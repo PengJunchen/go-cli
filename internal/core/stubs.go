@@ -17,41 +17,9 @@ import (
 // slog message so SCAN-008 is satisfied. Later phases replace these stubs with
 // full implementations.
 
-// LoopAgent is the default AgentLoop stub.
-type LoopAgent struct{}
-
-var _ AgentLoop = (*LoopAgent)(nil)
-
-// Run logs the submission and returns no events.
-func (LoopAgent) Run(_ context.Context, submission Submission) ([]AgentEvent, error) {
-	slog.Info("core.agentloop.run", "type", submission.Type)
-	return []AgentEvent{}, nil
-}
-
-// AgentImpl is the default Agent stub.
-type AgentImpl struct{}
-
-var _ Agent = (*AgentImpl)(nil)
-
-// Name returns the default agent name.
-func (AgentImpl) Name() string { return "default" }
-
-// Run logs the submission and returns an empty successful result.
-func (AgentImpl) Run(_ context.Context, submission Submission) (Result, error) {
-	slog.Info("core.agent.run", "submission", submission.Content)
-	return Result{Message: "", Success: true}, nil
-}
-
-// HarnessImpl is the default Harness stub.
-type HarnessImpl struct{}
-
-var _ Harness = (*HarnessImpl)(nil)
-
-// Submit logs the message and returns an empty, already-closed event stream.
-func (HarnessImpl) Submit(_ context.Context, msg string) (EventStream, error) {
-	slog.Info("core.harness.submit", "msg", msg)
-	return NewEventStream(0), nil
-}
+// LoopAgent, AgentImpl and HarnessImpl are defined in loop.go, agent.go and
+// harness.go respectively with their full implementations. This file retains
+// the remaining default stubs for the other core and service interfaces.
 
 // EinoTurnRunner is the default TurnRunner stub.
 type EinoTurnRunner struct{}

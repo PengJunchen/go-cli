@@ -14,21 +14,6 @@ import (
 func TestStubZeroValues(t *testing.T) {
 	ctx := context.Background()
 
-	evs, err := (LoopAgent{}).Run(ctx, Submission{Content: "hi"})
-	assert.NoError(t, err)
-	assert.Empty(t, evs)
-
-	name := (AgentImpl{}).Name()
-	assert.Equal(t, "default", name)
-
-	res, err := (AgentImpl{}).Run(ctx, Submission{})
-	assert.NoError(t, err)
-	assert.True(t, res.Success)
-
-	stream, err := (HarnessImpl{}).Submit(ctx, "hello")
-	assert.NoError(t, err)
-	assert.NotNil(t, stream)
-
 	turnRes, err := (EinoTurnRunner{}).RunTurn(ctx, Submission{Content: "step"})
 	assert.NoError(t, err)
 	assert.True(t, turnRes.Success)
@@ -61,9 +46,7 @@ func TestStubSlogCallsDoNotPanic(t *testing.T) {
 	ctx := context.Background()
 
 	assert.NotPanics(t, func() {
-		_, err := (LoopAgent{}).Run(ctx, Submission{Content: "log"})
-		assert.NoError(t, err)
-		_, err = (DefaultToolRegistry{}).List(ctx)
+		_, err := (DefaultToolRegistry{}).List(ctx)
 		assert.NoError(t, err)
 		_, _, err = (DefaultModelProvider{}).Build(ctx, llm.ModelConfig{})
 		assert.Error(t, err)
