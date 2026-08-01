@@ -1,11 +1,15 @@
 package verify
 
 import (
+	"context"
 	"fmt"
 	"log/slog"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLogCapturer_CapturesEntries(t *testing.T) {
@@ -191,4 +195,179 @@ func TestLogCapturer_TimeField(t *testing.T) {
 	if entries[0].Time.Before(before) || entries[0].Time.After(after.Add(time.Millisecond)) {
 		t.Errorf("entry time %v not in expected range [%v, %v]", entries[0].Time, before, after)
 	}
+}
+
+func TestCaptureHandler_WithAttrs(t *testing.T) {
+	capturer := NewLogCapturer()
+	ch := &captureHandler{
+		capturer: capturer,
+		level:    slog.LevelDebug,
+	}
+
+	h2 := ch.WithAttrs([]slog.Attr{slog.String("preset_key", "preset_val")})
+	require.NotNil(t, h2)
+
+	ch2, ok := h2.(*captureHandler)
+	require.True(t, ok, "returned handler should be *captureHandler")
+	assert.Len(t, ch2.attrs, 1)
+	assert.Equal(t, "preset_key", ch2.attrs[0].Key)
+
+	// Log through the new handler and verify both preset and record attrs appear.
+	logger := slog.New(h2)
+	logger.Info("test message", "op", "with_attrs_test")
+
+	entries := capturer.Entries()
+	require.Len(t, entries, 1)
+	assert.Equal(t, "test message", entries[0].Message)
+	assert.Equal(t, "preset_val", entries[0].Fields["preset_key"], "pre-set attr should appear in captured entry")
+	assert.Equal(t, "with_attrs_test", entries[0].Fields["op"], "record attr should appear in captured entry")
+}
+
+func TestCaptureHandler_WithAttrs_Chained(t *testing.T) {
+	capturer := NewLogCapturer()
+	ch := &captureHandler{
+		capturer: capturer,
+		level:    slog.LevelDebug,
+	}
+
+	h2 := ch.WithAttrs([]slog.Attr{slog.String("k1", "v1")})
+	h3 := h2.WithAttrs([]slog.Attr{slog.Int("k2", 42)})
+
+	ch3, ok := h3.(*captureHandler)
+	require.True(t, ok)
+	assert.Len(t, ch3.attrs, 2, "chained WithAttrs should accumulate attrs")
+	assert.Equal(t, "k1", ch3.attrs[0].Key)
+	assert.Equal(t, "k2", ch3.attrs[1].Key)
+}
+
+func TestCaptureHandler_WithGroup(t *testing.T) {
+	capturer := NewLogCapturer()
+	ch := &captureHandler{
+		capturer: capturer,
+		level:    slog.LevelDebug,
+	}
+
+	h2 := ch.WithGroup("testgroup")
+	require.NotNil(t, h2)
+
+	logger := slog.New(h2)
+	logger.Info("grouped message", "op", "with_group_test")
+
+	entries := capturer.Entries()
+	require.Len(t, entries, 1)
+	assert.Equal(t, "grouped message", entries[0].Message)
+	assert.Equal(t, "with_group_test", entries[0].Fields["testgroup.op"], "attr key should be prefixed with group")
+}
+
+func TestCaptureHandler_WithGroup_EmptyName(t *testing.T) {
+	capturer := NewLogCapturer()
+	ch := &captureHandler{
+		capturer: capturer,
+		level:    slog.LevelDebug,
+	}
+
+	h2 := ch.WithGroup("")
+	assert.Same(t, ch, h2, "WithGroup with empty name should return the same handler")
+}
+
+func TestCaptureHandler_WithGroup_Nested(t *testing.T) {
+	capturer := NewLogCapturer()
+	ch := &captureHandler{
+		capturer: capturer,
+		level:    slog.LevelDebug,
+		group:    "outer",
+	}
+
+	h2 := ch.WithGroup("inner")
+	ch2, ok := h2.(*captureHandler)
+	require.True(t, ok)
+	assert.Equal(t, "outer.inner", ch2.group, "nested groups should be dot-separated")
+}
+
+func TestCaptureHandler_WithGroup_WithAttrs(t *testing.T) {
+	capturer := NewLogCapturer()
+	ch := &captureHandler{
+		capturer: capturer,
+		level:    slog.LevelDebug,
+	}
+
+	h2 := ch.WithGroup("mygroup").WithAttrs([]slog.Attr{slog.String("preset", "val")})
+	logger := slog.New(h2)
+	logger.Info("combined message", "op", "combo")
+
+	entries := capturer.Entries()
+	require.Len(t, entries, 1)
+	assert.Equal(t, "val", entries[0].Fields["mygroup.preset"], "preset attr should be prefixed with group")
+	assert.Equal(t, "combo", entries[0].Fields["mygroup.op"], "record attr should be prefixed with group")
+}
+
+func TestCaptureHandler_Enabled(t *testing.T) {
+	capturer := NewLogCapturer()
+	ch := &captureHandler{
+		capturer: capturer,
+		level:    slog.LevelWarn,
+	}
+
+	assert.True(t, ch.Enabled(context.Background(), slog.LevelError), "Error >= Warn should be enabled")
+	assert.True(t, ch.Enabled(context.Background(), slog.LevelWarn), "Warn >= Warn should be enabled")
+	assert.False(t, ch.Enabled(context.Background(), slog.LevelInfo), "Info < Warn should not be enabled")
+	assert.False(t, ch.Enabled(context.Background(), slog.LevelDebug), "Debug < Warn should not be enabled")
+}
+
+func TestFormatEntry(t *testing.T) {
+	entry := LogEntry{
+		Level:   slog.LevelInfo,
+		Message: "task completed",
+		Fields: map[string]any{
+			"op":      "complete",
+			"task_id": "t1",
+		},
+		Time: time.Now(),
+	}
+
+	text := formatEntry(entry)
+	assert.Contains(t, text, "INFO")
+	assert.Contains(t, text, "task completed")
+	assert.Contains(t, text, "op=complete")
+	assert.Contains(t, text, "task_id=t1")
+}
+
+func TestFormatEntry_NoFields(t *testing.T) {
+	entry := LogEntry{
+		Level:   slog.LevelError,
+		Message: "critical failure",
+		Fields:  map[string]any{},
+		Time:    time.Now(),
+	}
+
+	text := formatEntry(entry)
+	assert.Contains(t, text, "ERROR")
+	assert.Contains(t, text, "critical failure")
+	// Should not panic or produce unexpected output with empty fields.
+	assert.NotContains(t, text, "=")
+}
+
+func TestFormatEntries_Empty(t *testing.T) {
+	text := formatEntries(nil)
+	assert.Equal(t, "", text, "empty entries should produce empty string")
+}
+
+func TestFormatEntries_Single(t *testing.T) {
+	entries := []LogEntry{
+		{Level: slog.LevelInfo, Message: "single", Fields: map[string]any{}, Time: time.Now()},
+	}
+	text := formatEntries(entries)
+	assert.Contains(t, text, "INFO")
+	assert.Contains(t, text, "single")
+}
+
+func TestFormatEntries_Multiple(t *testing.T) {
+	entries := []LogEntry{
+		{Level: slog.LevelInfo, Message: "first", Fields: map[string]any{"k": "v"}, Time: time.Now()},
+		{Level: slog.LevelError, Message: "second", Fields: map[string]any{}, Time: time.Now()},
+	}
+	text := formatEntries(entries)
+	assert.Contains(t, text, "first")
+	assert.Contains(t, text, "second")
+	assert.Contains(t, text, "\n", "multiple entries should be newline-separated")
 }

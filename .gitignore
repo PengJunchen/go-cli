@@ -36,4 +36,4 @@ bin/
 
 # Temporary
 .tmp/
-scanner
+/scanner

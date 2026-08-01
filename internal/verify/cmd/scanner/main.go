@@ -5,16 +5,26 @@ package main
 import (
 	"flag"
 	"fmt"
+	"io"
 	"os"
 
 	"github.com/pengjunchen/go-cli/internal/verify"
 )
 
 func main() {
-	dir := flag.String("dir", ".", "directory to scan")
-	format := flag.String("format", "text", "output format: text or json")
-	includeTests := flag.Bool("include-tests", false, "include _test.go files in scan")
-	flag.Parse()
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr))
+}
+
+// run executes the scanner CLI with the given arguments and writes output to
+// stdout/stderr. It returns the process exit code.
+func run(args []string, stdout, stderr io.Writer) int {
+	fs := flag.NewFlagSet("verify-scanner", flag.ContinueOnError)
+	dir := fs.String("dir", ".", "directory to scan")
+	format := fs.String("format", "text", "output format: text or json")
+	includeTests := fs.Bool("include-tests", false, "include _test.go files in scan")
+	if err := fs.Parse(args); err != nil {
+		return 2
+	}
 
 	cfg := verify.DefaultScanConfig(*dir)
 	if *includeTests {
@@ -23,22 +33,23 @@ func main() {
 
 	report, err := verify.Scan(cfg)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "scan error: %v\n", err)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "scan error: %v\n", err)
+		return 1
 	}
 
 	switch *format {
 	case "json":
 		data, _ := report.ToJSON() //nolint:errcheck // CLI output, error is non-critical
-		fmt.Println(string(data))
+		fmt.Fprintln(stdout, string(data))
 	case "text":
-		fmt.Println(report.FormatText())
+		fmt.Fprintln(stdout, report.FormatText())
 	default:
-		fmt.Fprintf(os.Stderr, "unknown format: %s\n", *format)
-		os.Exit(1)
+		fmt.Fprintf(stderr, "unknown format: %s\n", *format)
+		return 1
 	}
 
 	if report.HasErrors() {
-		os.Exit(1)
+		return 1
 	}
+	return 0
 }
