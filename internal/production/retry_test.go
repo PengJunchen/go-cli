@@ -11,6 +11,7 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/mock"
 	"github.com/pengjunchen/go-cli/internal/tracing"
+	"github.com/pengjunchen/go-cli/internal/verify"
 )
 
 // newRetryTestCtx wires a MockTraceExporter + Tracer into a root context.
@@ -151,6 +152,7 @@ func TestShouldRetryEmitsSpan(t *testing.T) {
 }
 
 func TestRetryPolicyConcurrent(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
 	ctx, _ := newRetryTestCtx(t)
 	p := NewDefaultRetryPolicy(RetryConfig{MaxAttempts: 3, BaseDelay: 1 * time.Millisecond})
 

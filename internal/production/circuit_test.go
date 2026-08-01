@@ -12,6 +12,7 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/mock"
 	"github.com/pengjunchen/go-cli/internal/tracing"
+	"github.com/pengjunchen/go-cli/internal/verify"
 )
 
 // newCircuitTestCtx wires a MockTraceExporter + Tracer into a root context and
@@ -189,6 +190,7 @@ func TestCircuitWrapGenericAdapter(t *testing.T) {
 }
 
 func TestCircuitConcurrent(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
 	ctx, _ := newCircuitTestCtx(t)
 	_, clock := manualClock()
 	b := NewDefaultCircuitBreaker(CircuitBreakerConfig{

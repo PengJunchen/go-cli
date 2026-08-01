@@ -12,6 +12,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/mock"
 	"github.com/pengjunchen/go-cli/internal/tracing"
+	"github.com/pengjunchen/go-cli/internal/verify"
 )
 
 // newLoopTestCtx wires a MockTraceExporter + Tracer into a root context and
@@ -172,6 +173,7 @@ func TestLoopDetectorName(t *testing.T) {
 }
 
 func TestLoopDetectorConcurrent(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
 	ctx, _ := newLoopTestCtx(t)
 	det := NewDefaultLoopDetector(LoopDetectionConfig{EditThreshold: 100})
 
