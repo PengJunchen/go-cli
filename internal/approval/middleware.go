@@ -21,7 +21,10 @@ var ErrToolDenied = errors.New("tool call denied by approval policy")
 
 // approvalOptions configures how Ask classifications are resolved.
 type approvalOptions struct {
-	autoApprove bool
+	autoApprove            bool
+	permissionModeResolver PermissionModeResolver
+	permissionMode         PermissionMode
+	permissionModeSet      bool
 }
 
 // Option configures an ApprovalMiddleware.
@@ -35,13 +38,36 @@ func WithAutoApprove(auto bool) Option {
 	return func(o *approvalOptions) { o.autoApprove = auto }
 }
 
+// WithPermissionModeResolver wires a PermissionModeResolver into the middleware
+// so the effective classifier is chosen dynamically from the current mode via
+// resolver.Resolve(mode).Classify(...) instead of the statically bound
+// classifier. Backward compatible: when unset, the direct classifier path is
+// used.
+func WithPermissionModeResolver(r PermissionModeResolver) Option {
+	return func(o *approvalOptions) { o.permissionModeResolver = r }
+}
+
+// WithPermissionMode sets the current PermissionMode resolved by the
+// permission-mode resolver. It is only meaningful when a resolver is also
+// wired. When unset, the resolver's Default mode is used.
+func WithPermissionMode(mode PermissionMode) Option {
+	return func(o *approvalOptions) {
+		o.permissionMode = mode
+		o.permissionModeSet = true
+	}
+}
+
 // ApprovalMiddleware is a deny-first core.ToolMiddleware. For each call it
 // consults the in-session cache, then the cross-session ApprovalStore, then the
-// classifier. Any Deny (or an Ask resolved to deny) refuses the call without
-// invoking the wrapped executor. It emits an approval.decision span recording
-// the outcome so telemetry is reproducible.
+// effective classifier. The effective classifier is either the statically bound
+// one or, when a PermissionModeResolver is wired, resolver.Resolve(mode). Any
+// Deny (or an Ask resolved to deny) refuses the call without invoking the
+// wrapped executor. It emits an approval.decision span recording the outcome so
+// telemetry is reproducible.
 type ApprovalMiddleware struct {
 	classifier ApprovalClassifier
+	resolver   PermissionModeResolver
+	mode       PermissionMode
 	store      ApprovalStore
 	opts       approvalOptions
 
@@ -66,8 +92,14 @@ func NewApprovalMiddleware(classifier ApprovalClassifier, store ApprovalStore, o
 	if store == nil {
 		store = NewInMemoryApprovalStore()
 	}
+	mode := options.permissionMode
+	if !options.permissionModeSet {
+		mode = PermissionDefault
+	}
 	return &ApprovalMiddleware{
 		classifier: classifier,
+		resolver:   options.permissionModeResolver,
+		mode:       mode,
 		store:      store,
 		opts:       options,
 		session:    make(map[string]Classification),
@@ -127,8 +159,10 @@ func (m *ApprovalMiddleware) decide(ctx context.Context, key string, call tools.
 		slog.Warn("approval.store_get", "key", key, "error", err)
 	}
 
-	// Classifier decides; Ask is resolved by the configured policy.
-	c := m.classifier.Classify(ctx, call)
+	// Classifier decides; Ask is resolved by the configured policy. When a
+	// PermissionModeResolver is wired, the classifier is chosen from the mode.
+	classifier := m.effectiveClassifier()
+	c := classifier.Classify(ctx, call)
 	if c == Ask {
 		if m.opts.autoApprove {
 			c = Allow
@@ -144,13 +178,33 @@ func (m *ApprovalMiddleware) decide(ctx context.Context, key string, call tools.
 	return m.record(span, call, c, false), false
 }
 
+// effectiveClassifier returns the classifier to consult for the current call.
+// When a PermissionModeResolver is wired it resolves the current mode,
+// otherwise it returns the statically bound classifier.
+func (m *ApprovalMiddleware) effectiveClassifier() ApprovalClassifier {
+	if m.resolver != nil {
+		return m.resolver.Resolve(m.mode)
+	}
+	return m.classifier
+}
+
+// currentMode returns the permission mode used for decision telemetry. When no
+// resolver is wired the mode defaults to PermissionDefault for the attribute.
+func (m *ApprovalMiddleware) currentMode() PermissionMode {
+	if m.resolver == nil {
+		return PermissionDefault
+	}
+	return m.mode
+}
+
 // record attaches the decision attributes to the span and returns the decision.
 func (m *ApprovalMiddleware) record(span tracing.TraceSpan, call tools.ToolCall, c Classification, cached bool) Classification {
 	span.SetAttributes(
-		tracing.Attribute{Key: "classifier", Value: m.classifier.Name()},
+		tracing.Attribute{Key: "classifier", Value: m.effectiveClassifier().Name()},
 		tracing.Attribute{Key: "classification", Value: classificationString(c)},
 		tracing.Attribute{Key: "tool_name", Value: call.Name},
 		tracing.Attribute{Key: "cached", Value: cached},
+		tracing.Attribute{Key: "permission_mode", Value: m.currentMode().String()},
 	)
 	if c == Deny {
 		span.SetStatus(tracing.SpanStatusError, "denied by approval policy")

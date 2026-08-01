@@ -5,17 +5,27 @@ import (
 	"sync"
 )
 
-// registry is a minimal process-wide holder for the active classifier and
-// store. It lets callers override the wiring at startup while keeping a
-// sensible deny-first default otherwise.
+// registry is a minimal process-wide holder for the active classifier,
+// store, permission-mode resolver and trust manager. It lets callers override
+// the wiring at startup while keeping a sensible deny-first default otherwise.
 type registry struct {
 	classifier ApprovalClassifier
 	store      ApprovalStore
+
+	permissionModeResolver PermissionModeResolver
+	permissionMode         PermissionMode
+	trustManager           TrustManager
 }
 
 var (
 	registryMu sync.RWMutex
-	defaultReg = &registry{classifier: &AllowAllClassifier{}, store: NewInMemoryApprovalStore()}
+	defaultReg = &registry{
+		classifier:             &AllowAllClassifier{},
+		store:                  NewInMemoryApprovalStore(),
+		permissionModeResolver: NewDefaultPermissionModeResolver(),
+		permissionMode:         PermissionDefault,
+		trustManager:           NewDefaultTrustManager(nil),
+	}
 )
 
 // RegisterApprovalClassifier swaps in a new active classifier. Pass nil to
@@ -54,4 +64,59 @@ func GetApprovalStore() ApprovalStore {
 	registryMu.RLock()
 	defer registryMu.RUnlock()
 	return defaultReg.store
+}
+
+// RegisterPermissionModeResolver swaps in a new permission-mode resolver. Pass
+// nil to reset to the default resolver.
+func RegisterPermissionModeResolver(r PermissionModeResolver) {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	if r == nil {
+		r = NewDefaultPermissionModeResolver()
+	}
+	slog.Info("approval.register.permission_mode_resolver", "resolver", r.Name())
+	defaultReg.permissionModeResolver = r
+}
+
+// GetPermissionModeResolver returns the currently active permission-mode
+// resolver.
+func GetPermissionModeResolver() PermissionModeResolver {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	return defaultReg.permissionModeResolver
+}
+
+// RegisterPermissionMode sets the currently active permission mode. Changes are
+// logged so operators can trace posture switches.
+func RegisterPermissionMode(mode PermissionMode) {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	slog.Info("approval.register.permission_mode", "permission_mode", mode.String())
+	defaultReg.permissionMode = mode
+}
+
+// GetPermissionMode returns the currently active permission mode.
+func GetPermissionMode() PermissionMode {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	return defaultReg.permissionMode
+}
+
+// RegisterTrustManager swaps in a new trust manager. Pass nil to reset to a
+// manager backed by an in-memory trust store.
+func RegisterTrustManager(tm TrustManager) {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	if tm == nil {
+		tm = NewDefaultTrustManager(nil)
+	}
+	slog.Info("approval.register.trust_manager")
+	defaultReg.trustManager = tm
+}
+
+// GetTrustManager returns the currently active trust manager.
+func GetTrustManager() TrustManager {
+	registryMu.RLock()
+	defer registryMu.RUnlock()
+	return defaultReg.trustManager
 }
