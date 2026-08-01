@@ -6,9 +6,9 @@ import (
 	"log/slog"
 )
 
-// RegisterDefaults registers the built-in read, bash and write tools into the
-// given registry. It returns an error if any registration conflicts with an
-// existing tool name.
+// RegisterDefaults registers the built-in read, bash, write, edit and grep
+// tools into the given registry. It returns an error if any registration
+// conflicts with an existing tool name.
 func RegisterDefaults(ctx context.Context, reg ToolRegistry) error {
 	if reg == nil {
 		return fmt.Errorf("tools: nil registry")
@@ -18,6 +18,8 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry) error {
 		NewReadTool(),
 		NewBashTool(),
 		NewWriteTool(),
+		NewEditFileTool(),
+		NewGrepTool(),
 	}
 
 	for _, def := range defs {
