@@ -108,25 +108,13 @@ func (t *EditFileTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 
 	updated := strings.Replace(data, oldString, newString, 1)
 
-	// Open the existing file for writing (no O_CREATE) and truncate it before
-	// writing the updated content, preserving the original permission bits.
-	f, openErr := os.OpenFile(abspath, os.O_WRONLY|os.O_TRUNC, info.Mode().Perm())
-	if openErr != nil {
+	// Write the updated content atomically (temp file + rename) so a crash or
+	// write error never leaves the file truncated with partial content. The
+	// original permission bits are preserved by writeAtomic.
+	if _, werr := writeAtomic(abspath, []byte(updated)); werr != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-		logger.Error("edit.open_failed", "path", abspath, "err", openErr)
-		return &ToolResult{Output: ""}, fmt.Errorf("edit: %w", openErr)
-	}
-	_, writeErr := f.WriteString(updated)
-	closeErr := f.Close()
-	if writeErr != nil {
-		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-		logger.Error("edit.write_failed", "path", abspath, "err", writeErr)
-		return &ToolResult{Output: ""}, fmt.Errorf("edit: %w", writeErr)
-	}
-	if closeErr != nil {
-		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-		logger.Error("edit.close_failed", "path", abspath, "err", closeErr)
-		return &ToolResult{Output: ""}, fmt.Errorf("edit: %w", closeErr)
+		logger.Error("edit.write_failed", "path", abspath, "err", werr)
+		return &ToolResult{Output: ""}, fmt.Errorf("edit: %w", werr)
 	}
 
 	span.SetAttributes(tracing.Attribute{Key: "success", Value: true})
