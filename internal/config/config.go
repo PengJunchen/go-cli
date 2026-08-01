@@ -2,32 +2,30 @@
 package config
 
 import (
+	"context"
 	"fmt"
-	"os"
+	"log/slog"
 )
 
-// Config holds the application configuration.
-type Config struct {
-	verbose bool
-}
-
-// Verbose returns whether verbose output is enabled.
-func (c *Config) Verbose() bool { return c.verbose }
-
-// Load reads configuration from environment variables and defaults.
+// Load reads configuration from environment variables and defaults, returning
+// the default+env merged Config. It is the backward-compatible entry point
+// used by cmd/cli/main.go so bare invocations (go-cli version/help) still
+// work without a config file. For layered loading use Loader.
 func Load() (*Config, error) {
-	cfg := &Config{
-		verbose: os.Getenv("GO_CLI_VERBOSE") == "1",
-	}
+	slog.Info("config_load",
+		"op", "config_load",
+		"source", "env",
+		"file_path", "",
+	)
 
-	if err := cfg.validate(); err != nil {
+	cfg, err := NewLoader().Load(context.Background())
+	if err != nil {
+		slog.Error("config_error",
+			"op", "config_error",
+			"error_type", "validation_failed",
+			"error", err,
+		)
 		return nil, fmt.Errorf("config validation: %w", err)
 	}
-
 	return cfg, nil
-}
-
-// validate checks the configuration for errors.
-func (c *Config) validate() error {
-	return nil
 }
