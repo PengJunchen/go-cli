@@ -12,6 +12,9 @@ type options struct {
 	// now is an injectable clock for deterministic time-based tests. Leave
 	// nil to use time.Now.
 	now func() time.Time
+	// guardSeverity overrides the denial severity used by the OutputGuard
+	// implementations. It is ignored by components that are not guards.
+	guardSeverity GuardSeverity
 }
 
 // Option configures a production component at construction time.
@@ -43,4 +46,10 @@ func WithFallback(fn func() (any, error)) Option {
 // primarily consumed by the CircuitBreaker and ignored elsewhere.
 func WithClock(now func() time.Time) Option {
 	return func(o *options) { o.now = now }
+}
+
+// WithGuardSeverity overrides the denial severity used by the OutputGuard
+// implementations. It has no effect on non-guard components.
+func WithGuardSeverity(sev GuardSeverity) Option {
+	return func(o *options) { o.guardSeverity = sev }
 }
