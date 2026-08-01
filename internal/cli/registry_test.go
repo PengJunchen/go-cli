@@ -72,7 +72,10 @@ func TestDefaultCommandRegistry_ConcurrentSafety(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			name := string(rune('a' + i%26))
-			_ = reg.Register(&fakeCommand{name: name})
+			if err := reg.Register(&fakeCommand{name: name}); err != nil {
+				// duplicate names are expected because n > alphabet size; skip
+				_ = err
+			}
 			_, _ = reg.Get(name)
 		}(i)
 	}

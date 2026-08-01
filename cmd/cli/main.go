@@ -1,3 +1,4 @@
+// Command go-cli is the command-line entry point for the go-cli tool.
 package main
 
 import (

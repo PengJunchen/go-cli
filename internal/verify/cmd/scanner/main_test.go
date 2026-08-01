@@ -8,9 +8,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/pengjunchen/go-cli/internal/verify"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/verify"
 )
 
 // writeCleanProject creates a temp dir with a clean Go source file that

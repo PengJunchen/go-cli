@@ -19,6 +19,20 @@ type Config interface {
 	Verbose() bool
 }
 
+// defaultConfig is a minimal Config implementation that keeps verbose off by
+// default. Real programs typically supply their own Config (e.g. loaded from
+// the environment) and satisfy this interface structurally.
+type defaultConfig struct{ verbose bool }
+
+// var _ ensures defaultConfig satisfies Config.
+var _ Config = (*defaultConfig)(nil)
+
+// Verbose returns whether verbose output is enabled.
+func (c *defaultConfig) Verbose() bool { return c.verbose }
+
+// NewDefaultConfig returns a Config with verbose mode set to the given value.
+func NewDefaultConfig(verbose bool) Config { return &defaultConfig{verbose: verbose} }
+
 // UsageError indicates the CLI was invoked with invalid arguments, such as an
 // unknown command or a flag parsing failure. Callers should report it with an
 // exit code of 2.
@@ -70,7 +84,7 @@ func Run(ctx context.Context, cfg Config, args []string, out io.Writer) error {
 // requested subcommand through reg, and executes it.
 func RunWithRegistry(ctx context.Context, cfg Config, args []string, out io.Writer, reg CommandRegistry) error {
 	if err := ctx.Err(); err != nil {
-		slog.Default().Warn("context cancelled before run", "err", err)
+		slog.Default().Warn("context canceled before run", "err", err)
 		return err
 	}
 
@@ -84,12 +98,11 @@ func RunWithRegistry(ctx context.Context, cfg Config, args []string, out io.Writ
 	fs.BoolVar(&printUsage, "help", false, "print usage and exit")
 
 	fs.Usage = func() {
-		fmt.Fprintf(out, "Usage: go-cli [options] <command> [args]\n\n")
-		fmt.Fprintf(out, "Options:\n")
+		_, _ = fmt.Fprintf(out, "Usage: go-cli [options] <command> [args]\n\nOptions:\n") //nolint:errcheck // usage output is best-effort
 		fs.PrintDefaults()
-		fmt.Fprintf(out, "\nCommands:\n")
+		_, _ = fmt.Fprintf(out, "\nCommands:\n") //nolint:errcheck // usage output is best-effort
 		for _, cmd := range reg.List() {
-			fmt.Fprintf(out, "  %-10s %s\n", cmd.Name(), cmd.Synopsis())
+			_, _ = fmt.Fprintf(out, "  %-10s %s\n", cmd.Name(), cmd.Synopsis()) //nolint:errcheck // usage output is best-effort
 		}
 	}
 
@@ -102,9 +115,13 @@ func RunWithRegistry(ctx context.Context, cfg Config, args []string, out io.Writ
 	}
 
 	// Ensure the built-in commands are resolvable from the registry. Errors are
-	// ignored so that a caller-supplied registry may provide its own versions.
-	_ = reg.Register(newVersionCmd(out))
-	_ = reg.Register(newHelpCmd(out, fs.Usage))
+	// tolerated so that a caller-supplied registry may provide its own versions.
+	if err := reg.Register(newVersionCmd(out)); err != nil {
+		slog.Default().Info("built-in version command already registered; keeping caller's", "err", err)
+	}
+	if err := reg.Register(newHelpCmd(out, fs.Usage)); err != nil {
+		slog.Default().Info("built-in help command already registered; keeping caller's", "err", err)
+	}
 
 	if showVersion {
 		return runCommand(ctx, cfg, newVersionCmd(out), nil)
@@ -137,13 +154,13 @@ func runCommand(ctx context.Context, cfg Config, cmd Command, args []string) err
 	slog.Default().Debug("command_start", "command", name, "args_len", len(args))
 
 	if err := ctx.Err(); err != nil {
-		slog.Default().Warn("context cancelled before command", "command", name, "err", err)
+		slog.Default().Warn("context canceled before command", "command", name, "err", err)
 		return err
 	}
 
 	if err := cmd.Run(ctx, cfg, args); err != nil {
 		if err2 := ctx.Err(); err2 != nil {
-			slog.Default().Warn("context cancelled during command", "command", name, "err", err2)
+			slog.Default().Warn("context canceled during command", "command", name, "err", err2)
 		}
 		slog.Default().Info("command_end", "command", name, "success", false, "duration_ms", time.Since(start).Milliseconds())
 		return newExecutionError(name, err)
@@ -166,12 +183,12 @@ func NewOutputWriter(w io.Writer, verbose bool) *OutputWriter {
 
 // Print writes a formatted message to the output.
 func (ow *OutputWriter) Print(format string, args ...interface{}) {
-	fmt.Fprintf(ow.w, format, args...)
+	_, _ = fmt.Fprintf(ow.w, format, args...) //nolint:errcheck // output writing is best-effort
 }
 
 // Verbose writes a formatted message only when verbose mode is enabled.
 func (ow *OutputWriter) Verbose(format string, args ...interface{}) {
 	if ow.verbose {
-		fmt.Fprintf(ow.w, format, args...)
+		_, _ = fmt.Fprintf(ow.w, format, args...) //nolint:errcheck // output writing is best-effort
 	}
 }

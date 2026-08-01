@@ -26,8 +26,8 @@ type DefaultCommandRegistry struct {
 	order []string
 }
 
-// NewDefaultCommandRegistry creates a new, empty DefaultCommandRegistry.
-func NewDefaultCommandRegistry() *DefaultCommandRegistry {
+// NewDefaultCommandRegistry creates a new, empty default command registry.
+func NewDefaultCommandRegistry() CommandRegistry {
 	return &DefaultCommandRegistry{
 		cmds: make(map[string]Command),
 	}

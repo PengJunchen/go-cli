@@ -34,7 +34,9 @@ func (c *versionCmd) Synopsis() string { return "Print version" }
 
 // Run implements Command.
 func (c *versionCmd) Run(ctx context.Context, cfg Config, args []string) error {
-	fmt.Fprintf(c.out, "go-cli %s\n", Version)
+	if _, err := fmt.Fprintf(c.out, "go-cli %s\n", Version); err != nil {
+		return newExecutionError("write version output", err)
+	}
 	return nil
 }
 

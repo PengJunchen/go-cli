@@ -33,18 +33,18 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	report, err := verify.Scan(cfg)
 	if err != nil {
-		fmt.Fprintf(stderr, "scan error: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "scan error: %v\n", err) //nolint:errcheck // CLI error output is best-effort
 		return 1
 	}
 
 	switch *format {
 	case "json":
-		data, _ := report.ToJSON() //nolint:errcheck // CLI output, error is non-critical
-		fmt.Fprintln(stdout, string(data))
+		data, _ := report.ToJSON()                //nolint:errcheck // CLI output, error is non-critical
+		_, _ = fmt.Fprintln(stdout, string(data)) //nolint:errcheck // CLI output is best-effort
 	case "text":
-		fmt.Fprintln(stdout, report.FormatText())
+		_, _ = fmt.Fprintln(stdout, report.FormatText()) //nolint:errcheck // CLI output is best-effort
 	default:
-		fmt.Fprintf(stderr, "unknown format: %s\n", *format)
+		_, _ = fmt.Fprintf(stderr, "unknown format: %s\n", *format) //nolint:errcheck // CLI error output is best-effort
 		return 1
 	}
 
