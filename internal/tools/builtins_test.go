@@ -24,14 +24,16 @@ func TestRegisterDefaultsRegistersBuiltins(t *testing.T) {
 		names[def.Name()] = true
 	}
 
-	assert.Len(t, names, 5)
+	assert.Len(t, names, 7)
 	assert.True(t, names["read"])
 	assert.True(t, names["bash"])
 	assert.True(t, names["write"])
 	assert.True(t, names["edit"])
 	assert.True(t, names["grep"])
+	assert.True(t, names["find"])
+	assert.True(t, names["ls"])
 
-	for _, name := range []string{"read", "bash", "write", "edit", "grep"} {
+	for _, name := range []string{"read", "bash", "write", "edit", "grep", "find", "ls"} {
 		def, err := reg.Get(context.Background(), name)
 		require.NoError(t, err)
 		assert.Equal(t, name, def.Name())
@@ -55,5 +57,5 @@ func TestRegisterDefaultsTwiceOverwrites(t *testing.T) {
 
 	list, err := reg.List(ctx)
 	require.NoError(t, err)
-	assert.Len(t, list, 5)
+	assert.Len(t, list, 7)
 }
