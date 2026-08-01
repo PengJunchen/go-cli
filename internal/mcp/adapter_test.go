@@ -2,12 +2,14 @@ package mcp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -200,4 +202,134 @@ func TestAdapterCallToolEmitsSpan(t *testing.T) {
 		found = true
 	}
 	assert.True(t, found, "mcp.tool.call span with attributes was exported")
+}
+
+// neverReader blocks for a long time on Read. It is used only to prove that
+// Request honors a pre-canceled context without ever reading; it must never be
+// reached in a passing run.
+type neverReader struct{}
+
+func (neverReader) Read([]byte) (int, error) {
+	time.Sleep(time.Hour)
+	return 0, io.EOF
+}
+
+func TestTransportRequestPropagatesRPCError(t *testing.T) {
+	t.Parallel()
+	// Server responds with a JSON-RPC error frame for id 0.
+	in := bytes.NewReader([]byte(`{"jsonrpc":"2.0","id":0,"error":{"code":-1,"message":"boom"}}` + "\n"))
+	var out bytes.Buffer
+	tr := NewJSONRPCLineTransport(in, &out, nil)
+
+	_, err := tr.Request(context.Background(), "tools/call", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "rpc error")
+}
+
+func TestTransportRequestSkipsMalformedFrames(t *testing.T) {
+	t.Parallel()
+	// A malformed line (e.g. a JSON-RPC notification) must be ignored and the
+	// loop must keep waiting for the matching response.
+	in := bytes.NewReader([]byte("not-json\n" + `{"jsonrpc":"2.0","id":0,"result":{"ok":true}}` + "\n"))
+	var out bytes.Buffer
+	tr := NewJSONRPCLineTransport(in, &out, nil)
+
+	res, err := tr.Request(context.Background(), "ping", nil)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"ok": true}, res)
+}
+
+func TestTransportRequestRespectsCancelledContext(t *testing.T) {
+	t.Parallel()
+	tr := NewJSONRPCLineTransport(neverReader{}, io.Discard, nil)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := tr.Request(ctx, "ping", nil)
+		errCh <- err
+	}()
+
+	select {
+	case err := <-errCh:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("Request did not honor the canceled context")
+	}
+}
+
+func TestAdapterConnectIsIdempotent(t *testing.T) {
+	t.Parallel()
+	serverConn, conn := fakeMCPConn(t)
+	defer closeConn(serverConn)
+
+	adapter := NewOfficialSDKAdapter(MCPServerConfig{Name: "srv", Transport: MCPTransportStdio}, WithConnection(conn))
+	require.NoError(t, adapter.Connect(context.Background()))
+	require.NoError(t, adapter.Connect(context.Background()), "second Connect must be a no-op")
+}
+
+func TestAdapterDisconnectWhenNotConnected(t *testing.T) {
+	t.Parallel()
+	adapter := NewOfficialSDKAdapter(MCPServerConfig{Name: "srv", Transport: MCPTransportStdio})
+	require.NoError(t, adapter.Disconnect(context.Background()), "Disconnect before Connect must be a no-op")
+}
+
+func TestAdapterDisconnectPreservesExternalConnection(t *testing.T) {
+	t.Parallel()
+	var closed atomic.Bool
+	tr := NewJSONRPCLineTransport(
+		bytes.NewReader(nil),
+		io.Discard,
+		func() error { closed.Store(true); return nil },
+	)
+	adapter := NewOfficialSDKAdapter(MCPServerConfig{Name: "srv", Transport: MCPTransportStdio}, WithConnection(tr))
+
+	require.NoError(t, adapter.Connect(context.Background()))
+	require.NoError(t, adapter.Disconnect(context.Background()))
+	assert.False(t, closed.Load(), "Disconnect must not close an externally-supplied connection")
+}
+
+func TestAdapterCallToolSurfacesIsErrorAndDefaultsContent(t *testing.T) {
+	t.Parallel()
+	serverConn, clientConn := net.Pipe()
+	defer closeConn(serverConn)
+
+	// Inline server: every request gets a result with isError=true and no
+	// "content" key, exercising both the IsError propagation and the
+	// nil-content defaulting path in CallTool.
+	go func() {
+		sc := bufio.NewScanner(serverConn)
+		for sc.Scan() {
+			var req struct {
+				ID int64 `json:"id"`
+			}
+			if json.Unmarshal(sc.Bytes(), &req) != nil {
+				continue
+			}
+			frame := map[string]any{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"result":  map[string]any{"isError": true},
+			}
+			b, err := json.Marshal(frame)
+			if err != nil {
+				return
+			}
+			if _, err := fmt.Fprintf(serverConn, "%s\n", b); err != nil {
+				return
+			}
+		}
+		closeConn(serverConn)
+	}()
+
+	conn := NewJSONRPCLineTransport(clientConn, clientConn, clientConn.Close)
+	adapter := NewOfficialSDKAdapter(MCPServerConfig{Name: "srv", Transport: MCPTransportStdio}, WithConnection(conn))
+	require.NoError(t, adapter.Connect(context.Background()))
+
+	result, err := adapter.CallTool(context.Background(), "echo", nil)
+	require.NoError(t, err, "a server-side IsError must not be surfaced as a Go error")
+	assert.True(t, result.IsError, "IsError must be propagated to the caller")
+	assert.Equal(t, "", result.Content, "missing content must default to an empty string")
 }
