@@ -14,10 +14,6 @@ import (
 func TestStubZeroValues(t *testing.T) {
 	ctx := context.Background()
 
-	turnRes, err := (EinoTurnRunner{}).RunTurn(ctx, Submission{Content: "step"})
-	assert.NoError(t, err)
-	assert.True(t, turnRes.Success)
-
 	est := (HeuristicTokenEstimator{}).Estimate("0123456789")
 	assert.Equal(t, 2, est)
 

@@ -21,17 +21,6 @@ import (
 // harness.go respectively with their full implementations. This file retains
 // the remaining default stubs for the other core and service interfaces.
 
-// EinoTurnRunner is the default TurnRunner stub.
-type EinoTurnRunner struct{}
-
-var _ TurnRunner = (*EinoTurnRunner)(nil)
-
-// RunTurn logs the submission and returns an empty successful result.
-func (EinoTurnRunner) RunTurn(_ context.Context, submission Submission) (Result, error) {
-	slog.Info("core.turn.run", "type", submission.Type)
-	return Result{Message: "", Success: true}, nil
-}
-
 // SessionStoreImpl is the default SessionStore stub.
 type SessionStoreImpl struct{}
 

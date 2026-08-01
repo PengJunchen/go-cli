@@ -15,10 +15,19 @@ type Extension interface {
 	Name() string
 }
 
-// Hook is an event hook registered by an extension.
+// Hook is an event hook registered by an extension. It observes the agent
+// lifecycle: BeforeRun runs before a submission executes and AfterRun runs
+// after it completes. A hook may interrupt a run from BeforeRun by returning a
+// HookResult with Continue == false, preventing the loop from starting.
 type Hook interface {
 	// Name returns the hook identifier.
 	Name() string
+	// BeforeRun is invoked before a submission is executed. Returning an error
+	// (or a HookResult with Continue == false) halts the run.
+	BeforeRun(ctx context.Context, submission Submission) error
+	// AfterRun is invoked after a submission finished executing, whether it
+	// succeeded or failed.
+	AfterRun(ctx context.Context, submission Submission, result Result, err error) error
 }
 
 // Middleware wraps an AgentLoop to intercept and augment its behavior
@@ -169,6 +178,18 @@ func (h *HookImpl) Name() string {
 		return "default-hook"
 	}
 	return h.name
+}
+
+// BeforeRun is a no-op that allows the run to continue.
+func (h *HookImpl) BeforeRun(_ context.Context, _ Submission) error {
+	slog.Info("core.hook.before", "name", h.Name())
+	return nil
+}
+
+// AfterRun is a no-op that observes the completed run.
+func (h *HookImpl) AfterRun(_ context.Context, _ Submission, _ Result, _ error) error {
+	slog.Info("core.hook.after", "name", h.Name())
+	return nil
 }
 
 // MiddlewareImpl is the default Middleware stub. It is a pass-through that
