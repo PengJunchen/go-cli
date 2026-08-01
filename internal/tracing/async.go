@@ -24,6 +24,7 @@ type AsyncExporter struct {
 	batchSize     int
 	flushInterval time.Duration
 	wg            sync.WaitGroup
+	shutdownOnce  sync.Once
 }
 
 var _ TraceExporter = (*AsyncExporter)(nil)
@@ -110,9 +111,12 @@ func (e *AsyncExporter) process() {
 }
 
 // Shutdown stops the worker (waiting for it to exit), flushing all buffered
-// spans, then shuts down the inner exporter.
+// spans, then shuts down the inner exporter. It is safe to call multiple
+// times; only the first call closes the done channel.
 func (e *AsyncExporter) Shutdown(ctx context.Context) error {
-	close(e.done)
+	e.shutdownOnce.Do(func() {
+		close(e.done)
+	})
 	e.wg.Wait()
 	return e.inner.Shutdown(ctx)
 }

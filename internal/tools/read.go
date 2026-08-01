@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -101,11 +102,37 @@ func (t *ReadTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		return nil, err
 	}
 
-	info, err := os.Stat(abspath)
+	// Lstat does not follow symlinks, so the ModeSymlink bit is visible here.
+	// os.Stat would resolve the link first and the check below would be dead.
+	info, err := os.Lstat(abspath)
 	if err != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("read.stat_failed", "path", abspath, "err", err)
 		return nil, fmt.Errorf("read: %w", err)
+	}
+
+	if info.Mode()&os.ModeSymlink != 0 {
+		if !t.FollowSymlinks {
+			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+			logger.Error("read.symlink_denied", "path", abspath)
+			return nil, fmt.Errorf("read: refusing to follow symlink %q", abspath)
+		}
+		// Following is allowed: stat the target to obtain accurate IsDir/Size.
+		info, err = os.Stat(abspath)
+		if err != nil {
+			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+			logger.Error("read.stat_failed", "path", abspath, "err", err)
+			return nil, fmt.Errorf("read: %w", err)
+		}
+	}
+
+	// Reject special files (devices, FIFOs, sockets, etc.) that never reach
+	// EOF or block indefinitely, which would cause unbounded memory growth or
+	// a hang inside the read below.
+	if info.Mode()&(os.ModeDevice|os.ModeNamedPipe|os.ModeSocket|os.ModeIrregular) != 0 {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		logger.Error("read.special_file", "path", abspath, "mode", info.Mode().String())
+		return nil, fmt.Errorf("read: refusing to read special file %q", abspath)
 	}
 
 	if info.IsDir() {
@@ -137,13 +164,17 @@ func (t *ReadTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		}, nil
 	}
 
-	if !t.FollowSymlinks && info.Mode()&os.ModeSymlink != 0 {
+	f, openErr := os.Open(abspath)
+	if openErr != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-		logger.Error("read.symlink_denied", "path", abspath)
-		return nil, fmt.Errorf("read: refusing to follow symlink %q", abspath)
+		logger.Error("read.open_failed", "path", abspath, "err", openErr)
+		return nil, fmt.Errorf("read: %w", openErr)
 	}
+	defer func() { _ = f.Close() }() //nolint:errcheck // best-effort close; data already read.
 
-	data, readErr := os.ReadFile(abspath)
+	// LimitReader bounds the read so an unexpectedly large or infinite stream
+	// cannot exhaust memory. The +1 lets us detect truncation.
+	data, readErr := io.ReadAll(io.LimitReader(f, int64(t.maxBytes)+1))
 	if readErr != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("read.read_failed", "path", abspath, "err", readErr)
@@ -152,8 +183,8 @@ func (t *ReadTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 
 	if len(data) > t.maxBytes {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-		logger.Error("read.too_large", "path", abspath, "bytes", len(data), "max", t.maxBytes)
-		return nil, fmt.Errorf("read: file %q is %d bytes, exceeding the maximum of %d", abspath, len(data), t.maxBytes)
+		logger.Error("read.too_large", "path", abspath, "max", t.maxBytes)
+		return nil, fmt.Errorf("read: file %q is too large, exceeding the maximum of %d bytes", abspath, t.maxBytes)
 	}
 
 	span.SetAttributes(tracing.Attribute{Key: "success", Value: true})

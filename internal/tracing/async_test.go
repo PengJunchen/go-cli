@@ -246,3 +246,15 @@ func TestAsyncExporterNoGoroutineLeak(t *testing.T) {
 		require.NoError(t, async.Shutdown(context.Background()))
 	}
 }
+
+func TestAsyncExporterDoubleShutdownNoPanic(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	rec := &recordingExporter{}
+	async := NewAsyncExporter(rec, 8, 4)
+	require.NoError(t, async.Shutdown(context.Background()))
+	// A second shutdown (common with defer + explicit cleanup) must not panic.
+	require.NotPanics(t, func() {
+		_ = async.Shutdown(context.Background()) //nolint:errcheck // second shutdown is best-effort
+	})
+}

@@ -108,3 +108,54 @@ func TestReadNameAndNames(t *testing.T) {
 	assert.Contains(t, tool.Names(), "read")
 	assert.Contains(t, tool.Names(), "read_file")
 }
+
+func TestReadRefusesSymlinkWhenNotFollowing(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.txt")
+	require.NoError(t, os.WriteFile(target, []byte("secret"), 0o600))
+
+	link := filepath.Join(dir, "link.txt")
+	require.NoError(t, os.Symlink(target, link))
+
+	tool := NewReadTool(WithWorkdir(dir), WithFollowSymlinks(false))
+	_, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"path": "link.txt"},
+	})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "symlink")
+}
+
+func TestReadFollowsSymlinkWhenEnabled(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.txt")
+	require.NoError(t, os.WriteFile(target, []byte("via-link"), 0o600))
+
+	link := filepath.Join(dir, "link.txt")
+	require.NoError(t, os.Symlink(target, link))
+
+	tool := NewReadTool(WithWorkdir(dir), WithFollowSymlinks(true))
+	res, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"path": "link.txt"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "via-link", res.Output)
+}
+
+func TestReadRejectsSpecialFile(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	if _, err := os.Lstat("/dev/null"); err != nil {
+		t.Skip("/dev/null not available on this platform")
+	}
+
+	tool := NewReadTool()
+	_, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"path": "/dev/null"},
+	})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "special file")
+}
