@@ -6,7 +6,8 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"os"
+	"log/slog"
+	"time"
 )
 
 // Version is the CLI version, set at build time via ldflags.
@@ -18,27 +19,99 @@ type Config interface {
 	Verbose() bool
 }
 
-// Run executes the CLI with the given configuration and arguments.
-func Run(ctx context.Context, cfg Config, args []string) error {
-	fs := flag.NewFlagSet("go-cli", flag.ContinueOnError)
-	fs.Usage = func() {
-		fmt.Fprintf(fs.Output(), "Usage: go-cli [options] <command> [args]\n\n")
-		fmt.Fprintf(fs.Output(), "Options:\n")
-		fs.PrintDefaults()
-		fmt.Fprintf(fs.Output(), "\nCommands:\n")
-		fmt.Fprintf(fs.Output(), "  version   Print version\n")
-		fmt.Fprintf(fs.Output(), "  help      Print help\n")
+// UsageError indicates the CLI was invoked with invalid arguments, such as an
+// unknown command or a flag parsing failure. Callers should report it with an
+// exit code of 2.
+type UsageError struct {
+	msg string
+}
+
+// Error implements error.
+func (e *UsageError) Error() string { return e.msg }
+
+// newUsageError creates a UsageError wrapping the given message.
+func newUsageError(format string, args ...interface{}) *UsageError {
+	return &UsageError{msg: fmt.Sprintf(format, args...)}
+}
+
+// ExecutionError indicates a runtime failure while executing a command.
+// Callers should report it with an exit code of 1.
+type ExecutionError struct {
+	msg string
+	err error
+}
+
+// Error implements error.
+func (e *ExecutionError) Error() string {
+	if e.err != nil {
+		return fmt.Sprintf("%s: %v", e.msg, e.err)
 	}
+	return e.msg
+}
+
+// Unwrap returns the underlying error for errors.As / errors.Is use.
+func (e *ExecutionError) Unwrap() error { return e.err }
+
+// newExecutionError creates an ExecutionError wrapping err with msg context.
+func newExecutionError(msg string, err error) *ExecutionError {
+	return &ExecutionError{msg: msg, err: err}
+}
+
+// Run executes the CLI with the given configuration and arguments, writing
+// output to out. It creates a default registry that RunWithRegistry populates
+// with the built-in version and help commands.
+func Run(ctx context.Context, cfg Config, args []string, out io.Writer) error {
+	reg := NewDefaultCommandRegistry()
+	return RunWithRegistry(ctx, cfg, args, out, reg)
+}
+
+// RunWithRegistry executes the CLI with the given configuration, arguments,
+// output writer, and command registry. It parses top-level flags, resolves the
+// requested subcommand through reg, and executes it.
+func RunWithRegistry(ctx context.Context, cfg Config, args []string, out io.Writer, reg CommandRegistry) error {
+	if err := ctx.Err(); err != nil {
+		slog.Default().Warn("context cancelled before run", "err", err)
+		return err
+	}
+
+	fs := flag.NewFlagSet("go-cli", flag.ContinueOnError)
+	fs.SetOutput(out)
 
 	var showVersion bool
 	fs.BoolVar(&showVersion, "version", false, "print version and exit")
 
-	if err := fs.Parse(args); err != nil {
-		return err
+	var printUsage bool
+	fs.BoolVar(&printUsage, "help", false, "print usage and exit")
+
+	fs.Usage = func() {
+		fmt.Fprintf(out, "Usage: go-cli [options] <command> [args]\n\n")
+		fmt.Fprintf(out, "Options:\n")
+		fs.PrintDefaults()
+		fmt.Fprintf(out, "\nCommands:\n")
+		for _, cmd := range reg.List() {
+			fmt.Fprintf(out, "  %-10s %s\n", cmd.Name(), cmd.Synopsis())
+		}
 	}
 
+	if err := fs.Parse(args); err != nil {
+		return newUsageError("flag parse: %v", err)
+	}
+
+	if cfg.Verbose() {
+		slog.Default().Debug("verbose mode enabled")
+	}
+
+	// Ensure the built-in commands are resolvable from the registry. Errors are
+	// ignored so that a caller-supplied registry may provide its own versions.
+	_ = reg.Register(newVersionCmd(out))
+	_ = reg.Register(newHelpCmd(out, fs.Usage))
+
 	if showVersion {
-		fmt.Fprintf(os.Stdout, "go-cli %s\n", Version)
+		return runCommand(ctx, cfg, newVersionCmd(out), nil)
+	}
+
+	if printUsage {
+		fs.Usage()
 		return nil
 	}
 
@@ -48,16 +121,36 @@ func Run(ctx context.Context, cfg Config, args []string) error {
 		return nil
 	}
 
-	switch subArgs[0] {
-	case "version":
-		fmt.Fprintf(os.Stdout, "go-cli %s\n", Version)
-		return nil
-	case "help":
-		fs.Usage()
-		return nil
-	default:
-		return fmt.Errorf("unknown command: %s", subArgs[0])
+	cmd, ok := reg.Get(subArgs[0])
+	if !ok {
+		return newUsageError("unknown command: %s", subArgs[0])
 	}
+
+	return runCommand(ctx, cfg, cmd, subArgs[1:])
+}
+
+// runCommand executes cmd with args, logging start/end telemetry and checking
+// for context cancellation before executing.
+func runCommand(ctx context.Context, cfg Config, cmd Command, args []string) error {
+	name := cmd.Name()
+	start := time.Now()
+	slog.Default().Debug("command_start", "command", name, "args_len", len(args))
+
+	if err := ctx.Err(); err != nil {
+		slog.Default().Warn("context cancelled before command", "command", name, "err", err)
+		return err
+	}
+
+	if err := cmd.Run(ctx, cfg, args); err != nil {
+		if err2 := ctx.Err(); err2 != nil {
+			slog.Default().Warn("context cancelled during command", "command", name, "err", err2)
+		}
+		slog.Default().Info("command_end", "command", name, "success", false, "duration_ms", time.Since(start).Milliseconds())
+		return newExecutionError(name, err)
+	}
+
+	slog.Default().Info("command_end", "command", name, "success", true, "duration_ms", time.Since(start).Milliseconds())
+	return nil
 }
 
 // OutputWriter wraps an io.Writer for structured CLI output.

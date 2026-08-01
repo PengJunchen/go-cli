@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/signal"
@@ -21,7 +22,12 @@ func main() {
 		os.Exit(1)
 	}
 
-	if err := cli.Run(ctx, cfg, os.Args[1:]); err != nil {
+	if err := cli.Run(ctx, cfg, os.Args[1:], os.Stdout); err != nil {
+		var usageErr *cli.UsageError
+		if errors.As(err, &usageErr) {
+			fmt.Fprintf(os.Stderr, "error: %v\n", err)
+			os.Exit(2)
+		}
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
