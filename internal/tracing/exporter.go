@@ -24,8 +24,11 @@ type TraceExporter interface {
 	Shutdown(ctx context.Context) error
 }
 
-// spanToData converts any TraceSpan to its serializable SpanData form.
-func spanToData(span TraceSpan) SpanData {
+// SpanToData converts any TraceSpan to its serializable SpanData form.
+// It is exported so that external TraceExporter implementations (e.g. mock
+// exporters in tests) can access the full span data including attributes,
+// events, and status.
+func SpanToData(span TraceSpan) SpanData {
 	if ls, ok := span.(*localSpan); ok {
 		return ls.ToSpanData()
 	}
@@ -115,7 +118,7 @@ func (e *JSONLTraceExporter) FilePath() string { return e.filePath }
 func (e *JSONLTraceExporter) ExportSpan(_ context.Context, span TraceSpan) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	return e.encoder.Encode(spanToData(span))
+	return e.encoder.Encode(SpanToData(span))
 }
 
 // Shutdown closes the underlying trace file.
@@ -153,7 +156,7 @@ func NewStdoutTraceExporterWithWriter(indent bool, w io.Writer) *StdoutTraceExpo
 
 // ExportSpan marshals the span and prints it to the configured writer.
 func (e *StdoutTraceExporter) ExportSpan(_ context.Context, span TraceSpan) error {
-	data := spanToData(span)
+	data := SpanToData(span)
 
 	var dataBytes []byte
 	var err error

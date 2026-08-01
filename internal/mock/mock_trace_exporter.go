@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/pengjunchen/go-cli/internal/tracing"
 	"github.com/pengjunchen/go-cli/internal/verify"
@@ -28,17 +27,11 @@ func NewMockTraceExporter() *MockTraceExporter {
 }
 
 // ExportSpan collects the span into the in-memory store.
+// It uses tracing.SpanToData to preserve attributes, events, and status.
 func (e *MockTraceExporter) ExportSpan(_ context.Context, span tracing.TraceSpan) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
-	e.spans = append(e.spans, tracing.SpanData{
-		TraceID:      span.TraceID(),
-		SpanID:       span.SpanID(),
-		ParentSpanID: span.ParentSpanID(),
-		Name:         span.Name(),
-		StartTime:    span.StartTime().Format(time.RFC3339Nano),
-		EndTime:      span.EndTime().Format(time.RFC3339Nano),
-	})
+	e.spans = append(e.spans, tracing.SpanToData(span))
 	return nil
 }
 
