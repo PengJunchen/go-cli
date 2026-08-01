@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/tracing"
@@ -27,6 +28,12 @@ type DefaultSessionTree struct {
 	entries  map[string]*SessionEntry
 	leafID   string
 	branches map[string]BranchMeta
+
+	// branchSummary, when non-nil, is used by MoveTo to append a compact
+	// summary entry to the branch being departed on every branch switch.
+	branchSummary BranchSummary
+	// summarySeq generates unique ids for appended branch-summary entries.
+	summarySeq atomic.Uint64
 }
 
 var _ SessionTree = (*DefaultSessionTree)(nil)
@@ -88,7 +95,11 @@ func (t *DefaultSessionTree) Append(ctx context.Context, entry *SessionEntry) er
 }
 
 // MoveTo changes the current leaf pointer to leafID. It returns ErrLeafNotFound
-// when the leaf id is unknown.
+// when the leaf id is unknown. On a genuine branch switch (leafID differs from
+// the current leaf), the departed branch's entries are summarized through the
+// configured BranchSummary (if any) and the summary is appended as a SessionEntry
+// at the end of the departed branch. This is non-destructive: no entries are
+// removed, and without a configured BranchSummary behavior is unchanged.
 func (t *DefaultSessionTree) MoveTo(ctx context.Context, leafID string) error {
 	span, _ := tracing.SpanFromContext(ctx, "session.tree.move", tracing.SpanKindInternal)
 	defer span.End()
@@ -102,12 +113,65 @@ func (t *DefaultSessionTree) MoveTo(ctx context.Context, leafID string) error {
 		logger.Error("session_tree_move", "op", "session.tree.move", "error_type", "leaf_not_found", "leaf_id", leafID)
 		return ErrLeafNotFound
 	}
+	departed := t.leafID
 	t.leafID = leafID
+	// Snapshot the departed branch and the summary config under lock so the
+	// (potentially slow) summarization call happens outside the critical section.
+	var departEntries []SessionEntry
+	if t.branchSummary != nil && departed != "" && departed != leafID {
+		if branch, ok := t.walkBranchLocked(departed); ok {
+			departEntries = make([]SessionEntry, 0, len(branch))
+			for _, e := range branch {
+				departEntries = append(departEntries, *e)
+			}
+		}
+	}
+	summarizer := t.branchSummary
 	t.mu.Unlock()
+
+	if len(departEntries) > 0 {
+		summary, err := summarizer.Summarize(ctx, departEntries)
+		if err != nil {
+			logger.Warn("session_tree_move", "op", "session.tree.move", "error_type", "branch_summary_failed", "leaf_id", leafID, "departed", departed, "err", err)
+		} else if summary != "" {
+			entry := &SessionEntry{
+				ID:        t.nextSummaryID(),
+				ParentID:  departed,
+				Type:      EntryTypeSystem,
+				Content:   summary,
+				Summary:   summary,
+				Timestamp: time.Now().UTC(),
+				IsSummary: true,
+			}
+			// Append returns the standard duplicate/parent validation; a fresh
+			// generated id cannot collide, and departed is a known leaf.
+			_ = t.Append(ctx, entry) //nolint:errcheck // best-effort append of branch summary.
+			span.SetAttributes(
+				tracing.Attribute{Key: "summary_appended", Value: true},
+				tracing.Attribute{Key: "departed_leaf", Value: departed},
+			)
+		}
+	}
 
 	logger.Info("session_tree_move", "op", "session.tree.move", "leaf_id", leafID)
 	span.SetStatus(tracing.SpanStatusOK, "")
 	return nil
+}
+
+// SetBranchSummary configures a BranchSummary used by MoveTo to record a compact
+// summary of each branch as it is departed. A nil value disables the behavior.
+func (t *DefaultSessionTree) SetBranchSummary(s BranchSummary) {
+	t.mu.Lock()
+	t.branchSummary = s
+	t.mu.Unlock()
+	if s != nil {
+		slog.Info("session_tree_set_branch_summary", "op", "session.tree.set_branch_summary", "name", s.Name())
+	}
+}
+
+// nextSummaryID returns a unique id for a branch-summary entry.
+func (t *DefaultSessionTree) nextSummaryID() string {
+	return fmt.Sprintf("branch-summary-%d", t.summarySeq.Add(1))
 }
 
 // GetBranch returns the entries ordered from root to leafID, or ErrLeafNotFound.

@@ -34,6 +34,9 @@ type SessionEntry struct {
 	Content   string    `json:"content"`
 	Timestamp time.Time `json:"timestamp"`
 	Summary   string    `json:"summary,omitempty"`
+	// IsSummary marks an entry as an auto-generated branch summary appended to
+	// a departed branch by SessionTree.MoveTo. It does not affect replay.
+	IsSummary bool `json:"is_summary,omitempty"`
 }
 
 // clone returns a defensive copy of the entry so callers cannot mutate the
