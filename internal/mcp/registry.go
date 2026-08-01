@@ -10,17 +10,48 @@ import (
 // registered under the requested server name.
 var ErrMCPClientNotFound = errors.New("mcp: client not found")
 
-// MCPClientRegistry stores MCPClient instances by their logical server name.
-// It is concurrency-safe: Register and Get may be called concurrently.
+// MCPClientRegistry stores MCPClient instances by their logical server name,
+// plus their associated HotReloaders. It is concurrency-safe: Register/Get and
+// the hot-reloader methods may be called concurrently.
 type MCPClientRegistry struct {
-	mu      sync.RWMutex
-	clients map[string]MCPClient
-	order   []string
+	mu           sync.RWMutex
+	clients      map[string]MCPClient
+	order        []string
+	hotReloaders map[string]HotReloader
 }
 
 // NewMCPClientRegistry returns an empty, ready-to-use registry.
 func NewMCPClientRegistry() *MCPClientRegistry {
-	return &MCPClientRegistry{clients: map[string]MCPClient{}}
+	return &MCPClientRegistry{
+		clients:      map[string]MCPClient{},
+		hotReloaders: map[string]HotReloader{},
+	}
+}
+
+// RegisterHotReloader stores the hot reloader under the given name. Registering
+// a name a second time overwrites the previous reloader.
+func (r *MCPClientRegistry) RegisterHotReloader(name string, hr HotReloader) error {
+	if hr == nil {
+		return errors.New("mcp: cannot register a nil hot reloader")
+	}
+	if name == "" {
+		return errors.New("mcp: cannot register a hot reloader with an empty name")
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.hotReloaders[name] = hr
+	return nil
+}
+
+// HotReloader returns the hot reloader registered under name, or ok=false when
+// none is registered.
+func (r *MCPClientRegistry) HotReloader(name string) (HotReloader, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	hr, ok := r.hotReloaders[name]
+	return hr, ok
 }
 
 // Register stores the client under the given server name. Registering a name a
