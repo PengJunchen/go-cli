@@ -50,16 +50,22 @@ func (c *TruncatingCompactor) Compact(ctx context.Context, items []TurnItem, max
 	result = append(result, system...)
 	budget := maxTokens - estimateTokens(result, estimator)
 
-	// Add newest non-system entries first, dropping the oldest. An entry that
-	// does not fit the remaining budget on its own is skipped so the total stays
-	// within the limit.
+	// Keep the newest non-system entries that fit the budget, dropping the
+	// oldest. We iterate newest-first so the most recent entries win the
+	// remaining budget, but collect them into a temporary slice and reverse
+	// before appending so the result stays in chronological order.
+	kept := make([]TurnItem, 0, len(nonSystem))
 	for i := len(nonSystem) - 1; i >= 0; i-- {
 		n := estimateTokens([]TurnItem{nonSystem[i]}, estimator)
 		if n <= budget {
-			result = append(result, nonSystem[i])
+			kept = append(kept, nonSystem[i])
 			budget -= n
 		}
 	}
+	for i, j := 0, len(kept)-1; i < j; i, j = i+1, j-1 {
+		kept[i], kept[j] = kept[j], kept[i]
+	}
+	result = append(result, kept...)
 
 	tokensAfter := estimateTokens(result, estimator)
 	span.SetAttributes(

@@ -116,6 +116,64 @@ func TestTruncatingCompactorGracefulWhenSystemOverBudget(t *testing.T) {
 	assert.Equal(t, RoleSystem, out[0].Role)
 }
 
+func TestTruncatingCompactorPreservesChronologicalOrder(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	ctx, _ := newTracedCtx(t)
+	est := tracedEstimator()
+
+	// Items are in chronological order: oldest first, newest last. Each is
+	// small enough to fit a generous budget, so all should be retained.
+	items := []TurnItem{
+		{Role: RoleSystem, Content: "sys"},
+		{Role: RoleUser, Content: "first"},
+		{Role: RoleAssistant, Content: "second"},
+		{Role: RoleUser, Content: "third"},
+		{Role: RoleAssistant, Content: "fourth"},
+	}
+
+	compactor := NewTruncatingCompactor()
+	out, err := compactor.Compact(ctx, items, 200, est)
+	require.NoError(t, err)
+
+	// The non-system entries must remain in their original chronological
+	// order. A reverse-order bug would surface as newest-first.
+	expected := []string{"sys", "first", "second", "third", "fourth"}
+	actual := make([]string, len(out))
+	for i, it := range out {
+		actual[i] = it.Content
+	}
+	assert.Equal(t, expected, actual)
+}
+
+func TestTruncatingCompactorDropsOldestKeepsOrder(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	ctx, _ := newTracedCtx(t)
+	est := tracedEstimator()
+
+	// The first non-system entry is large so it is dropped; the remaining
+	// entries must still be in chronological order.
+	items := []TurnItem{
+		{Role: RoleSystem, Content: "sys"},
+		{Role: RoleUser, Content: strings.Repeat("old", 100)},
+		{Role: RoleUser, Content: "keep-a"},
+		{Role: RoleAssistant, Content: "keep-b"},
+		{Role: RoleUser, Content: "keep-c"},
+	}
+
+	compactor := NewTruncatingCompactor()
+	out, err := compactor.Compact(ctx, items, 30, est)
+	require.NoError(t, err)
+
+	expected := []string{"sys", "keep-a", "keep-b", "keep-c"}
+	actual := make([]string, len(out))
+	for i, it := range out {
+		actual[i] = it.Content
+	}
+	assert.Equal(t, expected, actual)
+}
+
 func TestTruncatingCompactorCompileGuard(t *testing.T) {
 	var _ Compactor = (*TruncatingCompactor)(nil)
 	assert.NotNil(t, NewTruncatingCompactor())
