@@ -175,3 +175,33 @@ func (s *deferredStub) Description() string {
 func (s *deferredStub) Execute(_ context.Context, _ ToolCall) (*ToolResult, error) {
 	return nil, fmt.Errorf("tools: deferred tool %q is not loaded", s.name)
 }
+
+// defaultDeferredRegistry holds the process-wide active DeferredToolRegistry.
+var (
+	deferredMu      sync.RWMutex
+	defaultDeferred DeferredToolRegistry
+)
+
+// RegisterDeferredToolRegistry sets the active DeferredToolRegistry. A nil
+// value resets to a fresh DefaultDeferredToolRegistry wrapping a new
+// DefaultToolRegistry (which may be nil while deferred tools are still loading).
+func RegisterDeferredToolRegistry(r DeferredToolRegistry) {
+	deferredMu.Lock()
+	defer deferredMu.Unlock()
+	if r == nil {
+		r = NewDefaultDeferredToolRegistry(NewDefaultToolRegistry())
+	}
+	slog.Info("tools.register.deferred_registry", "name", "deferred-tool-registry")
+	defaultDeferred = r
+}
+
+// GetDeferredToolRegistry returns the active DeferredToolRegistry, lazily
+// defaulting to a DefaultDeferredToolRegistry when none has been registered.
+func GetDeferredToolRegistry() DeferredToolRegistry {
+	deferredMu.RLock()
+	defer deferredMu.RUnlock()
+	if defaultDeferred == nil {
+		return NewDefaultDeferredToolRegistry(NewDefaultToolRegistry())
+	}
+	return defaultDeferred
+}
