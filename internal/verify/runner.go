@@ -77,9 +77,9 @@ func AllRules() []VerifyRule {
 		// State management.
 		{ID: "VS-001", Name: "并发安全", Category: "state", Description: "Race test"},
 		{ID: "VS-002", Name: "状态变更可观测", Category: "state", Description: "Log capture"},
-		// Context management.
-		{ID: "VC-001", Name: "context 取消传播", Category: "context", Description: "Context cancellation propagation"},
-		{ID: "VC-002", Name: "context 超时传播", Category: "context", Description: "Context timeout propagation"},
+		// Context management (VG prefix = Go context/goroutine rules).
+		{ID: "VG-001", Name: "context 取消传播", Category: "context", Description: "Context cancellation propagation"},
+		{ID: "VG-002", Name: "goroutine 泄漏检测", Category: "context", Description: "Goroutine leak detection (CLI level)"},
 		// Error recovery.
 		{ID: "VE-001", Name: "错误包装保留链", Category: "error", Description: "Error wrapping preserves chain"},
 		{ID: "VE-002", Name: "非空错误检测", Category: "error", Description: "Non-nil error detection"},

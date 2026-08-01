@@ -403,6 +403,303 @@ type S struct{ m mock.Mock }
 	}
 }
 
+func TestScanSlogUsage_Violation(t *testing.T) {
+	dir := t.TempDir()
+
+	code := `package example
+
+func Run() {}
+`
+	err := os.WriteFile(filepath.Join(dir, "run.go"), []byte(code), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultScanConfig(dir)
+	report, err := Scan(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !hasRule(report, "SCAN-008") {
+		t.Error("expected SCAN-008 finding for no slog usage, got none")
+	}
+}
+
+func TestScanSlogUsage_Compliant(t *testing.T) {
+	dir := t.TempDir()
+
+	code := `package example
+
+import (
+	"context"
+	"log/slog"
+)
+
+func Run(ctx context.Context) {
+	slog.InfoContext(ctx, "running", "op", "command")
+}
+`
+	err := os.WriteFile(filepath.Join(dir, "run.go"), []byte(code), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultScanConfig(dir)
+	report, err := Scan(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if hasRule(report, "SCAN-008") {
+		t.Errorf("expected no SCAN-008 finding for slog usage, got: %s", report.FormatText())
+	}
+}
+
+func TestScanHardcodedDefaults(t *testing.T) {
+	dir := t.TempDir()
+
+	violation := `package example
+
+const Prompt = "You are a helpful assistant."
+`
+	err := os.WriteFile(filepath.Join(dir, "prompt.go"), []byte(violation), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultScanConfig(dir)
+	report, err := Scan(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !hasRule(report, "SCAN-009") {
+		t.Error("expected SCAN-009 finding for hardcoded default/prompt, got none")
+	}
+}
+
+func TestScanHardcodedDefaults_Compliant(t *testing.T) {
+	dir := t.TempDir()
+
+	code := `package example
+
+const Prompt = "assistant"
+`
+	err := os.WriteFile(filepath.Join(dir, "prompt.go"), []byte(code), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultScanConfig(dir)
+	report, err := Scan(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if hasRule(report, "SCAN-009") {
+		t.Errorf("expected no SCAN-009 finding, got: %s", report.FormatText())
+	}
+}
+
+func TestScanCommandRouting_Switch(t *testing.T) {
+	dir := t.TempDir()
+
+	violation := `package example
+
+func Route(args []string) string {
+	switch args[0] {
+	case "help":
+		return "usage"
+	case "version":
+		return "v1"
+	}
+	return ""
+}
+`
+	err := os.WriteFile(filepath.Join(dir, "cmd.go"), []byte(violation), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultScanConfig(dir)
+	report, err := Scan(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !hasRule(report, "SCAN-010") {
+		t.Error("expected SCAN-010 finding for switch command routing, got none")
+	}
+}
+
+func TestScanCommandRouting_RegistryPasses(t *testing.T) {
+	dir := t.TempDir()
+
+	code := `package example
+
+import "fmt"
+
+type Command struct {
+	Name string
+}
+
+var registry = map[string]*Command{}
+
+func Route(args []string) string {
+	cmd, ok := registry[args[0]]
+	if !ok {
+		return fmt.Sprint("unknown")
+	}
+	return cmd.Name
+}
+`
+	err := os.WriteFile(filepath.Join(dir, "cmd.go"), []byte(code), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultScanConfig(dir)
+	report, err := Scan(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if hasRule(report, "SCAN-010") {
+		t.Errorf("expected no SCAN-010 finding for registry routing, got: %s", report.FormatText())
+	}
+}
+
+func TestScanInterfaceDefaultImpl_Violation(t *testing.T) {
+	dir := t.TempDir()
+
+	code := `package example
+
+type Service interface {
+	Run() error
+}
+`
+	err := os.WriteFile(filepath.Join(dir, "service.go"), []byte(code), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultScanConfig(dir)
+	report, err := Scan(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !hasRule(report, "SCAN-012") {
+		t.Error("expected SCAN-012 finding for interface missing default impl, got none")
+	}
+}
+
+func TestScanInterfaceDefaultImpl_Compliant(t *testing.T) {
+	dir := t.TempDir()
+
+	code := `package example
+
+type Service interface {
+	Run() error
+}
+
+type defaultService struct{}
+
+var _ Service = (*defaultService)(nil)
+`
+	err := os.WriteFile(filepath.Join(dir, "service.go"), []byte(code), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultScanConfig(dir)
+	report, err := Scan(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if hasRule(report, "SCAN-012") {
+		t.Errorf("expected no SCAN-012 finding with var _ assertion, got: %s", report.FormatText())
+	}
+}
+
+func TestScanConcreteInInterface(t *testing.T) {
+	dir := t.TempDir()
+
+	violation := `package example
+
+type Service interface {
+	Run() error
+}
+
+type implService struct{}
+
+func Run(s *implService) error {
+	return nil
+}
+`
+	err := os.WriteFile(filepath.Join(dir, "svc.go"), []byte(violation), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultScanConfig(dir)
+	report, err := Scan(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !hasRule(report, "SCAN-013") {
+		t.Error("expected SCAN-013 finding for concrete type in interface position, got none")
+	}
+}
+
+func TestScanConcreteInInterface_Compliant(t *testing.T) {
+	dir := t.TempDir()
+
+	code := `package example
+
+import "context"
+
+type Service interface {
+	Run(ctx context.Context) error
+}
+
+type defaultService struct{}
+
+var _ Service = (*defaultService)(nil)
+
+func New() Service {
+	return &defaultService{}
+}
+`
+	err := os.WriteFile(filepath.Join(dir, "svc.go"), []byte(code), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultScanConfig(dir)
+	report, err := Scan(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if hasRule(report, "SCAN-013") {
+		t.Errorf("expected no SCAN-013 finding for interface usage, got: %s", report.FormatText())
+	}
+}
+
+// hasRule reports whether the report contains any finding with the given RuleID.
+func hasRule(report *ScanReport, ruleID string) bool {
+	for _, f := range report.Findings {
+		if f.RuleID == ruleID {
+			return true
+		}
+	}
+	return false
+}
+
 func TestScanDir(t *testing.T) {
 	dir := t.TempDir()
 

@@ -90,21 +90,39 @@ type ScanConfig struct {
 	CheckNolint bool
 	// NolintThreshold is the maximum allowed //nolint directives per file.
 	NolintThreshold int
+	// CheckSlogUsage enables SCAN-008 (production code with zero slog calls).
+	CheckSlogUsage bool
+	// CheckHardcodedDefaults enables SCAN-009 (hardcoded defaults/prompts).
+	CheckHardcodedDefaults bool
+	// CheckCommandRouting enables SCAN-010 (hardcoded command routing).
+	CheckCommandRouting bool
+	// CheckConfigMergePriority enables SCAN-011 (config merge priority violations).
+	CheckConfigMergePriority bool
+	// CheckInterfaceDefaultImpl enables SCAN-012 (interfaces missing default implementations).
+	CheckInterfaceDefaultImpl bool
+	// CheckConcreteInInterface enables SCAN-013 (concrete types used in interface positions).
+	CheckConcreteInInterface bool
 }
 
 // DefaultScanConfig returns a config with all checks enabled and sensible defaults.
 func DefaultScanConfig(dir string) ScanConfig {
 	return ScanConfig{
-		Dir:             dir,
-		ExcludeDirs:     []string{"vendor", "internal/verify", ".git"},
-		ExcludeFiles:    []string{"*_test.go"},
-		CheckMockImport: true,
-		CheckTesting:    true,
-		CheckHardcoded:  true,
-		CheckTestURL:    true,
-		CheckBuildTag:   true,
-		CheckNolint:     true,
-		NolintThreshold: 3,
+		Dir:                      dir,
+		ExcludeDirs:              []string{"vendor", "internal/verify", ".git"},
+		ExcludeFiles:             []string{"*_test.go"},
+		CheckMockImport:          true,
+		CheckTesting:             true,
+		CheckHardcoded:           true,
+		CheckTestURL:             true,
+		CheckBuildTag:            true,
+		CheckNolint:              true,
+		NolintThreshold:          3,
+		CheckSlogUsage:           true,
+		CheckHardcodedDefaults:   true,
+		CheckCommandRouting:      true,
+		CheckConfigMergePriority: true,
+		CheckInterfaceDefaultImpl: true,
+		CheckConcreteInInterface:  true,
 	}
 }
 
@@ -138,6 +156,18 @@ func Scan(cfg ScanConfig) (*ScanReport, error) {
 	}
 
 	fset := token.NewFileSet()
+
+	// pkgGroup collects file paths grouped by their parent directory
+	// for package-level scan rules (SCAN-008 through SCAN-013).
+	type pkgGroup struct {
+		dir   string
+		files []string
+	}
+	pkgGroups := map[string]*pkgGroup{}
+
+	needsPkgScan := cfg.CheckSlogUsage || cfg.CheckHardcodedDefaults ||
+		cfg.CheckCommandRouting || cfg.CheckConfigMergePriority ||
+		cfg.CheckInterfaceDefaultImpl || cfg.CheckConcreteInInterface
 
 	err := filepath.Walk(cfg.Dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -185,7 +215,7 @@ func Scan(cfg ScanConfig) (*ScanReport, error) {
 			return nil
 		}
 
-		// Run all enabled checks.
+		// Run per-file checks.
 		if cfg.CheckMockImport {
 			report.Findings = append(report.Findings, scanMockImports(path, node, fset)...)
 		}
@@ -205,11 +235,43 @@ func Scan(cfg ScanConfig) (*ScanReport, error) {
 			report.Findings = append(report.Findings, scanNolint(path, node, fset, cfg.NolintThreshold)...)
 		}
 
+		// Collect file paths for package-level checks.
+		if needsPkgScan {
+			pkgDir := filepath.Dir(path)
+			if _, ok := pkgGroups[pkgDir]; !ok {
+				pkgGroups[pkgDir] = &pkgGroup{dir: pkgDir}
+			}
+			pkgGroups[pkgDir].files = append(pkgGroups[pkgDir].files, path)
+		}
+
 		return nil
 	})
 
 	if err != nil {
 		return nil, fmt.Errorf("scan walk error: %w", err)
+	}
+
+	// Phase 2: Run package-level scan rules.
+	// These rules need to analyze all files in a package together.
+	for _, pkg := range pkgGroups {
+		if cfg.CheckSlogUsage {
+			report.Findings = append(report.Findings, scanSlogUsage(pkg.dir, pkg.files)...)
+		}
+		if cfg.CheckHardcodedDefaults {
+			report.Findings = append(report.Findings, scanHardcodedDefaults(pkg.dir, pkg.files)...)
+		}
+		if cfg.CheckCommandRouting {
+			report.Findings = append(report.Findings, scanCommandRouting(pkg.dir, pkg.files)...)
+		}
+		if cfg.CheckConfigMergePriority {
+			report.Findings = append(report.Findings, scanConfigMergePriority(pkg.dir, pkg.files)...)
+		}
+		if cfg.CheckInterfaceDefaultImpl {
+			report.Findings = append(report.Findings, scanInterfaceDefaultImpl(pkg.dir, pkg.files)...)
+		}
+		if cfg.CheckConcreteInInterface {
+			report.Findings = append(report.Findings, scanConcreteInInterface(pkg.dir, pkg.files)...)
+		}
 	}
 
 	// Compute summary.

@@ -1,0 +1,413 @@
+// Package verify — package-level scan rules (SCAN-008 through SCAN-013).
+// These rules operate on a whole package (all .go files in one directory) and
+// use go/ast inspection to detect log, routing, and interface-conformance issues.
+package verify
+
+import (
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
+	"strings"
+)
+
+// hardcodedDefaultPatterns are keyword markers for string literals that look
+// like hardcoded defaults or embedded LLM system prompts (SCAN-009).
+var hardcodedDefaultPatterns = []string{
+	"default timeout",
+	"default value",
+	"default values",
+	"you are",
+	"system prompt",
+	"act as",
+	"fallback prompt",
+	"hardcoded default",
+}
+
+// knownCommandNames are command names that should be routed through a command
+// registry rather than by string comparison (SCAN-010).
+var knownCommandNames = []string{
+	"help", "version", "prompt", "run", "start", "stop", "init",
+	"config", "status", "execute", "list",
+}
+
+// scanSlogUsage detects production files with zero slog calls (SCAN-008).
+func scanSlogUsage(dir string, goFiles []string) []Finding {
+	var findings []Finding
+
+	fset := token.NewFileSet()
+	for _, file := range goFiles {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+
+		node, err := parser.ParseFile(fset, file, nil, parser.ParseComments)
+		if err != nil {
+			continue
+		}
+
+		hasSlog := false
+		ast.Inspect(node, func(n ast.Node) bool {
+			if hasSlog {
+				return false
+			}
+			sel, ok := n.(*ast.SelectorExpr)
+			if !ok {
+				return true
+			}
+			if ident, ok := sel.X.(*ast.Ident); ok && ident.Name == "slog" {
+				hasSlog = true
+				return false
+			}
+			return true
+		})
+
+		if !hasSlog {
+			findings = append(findings, Finding{
+				RuleID:   "SCAN-008",
+				Severity: SeverityWarn,
+				File:     file,
+				Line:     1,
+				Message:  "no slog usage in production code",
+				Snippet:  filepath.Base(file),
+			})
+		}
+	}
+
+	return findings
+}
+
+// scanHardcodedDefaults detects hardcoded default values/prompts (SCAN-009).
+func scanHardcodedDefaults(dir string, goFiles []string) []Finding {
+	var findings []Finding
+
+	fset := token.NewFileSet()
+	for _, file := range goFiles {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+
+		node, err := parser.ParseFile(fset, file, nil, parser.ParseComments)
+		if err != nil {
+			continue
+		}
+
+		ast.Inspect(node, func(n ast.Node) bool {
+			lit, ok := n.(*ast.BasicLit)
+			if !ok || lit.Kind != token.STRING {
+				return true
+			}
+
+			value := strings.ToLower(strings.Trim(lit.Value, "`\""))
+
+			for _, pattern := range hardcodedDefaultPatterns {
+				if strings.Contains(value, pattern) {
+					findings = append(findings, Finding{
+						RuleID:   "SCAN-009",
+						Severity: SeverityError,
+						File:     file,
+						Line:     fset.Position(lit.Pos()).Line,
+						Message:  "hardcoded default/prompt string literal detected",
+						Snippet:  truncate(lit.Value, 80),
+					})
+					break
+				}
+			}
+			return true
+		})
+	}
+
+	return findings
+}
+
+// scanCommandRouting detects hardcoded command routing (SCAN-010).
+// It flags string-comparison dispatch (switch on string literal case, or
+// `if args[0] == "help"`) when the compared value is a known command name.
+func scanCommandRouting(dir string, goFiles []string) []Finding {
+	var findings []Finding
+
+	fset := token.NewFileSet()
+	for _, file := range goFiles {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+
+		node, err := parser.ParseFile(fset, file, nil, parser.ParseComments)
+		if err != nil {
+			continue
+		}
+
+		ast.Inspect(node, func(n ast.Node) bool {
+			switch stmt := n.(type) {
+			case *ast.SwitchStmt:
+				// Check each case clause for a string literal that matches a command name.
+				for _, st := range stmt.Body.List {
+					if stmtCase, ok := st.(*ast.CaseClause); ok {
+						for _, expr := range stmtCase.List {
+							if isCommandStringLiteral(fset, file, expr, &findings) {
+								break
+							}
+						}
+					}
+				}
+			case *ast.TypeSwitchStmt:
+				// Skip type switches.
+				return true
+			case *ast.BinaryExpr:
+				// Detect `x == "help"` or `"help" == x` string comparisons.
+				if stmt.Op.String() == "==" {
+					if isCommandStringLiteral(fset, file, stmt.X, &findings) ||
+						isCommandStringLiteral(fset, file, stmt.Y, &findings) {
+						return true
+					}
+				}
+			}
+			return true
+		})
+	}
+
+	return findings
+}
+
+// isCommandStringLiteral reports a finding when expr is a string literal that
+// matches a known command name, and returns true if it did.
+func isCommandStringLiteral(fset *token.FileSet, file string, expr ast.Expr, findings *[]Finding) bool {
+	lit, ok := expr.(*ast.BasicLit)
+	if !ok || lit.Kind != token.STRING {
+		return false
+	}
+	value := strings.Trim(lit.Value, "`\"")
+	for _, cmd := range knownCommandNames {
+		if value == cmd {
+			*findings = append(*findings, Finding{
+				RuleID:   "SCAN-010",
+				Severity: SeverityError,
+				File:     file,
+				Line:     fset.Position(lit.Pos()).Line,
+				Message:  "hardcoded command routing via string literal",
+				Snippet:  value,
+			})
+			return true
+		}
+	}
+	return false
+}
+
+// scanConfigMergePriority is a stub (SCAN-011) pending implementation in a
+// later task. It is referenced by Scan() but not yet fully implemented.
+func scanConfigMergePriority(_ string, _ []string) []Finding {
+	return nil
+}
+
+// scanInterfaceDefaultImpl detects interfaces missing a default implementation
+// assertion (var _ Xxx = ...) in the same package (SCAN-012).
+func scanInterfaceDefaultImpl(dir string, goFiles []string) []Finding {
+	var findings []Finding
+
+	// Collect interfaces declared in the package and the set of interface names
+	// referenced by `var _ Xxx = ...` compile-time default-implementation assertions.
+	interfaceNames := map[string]bool{}
+	implAssertions := map[string]bool{}
+
+	fset := token.NewFileSet()
+	for _, file := range goFiles {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+
+		node, err := parser.ParseFile(fset, file, nil, parser.ParseComments)
+		if err != nil {
+			continue
+		}
+
+		for _, decl := range node.Decls {
+			genDecl, ok := decl.(*ast.GenDecl)
+			if !ok {
+				continue
+			}
+
+			for _, spec := range genDecl.Specs {
+				switch s := spec.(type) {
+				case *ast.TypeSpec:
+					if _, ok := s.Type.(*ast.InterfaceType); ok {
+						interfaceNames[s.Name.Name] = true
+					}
+				case *ast.ValueSpec:
+					if len(s.Names) > 0 && s.Names[0].Name == "_" {
+						if id, ok := s.Type.(*ast.Ident); ok {
+							implAssertions[id.Name] = true
+						}
+					}
+				}
+			}
+		}
+	}
+
+	// Report interfaces that lack any compile-time default implementation assertion.
+	for name := range interfaceNames {
+		if !implAssertions[name] {
+			findings = append(findings, Finding{
+				RuleID:   "SCAN-012",
+				Severity: SeverityError,
+				File:     firstGoFile(goFiles),
+				Line:     1,
+				Message:  "interface " + name + " missing default implementation",
+				Snippet:  name,
+			})
+		}
+	}
+
+	return findings
+}
+
+// scanConcreteInInterface detects concrete types used in function/method
+// signatures where a matching interface exists in the same package (SCAN-013).
+// It uses a conservative heuristic: a non-basic concrete type name T used in a
+// parameter or return position is flagged when the package defines an interface
+// named IT or TInterface.
+func scanConcreteInInterface(dir string, goFiles []string) []Finding {
+	var findings []Finding
+
+	interfaceNames := map[string]bool{}
+	fset := token.NewFileSet()
+	parsed := map[string]*ast.File{}
+
+	for _, file := range goFiles {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+		node, err := parser.ParseFile(fset, file, nil, parser.ParseComments)
+		if err != nil {
+			continue
+		}
+		parsed[file] = node
+		for _, decl := range node.Decls {
+			if gd, ok := decl.(*ast.GenDecl); ok {
+				for _, spec := range gd.Specs {
+					if ts, ok := spec.(*ast.TypeSpec); ok {
+						if _, ok := ts.Type.(*ast.InterfaceType); ok {
+							interfaceNames[ts.Name.Name] = true
+						}
+					}
+				}
+			}
+		}
+	}
+
+	for _, node := range parsed {
+		ast.Inspect(node, func(n ast.Node) bool {
+			switch fn := n.(type) {
+			case *ast.FuncDecl:
+				if fn.Type != nil {
+					checkFieldList(fn.Type.Params, fset, interfaceNames, &findings)
+					checkFieldList(fn.Type.Results, fset, interfaceNames, &findings)
+				}
+			case *ast.FuncLit:
+				if fn.Type != nil {
+					checkFieldList(fn.Type.Params, fset, interfaceNames, &findings)
+					checkFieldList(fn.Type.Results, fset, interfaceNames, &findings)
+				}
+			}
+			return true
+		})
+	}
+
+	return findings
+}
+
+// checkFieldList inspects a parameter/result field list and flags concrete
+// types that correspond to a package interface.
+func checkFieldList(fields *ast.FieldList, fset *token.FileSet, interfaceNames map[string]bool, findings *[]Finding) {
+	if fields == nil {
+		return
+	}
+	for _, field := range fields.List {
+		typ := field.Type
+		// Unwrap pointer / slice / map wrappers to reach the base type.
+		t := unwrapTypeName(typ)
+		concreteType, ok := t.(*ast.Ident)
+		if !ok {
+			continue
+		}
+		name := concreteType.Name
+		if isBasicTypeName(name) {
+			continue
+		}
+		// Skip if the type itself is an interface — that is the compliant case.
+		if interfaceNames[name] {
+			continue
+		}
+		// Look for a corresponding interface name: IT, TInterface, or the
+		// concrete type with an implementation prefix stripped (e.g. implService
+		// corresponds to the Service interface).
+		if hasCorrespondingInterface(interfaceNames, name) {
+			*findings = append(*findings, Finding{
+				RuleID:   "SCAN-013",
+				Severity: SeverityWarn,
+				File:     fset.Position(field.Pos()).Filename,
+				Line:     fset.Position(field.Pos()).Line,
+				Message:  "concrete type " + name + " used in interface position",
+				Snippet:  name,
+			})
+		}
+	}
+}
+
+// hasCorrespondingInterface reports whether the package defines an interface
+// that a concrete type `name` is likely meant to satisfy. It matches direct
+// name forms (IT, TInterface) as well as implementation-style prefixes
+// (implX, defaultX) against a shared base name.
+func hasCorrespondingInterface(interfaceNames map[string]bool, name string) bool {
+	if interfaceNames["I"+name] || interfaceNames[name+"Interface"] {
+		return true
+	}
+	// Strip common implementation prefixes and re-check.
+	for _, prefix := range []string{"impl", "default", "Default", "std", "Std"} {
+		base := strings.TrimPrefix(name, prefix)
+		if base == "" || base == name {
+			continue
+		}
+		if interfaceNames[base] || interfaceNames["I"+base] {
+			return true
+		}
+	}
+	return false
+}
+
+// unwrapTypeName strips pointer/slice/map/array wrappers to return the base type expression.
+func unwrapTypeName(expr ast.Expr) ast.Expr {
+	switch t := expr.(type) {
+	case *ast.StarExpr:
+		return unwrapTypeName(t.X)
+	case *ast.ArrayType:
+		return unwrapTypeName(t.Elt)
+	case *ast.MapType:
+		return unwrapTypeName(t.Value)
+	case *ast.SelectorExpr:
+		return t
+	default:
+		return expr
+	}
+}
+
+// isBasicTypeName reports whether s is a built-in Go type name.
+func isBasicTypeName(s string) bool {
+	switch s {
+	case "string", "int", "int8", "int16", "int32", "int64",
+		"uint", "uint8", "uint16", "uint32", "uint64", "uintptr",
+		"float32", "float64", "complex64", "complex128",
+		"bool", "byte", "rune", "error", "any":
+		return true
+	}
+	return false
+}
+
+// firstGoFile returns the first non-test Go file in the list, or "" if none.
+func firstGoFile(goFiles []string) string {
+	for _, f := range goFiles {
+		if !strings.HasSuffix(f, "_test.go") {
+			return f
+		}
+	}
+	return ""
+}
