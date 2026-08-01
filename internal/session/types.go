@@ -48,10 +48,23 @@ func (e *SessionEntry) clone() *SessionEntry {
 
 // SessionContext is the effective, replayable context for a session branch.
 type SessionContext struct {
-	LeafID     string         `json:"leaf_id"`
-	Messages   []SessionEntry `json:"messages"`
-	EntryCount int            `json:"entry_count"`
-	LastUpdate time.Time      `json:"last_update,omitempty"`
+	// LeafID is the entry the context was reconstructed for.
+	LeafID string `json:"leaf_id"`
+	// RootID is the root entry of the reconstructed branch.
+	RootID string `json:"root_id,omitempty"`
+	// Messages are the ordered (root to leaf) effective messages for the
+	// context. Compaction entries are folded into a single summary message.
+	Messages []SessionEntry `json:"messages"`
+	// Traversed are the raw entries visited while walking from the leaf back to
+	// the root, in walk (leaf to root) order.
+	Traversed []SessionEntry `json:"traversed,omitempty"`
+	// EntryCount is the number of effective messages in Messages.
+	EntryCount int `json:"entry_count"`
+	// EstimatedTokens is a heuristic estimate of the token count for the
+	// reconstructed context.
+	EstimatedTokens int `json:"estimated_tokens,omitempty"`
+	// LastUpdate is the most recent timestamp among the traversed entries.
+	LastUpdate time.Time `json:"last_update,omitempty"`
 }
 
 // SessionStore persists and loads immutable session entries.
@@ -76,4 +89,7 @@ type SessionTree interface {
 	BuildContext(ctx context.Context, leafID string) (*SessionContext, error)
 	// CurrentLeaf returns the id of the current leaf, or "" when empty.
 	CurrentLeaf() string
+	// Branch zero-copy points the current leaf at the existing entry fromID,
+	// establishing a new branch without copying any entries.
+	Branch(ctx context.Context, fromID string, opts ...BranchOption) error
 }

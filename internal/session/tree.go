@@ -23,16 +23,20 @@ var ErrParentNotFound = errors.New("session: parent entry not found")
 // holds every entry by id and a current-leaf pointer. Branching is expressed by
 // entries sharing a common ancestor via ParentID.
 type DefaultSessionTree struct {
-	mu      sync.RWMutex
-	entries map[string]*SessionEntry
-	leafID  string
+	mu       sync.RWMutex
+	entries  map[string]*SessionEntry
+	leafID   string
+	branches map[string]BranchMeta
 }
 
 var _ SessionTree = (*DefaultSessionTree)(nil)
 
 // NewDefaultSessionTree returns an empty in-memory session tree.
 func NewDefaultSessionTree() *DefaultSessionTree {
-	return &DefaultSessionTree{entries: make(map[string]*SessionEntry)}
+	return &DefaultSessionTree{
+		entries:  make(map[string]*SessionEntry),
+		branches: make(map[string]BranchMeta),
+	}
 }
 
 // Append adds an immutable entry. A non-empty ParentID must reference an
