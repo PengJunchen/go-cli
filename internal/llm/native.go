@@ -364,6 +364,20 @@ func encodeOpenAIRequest(cfg ModelConfig, model string, msgs []Message, opts []O
 		if msg.ToolCallID != "" {
 			om.ToolCallID = msg.ToolCallID
 		}
+		if len(msg.ToolCalls) > 0 {
+			om.ToolCalls = make([]openAIToolCall, 0, len(msg.ToolCalls))
+			for _, tc := range msg.ToolCalls {
+				argsJSON, _ := json.Marshal(tc.Args)
+				om.ToolCalls = append(om.ToolCalls, openAIToolCall{
+					ID:   tc.ID,
+					Type: "function",
+					Function: openAIFunction{
+						Name:      tc.Name,
+						Arguments: string(argsJSON),
+					},
+				})
+			}
+		}
 		reqMsgs = append(reqMsgs, om)
 	}
 	req := openAIRequest{

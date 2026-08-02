@@ -123,9 +123,13 @@ func TestLoopNoToolRegistry(t *testing.T) {
 	// No WithTools => the loop has no tool registry.
 	loop := NewLoopAgent(WithLLM(model))
 
+	// The "no tool registry" failure is fed back to the model as a tool
+	// result; the loop completes cleanly once the model stops calling tools.
 	events, err := loop.Run(context.Background(), Submission{Content: "go"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no tool registry")
+	require.NoError(t, err)
+	results := findEvents(events, "tool_result")
+	require.NotEmpty(t, results)
+	assert.Contains(t, results[0], "no tool registry")
 	toolCalls := findEvents(events, "tool_call")
 	require.Len(t, toolCalls, 1)
 	assert.Equal(t, "read", toolCalls[0])
@@ -142,10 +146,36 @@ func TestLoopToolExecuteError(t *testing.T) {
 	}}}
 	loop := NewLoopAgent(WithLLM(model), WithTools(toolSrv))
 
+	// Tool errors are fed back to the model as tool results rather than
+	// aborting the loop, so the model can diagnose and retry. With no
+	// further tool calls in the scripted sequence the loop finishes cleanly.
 	events, err := loop.Run(context.Background(), Submission{Content: "go"})
-	require.ErrorIs(t, err, boom)
-	errs := findEvents(events, "error")
-	require.NotEmpty(t, errs)
+	require.NoError(t, err)
+	results := findEvents(events, "tool_result")
+	require.Len(t, results, 1)
+	assert.Contains(t, results[0], boom.Error())
+	// The error must NOT surface as a terminal error event.
+	assert.Empty(t, findEvents(events, "error"))
+}
+
+func TestLoopToolExecuteErrorAbortsOnCancel(t *testing.T) {
+	boom := errors.New("tool execution failed")
+	toolSrv := scriptedRegistry(scriptedTool{name: "faulty", err: boom})
+
+	model := &scriptedChatModel{seq: []*llm.Message{{
+		Role:      llm.RoleAssistant,
+		Content:   "calling",
+		ToolCalls: []llm.ToolCall{{ID: "c1", Name: "faulty", Args: map[string]any{}}},
+	}}}
+	loop := NewLoopAgent(WithLLM(model), WithTools(toolSrv))
+
+	// A canceled context causes the loop to abort at the next iteration
+	// boundary rather than feeding errors back indefinitely.
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	events, err := loop.Run(ctx, Submission{Content: "go"})
+	require.Error(t, err)
+	assert.NotEmpty(t, findEvents(events, "error"))
 }
 
 func TestLoopToolNilResult(t *testing.T) {

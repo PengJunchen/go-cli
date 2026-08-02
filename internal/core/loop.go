@@ -14,7 +14,9 @@ import (
 
 // defaultMaxIterations bounds the number of think -> act -> observe turns a
 // LoopAgent performs before giving up, guarding against runaway tool loops.
-const defaultMaxIterations = 10
+// Complex multi-step tasks (install dependencies, write code, run, debug)
+// legitimately need many turns, so the default is generous.
+const defaultMaxIterations = 25
 
 // errNilModel reports that a LoopAgent has no chat model wired up.
 var errNilModel = errors.New("core: agent loop has no chat model")
@@ -189,10 +191,17 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission) ([]AgentEven
 
 			resultText, execErr := l.executeTool(spanCtx, toToolsCall(tc))
 			if execErr != nil {
-				span.SetStatus(tracing.SpanStatusError, execErr.Error())
-				logger.Error("core.loop.tool_error", "tool", tc.Name, "err", execErr)
-				events = append(events, errEvent(execErr))
-				return events, execErr
+				// Do NOT abort the loop on tool errors. Feed the error back
+				// as a tool result so the model can diagnose and retry with
+				// an alternative approach. Only abort if the context itself
+				// is canceled (user gave up or timeout).
+				logger.Warn("core.loop.tool_error", "tool", tc.Name, "err", execErr)
+				resultText = "Error: " + execErr.Error()
+				if spanCtx.Err() != nil {
+					span.SetStatus(tracing.SpanStatusError, execErr.Error())
+					events = append(events, errEvent(execErr))
+					return events, execErr
+				}
 			}
 			events = append(events, AgentEvent{Kind: "tool_result", Content: resultText, Timestamp: time.Now()})
 			messages = append(messages, llm.Message{
@@ -249,7 +258,14 @@ func errEvent(err error) AgentEvent {
 // and encourages it to use tools when appropriate. When the tool registry is
 // nil or empty, a minimal prompt is returned.
 func systemPrompt(tr tools.ToolRegistry) string {
-	base := "You are a helpful AI assistant. When the user asks you to perform an action that requires tools (such as reading files, listing directories, running commands, or searching), use the available tools to accomplish the task. Do not guess or make up information when a tool can provide the answer."
+	base := `You are a helpful AI assistant embedded in a developer CLI. When the user asks you to perform an action, you MUST use the available tools to accomplish it and persist until the task is fully complete.
+
+Rules:
+1. NEVER stop with a statement like "Let me install..." or "I need to..." and then do nothing. If you say you will do something, immediately call a tool to do it in the same turn.
+2. When a tool call fails or returns an error, diagnose the cause and try an alternative approach. Do not give up after a single failure.
+3. Keep iterating (call tools, observe results, adjust) until the user's request is fully satisfied. Only produce a final text answer with NO tool calls when the task is genuinely complete.
+4. Do not guess or fabricate information when a tool can provide the answer.
+5. If a skill tool is available and relevant, call it first to obtain expert instructions, then follow those instructions using other tools.`
 	if tr == nil {
 		return base
 	}

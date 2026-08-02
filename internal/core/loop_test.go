@@ -180,8 +180,13 @@ func TestLoopToolExecutionError(t *testing.T) {
 	))
 	loop := NewLoopAgent(WithLLM(model), WithTools(toolSrv))
 
+	// Tool-not-found errors are fed back to the model as tool results so
+	// the model can adapt. The loop completes cleanly when the model stops
+	// calling tools.
 	events, err := loop.Run(context.Background(), Submission{Content: "go"})
-	require.Error(t, err)
-	errs := findEvents(events, "error")
-	assert.NotEmpty(t, errs)
+	require.NoError(t, err)
+	results := findEvents(events, "tool_result")
+	require.NotEmpty(t, results)
+	assert.Contains(t, results[0], "missing_tool")
+	assert.Empty(t, findEvents(events, "error"))
 }

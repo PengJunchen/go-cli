@@ -281,6 +281,22 @@ func (m *HTTPChatModel) buildBody(msgs []Message, opts ...Option) ([]byte, error
 		if msg.ToolCallID != "" {
 			om.ToolCallID = msg.ToolCallID
 		}
+		// Forward assistant tool_calls so the API can match them to
+		// subsequent tool_result messages.
+		if len(msg.ToolCalls) > 0 {
+			om.ToolCalls = make([]openAIToolCall, 0, len(msg.ToolCalls))
+			for _, tc := range msg.ToolCalls {
+				argsJSON, _ := json.Marshal(tc.Args)
+				om.ToolCalls = append(om.ToolCalls, openAIToolCall{
+					ID:   tc.ID,
+					Type: "function",
+					Function: openAIFunction{
+						Name:      tc.Name,
+						Arguments: string(argsJSON),
+					},
+				})
+			}
+		}
 		reqMsgs = append(reqMsgs, om)
 	}
 
@@ -397,7 +413,7 @@ type openAIToolFunction struct {
 // openAIMessage is a single message in an OpenAI chat request/response.
 type openAIMessage struct {
 	Role       string           `json:"role"`
-	Content    string           `json:"content,omitempty"`
+	Content    string           `json:"content"`
 	Name       string           `json:"name,omitempty"`
 	ToolCallID string           `json:"tool_call_id,omitempty"`
 	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
