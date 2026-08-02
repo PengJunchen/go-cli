@@ -167,8 +167,19 @@ func RunVerify(dir string) *VerifyReport {
 	// Phase 2: Check for Go-specific issues via file scanning.
 	report.Results = append(report.Results, checkGoFiles(dir)...)
 
-	// Phase 3: Include all V* rules as SKIP (pending package-level test implementation).
+	// Phase 3: Run the VQ-*/VG-* AST heuristics and include the remaining V*
+	// rules as SKIP (pending package-level test implementation). The six
+	// VQ-001..004 / VG-001..002 rules produce PASS or FAIL from the source
+	// scan; every other rule stays SKIP.
+	vqvgByID := make(map[string]VerifyResult, 6)
+	for _, r := range checkVQVG(dir) {
+		vqvgByID[r.ID] = r
+	}
 	for _, rule := range AllRules() {
+		if r, ok := vqvgByID[rule.ID]; ok {
+			report.Results = append(report.Results, r)
+			continue
+		}
 		report.Results = append(report.Results, VerifyResult{
 			ID:      rule.ID,
 			Name:    rule.Name,

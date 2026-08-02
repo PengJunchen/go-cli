@@ -203,12 +203,41 @@ func Hello() { fmt.Println("hello") }
 	require.NotNil(t, goModResult, "GOMOD result should be present")
 	assert.Equal(t, "PASS", goModResult.Status, "go.mod should be found")
 
-	// Verify all V* rules are SKIP.
+	// Verify all V* rules: VQ-001..004 and VG-001..002 are executed against
+	// the minimal temp source (so they must be PASS or FAIL, not SKIP), while
+	// every other rule stays SKIP pending package-level tests.
+	vqvgIDs := map[string]bool{"VQ-001": true, "VQ-002": true, "VQ-003": true, "VQ-004": true, "VG-001": true, "VG-002": true}
 	for _, rule := range AllRules() {
 		r := findResultByID(report, rule.ID)
 		require.NotNil(t, r, "rule %s should be in results", rule.ID)
-		assert.Equal(t, "SKIP", r.Status, "rule %s should be SKIP", rule.ID)
+		if vqvgIDs[rule.ID] {
+			assert.NotEqual(t, "SKIP", r.Status, "rule %s should be PASS or FAIL", rule.ID)
+		} else {
+			assert.Equal(t, "SKIP", r.Status, "rule %s should be SKIP", rule.ID)
+		}
 	}
+}
+
+// TestRunVerify_VQVG_PassesOnRealProject runs RunVerify against the go-cli
+// reference project and asserts that all six VQ-*/VG-* rules report PASS. The
+// go-cli repo provides command registration/routing, an unknown-command error,
+// version/help handling, context cancellation, and goroutine leak detection, so
+// this guards the most important acceptVQVG-backed assertions end-to-end.
+func TestRunVerify_VQVG_PassesOnRealProject(t *testing.T) {
+	report := RunVerify(repoRoot())
+
+	vqvgIDs := []string{"VQ-001", "VQ-002", "VQ-003", "VQ-004", "VG-001", "VG-002"}
+	for _, id := range vqvgIDs {
+		r := findResultByID(report, id)
+		require.NotNil(t, r, "rule %s should be in results", id)
+		assert.Equal(t, "PASS", r.Status, "rule %s should PASS on the go-cli project: %s", id, r.Message)
+	}
+}
+
+// repoRoot returns the path to the go-cli repository root, resolved relative to
+// this package so the test works regardless of the CI working directory.
+func repoRoot() string {
+	return filepath.Clean(filepath.Join("..", ".."))
 }
 
 func TestRunVerify_ScanError(t *testing.T) {
