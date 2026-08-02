@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
@@ -31,12 +32,28 @@ type HTTPClientAdapter struct {
 
 var _ MCPClient = (*HTTPClientAdapter)(nil)
 
+// defaultHTTPTimeout bounds individual HTTP requests. Network fetch
+// operations (e.g. web search) can legitimately take several seconds, but
+// without a cap a hung server would block the agent loop forever.
+const defaultHTTPTimeout = 60 * time.Second
+
 // NewHTTPClientAdapter returns an HTTPClientAdapter for the given config.
 func NewHTTPClientAdapter(cfg MCPServerConfig) *HTTPClientAdapter {
 	return &HTTPClientAdapter{
-		cfg:    cfg,
-		client: http.DefaultClient,
+		cfg: cfg,
+		client: &http.Client{
+			Timeout: defaultHTTPTimeout,
+		},
 	}
+}
+
+// NewHTTPClientAdapterWithClient returns an HTTPClientAdapter using the given
+// *http.Client, allowing callers to override transport or timeouts.
+func NewHTTPClientAdapterWithClient(cfg MCPServerConfig, client *http.Client) *HTTPClientAdapter {
+	if client == nil {
+		client = &http.Client{Timeout: defaultHTTPTimeout}
+	}
+	return &HTTPClientAdapter{cfg: cfg, client: client}
 }
 
 // Connect verifies the server is reachable and prepares the POST endpoint.

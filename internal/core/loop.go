@@ -185,6 +185,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission) ([]AgentEven
 				return events, err
 			}
 			events = append(events, AgentEvent{Kind: "tool_call", Content: tc.Name, Timestamp: time.Now()})
+			logger.Info("core.loop.tool_call", "iteration", iter, "tool", tc.Name)
 
 			resultText, execErr := l.executeTool(spanCtx, toToolsCall(tc))
 			if execErr != nil {
