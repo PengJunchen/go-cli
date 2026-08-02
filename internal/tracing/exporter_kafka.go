@@ -139,7 +139,8 @@ func (e *KafkaTraceExporter) flushBatch(ctx context.Context) error {
 		e.mu.Unlock()
 		return nil
 	}
-	batch := e.buffer
+	batch := make([]SpanData, len(e.buffer))
+	copy(batch, e.buffer)
 	e.buffer = e.buffer[:0]
 	e.mu.Unlock()
 
