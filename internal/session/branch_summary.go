@@ -54,7 +54,7 @@ func WithBranchSummaryName(name string) BranchSummaryOption {
 // NewDefaultBranchSummary returns a DefaultBranchSummary that delegates
 // summarization to summarizer. When summarizer is nil, a fallback that errors is
 // used so misconfiguration is obvious.
-func NewDefaultBranchSummary(summarizer SummarizeFunc, opts ...BranchSummaryOption) *DefaultBranchSummary {
+func NewDefaultBranchSummary(summarizer SummarizeFunc, opts ...BranchSummaryOption) BranchSummary {
 	d := &DefaultBranchSummary{
 		name:      "default-branch-summary",
 		summarize: summarizer,

@@ -38,7 +38,7 @@ var _ TrustManager = (*DefaultTrustManager)(nil)
 
 // NewDefaultTrustManager builds a DefaultTrustManager over the given store.
 // A nil store is replaced with an in-memory trust store.
-func NewDefaultTrustManager(store TrustStore) *DefaultTrustManager {
+func NewDefaultTrustManager(store TrustStore) TrustManager {
 	if store == nil {
 		store = NewInMemoryTrustStore()
 	}

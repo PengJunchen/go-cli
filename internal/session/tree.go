@@ -39,7 +39,7 @@ type DefaultSessionTree struct {
 var _ SessionTree = (*DefaultSessionTree)(nil)
 
 // NewDefaultSessionTree returns an empty in-memory session tree.
-func NewDefaultSessionTree() *DefaultSessionTree {
+func NewDefaultSessionTree() SessionTree {
 	return &DefaultSessionTree{
 		entries:  make(map[string]*SessionEntry),
 		branches: make(map[string]BranchMeta),

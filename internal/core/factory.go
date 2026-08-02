@@ -37,7 +37,7 @@ type DefaultSubAgentFactory struct {
 var _ SubAgentFactory = (*DefaultSubAgentFactory)(nil)
 
 // NewSubAgentFactory builds a DefaultSubAgentFactory from functional options.
-func NewSubAgentFactory(opts ...SubAgentFactoryOption) *DefaultSubAgentFactory {
+func NewSubAgentFactory(opts ...SubAgentFactoryOption) SubAgentFactory {
 	cfg := subAgentFactoryConfig{}
 	for _, o := range opts {
 		o(&cfg)

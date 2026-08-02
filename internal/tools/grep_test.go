@@ -159,7 +159,9 @@ func TestGrepEmitsToolCallSpan(t *testing.T) {
 	reg := NewDefaultToolRegistry()
 	require.NoError(t, reg.Register(ctx, NewGrepTool(WithGrepWorkdir(dir), WithForcePureGo(true))))
 
-	_, err := reg.Execute(ctx, ToolCall{
+	// Execute is a method on *DefaultToolRegistry, not the ToolRegistry interface.
+	dreg := reg.(*DefaultToolRegistry)
+	_, err := dreg.Execute(ctx, ToolCall{
 		Name: "grep",
 		Args: map[string]any{"pattern": "TODO"},
 	})
@@ -200,6 +202,16 @@ func TestParseRipgrepOutput(t *testing.T) {
 func TestGrepName(t *testing.T) {
 	assert.Equal(t, "grep", NewGrepTool().Name())
 	assert.Contains(t, NewGrepTool().Description(), "pattern")
+}
+
+func TestGrepWithGrepMaxOutput(t *testing.T) {
+	tool := NewGrepTool(WithGrepMaxOutput(100))
+	assert.Equal(t, 100, tool.MaxOutput)
+}
+
+func TestGrepWithGrepMaxMatches(t *testing.T) {
+	tool := NewGrepTool(WithGrepMaxMatches(50))
+	assert.Equal(t, 50, tool.MaxMatches)
 }
 
 func mustCompile(t *testing.T, pattern string) *regexp.Regexp {

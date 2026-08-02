@@ -123,3 +123,90 @@ func TestWriteName(t *testing.T) {
 	tool := NewWriteTool()
 	assert.Equal(t, "write", tool.Name())
 }
+
+func TestWriteDescription(t *testing.T) {
+	tool := NewWriteTool()
+	desc := tool.Description()
+	assert.Contains(t, desc, "write")
+	assert.Contains(t, desc, "path")
+}
+
+func TestWriteWithWriteMaxBytes(t *testing.T) {
+	tool := NewWriteTool(WithWriteMaxBytes(100))
+	assert.Equal(t, 100, tool.MaxBytes)
+}
+
+func TestWriteWithOverwrite(t *testing.T) {
+	tool := NewWriteTool(WithOverwrite(true))
+	assert.True(t, tool.Overwrite)
+}
+
+func TestWriteAppendMode(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "append.txt")
+	require.NoError(t, os.WriteFile(path, []byte("original"), 0o600))
+
+	tool := NewWriteTool(WithWriteWorkdir(dir))
+	res, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"path": "append.txt", "content": " appended", "append": true},
+	})
+	require.NoError(t, err)
+	assert.NotNil(t, res)
+
+	data, rerr := os.ReadFile(path)
+	require.NoError(t, rerr)
+	assert.Equal(t, "original appended", string(data))
+}
+
+func TestWriteAppendNewFile(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	tool := NewWriteTool(WithWriteWorkdir(dir))
+
+	// Append to a file that doesn't exist yet should create it.
+	res, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"path": "new.txt", "content": "fresh", "append": true},
+	})
+	require.NoError(t, err)
+	assert.NotNil(t, res)
+
+	data, rerr := os.ReadFile(filepath.Join(dir, "new.txt"))
+	require.NoError(t, rerr)
+	assert.Equal(t, "fresh", string(data))
+}
+
+func TestWriteDirectoryError(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	// Create a directory where we want to write a file.
+	path := filepath.Join(dir, "mydir")
+	require.NoError(t, os.MkdirAll(path, 0o750)) //nolint:gosec
+
+	tool := NewWriteTool(WithWriteWorkdir(dir))
+	_, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"path": "mydir", "content": "data"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "directory")
+}
+
+func TestWriteMissingContentArg(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	tool := NewWriteTool(WithWriteWorkdir(dir), WithOverwrite(true))
+
+	res, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"path": "empty.txt"},
+	})
+	require.NoError(t, err)
+	assert.NotNil(t, res)
+
+	data, rerr := os.ReadFile(filepath.Join(dir, "empty.txt"))
+	require.NoError(t, rerr)
+	assert.Empty(t, data)
+}

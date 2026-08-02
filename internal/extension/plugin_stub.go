@@ -33,7 +33,7 @@ type DefaultPluginLoader struct {
 }
 
 // NewDefaultPluginLoader creates a DefaultPluginLoader for the no_plugin build.
-func NewDefaultPluginLoader() *DefaultPluginLoader {
+func NewDefaultPluginLoader() PluginLoader {
 	return &DefaultPluginLoader{name: "default-plugin-loader"}
 }
 

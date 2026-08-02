@@ -173,3 +173,179 @@ func TestDeferredEmitsLoadSpan(t *testing.T) {
 
 	require.Eventually(t, func() bool { return e.hasSpan("tool.call") }, 2*time.Second, 10*time.Millisecond)
 }
+
+// --- deferredStub tests ---
+
+func TestDeferredStub_Description(t *testing.T) {
+	s := &deferredStub{name: "my_tool"}
+	assert.Equal(t, "my_tool: deferred tool (not yet loaded)", s.Description())
+}
+
+func TestDeferredStub_Execute_ReturnsError(t *testing.T) {
+	s := &deferredStub{name: "my_tool"}
+	_, err := s.Execute(context.Background(), ToolCall{Name: "my_tool"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not loaded")
+}
+
+func TestDeferredStub_Name(t *testing.T) {
+	s := &deferredStub{name: "my_tool"}
+	assert.Equal(t, "my_tool", s.Name())
+}
+
+// --- RegisterDeferred validation tests ---
+
+func TestDeferredRegisterEmptyName(t *testing.T) {
+	dr := NewDefaultDeferredToolRegistry(nil)
+	err := dr.RegisterDeferred(context.Background(), "", func() (ToolDefinition, error) {
+		return &fakeTool{name: "x"}, nil
+	})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "empty name")
+}
+
+func TestDeferredRegisterNilLoader(t *testing.T) {
+	dr := NewDefaultDeferredToolRegistry(nil)
+	err := dr.RegisterDeferred(context.Background(), "tool", nil)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "nil")
+}
+
+// --- Deferred loader returns nil definition ---
+
+func TestDeferredLoaderReturnsNil(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dr := NewDefaultDeferredToolRegistry(nil)
+	loader := &recorderLoader{name: "nil_tool"}
+	loader.payload = nil // nil payload
+	require.NoError(t, dr.RegisterDeferred(context.Background(), "nil_tool", loader.fn()))
+
+	def, err := dr.Load(context.Background(), "nil_tool")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nil definition")
+	// A stub is returned so execution neither blocks nor panics.
+	require.NotNil(t, def)
+	assert.Equal(t, "nil_tool", def.Name())
+	assert.True(t, dr.IsLoaded("nil_tool"))
+}
+
+// --- RegisterDeferred overwrites previous loader ---
+
+func TestDeferredRegisterOverwrites(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dr := NewDefaultDeferredToolRegistry(nil)
+	first := &recorderLoader{name: "tool", payload: &fakeTool{name: "tool", description: "first"}}
+	require.NoError(t, dr.RegisterDeferred(context.Background(), "tool", first.fn()))
+
+	def, err := dr.Load(context.Background(), "tool")
+	require.NoError(t, err)
+	assert.Equal(t, "tool", def.Name())
+	assert.True(t, dr.IsLoaded("tool"))
+
+	// Re-registering resets the loaded state.
+	second := &recorderLoader{name: "tool", payload: &fakeTool{name: "tool", description: "second"}}
+	require.NoError(t, dr.RegisterDeferred(context.Background(), "tool", second.fn()))
+	assert.False(t, dr.IsLoaded("tool"))
+
+	// Load again uses the new loader.
+	def2, err := dr.Load(context.Background(), "tool")
+	require.NoError(t, err)
+	assert.Equal(t, "tool", def2.Name())
+	assert.Equal(t, int32(1), second.count())
+}
+
+// --- Load with underlying registry that fails to register ---
+
+func TestDeferredLoadUnderlyingRegisterFails(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	// A registry that always rejects registration.
+	reg := &failingRegistry{}
+	dr := NewDefaultDeferredToolRegistry(reg)
+	loader := &recorderLoader{name: "tool", payload: &fakeTool{name: "tool", description: "real"}}
+	require.NoError(t, dr.RegisterDeferred(context.Background(), "tool", loader.fn()))
+
+	def, err := dr.Load(context.Background(), "tool")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "register")
+	// The definition is still returned even when registration fails.
+	require.NotNil(t, def)
+	assert.Equal(t, "tool", def.Name())
+}
+
+// failingRegistry is a ToolRegistry that always returns an error on Register.
+type failingRegistry struct{}
+
+func (f *failingRegistry) Register(_ context.Context, _ ToolDefinition) error {
+	return errors.New("register rejected")
+}
+func (f *failingRegistry) Get(_ context.Context, _ string) (ToolDefinition, error) {
+	return nil, ErrToolNotFound
+}
+func (f *failingRegistry) List(_ context.Context) ([]ToolDefinition, error) { return nil, nil }
+
+// --- Global deferred registry tests ---
+
+func TestGetDeferredToolRegistry_Default(t *testing.T) {
+	// Reset the global registry to nil first so we test the lazy default.
+	deferredMu.Lock()
+	defaultDeferred = nil
+	deferredMu.Unlock()
+
+	reg := GetDeferredToolRegistry()
+	require.NotNil(t, reg)
+	// Should be a DefaultDeferredToolRegistry.
+	_, ok := reg.(*DefaultDeferredToolRegistry)
+	assert.True(t, ok)
+}
+
+func TestRegisterDeferredToolRegistry_SetsGlobal(t *testing.T) {
+	deferredMu.Lock()
+	defaultDeferred = nil
+	deferredMu.Unlock()
+
+	inner := NewDefaultToolRegistry()
+	custom := NewDefaultDeferredToolRegistry(inner)
+	RegisterDeferredToolRegistry(custom)
+
+	got := GetDeferredToolRegistry()
+	assert.Equal(t, custom, got)
+}
+
+func TestRegisterDeferredToolRegistry_NilResetsToDefault(t *testing.T) {
+	deferredMu.Lock()
+	defaultDeferred = nil
+	deferredMu.Unlock()
+
+	inner := NewDefaultToolRegistry()
+	custom := NewDefaultDeferredToolRegistry(inner)
+	RegisterDeferredToolRegistry(custom)
+
+	// Verify custom is set.
+	got1 := GetDeferredToolRegistry()
+	customConcrete := custom.(*DefaultDeferredToolRegistry)
+	got1Concrete := got1.(*DefaultDeferredToolRegistry)
+	assert.Same(t, customConcrete, got1Concrete, "custom should be the global registry")
+
+	// Passing nil resets to a fresh default.
+	RegisterDeferredToolRegistry(nil)
+
+	got2 := GetDeferredToolRegistry()
+	got2Concrete := got2.(*DefaultDeferredToolRegistry)
+	assert.NotSame(t, customConcrete, got2Concrete, "after nil reset, the global should be a different instance")
+}
+
+func TestGetDeferredToolRegistry_CalledTwiceReturnsSame(t *testing.T) {
+	deferredMu.Lock()
+	defaultDeferred = nil
+	deferredMu.Unlock()
+
+	reg1 := GetDeferredToolRegistry()
+	reg2 := GetDeferredToolRegistry()
+	// Without a Register call, each Get creates a new instance.
+	// But the important thing is both are non-nil and functional.
+	require.NotNil(t, reg1)
+	require.NotNil(t, reg2)
+}

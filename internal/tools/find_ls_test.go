@@ -215,3 +215,85 @@ func TestFindAndLSName(t *testing.T) {
 	assert.Equal(t, "ls", NewLSTool().Name())
 	assert.Contains(t, NewLSTool().Description(), "path")
 }
+
+func TestFindPureGoNonExistentPath(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	tool := NewFindTool(WithFindForceNode(true))
+	_, err := tool.Execute(context.Background(), ToolCall{Args: map[string]any{"path": "/nonexistent/path/xyz"}})
+	require.Error(t, err)
+}
+
+func TestFindPureGoCancelledContext(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := setupFindDir(t)
+	tool := NewFindTool(WithFindWorkdir(dir), WithFindForceNode(true))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := tool.Execute(ctx, ToolCall{Args: map[string]any{}})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
+}
+
+func TestFindPureGoTypeFile(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := setupFindDir(t)
+	tool := NewFindTool(WithFindWorkdir(dir), WithFindForceNode(true))
+
+	res, err := tool.Execute(context.Background(), ToolCall{Args: map[string]any{"type": "f"}})
+	require.NoError(t, err)
+	assert.Contains(t, res.Output, "a.txt")
+	assert.Contains(t, res.Output, "b.go")
+	// Directories should be excluded, but file paths under subdirectories remain.
+	assert.NotContains(t, res.Output, "sub\n")
+	assert.NotContains(t, res.Output, "sub/deep\n")
+}
+
+func TestFindSingleFileNoMatch(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := setupFindDir(t)
+	tool := NewFindTool(WithFindWorkdir(dir), WithFindForceNode(true))
+
+	filePath := filepath.Join(dir, "a.txt")
+	res, err := tool.Execute(context.Background(), ToolCall{Args: map[string]any{"path": filePath, "pattern": "*.go"}})
+	require.NoError(t, err)
+	assert.Empty(t, res.Output)
+}
+
+func TestFindPureGoEmptyPatternMatchesAll(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := setupFindDir(t)
+	tool := NewFindTool(WithFindWorkdir(dir), WithFindForceNode(true))
+
+	res, err := tool.Execute(context.Background(), ToolCall{Args: map[string]any{"pattern": ""}})
+	require.NoError(t, err)
+	assert.Equal(t, 7, res.Metadata["matches"])
+}
+
+func TestFindMaxResultsTruncation(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := setupFindDir(t)
+	tool := NewFindTool(WithFindWorkdir(dir), WithFindForceNode(true))
+
+	res, err := tool.Execute(context.Background(), ToolCall{Args: map[string]any{}})
+	require.NoError(t, err)
+	// All 7 entries fit under the findMaxResults cap.
+	assert.Equal(t, 7, res.Metadata["matches"])
+}
+
+func TestLSEmptyDirectory(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	tool := NewLSTool()
+	res, err := tool.Execute(context.Background(), ToolCall{Args: map[string]any{"path": dir}})
+	require.NoError(t, err)
+	assert.Equal(t, 0, res.Metadata["entries"])
+}

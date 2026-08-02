@@ -98,3 +98,51 @@ func TestBashName(t *testing.T) {
 	tool := NewBashTool()
 	assert.Equal(t, "bash", tool.Name())
 }
+
+func TestBashDescription(t *testing.T) {
+	tool := NewBashTool()
+	assert.Contains(t, tool.Description(), "bash")
+	assert.Contains(t, tool.Description(), "shell command")
+}
+
+func TestBashWithMaxOutput(t *testing.T) {
+	tool := NewBashTool(WithMaxOutput(10))
+	assert.Equal(t, 10, tool.MaxOutput)
+}
+
+func TestBashWithTimeout(t *testing.T) {
+	tool := NewBashTool(WithTimeout(5 * time.Second))
+	assert.Equal(t, 5*time.Second, tool.Timeout)
+}
+
+func TestBashWithEnv(t *testing.T) {
+	tool := NewBashTool(WithEnv(map[string]string{"KEY": "val"}))
+	assert.Equal(t, "val", tool.Env["KEY"])
+}
+
+func TestBashWithEnvMerges(t *testing.T) {
+	tool := NewBashTool(
+		WithEnv(map[string]string{"A": "1"}),
+		WithEnv(map[string]string{"B": "2"}),
+	)
+	assert.Equal(t, "1", tool.Env["A"])
+	assert.Equal(t, "2", tool.Env["B"])
+}
+
+func TestBashOutputTruncation(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	// Use a very small max output to force truncation.
+	tool := NewBashTool(WithMaxOutput(20))
+	res, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"command": "echo 012345678901234567890123456789"},
+	})
+	// Truncation returns a timeout-style error but still provides partial output.
+	if err != nil {
+		// Error is expected when output exceeds the limit.
+		assert.Contains(t, res.Output, "[output truncated]")
+	} else {
+		// If no error, the output should contain the truncation marker.
+		assert.Contains(t, res.Output, "[output truncated]")
+	}
+}

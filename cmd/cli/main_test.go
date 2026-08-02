@@ -60,7 +60,8 @@ func TestRunSuccessNoArgs(t *testing.T) {
 		return disabledCfg(), nil
 	})
 	assert.Equal(t, 0, code)
-	assert.Contains(t, stdout.String(), "Usage:")
+	// No subcommand defaults to interactive mode.
+	assert.Contains(t, stdout.String(), "Interactive session started")
 }
 
 func TestRunUsageErrorExitCode2(t *testing.T) {

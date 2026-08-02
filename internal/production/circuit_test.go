@@ -51,9 +51,9 @@ func okFn(val any) func() (any, error) {
 
 // openBreaker drives the breaker to the Open state by failing it past
 // FailureThreshold, asserting each failure returns the sentinel error.
-func openBreaker(ctx context.Context, t *testing.T, b *DefaultCircuitBreaker, sentinel error) {
+func openBreaker(ctx context.Context, t *testing.T, b CircuitBreaker, cfg CircuitBreakerConfig, sentinel error) {
 	t.Helper()
-	for i := 0; i < b.cfg.FailureThreshold; i++ {
+	for i := 0; i < cfg.FailureThreshold; i++ {
 		_, err := b.Execute(ctx, failFn(sentinel))
 		require.ErrorIs(t, err, sentinel)
 	}
@@ -79,7 +79,7 @@ func TestCircuitOpenRefusesWithoutFallback(t *testing.T) {
 	b := NewDefaultCircuitBreaker(baseCircuitConfig(), WithClock(clock))
 
 	sentinel := errors.New("boom")
-	openBreaker(ctx, t, b, sentinel)
+	openBreaker(ctx, t, b, baseCircuitConfig(), sentinel)
 
 	called := false
 	_, err := b.Execute(ctx, func() (any, error) { called = true; return "ignored", nil })
@@ -95,7 +95,7 @@ func TestCircuitOpenUsesFallback(t *testing.T) {
 	}))
 
 	sentinel := errors.New("boom")
-	openBreaker(ctx, t, b, sentinel)
+	openBreaker(ctx, t, b, baseCircuitConfig(), sentinel)
 
 	called := false
 	out, err := b.Execute(ctx, func() (any, error) { called = true; return "real", nil })
@@ -110,7 +110,7 @@ func TestCircuitRecoveryToHalfOpenThenClosed(t *testing.T) {
 	b := NewDefaultCircuitBreaker(baseCircuitConfig(), WithClock(clock))
 
 	sentinel := errors.New("boom")
-	openBreaker(ctx, t, b, sentinel)
+	openBreaker(ctx, t, b, baseCircuitConfig(), sentinel)
 
 	// Advance past RecoveryTimeout and issue a successful probe.
 	clockVal.Add(int64(2 * time.Second))
@@ -128,7 +128,7 @@ func TestCircuitHalfOpenFailureReopens(t *testing.T) {
 	b := NewDefaultCircuitBreaker(baseCircuitConfig(), WithClock(clock))
 
 	sentinel := errors.New("boom")
-	openBreaker(ctx, t, b, sentinel)
+	openBreaker(ctx, t, b, baseCircuitConfig(), sentinel)
 
 	// Advance into HalfOpen but the probe fails -> back to Open.
 	clockVal.Add(int64(2 * time.Second))
@@ -146,7 +146,7 @@ func TestCircuitResetReturnsToClosed(t *testing.T) {
 	b := NewDefaultCircuitBreaker(baseCircuitConfig())
 
 	sentinel := errors.New("boom")
-	openBreaker(ctx, t, b, sentinel)
+	openBreaker(ctx, t, b, baseCircuitConfig(), sentinel)
 
 	require.NoError(t, b.Reset(ctx))
 	require.Equal(t, CircuitClosed, b.State())
@@ -167,7 +167,7 @@ func TestCircuitEmitsSpan(t *testing.T) {
 	b := NewDefaultCircuitBreaker(baseCircuitConfig())
 
 	sentinel := errors.New("boom")
-	openBreaker(ctx, t, b, sentinel)
+	openBreaker(ctx, t, b, baseCircuitConfig(), sentinel)
 
 	require.Eventually(t, func() bool {
 		return exporter.SpanCount() >= 1

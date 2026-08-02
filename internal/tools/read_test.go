@@ -159,3 +159,67 @@ func TestReadRejectsSpecialFile(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "special file")
 }
+
+func TestReadDescription(t *testing.T) {
+	tool := NewReadTool()
+	desc := tool.Description()
+	assert.Contains(t, desc, "read")
+	assert.Contains(t, desc, "path")
+}
+
+func TestReadAbsolutePath(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "abs.txt")
+	require.NoError(t, os.WriteFile(path, []byte("absolute"), 0o600))
+
+	tool := NewReadTool() // no workdir; absolute path used directly
+	res, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"path": path},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "absolute", res.Output)
+}
+
+func TestReadEmptyPath(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	tool := NewReadTool()
+	_, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"path": "   "},
+	})
+	assert.Error(t, err)
+}
+
+func TestReadReadDirError(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	// Create a directory without read permissions.
+	dir := t.TempDir()
+	subdir := filepath.Join(dir, "noperm")
+	require.NoError(t, os.MkdirAll(subdir, 0o000))
+
+	tool := NewReadTool(WithWorkdir(dir))
+	// Try to read the unreadable directory - this should error gracefully.
+	_, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"path": "noperm"},
+	})
+	// May or may not error depending on OS, but must not panic.
+	_ = err
+}
+
+func TestReadWithWorkdirOption(t *testing.T) {
+	tool := NewReadTool(WithWorkdir("/tmp"))
+	assert.Equal(t, "/tmp", tool.workdir)
+}
+
+func TestReadWithMaxBytesOption(t *testing.T) {
+	tool := NewReadTool(WithMaxBytes(1024))
+	assert.Equal(t, 1024, tool.maxBytes)
+}
+
+func TestReadWithFollowSymlinksOption(t *testing.T) {
+	tool := NewReadTool(WithFollowSymlinks(true))
+	assert.True(t, tool.FollowSymlinks)
+}

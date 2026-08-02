@@ -21,7 +21,8 @@ import (
 // TestCircuitDefaultsAppliesSensibleDefaults verifies the documented default
 // thresholds applied when the config is zero-valued.
 func TestCircuitDefaultsAppliesSensibleDefaults(t *testing.T) {
-	b := NewDefaultCircuitBreaker(CircuitBreakerConfig{})
+	b, ok := NewDefaultCircuitBreaker(CircuitBreakerConfig{}).(*DefaultCircuitBreaker)
+	require.True(t, ok)
 	require.Equal(t, 5, b.cfg.FailureThreshold)
 	require.Equal(t, 30*time.Second, b.cfg.RecoveryTimeout)
 	require.Equal(t, 1, b.cfg.HalfOpenMaxCalls)
@@ -215,7 +216,8 @@ func TestRetryBackoffWithOnlyJitter(t *testing.T) {
 
 // TestRetryMaxAttemptsZeroDefaults verify the constructor fills defaults.
 func TestRetryMaxAttemptsZeroDefaults(t *testing.T) {
-	p := NewDefaultRetryPolicy(RetryConfig{})
+	p, ok := NewDefaultRetryPolicy(RetryConfig{}).(*DefaultRetryPolicy)
+	require.True(t, ok)
 	require.Equal(t, 3, p.cfg.MaxAttempts)
 	require.Equal(t, 100*time.Millisecond, p.cfg.BaseDelay)
 	require.Equal(t, "default-retry-policy", p.Name())
@@ -224,7 +226,8 @@ func TestRetryMaxAttemptsZeroDefaults(t *testing.T) {
 // TestClassifyRateLimitVariants verifies additional rate-limit string shapes are
 // classified ErrorRateLimit.
 func TestClassifyRateLimitVariants(t *testing.T) {
-	p := NewDefaultRetryPolicy(RetryConfig{})
+	p, ok := NewDefaultRetryPolicy(RetryConfig{}).(*DefaultRetryPolicy)
+	require.True(t, ok)
 	for _, msg := range []string{
 		"rate limit exceeded",
 		"too many requests, slow down",
@@ -237,7 +240,8 @@ func TestClassifyRateLimitVariants(t *testing.T) {
 
 // TestClassifyTimeoutVariants verifies additional timeout/deadline shapes.
 func TestClassifyTimeoutVariants(t *testing.T) {
-	p := NewDefaultRetryPolicy(RetryConfig{})
+	p, ok := NewDefaultRetryPolicy(RetryConfig{}).(*DefaultRetryPolicy)
+	require.True(t, ok)
 	for _, msg := range []string{
 		"operation timeout occurred",
 		"deadline exceeded waiting for worker",
@@ -249,7 +253,8 @@ func TestClassifyTimeoutVariants(t *testing.T) {
 
 // TestClassifyTransientVariants verifies additional transient shapes.
 func TestClassifyTransientVariants(t *testing.T) {
-	p := NewDefaultRetryPolicy(RetryConfig{})
+	p, ok := NewDefaultRetryPolicy(RetryConfig{}).(*DefaultRetryPolicy)
+	require.True(t, ok)
 	for _, msg := range []string{
 		"transient failure, please retry",
 		"temporary outage",
@@ -263,7 +268,8 @@ func TestClassifyTransientVariants(t *testing.T) {
 // TestClassifyPrecedence verifies the string-match precedence across the switch:
 // the first matching branch (rate limit before timeout before transient) wins.
 func TestClassifyPrecedence(t *testing.T) {
-	p := NewDefaultRetryPolicy(RetryConfig{})
+	p, ok := NewDefaultRetryPolicy(RetryConfig{}).(*DefaultRetryPolicy)
+	require.True(t, ok)
 	// Contains both "timeout" and "connection reset": timeout wins (checked first).
 	require.Equal(t, ErrorTimeout, p.Classify(errors.New("connection reset timeout occurred")))
 	// Contains "temporary" and "429": rate limit wins (checked first).
@@ -273,7 +279,8 @@ func TestClassifyPrecedence(t *testing.T) {
 // TestWrappedErrorChainClassification verifies classification descends a
 // multi-layer fmt.Errorf %w chain via errContains.
 func TestWrappedErrorChainClassification(t *testing.T) {
-	p := NewDefaultRetryPolicy(RetryConfig{})
+	p, ok := NewDefaultRetryPolicy(RetryConfig{}).(*DefaultRetryPolicy)
+	require.True(t, ok)
 	root := errors.New("connection reset occurred")
 	mid := newWrappedErr("outer", root)
 	outer := newWrappedErr("top", mid)

@@ -138,7 +138,8 @@ func TestAuditLogPreservesFullEntry(t *testing.T) {
 func TestTelemetryTracksLastSeen(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
-	tm := NewDefaultTelemetry()
+	tm, ok := NewDefaultTelemetry().(*DefaultTelemetry)
+	require.True(t, ok)
 	t1 := time.Now().Add(-time.Hour)
 	t2 := time.Now()
 
@@ -254,7 +255,8 @@ func TestCategorizedErrorNilInner(t *testing.T) {
 
 // RetryPolicy: Classify follows wrapped error chains built from multiple NewError.
 func TestClassifyFollowsWrappedChain(t *testing.T) {
-	p := NewDefaultRetryPolicy(RetryConfig{})
+	p, ok := NewDefaultRetryPolicy(RetryConfig{}).(*DefaultRetryPolicy)
+	require.True(t, ok)
 	inner := errors.New("429 too many requests")
 	outer := NewError(ErrorFatal, errors.New("wrapped"))
 	// errContains walks the chain; classify prioritizes explicit category.

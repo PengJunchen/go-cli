@@ -29,7 +29,7 @@ type DefaultToolRegistry struct {
 var _ ToolRegistry = (*DefaultToolRegistry)(nil)
 
 // NewDefaultToolRegistry returns an empty, ready-to-use registry.
-func NewDefaultToolRegistry() *DefaultToolRegistry {
+func NewDefaultToolRegistry() ToolRegistry {
 	return &DefaultToolRegistry{
 		tools: map[string]ToolDefinition{},
 	}

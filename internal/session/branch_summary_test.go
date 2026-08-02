@@ -92,7 +92,7 @@ func TestTree_MoveToAppendsBranchSummary(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	bs := &testBranchSummary{summary: "DEPARTED-SUM"}
-	tree := NewDefaultSessionTree()
+	tree := newConcreteTree()
 
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("a", "", EntryTypeUser)))
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("b", "a", EntryTypeAssistant)))
@@ -126,7 +126,7 @@ func TestTree_MoveToAppendsBranchSummary(t *testing.T) {
 func TestTree_BuildContextIncludesBranchSummary(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tree := NewDefaultSessionTree()
+	tree := newConcreteTree()
 
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("a", "", EntryTypeUser)))
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("b", "a", EntryTypeUser)))
@@ -154,7 +154,7 @@ func TestTree_BuildContextIncludesBranchSummary(t *testing.T) {
 func TestTree_MoveToWithoutBranchSummaryUnchanged(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tree := NewDefaultSessionTree()
+	tree := newConcreteTree()
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("a", "", EntryTypeUser)))
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("b", "a", EntryTypeUser)))
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("c", "b", EntryTypeUser)))

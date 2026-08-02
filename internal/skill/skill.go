@@ -49,7 +49,7 @@ type DefaultSkillDefinition struct {
 var _ SkillDefinition = (*DefaultSkillDefinition)(nil)
 
 // NewSkill constructs a skill name with optional option overrides.
-func NewSkill(name string, opts ...SkillOption) *DefaultSkillDefinition {
+func NewSkill(name string, opts ...SkillOption) SkillDefinition {
 	def := &DefaultSkillDefinition{name: name}
 	for _, opt := range opts {
 		opt(def)

@@ -43,7 +43,7 @@ func TestTree_MoveToSameLeafNoSummary(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	bs := &testBranchSummary{summary: "S"}
-	tree := NewDefaultSessionTree()
+	tree := NewDefaultSessionTree().(*DefaultSessionTree)
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("a", "", EntryTypeUser)))
 	require.NoError(t, tree.MoveTo(context.Background(), "a"))
 	tree.SetBranchSummary(bs)
@@ -59,7 +59,7 @@ func TestTree_MoveToSameLeafNoSummary(t *testing.T) {
 func TestTree_MoveToEmptySummaryDoesNotAppend(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tree := NewDefaultSessionTree()
+	tree := NewDefaultSessionTree().(*DefaultSessionTree)
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("a", "", EntryTypeUser)))
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("b", "a", EntryTypeUser)))
 	require.NoError(t, tree.MoveTo(context.Background(), "b"))
@@ -77,7 +77,7 @@ func TestTree_MoveToSummarizeErrorDoesNotFail(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	bs := &errBranchSummary{}
-	tree := NewDefaultSessionTree()
+	tree := NewDefaultSessionTree().(*DefaultSessionTree)
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("a", "", EntryTypeUser)))
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("b", "a", EntryTypeUser)))
 	tree.SetBranchSummary(bs)
@@ -94,7 +94,7 @@ func TestTree_MoveToSummarizeErrorDoesNotFail(t *testing.T) {
 // TestTree_MoveToSummaryAppendedEntryLocation verifies the summary entry's
 // parent is the departed leaf and the current leaf is unchanged.
 func TestTree_MoveToSummaryAppendedEntryLocation(t *testing.T) {
-	tree := NewDefaultSessionTree()
+	tree := NewDefaultSessionTree().(*DefaultSessionTree)
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("a", "", EntryTypeUser)))
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("b", "a", EntryTypeUser)))
 	require.NoError(t, tree.MoveTo(context.Background(), "b"))
@@ -111,7 +111,7 @@ func TestTree_MoveToSummaryAppendedEntryLocation(t *testing.T) {
 // TestTree_GetBranchWithParentChainMissingLeaf verifies that walking a chain
 // referencing an unknown ancestor reports the leaf as not found.
 func TestTree_GetBranchWithParentChainMissingLeaf(t *testing.T) {
-	tree := NewDefaultSessionTree()
+	tree := NewDefaultSessionTree().(*DefaultSessionTree)
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("a", "", EntryTypeUser)))
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("b", "a", EntryTypeUser)))
 	// Append an entry whose parent b exists; then build a chain that references
@@ -125,7 +125,7 @@ func TestTree_GetBranchWithParentChainMissingLeaf(t *testing.T) {
 // TestTree_BuildContextLastUpdateLatest verifies LastUpdate picks the newest
 // timestamp across the walked branch.
 func TestTree_BuildContextLastUpdateLatest(t *testing.T) {
-	tree := NewDefaultSessionTree()
+	tree := NewDefaultSessionTree().(*DefaultSessionTree)
 	t0 := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC)
 	t1 := t0.Add(2 * time.Hour)
 	require.NoError(t, tree.Append(context.Background(), &SessionEntry{ID: "a", Type: EntryTypeUser, Timestamp: t0}))
@@ -140,7 +140,7 @@ func TestTree_BuildContextLastUpdateLatest(t *testing.T) {
 func TestTree_ConcurrentMoveToAndAppend(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tree := NewDefaultSessionTree()
+	tree := NewDefaultSessionTree().(*DefaultSessionTree)
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("root", "", EntryTypeUser)))
 
 	const n = 32
@@ -164,7 +164,7 @@ func TestTree_ConcurrentMoveToAndAppend(t *testing.T) {
 // the identifier.
 func TestDefaultBranchSummary_NameOption(t *testing.T) {
 	d := NewDefaultBranchSummary(func(context.Context, string) (string, error) { return "s", nil },
-		WithBranchSummaryName("summarizer-v2"))
+		WithBranchSummaryName("summarizer-v2")).(*DefaultBranchSummary)
 	assert.Equal(t, "summarizer-v2", d.Name())
 }
 

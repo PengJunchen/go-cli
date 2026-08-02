@@ -153,7 +153,7 @@ func TestRegistryExecute(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	ctx := context.Background()
-	reg := NewDefaultToolRegistry()
+	reg := NewDefaultToolRegistry().(*DefaultToolRegistry)
 	require.NoError(t, reg.Register(ctx, &stubTool{name: "alpha"}))
 
 	res, err := reg.Execute(ctx, ToolCall{ID: "call-1", Name: "alpha"})
@@ -173,7 +173,7 @@ func TestRegistryExecute(t *testing.T) {
 func TestRegistryExecuteWithSpanContext(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	reg := NewDefaultToolRegistry()
+	reg := NewDefaultToolRegistry().(*DefaultToolRegistry)
 	ctx := context.Background()
 	require.NoError(t, reg.Register(ctx, &stubTool{name: "alpha"}))
 

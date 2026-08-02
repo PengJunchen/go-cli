@@ -15,7 +15,7 @@ import (
 func TestTelemetryRecordAndSnapshot(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
-	tm := NewDefaultTelemetry()
+	tm := NewDefaultTelemetry().(*DefaultTelemetry)
 
 	require.NoError(t, tm.Record(ctx, TelemetryMetric{Name: "tokens", Value: 10}))
 	require.NoError(t, tm.Record(ctx, TelemetryMetric{Name: "tokens", Value: 5}))
@@ -29,7 +29,7 @@ func TestTelemetryRecordAndSnapshot(t *testing.T) {
 func TestTelemetryRecordEmptyNameIgnored(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
-	tm := NewDefaultTelemetry()
+	tm := NewDefaultTelemetry().(*DefaultTelemetry)
 
 	require.NoError(t, tm.Record(ctx, TelemetryMetric{Name: "", Value: 42}))
 	assert.Empty(t, tm.Snapshot(), "empty metric name should not be stored")
@@ -44,7 +44,7 @@ func TestTelemetryNameAndOption(t *testing.T) {
 func TestTelemetryConcurrentRecord(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
-	tm := NewDefaultTelemetry()
+	tm := NewDefaultTelemetry().(*DefaultTelemetry)
 
 	var wg sync.WaitGroup
 	const goroutines = 8
@@ -80,7 +80,7 @@ func TestTelemetryContextCancellation(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	tm := NewDefaultTelemetry()
+	tm := NewDefaultTelemetry().(*DefaultTelemetry)
 
 	require.NoError(t, tm.Record(ctx, TelemetryMetric{Name: "x", Value: 1}))
 	snap := tm.Snapshot()

@@ -21,6 +21,17 @@ go.work.sum
 # env
 .env
 
+# Local config (may contain API keys)
+.go-cli.yaml
+.go-cli.yml
+.go-cli.json
+go-cli.yaml
+go-cli.yml
+go-cli.json
+
+# Runtime data (logs, traces)
+.go-cli/
+
 # Build output
 bin/
 /go-cli

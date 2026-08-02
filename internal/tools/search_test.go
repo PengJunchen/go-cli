@@ -30,7 +30,7 @@ func (s *searchTestTool) Execute(_ context.Context, _ ToolCall) (*ToolResult, er
 // newSearchFixture builds a registry with a spread of tools across categories.
 func newSearchFixture(t *testing.T) *DefaultToolRegistry {
 	t.Helper()
-	reg := NewDefaultToolRegistry()
+	reg := NewDefaultToolRegistry().(*DefaultToolRegistry)
 	tools := []ToolDefinition{
 		&searchTestTool{name: "read", description: "reads a file's contents"},
 		&searchTestTool{name: "write", description: "writes content to a file"},

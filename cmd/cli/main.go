@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -30,6 +31,18 @@ func main() {
 func run(argv []string, stdout, stderr io.Writer, loadConfig func() (*config.Config, error)) int {
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
+
+	// Redirect slog output to a log file so the console stays clean for TUI
+	// and user interaction. Logs are written to .go-cli/logs/go-cli.log by
+	// default. This runs before config loading so even config_load spans are
+	// captured in the file.
+	logDir := filepath.Join(".go-cli", "logs")
+	if err := os.MkdirAll(logDir, 0o755); err == nil {
+		logFile, fErr := os.OpenFile(filepath.Join(logDir, "go-cli.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+		if fErr == nil {
+			slog.SetDefault(slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelInfo})))
+		}
+	}
 
 	cfg, err := loadConfig()
 	if err != nil {

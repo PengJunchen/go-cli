@@ -169,7 +169,7 @@ var _ ProviderComposer = (*DefaultProviderComposer)(nil)
 // NewDefaultProviderComposer builds a DefaultProviderComposer that contributes
 // the builtin providers and, when configured, the config and extension layers.
 // Any source left nil contributes nothing.
-func NewDefaultProviderComposer(opts ...ProviderComposerOption) *DefaultProviderComposer {
+func NewDefaultProviderComposer(opts ...ProviderComposerOption) ProviderComposer {
 	d := &DefaultProviderComposer{
 		name:            "default-provider-composer",
 		configSource:    staticSources(nil),

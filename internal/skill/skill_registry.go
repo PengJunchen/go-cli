@@ -53,7 +53,7 @@ type DefaultSkillRegistry struct {
 var _ SkillRegistry = (*DefaultSkillRegistry)(nil)
 
 // NewDefaultSkillRegistry returns an empty, ready-to-use registry.
-func NewDefaultSkillRegistry() *DefaultSkillRegistry {
+func NewDefaultSkillRegistry() SkillRegistry {
 	return &DefaultSkillRegistry{
 		byName:     map[string]SkillDefinition{},
 		byCategory: map[string][]string{},

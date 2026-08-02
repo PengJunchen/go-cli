@@ -42,7 +42,7 @@ type DefaultExtensionRegistry struct {
 var _ ExtensionRegistry = (*DefaultExtensionRegistry)(nil)
 
 // NewExtensionRegistry creates an empty DefaultExtensionRegistry.
-func NewExtensionRegistry() *DefaultExtensionRegistry {
+func NewExtensionRegistry() ExtensionRegistry {
 	return &DefaultExtensionRegistry{
 		tools:       make(map[string]tools.ToolDefinition),
 		commands:    make(map[string]func(args []string) error),

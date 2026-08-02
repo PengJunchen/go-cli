@@ -35,7 +35,7 @@ var _ ContextManager = (*DefaultContextManager)(nil)
 // NewDefaultContextManager returns a ContextManager that reconstructs contexts
 // from the given SessionTree. It takes the tree through the SessionTree
 // interface so callers may supply any implementation.
-func NewDefaultContextManager(tree SessionTree) *DefaultContextManager {
+func NewDefaultContextManager(tree SessionTree) ContextManager {
 	return &DefaultContextManager{tree: tree}
 }
 

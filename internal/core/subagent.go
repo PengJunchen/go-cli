@@ -125,7 +125,7 @@ func WithSubAgentRunner(factory subAgentRunnerFactory) SubAgentOption {
 
 // NewDefaultSubAgent builds a DefaultSubAgent bound to the given config. A
 // blank name is replaced with "subagent".
-func NewDefaultSubAgent(config SubAgentConfig, opts ...SubAgentOption) *DefaultSubAgent {
+func NewDefaultSubAgent(config SubAgentConfig, opts ...SubAgentOption) SubAgent {
 	if config.Name == "" {
 		config.Name = "subagent"
 	}

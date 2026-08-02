@@ -176,7 +176,8 @@ func TestAuditTelemetryEndToEnd(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "e2e-audit.jsonl")
 	audit := NewDefaultAuditLog(path)
-	tel := NewDefaultTelemetry()
+	tel, ok := NewDefaultTelemetry().(*DefaultTelemetry)
+	require.True(t, ok)
 
 	const n = 5
 	for i := 0; i < n; i++ {
@@ -208,7 +209,8 @@ func TestAuditTelemetryEndToEnd(t *testing.T) {
 func TestTelemetryAndIdempotentCacheIntegration(t *testing.T) {
 	ctx := context.Background()
 	cache := NewFIFOIdempotentCache(8)
-	tel := NewDefaultTelemetry()
+	tel, ok := NewDefaultTelemetry().(*DefaultTelemetry)
+	require.True(t, ok)
 
 	require.NoError(t, cache.Set(ctx, "a", 1))
 	require.NoError(t, cache.Set(ctx, "b", 2))
@@ -360,7 +362,8 @@ func TestGuardAndLoopDetectorCombined(t *testing.T) {
 // classified differently.
 func TestCircuitRetryPolicyWithCategorizedPrecedence(t *testing.T) {
 	ctx := context.Background()
-	policy := NewDefaultRetryPolicy(RetryConfig{MaxAttempts: 4, BaseDelay: time.Millisecond})
+	policy, ok := NewDefaultRetryPolicy(RetryConfig{MaxAttempts: 4, BaseDelay: time.Millisecond}).(*DefaultRetryPolicy)
+	require.True(t, ok)
 
 	// An error whose text mentions "connection reset" (transient) but carries
 	// an explicit rate-limit category: the explicit category must win.

@@ -47,11 +47,21 @@ func (h *trackingHandler) snapshot() []string {
 	return out
 }
 
+// closeQueue is a test helper that type-asserts the FileMutationQueue to
+// *DefaultFileMutationQueue and calls Close. It fails the test if the
+// assertion fails.
+func closeQueue(t *testing.T, q FileMutationQueue) {
+	t.Helper()
+	cq, ok := q.(*DefaultFileMutationQueue)
+	require.True(t, ok, "expected *DefaultFileMutationQueue")
+	require.NoError(t, cq.Close())
+}
+
 func TestMutationQueueName(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	q := NewDefaultFileMutationQueue()
-	defer func() { require.NoError(t, q.Close()) }()
+	defer closeQueue(t, q)
 
 	assert.Equal(t, "file-mutation-queue", q.Name())
 }
@@ -61,7 +71,7 @@ func TestMutationQueuePerFileFIFO(t *testing.T) {
 
 	handler := &trackingHandler{}
 	q := NewDefaultFileMutationQueue(WithMutationHandler(handler.handle()))
-	defer func() { require.NoError(t, q.Close()) }()
+	defer closeQueue(t, q)
 
 	// All three mutations target the SAME file via one shared path so they are
 	// routed to the same per-file worker.
@@ -119,7 +129,7 @@ func TestMutationQueueCrossFileParallelism(t *testing.T) {
 	})
 
 	q := NewDefaultFileMutationQueue(WithMutationHandler(handler))
-	defer func() { require.NoError(t, q.Close()) }()
+	defer closeQueue(t, q)
 
 	const (
 		pathA = "parallel-a.txt"
@@ -171,7 +181,8 @@ func TestMutationQueueRealpathSymlink(t *testing.T) {
 	// Use the built-in handler so mutations perform real writes against the
 	// underlying file, proving FIFO serialization on a shared worker.
 	q := NewDefaultFileMutationQueue()
-	defer func() { require.NoError(t, q.Close()) }()
+	cq := q.(*DefaultFileMutationQueue)
+	defer func() { require.NoError(t, cq.Close()) }()
 
 	// Enqueue via the symlink path and then via the real path.
 	resCh1, err := q.Enqueue(context.Background(), FileMutation{FilePath: link, Operation: "write", Content: "via-link", ToolName: "write"})
@@ -186,7 +197,7 @@ func TestMutationQueueRealpathSymlink(t *testing.T) {
 	// real path, so the queue keeps exactly one worker despite two distinct
 	// original paths.
 	workerCount := 0
-	q.workers.Range(func(_, _ any) bool { workerCount++; return true })
+	cq.workers.Range(func(_, _ any) bool { workerCount++; return true })
 	assert.Equal(t, 1, workerCount, "symlink and real-path mutations must serialize on one worker")
 
 	// FIFO on the shared worker: the later (real-path) write wins on disk.
@@ -199,7 +210,7 @@ func TestMutationQueueResultChannel(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	q := NewDefaultFileMutationQueue()
-	defer func() { require.NoError(t, q.Close()) }()
+	defer closeQueue(t, q)
 
 	path := filepath.Join(t.TempDir(), "ok.txt")
 	resCh, err := q.Enqueue(context.Background(), FileMutation{FilePath: path, Operation: "write", Content: "hi", ToolName: "write"})
@@ -220,7 +231,7 @@ func TestMutationQueueErrorResult(t *testing.T) {
 	q := NewDefaultFileMutationQueue(WithMutationHandler(func(_ context.Context, _ FileMutation) error {
 		return assert.AnError
 	}))
-	defer func() { require.NoError(t, q.Close()) }()
+	defer closeQueue(t, q)
 
 	resCh, err := q.Enqueue(context.Background(), FileMutation{FilePath: filepath.Join(t.TempDir(), "err.txt"), Operation: "write", Content: "x", ToolName: "write"})
 	require.NoError(t, err)
@@ -237,7 +248,7 @@ func TestMutationQueueEmitsSpan(t *testing.T) {
 	root, ctx := tracer.Start(context.Background(), "cli.invocation", tracing.SpanKindInternal)
 
 	q := NewDefaultFileMutationQueue()
-	defer func() { require.NoError(t, q.Close()) }()
+	defer closeQueue(t, q)
 
 	resCh, err := q.Enqueue(ctx, FileMutation{FilePath: filepath.Join(t.TempDir(), "span.txt"), Operation: "write", Content: "span", ToolName: "write"})
 	require.NoError(t, err)
@@ -253,8 +264,9 @@ func TestMutationQueueCloseStopsEnqueue(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	q := NewDefaultFileMutationQueue()
-	require.NoError(t, q.Close())
-	require.Error(t, q.Close(), "closing twice should error")
+	cq := q.(*DefaultFileMutationQueue)
+	require.NoError(t, cq.Close())
+	require.Error(t, cq.Close(), "closing twice should error")
 
 	_, err := q.Enqueue(context.Background(), FileMutation{FilePath: "/tmp/closed.txt", Operation: "write", Content: "x", ToolName: "write"})
 	assert.Error(t, err, "enqueue on a closed queue must fail")
@@ -271,6 +283,7 @@ func TestMutationQueueConcurrentEnqueueCloseNoPanic(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 		return nil
 	}))
+	cq := q.(*DefaultFileMutationQueue)
 
 	dir := t.TempDir()
 	const enqueuers = 8
@@ -303,7 +316,7 @@ func TestMutationQueueConcurrentEnqueueCloseNoPanic(t *testing.T) {
 	started.Done()
 	time.Sleep(2 * time.Millisecond)
 
-	require.NoError(t, q.Close(), "Close must not error")
+	require.NoError(t, cq.Close(), "Close must not error")
 
 	wg.Wait()
 
@@ -323,7 +336,7 @@ func TestMutationQueueHandlerPanicDoesNotDeadlock(t *testing.T) {
 		}
 		return nil
 	}))
-	defer func() { require.NoError(t, q.Close()) }()
+	defer closeQueue(t, q)
 
 	path := filepath.Join(t.TempDir(), "panic-test.txt")
 
@@ -355,7 +368,7 @@ func TestMutationMiddlewarePassthroughAndQueued(t *testing.T) {
 	q := NewDefaultFileMutationQueue(WithMutationHandler(func(_ context.Context, _ FileMutation) error {
 		return nil
 	}))
-	defer func() { require.NoError(t, q.Close()) }()
+	defer closeQueue(t, q)
 
 	wrapped := WithMutationQueue(q, next)
 
@@ -370,4 +383,55 @@ func TestMutationMiddlewarePassthroughAndQueued(t *testing.T) {
 	assert.Contains(t, res.Output, "queued and applied", "mutation route reported queued application")
 	queued, ok := res.Metadata["queued"].(bool)
 	assert.True(t, ok && queued)
+}
+
+func TestMutationQueueDefaultHandlerWriteAndEdit(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+
+	// Use the built-in default handler (no WithMutationHandler override).
+	q := NewDefaultFileMutationQueue()
+	defer closeQueue(t, q)
+
+	// Write a file via the default handler.
+	writePath := filepath.Join(dir, "handler-write.txt")
+	resCh, err := q.Enqueue(context.Background(), FileMutation{
+		FilePath: writePath, Operation: "write", Content: "hello", ToolName: "write",
+	})
+	require.NoError(t, err)
+	require.True(t, (<-resCh).Success)
+
+	data, rerr := os.ReadFile(writePath)
+	require.NoError(t, rerr)
+	assert.Equal(t, "hello", string(data))
+
+	// Edit the file via the default handler.
+	resCh, err = q.Enqueue(context.Background(), FileMutation{
+		FilePath: writePath, Operation: "edit", Content: map[string]any{
+			"old_string": "hello",
+			"new_string": "world",
+		}, ToolName: "edit",
+	})
+	require.NoError(t, err)
+	require.True(t, (<-resCh).Success)
+
+	data, rerr = os.ReadFile(writePath)
+	require.NoError(t, rerr)
+	assert.Equal(t, "world", string(data))
+}
+
+func TestMutationQueueDefaultHandlerUnsupportedOperation(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	q := NewDefaultFileMutationQueue()
+	defer closeQueue(t, q)
+
+	resCh, err := q.Enqueue(context.Background(), FileMutation{
+		FilePath: "/tmp/unsupported.txt", Operation: "delete", Content: "", ToolName: "delete",
+	})
+	require.NoError(t, err)
+	res := <-resCh
+	assert.False(t, res.Success)
+	assert.Contains(t, res.Error.Error(), "unsupported operation")
 }

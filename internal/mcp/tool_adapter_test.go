@@ -81,7 +81,8 @@ func TestMCPToolAdapterThroughRegistry(t *testing.T) {
 	client := &fakeClient{name: "srv"}
 	adapter := NewMCPToolAdapter(client, MCPTool{Name: "echo", Description: "echoes a message"})
 
-	reg := tools.NewDefaultToolRegistry()
+	reg, ok := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry)
+	require.True(t, ok)
 	ctx := context.Background()
 	require.NoError(t, reg.Register(ctx, adapter))
 

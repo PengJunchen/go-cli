@@ -58,7 +58,7 @@ var _ PluginLoader = (*DefaultPluginLoader)(nil)
 
 // NewDefaultPluginLoader creates a DefaultPluginLoader. A nil-safe default is
 // provided by the process-wide registry in manager.go.
-func NewDefaultPluginLoader() *DefaultPluginLoader {
+func NewDefaultPluginLoader() PluginLoader {
 	return &DefaultPluginLoader{name: "default-plugin-loader"}
 }
 

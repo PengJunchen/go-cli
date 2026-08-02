@@ -127,6 +127,9 @@ func RunWithRegistry(ctx context.Context, cfg Config, args []string, out io.Writ
 	if err := reg.Register(newPromptCmd(out)); err != nil {
 		slog.Default().Info("built-in prompt command already registered; keeping caller's", "err", err)
 	}
+	if err := reg.Register(newInteractiveCmd(nil, out)); err != nil {
+		slog.Default().Info("built-in interactive command already registered; keeping caller's", "err", err)
+	}
 
 	if showVersion {
 		return runCommand(ctx, cfg, newVersionCmd(out), nil)
@@ -139,6 +142,11 @@ func RunWithRegistry(ctx context.Context, cfg Config, args []string, out io.Writ
 
 	subArgs := fs.Args()
 	if len(subArgs) == 0 {
+		// Default to interactive mode when no subcommand is given.
+		interactiveCmd, _ := reg.Get("interactive")
+		if interactiveCmd != nil {
+			return runCommand(ctx, cfg, interactiveCmd, nil)
+		}
 		fs.Usage()
 		return nil
 	}

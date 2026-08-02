@@ -52,7 +52,7 @@ type YAMLSkillLoader struct{}
 var _ SkillLoader = (*YAMLSkillLoader)(nil)
 
 // NewYAMLSkillLoader returns a ready-to-use YAMLSkillLoader.
-func NewYAMLSkillLoader() *YAMLSkillLoader { return &YAMLSkillLoader{} }
+func NewYAMLSkillLoader() SkillLoader { return &YAMLSkillLoader{} }
 
 // frontmatterDelimiter is the line that opens and closes the frontmatter block.
 const frontmatterDelimiter = "---"

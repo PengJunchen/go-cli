@@ -85,7 +85,7 @@ func WithSettingsName(name string) SettingsOption {
 }
 
 // NewDefaultSettings returns an empty dual-layer DefaultSettings.
-func NewDefaultSettings(opts ...SettingsOption) *DefaultSettings {
+func NewDefaultSettings(opts ...SettingsOption) Settings {
 	o := &settingsOptions{}
 	for _, opt := range opts {
 		if opt != nil {

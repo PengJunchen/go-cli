@@ -24,7 +24,7 @@ type MemoryStore struct {
 var _ SessionStore = (*MemoryStore)(nil)
 
 // NewMemoryStore returns an empty in-memory store.
-func NewMemoryStore() *MemoryStore {
+func NewMemoryStore() SessionStore {
 	return &MemoryStore{entries: make(map[string]*SessionEntry)}
 }
 
@@ -99,6 +99,6 @@ type DefaultSessionStore = MemoryStore
 var _ SessionStore = (*DefaultSessionStore)(nil)
 
 // NewDefaultSessionStore returns the default in-memory session store.
-func NewDefaultSessionStore() *DefaultSessionStore {
+func NewDefaultSessionStore() SessionStore {
 	return NewMemoryStore()
 }

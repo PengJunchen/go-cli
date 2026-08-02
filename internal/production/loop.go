@@ -153,7 +153,7 @@ var _ LoopDetector = (*DefaultLoopDetector)(nil)
 
 // NewDefaultLoopDetector returns a DefaultLoopDetector backed by cfg, filling
 // in sensible defaults for any zero-valued fields.
-func NewDefaultLoopDetector(cfg LoopDetectionConfig, opts ...Option) *DefaultLoopDetector {
+func NewDefaultLoopDetector(cfg LoopDetectionConfig, opts ...Option) LoopDetector {
 	applyDefaults(&cfg)
 	o := applyOptions(opts)
 	name := o.name

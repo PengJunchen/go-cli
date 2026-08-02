@@ -97,7 +97,7 @@ func WithMutationHandler(h MutationHandler) MutationQueueOption {
 
 // NewDefaultFileMutationQueue returns a DefaultFileMutationQueue using the
 // built-in write/edit handler unless overridden via WithMutationHandler.
-func NewDefaultFileMutationQueue(opts ...MutationQueueOption) *DefaultFileMutationQueue {
+func NewDefaultFileMutationQueue(opts ...MutationQueueOption) FileMutationQueue {
 	q := &DefaultFileMutationQueue{}
 	for _, opt := range opts {
 		opt(q)

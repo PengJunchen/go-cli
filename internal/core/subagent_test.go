@@ -47,11 +47,20 @@ func drainChan(ch <-chan AgentEvent) []AgentEvent {
 }
 
 func newTestSubAgent(name string) *DefaultSubAgent {
-	return NewDefaultSubAgent(SubAgentConfig{
+	sub := NewDefaultSubAgent(SubAgentConfig{
 		Name:     name,
 		Model:    "mock",
 		MaxTurns: 2,
 	})
+	return mustSubAgent(sub)
+}
+
+func mustSubAgent(sub SubAgent) *DefaultSubAgent {
+	impl, ok := sub.(*DefaultSubAgent)
+	if !ok {
+		panic("NewDefaultSubAgent should return *DefaultSubAgent")
+	}
+	return impl
 }
 
 func TestSubAgentRunExecutesIndependentRun(t *testing.T) {
@@ -102,7 +111,7 @@ func TestSubAgentSendRecordsMessage(t *testing.T) {
 func TestSubAgentInterruptStopsRun(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	sub := NewDefaultSubAgent(SubAgentConfig{Name: "blocker"}, WithSubAgentRunner(blockingFactory))
+	sub := mustSubAgent(NewDefaultSubAgent(SubAgentConfig{Name: "blocker"}, WithSubAgentRunner(blockingFactory)))
 	ch, err := sub.Run(context.Background(), "long task")
 	require.NoError(t, err)
 
@@ -155,7 +164,7 @@ func TestSubAgentStateTransitions(t *testing.T) {
 
 	// Idle -> Running -> Failed when the runner errors (blocking ctx cancel
 	// without an explicit Interrupt yields a failed terminal state).
-	blocker := NewDefaultSubAgent(SubAgentConfig{Name: "b"}, WithSubAgentRunner(blockingFactory))
+	blocker := mustSubAgent(NewDefaultSubAgent(SubAgentConfig{Name: "b"}, WithSubAgentRunner(blockingFactory)))
 	rctx, rcancel := context.WithCancel(context.Background())
 	_, err = blocker.Run(rctx, "p")
 	require.NoError(t, err)
@@ -170,7 +179,7 @@ func TestSubAgentParentCancellationCascades(t *testing.T) {
 
 	// the sub-agent uses an independent context; canceling the
 	// parent context cancels the child context (observed via a terminal error).
-	sub := NewDefaultSubAgent(SubAgentConfig{Name: "b"}, WithSubAgentRunner(blockingFactory))
+	sub := mustSubAgent(NewDefaultSubAgent(SubAgentConfig{Name: "b"}, WithSubAgentRunner(blockingFactory)))
 	parent, cancel := context.WithCancel(context.Background())
 	_, err := sub.Run(parent, "p")
 	require.NoError(t, err)

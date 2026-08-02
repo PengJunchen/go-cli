@@ -81,7 +81,7 @@ func WithAuditName(name string) AuditLogOption {
 }
 
 // NewDefaultAuditLog returns a DefaultAuditLog that appends JSON-lines to path.
-func NewDefaultAuditLog(path string, opts ...AuditLogOption) *DefaultAuditLog {
+func NewDefaultAuditLog(path string, opts ...AuditLogOption) AuditLog {
 	o := &auditLogOptions{}
 	for _, opt := range opts {
 		if opt != nil {

@@ -70,12 +70,23 @@ func (m *regTestMiddleware) WrapCount() int {
 	return m.wrapCount
 }
 
+// newConcreteRegistry returns the concrete *DefaultExtensionRegistry for tests
+// that need access to unexported helper methods (tool, command, provider, etc.)
+// not exposed on the ExtensionRegistry interface.
+func newConcreteRegistry() *DefaultExtensionRegistry {
+	reg, ok := NewExtensionRegistry().(*DefaultExtensionRegistry)
+	if !ok {
+		panic("NewExtensionRegistry() should return *DefaultExtensionRegistry")
+	}
+	return reg
+}
+
 // --- tests ---
 
 // TestRegistryMissingGetters verifies getters return nil/zero for unknown keys
 // without panicking.
 func TestRegistryMissingGetters(t *testing.T) {
-	reg := NewExtensionRegistry()
+	reg := newConcreteRegistry()
 	assert.Nil(t, reg.tool("nope"))
 	assert.Nil(t, reg.command("nope"))
 	assert.Nil(t, reg.provider("nope"))
@@ -87,7 +98,7 @@ func TestRegistryMissingGetters(t *testing.T) {
 // providers.
 func TestRegistryHookAndProviderOverwrite(t *testing.T) {
 	ctx := context.Background()
-	reg := NewExtensionRegistry()
+	reg := newConcreteRegistry()
 
 	h1 := newRegTestHook("h")
 	h2 := newRegTestHook("h")
@@ -103,7 +114,7 @@ func TestRegistryHookAndProviderOverwrite(t *testing.T) {
 // TestRegistryMiddlewareOverwrite verifies last-writer-wins for middleware.
 func TestRegistryMiddlewareOverwrite(t *testing.T) {
 	ctx := context.Background()
-	reg := NewExtensionRegistry()
+	reg := newConcreteRegistry()
 	m1 := newRegTestMiddleware("m")
 	m2 := newRegTestMiddleware("m")
 	require.NoError(t, reg.RegisterMiddleware(ctx, m1))
@@ -113,7 +124,7 @@ func TestRegistryMiddlewareOverwrite(t *testing.T) {
 
 // TestRegistryCommandOverwrite verifies the last registered command runs.
 func TestRegistryCommandOverwrite(t *testing.T) {
-	reg := NewExtensionRegistry()
+	reg := newConcreteRegistry()
 	first, second := false, false
 	require.NoError(t, reg.RegisterCommand("run", func([]string) error { first = true; return nil }))
 	require.NoError(t, reg.RegisterCommand("run", func([]string) error { second = true; return nil }))
@@ -125,7 +136,7 @@ func TestRegistryCommandOverwrite(t *testing.T) {
 // TestRegistryConcurrentConcurrentRW exercises concurrent registration and
 // reads across all five building-block types under the -race detector.
 func TestRegistryConcurrentConcurrentRW(t *testing.T) {
-	reg := NewExtensionRegistry()
+	reg := newConcreteRegistry()
 	ctx := context.Background()
 
 	var wg sync.WaitGroup
@@ -151,7 +162,7 @@ func TestRegistryConcurrentConcurrentRW(t *testing.T) {
 
 // TestRegistryEmptyFresh asserts a freshly constructed registry starts empty.
 func TestRegistryEmptyFresh(t *testing.T) {
-	reg := NewExtensionRegistry()
+	reg := newConcreteRegistry()
 	assert.Nil(t, reg.tool("x"))
 	assert.Nil(t, reg.command("x"))
 	assert.Nil(t, reg.provider("x"))

@@ -55,7 +55,7 @@ var _ DeferredToolRegistry = (*DefaultDeferredToolRegistry)(nil)
 // NewDefaultDeferredToolRegistry wraps the given underlying ToolRegistry. The
 // underlying registry may be nil; Load then returns a stub without registering,
 // and RegisterDeferred still records the loader.
-func NewDefaultDeferredToolRegistry(underlying ToolRegistry) *DefaultDeferredToolRegistry {
+func NewDefaultDeferredToolRegistry(underlying ToolRegistry) DeferredToolRegistry {
 	return &DefaultDeferredToolRegistry{
 		underlying: underlying,
 		loaders:    map[string]func() (ToolDefinition, error){},

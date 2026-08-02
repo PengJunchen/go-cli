@@ -24,7 +24,7 @@ var _ Validator = (*DefaultValidator)(nil)
 
 // NewDefaultValidator returns a DefaultValidator that logs validation
 // diagnostics to slog.Default().
-func NewDefaultValidator() *DefaultValidator {
+func NewDefaultValidator() Validator {
 	return &DefaultValidator{logger: slog.Default()}
 }
 

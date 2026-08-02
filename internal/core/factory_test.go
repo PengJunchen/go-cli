@@ -22,7 +22,9 @@ func TestDefaultSubAgentWithNilRunnerFactoryFallsBack(t *testing.T) {
 		SubAgentConfig{Name: "n", MaxTurns: 1},
 		WithSubAgentRunner(nil),
 	)
-	assert.NotNil(t, sub.runnerFactory)
+	subImpl, ok := sub.(*DefaultSubAgent)
+	require.True(t, ok)
+	assert.NotNil(t, subImpl.runnerFactory)
 }
 
 func TestSubAgentSimulatedRunnerDefaultMaxTurns(t *testing.T) {

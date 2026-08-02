@@ -184,3 +184,58 @@ func TestMockLLMServerCancelledContext(t *testing.T) {
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.Canceled)
 }
+
+// --- Name, SetTurns, Models tests ---
+
+func TestMockLLMServerName(t *testing.T) {
+	server := NewMockLLMServer(nil)
+	assert.Equal(t, "mock", server.Name())
+}
+
+func TestMockLLMServerSetTurns(t *testing.T) {
+	server := NewMockLLMServer(nil)
+
+	server.SetTurns([]ConversationTurn{
+		{AssistantContent: "new turn"},
+	})
+
+	resp, err := server.Generate(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, "new turn", resp.Content)
+}
+
+func TestMockLLMServerModels(t *testing.T) {
+	server := NewMockLLMServer(nil)
+	models := server.Models()
+	require.Len(t, models, 1)
+	assert.Equal(t, "mock-model", models[0].Name)
+	assert.Equal(t, 128000, models[0].ContextWindow)
+}
+
+func TestMockLLMServerBuild(t *testing.T) {
+	server := NewMockLLMServer(NewConversationTemplate("T", "build",
+		ConversationTurn{AssistantContent: "built"},
+	))
+
+	model, cleanup, err := server.Build(context.Background(), llm.ModelConfig{Model: "mock"})
+	require.NoError(t, err)
+	defer cleanup()
+
+	resp, err := model.Generate(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, "built", resp.Content)
+}
+
+func TestMockLLMServerCallCount(t *testing.T) {
+	server := NewMockLLMServer(NewConversationTemplate("T", "count",
+		ConversationTurn{AssistantContent: "a"},
+	))
+
+	assert.Equal(t, 0, server.CallCount())
+
+	_, _ = server.Generate(context.Background(), nil) //nolint:errcheck
+	assert.Equal(t, 1, server.CallCount())
+
+	_, _ = server.Generate(context.Background(), nil) //nolint:errcheck
+	assert.Equal(t, 2, server.CallCount())
+}

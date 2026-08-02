@@ -101,7 +101,7 @@ var _ RetryPolicy = (*DefaultRetryPolicy)(nil)
 
 // NewDefaultRetryPolicy returns a DefaultRetryPolicy backed by cfg with
 // sensible defaults for zero-valued fields.
-func NewDefaultRetryPolicy(cfg RetryConfig, opts ...Option) *DefaultRetryPolicy {
+func NewDefaultRetryPolicy(cfg RetryConfig, opts ...Option) RetryPolicy {
 	if cfg.MaxAttempts <= 0 {
 		cfg.MaxAttempts = 3
 	}

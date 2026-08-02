@@ -69,3 +69,40 @@ func TestMockAuditLogRecords(t *testing.T) {
 	_, err = l.Query(context.Background(), production.AuditFilter{})
 	assert.Error(t, err)
 }
+
+func TestMockAuditLogName(t *testing.T) {
+	l := NewMockAuditLog()
+	assert.Equal(t, "mock-audit-log", l.Name())
+}
+
+func TestMockAuditLogWithName(t *testing.T) {
+	l := NewMockAuditLog()
+	result := l.WithName("custom-name")
+	assert.Same(t, l, result, "WithName should return the same instance for chaining")
+	assert.Equal(t, "custom-name", l.Name())
+}
+
+func TestMockAuditLogSetErr(t *testing.T) {
+	l := NewMockAuditLog()
+	l.SetErr(errors.New("injected"))
+
+	err := l.Log(context.Background(), production.AuditEntry{Operation: "test"})
+	require.Error(t, err)
+	assert.Equal(t, "injected", err.Error())
+
+	// The entry should still be recorded.
+	assert.Equal(t, 1, l.LogCount())
+}
+
+func TestMockAuditLogQueryReturnsCopy(t *testing.T) {
+	l := NewMockAuditLog()
+	require.NoError(t, l.Log(context.Background(), production.AuditEntry{Operation: "a"}))
+
+	entries1, err := l.Query(context.Background(), production.AuditFilter{})
+	require.NoError(t, err)
+	entries1[0] = production.AuditEntry{} // mutate copy
+
+	entries2, err := l.Query(context.Background(), production.AuditFilter{})
+	require.NoError(t, err)
+	assert.Equal(t, "a", entries2[0].Operation, "original should be unchanged")
+}

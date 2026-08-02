@@ -58,7 +58,7 @@ func WithQualityStrategy(s Strategy) QualityEvaluatorOption {
 // NewDefaultQualityEvaluator returns a DefaultQualityEvaluator that uses
 // estimator to estimate token counts. A nil estimator falls back to the
 // heuristic.
-func NewDefaultQualityEvaluator(estimator TokenEstimator, opts ...QualityEvaluatorOption) *DefaultQualityEvaluator {
+func NewDefaultQualityEvaluator(estimator TokenEstimator, opts ...QualityEvaluatorOption) QualityEvaluator {
 	e := &DefaultQualityEvaluator{estimator: estimator, strategy: StrategyNone}
 	for _, opt := range opts {
 		opt(e)

@@ -12,7 +12,7 @@ make check         # 提交前检查
 make verify        # 全量校验
 ```
 
-Go 版本：1.23+。
+Go 版本：1.24+（与 go.mod 对齐）。
 
 ## 核心原则
 
@@ -51,10 +51,25 @@ make scan       # AST 扫描
 
 ```
 go-cli/                        # 本仓库 — 代码实现
-├── cmd/cli/                   # CLI 入口
-├── internal/cli/              # CLI 核心实现
-├── internal/config/           # 配置系统
-├── internal/verify/           # 校验框架
+├── cmd/cli/                   # CLI 入口（含 cli.invocation Span）
+├── internal/core/             # 核心层：AgentLoop, Agent, Harness, TurnRunner, Hooks, Middleware, SubAgent, Registry, EventStream
+├── internal/llm/              # LLM 层：Provider, ModelRegistry, Composer, Native/Eino 适配
+├── internal/tools/            # 工具层：Bash, Read, Write, Edit, Grep, Find, Ls, MCP 适配, Deferred, Mutation
+├── internal/session/          # 会话层：SessionTree, Store, JSONL 持久化, Branch, Context 重建
+├── internal/compaction/       # 压缩层：Micro, Summary, Truncating, Unified, Quality, Midturn
+├── internal/approval/         # 审批层：Classifier, Store, Trust, Permission, Middleware
+├── internal/skill/            # 技能层：SkillDefinition, Loader, Registry, Adapter
+├── internal/production/       # 生产化：CircuitBreaker, Retry, LoopDetection, Idempotent, OutputGuard, Audit, Telemetry
+├── internal/tracing/          # 链路追踪：Tracer, Span, Exporter(JSONL/OTLP/Kafka), Async, Slog 集成
+├── internal/extension/        # 扩展层：Extension, Middleware, PluginLoader, Registry, Manager
+├── internal/mcp/              # MCP 集成：Adapter, Registry, ToolAdapter, HotReload
+├── internal/mock/             # Mock 框架：LLMServer, ToolServer, MCPServer, ConfigProvider, TraceExporter 等
+├── internal/tui/              # 终端 UI
+├── internal/acp/              # ACP 协议
+├── internal/cli/              # CLI 核心实现（命令路由, prompt 交互）
+├── internal/config/           # 配置系统：Types, Loader, Validator, Settings, YAML
+├── internal/verify/           # 校验框架：Scanner, AST 规则, VQ/VG 规则, Goroutine 泄漏检测, 日志捕获
+├── tests/                     # 集成测试与 E2E 测试
 ├── .github/workflows/         # CI/CD
 ├── CLAUDE.md
 └── AGENTS.md

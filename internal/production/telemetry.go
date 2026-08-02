@@ -42,7 +42,7 @@ type DefaultTelemetry struct {
 var _ Telemetry = (*DefaultTelemetry)(nil)
 
 // NewDefaultTelemetry returns an empty in-memory DefaultTelemetry.
-func NewDefaultTelemetry(opts ...Option) *DefaultTelemetry {
+func NewDefaultTelemetry(opts ...Option) Telemetry {
 	o := applyOptions(opts)
 	name := o.name
 	if name == "" {

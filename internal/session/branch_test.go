@@ -13,10 +13,20 @@ import (
 	"github.com/pengjunchen/go-cli/internal/verify"
 )
 
+// newConcreteTree returns a *DefaultSessionTree for tests that need access to
+// concrete-only methods not exposed on the SessionTree interface.
+func newConcreteTree() *DefaultSessionTree {
+	tree, ok := NewDefaultSessionTree().(*DefaultSessionTree)
+	if !ok {
+		panic("NewDefaultSessionTree() should return *DefaultSessionTree")
+	}
+	return tree
+}
+
 func TestBranch_ZeroCopyEntryCountUnchanged(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tree := NewDefaultSessionTree()
+	tree := newConcreteTree()
 	for i := 0; i < 10; i++ {
 		id := fmt.Sprintf("e%d", i)
 		parent := ""
@@ -37,7 +47,7 @@ func TestBranch_ZeroCopyEntryCountUnchanged(t *testing.T) {
 func TestBranch_LeafIdAndBranchRecovery(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tree := NewDefaultSessionTree()
+	tree := newConcreteTree()
 	for i := 0; i < 10; i++ {
 		id := fmt.Sprintf("e%d", i)
 		parent := ""
@@ -68,7 +78,7 @@ func TestBranch_LeafIdAndBranchRecovery(t *testing.T) {
 func TestBranch_UnknownFromID(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tree := NewDefaultSessionTree()
+	tree := newConcreteTree()
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("a", "", EntryTypeUser)))
 	require.ErrorIs(t, tree.Branch(context.Background(), "nope"), ErrLeafNotFound)
 }
@@ -76,7 +86,7 @@ func TestBranch_UnknownFromID(t *testing.T) {
 func TestBranch_WithBranchIDAndMeta(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tree := NewDefaultSessionTree()
+	tree := newConcreteTree()
 	for i := 0; i < 5; i++ {
 		id := fmt.Sprintf("e%d", i)
 		parent := ""
@@ -101,7 +111,7 @@ func TestBranch_Span(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	ctx, exp := tracedCtx(t)
-	tree := NewDefaultSessionTree()
+	tree := newConcreteTree()
 	require.NoError(t, tree.Append(ctx, newTestEntry("a", "", EntryTypeUser)))
 	require.NoError(t, tree.Append(ctx, newTestEntry("b", "a", EntryTypeUser)))
 
@@ -115,7 +125,7 @@ func TestBranch_Span(t *testing.T) {
 func TestBranch_Concurrent(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tree := NewDefaultSessionTree()
+	tree := newConcreteTree()
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("root", "", EntryTypeUser)))
 
 	const n = 32

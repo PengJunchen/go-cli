@@ -88,7 +88,8 @@ var _ llm.ModelProvider = (*testProvider)(nil)
 // implementation stores by name (last writer wins) with getters.
 func TestExtensionRegistryRegisterAndGet(t *testing.T) {
 	ctx := context.Background()
-	reg := NewExtensionRegistry()
+	reg, ok := NewExtensionRegistry().(*DefaultExtensionRegistry)
+	require.True(t, ok)
 
 	require.NoError(t, reg.RegisterTool(ctx, testTool{name: "read"}))
 	got := reg.tool("read")
@@ -118,7 +119,8 @@ func TestExtensionRegistryRegisterAndGet(t *testing.T) {
 // propagate.
 func TestExtensionRegistryDuplicatesAndErrors(t *testing.T) {
 	ctx := context.Background()
-	reg := NewExtensionRegistry()
+	reg, ok := NewExtensionRegistry().(*DefaultExtensionRegistry)
+	require.True(t, ok)
 
 	require.NoError(t, reg.RegisterTool(ctx, testTool{name: "read"}))
 	require.NoError(t, reg.RegisterTool(ctx, testTool{name: "read"}))

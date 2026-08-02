@@ -30,7 +30,8 @@ func TestTrustTrustedAfterTrustProjectThenRevoked(t *testing.T) {
 }
 
 func TestTrustExpiryHonored(t *testing.T) {
-	tm := NewDefaultTrustManager(NewInMemoryTrustStore())
+	tm, ok := NewDefaultTrustManager(NewInMemoryTrustStore()).(*DefaultTrustManager)
+	require.True(t, ok)
 
 	expiredEntry := TrustEntry{
 		Path:      "/repo/expired",

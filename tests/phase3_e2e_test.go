@@ -130,6 +130,8 @@ func phaseApprovalAndMCP(ctx context.Context, t *testing.T, audit production.Aud
 
 	// Adapt the MCP tool into a tools.ToolDefinition and register it.
 	reg := tools.NewDefaultToolRegistry()
+	regExec, ok := reg.(*tools.DefaultToolRegistry)
+	require.True(t, ok, "reg should be *DefaultToolRegistry")
 	adapter := mcp.NewMCPToolAdapter(server, mcp.MCPTool{Name: "lookup", Description: "weather lookup"})
 	require.NoError(t, reg.Register(ctx, adapter))
 	mcpName := mcp.NormalizeToolName("weather", "lookup")
@@ -154,7 +156,7 @@ func phaseApprovalAndMCP(ctx context.Context, t *testing.T, audit production.Aud
 	// registry Execute so the "tool.call" span and the MCP round trip both fire.
 	allowed := tools.ToolCall{ID: "call-weather-01", Name: mcpName, Args: map[string]any{"city": "Shanghai"}}
 	exec := func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
-		return reg.Execute(ctx, call)
+		return regExec.Execute(ctx, call)
 	}
 	approvedExec := mw.WrapToolCall(exec)
 

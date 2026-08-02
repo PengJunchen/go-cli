@@ -8,7 +8,7 @@ import (
 )
 
 func TestDefaultValidatorInterfaceSatisdition(t *testing.T) {
-	var v Validator = NewDefaultValidator()
+	v := NewDefaultValidator()
 	assert.NotNil(t, v)
 }
 

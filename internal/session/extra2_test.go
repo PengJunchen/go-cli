@@ -14,13 +14,13 @@ import (
 // TestTree_MoveToEmptyTree verifies MoveTo on an empty tree reports the missing
 // leaf.
 func TestTree_MoveToEmptyTree(t *testing.T) {
-	tree := NewDefaultSessionTree()
+	tree := newConcreteTree()
 	require.ErrorIs(t, tree.MoveTo(context.Background(), "ghost"), ErrLeafNotFound)
 }
 
 // TestTree_GetBranchEmptyTree verifies GetBranch on an empty tree fails cleanly.
 func TestTree_GetBranchEmptyTree(t *testing.T) {
-	tree := NewDefaultSessionTree()
+	tree := newConcreteTree()
 	branch, err := tree.GetBranch(context.Background(), "ghost")
 	require.ErrorIs(t, err, ErrLeafNotFound)
 	assert.Nil(t, branch)
@@ -29,7 +29,7 @@ func TestTree_GetBranchEmptyTree(t *testing.T) {
 // TestTree_BranchNilOption verifies Branch tolerates a nil option.
 func TestTree_BranchNilOption(t *testing.T) {
 	ctx := context.Background()
-	tree := NewDefaultSessionTree()
+	tree := newConcreteTree()
 	require.NoError(t, tree.Append(ctx, newTestEntry("a", "", EntryTypeUser)))
 	require.NoError(t, tree.Append(ctx, newTestEntry("b", "a", EntryTypeUser)))
 
@@ -41,7 +41,7 @@ func TestTree_BranchNilOption(t *testing.T) {
 
 // TestTree_BranchMetaForUnknown verifies an unknown branch id yields false.
 func TestTree_BranchMetaForUnknown(t *testing.T) {
-	tree := NewDefaultSessionTree()
+	tree := newConcreteTree()
 	_, ok := tree.BranchMetaFor("nope")
 	assert.False(t, ok)
 }
@@ -50,7 +50,7 @@ func TestTree_BranchMetaForUnknown(t *testing.T) {
 // back to fromID and records the branch meta under it.
 func TestTree_BranchReusesFromIDWhenWithoutBranchID(t *testing.T) {
 	ctx := context.Background()
-	tree := NewDefaultSessionTree()
+	tree := newConcreteTree()
 	require.NoError(t, tree.Append(ctx, newTestEntry("a", "", EntryTypeUser)))
 	require.NoError(t, tree.Append(ctx, newTestEntry("b", "a", EntryTypeUser)))
 
@@ -72,7 +72,7 @@ func TestKeepBranchID(t *testing.T) {
 // entry becomes the current leaf.
 func TestTree_AppendDoesNotMoveLeafOnSubsequent(t *testing.T) {
 	ctx := context.Background()
-	tree := NewDefaultSessionTree()
+	tree := newConcreteTree()
 	require.NoError(t, tree.Append(ctx, newTestEntry("a", "", EntryTypeUser)))
 	require.NoError(t, tree.Append(ctx, newTestEntry("b", "a", EntryTypeUser)))
 	require.NoError(t, tree.Append(ctx, newTestEntry("c", "b", EntryTypeUser)))
@@ -84,7 +84,7 @@ func TestTree_AppendDoesNotMoveLeafOnSubsequent(t *testing.T) {
 func TestDefaultBranchSummary_SummarizeErrorsFromFunc(t *testing.T) {
 	d := NewDefaultBranchSummary(func(context.Context, string) (string, error) {
 		return "", errors.New("llm down")
-	})
+	}).(*DefaultBranchSummary)
 	_, err := d.Summarize(context.Background(), []SessionEntry{{ID: "a", Content: "x"}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "llm down")
@@ -97,7 +97,7 @@ func TestDefaultBranchSummary_EmptyEntriesProducesPrompt(t *testing.T) {
 	d := NewDefaultBranchSummary(func(_ context.Context, _ string) (string, error) {
 		called = true
 		return "empty-sum", nil
-	})
+	}).(*DefaultBranchSummary)
 	sum, err := d.Summarize(context.Background(), nil)
 	require.NoError(t, err)
 	assert.Equal(t, "empty-sum", sum)
@@ -107,7 +107,7 @@ func TestDefaultBranchSummary_EmptyEntriesProducesPrompt(t *testing.T) {
 // TestDefaultBranchSummary_BuildPrompt empty content yields a prompt that still
 // carries the instruction header.
 func TestDefaultBranchSummary_BuildPromptHeader(t *testing.T) {
-	d := NewDefaultBranchSummary(func(context.Context, string) (string, error) { return "", nil })
+	d := NewDefaultBranchSummary(func(context.Context, string) (string, error) { return "", nil }).(*DefaultBranchSummary)
 	// We cannot call unexported buildPrompt from here? We can, same package.
 	prompt := d.buildPrompt([]SessionEntry{{ID: "a", Content: "hi"}})
 	assert.Contains(t, prompt, "Summarize the following departed conversation branch")
@@ -128,7 +128,7 @@ func TestMemoryStoreDefaultTypeAlias(t *testing.T) {
 // TestMemoryStoreAppendValidation verifies validation short-circuits nil/id/type
 // before touching state.
 func TestMemoryStoreAppendValidation(t *testing.T) {
-	s := NewMemoryStore()
+	s := NewMemoryStore().(*MemoryStore)
 	require.Error(t, s.Append(context.Background(), nil))
 	require.Error(t, s.Append(context.Background(), &SessionEntry{Type: EntryTypeUser}))
 	require.Error(t, s.Append(context.Background(), &SessionEntry{ID: "x"}))
@@ -183,7 +183,7 @@ func TestBranchMetaJSON(t *testing.T) {
 // TestContextManagerCompactionTraversedHasRawEntries verifies Traversed keeps
 // the raw compaction entry (with empty Content) while Messages folds it.
 func TestContextManagerCompactionTraversedHasRawEntries(t *testing.T) {
-	tree := NewDefaultSessionTree()
+	tree := newConcreteTree()
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("a", "", EntryTypeUser)))
 	require.NoError(t, tree.Append(context.Background(), newCompactionEntry("comp", "a", "folded")))
 
@@ -202,7 +202,7 @@ func TestContextManagerCompactionTraversedHasRawEntries(t *testing.T) {
 // TestContextManagerBuildContextWithSystemEntries verifies system entries pass
 // through into Messages unchanged (no special folding).
 func TestContextManagerBuildContextWithSystemEntries(t *testing.T) {
-	tree := NewDefaultSessionTree()
+	tree := newConcreteTree()
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("a", "", EntryTypeUser)))
 	require.NoError(t, tree.Append(context.Background(), &SessionEntry{
 		ID: "sys", ParentID: "a", Type: EntryTypeSystem, Content: "system note", Timestamp: time.Now().UTC(),

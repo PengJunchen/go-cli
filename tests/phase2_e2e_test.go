@@ -250,7 +250,9 @@ func phase4ToolCalls(spanCtx context.Context, t *testing.T) {
 	require.NoError(t, reg.Register(spanCtx, tools.NewEditFileTool()))
 	require.NoError(t, reg.Register(spanCtx, tools.NewGrepTool(tools.WithForcePureGo(true))))
 
-	_, err := reg.Execute(spanCtx, tools.ToolCall{
+	regExec, ok := reg.(*tools.DefaultToolRegistry)
+	require.True(t, ok, "reg should be *DefaultToolRegistry")
+	_, err := regExec.Execute(spanCtx, tools.ToolCall{
 		Name: "edit",
 		Args: map[string]any{
 			"file_path":  target,
@@ -260,7 +262,7 @@ func phase4ToolCalls(spanCtx context.Context, t *testing.T) {
 	})
 	require.NoError(t, err, "edit tool should replace the block")
 
-	_, err = reg.Execute(spanCtx, tools.ToolCall{
+	_, err = regExec.Execute(spanCtx, tools.ToolCall{
 		Name: "grep",
 		Args: map[string]any{"pattern": "go-cli", "path": target},
 	})

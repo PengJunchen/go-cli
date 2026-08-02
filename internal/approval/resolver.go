@@ -24,7 +24,7 @@ type DefaultPermissionModeResolver struct{}
 var _ PermissionModeResolver = (*DefaultPermissionModeResolver)(nil)
 
 // NewDefaultPermissionModeResolver builds a DefaultPermissionModeResolver.
-func NewDefaultPermissionModeResolver() *DefaultPermissionModeResolver {
+func NewDefaultPermissionModeResolver() PermissionModeResolver {
 	return &DefaultPermissionModeResolver{}
 }
 

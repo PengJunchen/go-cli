@@ -24,7 +24,7 @@ func newRetryTestCtx(t *testing.T) (context.Context, *mock.MockTraceExporter) {
 }
 
 func TestClassifyCategorizedError(t *testing.T) {
-	p := NewDefaultRetryPolicy(RetryConfig{})
+	p := NewDefaultRetryPolicy(RetryConfig{}).(*DefaultRetryPolicy)
 	transient := NewError(ErrorTransient, errors.New("connection reset"))
 	require.Equal(t, ErrorTransient, p.Classify(transient))
 
@@ -41,7 +41,7 @@ func TestClassifyCategorizedError(t *testing.T) {
 }
 
 func TestClassifyStringMatching(t *testing.T) {
-	p := NewDefaultRetryPolicy(RetryConfig{})
+	p := NewDefaultRetryPolicy(RetryConfig{}).(*DefaultRetryPolicy)
 	require.Equal(t, ErrorRateLimit, p.Classify(errors.New("429 too many requests")))
 	require.Equal(t, ErrorTimeout, p.Classify(errors.New("context deadline exceeded")))
 	require.Equal(t, ErrorTransient, p.Classify(errors.New("connection refused")))
@@ -90,7 +90,7 @@ func TestNextBackoffExponentialAndCapped(t *testing.T) {
 		BaseDelay:   100 * time.Millisecond,
 		MaxDelay:    2 * time.Second,
 		Jitter:      0, // deterministic
-	})
+	}).(*DefaultRetryPolicy)
 
 	d0 := p.NextBackoff(ctx, 0)
 	d1 := p.NextBackoff(ctx, 1)
@@ -118,7 +118,7 @@ func TestNextBackoffNonNegativeWithJitter(t *testing.T) {
 		BaseDelay:   10 * time.Millisecond,
 		MaxDelay:    100 * time.Millisecond,
 		Jitter:      25 * time.Millisecond,
-	})
+	}).(*DefaultRetryPolicy)
 
 	for attempt := 0; attempt < 10; attempt++ {
 		d := p.NextBackoff(ctx, attempt)
@@ -154,7 +154,7 @@ func TestShouldRetryEmitsSpan(t *testing.T) {
 func TestRetryPolicyConcurrent(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx, _ := newRetryTestCtx(t)
-	p := NewDefaultRetryPolicy(RetryConfig{MaxAttempts: 3, BaseDelay: 1 * time.Millisecond})
+	p := NewDefaultRetryPolicy(RetryConfig{MaxAttempts: 3, BaseDelay: 1 * time.Millisecond}).(*DefaultRetryPolicy)
 
 	var wg sync.WaitGroup
 	for g := 0; g < 8; g++ {

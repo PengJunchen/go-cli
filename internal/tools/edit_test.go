@@ -179,7 +179,9 @@ func TestEditEmitsToolCallSpan(t *testing.T) {
 	reg := NewDefaultToolRegistry()
 	require.NoError(t, reg.Register(ctx, NewEditFileTool()))
 
-	_, err := reg.Execute(ctx, ToolCall{
+	// Execute is a method on *DefaultToolRegistry, not the ToolRegistry interface.
+	dreg := reg.(*DefaultToolRegistry)
+	_, err := dreg.Execute(ctx, ToolCall{
 		Name: "edit",
 		Args: map[string]any{
 			"file_path":  path,
@@ -225,4 +227,11 @@ func TestEditPreservesFilePermissions(t *testing.T) {
 	entries, err := os.ReadDir(dir)
 	require.NoError(t, err)
 	assert.Len(t, entries, 1)
+}
+
+func TestEditDescription(t *testing.T) {
+	tool := NewEditFileTool()
+	desc := tool.Description()
+	assert.Contains(t, desc, "edit")
+	assert.Contains(t, desc, "old_string")
 }

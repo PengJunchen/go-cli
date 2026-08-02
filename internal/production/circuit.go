@@ -80,7 +80,7 @@ var _ CircuitBreaker = (*DefaultCircuitBreaker)(nil)
 
 // NewDefaultCircuitBreaker returns a DefaultCircuitBreaker backed by cfg with
 // sensible defaults for zero-valued fields. It starts in the Closed state.
-func NewDefaultCircuitBreaker(cfg CircuitBreakerConfig, opts ...Option) *DefaultCircuitBreaker {
+func NewDefaultCircuitBreaker(cfg CircuitBreakerConfig, opts ...Option) CircuitBreaker {
 	if cfg.FailureThreshold <= 0 {
 		cfg.FailureThreshold = 5
 	}

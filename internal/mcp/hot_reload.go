@@ -135,7 +135,7 @@ var _ HotReloader = (*DefaultHotReloader)(nil)
 // NewDefaultHotReloader returns a DefaultHotReloader that reconnects client and
 // calls register with the freshly advertised tools after every reload. opts may
 // tune the poll interval, backoff and retry limits.
-func NewDefaultHotReloader(client MCPClient, register RegisterToolsFunc, opts ...HotReloaderOption) *DefaultHotReloader {
+func NewDefaultHotReloader(client MCPClient, register RegisterToolsFunc, opts ...HotReloaderOption) HotReloader {
 	h := &DefaultHotReloader{
 		client:        client,
 		register:      register,

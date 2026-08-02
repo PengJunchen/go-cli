@@ -150,17 +150,21 @@ func TestSubAgentConfigExposedOnSubAgent(t *testing.T) {
 		Model:        "mock",
 		MaxTurns:     4,
 	})
-	assert.Equal(t, "cfg", sub.Name())
-	assert.Equal(t, "be concise", sub.config.SystemPrompt)
-	assert.Len(t, sub.config.Tools, 2)
-	assert.Equal(t, "mock", sub.config.Model)
-	assert.Equal(t, 4, sub.config.MaxTurns)
+	subImpl, ok := sub.(*DefaultSubAgent)
+	require.True(t, ok)
+	assert.Equal(t, "cfg", subImpl.Name())
+	assert.Equal(t, "be concise", subImpl.config.SystemPrompt)
+	assert.Len(t, subImpl.config.Tools, 2)
+	assert.Equal(t, "mock", subImpl.config.Model)
+	assert.Equal(t, 4, subImpl.config.MaxTurns)
 }
 
 func TestSubAgentIdleStateInitial(t *testing.T) {
 	sub := NewDefaultSubAgent(SubAgentConfig{Name: "idle"})
-	assert.Equal(t, SubAgentIdle, sub.State())
-	assert.Empty(t, sub.Received())
+	subImpl, ok := sub.(*DefaultSubAgent)
+	require.True(t, ok)
+	assert.Equal(t, SubAgentIdle, subImpl.State())
+	assert.Empty(t, subImpl.Received())
 }
 
 func TestSubAgentStateStringValues(t *testing.T) {

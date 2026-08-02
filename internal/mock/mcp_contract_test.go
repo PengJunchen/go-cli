@@ -34,7 +34,8 @@ func TestMCPContractNormalizedName(t *testing.T) {
 	adapter := mcp.NewMCPToolAdapter(server, mcp.MCPTool{Name: "echo", Description: "echoes a message"})
 	require.Equal(t, "mcp__mock__echo", adapter.Name())
 
-	reg := tools.NewDefaultToolRegistry()
+	reg, ok := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry)
+	require.True(t, ok, "should be *DefaultToolRegistry")
 	ctx := context.Background()
 	require.NoError(t, reg.Register(ctx, adapter))
 
