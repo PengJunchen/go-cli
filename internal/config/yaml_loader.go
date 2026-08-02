@@ -1,0 +1,534 @@
+package config
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strconv"
+	"strings"
+
+	"github.com/pengjunchen/go-cli/internal/tracing"
+)
+
+// ConfigFormat enumerates the supported configuration file encodings.
+type ConfigFormat int
+
+const (
+	// ConfigFormatJSON is the JSON configuration format (the default and the
+	// only format supported before Phase 4 YAML support).
+	ConfigFormatJSON ConfigFormat = iota
+	// ConfigFormatYAML is the YAML configuration format.
+	ConfigFormatYAML
+	// ConfigFormatAuto detects the format from the file path extension when
+	// the caller does not want to commit to a specific encoding.
+	ConfigFormatAuto
+)
+
+// String returns the lowercase name of the format ("json", "yaml", "auto").
+func (f ConfigFormat) String() string {
+	switch f {
+	case ConfigFormatJSON:
+		return "json"
+	case ConfigFormatYAML:
+		return "yaml"
+	case ConfigFormatAuto:
+		return "auto"
+	default:
+		return "unknown"
+	}
+}
+
+// DetectConfigFormat infers the configuration format from path's file
+// extension. ".json" selects JSON, ".yaml"/".yml" select YAML. Any other or
+// absent extension returns a clear error; the caller typically falls back to
+// JSON for backward compatibility (see Loader.Load).
+func DetectConfigFormat(path string) (ConfigFormat, error) {
+	switch ext := strings.ToLower(filepath.Ext(path)); ext {
+	case ".json":
+		return ConfigFormatJSON, nil
+	case ".yaml", ".yml":
+		return ConfigFormatYAML, nil
+	default:
+		return ConfigFormatAuto, fmt.Errorf(
+			"config: unsupported or missing extension %q for %s (want .json, .yaml or .yml)",
+			ext, path)
+	}
+}
+
+// UnmarshalConfig parses data according to format and stores the result in
+// target (an addressable Config or nested struct). JSON is decoded with
+// encoding/json; YAML is decoded with this package's hand-written, zero
+// external dependency YAML-subset parser. ConfigFormatAuto resolves to JSON.
+func UnmarshalConfig(data []byte, format ConfigFormat, target any) error {
+	if format == ConfigFormatAuto {
+		format = ConfigFormatJSON
+	}
+	switch format {
+	case ConfigFormatJSON:
+		return json.Unmarshal(data, target)
+	case ConfigFormatYAML:
+		tree, err := parseYAMLTree(data)
+		if err != nil {
+			return err
+		}
+		m, ok := tree.(map[string]any)
+		if !ok {
+			return fmt.Errorf("yaml: top level must be a mapping")
+		}
+		return assignFromMap(target, m)
+	default:
+		return fmt.Errorf("config: unsupported format %s", format)
+	}
+}
+
+// YAMLConfigLoader loads a Config from a configuration file, using its
+// extension to choose between YAML and JSON. It is a small, self-contained
+// loader for callers that want format-aware file loading without the full
+// layered Loader.
+type YAMLConfigLoader struct{}
+
+// Compile-time assertion. There is no ConfigProvider interface in this
+// package, so a plain assignability check is used.
+var _ = (*YAMLConfigLoader)(nil)
+
+// NewYAMLConfigLoader returns a ready-to-use YAMLConfigLoader.
+func NewYAMLConfigLoader() *YAMLConfigLoader { return &YAMLConfigLoader{} }
+
+// Load reads the file at path, detects its format, parses it into a Config
+// and validates nothing (validation is the caller's concern). It emits a
+// config.load.yaml span and logs the detected format at debug level.
+func (l *YAMLConfigLoader) Load(ctx context.Context, path string) (*Config, error) {
+	span, spanCtx := tracing.SpanFromContext(ctx, "config.load.yaml", tracing.SpanKindInternal)
+	logger := tracing.NewTraceLogger(span, slog.Default())
+	defer span.End()
+	span.SetAttributes(tracing.Attribute{Key: "path", Value: path})
+
+	format, err := DetectConfigFormat(path)
+	if err != nil {
+		span.SetStatus(tracing.SpanStatusError, err.Error())
+		return nil, fmt.Errorf("config: detect format %s: %w", path, err)
+	}
+	logger.DebugContext(spanCtx, "config.load.yaml.format",
+		"op", "config.load.yaml",
+		"path", path,
+		"format", format.String(),
+	)
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		span.SetStatus(tracing.SpanStatusError, err.Error())
+		return nil, fmt.Errorf("config: read %s: %w", path, err)
+	}
+
+	var cfg Config
+	if err := UnmarshalConfig(data, format, &cfg); err != nil {
+		span.SetStatus(tracing.SpanStatusError, err.Error())
+		return nil, fmt.Errorf("config: parse %s as %s: %w", path, format, err)
+	}
+
+	span.SetAttributes(tracing.Attribute{Key: "config_keys", Value: countKeys(&cfg)})
+	span.SetStatus(tracing.SpanStatusOK, "")
+	return &cfg, nil
+}
+
+// ---------------------------------------------------------------------------
+// Hand-written YAML-subset parser.
+//
+// It is deliberately minimal and covers the configuration schema shape: a
+// top-level mapping whose values are scalar fields, one level of nested
+// mappings (provider/model/tracing/...), and lists of scalar strings (tools
+// builtin/registry). Unquoted scalars are coerced to bool/int/float/string so
+// typed Config fields populate correctly. It does not implement anchors,
+// aliases, multi-line block scalars or flow maps.
+// ---------------------------------------------------------------------------
+
+// yamlLine is a single significant line from a YAML document.
+type yamlLine struct {
+	indent   int
+	text     string
+	isBlank  bool
+	trimmed  string
+	listItem bool
+}
+
+// yamlParser walks the normalized lines of a YAML document.
+type yamlParser struct {
+	lines []yamlLine
+	pos   int
+}
+
+// buildYAMLLines strips comments and splits data into indentation-tagged lines.
+func buildYAMLLines(data []byte) []yamlLine {
+	var out []yamlLine
+	for _, raw := range strings.Split(string(data), "\n") {
+		raw = strings.TrimRight(raw, "\r")
+		trimmed := strings.TrimSpace(stripYAMLComment(raw))
+		if trimmed == "" {
+			out = append(out, yamlLine{isBlank: true})
+			continue
+		}
+		out = append(out, yamlLine{
+			indent:   indentWidth(raw),
+			text:     trimmed,
+			trimmed:  trimmed,
+			listItem: strings.HasPrefix(trimmed, "-"),
+		})
+	}
+	return out
+}
+
+// peek returns the next significant (non-blank) line, consuming any blank
+// lines it skips, and an indicator that no more lines remain.
+func (p *yamlParser) peek() (yamlLine, bool) {
+	for p.pos < len(p.lines) {
+		ln := p.lines[p.pos]
+		if ln.isBlank {
+			p.pos++
+			continue
+		}
+		return ln, true
+	}
+	return yamlLine{}, false
+}
+
+// parseYAMLTree parses a full YAML document into an any tree whose leaves are
+// native Go scalars, maps and slices.
+func parseYAMLTree(data []byte) (any, error) {
+	p := &yamlParser{lines: buildYAMLLines(data)}
+	ln, ok := p.peek()
+	if !ok {
+		return map[string]any{}, nil
+	}
+	if ln.listItem {
+		return p.parseList(ln.indent)
+	}
+	return p.parseMap(ln.indent)
+}
+
+// parseMap consumes consecutive sibling `key: value` lines all indented nd.
+func (p *yamlParser) parseMap(nd int) (any, error) {
+	m := map[string]any{}
+	for {
+		ln, ok := p.peek()
+		if !ok || ln.indent != nd || ln.listItem {
+			break
+		}
+		p.pos++
+		key, inline, ok := splitKeyValue(ln.text)
+		if !ok || key == "" {
+			return nil, fmt.Errorf("yaml: invalid mapping line %q", ln.text)
+		}
+		v, err := p.valueFor(key, inline, nd)
+		if err != nil {
+			return nil, err
+		}
+		m[key] = v
+	}
+	return m, nil
+}
+
+// parseList consumes consecutive sibling `- item` lines all indented nd.
+func (p *yamlParser) parseList(nd int) (any, error) {
+	list := []any{}
+	for {
+		ln, ok := p.peek()
+		if !ok || ln.indent != nd || !ln.listItem {
+			break
+		}
+		p.pos++
+		text := strings.TrimSpace(strings.TrimPrefix(ln.text, "-"))
+		if text == "" {
+			list = append(list, map[string]any{})
+			continue
+		}
+		if key, inline, ok := splitKeyValue(text); ok && key != "" {
+			sub := map[string]any{}
+			v, err := p.valueFor(key, inline, nd)
+			if err != nil {
+				return nil, err
+			}
+			sub[key] = v
+			list = append(list, sub)
+			continue
+		}
+		list = append(list, parseScalar(text))
+	}
+	return list, nil
+}
+
+// valueFor parses the value that follows a `key:` at the given indent. An
+// inline scalar returns immediately; an empty value collects the deeper
+// (map or list) block that follows.
+func (p *yamlParser) valueFor(key, inline string, nd int) (any, error) {
+	if strings.TrimSpace(inline) != "" {
+		return parseScalar(inline), nil
+	}
+	child, ok := p.peek()
+	if !ok {
+		return map[string]any{}, nil
+	}
+	if child.indent > nd {
+		if child.listItem {
+			return p.parseList(child.indent)
+		}
+		return p.parseMap(child.indent)
+	}
+	// No deeper block: an empty value, tolerantly an empty mapping.
+	return map[string]any{}, nil
+}
+
+// splitKeyValue splits a line at the first colon into a key and the remainder.
+func splitKeyValue(line string) (key, rest string, ok bool) {
+	idx := strings.Index(line, ":")
+	if idx <= 0 {
+		return "", "", false
+	}
+	key = strings.TrimSpace(line[:idx])
+	if key == "" {
+		return "", "", false
+	}
+	return key, strings.TrimSpace(line[idx+1:]), true
+}
+
+// indentWidth returns the number of leading space characters in line.
+func indentWidth(line string) int {
+	n := 0
+	for n < len(line) && line[n] == ' ' {
+		n++
+	}
+	return n
+}
+
+// stripYAMLComment removes a YAML comment (a '#' that starts a word) unless it
+// sits inside a single- or double-quoted region.
+func stripYAMLComment(s string) string {
+	var quote byte
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if quote != 0 {
+			if c == quote {
+				if quote == '"' && i > 0 && s[i-1] == '\\' {
+					continue
+				}
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '"', '\'':
+			quote = c
+		case '#':
+			if i == 0 || s[i-1] == ' ' || s[i-1] == '\t' {
+				return strings.TrimRight(s[:i], " \t")
+			}
+		}
+	}
+	return s
+}
+
+// parseScalar coerces a YAML scalar to a native Go value: quoted strings stay
+// strings, and unquoted true/false/null, integers and floats are converted.
+func parseScalar(s string) any {
+	s = strings.TrimSpace(s)
+	if len(s) >= 2 {
+		if (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'') {
+			return s[1 : len(s)-1]
+		}
+	}
+	switch s {
+	case "true":
+		return true
+	case "false":
+		return false
+	case "null", "~":
+		return nil
+	}
+	if i, err := strconv.ParseInt(s, 10, 64); err == nil {
+		return i
+	}
+	if f, err := strconv.ParseFloat(s, 64); err == nil {
+		return f
+	}
+	return s
+}
+
+// assignFromMap fills an addressable struct target from a parsed YAML mapping,
+// matching fields by their json tag name. It returns an error describing the
+// first field that cannot be populated.
+func assignFromMap(target any, m map[string]any) error {
+	rv := reflect.ValueOf(target)
+	if rv.Kind() != reflect.Pointer || rv.IsNil() {
+		return fmt.Errorf("yaml: target must be a non-nil pointer")
+	}
+	return assignValue(rv.Elem(), m)
+}
+
+// assignValue assigns src into the settable destination dst, recursing into
+// structs, slices and pointers.
+func assignValue(dst reflect.Value, src any) error {
+	if !dst.IsValid() || !dst.CanSet() {
+		return nil
+	}
+	if m, ok := src.(map[string]any); ok && dst.Kind() == reflect.Struct {
+		for i := 0; i < dst.NumField(); i++ {
+			f := dst.Type().Field(i)
+			if !f.IsExported() {
+				continue
+			}
+			name := strings.Split(f.Tag.Get("json"), ",")[0]
+			if name == "-" {
+				continue
+			}
+			if name == "" {
+				name = strings.ToLower(f.Name)
+			}
+			v, exists := m[name]
+			if !exists {
+				continue
+			}
+			if err := assignValue(dst.Field(i), v); err != nil {
+				return fmt.Errorf("yaml: key %q: %w", name, err)
+			}
+		}
+		return nil
+	}
+	if dst.Kind() == reflect.Pointer {
+		if src == nil {
+			dst.Set(reflect.Zero(dst.Type()))
+			return nil
+		}
+		np := reflect.New(dst.Type().Elem())
+		if err := assignValue(np.Elem(), src); err != nil {
+			return err
+		}
+		dst.Set(np)
+		return nil
+	}
+	if dst.Kind() == reflect.Slice {
+		switch v := src.(type) {
+		case []any:
+			out := reflect.MakeSlice(dst.Type(), len(v), len(v))
+			for i, item := range v {
+				if err := assignValue(out.Index(i), item); err != nil {
+					return err
+				}
+			}
+			dst.Set(out)
+			return nil
+		case map[string]any:
+			if len(v) > 0 {
+				return fmt.Errorf("cannot assign a mapping to a slice")
+			}
+			dst.Set(reflect.MakeSlice(dst.Type(), 0, 0))
+			return nil
+		case nil:
+			dst.Set(reflect.Zero(dst.Type()))
+			return nil
+		default:
+			return fmt.Errorf("cannot assign %T to a slice", src)
+		}
+	}
+	return assignScalar(dst, src)
+}
+
+// assignScalar coerces a scalar value into dst according to its kind.
+func assignScalar(dst reflect.Value, src any) error {
+	switch dst.Kind() {
+	case reflect.String:
+		v, ok := scalarToString(src)
+		if !ok {
+			return fmt.Errorf("cannot assign %T to string", src)
+		}
+		dst.SetString(v)
+	case reflect.Bool:
+		v, ok := scalarToBool(src)
+		if !ok {
+			return fmt.Errorf("cannot assign %T to bool", src)
+		}
+		dst.SetBool(v)
+	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+		v, ok := scalarToInt64(src)
+		if !ok {
+			return fmt.Errorf("cannot assign %T to integer", src)
+		}
+		dst.SetInt(v)
+	case reflect.Float32, reflect.Float64:
+		v, ok := scalarToFloat64(src)
+		if !ok {
+			return fmt.Errorf("cannot assign %T to float", src)
+		}
+		dst.SetFloat(v)
+	default:
+		return fmt.Errorf("unsupported destination kind %v", dst.Kind())
+	}
+	return nil
+}
+
+func scalarToString(src any) (string, bool) {
+	switch v := src.(type) {
+	case string:
+		return v, true
+	case int64:
+		return strconv.FormatInt(v, 10), true
+	case int:
+		return strconv.Itoa(v), true
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64), true
+	case bool:
+		return strconv.FormatBool(v), true
+	default:
+		return "", false
+	}
+}
+
+func scalarToBool(src any) (bool, bool) {
+	switch v := src.(type) {
+	case bool:
+		return v, true
+	case int64:
+		return v != 0, true
+	case string:
+		b, err := strconv.ParseBool(strings.TrimSpace(v))
+		return b, err == nil
+	default:
+		return false, false
+	}
+}
+
+func scalarToInt64(src any) (int64, bool) {
+	switch v := src.(type) {
+	case int64:
+		return v, true
+	case int:
+		return int64(v), true
+	case float64:
+		return int64(v), true
+	case string:
+		i, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+		return i, err == nil
+	default:
+		return 0, false
+	}
+}
+
+func scalarToFloat64(src any) (float64, bool) {
+	switch v := src.(type) {
+	case float64:
+		return v, true
+	case float32:
+		return float64(v), true
+	case int64:
+		return float64(v), true
+	case int:
+		return float64(v), true
+	case string:
+		f, err := strconv.ParseFloat(strings.TrimSpace(v), 64)
+		return f, err == nil
+	default:
+		return 0, false
+	}
+}

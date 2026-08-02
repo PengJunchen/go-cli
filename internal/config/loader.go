@@ -2,7 +2,6 @@ package config
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log/slog"
 	"os"
@@ -97,9 +96,28 @@ func (l *Loader) Load(ctx context.Context) (*Config, error) {
 	cfg := defaultConfig()
 	applied := []string{SourceDefault.String()}
 
+	// Detect the config file format from the configured path. The coexistence
+	// rule is: an explicitly configured .json path wins over a sibling .yaml
+	// file (the Loader uses only the path it was given), an explicit
+	// .yaml/.yml path is parsed as YAML, and any unknown extension falls back
+	// to JSON for backward compatibility.
+	format := ConfigFormatJSON
+	if l.filePath != "" {
+		if f, err := DetectConfigFormat(l.filePath); err == nil {
+			format = f
+		} else {
+			logger.DebugContext(ctx, "config_load_detect_format_fallback",
+				"op", "config_load_detect_format",
+				"path", l.filePath,
+				"format", ConfigFormatJSON.String(),
+			)
+		}
+	}
+	span.SetAttributes(tracing.Attribute{Key: "format", Value: format.String()})
+
 	// File layer.
 	if l.filePath != "" {
-		fileCfg, err := l.loadFile(ctx)
+		fileCfg, err := l.loadFile(ctx, format)
 		if err != nil {
 			span.SetStatus(tracing.SpanStatusError, err.Error())
 			return nil, err
@@ -151,14 +169,15 @@ func (l *Loader) Load(ctx context.Context) (*Config, error) {
 	return cfg, nil
 }
 
-// loadFile reads the configuration file (JSON) into a partial Config and emits
-// a per-source trace span.
-func (l *Loader) loadFile(ctx context.Context) (*Config, error) {
+// loadFile reads the configuration file (JSON or YAML, chosen by format) into
+// a partial Config and emits a per-source trace span.
+func (l *Loader) loadFile(ctx context.Context, format ConfigFormat) (*Config, error) {
 	span, _ := tracing.SpanFromContext(ctx, "config.load.file", tracing.SpanKindInternal)
 	defer span.End()
 	span.SetAttributes(
 		tracing.Attribute{Key: "source", Value: SourceFile.String()},
 		tracing.Attribute{Key: "path", Value: l.filePath},
+		tracing.Attribute{Key: "format", Value: format.String()},
 	)
 
 	data, err := os.ReadFile(l.filePath)
@@ -168,9 +187,9 @@ func (l *Loader) loadFile(ctx context.Context) (*Config, error) {
 	}
 
 	var cfg Config
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	if err := UnmarshalConfig(data, format, &cfg); err != nil {
 		span.SetStatus(tracing.SpanStatusError, err.Error())
-		return nil, fmt.Errorf("parse config file %s: %w", l.filePath, err)
+		return nil, fmt.Errorf("parse config file %s as %s: %w", l.filePath, format, err)
 	}
 
 	span.SetAttributes(tracing.Attribute{Key: "config_keys", Value: countKeys(&cfg)})
