@@ -56,7 +56,7 @@ type lsEntry struct {
 // are included; with long=true entries are rendered ls -l style; sort selects
 // name (default), time (modification time) or size ordering.
 func (t *LSTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, error) {
-	span, _ := tracing.SpanFromContext(ctx, "tools.ls", tracing.SpanKindInternal)
+	span, _ := tracing.SpanFromContext(ctx, "tool.call", tracing.SpanKindClient)
 	logger := tracing.NewTraceLogger(span, slog.Default())
 	defer span.End()
 

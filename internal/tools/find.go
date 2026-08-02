@@ -80,7 +80,7 @@ func (t *FindTool) Description() string {
 // directories ("d"); max_depth limits traversal depth. Results are returned as
 // one path per line.
 func (t *FindTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, error) {
-	span, _ := tracing.SpanFromContext(ctx, "tools.find", tracing.SpanKindInternal)
+	span, _ := tracing.SpanFromContext(ctx, "tool.call", tracing.SpanKindClient)
 	logger := tracing.NewTraceLogger(span, slog.Default())
 	defer span.End()
 

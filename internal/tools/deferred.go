@@ -88,7 +88,7 @@ func (r *DefaultDeferredToolRegistry) RegisterDeferred(_ context.Context, name s
 // error, a stub placeholder is stored so execution neither blocks nor panics and
 // the loader is retained for a later retry.
 func (r *DefaultDeferredToolRegistry) Load(ctx context.Context, name string) (ToolDefinition, error) {
-	span, _ := tracing.SpanFromContext(ctx, "tools.deferred.load", tracing.SpanKindInternal)
+	span, _ := tracing.SpanFromContext(ctx, "tool.call", tracing.SpanKindClient)
 	logger := tracing.NewTraceLogger(span, slog.Default())
 	defer span.End()
 

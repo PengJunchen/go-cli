@@ -86,7 +86,7 @@ type searchResult struct {
 // An empty query returns all tools. Results are sorted by name for
 // determinism.
 func (t *ToolSearchTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, error) {
-	span, _ := tracing.SpanFromContext(ctx, "tools.search", tracing.SpanKindInternal)
+	span, _ := tracing.SpanFromContext(ctx, "tool.call", tracing.SpanKindClient)
 	logger := tracing.NewTraceLogger(span, slog.Default())
 	defer span.End()
 

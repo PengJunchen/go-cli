@@ -14,7 +14,7 @@ const (
 	// mutationQueueName is the canonical name reported by DefaultFileMutationQueue.
 	mutationQueueName = "file-mutation-queue"
 	// mutationSpanName identifies the tracing span emitted per enqueued mutation.
-	mutationSpanName = "tools.mutation"
+	mutationSpanName = "tool.call"
 )
 
 // FileMutation is a single ordered write/edit mutation targeting a file. It is
@@ -124,7 +124,7 @@ func resolveRealPath(p string) string {
 // per-file worker, and hands the mutation off for FIFO processing. It returns a
 // receive-only result channel that yields a single FileMutationResult.
 func (q *DefaultFileMutationQueue) Enqueue(ctx context.Context, mutation FileMutation) (<-chan FileMutationResult, error) {
-	span, _ := tracing.SpanFromContext(ctx, mutationSpanName, tracing.SpanKindInternal)
+	span, _ := tracing.SpanFromContext(ctx, mutationSpanName, tracing.SpanKindClient)
 	defer span.End()
 
 	realPath := resolveRealPath(mutation.FilePath)

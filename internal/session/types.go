@@ -6,11 +6,16 @@ package session
 
 import (
 	"context"
+	"log/slog"
 	"time"
 )
 
 // EntryType categorizes a single immutable session entry.
 type EntryType string
+
+func init() {
+	slog.Debug("session types initialized", "entry_types", []string{"user", "assistant", "tool", "compaction", "system"})
+}
 
 const (
 	// EntryTypeUser is a message authored by the human user.
