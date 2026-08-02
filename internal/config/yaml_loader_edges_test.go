@@ -176,7 +176,7 @@ func TestAssignFromMap_NilPointerTarget(t *testing.T) {
 // Unknown keys and lowercase fallback
 // ---------------------------------------------------------------------------
 
-// TestUnmarshalConfig_YAMLUnknownKeysIgnored verifies unrecognised top-level
+// TestUnmarshalConfig_YAMLUnknownKeysIgnored verifies unrecognized top-level
 // keys are tolerated rather than causing an error.
 func TestUnmarshalConfig_YAMLUnknownKeysIgnored(t *testing.T) {
 	doc := "unknown_key: whatever\nmodel:\n  name: gpt-4\nanother: 5\n"
@@ -269,7 +269,7 @@ func TestYAMLConfigLoader_TopLevelList(t *testing.T) {
 	assert.Contains(t, err.Error(), "must be a mapping")
 }
 
-// TestYAMLConfigLoader_ExplicitJSONPath verifies the loader honours an explicit
+// TestYAMLConfigLoader_ExplicitJSONPath verifies the loader honors an explicit
 // .json path (no extension sniff surprise).
 func TestYAMLConfigLoader_ExplicitJSONPath(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "plain.cfg") // unknown ext

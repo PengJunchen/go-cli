@@ -14,7 +14,7 @@ import (
 // loadFromEnv: full coverage of every field the env layer reads
 // ---------------------------------------------------------------------------
 
-// TestLoadFromEnv_FullCoverage sets every recognised GO_CLI variable and
+// TestLoadFromEnv_FullCoverage sets every recognized GO_CLI variable and
 // asserts each one lands on the correct Config field. This complements the
 // sparse per-field checks in loader_test.go.
 func TestLoadFromEnv_FullCoverage(t *testing.T) {
@@ -87,7 +87,7 @@ func TestLoadFromEnv_InvalidNumericParsing(t *testing.T) {
 	assert.Equal(t, 0, cfg.Model.MaxTokens)
 }
 
-// TestLoadFromEnv_TracingEnabledFalse sets a recognised false boolean so the
+// TestLoadFromEnv_TracingEnabledFalse sets a recognized false boolean so the
 // explicit pointer landed as false rather than nil.
 func TestLoadFromEnv_TracingEnabledFalse(t *testing.T) {
 	t.Setenv("GO_CLI_TRACING_ENABLED", "false")

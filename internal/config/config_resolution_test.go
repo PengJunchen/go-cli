@@ -201,7 +201,7 @@ func TestValidator_ContainsHelper(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Load path behaviour
+// Load path behavior
 // ---------------------------------------------------------------------------
 
 // TestLoad_ValidationFailureViaLoader verifies a config that fails validation

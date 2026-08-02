@@ -66,7 +66,7 @@ func TestHTTPChatModel_roundTripErrorBody(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests)
-		_, _ = io.WriteString(w, "  rate limited  ")
+		_, _ = io.WriteString(w, "  rate limited  ") //nolint:errcheck // http test body write
 	}))
 	defer srv.Close()
 
@@ -131,10 +131,11 @@ func TestHTTPChatModel_GenerateUsageTokens(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{
+		body := `{
 			"choices":[{"message":{"role":"assistant","content":" hello "}}],
 			"usage":{"prompt_tokens":10,"completion_tokens":7}
-		}`)
+		}`
+		_, _ = io.WriteString(w, body) //nolint:errcheck // http test body write
 	}))
 	defer srv.Close()
 
@@ -175,7 +176,7 @@ func TestHTTPChatModel_StreamSuccess(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"streamed!"}}]}`)
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"content":"streamed!"}}]}`) //nolint:errcheck // http test body write
 	}))
 	defer srv.Close()
 
@@ -204,10 +205,11 @@ func TestHTTPChatModel_EmitsRequestSpan(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{
+		body := `{
 			"choices":[{"message":{"content":"ok"}}],
 			"usage":{"prompt_tokens":5,"completion_tokens":6}
-		}`)
+		}`
+		_, _ = io.WriteString(w, body) //nolint:errcheck // http test body write
 	}))
 	defer srv.Close()
 
@@ -248,7 +250,7 @@ func TestHTTPChatModel_EmitsErrorRequestSpan(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadRequest)
-		_, _ = io.WriteString(w, "bad")
+		_, _ = io.WriteString(w, "bad") //nolint:errcheck // http test body write
 	}))
 	defer srv.Close()
 
@@ -276,7 +278,7 @@ func TestNativeChatModel_EmitsRequestSpan(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = io.WriteString(w, `{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}`)
+		_, _ = io.WriteString(w, `{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}`) //nolint:errcheck // http test body write
 	}))
 	defer srv.Close()
 
