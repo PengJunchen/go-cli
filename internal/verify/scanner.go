@@ -447,6 +447,11 @@ func scanBuildTags(file string, node *ast.File, fset *token.FileSet) []Finding {
 	return findings
 }
 
+// nolintDirectivePattern matches Go //nolint (or // nolint) suppression
+// directives. Using a regex rather than a plain substring count improves
+// precision, so prose that merely mentions "nolint" is not counted.
+var nolintDirectivePattern = regexp.MustCompile(`//\s*nolint`)
+
 // scanNolint counts //nolint directives and flags excess (SCAN-007).
 func scanNolint(file string, _ *ast.File, _ *token.FileSet, threshold int) []Finding {
 	var findings []Finding
@@ -456,7 +461,7 @@ func scanNolint(file string, _ *ast.File, _ *token.FileSet, threshold int) []Fin
 		return findings
 	}
 
-	count := strings.Count(string(data), "nolint")
+	count := len(nolintDirectivePattern.FindAllString(string(data), -1))
 
 	if count > threshold {
 		findings = append(findings, Finding{

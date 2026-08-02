@@ -332,6 +332,198 @@ func D() {}
 	}
 }
 
+// TestScanner_NoHardcodedSecretOnShortText verifies that strings shorter than
+// 20 characters or non-secret-looking text do NOT trigger SCAN-003.
+func TestScanner_NoHardcodedSecretOnShortText(t *testing.T) {
+	dir := t.TempDir()
+
+	code := `package example
+
+var key = "short"
+
+func Get() string {
+	return "production_mode"
+}
+`
+	err := os.WriteFile(filepath.Join(dir, "config.go"), []byte(code), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultScanConfig(dir)
+	report, err := Scan(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if hasRule(report, "SCAN-003") {
+		t.Errorf("expected no SCAN-003 finding for short/non-secret text, got:\n%s", report.FormatText())
+	}
+}
+
+// TestScanner_NoTestURLOnProductionText verifies that non-test/non-URL strings
+// do NOT trigger SCAN-004.
+func TestScanner_NoTestURLOnProductionText(t *testing.T) {
+	dir := t.TempDir()
+
+	code := `package example
+
+const Endpoint = "https://example.com/api/v1"
+
+func Get() string {
+	return "production api integration"
+}
+`
+	err := os.WriteFile(filepath.Join(dir, "url.go"), []byte(code), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultScanConfig(dir)
+	report, err := Scan(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if hasRule(report, "SCAN-004") {
+		t.Errorf("expected no SCAN-004 finding for production text, got:\n%s", report.FormatText())
+	}
+}
+
+// TestScanner_NoBuildTagOnLegitimateTags verifies that legitimate build tags
+// (without test/integration constraints) do NOT trigger SCAN-005.
+func TestScanner_NoBuildTagOnLegitimateTags(t *testing.T) {
+	dir := t.TempDir()
+
+	code := `//go:build linux && amd64
+
+package example
+
+func Run() {}
+`
+	err := os.WriteFile(filepath.Join(dir, "platform.go"), []byte(code), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultScanConfig(dir)
+	report, err := Scan(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if hasRule(report, "SCAN-005") {
+		t.Errorf("expected no SCAN-005 finding for legitimate build tag, got:\n%s", report.FormatText())
+	}
+}
+
+// TestScanner_NoNolintBelowThreshold verifies that nolint directives at or
+// below the threshold do NOT trigger SCAN-007.
+func TestScanner_NoNolintBelowThreshold(t *testing.T) {
+	dir := t.TempDir()
+
+	code := `package example
+
+//nolint:errcheck
+func A() {}
+
+// nolint:unused
+func B() {}
+`
+	err := os.WriteFile(filepath.Join(dir, "nolint.go"), []byte(code), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultScanConfig(dir)
+	cfg.NolintThreshold = 3
+	report, err := Scan(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if hasRule(report, "SCAN-007") {
+		t.Errorf("expected no SCAN-007 finding below threshold, got:\n%s", report.FormatText())
+	}
+}
+
+// TestScanConfigMergePriority_Violation verifies SCAN-011 fires when a
+// higher-priority env value is later overwritten by a lower-priority file value.
+func TestScanConfigMergePriority_Violation(t *testing.T) {
+	dir := t.TempDir()
+
+	code := `package example
+
+import "os"
+
+type Config struct {
+	Token string
+}
+
+func Load() Config {
+	cfg := Config{}
+	cfg.Token = os.Getenv("TOKEN")
+	cfg.Token = loadFromFile("cfg.json")
+	return cfg
+}
+
+func loadFromFile(path string) string { return path }
+`
+	err := os.WriteFile(filepath.Join(dir, "config.go"), []byte(code), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultScanConfig(dir)
+	report, err := Scan(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if !hasRule(report, "SCAN-011") {
+		t.Errorf("expected SCAN-011 finding for env overwritten by file, got:\n%s", report.FormatText())
+	}
+}
+
+// TestScanConfigMergePriority_Compliant verifies SCAN-011 does NOT fire when
+// config fields are assigned in ascending priority (default → file → env).
+func TestScanConfigMergePriority_Compliant(t *testing.T) {
+	dir := t.TempDir()
+
+	code := `package example
+
+import "os"
+
+type Config struct {
+	Port int
+}
+
+func Load() Config {
+	cfg := Config{Port: 8080}
+	cfg.Port = loadPortFromFile("cfg.json")
+	cfg.Port = lookupPortFromEnv()
+	return cfg
+}
+
+func loadPortFromFile(path string) int { return 8080 }
+func lookupPortFromEnv() int           { return 9090 }
+`
+	err := os.WriteFile(filepath.Join(dir, "config.go"), []byte(code), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultScanConfig(dir)
+	report, err := Scan(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if hasRule(report, "SCAN-011") {
+		t.Errorf("expected no SCAN-011 finding for ascending priority, got:\n%s", report.FormatText())
+	}
+}
+
 func TestScanner_ExcludesTestFiles(t *testing.T) {
 	dir := t.TempDir()
 

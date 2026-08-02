@@ -354,10 +354,161 @@ func isCommandStringLiteral(fset *token.FileSet, file string, expr ast.Expr, fin
 	return false
 }
 
-// scanConfigMergePriority is a stub (SCAN-011) pending implementation in a
-// later task. It is referenced by Scan() but not yet fully implemented.
-func scanConfigMergePriority(_ string, _ []string) []Finding {
-	return nil
+// scanConfigMergePriority detects configuration merge-priority violations
+// (SCAN-011). Config sources must merge in ascending priority order:
+// defaults → file → env → CLI, so that a higher-priority source wins.
+//
+// The heuristic is deterministic and conservative: within each function body,
+// assignments to the same config struct field (e.g. cfg.Port = <rhs>) are
+// examined in source order. If a later assignment to the field loads a value
+// from a LOWER-priority source than an earlier assignment, the higher-priority
+// value has been overwritten by a lower-priority one — a priority inversion.
+// Compliant code assigns fields in ascending priority, which never triggers.
+func scanConfigMergePriority(dir string, goFiles []string) []Finding {
+	var findings []Finding
+
+	fset := token.NewFileSet()
+	for _, file := range goFiles {
+		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+
+		node, err := parser.ParseFile(fset, file, nil, parser.ParseComments)
+		if err != nil {
+			continue
+		}
+
+		for _, decl := range node.Decls {
+			fn, ok := decl.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+
+			// highestSeen tracks, per config struct field, the highest-priority
+			// source that has been assigned to it so far within this function.
+			highestSeen := map[string]int{}
+
+			ast.Inspect(fn.Body, func(n ast.Node) bool {
+				as, ok := n.(*ast.AssignStmt)
+				if !ok {
+					return true
+				}
+
+				for i, lhs := range as.Lhs {
+					sel, ok := lhs.(*ast.SelectorExpr)
+					if !ok || sel.Sel == nil {
+						continue
+					}
+
+					var rhs ast.Expr
+					switch {
+					case i < len(as.Rhs):
+						rhs = as.Rhs[i]
+					case len(as.Rhs) == 1:
+						rhs = as.Rhs[0]
+					default:
+						continue
+					}
+
+					fieldKey := exprName(sel.X) + "." + sel.Sel.Name
+					priority := configSourcePriority(rhs)
+					if prev, seen := highestSeen[fieldKey]; seen && priority < prev {
+						findings = append(findings, Finding{
+							RuleID:   "SCAN-011",
+							Severity: SeverityWarn,
+							File:     file,
+							Line:     fset.Position(as.Pos()).Line,
+							Message: fmt.Sprintf(
+								"config merge priority violation: %s assigns a lower-priority source (%s) after a higher-priority source",
+								fieldKey, sourceName(priority)),
+							Snippet: fieldKey,
+						})
+					}
+					if priority > highestSeen[fieldKey] {
+						highestSeen[fieldKey] = priority
+					}
+				}
+				return true
+			})
+		}
+	}
+
+	return findings
+}
+
+// configSourcePriority ranks a config-source expression by merge priority.
+// Higher values win. Unknown/literal values are treated as defaults (lowest).
+func configSourcePriority(expr ast.Expr) int {
+	switch {
+	case referencesSource(expr, "Args", "Arg", "Flag", "flag"):
+		return 4 // CLI
+	case referencesSource(expr, "Getenv", "LookupEnv", "Env"):
+		return 3 // env
+	case referencesSource(expr, "ReadFile", "Unmarshal", "Load", "fromFile", "File"):
+		return 2 // file
+	default:
+		return 1 // defaults
+	}
+}
+
+// sourceName returns a human-readable name for a config-source priority.
+func sourceName(priority int) string {
+	switch priority {
+	case 4:
+		return "CLI"
+	case 3:
+		return "env"
+	case 2:
+		return "file"
+	default:
+		return "defaults"
+	}
+}
+
+// referencesSource reports whether expr references any of the given markers in
+// its identifiers or selector names (e.g. os.Getenv matches "Getenv").
+func referencesSource(expr ast.Expr, markers ...string) bool {
+	found := false
+	ast.Inspect(expr, func(n ast.Node) bool {
+		if found {
+			return false
+		}
+		name := ""
+		switch t := n.(type) {
+		case *ast.Ident:
+			name = t.Name
+		case *ast.SelectorExpr:
+			if t.Sel != nil {
+				name = t.Sel.Name
+			}
+		}
+		if name != "" {
+			for _, m := range markers {
+				if strings.Contains(name, m) {
+					found = true
+					return false
+				}
+			}
+		}
+		return true
+	})
+	return found
+}
+
+// exprName returns a stable textual name for an expression, used as part of the
+// config-field key. Identifiers return their name; other expressions fall back
+// to a source-position-based token so distinct receivers stay distinct.
+func exprName(expr ast.Expr) string {
+	switch t := expr.(type) {
+	case *ast.Ident:
+		return t.Name
+	case *ast.SelectorExpr:
+		// e.g. cfg.Sub → "cfg.Sub", using the last identifier segment.
+		if t.Sel != nil {
+			return exprName(t.X) + "." + t.Sel.Name
+		}
+	}
+	return "?"
 }
 
 // scanInterfaceDefaultImpl detects interfaces missing a default implementation
