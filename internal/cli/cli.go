@@ -8,6 +8,8 @@ import (
 	"io"
 	"log/slog"
 	"time"
+
+	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
 // Version is the CLI version, set at build time via ldflags.
@@ -150,26 +152,39 @@ func RunWithRegistry(ctx context.Context, cfg Config, args []string, out io.Writ
 }
 
 // runCommand executes cmd with args, logging start/end telemetry and checking
-// for context cancellation before executing.
+// for context cancellation before executing. It emits a command.dispatch span
+// so downstream harness/turn/tool spans are nested under it.
 func runCommand(ctx context.Context, cfg Config, cmd Command, args []string) error {
 	name := cmd.Name()
 	start := time.Now()
+
+	span, spanCtx := tracing.SpanFromContext(ctx, "command.dispatch", tracing.SpanKindInternal)
+	span.SetAttributes(
+		tracing.Attribute{Key: "command", Value: name},
+		tracing.Attribute{Key: "args_count", Value: len(args)},
+	)
 	slog.Default().Debug("command_start", "command", name, "args_len", len(args))
 
 	if err := ctx.Err(); err != nil {
 		slog.Default().Warn("context canceled before command", "command", name, "err", err)
+		span.SetStatus(tracing.SpanStatusError, err.Error())
+		span.End()
 		return err
 	}
 
-	if err := cmd.Run(ctx, cfg, args); err != nil {
+	if err := cmd.Run(spanCtx, cfg, args); err != nil {
 		if err2 := ctx.Err(); err2 != nil {
 			slog.Default().Warn("context canceled during command", "command", name, "err", err2)
 		}
 		slog.Default().Info("command_end", "command", name, "success", false, "duration_ms", time.Since(start).Milliseconds())
+		span.SetStatus(tracing.SpanStatusError, err.Error())
+		span.End()
 		return newExecutionError(name, err)
 	}
 
 	slog.Default().Info("command_end", "command", name, "success", true, "duration_ms", time.Since(start).Milliseconds())
+	span.SetStatus(tracing.SpanStatusOK, "")
+	span.End()
 	return nil
 }
 
