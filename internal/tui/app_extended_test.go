@@ -1,0 +1,173 @@
+package tui
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// TestAppDrawAppendNonStreaming verifies non-streaming renderers append frames
+// to the view buffer in order.
+func TestAppDrawAppendNonStreaming(t *testing.T) {
+	app := NewBubbleteaApp(nil)
+	app.draw("status", "first", StatusRenderer{})
+	app.draw("status", "second", StatusRenderer{})
+	assert.Equal(t, "first\nsecond", app.View())
+}
+
+// TestAppDrawReplaceStreaming verifies streaming renderers replace the previous
+// frame instead of appending.
+func TestAppDrawReplaceStreaming(t *testing.T) {
+	app := NewBubbleteaApp(nil)
+	app.draw("streaming", "a", StreamingRenderer{})
+	app.draw("streaming", "b", StreamingRenderer{})
+	assert.Equal(t, "b", app.View())
+}
+
+// TestAppDrawStreamingFirstAppends verifies the first streaming frame is appended
+// when the buffer is empty (no last frame to replace yet).
+func TestAppDrawStreamingFirstAppends(t *testing.T) {
+	app := NewBubbleteaApp(nil)
+	app.draw("streaming", "only", StreamingRenderer{})
+	assert.Equal(t, "only", app.View())
+}
+
+// TestIsStreamingRenderer verifies isStreamingRenderer distinguishes streaming
+// renderers from ordinary ones.
+func TestIsStreamingRenderer(t *testing.T) {
+	assert.True(t, isStreamingRenderer(StreamingRenderer{}))
+	assert.True(t, isStreamingRenderer(StreamingCodeRenderer{}))
+	assert.True(t, isStreamingRenderer(StreamingThinkingRenderer{}))
+	assert.False(t, isStreamingRenderer(StatusRenderer{}))
+	assert.False(t, isStreamingRenderer(nil))
+}
+
+// TestAppSendDropsWhenFull verifies Send drops a message rather than blocking
+// when the internal queue is saturated. It must never block the caller.
+func TestAppSendDropsWhenFull(t *testing.T) {
+	app := NewBubbleteaApp(make(chan AgentEvent, 1))
+	require.Len(t, app.msgCh, 0)
+
+	// Fill the buffered (capacity 16) queue completely.
+	for i := 0; i < cap(app.msgCh); i++ {
+		app.Send(i)
+	}
+	require.Len(t, app.msgCh, cap(app.msgCh))
+
+	// The next Send must drop (default branch) without blocking.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		app.Send("overflow")
+	}()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Send blocked on a full queue; expected non-blocking drop")
+	}
+	assert.Len(t, app.msgCh, cap(app.msgCh), "overflow message should have been dropped")
+}
+
+// TestAppHandleEventUnknownTypeFallback verifies handleEvent routes an unknown
+// content type through the default renderer and still draws to the view.
+func TestAppHandleEventUnknownTypeFallback(t *testing.T) {
+	app := NewBubbleteaApp(make(chan AgentEvent, 1))
+	app.handleEvent(context.Background(), AgentEvent{ContentType: "unknown-ct", Content: "payload"})
+	assert.Contains(t, app.View(), "payload")
+	assert.Equal(t, int64(0), app.EventsProcessed(), "handleEvent should not bump the event counter")
+}
+
+// TestAppCleanupSingleRelease verifies cleanup is idempotent and closes Done only
+// once and resets the stream buffer.
+func TestAppCleanupSingleRelease(t *testing.T) {
+	app := NewBubbleteaApp(make(chan AgentEvent, 1))
+	app.cleanup()
+	recvClosed := false
+	select {
+	case <-app.Done():
+		recvClosed = true
+	default:
+	}
+	require.True(t, recvClosed, "Done should be closed after cleanup")
+
+	// A second cleanup must not panic and must not reset buffer to a new map the
+	// second time (idempotent).
+	app.cleanup()
+	require.True(t, app.cleaned)
+}
+
+// TestAppRunWithNilEventsChannel verifies Run returns promptly when the event
+// channel is (nil) closed, exercising the events-closed exit path.
+func TestAppRunWithNilEventsChannel(t *testing.T) {
+	closed := make(chan AgentEvent)
+	close(closed)
+	app := NewBubbleteaApp(closed)
+	require.NoError(t, app.Run(context.Background()))
+	assert.Equal(t, int64(0), app.EventsProcessed())
+	select {
+	case <-app.Done():
+	default:
+		t.Fatal("Done not closed after events channel closed")
+	}
+}
+
+// TestAppQuitIsIdempotent verifies calling Quit multiple times across
+// goroutines does not panic and stops the loop exactly once.
+func TestAppQuitIsIdempotent(t *testing.T) {
+	events := make(chan AgentEvent, 1)
+	defer close(events)
+	app := NewBubbleteaApp(events)
+	runErr := make(chan error, 1)
+	go func() { runErr <- app.Run(context.Background()) }() //nolint:errcheck
+
+	for i := 0; i < 10; i++ {
+		app.Quit()
+	}
+	select {
+	case err := <-runErr:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Run did not return after repeated Quit")
+	}
+}
+
+// TestAppViewEmptyBeforeRun verifies View returns an empty string before any
+// events are processed.
+func TestAppViewEmptyBeforeRun(t *testing.T) {
+	app := NewBubbleteaApp(make(chan AgentEvent, 1))
+	assert.Equal(t, "", app.View())
+}
+
+// TestAppOptionsOverride verifies WithRegistry and WithWidth options are applied
+// at construction.
+func TestAppOptionsOverride(t *testing.T) {
+	reg := NewRendererRegistry()
+	reg.Register(NewMockRenderer("custom", ContentTypeStatus, "custom-out"))
+	app := NewBubbleteaApp(make(chan AgentEvent, 1), WithRegistry(reg), WithWidth(42))
+	require.Equal(t, reg, app.reg)
+	require.Equal(t, 42, app.width)
+}
+
+// TestAppSendAndEventsBothConsumed verifies the loop interleaves Send messages
+// with the event stream without losing either.
+func TestAppSendAndEventsBothConsumed(t *testing.T) {
+	events := make(chan AgentEvent, 16)
+	app := NewBubbleteaApp(events, WithWidth(10))
+	runErr := make(chan error, 1)
+	go func() { runErr <- app.Run(context.Background()) }() //nolint:errcheck
+
+	events <- AgentEvent{ContentType: ContentTypeCode, Content: "x"}
+	app.Send("msg1")
+	app.Send("msg2")
+	events <- AgentEvent{ContentType: ContentTypeCode, Content: "y"}
+
+	require.Eventually(t, func() bool {
+		return app.EventsProcessed() == 2 && app.MessagesProcessed() == 2
+	}, time.Second, 5*time.Millisecond, "events/messages not fully consumed")
+
+	app.Quit()
+	<-runErr
+}

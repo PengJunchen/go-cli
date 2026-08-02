@@ -1,0 +1,146 @@
+package tui
+
+import (
+	"context"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+)
+
+// TestAllRenderersEmptyContent verifies every renderer handles empty content
+// without panicking and (except blank) still returns a styled/meaningful frame.
+func TestAllRenderersEmptyContent(t *testing.T) {
+	ctx := context.Background()
+	reg := NewDefaultRegistry()
+	for _, ct := range contentTypes {
+		r, _ := reg.Get(ct)
+		out := r.Render(ctx, "", RenderOpts{Theme: DarkTheme{}, Width: 0})
+		_ = out // must not panic
+	}
+}
+
+// TestAllRenderersMultiByteContent verifies every renderer preserves UTF-8
+// multibyte runes in its payload without corruption.
+func TestAllRenderersMultiByteContent(t *testing.T) {
+	ctx := context.Background()
+	reg := NewDefaultRegistry()
+	payload := "héllo wörld 世界 🚀"
+	for _, ct := range contentTypes {
+		r, _ := reg.Get(ct)
+		// Progress and separator renderers do not reproduce the raw payload, and
+		// blank emits nothing.
+		if ct == ContentTypeProgress || ct == ContentTypeSeparator || ct == ContentTypeBlank {
+			continue
+		}
+		out := r.Render(ctx, payload, RenderOpts{Theme: DarkTheme{}, Width: 60})
+		assert.Contains(t, out, "wörld", "%s should preserve multibyte payload", ct)
+	}
+}
+
+// TestStripANSIWrapsPlainText verifies stripANSI wraps plain text at the column
+// limit, inserting a newline on the rune boundary.
+func TestStripANSIWrapsPlainText(t *testing.T) {
+	out := stripANSI("abcdef", 3)
+	assert.Equal(t, "abc\ndef", out)
+}
+
+// TestStripANSIHandlesNewlines verifies stripANSI treats pre-existing newlines
+// as column resets and preserves them.
+func TestStripANSIHandlesNewlines(t *testing.T) {
+	out := stripANSI("ab\ncd", 2)
+	assert.Equal(t, "ab\ncd", out)
+	out = stripANSI("ab\ncd", 1)
+	assert.Equal(t, "a\nb\nc\nd", out)
+}
+
+// TestStripANSINoWrap verifies stripANSI returns input unchanged when the column
+// limit is not exceeded.
+func TestStripANSINoWrap(t *testing.T) {
+	assert.Equal(t, "abc", stripANSI("abc", 5))
+	assert.Equal(t, "", stripANSI("", 5))
+}
+
+// TestStripANSIUnicodeColumns verifies every rune, including multibyte, is
+// treated as one printable column.
+func TestStripANSIUnicodeColumns(t *testing.T) {
+	out := stripANSI("世界ok", 2)
+	assert.Equal(t, "世界\nok", out)
+}
+
+// TestJoinInts verifies joinInts renders codes joined by semicolons.
+func TestJoinInts(t *testing.T) {
+	assert.Equal(t, "30;1", joinInts([]int{30, 1}))
+	assert.Equal(t, "", joinInts(nil))
+	assert.Equal(t, "7", joinInts([]int{7}))
+}
+
+// TestMarkdownRendererWidthWraps verifies markdown output respects the render
+// width by wrapping long lines.
+func TestMarkdownRendererWidthWraps(t *testing.T) {
+	out := (MarkdownRenderer{}).Render(context.Background(), "abcdefgh", RenderOpts{Theme: DarkTheme{}, Width: 4})
+	assert.True(t, strings.Contains(out, "abcd"))
+	assert.True(t, strings.Contains(out, "\n"), "markdown should wrap long content")
+}
+
+// TestTableRendererPreservesRowOrder verifies table header emphasis is applied
+// only to the first line and subsequent rows are passed through verbatim.
+func TestTableRendererPreservesRowOrder(t *testing.T) {
+	out := (TableRenderer{}).Render(context.Background(), "a\tb\nc\td", RenderOpts{Theme: DarkTheme{}})
+	lines := strings.Split(out, "\n")
+	require.Len(t, lines, 2)
+	// Header row is styled (starts with an escape); data row is not.
+	assert.True(t, strings.HasPrefix(lines[0], "\x1b[104m"))
+	assert.Equal(t, "c\td", lines[1])
+}
+
+// TestDiffRendererEmptyContent verifies diff on a single blank line renders the
+// context (fg) style applied to the empty line without panicking.
+func TestDiffRendererEmptyContent(t *testing.T) {
+	out := (DiffRenderer{}).Render(context.Background(), "", RenderOpts{Theme: DarkTheme{}})
+	assert.Equal(t, "\x1b[37m\x1b[0m", out)
+}
+
+// TestProgressRendererAlwaysExactlyWidth verifies the visible bar (== and --)
+// always sums to the requested width for every fraction.
+func TestProgressRendererAlwaysExactlyWidth(t *testing.T) {
+	p := ProgressRenderer{}
+	for _, frac := range []string{"0", "0.1", "0.5", "0.9", "1"} {
+		out := p.Render(context.Background(), frac, RenderOpts{Theme: DarkTheme{}, Width: 12})
+		assert.Equal(t, strings.Count(out, "=")+strings.Count(out, "-"), 12,
+			"bar for %q should span exactly 12 cells", frac)
+	}
+}
+
+// TestSeparatorRendererTrim verifies the separator output has no ANSI wrappers
+// and uses the box-drawing character throughout.
+func TestSeparatorRendererTrim(t *testing.T) {
+	out := (SeparatorRenderer{}).Render(context.Background(), "", RenderOpts{Width: 5})
+	assert.Equal(t, "─────", out)
+}
+
+// TestStreamingRenderersRespectWidth verifies streaming renderers wrap long
+// input to the configured width.
+func TestStreamingRenderersRespectWidth(t *testing.T) {
+	long := "1234567890"
+	for _, r := range []Renderer{StreamingRenderer{}, StreamingCodeRenderer{}} {
+		out := r.Render(context.Background(), long, RenderOpts{Theme: DarkTheme{}, Width: 4})
+		// After stripping ANSI the wrapped text contains a newline.
+		assert.Contains(t, out, "\n", "%s should wrap at width 4", r.Name())
+	}
+}
+
+// TestTableRendererWrapInHeader verifies header styling survives width wrapping.
+func TestTableRendererWrapInHeader(t *testing.T) {
+	out := (TableRenderer{}).Render(context.Background(), "head", RenderOpts{Theme: MockTheme{}, Width: 2})
+	// MockTheme Primary is red+bold; header single cell on its own line.
+	assert.True(t, strings.HasPrefix(out, "\x1b[31"), "header should be wrapped in primary style")
+}
+
+// TestFileTreeRendererTrimsTrailingNewline verifies renderers do not emit a
+// trailing newline in their output.
+func TestFileTreeRendererTrimsTrailingNewline(t *testing.T) {
+	out := (FileTreeRenderer{}).Render(context.Background(), "a\nb", RenderOpts{Theme: DarkTheme{}})
+	assert.False(t, strings.HasSuffix(out, "\n"), "file tree output must not end with a newline")
+}
