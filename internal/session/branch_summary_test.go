@@ -227,3 +227,18 @@ func findSummaryEntry(t *testing.T, tree *DefaultSessionTree) *SessionEntry {
 	}
 	return nil
 }
+
+func TestBranchSummaryRegistry(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	orig := GetBranchSummary()
+	defer RegisterBranchSummary(orig)
+
+	RegisterBranchSummary(nil)
+	got := GetBranchSummary()
+	require.NotNil(t, got)
+	assert.Equal(t, "default-branch-summary", got.Name())
+
+	custom := &testBranchSummary{summary: "reg"}
+	RegisterBranchSummary(custom)
+	assert.Same(t, custom, GetBranchSummary())
+}

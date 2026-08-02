@@ -86,6 +86,8 @@ type ScanConfig struct {
 	CheckTestURL bool
 	// CheckBuildTag enables SCAN-005 (build tags in production files).
 	CheckBuildTag bool
+	// CheckExportOnlyUsedByTest enables SCAN-006 (exported symbols only referenced by _test.go).
+	CheckExportOnlyUsedByTest bool
 	// CheckNolint enables SCAN-007 (nolint directive threshold).
 	CheckNolint bool
 	// NolintThreshold is the maximum allowed //nolint directives per file.
@@ -115,6 +117,7 @@ func DefaultScanConfig(dir string) ScanConfig {
 		CheckHardcoded:            true,
 		CheckTestURL:              true,
 		CheckBuildTag:             true,
+		CheckExportOnlyUsedByTest: true,
 		CheckNolint:               true,
 		NolintThreshold:           3,
 		CheckSlogUsage:            true,
@@ -167,7 +170,8 @@ func Scan(cfg ScanConfig) (*ScanReport, error) {
 
 	needsPkgScan := cfg.CheckSlogUsage || cfg.CheckHardcodedDefaults ||
 		cfg.CheckCommandRouting || cfg.CheckConfigMergePriority ||
-		cfg.CheckInterfaceDefaultImpl || cfg.CheckConcreteInInterface
+		cfg.CheckInterfaceDefaultImpl || cfg.CheckConcreteInInterface ||
+		cfg.CheckExportOnlyUsedByTest
 
 	err := filepath.Walk(cfg.Dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
@@ -195,6 +199,16 @@ func Scan(cfg ScanConfig) (*ScanReport, error) {
 				if cfg.CheckHardcoded {
 					findings := scanHardcodedSecrets(path)
 					report.Findings = append(report.Findings, findings...)
+				}
+				// Even though test files are excluded from per-file checks,
+				// they must still be collected into pkgGroups so that
+				// package-level rules (e.g. SCAN-006) can analyze them.
+				if needsPkgScan {
+					pkgDir := filepath.Dir(path)
+					if _, ok := pkgGroups[pkgDir]; !ok {
+						pkgGroups[pkgDir] = &pkgGroup{dir: pkgDir}
+					}
+					pkgGroups[pkgDir].files = append(pkgGroups[pkgDir].files, path)
 				}
 				return nil
 			}
@@ -256,6 +270,9 @@ func Scan(cfg ScanConfig) (*ScanReport, error) {
 	for _, pkg := range pkgGroups {
 		if cfg.CheckSlogUsage {
 			report.Findings = append(report.Findings, scanSlogUsage(pkg.dir, pkg.files)...)
+		}
+		if cfg.CheckExportOnlyUsedByTest {
+			report.Findings = append(report.Findings, scanExportOnlyUsedByTest(pkg.dir, pkg.files)...)
 		}
 		if cfg.CheckHardcodedDefaults {
 			report.Findings = append(report.Findings, scanHardcodedDefaults(pkg.dir, pkg.files)...)

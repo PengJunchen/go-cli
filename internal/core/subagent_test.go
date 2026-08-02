@@ -324,6 +324,31 @@ func TestSubAgentFactoryCreate(t *testing.T) {
 	require.NotNil(t, f2)
 }
 
+// TestSubAgentFactoryForwardsRunnerFactory proves the pluggable runner seam:
+// a factory built with WithSubAgentRunnerFactory must hand the custom runner
+// to every created sub-agent. The blocking runner emits the prompt then blocks,
+// behavior the default simulated runner would not exhibit.
+func TestSubAgentFactoryForwardsRunnerFactory(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	factory := NewSubAgentFactory(WithSubAgentRunnerFactory(blockingFactory))
+	sub, err := factory.Create(context.Background(), "custom-runner", SubAgentConfig{Model: "mock", MaxTurns: 2})
+	require.NoError(t, err)
+	assert.Equal(t, "custom-runner", sub.Name())
+
+	ch, err := sub.Run(context.Background(), "block me")
+	require.NoError(t, err)
+
+	ev := <-ch
+	assert.Equal(t, "user", ev.Kind)
+	assert.Equal(t, "block me", ev.Content)
+
+	require.NoError(t, sub.Interrupt(context.Background()))
+	_, werr := sub.Wait(context.Background())
+	require.Error(t, werr)
+	drainChan(ch)
+}
+
 // subFactoryStub is a minimal SubAgentFactory used to exercise the registry.
 type subFactoryStub struct{}
 

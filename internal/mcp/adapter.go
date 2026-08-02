@@ -178,22 +178,34 @@ func (c *adapterCore) Connect(ctx context.Context) error {
 // Disconnect tears down the session and stops any spawned subprocess.
 func (c *adapterCore) Disconnect(_ context.Context) error {
 	c.mu.Lock()
-	defer c.mu.Unlock()
 
 	if !c.connected {
+		c.mu.Unlock()
 		return nil
 	}
 	c.connected = false
 
 	var err error
+	var waitProc *exec.Cmd
 	if !c.externalConn && c.conn != nil {
-		err = c.conn.Close()
+		if closeErr := c.conn.Close(); closeErr != nil {
+			err = closeErr
+		}
+		c.conn = nil
 	}
 	if c.proc != nil {
+		waitProc = c.proc
 		if killErr := c.proc.Process.Kill(); err == nil {
 			err = killErr
 		}
+		c.proc = nil
 	}
+	c.mu.Unlock()
+
+	if waitProc != nil {
+		_ = waitProc.Wait() //nolint:errcheck // best-effort wait for process exit
+	}
+
 	slog.Info("mcp.disconnect", "server", c.cfg.Name, "transport", c.cfg.Transport)
 	return err
 }

@@ -195,3 +195,34 @@ func TestEditEmitsToolCallSpan(t *testing.T) {
 	require.Eventually(t, func() bool { return e.count() >= 2 }, 2*time.Second, 10*time.Millisecond)
 	assert.True(t, e.hasSpan("tool.call"), "expected a tool.call span to be exported")
 }
+
+func TestEditPreservesFilePermissions(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "executable.sh")
+	require.NoError(t, os.WriteFile(path, []byte("#!/bin/sh\necho old\n"), 0o755)) //nolint:gosec // G306: executable bit is the fixture under test
+
+	tool := NewEditFileTool()
+	_, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{
+			"file_path":  path,
+			"old_string": "echo old",
+			"new_string": "echo new",
+		},
+	})
+	require.NoError(t, err)
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "echo new")
+	assert.NotContains(t, string(data), "echo old")
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o755), info.Mode().Perm())
+
+	entries, err := os.ReadDir(dir)
+	require.NoError(t, err)
+	assert.Len(t, entries, 1)
+}

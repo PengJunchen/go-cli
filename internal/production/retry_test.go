@@ -170,3 +170,20 @@ func TestRetryPolicyConcurrent(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+func TestCategorizedErrorUnwrap(t *testing.T) {
+	sentinel := errors.New("root cause")
+	wrapped := NewError(ErrorTransient, sentinel)
+
+	require.True(t, errors.Is(wrapped, sentinel))
+	require.Equal(t, "root cause", wrapped.Error())
+
+	inner := errors.New("inner")
+	mid := NewError(ErrorTransient, inner)
+	outer := NewError(ErrorFatal, mid)
+	require.True(t, errors.Is(outer, inner), "errors.Is must traverse nested CategorizedError wrappers")
+}
+
+func TestNewErrorNilReturnsNil(t *testing.T) {
+	require.Nil(t, NewError(ErrorTransient, nil))
+}

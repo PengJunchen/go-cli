@@ -295,22 +295,18 @@ func TestGuardContextCancellation(t *testing.T) {
 func TestOutputGuardChainCombinesResults(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
-	// Run the blocking guards before the length guard so detection operates on
-	// the full text rather than a truncated prefix.
 	chain := NewOutputGuardChain([]OutputGuard{
 		NewCodeInjectionGuard(),
 		NewLengthGuard(8),
 		NewRegexOutputGuard([]string{`banned+`}),
 	})
 
-	// Safe within length: only the length guard truncates.
 	res, err := chain.Check(ctx, "hello world")
 	require.NoError(t, err)
 	assert.False(t, res.Allowed, "truncation marks the chain as not-allowed")
 	assert.Equal(t, "hello wo", res.Sanitized)
 	assert.Equal(t, GuardLow, res.Severity)
 
-	// Injection severity dominates the combined result.
 	res, err = chain.Check(ctx, "DROP TABLE users; more text beyond limit")
 	require.NoError(t, err)
 	assert.False(t, res.Allowed)
@@ -318,6 +314,40 @@ func TestOutputGuardChainCombinesResults(t *testing.T) {
 
 	assert.Len(t, chain.Guards(), 3)
 	assert.Equal(t, "output-guard-chain", chain.Name())
+}
+
+func TestOutputGuardChainBlocksClearSanitized(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx := context.Background()
+
+	chain := NewOutputGuardChain([]OutputGuard{
+		NewPIIOutputGuard(),
+	})
+
+	res, err := chain.Check(ctx, "contact me at joe@example.com please")
+	require.NoError(t, err)
+	assert.False(t, res.Allowed, "PII guard should block")
+	assert.Empty(t, res.Sanitized, "chain must clear Sanitized when guard blocks with empty Sanitized")
+}
+
+func TestOutputGuardMiddlewareChainBlocksDoesNotLeak(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx := context.Background()
+	secret := "the secret-999 is here"
+	next := func(_ context.Context, _ extension.ModelRequest) (extension.ModelResponse, error) {
+		return extension.ModelResponse{Text: secret}, nil
+	}
+
+	chain := NewOutputGuardChain([]OutputGuard{
+		NewRegexOutputGuard([]string{`secret-[\d]+`}),
+	})
+	mw := NewOutputGuardMiddleware(chain)
+	wrapped := mw.WrapModel(next)
+
+	resp, err := wrapped(ctx, extension.ModelRequest{Prompt: "leak?"})
+	require.NoError(t, err)
+	assert.Equal(t, blockedOutputMessage, resp.Text, "chain-blocked output must not leak original text")
+	assert.NotContains(t, resp.Text, "secret-999")
 }
 
 func TestOutputGuardRegistry(t *testing.T) {
@@ -335,4 +365,21 @@ func TestOutputGuardRegistry(t *testing.T) {
 	custom := NewRegexOutputGuard([]string{`a`}, WithName("custom-guard"))
 	RegisterOutputGuard(custom)
 	assert.Equal(t, "custom-guard", GetOutputGuard().Name())
+}
+
+func TestWithGuardSeverityOverridesDefault(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx := context.Background()
+
+	defaultGuard := NewRegexOutputGuard([]string{`banned`})
+	res, err := defaultGuard.Check(ctx, "contains banned text")
+	require.NoError(t, err)
+	assert.False(t, res.Allowed)
+	assert.Equal(t, GuardHigh, res.Severity)
+
+	criticalGuard := NewRegexOutputGuard([]string{`banned`}, WithGuardSeverity(GuardCritical))
+	res, err = criticalGuard.Check(ctx, "contains banned text")
+	require.NoError(t, err)
+	assert.False(t, res.Allowed)
+	assert.Equal(t, GuardCritical, res.Severity)
 }

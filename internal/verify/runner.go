@@ -68,21 +68,61 @@ type VerifySummary struct {
 // AllRules returns the complete list of verification rules.
 func AllRules() []VerifyRule {
 	return []VerifyRule{
-		// CLI execution.
-		{ID: "VQ-001", Name: "命令解析与执行", Category: "cli", Description: "Parse flags and execute subcommands"},
-		{ID: "VQ-002", Name: "未知命令返回错误", Category: "cli", Description: "Unknown command returns error"},
+		// ── CLI 命令路由架构 (VQ) ──
+		{ID: "VQ-001", Name: "命令注册后可路由执行", Category: "cli", Description: "Register subcommand and route execution"},
+		{ID: "VQ-002", Name: "未知命令返回明确错误", Category: "cli", Description: "Unknown command returns error"},
 		{ID: "VQ-003", Name: "version 输出正确", Category: "cli", Description: "Version flag and command output"},
-		// Config system.
-		{ID: "VQ-004", Name: "配置加载从环境变量", Category: "config", Description: "Load config from env vars"},
-		// State management.
-		{ID: "VS-001", Name: "并发安全", Category: "state", Description: "Race test"},
-		{ID: "VS-002", Name: "状态变更可观测", Category: "state", Description: "Log capture"},
-		// Context management (VG prefix = Go context/goroutine rules).
+		{ID: "VQ-004", Name: "帮助信息完整", Category: "cli", Description: "Help flag shows complete usage"},
+
+		// ── 命令执行循环 (VT) ──
+		{ID: "VT-001", Name: "参数解析→配置加载→命令执行循环", Category: "loop", Description: "Parse args → load config → execute command cycle"},
+		{ID: "VT-002", Name: "参数优先级合并正确", Category: "loop", Description: "Multi-source config merge priority"},
+		{ID: "VT-003", Name: "正常退出终止条件", Category: "loop", Description: "Normal exit: exit_code=0"},
+		{ID: "VT-004", Name: "参数错误退出终止条件", Category: "loop", Description: "Args error exit: exit_code=2"},
+		{ID: "VT-005", Name: "子命令直接执行", Category: "loop", Description: "Subcommand direct execution mode"},
+		{ID: "VT-006", Name: "命令注册可枚举", Category: "loop", Description: "Registered commands are enumerable"},
+
+		// ── 状态管理 (VS) ──
+		{ID: "VS-001", Name: "并发安全", Category: "state", Description: "Race test — no data races"},
+		{ID: "VS-002", Name: "状态变更可观测", Category: "state", Description: "Every state change emits structured log"},
+		{ID: "VS-003", Name: "命令状态正确转换", Category: "state", Description: "State machine: Idle→Running→Completed"},
+
+		// ── 配置管理 (VC) ──
+		{ID: "VC-001", Name: "默认值不覆盖文件值", Category: "config", Description: "File values override defaults"},
+		{ID: "VC-002", Name: "环境变量覆盖文件值", Category: "config", Description: "Env vars override file values"},
+		{ID: "VC-003", Name: "命令行参数覆盖环境变量", Category: "config", Description: "CLI flags override env vars"},
+
+		// ── 信号处理与优雅退出 (VH) ──
+		{ID: "VH-001", Name: "SIGINT 触发优雅退出", Category: "signal", Description: "SIGINT triggers graceful shutdown"},
+		{ID: "VH-002", Name: "中断取消运行中命令", Category: "signal", Description: "Interrupt cancels running command"},
+		{ID: "VH-003", Name: "SIGTERM 同等处理", Category: "signal", Description: "SIGTERM handled like SIGINT"},
+
+		// ── 持久化 (VP) ──
+		{ID: "VP-001", Name: "配置文件正确读取", Category: "persistence", Description: "Config file read from JSON"},
+		{ID: "VP-002", Name: "配置文件不存在时降级", Category: "persistence", Description: "Fallback to defaults when config missing"},
+
+		// ── Go 语言特性 (VG) ──
 		{ID: "VG-001", Name: "context 取消传播", Category: "context", Description: "Context cancellation propagation"},
 		{ID: "VG-002", Name: "goroutine 泄漏检测", Category: "context", Description: "Goroutine leak detection (CLI level)"},
-		// Error recovery.
-		{ID: "VE-001", Name: "错误包装保留链", Category: "error", Description: "Error wrapping preserves chain"},
+
+		// ── 错误恢复 (VE) ──
+		{ID: "VE-001", Name: "错误包装保留链", Category: "error", Description: "Error wrapping preserves chain (%w)"},
 		{ID: "VE-002", Name: "非空错误检测", Category: "error", Description: "Non-nil error detection"},
+		{ID: "VE-003", Name: "参数类型错误处理", Category: "error", Description: "Type mismatch error handling"},
+
+		// ── 链路追踪完整性 (VT tracing) ──
+		{ID: "VT-010", Name: "LLM 请求/响应有追踪span", Category: "tracing", Description: "LLM request/response has trace span"},
+		{ID: "VT-011", Name: "工具调用有追踪span", Category: "tracing", Description: "Tool call has trace span with parent"},
+		{ID: "VT-012", Name: "命令执行有追踪span", Category: "tracing", Description: "Command execution has trace span"},
+		{ID: "VT-013", Name: "追踪链路完整无断裂", Category: "tracing", Description: "All parent_span_id resolvable"},
+		{ID: "VT-014", Name: "追踪导出器可替换", Category: "tracing", Description: "Custom TraceExporter receives spans"},
+		{ID: "VT-015", Name: "超长对话追踪完整", Category: "tracing", Description: "100+ Turn trace without span loss"},
+
+		// ── 合约驱动测试 (VT contract) ──
+		{ID: "VT-016", Name: "Mock Server 先于实现", Category: "contract", Description: "Test files created before implementation"},
+		{ID: "VT-017", Name: "多轮场景覆盖", Category: "contract", Description: "Each module has ≥3 multi-turn scenarios"},
+		{ID: "VT-018", Name: "超长对话稳定性", Category: "contract", Description: "100+ Turn test: no leak, no OOM"},
+		{ID: "VT-019", Name: "合约一致性", Category: "contract", Description: "Mock vs Real behavior identical"},
 	}
 }
 

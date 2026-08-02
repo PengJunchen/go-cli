@@ -489,3 +489,69 @@ func attrString(span tracing.SpanData, key string) string {
 	}
 	return v
 }
+
+func TestYAMLLoaderTabIndentedPromptBlock(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	path := writeSkillFile(t, dir, "tabbed.md", "---\nname: tabbed\nprompt: |\n\tline one\n\tline two\n---\nbody\n")
+
+	loader := skill.NewYAMLSkillLoader()
+	def, err := loader.Load(context.Background(), path)
+	require.NoError(t, err)
+	d := *def
+	assert.Equal(t, "line one\nline two", d.Prompt())
+}
+
+func TestYAMLLoaderBlockScalarPreservesBlankLines(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	path := writeSkillFile(t, dir, "blank.md", "---\nname: blank\nprompt: |\n  para one\n\n  para two\n---\nbody\n")
+
+	loader := skill.NewYAMLSkillLoader()
+	def, err := loader.Load(context.Background(), path)
+	require.NoError(t, err)
+	d := *def
+	assert.Equal(t, "para one\n\npara two", d.Prompt())
+}
+
+func TestYAMLLoaderCoercesFloatParameters(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	path := writeSkillFile(t, dir, "floats.md", "---\nname: floats\nparameters:\n  ratio: 0.75\n  factor: 1.5\n---\nbody\n")
+
+	loader := skill.NewYAMLSkillLoader()
+	def, err := loader.Load(context.Background(), path)
+	require.NoError(t, err)
+	d := *def
+
+	ratio, ok := d.Parameters()["ratio"].(float64)
+	require.True(t, ok, "ratio should be float64, got %T", d.Parameters()["ratio"])
+	assert.Equal(t, 0.75, ratio)
+
+	factor, ok := d.Parameters()["factor"].(float64)
+	require.True(t, ok, "factor should be float64, got %T", d.Parameters()["factor"])
+	assert.Equal(t, 1.5, factor)
+}
+
+func TestYAMLLoaderCoercesBoolParameters(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	path := writeSkillFile(t, dir, "bools.md", "---\nname: bools\nparameters:\n  enabled: true\n  verbose: false\n---\nbody\n")
+
+	loader := skill.NewYAMLSkillLoader()
+	def, err := loader.Load(context.Background(), path)
+	require.NoError(t, err)
+	d := *def
+
+	enabled, ok := d.Parameters()["enabled"].(bool)
+	require.True(t, ok, "enabled should be bool, got %T", d.Parameters()["enabled"])
+	assert.True(t, enabled)
+
+	verbose, ok := d.Parameters()["verbose"].(bool)
+	require.True(t, ok, "verbose should be bool, got %T", d.Parameters()["verbose"])
+	assert.False(t, verbose)
+}

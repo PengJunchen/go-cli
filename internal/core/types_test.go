@@ -65,3 +65,21 @@ func TestEventStreamContract(t *testing.T) {
 	assert.ErrorIs(t, err, errNoResult)
 	assert.NoError(t, stream.Err())
 }
+
+// TestEventStreamSendAfterCloseIsNoOp guards the closed-check in Send: emitting
+// after Close must be a silent no-op rather than panicking on a closed channel.
+func TestEventStreamSendAfterCloseIsNoOp(t *testing.T) {
+	stream := NewEventStream(1)
+	stream.Close()
+	assert.NotPanics(t, func() {
+		assert.NoError(t, stream.Send(AgentEvent{Kind: "status", Content: "late"}))
+	})
+}
+
+// TestEventStreamCloseIsIdempotent guards the closed-check in Close: a second
+// close must not panic by closing an already-closed channel.
+func TestEventStreamCloseIsIdempotent(t *testing.T) {
+	stream := NewEventStream(1)
+	stream.Close()
+	assert.NotPanics(t, func() { stream.Close() })
+}

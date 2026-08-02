@@ -4,6 +4,7 @@
 package verify
 
 import (
+	"fmt"
 	"go/ast"
 	"go/parser"
 	"go/token"
@@ -31,7 +32,167 @@ var knownCommandNames = []string{
 	"config", "status", "execute", "list",
 }
 
-// scanSlogUsage detects production files with zero slog calls (SCAN-008).
+// scanExportOnlyUsedByTest detects exported symbols that are only referenced
+// from _test.go files within the same package (SCAN-006).
+func scanExportOnlyUsedByTest(dir string, goFiles []string) []Finding {
+	var findings []Finding
+
+	fset := token.NewFileSet()
+
+	// Phase 1: Collect exported function/method names from production files.
+	type exportInfo struct {
+		name string
+		file string
+		line int
+	}
+	var exports []exportInfo
+	prodFiles := []string{}
+	testFiles := []string{}
+
+	for _, file := range goFiles {
+		if strings.HasSuffix(file, "_test.go") {
+			testFiles = append(testFiles, file)
+		} else {
+			prodFiles = append(prodFiles, file)
+		}
+	}
+
+	for _, file := range prodFiles {
+		node, err := parser.ParseFile(fset, file, nil, parser.ParseComments)
+		if err != nil {
+			continue
+		}
+		for _, decl := range node.Decls {
+			switch d := decl.(type) {
+			case *ast.FuncDecl:
+				// Only exported functions/methods.
+				if d.Name == nil || !ast.IsExported(d.Name.Name) {
+					continue
+				}
+				exports = append(exports, exportInfo{
+					name: d.Name.Name,
+					file: file,
+					line: fset.Position(d.Pos()).Line,
+				})
+			case *ast.GenDecl:
+				// Exported type/var/const declarations.
+				for _, spec := range d.Specs {
+					switch s := spec.(type) {
+					case *ast.TypeSpec:
+						if ast.IsExported(s.Name.Name) {
+							exports = append(exports, exportInfo{
+								name: s.Name.Name,
+								file: file,
+								line: fset.Position(s.Pos()).Line,
+							})
+						}
+					case *ast.ValueSpec:
+						for _, name := range s.Names {
+							if ast.IsExported(name.Name) {
+								exports = append(exports, exportInfo{
+									name: name.Name,
+									file: file,
+									line: fset.Position(name.Pos()).Line,
+								})
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	if len(exports) == 0 {
+		return findings
+	}
+
+	// Phase 2: Build reference sets from production and test files.
+	prodRefs := map[string]bool{}
+	testRefs := map[string]bool{}
+
+	collectRefs := func(files []string, refSet map[string]bool) {
+		for _, file := range files {
+			node, err := parser.ParseFile(fset, file, nil, parser.ParseComments)
+			if err != nil {
+				continue
+			}
+			ast.Inspect(node, func(n ast.Node) bool {
+				switch x := n.(type) {
+				case *ast.Ident:
+					if ast.IsExported(x.Name) {
+						refSet[x.Name] = true
+					}
+				case *ast.SelectorExpr:
+					if x.Sel != nil && ast.IsExported(x.Sel.Name) {
+						refSet[x.Sel.Name] = true
+					}
+				}
+				return true
+			})
+		}
+	}
+
+	collectRefs(prodFiles, prodRefs)
+	collectRefs(testFiles, testRefs)
+
+	// Phase 3: Flag exported symbols not referenced in any production file.
+	for _, exp := range exports {
+		// Skip the declaration itself (self-reference in the same file).
+		// The reference set includes the declaration file, so we check if
+		// the symbol is used in ANY production file OTHER than where it's declared.
+		// We do this by checking if prodRefs contains it from a file other than
+		// the declaration file.
+		usedInProd := false
+		for _, pf := range prodFiles {
+			if pf == exp.file {
+				continue // Skip declaration file.
+			}
+			node, err := parser.ParseFile(fset, pf, nil, parser.ParseComments)
+			if err != nil {
+				continue
+			}
+			found := false
+			ast.Inspect(node, func(n ast.Node) bool {
+				if found {
+					return false
+				}
+				switch x := n.(type) {
+				case *ast.Ident:
+					if x.Name == exp.name {
+						found = true
+						return false
+					}
+				case *ast.SelectorExpr:
+					if x.Sel != nil && x.Sel.Name == exp.name {
+						found = true
+						return false
+					}
+				}
+				return true
+			})
+			if found {
+				usedInProd = true
+				break
+			}
+		}
+
+		if !usedInProd {
+			// Check if it's at least referenced in test files.
+			if testRefs[exp.name] {
+				findings = append(findings, Finding{
+					RuleID:   "SCAN-006",
+					Severity: SeverityWarn,
+					File:     exp.file,
+					Line:     exp.line,
+					Message:  fmt.Sprintf("exported symbol %s only referenced by _test.go files", exp.name),
+					Snippet:  exp.name,
+				})
+			}
+		}
+	}
+
+	return findings
+}
 func scanSlogUsage(dir string, goFiles []string) []Finding {
 	var findings []Finding
 

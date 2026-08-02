@@ -377,9 +377,7 @@ func (c *OutputGuardChain) Check(ctx context.Context, text string) (*GuardResult
 		if err != nil {
 			return nil, err
 		}
-		if res.Sanitized != "" {
-			combined.Sanitized = res.Sanitized
-		}
+		combined.Sanitized = res.Sanitized
 		if !res.Allowed {
 			combined.Allowed = false
 			if topSeverity == "" || severityRank(res.Severity) > severityRank(topSeverity) {

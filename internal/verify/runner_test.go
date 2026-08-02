@@ -15,23 +15,61 @@ func TestAllRules(t *testing.T) {
 	rules := AllRules()
 	require.NotEmpty(t, rules, "AllRules should return non-empty slice")
 
+	// Hard-coded expected IDs from verify-rules.md design spec.
+	// If a new rule is added to the design, it MUST be added here too.
 	expectedIDs := map[string]bool{
+		// CLI 命令路由架构.
 		"VQ-001": false, "VQ-002": false, "VQ-003": false, "VQ-004": false,
-		"VS-001": false, "VS-002": false,
+		// 命令执行循环.
+		"VT-001": false, "VT-002": false, "VT-003": false, "VT-004": false,
+		"VT-005": false, "VT-006": false,
+		// 状态管理.
+		"VS-001": false, "VS-002": false, "VS-003": false,
+		// 配置管理.
+		"VC-001": false, "VC-002": false, "VC-003": false,
+		// 信号处理.
+		"VH-001": false, "VH-002": false, "VH-003": false,
+		// 持久化.
+		"VP-001": false, "VP-002": false,
+		// Go 语言特性.
 		"VG-001": false, "VG-002": false,
-		"VE-001": false, "VE-002": false,
+		// 错误恢复.
+		"VE-001": false, "VE-002": false, "VE-003": false,
+		// 链路追踪完整性.
+		"VT-010": false, "VT-011": false, "VT-012": false,
+		"VT-013": false, "VT-014": false, "VT-015": false,
+		// 合约驱动测试.
+		"VT-016": false, "VT-017": false, "VT-018": false, "VT-019": false,
 	}
+
+	// Verify total count matches design spec.
+	const expectedTotal = 36
+	require.Len(t, rules, expectedTotal,
+		"AllRules should return exactly %d rules (got %d). "+
+			"If you added a new rule, update expectedIDs and expectedTotal.",
+		expectedTotal, len(rules))
+
+	// Verify ID uniqueness.
+	seenIDs := make(map[string]bool, len(rules))
 	for _, rule := range rules {
-		assert.NotEmpty(t, rule.ID, "rule should have non-empty ID")
-		assert.NotEmpty(t, rule.Name, "rule %s should have non-empty Name", rule.ID)
-		assert.NotEmpty(t, rule.Category, "rule %s should have non-empty Category", rule.ID)
-		assert.NotEmpty(t, rule.Description, "rule %s should have non-empty Description", rule.ID)
+		require.NotEmpty(t, rule.ID, "rule should have non-empty ID")
+		require.NotEmpty(t, rule.Name, "rule %s should have non-empty Name", rule.ID)
+		require.NotEmpty(t, rule.Category, "rule %s should have non-empty Category", rule.ID)
+		require.NotEmpty(t, rule.Description, "rule %s should have non-empty Description", rule.ID)
+
+		require.False(t, seenIDs[rule.ID], "duplicate rule ID %s found in AllRules", rule.ID)
+		seenIDs[rule.ID] = true
+
 		if _, ok := expectedIDs[rule.ID]; ok {
 			expectedIDs[rule.ID] = true
+		} else {
+			t.Errorf("unexpected rule %s in AllRules — add it to expectedIDs or remove it", rule.ID)
 		}
 	}
+
+	// Verify every expected ID was found.
 	for id, found := range expectedIDs {
-		assert.True(t, found, "expected rule %s to be present in AllRules", id)
+		require.True(t, found, "expected rule %s is missing from AllRules", id)
 	}
 }
 

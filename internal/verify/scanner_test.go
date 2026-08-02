@@ -209,6 +209,88 @@ func Run() {}
 	}
 }
 
+func TestScanner_DetectsExportOnlyUsedByTest(t *testing.T) {
+	dir := t.TempDir()
+
+	// Production code with an exported function only used by tests.
+	prodCode := `package example
+
+func UsedByProd() string { return "prod" }
+func OnlyUsedByTest() string { return "test-only" }
+`
+	err := os.WriteFile(filepath.Join(dir, "service.go"), []byte(prodCode), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Test file that references OnlyUsedByTest.
+	testCode := `package example
+
+import "testing"
+
+func TestOnlyUsedByTest(t *testing.T) {
+	OnlyUsedByTest()
+}
+`
+	err = os.WriteFile(filepath.Join(dir, "service_test.go"), []byte(testCode), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultScanConfig(dir)
+	report, err := Scan(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	found := false
+	for _, f := range report.Findings {
+		if f.RuleID == "SCAN-006" && f.Snippet == "OnlyUsedByTest" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Error("expected SCAN-006 finding for OnlyUsedByTest, got none")
+	}
+}
+
+func TestScanner_ExportUsedByProdNotFlagged(t *testing.T) {
+	dir := t.TempDir()
+
+	// Production code with two exported functions.
+	prodCode := `package example
+
+func UsedEverywhere() string { return "all" }
+`
+	err := os.WriteFile(filepath.Join(dir, "service.go"), []byte(prodCode), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Another production file that uses the exported function.
+	otherCode := `package example
+
+func CallIt() string { return UsedEverywhere() }
+`
+	err = os.WriteFile(filepath.Join(dir, "other.go"), []byte(otherCode), 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := DefaultScanConfig(dir)
+	report, err := Scan(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, f := range report.Findings {
+		if f.RuleID == "SCAN-006" {
+			t.Errorf("expected no SCAN-006 finding when export is used in prod, got: %s", f.Message)
+		}
+	}
+}
+
 func TestScanner_DetectsExcessiveNolint(t *testing.T) {
 	dir := t.TempDir()
 

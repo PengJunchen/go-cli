@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -289,6 +291,36 @@ func TestAdapterDisconnectPreservesExternalConnection(t *testing.T) {
 	require.NoError(t, adapter.Connect(context.Background()))
 	require.NoError(t, adapter.Disconnect(context.Background()))
 	assert.False(t, closed.Load(), "Disconnect must not close an externally-supplied connection")
+}
+
+func TestAdapterDisconnectAllowsStdioReconnect(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "started")
+	cfg := MCPServerConfig{
+		Name:      "srv",
+		Transport: MCPTransportStdio,
+		Command:   "sh",
+		Args:      []string{"-c", fmt.Sprintf("touch %s; cat", marker)},
+	}
+	adapter := NewOfficialSDKAdapter(cfg)
+	ctx := context.Background()
+
+	require.NoError(t, adapter.Connect(ctx), "first Connect must succeed")
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(marker)
+		return err == nil
+	}, time.Second, 10*time.Millisecond, "first subprocess should create marker file")
+
+	require.NoError(t, adapter.Disconnect(ctx), "Disconnect must succeed")
+
+	require.NoError(t, os.Remove(marker), "remove marker from first subprocess")
+
+	require.NoError(t, adapter.Connect(ctx), "second Connect must respawn subprocess")
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(marker)
+		return err == nil
+	}, time.Second, 10*time.Millisecond, "second subprocess should create marker file")
+
+	_ = adapter.Disconnect(ctx) //nolint:errcheck // best-effort cleanup
 }
 
 func TestAdapterCallToolSurfacesIsErrorAndDefaultsContent(t *testing.T) {

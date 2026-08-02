@@ -138,28 +138,30 @@ func (q *DefaultFileMutationQueue) Enqueue(ctx context.Context, mutation FileMut
 
 	resultCh := make(chan FileMutationResult, 1)
 
-	input, err := q.workerFor(realPath)
+	q.mu.Lock()
+	input, err := q.workerForLocked(realPath)
 	if err != nil {
+		q.mu.Unlock()
 		return nil, err
 	}
-
 	select {
 	case input <- queuedMutation{mutation: mutation, result: resultCh}:
+		q.mu.Unlock()
 	case <-ctx.Done():
+		q.mu.Unlock()
 		return nil, fmt.Errorf("mutation: enqueue %s: %w", realPath, ctx.Err())
 	}
 	return resultCh, nil
 }
 
-// workerFor returns the worker channel for realPath, creating it lazily on the
-// first use. If the queue is closed it returns an error.
-func (q *DefaultFileMutationQueue) workerFor(realPath string) (chan queuedMutation, error) {
-	q.mu.Lock()
+// workerForLocked returns the worker channel for realPath, creating it lazily
+// on the first use. If the queue is closed it returns an error. The caller must
+// hold q.mu so that Close cannot close the channel between the closed check and
+// the subsequent send in Enqueue.
+func (q *DefaultFileMutationQueue) workerForLocked(realPath string) (chan queuedMutation, error) {
 	if q.closed {
-		q.mu.Unlock()
 		return nil, fmt.Errorf("mutation: queue is closed")
 	}
-	q.mu.Unlock()
 
 	if v, ok := q.workers.Load(realPath); ok {
 		//nolint:errcheck // map value is always a worker channel.
