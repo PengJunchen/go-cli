@@ -77,14 +77,14 @@ func TestMockExtensionConcurrentAccess(t *testing.T) {
 	for i := 0; i < goroutines; i++ {
 		go func() {
 			defer wg.Done()
-			e.Init(context.Background(), reg) //nolint:errcheck // concurrent test, error not needed
+			e.Init(context.Background(), reg) //nolint:errcheck,gosec // concurrent test, error not needed
 		}()
 	}
 	// Concurrent Shutdown calls
 	for i := 0; i < goroutines; i++ {
 		go func() {
 			defer wg.Done()
-			e.Shutdown(context.Background()) //nolint:errcheck // concurrent test, error not needed
+			e.Shutdown(context.Background()) //nolint:errcheck,gosec // concurrent test, error not needed
 		}()
 	}
 	// Concurrent reads
@@ -215,10 +215,10 @@ func TestMockPluginLoaderErrorTakesPrecedenceOverResult(t *testing.T) {
 func TestMockPluginLoaderLoadedPathTracksLastCall(t *testing.T) {
 	l := NewMockPluginLoader("loader")
 
-	l.Load(context.Background(), "/first") //nolint:errcheck // test
+	l.Load(context.Background(), "/first") //nolint:errcheck,gosec // test
 	assert.Equal(t, "/first", l.LoadedPath())
 
-	l.Load(context.Background(), "/second") //nolint:errcheck // test
+	l.Load(context.Background(), "/second") //nolint:errcheck,gosec // test
 	assert.Equal(t, "/second", l.LoadedPath(), "LoadedPath should reflect the most recent call")
 }
 
@@ -235,9 +235,9 @@ func TestMockPluginLoaderConcurrentAccess(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			if i%2 == 0 {
-				l.Load(context.Background(), "/a") //nolint:errcheck // concurrent test
+				l.Load(context.Background(), "/a") //nolint:errcheck,gosec // concurrent test
 			} else {
-				l.Load(context.Background(), "/b") //nolint:errcheck // concurrent test
+				l.Load(context.Background(), "/b") //nolint:errcheck,gosec // concurrent test
 			}
 		}(i)
 	}
