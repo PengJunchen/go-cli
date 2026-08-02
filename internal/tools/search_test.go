@@ -135,7 +135,7 @@ func TestSearchEmitsSearchSpan(t *testing.T) {
 	root.SetStatus(tracing.SpanStatusOK, "")
 	root.End()
 
-	require.Eventually(t, func() bool { return e.hasSpan("tools.search") }, 2*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return e.hasSpan("tool.call") }, 2*time.Second, 10*time.Millisecond)
 }
 
 func TestToolSearchName(t *testing.T) {

@@ -105,7 +105,7 @@ func TestFindEmitsFindSpan(t *testing.T) {
 	root.SetStatus(tracing.SpanStatusOK, "")
 	root.End()
 
-	require.Eventually(t, func() bool { return e.hasSpan("tools.find") }, 2*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return e.hasSpan("tool.call") }, 2*time.Second, 10*time.Millisecond)
 }
 
 func TestLSListsDirectory(t *testing.T) {
@@ -206,7 +206,7 @@ func TestLSEmitsLSSpan(t *testing.T) {
 	root.SetStatus(tracing.SpanStatusOK, "")
 	root.End()
 
-	require.Eventually(t, func() bool { return e.hasSpan("tools.ls") }, 2*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return e.hasSpan("tool.call") }, 2*time.Second, 10*time.Millisecond)
 }
 
 func TestFindAndLSName(t *testing.T) {

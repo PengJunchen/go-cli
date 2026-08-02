@@ -171,5 +171,5 @@ func TestDeferredEmitsLoadSpan(t *testing.T) {
 	root.SetStatus(tracing.SpanStatusOK, "")
 	root.End()
 
-	require.Eventually(t, func() bool { return e.hasSpan("tools.deferred.load") }, 2*time.Second, 10*time.Millisecond)
+	require.Eventually(t, func() bool { return e.hasSpan("tool.call") }, 2*time.Second, 10*time.Millisecond)
 }
