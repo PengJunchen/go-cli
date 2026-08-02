@@ -3,6 +3,11 @@ package core
 import (
 	"context"
 	"log/slog"
+
+	"github.com/pengjunchen/go-cli/internal/extension"
+	"github.com/pengjunchen/go-cli/internal/llm"
+	"github.com/pengjunchen/go-cli/internal/tools"
+	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
 // SubmissionType distinguishes the different kinds of Submission the runtime
@@ -175,4 +180,106 @@ type ApprovalStore interface {
 type PluginLoader interface {
 	// Load loads the extension at the given path.
 	Load(ctx context.Context, path string) (Extension, error)
+}
+
+// Registry is the dependency-inversion hub of the runtime. It exposes one
+// getter and one RegisterXxx method per subsystem. Consumers depend on this
+// interface rather than on any concrete implementation, so the bound
+// subsystem can be swapped without coupling callers to a concrete type.
+type Registry interface {
+	// AgentLoop returns the bound AgentLoop implementation.
+	AgentLoop() AgentLoop
+	// RegisterAgentLoop replaces the AgentLoop implementation and returns the
+	// old one. It panics if n is nil.
+	RegisterAgentLoop(n AgentLoop) AgentLoop
+
+	// Agent returns the bound Agent implementation.
+	Agent() Agent
+	// RegisterAgent replaces the Agent implementation and returns the old one.
+	// It panics if n is nil.
+	RegisterAgent(n Agent) Agent
+
+	// Harness returns the bound Harness implementation.
+	Harness() Harness
+	// RegisterHarness replaces the Harness implementation and returns the old
+	// one. It panics if n is nil.
+	RegisterHarness(n Harness) Harness
+
+	// TurnRunner returns the bound TurnRunner implementation.
+	TurnRunner() TurnRunner
+	// RegisterTurnRunner replaces the TurnRunner implementation and returns
+	// the old one. It panics if n is nil.
+	RegisterTurnRunner(n TurnRunner) TurnRunner
+
+	// SessionStore returns the bound SessionStore implementation.
+	SessionStore() SessionStore
+	// RegisterSessionStore replaces the SessionStore implementation and
+	// returns the old one. It panics if n is nil.
+	RegisterSessionStore(n SessionStore) SessionStore
+
+	// SessionTree returns the bound SessionTree implementation.
+	SessionTree() SessionTree
+	// RegisterSessionTree replaces the SessionTree implementation and returns
+	// the old one. It panics if n is nil.
+	RegisterSessionTree(n SessionTree) SessionTree
+
+	// ContextManager returns the bound ContextManager implementation.
+	ContextManager() ContextManager
+	// RegisterContextManager replaces the ContextManager implementation and
+	// returns the old one. It panics if n is nil.
+	RegisterContextManager(n ContextManager) ContextManager
+
+	// Compactor returns the bound Compactor implementation.
+	Compactor() Compactor
+	// RegisterCompactor replaces the Compactor implementation and returns the
+	// old one. It panics if n is nil.
+	RegisterCompactor(n Compactor) Compactor
+
+	// TokenEstimator returns the bound TokenEstimator implementation.
+	TokenEstimator() TokenEstimator
+	// RegisterTokenEstimator replaces the TokenEstimator implementation and
+	// returns the old one. It panics if n is nil.
+	RegisterTokenEstimator(n TokenEstimator) TokenEstimator
+
+	// ToolRegistry returns the bound ToolRegistry implementation.
+	ToolRegistry() tools.ToolRegistry
+	// RegisterToolRegistry replaces the ToolRegistry implementation and
+	// returns the old one. It panics if n is nil.
+	RegisterToolRegistry(n tools.ToolRegistry) tools.ToolRegistry
+
+	// ModelProvider returns the bound ModelProvider implementation.
+	ModelProvider() llm.ModelProvider
+	// RegisterModelProvider replaces the ModelProvider implementation and
+	// returns the old one. It panics if n is nil.
+	RegisterModelProvider(n llm.ModelProvider) llm.ModelProvider
+
+	// ApprovalClassifier returns the bound ApprovalClassifier implementation.
+	ApprovalClassifier() ApprovalClassifier
+	// RegisterApprovalClassifier replaces the ApprovalClassifier
+	// implementation and returns the old one. It panics if n is nil.
+	RegisterApprovalClassifier(n ApprovalClassifier) ApprovalClassifier
+
+	// ApprovalStore returns the bound ApprovalStore implementation.
+	ApprovalStore() ApprovalStore
+	// RegisterApprovalStore replaces the ApprovalStore implementation and
+	// returns the old one. It panics if n is nil.
+	RegisterApprovalStore(n ApprovalStore) ApprovalStore
+
+	// TraceExporter returns the bound TraceExporter implementation.
+	TraceExporter() tracing.TraceExporter
+	// RegisterTraceExporter replaces the TraceExporter implementation and
+	// returns the old one. It panics if n is nil.
+	RegisterTraceExporter(n tracing.TraceExporter) tracing.TraceExporter
+
+	// ConfigProvider returns the bound ConfigProvider implementation.
+	ConfigProvider() extension.ConfigProvider
+	// RegisterConfigProvider replaces the ConfigProvider implementation and
+	// returns the old one. It panics if n is nil.
+	RegisterConfigProvider(n extension.ConfigProvider) extension.ConfigProvider
+
+	// PluginLoader returns the bound PluginLoader implementation.
+	PluginLoader() PluginLoader
+	// RegisterPluginLoader replaces the PluginLoader implementation and
+	// returns the old one. It panics if n is nil.
+	RegisterPluginLoader(n PluginLoader) PluginLoader
 }
