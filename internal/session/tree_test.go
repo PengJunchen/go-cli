@@ -149,15 +149,24 @@ func TestTree_ConcurrentAppendBranch(t *testing.T) {
 	const n = 64
 	var wg sync.WaitGroup
 	wg.Add(n)
+	errCh := make(chan error, n*2)
 	for i := 0; i < n; i++ {
 		go func(i int) {
 			defer wg.Done()
-			require.NoError(t, tree.Append(context.Background(), newTestEntry(fmt.Sprintf("child-%d", i), "root", EntryTypeUser)))
-			_, err := tree.GetBranch(context.Background(), fmt.Sprintf("child-%d", i))
-			require.NoError(t, err)
+			if err := tree.Append(context.Background(), newTestEntry(fmt.Sprintf("child-%d", i), "root", EntryTypeUser)); err != nil {
+				errCh <- fmt.Errorf("append child-%d: %w", i, err)
+				return
+			}
+			if _, err := tree.GetBranch(context.Background(), fmt.Sprintf("child-%d", i)); err != nil {
+				errCh <- fmt.Errorf("get child-%d: %w", i, err)
+			}
 		}(i)
 	}
 	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Errorf("concurrent operation failed: %v", err)
+	}
 }
 
 func TestTree_TraceSpans(t *testing.T) {

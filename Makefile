@@ -55,7 +55,11 @@ lint:
 # Format code
 fmt:
 	gofmt -s -w .
-	goimports -w .
+	@if command -v goimports >/dev/null 2>&1; then \
+		goimports -w . ; \
+	else \
+		echo "Note: goimports not found, skipping (install with: go install golang.org/x/tools/cmd/goimports@latest)" ; \
+	fi
 
 # Run go vet
 vet:
