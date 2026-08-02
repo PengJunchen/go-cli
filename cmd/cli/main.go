@@ -33,7 +33,7 @@ func run(argv []string, stdout, stderr io.Writer, loadConfig func() (*config.Con
 
 	cfg, err := loadConfig()
 	if err != nil {
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "error: %v\n", err) //nolint:errcheck // CLI error output is best-effort
 		return 1
 	}
 
@@ -63,7 +63,9 @@ func run(argv []string, stdout, stderr io.Writer, loadConfig func() (*config.Con
 		// data before Shutdown drains the exporter, so the trace file captures
 		// the full span chain (cli.invocation → command.dispatch) on exit.
 		time.Sleep(50 * time.Millisecond)
-		_ = exporter.Shutdown(ctx)
+		if err := exporter.Shutdown(ctx); err != nil {
+			_, _ = fmt.Fprintf(stderr, "error: shutdown exporter: %v\n", err) //nolint:errcheck // CLI error output is best-effort
+		}
 	}
 	return code
 }
@@ -73,10 +75,10 @@ func runCLI(ctx context.Context, cfg *config.Config, argv []string, stdout, stde
 	if err := cli.Run(ctx, cfg, argv, stdout); err != nil {
 		var usageErr *cli.UsageError
 		if errors.As(err, &usageErr) {
-			fmt.Fprintf(stderr, "error: %v\n", err)
+			_, _ = fmt.Fprintf(stderr, "error: %v\n", err) //nolint:errcheck // CLI error output is best-effort
 			return 2
 		}
-		fmt.Fprintf(stderr, "error: %v\n", err)
+		_, _ = fmt.Fprintf(stderr, "error: %v\n", err) //nolint:errcheck // CLI error output is best-effort
 		return 1
 	}
 	return 0

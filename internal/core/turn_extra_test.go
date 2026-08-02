@@ -7,6 +7,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
 func TestTurnStatusString(t *testing.T) {
@@ -118,4 +120,56 @@ func TestTurnRunnerNilEventsYieldEmptyResult(t *testing.T) {
 	require.ErrorIs(t, err, errNilModel)
 	assert.False(t, res.Success)
 	assert.Empty(t, res.Message)
+}
+
+func TestTurnRunnerCancelEmitsSpan(t *testing.T) {
+	exp := &captureExporter{}
+	tr := tracing.NewTracer("", exp)
+	root, tctx := tr.Start(context.Background(), "root.test", tracing.SpanKindInternal)
+	defer root.End()
+
+	runner := NewEinoTurnRunner(&stubLoop{})
+	// Canceling an unknown/inactive turn emits a span with an error status.
+	require.Error(t, runner.Cancel(tctx, "ghost"))
+	errSpan := waitForSpanStatus(t, exp, "turn.cancel", tracing.SpanStatusError)
+	assert.NotZero(t, errSpan)
+
+	// A real cancel against a running turn emits a span with an OK status.
+	bl := newBlockingTurnLoop()
+	runner = NewEinoTurnRunner(bl)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = runner.RunTurn(tctx, Submission{Content: "hi"}) //nolint:errcheck // error checked after <-done via Canceled state
+	}()
+
+	<-bl.started // loop began => turn is registered and running
+	id := runningTurnID(t, runner)
+	require.NotEmpty(t, id)
+
+	require.NoError(t, runner.Cancel(tctx, id))
+	<-done
+
+	span := waitForSpanStatus(t, exp, "turn.cancel", tracing.SpanStatusOK)
+	val, ok := attrValue(span.Attributes, "turn_id")
+	assert.True(t, ok)
+	assert.Equal(t, id, val)
+}
+
+// waitForSpanStatus polls until a span with the given name and status is
+// exported. Spans are exported asynchronously.
+func waitForSpanStatus(t *testing.T, exp *captureExporter, name string, status tracing.SpanStatus) tracing.SpanData {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, span := range exp.all() {
+			if span.Name == name && span.Status == status {
+				return span
+			}
+		}
+		time.Sleep(2 * time.Millisecond)
+	}
+	t.Fatalf("span with name %q and status %q not exported; got %d spans", name, status, len(exp.all()))
+	return tracing.SpanData{}
 }

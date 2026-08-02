@@ -109,13 +109,20 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Re
 
 // Cancel marks a running turn as canceled and cancels its underlying context.
 // It returns an error if the turn is unknown or not currently running.
-func (r *EinoTurnRunner) Cancel(_ context.Context, id string) error {
+func (r *EinoTurnRunner) Cancel(ctx context.Context, id string) error {
+	span, _ := tracing.SpanFromContext(ctx, "turn.cancel", tracing.SpanKindInternal)
+	defer span.End()
+	span.SetAttributes(
+		tracing.Attribute{Key: "turn_id", Value: id},
+	)
+
 	r.mu.Lock()
 	turn, ok := r.turns[id]
 	cancel, running := r.running[id]
 	r.mu.Unlock()
 
 	if !ok || !running {
+		span.SetStatus(tracing.SpanStatusError, errTurnUnknown.Error())
 		return errTurnUnknown
 	}
 
@@ -128,6 +135,7 @@ func (r *EinoTurnRunner) Cancel(_ context.Context, id string) error {
 	}
 	r.mu.Unlock()
 
+	span.SetStatus(tracing.SpanStatusOK, "")
 	slog.Info("core.turn.runner.cancel", "id", id)
 	return nil
 }

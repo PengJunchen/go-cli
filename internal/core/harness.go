@@ -59,7 +59,7 @@ func NewHarnessImpl(agent Agent, opts ...HarnessOption) *HarnessImpl {
 	if agent == nil {
 		panic("core: harness requires a non-nil Agent")
 	}
-	cfg := harnessConfig{startSpan: "harness.submit"}
+	cfg := harnessConfig{startSpan: "harness.start"}
 	for _, o := range opts {
 		o(&cfg)
 	}
@@ -84,7 +84,7 @@ func (h *HarnessImpl) Submit(ctx context.Context, msg string) (EventStream, erro
 	span.SetAttributes(tracing.Attribute{Key: "user_message", Value: msg})
 	defer span.End()
 	logger := tracing.NewTraceLogger(span, nil)
-	logger.Info("core.harness.submit", "msg", msg)
+	logger.Info("core.harness.start", "msg", msg)
 
 	stream := NewEventStream(h.bufferSize)
 	if stream == nil {

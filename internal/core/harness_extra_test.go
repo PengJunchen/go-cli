@@ -71,7 +71,7 @@ func TestHarnessWithDiscardPolicyOption(t *testing.T) {
 	// WithDiscardPolicy is accepted without error for API completeness.
 	h := NewHarnessImpl(nonEventSourceAgent{}, WithDiscardPolicy(DiscardNewest))
 	require.NotNil(t, h)
-	assert.Equal(t, "harness.submit", h.startSpanName)
+	assert.Equal(t, "harness.start", h.startSpanName)
 }
 
 func TestHarnessStartSpanOption(t *testing.T) {
@@ -83,7 +83,7 @@ func TestHarnessStartSpanOption(t *testing.T) {
 func TestHarnessDefaultStartSpanName(t *testing.T) {
 	agent := &fakeEventStreamAgent{res: Result{Success: true}}
 	h := NewHarnessImpl(agent)
-	assert.Equal(t, "harness.submit", h.startSpanName)
+	assert.Equal(t, "harness.start", h.startSpanName)
 }
 
 func TestHarnessWithEventBufferNonPositiveIgnored(t *testing.T) {

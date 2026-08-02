@@ -142,9 +142,11 @@ func TestRunEmitsErrorSpanStatus(t *testing.T) {
 	})
 	assert.Equal(t, 2, code)
 
-	files, _ := filepath.Glob(filepath.Join(dir, "*.jsonl"))
+	files, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
+	require.NoError(t, err)
 	require.NotEmpty(t, files)
-	data, _ := os.ReadFile(files[0])
+	data, err := os.ReadFile(files[0])
+	require.NoError(t, err)
 	assert.Contains(t, string(data), "cli.invocation")
 	assert.Contains(t, string(data), "ERROR")
 }
@@ -164,7 +166,8 @@ func TestNewTracingSpanNonNoop(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	require.NoError(t, exp.Shutdown(ctx))
 
-	files, _ := filepath.Glob(filepath.Join(dir, "*.jsonl"))
+	files, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
+	require.NoError(t, err)
 	require.NotEmpty(t, files, "a real tracer should export the ended span to the JSONL file")
 
 	data, err := os.ReadFile(files[0])
