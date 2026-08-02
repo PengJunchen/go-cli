@@ -177,7 +177,7 @@ func p4SkillLoadAndMatch(ctx context.Context, t *testing.T, dir string, exporter
 	assert.Equal(t, "e2e-skill", matches[0].Name())
 
 	assert.Equal(t, []string{"e2e-skill"}, skillNames(reg.List(ctx, "coding")))
-	exporter.AssertSpanExists(t, "skill.load")
+	assertSpanEventually(t, exporter, "skill.load")
 }
 
 // p4ExtensionRegistration drives an Extension through its Init/Shutdown lifecycle
@@ -662,6 +662,21 @@ func hasSpanNamed(spans []tracing.SpanData, name string) bool {
 		}
 	}
 	return false
+}
+
+// assertSpanEventually polls the exporter until a span with the given name
+// appears. Span export is asynchronous (span.End launches a goroutine), so
+// immediate assertions can race on slow CI runners.
+func assertSpanEventually(t *testing.T, exporter *mock.MockTraceExporter, name string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if hasSpanNamed(exporter.Spans(), name) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	exporter.AssertSpanExists(t, name)
 }
 
 // skillNames projects a list of SkillDefinition values to their names.
