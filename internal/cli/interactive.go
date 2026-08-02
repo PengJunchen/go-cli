@@ -200,7 +200,29 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		// sole consumer of the tuiEvents channel; when the bridge channel
 		// closes the app's Run loop returns and closes its Done channel.
 		tuiEvents := tui.BridgeEvents(turnCtx, stream)
-		app := tui.NewBubbleteaApp(tuiEvents, tui.WithWidth(80))
+
+		// Streaming output: each view mutation re-renders to the terminal.
+		// In TTY mode we use ANSI cursor reset + clear-line to repaint in
+		// place; in pipe mode we emit the latest view line-by-line.
+		var lastLineCount int
+		isTTY := tui.IsTerminal()
+		var app *tui.BubbleteaApp
+		app = tui.NewBubbleteaApp(tuiEvents,
+			tui.WithWidth(80),
+			tui.WithOnUpdate(func() {
+				view := app.View()
+				if isTTY {
+					if lastLineCount > 0 {
+						fmt.Fprintf(c.out, "\033[%dA", lastLineCount)
+					}
+					fmt.Fprint(c.out, "\033[J")
+					fmt.Fprintln(c.out, view)
+					lastLineCount = strings.Count(view, "\n") + 1
+				} else {
+					fmt.Fprintln(c.out, view)
+				}
+			}),
+		)
 
 		go func() {
 			if runErr := app.Run(turnCtx); runErr != nil && runErr != context.Canceled {
@@ -229,12 +251,8 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 			continue
 		}
 
-		// Render the accordion view (tool calls, results, thinking) before
-		// the final assistant message so the user sees the full transcript.
-		if view := app.View(); view != "" {
-			fmt.Fprintln(c.out, view)
-		}
-
+		// The accordion view was streamed in real time via onUpdate.
+		// Only print the final assistant message here.
 		if result.Content != "" {
 			fmt.Fprintf(c.out, "AI: %s\n", result.Content)
 			turnItems = append(turnItems, compaction.TurnItem{

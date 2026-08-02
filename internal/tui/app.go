@@ -71,6 +71,13 @@ func WithWidth(width int) AppOption {
 	return func(a *BubbleteaApp) { a.width = width }
 }
 
+// WithOnUpdate registers a callback invoked after every view mutation. The
+// callback runs synchronously inside the render loop, so it must not block on
+// the app (no calls to View, Run, Quit, or Send from within).
+func WithOnUpdate(fn func()) AppOption {
+	return func(a *BubbleteaApp) { a.onUpdate = fn }
+}
+
 // BubbleteaApp is the default App implementation. It owns a render loop that
 // merges three sources: the incoming agent-event channel, messages pushed via
 // Send, and the quit/cancel signals. Streaming content types accumulate into a
@@ -102,6 +109,11 @@ type BubbleteaApp struct {
 	// (the default for non-TTY / pipe input), the app renders every entry
 	// expanded (legacy behaviour).
 	interactive bool
+
+	// onUpdate is invoked after every entry mutation (add/replace). It lets
+	// the caller stream the view to the terminal in real time instead of
+	// waiting for the turn to finish. When nil no callback fires.
+	onUpdate func()
 }
 
 // NewBubbleteaApp constructs an app wired to the given event source, using a
@@ -256,12 +268,18 @@ func (a *BubbleteaApp) addEntry(ct string, out string) {
 	if isStreamingRenderContentType(ct) {
 		if a.accordion.Len() == 0 {
 			a.accordion.Add(entryFor(ct, out, a.interactive))
+			if a.onUpdate != nil {
+				a.onUpdate()
+			}
 			return
 		}
 		last := a.accordion.Entries()[a.accordion.Len()-1]
 		last.Full = out
 		last.Summary = summarizeFirstLine(out, 80)
 		last.Collapsed = false
+		if a.onUpdate != nil {
+			a.onUpdate()
+		}
 		return
 	}
 
@@ -275,6 +293,10 @@ func (a *BubbleteaApp) addEntry(ct string, out string) {
 		}
 	}
 	a.accordion.Add(entry)
+
+	if a.onUpdate != nil {
+		a.onUpdate()
+	}
 }
 
 // isStreamingRenderContentType reports whether the content type is a
@@ -335,12 +357,15 @@ func stripANSIPlain(s string) string {
 	return sb.String()
 }
 
-// isTerminal reports whether stdin is a terminal (TTY). When true the
+// IsTerminal reports whether stdin is a terminal (TTY). When true the
 // interactive accordion mode is enabled with keyboard navigation.
-func isTerminal() bool {
+func IsTerminal() bool {
 	fi, err := os.Stdin.Stat()
 	if err != nil {
 		return false
 	}
 	return fi.Mode()&os.ModeCharDevice != 0
 }
+
+// isTerminal is the unexported alias used by the constructor.
+func isTerminal() bool { return IsTerminal() }
