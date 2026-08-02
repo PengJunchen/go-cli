@@ -2,6 +2,7 @@ package approval
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -113,4 +114,42 @@ func TestRegistryTrustManagerNilResets(t *testing.T) {
 	require.NotNil(t, got)
 	_, ok := got.(*DefaultTrustManager)
 	assert.True(t, ok, "expected *DefaultTrustManager after nil reset")
+}
+
+func TestRegistryConcurrentRegisterGet(t *testing.T) {
+	origClassifier := GetApprovalClassifier()
+	origMode := GetPermissionMode()
+	defer RegisterApprovalClassifier(origClassifier)
+	defer RegisterPermissionMode(origMode)
+
+	const n = 50
+	var wg sync.WaitGroup
+	wg.Add(2)
+	errCh := make(chan error, n)
+
+	// Writers register and get concurrently to surface any data race on the
+	// shared registry state.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < n; i++ {
+			RegisterApprovalClassifier(&DenyAllClassifier{})
+			RegisterPermissionMode(PermissionAuto)
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < n; i++ {
+			if got := GetApprovalClassifier(); got == nil {
+				errCh <- assert.AnError
+			}
+			if got := GetPermissionMode(); got < PermissionDefault || got > PermissionAutoFull {
+				errCh <- assert.AnError
+			}
+		}
+	}()
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		t.Errorf("concurrent registry access failed: %v", err)
+	}
 }
