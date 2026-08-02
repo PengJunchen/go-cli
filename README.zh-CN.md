@@ -6,6 +6,10 @@
 
 纯 Go 实现的 AI Agent CLI 框架。零外部运行时依赖，依赖倒置驱动，全链路 tracing。
 
+灵感来源于 [CloudWeGo Eino](https://github.com/cloudwego/eino/tree/main) 与 [Google ADK-Go](https://github.com/google/adk-go)，并在此基础上构建。开发过程中使用 [GLM 5.1](https://bigmodel.cn) 与 [DeepSeek-v4-flash](https://deepseek.com)（非 20260731 版本），借助 [Trae](https://www.trae.ai) 与 [Trae Work](https://www.trae.ai) 完成——六月底的更新大幅提升了稳定性和持续性，让长时间持续开发成为现实。
+
+> **关联项目**：[go-agent-core](https://github.com/PengJunchen/go-agent-core) 是接口驱动的 Agent 核心 SDK（L0–L4 分层架构，依赖 Eino 做 LLM 适配，可供其他项目导入）。本仓库（**go-cli**）则是完整的 CLI 框架，包含 Harness→Agent→AgentLoop 三层架构、TUI、MCP/ACP/Skill/Extension 等——是可独立运行的 CLI 工具，而非可导入的 SDK。
+
 **[English](README.md)**
 
 ---

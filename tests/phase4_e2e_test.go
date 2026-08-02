@@ -177,7 +177,7 @@ func p4SkillLoadAndMatch(ctx context.Context, t *testing.T, dir string, exporter
 	assert.Equal(t, "e2e-skill", matches[0].Name())
 
 	assert.Equal(t, []string{"e2e-skill"}, skillNames(reg.List(ctx, "coding")))
-	exporter.AssertSpanExists(t, "skill.load")
+	waitForSpanNamed(t, exporter, "skill.load")
 }
 
 // p4ExtensionRegistration drives an Extension through its Init/Shutdown lifecycle
@@ -188,12 +188,14 @@ func p4ExtensionRegistration(ctx context.Context, t *testing.T) {
 	t.Helper()
 
 	reg := extension.NewExtensionRegistry()
+	regImpl, ok := reg.(*extension.DefaultExtensionRegistry)
+	require.True(t, ok, "reg should be *DefaultExtensionRegistry")
 
 	ext := &p4TestExtension{name: "e2e-ext"}
 	require.NoError(t, ext.Init(ctx, reg))
 
 	// The extension registered a hook and a middleware during Init.
-	hook := reg.Hook("e2e-hook")
+	hook := regImpl.Hook("e2e-hook")
 	require.NotNil(t, hook, "extension must register its hook")
 	assert.Equal(t, "e2e-hook", hook.Name())
 
@@ -201,7 +203,7 @@ func p4ExtensionRegistration(ctx context.Context, t *testing.T) {
 	res := hook.Handle(ctx, extension.HookEvent{Name: "agent.before_run", Source: "e2e"})
 	assert.Equal(t, extension.HookActionPass, res.Action)
 
-	mw := reg.Middleware("e2e-middleware")
+	mw := regImpl.Middleware("e2e-middleware")
 	require.NotNil(t, mw, "extension must register its middleware")
 	out, err := mw.WrapAgent(func(_ context.Context, in extension.AgentInput) (extension.AgentOutput, error) {
 		return extension.AgentOutput{Text: "wrapped:" + in.Message}, nil
@@ -662,6 +664,20 @@ func hasSpanNamed(spans []tracing.SpanData, name string) bool {
 		}
 	}
 	return false
+}
+
+// waitForSpanNamed polls the exporter until a span with the given name appears,
+// bounding the wait so that asynchronous export cannot make assertions flaky.
+func waitForSpanNamed(t *testing.T, exporter *mock.MockTraceExporter, name string) {
+	t.Helper()
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if hasSpanNamed(exporter.Spans(), name) {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	exporter.AssertSpanExists(t, name)
 }
 
 // skillNames projects a list of SkillDefinition values to their names.
