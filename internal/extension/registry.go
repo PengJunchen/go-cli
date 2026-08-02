@@ -98,22 +98,22 @@ func (r *DefaultExtensionRegistry) RegisterMiddleware(_ context.Context, m Middl
 	return nil
 }
 
-// Tool returns the tool registered under name, or nil if unknown.
-func (r *DefaultExtensionRegistry) Tool(name string) tools.ToolDefinition {
+// tool returns the tool registered under name, or nil if unknown.
+func (r *DefaultExtensionRegistry) tool(name string) tools.ToolDefinition {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.tools[name]
 }
 
-// Command returns the command registered under name, or nil if unknown.
-func (r *DefaultExtensionRegistry) Command(name string) func(args []string) error {
+// command returns the command registered under name, or nil if unknown.
+func (r *DefaultExtensionRegistry) command(name string) func(args []string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.commands[name]
 }
 
-// Provider returns the provider registered under name, or nil if unknown.
-func (r *DefaultExtensionRegistry) Provider(name string) llm.ModelProvider {
+// provider returns the provider registered under name, or nil if unknown.
+func (r *DefaultExtensionRegistry) provider(name string) llm.ModelProvider {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.providers[name]

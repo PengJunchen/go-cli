@@ -1,3 +1,5 @@
+//go:build !no_plugin
+
 package extension_test
 
 import (

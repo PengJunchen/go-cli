@@ -6,9 +6,11 @@
 //
 //  1. Skill load      : YAMLSkillLoader parses a YAML-frontmatter skill file and
 //     the DefaultSkillRegistry indexes/matches it.
-//  2. Extension reg   : an ExtensionCoordinator drives an Extension through its
-//     Init lifecycle, which registers a hook and middleware
-//     into a DefaultExtensionRegistry.
+//  2. Extension reg   : an Extension's Init registers a hook and middleware
+//     into a DefaultExtensionRegistry, and both are queryable
+//     and runnable afterward. (The ExtensionCoordinator
+//     lifecycle that drives Init/Shutdown is covered by the
+//     coordinator tests in internal/extension.)
 //  3. SubAgent spawn  : DefaultSubAgentFactory spawns a DefaultSubAgent that
 //     runs, accepts Send, and returns a Wait result.
 //  4. TUI render      : a BubbleteaApp consumes agent events and renders them
@@ -140,7 +142,7 @@ func TestPhase4EndToEnd(t *testing.T) {
 	// A span with the phase4 root trace id must exist for each chain step.
 	p4WaitForSpans(t, exporter)
 	require.GreaterOrEqual(t, len(exporter.Spans()), 6,
-		"phase 4 chain must emit spans for skill.load, extension.init, subagent.spawn, config.load, llm.provider_compose and acp.send at minimum")
+		"phase 4 chain must emit spans for skill.load, subagent.spawn, config.load, llm.provider_compose, acp.send and session at minimum")
 	for _, s := range exporter.Spans() {
 		require.Equal(t, tracer.TraceID(), s.TraceID,
 			"span %s (%s) must share the phase4 trace root id", s.SpanID, s.Name)
@@ -179,26 +181,25 @@ func p4SkillLoadAndMatch(ctx context.Context, t *testing.T, dir string, exporter
 	exporter.AssertSpanExists(t, "skill.load")
 }
 
-// p4ExtensionRegistration drives an extension through its Init/Shutdown lifecycle
-// and verifies the hooks / middleware it registered are queryable from the
-// ExtensionRegistry.
+// p4ExtensionRegistration drives an Extension through its Init/Shutdown lifecycle
+// and verifies the hooks / middleware it registered are queryable and runnable
+// from the ExtensionRegistry. The lifecycle transitions themselves are covered
+// by the coordinator tests in internal/extension.
 func p4ExtensionRegistration(ctx context.Context, t *testing.T) {
 	t.Helper()
 
 	reg := extension.NewExtensionRegistry()
-	coord := extension.NewExtensionCoordinator(reg)
 
 	ext := &p4TestExtension{name: "e2e-ext"}
-	require.NoError(t, coord.InitExtension(ctx, ext))
-	require.Equal(t, extension.ExtensionStateRunning, coord.State("e2e-ext"))
+	require.NoError(t, ext.Init(ctx, reg))
 
 	// The extension registered a hook and a middleware during Init.
 	hook := reg.Hook("e2e-hook")
 	require.NotNil(t, hook, "extension must register its hook")
 	assert.Equal(t, "e2e-hook", hook.Name())
 
-	// RunHook round-trips the hook handle.
-	res := coord.RunHook(ctx, hook, extension.HookEvent{Name: "agent.before_run", Source: "e2e"})
+	// The hook handle round-trips.
+	res := hook.Handle(ctx, extension.HookEvent{Name: "agent.before_run", Source: "e2e"})
 	assert.Equal(t, extension.HookActionPass, res.Action)
 
 	mw := reg.Middleware("e2e-middleware")
@@ -209,8 +210,7 @@ func p4ExtensionRegistration(ctx context.Context, t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "wrapped:hi", out.Text)
 
-	require.NoError(t, coord.ShutdownExtension(ctx, ext))
-	require.Equal(t, extension.ExtensionStateStopped, coord.State("e2e-ext"))
+	require.NoError(t, ext.Shutdown(ctx))
 }
 
 // p4Hook is a real extension.Hook used to prove registration.

@@ -25,16 +25,16 @@ type Extension interface {
 	Shutdown(ctx context.Context) error
 }
 
-// DefaultExtension is a pass-through stub that satisfies the Extension
+// defaultExtension is a pass-through stub that satisfies the Extension
 // contract without registering anything or acquiring resources.
-type DefaultExtension struct {
+type defaultExtension struct {
 	name string
 }
 
-var _ Extension = (*DefaultExtension)(nil)
+var _ Extension = (*defaultExtension)(nil)
 
 // Name returns the extension name, defaulting to "default-extension".
-func (d *DefaultExtension) Name() string {
+func (d *defaultExtension) Name() string {
 	if d.name == "" {
 		return "default-extension"
 	}
@@ -42,13 +42,13 @@ func (d *DefaultExtension) Name() string {
 }
 
 // Init is a no-op that accepts the registry and logs the event.
-func (d *DefaultExtension) Init(_ context.Context, _ ExtensionRegistry) error {
+func (d *defaultExtension) Init(_ context.Context, _ ExtensionRegistry) error {
 	slog.Info("extension.init", "name", d.Name())
 	return nil
 }
 
 // Shutdown is a no-op that logs the event.
-func (d *DefaultExtension) Shutdown(_ context.Context) error {
+func (d *defaultExtension) Shutdown(_ context.Context) error {
 	slog.Info("extension.shutdown", "name", d.Name())
 	return nil
 }
@@ -60,14 +60,14 @@ const (
 	// HookActionPass indicates the event was observed and processing should
 	// continue with the next hook.
 	HookActionPass HookAction = "pass"
-	// HookActionBlock indicates processing should stop and the event should be
+	// hookActionBlock indicates processing should stop and the event should be
 	// rejected (e.g. a permission denial).
-	HookActionBlock HookAction = "block"
-	// HookActionTerminate indicates the whole run should stop immediately.
-	HookActionTerminate HookAction = "terminate"
-	// HookActionReplace indicates the caller should substitute its payload with
+	hookActionBlock HookAction = "block"
+	// hookActionTerminate indicates the whole run should stop immediately.
+	hookActionTerminate HookAction = "terminate"
+	// hookActionReplace indicates the caller should substitute its payload with
 	// the HookResult.Replacement value.
-	HookActionReplace HookAction = "replace"
+	hookActionReplace HookAction = "replace"
 )
 
 // HookEvent is the immutable description of an event delivered to a Hook.
@@ -88,7 +88,7 @@ type HookResult struct {
 	Action HookAction
 	// Reason describes the outcome, especially for block/terminate.
 	Reason string
-	// Replacement carries the substituted value when Action is HookActionReplace.
+	// Replacement carries the substituted value when Action is hookActionReplace.
 	Replacement any
 }
 
@@ -101,20 +101,20 @@ type Hook interface {
 	Handle(ctx context.Context, event HookEvent) HookResult
 }
 
-// DefaultHook is a pass-through hook that always returns HookActionPass.
-type DefaultHook struct {
+// defaultHook is a pass-through hook that always returns HookActionPass.
+type defaultHook struct {
 	name string
 }
 
-var _ Hook = (*DefaultHook)(nil)
+var _ Hook = (*defaultHook)(nil)
 
 // Name returns the hook name, defaulting to "default-hook".
-func (h *DefaultHook) Name() string {
+func (h *defaultHook) Name() string {
 	return h.name
 }
 
 // Handle logs the event and returns HookActionPass.
-func (h *DefaultHook) Handle(_ context.Context, event HookEvent) HookResult {
+func (h *defaultHook) Handle(_ context.Context, event HookEvent) HookResult {
 	slog.Info("extension.hook", "name", h.Name(), "event", event.Name)
 	return HookResult{Action: HookActionPass}
 }

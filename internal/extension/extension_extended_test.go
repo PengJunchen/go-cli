@@ -1,4 +1,4 @@
-package extension_test
+package extension
 
 import (
 	"context"
@@ -8,14 +8,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/pengjunchen/go-cli/internal/extension"
 )
 
 // TestDefaultExtensionNameFallback verifies DefaultExtension reports the stable
 // default name for a zero-value instance.
 func TestDefaultExtensionNameFallback(t *testing.T) {
-	def := &extension.DefaultExtension{}
+	def := &defaultExtension{}
 	assert.Equal(t, "default-extension", def.Name())
 }
 
@@ -23,8 +21,8 @@ func TestDefaultExtensionNameFallback(t *testing.T) {
 // lifecycle contract without registering anything or failing.
 func TestDefaultExtensionLifecycleNoop(t *testing.T) {
 	ctx := context.Background()
-	reg := extension.NewExtensionRegistry()
-	def := &extension.DefaultExtension{}
+	reg := NewExtensionRegistry()
+	def := &defaultExtension{}
 	require.NoError(t, def.Init(ctx, reg))
 	require.NoError(t, def.Shutdown(ctx))
 	assert.Equal(t, "default-extension", def.Name())
@@ -33,10 +31,10 @@ func TestDefaultExtensionLifecycleNoop(t *testing.T) {
 // TestDefaultHookNameAndPass verifies the default hook always returns
 // HookActionPass and logs without changing the payload.
 func TestDefaultHookNameAndPass(t *testing.T) {
-	h := &extension.DefaultHook{}
-	event := extension.HookEvent{Name: "agent.before_run", Data: "payload", Source: "src"}
+	h := &defaultHook{}
+	event := HookEvent{Name: "agent.before_run", Data: "payload", Source: "src"}
 	res := h.Handle(context.Background(), event)
-	assert.Equal(t, extension.HookActionPass, res.Action)
+	assert.Equal(t, HookActionPass, res.Action)
 	assert.Empty(t, res.Reason)
 	assert.Nil(t, res.Replacement)
 }
@@ -44,7 +42,7 @@ func TestDefaultHookNameAndPass(t *testing.T) {
 // TestHookEventFields verifies the bare HookEvent value carries all its
 // conjunctive fields through Dispatch untouched.
 func TestHookEventFields(t *testing.T) {
-	ev := extension.HookEvent{Name: "e", Data: map[string]int{"k": 1}, Source: "src", Timestamp: time.Now()}
+	ev := HookEvent{Name: "e", Data: map[string]int{"k": 1}, Source: "src", Timestamp: time.Now()}
 	assert.Equal(t, "e", ev.Name)
 	assert.Equal(t, map[string]int{"k": 1}, ev.Data)
 	assert.Equal(t, "src", ev.Source)
@@ -54,11 +52,11 @@ func TestHookEventFields(t *testing.T) {
 // TestHookResultActions verifies the four HookAction values serialize to their
 // documented strings.
 func TestHookResultActions(t *testing.T) {
-	actions := map[extension.HookAction]string{
-		extension.HookActionPass:      "pass",
-		extension.HookActionBlock:     "block",
-		extension.HookActionTerminate: "terminate",
-		extension.HookActionReplace:   "replace",
+	actions := map[HookAction]string{
+		HookActionPass:      "pass",
+		hookActionBlock:     "block",
+		hookActionTerminate: "terminate",
+		hookActionReplace:   "replace",
 	}
 	for action, want := range actions {
 		assert.Equal(t, want, string(action))
@@ -68,12 +66,12 @@ func TestHookResultActions(t *testing.T) {
 // TestHookResultCarriesReasonAndReplacement verifies HookResult relays the
 // decision plus optional metadata for block/replace outcomes.
 func TestHookResultCarriesReasonAndReplacement(t *testing.T) {
-	block := extension.HookResult{Action: extension.HookActionBlock, Reason: "denied"}
-	assert.Equal(t, extension.HookActionBlock, block.Action)
+	block := HookResult{Action: hookActionBlock, Reason: "denied"}
+	assert.Equal(t, hookActionBlock, block.Action)
 	assert.Equal(t, "denied", block.Reason)
 
-	replace := extension.HookResult{Action: extension.HookActionReplace, Replacement: "sub"}
-	assert.Equal(t, extension.HookActionReplace, replace.Action)
+	replace := HookResult{Action: hookActionReplace, Replacement: "sub"}
+	assert.Equal(t, hookActionReplace, replace.Action)
 	assert.Equal(t, "sub", replace.Replacement)
 }
 
@@ -84,20 +82,20 @@ func TestMiddlewareOnionOrder(t *testing.T) {
 	var order []string
 
 	// Base AgentFunc records its position.
-	base := func(_ context.Context, input extension.AgentInput) (extension.AgentOutput, error) {
+	base := func(_ context.Context, input AgentInput) (AgentOutput, error) {
 		order = append(order, "base")
-		return extension.AgentOutput{Text: "done:" + input.Message}, nil
+		return AgentOutput{Text: "done:" + input.Message}, nil
 	}
 
 	// outmost returns a wrapper that records before calling next.
-	makeLayer := func(name string) extension.Middleware {
+	makeLayer := func(name string) Middleware {
 		return &defaultMW{name: name, order: &order}
 	}
 
 	wrapped := makeLayer("outer").WrapAgent(
 		makeLayer("inner").WrapAgent(base),
 	)
-	out, err := wrapped(ctx, extension.AgentInput{Message: "m"})
+	out, err := wrapped(ctx, AgentInput{Message: "m"})
 	require.NoError(t, err)
 	assert.Equal(t, "done:m", out.Text)
 	// Onion order: outer enters first, then inner, then base.
@@ -110,12 +108,12 @@ type defaultMW struct {
 	order *[]string
 }
 
-var _ extension.Middleware = (*defaultMW)(nil)
+var _ Middleware = (*defaultMW)(nil)
 
 func (m *defaultMW) Name() string { return m.name }
 
-func (m *defaultMW) WrapAgent(next extension.AgentFunc) extension.AgentFunc {
-	return func(ctx context.Context, input extension.AgentInput) (extension.AgentOutput, error) {
+func (m *defaultMW) WrapAgent(next AgentFunc) AgentFunc {
+	return func(ctx context.Context, input AgentInput) (AgentOutput, error) {
 		*m.order = append(*m.order, m.name+"-in")
 		out, err := next(ctx, input)
 		*m.order = append(*m.order, m.name+"-out")
@@ -128,12 +126,12 @@ func (m *defaultMW) WrapAgent(next extension.AgentFunc) extension.AgentFunc {
 func TestMiddlewareErrorPropagation(t *testing.T) {
 	ctx := context.Background()
 	sentinel := errors.New("agent failed")
-	base := func(_ context.Context, _ extension.AgentInput) (extension.AgentOutput, error) {
-		return extension.AgentOutput{}, sentinel
+	base := func(_ context.Context, _ AgentInput) (AgentOutput, error) {
+		return AgentOutput{}, sentinel
 	}
 	var order []string
 	mw := &defaultMW{name: "x", order: &order}
-	out, err := mw.WrapAgent(base)(ctx, extension.AgentInput{})
+	out, err := mw.WrapAgent(base)(ctx, AgentInput{})
 	assert.ErrorIs(t, err, sentinel)
 	assert.Empty(t, out.Text)
 }
@@ -142,13 +140,13 @@ func TestMiddlewareErrorPropagation(t *testing.T) {
 // the underlying ModelFunc and preserves the response.
 func TestModelMiddlewarePassThrough(t *testing.T) {
 	ctx := context.Background()
-	mmw := &extension.DefaultModelMiddleware{}
+	mmw := &defaultModelMiddleware{}
 	var called bool
-	fn := func(_ context.Context, req extension.ModelRequest) (extension.ModelResponse, error) {
+	fn := func(_ context.Context, req ModelRequest) (ModelResponse, error) {
 		called = true
-		return extension.ModelResponse{Text: req.Prompt + "|" + req.Model}, nil
+		return ModelResponse{Text: req.Prompt + "|" + req.Model}, nil
 	}
-	out, err := mmw.WrapModel(fn)(ctx, extension.ModelRequest{Prompt: "hi", Model: "gpt"})
+	out, err := mmw.WrapModel(fn)(ctx, ModelRequest{Prompt: "hi", Model: "gpt"})
 	require.NoError(t, err)
 	assert.True(t, called)
 	assert.Equal(t, "hi|gpt", out.Text)
@@ -158,7 +156,7 @@ func TestModelMiddlewarePassThrough(t *testing.T) {
 // underlying ToolFunc, preserving name, input and output.
 func TestToolMiddlewarePassThrough(t *testing.T) {
 	ctx := context.Background()
-	tmw := &extension.DefaultToolMiddleware{}
+	tmw := &defaultToolMiddleware{}
 	var gotName string
 	var gotInput any
 	fn := func(_ context.Context, name string, input any) (any, error) {
@@ -176,7 +174,7 @@ func TestToolMiddlewarePassThrough(t *testing.T) {
 // TestMiddlewareZeroValueNames verifies the zero-value default middleware
 // structs expose an empty name (callers may set one explicitly).
 func TestMiddlewareZeroValueNames(t *testing.T) {
-	assert.Equal(t, "", (&extension.DefaultMiddleware{}).Name())
-	assert.Equal(t, "", (&extension.DefaultModelMiddleware{}).Name())
-	assert.Equal(t, "", (&extension.DefaultToolMiddleware{}).Name())
+	assert.Equal(t, "", (&defaultMiddleware{}).Name())
+	assert.Equal(t, "", (&defaultModelMiddleware{}).Name())
+	assert.Equal(t, "", (&defaultToolMiddleware{}).Name())
 }

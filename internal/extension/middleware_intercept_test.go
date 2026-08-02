@@ -1,4 +1,4 @@
-package extension_test
+package extension
 
 import (
 	"context"
@@ -6,20 +6,18 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/pengjunchen/go-cli/internal/extension"
 )
 
 // interceptModelMiddleware decorates a ModelFunc to mutate the request prompt
 // before delegating and to post-process the response text after.
 type interceptModelMiddleware struct{}
 
-var _ extension.ModelMiddleware = interceptModelMiddleware{}
+var _ ModelMiddleware = interceptModelMiddleware{}
 
 func (interceptModelMiddleware) Name() string { return "intercept-model" }
 
-func (interceptModelMiddleware) WrapModel(next extension.ModelFunc) extension.ModelFunc {
-	return func(ctx context.Context, req extension.ModelRequest) (extension.ModelResponse, error) {
+func (interceptModelMiddleware) WrapModel(next ModelFunc) ModelFunc {
+	return func(ctx context.Context, req ModelRequest) (ModelResponse, error) {
 		req.Prompt = "PRE:" + req.Prompt
 		resp, err := next(ctx, req)
 		if err != nil {
@@ -34,11 +32,11 @@ func (interceptModelMiddleware) WrapModel(next extension.ModelFunc) extension.Mo
 // delegation.
 type interceptToolMiddleware struct{}
 
-var _ extension.ToolMiddleware = interceptToolMiddleware{}
+var _ ToolMiddleware = interceptToolMiddleware{}
 
 func (interceptToolMiddleware) Name() string { return "intercept-tool" }
 
-func (interceptToolMiddleware) WrapTool(next extension.ToolFunc) extension.ToolFunc {
+func (interceptToolMiddleware) WrapTool(next ToolFunc) ToolFunc {
 	return func(ctx context.Context, name string, input any) (any, error) {
 		return next(ctx, "wrapped:"+name, input)
 	}
@@ -49,10 +47,10 @@ func (interceptToolMiddleware) WrapTool(next extension.ToolFunc) extension.ToolF
 func TestModelMiddlewareIntercepts(t *testing.T) {
 	ctx := context.Background()
 	mw := interceptModelMiddleware{}
-	base := func(_ context.Context, req extension.ModelRequest) (extension.ModelResponse, error) {
-		return extension.ModelResponse{Text: "echo(" + req.Prompt + ")"}, nil
+	base := func(_ context.Context, req ModelRequest) (ModelResponse, error) {
+		return ModelResponse{Text: "echo(" + req.Prompt + ")"}, nil
 	}
-	out, err := mw.WrapModel(base)(ctx, extension.ModelRequest{Prompt: "hi"})
+	out, err := mw.WrapModel(base)(ctx, ModelRequest{Prompt: "hi"})
 	require.NoError(t, err)
 	assert.Equal(t, "echo(PRE:hi):POST", out.Text)
 }
@@ -77,11 +75,11 @@ func TestToolMiddlewareIntercepts(t *testing.T) {
 // preserves the original semantics end to end.
 func TestModelMiddlewareUnwrapChain(t *testing.T) {
 	ctx := context.Background()
-	mmw := &extension.DefaultModelMiddleware{}
-	base := func(_ context.Context, req extension.ModelRequest) (extension.ModelResponse, error) {
-		return extension.ModelResponse{Text: req.Prompt}, nil
+	mmw := &defaultModelMiddleware{}
+	base := func(_ context.Context, req ModelRequest) (ModelResponse, error) {
+		return ModelResponse{Text: req.Prompt}, nil
 	}
-	out, err := mmw.WrapModel(base)(ctx, extension.ModelRequest{Prompt: "p"})
+	out, err := mmw.WrapModel(base)(ctx, ModelRequest{Prompt: "p"})
 	require.NoError(t, err)
 	assert.Equal(t, "p", out.Text)
 }
@@ -90,17 +88,17 @@ func TestModelMiddlewareUnwrapChain(t *testing.T) {
 // wrap produce a fresh callable each time without shared state.
 func TestMiddlewareWrapIdempotent(t *testing.T) {
 	ctx := context.Background()
-	mw := &extension.DefaultMiddleware{}
+	mw := &defaultMiddleware{}
 	count := 0
-	base := func(_ context.Context, _ extension.AgentInput) (extension.AgentOutput, error) {
+	base := func(_ context.Context, _ AgentInput) (AgentOutput, error) {
 		count++
-		return extension.AgentOutput{Text: "x"}, nil
+		return AgentOutput{Text: "x"}, nil
 	}
 	f1 := mw.WrapAgent(base)
 	f2 := mw.WrapAgent(base)
-	_, err := f1(ctx, extension.AgentInput{})
+	_, err := f1(ctx, AgentInput{})
 	require.NoError(t, err)
-	_, err = f2(ctx, extension.AgentInput{})
+	_, err = f2(ctx, AgentInput{})
 	require.NoError(t, err)
 	assert.Equal(t, 2, count, "each wrapped function should reach the base")
 }

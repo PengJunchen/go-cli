@@ -1,4 +1,4 @@
-package extension_test
+package extension
 
 import (
 	"context"
@@ -7,18 +7,78 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/pengjunchen/go-cli/internal/extension"
-	"github.com/pengjunchen/go-cli/internal/mock"
 )
+
+// --- local stubs (avoid importing internal/mock which creates a cycle) ---
+
+// regTestHook records Handle calls.
+type regTestHook struct {
+	mu     sync.Mutex
+	name   string
+	calls  int
+	result HookResult
+}
+
+var _ Hook = (*regTestHook)(nil)
+
+func newRegTestHook(name string) *regTestHook {
+	return &regTestHook{name: name, result: HookResult{Action: HookActionPass}}
+}
+
+func (h *regTestHook) Name() string { return h.name }
+
+func (h *regTestHook) Handle(_ context.Context, _ HookEvent) HookResult {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.calls++
+	return h.result
+}
+
+func (h *regTestHook) CallCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.calls
+}
+
+// regTestMiddleware wraps an AgentFunc, recording wrap counts.
+type regTestMiddleware struct {
+	mu        sync.Mutex
+	name      string
+	wrapCount int
+}
+
+var _ Middleware = (*regTestMiddleware)(nil)
+
+func newRegTestMiddleware(name string) *regTestMiddleware {
+	return &regTestMiddleware{name: name}
+}
+
+func (m *regTestMiddleware) Name() string { return m.name }
+
+func (m *regTestMiddleware) WrapAgent(next AgentFunc) AgentFunc {
+	m.mu.Lock()
+	m.wrapCount++
+	m.mu.Unlock()
+	return func(ctx context.Context, input AgentInput) (AgentOutput, error) {
+		return next(ctx, input)
+	}
+}
+
+func (m *regTestMiddleware) WrapCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.wrapCount
+}
+
+// --- tests ---
 
 // TestRegistryMissingGetters verifies getters return nil/zero for unknown keys
 // without panicking.
 func TestRegistryMissingGetters(t *testing.T) {
-	reg := extension.NewExtensionRegistry()
-	assert.Nil(t, reg.Tool("nope"))
-	assert.Nil(t, reg.Command("nope"))
-	assert.Nil(t, reg.Provider("nope"))
+	reg := NewExtensionRegistry()
+	assert.Nil(t, reg.tool("nope"))
+	assert.Nil(t, reg.command("nope"))
+	assert.Nil(t, reg.provider("nope"))
 	assert.Nil(t, reg.Hook("nope"))
 	assert.Nil(t, reg.Middleware("nope"))
 }
@@ -27,25 +87,25 @@ func TestRegistryMissingGetters(t *testing.T) {
 // providers.
 func TestRegistryHookAndProviderOverwrite(t *testing.T) {
 	ctx := context.Background()
-	reg := extension.NewExtensionRegistry()
+	reg := NewExtensionRegistry()
 
-	h1 := mock.NewMockHook("h")
-	h2 := mock.NewMockHook("h")
+	h1 := newRegTestHook("h")
+	h2 := newRegTestHook("h")
 	require.NoError(t, reg.RegisterHook(ctx, h1))
 	require.NoError(t, reg.RegisterHook(ctx, h2))
 	assert.Same(t, h2, reg.Hook("h"), "second hook should overwrite the first")
 
 	require.NoError(t, reg.RegisterProvider(testProvider{name: "p"}))
 	require.NoError(t, reg.RegisterProvider(testProvider{name: "p"}))
-	assert.Equal(t, "p", reg.Provider("p").Name())
+	assert.Equal(t, "p", reg.provider("p").Name())
 }
 
 // TestRegistryMiddlewareOverwrite verifies last-writer-wins for middleware.
 func TestRegistryMiddlewareOverwrite(t *testing.T) {
 	ctx := context.Background()
-	reg := extension.NewExtensionRegistry()
-	m1 := mock.NewMockMiddleware("m")
-	m2 := mock.NewMockMiddleware("m")
+	reg := NewExtensionRegistry()
+	m1 := newRegTestMiddleware("m")
+	m2 := newRegTestMiddleware("m")
 	require.NoError(t, reg.RegisterMiddleware(ctx, m1))
 	require.NoError(t, reg.RegisterMiddleware(ctx, m2))
 	assert.Same(t, m2, reg.Middleware("m"))
@@ -53,11 +113,11 @@ func TestRegistryMiddlewareOverwrite(t *testing.T) {
 
 // TestRegistryCommandOverwrite verifies the last registered command runs.
 func TestRegistryCommandOverwrite(t *testing.T) {
-	reg := extension.NewExtensionRegistry()
+	reg := NewExtensionRegistry()
 	first, second := false, false
 	require.NoError(t, reg.RegisterCommand("run", func([]string) error { first = true; return nil }))
 	require.NoError(t, reg.RegisterCommand("run", func([]string) error { second = true; return nil }))
-	require.NoError(t, reg.Command("run")(nil))
+	require.NoError(t, reg.command("run")(nil))
 	assert.False(t, first)
 	assert.True(t, second)
 }
@@ -65,7 +125,7 @@ func TestRegistryCommandOverwrite(t *testing.T) {
 // TestRegistryConcurrentConcurrentRW exercises concurrent registration and
 // reads across all five building-block types under the -race detector.
 func TestRegistryConcurrentConcurrentRW(t *testing.T) {
-	reg := extension.NewExtensionRegistry()
+	reg := NewExtensionRegistry()
 	ctx := context.Background()
 
 	var wg sync.WaitGroup
@@ -76,14 +136,14 @@ func TestRegistryConcurrentConcurrentRW(t *testing.T) {
 			name := string(rune('a' + i%26))
 			_ = reg.RegisterTool(ctx, testTool{name: name})                         //nolint:errcheck // registration returns nil error
 			_ = reg.RegisterProvider(testProvider{name: name})                      //nolint:errcheck // registration returns nil error
-			_ = reg.RegisterHook(ctx, mock.NewMockHook(name))                       //nolint:errcheck // registration returns nil error
-			_ = reg.RegisterMiddleware(ctx, mock.NewMockMiddleware(name))           //nolint:errcheck // registration returns nil error
+			_ = reg.RegisterHook(ctx, newRegTestHook(name))                         //nolint:errcheck // registration returns nil error
+			_ = reg.RegisterMiddleware(ctx, newRegTestMiddleware(name))             //nolint:errcheck // registration returns nil error
 			_ = reg.RegisterCommand(name, func(args []string) error { return nil }) //nolint:errcheck // registration returns nil error
-			_ = reg.Tool(name)
-			_ = reg.Provider(name)
+			_ = reg.tool(name)
+			_ = reg.provider(name)
 			_ = reg.Hook(name)
 			_ = reg.Middleware(name)
-			_ = reg.Command(name)
+			_ = reg.command(name)
 		}(i)
 	}
 	wg.Wait()
@@ -91,10 +151,10 @@ func TestRegistryConcurrentConcurrentRW(t *testing.T) {
 
 // TestRegistryEmptyFresh asserts a freshly constructed registry starts empty.
 func TestRegistryEmptyFresh(t *testing.T) {
-	reg := extension.NewExtensionRegistry()
-	assert.Nil(t, reg.Tool("x"))
-	assert.Nil(t, reg.Command("x"))
-	assert.Nil(t, reg.Provider("x"))
+	reg := NewExtensionRegistry()
+	assert.Nil(t, reg.tool("x"))
+	assert.Nil(t, reg.command("x"))
+	assert.Nil(t, reg.provider("x"))
 	assert.Nil(t, reg.Hook("x"))
 	assert.Nil(t, reg.Middleware("x"))
 }
@@ -102,6 +162,6 @@ func TestRegistryEmptyFresh(t *testing.T) {
 // TestDefaultExtensionRegistryImplementsInterface asserts the default registry
 // satisfies the ExtensionRegistry contract.
 func TestDefaultExtensionRegistryImplementsInterface(t *testing.T) {
-	var _ extension.ExtensionRegistry = extension.NewExtensionRegistry()
-	assert.NotNil(t, extension.NewExtensionRegistry())
+	var _ ExtensionRegistry = NewExtensionRegistry()
+	assert.NotNil(t, NewExtensionRegistry())
 }

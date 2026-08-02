@@ -1,4 +1,4 @@
-package extension_test
+package extension
 
 import (
 	"context"
@@ -10,10 +10,156 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/pengjunchen/go-cli/internal/extension"
-	"github.com/pengjunchen/go-cli/internal/mock"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
+
+// --- local stubs (avoid importing internal/mock which creates a cycle) ---
+
+// mgrTestExt records Init/Shutdown calls for lifecycle assertions.
+type mgrTestExt struct {
+	mu          sync.Mutex
+	name        string
+	initCalled  bool
+	shutdownCnt int
+	initErr     error
+	shutdownErr error
+	registry    ExtensionRegistry
+}
+
+var _ Extension = (*mgrTestExt)(nil)
+
+func newMgrTestExt(name string) *mgrTestExt { return &mgrTestExt{name: name} }
+
+func (e *mgrTestExt) Name() string { return e.name }
+
+func (e *mgrTestExt) SetInitError(err error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.initErr = err
+}
+
+func (e *mgrTestExt) SetShutdownError(err error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.shutdownErr = err
+}
+
+func (e *mgrTestExt) Init(_ context.Context, reg ExtensionRegistry) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.initCalled = true
+	e.registry = reg
+	return e.initErr
+}
+
+func (e *mgrTestExt) Shutdown(_ context.Context) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.shutdownCnt++
+	return e.shutdownErr
+}
+
+func (e *mgrTestExt) InitCalled() bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.initCalled
+}
+
+func (e *mgrTestExt) ShutdownCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.shutdownCnt
+}
+
+func (e *mgrTestExt) Registry() ExtensionRegistry {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.registry
+}
+
+// mgrTestHook records Handle calls.
+type mgrTestHook struct {
+	mu     sync.Mutex
+	name   string
+	calls  int
+	result HookResult
+}
+
+var _ Hook = (*mgrTestHook)(nil)
+
+func newMgrTestHook(name string) *mgrTestHook {
+	return &mgrTestHook{name: name, result: HookResult{Action: HookActionPass}}
+}
+
+func (h *mgrTestHook) Name() string { return h.name }
+
+func (h *mgrTestHook) SetResult(r HookResult) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.result = r
+}
+
+func (h *mgrTestHook) Handle(_ context.Context, _ HookEvent) HookResult {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.calls++
+	return h.result
+}
+
+func (h *mgrTestHook) CallCount() int {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.calls
+}
+
+// mgrTestPluginLoader returns predefined extensions for a path.
+type mgrTestPluginLoader struct {
+	mu         sync.Mutex
+	name       string
+	results    map[string][]Extension
+	loadErr    map[string]error
+	loadedPath string
+}
+
+var _ PluginLoader = (*mgrTestPluginLoader)(nil)
+
+func newMgrTestPluginLoader(name string) *mgrTestPluginLoader {
+	return &mgrTestPluginLoader{
+		name:    name,
+		results: make(map[string][]Extension),
+		loadErr: make(map[string]error),
+	}
+}
+
+func (l *mgrTestPluginLoader) Name() string { return l.name }
+
+func (l *mgrTestPluginLoader) SetResult(path string, exts []Extension) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.results[path] = exts
+}
+
+func (l *mgrTestPluginLoader) SetError(path string, err error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.loadErr[path] = err
+}
+
+func (l *mgrTestPluginLoader) Load(_ context.Context, path string) ([]Extension, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.loadedPath = path
+	if err := l.loadErr[path]; err != nil {
+		return nil, err
+	}
+	return l.results[path], nil
+}
+
+func (l *mgrTestPluginLoader) LoadedPath() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.loadedPath
+}
 
 // captureExporter is a local in-memory tracing.TraceExporter used to verify span
 // emission deterministically without importing an unrelated mock package.
@@ -73,14 +219,14 @@ func TestCoordinatorEmitsSpans(t *testing.T) {
 	rec := &captureExporter{}
 	ctx := newTracingCtx(rec)
 
-	coord := extension.NewExtensionCoordinator(nil)
-	ext := mock.NewMockExtension("span-ext")
-	require.NoError(t, coord.InitExtension(ctx, ext))
+	coord := newExtensionCoordinator(nil)
+	ext := newMgrTestExt("span-ext")
+	require.NoError(t, coord.initExtension(ctx, ext))
 
-	hook := mock.NewMockHook("span-hook")
-	coord.RunHook(ctx, hook, extension.HookEvent{Name: "agent.before_run"})
+	hook := newMgrTestHook("span-hook")
+	coord.runHook(ctx, hook, HookEvent{Name: "agent.before_run"})
 
-	require.NoError(t, coord.ShutdownExtension(ctx, ext))
+	require.NoError(t, coord.shutdownExtension(ctx, ext))
 
 	initSpan := waitFind(t, rec, "extension.init")
 	got := map[string]string{}
@@ -108,53 +254,53 @@ func TestCoordinatorEmitsSpans(t *testing.T) {
 
 // AC-10: process-wide plugin loader registry provides nil-default accessors.
 func TestPluginLoaderRegistry(t *testing.T) {
-	extension.RegisterPluginLoader(nil) // reset to default
-	got := extension.GetPluginLoader()
+	registerPluginLoader(nil) // reset to default
+	got := getPluginLoader()
 	require.NotNil(t, got)
 	assert.Equal(t, "default-plugin-loader", got.Name())
 
-	mockLoader := mock.NewMockPluginLoader("custom")
-	extension.RegisterPluginLoader(mockLoader)
-	assert.Same(t, mockLoader, extension.GetPluginLoader())
+	mockLoader := newMgrTestPluginLoader("custom")
+	registerPluginLoader(mockLoader)
+	assert.Same(t, mockLoader, getPluginLoader())
 
 	// A nil registration resets back to the default loader.
-	extension.RegisterPluginLoader(nil)
-	assert.Equal(t, "default-plugin-loader", extension.GetPluginLoader().Name())
+	registerPluginLoader(nil)
+	assert.Equal(t, "default-plugin-loader", getPluginLoader().Name())
 }
 
 // AC-11: lifecycle transitions Pending -> Running -> Stopped.
 func TestCoordinatorLifecycleStates(t *testing.T) {
-	coord := extension.NewExtensionCoordinator(nil)
+	coord := newExtensionCoordinator(nil)
 	ctx := context.Background()
 
-	ext := mock.NewMockExtension("lifecycle")
-	assert.Equal(t, extension.ExtensionStatePending, coord.State(ext.Name()))
+	ext := newMgrTestExt("lifecycle")
+	assert.Equal(t, extensionStatePending, coord.state(ext.Name()))
 
-	require.NoError(t, coord.InitExtension(ctx, ext))
+	require.NoError(t, coord.initExtension(ctx, ext))
 	assert.True(t, ext.InitCalled())
-	assert.Equal(t, extension.ExtensionStateRunning, coord.State(ext.Name()))
+	assert.Equal(t, extensionStateRunning, coord.state(ext.Name()))
 
-	require.NoError(t, coord.ShutdownExtension(ctx, ext))
+	require.NoError(t, coord.shutdownExtension(ctx, ext))
 	assert.Equal(t, 1, ext.ShutdownCount())
-	assert.Equal(t, extension.ExtensionStateStopped, coord.State(ext.Name()))
+	assert.Equal(t, extensionStateStopped, coord.state(ext.Name()))
 }
 
 // AC-11: Init failure surfaces the error and does not mark the extension
 // Running; Shutdown failure propagates.
 func TestCoordinatorLifecycleErrors(t *testing.T) {
-	coord := extension.NewExtensionCoordinator(nil)
+	coord := newExtensionCoordinator(nil)
 	ctx := context.Background()
 
-	initExt := mock.NewMockExtension("fail-init")
+	initExt := newMgrTestExt("fail-init")
 	initExt.SetInitError(errors.New("init blew up"))
-	err := coord.InitExtension(ctx, initExt)
+	err := coord.initExtension(ctx, initExt)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "init blew up")
 
-	shutExt := mock.NewMockExtension("fail-shutdown")
-	require.NoError(t, coord.InitExtension(ctx, shutExt))
+	shutExt := newMgrTestExt("fail-shutdown")
+	require.NoError(t, coord.initExtension(ctx, shutExt))
 	shutExt.SetShutdownError(errors.New("shutdown blew up"))
-	err = coord.ShutdownExtension(ctx, shutExt)
+	err = coord.shutdownExtension(ctx, shutExt)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "shutdown blew up")
 }
@@ -162,29 +308,29 @@ func TestCoordinatorLifecycleErrors(t *testing.T) {
 // AC-11: the coordinator passes its registry through so extensions can register
 // building blocks during Init.
 func TestCoordinatorPassesRegistry(t *testing.T) {
-	reg := extension.NewExtensionRegistry()
-	coord := extension.NewExtensionCoordinator(reg)
+	reg := NewExtensionRegistry()
+	coord := newExtensionCoordinator(reg)
 	ctx := context.Background()
 
-	ext := mock.NewMockExtension("reg-ext")
-	require.NoError(t, coord.InitExtension(ctx, ext))
+	ext := newMgrTestExt("reg-ext")
+	require.NoError(t, coord.initExtension(ctx, ext))
 	assert.Same(t, reg, ext.Registry())
 }
 
 // Hook block/terminate/replace actions are relayed unchanged by the coordinator.
 func TestCoordinatorRunHookActions(t *testing.T) {
-	coord := extension.NewExtensionCoordinator(nil)
+	coord := newExtensionCoordinator(nil)
 	ctx := context.Background()
-	hook := mock.NewMockHook("act")
-	event := extension.HookEvent{Name: "e", Timestamp: time.Now()}
+	hook := newMgrTestHook("act")
+	event := HookEvent{Name: "e", Timestamp: time.Now()}
 
-	hook.SetResult(extension.HookResult{Action: extension.HookActionBlock, Reason: "denied"})
-	res := coord.RunHook(ctx, hook, event)
-	assert.Equal(t, extension.HookActionBlock, res.Action)
+	hook.SetResult(HookResult{Action: hookActionBlock, Reason: "denied"})
+	res := coord.runHook(ctx, hook, event)
+	assert.Equal(t, hookActionBlock, res.Action)
 	assert.Equal(t, "denied", res.Reason)
 
-	hook.SetResult(extension.HookResult{Action: extension.HookActionReplace, Replacement: "repl"})
-	res = coord.RunHook(ctx, hook, event)
-	assert.Equal(t, extension.HookActionReplace, res.Action)
+	hook.SetResult(HookResult{Action: hookActionReplace, Replacement: "repl"})
+	res = coord.runHook(ctx, hook, event)
+	assert.Equal(t, hookActionReplace, res.Action)
 	assert.Equal(t, "repl", res.Replacement)
 }

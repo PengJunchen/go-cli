@@ -37,21 +37,21 @@ type Middleware interface {
 	WrapAgent(next AgentFunc) AgentFunc
 }
 
-// DefaultMiddleware is a pass-through middleware that returns the underlying
+// defaultMiddleware is a pass-through middleware that returns the underlying
 // AgentFunc unchanged.
-type DefaultMiddleware struct {
+type defaultMiddleware struct {
 	name string
 }
 
-var _ Middleware = (*DefaultMiddleware)(nil)
+var _ Middleware = (*defaultMiddleware)(nil)
 
 // Name returns the middleware name, defaulting to "default-middleware".
-func (m *DefaultMiddleware) Name() string {
+func (m *defaultMiddleware) Name() string {
 	return m.name
 }
 
 // WrapAgent returns next unchanged (pass-through).
-func (m *DefaultMiddleware) WrapAgent(next AgentFunc) AgentFunc {
+func (m *defaultMiddleware) WrapAgent(next AgentFunc) AgentFunc {
 	return func(ctx context.Context, input AgentInput) (AgentOutput, error) {
 		slog.Info("extension.middleware", "name", m.Name())
 		return next(ctx, input)
@@ -85,20 +85,20 @@ type ModelMiddleware interface {
 	WrapModel(next ModelFunc) ModelFunc
 }
 
-// DefaultModelMiddleware is a pass-through model middleware.
-type DefaultModelMiddleware struct {
+// defaultModelMiddleware is a pass-through model middleware.
+type defaultModelMiddleware struct {
 	name string
 }
 
-var _ ModelMiddleware = (*DefaultModelMiddleware)(nil)
+var _ ModelMiddleware = (*defaultModelMiddleware)(nil)
 
 // Name returns the middleware name, defaulting to "default-model-middleware".
-func (m *DefaultModelMiddleware) Name() string {
+func (m *defaultModelMiddleware) Name() string {
 	return m.name
 }
 
 // WrapModel returns next unchanged (pass-through).
-func (m *DefaultModelMiddleware) WrapModel(next ModelFunc) ModelFunc {
+func (m *defaultModelMiddleware) WrapModel(next ModelFunc) ModelFunc {
 	return func(ctx context.Context, req ModelRequest) (ModelResponse, error) {
 		slog.Info("extension.model_middleware", "name", m.Name())
 		return next(ctx, req)
@@ -116,20 +116,20 @@ type ToolMiddleware interface {
 	WrapTool(next ToolFunc) ToolFunc
 }
 
-// DefaultToolMiddleware is a pass-through tool middleware.
-type DefaultToolMiddleware struct {
+// defaultToolMiddleware is a pass-through tool middleware.
+type defaultToolMiddleware struct {
 	name string
 }
 
-var _ ToolMiddleware = (*DefaultToolMiddleware)(nil)
+var _ ToolMiddleware = (*defaultToolMiddleware)(nil)
 
 // Name returns the middleware name, defaulting to "default-tool-middleware".
-func (m *DefaultToolMiddleware) Name() string {
+func (m *defaultToolMiddleware) Name() string {
 	return m.name
 }
 
 // WrapTool returns next unchanged (pass-through).
-func (m *DefaultToolMiddleware) WrapTool(next ToolFunc) ToolFunc {
+func (m *defaultToolMiddleware) WrapTool(next ToolFunc) ToolFunc {
 	return func(ctx context.Context, name string, input any) (any, error) {
 		slog.Info("extension.tool_middleware", "name", m.Name())
 		return next(ctx, name, input)
