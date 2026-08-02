@@ -209,8 +209,12 @@ func (a *BubbleteaApp) handleEvent(ctx context.Context, ev AgentEvent) {
 	}
 	out := ev.Content
 	if ok && r != nil {
+		theme := Theme(DarkTheme{})
+		if a.themeMgr != nil {
+			theme = a.themeMgr.Get()
+		}
 		out = r.Render(ctx, ev.Content, RenderOpts{
-			Theme:       a.themeMgr.Get(),
+			Theme:       theme,
 			Width:       a.width,
 			ContentType: ct,
 		})

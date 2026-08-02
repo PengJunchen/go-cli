@@ -65,6 +65,7 @@ func (c *TruncatingCompactor) Compact(ctx context.Context, items []TurnItem, max
 	for i, j := 0, len(kept)-1; i < j; i, j = i+1, j-1 {
 		kept[i], kept[j] = kept[j], kept[i]
 	}
+	kept = removeDanglingToolResults(kept)
 	result = append(result, kept...)
 
 	tokensAfter := estimateTokens(result, estimator)
@@ -79,4 +80,18 @@ func (c *TruncatingCompactor) Compact(ctx context.Context, items []TurnItem, max
 		"tokens_before", tokensBefore,
 		"tokens_after", tokensAfter)
 	return result, nil
+}
+
+func removeDanglingToolResults(items []TurnItem) []TurnItem {
+	if len(items) == 0 {
+		return items
+	}
+	out := make([]TurnItem, 0, len(items))
+	for _, it := range items {
+		if it.Role == RoleTool && (len(out) == 0 || (out[len(out)-1].Role != RoleAssistant && out[len(out)-1].Role != RoleTool)) {
+			continue
+		}
+		out = append(out, it)
+	}
+	return out
 }

@@ -178,3 +178,118 @@ func TestTruncatingCompactorCompileGuard(t *testing.T) {
 	var _ Compactor = (*TruncatingCompactor)(nil)
 	assert.NotNil(t, NewTruncatingCompactor())
 }
+
+func TestTruncatingCompactorDropsDanglingToolResults(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	ctx, _ := newTracedCtx(t)
+	est := tracedEstimator()
+
+	items := []TurnItem{
+		{Role: RoleSystem, Content: "sys"},
+		{Role: RoleUser, Content: "u1"},
+		{Role: RoleAssistant, Content: strings.Repeat("a", 200)},
+		{Role: RoleTool, ToolName: "read", ToolResult: "tr1"},
+		{Role: RoleUser, Content: "u2"},
+		{Role: RoleAssistant, Content: "a2"},
+	}
+
+	compactor := NewTruncatingCompactor()
+	out, err := compactor.Compact(ctx, items, 30, est)
+	require.NoError(t, err)
+
+	for i, it := range out {
+		if it.Role == RoleTool {
+			assert.NotEqual(t, RoleSystem, out[i-1].Role,
+				"dangling tool result: RoleTool at index %d preceded by %s, not RoleAssistant", i, out[i-1].Role)
+			assert.NotEqual(t, RoleUser, out[i-1].Role,
+				"dangling tool result: RoleTool at index %d preceded by %s, not RoleAssistant", i, out[i-1].Role)
+			assert.Equal(t, RoleAssistant, out[i-1].Role,
+				"RoleTool at index %d must be preceded by RoleAssistant", i)
+		}
+	}
+}
+
+func TestTruncatingCompactorKeepsPairedToolResults(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	ctx, _ := newTracedCtx(t)
+	est := tracedEstimator()
+
+	items := []TurnItem{
+		{Role: RoleSystem, Content: "sys"},
+		{Role: RoleUser, Content: "u1"},
+		{Role: RoleAssistant, Content: "a1"},
+		{Role: RoleTool, ToolName: "read", ToolResult: "tr1"},
+	}
+
+	compactor := NewTruncatingCompactor()
+	out, err := compactor.Compact(ctx, items, 200, est)
+	require.NoError(t, err)
+
+	roles := make([]string, len(out))
+	for i, it := range out {
+		roles[i] = it.Role
+	}
+	assert.Equal(t, []string{RoleSystem, RoleUser, RoleAssistant, RoleTool}, roles)
+}
+
+func TestRemoveDanglingToolResults(t *testing.T) {
+	tests := []struct {
+		name  string
+		input []TurnItem
+		roles []string
+	}{
+		{
+			name:  "empty",
+			input: nil,
+			roles: []string{},
+		},
+		{
+			name: "tool at start removed",
+			input: []TurnItem{
+				{Role: RoleTool, ToolName: "read", ToolResult: "x"},
+				{Role: RoleUser, Content: "u"},
+			},
+			roles: []string{RoleUser},
+		},
+		{
+			name: "tool after user removed",
+			input: []TurnItem{
+				{Role: RoleUser, Content: "u"},
+				{Role: RoleTool, ToolName: "read", ToolResult: "x"},
+				{Role: RoleUser, Content: "v"},
+			},
+			roles: []string{RoleUser, RoleUser},
+		},
+		{
+			name: "tool after assistant kept",
+			input: []TurnItem{
+				{Role: RoleUser, Content: "u"},
+				{Role: RoleAssistant, Content: "a"},
+				{Role: RoleTool, ToolName: "read", ToolResult: "x"},
+			},
+			roles: []string{RoleUser, RoleAssistant, RoleTool},
+		},
+		{
+			name: "consecutive tools first removed second kept",
+			input: []TurnItem{
+				{Role: RoleUser, Content: "u"},
+				{Role: RoleAssistant, Content: "a"},
+				{Role: RoleTool, ToolName: "bash", ToolResult: "x"},
+				{Role: RoleTool, ToolName: "read", ToolResult: "y"},
+			},
+			roles: []string{RoleUser, RoleAssistant, RoleTool, RoleTool},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := removeDanglingToolResults(tt.input)
+			roles := make([]string, len(out))
+			for i, it := range out {
+				roles[i] = it.Role
+			}
+			assert.Equal(t, tt.roles, roles)
+		})
+	}
+}

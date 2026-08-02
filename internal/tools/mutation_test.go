@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -257,6 +258,58 @@ func TestMutationQueueCloseStopsEnqueue(t *testing.T) {
 
 	_, err := q.Enqueue(context.Background(), FileMutation{FilePath: "/tmp/closed.txt", Operation: "write", Content: "x", ToolName: "write"})
 	assert.Error(t, err, "enqueue on a closed queue must fail")
+}
+
+func TestMutationQueueConcurrentEnqueueCloseNoPanic(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	var started sync.WaitGroup
+	started.Add(1)
+
+	q := NewDefaultFileMutationQueue(WithMutationHandler(func(_ context.Context, _ FileMutation) error {
+		started.Wait()
+		time.Sleep(5 * time.Millisecond)
+		return nil
+	}))
+
+	dir := t.TempDir()
+	const enqueuers = 8
+
+	var (
+		wg      sync.WaitGroup
+		panics  int64
+		success int64
+		errors  int64
+	)
+
+	for i := 0; i < enqueuers; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			started.Wait()
+			path := filepath.Join(dir, fmt.Sprintf("file-%d.txt", i%3))
+			resCh, err := q.Enqueue(context.Background(), FileMutation{
+				FilePath: path, Operation: "write", Content: "x", ToolName: "write",
+			})
+			if err != nil {
+				atomic.AddInt64(&errors, 1)
+				return
+			}
+			<-resCh
+			atomic.AddInt64(&success, 1)
+		}(i)
+	}
+
+	started.Done()
+	time.Sleep(2 * time.Millisecond)
+
+	require.NoError(t, q.Close(), "Close must not error")
+
+	wg.Wait()
+
+	total := atomic.LoadInt64(&success) + atomic.LoadInt64(&errors) + atomic.LoadInt64(&panics)
+	assert.Equal(t, int64(enqueuers), total, "every enqueuer must finish without panic")
+	assert.Zero(t, atomic.LoadInt64(&panics), "no goroutine should panic on send to closed channel")
 }
 
 func TestMutationMiddlewarePassthroughAndQueued(t *testing.T) {
