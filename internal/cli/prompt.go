@@ -24,8 +24,8 @@ const (
 	// flags or configuration.
 	promptDefaultModel = "gpt-4o-mini"
 
-	// spanPromptInvocation is the root span emitted for a prompt run.
-	spanPromptInvocation = "cli.invocation"
+	// spanPromptRun is the top-level span emitted for a prompt run.
+	spanPromptRun = "prompt.run"
 	// spanPromptDispatch is the command dispatch span emitted for a prompt run.
 	spanPromptDispatch = "command.dispatch"
 	// spanPromptStop is the closedown span emitted after the harness stops.
@@ -83,7 +83,7 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	modelName := resolveModelName(modelFlag, rc)
 	providerName := resolveProviderName(providerFlag, rc)
 
-	span, spanCtx := tracing.SpanFromContext(ctx, spanPromptInvocation, tracing.SpanKindInternal)
+	span, spanCtx := tracing.SpanFromContext(ctx, spanPromptRun, tracing.SpanKindInternal)
 	span.SetAttributes(
 		tracing.Attribute{Key: "command", Value: c.Name()},
 		tracing.Attribute{Key: "args", Value: args},
