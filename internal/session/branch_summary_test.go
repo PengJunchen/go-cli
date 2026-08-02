@@ -178,11 +178,24 @@ func TestDefaultBranchSummary_EmitsCompactionSpan(t *testing.T) {
 	d := NewDefaultBranchSummary(func(_ context.Context, _ string) (string, error) { return "S", nil })
 	_, err := d.Summarize(ctx, []SessionEntry{{ID: "a", Content: "x"}})
 	require.NoError(t, err)
+	rootID := root.SpanID()
 	root.End()
 
 	require.Eventually(t, func() bool {
 		for _, sp := range exp.Spans() {
 			if sp.Name == "compaction.branch_summary" {
+				return true
+			}
+		}
+		return false
+	}, 2*time.Second, 5*time.Millisecond)
+
+	// The root span is exported asynchronously (localSpan.End spawns a
+	// goroutine), so await it before checking chain integrity to avoid a race
+	// between the compaction span landing and the root still being in flight.
+	require.Eventually(t, func() bool {
+		for _, sp := range exp.Spans() {
+			if sp.SpanID == rootID {
 				return true
 			}
 		}

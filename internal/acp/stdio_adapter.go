@@ -101,8 +101,11 @@ func (s *StdioAdapter) Disconnect(ctx context.Context) error {
 	out := s.out
 	s.mu.Unlock()
 
+	// Best-effort disconnect frame written asynchronously so a peer that is
+	// itself blocked mid-reply on the other pipe cannot deadlock Disconnect on
+	// this pipe write (io.Pipe writes block until read).
 	disconnectMsg := ACPMessage{Type: TypeDisconnect, SenderID: s.name, Timestamp: time.Now()}
-	_ = writeLine(out, disconnectMsg) //nolint:errcheck // best-effort disconnect notify
+	go func() { _ = writeLine(out, disconnectMsg) }() //nolint:errcheck // best-effort disconnect notify
 
 	// Wait briefly for the receiver goroutine to observe the session teardown.
 	select {
