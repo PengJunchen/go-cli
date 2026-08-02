@@ -137,7 +137,12 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		logger.Warn("cli_interactive_skill_failed", "err", skillErr)
 	}
 
-	loop := core.NewLoopAgent(core.WithLLM(model), core.WithTools(tr))
+	// Build loop agent with configurable max iterations.
+	loopOpts := []core.LoopOption{core.WithLLM(model), core.WithTools(tr)}
+	if rc != nil && rc.Agent.MaxIterations != 0 {
+		loopOpts = append(loopOpts, core.WithMaxIterations(rc.Agent.MaxIterations))
+	}
+	loop := core.NewLoopAgent(loopOpts...)
 	agent := core.NewAgentImpl("interactive", loop)
 	h := core.NewHarnessImpl(agent)
 

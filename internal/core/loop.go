@@ -16,7 +16,7 @@ import (
 // LoopAgent performs before giving up, guarding against runaway tool loops.
 // Complex multi-step tasks (install dependencies, write code, run, debug)
 // legitimately need many turns, so the default is generous.
-const defaultMaxIterations = 25
+const defaultMaxIterations = 200
 
 // errNilModel reports that a LoopAgent has no chat model wired up.
 var errNilModel = errors.New("core: agent loop has no chat model")
@@ -45,13 +45,11 @@ func WithTools(tr tools.ToolRegistry) LoopOption {
 	return func(c *loopConfig) { c.tools = tr }
 }
 
-// WithMaxIterations bounds the number of ReAct turns. Non-positive values fall
-// back to the default.
+// WithMaxIterations bounds the number of ReAct turns. A value of -1
+// disables the iteration limit entirely. Zero falls back to the default.
 func WithMaxIterations(n int) LoopOption {
 	return func(c *loopConfig) {
-		if n > 0 {
-			c.maxIterations = n
-		}
+		c.maxIterations = n
 	}
 }
 
@@ -75,7 +73,9 @@ func NewLoopAgent(opts ...LoopOption) *LoopAgent {
 	for _, o := range opts {
 		o(&cfg)
 	}
-	if cfg.maxIterations <= 0 {
+	// maxIterations == -1 means unlimited (0 is reserved for "not set",
+	// which falls back to the built-in default).
+	if cfg.maxIterations == 0 {
 		cfg.maxIterations = defaultMaxIterations
 	}
 	la := &LoopAgent{
@@ -144,7 +144,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission) ([]AgentEven
 		messages = append(messages, llm.Message{Role: llm.RoleUser, Content: submission.Content})
 	}
 
-	for iter := 0; iter < l.maxIterations; iter++ {
+	for iter := 0; l.maxIterations < 0 || iter < l.maxIterations; iter++ {
 		if err := spanCtx.Err(); err != nil {
 			span.SetStatus(tracing.SpanStatusError, err.Error())
 			logger.Error("core.loop.canceled", "iteration", iter, "err", err)

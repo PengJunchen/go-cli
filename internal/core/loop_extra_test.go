@@ -259,10 +259,12 @@ func TestLoopContextCancelTwoBranches(t *testing.T) {
 }
 
 func TestLoopWithMaxIterationsNonPositiveFallsBack(t *testing.T) {
+	// Zero falls back to the built-in default.
 	l1 := NewLoopAgent(WithMaxIterations(0))
 	assert.Equal(t, defaultMaxIterations, l1.maxIterations)
-	l2 := NewLoopAgent(WithMaxIterations(-3))
-	assert.Equal(t, defaultMaxIterations, l2.maxIterations)
+	// -1 means unlimited (no cap).
+	l2 := NewLoopAgent(WithMaxIterations(-1))
+	assert.Equal(t, -1, l2.maxIterations)
 }
 
 func TestLoopForwardCompatibleOptions(t *testing.T) {

@@ -5,6 +5,7 @@ package config
 type Config struct {
 	Provider   ProviderConfig   `json:"provider"`
 	Model      ModelConfig      `json:"model"`
+	Agent      AgentConfig      `json:"agent"`
 	Tools      ToolsConfig      `json:"tools"`
 	Tracing    TracingConfig    `json:"tracing"`
 	Approval   ApprovalConfig   `json:"approval"`
@@ -34,6 +35,14 @@ type ModelConfig struct {
 	Name        string  `json:"name"`
 	Temperature float64 `json:"temperature"`
 	MaxTokens   int     `json:"max_tokens"`
+}
+
+// AgentConfig holds agent loop behavior settings.
+type AgentConfig struct {
+	// MaxIterations bounds the number of think → act → observe turns the
+	// agent loop performs before giving up. Zero means use the built-in
+	// default (200). A value of -1 disables the limit entirely.
+	MaxIterations int `json:"max_iterations"`
 }
 
 // ToolsConfig controls which builtin tools and tool registries are available.
