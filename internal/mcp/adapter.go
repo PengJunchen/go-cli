@@ -42,6 +42,8 @@ func NewJSONRPCLineTransport(in io.Reader, out io.Writer, closeFn func() error) 
 // with a matching id arrives. It returns the parsed result object.
 func (t *JSONRPCLineTransport) Request(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
 	t.mu.Lock()
+	defer t.mu.Unlock()
+
 	id := t.nextID
 	t.nextID++
 	req, err := json.Marshal(map[string]any{
@@ -50,7 +52,6 @@ func (t *JSONRPCLineTransport) Request(ctx context.Context, method string, param
 		"method":  method,
 		"params":  params,
 	})
-	t.mu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("mcp: marshal request: %w", err)
 	}
@@ -73,8 +74,6 @@ func (t *JSONRPCLineTransport) Request(ctx context.Context, method string, param
 
 		var frame map[string]any
 		if err := json.Unmarshal([]byte(line), &frame); err != nil {
-			// Ignore malformed or unrelated frames (e.g. JSON-RPC
-			// notifications) and keep waiting for our response.
 			continue
 		}
 		if fid, ok := frame["id"].(float64); ok && int64(fid) == id {

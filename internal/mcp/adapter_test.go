@@ -365,3 +365,66 @@ func TestAdapterCallToolSurfacesIsErrorAndDefaultsContent(t *testing.T) {
 	assert.True(t, result.IsError, "IsError must be propagated to the caller")
 	assert.Equal(t, "", result.Content, "missing content must default to an empty string")
 }
+
+func TestConcurrentRequestsDoNotCorruptResponses(t *testing.T) {
+	t.Parallel()
+
+	serverConn, clientConn := net.Pipe()
+	defer closeConn(serverConn)
+
+	go func() {
+		sc := bufio.NewScanner(serverConn)
+		for sc.Scan() {
+			var req struct {
+				ID     int64  `json:"id"`
+				Method string `json:"method"`
+			}
+			if json.Unmarshal(sc.Bytes(), &req) != nil {
+				continue
+			}
+			res := map[string]any{"method": req.Method, "echo_id": req.ID}
+			frame := map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": res}
+			b, err := json.Marshal(frame)
+			if err != nil {
+				return
+			}
+			if _, err := fmt.Fprintf(serverConn, "%s\n", b); err != nil {
+				return
+			}
+		}
+		closeConn(serverConn)
+	}()
+
+	tr := NewJSONRPCLineTransport(clientConn, clientConn, clientConn.Close)
+
+	const n = 10
+	var wg sync.WaitGroup
+	wg.Add(n)
+	errCh := make(chan error, n)
+
+	for i := 0; i < n; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			method := fmt.Sprintf("method_%d", idx)
+			res, err := tr.Request(context.Background(), method, nil)
+			if err != nil {
+				errCh <- fmt.Errorf("goroutine %d: %w", idx, err)
+				return
+			}
+			got, ok := res["method"].(string)
+			if ok && got != method {
+				errCh <- fmt.Errorf("goroutine %d: expected method %q, got %q", idx, method, got)
+			} else if !ok {
+				errCh <- fmt.Errorf("goroutine %d: response missing method key", idx)
+			}
+		}(i)
+	}
+
+	wg.Wait()
+	close(errCh)
+	var errs []error
+	for e := range errCh {
+		errs = append(errs, e)
+	}
+	require.Empty(t, errs, "concurrent requests must each receive their own response")
+}
