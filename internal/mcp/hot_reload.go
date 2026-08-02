@@ -153,20 +153,21 @@ func NewDefaultHotReloader(client MCPClient, register RegisterToolsFunc, opts ..
 }
 
 // Watch starts the stdlib poller goroutine and records the baseline state of
-// the config file. The poller exits cleanly when Stop is called or ctx is
-// canceled.
+// the config file before returning. The poller exits cleanly when Stop is
+// called or ctx is canceled.
 func (h *DefaultHotReloader) Watch(ctx context.Context, configPath string) error {
 	if configPath == "" {
 		return errors.New("mcp: hot reload: empty config path")
 	}
 
 	h.mu.Lock()
-	defer h.mu.Unlock()
 
 	if h.stopped {
+		h.mu.Unlock()
 		return errors.New("mcp: hot reload: already stopped")
 	}
 	if h.pollCancel != nil {
+		h.mu.Unlock()
 		return errors.New("mcp: hot reload: already watching")
 	}
 
@@ -175,6 +176,14 @@ func (h *DefaultHotReloader) Watch(ctx context.Context, configPath string) error
 	h.pollCancel = cancel
 	h.pollDone = make(chan struct{})
 	h.stopCh = make(chan struct{})
+	h.mu.Unlock()
+
+	// Establish the baseline snapshot synchronously so that Watch only returns
+	// after the config state is captured. Otherwise a caller that writes to the
+	// config immediately after Watch returns could race the poller goroutine's
+	// very first detectChange() (which sets the baseline), and the change would
+	// be silently absorbed into the baseline and never detected.
+	h.detectChange()
 
 	go h.poll(pollCtx)
 	return nil
