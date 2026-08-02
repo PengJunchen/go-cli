@@ -303,12 +303,16 @@ func (m *HTTPChatModel) buildBody(msgs []Message, opts ...Option) ([]byte, error
 	if len(genOpts.Tools) > 0 {
 		req.Tools = make([]openAIToolDef, 0, len(genOpts.Tools))
 		for _, td := range genOpts.Tools {
+			params := td.Parameters
+			if params == nil {
+				params = map[string]any{"type": "object", "properties": map[string]any{}}
+			}
 			req.Tools = append(req.Tools, openAIToolDef{
 				Type: "function",
 				Function: openAIToolFunction{
 					Name:        td.Name,
 					Description: td.Description,
-					Parameters:  td.Parameters,
+					Parameters:  params,
 				},
 			})
 		}
