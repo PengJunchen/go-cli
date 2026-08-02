@@ -382,6 +382,20 @@ func encodeOpenAIRequest(cfg ModelConfig, model string, msgs []Message, opts []O
 	if len(genOpts.StopStrings) > 0 {
 		req.Stop = genOpts.StopStrings
 	}
+	if len(genOpts.Tools) > 0 {
+		req.Tools = make([]openAIToolDef, 0, len(genOpts.Tools))
+		for _, td := range genOpts.Tools {
+			req.Tools = append(req.Tools, openAIToolDef{
+				Type: "function",
+				Function: openAIToolFunction{
+					Name:        td.Name,
+					Description: td.Description,
+					Parameters:  td.Parameters,
+				},
+			})
+		}
+		req.ToolChoice = "auto"
+	}
 	data, err := json.Marshal(req)
 	if err != nil {
 		return nil, fmt.Errorf("llm: marshal request: %w", err)

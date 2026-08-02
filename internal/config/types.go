@@ -10,6 +10,8 @@ type Config struct {
 	Approval   ApprovalConfig   `json:"approval"`
 	Session    SessionConfig    `json:"session"`
 	Compaction CompactionConfig `json:"compaction"`
+	MCP        MCPConfig        `json:"mcp"`
+	Skill      SkillConfig      `json:"skill"`
 
 	verbose bool
 }
@@ -64,6 +66,41 @@ type SessionConfig struct {
 type CompactionConfig struct {
 	Strategy  string `json:"strategy"`
 	MaxTokens int    `json:"max_tokens"`
+}
+
+// MCPServerConfig describes a single MCP server connection.
+type MCPServerConfig struct {
+	// Name is a unique identifier for the server.
+	Name string `json:"name"`
+	// Command is the executable to launch (stdio transport).
+	Command string `json:"command"`
+	// Args are command-line arguments passed to Command.
+	Args []string `json:"args"`
+	// URL is the server endpoint (HTTP/SSE transport).
+	URL string `json:"url"`
+	// Env holds optional environment variables for the server process.
+	Env map[string]string `json:"env"`
+}
+
+// MCPConfig holds MCP server connection settings.
+type MCPConfig struct {
+	Servers []MCPServerConfig `json:"servers"`
+}
+
+// MCPServersMap holds MCP servers in the common mcpServers format:
+//   {"server-name": {"url": "..."}, "other": {"command": "..."}}
+// This is deserialized from JSON and then flattened into MCPConfig.Servers.
+type MCPServersMap map[string]struct {
+	Command string            `json:"command"`
+	Args    []string          `json:"args"`
+	URL     string            `json:"url"`
+	Env     map[string]string `json:"env"`
+}
+
+// SkillConfig holds skill loading settings.
+type SkillConfig struct {
+	// Dir is the directory to load skill definitions from.
+	Dir string `json:"dir"`
 }
 
 // Source enumerates the five configuration layers, ordered by ascending

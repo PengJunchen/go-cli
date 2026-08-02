@@ -300,6 +300,20 @@ func (m *HTTPChatModel) buildBody(msgs []Message, opts ...Option) ([]byte, error
 	if len(genOpts.StopStrings) > 0 {
 		req.Stop = genOpts.StopStrings
 	}
+	if len(genOpts.Tools) > 0 {
+		req.Tools = make([]openAIToolDef, 0, len(genOpts.Tools))
+		for _, td := range genOpts.Tools {
+			req.Tools = append(req.Tools, openAIToolDef{
+				Type: "function",
+				Function: openAIToolFunction{
+					Name:        td.Name,
+					Description: td.Description,
+					Parameters:  td.Parameters,
+				},
+			})
+		}
+		req.ToolChoice = "auto"
+	}
 
 	data, err := json.Marshal(req)
 	if err != nil {
@@ -359,6 +373,21 @@ type openAIRequest struct {
 	Temperature float64         `json:"temperature,omitempty"`
 	MaxTokens   int             `json:"max_tokens,omitempty"`
 	Stop        []string        `json:"stop,omitempty"`
+	Tools       []openAIToolDef `json:"tools,omitempty"`
+	ToolChoice  any             `json:"tool_choice,omitempty"`
+}
+
+// openAIToolDef is the OpenAI tool definition format.
+type openAIToolDef struct {
+	Type     string             `json:"type"`
+	Function openAIToolFunction `json:"function"`
+}
+
+// openAIToolFunction names a tool and describes its parameters.
+type openAIToolFunction struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+	Parameters  any    `json:"parameters,omitempty"`
 }
 
 // openAIMessage is a single message in an OpenAI chat request/response.

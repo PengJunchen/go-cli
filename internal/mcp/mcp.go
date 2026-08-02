@@ -58,6 +58,8 @@ type MCPServerConfig struct {
 	Env []string `json:"env,omitempty"`
 	// Args holds the command-line arguments for the Stdio child.
 	Args []string `json:"args,omitempty"`
+	// URL is the server endpoint for SSE/HTTP transports.
+	URL string `json:"url,omitempty"`
 }
 
 // MCPClient is the contract every MCP client adapter satisfies. Both SDK

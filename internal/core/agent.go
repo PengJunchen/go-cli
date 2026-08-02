@@ -81,7 +81,12 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission) (Result, err
 
 	a.mu.Lock()
 	a.history = append(a.history, AgentMessage{Role: "user", Content: submission.Content})
+	historyCopy := append([]AgentMessage{}, a.history...)
 	a.mu.Unlock()
+
+	// Propagate the full history to the loop so the LLM receives the complete
+	// conversation context (prior user/assistant turns).
+	submission.History = historyCopy
 
 	events, err := a.loop.Run(spanCtx, submission)
 	if err != nil {

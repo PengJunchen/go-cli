@@ -66,6 +66,10 @@ type Submission struct {
 	Content string
 	// Metadata carries optional structured context for the submission.
 	Metadata map[string]any
+	// History carries the prior conversation messages so the loop can send
+	// the full context to the LLM. Populated by AgentImpl.Run from its
+	// internal history before invoking the loop.
+	History []AgentMessage
 }
 
 // Session is a minimal unit of persisted conversational state referenced by

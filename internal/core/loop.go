@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/llm"
@@ -101,8 +102,41 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission) ([]AgentEven
 		return nil, errNilModel
 	}
 
+	// Build tool definitions for the model from the tool registry so the LLM
+	// knows what tools it can invoke.
+	var toolOpts []llm.Option
+	if l.tools != nil {
+		defs, listErr := l.tools.List(spanCtx)
+		if listErr != nil {
+			logger.Warn("core.loop.list_tools_failed", "err", listErr)
+		} else if len(defs) > 0 {
+			llmTools := make([]llm.ToolDefinition, 0, len(defs))
+			for _, d := range defs {
+				llmTools = append(llmTools, llm.ToolDefinition{
+					Name:        d.Name(),
+					Description: d.Description(),
+				})
+			}
+			toolOpts = append(toolOpts, llm.WithTools(llmTools))
+		}
+	}
+
 	var events []AgentEvent
-	messages := []llm.Message{{Role: llm.RoleUser, Content: submission.Content}}
+
+	// Build the conversation from history (if any) plus the current
+	// submission. Prior turns must be included or the LLM loses context and
+	// cannot answer questions referencing earlier conversation.
+	messages := make([]llm.Message, 0, len(submission.History)+2)
+
+	// System prompt: tell the model it can use tools to help the user.
+	messages = append(messages, llm.Message{Role: llm.RoleSystem, Content: systemPrompt(l.tools)})
+
+	for _, hm := range submission.History {
+		messages = append(messages, llm.Message{Role: llm.Role(hm.Role), Content: hm.Content})
+	}
+	if len(messages) == 0 || messages[len(messages)-1].Role != llm.RoleUser {
+		messages = append(messages, llm.Message{Role: llm.RoleUser, Content: submission.Content})
+	}
 
 	for iter := 0; iter < l.maxIterations; iter++ {
 		if err := spanCtx.Err(); err != nil {
@@ -112,7 +146,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission) ([]AgentEven
 			return events, err
 		}
 
-		resp, err := l.model.Generate(spanCtx, messages)
+		resp, err := l.model.Generate(spanCtx, messages, toolOpts...)
 		if err != nil {
 			span.SetStatus(tracing.SpanStatusError, err.Error())
 			logger.Error("core.loop.generate_error", "iteration", iter, "err", err)
@@ -204,4 +238,23 @@ func toToolsCall(tc llm.ToolCall) tools.ToolCall {
 // errEvent builds a timestamped "error" AgentEvent for the given error.
 func errEvent(err error) AgentEvent {
 	return AgentEvent{Kind: "error", Content: err.Error(), Timestamp: time.Now()}
+}
+
+// systemPrompt returns the system instruction that tells the model its role
+// and encourages it to use tools when appropriate. When the tool registry is
+// nil or empty, a minimal prompt is returned.
+func systemPrompt(tr tools.ToolRegistry) string {
+	base := "You are a helpful AI assistant. When the user asks you to perform an action that requires tools (such as reading files, listing directories, running commands, or searching), use the available tools to accomplish the task. Do not guess or make up information when a tool can provide the answer."
+	if tr == nil {
+		return base
+	}
+	defs, err := tr.List(context.Background())
+	if err != nil || len(defs) == 0 {
+		return base
+	}
+	names := make([]string, 0, len(defs))
+	for _, d := range defs {
+		names = append(names, d.Name())
+	}
+	return base + "\n\nYou have access to these tools: " + strings.Join(names, ", ") + "."
 }

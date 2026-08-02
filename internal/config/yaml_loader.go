@@ -232,6 +232,9 @@ func (p *yamlParser) parseMap(nd int) (any, error) {
 }
 
 // parseList consumes consecutive sibling `- item` lines all indented nd.
+// Each list item may be a single scalar or a multi-line mapping that starts
+// with a key-value on the "- " line and continues with deeper-indented
+// key-value lines belonging to the same item.
 func (p *yamlParser) parseList(nd int) (any, error) {
 	list := []any{}
 	for {
@@ -242,22 +245,62 @@ func (p *yamlParser) parseList(nd int) (any, error) {
 		p.pos++
 		text := strings.TrimSpace(strings.TrimPrefix(ln.text, "-"))
 		if text == "" {
-			list = append(list, map[string]any{})
+			// Empty list item: may be followed by a deeper block.
+			child, childOK := p.peek()
+			if childOK && child.indent > nd {
+				v, err := p.parseMapOrList(child)
+				if err != nil {
+					return nil, err
+				}
+				list = append(list, v)
+			} else {
+				list = append(list, map[string]any{})
+			}
 			continue
 		}
 		if key, inline, ok := splitKeyValue(text); ok && key != "" {
+			// First key-value pair on the "- " line. Collect deeper
+			// key-value lines into the same mapping.
 			sub := map[string]any{}
 			v, err := p.valueFor(key, inline, nd)
 			if err != nil {
 				return nil, err
 			}
 			sub[key] = v
+			// Collect additional key-value lines that are deeper than
+			// the "- " line but not new list items at the same indent.
+			for {
+				child, childOK := p.peek()
+				if !childOK || child.indent <= nd || child.listItem {
+					break
+				}
+				// The child line belongs to this list item's mapping.
+				p.pos++
+				ck, cinline, cok := splitKeyValue(child.text)
+				if !cok || ck == "" {
+					return nil, fmt.Errorf("yaml: invalid mapping line %q", child.text)
+				}
+				cv, err := p.valueFor(ck, cinline, child.indent)
+				if err != nil {
+					return nil, err
+				}
+				sub[ck] = cv
+			}
 			list = append(list, sub)
 			continue
 		}
 		list = append(list, parseScalar(text))
 	}
 	return list, nil
+}
+
+// parseMapOrList dispatches to parseMap or parseList depending on whether the
+// next line is a list item.
+func (p *yamlParser) parseMapOrList(ln yamlLine) (any, error) {
+	if ln.listItem {
+		return p.parseList(ln.indent)
+	}
+	return p.parseMap(ln.indent)
 }
 
 // valueFor parses the value that follows a `key:` at the given indent. An

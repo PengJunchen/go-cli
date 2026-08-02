@@ -70,11 +70,24 @@ type ModelConfig struct {
 	BaseURL     string  `json:"base_url,omitempty"`
 }
 
+// ToolDefinition describes a tool that the model may invoke. It is the
+// LLM-layer representation of a tool, independent of the tools package.
+type ToolDefinition struct {
+	// Name is the tool identifier the model uses in a tool_call.
+	Name string `json:"name"`
+	// Description explains what the tool does so the model can decide when to
+	// call it.
+	Description string `json:"description,omitempty"`
+	// Parameters is the JSON Schema for the tool's input parameters.
+	Parameters any `json:"parameters,omitempty"`
+}
+
 // GenerationOptions carries optional knobs for a single generation call.
 type GenerationOptions struct {
 	Temperature *float64
 	MaxTokens   *int
 	StopStrings []string
+	Tools       []ToolDefinition
 }
 
 // Option configures a generation call.
@@ -93,6 +106,13 @@ func WithMaxTokens(n int) Option {
 // WithStopStrings sets the stop sequences for a single call.
 func WithStopStrings(ss ...string) Option {
 	return func(o *GenerationOptions) { o.StopStrings = ss }
+}
+
+// WithTools provides the tool definitions the model may invoke during this
+// generation call. When non-empty, the OpenAI-compatible providers include a
+// "tools" field in the request body so the model knows what tools are available.
+func WithTools(tools []ToolDefinition) Option {
+	return func(o *GenerationOptions) { o.Tools = tools }
 }
 
 // BaseChatModel is the contract every chat model (mock or real, streaming or
