@@ -6,10 +6,6 @@
 
 A pure-Go AI Agent CLI framework. Zero external runtime dependencies, dependency-inversion driven, full-chain tracing.
 
-Inspired by and building upon [CloudWeGo Eino](https://github.com/cloudwego/eino/tree/main) and [Google ADK-Go](https://github.com/google/adk-go). Developed with [GLM 5.1](https://bigmodel.cn) and [DeepSeek-v4-flash](https://deepseek.com) (pre-20260731 release), using [Trae](https://www.trae.ai) and [Trae Work](https://www.trae.ai) — the late-June updates to Trae significantly improved stability and continuity, making sustained development sessions actually viable.
-
-> **Related project**: [go-agent-core](https://github.com/PengJunchen/go-agent-core) is the interface-driven Agent core SDK (layered L0–L4, depends on Eino for LLM adaptation). This repo (**go-cli**) is the full CLI framework with Harness→Agent→AgentLoop architecture, TUI, MCP/ACP/Skill/Extension — a standalone runnable tool rather than an importable SDK.
-
 **[中文文档](README.zh-CN.md)**
 
 ---
