@@ -209,8 +209,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		var app *tui.BubbleteaApp
 		app = tui.NewBubbleteaApp(tuiEvents,
 			tui.WithWidth(80),
-			tui.WithOnUpdate(func() {
-				view := app.View()
+			tui.WithOnUpdate(func(view string) {
 				if isTTY {
 					if lastLineCount > 0 {
 						fmt.Fprintf(c.out, "\033[%dA", lastLineCount)

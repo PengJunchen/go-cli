@@ -72,9 +72,10 @@ func WithWidth(width int) AppOption {
 }
 
 // WithOnUpdate registers a callback invoked after every view mutation. The
-// callback runs synchronously inside the render loop, so it must not block on
-// the app (no calls to View, Run, Quit, or Send from within).
-func WithOnUpdate(fn func()) AppOption {
+// callback receives the freshly rendered view string so it does not need to
+// call View (which would deadlock on the internal mutex). The callback runs
+// synchronously inside the render loop, so it must not block on the app.
+func WithOnUpdate(fn func(string)) AppOption {
 	return func(a *BubbleteaApp) { a.onUpdate = fn }
 }
 
@@ -113,7 +114,7 @@ type BubbleteaApp struct {
 	// onUpdate is invoked after every entry mutation (add/replace). It lets
 	// the caller stream the view to the terminal in real time instead of
 	// waiting for the turn to finish. When nil no callback fires.
-	onUpdate func()
+	onUpdate func(string)
 }
 
 // NewBubbleteaApp constructs an app wired to the given event source, using a
@@ -140,6 +141,11 @@ func NewBubbleteaApp(events <-chan AgentEvent, opts ...AppOption) *BubbleteaApp 
 // Run starts the render loop. It returns when the context is canceled, the
 // event channel closes, or Quit is invoked. The loop tears down internal
 // resources before returning.
+//
+// In interactive (TTY) mode the terminal is switched to raw mode so the
+// keyboard loop can read single keypresses (arrow navigation, Tab/Enter to
+// toggle, e/c for global expand/collapse, q to quit). The terminal is
+// restored before Run returns.
 func (a *BubbleteaApp) Run(ctx context.Context) error {
 	if !a.running.CompareAndSwap(false, true) {
 		return errAlreadyRunning
@@ -148,6 +154,22 @@ func (a *BubbleteaApp) Run(ctx context.Context) error {
 		a.running.Store(false)
 		a.cleanup()
 	}()
+
+	// Enable keyboard navigation only when interactive AND the platform
+	// supports raw mode. On unsupported platforms we degrade to the
+	// always-expanded rendering.
+	var kbdCancel context.CancelFunc
+	if a.interactive {
+		if oldTerm, err := makeRaw(int(os.Stdin.Fd())); err == nil {
+			defer restoreRaw(int(os.Stdin.Fd()), oldTerm)
+			kbdCtx, cancel := context.WithCancel(ctx)
+			kbdCancel = cancel
+			go a.keyboardLoop(kbdCtx)
+		}
+	}
+	if kbdCancel != nil {
+		defer kbdCancel()
+	}
 
 	slog.Debug("tui.app.run", "started", true)
 	for {
@@ -165,12 +187,16 @@ func (a *BubbleteaApp) Run(ctx context.Context) error {
 			}
 			a.eventsSeen.Add(1)
 			a.handleEvent(ctx, ev)
-		case _, ok := <-a.msgCh:
+		case msg, ok := <-a.msgCh:
 			if !ok {
 				slog.Debug("tui.app.run", "stop", "msg_channel_closed")
 				return nil
 			}
 			a.msgsSeen.Add(1)
+			if a.handleMsg(msg) {
+				slog.Debug("tui.app.run", "stop", "quit_key")
+				return nil
+			}
 		}
 	}
 }
@@ -260,42 +286,41 @@ func (a *BubbleteaApp) handleEvent(ctx context.Context, ev AgentEvent) {
 
 // addEntry appends a rendered frame to the accordion model. Streaming
 // renderers replace the last entry instead of appending, giving a live-update
-// effect.
+// effect. After mutating the model the view is rendered (under the lock) and
+// the onUpdate callback is invoked outside the lock so it can safely write to
+// the terminal.
 func (a *BubbleteaApp) addEntry(ct string, out string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	var view string
+	notify := a.onUpdate != nil
+	func() {
+		a.mu.Lock()
+		defer a.mu.Unlock()
 
-	if isStreamingRenderContentType(ct) {
-		if a.accordion.Len() == 0 {
-			a.accordion.Add(entryFor(ct, out, a.interactive))
-			if a.onUpdate != nil {
-				a.onUpdate()
+		if isStreamingRenderContentType(ct) {
+			if a.accordion.Len() == 0 {
+				a.accordion.Add(entryFor(ct, out, a.interactive))
+			} else {
+				last := a.accordion.Entries()[a.accordion.Len()-1]
+				last.Full = out
+				last.Summary = summarizeFirstLine(out, 80)
+				last.Collapsed = false
 			}
-			return
+		} else {
+			entry := entryFor(ct, out, a.interactive)
+			if !a.interactive {
+				entry.Collapsed = false
+				for _, c := range entry.Children {
+					c.Collapsed = false
+				}
+			}
+			a.accordion.Add(entry)
 		}
-		last := a.accordion.Entries()[a.accordion.Len()-1]
-		last.Full = out
-		last.Summary = summarizeFirstLine(out, 80)
-		last.Collapsed = false
-		if a.onUpdate != nil {
-			a.onUpdate()
+		if notify {
+			view = a.accordion.Render()
 		}
-		return
-	}
-
-	entry := entryFor(ct, out, a.interactive)
-	// Only collapse gated content types when interactive; piped/legacy
-	// consumers get the full transcript.
-	if !a.interactive {
-		entry.Collapsed = false
-		for _, c := range entry.Children {
-			c.Collapsed = false
-		}
-	}
-	a.accordion.Add(entry)
-
-	if a.onUpdate != nil {
-		a.onUpdate()
+	}()
+	if notify {
+		a.onUpdate(view)
 	}
 }
 
