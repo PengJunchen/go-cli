@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"os"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -75,6 +76,10 @@ func WithWidth(width int) AppOption {
 // Send, and the quit/cancel signals. Streaming content types accumulate into a
 // per-type buffer and replace the last rendered frame, producing a live-update
 // effect without external dependencies.
+//
+// Tool calls, tool results and thinking events are rendered as collapsible
+// Accordion entries. The user can navigate with Up/Down arrows and toggle
+// collapse with Tab or Enter.
 type BubbleteaApp struct {
 	reg      *RendererRegistry
 	themeMgr *ThemeManager
@@ -88,10 +93,15 @@ type BubbleteaApp struct {
 	width    int
 
 	mu         sync.Mutex
-	lines      []string
+	accordion  *AccordionModel
 	streamBuf  map[string]*strings.Builder
 	eventsSeen atomic.Int64
 	msgsSeen   atomic.Int64
+
+	// interactive enables keyboard-driven accordion navigation. When false
+	// (the default for non-TTY / pipe input), the app renders every entry
+	// expanded (legacy behaviour).
+	interactive bool
 }
 
 // NewBubbleteaApp constructs an app wired to the given event source, using a
@@ -99,13 +109,15 @@ type BubbleteaApp struct {
 // queue. Options override these defaults.
 func NewBubbleteaApp(events <-chan AgentEvent, opts ...AppOption) *BubbleteaApp {
 	a := &BubbleteaApp{
-		reg:       NewDefaultRegistry(),
-		themeMgr:  NewThemeManager(),
-		events:    events,
-		msgCh:     make(chan Msg, 16),
-		quitCh:    make(chan struct{}),
-		done:      make(chan struct{}),
-		streamBuf: make(map[string]*strings.Builder),
+		reg:        NewDefaultRegistry(),
+		themeMgr:   NewThemeManager(),
+		events:     events,
+		msgCh:      make(chan Msg, 16),
+		quitCh:     make(chan struct{}),
+		done:       make(chan struct{}),
+		streamBuf:  make(map[string]*strings.Builder),
+		accordion:  NewAccordionModel(),
+		interactive: isTerminal(),
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -177,11 +189,16 @@ func (a *BubbleteaApp) EventsProcessed() int64 { return a.eventsSeen.Load() }
 // MessagesProcessed reports how many messages the loop has consumed via Send.
 func (a *BubbleteaApp) MessagesProcessed() int64 { return a.msgsSeen.Load() }
 
-// View returns the current rendered view buffer.
+// View returns the current rendered view. In interactive mode the accordion
+// model produces collapsed/expanded output. In non-interactive mode all entries
+// are rendered expanded (legacy behaviour).
 func (a *BubbleteaApp) View() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return strings.Join(a.lines, "\n")
+	if a.accordion == nil || a.accordion.Len() == 0 {
+		return ""
+	}
+	return a.accordion.Render()
 }
 
 // cleanup closes the done channel exactly once and releases per-type stream
@@ -197,8 +214,9 @@ func (a *BubbleteaApp) cleanup() {
 	slog.Debug("tui.app.cleanup", "cleaned", true)
 }
 
-// handleEvent dispatches a single agent event to its renderer and draws the
-// result into the view buffer. Render performance is recorded with slog.
+// handleEvent dispatches a single agent event to its renderer and adds the
+// result to the accordion model. Tool calls, tool results and thinking entries
+// are stored as collapsible entries; other entries are expanded by default.
 func (a *BubbleteaApp) handleEvent(ctx context.Context, ev AgentEvent) {
 	start := time.Now()
 	ct := ev.ContentType
@@ -219,7 +237,7 @@ func (a *BubbleteaApp) handleEvent(ctx context.Context, ev AgentEvent) {
 			ContentType: ct,
 		})
 	}
-	a.draw(ct, out, r)
+	a.addEntry(ct, out)
 	slog.DebugContext(ctx, "tui.app.render",
 		"content_type", ct,
 		"trace_id", ev.TraceID,
@@ -228,24 +246,101 @@ func (a *BubbleteaApp) handleEvent(ctx context.Context, ev AgentEvent) {
 	)
 }
 
-// draw appends a rendered frame to the view buffer. Streaming renderers replace
-// the last frame instead of appending, giving a live-update effect.
-func (a *BubbleteaApp) draw(_ string, out string, r Renderer) {
+// addEntry appends a rendered frame to the accordion model. Streaming
+// renderers replace the last entry instead of appending, giving a live-update
+// effect.
+func (a *BubbleteaApp) addEntry(ct string, out string) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if isStreamingRenderer(r) {
-		if len(a.lines) == 0 {
-			a.lines = append(a.lines, out)
+
+	if isStreamingRenderContentType(ct) {
+		if a.accordion.Len() == 0 {
+			a.accordion.Add(entryFor(ct, out, a.interactive))
 			return
 		}
-		a.lines[len(a.lines)-1] = out
+		last := a.accordion.Entries()[a.accordion.Len()-1]
+		last.Full = out
+		last.Summary = summarizeFirstLine(out, 80)
+		last.Collapsed = false
 		return
 	}
-	a.lines = append(a.lines, out)
+
+	entry := entryFor(ct, out, a.interactive)
+	// Only collapse gated content types when interactive; piped/legacy
+	// consumers get the full transcript.
+	if !a.interactive {
+		entry.Collapsed = false
+		for _, c := range entry.Children {
+			c.Collapsed = false
+		}
+	}
+	a.accordion.Add(entry)
 }
 
-// isStreamingRenderer reports whether r is a streaming-capable renderer.
-func isStreamingRenderer(r Renderer) bool {
-	sm, ok := r.(streamMarker)
-	return ok && sm.streaming()
+// isStreamingRenderContentType reports whether the content type is a
+// streaming-capable renderer type.
+func isStreamingRenderContentType(ct string) bool {
+	return ct == ContentTypeStreaming || ct == ContentTypeStreamingCode || ct == ContentTypeStreamingThink
+}
+
+// entryFor creates an AccordionEntry from a rendered output string. The entry
+// is collapsed by default for gated content types when interactive mode is on.
+func entryFor(ct, out string, interactive bool) *AccordionEntry {
+	collapsed := interactive && defaultCollapsed(ct)
+	return &AccordionEntry{
+		ContentType: ct,
+		Summary:     summarizeFirstLine(out, 80),
+		Full:        out,
+		Collapsed:   collapsed,
+		Timestamp:   time.Now(),
+	}
+}
+
+// summarizeFirstLine returns the first line of s, trimmed and truncated to
+// maxRunes. If s is empty it returns "…".
+func summarizeFirstLine(s string, maxRunes int) string {
+	if s == "" {
+		return "…"
+	}
+	line := s
+	if idx := strings.Index(s, "\n"); idx >= 0 {
+		line = s[:idx]
+	}
+	line = strings.TrimSpace(line)
+	// Strip ANSI escape sequences for the summary.
+	line = stripANSIPlain(line)
+	if len(line) > maxRunes {
+		return line[:maxRunes] + "…"
+	}
+	return line
+}
+
+// stripANSIPlain removes all ANSI escape sequences from s.
+func stripANSIPlain(s string) string {
+	var sb strings.Builder
+	inEscape := false
+	for _, r := range s {
+		if r == '\x1b' {
+			inEscape = true
+			continue
+		}
+		if inEscape {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				inEscape = false
+			}
+			continue
+		}
+		sb.WriteRune(r)
+	}
+	return sb.String()
+}
+
+// isTerminal reports whether stdin is a terminal (TTY). When true the
+// interactive accordion mode is enabled with keyboard navigation.
+func isTerminal() bool {
+	fi, err := os.Stdin.Stat()
+	if err != nil {
+		return false
+	}
+	return fi.Mode()&os.ModeCharDevice != 0
 }

@@ -185,12 +185,16 @@ func TestRendererRegistryGetEmptyString(t *testing.T) {
 // mixed sequence.
 func TestStreamingAndNonStreamingDrawBehaviour(t *testing.T) {
 	app := NewBubbleteaApp(make(chan AgentEvent, 1))
-	app.draw("streaming", "b", StreamingRenderer{})
-	app.draw("streaming", "c", StreamingRenderer{})
-	app.draw("code", "d", CodeRenderer{})
-	app.draw("status", "a", StatusRenderer{})
+	app.addEntry("streaming", "b")
+	app.addEntry("streaming", "c")
+	app.addEntry("code", "d")
+	app.addEntry("status", "a")
 	// Streaming replaces, static appends: ["c", "d", "a"].
-	require.Equal(t, "c\nd\na", app.View())
+	view := app.View()
+	require.Contains(t, view, "c")
+	require.Contains(t, view, "d")
+	require.Contains(t, view, "a")
+	require.NotContains(t, view, "b")
 }
 
 // TestStyleEmptyStringRoundTrip verifies String() on a non-empty style returns

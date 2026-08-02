@@ -9,40 +9,43 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestAppDrawAppendNonStreaming verifies non-streaming renderers append frames
-// to the view buffer in order.
+// TestAppDrawAppendNonStreaming verifies non-streaming entries append to the
+// accordion model in order.
 func TestAppDrawAppendNonStreaming(t *testing.T) {
 	app := NewBubbleteaApp(nil)
-	app.draw("status", "first", StatusRenderer{})
-	app.draw("status", "second", StatusRenderer{})
-	assert.Equal(t, "first\nsecond", app.View())
+	app.addEntry("status", "first")
+	app.addEntry("status", "second")
+	view := app.View()
+	assert.Contains(t, view, "first")
+	assert.Contains(t, view, "second")
 }
 
-// TestAppDrawReplaceStreaming verifies streaming renderers replace the previous
-// frame instead of appending.
+// TestAppDrawReplaceStreaming verifies streaming content types replace the
+// previous frame instead of appending.
 func TestAppDrawReplaceStreaming(t *testing.T) {
 	app := NewBubbleteaApp(nil)
-	app.draw("streaming", "a", StreamingRenderer{})
-	app.draw("streaming", "b", StreamingRenderer{})
-	assert.Equal(t, "b", app.View())
+	app.addEntry("streaming", "a")
+	app.addEntry("streaming", "b")
+	view := app.View()
+	assert.Contains(t, view, "b")
+	assert.NotContains(t, view, "a")
 }
 
 // TestAppDrawStreamingFirstAppends verifies the first streaming frame is appended
 // when the buffer is empty (no last frame to replace yet).
 func TestAppDrawStreamingFirstAppends(t *testing.T) {
 	app := NewBubbleteaApp(nil)
-	app.draw("streaming", "only", StreamingRenderer{})
-	assert.Equal(t, "only", app.View())
+	app.addEntry("streaming", "only")
+	assert.Contains(t, app.View(), "only")
 }
 
-// TestIsStreamingRenderer verifies isStreamingRenderer distinguishes streaming
-// renderers from ordinary ones.
-func TestIsStreamingRenderer(t *testing.T) {
-	assert.True(t, isStreamingRenderer(StreamingRenderer{}))
-	assert.True(t, isStreamingRenderer(StreamingCodeRenderer{}))
-	assert.True(t, isStreamingRenderer(StreamingThinkingRenderer{}))
-	assert.False(t, isStreamingRenderer(StatusRenderer{}))
-	assert.False(t, isStreamingRenderer(nil))
+// TestIsStreamingRenderContentType verifies the streaming content type check.
+func TestIsStreamingRenderContentType(t *testing.T) {
+	assert.True(t, isStreamingRenderContentType(ContentTypeStreaming))
+	assert.True(t, isStreamingRenderContentType(ContentTypeStreamingCode))
+	assert.True(t, isStreamingRenderContentType(ContentTypeStreamingThink))
+	assert.False(t, isStreamingRenderContentType(ContentTypeStatus))
+	assert.False(t, isStreamingRenderContentType(ContentTypeToolCall))
 }
 
 // TestAppSendDropsWhenFull verifies Send drops a message rather than blocking

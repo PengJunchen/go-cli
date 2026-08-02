@@ -102,7 +102,7 @@ func TestE2ERegistryCannedRenderer(t *testing.T) {
 
 	app := NewBubbleteaApp(events, WithRegistry(reg))
 	require.NoError(t, app.Run(context.Background()))
-	require.Equal(t, "CANONICAL", app.View())
+	require.Contains(t, app.View(), "CANONICAL")
 }
 
 // TestE2ESendMessagesConsumed verifies messages pushed before the loop starts

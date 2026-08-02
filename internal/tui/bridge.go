@@ -21,6 +21,8 @@ func KindToContentType(kind string) string {
 		return ContentTypeError
 	case "done":
 		return ContentTypeStatus
+	case "thinking":
+		return ContentTypeThinking
 	default:
 		return ContentTypeStatus
 	}

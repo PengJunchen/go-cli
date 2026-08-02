@@ -229,8 +229,14 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 			continue
 		}
 
+		// Render the accordion view (tool calls, results, thinking) before
+		// the final assistant message so the user sees the full transcript.
+		if view := app.View(); view != "" {
+			fmt.Fprintln(c.out, view)
+		}
+
 		if result.Content != "" {
-			fmt.Fprintln(c.out, result.Content)
+			fmt.Fprintf(c.out, "AI: %s\n", result.Content)
 			turnItems = append(turnItems, compaction.TurnItem{
 				ID:      fmt.Sprintf("msg-%d", len(turnItems)),
 				Role:    compaction.RoleAssistant,
