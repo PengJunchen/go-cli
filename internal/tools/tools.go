@@ -51,6 +51,16 @@ type ToolDefinition interface {
 	Execute(ctx context.Context, call ToolCall) (*ToolResult, error)
 }
 
+// Parameterized is an optional interface that tools can implement to expose
+// their OpenAI-compatible JSON Schema for parameters. Tools with structured
+// input (e.g. MCP tools with an inputSchema) should implement this so the
+// LLM knows what arguments it can pass.
+type Parameterized interface {
+	// Parameters returns the JSON Schema object describing the tool's
+	// input parameters, or nil if the tool has no structured parameters.
+	Parameters() any
+}
+
 // ToolRegistry is the contract a repository of tools satisfies. It supports
 // registering, looking up and enumerating tools.
 type ToolRegistry interface {

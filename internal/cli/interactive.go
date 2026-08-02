@@ -8,7 +8,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 
 	"github.com/pengjunchen/go-cli/internal/compaction"
@@ -320,33 +319,32 @@ func (c *interactiveCmd) registerMCPTools(ctx context.Context, rc *config.Config
 }
 
 // registerSkillTools loads skills from the configured directory and registers
-// them as tools.
+// them as tools. It supports two directory layouts:
+//   - Flat: {dir}/{name}.md
+//   - Nested: {dir}/{name}/SKILL.md
+//
+// Skills are loaded with YAMLSkillLoader for proper frontmatter parsing and
+// wrapped with SkillAdapter so the agent loop can execute them.
 func (c *interactiveCmd) registerSkillTools(ctx context.Context, rc *config.Config, tr tools.ToolRegistry) error {
 	if rc == nil || rc.Skill.Dir == "" {
 		return nil
 	}
 
-	entries, err := os.ReadDir(rc.Skill.Dir)
+	loader := skill.NewYAMLSkillLoader()
+	defs, err := loader.LoadDir(ctx, rc.Skill.Dir)
 	if err != nil {
-		slog.Warn("cli_interactive_skill_dir_failed", "dir", rc.Skill.Dir, "err", err)
+		slog.Warn("cli_interactive_skill_load_failed", "dir", rc.Skill.Dir, "err", err)
 		return nil
 	}
 
 	count := 0
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".md") {
+	for _, def := range defs {
+		if def == nil {
 			continue
 		}
-		path := filepath.Join(rc.Skill.Dir, entry.Name())
-		data, err := os.ReadFile(path)
-		if err != nil {
-			slog.Warn("cli_interactive_skill_read_failed", "file", path, "err", err)
-			continue
-		}
-		name := strings.TrimSuffix(entry.Name(), ".md")
-		adapter := &skillToolAdapter{name: name, description: string(data)}
+		adapter := skill.NewSkillAdapter(*def)
 		if regErr := tr.Register(ctx, adapter); regErr != nil {
-			slog.Warn("cli_interactive_skill_register_failed", "skill", name, "err", regErr)
+			slog.Warn("cli_interactive_skill_register_failed", "skill", (*def).Name(), "err", regErr)
 			continue
 		}
 		count++
@@ -355,19 +353,6 @@ func (c *interactiveCmd) registerSkillTools(ctx context.Context, rc *config.Conf
 		slog.Info("cli_interactive_skills_registered", "dir", rc.Skill.Dir, "count", count)
 	}
 	return nil
-}
-
-// skillToolAdapter adapts a skill markdown file into a tools.ToolDefinition.
-// The skill content is returned as the tool's output when called.
-type skillToolAdapter struct {
-	name        string
-	description string
-}
-
-func (s *skillToolAdapter) Name() string       { return "skill__" + s.name }
-func (s *skillToolAdapter) Description() string { return "Skill: " + s.name }
-func (s *skillToolAdapter) Execute(_ context.Context, _ tools.ToolCall) (*tools.ToolResult, error) {
-	return &tools.ToolResult{Output: s.description}, nil
 }
 
 // autoCompact checks whether the conversation turn items exceed the token

@@ -112,10 +112,14 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission) ([]AgentEven
 		} else if len(defs) > 0 {
 			llmTools := make([]llm.ToolDefinition, 0, len(defs))
 			for _, d := range defs {
-				llmTools = append(llmTools, llm.ToolDefinition{
+				td := llm.ToolDefinition{
 					Name:        d.Name(),
 					Description: d.Description(),
-				})
+				}
+				if p, ok := d.(tools.Parameterized); ok {
+					td.Parameters = p.Parameters()
+				}
+				llmTools = append(llmTools, td)
 			}
 			toolOpts = append(toolOpts, llm.WithTools(llmTools))
 		}

@@ -36,6 +36,15 @@ func (a *MCPToolAdapter) Description() string {
 	return a.tool.Description
 }
 
+// Parameters returns the MCP tool's input schema so the LLM knows what
+// arguments it can pass. Implements tools.Parameterized.
+func (a *MCPToolAdapter) Parameters() any {
+	if len(a.tool.ArgsSchema) == 0 {
+		return nil
+	}
+	return a.tool.ArgsSchema
+}
+
 // Execute forwards the call to the remote MCP client and maps its result into
 // a tools.ToolResult. ToolCallID is set so the result can be matched back to
 // the originating call.
