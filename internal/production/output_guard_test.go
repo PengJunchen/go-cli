@@ -87,7 +87,7 @@ func newGuardTraceCtx(t *testing.T) (context.Context, *captureExporter, string) 
 	return ctx, exporter, root.SpanID()
 }
 
-// AC-1: RegexOutputGuard matches a regex and blocks sensitive content.
+// RegexOutputGuard matches a regex and blocks sensitive content.
 func TestRegexOutputGuardBlocksSensitiveContent(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
@@ -105,7 +105,7 @@ func TestRegexOutputGuardBlocksSensitiveContent(t *testing.T) {
 	assert.Equal(t, "regex-output-guard", g.Name())
 }
 
-// AC-2: PIIOutputGuard detects emails, phone numbers and Chinese ID numbers.
+// PIIOutputGuard detects emails, phone numbers and Chinese ID numbers.
 func TestPIIOutputGuardDetectsEmailsPhonesAndIDs(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
@@ -133,7 +133,7 @@ func TestPIIOutputGuardDetectsEmailsPhonesAndIDs(t *testing.T) {
 	assert.True(t, res.Allowed)
 }
 
-// AC-3: CodeInjectionGuard detects injection indicators.
+// CodeInjectionGuard detects injection indicators.
 func TestCodeInjectionGuardDetectsInjection(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
@@ -157,7 +157,7 @@ func TestCodeInjectionGuardDetectsInjection(t *testing.T) {
 	assert.True(t, res.Allowed)
 }
 
-// AC-4: LengthGuard limits length and truncates.
+// LengthGuard limits length and truncates.
 func TestLengthGuardLimitsAndTruncates(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
@@ -175,7 +175,7 @@ func TestLengthGuardLimitsAndTruncates(t *testing.T) {
 	assert.Equal(t, "short", res.Sanitized)
 }
 
-// AC-5: Middleware wraps a ModelFunc; allowed responses pass through.
+// Middleware wraps a ModelFunc; allowed responses pass through.
 func TestOutputGuardMiddlewarePassesThroughWhenAllowed(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
@@ -195,7 +195,7 @@ func TestOutputGuardMiddlewarePassesThroughWhenAllowed(t *testing.T) {
 	assert.Equal(t, "output-guard-middleware", mw.Name())
 }
 
-// AC-6: When blocked, output does NOT propagate (replaced with blocked text).
+// When blocked, output does NOT propagate (replaced with blocked text).
 func TestOutputGuardMiddlewareBlocksOutput(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
@@ -213,7 +213,7 @@ func TestOutputGuardMiddlewareBlocksOutput(t *testing.T) {
 	assert.NotEqual(t, "the secret-777 leaked", resp.Text)
 }
 
-// AC-7: When truncated, GuardResult.Sanitized contains the sanitized output.
+// When truncated, GuardResult.Sanitized contains the sanitized output.
 func TestOutputGuardMiddlewareSanitizesOnTruncation(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
@@ -230,7 +230,7 @@ func TestOutputGuardMiddlewareSanitizesOnTruncation(t *testing.T) {
 	assert.NotEqual(t, "a very long output that exceeds the limit", resp.Text)
 }
 
-// AC-8: production.output_guard span emitted with guard_name/allowed/severity/reason.
+// production.output_guard span emitted with guard_name/allowed/severity/reason.
 func TestGuardEmitsSpanWithAttributes(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx, exporter, _ := newGuardTraceCtx(t)
@@ -246,7 +246,7 @@ func TestGuardEmitsSpanWithAttributes(t *testing.T) {
 	assert.Contains(t, attrs["reason"], "banned")
 }
 
-// AC-9: trace_id consistent and parent_span_id traceable on guard spans.
+// trace_id consistent and parent_span_id traceable on guard spans.
 func TestGuardSpansShareTraceAndParent(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx, exporter, rootID := newGuardTraceCtx(t)
@@ -265,7 +265,7 @@ func TestGuardSpansShareTraceAndParent(t *testing.T) {
 	}
 }
 
-// AC-12: context cancellation propagates out of the guards and middleware.
+// context cancellation propagates out of the guards and middleware.
 func TestGuardContextCancellation(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -291,7 +291,7 @@ func TestGuardContextCancellation(t *testing.T) {
 	assert.True(t, errors.Is(err, context.Canceled))
 }
 
-// AC-11 (race / leaks) plus chain combination correctness.
+// race / leak check plus chain combination correctness.
 func TestOutputGuardChainCombinesResults(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()

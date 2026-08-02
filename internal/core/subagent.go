@@ -65,7 +65,7 @@ type SubAgent interface {
 // subAgentRunner is the harness-ish seam a DefaultSubAgent drives. It executes
 // the sub-task turn loop, emitting AgentEvents through emit and returning the
 // final AgentMessage. It must honor ctx cancellation so that interrupting or
-// canceling the parent cancels the running sub-task (AC-6 / AC-12).
+// canceling the parent cancels the running sub-task.
 type subAgentRunner interface {
 	Run(ctx context.Context, prompt string, inbox <-chan string, emit func(AgentEvent)) (AgentMessage, error)
 }
@@ -174,7 +174,7 @@ func (s *DefaultSubAgent) Received() []string {
 // subagent_name / prompt_length attributes and starts a goroutine that emits a
 // subagent.run span (INTERNAL) with subagent_name / status attributes until it
 // reaches a terminal state. The run derives a child context from ctx so that
-// canceling the parent (or Interrupt) cancels the sub-task (AC-6 / AC-12).
+// canceling the parent (or Interrupt) cancels the sub-task.
 func (s *DefaultSubAgent) Run(ctx context.Context, prompt string) (<-chan AgentEvent, error) {
 	s.mu.Lock()
 	if s.state != SubAgentIdle {
@@ -274,7 +274,7 @@ func (s *DefaultSubAgent) setStateLocked(state SubAgentState) {
 
 // Send records and delivers a follow-up message to the running sub-agent.
 // Messages are recorded immediately under lock so they remain observable even
-// if the runner has already terminated (AC-2).
+// if the runner has already terminated.
 func (s *DefaultSubAgent) Send(_ context.Context, msg string) error {
 	s.mu.Lock()
 	s.received = append(s.received, msg)
@@ -335,13 +335,13 @@ func simulatedRunnerFactory(cfg SubAgentConfig) subAgentRunner {
 // simulatedSubAgentRunner is the default subAgentRunner. It simulates a short
 // ReAct-style turn loop in-process, emitting an initial "user" event, draining
 // any inbox messages, and producing "message" events until it reaches a
-// terminal response. It honors ctx cancellation (AC-6 / AC-12).
+// terminal response. It honors ctx cancellation.
 type simulatedSubAgentRunner struct {
 	maxTurns int
 }
 
 // Compile-time assertion that the simulated runner is the default
-// implementation of the subAgentRunner interface (SCAN-012).
+// implementation of the subAgentRunner interface.
 var _ subAgentRunner = (*simulatedSubAgentRunner)(nil)
 
 // Run executes the simulated turn loop.

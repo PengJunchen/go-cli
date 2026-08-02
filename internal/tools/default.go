@@ -6,7 +6,7 @@ import (
 )
 
 // These types are the default (compile-time) implementations of the tools
-// contracts. SCAN-012 requires every production interface in a package to
+// contracts. Every production interface in a package should
 // carry a `var _ Interface = (*Impl)(nil)` default-implementation assertion.
 // Real behavior is provided by the mock framework (internal/mock) and later
 // production registries; these defaults are minimal placeholders that exist so

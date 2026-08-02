@@ -9,7 +9,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
-// This file defines the Phase 4 OutputGuard system (tasks 4-13 / 4-14). It
+// This file defines the OutputGuard system. It
 // provides the OutputGuard contract, the GuardResult value, the GuardSeverity
 // enumeration and four default guard implementations (Regex, PII,
 // CodeInjection, Length) together with an OutputGuardChain that composes them.

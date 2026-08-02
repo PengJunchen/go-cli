@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 env:
-  GO_VERSION: "1.23"
+  GO_VERSION: "1.24"
 
 permissions:
   contents: read
@@ -82,3 +82,72 @@ jobs:
         with:
           name: coverage
           path: coverage.out
+
+  coverage:
+    name: Coverage Threshold (>=65%)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - run: go mod download
+
+      - name: Check coverage >= 65%
+        run: make test-cov-check
+
+  scan:
+    name: AST Scan
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - run: go mod download
+
+      - name: Run AST scanner (JSON format)
+        run: |
+          output=$(go run ./internal/verify/cmd/scanner -dir ./internal -format json)
+          echo "$output"
+          if echo "$output" | grep -q '"severity":"ERROR"'; then
+            echo "::error::AST scan found ERROR-level findings"
+            exit 1
+          fi
+          echo "AST scan passed: no ERROR-level findings"
+
+  test-log:
+    name: Log Verification Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - run: go mod download
+
+      - name: Run log-based verification tests
+        run: make test-log
+
+  test-leak:
+    name: Goroutine Leak Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - run: go mod download
+
+      - name: Run goroutine leak tests
+        run: make test-leak

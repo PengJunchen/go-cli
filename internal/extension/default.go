@@ -6,7 +6,7 @@ import (
 )
 
 // defaultConfigProvider is the default (compile-time) implementation of the
-// ConfigProvider contract. SCAN-012 requires every production interface in a
+// ConfigProvider contract. Every production interface in a
 // package to carry a `var _ Interface = (*Impl)(nil)` default-implementation
 // assertion. Real behavior is provided by the mock framework
 // (internal/mock) and later production providers.

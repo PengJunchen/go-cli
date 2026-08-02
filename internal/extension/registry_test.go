@@ -84,7 +84,7 @@ func (p testProvider) Models() []llm.ModelInfo { return nil }
 
 var _ llm.ModelProvider = (*testProvider)(nil)
 
-// AC-6: ExtensionRegistry exposes the five registration methods and the default
+// ExtensionRegistry exposes the five registration methods and the default
 // implementation stores by name (last writer wins) with getters.
 func TestExtensionRegistryRegisterAndGet(t *testing.T) {
 	ctx := context.Background()
@@ -114,7 +114,7 @@ func TestExtensionRegistryRegisterAndGet(t *testing.T) {
 	assert.Equal(t, "m1", reg.Middleware("m1").Name())
 }
 
-// AC-6: duplicate registrations overwrite (last writer wins) and command errors
+// duplicate registrations overwrite (last writer wins) and command errors
 // propagate.
 func TestExtensionRegistryDuplicatesAndErrors(t *testing.T) {
 	ctx := context.Background()

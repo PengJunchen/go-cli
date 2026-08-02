@@ -25,7 +25,7 @@ import (
 // decoded with the standard library. All three share the nativeChatModel helper
 // so the HTTP mechanics and the "llm.request" span are defined once.
 
-// Native provider constants. Grouped in one const block (SCAN-009).
+// Native provider constants. Grouped in one const block.
 const (
 	// openaiProviderName is the identifier returned by OpenAIProvider.Name().
 	openaiProviderName = "openai"
@@ -298,7 +298,7 @@ type OpenAIProvider struct {
 	nativeProviderBase
 }
 
-// Compile-time assertion (SCAN-012).
+// Compile-time assertion.
 var _ ModelProvider = (*OpenAIProvider)(nil)
 
 // NewOpenAIProvider builds an OpenAIProvider with sensible defaults.
@@ -421,7 +421,7 @@ type ClaudeProvider struct {
 	nativeProviderBase
 }
 
-// Compile-time assertion (SCAN-012).
+// Compile-time assertion.
 var _ ModelProvider = (*ClaudeProvider)(nil)
 
 // NewClaudeProvider builds a ClaudeProvider with sensible defaults.
@@ -587,7 +587,7 @@ type GeminiProvider struct {
 	nativeProviderBase
 }
 
-// Compile-time assertion (SCAN-012).
+// Compile-time assertion.
 var _ ModelProvider = (*GeminiProvider)(nil)
 
 // NewGeminiProvider builds a GeminiProvider with sensible defaults.

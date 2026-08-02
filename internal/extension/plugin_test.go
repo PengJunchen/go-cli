@@ -16,7 +16,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/extension"
 )
 
-// AC-5/AC-7: the default loader routes an http(s) path to the JSON-over-HTTP
+// the default loader routes an http(s) path to the JSON-over-HTTP
 // loader and returns the wrapped rpc extensions.
 func TestPluginLoaderHTTP(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -38,7 +38,7 @@ func TestPluginLoaderHTTP(t *testing.T) {
 	require.NoError(t, exts[0].Shutdown(context.Background()))
 }
 
-// AC-8: the gRPC scheme is recognized but flagged unsupported in the
+// the gRPC scheme is recognized but flagged unsupported in the
 // zero-dependency build.
 func TestPluginLoaderGRPCUnsupported(t *testing.T) {
 	loader := extension.NewDefaultPluginLoader()
@@ -46,7 +46,7 @@ func TestPluginLoaderGRPCUnsupported(t *testing.T) {
 	require.ErrorIs(t, err, extension.ErrUnsupportedRPC)
 }
 
-// AC-7: loading a nonexistent .so path surfaces a clear, wrapped error.
+// loading a nonexistent .so path surfaces a clear, wrapped error.
 func TestPluginLoaderingNonExistentPlugin(t *testing.T) {
 	loader := extension.NewDefaultPluginLoader()
 	missing := filepath.Join(t.TempDir(), "nonexistent.so")
@@ -56,7 +56,7 @@ func TestPluginLoaderingNonExistentPlugin(t *testing.T) {
 	assert.Contains(t, err.Error(), missing)
 }
 
-// AC-7: an HTTP endpoint that fails to decode returns a clear error.
+// an HTTP endpoint that fails to decode returns a clear error.
 func TestPluginLoaderingHTTPBadPayload(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte("not-json")) //nolint:errcheck // response writing is best-effort
@@ -69,7 +69,7 @@ func TestPluginLoaderingHTTPBadPayload(t *testing.T) {
 	assert.Contains(t, err.Error(), "decode")
 }
 
-// AC-7: an HTTP endpoint returning non-200 surfaces the status in the error.
+// an HTTP endpoint returning non-200 surfaces the status in the error.
 func TestPluginLoaderingHTTPNonOK(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusInternalServerError)

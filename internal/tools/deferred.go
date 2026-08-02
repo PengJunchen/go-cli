@@ -43,7 +43,7 @@ const deferredStubDescription = "deferred tool (not yet loaded)"
 // DefaultDeferredToolRegistry is the default DeferredToolRegistry
 // implementation. It is concurrency-safe.
 type DefaultDeferredToolRegistry struct {
-	underlying ToolRegistry // SCAN-013: dependency held by interface.
+	underlying ToolRegistry // dependency held by interface.
 
 	mu      sync.RWMutex
 	loaders map[string]func() (ToolDefinition, error)

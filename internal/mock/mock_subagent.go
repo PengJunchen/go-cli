@@ -17,7 +17,7 @@ type MockSubAgentRun struct {
 
 // MockSubAgent is a programmable core.SubAgent. It records every Run / Send /
 // Interrupt / Wait call and supports immediate completion, a programmed event
-// stream, and a programmed final result (AC-2 / AC-4).
+// stream, and a programmed final result.
 type MockSubAgent struct {
 	mu     sync.Mutex
 	name   string

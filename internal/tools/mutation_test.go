@@ -312,6 +312,39 @@ func TestMutationQueueConcurrentEnqueueCloseNoPanic(t *testing.T) {
 	assert.Zero(t, atomic.LoadInt64(&panics), "no goroutine should panic on send to closed channel")
 }
 
+func TestMutationQueueHandlerPanicDoesNotDeadlock(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	var callCount int64
+	q := NewDefaultFileMutationQueue(WithMutationHandler(func(_ context.Context, m FileMutation) error {
+		cur := atomic.AddInt64(&callCount, 1)
+		if cur == 1 {
+			panic("handler boom")
+		}
+		return nil
+	}))
+	defer func() { require.NoError(t, q.Close()) }()
+
+	path := filepath.Join(t.TempDir(), "panic-test.txt")
+
+	resCh1, err := q.Enqueue(context.Background(), FileMutation{
+		FilePath: path, Operation: "write", Content: "first", ToolName: "write",
+	})
+	require.NoError(t, err)
+
+	res1 := <-resCh1
+	assert.False(t, res1.Success, "panicked mutation must report failure")
+	assert.Contains(t, res1.Error.Error(), "handler panic", "error must mention handler panic")
+
+	resCh2, err := q.Enqueue(context.Background(), FileMutation{
+		FilePath: path, Operation: "write", Content: "second", ToolName: "write",
+	})
+	require.NoError(t, err, "enqueue after panic must succeed (no deadlock)")
+
+	res2 := <-resCh2
+	assert.True(t, res2.Success, "mutation after panic must succeed")
+}
+
 func TestMutationMiddlewarePassthroughAndQueued(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 

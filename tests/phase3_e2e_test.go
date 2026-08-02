@@ -1,6 +1,6 @@
 // Package tests contains end-to-end integration tests for go-cli.
 //
-// This file is the Phase 3 milestone gate (task 3-49). It proves, in one trace
+// This file is the Phase 3 end-to-end gate. It proves, in one trace
 // rooted at a single span with a consistent trace_id:
 //
 //  1. 审批门控 (approval gating): the deny-first ApprovalMiddleware refuses a
@@ -374,7 +374,7 @@ func waitForSpans(t *testing.T, exporter *mock.MockTraceExporter) {
 	exporter.AssertSpanExists(t, "phase3.root")
 }
 
-// TestPhase3RegistryInventory verifies AC-1's Registry扩展点 inventory: every
+// TestPhase3RegistryInventory verifies the Registry extension point inventory: every
 // process-wide RegisterXxx entry point exists and accepts its interface, and
 // each is wired to a default implementation that satisfies the interface.
 // The register calls pass nil to reset to defaults, so they are idempotent and
@@ -420,7 +420,7 @@ func TestPhase3RegistryInventory(t *testing.T) {
 	require.NotNil(t, config.GetSettings())
 }
 
-// TestPhase3NoProductionMockImport verifies AC-3 / SCAN-003: no production
+// TestPhase3NoProductionMockImport verifies that no production
 // package under internal/ (other than internal/mock itself) imports
 // internal/mock. It walks the source tree and scans import lines.
 func TestPhase3NoProductionMockImport(t *testing.T) {
@@ -436,7 +436,7 @@ func TestPhase3NoProductionMockImport(t *testing.T) {
 			return nil
 		}
 		// Test files are not "production code" and may legitimately import the
-		// mock framework; SCAN-003 only constrains non-test source.
+		// mock framework; the scan rule only constrains non-test source.
 		if strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
@@ -452,7 +452,7 @@ func TestPhase3NoProductionMockImport(t *testing.T) {
 			trimmed := strings.TrimSpace(line)
 			if strings.HasPrefix(trimmed, "\"github.com/pengjunchen/go-cli/internal/mock\"") ||
 				strings.HasPrefix(trimmed, "github.com/pengjunchen/go-cli/internal/mock\"") {
-				t.Errorf("SCAN-003 violation: %s imports internal/mock", path)
+				t.Errorf("mock import violation: %s imports internal/mock", path)
 			}
 		}
 		return nil

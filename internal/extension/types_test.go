@@ -195,7 +195,7 @@ func (m *typesTestToolMiddleware) WrapCount() int {
 
 // --- tests ---
 
-// AC-1: the Extension interface exposes Name/Init/Shutdown, implemented by the
+// the Extension interface exposes Name/Init/Shutdown, implemented by the
 // default stub and recorded by the mock.
 func TestExtensionInterface(t *testing.T) {
 	ctx := context.Background()
@@ -214,7 +214,7 @@ func TestExtensionInterface(t *testing.T) {
 	assert.Equal(t, 1, ext.ShutdownCount())
 }
 
-// AC-2/AC-3: the Hook interface (Name/Handle) and HookEvent/HookResult model
+// the Hook interface (Name/Handle) and HookEvent/HookResult model
 // with the four actions.
 func TestHookAndHookActions(t *testing.T) {
 	ctx := context.Background()
@@ -253,7 +253,7 @@ func TestHookAndHookActions(t *testing.T) {
 	assert.Equal(t, HookActionPass, defHook.Handle(ctx, event).Action)
 }
 
-// AC-4: Middleware, ModelMiddleware and ToolMiddleware interfaces and their
+// Middleware, ModelMiddleware and ToolMiddleware interfaces and their
 // pass-through default implementations actually wrap (unwrap) correctly.
 func TestMiddlewareInterfaces(t *testing.T) {
 	ctx := context.Background()

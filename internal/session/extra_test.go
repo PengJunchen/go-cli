@@ -386,3 +386,33 @@ func TestJSONLSessionStoreFilePath(t *testing.T) {
 	store := NewJSONLSessionStore(p)
 	assert.Equal(t, p, store.FilePath())
 }
+
+// TestJSONLSessionStoreAppendNilEntry verifies Append rejects a nil entry.
+func TestJSONLSessionStoreAppendNilEntry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	store := NewJSONLSessionStore(path)
+	err := store.Append(context.Background(), nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "nil entry")
+	require.NoError(t, store.Close())
+}
+
+// TestJSONLSessionStoreAppendEmptyID verifies Append rejects an empty ID.
+func TestJSONLSessionStoreAppendEmptyID(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	store := NewJSONLSessionStore(path)
+	err := store.Append(context.Background(), &SessionEntry{Type: EntryTypeUser})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "id is required")
+	require.NoError(t, store.Close())
+}
+
+// TestJSONLSessionStoreAppendEmptyType verifies Append rejects an empty type.
+func TestJSONLSessionStoreAppendEmptyType(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	store := NewJSONLSessionStore(path)
+	err := store.Append(context.Background(), &SessionEntry{ID: "x"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "type is required")
+	require.NoError(t, store.Close())
+}

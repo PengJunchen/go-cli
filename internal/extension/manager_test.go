@@ -213,7 +213,7 @@ func newTracingCtx(rec *captureExporter) context.Context {
 	return ctx
 }
 
-// AC-9: extension.init, extension.shutdown and extension.hook spans are emitted
+// extension.init, extension.shutdown and extension.hook spans are emitted
 // with the required attributes.
 func TestCoordinatorEmitsSpans(t *testing.T) {
 	rec := &captureExporter{}
@@ -252,7 +252,7 @@ func TestCoordinatorEmitsSpans(t *testing.T) {
 	assert.Equal(t, tracing.SpanKindInternal, shutdownSpan.SpanKind)
 }
 
-// AC-10: process-wide plugin loader registry provides nil-default accessors.
+// process-wide plugin loader registry provides nil-default accessors.
 func TestPluginLoaderRegistry(t *testing.T) {
 	registerPluginLoader(nil) // reset to default
 	got := getPluginLoader()
@@ -268,7 +268,7 @@ func TestPluginLoaderRegistry(t *testing.T) {
 	assert.Equal(t, "default-plugin-loader", getPluginLoader().Name())
 }
 
-// AC-11: lifecycle transitions Pending -> Running -> Stopped.
+// lifecycle transitions Pending -> Running -> Stopped.
 func TestCoordinatorLifecycleStates(t *testing.T) {
 	coord := newExtensionCoordinator(nil)
 	ctx := context.Background()
@@ -285,7 +285,7 @@ func TestCoordinatorLifecycleStates(t *testing.T) {
 	assert.Equal(t, extensionStateStopped, coord.state(ext.Name()))
 }
 
-// AC-11: Init failure surfaces the error and does not mark the extension
+// Init failure surfaces the error and does not mark the extension
 // Running; Shutdown failure propagates.
 func TestCoordinatorLifecycleErrors(t *testing.T) {
 	coord := newExtensionCoordinator(nil)
@@ -305,7 +305,7 @@ func TestCoordinatorLifecycleErrors(t *testing.T) {
 	assert.Contains(t, err.Error(), "shutdown blew up")
 }
 
-// AC-11: the coordinator passes its registry through so extensions can register
+// the coordinator passes its registry through so extensions can register
 // building blocks during Init.
 func TestCoordinatorPassesRegistry(t *testing.T) {
 	reg := NewExtensionRegistry()

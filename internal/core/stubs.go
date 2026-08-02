@@ -14,7 +14,7 @@ import (
 // defined in this package, plus lightweight defaults backing the optional
 // service/extension interfaces imported from other packages. Each stub returns
 // benign zero values so the Registry is always fully wired, and logs a real
-// slog message so SCAN-008 is satisfied. Later phases replace these stubs with
+// slog message. Later phases replace these stubs with
 // full implementations.
 
 // LoopAgent, AgentImpl and HarnessImpl are defined in loop.go, agent.go and

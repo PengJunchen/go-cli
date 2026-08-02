@@ -18,7 +18,7 @@ import (
 
 // This file defines the PluginLoader contract and the default implementation.
 //
-// The Phase 4 design (AC-8) only requires the remote-loading SCHEME to be
+// The design only requires the remote-loading SCHEME to be
 // designed; the project is zero-dependency, so gRPC wire framing is NOT
 // embedded. The default loader therefore supports two local/remote schemes
 // using only the Go standard library:

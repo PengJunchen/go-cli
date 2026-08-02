@@ -3,11 +3,11 @@
 Go CLI 工具框架。
 
 > 完整行为约束、工作流、验收规范等详见 [go-cli-infra](../go-cli-infra/) 仓库：
-> - [CLAUDE.md](../go-cli-infra/CLAUDE.md) — 完整 LLM 行为约束
-> - [AGENTS.md](../go-cli-infra/AGENTS.md) — 完整跨工具标准
+> - [CLAUDE.md](../go-cli-infra/CLAUDE.md) — LLM 行为约束
+> - [AGENTS.md](../go-cli-infra/AGENTS.md) — 跨工具标准
 > - [design/](../go-cli-infra/design/) — 设计文档
 > - [rules/](../go-cli-infra/rules/) — 验证规则
-> - [infra/](../go-cli-infra/infra/) — 任务规划
+> - [infra/](../go-cli-infra/infra/) — 任务规划与工作流
 
 ## 四原则
 
@@ -18,17 +18,19 @@ Go CLI 工具框架。
 
 ## 三大横切关注点
 
-1. **接口优先** → [design/04-interface-first-design.md](../go-cli-infra/design/04-interface-first-design.md)
-2. **链路追踪日志** → [design/05-trace-logging-design.md](../go-cli-infra/design/05-trace-logging-design.md)
-3. **TDD Mock Server** → [design/06-tdd-mock-server-design.md](../go-cli-infra/design/06-tdd-mock-server-design.md)
+1. **接口优先** — 核心抽象先定义接口，再提供默认实现
+2. **链路追踪日志** — 每个关键操作发出 tracing span
+3. **TDD Mock Server** — 测试先写 mock server 验证行为
+
+详见：[go-cli-infra design/](../go-cli-infra/design/)
 
 ## 子智能体优先
 
-分项任务委派子智能体执行，主上下文只做调度。详见 [CLAUDE.md](../go-cli-infra/CLAUDE.md)。
+分项任务委派子智能体执行，主上下文只做调度。详见 [go-cli-infra CLAUDE.md](../go-cli-infra/CLAUDE.md)。
 
 ## 三阶段闭环
 
-规划 → TDD → 执行，由 milestone.md 和 tasks.json 驱动。详见 [workflow.md](../go-cli-infra/infra/workflow.md)。
+规划 → TDD → 执行。详见 [go-cli-infra workflow](../go-cli-infra/infra/)。
 
 ## 快速命令
 
@@ -52,10 +54,10 @@ go-cli/                        # 本仓库 — 代码实现
 ├── CLAUDE.md
 └── AGENTS.md
 
-go-cli-infra/                  # 基础设施仓库 — 完整约束、规则、任务
+go-cli-infra/                  # 基础设施仓库 — 约束、规则、规划
 ├── design/                    # 设计文档
-├── infra/                     # 任务规划
+├── infra/                     # 任务规划与工作流
 ├── rules/                     # 验证规则
-├── CLAUDE.md                  # 完整 LLM 行为约束
-└── AGENTS.md                  # 完整跨工具标准
+├── CLAUDE.md                  # LLM 行为约束
+└── AGENTS.md                  # 跨工具标准
 ```

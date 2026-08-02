@@ -1,9 +1,7 @@
 # AGENTS.md
 
 > 跨工具开放标准（Codex / Cursor / Gemini CLI / Claude Code 等兼容）。
-> 完整规范详见 [go-cli-infra](../go-cli-infra/) 仓库：
-> - [CLAUDE.md](../go-cli-infra/CLAUDE.md) — 完整 LLM 行为约束
-> - [AGENTS.md](../go-cli-infra/AGENTS.md) — 完整跨工具标准
+> 完整规范详见 [go-cli-infra](../go-cli-infra/) 仓库。
 
 ## Setup
 
@@ -22,7 +20,7 @@ Go 版本：1.23+。
 - **三角色**：designer → builder → reviewer，每阶段产出是下阶段输入
 - **TDD 驱动**：先写测试再实现，验收标准可执行验证
 
-详见：[CLAUDE.md](../go-cli-infra/CLAUDE.md) 和 [workflow.md](../go-cli-infra/infra/workflow.md)
+详见：[go-cli-infra CLAUDE.md](../go-cli-infra/CLAUDE.md) 和 [go-cli-infra AGENTS.md](../go-cli-infra/AGENTS.md)
 
 ## Code Style
 
@@ -61,10 +59,10 @@ go-cli/                        # 本仓库 — 代码实现
 ├── CLAUDE.md
 └── AGENTS.md
 
-go-cli-infra/                  # 基础设施仓库 — 完整约束、规则、任务
+go-cli-infra/                  # 基础设施仓库 — 约束、规则、规划
 ├── design/                    # 设计文档
-├── infra/                     # 任务规划
+├── infra/                     # 任务规划与工作流
 ├── rules/                     # 验证规则
-├── CLAUDE.md                  # 完整 LLM 行为约束
-└── AGENTS.md                  # 完整跨工具标准
+├── CLAUDE.md                  # LLM 行为约束
+└── AGENTS.md                  # 跨工具标准
 ```

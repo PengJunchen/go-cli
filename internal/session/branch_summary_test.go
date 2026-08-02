@@ -14,7 +14,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/verify"
 )
 
-// AC-1: DefaultBranchSummary.Summarize generates a summary via an injected
+// DefaultBranchSummary.Summarize generates a summary via an injected
 // SummarizeFunc, passing it the concatenated entries text.
 func TestDefaultBranchSummary_Summarize(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
@@ -46,7 +46,7 @@ func TestDefaultBranchSummary_NilSummarizerErrors(t *testing.T) {
 	require.Error(t, err)
 }
 
-// AC-9: context cancellation propagates to the Summarize call.
+// context cancellation propagates to the Summarize call.
 func TestDefaultBranchSummary_ContextCancellation(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -86,7 +86,7 @@ func (t *testBranchSummary) Summarize(_ context.Context, entries []SessionEntry)
 
 func (t *testBranchSummary) Name() string { return "test-branch-summary" }
 
-// AC-2 + AC-3: MoveTo triggers the BranchSummary on a branch switch and appends
+// MoveTo triggers the BranchSummary on a branch switch and appends
 // the summary as a SessionEntry on the departed branch.
 func TestTree_MoveToAppendsBranchSummary(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
@@ -122,7 +122,7 @@ func TestTree_MoveToAppendsBranchSummary(t *testing.T) {
 	assert.True(t, summaryEntry.IsSummary)
 }
 
-// AC-4: BuildContext reconstructing the departed branch includes the summary.
+// BuildContext reconstructing the departed branch includes the summary.
 func TestTree_BuildContextIncludesBranchSummary(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -166,7 +166,7 @@ func TestTree_MoveToWithoutBranchSummaryUnchanged(t *testing.T) {
 	assert.Equal(t, uint64(0), tree.summarySeq.Load())
 }
 
-// AC-5 + AC-6: a compaction span is emitted with strategy_used=branch_summary,
+// a compaction span is emitted with strategy_used=branch_summary,
 // a consistent trace_id, and a traceable parent_span_id.
 func TestDefaultBranchSummary_EmitsCompactionSpan(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()

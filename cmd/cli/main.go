@@ -42,15 +42,23 @@ func run(argv []string, stdout, stderr io.Writer, loadConfig func() (*config.Con
 	tctx := ctx
 	if tracer != nil {
 		root, tctx = tracer.Start(ctx, "cli.invocation", tracing.SpanKindInternal)
+		cmdName := ""
+		if len(argv) > 0 {
+			cmdName = argv[0]
+		}
 		root.SetAttributes(
 			tracing.Attribute{Key: "cli_version", Value: cli.Version},
 			tracing.Attribute{Key: "args_count", Value: len(argv)},
+			tracing.Attribute{Key: "command", Value: cmdName},
 		)
 	}
 
 	code := runCLI(tctx, cfg, argv, stdout, stderr, root)
 
 	if root != nil {
+		root.SetAttributes(
+			tracing.Attribute{Key: "exit_code", Value: code},
+		)
 		if code != 0 {
 			root.SetStatus(tracing.SpanStatusError, fmt.Sprintf("exit code %d", code))
 		} else {

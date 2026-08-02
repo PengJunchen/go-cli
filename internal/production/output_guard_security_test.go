@@ -148,7 +148,7 @@ func TestRegexOutputGuardSensitiveScrubbing(t *testing.T) {
 	// Build a guard denying outputs that carry an obvious secret token.
 	g := NewRegexOutputGuard([]string{`sk-[A-Za-z0-9]{20,}`})
 	// Assemble the secret from fragments so the test source does not embed a
-	// full hardcoded token (SCAN-003) while still exercising the scrubber.
+	// full hardcoded token while still exercising the scrubber.
 	fullToken := "sk-" + "abcdef0" + "123456789abc" + "def9876543210"
 	res, err := g.Check(ctx, "my key is "+fullToken+" ok")
 	require.NoError(t, err)

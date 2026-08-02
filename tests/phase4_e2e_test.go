@@ -1,8 +1,7 @@
 // Package tests contains end-to-end integration tests for go-cli.
 //
-// This file is the Phase 4 milestone gate (task 4-31). It proves, in one trace
-// rooted at a single span with a consistent trace_id, the full Phase 4 chain
-// described by AC-2:
+// This file is the Phase 4 end-to-end gate. It proves, in one trace
+// rooted at a single span with a consistent trace_id, the full Phase 4 chain:
 //
 //  1. Skill load      : YAMLSkillLoader parses a YAML-frontmatter skill file and
 //     the DefaultSkillRegistry indexes/matches it.

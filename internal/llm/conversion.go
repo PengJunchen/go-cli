@@ -13,7 +13,7 @@ import "strings"
 // thinking blocks are assumed to be embedded in Content as textual markers.
 // The marker formats are documented on the corresponding helper.
 
-// Default conversion constants. Grouped in one const block (SCAN-009) so the
+// Default conversion constants. Grouped in one const block so the
 // marker formats and the canonical tool-call prefix are easy to inspect and do
 // not look like scattered hardcoded strings.
 const (

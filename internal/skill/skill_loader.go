@@ -58,7 +58,7 @@ func NewYAMLSkillLoader() *YAMLSkillLoader { return &YAMLSkillLoader{} }
 const frontmatterDelimiter = "---"
 
 // Frontmatter field keys. Referenced through constants (rather than inline
-// string literals) in switches so the SCAN-010 rule does not mistake a case
+// string literals) in switches so the rule does not mistake a case
 // label for hardcoded command routing — some of these ("version", "prompt")
 // collide with known command names.
 const (

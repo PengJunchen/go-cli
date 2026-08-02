@@ -14,7 +14,7 @@ import (
 
 // TestAppRunConsumesEvents verifies that Run starts the TUI, consumes events
 // from the stream, dispatches them to the matching renderer, and updates the
-// view buffer (AC-1, AC-6 non-streaming branch).
+// view buffer (non-streaming branch).
 func TestAppRunConsumesEvents(t *testing.T) {
 	events := make(chan AgentEvent, 8)
 	events <- AgentEvent{Type: "msg", ContentType: ContentTypeAssistant, Content: "hello", TraceID: "t1", SpanID: "s1"}
@@ -34,7 +34,7 @@ func TestAppRunConsumesEvents(t *testing.T) {
 }
 
 // TestAppSendDeliversMsg verifies that Send enqueues a message the loop then
-// consumes (AC-2).
+// consumes.
 func TestAppSendDeliversMsg(t *testing.T) {
 	events := make(chan AgentEvent, 1)
 	defer close(events)
@@ -58,7 +58,7 @@ func TestAppSendDeliversMsg(t *testing.T) {
 }
 
 // TestAppQuitGraceful verifies that Quit stops the loop gracefully and that
-// resources are cleaned up (AC-3, AC-11).
+// resources are cleaned up.
 func TestAppQuitGraceful(t *testing.T) {
 	events := make(chan AgentEvent, 1)
 	defer close(events)
@@ -87,7 +87,7 @@ func TestAppQuitGraceful(t *testing.T) {
 
 // TestAppStreamingRender verifies streaming render: each streaming event
 // replaces the previous frame so the view holds the latest accumulated buffer
-// on a single line (AC-6 streaming branch).
+// on a single line (streaming branch).
 func TestAppStreamingRender(t *testing.T) {
 	events := make(chan AgentEvent, 8)
 	app := NewBubbleteaApp(events, WithWidth(40))
@@ -126,7 +126,7 @@ func TestAppUnknownContentTypeFallsBack(t *testing.T) {
 }
 
 // TestAppContextCancelPropagation verifies context cancellation stops the
-// loop and reports the cancellation (AC-11).
+// loop and reports the cancellation.
 func TestAppContextCancelPropagation(t *testing.T) {
 	events := make(chan AgentEvent, 1)
 	defer close(events)
@@ -195,7 +195,7 @@ func TestAppWithCustomTheme(t *testing.T) {
 }
 
 // TestNoGoroutineLeak verifies that repeated run/quit cycles do not leak
-// goroutines (AC-10).
+// goroutines.
 func TestNoGoroutineLeak(t *testing.T) {
 	before := runtime.NumGoroutine()
 	for i := 0; i < 5; i++ {

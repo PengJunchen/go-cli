@@ -56,7 +56,7 @@ func categorizeTool(def ToolDefinition) toolCategory {
 // description keyword, optionally filtered by category. It implements the
 // ToolDefinition interface.
 type ToolSearchTool struct {
-	reg ToolRegistry // SCAN-013: dependency held by interface.
+	reg ToolRegistry // dependency held by interface.
 }
 
 var _ ToolDefinition = (*ToolSearchTool)(nil)

@@ -1,6 +1,6 @@
 // Package tests contains end-to-end integration tests for go-cli.
 //
-// This file is the Phase 2 milestone gate (task 2-40). It proves, in one trace
+// This file is the Phase 2 end-to-end gate. It proves, in one trace
 // with a consistent trace_id rooted at a single span:
 //
 //  1. A 100+ turn long conversation runs stably against a real core.HarnessImpl
@@ -37,10 +37,10 @@ import (
 )
 
 // phase2Turns is the number of user submissions that must run stably to prove
-// the "100+ turn long conversation" milestone.
+// long conversation stability.
 const phase2Turns = 120
 
-// TestPhase2EndToEnd exercises the full Phase 2 milestone under a single
+// TestPhase2EndToEnd exercises the full Phase 2 feature set under a single
 // tracing root so the trace chain can be asserted end to end.
 func TestPhase2EndToEnd(t *testing.T) {
 	exporter := mock.NewMockTraceExporter()

@@ -96,7 +96,7 @@ parameters:
 optional body markdown that is ignored when a prompt is declared
 `
 
-// AC-1: Load parses a YAML-frontmatter skill file and populates all 8 fields.
+// Load parses a YAML-frontmatter skill file and populates all 8 fields.
 func TestYAMLLoaderLoadPopulatesAllFields(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -120,7 +120,7 @@ func TestYAMLLoaderLoadPopulatesAllFields(t *testing.T) {
 	assert.Equal(t, "fix bug", d.TriggerHint())
 }
 
-// AC-2: LoadDir loads every skill file in a directory.
+// LoadDir loads every skill file in a directory.
 func TestYAMLLoaderLoadDir(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -156,7 +156,7 @@ body two
 	assert.Contains(t, names["two"], "body two")
 }
 
-// AC-2 shared: Prompt falls back to the body when no frontmatter prompt.
+// Prompt falls back to the body when no frontmatter prompt.
 func TestYAMLLoaderPromptFallsBackToBody(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -175,7 +175,7 @@ the body is the prompt
 	assert.Equal(t, "the body is the prompt", d.Prompt())
 }
 
-// AC-1 tolerant: unknown keys ignored, missing optional fields default empty.
+// unknown keys ignored, missing optional fields default empty.
 func TestYAMLLoaderTolerantParse(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -208,7 +208,7 @@ body
 	assert.Equal(t, "body", d.Prompt())
 }
 
-// AC-1 error: malformed file returns a wrapped error.
+// malformed file returns a wrapped error.
 func TestYAMLLoaderParseError(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -220,7 +220,7 @@ func TestYAMLLoaderParseError(t *testing.T) {
 	assert.Contains(t, err.Error(), "skill")
 }
 
-// AC-3: Register / Get / List / Match / Unregister on the default registry.
+// Register / Get / List / Match / Unregister on the default registry.
 func TestDefaultRegistryLifecycle(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -256,7 +256,7 @@ func TestDefaultRegistryLifecycle(t *testing.T) {
 	require.ErrorIs(t, err, skill.ErrSkillNotFound)
 }
 
-// AC-3 errors: nil registration and empty name are rejected.
+// nil registration and empty name are rejected.
 func TestDefaultRegistryRegisterInvalid(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -274,7 +274,7 @@ func TestDefaultRegistryRegisterInvalid(t *testing.T) {
 	assert.Len(t, reg.List(context.Background()), 1)
 }
 
-// AC-4: List filters by category; Match finds by name/description/trigger.
+// List filters by category; Match finds by name/description/trigger.
 func TestDefaultRegistryProgressiveDisclosure(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -322,7 +322,7 @@ func TestDefaultRegistryProgressiveDisclosure(t *testing.T) {
 	assert.Empty(t, reg.Match(ctx, "   "))
 }
 
-// AC-5: SkillAdapter maps a SkillDefinition onto tools.ToolDefinition.
+// SkillAdapter maps a SkillDefinition onto tools.ToolDefinition.
 func TestSkillAdapterImplementsToolDefinition(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -351,7 +351,7 @@ func TestSkillAdapterImplementsToolDefinition(t *testing.T) {
 	assert.Contains(t, res.Output, "adapter-skill")
 }
 
-// AC-6: Execute returns the prompt and lists tools/parameters in metadata.
+// Execute returns the prompt and lists tools/parameters in metadata.
 func TestSkillAdapterExecuteListsToolsAndParams(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -376,7 +376,7 @@ func TestSkillAdapterExecuteListsToolsAndParams(t *testing.T) {
 	assert.Equal(t, map[string]any{"max": 10}, params)
 }
 
-// AC-7: skill.load span emitted with skill_name / source_path attrs.
+// skill.load span emitted with skill_name / source_path attrs.
 func TestLoadEmitsSkillLoadSpan(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -402,7 +402,7 @@ body
 	assert.True(t, strings.HasSuffix(attrString(span, "source_path"), "traced.md"))
 }
 
-// AC-8: skill.execute span emitted with skill_name / success attrs.
+// skill.execute span emitted with skill_name / success attrs.
 func TestExecuteEmitsSkillExecuteSpan(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -424,7 +424,7 @@ func TestExecuteEmitsSkillExecuteSpan(t *testing.T) {
 	require.NoError(t, err)
 }
 
-// AC-9: trace_id consistent and parent_span_id traceable across spans.
+// trace_id consistent and parent_span_id traceable across spans.
 func TestTraceChainConsistency(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -443,7 +443,7 @@ func TestTraceChainConsistency(t *testing.T) {
 	assert.Equal(t, root.SpanID(), span.ParentSpanID, "skill.load is a child of the root span")
 }
 
-// AC-12: context cancellation propagates through Load / Register / Execute.
+// context cancellation propagates through Load / Register / Execute.
 func TestContextCancellation(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 

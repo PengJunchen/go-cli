@@ -14,7 +14,7 @@ import (
 // default implementation for every subsystem interface and lets callers
 // replace any of them via the RegisterXxx methods. All fields are interface
 // types so the runtime always depends on abstractions rather than concrete
-// implementations (SCAN-013).
+// implementations.
 type DefaultRegistry struct {
 	mu sync.RWMutex
 

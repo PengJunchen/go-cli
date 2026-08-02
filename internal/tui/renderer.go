@@ -85,7 +85,7 @@ type streamMarker interface {
 }
 
 // Compile-time assertions that the streaming renderers satisfy streamMarker
-// (SCAN-012 requires every interface to have a default-implementation guard).
+// (every interface must have a default-implementation guard).
 var (
 	_ streamMarker = StreamingRenderer{}
 	_ streamMarker = StreamingCodeRenderer{}

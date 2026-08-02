@@ -179,21 +179,33 @@ func (q *DefaultFileMutationQueue) workerForLocked(realPath string) (chan queued
 }
 
 // startWorker launches the per-file worker goroutine that consumes mutations
-// FIFO and reports each result on its own result channel.
+// FIFO and reports each result on its own result channel. Each mutation is
+// processed inside a defer/recover so a panic in the handler does not kill the
+// worker goroutine; instead the panic is reported as an error result and the
+// loop continues.
 func (q *DefaultFileMutationQueue) startWorker(input chan queuedMutation) {
 	go func() {
 		for qm := range input {
-			ctx := context.Background()
-			var res FileMutationResult
-			if err := q.apply(ctx, qm.mutation); err != nil {
-				res = FileMutationResult{Success: false, Error: err}
-			} else {
-				res = FileMutationResult{Success: true}
-			}
+			res := q.applySafe(qm.mutation)
 			qm.result <- res
 			close(qm.result)
 		}
 	}()
+}
+
+// applySafe runs the configured handler inside a recover block so a panic
+// is converted into an error result instead of killing the worker goroutine.
+func (q *DefaultFileMutationQueue) applySafe(m FileMutation) (res FileMutationResult) {
+	defer func() {
+		if r := recover(); r != nil {
+			slog.Error("mutation: handler panicked", "path", m.FilePath, "operation", m.Operation, "panic", r)
+			res = FileMutationResult{Success: false, Error: fmt.Errorf("mutation: handler panic for %s: %v", m.FilePath, r)}
+		}
+	}()
+	if err := q.apply(context.Background(), m); err != nil {
+		return FileMutationResult{Success: false, Error: err}
+	}
+	return FileMutationResult{Success: true}
 }
 
 // apply runs the configured handler, falling back to the built-in write/edit

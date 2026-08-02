@@ -73,7 +73,7 @@ func TestSubAgentRunExecutesIndependentRun(t *testing.T) {
 	assert.Equal(t, "assistant", res.Role)
 	assert.NotEmpty(t, res.Content)
 
-	// AC-1: a fresh independent run executes and completes.
+	// a fresh independent run executes and completes.
 	assert.Equal(t, SubAgentCompleted, sub.State())
 }
 
@@ -86,7 +86,7 @@ func TestSubAgentSendRecordsMessage(t *testing.T) {
 
 	require.NoError(t, sub.Send(context.Background(), "follow-up"))
 
-	// AC-2: the message is recorded against the running sub-agent.
+	// the message is recorded against the running sub-agent.
 	require.Eventually(t, func() bool {
 		received := sub.Received()
 		if len(received) != 1 {
@@ -115,7 +115,7 @@ func TestSubAgentInterruptStopsRun(t *testing.T) {
 	assert.True(t, errors.Is(err, context.Canceled))
 	assert.Empty(t, msg.Content)
 
-	// AC-3 / AC-5: the sub-agent reached the Interrupted state.
+	// the sub-agent reached the Interrupted state.
 	assert.Equal(t, SubAgentInterrupted, sub.State())
 	drainChan(ch)
 }
@@ -127,7 +127,7 @@ func TestSubAgentWaitReturnsResult(t *testing.T) {
 	_, err := sub.Run(context.Background(), "prompt")
 	require.NoError(t, err)
 
-	// AC-4: Wait blocks until the sub-run finishes and returns the result.
+	// Wait blocks until the sub-run finishes and returns the result.
 	begin := time.Now()
 	res, err := sub.Wait(context.Background())
 	require.NoError(t, err)
@@ -139,7 +139,7 @@ func TestSubAgentWaitReturnsResult(t *testing.T) {
 func TestSubAgentStateTransitions(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	// AC-5: Idle -> Running -> Completed.
+	// Idle -> Running -> Completed.
 	sub := newTestSubAgent("worker")
 	assert.Equal(t, SubAgentIdle, sub.State())
 	_, err := sub.Run(context.Background(), "p")
@@ -168,7 +168,7 @@ func TestSubAgentStateTransitions(t *testing.T) {
 func TestSubAgentParentCancellationCascades(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	// AC-6 / AC-12: the sub-agent uses an independent context; canceling the
+	// the sub-agent uses an independent context; canceling the
 	// parent context cancels the child context (observed via a terminal error).
 	sub := NewDefaultSubAgent(SubAgentConfig{Name: "b"}, WithSubAgentRunner(blockingFactory))
 	parent, cancel := context.WithCancel(context.Background())
@@ -258,7 +258,7 @@ func TestSubAgentSpawnSpanAttrs(t *testing.T) {
 	_, werr := sub.Wait(spanCtx)
 	require.NoError(t, werr)
 
-	// AC-7: subagent.spawn carries subagent_name and prompt_length.
+	// subagent.spawn carries subagent_name and prompt_length.
 	spawn := waitForSpan(t, exp, "subagent.spawn")
 	name, ok := attrValue(spawn.Attributes, "subagent_name")
 	require.True(t, ok)
@@ -278,7 +278,7 @@ func TestSubAgentRunSpanAttrs(t *testing.T) {
 	_, werr := sub.Wait(spanCtx)
 	require.NoError(t, werr)
 
-	// AC-8: subagent.run carries subagent_name and status.
+	// subagent.run carries subagent_name and status.
 	run := waitForSpan(t, exp, "subagent.run")
 	name, ok := attrValue(run.Attributes, "subagent_name")
 	require.True(t, ok)
@@ -301,11 +301,11 @@ func TestSubAgentTraceChainConsistent(t *testing.T) {
 	spawn := waitForSpan(t, exp, "subagent.spawn")
 	run := waitForSpan(t, exp, "subagent.run")
 
-	// AC-9: trace_id is consistent across the trace.
+	// trace_id is consistent across the trace.
 	assert.Equal(t, spawn.TraceID, run.TraceID)
 	assert.Equal(t, "test-trace", spawn.TraceID)
 
-	// AC-9: the run span is a child of the spawn span.
+	// the run span is a child of the spawn span.
 	assert.Equal(t, spawn.SpanID, run.ParentSpanID)
 }
 

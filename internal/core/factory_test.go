@@ -67,7 +67,7 @@ func TestSubAgentSendAfterTerminalStillRecords(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, SubAgentCompleted, sub.State())
 
-	// AC-2: a send after the run ended is still recorded under lock.
+	// a send after the run ended is still recorded under lock.
 	require.NoError(t, sub.Send(context.Background(), "late msg"))
 	assert.Equal(t, []string{"late msg"}, sub.Received())
 }

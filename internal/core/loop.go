@@ -22,7 +22,7 @@ var errNilModel = errors.New("core: agent loop has no chat model")
 var errMaxIterations = errors.New("core: agent loop exceeded max iterations")
 
 // loopConfig holds the configurable dependencies of a LoopAgent. All
-// dependencies are interface types (SCAN-013).
+// dependencies are interface types.
 type loopConfig struct {
 	model         llm.BaseChatModel
 	tools         tools.ToolRegistry

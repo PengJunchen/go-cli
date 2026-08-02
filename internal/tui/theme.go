@@ -6,7 +6,7 @@
 // subset (ANSI-styled rendering, content-type dispatch, theme switching) using
 // only the standard library.
 //
-// Design (task 4-16/4-17/4-18): the App consumes an event stream, dispatches
+// Design: the App consumes an event stream, dispatches
 // each agent event to the renderer matching its content type via a
 // thread-safe registry, and accumulates a view buffer exposed through View().
 // The TUI layer itself does not emit tracing spans; render performance is

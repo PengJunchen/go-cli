@@ -68,7 +68,7 @@ func findAttr(s tracing.SpanData, key string) (any, bool) {
 	return nil, false
 }
 
-// AC-1: Compose collects the builtin layer (Eino/OpenAI/Claude/Gemini).
+// Compose collects the builtin layer (Eino/OpenAI/Claude/Gemini).
 func TestDefaultProviderComposer_BuiltinProviders(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	c := NewDefaultProviderComposer()
@@ -85,7 +85,7 @@ func TestDefaultProviderComposer_BuiltinProviders(t *testing.T) {
 	require.Len(t, reg.List(), len(want))
 }
 
-// AC-1 + AC-2: config providers are loaded into the composition.
+// config providers are loaded into the composition.
 func TestDefaultProviderComposer_ConfigProviders(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	cfg := NewEinoProvider(WithProviderName("custom-config"))
@@ -105,7 +105,7 @@ func TestDefaultProviderComposer_ConfigProviders(t *testing.T) {
 	assert.Same(t, cfg, got)
 }
 
-// AC-1 + AC-3: extension providers are registered into the composition.
+// extension providers are registered into the composition.
 func TestDefaultProviderComposer_ExtensionProviders(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ext := NewEinoProvider(WithProviderName("custom-ext"))
@@ -119,7 +119,7 @@ func TestDefaultProviderComposer_ExtensionProviders(t *testing.T) {
 	assert.Same(t, ext, got)
 }
 
-// AC-2: Compose yields the correct priority ordering Extension > Config > Builtin,
+// Compose yields the correct priority ordering Extension > Config > Builtin,
 // and GetProvider returns the winner for a name present in all three layers.
 func TestDefaultProviderComposer_PriorityExtensionOverridesAll(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
@@ -142,7 +142,7 @@ func TestDefaultProviderComposer_PriorityExtensionOverridesAll(t *testing.T) {
 	assert.Same(t, extension, got)
 }
 
-// AC-3: same-name config provider overrides a builtin provider.
+// same-name config provider overrides a builtin provider.
 func TestDefaultProviderComposer_ConfigOverridesBuiltin(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	// The builtin layer provides "eino"; a config provider shadows it.
@@ -157,7 +157,7 @@ func TestDefaultProviderComposer_ConfigOverridesBuiltin(t *testing.T) {
 	assert.Same(t, config, got)
 }
 
-// AC-2: Default() reflects the highest-priority source. A provider contributed
+// Default() reflects the highest-priority source. A provider contributed
 // only by the builtin layer ("gemini" via ExtProvider name) remains available,
 // while Default() (the first registered) resolves to the extension-shared name.
 func TestDefaultProviderComposer_DefaultReflectsPriority(t *testing.T) {
@@ -192,7 +192,7 @@ func TestDefaultProviderComposer_TieBreaker(t *testing.T) {
 	assert.Same(t, high, winners[0].Provider)
 }
 
-// AC-4: GetProvider via the returned registry returns the winner for names that
+// GetProvider via the returned registry returns the winner for names that
 // only exist in one layer, and does not leak losing providers.
 func TestDefaultProviderComposer_GetProviderReturnsWinner(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
@@ -221,7 +221,7 @@ func TestDefaultProviderComposer_GetProviderReturnsWinner(t *testing.T) {
 	assert.Same(t, shadowed, got)
 }
 
-// AC-5 + AC-6: Compose emits an "llm.provider_compose" span with the four count
+// Compose emits an "llm.provider_compose" span with the four count
 // attributes and a traceable parent_span_id.
 func TestDefaultProviderComposer_EmitsComposeSpan(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
@@ -266,7 +266,7 @@ func TestDefaultProviderComposer_EmitsComposeSpan(t *testing.T) {
 	}
 }
 
-// AC-9: context cancellation propagates through Compose and surfaces as an
+// context cancellation propagates through Compose and surfaces as an
 // error, and the compose span is marked as an error without a registry result.
 func TestDefaultProviderComposer_ContextCancellation(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()

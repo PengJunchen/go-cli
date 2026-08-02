@@ -1,7 +1,6 @@
 package llm
 
-// This file implements the "Provider three-layer composition" feature
-// (go-cli-infra tasks 4-25/4-26/4-27).
+// This file implements the "Provider three-layer composition" feature.
 //
 // == Design (produced inline, per the designer/builder split) ==
 //
@@ -51,7 +50,7 @@ package llm
 //
 // The child-span context returned by tracing.SpanFromContext is passed into the
 // config/extension sources so any span they emit traces back to this one via
-// parent_span_id. Results are also recorded with slog (SCAN-008).
+// parent_span_id. Results are also recorded with slog.
 
 import (
 	"context"
@@ -164,8 +163,7 @@ type DefaultProviderComposer struct {
 	extensionSource ProviderSourceFunc
 }
 
-// Compile-time assertion that DefaultProviderComposer satisfies ProviderComposer
-// (SCAN-012).
+// Compile-time assertion that DefaultProviderComposer satisfies ProviderComposer.
 var _ ProviderComposer = (*DefaultProviderComposer)(nil)
 
 // NewDefaultProviderComposer builds a DefaultProviderComposer that contributes

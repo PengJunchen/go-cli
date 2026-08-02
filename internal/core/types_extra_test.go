@@ -8,11 +8,27 @@ import (
 )
 
 func TestEnumStringInvalidFallbacks(t *testing.T) {
-	// Out-of-range enum values fall back to the documented default in each
-	// type's String method.
 	assert.Equal(t, "user", SubmissionType(99).String())
 	assert.Equal(t, "discard_oldest", DiscardPolicy(99).String())
 	assert.Equal(t, "allow", Classification(99).String())
+}
+
+func TestSubmissionTypeStringPositiveBranches(t *testing.T) {
+	assert.Equal(t, "user", SubmissionUserMessage.String())
+	assert.Equal(t, "steering", SubmissionSteering.String())
+	assert.Equal(t, "followup", SubmissionFollowUp.String())
+}
+
+func TestDiscardPolicyStringPositiveBranches(t *testing.T) {
+	assert.Equal(t, "discard_oldest", DiscardOldest.String())
+	assert.Equal(t, "discard_newest", DiscardNewest.String())
+	assert.Equal(t, "block", BlockUntilConsumed.String())
+}
+
+func TestClassificationStringPositiveBranches(t *testing.T) {
+	assert.Equal(t, "allow", ClassificationAllow.String())
+	assert.Equal(t, "deny", ClassificationDeny.String())
+	assert.Equal(t, "require_approval", ClassificationRequireApproval.String())
 }
 
 func TestAgentEventStringRoundTrip(t *testing.T) {
