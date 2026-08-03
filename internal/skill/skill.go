@@ -29,8 +29,21 @@ type SkillDefinition interface {
 	TriggerHint() string
 }
 
-// SkillOption configures a DefaultSkillDefinition during construction.
-type SkillOption func(*DefaultSkillDefinition)
+// skillOptions holds the configurable fields of a skill during construction.
+// It is an internal construction aid so that SkillOption closures do not
+// reference the concrete DefaultSkillDefinition type.
+type skillOptions struct {
+	description string
+	version     string
+	category    string
+	prompt      string
+	tools       []string
+	parameters  map[string]any
+	triggerHint string
+}
+
+// SkillOption configures a skill during construction.
+type SkillOption func(*skillOptions)
 
 // DefaultSkillDefinition is the default SkillDefinition implementation. It is
 // a plain data holder returned by NewSkill and by the YAMLSkillLoader.
@@ -50,52 +63,61 @@ var _ SkillDefinition = (*DefaultSkillDefinition)(nil)
 
 // NewSkill constructs a skill name with optional option overrides.
 func NewSkill(name string, opts ...SkillOption) SkillDefinition {
-	def := &DefaultSkillDefinition{name: name}
+	o := &skillOptions{}
 	for _, opt := range opts {
-		opt(def)
+		opt(o)
 	}
-	return def
+	return &DefaultSkillDefinition{
+		name:        name,
+		description: o.description,
+		version:     o.version,
+		category:    o.category,
+		prompt:      o.prompt,
+		tools:       o.tools,
+		parameters:  o.parameters,
+		triggerHint: o.triggerHint,
+	}
 }
 
 // WithDescription sets the skill description.
 func WithDescription(d string) SkillOption {
-	return func(def *DefaultSkillDefinition) { def.description = d }
+	return func(o *skillOptions) { o.description = d }
 }
 
 // WithVersion sets the skill version.
 func WithVersion(v string) SkillOption {
-	return func(def *DefaultSkillDefinition) { def.version = v }
+	return func(o *skillOptions) { o.version = v }
 }
 
 // WithCategory sets the skill category.
 func WithCategory(c string) SkillOption {
-	return func(def *DefaultSkillDefinition) { def.category = c }
+	return func(o *skillOptions) { o.category = c }
 }
 
 // WithPrompt sets the skill prompt.
 func WithPrompt(p string) SkillOption {
-	return func(def *DefaultSkillDefinition) { def.prompt = p }
+	return func(o *skillOptions) { o.prompt = p }
 }
 
 // WithTools sets the list of tool names the skill may use.
 func WithTools(tools ...string) SkillOption {
-	return func(def *DefaultSkillDefinition) { def.tools = append([]string(nil), tools...) }
+	return func(o *skillOptions) { o.tools = append([]string(nil), tools...) }
 }
 
 // WithParameters sets the structured parameters map.
 func WithParameters(p map[string]any) SkillOption {
-	return func(def *DefaultSkillDefinition) {
+	return func(o *skillOptions) {
 		m := make(map[string]any, len(p))
 		for k, v := range p {
 			m[k] = v
 		}
-		def.parameters = m
+		o.parameters = m
 	}
 }
 
 // WithTriggerHint sets the natural-language trigger hint.
 func WithTriggerHint(h string) SkillOption {
-	return func(def *DefaultSkillDefinition) { def.triggerHint = h }
+	return func(o *skillOptions) { o.triggerHint = h }
 }
 
 // Name returns the skill name.

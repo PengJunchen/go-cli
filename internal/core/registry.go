@@ -70,12 +70,13 @@ func NewRegistry() Registry {
 
 // replace swaps field under lock, panics on a nil next, and returns the
 // previous value. It logs when an implementation is replaced.
-func replace[T any](r *DefaultRegistry, field *T, name string, next T) (prev T) {
+func replace[T any](r Registry, field *T, name string, next T) (prev T) {
 	if any(next) == nil {
 		panic("registry: nil " + name)
 	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
+	dr := r.(*DefaultRegistry)
+	dr.mu.Lock()
+	defer dr.mu.Unlock()
 	prev = *field
 	slog.Info("core.registry.replace", "component", name)
 	*field = next
@@ -83,9 +84,10 @@ func replace[T any](r *DefaultRegistry, field *T, name string, next T) (prev T) 
 }
 
 // get returns the current value of field under a read lock.
-func get[T any](r *DefaultRegistry, field *T) T {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+func get[T any](r Registry, field *T) T {
+	dr := r.(*DefaultRegistry)
+	dr.mu.RLock()
+	defer dr.mu.RUnlock()
 	return *field
 }
 

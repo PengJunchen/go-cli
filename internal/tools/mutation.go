@@ -85,24 +85,32 @@ type DefaultFileMutationQueue struct {
 
 var _ FileMutationQueue = (*DefaultFileMutationQueue)(nil)
 
+// mutationQueueOptions holds the configurable fields of a mutation queue
+// during construction. It is an internal construction aid so that
+// MutationQueueOption closures do not reference the concrete
+// DefaultFileMutationQueue type.
+type mutationQueueOptions struct {
+	handler MutationHandler
+}
+
 // MutationQueueOption configures a DefaultFileMutationQueue.
-type MutationQueueOption func(*DefaultFileMutationQueue)
+type MutationQueueOption func(*mutationQueueOptions)
 
 // WithMutationHandler sets the handler used to apply queued mutations. When
 // omitted, DefaultFileMutationQueue uses a handler that delegates to the
 // built-in write/edit tools.
 func WithMutationHandler(h MutationHandler) MutationQueueOption {
-	return func(q *DefaultFileMutationQueue) { q.handler = h }
+	return func(o *mutationQueueOptions) { o.handler = h }
 }
 
 // NewDefaultFileMutationQueue returns a DefaultFileMutationQueue using the
 // built-in write/edit handler unless overridden via WithMutationHandler.
 func NewDefaultFileMutationQueue(opts ...MutationQueueOption) FileMutationQueue {
-	q := &DefaultFileMutationQueue{}
+	o := &mutationQueueOptions{}
 	for _, opt := range opts {
-		opt(q)
+		opt(o)
 	}
-	return q
+	return &DefaultFileMutationQueue{handler: o.handler}
 }
 
 // Name returns the queue's canonical name.

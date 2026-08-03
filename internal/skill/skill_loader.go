@@ -126,15 +126,13 @@ func (l *YAMLSkillLoader) Load(ctx context.Context, path string) (*SkillDefiniti
 	}
 
 	span.SetAttributes(
-		tracing.Attribute{Key: "skill_name", Value: def.name},
+		tracing.Attribute{Key: "skill_name", Value: def.Name()},
 		tracing.Attribute{Key: "success", Value: true},
 	)
 	span.SetStatus(tracing.SpanStatusOK, "")
-	logger.Info("skill.load", "path", absPath, "name", def.name)
+	logger.Info("skill.load", "path", absPath, "name", def.Name())
 
-	// Return the concrete definition through the interface pointer.
-	base := SkillDefinition(def)
-	return &base, nil
+	return &def, nil
 }
 
 // LoadDir scans dirPath recursively for skill files and loads each one. Files
@@ -194,9 +192,9 @@ func isSkillFileName(name string) bool {
 }
 
 // parseFrontmatter splits the lines into a frontmatter block and a body, then
-// parses the frontmatter into a DefaultSkillDefinition. The body is used as
+// parses the frontmatter into a SkillDefinition. The body is used as
 // the prompt when the frontmatter does not declare one.
-func parseFrontmatter(lines []string) (*DefaultSkillDefinition, error) {
+func parseFrontmatter(lines []string) (SkillDefinition, error) {
 	if len(lines) == 0 || strings.TrimSpace(lines[0]) != frontmatterDelimiter {
 		return nil, fmt.Errorf("%w: missing opening --- delimiter", errParse)
 	}
@@ -219,14 +217,15 @@ func parseFrontmatter(lines []string) (*DefaultSkillDefinition, error) {
 	if err != nil {
 		return nil, err
 	}
-	if parsed.prompt == "" {
-		parsed.prompt = body
+	d := parsed.(*DefaultSkillDefinition)
+	if d.prompt == "" {
+		d.prompt = body
 	}
 	return parsed, nil
 }
 
 // parseFrontmatterBlock parses the frontmatter lines into a definition.
-func parseFrontmatterBlock(lines []string) (*DefaultSkillDefinition, error) {
+func parseFrontmatterBlock(lines []string) (SkillDefinition, error) {
 	def := &DefaultSkillDefinition{}
 	var tools []string
 	parameters := map[string]any{}
