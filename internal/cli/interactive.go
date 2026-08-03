@@ -3,12 +3,14 @@ package cli
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/pengjunchen/go-cli/internal/approval"
 	"github.com/pengjunchen/go-cli/internal/compaction"
@@ -16,6 +18,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mcp"
+	"github.com/pengjunchen/go-cli/internal/session"
 	"github.com/pengjunchen/go-cli/internal/skill"
 	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tracing"
@@ -72,11 +75,13 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		providerFlag  string
 		maxTokensFlag int
 		verboseFlag   bool
+		resumeFlag    bool
 	)
 	fs.StringVar(&modelFlag, "model", "", "model name to use")
 	fs.StringVar(&providerFlag, "provider", "", "provider name to use")
 	fs.IntVar(&maxTokensFlag, "max-tokens", interactiveDefaultMaxTokens, "compaction token budget")
 	fs.BoolVar(&verboseFlag, "verbose", false, "enable verbose output")
+	fs.BoolVar(&resumeFlag, "resume", false, "resume previous session from store path")
 	if err := fs.Parse(args); err != nil {
 		return newUsageError("interactive: %v", err)
 	}
@@ -159,12 +164,39 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 	estimator := compaction.NewHeuristicTokenEstimator()
 	midTurn := compaction.NewMidTurnCompact()
 
-	agent := core.NewAgentImpl("interactive", loop,
+	// Wire session persistence.
+	var sessionStore *session.JSONLSessionStore
+	if rc != nil && rc.Session.StorePath != "" {
+		sessionStore = session.NewJSONLSessionStore(rc.Session.StorePath)
+		if openErr := sessionStore.Open(spanCtx); openErr != nil {
+			logger.Warn("cli_interactive_session_open_failed", "err", openErr)
+			sessionStore = nil
+		}
+	}
+	if sessionStore != nil {
+		defer sessionStore.Close()
+	}
+
+	// Resume history from session store if requested.
+	var restoredHistory []core.AgentMessage
+	if resumeFlag && sessionStore != nil {
+		restoredHistory, _ = loadSessionHistory(sessionStore.FilePath())
+		if len(restoredHistory) > 0 {
+			logger.Info("cli_interactive_session_resumed", "messages", len(restoredHistory))
+		}
+	}
+
+	agentOpts := []core.AgentOption{
 		core.WithCompactionHook(newCompactionHook(compactor, estimator, maxTokensFlag)),
-	)
+	}
+	if len(restoredHistory) > 0 {
+		agentOpts = append(agentOpts, core.WithHistory(restoredHistory))
+	}
+	agent := core.NewAgentImpl("interactive", loop, agentOpts...)
 	h := core.NewHarnessImpl(agent, core.WithEventBuffer(64))
 
 	var turnItems []compaction.TurnItem
+	entryCounter := len(restoredHistory)
 
 	// Default to os.Stdin when no input reader was provided at registration
 	// time (the common path when RunWithRegistry creates the command).
@@ -279,6 +311,31 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 				Role:    compaction.RoleAssistant,
 				Content: result.Content,
 			})
+		}
+
+		// Persist to session store.
+		if sessionStore != nil {
+			if appendErr := sessionStore.Append(turnCtx, &session.SessionEntry{
+				ID:        fmt.Sprintf("entry-%d", entryCounter),
+				Type:      session.EntryTypeUser,
+				Content:   line,
+				Timestamp: time.Now(),
+			}); appendErr != nil {
+				logger.Warn("cli_interactive_session_save_failed", "err", appendErr)
+			}
+			entryCounter++
+			if result.Content != "" {
+				if appendErr := sessionStore.Append(turnCtx, &session.SessionEntry{
+					ID:        fmt.Sprintf("entry-%d", entryCounter),
+					Type:      session.EntryTypeAssistant,
+					Content:   result.Content,
+					Timestamp: time.Now(),
+				}); appendErr != nil {
+					logger.Warn("cli_interactive_session_save_failed", "err", appendErr)
+				}
+				entryCounter++
+			}
+			_ = sessionStore.Save(turnCtx)
 		}
 
 		logger.Info("cli_interactive_turn_complete",
@@ -563,6 +620,33 @@ func turnItemsToMessages(items []compaction.TurnItem) []core.AgentMessage {
 		}
 	}
 	return msgs
+}
+
+// loadSessionHistory reads a JSONL session file and reconstructs the message
+// history as []core.AgentMessage. Only user and assistant entries are included.
+func loadSessionHistory(path string) ([]core.AgentMessage, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	var messages []core.AgentMessage
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		var entry session.SessionEntry
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			continue
+		}
+		if entry.Type == session.EntryTypeUser || entry.Type == session.EntryTypeAssistant {
+			messages = append(messages, core.AgentMessage{
+				Role:    string(entry.Type),
+				Content: entry.Content,
+			})
+		}
+	}
+	return messages, scanner.Err()
 }
 
 var _ Command = (*interactiveCmd)(nil)
