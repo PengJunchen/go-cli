@@ -5,6 +5,8 @@
 // contracts.
 package tools
 
+//nolint:scan008 // pure type definitions, no executable logic
+
 import "context"
 
 // ToolCall is a request to invoke a named tool with arguments.

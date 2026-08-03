@@ -4,6 +4,8 @@
 // configuration.
 package extension
 
+//nolint:scan008 // pure type definitions, no executable logic
+
 import (
 	"context"
 	"time"

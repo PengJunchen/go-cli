@@ -207,6 +207,11 @@ func scanSlogUsage(dir string, goFiles []string) []Finding {
 			continue
 		}
 
+		// Check for nolint:scan008 directive in comments.
+		if hasNolintDirective(node, "scan008") {
+			continue
+		}
+
 		hasSlog := false
 		ast.Inspect(node, func(n ast.Node) bool {
 			if hasSlog {
@@ -722,4 +727,18 @@ func firstGoFile(goFiles []string) string {
 		}
 	}
 	return ""
+}
+
+// hasNolintDirective checks whether the file contains a //nolint:<rule>
+// directive in its comments.
+func hasNolintDirective(node *ast.File, rule string) bool {
+	for _, cg := range node.Comments {
+		for _, c := range cg.List {
+			text := c.Text
+			if strings.Contains(text, "nolint:"+rule) || strings.Contains(text, "nolint:all") {
+				return true
+			}
+		}
+	}
+	return false
 }
