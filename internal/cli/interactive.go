@@ -154,12 +154,15 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		loopOpts = append(loopOpts, core.WithMaxIterations(rc.Agent.MaxIterations))
 	}
 	loop := core.NewLoopAgent(loopOpts...)
-	agent := core.NewAgentImpl("interactive", loop)
-	h := core.NewHarnessImpl(agent, core.WithEventBuffer(64))
 
 	compactor := compaction.NewUnifiedCompactor()
 	estimator := compaction.NewHeuristicTokenEstimator()
 	midTurn := compaction.NewMidTurnCompact()
+
+	agent := core.NewAgentImpl("interactive", loop,
+		core.WithCompactionHook(newCompactionHook(compactor, estimator, maxTokensFlag)),
+	)
+	h := core.NewHarnessImpl(agent, core.WithEventBuffer(64))
 
 	var turnItems []compaction.TurnItem
 
