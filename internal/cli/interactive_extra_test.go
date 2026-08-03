@@ -446,7 +446,7 @@ func TestPromptCmd_BuildModel_WithConfig(t *testing.T) {
 		Provider: config.ProviderConfig{
 			Name:    "test",
 			BaseURL: srv.URL,
-			APIKey:  "test-key",
+			APIKey:  "test",
 		},
 	}
 
@@ -487,7 +487,7 @@ func TestInteractiveCmd_BuildModel_WithConfig(t *testing.T) {
 		Provider: config.ProviderConfig{
 			Name:    "test",
 			BaseURL: srv.URL,
-			APIKey:  "test-key",
+			APIKey:  "test",
 		},
 	}
 
