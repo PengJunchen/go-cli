@@ -303,6 +303,11 @@ func scanCommandRouting(dir string, goFiles []string) []Finding {
 			continue
 		}
 
+		// Check for nolint:scan010 directive in comments.
+		if hasNolintDirective(node, "scan010") {
+			continue
+		}
+
 		ast.Inspect(node, func(n ast.Node) bool {
 			switch stmt := n.(type) {
 			case *ast.SwitchStmt:
