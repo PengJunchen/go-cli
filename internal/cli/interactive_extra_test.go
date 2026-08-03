@@ -266,26 +266,23 @@ func TestRegisterSkillToolsFromDir_EmptyDir(t *testing.T) {
 
 func TestInteractiveCmd_RegisterMCPTools_NilConfig(t *testing.T) {
 	ctx := t.Context()
-	cmd := newInteractiveCmd(nil, &bytes.Buffer{})
 	tr := tools.NewDefaultToolRegistry()
 
-	err := cmd.registerMCPTools(ctx, nil, tr)
+	err := registerMCPTools(ctx, nil, tr)
 	require.NoError(t, err)
 }
 
 func TestInteractiveCmd_RegisterMCPTools_EmptyServers(t *testing.T) {
 	ctx := t.Context()
-	cmd := newInteractiveCmd(nil, &bytes.Buffer{})
 	tr := tools.NewDefaultToolRegistry()
 	rc := &config.Config{}
 
-	err := cmd.registerMCPTools(ctx, rc, tr)
+	err := registerMCPTools(ctx, rc, tr)
 	require.NoError(t, err)
 }
 
 func TestInteractiveCmd_RegisterMCPTools_StdioServer(t *testing.T) {
 	ctx := t.Context()
-	cmd := newInteractiveCmd(nil, &bytes.Buffer{})
 	tr := tools.NewDefaultToolRegistry()
 	rc := &config.Config{
 		MCP: config.MCPConfig{
@@ -300,7 +297,7 @@ func TestInteractiveCmd_RegisterMCPTools_StdioServer(t *testing.T) {
 		},
 	}
 
-	err := cmd.registerMCPTools(ctx, rc, tr)
+	err := registerMCPTools(ctx, rc, tr)
 	require.NoError(t, err) // Connect failures are logged, not propagated.
 
 	registered, err := tr.List(ctx)
@@ -320,7 +317,6 @@ func TestInteractiveCmd_RegisterMCPTools_SSEServer(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cmd := newInteractiveCmd(nil, &bytes.Buffer{})
 	tr := tools.NewDefaultToolRegistry()
 	rc := &config.Config{
 		MCP: config.MCPConfig{
@@ -330,7 +326,7 @@ func TestInteractiveCmd_RegisterMCPTools_SSEServer(t *testing.T) {
 		},
 	}
 
-	err := cmd.registerMCPTools(ctx, rc, tr)
+	err := registerMCPTools(ctx, rc, tr)
 	require.NoError(t, err)
 
 	tool, err := tr.Get(ctx, mcp.NormalizeToolName("sse-server", "sse-tool"))
@@ -341,7 +337,6 @@ func TestInteractiveCmd_RegisterMCPTools_SSEServer(t *testing.T) {
 
 func TestInteractiveCmd_RegisterMCPTools_NoTransport(t *testing.T) {
 	ctx := t.Context()
-	cmd := newInteractiveCmd(nil, &bytes.Buffer{})
 	tr := tools.NewDefaultToolRegistry()
 	rc := &config.Config{
 		MCP: config.MCPConfig{
@@ -351,7 +346,7 @@ func TestInteractiveCmd_RegisterMCPTools_NoTransport(t *testing.T) {
 		},
 	}
 
-	err := cmd.registerMCPTools(ctx, rc, tr)
+	err := registerMCPTools(ctx, rc, tr)
 	require.NoError(t, err)
 
 	registered, err := tr.List(ctx)
@@ -365,26 +360,23 @@ func TestInteractiveCmd_RegisterMCPTools_NoTransport(t *testing.T) {
 
 func TestInteractiveCmd_RegisterSkillTools_NilConfig(t *testing.T) {
 	ctx := t.Context()
-	cmd := newInteractiveCmd(nil, &bytes.Buffer{})
 	tr := tools.NewDefaultToolRegistry()
 
-	err := cmd.registerSkillTools(ctx, nil, tr)
+	err := registerSkillTools(ctx, nil, tr)
 	require.NoError(t, err)
 }
 
 func TestInteractiveCmd_RegisterSkillTools_EmptyDir(t *testing.T) {
 	ctx := t.Context()
-	cmd := newInteractiveCmd(nil, &bytes.Buffer{})
 	tr := tools.NewDefaultToolRegistry()
 	rc := &config.Config{}
 
-	err := cmd.registerSkillTools(ctx, rc, tr)
+	err := registerSkillTools(ctx, rc, tr)
 	require.NoError(t, err)
 }
 
 func TestInteractiveCmd_RegisterSkillTools_LoadError(t *testing.T) {
 	ctx := t.Context()
-	cmd := newInteractiveCmd(nil, &bytes.Buffer{})
 	tr := tools.NewDefaultToolRegistry()
 	rc := &config.Config{
 		Skill: config.SkillConfig{
@@ -392,7 +384,7 @@ func TestInteractiveCmd_RegisterSkillTools_LoadError(t *testing.T) {
 		},
 	}
 
-	err := cmd.registerSkillTools(ctx, rc, tr)
+	err := registerSkillTools(ctx, rc, tr)
 	require.NoError(t, err) // Load errors are logged, not propagated.
 
 	registered, err := tr.List(ctx)
@@ -415,13 +407,12 @@ Skill body text.
 `
 	writeSkillFile(t, dir, "registered-skill.md", skillContent)
 
-	cmd := newInteractiveCmd(nil, &bytes.Buffer{})
 	tr := tools.NewDefaultToolRegistry()
 	rc := &config.Config{
 		Skill: config.SkillConfig{Dir: dir},
 	}
 
-	err := cmd.registerSkillTools(ctx, rc, tr)
+	err := registerSkillTools(ctx, rc, tr)
 	require.NoError(t, err)
 
 	tool, err := tr.Get(ctx, "registered-skill")
@@ -441,7 +432,6 @@ func TestPromptCmd_BuildModel_WithConfig(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cmd := newPromptCmd(&bytes.Buffer{})
 	rc := &config.Config{
 		Provider: config.ProviderConfig{
 			Name:    "test",
@@ -450,7 +440,7 @@ func TestPromptCmd_BuildModel_WithConfig(t *testing.T) {
 		},
 	}
 
-	model, cleanup, err := cmd.buildModel(t.Context(), rc, "test", "test-model")
+	model, cleanup, err := buildModel(t.Context(), rc, "test", "test-model")
 	require.NoError(t, err)
 	assert.NotNil(t, model)
 	require.NotNil(t, cleanup)
@@ -458,10 +448,8 @@ func TestPromptCmd_BuildModel_WithConfig(t *testing.T) {
 }
 
 func TestPromptCmd_BuildModel_WithNilConfig(t *testing.T) {
-	cmd := newPromptCmd(&bytes.Buffer{})
-
 	t.Run("default provider succeeds", func(t *testing.T) {
-		model, cleanup, err := cmd.buildModel(t.Context(), nil, "eino", "test-model")
+		model, cleanup, err := buildModel(t.Context(), nil, "eino", "test-model")
 		require.NoError(t, err)
 		assert.NotNil(t, model)
 		require.NotNil(t, cleanup)
@@ -469,7 +457,7 @@ func TestPromptCmd_BuildModel_WithNilConfig(t *testing.T) {
 	})
 
 	t.Run("nonexistent provider fails", func(t *testing.T) {
-		model, _, err := cmd.buildModel(t.Context(), nil, "nonexistent-provider", "test-model")
+		model, _, err := buildModel(t.Context(), nil, "nonexistent-provider", "test-model")
 		require.Error(t, err)
 		assert.Nil(t, model)
 	})
@@ -482,7 +470,6 @@ func TestInteractiveCmd_BuildModel_WithConfig(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cmd := newInteractiveCmd(nil, &bytes.Buffer{})
 	rc := &config.Config{
 		Provider: config.ProviderConfig{
 			Name:    "test",
@@ -491,7 +478,7 @@ func TestInteractiveCmd_BuildModel_WithConfig(t *testing.T) {
 		},
 	}
 
-	model, cleanup, err := cmd.buildModel(t.Context(), rc, "test", "test-model")
+	model, cleanup, err := buildModel(t.Context(), rc, "test", "test-model")
 	require.NoError(t, err)
 	assert.NotNil(t, model)
 	require.NotNil(t, cleanup)
@@ -499,10 +486,8 @@ func TestInteractiveCmd_BuildModel_WithConfig(t *testing.T) {
 }
 
 func TestInteractiveCmd_BuildModel_WithNilConfig(t *testing.T) {
-	cmd := newInteractiveCmd(nil, &bytes.Buffer{})
-
 	t.Run("default provider succeeds", func(t *testing.T) {
-		model, cleanup, err := cmd.buildModel(t.Context(), nil, "eino", "test-model")
+		model, cleanup, err := buildModel(t.Context(), nil, "eino", "test-model")
 		require.NoError(t, err)
 		assert.NotNil(t, model)
 		require.NotNil(t, cleanup)
@@ -510,7 +495,7 @@ func TestInteractiveCmd_BuildModel_WithNilConfig(t *testing.T) {
 	})
 
 	t.Run("nonexistent provider fails", func(t *testing.T) {
-		model, _, err := cmd.buildModel(t.Context(), nil, "nonexistent-provider", "test-model")
+		model, _, err := buildModel(t.Context(), nil, "nonexistent-provider", "test-model")
 		require.Error(t, err)
 		assert.Nil(t, model)
 	})

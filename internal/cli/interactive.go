@@ -12,13 +12,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/pengjunchen/go-cli/internal/approval"
 	"github.com/pengjunchen/go-cli/internal/compaction"
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/core"
-	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mcp"
-	"github.com/pengjunchen/go-cli/internal/production"
 	"github.com/pengjunchen/go-cli/internal/session"
 	"github.com/pengjunchen/go-cli/internal/skill"
 	"github.com/pengjunchen/go-cli/internal/tools"
@@ -29,8 +26,6 @@ import (
 // Interactive command constants. They live in one place so the scanner does not
 // flag them as scattered hardcoded values.
 const (
-	// interactiveDefaultMaxTokens is the default compaction token budget.
-	interactiveDefaultMaxTokens = 8000
 	// spanInteractiveRun is the top-level span for an interactive session.
 	spanInteractiveRun = "interactive.run"
 	// spanInteractiveTurn is the span for a single turn in the session.
@@ -80,7 +75,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 	)
 	fs.StringVar(&modelFlag, "model", "", "model name to use")
 	fs.StringVar(&providerFlag, "provider", "", "provider name to use")
-	fs.IntVar(&maxTokensFlag, "max-tokens", interactiveDefaultMaxTokens, "compaction token budget")
+	fs.IntVar(&maxTokensFlag, "max-tokens", defaultMaxTokens, "compaction token budget")
 	fs.BoolVar(&verboseFlag, "verbose", false, "enable verbose output")
 	fs.BoolVar(&resumeFlag, "resume", false, "resume previous session from store path")
 	if err := fs.Parse(args); err != nil {
@@ -95,7 +90,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 	modelName := resolveModelName(modelFlag, rc)
 	providerName := resolveProviderName(providerFlag, rc)
 	if maxTokensFlag <= 0 {
-		maxTokensFlag = interactiveDefaultMaxTokens
+		maxTokensFlag = defaultMaxTokens
 	}
 
 	span, spanCtx := tracing.SpanFromContext(ctx, spanInteractiveRun, tracing.SpanKindInternal)
@@ -119,173 +114,39 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		"verbose", verboseFlag,
 	)
 
-	model, cleanup, err := c.buildModel(spanCtx, rc, providerName, modelName)
+	// Assemble the full agent runtime with all production wiring (model
+	// wrapping, tools, approval gates, retry/cost tracking, output guards,
+	// subagent, session persistence, compaction).
+	assembly, err := AssembleAgent(spanCtx, rc, providerName, modelName, c.out,
+		WithMaxTokens(maxTokensFlag),
+		WithResume(resumeFlag),
+		WithSessionPersistence(true),
+		WithAgentName("interactive"),
+	)
 	if err != nil {
 		span.SetStatus(tracing.SpanStatusError, err.Error())
-		return newExecutionError("interactive: build model", err)
+		return newExecutionError("interactive: assemble agent", err)
 	}
-	if cleanup != nil {
-		defer cleanup()
-	}
+	defer assembly.Cleanup()
 
-	tr := tools.NewDefaultToolRegistry()
-	if registerErr := tools.RegisterDefaults(spanCtx, tr); registerErr != nil {
-		span.SetStatus(tracing.SpanStatusError, registerErr.Error())
-		return newExecutionError("interactive: register tools", registerErr)
-	}
-
-	// Register MCP tools.
-	if mcpErr := c.registerMCPTools(spanCtx, rc, tr); mcpErr != nil {
-		logger.Warn("cli_interactive_mcp_failed", "err", mcpErr)
-	}
-
-	// Register skill tools.
-	if skillErr := c.registerSkillTools(spanCtx, rc, tr); skillErr != nil {
-		logger.Warn("cli_interactive_skill_failed", "err", skillErr)
-	}
-
-	// Wire approval + mutation middleware via decorator pattern.
-	// Approval: SafetyPolicyClassifier denies dangerous tools (bash), allows all others.
-	// Mutation: serializes concurrent write/edit to the same file path.
-	approvalMW := approval.NewApprovalMiddleware(
-		approval.NewSafetyPolicyClassifier([]string{"bash"}),
-		approval.NewInMemoryApprovalStore(),
-		approval.WithAutoApprove(false),
-	)
-	tr = tools.NewMiddlewareToolRegistry(tr, approvalMW.WrapToolCall, tools.NewMutationWrapper())
-
-	// Wire production resilience (retry + cost tracking).
-	retryPolicy := production.NewDefaultRetryPolicy(production.RetryConfig{
-		MaxAttempts: 3,
-		BaseDelay:   time.Second,
-		MaxDelay:    10 * time.Second,
-	})
-	costTracker := production.NewCostTracker(nil)
-	statsRegistry := production.NewStatsRegistry()
-	pw := production.NewProductionModelWrapper(
-		production.WithWrapperRetryPolicy(retryPolicy),
-		production.WithWrapperCostTracker(costTracker),
-		production.WithWrapperStatsRegistry(statsRegistry),
-		production.WithWrapperModelName(modelName),
-		production.WithWrapperSessionID("interactive"),
-	)
-
-	// Wire output guards (PII + code injection + length).
-	guardChain := production.NewOutputGuardChain([]production.OutputGuard{
-		production.NewPIIOutputGuard(),
-		production.NewCodeInjectionGuard(),
-		production.NewLengthGuard(100000),
-	})
-
-	// Wire real SubAgent execution (replaces simulated runner).
-	// The sub-agent gets the same production-wrapped model and tool registry
-	// so it inherits retry, cost tracking, output guards, and approval gates.
-	subAgentFactory := core.NewRealSubAgentFactory(model, tr,
-		core.WithModelWrapper(newModelWrapper(pw, guardChain)),
-	)
-	core.RegisterSubAgentFactory(subAgentFactory)
-	dispatcher := core.NewDefaultSubagentDispatcher(nil)
-	if subErr := tr.Register(spanCtx, core.NewSubagentTool(dispatcher)); subErr != nil {
-		logger.Warn("cli_interactive_subagent_tool_failed", "err", subErr)
-	}
-
-	// Register remaining unconnected tools (todo, task, web, plan_mode, etc.).
-	todoStore := tools.NewTodoStore()
-	taskStore := tools.NewTaskStore()
-	planCtrl := core.NewDefaultPlanModeController()
-	hitlEmitter := &cliHITLEmitter{out: c.out}
-
-	extraTools := []tools.ToolDefinition{
-		tools.NewTodoWriteTool(todoStore),
-		tools.NewTaskCreateTool(taskStore),
-		tools.NewTaskGetTool(taskStore),
-		tools.NewTaskListTool(taskStore),
-		tools.NewWebFetchTool(),
-		tools.NewWebSearchTool(),
-		core.NewAskUserQuestionTool(hitlEmitter, 30*time.Second),
-		tools.NewEnterPlanModeTool(planCtrl),
-		tools.NewExitPlanModeTool(planCtrl),
-	}
-	for _, t := range extraTools {
-		if err := tr.Register(spanCtx, t); err != nil {
-			logger.Warn("cli_interactive_tool_register_failed", "tool", t.Name(), "err", err)
-		}
-	}
-	// tool_search needs visibility into all registered tools, so register last.
-	if err := tr.Register(spanCtx, tools.NewToolSearchTool(tr)); err != nil {
-		logger.Warn("cli_interactive_tool_register_failed", "tool", "tool_search", "err", err)
-	}
-
-	// Build loop agent with configurable max iterations.
-	loopOpts := []core.LoopOption{
-		core.WithLLM(model),
-		core.WithTools(tr),
-		core.WithModelWrapper(newModelWrapper(pw, guardChain)),
-	}
-	if rc != nil && rc.Agent.MaxIterations != 0 {
-		loopOpts = append(loopOpts, core.WithMaxIterations(rc.Agent.MaxIterations))
-	}
-	var loop core.AgentLoop = core.NewLoopAgent(loopOpts...)
-
-	// Activate middleware chain (onion model) around the loop agent.
-	loop = core.NewMiddlewareChain(
-		core.NewLoggingMiddleware("interactive"),
-	).Wrap(loop)
-
-	compactor := compaction.NewUnifiedCompactor()
-	estimator := compaction.NewHeuristicTokenEstimator()
-	midTurn := compaction.NewMidTurnCompact()
-
-	// Wire session persistence.
-	var sessionStore *session.JSONLSessionStore
-	if rc != nil && rc.Session.StorePath != "" {
-		sessionStore = session.NewJSONLSessionStore(rc.Session.StorePath)
-		if openErr := sessionStore.Open(spanCtx); openErr != nil {
-			logger.Warn("cli_interactive_session_open_failed", "err", openErr)
-			sessionStore = nil
-		}
-	}
-	if sessionStore != nil {
-		defer sessionStore.Close()
-	}
-
-	// Resume history from session store if requested.
-	var restoredHistory []core.AgentMessage
-	if resumeFlag && sessionStore != nil {
-		restoredHistory, _ = loadSessionHistory(sessionStore.FilePath())
-		if len(restoredHistory) > 0 {
-			logger.Info("cli_interactive_session_resumed", "messages", len(restoredHistory))
-		}
-	}
-
-	agentOpts := []core.AgentOption{
-		core.WithCompactionHook(newCompactionHook(compactor, estimator, maxTokensFlag)),
-	}
-	if len(restoredHistory) > 0 {
-		agentOpts = append(agentOpts, core.WithHistory(restoredHistory))
-	}
-	agent := core.NewAgentImpl("interactive", loop, agentOpts...)
-	h := core.NewHarnessImpl(agent, core.WithEventBuffer(64))
-
-	// Build slash command context from the local variables already wired
-	// above. The slashCtx is passed to handleSlashCommand for each /command.
+	// Build slash command context from the assembled components.
 	var sessionHandler *session.SessionSlashHandler
-	if sessionStore != nil {
-		sessionHandler = session.NewSessionSlashHandler(session.NewDefaultSessionTree(), sessionStore)
+	if assembly.SessionStore != nil {
+		sessionHandler = session.NewSessionSlashHandler(session.NewDefaultSessionTree(), assembly.SessionStore)
 	}
 	slashCtx := slashContext{
-		agent:          agent,
-		costTracker:    costTracker,
-		statsRegistry:  statsRegistry,
-		sessionID:      "interactive",
-		toolRegistry:   tr,
+		agent:          assembly.Agent,
+		costTracker:    assembly.CostTracker,
+		statsRegistry:  assembly.StatsRegistry,
+		sessionID:      assembly.SessionID,
+		toolRegistry:   assembly.ToolRegistry,
 		modelName:      modelName,
 		sessionHandler: sessionHandler,
 		out:            c.out,
 	}
 
 	var turnItems []compaction.TurnItem
-	entryCounter := len(restoredHistory)
+	entryCounter := len(assembly.Agent.Messages())
 
 	// Default to os.Stdin when no input reader was provided at registration
 	// time (the common path when RunWithRegistry creates the command).
@@ -334,9 +195,9 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		})
 
 		// Auto-compaction check before submitting.
-		turnItems = c.autoCompact(turnCtx, turnItems, maxTokensFlag, compactor, estimator, midTurn, logger)
+		turnItems = c.autoCompact(turnCtx, turnItems, assembly.MaxTokens, assembly.Compactor, assembly.Estimator, assembly.MidTurn, logger)
 
-		stream, err := h.Submit(turnCtx, line)
+		stream, err := assembly.Harness.Submit(turnCtx, line)
 		if err != nil {
 			turnSpan.SetStatus(tracing.SpanStatusError, err.Error())
 			turnSpan.End()
@@ -416,8 +277,8 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		}
 
 		// Persist to session store.
-		if sessionStore != nil {
-			if appendErr := sessionStore.Append(turnCtx, &session.SessionEntry{
+		if assembly.SessionStore != nil {
+			if appendErr := assembly.SessionStore.Append(turnCtx, &session.SessionEntry{
 				ID:        fmt.Sprintf("entry-%d", entryCounter),
 				Type:      session.EntryTypeUser,
 				Content:   line,
@@ -427,7 +288,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 			}
 			entryCounter++
 			if result.Content != "" {
-				if appendErr := sessionStore.Append(turnCtx, &session.SessionEntry{
+				if appendErr := assembly.SessionStore.Append(turnCtx, &session.SessionEntry{
 					ID:        fmt.Sprintf("entry-%d", entryCounter),
 					Type:      session.EntryTypeAssistant,
 					Content:   result.Content,
@@ -437,7 +298,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 				}
 				entryCounter++
 			}
-			_ = sessionStore.Save(turnCtx)
+			_ = assembly.SessionStore.Save(turnCtx)
 		}
 
 		logger.Info("cli_interactive_turn_complete",
@@ -451,114 +312,6 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 	}
 
 	fmt.Fprintln(c.out, "Session ended.")
-	return nil
-}
-
-// buildModel resolves an llm.BaseChatModel. Reuses the same logic as promptCmd.
-func (c *interactiveCmd) buildModel(ctx context.Context, rc *config.Config, providerName, modelName string) (llm.BaseChatModel, func(), error) {
-	cfg := llm.ModelConfig{Model: modelName}
-
-	if rc != nil && (rc.Provider.BaseURL != "" || rc.Provider.APIKey != "") {
-		provider := llm.NewEinoProvider(
-			llm.WithProviderName(providerName),
-			llm.WithBaseURL(rc.Provider.BaseURL),
-			llm.WithAPIKey(rc.Provider.APIKey),
-			llm.WithDefaultModel(modelName),
-		)
-		return provider.Build(ctx, cfg)
-	}
-
-	reg := llm.NewProviderRegistry()
-	return reg.GetModel(ctx, providerName, cfg)
-}
-
-// registerMCPTools connects to configured MCP servers and registers their
-// tools into the tool registry.
-func (c *interactiveCmd) registerMCPTools(ctx context.Context, rc *config.Config, tr tools.ToolRegistry) error {
-	if rc == nil || len(rc.MCP.Servers) == 0 {
-		return nil
-	}
-
-	for _, srv := range rc.MCP.Servers {
-		cfg := mcp.MCPServerConfig{
-			Name: srv.Name,
-			URL:  srv.URL,
-		}
-		if srv.Command != "" {
-			cfg.Transport = mcp.MCPTransportStdio
-			cfg.Command = srv.Command
-			cfg.Args = srv.Args
-			for k, v := range srv.Env {
-				cfg.Env = append(cfg.Env, k+"="+v)
-			}
-		} else if srv.URL != "" {
-			cfg.Transport = mcp.MCPTransportSSE
-		} else {
-			continue
-		}
-
-		var client mcp.MCPClient
-		if cfg.Transport == mcp.MCPTransportSSE {
-			client = mcp.NewHTTPClientAdapter(cfg)
-		} else {
-			client = mcp.NewOfficialSDKAdapter(cfg)
-		}
-
-		if err := client.Connect(ctx); err != nil {
-			slog.Warn("cli_interactive_mcp_connect_failed", "server", srv.Name, "err", err)
-			continue
-		}
-
-		mcpTools, err := client.ListTools(ctx)
-		if err != nil {
-			slog.Warn("cli_interactive_mcp_list_failed", "server", srv.Name, "err", err)
-			continue
-		}
-
-		for _, t := range mcpTools {
-			if regErr := tr.Register(ctx, mcp.NewMCPToolAdapter(client, t)); regErr != nil {
-				slog.Warn("cli_interactive_mcp_register_failed", "tool", t.Name, "err", regErr)
-			}
-		}
-		slog.Info("cli_interactive_mcp_registered", "server", srv.Name, "tools", len(mcpTools))
-	}
-	return nil
-}
-
-// registerSkillTools loads skills from the configured directory and registers
-// them as tools. It supports two directory layouts:
-//   - Flat: {dir}/{name}.md
-//   - Nested: {dir}/{name}/SKILL.md
-//
-// Skills are loaded with YAMLSkillLoader for proper frontmatter parsing and
-// wrapped with SkillAdapter so the agent loop can execute them.
-func (c *interactiveCmd) registerSkillTools(ctx context.Context, rc *config.Config, tr tools.ToolRegistry) error {
-	if rc == nil || rc.Skill.Dir == "" {
-		return nil
-	}
-
-	loader := skill.NewYAMLSkillLoader()
-	defs, err := loader.LoadDir(ctx, rc.Skill.Dir)
-	if err != nil {
-		slog.Warn("cli_interactive_skill_load_failed", "dir", rc.Skill.Dir, "err", err)
-		return nil
-	}
-
-	count := 0
-	for _, def := range defs {
-		if def == nil {
-			continue
-		}
-		adapter := skill.NewSkillAdapter(*def)
-		if regErr := tr.Register(ctx, adapter); regErr != nil {
-			slog.Warn("cli_interactive_skill_register_failed", "skill", (*def).Name(), "err", regErr)
-			continue
-		}
-		count++
-	}
-	if count > 0 {
-		slog.Info("cli_interactive_skills_registered", "dir", rc.Skill.Dir, "count", count)
-	}
 	return nil
 }
 
