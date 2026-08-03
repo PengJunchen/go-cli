@@ -169,11 +169,18 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		production.WithWrapperModelName(modelName),
 	)
 
+	// Wire output guards (PII + code injection + length).
+	guardChain := production.NewOutputGuardChain([]production.OutputGuard{
+		production.NewPIIOutputGuard(),
+		production.NewCodeInjectionGuard(),
+		production.NewLengthGuard(100000),
+	})
+
 	// Build loop agent with configurable max iterations.
 	loopOpts := []core.LoopOption{
 		core.WithLLM(model),
 		core.WithTools(tr),
-		core.WithModelWrapper(newModelWrapper(pw, nil)),
+		core.WithModelWrapper(newModelWrapper(pw, guardChain)),
 	}
 	if rc != nil && rc.Agent.MaxIterations != 0 {
 		loopOpts = append(loopOpts, core.WithMaxIterations(rc.Agent.MaxIterations))
