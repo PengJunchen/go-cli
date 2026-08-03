@@ -188,6 +188,33 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		logger.Warn("cli_interactive_subagent_tool_failed", "err", subErr)
 	}
 
+	// Register remaining unconnected tools (todo, task, web, plan_mode, etc.).
+	todoStore := tools.NewTodoStore()
+	taskStore := tools.NewTaskStore()
+	planCtrl := core.NewDefaultPlanModeController()
+	hitlEmitter := &cliHITLEmitter{out: c.out}
+
+	extraTools := []tools.ToolDefinition{
+		tools.NewTodoWriteTool(todoStore),
+		tools.NewTaskCreateTool(taskStore),
+		tools.NewTaskGetTool(taskStore),
+		tools.NewTaskListTool(taskStore),
+		tools.NewWebFetchTool(),
+		tools.NewWebSearchTool(),
+		core.NewAskUserQuestionTool(hitlEmitter, 30*time.Second),
+		tools.NewEnterPlanModeTool(planCtrl),
+		tools.NewExitPlanModeTool(planCtrl),
+	}
+	for _, t := range extraTools {
+		if err := tr.Register(spanCtx, t); err != nil {
+			logger.Warn("cli_interactive_tool_register_failed", "tool", t.Name(), "err", err)
+		}
+	}
+	// tool_search needs visibility into all registered tools, so register last.
+	if err := tr.Register(spanCtx, tools.NewToolSearchTool(tr)); err != nil {
+		logger.Warn("cli_interactive_tool_register_failed", "tool", "tool_search", "err", err)
+	}
+
 	// Build loop agent with configurable max iterations.
 	loopOpts := []core.LoopOption{
 		core.WithLLM(model),
@@ -689,3 +716,37 @@ func loadSessionHistory(path string) ([]core.AgentMessage, error) {
 }
 
 var _ Command = (*interactiveCmd)(nil)
+
+// cliHITLEmitter implements core.HITLQuestionEmitter for the interactive CLI.
+// It prints the question to the output writer and reads the answer from stdin.
+type cliHITLEmitter struct {
+	out io.Writer
+}
+
+func (e *cliHITLEmitter) Emit(ctx context.Context, event core.HITLQuestionEvent) error {
+	fmt.Fprintf(e.out, "\n[ask_user] %s\n", event.Question)
+	for i, opt := range event.Options {
+		fmt.Fprintf(e.out, "  %d. %s\n", i+1, opt)
+	}
+	fmt.Fprint(e.out, "> ")
+
+	line, err := readLine(os.Stdin)
+	if err != nil {
+		return err
+	}
+	answer := strings.TrimSpace(line)
+
+	select {
+	case event.ResponseCh <- core.HITLAnswer{QuestionID: event.QuestionID, Answer: answer}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// readLine reads a single line from r using a fresh bufio.Reader so it does
+// not compete with the REPL scanner's internal buffer.
+func readLine(r io.Reader) (string, error) {
+	br := bufio.NewReader(r)
+	return br.ReadString('\n')
+}
