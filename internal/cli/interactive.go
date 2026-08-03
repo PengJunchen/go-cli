@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/pengjunchen/go-cli/internal/approval"
 	"github.com/pengjunchen/go-cli/internal/compaction"
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/core"
@@ -137,6 +138,15 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		logger.Warn("cli_interactive_skill_failed", "err", skillErr)
 	}
 
+	// Wire approval middleware via decorator pattern.
+	// SafetyPolicyClassifier denies dangerous tools (bash), allows all others.
+	approvalMW := approval.NewApprovalMiddleware(
+		approval.NewSafetyPolicyClassifier([]string{"bash"}),
+		approval.NewInMemoryApprovalStore(),
+		approval.WithAutoApprove(false),
+	)
+	tr = tools.NewMiddlewareToolRegistry(tr, approvalMW.WrapToolCall)
+
 	// Build loop agent with configurable max iterations.
 	loopOpts := []core.LoopOption{core.WithLLM(model), core.WithTools(tr)}
 	if rc != nil && rc.Agent.MaxIterations != 0 {
@@ -144,7 +154,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 	}
 	loop := core.NewLoopAgent(loopOpts...)
 	agent := core.NewAgentImpl("interactive", loop)
-	h := core.NewHarnessImpl(agent)
+	h := core.NewHarnessImpl(agent, core.WithEventBuffer(64))
 
 	compactor := compaction.NewUnifiedCompactor()
 	estimator := compaction.NewHeuristicTokenEstimator()
@@ -209,13 +219,16 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		var app *tui.BubbleteaApp
 		app = tui.NewBubbleteaApp(tuiEvents,
 			tui.WithWidth(80),
+			tui.WithoutKeyboardNavigation(),
 			tui.WithOnUpdate(func(view string) {
 				if isTTY {
 					if lastLineCount > 0 {
 						fmt.Fprintf(c.out, "\033[%dA", lastLineCount)
 					}
 					fmt.Fprint(c.out, "\033[J")
-					fmt.Fprintln(c.out, view)
+					// In raw mode \n only moves down; \r\n returns to column 0.
+					fmt.Fprint(c.out, strings.ReplaceAll(view, "\n", "\r\n"))
+					fmt.Fprint(c.out, "\r\n")
 					lastLineCount = strings.Count(view, "\n") + 1
 				} else {
 					fmt.Fprintln(c.out, view)
@@ -251,9 +264,12 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		}
 
 		// The accordion view was streamed in real time via onUpdate.
-		// Only print the final assistant message here.
+		// Only print the final assistant message in non-TTY mode (where the
+		// TUI's real-time repaint isn't active).
 		if result.Content != "" {
-			fmt.Fprintf(c.out, "AI: %s\n", result.Content)
+			if !isTTY {
+				fmt.Fprintf(c.out, "AI: %s\n", result.Content)
+			}
 			turnItems = append(turnItems, compaction.TurnItem{
 				ID:      fmt.Sprintf("msg-%d", len(turnItems)),
 				Role:    compaction.RoleAssistant,
