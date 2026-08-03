@@ -167,6 +167,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		production.WithWrapperCostTracker(costTracker),
 		production.WithWrapperStatsRegistry(statsRegistry),
 		production.WithWrapperModelName(modelName),
+		production.WithWrapperSessionID("interactive"),
 	)
 
 	// Wire output guards (PII + code injection + length).
@@ -269,15 +270,11 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 	}
 	slashCtx := slashContext{
 		agent:          agent,
-		harness:        h,
 		costTracker:    costTracker,
 		statsRegistry:  statsRegistry,
 		sessionID:      "interactive",
 		toolRegistry:   tr,
 		modelName:      modelName,
-		compactor:      compactor,
-		estimator:      estimator,
-		maxTokens:      maxTokensFlag,
 		sessionHandler: sessionHandler,
 		out:            c.out,
 	}

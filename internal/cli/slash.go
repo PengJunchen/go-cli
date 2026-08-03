@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/pengjunchen/go-cli/internal/compaction"
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/production"
 	"github.com/pengjunchen/go-cli/internal/session"
@@ -18,15 +17,11 @@ import (
 // handler invocation.
 type slashContext struct {
 	agent          *core.AgentImpl
-	harness        *core.HarnessImpl
 	costTracker    *production.CostTracker
 	statsRegistry  *production.StatsRegistry
 	sessionID      string
 	toolRegistry   tools.ToolRegistry
 	modelName      string
-	compactor      compaction.Compactor
-	estimator      compaction.TokenEstimator
-	maxTokens      int
 	sessionHandler *session.SessionSlashHandler
 	out            io.Writer
 }
@@ -67,10 +62,7 @@ func (c *interactiveCmd) slashHelp(sc *slashContext) {
 	fmt.Fprintln(sc.out, "  /clear    Clear conversation history")
 	fmt.Fprintln(sc.out, "  /tools    List registered tools")
 	fmt.Fprintln(sc.out, "  /model    Show the current model name")
-	fmt.Fprintln(sc.out, "  /session  Show session tree (subcommands: tree, fork, resume)")
-	fmt.Fprintln(sc.out, "  /tree     Show session tree")
-	fmt.Fprintln(sc.out, "  /fork     Fork the current session branch")
-	fmt.Fprintln(sc.out, "  /resume   Resume a previous session")
+	fmt.Fprintln(sc.out, "  /session  Session operations (subcommands: tree, fork, resume)")
 	fmt.Fprintln(sc.out, "  exit      Exit the interactive session")
 }
 
