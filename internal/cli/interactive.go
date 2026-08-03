@@ -225,7 +225,12 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 	if rc != nil && rc.Agent.MaxIterations != 0 {
 		loopOpts = append(loopOpts, core.WithMaxIterations(rc.Agent.MaxIterations))
 	}
-	loop := core.NewLoopAgent(loopOpts...)
+	var loop core.AgentLoop = core.NewLoopAgent(loopOpts...)
+
+	// Activate middleware chain (onion model) around the loop agent.
+	loop = core.NewMiddlewareChain(
+		core.NewLoggingMiddleware("interactive"),
+	).Wrap(loop)
 
 	compactor := compaction.NewUnifiedCompactor()
 	estimator := compaction.NewHeuristicTokenEstimator()

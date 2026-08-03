@@ -4,6 +4,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"os"
@@ -440,8 +441,8 @@ const defaultMinDiskBytes = 100 * 1024 * 1024
 // DiskSpaceChecker verifies sufficient free disk space on the volume holding
 // dir.
 type DiskSpaceChecker struct {
-	dir       string // path on the volume to check; empty means CWD
-	minBytes  uint64 // minimum free bytes; zero means defaultMinDiskBytes
+	dir      string // path on the volume to check; empty means CWD
+	minBytes uint64 // minimum free bytes; zero means defaultMinDiskBytes
 }
 
 // NewDiskSpaceChecker returns a checker for dir with a minimum of minBytes.
@@ -497,6 +498,38 @@ func humanBytes(n uint64) string {
 	}
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
+
+// doctorCmd implements Command and runs diagnostic checks.
+type doctorCmd struct {
+	out io.Writer
+}
+
+// newDoctorCmd creates a doctor command writing to out.
+func newDoctorCmd(out io.Writer) *doctorCmd {
+	return &doctorCmd{out: out}
+}
+
+// Name implements Command.
+func (c *doctorCmd) Name() string { return "doctor" }
+
+// Synopsis implements Command.
+func (c *doctorCmd) Synopsis() string { return "Run diagnostic checks" }
+
+// Run implements Command. It runs all doctor checks and prints the results.
+// A non-zero number of failed checks returns an ExecutionError.
+func (c *doctorCmd) Run(ctx context.Context, cfg Config, args []string) error {
+	runner := NewDoctorRunner()
+	checks := runner.Run(ctx)
+	fmt.Fprint(c.out, Format(checks))
+	for _, ch := range checks {
+		if ch.Status == doctorFail {
+			return newExecutionError(fmt.Sprintf("doctor: %s check failed", ch.Name), nil)
+		}
+	}
+	return nil
+}
+
+var _ Command = (*doctorCmd)(nil)
 
 // Compile-time assertions that each checker satisfies DoctorChecker.
 var (
