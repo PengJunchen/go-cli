@@ -160,6 +160,14 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) error {
 		}
 		streaming = false
 	}
+	// If the last event was incremental, ensure a trailing newline.
+	if streaming {
+		if _, werr := fmt.Fprintln(out); werr != nil {
+			dispatchSpan.SetStatus(tracing.SpanStatusError, werr.Error())
+			dispatchSpan.End()
+			return newExecutionError("prompt: write output", werr)
+		}
+	}
 
 	result, err := stream.Result()
 	dispatchSpan.SetStatus(tracing.SpanStatusOK, "")
