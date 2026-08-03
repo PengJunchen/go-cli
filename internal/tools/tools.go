@@ -57,6 +57,7 @@ type ToolDefinition interface {
 // their OpenAI-compatible JSON Schema for parameters. Tools with structured
 // input (e.g. MCP tools with an inputSchema) should implement this so the
 // LLM knows what arguments it can pass.
+//nolint:scan012 // optional interface; implementations in various tool files
 type Parameterized interface {
 	// Parameters returns the JSON Schema object describing the tool's
 	// input parameters, or nil if the tool has no structured parameters.

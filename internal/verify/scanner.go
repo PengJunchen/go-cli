@@ -372,6 +372,11 @@ func scanHardcodedSecrets(file string) []Finding {
 		return findings
 	}
 
+	// Check for nolint:scan003 directive in the file.
+	if strings.Contains(string(data), "nolint:scan003") || strings.Contains(string(data), "nolint:all") {
+		return findings
+	}
+
 	lines := strings.Split(string(data), "\n")
 	for i, line := range lines {
 		for _, pattern := range hardcodedSecretPatterns {

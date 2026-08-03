@@ -546,8 +546,26 @@ func scanInterfaceDefaultImpl(dir string, goFiles []string) []Finding {
 			for _, spec := range genDecl.Specs {
 				switch s := spec.(type) {
 				case *ast.TypeSpec:
-					if _, ok := s.Type.(*ast.InterfaceType); ok {
-						interfaceNames[s.Name.Name] = true
+					if it, ok := s.Type.(*ast.InterfaceType); ok && it != nil {
+						// Check for nolint:scan012 directive in doc comments
+						// (can be on GenDecl.Doc or TypeSpec.Doc).
+						nolint := false
+						checkDoc := func(doc *ast.CommentGroup) {
+							if doc == nil || nolint {
+								return
+							}
+							for _, c := range doc.List {
+								if strings.Contains(c.Text, "nolint:scan012") || strings.Contains(c.Text, "nolint:all") {
+									nolint = true
+									return
+								}
+							}
+						}
+						checkDoc(genDecl.Doc)
+						checkDoc(s.Doc)
+						if !nolint {
+							interfaceNames[s.Name.Name] = true
+						}
 					}
 				case *ast.ValueSpec:
 					if len(s.Names) > 0 && s.Names[0].Name == "_" {

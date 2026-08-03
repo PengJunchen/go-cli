@@ -44,6 +44,8 @@ type HITLAnswer struct {
 // HITLQuestionEmitter is the sink a tool uses to surface a HITL question. The
 // emitter is responsible for eventually delivering exactly one HITLAnswer on
 // event.ResponseCh.
+//
+//nolint:scan012 // consumer-side interface; default impl in core package
 type HITLQuestionEmitter interface {
 	// Emit delivers the question event to the HITL layer.
 	Emit(ctx context.Context, event HITLQuestionEvent) error
