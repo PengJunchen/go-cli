@@ -138,14 +138,15 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		logger.Warn("cli_interactive_skill_failed", "err", skillErr)
 	}
 
-	// Wire approval middleware via decorator pattern.
-	// SafetyPolicyClassifier denies dangerous tools (bash), allows all others.
+	// Wire approval + mutation middleware via decorator pattern.
+	// Approval: SafetyPolicyClassifier denies dangerous tools (bash), allows all others.
+	// Mutation: serializes concurrent write/edit to the same file path.
 	approvalMW := approval.NewApprovalMiddleware(
 		approval.NewSafetyPolicyClassifier([]string{"bash"}),
 		approval.NewInMemoryApprovalStore(),
 		approval.WithAutoApprove(false),
 	)
-	tr = tools.NewMiddlewareToolRegistry(tr, approvalMW.WrapToolCall)
+	tr = tools.NewMiddlewareToolRegistry(tr, approvalMW.WrapToolCall, tools.NewMutationWrapper())
 
 	// Build loop agent with configurable max iterations.
 	loopOpts := []core.LoopOption{core.WithLLM(model), core.WithTools(tr)}
