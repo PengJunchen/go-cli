@@ -1,0 +1,88 @@
+package core
+
+import (
+	"context"
+	"log/slog"
+
+	"github.com/pengjunchen/go-cli/internal/llm"
+	"github.com/pengjunchen/go-cli/internal/tools"
+)
+
+// realSubAgentRunner implements subAgentRunner by constructing a fresh
+// LoopAgent -> AgentImpl -> HarnessImpl stack per Run call. Unlike the
+// simulated runner it calls the real LLM and produces genuine responses.
+type realSubAgentRunner struct {
+	model   llm.BaseChatModel
+	tools   tools.ToolRegistry
+	maxIter int
+	opts    []LoopOption
+}
+
+var _ subAgentRunner = (*realSubAgentRunner)(nil)
+
+// Run creates an independent agent stack, submits the prompt, drains events
+// via emit, and returns the final assistant message.
+func (r *realSubAgentRunner) Run(ctx context.Context, prompt string, _ <-chan string, emit func(AgentEvent)) (AgentMessage, error) {
+	loopOpts := []LoopOption{
+		WithLLM(r.model),
+	}
+	if r.tools != nil {
+		loopOpts = append(loopOpts, WithTools(r.tools))
+	}
+	if r.maxIter > 0 {
+		loopOpts = append(loopOpts, WithMaxIterations(r.maxIter))
+	}
+	loopOpts = append(loopOpts, r.opts...)
+
+	loop := NewLoopAgent(loopOpts...)
+	agent := NewAgentImpl("subagent", loop)
+	h := NewHarnessImpl(agent, WithEventBuffer(32))
+
+	stream, err := h.Submit(ctx, prompt)
+	if err != nil {
+		return AgentMessage{}, err
+	}
+
+	for ev := range stream.Events() {
+		emit(ev)
+	}
+
+	final, runErr := stream.Result()
+	if runErr != nil {
+		slog.Warn("core.subagent.real_runner.error", "err", runErr)
+		return final, runErr
+	}
+
+	slog.Info("core.subagent.real_runner.complete",
+		"content_len", len(final.Content),
+	)
+	return final, nil
+}
+
+// NewRealSubAgentRunnerFactory returns a subAgentRunnerFactory that produces
+// realSubAgentRunner instances. The model and tool registry are captured in
+// the closure so every sub-agent gets the same LLM and tool set as the parent.
+func NewRealSubAgentRunnerFactory(model llm.BaseChatModel, tr tools.ToolRegistry, opts ...LoopOption) subAgentRunnerFactory {
+	return func(cfg SubAgentConfig) subAgentRunner {
+		maxIter := cfg.MaxTurns
+		if maxIter <= 0 {
+			maxIter = 10
+		}
+		return &realSubAgentRunner{
+			model:   model,
+			tools:   tr,
+			maxIter: maxIter,
+			opts:    opts,
+		}
+	}
+}
+
+// NewRealSubAgentFactory creates a SubAgentFactory that spawns real
+// LoopAgent-backed sub-agents instead of the simulated runner. This is the
+// exported entry point for packages outside core (e.g. cli) to register a
+// real sub-agent factory via RegisterSubAgentFactory.
+func NewRealSubAgentFactory(model llm.BaseChatModel, tr tools.ToolRegistry, opts ...LoopOption) SubAgentFactory {
+	return NewSubAgentFactory(WithSubAgentRunnerFactory(
+		NewRealSubAgentRunnerFactory(model, tr, opts...),
+	))
+}
