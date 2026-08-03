@@ -18,6 +18,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mcp"
+	"github.com/pengjunchen/go-cli/internal/production"
 	"github.com/pengjunchen/go-cli/internal/session"
 	"github.com/pengjunchen/go-cli/internal/skill"
 	"github.com/pengjunchen/go-cli/internal/tools"
@@ -153,8 +154,27 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 	)
 	tr = tools.NewMiddlewareToolRegistry(tr, approvalMW.WrapToolCall, tools.NewMutationWrapper())
 
+	// Wire production resilience (retry + cost tracking).
+	retryPolicy := production.NewDefaultRetryPolicy(production.RetryConfig{
+		MaxAttempts: 3,
+		BaseDelay:   time.Second,
+		MaxDelay:    10 * time.Second,
+	})
+	costTracker := production.NewCostTracker(nil)
+	statsRegistry := production.NewStatsRegistry()
+	pw := production.NewProductionModelWrapper(
+		production.WithWrapperRetryPolicy(retryPolicy),
+		production.WithWrapperCostTracker(costTracker),
+		production.WithWrapperStatsRegistry(statsRegistry),
+		production.WithWrapperModelName(modelName),
+	)
+
 	// Build loop agent with configurable max iterations.
-	loopOpts := []core.LoopOption{core.WithLLM(model), core.WithTools(tr)}
+	loopOpts := []core.LoopOption{
+		core.WithLLM(model),
+		core.WithTools(tr),
+		core.WithModelWrapper(newModelWrapper(pw, nil)),
+	}
 	if rc != nil && rc.Agent.MaxIterations != 0 {
 		loopOpts = append(loopOpts, core.WithMaxIterations(rc.Agent.MaxIterations))
 	}
