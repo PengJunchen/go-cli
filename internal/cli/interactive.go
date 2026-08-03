@@ -176,6 +176,18 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		production.NewLengthGuard(100000),
 	})
 
+	// Wire real SubAgent execution (replaces simulated runner).
+	// The sub-agent gets the same production-wrapped model and tool registry
+	// so it inherits retry, cost tracking, output guards, and approval gates.
+	subAgentFactory := core.NewRealSubAgentFactory(model, tr,
+		core.WithModelWrapper(newModelWrapper(pw, guardChain)),
+	)
+	core.RegisterSubAgentFactory(subAgentFactory)
+	dispatcher := core.NewDefaultSubagentDispatcher(nil)
+	if subErr := tr.Register(spanCtx, core.NewSubagentTool(dispatcher)); subErr != nil {
+		logger.Warn("cli_interactive_subagent_tool_failed", "err", subErr)
+	}
+
 	// Build loop agent with configurable max iterations.
 	loopOpts := []core.LoopOption{
 		core.WithLLM(model),
