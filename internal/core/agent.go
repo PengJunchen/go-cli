@@ -145,6 +145,37 @@ func (a *AgentImpl) Messages() []AgentMessage {
 	return append([]AgentMessage{}, a.history...)
 }
 
+// ClearHistory resets the agent's conversation history. It is used by the
+// /clear slash command.
+func (a *AgentImpl) ClearHistory() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.history = nil
+	slog.Info("core.agent.history_cleared", "name", a.name)
+}
+
+// Compact manually triggers the compaction hook on the current history.
+// It is used by the /compact slash command. When no compaction hook is
+// configured, it is a no-op.
+func (a *AgentImpl) Compact(ctx context.Context) error {
+	if a.compactionHook == nil {
+		return nil
+	}
+	a.mu.Lock()
+	historyCopy := append([]AgentMessage{}, a.history...)
+	a.mu.Unlock()
+
+	compacted, err := a.compactionHook(ctx, historyCopy)
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	a.history = compacted
+	a.mu.Unlock()
+	slog.Info("core.agent.manual_compact", "name", a.name, "before", len(historyCopy), "after", len(compacted))
+	return nil
+}
+
 // lastMessageEvent returns the content of the final non-empty "message" event,
 // or the empty string if none exists.
 func lastMessageEvent(events []AgentEvent) string {

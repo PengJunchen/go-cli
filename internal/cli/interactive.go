@@ -261,6 +261,27 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 	agent := core.NewAgentImpl("interactive", loop, agentOpts...)
 	h := core.NewHarnessImpl(agent, core.WithEventBuffer(64))
 
+	// Build slash command context from the local variables already wired
+	// above. The slashCtx is passed to handleSlashCommand for each /command.
+	var sessionHandler *session.SessionSlashHandler
+	if sessionStore != nil {
+		sessionHandler = session.NewSessionSlashHandler(session.NewDefaultSessionTree(), sessionStore)
+	}
+	slashCtx := slashContext{
+		agent:          agent,
+		harness:        h,
+		costTracker:    costTracker,
+		statsRegistry:  statsRegistry,
+		sessionID:      "interactive",
+		toolRegistry:   tr,
+		modelName:      modelName,
+		compactor:      compactor,
+		estimator:      estimator,
+		maxTokens:      maxTokensFlag,
+		sessionHandler: sessionHandler,
+		out:            c.out,
+	}
+
 	var turnItems []compaction.TurnItem
 	entryCounter := len(restoredHistory)
 
@@ -281,6 +302,19 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		}
 		line := strings.TrimSpace(scanner.Text())
 		if line == "" {
+			continue
+		}
+		// Slash command routing.
+		if strings.HasPrefix(line, "/") {
+			cmd, ok := session.ParseSlashCommand(line)
+			if !ok {
+				fmt.Fprintln(c.out, "Invalid command. Type /help for available commands.")
+				continue
+			}
+			if cmd.Name == "exit" {
+				break
+			}
+			c.handleSlashCommand(spanCtx, cmd, &slashCtx)
 			continue
 		}
 		if strings.EqualFold(line, exitCommand) {
