@@ -57,6 +57,14 @@ func WithMaxOutput(n int) BashToolOption {
 	return func(t *BashTool) { t.MaxOutput = n }
 }
 
+// WithBashSandbox attaches a BashSandbox that validates commands before
+// execution. When set, Execute calls Validate before running the command and
+// returns the error without executing if validation fails. When unset (the
+// default) no validation is performed, preserving backward compatibility.
+func WithBashSandbox(sb BashSandbox) BashToolOption {
+	return func(t *BashTool) { t.Sandbox = sb }
+}
+
 // BashTool executes shell commands and returns their combined output. It
 // implements the ToolDefinition interface.
 type BashTool struct {
@@ -69,6 +77,8 @@ type BashTool struct {
 	Workdir string
 	// MaxOutput caps the number of bytes of captured output.
 	MaxOutput int
+	// Sandbox, when non-nil, validates commands before execution.
+	Sandbox BashSandbox
 }
 
 var _ ToolDefinition = (*BashTool)(nil)
@@ -110,6 +120,15 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("bash.missing_command", "tool", "bash")
 		return nil, errors.New("bash: missing string argument 'command'")
+	}
+
+	// When a sandbox is configured, validate the command before execution.
+	if t.Sandbox != nil {
+		if err := t.Sandbox.Validate(ctx, command, t.Workdir); err != nil {
+			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+			logger.Error("bash.sandbox_blocked", "tool", "bash", "err", err)
+			return nil, err
+		}
 	}
 
 	execCtx, cancel := context.WithTimeout(ctx, t.Timeout)
