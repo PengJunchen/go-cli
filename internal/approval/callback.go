@@ -56,7 +56,7 @@ func (c *InteractiveApprovalCallback) RequestApproval(_ context.Context, toolNam
 		return ApprovalDeny, nil
 	}
 
-	fmt.Fprintf(c.stdout, "[approval] Tool '%s' wants to execute. Allow? (y/n/a): ", toolName)
+	fmt.Fprintf(c.stdout, "[approval] Tool '%s' wants to execute. Allow? (y/n/a): ", toolName) //nolint:errcheck
 
 	reader := bufio.NewReader(c.stdin)
 	for {
@@ -76,7 +76,7 @@ func (c *InteractiveApprovalCallback) RequestApproval(_ context.Context, toolNam
 		if err == io.EOF {
 			return ApprovalDeny, nil
 		}
-		fmt.Fprintf(c.stdout, "[approval] Invalid input. Allow? (y/n/a): ")
+		fmt.Fprintf(c.stdout, "[approval] Invalid input. Allow? (y/n/a): ") //nolint:errcheck
 	}
 }
 

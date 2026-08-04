@@ -1,7 +1,7 @@
 // Package e2e_20260802 contains end-to-end integration tests.
 // This file verifies Phase 19 safety baseline wiring: approval gate and
 // mutation serialization through the MiddlewareToolRegistry decorator.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"context"
@@ -122,7 +122,7 @@ func TestE2E_Phase19_MutationQueueSerializes(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = def.Execute(context.Background(), toolCallWithArgs("write", map[string]any{
+			_, _ = def.Execute(context.Background(), toolCallWithArgs("write", map[string]any{ //nolint:errcheck,gosec
 				"path":    "/tmp/e2e-phase19-serial.txt",
 				"content": "x",
 			}))

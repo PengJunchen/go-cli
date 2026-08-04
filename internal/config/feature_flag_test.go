@@ -92,7 +92,7 @@ func TestFeatureFlagRegistryConcurrent(t *testing.T) {
 		wg.Add(3)
 		go func(i int) {
 			defer wg.Done()
-			_ = r.Set("flag"+itoa(i%20), i%3 == 0)
+			_ = r.Set("flag"+itoa(i%20), i%3 == 0) //nolint:errcheck
 		}(i)
 		go func(i int) {
 			defer wg.Done()

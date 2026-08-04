@@ -11,7 +11,7 @@ import (
 
 // TimeoutModelMiddleware enforces a total deadline on Generate/Stream and a
 // per-chunk idle timeout on Stream. When either timeout fires the context is
-// cancelled so the underlying model can clean up promptly.
+// canceled so the underlying model can clean up promptly.
 type TimeoutModelMiddleware struct {
 	totalTimeout       time.Duration
 	streamChunkTimeout time.Duration
@@ -98,7 +98,7 @@ func (t *timeoutModel) Generate(ctx context.Context, msgs []Message, opts ...Opt
 }
 
 // Stream wraps the context with totalTimeout and monitors chunk arrival times.
-// If no chunk arrives within streamChunkTimeout the context is cancelled and the
+// If no chunk arrives within streamChunkTimeout the context is canceled and the
 // output channel is closed. The initial Stream() call error (if any) is returned
 // directly; mid-stream timeouts manifest as a closed output channel.
 func (t *timeoutModel) Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {

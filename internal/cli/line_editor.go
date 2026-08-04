@@ -16,7 +16,7 @@ import (
 // tab completion.
 type LineEditor interface {
 	// ReadLine reads a single line (or multi-line block) of user input.
-	// It blocks until input is available or ctx is cancelled.
+	// It blocks until input is available or ctx is canceled.
 	ReadLine(ctx context.Context, prompt string) (string, error)
 	// SetHistory replaces the full history.
 	SetHistory(h []string)
@@ -130,7 +130,7 @@ func (le *DefaultLineEditor) readLineNonTTY(ctx context.Context, prompt string) 
 	if le.scanner == nil {
 		le.scanner = bufio.NewScanner(le.in)
 	}
-	fmt.Fprint(le.out, prompt)
+	fmt.Fprint(le.out, prompt) //nolint:errcheck
 	if !le.scanner.Scan() {
 		if err := le.scanner.Err(); err != nil {
 			return "", err
@@ -233,7 +233,7 @@ func (le *DefaultLineEditor) readLineTTY(ctx context.Context, prompt string) (st
 
 // readSingleLineTTY reads one physical line with editing support.
 func (le *DefaultLineEditor) readSingleLineTTY(readByte func() (byte, error), prompt string) (string, error) {
-	fmt.Fprint(le.out, prompt)
+	fmt.Fprint(le.out, prompt) //nolint:errcheck
 
 	var buf []rune
 	pos := 0
@@ -243,12 +243,12 @@ func (le *DefaultLineEditor) readSingleLineTTY(readByte func() (byte, error), pr
 
 	render := func() {
 		// Move to beginning of line, clear to end, write prompt + buffer.
-		fmt.Fprint(le.out, "\r\033[K")
-		fmt.Fprint(le.out, prompt)
-		fmt.Fprint(le.out, string(buf))
+		fmt.Fprint(le.out, "\r\033[K")  //nolint:errcheck
+		fmt.Fprint(le.out, prompt)      //nolint:errcheck
+		fmt.Fprint(le.out, string(buf)) //nolint:errcheck
 		// Move cursor left to correct position.
 		if pos < len(buf) {
-			fmt.Fprintf(le.out, "\033[%dD", len(buf)-pos)
+			fmt.Fprintf(le.out, "\033[%dD", len(buf)-pos) //nolint:errcheck
 		}
 	}
 
@@ -260,7 +260,7 @@ func (le *DefaultLineEditor) readSingleLineTTY(readByte func() (byte, error), pr
 
 		switch {
 		case b == '\r' || b == '\n': // Enter
-			fmt.Fprint(le.out, "\r\n")
+			fmt.Fprint(le.out, "\r\n") //nolint:errcheck
 			return string(buf), nil
 
 		case b == 0x01: // Ctrl+A — beginning of line
@@ -308,12 +308,12 @@ func (le *DefaultLineEditor) readSingleLineTTY(readByte func() (byte, error), pr
 			}
 
 		case b == 0x03: // Ctrl+C
-			fmt.Fprint(le.out, "\r\n")
+			fmt.Fprint(le.out, "\r\n") //nolint:errcheck
 			return "", errInterrupted
 
 		case b == 0x04: // Ctrl+D
 			if len(buf) == 0 {
-				fmt.Fprint(le.out, "\r\n")
+				fmt.Fprint(le.out, "\r\n") //nolint:errcheck
 				return "", io.EOF
 			}
 			if pos < len(buf) {
@@ -358,12 +358,12 @@ func (le *DefaultLineEditor) readSingleLineTTY(readByte func() (byte, error), pr
 			case 'C': // Right
 				if pos < len(buf) {
 					pos++
-					fmt.Fprint(le.out, "\033[C")
+					fmt.Fprint(le.out, "\033[C") //nolint:errcheck
 				}
 			case 'D': // Left
 				if pos > 0 {
 					pos--
-					fmt.Fprint(le.out, "\033[D")
+					fmt.Fprint(le.out, "\033[D") //nolint:errcheck
 				}
 			}
 
@@ -406,12 +406,12 @@ func (le *DefaultLineEditor) applyCompletions(buf *[]rune, pos *int, completions
 		*pos = start + len(prefix)
 	}
 	// Display options.
-	fmt.Fprint(le.out, "\r\n")
+	fmt.Fprint(le.out, "\r\n") //nolint:errcheck
 	for _, c := range completions {
 		if c.Description != "" {
-			fmt.Fprintf(le.out, "  %s\t(%s)\r\n", c.Text, c.Description)
+			fmt.Fprintf(le.out, "  %s\t(%s)\r\n", c.Text, c.Description) //nolint:errcheck
 		} else {
-			fmt.Fprintf(le.out, "  %s\r\n", c.Text)
+			fmt.Fprintf(le.out, "  %s\r\n", c.Text) //nolint:errcheck
 		}
 	}
 	le.renderBuf(prompt, *buf, *pos)
@@ -419,11 +419,11 @@ func (le *DefaultLineEditor) applyCompletions(buf *[]rune, pos *int, completions
 
 // renderBuf writes the prompt, buffer, and positions the cursor.
 func (le *DefaultLineEditor) renderBuf(prompt string, buf []rune, pos int) {
-	fmt.Fprint(le.out, "\r\033[K")
-	fmt.Fprint(le.out, prompt)
-	fmt.Fprint(le.out, string(buf))
+	fmt.Fprint(le.out, "\r\033[K")  //nolint:errcheck
+	fmt.Fprint(le.out, prompt)      //nolint:errcheck
+	fmt.Fprint(le.out, string(buf)) //nolint:errcheck
 	if pos < len(buf) {
-		fmt.Fprintf(le.out, "\033[%dD", len(buf)-pos)
+		fmt.Fprintf(le.out, "\033[%dD", len(buf)-pos) //nolint:errcheck
 	}
 }
 

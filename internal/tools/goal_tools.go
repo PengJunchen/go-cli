@@ -60,8 +60,8 @@ func (t *GoalCreateTool) Execute(ctx context.Context, call ToolCall) (*ToolResul
 	if !ok || strings.TrimSpace(title) == "" {
 		return nil, errors.New("goal_create: missing string argument 'title'")
 	}
-	description, _ := call.Args["description"].(string)
-	criteria, _ := call.Args["success_criteria"].(string)
+	description, _ := call.Args["description"].(string)   //nolint:errcheck
+	criteria, _ := call.Args["success_criteria"].(string) //nolint:errcheck
 
 	goal, err := t.store.Create(ctx, title, description, criteria)
 	if err != nil {

@@ -66,19 +66,19 @@ func TestGoalStoreUpdateStatusTransition(t *testing.T) {
 	// Draft -> Active
 	err = s.Update(context.Background(), goal.ID, WithGoalStatus(GoalStatusActive))
 	require.NoError(t, err)
-	g, _ := s.Get(context.Background(), goal.ID)
+	g, _ := s.Get(context.Background(), goal.ID) //nolint:errcheck
 	assert.Equal(t, GoalStatusActive, g.Status)
 
 	// Active -> InProgress
 	err = s.Update(context.Background(), goal.ID, WithGoalStatus(GoalStatusInProgress))
 	require.NoError(t, err)
-	g, _ = s.Get(context.Background(), goal.ID)
+	g, _ = s.Get(context.Background(), goal.ID) //nolint:errcheck
 	assert.Equal(t, GoalStatusInProgress, g.Status)
 
 	// InProgress -> Completed (should set CompletedAt)
 	err = s.Update(context.Background(), goal.ID, WithGoalStatus(GoalStatusCompleted))
 	require.NoError(t, err)
-	g, _ = s.Get(context.Background(), goal.ID)
+	g, _ = s.Get(context.Background(), goal.ID) //nolint:errcheck
 	assert.Equal(t, GoalStatusCompleted, g.Status)
 	assert.NotNil(t, g.CompletedAt)
 }
@@ -92,7 +92,7 @@ func TestGoalStoreUpdateBlocked(t *testing.T) {
 
 	err = s.Update(context.Background(), goal.ID, WithGoalStatus(GoalStatusBlocked))
 	require.NoError(t, err)
-	g, _ := s.Get(context.Background(), goal.ID)
+	g, _ := s.Get(context.Background(), goal.ID) //nolint:errcheck
 	assert.Equal(t, GoalStatusBlocked, g.Status)
 }
 
@@ -111,7 +111,7 @@ func TestGoalStoreUpdateTitleAndPriority(t *testing.T) {
 	)
 	require.NoError(t, err)
 
-	g, _ := s.Get(context.Background(), goal.ID)
+	g, _ := s.Get(context.Background(), goal.ID) //nolint:errcheck
 	assert.Equal(t, "new title", g.Title)
 	assert.Equal(t, "high", g.Priority)
 	assert.Equal(t, "new desc", g.Description)
@@ -137,14 +137,14 @@ func TestGoalStoreAddTask(t *testing.T) {
 	err = s.AddTask(context.Background(), goal.ID, "task-1")
 	require.NoError(t, err)
 
-	g, _ := s.Get(context.Background(), goal.ID)
+	g, _ := s.Get(context.Background(), goal.ID) //nolint:errcheck
 	assert.Contains(t, g.TaskIDs, "task-1")
 
 	// Adding the same task again is a no-op.
 	err = s.AddTask(context.Background(), goal.ID, "task-1")
 	require.NoError(t, err)
 
-	g, _ = s.Get(context.Background(), goal.ID)
+	g, _ = s.Get(context.Background(), goal.ID) //nolint:errcheck
 	assert.Len(t, g.TaskIDs, 1)
 }
 
@@ -155,13 +155,13 @@ func TestGoalStoreRemoveTask(t *testing.T) {
 	goal, err := s.Create(context.Background(), "goal", "desc", "criteria")
 	require.NoError(t, err)
 
-	_ = s.AddTask(context.Background(), goal.ID, "task-1")
-	_ = s.AddTask(context.Background(), goal.ID, "task-2")
+	_ = s.AddTask(context.Background(), goal.ID, "task-1") //nolint:errcheck
+	_ = s.AddTask(context.Background(), goal.ID, "task-2") //nolint:errcheck
 
 	err = s.RemoveTask(context.Background(), goal.ID, "task-1")
 	require.NoError(t, err)
 
-	g, _ := s.Get(context.Background(), goal.ID)
+	g, _ := s.Get(context.Background(), goal.ID) //nolint:errcheck
 	assert.NotContains(t, g.TaskIDs, "task-1")
 	assert.Contains(t, g.TaskIDs, "task-2")
 
@@ -183,11 +183,11 @@ func TestGoalStoreListSortedByCreatedAt(t *testing.T) {
 	s, err := NewDefaultGoalStore("")
 	require.NoError(t, err)
 
-	g1, _ := s.Create(context.Background(), "first", "", "")
+	g1, _ := s.Create(context.Background(), "first", "", "") //nolint:errcheck
 	time.Sleep(1 * time.Millisecond)
-	g2, _ := s.Create(context.Background(), "second", "", "")
+	g2, _ := s.Create(context.Background(), "second", "", "") //nolint:errcheck
 	time.Sleep(1 * time.Millisecond)
-	g3, _ := s.Create(context.Background(), "third", "", "")
+	g3, _ := s.Create(context.Background(), "third", "", "") //nolint:errcheck
 
 	goals, err := s.List(context.Background())
 	require.NoError(t, err)
@@ -211,7 +211,7 @@ func TestGoalStoreDelete(t *testing.T) {
 	s, err := NewDefaultGoalStore("")
 	require.NoError(t, err)
 
-	goal, _ := s.Create(context.Background(), "goal", "desc", "criteria")
+	goal, _ := s.Create(context.Background(), "goal", "desc", "criteria") //nolint:errcheck
 
 	err = s.Delete(context.Background(), goal.ID)
 	require.NoError(t, err)
@@ -278,8 +278,8 @@ func TestGoalStoreConcurrent(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = s.Create(context.Background(), "concurrent", "desc", "criteria")
-			_, _ = s.List(context.Background())
+			_, _ = s.Create(context.Background(), "concurrent", "desc", "criteria") //nolint:errcheck
+			_, _ = s.List(context.Background())                                     //nolint:errcheck
 		}()
 	}
 	wg.Wait()

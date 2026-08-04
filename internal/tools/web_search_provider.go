@@ -33,9 +33,6 @@ const (
 
 	// defaultBraveSearchBaseURL is the default Brave Search API endpoint.
 	defaultBraveSearchBaseURL = "https://api.search.brave.com/res/v1/web/search"
-
-	// defaultCacheTTL is the default TTL for cached search results.
-	defaultCacheTTL = 5 * time.Minute
 )
 
 // SearchResult represents a single search result item.
@@ -168,7 +165,7 @@ func (p *FetchSearchProvider) Search(ctx context.Context, query string, opts Sea
 	if err != nil {
 		return nil, fmt.Errorf("fetch_search: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { _ = resp.Body.Close() }() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetch_search: unexpected status %d", resp.StatusCode)
@@ -266,7 +263,7 @@ func (p *BraveSearchProvider) Search(ctx context.Context, query string, opts Sea
 	if err != nil {
 		return nil, fmt.Errorf("brave_search: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { _ = resp.Body.Close() }() //nolint:errcheck
 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("brave_search: unexpected status %d", resp.StatusCode)

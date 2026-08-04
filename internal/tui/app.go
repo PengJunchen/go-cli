@@ -118,7 +118,7 @@ type BubbleteaApp struct {
 
 	// interactive enables keyboard-driven accordion navigation. When false
 	// (the default for non-TTY / pipe input), the app renders every entry
-	// expanded (legacy behaviour).
+	// expanded (legacy behavior).
 	interactive bool
 
 	// onUpdate is invoked after every entry mutation (add/replace). It lets
@@ -171,7 +171,7 @@ func (a *BubbleteaApp) Run(ctx context.Context) error {
 	var kbdCancel context.CancelFunc
 	if a.interactive {
 		if oldTerm, err := makeRaw(int(os.Stdin.Fd())); err == nil {
-			defer restoreRaw(int(os.Stdin.Fd()), oldTerm)
+			defer restoreRaw(int(os.Stdin.Fd()), oldTerm) //nolint:errcheck
 			kbdCtx, cancel := context.WithCancel(ctx)
 			kbdCancel = cancel
 			go a.keyboardLoop(kbdCtx)
@@ -239,7 +239,7 @@ func (a *BubbleteaApp) MessagesProcessed() int64 { return a.msgsSeen.Load() }
 
 // View returns the current rendered view. In interactive mode the accordion
 // model produces collapsed/expanded output. In non-interactive mode all entries
-// are rendered expanded (legacy behaviour).
+// are rendered expanded (legacy behavior).
 func (a *BubbleteaApp) View() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()

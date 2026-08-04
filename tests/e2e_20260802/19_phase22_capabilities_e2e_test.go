@@ -1,7 +1,7 @@
 // Package e2e_20260802 contains end-to-end integration tests.
 // This file verifies Phase 22 agent capabilities wiring: real SubAgent
 // execution, unconnected tool registration, and plan-mode blocking.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"context"
@@ -160,7 +160,7 @@ func TestE2E_Phase22_TaskToolsWork(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Contains(t, createResult.Output, "E2E verification")
-	taskID := createResult.Metadata["id"].(string)
+	taskID := createResult.Metadata["id"].(string) //nolint:errcheck
 	assert.NotEmpty(t, taskID)
 
 	// Get the task.

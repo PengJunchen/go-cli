@@ -21,7 +21,7 @@ type AgentHarnessError struct {
 }
 
 // Compile-time assertion that AgentHarnessError satisfies the error interface.
-var _ error = (*AgentHarnessError)(nil)
+var _ error = (*AgentHarnessError)(nil) //nolint:errcheck // compile-time interface assertion
 
 // Error codes returned by NormalizeError.
 const (
@@ -112,9 +112,9 @@ func classifyError(err error) (code, msg string) {
 	}
 
 	// Context cancellation without deadline is treated as a model error
-	// surface (the caller cancelled, often while waiting on the model).
+	// surface (the caller canceled, often while waiting on the model).
 	if errors.Is(err, context.Canceled) {
-		return ErrCodeModelError, "operation cancelled"
+		return ErrCodeModelError, "operation canceled"
 	}
 
 	// Default: treat as a model generation error.

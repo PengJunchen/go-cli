@@ -41,7 +41,7 @@ func TestWebFetchOptions(t *testing.T) {
 func TestWebFetchSuccess(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("hello world"))
+		_, _ = w.Write([]byte("hello world")) //nolint:errcheck
 	}))
 	defer srv.Close()
 
@@ -76,7 +76,7 @@ func TestWebFetchTruncation(t *testing.T) {
 	body := strings.Repeat("x", 2048)
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(body))
+		_, _ = w.Write([]byte(body)) //nolint:errcheck
 	}))
 	defer srv.Close()
 
@@ -86,7 +86,7 @@ func TestWebFetchTruncation(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Len(t, res.Output, 100)
-	assert.True(t, res.Metadata["truncated"].(bool))
+	assert.True(t, res.Metadata["truncated"].(bool)) //nolint:errcheck
 }
 
 func TestWebFetchTimeout(t *testing.T) {
@@ -123,7 +123,7 @@ func TestWebFetchContextCancel(t *testing.T) {
 func TestWebFetchReturnsBodyOn404(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNotFound)
-		_, _ = w.Write([]byte("not found"))
+		_, _ = w.Write([]byte("not found")) //nolint:errcheck
 	}))
 	defer srv.Close()
 

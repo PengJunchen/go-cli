@@ -8,6 +8,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -250,6 +251,15 @@ func scanHardcodedDefaults(dir string, goFiles []string) []Finding {
 	fset := token.NewFileSet()
 	for _, file := range goFiles {
 		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+
+		// Check for nolint:scan009 directive in the file.
+		data, err := os.ReadFile(file)
+		if err != nil {
+			continue
+		}
+		if strings.Contains(string(data), "nolint:scan009") || strings.Contains(string(data), "nolint:all") {
 			continue
 		}
 

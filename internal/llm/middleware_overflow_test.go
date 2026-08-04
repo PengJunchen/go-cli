@@ -185,7 +185,7 @@ func TestOverflowRecoveryMiddleware_OverflowCount(t *testing.T) {
 		{Role: "user", Content: "4"},
 	}
 
-	_, _ = wrapped.Generate(t.Context(), msgs)
+	_, _ = wrapped.Generate(t.Context(), msgs) //nolint:errcheck
 
 	mw.mu.Lock()
 	count := mw.overflowCount

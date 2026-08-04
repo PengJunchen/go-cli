@@ -29,7 +29,7 @@ func TestTimeoutModelMiddleware_GenerateNoTimeout(t *testing.T) {
 }
 
 // TestTimeoutModelMiddleware_GenerateTimeout verifies that a slow Generate call
-// is cancelled by the total timeout.
+// is canceled by the total timeout.
 func TestTimeoutModelMiddleware_GenerateTimeout(t *testing.T) {
 	model := &mockModel{
 		generateFn: func(ctx context.Context, _ []Message, _ ...Option) (*Message, error) {

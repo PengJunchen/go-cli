@@ -154,6 +154,6 @@ func TestLoopDetectionModelMiddleware_ConcurrentSafe(t *testing.T) {
 	wrapped := mw.WrapModel(base)
 
 	for i := 0; i < 6; i++ {
-		_, _ = wrapped.Generate(context.Background(), nil)
+		_, _ = wrapped.Generate(context.Background(), nil) //nolint:errcheck
 	}
 }

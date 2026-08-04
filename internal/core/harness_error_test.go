@@ -128,7 +128,7 @@ func TestNormalizeErrorUnwrapChain(t *testing.T) {
 }
 
 func TestAgentHarnessErrorInterfaceCompliance(t *testing.T) {
-	var _ error = (*AgentHarnessError)(nil)
+	var _ error = (*AgentHarnessError)(nil) //nolint:errcheck // compile-time interface assertion
 }
 
 // netTimeoutError is a minimal net.Error that reports Timeout() == true.
@@ -139,4 +139,4 @@ func (e *netTimeoutError) Timeout() bool   { return true }
 func (e *netTimeoutError) Temporary() bool { return false }
 
 // Compile-time assertion that netTimeoutError satisfies net.Error.
-var _ net.Error = (*netTimeoutError)(nil)
+var _ net.Error = (*netTimeoutError)(nil) //nolint:errcheck // compile-time interface assertion

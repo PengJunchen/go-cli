@@ -4,7 +4,7 @@
 // This file verifies Phase 21 TUI Enhancements: dynamic terminal width,
 // code/markdown highlighting, collapsible tool-call rendering, non-TTY
 // degradation, and removal of legacy hardcoded width / keyboard-nav options.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"context"

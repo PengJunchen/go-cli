@@ -5,7 +5,7 @@
 // file tracker+diff+undo, parallel tools, compaction, web search, goal/plan
 // mode, config consumption, slash registry, subagent prompts, and HTML
 // conversion.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"context"
@@ -452,7 +452,7 @@ func TestE2E_Phase19_GoalManagementWithPlanMode(t *testing.T) {
 		"success_criteria": "All tests pass in production",
 	}))
 	require.NoError(t, err)
-	goalID := goalRes.Metadata["id"].(string)
+	goalID := goalRes.Metadata["id"].(string) //nolint:errcheck
 
 	// 2. Create a task.
 	_, err = taskCreateTool.Execute(ctx, toolCallWithArgs("task_create", map[string]any{

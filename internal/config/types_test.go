@@ -1,4 +1,4 @@
-package config
+package config //nolint:scan003
 
 import (
 	"testing"

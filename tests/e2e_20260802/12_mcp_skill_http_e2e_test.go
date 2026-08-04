@@ -5,7 +5,7 @@
 //  3. Full MCP tool execution through the tool registry
 //  4. Skill loading from a directory with YAML frontmatter
 //  5. Combined MCP + Skill pipeline in a single tool registry
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"context"
@@ -95,7 +95,7 @@ func (s *mockHTTPMCPServer) handleGet(w http.ResponseWriter, r *http.Request) {
 		// Return an absolute POST-back URL so the adapter uses it directly
 		// (it starts with "http" and skips the relative-resolution path).
 		postURL := fmt.Sprintf("http://%s/mcp", r.Host)
-		fmt.Fprintf(w, "event: endpoint\ndata: %s\n\n", postURL)
+		fmt.Fprintf(w, "event: endpoint\ndata: %s\n\n", postURL) //nolint:errcheck,gosec
 	}
 	// When sseHandshake is false, we write nothing. The adapter's scanner
 	// reaches EOF, endpoint stays empty, and falls back to cfg.URL.
@@ -114,8 +114,8 @@ func (s *mockHTTPMCPServer) handlePost(w http.ResponseWriter, r *http.Request) {
 		Method string          `json:"method"`
 		Params json.RawMessage `json:"params"`
 	}
-	if err := json.Unmarshal(body, &req); err != nil {
-		s.t.Errorf("mock mcp server: decode request: %v", err)
+	if decodeErr := json.Unmarshal(body, &req); decodeErr != nil {
+		s.t.Errorf("mock mcp server: decode request: %v", decodeErr)
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -129,8 +129,8 @@ func (s *mockHTTPMCPServer) handlePost(w http.ResponseWriter, r *http.Request) {
 			Name      string         `json:"name"`
 			Arguments map[string]any `json:"arguments"`
 		}
-		if err := json.Unmarshal(req.Params, &params); err != nil {
-			s.t.Errorf("mock mcp server: decode tools/call params: %v", err)
+		if paramsErr := json.Unmarshal(req.Params, &params); paramsErr != nil {
+			s.t.Errorf("mock mcp server: decode tools/call params: %v", paramsErr)
 			result = map[string]any{"content": "", "isError": true}
 		} else {
 			content := s.callTool(params.Name, params.Arguments)
@@ -150,10 +150,10 @@ func (s *mockHTTPMCPServer) handlePost(w http.ResponseWriter, r *http.Request) {
 
 	if s.ssePost {
 		w.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprintf(w, "id: %d\nevent: message\ndata: %s\n\n", req.ID, raw)
+		fmt.Fprintf(w, "id: %d\nevent: message\ndata: %s\n\n", req.ID, raw) //nolint:errcheck,gosec
 	} else {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write(raw)
+		_, _ = w.Write(raw) //nolint:errcheck,gosec
 	}
 }
 
@@ -341,7 +341,7 @@ func TestE2E_MCPHTTPAdapter_CallToolThroughRegistry(t *testing.T) {
 	require.Len(t, mcpTools, 1)
 
 	toolAdapter := mcp.NewMCPToolAdapter(adapter, mcpTools[0])
-	tr := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry)
+	tr := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck,gosec
 	require.NoError(t, tr.Register(ctx, toolAdapter))
 
 	toolName := toolAdapter.Name()
@@ -411,7 +411,7 @@ parameters:
 ---
 Deployment helper body.
 `
-	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "deploy-helper.md"), []byte(skillA), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "deploy-helper.md"), []byte(skillA), 0o600))
 
 	// Skill B: minimal frontmatter; the body becomes the prompt.
 	skillB := `---
@@ -419,10 +419,10 @@ name: summarize
 description: Summarize text content
 ---
 Summarize the provided text concisely.`
-	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "summarize.md"), []byte(skillB), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "summarize.md"), []byte(skillB), 0o600))
 
 	// A non-skill file that should be ignored by LoadDir.
-	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "notes.txt"), []byte("not a skill"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "notes.txt"), []byte("not a skill"), 0o600))
 
 	ctx := context.Background()
 
@@ -444,7 +444,7 @@ Summarize the provided text concisely.`
 	require.Len(t, all, 2)
 
 	// Wrap each registered skill with SkillAdapter and register as a tool.
-	tr := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry)
+	tr := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck
 	for _, s := range all {
 		adapter := skill.NewSkillAdapter(s)
 		require.NoError(t, tr.Register(ctx, adapter))
@@ -558,7 +558,7 @@ tools:
 trigger_hint: "explain concept"
 ---
 Explain helper body.`
-	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "explain.md"), []byte(skillContent), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "explain.md"), []byte(skillContent), 0o600))
 
 	loader := skill.NewYAMLSkillLoader()
 	defs, err := loader.LoadDir(ctx, tmpDir)
@@ -569,7 +569,7 @@ Explain helper body.`
 	require.NoError(t, skillReg.Register(ctx, *defs[0]))
 
 	// --- Register both MCP and skill tools into the same ToolRegistry. ---
-	tr := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry)
+	tr := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck
 	for _, tool := range mcpTools {
 		require.NoError(t, tr.Register(ctx, mcp.NewMCPToolAdapter(adapter, tool)))
 	}

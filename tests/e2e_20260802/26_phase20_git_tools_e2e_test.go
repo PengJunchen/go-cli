@@ -3,7 +3,7 @@
 // Package e2e_20260802 contains end-to-end integration tests.
 // This file verifies Phase 20 Git Tools: GitStatusTool, GitDiffTool, and
 // GitCommitTool using real git repos created with `git init`.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"context"

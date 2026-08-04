@@ -65,10 +65,10 @@ func (r *realSubAgentRunner) Run(ctx context.Context, prompt string, _ <-chan st
 	return final, nil
 }
 
-// NewRealSubAgentRunnerFactory returns a subAgentRunnerFactory that produces
+// NewRealSubAgentRunnerFactory returns a SubAgentRunnerFactory that produces
 // realSubAgentRunner instances. The model and tool registry are captured in
 // the closure so every sub-agent gets the same LLM and tool set as the parent.
-func NewRealSubAgentRunnerFactory(model llm.BaseChatModel, tr tools.ToolRegistry, opts ...LoopOption) subAgentRunnerFactory {
+func NewRealSubAgentRunnerFactory(model llm.BaseChatModel, tr tools.ToolRegistry, opts ...LoopOption) SubAgentRunnerFactory {
 	return func(cfg SubAgentConfig) subAgentRunner {
 		maxIter := cfg.MaxTurns
 		if maxIter <= 0 {

@@ -4,7 +4,7 @@
 // This file verifies Phase 20 token estimation: UnicodeTokenEstimator
 // (CJK/ASCII/mixed), HeuristicTokenEstimator, CompositeTokenEstimator, and
 // AgentAssembly wiring.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"testing"

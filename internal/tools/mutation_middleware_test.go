@@ -47,7 +47,7 @@ func TestMutationWrapper_SerializesConcurrentWrites(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = def.Execute(context.Background(), tools.ToolCall{
+			_, _ = def.Execute(context.Background(), tools.ToolCall{ //nolint:errcheck
 				ID:   "1",
 				Name: "write",
 				Args: map[string]any{"path": "/tmp/test-mutation-serial.txt", "content": "x"},
@@ -94,7 +94,7 @@ func TestMutationWrapper_DifferentFilesParallel(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			_, _ = def.Execute(context.Background(), tools.ToolCall{
+			_, _ = def.Execute(context.Background(), tools.ToolCall{ //nolint:errcheck
 				ID:   "1",
 				Name: "write",
 				Args: map[string]any{"path": "/tmp/test-mutation-diff-" + string(rune('a'+idx)) + ".txt", "content": "x"},
@@ -166,7 +166,7 @@ func TestMutationWrapper_EditAlsoSerialized(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = def.Execute(context.Background(), tools.ToolCall{
+			_, _ = def.Execute(context.Background(), tools.ToolCall{ //nolint:errcheck
 				ID:   "1",
 				Name: "edit",
 				Args: map[string]any{"file_path": "/tmp/test-mutation-edit.txt", "old_string": "a", "new_string": "b"},

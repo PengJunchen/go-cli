@@ -5,7 +5,7 @@
 // approval callback/cache/resolver, FileTracker, DiffGenerator, BashSandbox,
 // HTMLConverter, PlanModeController, and WebSearchProvider config-driven
 // selection.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"context"

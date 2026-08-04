@@ -13,19 +13,19 @@ import (
 // --- GoalCreateTool ---
 
 func TestGoalCreateToolName(t *testing.T) {
-	store, _ := NewDefaultGoalStore("")
+	store, _ := NewDefaultGoalStore("") //nolint:errcheck
 	tool := NewGoalCreateTool(store)
 	assert.Equal(t, "goal_create", tool.Name())
 }
 
 func TestGoalCreateToolDescription(t *testing.T) {
-	store, _ := NewDefaultGoalStore("")
+	store, _ := NewDefaultGoalStore("") //nolint:errcheck
 	tool := NewGoalCreateTool(store)
 	assert.Contains(t, tool.Description(), "goal_create")
 }
 
 func TestGoalCreateToolExecute(t *testing.T) {
-	store, _ := NewDefaultGoalStore("")
+	store, _ := NewDefaultGoalStore("") //nolint:errcheck
 	tool := NewGoalCreateTool(store)
 
 	res, err := tool.Execute(context.Background(), ToolCall{
@@ -46,13 +46,13 @@ func TestGoalCreateToolExecute(t *testing.T) {
 	assert.Equal(t, "draft", res.Metadata["status"])
 
 	// Verify the goal was actually stored.
-	goals, _ := store.List(context.Background())
+	goals, _ := store.List(context.Background()) //nolint:errcheck
 	require.Len(t, goals, 1)
 	assert.Equal(t, "ship feature", goals[0].Title)
 }
 
 func TestGoalCreateToolMissingTitle(t *testing.T) {
-	store, _ := NewDefaultGoalStore("")
+	store, _ := NewDefaultGoalStore("") //nolint:errcheck
 	tool := NewGoalCreateTool(store)
 
 	_, err := tool.Execute(context.Background(), ToolCall{
@@ -73,14 +73,14 @@ func TestGoalCreateToolNilStore(t *testing.T) {
 // --- GoalUpdateTool ---
 
 func TestGoalUpdateToolName(t *testing.T) {
-	store, _ := NewDefaultGoalStore("")
+	store, _ := NewDefaultGoalStore("") //nolint:errcheck
 	tool := NewGoalUpdateTool(store)
 	assert.Equal(t, "goal_update", tool.Name())
 }
 
 func TestGoalUpdateToolExecute(t *testing.T) {
-	store, _ := NewDefaultGoalStore("")
-	goal, _ := store.Create(context.Background(), "old title", "desc", "criteria")
+	store, _ := NewDefaultGoalStore("")                                            //nolint:errcheck
+	goal, _ := store.Create(context.Background(), "old title", "desc", "criteria") //nolint:errcheck
 
 	tool := NewGoalUpdateTool(store)
 	res, err := tool.Execute(context.Background(), ToolCall{
@@ -98,14 +98,14 @@ func TestGoalUpdateToolExecute(t *testing.T) {
 	assert.Contains(t, res.Output, "active")
 	assert.Equal(t, "call-2", res.ToolCallID)
 
-	g, _ := store.Get(context.Background(), goal.ID)
+	g, _ := store.Get(context.Background(), goal.ID) //nolint:errcheck
 	assert.Equal(t, GoalStatusActive, g.Status)
 	assert.Equal(t, "new title", g.Title)
 }
 
 func TestGoalUpdateToolInvalidStatus(t *testing.T) {
-	store, _ := NewDefaultGoalStore("")
-	goal, _ := store.Create(context.Background(), "title", "desc", "criteria")
+	store, _ := NewDefaultGoalStore("")                                        //nolint:errcheck
+	goal, _ := store.Create(context.Background(), "title", "desc", "criteria") //nolint:errcheck
 
 	tool := NewGoalUpdateTool(store)
 	_, err := tool.Execute(context.Background(), ToolCall{
@@ -119,7 +119,7 @@ func TestGoalUpdateToolInvalidStatus(t *testing.T) {
 }
 
 func TestGoalUpdateToolMissingID(t *testing.T) {
-	store, _ := NewDefaultGoalStore("")
+	store, _ := NewDefaultGoalStore("") //nolint:errcheck
 	tool := NewGoalUpdateTool(store)
 
 	_, err := tool.Execute(context.Background(), ToolCall{
@@ -140,24 +140,24 @@ func TestGoalUpdateToolNilStore(t *testing.T) {
 // --- GoalListTool ---
 
 func TestGoalListToolName(t *testing.T) {
-	store, _ := NewDefaultGoalStore("")
+	store, _ := NewDefaultGoalStore("") //nolint:errcheck
 	tool := NewGoalListTool(store, NewTaskStore())
 	assert.Equal(t, "goal_list", tool.Name())
 }
 
 func TestGoalListToolExecute(t *testing.T) {
-	store, _ := NewDefaultGoalStore("")
+	store, _ := NewDefaultGoalStore("") //nolint:errcheck
 	taskStore := NewTaskStore()
 
-	g1, _ := store.Create(context.Background(), "goal A", "", "")
-	_, _ = store.Create(context.Background(), "goal B", "", "")
+	g1, _ := store.Create(context.Background(), "goal A", "", "") //nolint:errcheck
+	_, _ = store.Create(context.Background(), "goal B", "", "")   //nolint:errcheck
 
 	// Associate tasks with g1 for progress calculation.
-	_ = store.AddTask(context.Background(), g1.ID, "task-1")
-	_ = store.AddTask(context.Background(), g1.ID, "task-2")
+	_ = store.AddTask(context.Background(), g1.ID, "task-1") //nolint:errcheck
+	_ = store.AddTask(context.Background(), g1.ID, "task-2") //nolint:errcheck
 	taskStore.Create("task 1", "")
 	taskStore.Create("task 2", "")
-	_ = taskStore.Update("task-1", WithTaskStatus(StatusCompleted))
+	_ = taskStore.Update("task-1", WithTaskStatus(StatusCompleted)) //nolint:errcheck
 
 	tool := NewGoalListTool(store, taskStore)
 	res, err := tool.Execute(context.Background(), ToolCall{
@@ -176,7 +176,7 @@ func TestGoalListToolExecute(t *testing.T) {
 }
 
 func TestGoalListToolEmpty(t *testing.T) {
-	store, _ := NewDefaultGoalStore("")
+	store, _ := NewDefaultGoalStore("") //nolint:errcheck
 	tool := NewGoalListTool(store, NewTaskStore())
 
 	res, err := tool.Execute(context.Background(), ToolCall{
@@ -196,17 +196,17 @@ func TestGoalListToolNilStore(t *testing.T) {
 // --- GoalGetTool ---
 
 func TestGoalGetToolName(t *testing.T) {
-	store, _ := NewDefaultGoalStore("")
+	store, _ := NewDefaultGoalStore("") //nolint:errcheck
 	tool := NewGoalGetTool(store, NewTaskStore())
 	assert.Equal(t, "goal_get", tool.Name())
 }
 
 func TestGoalGetToolExecute(t *testing.T) {
-	store, _ := NewDefaultGoalStore("")
+	store, _ := NewDefaultGoalStore("") //nolint:errcheck
 	taskStore := NewTaskStore()
 
-	goal, _ := store.Create(context.Background(), "my goal", "a description", "success criteria")
-	_ = store.AddTask(context.Background(), goal.ID, "task-1")
+	goal, _ := store.Create(context.Background(), "my goal", "a description", "success criteria") //nolint:errcheck
+	_ = store.AddTask(context.Background(), goal.ID, "task-1")                                    //nolint:errcheck
 	taskStore.Create("task 1", "desc")
 
 	tool := NewGoalGetTool(store, taskStore)
@@ -226,7 +226,7 @@ func TestGoalGetToolExecute(t *testing.T) {
 }
 
 func TestGoalGetToolNotFound(t *testing.T) {
-	store, _ := NewDefaultGoalStore("")
+	store, _ := NewDefaultGoalStore("") //nolint:errcheck
 	tool := NewGoalGetTool(store, NewTaskStore())
 
 	_, err := tool.Execute(context.Background(), ToolCall{
@@ -237,7 +237,7 @@ func TestGoalGetToolNotFound(t *testing.T) {
 }
 
 func TestGoalGetToolMissingID(t *testing.T) {
-	store, _ := NewDefaultGoalStore("")
+	store, _ := NewDefaultGoalStore("") //nolint:errcheck
 	tool := NewGoalGetTool(store, NewTaskStore())
 
 	_, err := tool.Execute(context.Background(), ToolCall{Args: map[string]any{}})
@@ -306,13 +306,13 @@ func TestTaskUpdateToolExecuteBlocked(t *testing.T) {
 
 func TestTaskUpdateToolExecuteCancelled(t *testing.T) {
 	store := NewTaskStore()
-	created := store.Create("cancelled task", "desc")
+	created := store.Create("canceled task", "desc")
 
 	tool := NewTaskUpdateTool(store)
 	_, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{
 			"id":     created.ID,
-			"status": "cancelled",
+			"status": "cancelled", //nolint:misspell
 		},
 	})
 	require.NoError(t, err)
@@ -379,7 +379,7 @@ func TestGoalToolsSatisfyInterface(t *testing.T) {
 // --- Concurrency ---
 
 func TestGoalToolsConcurrent(t *testing.T) {
-	store, _ := NewDefaultGoalStore("")
+	store, _ := NewDefaultGoalStore("") //nolint:errcheck
 	taskStore := NewTaskStore()
 
 	createTool := NewGoalCreateTool(store)
@@ -390,16 +390,16 @@ func TestGoalToolsConcurrent(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = createTool.Execute(context.Background(), ToolCall{
+			_, _ = createTool.Execute(context.Background(), ToolCall{ //nolint:errcheck
 				Args: map[string]any{"title": "concurrent goal"},
 			})
-			_, _ = listTool.Execute(context.Background(), ToolCall{
+			_, _ = listTool.Execute(context.Background(), ToolCall{ //nolint:errcheck
 				Args: map[string]any{},
 			})
 		}()
 	}
 	wg.Wait()
 
-	goals, _ := store.List(context.Background())
+	goals, _ := store.List(context.Background()) //nolint:errcheck
 	assert.Len(t, goals, 20)
 }

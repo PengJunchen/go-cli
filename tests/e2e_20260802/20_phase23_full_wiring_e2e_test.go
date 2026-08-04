@@ -2,7 +2,7 @@
 // This file verifies Phase 23 full runtime wiring across Phases 19-23:
 // safety, context management, production resilience, agent capabilities,
 // and UX convergence.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"context"
@@ -150,7 +150,7 @@ func TestE2E_Phase23_SessionSaveAndRestore(t *testing.T) {
 	// Reopen with a brand-new store instance at the same path.
 	store2 := session.NewJSONLSessionStore(storePath)
 	require.NoError(t, store2.Open(ctx))
-	defer store2.Close()
+	defer store2.Close() //nolint:errcheck,gosec
 
 	for _, expected := range entries {
 		got, getErr := store2.Get(ctx, expected.ID)

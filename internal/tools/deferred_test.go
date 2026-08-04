@@ -325,15 +325,15 @@ func TestRegisterDeferredToolRegistry_NilResetsToDefault(t *testing.T) {
 
 	// Verify custom is set.
 	got1 := GetDeferredToolRegistry()
-	customConcrete := custom.(*DefaultDeferredToolRegistry)
-	got1Concrete := got1.(*DefaultDeferredToolRegistry)
+	customConcrete := custom.(*DefaultDeferredToolRegistry) //nolint:errcheck
+	got1Concrete := got1.(*DefaultDeferredToolRegistry)     //nolint:errcheck
 	assert.Same(t, customConcrete, got1Concrete, "custom should be the global registry")
 
 	// Passing nil resets to a fresh default.
 	RegisterDeferredToolRegistry(nil)
 
 	got2 := GetDeferredToolRegistry()
-	got2Concrete := got2.(*DefaultDeferredToolRegistry)
+	got2Concrete := got2.(*DefaultDeferredToolRegistry) //nolint:errcheck
 	assert.NotSame(t, customConcrete, got2Concrete, "after nil reset, the global should be a different instance")
 }
 

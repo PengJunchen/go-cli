@@ -3,7 +3,7 @@
 // Package e2e_20260802 contains end-to-end integration tests.
 // This file verifies Phase 20 Interrupt/Steer: InterruptHandler signal
 // handling, goroutine cleanup, SteerChannel, and context cancellation.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"context"

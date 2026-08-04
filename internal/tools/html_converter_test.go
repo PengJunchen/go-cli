@@ -234,7 +234,7 @@ func TestWebFetchHTMLConversion(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("<h1>Hi</h1>"))
+		_, _ = w.Write([]byte("<h1>Hi</h1>")) //nolint:errcheck
 	}))
 	defer srv.Close()
 
@@ -253,7 +253,7 @@ func TestWebFetchNonHTMLNoConversion(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/plain")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("raw bytes"))
+		_, _ = w.Write([]byte("raw bytes")) //nolint:errcheck
 	}))
 	defer srv.Close()
 
@@ -269,7 +269,7 @@ func TestWebFetchNoConverterRawHTML(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("<h1>Hi</h1>"))
+		_, _ = w.Write([]byte("<h1>Hi</h1>")) //nolint:errcheck
 	}))
 	defer srv.Close()
 

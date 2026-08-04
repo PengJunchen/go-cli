@@ -4,7 +4,7 @@
 // This file verifies Phase 20 SSE Streaming: DefaultSSEParser, and
 // nativeChatModel.Stream for Claude, OpenAI, and Gemini providers using
 // httptest.Server mock endpoints.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"context"

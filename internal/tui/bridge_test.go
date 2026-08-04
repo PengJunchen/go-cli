@@ -50,8 +50,8 @@ func TestBridgeEventsForwardsEvents(t *testing.T) {
 
 	ch := BridgeEvents(ctx, stream)
 
-	stream.Send(core.AgentEvent{Kind: "message", Content: "hello"})
-	stream.Send(core.AgentEvent{Kind: "done", Content: "bye"})
+	stream.Send(core.AgentEvent{Kind: "message", Content: "hello"}) //nolint:errcheck,gosec
+	stream.Send(core.AgentEvent{Kind: "done", Content: "bye"})      //nolint:errcheck,gosec
 	stream.Close()
 
 	var events []AgentEvent
@@ -75,7 +75,7 @@ func TestBridgeEventsContextCancel(t *testing.T) {
 
 	ch := BridgeEvents(ctx, stream)
 
-	stream.Send(core.AgentEvent{Kind: "message", Content: "hi"})
+	stream.Send(core.AgentEvent{Kind: "message", Content: "hi"}) //nolint:errcheck,gosec
 	cancel()
 
 	timeout := time.After(2 * time.Second)

@@ -31,7 +31,7 @@ func TestWebSearchReturnsResults(t *testing.T) {
 	assert.Contains(t, res.Output, "golang testing")
 	assert.Equal(t, "call-1", res.ToolCallID)
 	assert.Equal(t, 3, res.Metadata["results"])
-	assert.True(t, res.Metadata["mock"].(bool))
+	assert.True(t, res.Metadata["mock"].(bool)) //nolint:errcheck
 }
 
 func TestWebSearchMissingQuery(t *testing.T) {

@@ -392,7 +392,7 @@ func TestRunVerify_WithResults(t *testing.T) {
 	// RunVerify on a temp directory with a simple Go file.
 	tmpDir := t.TempDir()
 	goFile := filepath.Join(tmpDir, "test.go")
-	err := os.WriteFile(goFile, []byte("package test\n\n// TestFunc does something.\nfunc TestFunc() {}\n"), 0o644)
+	err := os.WriteFile(goFile, []byte("package test\n\n// TestFunc does something.\nfunc TestFunc() {}\n"), 0o600) //nolint:gosec
 	if err != nil {
 		t.Fatalf("write file: %v", err)
 	}
@@ -421,7 +421,7 @@ func TestCheckGoFiles_NoGoFiles(t *testing.T) {
 func TestScanNolint_NoNolint(t *testing.T) {
 	tmpDir := t.TempDir()
 	goFile := filepath.Join(tmpDir, "test.go")
-	_ = os.WriteFile(goFile, []byte("package main\n\nfunc main() {}\n"), 0o644)
+	_ = os.WriteFile(goFile, []byte("package main\n\nfunc main() {}\n"), 0o600) //nolint:errcheck,gosec
 
 	fset := token.NewFileSet()
 	astFile, err := parser.ParseFile(fset, goFile, nil, parser.ParseComments)
@@ -438,7 +438,7 @@ func TestScanNolint_NoNolint(t *testing.T) {
 func TestScanNolint_WithNolint(t *testing.T) {
 	tmpDir := t.TempDir()
 	goFile := filepath.Join(tmpDir, "test.go")
-	_ = os.WriteFile(goFile, []byte("package main //nolint:errcheck\n\nfunc main() {} //nolint\n"), 0o644)
+	_ = os.WriteFile(goFile, []byte("package main //nolint:errcheck\n\nfunc main() {} //nolint\n"), 0o600) //nolint:errcheck,gosec
 
 	fset := token.NewFileSet()
 	astFile, err := parser.ParseFile(fset, goFile, nil, parser.ParseComments)
@@ -480,7 +480,7 @@ func TestIsExcludedDir_NormalDir(t *testing.T) {
 func TestScanHardcodedSecrets_NoSecrets(t *testing.T) {
 	tmpDir := t.TempDir()
 	goFile := filepath.Join(tmpDir, "test.go")
-	_ = os.WriteFile(goFile, []byte("package main\n\nfunc main() {}\n"), 0o644)
+	_ = os.WriteFile(goFile, []byte("package main\n\nfunc main() {}\n"), 0o600) //nolint:errcheck,gosec
 
 	findings := scanHardcodedSecrets(goFile)
 	if len(findings) != 0 {
@@ -491,12 +491,13 @@ func TestScanHardcodedSecrets_NoSecrets(t *testing.T) {
 func TestScanHardcodedSecrets_WithSecret(t *testing.T) {
 	tmpDir := t.TempDir()
 	goFile := filepath.Join(tmpDir, "test.go")
-	_ = os.WriteFile(goFile, []byte(`package main
+	content := []byte(`package main
 
 var apiKey = "sk-proj-1234567890abcdefghijklmnop"
 
 func main() {}
-`), 0o644)
+`)
+	_ = os.WriteFile(goFile, content, 0o600) //nolint:errcheck,gosec
 
 	findings := scanHardcodedSecrets(goFile)
 	if len(findings) == 0 {

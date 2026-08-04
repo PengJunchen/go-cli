@@ -84,14 +84,14 @@ func TestSystemReminderInjectorOnlyInjectsDueReminders(t *testing.T) {
 	wrapped := NewSystemReminderInjector(mgr).Wrap(base)
 
 	sub := Submission{Type: SubmissionUserMessage, Content: "turn1"}
-	_, _ = wrapped.Run(context.Background(), sub)
+	_, _ = wrapped.Run(context.Background(), sub) //nolint:errcheck
 	require.Len(t, base.got.History, 1)
 	assert.Equal(t, "once-only", base.got.History[0].Content)
 
 	// Second turn: the one-time reminder already fired, so nothing is injected.
 	base2 := &captureLoop{}
 	wrapped2 := NewSystemReminderInjector(mgr).Wrap(base2)
-	_, _ = wrapped2.Run(context.Background(), Submission{Type: SubmissionUserMessage, Content: "turn2"})
+	_, _ = wrapped2.Run(context.Background(), Submission{Type: SubmissionUserMessage, Content: "turn2"}) //nolint:errcheck
 	assert.Empty(t, base2.got.History, "no reminder due on the second turn")
 }
 

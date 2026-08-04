@@ -158,7 +158,7 @@ func TestDefaultSubagentDispatcherListRunning(t *testing.T) {
 
 	dispatchDone := make(chan struct{})
 	go func() {
-		_, _ = d.Dispatch(context.Background(), SubagentTask{ID: "running-1", Prompt: "go"})
+		_, _ = d.Dispatch(context.Background(), SubagentTask{ID: "running-1", Prompt: "go"}) //nolint:errcheck
 		close(dispatchDone)
 	}()
 

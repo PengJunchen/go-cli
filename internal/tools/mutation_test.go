@@ -181,7 +181,7 @@ func TestMutationQueueRealpathSymlink(t *testing.T) {
 	// Use the built-in handler so mutations perform real writes against the
 	// underlying file, proving FIFO serialization on a shared worker.
 	q := NewDefaultFileMutationQueue()
-	cq := q.(*DefaultFileMutationQueue)
+	cq := q.(*DefaultFileMutationQueue) //nolint:errcheck
 	defer func() { require.NoError(t, cq.Close()) }()
 
 	// Enqueue via the symlink path and then via the real path.
@@ -264,7 +264,7 @@ func TestMutationQueueCloseStopsEnqueue(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	q := NewDefaultFileMutationQueue()
-	cq := q.(*DefaultFileMutationQueue)
+	cq := q.(*DefaultFileMutationQueue) //nolint:errcheck
 	require.NoError(t, cq.Close())
 	require.Error(t, cq.Close(), "closing twice should error")
 
@@ -283,7 +283,7 @@ func TestMutationQueueConcurrentEnqueueCloseNoPanic(t *testing.T) {
 		time.Sleep(5 * time.Millisecond)
 		return nil
 	}))
-	cq := q.(*DefaultFileMutationQueue)
+	cq := q.(*DefaultFileMutationQueue) //nolint:errcheck
 
 	dir := t.TempDir()
 	const enqueuers = 8

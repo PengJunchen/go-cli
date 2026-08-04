@@ -17,7 +17,7 @@ func TestFileTrackerBackupRestoreExistingFile(t *testing.T) {
 	path := filepath.Join(tmpDir, "existing.txt")
 
 	original := "original content"
-	require.NoError(t, os.WriteFile(path, []byte(original), 0644))
+	require.NoError(t, os.WriteFile(path, []byte(original), 0600))
 
 	id, err := ft.Backup(path)
 	require.NoError(t, err)
@@ -25,7 +25,7 @@ func TestFileTrackerBackupRestoreExistingFile(t *testing.T) {
 	assert.True(t, hasCheckpointPrefix(t, id), "checkpoint ID should have cp_ prefix")
 
 	// Modify the file after backup.
-	require.NoError(t, os.WriteFile(path, []byte("modified content"), 0644))
+	require.NoError(t, os.WriteFile(path, []byte("modified content"), 0600))
 
 	// Restore should bring back the original content.
 	require.NoError(t, ft.Restore(id))
@@ -46,7 +46,7 @@ func TestFileTrackerBackupNewFileRestoreDeletes(t *testing.T) {
 	assert.NotEmpty(t, id)
 
 	// Create the file (simulating a write operation after backup).
-	require.NoError(t, os.WriteFile(path, []byte("newly created"), 0644))
+	require.NoError(t, os.WriteFile(path, []byte("newly created"), 0600))
 
 	// Restore should delete the file since it didn't exist at backup time.
 	require.NoError(t, ft.Restore(id))
@@ -62,12 +62,12 @@ func TestFileTrackerMultipleBackupRestoreCycles(t *testing.T) {
 
 	// --- Cycle 1: backup original, modify, restore ---
 	original := "original content"
-	require.NoError(t, os.WriteFile(path, []byte(original), 0644))
+	require.NoError(t, os.WriteFile(path, []byte(original), 0600))
 
 	cp1, err := ft.Backup(path)
 	require.NoError(t, err)
 
-	require.NoError(t, os.WriteFile(path, []byte("modified content"), 0644))
+	require.NoError(t, os.WriteFile(path, []byte("modified content"), 0600))
 	require.NoError(t, ft.Restore(cp1))
 
 	got, err := os.ReadFile(path)
@@ -76,13 +76,13 @@ func TestFileTrackerMultipleBackupRestoreCycles(t *testing.T) {
 
 	// --- Cycle 2: backup modified, change again, restore to modified ---
 	modified := "modified content"
-	require.NoError(t, os.WriteFile(path, []byte(modified), 0644))
+	require.NoError(t, os.WriteFile(path, []byte(modified), 0600))
 
 	cp2, err := ft.Backup(path)
 	require.NoError(t, err)
 	assert.NotEqual(t, cp1, cp2, "checkpoint IDs should be unique")
 
-	require.NoError(t, os.WriteFile(path, []byte("other content"), 0644))
+	require.NoError(t, os.WriteFile(path, []byte("other content"), 0600))
 	require.NoError(t, ft.Restore(cp2))
 
 	got, err = os.ReadFile(path)
@@ -98,9 +98,9 @@ func TestFileTrackerListCheckpoints(t *testing.T) {
 	path2 := filepath.Join(tmpDir, "b.txt")
 	path3 := filepath.Join(tmpDir, "c.txt")
 
-	require.NoError(t, os.WriteFile(path1, []byte("aaa"), 0644))
-	require.NoError(t, os.WriteFile(path2, []byte("bbb"), 0644))
-	require.NoError(t, os.WriteFile(path3, []byte("ccc"), 0644))
+	require.NoError(t, os.WriteFile(path1, []byte("aaa"), 0600))
+	require.NoError(t, os.WriteFile(path2, []byte("bbb"), 0600))
+	require.NoError(t, os.WriteFile(path3, []byte("ccc"), 0600))
 
 	id1, err := ft.Backup(path1)
 	require.NoError(t, err)
@@ -142,7 +142,7 @@ func TestFileTrackerBackupBinaryFileSkipped(t *testing.T) {
 
 	// Content with a null byte in the first 512 bytes.
 	binaryContent := []byte("hello\x00world")
-	require.NoError(t, os.WriteFile(path, binaryContent, 0644))
+	require.NoError(t, os.WriteFile(path, binaryContent, 0600))
 
 	id, err := ft.Backup(path)
 	require.NoError(t, err)
@@ -156,7 +156,7 @@ func TestFileTrackerBackupBinaryFileSkipped(t *testing.T) {
 	assert.True(t, checkpoints[0].Existed, "file existed")
 
 	// Verify no content was stored: modify file then restore should be a no-op.
-	require.NoError(t, os.WriteFile(path, []byte("modified"), 0644))
+	require.NoError(t, os.WriteFile(path, []byte("modified"), 0600))
 	require.NoError(t, ft.Restore(id))
 
 	got, err := os.ReadFile(path)
@@ -175,7 +175,7 @@ func TestFileTrackerConcurrentBackup(t *testing.T) {
 		go func(idx int) {
 			defer wg.Done()
 			path := filepath.Join(tmpDir, fmt.Sprintf("file_%d.txt", idx))
-			if err := os.WriteFile(path, []byte("content"), 0644); err != nil {
+			if err := os.WriteFile(path, []byte("content"), 0600); err != nil {
 				t.Errorf("write file %d: %v", idx, err)
 				return
 			}
@@ -206,7 +206,7 @@ func TestFileTrackerCheckpointLimit(t *testing.T) {
 	ft := NewFileTracker()
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "limit.txt")
-	require.NoError(t, os.WriteFile(path, []byte("content"), 0644))
+	require.NoError(t, os.WriteFile(path, []byte("content"), 0600))
 
 	var ids []string
 	for i := 0; i < 55; i++ {
@@ -242,7 +242,7 @@ func TestFileTrackerBackupContent(t *testing.T) {
 	tmpDir := t.TempDir()
 	path := filepath.Join(tmpDir, "existing.txt")
 	original := "original content"
-	require.NoError(t, os.WriteFile(path, []byte(original), 0644))
+	require.NoError(t, os.WriteFile(path, []byte(original), 0600))
 
 	id, err := ft.Backup(path)
 	require.NoError(t, err)

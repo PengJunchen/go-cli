@@ -115,7 +115,7 @@ func (t *WebFetchTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 		slog.Debug("web_fetch.fetch_failed", "url", url, "err", err)
 		return nil, fmt.Errorf("web_fetch: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { _ = resp.Body.Close() }() //nolint:errcheck
 
 	// LimitReader bounds the read so an unexpectedly large body cannot exhaust
 	// memory. The +1 lets us detect truncation.

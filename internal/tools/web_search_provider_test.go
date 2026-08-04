@@ -55,7 +55,7 @@ func TestFetchSearchProviderParsesHTML(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(html))
+		_, _ = w.Write([]byte(html)) //nolint:errcheck
 	}))
 	defer srv.Close()
 
@@ -116,7 +116,7 @@ func TestFetchSearchProviderMaxResults(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(html))
+		_, _ = w.Write([]byte(html)) //nolint:errcheck
 	}))
 	defer srv.Close()
 
@@ -134,10 +134,11 @@ func TestBraveSearchProviderParsesJSON(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		assert.Equal(t, "Bearer test-key", r.Header.Get("X-Subscription-Token"))
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"web":{"results":[
+		body := []byte(`{"web":{"results":[
 			{"title":"Brave Result","url":"https://brave.com/r1","description":"Brave snippet"},
 			{"title":"Second","url":"https://brave.com/r2","description":"Second snippet"}
-		]}}`))
+		]}}`)
+		_, _ = w.Write(body) //nolint:errcheck
 	}))
 	defer srv.Close()
 
@@ -253,13 +254,13 @@ func TestWebSearchToolWithMockProviderNoPanic(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.NotEmpty(t, res.Output)
-	assert.True(t, res.Metadata["mock"].(bool))
+	assert.True(t, res.Metadata["mock"].(bool)) //nolint:errcheck
 }
 
 func TestWebSearchToolWithFetchProviderNoPanic(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`<h2>Fetched Title</h2><a href="https://fetched.com/x">x</a><p>Fetched snippet</p>`))
+		_, _ = w.Write([]byte(`<h2>Fetched Title</h2><a href="https://fetched.com/x">x</a><p>Fetched snippet</p>`)) //nolint:errcheck
 	}))
 	defer srv.Close()
 
@@ -272,13 +273,13 @@ func TestWebSearchToolWithFetchProviderNoPanic(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEmpty(t, res.Output)
 	assert.Contains(t, res.Output, "https://fetched.com/x")
-	assert.False(t, res.Metadata["mock"].(bool))
+	assert.False(t, res.Metadata["mock"].(bool)) //nolint:errcheck
 }
 
 func TestWebSearchToolWithBraveProviderNoPanic(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte(`{"web":{"results":[{"title":"Brave Title","url":"https://brave.com/y","description":"Brave snippet"}]}}`))
+		_, _ = w.Write([]byte(`{"web":{"results":[{"title":"Brave Title","url":"https://brave.com/y","description":"Brave snippet"}]}}`)) //nolint:errcheck
 	}))
 	defer srv.Close()
 

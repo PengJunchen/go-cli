@@ -70,10 +70,10 @@ type subAgentRunner interface {
 	Run(ctx context.Context, prompt string, inbox <-chan string, emit func(AgentEvent)) (AgentMessage, error)
 }
 
-// subAgentRunnerFactory builds a runner from a SubAgentConfig. It is the
+// SubAgentRunnerFactory builds a runner from a SubAgentConfig. It is the
 // pluggable harness constructor seam (defaults to a simulated in-process
 // runner).
-type subAgentRunnerFactory func(cfg SubAgentConfig) subAgentRunner
+type SubAgentRunnerFactory func(cfg SubAgentConfig) subAgentRunner
 
 // eventBufferSize caps how many events a sub-agent buffers.
 const eventBufferSize = 32
@@ -109,7 +109,7 @@ type DefaultSubAgent struct {
 	result        AgentMessage
 	doneErr       error
 	cancel        context.CancelFunc
-	runnerFactory subAgentRunnerFactory
+	runnerFactory SubAgentRunnerFactory
 }
 
 var _ SubAgent = (*DefaultSubAgent)(nil)
@@ -118,7 +118,7 @@ var _ SubAgent = (*DefaultSubAgent)(nil)
 // construction. It is an internal construction aid so that
 // SubAgentOption closures do not reference the concrete DefaultSubAgent type.
 type subAgentOptions struct {
-	runnerFactory subAgentRunnerFactory
+	runnerFactory SubAgentRunnerFactory
 }
 
 // SubAgentOption configures a DefaultSubAgent at construction time.
@@ -126,7 +126,7 @@ type SubAgentOption func(*subAgentOptions)
 
 // WithSubAgentRunner overrides the runner factory the sub-agent drives. It is
 // the pluggable harness constructor; a nil factory uses the simulated runner.
-func WithSubAgentRunner(factory subAgentRunnerFactory) SubAgentOption {
+func WithSubAgentRunner(factory SubAgentRunnerFactory) SubAgentOption {
 	return func(o *subAgentOptions) { o.runnerFactory = factory }
 }
 

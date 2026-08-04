@@ -20,7 +20,7 @@ type fakeHandler struct {
 func (h *fakeHandler) Name() string        { return h.name }
 func (h *fakeHandler) Description() string { return h.desc }
 func (h *fakeHandler) Handle(_ context.Context, args []string, sc *slashContext) error {
-	fmt.Fprintf(sc.out, "%s called with %v\n", h.name, args)
+	fmt.Fprintf(sc.out, "%s called with %v\n", h.name, args) //nolint:errcheck
 	return nil
 }
 
@@ -116,7 +116,7 @@ func TestSlashRegistryConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_ = reg.Register(&fakeHandler{name: fmt.Sprintf("c%d", i), desc: "c"})
+			_ = reg.Register(&fakeHandler{name: fmt.Sprintf("c%d", i), desc: "c"}) //nolint:errcheck
 			_, _ = reg.Lookup("c0")
 			_ = reg.List()
 			_ = reg.Names()

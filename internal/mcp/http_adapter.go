@@ -24,7 +24,6 @@ type HTTPClientAdapter struct {
 	cfg       MCPServerConfig
 	client    *http.Client
 	endpoint  string // resolved POST endpoint (may be relative to base URL)
-	sseResp   *http.Response
 	mu        sync.Mutex
 	connected bool
 	nextID    int64
@@ -104,7 +103,7 @@ func (a *HTTPClientAdapter) Connect(ctx context.Context) error {
 			}
 		}
 	}
-	resp.Body.Close()
+	resp.Body.Close() //nolint:errcheck,gosec
 
 	if a.endpoint == "" {
 		// No endpoint event: streamable HTTP server, use the URL directly.
@@ -214,7 +213,7 @@ func (a *HTTPClientAdapter) request(ctx context.Context, method string, params m
 	if err != nil {
 		return nil, fmt.Errorf("mcp: do request: %w", err)
 	}
-	defer func() { _ = resp.Body.Close() }()
+	defer func() { _ = resp.Body.Close() }() //nolint:errcheck
 
 	raw, err := io.ReadAll(resp.Body)
 	if err != nil {

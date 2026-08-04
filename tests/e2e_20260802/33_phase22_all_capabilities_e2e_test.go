@@ -6,7 +6,7 @@
 // functionality, production/middleware/Phase20/Phase19 component non-nil
 // checks, config-driven tracing, the approval system, and a full agent turn
 // driven by MockLLMServer.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"context"

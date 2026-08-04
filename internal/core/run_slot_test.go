@@ -111,7 +111,7 @@ func TestRunSlotGuard_ClaimRun_CancelledContext(t *testing.T) {
 	cancel() // cancel immediately
 	_, err = g.ClaimRun(ctx)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "cancelled")
+	assert.Contains(t, err.Error(), "canceled")
 
 	g.Release(claim)
 }
@@ -148,7 +148,7 @@ func TestRunSlotGuard_ExecuteClaimedRun_ReleasesOnPanic(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.Panics(t, func() {
-		_ = g.ExecuteClaimedRun(claim, func() error {
+		_ = g.ExecuteClaimedRun(claim, func() error { //nolint:errcheck
 			panic("kaboom")
 		})
 	})

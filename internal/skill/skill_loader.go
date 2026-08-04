@@ -217,7 +217,7 @@ func parseFrontmatter(lines []string) (SkillDefinition, error) {
 	if err != nil {
 		return nil, err
 	}
-	d := parsed.(*DefaultSkillDefinition)
+	d := parsed.(*DefaultSkillDefinition) //nolint:errcheck
 	if d.prompt == "" {
 		d.prompt = body
 	}

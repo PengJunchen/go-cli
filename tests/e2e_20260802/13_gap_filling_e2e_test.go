@@ -6,7 +6,7 @@
 // FileMutationQueue serialization, compaction MidTurn threshold and Unified
 // strategy routing, multi-exporter tracing fan-out, PermissionModeResolver,
 // CircuitBreaker + RetryPolicy integration, and Config five-layer merge.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"bytes"
@@ -151,7 +151,7 @@ func TestSubAgentFullLifecycle(t *testing.T) {
 	sub := core.NewDefaultSubAgent(conf)
 
 	// Initial state: Idle.
-	sa := sub.(*core.DefaultSubAgent)
+	sa := sub.(*core.DefaultSubAgent) //nolint:errcheck
 	assert.Equal(t, core.SubAgentIdle, sa.State())
 
 	// Run: state transitions to Running.
@@ -178,7 +178,7 @@ func TestSubAgentFullLifecycle(t *testing.T) {
 func TestSubAgentInterruptLifecycle(t *testing.T) {
 	conf := core.SubAgentConfig{Name: "interrupt-worker", MaxTurns: 50}
 	sub := core.NewDefaultSubAgent(conf)
-	sa := sub.(*core.DefaultSubAgent)
+	sa := sub.(*core.DefaultSubAgent) //nolint:errcheck
 
 	ch, err := sub.Run(context.Background(), "long task")
 	require.NoError(t, err)
@@ -281,7 +281,7 @@ func TestSessionTreeDeepBranchAndRebuild(t *testing.T) {
 		entryIDs[i] = id
 		parentID := ""
 		if i > 0 {
-			parentID = entryIDs[i-1]
+			parentID = entryIDs[i-1] //nolint:gosec // bounded by i > 0 check
 		}
 		err := tree.Append(ctx, &session.SessionEntry{
 			ID:        id,
@@ -503,7 +503,7 @@ func TestFileMutationQueueSerialization(t *testing.T) {
 	}
 
 	// Clean up the queue.
-	qImpl := q.(*tools.DefaultFileMutationQueue)
+	qImpl := q.(*tools.DefaultFileMutationQueue) //nolint:errcheck
 	require.NoError(t, qImpl.Close())
 }
 
@@ -756,5 +756,5 @@ func TestConfigFiveLayerMerge(t *testing.T) {
 
 // writeFile writes data to a file at the given path.
 func writeFile(path, data string) error {
-	return os.WriteFile(path, []byte(data), 0o644)
+	return os.WriteFile(path, []byte(data), 0o600)
 }

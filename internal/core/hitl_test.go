@@ -61,7 +61,7 @@ func (e *recordingEmitter) lastEvent() HITLQuestionEvent {
 
 func TestHITLTypesRoundTrip(t *testing.T) {
 	ch := make(chan HITLAnswer, 1)
-	ev := HITLQuestionEvent{QuestionID: "q1", Question: "which?", Options: []string{"a", "b"}, ResponseCh: ch}
+	ev := HITLQuestionEvent{QuestionID: "q1", Options: []string{"a", "b"}}
 	ch <- HITLAnswer{QuestionID: "q1", Answer: "a"}
 	assert.Equal(t, "q1", ev.QuestionID)
 	assert.Equal(t, []string{"a", "b"}, ev.Options)

@@ -282,11 +282,11 @@ func TestSlashUndoRestoresMostRecentCheckpoint(t *testing.T) {
 	ft := tools.NewFileTracker()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "file.txt")
-	require.NoError(t, os.WriteFile(path, []byte("original\n"), 0o644))
+	require.NoError(t, os.WriteFile(path, []byte("original\n"), 0o600))
 
 	_, err := ft.Backup(path)
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(path, []byte("modified\n"), 0o644))
+	require.NoError(t, os.WriteFile(path, []byte("modified\n"), 0o600))
 
 	c, buf := newTestCmd()
 	sc := &slashContext{out: buf, fileTracker: ft}
@@ -319,11 +319,11 @@ func TestSlashDiffShowsUnifiedDiff(t *testing.T) {
 	ft := tools.NewFileTracker()
 	dir := t.TempDir()
 	path := filepath.Join(dir, "file.txt")
-	require.NoError(t, os.WriteFile(path, []byte("alpha\nbeta\n"), 0o644))
+	require.NoError(t, os.WriteFile(path, []byte("alpha\nbeta\n"), 0o600))
 
 	_, err := ft.Backup(path)
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(path, []byte("alpha\ngamma\n"), 0o644))
+	require.NoError(t, os.WriteFile(path, []byte("alpha\ngamma\n"), 0o600))
 
 	c, buf := newTestCmd()
 	sc := &slashContext{out: buf, fileTracker: ft, diffGenerator: tools.NewUnifiedDiffGenerator(0, false)}
@@ -459,7 +459,7 @@ func TestSlashSave(t *testing.T) {
 	path := filepath.Join(dir, "s.jsonl")
 	store := session.NewJSONLSessionStore(path)
 	require.NoError(t, store.Open(context.Background()))
-	defer func() { _ = store.Close() }()
+	defer func() { _ = store.Close() }() //nolint:errcheck
 
 	c, buf := newTestCmd()
 	sc := &slashContext{out: buf, sessionStore: store}
@@ -481,7 +481,7 @@ func TestSlashLoadSummarizesStoredEntries(t *testing.T) {
 	path := filepath.Join(dir, "s.jsonl")
 	store := session.NewJSONLSessionStore(path)
 	require.NoError(t, store.Open(context.Background()))
-	defer func() { _ = store.Close() }()
+	defer func() { _ = store.Close() }() //nolint:errcheck
 
 	require.NoError(t, store.Append(context.Background(), &session.SessionEntry{
 		ID: "e1", Type: session.EntryTypeUser, Content: "hello", Timestamp: time.Now(),
@@ -504,7 +504,7 @@ func TestSlashLoadEmpty(t *testing.T) {
 	path := filepath.Join(dir, "s.jsonl")
 	store := session.NewJSONLSessionStore(path)
 	require.NoError(t, store.Open(context.Background()))
-	defer func() { _ = store.Close() }()
+	defer func() { _ = store.Close() }() //nolint:errcheck
 
 	c, buf := newTestCmd()
 	sc := &slashContext{out: buf, sessionStore: store}

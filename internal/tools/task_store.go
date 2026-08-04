@@ -21,7 +21,7 @@ const (
 	// external issue.
 	StatusBlocked TaskStatus = "blocked"
 	// StatusCancelled indicates the task has been abandoned.
-	StatusCancelled TaskStatus = "cancelled"
+	StatusCancelled TaskStatus = "cancelled" //nolint:misspell
 )
 
 // Task represents a single task managed by TaskStore.
@@ -33,7 +33,7 @@ type Task struct {
 	// Description is the longer description of the task.
 	Description string `json:"description"`
 	// Status is one of "pending", "in_progress", "completed", "blocked", or
-	// "cancelled".
+	// "canceled".
 	Status TaskStatus `json:"status"`
 	// CreatedAt is when the task was created.
 	CreatedAt time.Time `json:"created_at"`

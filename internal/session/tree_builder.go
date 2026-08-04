@@ -14,6 +14,8 @@ type EntryLister interface {
 	List(ctx context.Context) ([]*SessionEntry, error)
 }
 
+var _ EntryLister = (*MemoryStore)(nil)
+
 // SessionTreeBuilder builds a SessionTree from a SessionStore.
 type SessionTreeBuilder interface {
 	BuildFromStore(ctx context.Context, store SessionStore) (SessionTree, error)
@@ -77,7 +79,7 @@ func (b *DefaultSessionTreeBuilder) BuildFromStore(ctx context.Context, store Se
 	ordered := topoSortEntries(entryMap)
 
 	var latestID string
-	var latestTs time.Time
+	var latestTS time.Time
 
 	for _, e := range ordered {
 		if err := tree.Append(ctx, e); err != nil {
@@ -85,8 +87,8 @@ func (b *DefaultSessionTreeBuilder) BuildFromStore(ctx context.Context, store Se
 			// corruption). Continue building the rest of the tree.
 			continue
 		}
-		if e.Timestamp.After(latestTs) {
-			latestTs = e.Timestamp
+		if e.Timestamp.After(latestTS) {
+			latestTS = e.Timestamp
 			latestID = e.ID
 		}
 	}

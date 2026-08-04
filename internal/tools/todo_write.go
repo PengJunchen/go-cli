@@ -61,15 +61,15 @@ func (t *TodoWriteTool) Execute(ctx context.Context, call ToolCall) (*ToolResult
 
 // doAdd creates a new todo item.
 func (t *TodoWriteTool) doAdd(call ToolCall) (*ToolResult, error) {
-	content, _ := call.Args["content"].(string)
+	content, _ := call.Args["content"].(string) //nolint:errcheck
 	if strings.TrimSpace(content) == "" {
 		return nil, errors.New("todo_write: 'content' is required for add action")
 	}
-	priority, _ := call.Args["priority"].(string)
+	priority, _ := call.Args["priority"].(string) //nolint:errcheck
 	if priority == "" {
 		priority = "medium"
 	}
-	status, _ := call.Args["status"].(string)
+	status, _ := call.Args["status"].(string) //nolint:errcheck
 	if status == "" {
 		status = "pending"
 	}
@@ -100,11 +100,11 @@ func (t *TodoWriteTool) doAdd(call ToolCall) (*ToolResult, error) {
 
 // doUpdate changes the status of an existing todo item.
 func (t *TodoWriteTool) doUpdate(call ToolCall) (*ToolResult, error) {
-	id, _ := call.Args["id"].(string)
+	id, _ := call.Args["id"].(string) //nolint:errcheck
 	if strings.TrimSpace(id) == "" {
 		return nil, errors.New("todo_write: 'id' is required for update action")
 	}
-	status, _ := call.Args["status"].(string)
+	status, _ := call.Args["status"].(string) //nolint:errcheck
 	if strings.TrimSpace(status) == "" {
 		return nil, errors.New("todo_write: 'status' is required for update action")
 	}
@@ -147,7 +147,7 @@ func (t *TodoWriteTool) doList(call ToolCall) (*ToolResult, error) {
 
 // doRemove deletes a todo item by ID.
 func (t *TodoWriteTool) doRemove(call ToolCall) (*ToolResult, error) {
-	id, _ := call.Args["id"].(string)
+	id, _ := call.Args["id"].(string) //nolint:errcheck
 	if strings.TrimSpace(id) == "" {
 		return nil, errors.New("todo_write: 'id' is required for remove action")
 	}

@@ -1,7 +1,7 @@
 // Package e2e_20260802 contains end-to-end integration tests.
 // This file verifies Phase 20 context management wiring: compaction
 // writeback to AgentImpl.history and session persistence/resume.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"bufio"
@@ -78,7 +78,7 @@ func TestE2E_Phase20_SessionPersistence(t *testing.T) {
 
 	store := session.NewJSONLSessionStore(storePath)
 	require.NoError(t, store.Open(context.Background()))
-	defer store.Close()
+	defer store.Close() //nolint:errcheck,gosec
 
 	require.NoError(t, store.Append(context.Background(), &session.SessionEntry{
 		ID:        "entry-0",
@@ -100,7 +100,7 @@ func TestE2E_Phase20_SessionPersistence(t *testing.T) {
 
 	store2 := session.NewJSONLSessionStore(storePath)
 	require.NoError(t, store2.Open(context.Background()))
-	defer store2.Close()
+	defer store2.Close() //nolint:errcheck,gosec
 
 	entry0, err := store2.Get(context.Background(), "entry-0")
 	require.NoError(t, err)
@@ -142,12 +142,12 @@ func TestE2E_Phase20_SessionResumeReconstructsHistory(t *testing.T) {
 		}))
 	}
 	require.NoError(t, store.Save(context.Background()))
-	store.Close()
+	store.Close() //nolint:errcheck,gosec
 
 	// Read file back as JSONL (simulating loadSessionHistory).
 	file, err := os.Open(storePath)
 	require.NoError(t, err)
-	defer file.Close()
+	defer file.Close() //nolint:errcheck,gosec
 
 	var history []core.AgentMessage
 	scanner := bufio.NewScanner(file)

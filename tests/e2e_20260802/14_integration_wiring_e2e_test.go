@@ -1,7 +1,7 @@
 // Package e2e_20260802 contains rigorous, traceable integration/wiring tests
 // (WT prefix) that verify modules are properly connected to the runtime. Each
 // test follows the standards in integration_test_standards.md.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"context"
@@ -440,7 +440,7 @@ func TestWT_Session_JSONLSaveAndRestore(t *testing.T) {
 	// Create new store with same path, Open/Load, verify entries restored.
 	store2 := session.NewJSONLSessionStore(path)
 	require.NoError(t, store2.Open(ctx))
-	defer store2.Close()
+	defer store2.Close() //nolint:errcheck,gosec
 
 	for _, expected := range entries {
 		got, err := store2.Get(ctx, expected.ID)
@@ -466,7 +466,7 @@ func TestWT_Session_TreeBranchAndContext(t *testing.T) {
 		entryIDs[i] = id
 		parentID := ""
 		if i > 0 {
-			parentID = entryIDs[i-1]
+			parentID = entryIDs[i-1] //nolint:gosec // bounded by i > 0 check
 		}
 		require.NoError(t, tree.Append(ctx, &session.SessionEntry{
 			ID:        id,
@@ -760,7 +760,7 @@ func TestWT_Middleware_ModelMiddlewareWraps(t *testing.T) {
 func TestWT_SubAgent_LifecycleStates(t *testing.T) {
 	conf := core.SubAgentConfig{Name: "lifecycle-worker", MaxTurns: 3}
 	sub := core.NewDefaultSubAgent(conf)
-	sa := sub.(*core.DefaultSubAgent)
+	sa := sub.(*core.DefaultSubAgent) //nolint:errcheck
 
 	// Verify initial state is Idle.
 	assert.Equal(t, core.SubAgentIdle, sa.State())
@@ -791,7 +791,7 @@ func TestWT_SubAgent_LifecycleStates(t *testing.T) {
 func TestWT_SubAgent_InterruptTransitions(t *testing.T) {
 	conf := core.SubAgentConfig{Name: "interrupt-worker", MaxTurns: 50}
 	sub := core.NewDefaultSubAgent(conf)
-	sa := sub.(*core.DefaultSubAgent)
+	sa := sub.(*core.DefaultSubAgent) //nolint:errcheck
 
 	ch, err := sub.Run(context.Background(), "long task")
 	require.NoError(t, err)
@@ -986,9 +986,7 @@ func TestET_Pipeline_ApprovalToolTrace(t *testing.T) {
 		switch ev.Kind {
 		case "tool_call":
 			toolCallIdx++
-			if ev.Content == "bash" {
-				// Next tool_result should contain the denial error.
-			}
+			// When Content == "bash", the next tool_result should contain the denial error.
 		case "tool_result":
 			toolResultIdx++
 			if strings.Contains(ev.Content, "denied") {

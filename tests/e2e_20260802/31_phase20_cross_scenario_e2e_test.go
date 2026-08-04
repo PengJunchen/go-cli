@@ -3,7 +3,7 @@
 // Package e2e_20260802 contains end-to-end integration tests.
 // This file verifies Phase 20 cross-scenario integration: system prompt +
 // git tools, token estimation + git, and SSE parser + git.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"context"
