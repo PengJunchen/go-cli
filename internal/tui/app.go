@@ -31,6 +31,10 @@ type AgentEvent struct {
 	TraceID string
 	// SpanID associates the event with a span for debug logging.
 	SpanID string
+	// Incremental marks a partial event that contains only a fragment of
+	// the assistant's response (streaming tokens). The TUI accumulates
+	// these into the last assistant entry instead of creating new entries.
+	Incremental bool
 }
 
 // App is the top-level TUI application entry point. It runs a
@@ -71,6 +75,15 @@ func WithWidth(width int) AppOption {
 	return func(a *BubbleteaApp) { a.width = width }
 }
 
+// WithoutKeyboardNavigation disables raw-mode keyboard input even when stdin
+// is a TTY. This is necessary when the caller already reads stdin with a
+// line-based scanner (e.g. the interactive command), because the keyboard
+// loop's bufio.Reader and the scanner would contend for the same file
+// descriptor, causing the scanner to miss bytes after the loop exits.
+func WithoutKeyboardNavigation() AppOption {
+	return func(a *BubbleteaApp) { a.interactive = false }
+}
+
 // WithOnUpdate registers a callback invoked after every view mutation. The
 // callback receives the freshly rendered view string so it does not need to
 // call View (which would deadlock on the internal mutex). The callback runs
@@ -106,6 +119,12 @@ type BubbleteaApp struct {
 	eventsSeen atomic.Int64
 	msgsSeen   atomic.Int64
 
+	// streamingEntry points to the accordion entry currently receiving
+	// incremental token chunks. It is set on the first incremental event
+	// and cleared when a non-incremental event arrives.
+	streamingEntry *AccordionEntry
+	streamingBuf   strings.Builder
+
 	// interactive enables keyboard-driven accordion navigation. When false
 	// (the default for non-TTY / pipe input), the app renders every entry
 	// expanded (legacy behaviour).
@@ -122,14 +141,14 @@ type BubbleteaApp struct {
 // queue. Options override these defaults.
 func NewBubbleteaApp(events <-chan AgentEvent, opts ...AppOption) *BubbleteaApp {
 	a := &BubbleteaApp{
-		reg:        NewDefaultRegistry(),
-		themeMgr:   NewThemeManager(),
-		events:     events,
-		msgCh:      make(chan Msg, 16),
-		quitCh:     make(chan struct{}),
-		done:       make(chan struct{}),
-		streamBuf:  make(map[string]*strings.Builder),
-		accordion:  NewAccordionModel(),
+		reg:         NewDefaultRegistry(),
+		themeMgr:    NewThemeManager(),
+		events:      events,
+		msgCh:       make(chan Msg, 16),
+		quitCh:      make(chan struct{}),
+		done:        make(chan struct{}),
+		streamBuf:   make(map[string]*strings.Builder),
+		accordion:   NewAccordionModel(),
 		interactive: isTerminal(),
 	}
 	for _, opt := range opts {
@@ -253,9 +272,32 @@ func (a *BubbleteaApp) cleanup() {
 }
 
 // handleEvent dispatches a single agent event to its renderer and adds the
-// result to the accordion model. Tool calls, tool results and thinking entries
-// are stored as collapsible entries; other entries are expanded by default.
+// result to the accordion model. Incremental events (streaming tokens) are
+// accumulated into the last assistant entry instead of creating new entries.
+// Tool calls, tool results and thinking entries are stored as collapsible
+// entries; other entries are expanded by default.
 func (a *BubbleteaApp) handleEvent(ctx context.Context, ev AgentEvent) {
+	if ev.Incremental {
+		a.handleIncremental(ctx, ev)
+		return
+	}
+
+	// Finalize any active streaming entry so the next incremental event
+	// creates a fresh entry rather than appending to a completed message.
+	a.mu.Lock()
+	hadStreaming := a.streamingEntry != nil
+	a.streamingEntry = nil
+	a.streamingBuf.Reset()
+	a.mu.Unlock()
+
+	// When the loop finishes streaming, it sends a non-incremental "message"
+	// event carrying the complete content for downstream consumers (harness
+	// result, lastMessageEvent). The TUI has already rendered the content
+	// incrementally, so skip this duplicate.
+	if hadStreaming && ev.Type == "message" {
+		return
+	}
+
 	start := time.Now()
 	ct := ev.ContentType
 	r, ok := a.reg.Get(ct)
@@ -282,6 +324,62 @@ func (a *BubbleteaApp) handleEvent(ctx context.Context, ev AgentEvent) {
 		"span_id", ev.SpanID,
 		"latency_us", time.Since(start).Microseconds(),
 	)
+}
+
+// handleIncremental processes a streaming token chunk. On the first chunk it
+// creates a new accordion entry; on subsequent chunks it appends to the
+// accumulated content and re-renders the entry in place, producing a live
+// typewriter effect.
+func (a *BubbleteaApp) handleIncremental(ctx context.Context, ev AgentEvent) {
+	ct := ev.ContentType
+	r, ok := a.reg.Get(ct)
+	if !ok {
+		ct = DefaultContentType
+		r, ok = a.reg.Get(DefaultContentType)
+	}
+
+	var view string
+	notify := a.onUpdate != nil
+
+	func() {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+
+		a.streamingBuf.WriteString(ev.Content)
+		accumulated := a.streamingBuf.String()
+
+		// Render the accumulated content so styles wrap the full message.
+		out := accumulated
+		if ok && r != nil {
+			theme := Theme(DarkTheme{})
+			if a.themeMgr != nil {
+				theme = a.themeMgr.Get()
+			}
+			out = r.Render(ctx, accumulated, RenderOpts{
+				Theme:       theme,
+				Width:       a.width,
+				ContentType: ct,
+			})
+		}
+
+		if a.streamingEntry == nil {
+			entry := entryFor(ct, out, a.interactive)
+			entry.Collapsed = false
+			a.accordion.Add(entry)
+			a.streamingEntry = entry
+		} else {
+			a.streamingEntry.Full = out
+			a.streamingEntry.Summary = summarizeFirstLine(out, 80)
+		}
+
+		if notify {
+			view = a.accordion.Render()
+		}
+	}()
+
+	if notify {
+		a.onUpdate(view)
+	}
 }
 
 // addEntry appends a rendered frame to the accordion model. Streaming

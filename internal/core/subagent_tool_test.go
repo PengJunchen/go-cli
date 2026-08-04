@@ -48,8 +48,8 @@ func (s *fakeSubAgent) Run(_ context.Context, prompt string) (<-chan AgentEvent,
 	return ch, nil
 }
 
-func (s *fakeSubAgent) Send(_ context.Context, _ string) error    { return nil }
-func (s *fakeSubAgent) Interrupt(_ context.Context) error         { return nil }
+func (s *fakeSubAgent) Send(_ context.Context, _ string) error { return nil }
+func (s *fakeSubAgent) Interrupt(_ context.Context) error      { return nil }
 func (s *fakeSubAgent) Wait(_ context.Context) (AgentMessage, error) {
 	<-s.done
 	return s.result, s.err
@@ -148,9 +148,9 @@ func TestDefaultSubagentDispatcherListRunning(t *testing.T) {
 	// A sub-agent whose Wait blocks until we close its done channel, so the
 	// task stays running while we observe it.
 	sub := &blockingFakeSubAgent{
-		name:   "long",
-		result: AgentMessage{Role: "assistant", Content: "ok"},
-		done:   make(chan struct{}),
+		name:    "long",
+		result:  AgentMessage{Role: "assistant", Content: "ok"},
+		done:    make(chan struct{}),
 		started: make(chan struct{}),
 	}
 	factory := &fakeSubAgentFactory{subs: []SubAgent{sub}}
@@ -206,10 +206,10 @@ func (s *blockingFakeSubAgent) Wait(_ context.Context) (AgentMessage, error) {
 
 // fakeDispatcher is a core.SubagentDispatcher stub for adapter tests.
 type fakeDispatcher struct {
-	mu       sync.Mutex
-	task     SubagentTask
-	res      SubagentResult
-	err      error
+	mu         sync.Mutex
+	task       SubagentTask
+	res        SubagentResult
+	err        error
 	dispatched bool
 }
 
@@ -232,10 +232,10 @@ func TestAdaptSubagentDispatcherAndNewSubagentTool(t *testing.T) {
 
 	res, err := tool.Execute(context.Background(), tools.ToolCall{
 		Args: map[string]any{
-			"prompt":     "do something",
-			"id":         "t9",
-			"tools":      []any{"bash", "read"},
-			"max_turns":  float64(2),
+			"prompt":    "do something",
+			"id":        "t9",
+			"tools":     []any{"bash", "read"},
+			"max_turns": float64(2),
 		},
 	})
 	require.NoError(t, err)

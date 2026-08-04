@@ -97,7 +97,9 @@ type MCPConfig struct {
 }
 
 // MCPServersMap holds MCP servers in the common mcpServers format:
-//   {"server-name": {"url": "..."}, "other": {"command": "..."}}
+//
+//	{"server-name": {"url": "..."}, "other": {"command": "..."}}
+//
 // This is deserialized from JSON and then flattened into MCPConfig.Servers.
 type MCPServersMap map[string]struct {
 	Command string            `json:"command"`

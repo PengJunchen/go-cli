@@ -38,7 +38,7 @@ func TestExecuteToolsParallel(t *testing.T) {
 	for _, name := range []string{"tool_a", "tool_b", "tool_c"} {
 		name := name
 		err := toolSrv.Register(context.Background(), &testToolDef{
-			name:    name,
+			name: name,
 			handler: func(_ context.Context, _ tools.ToolCall) (*tools.ToolResult, error) {
 				time.Sleep(50 * time.Millisecond)
 				return &tools.ToolResult{Output: name + "_result"}, nil

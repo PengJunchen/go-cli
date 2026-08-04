@@ -508,11 +508,11 @@ func TestE2E_SkillAndMCPCombinedPipeline(t *testing.T) {
 	srv.sseHandshake = true
 	srv.ssePost = true
 	srv.declareTool("search_docs", "Search the documentation", map[string]any{
-		"type": "object",
+		"type":       "object",
 		"properties": map[string]any{"query": map[string]any{"type": "string"}},
 	})
 	srv.declareTool("count_words", "Count words in text", map[string]any{
-		"type": "object",
+		"type":       "object",
 		"properties": map[string]any{"text": map[string]any{"type": "string"}},
 	})
 	srv.callHandler = func(name string, args map[string]any) any {

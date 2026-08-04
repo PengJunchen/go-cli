@@ -38,9 +38,9 @@ type SystemReminderManager interface {
 // thread-safe and tracks the last-fired time of each reminder so one-time
 // reminders fire once and periodic reminders fire on their interval.
 type DefaultSystemReminderManager struct {
-	mu         sync.RWMutex
-	reminders  map[string]SystemReminder
-	lastFired  map[string]time.Time
+	mu        sync.RWMutex
+	reminders map[string]SystemReminder
+	lastFired map[string]time.Time
 }
 
 var _ SystemReminderManager = (*DefaultSystemReminderManager)(nil)

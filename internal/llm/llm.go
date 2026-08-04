@@ -53,6 +53,15 @@ type Message struct {
 type MessageChunk struct {
 	Role    Role   `json:"role"`
 	Content string `json:"content"`
+
+	// Final marks the last chunk of a generation. When tool calls were
+	// accumulated during streaming, the Final chunk carries the complete
+	// ToolCalls so the caller can reconstruct the full assistant message.
+	Final bool `json:"final,omitempty"`
+
+	// ToolCalls holds complete tool calls, populated only on the Final chunk
+	// after per-call argument fragments have been merged.
+	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 }
 
 // ModelInfo describes a model exposed by a provider.

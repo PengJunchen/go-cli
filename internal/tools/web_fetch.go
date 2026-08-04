@@ -130,13 +130,13 @@ func (t *WebFetchTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 		"duration_ms", ms)
 
 	return &ToolResult{
-		Output:   string(data),
+		Output:     string(data),
 		ToolCallID: call.ID,
 		Metadata: map[string]any{
-			"url":       url,
-			"status":    resp.StatusCode,
-			"bytes":     len(data),
-			"truncated": truncated,
+			"url":         url,
+			"status":      resp.StatusCode,
+			"bytes":       len(data),
+			"truncated":   truncated,
 			"duration_ms": ms,
 		},
 	}, nil

@@ -102,16 +102,19 @@ func (h *HarnessImpl) Submit(ctx context.Context, msg string) (EventStream, erro
 // records a terminal result, sends a closing event, and closes the stream so
 // consumers can observe completion without a goroutine leak.
 func (h *HarnessImpl) run(ctx context.Context, stream *EventStreamImpl, submission Submission) {
-	result, err := h.agent.Run(ctx, submission)
+	// Pass the EventStream to the agent so events are emitted in real time
+	// as the LLM streams tokens. The agent also stores events internally
+	// for backward-compatible retrieval via the eventSource interface.
+	result, err := h.agent.Run(ctx, submission, stream)
 
-	var events []AgentEvent
-	if es, ok := h.agent.(eventSource); ok {
-		events = es.Events()
-	}
-	// Send is best-effort: a send after close (or a full buffer) is ignored by
-	// design, so the returned error is passed to bestEffort and discarded.
-	for _, ev := range events {
-		bestEffort(stream.Send(ev))
+	// If the agent didn't send any events to the stream (e.g. it doesn't
+	// support streaming), fall back to fanning out its stored events.
+	if stream.SentCount() == 0 {
+		if es, ok := h.agent.(eventSource); ok {
+			for _, ev := range es.Events() {
+				bestEffort(stream.Send(ev))
+			}
+		}
 	}
 
 	if err != nil {

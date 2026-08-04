@@ -118,8 +118,11 @@ func TestMockLLMServerStreamClosesChannel(t *testing.T) {
 	for c := range ch {
 		chunks = append(chunks, c)
 	}
-	require.Len(t, chunks, 1)
+	// Stream emits a content chunk followed by a Final chunk carrying
+	// tool calls (if any).
+	require.Len(t, chunks, 2)
 	assert.Equal(t, "streamed", chunks[0].Content)
+	assert.True(t, chunks[1].Final)
 }
 
 func TestMockLLMServerReset(t *testing.T) {

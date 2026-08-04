@@ -11,9 +11,9 @@ import (
 
 // fakeAgentLoop is a test AgentLoop that records whether Run was called.
 type fakeAgentLoop struct {
-	called  atomic.Int32
-	events  []AgentEvent
-	runErr  error
+	called atomic.Int32
+	events []AgentEvent
+	runErr error
 }
 
 func (f *fakeAgentLoop) Run(_ context.Context, _ Submission, _ ...EventStream) ([]AgentEvent, error) {

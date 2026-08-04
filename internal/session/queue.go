@@ -48,9 +48,9 @@ const (
 
 // QueuedSubmission is a single submission waiting in one of the three queues.
 type QueuedSubmission struct {
-	ID          string    `json:"id"`
-	Content     string    `json:"content"`
-	EnqueuedAt  time.Time `json:"enqueued_at"`
+	ID         string    `json:"id"`
+	Content    string    `json:"content"`
+	EnqueuedAt time.Time `json:"enqueued_at"`
 }
 
 // SubmissionQueue manages three types of pending submissions:

@@ -186,7 +186,7 @@ type mockMutationTool struct {
 }
 
 func (m *mockMutationTool) Name() string        { return m.name }
-func (m *mockMutationTool) Description() string  { return "mock " + m.name }
+func (m *mockMutationTool) Description() string { return "mock " + m.name }
 func (m *mockMutationTool) Execute(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
 	return m.execute(ctx, call)
 }

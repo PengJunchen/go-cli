@@ -92,7 +92,7 @@ func (c Classification) String() string {
 type AgentLoop interface {
 	// Run executes one iteration of the agent loop for the submission and
 	// returns the events emitted during execution.
-	Run(ctx context.Context, submission Submission) ([]AgentEvent, error)
+	Run(ctx context.Context, submission Submission, stream ...EventStream) ([]AgentEvent, error)
 }
 
 // Agent is a stateful wrapper around the agent loop, exposing a named,
@@ -101,7 +101,7 @@ type Agent interface {
 	// Name returns the agent identifier.
 	Name() string
 	// Run executes a submission through the agent and returns a result.
-	Run(ctx context.Context, submission Submission) (Result, error)
+	Run(ctx context.Context, submission Submission, stream ...EventStream) (Result, error)
 }
 
 // Harness is the full runtime facade. It accepts user input and returns an

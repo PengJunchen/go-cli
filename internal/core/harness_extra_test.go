@@ -16,7 +16,7 @@ type nonEventSourceAgent struct{}
 
 func (nonEventSourceAgent) Name() string { return "plain-agent" }
 
-func (nonEventSourceAgent) Run(context.Context, Submission) (Result, error) {
+func (nonEventSourceAgent) Run(context.Context, Submission, ...EventStream) (Result, error) {
 	return Result{Message: "from-run", Success: true}, nil
 }
 
@@ -45,7 +45,7 @@ type failingEventSourceAgent struct{}
 
 func (failingEventSourceAgent) Name() string { return "fail-agent" }
 
-func (failingEventSourceAgent) Run(context.Context, Submission) (Result, error) {
+func (failingEventSourceAgent) Run(context.Context, Submission, ...EventStream) (Result, error) {
 	return Result{Success: false}, errNilModel
 }
 

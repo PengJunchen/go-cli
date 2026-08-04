@@ -37,6 +37,10 @@ type AgentEvent struct {
 	Content string
 	// Timestamp records when the event was produced.
 	Timestamp time.Time
+	// Incremental marks a partial "message" event that contains only a
+	// fragment of the assistant's response (one or more tokens from a
+	// streaming LLM). The TUI accumulates these into the full message.
+	Incremental bool
 }
 
 // String returns a time-stamped representation of the event and logs it.

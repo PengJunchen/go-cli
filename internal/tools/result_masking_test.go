@@ -83,8 +83,8 @@ func TestResultMaskerSetMaskEmptyFallsBack(t *testing.T) {
 func TestResultMaskerInvalidPatternSkipped(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	m := NewResultMasker([]string{
-		`[invalid(`,                  // invalid regex - skipped
-		`(sk-[a-zA-Z0-9]{20,})`,      // valid
+		`[invalid(`,             // invalid regex - skipped
+		`(sk-[a-zA-Z0-9]{20,})`, // valid
 	})
 
 	out := m.Mask("sk-abcdefghijklmnopqrstuvwxyz1234")

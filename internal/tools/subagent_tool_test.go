@@ -66,9 +66,9 @@ func TestSubagentToolExecuteParsesJSONShapes(t *testing.T) {
 	// JSON-decoded shapes: tools as []any, max_turns as float64.
 	_, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{
-			"prompt":     "hi",
-			"tools":      []any{"a", "b"},
-			"max_turns":  float64(7),
+			"prompt":    "hi",
+			"tools":     []any{"a", "b"},
+			"max_turns": float64(7),
 		},
 	})
 	require.NoError(t, err)

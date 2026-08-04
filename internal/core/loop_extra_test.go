@@ -38,8 +38,23 @@ func (m *scriptedChatModel) Generate(_ context.Context, _ []llm.Message, _ ...ll
 	return m.seq[i], err
 }
 
-func (m *scriptedChatModel) Stream(_ context.Context, _ []llm.Message, _ ...llm.Option) (<-chan llm.MessageChunk, error) {
-	ch := make(chan llm.MessageChunk)
+func (m *scriptedChatModel) Stream(ctx context.Context, msgs []llm.Message, opts ...llm.Option) (<-chan llm.MessageChunk, error) {
+	resp, err := m.Generate(ctx, msgs, opts...)
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil {
+		return nil, errors.New("model returned nil response")
+	}
+	ch := make(chan llm.MessageChunk, 2)
+	if resp.Content != "" {
+		ch <- llm.MessageChunk{Role: resp.Role, Content: resp.Content}
+	}
+	final := llm.MessageChunk{Role: resp.Role, Final: true}
+	if len(resp.ToolCalls) > 0 {
+		final.ToolCalls = resp.ToolCalls
+	}
+	ch <- final
 	close(ch)
 	return ch, nil
 }

@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -246,21 +247,234 @@ func (m *HTTPChatModel) generate(ctx context.Context, msgs []Message, opts ...Op
 	return msg, nil
 }
 
-// Stream returns the generation result as a channel of MessageChunk. This is a
-// deliberately simple implementation: it runs Generate and delivers the full
-// content as a single chunk before closing the channel. It does not perform
-// incremental SSE parsing. The channel is always closed on success and on
-// failure.
+// Stream returns the generation result as a channel of MessageChunk. It sends
+// `stream: true` to the provider and parses the `text/event-stream` response
+// incrementally, emitting one MessageChunk per SSE `data:` payload (which
+// usually arrives as one or more tokens). Tool-call argument fragments are
+// accumulated per call across chunks so the final assistant message can be
+// reconstructed by the caller. The channel is always closed on success and on
+// failure; a non-nil error is returned only for failures detected before the
+// connection is established.
 func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
-	ch := make(chan MessageChunk, 1)
-	resp, err := m.Generate(ctx, msgs, opts...)
+	ch := make(chan MessageChunk, 64)
+	slog.Info("llm_stream_start",
+		"op", "llm.stream",
+		"provider", m.provider.name,
+		"model", m.cfg.Model,
+		"messages", len(msgs),
+	)
+
+	body, err := m.buildBody(msgs, opts...)
 	if err != nil {
 		close(ch)
 		return ch, err
 	}
-	ch <- MessageChunk{Role: resp.Role, Content: resp.Content}
-	close(ch)
+
+	// Re-marshal with stream=true. buildBody does not expose a streaming flag
+	// so we inject it here by decoding and re-encoding.
+	var reqMap map[string]any
+	if err := json.Unmarshal(body, &reqMap); err != nil {
+		close(ch)
+		return ch, fmt.Errorf("llm: decode stream request: %w", err)
+	}
+	reqMap["stream"] = true
+	if reqMap["stream_options"] == nil {
+		reqMap["stream_options"] = map[string]any{"include_usage": true}
+	}
+	streamBody, err := json.Marshal(reqMap)
+	if err != nil {
+		close(ch)
+		return ch, fmt.Errorf("llm: marshal stream request: %w", err)
+	}
+
+	respBody, err := m.roundTrip(ctx, streamBody)
+	if err != nil {
+		close(ch)
+		return ch, err
+	}
+
+	go func() {
+		defer close(ch)
+		defer func() {
+			if cerr := respBody.Close(); cerr != nil {
+				slog.Warn("llm_close_stream_body", "err", cerr)
+			}
+		}()
+
+		reader := bufio.NewReaderSize(respBody, 64*1024)
+
+		// Peek at the first bytes to detect SSE vs plain JSON.
+		isJSON := false
+		peek, err := reader.Peek(64)
+		if err != nil && err != io.EOF {
+			slog.Error("llm_stream_peek_error", "err", err)
+			return
+		}
+		// Trim leading whitespace to find the first meaningful character.
+		trimmed := bytes.TrimLeft(peek, " \t\r\n")
+		if len(trimmed) > 0 && trimmed[0] == '{' {
+			isJSON = true
+		}
+
+		if isJSON {
+			// Server returned a regular JSON response instead of SSE.
+			body, err := io.ReadAll(reader)
+			if err != nil {
+				slog.Error("llm_stream_json_read_error", "err", err)
+				return
+			}
+			var parsed openAIResponse
+			if err := json.Unmarshal(body, &parsed); err != nil {
+				slog.Error("llm_stream_json_parse_error", "err", err)
+				return
+			}
+			var content string
+			var toolCalls []ToolCall
+			if len(parsed.Choices) > 0 {
+				content = parsed.Choices[0].Message.Content
+				toolCalls = convertAssistantToolCalls(parsed.Choices[0].Message.ToolCalls)
+			}
+			if content != "" {
+				ch <- MessageChunk{Role: RoleAssistant, Content: content}
+			}
+			ch <- MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls}
+			return
+		}
+
+		// SSE path: parse data: lines from the buffered reader.
+		scanner := bufio.NewScanner(reader)
+		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+
+		// Per-request accumulation: tool_call index → name + args fragments.
+		var toolNameByIndex map[int]string
+		var toolArgsBuf []string
+		emittedRole := false
+
+		for scanner.Scan() {
+			line := scanner.Text()
+			line = strings.TrimSpace(line)
+			if line == "" || !strings.HasPrefix(line, "data:") {
+				continue
+			}
+			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+			// SSE termination sentinel.
+			if payload == "[DONE]" {
+				break
+			}
+
+			var chunk openAIStreamChunk
+			if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
+				slog.Warn("llm_stream_parse_skip", "err", err)
+				continue
+			}
+			if len(chunk.Choices) == 0 {
+				continue
+			}
+			delta := chunk.Choices[0].Delta
+
+			if !emittedRole {
+				// Emit a role-only chunk early so the loop can start
+				// rendering the assistant message placeholder.
+				ch <- MessageChunk{Role: RoleAssistant, Content: ""}
+				emittedRole = true
+			}
+
+			if delta.Content != "" {
+				ch <- MessageChunk{Role: RoleAssistant, Content: delta.Content}
+			}
+
+			// Accumulate tool_call fragments emitted across chunks.
+			for ci, tc := range delta.ToolCalls {
+				if tc.Index == nil {
+					tc.Index = &ci
+				}
+				idx := *tc.Index
+				for len(toolArgsBuf) <= idx {
+					toolArgsBuf = append(toolArgsBuf, "")
+				}
+				if tc.Function.Name != "" {
+					if toolNameByIndex == nil {
+						toolNameByIndex = make(map[int]string)
+					}
+					if toolNameByIndex[idx] == "" {
+						toolNameByIndex[idx] = tc.Function.Name
+					}
+				}
+				if tc.Function.Arguments != "" {
+					toolArgsBuf[idx] += tc.Function.Arguments
+				}
+			}
+		}
+
+		if scanErr := scanner.Err(); scanErr != nil {
+			slog.Error("llm_stream_scan_error", "err", scanErr)
+		}
+
+		// Fallback: if no SSE lines were found, try to parse the response
+		// as JSON. This handles edge cases where the peek didn't work correctly.
+		if !emittedRole {
+			body, readErr := io.ReadAll(reader)
+			if readErr != nil {
+				slog.Error("llm_stream_fallback_read_error", "err", readErr)
+			} else {
+				var parsed openAIResponse
+				if unmarshalErr := json.Unmarshal(body, &parsed); unmarshalErr != nil {
+					slog.Error("llm_stream_fallback_parse_error", "err", unmarshalErr)
+				} else {
+					var content string
+					var toolCalls []ToolCall
+					if len(parsed.Choices) > 0 {
+						content = parsed.Choices[0].Message.Content
+						toolCalls = convertAssistantToolCalls(parsed.Choices[0].Message.ToolCalls)
+					}
+					if content != "" {
+						ch <- MessageChunk{Role: RoleAssistant, Content: content}
+					}
+					ch <- MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls}
+					return
+				}
+			}
+		}
+
+		// Emit the final accumulated assistant message so callers can build
+		// the complete Message including tool calls.
+		final := MessageChunk{Role: RoleAssistant, Final: true}
+		if toolNameByIndex != nil {
+			final.ToolCalls = make([]ToolCall, len(toolArgsBuf))
+			for idx, name := range toolNameByIndex {
+				var args any
+				if idx < len(toolArgsBuf) && toolArgsBuf[idx] != "" {
+					var decoded any
+					if err := json.Unmarshal([]byte(toolArgsBuf[idx]), &decoded); err == nil {
+						args = decoded
+					} else {
+						args = toolArgsBuf[idx]
+					}
+				}
+				final.ToolCalls[idx] = ToolCall{
+					ID:   fmt.Sprintf("call_%d", idx),
+					Name: name,
+					Args: args,
+				}
+			}
+		}
+		ch <- final
+	}()
+
 	return ch, nil
+}
+
+// openAIStreamChunk is one SSE data payload of a streaming response.
+type openAIStreamChunk struct {
+	Choices []openAIStreamChoice `json:"choices"`
+}
+
+// openAIStreamChoice carries the incremental delta of an OpenAI stream.
+type openAIStreamChoice struct {
+	Delta struct {
+		Content   string           `json:"content"`
+		ToolCalls []openAIToolCall `json:"tool_calls"`
+	} `json:"delta"`
 }
 
 // buildBody serializes the conversation and options into the OpenAI chat
@@ -436,8 +650,11 @@ type openAIUsage struct {
 	CompletionTokens int `json:"completion_tokens"`
 }
 
-// openAIToolCall is an assistant tool invocation request.
+// openAIToolCall is an assistant tool invocation request. In streaming
+// responses the Index field identifies which tool call this fragment belongs
+// to so arguments can be accumulated across chunks.
 type openAIToolCall struct {
+	Index    *int           `json:"index,omitempty"`
 	ID       string         `json:"id"`
 	Type     string         `json:"type,omitempty"`
 	Function openAIFunction `json:"function"`

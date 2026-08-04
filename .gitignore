@@ -48,3 +48,5 @@ bin/
 # Temporary
 .tmp/
 /scanner
+ppt_build/
+*.pptx

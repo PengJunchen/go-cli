@@ -63,7 +63,7 @@ func (m *OverflowRecoveryMiddleware) Name() string { return "overflow" }
 // WrapModel implements ModelMiddleware.
 func (m *OverflowRecoveryMiddleware) WrapModel(next BaseChatModel) BaseChatModel {
 	return &overflowRecoveryModel{
-		mw:   m,
+		mw:    m,
 		inner: next,
 	}
 }

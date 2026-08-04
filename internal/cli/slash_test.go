@@ -260,11 +260,11 @@ func TestSlashCommandsTableDriven(t *testing.T) {
 				{Role: "user", Content: "msg"},
 			}))
 			sc := &slashContext{
-				out:         &buf,
-				agent:       testAgent,
-				costTracker: tracker,
+				out:          &buf,
+				agent:        testAgent,
+				costTracker:  tracker,
 				toolRegistry: reg,
-				modelName:   "test-model",
+				modelName:    "test-model",
 			}
 			c.handleSlashCommand(context.Background(), tt.cmd, sc)
 			assert.Contains(t, buf.String(), tt.wantSub)

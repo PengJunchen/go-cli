@@ -10,8 +10,8 @@ import (
 // API keys, GitHub tokens, password fields in JSON, and credit card numbers.
 var DefaultMaskPatterns = []string{
 	`(sk-[a-zA-Z0-9]{20,})`,                        // API keys
-	`(ghp_[a-zA-Z0-9]{36,})`,                      // GitHub tokens
-	`("[^"]*password[^"]*"\s*:\s*")[^"]*(")`,      // Password fields
+	`(ghp_[a-zA-Z0-9]{36,})`,                       // GitHub tokens
+	`("[^"]*password[^"]*"\s*:\s*")[^"]*(")`,       // Password fields
 	`(\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b)`, // Credit card numbers
 }
 

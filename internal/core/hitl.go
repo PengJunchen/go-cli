@@ -38,6 +38,7 @@ type HITLAnswer struct {
 // HITLQuestionEmitter is the sink a tool uses to surface a HITL question. The
 // emitter is responsible for eventually delivering exactly one HITLAnswer on
 // event.ResponseCh.
+//
 //nolint:scan012 // consumer-side interface; bridge adapter provided below
 type HITLQuestionEmitter interface {
 	// Emit delivers the question event to the HITL layer.
@@ -98,4 +99,3 @@ func (a *hitlEmitterAdapter) Emit(ctx context.Context, ev tools.HITLQuestionEven
 func NewAskUserQuestionTool(e HITLQuestionEmitter, timeout time.Duration) *tools.AskUserQuestionTool {
 	return tools.NewAskUserQuestionTool(AdaptHITLEmitter(e), timeout)
 }
-

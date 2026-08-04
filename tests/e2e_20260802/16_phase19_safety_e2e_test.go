@@ -182,7 +182,7 @@ type recordingTool struct {
 }
 
 func (t *recordingTool) Name() string        { return t.name }
-func (t *recordingTool) Description() string  { return "test " + t.name }
+func (t *recordingTool) Description() string { return "test " + t.name }
 func (t *recordingTool) Execute(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
 	t.executed = true
 	if t.execute != nil {

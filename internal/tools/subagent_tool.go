@@ -43,6 +43,7 @@ type SubagentResult struct {
 // SubagentDispatcher manages sub-agent lifecycle and task dispatch. It is the
 // tools-package consumer-side contract; core.DefaultSubagentDispatcher plus
 // core.AdaptSubagentDispatcher satisfy it.
+//
 //nolint:scan012 // consumer-side interface; default impl in core package
 type SubagentDispatcher interface {
 	// Dispatch creates a sub-agent for the task, runs it to completion, and
