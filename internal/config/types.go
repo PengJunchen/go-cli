@@ -40,10 +40,17 @@ type ModelConfig struct {
 
 // AgentConfig holds agent loop behavior settings.
 type AgentConfig struct {
-	// MaxIterations bounds the number of think → act → observe turns the
+	// MaxIterations bounds the number of think -> act -> observe turns the
 	// agent loop performs before giving up. Zero means use the built-in
 	// default (200). A value of -1 disables the limit entirely.
 	MaxIterations int `json:"max_iterations"`
+	// SystemPrompt, when non-empty, replaces the default base system prompt
+	// entirely. This corresponds to the content of a SYSTEM.md file.
+	SystemPrompt string `json:"system_prompt"`
+	// AppendSystemPrompt, when non-empty, is appended to the end of the
+	// assembled system prompt. This corresponds to the content of an
+	// APPEND_SYSTEM.md file.
+	AppendSystemPrompt string `json:"append_system_prompt"`
 }
 
 // ToolsConfig controls which builtin tools and tool registries are available.

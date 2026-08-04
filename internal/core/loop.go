@@ -33,6 +33,8 @@ type loopConfig struct {
 	modelWrapper         ModelWrapper
 	executionMode        ExecutionMode
 	systemPromptOverride string
+	promptBuilder        SystemPromptBuilder
+	promptOpts           SystemPromptOptions
 }
 
 // LoopOption configures a LoopAgent at construction time.
@@ -49,6 +51,22 @@ func WithLLM(m llm.BaseChatModel) LoopOption {
 // role-specific system prompt.
 func WithSystemPrompt(prompt string) LoopOption {
 	return func(c *loopConfig) { c.systemPromptOverride = prompt }
+}
+
+// WithSystemPromptBuilder sets a SystemPromptBuilder that dynamically assembles
+// the system prompt at Run time. When set, the builder takes precedence over
+// both the default systemPrompt() function and the systemPromptOverride. When
+// nil, the loop falls back to the legacy behavior.
+func WithSystemPromptBuilder(b SystemPromptBuilder) LoopOption {
+	return func(c *loopConfig) { c.promptBuilder = b }
+}
+
+// WithSystemPromptOptions sets the options passed to the SystemPromptBuilder at
+// Run time. The Tools field is populated automatically from the tool registry;
+// callers need only set Cwd, ContextFiles, Skills, CustomPrompt, and
+// AppendPrompt.
+func WithSystemPromptOptions(opts SystemPromptOptions) LoopOption {
+	return func(c *loopConfig) { c.promptOpts = opts }
 }
 
 // WithTools sets the tool registry the loop uses to service tool calls.
@@ -75,6 +93,8 @@ type LoopAgent struct {
 	modelWrapper         ModelWrapper
 	executionMode        ExecutionMode
 	systemPromptOverride string
+	promptBuilder        SystemPromptBuilder
+	promptOpts           SystemPromptOptions
 }
 
 var _ AgentLoop = (*LoopAgent)(nil)
@@ -99,6 +119,8 @@ func NewLoopAgent(opts ...LoopOption) *LoopAgent {
 		modelWrapper:         cfg.modelWrapper,
 		executionMode:        cfg.executionMode,
 		systemPromptOverride: cfg.systemPromptOverride,
+		promptBuilder:        cfg.promptBuilder,
+		promptOpts:           cfg.promptOpts,
 	}
 	slog.Info("core.loop.new",
 		"max_iterations", la.maxIterations,
@@ -179,12 +201,27 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 	// cannot answer questions referencing earlier conversation.
 	messages := make([]llm.Message, 0, len(submission.History)+2)
 
-	// System prompt: tell the model it can use tools to help the user. A
-	// non-empty override (e.g. from a sub-agent config) replaces the
-	// tool-aware default entirely.
-	sysPrompt := l.systemPromptOverride
-	if sysPrompt == "" {
-		sysPrompt = systemPrompt(l.tools)
+	// System prompt: tell the model it can use tools to help the user.
+	// When a SystemPromptBuilder is wired, it takes precedence and assembles
+	// the prompt dynamically from structured options. Otherwise fall back to
+	// the legacy behavior: a non-empty override (e.g. from a sub-agent config)
+	// replaces the tool-aware default entirely.
+	var sysPrompt string
+	if l.promptBuilder != nil {
+		opts := l.promptOpts
+		if l.tools != nil {
+			if defs, listErr := l.tools.List(spanCtx); listErr == nil {
+				opts.Tools = defs
+			} else {
+				logger.Warn("core.loop.list_tools_for_prompt_failed", "err", listErr)
+			}
+		}
+		sysPrompt = l.promptBuilder.Build(spanCtx, opts)
+	} else {
+		sysPrompt = l.systemPromptOverride
+		if sysPrompt == "" {
+			sysPrompt = systemPrompt(l.tools)
+		}
 	}
 	messages = append(messages, llm.Message{Role: llm.RoleSystem, Content: sysPrompt})
 

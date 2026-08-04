@@ -61,6 +61,11 @@ func (t *EditFileTool) Description() string {
 	return "edit: replaces an old_string block in a file with new_string. Args: file_path (string), old_string (string), new_string (string)."
 }
 
+// PromptGuidelines returns usage hints for the edit tool.
+func (t *EditFileTool) PromptGuidelines() []string {
+	return []string{"Use edit to make targeted changes to existing files"}
+}
+
 // Execute edits the file at file_path by locating a single occurrence of
 // old_string and replacing it with new_string. The old_string must match
 // exactly once; zero or multiple occurrences produce an error. An empty

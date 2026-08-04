@@ -362,8 +362,8 @@ func TestInteractiveCmd_RegisterSkillTools_NilConfig(t *testing.T) {
 	ctx := t.Context()
 	tr := tools.NewDefaultToolRegistry()
 
-	err := registerSkillTools(ctx, nil, tr)
-	require.NoError(t, err)
+	infos := registerSkillTools(ctx, nil, tr)
+	assert.Empty(t, infos)
 }
 
 func TestInteractiveCmd_RegisterSkillTools_EmptyDir(t *testing.T) {
@@ -371,8 +371,8 @@ func TestInteractiveCmd_RegisterSkillTools_EmptyDir(t *testing.T) {
 	tr := tools.NewDefaultToolRegistry()
 	rc := &config.Config{}
 
-	err := registerSkillTools(ctx, rc, tr)
-	require.NoError(t, err)
+	infos := registerSkillTools(ctx, rc, tr)
+	assert.Empty(t, infos)
 }
 
 func TestInteractiveCmd_RegisterSkillTools_LoadError(t *testing.T) {
@@ -384,8 +384,8 @@ func TestInteractiveCmd_RegisterSkillTools_LoadError(t *testing.T) {
 		},
 	}
 
-	err := registerSkillTools(ctx, rc, tr)
-	require.NoError(t, err) // Load errors are logged, not propagated.
+	infos := registerSkillTools(ctx, rc, tr)
+	assert.Empty(t, infos) // Load errors are logged, not propagated.
 
 	registered, err := tr.List(ctx)
 	require.NoError(t, err)
@@ -412,8 +412,10 @@ Skill body text.
 		Skill: config.SkillConfig{Dir: dir},
 	}
 
-	err := registerSkillTools(ctx, rc, tr)
-	require.NoError(t, err)
+	infos := registerSkillTools(ctx, rc, tr)
+	require.Len(t, infos, 1)
+	assert.Equal(t, "registered-skill", infos[0].Name)
+	assert.Equal(t, "test", infos[0].Category)
 
 	tool, err := tr.Get(ctx, "registered-skill")
 	require.NoError(t, err)
