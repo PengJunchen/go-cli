@@ -384,11 +384,11 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 
 // claudeStreamEvent is a single SSE event in the Anthropic streaming protocol.
 type claudeStreamEvent struct {
-	Type         string                `json:"type"`
-	Index        int                   `json:"index"`
-	Message      *claudeStreamMessage  `json:"message,omitempty"`
-	ContentBlock *claudeStreamBlock    `json:"content_block,omitempty"`
-	Delta        *claudeStreamDelta    `json:"delta,omitempty"`
+	Type         string               `json:"type"`
+	Index        int                  `json:"index"`
+	Message      *claudeStreamMessage `json:"message,omitempty"`
+	ContentBlock *claudeStreamBlock   `json:"content_block,omitempty"`
+	Delta        *claudeStreamDelta   `json:"delta,omitempty"`
 }
 
 // claudeStreamMessage carries the top-level message metadata from message_start.

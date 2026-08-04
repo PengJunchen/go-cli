@@ -77,7 +77,7 @@ func (e *UnicodeTokenEstimator) Estimate(text string) (int, error) {
 		case r < 0x80 && (unicode.IsSpace(r) || unicode.IsPunct(r)):
 			sum += 0.5
 		default:
-			sum += 1
+			sum++
 		}
 	}
 	n := int(math.Round(sum))
