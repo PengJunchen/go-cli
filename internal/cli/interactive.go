@@ -149,6 +149,9 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		out:            c.out,
 		config:         rc,
 		sessionStore:   assembly.SessionStore,
+		fileTracker:    assembly.FileTracker,
+		diffGenerator:  assembly.DiffGenerator,
+		planCtrl:       assembly.PlanCtrl,
 	}
 
 	entryCounter := len(assembly.Agent.Messages())

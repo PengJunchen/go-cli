@@ -22,6 +22,12 @@ func WithEditDiffGenerator(dg DiffGenerator) EditFileToolOption {
 	return func(t *EditFileTool) { t.diffGenerator = dg }
 }
 
+// WithEditFileTracker sets the FileTracker used to create backup checkpoints
+// before editing files. When nil (the default) no backup is created.
+func WithEditFileTracker(ft *FileTracker) EditFileToolOption {
+	return func(t *EditFileTool) { t.fileTracker = ft }
+}
+
 // EditFileTool replaces an old_string block in a file with new_string, in the
 // style of apply_patch. It implements the ToolDefinition interface.
 type EditFileTool struct {
@@ -30,6 +36,8 @@ type EditFileTool struct {
 	// diffGenerator, when set, produces a diff preview of the edit. It is
 	// included in the ToolResult metadata under "diff".
 	diffGenerator DiffGenerator
+	// fileTracker, when set, creates backup checkpoints before editing files.
+	fileTracker *FileTracker
 }
 
 var _ ToolDefinition = (*EditFileTool)(nil)
@@ -123,6 +131,14 @@ func (t *EditFileTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 	}
 
 	updated := strings.Replace(data, oldString, newString, 1)
+
+	// When a file tracker is configured, create a backup checkpoint before
+	// applying the edit. Errors are logged but never block the edit.
+	if t.fileTracker != nil {
+		if _, berr := t.fileTracker.Backup(abspath); berr != nil {
+			logger.Warn("edit.backup_failed", "path", abspath, "err", berr)
+		}
+	}
 
 	// When a diff generator is configured, produce a change preview that the
 	// approval flow can surface. This never blocks execution; a generation

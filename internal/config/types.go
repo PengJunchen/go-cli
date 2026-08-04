@@ -13,6 +13,7 @@ type Config struct {
 	Compaction CompactionConfig `json:"compaction"`
 	MCP        MCPConfig        `json:"mcp"`
 	Skill      SkillConfig      `json:"skill"`
+	WebSearch  WebSearchConfig  `json:"web_search"`
 
 	verbose bool
 }
@@ -116,6 +117,16 @@ type MCPServersMap map[string]struct {
 type SkillConfig struct {
 	// Dir is the directory to load skill definitions from.
 	Dir string `json:"dir"`
+}
+
+// WebSearchConfig controls the web search provider selection. When Provider
+// is empty or "mock", the MockSearchProvider is used (default). "fetch" selects
+// the DuckDuckGo HTML scraping provider, and "brave" selects the Brave Search
+// API provider (requires APIKey).
+type WebSearchConfig struct {
+	Provider string `json:"provider"` // "mock" (default), "fetch", "brave"
+	APIKey   string `json:"api_key"`  // for brave provider
+	Timeout  string `json:"timeout"`  // duration string, default "10s"
 }
 
 // Source enumerates the five configuration layers, ordered by ascending

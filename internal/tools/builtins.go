@@ -6,19 +6,77 @@ import (
 	"log/slog"
 )
 
+// RegisterDefaultsOption configures RegisterDefaults behavior.
+type RegisterDefaultsOption func(*registerDefaultsConfig)
+
+type registerDefaultsConfig struct {
+	fileTracker   *FileTracker
+	diffGenerator DiffGenerator
+	bashSandbox   BashSandbox
+}
+
+// WithRegisteredFileTracker wires a FileTracker into the WriteTool and
+// EditFileTool registered by RegisterDefaults.
+func WithRegisteredFileTracker(ft *FileTracker) RegisterDefaultsOption {
+	return func(c *registerDefaultsConfig) { c.fileTracker = ft }
+}
+
+// WithRegisteredDiffGenerator wires a DiffGenerator into the WriteTool and
+// EditFileTool registered by RegisterDefaults.
+func WithRegisteredDiffGenerator(dg DiffGenerator) RegisterDefaultsOption {
+	return func(c *registerDefaultsConfig) { c.diffGenerator = dg }
+}
+
+// WithRegisteredBashSandbox wires a BashSandbox into the BashTool registered by
+// RegisterDefaults.
+func WithRegisteredBashSandbox(sb BashSandbox) RegisterDefaultsOption {
+	return func(c *registerDefaultsConfig) { c.bashSandbox = sb }
+}
+
 // RegisterDefaults registers the built-in read, bash, write, edit, grep, find
 // and ls tools into the given registry. It returns an error if any
-// registration conflicts with an existing tool name.
-func RegisterDefaults(ctx context.Context, reg ToolRegistry) error {
+// registration conflicts with an existing tool name. Options may be passed to
+// wire dependencies (FileTracker, DiffGenerator, BashSandbox) into the
+// registered tools; when no options are provided the tools use their defaults.
+func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDefaultsOption) error {
 	if reg == nil {
 		return fmt.Errorf("tools: nil registry")
 	}
 
+	cfg := registerDefaultsConfig{}
+	for _, opt := range opts {
+		opt(&cfg)
+	}
+
+	// Build WriteTool options.
+	writeOpts := []WriteToolOption{}
+	if cfg.fileTracker != nil {
+		writeOpts = append(writeOpts, WithFileTracker(cfg.fileTracker))
+	}
+	if cfg.diffGenerator != nil {
+		writeOpts = append(writeOpts, WithDiffGenerator(cfg.diffGenerator))
+	}
+
+	// Build EditFileTool options.
+	editOpts := []EditFileToolOption{}
+	if cfg.fileTracker != nil {
+		editOpts = append(editOpts, WithEditFileTracker(cfg.fileTracker))
+	}
+	if cfg.diffGenerator != nil {
+		editOpts = append(editOpts, WithEditDiffGenerator(cfg.diffGenerator))
+	}
+
+	// Build BashTool options.
+	bashOpts := []BashToolOption{}
+	if cfg.bashSandbox != nil {
+		bashOpts = append(bashOpts, WithBashSandbox(cfg.bashSandbox))
+	}
+
 	defs := []ToolDefinition{
 		NewReadTool(),
-		NewBashTool(),
-		NewWriteTool(),
-		NewEditFileTool(),
+		NewBashTool(bashOpts...),
+		NewWriteTool(writeOpts...),
+		NewEditFileTool(editOpts...),
 		NewGrepTool(),
 		NewFindTool(),
 		NewLSTool(),

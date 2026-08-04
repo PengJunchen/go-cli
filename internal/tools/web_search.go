@@ -41,6 +41,9 @@ func NewWebSearchTool(opts ...WebSearchToolOption) *WebSearchTool {
 // Name returns the tool name.
 func (t *WebSearchTool) Name() string { return "web_search" }
 
+// ProviderName returns the name of the configured search provider.
+func (t *WebSearchTool) ProviderName() string { return t.provider.Name() }
+
 // Description returns a brief description of the tool.
 func (t *WebSearchTool) Description() string {
 	return "web_search: searches the web for a query and returns results. Args: query (string)."

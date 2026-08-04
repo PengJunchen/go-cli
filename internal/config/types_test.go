@@ -64,3 +64,23 @@ func TestConfigIsValidByDefault(t *testing.T) {
 	err := NewDefaultValidator().Validate(*defaultConfig())
 	require.NoError(t, err)
 }
+
+func TestWebSearchConfigFields(t *testing.T) {
+	cfg := &Config{
+		WebSearch: WebSearchConfig{
+			Provider: "brave",
+			APIKey:   "test-key",
+			Timeout:  "15s",
+		},
+	}
+	assert.Equal(t, "brave", cfg.WebSearch.Provider)
+	assert.Equal(t, "test-key", cfg.WebSearch.APIKey)
+	assert.Equal(t, "15s", cfg.WebSearch.Timeout)
+}
+
+func TestWebSearchConfigDefaultsToEmpty(t *testing.T) {
+	cfg := defaultConfig()
+	assert.Equal(t, "", cfg.WebSearch.Provider, "default provider should be empty (treated as mock)")
+	assert.Equal(t, "", cfg.WebSearch.APIKey)
+	assert.Equal(t, "", cfg.WebSearch.Timeout)
+}

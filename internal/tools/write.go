@@ -49,6 +49,12 @@ func WithDiffGenerator(dg DiffGenerator) WriteToolOption {
 	return func(t *WriteTool) { t.diffGenerator = dg }
 }
 
+// WithFileTracker sets the FileTracker used to create backup checkpoints
+// before writing files. When nil (the default) no backup is created.
+func WithFileTracker(ft *FileTracker) WriteToolOption {
+	return func(t *WriteTool) { t.fileTracker = ft }
+}
+
 // WriteTool writes content to files, creating parent directories as needed.
 // It implements the ToolDefinition interface.
 type WriteTool struct {
@@ -61,6 +67,8 @@ type WriteTool struct {
 	// diffGenerator, when set, produces a diff preview for overwrites of
 	// existing files. It is included in the ToolResult metadata under "diff".
 	diffGenerator DiffGenerator
+	// fileTracker, when set, creates backup checkpoints before writing files.
+	fileTracker *FileTracker
 }
 
 var _ ToolDefinition = (*WriteTool)(nil)
@@ -143,6 +151,14 @@ func (t *WriteTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, er
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("write.mkdir_failed", "dir", parent, "err", err)
 		return nil, fmt.Errorf("write: %w", err)
+	}
+
+	// When a file tracker is configured, create a backup checkpoint before
+	// writing. Errors are logged but never block the write.
+	if t.fileTracker != nil {
+		if _, berr := t.fileTracker.Backup(abspath); berr != nil {
+			logger.Warn("write.backup_failed", "path", abspath, "err", berr)
+		}
 	}
 
 	// When a diff generator is configured and the file already exists, produce

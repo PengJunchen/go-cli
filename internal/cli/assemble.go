@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/approval"
@@ -47,6 +48,17 @@ type AgentAssembly struct {
 	// additive: the components above are still constructed and wired exactly as
 	// before, they are also registered here for dependency-injection use.
 	Registry *core.DefaultRegistry
+	// FileTracker is the shared file tracker wired into WriteTool and
+	// EditFileTool for backup/restore checkpoints.
+	FileTracker *tools.FileTracker
+	// DiffGenerator is the shared diff generator wired into WriteTool and
+	// EditFileTool for change previews.
+	DiffGenerator tools.DiffGenerator
+	// PlanCtrl is the plan-mode controller exposed for slash commands.
+	PlanCtrl core.PlanModeController
+	// ModeResolver is the PermissionModeResolver wired into the ApprovalMiddleware
+	// so the effective classifier can switch dynamically based on PermissionMode.
+	ModeResolver approval.PermissionModeResolver
 }
 
 // AssembleOption configures AssembleAgent behavior.
@@ -133,7 +145,18 @@ func AssembleAgent(
 
 	// 2. Create tool registry + register defaults.
 	tr := tools.NewDefaultToolRegistry()
-	if registerErr := tools.RegisterDefaults(ctx, tr); registerErr != nil {
+
+	// Create shared component instances for the PARTIAL tools (D5, D6, D7, D9).
+	fileTracker := tools.NewFileTracker()
+	diffGen := tools.NewUnifiedDiffGenerator(0, false)
+	bashSandbox := tools.NewDefaultBashSandbox()
+	htmlConverter := tools.NewDefaultHTMLConverter()
+
+	if registerErr := tools.RegisterDefaults(ctx, tr,
+		tools.WithRegisteredFileTracker(fileTracker),
+		tools.WithRegisteredDiffGenerator(diffGen),
+		tools.WithRegisteredBashSandbox(bashSandbox),
+	); registerErr != nil {
 		cleanup()
 		return nil, fmt.Errorf("assemble: register tools: %w", registerErr)
 	}
@@ -151,10 +174,16 @@ func AssembleAgent(
 	// 5. Wire approval + mutation middleware via decorator pattern.
 	classifier := approval.NewSafetyPolicyClassifier([]string{"bash"})
 	approvalStore := approval.NewInMemoryApprovalStore()
+	approvalCallback := approval.NewInteractiveApprovalCallback(os.Stdin, out)
+	approvalCache := approval.NewApprovalCache("")
+	modeResolver := approval.NewDefaultPermissionModeResolver()
 	approvalMW := approval.NewApprovalMiddleware(
 		classifier,
 		approvalStore,
 		approval.WithAutoApprove(false),
+		approval.WithCallback(approvalCallback),
+		approval.WithCache(approvalCache),
+		approval.WithPermissionModeResolver(modeResolver),
 	)
 	reg.RegisterApprovalClassifier(&approvalClassifierAdapter{inner: classifier})
 	reg.RegisterApprovalStore(&approvalStoreAdapter{inner: approvalStore})
@@ -201,6 +230,24 @@ func AssembleAgent(
 	planCtrl := core.NewDefaultPlanModeController()
 	hitlEmitter := &cliHITLEmitter{out: out}
 
+	// Build the web search tool from config. Default is MockSearchProvider;
+	// "fetch" uses DuckDuckGo HTML scraping, "brave" uses the Brave API.
+	webSearchTool := tools.NewWebSearchTool()
+	if rc != nil {
+		switch rc.WebSearch.Provider {
+		case "brave":
+			if rc.WebSearch.APIKey != "" {
+				webSearchTool = tools.NewWebSearchTool(tools.WithSearchProvider(
+					tools.NewBraveSearchProvider(rc.WebSearch.APIKey),
+				))
+			}
+		case "fetch":
+			webSearchTool = tools.NewWebSearchTool(tools.WithSearchProvider(
+				tools.NewFetchSearchProvider(),
+			))
+		}
+	}
+
 	extraTools := []tools.ToolDefinition{
 		tools.NewTodoWriteTool(todoStore),
 		tools.NewTaskCreateTool(taskStore),
@@ -211,8 +258,8 @@ func AssembleAgent(
 		tools.NewGoalUpdateTool(goalStore),
 		tools.NewGoalListTool(goalStore, taskStore),
 		tools.NewGoalGetTool(goalStore, taskStore),
-		tools.NewWebFetchTool(),
-		tools.NewWebSearchTool(),
+		tools.NewWebFetchTool(tools.WithHTMLConverter(htmlConverter)),
+		webSearchTool,
 		core.NewAskUserQuestionTool(hitlEmitter, 30*time.Second),
 		tools.NewEnterPlanModeTool(planCtrl),
 		tools.NewExitPlanModeTool(planCtrl),
@@ -330,6 +377,10 @@ func AssembleAgent(
 		MaxTokens:     ac.maxTokens,
 		Cleanup:       cleanup,
 		Registry:      reg,
+		FileTracker:   fileTracker,
+		DiffGenerator: diffGen,
+		PlanCtrl:      planCtrl,
+		ModeResolver:  modeResolver,
 	}, nil
 }
 

@@ -53,6 +53,9 @@ type SearchOptions struct {
 
 // WebSearchProvider abstracts search backends.
 type WebSearchProvider interface {
+	// Name returns the provider identifier (e.g. "mock", "fetch", "brave").
+	Name() string
+	// Search performs a search and returns results.
 	Search(ctx context.Context, query string, opts SearchOptions) ([]SearchResult, error)
 }
 

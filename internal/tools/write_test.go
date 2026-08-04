@@ -210,3 +210,47 @@ func TestWriteMissingContentArg(t *testing.T) {
 	require.NoError(t, rerr)
 	assert.Empty(t, data)
 }
+
+// TestWriteWithFileTrackerOption verifies that WithFileTracker sets the
+// fileTracker field so that Execute creates a backup checkpoint before
+// overwriting an existing file.
+func TestWriteWithFileTrackerOption(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "out.txt")
+	require.NoError(t, os.WriteFile(path, []byte("original"), 0o600))
+
+	ft := NewFileTracker()
+	tool := NewWriteTool(WithWriteWorkdir(dir), WithOverwrite(true), WithFileTracker(ft))
+
+	_, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"path": "out.txt", "content": "new"},
+	})
+	require.NoError(t, err)
+
+	// Backup should have created a checkpoint for the existing file.
+	checkpoints := ft.ListCheckpoints()
+	require.Len(t, checkpoints, 1)
+	assert.Equal(t, path, checkpoints[0].Path)
+	assert.True(t, checkpoints[0].Existed)
+}
+
+// TestWriteWithFileTrackerNewFile verifies that Backup is called even for
+// new files (where the file does not exist yet).
+func TestWriteWithFileTrackerNewFile(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	ft := NewFileTracker()
+	tool := NewWriteTool(WithWriteWorkdir(dir), WithFileTracker(ft))
+
+	_, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"path": "new.txt", "content": "fresh"},
+	})
+	require.NoError(t, err)
+
+	checkpoints := ft.ListCheckpoints()
+	require.Len(t, checkpoints, 1)
+	assert.False(t, checkpoints[0].Existed)
+}

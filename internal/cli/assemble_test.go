@@ -7,6 +7,7 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/llm"
+	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -120,3 +121,145 @@ func (f *fakeModelProvider) Build(_ context.Context, _ llm.ModelConfig) (llm.Bas
 func (f *fakeModelProvider) Models() []llm.ModelInfo { return nil }
 
 var _ llm.ModelProvider = (*fakeModelProvider)(nil)
+
+// TestAssembleAgent_WiresPartialComponents verifies that AssembleAgent creates
+// and exposes the 5 PARTIAL components: FileTracker (D5), DiffGenerator (D6),
+// and PlanModeController (D9/19-9). These must be non-nil on the returned
+// AgentAssembly so slash commands and the interactive session can use them.
+func TestAssembleAgent_WiresPartialComponents(t *testing.T) {
+	assembly, err := AssembleAgent(
+		context.Background(),
+		newAssembleTestConfig(),
+		"openai", "test-model",
+		io.Discard,
+	)
+	require.NoError(t, err)
+	t.Cleanup(assembly.Cleanup)
+
+	// D5: FileTracker must be created and exposed.
+	require.NotNil(t, assembly.FileTracker, "FileTracker must be wired by AssembleAgent")
+
+	// D6: DiffGenerator must be created and exposed.
+	require.NotNil(t, assembly.DiffGenerator, "DiffGenerator must be wired by AssembleAgent")
+
+	// 19-9: PlanModeController must be created and exposed.
+	require.NotNil(t, assembly.PlanCtrl, "PlanCtrl must be wired by AssembleAgent")
+}
+
+// TestAssembleAgent_WiresPermissionModeResolver verifies that AssembleAgent
+// creates a PermissionModeResolver and wires it into the ApprovalMiddleware
+// (task 19-11). The resolver must be non-nil and identify itself as the
+// default "permission_mode" resolver so the middleware can switch policy
+// dynamically based on the current PermissionMode.
+func TestAssembleAgent_WiresPermissionModeResolver(t *testing.T) {
+	assembly, err := AssembleAgent(
+		context.Background(),
+		newAssembleTestConfig(),
+		"openai", "test-model",
+		io.Discard,
+	)
+	require.NoError(t, err)
+	t.Cleanup(assembly.Cleanup)
+
+	require.NotNil(t, assembly.ModeResolver, "ModeResolver must be wired by AssembleAgent")
+	assert.Equal(t, "permission_mode", assembly.ModeResolver.Name(),
+		"resolver must be the default permission_mode resolver")
+}
+
+// getWebSearchTool retrieves the original (unwrapped) *tools.WebSearchTool from
+// the assembled tool registry. List returns the underlying definitions without
+// middleware wrapping, so the concrete type is accessible.
+func getWebSearchTool(t *testing.T, assembly *AgentAssembly) *tools.WebSearchTool {
+	t.Helper()
+	defs, err := assembly.ToolRegistry.List(context.Background())
+	require.NoError(t, err)
+	for _, d := range defs {
+		if d.Name() == "web_search" {
+			ws, ok := d.(*tools.WebSearchTool)
+			require.True(t, ok, "web_search tool should be *tools.WebSearchTool")
+			return ws
+		}
+	}
+	t.Fatal("web_search tool not found in registry")
+	return nil
+}
+
+// TestAssembleAgent_WebSearchDefaultUsesMockProvider verifies that when no
+// web_search config is provided, the WebSearchTool defaults to the
+// MockSearchProvider (task 19-7).
+func TestAssembleAgent_WebSearchDefaultUsesMockProvider(t *testing.T) {
+	assembly, err := AssembleAgent(
+		context.Background(),
+		newAssembleTestConfig(),
+		"openai", "test-model",
+		io.Discard,
+	)
+	require.NoError(t, err)
+	t.Cleanup(assembly.Cleanup)
+
+	ws := getWebSearchTool(t, assembly)
+	assert.Equal(t, "mock", ws.ProviderName(),
+		"default config should use MockSearchProvider")
+}
+
+// TestAssembleAgent_WebSearchFetchProvider verifies that when
+// web_search.provider = "fetch", the WebSearchTool uses the
+// FetchSearchProvider (task 19-7).
+func TestAssembleAgent_WebSearchFetchProvider(t *testing.T) {
+	cfg := newAssembleTestConfig()
+	cfg.WebSearch.Provider = "fetch"
+	assembly, err := AssembleAgent(
+		context.Background(),
+		cfg,
+		"openai", "test-model",
+		io.Discard,
+	)
+	require.NoError(t, err)
+	t.Cleanup(assembly.Cleanup)
+
+	ws := getWebSearchTool(t, assembly)
+	assert.Equal(t, "fetch", ws.ProviderName(),
+		"provider=fetch should use FetchSearchProvider")
+}
+
+// TestAssembleAgent_WebSearchBraveProvider verifies that when
+// web_search.provider = "brave" with an API key, the WebSearchTool uses the
+// BraveSearchProvider (task 19-7).
+func TestAssembleAgent_WebSearchBraveProvider(t *testing.T) {
+	cfg := newAssembleTestConfig()
+	cfg.WebSearch.Provider = "brave"
+	cfg.WebSearch.APIKey = "test-key"
+	assembly, err := AssembleAgent(
+		context.Background(),
+		cfg,
+		"openai", "test-model",
+		io.Discard,
+	)
+	require.NoError(t, err)
+	t.Cleanup(assembly.Cleanup)
+
+	ws := getWebSearchTool(t, assembly)
+	assert.Equal(t, "brave", ws.ProviderName(),
+		"provider=brave with API key should use BraveSearchProvider")
+}
+
+// TestAssembleAgent_WebSearchBraveWithoutAPIKeyFallsBackToMock verifies that
+// when web_search.provider = "brave" but no API key is supplied, the tool
+// falls back to the MockSearchProvider rather than a broken Brave provider.
+func TestAssembleAgent_WebSearchBraveWithoutAPIKeyFallsBackToMock(t *testing.T) {
+	cfg := newAssembleTestConfig()
+	cfg.WebSearch.Provider = "brave"
+	// No API key set.
+	assembly, err := AssembleAgent(
+		context.Background(),
+		cfg,
+		"openai", "test-model",
+		io.Discard,
+	)
+	require.NoError(t, err)
+	t.Cleanup(assembly.Cleanup)
+
+	ws := getWebSearchTool(t, assembly)
+	assert.Equal(t, "mock", ws.ProviderName(),
+		"brave without API key should fall back to MockSearchProvider")
+}
