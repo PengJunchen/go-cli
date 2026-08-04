@@ -189,6 +189,11 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 	return &ToolResult{Output: output, Metadata: metadata}, nil
 }
 
+// PromptGuidelines returns usage hints for the bash tool.
+func (t *BashTool) PromptGuidelines() []string {
+	return []string{"Use bash for shell commands. Avoid using cat/sed/grep - use read/edit/grep tools instead"}
+}
+
 // envSlice converts the tool's environment map to "K=V" entries suitable for
 // cmd.Env.
 func envSlice(env map[string]string) []string {

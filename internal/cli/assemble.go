@@ -59,6 +59,12 @@ type AgentAssembly struct {
 	// ModeResolver is the PermissionModeResolver wired into the ApprovalMiddleware
 	// so the effective classifier can switch dynamically based on PermissionMode.
 	ModeResolver approval.PermissionModeResolver
+	// PromptBuilder is the SystemPromptBuilder wired into the LoopAgent for
+	// dynamic system prompt assembly.
+	PromptBuilder core.SystemPromptBuilder
+	// ContextLoader is the ProjectContextLoader used to discover and load
+	// AGENTS.md / CLAUDE.md files from the file system.
+	ContextLoader core.ProjectContextLoader
 }
 
 // AssembleOption configures AssembleAgent behavior.
@@ -167,9 +173,7 @@ func AssembleAgent(
 	}
 
 	// 4. Register skill tools.
-	if skillErr := registerSkillTools(ctx, rc, tr); skillErr != nil {
-		logger.Warn("assemble_skill_failed", "err", skillErr)
-	}
+	skillInfos := registerSkillTools(ctx, rc, tr)
 
 	// 5. Wire approval + mutation middleware via decorator pattern.
 	classifier := approval.NewSafetyPolicyClassifier([]string{"bash"})
@@ -248,6 +252,14 @@ func AssembleAgent(
 		}
 	}
 
+	// Resolve the working directory for git tools. There is no explicit config
+	// for cwd, so fall back to the process working directory.
+	gitCwd, err := os.Getwd()
+	if err != nil {
+		gitCwd = "."
+	}
+	gitTool := tools.NewDefaultGitTool(gitCwd)
+
 	extraTools := []tools.ToolDefinition{
 		tools.NewTodoWriteTool(todoStore),
 		tools.NewTaskCreateTool(taskStore),
@@ -263,6 +275,9 @@ func AssembleAgent(
 		core.NewAskUserQuestionTool(hitlEmitter, 30*time.Second),
 		tools.NewEnterPlanModeTool(planCtrl),
 		tools.NewExitPlanModeTool(planCtrl),
+		tools.NewGitDiffTool(gitTool),
+		tools.NewGitStatusTool(gitTool),
+		tools.NewGitCommitTool(gitTool),
 	}
 	for _, t := range extraTools {
 		if err := tr.Register(ctx, t); err != nil {
@@ -288,6 +303,31 @@ func AssembleAgent(
 	if rc != nil && rc.Tools.Parallel != nil && !*rc.Tools.Parallel {
 		loopOpts = append(loopOpts, core.WithExecutionMode(core.ExecutionModeSequential))
 	}
+
+	// 10b. Wire dynamic system prompt builder with project context.
+	contextLoader := core.NewDefaultProjectContextLoader()
+	promptBuilder := core.NewDefaultSystemPromptBuilder()
+	cwd, _ := os.Getwd()
+	contextFiles, ctxErr := contextLoader.Load(ctx, cwd)
+	if ctxErr != nil {
+		logger.Warn("assemble_context_load_failed", "err", ctxErr)
+	}
+	var customPrompt, appendPrompt string
+	if rc != nil {
+		customPrompt = rc.Agent.SystemPrompt
+		appendPrompt = rc.Agent.AppendSystemPrompt
+	}
+	loopOpts = append(loopOpts,
+		core.WithSystemPromptBuilder(promptBuilder),
+		core.WithSystemPromptOptions(core.SystemPromptOptions{
+			Cwd:          cwd,
+			ContextFiles: contextFiles,
+			Skills:       skillInfos,
+			CustomPrompt: customPrompt,
+			AppendPrompt: appendPrompt,
+		}),
+	)
+
 	var loop core.AgentLoop = core.NewLoopAgent(loopOpts...)
 
 	// 11. Apply middleware chain (onion model) around the loop agent.
@@ -307,7 +347,7 @@ func AssembleAgent(
 		cleanup()
 		return nil, fmt.Errorf("assemble: create compactor: %w", err)
 	}
-	estimator := compaction.NewHeuristicTokenEstimator()
+	estimator := compaction.NewUnicodeTokenEstimator()
 	midTurn := compaction.NewMidTurnCompact()
 	reg.RegisterCompactor(&compactorAdapter{inner: compactor, estimator: estimator})
 	reg.RegisterTokenEstimator(&tokenEstimatorAdapter{inner: estimator})
@@ -381,6 +421,8 @@ func AssembleAgent(
 		DiffGenerator: diffGen,
 		PlanCtrl:      planCtrl,
 		ModeResolver:  modeResolver,
+		PromptBuilder: promptBuilder,
+		ContextLoader: contextLoader,
 	}, nil
 }
 
@@ -461,7 +503,10 @@ func registerMCPTools(ctx context.Context, rc *config.Config, tr tools.ToolRegis
 // them as tools. It supports two directory layouts:
 //   - Flat: {dir}/{name}.md
 //   - Nested: {dir}/{name}/SKILL.md
-func registerSkillTools(ctx context.Context, rc *config.Config, tr tools.ToolRegistry) error {
+//
+// It returns a slice of SkillInfo describing each registered skill, suitable
+// for injection into the system prompt.
+func registerSkillTools(ctx context.Context, rc *config.Config, tr tools.ToolRegistry) []core.SkillInfo {
 	if rc == nil || rc.Skill.Dir == "" {
 		return nil
 	}
@@ -473,6 +518,7 @@ func registerSkillTools(ctx context.Context, rc *config.Config, tr tools.ToolReg
 		return nil
 	}
 
+	var infos []core.SkillInfo
 	count := 0
 	for _, def := range defs {
 		if def == nil {
@@ -483,10 +529,14 @@ func registerSkillTools(ctx context.Context, rc *config.Config, tr tools.ToolReg
 			slog.Warn("assemble_skill_register_failed", "skill", (*def).Name(), "err", regErr)
 			continue
 		}
+		infos = append(infos, core.SkillInfo{
+			Name:     (*def).Name(),
+			Category: (*def).Category(),
+		})
 		count++
 	}
 	if count > 0 {
 		slog.Info("assemble_skills_registered", "dir", rc.Skill.Dir, "count", count)
 	}
-	return nil
+	return infos
 }

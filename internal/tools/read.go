@@ -199,6 +199,11 @@ func (t *ReadTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 	}, nil
 }
 
+// PromptGuidelines returns usage hints for the read tool.
+func (t *ReadTool) PromptGuidelines() []string {
+	return []string{"Use read to examine files instead of cat or sed"}
+}
+
 // resolvePath resolves a possibly-relative path against the workdir and cleans
 // the result.
 func (t *ReadTool) resolvePath(path string) (string, error) {

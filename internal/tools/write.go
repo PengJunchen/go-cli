@@ -224,6 +224,11 @@ func (t *WriteTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, er
 	}, nil
 }
 
+// PromptGuidelines returns usage hints for the write tool.
+func (t *WriteTool) PromptGuidelines() []string {
+	return []string{"Use write to create new files or overwrite existing ones"}
+}
+
 // writeAtomic writes data to a temp file in the destination directory and
 // renames it into place so a crash never leaves a partially written file. The
 // existing file's permission bits (or 0644 for a new file) are preserved.

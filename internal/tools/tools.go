@@ -65,6 +65,19 @@ type Parameterized interface {
 	Parameters() any
 }
 
+// PromptGuideliner is an optional interface that tools can implement to
+// provide usage guidelines injected into the system prompt. This is analogous
+// to Parameterized: tools that wish to steer the model's tool usage should
+// implement this so the SystemPromptBuilder can include their guidance.
+//
+//nolint:scan012 // optional interface; implementations in various tool files
+type PromptGuideliner interface {
+	// PromptGuidelines returns human-readable usage hints for the tool.
+	// Each string is rendered as a separate bullet point in the system
+	// prompt's tool guidelines section.
+	PromptGuidelines() []string
+}
+
 // ToolRegistry is the contract a repository of tools satisfies. It supports
 // registering, looking up and enumerating tools.
 type ToolRegistry interface {

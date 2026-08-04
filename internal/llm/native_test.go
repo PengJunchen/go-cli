@@ -228,8 +228,8 @@ func TestNativeChatModelStreamSingleChunk(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		writeResponse(t, w, `{"choices":[{"message":{"role":"assistant","content":"streamed"}}]}`)
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeResponse(t, w, "data: {\"choices\":[{\"delta\":{\"content\":\"streamed\"}}]}\n\ndata: [DONE]\n\n")
 	}))
 	defer srv.Close()
 
@@ -243,9 +243,10 @@ func TestNativeChatModelStreamSingleChunk(t *testing.T) {
 	for c := range ch {
 		chunks = append(chunks, c)
 	}
-	require.Len(t, chunks, 1)
+	require.Len(t, chunks, 2)
 	assert.Equal(t, RoleAssistant, chunks[0].Role)
 	assert.Equal(t, "streamed", chunks[0].Content)
+	assert.True(t, chunks[1].Final)
 }
 
 func TestNativeChatModelHTTP500(t *testing.T) {

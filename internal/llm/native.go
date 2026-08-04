@@ -64,6 +64,9 @@ const (
 	geminiGeneratePathPrefix = "/v1beta/models/"
 	// geminiGenerateAction is the RPC action appended to the model path.
 	geminiGenerateAction = ":generateContent"
+	// geminiStreamAction is the streaming RPC action; alt=sse forces SSE
+	// framing instead of newline-delimited JSON.
+	geminiStreamAction = ":streamGenerateContent?alt=sse"
 )
 
 // nativeChatModel is a BaseChatModel shared by the OpenAI, Claude and Gemini
@@ -175,10 +178,29 @@ func (m *nativeChatModel) generate(ctx context.Context, msgs []Message, opts ...
 	return m.decode(data)
 }
 
-// Stream returns the generation result as a channel of MessageChunk. Like
-// HTTPChatModel.Stream it runs Generate and delivers the full content as a
-// single chunk before closing the channel; the channel is always closed.
+// Stream returns the generation result as a channel of MessageChunk. For the
+// three known providers (openai, claude, gemini) it performs true SSE-based
+// streaming: the request is sent with stream=true (or the streaming endpoint
+// for Gemini) and the response body is parsed as Server-Sent Events, emitting
+// one MessageChunk per content delta. For unknown providers it falls back to
+// the fake single-chunk approach (Generate then emit). The channel is always
+// closed.
 func (m *nativeChatModel) Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
+	switch m.provider {
+	case claudeProviderName:
+		return m.streamClaude(ctx, msgs, opts)
+	case geminiProviderName:
+		return m.streamGemini(ctx, msgs, opts)
+	case openaiProviderName:
+		return m.streamOpenAI(ctx, msgs, opts)
+	default:
+		return m.streamFake(ctx, msgs, opts)
+	}
+}
+
+// streamFake is the fallback streaming implementation: it calls Generate and
+// delivers the full response as a single chunk before closing the channel.
+func (m *nativeChatModel) streamFake(ctx context.Context, msgs []Message, opts []Option) (<-chan MessageChunk, error) {
 	ch := make(chan MessageChunk, 1)
 	resp, err := m.Generate(ctx, msgs, opts...)
 	if err != nil {
@@ -187,6 +209,394 @@ func (m *nativeChatModel) Stream(ctx context.Context, msgs []Message, opts ...Op
 	}
 	ch <- MessageChunk{Role: resp.Role, Content: resp.Content}
 	close(ch)
+	return ch, nil
+}
+
+// streamRoundTrip builds the HTTP request, executes it, and verifies a 2xx
+// status. It returns the response body for SSE parsing. The caller is
+// responsible for closing the returned ReadCloser.
+func (m *nativeChatModel) streamRoundTrip(ctx context.Context, body []byte, endpoint string) (io.ReadCloser, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, fmt.Errorf("llm: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "text/event-stream")
+	if m.header != nil {
+		for k, v := range m.header() {
+			req.Header.Set(k, v)
+		}
+	}
+
+	resp, err := m.client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("llm: do request: %w", err)
+	}
+
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		defer func() {
+			if cerr := resp.Body.Close(); cerr != nil {
+				slog.Warn("llm_close_error_body", "err", cerr)
+			}
+		}()
+		payload, rerr := io.ReadAll(resp.Body)
+		if rerr != nil {
+			return nil, fmt.Errorf("llm: read error response: %w", rerr)
+		}
+		return nil, fmt.Errorf("llm: provider returned %s: %s", resp.Status, strings.TrimSpace(string(payload)))
+	}
+	return resp.Body, nil
+}
+
+// withStreamFlag decodes the request body, injects "stream": true, and
+// re-encodes it. This avoids duplicating the encode closures.
+func withStreamFlag(body []byte) ([]byte, error) {
+	var reqMap map[string]any
+	if err := json.Unmarshal(body, &reqMap); err != nil {
+		return nil, fmt.Errorf("llm: decode stream request: %w", err)
+	}
+	reqMap["stream"] = true
+	out, err := json.Marshal(reqMap)
+	if err != nil {
+		return nil, fmt.Errorf("llm: marshal stream request: %w", err)
+	}
+	return out, nil
+}
+
+// ---------------------------------------------------------------------------
+// OpenAI streaming
+// ---------------------------------------------------------------------------
+
+// streamOpenAI sends a streaming chat completions request and parses the SSE
+// response. Each "data:" line carries an openAIStreamChunk; "data: [DONE]"
+// signals the end of the stream. Tool-call fragments are accumulated across
+// chunks and emitted in the Final MessageChunk.
+func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts []Option) (<-chan MessageChunk, error) {
+	ch := make(chan MessageChunk, 64)
+
+	body, err := m.encode(msgs, opts)
+	if err != nil {
+		close(ch)
+		return ch, err
+	}
+	streamBody, err := withStreamFlag(body)
+	if err != nil {
+		close(ch)
+		return ch, err
+	}
+
+	respBody, err := m.streamRoundTrip(ctx, streamBody, m.endpoint)
+	if err != nil {
+		close(ch)
+		return ch, err
+	}
+
+	go func() {
+		defer close(ch)
+		defer func() {
+			if cerr := respBody.Close(); cerr != nil {
+				slog.Warn("llm_close_stream_body", "err", cerr)
+			}
+		}()
+
+		parser := NewDefaultSSEParser()
+		events, _ := parser.Parse(respBody)
+
+		// Per-request tool-call accumulation.
+		var toolNameByIndex map[int]string
+		var toolArgsBuf []string
+
+		for event := range events {
+			if event.Data == "[DONE]" {
+				break
+			}
+			if event.Data == "" {
+				continue
+			}
+
+			var chunk openAIStreamChunk
+			if err := json.Unmarshal([]byte(event.Data), &chunk); err != nil {
+				slog.Warn("llm_stream_parse_skip", "err", err)
+				continue
+			}
+			if len(chunk.Choices) == 0 {
+				continue
+			}
+			delta := chunk.Choices[0].Delta
+
+			if delta.Content != "" {
+				ch <- MessageChunk{Role: RoleAssistant, Content: delta.Content}
+			}
+
+			// Accumulate tool_call fragments emitted across chunks.
+			for ci, tc := range delta.ToolCalls {
+				if tc.Index == nil {
+					tc.Index = &ci
+				}
+				idx := *tc.Index
+				for len(toolArgsBuf) <= idx {
+					toolArgsBuf = append(toolArgsBuf, "")
+				}
+				if tc.Function.Name != "" {
+					if toolNameByIndex == nil {
+						toolNameByIndex = make(map[int]string)
+					}
+					if toolNameByIndex[idx] == "" {
+						toolNameByIndex[idx] = tc.Function.Name
+					}
+				}
+				if tc.Function.Arguments != "" {
+					toolArgsBuf[idx] += tc.Function.Arguments
+				}
+			}
+		}
+
+		// Emit the final accumulated assistant message.
+		final := MessageChunk{Role: RoleAssistant, Final: true}
+		if toolNameByIndex != nil {
+			final.ToolCalls = make([]ToolCall, len(toolArgsBuf))
+			for idx, name := range toolNameByIndex {
+				var args any
+				if idx < len(toolArgsBuf) && toolArgsBuf[idx] != "" {
+					var decoded any
+					if err := json.Unmarshal([]byte(toolArgsBuf[idx]), &decoded); err == nil {
+						args = decoded
+					} else {
+						args = toolArgsBuf[idx]
+					}
+				}
+				final.ToolCalls[idx] = ToolCall{
+					ID:   fmt.Sprintf("call_%d", idx),
+					Name: name,
+					Args: args,
+				}
+			}
+		}
+		ch <- final
+	}()
+
+	return ch, nil
+}
+
+// ---------------------------------------------------------------------------
+// Claude (Anthropic) streaming
+// ---------------------------------------------------------------------------
+
+// claudeStreamEvent is a single SSE event in the Anthropic streaming protocol.
+type claudeStreamEvent struct {
+	Type         string                `json:"type"`
+	Index        int                   `json:"index"`
+	Message      *claudeStreamMessage  `json:"message,omitempty"`
+	ContentBlock *claudeStreamBlock    `json:"content_block,omitempty"`
+	Delta        *claudeStreamDelta    `json:"delta,omitempty"`
+}
+
+// claudeStreamMessage carries the top-level message metadata from message_start.
+type claudeStreamMessage struct {
+	Role string `json:"role"`
+}
+
+// claudeStreamBlock describes a content block from content_block_start.
+type claudeStreamBlock struct {
+	Type string `json:"type"`           // "text" or "tool_use"
+	ID   string `json:"id,omitempty"`   // tool_use ID
+	Name string `json:"name,omitempty"` // tool name
+}
+
+// claudeStreamDelta carries the incremental delta from content_block_delta.
+type claudeStreamDelta struct {
+	Type        string `json:"type"`                   // "text_delta" or "input_json_delta"
+	Text        string `json:"text,omitempty"`         // text_delta text
+	PartialJSON string `json:"partial_json,omitempty"` // input_json_delta fragment
+}
+
+// claudeToolAccum accumulates a single tool call's fragments across chunks.
+type claudeToolAccum struct {
+	id   string
+	name string
+	args strings.Builder
+}
+
+// streamClaude sends a streaming Anthropic messages request and parses the SSE
+// response. The "stream": true flag is injected into the request body. Event
+// types handled: message_start (role), content_block_delta (text/tool args),
+// message_stop (final chunk with accumulated tool calls).
+func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts []Option) (<-chan MessageChunk, error) {
+	ch := make(chan MessageChunk, 64)
+
+	body, err := m.encode(msgs, opts)
+	if err != nil {
+		close(ch)
+		return ch, err
+	}
+	streamBody, err := withStreamFlag(body)
+	if err != nil {
+		close(ch)
+		return ch, err
+	}
+
+	respBody, err := m.streamRoundTrip(ctx, streamBody, m.endpoint)
+	if err != nil {
+		close(ch)
+		return ch, err
+	}
+
+	go func() {
+		defer close(ch)
+		defer func() {
+			if cerr := respBody.Close(); cerr != nil {
+				slog.Warn("llm_close_stream_body", "err", cerr)
+			}
+		}()
+
+		parser := NewDefaultSSEParser()
+		events, _ := parser.Parse(respBody)
+
+		// Tool-call accumulation keyed by content block index.
+		tools := map[int]*claudeToolAccum{}
+		var toolIndices []int // preserve insertion order
+		finalSent := false
+
+		for event := range events {
+			if event.Data == "" {
+				continue
+			}
+			var ce claudeStreamEvent
+			if err := json.Unmarshal([]byte(event.Data), &ce); err != nil {
+				slog.Warn("llm_stream_parse_skip", "err", err)
+				continue
+			}
+
+			switch ce.Type {
+			case "message_start":
+				if ce.Message != nil {
+					ch <- MessageChunk{Role: RoleAssistant}
+				}
+
+			case "content_block_start":
+				if ce.ContentBlock != nil && ce.ContentBlock.Type == "tool_use" {
+					idx := ce.Index
+					if _, ok := tools[idx]; !ok {
+						tools[idx] = &claudeToolAccum{
+							id:   ce.ContentBlock.ID,
+							name: ce.ContentBlock.Name,
+						}
+						toolIndices = append(toolIndices, idx)
+					}
+				}
+
+			case "content_block_delta":
+				if ce.Delta == nil {
+					continue
+				}
+				switch ce.Delta.Type {
+				case "text_delta":
+					if ce.Delta.Text != "" {
+						ch <- MessageChunk{Role: RoleAssistant, Content: ce.Delta.Text}
+					}
+				case "input_json_delta":
+					if accum, ok := tools[ce.Index]; ok {
+						accum.args.WriteString(ce.Delta.PartialJSON)
+					}
+				}
+
+			case "message_stop":
+				final := MessageChunk{Role: RoleAssistant, Final: true}
+				if len(toolIndices) > 0 {
+					final.ToolCalls = make([]ToolCall, 0, len(toolIndices))
+					for _, idx := range toolIndices {
+						accum := tools[idx]
+						var args any
+						if accum.args.Len() > 0 {
+							var decoded any
+							if err := json.Unmarshal([]byte(accum.args.String()), &decoded); err == nil {
+								args = decoded
+							} else {
+								args = accum.args.String()
+							}
+						}
+						final.ToolCalls = append(final.ToolCalls, ToolCall{
+							ID:   accum.id,
+							Name: accum.name,
+							Args: args,
+						})
+					}
+				}
+				ch <- final
+				finalSent = true
+			}
+		}
+
+		// If the stream ended without message_stop, emit a final chunk so
+		// the caller is not left waiting.
+		if !finalSent {
+			ch <- MessageChunk{Role: RoleAssistant, Final: true}
+		}
+	}()
+
+	return ch, nil
+}
+
+// ---------------------------------------------------------------------------
+// Gemini (Google) streaming
+// ---------------------------------------------------------------------------
+
+// streamGemini sends a streaming generateContent request and parses the SSE
+// response. The endpoint switches from :generateContent to
+// :streamGenerateContent?alt=sse. Each "data:" line carries a geminiResponse
+// chunk; text parts are extracted and emitted as MessageChunks.
+func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts []Option) (<-chan MessageChunk, error) {
+	ch := make(chan MessageChunk, 64)
+
+	body, err := m.encode(msgs, opts)
+	if err != nil {
+		close(ch)
+		return ch, err
+	}
+
+	// Switch the endpoint to the streaming variant.
+	streamEndpoint := strings.Replace(m.endpoint, geminiGenerateAction, geminiStreamAction, 1)
+
+	respBody, err := m.streamRoundTrip(ctx, body, streamEndpoint)
+	if err != nil {
+		close(ch)
+		return ch, err
+	}
+
+	go func() {
+		defer close(ch)
+		defer func() {
+			if cerr := respBody.Close(); cerr != nil {
+				slog.Warn("llm_close_stream_body", "err", cerr)
+			}
+		}()
+
+		parser := NewDefaultSSEParser()
+		events, _ := parser.Parse(respBody)
+
+		for event := range events {
+			if event.Data == "" {
+				continue
+			}
+			var parsed geminiResponse
+			if err := json.Unmarshal([]byte(event.Data), &parsed); err != nil {
+				slog.Warn("llm_stream_parse_skip", "err", err)
+				continue
+			}
+			if len(parsed.Candidates) > 0 && parsed.Candidates[0].Content != nil {
+				var sb strings.Builder
+				for _, part := range parsed.Candidates[0].Content.Parts {
+					sb.WriteString(part.Text)
+				}
+				if sb.Len() > 0 {
+					ch <- MessageChunk{Role: RoleAssistant, Content: sb.String()}
+				}
+			}
+		}
+
+		ch <- MessageChunk{Role: RoleAssistant, Final: true}
+	}()
+
 	return ch, nil
 }
 
