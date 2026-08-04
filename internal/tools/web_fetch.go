@@ -37,6 +37,13 @@ func WithWebFetchClient(c *http.Client) WebFetchToolOption {
 	return func(t *WebFetchTool) { t.Client = c }
 }
 
+// WithHTMLConverter sets the converter used to turn text/html responses into
+// Markdown. When nil (the default) the raw response body is returned, keeping
+// the tool backward compatible.
+func WithHTMLConverter(c HTMLToMarkdownConverter) WebFetchToolOption {
+	return func(t *WebFetchTool) { t.converter = c }
+}
+
 // WebFetchTool fetches a URL and returns its body as text. It implements the
 // ToolDefinition interface.
 type WebFetchTool struct {
@@ -47,6 +54,9 @@ type WebFetchTool struct {
 	// Client is the HTTP client used for requests. When nil a default client
 	// is used.
 	Client *http.Client
+	// converter, when non-nil, converts text/html responses to Markdown.
+	// When nil the raw body is returned (backward compatible).
+	converter HTMLToMarkdownConverter
 }
 
 var _ ToolDefinition = (*WebFetchTool)(nil)
@@ -129,8 +139,17 @@ func (t *WebFetchTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 		"truncated", truncated,
 		"duration_ms", ms)
 
+	output := string(data)
+	// When a converter is configured and the response is HTML, convert it to
+	// Markdown so the LLM receives clean text. Otherwise return the raw body.
+	if t.converter != nil && strings.Contains(strings.ToLower(resp.Header.Get("Content-Type")), "text/html") {
+		if converted, err := t.converter.Convert(output); err == nil {
+			output = converted
+		}
+	}
+
 	return &ToolResult{
-		Output:     string(data),
+		Output:     output,
 		ToolCallID: call.ID,
 		Metadata: map[string]any{
 			"url":         url,
