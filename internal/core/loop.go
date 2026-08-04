@@ -35,6 +35,7 @@ type loopConfig struct {
 	systemPromptOverride string
 	promptBuilder        SystemPromptBuilder
 	promptOpts           SystemPromptOptions
+	tracer               *tracing.Tracer
 }
 
 // LoopOption configures a LoopAgent at construction time.
@@ -95,6 +96,7 @@ type LoopAgent struct {
 	systemPromptOverride string
 	promptBuilder        SystemPromptBuilder
 	promptOpts           SystemPromptOptions
+	tracer               *tracing.Tracer
 }
 
 var _ AgentLoop = (*LoopAgent)(nil)
@@ -121,6 +123,7 @@ func NewLoopAgent(opts ...LoopOption) *LoopAgent {
 		systemPromptOverride: cfg.systemPromptOverride,
 		promptBuilder:        cfg.promptBuilder,
 		promptOpts:           cfg.promptOpts,
+		tracer:               cfg.tracer,
 	}
 	slog.Info("core.loop.new",
 		"max_iterations", la.maxIterations,
@@ -135,6 +138,14 @@ func NewLoopAgent(opts ...LoopOption) *LoopAgent {
 // they happen (streaming mode); otherwise they are collected into the returned
 // slice (batch mode, for backward compatibility).
 func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...EventStream) ([]AgentEvent, error) {
+	// Inject the Tracer into the context so that all downstream
+	// SpanFromContext calls (middleware, loop internals, tools) create real
+	// spans sharing the same trace. When l.tracer is nil, SpanFromContext
+	// returns noop spans (zero overhead).
+	if l.tracer != nil {
+		ctx = l.tracer.ContextWithTracer(ctx)
+	}
+
 	span, spanCtx := tracing.SpanFromContext(ctx, "loop.run", tracing.SpanKindInternal)
 	defer span.End()
 	logger := tracing.NewTraceLogger(span, nil)

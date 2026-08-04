@@ -129,6 +129,15 @@ func (t *Tracer) Start(ctx context.Context, name string, kind SpanKind) (TraceSp
 	return span, newCtx
 }
 
+// ContextWithTracer returns a context that carries the Tracer so that
+// SpanFromContext can create real spans. It does not start a span itself.
+// Callers use this to inject a Tracer at the outermost layer of a request so
+// that all downstream SpanFromContext calls (middleware, loop, tools) share
+// the same trace.
+func (t *Tracer) ContextWithTracer(ctx context.Context) context.Context {
+	return context.WithValue(ctx, tracerKey{}, t)
+}
+
 // SpanFromContext starts a child Span using the Tracer stored in ctx. It is
 // the ergonomic entry point for tracing arbitrary code paths:
 //

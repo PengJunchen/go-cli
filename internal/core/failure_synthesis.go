@@ -7,6 +7,8 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+
+	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
 // SynthesizedMessage is a system message produced from a recoverable error. It
@@ -113,4 +115,83 @@ func (s *DefaultFailureTurnSynthesizer) Synthesize(_ context.Context, err error)
 		Content:       content,
 		OriginalError: original,
 	}, nil
+}
+
+// FailureSynthesisMiddleware is an agent-level Middleware that intercepts
+// recoverable errors from the wrapped loop. When the loop returns a
+// recoverable error, the middleware synthesizes a recovery message, injects
+// it into the submission history as a system message, and retries the run
+// once. Non-recoverable errors are passed through unchanged.
+type FailureSynthesisMiddleware struct {
+	synthesizer FailureTurnSynthesizer
+	name        string
+}
+
+var _ Middleware = (*FailureSynthesisMiddleware)(nil)
+
+// NewFailureSynthesisMiddleware builds a middleware backed by the given
+// synthesizer.
+func NewFailureSynthesisMiddleware(s FailureTurnSynthesizer) *FailureSynthesisMiddleware {
+	return &FailureSynthesisMiddleware{synthesizer: s, name: "failure-synthesis"}
+}
+
+// Name returns the middleware identifier.
+func (m *FailureSynthesisMiddleware) Name() string {
+	if m.name == "" {
+		return "failure-synthesis"
+	}
+	return m.name
+}
+
+// Wrap returns a loop-view that retries recoverable errors once with a
+// synthesized recovery message.
+func (m *FailureSynthesisMiddleware) Wrap(next AgentLoop) AgentLoop {
+	return &failureSynthesisLoop{synthesizer: m.synthesizer, next: next}
+}
+
+// failureSynthesisLoop is the concrete wrapped loop produced by
+// FailureSynthesisMiddleware.
+type failureSynthesisLoop struct {
+	synthesizer FailureTurnSynthesizer
+	next        AgentLoop
+}
+
+// Run delegates to the wrapped loop. On a recoverable error it synthesizes a
+// recovery message, injects it into the submission history, and retries once.
+func (l *failureSynthesisLoop) Run(ctx context.Context, submission Submission, stream ...EventStream) ([]AgentEvent, error) {
+	span, spanCtx := tracing.SpanFromContext(ctx, "middleware.failure-synthesis", tracing.SpanKindInternal)
+	defer span.End()
+	logger := tracing.NewTraceLogger(span, nil)
+
+	events, err := l.next.Run(spanCtx, submission, stream...)
+	if err == nil {
+		return events, err
+	}
+
+	// Non-recoverable errors pass through unchanged.
+	if l.synthesizer == nil || !l.synthesizer.IsRecoverable(err) {
+		logger.Info("failure_synthesis.skip", "recoverable", false, "error", err.Error())
+		return events, err
+	}
+
+	// Synthesize a recovery message and inject it into the history so the
+	// LLM receives context about the failure on the retry.
+	msg, synErr := l.synthesizer.Synthesize(spanCtx, err)
+	if synErr != nil {
+		slog.Warn("core.failure_synthesis.synthesize_failed", "err", synErr)
+		return events, err
+	}
+
+	logger.Info("failure_synthesis.retry", "original_error", msg.OriginalError, "recoverable", true)
+	slog.Info("core.failure_synthesis.retry", "error", msg.OriginalError)
+
+	// Prepend the synthesized system message to the history so the LLM sees
+	// the recovery strategy before the original conversation.
+	retrySubmission := submission
+	retrySubmission.History = append(
+		[]AgentMessage{{Role: msg.Role, Content: msg.Content}},
+		submission.History...,
+	)
+
+	return l.next.Run(spanCtx, retrySubmission, stream...)
 }

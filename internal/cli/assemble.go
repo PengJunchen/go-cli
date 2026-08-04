@@ -2,10 +2,14 @@ package cli
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/approval"
@@ -65,6 +69,32 @@ type AgentAssembly struct {
 	// ContextLoader is the ProjectContextLoader used to discover and load
 	// AGENTS.md / CLAUDE.md files from the file system.
 	ContextLoader core.ProjectContextLoader
+	// Tracer is the tracing.Tracer created from config.Tracing. It is nil when
+	// tracing is disabled (noop spans, zero overhead).
+	Tracer *tracing.Tracer
+	// ReminderManager manages system-reminder injections wired into the
+	// middleware chain.
+	ReminderManager core.SystemReminderManager
+	// HookChain is the hook chain wired into the middleware chain. Hooks are
+	// invoked before and after each turn.
+	HookChain *core.HookChain
+	// FailureSynthesizer converts recoverable errors into retry messages.
+	FailureSynthesizer core.FailureTurnSynthesizer
+	// CircuitBreaker protects the LLM model from cascading failures. When the
+	// breaker is Open, Generate returns a fallback response.
+	CircuitBreaker production.CircuitBreaker
+	// LoopDetector monitors the agent event stream for recurring patterns
+	// (repeated edits, test failures, identical tool calls).
+	LoopDetector production.LoopDetector
+	// IdempotentCache caches tool call results so that identical calls with
+	// identical arguments return the stored result without re-executing.
+	IdempotentCache production.IdempotentCache
+	// AuditLog records tool calls as JSON-lines for later inspection. It is
+	// nil when audit logging is disabled.
+	AuditLog production.AuditLog
+	// Telemetry collects runtime metrics (LLM token usage, tool call counts,
+	// execution duration) queryable for cost reporting.
+	Telemetry production.Telemetry
 }
 
 // AssembleOption configures AssembleAgent behavior.
@@ -112,15 +142,20 @@ func AssembleAgent(
 	opts ...AssembleOption,
 ) (*AgentAssembly, error) {
 	ac := assembleConfig{
-		maxTokens:     defaultMaxTokens,
+		maxTokens:     0, // 0 means "not set"; resolved below
 		enableSession: false,
 		agentName:     "main",
 	}
 	for _, o := range opts {
 		o(&ac)
 	}
+	// Resolve maxTokens: explicit flag > config.Compaction.MaxTokens > default.
 	if ac.maxTokens <= 0 {
-		ac.maxTokens = defaultMaxTokens
+		if rc != nil && rc.Compaction.MaxTokens > 0 {
+			ac.maxTokens = rc.Compaction.MaxTokens
+		} else {
+			ac.maxTokens = defaultMaxTokens
+		}
 	}
 
 	logger := slog.Default()
@@ -146,6 +181,21 @@ func AssembleAgent(
 	cleanup := func() {
 		if modelCleanup != nil {
 			modelCleanup()
+		}
+	}
+
+	// 1b. Wire tracing from config. When tracing.enabled is true, create the
+	// appropriate TraceExporter (jsonl, stdout, otlp) and a Tracer. When
+	// disabled, tracer remains nil so all SpanFromContext calls return noop
+	// spans (zero overhead).
+	var tracer *tracing.Tracer
+	var traceExporter tracing.TraceExporter
+	if rc != nil && rc.Tracing.Enabled != nil && *rc.Tracing.Enabled {
+		traceExporter = buildTraceExporter(rc.Tracing, sessionID, logger)
+		if traceExporter != nil {
+			tracer = tracing.NewTracer(sessionID, traceExporter)
+			reg.RegisterTraceExporter(traceExporter)
+			logger.Info("assemble_tracing_enabled", "exporter", rc.Tracing.Exporter, "level", rc.Tracing.Level)
 		}
 	}
 
@@ -210,6 +260,45 @@ func AssembleAgent(
 		production.WithWrapperSessionID(sessionID),
 	)
 
+	// 6b. Wire circuit breaker to protect the LLM model from cascading failures.
+	cbCfg := production.CircuitBreakerConfig{}
+	if rc != nil {
+		cbCfg.FailureThreshold = rc.Production.CircuitBreaker.Threshold
+		cbCfg.RecoveryTimeout = rc.Production.CircuitBreaker.ResetTimeout
+	}
+	circuitBreaker := production.NewDefaultCircuitBreaker(cbCfg,
+		production.WithName("model-breaker"),
+	)
+	production.RegisterCircuitBreaker(circuitBreaker)
+
+	// 6c. Wire idempotent cache, audit log, and telemetry for tool calls.
+	idempotentCache := production.NewFIFOIdempotentCache(1024)
+	production.RegisterIdempotentCache(idempotentCache)
+
+	telemetry := production.NewDefaultTelemetry()
+	production.RegisterTelemetry(telemetry)
+
+	var auditLog production.AuditLog
+	if rc != nil && rc.Production.Audit.Enabled {
+		auditPath := rc.Production.Audit.Path
+		if auditPath == "" {
+			if home, err := os.UserHomeDir(); err == nil && home != "" {
+				auditPath = filepath.Join(home, ".go-cli", "audit.jsonl")
+			}
+		}
+		if auditPath != "" {
+			auditLog = production.NewDefaultAuditLog(auditPath)
+			production.RegisterAuditLog(auditLog)
+		}
+	}
+
+	// 6d. Wrap tool registry with idempotent cache + audit + telemetry so that
+	// identical tool calls return cached results and every call is recorded.
+	tr = tools.NewMiddlewareToolRegistry(tr,
+		newProductionToolWrapper(idempotentCache, auditLog, telemetry, sessionID),
+	)
+	reg.RegisterToolRegistry(tr)
+
 	// 7. Wire output guards (PII + code injection + length).
 	guardChain := production.NewOutputGuardChain([]production.OutputGuard{
 		production.NewPIIOutputGuard(),
@@ -219,7 +308,7 @@ func AssembleAgent(
 
 	// 8. Wire real SubAgent execution (replaces simulated runner).
 	subAgentFactory := core.NewRealSubAgentFactory(model, tr,
-		core.WithModelWrapper(newModelWrapper(pw, guardChain)),
+		core.WithModelWrapper(newModelWrapper(pw, circuitBreaker, guardChain, telemetry)),
 	)
 	core.RegisterSubAgentFactory(subAgentFactory)
 	dispatcher := core.NewDefaultSubagentDispatcher(nil)
@@ -293,8 +382,9 @@ func AssembleAgent(
 	loopOpts := []core.LoopOption{
 		core.WithLLM(model),
 		core.WithTools(tr),
-		core.WithModelWrapper(newModelWrapper(pw, guardChain)),
+		core.WithModelWrapper(newModelWrapper(pw, circuitBreaker, guardChain, telemetry)),
 		core.WithExecutionMode(core.ExecutionModeParallel),
+		core.WithTracer(tracer),
 	}
 	if rc != nil && rc.Agent.MaxIterations != 0 {
 		loopOpts = append(loopOpts, core.WithMaxIterations(rc.Agent.MaxIterations))
@@ -330,10 +420,35 @@ func AssembleAgent(
 
 	var loop core.AgentLoop = core.NewLoopAgent(loopOpts...)
 
+	// 10b. Wire loop detector + system reminder injector.
+	ldCfg := production.LoopDetectionConfig{}
+	if rc != nil {
+		ldCfg.EditThreshold = rc.Production.LoopDetector.EditThreshold
+		ldCfg.TestFailureThreshold = rc.Production.LoopDetector.TestFailureThreshold
+		ldCfg.SameToolCallThreshold = rc.Production.LoopDetector.SameToolCallThreshold
+	}
+	loopDetector := production.NewDefaultLoopDetector(ldCfg)
+	production.RegisterLoopDetector(loopDetector)
+	reminderMgr := core.NewDefaultSystemReminderManager()
+
+	// 10c. Wire failure synthesis and hook chain.
+	failureSynthesizer := core.NewDefaultFailureTurnSynthesizer()
+	hookChain := core.NewHookChain()
+
 	// 11. Apply middleware chain (onion model) around the loop agent.
+	// Order (outermost first): logging -> loop-detector -> plan-mode ->
+	// system-reminder -> failure-synthesis -> hook. The loop detector
+	// observes events after Run and registers a SystemReminder; the
+	// SystemReminderInjector injects it on the next turn. FailureSynthesis
+	// retries recoverable errors once with a synthesized message. The Hook
+	// middleware runs pre/post-turn hooks.
 	loop = core.NewMiddlewareChain(
 		core.NewLoggingMiddleware(ac.agentName),
+		&loopDetectorMiddleware{detector: loopDetector, manager: reminderMgr},
 		core.NewPlanModeMiddleware(planCtrl),
+		core.NewSystemReminderInjector(reminderMgr),
+		core.NewFailureSynthesisMiddleware(failureSynthesizer),
+		core.NewHookMiddleware(hookChain),
 	).Wrap(loop)
 
 	// 12. Create compaction components (strategy from config, default unified).
@@ -362,11 +477,14 @@ func AssembleAgent(
 		}
 	}
 
-	// Extend cleanup to include session store.
+	// Extend cleanup to include session store and trace exporter.
 	prevCleanup := cleanup
 	cleanup = func() {
 		if sessionStore != nil {
 			sessionStore.Close()
+		}
+		if traceExporter != nil {
+			_ = traceExporter.Shutdown(context.Background())
 		}
 		prevCleanup()
 	}
@@ -388,7 +506,7 @@ func AssembleAgent(
 		agentOpts = append(agentOpts, core.WithHistory(restoredHistory))
 	}
 	agent := core.NewAgentImpl(ac.agentName, loop, agentOpts...)
-	h := core.NewHarnessImpl(agent, core.WithEventBuffer(64))
+	h := core.NewHarnessImpl(agent, core.WithEventBuffer(64), core.WithHarnessTracer(tracer))
 
 	// Emit assemble span for observability.
 	asmSpan, _ := tracing.SpanFromContext(ctx, "assemble.agent", tracing.SpanKindInternal)
@@ -402,27 +520,36 @@ func AssembleAgent(
 	asmSpan.End()
 
 	return &AgentAssembly{
-		Harness:       h,
-		Agent:         agent,
-		ToolRegistry:  tr,
-		CostTracker:   costTracker,
-		StatsRegistry: statsRegistry,
-		SessionStore:  sessionStore,
-		SessionID:     sessionID,
-		Model:         model,
-		ModelName:     modelName,
-		Compactor:     compactor,
-		Estimator:     estimator,
-		MidTurn:       midTurn,
-		MaxTokens:     ac.maxTokens,
-		Cleanup:       cleanup,
-		Registry:      reg,
-		FileTracker:   fileTracker,
-		DiffGenerator: diffGen,
-		PlanCtrl:      planCtrl,
-		ModeResolver:  modeResolver,
-		PromptBuilder: promptBuilder,
-		ContextLoader: contextLoader,
+		Harness:            h,
+		Agent:              agent,
+		ToolRegistry:       tr,
+		CostTracker:        costTracker,
+		StatsRegistry:      statsRegistry,
+		SessionStore:       sessionStore,
+		SessionID:          sessionID,
+		Model:              model,
+		ModelName:          modelName,
+		Compactor:          compactor,
+		Estimator:          estimator,
+		MidTurn:            midTurn,
+		MaxTokens:          ac.maxTokens,
+		Cleanup:            cleanup,
+		Registry:           reg,
+		FileTracker:        fileTracker,
+		DiffGenerator:      diffGen,
+		PlanCtrl:           planCtrl,
+		ModeResolver:       modeResolver,
+		PromptBuilder:      promptBuilder,
+		ContextLoader:      contextLoader,
+		Tracer:             tracer,
+		ReminderManager:    reminderMgr,
+		HookChain:          hookChain,
+		FailureSynthesizer: failureSynthesizer,
+		CircuitBreaker:     circuitBreaker,
+		LoopDetector:       loopDetector,
+		IdempotentCache:    idempotentCache,
+		AuditLog:           auditLog,
+		Telemetry:          telemetry,
 	}, nil
 }
 
@@ -539,4 +666,225 @@ func registerSkillTools(ctx context.Context, rc *config.Config, tr tools.ToolReg
 		slog.Info("assemble_skills_registered", "dir", rc.Skill.Dir, "count", count)
 	}
 	return infos
+}
+
+// loopDetectorMiddleware wraps an AgentLoop, feeding returned events to a
+// LoopDetector after each Run. When a loop is detected, a SystemReminder is
+// added to the reminder manager so the SystemReminderInjector can inject it
+// on the next turn.
+type loopDetectorMiddleware struct {
+	detector production.LoopDetector
+	manager  *core.DefaultSystemReminderManager
+	name     string
+}
+
+var _ core.Middleware = (*loopDetectorMiddleware)(nil)
+
+// Name returns the middleware identifier.
+func (m *loopDetectorMiddleware) Name() string {
+	if m.name == "" {
+		return "loop-detector"
+	}
+	return m.name
+}
+
+// Wrap returns a wrapped AgentLoop that monitors events for loops.
+func (m *loopDetectorMiddleware) Wrap(next core.AgentLoop) core.AgentLoop {
+	return &loopDetectorLoop{detector: m.detector, manager: m.manager, next: next}
+}
+
+// loopDetectorLoop is the concrete wrapped loop produced by
+// loopDetectorMiddleware.
+type loopDetectorLoop struct {
+	detector production.LoopDetector
+	manager  *core.DefaultSystemReminderManager
+	next     core.AgentLoop
+}
+
+// Run delegates to the wrapped loop, then feeds the returned events to the
+// LoopDetector. When a loop is detected, a SystemReminder is registered for
+// injection on the next turn.
+func (l *loopDetectorLoop) Run(ctx context.Context, submission core.Submission, stream ...core.EventStream) ([]core.AgentEvent, error) {
+	events, err := l.next.Run(ctx, submission, stream...)
+	if err != nil {
+		return events, err
+	}
+
+	for _, ev := range events {
+		_ = l.detector.Observe(ctx, ev)
+	}
+
+	res := l.detector.Check(ctx)
+	if res.Detected {
+		slog.WarnContext(ctx, "loop_detected",
+			"dimension", res.Dimension,
+			"count", res.Count,
+			"threshold", res.Threshold,
+			"message", res.Message,
+		)
+		l.manager.AddReminder(core.SystemReminder{
+			ID:      "loop-detector",
+			Content: fmt.Sprintf("Loop detected: %s. Please try a different approach.", res.Message),
+		})
+	}
+
+	return events, err
+}
+
+// defaultCacheTTL is the default time-to-live for idempotent tool call results.
+const defaultCacheTTL = 5 * time.Minute
+
+// cachedToolResult holds a cached tool result with an expiry timestamp for
+// TTL-based cache invalidation. The FIFOIdempotentCache itself does not
+// support TTL, so expiry is tracked alongside the value.
+type cachedToolResult struct {
+	result *tools.ToolResult
+	expiry time.Time
+}
+
+// newProductionToolWrapper returns a ToolExecutorWrapper that applies
+// idempotent caching, audit logging, and telemetry recording to every tool
+// call. On a cache hit (within the TTL) the wrapper short-circuits and returns
+// the stored result without invoking the underlying tool. The wrapper is
+// safe to use with nil cache, auditLog, or telemetry; each concern is
+// skipped when its component is absent.
+func newProductionToolWrapper(
+	cache production.IdempotentCache,
+	auditLog production.AuditLog,
+	telemetry production.Telemetry,
+	sessionID string,
+) tools.ToolExecutorWrapper {
+	return func(next func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error)) func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
+		return func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
+			start := time.Now()
+			cacheKey := toolCacheKey(call.Name, call.Args)
+
+			// Check idempotent cache.
+			if cache != nil {
+				if cached, ok := cache.Get(ctx, cacheKey); ok {
+					if entry, ok := cached.(*cachedToolResult); ok && time.Now().Before(entry.expiry) {
+						duration := time.Since(start)
+						recordAudit(ctx, auditLog, call, entry.result, duration, sessionID, true)
+						recordToolTelemetry(ctx, telemetry, call.Name, duration, true)
+						return entry.result, nil
+					}
+				}
+			}
+
+			// Cache miss: execute the tool.
+			result, err := next(ctx, call)
+			duration := time.Since(start)
+
+			if err == nil && result != nil && cache != nil {
+				_ = cache.Set(ctx, cacheKey, &cachedToolResult{
+					result: result,
+					expiry: time.Now().Add(defaultCacheTTL),
+				})
+			}
+
+			recordAudit(ctx, auditLog, call, result, duration, sessionID, false)
+			recordToolTelemetry(ctx, telemetry, call.Name, duration, false)
+
+			return result, err
+		}
+	}
+}
+
+// toolCacheKey generates a deterministic cache key from the tool name and
+// arguments by JSON-marshaling the args map.
+func toolCacheKey(name string, args map[string]any) string {
+	data, err := json.Marshal(args)
+	if err != nil {
+		return name
+	}
+	return name + ":" + string(data)
+}
+
+// hashValue computes a SHA-256 hex digest of the JSON representation of v.
+func hashValue(v any) string {
+	data, err := json.Marshal(v)
+	if err != nil {
+		return ""
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+// recordAudit logs a tool call to the audit log if one is configured. It
+// records the args hash, result hash, duration, and whether the result was
+// served from cache.
+func recordAudit(ctx context.Context, auditLog production.AuditLog, call tools.ToolCall, result *tools.ToolResult, duration time.Duration, sessionID string, cacheHit bool) {
+	if auditLog == nil {
+		return
+	}
+	entry := production.AuditEntry{
+		Timestamp: time.Now(),
+		Operation: "tool.run",
+		ToolName:  call.Name,
+		SessionID: sessionID,
+		Args: map[string]any{
+			"args_hash": hashValue(call.Args),
+		},
+	}
+	if result != nil {
+		entry.Result = map[string]any{
+			"result_hash": hashValue(result.Output),
+			"duration_ms": duration.Milliseconds(),
+			"cache_hit":   cacheHit,
+		}
+	}
+	_ = auditLog.Log(ctx, entry)
+}
+
+// recordToolTelemetry records tool call count and duration metrics if a
+// telemetry instance is configured.
+func recordToolTelemetry(ctx context.Context, telemetry production.Telemetry, toolName string, duration time.Duration, cacheHit bool) {
+	if telemetry == nil {
+		return
+	}
+	_ = telemetry.Record(ctx, production.TelemetryMetric{
+		Name:  "tool.call.count",
+		Value: 1,
+		Labels: map[string]string{
+			"tool":      toolName,
+			"cache_hit": fmt.Sprintf("%v", cacheHit),
+		},
+	})
+	_ = telemetry.Record(ctx, production.TelemetryMetric{
+		Name:  "tool.call.duration_ms",
+		Value: float64(duration.Milliseconds()),
+		Labels: map[string]string{
+			"tool": toolName,
+		},
+	})
+}
+
+// buildTraceExporter creates the appropriate TraceExporter from the tracing
+// config. Supported exporter types: "jsonl" (default), "stdout", "otlp".
+// When the exporter cannot be created (e.g. file open failure), nil is
+// returned and a warning is logged so assembly continues without tracing.
+func buildTraceExporter(tc config.TracingConfig, sessionID string, logger *slog.Logger) tracing.TraceExporter {
+	switch tc.Exporter {
+	case "stdout":
+		return tracing.NewStdoutTraceExporter(false)
+	case "otlp":
+		endpoint := tc.FilePath
+		if endpoint == "" {
+			endpoint = "http://localhost:4318/v1/traces"
+		}
+		return tracing.NewOTLPTraceExporter(tracing.OTLPTraceExporterConfig{
+			Endpoint: endpoint,
+		})
+	default: // "jsonl" or empty
+		dir := tc.FilePath
+		if dir == "" {
+			dir = ".go-cli/traces"
+		}
+		exp, err := tracing.NewJSONLTraceExporter(dir, sessionID)
+		if err != nil {
+			logger.Warn("assemble_tracing_jsonl_failed", "dir", dir, "err", err)
+			return nil
+		}
+		return exp
+	}
 }
