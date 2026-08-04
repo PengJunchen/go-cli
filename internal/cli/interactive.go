@@ -30,8 +30,6 @@ const (
 	spanInteractiveRun = "interactive.run"
 	// spanInteractiveTurn is the span for a single turn in the session.
 	spanInteractiveTurn = "interactive.turn"
-	// spanInteractiveCompact is the span for auto-compaction between turns.
-	spanInteractiveCompact = "interactive.compact"
 	// exitCommand is the user input that terminates the interactive session.
 	exitCommand = "exit"
 )
@@ -145,7 +143,6 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		out:            c.out,
 	}
 
-	var turnItems []compaction.TurnItem
 	entryCounter := len(assembly.Agent.Messages())
 
 	// Default to os.Stdin when no input reader was provided at registration
@@ -187,15 +184,6 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 
 		turnSpan, turnCtx := tracing.SpanFromContext(spanCtx, spanInteractiveTurn, tracing.SpanKindInternal)
 		turnSpan.SetAttributes(tracing.Attribute{Key: "user_message", Value: line})
-
-		turnItems = append(turnItems, compaction.TurnItem{
-			ID:      fmt.Sprintf("msg-%d", len(turnItems)),
-			Role:    compaction.RoleUser,
-			Content: line,
-		})
-
-		// Auto-compaction check before submitting.
-		turnItems = c.autoCompact(turnCtx, turnItems, assembly.MaxTokens, assembly.Compactor, assembly.Estimator, assembly.MidTurn, logger)
 
 		stream, err := assembly.Harness.Submit(turnCtx, line)
 		if err != nil {
@@ -265,15 +253,8 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		// The accordion view was streamed in real time via onUpdate.
 		// Only print the final assistant message in non-TTY mode (where the
 		// TUI's real-time repaint isn't active).
-		if result.Content != "" {
-			if !isTTY {
-				fmt.Fprintf(c.out, "AI: %s\n", result.Content)
-			}
-			turnItems = append(turnItems, compaction.TurnItem{
-				ID:      fmt.Sprintf("msg-%d", len(turnItems)),
-				Role:    compaction.RoleAssistant,
-				Content: result.Content,
-			})
+		if result.Content != "" && !isTTY {
+			fmt.Fprintf(c.out, "AI: %s\n", result.Content)
 		}
 
 		// Persist to session store.
@@ -303,7 +284,6 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 
 		logger.Info("cli_interactive_turn_complete",
 			"op", "cli.interactive.turn_complete",
-			"turn_items", len(turnItems),
 		)
 	}
 
@@ -313,56 +293,6 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 
 	fmt.Fprintln(c.out, "Session ended.")
 	return nil
-}
-
-// autoCompact checks whether the conversation turn items exceed the token
-// budget and triggers compaction when necessary. It returns the (possibly
-// compacted) items.
-func (c *interactiveCmd) autoCompact(
-	ctx context.Context,
-	items []compaction.TurnItem,
-	maxTokens int,
-	compactor compaction.Compactor,
-	estimator compaction.TokenEstimator,
-	midTurn *compaction.MidTurnCompact,
-	logger *slog.Logger,
-) []compaction.TurnItem {
-	compactSpan, compactCtx := tracing.SpanFromContext(ctx, spanInteractiveCompact, tracing.SpanKindInternal)
-	current := estimateTurnTokens(items, estimator)
-	compactSpan.SetAttributes(
-		tracing.Attribute{Key: "current_tokens", Value: current},
-		tracing.Attribute{Key: "max_tokens", Value: maxTokens},
-	)
-
-	// CompactIfNeeded uses a threshold ratio (default 0.8) to decide whether
-	// compaction should run. It returns items unchanged when below threshold.
-	result, compactResult, err := midTurn.CompactIfNeeded(compactCtx, items, maxTokens, estimator, compactor)
-
-	compactSpan.SetAttributes(
-		tracing.Attribute{Key: "triggered", Value: compactResult.Triggered},
-		tracing.Attribute{Key: "reason", Value: compactResult.Reason.String()},
-	)
-
-	if err != nil {
-		compactSpan.SetStatus(tracing.SpanStatusError, err.Error())
-		compactSpan.End()
-		logger.Warn("cli_interactive_compact_failed", "err", err)
-		return items
-	}
-
-	compactSpan.SetStatus(tracing.SpanStatusOK, "")
-	compactSpan.End()
-
-	if compactResult.Triggered {
-		logger.Info("cli_interactive_compacted",
-			"op", "cli.interactive.compacted",
-			"reason", compactResult.Reason.String(),
-			"items_in", len(items),
-			"items_out", len(result),
-		)
-		return result
-	}
-	return items
 }
 
 // estimateTurnTokens sums the estimated token counts of all turn items.
