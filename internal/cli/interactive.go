@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -38,8 +39,9 @@ const (
 // session with TUI rendering, MCP tool support, skill execution, and automatic
 // session compaction.
 type interactiveCmd struct {
-	out io.Writer
-	in  io.Reader
+	out        io.Writer
+	in         io.Reader
+	lineEditor LineEditor
 }
 
 // newInteractiveCmd creates an interactive command reading from in and writing
@@ -165,13 +167,21 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 
 	fmt.Fprintln(c.out, "Interactive session started. Type 'exit' to quit.")
 
-	scanner := bufio.NewScanner(in)
+	le := c.lineEditor
+	if le == nil {
+		le = NewDefaultLineEditor(in, c.out)
+		le.SetCompleter(NewSlashCommandCompleter(slashCommandNames()))
+	}
+
 	for {
-		fmt.Fprint(c.out, "> ")
-		if !scanner.Scan() {
+		line, err := le.ReadLine(ctx, "> ")
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				logger.Warn("cli_interactive_readline_error", "err", err)
+			}
 			break
 		}
-		line := strings.TrimSpace(scanner.Text())
+		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
 		}
@@ -196,8 +206,18 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		turnSpan, turnCtx := tracing.SpanFromContext(spanCtx, spanInteractiveTurn, tracing.SpanKindInternal)
 		turnSpan.SetAttributes(tracing.Attribute{Key: "user_message", Value: line})
 
+		// Wrap the turn context in a cancellable context so the user can
+		// interrupt the in-progress agent turn via Ctrl+C (non-TTY) or Esc
+		// (TTY, future work). The InterruptHandler monitors for SIGINT and
+		// invokes cancelTurn when a signal arrives.
+		turnCtx, cancelTurn := context.WithCancel(turnCtx)
+		interrupter := NewInterruptHandler(cancelTurn)
+		interrupter.Start(in)
+
 		stream, err := assembly.Harness.Submit(turnCtx, line)
 		if err != nil {
+			cancelTurn()
+			interrupter.Stop()
 			turnSpan.SetStatus(tracing.SpanStatusError, err.Error())
 			turnSpan.End()
 			fmt.Fprintf(c.out, "Error: %v\n", err)
@@ -242,35 +262,65 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 
 		// Wait for the render loop to finish. The app exits when the bridge
 		// channel closes, which only happens after the harness closes the
-		// EventStream — by which point SetResult has already been invoked.
+		// EventStream - by which point SetResult has already been invoked.
 		// stream.Result() is non-blocking, so it must be called after the
 		// stream is known to be closed, otherwise it returns errNoResult.
-		select {
-		case <-app.Done():
-		case <-turnCtx.Done():
+		// If the context is cancelled (user interrupt), we additionally wait
+		// for app.Done() so the stream is fully closed and Result() is ready.
+		// Steer messages arriving on the interrupter's channel are logged;
+		// since TurnRunner is not directly accessible from the REPL loop,
+		// steer injection is deferred to a future wiring.
+		turnComplete := false
+		for !turnComplete {
+			select {
+			case <-app.Done():
+				turnComplete = true
+			case <-turnCtx.Done():
+				// Context cancelled (user interrupt). Wait for the app to
+				// finish cleaning up so the stream closes and Result() is
+				// available.
+				<-app.Done()
+				turnComplete = true
+			case steerMsg := <-interrupter.SteerChannel():
+				logger.Info("cli_interactive_steer",
+					"op", "cli.interactive.steer",
+					"message", steerMsg,
+				)
+			}
 		}
 
 		result, streamErr := stream.Result()
+
+		interrupted := turnCtx.Err() != nil
+		cancelTurn()
+		interrupter.Stop()
 		turnSpan.SetStatus(tracing.SpanStatusOK, "")
 		turnSpan.End()
 
 		app.Quit()
 
-		if streamErr != nil {
+		if streamErr != nil && !interrupted {
 			fmt.Fprintf(c.out, "Error: %v\n", streamErr)
 			continue
 		}
 
+		if interrupted {
+			fmt.Fprintln(c.out, "[interrupted]")
+		}
+
 		// The accordion view was streamed in real time via onUpdate.
 		// Only print the final assistant message in non-TTY mode (where the
-		// TUI's real-time repaint isn't active).
-		if result.Content != "" && !isTTY {
+		// TUI's real-time repaint isn't active), and only when the turn was
+		// not interrupted.
+		if result.Content != "" && !isTTY && !interrupted {
 			fmt.Fprintf(c.out, "AI: %s\n", result.Content)
 		}
 
-		// Persist to session store.
+		// Persist to session store (even on interruption to preserve history).
+		// Use spanCtx, not turnCtx, because turnCtx may be cancelled by the
+		// interrupt handler.
 		if assembly.SessionStore != nil {
-			if appendErr := assembly.SessionStore.Append(turnCtx, &session.SessionEntry{
+			if appendErr := assembly.SessionStore.Append(spanCtx, &session.SessionEntry{
 				ID:        fmt.Sprintf("entry-%d", entryCounter),
 				Type:      session.EntryTypeUser,
 				Content:   line,
@@ -280,7 +330,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 			}
 			entryCounter++
 			if result.Content != "" {
-				if appendErr := assembly.SessionStore.Append(turnCtx, &session.SessionEntry{
+				if appendErr := assembly.SessionStore.Append(spanCtx, &session.SessionEntry{
 					ID:        fmt.Sprintf("entry-%d", entryCounter),
 					Type:      session.EntryTypeAssistant,
 					Content:   result.Content,
@@ -290,16 +340,12 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 				}
 				entryCounter++
 			}
-			_ = assembly.SessionStore.Save(turnCtx)
+			_ = assembly.SessionStore.Save(spanCtx)
 		}
 
 		logger.Info("cli_interactive_turn_complete",
 			"op", "cli.interactive.turn_complete",
 		)
-	}
-
-	if scanErr := scanner.Err(); scanErr != nil {
-		logger.Warn("cli_interactive_scanner_error", "err", scanErr)
 	}
 
 	fmt.Fprintln(c.out, "Session ended.")
@@ -443,6 +489,12 @@ func loadSessionHistory(path string) ([]core.AgentMessage, error) {
 		}
 	}
 	return messages, scanner.Err()
+}
+
+// slashCommandNames returns the canonical names of all registered slash
+// commands plus "exit", for use by the tab completer.
+func slashCommandNames() []string {
+	return append(defaultSlashReg.Names(), "exit")
 }
 
 var _ Command = (*interactiveCmd)(nil)
