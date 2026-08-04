@@ -185,9 +185,19 @@ func (ErrorRenderer) Supports(ct string) bool { return ct == ContentTypeError }
 // ---------- tool_call ----------
 
 // ToolCallRenderer renders a tool invocation in the secondary/bold style.
-type ToolCallRenderer struct{}
+// The collapsed field tracks display state for the collapsible render methods
+// (RenderCollapsed / RenderExpanded) defined in accordion.go.
+type ToolCallRenderer struct {
+	collapsed bool
+}
 
 var _ Renderer = (*ToolCallRenderer)(nil)
+
+// NewToolCallRenderer returns a ToolCallRenderer with collapsed set to true,
+// suitable for interactive accordion display.
+func NewToolCallRenderer() *ToolCallRenderer {
+	return &ToolCallRenderer{collapsed: true}
+}
 
 // Render styles tool call content.
 func (ToolCallRenderer) Render(ctx context.Context, content string, opts RenderOpts) string {

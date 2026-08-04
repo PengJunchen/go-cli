@@ -234,10 +234,10 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		// place; in pipe mode we emit the latest view line-by-line.
 		var lastLineCount int
 		isTTY := tui.IsTerminal()
+		tsp := tui.NewDefaultTerminalSizeProvider()
 		var app *tui.BubbleteaApp
 		app = tui.NewBubbleteaApp(tuiEvents,
-			tui.WithWidth(80),
-			tui.WithoutKeyboardNavigation(),
+			tui.WithWidth(tsp.Width()),
 			tui.WithOnUpdate(func(view string) {
 				if isTTY {
 					if lastLineCount > 0 {

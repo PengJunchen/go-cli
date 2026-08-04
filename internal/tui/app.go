@@ -75,15 +75,6 @@ func WithWidth(width int) AppOption {
 	return func(a *BubbleteaApp) { a.width = width }
 }
 
-// WithoutKeyboardNavigation disables raw-mode keyboard input even when stdin
-// is a TTY. This is necessary when the caller already reads stdin with a
-// line-based scanner (e.g. the interactive command), because the keyboard
-// loop's bufio.Reader and the scanner would contend for the same file
-// descriptor, causing the scanner to miss bytes after the loop exits.
-func WithoutKeyboardNavigation() AppOption {
-	return func(a *BubbleteaApp) { a.interactive = false }
-}
-
 // WithOnUpdate registers a callback invoked after every view mutation. The
 // callback receives the freshly rendered view string so it does not need to
 // call View (which would deadlock on the internal mutex). The callback runs

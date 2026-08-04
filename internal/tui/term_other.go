@@ -18,3 +18,7 @@ func makeRaw(fd int) (*termios, error) { return nil, errRawModeUnsupported }
 
 // restoreRaw matches the stub contract.
 func restoreRaw(fd int, old *termios) error { return nil }
+
+// getTerminalSize is a stub on non-Darwin platforms; callers fall back to
+// 80x24 via DefaultTerminalSizeProvider.
+func getTerminalSize() (int, int) { return 0, 0 }
