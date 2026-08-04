@@ -102,6 +102,12 @@ func AssembleAgent(
 
 	logger := slog.Default()
 
+	// Resolve session ID: config.Session.ID takes priority, fallback to agentName.
+	sessionID := ac.agentName
+	if rc != nil && rc.Session.ID != "" {
+		sessionID = rc.Session.ID
+	}
+
 	// 1. Build model.
 	model, modelCleanup, err := buildModel(ctx, rc, providerName, modelName)
 	if err != nil {
@@ -152,7 +158,7 @@ func AssembleAgent(
 		production.WithWrapperCostTracker(costTracker),
 		production.WithWrapperStatsRegistry(statsRegistry),
 		production.WithWrapperModelName(modelName),
-		production.WithWrapperSessionID(ac.agentName),
+		production.WithWrapperSessionID(sessionID),
 	)
 
 	// 7. Wire output guards (PII + code injection + length).
@@ -227,8 +233,17 @@ func AssembleAgent(
 		core.NewPlanModeMiddleware(planCtrl),
 	).Wrap(loop)
 
-	// 12. Create compaction components.
-	compactor := compaction.NewUnifiedCompactor()
+	// 12. Create compaction components (strategy from config, default unified).
+	compactorFactory := compaction.NewDefaultCompactorFactory()
+	strategy := "unified"
+	if rc != nil && rc.Compaction.Strategy != "" {
+		strategy = rc.Compaction.Strategy
+	}
+	compactor, err := compactorFactory.Create(strategy)
+	if err != nil {
+		cleanup()
+		return nil, fmt.Errorf("assemble: create compactor: %w", err)
+	}
 	estimator := compaction.NewHeuristicTokenEstimator()
 	midTurn := compaction.NewMidTurnCompact()
 
@@ -288,7 +303,7 @@ func AssembleAgent(
 		CostTracker:   costTracker,
 		StatsRegistry: statsRegistry,
 		SessionStore:  sessionStore,
-		SessionID:     ac.agentName,
+		SessionID:     sessionID,
 		Model:         model,
 		ModelName:     modelName,
 		Compactor:     compactor,
