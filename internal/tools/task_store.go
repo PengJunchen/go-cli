@@ -7,6 +7,23 @@ import (
 	"time"
 )
 
+// TaskStatus represents the lifecycle state of a task.
+type TaskStatus string
+
+const (
+	// StatusPending is the initial state of a newly created task.
+	StatusPending TaskStatus = "pending"
+	// StatusInProgress indicates work has started on the task.
+	StatusInProgress TaskStatus = "in_progress"
+	// StatusCompleted indicates the task is finished.
+	StatusCompleted TaskStatus = "completed"
+	// StatusBlocked indicates the task cannot proceed due to a dependency or
+	// external issue.
+	StatusBlocked TaskStatus = "blocked"
+	// StatusCancelled indicates the task has been abandoned.
+	StatusCancelled TaskStatus = "cancelled"
+)
+
 // Task represents a single task managed by TaskStore.
 type Task struct {
 	// ID uniquely identifies the task.
@@ -15,8 +32,9 @@ type Task struct {
 	Title string `json:"title"`
 	// Description is the longer description of the task.
 	Description string `json:"description"`
-	// Status is one of "pending", "in_progress", or "completed".
-	Status string `json:"status"`
+	// Status is one of "pending", "in_progress", "completed", "blocked", or
+	// "cancelled".
+	Status TaskStatus `json:"status"`
 	// CreatedAt is when the task was created.
 	CreatedAt time.Time `json:"created_at"`
 	// UpdatedAt is when the task was last modified.
@@ -27,7 +45,7 @@ type Task struct {
 type TaskUpdateOption func(*Task)
 
 // WithTaskStatus sets the status of a task.
-func WithTaskStatus(status string) TaskUpdateOption {
+func WithTaskStatus(status TaskStatus) TaskUpdateOption {
 	return func(t *Task) { t.Status = status }
 }
 
@@ -69,7 +87,7 @@ func (s *TaskStore) Create(title, description string) Task {
 		ID:          id,
 		Title:       title,
 		Description: description,
-		Status:      "pending",
+		Status:      StatusPending,
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}

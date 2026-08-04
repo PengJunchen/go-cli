@@ -172,9 +172,10 @@ func AssembleAgent(
 		logger.Warn("assemble_subagent_tool_failed", "err", subErr)
 	}
 
-	// 9. Register remaining unconnected tools (todo, task, web, plan_mode, etc.).
+	// 9. Register remaining unconnected tools (todo, task, goal, web, plan_mode, etc.).
 	todoStore := tools.NewTodoStore()
 	taskStore := tools.NewTaskStore()
+	goalStore, _ := tools.NewDefaultGoalStore("")
 	planCtrl := core.NewDefaultPlanModeController()
 	hitlEmitter := &cliHITLEmitter{out: out}
 
@@ -183,6 +184,11 @@ func AssembleAgent(
 		tools.NewTaskCreateTool(taskStore),
 		tools.NewTaskGetTool(taskStore),
 		tools.NewTaskListTool(taskStore),
+		tools.NewTaskUpdateTool(taskStore),
+		tools.NewGoalCreateTool(goalStore),
+		tools.NewGoalUpdateTool(goalStore),
+		tools.NewGoalListTool(goalStore, taskStore),
+		tools.NewGoalGetTool(goalStore, taskStore),
 		tools.NewWebFetchTool(),
 		tools.NewWebSearchTool(),
 		core.NewAskUserQuestionTool(hitlEmitter, 30*time.Second),
@@ -218,6 +224,7 @@ func AssembleAgent(
 	// 11. Apply middleware chain (onion model) around the loop agent.
 	loop = core.NewMiddlewareChain(
 		core.NewLoggingMiddleware(ac.agentName),
+		core.NewPlanModeMiddleware(planCtrl),
 	).Wrap(loop)
 
 	// 12. Create compaction components.

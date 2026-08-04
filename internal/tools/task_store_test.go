@@ -15,7 +15,7 @@ func TestTaskStoreCreate(t *testing.T) {
 	assert.Equal(t, "task-1", task.ID)
 	assert.Equal(t, "my task", task.Title)
 	assert.Equal(t, "do something", task.Description)
-	assert.Equal(t, "pending", task.Status)
+	assert.Equal(t, StatusPending, task.Status)
 	assert.False(t, task.CreatedAt.IsZero())
 	assert.False(t, task.UpdatedAt.IsZero())
 }
@@ -86,7 +86,7 @@ func TestTaskStoreUpdateStatus(t *testing.T) {
 	require.NoError(t, err)
 
 	updated, _ := s.Get(task.ID)
-	assert.Equal(t, "completed", updated.Status)
+	assert.Equal(t, StatusCompleted, updated.Status)
 	assert.True(t, updated.UpdatedAt.After(updated.CreatedAt) || updated.UpdatedAt.Equal(updated.CreatedAt))
 }
 
@@ -124,7 +124,7 @@ func TestTaskStoreUpdateMultipleOptions(t *testing.T) {
 	require.NoError(t, err)
 
 	updated, _ := s.Get(task.ID)
-	assert.Equal(t, "in_progress", updated.Status)
+	assert.Equal(t, StatusInProgress, updated.Status)
 	assert.Equal(t, "updated title", updated.Title)
 	assert.Equal(t, "updated desc", updated.Description)
 }
