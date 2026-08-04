@@ -42,6 +42,11 @@ type AgentAssembly struct {
 	MidTurn       *compaction.MidTurnCompact
 	MaxTokens     int
 	Cleanup       func()
+	// Registry exposes the assembled components through the core.DefaultRegistry
+	// so callers can retrieve or override any subsystem via RegisterXxx. It is
+	// additive: the components above are still constructed and wired exactly as
+	// before, they are also registered here for dependency-injection use.
+	Registry *core.DefaultRegistry
 }
 
 // AssembleOption configures AssembleAgent behavior.
@@ -102,6 +107,11 @@ func AssembleAgent(
 
 	logger := slog.Default()
 
+	// Registry: assemble components are also registered here so callers can
+	// retrieve or override any subsystem via RegisterXxx. The registry is
+	// additive; it does not change how components are constructed or wired.
+	reg := core.NewRegistry().(*core.DefaultRegistry)
+
 	// Resolve session ID: config.Session.ID takes priority, fallback to agentName.
 	sessionID := ac.agentName
 	if rc != nil && rc.Session.ID != "" {
@@ -113,6 +123,7 @@ func AssembleAgent(
 	if err != nil {
 		return nil, fmt.Errorf("assemble: build model: %w", err)
 	}
+	reg.RegisterModelProvider(&chatModelProvider{name: modelName, model: model})
 
 	cleanup := func() {
 		if modelCleanup != nil {
@@ -138,12 +149,17 @@ func AssembleAgent(
 	}
 
 	// 5. Wire approval + mutation middleware via decorator pattern.
+	classifier := approval.NewSafetyPolicyClassifier([]string{"bash"})
+	approvalStore := approval.NewInMemoryApprovalStore()
 	approvalMW := approval.NewApprovalMiddleware(
-		approval.NewSafetyPolicyClassifier([]string{"bash"}),
-		approval.NewInMemoryApprovalStore(),
+		classifier,
+		approvalStore,
 		approval.WithAutoApprove(false),
 	)
+	reg.RegisterApprovalClassifier(&approvalClassifierAdapter{inner: classifier})
+	reg.RegisterApprovalStore(&approvalStoreAdapter{inner: approvalStore})
 	tr = tools.NewMiddlewareToolRegistry(tr, approvalMW.WrapToolCall, tools.NewMutationWrapper())
+	reg.RegisterToolRegistry(tr)
 
 	// 6. Wire production resilience (retry + cost tracking).
 	retryPolicy := production.NewDefaultRetryPolicy(production.RetryConfig{
@@ -246,6 +262,8 @@ func AssembleAgent(
 	}
 	estimator := compaction.NewHeuristicTokenEstimator()
 	midTurn := compaction.NewMidTurnCompact()
+	reg.RegisterCompactor(&compactorAdapter{inner: compactor, estimator: estimator})
+	reg.RegisterTokenEstimator(&tokenEstimatorAdapter{inner: estimator})
 
 	// 13. Wire session persistence (if enabled).
 	var sessionStore *session.JSONLSessionStore
@@ -311,6 +329,7 @@ func AssembleAgent(
 		MidTurn:       midTurn,
 		MaxTokens:     ac.maxTokens,
 		Cleanup:       cleanup,
+		Registry:      reg,
 	}, nil
 }
 
