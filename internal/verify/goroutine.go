@@ -50,6 +50,10 @@ func AssertNoGoroutineLeak(t TestingT) func() {
 var knownLeakPatterns = []string{
 	"net/http.(*persistConn).readLoop",
 	"net/http.(*persistConn).writeLoop",
+	// os/signal.loop is the runtime signal-watcher goroutine started by
+	// signal.Notify. It is created once via sync.Once and never exits, even
+	// after signal.Stop. It is a known Go runtime goroutine, not a leak.
+	"os/signal.loop",
 }
 
 // countFilteredGoroutines returns the number of goroutines excluding known
