@@ -4,20 +4,38 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"strings"
 )
 
-// WebSearchTool performs a web search and returns results. Because no real
-// search API is wired in, it returns deterministic mock results derived from
-// the query. It implements the ToolDefinition interface.
-type WebSearchTool struct{}
+// WebSearchToolOption configures a WebSearchTool.
+type WebSearchToolOption func(*WebSearchTool)
+
+// WithSearchProvider sets the search backend provider. When not set, a
+// MockSearchProvider is used by default for backward compatibility.
+func WithSearchProvider(p WebSearchProvider) WebSearchToolOption {
+	return func(t *WebSearchTool) { t.provider = p }
+}
+
+// WebSearchTool performs a web search and returns results. It delegates to a
+// WebSearchProvider; by default a MockSearchProvider is used for backward
+// compatibility. It implements the ToolDefinition interface.
+type WebSearchTool struct {
+	provider WebSearchProvider
+}
 
 var _ ToolDefinition = (*WebSearchTool)(nil)
 
-// NewWebSearchTool returns a WebSearchTool.
-func NewWebSearchTool() *WebSearchTool {
-	return &WebSearchTool{}
+// NewWebSearchTool returns a WebSearchTool configured with the given options.
+// When no provider option is supplied, a MockSearchProvider is used.
+func NewWebSearchTool(opts ...WebSearchToolOption) *WebSearchTool {
+	t := &WebSearchTool{}
+	for _, opt := range opts {
+		opt(t)
+	}
+	if t.provider == nil {
+		t.provider = NewMockSearchProvider()
+	}
+	return t
 }
 
 // Name returns the tool name.
@@ -28,55 +46,39 @@ func (t *WebSearchTool) Description() string {
 	return "web_search: searches the web for a query and returns results. Args: query (string)."
 }
 
-// Execute takes args["query"] and returns simulated search results as a
-// formatted string. The results are deterministic and derived from the query.
+// Execute takes args["query"] and returns formatted search results from the
+// configured provider.
 func (t *WebSearchTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, error) {
 	query, ok := call.Args["query"].(string)
 	if !ok || strings.TrimSpace(query) == "" {
-		slog.Debug("web_search.missing_query")
 		return nil, errors.New("web_search: missing string argument 'query'")
 	}
 
-	slog.Debug("web_search.start", "query", query)
+	results, err := t.provider.Search(ctx, query, SearchOptions{
+		MaxResults: defaultFetchSearchMaxResults,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("web_search: %w", err)
+	}
 
-	// Build deterministic mock results derived from the query.
-	const numResults = 3
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("Search results for: %q\n\n", query))
-	for i := 1; i <= numResults; i++ {
-		sb.WriteString(fmt.Sprintf("%d. Example Result %s\n", i, ordinal(i)))
-		sb.WriteString(fmt.Sprintf("   https://example.com/result%d\n", i))
-		sb.WriteString(fmt.Sprintf("   A relevant page about %s\n\n", query))
+	for i, r := range results {
+		sb.WriteString(fmt.Sprintf("%d. %s\n", i+1, r.Title))
+		sb.WriteString(fmt.Sprintf("   %s\n", r.URL))
+		sb.WriteString(fmt.Sprintf("   %s\n\n", r.Snippet))
 	}
 	output := strings.TrimSuffix(sb.String(), "\n")
 
-	slog.Debug("web_search.done", "query", query, "results", numResults, "mock", true)
+	_, isMock := t.provider.(*MockSearchProvider)
 
 	return &ToolResult{
 		Output:     output,
 		ToolCallID: call.ID,
 		Metadata: map[string]any{
 			"query":   query,
-			"results": numResults,
-			"mock":    true,
+			"results": len(results),
+			"mock":    isMock,
 		},
 	}, nil
-}
-
-// ordinal returns the ordinal suffix for a positive integer (1st, 2nd, 3rd, ...).
-func ordinal(n int) string {
-	switch n {
-	case 1:
-		return "One"
-	case 2:
-		return "Two"
-	case 3:
-		return "Three"
-	case 4:
-		return "Four"
-	case 5:
-		return "Five"
-	default:
-		return fmt.Sprintf("%d", n)
-	}
 }
