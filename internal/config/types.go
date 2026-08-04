@@ -49,6 +49,10 @@ type AgentConfig struct {
 type ToolsConfig struct {
 	Builtin  []string `json:"builtin"`
 	Registry []string `json:"registry"`
+	// Parallel enables concurrent tool execution within a single turn.
+	// When nil or true, tools execute in parallel; when explicitly false,
+	// tools execute sequentially.
+	Parallel *bool `json:"parallel"`
 }
 
 // TracingConfig controls the trace logging exporter and level.

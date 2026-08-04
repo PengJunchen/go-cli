@@ -204,9 +204,14 @@ func AssembleAgent(
 		core.WithLLM(model),
 		core.WithTools(tr),
 		core.WithModelWrapper(newModelWrapper(pw, guardChain)),
+		core.WithExecutionMode(core.ExecutionModeParallel),
 	}
 	if rc != nil && rc.Agent.MaxIterations != 0 {
 		loopOpts = append(loopOpts, core.WithMaxIterations(rc.Agent.MaxIterations))
+	}
+	// Allow config to override parallel execution to sequential.
+	if rc != nil && rc.Tools.Parallel != nil && !*rc.Tools.Parallel {
+		loopOpts = append(loopOpts, core.WithExecutionMode(core.ExecutionModeSequential))
 	}
 	var loop core.AgentLoop = core.NewLoopAgent(loopOpts...)
 
