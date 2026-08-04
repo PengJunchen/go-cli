@@ -245,6 +245,22 @@ func (ft *FileTracker) ListCheckpoints() []CheckpointMeta {
 	return out
 }
 
+// BackupContent returns a defensive copy of the backed-up content for the
+// given checkpoint ID. The second value is false when no content was stored
+// (e.g. the checkpoint was for a new file or a skipped binary file) or when
+// the checkpoint ID is unknown.
+func (ft *FileTracker) BackupContent(checkpointID string) ([]byte, bool) {
+	ft.mu.RLock()
+	defer ft.mu.RUnlock()
+	content, ok := ft.backupContent[checkpointID]
+	if !ok {
+		return nil, false
+	}
+	cp := make([]byte, len(content))
+	copy(cp, content)
+	return cp, true
+}
+
 // storeCheckpoint records a checkpoint and its optional backup content, then
 // trims old checkpoints so that at most maxCheckpoints are retained. The
 // caller must hold ft.mu.

@@ -237,6 +237,44 @@ func TestFileTrackerCheckpointLimit(t *testing.T) {
 	assert.Equal(t, ids[54], remaining[49].ID, "last remaining checkpoint should be the 55th created")
 }
 
+func TestFileTrackerBackupContent(t *testing.T) {
+	ft := NewFileTracker()
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "existing.txt")
+	original := "original content"
+	require.NoError(t, os.WriteFile(path, []byte(original), 0644))
+
+	id, err := ft.Backup(path)
+	require.NoError(t, err)
+
+	content, ok := ft.BackupContent(id)
+	require.True(t, ok, "backup content should be available for an existing-file checkpoint")
+	assert.Equal(t, original, string(content), "backup content should match the original file")
+
+	// Mutating the returned slice must not affect the stored backup.
+	content[0] = 'X'
+	again, _ := ft.BackupContent(id)
+	assert.Equal(t, original, string(again), "stored backup content must be a defensive copy")
+}
+
+func TestFileTrackerBackupContentNewFile(t *testing.T) {
+	ft := NewFileTracker()
+	tmpDir := t.TempDir()
+	path := filepath.Join(tmpDir, "newfile.txt")
+
+	id, err := ft.Backup(path) // file does not exist -> new-file checkpoint
+	require.NoError(t, err)
+
+	_, ok := ft.BackupContent(id)
+	assert.False(t, ok, "no backup content should be stored for a new-file checkpoint")
+}
+
+func TestFileTrackerBackupContentUnknownID(t *testing.T) {
+	ft := NewFileTracker()
+	_, ok := ft.BackupContent("cp_does_not_exist")
+	assert.False(t, ok, "unknown checkpoint id should return ok=false")
+}
+
 // hasCheckpointPrefix is a test helper that verifies a checkpoint ID starts
 // with "cp_".
 func hasCheckpointPrefix(t *testing.T, id string) bool {
