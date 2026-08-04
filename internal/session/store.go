@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 
 	"github.com/pengjunchen/go-cli/internal/tracing"
@@ -82,6 +83,20 @@ func (s *MemoryStore) Get(ctx context.Context, id string) (*SessionEntry, error)
 	logger.Info("session_load", "op", "session.load", "entry_id", id, "entry_type", string(e.Type))
 	span.SetStatus(tracing.SpanStatusOK, "")
 	return e.clone(), nil
+}
+
+// List returns defensive copies of all stored entries sorted by timestamp.
+func (s *MemoryStore) List(ctx context.Context) ([]*SessionEntry, error) {
+	s.mu.RLock()
+	entries := make([]*SessionEntry, 0, len(s.entries))
+	for _, e := range s.entries {
+		entries = append(entries, e.clone())
+	}
+	s.mu.RUnlock()
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Timestamp.Before(entries[j].Timestamp)
+	})
+	return entries, nil
 }
 
 // Save is a no-op for the in-memory store; entries are immediately available.

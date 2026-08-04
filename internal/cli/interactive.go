@@ -130,7 +130,13 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 	// Build slash command context from the assembled components.
 	var sessionHandler *session.SessionSlashHandler
 	if assembly.SessionStore != nil {
-		sessionHandler = session.NewSessionSlashHandler(session.NewDefaultSessionTree(), assembly.SessionStore)
+		treeBuilder := session.NewDefaultSessionTreeBuilder()
+		sessionTree, err := treeBuilder.BuildFromStore(spanCtx, assembly.SessionStore)
+		if err != nil {
+			// fallback to empty tree on error
+			sessionTree = session.NewDefaultSessionTree()
+		}
+		sessionHandler = session.NewSessionSlashHandler(sessionTree, assembly.SessionStore)
 	}
 	slashCtx := slashContext{
 		agent:          assembly.Agent,
@@ -141,6 +147,8 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		modelName:      modelName,
 		sessionHandler: sessionHandler,
 		out:            c.out,
+		config:         rc,
+		sessionStore:   assembly.SessionStore,
 	}
 
 	entryCounter := len(assembly.Agent.Messages())

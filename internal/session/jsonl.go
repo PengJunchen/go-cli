@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"sort"
 	"sync"
 
 	"github.com/pengjunchen/go-cli/internal/tracing"
@@ -137,6 +138,23 @@ func (s *JSONLSessionStore) Get(ctx context.Context, id string) (*SessionEntry, 
 	logger.Info("session_load", "op", "session.load", "entry_id", id, "entry_type", string(e.Type))
 	span.SetStatus(tracing.SpanStatusOK, "")
 	return e.clone(), nil
+}
+
+// List returns defensive copies of all stored entries sorted by timestamp.
+func (s *JSONLSessionStore) List(ctx context.Context) ([]*SessionEntry, error) {
+	if err := s.ensureLoaded(); err != nil {
+		return nil, fmt.Errorf("session: list entries: %w", err)
+	}
+	s.mu.Lock()
+	entries := make([]*SessionEntry, 0, len(s.entries))
+	for _, e := range s.entries {
+		entries = append(entries, e.clone())
+	}
+	s.mu.Unlock()
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Timestamp.Before(entries[j].Timestamp)
+	})
+	return entries, nil
 }
 
 // Save flushes buffered bytes to the backing file.
