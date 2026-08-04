@@ -1,7 +1,7 @@
 // Package e2e_20260802 contains end-to-end integration tests.
 // This file verifies Phase 21 production resilience wiring: retry,
 // cost tracking, and output guards.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"context"

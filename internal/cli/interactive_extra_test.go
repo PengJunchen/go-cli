@@ -75,14 +75,14 @@ func (alwaysFailRegistry) List(_ context.Context) ([]tools.ToolDefinition, error
 
 var _ tools.ToolRegistry = alwaysFailRegistry{}
 
-// blockingCommand blocks until its context is cancelled, then returns the
+// blockingCommand blocks until its context is canceled, then returns the
 // context error. It signals startup via the started channel.
 type blockingCommand struct {
 	started chan struct{}
 }
 
 func (c *blockingCommand) Name() string     { return "block" }
-func (c *blockingCommand) Synopsis() string { return "Blocks until cancelled" }
+func (c *blockingCommand) Synopsis() string { return "Blocks until canceled" }
 func (c *blockingCommand) Run(ctx context.Context, _ Config, _ []string) error {
 	close(c.started)
 	<-ctx.Done()
@@ -99,7 +99,7 @@ var _ Command = (*blockingCommand)(nil)
 func writeSkillFile(t *testing.T, dir, name, content string) {
 	t.Helper()
 	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
 		t.Fatalf("write skill file %s: %v", path, err)
 	}
 }
@@ -310,9 +310,9 @@ func TestInteractiveCmd_RegisterMCPTools_SSEServer(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodPost {
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"sse-tool","description":"An SSE tool"}]}}`))
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"sse-tool","description":"An SSE tool"}]}}`)) //nolint:errcheck
 		} else {
-			_, _ = w.Write([]byte(`{}`))
+			_, _ = w.Write([]byte(`{}`)) //nolint:errcheck
 		}
 	}))
 	defer srv.Close()
@@ -430,7 +430,7 @@ Skill body text.
 func TestPromptCmd_BuildModel_WithConfig(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{}`))
+		_, _ = w.Write([]byte(`{}`)) //nolint:errcheck
 	}))
 	defer srv.Close()
 
@@ -468,7 +468,7 @@ func TestPromptCmd_BuildModel_WithNilConfig(t *testing.T) {
 func TestInteractiveCmd_BuildModel_WithConfig(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{}`))
+		_, _ = w.Write([]byte(`{}`)) //nolint:errcheck
 	}))
 	defer srv.Close()
 
@@ -512,7 +512,7 @@ func TestInteractiveCmd_RunConversation(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Hello from the assistant"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Hello from the assistant"}}]}`)) //nolint:errcheck
 	}))
 	defer srv.Close()
 
@@ -540,7 +540,7 @@ func TestInteractiveCmd_RunConversation(t *testing.T) {
 func TestInteractiveCmd_MaxTokensFlag(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)) //nolint:errcheck
 	}))
 	defer srv.Close()
 

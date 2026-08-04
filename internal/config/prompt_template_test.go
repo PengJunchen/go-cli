@@ -12,7 +12,7 @@ import (
 func TestPromptTemplateLoad(t *testing.T) {
 	dir := t.TempDir()
 	body := "Hello {{.name}}, you are a {{.role}}."
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "greet.tmpl"), []byte(body), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "greet.tmpl"), []byte(body), 0o600))
 
 	l := NewPromptTemplateLoader(dir)
 	tmpl, err := l.Load("greet")
@@ -25,7 +25,7 @@ func TestPromptTemplateLoad(t *testing.T) {
 func TestPromptTemplateLoadWithDescription(t *testing.T) {
 	dir := t.TempDir()
 	body := "# description: A greeting template\nHello {{.name}}!"
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "greet.tmpl"), []byte(body), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "greet.tmpl"), []byte(body), 0o600))
 
 	l := NewPromptTemplateLoader(dir)
 	tmpl, err := l.Load("greet")
@@ -43,9 +43,9 @@ func TestPromptTemplateLoadMissing(t *testing.T) {
 
 func TestPromptTemplateLoadAll(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.tmpl"), []byte("A {{.x}}"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "b.tmpl"), []byte("B {{.y}}"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "notmpl.txt"), []byte("ignore"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.tmpl"), []byte("A {{.x}}"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "b.tmpl"), []byte("B {{.y}}"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "notmpl.txt"), []byte("ignore"), 0o600))
 
 	l := NewPromptTemplateLoader(dir)
 	all, err := l.LoadAll()

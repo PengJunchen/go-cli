@@ -73,7 +73,7 @@ func (h *HistoryStore) Save() error {
 		buf.Write(b)
 		buf.WriteByte('\n')
 	}
-	return os.WriteFile(h.filePath, buf.Bytes(), 0644)
+	return os.WriteFile(h.filePath, buf.Bytes(), 0o600)
 }
 
 // Load reads the history from the configured file. If no file path is set or

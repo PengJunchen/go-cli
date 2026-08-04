@@ -60,7 +60,7 @@ func TestParseGoVersion(t *testing.T) {
 	assert.Equal(t, 1, major)
 	assert.Equal(t, 24, minor)
 
-	major, minor, ok = parseGoVersion("go1.24rc1")
+	_, minor, ok = parseGoVersion("go1.24rc1")
 	require.True(t, ok)
 	assert.Equal(t, 24, minor)
 }
@@ -70,7 +70,7 @@ func TestParseGoVersion(t *testing.T) {
 func TestGoModCheckerPass(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"),
-		[]byte("module example.com/foo\ngo 1.24\n"), 0o644))
+		[]byte("module example.com/foo\ngo 1.24\n"), 0o600))
 	c := NewGoModChecker(dir)
 	chk := c.Check(context.Background())
 	assert.Equal(t, doctorPass, chk.Status)
@@ -86,7 +86,7 @@ func TestGoModCheckerWarnMissing(t *testing.T) {
 func TestGoModCheckerFailInvalid(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"),
-		[]byte("not a real go mod\n"), 0o644))
+		[]byte("not a real go mod\n"), 0o600))
 	c := NewGoModChecker(dir)
 	chk := c.Check(context.Background())
 	assert.Equal(t, doctorFail, chk.Status)
@@ -96,7 +96,7 @@ func TestGoModCheckerFailInvalid(t *testing.T) {
 
 func TestMakefileCheckerPass(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "Makefile"), []byte("build:\n\tgo build\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "Makefile"), []byte("build:\n\tgo build\n"), 0o600))
 	c := NewMakefileChecker(dir)
 	chk := c.Check(context.Background())
 	assert.Equal(t, doctorPass, chk.Status)
@@ -114,7 +114,7 @@ func TestMakefileCheckerWarnMissing(t *testing.T) {
 func TestConfigCheckerPass(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	require.NoError(t, os.WriteFile(path, []byte(`{"provider":{"name":"openai"}}`), 0o644))
+	require.NoError(t, os.WriteFile(path, []byte(`{"provider":{"name":"openai"}}`), 0o600))
 	c := NewConfigChecker(path)
 	chk := c.Check(context.Background())
 	assert.Equal(t, doctorPass, chk.Status)
@@ -129,7 +129,7 @@ func TestConfigCheckerWarnMissing(t *testing.T) {
 func TestConfigCheckerFailInvalid(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
-	require.NoError(t, os.WriteFile(path, []byte(`{not json`), 0o644))
+	require.NoError(t, os.WriteFile(path, []byte(`{not json`), 0o600))
 	c := NewConfigChecker(path)
 	chk := c.Check(context.Background())
 	assert.Equal(t, doctorFail, chk.Status)
@@ -167,7 +167,7 @@ func TestPermissionsCheckerWarnWritable(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("{}"), 0o600))
 	// Chmod explicitly to bypass the process umask so the group-write bit is
 	// actually set on disk.
-	require.NoError(t, os.Chmod(path, 0o626))
+	require.NoError(t, os.Chmod(path, 0o626)) //nolint:gosec
 	c := NewPermissionsChecker([]string{path})
 	chk := c.Check(context.Background())
 	assert.Equal(t, doctorWarn, chk.Status)
@@ -184,7 +184,7 @@ func TestPermissionsCheckerSkipMissing(t *testing.T) {
 func TestNetworkCheckerPassLocal(t *testing.T) {
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
-	defer ln.Close()
+	defer ln.Close() //nolint:errcheck
 	c := NewNetworkChecker(ln.Addr().String(), time.Second)
 	chk := c.Check(context.Background())
 	assert.Equal(t, doctorPass, chk.Status)

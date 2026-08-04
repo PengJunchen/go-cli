@@ -294,7 +294,7 @@ func (s *DefaultGoalStore) saveLocked() error {
 		buf.Write(data)
 		buf.WriteByte('\n')
 	}
-	return os.WriteFile(s.path, buf.Bytes(), 0644)
+	return os.WriteFile(s.path, buf.Bytes(), 0o600)
 }
 
 // load reads goals from the JSONL file into the store. It must be called before

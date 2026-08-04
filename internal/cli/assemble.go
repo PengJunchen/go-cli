@@ -163,7 +163,7 @@ func AssembleAgent(
 	// Registry: assemble components are also registered here so callers can
 	// retrieve or override any subsystem via RegisterXxx. The registry is
 	// additive; it does not change how components are constructed or wired.
-	reg := core.NewRegistry().(*core.DefaultRegistry)
+	reg := core.NewRegistry().(*core.DefaultRegistry) //nolint:errcheck
 
 	// Resolve session ID: config.Session.ID takes priority, fallback to agentName.
 	sessionID := ac.agentName
@@ -282,7 +282,7 @@ func AssembleAgent(
 	if rc != nil && rc.Production.Audit.Enabled {
 		auditPath := rc.Production.Audit.Path
 		if auditPath == "" {
-			if home, err := os.UserHomeDir(); err == nil && home != "" {
+			if home, homeErr := os.UserHomeDir(); homeErr == nil && home != "" {
 				auditPath = filepath.Join(home, ".go-cli", "audit.jsonl")
 			}
 		}
@@ -319,7 +319,7 @@ func AssembleAgent(
 	// 9. Register remaining unconnected tools (todo, task, goal, web, plan_mode, etc.).
 	todoStore := tools.NewTodoStore()
 	taskStore := tools.NewTaskStore()
-	goalStore, _ := tools.NewDefaultGoalStore("")
+	goalStore, _ := tools.NewDefaultGoalStore("") //nolint:errcheck
 	planCtrl := core.NewDefaultPlanModeController()
 	hitlEmitter := &cliHITLEmitter{out: out}
 
@@ -369,13 +369,13 @@ func AssembleAgent(
 		tools.NewGitCommitTool(gitTool),
 	}
 	for _, t := range extraTools {
-		if err := tr.Register(ctx, t); err != nil {
-			logger.Warn("assemble_tool_register_failed", "tool", t.Name(), "err", err)
+		if regErr := tr.Register(ctx, t); regErr != nil {
+			logger.Warn("assemble_tool_register_failed", "tool", t.Name(), "err", regErr)
 		}
 	}
 	// tool_search needs visibility into all registered tools, so register last.
-	if err := tr.Register(ctx, tools.NewToolSearchTool(tr)); err != nil {
-		logger.Warn("assemble_tool_register_failed", "tool", "tool_search", "err", err)
+	if searchErr := tr.Register(ctx, tools.NewToolSearchTool(tr)); searchErr != nil {
+		logger.Warn("assemble_tool_register_failed", "tool", "tool_search", "err", searchErr)
 	}
 
 	// 10. Build loop agent with model wrapper.
@@ -397,7 +397,7 @@ func AssembleAgent(
 	// 10b. Wire dynamic system prompt builder with project context.
 	contextLoader := core.NewDefaultProjectContextLoader()
 	promptBuilder := core.NewDefaultSystemPromptBuilder()
-	cwd, _ := os.Getwd()
+	cwd, _ := os.Getwd() //nolint:errcheck
 	contextFiles, ctxErr := contextLoader.Load(ctx, cwd)
 	if ctxErr != nil {
 		logger.Warn("assemble_context_load_failed", "err", ctxErr)
@@ -481,10 +481,10 @@ func AssembleAgent(
 	prevCleanup := cleanup
 	cleanup = func() {
 		if sessionStore != nil {
-			sessionStore.Close()
+			sessionStore.Close() //nolint:errcheck,gosec
 		}
 		if traceExporter != nil {
-			_ = traceExporter.Shutdown(context.Background())
+			_ = traceExporter.Shutdown(context.Background()) //nolint:errcheck
 		}
 		prevCleanup()
 	}
@@ -492,7 +492,7 @@ func AssembleAgent(
 	// 14. Resume history from session store if requested.
 	var restoredHistory []core.AgentMessage
 	if ac.resumeFlag && sessionStore != nil {
-		restoredHistory, _ = loadSessionHistory(sessionStore.FilePath())
+		restoredHistory, _ = loadSessionHistory(sessionStore.FilePath()) //nolint:errcheck
 		if len(restoredHistory) > 0 {
 			logger.Info("assemble_session_resumed", "messages", len(restoredHistory))
 		}
@@ -711,7 +711,7 @@ func (l *loopDetectorLoop) Run(ctx context.Context, submission core.Submission, 
 	}
 
 	for _, ev := range events {
-		_ = l.detector.Observe(ctx, ev)
+		_ = l.detector.Observe(ctx, ev) //nolint:errcheck
 	}
 
 	res := l.detector.Check(ctx)
@@ -776,7 +776,7 @@ func newProductionToolWrapper(
 			duration := time.Since(start)
 
 			if err == nil && result != nil && cache != nil {
-				_ = cache.Set(ctx, cacheKey, &cachedToolResult{
+				_ = cache.Set(ctx, cacheKey, &cachedToolResult{ //nolint:errcheck
 					result: result,
 					expiry: time.Now().Add(defaultCacheTTL),
 				})
@@ -833,7 +833,7 @@ func recordAudit(ctx context.Context, auditLog production.AuditLog, call tools.T
 			"cache_hit":   cacheHit,
 		}
 	}
-	_ = auditLog.Log(ctx, entry)
+	_ = auditLog.Log(ctx, entry) //nolint:errcheck
 }
 
 // recordToolTelemetry records tool call count and duration metrics if a
@@ -842,7 +842,7 @@ func recordToolTelemetry(ctx context.Context, telemetry production.Telemetry, to
 	if telemetry == nil {
 		return
 	}
-	_ = telemetry.Record(ctx, production.TelemetryMetric{
+	_ = telemetry.Record(ctx, production.TelemetryMetric{ //nolint:errcheck
 		Name:  "tool.call.count",
 		Value: 1,
 		Labels: map[string]string{
@@ -850,7 +850,7 @@ func recordToolTelemetry(ctx context.Context, telemetry production.Telemetry, to
 			"cache_hit": fmt.Sprintf("%v", cacheHit),
 		},
 	})
-	_ = telemetry.Record(ctx, production.TelemetryMetric{
+	_ = telemetry.Record(ctx, production.TelemetryMetric{ //nolint:errcheck
 		Name:  "tool.call.duration_ms",
 		Value: float64(duration.Milliseconds()),
 		Labels: map[string]string{

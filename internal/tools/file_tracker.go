@@ -1,7 +1,7 @@
 package tools
 
 import (
-	"crypto/md5"
+	"crypto/md5" //nolint:gosec // md5 used for file tracking, not security
 	"encoding/hex"
 	"fmt"
 	"log/slog"
@@ -118,7 +118,7 @@ func (ft *FileTracker) Reset() {
 
 // hashContent computes the MD5 hash of content and returns its hex encoding.
 func hashContent(content string) string {
-	sum := md5.Sum([]byte(content))
+	sum := md5.Sum([]byte(content)) //nolint:gosec // md5 used for file tracking, not security
 	return hex.EncodeToString(sum[:])
 }
 
@@ -227,7 +227,7 @@ func (ft *FileTracker) Restore(checkpointID string) error {
 		return nil
 	}
 
-	if err := os.WriteFile(meta.Path, content, 0644); err != nil {
+	if err := os.WriteFile(meta.Path, content, 0o600); err != nil {
 		return fmt.Errorf("restore: write %s: %w", meta.Path, err)
 	}
 	return nil

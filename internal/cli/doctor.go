@@ -90,7 +90,7 @@ func (r *DoctorRunner) Run(ctx context.Context) []DoctorCheck {
 func Format(checks []DoctorCheck) string {
 	var b strings.Builder
 	for _, c := range checks {
-		fmt.Fprintf(&b, "%-16s [%s]  %s\n", c.Name, strings.ToUpper(c.Status), c.Message)
+		fmt.Fprintf(&b, "%-16s [%s]  %s\n", c.Name, strings.ToUpper(c.Status), c.Message) //nolint:errcheck
 	}
 	return b.String()
 }
@@ -426,7 +426,7 @@ func (c *NetworkChecker) Check(ctx context.Context) DoctorCheck {
 		return DoctorCheck{Name: "network", Status: doctorWarn,
 			Message: "cannot reach " + target + ": " + err.Error()}
 	}
-	_ = conn.Close()
+	_ = conn.Close() //nolint:errcheck
 	return DoctorCheck{Name: "network", Status: doctorPass,
 		Message: "network reachable (" + target + ")"}
 }
@@ -520,7 +520,7 @@ func (c *doctorCmd) Synopsis() string { return "Run diagnostic checks" }
 func (c *doctorCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	runner := NewDoctorRunner()
 	checks := runner.Run(ctx)
-	fmt.Fprint(c.out, Format(checks))
+	fmt.Fprint(c.out, Format(checks)) //nolint:errcheck
 	for _, ch := range checks {
 		if ch.Status == doctorFail {
 			return newExecutionError(fmt.Sprintf("doctor: %s check failed", ch.Name), nil)

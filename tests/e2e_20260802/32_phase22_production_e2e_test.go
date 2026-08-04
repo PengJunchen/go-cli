@@ -4,7 +4,7 @@
 // This file verifies Phase 22 production component wiring: CircuitBreaker,
 // LoopDetector, IdempotentCache, AuditLog, Telemetry, SystemReminderMiddleware,
 // FailureSynthesis, Hook, Tracing config, and Compaction.MaxTokens config.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"context"

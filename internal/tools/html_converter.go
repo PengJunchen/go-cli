@@ -23,8 +23,7 @@ func WithMaxLines(n int) DefaultHTMLConverterOption {
 // DefaultHTMLConverter uses standard library regexp + strings for conversion.
 // It has zero third-party dependencies.
 type DefaultHTMLConverter struct {
-	maxLines int  // max lines of output, 0 = unlimited
-	color    bool // ANSI color output (not used in default, for future)
+	maxLines int // max lines of output, 0 = unlimited
 }
 
 var _ HTMLToMarkdownConverter = (*DefaultHTMLConverter)(nil)

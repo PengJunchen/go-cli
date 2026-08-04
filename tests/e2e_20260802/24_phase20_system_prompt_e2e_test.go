@@ -4,7 +4,7 @@
 // This file verifies Phase 20 system prompt assembly: AGENTS.md loading,
 // tool guidelines, custom/append prompts, skills XML, date/cwd suffix, and
 // AgentAssembly wiring.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"context"

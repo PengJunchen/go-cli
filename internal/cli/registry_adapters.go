@@ -96,7 +96,7 @@ type tokenEstimatorAdapter struct {
 var _ core.TokenEstimator = (*tokenEstimatorAdapter)(nil)
 
 func (e *tokenEstimatorAdapter) Estimate(text string) int {
-	n, _ := e.inner.Estimate(text)
+	n, _ := e.inner.Estimate(text) //nolint:errcheck
 	return n
 }
 

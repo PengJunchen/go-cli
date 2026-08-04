@@ -82,7 +82,7 @@ func TestTree_AppendDoesNotMoveLeafOnSubsequent(t *testing.T) {
 // TestDefaultBranchSummary_SummarizeErrorsFromFunc verifies an injected
 // SummarizeFunc error surfaces.
 func TestDefaultBranchSummary_SummarizeErrorsFromFunc(t *testing.T) {
-	d := NewDefaultBranchSummary(func(context.Context, string) (string, error) {
+	d := NewDefaultBranchSummary(func(context.Context, string) (string, error) { //nolint:errcheck
 		return "", errors.New("llm down")
 	}).(*DefaultBranchSummary)
 	_, err := d.Summarize(context.Background(), []SessionEntry{{ID: "a", Content: "x"}})
@@ -94,7 +94,7 @@ func TestDefaultBranchSummary_SummarizeErrorsFromFunc(t *testing.T) {
 // empty entry set still calls the summarizer (prompt still built).
 func TestDefaultBranchSummary_EmptyEntriesProducesPrompt(t *testing.T) {
 	called := false
-	d := NewDefaultBranchSummary(func(_ context.Context, _ string) (string, error) {
+	d := NewDefaultBranchSummary(func(_ context.Context, _ string) (string, error) { //nolint:errcheck
 		called = true
 		return "empty-sum", nil
 	}).(*DefaultBranchSummary)
@@ -107,7 +107,7 @@ func TestDefaultBranchSummary_EmptyEntriesProducesPrompt(t *testing.T) {
 // TestDefaultBranchSummary_BuildPrompt empty content yields a prompt that still
 // carries the instruction header.
 func TestDefaultBranchSummary_BuildPromptHeader(t *testing.T) {
-	d := NewDefaultBranchSummary(func(context.Context, string) (string, error) { return "", nil }).(*DefaultBranchSummary)
+	d := NewDefaultBranchSummary(func(context.Context, string) (string, error) { return "", nil }).(*DefaultBranchSummary) //nolint:errcheck
 	// We cannot call unexported buildPrompt from here? We can, same package.
 	prompt := d.buildPrompt([]SessionEntry{{ID: "a", Content: "hi"}})
 	assert.Contains(t, prompt, "Summarize the following departed conversation branch")
@@ -128,7 +128,7 @@ func TestMemoryStoreDefaultTypeAlias(t *testing.T) {
 // TestMemoryStoreAppendValidation verifies validation short-circuits nil/id/type
 // before touching state.
 func TestMemoryStoreAppendValidation(t *testing.T) {
-	s := NewMemoryStore().(*MemoryStore)
+	s := NewMemoryStore().(*MemoryStore) //nolint:errcheck
 	require.Error(t, s.Append(context.Background(), nil))
 	require.Error(t, s.Append(context.Background(), &SessionEntry{Type: EntryTypeUser}))
 	require.Error(t, s.Append(context.Background(), &SessionEntry{ID: "x"}))

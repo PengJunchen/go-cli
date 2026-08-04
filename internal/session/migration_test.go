@@ -81,7 +81,7 @@ func TestMigrationChain_PreservesExistingFields(t *testing.T) {
 
 	meta, ok := result["metadata"].(map[string]any)
 	require.True(t, ok)
-	assert.True(t, meta["existing"].(bool), "existing metadata should be preserved")
+	assert.True(t, meta["existing"].(bool), "existing metadata should be preserved") //nolint:errcheck
 
 	assert.Equal(t, "t-existing", result["trace_id"], "existing trace_id should be preserved")
 	assert.Equal(t, "value", result["other_field"])

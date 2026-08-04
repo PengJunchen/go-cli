@@ -6,7 +6,7 @@
 // ResultMasker sanitisation, parallel tool execution, FailureTurn synthesis,
 // TodoWriteTool CRUD, session migration, model alias resolution, feature flag
 // runtime toggling, and AgentHarnessError normalisation.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"context"
@@ -467,7 +467,7 @@ func TestE2E_TodoWriteTool_EndToEnd(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Contains(t, addResult.Output, "added todo")
-	todoID, _ := addResult.Metadata["id"].(string)
+	todoID, _ := addResult.Metadata["id"].(string) //nolint:errcheck
 	assert.NotEmpty(t, todoID, "add should return a todo ID")
 
 	// --- List ---

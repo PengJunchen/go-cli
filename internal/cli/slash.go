@@ -52,11 +52,11 @@ func (c *interactiveCmd) handleSlashCommand(ctx context.Context, cmd session.Sla
 
 	handler, ok := defaultSlashReg.Lookup(cmd.Name)
 	if !ok {
-		fmt.Fprintf(sc.out, "Unknown command: /%s. Type /help for available commands.\n", cmd.Name)
+		fmt.Fprintf(sc.out, "Unknown command: /%s. Type /help for available commands.\n", cmd.Name) //nolint:errcheck
 		return
 	}
 	if err := handler.Handle(spanCtx, cmd.Args, sc); err != nil {
-		fmt.Fprintf(sc.out, "Error: %v\n", err)
+		fmt.Fprintf(sc.out, "Error: %v\n", err) //nolint:errcheck
 	}
 }
 

@@ -24,7 +24,7 @@ func TestDoctorCommand(t *testing.T) {
 
 	// Run the command. Some checks may warn or fail in the test environment
 	// (e.g. network), but the output should still contain check names.
-	_ = cmd.Run(context.Background(), &mockConfig{verbose: false}, nil)
+	_ = cmd.Run(context.Background(), &mockConfig{verbose: false}, nil) //nolint:errcheck
 
 	output := out.String()
 	assert.Contains(t, output, "go-version")

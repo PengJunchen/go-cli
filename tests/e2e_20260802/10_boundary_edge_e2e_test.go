@@ -3,7 +3,7 @@
 // existing suite. These tests exercise loop agent boundaries, sub-agent state
 // machines, circuit breakers, retry policies, session trees, config merging,
 // tracing, MCP hot reload, and compaction strategies.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"context"
@@ -309,14 +309,14 @@ func TestBoundary_CircuitExactThresholdTransition(t *testing.T) {
 	assert.Equal(t, production.CircuitClosed, cb.State())
 
 	// Fail 2 times - should still be Closed
-	_, _ = cb.Execute(ctx, func() (any, error) { return nil, errors.New("fail 1") })
+	_, _ = cb.Execute(ctx, func() (any, error) { return nil, errors.New("fail 1") }) //nolint:errcheck,gosec
 	assert.Equal(t, production.CircuitClosed, cb.State())
 
-	_, _ = cb.Execute(ctx, func() (any, error) { return nil, errors.New("fail 2") })
+	_, _ = cb.Execute(ctx, func() (any, error) { return nil, errors.New("fail 2") }) //nolint:errcheck,gosec
 	assert.Equal(t, production.CircuitClosed, cb.State())
 
 	// 3rd failure - should transition to Open
-	_, _ = cb.Execute(ctx, func() (any, error) { return nil, errors.New("fail 3") })
+	_, _ = cb.Execute(ctx, func() (any, error) { return nil, errors.New("fail 3") }) //nolint:errcheck,gosec
 	assert.Equal(t, production.CircuitOpen, cb.State())
 }
 
@@ -334,7 +334,7 @@ func TestBoundary_CircuitHalfOpenExactMaxCalls(t *testing.T) {
 	}, production.WithClock(clock.Now))
 
 	// Open the circuit
-	_, _ = cb.Execute(ctx, func() (any, error) { return nil, errors.New("fail") })
+	_, _ = cb.Execute(ctx, func() (any, error) { return nil, errors.New("fail") }) //nolint:errcheck,gosec
 	assert.Equal(t, production.CircuitOpen, cb.State())
 
 	// Advance past recovery timeout so it transitions to HalfOpen
@@ -677,7 +677,7 @@ func TestBoundary_MCPHotReloadRapidMultipleReload(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_ = reloader.Reload(context.Background())
+			_ = reloader.Reload(context.Background()) //nolint:errcheck,gosec
 		}()
 	}
 	wg.Wait()
@@ -733,11 +733,11 @@ func TestBoundary_CompactionOneTokenBudget(t *testing.T) {
 	tokenCount := 0
 	for _, it := range result {
 		if it.Content != "" {
-			n, _ := estimator.Estimate(it.Content)
+			n, _ := estimator.Estimate(it.Content) //nolint:errcheck,gosec
 			tokenCount += n
 		}
 		if it.ToolResult != "" {
-			n, _ := estimator.Estimate(it.ToolResult)
+			n, _ := estimator.Estimate(it.ToolResult) //nolint:errcheck,gosec
 			tokenCount += n
 		}
 	}

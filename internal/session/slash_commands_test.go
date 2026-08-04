@@ -109,7 +109,7 @@ func TestSessionSlashHandler_HandleTreeEmpty(t *testing.T) {
 func TestSessionSlashHandler_HandleFork(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tree := NewDefaultSessionTree().(*DefaultSessionTree)
+	tree := NewDefaultSessionTree().(*DefaultSessionTree) //nolint:errcheck
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("e1", "", EntryTypeUser)))
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("e2", "e1", EntryTypeUser)))
 	require.NoError(t, tree.MoveTo(context.Background(), "e2"))
@@ -128,7 +128,7 @@ func TestSessionSlashHandler_HandleFork(t *testing.T) {
 func TestSessionSlashHandler_HandleForkDefaultName(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tree := NewDefaultSessionTree().(*DefaultSessionTree)
+	tree := NewDefaultSessionTree().(*DefaultSessionTree) //nolint:errcheck
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("e1", "", EntryTypeUser)))
 
 	handler := NewSessionSlashHandler(tree, nil)
@@ -150,7 +150,7 @@ func TestSessionSlashHandler_HandleForkEmptyTree(t *testing.T) {
 func TestSessionSlashHandler_HandleResume(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tree := NewDefaultSessionTree().(*DefaultSessionTree)
+	tree := NewDefaultSessionTree().(*DefaultSessionTree) //nolint:errcheck
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("e1", "", EntryTypeUser)))
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("e2", "e1", EntryTypeUser)))
 	require.NoError(t, tree.Append(context.Background(), newTestEntry("e3", "e2", EntryTypeUser)))

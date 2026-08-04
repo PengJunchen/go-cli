@@ -165,7 +165,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		in = os.Stdin
 	}
 
-	fmt.Fprintln(c.out, "Interactive session started. Type 'exit' to quit.")
+	fmt.Fprintln(c.out, "Interactive session started. Type 'exit' to quit.") //nolint:errcheck
 
 	le := c.lineEditor
 	if le == nil {
@@ -189,7 +189,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		if strings.HasPrefix(line, "/") {
 			cmd, ok := session.ParseSlashCommand(line)
 			if !ok {
-				fmt.Fprintln(c.out, "Invalid command. Type /help for available commands.")
+				fmt.Fprintln(c.out, "Invalid command. Type /help for available commands.") //nolint:errcheck
 				continue
 			}
 			if cmd.Name == "exit" {
@@ -220,7 +220,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 			interrupter.Stop()
 			turnSpan.SetStatus(tracing.SpanStatusError, err.Error())
 			turnSpan.End()
-			fmt.Fprintf(c.out, "Error: %v\n", err)
+			fmt.Fprintf(c.out, "Error: %v\n", err) //nolint:errcheck
 			continue
 		}
 
@@ -235,21 +235,20 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		var lastLineCount int
 		isTTY := tui.IsTerminal()
 		tsp := tui.NewDefaultTerminalSizeProvider()
-		var app *tui.BubbleteaApp
-		app = tui.NewBubbleteaApp(tuiEvents,
+		app := tui.NewBubbleteaApp(tuiEvents,
 			tui.WithWidth(tsp.Width()),
 			tui.WithOnUpdate(func(view string) {
 				if isTTY {
 					if lastLineCount > 0 {
-						fmt.Fprintf(c.out, "\033[%dA", lastLineCount)
+						fmt.Fprintf(c.out, "\033[%dA", lastLineCount) //nolint:errcheck
 					}
-					fmt.Fprint(c.out, "\033[J")
+					fmt.Fprint(c.out, "\033[J") //nolint:errcheck
 					// In raw mode \n only moves down; \r\n returns to column 0.
-					fmt.Fprint(c.out, strings.ReplaceAll(view, "\n", "\r\n"))
-					fmt.Fprint(c.out, "\r\n")
+					fmt.Fprint(c.out, strings.ReplaceAll(view, "\n", "\r\n")) //nolint:errcheck
+					fmt.Fprint(c.out, "\r\n")                                 //nolint:errcheck
 					lastLineCount = strings.Count(view, "\n") + 1
 				} else {
-					fmt.Fprintln(c.out, view)
+					fmt.Fprintln(c.out, view) //nolint:errcheck
 				}
 			}),
 		)
@@ -265,7 +264,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		// EventStream - by which point SetResult has already been invoked.
 		// stream.Result() is non-blocking, so it must be called after the
 		// stream is known to be closed, otherwise it returns errNoResult.
-		// If the context is cancelled (user interrupt), we additionally wait
+		// If the context is canceled (user interrupt), we additionally wait
 		// for app.Done() so the stream is fully closed and Result() is ready.
 		// Steer messages arriving on the interrupter's channel are logged;
 		// since TurnRunner is not directly accessible from the REPL loop,
@@ -276,7 +275,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 			case <-app.Done():
 				turnComplete = true
 			case <-turnCtx.Done():
-				// Context cancelled (user interrupt). Wait for the app to
+				// Context canceled (user interrupt). Wait for the app to
 				// finish cleaning up so the stream closes and Result() is
 				// available.
 				<-app.Done()
@@ -300,12 +299,12 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		app.Quit()
 
 		if streamErr != nil && !interrupted {
-			fmt.Fprintf(c.out, "Error: %v\n", streamErr)
+			fmt.Fprintf(c.out, "Error: %v\n", streamErr) //nolint:errcheck
 			continue
 		}
 
 		if interrupted {
-			fmt.Fprintln(c.out, "[interrupted]")
+			fmt.Fprintln(c.out, "[interrupted]") //nolint:errcheck
 		}
 
 		// The accordion view was streamed in real time via onUpdate.
@@ -313,11 +312,11 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		// TUI's real-time repaint isn't active), and only when the turn was
 		// not interrupted.
 		if result.Content != "" && !isTTY && !interrupted {
-			fmt.Fprintf(c.out, "AI: %s\n", result.Content)
+			fmt.Fprintf(c.out, "AI: %s\n", result.Content) //nolint:errcheck
 		}
 
 		// Persist to session store (even on interruption to preserve history).
-		// Use spanCtx, not turnCtx, because turnCtx may be cancelled by the
+		// Use spanCtx, not turnCtx, because turnCtx may be canceled by the
 		// interrupt handler.
 		if assembly.SessionStore != nil {
 			if appendErr := assembly.SessionStore.Append(spanCtx, &session.SessionEntry{
@@ -340,7 +339,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 				}
 				entryCounter++
 			}
-			_ = assembly.SessionStore.Save(spanCtx)
+			_ = assembly.SessionStore.Save(spanCtx) //nolint:errcheck
 		}
 
 		logger.Info("cli_interactive_turn_complete",
@@ -348,7 +347,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		)
 	}
 
-	fmt.Fprintln(c.out, "Session ended.")
+	fmt.Fprintln(c.out, "Session ended.") //nolint:errcheck
 	return nil
 }
 
@@ -357,11 +356,11 @@ func estimateTurnTokens(items []compaction.TurnItem, estimator compaction.TokenE
 	total := 0
 	for _, it := range items {
 		if it.Content != "" {
-			n, _ := estimator.Estimate(it.Content)
+			n, _ := estimator.Estimate(it.Content) //nolint:errcheck
 			total += n
 		}
 		if it.ToolResult != "" {
-			n, _ := estimator.Estimate(it.ToolResult)
+			n, _ := estimator.Estimate(it.ToolResult) //nolint:errcheck
 			total += n
 		}
 	}
@@ -471,7 +470,7 @@ func loadSessionHistory(path string) ([]core.AgentMessage, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer file.Close() //nolint:errcheck
 
 	var messages []core.AgentMessage
 	scanner := bufio.NewScanner(file)
@@ -506,11 +505,11 @@ type cliHITLEmitter struct {
 }
 
 func (e *cliHITLEmitter) Emit(ctx context.Context, event core.HITLQuestionEvent) error {
-	fmt.Fprintf(e.out, "\n[ask_user] %s\n", event.Question)
+	fmt.Fprintf(e.out, "\n[ask_user] %s\n", event.Question) //nolint:errcheck
 	for i, opt := range event.Options {
-		fmt.Fprintf(e.out, "  %d. %s\n", i+1, opt)
+		fmt.Fprintf(e.out, "  %d. %s\n", i+1, opt) //nolint:errcheck
 	}
-	fmt.Fprint(e.out, "> ")
+	fmt.Fprint(e.out, "> ") //nolint:errcheck
 
 	line, err := readLine(os.Stdin)
 	if err != nil {

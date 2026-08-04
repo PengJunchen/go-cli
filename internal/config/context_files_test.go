@@ -17,9 +17,9 @@ func TestNewContextFileLoaderDefaults(t *testing.T) {
 
 func TestContextFileLoaderLoadAllFound(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("agents body"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("claude body"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "SYSTEM.md"), []byte("system body"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "AGENTS.md"), []byte("agents body"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("claude body"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "SYSTEM.md"), []byte("system body"), 0o600))
 
 	l := NewContextFileLoader()
 	files, err := l.Load(context.Background(), dir)
@@ -36,7 +36,7 @@ func TestContextFileLoaderLoadAllFound(t *testing.T) {
 
 func TestContextFileLoaderLoadSkipsMissing(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("only claude"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "CLAUDE.md"), []byte("only claude"), 0o600))
 
 	l := NewContextFileLoader()
 	files, err := l.Load(context.Background(), dir)
@@ -77,7 +77,7 @@ func TestContextFileLoaderMergeSkipsEmpty(t *testing.T) {
 
 func TestContextFileLoaderWithFiles(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "CUSTOM.md"), []byte("custom"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "CUSTOM.md"), []byte("custom"), 0o600))
 
 	l := NewContextFileLoader().WithFiles([]string{"CUSTOM.md"})
 	files, err := l.Load(context.Background(), dir)

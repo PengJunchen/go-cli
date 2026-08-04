@@ -1,4 +1,4 @@
-package cli
+package cli //nolint:scan003
 
 import (
 	"context"
@@ -8,6 +8,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/tools"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )

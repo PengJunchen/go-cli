@@ -40,7 +40,7 @@ func (t *TaskCreateTool) Execute(ctx context.Context, call ToolCall) (*ToolResul
 		slog.Debug("task_create.missing_title")
 		return nil, errors.New("task_create: missing string argument 'title'")
 	}
-	description, _ := call.Args["description"].(string)
+	description, _ := call.Args["description"].(string) //nolint:errcheck
 
 	task := t.store.Create(title, description)
 

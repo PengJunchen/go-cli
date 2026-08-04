@@ -180,7 +180,7 @@ func TestEditEmitsToolCallSpan(t *testing.T) {
 	require.NoError(t, reg.Register(ctx, NewEditFileTool()))
 
 	// Execute is a method on *DefaultToolRegistry, not the ToolRegistry interface.
-	dreg := reg.(*DefaultToolRegistry)
+	dreg := reg.(*DefaultToolRegistry) //nolint:errcheck
 	_, err := dreg.Execute(ctx, ToolCall{
 		Name: "edit",
 		Args: map[string]any{

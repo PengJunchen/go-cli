@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"time"
 )
 
 // SlashCommand represents a parsed session slash command.
@@ -146,6 +145,3 @@ func truncateForDisplay(content string, maxLen int) string {
 	}
 	return content[:maxLen] + "..."
 }
-
-// nowFunc is overridable in tests for deterministic timestamps.
-var nowFunc = func() time.Time { return time.Now().UTC() }

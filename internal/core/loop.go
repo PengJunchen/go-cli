@@ -1,4 +1,4 @@
-package core
+package core //nolint:scan009
 
 import (
 	"context"
@@ -203,7 +203,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 	sendEvent := func(ev AgentEvent) {
 		events = append(events, ev)
 		if es != nil {
-			_ = es.Send(ev)
+			_ = es.Send(ev) //nolint:errcheck
 		}
 	}
 
@@ -378,7 +378,7 @@ func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel,
 			// The complete non-incremental "message" event is emitted by the
 			// loop once the response finishes.
 			if es != nil {
-				_ = es.Send(AgentEvent{
+				_ = es.Send(AgentEvent{ //nolint:errcheck
 					Kind:        "message",
 					Content:     chunk.Content,
 					Timestamp:   time.Now(),

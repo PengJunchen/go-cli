@@ -7,7 +7,7 @@
 // middleware, extension registry, ConfigProvider, and a complex full pipeline
 // (load skill → register in registry → match by trigger → wrap as tool →
 // execute).
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"context"
@@ -89,7 +89,7 @@ This is the body text used as the default prompt.
 func TestSkill_YAMLLoading(t *testing.T) {
 	tmpDir := t.TempDir()
 	skillFile := filepath.Join(tmpDir, "code-review.skill.md")
-	require.NoError(t, os.WriteFile(skillFile, []byte(yamlSkillContent), 0o644))
+	require.NoError(t, os.WriteFile(skillFile, []byte(yamlSkillContent), 0o600))
 
 	loader := skill.NewYAMLSkillLoader()
 
@@ -120,7 +120,7 @@ This body becomes the prompt.`
 
 	tmpDir := t.TempDir()
 	skillFile := filepath.Join(tmpDir, "fallback.md")
-	require.NoError(t, os.WriteFile(skillFile, []byte(content), 0o644))
+	require.NoError(t, os.WriteFile(skillFile, []byte(content), 0o600))
 
 	loader := skill.NewYAMLSkillLoader()
 	got, err := loader.Load(context.Background(), skillFile)
@@ -286,12 +286,12 @@ func TestSkill_LoadingFromDirectory(t *testing.T) {
 	// Create multiple skill files.
 	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "skill-a.md"), []byte(
 		"---\nname: skill-a\ndescription: first skill\n---\nbody-a\n",
-	), 0o644))
+	), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "skill-b.md"), []byte(
 		"---\nname: skill-b\ndescription: second skill\n---\nbody-b\n",
-	), 0o644))
+	), 0o600))
 	// A non-skill file should be ignored.
-	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "readme.txt"), []byte("not a skill"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(tmpDir, "readme.txt"), []byte("not a skill"), 0o600))
 
 	loader := skill.NewYAMLSkillLoader()
 	defs, err := loader.LoadDir(context.Background(), tmpDir)
@@ -380,7 +380,7 @@ func TestExtension_Registry_DuplicateRegistration(t *testing.T) {
 	require.NoError(t, reg.RegisterMiddleware(ctx, mw1))
 	require.NoError(t, reg.RegisterMiddleware(ctx, mw2))
 
-	dr := reg.(*extension.DefaultExtensionRegistry)
+	dr := reg.(*extension.DefaultExtensionRegistry) //nolint:errcheck,gosec
 	// Last write wins.
 	assert.Equal(t, mw2, dr.Middleware("same-name"))
 }
@@ -516,7 +516,7 @@ parameters:
 ---
 Expert refactoring body.`
 
-	require.NoError(t, os.WriteFile(skillFile, []byte(skillContent), 0o644))
+	require.NoError(t, os.WriteFile(skillFile, []byte(skillContent), 0o600))
 
 	ctx := context.Background()
 
@@ -554,7 +554,7 @@ Expert refactoring body.`
 	assert.Contains(t, adapter.Description(), "parameters: max_files")
 
 	// Step 6: Register into tool registry and execute.
-	toolReg := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry)
+	toolReg := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck,gosec
 	require.NoError(t, toolReg.Register(ctx, adapter))
 
 	listed, err := toolReg.List(ctx)
@@ -592,7 +592,7 @@ func TestExtension_FullPipeline_ExtensionMiddlewareRegistry(t *testing.T) {
 	mw := mock.NewMockMiddleware("security-mw")
 	require.NoError(t, reg.RegisterMiddleware(ctx, mw))
 
-	dr := reg.(*extension.DefaultExtensionRegistry)
+	dr := reg.(*extension.DefaultExtensionRegistry) //nolint:errcheck,gosec
 	gotMw := dr.Middleware("security-mw")
 	require.NotNil(t, gotMw)
 	assert.Equal(t, "security-mw", gotMw.Name())

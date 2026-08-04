@@ -3,7 +3,7 @@
 // LoopAgent → AgentImpl → HarnessImpl → BridgeEvents → BubbleteaApp,
 // plus MCP tool execution, skill execution, automatic session compaction,
 // and content-type mapping through the bridge.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"context"
@@ -542,7 +542,7 @@ func TestE2EInteractive_BridgeContentTypeMapping(t *testing.T) {
 		}
 
 		for _, k := range kinds {
-			_ = stream.Send(core.AgentEvent{Kind: k.kind, Content: "payload:" + k.kind})
+			_ = stream.Send(core.AgentEvent{Kind: k.kind, Content: "payload:" + k.kind}) //nolint:errcheck,gosec
 		}
 		stream.Close()
 

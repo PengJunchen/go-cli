@@ -18,7 +18,7 @@ func TestTreeBuilder_EmptyStore(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "session.jsonl")
 	store := NewJSONLSessionStore(path)
 	require.NoError(t, store.Open(context.Background()))
-	defer func() { _ = store.Close() }()
+	defer func() { _ = store.Close() }() //nolint:errcheck
 
 	builder := NewDefaultSessionTreeBuilder()
 	tree, err := builder.BuildFromStore(context.Background(), store)
@@ -31,7 +31,7 @@ func TestTreeBuilder_MissingFile(t *testing.T) {
 
 	path := filepath.Join(t.TempDir(), "does-not-exist.jsonl")
 	store := NewJSONLSessionStore(path)
-	defer func() { _ = store.Close() }()
+	defer func() { _ = store.Close() }() //nolint:errcheck
 
 	builder := NewDefaultSessionTreeBuilder()
 	tree, err := builder.BuildFromStore(context.Background(), store)
@@ -62,7 +62,7 @@ func TestTreeBuilder_WithEntries(t *testing.T) {
 	// Re-open from disk to simulate a restart.
 	reopened := NewJSONLSessionStore(path)
 	require.NoError(t, reopened.Open(context.Background()))
-	defer func() { _ = reopened.Close() }()
+	defer func() { _ = reopened.Close() }() //nolint:errcheck
 
 	builder := NewDefaultSessionTreeBuilder()
 	tree, err := builder.BuildFromStore(context.Background(), reopened)
@@ -103,7 +103,7 @@ func TestTreeBuilder_CorruptedEntry(t *testing.T) {
 	// Re-open from disk; the store skips corrupted lines during load.
 	reopened := NewJSONLSessionStore(path)
 	require.NoError(t, reopened.Open(context.Background()))
-	defer func() { _ = reopened.Close() }()
+	defer func() { _ = reopened.Close() }() //nolint:errcheck
 
 	builder := NewDefaultSessionTreeBuilder()
 	tree, err := builder.BuildFromStore(context.Background(), reopened)
@@ -130,7 +130,7 @@ func TestTreeBuilder_OrphanedEntry(t *testing.T) {
 
 	reopened := NewJSONLSessionStore(path)
 	require.NoError(t, reopened.Open(context.Background()))
-	defer func() { _ = reopened.Close() }()
+	defer func() { _ = reopened.Close() }() //nolint:errcheck
 
 	builder := NewDefaultSessionTreeBuilder()
 	tree, err := builder.BuildFromStore(context.Background(), reopened)
@@ -160,7 +160,7 @@ func TestTreeBuilder_CurrentLeaf(t *testing.T) {
 
 	reopened := NewJSONLSessionStore(path)
 	require.NoError(t, reopened.Open(context.Background()))
-	defer func() { _ = reopened.Close() }()
+	defer func() { _ = reopened.Close() }() //nolint:errcheck
 
 	builder := NewDefaultSessionTreeBuilder()
 	tree, err := builder.BuildFromStore(context.Background(), reopened)
@@ -190,7 +190,7 @@ func TestTreeBuilder_CurrentLeafWithBranch(t *testing.T) {
 
 	reopened := NewJSONLSessionStore(path)
 	require.NoError(t, reopened.Open(context.Background()))
-	defer func() { _ = reopened.Close() }()
+	defer func() { _ = reopened.Close() }() //nolint:errcheck
 
 	builder := NewDefaultSessionTreeBuilder()
 	tree, err := builder.BuildFromStore(context.Background(), reopened)

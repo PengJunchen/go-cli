@@ -300,7 +300,7 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 		}()
 
 		parser := NewDefaultSSEParser()
-		events, _ := parser.Parse(respBody)
+		events, _ := parser.Parse(respBody) //nolint:errcheck
 
 		// Per-request tool-call accumulation.
 		var toolNameByIndex map[int]string
@@ -450,7 +450,7 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 		}()
 
 		parser := NewDefaultSSEParser()
-		events, _ := parser.Parse(respBody)
+		events, _ := parser.Parse(respBody) //nolint:errcheck
 
 		// Tool-call accumulation keyed by content block index.
 		tools := map[int]*claudeToolAccum{}
@@ -572,7 +572,7 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 		}()
 
 		parser := NewDefaultSSEParser()
-		events, _ := parser.Parse(respBody)
+		events, _ := parser.Parse(respBody) //nolint:errcheck
 
 		for event := range events {
 			if event.Data == "" {
@@ -777,7 +777,7 @@ func encodeOpenAIRequest(cfg ModelConfig, model string, msgs []Message, opts []O
 		if len(msg.ToolCalls) > 0 {
 			om.ToolCalls = make([]openAIToolCall, 0, len(msg.ToolCalls))
 			for _, tc := range msg.ToolCalls {
-				argsJSON, _ := json.Marshal(tc.Args)
+				argsJSON, _ := json.Marshal(tc.Args) //nolint:errcheck
 				om.ToolCalls = append(om.ToolCalls, openAIToolCall{
 					ID:   tc.ID,
 					Type: "function",

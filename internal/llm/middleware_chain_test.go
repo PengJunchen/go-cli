@@ -229,7 +229,6 @@ func TestModelMiddlewareChain_List(t *testing.T) {
 
 	// Mutate the returned copy.
 	list[0] = nil
-	list = append(list, nil)
 
 	// Chain must be unaffected.
 	again := c.List()
@@ -288,7 +287,7 @@ func TestModelMiddlewareChain_ConcurrentAccess(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		for i := 0; i < 50; i++ {
-			_ = c.Register(prefixMiddleware{name: "mw"})
+			_ = c.Register(prefixMiddleware{name: "mw"}) //nolint:errcheck
 		}
 	}()
 

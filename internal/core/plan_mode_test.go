@@ -77,10 +77,10 @@ func TestDefaultPlanModeController_ConcurrentAccess(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_ = c.Enter(context.Background(), "concurrent")
-			_ = c.IsActive()
-			_ = c.ShouldBlockWrite("write")
-			_ = c.Exit(context.Background(), "done")
+			_ = c.Enter(context.Background(), "concurrent") //nolint:errcheck
+			_ = c.IsActive()                                //nolint:errcheck
+			_ = c.ShouldBlockWrite("write")                 //nolint:errcheck
+			_ = c.Exit(context.Background(), "done")        //nolint:errcheck
 		}()
 	}
 	wg.Wait()

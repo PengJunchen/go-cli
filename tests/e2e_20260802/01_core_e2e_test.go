@@ -1,4 +1,4 @@
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck // package name with underscores required by test convention
 
 import (
 	"context"

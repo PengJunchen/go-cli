@@ -93,7 +93,7 @@ func TestCostTrackerConcurrentRecord(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < per; i++ {
-				_, _ = tr.Record("gpt-4o-mini", 100, 100)
+				_, _ = tr.Record("gpt-4o-mini", 100, 100) //nolint:errcheck
 			}
 		}()
 	}

@@ -30,13 +30,13 @@ func (h *HelpHandler) Name() string        { return "help" }
 func (h *HelpHandler) Description() string { return "Show available slash commands" }
 
 func (h *HelpHandler) Handle(_ context.Context, _ []string, sc *slashContext) error {
-	fmt.Fprintln(sc.out, "Available commands:")
+	fmt.Fprintln(sc.out, "Available commands:") //nolint:errcheck
 	if h != nil && h.reg != nil {
 		for _, cmd := range h.reg.List() {
-			fmt.Fprintf(sc.out, "  /%-8s %s\n", cmd.Name(), cmd.Description())
+			fmt.Fprintf(sc.out, "  /%-8s %s\n", cmd.Name(), cmd.Description()) //nolint:errcheck
 		}
 	}
-	fmt.Fprintln(sc.out, "  exit      Exit the interactive session")
+	fmt.Fprintln(sc.out, "  exit      Exit the interactive session") //nolint:errcheck
 	return nil
 }
 
@@ -51,18 +51,18 @@ func (h *CostHandler) Description() string { return "Show accumulated cost and u
 
 func (h *CostHandler) Handle(_ context.Context, _ []string, sc *slashContext) error {
 	if sc.costTracker != nil {
-		fmt.Fprintf(sc.out, "Total cost: $%.4f\n", sc.costTracker.Total())
-		fmt.Fprintf(sc.out, "Total calls: %d\n", sc.costTracker.Calls())
+		fmt.Fprintf(sc.out, "Total cost: $%.4f\n", sc.costTracker.Total()) //nolint:errcheck
+		fmt.Fprintf(sc.out, "Total calls: %d\n", sc.costTracker.Calls())   //nolint:errcheck
 	} else {
-		fmt.Fprintln(sc.out, "Cost tracking not configured.")
+		fmt.Fprintln(sc.out, "Cost tracking not configured.") //nolint:errcheck
 	}
 	if sc.statsRegistry != nil && sc.sessionID != "" {
 		if stats, ok := sc.statsRegistry.GetSessionStats(sc.sessionID); ok {
-			fmt.Fprintf(sc.out, "Session stats:\n")
-			fmt.Fprintf(sc.out, "  Turns:     %d\n", stats.Turns)
-			fmt.Fprintf(sc.out, "  Tool calls: %d\n", stats.ToolCalls)
-			fmt.Fprintf(sc.out, "  Tokens in:  %d\n", stats.TokensIn)
-			fmt.Fprintf(sc.out, "  Tokens out: %d\n", stats.TokensOut)
+			fmt.Fprintf(sc.out, "Session stats:\n")                    //nolint:errcheck
+			fmt.Fprintf(sc.out, "  Turns:     %d\n", stats.Turns)      //nolint:errcheck
+			fmt.Fprintf(sc.out, "  Tool calls: %d\n", stats.ToolCalls) //nolint:errcheck
+			fmt.Fprintf(sc.out, "  Tokens in:  %d\n", stats.TokensIn)  //nolint:errcheck
+			fmt.Fprintf(sc.out, "  Tokens out: %d\n", stats.TokensOut) //nolint:errcheck
 		}
 	}
 	return nil
@@ -79,16 +79,16 @@ func (h *CompactHandler) Description() string { return "Manually compact convers
 
 func (h *CompactHandler) Handle(ctx context.Context, _ []string, sc *slashContext) error {
 	if sc.agent == nil {
-		fmt.Fprintln(sc.out, "Agent not configured.")
+		fmt.Fprintln(sc.out, "Agent not configured.") //nolint:errcheck
 		return nil
 	}
 	before := len(sc.agent.Messages())
 	if err := sc.agent.Compact(ctx); err != nil {
-		fmt.Fprintf(sc.out, "Compaction failed: %v\n", err)
+		fmt.Fprintf(sc.out, "Compaction failed: %v\n", err) //nolint:errcheck
 		return nil
 	}
 	after := len(sc.agent.Messages())
-	fmt.Fprintf(sc.out, "Compacted history: %d -> %d messages\n", before, after)
+	fmt.Fprintf(sc.out, "Compacted history: %d -> %d messages\n", before, after) //nolint:errcheck
 	return nil
 }
 
@@ -102,11 +102,11 @@ func (h *ClearHandler) Description() string { return "Clear conversation history
 
 func (h *ClearHandler) Handle(_ context.Context, _ []string, sc *slashContext) error {
 	if sc.agent == nil {
-		fmt.Fprintln(sc.out, "Agent not configured.")
+		fmt.Fprintln(sc.out, "Agent not configured.") //nolint:errcheck
 		return nil
 	}
 	sc.agent.ClearHistory()
-	fmt.Fprintln(sc.out, "Conversation history cleared.")
+	fmt.Fprintln(sc.out, "Conversation history cleared.") //nolint:errcheck
 	return nil
 }
 
@@ -120,21 +120,21 @@ func (h *ToolsHandler) Description() string { return "List registered tools" }
 
 func (h *ToolsHandler) Handle(ctx context.Context, _ []string, sc *slashContext) error {
 	if sc.toolRegistry == nil {
-		fmt.Fprintln(sc.out, "Tool registry not configured.")
+		fmt.Fprintln(sc.out, "Tool registry not configured.") //nolint:errcheck
 		return nil
 	}
 	defs, err := sc.toolRegistry.List(ctx)
 	if err != nil {
-		fmt.Fprintf(sc.out, "Error listing tools: %v\n", err)
+		fmt.Fprintf(sc.out, "Error listing tools: %v\n", err) //nolint:errcheck
 		return nil
 	}
 	if len(defs) == 0 {
-		fmt.Fprintln(sc.out, "No tools registered.")
+		fmt.Fprintln(sc.out, "No tools registered.") //nolint:errcheck
 		return nil
 	}
-	fmt.Fprintf(sc.out, "Registered tools (%d):\n", len(defs))
+	fmt.Fprintf(sc.out, "Registered tools (%d):\n", len(defs)) //nolint:errcheck
 	for _, def := range defs {
-		fmt.Fprintf(sc.out, "  %s: %s\n", def.Name(), def.Description())
+		fmt.Fprintf(sc.out, "  %s: %s\n", def.Name(), def.Description()) //nolint:errcheck
 	}
 	return nil
 }
@@ -148,7 +148,7 @@ func (h *ModelHandler) Name() string        { return "model" }
 func (h *ModelHandler) Description() string { return "Show the current model name" }
 
 func (h *ModelHandler) Handle(_ context.Context, _ []string, sc *slashContext) error {
-	fmt.Fprintf(sc.out, "Current model: %s\n", sc.modelName)
+	fmt.Fprintf(sc.out, "Current model: %s\n", sc.modelName) //nolint:errcheck
 	return nil
 }
 
@@ -166,7 +166,7 @@ func (h *SessionHandler) Description() string {
 
 func (h *SessionHandler) Handle(ctx context.Context, args []string, sc *slashContext) error {
 	if sc.sessionHandler == nil {
-		fmt.Fprintln(sc.out, "Session tree not configured.")
+		fmt.Fprintln(sc.out, "Session tree not configured.") //nolint:errcheck
 		return nil
 	}
 	// Map /session to /tree when no subcommand is given; otherwise use the
@@ -178,10 +178,10 @@ func (h *SessionHandler) Handle(ctx context.Context, args []string, sc *slashCon
 	}
 	output, err := sc.sessionHandler.Handle(ctx, subCmd)
 	if err != nil {
-		fmt.Fprintf(sc.out, "Error: %v\n", err)
+		fmt.Fprintf(sc.out, "Error: %v\n", err) //nolint:errcheck
 		return nil
 	}
-	fmt.Fprint(sc.out, output)
+	fmt.Fprint(sc.out, output) //nolint:errcheck
 	return nil
 }
 
@@ -200,20 +200,20 @@ func (h *UndoHandler) Description() string { return "Restore the most recent fil
 
 func (h *UndoHandler) Handle(_ context.Context, _ []string, sc *slashContext) error {
 	if sc.fileTracker == nil {
-		fmt.Fprintln(sc.out, "File tracking not configured.")
+		fmt.Fprintln(sc.out, "File tracking not configured.") //nolint:errcheck
 		return nil
 	}
 	checkpoints := sc.fileTracker.ListCheckpoints()
 	if len(checkpoints) == 0 {
-		fmt.Fprintln(sc.out, "No checkpoints to undo.")
+		fmt.Fprintln(sc.out, "No checkpoints to undo.") //nolint:errcheck
 		return nil
 	}
 	latest := checkpoints[len(checkpoints)-1]
 	if err := sc.fileTracker.Restore(latest.ID); err != nil {
-		fmt.Fprintf(sc.out, "Undo failed: %v\n", err)
+		fmt.Fprintf(sc.out, "Undo failed: %v\n", err) //nolint:errcheck
 		return nil
 	}
-	fmt.Fprintf(sc.out, "Restored %s to checkpoint %s.\n", latest.Path, latest.ID)
+	fmt.Fprintf(sc.out, "Restored %s to checkpoint %s.\n", latest.Path, latest.ID) //nolint:errcheck
 	return nil
 }
 
@@ -228,18 +228,18 @@ func (h *DiffHandler) Description() string { return "Show the diff of the most r
 
 func (h *DiffHandler) Handle(_ context.Context, _ []string, sc *slashContext) error {
 	if sc.fileTracker == nil {
-		fmt.Fprintln(sc.out, "File tracking not configured.")
+		fmt.Fprintln(sc.out, "File tracking not configured.") //nolint:errcheck
 		return nil
 	}
 	checkpoints := sc.fileTracker.ListCheckpoints()
 	if len(checkpoints) == 0 {
-		fmt.Fprintln(sc.out, "No file changes recorded.")
+		fmt.Fprintln(sc.out, "No file changes recorded.") //nolint:errcheck
 		return nil
 	}
 	latest := checkpoints[len(checkpoints)-1]
 
 	if sc.diffGenerator == nil {
-		fmt.Fprintf(sc.out, "Recent change: %s (checkpoint %s)\n", latest.Path, latest.ID)
+		fmt.Fprintf(sc.out, "Recent change: %s (checkpoint %s)\n", latest.Path, latest.ID) //nolint:errcheck
 		return nil
 	}
 
@@ -251,20 +251,20 @@ func (h *DiffHandler) Handle(_ context.Context, _ []string, sc *slashContext) er
 	}
 	newBytes, err := os.ReadFile(latest.Path)
 	if err != nil {
-		fmt.Fprintf(sc.out, "Recent change: %s (checkpoint %s, current content unreadable: %v)\n", latest.Path, latest.ID, err)
+		fmt.Fprintf(sc.out, "Recent change: %s (checkpoint %s, current content unreadable: %v)\n", latest.Path, latest.ID, err) //nolint:errcheck
 		return nil
 	}
 
 	diff, genErr := sc.diffGenerator.Generate(oldContent, string(newBytes), latest.Path)
 	if genErr != nil {
-		fmt.Fprintf(sc.out, "Diff failed: %v\n", genErr)
+		fmt.Fprintf(sc.out, "Diff failed: %v\n", genErr) //nolint:errcheck
 		return nil
 	}
 	if diff == "" {
-		fmt.Fprintf(sc.out, "No changes for %s.\n", latest.Path)
+		fmt.Fprintf(sc.out, "No changes for %s.\n", latest.Path) //nolint:errcheck
 		return nil
 	}
-	fmt.Fprint(sc.out, diff)
+	fmt.Fprint(sc.out, diff) //nolint:errcheck
 	return nil
 }
 
@@ -280,43 +280,43 @@ func (h *PlanHandler) Description() string { return "Enter or exit plan mode (re
 
 func (h *PlanHandler) Handle(ctx context.Context, args []string, sc *slashContext) error {
 	if sc.planCtrl == nil {
-		fmt.Fprintln(sc.out, "Plan mode not configured.")
+		fmt.Fprintln(sc.out, "Plan mode not configured.") //nolint:errcheck
 		return nil
 	}
 
 	if len(args) > 0 && args[0] == "exit" {
 		summary := strings.Join(args[1:], " ")
 		if err := sc.planCtrl.Exit(ctx, summary); err != nil {
-			fmt.Fprintf(sc.out, "Failed to exit plan mode: %v\n", err)
+			fmt.Fprintf(sc.out, "Failed to exit plan mode: %v\n", err) //nolint:errcheck
 			return nil
 		}
-		fmt.Fprintln(sc.out, "Exited plan mode.")
+		fmt.Fprintln(sc.out, "Exited plan mode.") //nolint:errcheck
 		return nil
 	}
 	if len(args) > 0 && args[0] == "enter" {
 		reason := strings.Join(args[1:], " ")
 		if err := sc.planCtrl.Enter(ctx, reason); err != nil {
-			fmt.Fprintf(sc.out, "Failed to enter plan mode: %v\n", err)
+			fmt.Fprintf(sc.out, "Failed to enter plan mode: %v\n", err) //nolint:errcheck
 			return nil
 		}
-		fmt.Fprintf(sc.out, "Entered plan mode: %s\n", reason)
+		fmt.Fprintf(sc.out, "Entered plan mode: %s\n", reason) //nolint:errcheck
 		return nil
 	}
 
 	// No explicit subcommand: toggle.
 	if sc.planCtrl.IsActive() {
 		if err := sc.planCtrl.Exit(ctx, ""); err != nil {
-			fmt.Fprintf(sc.out, "Failed to exit plan mode: %v\n", err)
+			fmt.Fprintf(sc.out, "Failed to exit plan mode: %v\n", err) //nolint:errcheck
 			return nil
 		}
-		fmt.Fprintln(sc.out, "Exited plan mode.")
+		fmt.Fprintln(sc.out, "Exited plan mode.") //nolint:errcheck
 		return nil
 	}
 	if err := sc.planCtrl.Enter(ctx, "user requested"); err != nil {
-		fmt.Fprintf(sc.out, "Failed to enter plan mode: %v\n", err)
+		fmt.Fprintf(sc.out, "Failed to enter plan mode: %v\n", err) //nolint:errcheck
 		return nil
 	}
-	fmt.Fprintln(sc.out, "Entered plan mode.")
+	fmt.Fprintln(sc.out, "Entered plan mode.") //nolint:errcheck
 	return nil
 }
 
@@ -330,24 +330,24 @@ func (h *ConfigHandler) Description() string { return "Display the current confi
 
 func (h *ConfigHandler) Handle(_ context.Context, _ []string, sc *slashContext) error {
 	if sc.config == nil {
-		fmt.Fprintln(sc.out, "Config not available.")
+		fmt.Fprintln(sc.out, "Config not available.") //nolint:errcheck
 		return nil
 	}
 	cfg := sc.config
-	fmt.Fprintln(sc.out, "Configuration summary:")
-	fmt.Fprintf(sc.out, "  Provider:   %s\n", nonEmpty(cfg.Provider.Name))
-	fmt.Fprintf(sc.out, "  Model:      %s\n", nonEmpty(cfg.Model.Name))
+	fmt.Fprintln(sc.out, "Configuration summary:")                         //nolint:errcheck
+	fmt.Fprintf(sc.out, "  Provider:   %s\n", nonEmpty(cfg.Provider.Name)) //nolint:errcheck
+	fmt.Fprintf(sc.out, "  Model:      %s\n", nonEmpty(cfg.Model.Name))    //nolint:errcheck
 	if cfg.Agent.MaxIterations != 0 {
-		fmt.Fprintf(sc.out, "  Max iters:  %d\n", cfg.Agent.MaxIterations)
+		fmt.Fprintf(sc.out, "  Max iters:  %d\n", cfg.Agent.MaxIterations) //nolint:errcheck
 	}
 	if cfg.Approval.Mode != "" {
-		fmt.Fprintf(sc.out, "  Approval:   %s\n", cfg.Approval.Mode)
+		fmt.Fprintf(sc.out, "  Approval:   %s\n", cfg.Approval.Mode) //nolint:errcheck
 	}
 	if cfg.Session.StorePath != "" {
-		fmt.Fprintf(sc.out, "  Session:    %s\n", cfg.Session.StorePath)
+		fmt.Fprintf(sc.out, "  Session:    %s\n", cfg.Session.StorePath) //nolint:errcheck
 	}
 	if cfg.Compaction.Strategy != "" {
-		fmt.Fprintf(sc.out, "  Compaction: %s\n", cfg.Compaction.Strategy)
+		fmt.Fprintf(sc.out, "  Compaction: %s\n", cfg.Compaction.Strategy) //nolint:errcheck
 	}
 	return nil
 }
@@ -371,17 +371,17 @@ func (h *HistoryHandler) Description() string { return "Show conversation histor
 
 func (h *HistoryHandler) Handle(_ context.Context, _ []string, sc *slashContext) error {
 	if sc.agent == nil {
-		fmt.Fprintln(sc.out, "Agent not configured.")
+		fmt.Fprintln(sc.out, "Agent not configured.") //nolint:errcheck
 		return nil
 	}
 	msgs := sc.agent.Messages()
 	if len(msgs) == 0 {
-		fmt.Fprintln(sc.out, "No conversation history.")
+		fmt.Fprintln(sc.out, "No conversation history.") //nolint:errcheck
 		return nil
 	}
-	fmt.Fprintf(sc.out, "Conversation history (%d messages):\n", len(msgs))
+	fmt.Fprintf(sc.out, "Conversation history (%d messages):\n", len(msgs)) //nolint:errcheck
 	for i, m := range msgs {
-		fmt.Fprintf(sc.out, "  %d. [%s] %s\n", i+1, m.Role, truncatePreview(m.Content))
+		fmt.Fprintf(sc.out, "  %d. [%s] %s\n", i+1, m.Role, truncatePreview(m.Content)) //nolint:errcheck
 	}
 	return nil
 }
@@ -396,14 +396,14 @@ func (h *SaveHandler) Description() string { return "Explicitly save the current
 
 func (h *SaveHandler) Handle(ctx context.Context, _ []string, sc *slashContext) error {
 	if sc.sessionStore == nil {
-		fmt.Fprintln(sc.out, "Session store not configured.")
+		fmt.Fprintln(sc.out, "Session store not configured.") //nolint:errcheck
 		return nil
 	}
 	if err := sc.sessionStore.Save(ctx); err != nil {
-		fmt.Fprintf(sc.out, "Save failed: %v\n", err)
+		fmt.Fprintf(sc.out, "Save failed: %v\n", err) //nolint:errcheck
 		return nil
 	}
-	fmt.Fprintf(sc.out, "Session saved to %s.\n", sc.sessionStore.FilePath())
+	fmt.Fprintf(sc.out, "Session saved to %s.\n", sc.sessionStore.FilePath()) //nolint:errcheck
 	return nil
 }
 
@@ -418,21 +418,21 @@ func (h *LoadHandler) Description() string { return "Load and summarize the stor
 
 func (h *LoadHandler) Handle(ctx context.Context, _ []string, sc *slashContext) error {
 	if sc.sessionStore == nil {
-		fmt.Fprintln(sc.out, "Session store not configured.")
+		fmt.Fprintln(sc.out, "Session store not configured.") //nolint:errcheck
 		return nil
 	}
 	entries, err := sc.sessionStore.List(ctx)
 	if err != nil {
-		fmt.Fprintf(sc.out, "Load failed: %v\n", err)
+		fmt.Fprintf(sc.out, "Load failed: %v\n", err) //nolint:errcheck
 		return nil
 	}
 	if len(entries) == 0 {
-		fmt.Fprintln(sc.out, "No stored session entries.")
+		fmt.Fprintln(sc.out, "No stored session entries.") //nolint:errcheck
 		return nil
 	}
-	fmt.Fprintf(sc.out, "Loaded %d session entries from %s:\n", len(entries), sc.sessionStore.FilePath())
+	fmt.Fprintf(sc.out, "Loaded %d session entries from %s:\n", len(entries), sc.sessionStore.FilePath()) //nolint:errcheck
 	for _, e := range entries {
-		fmt.Fprintf(sc.out, "  [%s] %s: %s\n", e.Type, e.ID, truncatePreview(e.Content))
+		fmt.Fprintf(sc.out, "  [%s] %s: %s\n", e.Type, e.ID, truncatePreview(e.Content)) //nolint:errcheck
 	}
 	return nil
 }

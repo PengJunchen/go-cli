@@ -4,7 +4,7 @@
 // This file verifies Phase 20 REPL Upgrade: DefaultLineEditor non-TTY mode,
 // multi-line input, history, SlashCommandCompleter, FilePathCompleter,
 // HistoryStore persistence, and old interactive behavior.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"bufio"

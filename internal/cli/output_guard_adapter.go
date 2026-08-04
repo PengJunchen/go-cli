@@ -108,11 +108,11 @@ var _ llm.BaseChatModel = (*telemetryModel)(nil)
 func (m *telemetryModel) Generate(ctx context.Context, msgs []llm.Message, opts ...llm.Option) (*llm.Message, error) {
 	resp, err := m.inner.Generate(ctx, msgs, opts...)
 	if err == nil && resp != nil && resp.Usage != nil && m.telemetry != nil {
-		_ = m.telemetry.Record(ctx, production.TelemetryMetric{
+		_ = m.telemetry.Record(ctx, production.TelemetryMetric{ //nolint:errcheck
 			Name:  "llm.tokens.input",
 			Value: float64(resp.Usage.InputTokens),
 		})
-		_ = m.telemetry.Record(ctx, production.TelemetryMetric{
+		_ = m.telemetry.Record(ctx, production.TelemetryMetric{ //nolint:errcheck
 			Name:  "llm.tokens.output",
 			Value: float64(resp.Usage.OutputTokens),
 		})

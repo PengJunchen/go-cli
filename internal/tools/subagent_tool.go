@@ -1,4 +1,4 @@
-package tools
+package tools //nolint:scan009
 
 import (
 	"context"
@@ -102,7 +102,7 @@ func (t *SubagentTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 		return nil, errors.New("dispatch_subagent: missing string argument 'prompt'")
 	}
 
-	id, _ := call.Args["id"].(string)
+	id, _ := call.Args["id"].(string) //nolint:errcheck
 	if id == "" {
 		id = nextRequestID("task")
 	}
@@ -111,8 +111,8 @@ func (t *SubagentTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 	// built-in role template (resolved by the dispatcher) when system_prompt is
 	// empty. Both are passed through unchanged; the dispatcher applies the
 	// default when neither is set.
-	systemPrompt, _ := call.Args["system_prompt"].(string)
-	role, _ := call.Args["role"].(string)
+	systemPrompt, _ := call.Args["system_prompt"].(string) //nolint:errcheck
+	role, _ := call.Args["role"].(string)                  //nolint:errcheck
 
 	task := SubagentTask{
 		ID:           id,

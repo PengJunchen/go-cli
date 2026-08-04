@@ -23,7 +23,7 @@ type RunClaim struct {
 // claim the slot before running and release it when done.
 type RunSlotGuard interface {
 	// ClaimRun acquires the run slot, blocking until the slot is free or the
-	// context is cancelled. It returns a RunClaim identifying the holder.
+	// context is canceled. It returns a RunClaim identifying the holder.
 	ClaimRun(ctx context.Context) (RunClaim, error)
 	// ExecuteClaimedRun validates the claim, executes fn, and releases the
 	// slot. The slot is released even if fn returns an error or panics.
@@ -51,14 +51,14 @@ func NewDefaultRunSlotGuard() *DefaultRunSlotGuard {
 }
 
 // ClaimRun acquires the single run slot. It blocks until the slot is available
-// or the context is cancelled.
+// or the context is canceled.
 func (g *DefaultRunSlotGuard) ClaimRun(ctx context.Context) (RunClaim, error) {
 	select {
 	case g.sem <- struct{}{}:
 		// Slot acquired.
 	case <-ctx.Done():
-		slog.Debug("core.run_slot.claim_cancelled", "err", ctx.Err())
-		return RunClaim{}, fmt.Errorf("run_slot: claim cancelled: %w", ctx.Err())
+		slog.Debug("core.run_slot.claim_canceled", "err", ctx.Err())
+		return RunClaim{}, fmt.Errorf("run_slot: claim canceled: %w", ctx.Err())
 	}
 
 	claim := RunClaim{

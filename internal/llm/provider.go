@@ -273,9 +273,9 @@ func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 	// Re-marshal with stream=true. buildBody does not expose a streaming flag
 	// so we inject it here by decoding and re-encoding.
 	var reqMap map[string]any
-	if err := json.Unmarshal(body, &reqMap); err != nil {
+	if unmarshalErr := json.Unmarshal(body, &reqMap); unmarshalErr != nil {
 		close(ch)
-		return ch, fmt.Errorf("llm: decode stream request: %w", err)
+		return ch, fmt.Errorf("llm: decode stream request: %w", unmarshalErr)
 	}
 	reqMap["stream"] = true
 	if reqMap["stream_options"] == nil {
@@ -500,7 +500,7 @@ func (m *HTTPChatModel) buildBody(msgs []Message, opts ...Option) ([]byte, error
 		if len(msg.ToolCalls) > 0 {
 			om.ToolCalls = make([]openAIToolCall, 0, len(msg.ToolCalls))
 			for _, tc := range msg.ToolCalls {
-				argsJSON, _ := json.Marshal(tc.Args)
+				argsJSON, _ := json.Marshal(tc.Args) //nolint:errcheck
 				om.ToolCalls = append(om.ToolCalls, openAIToolCall{
 					ID:   tc.ID,
 					Type: "function",

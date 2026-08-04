@@ -78,7 +78,7 @@ func (t *AskUserQuestionTool) Description() string {
 // Execute extracts the question and options from call.Args, emits a
 // HITLQuestionEvent, and waits for the answer with a timeout. The timeout
 // context is derived from the incoming context so the emitter's work is
-// cancelled when the wait gives up.
+// canceled when the wait gives up.
 func (t *AskUserQuestionTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, error) {
 	question, ok := call.Args["question"].(string)
 	if !ok || question == "" {

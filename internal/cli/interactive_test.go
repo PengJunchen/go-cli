@@ -34,7 +34,7 @@ func TestInteractiveCmd_ExitCommand(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)) //nolint:errcheck,gosec
 	}))
 	defer srv.Close()
 
@@ -62,7 +62,7 @@ func TestInteractiveCmd_EmptyInput(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)) //nolint:errcheck,gosec
 	}))
 	defer srv.Close()
 
@@ -206,7 +206,7 @@ func TestEstimateTurnTokens(t *testing.T) {
 			{Role: "assistant", Content: "hi"}, // 2 chars => 0 tokens
 		}
 		total := estimateTurnTokens(items, estimator)
-		assert.Equal(t, 2/4, total)
+		assert.Equal(t, 0, total)
 	})
 }
 
