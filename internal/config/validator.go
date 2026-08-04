@@ -35,8 +35,8 @@ const (
 )
 
 var (
-	validTracingLevels   = []string{"debug", "info", "warn", "error"}
-	validTracingExporter = []string{"jsonl", "stdout", "none"}
+	validTracingLevels        = []string{"debug", "info", "warn", "error"}
+	validTracingExporter      = []string{"jsonl", "stdout", "none"}
 	validCompactionStrategies = []string{"", "unified", "micro", "micro_first", "summary", "truncating"}
 )
 

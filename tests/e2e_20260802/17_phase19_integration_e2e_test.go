@@ -855,8 +855,8 @@ func (s *e2eFakeSubAgent) Run(_ context.Context, _ string) (<-chan core.AgentEve
 	close(ch)
 	return ch, nil
 }
-func (s *e2eFakeSubAgent) Send(_ context.Context, _ string) error  { return nil }
-func (s *e2eFakeSubAgent) Interrupt(_ context.Context) error        { return nil }
+func (s *e2eFakeSubAgent) Send(_ context.Context, _ string) error { return nil }
+func (s *e2eFakeSubAgent) Interrupt(_ context.Context) error      { return nil }
 func (s *e2eFakeSubAgent) Wait(_ context.Context) (core.AgentMessage, error) {
 	return s.result, s.err
 }

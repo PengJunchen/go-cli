@@ -189,11 +189,15 @@ func p4ExtensionRegistration(ctx context.Context, t *testing.T) {
 
 	reg := extension.NewExtensionRegistry()
 
+	// Hook/Middleware getters are on the concrete type, not the interface.
+	concreteReg, ok := reg.(*extension.DefaultExtensionRegistry)
+	require.True(t, ok, "NewExtensionRegistry must return *DefaultExtensionRegistry")
+
 	ext := &p4TestExtension{name: "e2e-ext"}
 	require.NoError(t, ext.Init(ctx, reg))
 
 	// The extension registered a hook and a middleware during Init.
-	hook := reg.Hook("e2e-hook")
+	hook := concreteReg.Hook("e2e-hook")
 	require.NotNil(t, hook, "extension must register its hook")
 	assert.Equal(t, "e2e-hook", hook.Name())
 
@@ -201,7 +205,7 @@ func p4ExtensionRegistration(ctx context.Context, t *testing.T) {
 	res := hook.Handle(ctx, extension.HookEvent{Name: "agent.before_run", Source: "e2e"})
 	assert.Equal(t, extension.HookActionPass, res.Action)
 
-	mw := reg.Middleware("e2e-middleware")
+	mw := concreteReg.Middleware("e2e-middleware")
 	require.NotNil(t, mw, "extension must register its middleware")
 	out, err := mw.WrapAgent(func(_ context.Context, in extension.AgentInput) (extension.AgentOutput, error) {
 		return extension.AgentOutput{Text: "wrapped:" + in.Message}, nil

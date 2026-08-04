@@ -15,6 +15,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -546,9 +547,12 @@ func TestMCP_HotReload_Lifecycle(t *testing.T) {
 		return "pong", nil
 	})
 
+	var mu sync.Mutex
 	var registeredCount int
 	var lastTools []mcp.MCPTool
 	registerFn := func(tools []mcp.MCPTool) {
+		mu.Lock()
+		defer mu.Unlock()
 		registeredCount++
 		lastTools = tools
 	}
@@ -573,9 +577,13 @@ func TestMCP_HotReload_Lifecycle(t *testing.T) {
 
 	// Give it time to reconnect.
 	time.Sleep(200 * time.Millisecond)
-	assert.Equal(t, 1, registeredCount)
-	assert.Len(t, lastTools, 1)
-	assert.Equal(t, "ping", lastTools[0].Name)
+	mu.Lock()
+	count := registeredCount
+	tools := lastTools
+	mu.Unlock()
+	assert.Equal(t, 1, count)
+	assert.Len(t, tools, 1)
+	assert.Equal(t, "ping", tools[0].Name)
 
 	require.NoError(t, reloader.Stop())
 }
