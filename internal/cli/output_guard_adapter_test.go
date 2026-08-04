@@ -79,7 +79,7 @@ func TestNewModelWrapper_AppliesBothWrappers(t *testing.T) {
 	}
 	pw := production.NewProductionModelWrapper()
 	guard := production.NewPIIOutputGuard()
-	wrapper := newModelWrapper(pw, guard)
+	wrapper := newModelWrapper(pw, nil, guard)
 
 	wrapped := wrapper(inner)
 	require.NotNil(t, wrapped)
@@ -97,7 +97,7 @@ func TestNewModelWrapper_NilGuardReturnsProductionWrapped(t *testing.T) {
 		resp: &llm.Message{Role: llm.RoleAssistant, Content: "safe content"},
 	}
 	pw := production.NewProductionModelWrapper()
-	wrapper := newModelWrapper(pw, nil)
+	wrapper := newModelWrapper(pw, nil, nil)
 
 	wrapped := wrapper(inner)
 	require.NotNil(t, wrapped)
@@ -108,7 +108,7 @@ func TestNewModelWrapper_NilGuardReturnsProductionWrapped(t *testing.T) {
 
 func TestNewModelWrapper_NonBaseChatModelReturnsUnchanged(t *testing.T) {
 	pw := production.NewProductionModelWrapper()
-	wrapper := newModelWrapper(pw, nil)
+	wrapper := newModelWrapper(pw, nil, nil)
 
 	result := wrapper("not a model")
 	assert.Equal(t, "not a model", result)

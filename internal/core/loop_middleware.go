@@ -1,5 +1,9 @@
 package core
 
+import (
+	"github.com/pengjunchen/go-cli/internal/tracing"
+)
+
 // ModelWrapper wraps a base chat model with additional behavior (e.g.
 // middleware). Since core cannot export llm.BaseChatModel in the type
 // signature without creating a hard dependency, the wrapper accepts and
@@ -18,4 +22,13 @@ type ModelWrapper func(model any) any
 // duration of that Run.
 func WithModelWrapper(wrapper ModelWrapper) LoopOption {
 	return func(c *loopConfig) { c.modelWrapper = wrapper }
+}
+
+// WithTracer sets a tracing.Tracer on the LoopAgent. When non-nil, the loop
+// injects the Tracer into the context at the start of Run so that all
+// downstream SpanFromContext calls (inside the loop and its middleware) create
+// real spans sharing the same trace. When nil, tracing remains noop (zero
+// overhead).
+func WithTracer(t *tracing.Tracer) LoopOption {
+	return func(c *loopConfig) { c.tracer = t }
 }

@@ -1,5 +1,7 @@
 package config
 
+import "time"
+
 // Config is the root application configuration. It is deeply nested into
 // sections mirroring the go-cli configuration file / environment schema.
 type Config struct {
@@ -14,6 +16,7 @@ type Config struct {
 	MCP        MCPConfig        `json:"mcp"`
 	Skill      SkillConfig      `json:"skill"`
 	WebSearch  WebSearchConfig  `json:"web_search"`
+	Production ProductionConfig `json:"production"`
 
 	verbose bool
 }
@@ -134,6 +137,41 @@ type WebSearchConfig struct {
 	Provider string `json:"provider"` // "mock" (default), "fetch", "brave"
 	APIKey   string `json:"api_key"`  // for brave provider
 	Timeout  string `json:"timeout"`  // duration string, default "10s"
+}
+
+// ProductionConfig holds production resilience settings (circuit breaker, loop
+// detection, audit logging).
+type ProductionConfig struct {
+	CircuitBreaker CircuitBreakerConfig `json:"circuit_breaker"`
+	LoopDetector   LoopDetectorConfig   `json:"loop_detector"`
+	Audit          AuditConfig          `json:"audit"`
+}
+
+// AuditConfig controls the audit log that records tool calls and their
+// outcomes as JSON-lines for later inspection.
+type AuditConfig struct {
+	// Enabled controls whether the audit log is active.
+	Enabled bool `json:"enabled"`
+	// Path is the JSONL file path where audit entries are appended.
+	Path string `json:"path"`
+}
+
+// CircuitBreakerConfig tunes the model-protection circuit breaker.
+type CircuitBreakerConfig struct {
+	// Threshold is the number of consecutive failures before the breaker opens.
+	Threshold int `json:"threshold"`
+	// ResetTimeout is how long the breaker stays open before probing.
+	ResetTimeout time.Duration `json:"reset_timeout"`
+}
+
+// LoopDetectorConfig tunes the agent loop detector thresholds.
+type LoopDetectorConfig struct {
+	// EditThreshold triggers when a single file is edited this many times.
+	EditThreshold int `json:"edit_threshold"`
+	// TestFailureThreshold triggers after this many consecutive test failures.
+	TestFailureThreshold int `json:"test_failure_threshold"`
+	// SameToolCallThreshold triggers after this many repeated identical tool calls.
+	SameToolCallThreshold int `json:"same_tool_call_threshold"`
 }
 
 // Source enumerates the five configuration layers, ordered by ascending
