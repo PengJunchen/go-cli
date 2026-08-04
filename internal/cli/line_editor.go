@@ -49,7 +49,7 @@ type DefaultLineEditor struct {
 	history   *HistoryStore
 	completer Completer
 
-	// Non-TTY state (lazy-initialised scanner shared across ReadLine calls).
+	// Non-TTY state (lazy-initialized scanner shared across ReadLine calls).
 	scanner *bufio.Scanner
 
 	// TTY state (checked once).
@@ -122,7 +122,7 @@ func (le *DefaultLineEditor) detectTTY() bool {
 // ---------------------------------------------------------------------------
 
 // readLineNonTTY reads a single line using bufio.Scanner, preserving the
-// exact behaviour of the original REPL input loop.
+// exact behavior of the original REPL input loop.
 func (le *DefaultLineEditor) readLineNonTTY(ctx context.Context, prompt string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err

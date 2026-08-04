@@ -44,7 +44,7 @@ func TestET_Phase20_TokenEstimation(t *testing.T) {
 		assert.Equal(t, 5, n, "2 CJK * 2 + 5 letters * 0.25 = 5.25 -> round to 5")
 
 		// The mixed estimate should fall between pure Chinese and pure English.
-		chineseN, _ := est.Estimate("你好世界")   // 8
+		chineseN, _ := est.Estimate("你好世界")        // 8
 		englishN, _ := est.Estimate("hello world") // 3
 		assert.Greater(t, n, englishN, "mixed estimate should exceed pure English estimate")
 		assert.Less(t, n, chineseN, "mixed estimate should be below pure Chinese estimate")
