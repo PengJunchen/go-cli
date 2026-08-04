@@ -285,12 +285,12 @@ func (t *GoalGetTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, 
 		Output:     strings.TrimSuffix(sb.String(), "\n"),
 		ToolCallID: call.ID,
 		Metadata: map[string]any{
-			"id":          goal.ID,
-			"title":       goal.Title,
-			"status":      goal.Status.String(),
-			"priority":    goal.Priority,
-			"task_ids":    goal.TaskIDs,
-			"task_count":  len(goal.TaskIDs),
+			"id":         goal.ID,
+			"title":      goal.Title,
+			"status":     goal.Status.String(),
+			"priority":   goal.Priority,
+			"task_ids":   goal.TaskIDs,
+			"task_count": len(goal.TaskIDs),
 		},
 	}, nil
 }

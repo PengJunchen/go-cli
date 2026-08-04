@@ -590,18 +590,42 @@ func TestMultiExporterTracingFanOut(t *testing.T) {
 	exp2 := tracing.NewStdoutTraceExporterWithWriter(false, &buf2)
 
 	multi := tracing.NewMultiExporter(exp1, exp2)
-	tracer := tracing.NewTracer("fan-out-test", multi)
+
+	// Wrap multi exporter with a WaitGroup so the test can wait for the
+	// async export goroutine spawned by localSpan.End() to finish before
+	// reading the buffers, avoiding a data race.
+	var exportDone sync.WaitGroup
+	exportDone.Add(1)
+	wrapped := &waitExporter{inner: multi, done: &exportDone}
+	tracer := tracing.NewTracer("fan-out-test", wrapped)
 
 	span, _ := tracer.Start(context.Background(), "fan.out.op", tracing.SpanKindInternal)
 	span.SetAttributes(tracing.Attribute{Key: "key1", Value: "val1"})
 	span.SetStatus(tracing.SpanStatusOK, "")
 	span.End()
 
-	// Wait for async export.
-	time.Sleep(100 * time.Millisecond)
+	// Wait for async export to finish.
+	exportDone.Wait()
 
 	assert.NotEmpty(t, buf1.String(), "exporter 1 should receive the span")
 	assert.NotEmpty(t, buf2.String(), "exporter 2 should receive the span")
+}
+
+// waitExporter wraps a TraceExporter and signals a WaitGroup when ExportSpan
+// completes, allowing tests to synchronize with the async export goroutine.
+type waitExporter struct {
+	inner tracing.TraceExporter
+	done  *sync.WaitGroup
+}
+
+func (w *waitExporter) ExportSpan(ctx context.Context, span tracing.TraceSpan) error {
+	err := w.inner.ExportSpan(ctx, span)
+	w.done.Done()
+	return err
+}
+
+func (w *waitExporter) Shutdown(ctx context.Context) error {
+	return w.inner.Shutdown(ctx)
 }
 
 // =============================================================================

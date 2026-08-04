@@ -880,13 +880,17 @@ func TestStdoutTraceExporter(t *testing.T) {
 	var buf bytes.Buffer
 	exp := tracing.NewStdoutTraceExporterWithWriter(false, &buf)
 
-	tr := tracing.NewTracer("trace-stdout", exp)
+	// Wrap with WaitGroup to synchronize with async export goroutine.
+	var done sync.WaitGroup
+	done.Add(1)
+	wrapped := &syncExporter{inner: exp, done: &done}
+	tr := tracing.NewTracer("trace-stdout", wrapped)
 	span, _ := tr.Start(context.Background(), "stdout.op", tracing.SpanKindInternal)
 	span.SetStatus(tracing.SpanStatusOK, "")
 	span.End()
 
-	// Wait for async export.
-	require.Eventually(t, func() bool { return buf.Len() > 0 }, 2*time.Second, 5*time.Millisecond)
+	// Wait for async export to finish.
+	done.Wait()
 
 	require.NoError(t, exp.Shutdown(context.Background()))
 
@@ -899,13 +903,35 @@ func TestStdoutTraceExporter(t *testing.T) {
 	// Test with indentation.
 	var buf2 bytes.Buffer
 	exp2 := tracing.NewStdoutTraceExporterWithWriter(true, &buf2)
-	tr2 := tracing.NewTracer("trace-indent", exp2)
+
+	var done2 sync.WaitGroup
+	done2.Add(1)
+	wrapped2 := &syncExporter{inner: exp2, done: &done2}
+	tr2 := tracing.NewTracer("trace-indent", wrapped2)
 	sp2, _ := tr2.Start(context.Background(), "indent.op", tracing.SpanKindInternal)
 	sp2.SetStatus(tracing.SpanStatusOK, "")
 	sp2.End()
-	require.Eventually(t, func() bool { return buf2.Len() > 0 }, 2*time.Second, 5*time.Millisecond)
+	done2.Wait()
 	require.NoError(t, exp2.Shutdown(context.Background()))
 	assert.Contains(t, buf2.String(), "  ") // indented output
+}
+
+// syncExporter wraps a TraceExporter and signals a WaitGroup when ExportSpan
+// completes, allowing tests to synchronize with the async export goroutine
+// spawned by localSpan.End().
+type syncExporter struct {
+	inner tracing.TraceExporter
+	done  *sync.WaitGroup
+}
+
+func (s *syncExporter) ExportSpan(ctx context.Context, span tracing.TraceSpan) error {
+	err := s.inner.ExportSpan(ctx, span)
+	s.done.Done()
+	return err
+}
+
+func (s *syncExporter) Shutdown(ctx context.Context) error {
+	return s.inner.Shutdown(ctx)
 }
 
 // TestOTLPTraceExporter verifies OTLP export using httptest.Server.

@@ -159,8 +159,10 @@ type SessionHandler struct{}
 
 var _ SlashCommandHandler = (*SessionHandler)(nil)
 
-func (h *SessionHandler) Name() string        { return "session" }
-func (h *SessionHandler) Description() string { return "Session operations (subcommands: tree, fork, resume)" }
+func (h *SessionHandler) Name() string { return "session" }
+func (h *SessionHandler) Description() string {
+	return "Session operations (subcommands: tree, fork, resume)"
+}
 
 func (h *SessionHandler) Handle(ctx context.Context, args []string, sc *slashContext) error {
 	if sc.sessionHandler == nil {

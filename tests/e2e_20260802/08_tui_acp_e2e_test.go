@@ -682,6 +682,7 @@ func TestACP_StdioAdapterBidirectionalCommunication(t *testing.T) {
 	var wg2 sync.WaitGroup
 	wg2.Add(1)
 	serverDone := make(chan struct{})
+	errCh := make(chan error, 1)
 
 	// Server goroutine.
 	go func() {
@@ -698,7 +699,8 @@ func TestACP_StdioAdapterBidirectionalCommunication(t *testing.T) {
 			assert.Equal(t, acp.TypeConnect, connectMsg.Type)
 			assert.Equal(t, "client-agent", connectMsg.SenderID)
 		case <-time.After(5 * time.Second):
-			t.Fatal("timed out waiting for connect message on server")
+			errCh <- fmt.Errorf("timed out waiting for connect message on server")
+			return
 		}
 
 		// Second message should be the test message.
@@ -707,7 +709,8 @@ func TestACP_StdioAdapterBidirectionalCommunication(t *testing.T) {
 			assert.Equal(t, "client-agent", msg.SenderID)
 			assert.Equal(t, "hello from client", msg.Content)
 		case <-time.After(5 * time.Second):
-			t.Fatal("timed out waiting for message on server")
+			errCh <- fmt.Errorf("timed out waiting for message on server")
+			return
 		}
 
 		// Send response back.
@@ -756,6 +759,11 @@ func TestACP_StdioAdapterBidirectionalCommunication(t *testing.T) {
 	<-serverDone
 	wg.Wait()
 	wg2.Wait()
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	default:
+	}
 }
 
 func TestACP_StdioAdapterNameDefault(t *testing.T) {
