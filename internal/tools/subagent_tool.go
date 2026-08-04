@@ -22,6 +22,13 @@ type SubagentTask struct {
 	ID string
 	// Prompt is the instruction the sub-agent executes.
 	Prompt string
+	// SystemPrompt is an explicit system prompt for the sub-agent. When empty,
+	// Role (if set) selects a role template; otherwise the dispatcher applies a
+	// default. system_prompt takes precedence over role.
+	SystemPrompt string
+	// Role optionally selects a role template (researcher, implementer,
+	// reviewer, tester) when SystemPrompt is empty.
+	Role string
 	// Tools lists the tool names available to the sub-agent.
 	Tools []string
 	// MaxTurns bounds the sub-agent turn loop. Zero leaves it unset.
@@ -69,9 +76,22 @@ func NewSubagentTool(dispatcher SubagentDispatcher) *SubagentTool {
 // Name returns the tool name.
 func (t *SubagentTool) Name() string { return "dispatch_subagent" }
 
-// Description returns a brief description of the tool.
+// Description returns guidance for the model on when and how to delegate work
+// to a sub-agent.
 func (t *SubagentTool) Description() string {
-	return "dispatch_subagent: delegates a prompt to a sub-agent and returns its final answer. Args: prompt (string, required), id (string, optional), tools ([]string, optional), max_turns (int, optional)."
+	return "dispatch_subagent: delegates a task to a focused sub-agent and returns its final answer.\n" +
+		"\n" +
+		"Use this tool to delegate a task to a focused sub-agent when the work is self-contained (e.g. research, implementation, review, or testing).\n" +
+		"\n" +
+		"Args:\n" +
+		"- prompt (string, required): a clear, specific task description. Write it so the sub-agent can execute without extra context.\n" +
+		"- id (string, optional): a unique task identifier; generated when omitted.\n" +
+		"- system_prompt (string, optional): an explicit system prompt for the sub-agent. Takes precedence over role.\n" +
+		"- role (string, optional): one of researcher, implementer, reviewer, tester. Selects a built-in role template when system_prompt is empty.\n" +
+		"- tools ([]string, optional): tool names available to the sub-agent.\n" +
+		"- max_turns (int, optional): bound on the sub-agent turn loop.\n" +
+		"\n" +
+		"The sub-agent will return its result as content."
 }
 
 // Execute parses a sub-agent task from call.Args, dispatches it via the
@@ -87,11 +107,20 @@ func (t *SubagentTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 		id = nextRequestID("task")
 	}
 
+	// system_prompt is optional and takes precedence over role. role selects a
+	// built-in role template (resolved by the dispatcher) when system_prompt is
+	// empty. Both are passed through unchanged; the dispatcher applies the
+	// default when neither is set.
+	systemPrompt, _ := call.Args["system_prompt"].(string)
+	role, _ := call.Args["role"].(string)
+
 	task := SubagentTask{
-		ID:       id,
-		Prompt:   prompt,
-		Tools:    toStringSlice(call.Args["tools"]),
-		MaxTurns: toInt(call.Args["max_turns"]),
+		ID:           id,
+		Prompt:       prompt,
+		SystemPrompt: systemPrompt,
+		Role:         role,
+		Tools:        toStringSlice(call.Args["tools"]),
+		MaxTurns:     toInt(call.Args["max_turns"]),
 	}
 
 	slog.Debug("tools.subagent.execute",

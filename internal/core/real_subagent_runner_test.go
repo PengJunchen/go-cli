@@ -176,3 +176,69 @@ func TestRealSubAgentRunner_ImplementsBaseChatModel(t *testing.T) {
 		mock.ConversationTurn{AssistantContent: "ok"},
 	))
 }
+
+// TestRealSubAgentRunner_UsesSystemPrompt proves the runner injects its
+// systemPrompt into the LoopAgent so the model receives it as the system
+// message (overriding the tool-aware default).
+func TestRealSubAgentRunner_UsesSystemPrompt(t *testing.T) {
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"System", "sys-prompt",
+		mock.ConversationTurn{AssistantContent: "done"},
+	))
+
+	runner := &realSubAgentRunner{
+		model:        model,
+		tools:        tools.NewDefaultToolRegistry(),
+		maxIter:      3,
+		systemPrompt: "ROLE-PROMPT-FROM-CONFIG",
+	}
+
+	_, err := runner.Run(context.Background(), "test", nil, func(AgentEvent) {})
+	require.NoError(t, err)
+
+	require.Equal(t, 1, model.CallCount())
+	msgs := model.CallLog()[0].Messages
+	require.NotEmpty(t, msgs)
+	assert.Equal(t, llm.RoleSystem, msgs[0].Role)
+	assert.Equal(t, "ROLE-PROMPT-FROM-CONFIG", msgs[0].Content)
+}
+
+// TestRealSubAgentRunner_NoSystemPromptUsesDefault proves that when the runner
+// has no systemPrompt the LoopAgent falls back to its built-in default.
+func TestRealSubAgentRunner_NoSystemPromptUsesDefault(t *testing.T) {
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"System", "no-sys-prompt",
+		mock.ConversationTurn{AssistantContent: "done"},
+	))
+
+	runner := &realSubAgentRunner{
+		model:   model,
+		tools:   tools.NewDefaultToolRegistry(),
+		maxIter: 3,
+	}
+
+	_, err := runner.Run(context.Background(), "test", nil, func(AgentEvent) {})
+	require.NoError(t, err)
+
+	msgs := model.CallLog()[0].Messages
+	assert.Contains(t, msgs[0].Content, "helpful AI assistant")
+}
+
+// TestNewRealSubAgentRunnerFactory_CapturesSystemPrompt proves the factory
+// closure threads cfg.SystemPrompt into the produced runner.
+func TestNewRealSubAgentRunnerFactory_CapturesSystemPrompt(t *testing.T) {
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"System", "factory-sys",
+		mock.ConversationTurn{AssistantContent: "ok"},
+	))
+
+	factory := NewRealSubAgentRunnerFactory(model, tools.NewDefaultToolRegistry())
+	runner := factory(SubAgentConfig{Name: "test", MaxTurns: 5, SystemPrompt: "FROM-FACTORY"})
+	require.NotNil(t, runner)
+
+	_, err := runner.Run(context.Background(), "prompt", nil, func(AgentEvent) {})
+	require.NoError(t, err)
+
+	msgs := model.CallLog()[0].Messages
+	assert.Equal(t, "FROM-FACTORY", msgs[0].Content)
+}

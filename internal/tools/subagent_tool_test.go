@@ -115,3 +115,63 @@ func TestSubagentToolListRunningPassThrough(t *testing.T) {
 	tool := NewSubagentTool(d)
 	assert.Len(t, tool.dispatcher.ListRunning(), 2)
 }
+
+func TestSubagentToolExecuteParsesSystemPrompt(t *testing.T) {
+	d := &fakeSubagentDispatcher{res: SubagentResult{Content: "ok"}}
+	tool := NewSubagentTool(d)
+
+	_, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{
+			"prompt":        "do research",
+			"system_prompt": "you are a researcher",
+		},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "you are a researcher", d.task.SystemPrompt)
+	assert.Empty(t, d.task.Role, "role must not be set when only system_prompt is given")
+}
+
+func TestSubagentToolExecuteParsesRole(t *testing.T) {
+	d := &fakeSubagentDispatcher{res: SubagentResult{Content: "ok"}}
+	tool := NewSubagentTool(d)
+
+	_, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{
+			"prompt": "review this",
+			"role":   "reviewer",
+		},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "reviewer", d.task.Role)
+	assert.Empty(t, d.task.SystemPrompt, "system_prompt must remain empty so the dispatcher applies the role template")
+}
+
+func TestSubagentToolExecuteSystemPromptAndRoleBothParsed(t *testing.T) {
+	d := &fakeSubagentDispatcher{res: SubagentResult{Content: "ok"}}
+	tool := NewSubagentTool(d)
+
+	_, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{
+			"prompt":        "go",
+			"system_prompt": "explicit",
+			"role":          "tester",
+		},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "explicit", d.task.SystemPrompt)
+	assert.Equal(t, "tester", d.task.Role)
+}
+
+func TestSubagentToolDescriptionIncludesGuidance(t *testing.T) {
+	tool := NewSubagentTool(&fakeSubagentDispatcher{})
+	desc := tool.Description()
+
+	assert.Contains(t, desc, "sub-agent")
+	assert.Contains(t, desc, "system_prompt")
+	assert.Contains(t, desc, "role")
+	assert.Contains(t, desc, "researcher, implementer, reviewer, tester")
+	assert.Contains(t, desc, "return its result")
+}

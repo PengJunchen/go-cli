@@ -265,3 +265,83 @@ func TestSubagentToolGeneratedID(t *testing.T) {
 	assert.NotEmpty(t, fd.task.ID)
 	fd.mu.Unlock()
 }
+
+// TestDispatchPassesSystemPromptToConfig proves an explicit SystemPrompt flows
+// from SubagentTask through Dispatch into the SubAgentConfig.
+func TestDispatchPassesSystemPromptToConfig(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	sub := newFakeSubAgent("worker", AgentMessage{Role: "assistant", Content: "done"})
+	factory := &fakeSubAgentFactory{subs: []SubAgent{sub}}
+
+	d := NewDefaultSubagentDispatcher(factory)
+	_, err := d.Dispatch(context.Background(), SubagentTask{
+		ID:           "t1",
+		Prompt:       "go",
+		SystemPrompt: "custom sub-agent instructions",
+	})
+	require.NoError(t, err)
+
+	require.Len(t, factory.configs, 1)
+	assert.Equal(t, "custom sub-agent instructions", factory.configs[0].SystemPrompt)
+}
+
+// TestDispatchAppliesDefaultPromptWhenEmpty proves the default prompt is used
+// when neither SystemPrompt nor Role is provided.
+func TestDispatchAppliesDefaultPromptWhenEmpty(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	sub := newFakeSubAgent("worker", AgentMessage{Role: "assistant", Content: "done"})
+	factory := &fakeSubAgentFactory{subs: []SubAgent{sub}}
+
+	d := NewDefaultSubagentDispatcher(factory)
+	_, err := d.Dispatch(context.Background(), SubagentTask{
+		ID:     "t2",
+		Prompt: "go",
+	})
+	require.NoError(t, err)
+
+	require.Len(t, factory.configs, 1)
+	assert.Equal(t, DefaultSubAgentPrompt, factory.configs[0].SystemPrompt)
+}
+
+// TestDispatchAppliesRoleTemplate proves a recognized Role selects its template
+// as the SystemPrompt when no explicit SystemPrompt is set.
+func TestDispatchAppliesRoleTemplate(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	sub := newFakeSubAgent("worker", AgentMessage{Role: "assistant", Content: "done"})
+	factory := &fakeSubAgentFactory{subs: []SubAgent{sub}}
+
+	d := NewDefaultSubagentDispatcher(factory)
+	_, err := d.Dispatch(context.Background(), SubagentTask{
+		ID:     "t3",
+		Prompt: "go",
+		Role:   "tester",
+	})
+	require.NoError(t, err)
+
+	require.Len(t, factory.configs, 1)
+	assert.Equal(t, TesterPrompt, factory.configs[0].SystemPrompt)
+}
+
+// TestDispatchSystemPromptPrecedenceOverRole proves an explicit SystemPrompt
+// wins over a Role template.
+func TestDispatchSystemPromptPrecedenceOverRole(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	sub := newFakeSubAgent("worker", AgentMessage{Role: "assistant", Content: "done"})
+	factory := &fakeSubAgentFactory{subs: []SubAgent{sub}}
+
+	d := NewDefaultSubagentDispatcher(factory)
+	_, err := d.Dispatch(context.Background(), SubagentTask{
+		ID:           "t4",
+		Prompt:       "go",
+		Role:         "researcher",
+		SystemPrompt: "explicit wins",
+	})
+	require.NoError(t, err)
+
+	require.Len(t, factory.configs, 1)
+	assert.Equal(t, "explicit wins", factory.configs[0].SystemPrompt)
+}

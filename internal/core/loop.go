@@ -27,11 +27,12 @@ var errMaxIterations = errors.New("core: agent loop exceeded max iterations")
 // loopConfig holds the configurable dependencies of a LoopAgent. All
 // dependencies are interface types.
 type loopConfig struct {
-	model         llm.BaseChatModel
-	tools         tools.ToolRegistry
-	maxIterations int
-	modelWrapper  ModelWrapper
-	executionMode ExecutionMode
+	model                llm.BaseChatModel
+	tools                tools.ToolRegistry
+	maxIterations        int
+	modelWrapper         ModelWrapper
+	executionMode        ExecutionMode
+	systemPromptOverride string
 }
 
 // LoopOption configures a LoopAgent at construction time.
@@ -40,6 +41,14 @@ type LoopOption func(*loopConfig)
 // WithLLM sets the chat model the loop drives.
 func WithLLM(m llm.BaseChatModel) LoopOption {
 	return func(c *loopConfig) { c.model = m }
+}
+
+// WithSystemPrompt overrides the default system prompt the loop sends to the
+// model. A non-empty prompt replaces the tool-aware default entirely; an empty
+// prompt leaves the default in place. This is how sub-agents receive their own
+// role-specific system prompt.
+func WithSystemPrompt(prompt string) LoopOption {
+	return func(c *loopConfig) { c.systemPromptOverride = prompt }
 }
 
 // WithTools sets the tool registry the loop uses to service tool calls.
@@ -60,11 +69,12 @@ func WithMaxIterations(n int) LoopOption {
 // the injected chat model, servicing any tool calls the model requests, and
 // returns the events it fired.
 type LoopAgent struct {
-	model         llm.BaseChatModel
-	tools         tools.ToolRegistry
-	maxIterations int
-	modelWrapper  ModelWrapper
-	executionMode ExecutionMode
+	model                llm.BaseChatModel
+	tools                tools.ToolRegistry
+	maxIterations        int
+	modelWrapper         ModelWrapper
+	executionMode        ExecutionMode
+	systemPromptOverride string
 }
 
 var _ AgentLoop = (*LoopAgent)(nil)
@@ -83,11 +93,12 @@ func NewLoopAgent(opts ...LoopOption) *LoopAgent {
 		cfg.maxIterations = defaultMaxIterations
 	}
 	la := &LoopAgent{
-		model:         cfg.model,
-		tools:         cfg.tools,
-		maxIterations: cfg.maxIterations,
-		modelWrapper:  cfg.modelWrapper,
-		executionMode: cfg.executionMode,
+		model:                cfg.model,
+		tools:                cfg.tools,
+		maxIterations:        cfg.maxIterations,
+		modelWrapper:         cfg.modelWrapper,
+		executionMode:        cfg.executionMode,
+		systemPromptOverride: cfg.systemPromptOverride,
 	}
 	slog.Info("core.loop.new",
 		"max_iterations", la.maxIterations,
@@ -168,8 +179,14 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 	// cannot answer questions referencing earlier conversation.
 	messages := make([]llm.Message, 0, len(submission.History)+2)
 
-	// System prompt: tell the model it can use tools to help the user.
-	messages = append(messages, llm.Message{Role: llm.RoleSystem, Content: systemPrompt(l.tools)})
+	// System prompt: tell the model it can use tools to help the user. A
+	// non-empty override (e.g. from a sub-agent config) replaces the
+	// tool-aware default entirely.
+	sysPrompt := l.systemPromptOverride
+	if sysPrompt == "" {
+		sysPrompt = systemPrompt(l.tools)
+	}
+	messages = append(messages, llm.Message{Role: llm.RoleSystem, Content: sysPrompt})
 
 	for _, hm := range submission.History {
 		messages = append(messages, llm.Message{Role: llm.Role(hm.Role), Content: hm.Content})

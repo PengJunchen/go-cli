@@ -15,6 +15,13 @@ type SubagentTask struct {
 	ID string
 	// Prompt is the instruction the sub-agent executes.
 	Prompt string
+	// SystemPrompt is an explicit system prompt for the sub-agent. When empty,
+	// Role (if set) selects a role template; otherwise the default prompt is
+	// used.
+	SystemPrompt string
+	// Role optionally selects a role template (researcher, implementer,
+	// reviewer, tester) when SystemPrompt is empty.
+	Role string
 	// Tools lists the tool names available to the sub-agent.
 	Tools []string
 	// MaxTurns bounds the sub-agent turn loop. Zero leaves it unset.
@@ -79,9 +86,10 @@ func (d *DefaultSubagentDispatcher) Dispatch(ctx context.Context, task SubagentT
 	)
 
 	config := SubAgentConfig{
-		Name:     task.ID,
-		Tools:    task.Tools,
-		MaxTurns: task.MaxTurns,
+		Name:         task.ID,
+		SystemPrompt: resolveSubAgentSystemPrompt(task),
+		Tools:        task.Tools,
+		MaxTurns:     task.MaxTurns,
 	}
 	sub, err := d.factory.Create(ctx, task.ID, config)
 	if err != nil {
@@ -161,10 +169,12 @@ func AdaptSubagentDispatcher(d SubagentDispatcher) tools.SubagentDispatcher {
 // converts the result back.
 func (a *subagentDispatcherAdapter) Dispatch(ctx context.Context, task tools.SubagentTask) (tools.SubagentResult, error) {
 	res, err := a.d.Dispatch(ctx, SubagentTask{
-		ID:       task.ID,
-		Prompt:   task.Prompt,
-		Tools:    task.Tools,
-		MaxTurns: task.MaxTurns,
+		ID:           task.ID,
+		Prompt:       task.Prompt,
+		SystemPrompt: task.SystemPrompt,
+		Role:         task.Role,
+		Tools:        task.Tools,
+		MaxTurns:     task.MaxTurns,
 	})
 	return tools.SubagentResult{
 		TaskID:   res.TaskID,
@@ -180,10 +190,12 @@ func (a *subagentDispatcherAdapter) ListRunning() []tools.SubagentTask {
 	out := make([]tools.SubagentTask, len(tasks))
 	for i, t := range tasks {
 		out[i] = tools.SubagentTask{
-			ID:       t.ID,
-			Prompt:   t.Prompt,
-			Tools:    t.Tools,
-			MaxTurns: t.MaxTurns,
+			ID:           t.ID,
+			Prompt:       t.Prompt,
+			SystemPrompt: t.SystemPrompt,
+			Role:         t.Role,
+			Tools:        t.Tools,
+			MaxTurns:     t.MaxTurns,
 		}
 	}
 	return out

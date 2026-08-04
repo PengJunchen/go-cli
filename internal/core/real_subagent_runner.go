@@ -12,10 +12,11 @@ import (
 // LoopAgent -> AgentImpl -> HarnessImpl stack per Run call. Unlike the
 // simulated runner it calls the real LLM and produces genuine responses.
 type realSubAgentRunner struct {
-	model   llm.BaseChatModel
-	tools   tools.ToolRegistry
-	maxIter int
-	opts    []LoopOption
+	model        llm.BaseChatModel
+	tools        tools.ToolRegistry
+	maxIter      int
+	systemPrompt string
+	opts         []LoopOption
 }
 
 var _ subAgentRunner = (*realSubAgentRunner)(nil)
@@ -25,6 +26,11 @@ var _ subAgentRunner = (*realSubAgentRunner)(nil)
 func (r *realSubAgentRunner) Run(ctx context.Context, prompt string, _ <-chan string, emit func(AgentEvent)) (AgentMessage, error) {
 	loopOpts := []LoopOption{
 		WithLLM(r.model),
+	}
+	// The sub-agent's system prompt (resolved by the dispatcher) overrides the
+	// LoopAgent's tool-aware default so the sub-agent adopts its delegated role.
+	if r.systemPrompt != "" {
+		loopOpts = append(loopOpts, WithSystemPrompt(r.systemPrompt))
 	}
 	if r.tools != nil {
 		loopOpts = append(loopOpts, WithTools(r.tools))
@@ -69,10 +75,11 @@ func NewRealSubAgentRunnerFactory(model llm.BaseChatModel, tr tools.ToolRegistry
 			maxIter = 10
 		}
 		return &realSubAgentRunner{
-			model:   model,
-			tools:   tr,
-			maxIter: maxIter,
-			opts:    opts,
+			model:        model,
+			tools:        tr,
+			maxIter:      maxIter,
+			systemPrompt: cfg.SystemPrompt,
+			opts:         opts,
 		}
 	}
 }
