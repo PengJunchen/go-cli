@@ -148,3 +148,60 @@ func TestRegisterDefaultsBackwardCompatible(t *testing.T) {
 	assert.Nil(t, wtConcrete.fileTracker)
 	assert.Nil(t, wtConcrete.diffGenerator)
 }
+
+// TestRegisterDefaultsBuiltinWhitelist verifies that when a whitelist is
+// configured, only the named builtin tools are registered.
+func TestRegisterDefaultsBuiltinWhitelist(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	ctx := context.Background()
+	reg := NewDefaultToolRegistry()
+
+	require.NoError(t, RegisterDefaults(ctx, reg,
+		WithRegisteredBuiltinWhitelist([]string{"read", "ls"}),
+	))
+
+	list, err := reg.List(ctx)
+	require.NoError(t, err)
+	require.Len(t, list, 2)
+
+	names := map[string]bool{}
+	for _, def := range list {
+		names[def.Name()] = true
+	}
+	assert.True(t, names["read"])
+	assert.True(t, names["ls"])
+
+	// Whitelisted tools are retrievable.
+	_, err = reg.Get(ctx, "read")
+	assert.NoError(t, err)
+	_, err = reg.Get(ctx, "ls")
+	assert.NoError(t, err)
+
+	// Non-whitelisted builtins are NOT registered.
+	_, err = reg.Get(ctx, "bash")
+	assert.ErrorIs(t, err, ErrToolNotFound)
+	_, err = reg.Get(ctx, "write")
+	assert.ErrorIs(t, err, ErrToolNotFound)
+}
+
+// TestRegisterDefaultsEmptyWhitelistRegistersAll verifies that an empty/nil
+// whitelist preserves the default behavior (all builtins registered).
+func TestRegisterDefaultsEmptyWhitelistRegistersAll(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	ctx := context.Background()
+	reg := NewDefaultToolRegistry()
+
+	require.NoError(t, RegisterDefaults(ctx, reg,
+		WithRegisteredBuiltinWhitelist(nil),
+	))
+
+	list, err := reg.List(ctx)
+	require.NoError(t, err)
+	// All 7 core builtins are registered (no git tool wired).
+	assert.Len(t, list, 7)
+
+	_, err = reg.Get(ctx, "bash")
+	assert.NoError(t, err)
+}
