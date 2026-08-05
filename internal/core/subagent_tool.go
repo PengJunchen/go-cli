@@ -161,8 +161,94 @@ func (d *DefaultSubagentDispatcher) ListRunning() []SubagentTask {
 // collects results preserving input order, and returns the first error
 // encountered (if any). All tasks are attempted regardless of individual
 // failures.
+//
+// Sub-agents are created sequentially before concurrent execution begins so
+// that factory assignment is deterministic (task[i] maps to factory call #i).
 func (d *DefaultSubagentDispatcher) ParallelDispatch(ctx context.Context, tasks []SubagentTask) ([]SubagentResult, error) {
-	return nil, nil
+	if len(tasks) == 0 {
+		return []SubagentResult{}, nil
+	}
+
+	// Create sub-agents sequentially for deterministic factory assignment.
+	starts := make([]time.Time, len(tasks))
+	subs := make([]SubAgent, len(tasks))
+	createErrs := make([]error, len(tasks))
+	for i, task := range tasks {
+		starts[i] = time.Now()
+		config := SubAgentConfig{
+			Name:         task.ID,
+			SystemPrompt: resolveSubAgentSystemPrompt(task),
+			Tools:        task.Tools,
+			Model:        task.Model,
+			MaxTurns:     task.MaxTurns,
+		}
+		subs[i], createErrs[i] = d.factory.Create(ctx, task.ID, config)
+	}
+
+	// Run all sub-agents concurrently.
+	results := make([]SubagentResult, len(tasks))
+	var wg sync.WaitGroup
+	var firstErr error
+	var errMu sync.Mutex
+
+	for i, task := range tasks {
+		wg.Add(1)
+		go func(idx int, t SubagentTask) {
+			defer wg.Done()
+
+			if createErrs[idx] != nil {
+				results[idx] = SubagentResult{TaskID: t.ID, Error: createErrs[idx], Duration: time.Since(starts[idx])}
+				errMu.Lock()
+				if firstErr == nil {
+					firstErr = createErrs[idx]
+				}
+				errMu.Unlock()
+				return
+			}
+
+			d.mu.Lock()
+			d.running[t.ID] = t
+			d.mu.Unlock()
+			defer func() {
+				d.mu.Lock()
+				delete(d.running, t.ID)
+				d.mu.Unlock()
+			}()
+
+			evCh, err := subs[idx].Run(ctx, t.Prompt)
+			if err != nil {
+				results[idx] = SubagentResult{TaskID: t.ID, Error: err, Duration: time.Since(starts[idx])}
+				errMu.Lock()
+				if firstErr == nil {
+					firstErr = err
+				}
+				errMu.Unlock()
+				return
+			}
+
+			go func() {
+				for range evCh {
+				}
+			}()
+
+			final, waitErr := subs[idx].Wait(ctx)
+			results[idx] = SubagentResult{
+				TaskID:   t.ID,
+				Content:  final.Content,
+				Error:    waitErr,
+				Duration: time.Since(starts[idx]),
+			}
+			if waitErr != nil {
+				errMu.Lock()
+				if firstErr == nil {
+					firstErr = waitErr
+				}
+				errMu.Unlock()
+			}
+		}(i, task)
+	}
+	wg.Wait()
+	return results, firstErr
 }
 
 // subagentDispatcherAdapter bridges a core.SubagentDispatcher to the
