@@ -301,7 +301,7 @@ func TestET_Phase19_AC5_WriteToolFileTrackerCheckpoint(t *testing.T) {
 		"content": "ac5 content",
 	}))
 	require.NoError(t, err)
-	assert.Contains(t, res.Output, "wrote")
+	assert.Contains(t, res.Output, "queued")
 
 	// Verify the file was created on disk.
 	data, err := os.ReadFile(filePath)
@@ -352,7 +352,7 @@ func TestET_Phase19_AC6_EditToolFileTrackerCheckpoint(t *testing.T) {
 		"new_string": "line2 delta",
 	}))
 	require.NoError(t, err)
-	assert.Contains(t, res.Output, "replaced")
+	assert.Contains(t, res.Output, "queued")
 
 	// Verify the file was modified on disk.
 	data, err := os.ReadFile(filePath)

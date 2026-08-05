@@ -154,7 +154,7 @@ func TestET_Phase22_AllCapabilities_AC2_CoreToolsFunctional(t *testing.T) {
 		"content": "hello world\nline2\n",
 	}))
 	require.NoError(t, err)
-	assert.Contains(t, res.Output, "wrote")
+	assert.Contains(t, res.Output, "queued")
 
 	// Verify file on disk.
 	data, err := os.ReadFile(filePath)
