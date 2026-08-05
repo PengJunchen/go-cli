@@ -256,6 +256,31 @@ func AssembleAgent(
 		logger.Warn("assemble_mcp_failed", "err", mcpErr)
 	}
 
+	// 3b. Register LSP tool (if configured).
+	if rc != nil && len(rc.LSP.ServerCommand) > 0 {
+		workspaceRoot := rc.LSP.WorkspaceRoot
+		if workspaceRoot == "" {
+			workspaceRoot, _ = os.Getwd()
+		}
+		lspClient, lspErr := tools.NewDefaultLSPClient(ctx, rc.LSP.ServerCommand, workspaceRoot)
+		if lspErr != nil {
+			logger.Warn("assemble_lsp_start_failed", "err", lspErr)
+		} else if initErr := lspClient.Initialize(ctx, "file://"+workspaceRoot); initErr != nil {
+			logger.Warn("assemble_lsp_init_failed", "err", initErr)
+			_ = lspClient.Shutdown(context.Background())
+		} else {
+			if regErr := tr.Register(ctx, tools.NewLSPTool(lspClient)); regErr != nil {
+				logger.Warn("assemble_lsp_register_failed", "err", regErr)
+			}
+			lspCleanup := cleanup
+			cleanup = func() {
+				_ = lspClient.Shutdown(context.Background())
+				lspCleanup()
+			}
+			logger.Info("assemble_lsp_ready", "command", rc.LSP.ServerCommand)
+		}
+	}
+
 	// 4. Register skill tools.
 	skillInfos := registerSkillTools(ctx, rc, tr)
 

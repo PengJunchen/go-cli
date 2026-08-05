@@ -18,6 +18,7 @@ type Config struct {
 	WebSearch  WebSearchConfig  `json:"web_search"`
 	Production ProductionConfig `json:"production"`
 	Sandbox    SandboxConfig    `json:"sandbox"`
+	LSP        LSPConfig        `json:"lsp"`
 
 	verbose bool
 }
@@ -186,6 +187,16 @@ type SandboxConfig struct {
 	// MaxMemory bounds the maximum memory (in bytes) a single command may
 	// consume.
 	MaxMemory int64 `json:"max_memory"`
+}
+
+// LSPConfig controls the Language Server Protocol integration.
+type LSPConfig struct {
+	// ServerCommand is the command and arguments used to launch the LSP
+	// server subprocess (e.g. ["gopls", "serve"]).
+	ServerCommand []string `json:"server_command"`
+	// WorkspaceRoot is the root directory of the workspace, passed as the
+	// LSP root URI. When empty, the current working directory is used.
+	WorkspaceRoot string `json:"workspace_root"`
 }
 
 // Source enumerates the five configuration layers, ordered by ascending
