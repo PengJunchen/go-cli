@@ -10,11 +10,12 @@ import (
 type RegisterDefaultsOption func(*registerDefaultsConfig)
 
 type registerDefaultsConfig struct {
-	fileTracker    *FileTracker
-	diffGenerator  DiffGenerator
-	bashSandbox    BashSandbox
-	resourceLimits ResourceLimits
-	gitTool        GitTool
+	fileTracker       *FileTracker
+	diffGenerator     DiffGenerator
+	bashSandbox       BashSandbox
+	resourceLimits    ResourceLimits
+	gitTool           GitTool
+	builtinWhitelist  map[string]bool
 }
 
 // WithRegisteredFileTracker wires a FileTracker into the WriteTool and
@@ -45,6 +46,22 @@ func WithRegisteredResourceLimits(limits ResourceLimits) RegisterDefaultsOption 
 // commit, log, branch, checkout, blame, push) registered by RegisterDefaults.
 func WithRegisteredGitTool(git GitTool) RegisterDefaultsOption {
 	return func(c *registerDefaultsConfig) { c.gitTool = git }
+}
+
+// WithRegisteredBuiltinWhitelist restricts RegisterDefaults to only the named
+// builtin tools. When names is empty or nil, all builtins are registered (the
+// default behavior). The whitelist is matched by tool name (e.g. "bash",
+// "read", "git_diff").
+func WithRegisteredBuiltinWhitelist(names []string) RegisterDefaultsOption {
+	return func(c *registerDefaultsConfig) {
+		if len(names) == 0 {
+			return
+		}
+		c.builtinWhitelist = make(map[string]bool, len(names))
+		for _, n := range names {
+			c.builtinWhitelist[n] = true
+		}
+	}
 }
 
 // RegisterDefaults registers the built-in read, bash, write, edit, grep, find
@@ -111,6 +128,19 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDef
 			NewGitBlameTool(cfg.gitTool),
 			NewGitPushTool(cfg.gitTool),
 		)
+	}
+
+	// When a builtin whitelist is configured, keep only the named builtins.
+	if cfg.builtinWhitelist != nil {
+		filtered := make([]ToolDefinition, 0, len(defs))
+		for _, def := range defs {
+			if cfg.builtinWhitelist[def.Name()] {
+				filtered = append(filtered, def)
+			} else {
+				slog.Debug("tools.builtin_skipped", "tool", def.Name())
+			}
+		}
+		defs = filtered
 	}
 
 	for _, def := range defs {

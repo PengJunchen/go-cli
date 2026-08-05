@@ -61,12 +61,37 @@ type AgentConfig struct {
 
 // ToolsConfig controls which builtin tools and tool registries are available.
 type ToolsConfig struct {
-	Builtin  []string `json:"builtin"`
-	Registry []string `json:"registry"`
+	Builtin     []string           `json:"builtin"`
+	Registry    []string           `json:"registry"`
+	CustomTools []CustomToolConfig `json:"custom_tools"`
 	// Parallel enables concurrent tool execution within a single turn.
 	// When nil or true, tools execute in parallel; when explicitly false,
 	// tools execute sequentially.
 	Parallel *bool `json:"parallel"`
+}
+
+// CustomToolConfig describes a user-defined command-line tool that wraps an
+// external executable as a ToolDefinition. The executable receives the dynamic
+// "input" argument appended after the static Args.
+type CustomToolConfig struct {
+	// Name is the unique tool name exposed to the agent.
+	Name string `json:"name"`
+	// Description is a human-readable description of what the tool does.
+	Description string `json:"description"`
+	// Command is the executable (Command[0]) and its base arguments
+	// (Command[1:]). At least one element is required.
+	Command []string `json:"command"`
+	// Args are static arguments appended after the base command arguments and
+	// before the dynamic input.
+	Args []string `json:"args"`
+	// Env holds optional environment variables applied on top of the process
+	// environment.
+	Env map[string]string `json:"env"`
+	// Timeout bounds execution in seconds. Zero means no timeout.
+	Timeout int `json:"timeout"`
+	// WorkingDir is the directory the command runs in. Empty inherits the
+	// process working directory.
+	WorkingDir string `json:"working_dir"`
 }
 
 // TracingConfig controls the trace logging exporter and level.
