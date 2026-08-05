@@ -14,6 +14,7 @@ type registerDefaultsConfig struct {
 	diffGenerator  DiffGenerator
 	bashSandbox    BashSandbox
 	resourceLimits ResourceLimits
+	gitTool        GitTool
 }
 
 // WithRegisteredFileTracker wires a FileTracker into the WriteTool and
@@ -38,6 +39,12 @@ func WithRegisteredBashSandbox(sb BashSandbox) RegisterDefaultsOption {
 // registered by RegisterDefaults.
 func WithRegisteredResourceLimits(limits ResourceLimits) RegisterDefaultsOption {
 	return func(c *registerDefaultsConfig) { c.resourceLimits = limits }
+}
+
+// WithRegisteredGitTool wires a GitTool into the git tools (diff, status,
+// commit, log, branch, checkout, blame, push) registered by RegisterDefaults.
+func WithRegisteredGitTool(git GitTool) RegisterDefaultsOption {
+	return func(c *registerDefaultsConfig) { c.gitTool = git }
 }
 
 // RegisterDefaults registers the built-in read, bash, write, edit, grep, find
@@ -90,6 +97,20 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDef
 		NewGrepTool(),
 		NewFindTool(),
 		NewLSTool(),
+	}
+
+	// Register git tools when a GitTool is wired.
+	if cfg.gitTool != nil {
+		defs = append(defs,
+			NewGitDiffTool(cfg.gitTool),
+			NewGitStatusTool(cfg.gitTool),
+			NewGitCommitTool(cfg.gitTool),
+			NewGitLogTool(cfg.gitTool),
+			NewGitBranchTool(cfg.gitTool),
+			NewGitCheckoutTool(cfg.gitTool),
+			NewGitBlameTool(cfg.gitTool),
+			NewGitPushTool(cfg.gitTool),
+		)
 	}
 
 	for _, def := range defs {
