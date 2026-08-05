@@ -89,3 +89,21 @@ func (pm *PluginManager) Tools() []tools.ToolDefinition {
 	}
 	return nil
 }
+
+// Hooks returns all hooks registered by extensions during Init. It is empty
+// before Init is called.
+func (pm *PluginManager) Hooks() []Hook {
+	if der, ok := pm.coordinator.registry().(*DefaultExtensionRegistry); ok {
+		return der.AllHooks()
+	}
+	return nil
+}
+
+// Middleware returns all middleware registered by extensions during Init. It is
+// empty before Init is called.
+func (pm *PluginManager) Middleware() []Middleware {
+	if der, ok := pm.coordinator.registry().(*DefaultExtensionRegistry); ok {
+		return der.AllMiddleware()
+	}
+	return nil
+}
