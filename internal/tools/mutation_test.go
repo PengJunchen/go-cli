@@ -435,3 +435,132 @@ func TestMutationQueueDefaultHandlerUnsupportedOperation(t *testing.T) {
 	assert.False(t, res.Success)
 	assert.Contains(t, res.Error.Error(), "unsupported operation")
 }
+
+// recordingDiffGen is a test DiffGenerator that records whether Generate was
+// called and with what arguments.
+type recordingDiffGen struct {
+	mu     sync.Mutex
+	called bool
+	old    string
+	new    string
+	path   string
+}
+
+func (r *recordingDiffGen) Generate(oldContent, newContent, path string) (string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.called = true
+	r.old = oldContent
+	r.new = newContent
+	r.path = path
+	return "mock-diff", nil
+}
+
+func (r *recordingDiffGen) wasCalled() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.called
+}
+
+// TestMutationQueueConfiguredHandlerPreservesFileTracker verifies that when a
+// FileTracker is injected via WithMutationFileTracker, the configured handler
+// creates a backup checkpoint before writing—proving fileTracker is not lost.
+func TestMutationQueueConfiguredHandlerPreservesFileTracker(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	ft := NewFileTracker()
+	q := NewDefaultFileMutationQueue(WithMutationFileTracker(ft))
+	defer closeQueue(t, q)
+
+	writePath := filepath.Join(t.TempDir(), "tracked.txt")
+	resCh, err := q.Enqueue(context.Background(), FileMutation{
+		FilePath: writePath, Operation: "write", Content: "hello", ToolName: "write",
+	})
+	require.NoError(t, err)
+	require.True(t, (<-resCh).Success)
+
+	checkpoints := ft.ListCheckpoints()
+	require.Len(t, checkpoints, 1, "fileTracker must create a backup checkpoint")
+	assert.Equal(t, writePath, checkpoints[0].Path)
+}
+
+// TestMutationQueueConfiguredHandlerPreservesDiffGenerator verifies that when a
+// DiffGenerator is injected via WithMutationDiffGenerator, the configured
+// handler generates a diff when overwriting an existing file—proving
+// diffGenerator is not lost.
+func TestMutationQueueConfiguredHandlerPreservesDiffGenerator(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	writePath := filepath.Join(dir, "existing.txt")
+	require.NoError(t, os.WriteFile(writePath, []byte("old"), 0o600))
+
+	dg := &recordingDiffGen{}
+	q := NewDefaultFileMutationQueue(WithMutationDiffGenerator(dg))
+	defer closeQueue(t, q)
+
+	resCh, err := q.Enqueue(context.Background(), FileMutation{
+		FilePath: writePath, Operation: "write", Content: "new", ToolName: "write",
+	})
+	require.NoError(t, err)
+	require.True(t, (<-resCh).Success)
+
+	assert.True(t, dg.wasCalled(), "diffGenerator.Generate must be called for overwrite")
+	assert.Equal(t, "old", dg.old)
+	assert.Equal(t, "new", dg.new)
+}
+
+// TestNewMutationQueueWrapper_MutationToolQueued verifies that
+// NewMutationQueueWrapper returns a ToolExecutorWrapper that routes write/edit
+// calls through the FileMutationQueue instead of calling next directly.
+func TestNewMutationQueueWrapper_MutationToolQueued(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	var handlerCalled bool
+	q := NewDefaultFileMutationQueue(WithMutationHandler(func(_ context.Context, m FileMutation) error {
+		handlerCalled = true
+		assert.Equal(t, "write", m.Operation)
+		assert.Equal(t, "/tmp/wrapper-queued.txt", m.FilePath)
+		return nil
+	}))
+	defer closeQueue(t, q)
+
+	wrapper := NewMutationQueueWrapper(q)
+	wrapped := wrapper(func(_ context.Context, _ ToolCall) (*ToolResult, error) {
+		t.Fatal("next must not run for mutation tools")
+		return nil, nil
+	})
+
+	res, err := wrapped(context.Background(), ToolCall{
+		Name: "write",
+		Args: map[string]any{"path": "/tmp/wrapper-queued.txt", "content": "data"},
+	})
+	require.NoError(t, err)
+	assert.True(t, handlerCalled, "queue handler must be invoked")
+	assert.Contains(t, res.Output, "queued and applied")
+}
+
+// TestNewMutationQueueWrapper_NonMutationPassthrough verifies that
+// NewMutationQueueWrapper passes non-mutation tool calls straight through to
+// next without touching the queue.
+func TestNewMutationQueueWrapper_NonMutationPassthrough(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	q := NewDefaultFileMutationQueue()
+	defer closeQueue(t, q)
+
+	wrapper := NewMutationQueueWrapper(q)
+	nextCalled := false
+	wrapped := wrapper(func(_ context.Context, call ToolCall) (*ToolResult, error) {
+		nextCalled = true
+		return &ToolResult{Output: "passthrough:" + call.Name}, nil
+	})
+
+	res, err := wrapped(context.Background(), ToolCall{
+		Name: "read",
+		Args: map[string]any{"path": "/tmp/wrapper-passthrough.txt"},
+	})
+	require.NoError(t, err)
+	assert.True(t, nextCalled, "next must run for non-mutation tools")
+	assert.Equal(t, "passthrough:read", res.Output)
+}
