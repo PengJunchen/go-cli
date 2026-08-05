@@ -1,9 +1,15 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
 	"time"
+
+	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
 // RemoteBashToolOption configures a RemoteBashTool.
@@ -95,7 +101,108 @@ func (t *RemoteBashTool) Parameters() any {
 	}
 }
 
-// Execute runs the given command on the remote host. (stub)
-func (t *RemoteBashTool) Execute(_ context.Context, _ ToolCall) (*ToolResult, error) {
-	return nil, errors.New("remote_bash: not implemented")
+// Execute runs the given command on the remote host. It validates the command
+// against the sandbox (if configured), selects the appropriate SSH client
+// based on the optional host argument, and returns captured stdout/stderr/exit
+// code in the result metadata.
+func (t *RemoteBashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, error) {
+	span, _ := tracing.SpanFromContext(ctx, "tool.call", tracing.SpanKindClient)
+	logger := tracing.NewTraceLogger(span, slog.Default())
+
+	start := time.Now()
+
+	command, ok := call.Args["command"].(string)
+	if !ok || strings.TrimSpace(command) == "" {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		logger.Error("remote_bash.missing_command", "tool", "remote_bash")
+		return nil, errors.New("remote_bash: missing string argument 'command'")
+	}
+
+	// Select the SSH client: use a named host if provided, otherwise the default.
+	hostName, _ := call.Args["host"].(string)
+	client := t.client
+	if hostName != "" {
+		if c, ok := t.hostClients[hostName]; ok {
+			client = c
+		} else {
+			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+			logger.Error("remote_bash.unknown_host", "tool", "remote_bash", "host", hostName)
+			return nil, fmt.Errorf("remote_bash: unknown host %q", hostName)
+		}
+	}
+
+	if client == nil {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		return nil, errors.New("remote_bash: no SSH client configured")
+	}
+
+	// Validate the command against the sandbox (if configured). An empty
+	// workDir is passed because remote execution has no local working
+	// directory; sandboxes with an empty path whitelist allow all paths.
+	if t.sandbox != nil {
+		if err := t.sandbox.Validate(ctx, command, ""); err != nil {
+			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+			logger.Error("remote_bash.sandbox_blocked", "tool", "remote_bash", "err", err)
+			return nil, err
+		}
+	}
+
+	// Apply the tool's timeout.
+	execCtx, cancel := context.WithTimeout(ctx, t.timeout)
+	defer cancel()
+
+	stdout, stderr, exitCode, execErr := client.Exec(execCtx, command)
+	ms := time.Since(start).Milliseconds()
+
+	// Build the combined output with the limitedWriter pattern (reused from
+	// bash.go) to cap the amount of buffered data.
+	var buf bytes.Buffer
+	limited := &limitedWriter{max: t.maxOutput, buf: &buf}
+	limited.Write([]byte(stdout))
+	if stderr != "" {
+		limited.Write([]byte(stderr))
+	}
+	limited.truncate()
+	output := buf.String()
+
+	metadata := map[string]any{
+		"duration_ms": ms,
+		"exit_code":   exitCode,
+		"stdout":      stdout,
+		"stderr":      stderr,
+	}
+	if hostName != "" {
+		metadata["host"] = hostName
+	}
+
+	if execCtx.Err() != nil {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		metadata["error"] = "timed out"
+		logger.Error("remote_bash.timeout",
+			"tool", "remote_bash",
+			"duration_ms", ms,
+			"timeout", t.timeout.String())
+		return &ToolResult{Output: output, Metadata: metadata, ToolCallID: call.ID},
+			fmt.Errorf("remote_bash: timed out after %s: %w", t.timeout.String(), execCtx.Err())
+	}
+
+	if execErr != nil {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		logger.Error("remote_bash.exec_failed",
+			"tool", "remote_bash",
+			"duration_ms", ms,
+			"exit_code", exitCode,
+			"err", execErr)
+		return &ToolResult{Output: output, Metadata: metadata, ToolCallID: call.ID},
+			fmt.Errorf("remote_bash: %w", execErr)
+	}
+
+	span.SetAttributes(tracing.Attribute{Key: "success", Value: true})
+	logger.Info("remote_bash.exec",
+		"tool", "remote_bash",
+		"duration_ms", ms,
+		"exit_code", exitCode,
+		"output_bytes", len(output))
+
+	return &ToolResult{Output: output, Metadata: metadata, ToolCallID: call.ID}, nil
 }
