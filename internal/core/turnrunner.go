@@ -178,9 +178,12 @@ func (r *EinoTurnRunner) Steer(ctx context.Context, id, instruction string) erro
 	// LLM iterations. The send is non-blocking: if the channel is full,
 	// the instruction is still recorded on the Turn (above) and the loop
 	// will pick up whatever is in the buffer.
-	if r.steerCh != nil {
+	r.mu.Lock()
+	steerCh := r.steerCh
+	r.mu.Unlock()
+	if steerCh != nil {
 		select {
-		case r.steerCh <- instruction:
+		case steerCh <- instruction:
 			slog.Info("core.turn.runner.steer.sent", "id", id, "instruction", instruction)
 		default:
 			slog.Warn("core.turn.runner.steer.channel_full", "id", id)
