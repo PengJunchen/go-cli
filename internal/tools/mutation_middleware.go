@@ -57,3 +57,17 @@ func NewMutationWrapper() ToolExecutorWrapper {
 		}
 	}
 }
+
+// NewMutationQueueWrapper returns a ToolExecutorWrapper that routes mutation
+// tool calls (write/edit) through the given FileMutationQueue, serializing them
+// per file via dedicated worker goroutines. Non-mutation tools pass through to
+// next without queueing.
+//
+// This is the queue-based equivalent of NewMutationWrapper, designed to be
+// passed to NewMiddlewareToolRegistry. The caller is responsible for closing
+// the queue when it is no longer needed.
+func NewMutationQueueWrapper(queue FileMutationQueue) ToolExecutorWrapper {
+	return func(next func(ctx context.Context, call ToolCall) (*ToolResult, error)) func(ctx context.Context, call ToolCall) (*ToolResult, error) {
+		return WithMutationQueue(queue, next)
+	}
+}
