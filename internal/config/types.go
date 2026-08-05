@@ -20,6 +20,7 @@ type Config struct {
 	Sandbox    SandboxConfig    `json:"sandbox"`
 	LSP        LSPConfig        `json:"lsp"`
 	Remote     RemoteConfig     `json:"remote"`
+	Extensions ExtensionsConfig  `json:"extensions"`
 
 	verbose bool
 }
@@ -249,6 +250,17 @@ type SSHHostConfig struct {
 	// KnownHostsPath is the path to the known_hosts file for host key
 	// verification.
 	KnownHostsPath string `json:"known_hosts_path"`
+}
+
+// ExtensionsConfig controls the plugin/extension ecosystem. When Enabled is
+// true and PluginPaths is non-empty, the CLI loads extensions from each path
+// during assembly and initializes them before the agent loop starts.
+type ExtensionsConfig struct {
+	// PluginPaths is the list of .so file paths or HTTP endpoints to load
+	// extensions from.
+	PluginPaths []string `json:"plugin_paths"`
+	// Enabled controls whether extension loading is active.
+	Enabled bool `json:"enabled"`
 }
 
 // Source enumerates the five configuration layers, ordered by ascending
