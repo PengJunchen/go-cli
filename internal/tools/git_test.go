@@ -115,8 +115,8 @@ func TestGitLogPath(t *testing.T) {
 
 	entries, err := git.Log(context.Background(), GitLogOptions{Path: "a.txt"})
 	require.NoError(t, err)
-	// Only commits touching a.txt: "add a" and "initial commit".
-	assert.Len(t, entries, 2)
+	// Only the "add a" commit touched a.txt (initial commit only added README.md).
+	require.Len(t, entries, 1)
 	assert.Equal(t, "add a", entries[0].Message)
 }
 

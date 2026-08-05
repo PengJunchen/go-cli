@@ -232,11 +232,20 @@ func AssembleAgent(
 
 	htmlConverter := tools.NewDefaultHTMLConverter()
 
+	// Resolve the working directory for git tools. There is no explicit config
+	// for cwd, so fall back to the process working directory.
+	gitCwd, err := os.Getwd()
+	if err != nil {
+		gitCwd = "."
+	}
+	gitTool := tools.NewDefaultGitTool(gitCwd)
+
 	if registerErr := tools.RegisterDefaults(ctx, tr,
 		tools.WithRegisteredFileTracker(fileTracker),
 		tools.WithRegisteredDiffGenerator(diffGen),
 		tools.WithRegisteredBashSandbox(bashSandbox),
 		tools.WithRegisteredResourceLimits(resourceLimits),
+		tools.WithRegisteredGitTool(gitTool),
 	); registerErr != nil {
 		cleanup()
 		return nil, fmt.Errorf("assemble: register tools: %w", registerErr)
@@ -380,14 +389,6 @@ func AssembleAgent(
 		}
 	}
 
-	// Resolve the working directory for git tools. There is no explicit config
-	// for cwd, so fall back to the process working directory.
-	gitCwd, err := os.Getwd()
-	if err != nil {
-		gitCwd = "."
-	}
-	gitTool := tools.NewDefaultGitTool(gitCwd)
-
 	extraTools := []tools.ToolDefinition{
 		tools.NewTodoWriteTool(todoStore),
 		tools.NewTaskCreateTool(taskStore),
@@ -403,9 +404,6 @@ func AssembleAgent(
 		core.NewAskUserQuestionTool(hitlEmitter, 30*time.Second),
 		tools.NewEnterPlanModeTool(planCtrl),
 		tools.NewExitPlanModeTool(planCtrl),
-		tools.NewGitDiffTool(gitTool),
-		tools.NewGitStatusTool(gitTool),
-		tools.NewGitCommitTool(gitTool),
 	}
 	for _, t := range extraTools {
 		if regErr := tr.Register(ctx, t); regErr != nil {
