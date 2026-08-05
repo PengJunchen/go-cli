@@ -16,6 +16,7 @@ type realSubAgentRunner struct {
 	registry     *llm.ProviderRegistry
 	modelName    string
 	tools        tools.ToolRegistry
+	allowedTools []string
 	maxIter      int
 	systemPrompt string
 	opts         []LoopOption
@@ -55,8 +56,12 @@ func (r *realSubAgentRunner) Run(ctx context.Context, prompt string, inbox <-cha
 	if r.systemPrompt != "" {
 		loopOpts = append(loopOpts, WithSystemPrompt(r.systemPrompt))
 	}
-	if r.tools != nil {
-		loopOpts = append(loopOpts, WithTools(r.tools))
+	tr := r.tools
+	if tr != nil && len(r.allowedTools) > 0 {
+		tr = newFilteredToolRegistry(tr, r.allowedTools)
+	}
+	if tr != nil {
+		loopOpts = append(loopOpts, WithTools(tr))
 	}
 	if r.maxIter > 0 {
 		loopOpts = append(loopOpts, WithMaxIterations(r.maxIter))
@@ -102,6 +107,7 @@ func NewRealSubAgentRunnerFactory(model llm.BaseChatModel, registry *llm.Provide
 			registry:     registry,
 			modelName:    cfg.Model,
 			tools:        tr,
+			allowedTools: cfg.Tools,
 			maxIter:      maxIter,
 			systemPrompt: cfg.SystemPrompt,
 			opts:         opts,
