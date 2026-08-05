@@ -20,7 +20,8 @@ type Config struct {
 	Sandbox    SandboxConfig    `json:"sandbox"`
 	LSP        LSPConfig        `json:"lsp"`
 	Remote     RemoteConfig     `json:"remote"`
-	Extensions ExtensionsConfig  `json:"extensions"`
+	Extensions ExtensionsConfig `json:"extensions"`
+	ACP        ACPConfig        `json:"acp"`
 
 	verbose bool
 }
@@ -261,6 +262,23 @@ type ExtensionsConfig struct {
 	PluginPaths []string `json:"plugin_paths"`
 	// Enabled controls whether extension loading is active.
 	Enabled bool `json:"enabled"`
+}
+
+// ACPConfig controls Agent Communication Protocol (ACP) multi-agent
+// communication. When Transport and Endpoints are both non-empty, the CLI
+// creates an ACPClient, connects to the first endpoint, and wires an
+// ACPMiddlewareAdapter into the loop middleware chain so inbound ACP messages
+// are dispatched to sub-agents.
+type ACPConfig struct {
+	// Transport selects the wire format: "stdio" (newline-delimited JSON over
+	// stdin/stdout) or "grpc" (JSON-over-HTTP). When empty, ACP is disabled.
+	Transport string `json:"transport"`
+	// Endpoints lists the peer endpoints. For "grpc" transport each entry is an
+	// HTTP URL; for "stdio" the first entry is informational (stdin/stdout are
+	// used automatically).
+	Endpoints []string `json:"endpoints"`
+	// Timeout bounds ACP operations in seconds. Zero means no explicit timeout.
+	Timeout int `json:"timeout"`
 }
 
 // Source enumerates the five configuration layers, ordered by ascending

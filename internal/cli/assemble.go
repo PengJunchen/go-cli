@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/pengjunchen/go-cli/internal/acp"
 	"github.com/pengjunchen/go-cli/internal/approval"
 	"github.com/pengjunchen/go-cli/internal/compaction"
 	"github.com/pengjunchen/go-cli/internal/config"
@@ -433,6 +434,33 @@ func AssembleAgent(
 		logger.Warn("assemble_subagent_tool_failed", "err", subErr)
 	}
 
+	// 8b. Wire ACP multi-agent communication (if configured). When the config
+	// supplies a transport and at least one endpoint, create an ACPClient,
+	// connect it, and build an ACPMiddlewareAdapter that routes inbound ACP
+	// messages to the SubagentDispatcher above.
+	var acpAdapter *acp.ACPMiddlewareAdapter
+	var acpClient acp.ACPClient
+	if rc != nil && rc.ACP.Transport != "" && len(rc.ACP.Endpoints) > 0 {
+		switch rc.ACP.Transport {
+		case "stdio":
+			acpClient = acp.NewStdioAdapter(os.Stdin, os.Stdout)
+		case "grpc":
+			acpClient = acp.NewGRPCAdapter(rc.ACP.Endpoints[0])
+		default:
+			logger.Warn("assemble_acp_unknown_transport", "transport", rc.ACP.Transport)
+		}
+		if acpClient != nil {
+			if connErr := acpClient.Connect(ctx); connErr != nil {
+				logger.Warn("assemble_acp_connect_failed", "err", connErr)
+				acpClient = nil
+			} else {
+				acpMW := acp.NewACPMiddleware("acp-bridge", acpClient)
+				acpAdapter = acp.NewACPMiddlewareAdapter(acpMW, dispatcher, acpClient)
+				logger.Info("assemble_acp_connected", "transport", rc.ACP.Transport)
+			}
+		}
+	}
+
 	// 9. Register remaining unconnected tools (todo, task, goal, web, plan_mode, etc.).
 	todoStore := tools.NewTodoStore()
 	taskStore := tools.NewTaskStore()
@@ -549,15 +577,21 @@ func AssembleAgent(
 	// observes events after Run and registers a SystemReminder; the
 	// SystemReminderInjector injects it on the next turn. FailureSynthesis
 	// retries recoverable errors once with a synthesized message. The Hook
-	// middleware runs pre/post-turn hooks.
-	loop = core.NewMiddlewareChain(
+	// middleware runs pre/post-turn hooks. When ACP is configured the
+	// ACPMiddlewareAdapter is appended innermost so it runs closest to the
+	// core loop while still routing inbound peer messages.
+	chain := []core.Middleware{
 		core.NewLoggingMiddleware(ac.agentName),
 		&loopDetectorMiddleware{detector: loopDetector, manager: reminderMgr},
 		core.NewPlanModeMiddleware(planCtrl),
 		core.NewSystemReminderInjector(reminderMgr),
 		core.NewFailureSynthesisMiddleware(failureSynthesizer),
 		core.NewHookMiddleware(hookChain),
-	).Wrap(loop)
+	}
+	if acpAdapter != nil {
+		chain = append(chain, acpAdapter)
+	}
+	loop = core.NewMiddlewareChain(chain...).Wrap(loop)
 
 	// 12. Create compaction components (strategy from config, default unified).
 	compactorFactory := compaction.NewDefaultCompactorFactory()
@@ -585,9 +619,15 @@ func AssembleAgent(
 		}
 	}
 
-	// Extend cleanup to include session store and trace exporter.
+	// Extend cleanup to include ACP client, session store and trace exporter.
 	prevCleanup := cleanup
 	cleanup = func() {
+		if acpAdapter != nil {
+			acpAdapter.Close()
+		}
+		if acpClient != nil {
+			_ = acpClient.Disconnect(context.Background()) //nolint:errcheck
+		}
 		if sessionStore != nil {
 			sessionStore.Close() //nolint:errcheck,gosec
 		}
