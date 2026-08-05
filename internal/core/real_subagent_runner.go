@@ -25,9 +25,30 @@ var _ subAgentRunner = (*realSubAgentRunner)(nil)
 
 // Run creates an independent agent stack, submits the prompt, drains events
 // via emit, and returns the final assistant message.
-func (r *realSubAgentRunner) Run(ctx context.Context, prompt string, _ <-chan string, emit func(AgentEvent)) (AgentMessage, error) {
+func (r *realSubAgentRunner) Run(ctx context.Context, prompt string, inbox <-chan string, emit func(AgentEvent)) (AgentMessage, error) {
+	// Drain any pending inbox messages before starting the agent so follow-up
+	// messages delivered before Run are visible as "user" events.
+	if err := pumpInbox(ctx, inbox, emit); err != nil {
+		return AgentMessage{}, err
+	}
+
+	// Resolve the model: when a model-name override is set and a registry is
+	// available, build a model from the registry; otherwise fall back to the
+	// parent model.
+	model := r.model
+	if r.modelName != "" && r.registry != nil {
+		m, cleanup, err := r.registry.GetModel(ctx, r.modelName, llm.ModelConfig{Model: r.modelName})
+		if err != nil {
+			return AgentMessage{}, err
+		}
+		if cleanup != nil {
+			defer cleanup()
+		}
+		model = m
+	}
+
 	loopOpts := []LoopOption{
-		WithLLM(r.model),
+		WithLLM(model),
 	}
 	// The sub-agent's system prompt (resolved by the dispatcher) overrides the
 	// LoopAgent's tool-aware default so the sub-agent adopts its delegated role.
@@ -122,9 +143,22 @@ func (r *filteredToolRegistry) Register(_ context.Context, _ tools.ToolDefinitio
 }
 
 func (r *filteredToolRegistry) Get(ctx context.Context, name string) (tools.ToolDefinition, error) {
-	return r.inner.Get(ctx, name) // STUB: no filtering yet
+	if !r.allowed[name] {
+		return nil, tools.ErrToolNotFound
+	}
+	return r.inner.Get(ctx, name)
 }
 
 func (r *filteredToolRegistry) List(ctx context.Context) ([]tools.ToolDefinition, error) {
-	return r.inner.List(ctx) // STUB: no filtering yet
+	all, err := r.inner.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]tools.ToolDefinition, 0, len(all))
+	for _, def := range all {
+		if r.allowed[def.Name()] {
+			out = append(out, def)
+		}
+	}
+	return out, nil
 }
