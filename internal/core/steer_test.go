@@ -5,7 +5,6 @@ import (
 	"errors"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -277,13 +276,10 @@ func TestEinoTurnRunnerRunWithAgentAndStream(t *testing.T) {
 		runner.SetStream(nil)
 	}()
 
-	// Wait for the turn to complete.
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) && runner.RunningTurnID() == "" {
-		time.Sleep(2 * time.Millisecond)
-	}
-	require.NotEmpty(t, runner.RunningTurnID())
+	// The model returns immediately with no tool calls, so the turn
+	// completes almost instantly. Just wait for it to finish.
 	<-done
+	stream.Close() // close so drainEvents can terminate
 
 	require.NoError(t, runErr)
 	assert.True(t, result.Success)

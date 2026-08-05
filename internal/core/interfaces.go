@@ -115,6 +115,20 @@ type Harness interface {
 type TurnRunner interface {
 	// RunTurn executes one turn from a submission and returns a result.
 	RunTurn(ctx context.Context, submission Submission) (Result, error)
+	// Steer injects a steering instruction into a running turn. The
+	// instruction is delivered to the running loop between LLM iterations
+	// (not during generation) and recorded on the Turn for later retrieval
+	// via Get. It returns an error if the turn is unknown or not running.
+	Steer(ctx context.Context, id, instruction string) error
+	// Cancel marks a running turn as canceled and cancels its context.
+	// It returns an error if the turn is unknown or not running.
+	Cancel(ctx context.Context, id string) error
+	// FollowUp appends a follow-up user message to a running turn.
+	// It returns an error if the turn is unknown or not running.
+	FollowUp(ctx context.Context, id, content string) error
+	// Get returns a copy of the turn with the given id, or an error if
+	// unknown.
+	Get(ctx context.Context, id string) (Turn, error)
 }
 
 // SessionStore persists and loads conversational sessions.
