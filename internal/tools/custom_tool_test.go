@@ -9,7 +9,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/verify"
 )
 
@@ -19,11 +18,7 @@ import (
 func TestCustomCommandToolNameDescription(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tool := NewCustomCommandTool(config.CustomToolConfig{
-		Name:        "my_tool",
-		Description: "does a thing",
-		Command:     []string{"echo"},
-	})
+	tool := NewCustomCommandTool("my_tool", "does a thing", []string{"echo"}, nil, nil, 0, "")
 
 	assert.Equal(t, "my_tool", tool.Name())
 	assert.Equal(t, "does a thing", tool.Description())
@@ -41,10 +36,7 @@ func TestCustomCommandToolNameDescription(t *testing.T) {
 func TestCustomCommandToolEcho(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tool := NewCustomCommandTool(config.CustomToolConfig{
-		Name:    "echoer",
-		Command: []string{"echo"},
-	})
+	tool := NewCustomCommandTool("echoer", "", []string{"echo"}, nil, nil, 0, "")
 
 	res, err := tool.Execute(context.Background(), ToolCall{
 		ID:   "c1",
@@ -57,17 +49,13 @@ func TestCustomCommandToolEcho(t *testing.T) {
 	assert.Equal(t, 0, res.Metadata["exit_code"])
 }
 
-// TestCustomCommandToolStaticArgs verifies that static args (Args) are appended
+// TestCustomCommandToolStaticArgs verifies that static args are appended
 // after the base command args and before the dynamic input.
 func TestCustomCommandToolStaticArgs(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	// command[1:] = ["first"] (base args), Args = ["second"] (static), input = "third".
-	tool := NewCustomCommandTool(config.CustomToolConfig{
-		Name:    "baseargs",
-		Command: []string{"echo", "first"},
-		Args:    []string{"second"},
-	})
+	// command[1:] = ["first"] (base args), staticArgs = ["second"], input = "third".
+	tool := NewCustomCommandTool("baseargs", "", []string{"echo", "first"}, []string{"second"}, nil, 0, "")
 
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"input": "third"},
@@ -81,11 +69,8 @@ func TestCustomCommandToolStaticArgs(t *testing.T) {
 func TestCustomCommandToolEnv(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tool := NewCustomCommandTool(config.CustomToolConfig{
-		Name:    "envtool",
-		Command: []string{"printenv"},
-		Env:     map[string]string{"CUSTOM_TOOL_TEST_VAR": "env-value-123"},
-	})
+	tool := NewCustomCommandTool("envtool", "", []string{"printenv"}, nil,
+		map[string]string{"CUSTOM_TOOL_TEST_VAR": "env-value-123"}, 0, "")
 
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"input": "CUSTOM_TOOL_TEST_VAR"},
@@ -99,11 +84,7 @@ func TestCustomCommandToolEnv(t *testing.T) {
 func TestCustomCommandToolTimeout(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tool := NewCustomCommandTool(config.CustomToolConfig{
-		Name:    "sleeper",
-		Command: []string{"sleep"},
-		Timeout: 1, // 1 second
-	})
+	tool := NewCustomCommandTool("sleeper", "", []string{"sleep"}, nil, nil, 1*time.Second, "")
 
 	start := time.Now()
 	_, err := tool.Execute(context.Background(), ToolCall{
@@ -121,11 +102,7 @@ func TestCustomCommandToolWorkingDir(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	dir := t.TempDir()
-	tool := NewCustomCommandTool(config.CustomToolConfig{
-		Name:       "pwdtool",
-		Command:    []string{"pwd"},
-		WorkingDir: dir,
-	})
+	tool := NewCustomCommandTool("pwdtool", "", []string{"pwd"}, nil, nil, 0, dir)
 
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{},
@@ -139,10 +116,7 @@ func TestCustomCommandToolWorkingDir(t *testing.T) {
 func TestCustomCommandToolNotFound(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tool := NewCustomCommandTool(config.CustomToolConfig{
-		Name:    "missing",
-		Command: []string{"definitely_not_a_real_command_xyz_12345"},
-	})
+	tool := NewCustomCommandTool("missing", "", []string{"definitely_not_a_real_command_xyz_12345"}, nil, nil, 0, "")
 
 	_, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"input": "foo"},
@@ -155,10 +129,7 @@ func TestCustomCommandToolNotFound(t *testing.T) {
 func TestCustomCommandToolOutputLimit(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tool := NewCustomCommandTool(config.CustomToolConfig{
-		Name:    "echolong",
-		Command: []string{"echo"},
-	})
+	tool := NewCustomCommandTool("echolong", "", []string{"echo"}, nil, nil, 0, "")
 	// White-box override of the internal output cap.
 	tool.maxOutput = 10
 
@@ -175,10 +146,7 @@ func TestCustomCommandToolOutputLimit(t *testing.T) {
 func TestCustomCommandToolNonZeroExit(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tool := NewCustomCommandTool(config.CustomToolConfig{
-		Name:    "failer",
-		Command: []string{"sh", "-c"},
-	})
+	tool := NewCustomCommandTool("failer", "", []string{"sh", "-c"}, nil, nil, 0, "")
 
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"input": "echo oops; exit 3"},

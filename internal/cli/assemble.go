@@ -240,16 +240,27 @@ func AssembleAgent(
 	}
 	gitTool := tools.NewDefaultGitTool(gitCwd)
 
-	if registerErr := tools.RegisterDefaults(ctx, tr,
+	regOpts := []tools.RegisterDefaultsOption{
 		tools.WithRegisteredFileTracker(fileTracker),
 		tools.WithRegisteredDiffGenerator(diffGen),
 		tools.WithRegisteredBashSandbox(bashSandbox),
 		tools.WithRegisteredResourceLimits(resourceLimits),
 		tools.WithRegisteredGitTool(gitTool),
-	); registerErr != nil {
+	}
+	// When a builtin whitelist is configured, only the named builtins are
+	// registered; otherwise all builtins are registered (default behavior).
+	if rc != nil && len(rc.Tools.Builtin) > 0 {
+		regOpts = append(regOpts, tools.WithRegisteredBuiltinWhitelist(rc.Tools.Builtin))
+	}
+	if registerErr := tools.RegisterDefaults(ctx, tr, regOpts...); registerErr != nil {
 		cleanup()
 		return nil, fmt.Errorf("assemble: register tools: %w", registerErr)
 	}
+
+	// 2b. Register config-driven custom command tools. They are registered
+	// after the builtins so they extend the toolset; custom tool names that
+	// collide with an existing (builtin) tool are skipped with a warning.
+	registerCustomTools(ctx, rc, tr, logger)
 
 	// 3. Register MCP tools.
 	if mcpErr := registerMCPTools(ctx, rc, tr); mcpErr != nil {
@@ -752,6 +763,51 @@ func registerSkillTools(ctx context.Context, rc *config.Config, tr tools.ToolReg
 		slog.Info("assemble_skills_registered", "dir", rc.Skill.Dir, "count", count)
 	}
 	return infos
+}
+
+// registerCustomTools registers config-driven custom command tools from
+// rc.Tools.CustomTools. They are registered after the builtins so they extend
+// the available toolset. A custom tool with an empty name or command, or whose
+// name collides with an already-registered tool, is skipped with a warning.
+func registerCustomTools(ctx context.Context, rc *config.Config, tr tools.ToolRegistry, logger *slog.Logger) {
+	if rc == nil || len(rc.Tools.CustomTools) == 0 {
+		return
+	}
+
+	existing, err := tr.List(ctx)
+	if err != nil {
+		logger.Warn("assemble_custom_tools_list_failed", "err", err)
+		return
+	}
+	existingNames := make(map[string]bool, len(existing))
+	for _, t := range existing {
+		existingNames[t.Name()] = true
+	}
+
+	for _, cfg := range rc.Tools.CustomTools {
+		if cfg.Name == "" {
+			logger.Warn("assemble_custom_tool_skipped", "reason", "empty name")
+			continue
+		}
+		if len(cfg.Command) == 0 {
+			logger.Warn("assemble_custom_tool_skipped", "name", cfg.Name, "reason", "empty command")
+			continue
+		}
+		if existingNames[cfg.Name] {
+			logger.Warn("assemble_custom_tool_skipped", "name", cfg.Name, "reason", "collides with existing tool")
+			continue
+		}
+		timeout := time.Duration(0)
+		if cfg.Timeout > 0 {
+			timeout = time.Duration(cfg.Timeout) * time.Second
+		}
+		if regErr := tr.Register(ctx, tools.NewCustomCommandTool(cfg.Name, cfg.Description, cfg.Command, cfg.Args, cfg.Env, timeout, cfg.WorkingDir)); regErr != nil {
+			logger.Warn("assemble_custom_tool_register_failed", "name", cfg.Name, "err", regErr)
+			continue
+		}
+		existingNames[cfg.Name] = true
+		logger.Info("assemble_custom_tool_registered", "name", cfg.Name)
+	}
 }
 
 // loopDetectorMiddleware wraps an AgentLoop, feeding returned events to a
