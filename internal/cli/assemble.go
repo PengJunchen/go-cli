@@ -312,6 +312,11 @@ func AssembleAgent(
 	// 4b. Load and initialize extensions (if configured). Extension-provided
 	// tools are registered into the tool registry before the middleware wraps
 	// it, so they participate in approval gates and production wrappers.
+	// Extension hooks and middleware are bridged into the runtime via adapters
+	// (extension_bridge.go) and wired into the HookChain and MiddlewareChain
+	// assembled below.
+	var extHooks []core.Hook
+	var extMiddleware []core.Middleware
 	if rc != nil && rc.Extensions.Enabled && len(rc.Extensions.PluginPaths) > 0 {
 		pm := extension.NewPluginManager(extension.NewDefaultPluginLoader())
 		_ = pm.Load(ctx, rc.Extensions.PluginPaths)
@@ -321,7 +326,13 @@ func AssembleAgent(
 				logger.Warn("assemble_extension_tool_register_failed", "tool", t.Name(), "err", regErr)
 			}
 		}
-		logger.Info("assemble_extensions_ready", "extensions", len(pm.Extensions()), "paths", len(rc.Extensions.PluginPaths))
+		for _, h := range pm.Hooks() {
+			extHooks = append(extHooks, newExtensionHookAdapter(h))
+		}
+		for _, m := range pm.Middleware() {
+			extMiddleware = append(extMiddleware, newExtensionMiddlewareAdapter(m))
+		}
+		logger.Info("assemble_extensions_ready", "extensions", len(pm.Extensions()), "paths", len(rc.Extensions.PluginPaths), "hooks", len(extHooks), "middleware", len(extMiddleware))
 		extCleanup := cleanup
 		cleanup = func() {
 			_ = pm.Shutdown(context.Background()) //nolint:errcheck
@@ -567,9 +578,11 @@ func AssembleAgent(
 	production.RegisterLoopDetector(loopDetector)
 	reminderMgr := core.NewDefaultSystemReminderManager()
 
-	// 10c. Wire failure synthesis and hook chain.
+	// 10c. Wire failure synthesis and hook chain. Extension-registered hooks
+	// (bridged from extension.Hook to core.Hook) are included so they observe
+	// the agent lifecycle.
 	failureSynthesizer := core.NewDefaultFailureTurnSynthesizer()
-	hookChain := core.NewHookChain()
+	hookChain := core.NewHookChain(extHooks...)
 
 	// 11. Apply middleware chain (onion model) around the loop agent.
 	// Order (outermost first): logging -> loop-detector -> plan-mode ->
@@ -591,6 +604,10 @@ func AssembleAgent(
 	if acpAdapter != nil {
 		chain = append(chain, acpAdapter)
 	}
+	// Extension-registered middleware (bridged from extension.Middleware to
+	// core.Middleware) are appended innermost so they run closest to the core
+	// loop while still participating in the onion chain.
+	chain = append(chain, extMiddleware...)
 	loop = core.NewMiddlewareChain(chain...).Wrap(loop)
 
 	// 12. Create compaction components (strategy from config, default unified).
