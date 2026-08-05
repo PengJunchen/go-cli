@@ -19,6 +19,7 @@ type Config struct {
 	Production ProductionConfig `json:"production"`
 	Sandbox    SandboxConfig    `json:"sandbox"`
 	LSP        LSPConfig        `json:"lsp"`
+	Remote     RemoteConfig     `json:"remote"`
 
 	verbose bool
 }
@@ -197,6 +198,32 @@ type LSPConfig struct {
 	// WorkspaceRoot is the root directory of the workspace, passed as the
 	// LSP root URI. When empty, the current working directory is used.
 	WorkspaceRoot string `json:"workspace_root"`
+}
+
+// RemoteConfig holds SSH remote execution settings.
+type RemoteConfig struct {
+	// Hosts maps host names to their SSH connection configurations.
+	Hosts map[string]SSHHostConfig `json:"hosts"`
+	// DefaultHost is the host name used when the tool's host argument is
+	// omitted. It must match a key in Hosts.
+	DefaultHost string `json:"default_host"`
+}
+
+// SSHHostConfig describes a single SSH host connection.
+type SSHHostConfig struct {
+	// Host is the hostname or IP address of the remote server.
+	Host string `json:"host"`
+	// Port is the SSH port (0 or 22 means the default 22).
+	Port int `json:"port"`
+	// User is the SSH login user.
+	User string `json:"user"`
+	// KeyPath is the path to the private key file for key-based auth.
+	KeyPath string `json:"key_path"`
+	// Password is the password for password-based auth (requires sshpass).
+	Password string `json:"password"`
+	// KnownHostsPath is the path to the known_hosts file for host key
+	// verification.
+	KnownHostsPath string `json:"known_hosts_path"`
 }
 
 // Source enumerates the five configuration layers, ordered by ascending

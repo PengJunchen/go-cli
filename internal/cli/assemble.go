@@ -281,6 +281,18 @@ func AssembleAgent(
 		}
 	}
 
+	// 3c. Register remote bash tool (if SSH hosts are configured).
+	if rc != nil && len(rc.Remote.Hosts) > 0 {
+		remoteTool := buildRemoteBashTool(ctx, rc, logger)
+		if remoteTool != nil {
+			if regErr := tr.Register(ctx, remoteTool); regErr != nil {
+				logger.Warn("assemble_remote_bash_register_failed", "err", regErr)
+			} else {
+				logger.Info("assemble_remote_bash_ready", "default_host", rc.Remote.DefaultHost)
+			}
+		}
+	}
+
 	// 4. Register skill tools.
 	skillInfos := registerSkillTools(ctx, rc, tr)
 
@@ -961,4 +973,68 @@ func buildTraceExporter(tc config.TracingConfig, sessionID string, logger *slog.
 		}
 		return exp
 	}
+}
+
+// buildRemoteBashTool constructs a RemoteBashTool from the remote config. It
+// creates an SSH client for each configured host, selects the default host's
+// client as the primary, and registers the rest via WithRemoteBashHosts. A
+// sandbox with the default command blacklist (but no path whitelist, since
+// remote execution has no local working directory) is attached. Returns nil
+// when no default host is configured or the default host is missing from the
+// hosts map.
+func buildRemoteBashTool(_ context.Context, rc *config.Config, logger *slog.Logger) *tools.RemoteBashTool {
+	if rc == nil || len(rc.Remote.Hosts) == 0 {
+		return nil
+	}
+
+	// Build SSH clients for every configured host (simple client cache by
+	// host name). Since exec-based SSH is stateless, there is no persistent
+	// connection to pool.
+	hostClients := make(map[string]tools.SSHClient, len(rc.Remote.Hosts))
+	for name, hc := range rc.Remote.Hosts {
+		sshCfg := tools.SSHConfig{
+			Host:           hc.Host,
+			Port:           hc.Port,
+			User:           hc.User,
+			KeyPath:        hc.KeyPath,
+			Password:       hc.Password,
+			KnownHostsPath: hc.KnownHostsPath,
+		}
+		hostClients[name] = tools.NewDefaultSSHClient(sshCfg)
+	}
+
+	// Resolve the default host's client.
+	defaultName := rc.Remote.DefaultHost
+	if defaultName == "" {
+		// Fall back to the first configured host.
+		for name := range rc.Remote.Hosts {
+			defaultName = name
+			break
+		}
+	}
+	defaultClient, ok := hostClients[defaultName]
+	if !ok {
+		logger.Warn("assemble_remote_bash_default_host_missing", "default_host", defaultName)
+		return nil
+	}
+
+	// Build a sandbox with the default command blacklist but no path
+	// whitelist (remote execution has no local working directory).
+	// NewDefaultBashSandbox() already sets the default blacklist and an
+	// empty whitelist (allow all paths), which is the correct behavior for
+	// remote command validation.
+	remoteSandbox := tools.NewDefaultBashSandbox()
+
+	// Remove the default from the hostClients map since it's passed as the
+	// primary client; the rest are registered as additional hosts.
+	delete(hostClients, defaultName)
+
+	opts := []tools.RemoteBashToolOption{
+		tools.WithRemoteBashSandbox(remoteSandbox),
+	}
+	if len(hostClients) > 0 {
+		opts = append(opts, tools.WithRemoteBashHosts(hostClients))
+	}
+
+	return tools.NewRemoteBashTool(defaultClient, opts...)
 }
