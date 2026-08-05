@@ -31,6 +31,9 @@ type SubagentTask struct {
 	Role string
 	// Tools lists the tool names available to the sub-agent.
 	Tools []string
+	// Model optionally overrides the LLM model used by the sub-agent. When
+	// empty, the sub-agent inherits the parent model.
+	Model string
 	// MaxTurns bounds the sub-agent turn loop. Zero leaves it unset.
 	MaxTurns int
 }
@@ -56,6 +59,10 @@ type SubagentDispatcher interface {
 	// Dispatch creates a sub-agent for the task, runs it to completion, and
 	// returns the result.
 	Dispatch(ctx context.Context, task SubagentTask) (SubagentResult, error)
+	// ParallelDispatch dispatches all tasks concurrently and returns results
+	// in input order. The first error encountered is returned (if any),
+	// though all tasks are still attempted.
+	ParallelDispatch(ctx context.Context, tasks []SubagentTask) ([]SubagentResult, error)
 	// ListRunning returns the tasks currently in flight.
 	ListRunning() []SubagentTask
 }
@@ -89,6 +96,7 @@ func (t *SubagentTool) Description() string {
 		"- system_prompt (string, optional): an explicit system prompt for the sub-agent. Takes precedence over role.\n" +
 		"- role (string, optional): one of researcher, implementer, reviewer, tester. Selects a built-in role template when system_prompt is empty.\n" +
 		"- tools ([]string, optional): tool names available to the sub-agent.\n" +
+		"- model (string, optional): model name to override the sub-agent's LLM. When omitted, the sub-agent inherits the parent model.\n" +
 		"- max_turns (int, optional): bound on the sub-agent turn loop.\n" +
 		"\n" +
 		"The sub-agent will return its result as content."
@@ -113,6 +121,7 @@ func (t *SubagentTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 	// default when neither is set.
 	systemPrompt, _ := call.Args["system_prompt"].(string) //nolint:errcheck
 	role, _ := call.Args["role"].(string)                  //nolint:errcheck
+	model, _ := call.Args["model"].(string)                //nolint:errcheck
 
 	task := SubagentTask{
 		ID:           id,
@@ -120,6 +129,7 @@ func (t *SubagentTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 		SystemPrompt: systemPrompt,
 		Role:         role,
 		Tools:        toStringSlice(call.Args["tools"]),
+		Model:        model,
 		MaxTurns:     toInt(call.Args["max_turns"]),
 	}
 

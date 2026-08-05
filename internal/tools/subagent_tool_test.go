@@ -22,6 +22,18 @@ func (f *fakeSubagentDispatcher) Dispatch(_ context.Context, task SubagentTask) 
 	f.task = task
 	return f.res, f.err
 }
+
+func (f *fakeSubagentDispatcher) ParallelDispatch(_ context.Context, tasks []SubagentTask) ([]SubagentResult, error) {
+	if len(tasks) > 0 {
+		f.task = tasks[0]
+	}
+	results := make([]SubagentResult, len(tasks))
+	for i, t := range tasks {
+		results[i] = SubagentResult{TaskID: t.ID, Content: f.res.Content, Error: f.err}
+	}
+	return results, f.err
+}
+
 func (f *fakeSubagentDispatcher) ListRunning() []SubagentTask { return f.listing }
 
 func TestSubagentToolImplementsToolDefinition(t *testing.T) {
@@ -173,5 +185,33 @@ func TestSubagentToolDescriptionIncludesGuidance(t *testing.T) {
 	assert.Contains(t, desc, "system_prompt")
 	assert.Contains(t, desc, "role")
 	assert.Contains(t, desc, "researcher, implementer, reviewer, tester")
+	assert.Contains(t, desc, "model")
 	assert.Contains(t, desc, "return its result")
+}
+
+func TestSubagentToolExecuteParsesModel(t *testing.T) {
+	d := &fakeSubagentDispatcher{res: SubagentResult{Content: "ok"}}
+	tool := NewSubagentTool(d)
+
+	_, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{
+			"prompt": "go",
+			"model":  "gpt-4",
+		},
+	})
+	require.NoError(t, err)
+
+	assert.Equal(t, "gpt-4", d.task.Model)
+}
+
+func TestSubagentToolExecuteModelDefaultsToEmpty(t *testing.T) {
+	d := &fakeSubagentDispatcher{res: SubagentResult{Content: "ok"}}
+	tool := NewSubagentTool(d)
+
+	_, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"prompt": "go"},
+	})
+	require.NoError(t, err)
+
+	assert.Empty(t, d.task.Model)
 }

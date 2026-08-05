@@ -307,7 +307,7 @@ func AssembleAgent(
 	})
 
 	// 8. Wire real SubAgent execution (replaces simulated runner).
-	subAgentFactory := core.NewRealSubAgentFactory(model, tr,
+	subAgentFactory := core.NewRealSubAgentFactory(model, llm.NewProviderRegistry(), tr,
 		core.WithModelWrapper(newModelWrapper(pw, circuitBreaker, guardChain, telemetry)),
 	)
 	core.RegisterSubAgentFactory(subAgentFactory)

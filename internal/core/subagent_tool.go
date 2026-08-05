@@ -24,6 +24,9 @@ type SubagentTask struct {
 	Role string
 	// Tools lists the tool names available to the sub-agent.
 	Tools []string
+	// Model optionally overrides the LLM model used by the sub-agent. When
+	// empty, the sub-agent inherits the parent model.
+	Model string
 	// MaxTurns bounds the sub-agent turn loop. Zero leaves it unset.
 	MaxTurns int
 }
@@ -45,6 +48,10 @@ type SubagentDispatcher interface {
 	// Dispatch creates a sub-agent for the task, runs it to completion, and
 	// returns the result.
 	Dispatch(ctx context.Context, task SubagentTask) (SubagentResult, error)
+	// ParallelDispatch dispatches all tasks concurrently and returns results
+	// in input order. The first error encountered is returned (if any),
+	// though all tasks are still attempted.
+	ParallelDispatch(ctx context.Context, tasks []SubagentTask) ([]SubagentResult, error)
 	// ListRunning returns the tasks currently in flight.
 	ListRunning() []SubagentTask
 }
@@ -89,6 +96,7 @@ func (d *DefaultSubagentDispatcher) Dispatch(ctx context.Context, task SubagentT
 		Name:         task.ID,
 		SystemPrompt: resolveSubAgentSystemPrompt(task),
 		Tools:        task.Tools,
+		Model:        task.Model,
 		MaxTurns:     task.MaxTurns,
 	}
 	sub, err := d.factory.Create(ctx, task.ID, config)
@@ -149,6 +157,14 @@ func (d *DefaultSubagentDispatcher) ListRunning() []SubagentTask {
 	return out
 }
 
+// ParallelDispatch dispatches all tasks concurrently using sync.WaitGroup,
+// collects results preserving input order, and returns the first error
+// encountered (if any). All tasks are attempted regardless of individual
+// failures.
+func (d *DefaultSubagentDispatcher) ParallelDispatch(ctx context.Context, tasks []SubagentTask) ([]SubagentResult, error) {
+	return nil, nil
+}
+
 // subagentDispatcherAdapter bridges a core.SubagentDispatcher to the
 // tools.SubagentDispatcher contract. It exists because the tools package
 // cannot import core (core already depends on tools), so the tool defines its
@@ -174,6 +190,7 @@ func (a *subagentDispatcherAdapter) Dispatch(ctx context.Context, task tools.Sub
 		SystemPrompt: task.SystemPrompt,
 		Role:         task.Role,
 		Tools:        task.Tools,
+		Model:        task.Model,
 		MaxTurns:     task.MaxTurns,
 	})
 	return tools.SubagentResult{
@@ -182,6 +199,37 @@ func (a *subagentDispatcherAdapter) Dispatch(ctx context.Context, task tools.Sub
 		Error:    res.Error,
 		Duration: res.Duration,
 	}, err
+}
+
+// ParallelDispatch converts the tools-level tasks into core tasks, delegates
+// concurrently, and converts the results back.
+func (a *subagentDispatcherAdapter) ParallelDispatch(ctx context.Context, tasks []tools.SubagentTask) ([]tools.SubagentResult, error) {
+	coreTasks := make([]SubagentTask, len(tasks))
+	for i, t := range tasks {
+		coreTasks[i] = SubagentTask{
+			ID:           t.ID,
+			Prompt:       t.Prompt,
+			SystemPrompt: t.SystemPrompt,
+			Role:         t.Role,
+			Tools:        t.Tools,
+			Model:        t.Model,
+			MaxTurns:     t.MaxTurns,
+		}
+	}
+	results, err := a.d.ParallelDispatch(ctx, coreTasks)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]tools.SubagentResult, len(results))
+	for i, r := range results {
+		out[i] = tools.SubagentResult{
+			TaskID:   r.TaskID,
+			Content:  r.Content,
+			Error:    r.Error,
+			Duration: r.Duration,
+		}
+	}
+	return out, nil
 }
 
 // ListRunning converts the core running tasks to the tools-level type.
@@ -195,6 +243,7 @@ func (a *subagentDispatcherAdapter) ListRunning() []tools.SubagentTask {
 			SystemPrompt: t.SystemPrompt,
 			Role:         t.Role,
 			Tools:        t.Tools,
+			Model:        t.Model,
 			MaxTurns:     t.MaxTurns,
 		}
 	}

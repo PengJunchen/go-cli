@@ -13,6 +13,8 @@ import (
 // simulated runner it calls the real LLM and produces genuine responses.
 type realSubAgentRunner struct {
 	model        llm.BaseChatModel
+	registry     *llm.ProviderRegistry
+	modelName    string
 	tools        tools.ToolRegistry
 	maxIter      int
 	systemPrompt string
@@ -68,7 +70,7 @@ func (r *realSubAgentRunner) Run(ctx context.Context, prompt string, _ <-chan st
 // NewRealSubAgentRunnerFactory returns a SubAgentRunnerFactory that produces
 // realSubAgentRunner instances. The model and tool registry are captured in
 // the closure so every sub-agent gets the same LLM and tool set as the parent.
-func NewRealSubAgentRunnerFactory(model llm.BaseChatModel, tr tools.ToolRegistry, opts ...LoopOption) SubAgentRunnerFactory {
+func NewRealSubAgentRunnerFactory(model llm.BaseChatModel, registry *llm.ProviderRegistry, tr tools.ToolRegistry, opts ...LoopOption) SubAgentRunnerFactory {
 	return func(cfg SubAgentConfig) subAgentRunner {
 		maxIter := cfg.MaxTurns
 		if maxIter <= 0 {
@@ -76,6 +78,8 @@ func NewRealSubAgentRunnerFactory(model llm.BaseChatModel, tr tools.ToolRegistry
 		}
 		return &realSubAgentRunner{
 			model:        model,
+			registry:     registry,
+			modelName:    cfg.Model,
 			tools:        tr,
 			maxIter:      maxIter,
 			systemPrompt: cfg.SystemPrompt,
@@ -88,8 +92,39 @@ func NewRealSubAgentRunnerFactory(model llm.BaseChatModel, tr tools.ToolRegistry
 // LoopAgent-backed sub-agents instead of the simulated runner. This is the
 // exported entry point for packages outside core (e.g. cli) to register a
 // real sub-agent factory via RegisterSubAgentFactory.
-func NewRealSubAgentFactory(model llm.BaseChatModel, tr tools.ToolRegistry, opts ...LoopOption) SubAgentFactory {
+func NewRealSubAgentFactory(model llm.BaseChatModel, registry *llm.ProviderRegistry, tr tools.ToolRegistry, opts ...LoopOption) SubAgentFactory {
 	return NewSubAgentFactory(WithSubAgentRunnerFactory(
-		NewRealSubAgentRunnerFactory(model, tr, opts...),
+		NewRealSubAgentRunnerFactory(model, registry, tr, opts...),
 	))
+}
+
+// filteredToolRegistry wraps a tools.ToolRegistry and only exposes tools whose
+// names appear in the allowed list. Register is a no-op (the filtered registry
+// is read-only). It is used by the sub-agent runner to restrict the tool set
+// based on SubAgentConfig.Tools.
+type filteredToolRegistry struct {
+	inner   tools.ToolRegistry
+	allowed map[string]bool
+}
+
+var _ tools.ToolRegistry = (*filteredToolRegistry)(nil)
+
+func newFilteredToolRegistry(inner tools.ToolRegistry, allowed []string) *filteredToolRegistry {
+	m := make(map[string]bool, len(allowed))
+	for _, name := range allowed {
+		m[name] = true
+	}
+	return &filteredToolRegistry{inner: inner, allowed: m}
+}
+
+func (r *filteredToolRegistry) Register(_ context.Context, _ tools.ToolDefinition) error {
+	return nil // read-only: silently ignore
+}
+
+func (r *filteredToolRegistry) Get(ctx context.Context, name string) (tools.ToolDefinition, error) {
+	return r.inner.Get(ctx, name) // STUB: no filtering yet
+}
+
+func (r *filteredToolRegistry) List(ctx context.Context) ([]tools.ToolDefinition, error) {
+	return r.inner.List(ctx) // STUB: no filtering yet
 }

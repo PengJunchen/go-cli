@@ -220,6 +220,20 @@ func (f *fakeDispatcher) Dispatch(_ context.Context, task SubagentTask) (Subagen
 	f.dispatched = true
 	return f.res, f.err
 }
+
+func (f *fakeDispatcher) ParallelDispatch(_ context.Context, tasks []SubagentTask) ([]SubagentResult, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(tasks) > 0 {
+		f.task = tasks[0]
+		f.dispatched = true
+	}
+	results := make([]SubagentResult, len(tasks))
+	for i, t := range tasks {
+		results[i] = SubagentResult{TaskID: t.ID, Content: f.res.Content, Error: f.err}
+	}
+	return results, f.err
+}
 func (f *fakeDispatcher) ListRunning() []SubagentTask { return nil }
 
 func TestAdaptSubagentDispatcherAndNewSubagentTool(t *testing.T) {
@@ -344,4 +358,81 @@ func TestDispatchSystemPromptPrecedenceOverRole(t *testing.T) {
 
 	require.Len(t, factory.configs, 1)
 	assert.Equal(t, "explicit wins", factory.configs[0].SystemPrompt)
+}
+
+// TestDispatchPassesModelToConfig proves the Model field flows from
+// SubagentTask through Dispatch into the SubAgentConfig.
+func TestDispatchPassesModelToConfig(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	sub := newFakeSubAgent("worker", AgentMessage{Role: "assistant", Content: "done"})
+	factory := &fakeSubAgentFactory{subs: []SubAgent{sub}}
+
+	d := NewDefaultSubagentDispatcher(factory)
+	_, err := d.Dispatch(context.Background(), SubagentTask{
+		ID:     "t1",
+		Prompt: "go",
+		Model:  "gpt-4",
+	})
+	require.NoError(t, err)
+
+	require.Len(t, factory.configs, 1)
+	assert.Equal(t, "gpt-4", factory.configs[0].Model)
+}
+
+// TestDefaultSubagentDispatcherParallelDispatch proves ParallelDispatch runs
+// all tasks concurrently and returns results in input order.
+func TestDefaultSubagentDispatcherParallelDispatch(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	sub1 := newFakeSubAgent("w1", AgentMessage{Role: "assistant", Content: "result-1"})
+	sub2 := newFakeSubAgent("w2", AgentMessage{Role: "assistant", Content: "result-2"})
+	factory := &fakeSubAgentFactory{subs: []SubAgent{sub1, sub2}}
+
+	d := NewDefaultSubagentDispatcher(factory)
+	results, err := d.ParallelDispatch(context.Background(), []SubagentTask{
+		{ID: "t1", Prompt: "task1"},
+		{ID: "t2", Prompt: "task2"},
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+	assert.Equal(t, "t1", results[0].TaskID)
+	assert.Equal(t, "result-1", results[0].Content)
+	assert.Equal(t, "t2", results[1].TaskID)
+	assert.Equal(t, "result-2", results[1].Content)
+}
+
+// TestDefaultSubagentDispatcherParallelDispatchEmpty verifies ParallelDispatch
+// with no tasks returns an empty slice.
+func TestDefaultSubagentDispatcherParallelDispatchEmpty(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	factory := &fakeSubAgentFactory{}
+	d := NewDefaultSubagentDispatcher(factory)
+	results, err := d.ParallelDispatch(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
+// TestAdapterParallelDispatch proves the adapter bridges ParallelDispatch and
+// copies the Model field.
+func TestAdapterParallelDispatch(t *testing.T) {
+	fd := &fakeDispatcher{
+		res: SubagentResult{TaskID: "t1", Content: "answer", Duration: 5 * time.Millisecond},
+	}
+	adapter := AdaptSubagentDispatcher(fd)
+
+	results, err := adapter.ParallelDispatch(context.Background(), []tools.SubagentTask{
+		{ID: "t1", Prompt: "do something", Model: "gpt-4"},
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "t1", results[0].TaskID)
+	assert.Equal(t, "answer", results[0].Content)
+
+	fd.mu.Lock()
+	assert.True(t, fd.dispatched)
+	assert.Equal(t, "t1", fd.task.ID)
+	assert.Equal(t, "gpt-4", fd.task.Model)
+	fd.mu.Unlock()
 }

@@ -28,7 +28,7 @@ func registerRealSubAgentFactory(t *testing.T, model llm.BaseChatModel) {
 	t.Helper()
 	orig := core.GetSubAgentFactory()
 	t.Cleanup(func() { core.RegisterSubAgentFactory(orig) })
-	core.RegisterSubAgentFactory(core.NewRealSubAgentFactory(model, tools.NewDefaultToolRegistry()))
+	core.RegisterSubAgentFactory(core.NewRealSubAgentFactory(model, nil, tools.NewDefaultToolRegistry()))
 }
 
 // --- AC-1: SubAgent real execution ---
