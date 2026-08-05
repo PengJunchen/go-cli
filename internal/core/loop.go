@@ -36,6 +36,7 @@ type loopConfig struct {
 	promptBuilder        SystemPromptBuilder
 	promptOpts           SystemPromptOptions
 	tracer               *tracing.Tracer
+	steerCh              chan string
 }
 
 // LoopOption configures a LoopAgent at construction time.
@@ -83,6 +84,15 @@ func WithMaxIterations(n int) LoopOption {
 	}
 }
 
+// WithSteeringChannel sets the channel the loop drains for steering
+// instructions between LLM iterations. When a steering message is pending,
+// it is injected into the conversation as a user message before the next LLM
+// call. Steering can only happen between iterations, not during generation,
+// because the LLM call is a synchronous blocking operation.
+func WithSteeringChannel(ch chan string) LoopOption {
+	return func(c *loopConfig) { c.steerCh = ch }
+}
+
 // LoopAgent is the pure ReAct (think -> act -> observe) loop. It is stateless
 // with respect to a session: given a Submission it drives a conversation with
 // the injected chat model, servicing any tool calls the model requests, and
@@ -97,6 +107,7 @@ type LoopAgent struct {
 	promptBuilder        SystemPromptBuilder
 	promptOpts           SystemPromptOptions
 	tracer               *tracing.Tracer
+	steerCh              chan string
 }
 
 var _ AgentLoop = (*LoopAgent)(nil)
@@ -124,6 +135,7 @@ func NewLoopAgent(opts ...LoopOption) *LoopAgent {
 		promptBuilder:        cfg.promptBuilder,
 		promptOpts:           cfg.promptOpts,
 		tracer:               cfg.tracer,
+		steerCh:              cfg.steerCh,
 	}
 	slog.Info("core.loop.new",
 		"max_iterations", la.maxIterations,
@@ -249,6 +261,15 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 			logger.Error("core.loop.canceled", "iteration", iter, "err", err)
 			sendEvent(errEvent(err))
 			return events, err
+		}
+
+		// Drain any pending steering messages from the steer channel.
+		// Steering can only happen between LLM iterations, not during
+		// generation, because the LLM call is a synchronous blocking
+		// operation. Each steering message is injected as a user message
+		// so the model sees it on the next iteration.
+		if l.steerCh != nil {
+			drainSteerMessages(l.steerCh, &messages, logger)
 		}
 
 		// ---- LLM call (streaming) ----
@@ -438,6 +459,22 @@ func toToolsCall(tc llm.ToolCall) tools.ToolCall {
 // errEvent builds a timestamped "error" AgentEvent for the given error.
 func errEvent(err error) AgentEvent {
 	return AgentEvent{Kind: "error", Content: err.Error(), Timestamp: time.Now()}
+}
+
+// drainSteerMessages non-blockingly drains all pending steering messages from
+// ch and appends each as a user message to *msgs. This is how steering
+// instructions are injected between LLM iterations: the loop drains the
+// channel at the top of each iteration, before calling the LLM.
+func drainSteerMessages(ch chan string, msgs *[]llm.Message, logger *slog.Logger) {
+	for {
+		select {
+		case instruction := <-ch:
+			*msgs = append(*msgs, llm.Message{Role: llm.RoleUser, Content: instruction})
+			logger.Info("core.loop.steer_injected", "instruction", instruction)
+		default:
+			return
+		}
+	}
 }
 
 // systemPrompt returns the system instruction that tells the model its role

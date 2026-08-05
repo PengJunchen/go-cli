@@ -95,6 +95,15 @@ type AgentAssembly struct {
 	// Telemetry collects runtime metrics (LLM token usage, tool call counts,
 	// execution duration) queryable for cost reporting.
 	Telemetry production.Telemetry
+	// TurnRunner is the TurnRunner wired with the same steering channel as
+	// the LoopAgent, so Steer calls are delivered to the running loop
+	// between LLM iterations.
+	TurnRunner *core.EinoTurnRunner
+	// SteerChannel is the shared steering channel between the
+	// InterruptHandler (writer) and the LoopAgent (reader). The REPL writes
+	// steering messages here when the user presses Esc and types an
+	// instruction.
+	SteerChannel chan string
 }
 
 // AssembleOption configures AssembleAgent behavior.
@@ -409,12 +418,14 @@ func AssembleAgent(
 	}
 
 	// 10. Build loop agent with model wrapper.
+	steerCh := make(chan string, 1)
 	loopOpts := []core.LoopOption{
 		core.WithLLM(model),
 		core.WithTools(tr),
 		core.WithModelWrapper(newModelWrapper(pw, circuitBreaker, guardChain, telemetry)),
 		core.WithExecutionMode(core.ExecutionModeParallel),
 		core.WithTracer(tracer),
+		core.WithSteeringChannel(steerCh),
 	}
 	if rc != nil && rc.Agent.MaxIterations != 0 {
 		loopOpts = append(loopOpts, core.WithMaxIterations(rc.Agent.MaxIterations))
@@ -538,6 +549,14 @@ func AssembleAgent(
 	agent := core.NewAgentImpl(ac.agentName, loop, agentOpts...)
 	h := core.NewHarnessImpl(agent, core.WithEventBuffer(64), core.WithHarnessTracer(tracer))
 
+	// 15b. Build TurnRunner wired with the shared steering channel and agent
+	// so Steer calls are delivered to the running loop between LLM
+	// iterations, and RunTurn delegates to agent.Run (with history).
+	turnRunner := core.NewEinoTurnRunner(loop)
+	turnRunner.SetSteerChannel(steerCh)
+	turnRunner.SetAgent(agent)
+	reg.RegisterTurnRunner(turnRunner)
+
 	// Emit assemble span for observability.
 	asmSpan, _ := tracing.SpanFromContext(ctx, "assemble.agent", tracing.SpanKindInternal)
 	asmSpan.SetAttributes(
@@ -580,6 +599,8 @@ func AssembleAgent(
 		IdempotentCache:    idempotentCache,
 		AuditLog:           auditLog,
 		Telemetry:          telemetry,
+		TurnRunner:         turnRunner,
+		SteerChannel:       steerCh,
 	}, nil
 }
 

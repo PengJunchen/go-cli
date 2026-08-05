@@ -75,3 +75,18 @@ func (h *InterruptHandler) Stop() {
 func (h *InterruptHandler) SteerChannel() <-chan string {
 	return h.steerCh
 }
+
+// SendSteer writes a steering instruction to the steer channel. It is
+// non-blocking: if the channel buffer is full, the message is dropped and nil
+// is returned (the caller cannot act on a full buffer). The REPL calls this
+// when the user presses Esc and types a steering instruction; the REPL's
+// select loop then receives it from SteerChannel and forwards it to the
+// running loop via the assembly's shared SteerChannel.
+func (h *InterruptHandler) SendSteer(msg string) error {
+	select {
+	case h.steerCh <- msg:
+		return nil
+	default:
+		return nil // channel full, drop silently
+	}
+}

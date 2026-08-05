@@ -266,9 +266,11 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		// stream is known to be closed, otherwise it returns errNoResult.
 		// If the context is canceled (user interrupt), we additionally wait
 		// for app.Done() so the stream is fully closed and Result() is ready.
-		// Steer messages arriving on the interrupter's channel are logged;
-		// since TurnRunner is not directly accessible from the REPL loop,
-		// steer injection is deferred to a future wiring.
+		// Steer messages arriving on the interrupter's channel are forwarded
+		// to the assembly's shared SteerChannel, which the LoopAgent drains
+		// between LLM iterations. Steering can only happen between iterations,
+		// not during generation, because the LLM call is a synchronous
+		// blocking operation.
 		turnComplete := false
 		for !turnComplete {
 			select {
@@ -285,6 +287,17 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 					"op", "cli.interactive.steer",
 					"message", steerMsg,
 				)
+				// Forward the steer message to the assembly's shared
+				// SteerChannel so the LoopAgent picks it up between
+				// LLM iterations.
+				if assembly.SteerChannel != nil {
+					select {
+					case assembly.SteerChannel <- steerMsg:
+						logger.Info("cli_interactive_steer_forwarded", "message", steerMsg)
+					default:
+						logger.Warn("cli_interactive_steer_channel_full")
+					}
+				}
 			}
 		}
 
