@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -122,9 +123,26 @@ var _ BashSandbox = (*DefaultBashSandbox)(nil)
 // SandboxOption configures a DefaultBashSandbox.
 type SandboxOption func(*DefaultBashSandbox)
 
-// WithWhitelist sets the allowed base paths for the sandbox.
+// WithWhitelist sets the allowed base paths for the sandbox. An empty slice
+// allows all paths (no restriction).
 func WithWhitelist(paths []string) SandboxOption {
 	return func(s *DefaultBashSandbox) { s.whitelist = NewPathWhitelist(paths) }
+}
+
+// WithAllowedPaths sets the allowed base paths for the sandbox. When paths is
+// empty, the current working directory is used as a safe default rather than
+// allowing all paths.
+func WithAllowedPaths(paths []string) SandboxOption {
+	return func(s *DefaultBashSandbox) {
+		if len(paths) == 0 {
+			cwd, err := os.Getwd()
+			if err != nil {
+				cwd = "."
+			}
+			paths = []string{cwd}
+		}
+		s.whitelist = NewPathWhitelist(paths)
+	}
 }
 
 // WithBlacklist sets the disallowed command names for the sandbox.
