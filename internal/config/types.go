@@ -17,6 +17,7 @@ type Config struct {
 	Skill      SkillConfig      `json:"skill"`
 	WebSearch  WebSearchConfig  `json:"web_search"`
 	Production ProductionConfig `json:"production"`
+	Sandbox    SandboxConfig    `json:"sandbox"`
 
 	verbose bool
 }
@@ -172,6 +173,19 @@ type LoopDetectorConfig struct {
 	TestFailureThreshold int `json:"test_failure_threshold"`
 	// SameToolCallThreshold triggers after this many repeated identical tool calls.
 	SameToolCallThreshold int `json:"same_tool_call_threshold"`
+}
+
+// SandboxConfig controls the workspace sandbox applied to the bash tool.
+type SandboxConfig struct {
+	// AllowedPaths restricts command execution to these directories (and
+	// their subdirectories). When empty, the current working directory is
+	// used as a safe default.
+	AllowedPaths []string `json:"allowed_paths"`
+	// MaxCPU bounds the CPU time a single command may consume.
+	MaxCPU time.Duration `json:"max_cpu"`
+	// MaxMemory bounds the maximum memory (in bytes) a single command may
+	// consume.
+	MaxMemory int64 `json:"max_memory"`
 }
 
 // Source enumerates the five configuration layers, ordered by ascending

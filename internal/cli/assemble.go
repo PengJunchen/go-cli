@@ -205,13 +205,29 @@ func AssembleAgent(
 	// Create shared component instances for the PARTIAL tools (D5, D6, D7, D9).
 	fileTracker := tools.NewFileTracker()
 	diffGen := tools.NewUnifiedDiffGenerator(0, false)
-	bashSandbox := tools.NewDefaultBashSandbox()
+
+	// Build the bash sandbox from config. WithAllowedPaths defaults to the
+	// current working directory when no paths are configured (safe default).
+	var sandboxOpts []tools.SandboxOption
+	var resourceLimits tools.ResourceLimits
+	if rc != nil {
+		sandboxOpts = append(sandboxOpts, tools.WithAllowedPaths(rc.Sandbox.AllowedPaths))
+		resourceLimits = tools.ResourceLimits{
+			MaxCPU:    rc.Sandbox.MaxCPU,
+			MaxMemory: rc.Sandbox.MaxMemory,
+		}
+	} else {
+		sandboxOpts = append(sandboxOpts, tools.WithAllowedPaths(nil))
+	}
+	bashSandbox := tools.NewDefaultBashSandbox(sandboxOpts...)
+
 	htmlConverter := tools.NewDefaultHTMLConverter()
 
 	if registerErr := tools.RegisterDefaults(ctx, tr,
 		tools.WithRegisteredFileTracker(fileTracker),
 		tools.WithRegisteredDiffGenerator(diffGen),
 		tools.WithRegisteredBashSandbox(bashSandbox),
+		tools.WithRegisteredResourceLimits(resourceLimits),
 	); registerErr != nil {
 		cleanup()
 		return nil, fmt.Errorf("assemble: register tools: %w", registerErr)

@@ -10,9 +10,10 @@ import (
 type RegisterDefaultsOption func(*registerDefaultsConfig)
 
 type registerDefaultsConfig struct {
-	fileTracker   *FileTracker
-	diffGenerator DiffGenerator
-	bashSandbox   BashSandbox
+	fileTracker    *FileTracker
+	diffGenerator  DiffGenerator
+	bashSandbox    BashSandbox
+	resourceLimits ResourceLimits
 }
 
 // WithRegisteredFileTracker wires a FileTracker into the WriteTool and
@@ -31,6 +32,12 @@ func WithRegisteredDiffGenerator(dg DiffGenerator) RegisterDefaultsOption {
 // RegisterDefaults.
 func WithRegisteredBashSandbox(sb BashSandbox) RegisterDefaultsOption {
 	return func(c *registerDefaultsConfig) { c.bashSandbox = sb }
+}
+
+// WithRegisteredResourceLimits wires ResourceLimits into the BashTool
+// registered by RegisterDefaults.
+func WithRegisteredResourceLimits(limits ResourceLimits) RegisterDefaultsOption {
+	return func(c *registerDefaultsConfig) { c.resourceLimits = limits }
 }
 
 // RegisterDefaults registers the built-in read, bash, write, edit, grep, find
@@ -70,6 +77,9 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDef
 	bashOpts := []BashToolOption{}
 	if cfg.bashSandbox != nil {
 		bashOpts = append(bashOpts, WithBashSandbox(cfg.bashSandbox))
+	}
+	if cfg.resourceLimits.MaxMemory > 0 || cfg.resourceLimits.MaxCPU > 0 {
+		bashOpts = append(bashOpts, WithResourceLimits(cfg.resourceLimits))
 	}
 
 	defs := []ToolDefinition{
