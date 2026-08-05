@@ -257,8 +257,22 @@ func AssembleAgent(
 	)
 	reg.RegisterApprovalClassifier(&approvalClassifierAdapter{inner: classifier})
 	reg.RegisterApprovalStore(&approvalStoreAdapter{inner: approvalStore})
-	tr = tools.NewMiddlewareToolRegistry(tr, approvalMW.WrapToolCall, tools.NewMutationWrapper())
+	mutationQueue := tools.NewDefaultFileMutationQueue(
+		tools.WithMutationFileTracker(fileTracker),
+		tools.WithMutationDiffGenerator(diffGen),
+	)
+	tr = tools.NewMiddlewareToolRegistry(tr, approvalMW.WrapToolCall, tools.NewMutationQueueWrapper(mutationQueue))
 	reg.RegisterToolRegistry(tr)
+
+	// Close the mutation queue on cleanup so pending mutations are flushed and
+	// worker goroutines are released.
+	mqCleanup := cleanup
+	cleanup = func() {
+		if cq, ok := mutationQueue.(*tools.DefaultFileMutationQueue); ok {
+			_ = cq.Close() //nolint:errcheck
+		}
+		mqCleanup()
+	}
 
 	// 6. Wire production resilience (retry + cost tracking).
 	retryPolicy := production.NewDefaultRetryPolicy(production.RetryConfig{

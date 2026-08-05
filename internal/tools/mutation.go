@@ -90,7 +90,9 @@ var _ FileMutationQueue = (*DefaultFileMutationQueue)(nil)
 // MutationQueueOption closures do not reference the concrete
 // DefaultFileMutationQueue type.
 type mutationQueueOptions struct {
-	handler MutationHandler
+	handler       MutationHandler
+	fileTracker   *FileTracker
+	diffGenerator DiffGenerator
 }
 
 // MutationQueueOption configures a DefaultFileMutationQueue.
@@ -103,14 +105,36 @@ func WithMutationHandler(h MutationHandler) MutationQueueOption {
 	return func(o *mutationQueueOptions) { o.handler = h }
 }
 
+// WithMutationFileTracker injects a FileTracker into the default mutation
+// handler so that backup checkpoints are created before each write/edit. This
+// preserves fileTracker functionality when mutations are queued. When a custom
+// handler is set via WithMutationHandler, this option has no effect.
+func WithMutationFileTracker(ft *FileTracker) MutationQueueOption {
+	return func(o *mutationQueueOptions) { o.fileTracker = ft }
+}
+
+// WithMutationDiffGenerator injects a DiffGenerator into the default mutation
+// handler so that change previews are generated for overwrites. This preserves
+// diffGenerator functionality when mutations are queued. When a custom handler
+// is set via WithMutationHandler, this option has no effect.
+func WithMutationDiffGenerator(dg DiffGenerator) MutationQueueOption {
+	return func(o *mutationQueueOptions) { o.diffGenerator = dg }
+}
+
 // NewDefaultFileMutationQueue returns a DefaultFileMutationQueue using the
-// built-in write/edit handler unless overridden via WithMutationHandler.
+// built-in write/edit handler unless overridden via WithMutationHandler. When
+// fileTracker or diffGenerator options are provided, they are injected into the
+// default handler so backup checkpoints and change previews are preserved.
 func NewDefaultFileMutationQueue(opts ...MutationQueueOption) FileMutationQueue {
 	o := &mutationQueueOptions{}
 	for _, opt := range opts {
 		opt(o)
 	}
-	return &DefaultFileMutationQueue{handler: o.handler}
+	handler := o.handler
+	if handler == nil {
+		handler = newConfiguredMutationHandler(o.fileTracker, o.diffGenerator)
+	}
+	return &DefaultFileMutationQueue{handler: handler}
 }
 
 // Name returns the queue's canonical name.
@@ -224,6 +248,55 @@ func (q *DefaultFileMutationQueue) apply(ctx context.Context, m FileMutation) er
 		h = defaultMutationHandler
 	}
 	return h(ctx, m)
+}
+
+// newConfiguredMutationHandler returns a MutationHandler that creates WriteTool
+// and EditFileTool instances with the given fileTracker and diffGenerator
+// injected, so that backup checkpoints and change previews are preserved when
+// mutations are applied through the queue. When both ft and dg are nil the
+// behavior is equivalent to the package-level defaultMutationHandler.
+func newConfiguredMutationHandler(ft *FileTracker, dg DiffGenerator) MutationHandler {
+	return func(ctx context.Context, m FileMutation) error {
+		switch m.Operation {
+		case "write":
+			toolOpts := []WriteToolOption{WithOverwrite(true)}
+			if ft != nil {
+				toolOpts = append(toolOpts, WithFileTracker(ft))
+			}
+			if dg != nil {
+				toolOpts = append(toolOpts, WithDiffGenerator(dg))
+			}
+			tool := NewWriteTool(toolOpts...)
+			call := ToolCall{Args: map[string]any{"path": m.FilePath}}
+			if s, ok := m.Content.(string); ok {
+				call.Args["content"] = s
+			}
+			_, err := tool.Execute(ctx, call)
+			return err
+		case "edit":
+			call := ToolCall{Args: map[string]any{"file_path": m.FilePath}}
+			if cm, ok := m.Content.(map[string]any); ok {
+				if v, ok := cm["old_string"]; ok {
+					call.Args["old_string"] = v
+				}
+				if v, ok := cm["new_string"]; ok {
+					call.Args["new_string"] = v
+				}
+			}
+			toolOpts := []EditFileToolOption{}
+			if ft != nil {
+				toolOpts = append(toolOpts, WithEditFileTracker(ft))
+			}
+			if dg != nil {
+				toolOpts = append(toolOpts, WithEditDiffGenerator(dg))
+			}
+			tool := NewEditFileTool(toolOpts...)
+			_, err := tool.Execute(ctx, call)
+			return err
+		default:
+			return fmt.Errorf("mutation: unsupported operation %q", m.Operation)
+		}
+	}
 }
 
 // defaultMutationHandler applies a mutation using the built-in write/edit tools.
