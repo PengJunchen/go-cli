@@ -2,7 +2,12 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log/slog"
+	"strings"
+
+	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
 // lspTool wraps an LSPClient as a ToolDefinition, exposing semantic code
@@ -57,5 +62,112 @@ func (t *lspTool) Parameters() any {
 
 // Execute runs the LSP query for the given call.
 func (t *lspTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, error) {
-	return nil, fmt.Errorf("lsp_query: not implemented")
+	span, _ := tracing.SpanFromContext(ctx, "tool.call", tracing.SpanKindClient)
+	logger := tracing.NewTraceLogger(span, slog.Default())
+
+	operation, _ := call.Args["operation"].(string)
+	uri, _ := call.Args["uri"].(string)
+	line, _ := call.Args["line"].(float64)
+	character, _ := call.Args["character"].(float64)
+
+	if operation == "" {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		return nil, errors.New("lsp_query: missing 'operation' argument")
+	}
+	if uri == "" {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		return nil, errors.New("lsp_query: missing 'uri' argument")
+	}
+
+	// Validate operation before requiring a client so argument errors are
+	// surfaced even when the tool is used without a running server.
+	switch operation {
+	case "definition", "references", "hover", "diagnostics":
+	default:
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		return nil, fmt.Errorf("lsp_query: unknown operation %q", operation)
+	}
+
+	if t.client == nil {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		return nil, errors.New("lsp_query: nil LSP client")
+	}
+
+	var output string
+	var err error
+
+	switch operation {
+	case "definition":
+		var locs []Location
+		locs, err = t.client.Definition(ctx, uri, int(line), int(character))
+		if err == nil {
+			output = formatLocations(locs)
+		}
+	case "references":
+		var locs []Location
+		locs, err = t.client.References(ctx, uri, int(line), int(character))
+		if err == nil {
+			output = formatLocations(locs)
+		}
+	case "hover":
+		output, err = t.client.Hover(ctx, uri, int(line), int(character))
+	case "diagnostics":
+		var diags []Diagnostic
+		diags, err = t.client.Diagnostics(ctx, uri)
+		if err == nil {
+			output = formatDiagnostics(diags)
+		}
+	}
+
+	if err != nil {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		logger.Error("lsp_query.failed", "operation", operation, "uri", uri, "err", err)
+		return nil, err
+	}
+
+	span.SetAttributes(tracing.Attribute{Key: "success", Value: true})
+	logger.Info("lsp_query.done", "operation", operation, "uri", uri)
+
+	return &ToolResult{
+		Output:     output,
+		ToolCallID: call.ID,
+		Metadata: map[string]any{
+			"operation": operation,
+			"uri":       uri,
+		},
+	}, nil
+}
+
+// formatLocations renders a slice of Location as one line per location.
+func formatLocations(locs []Location) string {
+	if len(locs) == 0 {
+		return "(no results)"
+	}
+	var sb strings.Builder
+	for i, loc := range locs {
+		if i > 0 {
+			sb.WriteString("\n")
+		}
+		fmt.Fprintf(&sb, "%s:%d:%d", loc.URI, loc.Range.Start.Line, loc.Range.Start.Character)
+	}
+	return sb.String()
+}
+
+// formatDiagnostics renders a slice of Diagnostic as one line per diagnostic.
+func formatDiagnostics(diags []Diagnostic) string {
+	if len(diags) == 0 {
+		return "(no diagnostics)"
+	}
+	var sb strings.Builder
+	for i, d := range diags {
+		if i > 0 {
+			sb.WriteString("\n")
+		}
+		src := d.Source
+		if src == "" {
+			src = "lsp"
+		}
+		fmt.Fprintf(&sb, "[%s] %d:%d %s", src, d.Range.Start.Line, d.Range.Start.Character, d.Message)
+	}
+	return sb.String()
 }
