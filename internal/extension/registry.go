@@ -132,3 +132,14 @@ func (r *DefaultExtensionRegistry) Middleware(name string) Middleware {
 	defer r.mu.Unlock()
 	return r.middlewares[name]
 }
+
+// AllTools returns a slice of all registered tools.
+func (r *DefaultExtensionRegistry) AllTools() []tools.ToolDefinition {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := make([]tools.ToolDefinition, 0, len(r.tools))
+	for _, t := range r.tools {
+		result = append(result, t)
+	}
+	return result
+}

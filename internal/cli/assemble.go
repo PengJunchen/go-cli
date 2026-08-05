@@ -16,6 +16,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/compaction"
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/extension"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mcp"
 	"github.com/pengjunchen/go-cli/internal/production"
@@ -306,6 +307,26 @@ func AssembleAgent(
 
 	// 4. Register skill tools.
 	skillInfos := registerSkillTools(ctx, rc, tr)
+
+	// 4b. Load and initialize extensions (if configured). Extension-provided
+	// tools are registered into the tool registry before the middleware wraps
+	// it, so they participate in approval gates and production wrappers.
+	if rc != nil && rc.Extensions.Enabled && len(rc.Extensions.PluginPaths) > 0 {
+		pm := extension.NewPluginManager(extension.NewDefaultPluginLoader())
+		_ = pm.Load(ctx, rc.Extensions.PluginPaths)
+		_ = pm.Init(ctx)
+		for _, t := range pm.Tools() {
+			if regErr := tr.Register(ctx, t); regErr != nil {
+				logger.Warn("assemble_extension_tool_register_failed", "tool", t.Name(), "err", regErr)
+			}
+		}
+		logger.Info("assemble_extensions_ready", "extensions", len(pm.Extensions()), "paths", len(rc.Extensions.PluginPaths))
+		extCleanup := cleanup
+		cleanup = func() {
+			_ = pm.Shutdown(context.Background()) //nolint:errcheck
+			extCleanup()
+		}
+	}
 
 	// 5. Wire approval + mutation middleware via decorator pattern.
 	classifier := approval.NewSafetyPolicyClassifier([]string{"bash"})
