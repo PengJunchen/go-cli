@@ -188,3 +188,45 @@ func TestBashTool_SandboxBlocksCommandWithoutExecuting(t *testing.T) {
 	_, statErr := os.Stat(marker)
 	assert.Error(t, statErr, "marker file should not exist; command must not have executed")
 }
+
+// --- WithAllowedPaths tests ---
+
+func TestSandbox_WithAllowedPaths_EmptyDefaultsToCWD(t *testing.T) {
+	cwd, err := os.Getwd()
+	require.NoError(t, err)
+
+	sb := NewDefaultBashSandbox(WithAllowedPaths(nil))
+	// CWD should be allowed.
+	err = sb.Validate(context.Background(), "echo hello", cwd)
+	require.NoError(t, err)
+}
+
+func TestSandbox_WithAllowedPaths_EmptyBlocksOutsideCWD(t *testing.T) {
+	sb := NewDefaultBashSandbox(WithAllowedPaths(nil))
+	// A path outside CWD should be blocked.
+	err := sb.Validate(context.Background(), "echo hello", "/etc")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "whitelist")
+}
+
+func TestSandbox_WithAllowedPaths_SpecificPaths(t *testing.T) {
+	dir := t.TempDir()
+	sb := NewDefaultBashSandbox(WithAllowedPaths([]string{dir}))
+	// The specified path is allowed.
+	err := sb.Validate(context.Background(), "echo hello", dir)
+	require.NoError(t, err)
+	// A different path is blocked.
+	err = sb.Validate(context.Background(), "echo hello", "/etc")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "whitelist")
+}
+
+func TestSandbox_WithAllowedPaths_NestedDirectoryAllowed(t *testing.T) {
+	dir := t.TempDir()
+	nested := filepath.Join(dir, "subdir")
+	require.NoError(t, os.Mkdir(nested, 0o755))
+
+	sb := NewDefaultBashSandbox(WithAllowedPaths([]string{dir}))
+	err := sb.Validate(context.Background(), "echo hello", nested)
+	require.NoError(t, err)
+}
