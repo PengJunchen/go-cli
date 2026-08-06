@@ -394,7 +394,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 				sendEvent(AgentEvent{Kind: "tool_call", Content: tc.Name, Timestamp: time.Now()})
 				logger.Info("core.loop.tool_call", "iteration", iter, "tool", tc.Name, "mode", "parallel")
 			}
-			results := executeToolsParallel(spanCtx, l.tools, resp.ToolCalls)
+			results := executeToolsParallel(spanCtx, l.tools, resp.ToolCalls, es)
 			for _, res := range results {
 				if res.Err != nil {
 					logger.Warn("core.loop.tool_error", "tool", res.Name, "err", res.Err)
@@ -424,7 +424,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 				sendEvent(AgentEvent{Kind: "tool_call", Content: tc.Name, Timestamp: time.Now()})
 				logger.Info("core.loop.tool_call", "iteration", iter, "tool", tc.Name)
 
-				resultText, execErr := l.executeTool(spanCtx, toToolsCall(tc))
+				resultText, execErr := l.executeTool(spanCtx, toToolsCall(tc), es)
 				if execErr != nil {
 					logger.Warn("core.loop.tool_error", "tool", tc.Name, "err", execErr)
 					resultText = "Error: " + execErr.Error()
@@ -560,14 +560,49 @@ func (l *LoopAgent) generateWithContinuation(ctx context.Context, model llm.Base
 	return resp, nil
 }
 
+// eventStreamSink adapts a core.EventStream to satisfy tools.StreamSink.
+// It bridges streaming tool output (stdout/stderr lines) into the same
+// EventStream the loop uses for all other agent events. Each Send produces a
+// "tool_output" AgentEvent carrying the ToolCallID and Stream ("stdout"/
+// "stderr") so consumers can associate the line with its originating call.
+type eventStreamSink struct {
+	es EventStream
+}
+
+// Send wraps content as a "tool_output" AgentEvent and forwards it to the
+// underlying EventStream.
+func (s *eventStreamSink) Send(content, toolCallID, stream string) error {
+	return s.es.Send(AgentEvent{
+		Kind:       "tool_output",
+		Content:    content,
+		Timestamp:  time.Now(),
+		ToolCallID: toolCallID,
+		Stream:     stream,
+	})
+}
+
 // executeTool looks up the tool and runs its definition against the registry.
-func (l *LoopAgent) executeTool(ctx context.Context, call tools.ToolCall) (string, error) {
+// When the tool implements tools.StreamingBashTool and an EventStream is
+// provided, it uses ExecuteStreaming to push output lines in real time.
+func (l *LoopAgent) executeTool(ctx context.Context, call tools.ToolCall, es EventStream) (string, error) {
 	if l.tools == nil {
 		return "", errors.New("core: agent loop has no tool registry")
 	}
 	def, err := l.tools.Get(ctx, call.Name)
 	if err != nil {
 		return "", err
+	}
+	// Check if the tool supports streaming output.
+	if st, ok := def.(tools.StreamingBashTool); ok && es != nil {
+		sink := &eventStreamSink{es: es}
+		result, err := st.ExecuteStreaming(ctx, call, sink)
+		if err != nil {
+			return "", err
+		}
+		if result == nil {
+			return "", nil
+		}
+		return result.Output, nil
 	}
 	result, err := def.Execute(ctx, call)
 	if err != nil {
