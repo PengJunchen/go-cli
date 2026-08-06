@@ -44,6 +44,7 @@ type loopConfig struct {
 	promptOpts           SystemPromptOptions
 	tracer               *tracing.Tracer
 	steerCh              chan string
+	thinkingConfig       *llm.ThinkingConfig
 }
 
 // LoopOption configures a LoopAgent at construction time.
@@ -100,6 +101,16 @@ func WithSteeringChannel(ch chan string) LoopOption {
 	return func(c *loopConfig) { c.steerCh = ch }
 }
 
+// WithThinkingConfig sets the thinking configuration applied to every LLM
+// Generate/Stream call. When set, the loop appends llm.WithThinking(cfg) to
+// the generation options so the provider can enable reasoning according to the
+// configured level. When nil, no thinking option is added.
+func WithThinkingConfig(cfg llm.ThinkingConfig) LoopOption {
+	return func(c *loopConfig) {
+		c.thinkingConfig = &cfg
+	}
+}
+
 // LoopAgent is the pure ReAct (think -> act -> observe) loop. It is stateless
 // with respect to a session: given a Submission it drives a conversation with
 // the injected chat model, servicing any tool calls the model requests, and
@@ -115,6 +126,7 @@ type LoopAgent struct {
 	promptOpts           SystemPromptOptions
 	tracer               *tracing.Tracer
 	steerCh              chan string
+	thinkingConfig       *llm.ThinkingConfig
 	pauseMu              sync.Mutex
 	pauseCh              chan struct{}
 }
@@ -187,6 +199,7 @@ func NewLoopAgent(opts ...LoopOption) *LoopAgent {
 		promptOpts:           cfg.promptOpts,
 		tracer:               cfg.tracer,
 		steerCh:              cfg.steerCh,
+		thinkingConfig:       cfg.thinkingConfig,
 	}
 	slog.Info("core.loop.new",
 		"max_iterations", la.maxIterations,
@@ -257,6 +270,12 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 			}
 			toolOpts = append(toolOpts, llm.WithTools(llmTools))
 		}
+	}
+
+	// Apply thinking configuration to every LLM call so the provider can
+	// enable reasoning according to the configured level.
+	if l.thinkingConfig != nil {
+		toolOpts = append(toolOpts, llm.WithThinking(*l.thinkingConfig))
 	}
 
 	var events []AgentEvent

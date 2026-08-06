@@ -120,6 +120,13 @@ type AgentAssembly struct {
 	// MemoryExtractor extracts key facts from conversations for memory
 	// storage.
 	MemoryExtractor memory.MemoryExtractor
+	// ThinkingLevel is the resolved LLM reasoning depth applied to every
+	// Generate/Stream call. Defaults to ThinkingMedium when no explicit
+	// option or config value is provided.
+	ThinkingLevel llm.ThinkingLevel
+	// ModelCycler rotates model selection across multiple providers. It is
+	// nil when model cycling is not configured.
+	ModelCycler *llm.ModelCycler
 }
 
 // AssembleOption configures AssembleAgent behavior.
@@ -130,6 +137,7 @@ type assembleConfig struct {
 	resumeFlag    bool
 	enableSession bool
 	agentName     string
+	thinkingLevel *llm.ThinkingLevel
 }
 
 // WithMaxTokens sets the compaction token budget.
@@ -150,6 +158,13 @@ func WithSessionPersistence(b bool) AssembleOption {
 // WithAgentName sets the agent's name used in tracing, logging, and session ID.
 func WithAgentName(name string) AssembleOption {
 	return func(c *assembleConfig) { c.agentName = name }
+}
+
+// WithThinkingLevel sets the LLM reasoning depth applied to every Generate/Stream
+// call. When omitted, the level is resolved from config.Agent.Thinking, falling
+// back to ThinkingMedium.
+func WithThinkingLevel(level llm.ThinkingLevel) AssembleOption {
+	return func(c *assembleConfig) { c.thinkingLevel = &level }
 }
 
 // AssembleAgent wires all production components (model wrapping, tool
@@ -183,6 +198,16 @@ func AssembleAgent(
 		}
 	}
 
+	// Resolve thinking level: explicit flag > config.Agent.Thinking > medium.
+	thinkingLevel := llm.ThinkingMedium
+	if ac.thinkingLevel != nil {
+		thinkingLevel = *ac.thinkingLevel
+	} else if rc != nil && rc.Agent.Thinking != "" {
+		if parsed, pErr := llm.ParseThinkingLevel(rc.Agent.Thinking); pErr == nil {
+			thinkingLevel = parsed
+		}
+	}
+
 	logger := slog.Default()
 
 	// Registry: assemble components are also registered here so callers can
@@ -207,6 +232,31 @@ func AssembleAgent(
 		if modelCleanup != nil {
 			modelCleanup()
 		}
+	}
+
+	// 1c. Wire ModelCycler when enabled models are configured. The cycler
+	// wraps the primary model so each Generate/Stream call can be routed to
+	// a different provider according to the configured strategy.
+	var modelCycler *llm.ModelCycler
+	if rc != nil && rc.ModelCycler.Enabled && len(rc.ModelCycler.Models) > 0 {
+		entries := make([]llm.ModelEntry, len(rc.ModelCycler.Models))
+		for i, m := range rc.ModelCycler.Models {
+			entries[i] = llm.ModelEntry{
+				Provider: m.Provider,
+				Model:    m.Model,
+				Weight:   m.Weight,
+			}
+		}
+		modelCycler = llm.NewModelCycler(llm.ModelCyclerConfig{
+			Models:   entries,
+			Strategy: rc.ModelCycler.Strategy,
+		})
+		modelCycler.WithRegistry(llm.NewProviderRegistry())
+		model = modelCycler.WrapModel(model)
+		logger.Info("assemble_model_cycler_enabled",
+			"strategy", rc.ModelCycler.Strategy,
+			"models", len(entries),
+		)
 	}
 
 	// 1b. Wire tracing from config. When tracing.enabled is true, create the
@@ -553,6 +603,7 @@ func AssembleAgent(
 		core.WithExecutionMode(core.ExecutionModeParallel),
 		core.WithTracer(tracer),
 		core.WithSteeringChannel(steerCh),
+		core.WithThinkingConfig(llm.ThinkingConfigForLevel(thinkingLevel)),
 	}
 	if rc != nil && rc.Agent.MaxIterations != 0 {
 		loopOpts = append(loopOpts, core.WithMaxIterations(rc.Agent.MaxIterations))
@@ -805,6 +856,8 @@ func AssembleAgent(
 		GitTool:            gitTool,
 		MemoryStore:        memStore,
 		MemoryExtractor:    memExtractor,
+		ThinkingLevel:      thinkingLevel,
+		ModelCycler:        modelCycler,
 	}, nil
 }
 

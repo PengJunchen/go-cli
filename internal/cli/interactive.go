@@ -16,6 +16,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/compaction"
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mcp"
 	"github.com/pengjunchen/go-cli/internal/session"
 	"github.com/pengjunchen/go-cli/internal/skill"
@@ -72,13 +73,20 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		maxTokensFlag int
 		verboseFlag   bool
 		resumeFlag    bool
+		thinkingFlag  string
 	)
 	fs.StringVar(&modelFlag, "model", "", "model name to use")
 	fs.StringVar(&providerFlag, "provider", "", "provider name to use")
 	fs.IntVar(&maxTokensFlag, "max-tokens", defaultMaxTokens, "compaction token budget")
 	fs.BoolVar(&verboseFlag, "verbose", false, "enable verbose output")
 	fs.BoolVar(&resumeFlag, "resume", false, "resume previous session from store path")
+	fs.StringVar(&thinkingFlag, "thinking", "medium", "thinking level: none|minimal|low|medium|high|max")
 	if err := fs.Parse(args); err != nil {
+		return newUsageError("interactive: %v", err)
+	}
+
+	thinkingLevel, err := llm.ParseThinkingLevel(thinkingFlag)
+	if err != nil {
 		return newUsageError("interactive: %v", err)
 	}
 
@@ -99,6 +107,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		tracing.Attribute{Key: "model", Value: modelName},
 		tracing.Attribute{Key: "provider", Value: providerName},
 		tracing.Attribute{Key: "max_tokens", Value: maxTokensFlag},
+		tracing.Attribute{Key: "thinking", Value: thinkingFlag},
 	)
 	defer func() {
 		span.SetStatus(tracing.SpanStatusOK, "")
@@ -112,6 +121,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		"model", modelName,
 		"max_tokens", maxTokensFlag,
 		"verbose", verboseFlag,
+		"thinking", thinkingFlag,
 	)
 
 	// Assemble the full agent runtime with all production wiring (model
@@ -122,6 +132,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		WithResume(resumeFlag),
 		WithSessionPersistence(true),
 		WithAgentName("interactive"),
+		WithThinkingLevel(thinkingLevel),
 	)
 	if err != nil {
 		span.SetStatus(tracing.SpanStatusError, err.Error())

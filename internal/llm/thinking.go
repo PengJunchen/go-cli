@@ -9,7 +9,11 @@
 // it during request encoding.
 package llm
 
-import "sync"
+import (
+	"fmt"
+	"strings"
+	"sync"
+)
 
 // ThinkingLevel controls LLM reasoning depth.
 type ThinkingLevel int
@@ -153,4 +157,26 @@ func ThinkingFromOpts(o *GenerationOptions) (ThinkingConfig, bool) {
 // avoid leaking memory.
 func DeleteThinking(o *GenerationOptions) {
 	thinkingConfigs.Delete(o)
+}
+
+// ParseThinkingLevel converts a string to a ThinkingLevel. An empty string
+// defaults to ThinkingMedium. Valid values (case-insensitive):
+// none, minimal, low, medium, high, max.
+func ParseThinkingLevel(s string) (ThinkingLevel, error) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "medium":
+		return ThinkingMedium, nil
+	case "none":
+		return ThinkingNone, nil
+	case "minimal":
+		return ThinkingMinimal, nil
+	case "low":
+		return ThinkingLow, nil
+	case "high":
+		return ThinkingHigh, nil
+	case "max":
+		return ThinkingMax, nil
+	default:
+		return ThinkingMedium, fmt.Errorf("llm: invalid thinking level %q (want none|minimal|low|medium|high|max)", s)
+	}
 }
