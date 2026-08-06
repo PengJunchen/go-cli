@@ -1,8 +1,9 @@
 package tui
 
 import (
-	"log/slog"
 	"strings"
+
+	"github.com/pengjunchen/go-cli/internal/tui/highlighters"
 )
 
 // CodeHighlighter applies syntax highlighting to code blocks.
@@ -15,14 +16,23 @@ type CodeHighlighter interface {
 var _ CodeHighlighter = (*DefaultCodeHighlighter)(nil)
 
 // DefaultCodeHighlighter is a zero-dependency ANSI escape coloring highlighter.
-// It colors Go keywords in blue, strings in green, and comments in gray. For
-// other languages it applies basic keyword coloring. When stdout is not a TTY
-// the code is returned unchanged (no ANSI codes).
-type DefaultCodeHighlighter struct{}
+// It colors keywords in blue, strings in green, comments in gray, and numbers
+// in yellow. For recognized languages it uses a LanguageSpec with the proper
+// keyword set, comment styles, and string delimiters. For other languages it
+// falls back to a common keyword set. When stdout is not a TTY the code is
+// returned unchanged (no ANSI codes).
+type DefaultCodeHighlighter struct {
+	languages map[string]highlighters.LanguageSpec
+}
 
-// NewDefaultCodeHighlighter returns a ready-to-use highlighter.
+// NewDefaultCodeHighlighter returns a ready-to-use highlighter preloaded with
+// specs for all supported languages.
 func NewDefaultCodeHighlighter() *DefaultCodeHighlighter {
-	return &DefaultCodeHighlighter{}
+	langs := make(map[string]highlighters.LanguageSpec, len(highlighters.Specs))
+	for k, v := range highlighters.Specs {
+		langs[k] = v
+	}
+	return &DefaultCodeHighlighter{languages: langs}
 }
 
 // ANSI color escape sequences used by the highlighter.
@@ -35,16 +45,8 @@ const (
 	hlReset  = "\033[0m"
 )
 
-// goKeywords is the set of Go language keywords.
-var goKeywords = map[string]bool{
-	"break": true, "case": true, "chan": true, "const": true, "continue": true,
-	"default": true, "defer": true, "else": true, "fallthrough": true, "for": true,
-	"func": true, "go": true, "goto": true, "if": true, "import": true,
-	"interface": true, "map": true, "package": true, "range": true, "return": true,
-	"select": true, "struct": true, "switch": true, "type": true, "var": true,
-}
-
 // commonKeywords is a small set of keywords shared across C-like languages.
+// Used as the fallback when the language is not recognized.
 var commonKeywords = map[string]bool{
 	"if": true, "else": true, "for": true, "while": true, "return": true,
 	"func": true, "function": true, "def": true, "class": true, "import": true,
@@ -57,15 +59,23 @@ var commonKeywords = map[string]bool{
 	"map": true, "range": true, "defer": true,
 }
 
+// fallbackSpec is used when the language is not recognized. It preserves the
+// original behavior: commonKeywords, both "//" and "#" as line comments, and
+// double/single/backtick string delimiters.
+var fallbackSpec = highlighters.LanguageSpec{
+	Keywords:     commonKeywords,
+	CommentLine:  "", // empty triggers legacy dual "//" / "#" handling
+	CommentBlock: [2]string{},
+	StringDelims: []string{"\"", "'", "`"},
+}
+
 // Highlight applies syntax highlighting to code. When stdout is not a TTY the
 // code is returned unchanged.
 func (h *DefaultCodeHighlighter) Highlight(code, lang string) string {
 	if !isStdoutTerminal() {
 		return code
 	}
-	out := h.highlightCode(code, lang)
-	slog.Debug("tui.highlighter.highlight", "lang", lang, "input_bytes", len(code), "output_bytes", len(out))
-	return out
+	return h.highlightCode(code, lang)
 }
 
 // HighlightMarkdown processes markdown text and applies syntax highlighting to
@@ -118,87 +128,134 @@ func (h *DefaultCodeHighlighter) HighlightMarkdown(text string) string {
 	return sb.String()
 }
 
-// highlightCode applies line-by-line syntax highlighting.
+// lookupSpec returns the LanguageSpec for the given language name (case-insensitive)
+// and whether a spec was found.
+func (h *DefaultCodeHighlighter) lookupSpec(lang string) (highlighters.LanguageSpec, bool) {
+	if h.languages != nil {
+		if spec, ok := h.languages[strings.ToLower(lang)]; ok {
+			return spec, true
+		}
+	}
+	return highlighters.LanguageSpec{}, false
+}
+
+// highlightCode applies line-by-line syntax highlighting using the LanguageSpec
+// selected for lang. Unknown languages fall back to commonKeywords.
 func (h *DefaultCodeHighlighter) highlightCode(code, lang string) string {
-	keywords := commonKeywords
-	if strings.EqualFold(lang, "go") || strings.EqualFold(lang, "golang") {
-		keywords = goKeywords
+	spec, ok := h.lookupSpec(lang)
+	if !ok {
+		spec = fallbackSpec
 	}
 
 	var sb strings.Builder
 	lines := strings.Split(code, "\n")
+	inBlockComment := false
 	for i, line := range lines {
 		if i > 0 {
 			sb.WriteString("\n")
 		}
-		sb.WriteString(h.highlightLine(line, keywords))
+		var highlighted string
+		highlighted, inBlockComment = h.highlightLine(line, spec, inBlockComment)
+		sb.WriteString(highlighted)
 	}
 	return sb.String()
 }
 
-// highlightLine applies syntax highlighting to a single line of code.
-func (h *DefaultCodeHighlighter) highlightLine(line string, keywords map[string]bool) string {
+// highlightLine applies syntax highlighting to a single line of code. The
+// inBlock parameter indicates whether the line begins inside an open block
+// comment; the return value reports whether the block comment is still open at
+// the end of the line.
+func (h *DefaultCodeHighlighter) highlightLine(line string, spec highlighters.LanguageSpec, inBlock bool) (string, bool) {
 	var sb strings.Builder
 	i := 0
+
+	blockOpen := spec.CommentBlock[0]
+	blockClose := spec.CommentBlock[1]
+	hasBlockComment := blockOpen != "" && blockClose != ""
+
+	// If we are inside a block comment, look for the closing delimiter.
+	if inBlock {
+		idx := strings.Index(line, blockClose)
+		if idx < 0 {
+			// Entire line stays inside the block comment.
+			if line != "" {
+				return hlGray + line + hlReset, true
+			}
+			return "", true
+		}
+		end := idx + len(blockClose)
+		sb.WriteString(hlGray + line[:end] + hlReset)
+		i = end
+		inBlock = false
+	}
+
 	for i < len(line) {
-		// Full-line comment (// or #).
+		// Full-line comment (only checked at the start of content).
 		if i == 0 {
 			trimmed := strings.TrimLeft(line, " \t")
-			if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "#") {
-				return hlGray + line + hlReset
+			if spec.CommentLine != "" {
+				if strings.HasPrefix(trimmed, spec.CommentLine) {
+					return hlGray + line + hlReset, inBlock
+				}
+			} else {
+				// Fallback: check both // and #.
+				if strings.HasPrefix(trimmed, "//") || strings.HasPrefix(trimmed, "#") {
+					return hlGray + line + hlReset, inBlock
+				}
 			}
 		}
 
-		// Inline // comment.
-		if i+1 < len(line) && line[i] == '/' && line[i+1] == '/' {
-			sb.WriteString(hlGray + line[i:] + hlReset)
-			return sb.String()
+		// Inline line comment.
+		if spec.CommentLine != "" {
+			cl := spec.CommentLine
+			if i+len(cl) <= len(line) && line[i:i+len(cl)] == cl {
+				sb.WriteString(hlGray + line[i:] + hlReset)
+				return sb.String(), inBlock
+			}
+		} else {
+			// Fallback: inline // only.
+			if i+1 < len(line) && line[i] == '/' && line[i+1] == '/' {
+				sb.WriteString(hlGray + line[i:] + hlReset)
+				return sb.String(), inBlock
+			}
+		}
+
+		// Block comment start.
+		if hasBlockComment && i+len(blockOpen) <= len(line) {
+			if line[i:i+len(blockOpen)] == blockOpen {
+				rest := line[i+len(blockOpen):]
+				closeIdx := strings.Index(rest, blockClose)
+				if closeIdx >= 0 {
+					end := i + len(blockOpen) + closeIdx + len(blockClose)
+					sb.WriteString(hlGray + line[i:end] + hlReset)
+					i = end
+					continue
+				}
+				// No close on this line — rest of line is gray.
+				sb.WriteString(hlGray + line[i:] + hlReset)
+				return sb.String(), true
+			}
 		}
 
 		ch := line[i]
 
-		// Double-quoted string.
-		if ch == '"' {
+		// String literal (driven by spec.StringDelims).
+		if isStringDelim(ch, spec.StringDelims) {
 			start := i
 			i++
-			for i < len(line) && line[i] != '"' {
-				if line[i] == '\\' && i+1 < len(line) {
-					i += 2
-					continue
+			if ch == '`' {
+				// Raw string — no escape processing.
+				for i < len(line) && line[i] != ch {
+					i++
 				}
-				i++
-			}
-			if i < len(line) {
-				i++ // include closing quote
-			}
-			sb.WriteString(hlGreen + line[start:i] + hlReset)
-			continue
-		}
-
-		// Backtick string (Go raw string).
-		if ch == '`' {
-			start := i
-			i++
-			for i < len(line) && line[i] != '`' {
-				i++
-			}
-			if i < len(line) {
-				i++ // include closing backtick
-			}
-			sb.WriteString(hlGreen + line[start:i] + hlReset)
-			continue
-		}
-
-		// Single-quoted string/char.
-		if ch == '\'' {
-			start := i
-			i++
-			for i < len(line) && line[i] != '\'' {
-				if line[i] == '\\' && i+1 < len(line) {
-					i += 2
-					continue
+			} else {
+				for i < len(line) && line[i] != ch {
+					if line[i] == '\\' && i+1 < len(line) {
+						i += 2
+						continue
+					}
+					i++
 				}
-				i++
 			}
 			if i < len(line) {
 				i++ // include closing quote
@@ -214,7 +271,7 @@ func (h *DefaultCodeHighlighter) highlightLine(line string, keywords map[string]
 				i++
 			}
 			word := line[start:i]
-			if keywords[word] {
+			if isKeyword(word, spec) {
 				sb.WriteString(hlBlue + word + hlReset)
 			} else {
 				sb.WriteString(word)
@@ -235,7 +292,30 @@ func (h *DefaultCodeHighlighter) highlightLine(line string, keywords map[string]
 		sb.WriteByte(ch)
 		i++
 	}
-	return sb.String()
+	return sb.String(), inBlock
+}
+
+// isKeyword reports whether word is a keyword in the given spec, honoring the
+// CaseInsensitive flag.
+func isKeyword(word string, spec highlighters.LanguageSpec) bool {
+	if spec.Keywords == nil {
+		return false
+	}
+	if spec.CaseInsensitive {
+		return spec.Keywords[strings.ToUpper(word)]
+	}
+	return spec.Keywords[word]
+}
+
+// isStringDelim reports whether ch matches any of the string delimiter
+// characters in delims.
+func isStringDelim(ch byte, delims []string) bool {
+	for _, d := range delims {
+		if len(d) > 0 && d[0] == ch {
+			return true
+		}
+	}
+	return false
 }
 
 // isAlphaByte reports whether b is an ASCII letter.
