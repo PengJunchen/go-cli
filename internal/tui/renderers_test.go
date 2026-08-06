@@ -10,7 +10,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// allRenderers enumerates exactly the 24 required renderer types.
+// allRenderers enumerates every default renderer type (BoxRenderer included;
+// SpinnerRenderer is omitted because it is a standalone component, not a
+// Renderer).
 var allRenderers = func() []Renderer {
 	return []Renderer{
 		MarkdownRenderer{}, CodeRenderer{}, TableRenderer{}, DiffRenderer{},
@@ -19,18 +21,22 @@ var allRenderers = func() []Renderer {
 		SystemRenderer{}, UserRenderer{}, AssistantRenderer{}, ApprovalRenderer{},
 		PromptRenderer{}, CompactionRenderer{}, StreamingRenderer{}, StreamingCodeRenderer{},
 		StreamingThinkingRenderer{}, BlankRenderer{}, SeparatorRenderer{}, StatusRenderer{},
+		BoxRenderer{},
 	}
 }()
 
-func TestTwentyFourRenderers(t *testing.T) {
-	require.Len(t, allRenderers, 24)
-	assert.Len(t, contentTypes, 24)
+func TestAllRenderersCount(t *testing.T) {
+	require.Len(t, allRenderers, 25)
+	assert.Len(t, contentTypes, 26)
 }
 
 func TestDefaultRegistryRegistersAll(t *testing.T) {
 	reg := NewDefaultRegistry()
-	require.Len(t, reg.List(), 24)
+	require.Len(t, reg.List(), 25)
 	for _, ct := range contentTypes {
+		if ct == ContentTypeSpinner {
+			continue // SpinnerRenderer is a standalone component, not a Renderer
+		}
 		r, ok := reg.Get(ct)
 		require.True(t, ok, "content type %q should be registered", ct)
 		require.NotNil(t, r)
@@ -58,6 +64,9 @@ func TestRegistryGetMissing(t *testing.T) {
 
 func TestRendererSupportsOwnType(t *testing.T) {
 	for i, ct := range contentTypes {
+		if ct == ContentTypeSpinner {
+			continue // SpinnerRenderer is a standalone component, not a Renderer
+		}
 		r, ok := NewDefaultRegistry().Get(ct)
 		require.True(t, ok, "missing type %q at index %d", ct, i)
 		assert.True(t, r.Supports(ct), "%s should support %s", r.Name(), ct)
@@ -70,6 +79,9 @@ func TestEveryRendererProducesOutput(t *testing.T) {
 	opts := RenderOpts{Theme: DarkTheme{}, Width: 60}
 
 	for _, ct := range contentTypes {
+		if ct == ContentTypeSpinner {
+			continue // SpinnerRenderer is a standalone component, not a Renderer
+		}
 		r, _ := reg.Get(ct)
 		out := r.Render(ctx, "sample", opts)
 		if ct == ContentTypeBlank {
@@ -99,8 +111,8 @@ func TestProgressRendererWidth(t *testing.T) {
 	p := ProgressRenderer{}
 	// 0.5 on width 10 yields 5 filled cells.
 	out := p.Render(context.Background(), "0.5", RenderOpts{Theme: DarkTheme{}, Width: 10})
-	assert.Contains(t, out, strings.Repeat("=", 5))
-	assert.Contains(t, out, strings.Repeat("-", 5))
+	assert.Contains(t, out, strings.Repeat("█", 5))
+	assert.Contains(t, out, strings.Repeat("░", 5))
 }
 
 func TestSeparatorRendererSpan(t *testing.T) {
@@ -126,4 +138,60 @@ func TestStreamingRenderersImplementMarker(t *testing.T) {
 	// Non-streaming renderers are not markers.
 	_, ok := Renderer(MarkdownRenderer{}).(streamMarker)
 	assert.False(t, ok)
+}
+
+// ---------- enhanced progress tests ----------
+
+func TestProgressRendererPercentageDisplay(t *testing.T) {
+	p := ProgressRenderer{}
+	cases := []struct {
+		content string
+		wantPct string
+	}{
+		{"0", "0%"},
+		{"0.5", "50%"},
+		{"1", "100%"},
+		{"0.25", "25%"},
+		{"bananas", "0%"},
+	}
+	for _, tc := range cases {
+		out := p.Render(context.Background(), tc.content, RenderOpts{Theme: DarkTheme{}, Width: 10})
+		assert.Contains(t, out, tc.wantPct, "progress %q should show %s", tc.content, tc.wantPct)
+	}
+}
+
+func TestProgressRendererColorTiers(t *testing.T) {
+	p := ProgressRenderer{}
+	ctx := context.Background()
+	opts := RenderOpts{Theme: DarkTheme{}, Width: 20}
+
+	// <50% → green (Success): DarkTheme Success fg=32
+	out := p.Render(ctx, "0.3", opts)
+	assert.Contains(t, out, "\x1b[32", "30%% should use green tier")
+
+	// 50%-79% → yellow (Warning): DarkTheme Warning fg=33
+	out = p.Render(ctx, "0.6", opts)
+	assert.Contains(t, out, "\x1b[33", "60%% should use yellow tier")
+
+	// >=80% → red (Error): DarkTheme Error fg=31
+	out = p.Render(ctx, "0.9", opts)
+	assert.Contains(t, out, "\x1b[31", "90%% should use red tier")
+
+	// exactly 80% → red
+	out = p.Render(ctx, "0.8", opts)
+	assert.Contains(t, out, "\x1b[31", "80%% should use red tier")
+
+	// exactly 50% → yellow
+	out = p.Render(ctx, "0.5", opts)
+	assert.Contains(t, out, "\x1b[33", "50%% should use yellow tier")
+}
+
+func TestProgressRendererUsesBlockChars(t *testing.T) {
+	p := ProgressRenderer{}
+	out := p.Render(context.Background(), "0.5", RenderOpts{Theme: DarkTheme{}, Width: 10})
+	assert.Contains(t, out, "█")
+	assert.Contains(t, out, "░")
+	// Old characters should not appear.
+	assert.NotContains(t, out, "=")
+	assert.NotContains(t, out, "-")
 }

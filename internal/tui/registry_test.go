@@ -71,7 +71,7 @@ func TestRendererRegistryRegisterOverwrites(t *testing.T) {
 func TestRendererRegistryListSnapshot(t *testing.T) {
 	reg := NewDefaultRegistry()
 	list := reg.List()
-	require.Len(t, list, 24)
+	require.Len(t, list, 25)
 
 	// Mutating the returned snapshot must not affect the registry.
 	list[ContentTypeCode] = NewMockRenderer("mutated", ContentTypeCode, "x")
@@ -134,12 +134,12 @@ func TestRendererRegistryConcurrentDefault(t *testing.T) {
 }
 
 // TestRegisterDefaultRenderersIdempotent verifies registering the built-ins
-// twice is harmless and still yields exactly 24 entries.
+// twice is harmless and still yields exactly 25 entries.
 func TestRegisterDefaultRenderersIdempotent(t *testing.T) {
 	reg := NewRendererRegistry()
 	RegisterDefaultRenderers(reg)
 	RegisterDefaultRenderers(reg)
-	require.Len(t, reg.List(), 24)
+	require.Len(t, reg.List(), 25)
 }
 
 // TestNewDefaultRegistryFullyPopulated verifies the default registry indexes
@@ -147,6 +147,9 @@ func TestRegisterDefaultRenderersIdempotent(t *testing.T) {
 func TestNewDefaultRegistryFullyPopulated(t *testing.T) {
 	reg := NewDefaultRegistry()
 	for _, ct := range contentTypes {
+		if ct == ContentTypeSpinner {
+			continue // SpinnerRenderer is a standalone component, not a Renderer
+		}
 		r, ok := reg.Get(ct)
 		require.True(t, ok, "%q missing", ct)
 		require.NotNil(t, r)

@@ -15,6 +15,9 @@ func TestAllRenderersEmptyContent(t *testing.T) {
 	ctx := context.Background()
 	reg := NewDefaultRegistry()
 	for _, ct := range contentTypes {
+		if ct == ContentTypeSpinner {
+			continue // SpinnerRenderer is a standalone component, not a Renderer
+		}
 		r, _ := reg.Get(ct)
 		out := r.Render(ctx, "", RenderOpts{Theme: DarkTheme{}, Width: 0})
 		_ = out // must not panic
@@ -28,6 +31,9 @@ func TestAllRenderersMultiByteContent(t *testing.T) {
 	reg := NewDefaultRegistry()
 	payload := "héllo wörld 世界 🚀"
 	for _, ct := range contentTypes {
+		if ct == ContentTypeSpinner {
+			continue // SpinnerRenderer is a standalone component, not a Renderer
+		}
 		r, _ := reg.Get(ct)
 		// Progress and separator renderers do not reproduce the raw payload, and
 		// blank emits nothing.
@@ -102,13 +108,13 @@ func TestDiffRendererEmptyContent(t *testing.T) {
 	assert.Equal(t, "\x1b[37m\x1b[0m", out)
 }
 
-// TestProgressRendererAlwaysExactlyWidth verifies the visible bar (== and --)
+// TestProgressRendererAlwaysExactlyWidth verifies the visible bar (█ and ░)
 // always sums to the requested width for every fraction.
 func TestProgressRendererAlwaysExactlyWidth(t *testing.T) {
 	p := ProgressRenderer{}
 	for _, frac := range []string{"0", "0.1", "0.5", "0.9", "1"} {
 		out := p.Render(context.Background(), frac, RenderOpts{Theme: DarkTheme{}, Width: 12})
-		assert.Equal(t, strings.Count(out, "=")+strings.Count(out, "-"), 12,
+		assert.Equal(t, strings.Count(out, "█")+strings.Count(out, "░"), 12,
 			"bar for %q should span exactly 12 cells", frac)
 	}
 }

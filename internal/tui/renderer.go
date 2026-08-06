@@ -59,6 +59,8 @@ const (
 	ContentTypeBlank          = "blank"
 	ContentTypeSeparator      = "separator"
 	ContentTypeStatus         = "status"
+	ContentTypeBox            = "box"
+	ContentTypeSpinner        = "spinner"
 )
 
 // contentTypes lists every content type the TUI layer supports. The order is
@@ -70,7 +72,7 @@ var contentTypes = []string{
 	ContentTypeSystem, ContentTypeUser, ContentTypeAssistant, ContentTypeApproval,
 	ContentTypePrompt, ContentTypeCompaction, ContentTypeStreaming,
 	ContentTypeStreamingCode, ContentTypeStreamingThink, ContentTypeBlank,
-	ContentTypeSeparator, ContentTypeStatus,
+	ContentTypeSeparator, ContentTypeStatus, ContentTypeBox, ContentTypeSpinner,
 }
 
 // DefaultContentType is the fallback content type used when an event carries an
@@ -104,7 +106,7 @@ func NewRendererRegistry() *RendererRegistry {
 	return &RendererRegistry{byType: make(map[string]Renderer)}
 }
 
-// NewDefaultRegistry returns a registry pre-populated with all 24 built-in
+// NewDefaultRegistry returns a registry pre-populated with all built-in
 // renderers.
 func NewDefaultRegistry() *RendererRegistry {
 	reg := NewRendererRegistry()
@@ -144,7 +146,7 @@ func (r *RendererRegistry) List() map[string]Renderer {
 	return out
 }
 
-// RegisterDefaultRenderers registers all 24 built-in renderers into the given
+// RegisterDefaultRenderers registers all built-in renderers into the given
 // registry.
 func RegisterDefaultRenderers(reg *RendererRegistry) {
 	reg.Register(MarkdownRenderer{})
@@ -171,4 +173,5 @@ func RegisterDefaultRenderers(reg *RendererRegistry) {
 	reg.Register(BlankRenderer{})
 	reg.Register(SeparatorRenderer{})
 	reg.Register(StatusRenderer{})
+	reg.Register(BoxRenderer{})
 }

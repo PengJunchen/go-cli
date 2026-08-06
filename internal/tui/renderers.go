@@ -259,13 +259,16 @@ func (ThinkingRenderer) Supports(ct string) bool { return ct == ContentTypeThink
 
 // ---------- progress ----------
 
-// ProgressRenderer renders a progress bar bounded by the render width.
+// ProgressRenderer renders a progress bar bounded by the render width. The bar
+// uses filled (█) and empty (░) cells, appends a percentage readout, and
+// selects the bar color by tier: green below 50 %, yellow from 50 % to 79 %,
+// red at 80 % and above.
 type ProgressRenderer struct{}
 
 var _ Renderer = (*ProgressRenderer)(nil)
 
 // Render draws a progress bar; content is expected to be a float value in
-// [0,1] as text. Non-numeric content is rendered verbatim in the primary style.
+// [0,1] as text. Non-numeric content is rendered as 0 %.
 func (ProgressRenderer) Render(ctx context.Context, content string, opts RenderOpts) string {
 	theme := renderTheme(opts)
 	width := opts.Width
@@ -273,14 +276,27 @@ func (ProgressRenderer) Render(ctx context.Context, content string, opts RenderO
 		width = 40
 	}
 	filled := progressFrac(content, width)
-	bar := strings.Repeat("=", filled) + strings.Repeat("-", width-filled)
-	out := theme.Primary().Bold(true).Render("[" + bar + "]")
+	pct := progressPct(content)
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+	style := progressStyle(theme, pct)
+	out := style.Bold(true).Render("["+bar+"]") + " " + strconv.Itoa(pct) + "%"
 	logRender(ctx, "progress", opts.ContentType, len(out))
 	return out
 }
 
 // progressFrac converts textual progress into a filled-cell count.
 func progressFrac(content string, width int) int {
+	return int(progressValue(content) * float64(width))
+}
+
+// progressPct converts textual progress into an integer percentage [0,100].
+func progressPct(content string) int {
+	return int(progressValue(content) * 100)
+}
+
+// progressValue parses a float in [0,1] from content, clamping out-of-range
+// values and returning 0 for non-numeric input.
+func progressValue(content string) float64 {
 	val, err := strconv.ParseFloat(content, 64)
 	if err != nil {
 		return 0
@@ -291,7 +307,19 @@ func progressFrac(content string, width int) int {
 	if val < 0 {
 		val = 0
 	}
-	return int(val * float64(width))
+	return val
+}
+
+// progressStyle selects the bar color by percentage tier.
+func progressStyle(theme Theme, pct int) Style {
+	switch {
+	case pct < 50:
+		return theme.Success()
+	case pct < 80:
+		return theme.Warning()
+	default:
+		return theme.Error()
+	}
 }
 
 // Name identifies the renderer.
