@@ -3,6 +3,7 @@
 package tools
 
 import (
+	"log/slog"
 	"os/exec"
 	"syscall"
 )
@@ -16,15 +17,17 @@ type rlimitSnapshot struct {
 // saveRlimits records the current process's RLIMIT_AS.
 func saveRlimits() rlimitSnapshot {
 	var s rlimitSnapshot
-	// Best-effort: rlimit may be unavailable on some kernels.
-	_ = syscall.Getrlimit(syscall.RLIMIT_AS, &s.as)
+	if err := syscall.Getrlimit(syscall.RLIMIT_AS, &s.as); err != nil {
+		slog.Debug("rlimit: getrlimit failed", "error", err)
+	}
 	return s
 }
 
 // restoreRlimits restores the saved RLIMIT_AS to the current process.
 func restoreRlimits(s rlimitSnapshot) {
-	// Best-effort: restoration failure is non-fatal.
-	_ = syscall.Setrlimit(syscall.RLIMIT_AS, &s.as)
+	if err := syscall.Setrlimit(syscall.RLIMIT_AS, &s.as); err != nil {
+		slog.Debug("rlimit: setrlimit restore failed", "error", err)
+	}
 }
 
 // applyRlimits sets memory resource limits on the current process so the
@@ -36,9 +39,10 @@ func restoreRlimits(s rlimitSnapshot) {
 // parent process. CPU time is bounded by the context timeout instead.
 func applyRlimits(_ *exec.Cmd, limits ResourceLimits) {
 	if limits.MaxMemory > 0 {
-		// Best-effort: rlimit may be unavailable or insufficient permissions.
-		_ = syscall.Setrlimit(syscall.RLIMIT_AS, &syscall.Rlimit{
+		if err := syscall.Setrlimit(syscall.RLIMIT_AS, &syscall.Rlimit{
 			Cur: uint64(limits.MaxMemory), Max: uint64(limits.MaxMemory),
-		})
+		}); err != nil {
+			slog.Debug("rlimit: setrlimit apply failed", "error", err)
+		}
 	}
 }
