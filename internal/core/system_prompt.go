@@ -24,6 +24,8 @@ type ContextFile struct {
 type SkillInfo struct {
 	// Name is the unique name of the skill.
 	Name string
+	// Description summarizes what the skill does and when to use it.
+	Description string
 	// Category is the coarse grouping the skill belongs to.
 	Category string
 }
@@ -145,7 +147,14 @@ func (b *DefaultSystemPromptBuilder) Build(_ context.Context, opts SystemPromptO
 	if len(opts.Skills) > 0 {
 		sb.WriteString("\n\n<skills>")
 		for _, s := range opts.Skills {
-			sb.WriteString(fmt.Sprintf(`<skill name="%s" category="%s"/>`, s.Name, s.Category))
+			sb.WriteString(fmt.Sprintf(`<skill name="%s"`, s.Name))
+			if s.Category != "" {
+				sb.WriteString(fmt.Sprintf(` category="%s"`, s.Category))
+			}
+			if s.Description != "" {
+				sb.WriteString(fmt.Sprintf(` description=%q`, s.Description))
+			}
+			sb.WriteString(`/>`)
 		}
 		sb.WriteString("</skills>")
 	}
