@@ -279,9 +279,17 @@ type ToolOutputRenderer struct{}
 
 var _ Renderer = (*ToolOutputRenderer)(nil)
 
-// Render styles streaming tool output content.
+// Render styles streaming tool output content. When opts.Stream is "stderr"
+// the output is rendered in the error style with an [err] label; otherwise
+// (stdout or empty) it uses the foreground style with an [output] label.
 func (ToolOutputRenderer) Render(ctx context.Context, content string, opts RenderOpts) string {
 	theme := renderTheme(opts)
+	if opts.Stream == "stderr" {
+		label := theme.Error().Bold(true).Render("[err]")
+		out := label + " " + theme.Error().Render(wrapWidth(content, opts.Width))
+		logRender(ctx, "tool_output", opts.ContentType, len(out))
+		return out
+	}
 	label := theme.Fg().Bold(true).Render("[output]")
 	out := label + " " + theme.Fg().Render(wrapWidth(content, opts.Width))
 	logRender(ctx, "tool_output", opts.ContentType, len(out))

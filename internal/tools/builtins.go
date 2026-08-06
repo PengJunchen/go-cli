@@ -43,7 +43,8 @@ func WithRegisteredResourceLimits(limits ResourceLimits) RegisterDefaultsOption 
 }
 
 // WithRegisteredGitTool wires a GitTool into the git tools (diff, status,
-// commit, log, branch, checkout, blame, push) registered by RegisterDefaults.
+// commit, log, branch, checkout, blame, push, create_branch, merge, stash,
+// stash_pop, reset, revert, fetch, pull, remote) registered by RegisterDefaults.
 func WithRegisteredGitTool(git GitTool) RegisterDefaultsOption {
 	return func(c *registerDefaultsConfig) { c.gitTool = git }
 }
@@ -108,7 +109,7 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDef
 
 	defs := []ToolDefinition{
 		NewReadTool(),
-		NewBashTool(bashOpts...),
+		NewStreamingBashTool(bashOpts...),
 		NewWriteTool(writeOpts...),
 		NewEditFileTool(editOpts...),
 		NewGrepTool(),
@@ -127,6 +128,15 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDef
 			NewGitCheckoutTool(cfg.gitTool),
 			NewGitBlameTool(cfg.gitTool),
 			NewGitPushTool(cfg.gitTool),
+			NewGitCreateBranchTool(cfg.gitTool),
+			NewGitMergeTool(cfg.gitTool),
+			NewGitStashTool(cfg.gitTool),
+			NewGitStashPopTool(cfg.gitTool),
+			NewGitResetTool(cfg.gitTool),
+			NewGitRevertTool(cfg.gitTool),
+			NewGitFetchTool(cfg.gitTool),
+			NewGitPullTool(cfg.gitTool),
+			NewGitRemoteTool(cfg.gitTool),
 		)
 	}
 

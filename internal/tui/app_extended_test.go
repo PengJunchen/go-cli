@@ -174,3 +174,52 @@ func TestAppSendAndEventsBothConsumed(t *testing.T) {
 	app.Quit()
 	<-runErr
 }
+
+// TestAppToolOutputAppendsToToolCall verifies that tool_output events append
+// to the last tool_call entry instead of creating a new top-level entry.
+func TestAppToolOutputAppendsToToolCall(t *testing.T) {
+	app := NewBubbleteaApp(nil)
+
+	app.handleEvent(context.Background(), AgentEvent{
+		ContentType: ContentTypeToolCall,
+		Content:     "bash echo hi",
+	})
+	app.handleEvent(context.Background(), AgentEvent{
+		ContentType: ContentTypeToolOutput,
+		Content:     "line one",
+		Stream:      "stdout",
+	})
+	app.handleEvent(context.Background(), AgentEvent{
+		ContentType: ContentTypeToolOutput,
+		Content:     "line two",
+		Stream:      "stderr",
+	})
+
+	// The accordion should have exactly one top-level entry (the tool_call).
+	require.Equal(t, 1, app.accordion.Len())
+	entries := app.accordion.Entries()
+	require.Len(t, entries, 1)
+	full := entries[0].Full
+	assert.Contains(t, full, "bash echo hi")
+	assert.Contains(t, full, "line one")
+	assert.Contains(t, full, "[output]")
+	assert.Contains(t, full, "line two")
+	assert.Contains(t, full, "[err]")
+}
+
+// TestAppToolOutputNoToolCallFallsBack verifies that a tool_output event with
+// no preceding tool_call entry falls through to creating a new entry.
+func TestAppToolOutputNoToolCallFallsBack(t *testing.T) {
+	app := NewBubbleteaApp(nil)
+
+	app.handleEvent(context.Background(), AgentEvent{
+		ContentType: ContentTypeToolOutput,
+		Content:     "orphan output",
+		Stream:      "stdout",
+	})
+
+	require.Equal(t, 1, app.accordion.Len())
+	entries := app.accordion.Entries()
+	require.Len(t, entries, 1)
+	assert.Contains(t, entries[0].Full, "orphan output")
+}
