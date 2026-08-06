@@ -41,6 +41,27 @@ type AgentEvent struct {
 	// fragment of the assistant's response (one or more tokens from a
 	// streaming LLM). The TUI accumulates these into the full message.
 	Incremental bool
+	// TokenUsage carries token consumption data for "token_usage" events.
+	// It is nil for all other event kinds.
+	TokenUsage *TokenUsage
+	// ToolCallID associates streaming output with the originating tool
+	// call. Populated for "tool_output" events; empty for other kinds.
+	ToolCallID string
+	// Stream identifies the output source for "tool_output" events:
+	// "stdout" or "stderr". Empty for other event kinds.
+	Stream string
+}
+
+// TokenUsage carries token consumption and cost data for a token_usage event.
+type TokenUsage struct {
+	// InputTokens is the total prompt tokens consumed so far.
+	InputTokens int
+	// OutputTokens is the total completion tokens consumed so far.
+	OutputTokens int
+	// MaxTokens is the token budget for the session.
+	MaxTokens int
+	// Cost is the accumulated monetary cost in USD.
+	Cost float64
 }
 
 // String returns a time-stamped representation of the event and logs it.

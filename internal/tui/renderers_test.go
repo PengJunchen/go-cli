@@ -16,7 +16,7 @@ import (
 var allRenderers = func() []Renderer {
 	return []Renderer{
 		MarkdownRenderer{}, CodeRenderer{}, TableRenderer{}, DiffRenderer{},
-		ErrorRenderer{}, ToolCallRenderer{}, ToolResultRenderer{}, ThinkingRenderer{},
+		ErrorRenderer{}, ToolCallRenderer{}, ToolResultRenderer{}, ToolOutputRenderer{}, ThinkingRenderer{},
 		ProgressRenderer{}, FileTreeRenderer{}, ImageRenderer{}, LinkRenderer{},
 		SystemRenderer{}, UserRenderer{}, AssistantRenderer{}, ApprovalRenderer{},
 		PromptRenderer{}, CompactionRenderer{}, StreamingRenderer{}, StreamingCodeRenderer{},
@@ -26,13 +26,13 @@ var allRenderers = func() []Renderer {
 }()
 
 func TestAllRenderersCount(t *testing.T) {
-	require.Len(t, allRenderers, 25)
-	assert.Len(t, contentTypes, 26)
+	require.Len(t, allRenderers, 26)
+	assert.Len(t, contentTypes, 27)
 }
 
 func TestDefaultRegistryRegistersAll(t *testing.T) {
 	reg := NewDefaultRegistry()
-	require.Len(t, reg.List(), 25)
+	require.Len(t, reg.List(), 26)
 	for _, ct := range contentTypes {
 		if ct == ContentTypeSpinner {
 			continue // SpinnerRenderer is a standalone component, not a Renderer

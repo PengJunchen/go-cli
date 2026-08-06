@@ -39,6 +39,12 @@ type AgentEvent struct {
 	// TokenUsage carries token consumption data for "token_usage" events.
 	// It is nil for all other event types.
 	TokenUsage *TokenUsageData
+	// ToolCallID associates streaming output with the originating tool
+	// call. Populated for tool_output events; empty for other types.
+	ToolCallID string
+	// Stream identifies the output source for tool_output events: "stdout"
+	// or "stderr".
+	Stream string
 }
 
 // TokenUsageData mirrors core.TokenUsage for the TUI layer.

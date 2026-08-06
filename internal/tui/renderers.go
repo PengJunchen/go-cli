@@ -270,6 +270,30 @@ func (ToolResultRenderer) Name() string { return "tool_result" }
 // Supports reports whether the renderer handles the content type.
 func (ToolResultRenderer) Supports(ct string) bool { return ct == ContentTypeToolResult }
 
+// ---------- tool_output ----------
+
+// ToolOutputRenderer renders a line of streaming tool output. It is similar
+// to ToolResultRenderer but uses a distinct label so the user can distinguish
+// real-time output from a final result.
+type ToolOutputRenderer struct{}
+
+var _ Renderer = (*ToolOutputRenderer)(nil)
+
+// Render styles streaming tool output content.
+func (ToolOutputRenderer) Render(ctx context.Context, content string, opts RenderOpts) string {
+	theme := renderTheme(opts)
+	label := theme.Fg().Bold(true).Render("[output]")
+	out := label + " " + theme.Fg().Render(wrapWidth(content, opts.Width))
+	logRender(ctx, "tool_output", opts.ContentType, len(out))
+	return out
+}
+
+// Name identifies the renderer.
+func (ToolOutputRenderer) Name() string { return ContentTypeToolOutput }
+
+// Supports reports whether the renderer handles the content type.
+func (ToolOutputRenderer) Supports(ct string) bool { return ct == ContentTypeToolOutput }
+
 // ---------- thinking ----------
 
 // ThinkingRenderer renders internal reasoning in the faint/italic style.
