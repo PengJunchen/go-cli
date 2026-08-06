@@ -47,7 +47,7 @@ jobs:
           goimports -l .
           test -z "$(gofmt -s -l .)" && test -z "$(goimports -l .)"
 
-      - uses: golangci/golangci-lint-action@v7
+      - uses: golangci/golangci-lint-action@v8
         with:
           version: v2.12.2
 
