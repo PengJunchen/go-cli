@@ -138,6 +138,12 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 			// fallback to empty tree on error
 			sessionTree = session.NewDefaultSessionTree()
 		}
+		// Wire Git-aware branch linkage when enabled in config.
+		if rc != nil && rc.Session.GitAwareBranch && assembly.GitTool != nil {
+			if dt, ok := sessionTree.(*session.DefaultSessionTree); ok {
+				dt.SetGitBranchSwitcher(assembly.GitTool)
+			}
+		}
 		sessionHandler = session.NewSessionSlashHandler(sessionTree, assembly.SessionStore)
 	}
 	slashCtx := slashContext{
@@ -154,6 +160,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		fileTracker:    assembly.FileTracker,
 		diffGenerator:  assembly.DiffGenerator,
 		planCtrl:       assembly.PlanCtrl,
+		memoryStore:    assembly.MemoryStore,
 	}
 
 	entryCounter := len(assembly.Agent.Messages())
@@ -214,24 +221,41 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		interrupter := NewInterruptHandler(cancelTurn)
 		interrupter.Start(in)
 
-		stream, err := assembly.Harness.Submit(turnCtx, line)
-		if err != nil {
-			cancelTurn()
-			interrupter.Stop()
-			turnSpan.SetStatus(tracing.SpanStatusError, err.Error())
-			turnSpan.End()
-			fmt.Fprintf(c.out, "Error: %v\n", err) //nolint:errcheck
-			continue
-		}
+		// Create an EventStream for this turn and wire it to the TurnRunner
+		// so events are streamed in real time to the TUI. RunTurn is
+		// blocking, so it runs in a goroutine that closes the stream when
+		// the turn finishes.
+		stream := core.NewEventStream(64)
+		assembly.TurnRunner.SetStream(stream)
 
-		// Bridge core events to TUI events and render. The BubbleteaApp is the
-		// sole consumer of the tuiEvents channel; when the bridge channel
-		// closes the app's Run loop returns and closes its Done channel.
+		var turnResult core.Result
+		var turnErr error
+		turnDone := make(chan struct{})
+		go func() {
+			defer close(turnDone)
+			turnResult, turnErr = assembly.TurnRunner.RunTurn(turnCtx, core.Submission{
+				Type:    core.SubmissionUserMessage,
+				Content: line,
+			})
+
+			// Emit a token_usage event from CostTracker and estimator data
+			// so the TUI status bar updates before the stream closes.
+			emitTokenUsageEvent(stream, assembly)
+
+			// Set the result and send a done event, matching the harness
+			// behavior so downstream consumers (bridge, TUI) observe
+			// completion correctly.
+			stream.SetResult(core.AgentMessage{Role: "assistant", Content: turnResult.Message}, turnErr)
+			if turnErr == nil {
+				_ = stream.Send(core.AgentEvent{Kind: "done", Content: turnResult.Message, Timestamp: time.Now()}) //nolint:errcheck
+			}
+			stream.Close()
+		}()
+
+		// Bridge core events to TUI events and render.
 		tuiEvents := tui.BridgeEvents(turnCtx, stream)
 
 		// Streaming output: each view mutation re-renders to the terminal.
-		// In TTY mode we use ANSI cursor reset + clear-line to repaint in
-		// place; in pipe mode we emit the latest view line-by-line.
 		var lastLineCount int
 		isTTY := tui.IsTerminal()
 		tsp := tui.NewDefaultTerminalSizeProvider()
@@ -243,13 +267,38 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 					if lastLineCount > 0 {
 						fmt.Fprintf(c.out, "\033[%dA", lastLineCount) //nolint:errcheck
 					}
-					fmt.Fprint(c.out, "\033[J") //nolint:errcheck
-					// In raw mode \n only moves down; \r\n returns to column 0.
+					fmt.Fprint(c.out, "\033[J")                               //nolint:errcheck
 					fmt.Fprint(c.out, strings.ReplaceAll(view, "\n", "\r\n")) //nolint:errcheck
 					fmt.Fprint(c.out, "\r\n")                                 //nolint:errcheck
 					lastLineCount = countViewVisualLines(view, termWidth)
 				} else {
 					fmt.Fprintln(c.out, view) //nolint:errcheck
+				}
+			}),
+			tui.WithSteerCallback(func(input string) {
+				turnID := assembly.TurnRunner.RunningTurnID()
+				if turnID != "" {
+					if steerErr := assembly.TurnRunner.Steer(turnCtx, turnID, input); steerErr != nil {
+						logger.Warn("cli_interactive_steer_callback_failed", "err", steerErr)
+					}
+				} else if assembly.SteerChannel != nil {
+					select {
+					case assembly.SteerChannel <- input:
+					default:
+					}
+				}
+			}),
+			tui.WithCancelCallback(func() {
+				cancelTurn()
+			}),
+			tui.WithPauseCallback(func() {
+				if assembly.LoopAgent != nil {
+					assembly.LoopAgent.Pause()
+				}
+			}),
+			tui.WithResumeCallback(func() {
+				if assembly.LoopAgent != nil {
+					assembly.LoopAgent.Resume()
 				}
 			}),
 		)
@@ -261,26 +310,16 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		}()
 
 		// Wait for the render loop to finish. The app exits when the bridge
-		// channel closes, which only happens after the harness closes the
-		// EventStream - by which point SetResult has already been invoked.
-		// stream.Result() is non-blocking, so it must be called after the
-		// stream is known to be closed, otherwise it returns errNoResult.
-		// If the context is canceled (user interrupt), we additionally wait
-		// for app.Done() so the stream is fully closed and Result() is ready.
-		// Steer messages arriving on the interrupter's channel are forwarded
-		// to the assembly's shared SteerChannel, which the LoopAgent drains
-		// between LLM iterations. Steering can only happen between iterations,
-		// not during generation, because the LLM call is a synchronous
-		// blocking operation.
+		// channel closes (stream closed by the RunTurn goroutine). Steer
+		// messages arriving on the interrupter's channel are forwarded to
+		// the TurnRunner via Steer(), which delivers them to the running
+		// loop between LLM iterations.
 		turnComplete := false
 		for !turnComplete {
 			select {
 			case <-app.Done():
 				turnComplete = true
 			case <-turnCtx.Done():
-				// Context canceled (user interrupt). Wait for the app to
-				// finish cleaning up so the stream closes and Result() is
-				// available.
 				<-app.Done()
 				turnComplete = true
 			case steerMsg := <-interrupter.SteerChannel():
@@ -288,10 +327,14 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 					"op", "cli.interactive.steer",
 					"message", steerMsg,
 				)
-				// Forward the steer message to the assembly's shared
-				// SteerChannel so the LoopAgent picks it up between
-				// LLM iterations.
-				if assembly.SteerChannel != nil {
+				turnID := assembly.TurnRunner.RunningTurnID()
+				if turnID != "" {
+					if steerErr := assembly.TurnRunner.Steer(turnCtx, turnID, steerMsg); steerErr != nil {
+						logger.Warn("cli_interactive_steer_failed", "err", steerErr)
+					} else {
+						logger.Info("cli_interactive_steer_forwarded", "message", steerMsg)
+					}
+				} else if assembly.SteerChannel != nil {
 					select {
 					case assembly.SteerChannel <- steerMsg:
 						logger.Info("cli_interactive_steer_forwarded", "message", steerMsg)
@@ -302,7 +345,8 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 			}
 		}
 
-		result, streamErr := stream.Result()
+		// Wait for RunTurn to finish so turnResult and turnErr are populated.
+		<-turnDone
 
 		interrupted := turnCtx.Err() != nil
 		cancelTurn()
@@ -312,8 +356,8 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 
 		app.Quit()
 
-		if streamErr != nil && !interrupted {
-			fmt.Fprintf(c.out, "Error: %v\n", streamErr) //nolint:errcheck
+		if turnErr != nil && !interrupted {
+			fmt.Fprintf(c.out, "Error: %v\n", turnErr) //nolint:errcheck
 			continue
 		}
 
@@ -325,8 +369,8 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		// Only print the final assistant message in non-TTY mode (where the
 		// TUI's real-time repaint isn't active), and only when the turn was
 		// not interrupted.
-		if result.Content != "" && !isTTY && !interrupted {
-			fmt.Fprintf(c.out, "AI: %s\n", result.Content) //nolint:errcheck
+		if turnResult.Message != "" && !isTTY && !interrupted {
+			fmt.Fprintf(c.out, "AI: %s\n", turnResult.Message) //nolint:errcheck
 		}
 
 		// Persist to session store (even on interruption to preserve history).
@@ -342,11 +386,11 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 				logger.Warn("cli_interactive_session_save_failed", "err", appendErr)
 			}
 			entryCounter++
-			if result.Content != "" {
+			if turnResult.Message != "" {
 				if appendErr := assembly.SessionStore.Append(spanCtx, &session.SessionEntry{
 					ID:        fmt.Sprintf("entry-%d", entryCounter),
 					Type:      session.EntryTypeAssistant,
-					Content:   result.Content,
+					Content:   turnResult.Message,
 					Timestamp: time.Now(),
 				}); appendErr != nil {
 					logger.Warn("cli_interactive_session_save_failed", "err", appendErr)
@@ -508,6 +552,38 @@ func loadSessionHistory(path string) ([]core.AgentMessage, error) {
 // commands plus "exit", for use by the tab completer.
 func slashCommandNames() []string {
 	return append(defaultSlashReg.Names(), "exit")
+}
+
+// emitTokenUsageEvent estimates the total token usage from the agent's message
+// history and the accumulated cost from the CostTracker, then sends a
+// token_usage event to the stream so the TUI status bar can update.
+func emitTokenUsageEvent(stream *core.EventStreamImpl, assembly *AgentAssembly) {
+	if assembly.Estimator == nil || assembly.Agent == nil {
+		return
+	}
+	var inputTokens, outputTokens int
+	for _, msg := range assembly.Agent.Messages() {
+		n, _ := assembly.Estimator.Estimate(msg.Content) //nolint:errcheck
+		if msg.Role == "assistant" {
+			outputTokens += n
+		} else {
+			inputTokens += n
+		}
+	}
+	cost := 0.0
+	if assembly.CostTracker != nil {
+		cost = assembly.CostTracker.Total()
+	}
+	_ = stream.Send(core.AgentEvent{ //nolint:errcheck
+		Kind:      "token_usage",
+		Timestamp: time.Now(),
+		TokenUsage: &core.TokenUsage{
+			InputTokens:  inputTokens,
+			OutputTokens: outputTokens,
+			MaxTokens:    assembly.MaxTokens,
+			Cost:         cost,
+		},
+	})
 }
 
 var _ Command = (*interactiveCmd)(nil)

@@ -20,6 +20,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/extension"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mcp"
+	"github.com/pengjunchen/go-cli/internal/memory"
 	"github.com/pengjunchen/go-cli/internal/production"
 	"github.com/pengjunchen/go-cli/internal/session"
 	"github.com/pengjunchen/go-cli/internal/skill"
@@ -106,6 +107,19 @@ type AgentAssembly struct {
 	// steering messages here when the user presses Esc and types an
 	// instruction.
 	SteerChannel chan string
+	// LoopAgent is the raw LoopAgent before middleware wrapping. It is
+	// exposed so the REPL can call Pause()/Resume() on it.
+	LoopAgent *core.LoopAgent
+	// GitTool is the default git tool wired into the tool registry. It is
+	// exposed so the interactive session can wire it into the session tree
+	// for Git-aware branch linkage.
+	GitTool tools.GitTool
+	// MemoryStore persists cross-session memories for the /memory slash
+	// command and system prompt injection.
+	MemoryStore *memory.FileMemoryStore
+	// MemoryExtractor extracts key facts from conversations for memory
+	// storage.
+	MemoryExtractor memory.MemoryExtractor
 }
 
 // AssembleOption configures AssembleAgent behavior.
@@ -215,8 +229,7 @@ func AssembleAgent(
 
 	// Create shared component instances for the PARTIAL tools (D5, D6, D7, D9).
 	fileTracker := tools.NewFileTracker()
-	diffGen := tools.NewUnifiedDiffGenerator(0, false)
-
+	var diffGen tools.DiffGenerator = tools.NewUnifiedDiffGenerator(0, false)
 	// Build the bash sandbox from config. WithAllowedPaths defaults to the
 	// current working directory when no paths are configured (safe default).
 	var sandboxOpts []tools.SandboxOption
@@ -234,13 +247,21 @@ func AssembleAgent(
 
 	htmlConverter := tools.NewDefaultHTMLConverter()
 
-	// Resolve the working directory for git tools. There is no explicit config
-	// for cwd, so fall back to the process working directory.
+	// Resolve the working directory for git tools. Use GitConfig.WorkDir when
+	// configured, otherwise fall back to the process working directory.
 	gitCwd, err := os.Getwd()
 	if err != nil {
 		gitCwd = "."
 	}
+	if rc != nil && rc.Git.WorkDir != "" {
+		gitCwd = rc.Git.WorkDir
+	}
 	gitTool := tools.NewDefaultGitTool(gitCwd)
+
+	// Wrap the UnifiedDiffGenerator with GitDiffGenerator so that /diff uses
+	// `git diff` when inside a git repository (better rename/binary handling)
+	// and falls back to the LCS-based diff otherwise.
+	diffGen = tools.NewGitDiffGenerator(gitTool, diffGen)
 
 	regOpts := []tools.RegisterDefaultsOption{
 		tools.WithRegisteredFileTracker(fileTracker),
@@ -269,28 +290,27 @@ func AssembleAgent(
 		logger.Warn("assemble_mcp_failed", "err", mcpErr)
 	}
 
-	// 3b. Register LSP tool (if configured).
-	if rc != nil && len(rc.LSP.ServerCommand) > 0 {
-		workspaceRoot := rc.LSP.WorkspaceRoot
-		if workspaceRoot == "" {
-			workspaceRoot, _ = os.Getwd() //nolint:errcheck
-		}
-		lspClient, lspErr := tools.NewDefaultLSPClient(ctx, rc.LSP.ServerCommand, workspaceRoot)
-		if lspErr != nil {
-			logger.Warn("assemble_lsp_start_failed", "err", lspErr)
-		} else if initErr := lspClient.Initialize(ctx, "file://"+workspaceRoot); initErr != nil {
-			logger.Warn("assemble_lsp_init_failed", "err", initErr)
-			_ = lspClient.Shutdown(context.Background()) //nolint:errcheck
-		} else {
+	// 3b. Register LSP tool (if configured). Supports both the legacy
+	// single-server format (ServerCommand/WorkspaceRoot) and the new
+	// multi-server format (Servers). When multiple servers are configured,
+	// a MultiLSPClient routes requests by file extension. A single server
+	// uses a plain DefaultLSPClient (backward compatible). LSP server
+	// startup failures are logged as warnings and do not crash the main
+	// flow (graceful degradation).
+	if rc != nil && (len(rc.LSP.ServerCommand) > 0 || len(rc.LSP.Servers) > 0) {
+		lspClient, lspStarted := buildLSPClient(ctx, rc, logger)
+		if lspClient != nil && lspStarted {
 			if regErr := tr.Register(ctx, tools.NewLSPTool(lspClient)); regErr != nil {
 				logger.Warn("assemble_lsp_register_failed", "err", regErr)
-			}
-			lspCleanup := cleanup
-			cleanup = func() {
 				_ = lspClient.Shutdown(context.Background()) //nolint:errcheck
-				lspCleanup()
+			} else {
+				lspCleanup := cleanup
+				cleanup = func() {
+					_ = lspClient.Shutdown(context.Background()) //nolint:errcheck
+					lspCleanup()
+				}
+				logger.Info("assemble_lsp_ready")
 			}
-			logger.Info("assemble_lsp_ready", "command", rc.LSP.ServerCommand)
 		}
 	}
 
@@ -512,6 +532,7 @@ func AssembleAgent(
 		core.NewAskUserQuestionTool(hitlEmitter, 30*time.Second),
 		tools.NewEnterPlanModeTool(planCtrl),
 		tools.NewExitPlanModeTool(planCtrl),
+		tools.NewGitPRCreateTool(gitCwd),
 	}
 	for _, t := range extraTools {
 		if regErr := tr.Register(ctx, t); regErr != nil {
@@ -524,7 +545,7 @@ func AssembleAgent(
 	}
 
 	// 10. Build loop agent with model wrapper.
-	steerCh := make(chan string, 1)
+	steerCh := make(chan string, 16)
 	loopOpts := []core.LoopOption{
 		core.WithLLM(model),
 		core.WithTools(tr),
@@ -541,7 +562,50 @@ func AssembleAgent(
 		loopOpts = append(loopOpts, core.WithExecutionMode(core.ExecutionModeSequential))
 	}
 
-	// 10b. Wire dynamic system prompt builder with project context.
+	// 10b. Wire memory store for cross-session memory persistence. The store
+	// is backed by a JSONL file in the config directory (~/.go-cli/ by
+	// default). Existing memories are loaded and injected into the system
+	// prompt so the agent is aware of them from the first turn.
+	var memStore *memory.FileMemoryStore
+	memoryPath := ""
+	if home, homeErr := os.UserHomeDir(); homeErr == nil && home != "" {
+		memoryPath = filepath.Join(home, ".go-cli", "memories.jsonl")
+	}
+	if memoryPath != "" {
+		if mkErr := os.MkdirAll(filepath.Dir(memoryPath), 0o755); mkErr != nil {
+			logger.Warn("assemble_memory_mkdir_failed", "err", mkErr)
+		}
+		ms, msErr := memory.NewFileMemoryStore(memoryPath)
+		if msErr != nil {
+			logger.Warn("assemble_memory_store_failed", "err", msErr)
+		} else {
+			memStore = ms
+		}
+	}
+
+	var memoryEntries []core.MemoryEntry
+	if memStore != nil {
+		memories, memErr := memStore.List(ctx)
+		if memErr != nil {
+			logger.Warn("assemble_memory_list_failed", "err", memErr)
+		}
+		for _, m := range memories {
+			memoryEntries = append(memoryEntries, core.MemoryEntry{
+				ID:       m.ID,
+				Content:  m.Content,
+				Category: m.Category,
+			})
+		}
+	}
+
+	// Create memory extractor for LLM-based fact extraction. The extractor
+	// uses the model to analyze conversations and the store for deduplication.
+	var memExtractor memory.MemoryExtractor
+	if memStore != nil {
+		memExtractor = memory.NewLLMMemoryExtractor(model, memStore)
+	}
+
+	// 10c. Wire dynamic system prompt builder with project context.
 	contextLoader := core.NewDefaultProjectContextLoader()
 	promptBuilder := core.NewDefaultSystemPromptBuilder()
 	cwd, _ := os.Getwd() //nolint:errcheck
@@ -560,12 +624,18 @@ func AssembleAgent(
 			Cwd:          cwd,
 			ContextFiles: contextFiles,
 			Skills:       skillInfos,
+			Memories:     memoryEntries,
 			CustomPrompt: customPrompt,
 			AppendPrompt: appendPrompt,
 		}),
 	)
 
 	var loop core.AgentLoop = core.NewLoopAgent(loopOpts...)
+	// Keep a reference to the raw LoopAgent so the REPL can call Pause/Resume.
+	var loopAgent *core.LoopAgent
+	if la, ok := loop.(*core.LoopAgent); ok {
+		loopAgent = la
+	}
 
 	// 10b. Wire loop detector + system reminder injector.
 	ldCfg := production.LoopDetectionConfig{}
@@ -648,6 +718,9 @@ func AssembleAgent(
 		if sessionStore != nil {
 			sessionStore.Close() //nolint:errcheck,gosec
 		}
+		if memStore != nil {
+			_ = memStore.Close() //nolint:errcheck
+		}
 		if traceExporter != nil {
 			if tracer != nil {
 				tracer.Flush()
@@ -728,6 +801,10 @@ func AssembleAgent(
 		Telemetry:          telemetry,
 		TurnRunner:         turnRunner,
 		SteerChannel:       steerCh,
+		LoopAgent:          loopAgent,
+		GitTool:            gitTool,
+		MemoryStore:        memStore,
+		MemoryExtractor:    memExtractor,
 	}, nil
 }
 
@@ -1251,4 +1328,75 @@ func buildRemoteBashTool(_ context.Context, rc *config.Config, logger *slog.Logg
 	}
 
 	return tools.NewRemoteBashTool(defaultClient, opts...)
+}
+
+// buildLSPClient constructs the LSP client from config. When the legacy
+// ServerCommand field is set, it is normalized into a single-element Servers
+// list for backward compatibility. A single server returns a plain
+// DefaultLSPClient; multiple servers return a MultiLSPClient that routes by
+// file extension. Server startup failures are logged as warnings (graceful
+// degradation); the function returns (nil, false) when no server could start.
+func buildLSPClient(ctx context.Context, rc *config.Config, logger *slog.Logger) (tools.LSPClient, bool) {
+	// Normalize: merge legacy ServerCommand into Servers if Servers is empty.
+	servers := rc.LSP.Servers
+	if len(servers) == 0 && len(rc.LSP.ServerCommand) > 0 {
+		servers = []config.LSPServerConfig{
+			{
+				ServerCommand:  rc.LSP.ServerCommand,
+				WorkspaceRoot:  rc.LSP.WorkspaceRoot,
+				FileExtensions: nil, // default client
+			},
+		}
+	}
+
+	if len(servers) == 0 {
+		return nil, false
+	}
+
+	// Single server: use DefaultLSPClient directly (backward compatible).
+	if len(servers) == 1 {
+		return buildSingleLSPClient(ctx, servers[0], logger)
+	}
+
+	// Multiple servers: use MultiLSPClient.
+	multi := tools.NewMultiLSPClient()
+	anyStarted := false
+	for _, srv := range servers {
+		client, started := buildSingleLSPClient(ctx, srv, logger)
+		if !started {
+			continue
+		}
+		anyStarted = true
+		if len(srv.FileExtensions) > 0 {
+			multi.Register(client, srv.FileExtensions...)
+		} else {
+			multi.SetDefaultClient(client)
+		}
+	}
+	if !anyStarted {
+		return nil, false
+	}
+	return multi, true
+}
+
+// buildSingleLSPClient starts and initializes a single DefaultLSPClient from
+// the given LSPServerConfig. Returns (nil, false) on failure (graceful
+// degradation).
+func buildSingleLSPClient(ctx context.Context, srv config.LSPServerConfig, logger *slog.Logger) (tools.LSPClient, bool) {
+	workspaceRoot := srv.WorkspaceRoot
+	if workspaceRoot == "" {
+		workspaceRoot, _ = os.Getwd() //nolint:errcheck
+	}
+	client, err := tools.NewDefaultLSPClient(ctx, srv.ServerCommand, workspaceRoot)
+	if err != nil {
+		logger.Warn("assemble_lsp_start_failed", "command", srv.ServerCommand, "err", err)
+		return nil, false
+	}
+	if initErr := client.Initialize(ctx, "file://"+workspaceRoot); initErr != nil {
+		logger.Warn("assemble_lsp_init_failed", "command", srv.ServerCommand, "err", initErr)
+		_ = client.Shutdown(context.Background()) //nolint:errcheck
+		return nil, false
+	}
+	logger.Info("assemble_lsp_server_ready", "command", srv.ServerCommand, "extensions", srv.FileExtensions)
+	return client, true
 }
