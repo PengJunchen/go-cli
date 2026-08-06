@@ -5,6 +5,7 @@ import (
 	"errors"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/llm"
@@ -17,6 +18,12 @@ import (
 // Complex multi-step tasks (install dependencies, write code, run, debug)
 // legitimately need many turns, so the default is generous.
 const defaultMaxIterations = 200
+
+// maxContinuationAttempts bounds the number of automatic continuation
+// requests the loop issues when the model output is truncated by max_tokens
+// (finish_reason == "length"). After this many attempts the loop proceeds
+// with whatever content has been accumulated and logs a warning.
+const maxContinuationAttempts = 3
 
 // errNilModel reports that a LoopAgent has no chat model wired up.
 var errNilModel = errors.New("core: agent loop has no chat model")
@@ -108,9 +115,53 @@ type LoopAgent struct {
 	promptOpts           SystemPromptOptions
 	tracer               *tracing.Tracer
 	steerCh              chan string
+	pauseMu              sync.Mutex
+	pauseCh              chan struct{}
 }
 
 var _ AgentLoop = (*LoopAgent)(nil)
+
+// Pause causes the loop to block at the top of the next iteration until Resume
+// is called. It is safe to call from a different goroutine than Run. Calling
+// Pause when already paused is a no-op.
+func (l *LoopAgent) Pause() {
+	l.pauseMu.Lock()
+	defer l.pauseMu.Unlock()
+	if l.pauseCh == nil {
+		l.pauseCh = make(chan struct{})
+		slog.Info("core.loop.pause")
+	}
+}
+
+// Resume unblocks the loop after a Pause. It is safe to call from a different
+// goroutine than Run. Calling Resume when not paused is a no-op.
+func (l *LoopAgent) Resume() {
+	l.pauseMu.Lock()
+	defer l.pauseMu.Unlock()
+	if l.pauseCh != nil {
+		close(l.pauseCh)
+		l.pauseCh = nil
+		slog.Info("core.loop.resume")
+	}
+}
+
+// pauseWait blocks until the loop is resumed or the context is canceled. It
+// returns nil when resumed, or the context error when canceled.
+func (l *LoopAgent) pauseWait(ctx context.Context) error {
+	l.pauseMu.Lock()
+	pch := l.pauseCh
+	l.pauseMu.Unlock()
+	if pch == nil {
+		return nil
+	}
+	slog.Info("core.loop.pause_wait")
+	select {
+	case <-pch:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 // NewLoopAgent builds a LoopAgent from functional options. Missing optional
 // dependencies are left nil and reported at Run time so the loop can fail with
@@ -263,6 +314,15 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 			return events, err
 		}
 
+		// Block here if the loop has been paused via Pause(). This allows
+		// the user to suspend agent execution between LLM iterations.
+		if perr := l.pauseWait(spanCtx); perr != nil {
+			span.SetStatus(tracing.SpanStatusError, perr.Error())
+			logger.Error("core.loop.canceled_during_pause", "iteration", iter, "err", perr)
+			sendEvent(errEvent(perr))
+			return events, perr
+		}
+
 		// Drain any pending steering messages from the steer channel.
 		// Steering can only happen between LLM iterations, not during
 		// generation, because the LLM call is a synchronous blocking
@@ -273,7 +333,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 		}
 
 		// ---- LLM call (streaming) ----
-		resp, err := l.streamGenerate(spanCtx, model, messages, toolOpts, es, logger)
+		resp, err := l.generateWithContinuation(spanCtx, model, messages, toolOpts, es, logger)
 		if err != nil {
 			span.SetStatus(tracing.SpanStatusError, err.Error())
 			logger.Error("core.loop.generate_error", "iteration", iter, "err", err)
@@ -388,6 +448,7 @@ func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel,
 
 	var contentBuf strings.Builder
 	var toolCalls []llm.ToolCall
+	var finishReason string
 	gotChunk := false
 
 	for chunk := range ch {
@@ -411,6 +472,9 @@ func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel,
 			if len(chunk.ToolCalls) > 0 {
 				toolCalls = chunk.ToolCalls
 			}
+			if chunk.FinishReason != "" {
+				finishReason = chunk.FinishReason
+			}
 		}
 	}
 
@@ -421,10 +485,60 @@ func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel,
 	}
 
 	return &llm.Message{
-		Role:      llm.RoleAssistant,
-		Content:   contentBuf.String(),
-		ToolCalls: toolCalls,
+		Role:         llm.RoleAssistant,
+		Content:      contentBuf.String(),
+		ToolCalls:    toolCalls,
+		FinishReason: finishReason,
 	}, nil
+}
+
+// generateWithContinuation wraps streamGenerate with automatic truncation
+// detection and continuation. When the model's finish_reason is "length"
+// (output cut off by max_tokens), the partial assistant response is appended
+// to the conversation and the model is asked to continue. The continuation
+// content (and any tool calls) are merged into the original response. At most
+// maxContinuationAttempts retries are issued; if the output is still
+// truncated after that, a warning is logged and the accumulated content is
+// returned.
+func (l *LoopAgent) generateWithContinuation(ctx context.Context, model llm.BaseChatModel, messages []llm.Message, toolOpts []llm.Option, es EventStream, logger *slog.Logger) (*llm.Message, error) {
+	resp, err := l.streamGenerate(ctx, model, messages, toolOpts, es, logger)
+	if err != nil || resp == nil {
+		return resp, err
+	}
+
+	for attempt := 0; attempt < maxContinuationAttempts && resp.FinishReason == "length"; attempt++ {
+		// Build a continuation conversation: the original messages plus the
+		// partial assistant response so the model picks up where it left off.
+		contMsgs := make([]llm.Message, len(messages), len(messages)+1)
+		copy(contMsgs, messages)
+		contMsgs = append(contMsgs, llm.Message{
+			Role:         llm.RoleAssistant,
+			Content:      resp.Content,
+			ToolCalls:    resp.ToolCalls,
+			FinishReason: resp.FinishReason,
+		})
+
+		logger.Info("core.loop.continuation", "attempt", attempt+1)
+
+		contResp, contErr := l.streamGenerate(ctx, model, contMsgs, toolOpts, es, logger)
+		if contErr != nil || contResp == nil {
+			break
+		}
+
+		// Merge the continuation into the original response.
+		resp.Content += contResp.Content
+		resp.FinishReason = contResp.FinishReason
+		if len(contResp.ToolCalls) > 0 {
+			resp.ToolCalls = append(resp.ToolCalls, contResp.ToolCalls...)
+		}
+	}
+
+	if resp.FinishReason == "length" {
+		slog.WarnContext(ctx, "core.loop.truncation_max_attempts",
+			"max_attempts", maxContinuationAttempts)
+	}
+
+	return resp, nil
 }
 
 // executeTool looks up the tool and runs its definition against the registry.

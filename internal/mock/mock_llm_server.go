@@ -147,9 +147,10 @@ func (s *MockLLMServer) generate(ctx context.Context, msgs []llm.Message, opts .
 			err = fmt.Errorf("%s", turn.AssistantError)
 		} else {
 			resp = &llm.Message{
-				Role:      llm.RoleAssistant,
-				Content:   turn.AssistantContent,
-				ToolCalls: convertToolCalls(turn.AssistantToolCalls),
+				Role:         llm.RoleAssistant,
+				Content:      turn.AssistantContent,
+				ToolCalls:    convertToolCalls(turn.AssistantToolCalls),
+				FinishReason: turn.FinishReason,
 			}
 		}
 	} else {
@@ -187,7 +188,7 @@ func (s *MockLLMServer) stream(ctx context.Context, msgs []llm.Message, opts ...
 	if resp.Content != "" {
 		ch <- llm.MessageChunk{Role: resp.Role, Content: resp.Content}
 	}
-	final := llm.MessageChunk{Role: resp.Role, Final: true}
+	final := llm.MessageChunk{Role: resp.Role, Final: true, FinishReason: resp.FinishReason}
 	if len(resp.ToolCalls) > 0 {
 		final.ToolCalls = resp.ToolCalls
 	}

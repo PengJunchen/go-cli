@@ -31,6 +31,10 @@ type ConversationTurn struct {
 	AssistantToolCalls []ExpectedToolCall `json:"assistant_tool_calls,omitempty"`
 	// AssistantError, when non-empty, simulates the model returning an error.
 	AssistantError string `json:"assistant_error,omitempty"`
+	// FinishReason simulates the provider's finish_reason/stop_reason field
+	// (stop|length|tool_calls|content_filter). When "length", the response
+	// was truncated due to max_tokens.
+	FinishReason string `json:"finish_reason,omitempty"`
 }
 
 // ExpectedToolCall is an expected tool call issued by the model.

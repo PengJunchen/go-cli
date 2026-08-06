@@ -305,6 +305,7 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 		// Per-request tool-call accumulation.
 		var toolNameByIndex map[int]string
 		var toolArgsBuf []string
+		var finishReason string
 
 		for event := range events {
 			if event.Data == "[DONE]" {
@@ -322,7 +323,11 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 			if len(chunk.Choices) == 0 {
 				continue
 			}
-			delta := chunk.Choices[0].Delta
+			choice := chunk.Choices[0]
+			if choice.FinishReason != "" {
+				finishReason = choice.FinishReason
+			}
+			delta := choice.Delta
 
 			if delta.Content != "" {
 				ch <- MessageChunk{Role: RoleAssistant, Content: delta.Content}
@@ -352,7 +357,7 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 		}
 
 		// Emit the final accumulated assistant message.
-		final := MessageChunk{Role: RoleAssistant, Final: true}
+		final := MessageChunk{Role: RoleAssistant, Final: true, FinishReason: finishReason}
 		if toolNameByIndex != nil {
 			final.ToolCalls = make([]ToolCall, len(toolArgsBuf))
 			for idx, name := range toolNameByIndex {
@@ -408,6 +413,7 @@ type claudeStreamDelta struct {
 	Type        string `json:"type"`                   // "text_delta" or "input_json_delta"
 	Text        string `json:"text,omitempty"`         // text_delta text
 	PartialJSON string `json:"partial_json,omitempty"` // input_json_delta fragment
+	StopReason  string `json:"stop_reason,omitempty"`  // message_delta stop_reason
 }
 
 // claudeToolAccum accumulates a single tool call's fragments across chunks.
@@ -455,6 +461,7 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 		// Tool-call accumulation keyed by content block index.
 		tools := map[int]*claudeToolAccum{}
 		var toolIndices []int // preserve insertion order
+		var stopReason string
 		finalSent := false
 
 		for event := range events {
@@ -500,8 +507,13 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 					}
 				}
 
+			case "message_delta":
+				if ce.Delta != nil && ce.Delta.StopReason != "" {
+					stopReason = ce.Delta.StopReason
+				}
+
 			case "message_stop":
-				final := MessageChunk{Role: RoleAssistant, Final: true}
+				final := MessageChunk{Role: RoleAssistant, Final: true, FinishReason: stopReason}
 				if len(toolIndices) > 0 {
 					final.ToolCalls = make([]ToolCall, 0, len(toolIndices))
 					for _, idx := range toolIndices {
@@ -530,7 +542,7 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 		// If the stream ended without message_stop, emit a final chunk so
 		// the caller is not left waiting.
 		if !finalSent {
-			ch <- MessageChunk{Role: RoleAssistant, Final: true}
+			ch <- MessageChunk{Role: RoleAssistant, Final: true, FinishReason: stopReason}
 		}
 	}()
 
@@ -574,6 +586,7 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 		parser := NewDefaultSSEParser()
 		events, _ := parser.Parse(respBody) //nolint:errcheck
 
+		var finishReason string
 		for event := range events {
 			if event.Data == "" {
 				continue
@@ -583,18 +596,24 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 				slog.Warn("llm_stream_parse_skip", "err", err)
 				continue
 			}
-			if len(parsed.Candidates) > 0 && parsed.Candidates[0].Content != nil {
-				var sb strings.Builder
-				for _, part := range parsed.Candidates[0].Content.Parts {
-					sb.WriteString(part.Text)
+			if len(parsed.Candidates) > 0 {
+				candidate := parsed.Candidates[0]
+				if candidate.FinishReason != "" {
+					finishReason = candidate.FinishReason
 				}
-				if sb.Len() > 0 {
-					ch <- MessageChunk{Role: RoleAssistant, Content: sb.String()}
+				if candidate.Content != nil {
+					var sb strings.Builder
+					for _, part := range candidate.Content.Parts {
+						sb.WriteString(part.Text)
+					}
+					if sb.Len() > 0 {
+						ch <- MessageChunk{Role: RoleAssistant, Content: sb.String()}
+					}
 				}
 			}
 		}
 
-		ch <- MessageChunk{Role: RoleAssistant, Final: true}
+		ch <- MessageChunk{Role: RoleAssistant, Final: true, FinishReason: finishReason}
 	}()
 
 	return ch, nil
@@ -842,6 +861,7 @@ func decodeOpenAIResponse(body []byte) (*Message, error) {
 		choice := parsed.Choices[0]
 		msg.Content = choice.Message.Content
 		msg.ToolCalls = convertAssistantToolCalls(choice.Message.ToolCalls)
+		msg.FinishReason = choice.FinishReason
 	}
 	if parsed.Usage != nil {
 		msg.Usage = &Usage{
@@ -936,8 +956,9 @@ type claudeBlock struct {
 
 // claudeResponse is the Anthropic messages response body.
 type claudeResponse struct {
-	Content []claudeBlock `json:"content"`
-	Usage   *claudeUsage  `json:"usage,omitempty"`
+	Content    []claudeBlock `json:"content"`
+	Usage      *claudeUsage  `json:"usage,omitempty"`
+	StopReason string        `json:"stop_reason,omitempty"`
 }
 
 // claudeUsage reports token consumption.
@@ -1008,6 +1029,7 @@ func decodeClaudeResponse(body []byte) (*Message, error) {
 		}
 	}
 	msg := &Message{Role: RoleAssistant, Content: sb.String()}
+	msg.FinishReason = parsed.StopReason
 	if parsed.Usage != nil {
 		msg.Usage = &Usage{
 			InputTokens:  parsed.Usage.InputTokens,
@@ -1110,7 +1132,8 @@ type geminiResponse struct {
 
 // geminiCandidate is a ranked generation result.
 type geminiCandidate struct {
-	Content *geminiContent `json:"content,omitempty"`
+	Content      *geminiContent `json:"content,omitempty"`
+	FinishReason string         `json:"finishReason,omitempty"`
 }
 
 // geminiUsage reports token consumption.
@@ -1174,12 +1197,16 @@ func decodeGeminiResponse(body []byte) (*Message, error) {
 		return nil, fmt.Errorf("llm: decode response: %w", err)
 	}
 	msg := &Message{Role: RoleAssistant}
-	if len(parsed.Candidates) > 0 && parsed.Candidates[0].Content != nil {
-		var sb strings.Builder
-		for _, part := range parsed.Candidates[0].Content.Parts {
-			sb.WriteString(part.Text)
+	if len(parsed.Candidates) > 0 {
+		candidate := parsed.Candidates[0]
+		msg.FinishReason = candidate.FinishReason
+		if candidate.Content != nil {
+			var sb strings.Builder
+			for _, part := range candidate.Content.Parts {
+				sb.WriteString(part.Text)
+			}
+			msg.Content = sb.String()
 		}
-		msg.Content = sb.String()
 	}
 	if parsed.UsageMetadata != nil {
 		msg.Usage = &Usage{
