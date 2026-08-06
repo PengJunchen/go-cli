@@ -91,12 +91,13 @@ func TestET_Phase19_AC1_AssembledComponentsNotNil(t *testing.T) {
 	// D6: DiffGenerator must be created and exposed.
 	require.NotNil(t, assembly.DiffGenerator, "DiffGenerator must be wired by AssembleAgent")
 
-	// D7: BashSandbox must be wired into the BashTool. The Sandbox field is
-	// exported, so we can inspect it directly.
+	// D7: BashSandbox must be wired into the BashTool. AssembleAgent now
+	// uses StreamingBashToolImpl which embeds *BashTool, so Sandbox is
+	// promoted and accessible directly.
 	bashDef := phase19wFindTool(t, assembly.ToolRegistry, "bash")
-	bashTool, ok := bashDef.(*tools.BashTool)
-	require.True(t, ok, "bash tool should be *tools.BashTool")
-	require.NotNil(t, bashTool.Sandbox, "BashSandbox must be wired into BashTool")
+	streamingBash, ok := bashDef.(*tools.StreamingBashToolImpl)
+	require.True(t, ok, "bash tool should be *tools.StreamingBashToolImpl")
+	require.NotNil(t, streamingBash.Sandbox, "BashSandbox must be wired into BashTool")
 
 	// D9: HTMLConverter must be wired into the WebFetchTool. The converter
 	// field is private, so we verify behaviorally: fetch HTML from a test
