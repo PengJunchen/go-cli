@@ -100,7 +100,7 @@ func NewRealSubAgentRunnerFactory(model llm.BaseChatModel, registry *llm.Provide
 	return func(cfg SubAgentConfig) subAgentRunner {
 		maxIter := cfg.MaxTurns
 		if maxIter <= 0 {
-			maxIter = 10
+			maxIter = defaultMaxIterations
 		}
 		return &realSubAgentRunner{
 			model:        model,
