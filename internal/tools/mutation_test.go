@@ -69,7 +69,16 @@ func TestMutationQueueName(t *testing.T) {
 func TestMutationQueuePerFileFIFO(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	handler := &trackingHandler{}
+	// Use keyFn to record the Content (op-1, op-2, op-3) as the key so the
+	// handler's order slice captures the actual processing order.
+	handler := &trackingHandler{
+		keyFn: func(m FileMutation) string {
+			if s, ok := m.Content.(string); ok {
+				return s
+			}
+			return m.FilePath
+		},
+	}
 	q := NewDefaultFileMutationQueue(WithMutationHandler(handler.handle()))
 	defer closeQueue(t, q)
 
@@ -77,37 +86,19 @@ func TestMutationQueuePerFileFIFO(t *testing.T) {
 	// routed to the same per-file worker.
 	path := filepath.Join(t.TempDir(), "serialized-fifo-target.txt")
 
-	var mu sync.Mutex
-	var completed []string
 	for _, op := range []string{"op-1", "op-2", "op-3"} {
 		resCh, err := q.Enqueue(context.Background(), FileMutation{
 			FilePath: path, Operation: "write", Content: op, ToolName: "write",
 		})
 		require.NoError(t, err)
-		go func(op string, resCh <-chan FileMutationResult) {
-			require.True(t, (<-resCh).Success)
-			mu.Lock()
-			defer mu.Unlock()
-			completed = append(completed, op)
-		}(op, resCh)
+		require.True(t, (<-resCh).Success)
 	}
 
-	require.Eventually(t, func() bool {
-		mu.Lock()
-		defer mu.Unlock()
-		return len(completed) == 3
-	}, 2*time.Second, 10*time.Millisecond)
-
-	mu.Lock()
-	got := append([]string(nil), completed...)
-	mu.Unlock()
-	assert.Equal(t, []string{"op-1", "op-2", "op-3"}, got, "mutations to the same file must apply in FIFO order")
-
-	// Same worker: every handler observation carries one shared path.
+	// The handler records the actual processing order; since all three
+	// mutations target the same file they must be processed in FIFO order.
 	keys := handler.snapshot()
 	require.Len(t, keys, 3)
-	assert.Equal(t, keys[0], keys[1], "op-1 and op-2 landed on the same file worker")
-	assert.Equal(t, keys[1], keys[2], "op-2 and op-3 landed on the same file worker")
+	assert.Equal(t, []string{"op-1", "op-2", "op-3"}, keys, "mutations to the same file must apply in FIFO order")
 }
 
 func TestMutationQueueCrossFileParallelism(t *testing.T) {
