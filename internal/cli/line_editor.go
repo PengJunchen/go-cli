@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"unicode/utf8"
 )
 
 // LineEditor reads user input with optional line editing, history, and
@@ -246,9 +247,13 @@ func (le *DefaultLineEditor) readSingleLineTTY(readByte func() (byte, error), pr
 		fmt.Fprint(le.out, "\r\033[K")  //nolint:errcheck
 		fmt.Fprint(le.out, prompt)      //nolint:errcheck
 		fmt.Fprint(le.out, string(buf)) //nolint:errcheck
-		// Move cursor left to correct position.
+		// Move cursor left to correct position using display width
+		// (CJK characters occupy 2 columns each).
 		if pos < len(buf) {
-			fmt.Fprintf(le.out, "\033[%dD", len(buf)-pos) //nolint:errcheck
+			afterCursor := displayWidth(buf[pos:])
+			if afterCursor > 0 {
+				fmt.Fprintf(le.out, "\033[%dD", afterCursor) //nolint:errcheck
+			}
 		}
 	}
 
@@ -357,18 +362,60 @@ func (le *DefaultLineEditor) readSingleLineTTY(readByte func() (byte, error), pr
 				}
 			case 'C': // Right
 				if pos < len(buf) {
+					w := runeWidth(buf[pos])
 					pos++
-					fmt.Fprint(le.out, "\033[C") //nolint:errcheck
+					fmt.Fprintf(le.out, "\033[%dC", w) //nolint:errcheck
 				}
 			case 'D': // Left
 				if pos > 0 {
+					w := runeWidth(buf[pos-1])
 					pos--
-					fmt.Fprint(le.out, "\033[D") //nolint:errcheck
+					fmt.Fprintf(le.out, "\033[%dD", w) //nolint:errcheck
 				}
 			}
 
 		case b >= 0x20 && b < 0x7F: // Printable ASCII
 			buf = insertRune(buf, pos, rune(b))
+			pos++
+			render()
+
+		case b >= 0x80: // Multi-byte UTF-8 (CJK, emoji, etc.)
+			// Determine the total length of the UTF-8 sequence from the
+			// leading byte so we can read the remaining continuation bytes.
+			var seqLen int
+			switch {
+			case b >= 0xF0:
+				seqLen = 4
+			case b >= 0xE0:
+				seqLen = 3
+			case b >= 0xC0:
+				seqLen = 2
+			default:
+				// Stray continuation byte without a leading byte.
+				continue
+			}
+			seq := make([]byte, seqLen)
+			seq[0] = b
+			valid := true
+			for i := 1; i < seqLen; i++ {
+				nb, rErr := readByte()
+				if rErr != nil {
+					return "", rErr
+				}
+				if nb < 0x80 || nb > 0xBF {
+					valid = false
+					break
+				}
+				seq[i] = nb
+			}
+			if !valid {
+				continue
+			}
+			r, _ := utf8.DecodeRune(seq)
+			if r == utf8.RuneError {
+				continue
+			}
+			buf = insertRune(buf, pos, r)
 			pos++
 			render()
 
@@ -423,7 +470,10 @@ func (le *DefaultLineEditor) renderBuf(prompt string, buf []rune, pos int) {
 	fmt.Fprint(le.out, prompt)      //nolint:errcheck
 	fmt.Fprint(le.out, string(buf)) //nolint:errcheck
 	if pos < len(buf) {
-		fmt.Fprintf(le.out, "\033[%dD", len(buf)-pos) //nolint:errcheck
+		afterCursor := displayWidth(buf[pos:])
+		if afterCursor > 0 {
+			fmt.Fprintf(le.out, "\033[%dD", afterCursor) //nolint:errcheck
+		}
 	}
 }
 
@@ -516,6 +566,37 @@ func longestCommonPrefix(strs []string) string {
 		}
 	}
 	return prefix
+}
+
+// runeWidth returns the display width of a rune in terminal columns.
+// CJK and other East Asian wide characters occupy 2 columns; everything
+// else occupies 1. This covers the common ranges used in Chinese, Japanese,
+// and Korean input without pulling in an external dependency.
+func runeWidth(r rune) int {
+	switch {
+	case r >= 0x1100 && (r <= 0x115F || // Hangul Jamo
+		r >= 0x2E80 && r <= 0xA4CF && r != 0x303F || // CJK Radicals, Kangxi, Hiragana, Katakana, CJK
+		r >= 0xAC00 && r <= 0xD7A3 || // Hangul Syllables
+		r >= 0xF900 && r <= 0xFAFF || // CJK Compatibility Ideographs
+		r >= 0xFE30 && r <= 0xFE4F || // CJK Compatibility Forms
+		r >= 0xFF00 && r <= 0xFF60 || // Fullwidth Forms
+		r >= 0xFFE0 && r <= 0xFFE6 || // Fullwidth Signs
+		r >= 0x20000 && r <= 0x2FFFD || // CJK Extension B-F
+		r >= 0x30000 && r <= 0x3FFFD): // CJK Extension G
+		return 2
+	default:
+		return 1
+	}
+}
+
+// displayWidth returns the total display width of the rune slice, accounting
+// for double-width CJK characters.
+func displayWidth(buf []rune) int {
+	w := 0
+	for _, r := range buf {
+		w += runeWidth(r)
+	}
+	return w
 }
 
 // Compile-time assertion that DefaultLineEditor implements LineEditor.

@@ -749,13 +749,16 @@ func buildModel(ctx context.Context, rc *config.Config, providerName, modelName 
 }
 
 // registerMCPTools connects to configured MCP servers and registers their
-// tools into the tool registry.
+// tools into the tool registry. When no MCP servers are configured in the
+// main config file, it auto-loads from .go-cli/mcp.json or
+// ~/.config/go-cli/mcp.json if either exists.
 func registerMCPTools(ctx context.Context, rc *config.Config, tr tools.ToolRegistry) error {
-	if rc == nil || len(rc.MCP.Servers) == 0 {
+	servers := loadMCPServers(rc)
+	if len(servers) == 0 {
 		return nil
 	}
 
-	for _, srv := range rc.MCP.Servers {
+	for _, srv := range servers {
 		cfg := mcp.MCPServerConfig{
 			Name: srv.Name,
 			URL:  srv.URL,
@@ -801,22 +804,77 @@ func registerMCPTools(ctx context.Context, rc *config.Config, tr tools.ToolRegis
 	return nil
 }
 
-// registerSkillTools loads skills from the configured directory and registers
-// them as tools. It supports two directory layouts:
+// loadMCPServers returns MCP server configs from the main config, or
+// auto-discovered from default paths when the main config has none.
+func loadMCPServers(rc *config.Config) []config.MCPServerConfig {
+	if rc != nil && len(rc.MCP.Servers) > 0 {
+		return rc.MCP.Servers
+	}
+
+	// Auto-discover MCP config from default paths.
+	candidates := []string{".go-cli/mcp.json"}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		candidates = append(candidates, filepath.Join(home, ".config", "go-cli", "mcp.json"))
+	}
+	for _, path := range candidates {
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		// Support both the array format ({"servers": [...]}) and the map
+		// format ({"mcpServers": {"name": {...}}}).
+		var servers struct {
+			Servers    []config.MCPServerConfig `json:"servers"`
+			MCPServers config.MCPServersMap     `json:"mcpServers"`
+		}
+		if err := json.Unmarshal(data, &servers); err != nil {
+			slog.Warn("assemble_mcp_config_parse_failed", "path", path, "err", err)
+			continue
+		}
+		result := servers.Servers
+		if len(servers.MCPServers) > 0 {
+			for name, s := range servers.MCPServers {
+				result = append(result, config.MCPServerConfig{
+					Name:    name,
+					Command: s.Command,
+					Args:    s.Args,
+					URL:     s.URL,
+					Env:     s.Env,
+				})
+			}
+		}
+		if len(result) > 0 {
+			slog.Info("assemble_mcp_config_discovered", "path", path, "servers", len(result))
+			return result
+		}
+	}
+	return nil
+}
+
+// registerSkillTools loads skills from the configured directory (or default
+// discovery paths) and registers them as tools. It supports two directory
+// layouts:
 //   - Flat: {dir}/{name}.md
 //   - Nested: {dir}/{name}/SKILL.md
 //
 // It returns a slice of SkillInfo describing each registered skill, suitable
 // for injection into the system prompt.
 func registerSkillTools(ctx context.Context, rc *config.Config, tr tools.ToolRegistry) []core.SkillInfo {
-	if rc == nil || rc.Skill.Dir == "" {
+	skillDir := ""
+	if rc != nil && rc.Skill.Dir != "" {
+		skillDir = rc.Skill.Dir
+	} else {
+		// Auto-discover default skill directories.
+		skillDir = discoverSkillDir()
+	}
+	if skillDir == "" {
 		return nil
 	}
 
 	loader := skill.NewYAMLSkillLoader()
-	defs, err := loader.LoadDir(ctx, rc.Skill.Dir)
+	defs, err := loader.LoadDir(ctx, skillDir)
 	if err != nil {
-		slog.Warn("assemble_skill_load_failed", "dir", rc.Skill.Dir, "err", err)
+		slog.Warn("assemble_skill_load_failed", "dir", skillDir, "err", err)
 		return nil
 	}
 
@@ -832,15 +890,34 @@ func registerSkillTools(ctx context.Context, rc *config.Config, tr tools.ToolReg
 			continue
 		}
 		infos = append(infos, core.SkillInfo{
-			Name:     (*def).Name(),
-			Category: (*def).Category(),
+			Name:        (*def).Name(),
+			Description: (*def).Description(),
+			Category:    (*def).Category(),
 		})
 		count++
 	}
 	if count > 0 {
-		slog.Info("assemble_skills_registered", "dir", rc.Skill.Dir, "count", count)
+		slog.Info("assemble_skills_registered", "dir", skillDir, "count", count)
 	}
 	return infos
+}
+
+// discoverSkillDir probes default skill directories and returns the first one
+// that exists. The search order is:
+//  1. .go-cli/skills (project-local, conventional location)
+//  2. ~/.config/go-cli/skills (global user-level)
+func discoverSkillDir() string {
+	candidates := []string{".go-cli/skills"}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		candidates = append(candidates, filepath.Join(home, ".config", "go-cli", "skills"))
+	}
+	for _, dir := range candidates {
+		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+			slog.Info("assemble_skill_dir_discovered", "dir", dir)
+			return dir
+		}
+	}
+	return ""
 }
 
 // registerCustomTools registers config-driven custom command tools from
