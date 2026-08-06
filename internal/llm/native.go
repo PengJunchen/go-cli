@@ -263,6 +263,45 @@ func withStreamFlag(body []byte) ([]byte, error) {
 	return out, nil
 }
 
+// injectThinking retrieves the ThinkingConfig stored by WithThinking on
+// genOpts (deleting the entry to prevent memory leaks), and if present with a
+// non-None level, decodes the JSON body into a map, applies the provider
+// adapter, and re-encodes. When targetKey is non-empty the adapter is applied
+// to the nested sub-map (e.g. "generationConfig" for Gemini) instead of the
+// top-level map. If no thinking config was set or the level is None the body
+// is returned unchanged.
+func injectThinking(data []byte, genOpts *GenerationOptions, adapter ThinkingAdapter, targetKey string) ([]byte, error) {
+	cfg, ok := ThinkingFromOpts(genOpts)
+	if !ok {
+		return data, nil
+	}
+	DeleteThinking(genOpts)
+	if cfg.Level == ThinkingNone {
+		return data, nil
+	}
+	var reqMap map[string]any
+	if err := json.Unmarshal(data, &reqMap); err != nil {
+		return nil, fmt.Errorf("llm: decode request for thinking: %w", err)
+	}
+	target := reqMap
+	if targetKey != "" {
+		sub, ok := reqMap[targetKey].(map[string]any)
+		if !ok {
+			sub = map[string]any{}
+		}
+		target = sub
+	}
+	adapter.Apply(target, cfg)
+	if targetKey != "" {
+		reqMap[targetKey] = target
+	}
+	out, err := json.Marshal(reqMap)
+	if err != nil {
+		return nil, fmt.Errorf("llm: marshal request with thinking: %w", err)
+	}
+	return out, nil
+}
+
 // ---------------------------------------------------------------------------
 // OpenAI streaming
 // ---------------------------------------------------------------------------
@@ -847,7 +886,7 @@ func encodeOpenAIRequest(cfg ModelConfig, model string, msgs []Message, opts []O
 	if err != nil {
 		return nil, fmt.Errorf("llm: marshal request: %w", err)
 	}
-	return data, nil
+	return injectThinking(data, genOpts, OpenAIThinkingAdapter{}, "")
 }
 
 // decodeOpenAIResponse parses an OpenAI chat completions response.
@@ -1012,7 +1051,7 @@ func encodeClaudeRequest(cfg ModelConfig, model string, msgs []Message, opts []O
 	if err != nil {
 		return nil, fmt.Errorf("llm: marshal request: %w", err)
 	}
-	return data, nil
+	return injectThinking(data, genOpts, ClaudeThinkingAdapter{}, "")
 }
 
 // decodeClaudeResponse parses an Anthropic messages response, joining any text
@@ -1186,7 +1225,7 @@ func encodeGeminiRequest(cfg ModelConfig, msgs []Message, opts []Option) ([]byte
 	if err != nil {
 		return nil, fmt.Errorf("llm: marshal request: %w", err)
 	}
-	return data, nil
+	return injectThinking(data, genOpts, GeminiThinkingAdapter{}, "generationConfig")
 }
 
 // decodeGeminiResponse parses a generateContent response, joining the first
