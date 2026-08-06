@@ -2,7 +2,7 @@
 // module of go-cli. It exercises classifiers (AllowAll, DenyAll, Static,
 // SafetyPolicy), ApprovalMiddleware (deny-first), PermissionModeResolver,
 // TrustManager, TrustStore, ApprovalStore, and the Registry.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck // package name with underscores required by test convention
 
 import (
 	"context"
@@ -229,8 +229,8 @@ func TestApproval_ApprovalMiddlewareDecisionCaching(t *testing.T) {
 		}
 		wrapped := mw.WrapToolCall(exec)
 
-		wrapped(ctx, toolCall("read"))
-		wrapped(ctx, toolCall("write"))
+		wrapped(ctx, toolCall("read"))  //nolint:errcheck,gosec
+		wrapped(ctx, toolCall("write")) //nolint:errcheck,gosec
 
 		assert.Equal(t, 2, classifier.count(), "different tool names should trigger separate classifications")
 	})
@@ -244,7 +244,7 @@ func TestApproval_ApprovalMiddlewareDecisionCaching(t *testing.T) {
 		classifier1 := &countingClassifier{inner: &approval.AllowAllClassifier{}}
 		mw1 := approval.NewApprovalMiddleware(classifier1, store)
 		w1 := mw1.WrapToolCall(dummyExec)
-		w1(ctx, call)
+		w1(ctx, call) //nolint:errcheck,gosec
 		assert.Equal(t, 1, classifier1.count())
 
 		// Second middleware with different classifier reads from the store.
@@ -384,7 +384,7 @@ func TestApproval_ApprovalStoreRegistry(t *testing.T) {
 func TestApproval_TrustManager(t *testing.T) {
 	ctx := context.Background()
 	store := approval.NewInMemoryTrustStore()
-	tm := approval.NewDefaultTrustManager(store).(trustManagerAccessor)
+	tm := approval.NewDefaultTrustManager(store).(trustManagerAccessor) //nolint:errcheck,gosec
 
 	t.Run("unknown project not trusted", func(t *testing.T) {
 		assert.False(t, tm.IsTrusted(ctx, "/unknown/project"))
@@ -407,9 +407,9 @@ func TestApproval_TrustManager(t *testing.T) {
 		freshStore := approval.NewInMemoryTrustStore()
 		freshTM := approval.NewDefaultTrustManager(freshStore)
 
-		freshTM.TrustProject(ctx, "/b")
-		freshTM.TrustProject(ctx, "/a")
-		freshTM.TrustProject(ctx, "/c")
+		freshTM.TrustProject(ctx, "/b") //nolint:errcheck,gosec
+		freshTM.TrustProject(ctx, "/a") //nolint:errcheck,gosec
+		freshTM.TrustProject(ctx, "/c") //nolint:errcheck,gosec
 
 		paths := freshTM.TrustedProjects()
 		assert.Equal(t, []string{"/a", "/b", "/c"}, paths)
@@ -420,7 +420,7 @@ func TestApproval_TrustManager(t *testing.T) {
 		freshTM := approval.NewDefaultTrustManager(freshStore)
 
 		path := "/tmp/fingerprinted"
-		freshTM.TrustProject(ctx, path)
+		freshTM.TrustProject(ctx, path) //nolint:errcheck,gosec
 
 		entries, err := freshStore.Load()
 		require.NoError(t, err)
@@ -436,7 +436,7 @@ func TestApproval_TrustManager(t *testing.T) {
 		path := "/tmp/expired-project"
 
 		// Trust first.
-		freshTM.TrustProject(ctx, path)
+		freshTM.TrustProject(ctx, path) //nolint:errcheck,gosec
 		assert.True(t, freshTM.IsTrusted(ctx, path))
 
 		// Manually set expires_at in the past.
@@ -588,8 +588,8 @@ func TestApproval_InMemoryTrustStore(t *testing.T) {
 	t.Run("save replaces all", func(t *testing.T) {
 		store := approval.NewInMemoryTrustStore()
 
-		store.Add("/old", approval.TrustEntry{Path: "/old"})
-		store.Save(map[string]approval.TrustEntry{
+		store.Add("/old", approval.TrustEntry{Path: "/old"}) //nolint:errcheck,gosec
+		store.Save(map[string]approval.TrustEntry{           //nolint:errcheck,gosec
 			"/new": {Path: "/new"},
 		})
 
@@ -702,8 +702,8 @@ func TestApproval_EdgeCases(t *testing.T) {
 			go func(idx int) {
 				defer wg.Done()
 				key := "tool_" + string(rune('a'+idx%26)) + ":hash"
-				store.Set(ctx, key, approval.Allow)
-				_, _, _ = store.Get(ctx, key)
+				store.Set(ctx, key, approval.Allow) //nolint:errcheck,gosec
+				_, _, _ = store.Get(ctx, key)       //nolint:errcheck,gosec
 			}(i)
 		}
 		wg.Wait()
@@ -719,9 +719,9 @@ func TestApproval_EdgeCases(t *testing.T) {
 			go func(idx int) {
 				defer wg.Done()
 				path := "/tmp/proj_" + string(rune('a'+idx%26))
-				store.Add(path, approval.TrustEntry{Path: path})
-				store.Load()
-				store.Remove(path)
+				store.Add(path, approval.TrustEntry{Path: path}) //nolint:errcheck,gosec
+				store.Load()                                     //nolint:errcheck,gosec
+				store.Remove(path)                               //nolint:errcheck,gosec
 			}(i)
 		}
 		wg.Wait()
@@ -763,7 +763,7 @@ func TestApproval_EdgeCases(t *testing.T) {
 	t.Run("file trust store handles empty file", func(t *testing.T) {
 		dir := t.TempDir()
 		path := filepath.Join(dir, "empty.json")
-		err := os.WriteFile(path, []byte{}, 0o644)
+		err := os.WriteFile(path, []byte{}, 0o600)
 		require.NoError(t, err)
 
 		store := approval.NewFileTrustStore(path)
@@ -857,8 +857,8 @@ func TestApproval_EdgeCases(t *testing.T) {
 	t.Run("trust store add updates existing entry", func(t *testing.T) {
 		store := approval.NewInMemoryTrustStore()
 
-		store.Add("/p", approval.TrustEntry{Path: "/p", Fingerprint: "old"})
-		store.Add("/p", approval.TrustEntry{Path: "/p", Fingerprint: "new"})
+		store.Add("/p", approval.TrustEntry{Path: "/p", Fingerprint: "old"}) //nolint:errcheck,gosec
+		store.Add("/p", approval.TrustEntry{Path: "/p", Fingerprint: "new"}) //nolint:errcheck,gosec
 
 		entries, err := store.Load()
 		require.NoError(t, err)
@@ -876,7 +876,7 @@ func TestApproval_EdgeCases(t *testing.T) {
 			go func(idx int) {
 				defer wg.Done()
 				path := "/p" + string(rune('a'+idx%26))
-				store.Add(path, approval.TrustEntry{Path: path})
+				store.Add(path, approval.TrustEntry{Path: path}) //nolint:errcheck,gosec
 			}(i)
 		}
 		wg.Wait()
@@ -886,19 +886,19 @@ func TestApproval_EdgeCases(t *testing.T) {
 		assert.NotEmpty(t, entries)
 	})
 
-	t.Run("expired trust entry with unparseable time is untrusted", func(t *testing.T) {
+	t.Run("expired trust entry with unparsable time is untrusted", func(t *testing.T) {
 		store := approval.NewInMemoryTrustStore()
 		tm := approval.NewDefaultTrustManager(store)
 		path := "/tmp/bad-expiry"
 
-		tm.TrustProject(ctx, path)
+		tm.TrustProject(ctx, path) //nolint:errcheck,gosec
 
 		// Corrupt the expires_at field.
-		entries, _ := store.Load()
+		entries, _ := store.Load() //nolint:errcheck,gosec
 		entry := entries[path]
 		entry.ExpiresAt = "not-a-valid-time"
 		entries[path] = entry
-		store.Save(entries)
+		store.Save(entries) //nolint:errcheck,gosec
 
 		assert.False(t, tm.IsTrusted(ctx, path))
 	})

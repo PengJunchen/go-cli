@@ -1,4 +1,4 @@
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck // package name with underscores required by test convention
 
 import (
 	"context"
@@ -176,9 +176,9 @@ type trackingLoop struct {
 	next core.AgentLoop
 }
 
-func (l *trackingLoop) Run(ctx context.Context, sub core.Submission) ([]core.AgentEvent, error) {
+func (l *trackingLoop) Run(ctx context.Context, sub core.Submission, streams ...core.EventStream) ([]core.AgentEvent, error) {
 	*l.log = append(*l.log, l.name+":before")
-	evts, err := l.next.Run(ctx, sub)
+	evts, err := l.next.Run(ctx, sub, streams...)
 	*l.log = append(*l.log, l.name+":after")
 	return evts, err
 }
@@ -235,7 +235,7 @@ func TestTurnRunnerLifecycle(t *testing.T) {
 
 type blockingLoop struct{}
 
-func (b *blockingLoop) Run(ctx context.Context, _ core.Submission) ([]core.AgentEvent, error) {
+func (b *blockingLoop) Run(ctx context.Context, _ core.Submission, _ ...core.EventStream) ([]core.AgentEvent, error) {
 	select {
 	case <-ctx.Done():
 		return []core.AgentEvent{{Kind: "error", Content: ctx.Err().Error(), Timestamp: time.Now()}}, ctx.Err()

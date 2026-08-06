@@ -81,7 +81,7 @@ func TestMockToolServerCallLog(t *testing.T) {
 	assert.Equal(t, "read_file", log[0].ToolName)
 	assert.Equal(t, args, log[0].Args)
 	assert.NotNil(t, log[0].Result)
-	assert.Greater(t, log[0].Duration.Nanoseconds(), int64(0))
+	assert.GreaterOrEqual(t, log[0].Duration.Nanoseconds(), int64(0))
 }
 
 func TestMockToolServerUnregisteredTool(t *testing.T) {

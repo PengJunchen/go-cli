@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"log/slog"
 )
 
 // These types are the default (compile-time) implementations of the tools
@@ -22,6 +23,7 @@ type defaultToolDef struct{}
 func (defaultToolDef) Name() string        { return "default" }
 func (defaultToolDef) Description() string { return "" }
 func (defaultToolDef) Execute(_ context.Context, _ ToolCall) (*ToolResult, error) {
+	slog.Debug("tools: default tool execute called (not implemented)")
 	return nil, errDefaultTool
 }
 
@@ -30,10 +32,17 @@ var _ ToolDefinition = (*defaultToolDef)(nil)
 // defaultToolRegistry is a minimal ToolRegistry with no registered tools.
 type defaultToolRegistry struct{}
 
-func (defaultToolRegistry) Register(_ context.Context, _ ToolDefinition) error { return nil }
+func (defaultToolRegistry) Register(_ context.Context, _ ToolDefinition) error {
+	slog.Debug("tools: default registry register called (no-op)")
+	return nil
+}
 func (defaultToolRegistry) Get(_ context.Context, _ string) (ToolDefinition, error) {
+	slog.Debug("tools: default registry get called (not implemented)")
 	return nil, errDefaultTool
 }
-func (defaultToolRegistry) List(_ context.Context) ([]ToolDefinition, error) { return nil, nil }
+func (defaultToolRegistry) List(_ context.Context) ([]ToolDefinition, error) {
+	slog.Debug("tools: default registry list called (empty)")
+	return nil, nil
+}
 
 var _ ToolRegistry = (*defaultToolRegistry)(nil)

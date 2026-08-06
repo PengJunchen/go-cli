@@ -8,9 +8,6 @@ import (
 	"log/slog"
 
 	"github.com/pengjunchen/go-cli/internal/config"
-	"github.com/pengjunchen/go-cli/internal/core"
-	"github.com/pengjunchen/go-cli/internal/llm"
-	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
@@ -109,28 +106,18 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) error {
 		"verbose", verboseFlag,
 	)
 
-	model, cleanup, err := c.buildModel(dispatchCtx, rc, providerName, modelName)
+	// Assemble the full agent runtime with all production wiring (same as
+	// interactive: model wrapping, tools, approval gates, retry/cost tracking,
+	// output guards, subagent, compaction).
+	assembly, err := AssembleAgent(dispatchCtx, rc, providerName, modelName, c.out)
 	if err != nil {
 		dispatchSpan.SetStatus(tracing.SpanStatusError, err.Error())
 		dispatchSpan.End()
-		return newExecutionError("prompt: build model", err)
+		return newExecutionError("prompt: assemble agent", err)
 	}
-	if cleanup != nil {
-		defer cleanup()
-	}
+	defer assembly.Cleanup()
 
-	tr := tools.NewDefaultToolRegistry()
-	if registerErr := tools.RegisterDefaults(dispatchCtx, tr); registerErr != nil {
-		dispatchSpan.SetStatus(tracing.SpanStatusError, registerErr.Error())
-		dispatchSpan.End()
-		return newExecutionError("prompt: register tools", registerErr)
-	}
-
-	loop := core.NewLoopAgent(core.WithLLM(model), core.WithTools(tr))
-	agent := core.NewAgentImpl("main", loop)
-	h := core.NewHarnessImpl(agent)
-
-	stream, err := h.Submit(dispatchCtx, prompt)
+	stream, err := assembly.Harness.Submit(dispatchCtx, prompt)
 	if err != nil {
 		dispatchSpan.SetStatus(tracing.SpanStatusError, err.Error())
 		dispatchSpan.End()
@@ -138,13 +125,44 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	}
 
 	out := c.out
+	streaming := false
 	for ev := range stream.Events() {
-		// The harness emits a "done" terminal event carrying the same content
-		// as the final "message" event; skip it to avoid duplicating the answer.
 		if ev.Content == "" || ev.Kind == "done" {
 			continue
 		}
-		if _, werr := fmt.Fprintf(out, "%s\n", ev.Content); werr != nil {
+		if ev.Incremental {
+			// Stream tokens as they arrive, without newlines (typewriter
+			// effect for terminals and pipes).
+			streaming = true
+			if _, werr := fmt.Fprint(out, ev.Content); werr != nil {
+				dispatchSpan.SetStatus(tracing.SpanStatusError, werr.Error())
+				dispatchSpan.End()
+				return newExecutionError("prompt: write output", werr)
+			}
+			continue
+		}
+		// Complete non-incremental assistant message.
+		if streaming {
+			// Content has already been streamed token-by-token; close the
+			// line with a trailing newline.
+			if _, werr := fmt.Fprintln(out); werr != nil {
+				dispatchSpan.SetStatus(tracing.SpanStatusError, werr.Error())
+				dispatchSpan.End()
+				return newExecutionError("prompt: write output", werr)
+			}
+		} else {
+			// Non-streaming response (e.g. provider without Stream support).
+			if _, werr := fmt.Fprintf(out, "%s\n", ev.Content); werr != nil {
+				dispatchSpan.SetStatus(tracing.SpanStatusError, werr.Error())
+				dispatchSpan.End()
+				return newExecutionError("prompt: write output", werr)
+			}
+		}
+		streaming = false
+	}
+	// If the last event was incremental, ensure a trailing newline.
+	if streaming {
+		if _, werr := fmt.Fprintln(out); werr != nil {
 			dispatchSpan.SetStatus(tracing.SpanStatusError, werr.Error())
 			dispatchSpan.End()
 			return newExecutionError("prompt: write output", werr)
@@ -167,26 +185,6 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) error {
 		)
 	}
 	return nil
-}
-
-// buildModel resolves an llm.BaseChatModel from the loaded configuration. When
-// the configuration supplies a BaseURL or APIKey, a custom provider is built
-// with those settings; otherwise the default provider registry is used.
-func (c *promptCmd) buildModel(ctx context.Context, rc *config.Config, providerName, modelName string) (llm.BaseChatModel, func(), error) {
-	cfg := llm.ModelConfig{Model: modelName}
-
-	if rc != nil && (rc.Provider.BaseURL != "" || rc.Provider.APIKey != "") {
-		provider := llm.NewEinoProvider(
-			llm.WithProviderName(providerName),
-			llm.WithBaseURL(rc.Provider.BaseURL),
-			llm.WithAPIKey(rc.Provider.APIKey),
-			llm.WithDefaultModel(modelName),
-		)
-		return provider.Build(ctx, cfg)
-	}
-
-	reg := llm.NewProviderRegistry()
-	return reg.GetModel(ctx, providerName, cfg)
 }
 
 // emitClosedown records the closedown span emitted once the harness has

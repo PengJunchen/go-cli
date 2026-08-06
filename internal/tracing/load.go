@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"os"
 	"sort"
 )
@@ -18,6 +19,7 @@ type SpanNode struct {
 // LoadTrace loads all spans from a JSONL file and reconstructs the execution
 // tree. Lines that cannot be parsed are skipped.
 func LoadTrace(filePath string) (*SpanNode, error) {
+	slog.Debug("tracing: loading trace file", "path", filePath)
 	data, err := os.ReadFile(filePath)
 	if err != nil {
 		return nil, fmt.Errorf("open trace file: %w", err)
@@ -29,7 +31,7 @@ func LoadTrace(filePath string) (*SpanNode, error) {
 	for scanner.Scan() {
 		var span SpanData
 		if err := json.Unmarshal(scanner.Bytes(), &span); err != nil {
-			continue // skip unparseable lines
+			continue // skip unparsable lines
 		}
 		spans = append(spans, span)
 	}
@@ -37,6 +39,7 @@ func LoadTrace(filePath string) (*SpanNode, error) {
 		return nil, fmt.Errorf("read trace file: %w", err)
 	}
 
+	slog.Debug("tracing: parsed spans from file", "count", len(spans), "path", filePath)
 	return buildSpanTree(spans)
 }
 

@@ -124,17 +124,26 @@ type ProviderComposer interface {
 // they emit stay linked in the trace.
 type ProviderSourceFunc func(context.Context) ([]ModelProvider, error)
 
+// composerOptions holds the configurable fields of a composer during
+// construction. It is an internal construction aid so that
+// ProviderComposerOption closures do not reference the concrete
+// DefaultProviderComposer type.
+type composerOptions struct {
+	configSource    ProviderSourceFunc
+	extensionSource ProviderSourceFunc
+}
+
 // ProviderComposerOption configures a DefaultProviderComposer.
-type ProviderComposerOption func(*DefaultProviderComposer)
+type ProviderComposerOption func(*composerOptions)
 
 // WithConfigProviderSource sets the callback that yields the config layer.
 func WithConfigProviderSource(fn ProviderSourceFunc) ProviderComposerOption {
-	return func(d *DefaultProviderComposer) { d.configSource = fn }
+	return func(o *composerOptions) { o.configSource = fn }
 }
 
 // WithExtensionProviderSource sets the callback that yields the extension layer.
 func WithExtensionProviderSource(fn ProviderSourceFunc) ProviderComposerOption {
-	return func(d *DefaultProviderComposer) { d.extensionSource = fn }
+	return func(o *composerOptions) { o.extensionSource = fn }
 }
 
 // WithConfigProviders wraps a static slice of providers into the config layer.
@@ -170,17 +179,20 @@ var _ ProviderComposer = (*DefaultProviderComposer)(nil)
 // the builtin providers and, when configured, the config and extension layers.
 // Any source left nil contributes nothing.
 func NewDefaultProviderComposer(opts ...ProviderComposerOption) ProviderComposer {
-	d := &DefaultProviderComposer{
-		name:            "default-provider-composer",
+	o := &composerOptions{
 		configSource:    staticSources(nil),
 		extensionSource: staticSources(nil),
 	}
 	for _, opt := range opts {
 		if opt != nil {
-			opt(d)
+			opt(o)
 		}
 	}
-	return d
+	return &DefaultProviderComposer{
+		name:            "default-provider-composer",
+		configSource:    o.configSource,
+		extensionSource: o.extensionSource,
+	}
 }
 
 // staticSources returns a ProviderSourceFunc that always yields the given

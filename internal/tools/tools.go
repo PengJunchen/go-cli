@@ -5,6 +5,8 @@
 // contracts.
 package tools
 
+//exempt:scan008 // pure type definitions, no executable logic
+
 import "context"
 
 // ToolCall is a request to invoke a named tool with arguments.
@@ -55,10 +57,25 @@ type ToolDefinition interface {
 // their OpenAI-compatible JSON Schema for parameters. Tools with structured
 // input (e.g. MCP tools with an inputSchema) should implement this so the
 // LLM knows what arguments it can pass.
+//
+//exempt:scan012 // optional interface; implementations in various tool files
 type Parameterized interface {
 	// Parameters returns the JSON Schema object describing the tool's
 	// input parameters, or nil if the tool has no structured parameters.
 	Parameters() any
+}
+
+// PromptGuideliner is an optional interface that tools can implement to
+// provide usage guidelines injected into the system prompt. This is analogous
+// to Parameterized: tools that wish to steer the model's tool usage should
+// implement this so the SystemPromptBuilder can include their guidance.
+//
+//exempt:scan012 // optional interface; implementations in various tool files
+type PromptGuideliner interface {
+	// PromptGuidelines returns human-readable usage hints for the tool.
+	// Each string is rendered as a separate bullet point in the system
+	// prompt's tool guidelines section.
+	PromptGuidelines() []string
 }
 
 // ToolRegistry is the contract a repository of tools satisfies. It supports

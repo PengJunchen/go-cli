@@ -338,12 +338,12 @@ func TestScanVQVGMarkers_IgnoresTestFiles(t *testing.T) {
 	assert.False(t, m.hasRegister, "test files should be ignored")
 }
 
-func TestScanVQVGMarkers_SkipsUnparseableFiles(t *testing.T) {
+func TestScanVQVGMarkers_SkipsUnparsableFiles(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "bad.go"), []byte("this is not go code"), 0o600))
 	m := scanVQVGMarkers(dir)
 	var zero vqvgMarkers
-	assert.Equal(t, zero, m, "unparseable files should produce zero markers")
+	assert.Equal(t, zero, m, "unparsable files should produce zero markers")
 }
 
 func TestScanVQVGMarkers_DispatchFuncNames(t *testing.T) {

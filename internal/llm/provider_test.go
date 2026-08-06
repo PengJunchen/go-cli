@@ -192,8 +192,8 @@ func TestHTTPChatModelBaseURLJoin(t *testing.T) {
 	assert.Equal(t, "/chat/completions", gotPath)
 }
 
-// TestHTTPChatModelStreamSingleChunk verifies Stream delivers the content and
-// closes the channel.
+// TestHTTPChatModelStreamSingleChunk verifies Stream delivers the content as a
+// content chunk followed by a final chunk and closes the channel.
 func TestHTTPChatModelStreamSingleChunk(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -215,9 +215,11 @@ func TestHTTPChatModelStreamSingleChunk(t *testing.T) {
 	for c := range ch {
 		chunks = append(chunks, c)
 	}
-	require.Len(t, chunks, 1)
+	require.Len(t, chunks, 2)
 	assert.Equal(t, RoleAssistant, chunks[0].Role)
 	assert.Equal(t, "streamed", chunks[0].Content)
+	assert.False(t, chunks[0].Final)
+	assert.True(t, chunks[1].Final)
 }
 
 // TestBuildBodyOptions verifies per-call options override config defaults.

@@ -180,7 +180,7 @@ func TestEditEmitsToolCallSpan(t *testing.T) {
 	require.NoError(t, reg.Register(ctx, NewEditFileTool()))
 
 	// Execute is a method on *DefaultToolRegistry, not the ToolRegistry interface.
-	dreg := reg.(*DefaultToolRegistry)
+	dreg := reg.(*DefaultToolRegistry) //nolint:errcheck
 	_, err := dreg.Execute(ctx, ToolCall{
 		Name: "edit",
 		Args: map[string]any{
@@ -234,4 +234,38 @@ func TestEditDescription(t *testing.T) {
 	desc := tool.Description()
 	assert.Contains(t, desc, "edit")
 	assert.Contains(t, desc, "old_string")
+}
+
+// TestEditWithFileTrackerOption verifies that WithEditFileTracker sets the
+// fileTracker field so that Execute creates a backup checkpoint before
+// editing an existing file.
+func TestEditWithFileTrackerOption(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n\nvar version = 1\n"), 0o600))
+
+	ft := NewFileTracker()
+	tool := NewEditFileTool(WithEditFileTracker(ft))
+
+	_, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{
+			"file_path":  path,
+			"old_string": "var version = 1",
+			"new_string": "var version = 2",
+		},
+	})
+	require.NoError(t, err)
+
+	// Backup should have created a checkpoint for the existing file.
+	checkpoints := ft.ListCheckpoints()
+	require.Len(t, checkpoints, 1)
+	assert.Equal(t, path, checkpoints[0].Path)
+	assert.True(t, checkpoints[0].Existed)
+
+	// The backup content should match the original file content.
+	content, ok := ft.BackupContent(checkpoints[0].ID)
+	require.True(t, ok)
+	assert.Equal(t, "package main\n\nvar version = 1\n", string(content))
 }

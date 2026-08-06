@@ -3,7 +3,7 @@
 // TruncatingCompactor, UnifiedCompactor (strategy routing), MidTurnCompact
 // (threshold auto-compaction), HeuristicTokenEstimator, QualityEvaluator, and
 // long-conversation scenarios.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"context"

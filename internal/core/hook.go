@@ -90,3 +90,76 @@ func (c *HookChain) After(ctx context.Context, submission Submission, result Res
 	}
 	return firstErr
 }
+
+// HookMiddleware is an agent-level Middleware that wraps an AgentLoop with a
+// HookChain. Before each Run, it invokes the chain's Before phase (which may
+// halt the run); after the Run completes, it invokes the After phase so hooks
+// observe the run outcome.
+type HookMiddleware struct {
+	chain *HookChain
+	name  string
+}
+
+var _ Middleware = (*HookMiddleware)(nil)
+
+// NewHookMiddleware builds a middleware backed by the given HookChain.
+func NewHookMiddleware(chain *HookChain) *HookMiddleware {
+	return &HookMiddleware{chain: chain, name: "hook"}
+}
+
+// Name returns the middleware identifier.
+func (m *HookMiddleware) Name() string {
+	if m.name == "" {
+		return "hook"
+	}
+	return m.name
+}
+
+// Wrap returns a loop-view that runs the hook chain before and after the
+// wrapped loop.
+func (m *HookMiddleware) Wrap(next AgentLoop) AgentLoop {
+	return &hookLoop{chain: m.chain, next: next}
+}
+
+// hookLoop is the concrete wrapped loop produced by HookMiddleware.
+type hookLoop struct {
+	chain *HookChain
+	next  AgentLoop
+}
+
+// Run invokes the Before hooks, delegates to the wrapped loop, then invokes
+// the After hooks. When a Before hook halts the run, the wrapped loop is not
+// called and an error event is returned.
+func (l *hookLoop) Run(ctx context.Context, submission Submission, stream ...EventStream) ([]AgentEvent, error) {
+	span, spanCtx := tracing.SpanFromContext(ctx, "middleware.hook", tracing.SpanKindInternal)
+	defer span.End()
+	logger := tracing.NewTraceLogger(span, nil)
+
+	// Before hooks.
+	result, err := l.chain.Before(spanCtx, submission)
+	if err != nil {
+		logger.Info("hook.before.error", "err", err)
+		span.SetStatus(tracing.SpanStatusError, err.Error())
+		return []AgentEvent{errEvent(err)}, err
+	}
+	if result.Interrupted() {
+		logger.Info("hook.before.interrupt", "output", result.Output)
+		return []AgentEvent{{Kind: "status", Content: result.Output}}, nil
+	}
+
+	// Delegate to the wrapped loop.
+	events, runErr := l.next.Run(spanCtx, submission, stream...)
+
+	// Derive the Result for After hooks.
+	res := Result{Success: runErr == nil}
+	if len(events) > 0 {
+		res.Message = lastMessageEvent(events)
+	}
+
+	// After hooks - errors are logged but do not replace the run error.
+	if afterErr := l.chain.After(spanCtx, submission, res, runErr); afterErr != nil {
+		slog.Warn("core.hook.after_error", "err", afterErr)
+	}
+
+	return events, runErr
+}

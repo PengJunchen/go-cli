@@ -4,6 +4,8 @@
 // configuration.
 package extension
 
+//exempt:scan008 // pure type definitions, no executable logic
+
 import (
 	"context"
 	"time"

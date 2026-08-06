@@ -31,6 +31,10 @@ type AgentEvent struct {
 	TraceID string
 	// SpanID associates the event with a span for debug logging.
 	SpanID string
+	// Incremental marks a partial event that contains only a fragment of
+	// the assistant's response (streaming tokens). The TUI accumulates
+	// these into the last assistant entry instead of creating new entries.
+	Incremental bool
 }
 
 // App is the top-level TUI application entry point. It runs a
@@ -71,6 +75,14 @@ func WithWidth(width int) AppOption {
 	return func(a *BubbleteaApp) { a.width = width }
 }
 
+// WithOnUpdate registers a callback invoked after every view mutation. The
+// callback receives the freshly rendered view string so it does not need to
+// call View (which would deadlock on the internal mutex). The callback runs
+// synchronously inside the render loop, so it must not block on the app.
+func WithOnUpdate(fn func(string)) AppOption {
+	return func(a *BubbleteaApp) { a.onUpdate = fn }
+}
+
 // BubbleteaApp is the default App implementation. It owns a render loop that
 // merges three sources: the incoming agent-event channel, messages pushed via
 // Send, and the quit/cancel signals. Streaming content types accumulate into a
@@ -98,10 +110,21 @@ type BubbleteaApp struct {
 	eventsSeen atomic.Int64
 	msgsSeen   atomic.Int64
 
+	// streamingEntry points to the accordion entry currently receiving
+	// incremental token chunks. It is set on the first incremental event
+	// and cleared when a non-incremental event arrives.
+	streamingEntry *AccordionEntry
+	streamingBuf   strings.Builder
+
 	// interactive enables keyboard-driven accordion navigation. When false
 	// (the default for non-TTY / pipe input), the app renders every entry
-	// expanded (legacy behaviour).
+	// expanded (legacy behavior).
 	interactive bool
+
+	// onUpdate is invoked after every entry mutation (add/replace). It lets
+	// the caller stream the view to the terminal in real time instead of
+	// waiting for the turn to finish. When nil no callback fires.
+	onUpdate func(string)
 }
 
 // NewBubbleteaApp constructs an app wired to the given event source, using a
@@ -109,14 +132,14 @@ type BubbleteaApp struct {
 // queue. Options override these defaults.
 func NewBubbleteaApp(events <-chan AgentEvent, opts ...AppOption) *BubbleteaApp {
 	a := &BubbleteaApp{
-		reg:        NewDefaultRegistry(),
-		themeMgr:   NewThemeManager(),
-		events:     events,
-		msgCh:      make(chan Msg, 16),
-		quitCh:     make(chan struct{}),
-		done:       make(chan struct{}),
-		streamBuf:  make(map[string]*strings.Builder),
-		accordion:  NewAccordionModel(),
+		reg:         NewDefaultRegistry(),
+		themeMgr:    NewThemeManager(),
+		events:      events,
+		msgCh:       make(chan Msg, 16),
+		quitCh:      make(chan struct{}),
+		done:        make(chan struct{}),
+		streamBuf:   make(map[string]*strings.Builder),
+		accordion:   NewAccordionModel(),
 		interactive: isTerminal(),
 	}
 	for _, opt := range opts {
@@ -128,6 +151,11 @@ func NewBubbleteaApp(events <-chan AgentEvent, opts ...AppOption) *BubbleteaApp 
 // Run starts the render loop. It returns when the context is canceled, the
 // event channel closes, or Quit is invoked. The loop tears down internal
 // resources before returning.
+//
+// In interactive (TTY) mode the terminal is switched to raw mode so the
+// keyboard loop can read single keypresses (arrow navigation, Tab/Enter to
+// toggle, e/c for global expand/collapse, q to quit). The terminal is
+// restored before Run returns.
 func (a *BubbleteaApp) Run(ctx context.Context) error {
 	if !a.running.CompareAndSwap(false, true) {
 		return errAlreadyRunning
@@ -136,6 +164,22 @@ func (a *BubbleteaApp) Run(ctx context.Context) error {
 		a.running.Store(false)
 		a.cleanup()
 	}()
+
+	// Enable keyboard navigation only when interactive AND the platform
+	// supports raw mode. On unsupported platforms we degrade to the
+	// always-expanded rendering.
+	var kbdCancel context.CancelFunc
+	if a.interactive {
+		if oldTerm, err := makeRaw(int(os.Stdin.Fd())); err == nil {
+			defer restoreRaw(int(os.Stdin.Fd()), oldTerm) //nolint:errcheck
+			kbdCtx, cancel := context.WithCancel(ctx)
+			kbdCancel = cancel
+			go a.keyboardLoop(kbdCtx)
+		}
+	}
+	if kbdCancel != nil {
+		defer kbdCancel()
+	}
 
 	slog.Debug("tui.app.run", "started", true)
 	for {
@@ -153,12 +197,16 @@ func (a *BubbleteaApp) Run(ctx context.Context) error {
 			}
 			a.eventsSeen.Add(1)
 			a.handleEvent(ctx, ev)
-		case _, ok := <-a.msgCh:
+		case msg, ok := <-a.msgCh:
 			if !ok {
 				slog.Debug("tui.app.run", "stop", "msg_channel_closed")
 				return nil
 			}
 			a.msgsSeen.Add(1)
+			if a.handleMsg(msg) {
+				slog.Debug("tui.app.run", "stop", "quit_key")
+				return nil
+			}
 		}
 	}
 }
@@ -191,7 +239,7 @@ func (a *BubbleteaApp) MessagesProcessed() int64 { return a.msgsSeen.Load() }
 
 // View returns the current rendered view. In interactive mode the accordion
 // model produces collapsed/expanded output. In non-interactive mode all entries
-// are rendered expanded (legacy behaviour).
+// are rendered expanded (legacy behavior).
 func (a *BubbleteaApp) View() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -215,9 +263,32 @@ func (a *BubbleteaApp) cleanup() {
 }
 
 // handleEvent dispatches a single agent event to its renderer and adds the
-// result to the accordion model. Tool calls, tool results and thinking entries
-// are stored as collapsible entries; other entries are expanded by default.
+// result to the accordion model. Incremental events (streaming tokens) are
+// accumulated into the last assistant entry instead of creating new entries.
+// Tool calls, tool results and thinking entries are stored as collapsible
+// entries; other entries are expanded by default.
 func (a *BubbleteaApp) handleEvent(ctx context.Context, ev AgentEvent) {
+	if ev.Incremental {
+		a.handleIncremental(ctx, ev)
+		return
+	}
+
+	// Finalize any active streaming entry so the next incremental event
+	// creates a fresh entry rather than appending to a completed message.
+	a.mu.Lock()
+	hadStreaming := a.streamingEntry != nil
+	a.streamingEntry = nil
+	a.streamingBuf.Reset()
+	a.mu.Unlock()
+
+	// When the loop finishes streaming, it sends a non-incremental "message"
+	// event carrying the complete content for downstream consumers (harness
+	// result, lastMessageEvent). The TUI has already rendered the content
+	// incrementally, so skip this duplicate.
+	if hadStreaming && ev.Type == "message" {
+		return
+	}
+
 	start := time.Now()
 	ct := ev.ContentType
 	r, ok := a.reg.Get(ct)
@@ -246,35 +317,100 @@ func (a *BubbleteaApp) handleEvent(ctx context.Context, ev AgentEvent) {
 	)
 }
 
+// handleIncremental processes a streaming token chunk. On the first chunk it
+// creates a new accordion entry; on subsequent chunks it appends to the
+// accumulated content and re-renders the entry in place, producing a live
+// typewriter effect.
+func (a *BubbleteaApp) handleIncremental(ctx context.Context, ev AgentEvent) {
+	ct := ev.ContentType
+	r, ok := a.reg.Get(ct)
+	if !ok {
+		ct = DefaultContentType
+		r, ok = a.reg.Get(DefaultContentType)
+	}
+
+	var view string
+	notify := a.onUpdate != nil
+
+	func() {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+
+		a.streamingBuf.WriteString(ev.Content)
+		accumulated := a.streamingBuf.String()
+
+		// Render the accumulated content so styles wrap the full message.
+		out := accumulated
+		if ok && r != nil {
+			theme := Theme(DarkTheme{})
+			if a.themeMgr != nil {
+				theme = a.themeMgr.Get()
+			}
+			out = r.Render(ctx, accumulated, RenderOpts{
+				Theme:       theme,
+				Width:       a.width,
+				ContentType: ct,
+			})
+		}
+
+		if a.streamingEntry == nil {
+			entry := entryFor(ct, out, a.interactive)
+			entry.Collapsed = false
+			a.accordion.Add(entry)
+			a.streamingEntry = entry
+		} else {
+			a.streamingEntry.Full = out
+			a.streamingEntry.Summary = summarizeFirstLine(out, 80)
+		}
+
+		if notify {
+			view = a.accordion.Render()
+		}
+	}()
+
+	if notify {
+		a.onUpdate(view)
+	}
+}
+
 // addEntry appends a rendered frame to the accordion model. Streaming
 // renderers replace the last entry instead of appending, giving a live-update
-// effect.
+// effect. After mutating the model the view is rendered (under the lock) and
+// the onUpdate callback is invoked outside the lock so it can safely write to
+// the terminal.
 func (a *BubbleteaApp) addEntry(ct string, out string) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	var view string
+	notify := a.onUpdate != nil
+	func() {
+		a.mu.Lock()
+		defer a.mu.Unlock()
 
-	if isStreamingRenderContentType(ct) {
-		if a.accordion.Len() == 0 {
-			a.accordion.Add(entryFor(ct, out, a.interactive))
-			return
+		if isStreamingRenderContentType(ct) {
+			if a.accordion.Len() == 0 {
+				a.accordion.Add(entryFor(ct, out, a.interactive))
+			} else {
+				last := a.accordion.Entries()[a.accordion.Len()-1]
+				last.Full = out
+				last.Summary = summarizeFirstLine(out, 80)
+				last.Collapsed = false
+			}
+		} else {
+			entry := entryFor(ct, out, a.interactive)
+			if !a.interactive {
+				entry.Collapsed = false
+				for _, c := range entry.Children {
+					c.Collapsed = false
+				}
+			}
+			a.accordion.Add(entry)
 		}
-		last := a.accordion.Entries()[a.accordion.Len()-1]
-		last.Full = out
-		last.Summary = summarizeFirstLine(out, 80)
-		last.Collapsed = false
-		return
-	}
-
-	entry := entryFor(ct, out, a.interactive)
-	// Only collapse gated content types when interactive; piped/legacy
-	// consumers get the full transcript.
-	if !a.interactive {
-		entry.Collapsed = false
-		for _, c := range entry.Children {
-			c.Collapsed = false
+		if notify {
+			view = a.accordion.Render()
 		}
+	}()
+	if notify {
+		a.onUpdate(view)
 	}
-	a.accordion.Add(entry)
 }
 
 // isStreamingRenderContentType reports whether the content type is a
@@ -335,12 +471,15 @@ func stripANSIPlain(s string) string {
 	return sb.String()
 }
 
-// isTerminal reports whether stdin is a terminal (TTY). When true the
+// IsTerminal reports whether stdin is a terminal (TTY). When true the
 // interactive accordion mode is enabled with keyboard navigation.
-func isTerminal() bool {
+func IsTerminal() bool {
 	fi, err := os.Stdin.Stat()
 	if err != nil {
 		return false
 	}
 	return fi.Mode()&os.ModeCharDevice != 0
 }
+
+// isTerminal is the unexported alias used by the constructor.
+func isTerminal() bool { return IsTerminal() }

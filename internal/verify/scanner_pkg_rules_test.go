@@ -137,13 +137,13 @@ func TestVar(t *testing.T) { _ = TestOnlyVar }
 	assert.True(t, found, "should detect exported var only used in tests")
 }
 
-func TestScanExportOnlyUsedByTest_UnparseableFile(t *testing.T) {
+func TestScanExportOnlyUsedByTest_UnparsableFile(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "bad.go"), []byte("not valid go"), 0o600))
 
 	goFiles := []string{filepath.Join(dir, "bad.go")}
 	findings := scanExportOnlyUsedByTest(dir, goFiles)
-	assert.Empty(t, findings, "unparseable files should be skipped gracefully")
+	assert.Empty(t, findings, "unparsable files should be skipped gracefully")
 }
 
 // ---------------------------------------------------------------------------
@@ -186,12 +186,12 @@ func TestRun() {}
 	assert.Empty(t, findings, "test files should be skipped")
 }
 
-func TestScanSlogUsage_UnparseableFile(t *testing.T) {
+func TestScanSlogUsage_UnparsableFile(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "bad.go"), []byte("bad code"), 0o600))
 
 	findings := scanSlogUsage(dir, []string{filepath.Join(dir, "bad.go")})
-	assert.Empty(t, findings, "unparseable file should be skipped")
+	assert.Empty(t, findings, "unparsable file should be skipped")
 }
 
 // ---------------------------------------------------------------------------
@@ -937,11 +937,11 @@ func Init()
 	assert.Empty(t, findings, "function with nil body should not crash")
 }
 
-func TestScanConfigMergePriority_UnparseableFile(t *testing.T) {
+func TestScanConfigMergePriority_UnparsableFile(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "bad.go"), []byte("not valid go"), 0o600))
 	findings := scanConfigMergePriority(dir, []string{filepath.Join(dir, "bad.go")})
-	assert.Empty(t, findings, "unparseable file should be skipped")
+	assert.Empty(t, findings, "unparsable file should be skipped")
 }
 
 func TestScanConfigMergePriority_MultipleRhsSingleAssign(t *testing.T) {
@@ -980,11 +980,11 @@ func Route(v interface{}) {
 	assert.Empty(t, findings, "type switch should not trigger SCAN-010")
 }
 
-func TestScanConcreteInInterface_UnparseableFile(t *testing.T) {
+func TestScanConcreteInInterface_UnparsableFile(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "bad.go"), []byte("not valid go"), 0o600))
 	findings := scanConcreteInInterface(dir, []string{filepath.Join(dir, "bad.go")})
-	assert.Empty(t, findings, "unparseable file should be skipped")
+	assert.Empty(t, findings, "unparsable file should be skipped")
 }
 
 func TestScanConcreteInInterface_SkipsTestFiles(t *testing.T) {

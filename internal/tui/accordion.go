@@ -1,6 +1,8 @@
 package tui
 
 import (
+	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -165,3 +167,76 @@ func (m *AccordionModel) Render() string {
 
 // Len returns the number of top-level entries.
 func (m *AccordionModel) Len() int { return len(m.entries) }
+
+// ---------- collapsible tool call rendering ----------
+
+// ANSI escape sequences for the collapsible tool call renderer.
+const (
+	tcCyan  = "\033[36m"
+	tcGray  = "\033[90m"
+	tcReset = "\033[0m"
+)
+
+// sortedArgKeys returns the keys of args in sorted order for deterministic
+// output.
+func sortedArgKeys(args map[string]any) []string {
+	keys := make([]string, 0, len(args))
+	for k := range args {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// RenderCollapsed renders a tool call as a single-line summary:
+// [tool] tool_name(arg1=val1, arg2=val2). The tool name is colored cyan.
+func (r *ToolCallRenderer) RenderCollapsed(toolName string, args map[string]any) string {
+	var sb strings.Builder
+	sb.WriteString(tcCyan)
+	sb.WriteString("[tool] ")
+	sb.WriteString(toolName)
+	sb.WriteString(tcReset)
+	sb.WriteString("(")
+	keys := sortedArgKeys(args)
+	for i, k := range keys {
+		if i > 0 {
+			sb.WriteString(", ")
+		}
+		sb.WriteString(k)
+		sb.WriteString("=")
+		sb.WriteString(fmt.Sprintf("%v", args[k]))
+	}
+	sb.WriteString(")")
+	return sb.String()
+}
+
+// RenderExpanded renders a tool call with full args and result across multiple
+// lines. The tool name is colored cyan and the result is colored gray.
+func (r *ToolCallRenderer) RenderExpanded(toolName string, args map[string]any, result string) string {
+	var sb strings.Builder
+	sb.WriteString(tcCyan)
+	sb.WriteString("[tool] ")
+	sb.WriteString(toolName)
+	sb.WriteString(tcReset)
+	sb.WriteString("\n  args:")
+	keys := sortedArgKeys(args)
+	if len(keys) == 0 {
+		sb.WriteString(" (none)")
+	} else {
+		for _, k := range keys {
+			sb.WriteString("\n    ")
+			sb.WriteString(k)
+			sb.WriteString(": ")
+			sb.WriteString(fmt.Sprintf("%v", args[k]))
+		}
+	}
+	sb.WriteString("\n  ")
+	sb.WriteString(tcGray)
+	sb.WriteString("result:")
+	for _, line := range strings.Split(result, "\n") {
+		sb.WriteString("\n    ")
+		sb.WriteString(line)
+	}
+	sb.WriteString(tcReset)
+	return sb.String()
+}

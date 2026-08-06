@@ -198,7 +198,7 @@ func newBlockingTurnLoop() *blockingTurnLoop {
 	return &blockingTurnLoop{started: make(chan struct{}), release: make(chan struct{})}
 }
 
-func (b *blockingTurnLoop) Run(ctx context.Context, _ Submission) ([]AgentEvent, error) {
+func (b *blockingTurnLoop) Run(ctx context.Context, _ Submission, _ ...EventStream) ([]AgentEvent, error) {
 	close(b.started)
 	select {
 	case <-ctx.Done():
@@ -230,6 +230,6 @@ func runningTurnID(t *testing.T, runner *EinoTurnRunner) string {
 // errorLoop returns a fixed error on every Run.
 type errorLoop struct{ err error }
 
-func (l *errorLoop) Run(_ context.Context, _ Submission) ([]AgentEvent, error) {
+func (l *errorLoop) Run(_ context.Context, _ Submission, _ ...EventStream) ([]AgentEvent, error) {
 	return nil, l.err
 }

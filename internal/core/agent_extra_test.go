@@ -11,7 +11,7 @@ import (
 // returningNilEventsLoop returns no events and no error.
 type returningNilEventsLoop struct{}
 
-func (returningNilEventsLoop) Run(context.Context, Submission) ([]AgentEvent, error) {
+func (returningNilEventsLoop) Run(context.Context, Submission, ...EventStream) ([]AgentEvent, error) {
 	return nil, nil
 }
 
@@ -36,7 +36,7 @@ func TestAgentRunWithNilEventSlice(t *testing.T) {
 // errorAfterUserLoop fails Run after the user message is recorded.
 type errorAfterUserLoop struct{}
 
-func (errorAfterUserLoop) Run(context.Context, Submission) ([]AgentEvent, error) {
+func (errorAfterUserLoop) Run(context.Context, Submission, ...EventStream) ([]AgentEvent, error) {
 	return nil, errMaxIterations
 }
 

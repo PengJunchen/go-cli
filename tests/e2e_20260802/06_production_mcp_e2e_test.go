@@ -8,13 +8,14 @@
 // plus MCP server lifecycle, tool registration/calling, MCPToolAdapter
 // wrapping, tool name normalization, hot reload lifecycle, and a complex
 // pipeline through MockMCPServer → ApprovalMiddleware → ToolRegistry.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"context"
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -111,7 +112,7 @@ func TestProduction_CircuitBreaker_Reset(t *testing.T) {
 	cb := production.NewDefaultCircuitBreaker(production.CircuitBreakerConfig{
 		FailureThreshold: 1,
 	})
-	_, _ = cb.Execute(context.Background(), func() (any, error) { return nil, errors.New("fail") })
+	_, _ = cb.Execute(context.Background(), func() (any, error) { return nil, errors.New("fail") }) //nolint:errcheck,gosec
 	assert.Equal(t, production.CircuitOpen, cb.State())
 	require.NoError(t, cb.Reset(context.Background()))
 	assert.Equal(t, production.CircuitClosed, cb.State())
@@ -125,7 +126,7 @@ func TestProduction_CircuitBreaker_Fallback(t *testing.T) {
 	}, production.WithClock(clock.Now), production.WithFallback(func() (any, error) {
 		return "cached-value", nil
 	}))
-	_, _ = cb.Execute(context.Background(), func() (any, error) { return nil, errors.New("fail") })
+	_, _ = cb.Execute(context.Background(), func() (any, error) { return nil, errors.New("fail") }) //nolint:errcheck,gosec
 	assert.Equal(t, production.CircuitOpen, cb.State())
 
 	val, err := cb.Execute(context.Background(), func() (any, error) { return "fresh", nil })
@@ -546,9 +547,12 @@ func TestMCP_HotReload_Lifecycle(t *testing.T) {
 		return "pong", nil
 	})
 
+	var mu sync.Mutex
 	var registeredCount int
 	var lastTools []mcp.MCPTool
 	registerFn := func(tools []mcp.MCPTool) {
+		mu.Lock()
+		defer mu.Unlock()
 		registeredCount++
 		lastTools = tools
 	}
@@ -573,9 +577,13 @@ func TestMCP_HotReload_Lifecycle(t *testing.T) {
 
 	// Give it time to reconnect.
 	time.Sleep(200 * time.Millisecond)
-	assert.Equal(t, 1, registeredCount)
-	assert.Len(t, lastTools, 1)
-	assert.Equal(t, "ping", lastTools[0].Name)
+	mu.Lock()
+	count := registeredCount
+	tools := lastTools
+	mu.Unlock()
+	assert.Equal(t, 1, count)
+	assert.Len(t, tools, 1)
+	assert.Equal(t, "ping", tools[0].Name)
 
 	require.NoError(t, reloader.Stop())
 }
@@ -595,7 +603,7 @@ func TestMCP_Pipeline_ServerToAdapterToRegistry(t *testing.T) {
 		Description: "transforms input",
 	})
 
-	reg := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry)
+	reg := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck,gosec
 	ctx := context.Background()
 	require.NoError(t, reg.Register(ctx, adapter))
 
@@ -666,7 +674,7 @@ func TestMCP_MockServerCallLog(t *testing.T) {
 
 	assert.Empty(t, server.CallLog())
 
-	_, _ = server.CallTool(context.Background(), "add", map[string]any{"a": 1})
+	_, _ = server.CallTool(context.Background(), "add", map[string]any{"a": 1}) //nolint:errcheck,gosec
 	logs := server.CallLog()
 	assert.Len(t, logs, 1)
 	assert.Equal(t, "add", logs[0].ToolName)
@@ -690,7 +698,7 @@ func (c *fakeClock) Advance(d time.Duration) {
 }
 
 func safeString(v any) string {
-	s, _ := v.(string)
+	s, _ := v.(string) //nolint:errcheck,gosec
 	return s
 }
 

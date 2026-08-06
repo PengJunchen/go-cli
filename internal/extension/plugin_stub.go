@@ -2,6 +2,8 @@
 
 package extension
 
+//exempt:scan008 // build-tag stub, no executable logic
+
 import (
 	"context"
 	"errors"

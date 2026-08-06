@@ -1,7 +1,7 @@
 // Package e2e_20260802 contains end-to-end integration tests for the TUI
 // (theme, renderer registry, BubbleteaApp lifecycle) and ACP (client, stdio
 // adapter, gRPC adapter, middleware bridging) modules.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"context"
@@ -120,7 +120,7 @@ func TestTUI_BubbleteaAppRunTwiceError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go func() { _ = app.Run(ctx) }()
+	go func() { _ = app.Run(ctx) }() //nolint:errcheck,gosec
 	time.Sleep(20 * time.Millisecond)
 
 	err := app.Run(context.Background())
@@ -633,7 +633,7 @@ func TestTUI_ThemeManagerConcurrentAccess(t *testing.T) {
 		if i%2 == 0 {
 			go func() {
 				defer wg.Done()
-				_ = mgr.Set("dark")
+				_ = mgr.Set("dark") //nolint:errcheck,gosec
 			}()
 		} else {
 			go func() {
@@ -682,13 +682,14 @@ func TestACP_StdioAdapterBidirectionalCommunication(t *testing.T) {
 	var wg2 sync.WaitGroup
 	wg2.Add(1)
 	serverDone := make(chan struct{})
+	errCh := make(chan error, 1)
 
 	// Server goroutine.
 	go func() {
 		defer wg2.Done()
 		err := server.Connect(ctx)
 		require.NoError(t, err)
-		defer server.Disconnect(ctx)
+		defer server.Disconnect(ctx) //nolint:errcheck,gosec
 
 		msgCh := server.ReceiveMessages()
 
@@ -698,7 +699,8 @@ func TestACP_StdioAdapterBidirectionalCommunication(t *testing.T) {
 			assert.Equal(t, acp.TypeConnect, connectMsg.Type)
 			assert.Equal(t, "client-agent", connectMsg.SenderID)
 		case <-time.After(5 * time.Second):
-			t.Fatal("timed out waiting for connect message on server")
+			errCh <- fmt.Errorf("timed out waiting for connect message on server")
+			return
 		}
 
 		// Second message should be the test message.
@@ -707,7 +709,8 @@ func TestACP_StdioAdapterBidirectionalCommunication(t *testing.T) {
 			assert.Equal(t, "client-agent", msg.SenderID)
 			assert.Equal(t, "hello from client", msg.Content)
 		case <-time.After(5 * time.Second):
-			t.Fatal("timed out waiting for message on server")
+			errCh <- fmt.Errorf("timed out waiting for message on server")
+			return
 		}
 
 		// Send response back.
@@ -732,7 +735,7 @@ func TestACP_StdioAdapterBidirectionalCommunication(t *testing.T) {
 	// and its read loop is consuming serverReader.
 	err := client.Connect(ctx)
 	require.NoError(t, err)
-	defer client.Disconnect(ctx)
+	defer client.Disconnect(ctx) //nolint:errcheck,gosec
 
 	sendMsg := acp.ACPMessage{
 		Type:       acp.TypeMessage,
@@ -756,12 +759,17 @@ func TestACP_StdioAdapterBidirectionalCommunication(t *testing.T) {
 	<-serverDone
 	wg.Wait()
 	wg2.Wait()
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	default:
+	}
 }
 
 func TestACP_StdioAdapterNameDefault(t *testing.T) {
 	r, w := io.Pipe()
-	defer r.Close()
-	defer w.Close()
+	defer r.Close() //nolint:errcheck,gosec
+	defer w.Close() //nolint:errcheck,gosec
 
 	adapter := acp.NewStdioAdapter(r, w)
 	assert.Equal(t, "stdio", adapter.Name())
@@ -769,8 +777,8 @@ func TestACP_StdioAdapterNameDefault(t *testing.T) {
 
 func TestACP_StdioAdapterNameCustom(t *testing.T) {
 	r, w := io.Pipe()
-	defer r.Close()
-	defer w.Close()
+	defer r.Close() //nolint:errcheck,gosec
+	defer w.Close() //nolint:errcheck,gosec
 
 	adapter := acp.NewStdioAdapter(r, w, acp.WithName("my-agent"))
 	assert.Equal(t, "my-agent", adapter.Name())
@@ -778,8 +786,8 @@ func TestACP_StdioAdapterNameCustom(t *testing.T) {
 
 func TestACP_StdioAdapterSendBeforeConnect(t *testing.T) {
 	r, w := io.Pipe()
-	defer r.Close()
-	defer w.Close()
+	defer r.Close() //nolint:errcheck,gosec
+	defer w.Close() //nolint:errcheck,gosec
 
 	adapter := acp.NewStdioAdapter(r, w)
 	msg := acp.ACPMessage{Type: acp.TypeMessage, SenderID: "a", Content: "msg"}
@@ -790,8 +798,8 @@ func TestACP_StdioAdapterSendBeforeConnect(t *testing.T) {
 
 func TestACP_StdioAdapterReceiveBeforeConnect(t *testing.T) {
 	r, w := io.Pipe()
-	defer r.Close()
-	defer w.Close()
+	defer r.Close() //nolint:errcheck,gosec
+	defer w.Close() //nolint:errcheck,gosec
 
 	adapter := acp.NewStdioAdapter(r, w)
 	ch := adapter.ReceiveMessages()
@@ -807,7 +815,7 @@ func TestACP_StdioAdapterConnectDisconnect(t *testing.T) {
 	go func() {
 		defer wg.Done()
 		buf := make([]byte, 1024)
-		n, _ := r.Read(buf)
+		n, _ := r.Read(buf) //nolint:errcheck,gosec
 		// Should contain the connect message as JSON.
 		assert.Contains(t, string(buf[:n]), "connect")
 	}()

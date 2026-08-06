@@ -1,6 +1,9 @@
 package tracing
 
-import "time"
+import (
+	"log/slog"
+	"time"
+)
 
 // OTLPTraceExporterConfig configures an OTLPTraceExporter. It follows the OTLP
 // HTTP contract but, to keep go-cli dependency-free, uses a JSON-over-HTTP
@@ -54,6 +57,7 @@ const exporterDefaultHTTPTimeout = 5 * time.Second
 // normalizeBatchSize clamps batch sizes to a minimum of 1.
 func normalizeBatchSize(n int) int {
 	if n < 1 {
+		slog.Debug("tracing: clamping batch size to minimum", "requested", n, "clamped", 1)
 		return 1
 	}
 	return n
@@ -62,6 +66,7 @@ func normalizeBatchSize(n int) int {
 // normalizeInterval returns a positive flush interval, defaulting when needed.
 func normalizeInterval(d time.Duration) time.Duration {
 	if d <= 0 {
+		slog.Debug("tracing: using default flush interval", "requested", d, "default", exporterDefaultFlushInterval)
 		return exporterDefaultFlushInterval
 	}
 	return d

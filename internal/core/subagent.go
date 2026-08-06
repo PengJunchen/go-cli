@@ -70,10 +70,10 @@ type subAgentRunner interface {
 	Run(ctx context.Context, prompt string, inbox <-chan string, emit func(AgentEvent)) (AgentMessage, error)
 }
 
-// subAgentRunnerFactory builds a runner from a SubAgentConfig. It is the
+// SubAgentRunnerFactory builds a runner from a SubAgentConfig. It is the
 // pluggable harness constructor seam (defaults to a simulated in-process
 // runner).
-type subAgentRunnerFactory func(cfg SubAgentConfig) subAgentRunner
+type SubAgentRunnerFactory func(cfg SubAgentConfig) subAgentRunner
 
 // eventBufferSize caps how many events a sub-agent buffers.
 const eventBufferSize = 32
@@ -109,18 +109,25 @@ type DefaultSubAgent struct {
 	result        AgentMessage
 	doneErr       error
 	cancel        context.CancelFunc
-	runnerFactory subAgentRunnerFactory
+	runnerFactory SubAgentRunnerFactory
 }
 
 var _ SubAgent = (*DefaultSubAgent)(nil)
 
+// subAgentOptions holds the configurable fields of a sub-agent during
+// construction. It is an internal construction aid so that
+// SubAgentOption closures do not reference the concrete DefaultSubAgent type.
+type subAgentOptions struct {
+	runnerFactory SubAgentRunnerFactory
+}
+
 // SubAgentOption configures a DefaultSubAgent at construction time.
-type SubAgentOption func(*DefaultSubAgent)
+type SubAgentOption func(*subAgentOptions)
 
 // WithSubAgentRunner overrides the runner factory the sub-agent drives. It is
 // the pluggable harness constructor; a nil factory uses the simulated runner.
-func WithSubAgentRunner(factory subAgentRunnerFactory) SubAgentOption {
-	return func(s *DefaultSubAgent) { s.runnerFactory = factory }
+func WithSubAgentRunner(factory SubAgentRunnerFactory) SubAgentOption {
+	return func(o *subAgentOptions) { o.runnerFactory = factory }
 }
 
 // NewDefaultSubAgent builds a DefaultSubAgent bound to the given config. A
@@ -129,19 +136,21 @@ func NewDefaultSubAgent(config SubAgentConfig, opts ...SubAgentOption) SubAgent 
 	if config.Name == "" {
 		config.Name = "subagent"
 	}
+	o := &subAgentOptions{}
+	for _, opt := range opts {
+		opt(o)
+	}
+	runnerFactory := o.runnerFactory
+	if runnerFactory == nil {
+		runnerFactory = simulatedRunnerFactory
+	}
 	s := &DefaultSubAgent{
 		config:        config,
 		state:         SubAgentIdle,
 		done:          make(chan struct{}),
 		events:        make(chan AgentEvent, eventBufferSize),
 		inbox:         make(chan string, inboxBufferSize),
-		runnerFactory: simulatedRunnerFactory,
-	}
-	for _, o := range opts {
-		o(s)
-	}
-	if s.runnerFactory == nil {
-		s.runnerFactory = simulatedRunnerFactory
+		runnerFactory: runnerFactory,
 	}
 	slog.Info("core.subagent.new",
 		"name", s.config.Name,

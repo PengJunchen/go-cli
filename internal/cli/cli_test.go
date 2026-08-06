@@ -158,9 +158,9 @@ func TestExecutionError_ErrorsAs(t *testing.T) {
 	inner := &UsageError{msg: "bad args"}
 	e := newExecutionError("cmd", inner)
 
-	var ue *UsageError
-	assert.True(t, errors.As(e, &ue))
-	assert.Equal(t, "bad args", ue.Error())
+	var usageErr *UsageError
+	assert.True(t, errors.As(e, &usageErr))
+	assert.Equal(t, "bad args", usageErr.Error())
 }
 
 func TestNewExecutionError_Fields(t *testing.T) {

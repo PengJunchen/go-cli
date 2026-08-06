@@ -209,12 +209,12 @@ func parseYAMLTree(data []byte) (any, error) {
 	return p.parseMap(ln.indent)
 }
 
-// parseMap consumes consecutive sibling `key: value` lines all indented nd.
-func (p *yamlParser) parseMap(nd int) (any, error) {
+// parseMap consumes consecutive sibling `key: value` lines all at the given indent.
+func (p *yamlParser) parseMap(indent int) (any, error) {
 	m := map[string]any{}
 	for {
 		ln, ok := p.peek()
-		if !ok || ln.indent != nd || ln.listItem {
+		if !ok || ln.indent != indent || ln.listItem {
 			break
 		}
 		p.pos++
@@ -222,7 +222,7 @@ func (p *yamlParser) parseMap(nd int) (any, error) {
 		if !ok || key == "" {
 			return nil, fmt.Errorf("yaml: invalid mapping line %q", ln.text)
 		}
-		v, err := p.valueFor(key, inline, nd)
+		v, err := p.valueFor(key, inline, indent)
 		if err != nil {
 			return nil, err
 		}
@@ -231,15 +231,15 @@ func (p *yamlParser) parseMap(nd int) (any, error) {
 	return m, nil
 }
 
-// parseList consumes consecutive sibling `- item` lines all indented nd.
+// parseList consumes consecutive sibling `- item` lines all at the given indent.
 // Each list item may be a single scalar or a multi-line mapping that starts
 // with a key-value on the "- " line and continues with deeper-indented
 // key-value lines belonging to the same item.
-func (p *yamlParser) parseList(nd int) (any, error) {
+func (p *yamlParser) parseList(indent int) (any, error) {
 	list := []any{}
 	for {
 		ln, ok := p.peek()
-		if !ok || ln.indent != nd || !ln.listItem {
+		if !ok || ln.indent != indent || !ln.listItem {
 			break
 		}
 		p.pos++
@@ -247,7 +247,7 @@ func (p *yamlParser) parseList(nd int) (any, error) {
 		if text == "" {
 			// Empty list item: may be followed by a deeper block.
 			child, childOK := p.peek()
-			if childOK && child.indent > nd {
+			if childOK && child.indent > indent {
 				v, err := p.parseMapOrList(child)
 				if err != nil {
 					return nil, err
@@ -262,7 +262,7 @@ func (p *yamlParser) parseList(nd int) (any, error) {
 			// First key-value pair on the "- " line. Collect deeper
 			// key-value lines into the same mapping.
 			sub := map[string]any{}
-			v, err := p.valueFor(key, inline, nd)
+			v, err := p.valueFor(key, inline, indent)
 			if err != nil {
 				return nil, err
 			}
@@ -271,7 +271,7 @@ func (p *yamlParser) parseList(nd int) (any, error) {
 			// the "- " line but not new list items at the same indent.
 			for {
 				child, childOK := p.peek()
-				if !childOK || child.indent <= nd || child.listItem {
+				if !childOK || child.indent <= indent || child.listItem {
 					break
 				}
 				// The child line belongs to this list item's mapping.
@@ -306,7 +306,7 @@ func (p *yamlParser) parseMapOrList(ln yamlLine) (any, error) {
 // valueFor parses the value that follows a `key:` at the given indent. An
 // inline scalar returns immediately; an empty value collects the deeper
 // (map or list) block that follows.
-func (p *yamlParser) valueFor(key, inline string, nd int) (any, error) {
+func (p *yamlParser) valueFor(key, inline string, indent int) (any, error) {
 	if strings.TrimSpace(inline) != "" {
 		return parseScalar(inline), nil
 	}
@@ -314,7 +314,7 @@ func (p *yamlParser) valueFor(key, inline string, nd int) (any, error) {
 	if !ok {
 		return map[string]any{}, nil
 	}
-	if child.indent > nd {
+	if child.indent > indent {
 		if child.listItem {
 			return p.parseList(child.indent)
 		}

@@ -42,6 +42,19 @@ func WithOverwrite(b bool) WriteToolOption {
 	return func(t *WriteTool) { t.Overwrite = b }
 }
 
+// WithDiffGenerator sets the DiffGenerator used to produce a change preview
+// before overwriting an existing file. When nil (the default) no diff is
+// generated.
+func WithDiffGenerator(dg DiffGenerator) WriteToolOption {
+	return func(t *WriteTool) { t.diffGenerator = dg }
+}
+
+// WithFileTracker sets the FileTracker used to create backup checkpoints
+// before writing files. When nil (the default) no backup is created.
+func WithFileTracker(ft *FileTracker) WriteToolOption {
+	return func(t *WriteTool) { t.fileTracker = ft }
+}
+
 // WriteTool writes content to files, creating parent directories as needed.
 // It implements the ToolDefinition interface.
 type WriteTool struct {
@@ -51,6 +64,11 @@ type WriteTool struct {
 	MaxBytes int
 	// Overwrite controls whether an existing file may be replaced.
 	Overwrite bool
+	// diffGenerator, when set, produces a diff preview for overwrites of
+	// existing files. It is included in the ToolResult metadata under "diff".
+	diffGenerator DiffGenerator
+	// fileTracker, when set, creates backup checkpoints before writing files.
+	fileTracker *FileTracker
 }
 
 var _ ToolDefinition = (*WriteTool)(nil)
@@ -135,6 +153,30 @@ func (t *WriteTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, er
 		return nil, fmt.Errorf("write: %w", err)
 	}
 
+	// When a file tracker is configured, create a backup checkpoint before
+	// writing. Errors are logged but never block the write.
+	if t.fileTracker != nil {
+		if _, berr := t.fileTracker.Backup(abspath); berr != nil {
+			logger.Warn("write.backup_failed", "path", abspath, "err", berr)
+		}
+	}
+
+	// When a diff generator is configured and the file already exists, produce
+	// a change preview that the approval flow can surface. This never blocks
+	// execution; a generation error is silently ignored.
+	var diffPreview string
+	if t.diffGenerator != nil && exists {
+		if oldBytes, rerr := os.ReadFile(abspath); rerr == nil {
+			newFull := content
+			if appendMode {
+				newFull = string(oldBytes) + content
+			}
+			if d, derr := t.diffGenerator.Generate(string(oldBytes), newFull, path); derr == nil {
+				diffPreview = d
+			}
+		}
+	}
+
 	var written int
 	if appendMode && exists {
 		f, err := os.OpenFile(abspath, os.O_WRONLY|os.O_APPEND, 0o600)
@@ -172,10 +214,19 @@ func (t *WriteTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, er
 		"bytes", written,
 		"duration_ms", time.Since(start).Milliseconds())
 
+	meta := map[string]any{"path": abspath, "bytes": written}
+	if diffPreview != "" {
+		meta["diff"] = diffPreview
+	}
 	return &ToolResult{
 		Output:   fmt.Sprintf("wrote %d bytes to %s", written, abspath),
-		Metadata: map[string]any{"path": abspath, "bytes": written},
+		Metadata: meta,
 	}, nil
+}
+
+// PromptGuidelines returns usage hints for the write tool.
+func (t *WriteTool) PromptGuidelines() []string {
+	return []string{"Use write to create new files or overwrite existing ones"}
 }
 
 // writeAtomic writes data to a temp file in the destination directory and

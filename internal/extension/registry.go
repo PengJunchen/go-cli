@@ -132,3 +132,36 @@ func (r *DefaultExtensionRegistry) Middleware(name string) Middleware {
 	defer r.mu.Unlock()
 	return r.middlewares[name]
 }
+
+// AllTools returns a slice of all registered tools.
+func (r *DefaultExtensionRegistry) AllTools() []tools.ToolDefinition {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := make([]tools.ToolDefinition, 0, len(r.tools))
+	for _, t := range r.tools {
+		result = append(result, t)
+	}
+	return result
+}
+
+// AllHooks returns a slice of all registered hooks.
+func (r *DefaultExtensionRegistry) AllHooks() []Hook {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := make([]Hook, 0, len(r.hooks))
+	for _, h := range r.hooks {
+		result = append(result, h)
+	}
+	return result
+}
+
+// AllMiddleware returns a slice of all registered middleware.
+func (r *DefaultExtensionRegistry) AllMiddleware() []Middleware {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := make([]Middleware, 0, len(r.middlewares))
+	for _, m := range r.middlewares {
+		result = append(result, m)
+	}
+	return result
+}

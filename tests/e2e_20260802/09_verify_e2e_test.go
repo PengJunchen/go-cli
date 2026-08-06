@@ -2,7 +2,7 @@
 // module: goroutine leak detection, log capture/assertion, verification runner
 // (against temp projects), SCAN scanner rules (AST-level mock/hardcoded/slog),
 // VQVG heuristics, and report generation (text and JSON formats).
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"context"
@@ -273,7 +273,7 @@ func TestVerify_RunnerAgainstTempProject(t *testing.T) {
 	dir := t.TempDir()
 
 	// Create go.mod.
-	err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/test\n\ngo 1.24\n"), 0o644)
+	err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example.com/test\n\ngo 1.24\n"), 0o600)
 	require.NoError(t, err)
 
 	// Create a production .go file with a hardcoded test URL.
@@ -286,7 +286,7 @@ func main() {
 	fmt.Println(url)
 }
 `
-	err = os.WriteFile(filepath.Join(dir, "main.go"), []byte(prodContent), 0o644)
+	err = os.WriteFile(filepath.Join(dir, "main.go"), []byte(prodContent), 0o600)
 	require.NoError(t, err)
 
 	report := verify.RunVerify(dir)
@@ -339,7 +339,7 @@ import (
 
 func main() { fmt.Println("test") }
 `
-	err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o644)
+	err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o600)
 	require.NoError(t, err)
 
 	report, err := verify.Scan(verify.ScanConfig{
@@ -372,7 +372,7 @@ import "testing"
 
 func helper(t *testing.T) { t.Log("test") }
 `
-	err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o644)
+	err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o600)
 	require.NoError(t, err)
 
 	report, err := verify.Scan(verify.ScanConfig{
@@ -402,7 +402,7 @@ func TestVerify_ScanHardcodedSecretDetection(t *testing.T) {
 	src := `package main
 const apiKey = "sk-abcdefghijklmnopqrstuvwxyz"
 `
-	err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o644)
+	err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o600)
 	require.NoError(t, err)
 
 	report, err := verify.Scan(verify.ScanConfig{
@@ -432,7 +432,7 @@ func TestVerify_ScanTestURLDetection(t *testing.T) {
 	src := `package main
 var addr = "http://localhost:9999"
 `
-	err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o644)
+	err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o600)
 	require.NoError(t, err)
 
 	report, err := verify.Scan(verify.ScanConfig{
@@ -462,7 +462,7 @@ func TestVerify_ScanBuildTagDetection(t *testing.T) {
 	src := `//go:build integration
 package main
 `
-	err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o644)
+	err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o600)
 	require.NoError(t, err)
 
 	report, err := verify.Scan(verify.ScanConfig{
@@ -496,7 +496,7 @@ func TestVerify_ScanNolintDetection(t *testing.T) {
 	}
 	src := strings.Join(lines, "\n")
 
-	err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o644)
+	err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o600)
 	require.NoError(t, err)
 
 	report, err := verify.Scan(verify.ScanConfig{
@@ -529,7 +529,7 @@ func TestVerify_ScanSlogUsage(t *testing.T) {
 import "fmt"
 func main() { fmt.Println("hello") }
 `
-	err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o644)
+	err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o600)
 	require.NoError(t, err)
 
 	cfg := verify.DefaultScanConfig(dir)
@@ -566,7 +566,7 @@ func TestVerify_ScanHardcodedDefaultsDetection(t *testing.T) {
 	src := `package main
 const defaultPrompt = "You are a helpful assistant. Default value."
 `
-	err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o644)
+	err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o600)
 	require.NoError(t, err)
 
 	cfg := verify.DefaultScanConfig(dir)
@@ -607,7 +607,7 @@ func route(args []string) {
 	}
 }
 `
-	err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o644)
+	err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o600)
 	require.NoError(t, err)
 
 	cfg := verify.DefaultScanConfig(dir)
@@ -652,7 +652,7 @@ func Run(ctx context.Context) error {
 	return nil
 }
 `
-	err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o644)
+	err := os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o600)
 	require.NoError(t, err)
 
 	cfg := verify.DefaultScanConfig(dir)
@@ -712,7 +712,7 @@ func TestVerify_ScanExcludesTestFiles(t *testing.T) {
 import "testing"
 func TestFoo(t *testing.T) { t.Log("ok") }
 `
-	err := os.WriteFile(filepath.Join(dir, "main_test.go"), []byte(testSrc), 0o644)
+	err := os.WriteFile(filepath.Join(dir, "main_test.go"), []byte(testSrc), 0o600)
 	require.NoError(t, err)
 
 	cfg := verify.DefaultScanConfig(dir)
@@ -741,7 +741,7 @@ func TestFoo(t *testing.T) { t.Log("ok") }
 
 func TestVerify_ScanDirWrapper(t *testing.T) {
 	dir := t.TempDir()
-	err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main"), 0o644)
+	err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main"), 0o600)
 	require.NoError(t, err)
 
 	report, err := verify.ScanDir(dir)
@@ -791,7 +791,7 @@ func TestVerify_RunVerifyAgainstGoProject(t *testing.T) {
 	dir := t.TempDir()
 
 	// Create a minimal Go project with version/help handling.
-	err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module test\n\ngo 1.24\n"), 0o644)
+	err := os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module test\n\ngo 1.24\n"), 0o600)
 	require.NoError(t, err)
 
 	src := `package main
@@ -825,7 +825,7 @@ func RunCLI() {
 	wg.Wait()
 }
 `
-	err = os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o644)
+	err = os.WriteFile(filepath.Join(dir, "main.go"), []byte(src), 0o600)
 	require.NoError(t, err)
 
 	report := verify.RunVerify(dir)

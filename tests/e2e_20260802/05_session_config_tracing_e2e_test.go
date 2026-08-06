@@ -5,7 +5,7 @@
 // relationships, trace exporters (JSONL, stdout, OTLP using httptest.Server,
 // async batching), trace loading and tree reconstruction, NewTraceLogger slog
 // integration, and a full end-to-end integration flow across all three modules.
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck
 
 import (
 	"bytes"
@@ -101,7 +101,7 @@ func TestSessionTreeCreationBranchingLeaves(t *testing.T) {
 	_, ctx = tracer.Start(ctx, "test", tracing.SpanKindInternal)
 
 	// Use concrete DefaultSessionTree to access EntryCount and BranchMetaFor.
-	tree := session.NewDefaultSessionTree().(*session.DefaultSessionTree)
+	tree := session.NewDefaultSessionTree().(*session.DefaultSessionTree) //nolint:errcheck,gosec
 
 	// Root entry.
 	root := &session.SessionEntry{
@@ -276,7 +276,7 @@ func TestJSONLFileStorage(t *testing.T) {
 	filePath := filepath.Join(dir, "test-session.jsonl")
 
 	store := session.NewJSONLSessionStore(filePath)
-	defer store.Close()
+	defer store.Close() //nolint:errcheck,gosec
 
 	tracer := tracing.NewTracer("trace-jsonl", nil)
 	ctx := context.Background()
@@ -307,7 +307,7 @@ func TestJSONLFileStorage(t *testing.T) {
 	require.NoError(t, store.Close())
 
 	store2 := session.NewJSONLSessionStore(filePath)
-	defer store2.Close()
+	defer store2.Close() //nolint:errcheck,gosec
 
 	got1, err := store2.Get(ctx, "j-1")
 	require.NoError(t, err)
@@ -334,7 +334,7 @@ func TestBranchSummaryGeneration(t *testing.T) {
 	_, ctx = tracer.Start(ctx, "test", tracing.SpanKindInternal)
 
 	// Use concrete DefaultSessionTree to access SetBranchSummary.
-	tree := session.NewDefaultSessionTree().(*session.DefaultSessionTree)
+	tree := session.NewDefaultSessionTree().(*session.DefaultSessionTree) //nolint:errcheck,gosec
 
 	// Create a fake summarizer that returns a canned summary.
 	summarizer := func(_ context.Context, text string) (string, error) {
@@ -856,8 +856,8 @@ func TestJSONLTraceExporter(t *testing.T) {
 
 	// Wait for async export, then shutdown.
 	require.Eventually(t, func() bool {
-		data, err := os.ReadFile(exp.FilePath())
-		return err == nil && len(data) > 0
+		data, readErr := os.ReadFile(exp.FilePath())
+		return readErr == nil && len(data) > 0
 	}, 2*time.Second, 5*time.Millisecond)
 	require.NoError(t, exp.Shutdown(context.Background()))
 
@@ -880,13 +880,17 @@ func TestStdoutTraceExporter(t *testing.T) {
 	var buf bytes.Buffer
 	exp := tracing.NewStdoutTraceExporterWithWriter(false, &buf)
 
-	tr := tracing.NewTracer("trace-stdout", exp)
+	// Wrap with WaitGroup to synchronize with async export goroutine.
+	var done sync.WaitGroup
+	done.Add(1)
+	wrapped := &syncExporter{inner: exp, done: &done}
+	tr := tracing.NewTracer("trace-stdout", wrapped)
 	span, _ := tr.Start(context.Background(), "stdout.op", tracing.SpanKindInternal)
 	span.SetStatus(tracing.SpanStatusOK, "")
 	span.End()
 
-	// Wait for async export.
-	require.Eventually(t, func() bool { return buf.Len() > 0 }, 2*time.Second, 5*time.Millisecond)
+	// Wait for async export to finish.
+	done.Wait()
 
 	require.NoError(t, exp.Shutdown(context.Background()))
 
@@ -899,13 +903,35 @@ func TestStdoutTraceExporter(t *testing.T) {
 	// Test with indentation.
 	var buf2 bytes.Buffer
 	exp2 := tracing.NewStdoutTraceExporterWithWriter(true, &buf2)
-	tr2 := tracing.NewTracer("trace-indent", exp2)
+
+	var done2 sync.WaitGroup
+	done2.Add(1)
+	wrapped2 := &syncExporter{inner: exp2, done: &done2}
+	tr2 := tracing.NewTracer("trace-indent", wrapped2)
 	sp2, _ := tr2.Start(context.Background(), "indent.op", tracing.SpanKindInternal)
 	sp2.SetStatus(tracing.SpanStatusOK, "")
 	sp2.End()
-	require.Eventually(t, func() bool { return buf2.Len() > 0 }, 2*time.Second, 5*time.Millisecond)
+	done2.Wait()
 	require.NoError(t, exp2.Shutdown(context.Background()))
 	assert.Contains(t, buf2.String(), "  ") // indented output
+}
+
+// syncExporter wraps a TraceExporter and signals a WaitGroup when ExportSpan
+// completes, allowing tests to synchronize with the async export goroutine
+// spawned by localSpan.End().
+type syncExporter struct {
+	inner tracing.TraceExporter
+	done  *sync.WaitGroup
+}
+
+func (s *syncExporter) ExportSpan(ctx context.Context, span tracing.TraceSpan) error {
+	err := s.inner.ExportSpan(ctx, span)
+	s.done.Done()
+	return err
+}
+
+func (s *syncExporter) Shutdown(ctx context.Context) error {
+	return s.inner.Shutdown(ctx)
 }
 
 // TestOTLPTraceExporter verifies OTLP export using httptest.Server.
@@ -927,7 +953,7 @@ func TestOTLPTraceExporter(t *testing.T) {
 		FlushInterval: time.Hour,
 		Headers:       map[string]string{"X-Test": "test-value"},
 	})
-	defer func() { _ = exp.Shutdown(context.Background()) }()
+	defer func() { _ = exp.Shutdown(context.Background()) }() //nolint:errcheck,gosec
 
 	tr := tracing.NewTracer("trace-otlp-e2e", exp)
 	span, _ := tr.Start(context.Background(), "otlp.op", tracing.SpanKindInternal)
@@ -1011,8 +1037,8 @@ func TestTraceLoadingAndTreeReconstruction(t *testing.T) {
 
 	// Wait for async exports.
 	require.Eventually(t, func() bool {
-		data, err := os.ReadFile(exp.FilePath())
-		return err == nil && len(data) > 0
+		data, readErr := os.ReadFile(exp.FilePath())
+		return readErr == nil && len(data) > 0
 	}, 2*time.Second, 5*time.Millisecond)
 
 	require.NoError(t, exp.Shutdown(context.Background()))
@@ -1166,7 +1192,7 @@ func TestFullIntegrationSessionConfigTracing(t *testing.T) {
 
 	jsonlPath := filepath.Join(sessionDir, "integration-session.jsonl")
 	jsonlStore := session.NewJSONLSessionStore(jsonlPath)
-	defer jsonlStore.Close()
+	defer jsonlStore.Close() //nolint:errcheck,gosec
 
 	rootEntry := &session.SessionEntry{
 		ID:        "integ-root",
@@ -1196,13 +1222,13 @@ func TestFullIntegrationSessionConfigTracing(t *testing.T) {
 	require.NoError(t, jsonlStore.Append(rootCtx, assistantEntry))
 
 	require.NoError(t, jsonlStore.Save(rootCtx))
-	jsonlStore.Close()
+	jsonlStore.Close() //nolint:errcheck,gosec
 
 	// === PHASE 2: Read back from JSONL ===
 	storeSpan, storeCtx := tracer.Start(rootCtx, "integration.store.read", tracing.SpanKindInternal)
 
 	jsonlStore2 := session.NewJSONLSessionStore(jsonlPath)
-	defer jsonlStore2.Close()
+	defer jsonlStore2.Close() //nolint:errcheck,gosec
 
 	gotRoot, err := jsonlStore2.Get(storeCtx, "integ-root")
 	require.NoError(t, err)
@@ -1293,10 +1319,7 @@ tracing:
 	rootSpan.End()
 
 	// Wait for all async span exports to complete before shutting down.
-	require.Eventually(t, func() bool {
-		data, err := os.ReadFile(traceExp.FilePath())
-		return err == nil && len(data) > 0
-	}, 3*time.Second, 10*time.Millisecond)
+	tracer.Flush()
 
 	// === PHASE 6: Verify span chain ===
 	require.NoError(t, traceExp.Shutdown(context.Background()))

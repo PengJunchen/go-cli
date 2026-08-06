@@ -95,7 +95,7 @@ func TestAppStreamingRender(t *testing.T) {
 	runErr := make(chan error, 1)
 	go func() { runErr <- app.Run(context.Background()) }() //nolint:errcheck
 
-	parts := []string{"Hel", "Hello ", "Hello world"}
+	parts := []string{"Hi!", "Hello ", "Hello world"}
 	for i, part := range parts {
 		events <- AgentEvent{Type: "msg", ContentType: ContentTypeStreaming, Content: part}
 		want := int64(i + 1)

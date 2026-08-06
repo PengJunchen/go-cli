@@ -35,8 +35,9 @@ const (
 )
 
 var (
-	validTracingLevels   = []string{"debug", "info", "warn", "error"}
-	validTracingExporter = []string{"jsonl", "stdout", "none"}
+	validTracingLevels        = []string{"debug", "info", "warn", "error"}
+	validTracingExporter      = []string{"jsonl", "stdout", "none"}
+	validCompactionStrategies = []string{"", "unified", "micro", "micro_first", "summary", "truncating"}
 )
 
 // Validate evaluates the configuration and returns a combined error listing
@@ -67,6 +68,9 @@ func (v *DefaultValidator) Validate(cfg Config) error {
 
 	if cfg.Compaction.MaxTokens <= 0 {
 		errs = append(errs, "compaction max_tokens must be positive")
+	}
+	if !contains(validCompactionStrategies, cfg.Compaction.Strategy) {
+		errs = append(errs, "invalid compaction strategy (supported: unified, micro, summary, truncating)")
 	}
 
 	if len(errs) > 0 {

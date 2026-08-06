@@ -154,7 +154,7 @@ type fakeEventStreamAgent struct {
 
 func (f *fakeEventStreamAgent) Name() string { return "fake-agent" }
 
-func (f *fakeEventStreamAgent) Run(_ context.Context, _ Submission) (Result, error) {
+func (f *fakeEventStreamAgent) Run(_ context.Context, _ Submission, _ ...EventStream) (Result, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.calls++

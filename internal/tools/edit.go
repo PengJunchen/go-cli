@@ -13,20 +13,44 @@ import (
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
+// EditFileToolOption configures an EditFileTool.
+type EditFileToolOption func(*EditFileTool)
+
+// WithEditDiffGenerator sets the DiffGenerator used to produce a change preview
+// before applying an edit. When nil (the default) no diff is generated.
+func WithEditDiffGenerator(dg DiffGenerator) EditFileToolOption {
+	return func(t *EditFileTool) { t.diffGenerator = dg }
+}
+
+// WithEditFileTracker sets the FileTracker used to create backup checkpoints
+// before editing files. When nil (the default) no backup is created.
+func WithEditFileTracker(ft *FileTracker) EditFileToolOption {
+	return func(t *EditFileTool) { t.fileTracker = ft }
+}
+
 // EditFileTool replaces an old_string block in a file with new_string, in the
 // style of apply_patch. It implements the ToolDefinition interface.
 type EditFileTool struct {
 	// Workdir is the base directory relative paths are resolved against.
 	Workdir string
+	// diffGenerator, when set, produces a diff preview of the edit. It is
+	// included in the ToolResult metadata under "diff".
+	diffGenerator DiffGenerator
+	// fileTracker, when set, creates backup checkpoints before editing files.
+	fileTracker *FileTracker
 }
 
 var _ ToolDefinition = (*EditFileTool)(nil)
 
 // NewEditFileTool returns an EditFileTool with a default workdir of ".".
-func NewEditFileTool() *EditFileTool {
-	return &EditFileTool{
+func NewEditFileTool(opts ...EditFileToolOption) *EditFileTool {
+	t := &EditFileTool{
 		Workdir: defaultReadWorkdir,
 	}
+	for _, opt := range opts {
+		opt(t)
+	}
+	return t
 }
 
 // Name returns the tool name.
@@ -35,6 +59,11 @@ func (t *EditFileTool) Name() string { return "edit" }
 // Description returns a brief description of the tool.
 func (t *EditFileTool) Description() string {
 	return "edit: replaces an old_string block in a file with new_string. Args: file_path (string), old_string (string), new_string (string)."
+}
+
+// PromptGuidelines returns usage hints for the edit tool.
+func (t *EditFileTool) PromptGuidelines() []string {
+	return []string{"Use edit to make targeted changes to existing files"}
 }
 
 // Execute edits the file at file_path by locating a single occurrence of
@@ -108,6 +137,24 @@ func (t *EditFileTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 
 	updated := strings.Replace(data, oldString, newString, 1)
 
+	// When a file tracker is configured, create a backup checkpoint before
+	// applying the edit. Errors are logged but never block the edit.
+	if t.fileTracker != nil {
+		if _, berr := t.fileTracker.Backup(abspath); berr != nil {
+			logger.Warn("edit.backup_failed", "path", abspath, "err", berr)
+		}
+	}
+
+	// When a diff generator is configured, produce a change preview that the
+	// approval flow can surface. This never blocks execution; a generation
+	// error is silently ignored.
+	var diffPreview string
+	if t.diffGenerator != nil {
+		if d, derr := t.diffGenerator.Generate(data, updated, path); derr == nil {
+			diffPreview = d
+		}
+	}
+
 	// Write the updated content atomically (temp file + rename) so a crash or
 	// write error never leaves the file truncated with partial content. The
 	// original permission bits are preserved by writeAtomic.
@@ -124,8 +171,12 @@ func (t *EditFileTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 		"new_len", len(newString),
 		"duration_ms", time.Since(start).Milliseconds())
 
+	meta := map[string]any{"path": abspath, "bytes": len(updated)}
+	if diffPreview != "" {
+		meta["diff"] = diffPreview
+	}
 	return &ToolResult{
 		Output:   fmt.Sprintf("replaced %d-byte block with %d-byte block in %s", len(oldString), len(newString), abspath),
-		Metadata: map[string]any{"path": abspath, "bytes": len(updated)},
+		Metadata: meta,
 	}, nil
 }

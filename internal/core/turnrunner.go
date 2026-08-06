@@ -19,8 +19,16 @@ var errTurnUnknown = errors.New("core: unknown or inactive turn")
 // turn it executes, exposing Cancel, Steer and FollowUp to act on a running
 // turn. It drives the injected AgentLoop sequentially per turn and is safe for
 // concurrent use.
+//
+// When an Agent is set via SetAgent, RunTurn delegates to agent.Run (which
+// includes history management) instead of calling the loop directly. When a
+// steering channel is set via SetSteerChannel, Steer sends the instruction to
+// that channel so the running loop picks it up between LLM iterations.
 type EinoTurnRunner struct {
 	loop    AgentLoop
+	agent   Agent
+	stream  EventStream
+	steerCh chan string
 	mu      sync.Mutex
 	turns   map[string]*Turn
 	running map[string]context.CancelFunc
@@ -75,8 +83,25 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Re
 	r.running[id] = cancel
 	r.mu.Unlock()
 
-	events, runErr := r.loop.Run(spanCtx, submission)
-	result := Result{Message: lastMessageEvent(events), Success: runErr == nil}
+	var result Result
+	var runErr error
+	if r.agent != nil {
+		// Delegate to the agent (includes history management). Pass the
+		// stream if one is set so events are streamed in real time.
+		if r.stream != nil {
+			result, runErr = r.agent.Run(spanCtx, submission, r.stream)
+		} else {
+			result, runErr = r.agent.Run(spanCtx, submission)
+		}
+	} else if r.stream != nil {
+		events, err := r.loop.Run(spanCtx, submission, r.stream)
+		runErr = err
+		result = Result{Message: lastMessageEvent(events), Success: runErr == nil}
+	} else {
+		events, err := r.loop.Run(spanCtx, submission)
+		runErr = err
+		result = Result{Message: lastMessageEvent(events), Success: runErr == nil}
+	}
 
 	r.mu.Lock()
 	delete(r.running, id)
@@ -141,10 +166,68 @@ func (r *EinoTurnRunner) Cancel(ctx context.Context, id string) error {
 }
 
 // Steer injects a steering submission into a running turn. The steering is
-// recorded on the turn and surfaced via Get so the runtime can observe it; it
-// returns an error if the turn is unknown or not running.
-func (r *EinoTurnRunner) Steer(_ context.Context, id, instruction string) error {
-	return r.inject(id, Submission{Type: SubmissionSteering, Content: instruction}, "steer")
+// recorded on the turn and surfaced via Get so the runtime can observe it.
+// When a steering channel is set, the instruction is also sent to that
+// channel so the running loop picks it up between LLM iterations. It returns
+// an error if the turn is unknown or not running.
+func (r *EinoTurnRunner) Steer(ctx context.Context, id, instruction string) error {
+	if err := r.inject(id, Submission{Type: SubmissionSteering, Content: instruction}, "steer"); err != nil {
+		return err
+	}
+	// Send to the steering channel so the running loop drains it between
+	// LLM iterations. The send is non-blocking: if the channel is full,
+	// the instruction is still recorded on the Turn (above) and the loop
+	// will pick up whatever is in the buffer.
+	r.mu.Lock()
+	steerCh := r.steerCh
+	r.mu.Unlock()
+	if steerCh != nil {
+		select {
+		case steerCh <- instruction:
+			slog.Info("core.turn.runner.steer.sent", "id", id, "instruction", instruction)
+		default:
+			slog.Warn("core.turn.runner.steer.channel_full", "id", id)
+		}
+	}
+	return nil
+}
+
+// SetSteerChannel sets the channel used to deliver steering instructions to
+// the running loop. It must be called before RunTurn starts the turn.
+func (r *EinoTurnRunner) SetSteerChannel(ch chan string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.steerCh = ch
+}
+
+// SetAgent sets the Agent that RunTurn delegates to when non-nil. When set,
+// RunTurn calls agent.Run (which includes history management) instead of
+// calling the loop directly.
+func (r *EinoTurnRunner) SetAgent(a Agent) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.agent = a
+}
+
+// SetStream sets the EventStream that RunTurn passes to the agent or loop so
+// events are streamed in real time. Set to nil to disable streaming.
+func (r *EinoTurnRunner) SetStream(s EventStream) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.stream = s
+}
+
+// RunningTurnID returns the ID of the currently running turn, or the empty
+// string when no turn is running.
+func (r *EinoTurnRunner) RunningTurnID() string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for id, turn := range r.turns {
+		if turn.Status == TurnRunning {
+			return id
+		}
+	}
+	return ""
 }
 
 // FollowUp appends a follow-up user message to a running turn. It is recorded

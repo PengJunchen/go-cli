@@ -13,6 +13,7 @@ type harnessConfig struct {
 	startSpan  string
 	bufferSize int
 	discard    DiscardPolicy
+	tracer     *tracing.Tracer
 }
 
 // HarnessOption configures a HarnessImpl at construction time.
@@ -43,12 +44,21 @@ func WithStartSpanName(name string) HarnessOption {
 	}
 }
 
+// WithHarnessTracer sets a tracing.Tracer on the HarnessImpl. When non-nil, the
+// harness injects the Tracer into the context before creating its root span so
+// that all downstream components (agent, middleware, loop, tools) share the
+// same trace.
+func WithHarnessTracer(t *tracing.Tracer) HarnessOption {
+	return func(c *harnessConfig) { c.tracer = t }
+}
+
 // HarnessImpl is the full runtime facade. It accepts a user message and
 // returns an EventStream that streams agent events until the run completes.
 type HarnessImpl struct {
 	agent         Agent
 	startSpanName string
 	bufferSize    int
+	tracer        *tracing.Tracer
 }
 
 var _ Harness = (*HarnessImpl)(nil)
@@ -67,6 +77,7 @@ func NewHarnessImpl(agent Agent, opts ...HarnessOption) *HarnessImpl {
 		agent:         agent,
 		startSpanName: cfg.startSpan,
 		bufferSize:    cfg.bufferSize,
+		tracer:        cfg.tracer,
 	}
 	slog.Info("core.harness.new",
 		"agent", agent.Name(),
@@ -80,6 +91,13 @@ func NewHarnessImpl(agent Agent, opts ...HarnessOption) *HarnessImpl {
 // Submit runs the agent asynchronously and returns an EventStream immediately.
 // Non-blocking: the caller owns the stream and must drain it until it closes.
 func (h *HarnessImpl) Submit(ctx context.Context, msg string) (EventStream, error) {
+	// Inject the Tracer into the context so that all downstream
+	// SpanFromContext calls (middleware, loop, tools) create real spans
+	// sharing the same trace. When h.tracer is nil, spans are noop.
+	if h.tracer != nil {
+		ctx = h.tracer.ContextWithTracer(ctx)
+	}
+
 	span, spanCtx := tracing.SpanFromContext(ctx, h.startSpanName, tracing.SpanKindInternal)
 	span.SetAttributes(tracing.Attribute{Key: "user_message", Value: msg})
 	defer span.End()
@@ -102,16 +120,19 @@ func (h *HarnessImpl) Submit(ctx context.Context, msg string) (EventStream, erro
 // records a terminal result, sends a closing event, and closes the stream so
 // consumers can observe completion without a goroutine leak.
 func (h *HarnessImpl) run(ctx context.Context, stream *EventStreamImpl, submission Submission) {
-	result, err := h.agent.Run(ctx, submission)
+	// Pass the EventStream to the agent so events are emitted in real time
+	// as the LLM streams tokens. The agent also stores events internally
+	// for backward-compatible retrieval via the eventSource interface.
+	result, err := h.agent.Run(ctx, submission, stream)
 
-	var events []AgentEvent
-	if es, ok := h.agent.(eventSource); ok {
-		events = es.Events()
-	}
-	// Send is best-effort: a send after close (or a full buffer) is ignored by
-	// design, so the returned error is passed to bestEffort and discarded.
-	for _, ev := range events {
-		bestEffort(stream.Send(ev))
+	// If the agent didn't send any events to the stream (e.g. it doesn't
+	// support streaming), fall back to fanning out its stored events.
+	if stream.SentCount() == 0 {
+		if es, ok := h.agent.(eventSource); ok {
+			for _, ev := range es.Events() {
+				bestEffort(stream.Send(ev))
+			}
+		}
 	}
 
 	if err != nil {
