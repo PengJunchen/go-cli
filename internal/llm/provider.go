@@ -475,6 +475,7 @@ type openAIStreamChoice struct {
 		Content   string           `json:"content"`
 		ToolCalls []openAIToolCall `json:"tool_calls"`
 	} `json:"delta"`
+	FinishReason string `json:"finish_reason,omitempty"`
 }
 
 // buildBody serializes the conversation and options into the OpenAI chat
@@ -641,7 +642,8 @@ type openAIResponse struct {
 
 // openAIChoice is one completion choice.
 type openAIChoice struct {
-	Message openAIMessage `json:"message"`
+	Message      openAIMessage `json:"message"`
+	FinishReason string        `json:"finish_reason,omitempty"`
 }
 
 // openAIUsage reports token consumption.

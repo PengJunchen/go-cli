@@ -47,6 +47,10 @@ type Message struct {
 	ToolCallID string     `json:"tool_call_id,omitempty"`
 	Name       string     `json:"name,omitempty"`
 	Usage      *Usage     `json:"usage,omitempty"`
+	// FinishReason reports why the model stopped generating:
+	// stop|length|tool_calls|content_filter. When "length", the output was
+	// truncated due to max_tokens and the caller may request a continuation.
+	FinishReason string `json:"finish_reason,omitempty"`
 }
 
 // MessageChunk is a single incremental chunk emitted by streaming.
@@ -62,6 +66,10 @@ type MessageChunk struct {
 	// ToolCalls holds complete tool calls, populated only on the Final chunk
 	// after per-call argument fragments have been merged.
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+
+	// FinishReason, populated on the Final chunk, reports why the model
+	// stopped generating (stop|length|tool_calls|content_filter).
+	FinishReason string `json:"finish_reason,omitempty"`
 }
 
 // ModelInfo describes a model exposed by a provider.
