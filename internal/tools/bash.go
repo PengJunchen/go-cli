@@ -174,6 +174,10 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
+	// Wrap the command with resource limits (ulimit) so only the child
+	// process is affected, not the Go runtime.
+	command = wrapCommandWithLimits(command, t.ResourceLimits)
+
 	cmd := exec.CommandContext(execCtx, "bash", "-lc", command)
 	cmd.Dir = t.Workdir
 	cmd.Env = append(os.Environ(), envSlice(t.Env)...)
@@ -185,18 +189,7 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 	cmd.Stdout = limited
 	cmd.Stderr = limited
 
-	// Apply resource limits if configured. The parent process's rlimits are
-	// saved before and restored after so the lowered limits only affect the
-	// child process (which inherits them at fork time).
-	var runErr error
-	if t.ResourceLimits.MaxMemory > 0 || t.ResourceLimits.MaxCPU > 0 {
-		snap := saveRlimits()
-		ApplyResourceLimits(cmd, t.ResourceLimits)
-		runErr = cmd.Run()
-		restoreRlimits(snap)
-	} else {
-		runErr = cmd.Run()
-	}
+	runErr := cmd.Run()
 	ms := time.Since(start).Milliseconds()
 	limited.truncate()
 

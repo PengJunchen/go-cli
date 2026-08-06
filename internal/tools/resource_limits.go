@@ -15,11 +15,10 @@ type ResourceLimits struct {
 	MaxMemory int64
 }
 
-// ApplyResourceLimits configures the child process represented by cmd to be
-// constrained by the given resource limits. The parent process's rlimits are
-// temporarily lowered so the child inherits them at fork time; callers must
-// call saveRlimits before and restoreRlimits after to avoid affecting the
-// parent. When both limits are zero the function is a no-op.
+// ApplyResourceLimits is retained for backward compatibility. Resource limits
+// are now applied via wrapCommandWithLimits which prepends ulimit to the
+// command string, affecting only the child process. When both limits are zero
+// the function is a no-op.
 func ApplyResourceLimits(cmd *exec.Cmd, limits ResourceLimits) {
 	applyRlimits(cmd, limits)
 }
