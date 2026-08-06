@@ -5,6 +5,8 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+
+	"github.com/pengjunchen/go-cli/internal/tui/markdown"
 )
 
 // renderTheme resolves the theme to apply, falling back to a light-safe dark
@@ -57,14 +59,46 @@ func stripANSI(text string, maxCols int) string {
 
 // ---------- markdown ----------
 
-// MarkdownRenderer styles markdown content with the theme primary color.
-type MarkdownRenderer struct{}
+// themeAdapter wraps a Theme to satisfy the markdown.ThemeAdapter interface.
+// It bridges the tui.Theme accessors (which return Style) to the simpler
+// string-returning methods that the markdown renderer expects.
+type themeAdapter struct{ theme Theme }
+
+func (a themeAdapter) Bold(text string) string          { return a.theme.Bold().Render(text) }
+func (a themeAdapter) Italic(text string) string        { return a.theme.Italic().Render(text) }
+func (a themeAdapter) Faint(text string) string         { return a.theme.Faint().Render(text) }
+func (a themeAdapter) Primary(text string) string       { return a.theme.Primary().Render(text) }
+func (a themeAdapter) Secondary(text string) string     { return a.theme.Secondary().Render(text) }
+func (a themeAdapter) Error(text string) string         { return a.theme.Error().Render(text) }
+func (a themeAdapter) Underline(text string) string     { return NewStyle().Underline(true).Render(text) }
+func (a themeAdapter) Strikethrough(text string) string { return NewStyle().Strikethrough(true).Render(text) }
+
+// MarkdownRenderer parses markdown content into an AST and renders it with
+// ANSI styling via the markdown.MarkdownASTRenderer. An optional CodeHighlighter
+// provides syntax highlighting for fenced code blocks.
+type MarkdownRenderer struct {
+	highlighter CodeHighlighter
+}
 
 var _ Renderer = (*MarkdownRenderer)(nil)
 
-// Render styles markdown content.
-func (MarkdownRenderer) Render(ctx context.Context, content string, opts RenderOpts) string {
-	out := renderTheme(opts).Primary().Render(wrapWidth(content, opts.Width))
+// NewMarkdownRenderer returns a MarkdownRenderer wired to the given highlighter.
+// If hl is nil the renderer falls back to a DefaultCodeHighlighter at render time.
+func NewMarkdownRenderer(hl CodeHighlighter) *MarkdownRenderer {
+	return &MarkdownRenderer{highlighter: hl}
+}
+
+// Render parses content as markdown, walks the AST, and returns ANSI-styled text.
+func (m MarkdownRenderer) Render(ctx context.Context, content string, opts RenderOpts) string {
+	hl := m.highlighter
+	if hl == nil {
+		hl = NewDefaultCodeHighlighter()
+	}
+	parser := markdown.NewParser()
+	ast := parser.Parse(content)
+	adapter := themeAdapter{theme: renderTheme(opts)}
+	r := markdown.NewMarkdownASTRenderer(adapter, opts.Width, hl)
+	out := r.Render(ast)
 	logRender(ctx, "markdown", opts.ContentType, len(out))
 	return out
 }

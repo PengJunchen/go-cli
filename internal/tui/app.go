@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"strings"
@@ -35,6 +36,17 @@ type AgentEvent struct {
 	// the assistant's response (streaming tokens). The TUI accumulates
 	// these into the last assistant entry instead of creating new entries.
 	Incremental bool
+	// TokenUsage carries token consumption data for "token_usage" events.
+	// It is nil for all other event types.
+	TokenUsage *TokenUsageData
+}
+
+// TokenUsageData mirrors core.TokenUsage for the TUI layer.
+type TokenUsageData struct {
+	InputTokens  int
+	OutputTokens int
+	MaxTokens    int
+	Cost         float64
 }
 
 // App is the top-level TUI application entry point. It runs a
@@ -83,6 +95,32 @@ func WithOnUpdate(fn func(string)) AppOption {
 	return func(a *BubbleteaApp) { a.onUpdate = fn }
 }
 
+// WithSteerCallback registers a callback invoked when the user submits steer
+// text (Enter in steer input mode). The callback receives the typed text and
+// runs in a separate goroutine so it does not block the render loop.
+func WithSteerCallback(cb func(string)) AppOption {
+	return func(a *BubbleteaApp) { a.steerCallback = cb }
+}
+
+// WithCancelCallback registers a callback invoked when the user presses 'q' to
+// quit/cancel. The callback typically calls TurnRunner.Cancel to cancel the
+// running turn.
+func WithCancelCallback(cb func()) AppOption {
+	return func(a *BubbleteaApp) { a.cancelCallback = cb }
+}
+
+// WithPauseCallback registers a callback invoked when the user presses Space
+// to pause agent execution.
+func WithPauseCallback(cb func()) AppOption {
+	return func(a *BubbleteaApp) { a.pauseCallback = cb }
+}
+
+// WithResumeCallback registers a callback invoked when the user presses Space
+// to resume agent execution after a pause.
+func WithResumeCallback(cb func()) AppOption {
+	return func(a *BubbleteaApp) { a.resumeCallback = cb }
+}
+
 // BubbleteaApp is the default App implementation. It owns a render loop that
 // merges three sources: the incoming agent-event channel, messages pushed via
 // Send, and the quit/cancel signals. Streaming content types accumulate into a
@@ -125,6 +163,37 @@ type BubbleteaApp struct {
 	// the caller stream the view to the terminal in real time instead of
 	// waiting for the turn to finish. When nil no callback fires.
 	onUpdate func(string)
+
+	// steerInputMode is an atomic flag set by the keyboard loop to indicate
+	// the app is in steer input mode. The keyboard loop reads it to decide
+	// how to interpret key presses.
+	steerInputMode atomic.Bool
+	// steerInput is the accumulated text typed in steer input mode.
+	steerInput string
+	// steerCursor is the cursor position within steerInput.
+	steerCursor int
+	// steerCallback is invoked when the user submits steer text (Enter).
+	steerCallback func(string)
+	// cancelCallback is invoked when the user presses 'q' to quit/cancel.
+	cancelCallback func()
+	// pauseCallback is invoked when the user presses Space to pause.
+	pauseCallback func()
+	// resumeCallback is invoked when the user presses Space to resume.
+	resumeCallback func()
+	// paused tracks whether the agent is currently paused.
+	paused bool
+
+	// Token usage for the status bar.
+	tokenInput  int
+	tokenOutput int
+	tokenMax    int
+	tokenCost   float64
+
+	// Spinner is shown while a tool call is in progress (between tool_call
+	// and tool_result events). spinnerFrame advances on each view render.
+	spinner       *SpinnerRenderer
+	spinnerActive bool
+	spinnerFrame  int
 }
 
 // NewBubbleteaApp constructs an app wired to the given event source, using a
@@ -141,6 +210,7 @@ func NewBubbleteaApp(events <-chan AgentEvent, opts ...AppOption) *BubbleteaApp 
 		streamBuf:   make(map[string]*strings.Builder),
 		accordion:   NewAccordionModel(),
 		interactive: isTerminal(),
+		spinner:     NewSpinnerRenderer(),
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -243,10 +313,59 @@ func (a *BubbleteaApp) MessagesProcessed() int64 { return a.msgsSeen.Load() }
 func (a *BubbleteaApp) View() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.accordion == nil || a.accordion.Len() == 0 {
-		return ""
+	return a.renderView()
+}
+
+// renderView builds the full view string: the accordion content, optionally
+// followed by the steer input prompt and the token usage status bar. The
+// caller must hold a.mu.
+func (a *BubbleteaApp) renderView() string {
+	var sb strings.Builder
+	if a.accordion != nil && a.accordion.Len() > 0 {
+		sb.WriteString(a.accordion.Render())
 	}
-	return a.accordion.Render()
+	// Spinner indicator (shown while a tool is executing).
+	if a.spinnerActive && a.spinner != nil {
+		sb.WriteString("\n")
+		sb.WriteString(a.spinner.RenderFrame(a.spinnerFrame))
+		sb.WriteString(" working...")
+		a.spinnerFrame++
+	}
+	// Steer input prompt.
+	if a.steerInputMode.Load() {
+		sb.WriteString("\n> steer> ")
+		sb.WriteString(a.steerInput)
+		// Render a block cursor.
+		sb.WriteString("\u2588")
+	}
+	// Token usage status bar.
+	if a.tokenMax > 0 || a.tokenCost > 0 {
+		sb.WriteString("\n")
+		sb.WriteString(a.renderStatusBar())
+	}
+	// Pause indicator.
+	if a.paused {
+		sb.WriteString("\n[PAUSED - press Space to resume]")
+	}
+	return sb.String()
+}
+
+// renderStatusBar formats the token usage status bar. When the token usage
+// percentage exceeds 80%, the text is wrapped in ANSI yellow to warn the user.
+// The caller must hold a.mu.
+func (a *BubbleteaApp) renderStatusBar() string {
+	total := a.tokenInput + a.tokenOutput
+	maxT := a.tokenMax
+	pct := 0
+	if maxT > 0 {
+		pct = total * 100 / maxT
+	}
+	bar := fmt.Sprintf("Tokens: %d/%d (%d%%) | Cost: $%.4f", total, maxT, pct, a.tokenCost)
+	if pct > 80 {
+		// ANSI yellow foreground.
+		return "\x1b[33m" + bar + "\x1b[0m"
+	}
+	return bar
 }
 
 // cleanup closes the done channel exactly once and releases per-type stream
@@ -268,6 +387,27 @@ func (a *BubbleteaApp) cleanup() {
 // Tool calls, tool results and thinking entries are stored as collapsible
 // entries; other entries are expanded by default.
 func (a *BubbleteaApp) handleEvent(ctx context.Context, ev AgentEvent) {
+	// Handle token_usage events by updating the status bar data and re-rendering.
+	if ev.Type == "token_usage" && ev.TokenUsage != nil {
+		var view string
+		notify := a.onUpdate != nil
+		func() {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			a.tokenInput = ev.TokenUsage.InputTokens
+			a.tokenOutput = ev.TokenUsage.OutputTokens
+			a.tokenMax = ev.TokenUsage.MaxTokens
+			a.tokenCost = ev.TokenUsage.Cost
+			if notify {
+				view = a.renderView()
+			}
+		}()
+		if notify {
+			a.onUpdate(view)
+		}
+		return
+	}
+
 	if ev.Incremental {
 		a.handleIncremental(ctx, ev)
 		return
@@ -287,6 +427,19 @@ func (a *BubbleteaApp) handleEvent(ctx context.Context, ev AgentEvent) {
 	// incrementally, so skip this duplicate.
 	if hadStreaming && ev.Type == "message" {
 		return
+	}
+
+	// Update spinner state for tool lifecycle events. The spinner is
+	// activated on tool_call and deactivated on tool_result.
+	if ev.ContentType == ContentTypeToolCall || ev.ContentType == ContentTypeToolResult {
+		a.mu.Lock()
+		if ev.ContentType == ContentTypeToolCall {
+			a.spinnerActive = true
+			a.spinnerFrame = 0
+		} else {
+			a.spinnerActive = false
+		}
+		a.mu.Unlock()
 	}
 
 	start := time.Now()
@@ -364,7 +517,7 @@ func (a *BubbleteaApp) handleIncremental(ctx context.Context, ev AgentEvent) {
 		}
 
 		if notify {
-			view = a.accordion.Render()
+			view = a.renderView()
 		}
 	}()
 
@@ -405,7 +558,7 @@ func (a *BubbleteaApp) addEntry(ct string, out string) {
 			a.accordion.Add(entry)
 		}
 		if notify {
-			view = a.accordion.Render()
+			view = a.renderView()
 		}
 	}()
 	if notify {

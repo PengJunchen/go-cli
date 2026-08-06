@@ -138,7 +138,7 @@ func TestEachPresetProducesDistinctPrimary(t *testing.T) {
 func TestRenderersDrawWithThemeManager(t *testing.T) {
 	mgr := NewThemeManager()
 	require.NoError(t, mgr.Set("light"))
-	out := (MarkdownRenderer{}).Render(context.Background(), "hi", RenderOpts{Theme: mgr.Get()})
+	out := (MarkdownRenderer{}).Render(context.Background(), "[hi](http://x)", RenderOpts{Theme: mgr.Get()})
 	require.True(t, strings.HasPrefix(out, "\x1b[34m"), "light primary should be blue (34), got %q", out)
 }
 

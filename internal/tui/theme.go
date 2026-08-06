@@ -59,6 +59,8 @@ const (
 	styleAttrItalic = 3
 	// styleAttrUnderline enables underlined text.
 	styleAttrUnderline = 4
+	// styleAttrStrikethrough enables struck-through text.
+	styleAttrStrikethrough = 9
 	// noColor is the sentinel used to mark an unset color slot.
 	noColor = -1
 )
@@ -69,12 +71,13 @@ const (
 // codes plus bold/italic/faint/underline flags) and renders a string by
 // wrapping it in the corresponding escape sequences.
 type Style struct {
-	fg        int
-	bg        int
-	bold      bool
-	faint     bool
-	italic    bool
-	underline bool
+	fg           int
+	bg           int
+	bold         bool
+	faint        bool
+	italic       bool
+	underline    bool
+	strikethrough bool
 }
 
 // NewStyle returns a Style with every attribute unset.
@@ -120,6 +123,12 @@ func (s Style) Underline(v bool) Style {
 	return s
 }
 
+// Strikethrough returns a copy of the Style with the strikethrough attribute set.
+func (s Style) Strikethrough(v bool) Style {
+	s.strikethrough = v
+	return s
+}
+
 // codes aggregates the enabled SGR attribute codes in stable order.
 func (s Style) codes() []int {
 	codes := []int{}
@@ -141,6 +150,9 @@ func (s Style) codes() []int {
 	}
 	if s.underline {
 		codes = append(codes, styleAttrUnderline)
+	}
+	if s.strikethrough {
+		codes = append(codes, styleAttrStrikethrough)
 	}
 	return codes
 }

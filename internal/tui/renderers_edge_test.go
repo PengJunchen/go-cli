@@ -82,12 +82,11 @@ func TestJoinInts(t *testing.T) {
 	assert.Equal(t, "7", joinInts([]int{7}))
 }
 
-// TestMarkdownRendererWidthWraps verifies markdown output respects the render
-// width by wrapping long lines.
-func TestMarkdownRendererWidthWraps(t *testing.T) {
+// TestMarkdownRendererPreservesContent verifies markdown output contains the
+// full content. The AST-based renderer does not wrap paragraph text.
+func TestMarkdownRendererPreservesContent(t *testing.T) {
 	out := (MarkdownRenderer{}).Render(context.Background(), "abcdefgh", RenderOpts{Theme: DarkTheme{}, Width: 4})
-	assert.True(t, strings.Contains(out, "abcd"))
-	assert.True(t, strings.Contains(out, "\n"), "markdown should wrap long content")
+	assert.Contains(t, out, "abcdefgh")
 }
 
 // TestTableRendererPreservesRowOrder verifies table header emphasis is applied

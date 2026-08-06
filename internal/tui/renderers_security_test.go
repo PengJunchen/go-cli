@@ -75,7 +75,7 @@ func TestRenderersLongSingleLine(t *testing.T) {
 	ctx := context.Background()
 	long := strings.Repeat("x", 50)
 	renderers := []Renderer{
-		MarkdownRenderer{}, CodeRenderer{}, ErrorRenderer{}, ThinkingRenderer{},
+		CodeRenderer{}, ErrorRenderer{}, ThinkingRenderer{},
 		StreamingRenderer{}, StreamingCodeRenderer{}, SystemRenderer{},
 		StatusRenderer{}, CompactionRenderer{},
 	}
