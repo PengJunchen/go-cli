@@ -28,8 +28,8 @@ func runGitInDir(t *testing.T, dir string, args ...string) string {
 func writeFileInDir(t *testing.T, dir, name, content string) {
 	t.Helper()
 	path := filepath.Join(dir, name)
-	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
-	require.NoError(t, os.WriteFile(path, []byte(content), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o750))
+	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
 }
 
 // setupGitRepo creates a temp git repo with an initial commit and returns the
@@ -490,7 +490,7 @@ func TestGitPushToolForce(t *testing.T) {
 	br := currentBranch(t, dir)
 
 	tool := NewGitPushTool(git)
-	res, err := tool.Execute(context.Background(), ToolCall{
+	_, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{
 			"remote": "origin",
 			"branch": br,
@@ -503,6 +503,7 @@ func TestGitPushToolForce(t *testing.T) {
 	runGitInDir(t, dir, "add", "new.txt")
 	runGitInDir(t, dir, "commit", "--amend", "-m", "amended")
 
+	var res *ToolResult
 	res, err = tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{
 			"remote": "origin",

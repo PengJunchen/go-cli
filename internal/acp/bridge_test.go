@@ -108,7 +108,7 @@ func TestACPMiddlewareAdapterRoutesMessageToDispatcher(t *testing.T) {
 	wrapped := adapter.Wrap(inner)
 
 	// Start the router by invoking Run once.
-	_, _ = wrapped.Run(context.Background(), core.Submission{Content: "start"})
+	_, _ = wrapped.Run(context.Background(), core.Submission{Content: "start"}) //nolint:errcheck
 
 	// Simulate an inbound ACP message from the peer.
 	client.recv <- ACPMessage{
@@ -155,7 +155,7 @@ func TestACPMiddlewareAdapterRoutesErrorOnDispatchFailure(t *testing.T) {
 
 	inner := &echoLoop{}
 	wrapped := adapter.Wrap(inner)
-	_, _ = wrapped.Run(context.Background(), core.Submission{Content: "start"})
+	_, _ = wrapped.Run(context.Background(), core.Submission{Content: "start"}) //nolint:errcheck
 
 	client.recv <- ACPMessage{
 		Type:     TypeMessage,
@@ -182,7 +182,7 @@ func TestACPMiddlewareAdapterCloseStopsRouter(t *testing.T) {
 
 	inner := &echoLoop{}
 	wrapped := adapter.Wrap(inner)
-	_, _ = wrapped.Run(context.Background(), core.Submission{Content: "start"})
+	_, _ = wrapped.Run(context.Background(), core.Submission{Content: "start"}) //nolint:errcheck
 
 	done := make(chan struct{})
 	go func() {
@@ -208,7 +208,7 @@ func TestACPMiddlewareAdapterNilClientNoPanic(t *testing.T) {
 	wrapped := adapter.Wrap(inner)
 
 	assert.NotPanics(t, func() {
-		_, _ = wrapped.Run(context.Background(), core.Submission{Content: "hello"})
+		_, _ = wrapped.Run(context.Background(), core.Submission{Content: "hello"}) //nolint:errcheck
 	})
 	adapter.Close()
 }
@@ -225,7 +225,7 @@ func TestACPMiddlewareAdapterIgnoresNonMessageTypes(t *testing.T) {
 
 	inner := &echoLoop{}
 	wrapped := adapter.Wrap(inner)
-	_, _ = wrapped.Run(context.Background(), core.Submission{Content: "start"})
+	_, _ = wrapped.Run(context.Background(), core.Submission{Content: "start"}) //nolint:errcheck
 
 	client.recv <- ACPMessage{Type: TypeAck, SenderID: "peer", Content: "ack"}
 	client.recv <- ACPMessage{Type: TypeConnect, SenderID: "peer", Content: "connect"}

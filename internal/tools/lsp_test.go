@@ -92,10 +92,10 @@ func mockLSPServer(conn net.Conn) {
 		case "initialize":
 			result = map[string]any{
 				"capabilities": map[string]any{
-					"textDocumentSync":     1,
-					"definitionProvider":   true,
-					"referencesProvider":   true,
-					"hoverProvider":        true,
+					"textDocumentSync":   1,
+					"definitionProvider": true,
+					"referencesProvider": true,
+					"hoverProvider":      true,
 				},
 				"serverInfo": map[string]any{
 					"name":    "mock-lsp",
@@ -103,13 +103,13 @@ func mockLSPServer(conn net.Conn) {
 				},
 			}
 			// Write the initialize response first.
-			writeLSPFrame(conn, map[string]any{
+			writeLSPFrame(conn, map[string]any{ //nolint:errcheck,gosec
 				"jsonrpc": "2.0",
 				"id":      *msg.ID,
 				"result":  result,
 			})
 			// Then send a diagnostics notification.
-			writeLSPFrame(conn, map[string]any{
+			writeLSPFrame(conn, map[string]any{ //nolint:errcheck,gosec
 				"jsonrpc": "2.0",
 				"method":  "textDocument/publishDiagnostics",
 				"params": map[string]any{
@@ -173,7 +173,7 @@ func mockLSPServer(conn net.Conn) {
 			result = nil
 		}
 
-		writeLSPFrame(conn, map[string]any{
+		writeLSPFrame(conn, map[string]any{ //nolint:errcheck,gosec
 			"jsonrpc": "2.0",
 			"id":      *msg.ID,
 			"result":  result,
@@ -197,7 +197,7 @@ func mockLSPServerError(conn net.Conn) {
 		if msg.ID == nil {
 			continue
 		}
-		writeLSPFrame(conn, map[string]any{
+		writeLSPFrame(conn, map[string]any{ //nolint:errcheck,gosec
 			"jsonrpc": "2.0",
 			"id":      *msg.ID,
 			"error": map[string]any{
@@ -220,8 +220,8 @@ func newMockLSPConn(t *testing.T, serverFn func(net.Conn)) (*JSONRPCClient, func
 	}()
 	rpc := NewJSONRPCClient(clientConn, clientConn)
 	cleanup := func() {
-		rpc.Close()
-		_ = clientConn.Close()
+		_ = rpc.Close()        //nolint:errcheck
+		_ = clientConn.Close() //nolint:errcheck
 		<-done
 	}
 	return rpc, cleanup
@@ -292,9 +292,9 @@ func TestJSONRPCCallContextCanceled(t *testing.T) {
 	rpc, cleanup := newMockLSPConn(t, func(conn net.Conn) {
 		// Server that reads but never responds.
 		reader := bufio.NewReader(conn)
-		readLSPFrame(reader) // consume the request
+		readLSPFrame(reader) //nolint:errcheck,gosec // consume the request
 		// Block on the next read; this will error when the connection closes.
-		readLSPFrame(reader)
+		readLSPFrame(reader) //nolint:errcheck,gosec
 	})
 	defer cleanup()
 
@@ -460,7 +460,7 @@ func TestLSPDiagnostics(t *testing.T) {
 	// The mock server sends diagnostics for file:///test/main.go after
 	// initialize. Wait for them to arrive.
 	require.Eventually(t, func() bool {
-		diags, _ := client.Diagnostics(ctx, "file:///test/main.go")
+		diags, _ := client.Diagnostics(ctx, "file:///test/main.go") //nolint:errcheck
 		return len(diags) > 0
 	}, 2*time.Second, 10*time.Millisecond, "diagnostics should arrive after initialize")
 
@@ -530,7 +530,7 @@ func TestLSPToolDescription(t *testing.T) {
 
 func TestLSPToolParameters(t *testing.T) {
 	tool := NewLSPTool(nil)
-	params := tool.(Parameterized).Parameters()
+	params := tool.(Parameterized).Parameters() //nolint:errcheck
 	m, ok := params.(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "object", m["type"])
@@ -628,7 +628,7 @@ func TestLSPToolExecuteDiagnostics(t *testing.T) {
 
 	// Wait for diagnostics to arrive.
 	require.Eventually(t, func() bool {
-		diags, _ := client.Diagnostics(ctx, "file:///test/main.go")
+		diags, _ := client.Diagnostics(ctx, "file:///test/main.go") //nolint:errcheck
 		return len(diags) > 0
 	}, 2*time.Second, 10*time.Millisecond)
 

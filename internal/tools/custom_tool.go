@@ -95,7 +95,7 @@ func (t *CustomCommandTool) Execute(ctx context.Context, call ToolCall) (*ToolRe
 	span, _ := tracing.SpanFromContext(ctx, "tool.call", tracing.SpanKindClient)
 	logger := tracing.NewTraceLogger(span, slog.Default())
 
-	input, _ := call.Args["input"].(string)
+	input, _ := call.Args["input"].(string) //nolint:errcheck
 
 	// Build the argument list: base command args, then static args, then the
 	// dynamic input (only when non-empty).
@@ -115,7 +115,7 @@ func (t *CustomCommandTool) Execute(ctx context.Context, call ToolCall) (*ToolRe
 		defer cancel()
 	}
 
-	cmd := exec.CommandContext(execCtx, t.command[0], args...)
+	cmd := exec.CommandContext(execCtx, t.command[0], args...) //nolint:gosec // command from trusted config
 	if t.workingDir != "" {
 		cmd.Dir = t.workingDir
 	}

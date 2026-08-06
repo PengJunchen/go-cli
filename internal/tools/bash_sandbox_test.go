@@ -224,7 +224,7 @@ func TestSandbox_WithAllowedPaths_SpecificPaths(t *testing.T) {
 func TestSandbox_WithAllowedPaths_NestedDirectoryAllowed(t *testing.T) {
 	dir := t.TempDir()
 	nested := filepath.Join(dir, "subdir")
-	require.NoError(t, os.Mkdir(nested, 0o755))
+	require.NoError(t, os.Mkdir(nested, 0o750))
 
 	sb := NewDefaultBashSandbox(WithAllowedPaths([]string{dir}))
 	err := sb.Validate(context.Background(), "echo hello", nested)

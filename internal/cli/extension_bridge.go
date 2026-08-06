@@ -59,8 +59,8 @@ func (a *extensionHookAdapter) AfterRun(ctx context.Context, submission core.Sub
 	event := extension.HookEvent{
 		Name: "agent.after_run",
 		Data: map[string]any{
-			"result":   result,
-			"error":    runErr,
+			"result":     result,
+			"error":      runErr,
 			"submission": submission,
 		},
 		Source:    "extension-bridge",

@@ -83,7 +83,7 @@ func NewDefaultLSPClient(_ context.Context, command []string, workspaceRoot stri
 	// context. Shutdown cancels this context to terminate the subprocess.
 	lspCtx, cancel := context.WithCancel(context.Background())
 
-	cmd := exec.CommandContext(lspCtx, command[0], command[1:]...)
+	cmd := exec.CommandContext(lspCtx, command[0], command[1:]...) //nolint:gosec // command from config
 	if workspaceRoot != "" {
 		cmd.Dir = workspaceRoot
 	}
@@ -95,14 +95,14 @@ func NewDefaultLSPClient(_ context.Context, command []string, workspaceRoot stri
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		_ = stdin.Close()
+		_ = stdin.Close() //nolint:errcheck
 		cancel()
 		return nil, fmt.Errorf("lsp: stdout pipe: %w", err)
 	}
 
 	if err := cmd.Start(); err != nil {
-		_ = stdin.Close()
-		_ = stdout.Close()
+		_ = stdin.Close()  //nolint:errcheck
+		_ = stdout.Close() //nolint:errcheck
 		cancel()
 		return nil, fmt.Errorf("lsp: start server: %w", err)
 	}
@@ -151,8 +151,8 @@ func (c *DefaultLSPClient) Initialize(ctx context.Context, rootURI string) error
 	c.rootURI = rootURI
 
 	params := map[string]any{
-		"processId":   nil,
-		"rootUri":     rootURI,
+		"processId":    nil,
+		"rootUri":      rootURI,
 		"capabilities": map[string]any{},
 	}
 
@@ -235,18 +235,18 @@ func (c *DefaultLSPClient) Diagnostics(_ context.Context, uri string) ([]Diagnos
 func (c *DefaultLSPClient) Shutdown(ctx context.Context) error {
 	// Best-effort shutdown request.
 	shutdownCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	_ = c.rpc.Call(shutdownCtx, "shutdown", nil, nil)
+	_ = c.rpc.Call(shutdownCtx, "shutdown", nil, nil) //nolint:errcheck
 	cancel()
 
-	_ = c.rpc.Notify(ctx, "exit", nil)
-	c.rpc.Close()
+	_ = c.rpc.Notify(ctx, "exit", nil) //nolint:errcheck
+	_ = c.rpc.Close()                  //nolint:errcheck
 
 	if c.cancel != nil {
 		c.cancel()
 	}
 	if c.cmd != nil && c.cmd.Process != nil {
-		_ = c.cmd.Process.Kill()
-		_ = c.cmd.Wait()
+		_ = c.cmd.Process.Kill() //nolint:errcheck
+		_ = c.cmd.Wait()         //nolint:errcheck
 	}
 
 	slog.Info("lsp.server_stopped")

@@ -273,21 +273,21 @@ func AssembleAgent(
 	if rc != nil && len(rc.LSP.ServerCommand) > 0 {
 		workspaceRoot := rc.LSP.WorkspaceRoot
 		if workspaceRoot == "" {
-			workspaceRoot, _ = os.Getwd()
+			workspaceRoot, _ = os.Getwd() //nolint:errcheck
 		}
 		lspClient, lspErr := tools.NewDefaultLSPClient(ctx, rc.LSP.ServerCommand, workspaceRoot)
 		if lspErr != nil {
 			logger.Warn("assemble_lsp_start_failed", "err", lspErr)
 		} else if initErr := lspClient.Initialize(ctx, "file://"+workspaceRoot); initErr != nil {
 			logger.Warn("assemble_lsp_init_failed", "err", initErr)
-			_ = lspClient.Shutdown(context.Background())
+			_ = lspClient.Shutdown(context.Background()) //nolint:errcheck
 		} else {
 			if regErr := tr.Register(ctx, tools.NewLSPTool(lspClient)); regErr != nil {
 				logger.Warn("assemble_lsp_register_failed", "err", regErr)
 			}
 			lspCleanup := cleanup
 			cleanup = func() {
-				_ = lspClient.Shutdown(context.Background())
+				_ = lspClient.Shutdown(context.Background()) //nolint:errcheck
 				lspCleanup()
 			}
 			logger.Info("assemble_lsp_ready", "command", rc.LSP.ServerCommand)
@@ -319,8 +319,8 @@ func AssembleAgent(
 	var extMiddleware []core.Middleware
 	if rc != nil && rc.Extensions.Enabled && len(rc.Extensions.PluginPaths) > 0 {
 		pm := extension.NewPluginManager(extension.NewDefaultPluginLoader())
-		_ = pm.Load(ctx, rc.Extensions.PluginPaths)
-		_ = pm.Init(ctx)
+		_ = pm.Load(ctx, rc.Extensions.PluginPaths) //nolint:errcheck
+		_ = pm.Init(ctx)                            //nolint:errcheck
 		for _, t := range pm.Tools() {
 			if regErr := tr.Register(ctx, t); regErr != nil {
 				logger.Warn("assemble_extension_tool_register_failed", "tool", t.Name(), "err", regErr)

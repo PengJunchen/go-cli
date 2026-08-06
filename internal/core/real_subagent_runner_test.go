@@ -335,8 +335,8 @@ type stubToolDef struct {
 	name string
 }
 
-func (s *stubToolDef) Name() string                                             { return s.name }
-func (s *stubToolDef) Description() string                                      { return "stub" }
+func (s *stubToolDef) Name() string        { return s.name }
+func (s *stubToolDef) Description() string { return "stub" }
 func (s *stubToolDef) Execute(_ context.Context, _ tools.ToolCall) (*tools.ToolResult, error) {
 	return nil, nil
 }

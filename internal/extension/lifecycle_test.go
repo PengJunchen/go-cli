@@ -115,7 +115,7 @@ func TestPluginManagerHooksMultipleExtensions(t *testing.T) {
 // DefaultExtensionRegistry.AllHooks returns every registered hook.
 func TestRegistryAllHooks(t *testing.T) {
 	reg := NewExtensionRegistry()
-	der := reg.(*DefaultExtensionRegistry)
+	der := reg.(*DefaultExtensionRegistry) //nolint:errcheck
 	ctx := context.Background()
 
 	require.NoError(t, der.RegisterHook(ctx, newMgrTestHook("h1")))
@@ -128,7 +128,7 @@ func TestRegistryAllHooks(t *testing.T) {
 // DefaultExtensionRegistry.AllMiddleware returns every registered middleware.
 func TestRegistryAllMiddleware(t *testing.T) {
 	reg := NewExtensionRegistry()
-	der := reg.(*DefaultExtensionRegistry)
+	der := reg.(*DefaultExtensionRegistry) //nolint:errcheck
 	ctx := context.Background()
 
 	require.NoError(t, der.RegisterMiddleware(ctx, &defaultMW{name: "m1"}))

@@ -73,7 +73,7 @@ type blockingSteerTool struct {
 }
 
 func (t *blockingSteerTool) Name() string        { return "block" }
-func (t *blockingSteerTool) Description() string  { return "blocking test tool" }
+func (t *blockingSteerTool) Description() string { return "blocking test tool" }
 func (t *blockingSteerTool) Execute(ctx context.Context, _ tools.ToolCall) (*tools.ToolResult, error) {
 	close(t.started)
 	select {
@@ -116,7 +116,7 @@ func TestLoopAgentPicksUpSteeringBetweenIterations(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _ = loop.Run(context.Background(), Submission{Content: "go"})
+		_, _ = loop.Run(context.Background(), Submission{Content: "go"}) //nolint:errcheck
 	}()
 
 	<-tool.started // first iteration's tool is executing
@@ -222,7 +222,7 @@ func TestEinoTurnRunnerRunningTurnID(t *testing.T) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		_, _ = runner.RunTurn(context.Background(), Submission{Content: "hi"})
+		_, _ = runner.RunTurn(context.Background(), Submission{Content: "hi"}) //nolint:errcheck
 	}()
 
 	<-bl.started
