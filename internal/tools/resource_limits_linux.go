@@ -35,9 +35,15 @@ func restoreRlimits(s rlimitSnapshot) {
 // virtual address space. Callers must save before and restore after to avoid
 // affecting the parent.
 //
+// Under the race detector (TSan), setting RLIMIT_AS is skipped because TSan
+// maps a large shadow-memory region that would exceed the limit and cause OOM.
+//
 // RLIMIT_CPU is not set because it is cumulative and would risk killing the
 // parent process. CPU time is bounded by the context timeout instead.
 func applyRlimits(_ *exec.Cmd, limits ResourceLimits) {
+	if raceEnabled {
+		return
+	}
 	if limits.MaxMemory > 0 {
 		if err := syscall.Setrlimit(syscall.RLIMIT_AS, &syscall.Rlimit{
 			Cur: uint64(limits.MaxMemory), Max: uint64(limits.MaxMemory),

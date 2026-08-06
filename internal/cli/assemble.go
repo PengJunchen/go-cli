@@ -649,6 +649,9 @@ func AssembleAgent(
 			sessionStore.Close() //nolint:errcheck,gosec
 		}
 		if traceExporter != nil {
+			if tracer != nil {
+				tracer.Flush()
+			}
 			_ = traceExporter.Shutdown(context.Background()) //nolint:errcheck
 		}
 		prevCleanup()
