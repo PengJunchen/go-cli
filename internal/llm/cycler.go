@@ -1,15 +1,36 @@
 // Package llm cycler.go — ModelCycler rotates model selection across multiple
 // providers using configurable strategies (round-robin, weighted, cost
 // priority). It implements ModelMiddleware so it can be registered in a
-// ModelMiddlewareChain. The full WrapModel routing is task 25-5; this file
-// defines the types and selection logic.
+// ModelMiddlewareChain.
 package llm
 
 import (
+	"context"
+	"errors"
 	"math/rand/v2"
 	"sync"
 	"sync/atomic"
 )
+
+// sessionIDKey is the context key used to carry a session identifier for
+// ModelCycler session affinity.
+type sessionIDKey struct{}
+
+// WithSessionID returns a copy of ctx that carries the given sessionID. The
+// sessionID is used by ModelCycler (when SessionAffinity is enabled) to pin a
+// conversation to a consistent model.
+func WithSessionID(ctx context.Context, sessionID string) context.Context {
+	return context.WithValue(ctx, sessionIDKey{}, sessionID)
+}
+
+// sessionIDFromContext extracts the session ID from ctx, or returns "" when no
+// session ID is present.
+func sessionIDFromContext(ctx context.Context) string {
+	if v, ok := ctx.Value(sessionIDKey{}).(string); ok {
+		return v
+	}
+	return ""
+}
 
 // Strategy constants for ModelCyclerConfig.Strategy.
 const (
@@ -39,9 +60,10 @@ type ModelEntry struct {
 // ModelCycler implements model rotation across multiple providers. It is
 // safe for concurrent use.
 type ModelCycler struct {
-	config  ModelCyclerConfig
-	counter atomic.Int64
-	mu      sync.Mutex
+	config   ModelCyclerConfig
+	registry *ProviderRegistry
+	counter  atomic.Int64
+	mu       sync.Mutex
 	// sessions maps sessionID -> model index when SessionAffinity is enabled.
 	sessions map[string]int
 }
@@ -57,14 +79,26 @@ func NewModelCycler(config ModelCyclerConfig) *ModelCycler {
 	}
 }
 
+// WithRegistry sets the ProviderRegistry used to build selected models on
+// demand. Without a registry the cycler falls back to the primary (wrapped)
+// model for every call. Returns the cycler for chaining.
+func (c *ModelCycler) WithRegistry(r *ProviderRegistry) *ModelCycler {
+	c.registry = r
+	return c
+}
+
 // Name returns "model_cycler".
 func (c *ModelCycler) Name() string { return "model_cycler" }
 
-// WrapModel is a placeholder that returns the wrapped model unchanged. The
-// full implementation that routes to the selected provider's model is task
-// 25-5.
+// WrapModel returns a BaseChatModel that routes each call to the model selected
+// by the configured strategy. If the registry is unavailable, the selected
+// model cannot be built, or the selected model returns an error, the call
+// falls back to the wrapped primary model.
 func (c *ModelCycler) WrapModel(next BaseChatModel) BaseChatModel {
-	return next
+	return &cycledModel{
+		cycler:  c,
+		primary: next,
+	}
 }
 
 // selectModel returns the index of the selected model based on the configured
@@ -155,4 +189,75 @@ func (c *ModelCycler) selectCostPriority() int {
 		}
 	}
 	return bestIdx
+}
+
+// cycledModel is the BaseChatModel produced by ModelCycler.WrapModel. It
+// delegates each call to the model selected by the cycler's strategy, falling
+// back to the primary model when the selected model is unavailable or errors.
+type cycledModel struct {
+	cycler  *ModelCycler
+	primary BaseChatModel
+}
+
+var _ BaseChatModel = (*cycledModel)(nil)
+
+// buildSelectedModel resolves the model at idx via the registry. It returns an
+// error when no registry is configured, the index is out of range, or the
+// registry fails to build the model.
+func (m *cycledModel) buildSelectedModel(ctx context.Context, idx int) (BaseChatModel, func(), error) {
+	if m.cycler.registry == nil {
+		return nil, nil, errors.New("llm: model cycler has no registry")
+	}
+	models := m.cycler.config.Models
+	if idx < 0 || idx >= len(models) {
+		return nil, nil, errors.New("llm: model index out of range")
+	}
+	entry := models[idx]
+	return m.cycler.registry.GetModel(ctx, entry.Provider, ModelConfig{
+		Model: entry.Model,
+	})
+}
+
+// Generate routes the call to the model selected by the cycler's strategy. On
+// build failure or generation error it falls back to the primary model.
+func (m *cycledModel) Generate(ctx context.Context, msgs []Message, opts ...Option) (*Message, error) {
+	sessionID := sessionIDFromContext(ctx)
+	idx := m.cycler.selectModel(sessionID)
+
+	model, cleanup, err := m.buildSelectedModel(ctx, idx)
+	if err != nil {
+		return m.primary.Generate(ctx, msgs, opts...)
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
+
+	resp, err := model.Generate(ctx, msgs, opts...)
+	if err != nil {
+		return m.primary.Generate(ctx, msgs, opts...)
+	}
+	return resp, nil
+}
+
+// Stream routes the call to the model selected by the cycler's strategy. On
+// build failure or stream initialization error it falls back to the primary
+// model. Errors that occur mid-stream (after the channel has been returned)
+// are not retried.
+func (m *cycledModel) Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
+	sessionID := sessionIDFromContext(ctx)
+	idx := m.cycler.selectModel(sessionID)
+
+	model, cleanup, err := m.buildSelectedModel(ctx, idx)
+	if err != nil {
+		return m.primary.Stream(ctx, msgs, opts...)
+	}
+
+	ch, err := model.Stream(ctx, msgs, opts...)
+	if err != nil {
+		if cleanup != nil {
+			cleanup()
+		}
+		return m.primary.Stream(ctx, msgs, opts...)
+	}
+	return ch, nil
 }
