@@ -7,6 +7,7 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/memory"
 	"github.com/pengjunchen/go-cli/internal/production"
 	"github.com/pengjunchen/go-cli/internal/session"
 	"github.com/pengjunchen/go-cli/internal/tools"
@@ -34,6 +35,7 @@ type slashContext struct {
 	planCtrl      core.PlanModeController
 	config        *config.Config
 	sessionStore  *session.JSONLSessionStore
+	memoryStore   memory.MemoryStore
 }
 
 // defaultSlashReg is the fully populated registry shared by all interactive
@@ -90,6 +92,7 @@ func buildSlashCommandRegistry() *SlashCommandRegistry {
 	add(&HistoryHandler{})
 	add(&SaveHandler{})
 	add(&LoadHandler{})
+	add(&MemoryHandler{})
 
 	// Aliases.
 	reg.RegisterAlias("h", "help")
