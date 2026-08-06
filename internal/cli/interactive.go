@@ -235,8 +235,9 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		var lastLineCount int
 		isTTY := tui.IsTerminal()
 		tsp := tui.NewDefaultTerminalSizeProvider()
+		termWidth := tsp.Width()
 		app := tui.NewBubbleteaApp(tuiEvents,
-			tui.WithWidth(tsp.Width()),
+			tui.WithWidth(termWidth),
 			tui.WithOnUpdate(func(view string) {
 				if isTTY {
 					if lastLineCount > 0 {
@@ -246,7 +247,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 					// In raw mode \n only moves down; \r\n returns to column 0.
 					fmt.Fprint(c.out, strings.ReplaceAll(view, "\n", "\r\n")) //nolint:errcheck
 					fmt.Fprint(c.out, "\r\n")                                 //nolint:errcheck
-					lastLineCount = strings.Count(view, "\n") + 1
+					lastLineCount = countViewVisualLines(view, termWidth)
 				} else {
 					fmt.Fprintln(c.out, view) //nolint:errcheck
 				}

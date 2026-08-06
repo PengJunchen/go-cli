@@ -56,6 +56,10 @@ type DefaultLineEditor struct {
 	// TTY state (checked once).
 	ttyChecked bool
 	isTTY      bool
+
+	// Render state for multi-line wrapping support.
+	cachedTermWidth int // 0 = not queried yet
+	prevVisualLines int // visual lines used by the previous render
 }
 
 // NewDefaultLineEditor creates a DefaultLineEditor reading from in and
@@ -66,6 +70,90 @@ func NewDefaultLineEditor(in io.Reader, out io.Writer) *DefaultLineEditor {
 		out:     out,
 		history: NewHistoryStore(1000, ""),
 	}
+}
+
+// terminalWidth returns the terminal width in columns. It queries stty once
+// and caches the result. Falls back to 80 when the terminal size cannot be
+// determined.
+func (le *DefaultLineEditor) terminalWidth() int {
+	if le.cachedTermWidth > 0 {
+		return le.cachedTermWidth
+	}
+	le.cachedTermWidth = 80
+	f, ok := le.in.(*os.File)
+	if !ok {
+		return le.cachedTermWidth
+	}
+	cmd := exec.Command("stty", "size")
+	cmd.Stdin = f
+	out, err := cmd.Output()
+	if err != nil {
+		return le.cachedTermWidth
+	}
+	var rows, cols int
+	_, _ = fmt.Sscanf(strings.TrimSpace(string(out)), "%d %d", &rows, &cols) //nolint:errcheck // best-effort parse
+	if cols > 0 {
+		le.cachedTermWidth = cols
+	}
+	return le.cachedTermWidth
+}
+
+// visualLineCount calculates how many terminal visual lines the prompt + buffer
+// will occupy, accounting for CJK double-width characters and line wrapping.
+func visualLineCount(prompt string, buf []rune, termWidth int) int {
+	if termWidth <= 0 {
+		termWidth = 80
+	}
+	total := displayWidth([]rune(prompt)) + displayWidth(buf)
+	if total == 0 {
+		return 1
+	}
+	return (total + termWidth - 1) / termWidth
+}
+
+// stripANSI removes all ANSI escape sequences from s, returning only the
+// visible text. This is needed to calculate the true display width of styled
+// TUI output.
+func stripANSI(s string) string {
+	var sb strings.Builder
+	inEscape := false
+	for _, r := range s {
+		if r == '\x1b' {
+			inEscape = true
+			continue
+		}
+		if inEscape {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') {
+				inEscape = false
+			}
+			continue
+		}
+		sb.WriteRune(r)
+	}
+	return sb.String()
+}
+
+// countViewVisualLines counts the number of terminal visual lines a view
+// string will occupy, accounting for newlines, ANSI escape sequences, CJK
+// double-width characters, and line wrapping.
+func countViewVisualLines(view string, termWidth int) int {
+	if termWidth <= 0 {
+		termWidth = 80
+	}
+	total := 0
+	for _, line := range strings.Split(view, "\n") {
+		visible := stripANSI(line)
+		w := displayWidth([]rune(visible))
+		if w == 0 {
+			total++
+		} else {
+			total += (w + termWidth - 1) / termWidth
+		}
+	}
+	if total == 0 {
+		return 1
+	}
+	return total
 }
 
 // ReadLine implements LineEditor.
@@ -235,6 +323,9 @@ func (le *DefaultLineEditor) readLineTTY(ctx context.Context, prompt string) (st
 // readSingleLineTTY reads one physical line with editing support.
 func (le *DefaultLineEditor) readSingleLineTTY(readByte func() (byte, error), prompt string) (string, error) {
 	fmt.Fprint(le.out, prompt) //nolint:errcheck
+	le.prevVisualLines = 0
+
+	termW := le.terminalWidth()
 
 	var buf []rune
 	pos := 0
@@ -243,8 +334,13 @@ func (le *DefaultLineEditor) readSingleLineTTY(readByte func() (byte, error), pr
 	var savedInput string
 
 	render := func() {
-		// Move to beginning of line, clear to end, write prompt + buffer.
-		fmt.Fprint(le.out, "\r\033[K")  //nolint:errcheck
+		// Move cursor to the first visual line of the input so that
+		// clearing affects all wrapped lines, not just the last one.
+		if le.prevVisualLines > 1 {
+			fmt.Fprintf(le.out, "\033[%dA", le.prevVisualLines-1) //nolint:errcheck
+		}
+		// Clear from cursor to end of screen (handles wrapped lines).
+		fmt.Fprint(le.out, "\r\033[J")  //nolint:errcheck
 		fmt.Fprint(le.out, prompt)      //nolint:errcheck
 		fmt.Fprint(le.out, string(buf)) //nolint:errcheck
 		// Move cursor left to correct position using display width
@@ -255,6 +351,7 @@ func (le *DefaultLineEditor) readSingleLineTTY(readByte func() (byte, error), pr
 				fmt.Fprintf(le.out, "\033[%dD", afterCursor) //nolint:errcheck
 			}
 		}
+		le.prevVisualLines = visualLineCount(prompt, buf, termW)
 	}
 
 	for {
@@ -461,12 +558,20 @@ func (le *DefaultLineEditor) applyCompletions(buf *[]rune, pos *int, completions
 			fmt.Fprintf(le.out, "  %s\r\n", c.Text) //nolint:errcheck
 		}
 	}
+	// Cursor is on a fresh line after the completion options; no need
+	// to move up before rendering.
+	le.prevVisualLines = 0
 	le.renderBuf(prompt, *buf, *pos)
 }
 
-// renderBuf writes the prompt, buffer, and positions the cursor.
+// renderBuf writes the prompt, buffer, and positions the cursor. It also
+// handles multi-line wrapping by moving the cursor to the first visual line
+// before clearing.
 func (le *DefaultLineEditor) renderBuf(prompt string, buf []rune, pos int) {
-	fmt.Fprint(le.out, "\r\033[K")  //nolint:errcheck
+	if le.prevVisualLines > 1 {
+		fmt.Fprintf(le.out, "\033[%dA", le.prevVisualLines-1) //nolint:errcheck
+	}
+	fmt.Fprint(le.out, "\r\033[J")  //nolint:errcheck
 	fmt.Fprint(le.out, prompt)      //nolint:errcheck
 	fmt.Fprint(le.out, string(buf)) //nolint:errcheck
 	if pos < len(buf) {
@@ -475,6 +580,8 @@ func (le *DefaultLineEditor) renderBuf(prompt string, buf []rune, pos int) {
 			fmt.Fprintf(le.out, "\033[%dD", afterCursor) //nolint:errcheck
 		}
 	}
+	termW := le.terminalWidth()
+	le.prevVisualLines = visualLineCount(prompt, buf, termW)
 }
 
 // ---------------------------------------------------------------------------
