@@ -131,7 +131,7 @@ func TestRenderersTable(t *testing.T) {
 			renderer: ProgressRenderer{},
 			content:  "0.5",
 			opts:     RenderOpts{Theme: DarkTheme{}, Width: 10},
-			want:     []string{"=====", "-----"},
+			want:     []string{"█████", "░░░░░", "50%"},
 			notWant:  []string{},
 		},
 		{
@@ -139,7 +139,7 @@ func TestRenderersTable(t *testing.T) {
 			renderer: ProgressRenderer{},
 			content:  "99",
 			opts:     RenderOpts{Theme: DarkTheme{}, Width: 4},
-			want:     []string{"===="},
+			want:     []string{"████", "100%"},
 			notWant:  []string{},
 		},
 		{
@@ -147,7 +147,7 @@ func TestRenderersTable(t *testing.T) {
 			renderer: ProgressRenderer{},
 			content:  "bananas",
 			opts:     RenderOpts{Theme: DarkTheme{}, Width: 4},
-			want:     []string{"----"},
+			want:     []string{"░░░░", "0%"},
 			notWant:  []string{},
 		},
 		{
@@ -155,7 +155,7 @@ func TestRenderersTable(t *testing.T) {
 			renderer: ProgressRenderer{},
 			content:  "-0.5",
 			opts:     RenderOpts{Theme: DarkTheme{}, Width: 4},
-			want:     []string{"----"},
+			want:     []string{"░░░░", "0%"},
 			notWant:  []string{},
 		},
 		{
@@ -163,7 +163,7 @@ func TestRenderersTable(t *testing.T) {
 			renderer: ProgressRenderer{},
 			content:  "0.25",
 			opts:     RenderOpts{Theme: DarkTheme{}},
-			want:     []string{strings.Repeat("=", 10), strings.Repeat("-", 30)},
+			want:     []string{strings.Repeat("█", 10), strings.Repeat("░", 30), "25%"},
 			notWant:  []string{},
 		},
 		{
@@ -320,6 +320,9 @@ func TestRenderersTable(t *testing.T) {
 // Name equal to the content type it supports and that Name is stable.
 func TestRendererNamesMatchContentType(t *testing.T) {
 	for _, ct := range contentTypes {
+		if ct == ContentTypeSpinner {
+			continue // SpinnerRenderer is a standalone component, not a Renderer
+		}
 		r, ok := NewDefaultRegistry().Get(ct)
 		require.True(t, ok, "missing %q", ct)
 		assert.Equal(t, ct, r.Name(), "renderer name should equal its content type")
@@ -330,6 +333,9 @@ func TestRendererNamesMatchContentType(t *testing.T) {
 // content type and nothing else.
 func TestRendererSupportsIsExclusive(t *testing.T) {
 	for _, ct := range contentTypes {
+		if ct == ContentTypeSpinner {
+			continue // SpinnerRenderer is a standalone component, not a Renderer
+		}
 		r, _ := NewDefaultRegistry().Get(ct)
 		for _, other := range contentTypes {
 			assert.Equal(t, ct == other, r.Supports(other),

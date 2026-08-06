@@ -113,7 +113,7 @@ func TestProgressRendererWidthOneAndLarge(t *testing.T) {
 	p := ProgressRenderer{}
 	for _, width := range []int{1, 2, 100} {
 		out := p.Render(context.Background(), "0.5", RenderOpts{Theme: DarkTheme{}, Width: width})
-		assert.Equal(t, width, strings.Count(out, "=")+strings.Count(out, "-"),
+		assert.Equal(t, width, strings.Count(out, "█")+strings.Count(out, "░"),
 			"progress bar should span exactly %d cells", width)
 	}
 }
