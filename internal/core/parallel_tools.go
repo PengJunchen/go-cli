@@ -45,8 +45,9 @@ type ParallelToolResult struct {
 // executeToolsParallel runs multiple tool calls concurrently against the
 // registry. Results are returned in the same order as the input calls. It is
 // thread-safe: each goroutine writes to its own index in a pre-allocated
-// slice, so no locking is required for the results.
-func executeToolsParallel(ctx context.Context, tr tools.ToolRegistry, calls []llm.ToolCall) []ParallelToolResult {
+// slice, so no locking is required for the results. When es is non-nil,
+// streaming tools push output lines through the EventStream in real time.
+func executeToolsParallel(ctx context.Context, tr tools.ToolRegistry, calls []llm.ToolCall, es EventStream) []ParallelToolResult {
 	results := make([]ParallelToolResult, len(calls))
 	if len(calls) == 0 {
 		return results
@@ -63,7 +64,7 @@ func executeToolsParallel(ctx context.Context, tr tools.ToolRegistry, calls []ll
 				"call_id", call.ID,
 			)
 
-			output, err := executeSingleTool(ctx, tr, toToolsCall(call))
+			output, err := executeSingleTool(ctx, tr, toToolsCall(call), es)
 			results[idx] = ParallelToolResult{
 				ID:     call.ID,
 				Name:   call.Name,
@@ -80,14 +81,27 @@ func executeToolsParallel(ctx context.Context, tr tools.ToolRegistry, calls []ll
 
 // executeSingleTool looks up the tool in the registry and runs it, returning
 // the output string. It is shared by both sequential and parallel execution
-// paths.
-func executeSingleTool(ctx context.Context, tr tools.ToolRegistry, call tools.ToolCall) (string, error) {
+// paths. When the tool implements tools.StreamingBashTool and es is non-nil,
+// it uses ExecuteStreaming to push output lines in real time.
+func executeSingleTool(ctx context.Context, tr tools.ToolRegistry, call tools.ToolCall, es EventStream) (string, error) {
 	if tr == nil {
 		return "", errNoTools
 	}
 	def, err := tr.Get(ctx, call.Name)
 	if err != nil {
 		return "", err
+	}
+	// Check if the tool supports streaming output.
+	if st, ok := def.(tools.StreamingBashTool); ok && es != nil {
+		sink := &eventStreamSink{es: es}
+		result, err := st.ExecuteStreaming(ctx, call, sink)
+		if err != nil {
+			return "", err
+		}
+		if result == nil {
+			return "", nil
+		}
+		return result.Output, nil
 	}
 	result, err := def.Execute(ctx, call)
 	if err != nil {
