@@ -447,7 +447,7 @@ func TestWithRemoteBashMaxOutput(t *testing.T) {
 }
 
 func TestWithRemoteBashTimeout(t *testing.T) {
-	tool := NewRemoteBashTool(&mockSSHClient{}, WithRemoteBashTimeout(10 * time.Second))
+	tool := NewRemoteBashTool(&mockSSHClient{}, WithRemoteBashTimeout(10*time.Second))
 	assert.Equal(t, 10*time.Second, tool.timeout)
 }
 

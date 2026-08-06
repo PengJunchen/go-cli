@@ -65,10 +65,10 @@ func (t *lspTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, erro
 	span, _ := tracing.SpanFromContext(ctx, "tool.call", tracing.SpanKindClient)
 	logger := tracing.NewTraceLogger(span, slog.Default())
 
-	operation, _ := call.Args["operation"].(string)
-	uri, _ := call.Args["uri"].(string)
-	line, _ := call.Args["line"].(float64)
-	character, _ := call.Args["character"].(float64)
+	operation, _ := call.Args["operation"].(string)  //nolint:errcheck
+	uri, _ := call.Args["uri"].(string)              //nolint:errcheck
+	line, _ := call.Args["line"].(float64)           //nolint:errcheck
+	character, _ := call.Args["character"].(float64) //nolint:errcheck
 
 	if operation == "" {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})

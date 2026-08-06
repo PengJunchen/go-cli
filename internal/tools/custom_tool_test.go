@@ -92,7 +92,7 @@ func TestCustomCommandToolTimeout(t *testing.T) {
 	})
 	elapsed := time.Since(start)
 	assert.Error(t, err)
-	// The command should have been cancelled well before the 5s sleep finished.
+	// The command should have been canceled well before the 5s sleep finished.
 	assert.Less(t, elapsed, 4*time.Second)
 }
 

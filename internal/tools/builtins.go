@@ -10,12 +10,12 @@ import (
 type RegisterDefaultsOption func(*registerDefaultsConfig)
 
 type registerDefaultsConfig struct {
-	fileTracker       *FileTracker
-	diffGenerator     DiffGenerator
-	bashSandbox       BashSandbox
-	resourceLimits    ResourceLimits
-	gitTool           GitTool
-	builtinWhitelist  map[string]bool
+	fileTracker      *FileTracker
+	diffGenerator    DiffGenerator
+	bashSandbox      BashSandbox
+	resourceLimits   ResourceLimits
+	gitTool          GitTool
+	builtinWhitelist map[string]bool
 }
 
 // WithRegisteredFileTracker wires a FileTracker into the WriteTool and

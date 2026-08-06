@@ -119,7 +119,7 @@ func (t *RemoteBashTool) Execute(ctx context.Context, call ToolCall) (*ToolResul
 	}
 
 	// Select the SSH client: use a named host if provided, otherwise the default.
-	hostName, _ := call.Args["host"].(string)
+	hostName, _ := call.Args["host"].(string) //nolint:errcheck
 	client := t.client
 	if hostName != "" {
 		if c, ok := t.hostClients[hostName]; ok {
@@ -158,9 +158,9 @@ func (t *RemoteBashTool) Execute(ctx context.Context, call ToolCall) (*ToolResul
 	// bash.go) to cap the amount of buffered data.
 	var buf bytes.Buffer
 	limited := &limitedWriter{max: t.maxOutput, buf: &buf}
-	limited.Write([]byte(stdout))
+	_, _ = limited.Write([]byte(stdout)) //nolint:errcheck
 	if stderr != "" {
-		limited.Write([]byte(stderr))
+		_, _ = limited.Write([]byte(stderr)) //nolint:errcheck
 	}
 	limited.truncate()
 	output := buf.String()
