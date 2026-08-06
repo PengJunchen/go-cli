@@ -113,7 +113,7 @@ func TestRegisterDefaultsWithDiffGenerator(t *testing.T) {
 }
 
 // TestRegisterDefaultsWithBashSandbox verifies that RegisterDefaults wires the
-// BashSandbox into BashTool when the option is passed.
+// BashSandbox into the bash tool when the option is passed.
 func TestRegisterDefaultsWithBashSandbox(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -125,7 +125,7 @@ func TestRegisterDefaultsWithBashSandbox(t *testing.T) {
 
 	bt, err := reg.Get(ctx, "bash")
 	require.NoError(t, err)
-	btConcrete, ok := bt.(*BashTool)
+	btConcrete, ok := bt.(*StreamingBashToolImpl)
 	require.True(t, ok)
 	assert.Equal(t, sb, btConcrete.Sandbox)
 }

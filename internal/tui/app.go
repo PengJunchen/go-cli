@@ -465,8 +465,51 @@ func (a *BubbleteaApp) handleEvent(ctx context.Context, ev AgentEvent) {
 			Theme:       theme,
 			Width:       a.width,
 			ContentType: ct,
+			Stream:      ev.Stream,
 		})
 	}
+
+	// tool_output events append to the last tool_call entry instead of
+	// creating a new top-level entry, keeping streaming output grouped
+	// with its originating tool call.
+	if ct == ContentTypeToolOutput {
+		var view string
+		notify := a.onUpdate != nil
+		appended := false
+		func() {
+			a.mu.Lock()
+			defer a.mu.Unlock()
+			if len(a.accordion.entries) > 0 {
+				last := a.accordion.entries[len(a.accordion.entries)-1]
+				if last.ContentType == ContentTypeToolCall {
+					if last.Full != "" {
+						last.Full += "\n" + out
+					} else {
+						last.Full = out
+					}
+					last.Summary = summarizeFirstLine(last.Full, 80)
+					appended = true
+					if notify {
+						view = a.renderView()
+					}
+				}
+			}
+		}()
+		if appended {
+			if notify {
+				a.onUpdate(view)
+			}
+			slog.DebugContext(ctx, "tui.app.render",
+				"content_type", ct,
+				"trace_id", ev.TraceID,
+				"span_id", ev.SpanID,
+				"latency_us", time.Since(start).Microseconds(),
+			)
+			return
+		}
+		// Fall through to addEntry if no tool_call entry to append to.
+	}
+
 	a.addEntry(ct, out)
 	slog.DebugContext(ctx, "tui.app.render",
 		"content_type", ct,

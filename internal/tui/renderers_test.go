@@ -195,3 +195,50 @@ func TestProgressRendererUsesBlockChars(t *testing.T) {
 	assert.NotContains(t, out, "=")
 	assert.NotContains(t, out, "-")
 }
+
+// ---------- tool_output renderer tests ----------
+
+// TestToolOutputRendererStdout verifies that when Stream is "stdout" the
+// renderer produces an [output] label styled with the foreground color.
+func TestToolOutputRendererStdout(t *testing.T) {
+	r := ToolOutputRenderer{}
+	ctx := context.Background()
+	out := r.Render(ctx, "hello world", RenderOpts{
+		Theme:       DarkTheme{},
+		ContentType: ContentTypeToolOutput,
+		Stream:      "stdout",
+	})
+	assert.Contains(t, out, "[output]")
+	assert.Contains(t, out, "\x1b[37", "stdout should use Fg (white) style")
+	assert.NotContains(t, out, "[err]")
+}
+
+// TestToolOutputRendererStderr verifies that when Stream is "stderr" the
+// renderer produces an [err] label styled with the error (red) color.
+func TestToolOutputRendererStderr(t *testing.T) {
+	r := ToolOutputRenderer{}
+	ctx := context.Background()
+	out := r.Render(ctx, "something broke", RenderOpts{
+		Theme:       DarkTheme{},
+		ContentType: ContentTypeToolOutput,
+		Stream:      "stderr",
+	})
+	assert.Contains(t, out, "[err]")
+	assert.Contains(t, out, "\x1b[31", "stderr should use Error (red) style")
+	assert.NotContains(t, out, "[output]")
+}
+
+// TestToolOutputRendererEmptyStreamDefaultsToStdout verifies that an empty
+// Stream field defaults to stdout behavior ([output] label, Fg style).
+func TestToolOutputRendererEmptyStreamDefaultsToStdout(t *testing.T) {
+	r := ToolOutputRenderer{}
+	ctx := context.Background()
+	out := r.Render(ctx, "default behavior", RenderOpts{
+		Theme:       DarkTheme{},
+		ContentType: ContentTypeToolOutput,
+		Stream:      "",
+	})
+	assert.Contains(t, out, "[output]")
+	assert.Contains(t, out, "\x1b[37", "empty stream should use Fg (white) style")
+	assert.NotContains(t, out, "[err]")
+}
