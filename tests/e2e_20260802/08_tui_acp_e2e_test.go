@@ -298,10 +298,10 @@ func TestTUI_ProgressRenderer(t *testing.T) {
 	r := tui.ProgressRenderer{}
 	assert.True(t, r.Supports(tui.ContentTypeProgress))
 
-	// 50% progress.
+	// 50% progress — enhanced renderer uses █/░ bar characters.
 	out := r.Render(context.Background(), "0.5", tui.RenderOpts{Width: 40})
 	assert.NotEmpty(t, out)
-	assert.Contains(t, out, "=")
+	assert.Contains(t, out, "█")
 
 	// 100% progress.
 	out = r.Render(context.Background(), "1.0", tui.RenderOpts{Width: 20})
