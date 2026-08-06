@@ -31,7 +31,7 @@ func LoadTrace(filePath string) (*SpanNode, error) {
 	for scanner.Scan() {
 		var span SpanData
 		if err := json.Unmarshal(scanner.Bytes(), &span); err != nil {
-			continue // skip unparseable lines
+			continue // skip unparsable lines
 		}
 		spans = append(spans, span)
 	}

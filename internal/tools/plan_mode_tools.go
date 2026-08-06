@@ -11,7 +11,7 @@ import (
 // tools package does not need to import core (which would create an import
 // cycle, since core already imports tools).
 //
-//nolint:scan012 // consumer-side interface; default impl in core package
+//exempt:scan012 // consumer-side interface; default impl in core package
 type PlanModeController interface {
 	Enter(ctx context.Context, reason string) error
 	Exit(ctx context.Context, summary string) error

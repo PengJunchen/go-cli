@@ -17,7 +17,7 @@ type SkillDefinition interface {
 	Version() string
 	// Category returns the coarse grouping a skill belongs to (e.g. coding).
 	Category() string
-	// Prompt returns the instrution text to feed to the model when the
+	// Prompt returns the instruction text to feed to the model when the
 	// skill executes.
 	Prompt() string
 	// Tools lists the names of the tools the skill may use.

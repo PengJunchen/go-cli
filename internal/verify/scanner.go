@@ -372,8 +372,8 @@ func scanHardcodedSecrets(file string) []Finding {
 		return findings
 	}
 
-	// Check for nolint:scan003 directive in the file.
-	if strings.Contains(string(data), "nolint:scan003") || strings.Contains(string(data), "nolint:all") {
+	// Check for exempt:scan003 directive in the file.
+	if strings.Contains(string(data), "exempt:scan003") || strings.Contains(string(data), "exempt:all") {
 		return findings
 	}
 

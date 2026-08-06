@@ -48,7 +48,7 @@ func TestE2E_RealConfigScenario_FullPipeline(t *testing.T) {
 		if r.Method == http.MethodPost {
 			// Respond to initialize
 			if strings.Contains(r.URL.Path, "initialize") || r.Header.Get("Content-Type") != "" {
-				body, _ := json.Marshal(map[string]any{
+				body, _ := json.Marshal(map[string]any{ //nolint:errcheck
 					"jsonrpc": "2.0",
 					"id":      0,
 					"result": map[string]any{
@@ -58,11 +58,13 @@ func TestE2E_RealConfigScenario_FullPipeline(t *testing.T) {
 						},
 					},
 				})
-				_, _ = w.Write(body)
+				//nolint:errcheck // test HTTP response
+				_, _ = w.Write(body) //nolint:errcheck
 				return
 			}
 		}
-		_, _ = w.Write([]byte(`{}`))
+		//nolint:errcheck // test HTTP response
+		_, _ = w.Write([]byte(`{}`)) //nolint:errcheck
 	}))
 	defer mcpSrv.Close()
 
@@ -77,11 +79,11 @@ mcp:
 skill:
   dir: .go-cli/skills
 `, mcpSrv.URL)
-	require.NoError(t, os.WriteFile(".go-cli.yaml", []byte(yamlContent), 0o644))
+	require.NoError(t, os.WriteFile(".go-cli.yaml", []byte(yamlContent), 0o600))
 
 	// --- Setup: .go-cli/skills/ with a real skill ---
 	skillDir := filepath.Join(".go-cli", "skills", "pdf")
-	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	require.NoError(t, os.MkdirAll(skillDir, 0o750))
 	skillContent := `---
 name: pdf
 description: Use this skill whenever the user wants to do anything with PDF files. This includes reading, merging, splitting, and OCR.
@@ -91,7 +93,7 @@ prompt: PDF skill instructions here
 ---
 PDF skill body.
 `
-	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillContent), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillContent), 0o600))
 
 	// Also create a second skill (flat layout).
 	flatContent := `---
@@ -104,7 +106,7 @@ DOCX skill body.
 `
 	require.NoError(t, os.WriteFile(
 		filepath.Join(".go-cli", "skills", "docx.md"),
-		[]byte(flatContent), 0o644,
+		[]byte(flatContent), 0o600,
 	))
 
 	// --- Step 1: Load config (mirrors what the CLI does) ---
@@ -132,8 +134,8 @@ DOCX skill body.
 
 	// --- Step 4: Verify skill tools are in the registry ---
 	for _, name := range []string{"pdf", "docx"} {
-		tool, err := tr.Get(ctx, name)
-		require.NoError(t, err, "skill %s must be registered as a tool", name)
+		tool, getErr := tr.Get(ctx, name)
+		require.NoError(t, getErr, "skill %s must be registered as a tool", name)
 		assert.NotNil(t, tool)
 	}
 
@@ -198,7 +200,7 @@ func TestE2E_RealConfigScenario_MCPDescriptionPropagated(t *testing.T) {
 	// Mock MCP server that returns a tool with a specific description.
 	mcpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		body, _ := json.Marshal(map[string]any{
+		body, _ := json.Marshal(map[string]any{ //nolint:errcheck
 			"jsonrpc": "2.0",
 			"id":      0,
 			"result": map[string]any{
@@ -210,7 +212,8 @@ func TestE2E_RealConfigScenario_MCPDescriptionPropagated(t *testing.T) {
 				},
 			},
 		})
-		_, _ = w.Write(body)
+		//nolint:errcheck // test HTTP response
+		_, _ = w.Write(body) //nolint:errcheck
 	}))
 	defer mcpSrv.Close()
 
@@ -219,7 +222,7 @@ func TestE2E_RealConfigScenario_MCPDescriptionPropagated(t *testing.T) {
     - name: test-server
       url: "%s"
 `, mcpSrv.URL)
-	require.NoError(t, os.WriteFile(".go-cli.yaml", []byte(yamlContent), 0o644))
+	require.NoError(t, os.WriteFile(".go-cli.yaml", []byte(yamlContent), 0o600))
 
 	cfg, err := config.Load()
 	require.NoError(t, err)
@@ -259,11 +262,11 @@ func TestE2E_RealConfigScenario_AutoDiscoveryFallback(t *testing.T) {
   name: mock
   model: test-model
 `
-	require.NoError(t, os.WriteFile(".go-cli.yaml", []byte(yamlContent), 0o644))
+	require.NoError(t, os.WriteFile(".go-cli.yaml", []byte(yamlContent), 0o600))
 
 	// --- Setup: .go-cli/skills/ (should be auto-discovered) ---
 	skillDir := filepath.Join(".go-cli", "skills", "auto-skill")
-	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	require.NoError(t, os.MkdirAll(skillDir, 0o750))
 	skillContent := `---
 name: auto-skill
 description: Auto-discovered skill without explicit config
@@ -272,12 +275,12 @@ prompt: Auto-discovered
 ---
 Body.
 `
-	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillContent), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillContent), 0o600))
 
 	// --- Setup: .go-cli/mcp.json (should be auto-discovered) ---
 	mcpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		body, _ := json.Marshal(map[string]any{
+		body, _ := json.Marshal(map[string]any{ //nolint:errcheck
 			"jsonrpc": "2.0",
 			"id":      0,
 			"result": map[string]any{
@@ -286,7 +289,8 @@ Body.
 				},
 			},
 		})
-		_, _ = w.Write(body)
+		//nolint:errcheck // test HTTP response
+		_, _ = w.Write(body) //nolint:errcheck
 	}))
 	defer mcpSrv.Close()
 
@@ -297,8 +301,8 @@ Body.
 			},
 		},
 	}
-	mcpData, _ := json.Marshal(mcpConfig)
-	require.NoError(t, os.WriteFile(".go-cli/mcp.json", mcpData, 0o644))
+	mcpData, _ := json.Marshal(mcpConfig) //nolint:errcheck
+	require.NoError(t, os.WriteFile(".go-cli/mcp.json", mcpData, 0o600))
 
 	// --- Step 1: Load config (no mcp/skill in config) ---
 	cfg, err := config.Load()
@@ -344,14 +348,16 @@ func TestE2E_RealConfigScenario_ConfigWinsOverAutoDiscovery(t *testing.T) {
 	// Config server.
 	configSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"fromConfig","description":"From config"}]}}`))
+		//nolint:errcheck // test HTTP response
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"fromConfig","description":"From config"}]}}`)) //nolint:errcheck
 	}))
 	defer configSrv.Close()
 
 	// Auto-discovery server (should NOT be used).
 	autoSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"fromAuto","description":"From auto"}]}}`))
+		//nolint:errcheck // test HTTP response
+		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"fromAuto","description":"From auto"}]}}`)) //nolint:errcheck
 	}))
 	defer autoSrv.Close()
 
@@ -361,17 +367,17 @@ func TestE2E_RealConfigScenario_ConfigWinsOverAutoDiscovery(t *testing.T) {
     - name: config-server
       url: "%s"
 `, configSrv.URL)
-	require.NoError(t, os.WriteFile(".go-cli.yaml", []byte(yamlContent), 0o644))
+	require.NoError(t, os.WriteFile(".go-cli.yaml", []byte(yamlContent), 0o600))
 
 	// .go-cli/mcp.json that would be auto-discovered (but should be ignored).
-	require.NoError(t, os.MkdirAll(".go-cli", 0o755))
+	require.NoError(t, os.MkdirAll(".go-cli", 0o750))
 	autoConfig := map[string]any{
 		"servers": []map[string]any{
 			{"name": "auto-server", "url": autoSrv.URL},
 		},
 	}
-	autoData, _ := json.Marshal(autoConfig)
-	require.NoError(t, os.WriteFile(".go-cli/mcp.json", autoData, 0o644))
+	autoData, _ := json.Marshal(autoConfig) //nolint:errcheck
+	require.NoError(t, os.WriteFile(".go-cli/mcp.json", autoData, 0o600))
 
 	cfg, err := config.Load()
 	require.NoError(t, err)

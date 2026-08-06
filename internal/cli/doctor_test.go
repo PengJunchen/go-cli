@@ -48,7 +48,7 @@ func TestGoVersionCheckerFail(t *testing.T) {
 	assert.Equal(t, doctorFail, chk.Status)
 }
 
-func TestGoVersionCheckerWarnUnparseable(t *testing.T) {
+func TestGoVersionCheckerWarnUnparsable(t *testing.T) {
 	c := &GoVersionChecker{version: "garbage"}
 	chk := c.Check(context.Background())
 	assert.Equal(t, doctorWarn, chk.Status)

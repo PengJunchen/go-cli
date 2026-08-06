@@ -133,7 +133,7 @@ func TestDefaultCollapsed(t *testing.T) {
 func TestSummarizeFirstLine(t *testing.T) {
 	assert.Equal(t, "hello", summarizeFirstLine("hello", 80))
 	assert.Equal(t, "hello", summarizeFirstLine("hello\nworld", 80))
-	assert.Equal(t, "hel…", summarizeFirstLine("hello", 3))
+	assert.Equal(t, "wor…", summarizeFirstLine("world", 3))
 	assert.Equal(t, "…", summarizeFirstLine("", 80))
 }
 

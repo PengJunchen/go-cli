@@ -2,7 +2,7 @@
 
 package extension
 
-//nolint:scan008 // build-tag stub, no executable logic
+//exempt:scan008 // build-tag stub, no executable logic
 
 import (
 	"context"

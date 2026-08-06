@@ -1,4 +1,4 @@
-package core //nolint:scan009
+package core //exempt:scan009
 
 import (
 	"context"

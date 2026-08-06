@@ -123,7 +123,7 @@ func expired(entry TrustEntry, now time.Time) bool {
 	}
 	t, err := time.Parse(time.RFC3339, entry.ExpiresAt)
 	if err != nil {
-		// An unparseable expiry is treated conservatively as expired.
+		// An unparsable expiry is treated conservatively as expired.
 		return true
 	}
 	return now.After(t)

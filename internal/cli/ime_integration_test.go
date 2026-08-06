@@ -99,11 +99,11 @@ func TestIntegration_SkillAutoDiscovery(t *testing.T) {
 
 	// Create the .go-cli/skills directory structure.
 	skillDir := filepath.Join(tempDir, ".go-cli", "skills")
-	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	require.NoError(t, os.MkdirAll(skillDir, 0o750))
 
 	// Create a nested skill (SKILL.md inside a directory).
 	nestedDir := filepath.Join(skillDir, "auto-discovered-skill")
-	require.NoError(t, os.MkdirAll(nestedDir, 0o755))
+	require.NoError(t, os.MkdirAll(nestedDir, 0o750))
 	skillContent := `---
 name: auto-discovered-skill
 description: A skill that should be auto-discovered from .go-cli/skills
@@ -115,7 +115,7 @@ This skill was auto-discovered.
 `
 	require.NoError(t, os.WriteFile(
 		filepath.Join(nestedDir, "SKILL.md"),
-		[]byte(skillContent), 0o644,
+		[]byte(skillContent), 0o600,
 	))
 
 	// Create a flat skill (.md file directly in skills dir).
@@ -129,7 +129,7 @@ Flat skill body.
 `
 	require.NoError(t, os.WriteFile(
 		filepath.Join(skillDir, "flat-skill.md"),
-		[]byte(flatContent), 0o644,
+		[]byte(flatContent), 0o600,
 	))
 
 	// Change to the temp dir so discoverSkillDir finds .go-cli/skills.
@@ -196,16 +196,18 @@ func TestIntegration_MCPAutoDiscovery_ArrayFormat(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodPost {
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"search","description":"Search the web"}]}}`))
+			//nolint:errcheck // test HTTP response
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"search","description":"Search the web"}]}}`)) //nolint:errcheck
 		} else {
-			_, _ = w.Write([]byte(`{}`))
+			//nolint:errcheck // test HTTP response
+			_, _ = w.Write([]byte(`{}`)) //nolint:errcheck
 		}
 	}))
 	defer srv.Close()
 
 	tempDir := t.TempDir()
 	mcpDir := filepath.Join(tempDir, ".go-cli")
-	require.NoError(t, os.MkdirAll(mcpDir, 0o755))
+	require.NoError(t, os.MkdirAll(mcpDir, 0o750))
 
 	// Write .go-cli/mcp.json in "servers" array format.
 	mcpConfig := map[string]any{
@@ -215,7 +217,7 @@ func TestIntegration_MCPAutoDiscovery_ArrayFormat(t *testing.T) {
 	}
 	data, err := json.Marshal(mcpConfig)
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(mcpDir, "mcp.json"), data, 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(mcpDir, "mcp.json"), data, 0o600))
 
 	t.Chdir(tempDir)
 
@@ -242,16 +244,18 @@ func TestIntegration_MCPAutoDiscovery_MapFormat(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodPost {
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"echo","description":"Echo tool"}]}}`))
+			//nolint:errcheck // test HTTP response
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"echo","description":"Echo tool"}]}}`)) //nolint:errcheck
 		} else {
-			_, _ = w.Write([]byte(`{}`))
+			//nolint:errcheck // test HTTP response
+			_, _ = w.Write([]byte(`{}`)) //nolint:errcheck
 		}
 	}))
 	defer srv.Close()
 
 	tempDir := t.TempDir()
 	mcpDir := filepath.Join(tempDir, ".go-cli")
-	require.NoError(t, os.MkdirAll(mcpDir, 0o755))
+	require.NoError(t, os.MkdirAll(mcpDir, 0o750))
 
 	// Write .go-cli/mcp.json in "mcpServers" map format.
 	mcpConfig := map[string]any{
@@ -263,7 +267,7 @@ func TestIntegration_MCPAutoDiscovery_MapFormat(t *testing.T) {
 	}
 	data, err := json.Marshal(mcpConfig)
 	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(filepath.Join(mcpDir, "mcp.json"), data, 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(mcpDir, "mcp.json"), data, 0o600))
 
 	t.Chdir(tempDir)
 
@@ -286,9 +290,11 @@ func TestIntegration_MCPConfigOverridesAutoDiscovery(t *testing.T) {
 	configSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodPost {
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"config-tool","description":"From config"}]}}`))
+			//nolint:errcheck // test HTTP response
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"config-tool","description":"From config"}]}}`)) //nolint:errcheck
 		} else {
-			_, _ = w.Write([]byte(`{}`))
+			//nolint:errcheck // test HTTP response
+			_, _ = w.Write([]byte(`{}`)) //nolint:errcheck
 		}
 	}))
 	defer configSrv.Close()
@@ -296,16 +302,18 @@ func TestIntegration_MCPConfigOverridesAutoDiscovery(t *testing.T) {
 	autoSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodPost {
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"auto-tool","description":"From auto-discovery"}]}}`))
+			//nolint:errcheck // test HTTP response
+			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"auto-tool","description":"From auto-discovery"}]}}`)) //nolint:errcheck
 		} else {
-			_, _ = w.Write([]byte(`{}`))
+			//nolint:errcheck // test HTTP response
+			_, _ = w.Write([]byte(`{}`)) //nolint:errcheck
 		}
 	}))
 	defer autoSrv.Close()
 
 	tempDir := t.TempDir()
 	mcpDir := filepath.Join(tempDir, ".go-cli")
-	require.NoError(t, os.MkdirAll(mcpDir, 0o755))
+	require.NoError(t, os.MkdirAll(mcpDir, 0o750))
 
 	// Write .go-cli/mcp.json that would be auto-discovered.
 	mcpConfig := map[string]any{
@@ -313,8 +321,8 @@ func TestIntegration_MCPConfigOverridesAutoDiscovery(t *testing.T) {
 			{"name": "auto-server", "url": autoSrv.URL},
 		},
 	}
-	data, _ := json.Marshal(mcpConfig)
-	require.NoError(t, os.WriteFile(filepath.Join(mcpDir, "mcp.json"), data, 0o644))
+	data, _ := json.Marshal(mcpConfig) //nolint:errcheck
+	require.NoError(t, os.WriteFile(filepath.Join(mcpDir, "mcp.json"), data, 0o600))
 
 	t.Chdir(tempDir)
 
@@ -364,7 +372,7 @@ func TestIntegration_FullSystemPromptWithAutoDiscoveredSkills(t *testing.T) {
 
 	// Set up .go-cli/skills with a realistic skill.
 	skillDir := filepath.Join(tempDir, ".go-cli", "skills", "my-integration-skill")
-	require.NoError(t, os.MkdirAll(skillDir, 0o755))
+	require.NoError(t, os.MkdirAll(skillDir, 0o750))
 
 	skillContent := `---
 name: my-integration-skill
@@ -377,7 +385,7 @@ This skill guides integration test execution.
 `
 	require.NoError(t, os.WriteFile(
 		filepath.Join(skillDir, "SKILL.md"),
-		[]byte(skillContent), 0o644,
+		[]byte(skillContent), 0o600,
 	))
 
 	t.Chdir(tempDir)

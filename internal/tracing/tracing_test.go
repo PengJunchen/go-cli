@@ -194,7 +194,7 @@ func TestAttributeJSONTags(t *testing.T) {
 	assert.JSONEq(t, `{"key":"k","value":"v"}`, string(b))
 }
 
-func TestInternalSpanEndsConncurrent(t *testing.T) {
+func TestInternalSpanEndsConcurrent(t *testing.T) {
 	tr := newTestTracer()
 	span, _ := tr.Start(context.Background(), "op", SpanKindInternal)
 	done := make(chan struct{})
