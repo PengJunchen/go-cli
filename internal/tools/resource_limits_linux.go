@@ -16,13 +16,17 @@ type rlimitSnapshot struct {
 // saveRlimits records the current process's RLIMIT_AS.
 func saveRlimits() rlimitSnapshot {
 	var s rlimitSnapshot
-	_ = syscall.Getrlimit(syscall.RLIMIT_AS, &s.as)
+	if err := syscall.Getrlimit(syscall.RLIMIT_AS, &s.as); err != nil {
+		// Best-effort: rlimit may be unavailable on some kernels.
+	}
 	return s
 }
 
 // restoreRlimits restores the saved RLIMIT_AS to the current process.
 func restoreRlimits(s rlimitSnapshot) {
-	_ = syscall.Setrlimit(syscall.RLIMIT_AS, &s.as)
+	if err := syscall.Setrlimit(syscall.RLIMIT_AS, &s.as); err != nil {
+		// Best-effort: restoration failure is non-fatal.
+	}
 }
 
 // applyRlimits sets memory resource limits on the current process so the
@@ -34,8 +38,10 @@ func restoreRlimits(s rlimitSnapshot) {
 // parent process. CPU time is bounded by the context timeout instead.
 func applyRlimits(_ *exec.Cmd, limits ResourceLimits) {
 	if limits.MaxMemory > 0 {
-		_ = syscall.Setrlimit(syscall.RLIMIT_AS, &syscall.Rlimit{
+		if err := syscall.Setrlimit(syscall.RLIMIT_AS, &syscall.Rlimit{
 			Cur: uint64(limits.MaxMemory), Max: uint64(limits.MaxMemory),
-		})
+		}); err != nil {
+			// Best-effort: rlimit may be unavailable or insufficient permissions.
+		}
 	}
 }

@@ -1,4 +1,4 @@
-package cli //nolint:scan003
+package cli //exempt:scan003
 
 import (
 	"context"

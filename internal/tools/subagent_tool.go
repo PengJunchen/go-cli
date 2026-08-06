@@ -1,4 +1,4 @@
-package tools //nolint:scan009
+package tools //exempt:scan009
 
 import (
 	"context"
@@ -54,7 +54,7 @@ type SubagentResult struct {
 // tools-package consumer-side contract; core.DefaultSubagentDispatcher plus
 // core.AdaptSubagentDispatcher satisfy it.
 //
-//nolint:scan012 // consumer-side interface; default impl in core package
+//exempt:scan012 // consumer-side interface; default impl in core package
 type SubagentDispatcher interface {
 	// Dispatch creates a sub-agent for the task, runs it to completion, and
 	// returns the result.

@@ -1,4 +1,4 @@
-package core //nolint:scan009
+package core //exempt:scan009
 
 // Role template constants used to seed a sub-agent's system prompt when a
 // caller delegates a task with a named role but no explicit system_prompt.

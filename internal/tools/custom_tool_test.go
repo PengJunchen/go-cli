@@ -146,7 +146,7 @@ func TestCustomCommandToolOutputLimit(t *testing.T) {
 func TestCustomCommandToolNonZeroExit(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tool := NewCustomCommandTool("failer", "", []string{"sh", "-c"}, nil, nil, 0, "")
+	tool := NewCustomCommandTool("failing-cmd", "", []string{"sh", "-c"}, nil, nil, 0, "")
 
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"input": "echo oops; exit 3"},

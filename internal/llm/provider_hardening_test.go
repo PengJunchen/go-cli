@@ -81,7 +81,7 @@ func TestHTTPChatModel_roundTripErrorBody(t *testing.T) {
 	assert.Contains(t, err.Error(), "429")
 }
 
-// TestHTTPChatModel_roundTripRequestBuildError verifies an unparseable endpoint
+// TestHTTPChatModel_roundTripRequestBuildError verifies an unparsable endpoint
 // produces a request-build error. The scheme must be invalid for
 // http.NewRequestWithContext to fail.
 func TestHTTPChatModel_roundTripRequestBuildError(t *testing.T) {

@@ -161,7 +161,7 @@ func (l *YAMLSkillLoader) LoadDir(ctx context.Context, dirPath string) ([]*Skill
 		}
 		def, err := l.Load(spanCtx, path)
 		if err != nil {
-			// Skip unparseable files rather than failing the whole directory.
+			// Skip unparsable files rather than failing the whole directory.
 			logger.Warn("skill.load_dir.skipped", "path", path, "err", err)
 			return nil
 		}

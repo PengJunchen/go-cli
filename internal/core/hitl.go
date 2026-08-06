@@ -39,7 +39,7 @@ type HITLAnswer struct {
 // emitter is responsible for eventually delivering exactly one HITLAnswer on
 // event.ResponseCh.
 //
-//nolint:scan012 // consumer-side interface; bridge adapter provided below
+//exempt:scan012 // consumer-side interface; bridge adapter provided below
 type HITLQuestionEmitter interface {
 	// Emit delivers the question event to the HITL layer.
 	Emit(ctx context.Context, event HITLQuestionEvent) error

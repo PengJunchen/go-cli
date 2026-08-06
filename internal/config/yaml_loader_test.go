@@ -137,7 +137,7 @@ func TestUnmarshalConfig_UnknownFormat(t *testing.T) {
 func TestUnmarshalConfig_YAMLBadIndent(t *testing.T) {
 	doc := "model:\n    name: gpt-4\n  bad: x\n"
 	var cfg Config
-	// Tolerantly the parser only mis-parses; it must not panic.
+	// Tolerantly the parser only incorrectly parses; it must not panic.
 	_ = UnmarshalConfig([]byte(doc), ConfigFormatYAML, &cfg) //nolint:errcheck // only verifying no panic
 }
 

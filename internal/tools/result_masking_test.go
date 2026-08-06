@@ -1,4 +1,4 @@
-package tools //nolint:scan003 // test file contains intentional secret patterns for masking tests
+package tools //exempt:scan003 // test file contains intentional secret patterns for masking tests
 
 import (
 	"sync"

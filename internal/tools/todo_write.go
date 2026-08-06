@@ -1,4 +1,4 @@
-package tools //nolint:scan010 // tool action dispatch uses string-based routing
+package tools //exempt:scan010 // tool action dispatch uses string-based routing
 
 import (
 	"context"

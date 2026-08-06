@@ -886,7 +886,7 @@ func TestApproval_EdgeCases(t *testing.T) {
 		assert.NotEmpty(t, entries)
 	})
 
-	t.Run("expired trust entry with unparseable time is untrusted", func(t *testing.T) {
+	t.Run("expired trust entry with unparsable time is untrusted", func(t *testing.T) {
 		store := approval.NewInMemoryTrustStore()
 		tm := approval.NewDefaultTrustManager(store)
 		path := "/tmp/bad-expiry"

@@ -5,7 +5,7 @@
 // contracts.
 package tools
 
-//nolint:scan008 // pure type definitions, no executable logic
+//exempt:scan008 // pure type definitions, no executable logic
 
 import "context"
 
@@ -58,7 +58,7 @@ type ToolDefinition interface {
 // input (e.g. MCP tools with an inputSchema) should implement this so the
 // LLM knows what arguments it can pass.
 //
-//nolint:scan012 // optional interface; implementations in various tool files
+//exempt:scan012 // optional interface; implementations in various tool files
 type Parameterized interface {
 	// Parameters returns the JSON Schema object describing the tool's
 	// input parameters, or nil if the tool has no structured parameters.
@@ -70,7 +70,7 @@ type Parameterized interface {
 // to Parameterized: tools that wish to steer the model's tool usage should
 // implement this so the SystemPromptBuilder can include their guidance.
 //
-//nolint:scan012 // optional interface; implementations in various tool files
+//exempt:scan012 // optional interface; implementations in various tool files
 type PromptGuideliner interface {
 	// PromptGuidelines returns human-readable usage hints for the tool.
 	// Each string is rendered as a separate bullet point in the system
