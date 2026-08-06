@@ -168,7 +168,7 @@ func TestRendererRegistryListIsACopy(t *testing.T) {
 	delete(snap, ContentTypeCode)
 	_, ok := reg.Get(ContentTypeCode)
 	require.True(t, ok, "removing from the snapshot must not affect the registry")
-	require.Len(t, snap, 24)
+	require.Len(t, snap, 25)
 }
 
 // TestRendererRegistryGetEmptyString verifies an empty content type is absent

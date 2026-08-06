@@ -29,6 +29,9 @@ type RenderOpts struct {
 	ContentType string
 	// Language is an optional language hint (used by code renderers).
 	Language string
+	// Stream identifies the output source for tool_output events: "stdout"
+	// or "stderr".
+	Stream string
 }
 
 // Content type constants are the canonical identifiers used to route agent
@@ -58,6 +61,7 @@ const (
 	ContentTypeStreamingThink = "streaming_thinking"
 	ContentTypeBlank          = "blank"
 	ContentTypeSeparator      = "separator"
+	ContentTypeToolOutput     = "tool_output"
 	ContentTypeStatus         = "status"
 	ContentTypeBox            = "box"
 	ContentTypeSpinner        = "spinner"
@@ -67,12 +71,12 @@ const (
 // the canonical registry order.
 var contentTypes = []string{
 	ContentTypeMarkdown, ContentTypeCode, ContentTypeTable, ContentTypeDiff,
-	ContentTypeError, ContentTypeToolCall, ContentTypeToolResult, ContentTypeThinking,
-	ContentTypeProgress, ContentTypeFileTree, ContentTypeImage, ContentTypeLink,
-	ContentTypeSystem, ContentTypeUser, ContentTypeAssistant, ContentTypeApproval,
-	ContentTypePrompt, ContentTypeCompaction, ContentTypeStreaming,
-	ContentTypeStreamingCode, ContentTypeStreamingThink, ContentTypeBlank,
-	ContentTypeSeparator, ContentTypeStatus, ContentTypeBox, ContentTypeSpinner,
+	ContentTypeError, ContentTypeToolCall, ContentTypeToolResult, ContentTypeThinking, ContentTypeProgress,
+	ContentTypeFileTree, ContentTypeImage, ContentTypeLink, ContentTypeSystem,
+	ContentTypeUser, ContentTypeAssistant, ContentTypeApproval, ContentTypePrompt,
+	ContentTypeCompaction, ContentTypeStreaming, ContentTypeStreamingCode,
+	ContentTypeStreamingThink, ContentTypeBlank, ContentTypeSeparator,
+	ContentTypeStatus, ContentTypeBox, ContentTypeSpinner, ContentTypeToolOutput,
 }
 
 // DefaultContentType is the fallback content type used when an event carries an
@@ -156,6 +160,7 @@ func RegisterDefaultRenderers(reg *RendererRegistry) {
 	reg.Register(ErrorRenderer{})
 	reg.Register(ToolCallRenderer{})
 	reg.Register(ToolResultRenderer{})
+	reg.Register(ToolOutputRenderer{})
 	reg.Register(ThinkingRenderer{})
 	reg.Register(ProgressRenderer{})
 	reg.Register(FileTreeRenderer{})

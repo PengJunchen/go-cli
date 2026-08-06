@@ -71,7 +71,7 @@ func TestRendererRegistryRegisterOverwrites(t *testing.T) {
 func TestRendererRegistryListSnapshot(t *testing.T) {
 	reg := NewDefaultRegistry()
 	list := reg.List()
-	require.Len(t, list, 25)
+	require.Len(t, list, 26)
 
 	// Mutating the returned snapshot must not affect the registry.
 	list[ContentTypeCode] = NewMockRenderer("mutated", ContentTypeCode, "x")
@@ -139,7 +139,7 @@ func TestRegisterDefaultRenderersIdempotent(t *testing.T) {
 	reg := NewRendererRegistry()
 	RegisterDefaultRenderers(reg)
 	RegisterDefaultRenderers(reg)
-	require.Len(t, reg.List(), 25)
+	require.Len(t, reg.List(), 26)
 }
 
 // TestNewDefaultRegistryFullyPopulated verifies the default registry indexes
