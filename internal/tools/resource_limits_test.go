@@ -25,8 +25,6 @@ func TestWithResourceLimits(t *testing.T) {
 func TestApplyResourceLimits_DoesNotPanic(t *testing.T) {
 	cmd := exec.Command("echo", "hi")
 	limits := ResourceLimits{MaxMemory: 50 * 1024 * 1024, MaxCPU: 5 * time.Second}
-	snap := saveRlimits()
-	defer restoreRlimits(snap)
 	assert.NotPanics(t, func() {
 		ApplyResourceLimits(cmd, limits)
 	})
@@ -56,10 +54,7 @@ func TestBashTool_ResourceLimitsSimpleCommand(t *testing.T) {
 
 func TestBashTool_ResourceLimitsMemoryOOM(t *testing.T) {
 	if runtime.GOOS != "linux" {
-		t.Skip("RLIMIT_AS memory enforcement is Linux-specific; Darwin uses advisory RLIMIT_DATA")
-	}
-	if raceEnabled {
-		t.Skip("resource limits are disabled under race detector to avoid TSan OOM")
+		t.Skip("ulimit -v memory enforcement is most reliable on Linux")
 	}
 	defer verify.AssertNoGoroutineLeak(t)()
 
