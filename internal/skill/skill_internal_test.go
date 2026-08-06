@@ -73,8 +73,8 @@ func TestParseFrontmatterBlockEmptyAndLists(t *testing.T) {
 		"tools:", // bare key starts a list with zero items
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "list-skill", def.name)
-	assert.Nil(t, def.tools, "bare list key with no items yields nil tools")
+	assert.Equal(t, "list-skill", def.Name())
+	assert.Nil(t, def.Tools(), "bare list key with no items yields nil tools")
 
 	// A prompt: | block scalar with trailing blank line is trimmed.
 	def, err = parseFrontmatterBlock([]string{
@@ -86,7 +86,7 @@ func TestParseFrontmatterBlockEmptyAndLists(t *testing.T) {
 		"",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "line 1\n\nline 2", def.prompt)
+	assert.Equal(t, "line 1\n\nline 2", def.Prompt())
 }
 
 // parseFrontmatter: missing opening or closing delimiter yields a parse error.
@@ -108,12 +108,12 @@ func TestParseFrontmatterDelimiterErrors(t *testing.T) {
 func TestParseFrontmatterBodyFallback(t *testing.T) {
 	def, err := parseFrontmatter([]string{"---", "name: x", "---", "the body"})
 	require.NoError(t, err)
-	assert.Equal(t, "the body", def.prompt)
+	assert.Equal(t, "the body", def.Prompt())
 
 	// Explicit prompt wins over the body.
 	def, err = parseFrontmatter([]string{"---", "name: x", "prompt: explicit", "---", "the body"})
 	require.NoError(t, err)
-	assert.Equal(t, "explicit", def.prompt)
+	assert.Equal(t, "explicit", def.Prompt())
 }
 
 // matchScore ranks exact > prefix > substring name > description/hint.

@@ -77,6 +77,7 @@ type Tracer struct {
 	traceID  string
 	exporter TraceExporter
 	enabled  atomic.Bool
+	wg       sync.WaitGroup
 }
 
 // NewTracer creates a new Tracer. When traceID is empty a random ID is
@@ -100,6 +101,11 @@ func (t *Tracer) TraceID() string { return t.traceID }
 // so tracing is effectively zero-overhead until re-enabled.
 func (t *Tracer) SetEnabled(enabled bool) { t.enabled.Store(enabled) }
 
+// Flush waits for all in-flight span export goroutines to complete. Callers
+// must invoke Flush before shutting down the underlying exporter to ensure no
+// span writes race with file closure.
+func (t *Tracer) Flush() { t.wg.Wait() }
+
 // Start creates and starts a new Span. If ctx carries parent span information,
 // the new span inherits it as its parent_span_id. The returned context carries
 // both the new span context and this Tracer, so child spans can be created via
@@ -119,6 +125,7 @@ func (t *Tracer) Start(ctx context.Context, name string, kind SpanKind) (TraceSp
 		name:         name,
 		startTime:    time.Now(),
 		exporter:     t.exporter,
+		wg:           &t.wg,
 	}
 
 	sc := spanContext{traceID: t.traceID, spanID: spanID}
@@ -127,6 +134,15 @@ func (t *Tracer) Start(ctx context.Context, name string, kind SpanKind) (TraceSp
 	span.ctx = newCtx
 
 	return span, newCtx
+}
+
+// ContextWithTracer returns a context that carries the Tracer so that
+// SpanFromContext can create real spans. It does not start a span itself.
+// Callers use this to inject a Tracer at the outermost layer of a request so
+// that all downstream SpanFromContext calls (middleware, loop, tools) share
+// the same trace.
+func (t *Tracer) ContextWithTracer(ctx context.Context) context.Context {
+	return context.WithValue(ctx, tracerKey{}, t)
 }
 
 // SpanFromContext starts a child Span using the Tracer stored in ctx. It is
@@ -166,6 +182,7 @@ type localSpan struct {
 	attributes   []Attribute
 	events       []SpanEvent
 	exporter     TraceExporter
+	wg           *sync.WaitGroup
 	ctx          context.Context
 
 	mu    sync.Mutex
@@ -228,7 +245,13 @@ func (s *localSpan) End() {
 	s.mu.Unlock()
 
 	if s.exporter != nil {
+		if s.wg != nil {
+			s.wg.Add(1)
+		}
 		go func() {
+			if s.wg != nil {
+				defer s.wg.Done()
+			}
 			if err := s.exporter.ExportSpan(context.Background(), s); err != nil {
 				slog.Warn("failed to export span", "span_id", s.spanID, "err", err)
 			}

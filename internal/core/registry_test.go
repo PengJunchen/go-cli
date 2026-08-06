@@ -11,7 +11,7 @@ import (
 // testLoop is a minimal AgentLoop used to verify registry replacement.
 type testLoop struct{ tag string }
 
-func (t testLoop) Run(_ context.Context, _ Submission) ([]AgentEvent, error) {
+func (t testLoop) Run(_ context.Context, _ Submission, _ ...EventStream) ([]AgentEvent, error) {
 	return []AgentEvent{}, nil
 }
 

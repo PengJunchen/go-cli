@@ -46,24 +46,32 @@ type DefaultQualityEvaluator struct {
 // QualityEvaluator.
 var _ QualityEvaluator = (*DefaultQualityEvaluator)(nil)
 
+// qualityOptions holds the configurable fields of a quality evaluator during
+// construction. It is an internal construction aid so that
+// QualityEvaluatorOption closures do not reference the concrete
+// DefaultQualityEvaluator type.
+type qualityOptions struct {
+	strategy Strategy
+}
+
 // QualityEvaluatorOption configures a DefaultQualityEvaluator.
-type QualityEvaluatorOption func(*DefaultQualityEvaluator)
+type QualityEvaluatorOption func(*qualityOptions)
 
 // WithQualityStrategy sets the strategy reported in the returned metrics. When
 // unset the metrics report StrategyNone.
 func WithQualityStrategy(s Strategy) QualityEvaluatorOption {
-	return func(e *DefaultQualityEvaluator) { e.strategy = s }
+	return func(o *qualityOptions) { o.strategy = s }
 }
 
 // NewDefaultQualityEvaluator returns a DefaultQualityEvaluator that uses
 // estimator to estimate token counts. A nil estimator falls back to the
 // heuristic.
 func NewDefaultQualityEvaluator(estimator TokenEstimator, opts ...QualityEvaluatorOption) QualityEvaluator {
-	e := &DefaultQualityEvaluator{estimator: estimator, strategy: StrategyNone}
+	o := &qualityOptions{}
 	for _, opt := range opts {
-		opt(e)
+		opt(o)
 	}
-	return e
+	return &DefaultQualityEvaluator{estimator: estimator, strategy: o.strategy}
 }
 
 // Evaluate computes Coverage, InfoLoss and CompressionRatio as described on

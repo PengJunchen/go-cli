@@ -54,40 +54,53 @@ const (
 	defaultMaxRetries = 3
 )
 
+// hotReloaderOptions holds the configurable fields of a hot reloader during
+// construction. It is an internal construction aid so that
+// HotReloaderOption closures do not reference the concrete
+// DefaultHotReloader type.
+type hotReloaderOptions struct {
+	pollInterval  time.Duration
+	backoffBase   time.Duration
+	backoffFactor int
+	maxBackoff    time.Duration
+	maxRetries    int
+	transport     MCPTransport
+}
+
 // HotReloaderOption configures a DefaultHotReloader.
-type HotReloaderOption func(*DefaultHotReloader)
+type HotReloaderOption func(*hotReloaderOptions)
 
 // WithPollInterval overrides how often the stdlib poller re-checks the config
 // file. Tests use a very small interval for fast, deterministic runs.
 func WithPollInterval(d time.Duration) HotReloaderOption {
-	return func(h *DefaultHotReloader) { h.pollInterval = d }
+	return func(o *hotReloaderOptions) { o.pollInterval = d }
 }
 
 // WithBackoffBase overrides the initial retry backoff delay.
 func WithBackoffBase(d time.Duration) HotReloaderOption {
-	return func(h *DefaultHotReloader) { h.backoffBase = d }
+	return func(o *hotReloaderOptions) { o.backoffBase = d }
 }
 
 // WithBackoffFactor overrides the multiplier applied to the backoff delay on
 // every successive retry.
 func WithBackoffFactor(n int) HotReloaderOption {
-	return func(h *DefaultHotReloader) { h.backoffFactor = n }
+	return func(o *hotReloaderOptions) { o.backoffFactor = n }
 }
 
 // WithMaxBackoff caps the exponential backoff delay.
 func WithMaxBackoff(d time.Duration) HotReloaderOption {
-	return func(h *DefaultHotReloader) { h.maxBackoff = d }
+	return func(o *hotReloaderOptions) { o.maxBackoff = d }
 }
 
 // WithMaxRetries sets how many reconnect attempts happen before giving up.
 func WithMaxRetries(n int) HotReloaderOption {
-	return func(h *DefaultHotReloader) { h.maxRetries = n }
+	return func(o *hotReloaderOptions) { o.maxRetries = n }
 }
 
 // WithTransport records the transport used for the watched server so it can be
 // attached to the mcp.hot_reload span attributes.
 func WithTransport(t MCPTransport) HotReloaderOption {
-	return func(h *DefaultHotReloader) { h.transport = t }
+	return func(o *hotReloaderOptions) { o.transport = t }
 }
 
 // fileSnapshot captures the observable identity of the config file at one point
@@ -136,9 +149,7 @@ var _ HotReloader = (*DefaultHotReloader)(nil)
 // calls register with the freshly advertised tools after every reload. opts may
 // tune the poll interval, backoff and retry limits.
 func NewDefaultHotReloader(client MCPClient, register RegisterToolsFunc, opts ...HotReloaderOption) HotReloader {
-	h := &DefaultHotReloader{
-		client:        client,
-		register:      register,
+	o := &hotReloaderOptions{
 		pollInterval:  defaultPollInterval,
 		backoffBase:   defaultBackoffBase,
 		backoffFactor: defaultBackoffFactor,
@@ -147,9 +158,18 @@ func NewDefaultHotReloader(client MCPClient, register RegisterToolsFunc, opts ..
 		transport:     MCPTransportStdio,
 	}
 	for _, opt := range opts {
-		opt(h)
+		opt(o)
 	}
-	return h
+	return &DefaultHotReloader{
+		client:        client,
+		register:      register,
+		pollInterval:  o.pollInterval,
+		backoffBase:   o.backoffBase,
+		backoffFactor: o.backoffFactor,
+		maxBackoff:    o.maxBackoff,
+		maxRetries:    o.maxRetries,
+		transport:     o.transport,
+	}
 }
 
 // Watch starts the stdlib poller goroutine and records the baseline state of

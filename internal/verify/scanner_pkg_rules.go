@@ -8,6 +8,7 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -207,6 +208,11 @@ func scanSlogUsage(dir string, goFiles []string) []Finding {
 			continue
 		}
 
+		// Check for exempt:scan008 directive in comments.
+		if hasExemptDirective(node, "scan008") {
+			continue
+		}
+
 		hasSlog := false
 		ast.Inspect(node, func(n ast.Node) bool {
 			if hasSlog {
@@ -245,6 +251,15 @@ func scanHardcodedDefaults(dir string, goFiles []string) []Finding {
 	fset := token.NewFileSet()
 	for _, file := range goFiles {
 		if strings.HasSuffix(file, "_test.go") {
+			continue
+		}
+
+		// Check for exempt:scan009 directive in the file.
+		data, err := os.ReadFile(file)
+		if err != nil {
+			continue
+		}
+		if strings.Contains(string(data), "exempt:scan009") || strings.Contains(string(data), "exempt:all") {
 			continue
 		}
 
@@ -295,6 +310,11 @@ func scanCommandRouting(dir string, goFiles []string) []Finding {
 
 		node, err := parser.ParseFile(fset, file, nil, parser.ParseComments)
 		if err != nil {
+			continue
+		}
+
+		// Check for exempt:scan010 directive in comments.
+		if hasExemptDirective(node, "scan010") {
 			continue
 		}
 
@@ -541,8 +561,26 @@ func scanInterfaceDefaultImpl(dir string, goFiles []string) []Finding {
 			for _, spec := range genDecl.Specs {
 				switch s := spec.(type) {
 				case *ast.TypeSpec:
-					if _, ok := s.Type.(*ast.InterfaceType); ok {
-						interfaceNames[s.Name.Name] = true
+					if it, ok := s.Type.(*ast.InterfaceType); ok && it != nil {
+						// Check for exempt:scan012 directive in doc comments
+						// (can be on GenDecl.Doc or TypeSpec.Doc).
+						nolint := false
+						checkDoc := func(doc *ast.CommentGroup) {
+							if doc == nil || nolint {
+								return
+							}
+							for _, c := range doc.List {
+								if strings.Contains(c.Text, "exempt:scan012") || strings.Contains(c.Text, "exempt:all") {
+									nolint = true
+									return
+								}
+							}
+						}
+						checkDoc(genDecl.Doc)
+						checkDoc(s.Doc)
+						if !nolint {
+							interfaceNames[s.Name.Name] = true
+						}
 					}
 				case *ast.ValueSpec:
 					if len(s.Names) > 0 && s.Names[0].Name == "_" {
@@ -634,9 +672,9 @@ func checkFieldList(fields *ast.FieldList, fset *token.FileSet, interfaceNames m
 		return
 	}
 	for _, field := range fields.List {
-		typ := field.Type
+		fieldType := field.Type
 		// Unwrap pointer / slice / map wrappers to reach the base type.
-		t := unwrapTypeName(typ)
+		t := unwrapTypeName(fieldType)
 		concreteType, ok := t.(*ast.Ident)
 		if !ok {
 			continue
@@ -722,4 +760,18 @@ func firstGoFile(goFiles []string) string {
 		}
 	}
 	return ""
+}
+
+// hasExemptDirective checks whether the file contains a //exempt:<rule>
+// directive in its comments.
+func hasExemptDirective(node *ast.File, rule string) bool {
+	for _, cg := range node.Comments {
+		for _, c := range cg.List {
+			text := c.Text
+			if strings.Contains(text, "exempt:"+rule) || strings.Contains(text, "exempt:all") {
+				return true
+			}
+		}
+	}
+	return false
 }

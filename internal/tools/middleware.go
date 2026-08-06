@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"fmt"
+	"log/slog"
 )
 
 // mutationToolNames are the names of built-in tools that produce file
@@ -62,10 +63,12 @@ func WithMutationQueue(queue FileMutationQueue, next func(ctx context.Context, c
 			return nil, fmt.Errorf("tools: WithMutationQueue requires a non-nil next function")
 		}
 		if !mutationToolNames[call.Name] {
+			slog.Debug("tools: passing non-mutation call through", "name", call.Name)
 			return next(ctx, call)
 		}
 
 		path := mutationPathFromCall(call)
+		slog.Debug("tools: queueing mutation call", "name", call.Name, "path", path)
 		mutation := FileMutation{
 			FilePath:  path,
 			Operation: call.Name,

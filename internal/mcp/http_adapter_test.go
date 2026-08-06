@@ -100,8 +100,8 @@ func newHTTPMCPServer(t *testing.T, getStatus int, sse bool) *httptest.Server {
 				http.Error(w, err.Error(), http.StatusBadRequest)
 				return
 			}
-			if err := json.Unmarshal(body, &req); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+			if unmarshalErr := json.Unmarshal(body, &req); unmarshalErr != nil {
+				http.Error(w, unmarshalErr.Error(), http.StatusBadRequest)
 				return
 			}
 

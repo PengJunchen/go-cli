@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -24,6 +25,13 @@ const (
 
 	// defaultBashWorkdir is the working directory used when none is configured.
 	defaultBashWorkdir = "."
+
+	// Timeout tiers for classifyCommand. When TimeoutTier is enabled, the
+	// timeout for each command is chosen by classification rather than using
+	// the fixed defaultBashTimeout.
+	timeoutTierFast   = 5 * time.Second   // read-only / quick commands
+	timeoutTierNormal = 30 * time.Second  // default tier
+	timeoutTierSlow   = 300 * time.Second // builds, test suites, installs
 )
 
 // BashToolOption configures a BashTool.
@@ -57,6 +65,27 @@ func WithMaxOutput(n int) BashToolOption {
 	return func(t *BashTool) { t.MaxOutput = n }
 }
 
+// WithBashSandbox attaches a BashSandbox that validates commands before
+// execution. When set, Execute calls Validate before running the command and
+// returns the error without executing if validation fails. When unset (the
+// default) no validation is performed, preserving backward compatibility.
+func WithBashSandbox(sb BashSandbox) BashToolOption {
+	return func(t *BashTool) { t.Sandbox = sb }
+}
+
+// WithResourceLimits attaches process-level CPU and memory limits that are
+// applied to each spawned command.
+func WithResourceLimits(limits ResourceLimits) BashToolOption {
+	return func(t *BashTool) { t.ResourceLimits = limits }
+}
+
+// WithTimeoutTier enables per-command timeout classification. When enabled,
+// each command's timeout is determined by classifyCommand instead of using the
+// fixed default timeout.
+func WithTimeoutTier(enabled bool) BashToolOption {
+	return func(t *BashTool) { t.TimeoutTier = enabled }
+}
+
 // BashTool executes shell commands and returns their combined output. It
 // implements the ToolDefinition interface.
 type BashTool struct {
@@ -69,6 +98,14 @@ type BashTool struct {
 	Workdir string
 	// MaxOutput caps the number of bytes of captured output.
 	MaxOutput int
+	// Sandbox, when non-nil, validates commands before execution.
+	Sandbox BashSandbox
+	// ResourceLimits, when non-zero, applies process-level CPU and memory
+	// limits to each spawned command.
+	ResourceLimits ResourceLimits
+	// TimeoutTier, when true, enables per-command timeout classification
+	// via classifyCommand instead of the fixed Timeout.
+	TimeoutTier bool
 }
 
 var _ ToolDefinition = (*BashTool)(nil)
@@ -112,8 +149,34 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		return nil, errors.New("bash: missing string argument 'command'")
 	}
 
-	execCtx, cancel := context.WithTimeout(ctx, t.Timeout)
+	// When a sandbox is configured, validate the command before execution.
+	if t.Sandbox != nil {
+		// Resolve workDir to an absolute path so that relative values like
+		// "." are checked against the whitelist correctly.
+		workDir := t.Workdir
+		if absDir, absErr := filepath.Abs(t.Workdir); absErr == nil {
+			workDir = absDir
+		}
+		if err := t.Sandbox.Validate(ctx, command, workDir); err != nil {
+			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+			logger.Error("bash.sandbox_blocked", "tool", "bash", "err", err)
+			return nil, err
+		}
+	}
+
+	// Determine the effective timeout. When TimeoutTier is enabled, the
+	// timeout is classified per-command; otherwise the fixed Timeout is used.
+	timeout := t.Timeout
+	if t.TimeoutTier {
+		timeout = classifyCommand(command)
+	}
+
+	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+
+	// Wrap the command with resource limits (ulimit) so only the child
+	// process is affected, not the Go runtime.
+	command = wrapCommandWithLimits(command, t.ResourceLimits)
 
 	cmd := exec.CommandContext(execCtx, "bash", "-lc", command)
 	cmd.Dir = t.Workdir
@@ -170,6 +233,11 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 	return &ToolResult{Output: output, Metadata: metadata}, nil
 }
 
+// PromptGuidelines returns usage hints for the bash tool.
+func (t *BashTool) PromptGuidelines() []string {
+	return []string{"Use bash for shell commands. Avoid using cat/sed/grep - use read/edit/grep tools instead"}
+}
+
 // envSlice converts the tool's environment map to "K=V" entries suitable for
 // cmd.Env.
 func envSlice(env map[string]string) []string {
@@ -178,6 +246,36 @@ func envSlice(env map[string]string) []string {
 		out = append(out, k+"="+v)
 	}
 	return out
+}
+
+// fastCommands are read-only or quick commands that get the fast timeout tier.
+var fastCommands = map[string]bool{
+	"ls": true, "cat": true, "head": true, "tail": true,
+	"grep": true, "find": true, "wc": true, "echo": true,
+}
+
+// slowCommands are build/test/install commands that get the slow timeout tier.
+var slowCommands = map[string]bool{
+	"make": true, "go": true, "npm": true, "cargo": true, "docker": true,
+}
+
+// classifyCommand inspects the first token of cmd and returns the appropriate
+// timeout tier. Commands are classified by their base name (so path prefixes
+// like /usr/bin/ls are handled). Unknown or empty commands default to the
+// normal tier.
+func classifyCommand(cmd string) time.Duration {
+	fields := strings.Fields(cmd)
+	if len(fields) == 0 {
+		return timeoutTierNormal
+	}
+	name := filepath.Base(fields[0])
+	if fastCommands[name] {
+		return timeoutTierFast
+	}
+	if slowCommands[name] {
+		return timeoutTierSlow
+	}
+	return timeoutTierNormal
 }
 
 // exitCode extracts a process exit code from a command run error, defaulting

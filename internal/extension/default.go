@@ -3,6 +3,7 @@ package extension
 import (
 	"context"
 	"errors"
+	"log/slog"
 )
 
 // defaultConfigProvider is the default (compile-time) implementation of the
@@ -19,10 +20,12 @@ var errDefaultConfig = errors.New("extension: default config provider not implem
 func (defaultConfigProvider) Name() string { return "default" }
 
 func (defaultConfigProvider) Load(_ context.Context, _ string, _ any) error {
+	slog.Debug("extension: default config provider load called (not implemented)")
 	return errDefaultConfig
 }
 
 func (defaultConfigProvider) Watch(_ context.Context, _ string) (<-chan ConfigChange, error) {
+	slog.Debug("extension: default config provider watch called (not implemented)")
 	return nil, errDefaultConfig
 }
 

@@ -81,7 +81,7 @@ func TestHTTPChatModel_roundTripErrorBody(t *testing.T) {
 	assert.Contains(t, err.Error(), "429")
 }
 
-// TestHTTPChatModel_roundTripRequestBuildError verifies an unparseable endpoint
+// TestHTTPChatModel_roundTripRequestBuildError verifies an unparsable endpoint
 // produces a request-build error. The scheme must be invalid for
 // http.NewRequestWithContext to fail.
 func TestHTTPChatModel_roundTripRequestBuildError(t *testing.T) {
@@ -171,7 +171,7 @@ func TestHTTPChatModel_UsageOverrides(t *testing.T) {
 }
 
 // TestHTTPChatModel_StreamSuccess verifies Stream delivers the full content as
-// a single chunk and closes the channel.
+// a content chunk followed by a final chunk and closes the channel.
 func TestHTTPChatModel_StreamSuccess(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -190,8 +190,13 @@ func TestHTTPChatModel_StreamSuccess(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, RoleAssistant, chunk.Role)
 	assert.Equal(t, "streamed!", chunk.Content)
+	assert.False(t, chunk.Final)
+	// The final chunk marks the end of the generation.
+	finalChunk, ok := <-ch
+	require.True(t, ok)
+	assert.True(t, finalChunk.Final)
 	_, ok = <-ch
-	assert.False(t, ok, "stream channel must be closed after a single success")
+	assert.False(t, ok, "stream channel must be closed after the final chunk")
 }
 
 // ---------------------------------------------------------------------------

@@ -39,12 +39,12 @@ type orderLoop struct {
 	runOrder *[]string
 }
 
-func (l *orderLoop) Run(ctx context.Context, submission Submission) ([]AgentEvent, error) {
+func (l *orderLoop) Run(ctx context.Context, submission Submission, stream ...EventStream) ([]AgentEvent, error) {
 	*l.runOrder = append(*l.runOrder, l.name)
 	if l.next == nil {
 		return []AgentEvent{}, nil
 	}
-	return l.next.Run(ctx, submission)
+	return l.next.Run(ctx, submission, stream...)
 }
 
 func TestMiddlewareChainWrapOrderOnion(t *testing.T) {
@@ -149,14 +149,14 @@ func TestHookBackedMiddlewareComposesIntoChain(t *testing.T) {
 // stubLoop returns a single message event immediately.
 type stubLoop struct{}
 
-func (s *stubLoop) Run(context.Context, Submission) ([]AgentEvent, error) {
+func (s *stubLoop) Run(context.Context, Submission, ...EventStream) ([]AgentEvent, error) {
 	return []AgentEvent{{Kind: "message", Content: "ok", Timestamp: time.Now()}}, nil
 }
 
 // countingLoop runs a callback each time it executes.
 type countingLoop struct{ run func() }
 
-func (c countingLoop) Run(context.Context, Submission) ([]AgentEvent, error) {
+func (c countingLoop) Run(context.Context, Submission, ...EventStream) ([]AgentEvent, error) {
 	if c.run != nil {
 		c.run()
 	}

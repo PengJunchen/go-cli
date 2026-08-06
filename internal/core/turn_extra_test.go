@@ -110,7 +110,7 @@ func TestTurnRunnerNewLoopReporting(t *testing.T) {
 // result-message derivation edge coverage.
 type extraErrorLoop struct{}
 
-func (extraErrorLoop) Run(context.Context, Submission) ([]AgentEvent, error) {
+func (extraErrorLoop) Run(context.Context, Submission, ...EventStream) ([]AgentEvent, error) {
 	return nil, errNilModel
 }
 

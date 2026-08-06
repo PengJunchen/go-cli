@@ -15,7 +15,7 @@ type SubAgentFactory interface {
 
 // subAgentFactoryConfig holds the configurable knobs of a DefaultSubAgentFactory.
 type subAgentFactoryConfig struct {
-	runnerFactory subAgentRunnerFactory
+	runnerFactory SubAgentRunnerFactory
 }
 
 // SubAgentFactoryOption configures a DefaultSubAgentFactory at construction time.
@@ -23,7 +23,7 @@ type SubAgentFactoryOption func(*subAgentFactoryConfig)
 
 // WithSubAgentRunnerFactory sets the pluggable harness (runner) constructor
 // used by the factory when building sub-agents.
-func WithSubAgentRunnerFactory(factory subAgentRunnerFactory) SubAgentFactoryOption {
+func WithSubAgentRunnerFactory(factory SubAgentRunnerFactory) SubAgentFactoryOption {
 	return func(c *subAgentFactoryConfig) { c.runnerFactory = factory }
 }
 
@@ -31,7 +31,7 @@ func WithSubAgentRunnerFactory(factory subAgentRunnerFactory) SubAgentFactoryOpt
 // DefaultSubAgent instances, forwarding the pluggable runner factory when one
 // was configured.
 type DefaultSubAgentFactory struct {
-	runnerFactory subAgentRunnerFactory
+	runnerFactory SubAgentRunnerFactory
 }
 
 var _ SubAgentFactory = (*DefaultSubAgentFactory)(nil)

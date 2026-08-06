@@ -129,14 +129,14 @@ type loggingLoop struct {
 }
 
 // Run logs before and after delegating to the wrapped loop.
-func (l *loggingLoop) Run(ctx context.Context, submission Submission) ([]AgentEvent, error) {
+func (l *loggingLoop) Run(ctx context.Context, submission Submission, stream ...EventStream) ([]AgentEvent, error) {
 	span, spanCtx := tracing.SpanFromContext(ctx, "middleware."+l.name, tracing.SpanKindInternal)
 	defer span.End()
 	logger := tracing.NewTraceLogger(span, nil)
 	slog.Info("core.logging_middleware.run", "name", l.name, "type", submission.Type)
 	logger.Info("middleware.run", "name", l.name, "type", submission.Type)
 
-	events, err := l.next.Run(spanCtx, submission)
+	events, err := l.next.Run(spanCtx, submission, stream...)
 
 	slog.Info("core.logging_middleware.done", "name", l.name, "events", len(events), "error", err != nil)
 	logger.Info("middleware.done", "name", l.name, "events", len(events), "error", err != nil)

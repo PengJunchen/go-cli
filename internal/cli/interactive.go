@@ -3,18 +3,21 @@ package cli
 import (
 	"bufio"
 	"context"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/pengjunchen/go-cli/internal/compaction"
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/core"
-	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mcp"
+	"github.com/pengjunchen/go-cli/internal/session"
 	"github.com/pengjunchen/go-cli/internal/skill"
 	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tracing"
@@ -24,14 +27,10 @@ import (
 // Interactive command constants. They live in one place so the scanner does not
 // flag them as scattered hardcoded values.
 const (
-	// interactiveDefaultMaxTokens is the default compaction token budget.
-	interactiveDefaultMaxTokens = 8000
 	// spanInteractiveRun is the top-level span for an interactive session.
 	spanInteractiveRun = "interactive.run"
 	// spanInteractiveTurn is the span for a single turn in the session.
 	spanInteractiveTurn = "interactive.turn"
-	// spanInteractiveCompact is the span for auto-compaction between turns.
-	spanInteractiveCompact = "interactive.compact"
 	// exitCommand is the user input that terminates the interactive session.
 	exitCommand = "exit"
 )
@@ -40,8 +39,9 @@ const (
 // session with TUI rendering, MCP tool support, skill execution, and automatic
 // session compaction.
 type interactiveCmd struct {
-	out io.Writer
-	in  io.Reader
+	out        io.Writer
+	in         io.Reader
+	lineEditor LineEditor
 }
 
 // newInteractiveCmd creates an interactive command reading from in and writing
@@ -71,11 +71,13 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		providerFlag  string
 		maxTokensFlag int
 		verboseFlag   bool
+		resumeFlag    bool
 	)
 	fs.StringVar(&modelFlag, "model", "", "model name to use")
 	fs.StringVar(&providerFlag, "provider", "", "provider name to use")
-	fs.IntVar(&maxTokensFlag, "max-tokens", interactiveDefaultMaxTokens, "compaction token budget")
+	fs.IntVar(&maxTokensFlag, "max-tokens", defaultMaxTokens, "compaction token budget")
 	fs.BoolVar(&verboseFlag, "verbose", false, "enable verbose output")
+	fs.BoolVar(&resumeFlag, "resume", false, "resume previous session from store path")
 	if err := fs.Parse(args); err != nil {
 		return newUsageError("interactive: %v", err)
 	}
@@ -88,7 +90,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 	modelName := resolveModelName(modelFlag, rc)
 	providerName := resolveProviderName(providerFlag, rc)
 	if maxTokensFlag <= 0 {
-		maxTokensFlag = interactiveDefaultMaxTokens
+		maxTokensFlag = defaultMaxTokens
 	}
 
 	span, spanCtx := tracing.SpanFromContext(ctx, spanInteractiveRun, tracing.SpanKindInternal)
@@ -112,45 +114,49 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		"verbose", verboseFlag,
 	)
 
-	model, cleanup, err := c.buildModel(spanCtx, rc, providerName, modelName)
+	// Assemble the full agent runtime with all production wiring (model
+	// wrapping, tools, approval gates, retry/cost tracking, output guards,
+	// subagent, session persistence, compaction).
+	assembly, err := AssembleAgent(spanCtx, rc, providerName, modelName, c.out,
+		WithMaxTokens(maxTokensFlag),
+		WithResume(resumeFlag),
+		WithSessionPersistence(true),
+		WithAgentName("interactive"),
+	)
 	if err != nil {
 		span.SetStatus(tracing.SpanStatusError, err.Error())
-		return newExecutionError("interactive: build model", err)
+		return newExecutionError("interactive: assemble agent", err)
 	}
-	if cleanup != nil {
-		defer cleanup()
+	defer assembly.Cleanup()
+
+	// Build slash command context from the assembled components.
+	var sessionHandler *session.SessionSlashHandler
+	if assembly.SessionStore != nil {
+		treeBuilder := session.NewDefaultSessionTreeBuilder()
+		sessionTree, err := treeBuilder.BuildFromStore(spanCtx, assembly.SessionStore)
+		if err != nil {
+			// fallback to empty tree on error
+			sessionTree = session.NewDefaultSessionTree()
+		}
+		sessionHandler = session.NewSessionSlashHandler(sessionTree, assembly.SessionStore)
+	}
+	slashCtx := slashContext{
+		agent:          assembly.Agent,
+		costTracker:    assembly.CostTracker,
+		statsRegistry:  assembly.StatsRegistry,
+		sessionID:      assembly.SessionID,
+		toolRegistry:   assembly.ToolRegistry,
+		modelName:      modelName,
+		sessionHandler: sessionHandler,
+		out:            c.out,
+		config:         rc,
+		sessionStore:   assembly.SessionStore,
+		fileTracker:    assembly.FileTracker,
+		diffGenerator:  assembly.DiffGenerator,
+		planCtrl:       assembly.PlanCtrl,
 	}
 
-	tr := tools.NewDefaultToolRegistry()
-	if registerErr := tools.RegisterDefaults(spanCtx, tr); registerErr != nil {
-		span.SetStatus(tracing.SpanStatusError, registerErr.Error())
-		return newExecutionError("interactive: register tools", registerErr)
-	}
-
-	// Register MCP tools.
-	if mcpErr := c.registerMCPTools(spanCtx, rc, tr); mcpErr != nil {
-		logger.Warn("cli_interactive_mcp_failed", "err", mcpErr)
-	}
-
-	// Register skill tools.
-	if skillErr := c.registerSkillTools(spanCtx, rc, tr); skillErr != nil {
-		logger.Warn("cli_interactive_skill_failed", "err", skillErr)
-	}
-
-	// Build loop agent with configurable max iterations.
-	loopOpts := []core.LoopOption{core.WithLLM(model), core.WithTools(tr)}
-	if rc != nil && rc.Agent.MaxIterations != 0 {
-		loopOpts = append(loopOpts, core.WithMaxIterations(rc.Agent.MaxIterations))
-	}
-	loop := core.NewLoopAgent(loopOpts...)
-	agent := core.NewAgentImpl("interactive", loop)
-	h := core.NewHarnessImpl(agent)
-
-	compactor := compaction.NewUnifiedCompactor()
-	estimator := compaction.NewHeuristicTokenEstimator()
-	midTurn := compaction.NewMidTurnCompact()
-
-	var turnItems []compaction.TurnItem
+	entryCounter := len(assembly.Agent.Messages())
 
 	// Default to os.Stdin when no input reader was provided at registration
 	// time (the common path when RunWithRegistry creates the command).
@@ -159,16 +165,37 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		in = os.Stdin
 	}
 
-	fmt.Fprintln(c.out, "Interactive session started. Type 'exit' to quit.")
+	fmt.Fprintln(c.out, "Interactive session started. Type 'exit' to quit.") //nolint:errcheck
 
-	scanner := bufio.NewScanner(in)
+	le := c.lineEditor
+	if le == nil {
+		le = NewDefaultLineEditor(in, c.out)
+		le.SetCompleter(NewSlashCommandCompleter(slashCommandNames()))
+	}
+
 	for {
-		fmt.Fprint(c.out, "> ")
-		if !scanner.Scan() {
+		line, err := le.ReadLine(ctx, "> ")
+		if err != nil {
+			if !errors.Is(err, io.EOF) {
+				logger.Warn("cli_interactive_readline_error", "err", err)
+			}
 			break
 		}
-		line := strings.TrimSpace(scanner.Text())
+		line = strings.TrimSpace(line)
 		if line == "" {
+			continue
+		}
+		// Slash command routing.
+		if strings.HasPrefix(line, "/") {
+			cmd, ok := session.ParseSlashCommand(line)
+			if !ok {
+				fmt.Fprintln(c.out, "Invalid command. Type /help for available commands.") //nolint:errcheck
+				continue
+			}
+			if cmd.Name == "exit" {
+				break
+			}
+			c.handleSlashCommand(spanCtx, cmd, &slashCtx)
 			continue
 		}
 		if strings.EqualFold(line, exitCommand) {
@@ -179,20 +206,21 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		turnSpan, turnCtx := tracing.SpanFromContext(spanCtx, spanInteractiveTurn, tracing.SpanKindInternal)
 		turnSpan.SetAttributes(tracing.Attribute{Key: "user_message", Value: line})
 
-		turnItems = append(turnItems, compaction.TurnItem{
-			ID:      fmt.Sprintf("msg-%d", len(turnItems)),
-			Role:    compaction.RoleUser,
-			Content: line,
-		})
+		// Wrap the turn context in a cancellable context so the user can
+		// interrupt the in-progress agent turn via Ctrl+C (non-TTY) or Esc
+		// (TTY, future work). The InterruptHandler monitors for SIGINT and
+		// invokes cancelTurn when a signal arrives.
+		turnCtx, cancelTurn := context.WithCancel(turnCtx)
+		interrupter := NewInterruptHandler(cancelTurn)
+		interrupter.Start(in)
 
-		// Auto-compaction check before submitting.
-		turnItems = c.autoCompact(turnCtx, turnItems, maxTokensFlag, compactor, estimator, midTurn, logger)
-
-		stream, err := h.Submit(turnCtx, line)
+		stream, err := assembly.Harness.Submit(turnCtx, line)
 		if err != nil {
+			cancelTurn()
+			interrupter.Stop()
 			turnSpan.SetStatus(tracing.SpanStatusError, err.Error())
 			turnSpan.End()
-			fmt.Fprintf(c.out, "Error: %v\n", err)
+			fmt.Fprintf(c.out, "Error: %v\n", err) //nolint:errcheck
 			continue
 		}
 
@@ -200,7 +228,31 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		// sole consumer of the tuiEvents channel; when the bridge channel
 		// closes the app's Run loop returns and closes its Done channel.
 		tuiEvents := tui.BridgeEvents(turnCtx, stream)
-		app := tui.NewBubbleteaApp(tuiEvents, tui.WithWidth(80))
+
+		// Streaming output: each view mutation re-renders to the terminal.
+		// In TTY mode we use ANSI cursor reset + clear-line to repaint in
+		// place; in pipe mode we emit the latest view line-by-line.
+		var lastLineCount int
+		isTTY := tui.IsTerminal()
+		tsp := tui.NewDefaultTerminalSizeProvider()
+		termWidth := tsp.Width()
+		app := tui.NewBubbleteaApp(tuiEvents,
+			tui.WithWidth(termWidth),
+			tui.WithOnUpdate(func(view string) {
+				if isTTY {
+					if lastLineCount > 0 {
+						fmt.Fprintf(c.out, "\033[%dA", lastLineCount) //nolint:errcheck
+					}
+					fmt.Fprint(c.out, "\033[J") //nolint:errcheck
+					// In raw mode \n only moves down; \r\n returns to column 0.
+					fmt.Fprint(c.out, strings.ReplaceAll(view, "\n", "\r\n")) //nolint:errcheck
+					fmt.Fprint(c.out, "\r\n")                                 //nolint:errcheck
+					lastLineCount = countViewVisualLines(view, termWidth)
+				} else {
+					fmt.Fprintln(c.out, view) //nolint:errcheck
+				}
+			}),
+		)
 
 		go func() {
 			if runErr := app.Run(turnCtx); runErr != nil && runErr != context.Canceled {
@@ -210,210 +262,107 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 
 		// Wait for the render loop to finish. The app exits when the bridge
 		// channel closes, which only happens after the harness closes the
-		// EventStream — by which point SetResult has already been invoked.
+		// EventStream - by which point SetResult has already been invoked.
 		// stream.Result() is non-blocking, so it must be called after the
 		// stream is known to be closed, otherwise it returns errNoResult.
-		select {
-		case <-app.Done():
-		case <-turnCtx.Done():
+		// If the context is canceled (user interrupt), we additionally wait
+		// for app.Done() so the stream is fully closed and Result() is ready.
+		// Steer messages arriving on the interrupter's channel are forwarded
+		// to the assembly's shared SteerChannel, which the LoopAgent drains
+		// between LLM iterations. Steering can only happen between iterations,
+		// not during generation, because the LLM call is a synchronous
+		// blocking operation.
+		turnComplete := false
+		for !turnComplete {
+			select {
+			case <-app.Done():
+				turnComplete = true
+			case <-turnCtx.Done():
+				// Context canceled (user interrupt). Wait for the app to
+				// finish cleaning up so the stream closes and Result() is
+				// available.
+				<-app.Done()
+				turnComplete = true
+			case steerMsg := <-interrupter.SteerChannel():
+				logger.Info("cli_interactive_steer",
+					"op", "cli.interactive.steer",
+					"message", steerMsg,
+				)
+				// Forward the steer message to the assembly's shared
+				// SteerChannel so the LoopAgent picks it up between
+				// LLM iterations.
+				if assembly.SteerChannel != nil {
+					select {
+					case assembly.SteerChannel <- steerMsg:
+						logger.Info("cli_interactive_steer_forwarded", "message", steerMsg)
+					default:
+						logger.Warn("cli_interactive_steer_channel_full")
+					}
+				}
+			}
 		}
 
 		result, streamErr := stream.Result()
+
+		interrupted := turnCtx.Err() != nil
+		cancelTurn()
+		interrupter.Stop()
 		turnSpan.SetStatus(tracing.SpanStatusOK, "")
 		turnSpan.End()
 
 		app.Quit()
 
-		if streamErr != nil {
-			fmt.Fprintf(c.out, "Error: %v\n", streamErr)
+		if streamErr != nil && !interrupted {
+			fmt.Fprintf(c.out, "Error: %v\n", streamErr) //nolint:errcheck
 			continue
 		}
 
-		// Render the accordion view (tool calls, results, thinking) before
-		// the final assistant message so the user sees the full transcript.
-		if view := app.View(); view != "" {
-			fmt.Fprintln(c.out, view)
+		if interrupted {
+			fmt.Fprintln(c.out, "[interrupted]") //nolint:errcheck
 		}
 
-		if result.Content != "" {
-			fmt.Fprintf(c.out, "AI: %s\n", result.Content)
-			turnItems = append(turnItems, compaction.TurnItem{
-				ID:      fmt.Sprintf("msg-%d", len(turnItems)),
-				Role:    compaction.RoleAssistant,
-				Content: result.Content,
-			})
+		// The accordion view was streamed in real time via onUpdate.
+		// Only print the final assistant message in non-TTY mode (where the
+		// TUI's real-time repaint isn't active), and only when the turn was
+		// not interrupted.
+		if result.Content != "" && !isTTY && !interrupted {
+			fmt.Fprintf(c.out, "AI: %s\n", result.Content) //nolint:errcheck
+		}
+
+		// Persist to session store (even on interruption to preserve history).
+		// Use spanCtx, not turnCtx, because turnCtx may be canceled by the
+		// interrupt handler.
+		if assembly.SessionStore != nil {
+			if appendErr := assembly.SessionStore.Append(spanCtx, &session.SessionEntry{
+				ID:        fmt.Sprintf("entry-%d", entryCounter),
+				Type:      session.EntryTypeUser,
+				Content:   line,
+				Timestamp: time.Now(),
+			}); appendErr != nil {
+				logger.Warn("cli_interactive_session_save_failed", "err", appendErr)
+			}
+			entryCounter++
+			if result.Content != "" {
+				if appendErr := assembly.SessionStore.Append(spanCtx, &session.SessionEntry{
+					ID:        fmt.Sprintf("entry-%d", entryCounter),
+					Type:      session.EntryTypeAssistant,
+					Content:   result.Content,
+					Timestamp: time.Now(),
+				}); appendErr != nil {
+					logger.Warn("cli_interactive_session_save_failed", "err", appendErr)
+				}
+				entryCounter++
+			}
+			_ = assembly.SessionStore.Save(spanCtx) //nolint:errcheck
 		}
 
 		logger.Info("cli_interactive_turn_complete",
 			"op", "cli.interactive.turn_complete",
-			"turn_items", len(turnItems),
 		)
 	}
 
-	if scanErr := scanner.Err(); scanErr != nil {
-		logger.Warn("cli_interactive_scanner_error", "err", scanErr)
-	}
-
-	fmt.Fprintln(c.out, "Session ended.")
+	fmt.Fprintln(c.out, "Session ended.") //nolint:errcheck
 	return nil
-}
-
-// buildModel resolves an llm.BaseChatModel. Reuses the same logic as promptCmd.
-func (c *interactiveCmd) buildModel(ctx context.Context, rc *config.Config, providerName, modelName string) (llm.BaseChatModel, func(), error) {
-	cfg := llm.ModelConfig{Model: modelName}
-
-	if rc != nil && (rc.Provider.BaseURL != "" || rc.Provider.APIKey != "") {
-		provider := llm.NewEinoProvider(
-			llm.WithProviderName(providerName),
-			llm.WithBaseURL(rc.Provider.BaseURL),
-			llm.WithAPIKey(rc.Provider.APIKey),
-			llm.WithDefaultModel(modelName),
-		)
-		return provider.Build(ctx, cfg)
-	}
-
-	reg := llm.NewProviderRegistry()
-	return reg.GetModel(ctx, providerName, cfg)
-}
-
-// registerMCPTools connects to configured MCP servers and registers their
-// tools into the tool registry.
-func (c *interactiveCmd) registerMCPTools(ctx context.Context, rc *config.Config, tr tools.ToolRegistry) error {
-	if rc == nil || len(rc.MCP.Servers) == 0 {
-		return nil
-	}
-
-	for _, srv := range rc.MCP.Servers {
-		cfg := mcp.MCPServerConfig{
-			Name: srv.Name,
-			URL:  srv.URL,
-		}
-		if srv.Command != "" {
-			cfg.Transport = mcp.MCPTransportStdio
-			cfg.Command = srv.Command
-			cfg.Args = srv.Args
-			for k, v := range srv.Env {
-				cfg.Env = append(cfg.Env, k+"="+v)
-			}
-		} else if srv.URL != "" {
-			cfg.Transport = mcp.MCPTransportSSE
-		} else {
-			continue
-		}
-
-		var client mcp.MCPClient
-		if cfg.Transport == mcp.MCPTransportSSE {
-			client = mcp.NewHTTPClientAdapter(cfg)
-		} else {
-			client = mcp.NewOfficialSDKAdapter(cfg)
-		}
-
-		if err := client.Connect(ctx); err != nil {
-			slog.Warn("cli_interactive_mcp_connect_failed", "server", srv.Name, "err", err)
-			continue
-		}
-
-		mcpTools, err := client.ListTools(ctx)
-		if err != nil {
-			slog.Warn("cli_interactive_mcp_list_failed", "server", srv.Name, "err", err)
-			continue
-		}
-
-		for _, t := range mcpTools {
-			if regErr := tr.Register(ctx, mcp.NewMCPToolAdapter(client, t)); regErr != nil {
-				slog.Warn("cli_interactive_mcp_register_failed", "tool", t.Name, "err", regErr)
-			}
-		}
-		slog.Info("cli_interactive_mcp_registered", "server", srv.Name, "tools", len(mcpTools))
-	}
-	return nil
-}
-
-// registerSkillTools loads skills from the configured directory and registers
-// them as tools. It supports two directory layouts:
-//   - Flat: {dir}/{name}.md
-//   - Nested: {dir}/{name}/SKILL.md
-//
-// Skills are loaded with YAMLSkillLoader for proper frontmatter parsing and
-// wrapped with SkillAdapter so the agent loop can execute them.
-func (c *interactiveCmd) registerSkillTools(ctx context.Context, rc *config.Config, tr tools.ToolRegistry) error {
-	if rc == nil || rc.Skill.Dir == "" {
-		return nil
-	}
-
-	loader := skill.NewYAMLSkillLoader()
-	defs, err := loader.LoadDir(ctx, rc.Skill.Dir)
-	if err != nil {
-		slog.Warn("cli_interactive_skill_load_failed", "dir", rc.Skill.Dir, "err", err)
-		return nil
-	}
-
-	count := 0
-	for _, def := range defs {
-		if def == nil {
-			continue
-		}
-		adapter := skill.NewSkillAdapter(*def)
-		if regErr := tr.Register(ctx, adapter); regErr != nil {
-			slog.Warn("cli_interactive_skill_register_failed", "skill", (*def).Name(), "err", regErr)
-			continue
-		}
-		count++
-	}
-	if count > 0 {
-		slog.Info("cli_interactive_skills_registered", "dir", rc.Skill.Dir, "count", count)
-	}
-	return nil
-}
-
-// autoCompact checks whether the conversation turn items exceed the token
-// budget and triggers compaction when necessary. It returns the (possibly
-// compacted) items.
-func (c *interactiveCmd) autoCompact(
-	ctx context.Context,
-	items []compaction.TurnItem,
-	maxTokens int,
-	compactor compaction.Compactor,
-	estimator compaction.TokenEstimator,
-	midTurn *compaction.MidTurnCompact,
-	logger *slog.Logger,
-) []compaction.TurnItem {
-	compactSpan, compactCtx := tracing.SpanFromContext(ctx, spanInteractiveCompact, tracing.SpanKindInternal)
-	current := estimateTurnTokens(items, estimator)
-	compactSpan.SetAttributes(
-		tracing.Attribute{Key: "current_tokens", Value: current},
-		tracing.Attribute{Key: "max_tokens", Value: maxTokens},
-	)
-
-	// CompactIfNeeded uses a threshold ratio (default 0.8) to decide whether
-	// compaction should run. It returns items unchanged when below threshold.
-	result, compactResult, err := midTurn.CompactIfNeeded(compactCtx, items, maxTokens, estimator, compactor)
-
-	compactSpan.SetAttributes(
-		tracing.Attribute{Key: "triggered", Value: compactResult.Triggered},
-		tracing.Attribute{Key: "reason", Value: compactResult.Reason.String()},
-	)
-
-	if err != nil {
-		compactSpan.SetStatus(tracing.SpanStatusError, err.Error())
-		compactSpan.End()
-		logger.Warn("cli_interactive_compact_failed", "err", err)
-		return items
-	}
-
-	compactSpan.SetStatus(tracing.SpanStatusOK, "")
-	compactSpan.End()
-
-	if compactResult.Triggered {
-		logger.Info("cli_interactive_compacted",
-			"op", "cli.interactive.compacted",
-			"reason", compactResult.Reason.String(),
-			"items_in", len(items),
-			"items_out", len(result),
-		)
-		return result
-	}
-	return items
 }
 
 // estimateTurnTokens sums the estimated token counts of all turn items.
@@ -421,11 +370,11 @@ func estimateTurnTokens(items []compaction.TurnItem, estimator compaction.TokenE
 	total := 0
 	for _, it := range items {
 		if it.Content != "" {
-			n, _ := estimator.Estimate(it.Content)
+			n, _ := estimator.Estimate(it.Content) //nolint:errcheck
 			total += n
 		}
 		if it.ToolResult != "" {
-			n, _ := estimator.Estimate(it.ToolResult)
+			n, _ := estimator.Estimate(it.ToolResult) //nolint:errcheck
 			total += n
 		}
 	}
@@ -528,4 +477,71 @@ func turnItemsToMessages(items []compaction.TurnItem) []core.AgentMessage {
 	return msgs
 }
 
+// loadSessionHistory reads a JSONL session file and reconstructs the message
+// history as []core.AgentMessage. Only user and assistant entries are included.
+func loadSessionHistory(path string) ([]core.AgentMessage, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close() //nolint:errcheck
+
+	var messages []core.AgentMessage
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for scanner.Scan() {
+		var entry session.SessionEntry
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			continue
+		}
+		if entry.Type == session.EntryTypeUser || entry.Type == session.EntryTypeAssistant {
+			messages = append(messages, core.AgentMessage{
+				Role:    string(entry.Type),
+				Content: entry.Content,
+			})
+		}
+	}
+	return messages, scanner.Err()
+}
+
+// slashCommandNames returns the canonical names of all registered slash
+// commands plus "exit", for use by the tab completer.
+func slashCommandNames() []string {
+	return append(defaultSlashReg.Names(), "exit")
+}
+
 var _ Command = (*interactiveCmd)(nil)
+
+// cliHITLEmitter implements core.HITLQuestionEmitter for the interactive CLI.
+// It prints the question to the output writer and reads the answer from stdin.
+type cliHITLEmitter struct {
+	out io.Writer
+}
+
+func (e *cliHITLEmitter) Emit(ctx context.Context, event core.HITLQuestionEvent) error {
+	fmt.Fprintf(e.out, "\n[ask_user] %s\n", event.Question) //nolint:errcheck
+	for i, opt := range event.Options {
+		fmt.Fprintf(e.out, "  %d. %s\n", i+1, opt) //nolint:errcheck
+	}
+	fmt.Fprint(e.out, "> ") //nolint:errcheck
+
+	line, err := readLine(os.Stdin)
+	if err != nil {
+		return err
+	}
+	answer := strings.TrimSpace(line)
+
+	select {
+	case event.ResponseCh <- core.HITLAnswer{QuestionID: event.QuestionID, Answer: answer}:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// readLine reads a single line from r using a fresh bufio.Reader so it does
+// not compete with the REPL scanner's internal buffer.
+func readLine(r io.Reader) (string, error) {
+	br := bufio.NewReader(r)
+	return br.ReadString('\n')
+}

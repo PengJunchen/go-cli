@@ -178,13 +178,20 @@ func (s *MockLLMServer) generate(ctx context.Context, msgs []llm.Message, opts .
 
 // stream implements the shared Stream logic.
 func (s *MockLLMServer) stream(ctx context.Context, msgs []llm.Message, opts ...llm.Option) (<-chan llm.MessageChunk, error) {
-	ch := make(chan llm.MessageChunk, 1)
+	ch := make(chan llm.MessageChunk, 2)
 	resp, err := s.generate(ctx, msgs, opts...)
 	if err != nil {
 		close(ch)
 		return ch, err
 	}
-	ch <- llm.MessageChunk{Role: resp.Role, Content: resp.Content}
+	if resp.Content != "" {
+		ch <- llm.MessageChunk{Role: resp.Role, Content: resp.Content}
+	}
+	final := llm.MessageChunk{Role: resp.Role, Final: true}
+	if len(resp.ToolCalls) > 0 {
+		final.ToolCalls = resp.ToolCalls
+	}
+	ch <- final
 	close(ch)
 	return ch, nil
 }

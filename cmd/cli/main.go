@@ -37,8 +37,8 @@ func run(argv []string, stdout, stderr io.Writer, loadConfig func() (*config.Con
 	// default. This runs before config loading so even config_load spans are
 	// captured in the file.
 	logDir := filepath.Join(".go-cli", "logs")
-	if err := os.MkdirAll(logDir, 0o755); err == nil {
-		logFile, fErr := os.OpenFile(filepath.Join(logDir, "go-cli.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
+	if err := os.MkdirAll(logDir, 0o750); err == nil {
+		logFile, fErr := os.OpenFile(filepath.Join(logDir, "go-cli.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if fErr == nil {
 			slog.SetDefault(slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelInfo})))
 		}
@@ -80,10 +80,9 @@ func run(argv []string, stdout, stderr io.Writer, loadConfig func() (*config.Con
 		root.End()
 	}
 	if exporter != nil {
-		// Allow the root span's asynchronous export goroutine to enqueue its
-		// data before Shutdown drains the exporter, so the trace file captures
-		// the full span chain (cli.invocation → command.dispatch) on exit.
-		time.Sleep(50 * time.Millisecond)
+		if tracer != nil {
+			tracer.Flush()
+		}
 		if err := exporter.Shutdown(ctx); err != nil {
 			_, _ = fmt.Fprintf(stderr, "error: shutdown exporter: %v\n", err) //nolint:errcheck // CLI error output is best-effort
 		}

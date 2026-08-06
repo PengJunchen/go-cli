@@ -2,8 +2,8 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"errors"
-	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -34,7 +34,7 @@ func TestInteractiveCmd_ExitCommand(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)) //nolint:errcheck,gosec
 	}))
 	defer srv.Close()
 
@@ -62,7 +62,7 @@ func TestInteractiveCmd_EmptyInput(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`))
+		w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)) //nolint:errcheck,gosec
 	}))
 	defer srv.Close()
 
@@ -206,54 +206,63 @@ func TestEstimateTurnTokens(t *testing.T) {
 			{Role: "assistant", Content: "hi"}, // 2 chars => 0 tokens
 		}
 		total := estimateTurnTokens(items, estimator)
-		assert.Equal(t, 2/4, total)
+		assert.Equal(t, 0, total)
 	})
 }
 
-// TestInteractiveCmd_AutoCompact tests that autoCompact triggers compaction
-// when the token estimate exceeds the budget.
-func TestInteractiveCmd_AutoCompact(t *testing.T) {
-	compactor := compaction.NewUnifiedCompactor()
-	estimator := compaction.NewHeuristicTokenEstimator()
-	midTurn := compaction.NewMidTurnCompact()
-	cmd := newInteractiveCmd(nil, &bytes.Buffer{})
-
-	// Build a large conversation that exceeds the default 8000 token budget.
-	// Each char counts as ~0.25 tokens, so 40000+ chars will exceed 8000 tokens.
-	bigContent := strings.Repeat("x", 10000) // 2500 tokens per item
-	items := []compaction.TurnItem{
-		{ID: "msg-0", Role: "user", Content: bigContent},
-		{ID: "msg-1", Role: "assistant", Content: bigContent},
-		{ID: "msg-2", Role: "user", Content: bigContent},
-		{ID: "msg-3", Role: "assistant", Content: bigContent},
-	}
-
-	// Total tokens: 4 * 2500 = 10000, budget 8000 => triggers compaction.
-	logger := slog.Default()
-	result := cmd.autoCompact(t.Context(), items, 8000, compactor, estimator, midTurn, logger)
-
-	// Compaction should have reduced the item count or modified items.
-	assert.LessOrEqual(t, len(result), len(items))
+// messageStubLoop is a minimal AgentLoop that returns a single assistant
+// message event with the configured content. It is used by compaction tests
+// that need the agent to accumulate user+assistant history across turns.
+type messageStubLoop struct {
+	content string
 }
 
-// TestInteractiveCmd_NoCompactBelowBudget tests that autoCompact is a no-op
-// when the conversation is well under the MidTurnCompact threshold (80% of
-// maxTokens by default).
-func TestInteractiveCmd_NoCompactBelowBudget(t *testing.T) {
+func (m *messageStubLoop) Run(_ context.Context, _ core.Submission, _ ...core.EventStream) ([]core.AgentEvent, error) {
+	return []core.AgentEvent{{Kind: "message", Content: m.content}}, nil
+}
+
+// TestSinglePathCompaction_AgentHistoryShrinks verifies that long
+// conversations trigger compaction through the compactionHook (the single
+// remaining compaction path after removing the redundant between-turn
+// autoCompact). The agent's real history should shrink, not a local slice.
+func TestSinglePathCompaction_AgentHistoryShrinks(t *testing.T) {
 	compactor := compaction.NewUnifiedCompactor()
 	estimator := compaction.NewHeuristicTokenEstimator()
-	midTurn := compaction.NewMidTurnCompact()
-	cmd := newInteractiveCmd(nil, &bytes.Buffer{})
+	// Very low budget so compaction triggers after a few turns.
+	hook := newCompactionHook(compactor, estimator, 100)
 
-	items := []compaction.TurnItem{
-		{ID: "msg-0", Role: "user", Content: "hello"},
-		{ID: "msg-1", Role: "assistant", Content: "world"},
+	longContent := strings.Repeat("x", 200) // ~50 tokens per message
+	loop := &messageStubLoop{content: longContent}
+	agent := core.NewAgentImpl("test", loop, core.WithCompactionHook(hook))
+
+	// Run several turns to build up history beyond the budget.
+	for i := 0; i < 10; i++ {
+		_, err := agent.Run(t.Context(), core.Submission{Content: longContent})
+		require.NoError(t, err)
 	}
 
-	// Budget is 8000, threshold is 80% = 6400. "hello"+"world" = 10 chars / 4
-	// = 2 tokens, well below 6400, so CompactIfNeeded returns items unchanged.
-	logger := slog.Default()
-	result := cmd.autoCompact(t.Context(), items, 8000, compactor, estimator, midTurn, logger)
+	// Without compaction we would have 20 messages (10 user + 10 assistant).
+	// The compactionHook should have compacted the history below that.
+	msgs := agent.Messages()
+	assert.Less(t, len(msgs), 20, "compactionHook should have compacted the agent history")
+}
 
-	assert.Equal(t, items, result)
+// TestSinglePathCompaction_NoCompactBelowBudget verifies that when the
+// conversation is well under the token budget, the compactionHook does not
+// trigger compaction and the agent's history is preserved unchanged.
+func TestSinglePathCompaction_NoCompactBelowBudget(t *testing.T) {
+	compactor := compaction.NewUnifiedCompactor()
+	estimator := compaction.NewHeuristicTokenEstimator()
+	// High budget so compaction does not trigger.
+	hook := newCompactionHook(compactor, estimator, 8000)
+
+	loop := &messageStubLoop{content: "short reply"}
+	agent := core.NewAgentImpl("test", loop, core.WithCompactionHook(hook))
+
+	_, err := agent.Run(t.Context(), core.Submission{Content: "hello"})
+	require.NoError(t, err)
+
+	// user + assistant = 2 messages, well under the 8000 token budget.
+	msgs := agent.Messages()
+	assert.Len(t, msgs, 2, "history should not be compacted below budget")
 }

@@ -10,7 +10,8 @@ import (
 
 // agentConfig holds the configurable state of an AgentImpl.
 type agentConfig struct {
-	history []AgentMessage
+	history        []AgentMessage
+	compactionHook CompactionHook
 }
 
 // AgentOption configures an AgentImpl at construction time.
@@ -34,11 +35,12 @@ var _ eventSource = (*AgentImpl)(nil)
 // AgentImpl is a stateful wrapper around an AgentLoop. It maintains message
 // history across Run calls and records its name so the runtime can address it.
 type AgentImpl struct {
-	name    string
-	loop    AgentLoop
-	mu      sync.Mutex
-	history []AgentMessage
-	events  []AgentEvent
+	name           string
+	loop           AgentLoop
+	mu             sync.Mutex
+	history        []AgentMessage
+	events         []AgentEvent
+	compactionHook CompactionHook
 }
 
 var _ Agent = (*AgentImpl)(nil)
@@ -59,9 +61,10 @@ func NewAgentImpl(name string, loop AgentLoop, opts ...AgentOption) *AgentImpl {
 		o(&cfg)
 	}
 	a := &AgentImpl{
-		name:    name,
-		loop:    loop,
-		history: append([]AgentMessage{}, cfg.history...),
+		name:           name,
+		loop:           loop,
+		history:        append([]AgentMessage{}, cfg.history...),
+		compactionHook: cfg.compactionHook,
 	}
 	slog.Info("core.agent.new", "name", name, "history", len(a.history))
 	return a
@@ -73,7 +76,7 @@ func (a *AgentImpl) Name() string { return a.name }
 // Run appends the submission to the agent's history, executes the loop, records
 // the events it fired, and returns the final result. It is thread-safe. Success
 // is derived from the loop error: a successful run yields Success == true.
-func (a *AgentImpl) Run(ctx context.Context, submission Submission) (Result, error) {
+func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...EventStream) (Result, error) {
 	span, spanCtx := tracing.SpanFromContext(ctx, "agent.run", tracing.SpanKindInternal)
 	defer span.End()
 	logger := tracing.NewTraceLogger(span, nil)
@@ -88,7 +91,7 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission) (Result, err
 	// conversation context (prior user/assistant turns).
 	submission.History = historyCopy
 
-	events, err := a.loop.Run(spanCtx, submission)
+	events, err := a.loop.Run(spanCtx, submission, stream...)
 	if err != nil {
 		span.SetStatus(tracing.SpanStatusError, err.Error())
 	}
@@ -106,6 +109,24 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission) (Result, err
 	}
 	a.mu.Unlock()
 
+	// Apply compaction hook if set: the hook may trim or summarize the
+	// history to keep it within the token budget.
+	if a.compactionHook != nil {
+		a.mu.Lock()
+		historyCopy := append([]AgentMessage{}, a.history...)
+		a.mu.Unlock()
+
+		compacted, compErr := a.compactionHook(spanCtx, historyCopy)
+		if compErr != nil {
+			logger.Warn("core.agent.compaction_failed", "err", compErr)
+		} else {
+			a.mu.Lock()
+			a.history = compacted
+			a.mu.Unlock()
+			logger.Info("core.agent.compacted", "before", len(historyCopy), "after", len(compacted))
+		}
+	}
+
 	logger.Info("core.agent.done", "name", a.name, "events", len(evs), "success", err == nil)
 	return Result{Message: finalMsg, Success: err == nil}, err
 }
@@ -122,6 +143,37 @@ func (a *AgentImpl) Messages() []AgentMessage {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return append([]AgentMessage{}, a.history...)
+}
+
+// ClearHistory resets the agent's conversation history. It is used by the
+// /clear slash command.
+func (a *AgentImpl) ClearHistory() {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.history = nil
+	slog.Info("core.agent.history_cleared", "name", a.name)
+}
+
+// Compact manually triggers the compaction hook on the current history.
+// It is used by the /compact slash command. When no compaction hook is
+// configured, it is a no-op.
+func (a *AgentImpl) Compact(ctx context.Context) error {
+	if a.compactionHook == nil {
+		return nil
+	}
+	a.mu.Lock()
+	historyCopy := append([]AgentMessage{}, a.history...)
+	a.mu.Unlock()
+
+	compacted, err := a.compactionHook(ctx, historyCopy)
+	if err != nil {
+		return err
+	}
+	a.mu.Lock()
+	a.history = compacted
+	a.mu.Unlock()
+	slog.Info("core.agent.manual_compact", "name", a.name, "before", len(historyCopy), "after", len(compacted))
+	return nil
 }
 
 // lastMessageEvent returns the content of the final non-empty "message" event,

@@ -1,4 +1,4 @@
-package e2e_20260802
+package e2e_20260802 //nolint:staticcheck // package name with underscores required by test convention
 
 import (
 	"context"
@@ -23,7 +23,7 @@ func TestReadTool(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "test.txt")
 	content := "hello world\nline two\n"
-	require.NoError(t, os.WriteFile(fp, []byte(content), 0o644))
+	require.NoError(t, os.WriteFile(fp, []byte(content), 0o600))
 
 	read := tools.NewReadTool(tools.WithWorkdir(dir))
 
@@ -62,7 +62,7 @@ func TestWriteTool(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Contains(t, res.Output, "wrote")
-	data, _ := os.ReadFile(fp)
+	data, _ := os.ReadFile(fp) //nolint:errcheck,gosec
 	assert.Equal(t, "hello", string(data))
 
 	// overwrite disabled by default -> error
@@ -73,19 +73,19 @@ func TestWriteTool(t *testing.T) {
 
 	// overwrite enabled
 	wt2 := tools.NewWriteTool(tools.WithWriteWorkdir(dir), tools.WithOverwrite(true))
-	res, err = wt2.Execute(context.Background(), tools.ToolCall{
+	_, err = wt2.Execute(context.Background(), tools.ToolCall{
 		Args: map[string]any{"path": fp, "content": "overwritten"},
 	})
 	require.NoError(t, err)
-	data, _ = os.ReadFile(fp)
+	data, _ = os.ReadFile(fp) //nolint:errcheck,gosec
 	assert.Equal(t, "overwritten", string(data))
 
 	// append
-	res, err = wt2.Execute(context.Background(), tools.ToolCall{
+	_, err = wt2.Execute(context.Background(), tools.ToolCall{
 		Args: map[string]any{"path": fp, "content": "-appended", "append": true},
 	})
 	require.NoError(t, err)
-	data, _ = os.ReadFile(fp)
+	data, _ = os.ReadFile(fp) //nolint:errcheck,gosec
 	assert.Equal(t, "overwritten-appended", string(data))
 }
 
@@ -97,7 +97,7 @@ func TestEditTool(t *testing.T) {
 	fp := filepath.Join(dir, "edit.go")
 
 	initial := "package main\n\nfunc main() {\n    // old code\n}\n"
-	require.NoError(t, os.WriteFile(fp, []byte(initial), 0o644))
+	require.NoError(t, os.WriteFile(fp, []byte(initial), 0o600))
 
 	edit := tools.NewEditFileTool()
 	edit.Workdir = dir
@@ -112,7 +112,7 @@ func TestEditTool(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Contains(t, res.Output, "replaced")
-	data, _ := os.ReadFile(fp)
+	data, _ := os.ReadFile(fp) //nolint:errcheck,gosec
 	assert.Contains(t, string(data), "// new code")
 	assert.NotContains(t, string(data), "// old code")
 
@@ -130,7 +130,7 @@ func TestEditTool(t *testing.T) {
 	// multi match
 	dupPath := filepath.Join(dir, "dup.txt")
 	dupContent := "foo\nfoo\nfoo\n"
-	require.NoError(t, os.WriteFile(dupPath, []byte(dupContent), 0o644))
+	require.NoError(t, os.WriteFile(dupPath, []byte(dupContent), 0o600))
 	_, err = edit.Execute(context.Background(), tools.ToolCall{
 		Args: map[string]any{
 			"file_path":  dupPath,
@@ -184,7 +184,7 @@ func TestGrepTool(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "grep_test.go")
 	content := "package test\n\nfunc Hello() {\n    return\n}\n"
-	require.NoError(t, os.WriteFile(fp, []byte(content), 0o644))
+	require.NoError(t, os.WriteFile(fp, []byte(content), 0o600))
 
 	grep := tools.NewGrepTool(tools.WithGrepWorkdir(dir), tools.WithForcePureGo(true))
 
@@ -208,10 +208,10 @@ func TestGrepTool(t *testing.T) {
 // ---------------------------------------------------------------------------
 func TestFindTool(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, "src"), 0o755))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "src", "lib.go"), []byte("package src"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ".hidden"), []byte("hidden"), 0o644))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "src"), 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "src", "lib.go"), []byte("package src"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".hidden"), []byte("hidden"), 0o600))
 
 	find := tools.NewFindTool(tools.WithFindWorkdir(dir), tools.WithFindForceNode(true))
 
@@ -236,10 +236,10 @@ func TestFindTool(t *testing.T) {
 // ---------------------------------------------------------------------------
 func TestLSTool(t *testing.T) {
 	dir := t.TempDir()
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "b.txt"), []byte("bb"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, ".hidden"), []byte("h"), 0o644))
-	require.NoError(t, os.MkdirAll(filepath.Join(dir, "sub"), 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.txt"), []byte("a"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "b.txt"), []byte("bb"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".hidden"), []byte("h"), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(dir, "sub"), 0o750))
 
 	ls := tools.NewLSTool()
 	ls.Workdir = dir
@@ -275,10 +275,10 @@ func TestLSTool(t *testing.T) {
 func TestToolSearchTool(t *testing.T) {
 	reg := tools.NewDefaultToolRegistry()
 
-	reg.Register(context.Background(), tools.NewReadTool())
-	reg.Register(context.Background(), tools.NewWriteTool())
-	reg.Register(context.Background(), tools.NewBashTool())
-	reg.Register(context.Background(), tools.NewGrepTool(tools.WithForcePureGo(true)))
+	reg.Register(context.Background(), tools.NewReadTool())                            //nolint:errcheck,gosec
+	reg.Register(context.Background(), tools.NewWriteTool())                           //nolint:errcheck,gosec
+	reg.Register(context.Background(), tools.NewBashTool())                            //nolint:errcheck,gosec
+	reg.Register(context.Background(), tools.NewGrepTool(tools.WithForcePureGo(true))) //nolint:errcheck,gosec
 
 	search := tools.NewToolSearchTool(reg)
 
@@ -385,7 +385,7 @@ func TestDeferredToolRegistry(t *testing.T) {
 func TestFileMutationQueue(t *testing.T) {
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "mutated.txt")
-	require.NoError(t, os.WriteFile(fp, []byte("original"), 0o644))
+	require.NoError(t, os.WriteFile(fp, []byte("original"), 0o600))
 
 	q := tools.NewDefaultFileMutationQueue()
 
@@ -402,7 +402,7 @@ func TestFileMutationQueue(t *testing.T) {
 	assert.True(t, res.Success)
 	assert.Nil(t, res.Error)
 
-	data, _ := os.ReadFile(fp)
+	data, _ := os.ReadFile(fp) //nolint:errcheck,gosec
 	assert.Equal(t, "new content", string(data))
 
 	// enqueue edit
@@ -420,7 +420,7 @@ func TestFileMutationQueue(t *testing.T) {
 	res = <-editCh
 	assert.True(t, res.Success)
 
-	data, _ = os.ReadFile(fp)
+	data, _ = os.ReadFile(fp) //nolint:errcheck,gosec
 	assert.Equal(t, "edited content", string(data))
 }
 
@@ -577,7 +577,7 @@ func TestLargeOutputHandling(t *testing.T) {
 	// large file read
 	largeContent := strings.Repeat("abcdefghij", 200000) // ~2MB
 	fp := filepath.Join(dir, "large.txt")
-	require.NoError(t, os.WriteFile(fp, []byte(largeContent), 0o644))
+	require.NoError(t, os.WriteFile(fp, []byte(largeContent), 0o600))
 
 	read := tools.NewReadTool(tools.WithWorkdir(dir), tools.WithMaxBytes(1024))
 	_, err := read.Execute(context.Background(), tools.ToolCall{
@@ -651,7 +651,7 @@ func TestToolDefinitionInterfaceCompliance(t *testing.T) {
 	// execute each one with minimal valid args (don't care about errors)
 	dir := t.TempDir()
 	fp := filepath.Join(dir, "comp.txt")
-	os.WriteFile(fp, []byte("test content"), 0o644)
+	os.WriteFile(fp, []byte("test content"), 0o600) //nolint:errcheck,gosec
 
 	toolCalls := map[string]tools.ToolCall{
 		"read":  {Args: map[string]any{"path": fp}},
@@ -676,7 +676,7 @@ func TestToolDefinitionInterfaceCompliance(t *testing.T) {
 
 	// also verify ToolSearchTool compliance
 	reg := tools.NewDefaultToolRegistry()
-	reg.Register(ctx, tools.NewReadTool())
+	reg.Register(ctx, tools.NewReadTool()) //nolint:errcheck,gosec
 	search := tools.NewToolSearchTool(reg)
 	assert.Equal(t, "tool_search", search.Name())
 	assert.NotEmpty(t, search.Description())

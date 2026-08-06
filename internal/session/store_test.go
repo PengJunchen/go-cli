@@ -16,11 +16,11 @@ import (
 )
 
 // newTestEntry builds a well-formed entry with a stable id/content/timestamp.
-func newTestEntry(id, parentID string, typ EntryType) *SessionEntry {
+func newTestEntry(id, parentID string, entryType EntryType) *SessionEntry {
 	return &SessionEntry{
 		ID:        id,
 		ParentID:  parentID,
-		Type:      typ,
+		Type:      entryType,
 		Content:   "content-" + id,
 		Timestamp: time.Date(2024, 5, 1, 12, 0, int(id[0]), 0, time.UTC),
 	}

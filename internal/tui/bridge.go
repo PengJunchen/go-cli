@@ -36,6 +36,7 @@ func CoreEventToAgentEvent(ev core.AgentEvent) AgentEvent {
 		Type:        ev.Kind,
 		Content:     ev.Content,
 		ContentType: KindToContentType(ev.Kind),
+		Incremental: ev.Incremental,
 	}
 }
 
@@ -44,7 +45,7 @@ func CoreEventToAgentEvent(ev core.AgentEvent) AgentEvent {
 // closes or the context is canceled. BridgeEvents is the single integration
 // point between the core runtime and the TUI layer.
 func BridgeEvents(ctx context.Context, stream core.EventStream) <-chan AgentEvent {
-	ch := make(chan AgentEvent, 16)
+	ch := make(chan AgentEvent, 64)
 	go func() {
 		defer close(ch)
 		for {
@@ -62,8 +63,6 @@ func BridgeEvents(ctx context.Context, stream core.EventStream) <-chan AgentEven
 				case <-ctx.Done():
 					slog.Debug("tui.bridge.canceled_send", "err", ctx.Err())
 					return
-				default:
-					slog.Debug("tui.bridge.dropped", "kind", ev.Kind)
 				}
 			}
 		}

@@ -1,7 +1,8 @@
-package config
+package config //exempt:scan003
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -63,4 +64,44 @@ func TestProviderAndModelNestedFields(t *testing.T) {
 func TestConfigIsValidByDefault(t *testing.T) {
 	err := NewDefaultValidator().Validate(*defaultConfig())
 	require.NoError(t, err)
+}
+
+func TestWebSearchConfigFields(t *testing.T) {
+	cfg := &Config{
+		WebSearch: WebSearchConfig{
+			Provider: "brave",
+			APIKey:   "test-key",
+			Timeout:  "15s",
+		},
+	}
+	assert.Equal(t, "brave", cfg.WebSearch.Provider)
+	assert.Equal(t, "test-key", cfg.WebSearch.APIKey)
+	assert.Equal(t, "15s", cfg.WebSearch.Timeout)
+}
+
+func TestWebSearchConfigDefaultsToEmpty(t *testing.T) {
+	cfg := defaultConfig()
+	assert.Equal(t, "", cfg.WebSearch.Provider, "default provider should be empty (treated as mock)")
+	assert.Equal(t, "", cfg.WebSearch.APIKey)
+	assert.Equal(t, "", cfg.WebSearch.Timeout)
+}
+
+func TestSandboxConfig(t *testing.T) {
+	cfg := &Config{
+		Sandbox: SandboxConfig{
+			AllowedPaths: []string{"/tmp", "/home/user"},
+			MaxCPU:       30 * time.Second,
+			MaxMemory:    512 * 1024 * 1024,
+		},
+	}
+	assert.Equal(t, []string{"/tmp", "/home/user"}, cfg.Sandbox.AllowedPaths)
+	assert.Equal(t, 30*time.Second, cfg.Sandbox.MaxCPU)
+	assert.Equal(t, int64(512*1024*1024), cfg.Sandbox.MaxMemory)
+}
+
+func TestSandboxConfigDefaultsToEmpty(t *testing.T) {
+	cfg := defaultConfig()
+	assert.Nil(t, cfg.Sandbox.AllowedPaths)
+	assert.Equal(t, time.Duration(0), cfg.Sandbox.MaxCPU)
+	assert.Equal(t, int64(0), cfg.Sandbox.MaxMemory)
 }

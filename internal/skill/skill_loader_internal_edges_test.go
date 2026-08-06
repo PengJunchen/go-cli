@@ -98,7 +98,7 @@ func TestParseFrontmatterFirstClosingDelimiterWins(t *testing.T) {
 		"trailing treated as body too",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "body line\n---\ntrailing treated as body too", def.prompt)
+	assert.Equal(t, "body line\n---\ntrailing treated as body too", def.Prompt())
 }
 
 // parseFrontmatterBlock coerces typed parameter values declared as indented
@@ -114,11 +114,11 @@ func TestParseFrontmatterBlockParameterCoercion(t *testing.T) {
 		"  label: text",
 	})
 	require.NoError(t, err)
-	require.Equal(t, 3, def.parameters["retries"])
-	require.Equal(t, -1, def.parameters["warmup"])
-	require.Equal(t, 1.5, def.parameters["timeout"])
-	require.Equal(t, false, def.parameters["enabled"])
-	require.Equal(t, "text", def.parameters["label"])
+	require.Equal(t, 3, def.Parameters()["retries"])
+	require.Equal(t, -1, def.Parameters()["warmup"])
+	require.Equal(t, 1.5, def.Parameters()["timeout"])
+	require.Equal(t, false, def.Parameters()["enabled"])
+	require.Equal(t, "text", def.Parameters()["label"])
 }
 
 // parseFrontmatterBlock collects a tools list under the bare `tools:` key and
@@ -132,8 +132,8 @@ func TestParseFrontmatterBlockToolsListWithUnknown(t *testing.T) {
 		"  some_unknown: ignored",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"bash", "read"}, def.tools)
-	assert.Empty(t, def.parameters)
+	assert.Equal(t, []string{"bash", "read"}, def.Tools())
+	assert.Empty(t, def.Parameters())
 }
 
 // parseFrontmatterBlock ignores an unknown top-level key and does not mistake
@@ -145,9 +145,9 @@ func TestParseFrontmatterBlockUnknownTopLevelIgnored(t *testing.T) {
 		"description: kept",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "u", def.name)
-	assert.Equal(t, "kept", def.description)
-	assert.Empty(t, def.parameters, "unknown non-parameter key is not stored")
+	assert.Equal(t, "u", def.Name())
+	assert.Equal(t, "kept", def.Description())
+	assert.Empty(t, def.Parameters(), "unknown non-parameter key is not stored")
 }
 
 // NewSkill with no options yields only the name; all other fields stay empty.
@@ -212,9 +212,9 @@ func TestDefaultSkillDefinitionGetters(t *testing.T) {
 func TestParseFrontmatterBlockEmpty(t *testing.T) {
 	def, err := parseFrontmatterBlock(nil)
 	require.NoError(t, err)
-	assert.Equal(t, "", def.name)
-	assert.Nil(t, def.tools)
-	assert.Empty(t, def.parameters)
+	assert.Equal(t, "", def.Name())
+	assert.Nil(t, def.Tools())
+	assert.Empty(t, def.Parameters())
 }
 
 // A block scalar assigned to a key other than prompt is collected and then
@@ -228,8 +228,8 @@ func TestParseFrontmatterBlockUnknownBlockScalarDropped(t *testing.T) {
 		"description: after",
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "bs", def.name)
-	assert.Equal(t, "after", def.description)
+	assert.Equal(t, "bs", def.Name())
+	assert.Equal(t, "after", def.Description())
 	// block scalar content is only wired to prompt, so prompt stays empty.
-	assert.Equal(t, "", def.prompt)
+	assert.Equal(t, "", def.Prompt())
 }

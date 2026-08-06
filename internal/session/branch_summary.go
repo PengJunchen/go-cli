@@ -43,18 +43,32 @@ type DefaultBranchSummary struct {
 // Compile-time assertion that DefaultBranchSummary satisfies BranchSummary.
 var _ BranchSummary = (*DefaultBranchSummary)(nil)
 
+// branchSummaryOptions holds the configurable fields of a branch summary
+// during construction. It is an internal construction aid so that
+// BranchSummaryOption closures do not reference the concrete
+// DefaultBranchSummary type.
+type branchSummaryOptions struct {
+	name string
+}
+
 // BranchSummaryOption configures a DefaultBranchSummary.
-type BranchSummaryOption func(*DefaultBranchSummary)
+type BranchSummaryOption func(*branchSummaryOptions)
 
 // WithBranchSummaryName overrides the identifier returned by Name.
 func WithBranchSummaryName(name string) BranchSummaryOption {
-	return func(d *DefaultBranchSummary) { d.name = name }
+	return func(o *branchSummaryOptions) { o.name = name }
 }
 
 // NewDefaultBranchSummary returns a DefaultBranchSummary that delegates
 // summarization to summarizer. When summarizer is nil, a fallback that errors is
 // used so misconfiguration is obvious.
 func NewDefaultBranchSummary(summarizer SummarizeFunc, opts ...BranchSummaryOption) BranchSummary {
+	o := &branchSummaryOptions{}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(o)
+		}
+	}
 	d := &DefaultBranchSummary{
 		name:      "default-branch-summary",
 		summarize: summarizer,
@@ -62,10 +76,8 @@ func NewDefaultBranchSummary(summarizer SummarizeFunc, opts ...BranchSummaryOpti
 	if d.summarize == nil {
 		d.summarize = func(context.Context, string) (string, error) { return "", errNoSummarizer }
 	}
-	for _, opt := range opts {
-		if opt != nil {
-			opt(d)
-		}
+	if o.name != "" {
+		d.name = o.name
 	}
 	return d
 }

@@ -25,6 +25,8 @@ type approvalOptions struct {
 	permissionModeResolver PermissionModeResolver
 	permissionMode         PermissionMode
 	permissionModeSet      bool
+	callback               ApprovalCallback
+	cache                  *ApprovalCache
 }
 
 // Option configures an ApprovalMiddleware.
@@ -55,6 +57,20 @@ func WithPermissionMode(mode PermissionMode) Option {
 		o.permissionMode = mode
 		o.permissionModeSet = true
 	}
+}
+
+// WithCallback wires an ApprovalCallback so that Ask classifications are
+// resolved via interactive y/n/a confirmation instead of the auto-approve
+// policy. When unset, Ask falls back to the autoApprove flag.
+func WithCallback(cb ApprovalCallback) Option {
+	return func(o *approvalOptions) { o.callback = cb }
+}
+
+// WithCache wires an ApprovalCache that persists always-allow decisions from
+// the callback. When a callback is also wired, the cache is consulted before
+// prompting so repeated identical calls skip the interactive confirmation.
+func WithCache(cache *ApprovalCache) Option {
+	return func(o *approvalOptions) { o.cache = cache }
 }
 
 // ApprovalMiddleware is a deny-first core.ToolMiddleware. For each call it
@@ -164,11 +180,7 @@ func (m *ApprovalMiddleware) decide(ctx context.Context, key string, call tools.
 	classifier := m.effectiveClassifier()
 	c := classifier.Classify(ctx, call)
 	if c == Ask {
-		if m.opts.autoApprove {
-			c = Allow
-		} else {
-			c = Deny
-		}
+		c = m.resolveAsk(ctx, key, call)
 	}
 
 	m.sessionStore(key, c)
@@ -176,6 +188,41 @@ func (m *ApprovalMiddleware) decide(ctx context.Context, key string, call tools.
 		slog.Warn("approval.store_set", "key", key, "error", err)
 	}
 	return m.record(span, call, c, false), false
+}
+
+// resolveAsk resolves an Ask classification. When a callback is wired it
+// consults the always-allow cache first (skipping the prompt on a hit), then
+// prompts interactively. When no callback is wired it falls back to the
+// auto-approve policy: autoApprove allows the call, otherwise it is denied.
+func (m *ApprovalMiddleware) resolveAsk(ctx context.Context, key string, call tools.ToolCall) Classification {
+	if m.opts.callback == nil {
+		if m.opts.autoApprove {
+			return Allow
+		}
+		return Deny
+	}
+
+	if m.opts.cache != nil {
+		if allowed, ok := m.opts.cache.Get(key); ok && allowed {
+			return Allow
+		}
+	}
+
+	result, err := m.opts.callback.RequestApproval(ctx, call.Name, call.Args)
+	if err != nil {
+		return Deny
+	}
+	switch result {
+	case ApprovalAllow:
+		return Allow
+	case ApprovalAlwaysAllow:
+		if m.opts.cache != nil {
+			m.opts.cache.Set(key)
+		}
+		return Allow
+	default:
+		return Deny
+	}
 }
 
 // effectiveClassifier returns the classifier to consult for the current call.
