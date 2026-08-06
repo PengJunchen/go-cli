@@ -25,22 +25,28 @@ import (
 //	}
 func AssertNoGoroutineLeak(t TestingT) func() {
 	t.Helper()
-	startCount := countFilteredGoroutines()
+	startFiltered := countFilteredGoroutines()
+	startTotal := runtime.NumGoroutine()
 	return func() {
 		// Poll for goroutines to settle, up to 2 seconds.
 		deadline := time.Now().Add(2 * time.Second)
 		for time.Now().Before(deadline) {
-			if countFilteredGoroutines() <= startCount {
-				return // no leak
+			// Quick check: if total goroutines haven't increased, no leak.
+			if runtime.NumGoroutine() <= startTotal {
+				return
+			}
+			// Slower check: filter out known false positives.
+			if countFilteredGoroutines() <= startFiltered {
+				return
 			}
 			time.Sleep(50 * time.Millisecond)
 		}
 		endCount := countFilteredGoroutines()
-		if endCount > startCount {
+		if endCount > startFiltered {
 			buf := make([]byte, 4096*4)
 			n := runtime.Stack(buf, true)
 			t.Fatalf("goroutine leak detected: started with %d, ended with %d\nLeaked goroutine stacks:\n%s",
-				startCount, endCount, string(buf[:n]))
+				startFiltered, endCount, string(buf[:n]))
 		}
 	}
 }
@@ -162,6 +168,7 @@ type GoLeakChecker struct {
 type leakCheckpoint struct {
 	name  string
 	count int
+	total int
 }
 
 // NewGoLeakChecker creates a new goroutine leak checker.
@@ -176,6 +183,7 @@ func (g *GoLeakChecker) Checkpoint(name string) {
 	g.checkpoints = append(g.checkpoints, leakCheckpoint{
 		name:  name,
 		count: countFilteredGoroutines(),
+		total: runtime.NumGoroutine(),
 	})
 }
 
@@ -190,25 +198,30 @@ func (g *GoLeakChecker) Assert(t TestingT) {
 		t.Fatal("need at least 2 checkpoints to check for leaks")
 		return
 	}
-	first := g.checkpoints[0].count
+	first := g.checkpoints[0]
 	checkpointsStr := g.formatCheckpoints()
 	g.mu.Unlock()
 
 	// Poll outside lock to avoid blocking Checkpoint calls.
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
-		if countFilteredGoroutines() <= first {
-			return // no leak
+		// Quick check: if total goroutines haven't increased, no leak.
+		if runtime.NumGoroutine() <= first.total {
+			return
+		}
+		// Slower check: filter out known false positives.
+		if countFilteredGoroutines() <= first.count {
+			return
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 
 	last := countFilteredGoroutines()
-	if last > first {
+	if last > first.count {
 		buf := make([]byte, 4096*4)
 		n := runtime.Stack(buf, true)
 		t.Fatalf("goroutine leak: started=%d, current=%d (checkpoints: %s)\nStacks:\n%s",
-			first, last, checkpointsStr, string(buf[:n]))
+			first.count, last, checkpointsStr, string(buf[:n]))
 	}
 }
 
