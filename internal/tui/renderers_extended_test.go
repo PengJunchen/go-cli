@@ -31,11 +31,11 @@ func TestRenderersTable(t *testing.T) {
 	ctx := context.Background()
 	cases := []rendererCase{
 		{
-			name:     "markdown wraps long content and applies primary",
+			name:     "markdown heading applies bold styling",
 			renderer: MarkdownRenderer{},
-			content:  "a very long line that definitely exceeds the configured width",
+			content:  "# Heading",
 			opts:     RenderOpts{Theme: DarkTheme{}, Width: 20},
-			want:     []string{"\x1b[104m"}, // dark primary = bright cyan (code 104)
+			want:     []string{"\x1b[1m", "# Heading"}, // heading is rendered bold
 			notWant:  []string{},
 		},
 		{

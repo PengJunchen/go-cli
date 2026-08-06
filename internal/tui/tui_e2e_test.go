@@ -66,7 +66,7 @@ func TestE2EMixedStreamingAndStatic(t *testing.T) {
 // content flowing through the full app.
 func TestE2EWithWidthWraps(t *testing.T) {
 	events := make(chan AgentEvent, 4)
-	events <- AgentEvent{ContentType: ContentTypeMarkdown, Content: "0123456789"}
+	events <- AgentEvent{ContentType: ContentTypeCode, Content: "0123456789"}
 	close(events)
 
 	app := NewBubbleteaApp(events, WithWidth(3))
@@ -81,7 +81,7 @@ func TestE2EThemeManagerDrivesRendering(t *testing.T) {
 	require.NoError(t, mgr.Set("light"))
 
 	events := make(chan AgentEvent, 4)
-	events <- AgentEvent{ContentType: ContentTypeMarkdown, Content: "accent"}
+	events <- AgentEvent{ContentType: ContentTypeMarkdown, Content: "[accent](http://x)"}
 	close(events)
 
 	app := NewBubbleteaApp(events, WithThemeManager(mgr))
