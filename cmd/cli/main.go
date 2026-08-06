@@ -80,10 +80,9 @@ func run(argv []string, stdout, stderr io.Writer, loadConfig func() (*config.Con
 		root.End()
 	}
 	if exporter != nil {
-		// Allow the root span's asynchronous export goroutine to enqueue its
-		// data before Shutdown drains the exporter, so the trace file captures
-		// the full span chain (cli.invocation → command.dispatch) on exit.
-		time.Sleep(50 * time.Millisecond)
+		if tracer != nil {
+			tracer.Flush()
+		}
 		if err := exporter.Shutdown(ctx); err != nil {
 			_, _ = fmt.Fprintf(stderr, "error: shutdown exporter: %v\n", err) //nolint:errcheck // CLI error output is best-effort
 		}

@@ -1319,10 +1319,7 @@ tracing:
 	rootSpan.End()
 
 	// Wait for all async span exports to complete before shutting down.
-	require.Eventually(t, func() bool {
-		data, readErr := os.ReadFile(traceExp.FilePath())
-		return readErr == nil && len(data) > 0
-	}, 3*time.Second, 10*time.Millisecond)
+	tracer.Flush()
 
 	// === PHASE 6: Verify span chain ===
 	require.NoError(t, traceExp.Shutdown(context.Background()))
