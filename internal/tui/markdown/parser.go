@@ -10,14 +10,14 @@ func NewParser() Parser {
 	return &defaultParser{}
 }
 
-// defaultParser will be implemented in block_parser.go and inline_parser.go
+// defaultParser is implemented via block_parser.go (block-level parsing) and
+// will be extended by inline_parser.go (inline parsing, task 26-3).
 type defaultParser struct{}
 
-// Parse converts Markdown text into an AST.
-//
-// This is a stub implementation that returns an empty document node.
-// The full implementation will be provided in tasks 26-2 (block parser)
-// and 26-3 (inline parser).
+// Parse converts Markdown text into an AST. It splits the input into lines,
+// parses all block-level elements, and returns a NodeDocument root. Inline
+// parsing (populating Children of text-bearing nodes) is added in task 26-3;
+// for now text content is stored in each node's Text field.
 func (p *defaultParser) Parse(text string) *Node {
-	return &Node{Type: NodeDocument}
+	return newBlockParser(text).parseDocument()
 }
