@@ -116,6 +116,10 @@ func (s *FileMemoryStore) Add(_ context.Context, mem Memory) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
+	if s.file == nil {
+		return errors.New("memory: store is closed")
+	}
+
 	if _, exists := s.items[mem.ID]; exists {
 		return fmt.Errorf("memory: entry %q already exists", mem.ID)
 	}
