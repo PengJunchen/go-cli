@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -209,8 +210,33 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 
 	le := c.lineEditor
 	if le == nil {
-		le = NewDefaultLineEditor(in, c.out)
-		le.SetCompleter(NewSlashCommandCompleter(slashCommandNames()))
+		// Resolve history file path: use the configured path or fall back
+		// to ~/.go-cli/history.jsonl so history persists across sessions.
+		historyPath := ""
+		if rc != nil && rc.History.Path != "" {
+			historyPath = rc.History.Path
+		} else if home, err := os.UserHomeDir(); err == nil && home != "" {
+			historyPath = filepath.Join(home, ".go-cli", "history.jsonl")
+		}
+
+		historyMaxLen := 1000
+		if rc != nil && rc.History.MaxLen > 0 {
+			historyMaxLen = rc.History.MaxLen
+		}
+
+		dle := NewDefaultLineEditor(in, c.out,
+			WithHistoryPath(historyPath),
+			WithHistoryMaxLen(historyMaxLen),
+		)
+		dle.SetCompleter(NewSlashCommandCompleter(slashCommandNames()))
+
+		// Load persisted history on startup (best-effort).
+		if hs := dle.HistoryStore(); hs != nil {
+			if err := hs.Load(); err != nil {
+				logger.Warn("cli_interactive_history_load_failed", "err", err)
+			}
+		}
+		le = dle
 	}
 
 	for {
@@ -489,6 +515,13 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		logger.Info("cli_interactive_turn_complete",
 			"op", "cli.interactive.turn_complete",
 		)
+	}
+
+	// Save history on exit (covers EOF, /exit, and exit text paths).
+	if dle, ok := le.(*DefaultLineEditor); ok {
+		if hs := dle.HistoryStore(); hs != nil {
+			_ = hs.Save()
+		}
 	}
 
 	fmt.Fprintln(c.out, "Session ended.") //nolint:errcheck
