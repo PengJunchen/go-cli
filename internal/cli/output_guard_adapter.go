@@ -5,11 +5,29 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"time"
 
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/production"
 )
+
+// retryPolicyAdapter wraps a production.RetryPolicy so it can be used where an
+// llm.RetryPolicy is expected. The two interfaces are structurally compatible
+// but declared separately to avoid an import cycle; this adapter bridges them.
+type retryPolicyAdapter struct {
+	inner production.RetryPolicy
+}
+
+func (a *retryPolicyAdapter) ShouldRetry(ctx context.Context, err error, attempt int) bool {
+	return a.inner.ShouldRetry(ctx, err, attempt)
+}
+
+func (a *retryPolicyAdapter) NextBackoff(ctx context.Context, attempt int) time.Duration {
+	return a.inner.NextBackoff(ctx, attempt)
+}
+
+func (a *retryPolicyAdapter) Name() string { return a.inner.Name() }
 
 // outputGuardModel wraps an llm.BaseChatModel with an OutputGuard chain.
 // It applies the guard to the Content field of the Generate response,
@@ -149,6 +167,45 @@ func newModelWrapper(pw *production.ProductionModelWrapper, breaker production.C
 		if breaker != nil {
 			wrapped = &circuitBreakerModel{inner: wrapped, breaker: breaker}
 		}
+		if guard != nil {
+			return &outputGuardModel{inner: wrapped, guard: guard}
+		}
+		return wrapped
+	}
+}
+
+// newModelWrapperWithChain creates a core.ModelWrapper that applies the
+// ProductionModelWrapper (cost tracking only, no retry) as the innermost layer,
+// then the 7-layer ModelMiddlewareChain (failover, retry, timeout, sanitize,
+// loop detection, validate, overflow), then optional Telemetry, CircuitBreaker,
+// and OutputGuard layers from inner to outer.
+//
+// The optional telemetry argument, when non-nil, adds a telemetryModel layer
+// between the middleware chain and the circuit breaker so that LLM token usage
+// is recorded as metrics.
+func newModelWrapperWithChain(pw *production.ProductionModelWrapper, chain *llm.DefaultModelMiddlewareChain, breaker production.CircuitBreaker, guard production.OutputGuard, telemetry ...production.Telemetry) core.ModelWrapper {
+	var tel production.Telemetry
+	if len(telemetry) > 0 {
+		tel = telemetry[0]
+	}
+	return func(model any) any {
+		baseModel, ok := model.(llm.BaseChatModel)
+		if !ok {
+			return model
+		}
+		// 1. Innermost: cost tracking + stats (no retry, since the chain handles it).
+		wrapped := pw.WrapModel(baseModel)
+		// 2. 7-layer middleware chain (failover -> retry -> timeout -> ...).
+		wrapped = chain.Wrap(wrapped)
+		// 3. Telemetry recording.
+		if tel != nil {
+			wrapped = &telemetryModel{inner: wrapped, telemetry: tel}
+		}
+		// 4. Circuit breaker.
+		if breaker != nil {
+			wrapped = &circuitBreakerModel{inner: wrapped, breaker: breaker}
+		}
+		// 5. Outermost: output guard.
 		if guard != nil {
 			return &outputGuardModel{inner: wrapped, guard: guard}
 		}
