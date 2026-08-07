@@ -13,13 +13,21 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/pengjunchen/go-cli/internal/approval"
 	"github.com/pengjunchen/go-cli/internal/cli"
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
 func main() {
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, config.Load))
+	tm := approval.NewDefaultTrustManager(nil)
+	trustCheck := func(ctx context.Context, projectPath string) bool {
+		return tm.IsTrusted(ctx, projectPath)
+	}
+	loadConfig := func() (*config.Config, error) {
+		return config.LoadTrusted(trustCheck)
+	}
+	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, loadConfig))
 }
 
 // run is the testable entry point. It wires signal cancellation, config
