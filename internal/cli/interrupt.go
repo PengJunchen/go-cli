@@ -19,8 +19,11 @@ const escSequenceTimeout = 50 * time.Millisecond
 
 // InterruptHandler monitors for user interrupt signals during agent execution.
 // In non-TTY mode (the default for test/CI environments) it catches SIGINT
-// (Ctrl+C) and cancels the in-progress turn. In TTY mode it would monitor
-// stdin for the Esc key (future work).
+// (Ctrl+C) and cancels the in-progress turn. In TTY mode, Esc-key detection
+// is handled by the TUI keyboardLoop (keyboard.go) which calls
+// cancelCallback -> cancelTurn. The monitorEsc implementation in this handler
+// provides an alternative Esc detection path for non-TUI scenarios; it is
+// activated when Start is called with a non-nil io.Reader.
 //
 // Steering messages are enqueued into a session.SubmissionQueue and drained
 // into steerCh by a background goroutine. This decouples the producer
@@ -54,11 +57,12 @@ func NewInterruptHandler(cancelFn context.CancelFunc) *InterruptHandler {
 	}
 }
 
-// Start begins monitoring for interrupt input in a goroutine. In non-TTY mode
-// it catches SIGINT via signal.Notify. When r is non-nil (TTY mode) it also
-// launches a goroutine that watches stdin for standalone Esc keypresses and
-// cancels the current turn. A second goroutine drains the SubmissionQueue into
-// steerCh.
+// Start begins monitoring for interrupt input in a goroutine. It always
+// catches SIGINT via signal.Notify and drains the SubmissionQueue into
+// steerCh. When r is non-nil it also launches a monitorEsc goroutine that
+// watches for standalone Esc keypresses and cancels the current turn.
+// In production TTY mode, nil is passed because the TUI keyboardLoop
+// already handles Esc detection via its own 50ms timeout logic.
 func (h *InterruptHandler) Start(r io.Reader) {
 	go h.monitor()
 	go h.drainQueue()

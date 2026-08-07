@@ -277,10 +277,13 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 
 		// Wrap the turn context in a cancellable context so the user can
 		// interrupt the in-progress agent turn via Ctrl+C (non-TTY) or Esc
-		// (TTY, future work). The InterruptHandler monitors for SIGINT and
-		// invokes cancelTurn when a signal arrives. Esc-key monitoring
-		// requires a SharedStdin multiplexer (not yet implemented); nil is
-		// passed so only SIGINT monitoring is active.
+		// (TTY). The InterruptHandler monitors for SIGINT and invokes
+		// cancelTurn when a signal arrives. Esc-key detection is handled by
+		// the TUI keyboardLoop (keyboard.go), which uses a 50ms timeout to
+		// distinguish standalone Esc from CSI sequences and calls
+		// cancelCallback -> cancelTurn. nil is passed to Start() because the
+		// TUI already owns stdin in raw mode; a second reader would steal
+		// bytes from the keyboardLoop.
 		turnCtx, cancelTurn := context.WithCancel(turnCtx)
 		interrupter := NewInterruptHandler(cancelTurn)
 		interrupter.Start(nil)
