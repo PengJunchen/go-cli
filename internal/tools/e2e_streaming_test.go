@@ -4,7 +4,6 @@ package tools
 
 import (
 	"context"
-	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -12,6 +11,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/verify"
 )
 
 // orderedEvent wraps a streamEvent with a monotonically increasing arrival
@@ -56,10 +57,14 @@ func (m *orderedStreamSink) getEvents() []orderedEvent {
 // output to the sink before ExecuteStreaming returns, and that the final
 // result matches the expected output.
 func TestE2EBashStreamingEcho(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	tool := NewStreamingBashTool()
 	sink := &mockStreamSink{}
 
-	result, err := tool.ExecuteStreaming(context.Background(), ToolCall{
+	result, err := tool.ExecuteStreaming(ctx, ToolCall{
 		ID:   "e2e-echo",
 		Name: "bash",
 		Args: map[string]any{"command": "echo hello world"},
@@ -85,10 +90,14 @@ func TestE2EBashStreamingEcho(t *testing.T) {
 // the correct order and that all events are collected before ExecuteStreaming
 // returns.
 func TestE2EBashStreamingEventOrder(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	tool := NewStreamingBashTool()
 	sink := &orderedStreamSink{}
 
-	result, err := tool.ExecuteStreaming(context.Background(), ToolCall{
+	result, err := tool.ExecuteStreaming(ctx, ToolCall{
 		ID:   "e2e-order",
 		Name: "bash",
 		Args: map[string]any{"command": "echo line1; echo line2; echo line3"},
@@ -124,6 +133,10 @@ func TestE2EBashStreamingEventOrder(t *testing.T) {
 // TestE2EBashStreamingLargeOutput verifies that a large output is truncated
 // and that the command does not block/hang.
 func TestE2EBashStreamingLargeOutput(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
 	tool := NewStreamingBashTool(WithMaxOutput(5000))
 	sink := &mockStreamSink{}
 
@@ -133,7 +146,7 @@ func TestE2EBashStreamingLargeOutput(t *testing.T) {
 		err    error
 	)
 	go func() {
-		result, err = tool.ExecuteStreaming(context.Background(), ToolCall{
+		result, err = tool.ExecuteStreaming(ctx, ToolCall{
 			ID:   "e2e-large",
 			Name: "bash",
 			Args: map[string]any{"command": "seq 1 10000"},
@@ -162,12 +175,15 @@ func TestE2EBashStreamingLargeOutput(t *testing.T) {
 // timeout returns an error quickly, with correct metadata, and without
 // leaking goroutines.
 func TestE2EBashStreamingTimeoutCancel(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	tool := NewStreamingBashTool(WithTimeout(200 * time.Millisecond))
 
-	beforeGoroutines := runtime.NumGoroutine()
 	start := time.Now()
 
-	result, err := tool.ExecuteStreaming(context.Background(), ToolCall{
+	result, err := tool.ExecuteStreaming(ctx, ToolCall{
 		ID:   "e2e-timeout",
 		Name: "bash",
 		Args: map[string]any{"command": "sleep 5"},
@@ -185,22 +201,19 @@ func TestE2EBashStreamingTimeoutCancel(t *testing.T) {
 	require.NotNil(t, result)
 	assert.Equal(t, -1, result.Metadata["exit_code"])
 	assert.Equal(t, "timed out", result.Metadata["error"])
-
-	// Allow goroutines to settle, then check for leaks.
-	time.Sleep(200 * time.Millisecond)
-	afterGoroutines := runtime.NumGoroutine()
-	// Allow a small tolerance for background goroutines.
-	assert.LessOrEqual(t, afterGoroutines, beforeGoroutines+2,
-		"no significant goroutine leak; before=%d after=%d", beforeGoroutines, afterGoroutines)
 }
 
 // TestE2EBashStreamingStdoutStderrSeparation verifies that stdout and stderr
 // are captured as separate streams.
 func TestE2EBashStreamingStdoutStderrSeparation(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
 	tool := NewStreamingBashTool()
 	sink := &mockStreamSink{}
 
-	_, err := tool.ExecuteStreaming(context.Background(), ToolCall{
+	_, err := tool.ExecuteStreaming(ctx, ToolCall{
 		ID:   "e2e-sep",
 		Name: "bash",
 		Args: map[string]any{"command": "echo to_stdout; echo to_stderr >&2"},
