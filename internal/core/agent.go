@@ -154,6 +154,15 @@ func (a *AgentImpl) ClearHistory() {
 	slog.Info("core.agent.history_cleared", "name", a.name)
 }
 
+// SetHistory replaces the agent's conversation history. It is used by the
+// /resume slash command to restore a previous session's context.
+func (a *AgentImpl) SetHistory(messages []AgentMessage) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.history = append([]AgentMessage{}, messages...)
+	slog.Info("core.agent.history_set", "name", a.name, "messages", len(messages))
+}
+
 // Compact manually triggers the compaction hook on the current history.
 // It is used by the /compact slash command. When no compaction hook is
 // configured, it is a no-op.

@@ -141,10 +141,11 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 	defer assembly.Cleanup()
 
 	// Build slash command context from the assembled components.
+	var sessionTree session.SessionTree
 	var sessionHandler *session.SessionSlashHandler
 	if assembly.SessionStore != nil {
 		treeBuilder := session.NewDefaultSessionTreeBuilder()
-		sessionTree, err := treeBuilder.BuildFromStore(spanCtx, assembly.SessionStore)
+		sessionTree, err = treeBuilder.BuildFromStore(spanCtx, assembly.SessionStore)
 		if err != nil {
 			// fallback to empty tree on error
 			sessionTree = session.NewDefaultSessionTree()
@@ -156,6 +157,26 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 			}
 		}
 		sessionHandler = session.NewSessionSlashHandler(sessionTree, assembly.SessionStore)
+		sessionHandler.OnResume = func(ctx context.Context, entries []session.SessionEntry) error {
+			// Convert SessionEntry to AgentMessage and replace agent history.
+			msgs := make([]core.AgentMessage, 0, len(entries))
+			for _, e := range entries {
+				var role string
+				switch e.Type {
+				case session.EntryTypeUser:
+					role = "user"
+				case session.EntryTypeAssistant:
+					role = "assistant"
+				case session.EntryTypeSystem:
+					role = "system"
+				default:
+					continue // skip tool/compaction entries
+				}
+				msgs = append(msgs, core.AgentMessage{Role: role, Content: e.Content})
+			}
+			assembly.Agent.SetHistory(msgs)
+			return nil
+		}
 	}
 	slashCtx := slashContext{
 		agent:          assembly.Agent,
@@ -388,23 +409,45 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		// Use spanCtx, not turnCtx, because turnCtx may be canceled by the
 		// interrupt handler.
 		if assembly.SessionStore != nil {
-			if appendErr := assembly.SessionStore.Append(spanCtx, &session.SessionEntry{
+			parentID := ""
+			if sessionTree != nil {
+				parentID = sessionTree.CurrentLeaf()
+			}
+			userEntry := &session.SessionEntry{
 				ID:        fmt.Sprintf("entry-%d", entryCounter),
+				ParentID:  parentID,
 				Type:      session.EntryTypeUser,
 				Content:   line,
 				Timestamp: time.Now(),
-			}); appendErr != nil {
+			}
+			if appendErr := assembly.SessionStore.Append(spanCtx, userEntry); appendErr != nil {
 				logger.Warn("cli_interactive_session_save_failed", "err", appendErr)
+			}
+			if sessionTree != nil {
+				if treeErr := sessionTree.Append(spanCtx, userEntry); treeErr != nil {
+					logger.Warn("cli_interactive_session_tree_append_failed", "err", treeErr)
+				}
 			}
 			entryCounter++
 			if turnResult.Message != "" {
-				if appendErr := assembly.SessionStore.Append(spanCtx, &session.SessionEntry{
+				parentID := ""
+				if sessionTree != nil {
+					parentID = sessionTree.CurrentLeaf()
+				}
+				assistantEntry := &session.SessionEntry{
 					ID:        fmt.Sprintf("entry-%d", entryCounter),
+					ParentID:  parentID,
 					Type:      session.EntryTypeAssistant,
 					Content:   turnResult.Message,
 					Timestamp: time.Now(),
-				}); appendErr != nil {
+				}
+				if appendErr := assembly.SessionStore.Append(spanCtx, assistantEntry); appendErr != nil {
 					logger.Warn("cli_interactive_session_save_failed", "err", appendErr)
+				}
+				if sessionTree != nil {
+					if treeErr := sessionTree.Append(spanCtx, assistantEntry); treeErr != nil {
+						logger.Warn("cli_interactive_session_tree_append_failed", "err", treeErr)
+					}
 				}
 				entryCounter++
 			}

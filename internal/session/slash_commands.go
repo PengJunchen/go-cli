@@ -49,6 +49,10 @@ func (c SlashCommand) String() string {
 type SessionSlashHandler struct {
 	tree  SessionTree
 	store SessionStore
+	// OnResume, when non-nil, is invoked after a successful /resume with the
+	// rebuilt branch context so callers (e.g. the interactive REPL) can inject
+	// the history into the agent.
+	OnResume func(ctx context.Context, entries []SessionEntry) error
 }
 
 // Compile-time assertion that SessionSlashHandler is a usable type.
@@ -97,8 +101,9 @@ func (h *SessionSlashHandler) handleTree(ctx context.Context) (string, error) {
 	return sb.String(), nil
 }
 
-// handleFork creates a new branch from the current position. The first argument
-// is used as the branch name; when absent a default name is generated.
+// handleFork creates a new branch from the current position. The first
+// non-flag argument is used as the branch name; when absent a default name is
+// generated. The --git <branch> flag creates an associated git branch.
 func (h *SessionSlashHandler) handleFork(ctx context.Context, args []string) (string, error) {
 	if h.tree == nil {
 		return "", fmt.Errorf("session: no session tree configured")
@@ -107,20 +112,46 @@ func (h *SessionSlashHandler) handleFork(ctx context.Context, args []string) (st
 	if leaf == "" {
 		return "", fmt.Errorf("session: cannot fork from an empty tree")
 	}
-	branchName := "fork-" + leaf
-	if len(args) > 0 && args[0] != "" {
-		branchName = args[0]
+
+	// Parse flags: --git <branch> associates a git branch with the fork.
+	var gitBranch string
+	var positional []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "--git" && i+1 < len(args) {
+			gitBranch = args[i+1]
+			i++ // skip the git branch name
+		} else if strings.HasPrefix(args[i], "--git=") {
+			gitBranch = strings.TrimPrefix(args[i], "--git=")
+		} else {
+			positional = append(positional, args[i])
+		}
 	}
-	if err := h.tree.Branch(ctx, leaf, WithBranchID(branchName)); err != nil {
+
+	branchName := "fork-" + leaf
+	if len(positional) > 0 && positional[0] != "" {
+		branchName = positional[0]
+	}
+
+	var opts []BranchOption
+	opts = append(opts, WithBranchID(branchName))
+	if gitBranch != "" {
+		opts = append(opts, WithGitBranch(gitBranch))
+	}
+
+	if err := h.tree.Branch(ctx, leaf, opts...); err != nil {
 		return "", fmt.Errorf("session: fork failed: %w", err)
 	}
 	msg := fmt.Sprintf("Forked branch %q from %q", branchName, leaf)
-	slog.Info("session.slash.fork", "branch", branchName, "from", leaf)
+	if gitBranch != "" {
+		msg += fmt.Sprintf(" (git branch: %s)", gitBranch)
+	}
+	slog.Info("session.slash.fork", "branch", branchName, "from", leaf, "git_branch", gitBranch)
 	return msg, nil
 }
 
 // handleResume resumes a previous session by moving the current leaf to the
-// given session/entry id.
+// given session/entry id, rebuilding the branch context, and invoking the
+// OnResume callback (if set) so the caller can restore agent history.
 func (h *SessionSlashHandler) handleResume(ctx context.Context, args []string) (string, error) {
 	if h.tree == nil {
 		return "", fmt.Errorf("session: no session tree configured")
@@ -132,8 +163,22 @@ func (h *SessionSlashHandler) handleResume(ctx context.Context, args []string) (
 	if err := h.tree.MoveTo(ctx, target); err != nil {
 		return "", fmt.Errorf("session: resume failed: %w", err)
 	}
-	msg := fmt.Sprintf("Resumed session at %q", target)
-	slog.Info("session.slash.resume", "target", target)
+
+	// Rebuild the agent context from the target branch.
+	sessCtx, err := h.tree.BuildContext(ctx, target)
+	if err != nil {
+		return "", fmt.Errorf("session: resume context rebuild failed: %w", err)
+	}
+
+	// Invoke the OnResume callback so the caller can restore agent history.
+	if h.OnResume != nil {
+		if err := h.OnResume(ctx, sessCtx.Messages); err != nil {
+			return "", fmt.Errorf("session: resume callback failed: %w", err)
+		}
+	}
+
+	msg := fmt.Sprintf("Resumed session at %q (%d messages)", target, len(sessCtx.Messages))
+	slog.Info("session.slash.resume", "target", target, "messages", len(sessCtx.Messages))
 	return msg, nil
 }
 
