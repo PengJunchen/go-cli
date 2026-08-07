@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -243,4 +244,114 @@ func TestOverflowRecoveryMiddleware_Concurrent(t *testing.T) {
 		err := <-done
 		assert.NoError(t, err)
 	}
+}
+
+func TestOverflowLength(t *testing.T) {
+	var calls int32
+	model := &mockModel{
+		generateFn: func(_ context.Context, _ []Message, _ ...Option) (*Message, error) {
+			n := atomic.AddInt32(&calls, 1)
+			if n == 1 {
+				return &Message{Role: RoleAssistant, Content: "partial", FinishReason: "length"}, nil
+			}
+			return &Message{Role: RoleAssistant, Content: " complete", FinishReason: "stop"}, nil
+		},
+	}
+
+	mw := NewOverflowRecoveryMiddleware()
+	wrapped := mw.WrapModel(model)
+
+	result, err := wrapped.Generate(context.Background(), []Message{{Role: RoleUser, Content: "hi"}})
+	require.NoError(t, err)
+	assert.Equal(t, "partial complete", result.Content)
+	assert.Equal(t, "stop", result.FinishReason)
+}
+
+func TestOverflowContinue(t *testing.T) {
+	var calls int32
+	model := &mockModel{
+		generateFn: func(_ context.Context, _ []Message, _ ...Option) (*Message, error) {
+			n := atomic.AddInt32(&calls, 1)
+			if n == 1 {
+				return &Message{Role: RoleAssistant, Content: "partial", FinishReason: "length"}, nil
+			}
+			return &Message{Role: RoleAssistant, Content: " complete", FinishReason: "stop"}, nil
+		},
+	}
+
+	mw := NewOverflowRecoveryMiddleware()
+	wrapped := mw.WrapModel(model)
+
+	result, err := wrapped.Generate(context.Background(), []Message{{Role: RoleUser, Content: "hi"}})
+	require.NoError(t, err)
+	assert.Equal(t, "partial complete", result.Content)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&model.generateCalls), "should call Generate twice (initial + 1 continuation)")
+}
+
+func TestOverflowMaxContinuation(t *testing.T) {
+	model := &mockModel{
+		generateFn: func(_ context.Context, _ []Message, _ ...Option) (*Message, error) {
+			return &Message{Role: RoleAssistant, Content: "chunk", FinishReason: "length"}, nil
+		},
+	}
+
+	mw := NewOverflowRecoveryMiddleware()
+	wrapped := mw.WrapModel(model)
+
+	result, err := wrapped.Generate(context.Background(), []Message{{Role: RoleUser, Content: "hi"}})
+	require.NoError(t, err)
+	// 1 initial + 3 continuations = 4 total Generate calls.
+	assert.Equal(t, int32(4), atomic.LoadInt32(&model.generateCalls))
+	assert.Equal(t, "length", result.FinishReason)
+}
+
+func TestOverflowNoLength(t *testing.T) {
+	model := &mockModel{
+		generateFn: func(_ context.Context, _ []Message, _ ...Option) (*Message, error) {
+			return &Message{Role: RoleAssistant, Content: "done", FinishReason: "stop"}, nil
+		},
+	}
+
+	mw := NewOverflowRecoveryMiddleware()
+	wrapped := mw.WrapModel(model)
+
+	result, err := wrapped.Generate(context.Background(), []Message{{Role: RoleUser, Content: "hi"}})
+	require.NoError(t, err)
+	assert.Equal(t, "done", result.Content)
+	assert.Equal(t, "stop", result.FinishReason)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&model.generateCalls), "should not continue when FinishReason is not length")
+}
+
+func TestOverflowLengthStream(t *testing.T) {
+	var genCalls int32
+	model := &mockModel{
+		streamFn: func(_ context.Context, _ []Message, _ ...Option) (<-chan MessageChunk, error) {
+			ch := make(chan MessageChunk, 1)
+			ch <- MessageChunk{Role: RoleAssistant, Content: "partial", Final: true, FinishReason: "length"}
+			close(ch)
+			return ch, nil
+		},
+		generateFn: func(_ context.Context, _ []Message, _ ...Option) (*Message, error) {
+			atomic.AddInt32(&genCalls, 1)
+			return &Message{Role: RoleAssistant, Content: " complete", FinishReason: "stop"}, nil
+		},
+	}
+
+	mw := NewOverflowRecoveryMiddleware()
+	wrapped := mw.WrapModel(model)
+
+	ch, err := wrapped.Stream(context.Background(), []Message{{Role: RoleUser, Content: "hi"}})
+	require.NoError(t, err)
+
+	var content string
+	var finishReason string
+	for chunk := range ch {
+		content += chunk.Content
+		if chunk.Final {
+			finishReason = chunk.FinishReason
+		}
+	}
+	assert.Equal(t, "partial complete", content)
+	assert.Equal(t, "stop", finishReason)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&genCalls), "should call Generate once for continuation")
 }
