@@ -41,6 +41,8 @@ var (
 	validTracingExporter      = []string{"jsonl", "stdout", "none"}
 	validCompactionStrategies = []string{"", "unified", "micro", "micro_first", "summary", "truncating"}
 	validGitPlatforms         = []string{"", "github", "gitlab", "bitbucket"}
+	validTUIThemes            = []string{"", "dark", "light", "monokai", "solarized", "auto"}
+	validTUIDiffStyles        = []string{"", "unified", "split", "auto"}
 )
 
 // Validate evaluates the configuration and returns a combined error listing
@@ -95,6 +97,16 @@ func (v *DefaultValidator) Validate(cfg Config) error {
 				errs = append(errs, fmt.Sprintf("lsp servers[%d] workspace_root does not exist or is not a directory", i))
 			}
 		}
+	}
+
+	if !contains(validTUIThemes, cfg.TUI.Theme) {
+		errs = append(errs, "invalid tui theme (supported: dark, light, monokai, solarized, auto)")
+	}
+	if !contains(validTUIDiffStyles, cfg.TUI.DiffStyle) {
+		errs = append(errs, "invalid tui diff_style (supported: unified, split, auto)")
+	}
+	if cfg.TUI.WordWrap < 0 {
+		errs = append(errs, "tui word_wrap must be non-negative")
 	}
 
 	if len(errs) > 0 {

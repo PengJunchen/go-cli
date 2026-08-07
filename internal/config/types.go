@@ -25,6 +25,7 @@ type Config struct {
 	Git        GitConfig        `json:"git"`
 	ModelCycler ModelCyclerConfig `json:"model_cycler"`
 	History     HistoryConfig     `json:"history"`
+	TUI         TUIConfig         `json:"tui" yaml:"tui"`
 
 	verbose bool
 }
@@ -363,6 +364,18 @@ type ModelEntry struct {
 type HistoryConfig struct {
 	Path   string `yaml:"path" json:"path"`
 	MaxLen int    `yaml:"max_len" json:"max_len"`
+}
+
+// TUIConfig configures the terminal UI layer.
+type TUIConfig struct {
+	// Theme selects the color theme: dark, light, monokai, solarized, or auto.
+	// Empty defaults to dark at runtime.
+	Theme string `json:"theme" yaml:"theme"`
+	// WordWrap sets the render word-wrap width in columns. Zero disables wrapping.
+	WordWrap int `json:"word_wrap" yaml:"word_wrap"`
+	// DiffStyle selects the diff preview style: unified, split, or auto.
+	// Empty defaults to auto.
+	DiffStyle string `json:"diff_style" yaml:"diff_style"`
 }
 
 // Source enumerates the five configuration layers, ordered by ascending
