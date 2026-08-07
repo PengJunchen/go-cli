@@ -111,6 +111,11 @@ type AgentAssembly struct {
 	// steering messages here when the user presses Esc and types an
 	// instruction.
 	SteerChannel chan string
+	// FollowUpChannel is the shared follow-up channel between the
+	// TurnRunner (writer) and the LoopAgent (reader). The REPL writes
+	// follow-up messages here so the running loop picks them up between LLM
+	// iterations.
+	FollowUpChannel chan string
 	// LoopAgent is the raw LoopAgent before middleware wrapping. It is
 	// exposed so the REPL can call Pause()/Resume() on it.
 	LoopAgent *core.LoopAgent
@@ -639,6 +644,8 @@ func AssembleAgent(
 
 	// 10. Build loop agent with model wrapper.
 	steerCh := make(chan string, 16)
+	followUpCh := make(chan string, 16)
+	runSlotGuard := core.NewDefaultRunSlotGuard()
 	loopOpts := []core.LoopOption{
 		core.WithLLM(model),
 		core.WithTools(tr),
@@ -646,6 +653,7 @@ func AssembleAgent(
 		core.WithExecutionMode(core.ExecutionModeParallel),
 		core.WithTracer(tracer),
 		core.WithSteeringChannel(steerCh),
+		core.WithFollowUpChannel(followUpCh),
 		core.WithThinkingConfig(llm.ThinkingConfigForLevel(thinkingLevel)),
 	}
 	if rc != nil && rc.Agent.MaxIterations != 0 {
@@ -841,15 +849,17 @@ func AssembleAgent(
 		agentOpts = append(agentOpts, core.WithHistory(restoredHistory))
 	}
 	agent := core.NewAgentImpl(ac.agentName, loop, agentOpts...)
-	h := core.NewHarnessImpl(agent, core.WithEventBuffer(64), core.WithHarnessTracer(tracer))
+	h := core.NewHarnessImpl(agent, core.WithEventBuffer(64), core.WithHarnessTracer(tracer), core.WithRunSlotGuard(runSlotGuard))
 
 	// 15b. Build TurnRunner wired with the shared steering channel and agent
 	// so Steer calls are delivered to the running loop between LLM
 	// iterations, and RunTurn delegates to agent.Run (with history).
 	turnRunner := core.NewEinoTurnRunner(loop)
 	turnRunner.SetSteerChannel(steerCh)
+	turnRunner.SetFollowUpChannel(followUpCh)
 	turnRunner.SetAgent(agent)
 	turnRunner.SetHookChain(hookChain)
+	turnRunner.SetRunSlotGuard(runSlotGuard)
 	reg.RegisterTurnRunner(turnRunner)
 
 	// Emit assemble span for observability.
@@ -905,6 +915,7 @@ func AssembleAgent(
 		Telemetry:          telemetry,
 		TurnRunner:         turnRunner,
 		SteerChannel:       steerCh,
+		FollowUpChannel:    followUpCh,
 		LoopAgent:          loopAgent,
 		GitTool:            gitTool,
 		MemoryStore:        memStore,

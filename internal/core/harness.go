@@ -14,6 +14,7 @@ type harnessConfig struct {
 	bufferSize int
 	discard    DiscardPolicy
 	tracer     *tracing.Tracer
+	runSlot    RunSlotGuard
 }
 
 // HarnessOption configures a HarnessImpl at construction time.
@@ -52,6 +53,13 @@ func WithHarnessTracer(t *tracing.Tracer) HarnessOption {
 	return func(c *harnessConfig) { c.tracer = t }
 }
 
+// WithRunSlotGuard sets the RunSlotGuard used to enforce single-run
+// exclusivity. When nil (or not set), the harness uses the noop default so
+// concurrent Submits are allowed.
+func WithRunSlotGuard(g RunSlotGuard) HarnessOption {
+	return func(c *harnessConfig) { c.runSlot = g }
+}
+
 // HarnessImpl is the full runtime facade. It accepts a user message and
 // returns an EventStream that streams agent events until the run completes.
 type HarnessImpl struct {
@@ -59,6 +67,7 @@ type HarnessImpl struct {
 	startSpanName string
 	bufferSize    int
 	tracer        *tracing.Tracer
+	runSlot       RunSlotGuard
 }
 
 var _ Harness = (*HarnessImpl)(nil)
@@ -73,11 +82,15 @@ func NewHarnessImpl(agent Agent, opts ...HarnessOption) *HarnessImpl {
 	for _, o := range opts {
 		o(&cfg)
 	}
+	if cfg.runSlot == nil {
+		cfg.runSlot = defaultRunSlotGuard
+	}
 	h := &HarnessImpl{
 		agent:         agent,
 		startSpanName: cfg.startSpan,
 		bufferSize:    cfg.bufferSize,
 		tracer:        cfg.tracer,
+		runSlot:       cfg.runSlot,
 	}
 	slog.Info("core.harness.new",
 		"agent", agent.Name(),
@@ -109,21 +122,38 @@ func (h *HarnessImpl) Submit(ctx context.Context, msg string) (EventStream, erro
 		return nil, context.Canceled
 	}
 
+	// Claim the run slot before launching the goroutine so concurrent
+	// Submits fail fast when a run is already in progress. The 200ms
+	// timeout bounds how long a caller waits for the slot.
+	claimCtx, claimCancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	claim, err := h.runSlot.ClaimRun(claimCtx)
+	claimCancel()
+	if err != nil {
+		slog.Warn("core.harness.claim_failed", "err", err)
+		return nil, err
+	}
+
 	submission := Submission{Type: SubmissionUserMessage, Content: msg}
 
-	go h.run(spanCtx, stream, submission)
+	go h.run(spanCtx, stream, submission, claim)
 
 	return stream, nil
 }
 
 // run executes the agent and fans its events out to the stream. It always
 // records a terminal result, sends a closing event, and closes the stream so
-// consumers can observe completion without a goroutine leak.
-func (h *HarnessImpl) run(ctx context.Context, stream *EventStreamImpl, submission Submission) {
+// consumers can observe completion without a goroutine leak. The claim is
+// released by ExecuteClaimedRun when the run finishes (or panics).
+func (h *HarnessImpl) run(ctx context.Context, stream *EventStreamImpl, submission Submission, claim RunClaim) {
 	// Pass the EventStream to the agent so events are emitted in real time
 	// as the LLM streams tokens. The agent also stores events internally
 	// for backward-compatible retrieval via the eventSource interface.
-	result, err := h.agent.Run(ctx, submission, stream)
+	var result Result
+	err := h.runSlot.ExecuteClaimedRun(claim, func() error {
+		r, e := h.agent.Run(ctx, submission, stream)
+		result = r
+		return e
+	})
 
 	// If the agent didn't send any events to the stream (e.g. it doesn't
 	// support streaming), fall back to fanning out its stored events.
