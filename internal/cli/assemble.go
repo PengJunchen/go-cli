@@ -522,8 +522,15 @@ func AssembleAgent(
 	// identical tool calls return cached results and every call is recorded.
 	// The hook-aware middleware is added so BeforeToolCall/AfterToolCall
 	// lifecycle hooks fire around every tool execution.
+	// Argument preparation (path normalization + schema validation) is the
+	// outermost wrapper so arguments are prepared before any other middleware
+	// sees them. The schema validator uses the underlying (unwrapped) registry
+	// to avoid recursive lookups through the middleware chain.
 	hookToolMW := core.NewHookAwareToolMiddleware(hookChain)
+	pathNormalizer := tools.NewPathNormalizer("")
+	schemaValidator := tools.NewSchemaValidator(underlyingReg)
 	tr = tools.NewMiddlewareToolRegistry(tr,
+		tools.WithArgumentPreparation(pathNormalizer, schemaValidator),
 		newProductionToolWrapper(idempotentCache, auditLog, telemetry, sessionID),
 		hookToolMW.WrapToolCall,
 	)
