@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -348,4 +349,161 @@ func TestGetDeferredToolRegistry_CalledTwiceReturnsSame(t *testing.T) {
 	// But the important thing is both are non-nil and functional.
 	require.NotNil(t, reg1)
 	require.NotNil(t, reg2)
+}
+
+// --- DeferredToolRegistryAdapter tests ---
+
+func TestAdapter_Register_PassThrough(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	adapter := NewDeferredToolRegistryAdapter(NewDefaultToolRegistry())
+
+	tool := &fakeTool{name: "eager_tool", description: "registered eagerly"}
+	require.NoError(t, adapter.Register(context.Background(), tool))
+
+	// Register went straight to the underlying registry.
+	def, err := adapter.Get(context.Background(), "eager_tool")
+	require.NoError(t, err)
+	assert.Equal(t, "eager_tool", def.Name())
+
+	// List returns the eagerly registered tool.
+	list, err := adapter.List(context.Background())
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, "eager_tool", list[0].Name())
+}
+
+func TestAdapter_Get_LoadsOnDemand(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	adapter := NewDeferredToolRegistryAdapter(NewDefaultToolRegistry())
+	loader := &recorderLoader{name: "lazy_tool", payload: &fakeTool{name: "lazy_tool", description: "real"}}
+	require.NoError(t, adapter.RegisterDeferred(context.Background(), "lazy_tool", loader.fn()))
+
+	// Before Get, the loader has not run.
+	assert.Equal(t, int32(0), loader.count())
+
+	// Get triggers the loader.
+	def, err := adapter.Get(context.Background(), "lazy_tool")
+	require.NoError(t, err)
+	assert.Equal(t, "lazy_tool", def.Name())
+	assert.Equal(t, int32(1), loader.count())
+
+	// A second Get must NOT re-invoke the loader.
+	_, err = adapter.Get(context.Background(), "lazy_tool")
+	require.NoError(t, err)
+	assert.Equal(t, int32(1), loader.count())
+}
+
+func TestAdapter_Get_UnknownReturnsErrToolNotFound(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	adapter := NewDeferredToolRegistryAdapter(NewDefaultToolRegistry())
+
+	_, err := adapter.Get(context.Background(), "does_not_exist")
+	assert.ErrorIs(t, err, ErrToolNotFound)
+}
+
+func TestAdapter_List_IncludesStubs(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	adapter := NewDeferredToolRegistryAdapter(NewDefaultToolRegistry())
+
+	// Register one eager tool.
+	eager := &fakeTool{name: "eager", description: "eager"}
+	require.NoError(t, adapter.Register(context.Background(), eager))
+
+	// Register two deferred tools (not yet loaded).
+	loader1 := &recorderLoader{name: "deferred_one", payload: &fakeTool{name: "deferred_one", description: "real"}}
+	require.NoError(t, adapter.RegisterDeferred(context.Background(), "deferred_one", loader1.fn()))
+	loader2 := &recorderLoader{name: "deferred_two", payload: &fakeTool{name: "deferred_two", description: "real"}}
+	require.NoError(t, adapter.RegisterDeferred(context.Background(), "deferred_two", loader2.fn()))
+
+	list, err := adapter.List(context.Background())
+	require.NoError(t, err)
+	// 1 eager + 2 stubs.
+	require.Len(t, list, 3)
+
+	names := make(map[string]bool, len(list))
+	for _, d := range list {
+		names[d.Name()] = true
+	}
+	assert.True(t, names["eager"])
+	assert.True(t, names["deferred_one"])
+	assert.True(t, names["deferred_two"])
+
+	// Loaders have not been invoked by List.
+	assert.Equal(t, int32(0), loader1.count())
+	assert.Equal(t, int32(0), loader2.count())
+
+	// After loading one deferred tool, List still has 3 entries but one
+	// is now the real tool instead of a stub.
+	_, err = adapter.Get(context.Background(), "deferred_one")
+	require.NoError(t, err)
+
+	list2, err := adapter.List(context.Background())
+	require.NoError(t, err)
+	require.Len(t, list2, 3)
+
+	var foundReal bool
+	for _, d := range list2 {
+		if d.Name() == "deferred_one" {
+			// The real tool's description is "fake tool deferred_one: real",
+			// not the stub description.
+			assert.Contains(t, d.Description(), "fake tool")
+			foundReal = true
+		}
+	}
+	assert.True(t, foundReal)
+}
+
+func TestAdapter_Concurrent(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	adapter := NewDeferredToolRegistryAdapter(NewDefaultToolRegistry())
+
+	// Pre-register one eager tool.
+	require.NoError(t, adapter.Register(context.Background(), &fakeTool{name: "eager", description: "eager"}))
+
+	// Register several deferred tools.
+	for i := 0; i < 5; i++ {
+		name := fmt.Sprintf("lazy_%d", i) //nolint:govet // test helper
+		loader := &recorderLoader{name: name, payload: &fakeTool{name: name, description: "real"}}
+		require.NoError(t, adapter.RegisterDeferred(context.Background(), name, loader.fn()))
+	}
+
+	const n = 64
+	var wg sync.WaitGroup
+	wg.Add(n * 3)
+
+	// Concurrent Get on deferred tools.
+	for i := 0; i < n; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			_, _ = adapter.Get(context.Background(), fmt.Sprintf("lazy_%d", idx%5))
+		}(i)
+	}
+
+	// Concurrent Register (eager).
+	for i := 0; i < n; i++ {
+		go func(idx int) {
+			defer wg.Done()
+			_ = adapter.Register(context.Background(), &fakeTool{name: fmt.Sprintf("concurrent_eager_%d", idx), description: "concurrent"})
+		}(i)
+	}
+
+	// Concurrent List.
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			_, _ = adapter.List(context.Background())
+		}()
+	}
+
+	wg.Wait()
+
+	// Verify the registry is still functional after concurrent access.
+	list, err := adapter.List(context.Background())
+	require.NoError(t, err)
+	assert.NotEmpty(t, list)
 }

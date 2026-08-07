@@ -135,7 +135,7 @@ Flat skill body.
 	// Change to the temp dir so discoverSkillDir finds .go-cli/skills.
 	t.Chdir(tempDir)
 
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 
 	// Pass a config with no skill.dir — the auto-discovery should kick in.
 	rc := &config.Config{}
@@ -175,7 +175,7 @@ func TestIntegration_SkillAutoDiscoveryNotFound(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
 
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 	rc := &config.Config{}
 	infos := registerSkillTools(ctx, rc, tr)
 
@@ -221,9 +221,9 @@ func TestIntegration_MCPAutoDiscovery_ArrayFormat(t *testing.T) {
 
 	t.Chdir(tempDir)
 
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 
-	// Pass a config with no MCP servers — auto-discovery should find mcp.json.
+	// Pass a config with no MCP servers - auto-discovery should find mcp.json.
 	rc := &config.Config{}
 	require.NoError(t, registerMCPTools(ctx, rc, tr))
 
@@ -271,7 +271,7 @@ func TestIntegration_MCPAutoDiscovery_MapFormat(t *testing.T) {
 
 	t.Chdir(tempDir)
 
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 	rc := &config.Config{}
 	require.NoError(t, registerMCPTools(ctx, rc, tr))
 
@@ -326,9 +326,9 @@ func TestIntegration_MCPConfigOverridesAutoDiscovery(t *testing.T) {
 
 	t.Chdir(tempDir)
 
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 
-	// Config has its own MCP server — should take priority over mcp.json.
+	// Config has its own MCP server - should take priority over mcp.json.
 	rc := &config.Config{
 		MCP: config.MCPConfig{
 			Servers: []config.MCPServerConfig{
@@ -391,7 +391,7 @@ This skill guides integration test execution.
 	t.Chdir(tempDir)
 
 	// Step 1: Auto-discover and register skills (no skill.dir in config).
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 	rc := &config.Config{}
 	infos := registerSkillTools(ctx, rc, tr)
 	require.Len(t, infos, 1)

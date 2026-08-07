@@ -117,7 +117,7 @@ DOCX skill body.
 	require.Equal(t, ".go-cli/skills", cfg.Skill.Dir, "skill.dir must be loaded from config")
 
 	// --- Step 2: Assemble tools (register MCP + skills) ---
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 
 	// 2a. Register MCP tools.
 	require.NoError(t, registerMCPTools(ctx, cfg, tr))
@@ -228,7 +228,7 @@ func TestE2E_RealConfigScenario_MCPDescriptionPropagated(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, cfg.MCP.Servers, 1)
 
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 	require.NoError(t, registerMCPTools(ctx, cfg, tr))
 
 	// Verify the MCP tool description propagated.
@@ -311,7 +311,7 @@ Body.
 	assert.Empty(t, cfg.Skill.Dir, "config should have no skill dir")
 
 	// --- Step 2: Auto-discover and register ---
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 
 	// 2a. MCP auto-discovery.
 	require.NoError(t, registerMCPTools(ctx, cfg, tr))
@@ -382,7 +382,7 @@ func TestE2E_RealConfigScenario_ConfigWinsOverAutoDiscovery(t *testing.T) {
 	cfg, err := config.Load()
 	require.NoError(t, err)
 
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 	require.NoError(t, registerMCPTools(ctx, cfg, tr))
 
 	// Config server tool should be registered.

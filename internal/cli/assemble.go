@@ -275,7 +275,9 @@ func AssembleAgent(
 	}
 
 	// 2. Create tool registry + register defaults.
-	tr := tools.NewDefaultToolRegistry()
+	underlyingReg := tools.NewDefaultToolRegistry()
+	dtr := tools.NewDeferredToolRegistryAdapter(underlyingReg)
+	var tr tools.ToolRegistry = dtr
 
 	// Create shared component instances for the PARTIAL tools (D5, D6, D7, D9).
 	fileTracker := tools.NewFileTracker()
@@ -336,7 +338,7 @@ func AssembleAgent(
 	registerCustomTools(ctx, rc, tr, logger)
 
 	// 3. Register MCP tools.
-	if mcpErr := registerMCPTools(ctx, rc, tr); mcpErr != nil {
+	if mcpErr := registerMCPTools(ctx, rc, dtr); mcpErr != nil {
 		logger.Warn("assemble_mcp_failed", "err", mcpErr)
 	}
 
@@ -377,7 +379,7 @@ func AssembleAgent(
 	}
 
 	// 4. Register skill tools.
-	skillInfos := registerSkillTools(ctx, rc, tr)
+	skillInfos := registerSkillTools(ctx, rc, dtr)
 
 	// 4b. Load and initialize extensions (if configured). Extension-provided
 	// tools are registered into the tool registry before the middleware wraps
@@ -898,7 +900,7 @@ func buildModel(ctx context.Context, rc *config.Config, providerName, modelName 
 // tools into the tool registry. When no MCP servers are configured in the
 // main config file, it auto-loads from .go-cli/mcp.json or
 // ~/.config/go-cli/mcp.json if either exists.
-func registerMCPTools(ctx context.Context, rc *config.Config, tr tools.ToolRegistry) error {
+func registerMCPTools(ctx context.Context, rc *config.Config, tr tools.DeferredRegistry) error {
 	servers := loadMCPServers(rc)
 	if len(servers) == 0 {
 		return nil
@@ -941,7 +943,12 @@ func registerMCPTools(ctx context.Context, rc *config.Config, tr tools.ToolRegis
 		}
 
 		for _, t := range mcpTools {
-			if regErr := tr.Register(ctx, mcp.NewMCPToolAdapter(client, t)); regErr != nil {
+			toolName := mcp.NormalizeToolName(client.Name(), t.Name)
+			clientRef := client
+			toolRef := t
+			if regErr := tr.RegisterDeferred(ctx, toolName, func() (tools.ToolDefinition, error) {
+				return mcp.NewMCPToolAdapter(clientRef, toolRef), nil
+			}); regErr != nil {
 				slog.Warn("assemble_mcp_register_failed", "tool", t.Name, "err", regErr)
 			}
 		}
@@ -1005,7 +1012,7 @@ func loadMCPServers(rc *config.Config) []config.MCPServerConfig {
 //
 // It returns a slice of SkillInfo describing each registered skill, suitable
 // for injection into the system prompt.
-func registerSkillTools(ctx context.Context, rc *config.Config, tr tools.ToolRegistry) []core.SkillInfo {
+func registerSkillTools(ctx context.Context, rc *config.Config, tr tools.DeferredRegistry) []core.SkillInfo {
 	skillDir := ""
 	if rc != nil && rc.Skill.Dir != "" {
 		skillDir = rc.Skill.Dir
@@ -1030,8 +1037,10 @@ func registerSkillTools(ctx context.Context, rc *config.Config, tr tools.ToolReg
 		if def == nil {
 			continue
 		}
-		adapter := skill.NewSkillAdapter(*def)
-		if regErr := tr.Register(ctx, adapter); regErr != nil {
+		defCopy := def
+		if regErr := tr.RegisterDeferred(ctx, (*defCopy).Name(), func() (tools.ToolDefinition, error) {
+			return skill.NewSkillAdapter(*defCopy), nil
+		}); regErr != nil {
 			slog.Warn("assemble_skill_register_failed", "skill", (*def).Name(), "err", regErr)
 			continue
 		}
