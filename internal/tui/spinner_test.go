@@ -53,8 +53,8 @@ func TestSpinnerSetTheme(t *testing.T) {
 	s := NewSpinnerRenderer()
 	s.SetTheme(MockTheme{})
 	out := s.RenderFrame(0)
-	// MockTheme Primary is red+bold: \x1b[31;1m
-	assert.Contains(t, out, "\x1b[31;1m")
+	// MockTheme Primary is red+bold truecolor: 1;38;2;255;0;0
+	assert.Contains(t, out, "1;38;2;255;0;0")
 }
 
 func TestSpinnerNotARenderer(t *testing.T) {

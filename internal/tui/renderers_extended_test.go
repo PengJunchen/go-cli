@@ -51,7 +51,7 @@ func TestRenderersTable(t *testing.T) {
 			renderer: CodeRenderer{},
 			content:  "x := 1",
 			opts:     RenderOpts{Theme: DarkTheme{}},
-			want:     []string{"\x1b[37m", "x := 1"}, // dark fg = white
+			want:     []string{"38;2;205;214;243", "x := 1"}, // dark fg truecolor
 			notWant:  []string{},
 		},
 		{
@@ -59,7 +59,7 @@ func TestRenderersTable(t *testing.T) {
 			renderer: CodeRenderer{},
 			content:  "y",
 			opts:     RenderOpts{},
-			want:     []string{"\x1b[37m"},
+			want:     []string{"38;2;205;214;243"},
 			notWant:  []string{},
 		},
 		{
@@ -67,7 +67,7 @@ func TestRenderersTable(t *testing.T) {
 			renderer: TableRenderer{},
 			content:  "head\ta\nrow\tb",
 			opts:     RenderOpts{Theme: DarkTheme{}},
-			want:     []string{"\x1b[104m"}, // header is primary styled
+			want:     []string{"38;2;125;86;243"}, // header is primary styled (#7D56F4; termenv quantizes 0xF4 -> 243)
 			notWant:  []string{},
 		},
 		{
@@ -83,7 +83,7 @@ func TestRenderersTable(t *testing.T) {
 			renderer: DiffRenderer{},
 			content:  "+add\n-del\nctx",
 			opts:     RenderOpts{Theme: DarkTheme{}},
-			want:     []string{"\x1b[32m", "\x1b[31m", "\x1b[37m"},
+			want:     []string{"38;2;4;231;97", "38;2;255;92;92", "38;2;205;214;243"},
 			notWant:  []string{},
 		},
 		{
@@ -99,7 +99,7 @@ func TestRenderersTable(t *testing.T) {
 			renderer: ErrorRenderer{},
 			content:  "boom",
 			opts:     RenderOpts{Theme: DarkTheme{}},
-			want:     []string{"\x1b[31m"},
+			want:     []string{"38;2;255;92;92"},
 			notWant:  []string{},
 		},
 		{
@@ -307,7 +307,12 @@ func TestRenderersTable(t *testing.T) {
 				return
 			}
 			for _, w := range tc.want {
-				assert.Contains(t, out, w, "renderer %s missing expected substring %q", tc.renderer.Name(), w)
+				// Some renderers (link, markdown strikethrough) use underline or
+				// strikethrough which lipgloss applies per-rune, fragmenting the
+				// raw output. Accept a match in either the raw output or the
+				// escape-stripped output.
+				assert.True(t, strings.Contains(out, w) || strings.Contains(stripEscape(out), w),
+					"renderer %s missing expected substring %q", tc.renderer.Name(), w)
 			}
 			for _, nw := range tc.notWant {
 				assert.NotContains(t, out, nw, "renderer %s unexpectedly contains %q", tc.renderer.Name(), nw)

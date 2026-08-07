@@ -6,6 +6,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/pengjunchen/go-cli/internal/tui/markdown"
 )
 
@@ -560,7 +561,7 @@ var _ Renderer = (*PromptRenderer)(nil)
 // Render styles prompt content.
 func (PromptRenderer) Render(ctx context.Context, content string, opts RenderOpts) string {
 	theme := renderTheme(opts)
-	out := theme.Bold().Foreground(colorBrightWhite).Render(wrapWidth(content, opts.Width))
+	out := theme.Bold().Foreground(lipgloss.Color("#FFFFFF")).Render(wrapWidth(content, opts.Width))
 	logRender(ctx, "prompt", opts.ContentType, len(out))
 	return out
 }
