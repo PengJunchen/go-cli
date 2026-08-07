@@ -2,8 +2,12 @@ package core
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
+
+	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 // PlanModeController manages plan mode state. When plan mode is active, write
@@ -94,4 +98,51 @@ func (c *DefaultPlanModeController) Reason() string {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.reason
+}
+
+// ErrPlanModeBlocked is returned by NewPlanModeToolWrapper when a tool call is
+// blocked because plan mode is active and the tool is a write tool.
+var ErrPlanModeBlocked = errors.New("plan mode: tool blocked")
+
+// NewPlanModeToolWrapper returns a tools.ToolExecutorWrapper that intercepts
+// tool calls at the ToolExecutorWrapper chain level. When plan mode is active,
+// write tools (write, edit, bash, mutation) are blocked: the wrapper returns a
+// ToolResult with a descriptive message and ErrPlanModeBlocked, without
+// invoking the underlying executor. Read tools pass through unchanged.
+//
+// When the controller is nil (zero-config fallback) or plan mode is inactive,
+// all calls pass through to next unchanged.
+func NewPlanModeToolWrapper(controller PlanModeController) tools.ToolExecutorWrapper {
+	return func(next func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error)) func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
+		return func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
+			// Zero-config fallback: nil controller passes through.
+			if controller == nil {
+				if next == nil {
+					return nil, nil
+				}
+				return next(ctx, call)
+			}
+			// When plan mode is inactive, pass through.
+			if !controller.IsActive() {
+				if next == nil {
+					return nil, nil
+				}
+				return next(ctx, call)
+			}
+			// When plan mode is active and the tool is a write tool, block.
+			if controller.ShouldBlockWrite(call.Name) {
+				return &tools.ToolResult{
+					Output: fmt.Sprintf("plan mode: tool %q blocked", call.Name),
+					Metadata: map[string]any{
+						"plan_mode_blocked": true,
+					},
+				}, ErrPlanModeBlocked
+			}
+			// Read tools pass through.
+			if next == nil {
+				return nil, nil
+			}
+			return next(ctx, call)
+		}
+	}
 }
