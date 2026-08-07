@@ -268,6 +268,12 @@ func AssembleAgent(
 	if rc != nil && rc.Tracing.Enabled != nil && *rc.Tracing.Enabled {
 		traceExporter = buildTraceExporter(rc.Tracing, sessionID, logger)
 		if traceExporter != nil {
+			// Determine redaction level from config (default: redact).
+			redactionLevel := tracing.RedactionLevelRedact
+			if rc.Tracing.RedactionLevel != "" {
+				redactionLevel = tracing.RedactionLevel(rc.Tracing.RedactionLevel)
+			}
+			traceExporter = tracing.NewRedactingExporter(traceExporter, redactionLevel)
 			tracer = tracing.NewTracer(sessionID, traceExporter)
 			reg.RegisterTraceExporter(traceExporter)
 			logger.Info("assemble_tracing_enabled", "exporter", rc.Tracing.Exporter, "level", rc.Tracing.Level)

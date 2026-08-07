@@ -103,10 +103,11 @@ type CustomToolConfig struct {
 
 // TracingConfig controls the trace logging exporter and level.
 type TracingConfig struct {
-	Enabled  *bool  `json:"enabled"`
-	Exporter string `json:"exporter"`
-	Level    string `json:"level"`
-	FilePath string `json:"file_path"`
+	Enabled        *bool  `json:"enabled"`
+	Exporter       string `json:"exporter"`
+	Level          string `json:"level"`
+	FilePath       string `json:"file_path"`
+	RedactionLevel string `json:"redaction_level"` // full, redact (default), off
 }
 
 // ApprovalConfig controls the approval mode and classifier selection.
