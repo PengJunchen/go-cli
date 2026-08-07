@@ -2,6 +2,7 @@ package acp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -9,6 +10,40 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/core"
 )
+
+// RPCHandler is a function that handles a JSON-RPC method call.
+type RPCHandler func(ctx context.Context, params json.RawMessage) (any, error)
+
+// RPCDispatcher routes JSON-RPC method calls to registered handlers.
+type RPCDispatcher struct {
+	mu       sync.RWMutex
+	handlers map[string]RPCHandler
+}
+
+// NewRPCDispatcher creates an empty RPCDispatcher.
+func NewRPCDispatcher() *RPCDispatcher {
+	return &RPCDispatcher{handlers: make(map[string]RPCHandler)}
+}
+
+// Register associates method with handler. Overwrites any previous
+// registration for the same method name.
+func (d *RPCDispatcher) Register(method string, handler RPCHandler) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.handlers[method] = handler
+}
+
+// Dispatch routes the RPCMessage to its registered handler. Returns
+// the handler's result or an error if the method is not found.
+func (d *RPCDispatcher) Dispatch(ctx context.Context, msg RPCMessage) (any, error) {
+	d.mu.RLock()
+	handler, ok := d.handlers[msg.Method]
+	d.mu.RUnlock()
+	if !ok {
+		return nil, &RPCError{Code: RPCCodeMethodNotFound, Message: "method not found: " + msg.Method}
+	}
+	return handler(ctx, msg.Params)
+}
 
 // ACPMiddlewareAdapter bridges the extension.Middleware-based ACPMiddleware
 // into the core.Middleware model used by the LoopAgent middleware chain. It
@@ -24,6 +59,7 @@ type ACPMiddlewareAdapter struct {
 	acpMiddleware *ACPMiddleware
 	dispatcher    core.SubagentDispatcher
 	client        ACPClient
+	rpcDispatcher *RPCDispatcher
 
 	mu      sync.Mutex
 	started bool
@@ -42,6 +78,12 @@ func NewACPMiddlewareAdapter(mw *ACPMiddleware, dispatcher core.SubagentDispatch
 		dispatcher:    dispatcher,
 		client:        client,
 	}
+}
+
+// WithRPCDispatcher sets the RPC dispatcher for method-based routing.
+func (a *ACPMiddlewareAdapter) WithRPCDispatcher(d *RPCDispatcher) *ACPMiddlewareAdapter {
+	a.rpcDispatcher = d
+	return a
 }
 
 // Name returns the middleware identifier, delegating to the wrapped
@@ -73,12 +115,12 @@ func (l *acpBridgeLoop) Run(ctx context.Context, submission core.Submission, str
 }
 
 // startRouter starts the background goroutine that reads inbound ACP messages
-// and dispatches them to the SubagentDispatcher. It is idempotent and safe to
-// call from multiple goroutines.
+// and dispatches them to the SubagentDispatcher or RPCDispatcher. It is
+// idempotent and safe to call from multiple goroutines.
 func (a *ACPMiddlewareAdapter) startRouter() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.started || a.client == nil || a.dispatcher == nil {
+	if a.started || a.client == nil || (a.dispatcher == nil && a.rpcDispatcher == nil) {
 		return
 	}
 	a.started = true
@@ -113,8 +155,14 @@ func (a *ACPMiddlewareAdapter) routeMessages(ctx context.Context, done chan stru
 }
 
 // handleMessage converts an ACP message to a SubagentTask, dispatches it, and
-// relays the result back to the peer. Non-TypeMessage messages are ignored.
+// relays the result back to the peer. RPC messages are routed to the
+// RPCDispatcher. Other non-TypeMessage messages are ignored.
 func (a *ACPMiddlewareAdapter) handleMessage(ctx context.Context, msg ACPMessage) {
+	if msg.Type == TypeRPC {
+		a.handleRPC(ctx, msg)
+		return
+	}
+
 	if msg.Type != TypeMessage {
 		return
 	}
@@ -148,6 +196,61 @@ func (a *ACPMiddlewareAdapter) handleMessage(ctx context.Context, msg ACPMessage
 	}
 	if sendErr := a.client.SendMessage(ctx, reply); sendErr != nil {
 		slog.Warn("acp.bridge.reply_failed", "err", sendErr, "receiver", msg.SenderID)
+	}
+}
+
+// handleRPC parses a JSON-RPC 2.0 request from the ACP message content,
+// dispatches it to the RPCDispatcher, and relays the response back to the
+// peer. Notifications (ID == 0) do not receive a response.
+func (a *ACPMiddlewareAdapter) handleRPC(ctx context.Context, msg ACPMessage) {
+	var rpcMsg RPCMessage
+	if err := json.Unmarshal([]byte(msg.Content), &rpcMsg); err != nil {
+		slog.Warn("acp.bridge.rpc_parse_failed", "err", err)
+		return
+	}
+
+	// Notifications (ID == 0) don't get a response.
+	if rpcMsg.ID == 0 {
+		if a.rpcDispatcher != nil {
+			_, _ = a.rpcDispatcher.Dispatch(ctx, rpcMsg) //nolint:errcheck
+		}
+		return
+	}
+
+	var resp RPCResponse
+	resp.JSONRPC = "2.0"
+	resp.ID = rpcMsg.ID
+
+	if a.rpcDispatcher == nil {
+		resp.Error = &RPCError{Code: RPCCodeInternalError, Message: "no RPC dispatcher configured"}
+	} else {
+		result, err := a.rpcDispatcher.Dispatch(ctx, rpcMsg)
+		if err != nil {
+			if rpcErr, ok := err.(*RPCError); ok {
+				resp.Error = rpcErr
+			} else {
+				resp.Error = &RPCError{Code: RPCCodeInternalError, Message: err.Error()}
+			}
+		} else {
+			resp.Result = result
+		}
+	}
+
+	respData, err := json.Marshal(resp)
+	if err != nil {
+		slog.Warn("acp.bridge.rpc_marshal_failed", "err", err)
+		return
+	}
+
+	reply := ACPMessage{
+		Type:       TypeRPC,
+		SenderID:   msg.ReceiverID,
+		ReceiverID: msg.SenderID,
+		Content:    string(respData),
+		Timestamp:  time.Now(),
+	}
+	if sendErr := a.client.SendMessage(ctx, reply); sendErr != nil {
+		slog.Warn("acp.bridge.rpc_reply_failed", "err", sendErr)
 	}
 }
 

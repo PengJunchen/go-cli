@@ -21,6 +21,8 @@ package acp
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -52,6 +54,7 @@ const (
 	TypeResponse   = "response"
 	TypeAck        = "ack"
 	TypeError      = "error"
+	TypeRPC        = "rpc"
 )
 
 // ACPTransport identifies the transport an ACP client is wired to.
@@ -65,6 +68,44 @@ const (
 
 // String returns the canonical transport name.
 func (t ACPTransport) String() string { return string(t) }
+
+// RPCMessage is a JSON-RPC 2.0 request embedded in an ACPMessage.
+// The Method identifies the procedure to invoke, Params carries the
+// arguments as raw JSON, and ID is the request identifier (0 means
+// notification - no response expected).
+type RPCMessage struct {
+	JSONRPC string          `json:"jsonrpc"`
+	Method  string          `json:"method"`
+	Params  json.RawMessage `json:"params,omitempty"`
+	ID      int64           `json:"id"`
+}
+
+// RPCResponse is a JSON-RPC 2.0 response.
+type RPCResponse struct {
+	JSONRPC string    `json:"jsonrpc"`
+	Result  any       `json:"result,omitempty"`
+	Error   *RPCError `json:"error,omitempty"`
+	ID      int64     `json:"id"`
+}
+
+// RPCError is a JSON-RPC 2.0 error object.
+type RPCError struct {
+	Code    int    `json:"code"`
+	Message string `json:"message"`
+}
+
+// Error implements the error interface.
+func (e *RPCError) Error() string {
+	return fmt.Sprintf("rpc error %d: %s", e.Code, e.Message)
+}
+
+// RPC error codes (JSON-RPC 2.0 spec).
+const (
+	RPCCodeParseError     = -32700
+	RPCCodeMethodNotFound = -32601
+	RPCCodeInvalidParams  = -32602
+	RPCCodeInternalError  = -32603
+)
 
 // ACPClient is the client side of an ACP connection. Implementations connect
 // to a peer, send ACP messages, and expose received messages as a channel.
