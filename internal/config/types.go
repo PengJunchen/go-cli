@@ -24,6 +24,7 @@ type Config struct {
 	ACP        ACPConfig        `json:"acp"`
 	Git        GitConfig        `json:"git"`
 	ModelCycler ModelCyclerConfig `json:"model_cycler"`
+	History     HistoryConfig     `json:"history"`
 
 	verbose bool
 }
@@ -356,6 +357,12 @@ type ModelEntry struct {
 	Model string `json:"model"`
 	// Weight is used by the weighted and cost_priority strategies.
 	Weight int `json:"weight"`
+}
+
+// HistoryConfig controls REPL command history persistence.
+type HistoryConfig struct {
+	Path   string `yaml:"path" json:"path"`
+	MaxLen int    `yaml:"max_len" json:"max_len"`
 }
 
 // Source enumerates the five configuration layers, ordered by ascending

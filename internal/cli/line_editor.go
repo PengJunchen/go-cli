@@ -62,14 +62,50 @@ type DefaultLineEditor struct {
 	prevVisualLines int // visual lines used by the previous render
 }
 
+// LineEditorOption configures a DefaultLineEditor at construction time.
+type LineEditorOption func(*DefaultLineEditor)
+
+// WithHistoryPath sets the file path used for history persistence. If the
+// underlying HistoryStore is nil the option is a no-op.
+func WithHistoryPath(path string) LineEditorOption {
+	return func(le *DefaultLineEditor) {
+		if le.history != nil {
+			le.history.filePath = path
+		}
+	}
+}
+
+// WithHistoryMaxLen sets the maximum number of history entries. Values <= 0 are
+// ignored so the default (1000) is preserved.
+func WithHistoryMaxLen(n int) LineEditorOption {
+	return func(le *DefaultLineEditor) {
+		if n > 0 && le.history != nil {
+			le.history.maxLen = n
+		}
+	}
+}
+
 // NewDefaultLineEditor creates a DefaultLineEditor reading from in and
-// writing prompts/output to out.
-func NewDefaultLineEditor(in io.Reader, out io.Writer) *DefaultLineEditor {
-	return &DefaultLineEditor{
+// writing prompts/output to out. Optional LineEditorOption values can be used
+// to configure history persistence.
+func NewDefaultLineEditor(in io.Reader, out io.Writer, opts ...LineEditorOption) *DefaultLineEditor {
+	le := &DefaultLineEditor{
 		in:      in,
 		out:     out,
 		history: NewHistoryStore(1000, ""),
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(le)
+		}
+	}
+	return le
+}
+
+// HistoryStore returns the underlying HistoryStore used by the line editor, or
+// nil if none is configured. Callers can use it to Load/Save history.
+func (le *DefaultLineEditor) HistoryStore() *HistoryStore {
+	return le.history
 }
 
 // terminalWidth returns the terminal width in columns. It queries stty once
