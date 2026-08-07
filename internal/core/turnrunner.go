@@ -15,6 +15,13 @@ import (
 // errTurnUnknown reports that a turn id is not managed by the runner.
 var errTurnUnknown = errors.New("core: unknown or inactive turn")
 
+// messageSource is satisfied by Agent implementations that expose their
+// accumulated message history. The TurnRunner uses it to detect compaction
+// (a decrease in message count) during a turn.
+type messageSource interface {
+	Messages() []AgentMessage
+}
+
 // EinoTurnRunner is the default TurnRunner. It manages the lifecycle of each
 // turn it executes, exposing Cancel, Steer and FollowUp to act on a running
 // turn. It drives the injected AgentLoop sequentially per turn and is safe for
@@ -25,14 +32,15 @@ var errTurnUnknown = errors.New("core: unknown or inactive turn")
 // steering channel is set via SetSteerChannel, Steer sends the instruction to
 // that channel so the running loop picks it up between LLM iterations.
 type EinoTurnRunner struct {
-	loop    AgentLoop
-	agent   Agent
-	stream  EventStream
-	steerCh chan string
-	mu      sync.Mutex
-	turns   map[string]*Turn
-	running map[string]context.CancelFunc
-	idSeq   atomic.Uint64
+	loop      AgentLoop
+	agent     Agent
+	stream    EventStream
+	steerCh   chan string
+	hookChain *HookChain
+	mu        sync.Mutex
+	turns     map[string]*Turn
+	running   map[string]context.CancelFunc
+	idSeq     atomic.Uint64
 }
 
 var _ TurnRunner = (*EinoTurnRunner)(nil)
@@ -81,7 +89,21 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Re
 	r.mu.Lock()
 	r.turns[id] = turn
 	r.running[id] = cancel
+	hookChain := r.hookChain
 	r.mu.Unlock()
+
+	// OnTurnStart lifecycle hook (invoked before the run begins).
+	if hookChain != nil {
+		if herr := hookChain.OnTurnStart(spanCtx, id); herr != nil {
+			slog.Warn("core.turn.runner.hook.turn_start", "id", id, "err", herr)
+		}
+	}
+
+	// Capture message count before the run for compaction detection.
+	var beforeMsgCount int
+	if ms, ok := r.agent.(messageSource); ok {
+		beforeMsgCount = len(ms.Messages())
+	}
 
 	var result Result
 	var runErr error
@@ -117,6 +139,28 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Re
 		turn.Status = TurnCompleted
 	}
 	r.mu.Unlock()
+
+	// Post-run lifecycle hooks. OnError fires when the run failed; OnCompaction
+	// fires when the agent's message count decreased during the turn; OnTurnEnd
+	// always fires to signal the turn is complete.
+	if hookChain != nil {
+		if runErr != nil {
+			if herr := hookChain.OnError(spanCtx, id, runErr); herr != nil {
+				slog.Warn("core.turn.runner.hook.on_error", "id", id, "err", herr)
+			}
+		}
+		if ms, ok := r.agent.(messageSource); ok {
+			afterMsgCount := len(ms.Messages())
+			if afterMsgCount < beforeMsgCount {
+				if herr := hookChain.OnCompaction(spanCtx, beforeMsgCount, afterMsgCount); herr != nil {
+					slog.Warn("core.turn.runner.hook.compaction", "id", id, "err", herr)
+				}
+			}
+		}
+		if herr := hookChain.OnTurnEnd(spanCtx, id, result, runErr); herr != nil {
+			slog.Warn("core.turn.runner.hook.turn_end", "id", id, "err", herr)
+		}
+	}
 
 	endSpan, _ := tracing.SpanFromContext(ctx, "turn.end", tracing.SpanKindInternal)
 	endSpan.SetAttributes(tracing.Attribute{Key: "turn_id", Value: id}, tracing.Attribute{Key: "status", Value: turn.Status.String()})
@@ -207,6 +251,15 @@ func (r *EinoTurnRunner) SetAgent(a Agent) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.agent = a
+}
+
+// SetHookChain sets the HookChain used to dispatch lifecycle events
+// (OnTurnStart, OnTurnEnd, OnError, OnCompaction) during RunTurn. Set to nil
+// to disable lifecycle hook dispatch.
+func (r *EinoTurnRunner) SetHookChain(chain *HookChain) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.hookChain = chain
 }
 
 // SetStream sets the EventStream that RunTurn passes to the agent or loop so
