@@ -43,14 +43,33 @@ type Usage struct {
 type Message struct {
 	Role       Role       `json:"role"`
 	Content    string     `json:"content"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	Name       string     `json:"name,omitempty"`
-	Usage      *Usage     `json:"usage,omitempty"`
+	// ContentBlocks holds typed content parts for multimodal messages
+	// (text + images). When non-nil, encoders use ContentBlocks instead of
+	// Content. When nil, Content is used as before (backward compatible).
+	ContentBlocks []ContentBlock `json:"content_blocks,omitempty"`
+	ToolCalls     []ToolCall     `json:"tool_calls,omitempty"`
+	ToolCallID    string         `json:"tool_call_id,omitempty"`
+	Name          string         `json:"name,omitempty"`
+	Usage         *Usage         `json:"usage,omitempty"`
 	// FinishReason reports why the model stopped generating:
 	// stop|length|tool_calls|content_filter. When "length", the output was
 	// truncated due to max_tokens and the caller may request a continuation.
 	FinishReason string `json:"finish_reason,omitempty"`
+}
+
+// ImageURL represents an image specified by URL or base64 data URI.
+type ImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"` // high|low|auto (OpenAI)
+}
+
+// ContentBlock is a typed content part within a multimodal message.
+// When Message.ContentBlocks is non-nil, encoders use it instead of
+// the plain Content string.
+type ContentBlock struct {
+	Type     string    `json:"type"`               // "text" | "image_url"
+	Text     string    `json:"text,omitempty"`      // when Type == "text"
+	ImageURL *ImageURL `json:"image_url,omitempty"` // when Type == "image_url"
 }
 
 // MessageChunk is a single incremental chunk emitted by streaming.

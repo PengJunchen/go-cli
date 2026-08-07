@@ -25,6 +25,32 @@ import (
 // decoded with the standard library. All three share the nativeChatModel helper
 // so the HTTP mechanics and the "llm.request" span are defined once.
 
+// parseDataURI splits a "data:image/<mime>;base64,<data>" URI into its media
+// type and base64 payload. It returns ok=false when the string is not a data
+// URI, in which case the caller should pass the URL as-is (e.g. for OpenAI).
+func parseDataURI(s string) (mediaType, data string, ok bool) {
+	const prefix = "data:"
+	if !strings.HasPrefix(s, prefix) {
+		return "", "", false
+	}
+	rest := s[len(prefix):]
+	// The comma separates the metadata from the data payload.
+	comma := strings.IndexByte(rest, ',')
+	if comma < 0 {
+		return "", "", false
+	}
+	meta := rest[:comma]
+	data = rest[comma+1:]
+	// meta looks like "image/png;base64" — extract the media type.
+	semi := strings.IndexByte(meta, ';')
+	if semi >= 0 {
+		mediaType = meta[:semi]
+	} else {
+		mediaType = meta
+	}
+	return mediaType, data, true
+}
+
 // Native provider constants. Grouped in one const block.
 const (
 	// openaiProviderName is the identifier returned by OpenAIProvider.Name().
@@ -826,7 +852,7 @@ func encodeOpenAIRequest(cfg ModelConfig, model string, msgs []Message, opts []O
 	for _, msg := range msgs {
 		om := openAIMessage{
 			Role:    string(msg.Role),
-			Content: msg.Content,
+			Content: buildOpenAIContent(msg),
 			Name:    msg.Name,
 		}
 		if msg.ToolCallID != "" {
@@ -898,7 +924,7 @@ func decodeOpenAIResponse(body []byte) (*Message, error) {
 	msg := &Message{Role: RoleAssistant}
 	if len(parsed.Choices) > 0 {
 		choice := parsed.Choices[0]
-		msg.Content = choice.Message.Content
+		msg.Content = contentToString(choice.Message.Content)
 		msg.ToolCalls = convertAssistantToolCalls(choice.Message.ToolCalls)
 		msg.FinishReason = choice.FinishReason
 	}
@@ -987,10 +1013,19 @@ type claudeUserMessage struct {
 	Content []claudeBlock `json:"content"`
 }
 
-// claudeBlock is a single content item (text only in this model).
+// claudeBlock is a single content item (text or image).
 type claudeBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type   string             `json:"type"`
+	Text   string             `json:"text,omitempty"`
+	Source *claudeImageSource `json:"source,omitempty"` // when Type == "image"
+}
+
+// claudeImageSource is the Anthropic image source: a base64-encoded blob with
+// its media type.
+type claudeImageSource struct {
+	Type      string `json:"type"`       // "base64"
+	MediaType string `json:"media_type"`
+	Data      string `json:"data"`
 }
 
 // claudeResponse is the Anthropic messages response body.
@@ -1004,6 +1039,40 @@ type claudeResponse struct {
 type claudeUsage struct {
 	InputTokens  int `json:"input_tokens"`
 	OutputTokens int `json:"output_tokens"`
+}
+
+// buildClaudeBlocks converts a Message into a slice of claudeBlock values.
+// When ContentBlocks is non-nil, it maps text and image blocks to the Anthropic
+// format (image blocks require a base64 data URI). Otherwise it falls back to a
+// single text block built from Content.
+func buildClaudeBlocks(msg Message) []claudeBlock {
+	if msg.ContentBlocks == nil {
+		return []claudeBlock{{Type: "text", Text: msg.Content}}
+	}
+	blocks := make([]claudeBlock, 0, len(msg.ContentBlocks))
+	for _, cb := range msg.ContentBlocks {
+		switch cb.Type {
+		case "text":
+			blocks = append(blocks, claudeBlock{Type: "text", Text: cb.Text})
+		case "image_url":
+			if cb.ImageURL == nil {
+				continue
+			}
+			mediaType, data, ok := parseDataURI(cb.ImageURL.URL)
+			if !ok {
+				continue // Claude requires base64 data URIs
+			}
+			blocks = append(blocks, claudeBlock{
+				Type: "image",
+				Source: &claudeImageSource{
+					Type:      "base64",
+					MediaType: mediaType,
+					Data:      data,
+				},
+			})
+		}
+	}
+	return blocks
 }
 
 // encodeClaudeRequest marshals a conversation into the Anthropic message body.
@@ -1037,8 +1106,8 @@ func encodeClaudeRequest(cfg ModelConfig, model string, msgs []Message, opts []O
 	reqMsgs := make([]claudeUserMessage, 0, len(conv))
 	for _, msg := range conv {
 		role := string(msg.Role)
-		block := claudeBlock{Type: "text", Text: msg.Content}
-		reqMsgs = append(reqMsgs, claudeUserMessage{Role: role, Content: []claudeBlock{block}})
+		blocks := buildClaudeBlocks(msg)
+		reqMsgs = append(reqMsgs, claudeUserMessage{Role: role, Content: blocks})
 	}
 
 	req := claudeRequest{
@@ -1151,9 +1220,17 @@ type geminiContent struct {
 	Parts []geminiPart `json:"parts"`
 }
 
-// geminiPart is a single content part (text only in this model).
+// geminiPart is a single content part (text or inline image data).
 type geminiPart struct {
-	Text string `json:"text,omitempty"`
+	Text       string            `json:"text,omitempty"`
+	InlineData *geminiInlineData `json:"inline_data,omitempty"` // when image
+}
+
+// geminiInlineData is the Google GenAI inline image: base64-encoded data with
+// its MIME type.
+type geminiInlineData struct {
+	MimeType string `json:"mime_type"`
+	Data     string `json:"data"`
 }
 
 // geminiGenConfig carries optional sampling knobs. maxOutputTokens is the
@@ -1181,6 +1258,38 @@ type geminiUsage struct {
 	CandidatesTokenCount int `json:"candidatesTokenCount"`
 }
 
+// buildGeminiParts converts a Message into a slice of geminiPart values.
+// When ContentBlocks is non-nil, it maps text and image blocks to the Gemini
+// format (image blocks require a base64 data URI). Otherwise it falls back to a
+// single text part built from Content.
+func buildGeminiParts(msg Message) []geminiPart {
+	if msg.ContentBlocks == nil {
+		return []geminiPart{{Text: msg.Content}}
+	}
+	parts := make([]geminiPart, 0, len(msg.ContentBlocks))
+	for _, cb := range msg.ContentBlocks {
+		switch cb.Type {
+		case "text":
+			parts = append(parts, geminiPart{Text: cb.Text})
+		case "image_url":
+			if cb.ImageURL == nil {
+				continue
+			}
+			mediaType, data, ok := parseDataURI(cb.ImageURL.URL)
+			if !ok {
+				continue // Gemini requires base64 data URIs
+			}
+			parts = append(parts, geminiPart{
+				InlineData: &geminiInlineData{
+					MimeType: mediaType,
+					Data:     data,
+				},
+			})
+		}
+	}
+	return parts
+}
+
 // encodeGeminiRequest marshals the conversation into the generateContent body.
 func encodeGeminiRequest(cfg ModelConfig, msgs []Message, opts []Option) ([]byte, error) {
 	genOpts := &GenerationOptions{}
@@ -1201,7 +1310,7 @@ func encodeGeminiRequest(cfg ModelConfig, msgs []Message, opts []Option) ([]byte
 		}
 		contents = append(contents, geminiContent{
 			Role:  role,
-			Parts: []geminiPart{{Text: msg.Content}},
+			Parts: buildGeminiParts(msg),
 		})
 	}
 

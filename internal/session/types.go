@@ -8,6 +8,8 @@ import (
 	"context"
 	"log/slog"
 	"time"
+
+	"github.com/pengjunchen/go-cli/internal/llm"
 )
 
 // EntryType categorizes a single immutable session entry.
@@ -33,12 +35,13 @@ const (
 // SessionEntry is a single immutable record in a session. Entries are linked
 // into a tree via ParentID and are never mutated once appended.
 type SessionEntry struct {
-	ID        string    `json:"id"`
-	ParentID  string    `json:"parent_id,omitempty"`
-	Type      EntryType `json:"type"`
-	Content   string    `json:"content"`
-	Timestamp time.Time `json:"timestamp"`
-	Summary   string    `json:"summary,omitempty"`
+	ID            string             `json:"id"`
+	ParentID      string             `json:"parent_id,omitempty"`
+	Type          EntryType          `json:"type"`
+	Content       string             `json:"content"`
+	ContentBlocks []llm.ContentBlock `json:"content_blocks,omitempty"`
+	Timestamp     time.Time          `json:"timestamp"`
+	Summary       string             `json:"summary,omitempty"`
 	// IsSummary marks an entry as an auto-generated branch summary appended to
 	// a departed branch by SessionTree.MoveTo. It does not affect replay.
 	IsSummary bool `json:"is_summary,omitempty"`

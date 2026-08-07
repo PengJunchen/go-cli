@@ -233,7 +233,7 @@ func (m *HTTPChatModel) generate(ctx context.Context, msgs []Message, opts ...Op
 	msg := &Message{Role: RoleAssistant}
 	if len(parsed.Choices) > 0 {
 		choice := parsed.Choices[0]
-		msg.Content = choice.Message.Content
+		msg.Content = contentToString(choice.Message.Content)
 		msg.Role = RoleAssistant
 		msg.ToolCalls = convertAssistantToolCalls(choice.Message.ToolCalls)
 	}
@@ -331,7 +331,7 @@ func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 			var content string
 			var toolCalls []ToolCall
 			if len(parsed.Choices) > 0 {
-				content = parsed.Choices[0].Message.Content
+				content = contentToString(parsed.Choices[0].Message.Content)
 				toolCalls = convertAssistantToolCalls(parsed.Choices[0].Message.ToolCalls)
 			}
 			if content != "" {
@@ -424,7 +424,7 @@ func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 					var content string
 					var toolCalls []ToolCall
 					if len(parsed.Choices) > 0 {
-						content = parsed.Choices[0].Message.Content
+						content = contentToString(parsed.Choices[0].Message.Content)
 						toolCalls = convertAssistantToolCalls(parsed.Choices[0].Message.ToolCalls)
 					}
 					if content != "" {
@@ -490,7 +490,7 @@ func (m *HTTPChatModel) buildBody(msgs []Message, opts ...Option) ([]byte, error
 	for _, msg := range msgs {
 		om := openAIMessage{
 			Role:    string(msg.Role),
-			Content: msg.Content,
+			Content: buildOpenAIContent(msg),
 			Name:    msg.Name,
 		}
 		if msg.ToolCallID != "" {
@@ -628,10 +628,64 @@ type openAIToolFunction struct {
 // openAIMessage is a single message in an OpenAI chat request/response.
 type openAIMessage struct {
 	Role       string           `json:"role"`
-	Content    string           `json:"content"`
+	Content    any              `json:"content,omitempty"` // string or []openAIContentPart
 	Name       string           `json:"name,omitempty"`
 	ToolCallID string           `json:"tool_call_id,omitempty"`
 	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
+}
+
+// openAIContentPart is a single typed part within a multimodal message
+// (text or image_url).
+type openAIContentPart struct {
+	Type     string          `json:"type"` // "text" or "image_url"
+	Text     string          `json:"text,omitempty"`
+	ImageURL *openAIImageURL `json:"image_url,omitempty"`
+}
+
+// openAIImageURL wraps an image URL or data URI for the OpenAI vision API.
+type openAIImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// contentToString extracts the text from an openAIMessage.Content value, which
+// is `any` (string or []openAIContentPart). For assistant responses the content
+// is always a plain string; this helper safely coerces it back.
+func contentToString(v any) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
+// buildOpenAIContent returns the value to assign to openAIMessage.Content. When
+// the message has ContentBlocks, it builds a []openAIContentPart slice; otherwise
+// it returns the plain Content string (backward compatible).
+func buildOpenAIContent(msg Message) any {
+	if msg.ContentBlocks == nil {
+		return msg.Content
+	}
+	parts := make([]openAIContentPart, 0, len(msg.ContentBlocks))
+	for _, cb := range msg.ContentBlocks {
+		switch cb.Type {
+		case "text":
+			parts = append(parts, openAIContentPart{Type: "text", Text: cb.Text})
+		case "image_url":
+			if cb.ImageURL != nil {
+				parts = append(parts, openAIContentPart{
+					Type: "image_url",
+					ImageURL: &openAIImageURL{
+						URL:    cb.ImageURL.URL,
+						Detail: cb.ImageURL.Detail,
+					},
+				})
+			}
+		}
+	}
+	return parts
 }
 
 // openAIResponse is the OpenAI chat completions response body.
