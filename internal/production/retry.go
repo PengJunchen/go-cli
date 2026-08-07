@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
@@ -127,6 +128,11 @@ func (p *DefaultRetryPolicy) Classify(err error) ErrorCategory {
 	if c, ok := err.(categorized); ok {
 		return c.ErrorCategory()
 	}
+	// Recognize AgentHarnessError and map its Code to an ErrorCategory.
+	var ahe *core.AgentHarnessError
+	if errors.As(err, &ahe) {
+		return classifyHarnessError(ahe)
+	}
 	switch {
 	case isRateLimit(err):
 		return ErrorRateLimit
@@ -136,6 +142,22 @@ func (p *DefaultRetryPolicy) Classify(err error) ErrorCategory {
 		return ErrorTransient
 	default:
 		return ErrorFatal
+	}
+}
+
+// classifyHarnessError maps an AgentHarnessError code to an ErrorCategory.
+// busy and hook_rejected are fatal (no retry); timeout is retryable;
+// model_error and tool_error are transient.
+func classifyHarnessError(e *core.AgentHarnessError) ErrorCategory {
+	switch e.Code {
+	case core.ErrCodeBusy, core.ErrCodeHookRejected:
+		return ErrorFatal
+	case core.ErrCodeTimeout:
+		return ErrorTimeout
+	case core.ErrCodeModelError, core.ErrCodeToolError:
+		return ErrorTransient
+	default:
+		return ErrorTransient
 	}
 }
 
