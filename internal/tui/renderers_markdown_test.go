@@ -106,7 +106,9 @@ func TestMarkdownRendererASTStrikethrough(t *testing.T) {
 	out := r.Render(context.Background(), "~~deleted~~",
 		RenderOpts{Theme: DarkTheme{}, Width: 80})
 	assert.Contains(t, out, "\x1b[9m", "strikethrough should produce ANSI code 9")
-	assert.Contains(t, out, "deleted", "strikethrough text should be preserved")
+	// lipgloss applies strikethrough per-rune, fragmenting the raw output, so
+	// verify the visible payload via stripEscape.
+	assert.Contains(t, stripEscape(out), "deleted", "strikethrough text should be preserved")
 }
 
 // TestThemeAdapterDelegatesToTheme verifies that themeAdapter correctly
@@ -130,22 +132,24 @@ func TestThemeAdapterDelegatesToTheme(t *testing.T) {
 }
 
 // TestThemeAdapterProducesExpectedANSICodes verifies that each themeAdapter
-// method emits the expected SGR ANSI code for a DarkTheme.
+// method emits the expected SGR ANSI code for a DarkTheme under the forced
+// truecolor profile. Bold/italic/underline/strikethrough keep their standard
+// SGR codes (1/3/4/9), while colors render as 24-bit sequences.
 func TestThemeAdapterProducesExpectedANSICodes(t *testing.T) {
 	adapter := themeAdapter{theme: DarkTheme{}}
 
 	assert.Contains(t, adapter.Bold("x"), "\x1b[1m", "Bold should emit code 1")
 	assert.Contains(t, adapter.Italic("x"), "\x1b[3m", "Italic should emit code 3")
-	assert.Contains(t, adapter.Underline("x"), "\x1b[4m", "Underline should emit code 4")
+	assert.Contains(t, adapter.Underline("x"), "\x1b[4;4m", "Underline should emit code 4")
 	assert.Contains(t, adapter.Strikethrough("x"), "\x1b[9m", "Strikethrough should emit code 9")
-	// DarkTheme.Primary = colorBrightCyan (104 in this codebase's scheme).
-	assert.Contains(t, adapter.Primary("x"), "\x1b[104m", "Primary should emit bright cyan")
-	// DarkTheme.Secondary = colorBrightBlack (98 in this codebase's scheme).
-	assert.Contains(t, adapter.Secondary("x"), "\x1b[98m", "Secondary should emit bright black")
-	// DarkTheme.Error = red (31).
-	assert.Contains(t, adapter.Error("x"), "\x1b[31m", "Error should emit red")
-	// DarkTheme.Faint = colorBrightBlack (98) + faint (2).
-	assert.Contains(t, adapter.Faint("x"), "\x1b[98;2m", "Faint should emit bright black + faint")
+	// DarkTheme.Primary = #7D56F4 (truecolor; termenv quantizes 0xF4 -> 243).
+	assert.Contains(t, adapter.Primary("x"), "38;2;125;86;243", "Primary should emit purple truecolor")
+	// DarkTheme.Secondary = #6C7086 (truecolor).
+	assert.Contains(t, adapter.Secondary("x"), "38;2;108;112;134", "Secondary should emit muted truecolor")
+	// DarkTheme.Error = #FF5C5C (truecolor).
+	assert.Contains(t, adapter.Error("x"), "38;2;255;92;92", "Error should emit red truecolor")
+	// DarkTheme.Faint = #6C7086 + faint (2).
+	assert.Contains(t, adapter.Faint("x"), "2;38;2;108;112;134", "Faint should emit muted + faint")
 }
 
 // TestThemeAdapterWithMockTheme verifies themeAdapter works with any Theme
@@ -158,6 +162,6 @@ func TestThemeAdapterWithMockTheme(t *testing.T) {
 	assert.Equal(t, theme.Primary().Render("x"), adapter.Primary("x"))
 	assert.Equal(t, theme.Secondary().Render("x"), adapter.Secondary("x"))
 	assert.Equal(t, theme.Error().Render("x"), adapter.Error("x"))
-	// MockTheme.Primary = red (31) + bold (1).
-	assert.Contains(t, adapter.Primary("x"), "\x1b[31;1m")
+	// MockTheme.Primary = #FF0000 + bold (1).
+	assert.Contains(t, adapter.Primary("x"), "1;38;2;255;0;0")
 }

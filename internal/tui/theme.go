@@ -1,10 +1,8 @@
 // Package tui implements the functional TUI layer. It provides a
 // message-queue-driven render loop (BubbleteaApp), a set of content renderers
-// and a theme system. In a Bubbletea-based design these would sit on top of
-// the charmbracelet/bubbletea and lipgloss libraries; this repository is
-// deliberately zero-dependency, so the layer reimplements the functional
-// subset (ANSI-styled rendering, content-type dispatch, theme switching) using
-// only the standard library.
+// and a theme system. The layer sits on top of the charmbracelet/bubbletea and
+// lipgloss libraries; styling is delegated to lipgloss.Style and the theme
+// presets express colors as truecolor (#RRGGBB) values.
 //
 // Design: the App consumes an event stream, dispatches
 // each agent event to the renderer matching its content type via a
@@ -17,174 +15,17 @@ package tui
 import (
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
-// ANSI 4-bit color codes (standard + bright variants). These back the Style
-// struct and let presets express foreground/background colors as small ints.
-const (
-	colorBlack = iota + colorBlackBase
-	colorRed
-	colorGreen
-	colorYellow
-	colorBlue
-	colorMagenta
-	colorCyan
-	colorWhite
-	colorBrightBlack = iota + colorBrightBase
-	colorBrightRed
-	colorBrightGreen
-	colorBrightYellow
-	colorBrightBlue
-	colorBrightMagenta
-	colorBrightCyan
-	colorBrightWhite
-)
+// Style is an alias for lipgloss.Style so existing call sites
+// (Foreground/Bold/Render/...) keep working with the charmbracelet stack.
+type Style = lipgloss.Style
 
-// Base offsets for the standard and bright ANSI color ranges.
-const (
-	colorBlackBase  = 30
-	colorBrightBase = 90
-)
-
-const (
-	// ansiReset clears all active SGR attributes.
-	ansiReset = "\x1b[0m"
-	// styleAttrBold enables bold intensity.
-	styleAttrBold = 1
-	// styleAttrFaint enables faint/dim intensity.
-	styleAttrFaint = 2
-	// styleAttrItalic enables italic text.
-	styleAttrItalic = 3
-	// styleAttrUnderline enables underlined text.
-	styleAttrUnderline = 4
-	// styleAttrStrikethrough enables struck-through text.
-	styleAttrStrikethrough = 9
-	// noColor is the sentinel used to mark an unset color slot.
-	noColor = -1
-)
-
-// Style is a functional-equivalent of lipgloss.Style from the charmbracelet
-// ecosystem. Instead of depending on lipgloss (which the repository does not
-// vendor), it stores the ANSI SGR attributes (foreground/background color
-// codes plus bold/italic/faint/underline flags) and renders a string by
-// wrapping it in the corresponding escape sequences.
-type Style struct {
-	fg           int
-	bg           int
-	bold         bool
-	faint        bool
-	italic       bool
-	underline    bool
-	strikethrough bool
-}
-
-// NewStyle returns a Style with every attribute unset.
-func NewStyle() Style {
-	return Style{fg: noColor, bg: noColor}
-}
-
-// Foreground returns a copy of the Style with the given 4-bit ANSI color code
-// (colorBlack..colorBrightWhite) set as the foreground.
-func (s Style) Foreground(code int) Style {
-	s.fg = code
-	return s
-}
-
-// Background returns a copy of the Style with the given 4-bit ANSI color code
-// set as the background.
-func (s Style) Background(code int) Style {
-	s.bg = code
-	return s
-}
-
-// Bold returns a copy of the Style with the bold attribute set to the value.
-func (s Style) Bold(v bool) Style {
-	s.bold = v
-	return s
-}
-
-// Faint returns a copy of the Style with the faint attribute set to the value.
-func (s Style) Faint(v bool) Style {
-	s.faint = v
-	return s
-}
-
-// Italic returns a copy of the Style with the italic attribute set.
-func (s Style) Italic(v bool) Style {
-	s.italic = v
-	return s
-}
-
-// Underline returns a copy of the Style with the underline attribute set.
-func (s Style) Underline(v bool) Style {
-	s.underline = v
-	return s
-}
-
-// Strikethrough returns a copy of the Style with the strikethrough attribute set.
-func (s Style) Strikethrough(v bool) Style {
-	s.strikethrough = v
-	return s
-}
-
-// codes aggregates the enabled SGR attribute codes in stable order.
-func (s Style) codes() []int {
-	codes := []int{}
-	if s.fg != noColor {
-		codes = append(codes, s.fg)
-	}
-	if s.bg != noColor {
-		// Background SGR codes live 10 above the foreground codes.
-		codes = append(codes, s.bg+10)
-	}
-	if s.bold {
-		codes = append(codes, styleAttrBold)
-	}
-	if s.faint {
-		codes = append(codes, styleAttrFaint)
-	}
-	if s.italic {
-		codes = append(codes, styleAttrItalic)
-	}
-	if s.underline {
-		codes = append(codes, styleAttrUnderline)
-	}
-	if s.strikethrough {
-		codes = append(codes, styleAttrStrikethrough)
-	}
-	return codes
-}
-
-// String returns the raw SGR escape sequence that Render applies, without any
-// payload or reset. It returns an empty string when the Style is empty.
-func (s Style) String() string {
-	codes := s.codes()
-	if len(codes) == 0 {
-		return ""
-	}
-	return "\x1b[" + joinInts(codes) + "m"
-}
-
-// Render wraps text in the Style's ANSI escape sequence and a trailing reset,
-// returning the original text unchanged when the Style is empty.
-func (s Style) Render(text string) string {
-	codes := s.codes()
-	if len(codes) == 0 {
-		return text
-	}
-	return "\x1b[" + joinInts(codes) + "m" + text + ansiReset
-}
-
-// joinInts renders an int slice as a semicolon-separated string.
-func joinInts(codes []int) string {
-	parts := make([]string, 0, len(codes))
-	for _, c := range codes {
-		parts = append(parts, fmt.Sprintf("%d", c))
-	}
-	return strings.Join(parts, ";")
-}
+// NewStyle returns a lipgloss.Style with no attributes set.
+func NewStyle() Style { return lipgloss.NewStyle() }
 
 // Theme describes the set of named styles a renderer may use. The ten style
 // accessors are the functional-equivalent of the lipgloss Style accessors that
@@ -211,7 +52,8 @@ type ThemePreset struct {
 	Styles map[string]Style
 }
 
-// DarkTheme is the dark-background preset used on light text terminals.
+// DarkTheme is the dark-background preset used on light text terminals. It uses
+// an opencode-like purple accent over a muted slate foreground.
 type DarkTheme struct{}
 
 // compile-time assertions that the presets satisfy the Theme interface.
@@ -222,29 +64,31 @@ var (
 	_ Theme = (*SolarizedTheme)(nil)
 )
 
-// Primary returns the accent style for dark mode.
-func (DarkTheme) Primary() Style { return NewStyle().Foreground(colorBrightCyan) }
+// Primary returns the accent style for dark mode (purple #7D56F4).
+func (DarkTheme) Primary() Style { return NewStyle().Foreground(lipgloss.Color("#7D56F4")) }
 
-// Secondary returns the muted accent style for dark mode.
-func (DarkTheme) Secondary() Style { return NewStyle().Foreground(colorBrightBlack) }
+// Secondary returns the muted accent style for dark mode (#6C7086).
+func (DarkTheme) Secondary() Style { return NewStyle().Foreground(lipgloss.Color("#6C7086")) }
 
-// Success returns the green success style for dark mode.
-func (DarkTheme) Success() Style { return NewStyle().Foreground(colorGreen) }
+// Success returns the green success style for dark mode (#04E762).
+func (DarkTheme) Success() Style { return NewStyle().Foreground(lipgloss.Color("#04E762")) }
 
-// Warning returns the yellow warning style for dark mode.
-func (DarkTheme) Warning() Style { return NewStyle().Foreground(colorYellow) }
+// Warning returns the yellow warning style for dark mode (#FFC000).
+func (DarkTheme) Warning() Style { return NewStyle().Foreground(lipgloss.Color("#FFC000")) }
 
-// Error returns the red error style for dark mode.
-func (DarkTheme) Error() Style { return NewStyle().Foreground(colorRed) }
+// Error returns the red error style for dark mode (#FF5C5C).
+func (DarkTheme) Error() Style { return NewStyle().Foreground(lipgloss.Color("#FF5C5C")) }
 
-// Bg returns the default background style for dark mode.
-func (DarkTheme) Bg() Style { return NewStyle().Background(colorBlack) }
+// Bg returns the default background style for dark mode (no background).
+func (DarkTheme) Bg() Style { return NewStyle() }
 
-// Fg returns the default foreground style for dark mode.
-func (DarkTheme) Fg() Style { return NewStyle().Foreground(colorWhite) }
+// Fg returns the default foreground style for dark mode (#CDD6F4).
+func (DarkTheme) Fg() Style { return NewStyle().Foreground(lipgloss.Color("#CDD6F4")) }
 
-// Faint returns the faint/dim style for dark mode.
-func (DarkTheme) Faint() Style { return NewStyle().Foreground(colorBrightBlack).Faint(true) }
+// Faint returns the faint/dim style for dark mode (#6C7086 + faint).
+func (DarkTheme) Faint() Style {
+	return NewStyle().Foreground(lipgloss.Color("#6C7086")).Faint(true)
+}
 
 // Bold returns the bold style for dark mode.
 func (DarkTheme) Bold() Style { return NewStyle().Bold(true) }
@@ -255,29 +99,31 @@ func (DarkTheme) Italic() Style { return NewStyle().Italic(true) }
 // LightTheme is the light-background preset used on dark text terminals.
 type LightTheme struct{}
 
-// Primary returns the accent style for light mode.
-func (LightTheme) Primary() Style { return NewStyle().Foreground(colorBlue) }
+// Primary returns the accent style for light mode (blue #1E66F5).
+func (LightTheme) Primary() Style { return NewStyle().Foreground(lipgloss.Color("#1E66F5")) }
 
-// Secondary returns the muted accent style for light mode.
-func (LightTheme) Secondary() Style { return NewStyle().Foreground(colorBrightBlack) }
+// Secondary returns the muted accent style for light mode (#6C6C6C).
+func (LightTheme) Secondary() Style { return NewStyle().Foreground(lipgloss.Color("#6C6C6C")) }
 
-// Success returns the green success style for light mode.
-func (LightTheme) Success() Style { return NewStyle().Foreground(colorGreen) }
+// Success returns the green success style for light mode (#2E7D32).
+func (LightTheme) Success() Style { return NewStyle().Foreground(lipgloss.Color("#2E7D32")) }
 
-// Warning returns the yellow warning style for light mode.
-func (LightTheme) Warning() Style { return NewStyle().Foreground(colorYellow) }
+// Warning returns the yellow warning style for light mode (#F57C00).
+func (LightTheme) Warning() Style { return NewStyle().Foreground(lipgloss.Color("#F57C00")) }
 
-// Error returns the red error style for light mode.
-func (LightTheme) Error() Style { return NewStyle().Foreground(colorRed) }
+// Error returns the red error style for light mode (#C62828).
+func (LightTheme) Error() Style { return NewStyle().Foreground(lipgloss.Color("#C62828")) }
 
-// Bg returns the default background style for light mode.
-func (LightTheme) Bg() Style { return NewStyle().Background(colorWhite) }
+// Bg returns the default background style for light mode (no background).
+func (LightTheme) Bg() Style { return NewStyle() }
 
-// Fg returns the default foreground style for light mode.
-func (LightTheme) Fg() Style { return NewStyle().Foreground(colorBlack) }
+// Fg returns the default foreground style for light mode (#1A1A1A).
+func (LightTheme) Fg() Style { return NewStyle().Foreground(lipgloss.Color("#1A1A1A")) }
 
-// Faint returns the faint/dim style for light mode.
-func (LightTheme) Faint() Style { return NewStyle().Foreground(colorBrightBlack).Faint(true) }
+// Faint returns the faint/dim style for light mode (#9E9E9E + faint).
+func (LightTheme) Faint() Style {
+	return NewStyle().Foreground(lipgloss.Color("#9E9E9E")).Faint(true)
+}
 
 // Bold returns the bold style for light mode.
 func (LightTheme) Bold() Style { return NewStyle().Bold(true) }
@@ -288,29 +134,31 @@ func (LightTheme) Italic() Style { return NewStyle().Italic(true) }
 // MonokaiTheme is a high-contrast preset inspired by the Monokai palette.
 type MonokaiTheme struct{}
 
-// Primary returns the orange accent style for Monokai.
-func (MonokaiTheme) Primary() Style { return NewStyle().Foreground(colorBrightYellow) }
+// Primary returns the pink accent style for Monokai (#F92672).
+func (MonokaiTheme) Primary() Style { return NewStyle().Foreground(lipgloss.Color("#F92672")) }
 
-// Secondary returns the purple accent style for Monokai.
-func (MonokaiTheme) Secondary() Style { return NewStyle().Foreground(colorMagenta) }
+// Secondary returns the purple accent style for Monokai (#AE81FF).
+func (MonokaiTheme) Secondary() Style { return NewStyle().Foreground(lipgloss.Color("#AE81FF")) }
 
-// Success returns the green success style for Monokai.
-func (MonokaiTheme) Success() Style { return NewStyle().Foreground(colorGreen) }
+// Success returns the green success style for Monokai (#A6E22E).
+func (MonokaiTheme) Success() Style { return NewStyle().Foreground(lipgloss.Color("#A6E22E")) }
 
-// Warning returns the yellow warning style for Monokai.
-func (MonokaiTheme) Warning() Style { return NewStyle().Foreground(colorYellow) }
+// Warning returns the yellow warning style for Monokai (#FD971F).
+func (MonokaiTheme) Warning() Style { return NewStyle().Foreground(lipgloss.Color("#FD971F")) }
 
-// Error returns the red error style for Monokai.
-func (MonokaiTheme) Error() Style { return NewStyle().Foreground(colorRed) }
+// Error returns the red error style for Monokai (#F92672).
+func (MonokaiTheme) Error() Style { return NewStyle().Foreground(lipgloss.Color("#F92672")) }
 
-// Bg returns the dark background style for Monokai.
-func (MonokaiTheme) Bg() Style { return NewStyle().Background(colorBlack) }
+// Bg returns the dark background style for Monokai (#272822).
+func (MonokaiTheme) Bg() Style { return NewStyle().Background(lipgloss.Color("#272822")) }
 
-// Fg returns the light foreground style for Monokai.
-func (MonokaiTheme) Fg() Style { return NewStyle().Foreground(colorBrightWhite) }
+// Fg returns the light foreground style for Monokai (#F8F8F2).
+func (MonokaiTheme) Fg() Style { return NewStyle().Foreground(lipgloss.Color("#F8F8F2")) }
 
-// Faint returns the faint/dim style for Monokai.
-func (MonokaiTheme) Faint() Style { return NewStyle().Foreground(colorBrightBlack).Faint(true) }
+// Faint returns the faint/dim style for Monokai (#75715E + faint).
+func (MonokaiTheme) Faint() Style {
+	return NewStyle().Foreground(lipgloss.Color("#75715E")).Faint(true)
+}
 
 // Bold returns the bold style for Monokai.
 func (MonokaiTheme) Bold() Style { return NewStyle().Bold(true) }
@@ -321,29 +169,31 @@ func (MonokaiTheme) Italic() Style { return NewStyle().Italic(true) }
 // SolarizedTheme is a low-contrast preset inspired by the Solarized palette.
 type SolarizedTheme struct{}
 
-// Primary returns the blue accent style for Solarized.
-func (SolarizedTheme) Primary() Style { return NewStyle().Foreground(colorBrightBlue) }
+// Primary returns the blue accent style for Solarized (#268BD2).
+func (SolarizedTheme) Primary() Style { return NewStyle().Foreground(lipgloss.Color("#268BD2")) }
 
-// Secondary returns the cyan accent style for Solarized.
-func (SolarizedTheme) Secondary() Style { return NewStyle().Foreground(colorCyan) }
+// Secondary returns the cyan accent style for Solarized (#2AA198).
+func (SolarizedTheme) Secondary() Style { return NewStyle().Foreground(lipgloss.Color("#2AA198")) }
 
-// Success returns the green success style for Solarized.
-func (SolarizedTheme) Success() Style { return NewStyle().Foreground(colorGreen) }
+// Success returns the green success style for Solarized (#859900).
+func (SolarizedTheme) Success() Style { return NewStyle().Foreground(lipgloss.Color("#859900")) }
 
-// Warning returns the yellow warning style for Solarized.
-func (SolarizedTheme) Warning() Style { return NewStyle().Foreground(colorYellow) }
+// Warning returns the yellow warning style for Solarized (#B58900).
+func (SolarizedTheme) Warning() Style { return NewStyle().Foreground(lipgloss.Color("#B58900")) }
 
-// Error returns the red error style for Solarized.
-func (SolarizedTheme) Error() Style { return NewStyle().Foreground(colorRed) }
+// Error returns the red error style for Solarized (#DC322F).
+func (SolarizedTheme) Error() Style { return NewStyle().Foreground(lipgloss.Color("#DC322F")) }
 
-// Bg returns the base background style for Solarized.
-func (SolarizedTheme) Bg() Style { return NewStyle().Background(colorBrightBlack) }
+// Bg returns the base background style for Solarized (#002B36).
+func (SolarizedTheme) Bg() Style { return NewStyle().Background(lipgloss.Color("#002B36")) }
 
-// Fg returns the base foreground style for Solarized.
-func (SolarizedTheme) Fg() Style { return NewStyle().Foreground(colorWhite) }
+// Fg returns the base foreground style for Solarized (#93A1A1).
+func (SolarizedTheme) Fg() Style { return NewStyle().Foreground(lipgloss.Color("#93A1A1")) }
 
-// Faint returns the faint/dim style for Solarized.
-func (SolarizedTheme) Faint() Style { return NewStyle().Foreground(colorBrightBlack).Faint(true) }
+// Faint returns the faint/dim style for Solarized (#586E75 + faint).
+func (SolarizedTheme) Faint() Style {
+	return NewStyle().Foreground(lipgloss.Color("#586E75")).Faint(true)
+}
 
 // Bold returns the bold style for Solarized.
 func (SolarizedTheme) Bold() Style { return NewStyle().Bold(true) }

@@ -5,6 +5,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 // AccordionEntry is a single renderable item in the accordion view. Each entry
@@ -170,11 +172,11 @@ func (m *AccordionModel) Len() int { return len(m.entries) }
 
 // ---------- collapsible tool call rendering ----------
 
-// ANSI escape sequences for the collapsible tool call renderer.
-const (
-	tcCyan  = "\033[36m"
-	tcGray  = "\033[90m"
-	tcReset = "\033[0m"
+// Package-level lipgloss styles for the collapsible tool call renderer. The
+// tool name is painted cyan and the result payload gray.
+var (
+	toolNameStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#00D9FF"))
+	toolResultStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#888888"))
 )
 
 // sortedArgKeys returns the keys of args in sorted order for deterministic
@@ -192,10 +194,7 @@ func sortedArgKeys(args map[string]any) []string {
 // [tool] tool_name(arg1=val1, arg2=val2). The tool name is colored cyan.
 func (r *ToolCallRenderer) RenderCollapsed(toolName string, args map[string]any) string {
 	var sb strings.Builder
-	sb.WriteString(tcCyan)
-	sb.WriteString("[tool] ")
-	sb.WriteString(toolName)
-	sb.WriteString(tcReset)
+	sb.WriteString(toolNameStyle.Render("[tool] " + toolName))
 	sb.WriteString("(")
 	keys := sortedArgKeys(args)
 	for i, k := range keys {
@@ -214,10 +213,7 @@ func (r *ToolCallRenderer) RenderCollapsed(toolName string, args map[string]any)
 // lines. The tool name is colored cyan and the result is colored gray.
 func (r *ToolCallRenderer) RenderExpanded(toolName string, args map[string]any, result string) string {
 	var sb strings.Builder
-	sb.WriteString(tcCyan)
-	sb.WriteString("[tool] ")
-	sb.WriteString(toolName)
-	sb.WriteString(tcReset)
+	sb.WriteString(toolNameStyle.Render("[tool] " + toolName))
 	sb.WriteString("\n  args:")
 	keys := sortedArgKeys(args)
 	if len(keys) == 0 {
@@ -231,12 +227,10 @@ func (r *ToolCallRenderer) RenderExpanded(toolName string, args map[string]any, 
 		}
 	}
 	sb.WriteString("\n  ")
-	sb.WriteString(tcGray)
-	sb.WriteString("result:")
+	sb.WriteString(toolResultStyle.Render("result:"))
 	for _, line := range strings.Split(result, "\n") {
 		sb.WriteString("\n    ")
 		sb.WriteString(line)
 	}
-	sb.WriteString(tcReset)
 	return sb.String()
 }

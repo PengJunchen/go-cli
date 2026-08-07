@@ -103,8 +103,9 @@ func TestCodeRendererHonorsLanguage(t *testing.T) {
 func TestDiffRendererColorizes(t *testing.T) {
 	d := DiffRenderer{}
 	out := d.Render(context.Background(), "+added\n-removed\nctx", RenderOpts{Theme: DarkTheme{}})
-	assert.Contains(t, out, "\x1b[32m") // green for additions
-	assert.Contains(t, out, "\x1b[31m") // red for removals
+	// Truecolor: additions use Success green (#04E762), removals use Error red (#FF5C5C).
+	assert.Contains(t, out, "38;2;4;231;97")  // green for additions
+	assert.Contains(t, out, "38;2;255;92;92") // red for removals
 }
 
 func TestProgressRendererWidth(t *testing.T) {
@@ -165,25 +166,25 @@ func TestProgressRendererColorTiers(t *testing.T) {
 	ctx := context.Background()
 	opts := RenderOpts{Theme: DarkTheme{}, Width: 20}
 
-	// <50% → green (Success): DarkTheme Success fg=32
+	// <50% → green (Success): DarkTheme Success = #04E762
 	out := p.Render(ctx, "0.3", opts)
-	assert.Contains(t, out, "\x1b[32", "30%% should use green tier")
+	assert.Contains(t, out, "38;2;4;231;97", "30%% should use green tier")
 
-	// 50%-79% → yellow (Warning): DarkTheme Warning fg=33
+	// 50%-79% → yellow (Warning): DarkTheme Warning = #FFC000
 	out = p.Render(ctx, "0.6", opts)
-	assert.Contains(t, out, "\x1b[33", "60%% should use yellow tier")
+	assert.Contains(t, out, "38;2;255;192;0", "60%% should use yellow tier")
 
-	// >=80% → red (Error): DarkTheme Error fg=31
+	// >=80% → red (Error): DarkTheme Error = #FF5C5C
 	out = p.Render(ctx, "0.9", opts)
-	assert.Contains(t, out, "\x1b[31", "90%% should use red tier")
+	assert.Contains(t, out, "38;2;255;92;92", "90%% should use red tier")
 
 	// exactly 80% → red
 	out = p.Render(ctx, "0.8", opts)
-	assert.Contains(t, out, "\x1b[31", "80%% should use red tier")
+	assert.Contains(t, out, "38;2;255;92;92", "80%% should use red tier")
 
 	// exactly 50% → yellow
 	out = p.Render(ctx, "0.5", opts)
-	assert.Contains(t, out, "\x1b[33", "50%% should use yellow tier")
+	assert.Contains(t, out, "38;2;255;192;0", "50%% should use yellow tier")
 }
 
 func TestProgressRendererUsesBlockChars(t *testing.T) {
@@ -209,7 +210,7 @@ func TestToolOutputRendererStdout(t *testing.T) {
 		Stream:      "stdout",
 	})
 	assert.Contains(t, out, "[output]")
-	assert.Contains(t, out, "\x1b[37", "stdout should use Fg (white) style")
+	assert.Contains(t, out, "38;2;205;214;243", "stdout should use Fg style")
 	assert.NotContains(t, out, "[err]")
 }
 
@@ -224,7 +225,7 @@ func TestToolOutputRendererStderr(t *testing.T) {
 		Stream:      "stderr",
 	})
 	assert.Contains(t, out, "[err]")
-	assert.Contains(t, out, "\x1b[31", "stderr should use Error (red) style")
+	assert.Contains(t, out, "38;2;255;92;92", "stderr should use Error (red) style")
 	assert.NotContains(t, out, "[output]")
 }
 
@@ -239,6 +240,6 @@ func TestToolOutputRendererEmptyStreamDefaultsToStdout(t *testing.T) {
 		Stream:      "",
 	})
 	assert.Contains(t, out, "[output]")
-	assert.Contains(t, out, "\x1b[37", "empty stream should use Fg (white) style")
+	assert.Contains(t, out, "38;2;205;214;243", "empty stream should use Fg style")
 	assert.NotContains(t, out, "[err]")
 }

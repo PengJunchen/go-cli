@@ -108,7 +108,7 @@ This paragraph has **bold**, *italic*, and ~~strikethrough~~ text.
 	assert.Contains(t, plain, "─", "horizontal rule should contain ─ characters")
 
 	// --- Link: [text](url) format with underline ---
-	assert.Contains(t, out, "\x1b[4m", "link should have underline ANSI code")
+	assert.Contains(t, out, "\x1b[4;4m", "link should have underline ANSI code")
 	assert.Contains(t, plain, "[link text](https://example.com)")
 
 	// --- Image: [image: alt] format ---
@@ -135,15 +135,15 @@ This has **bold**, *italic*, ~~strikethrough~~, and a [link](https://x.com).
 		ContentType: ContentTypeMarkdown,
 	})
 
-	// Target ANSI codes to detect.
+	// Target ANSI codes to detect under the forced truecolor profile.
 	targets := map[string]string{
 		"bold(1)":          "\x1b[1m",
 		"italic(3)":        "\x1b[3m",
-		"underline(4)":     "\x1b[4m",
+		"underline(4)":     "\x1b[4;4m",
 		"strikethrough(9)": "\x1b[9m",
 		"reset(0)":         "\x1b[0m",
-		"color(104)":       "\x1b[104m", // bright cyan (DarkTheme Primary)
-		"color(98)":        "\x1b[98m",  // bright black (DarkTheme Secondary)
+		"color(primary)":   "38;2;125;86;244", // #7D56F4 (DarkTheme Primary)
+		"color(secondary)": "38;2;108;112;134", // #6C7086 (DarkTheme Secondary)
 	}
 
 	found := 0

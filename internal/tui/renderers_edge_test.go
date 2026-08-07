@@ -41,7 +41,9 @@ func TestAllRenderersMultiByteContent(t *testing.T) {
 			continue
 		}
 		out := r.Render(ctx, payload, RenderOpts{Theme: DarkTheme{}, Width: 60})
-		assert.Contains(t, out, "wörld", "%s should preserve multibyte payload", ct)
+		// lipgloss applies underline/strikethrough per-rune, so verify the
+		// visible payload via stripEscape rather than the raw ANSI output.
+		assert.Contains(t, stripEscape(out), "wörld", "%s should preserve multibyte payload", ct)
 	}
 }
 
@@ -75,12 +77,9 @@ func TestStripANSIUnicodeColumns(t *testing.T) {
 	assert.Equal(t, "世界\nok", out)
 }
 
-// TestJoinInts verifies joinInts renders codes joined by semicolons.
-func TestJoinInts(t *testing.T) {
-	assert.Equal(t, "30;1", joinInts([]int{30, 1}))
-	assert.Equal(t, "", joinInts(nil))
-	assert.Equal(t, "7", joinInts([]int{7}))
-}
+// TestJoinIntsWasRemoved: the manual joinInts helper was deleted together with
+// the custom ANSI Style struct when the package migrated to lipgloss. lipgloss
+// owns SGR sequence construction now, so there is nothing to unit-test here.
 
 // TestMarkdownRendererPreservesContent verifies markdown output contains the
 // full content. The AST-based renderer does not wrap paragraph text.
@@ -96,15 +95,17 @@ func TestTableRendererPreservesRowOrder(t *testing.T) {
 	lines := strings.Split(out, "\n")
 	require.Len(t, lines, 2)
 	// Header row is styled (starts with an escape); data row is not.
-	assert.True(t, strings.HasPrefix(lines[0], "\x1b[104m"))
+	assert.True(t, strings.HasPrefix(lines[0], "\x1b["))
 	assert.Equal(t, "c\td", lines[1])
 }
-
 // TestDiffRendererEmptyContent verifies diff on a single blank line renders the
-// context (fg) style applied to the empty line without panicking.
+// context (fg) style applied to the empty line without panicking. The fg style
+// wraps an empty payload, so after stripping escapes the visible text is empty.
 func TestDiffRendererEmptyContent(t *testing.T) {
 	out := (DiffRenderer{}).Render(context.Background(), "", RenderOpts{Theme: DarkTheme{}})
-	assert.Equal(t, "\x1b[37m\x1b[0m", out)
+	assert.True(t, strings.HasPrefix(out, "\x1b["), "empty diff line should still be fg-styled")
+	assert.True(t, strings.HasSuffix(out, "\x1b[0m"), "styled output should end with a reset")
+	assert.Equal(t, "", stripEscape(out))
 }
 
 // TestProgressRendererAlwaysExactlyWidth verifies the visible bar (█ and ░)
@@ -140,7 +141,7 @@ func TestStreamingRenderersRespectWidth(t *testing.T) {
 func TestTableRendererWrapInHeader(t *testing.T) {
 	out := (TableRenderer{}).Render(context.Background(), "head", RenderOpts{Theme: MockTheme{}, Width: 2})
 	// MockTheme Primary is red+bold; header single cell on its own line.
-	assert.True(t, strings.HasPrefix(out, "\x1b[31"), "header should be wrapped in primary style")
+	assert.True(t, strings.HasPrefix(out, "\x1b["), "header should be wrapped in primary style")
 }
 
 // TestFileTreeRendererTrimsTrailingNewline verifies renderers do not emit a

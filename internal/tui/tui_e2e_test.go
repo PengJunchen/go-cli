@@ -86,8 +86,8 @@ func TestE2EThemeManagerDrivesRendering(t *testing.T) {
 
 	app := NewBubbleteaApp(events, WithThemeManager(mgr))
 	require.NoError(t, app.Run(context.Background()))
-	// Light theme primary = blue (34).
-	require.Contains(t, app.View(), "\x1b[34m")
+	// Light theme primary = #1E66F5 (truecolor blue).
+	require.Contains(t, app.View(), "38;2;30;102;245")
 }
 
 // TestE2ERegistryCannedRenderer verifies a registered custom renderer is used
