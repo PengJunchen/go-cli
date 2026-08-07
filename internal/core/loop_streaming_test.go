@@ -225,7 +225,7 @@ func TestExecuteToolsParallelStreaming(t *testing.T) {
 		{ID: "pb", Name: "parallel_b"},
 	}
 
-	results := executeToolsParallel(context.Background(), tr, calls, es)
+	results, _ := executeToolsParallel(context.Background(), tr, calls, es)
 	require.Len(t, results, 2)
 
 	// Results preserve input order.

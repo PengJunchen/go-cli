@@ -461,7 +461,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 				sendEvent(AgentEvent{Kind: "tool_call", Content: tc.Name, Timestamp: time.Now()})
 				logger.Info("core.loop.tool_call", "iteration", iter, "tool", tc.Name, "mode", "parallel")
 			}
-			results := executeToolsParallel(spanCtx, l.tools, resp.ToolCalls, es)
+			results, perr := executeToolsParallel(spanCtx, l.tools, resp.ToolCalls, es)
 			for _, res := range results {
 				if res.Err != nil {
 					logger.Warn("core.loop.tool_error", "tool", res.Name, "err", res.Err)
@@ -479,6 +479,9 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 					Name:       res.Name,
 					Content:    res.Output,
 				})
+			}
+			if perr != nil {
+				return events, perr
 			}
 		} else {
 			// Sequential mode: execute one tool at a time.
