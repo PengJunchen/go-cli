@@ -65,6 +65,15 @@ type Parameterized interface {
 	Parameters() any
 }
 
+// ArgumentPreparer preprocesses tool call arguments before execution. It can
+// normalize paths, fill defaults, validate against schema, or transform types.
+// Preparers are applied in order; the output of one feeds into the next.
+type ArgumentPreparer interface {
+	// PrepareArguments transforms the call's arguments and returns a new
+	// (or modified) ToolCall. Returning an error prevents execution.
+	PrepareArguments(ctx context.Context, call ToolCall) (ToolCall, error)
+}
+
 // PromptGuideliner is an optional interface that tools can implement to
 // provide usage guidelines injected into the system prompt. This is analogous
 // to Parameterized: tools that wish to steer the model's tool usage should
