@@ -186,7 +186,7 @@ func TestAppWithCustomTheme(t *testing.T) {
 	go func() { runErr <- app.Run(context.Background()) }() //nolint:errcheck
 
 	events <- AgentEvent{ContentType: ContentTypeCode, Content: "x := 1"}
-	require.Eventually(t, func() bool { return app.eventsSeen.Load() == 1 },
+	require.Eventually(t, func() bool { return app.EventsProcessed() == 1 },
 		time.Second, 5*time.Millisecond)
 	app.Quit()
 	<-runErr
