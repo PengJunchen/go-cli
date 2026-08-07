@@ -143,3 +143,67 @@ func TestToolSearchName(t *testing.T) {
 	assert.Equal(t, "tool_search", tool.Name())
 	assert.Contains(t, tool.Description(), "query")
 }
+
+func TestToolSearchScore(t *testing.T) {
+	tool := NewToolSearchTool(newSearchFixture(t))
+
+	bashDef := &searchTestTool{name: "bash", description: "runs a shell command"}
+	grepDef := &searchTestTool{name: "grep", description: "searches files for a pattern"}
+
+	// Name-only match: "bash" matches the name of bashDef but not its
+	// description or category.
+	nameScore := tool.Score("bash", bashDef)
+	// Description-only match: "command" matches the description of bashDef
+	// but not its name or category.
+	descScore := tool.Score("command", bashDef)
+	// No match at all.
+	noMatchScore := tool.Score("xyzzy", grepDef)
+	// Empty query returns 0.
+	emptyScore := tool.Score("", grepDef)
+
+	assert.Equal(t, 3.0, nameScore, "name-only match should score 3.0")
+	assert.Equal(t, 2.0, descScore, "description-only match should score 2.0")
+	assert.Greater(t, nameScore, descScore, "name match should score higher than description match")
+	assert.Equal(t, 0.0, noMatchScore)
+	assert.Equal(t, 0.0, emptyScore)
+}
+
+func TestTopTools(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	tool := NewToolSearchTool(newSearchFixture(t))
+
+	// K < total: returns exactly K tools, ranked by relevance.
+	result, err := tool.TopTools(context.Background(), "file", 3)
+	require.NoError(t, err)
+	require.Len(t, result, 3)
+
+	names := make([]string, len(result))
+	for i, d := range result {
+		names[i] = d.Name()
+	}
+	// read, write, and grep all have "file" in their description or category.
+	assert.Contains(t, names, "read")
+	assert.Contains(t, names, "write")
+	assert.Contains(t, names, "grep")
+	// curl and bash do not match "file".
+	assert.NotContains(t, names, "curl")
+	assert.NotContains(t, names, "bash")
+
+	// K >= total: returns all tools.
+	all, err := tool.TopTools(context.Background(), "file", 10)
+	require.NoError(t, err)
+	assert.Len(t, all, 5)
+
+	// K = 0: returns empty slice.
+	zero, err := tool.TopTools(context.Background(), "file", 0)
+	require.NoError(t, err)
+	assert.Len(t, zero, 0)
+
+	// Empty query with K < total: all scores are 0, so sorted by name.
+	empty, err := tool.TopTools(context.Background(), "", 2)
+	require.NoError(t, err)
+	require.Len(t, empty, 2)
+	assert.Equal(t, "bash", empty[0].Name())
+	assert.Equal(t, "curl", empty[1].Name())
+}

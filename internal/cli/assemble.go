@@ -728,6 +728,7 @@ func AssembleAgent(
 	var loopAgent *core.LoopAgent
 	if la, ok := loop.(*core.LoopAgent); ok {
 		loopAgent = la
+		loopAgent.WithToolSearchThreshold(30)
 	}
 
 	// 10b. Wire loop detector + system reminder injector.
