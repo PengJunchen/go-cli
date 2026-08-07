@@ -109,6 +109,26 @@ func (g *DefaultRunSlotGuard) Release(claim RunClaim) {
 	slog.Info("core.run_slot.released", "id", claim.ID)
 }
 
+// noopRunSlotGuard is a RunSlotGuard that performs no synchronization. It is
+// the zero-config default used when no guard is explicitly configured, so
+// callers that don't need single-run enforcement pay no overhead.
+type noopRunSlotGuard struct{}
+
+var defaultRunSlotGuard RunSlotGuard = noopRunSlotGuard{}
+
+// ClaimRun returns a no-op claim immediately.
+func (noopRunSlotGuard) ClaimRun(_ context.Context) (RunClaim, error) {
+	return RunClaim{ID: "noop", AcquiredAt: time.Now()}, nil
+}
+
+// ExecuteClaimedRun runs fn directly without any slot enforcement.
+func (noopRunSlotGuard) ExecuteClaimedRun(_ RunClaim, fn func() error) error {
+	return fn()
+}
+
+// Release is a no-op.
+func (noopRunSlotGuard) Release(_ RunClaim) {}
+
 // newClaimID generates a unique random hex identifier for a claim.
 func newClaimID() string {
 	b := make([]byte, 8)

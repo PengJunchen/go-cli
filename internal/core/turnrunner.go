@@ -32,15 +32,17 @@ type messageSource interface {
 // steering channel is set via SetSteerChannel, Steer sends the instruction to
 // that channel so the running loop picks it up between LLM iterations.
 type EinoTurnRunner struct {
-	loop      AgentLoop
-	agent     Agent
-	stream    EventStream
-	steerCh   chan string
-	hookChain *HookChain
-	mu        sync.Mutex
-	turns     map[string]*Turn
-	running   map[string]context.CancelFunc
-	idSeq     atomic.Uint64
+	loop       AgentLoop
+	agent      Agent
+	stream     EventStream
+	steerCh    chan string
+	followUpCh chan string
+	hookChain  *HookChain
+	runSlot    RunSlotGuard
+	mu         sync.Mutex
+	turns      map[string]*Turn
+	running    map[string]context.CancelFunc
+	idSeq      atomic.Uint64
 }
 
 var _ TurnRunner = (*EinoTurnRunner)(nil)
@@ -90,7 +92,12 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Re
 	r.turns[id] = turn
 	r.running[id] = cancel
 	hookChain := r.hookChain
+	runSlot := r.runSlot
 	r.mu.Unlock()
+
+	if runSlot == nil {
+		runSlot = defaultRunSlotGuard
+	}
 
 	// OnTurnStart lifecycle hook (invoked before the run begins).
 	if hookChain != nil {
@@ -107,22 +114,36 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Re
 
 	var result Result
 	var runErr error
-	if r.agent != nil {
-		// Delegate to the agent (includes history management). Pass the
-		// stream if one is set so events are streamed in real time.
-		if r.stream != nil {
-			result, runErr = r.agent.Run(spanCtx, submission, r.stream)
-		} else {
-			result, runErr = r.agent.Run(spanCtx, submission)
-		}
-	} else if r.stream != nil {
-		events, err := r.loop.Run(spanCtx, submission, r.stream)
-		runErr = err
-		result = Result{Message: lastMessageEvent(events), Success: runErr == nil}
+
+	// Claim the run slot before executing the turn so concurrent turns
+	// fail fast when a run is already in progress.
+	claimCtx, claimCancel := context.WithTimeout(spanCtx, 200*time.Millisecond)
+	claim, claimErr := runSlot.ClaimRun(claimCtx)
+	claimCancel()
+	if claimErr != nil {
+		runErr = claimErr
 	} else {
-		events, err := r.loop.Run(spanCtx, submission)
-		runErr = err
-		result = Result{Message: lastMessageEvent(events), Success: runErr == nil}
+		runErr = runSlot.ExecuteClaimedRun(claim, func() error {
+			var e error
+			if r.agent != nil {
+				// Delegate to the agent (includes history management). Pass the
+				// stream if one is set so events are streamed in real time.
+				if r.stream != nil {
+					result, e = r.agent.Run(spanCtx, submission, r.stream)
+				} else {
+					result, e = r.agent.Run(spanCtx, submission)
+				}
+			} else if r.stream != nil {
+				var events []AgentEvent
+				events, e = r.loop.Run(spanCtx, submission, r.stream)
+				result = Result{Message: lastMessageEvent(events), Success: e == nil}
+			} else {
+				var events []AgentEvent
+				events, e = r.loop.Run(spanCtx, submission)
+				result = Result{Message: lastMessageEvent(events), Success: e == nil}
+			}
+			return e
+		})
 	}
 
 	r.mu.Lock()
@@ -244,6 +265,14 @@ func (r *EinoTurnRunner) SetSteerChannel(ch chan string) {
 	r.steerCh = ch
 }
 
+// SetFollowUpChannel sets the channel used to deliver follow-up user messages
+// to the running loop. It must be called before RunTurn starts the turn.
+func (r *EinoTurnRunner) SetFollowUpChannel(ch chan string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.followUpCh = ch
+}
+
 // SetAgent sets the Agent that RunTurn delegates to when non-nil. When set,
 // RunTurn calls agent.Run (which includes history management) instead of
 // calling the loop directly.
@@ -260,6 +289,15 @@ func (r *EinoTurnRunner) SetHookChain(chain *HookChain) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.hookChain = chain
+}
+
+// SetRunSlotGuard sets the RunSlotGuard used to enforce single-run
+// exclusivity. When nil (or not set), the runner uses the noop default so
+// concurrent turns are allowed.
+func (r *EinoTurnRunner) SetRunSlotGuard(g RunSlotGuard) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.runSlot = g
 }
 
 // SetStream sets the EventStream that RunTurn passes to the agent or loop so
@@ -284,10 +322,30 @@ func (r *EinoTurnRunner) RunningTurnID() string {
 }
 
 // FollowUp appends a follow-up user message to a running turn. It is recorded
-// on the turn and surfaced via Get; it returns an error if the turn is unknown
-// or not running.
+// on the turn and surfaced via Get. When a follow-up channel is set, the
+// instruction is also sent to that channel so the running loop picks it up
+// between LLM iterations. It returns an error if the turn is unknown or not
+// running.
 func (r *EinoTurnRunner) FollowUp(_ context.Context, id, content string) error {
-	return r.inject(id, Submission{Type: SubmissionFollowUp, Content: content}, "followup")
+	if err := r.inject(id, Submission{Type: SubmissionFollowUp, Content: content}, "followup"); err != nil {
+		return err
+	}
+	// Send to the follow-up channel so the running loop drains it between
+	// LLM iterations. The send is non-blocking: if the channel is full,
+	// the message is still recorded on the Turn (above) and the loop will
+	// pick up whatever is in the buffer.
+	r.mu.Lock()
+	ch := r.followUpCh
+	r.mu.Unlock()
+	if ch != nil {
+		select {
+		case ch <- content:
+			slog.Info("core.turn.runner.followup.sent", "id", id, "content_len", len(content))
+		default:
+			slog.Warn("core.turn.runner.followup.channel_full", "id", id)
+		}
+	}
+	return nil
 }
 
 // inject appends a submission of the given kind to a running turn's

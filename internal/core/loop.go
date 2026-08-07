@@ -44,6 +44,7 @@ type loopConfig struct {
 	promptOpts           SystemPromptOptions
 	tracer               *tracing.Tracer
 	steerCh              chan string
+	followUpCh           chan string
 	thinkingConfig       *llm.ThinkingConfig
 }
 
@@ -101,6 +102,14 @@ func WithSteeringChannel(ch chan string) LoopOption {
 	return func(c *loopConfig) { c.steerCh = ch }
 }
 
+// WithFollowUpChannel sets the channel the loop drains for follow-up user
+// messages between LLM iterations. Like steering, follow-ups are injected as
+// user messages before the next LLM call. Follow-ups are drained after
+// steering so the model sees steering context first, then the follow-up.
+func WithFollowUpChannel(ch chan string) LoopOption {
+	return func(c *loopConfig) { c.followUpCh = ch }
+}
+
 // WithThinkingConfig sets the thinking configuration applied to every LLM
 // Generate/Stream call. When set, the loop appends llm.WithThinking(cfg) to
 // the generation options so the provider can enable reasoning according to the
@@ -126,6 +135,7 @@ type LoopAgent struct {
 	promptOpts           SystemPromptOptions
 	tracer               *tracing.Tracer
 	steerCh              chan string
+	followUpCh           chan string
 	thinkingConfig       *llm.ThinkingConfig
 	// toolSearchThreshold is the maximum number of tools to expose to the LLM
 	// without filtering. When the tool count exceeds this, tools are
@@ -204,6 +214,7 @@ func NewLoopAgent(opts ...LoopOption) *LoopAgent {
 		promptOpts:           cfg.promptOpts,
 		tracer:               cfg.tracer,
 		steerCh:              cfg.steerCh,
+		followUpCh:           cfg.followUpCh,
 		thinkingConfig:       cfg.thinkingConfig,
 	}
 	slog.Info("core.loop.new",
@@ -379,6 +390,13 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 		// so the model sees it on the next iteration.
 		if l.steerCh != nil {
 			drainSteerMessages(l.steerCh, &messages, logger)
+		}
+
+		// Drain any pending follow-up messages from the follow-up channel.
+		// Follow-ups are injected as user messages after steering so the
+		// model sees steering context first, then the follow-up.
+		if l.followUpCh != nil {
+			drainFollowUpMessages(l.followUpCh, &messages, logger)
 		}
 
 		// ---- LLM call (streaming) ----
@@ -688,6 +706,22 @@ func drainSteerMessages(ch chan string, msgs *[]llm.Message, logger *slog.Logger
 		case instruction := <-ch:
 			*msgs = append(*msgs, llm.Message{Role: llm.RoleUser, Content: instruction})
 			logger.Info("core.loop.steer_injected", "instruction", instruction)
+		default:
+			return
+		}
+	}
+}
+
+// drainFollowUpMessages non-blockingly drains all pending follow-up messages
+// from ch and appends each as a user message to *msgs. This mirrors
+// drainSteerMessages but is called after it so the model sees steering
+// context first, then the follow-up.
+func drainFollowUpMessages(ch chan string, msgs *[]llm.Message, logger *slog.Logger) {
+	for {
+		select {
+		case content := <-ch:
+			*msgs = append(*msgs, llm.Message{Role: llm.RoleUser, Content: content})
+			logger.Info("core.loop.followup_injected", "content_len", len(content))
 		default:
 			return
 		}
