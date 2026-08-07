@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"strings"
@@ -93,6 +94,13 @@ func WithWidth(width int) AppOption {
 	return func(a *BubbleteaApp) { a.width = width }
 }
 
+// WithInputReader sets an alternative io.Reader for the keyboard loop instead
+// of os.Stdin. This is used to share a multiplexed stdin between the TUI and
+// an Esc-key interrupt monitor.
+func WithInputReader(r io.Reader) AppOption {
+	return func(a *BubbleteaApp) { a.inputReader = r }
+}
+
 // WithOnUpdate registers a callback invoked after every view mutation. The
 // callback receives the freshly rendered view string so it does not need to
 // call View (which would deadlock on the internal mutex). The callback runs
@@ -147,6 +155,11 @@ type BubbleteaApp struct {
 	running  atomic.Bool
 	cleaned  bool
 	width    int
+
+	// inputReader, when set, replaces os.Stdin as the source for the
+	// keyboard loop. This allows callers to share a multiplexed stdin
+	// between the TUI and an Esc-key interrupt monitor.
+	inputReader io.Reader
 
 	mu         sync.Mutex
 	accordion  *AccordionModel

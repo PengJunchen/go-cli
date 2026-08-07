@@ -103,3 +103,32 @@ func (f *FilePathCompleter) Complete(input string, pos int) ([]Completion, int) 
 func isSpaceByte(b byte) bool { return b == ' ' || b == '\t' }
 
 var _ Completer = (*FilePathCompleter)(nil)
+
+// CompositeCompleter delegates completion to the first child that returns
+// non-empty results. Children are consulted in order; nil children are
+// skipped. If no child produces matches, it returns nil, 0.
+type CompositeCompleter struct {
+	children []Completer
+}
+
+var _ Completer = (*CompositeCompleter)(nil)
+
+// NewCompositeCompleter creates a CompositeCompleter from the given child
+// completers.
+func NewCompositeCompleter(children ...Completer) *CompositeCompleter {
+	return &CompositeCompleter{children: children}
+}
+
+// Complete iterates children in order, returning the first non-empty result.
+func (c *CompositeCompleter) Complete(input string, pos int) ([]Completion, int) {
+	for _, child := range c.children {
+		if child == nil {
+			continue
+		}
+		completions, start := child.Complete(input, pos)
+		if len(completions) > 0 {
+			return completions, start
+		}
+	}
+	return nil, 0
+}
