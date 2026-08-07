@@ -2,31 +2,75 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
+// subagentDepthKey is the context key used to propagate the sub-agent
+// recursion depth from a parent runner to its children. Each level of
+// recursion increments the depth by one so that deeply nested delegations
+// can be bounded.
+type subagentDepthKey struct{}
+
+// defaultMaxSubAgentDepth is the maximum recursion depth for sub-agent
+// delegation. A sub-agent at this depth may not dispatch further sub-agents.
+const defaultMaxSubAgentDepth = 3
+
+// errSubAgentDepthExceeded is returned when a sub-agent dispatch would exceed
+// the configured maximum recursion depth.
+var errSubAgentDepthExceeded = fmt.Errorf("sub-agent recursion depth limit (%d) exceeded", defaultMaxSubAgentDepth)
+
 // realSubAgentRunner implements subAgentRunner by constructing a fresh
 // LoopAgent -> AgentImpl -> HarnessImpl stack per Run call. Unlike the
 // simulated runner it calls the real LLM and produces genuine responses.
 type realSubAgentRunner struct {
-	model        llm.BaseChatModel
-	registry     *llm.ProviderRegistry
-	modelName    string
-	tools        tools.ToolRegistry
-	allowedTools []string
-	maxIter      int
-	systemPrompt string
-	opts         []LoopOption
+	model          llm.BaseChatModel
+	registry       *llm.ProviderRegistry
+	modelName      string
+	tools          tools.ToolRegistry
+	allowedTools   []string
+	maxIter        int
+	systemPrompt   string
+	opts           []LoopOption
+	depth          int
+	maxDepth       int
+	compactionHook CompactionHook
 }
 
 var _ subAgentRunner = (*realSubAgentRunner)(nil)
 
 // Run creates an independent agent stack, submits the prompt, drains events
-// via emit, and returns the final assistant message.
+// via emit, and returns the final assistant message. It enforces the
+// recursion depth limit: if the depth propagated through the context meets or
+// exceeds maxDepth, the run is aborted with errSubAgentDepthExceeded.
 func (r *realSubAgentRunner) Run(ctx context.Context, prompt string, inbox <-chan string, emit func(AgentEvent)) (AgentMessage, error) {
+	// Read the recursion depth from the context (default 0 for top-level).
+	depth := r.depth
+	if d, ok := ctx.Value(subagentDepthKey{}).(int); ok && d > depth {
+		depth = d
+	}
+	r.depth = depth
+
+	// Enforce the recursion depth limit before spawning the sub-agent.
+	maxDepth := r.maxDepth
+	if maxDepth <= 0 {
+		maxDepth = defaultMaxSubAgentDepth
+	}
+	if depth >= maxDepth {
+		slog.Warn("core.subagent.real_runner.depth_exceeded",
+			"depth", depth,
+			"max_depth", maxDepth,
+		)
+		emit(AgentEvent{Kind: "error", Content: errSubAgentDepthExceeded.Error()})
+		return AgentMessage{}, fmt.Errorf("core: %w", errSubAgentDepthExceeded)
+	}
+
+	// Propagate depth+1 to any child sub-agents dispatched by this run.
+	ctx = context.WithValue(ctx, subagentDepthKey{}, depth+1)
+
 	// Drain any pending inbox messages before starting the agent so follow-up
 	// messages delivered before Run are visible as "user" events.
 	if err := pumpInbox(ctx, inbox, emit); err != nil {
@@ -69,7 +113,13 @@ func (r *realSubAgentRunner) Run(ctx context.Context, prompt string, inbox <-cha
 	loopOpts = append(loopOpts, r.opts...)
 
 	loop := NewLoopAgent(loopOpts...)
-	agent := NewAgentImpl("subagent", loop)
+	agentOpts := []AgentOption{}
+	if r.compactionHook != nil {
+		agentOpts = append(agentOpts, WithCompactionHook(r.compactionHook))
+	} else {
+		agentOpts = append(agentOpts, WithCompactionHook(defaultSubAgentCompactionHook))
+	}
+	agent := NewAgentImpl("subagent", loop, agentOpts...)
 	h := NewHarnessImpl(agent, WithEventBuffer(32))
 
 	stream, err := h.Submit(ctx, prompt)
@@ -93,6 +143,27 @@ func (r *realSubAgentRunner) Run(ctx context.Context, prompt string, inbox <-cha
 	return final, nil
 }
 
+// subagentMaxHistory is the maximum number of messages a sub-agent's history
+// may grow to before the default compaction hook trims it.
+const subagentMaxHistory = 40
+
+// defaultSubAgentCompactionHook is the CompactionHook injected into every
+// sub-agent's AgentImpl. It trims the history to the most recent
+// subagentMaxHistory messages so a long-running sub-agent does not consume
+// unbounded context. The first message (system prompt) is always preserved.
+func defaultSubAgentCompactionHook(_ context.Context, messages []AgentMessage) ([]AgentMessage, error) {
+	if len(messages) <= subagentMaxHistory {
+		return messages, nil
+	}
+	// Keep the first message (typically the system prompt) and the most
+	// recent messages up to the limit.
+	keep := subagentMaxHistory - 1
+	compacted := make([]AgentMessage, 0, subagentMaxHistory)
+	compacted = append(compacted, messages[0])
+	compacted = append(compacted, messages[len(messages)-keep:]...)
+	return compacted, nil
+}
+
 // NewRealSubAgentRunnerFactory returns a SubAgentRunnerFactory that produces
 // realSubAgentRunner instances. The model and tool registry are captured in
 // the closure so every sub-agent gets the same LLM and tool set as the parent.
@@ -111,6 +182,7 @@ func NewRealSubAgentRunnerFactory(model llm.BaseChatModel, registry *llm.Provide
 			maxIter:      maxIter,
 			systemPrompt: cfg.SystemPrompt,
 			opts:         opts,
+			maxDepth:     defaultMaxSubAgentDepth,
 		}
 	}
 }

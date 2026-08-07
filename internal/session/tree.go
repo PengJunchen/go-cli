@@ -34,6 +34,9 @@ type DefaultSessionTree struct {
 	branchSummary BranchSummary
 	// summarySeq generates unique ids for appended branch-summary entries.
 	summarySeq atomic.Uint64
+	// gitSwitcher, when non-nil, is used by Branch to create git branches and
+	// by MoveTo to checkout git branches on resume.
+	gitSwitcher GitBranchSwitcher
 }
 
 var _ SessionTree = (*DefaultSessionTree)(nil)
@@ -127,7 +130,32 @@ func (t *DefaultSessionTree) MoveTo(ctx context.Context, leafID string) error {
 		}
 	}
 	summarizer := t.branchSummary
+
+	// Look up the git branch associated with the target leaf. A branch's
+	// BaseLeafID is the entry the branch was forked from; when we move to
+	// that entry, we check out the associated git branch.
+	var gitBranch string
+	var switcher GitBranchSwitcher
+	if t.gitSwitcher != nil {
+		switcher = t.gitSwitcher
+		for _, meta := range t.branches {
+			if meta.BaseLeafID == leafID && meta.GitBranch != "" {
+				gitBranch = meta.GitBranch
+				break
+			}
+		}
+	}
 	t.mu.Unlock()
+
+	// Check out the associated git branch. Failures are logged as warnings
+	// but do not fail the session branch switch (graceful degradation).
+	if gitBranch != "" && switcher != nil {
+		if err := switcher.Checkout(ctx, gitBranch); err != nil {
+			logger.Warn("session_tree_move_git_checkout_failed", "op", "session.tree.move", "leaf_id", leafID, "git_branch", gitBranch, "err", err)
+		} else {
+			logger.Info("session_tree_move_git_checkout", "op", "session.tree.move", "leaf_id", leafID, "git_branch", gitBranch)
+		}
+	}
 
 	if len(departEntries) > 0 {
 		summary, err := summarizer.Summarize(ctx, departEntries)
@@ -167,6 +195,15 @@ func (t *DefaultSessionTree) SetBranchSummary(s BranchSummary) {
 	if s != nil {
 		slog.Info("session_tree_set_branch_summary", "op", "session.tree.set_branch_summary", "name", s.Name())
 	}
+}
+
+// SetGitBranchSwitcher wires a GitBranchSwitcher into the tree. When non-nil,
+// Branch creates the corresponding git branch (via WithGitBranch) and MoveTo
+// checks out the associated git branch when switching to a branch that has one.
+func (t *DefaultSessionTree) SetGitBranchSwitcher(g GitBranchSwitcher) {
+	t.mu.Lock()
+	t.gitSwitcher = g
+	t.mu.Unlock()
 }
 
 // nextSummaryID returns a unique id for a branch-summary entry.

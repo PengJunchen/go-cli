@@ -56,11 +56,19 @@ type SubagentDispatcher interface {
 	ListRunning() []SubagentTask
 }
 
+// SubagentEventForwarder is a callback invoked for each event emitted by a
+// running sub-agent. The taskID identifies which sub-agent produced the event,
+// allowing callers to prefix or indent the output. When no forwarder is set,
+// sub-agent events are drained silently.
+type SubagentEventForwarder func(taskID string, ev AgentEvent)
+
 // DefaultSubagentDispatcher is the default SubagentDispatcher. It uses a
 // SubAgentFactory to spawn sub-agents, tracks in-flight tasks, and emits
 // slog.Debug tracing around dispatch lifecycle events.
 type DefaultSubagentDispatcher struct {
 	factory SubAgentFactory
+	onEvent SubagentEventForwarder
+	wg      sync.WaitGroup
 
 	mu      sync.Mutex
 	running map[string]SubagentTask
@@ -80,6 +88,30 @@ func NewDefaultSubagentDispatcher(factory SubAgentFactory) *DefaultSubagentDispa
 	}
 }
 
+// SetEventForwarder registers a callback that receives every event emitted by
+// running sub-agents. Pass nil to disable forwarding (events are drained
+// silently). This is the integration seam for forwarding sub-agent events to
+// the main EventStream or TUI.
+func (d *DefaultSubagentDispatcher) SetEventForwarder(fn SubagentEventForwarder) {
+	d.mu.Lock()
+	d.onEvent = fn
+	d.mu.Unlock()
+}
+
+// forwardEvents drains evCh, forwarding each event to the onEvent callback (if
+// set) so sub-agent activity is visible to the parent. When no forwarder is
+// registered, events are silently consumed.
+func (d *DefaultSubagentDispatcher) forwardEvents(taskID string, evCh <-chan AgentEvent) {
+	d.mu.Lock()
+	fn := d.onEvent
+	d.mu.Unlock()
+	for ev := range evCh {
+		if fn != nil {
+			fn(taskID, ev)
+		}
+	}
+}
+
 // Dispatch creates a sub-agent for task, streams its events to a drain, waits
 // for the final message, and returns the result. The task is tracked as
 // running for the duration of the dispatch.
@@ -95,7 +127,7 @@ func (d *DefaultSubagentDispatcher) Dispatch(ctx context.Context, task SubagentT
 	config := SubAgentConfig{
 		Name:         task.ID,
 		SystemPrompt: resolveSubAgentSystemPrompt(task),
-		Tools:        task.Tools,
+		Tools:        resolveSubAgentTools(task),
 		Model:        task.Model,
 		MaxTurns:     task.MaxTurns,
 	}
@@ -122,14 +154,18 @@ func (d *DefaultSubagentDispatcher) Dispatch(ctx context.Context, task SubagentT
 		return res, err
 	}
 
-	// Drain the event stream so the sub-agent is never blocked publishing
-	// events while we wait for the final message.
+	// Forward the event stream so the sub-agent is never blocked publishing
+	// events while we wait for the final message. When an event forwarder is
+	// registered, events are forwarded to the parent; otherwise they are
+	// silently drained.
+	d.wg.Add(1)
 	go func() {
-		for range evCh {
-		}
+		defer d.wg.Done()
+		d.forwardEvents(task.ID, evCh)
 	}()
 
 	final, waitErr := sub.Wait(ctx)
+	d.wg.Wait() // ensure all forwarded events are processed before returning
 	duration := time.Since(start)
 
 	slog.Debug("core.subagent_dispatcher.complete",
@@ -178,7 +214,7 @@ func (d *DefaultSubagentDispatcher) ParallelDispatch(ctx context.Context, tasks 
 		config := SubAgentConfig{
 			Name:         task.ID,
 			SystemPrompt: resolveSubAgentSystemPrompt(task),
-			Tools:        task.Tools,
+			Tools:        resolveSubAgentTools(task),
 			Model:        task.Model,
 			MaxTurns:     task.MaxTurns,
 		}
@@ -226,10 +262,7 @@ func (d *DefaultSubagentDispatcher) ParallelDispatch(ctx context.Context, tasks 
 				return
 			}
 
-			go func() {
-				for range evCh {
-				}
-			}()
+			go d.forwardEvents(t.ID, evCh)
 
 			final, waitErr := subs[idx].Wait(ctx)
 			results[idx] = SubagentResult{

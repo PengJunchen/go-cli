@@ -2,7 +2,9 @@ package config
 
 import (
 	"errors"
+	"fmt"
 	"log/slog"
+	"os"
 	"strings"
 )
 
@@ -38,6 +40,7 @@ var (
 	validTracingLevels        = []string{"debug", "info", "warn", "error"}
 	validTracingExporter      = []string{"jsonl", "stdout", "none"}
 	validCompactionStrategies = []string{"", "unified", "micro", "micro_first", "summary", "truncating"}
+	validGitPlatforms         = []string{"", "github", "gitlab", "bitbucket"}
 )
 
 // Validate evaluates the configuration and returns a combined error listing
@@ -71,6 +74,27 @@ func (v *DefaultValidator) Validate(cfg Config) error {
 	}
 	if !contains(validCompactionStrategies, cfg.Compaction.Strategy) {
 		errs = append(errs, "invalid compaction strategy (supported: unified, micro, summary, truncating)")
+	}
+
+	// Git config: when APIToken is non-empty, Platform must be one of the
+	// supported platforms.
+	if cfg.Git.APIToken != "" && !contains(validGitPlatforms, cfg.Git.Platform) {
+		errs = append(errs, "invalid git platform (supported: github, gitlab, bitbucket) required when api_token is set")
+	}
+
+	// LSP config: when ServerCommand is non-empty, WorkspaceRoot (if set)
+	// must be an existing directory.
+	if len(cfg.LSP.ServerCommand) > 0 && cfg.LSP.WorkspaceRoot != "" {
+		if fi, err := os.Stat(cfg.LSP.WorkspaceRoot); err != nil || !fi.IsDir() {
+			errs = append(errs, "lsp workspace_root does not exist or is not a directory")
+		}
+	}
+	for i, srv := range cfg.LSP.Servers {
+		if len(srv.ServerCommand) > 0 && srv.WorkspaceRoot != "" {
+			if fi, err := os.Stat(srv.WorkspaceRoot); err != nil || !fi.IsDir() {
+				errs = append(errs, fmt.Sprintf("lsp servers[%d] workspace_root does not exist or is not a directory", i))
+			}
+		}
 	}
 
 	if len(errs) > 0 {

@@ -4,7 +4,16 @@ import (
 	"bufio"
 	"context"
 	"os"
+	"time"
 )
+
+// escSequenceTimeout is the window within which a following byte must arrive
+// after an ESC (0x1B) for the sequence to be treated as a CSI escape rather
+// than a standalone Esc keypress. After reading 0x1B the keyboard loop sleeps
+// for this duration, then checks whether more bytes are already buffered. If
+// buffered, the sequence is decoded as a CSI key; otherwise it is treated as
+// a standalone Esc.
+const escSequenceTimeout = 50 * time.Millisecond
 
 // keyMsg carries a parsed keyboard action through the msgCh into the render
 // loop. Decoding happens in keyboardLoop so the main select stays simple.
@@ -71,26 +80,36 @@ func (a *BubbleteaApp) keyboardLoop(ctx context.Context) {
 		var msg keyMsg
 		switch b {
 		case 0x1b: // ESC - could be a CSI sequence or a lone Escape
-			b2, err := reader.ReadByte()
-			if err != nil {
-				msg = keyQuit
-				break
-			}
-			if b2 == '[' {
-				b3, err := reader.ReadByte()
+			// Wait briefly to distinguish standalone Esc from a CSI sequence.
+			// If more bytes are already buffered (e.g. ESC [ A = up arrow),
+			// decode the CSI sequence; otherwise treat as standalone Esc.
+			time.Sleep(escSequenceTimeout)
+			if reader.Buffered() > 0 {
+				b2, err := reader.ReadByte()
 				if err != nil {
-					continue
+					msg = keyQuit
+					break
 				}
-				switch b3 {
-				case 'A':
-					msg = keySelectUp
-				case 'B':
-					msg = keySelectDown
-				default:
-					continue
+				if b2 == '[' {
+					b3, err := reader.ReadByte()
+					if err != nil {
+						continue
+					}
+					switch b3 {
+					case 'A':
+						msg = keySelectUp
+					case 'B':
+						msg = keySelectDown
+					default:
+						continue
+					}
+				} else {
+					// ESC followed by a non-'[' byte - treat as standalone Esc.
+					msg = keyQuit
 				}
 			} else {
-				continue
+				// No following byte within timeout - standalone Esc.
+				msg = keyQuit
 			}
 		case '\t':
 			msg = keySteerEnter
@@ -122,18 +141,25 @@ func (a *BubbleteaApp) handleSteerKey(ctx context.Context, reader *bufio.Reader,
 	var msg any
 	switch b {
 	case 0x1b: // ESC - cancel steer
-		// Check if this is a CSI sequence (arrow key); if so, ignore.
-		b2, err := reader.ReadByte()
-		if err != nil {
+		// Wait briefly to distinguish standalone Esc from a CSI sequence.
+		time.Sleep(escSequenceTimeout)
+		if reader.Buffered() > 0 {
+			b2, err := reader.ReadByte()
+			if err != nil {
+				msg = keySteerCancel
+				break
+			}
+			if b2 == '[' {
+				// Read and discard the third byte of the CSI sequence.
+				_, _ = reader.ReadByte() //nolint:errcheck // best-effort discard
+				return
+			}
+			// ESC followed by a non-'[' byte - cancel steer.
 			msg = keySteerCancel
-			break
+		} else {
+			// No following byte within timeout - standalone Esc.
+			msg = keySteerCancel
 		}
-		if b2 == '[' {
-			// Read and discard the third byte of the CSI sequence.
-			_, _ = reader.ReadByte() //nolint:errcheck // best-effort discard
-			return
-		}
-		msg = keySteerCancel
 	case '\r', '\n': // Enter - submit
 		msg = keySteerSubmit
 	case 0x7f, 0x08: // Backspace / Ctrl+H

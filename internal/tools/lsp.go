@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os/exec"
+	"strings"
 	"sync"
 	"time"
 )
@@ -37,6 +38,35 @@ type Diagnostic struct {
 	Source   string `json:"source"`
 }
 
+// CompletionItem represents a single completion suggestion returned by the
+// language server.
+type CompletionItem struct {
+	Label  string `json:"label"`
+	Kind   int    `json:"kind"`
+	Detail string `json:"detail"`
+}
+
+// TextEdit is a text change applied to a specific range in a document.
+type TextEdit struct {
+	Range   Range  `json:"range"`
+	NewText string `json:"newText"`
+}
+
+// WorkspaceEdit represents a collection of textual edits across multiple
+// documents, typically returned by rename or code action requests.
+type WorkspaceEdit struct {
+	Changes map[string][]TextEdit `json:"changes"`
+}
+
+// defaultDiagTTL is the default time-to-live for cached diagnostics.
+const defaultDiagTTL = 5 * time.Minute
+
+// diagEntry holds cached diagnostics alongside the time they were received.
+type diagEntry struct {
+	diagnostics []Diagnostic
+	timestamp   time.Time
+}
+
 // LSPClient is the contract for interacting with a Language Server.
 type LSPClient interface {
 	// Initialize sends the LSP initialize request and the initialized
@@ -53,6 +83,18 @@ type LSPClient interface {
 	Hover(ctx context.Context, uri string, line, character int) (string, error)
 	// Diagnostics returns the cached diagnostics for the given document URI.
 	Diagnostics(ctx context.Context, uri string) ([]Diagnostic, error)
+	// DidOpen sends a textDocument/didOpen notification to the server.
+	DidOpen(ctx context.Context, uri string, content string, version int) error
+	// DidChange sends a textDocument/didChange notification to the server.
+	DidChange(ctx context.Context, uri string, content string, version int) error
+	// Completion returns completion suggestions at the given position.
+	Completion(ctx context.Context, uri string, line, character int) ([]CompletionItem, error)
+	// TypeDefinition returns the type definition locations for the symbol
+	// at the given position.
+	TypeDefinition(ctx context.Context, uri string, line, character int) ([]Location, error)
+	// Rename returns the workspace edits for renaming the symbol at the
+	// given position.
+	Rename(ctx context.Context, uri string, line, character int, newName string) (*WorkspaceEdit, error)
 	// Shutdown sends the LSP shutdown request and exit notification, then
 	// terminates the server subprocess.
 	Shutdown(ctx context.Context) error
@@ -66,7 +108,7 @@ type DefaultLSPClient struct {
 	cancel  context.CancelFunc
 	rootURI string
 	mu      sync.Mutex
-	diags   map[string][]Diagnostic
+	diags   map[string]diagEntry
 }
 
 var _ LSPClient = (*DefaultLSPClient)(nil)
@@ -112,7 +154,7 @@ func NewDefaultLSPClient(_ context.Context, command []string, workspaceRoot stri
 		rpc:    rpc,
 		cmd:    cmd,
 		cancel: cancel,
-		diags:  make(map[string][]Diagnostic),
+		diags:  make(map[string]diagEntry),
 	}
 	rpc.SetNotifyHandler(client.handleNotification)
 
@@ -125,7 +167,7 @@ func NewDefaultLSPClient(_ context.Context, command []string, workspaceRoot stri
 func newDefaultLSPClientWithRPC(rpc *JSONRPCClient) *DefaultLSPClient {
 	c := &DefaultLSPClient{
 		rpc:   rpc,
-		diags: make(map[string][]Diagnostic),
+		diags: make(map[string]diagEntry),
 	}
 	rpc.SetNotifyHandler(c.handleNotification)
 	return c
@@ -140,7 +182,10 @@ func (c *DefaultLSPClient) handleNotification(method string, params json.RawMess
 		}
 		if err := json.Unmarshal(params, &notif); err == nil {
 			c.mu.Lock()
-			c.diags[notif.URI] = notif.Diagnostics
+			c.diags[notif.URI] = diagEntry{
+				diagnostics: notif.Diagnostics,
+				timestamp:   time.Now(),
+			}
 			c.mu.Unlock()
 		}
 	}
@@ -220,14 +265,126 @@ func (c *DefaultLSPClient) Hover(ctx context.Context, uri string, line, characte
 }
 
 // Diagnostics returns cached diagnostics for the given document URI.
+// Entries older than defaultDiagTTL are treated as expired and return empty.
 func (c *DefaultLSPClient) Diagnostics(_ context.Context, uri string) ([]Diagnostic, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	diags := c.diags[uri]
-	if diags == nil {
-		diags = []Diagnostic{}
+	entry, ok := c.diags[uri]
+	if !ok || time.Since(entry.timestamp) > defaultDiagTTL {
+		return []Diagnostic{}, nil
 	}
-	return diags, nil
+	return entry.diagnostics, nil
+}
+
+// languageIDFromURI derives an LSP languageId from the file extension in
+// the URI. Unknown extensions default to "plaintext".
+func languageIDFromURI(uri string) string {
+	switch {
+	case strings.HasSuffix(uri, ".go"):
+		return "go"
+	case strings.HasSuffix(uri, ".ts"):
+		return "typescript"
+	case strings.HasSuffix(uri, ".tsx"):
+		return "typescriptreact"
+	case strings.HasSuffix(uri, ".js"):
+		return "javascript"
+	case strings.HasSuffix(uri, ".jsx"):
+		return "javascriptreact"
+	case strings.HasSuffix(uri, ".py"):
+		return "python"
+	case strings.HasSuffix(uri, ".rs"):
+		return "rust"
+	case strings.HasSuffix(uri, ".java"):
+		return "java"
+	case strings.HasSuffix(uri, ".rb"):
+		return "ruby"
+	case strings.HasSuffix(uri, ".c"):
+		return "c"
+	case strings.HasSuffix(uri, ".cpp"), strings.HasSuffix(uri, ".cc"):
+		return "cpp"
+	default:
+		return "plaintext"
+	}
+}
+
+// DidOpen sends a textDocument/didOpen notification so the server tracks
+// the document content in memory.
+func (c *DefaultLSPClient) DidOpen(ctx context.Context, uri string, content string, version int) error {
+	params := map[string]any{
+		"textDocument": map[string]any{
+			"uri":        uri,
+			"languageId": languageIDFromURI(uri),
+			"version":    version,
+			"text":       content,
+		},
+	}
+	if err := c.rpc.Notify(ctx, "textDocument/didOpen", params); err != nil {
+		return fmt.Errorf("lsp: didOpen: %w", err)
+	}
+	return nil
+}
+
+// DidChange sends a textDocument/didChange notification with a full-content
+// sync (the simplest textDocumentSync mode).
+func (c *DefaultLSPClient) DidChange(ctx context.Context, uri string, content string, version int) error {
+	params := map[string]any{
+		"textDocument": map[string]any{
+			"uri":     uri,
+			"version": version,
+		},
+		"contentChanges": []map[string]any{
+			{"text": content},
+		},
+	}
+	if err := c.rpc.Notify(ctx, "textDocument/didChange", params); err != nil {
+		return fmt.Errorf("lsp: didChange: %w", err)
+	}
+	return nil
+}
+
+// Completion returns completion suggestions at the given position.
+func (c *DefaultLSPClient) Completion(ctx context.Context, uri string, line, character int) ([]CompletionItem, error) {
+	params := map[string]any{
+		"textDocument": map[string]any{"uri": uri},
+		"position":     map[string]any{"line": line, "character": character},
+	}
+
+	var items []CompletionItem
+	if err := c.rpc.Call(ctx, "textDocument/completion", params, &items); err != nil {
+		return nil, fmt.Errorf("lsp: completion: %w", err)
+	}
+	return items, nil
+}
+
+// TypeDefinition returns the type definition locations for the symbol at
+// the given position.
+func (c *DefaultLSPClient) TypeDefinition(ctx context.Context, uri string, line, character int) ([]Location, error) {
+	params := map[string]any{
+		"textDocument": map[string]any{"uri": uri},
+		"position":     map[string]any{"line": line, "character": character},
+	}
+
+	var locs []Location
+	if err := c.rpc.Call(ctx, "textDocument/typeDefinition", params, &locs); err != nil {
+		return nil, fmt.Errorf("lsp: typeDefinition: %w", err)
+	}
+	return locs, nil
+}
+
+// Rename returns the workspace edits for renaming the symbol at the given
+// position to newName.
+func (c *DefaultLSPClient) Rename(ctx context.Context, uri string, line, character int, newName string) (*WorkspaceEdit, error) {
+	params := map[string]any{
+		"textDocument": map[string]any{"uri": uri},
+		"position":     map[string]any{"line": line, "character": character},
+		"newName":      newName,
+	}
+
+	var edit WorkspaceEdit
+	if err := c.rpc.Call(ctx, "textDocument/rename", params, &edit); err != nil {
+		return nil, fmt.Errorf("lsp: rename: %w", err)
+	}
+	return &edit, nil
 }
 
 // Shutdown sends the LSP shutdown request and exit notification, then

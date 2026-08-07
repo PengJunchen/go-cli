@@ -243,7 +243,21 @@ func loadFromEnv(prefix string) *Config {
 	cfg.Compaction.Strategy = os.Getenv(envKey(prefix, "COMPACTION_STRATEGY"))
 	cfg.Compaction.MaxTokens = parseIntEnv(envKey(prefix, "COMPACTION_MAX_TOKENS"))
 
+	// LSP server command: space-separated string (e.g. "gopls serve").
+	if cmd := os.Getenv(envKey(prefix, "LSP_SERVER_COMMAND")); cmd != "" {
+		cfg.LSP.ServerCommand = parseCommandString(cmd)
+	}
+	if root := os.Getenv(envKey(prefix, "LSP_WORKSPACE_ROOT")); root != "" {
+		cfg.LSP.WorkspaceRoot = root
+	}
+
 	return cfg
+}
+
+// parseCommandString splits a command string by whitespace into a command
+// and its arguments, suitable for the LSP ServerCommand field.
+func parseCommandString(s string) []string {
+	return strings.Fields(s)
 }
 
 // defaultConfig returns the built-in default configuration.
