@@ -47,10 +47,20 @@ type ParallelToolResult struct {
 // thread-safe: each goroutine writes to its own index in a pre-allocated
 // slice, so no locking is required for the results. When es is non-nil,
 // streaming tools push output lines through the EventStream in real time.
-func executeToolsParallel(ctx context.Context, tr tools.ToolRegistry, calls []llm.ToolCall, es EventStream) []ParallelToolResult {
-	results := make([]ParallelToolResult, len(calls))
+//
+// When ctx is canceled before all tools complete, executeToolsParallel
+// returns a snapshot of results: completed tools have their real output,
+// while incomplete tools are marked with Err set to ctx.Err(). The returned
+// error is non-nil when the context was canceled.
+func executeToolsParallel(ctx context.Context, tr tools.ToolRegistry, calls []llm.ToolCall, es EventStream) ([]ParallelToolResult, error) {
 	if len(calls) == 0 {
-		return results
+		return nil, nil
+	}
+
+	results := make([]ParallelToolResult, len(calls))
+	dones := make([]chan struct{}, len(calls))
+	for i := range dones {
+		dones[i] = make(chan struct{})
 	}
 
 	var wg sync.WaitGroup
@@ -58,6 +68,7 @@ func executeToolsParallel(ctx context.Context, tr tools.ToolRegistry, calls []ll
 		wg.Add(1)
 		go func(idx int, call llm.ToolCall) {
 			defer wg.Done()
+			defer close(dones[idx])
 			slog.Info("core.loop.tool_call_parallel",
 				"tool", call.Name,
 				"index", idx,
@@ -73,10 +84,42 @@ func executeToolsParallel(ctx context.Context, tr tools.ToolRegistry, calls []ll
 			}
 		}(i, tc)
 	}
-	wg.Wait()
+
+	allDone := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(allDone)
+	}()
+
+	select {
+	case <-allDone:
+		// All completed normally.
+	case <-ctx.Done():
+		// Context canceled - build a safe snapshot of completed results.
+		// For completed tools (done channel closed), the result is safe to
+		// read because the write happened-before the channel close. For
+		// incomplete tools, mark as canceled. A separate slice is used so
+		// that still-running goroutines writing to the original results
+		// slice do not race with the caller.
+		snapshot := make([]ParallelToolResult, len(calls))
+		for i, done := range dones {
+			select {
+			case <-done:
+				snapshot[i] = results[i]
+			default:
+				snapshot[i] = ParallelToolResult{
+					ID:   calls[i].ID,
+					Name: calls[i].Name,
+					Err:  ctx.Err(),
+				}
+			}
+		}
+		slog.Info("core.loop.parallel_canceled", "count", len(calls))
+		return snapshot, ctx.Err()
+	}
 
 	slog.Info("core.loop.parallel_complete", "count", len(calls))
-	return results
+	return results, nil
 }
 
 // executeSingleTool looks up the tool in the registry and runs it, returning
