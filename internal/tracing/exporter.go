@@ -29,6 +29,9 @@ type TraceExporter interface {
 // exporters in tests) can access the full span data including attributes,
 // events, and status.
 func SpanToData(span TraceSpan) SpanData {
+	if dp, ok := span.(SpanDataProvider); ok {
+		return dp.SpanData()
+	}
 	if ls, ok := span.(*localSpan); ok {
 		return ls.ToSpanData()
 	}
@@ -42,6 +45,138 @@ func SpanToData(span TraceSpan) SpanData {
 		StartTime:    span.StartTime().Format(time.RFC3339Nano),
 		EndTime:      span.EndTime().Format(time.RFC3339Nano),
 	}
+}
+
+// SpanDataProvider is implemented by spans that carry pre-computed SpanData.
+// SpanToData checks for this interface first so wrappers like RedactingExporter
+// can supply modified data without re-reading the original span.
+type SpanDataProvider interface {
+	SpanData() SpanData
+}
+
+// dataSpan wraps a SpanData so it can be passed as a TraceSpan to inner
+// exporters. It implements both TraceSpan and SpanDataProvider; SpanToData
+// returns the embedded data directly without re-reading span fields.
+type dataSpan struct {
+	data SpanData
+	ctx  context.Context
+}
+
+func (s *dataSpan) SpanData() SpanData    { return s.data }
+func (s *dataSpan) TraceID() string       { return s.data.TraceID }
+func (s *dataSpan) SpanID() string        { return s.data.SpanID }
+func (s *dataSpan) ParentSpanID() string  { return s.data.ParentSpanID }
+func (s *dataSpan) Name() string          { return s.data.Name }
+func (s *dataSpan) StartTime() time.Time {
+	t, _ := time.Parse(time.RFC3339Nano, s.data.StartTime)
+	return t
+}
+func (s *dataSpan) EndTime() time.Time {
+	t, _ := time.Parse(time.RFC3339Nano, s.data.EndTime)
+	return t
+}
+func (s *dataSpan) SetAttributes(...Attribute)    {}
+func (s *dataSpan) AddEvent(string, ...Attribute) {}
+func (s *dataSpan) SetStatus(SpanStatus, string)  {}
+func (s *dataSpan) End()                          {}
+func (s *dataSpan) Context() context.Context      { return s.ctx }
+
+var _ TraceSpan = (*dataSpan)(nil)
+
+// RedactionLevel controls how the RedactingExporter treats attributes.
+type RedactionLevel string
+
+const (
+	// RedactionLevelFull exports all attributes as-is.
+	RedactionLevelFull RedactionLevel = "full"
+	// RedactionLevelRedact masks sensitive attributes (default).
+	RedactionLevelRedact RedactionLevel = "redact"
+	// RedactionLevelOff strips ALL attributes from exported spans.
+	RedactionLevelOff RedactionLevel = "off"
+)
+
+// redactedValue is the placeholder used for masked sensitive attributes.
+const redactedValue = "***REDACTED***"
+
+// RedactingExporter wraps a TraceExporter and masks or strips sensitive
+// attributes before delegating to the inner exporter. It is non-destructive:
+// the original span is never modified.
+type RedactingExporter struct {
+	inner TraceExporter
+	level RedactionLevel
+}
+
+var _ TraceExporter = (*RedactingExporter)(nil)
+
+// NewRedactingExporter wraps inner with a redaction layer. When level is
+// empty, RedactionLevelRedact is used.
+func NewRedactingExporter(inner TraceExporter, level RedactionLevel) *RedactingExporter {
+	return &RedactingExporter{inner: inner, level: level}
+}
+
+// ExportSpan applies the redaction policy to a copy of the span data and
+// forwards it to the inner exporter.
+func (e *RedactingExporter) ExportSpan(ctx context.Context, span TraceSpan) error {
+	data := SpanToData(span)
+	// Deep-copy mutable slices so the original span is never modified.
+	data.Attributes = cloneAttributes(data.Attributes)
+	data.Events = cloneEvents(data.Events)
+
+	switch e.level {
+	case RedactionLevelOff:
+		// Strip all attributes.
+		data.Attributes = nil
+		for i := range data.Events {
+			data.Events[i].Attributes = nil
+		}
+	case RedactionLevelFull:
+		// Export as-is, no modification.
+	default: // RedactionLevelRedact or empty
+		for i := range data.Attributes {
+			if data.Attributes[i].Sensitive {
+				data.Attributes[i].Value = redactedValue
+			}
+		}
+		for i := range data.Events {
+			for j := range data.Events[i].Attributes {
+				if data.Events[i].Attributes[j].Sensitive {
+					data.Events[i].Attributes[j].Value = redactedValue
+				}
+			}
+		}
+	}
+
+	return e.inner.ExportSpan(ctx, &dataSpan{data: data, ctx: ctx})
+}
+
+// cloneAttributes returns a shallow copy of attrs. The elements (Attribute
+// structs) are copied by value, so mutating an element's field does not affect
+// the original slice.
+func cloneAttributes(attrs []Attribute) []Attribute {
+	if attrs == nil {
+		return nil
+	}
+	cp := make([]Attribute, len(attrs))
+	copy(cp, attrs)
+	return cp
+}
+
+// cloneEvents returns a deep copy of events, including each event's attributes.
+func cloneEvents(events []SpanEvent) []SpanEvent {
+	if events == nil {
+		return nil
+	}
+	cp := make([]SpanEvent, len(events))
+	copy(cp, events)
+	for i := range cp {
+		cp[i].Attributes = cloneAttributes(cp[i].Attributes)
+	}
+	return cp
+}
+
+// Shutdown delegates to the inner exporter.
+func (e *RedactingExporter) Shutdown(ctx context.Context) error {
+	return e.inner.Shutdown(ctx)
 }
 
 // MultiExporter exports each span to multiple exporters. A failure in one

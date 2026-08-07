@@ -243,7 +243,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		}
 
 		turnSpan, turnCtx := tracing.SpanFromContext(spanCtx, spanInteractiveTurn, tracing.SpanKindInternal)
-		turnSpan.SetAttributes(tracing.Attribute{Key: "user_message", Value: line})
+		turnSpan.SetAttributes(tracing.SensitiveAttribute("user_message", line))
 
 		// Wrap the turn context in a cancellable context so the user can
 		// interrupt the in-progress agent turn via Ctrl+C (non-TTY) or Esc
