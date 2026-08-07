@@ -531,9 +531,11 @@ func AssembleAgent(
 	// sees them. The schema validator uses the underlying (unwrapped) registry
 	// to avoid recursive lookups through the middleware chain.
 	hookToolMW := core.NewHookAwareToolMiddleware(hookChain)
+	planCtrl := core.NewDefaultPlanModeController()
 	pathNormalizer := tools.NewPathNormalizer("")
 	schemaValidator := tools.NewSchemaValidator(underlyingReg)
 	tr = tools.NewMiddlewareToolRegistry(tr,
+		core.NewPlanModeToolWrapper(planCtrl),
 		tools.WithArgumentPreparation(pathNormalizer, schemaValidator),
 		newProductionToolWrapper(idempotentCache, auditLog, telemetry, sessionID),
 		hookToolMW.WrapToolCall,
@@ -588,7 +590,6 @@ func AssembleAgent(
 	todoStore := tools.NewTodoStore()
 	taskStore := tools.NewTaskStore()
 	goalStore, _ := tools.NewDefaultGoalStore("") //nolint:errcheck
-	planCtrl := core.NewDefaultPlanModeController()
 	hitlEmitter := &cliHITLEmitter{out: out}
 
 	// Build the web search tool from config. Default is MockSearchProvider;
