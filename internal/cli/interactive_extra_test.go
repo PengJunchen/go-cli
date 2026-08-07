@@ -442,7 +442,7 @@ func TestPromptCmd_BuildModel_WithConfig(t *testing.T) {
 		},
 	}
 
-	model, cleanup, err := buildModel(t.Context(), rc, "test", "test-model")
+	model, _, cleanup, err := buildModel(t.Context(), rc, "test", "test-model")
 	require.NoError(t, err)
 	assert.NotNil(t, model)
 	require.NotNil(t, cleanup)
@@ -451,7 +451,7 @@ func TestPromptCmd_BuildModel_WithConfig(t *testing.T) {
 
 func TestPromptCmd_BuildModel_WithNilConfig(t *testing.T) {
 	t.Run("default provider succeeds", func(t *testing.T) {
-		model, cleanup, err := buildModel(t.Context(), nil, "eino", "test-model")
+		model, _, cleanup, err := buildModel(t.Context(), nil, "eino", "test-model")
 		require.NoError(t, err)
 		assert.NotNil(t, model)
 		require.NotNil(t, cleanup)
@@ -459,7 +459,7 @@ func TestPromptCmd_BuildModel_WithNilConfig(t *testing.T) {
 	})
 
 	t.Run("nonexistent provider fails", func(t *testing.T) {
-		model, _, err := buildModel(t.Context(), nil, "nonexistent-provider", "test-model")
+		model, _, _, err := buildModel(t.Context(), nil, "nonexistent-provider", "test-model")
 		require.Error(t, err)
 		assert.Nil(t, model)
 	})
@@ -480,7 +480,7 @@ func TestInteractiveCmd_BuildModel_WithConfig(t *testing.T) {
 		},
 	}
 
-	model, cleanup, err := buildModel(t.Context(), rc, "test", "test-model")
+	model, _, cleanup, err := buildModel(t.Context(), rc, "test", "test-model")
 	require.NoError(t, err)
 	assert.NotNil(t, model)
 	require.NotNil(t, cleanup)
@@ -489,7 +489,7 @@ func TestInteractiveCmd_BuildModel_WithConfig(t *testing.T) {
 
 func TestInteractiveCmd_BuildModel_WithNilConfig(t *testing.T) {
 	t.Run("default provider succeeds", func(t *testing.T) {
-		model, cleanup, err := buildModel(t.Context(), nil, "eino", "test-model")
+		model, _, cleanup, err := buildModel(t.Context(), nil, "eino", "test-model")
 		require.NoError(t, err)
 		assert.NotNil(t, model)
 		require.NotNil(t, cleanup)
@@ -497,7 +497,7 @@ func TestInteractiveCmd_BuildModel_WithNilConfig(t *testing.T) {
 	})
 
 	t.Run("nonexistent provider fails", func(t *testing.T) {
-		model, _, err := buildModel(t.Context(), nil, "nonexistent-provider", "test-model")
+		model, _, _, err := buildModel(t.Context(), nil, "nonexistent-provider", "test-model")
 		require.Error(t, err)
 		assert.Nil(t, model)
 	})

@@ -49,6 +49,10 @@ type AgentAssembly struct {
 	Estimator     compaction.TokenEstimator
 	MidTurn       *compaction.MidTurnCompact
 	MaxTokens     int
+	// ContextWindow is the model's total context window size (in tokens),
+	// used for TUI status bar and /cost occupancy display. Falls back to
+	// MaxTokens when the model doesn't report a context window.
+	ContextWindow int
 	Cleanup       func()
 	// Registry exposes the assembled components through the core.DefaultRegistry
 	// so callers can retrieve or override any subsystem via RegisterXxx. It is
@@ -222,7 +226,7 @@ func AssembleAgent(
 	}
 
 	// 1. Build model.
-	model, modelCleanup, err := buildModel(ctx, rc, providerName, modelName)
+	model, modelInfo, modelCleanup, err := buildModel(ctx, rc, providerName, modelName)
 	if err != nil {
 		return nil, fmt.Errorf("assemble: build model: %w", err)
 	}
@@ -857,6 +861,14 @@ func AssembleAgent(
 	asmSpan.SetStatus(tracing.SpanStatusOK, "")
 	asmSpan.End()
 
+	// Resolve the context window for TUI status bar and /cost occupancy.
+	// When the model reports a context window, use it; otherwise fall back
+	// to the compaction budget (MaxTokens) so the display still works.
+	contextWindow := modelInfo.ContextWindow
+	if contextWindow <= 0 {
+		contextWindow = ac.maxTokens
+	}
+
 	return &AgentAssembly{
 		Harness:            h,
 		Agent:              agent,
@@ -871,6 +883,7 @@ func AssembleAgent(
 		Estimator:          estimator,
 		MidTurn:            midTurn,
 		MaxTokens:          ac.maxTokens,
+		ContextWindow:      contextWindow,
 		Cleanup:            cleanup,
 		Registry:           reg,
 		FileTracker:        fileTracker,
@@ -902,7 +915,9 @@ func AssembleAgent(
 // buildModel resolves an llm.BaseChatModel from the loaded configuration.
 // When the configuration supplies a BaseURL or APIKey, a custom provider is
 // built with those settings; otherwise the default provider registry is used.
-func buildModel(ctx context.Context, rc *config.Config, providerName, modelName string) (llm.BaseChatModel, func(), error) {
+// It also returns the ModelInfo for the resolved model so callers can inspect
+// the context window and other metadata.
+func buildModel(ctx context.Context, rc *config.Config, providerName, modelName string) (llm.BaseChatModel, llm.ModelInfo, func(), error) {
 	cfg := llm.ModelConfig{Model: modelName}
 
 	if rc != nil && (rc.Provider.BaseURL != "" || rc.Provider.APIKey != "") {
@@ -912,11 +927,34 @@ func buildModel(ctx context.Context, rc *config.Config, providerName, modelName 
 			llm.WithAPIKey(rc.Provider.APIKey),
 			llm.WithDefaultModel(modelName),
 		)
-		return provider.Build(ctx, cfg)
+		m, cleanup, err := provider.Build(ctx, cfg)
+		if err != nil {
+			return nil, llm.ModelInfo{}, cleanup, err
+		}
+		return m, findModelInfo(provider.Models(), modelName), cleanup, nil
 	}
 
 	reg := llm.NewProviderRegistry()
-	return reg.GetModel(ctx, providerName, cfg)
+	provider, err := reg.Get(providerName)
+	if err != nil {
+		return nil, llm.ModelInfo{}, nil, err
+	}
+	m, cleanup, err := provider.Build(ctx, cfg)
+	if err != nil {
+		return nil, llm.ModelInfo{}, cleanup, err
+	}
+	return m, findModelInfo(provider.Models(), modelName), cleanup, nil
+}
+
+// findModelInfo searches a slice of ModelInfo for a model whose Name matches
+// the given name. It returns a zero ModelInfo when no match is found.
+func findModelInfo(models []llm.ModelInfo, name string) llm.ModelInfo {
+	for _, m := range models {
+		if m.Name == name {
+			return m
+		}
+	}
+	return llm.ModelInfo{}
 }
 
 // registerMCPTools connects to configured MCP servers and registers their

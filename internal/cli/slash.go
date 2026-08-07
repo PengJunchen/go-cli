@@ -36,6 +36,7 @@ type slashContext struct {
 	config        *config.Config
 	sessionStore  *session.JSONLSessionStore
 	memoryStore   memory.MemoryStore
+	contextWindow int
 }
 
 // defaultSlashReg is the fully populated registry shared by all interactive
