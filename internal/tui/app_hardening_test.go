@@ -29,6 +29,9 @@ func TestAppRunRestartable(t *testing.T) {
 	second <- AgentEvent{ContentType: ContentTypeStatus, Content: "two"}
 	close(second)
 
+	// Point the model at the fresh event source (the adapter's copy is kept in
+	// sync for inspection) and run again.
+	app.model.events = second
 	app.events = second
 	require.NoError(t, app.Run(context.Background()))
 	require.Equal(t, int64(2), app.EventsProcessed(), "a fresh run should keep consuming")
@@ -39,9 +42,9 @@ func TestAppRunRestartable(t *testing.T) {
 // app has already cleaned up (it only appends to the view buffer).
 func TestAppDrawAfterCleanup(t *testing.T) {
 	app := NewBubbleteaApp(make(chan AgentEvent, 1))
-	app.addEntry("status", "first")
+	app.model.addEntry("status", "first")
 	app.cleanup()
-	app.addEntry("status", "after")
+	app.model.addEntry("status", "after")
 	view := app.View()
 	require.Contains(t, view, "first")
 	require.Contains(t, view, "after")
@@ -57,7 +60,7 @@ func TestAppViewConcurrentReads(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < 200; i++ {
-				app.addEntry("status", "x")
+				app.model.addEntry("status", "x")
 			}
 		}()
 		go func() {
@@ -76,7 +79,7 @@ func TestAppViewConcurrentReads(t *testing.T) {
 // styling, producing a styled frame in the view.
 func TestAppHandleEventWithThemeManagerOverride(t *testing.T) {
 	app := NewBubbleteaApp(make(chan AgentEvent, 1))
-	app.handleEvent(context.Background(), AgentEvent{ContentType: ContentTypeCode, Content: "stylized"})
+	app.model.handleEvent(AgentEvent{ContentType: ContentTypeCode, Content: "stylized"})
 	// Code renderer emits an SGR fg escape around the payload.
 	require.Contains(t, app.View(), "\x1b[")
 	require.Contains(t, app.View(), "stylized")
@@ -86,7 +89,7 @@ func TestAppHandleEventWithThemeManagerOverride(t *testing.T) {
 // default renderer rather than being dropped.
 func TestAppHandleEventEmptyContentType(t *testing.T) {
 	app := NewBubbleteaApp(make(chan AgentEvent, 1))
-	app.handleEvent(context.Background(), AgentEvent{ContentType: "", Content: "empty-ct"})
+	app.model.handleEvent(AgentEvent{ContentType: "", Content: "empty-ct"})
 	require.Contains(t, app.View(), "empty-ct")
 }
 
@@ -94,7 +97,7 @@ func TestAppHandleEventEmptyContentType(t *testing.T) {
 // identifiers without erroring when they are empty.
 func TestAppHandleEventTraceSpanLogging(t *testing.T) {
 	app := NewBubbleteaApp(make(chan AgentEvent, 1))
-	app.handleEvent(context.Background(), AgentEvent{
+	app.model.handleEvent(AgentEvent{
 		ContentType: ContentTypeMarkdown,
 		Content:     "logged",
 		TraceID:     "trace-1",
@@ -160,7 +163,7 @@ func TestAppErrAlreadyRunningSentinel(t *testing.T) {
 // and appends the raw output line.
 func TestAppDrawNilRenderer(t *testing.T) {
 	app := NewBubbleteaApp(make(chan AgentEvent, 1))
-	app.addEntry("status", "raw")
+	app.model.addEntry("status", "raw")
 	require.Contains(t, app.View(), "raw")
 }
 
@@ -187,10 +190,10 @@ func TestAppRunConsumesStreamingThenReplaces(t *testing.T) {
 // buffer map is rebuilt to a fresh, non-nil map.
 func TestAppCleanupReleasesStreamBuffer(t *testing.T) {
 	app := NewBubbleteaApp(make(chan AgentEvent, 1))
-	app.streamBuf["streaming"] = &strings.Builder{}
+	app.model.streamBuf["streaming"] = &strings.Builder{}
 	app.cleanup()
-	require.NotNil(t, app.streamBuf)
-	require.Empty(t, app.streamBuf)
+	require.NotNil(t, app.model.streamBuf)
+	require.Empty(t, app.model.streamBuf)
 	require.True(t, app.cleaned)
 }
 

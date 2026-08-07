@@ -13,8 +13,8 @@ import (
 // accordion model in order.
 func TestAppDrawAppendNonStreaming(t *testing.T) {
 	app := NewBubbleteaApp(nil)
-	app.addEntry("status", "first")
-	app.addEntry("status", "second")
+	app.model.addEntry("status", "first")
+	app.model.addEntry("status", "second")
 	view := app.View()
 	assert.Contains(t, view, "first")
 	assert.Contains(t, view, "second")
@@ -24,8 +24,8 @@ func TestAppDrawAppendNonStreaming(t *testing.T) {
 // previous frame instead of appending.
 func TestAppDrawReplaceStreaming(t *testing.T) {
 	app := NewBubbleteaApp(nil)
-	app.addEntry("streaming", "a")
-	app.addEntry("streaming", "b")
+	app.model.addEntry("streaming", "a")
+	app.model.addEntry("streaming", "b")
 	view := app.View()
 	assert.Contains(t, view, "b")
 	assert.NotContains(t, view, "a")
@@ -35,7 +35,7 @@ func TestAppDrawReplaceStreaming(t *testing.T) {
 // when the buffer is empty (no last frame to replace yet).
 func TestAppDrawStreamingFirstAppends(t *testing.T) {
 	app := NewBubbleteaApp(nil)
-	app.addEntry("streaming", "only")
+	app.model.addEntry("streaming", "only")
 	assert.Contains(t, app.View(), "only")
 }
 
@@ -52,13 +52,14 @@ func TestIsStreamingRenderContentType(t *testing.T) {
 // when the internal queue is saturated. It must never block the caller.
 func TestAppSendDropsWhenFull(t *testing.T) {
 	app := NewBubbleteaApp(make(chan AgentEvent, 1))
-	require.Len(t, app.msgCh, 0)
+	ch := app.model.msgCh
+	require.Len(t, ch, 0)
 
 	// Fill the buffered (capacity 16) queue completely.
-	for i := 0; i < cap(app.msgCh); i++ {
+	for i := 0; i < cap(ch); i++ {
 		app.Send(i)
 	}
-	require.Len(t, app.msgCh, cap(app.msgCh))
+	require.Len(t, ch, cap(ch))
 
 	// The next Send must drop (default branch) without blocking.
 	done := make(chan struct{})
@@ -71,14 +72,14 @@ func TestAppSendDropsWhenFull(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("Send blocked on a full queue; expected non-blocking drop")
 	}
-	assert.Len(t, app.msgCh, cap(app.msgCh), "overflow message should have been dropped")
+	assert.Len(t, ch, cap(ch), "overflow message should have been dropped")
 }
 
 // TestAppHandleEventUnknownTypeFallback verifies handleEvent routes an unknown
 // content type through the default renderer and still draws to the view.
 func TestAppHandleEventUnknownTypeFallback(t *testing.T) {
 	app := NewBubbleteaApp(make(chan AgentEvent, 1))
-	app.handleEvent(context.Background(), AgentEvent{ContentType: "unknown-ct", Content: "payload"})
+	app.model.handleEvent(AgentEvent{ContentType: "unknown-ct", Content: "payload"})
 	assert.Contains(t, app.View(), "payload")
 	assert.Equal(t, int64(0), app.EventsProcessed(), "handleEvent should not bump the event counter")
 }
@@ -152,6 +153,8 @@ func TestAppOptionsOverride(t *testing.T) {
 	app := NewBubbleteaApp(make(chan AgentEvent, 1), WithRegistry(reg), WithWidth(42))
 	require.Equal(t, reg, app.reg)
 	require.Equal(t, 42, app.width)
+	require.Equal(t, reg, app.model.reg)
+	require.Equal(t, 42, app.model.width)
 }
 
 // TestAppSendAndEventsBothConsumed verifies the loop interleaves Send messages
@@ -179,25 +182,26 @@ func TestAppSendAndEventsBothConsumed(t *testing.T) {
 // to the last tool_call entry instead of creating a new top-level entry.
 func TestAppToolOutputAppendsToToolCall(t *testing.T) {
 	app := NewBubbleteaApp(nil)
+	m := app.model
 
-	app.handleEvent(context.Background(), AgentEvent{
+	m.handleEvent(AgentEvent{
 		ContentType: ContentTypeToolCall,
 		Content:     "bash echo hi",
 	})
-	app.handleEvent(context.Background(), AgentEvent{
+	m.handleEvent(AgentEvent{
 		ContentType: ContentTypeToolOutput,
 		Content:     "line one",
 		Stream:      "stdout",
 	})
-	app.handleEvent(context.Background(), AgentEvent{
+	m.handleEvent(AgentEvent{
 		ContentType: ContentTypeToolOutput,
 		Content:     "line two",
 		Stream:      "stderr",
 	})
 
 	// The accordion should have exactly one top-level entry (the tool_call).
-	require.Equal(t, 1, app.accordion.Len())
-	entries := app.accordion.Entries()
+	require.Equal(t, 1, m.accordion.Len())
+	entries := m.accordion.Entries()
 	require.Len(t, entries, 1)
 	full := entries[0].Full
 	assert.Contains(t, full, "bash echo hi")
@@ -211,15 +215,16 @@ func TestAppToolOutputAppendsToToolCall(t *testing.T) {
 // no preceding tool_call entry falls through to creating a new entry.
 func TestAppToolOutputNoToolCallFallsBack(t *testing.T) {
 	app := NewBubbleteaApp(nil)
+	m := app.model
 
-	app.handleEvent(context.Background(), AgentEvent{
+	m.handleEvent(AgentEvent{
 		ContentType: ContentTypeToolOutput,
 		Content:     "orphan output",
 		Stream:      "stdout",
 	})
 
-	require.Equal(t, 1, app.accordion.Len())
-	entries := app.accordion.Entries()
+	require.Equal(t, 1, m.accordion.Len())
+	entries := m.accordion.Entries()
 	require.Len(t, entries, 1)
 	assert.Contains(t, entries[0].Full, "orphan output")
 }
