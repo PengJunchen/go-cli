@@ -193,6 +193,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		diffGenerator:  assembly.DiffGenerator,
 		planCtrl:       assembly.PlanCtrl,
 		memoryStore:    assembly.MemoryStore,
+		contextWindow:  assembly.ContextWindow,
 	}
 
 	entryCounter := len(assembly.Agent.Messages())
@@ -665,7 +666,7 @@ func emitTokenUsageEvent(stream *core.EventStreamImpl, assembly *AgentAssembly) 
 		TokenUsage: &core.TokenUsage{
 			InputTokens:  inputTokens,
 			OutputTokens: outputTokens,
-			MaxTokens:    assembly.MaxTokens,
+			MaxTokens:    assembly.ContextWindow,
 			Cost:         cost,
 		},
 	})

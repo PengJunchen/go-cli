@@ -78,6 +78,16 @@ func (h *CostHandler) Handle(_ context.Context, _ []string, sc *slashContext) er
 			fmt.Fprintf(sc.out, "  Tokens out: %d\n", stats.TokensOut) //nolint:errcheck
 		}
 	}
+	if sc.contextWindow > 0 {
+		totalTokens := 0
+		if sc.statsRegistry != nil && sc.sessionID != "" {
+			if stats, ok := sc.statsRegistry.GetSessionStats(sc.sessionID); ok {
+				totalTokens = stats.TokensIn + stats.TokensOut
+			}
+		}
+		pct := totalTokens * 100 / sc.contextWindow
+		fmt.Fprintf(sc.out, "  Context:   %d/%d (%d%%)\n", totalTokens, sc.contextWindow, pct) //nolint:errcheck
+	}
 	return nil
 }
 
