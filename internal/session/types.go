@@ -100,4 +100,8 @@ type SessionTree interface {
 	// Branch zero-copy points the current leaf at the existing entry fromID,
 	// establishing a new branch without copying any entries.
 	Branch(ctx context.Context, fromID string, opts ...BranchOption) error
+	// ListBranches returns metadata for all branches in the tree.
+	ListBranches() []BranchMeta
+	// Clone deep-copies entries from the source branch into a new branch ID.
+	Clone(ctx context.Context, fromBranchID, newBranchID string) error
 }
