@@ -255,7 +255,7 @@ func (a *DeferredToolRegistryAdapter) Get(ctx context.Context, name string) (Too
 		if errors.Is(loadErr, ErrDeferredToolNotFound) {
 			return nil, ErrToolNotFound
 		}
-		return nil, ErrToolNotFound
+		return nil, fmt.Errorf("tools: load deferred %q: %w", name, loadErr)
 	}
 
 	// Load succeeded and registered into the underlying registry.
