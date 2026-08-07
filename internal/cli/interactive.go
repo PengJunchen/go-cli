@@ -452,6 +452,37 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 				entryCounter++
 			}
 			_ = assembly.SessionStore.Save(spanCtx) //nolint:errcheck
+
+			// Asynchronously extract memories from the conversation for
+			// cross-session context continuity. Uses a detached context
+			// so it survives turn cancellation. Errors are logged only
+			// and do not block the main interaction loop.
+			if assembly.MemoryExtractor != nil && assembly.MemoryStore != nil {
+				agentMsgs := assembly.Agent.Messages()
+				msgs := make([]llm.Message, 0, len(agentMsgs))
+				for _, m := range agentMsgs {
+					msgs = append(msgs, llm.Message{
+						Role:    llm.Role(m.Role),
+						Content: m.Content,
+					})
+				}
+				memStore := assembly.MemoryStore
+				extractor := assembly.MemoryExtractor
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+					defer cancel()
+					extracted, err := extractor.Extract(ctx, msgs)
+					if err != nil {
+						logger.Warn("cli_interactive_memory_extract_failed", "err", err)
+						return
+					}
+					for _, mem := range extracted {
+						if err := memStore.Add(ctx, mem); err != nil {
+							logger.Warn("cli_interactive_memory_store_failed", "err", err)
+						}
+					}
+				}()
+			}
 		}
 
 		logger.Info("cli_interactive_turn_complete",
