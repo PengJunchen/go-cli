@@ -75,12 +75,19 @@ func (h *SessionSlashHandler) Handle(ctx context.Context, cmd SlashCommand) (str
 		return h.handleFork(ctx, cmd.Args)
 	case "resume":
 		return h.handleResume(ctx, cmd.Args)
+	case "branches":
+		return h.handleBranches(ctx)
+	case "clone":
+		return h.handleClone(ctx, cmd.Args)
+	case "switch":
+		return h.handleSwitch(ctx, cmd.Args)
 	default:
 		return "", fmt.Errorf("session: unknown slash command %q", cmd.Name)
 	}
 }
 
-// handleTree displays the session tree by listing the current branch.
+// handleTree displays the session tree by listing the current branch along with
+// all recorded branches.
 func (h *SessionSlashHandler) handleTree(ctx context.Context) (string, error) {
 	if h.tree == nil {
 		return "", fmt.Errorf("session: no session tree configured")
@@ -94,7 +101,17 @@ func (h *SessionSlashHandler) handleTree(ctx context.Context) (string, error) {
 		return "", err
 	}
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("Session tree (current leaf: %s, %d entries):\n", leaf, len(branch)))
+	branches := h.tree.ListBranches()
+	sb.WriteString(fmt.Sprintf("Session tree (current leaf: %s, %d entries, %d branches):\n", leaf, len(branch), len(branches)))
+	// Show branch list.
+	for _, b := range branches {
+		marker := ""
+		if b.BaseLeafID == leaf {
+			marker = " (current)"
+		}
+		sb.WriteString(fmt.Sprintf("  [branch] %s <- %s%s\n", b.BranchID, b.BaseLeafID, marker))
+	}
+	// Show entries.
 	for _, e := range branch {
 		sb.WriteString(fmt.Sprintf("  [%s] %s: %s\n", e.Type, e.ID, truncateForDisplay(e.Content, 60)))
 	}
@@ -180,6 +197,86 @@ func (h *SessionSlashHandler) handleResume(ctx context.Context, args []string) (
 	msg := fmt.Sprintf("Resumed session at %q (%d messages)", target, len(sessCtx.Messages))
 	slog.Info("session.slash.resume", "target", target, "messages", len(sessCtx.Messages))
 	return msg, nil
+}
+
+// handleBranches lists all branches recorded in the session tree, marking the
+// branch whose base leaf matches the current leaf.
+func (h *SessionSlashHandler) handleBranches(ctx context.Context) (string, error) {
+	if h.tree == nil {
+		return "", fmt.Errorf("session: no session tree configured")
+	}
+	branches := h.tree.ListBranches()
+	if len(branches) == 0 {
+		return "No branches in session tree.", nil
+	}
+	var sb strings.Builder
+	currentLeaf := h.tree.CurrentLeaf()
+	sb.WriteString(fmt.Sprintf("Branches (%d):\n", len(branches)))
+	for _, b := range branches {
+		marker := ""
+		if b.BaseLeafID == currentLeaf {
+			marker = " *"
+		}
+		sb.WriteString(fmt.Sprintf("  %s (base: %s, created: %s)%s\n", b.BranchID, b.BaseLeafID, b.CreatedAt.Format("2006-01-02 15:04:05"), marker))
+	}
+	return sb.String(), nil
+}
+
+// handleClone deep-copies entries from one branch into a new branch id. It
+// requires exactly two arguments: <from-branch-id> <new-branch-id>.
+func (h *SessionSlashHandler) handleClone(ctx context.Context, args []string) (string, error) {
+	if h.tree == nil {
+		return "", fmt.Errorf("session: no session tree configured")
+	}
+	if len(args) < 2 || args[0] == "" || args[1] == "" {
+		return "", fmt.Errorf("session: /clone requires <from-branch-id> <new-branch-id>")
+	}
+	fromID, newID := args[0], args[1]
+	if err := h.tree.Clone(ctx, fromID, newID); err != nil {
+		return "", fmt.Errorf("session: clone failed: %w", err)
+	}
+	slog.Info("session.slash.clone", "from", fromID, "new", newID)
+	return fmt.Sprintf("Cloned branch %q to %q", fromID, newID), nil
+}
+
+// handleSwitch moves the current leaf to the base leaf of the named branch,
+// rebuilds the context, and invokes the OnResume callback (like /resume).
+func (h *SessionSlashHandler) handleSwitch(ctx context.Context, args []string) (string, error) {
+	if h.tree == nil {
+		return "", fmt.Errorf("session: no session tree configured")
+	}
+	if len(args) == 0 || args[0] == "" {
+		return "", fmt.Errorf("session: /switch requires a branch id")
+	}
+	branchID := args[0]
+	// Look up the branch's base leaf id via the recorded branch metadata.
+	var targetLeaf string
+	for _, b := range h.tree.ListBranches() {
+		if b.BranchID == branchID {
+			targetLeaf = b.BaseLeafID
+			break
+		}
+	}
+	if targetLeaf == "" {
+		return "", fmt.Errorf("session: branch %q not found", branchID)
+	}
+	if err := h.tree.MoveTo(ctx, targetLeaf); err != nil {
+		return "", fmt.Errorf("session: switch failed: %w", err)
+	}
+
+	// Rebuild the agent context from the target branch.
+	sessCtx, err := h.tree.BuildContext(ctx, targetLeaf)
+	if err != nil {
+		return "", fmt.Errorf("session: switch context rebuild failed: %w", err)
+	}
+	if h.OnResume != nil {
+		if err := h.OnResume(ctx, sessCtx.Messages); err != nil {
+			return "", fmt.Errorf("session: switch callback failed: %w", err)
+		}
+	}
+
+	slog.Info("session.slash.switch", "branch", branchID, "leaf", targetLeaf)
+	return fmt.Sprintf("Switched to branch %q (%d messages)", branchID, len(sessCtx.Messages)), nil
 }
 
 // truncateForDisplay shortens content to at most maxLen characters, appending an

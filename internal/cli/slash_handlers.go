@@ -53,6 +53,19 @@ func (h *CostHandler) Handle(_ context.Context, _ []string, sc *slashContext) er
 	if sc.costTracker != nil {
 		fmt.Fprintf(sc.out, "Total cost: $%.4f\n", sc.costTracker.Total()) //nolint:errcheck
 		fmt.Fprintf(sc.out, "Total calls: %d\n", sc.costTracker.Calls())   //nolint:errcheck
+
+		// Sub-agent cost breakdown.
+		subTotal := sc.costTracker.SubagentTotal()
+		subCalls := sc.costTracker.SubagentCalls()
+		if subCalls > 0 {
+			fmt.Fprintf(sc.out, "\nSub-agent costs:\n")                 //nolint:errcheck
+			fmt.Fprintf(sc.out, "  Sub-agent total: $%.4f\n", subTotal) //nolint:errcheck
+			fmt.Fprintf(sc.out, "  Sub-agent calls: %d\n", subCalls)    //nolint:errcheck
+			for taskID, summary := range sc.costTracker.SubagentCosts { //nolint:errcheck
+				fmt.Fprintf(sc.out, "    %s: $%.4f (%d calls, %d in / %d out tokens)\n", //nolint:errcheck
+					taskID, summary.Cost, summary.Calls, summary.TokensIn, summary.TokensOut)
+			}
+		}
 	} else {
 		fmt.Fprintln(sc.out, "Cost tracking not configured.") //nolint:errcheck
 	}
@@ -161,7 +174,7 @@ var _ SlashCommandHandler = (*SessionHandler)(nil)
 
 func (h *SessionHandler) Name() string { return "session" }
 func (h *SessionHandler) Description() string {
-	return "Session operations (subcommands: tree, fork, resume)"
+	return "Session operations (subcommands: tree, fork, resume, branches, clone, switch)"
 }
 
 func (h *SessionHandler) Handle(ctx context.Context, args []string, sc *slashContext) error {
