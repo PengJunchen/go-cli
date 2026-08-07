@@ -452,11 +452,24 @@ func AssembleAgent(
 	costTracker := production.NewCostTracker(nil)
 	statsRegistry := production.NewStatsRegistry()
 	pw := production.NewProductionModelWrapper(
-		production.WithWrapperRetryPolicy(retryPolicy),
 		production.WithWrapperCostTracker(costTracker),
 		production.WithWrapperStatsRegistry(statsRegistry),
 		production.WithWrapperModelName(modelName),
 		production.WithWrapperSessionID(sessionID),
+	)
+
+	// 6a. Build the 7-layer model middleware chain (failover -> retry ->
+	// timeout -> sanitize -> loop detection -> validate -> overflow). This
+	// replaces the production wrapper's built-in retry so that retry is
+	// composed as a discrete middleware layer alongside the others.
+	modelChain := llm.NewStandardMiddlewareChain(
+		llm.NewFailoverModelMiddleware(),
+		llm.NewRetryModelMiddleware(llm.WithRetryPolicy(&retryPolicyAdapter{inner: retryPolicy})),
+		llm.NewTimeoutModelMiddleware(),
+		llm.NewSanitizeModelMiddleware(),
+		llm.NewLoopDetectionModelMiddleware(),
+		llm.NewValidateModelMiddleware(),
+		llm.NewOverflowRecoveryMiddleware(),
 	)
 
 	// 6b. Wire circuit breaker to protect the LLM model from cascading failures.
@@ -507,7 +520,7 @@ func AssembleAgent(
 
 	// 8. Wire real SubAgent execution (replaces simulated runner).
 	subAgentFactory := core.NewRealSubAgentFactory(model, llm.NewProviderRegistry(), tr,
-		core.WithModelWrapper(newModelWrapper(pw, circuitBreaker, guardChain, telemetry)),
+		core.WithModelWrapper(newModelWrapperWithChain(pw, modelChain, circuitBreaker, guardChain, telemetry)),
 	)
 	core.RegisterSubAgentFactory(subAgentFactory)
 	dispatcher := core.NewDefaultSubagentDispatcher(nil)
@@ -599,7 +612,7 @@ func AssembleAgent(
 	loopOpts := []core.LoopOption{
 		core.WithLLM(model),
 		core.WithTools(tr),
-		core.WithModelWrapper(newModelWrapper(pw, circuitBreaker, guardChain, telemetry)),
+		core.WithModelWrapper(newModelWrapperWithChain(pw, modelChain, circuitBreaker, guardChain, telemetry)),
 		core.WithExecutionMode(core.ExecutionModeParallel),
 		core.WithTracer(tracer),
 		core.WithSteeringChannel(steerCh),
