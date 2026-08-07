@@ -7,8 +7,10 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/mock"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 	"github.com/pengjunchen/go-cli/internal/verify"
@@ -188,4 +190,36 @@ func TestCategorizedErrorUnwrap(t *testing.T) {
 
 func TestNewErrorNilReturnsNil(t *testing.T) {
 	require.Nil(t, NewError(ErrorTransient, nil))
+}
+
+func TestClassifyHarnessError(t *testing.T) {
+	p := NewDefaultRetryPolicy(RetryConfig{}).(*DefaultRetryPolicy) //nolint:errcheck
+	cases := []struct {
+		code string
+		want ErrorCategory
+	}{
+		{core.ErrCodeBusy, ErrorFatal},
+		{core.ErrCodeHookRejected, ErrorFatal},
+		{core.ErrCodeTimeout, ErrorTimeout},
+		{core.ErrCodeModelError, ErrorTransient},
+		{core.ErrCodeToolError, ErrorTransient},
+	}
+	for _, tc := range cases {
+		err := &core.AgentHarnessError{Code: tc.code, Message: "test"}
+		assert.Equal(t, tc.want, p.Classify(err), "code %s should map to %s", tc.code, tc.want)
+	}
+}
+
+func TestNoRetryOnRejected(t *testing.T) {
+	ctx, _ := newRetryTestCtx(t)
+	p := NewDefaultRetryPolicy(RetryConfig{MaxAttempts: 5})
+	err := &core.AgentHarnessError{Code: core.ErrCodeHookRejected, Message: "hook rejected"}
+	require.False(t, p.ShouldRetry(ctx, err, 0))
+}
+
+func TestRetryOnTransient(t *testing.T) {
+	ctx, _ := newRetryTestCtx(t)
+	p := NewDefaultRetryPolicy(RetryConfig{MaxAttempts: 5})
+	err := &core.AgentHarnessError{Code: core.ErrCodeModelError, Message: "model error"}
+	require.True(t, p.ShouldRetry(ctx, err, 0))
 }
