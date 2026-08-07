@@ -228,7 +228,10 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 			WithHistoryPath(historyPath),
 			WithHistoryMaxLen(historyMaxLen),
 		)
-		dle.SetCompleter(NewSlashCommandCompleter(slashCommandNames()))
+		dle.SetCompleter(NewCompositeCompleter(
+			NewSlashCommandCompleter(slashCommandNames()),
+			NewFilePathCompleter(),
+		))
 
 		// Load persisted history on startup (best-effort).
 		if hs := dle.HistoryStore(); hs != nil {
@@ -275,10 +278,12 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		// Wrap the turn context in a cancellable context so the user can
 		// interrupt the in-progress agent turn via Ctrl+C (non-TTY) or Esc
 		// (TTY, future work). The InterruptHandler monitors for SIGINT and
-		// invokes cancelTurn when a signal arrives.
+		// invokes cancelTurn when a signal arrives. Esc-key monitoring
+		// requires a SharedStdin multiplexer (not yet implemented); nil is
+		// passed so only SIGINT monitoring is active.
 		turnCtx, cancelTurn := context.WithCancel(turnCtx)
 		interrupter := NewInterruptHandler(cancelTurn)
-		interrupter.Start(in)
+		interrupter.Start(nil)
 
 		// Create an EventStream for this turn and wire it to the TurnRunner
 		// so events are streamed in real time to the TUI. RunTurn is
