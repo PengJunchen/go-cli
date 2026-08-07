@@ -172,6 +172,85 @@ func (t *ToolSearchTool) Execute(ctx context.Context, call ToolCall) (*ToolResul
 	}, nil
 }
 
+// Score ranks a tool's relevance to a query using weighted keyword matching.
+// Name matches weight 3, Description matches weight 2, Category matches weight 1.
+// Higher score means more relevant.
+func (t *ToolSearchTool) Score(query string, def ToolDefinition) float64 {
+	if query == "" {
+		return 0
+	}
+	q := strings.ToLower(query)
+	name := strings.ToLower(def.Name())
+	desc := strings.ToLower(def.Description())
+	cat := string(categorizeTool(def))
+
+	var score float64
+	// Name match (highest weight)
+	if strings.Contains(name, q) {
+		score += 3.0
+	} else {
+		// Partial word matching
+		queryWords := strings.Fields(q)
+		for _, w := range queryWords {
+			if strings.Contains(name, w) {
+				score += 3.0 / float64(len(queryWords))
+			}
+		}
+	}
+	// Description match
+	if strings.Contains(desc, q) {
+		score += 2.0
+	} else {
+		queryWords := strings.Fields(q)
+		for _, w := range queryWords {
+			if strings.Contains(desc, w) {
+				score += 2.0 / float64(len(queryWords))
+			}
+		}
+	}
+	// Category match
+	if strings.Contains(cat, q) {
+		score += 1.0
+	}
+	return score
+}
+
+// TopTools returns the top-K tools ranked by Score against the query.
+// When query is empty, returns the first K tools unsorted.
+func (t *ToolSearchTool) TopTools(ctx context.Context, query string, k int) ([]ToolDefinition, error) {
+	defs, err := t.reg.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if len(defs) <= k {
+		return defs, nil
+	}
+	// Score and sort
+	type scored struct {
+		def   ToolDefinition
+		score float64
+	}
+	scoredItems := make([]scored, len(defs))
+	for i, d := range defs {
+		scoredItems[i] = scored{def: d, score: t.Score(query, d)}
+	}
+	sort.Slice(scoredItems, func(i, j int) bool {
+		if scoredItems[i].score != scoredItems[j].score {
+			return scoredItems[i].score > scoredItems[j].score
+		}
+		return scoredItems[i].def.Name() < scoredItems[j].def.Name()
+	})
+	// Return top K
+	if k > len(scoredItems) {
+		k = len(scoredItems)
+	}
+	out := make([]ToolDefinition, k)
+	for i := 0; i < k; i++ {
+		out[i] = scoredItems[i].def
+	}
+	return out, nil
+}
+
 // getStringArg returns the string value of Args[key], or "" when absent or not
 // a string.
 func getStringArg(call ToolCall, key string) string {

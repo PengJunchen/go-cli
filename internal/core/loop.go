@@ -127,8 +127,13 @@ type LoopAgent struct {
 	tracer               *tracing.Tracer
 	steerCh              chan string
 	thinkingConfig       *llm.ThinkingConfig
-	pauseMu              sync.Mutex
-	pauseCh              chan struct{}
+	// toolSearchThreshold is the maximum number of tools to expose to the LLM
+	// without filtering. When the tool count exceeds this, tools are
+	// dynamically scored and filtered by relevance to the current query.
+	// Zero means no filtering (all tools exposed).
+	toolSearchThreshold int
+	pauseMu             sync.Mutex
+	pauseCh             chan struct{}
 }
 
 var _ AgentLoop = (*LoopAgent)(nil)
@@ -209,6 +214,13 @@ func NewLoopAgent(opts ...LoopOption) *LoopAgent {
 	return la
 }
 
+// WithToolSearchThreshold sets the maximum number of tools exposed to the
+// LLM before dynamic filtering kicks in.
+func (l *LoopAgent) WithToolSearchThreshold(n int) *LoopAgent {
+	l.toolSearchThreshold = n
+	return l
+}
+
 // Run executes the ReAct loop for the submission and returns the events fired
 // during execution. When stream is non-nil, events are sent in real time as
 // they happen (streaming mode); otherwise they are collected into the returned
@@ -252,6 +264,8 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 	// Build tool definitions for the model from the tool registry so the LLM
 	// knows what tools it can invoke.
 	var toolOpts []llm.Option
+	var searchTool *tools.ToolSearchTool
+	needToolFiltering := false
 	if l.tools != nil {
 		defs, listErr := l.tools.List(spanCtx)
 		if listErr != nil {
@@ -269,6 +283,18 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 				llmTools = append(llmTools, td)
 			}
 			toolOpts = append(toolOpts, llm.WithTools(llmTools))
+
+			// Dynamic tool filtering: when the tool count exceeds the
+			// threshold, score and filter to reduce context bloat.
+			if l.toolSearchThreshold > 0 && len(defs) > l.toolSearchThreshold {
+				for _, d := range defs {
+					if st, ok := d.(*tools.ToolSearchTool); ok {
+						searchTool = st
+						needToolFiltering = true
+						break
+					}
+				}
+			}
 		}
 	}
 
@@ -356,7 +382,26 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 		}
 
 		// ---- LLM call (streaming) ----
-		resp, err := l.generateWithContinuation(spanCtx, model, messages, toolOpts, es, logger)
+		// Dynamic tool filtering: when the tool count exceeds the threshold,
+		// rebuild tool options with only the tools relevant to the current
+		// query so the LLM context isn't bloated by irrelevant tool schemas.
+		iterOpts := toolOpts
+		if needToolFiltering && searchTool != nil {
+			query := lastUserQuery(messages)
+			if query != "" {
+				filtered, ferr := searchTool.TopTools(spanCtx, query, l.toolSearchThreshold)
+				if ferr == nil && len(filtered) > 0 {
+					iterOpts = buildToolOpts(filtered, l.thinkingConfig)
+					logger.Info("core.loop.tool_search_filter",
+						"query", query,
+						"filtered_tools", len(filtered),
+						"threshold", l.toolSearchThreshold,
+					)
+				}
+			}
+		}
+
+		resp, err := l.generateWithContinuation(spanCtx, model, messages, iterOpts, es, logger)
 		if err != nil {
 			span.SetStatus(tracing.SpanStatusError, err.Error())
 			logger.Error("core.loop.generate_error", "iteration", iter, "err", err)
@@ -647,6 +692,44 @@ func drainSteerMessages(ch chan string, msgs *[]llm.Message, logger *slog.Logger
 			return
 		}
 	}
+}
+
+// lastUserQuery returns the content of the last user message in msgs, or ""
+// when there is none.
+func lastUserQuery(msgs []llm.Message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == llm.RoleUser {
+			return msgs[i].Content
+		}
+	}
+	return ""
+}
+
+// defsToLLMTools converts tool definitions to LLM tool definitions.
+func defsToLLMTools(defs []tools.ToolDefinition) []llm.ToolDefinition {
+	llmTools := make([]llm.ToolDefinition, 0, len(defs))
+	for _, d := range defs {
+		td := llm.ToolDefinition{
+			Name:        d.Name(),
+			Description: d.Description(),
+		}
+		if p, ok := d.(tools.Parameterized); ok {
+			td.Parameters = p.Parameters()
+		}
+		llmTools = append(llmTools, td)
+	}
+	return llmTools
+}
+
+// buildToolOpts builds LLM generation options from tool definitions and an
+// optional thinking config. Used to rebuild tool options per-iteration when
+// dynamic tool filtering is active.
+func buildToolOpts(defs []tools.ToolDefinition, thinkingCfg *llm.ThinkingConfig) []llm.Option {
+	opts := []llm.Option{llm.WithTools(defsToLLMTools(defs))}
+	if thinkingCfg != nil {
+		opts = append(opts, llm.WithThinking(*thinkingCfg))
+	}
+	return opts
 }
 
 // systemPrompt returns the system instruction that tells the model its role
