@@ -319,7 +319,11 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 	messages = append(messages, llm.Message{Role: llm.RoleSystem, Content: sysPrompt})
 
 	for _, hm := range submission.History {
-		messages = append(messages, llm.Message{Role: llm.Role(hm.Role), Content: hm.Content})
+		messages = append(messages, llm.Message{
+			Role:          llm.Role(hm.Role),
+			Content:       hm.Content,
+			ContentBlocks: hm.ContentBlocks,
+		})
 	}
 	if len(messages) == 0 || messages[len(messages)-1].Role != llm.RoleUser {
 		messages = append(messages, llm.Message{Role: llm.RoleUser, Content: submission.Content})

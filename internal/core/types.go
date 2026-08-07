@@ -5,7 +5,11 @@
 // core has zero downward dependencies on any service or extension package.
 package core
 
-import "time"
+import (
+	"time"
+
+	"github.com/pengjunchen/go-cli/internal/llm"
+)
 
 // AgentMessage is a single message exchanged within a conversation.
 type AgentMessage struct {
@@ -13,6 +17,9 @@ type AgentMessage struct {
 	Role string
 	// Content is the textual payload of the message.
 	Content string
+	// ContentBlocks holds typed content parts for multimodal messages
+	// (text + images). When non-nil, it takes precedence over Content.
+	ContentBlocks []llm.ContentBlock
 }
 
 // String returns a compact one-line representation of the message.

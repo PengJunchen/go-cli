@@ -172,7 +172,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 				default:
 					continue // skip tool/compaction entries
 				}
-				msgs = append(msgs, core.AgentMessage{Role: role, Content: e.Content})
+				msgs = append(msgs, core.AgentMessage{Role: role, Content: e.Content, ContentBlocks: e.ContentBlocks})
 			}
 			assembly.Agent.SetHistory(msgs)
 			return nil
@@ -626,8 +626,9 @@ func loadSessionHistory(path string) ([]core.AgentMessage, error) {
 		}
 		if entry.Type == session.EntryTypeUser || entry.Type == session.EntryTypeAssistant {
 			messages = append(messages, core.AgentMessage{
-				Role:    string(entry.Type),
-				Content: entry.Content,
+				Role:          string(entry.Type),
+				Content:       entry.Content,
+				ContentBlocks: entry.ContentBlocks,
 			})
 		}
 	}
