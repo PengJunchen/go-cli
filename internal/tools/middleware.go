@@ -253,10 +253,11 @@ func checkType(name string, val any, expectedType string) error {
 			return fmt.Errorf("parameter %q must be a string", name)
 		}
 	case "number", "integer":
-		if _, ok := val.(float64); !ok {
-			if _, ok := val.(int); !ok {
-				return fmt.Errorf("parameter %q must be a number", name)
-			}
+		switch val.(type) {
+		case float64, int, int64:
+			// ok
+		default:
+			return fmt.Errorf("parameter %q must be a number", name)
 		}
 	case "boolean":
 		if _, ok := val.(bool); !ok {
