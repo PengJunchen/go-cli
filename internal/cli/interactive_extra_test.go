@@ -266,7 +266,7 @@ func TestRegisterSkillToolsFromDir_EmptyDir(t *testing.T) {
 
 func TestInteractiveCmd_RegisterMCPTools_NilConfig(t *testing.T) {
 	ctx := t.Context()
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 
 	err := registerMCPTools(ctx, nil, tr)
 	require.NoError(t, err)
@@ -274,7 +274,7 @@ func TestInteractiveCmd_RegisterMCPTools_NilConfig(t *testing.T) {
 
 func TestInteractiveCmd_RegisterMCPTools_EmptyServers(t *testing.T) {
 	ctx := t.Context()
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 	rc := &config.Config{}
 
 	err := registerMCPTools(ctx, rc, tr)
@@ -283,7 +283,7 @@ func TestInteractiveCmd_RegisterMCPTools_EmptyServers(t *testing.T) {
 
 func TestInteractiveCmd_RegisterMCPTools_StdioServer(t *testing.T) {
 	ctx := t.Context()
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 	rc := &config.Config{
 		MCP: config.MCPConfig{
 			Servers: []config.MCPServerConfig{
@@ -317,7 +317,7 @@ func TestInteractiveCmd_RegisterMCPTools_SSEServer(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 	rc := &config.Config{
 		MCP: config.MCPConfig{
 			Servers: []config.MCPServerConfig{
@@ -337,7 +337,7 @@ func TestInteractiveCmd_RegisterMCPTools_SSEServer(t *testing.T) {
 
 func TestInteractiveCmd_RegisterMCPTools_NoTransport(t *testing.T) {
 	ctx := t.Context()
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 	rc := &config.Config{
 		MCP: config.MCPConfig{
 			Servers: []config.MCPServerConfig{
@@ -360,7 +360,7 @@ func TestInteractiveCmd_RegisterMCPTools_NoTransport(t *testing.T) {
 
 func TestInteractiveCmd_RegisterSkillTools_NilConfig(t *testing.T) {
 	ctx := t.Context()
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 
 	infos := registerSkillTools(ctx, nil, tr)
 	assert.Empty(t, infos)
@@ -368,7 +368,7 @@ func TestInteractiveCmd_RegisterSkillTools_NilConfig(t *testing.T) {
 
 func TestInteractiveCmd_RegisterSkillTools_EmptyDir(t *testing.T) {
 	ctx := t.Context()
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 	rc := &config.Config{}
 
 	infos := registerSkillTools(ctx, rc, tr)
@@ -377,7 +377,7 @@ func TestInteractiveCmd_RegisterSkillTools_EmptyDir(t *testing.T) {
 
 func TestInteractiveCmd_RegisterSkillTools_LoadError(t *testing.T) {
 	ctx := t.Context()
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 	rc := &config.Config{
 		Skill: config.SkillConfig{
 			Dir: "/nonexistent/directory/path",
@@ -407,7 +407,7 @@ Skill body text.
 `
 	writeSkillFile(t, dir, "registered-skill.md", skillContent)
 
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 	rc := &config.Config{
 		Skill: config.SkillConfig{Dir: dir},
 	}
