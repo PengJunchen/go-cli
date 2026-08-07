@@ -44,9 +44,24 @@ func TestAssembleAgent_TurnRunnerSharesSteerChannel(t *testing.T) {
 	require.NotNil(t, assembly.SteerChannel, "SteerChannel must be exposed for the REPL to write to")
 }
 
+// TestAssembleAgent_ExposesLoopAgent verifies that AssembleAgent exposes the
+// raw LoopAgent so the REPL can call Pause()/Resume() on it.
+func TestAssembleAgent_ExposesLoopAgent(t *testing.T) {
+	assembly, err := AssembleAgent(
+		context.Background(),
+		newAssembleTestConfig(),
+		"openai", "test-model",
+		io.Discard,
+	)
+	require.NoError(t, err)
+	t.Cleanup(assembly.Cleanup)
+
+	require.NotNil(t, assembly.LoopAgent, "LoopAgent must be exposed for Pause/Resume")
+}
+
 // TestInterruptHandler_SendSteerWritesToChannel verifies that SendSteer writes
-// the steering message to the steerCh so the REPL's select on SteerChannel()
-// receives it and can forward it to the TurnRunner.
+// the steering message to the steerCh (via SubmissionQueue) so the REPL's select
+// on SteerChannel() receives it and can forward it to the TurnRunner.
 func TestInterruptHandler_SendSteerWritesToChannel(t *testing.T) {
 	cancel := func() {}
 	h := NewInterruptHandler(cancel)
@@ -63,24 +78,42 @@ func TestInterruptHandler_SendSteerWritesToChannel(t *testing.T) {
 	}
 }
 
-// TestInterruptHandler_SendSteerNonBlocking verifies that SendSteer is
-// non-blocking when the channel buffer is full (cap 1), so the REPL loop
-// is never stalled by a steer write.
-func TestInterruptHandler_SendSteerNonBlocking(t *testing.T) {
+// TestInterruptHandler_SendSteerMultipleMessages verifies that the
+// SubmissionQueue + cap-16 steerCh allows multiple steer messages to be
+// buffered without loss, unlike the old cap-1 channel.
+func TestInterruptHandler_SendSteerMultipleMessages(t *testing.T) {
 	cancel := func() {}
 	h := NewInterruptHandler(cancel)
 	h.Start(nil)
 	defer h.Stop()
 
-	// Fill the buffer (cap 1).
-	require.NoError(t, h.SendSteer("first"))
-	// Second send should not block — it drops silently.
-	require.NoError(t, h.SendSteer("second"))
-
-	// Drain — should get at least one message.
-	select {
-	case <-h.SteerChannel():
-	case <-time.After(time.Second):
-		t.Fatal("timed out waiting for steer message")
+	// Send multiple steer messages - they should all be delivered.
+	for i := 0; i < 5; i++ {
+		require.NoError(t, h.SendSteer(string(rune('a'+i))))
 	}
+
+	received := make([]string, 0, 5)
+	for i := 0; i < 5; i++ {
+		select {
+		case msg := <-h.SteerChannel():
+			received = append(received, msg)
+		case <-time.After(time.Second):
+			t.Fatalf("timed out waiting for steer message %d", i)
+		}
+	}
+	assert.Len(t, received, 5)
+}
+
+// TestInterruptHandler_QueueLen verifies that QueueLen reports the number of
+// pending steering messages in the SubmissionQueue before the drain goroutine
+// starts.
+func TestInterruptHandler_QueueLen(t *testing.T) {
+	cancel := func() {}
+	h := NewInterruptHandler(cancel)
+	// Don't start the drain goroutine so messages stay in the queue.
+	require.NoError(t, h.SendSteer("msg1"))
+	require.NoError(t, h.SendSteer("msg2"))
+
+	// Items should still be in the SubmissionQueue since drainQueue hasn't started.
+	assert.Equal(t, 2, h.QueueLen(), "QueueLen should reflect queued messages before Start()")
 }

@@ -37,13 +37,28 @@ var DefaultCostTiers = []CostTier{
 	{Model: "claude-haiku-3.5", InputPer1K: 0.0008, OutputPer1K: 0.004},
 }
 
+// CostSummary is a per-key cost breakdown (e.g. per sub-agent task ID). It
+// accumulates the monetary cost, call count, and token usage for a discrete
+// unit of work.
+type CostSummary struct {
+	// Cost is the accumulated monetary cost in USD.
+	Cost float64
+	// Calls is the number of model calls recorded.
+	Calls int
+	// TokensIn is the cumulative input tokens consumed.
+	TokensIn int
+	// TokensOut is the cumulative output tokens produced.
+	TokensOut int
+}
+
 // CostTracker accumulates costs across a session. It is safe for concurrent
 // use.
 type CostTracker struct {
-	mu    sync.Mutex
-	tiers map[string]CostTier
-	total float64
-	calls int
+	mu            sync.Mutex
+	tiers         map[string]CostTier
+	total         float64
+	calls         int
+	SubagentCosts map[string]CostSummary
 }
 
 // Compile-time assertion that CostTracker satisfies CostCalculator.
@@ -60,7 +75,7 @@ func NewCostTracker(tiers []CostTier) *CostTracker {
 		tm[t.Model] = t
 	}
 	slog.Debug("production.cost_tracker.new", "tiers", len(tm))
-	return &CostTracker{tiers: tm}
+	return &CostTracker{tiers: tm, SubagentCosts: make(map[string]CostSummary)}
 }
 
 // CalculateCost returns the cost of a single model call. It returns an error
@@ -112,4 +127,51 @@ func (t *CostTracker) Calls() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.calls
+}
+
+// RecordSubagent records a sub-agent's token usage under the given taskID,
+// accumulating cost, calls, and tokens separately from the main session.
+func (t *CostTracker) RecordSubagent(taskID, model string, inputTokens, outputTokens int) (float64, error) {
+	cost, err := t.CalculateCost(model, inputTokens, outputTokens)
+	if err != nil {
+		return 0, err
+	}
+	t.mu.Lock()
+	entry := t.SubagentCosts[taskID]
+	entry.Cost += cost
+	entry.Calls++
+	entry.TokensIn += inputTokens
+	entry.TokensOut += outputTokens
+	t.SubagentCosts[taskID] = entry
+	t.mu.Unlock()
+	slog.Debug("production.cost_tracker.record_subagent",
+		"task_id", taskID,
+		"model", model,
+		"cost", cost,
+		"calls", entry.Calls,
+	)
+	return cost, nil
+}
+
+// SubagentTotal returns the aggregate cost across all recorded sub-agent
+// calls.
+func (t *CostTracker) SubagentTotal() float64 {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var sum float64
+	for _, s := range t.SubagentCosts {
+		sum += s.Cost
+	}
+	return sum
+}
+
+// SubagentCalls returns the total number of sub-agent model calls recorded.
+func (t *CostTracker) SubagentCalls() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	var sum int
+	for _, s := range t.SubagentCosts {
+		sum += s.Calls
+	}
+	return sum
 }

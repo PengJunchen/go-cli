@@ -30,7 +30,8 @@ func (t *lspTool) Name() string { return "lsp_query" }
 // Description returns a brief description of the tool.
 func (t *lspTool) Description() string {
 	return "lsp_query: Query a Language Server for semantic code information. " +
-		"Supports operations: definition, references, hover, diagnostics."
+		"Supports operations: definition, references, hover, diagnostics, " +
+		"completion, type_definition, rename."
 }
 
 // Parameters returns the JSON Schema describing the tool's input parameters.
@@ -40,7 +41,7 @@ func (t *lspTool) Parameters() any {
 		"properties": map[string]any{
 			"operation": map[string]any{
 				"type":        "string",
-				"enum":        []string{"definition", "references", "hover", "diagnostics"},
+				"enum":        []string{"definition", "references", "hover", "diagnostics", "completion", "type_definition", "rename"},
 				"description": "The LSP operation to perform.",
 			},
 			"uri": map[string]any{
@@ -54,6 +55,10 @@ func (t *lspTool) Parameters() any {
 			"character": map[string]any{
 				"type":        "integer",
 				"description": "0-based character offset.",
+			},
+			"new_name": map[string]any{
+				"type":        "string",
+				"description": "New name for the rename operation.",
 			},
 		},
 		"required": []string{"operation", "uri"},
@@ -69,6 +74,7 @@ func (t *lspTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, erro
 	uri, _ := call.Args["uri"].(string)              //nolint:errcheck
 	line, _ := call.Args["line"].(float64)           //nolint:errcheck
 	character, _ := call.Args["character"].(float64) //nolint:errcheck
+	newName, _ := call.Args["new_name"].(string)     //nolint:errcheck
 
 	if operation == "" {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
@@ -82,10 +88,16 @@ func (t *lspTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, erro
 	// Validate operation before requiring a client so argument errors are
 	// surfaced even when the tool is used without a running server.
 	switch operation {
-	case "definition", "references", "hover", "diagnostics":
+	case "definition", "references", "hover", "diagnostics", "completion", "type_definition", "rename":
 	default:
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		return nil, fmt.Errorf("lsp_query: unknown operation %q", operation)
+	}
+
+	// Validate rename-specific argument early.
+	if operation == "rename" && newName == "" {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		return nil, errors.New("lsp_query: missing 'new_name' argument for rename")
 	}
 
 	if t.client == nil {
@@ -116,6 +128,24 @@ func (t *lspTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, erro
 		diags, err = t.client.Diagnostics(ctx, uri)
 		if err == nil {
 			output = formatDiagnostics(diags)
+		}
+	case "completion":
+		var items []CompletionItem
+		items, err = t.client.Completion(ctx, uri, int(line), int(character))
+		if err == nil {
+			output = formatCompletionItems(items)
+		}
+	case "type_definition":
+		var locs []Location
+		locs, err = t.client.TypeDefinition(ctx, uri, int(line), int(character))
+		if err == nil {
+			output = formatLocations(locs)
+		}
+	case "rename":
+		var edit *WorkspaceEdit
+		edit, err = t.client.Rename(ctx, uri, int(line), int(character), newName)
+		if err == nil {
+			output = formatWorkspaceEdit(edit)
 		}
 	}
 
@@ -168,6 +198,44 @@ func formatDiagnostics(diags []Diagnostic) string {
 			src = "lsp"
 		}
 		fmt.Fprintf(&sb, "[%s] %d:%d %s", src, d.Range.Start.Line, d.Range.Start.Character, d.Message)
+	}
+	return sb.String()
+}
+
+// formatCompletionItems renders a slice of CompletionItem as one line per item.
+func formatCompletionItems(items []CompletionItem) string {
+	if len(items) == 0 {
+		return "(no completions)"
+	}
+	var sb strings.Builder
+	for i, item := range items {
+		if i > 0 {
+			sb.WriteString("\n")
+		}
+		if item.Detail != "" {
+			fmt.Fprintf(&sb, "%s (%d): %s", item.Label, item.Kind, item.Detail)
+		} else {
+			fmt.Fprintf(&sb, "%s (%d)", item.Label, item.Kind)
+		}
+	}
+	return sb.String()
+}
+
+// formatWorkspaceEdit renders a WorkspaceEdit showing each file and its edits.
+func formatWorkspaceEdit(edit *WorkspaceEdit) string {
+	if edit == nil || len(edit.Changes) == 0 {
+		return "(no changes)"
+	}
+	var sb strings.Builder
+	first := true
+	for uri, edits := range edit.Changes {
+		for _, te := range edits {
+			if !first {
+				sb.WriteString("\n")
+			}
+			first = false
+			fmt.Fprintf(&sb, "%s:%d:%d -> %s", uri, te.Range.Start.Line, te.Range.Start.Character, te.NewText)
+		}
 	}
 	return sb.String()
 }

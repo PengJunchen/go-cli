@@ -25,6 +25,25 @@ const (
 // enumerate the available roles.
 var SubAgentRoles = []string{"researcher", "implementer", "reviewer", "tester"}
 
+// RoleToolWhitelist maps each role to the set of tool names it is allowed to
+// use. When a caller does not specify Tools explicitly, the dispatcher applies
+// the role whitelist so each sub-agent operates within its role's scope.
+var RoleToolWhitelist = map[string][]string{
+	"researcher":  {"read", "grep", "find", "ls", "web_fetch"},
+	"implementer": {"read", "write", "edit", "bash", "grep", "find"},
+	"reviewer":    {"read", "grep", "find", "git_diff", "git_status"},
+	"tester":      {"read", "bash", "grep", "go_test"},
+}
+
+// RoleTools returns the tool whitelist for the given role. It returns nil for
+// unknown roles, signaling the caller to leave the tool set unrestricted.
+func RoleTools(role string) []string {
+	if tools, ok := RoleToolWhitelist[role]; ok {
+		return append([]string(nil), tools...)
+	}
+	return nil
+}
+
 // RolePrompt returns the system prompt template for the given role name. It
 // returns an empty string for unknown roles so callers can fall back to the
 // default prompt. Recognized roles: researcher, implementer, reviewer, tester.
@@ -54,4 +73,15 @@ func resolveSubAgentSystemPrompt(task SubagentTask) string {
 		return p
 	}
 	return DefaultSubAgentPrompt
+}
+
+// resolveSubAgentTools picks the tool set for a delegated task. Explicit Tools
+// win; otherwise a recognized Role selects its whitelist; otherwise nil is
+// returned (no restriction). This guarantees a sub-agent operates within its
+// role's scope when the caller does not specify tools.
+func resolveSubAgentTools(task SubagentTask) []string {
+	if len(task.Tools) > 0 {
+		return task.Tools
+	}
+	return RoleTools(task.Role)
 }
