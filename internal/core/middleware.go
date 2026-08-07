@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 
 	"github.com/pengjunchen/go-cli/internal/llm"
@@ -72,6 +73,53 @@ func (m *ToolMiddlewareImpl) Name() string {
 func (m *ToolMiddlewareImpl) WrapToolCall(next func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error)) func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
 	slog.Info("core.tool_middleware.wrap", "name", m.Name())
 	return next
+}
+
+// HookAwareToolMiddleware is a ToolMiddleware that integrates a HookChain into
+// the tool execution path. Before each tool call it invokes the chain's
+// BeforeToolCall (which may block the call); after the call it invokes
+// AfterToolCall so hooks observe the outcome. Hooks that do not implement
+// LifecycleHook are skipped.
+type HookAwareToolMiddleware struct {
+	chain *HookChain
+	name  string
+}
+
+var _ ToolMiddleware = (*HookAwareToolMiddleware)(nil)
+
+// NewHookAwareToolMiddleware builds a HookAwareToolMiddleware backed by the
+// given HookChain. A nil chain makes the middleware a pass-through.
+func NewHookAwareToolMiddleware(chain *HookChain) *HookAwareToolMiddleware {
+	return &HookAwareToolMiddleware{chain: chain, name: "hook-aware-tool"}
+}
+
+// Name returns the middleware identifier.
+func (m *HookAwareToolMiddleware) Name() string {
+	if m.name == "" {
+		return "hook-aware-tool"
+	}
+	return m.name
+}
+
+// WrapToolCall returns a wrapper that invokes BeforeToolCall before the
+// underlying tool executes and AfterToolCall afterwards. When BeforeToolCall
+// returns an error the tool call is blocked. AfterToolCall errors are logged
+// but do not override the original result or error.
+func (m *HookAwareToolMiddleware) WrapToolCall(next func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error)) func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
+	return func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
+		if m.chain != nil {
+			if err := m.chain.BeforeToolCall(ctx, call); err != nil {
+				return nil, fmt.Errorf("tool call blocked by hook: %w", err)
+			}
+		}
+		result, err := next(ctx, call)
+		if m.chain != nil {
+			if aerr := m.chain.AfterToolCall(ctx, call, result, err); aerr != nil {
+				slog.Warn("core.hook_aware_tool.after_error", "tool", call.Name, "err", aerr)
+			}
+		}
+		return result, err
+	}
 }
 
 // MiddlewareChain composes a list of Middleware into a single wrapped AgentLoop

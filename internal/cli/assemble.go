@@ -418,6 +418,12 @@ func AssembleAgent(
 		}
 	}
 
+	// 4c. Build the hook chain from extension-registered hooks. The chain is
+	// created early so it can be wired into both the tool middleware
+	// (BeforeToolCall/AfterToolCall) and the agent-level middleware
+	// (BeforeRun/AfterRun), as well as the TurnRunner for lifecycle events.
+	hookChain := core.NewHookChain(extHooks...)
+
 	// 5. Wire approval + mutation middleware via decorator pattern.
 	classifier := approval.NewSafetyPolicyClassifier([]string{"bash"})
 	approvalStore := approval.NewInMemoryApprovalStore()
@@ -514,8 +520,12 @@ func AssembleAgent(
 
 	// 6d. Wrap tool registry with idempotent cache + audit + telemetry so that
 	// identical tool calls return cached results and every call is recorded.
+	// The hook-aware middleware is added so BeforeToolCall/AfterToolCall
+	// lifecycle hooks fire around every tool execution.
+	hookToolMW := core.NewHookAwareToolMiddleware(hookChain)
 	tr = tools.NewMiddlewareToolRegistry(tr,
 		newProductionToolWrapper(idempotentCache, auditLog, telemetry, sessionID),
+		hookToolMW.WrapToolCall,
 	)
 	reg.RegisterToolRegistry(tr)
 
@@ -720,11 +730,10 @@ func AssembleAgent(
 	production.RegisterLoopDetector(loopDetector)
 	reminderMgr := core.NewDefaultSystemReminderManager()
 
-	// 10c. Wire failure synthesis and hook chain. Extension-registered hooks
-	// (bridged from extension.Hook to core.Hook) are included so they observe
-	// the agent lifecycle.
+	// 10c. Wire failure synthesis. The hook chain was created earlier (step
+	// 4c) so it can be shared between the tool middleware, the agent-level
+	// middleware, and the TurnRunner.
 	failureSynthesizer := core.NewDefaultFailureTurnSynthesizer()
-	hookChain := core.NewHookChain(extHooks...)
 
 	// 11. Apply middleware chain (onion model) around the loop agent.
 	// Order (outermost first): logging -> loop-detector -> plan-mode ->
@@ -827,6 +836,7 @@ func AssembleAgent(
 	turnRunner := core.NewEinoTurnRunner(loop)
 	turnRunner.SetSteerChannel(steerCh)
 	turnRunner.SetAgent(agent)
+	turnRunner.SetHookChain(hookChain)
 	reg.RegisterTurnRunner(turnRunner)
 
 	// Emit assemble span for observability.
