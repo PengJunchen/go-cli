@@ -243,3 +243,115 @@ func TestDetectJSONResponse_LeadingWhitespace(t *testing.T) {
 		})
 	}
 }
+
+// runStreamAccumulator feeds the given SSE event data payloads through
+// accumulateOpenAIStreamToolCalls and returns the accumulated tool calls,
+// finish reason, and emitted content chunks. A [DONE] sentinel is appended
+// automatically.
+func runStreamAccumulator(t *testing.T, eventData ...string) ([]ToolCall, string, []MessageChunk) {
+	t.Helper()
+	events := make(chan SSEEvent, len(eventData)+1)
+	for _, data := range eventData {
+		events <- SSEEvent{Data: data}
+	}
+	events <- SSEEvent{Data: "[DONE]"}
+	close(events)
+
+	ch := make(chan MessageChunk, 64)
+	toolCalls, finishReason, _ := accumulateOpenAIStreamToolCalls(events, ch)
+	close(ch)
+
+	var chunks []MessageChunk
+	for c := range ch {
+		chunks = append(chunks, c)
+	}
+	return toolCalls, finishReason, chunks
+}
+
+// TestStreamAccumulator_WithAPIIDsUsesRealID verifies that when the API
+// returns a tool call ID in the stream delta, the accumulator preserves it
+// instead of synthesising a "call_%d" ID.
+func TestStreamAccumulator_WithAPIIDsUsesRealID(t *testing.T) {
+	toolCalls, _, _ := runStreamAccumulator(t,
+		`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_abc123","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":\"SF\"}"}}]}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+	require.Len(t, toolCalls, 1)
+	assert.Equal(t, "call_abc123", toolCalls[0].ID)
+	assert.Equal(t, "get_weather", toolCalls[0].Name)
+	args, ok := toolCalls[0].Args.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "SF", args["city"])
+}
+
+// TestStreamAccumulator_WithoutIDsFallsBackSynthetic verifies that when the
+// stream never carries a tool call ID, the accumulator falls back to the
+// synthetic "call_%d" scheme so downstream code still has a non-empty ID.
+func TestStreamAccumulator_WithoutIDsFallsBackSynthetic(t *testing.T) {
+	toolCalls, _, _ := runStreamAccumulator(t,
+		`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"type":"function","function":{"name":"get_weather","arguments":""}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":\"SF\"}"}}]}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+	require.Len(t, toolCalls, 1)
+	assert.Equal(t, "call_0", toolCalls[0].ID)
+	assert.Equal(t, "get_weather", toolCalls[0].Name)
+}
+
+// TestStreamAccumulator_MultipleToolCallsTracked verifies that tool call IDs
+// are tracked independently per index when several tool calls are interleaved
+// in the stream.
+func TestStreamAccumulator_MultipleToolCallsTracked(t *testing.T) {
+	toolCalls, _, _ := runStreamAccumulator(t,
+		`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_a","type":"function","function":{"name":"get_weather","arguments":""}},{"index":1,"id":"call_b","type":"function","function":{"name":"get_time","arguments":""}},{"index":2,"id":"call_c","type":"function","function":{"name":"search","arguments":""}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":\"SF\"}"}},{"index":1,"function":{"arguments":"{\"zone\":\"PST\"}"}},{"index":2,"function":{"arguments":"{\"q\":\"go\"}"}}]}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+	require.Len(t, toolCalls, 3)
+	assert.Equal(t, "call_a", toolCalls[0].ID)
+	assert.Equal(t, "call_b", toolCalls[1].ID)
+	assert.Equal(t, "call_c", toolCalls[2].ID)
+	assert.Equal(t, "get_weather", toolCalls[0].Name)
+	assert.Equal(t, "get_time", toolCalls[1].Name)
+	assert.Equal(t, "search", toolCalls[2].Name)
+}
+
+// TestStreamAccumulator_FirstWriteWins verifies that once an ID is stored for
+// an index, subsequent deltas for the same index do not overwrite it
+// (first-write-wins semantics). This matches the behaviour already used for
+// tool names.
+func TestStreamAccumulator_FirstWriteWins(t *testing.T) {
+	toolCalls, _, _ := runStreamAccumulator(t,
+		`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_first","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}`,
+		`{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_second","function":{"arguments":"{\"city\":\"SF\"}"}}]}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+	require.Len(t, toolCalls, 1)
+	assert.Equal(t, "call_first", toolCalls[0].ID)
+}
+
+// TestToolCallID_MatchesNonStreaming verifies that the streaming accumulator
+// and the non-streaming conversion path (convertAssistantToolCalls) produce
+// identical tool call IDs when the API returns the same IDs. This is the core
+// invariant that lets tool results match tool calls regardless of whether the
+// response was streamed.
+func TestToolCallID_MatchesNonStreaming(t *testing.T) {
+	// Streaming path: fragments arrive across SSE chunks with API IDs.
+	streamCalls, _, _ := runStreamAccumulator(t,
+		`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_abc123","type":"function","function":{"name":"get_weather","arguments":"{\"city\":\"SF\"}"}}]}}]}`,
+		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+	)
+
+	// Non-streaming path: the same tool call arrives in a single response.
+	nonStreamCalls := convertAssistantToolCalls([]openAIToolCall{
+		{ID: "call_abc123", Type: "function", Function: openAIFunction{Name: "get_weather", Arguments: `{"city":"SF"}`}},
+	})
+
+	require.Len(t, streamCalls, 1)
+	require.Len(t, nonStreamCalls, 1)
+	assert.Equal(t, nonStreamCalls[0].ID, streamCalls[0].ID)
+	assert.Equal(t, "call_abc123", streamCalls[0].ID)
+	assert.Equal(t, nonStreamCalls[0].Name, streamCalls[0].Name)
+	assert.Equal(t, nonStreamCalls[0].Args, streamCalls[0].Args)
+}
