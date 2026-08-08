@@ -119,7 +119,8 @@ func TestSplitTurnCompactor_WithInjectedSummarizer(t *testing.T) {
 	assert.Contains(t, result.SecondPart, "SUMMARY:")
 	assert.Contains(t, result.SecondPart, "b")
 	assert.NotContains(t, result.SecondPart, "a", "second part should only contain b's")
-	assert.Equal(t, 50, result.OriginalTokens)
+	// 200 alphanumerics (0.25 each) + 1 newline (0.5) = 50.5 → rounds to 51.
+	assert.Equal(t, 51, result.OriginalTokens)
 }
 
 func TestSplitTurnCompactor_SummarizerErrorFallback(t *testing.T) {

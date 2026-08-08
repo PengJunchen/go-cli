@@ -132,3 +132,23 @@ func TestContextManager_RebuildSpan(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	exp.AssertSpanExists(t, "context.rebuild")
 }
+
+func TestTokenEstimateASCII(t *testing.T) {
+	// Pure ASCII alphanumerics: ~0.25 tokens per char.
+	assert.Equal(t, 2, estimateTokens("abcdefgh")) // 8 * 0.25 = 2
+}
+
+func TestTokenEstimateCJK(t *testing.T) {
+	// CJK runes count as 2 tokens each, not byte-length/4.
+	// "你好世界" is 12 bytes; len()/4 would give 3, but the correct estimate is 8.
+	assert.Equal(t, 8, estimateTokens("你好世界")) // 4 * 2 = 8
+}
+
+func TestTokenEstimateMixed(t *testing.T) {
+	// 3 ASCII letters (0.75) + 2 CJK (4) = 4.75 -> 5
+	assert.Equal(t, 5, estimateTokens("abc你好"))
+}
+
+func TestTokenEstimateEmpty(t *testing.T) {
+	assert.Equal(t, 0, estimateTokens(""))
+}

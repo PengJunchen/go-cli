@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -193,4 +194,42 @@ func TestNoopSummarizerFailsLoudly(t *testing.T) {
 	compactor := NewSummaryCompactor(nil) // fallback summarizer
 	_, err := compactor.Compact(ctx, items, 30, est)
 	require.ErrorIs(t, err, errNoSummarizer)
+}
+
+// runeCountEstimator returns the rune count as the token count, letting tests
+// distinguish estimator-driven truncation from len()/4 truncation.
+type runeCountEstimator struct{}
+
+func (runeCountEstimator) Estimate(text string) (int, error) {
+	return utf8.RuneCountInString(text), nil
+}
+
+func TestClampSummaryUsesEstimator(t *testing.T) {
+	est := runeCountEstimator{} // 1 token per rune
+	compactor := NewSummaryCompactor(nil, WithMaxSummaryTokens(10))
+
+	summary := strings.Repeat("x", 100) // 100 runes = 100 tokens
+	clamped := compactor.clampSummary(summary, est)
+
+	// With the rune-count estimator the budget of 10 means 10 runes.
+	// If len()/4 were used instead, the result would be 40 chars.
+	assert.Equal(t, 10, utf8.RuneCountInString(clamped))
+	n, _ := est.Estimate(clamped)
+	assert.LessOrEqual(t, n, 10)
+}
+
+func TestClampSummaryCJKAccuracy(t *testing.T) {
+	est := NewHeuristicTokenEstimator() // unicode-aware: CJK = 2 tokens
+	compactor := NewSummaryCompactor(nil, WithMaxSummaryTokens(50))
+
+	summary := strings.Repeat("你", 100) // 100 CJK chars = 200 tokens
+	clamped := compactor.clampSummary(summary, est)
+
+	// Budget 50 / 2 tokens-per-CJK = 25 runes. The old len()/4 approach would
+	// compute 300 bytes / 4 = 75 tokens and truncate at byte 200 (66.7 CJK
+	// chars, splitting a multi-byte rune). The estimator-based approach
+	// truncates cleanly at 25 runes.
+	assert.Equal(t, 25, utf8.RuneCountInString(clamped))
+	n, _ := est.Estimate(clamped)
+	assert.LessOrEqual(t, n, 50)
 }

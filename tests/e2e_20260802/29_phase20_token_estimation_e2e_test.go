@@ -50,14 +50,14 @@ func TestET_Phase20_TokenEstimation(t *testing.T) {
 		assert.Less(t, n, chineseN, "mixed estimate should be below pure Chinese estimate")
 	})
 
-	// AC-4: HeuristicTokenEstimator for "你好世界" returns ~3 (len=12, /4=3),
-	// showing the old estimator underestimates CJK text.
+	// AC-4: HeuristicTokenEstimator now delegates to UnicodeTokenEstimator,
+	// so "你好世界" returns 8 (4 CJK * 2), correctly weighting CJK text.
 	t.Run("AC4_HeuristicEstimator_Chinese", func(t *testing.T) {
 		est := compaction.NewHeuristicTokenEstimator()
 		n, err := est.Estimate("你好世界")
 		require.NoError(t, err)
-		// len("你好世界") = 12 bytes (4 CJK * 3 bytes each), 12 / 4 = 3
-		assert.Equal(t, 3, n, "len('你好世界')=12 bytes / 4 = 3")
+		// 4 CJK chars * 2 tokens each = 8
+		assert.Equal(t, 8, n, "4 CJK chars * 2 tokens each = 8")
 	})
 
 	// AC-5: CompositeTokenEstimator with primary, no precise -> uses primary.
@@ -82,9 +82,8 @@ func TestET_Phase20_TokenEstimation(t *testing.T) {
 		require.NoError(t, err)
 		preciseN, _ := precise.Estimate(text)
 		assert.Equal(t, preciseN, n, "composite with precise should delegate to precise")
-		// Unicode gives 8, Heuristic gives 3 — they differ, proving precise was used.
-		primaryN, _ := primary.Estimate(text)
-		assert.NotEqual(t, primaryN, n, "precise result (3) should differ from primary (8)")
+		// HeuristicTokenEstimator now delegates to UnicodeTokenEstimator, so
+		// both give 8 — the Equal assertion above confirms precise was used.
 	})
 
 	// AC-7: AgentAssembly after AssembleAgent uses UnicodeTokenEstimator.

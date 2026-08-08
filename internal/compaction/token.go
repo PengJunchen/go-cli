@@ -15,9 +15,10 @@ type TokenEstimator interface {
 	Estimate(text string) (int, error)
 }
 
-// HeuristicTokenEstimator estimates tokens by dividing the number of characters
-// by four, a common rule-of-thumb (roughly four characters per token for
-// English prose). It never fails for ordinary input.
+// HeuristicTokenEstimator estimates tokens using Unicode-aware heuristics. It
+// delegates to UnicodeTokenEstimator, which weights CJK characters at ~2 tokens
+// each and ASCII at ~0.25 tokens each, so non-English text is not undercounted
+// the way a byte-length divisor would. It never fails for ordinary input.
 type HeuristicTokenEstimator struct{}
 
 // Compile-time assertion that HeuristicTokenEstimator satisfies TokenEstimator.
@@ -28,12 +29,10 @@ func NewHeuristicTokenEstimator() *HeuristicTokenEstimator {
 	return &HeuristicTokenEstimator{}
 }
 
-// Estimate returns len(text)/4. The error is always nil for non-negative length
-// input, so callers can safely ignore it.
+// Estimate delegates to UnicodeTokenEstimator, which weights CJK runes as 2
+// tokens and ASCII alphanumerics as 0.25. The error is always nil.
 func (e *HeuristicTokenEstimator) Estimate(text string) (int, error) {
-	n := len(text) / 4
-	slog.Debug("compaction.estimate", "chars", len(text), "tokens", n)
-	return n, nil
+	return NewUnicodeTokenEstimator().Estimate(text)
 }
 
 // UnicodeTokenEstimator estimates token counts using Unicode-aware heuristics.

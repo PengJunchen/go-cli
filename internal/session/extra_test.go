@@ -244,12 +244,12 @@ func TestContextManagerNilTree(t *testing.T) {
 	assert.Contains(t, err.Error(), "no SessionTree")
 }
 
-// TestEstimateTokens verifies the coarse heuristic.
+// TestEstimateTokens verifies the Unicode-aware heuristic.
 func TestEstimateTokens(t *testing.T) {
 	assert.Equal(t, 0, estimateTokens(""))
-	assert.Equal(t, 1, estimateTokens("abcd"))     // 4 chars -> 1 token
-	assert.Equal(t, 0, estimateTokens("abc"))      // 3 chars -> 0 tokens
-	assert.Equal(t, 2, estimateTokens("abcdefgh")) // 8 chars -> 2 tokens
+	assert.Equal(t, 1, estimateTokens("abcd"))     // 4 ASCII * 0.25 = 1
+	assert.Equal(t, 1, estimateTokens("abc"))      // 3 ASCII * 0.25 = 0.75 -> 1
+	assert.Equal(t, 2, estimateTokens("abcdefgh")) // 8 ASCII * 0.25 = 2
 }
 
 // TestContextManagerCompactionTokenEstimate verifies compaction entries fold
