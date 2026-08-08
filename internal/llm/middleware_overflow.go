@@ -133,19 +133,69 @@ func (m *overflowRecoveryModel) Generate(ctx context.Context, msgs []Message, op
 	return nil, fmt.Errorf("overflow: unexpected state")
 }
 
-// Stream implements BaseChatModel.
+// Stream implements BaseChatModel. It forwards chunks from the inner model
+// in real-time via a goroutine, avoiding the latency of buffering the entire
+// stream before returning. Overflow detection still occurs at the
+// m.inner.Stream() call level: when the inner model returns an overflow
+// error, the middleware trims messages and retries. After a successful
+// stream, if FinishReason is "length", continuation is requested via Generate
+// and the extra content is sent as additional chunks.
 func (m *overflowRecoveryModel) Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
 	currentMsgs := msgs
 
-	// Collect the stream so we can inspect the FinishReason and retry on
-	// overflow errors (the final chunk carrying FinishReason is only known
-	// after the stream is fully drained).
-	var result *Message
 	for attempt := 0; attempt <= m.mw.maxRetries; attempt++ {
-		collected, err := m.collectStream(ctx, currentMsgs, opts)
+		ch, err := m.inner.Stream(ctx, currentMsgs, opts...)
 		if err == nil {
-			result = collected
-			break
+			// Success: forward chunks in real-time via a goroutine.
+			outCh := make(chan MessageChunk, 64)
+			go func() {
+				defer close(outCh)
+				var contentBuf strings.Builder
+				var toolCalls []ToolCall
+				var finishReason string
+				gotChunk := false
+
+				for chunk := range ch {
+					gotChunk = true
+					outCh <- chunk // Real-time forward
+					if chunk.Content != "" {
+						contentBuf.WriteString(chunk.Content)
+					}
+					if chunk.Final {
+						if len(chunk.ToolCalls) > 0 {
+							toolCalls = chunk.ToolCalls
+						}
+						if chunk.FinishReason != "" {
+							finishReason = chunk.FinishReason
+						}
+					}
+				}
+
+				// Post-hoc continuation for length truncation.
+				if gotChunk && finishReason == finishReasonLength {
+					result := &Message{
+						Role:         RoleAssistant,
+						Content:      contentBuf.String(),
+						ToolCalls:    toolCalls,
+						FinishReason: finishReason,
+					}
+					origLen := len(result.Content)
+					contResult, _ := m.continueGeneration(ctx, currentMsgs, result, opts)
+					if contResult != nil && len(contResult.Content) > origLen {
+						extra := contResult.Content[origLen:]
+						if extra != "" {
+							outCh <- MessageChunk{Role: RoleAssistant, Content: extra}
+						}
+						outCh <- MessageChunk{
+							Role:         RoleAssistant,
+							Final:        true,
+							FinishReason: contResult.FinishReason,
+							ToolCalls:    contResult.ToolCalls,
+						}
+					}
+				}
+			}()
+			return outCh, nil
 		}
 
 		if !isOverflowError(err) {
@@ -178,69 +228,7 @@ func (m *overflowRecoveryModel) Stream(ctx context.Context, msgs []Message, opts
 		}
 	}
 
-	// Guard against an empty stream response.
-	if result == nil {
-		result = &Message{Role: RoleAssistant}
-	}
-
-	// If the output was truncated by max_tokens, request continuation(s)
-	// via Generate (simpler than re-streaming).
-	if result.FinishReason == finishReasonLength {
-		result, _ = m.continueGeneration(ctx, currentMsgs, result, opts)
-	}
-
-	// Re-emit the (possibly continued) result as a single final chunk.
-	ch := make(chan MessageChunk, 1)
-	ch <- MessageChunk{
-		Role:         RoleAssistant,
-		Content:      result.Content,
-		Final:        true,
-		ToolCalls:    result.ToolCalls,
-		FinishReason: result.FinishReason,
-	}
-	close(ch)
-	return ch, nil
-}
-
-// collectStream calls inner.Stream, drains the channel, and returns the
-// accumulated result as a *Message. It mirrors the chunk-accumulation logic
-// in core/loop.go's streamGenerate.
-func (m *overflowRecoveryModel) collectStream(ctx context.Context, msgs []Message, opts []Option) (*Message, error) {
-	ch, err := m.inner.Stream(ctx, msgs, opts...)
-	if err != nil {
-		return nil, err
-	}
-
-	var contentBuf strings.Builder
-	var toolCalls []ToolCall
-	var finishReason string
-	gotChunk := false
-
-	for chunk := range ch {
-		gotChunk = true
-		if chunk.Content != "" {
-			contentBuf.WriteString(chunk.Content)
-		}
-		if chunk.Final {
-			if len(chunk.ToolCalls) > 0 {
-				toolCalls = chunk.ToolCalls
-			}
-			if chunk.FinishReason != "" {
-				finishReason = chunk.FinishReason
-			}
-		}
-	}
-
-	if !gotChunk {
-		return nil, nil
-	}
-
-	return &Message{
-		Role:         RoleAssistant,
-		Content:      contentBuf.String(),
-		ToolCalls:    toolCalls,
-		FinishReason: finishReason,
-	}, nil
+	return nil, fmt.Errorf("overflow: unexpected state")
 }
 
 // continueGeneration appends the partial assistant response to the

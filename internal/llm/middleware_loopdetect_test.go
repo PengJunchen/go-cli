@@ -119,9 +119,13 @@ func TestLoopDetectionModelMiddleware_CustomThreshold(t *testing.T) {
 }
 
 // TestLoopDetectionModelMiddleware_StreamLoopDetected verifies that the stream
-// path accumulates chunk content and flags a loop after the threshold.
+// path accumulates chunk content and flags a loop after the threshold. With
+// real-time forwarding, the loop is detected post-hoc: chunks are forwarded
+// immediately, and after the stream completes checkLoop records the content.
+// After threshold consecutive identical streams, the next Generate call
+// returns an error because the history shows a loop.
 func TestLoopDetectionModelMiddleware_StreamLoopDetected(t *testing.T) {
-	base := &loopMockModel{responses: []string{"same", "same", "same"}}
+	base := &loopMockModel{responses: []string{"same", "same", "same", "same"}}
 	mw := NewLoopDetectionModelMiddleware() // default threshold=3
 	wrapped := mw.WrapModel(base)
 
@@ -135,15 +139,21 @@ func TestLoopDetectionModelMiddleware_StreamLoopDetected(t *testing.T) {
 		return b.String()
 	}
 
-	// First two streams succeed.
+	// First two streams succeed and forward chunks in real-time.
 	assert.Equal(t, "same", drain())
 	assert.Equal(t, "same", drain())
 
-	// Third consecutive stream triggers the loop error from Stream itself.
-	ch, err := wrapped.Stream(context.Background(), nil)
+	// Third consecutive stream also forwards chunks (real-time), but
+	// post-hoc loop detection triggers (count=3 >= threshold=3). The
+	// error is logged, not returned from Stream, because chunks are
+	// already forwarded.
+	assert.Equal(t, "same", drain())
+
+	// After the loop history is established, the next Generate call with
+	// the same content returns an error.
+	_, err := wrapped.Generate(context.Background(), nil)
 	require.Error(t, err)
-	assert.Nil(t, ch)
-	assert.Contains(t, err.Error(), "count=3")
+	assert.Contains(t, err.Error(), "loopdetection")
 }
 
 // TestLoopDetectionModelMiddleware_ConcurrentSafe verifies the middleware is

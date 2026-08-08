@@ -241,8 +241,10 @@ func (m *cycledModel) Generate(ctx context.Context, msgs []Message, opts ...Opti
 
 // Stream routes the call to the model selected by the cycler's strategy. On
 // build failure or stream initialization error it falls back to the primary
-// model. Errors that occur mid-stream (after the channel has been returned)
-// are not retried.
+// model. When a cleanup function is returned by buildSelectedModel, the
+// returned channel is wrapped in a forwarding goroutine that calls cleanup
+// after the inner channel is drained. When cleanup is nil the original
+// channel is returned without a wrapper.
 func (m *cycledModel) Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
 	sessionID := sessionIDFromContext(ctx)
 	idx := m.cycler.selectModel(sessionID)
@@ -259,5 +261,21 @@ func (m *cycledModel) Stream(ctx context.Context, msgs []Message, opts ...Option
 		}
 		return m.primary.Stream(ctx, msgs, opts...)
 	}
-	return ch, nil
+
+	// nil cleanup: return original channel without a wrapper goroutine.
+	if cleanup == nil {
+		return ch, nil
+	}
+
+	// Wrap the channel with a forwarding goroutine that calls cleanup when
+	// the inner channel is drained (closed).
+	out := make(chan MessageChunk, 16)
+	go func() {
+		defer cleanup()
+		defer close(out)
+		for chunk := range ch {
+			out <- chunk
+		}
+	}()
+	return out, nil
 }
