@@ -42,9 +42,9 @@ func TestAppRunRestartable(t *testing.T) {
 // app has already cleaned up (it only appends to the view buffer).
 func TestAppDrawAfterCleanup(t *testing.T) {
 	app := NewBubbleteaApp(make(chan AgentEvent, 1))
-	app.model.addEntry("status", "first")
+	app.model.addEntry("status", "first", "")
 	app.cleanup()
-	app.model.addEntry("status", "after")
+	app.model.addEntry("status", "after", "")
 	view := app.View()
 	require.Contains(t, view, "first")
 	require.Contains(t, view, "after")
@@ -60,7 +60,7 @@ func TestAppViewConcurrentReads(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			for i := 0; i < 200; i++ {
-				app.model.addEntry("status", "x")
+				app.model.addEntry("status", "x", "")
 			}
 		}()
 		go func() {
@@ -163,7 +163,7 @@ func TestAppErrAlreadyRunningSentinel(t *testing.T) {
 // and appends the raw output line.
 func TestAppDrawNilRenderer(t *testing.T) {
 	app := NewBubbleteaApp(make(chan AgentEvent, 1))
-	app.model.addEntry("status", "raw")
+	app.model.addEntry("status", "raw", "")
 	require.Contains(t, app.View(), "raw")
 }
 

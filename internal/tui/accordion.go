@@ -82,6 +82,10 @@ type AccordionEntry struct {
 	// MaxResultLines caps the number of lines shown for a tool_result entry.
 	// 0 means use the default (maxResultLines). Set to -1 to disable truncation.
 	MaxResultLines int
+	// ToolCallID is the unique identifier from the model's tool call. Used to
+	// match tool_output and tool_result events to the originating tool_call
+	// entry, replacing position-based matching.
+	ToolCallID string
 }
 
 // AccordionModel holds the ordered list of entries and the index of the
@@ -97,21 +101,32 @@ func NewAccordionModel() *AccordionModel {
 	return &AccordionModel{selected: -1}
 }
 
-// Add appends a top-level entry and auto-selects it. If the previous entry is
-// a tool_call and the new entry is a tool_result, they are grouped: the
-// tool_result becomes a child of the tool_call entry instead of a new
-// top-level item.
+// Add appends a top-level entry and auto-selects it. If the new entry is a
+// tool_result, it is grouped as a child of the originating tool_call entry
+// (matched by ToolCallID, with position-based fallback) instead of becoming a
+// new top-level item.
 func (m *AccordionModel) Add(entry *AccordionEntry) {
 	if entry == nil {
 		return
 	}
-	// Group tool_result with the preceding tool_call.
-	if len(m.entries) > 0 && entry.ContentType == ContentTypeToolResult {
-		last := m.entries[len(m.entries)-1]
-		if last.ContentType == ContentTypeToolCall {
-			last.Children = append(last.Children, entry)
-			m.selected = len(m.entries) - 1
-			return
+	// Group tool_result with the originating tool_call entry.
+	if entry.ContentType == ContentTypeToolResult {
+		// Match by ToolCallID first.
+		if entry.ToolCallID != "" {
+			if parent := m.FindByToolCallID(entry.ToolCallID); parent != nil {
+				parent.Children = append(parent.Children, entry)
+				m.selected = len(m.entries) - 1
+				return
+			}
+		}
+		// Fallback: group with the last tool_call entry (position-based).
+		if len(m.entries) > 0 {
+			last := m.entries[len(m.entries)-1]
+			if last.ContentType == ContentTypeToolCall {
+				last.Children = append(last.Children, entry)
+				m.selected = len(m.entries) - 1
+				return
+			}
 		}
 	}
 	m.entries = append(m.entries, entry)
@@ -123,6 +138,22 @@ func (m *AccordionModel) Entries() []*AccordionEntry {
 	out := make([]*AccordionEntry, len(m.entries))
 	copy(out, m.entries)
 	return out
+}
+
+// FindByToolCallID returns the top-level tool_call entry whose ToolCallID
+// matches id, or nil if no match is found. Only top-level entries are
+// searched because tool_call entries are always added at the top level
+// (tool_result entries become children).
+func (m *AccordionModel) FindByToolCallID(id string) *AccordionEntry {
+	if id == "" {
+		return nil
+	}
+	for _, e := range m.entries {
+		if e.ContentType == ContentTypeToolCall && e.ToolCallID == id {
+			return e
+		}
+	}
+	return nil
 }
 
 // Selected returns the index of the currently selected entry, or -1 if empty.
