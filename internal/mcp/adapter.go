@@ -117,13 +117,19 @@ type adapterCore struct {
 	externalConn bool
 	proc         *exec.Cmd
 
-	mu        sync.Mutex
-	connected bool
+	mu                sync.Mutex
+	connected         bool
+	maxReconnect      int
+	reconnectAttempts int
 }
+
+// defaultMaxReconnect is the number of reconnection attempts made when a Call
+// fails due to a transport-level connection loss before giving up.
+const defaultMaxReconnect = 3
 
 // newAdapterCore builds the core for a given config and options.
 func newAdapterCore(cfg MCPServerConfig, opts []AdapterOption) *adapterCore {
-	c := &adapterCore{cfg: cfg}
+	c := &adapterCore{cfg: cfg, maxReconnect: defaultMaxReconnect}
 	for _, opt := range opts {
 		opt(c)
 	}
@@ -209,6 +215,85 @@ func (c *adapterCore) Disconnect(_ context.Context) error {
 	return err
 }
 
+// reconnect tears down the current session and re-establishes it. It is called
+// by callWithReconnect when a transport-level error suggests the connection was
+// lost. The caller is responsible for enforcing the maxReconnect budget and
+// backoff between attempts.
+func (c *adapterCore) reconnect(ctx context.Context) error {
+	// Disconnect ignoring errors — we are already in a degraded state.
+	_ = c.Disconnect(ctx) //nolint:errcheck // best-effort teardown
+	return c.Connect(ctx)
+}
+
+// reconnectBackoff returns the delay before the (zero-based) attempt-th
+// reconnection try: 1s, 2s, 4s, 8s, ... capped at 8s.
+func reconnectBackoff(attempt int) time.Duration {
+	d := time.Second
+	for i := 0; i < attempt; i++ {
+		d *= 2
+		if d >= 8*time.Second {
+			return 8 * time.Second
+		}
+	}
+	return d
+}
+
+// isConnectionError reports whether err likely indicates a transport-level
+// connection loss rather than a server-side RPC error. RPC errors are
+// server-level responses and must not trigger a reconnect.
+func isConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "rpc error") {
+		return false
+	}
+	return strings.Contains(msg, "write request") ||
+		strings.Contains(msg, "read response") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "EOF")
+}
+
+// callWithReconnect sends a JSON-RPC request and, when the error looks like a
+// transport-level connection loss, attempts to reconnect (with exponential
+// backoff) up to maxReconnect times before returning. On a successful
+// reconnect the request is retried once.
+func (c *adapterCore) callWithReconnect(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
+	res, err := c.conn.Request(ctx, method, params)
+	if err == nil {
+		return res, nil
+	}
+	if !isConnectionError(err) {
+		return nil, err
+	}
+
+	for attempt := 0; attempt < c.maxReconnect; attempt++ {
+		c.mu.Lock()
+		c.reconnectAttempts++
+		c.mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(reconnectBackoff(attempt)):
+		}
+
+		if rErr := c.reconnect(ctx); rErr != nil {
+			err = rErr
+			continue
+		}
+		// Reconnected — retry the request.
+		if res, err = c.conn.Request(ctx, method, params); err == nil {
+			return res, nil
+		}
+		if !isConnectionError(err) {
+			return nil, err
+		}
+	}
+	return nil, err
+}
+
 // ListTools returns the tools declared by the server via the tools/list
 // JSON-RPC method.
 func (c *adapterCore) ListTools(ctx context.Context) ([]MCPTool, error) {
@@ -251,7 +336,7 @@ func (c *adapterCore) CallTool(ctx context.Context, name string, args map[string
 	defer span.End()
 
 	start := time.Now()
-	res, err := c.conn.Request(spanCtx, "tools/call", map[string]any{
+	res, err := c.callWithReconnect(spanCtx, "tools/call", map[string]any{
 		"name":      name,
 		"arguments": args,
 	})
