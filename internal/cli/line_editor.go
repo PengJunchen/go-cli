@@ -169,29 +169,6 @@ func stripANSI(s string) string {
 	return sb.String()
 }
 
-// countViewVisualLines counts the number of terminal visual lines a view
-// string will occupy, accounting for newlines, ANSI escape sequences, CJK
-// double-width characters, and line wrapping.
-func countViewVisualLines(view string, termWidth int) int {
-	if termWidth <= 0 {
-		termWidth = 80
-	}
-	total := 0
-	for _, line := range strings.Split(view, "\n") {
-		visible := stripANSI(line)
-		w := displayWidth([]rune(visible))
-		if w == 0 {
-			total++
-		} else {
-			total += (w + termWidth - 1) / termWidth
-		}
-	}
-	if total == 0 {
-		return 1
-	}
-	return total
-}
-
 // ReadLine implements LineEditor.
 func (le *DefaultLineEditor) ReadLine(ctx context.Context, prompt string) (string, error) {
 	if le.detectTTY() {

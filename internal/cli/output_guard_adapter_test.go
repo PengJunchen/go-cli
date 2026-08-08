@@ -120,10 +120,10 @@ func TestNewModelWrapper_NonBaseChatModelReturnsUnchanged(t *testing.T) {
 // countingModel is a test double that counts Generate calls and returns err
 // for the first failCount calls, then returns resp.
 type countingModel struct {
-	calls      int32
-	failCount  int32
-	resp       *llm.Message
-	err        error
+	calls     int32
+	failCount int32
+	resp      *llm.Message
+	err       error
 }
 
 func (m *countingModel) Generate(_ context.Context, _ []llm.Message, _ ...llm.Option) (*llm.Message, error) {

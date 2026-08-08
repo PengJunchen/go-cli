@@ -99,7 +99,7 @@ func TestHistoryStore_MaxLenFIFOEviction(t *testing.T) {
 func TestHistoryStore_DedupConsecutive(t *testing.T) {
 	hs := NewHistoryStore(1000, "")
 	hs.Add("ls")
-	hs.Add("ls")   // consecutive duplicate — skipped
+	hs.Add("ls") // consecutive duplicate — skipped
 	hs.Add("ls -la")
 	hs.Add("ls -la") // consecutive duplicate — skipped
 	hs.Add("ls")     // not consecutive duplicate — kept

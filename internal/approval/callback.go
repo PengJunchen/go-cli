@@ -109,7 +109,7 @@ type DiffPreviewFunc func(toolName string, args map[string]any) string
 // RequestApproval, which sends a tui.ApprovalRequest on the channel and blocks
 // until the TUI delivers a tui.ApprovalResponse (or the context is canceled).
 type TeaApprovalCallback struct {
-	requestCh    chan<- tui.ApprovalRequest
+	requestCh     chan<- tui.ApprovalRequest
 	diffPreviewFn DiffPreviewFunc
 }
 
@@ -144,7 +144,7 @@ func (c *TeaApprovalCallback) RequestApproval(ctx context.Context, toolName stri
 	respCh := make(chan tui.ApprovalResponse, 1)
 	req := tui.ApprovalRequest{
 		ToolName:   toolName,
-		Args:        args,
+		Args:       args,
 		ResponseCh: respCh,
 	}
 	if c.diffPreviewFn != nil {

@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -249,7 +250,7 @@ func TestStatusBarRendering(t *testing.T) {
 
 	assert.Contains(t, bar, "Tokens: 1500/8000 (18%)")
 	assert.Contains(t, bar, "Cost: $0.0250")
-	assert.NotContains(t, bar, "\x1b[33m", "should not have warning color under 80%")
+	assert.NotContains(t, bar, "\x1b[", "should not have warning color under 80%")
 
 	// High usage (over 80%).
 	m.mu.Lock()
@@ -259,8 +260,118 @@ func TestStatusBarRendering(t *testing.T) {
 	bar = m.renderStatusBarLocked()
 	m.mu.Unlock()
 
-	assert.Contains(t, bar, "\x1b[33m", "should have warning color over 80%")
+	assert.Contains(t, bar, "\x1b[", "should have warning color over 80%")
 	assert.Contains(t, bar, "100%")
+}
+
+// TestStatusBar_TwoLines verifies the status bar renders as two lines when
+// both model info and token usage are present.
+func TestStatusBar_TwoLines(t *testing.T) {
+	m := NewBubbleteaApp(make(chan AgentEvent, 1)).model
+	m.mu.Lock()
+	m.modelName = "claude-sonnet-4"
+	m.turnCount = 3
+	m.sessionID = "abc12345"
+	m.modeLabel = "chat"
+	m.tokenInput = 1000
+	m.tokenOutput = 500
+	m.tokenMax = 8000
+	m.tokenCost = 0.01
+	bar := m.renderStatusBarLocked()
+	m.mu.Unlock()
+
+	// Two lines separated by \n.
+	lines := splitLines(bar)
+	assert.Len(t, lines, 2, "status bar should be two lines")
+	// Line 1 contains model/turn/session/mode info.
+	assert.Contains(t, lines[0], "claude-sonnet-4")
+	assert.Contains(t, lines[0], "turn #3")
+	assert.Contains(t, lines[0], "abc12345")
+	assert.Contains(t, lines[0], "chat")
+	// Line 2 contains tokens/cost.
+	assert.Contains(t, lines[1], "Tokens:")
+	assert.Contains(t, lines[1], "Cost:")
+}
+
+// TestStatusBar_ModelInfo verifies the model name appears on line 1.
+func TestStatusBar_ModelInfo(t *testing.T) {
+	m := NewBubbleteaApp(make(chan AgentEvent, 1)).model
+	m.mu.Lock()
+	m.modelName = "gpt-4o"
+	m.tokenInput = 100
+	m.tokenMax = 8000
+	bar := m.renderStatusBarLocked()
+	m.mu.Unlock()
+
+	assert.Contains(t, bar, "gpt-4o")
+}
+
+// TestStatusBar_TurnCount verifies the turn count appears on line 1.
+func TestStatusBar_TurnCount(t *testing.T) {
+	m := NewBubbleteaApp(make(chan AgentEvent, 1)).model
+	m.mu.Lock()
+	m.turnCount = 5
+	m.tokenInput = 100
+	m.tokenMax = 8000
+	bar := m.renderStatusBarLocked()
+	m.mu.Unlock()
+
+	assert.Contains(t, bar, "turn #5")
+}
+
+// TestStatusBar_TokenWarning verifies token usage >80% applies warning color.
+func TestStatusBar_TokenWarning(t *testing.T) {
+	m := NewBubbleteaApp(make(chan AgentEvent, 1)).model
+	m.mu.Lock()
+	m.tokenInput = 8500
+	m.tokenOutput = 0
+	m.tokenMax = 10000
+	m.tokenCost = 0.02
+	bar := m.renderStatusBarLocked()
+	m.mu.Unlock()
+
+	// 8500/10000 = 85% > 80%, so the token line should have ANSI styling.
+	assert.Contains(t, bar, "\x1b[", "over 80% should have warning ANSI styling")
+	assert.Contains(t, bar, "85%")
+}
+
+// TestInteractive_TUIConfigWired verifies that TUIConfig options are correctly
+// applied to the BubbleteaApp.
+func TestInteractive_TUIConfigWired(t *testing.T) {
+	app := NewBubbleteaApp(
+		make(chan AgentEvent, 1),
+		WithThemeConfig("monokai"),
+		WithWordWrap(80),
+		WithDiffStyle("split"),
+		WithModelInfo("test-model"),
+		WithSessionInfo("sess1234"),
+		WithTurnCount(2),
+		WithModeLabel("plan"),
+	)
+	m := app.model
+
+	assert.Equal(t, "test-model", m.modelName)
+	assert.Equal(t, 2, m.turnCount)
+	assert.Equal(t, "sess1234", m.sessionID)
+	assert.Equal(t, "plan", m.modeLabel)
+	assert.Equal(t, 80, m.wordWrap)
+	assert.Equal(t, "split", m.diffStyle)
+	// Theme manager should have switched to monokai.
+	theme := m.themeMgr.Get()
+	assert.NotNil(t, theme)
+	// Verify the theme name by checking it's not the default dark theme.
+	_, isDark := theme.(DarkTheme)
+	assert.False(t, isDark, "theme should not be the default dark theme")
+}
+
+// splitLines splits a string by newlines, trimming a single trailing empty
+// string caused by a trailing newline.
+func splitLines(s string) []string {
+	lines := strings.Split(s, "\n")
+	if len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+	return lines
 }
 
 // TestRenderViewWithSteerPrompt verifies that the steer prompt is rendered

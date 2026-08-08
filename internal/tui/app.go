@@ -12,8 +12,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/bubbles/spinner"
+	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/term"
 )
 
@@ -157,6 +158,55 @@ func WithThinkingVisibility(mode string) AppOption {
 	return func(a *BubbleteaApp) { a.thinkingVisibility = mode }
 }
 
+// WithModelInfo sets the model name displayed on the status bar's first line.
+func WithModelInfo(model string) AppOption {
+	return func(a *BubbleteaApp) { a.modelName = model }
+}
+
+// WithTurnCount sets the current turn number displayed on the status bar.
+func WithTurnCount(n int) AppOption {
+	return func(a *BubbleteaApp) { a.turnCount = n }
+}
+
+// WithSessionInfo sets the session ID displayed on the status bar's first line.
+func WithSessionInfo(sessionID string) AppOption {
+	return func(a *BubbleteaApp) { a.sessionID = sessionID }
+}
+
+// WithModeLabel sets the mode label (e.g. "chat" or "plan") shown on the
+// status bar's first line.
+func WithModeLabel(label string) AppOption {
+	return func(a *BubbleteaApp) { a.modeLabel = label }
+}
+
+// WithThemeConfig resolves and applies the named theme (dark/light/monokai/
+// solarized/auto) to the theme manager. "auto" or an empty name falls back to
+// the default dark theme.
+func WithThemeConfig(theme string) AppOption {
+	return func(a *BubbleteaApp) {
+		if a.themeMgr == nil {
+			return
+		}
+		name := strings.TrimSpace(strings.ToLower(theme))
+		if name == "" || name == "auto" {
+			name = "dark"
+		}
+		if err := a.themeMgr.Set(name); err != nil {
+			slog.Debug("tui.app.theme_config", "theme", theme, "err", err)
+		}
+	}
+}
+
+// WithWordWrap sets the markdown word-wrap width (0 disables wrapping).
+func WithWordWrap(width int) AppOption {
+	return func(a *BubbleteaApp) { a.wordWrap = width }
+}
+
+// WithDiffStyle sets the diff rendering style ("unified", "split", or "auto").
+func WithDiffStyle(style string) AppOption {
+	return func(a *BubbleteaApp) { a.diffStyle = style }
+}
+
 // BubbleteaApp is the default App implementation. It is a thin adapter over a
 // bubbletea tea.Program: the teaModel owns all TUI state (accordion, streaming,
 // steer, token usage, spinner) and the event-handling logic, while this struct
@@ -185,20 +235,29 @@ type BubbleteaApp struct {
 
 	// Option fields applied by WithXxx. They are mirrored into the model at
 	// construction time and retained here for test inspection.
-	reg        *RendererRegistry
-	themeMgr   *ThemeManager
-	events     <-chan AgentEvent
-	width      int
+	reg         *RendererRegistry
+	themeMgr    *ThemeManager
+	events      <-chan AgentEvent
+	width       int
 	inputReader io.Reader
 	interactive bool
 
-	onUpdate       func(string)
-	steerCallback  func(string)
-	cancelCallback func()
-	pauseCallback  func()
-	resumeCallback func()
-	approvalCh     <-chan ApprovalRequest
+	onUpdate           func(string)
+	steerCallback      func(string)
+	cancelCallback     func()
+	pauseCallback      func()
+	resumeCallback     func()
+	approvalCh         <-chan ApprovalRequest
 	thinkingVisibility string
+
+	// Status bar info fields (34-7): model name, turn count, session ID and
+	// mode label are rendered on the first status bar line.
+	modelName string
+	turnCount int
+	sessionID string
+	modeLabel string
+	wordWrap  int
+	diffStyle string
 }
 
 // NewBubbleteaApp constructs an app wired to the given event source, using a
@@ -228,8 +287,9 @@ func NewBubbleteaApp(events <-chan AgentEvent, opts ...AppOption) *BubbleteaApp 
 //
 // In interactive (TTY) mode bubbletea owns terminal rendering (raw mode,
 // keyboard, resize, diff-based repaint) on stderr. In non-interactive mode the
-// renderer is disabled and the WithOnUpdate callback (if any) streams the view
-// to stdout, matching the legacy single-stream behavior until 34-7 removes it.
+// renderer is disabled; callers that need streaming output in non-interactive
+// mode can still use WithOnUpdate, though interactive.go no longer wires it
+// (the final assistant message is printed directly instead).
 func (a *BubbleteaApp) Run(ctx context.Context) error {
 	if !a.running.CompareAndSwap(false, true) {
 		return errAlreadyRunning
@@ -268,8 +328,9 @@ func (a *BubbleteaApp) programOptions(ctx context.Context) []tea.ProgramOption {
 	case a.interactive:
 		opts = append(opts, tea.WithOutput(os.Stderr))
 	default:
-		// Non-interactive: disable input (no keyboard) and rendering (the
-		// onUpdate callback streams the view to stdout instead).
+		// Non-interactive: disable input (no keyboard) and rendering. If a
+		// WithOnUpdate callback is wired, it streams the view to stdout;
+		// otherwise the caller prints the final result directly.
 		opts = append(opts, tea.WithoutRenderer(), tea.WithInput(nil))
 	}
 	return opts
@@ -330,10 +391,10 @@ func (a *BubbleteaApp) cleanup() {
 // previously lived in the self-implemented render loop.
 type teaModel struct {
 	// configuration
-	reg        *RendererRegistry
-	themeMgr   *ThemeManager
-	width      int
-	height     int
+	reg         *RendererRegistry
+	themeMgr    *ThemeManager
+	width       int
+	height      int
 	interactive bool
 
 	// event / message sources
@@ -377,6 +438,15 @@ type teaModel struct {
 	// "show" (default), "collapse", or "hide".
 	thinkingVisibility string
 
+	// status bar info (34-7): model/turn/session/mode on line 1, tokens/cost
+	// on line 2.
+	modelName string
+	turnCount int
+	sessionID string
+	modeLabel string
+	wordWrap  int
+	diffStyle string
+
 	// token usage
 	tokenInput  int
 	tokenOutput int
@@ -394,7 +464,7 @@ type teaModel struct {
 	// concurrency: guards all mutable state above. Update runs single-threaded
 	// inside bubbletea, but external callers (tests, View) access the model
 	// concurrently, so the mutex serializes View against in-flight updates.
-	mu        sync.Mutex
+	mu         sync.Mutex
 	eventsSeen atomic.Int64
 	msgsSeen   atomic.Int64
 }
@@ -403,22 +473,28 @@ type teaModel struct {
 // BubbleteaApp adapter.
 func newTeaModel(a *BubbleteaApp) *teaModel {
 	return &teaModel{
-		reg:            a.reg,
-		themeMgr:       a.themeMgr,
-		width:          a.width,
-		interactive:    a.interactive,
-		events:         a.events,
-		msgCh:          make(chan Msg, 16),
-		quitCh:         a.quitCh,
-		streamBuf:      make(map[string]*strings.Builder),
-		accordion:      NewAccordionModel(),
-		onUpdate:       a.onUpdate,
-		steerCallback:  a.steerCallback,
-		cancelCallback: a.cancelCallback,
-		pauseCallback:  a.pauseCallback,
-		resumeCallback: a.resumeCallback,
+		reg:                a.reg,
+		themeMgr:           a.themeMgr,
+		width:              a.width,
+		interactive:        a.interactive,
+		events:             a.events,
+		msgCh:              make(chan Msg, 16),
+		quitCh:             a.quitCh,
+		streamBuf:          make(map[string]*strings.Builder),
+		accordion:          NewAccordionModel(),
+		onUpdate:           a.onUpdate,
+		steerCallback:      a.steerCallback,
+		cancelCallback:     a.cancelCallback,
+		pauseCallback:      a.pauseCallback,
+		resumeCallback:     a.resumeCallback,
 		approvalCh:         a.approvalCh,
 		thinkingVisibility: a.thinkingVisibility,
+		modelName:          a.modelName,
+		turnCount:          a.turnCount,
+		sessionID:          a.sessionID,
+		modeLabel:          a.modeLabel,
+		wordWrap:           a.wordWrap,
+		diffStyle:          a.diffStyle,
 		spinner:            spinner.New(spinner.WithSpinner(spinner.MiniDot)),
 	}
 }
@@ -526,8 +602,9 @@ func (m *teaModel) renderViewLocked() string {
 		// Render a block cursor.
 		sb.WriteString("\u2588")
 	}
-	// Token usage status bar.
-	if m.tokenMax > 0 || m.tokenCost > 0 {
+	// Status bar (model/turn/session/mode + tokens/cost). Shown when any
+	// status info is available.
+	if m.tokenMax > 0 || m.tokenCost > 0 || m.modelName != "" || m.turnCount > 0 || m.sessionID != "" || m.modeLabel != "" {
 		sb.WriteString("\n")
 		sb.WriteString(m.renderStatusBarLocked())
 	}
@@ -542,22 +619,69 @@ func (m *teaModel) renderViewLocked() string {
 	return sb.String()
 }
 
-// renderStatusBarLocked formats the token usage status bar. When the token
-// usage percentage exceeds 80%, the text is wrapped in ANSI yellow to warn the
-// user. The caller must hold m.mu.
+// statusBarLineStyle styles the first status bar line (model/turn/session/mode).
+var statusBarLineStyle = lipgloss.NewStyle().Bold(true)
+
+// statusBarWarnStyle styles the token usage line when usage exceeds 80%.
+var statusBarWarnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFC000"))
+
+// renderWidth returns the effective width for content rendering: the
+// configured word-wrap width when non-zero, otherwise the terminal width.
+func (m *teaModel) renderWidth() int {
+	if m.wordWrap > 0 {
+		return m.wordWrap
+	}
+	return m.width
+}
+
+// renderStatusBarLocked formats a two-line status bar. The first line shows
+// model/turn/session/mode info; the second shows token usage and cost. When
+// token usage exceeds 80%, the second line is rendered in warning color.
+// The caller must hold m.mu.
 func (m *teaModel) renderStatusBarLocked() string {
+	// Line 1: model | turn #N | session | mode
+	parts := make([]string, 0, 4)
+	if m.modelName != "" {
+		parts = append(parts, m.modelName)
+	}
+	if m.turnCount > 0 {
+		parts = append(parts, fmt.Sprintf("turn #%d", m.turnCount))
+	}
+	if m.sessionID != "" {
+		// Truncate long session IDs to the first 8 chars for the status bar.
+		sid := m.sessionID
+		if len(sid) > 8 {
+			sid = sid[:8]
+		}
+		parts = append(parts, sid)
+	}
+	if m.modeLabel != "" {
+		parts = append(parts, m.modeLabel)
+	}
+	line1 := strings.Join(parts, " | ")
+
+	// Line 2: tokens/cost — only rendered when token data is available.
+	if m.tokenMax == 0 && m.tokenCost == 0 {
+		if line1 == "" {
+			return ""
+		}
+		return statusBarLineStyle.Render(line1)
+	}
 	total := m.tokenInput + m.tokenOutput
 	maxT := m.tokenMax
 	pct := 0
 	if maxT > 0 {
 		pct = total * 100 / maxT
 	}
-	bar := fmt.Sprintf("Tokens: %d/%d (%d%%) | Cost: $%.4f", total, maxT, pct, m.tokenCost)
+	line2 := fmt.Sprintf("Tokens: %d/%d (%d%%) | Cost: $%.4f", total, maxT, pct, m.tokenCost)
 	if pct > 80 {
-		// ANSI yellow foreground.
-		return "\x1b[33m" + bar + "\x1b[0m"
+		line2 = statusBarWarnStyle.Render(line2)
 	}
-	return bar
+
+	if line1 == "" {
+		return line2
+	}
+	return statusBarLineStyle.Render(line1) + "\n" + line2
 }
 
 // ---------- command factories ----------
@@ -742,7 +866,7 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 		}
 		out = r.Render(ctx, ev.Content, RenderOpts{
 			Theme:       theme,
-			Width:       m.width,
+			Width:       m.renderWidth(),
 			ContentType: ct,
 			Stream:      ev.Stream,
 		})
@@ -882,7 +1006,7 @@ func (m *teaModel) handleIncremental(ctx context.Context, ev AgentEvent) {
 	}
 	opts := RenderOpts{
 		Theme:       theme,
-		Width:       m.width,
+		Width:       m.renderWidth(),
 		ContentType: ct,
 	}
 
@@ -976,9 +1100,11 @@ func (m *teaModel) addEntry(ct string, out string) {
 }
 
 // shouldNotify reports whether the onUpdate callback should fire for a view
-// mutation. It only fires in non-interactive mode: in interactive (TTY) mode
-// bubbletea owns terminal rendering, so the callback is suppressed to avoid
-// double rendering (the callback is removed entirely in 34-7).
+// mutation. It only fires in non-interactive mode when a callback is wired:
+// in interactive (TTY) mode bubbletea owns terminal rendering, so the callback
+// is suppressed to avoid double rendering. interactive.go no longer wires
+// onUpdate, but the mechanism is retained for other callers that need
+// non-interactive streaming.
 func (m *teaModel) shouldNotify() bool {
 	return m.onUpdate != nil && !m.interactive
 }

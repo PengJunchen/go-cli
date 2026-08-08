@@ -43,7 +43,7 @@ func (h *MemoryHandler) Handle(ctx context.Context, args []string, sc *slashCont
 	case "clear":
 		return h.handleMemoryClear(ctx, args, sc)
 	default:
-		fmt.Fprintf(sc.out, "Unknown subcommand: %s\n", subCmd)             //nolint:errcheck
+		fmt.Fprintf(sc.out, "Unknown subcommand: %s\n", subCmd)               //nolint:errcheck
 		fmt.Fprintln(sc.out, "Usage: /memory [list|add|delete|search|clear]") //nolint:errcheck
 		return nil
 	}

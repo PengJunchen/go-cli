@@ -1023,7 +1023,7 @@ type claudeBlock struct {
 // claudeImageSource is the Anthropic image source: a base64-encoded blob with
 // its media type.
 type claudeImageSource struct {
-	Type      string `json:"type"`       // "base64"
+	Type      string `json:"type"` // "base64"
 	MediaType string `json:"media_type"`
 	Data      string `json:"data"`
 }

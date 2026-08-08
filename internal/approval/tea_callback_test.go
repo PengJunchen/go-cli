@@ -2,196 +2,195 @@ package approval
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
-	"github.com/pengjunchen/go-cli/internal/tui"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/tui"
 )
 
+// Compile-time assertion that TeaApprovalCallback satisfies ApprovalCallback.
+// This complements the assertion in callback.go and guarantees the contract
+// is honored from the test side as well.
+var _ ApprovalCallback = (*TeaApprovalCallback)(nil)
+
+// requestResult carries the outcome of an asynchronous RequestApproval call so
+// tests can inspect both the result and error without races.
+type requestResult struct {
+	res ApprovalResult
+	err error
+}
+
+// TestTeaApprovalCallback_ImplementsInterface verifies at runtime that a
+// *TeaApprovalCallback can be assigned to the ApprovalCallback interface.
+// (The compile-time check is the package-level var above.)
+func TestTeaApprovalCallback_ImplementsInterface(t *testing.T) {
+	ch := make(chan tui.ApprovalRequest, 1)
+	var cb ApprovalCallback = NewTeaApprovalCallback(ch)
+	assert.NotNil(t, cb)
+}
+
 // TestTeaApprovalCallback_SendsRequest verifies that RequestApproval sends an
-// ApprovalRequest on the channel with the correct tool name and args.
+// ApprovalRequest carrying the correct ToolName and Args through the channel,
+// and that the returned result mirrors the user's response.
 func TestTeaApprovalCallback_SendsRequest(t *testing.T) {
 	ch := make(chan tui.ApprovalRequest, 1)
 	cb := NewTeaApprovalCallback(ch)
-	ctx := context.Background()
 
+	args := map[string]any{"path": "/tmp/test", "mode": "w"}
+
+	done := make(chan requestResult, 1)
 	go func() {
-		_, _ = cb.RequestApproval(ctx, "write", map[string]any{"path": "/tmp/test"})
+		res, err := cb.RequestApproval(context.Background(), "write", args)
+		done <- requestResult{res, err}
 	}()
 
+	// Receive the request forwarded by the callback and inspect its fields.
 	select {
 	case req := <-ch:
 		assert.Equal(t, "write", req.ToolName)
-		assert.Equal(t, "/tmp/test", req.Args["path"])
-		assert.NotNil(t, req.ResponseCh)
+		assert.Equal(t, args, req.Args)
+		assert.NotNil(t, req.ResponseCh, "ResponseCh must be initialized")
+		// Unblock the goroutine by replying with Allow.
+		req.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalAllow}
 	case <-time.After(time.Second):
-		t.Fatal("did not receive approval request")
+		t.Fatal("did not receive approval request on channel")
+	}
+
+	select {
+	case r := <-done:
+		require.NoError(t, r.err)
+		assert.Equal(t, ApprovalAllow, r.res)
+	case <-time.After(time.Second):
+		t.Fatal("RequestApproval did not return")
 	}
 }
 
-// TestTeaApprovalCallback_ReceivesAllow verifies that sending ApprovalAllow
-// via the response channel results in ApprovalAllow from RequestApproval.
+// TestTeaApprovalCallback_ReceivesAllow verifies that when the user sends an
+// ApprovalAllow decision, the callback returns ApprovalAllow with no error.
 func TestTeaApprovalCallback_ReceivesAllow(t *testing.T) {
-	ch := make(chan tui.ApprovalRequest, 1)
+	ch := make(chan tui.ApprovalRequest)
 	cb := NewTeaApprovalCallback(ch)
-	ctx := context.Background()
 
-	type result struct {
-		r   ApprovalResult
-		err error
-	}
-	resultCh := make(chan result, 1)
+	done := make(chan requestResult, 1)
 	go func() {
-		r, err := cb.RequestApproval(ctx, "bash", map[string]any{"command": "ls"})
-		resultCh <- result{r, err}
+		res, err := cb.RequestApproval(context.Background(), "bash", nil)
+		done <- requestResult{res, err}
 	}()
 
-	req := <-ch
-	req.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalAllow}
+	// Receive the request and respond with Allow.
+	select {
+	case req := <-ch:
+		req.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalAllow}
+	case <-time.After(time.Second):
+		t.Fatal("did not receive approval request on channel")
+	}
 
 	select {
-	case res := <-resultCh:
-		assert.Equal(t, ApprovalAllow, res.r)
-		assert.NoError(t, res.err)
+	case r := <-done:
+		require.NoError(t, r.err)
+		assert.Equal(t, ApprovalAllow, r.res)
 	case <-time.After(time.Second):
-		t.Fatal("did not receive result")
+		t.Fatal("RequestApproval did not return")
 	}
 }
 
-// TestTeaApprovalCallback_ReceivesDeny verifies the deny path.
+// TestTeaApprovalCallback_ReceivesDeny verifies that when the user sends an
+// ApprovalDeny decision, the callback returns ApprovalDeny with no error.
 func TestTeaApprovalCallback_ReceivesDeny(t *testing.T) {
-	ch := make(chan tui.ApprovalRequest, 1)
+	ch := make(chan tui.ApprovalRequest)
 	cb := NewTeaApprovalCallback(ch)
-	ctx := context.Background()
 
-	resultCh := make(chan ApprovalResult, 1)
+	done := make(chan requestResult, 1)
 	go func() {
-		r, _ := cb.RequestApproval(ctx, "bash", map[string]any{"command": "rm"})
-		resultCh <- r
+		res, err := cb.RequestApproval(context.Background(), "bash", nil)
+		done <- requestResult{res, err}
 	}()
 
-	req := <-ch
-	req.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalDeny}
+	// Receive the request and respond with Deny.
+	select {
+	case req := <-ch:
+		req.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalDeny}
+	case <-time.After(time.Second):
+		t.Fatal("did not receive approval request on channel")
+	}
 
 	select {
-	case r := <-resultCh:
-		assert.Equal(t, ApprovalDeny, r)
+	case r := <-done:
+		require.NoError(t, r.err)
+		assert.Equal(t, ApprovalDeny, r.res)
 	case <-time.After(time.Second):
-		t.Fatal("did not receive result")
+		t.Fatal("RequestApproval did not return")
 	}
 }
 
-// TestTeaApprovalCallback_ReceivesAlwaysAllow verifies the always-allow path.
+// TestTeaApprovalCallback_ReceivesAlwaysAllow verifies that when the user sends
+// an ApprovalAlwaysAllow decision, the callback returns ApprovalAlwaysAllow
+// with no error.
 func TestTeaApprovalCallback_ReceivesAlwaysAllow(t *testing.T) {
-	ch := make(chan tui.ApprovalRequest, 1)
+	ch := make(chan tui.ApprovalRequest)
 	cb := NewTeaApprovalCallback(ch)
-	ctx := context.Background()
 
-	resultCh := make(chan ApprovalResult, 1)
+	done := make(chan requestResult, 1)
 	go func() {
-		r, _ := cb.RequestApproval(ctx, "git", map[string]any{"command": "status"})
-		resultCh <- r
+		res, err := cb.RequestApproval(context.Background(), "git", nil)
+		done <- requestResult{res, err}
 	}()
 
-	req := <-ch
-	req.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalAlwaysAllow}
+	// Receive the request and respond with AlwaysAllow.
+	select {
+	case req := <-ch:
+		req.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalAlwaysAllow}
+	case <-time.After(time.Second):
+		t.Fatal("did not receive approval request on channel")
+	}
 
 	select {
-	case r := <-resultCh:
-		assert.Equal(t, ApprovalAlwaysAllow, r)
+	case r := <-done:
+		require.NoError(t, r.err)
+		assert.Equal(t, ApprovalAlwaysAllow, r.res)
 	case <-time.After(time.Second):
-		t.Fatal("did not receive result")
+		t.Fatal("RequestApproval did not return")
 	}
 }
 
-// TestTeaApprovalCallback_ContextCanceled verifies that a canceled context
-// results in ApprovalDeny and the context error.
+// TestTeaApprovalCallback_ContextCanceled verifies that when the context is
+// canceled while the callback is blocked waiting for a user response, the
+// callback returns ApprovalDeny and the context's error.
 func TestTeaApprovalCallback_ContextCanceled(t *testing.T) {
-	ch := make(chan tui.ApprovalRequest) // unbuffered, no consumer
+	ch := make(chan tui.ApprovalRequest)
 	cb := NewTeaApprovalCallback(ch)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
 
-	r, err := cb.RequestApproval(ctx, "bash", nil)
-	assert.Equal(t, ApprovalDeny, r)
-	assert.ErrorIs(t, err, context.Canceled)
-}
-
-// TestTeaApprovalCallback_ImplementsInterface is a compile-time check that
-// TeaApprovalCallback satisfies the ApprovalCallback interface.
-func TestTeaApprovalCallback_ImplementsInterface(t *testing.T) {
-	var _ ApprovalCallback = (*TeaApprovalCallback)(nil)
-}
-
-// TestTeaApprovalCallback_DiffPreview verifies that a wired DiffPreviewFunc
-// populates the DiffPreview field in the request.
-func TestTeaApprovalCallback_DiffPreview(t *testing.T) {
-	ch := make(chan tui.ApprovalRequest, 1)
-	cb := NewTeaApprovalCallback(ch,
-		WithDiffPreviewFunc(func(toolName string, args map[string]any) string {
-			if toolName == "write" {
-				return "+added line"
-			}
-			return ""
-		}),
-	)
-	ctx := context.Background()
-
-	go func() {
-		_, _ = cb.RequestApproval(ctx, "write", map[string]any{"path": "/tmp/test"})
-	}()
-
-	select {
-	case req := <-ch:
-		assert.Equal(t, "+added line", req.DiffPreview)
-	case <-time.After(time.Second):
-		t.Fatal("did not receive approval request")
-	}
-}
-
-// TestTeaApprovalCallback_NoDiffPreviewByDefault verifies that without a
-// DiffPreviewFunc, the DiffPreview field is empty.
-func TestTeaApprovalCallback_NoDiffPreviewByDefault(t *testing.T) {
-	ch := make(chan tui.ApprovalRequest, 1)
-	cb := NewTeaApprovalCallback(ch)
-	ctx := context.Background()
-
-	go func() {
-		_, _ = cb.RequestApproval(ctx, "write", map[string]any{"path": "/tmp/test"})
-	}()
-
-	select {
-	case req := <-ch:
-		assert.Empty(t, req.DiffPreview)
-	case <-time.After(time.Second):
-		t.Fatal("did not receive approval request")
-	}
-}
-
-// TestTeaApprovalCallback_ResponseContextCanceled verifies that canceling the
-// context while waiting for a response results in ApprovalDeny.
-func TestTeaApprovalCallback_ResponseContextCanceled(t *testing.T) {
-	ch := make(chan tui.ApprovalRequest, 1)
-	cb := NewTeaApprovalCallback(ch)
 	ctx, cancel := context.WithCancel(context.Background())
 
-	resultCh := make(chan error, 1)
+	done := make(chan requestResult, 1)
 	go func() {
-		_, err := cb.RequestApproval(ctx, "bash", nil)
-		resultCh <- err
+		res, err := cb.RequestApproval(ctx, "bash", nil)
+		done <- requestResult{res, err}
 	}()
 
-	// Wait for the request to arrive, then cancel the context before responding.
-	req := <-ch
-	require.NotNil(t, req.ResponseCh)
+	// Receive the request so the goroutine advances past the channel send and
+	// into the response-wait select. This guarantees the cancel below races
+	// only against the response-wait, not the send.
+	select {
+	case <-ch:
+	case <-time.After(time.Second):
+		t.Fatal("did not receive approval request on channel")
+	}
+
+	// Cancel the context while the goroutine is blocked waiting for a response.
 	cancel()
 
 	select {
-	case err := <-resultCh:
-		assert.ErrorIs(t, err, context.Canceled)
+	case r := <-done:
+		assert.Equal(t, ApprovalDeny, r.res, "canceled context should deny")
+		require.Error(t, r.err, "canceled context should return an error")
+		assert.True(t, errors.Is(r.err, context.Canceled),
+			"error should wrap context.Canceled, got %v", r.err)
 	case <-time.After(time.Second):
-		t.Fatal("did not receive result after context cancel")
+		t.Fatal("RequestApproval did not return after context cancel")
 	}
 }

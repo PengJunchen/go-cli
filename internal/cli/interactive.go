@@ -210,6 +210,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 	}
 
 	entryCounter := len(assembly.Agent.Messages())
+	turnCounter := 0
 
 	// Default to os.Stdin when no input reader was provided at registration
 	// time (the common path when RunWithRegistry creates the command).
@@ -331,29 +332,34 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 			stream.Close()
 		}()
 
-		// Bridge core events to TUI events and render.
+		// Bridge core events to TUI events and render. Bubbletea owns terminal
+		// rendering in TTY mode (raw mode, diff-based repaint on stderr), so
+		// the legacy onUpdate manual redraw and ANSI cursor logic has been
+		// removed.
 		tuiEvents := tui.BridgeEvents(turnCtx, stream)
-
-		// Streaming output: each view mutation re-renders to the terminal.
-		var lastLineCount int
+		turnCounter++
 		isTTY := tui.IsTerminal()
 		tsp := tui.NewDefaultTerminalSizeProvider()
 		termWidth := tsp.Width()
 		appOpts := []tui.AppOption{
 			tui.WithWidth(termWidth),
-			tui.WithOnUpdate(func(view string) {
-				if isTTY {
-					if lastLineCount > 0 {
-						fmt.Fprintf(c.out, "\033[%dA", lastLineCount) //nolint:errcheck
-					}
-					fmt.Fprint(c.out, "\033[J")                               //nolint:errcheck
-					fmt.Fprint(c.out, strings.ReplaceAll(view, "\n", "\r\n")) //nolint:errcheck
-					fmt.Fprint(c.out, "\r\n")                                 //nolint:errcheck
-					lastLineCount = countViewVisualLines(view, termWidth)
-				} else {
-					fmt.Fprintln(c.out, view) //nolint:errcheck
-				}
-			}),
+			tui.WithModelInfo(modelName),
+			tui.WithTurnCount(turnCounter),
+			tui.WithSessionInfo(assembly.SessionID),
+		}
+		// Mode label: show "plan" when plan mode is active, otherwise "chat".
+		if assembly.PlanCtrl != nil && assembly.PlanCtrl.IsActive() {
+			appOpts = append(appOpts, tui.WithModeLabel("plan"))
+		} else {
+			appOpts = append(appOpts, tui.WithModeLabel("chat"))
+		}
+		// TUIConfig: theme, word wrap, diff style.
+		if rc != nil {
+			appOpts = append(appOpts,
+				tui.WithThemeConfig(rc.TUI.Theme),
+				tui.WithWordWrap(rc.TUI.WordWrap),
+				tui.WithDiffStyle(rc.TUI.DiffStyle),
+			)
 		}
 		if assembly.ApprovalChannel != nil {
 			appOpts = append(appOpts, tui.WithApprovalChannel(assembly.ApprovalChannel))
@@ -453,10 +459,10 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 			fmt.Fprintln(c.out, "[interrupted]") //nolint:errcheck
 		}
 
-		// The accordion view was streamed in real time via onUpdate.
-		// Only print the final assistant message in non-TTY mode (where the
-		// TUI's real-time repaint isn't active), and only when the turn was
-		// not interrupted.
+		// In TTY mode bubbletea streamed the accordion view in real time on
+		// stderr. Only print the final assistant message in non-TTY mode
+		// (where bubbletea's renderer is disabled), and only when the turn
+		// was not interrupted.
 		if turnResult.Message != "" && !isTTY && !interrupted {
 			fmt.Fprintf(c.out, "AI: %s\n", turnResult.Message) //nolint:errcheck
 		}

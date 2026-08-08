@@ -619,16 +619,26 @@ func TestTUI_ThemeManagerRegisterCustom(t *testing.T) {
 // values compatible with the lipgloss-backed Style alias.
 type customTestTheme struct{}
 
-func (c *customTestTheme) Primary() tui.Style   { return tui.NewStyle().Foreground(lipgloss.Color("#FF00FF")) }
-func (c *customTestTheme) Secondary() tui.Style { return tui.NewStyle().Foreground(lipgloss.Color("#00D9FF")) }
-func (c *customTestTheme) Success() tui.Style   { return tui.NewStyle().Foreground(lipgloss.Color("#04E762")) }
-func (c *customTestTheme) Warning() tui.Style   { return tui.NewStyle().Foreground(lipgloss.Color("#FFC000")) }
-func (c *customTestTheme) Error() tui.Style     { return tui.NewStyle().Foreground(lipgloss.Color("#FF5C5C")) }
-func (c *customTestTheme) Bg() tui.Style        { return tui.NewStyle() }
-func (c *customTestTheme) Fg() tui.Style        { return tui.NewStyle() }
-func (c *customTestTheme) Faint() tui.Style     { return tui.NewStyle() }
-func (c *customTestTheme) Bold() tui.Style      { return tui.NewStyle() }
-func (c *customTestTheme) Italic() tui.Style    { return tui.NewStyle() }
+func (c *customTestTheme) Primary() tui.Style {
+	return tui.NewStyle().Foreground(lipgloss.Color("#FF00FF"))
+}
+func (c *customTestTheme) Secondary() tui.Style {
+	return tui.NewStyle().Foreground(lipgloss.Color("#00D9FF"))
+}
+func (c *customTestTheme) Success() tui.Style {
+	return tui.NewStyle().Foreground(lipgloss.Color("#04E762"))
+}
+func (c *customTestTheme) Warning() tui.Style {
+	return tui.NewStyle().Foreground(lipgloss.Color("#FFC000"))
+}
+func (c *customTestTheme) Error() tui.Style {
+	return tui.NewStyle().Foreground(lipgloss.Color("#FF5C5C"))
+}
+func (c *customTestTheme) Bg() tui.Style     { return tui.NewStyle() }
+func (c *customTestTheme) Fg() tui.Style     { return tui.NewStyle() }
+func (c *customTestTheme) Faint() tui.Style  { return tui.NewStyle() }
+func (c *customTestTheme) Bold() tui.Style   { return tui.NewStyle() }
+func (c *customTestTheme) Italic() tui.Style { return tui.NewStyle() }
 
 // Verify the Primary Render contains what we set.
 func (c *customTestTheme) ensureCustom() {}

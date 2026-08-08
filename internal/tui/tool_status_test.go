@@ -53,11 +53,11 @@ func TestAccordionRender_ToolStatusIcon(t *testing.T) {
 func TestAccordionRender_ToolStatusRunning(t *testing.T) {
 	m := NewAccordionModel()
 	m.Add(&AccordionEntry{
-		ContentType: ContentTypeToolCall,
-		Summary:     "bash(ls)",
-		Full:        "bash(ls)",
-		Collapsed:   true,
-		ToolStatus:  ToolStatusRunning,
+		ContentType:  ContentTypeToolCall,
+		Summary:      "bash(ls)",
+		Full:         "bash(ls)",
+		Collapsed:    true,
+		ToolStatus:   ToolStatusRunning,
 		SpinnerFrame: 0,
 	})
 	out := m.Render()
@@ -113,8 +113,8 @@ func TestTruncateToolResult_Disabled(t *testing.T) {
 		lines[i] = "line"
 	}
 	e := &AccordionEntry{
-		ContentType:   ContentTypeToolResult,
-		Full:          strings.Join(lines, "\n"),
+		ContentType:    ContentTypeToolResult,
+		Full:           strings.Join(lines, "\n"),
 		MaxResultLines: -1,
 	}
 	out := truncateToolResult(e)
@@ -128,8 +128,8 @@ func TestTruncateToolResult_CustomLimit(t *testing.T) {
 		lines[i] = "line"
 	}
 	e := &AccordionEntry{
-		ContentType:   ContentTypeToolResult,
-		Full:          strings.Join(lines, "\n"),
+		ContentType:    ContentTypeToolResult,
+		Full:           strings.Join(lines, "\n"),
 		MaxResultLines: 5,
 	}
 	out := truncateToolResult(e)

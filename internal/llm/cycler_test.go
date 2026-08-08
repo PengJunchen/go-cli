@@ -242,8 +242,8 @@ type cyclerTestProvider struct {
 	genErr error
 }
 
-func (p *cyclerTestProvider) Name() string         { return p.name }
-func (p *cyclerTestProvider) Models() []ModelInfo  { return nil }
+func (p *cyclerTestProvider) Name() string        { return p.name }
+func (p *cyclerTestProvider) Models() []ModelInfo { return nil }
 func (p *cyclerTestProvider) Build(_ context.Context, cfg ModelConfig) (BaseChatModel, func(), error) {
 	return &fbMockModel{
 		genContent: cfg.Model,
