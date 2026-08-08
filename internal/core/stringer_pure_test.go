@@ -18,7 +18,7 @@ func (h *recordingHandler) Handle(_ context.Context, _ slog.Record) error {
 }
 
 func (h *recordingHandler) WithAttrs(_ []slog.Attr) slog.Handler { return h }
-func (h *recordingHandler) WithGroup(_ string) slog.Handler       { return h }
+func (h *recordingHandler) WithGroup(_ string) slog.Handler      { return h }
 
 // TestStringerMethodsArePure verifies that String() methods produce no slog
 // side effects (they must be pure functions).

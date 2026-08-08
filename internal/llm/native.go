@@ -1270,9 +1270,9 @@ type geminiFunctionResponse struct {
 // geminiPart is a single content part (text, inline image data, or a
 // function call/response).
 type geminiPart struct {
-	Text             string                 `json:"text,omitempty"`
-	InlineData       *geminiInlineData      `json:"inline_data,omitempty"`       // when image
-	FunctionCall     *geminiFunctionCall    `json:"functionCall,omitempty"`      // when model calls a tool
+	Text             string                  `json:"text,omitempty"`
+	InlineData       *geminiInlineData       `json:"inline_data,omitempty"`      // when image
+	FunctionCall     *geminiFunctionCall     `json:"functionCall,omitempty"`     // when model calls a tool
 	FunctionResponse *geminiFunctionResponse `json:"functionResponse,omitempty"` // when feeding back a tool result
 }
 
