@@ -22,6 +22,9 @@ type StreamingMarkdownRenderer struct {
 	stableCount     int    // number of leading lines considered stable (cached)
 	unstableCount   int    // trailing lines re-rendered on every call
 	lastAccumulated string // previous accumulated input (for pure-append detection)
+
+	codeBlockBuffer strings.Builder // buffers content inside an incomplete code block
+	inCodeBlock     bool            // true when the accumulated content has an unclosed ```
 }
 
 // NewStreamingMarkdownRenderer returns a StreamingMarkdownRenderer that wraps
@@ -59,6 +62,34 @@ func (s *StreamingMarkdownRenderer) RenderIncremental(ctx context.Context, accum
 
 	stableCount := len(lines) - s.unstableCount
 
+	// When an incomplete code block is detected (odd number of ``` markers),
+	// ensure the opening fence and everything after it stays in the unstable
+	// region. This prevents the renderer from caching a partial code block in
+	// the stable prefix, which would produce broken output until the closing
+	// fence arrives. The entire code block is re-rendered on each call until it
+	// completes.
+	if s.hasIncompleteCodeBlock(accumulated) {
+		s.inCodeBlock = true
+		// Find the last ``` fence — this is the opening of the incomplete block.
+		lastFenceIdx := -1
+		for i, line := range lines {
+			if strings.Contains(line, "```") {
+				lastFenceIdx = i
+			}
+		}
+		// Move the stable boundary back to before the fence so the entire
+		// incomplete code block stays in the unstable region.
+		if lastFenceIdx >= 0 && lastFenceIdx < stableCount {
+			stableCount = lastFenceIdx
+		}
+		// Track the buffered code-block content for diagnostics / future use.
+		s.codeBlockBuffer.Reset()
+		s.codeBlockBuffer.WriteString(strings.Join(lines[stableCount:], "\n"))
+	} else {
+		s.inCodeBlock = false
+		s.codeBlockBuffer.Reset()
+	}
+
 	// Invalidate when the stable region grew (more lines became stable) or when
 	// the buffer is not a pure append of the previous one (replacement/reset).
 	if stableCount != s.stableCount || !strings.HasPrefix(accumulated, s.lastAccumulated) {
@@ -79,6 +110,13 @@ func (s *StreamingMarkdownRenderer) RenderIncremental(ctx context.Context, accum
 	return s.stableRendered + "\n" + unstableRendered
 }
 
+// hasIncompleteCodeBlock reports whether content contains an odd number of ```
+// fence markers, indicating that a code block has been opened but not yet
+// closed.
+func (s *StreamingMarkdownRenderer) hasIncompleteCodeBlock(content string) bool {
+	return strings.Count(content, "```")%2 != 0
+}
+
 // invalidate clears the stable cache and records the current accumulated input
 // as the new append-detection baseline.
 func (s *StreamingMarkdownRenderer) invalidate(accumulated string) {
@@ -93,4 +131,6 @@ func (s *StreamingMarkdownRenderer) Reset() {
 	s.stableRendered = ""
 	s.stableCount = 0
 	s.lastAccumulated = ""
+	s.inCodeBlock = false
+	s.codeBlockBuffer.Reset()
 }
