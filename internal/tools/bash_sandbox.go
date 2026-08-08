@@ -10,11 +10,13 @@ import (
 )
 
 // defaultCommandBlacklist lists commands that are too destructive to allow
-// inside a sandboxed bash tool.
+// inside a sandboxed bash tool. It also blocks commands that can be used to
+// bypass the sandbox by spawning a new shell or evaluating arbitrary input.
 var defaultCommandBlacklist = []string{
 	"rm", "rmdir", "dd", "mkfs", "fdisk",
 	"shutdown", "reboot", "halt", "poweroff",
 	"kill", "killall", "pkill",
+	"eval", "bash", "sh", "source", "exec",
 }
 
 // BashSandbox validates bash commands before execution. Implementations check
@@ -59,8 +61,8 @@ func (wl PathWhitelist) IsAllowed(workDir string) bool {
 }
 
 // CommandFilter checks parsed command strings against a blacklist of
-// disallowed command names. It understands pipes (|), logical operators
-// (&& and ||), and command substitution $(...).
+// disallowed command names. It understands command separators (;), pipes (|),
+// logical operators (&& and ||), and command substitution $(...) and `...`.
 type CommandFilter struct {
 	blacklist []string
 }
@@ -71,9 +73,9 @@ func NewCommandFilter(blacklist []string) CommandFilter {
 }
 
 // IsBlocked reports whether any command referenced by cmd is on the blacklist.
-// The command string is split on pipes and logical operators and each segment's
-// first token is checked. Command substitutions $(...) are recursively
-// inspected.
+// The command string is split on semicolons, pipes and logical operators and
+// each segment's first token is checked. Command substitutions $(...) and
+// backticks `...` are recursively inspected.
 func (f CommandFilter) IsBlocked(cmd string) bool {
 	return f.hasBlocked(cmd)
 }
@@ -187,15 +189,19 @@ func (s *DefaultBashSandbox) Validate(_ context.Context, cmd, workDir string) er
 
 // --- command parsing helpers (no third-party deps) ---
 
-// subShellRange describes a $(...) expression within a command string.
+// subShellRange describes a command substitution expression within a command
+// string, either a $(...) form or a `...` (backtick) form.
 type subShellRange struct {
-	start      int // index of '$'
-	innerStart int // index after '$('
-	innerEnd   int // index of matching ')'
-	end        int // index after ')'
+	start      int // index of opening char ('$' or '`')
+	innerStart int // index after the opening ('$(' or '`')
+	innerEnd   int // index of the closing char (')' or '`')
+	end        int // index after the closing char
 }
 
-// findSubShells returns the ranges of all top-level $(...) expressions in s.
+// findSubShells returns the ranges of all top-level command substitution
+// expressions in s, covering both $(...) and `...` (backtick) forms. Nested
+// substitutions are reported only at the top level; their inner content is
+// inspected recursively by callers.
 func findSubShells(s string) []subShellRange {
 	var ranges []subShellRange
 	i := 0
@@ -229,6 +235,36 @@ func findSubShells(s string) []subShellRange {
 			} else {
 				i++ // unmatched '('; skip
 			}
+		} else if s[i] == '`' {
+			// Backtick command substitution: scan to the next unescaped
+			// backtick. Escaped characters (\x) are skipped so that a
+			// backslash-escaped backtick does not terminate the substitution
+			// prematurely.
+			innerStart := i + 1
+			j := innerStart
+			closed := false
+			for j < len(s) {
+				if s[j] == '\\' && j+1 < len(s) {
+					j += 2
+					continue
+				}
+				if s[j] == '`' {
+					closed = true
+					break
+				}
+				j++
+			}
+			if closed {
+				ranges = append(ranges, subShellRange{
+					start:      i,
+					innerStart: innerStart,
+					innerEnd:   j,
+					end:        j + 1,
+				})
+				i = j + 1
+			} else {
+				i++ // unmatched backtick; skip
+			}
 		} else {
 			i++
 		}
@@ -236,7 +272,8 @@ func findSubShells(s string) []subShellRange {
 	return ranges
 }
 
-// extractSubShells returns the inner command strings of all $(...) expressions.
+// extractSubShells returns the inner command strings of all command
+// substitution expressions ($(...) and `...`).
 func extractSubShells(s string) []string {
 	ranges := findSubShells(s)
 	subs := make([]string, 0, len(ranges))
@@ -246,7 +283,8 @@ func extractSubShells(s string) []string {
 	return subs
 }
 
-// stripSubShells replaces every $(...) expression with a single space.
+// stripSubShells replaces every command substitution expression ($(...) and
+// `...`) with a single space.
 func stripSubShells(s string) string {
 	ranges := findSubShells(s)
 	if len(ranges) == 0 {
@@ -263,13 +301,14 @@ func stripSubShells(s string) string {
 	return b.String()
 }
 
-// splitCommands splits a command string on pipes (|) and logical operators
-// (&& and ||), returning the trimmed non-empty segments.
+// splitCommands splits a command string on command separators (;), pipes (|)
+// and logical operators (&& and ||), returning the trimmed non-empty segments.
 func splitCommands(s string) []string {
 	const delim = "\x00"
 	s = strings.ReplaceAll(s, "&&", delim)
 	s = strings.ReplaceAll(s, "||", delim)
 	s = strings.ReplaceAll(s, "|", delim)
+	s = strings.ReplaceAll(s, ";", delim)
 	parts := strings.Split(s, delim)
 	result := make([]string, 0, len(parts))
 	for _, p := range parts {

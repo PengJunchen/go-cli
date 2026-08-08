@@ -230,3 +230,160 @@ func TestSandbox_WithAllowedPaths_NestedDirectoryAllowed(t *testing.T) {
 	err := sb.Validate(context.Background(), "echo hello", nested)
 	require.NoError(t, err)
 }
+
+// --- P0 security: semicolon / backtick / eval / bash bypass vectors ---
+
+// TestSandboxSemicolonBlocked ensures a semicolon-separated second command that
+// is blacklisted is caught. The semicolon itself is not blocked; it is used to
+// split the input so each sub-command is inspected individually.
+func TestSandboxSemicolonBlocked(t *testing.T) {
+	sb := NewDefaultBashSandbox()
+	err := sb.Validate(context.Background(), "echo ok; rm file", "/anywhere")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "blacklist")
+}
+
+// TestSandboxBacktickBlocked ensures backtick command substitution is detected
+// as a subshell and its inner command is inspected.
+func TestSandboxBacktickBlocked(t *testing.T) {
+	sb := NewDefaultBashSandbox()
+	err := sb.Validate(context.Background(), "echo `rm file`", "/anywhere")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "blacklist")
+}
+
+// TestSandboxEvalBlocked ensures the eval builtin is blocked.
+func TestSandboxEvalBlocked(t *testing.T) {
+	sb := NewDefaultBashSandbox()
+	err := sb.Validate(context.Background(), `eval "rm file"`, "/anywhere")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "blacklist")
+}
+
+// TestSandboxBashSubshellBlocked ensures spawning a subshell via bash -c is
+// blocked.
+func TestSandboxBashSubshellBlocked(t *testing.T) {
+	sb := NewDefaultBashSandbox()
+	err := sb.Validate(context.Background(), `bash -c "rm file"`, "/anywhere")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "blacklist")
+}
+
+// TestSandboxLegitimateSemicolonNotBlocked ensures that a semicolon joining two
+// safe commands is allowed. Semicolons must split, not blanket-block.
+func TestSandboxLegitimateSemicolonNotBlocked(t *testing.T) {
+	sb := NewDefaultBashSandbox()
+	err := sb.Validate(context.Background(), "ls; pwd", "/anywhere")
+	require.NoError(t, err)
+}
+
+// TestSandboxDollarParenRegression ensures the pre-existing $(...) detection
+// still works after the backtick changes.
+func TestSandboxDollarParenRegression(t *testing.T) {
+	sb := NewDefaultBashSandbox()
+	err := sb.Validate(context.Background(), "echo $(rm file)", "/anywhere")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "blacklist")
+}
+
+// --- CommandFilter-level coverage for the new vectors ---
+
+func TestCommandFilter_SemicolonBlockedCommand(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked("echo ok; rm file"))
+}
+
+func TestCommandFilter_SemicolonSafeCommands(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.False(t, f.IsBlocked("ls; pwd"))
+}
+
+func TestCommandFilter_BacktickBlockedCommand(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked("echo `rm file`"))
+}
+
+func TestCommandFilter_BacktickSafeCommand(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.False(t, f.IsBlocked("echo `date`"))
+}
+
+func TestCommandFilter_EvalBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked(`eval "rm file"`))
+}
+
+func TestCommandFilter_BashSubshellBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked(`bash -c "rm file"`))
+}
+
+func TestCommandFilter_ShSubshellBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked(`sh -c "rm file"`))
+}
+
+func TestCommandFilter_SourceBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked("source malicious.sh"))
+}
+
+func TestCommandFilter_ExecBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked("exec rm file"))
+}
+
+// --- splitCommands unit tests ---
+
+func TestSplitCommands_Semicolon(t *testing.T) {
+	got := splitCommands("echo ok; rm file")
+	assert.Equal(t, []string{"echo ok", "rm file"}, got)
+}
+
+func TestSplitCommands_SemicolonMultiple(t *testing.T) {
+	got := splitCommands("a; b ; c")
+	assert.Equal(t, []string{"a", "b", "c"}, got)
+}
+
+func TestSplitCommands_SemicolonTrailing(t *testing.T) {
+	got := splitCommands("echo hi;")
+	assert.Equal(t, []string{"echo hi"}, got)
+}
+
+func TestSplitCommands_Pipe(t *testing.T) {
+	got := splitCommands("echo hello | cat")
+	assert.Equal(t, []string{"echo hello", "cat"}, got)
+}
+
+func TestSplitCommands_LogicalOperators(t *testing.T) {
+	got := splitCommands("echo hi && rm -rf / || true")
+	assert.Equal(t, []string{"echo hi", "rm -rf /", "true"}, got)
+}
+
+func TestSplitCommands_MixedSeparators(t *testing.T) {
+	got := splitCommands("a; b && c | d")
+	assert.Equal(t, []string{"a", "b", "c", "d"}, got)
+}
+
+// --- findSubShells unit tests ---
+
+func TestFindSubShells_DollarParen(t *testing.T) {
+	ranges := findSubShells("echo $(rm file)")
+	require.Len(t, ranges, 1)
+	assert.Equal(t, "rm file", "echo $(rm file)"[ranges[0].innerStart:ranges[0].innerEnd])
+}
+
+func TestFindSubShells_Backtick(t *testing.T) {
+	ranges := findSubShells("echo `rm file`")
+	require.Len(t, ranges, 1)
+	assert.Equal(t, "rm file", "echo `rm file`"[ranges[0].innerStart:ranges[0].innerEnd])
+}
+
+func TestFindSubShells_BacktickAndDollarParen(t *testing.T) {
+	ranges := findSubShells("echo `rm`; echo $(kill)")
+	require.Len(t, ranges, 2)
+}
+
+func TestFindSubShells_NoSubShells(t *testing.T) {
+	assert.Empty(t, findSubShells("echo hello world"))
+}
