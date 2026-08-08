@@ -9,6 +9,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/verify"
 )
 
 func TestEventStreamBoundedBuffering(t *testing.T) {
@@ -194,4 +196,111 @@ func TestHarnessFansOutAgentEventsToStream(t *testing.T) {
 	require.Len(t, done, 1)
 	assert.Equal(t, "hello", done[0])
 	assert.Equal(t, 1, agent.callCount())
+}
+
+// TestEventStreamConcurrentSendAndCloseNoPanicNoRecover exercises 32 senders
+// and 2 closers racing against each other with a drain goroutine consuming
+// events. The stream must not panic and no goroutine may leak.
+func TestEventStreamConcurrentSendAndCloseNoPanicNoRecover(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	stream := NewEventStream(8)
+
+	// Drain goroutine consuming Events() until the channel closes.
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		for range stream.Events() {
+		}
+	}()
+
+	const numSenders = 32
+	var sendWg sync.WaitGroup
+	sendWg.Add(numSenders)
+	for range numSenders {
+		go func() {
+			defer sendWg.Done()
+			//nolint:errcheck,gosec // Send returns nil; best-effort under test.
+			stream.Send(AgentEvent{Kind: "message", Content: "x"})
+		}()
+	}
+
+	// Two closers racing — sync.Once must make this safe.
+	var closeWg sync.WaitGroup
+	closeWg.Add(2)
+	for range 2 {
+		go func() {
+			defer closeWg.Done()
+			stream.Close()
+		}()
+	}
+
+	sendWg.Wait()
+	closeWg.Wait()
+	<-drainDone
+}
+
+// TestEventStreamResultNeverBlockedBySlowConsumer verifies that Result and
+// SetResult work immediately even when a Send is blocked on a zero-capacity
+// channel with no consumer. The mutex is not held during the channel send,
+// so result access is never blocked by back-pressure.
+func TestEventStreamResultNeverBlockedBySlowConsumer(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	stream := NewEventStream(0)
+
+	sendDone := make(chan struct{})
+	go func() {
+		defer close(sendDone)
+		//nolint:errcheck,gosec // Send returns nil; best-effort under test.
+		stream.Send(AgentEvent{Kind: "message", Content: "blocked"})
+	}()
+
+	// Allow the goroutine to enter the blocking select.
+	time.Sleep(10 * time.Millisecond)
+
+	// SetResult and Result must succeed while Send is blocked.
+	stream.SetResult(AgentMessage{Role: "assistant", Content: "final"}, nil)
+	res, err := stream.Result()
+	require.NoError(t, err)
+	assert.Equal(t, "final", res.Content)
+
+	// Unblock the send.
+	stream.Close()
+	<-sendDone
+}
+
+// TestEventStreamSendBlockedThenCloseNoDeadlock verifies that Close does not
+// deadlock when a Send is blocked on a zero-capacity channel with no
+// consumer. The done channel in the select allows Send to exit promptly.
+func TestEventStreamSendBlockedThenCloseNoDeadlock(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	stream := NewEventStream(0)
+
+	sendDone := make(chan struct{})
+	go func() {
+		defer close(sendDone)
+		//nolint:errcheck,gosec // Send returns nil; best-effort under test.
+		stream.Send(AgentEvent{Kind: "message", Content: "blocked"})
+	}()
+
+	// Allow the goroutine to enter the blocking select.
+	time.Sleep(10 * time.Millisecond)
+
+	// Close must complete promptly — the done channel unblocks the select.
+	closeDone := make(chan struct{})
+	go func() {
+		defer close(closeDone)
+		stream.Close()
+	}()
+
+	select {
+	case <-closeDone:
+		// Close completed without deadlock.
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close deadlocked while Send was blocked")
+	}
+
+	<-sendDone
 }

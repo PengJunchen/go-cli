@@ -187,7 +187,7 @@ func bestEffort(_ error) {}
 func (s *EventStreamImpl) SetResult(msg AgentMessage, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if s.closed.Load() {
 		return
 	}
 	s.result = msg
