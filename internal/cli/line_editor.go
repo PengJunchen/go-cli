@@ -223,8 +223,7 @@ func (le *DefaultLineEditor) ReadLine(ctx context.Context, prompt string) (strin
 
 // SetHistory implements LineEditor.
 func (le *DefaultLineEditor) SetHistory(h []string) {
-	le.history.entries = make([]string, len(h))
-	copy(le.history.entries, h)
+	le.history.Set(h)
 }
 
 // History implements LineEditor.
@@ -383,7 +382,7 @@ func (le *DefaultLineEditor) readSingleLineTTY(readByte func() (byte, error), pr
 
 	var buf []rune
 	pos := 0
-	entries := le.history.entries
+	entries := le.history.List()
 	histIdx := len(entries) // past end = current input
 	var savedInput string
 

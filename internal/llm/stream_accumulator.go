@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -13,13 +14,17 @@ import (
 // assistant placeholder early. Returns the accumulated tool calls (nil when no
 // tool calls were seen), the finish reason from the stream, and the usage
 // reported by the API (nil when the stream did not include usage).
-func accumulateOpenAIStreamToolCalls(events <-chan SSEEvent, ch chan<- MessageChunk) (toolCalls []ToolCall, finishReason string, usage *Usage) {
+func accumulateOpenAIStreamToolCalls(ctx context.Context, events <-chan SSEEvent, ch chan<- MessageChunk) (toolCalls []ToolCall, finishReason string, usage *Usage) {
 	var toolNameByIndex map[int]string
 	var toolIDByIndex map[int]string
 	var toolArgsBuf []string
 	emittedRole := false
+	cancelled := false
 
 	for event := range events {
+		if cancelled {
+			continue
+		}
 		if event.Data == "[DONE]" {
 			break
 		}
@@ -51,12 +56,22 @@ func accumulateOpenAIStreamToolCalls(events <-chan SSEEvent, ch chan<- MessageCh
 		delta := choice.Delta
 
 		if !emittedRole {
-			ch <- MessageChunk{Role: RoleAssistant, Content: ""}
-			emittedRole = true
+			select {
+			case ch <- MessageChunk{Role: RoleAssistant, Content: ""}:
+				emittedRole = true
+			case <-ctx.Done():
+				cancelled = true
+				continue
+			}
 		}
 
 		if delta.Content != "" {
-			ch <- MessageChunk{Role: RoleAssistant, Content: delta.Content}
+			select {
+			case ch <- MessageChunk{Role: RoleAssistant, Content: delta.Content}:
+			case <-ctx.Done():
+				cancelled = true
+				continue
+			}
 		}
 
 		// Accumulate tool_call fragments emitted across chunks.

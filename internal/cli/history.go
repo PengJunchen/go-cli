@@ -50,6 +50,17 @@ func (h *HistoryStore) Add(entry string) {
 	}
 }
 
+// Set replaces all history entries. The slice is copied.
+func (h *HistoryStore) Set(entries []string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.entries = make([]string, len(entries))
+	copy(h.entries, entries)
+	if len(h.entries) > h.maxLen {
+		h.entries = h.entries[len(h.entries)-h.maxLen:]
+	}
+}
+
 // List returns a copy of the current history entries.
 func (h *HistoryStore) List() []string {
 	h.mu.RLock()

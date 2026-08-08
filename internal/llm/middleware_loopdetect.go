@@ -152,7 +152,11 @@ func (m *loopDetectModel) Stream(ctx context.Context, msgs []Message, opts ...Op
 		defer close(out)
 		var acc strings.Builder
 		for chunk := range ch {
-			out <- chunk // Real-time forward
+			select {
+			case out <- chunk:
+			case <-ctx.Done():
+				return
+			}
 			acc.WriteString(chunk.Content)
 		}
 		// Post-hoc loop detection after all chunks have been forwarded.
