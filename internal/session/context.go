@@ -66,12 +66,23 @@ func (m *DefaultContextManager) BuildContext(ctx context.Context, leafID string)
 		traversed = append(traversed, *branch[i])
 	}
 
+	// Find the last compaction point; entries before it are replaced by the
+	// compaction summary.
+	startIdx := 0
+	for i := len(branch) - 1; i >= 0; i-- {
+		if branch[i].Type == EntryTypeCompaction {
+			startIdx = i
+			break
+		}
+	}
+	slog.Debug("context_rebuild.compaction_point", "start_idx", startIdx, "compaction", startIdx > 0)
+
 	// Messages are ordered root to leaf, with Compaction entries folded into a
 	// single summary message.
-	messages := make([]SessionEntry, 0, len(branch))
+	messages := make([]SessionEntry, 0, len(branch)-startIdx)
 	var estimatedTokens int
 	var last time.Time
-	for _, e := range branch {
+	for _, e := range branch[startIdx:] {
 		if e.Timestamp.After(last) {
 			last = e.Timestamp
 		}
@@ -87,12 +98,12 @@ func (m *DefaultContextManager) BuildContext(ctx context.Context, leafID string)
 			continue
 		}
 		messages = append(messages, *e)
-		estimatedTokens += estimateTokens(e.Content)
+		estimatedTokens += estimateTokensForEntry(*e)
 	}
 
 	sc := &SessionContext{
 		LeafID:          leafID,
-		RootID:          branch[0].ID,
+		RootID:          branch[startIdx].ID,
 		Messages:        messages,
 		Traversed:       traversed,
 		EntryCount:      len(messages),
@@ -111,4 +122,24 @@ func (m *DefaultContextManager) BuildContext(ctx context.Context, leafID string)
 func estimateTokens(content string) int {
 	n, _ := defaultEstimator.Estimate(content)
 	return n
+}
+
+// estimateTokensForEntry estimates tokens for an entry's Content plus its
+// ContentBlocks. Text blocks add their own text estimate; image_url blocks add
+// a fixed 85 tokens; other block types fall back to estimating by their text
+// length.
+func estimateTokensForEntry(e SessionEntry) int {
+	tokens := estimateTokens(e.Content)
+	for _, block := range e.ContentBlocks {
+		switch block.Type {
+		case "text":
+			tokens += estimateTokens(block.Text)
+		case "image_url":
+			tokens += 85
+		default:
+			// Estimate by JSON length for other block types.
+			tokens += estimateTokens(block.Text)
+		}
+	}
+	return tokens
 }

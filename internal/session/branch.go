@@ -294,10 +294,33 @@ func (t *DefaultSessionTree) Clone(ctx context.Context, fromBranchID, newBranchI
 		idMap[e.ID] = newBranchID + "-" + e.ID
 	}
 
+	// Build the old->new ToolCallID mapping so tool-call references can be
+	// remapped, avoiding ID collisions between the original and cloned branches.
+	toolCallIDMap := make(map[string]string)
+	seq := 0
+	for _, e := range branch {
+		for _, tc := range e.ToolCalls {
+			toolCallIDMap[tc.ID] = fmt.Sprintf("%s-cloned-%d", tc.ID, seq)
+			seq++
+		}
+	}
+
 	for _, e := range branch {
 		newEntry := e.clone()
 		newEntry.ID = idMap[e.ID]
 		newEntry.ParentID = idMap[e.ParentID] // maps to new ID, or "" for the root
+		// Remap ToolCall IDs to avoid collisions with the source branch.
+		for i := range newEntry.ToolCalls {
+			if newID, ok := toolCallIDMap[newEntry.ToolCalls[i].ID]; ok {
+				newEntry.ToolCalls[i].ID = newID
+			}
+		}
+		// Remap the tool-result's ToolCallID to the cloned tool-call's new ID.
+		if newEntry.ToolCallID != "" {
+			if newID, ok := toolCallIDMap[newEntry.ToolCallID]; ok {
+				newEntry.ToolCallID = newID
+			}
+		}
 		if err := t.Append(ctx, newEntry); err != nil {
 			return fmt.Errorf("session: clone: append entry %q: %w", newEntry.ID, err)
 		}
