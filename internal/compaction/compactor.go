@@ -130,6 +130,20 @@ func estimateTokens(items []TurnItem, estimator TokenEstimator) int {
 		if it.ToolResult != "" {
 			total += estimateLength(it.ToolResult, estimator)
 		}
+		for _, block := range it.ContentBlocks {
+			switch block.Type {
+			case "text":
+				if block.Text != "" {
+					total += estimateLength(block.Text, estimator)
+				}
+			case "image_url":
+				total += 85
+			default:
+				if block.Text != "" {
+					total += estimateLength(block.Text, estimator)
+				}
+			}
+		}
 	}
 	return total
 }

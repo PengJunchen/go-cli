@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"sync"
+	"unicode/utf8"
 )
 
 // defaultSplitThreshold is the token count above which a single turn is split
@@ -217,6 +218,10 @@ func splitAtBoundary(content string, mid int) (string, string) {
 			return content[:i], content[i+1:]
 		}
 	}
-	// Fall back to the exact midpoint.
+	// Fall back to the exact midpoint, aligned to a rune boundary so we
+	// never split a multi-byte UTF-8 character.
+	for mid > 0 && !utf8.RuneStart(content[mid]) {
+		mid--
+	}
 	return content[:mid], content[mid:]
 }

@@ -106,7 +106,9 @@ func (p *PendingSessionWrites) Flush(ctx context.Context, store SessionStore) er
 
 	p.mu.Lock()
 	p.flushed += len(writes)
-	p.pending = p.pending[:0]
+	// Remove only the flushed prefix; items enqueued concurrently
+	// between the two lock acquisitions must be preserved.
+	p.pending = p.pending[len(writes):]
 	p.mu.Unlock()
 
 	slog.Info("session.pending_writes.flush",
