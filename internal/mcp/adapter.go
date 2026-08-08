@@ -255,12 +255,26 @@ func isConnectionError(err error) bool {
 		strings.Contains(msg, "EOF")
 }
 
+// requestLocked snapshots c.conn under c.mu and sends a JSON-RPC request.
+// Holding the lock only for the pointer read (not the blocking Request call)
+// prevents a nil-pointer dereference when a concurrent Disconnect or reconnect
+// nils out c.conn between the read and the call.
+func (c *adapterCore) requestLocked(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn == nil {
+		return nil, fmt.Errorf("mcp: connection is not established")
+	}
+	return conn.Request(ctx, method, params)
+}
+
 // callWithReconnect sends a JSON-RPC request and, when the error looks like a
 // transport-level connection loss, attempts to reconnect (with exponential
 // backoff) up to maxReconnect times before returning. On a successful
 // reconnect the request is retried once.
 func (c *adapterCore) callWithReconnect(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
-	res, err := c.conn.Request(ctx, method, params)
+	res, err := c.requestLocked(ctx, method, params)
 	if err == nil {
 		return res, nil
 	}
@@ -284,7 +298,7 @@ func (c *adapterCore) callWithReconnect(ctx context.Context, method string, para
 			continue
 		}
 		// Reconnected — retry the request.
-		if res, err = c.conn.Request(ctx, method, params); err == nil {
+		if res, err = c.requestLocked(ctx, method, params); err == nil {
 			return res, nil
 		}
 		if !isConnectionError(err) {
@@ -297,7 +311,7 @@ func (c *adapterCore) callWithReconnect(ctx context.Context, method string, para
 // ListTools returns the tools declared by the server via the tools/list
 // JSON-RPC method.
 func (c *adapterCore) ListTools(ctx context.Context) ([]MCPTool, error) {
-	res, err := c.conn.Request(ctx, "tools/list", map[string]any{})
+	res, err := c.callWithReconnect(ctx, "tools/list", map[string]any{})
 	if err != nil {
 		return nil, fmt.Errorf("mcp: list tools: %w", err)
 	}

@@ -73,7 +73,7 @@ func (s *StreamingMarkdownRenderer) RenderIncremental(ctx context.Context, accum
 		// Find the last ``` fence — this is the opening of the incomplete block.
 		lastFenceIdx := -1
 		for i, line := range lines {
-			if strings.Contains(line, "```") {
+			if isFenceLine(line) {
 				lastFenceIdx = i
 			}
 		}
@@ -110,11 +110,26 @@ func (s *StreamingMarkdownRenderer) RenderIncremental(ctx context.Context, accum
 	return s.stableRendered + "\n" + unstableRendered
 }
 
-// hasIncompleteCodeBlock reports whether content contains an odd number of ```
-// fence markers, indicating that a code block has been opened but not yet
-// closed.
+// isFenceLine reports whether line is a markdown code fence marker: a line
+// that, after optional leading whitespace, starts with ```. This avoids
+// counting triple backticks that appear inline in text (e.g. inside a sentence)
+// which are not fence delimiters.
+func isFenceLine(line string) bool {
+	trimmed := strings.TrimLeft(line, " \t")
+	return strings.HasPrefix(trimmed, "```")
+}
+
+// hasIncompleteCodeBlock reports whether content contains an odd number of
+// code fence markers (lines starting with ```), indicating that a code block
+// has been opened but not yet closed.
 func (s *StreamingMarkdownRenderer) hasIncompleteCodeBlock(content string) bool {
-	return strings.Count(content, "```")%2 != 0
+	count := 0
+	for _, line := range strings.Split(content, "\n") {
+		if isFenceLine(line) {
+			count++
+		}
+	}
+	return count%2 != 0
 }
 
 // invalidate clears the stable cache and records the current accumulated input
