@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -349,6 +350,18 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 		close(ch)
 		return ch, err
 	}
+	// Ensure stream_options.include_usage is set so usage stats are streamed.
+	var streamReqMap map[string]any
+	if jErr := json.Unmarshal(streamBody, &streamReqMap); jErr == nil {
+		if streamReqMap["stream_options"] == nil {
+			streamReqMap["stream_options"] = map[string]any{"include_usage": true}
+			streamBody, err = json.Marshal(streamReqMap)
+			if err != nil {
+				close(ch)
+				return ch, err
+			}
+		}
+	}
 
 	respBody, err := m.streamRoundTrip(ctx, streamBody, m.endpoint)
 	if err != nil {
@@ -364,85 +377,41 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 			}
 		}()
 
+		reader := bufio.NewReaderSize(respBody, 64*1024)
+
+		// Detect non-SSE JSON responses (e.g. error responses returned as
+		// plain JSON instead of an event stream).
+		isJSON, jsonBody, err := detectJSONResponse(reader)
+		if err != nil {
+			slog.Error("llm_stream_peek_error", "err", err)
+			return
+		}
+		if isJSON {
+			var parsed openAIResponse
+			if err := json.Unmarshal(jsonBody, &parsed); err != nil {
+				slog.Error("llm_stream_json_parse_error", "err", err)
+				return
+			}
+			var content string
+			var toolCalls []ToolCall
+			var finishReason string
+			if len(parsed.Choices) > 0 {
+				content = contentToString(parsed.Choices[0].Message.Content)
+				toolCalls = convertAssistantToolCalls(parsed.Choices[0].Message.ToolCalls)
+				finishReason = parsed.Choices[0].FinishReason
+			}
+			if content != "" {
+				ch <- MessageChunk{Role: RoleAssistant, Content: content}
+			}
+			ch <- MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
+			return
+		}
+
 		parser := NewDefaultSSEParser()
-		events, _ := parser.Parse(respBody) //nolint:errcheck
+		events, _ := parser.Parse(reader) //nolint:errcheck
 
-		// Per-request tool-call accumulation.
-		var toolNameByIndex map[int]string
-		var toolArgsBuf []string
-		var finishReason string
-
-		for event := range events {
-			if event.Data == "[DONE]" {
-				break
-			}
-			if event.Data == "" {
-				continue
-			}
-
-			var chunk openAIStreamChunk
-			if err := json.Unmarshal([]byte(event.Data), &chunk); err != nil {
-				slog.Warn("llm_stream_parse_skip", "err", err)
-				continue
-			}
-			if len(chunk.Choices) == 0 {
-				continue
-			}
-			choice := chunk.Choices[0]
-			if choice.FinishReason != "" {
-				finishReason = choice.FinishReason
-			}
-			delta := choice.Delta
-
-			if delta.Content != "" {
-				ch <- MessageChunk{Role: RoleAssistant, Content: delta.Content}
-			}
-
-			// Accumulate tool_call fragments emitted across chunks.
-			for ci, tc := range delta.ToolCalls {
-				if tc.Index == nil {
-					tc.Index = &ci
-				}
-				idx := *tc.Index
-				for len(toolArgsBuf) <= idx {
-					toolArgsBuf = append(toolArgsBuf, "")
-				}
-				if tc.Function.Name != "" {
-					if toolNameByIndex == nil {
-						toolNameByIndex = make(map[int]string)
-					}
-					if toolNameByIndex[idx] == "" {
-						toolNameByIndex[idx] = tc.Function.Name
-					}
-				}
-				if tc.Function.Arguments != "" {
-					toolArgsBuf[idx] += tc.Function.Arguments
-				}
-			}
-		}
-
-		// Emit the final accumulated assistant message.
-		final := MessageChunk{Role: RoleAssistant, Final: true, FinishReason: finishReason}
-		if toolNameByIndex != nil {
-			final.ToolCalls = make([]ToolCall, len(toolArgsBuf))
-			for idx, name := range toolNameByIndex {
-				var args any
-				if idx < len(toolArgsBuf) && toolArgsBuf[idx] != "" {
-					var decoded any
-					if err := json.Unmarshal([]byte(toolArgsBuf[idx]), &decoded); err == nil {
-						args = decoded
-					} else {
-						args = toolArgsBuf[idx]
-					}
-				}
-				final.ToolCalls[idx] = ToolCall{
-					ID:   fmt.Sprintf("call_%d", idx),
-					Name: name,
-					Args: args,
-				}
-			}
-		}
-		ch <- final
+		toolCalls, finishReason := accumulateOpenAIStreamToolCalls(events, ch)
+		ch <- MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
 	}()
 
 	return ch, nil

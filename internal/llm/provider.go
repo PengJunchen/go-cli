@@ -303,162 +303,41 @@ func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 
 		reader := bufio.NewReaderSize(respBody, 64*1024)
 
-		// Peek at the first bytes to detect SSE vs plain JSON.
-		isJSON := false
-		peek, err := reader.Peek(64)
-		if err != nil && err != io.EOF {
+		// Detect non-SSE JSON responses (e.g. error responses returned as
+		// plain JSON instead of an event stream).
+		isJSON, jsonBody, err := detectJSONResponse(reader)
+		if err != nil {
 			slog.Error("llm_stream_peek_error", "err", err)
 			return
 		}
-		// Trim leading whitespace to find the first meaningful character.
-		trimmed := bytes.TrimLeft(peek, " \t\r\n")
-		if len(trimmed) > 0 && trimmed[0] == '{' {
-			isJSON = true
-		}
-
 		if isJSON {
-			// Server returned a regular JSON response instead of SSE.
-			body, err := io.ReadAll(reader)
-			if err != nil {
-				slog.Error("llm_stream_json_read_error", "err", err)
-				return
-			}
 			var parsed openAIResponse
-			if err := json.Unmarshal(body, &parsed); err != nil {
+			if err := json.Unmarshal(jsonBody, &parsed); err != nil {
 				slog.Error("llm_stream_json_parse_error", "err", err)
 				return
 			}
 			var content string
 			var toolCalls []ToolCall
+			var finishReason string
 			if len(parsed.Choices) > 0 {
 				content = contentToString(parsed.Choices[0].Message.Content)
 				toolCalls = convertAssistantToolCalls(parsed.Choices[0].Message.ToolCalls)
+				finishReason = parsed.Choices[0].FinishReason
 			}
 			if content != "" {
 				ch <- MessageChunk{Role: RoleAssistant, Content: content}
 			}
-			ch <- MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls}
+			ch <- MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
 			return
 		}
 
-		// SSE path: parse data: lines from the buffered reader.
-		scanner := bufio.NewScanner(reader)
-		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
+		// SSE path: parse using the shared DefaultSSEParser and accumulate
+		// tool-call fragments via the shared helper.
+		parser := NewDefaultSSEParser()
+		events, _ := parser.Parse(reader) //nolint:errcheck
 
-		// Per-request accumulation: tool_call index → name + args fragments.
-		var toolNameByIndex map[int]string
-		var toolArgsBuf []string
-		emittedRole := false
-
-		for scanner.Scan() {
-			line := scanner.Text()
-			line = strings.TrimSpace(line)
-			if line == "" || !strings.HasPrefix(line, "data:") {
-				continue
-			}
-			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-			// SSE termination sentinel.
-			if payload == "[DONE]" {
-				break
-			}
-
-			var chunk openAIStreamChunk
-			if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-				slog.Warn("llm_stream_parse_skip", "err", err)
-				continue
-			}
-			if len(chunk.Choices) == 0 {
-				continue
-			}
-			delta := chunk.Choices[0].Delta
-
-			if !emittedRole {
-				// Emit a role-only chunk early so the loop can start
-				// rendering the assistant message placeholder.
-				ch <- MessageChunk{Role: RoleAssistant, Content: ""}
-				emittedRole = true
-			}
-
-			if delta.Content != "" {
-				ch <- MessageChunk{Role: RoleAssistant, Content: delta.Content}
-			}
-
-			// Accumulate tool_call fragments emitted across chunks.
-			for ci, tc := range delta.ToolCalls {
-				if tc.Index == nil {
-					tc.Index = &ci
-				}
-				idx := *tc.Index
-				for len(toolArgsBuf) <= idx {
-					toolArgsBuf = append(toolArgsBuf, "")
-				}
-				if tc.Function.Name != "" {
-					if toolNameByIndex == nil {
-						toolNameByIndex = make(map[int]string)
-					}
-					if toolNameByIndex[idx] == "" {
-						toolNameByIndex[idx] = tc.Function.Name
-					}
-				}
-				if tc.Function.Arguments != "" {
-					toolArgsBuf[idx] += tc.Function.Arguments
-				}
-			}
-		}
-
-		if scanErr := scanner.Err(); scanErr != nil {
-			slog.Error("llm_stream_scan_error", "err", scanErr)
-		}
-
-		// Fallback: if no SSE lines were found, try to parse the response
-		// as JSON. This handles edge cases where the peek didn't work correctly.
-		if !emittedRole {
-			body, readErr := io.ReadAll(reader)
-			if readErr != nil {
-				slog.Error("llm_stream_fallback_read_error", "err", readErr)
-			} else {
-				var parsed openAIResponse
-				if unmarshalErr := json.Unmarshal(body, &parsed); unmarshalErr != nil {
-					slog.Error("llm_stream_fallback_parse_error", "err", unmarshalErr)
-				} else {
-					var content string
-					var toolCalls []ToolCall
-					if len(parsed.Choices) > 0 {
-						content = contentToString(parsed.Choices[0].Message.Content)
-						toolCalls = convertAssistantToolCalls(parsed.Choices[0].Message.ToolCalls)
-					}
-					if content != "" {
-						ch <- MessageChunk{Role: RoleAssistant, Content: content}
-					}
-					ch <- MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls}
-					return
-				}
-			}
-		}
-
-		// Emit the final accumulated assistant message so callers can build
-		// the complete Message including tool calls.
-		final := MessageChunk{Role: RoleAssistant, Final: true}
-		if toolNameByIndex != nil {
-			final.ToolCalls = make([]ToolCall, len(toolArgsBuf))
-			for idx, name := range toolNameByIndex {
-				var args any
-				if idx < len(toolArgsBuf) && toolArgsBuf[idx] != "" {
-					var decoded any
-					if err := json.Unmarshal([]byte(toolArgsBuf[idx]), &decoded); err == nil {
-						args = decoded
-					} else {
-						args = toolArgsBuf[idx]
-					}
-				}
-				final.ToolCalls[idx] = ToolCall{
-					ID:   fmt.Sprintf("call_%d", idx),
-					Name: name,
-					Args: args,
-				}
-			}
-		}
-		ch <- final
+		toolCalls, finishReason := accumulateOpenAIStreamToolCalls(events, ch)
+		ch <- MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
 	}()
 
 	return ch, nil

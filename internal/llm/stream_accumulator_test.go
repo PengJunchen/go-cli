@@ -1,0 +1,245 @@
+package llm
+
+import (
+	"bufio"
+	"bytes"
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/verify"
+)
+
+// TestEinoStream_UsesDefaultSSEParser verifies that EinoProvider.Stream uses
+// DefaultSSEParser to correctly handle standard SSE features: comment lines
+// (starting with ':'), event: fields, multi-line data payloads, and the
+// [DONE] sentinel.
+func TestEinoStream_UsesDefaultSSEParser(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		// The stream includes comments, event: fields, and multi-line data.
+		// DefaultSSEParser must skip comments, accept event: fields, and join
+		// multi-line data with "\n". The multi-line data splits JSON at a
+		// valid whitespace boundary (after '[' so the join produces valid JSON).
+		writeResponse(t, w, strings.Join([]string{
+			": this is a comment",
+			"",
+			"event: delta",
+			"data: {\"choices\":[",
+			"data: {\"delta\":{\"content\":\"hello\"}}",
+			"data: ]}",
+			"",
+			": another comment",
+			"data: {\"choices\":[{\"delta\":{\"content\":\"world\"}}]}",
+			"",
+			"data: [DONE]",
+			"",
+		}, "\n"))
+	}))
+	defer srv.Close()
+
+	model := &HTTPChatModel{
+		provider: NewEinoProvider(WithBaseURL(srv.URL)),
+		cfg:      ModelConfig{Model: "m"},
+		client:   http.DefaultClient,
+	}
+	ch, err := model.Stream(context.Background(), nil)
+	require.NoError(t, err)
+
+	var chunks []MessageChunk
+	for c := range ch {
+		chunks = append(chunks, c)
+	}
+
+	// Expected: role-only placeholder, "hello", "world", final.
+	require.Len(t, chunks, 4)
+	assert.Equal(t, RoleAssistant, chunks[0].Role)
+	assert.Equal(t, "", chunks[0].Content) // role-only placeholder
+	assert.Equal(t, "hello", chunks[1].Content)
+	assert.Equal(t, "world", chunks[2].Content)
+	assert.True(t, chunks[3].Final)
+}
+
+// TestEinoStream_JSONFallback_DetectNonSSE verifies that when the server
+// returns a plain JSON response instead of an SSE stream (e.g. an error
+// response), detectJSONResponse detects it and the response is parsed
+// without panic.
+func TestEinoStream_JSONFallback_DetectNonSSE(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		writeResponse(t, w, `{"choices":[{"message":{"role":"assistant","content":"not streamed"},"finish_reason":"stop"}]}`)
+	}))
+	defer srv.Close()
+
+	model := &HTTPChatModel{
+		provider: NewEinoProvider(WithBaseURL(srv.URL)),
+		cfg:      ModelConfig{Model: "m"},
+		client:   http.DefaultClient,
+	}
+	ch, err := model.Stream(context.Background(), nil)
+	require.NoError(t, err)
+
+	var chunks []MessageChunk
+	for c := range ch {
+		chunks = append(chunks, c)
+	}
+
+	// JSON path: content chunk + final chunk (no role-only placeholder).
+	require.Len(t, chunks, 2)
+	assert.Equal(t, "not streamed", chunks[0].Content)
+	assert.True(t, chunks[1].Final)
+	// FinishReason must be carried on the final chunk (bug fix).
+	assert.Equal(t, "stop", chunks[1].FinishReason)
+}
+
+// TestEinoStream_ToolCallAccumulation_Shared verifies that the same SSE input
+// produces identical tool call results when processed by EinoProvider.Stream
+// and native streamOpenAI, proving the shared accumulator is consistent.
+func TestEinoStream_ToolCallAccumulation_Shared(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	// SSE stream with tool-call fragments split across chunks.
+	sseBody := strings.Join([]string{
+		`data: {"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_0","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}`,
+		"",
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\":"}}]}}]}`,
+		"",
+		`data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"SF\"}"}}]}}]}`,
+		"",
+		`data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+		"",
+		"data: [DONE]",
+		"",
+	}, "\n")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeResponse(t, w, sseBody)
+	}))
+	defer srv.Close()
+
+	// Run through EinoProvider.
+	einoModel := &HTTPChatModel{
+		provider: NewEinoProvider(WithBaseURL(srv.URL)),
+		cfg:      ModelConfig{Model: "m"},
+		client:   http.DefaultClient,
+	}
+	einoCh, err := einoModel.Stream(context.Background(), nil)
+	require.NoError(t, err)
+	var einoChunks []MessageChunk
+	for c := range einoCh {
+		einoChunks = append(einoChunks, c)
+	}
+
+	// Run through native OpenAI provider.
+	openAIProvider := NewOpenAIProvider(WithNativeBaseURL(srv.URL))
+	nativeModel, _, err := openAIProvider.Build(context.Background(), ModelConfig{Model: "m"})
+	require.NoError(t, err)
+	nativeCh, err := nativeModel.Stream(context.Background(), nil)
+	require.NoError(t, err)
+	var nativeChunks []MessageChunk
+	for c := range nativeCh {
+		nativeChunks = append(nativeChunks, c)
+	}
+
+	// Both should have the same number of chunks.
+	require.Len(t, einoChunks, len(nativeChunks))
+
+	// Find the final chunk from each.
+	var einoFinal, nativeFinal *MessageChunk
+	for i := range einoChunks {
+		if einoChunks[i].Final {
+			einoFinal = &einoChunks[i]
+		}
+		if nativeChunks[i].Final {
+			nativeFinal = &nativeChunks[i]
+		}
+	}
+	require.NotNil(t, einoFinal)
+	require.NotNil(t, nativeFinal)
+
+	// Tool calls must be identical.
+	require.Len(t, einoFinal.ToolCalls, 1)
+	require.Len(t, nativeFinal.ToolCalls, 1)
+	assert.Equal(t, einoFinal.ToolCalls[0].ID, nativeFinal.ToolCalls[0].ID)
+	assert.Equal(t, einoFinal.ToolCalls[0].Name, nativeFinal.ToolCalls[0].Name)
+	assert.Equal(t, einoFinal.ToolCalls[0].Args, nativeFinal.ToolCalls[0].Args)
+
+	// Verify the accumulated tool call content.
+	assert.Equal(t, "call_0", einoFinal.ToolCalls[0].ID)
+	assert.Equal(t, "get_weather", einoFinal.ToolCalls[0].Name)
+	args, ok := einoFinal.ToolCalls[0].Args.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "SF", args["city"])
+
+	// FinishReason must match.
+	assert.Equal(t, "tool_calls", einoFinal.FinishReason)
+	assert.Equal(t, "tool_calls", nativeFinal.FinishReason)
+}
+
+// TestDetectJSONResponse_LeadingWhitespace verifies that detectJSONResponse
+// correctly identifies a JSON response even when it has leading whitespace
+// (spaces, tabs, newlines).
+func TestDetectJSONResponse_LeadingWhitespace(t *testing.T) {
+	tests := []struct {
+		name     string
+		input    string
+		wantJSON bool
+	}{
+		{
+			name:     "leading spaces",
+			input:    "   {\"key\":\"value\"}",
+			wantJSON: true,
+		},
+		{
+			name:     "leading newlines and tabs",
+			input:    "\n\n\t  {\"key\":\"value\"}",
+			wantJSON: true,
+		},
+		{
+			name:     "leading carriage returns",
+			input:    "\r\n\r\n  [1,2,3]",
+			wantJSON: true,
+		},
+		{
+			name:     "SSE stream (starts with data:)",
+			input:    "data: {\"choices\":[]}\n\n",
+			wantJSON: false,
+		},
+		{
+			name:     "SSE comment (starts with :)",
+			input:    ": comment\ndata: {\"choices\":[]}\n\n",
+			wantJSON: false,
+		},
+		{
+			name:     "empty input",
+			input:    "",
+			wantJSON: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := bufio.NewReader(bytes.NewReader([]byte(tt.input)))
+			isJSON, body, err := detectJSONResponse(reader)
+			require.NoError(t, err)
+			assert.Equal(t, tt.wantJSON, isJSON)
+			if tt.wantJSON {
+				assert.NotEmpty(t, body)
+				// Verify the body can be parsed as JSON.
+				var v any
+				require.NoError(t, json.Unmarshal(body, &v))
+			}
+		})
+	}
+}
