@@ -543,6 +543,11 @@ func (m *teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mu.Lock()
 		m.width = msg.Width
 		m.height = msg.Height
+		// Panel dimensions (leftWidth, rightWidth, panelHeight) are derived
+		// on the fly in renderViewLocked() from m.width/m.height, so no
+		// separate fields are needed. When width >= splitWidthThreshold,
+		// the layout splits into left (conversation) and right (tool
+		// accordion) panels; below the threshold it stays single-column.
 		m.mu.Unlock()
 		return m, nil
 	case spinner.TickMsg:
@@ -582,12 +587,68 @@ func (m *teaModel) View() string {
 	return m.renderViewLocked()
 }
 
+// splitWidthThreshold is the minimum terminal width for the left-right split
+// layout. Below this, the TUI falls back to a single-column layout.
+const splitWidthThreshold = 120
+
 // renderViewLocked builds the full view string. The caller must hold m.mu.
+//
+// When the terminal is at least splitWidthThreshold columns wide, the accordion
+// content is split into a left panel (conversation: user/assistant/thinking)
+// and a right panel (tool_call entries with their children), joined
+// horizontally with a vertical separator. Below the threshold, or when no tool
+// entries exist, the classic single-column layout is used.
 func (m *teaModel) renderViewLocked() string {
 	var sb strings.Builder
-	if m.accordion != nil && m.accordion.Len() > 0 {
+
+	// --- Accordion content (split or single-column) ---
+	// Only activate the split layout when tool entries exist; otherwise
+	// the conversation gets the full width.
+	useSplit := m.width >= splitWidthThreshold &&
+		m.accordion != nil && m.accordion.Len() > 0 && m.height > 0
+	if useSplit {
+		hasTools := false
+		for _, e := range m.accordion.entries {
+			if isToolEntry(e) {
+				hasTools = true
+				break
+			}
+		}
+		useSplit = hasTools
+	}
+
+	if useSplit {
+		leftWidth := m.width / 2
+		rightWidth := m.width - leftWidth - 1 // -1 for the separator column
+		if rightWidth < 1 {
+			rightWidth = 1
+		}
+		// Reserve ~2 lines for the status bar at the bottom.
+		panelHeight := m.height - 2
+		if panelHeight < 1 {
+			panelHeight = 0 // no clipping
+		}
+
+		leftPanel := m.accordion.RenderView(leftWidth, panelHeight, false)
+		rightPanel := m.accordion.RenderView(rightWidth, panelHeight, true)
+
+		switch {
+		case rightPanel == "" && leftPanel == "":
+			// nothing to render
+		case rightPanel == "":
+			sb.WriteString(leftPanel)
+		case leftPanel == "":
+			sb.WriteString(rightPanel)
+		default:
+			leftStyled := lipgloss.NewStyle().Width(leftWidth).Render(leftPanel)
+			rightStyled := lipgloss.NewStyle().Width(rightWidth).Render(rightPanel)
+			sb.WriteString(lipgloss.JoinHorizontal(lipgloss.Top, leftStyled, "│", rightStyled))
+		}
+	} else if m.accordion != nil && m.accordion.Len() > 0 {
 		sb.WriteString(m.accordion.Render())
 	}
+
+	// --- Bottom section (always full-width) ---
 	// Spinner indicator (shown while a tool is executing).
 	if m.spinnerActive {
 		sb.WriteString("\n")
