@@ -61,8 +61,8 @@ type DefaultLineEditor struct {
 	isTTY      bool
 
 	// Render state for multi-line wrapping support.
-	termWidth atomic.Int64 // 0 = not queried yet (needs re-query)
-	prevVisualLines int    // visual lines used by the previous render
+	termWidth       atomic.Int64 // 0 = not queried yet (needs re-query)
+	prevVisualLines int          // visual lines used by the previous render
 
 	// SIGWINCH monitoring for dynamic terminal resize.
 	winchStop chan struct{} // closed to signal the monitor goroutine to exit
