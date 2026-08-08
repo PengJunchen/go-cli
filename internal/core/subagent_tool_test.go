@@ -604,3 +604,112 @@ func TestParallelDispatchRaceClean(t *testing.T) {
 		mu.Unlock()
 	}
 }
+
+// tracerMarkerKey is a context key used to simulate the presence of a tracer
+// in the parent context. The subagent dispatcher should propagate the parent
+// context (and therefore the tracer) to every sub-agent's Run call.
+type tracerMarkerKey struct{}
+
+// ctxCapturingSubAgent is a fake SubAgent that records the context passed to
+// Run so tests can verify the parent context is propagated for trace
+// continuity.
+type ctxCapturingSubAgent struct {
+	name   string
+	result AgentMessage
+	done   chan struct{}
+
+	mu     sync.Mutex
+	runCtx context.Context
+	ran    bool
+}
+
+var _ SubAgent = (*ctxCapturingSubAgent)(nil)
+
+func newCtxCapturingSubAgent(name string) *ctxCapturingSubAgent {
+	return &ctxCapturingSubAgent{
+		name:   name,
+		result: AgentMessage{Role: "assistant", Content: "ok"},
+		done:   make(chan struct{}),
+	}
+}
+
+func (s *ctxCapturingSubAgent) Name() string { return s.name }
+
+func (s *ctxCapturingSubAgent) Run(ctx context.Context, _ string) (<-chan AgentEvent, error) {
+	s.mu.Lock()
+	s.runCtx = ctx
+	s.ran = true
+	s.mu.Unlock()
+
+	ch := make(chan AgentEvent)
+	close(ch)
+	close(s.done)
+	return ch, nil
+}
+
+func (s *ctxCapturingSubAgent) Send(_ context.Context, _ string) error { return nil }
+func (s *ctxCapturingSubAgent) Interrupt(_ context.Context) error      { return nil }
+func (s *ctxCapturingSubAgent) Wait(_ context.Context) (AgentMessage, error) {
+	<-s.done
+	return s.result, nil
+}
+
+func (s *ctxCapturingSubAgent) capturedCtx() context.Context {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.runCtx
+}
+
+// TestDispatchPassesParentCtxToSubagent verifies that Dispatch forwards the
+// parent context (which carries the tracer) to the sub-agent's Run call so
+// the sub-agent can create child spans linked to the parent span.
+func TestDispatchPassesParentCtxToSubagent(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	sub := newCtxCapturingSubAgent("tracer-worker")
+	factory := &fakeSubAgentFactory{subs: []SubAgent{sub}}
+
+	d := NewDefaultSubagentDispatcher(factory)
+
+	// Inject a marker value into the parent context to simulate a tracer.
+	marker := "parent-trace-id"
+	ctx := context.WithValue(context.Background(), tracerMarkerKey{}, marker)
+
+	_, err := d.Dispatch(ctx, SubagentTask{ID: "t1", Prompt: "go"})
+	require.NoError(t, err)
+
+	captured := sub.capturedCtx()
+	require.NotNil(t, captured, "sub-agent must receive a non-nil context")
+	got, ok := captured.Value(tracerMarkerKey{}).(string)
+	assert.True(t, ok, "parent context value must be propagated to sub-agent")
+	assert.Equal(t, marker, got)
+}
+
+// TestParallelDispatchPassesParentCtxToSubagents verifies that ParallelDispatch
+// forwards the parent context to every sub-agent's Run call.
+func TestParallelDispatchPassesParentCtxToSubagents(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	sub1 := newCtxCapturingSubAgent("w1")
+	sub2 := newCtxCapturingSubAgent("w2")
+	factory := &fakeSubAgentFactory{subs: []SubAgent{sub1, sub2}}
+
+	d := NewDefaultSubagentDispatcher(factory)
+
+	marker := "parallel-trace-id"
+	ctx := context.WithValue(context.Background(), tracerMarkerKey{}, marker)
+
+	_, err := d.ParallelDispatch(ctx, []SubagentTask{
+		{ID: "t1", Prompt: "go"},
+		{ID: "t2", Prompt: "go"},
+	})
+	require.NoError(t, err)
+
+	for _, sub := range []*ctxCapturingSubAgent{sub1, sub2} {
+		captured := sub.capturedCtx()
+		require.NotNil(t, captured)
+		got, ok := captured.Value(tracerMarkerKey{}).(string)
+		assert.True(t, ok, "parent context must be propagated to each sub-agent")
+		assert.Equal(t, marker, got)
+	}
+}

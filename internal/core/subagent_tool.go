@@ -147,6 +147,9 @@ func (d *DefaultSubagentDispatcher) Dispatch(ctx context.Context, task SubagentT
 		d.mu.Unlock()
 	}()
 
+	// Pass the parent ctx (which carries the tracer) to the sub-agent so it can
+	// create child spans linked to the parent span for trace continuity.
+	slog.Debug("core.subagent_dispatcher.tracer_inherit", "task_id", task.ID)
 	evCh, err := sub.Run(ctx, task.Prompt)
 	if err != nil {
 		res := SubagentResult{TaskID: task.ID, Error: err, Duration: time.Since(start)}
@@ -251,6 +254,10 @@ func (d *DefaultSubagentDispatcher) ParallelDispatch(ctx context.Context, tasks 
 				d.mu.Unlock()
 			}()
 
+			// Pass the parent ctx (which carries the tracer) to the sub-agent so
+			// it can create child spans linked to the parent span for trace
+			// continuity.
+			slog.Debug("core.subagent_dispatcher.tracer_inherit", "task_id", t.ID)
 			evCh, err := subs[idx].Run(ctx, t.Prompt)
 			if err != nil {
 				results[idx] = SubagentResult{TaskID: t.ID, Error: err, Duration: time.Since(starts[idx])}

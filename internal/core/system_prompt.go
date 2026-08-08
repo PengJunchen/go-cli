@@ -3,7 +3,9 @@ package core //exempt:scan009
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/tools"
@@ -119,8 +121,13 @@ Recursion constraints:
 - Each sub-agent has its own tool whitelist based on its role, so it cannot perform actions outside its scope.`
 
 // DefaultSystemPromptBuilder is the default SystemPromptBuilder implementation.
-// It is stateless and safe for concurrent use.
-type DefaultSystemPromptBuilder struct{}
+// It caches the assembled prompt and only rebuilds when the inputs that affect
+// the prompt change. It is safe for concurrent use.
+type DefaultSystemPromptBuilder struct {
+	mu           sync.Mutex
+	cachedPrompt string
+	cacheVersion string // hash of inputs that affect the prompt
+}
 
 // Compile-time assertion that DefaultSystemPromptBuilder satisfies
 // SystemPromptBuilder.
@@ -140,7 +147,60 @@ func NewDefaultSystemPromptBuilder() *DefaultSystemPromptBuilder {
 //  6. Memories (rendered as a <memory> XML block, grouped by category)
 //  7. Current date and working directory
 //  8. Append prompt (if non-empty)
+//
+// The assembled prompt is cached: if the inputs (tools, context files, skills,
+// memories, custom/append prompts, cwd) have not changed since the last Build,
+// the cached prompt is returned without rebuilding.
 func (b *DefaultSystemPromptBuilder) Build(_ context.Context, opts SystemPromptOptions) string {
+	version := computeCacheVersion(opts)
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if version == b.cacheVersion && b.cachedPrompt != "" {
+		slog.Debug("system_prompt.cache", "hit", true)
+		return b.cachedPrompt
+	}
+
+	slog.Debug("system_prompt.cache", "hit", false)
+	prompt := b.buildInner(opts)
+	b.cachedPrompt = prompt
+	b.cacheVersion = version
+	return prompt
+}
+
+// computeCacheVersion builds a string that uniquely represents all inputs that
+// affect the assembled prompt. Two identical version strings guarantee the same
+// prompt output (ignoring the non-deterministic current date).
+func computeCacheVersion(opts SystemPromptOptions) string {
+	var sb strings.Builder
+	for _, t := range opts.Tools {
+		sb.WriteString(t.Name())
+		sb.WriteString(",")
+	}
+	for _, cf := range opts.ContextFiles {
+		sb.WriteString(cf.Path)
+		sb.WriteString(cf.Content)
+	}
+	for _, s := range opts.Skills {
+		sb.WriteString(s.Name)
+		sb.WriteString(s.Description)
+		sb.WriteString(s.Category)
+	}
+	for _, m := range opts.Memories {
+		sb.WriteString(m.ID)
+		sb.WriteString(m.Content)
+		sb.WriteString(m.Category)
+	}
+	sb.WriteString(opts.CustomPrompt)
+	sb.WriteString(opts.AppendPrompt)
+	sb.WriteString(opts.Cwd)
+	return sb.String()
+}
+
+// buildInner assembles the system prompt from opts without consulting the
+// cache. It is called by Build when the cache version does not match.
+func (b *DefaultSystemPromptBuilder) buildInner(opts SystemPromptOptions) string {
 	var sb strings.Builder
 
 	// 1. Base prompt or custom replacement.
