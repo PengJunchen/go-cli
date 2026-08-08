@@ -621,6 +621,7 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 		events, _ := parser.Parse(respBody) //nolint:errcheck
 
 		var finishReason string
+		var toolCalls []ToolCall
 		for event := range events {
 			if event.Data == "" {
 				continue
@@ -639,6 +640,16 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 					var sb strings.Builder
 					for _, part := range candidate.Content.Parts {
 						sb.WriteString(part.Text)
+						// Gemini sends complete functionCall parts (name+args
+						// together, not fragmented like OpenAI), so we just
+						// append when encountered.
+						if part.FunctionCall != nil {
+							toolCalls = append(toolCalls, ToolCall{
+								ID:   fmt.Sprintf("call_%d", len(toolCalls)),
+								Name: part.FunctionCall.Name,
+								Args: part.FunctionCall.Args,
+							})
+						}
 					}
 					if sb.Len() > 0 {
 						ch <- MessageChunk{Role: RoleAssistant, Content: sb.String()}
@@ -647,7 +658,7 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 			}
 		}
 
-		ch <- MessageChunk{Role: RoleAssistant, Final: true, FinishReason: finishReason}
+		ch <- MessageChunk{Role: RoleAssistant, Final: true, FinishReason: finishReason, ToolCalls: toolCalls}
 	}()
 
 	return ch, nil
@@ -1189,10 +1200,25 @@ type geminiContent struct {
 	Parts []geminiPart `json:"parts"`
 }
 
-// geminiPart is a single content part (text or inline image data).
+// geminiFunctionCall represents a function call in a Gemini response.
+type geminiFunctionCall struct {
+	Name string         `json:"name"`
+	Args map[string]any `json:"args"`
+}
+
+// geminiFunctionResponse represents a function response in a Gemini request.
+type geminiFunctionResponse struct {
+	Name     string         `json:"name"`
+	Response map[string]any `json:"response"`
+}
+
+// geminiPart is a single content part (text, inline image data, or a
+// function call/response).
 type geminiPart struct {
-	Text       string            `json:"text,omitempty"`
-	InlineData *geminiInlineData `json:"inline_data,omitempty"` // when image
+	Text             string                 `json:"text,omitempty"`
+	InlineData       *geminiInlineData      `json:"inline_data,omitempty"`       // when image
+	FunctionCall     *geminiFunctionCall    `json:"functionCall,omitempty"`      // when model calls a tool
+	FunctionResponse *geminiFunctionResponse `json:"functionResponse,omitempty"` // when feeding back a tool result
 }
 
 // geminiInlineData is the Google GenAI inline image: base64-encoded data with
@@ -1231,7 +1257,41 @@ type geminiUsage struct {
 // When ContentBlocks is non-nil, it maps text and image blocks to the Gemini
 // format (image blocks require a base64 data URI). Otherwise it falls back to a
 // single text part built from Content.
+//
+// Tool-related messages are handled specially:
+//   - Assistant messages with ToolCalls produce functionCall parts (one per
+//     call), optionally preceded by a text part when Content is non-empty.
+//   - Tool result messages (RoleTool) produce a single functionResponse part
+//     whose Response carries the tool output.
 func buildGeminiParts(msg Message) []geminiPart {
+	// Tool result messages become functionResponse parts.
+	if msg.Role == RoleTool {
+		return []geminiPart{{
+			FunctionResponse: &geminiFunctionResponse{
+				Name:     msg.Name,
+				Response: contentToResponseMap(msg.Content),
+			},
+		}}
+	}
+
+	// Assistant messages with tool calls become functionCall parts.
+	if len(msg.ToolCalls) > 0 {
+		var parts []geminiPart
+		// Include any leading text content before the function calls.
+		if msg.Content != "" {
+			parts = append(parts, geminiPart{Text: msg.Content})
+		}
+		for _, tc := range msg.ToolCalls {
+			parts = append(parts, geminiPart{
+				FunctionCall: &geminiFunctionCall{
+					Name: tc.Name,
+					Args: argsToMap(tc.Args),
+				},
+			})
+		}
+		return parts
+	}
+
 	if msg.ContentBlocks == nil {
 		return []geminiPart{{Text: msg.Content}}
 	}
@@ -1257,6 +1317,43 @@ func buildGeminiParts(msg Message) []geminiPart {
 		}
 	}
 	return parts
+}
+
+// argsToMap converts a ToolCall.Args value (typically map[string]any from JSON
+// decoding) into the map[string]any required by geminiFunctionCall. When the
+// value is not already a map it is round-tripped through JSON; values that
+// still cannot be represented as a map are wrapped under a "value" key.
+func argsToMap(args any) map[string]any {
+	if args == nil {
+		return nil
+	}
+	if m, ok := args.(map[string]any); ok {
+		return m
+	}
+	data, err := json.Marshal(args)
+	if err != nil {
+		return map[string]any{"value": args}
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		return map[string]any{"value": args}
+	}
+	return m
+}
+
+// contentToResponseMap converts a tool result Content string into the
+// map[string]any required by geminiFunctionResponse. When the content is valid
+// JSON that decodes to a map it is used directly; otherwise the raw string is
+// wrapped under a "content" key so the result is never lost.
+func contentToResponseMap(content string) map[string]any {
+	if content == "" {
+		return map[string]any{}
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(content), &m); err == nil {
+		return m
+	}
+	return map[string]any{"content": content}
 }
 
 // encodeGeminiRequest marshals the conversation into the generateContent body.
@@ -1307,7 +1404,8 @@ func encodeGeminiRequest(cfg ModelConfig, msgs []Message, opts []Option) ([]byte
 }
 
 // decodeGeminiResponse parses a generateContent response, joining the first
-// candidate's text parts into the message content.
+// candidate's text parts into the message content and extracting any
+// functionCall parts into ToolCalls.
 func decodeGeminiResponse(body []byte) (*Message, error) {
 	var parsed geminiResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
@@ -1321,6 +1419,13 @@ func decodeGeminiResponse(body []byte) (*Message, error) {
 			var sb strings.Builder
 			for _, part := range candidate.Content.Parts {
 				sb.WriteString(part.Text)
+				if part.FunctionCall != nil {
+					msg.ToolCalls = append(msg.ToolCalls, ToolCall{
+						ID:   fmt.Sprintf("call_%d", len(msg.ToolCalls)),
+						Name: part.FunctionCall.Name,
+						Args: part.FunctionCall.Args,
+					})
+				}
 			}
 			msg.Content = sb.String()
 		}
