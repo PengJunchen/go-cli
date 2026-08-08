@@ -247,9 +247,18 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 			WithHistoryPath(historyPath),
 			WithHistoryMaxLen(historyMaxLen),
 		)
+		// Register completers in priority order: slash commands first,
+		// then file paths, and finally LSP code completion (when an LSP
+		// server is configured). CompositeCompleter uses first-non-empty-
+		// wins fall-through, so nil children are silently skipped.
+		var lspCompleter Completer
+		if assembly.LSPClient != nil {
+			lspCompleter = NewLSPCompleter(assembly.LSPClient, assembly.LSPWorkspaceRoot)
+		}
 		dle.SetCompleter(NewCompositeCompleter(
 			NewSlashCommandCompleterFromRegistry(defaultSlashReg),
 			NewFilePathCompleter(),
+			lspCompleter,
 		))
 
 		// Load persisted history on startup (best-effort).
