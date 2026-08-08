@@ -225,39 +225,95 @@ func (m *AccordionModel) Render() string {
 	if len(m.entries) == 0 {
 		return ""
 	}
-	var sb strings.Builder
+	var lines []string
 	for i, e := range m.entries {
-		marker := "  "
-		if i == m.selected {
-			if e.Collapsed {
-				marker = "▶ "
-			} else {
-				marker = "▼ "
-			}
-		}
-		// Prepend a status icon for tool_call entries.
-		statusPrefix := ""
-		if e.ContentType == ContentTypeToolCall {
-			statusPrefix = toolStatusIcon(e.ToolStatus, e.SpinnerFrame) + " "
-		}
+		lines = append(lines, m.renderEntryLines(e, i == m.selected)...)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// renderEntryLines produces the terminal lines for a single entry and its
+// children. The selected flag controls the marker prefix (▶/▼ vs spaces).
+// This is shared by Render() and RenderView() to avoid duplication.
+func (m *AccordionModel) renderEntryLines(e *AccordionEntry, selected bool) []string {
+	marker := "  "
+	if selected {
 		if e.Collapsed {
-			sb.WriteString(marker + statusPrefix + e.Summary + "\n")
+			marker = "▶ "
 		} else {
-			sb.WriteString(marker + statusPrefix + e.Full + "\n")
-			for _, child := range e.Children {
-				cMarker := "  "
-				if child.Collapsed {
-					sb.WriteString(cMarker + "  " + child.Summary + "\n")
-				} else {
-					rendered := truncateToolResult(child)
-					for _, line := range strings.Split(rendered, "\n") {
-						sb.WriteString(cMarker + "  " + line + "\n")
-					}
+			marker = "▼ "
+		}
+	}
+	statusPrefix := ""
+	if e.ContentType == ContentTypeToolCall {
+		statusPrefix = toolStatusIcon(e.ToolStatus, e.SpinnerFrame) + " "
+	}
+	var lines []string
+	if e.Collapsed {
+		lines = append(lines, marker+statusPrefix+e.Summary)
+	} else {
+		lines = append(lines, marker+statusPrefix+e.Full)
+		for _, child := range e.Children {
+			cMarker := "  "
+			if child.Collapsed {
+				lines = append(lines, cMarker+"  "+child.Summary)
+			} else {
+				rendered := truncateToolResult(child)
+				for _, line := range strings.Split(rendered, "\n") {
+					lines = append(lines, cMarker+"  "+line)
 				}
 			}
 		}
 	}
-	return strings.TrimRight(sb.String(), "\n")
+	return lines
+}
+
+// isToolEntry reports whether an entry belongs in the tool panel (right side
+// of the split layout). Tool_call and tool_result entries are tool entries;
+// all other content types (user, assistant, thinking, etc.) are conversation
+// entries.
+func isToolEntry(e *AccordionEntry) bool {
+	return e.ContentType == ContentTypeToolCall || e.ContentType == ContentTypeToolResult
+}
+
+// RenderView renders the accordion as an independent panel constrained to the
+// given width and height. When toolOnly is true, only tool_call/tool_result
+// entries (and their children) are rendered; otherwise only non-tool entries
+// are rendered. Lines wider than width are truncated. If height > 0, only the
+// last `height` lines are kept so the most recent content remains visible.
+func (m *AccordionModel) RenderView(width, height int, toolOnly bool) string {
+	if len(m.entries) == 0 {
+		return ""
+	}
+	var lines []string
+	for i, e := range m.entries {
+		if isToolEntry(e) != toolOnly {
+			continue
+		}
+		for _, line := range m.renderEntryLines(e, i == m.selected) {
+			if width > 0 {
+				line = truncateLine(line, width)
+			}
+			lines = append(lines, line)
+		}
+	}
+	if height > 0 && len(lines) > height {
+		lines = lines[len(lines)-height:]
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\n")
+}
+
+// truncateLine clips a line to at most width visible display columns,
+// handling ANSI escape sequences correctly via lipgloss. An ellipsis is
+// not appended because lipgloss.MaxWidth handles the truncation.
+func truncateLine(line string, width int) string {
+	if width <= 0 || lipgloss.Width(line) <= width {
+		return line
+	}
+	return lipgloss.NewStyle().MaxWidth(width).Render(line)
 }
 
 // truncateToolResult truncates a tool_result entry's Full content to
