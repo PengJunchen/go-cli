@@ -557,6 +557,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		if hs := dle.HistoryStore(); hs != nil {
 			_ = hs.Save()
 		}
+		dle.Stop()
 	}
 
 	fmt.Fprintln(c.out, "Session ended.") //nolint:errcheck
