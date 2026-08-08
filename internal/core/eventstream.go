@@ -4,6 +4,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 )
 
 // errNoResult reports that an EventStream has not yet received a result.
@@ -29,8 +30,11 @@ type EventStream interface {
 // records the final result and error of a run.
 type EventStreamImpl struct {
 	mu        sync.Mutex
+	sendMu    sync.RWMutex
 	events    chan AgentEvent
-	closed    bool
+	closed    atomic.Bool
+	closeOnce sync.Once
+	done      chan struct{}
 	result    AgentMessage
 	hasRes    bool
 	err       error
@@ -41,40 +45,36 @@ var _ EventStream = (*EventStreamImpl)(nil)
 
 // NewEventStream creates an EventStreamImpl with the given buffer capacity.
 func NewEventStream(capacity int) *EventStreamImpl {
-	return &EventStreamImpl{events: make(chan AgentEvent, capacity)}
+	return &EventStreamImpl{
+		events: make(chan AgentEvent, capacity),
+		done:   make(chan struct{}),
+	}
 }
 
 // Send enqueues an event. It returns nil after close so a best-effort send
-// does not fail the loop. The mutex is NOT held during the channel send to
-// avoid blocking Close()/Result() while waiting for a slow consumer.
+// does not fail the loop. The atomic fast-path check and the select on the
+// done channel together ensure that a send never blocks after Close and
+// never panics on a closed channel. The sendMu read-lock guarantees that
+// Close cannot close the events channel while a send is in-flight.
 func (s *EventStreamImpl) Send(event AgentEvent) error {
-	s.mu.Lock()
-	if s.closed {
-		s.mu.Unlock()
+	if s.closed.Load() {
 		return nil
 	}
-	s.mu.Unlock()
-
-	// Send without holding the lock. Use recover to handle the race where
-	// Close() closes the channel between the check above and this send.
-	sent := true
-	func() {
-		defer func() {
-			if r := recover(); r != nil {
-				sent = false
-			}
-		}()
-		s.events <- event
-	}()
-
-	if sent {
+	s.sendMu.RLock()
+	defer s.sendMu.RUnlock()
+	if s.closed.Load() {
+		return nil
+	}
+	select {
+	case <-s.done:
+		return nil
+	case s.events <- event:
 		s.mu.Lock()
 		s.sentCount++
 		s.mu.Unlock()
-
 		slog.Info("core.eventstream.send", "kind", event.Kind)
+		return nil
 	}
-	return nil
 }
 
 // SentCount returns the number of events that were successfully sent to the
@@ -89,15 +89,19 @@ func (s *EventStreamImpl) SentCount() int {
 // Events returns the event channel.
 func (s *EventStreamImpl) Events() <-chan AgentEvent { return s.events }
 
-// Close closes the stream and the event channel.
+// Close closes the stream and the event channel. It is idempotent via
+// sync.Once. The done channel is closed first to unblock any in-flight
+// Send (which exits via the select), then sendMu.Lock waits for all
+// senders to release their read-lock before closing the events channel.
 func (s *EventStreamImpl) Close() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if !s.closed {
-		s.closed = true
+	s.closeOnce.Do(func() {
+		s.closed.Store(true)
+		close(s.done)
+		s.sendMu.Lock()
 		close(s.events)
+		s.sendMu.Unlock()
 		slog.Info("core.eventstream.close")
-	}
+	})
 }
 
 // Result returns the recorded result of the run.
