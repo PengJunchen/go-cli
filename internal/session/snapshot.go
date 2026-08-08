@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/llm"
 )
 
 // TurnSnapshot is an immutable snapshot of the session state at a specific turn.
@@ -44,13 +45,44 @@ func NewDefaultSnapshotStore() *DefaultSnapshotStore {
 	return &DefaultSnapshotStore{snapshots: make(map[string]TurnSnapshot)}
 }
 
-// cloneMessages returns a defensive copy of the messages slice.
+// cloneMessages returns a defensive deep copy of the messages slice. It copies
+// the ContentBlocks slice (including the ImageURL pointer), the Usage pointer,
+// and the ToolCalls slice so callers cannot mutate the stored data through
+// nested references.
 func cloneMessages(msgs []core.AgentMessage) []core.AgentMessage {
 	if msgs == nil {
 		return nil
 	}
 	cp := make([]core.AgentMessage, len(msgs))
-	copy(cp, msgs)
+	for i := range msgs {
+		cp[i] = msgs[i]
+		// Deep copy ContentBlocks (ImageURL is a pointer).
+		if msgs[i].ContentBlocks != nil {
+			cp[i].ContentBlocks = make([]llm.ContentBlock, len(msgs[i].ContentBlocks))
+			copy(cp[i].ContentBlocks, msgs[i].ContentBlocks)
+			for j := range cp[i].ContentBlocks {
+				if cp[i].ContentBlocks[j].ImageURL != nil {
+					cp[i].ContentBlocks[j].ImageURL = &llm.ImageURL{
+						URL:    cp[i].ContentBlocks[j].ImageURL.URL,
+						Detail: cp[i].ContentBlocks[j].ImageURL.Detail,
+					}
+				}
+			}
+		}
+		// Deep copy Usage pointer.
+		if msgs[i].Usage != nil {
+			cp[i].Usage = &llm.Usage{
+				InputTokens:  msgs[i].Usage.InputTokens,
+				OutputTokens: msgs[i].Usage.OutputTokens,
+				TotalTokens:  msgs[i].Usage.TotalTokens,
+			}
+		}
+		// Deep copy ToolCalls slice.
+		if msgs[i].ToolCalls != nil {
+			cp[i].ToolCalls = make([]llm.ToolCall, len(msgs[i].ToolCalls))
+			copy(cp[i].ToolCalls, msgs[i].ToolCalls)
+		}
+	}
 	return cp
 }
 

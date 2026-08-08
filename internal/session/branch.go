@@ -92,12 +92,14 @@ func (s *JSONLBranchStore) ensureLoaded() error {
 	if err := s.loadLocked(); err != nil {
 		return err
 	}
+	// Mark entries as loaded immediately so that a failed file open below
+	// does not cause loadLocked to run again (and duplicate entries) on retry.
+	s.loaded = true
 	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, filePerm)
 	if err != nil {
 		return fmt.Errorf("session: open branch store file: %w", err)
 	}
 	s.file = f
-	s.loaded = true
 	return nil
 }
 

@@ -3,6 +3,7 @@ package compaction
 import (
 	"log/slog"
 	"math"
+	"sync"
 	"unicode"
 )
 
@@ -88,6 +89,7 @@ func (e *UnicodeTokenEstimator) Estimate(text string) (int, error) {
 // tokenizer. When a precise tokenizer is available, it is used; otherwise
 // the primary (heuristic) estimator is used.
 type CompositeTokenEstimator struct {
+	mu      sync.RWMutex
 	primary TokenEstimator
 	precise TokenEstimator // optional, nil means use primary
 }
@@ -104,14 +106,19 @@ func NewCompositeTokenEstimator(primary TokenEstimator) *CompositeTokenEstimator
 // SetPrecise installs a precise tokenizer that, when set, takes precedence
 // over the primary heuristic estimator.
 func (e *CompositeTokenEstimator) SetPrecise(p TokenEstimator) {
+	e.mu.Lock()
 	e.precise = p
+	e.mu.Unlock()
 }
 
 // Estimate delegates to the precise tokenizer when available, otherwise to
 // the primary estimator.
 func (e *CompositeTokenEstimator) Estimate(text string) (int, error) {
-	if e.precise != nil {
-		return e.precise.Estimate(text)
+	e.mu.RLock()
+	precise := e.precise
+	e.mu.RUnlock()
+	if precise != nil {
+		return precise.Estimate(text)
 	}
 	return e.primary.Estimate(text)
 }
