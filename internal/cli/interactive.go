@@ -189,7 +189,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 				default:
 					continue // skip tool/compaction entries
 				}
-				msgs = append(msgs, core.AgentMessage{Role: role, Content: e.Content, ContentBlocks: e.ContentBlocks})
+				msgs = append(msgs, core.AgentMessage{Role: role, Content: e.Content, ContentBlocks: e.ContentBlocks, ToolCalls: e.ToolCalls, ToolCallID: e.ToolCallID, ToolName: e.ToolName})
 			}
 			assembly.Agent.SetHistory(msgs)
 			return nil
@@ -684,9 +684,13 @@ func messagesToTurnItems(msgs []core.AgentMessage) []compaction.TurnItem {
 	items := make([]compaction.TurnItem, len(msgs))
 	for i, m := range msgs {
 		items[i] = compaction.TurnItem{
-			ID:      fmt.Sprintf("msg-%d", i),
-			Role:    m.Role,
-			Content: m.Content,
+			ID:            fmt.Sprintf("msg-%d", i),
+			Role:          m.Role,
+			Content:       m.Content,
+			ContentBlocks: m.ContentBlocks,
+			ToolCalls:     m.ToolCalls,
+			ToolCallID:    m.ToolCallID,
+			ToolName:      m.ToolName,
 		}
 	}
 	return items
@@ -702,8 +706,12 @@ func turnItemsToMessages(items []compaction.TurnItem) []core.AgentMessage {
 			content = "[compacted]"
 		}
 		msgs[i] = core.AgentMessage{
-			Role:    it.Role,
-			Content: content,
+			Role:          it.Role,
+			Content:       content,
+			ContentBlocks: it.ContentBlocks,
+			ToolCalls:     it.ToolCalls,
+			ToolCallID:    it.ToolCallID,
+			ToolName:      it.ToolName,
 		}
 	}
 	return msgs
@@ -731,6 +739,9 @@ func loadSessionHistory(path string) ([]core.AgentMessage, error) {
 				Role:          string(entry.Type),
 				Content:       entry.Content,
 				ContentBlocks: entry.ContentBlocks,
+				ToolCalls:     entry.ToolCalls,
+				ToolCallID:    entry.ToolCallID,
+				ToolName:      entry.ToolName,
 			})
 		}
 	}

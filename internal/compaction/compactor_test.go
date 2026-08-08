@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mock"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 	"github.com/pengjunchen/go-cli/internal/verify"
@@ -90,4 +91,39 @@ func (erroringEstimator) Estimate(_ string) (int, error) {
 func TestErrRequiresTruncating(t *testing.T) {
 	assert.Error(t, ErrRequiresTruncating)
 	assert.Contains(t, ErrRequiresTruncating.Error(), "truncating")
+}
+
+// TestTurnItemJSONRoundTrip_NewFieldsOmitEmpty verifies that the new
+// ContentBlocks, ToolCalls, and ToolCallID fields are omitted from JSON when
+// empty, and that a round-trip with populated values preserves them.
+func TestTurnItemJSONRoundTrip_NewFieldsOmitEmpty(t *testing.T) {
+	// Empty fields should not appear in JSON.
+	empty := TurnItem{ID: "t1", Role: RoleUser, Content: "hi"}
+	data, err := json.Marshal(empty)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "content_blocks")
+	assert.NotContains(t, string(data), "tool_calls")
+	assert.NotContains(t, string(data), "tool_call_id")
+
+	// Populated fields should survive a round-trip.
+	populated := TurnItem{
+		ID:      "t2",
+		Role:    RoleAssistant,
+		Content: "calling tool",
+		ContentBlocks: []llm.ContentBlock{
+			{Type: "text", Text: "hello"},
+		},
+		ToolCalls: []llm.ToolCall{
+			{ID: "call-1", Name: "read", Args: map[string]any{"path": "/tmp"}},
+		},
+		ToolCallID: "call-1",
+	}
+	data, err = json.Marshal(populated)
+	require.NoError(t, err)
+
+	var out TurnItem
+	require.NoError(t, json.Unmarshal(data, &out))
+	assert.Equal(t, populated.ContentBlocks, out.ContentBlocks)
+	assert.Equal(t, populated.ToolCalls, out.ToolCalls)
+	assert.Equal(t, populated.ToolCallID, out.ToolCallID)
 }

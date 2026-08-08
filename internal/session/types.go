@@ -45,6 +45,15 @@ type SessionEntry struct {
 	// IsSummary marks an entry as an auto-generated branch summary appended to
 	// a departed branch by SessionTree.MoveTo. It does not affect replay.
 	IsSummary bool `json:"is_summary,omitempty"`
+	// ToolCalls holds tool invocations requested by the assistant. Populated
+	// for assistant entries that request tool execution.
+	ToolCalls []llm.ToolCall `json:"tool_calls,omitempty"`
+	// ToolCallID associates a tool-result entry with the originating tool
+	// call. Populated for tool entries.
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	// ToolName is the name of the tool that produced this entry. Populated
+	// for tool entries.
+	ToolName string `json:"tool_name,omitempty"`
 }
 
 // clone returns a defensive copy of the entry so callers cannot mutate the
@@ -54,6 +63,14 @@ func (e *SessionEntry) clone() *SessionEntry {
 		return nil
 	}
 	cp := *e
+	if e.ContentBlocks != nil {
+		cp.ContentBlocks = make([]llm.ContentBlock, len(e.ContentBlocks))
+		copy(cp.ContentBlocks, e.ContentBlocks)
+	}
+	if e.ToolCalls != nil {
+		cp.ToolCalls = make([]llm.ToolCall, len(e.ToolCalls))
+		copy(cp.ToolCalls, e.ToolCalls)
+	}
 	return &cp
 }
 

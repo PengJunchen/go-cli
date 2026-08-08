@@ -1,9 +1,14 @@
 package session
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"sync"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/tracing"
@@ -53,6 +58,120 @@ type BranchMeta struct {
 type GitBranchSwitcher interface {
 	CreateBranch(ctx context.Context, name string, base string) error
 	Checkout(ctx context.Context, branch string) error
+}
+
+// BranchStore persists branch metadata so it survives process restarts.
+type BranchStore interface {
+	AppendBranch(ctx context.Context, meta BranchMeta) error
+	LoadBranches(ctx context.Context) ([]BranchMeta, error)
+}
+
+// JSONLBranchStore is a file-backed BranchStore. Each BranchMeta is persisted
+// as one JSON object per line (JSONL) using append-only writes, and existing
+// branches are lazily loaded on first use.
+type JSONLBranchStore struct {
+	mu      sync.Mutex
+	path    string
+	file    *os.File
+	loaded  bool
+	entries []BranchMeta
+}
+
+// NewJSONLBranchStore returns a file-backed branch store for the given path.
+// The file is not touched until AppendBranch or LoadBranches is first called.
+func NewJSONLBranchStore(path string) *JSONLBranchStore {
+	return &JSONLBranchStore{path: path}
+}
+
+// ensureLoaded opens the backing file and loads existing branches on first
+// use. It must be called with s.mu held.
+func (s *JSONLBranchStore) ensureLoaded() error {
+	if s.loaded {
+		return nil
+	}
+	if err := s.loadLocked(); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, filePerm)
+	if err != nil {
+		return fmt.Errorf("session: open branch store file: %w", err)
+	}
+	s.file = f
+	s.loaded = true
+	return nil
+}
+
+// loadLocked reads existing JSONL lines into memory. It must be called with
+// s.mu held.
+func (s *JSONLBranchStore) loadLocked() error {
+	f, err := os.Open(s.path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // brand-new store; nothing to load
+		}
+		return fmt.Errorf("session: open branch store file for reading: %w", err)
+	}
+	defer func() { _ = f.Close() }() //nolint:errcheck // read-only best-effort close.
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), jsonlScannerMaxBuffer)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(bytes.TrimSpace(line)) == 0 {
+			continue
+		}
+		var meta BranchMeta
+		if err := json.Unmarshal(line, &meta); err != nil {
+			continue // skip corrupt lines, keep the rest.
+		}
+		s.entries = append(s.entries, meta)
+	}
+	if err := scanner.Err(); err != nil {
+		return fmt.Errorf("session: read branch store file: %w", err)
+	}
+	return nil
+}
+
+// AppendBranch persists the branch metadata as a new JSONL line.
+func (s *JSONLBranchStore) AppendBranch(ctx context.Context, meta BranchMeta) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureLoaded(); err != nil {
+		return err
+	}
+	// After Close, loaded is still true but file is nil.
+	if s.file == nil {
+		return fmt.Errorf("session: branch store is closed")
+	}
+	if err := json.NewEncoder(s.file).Encode(meta); err != nil {
+		return fmt.Errorf("session: write branch entry: %w", err)
+	}
+	s.entries = append(s.entries, meta)
+	return nil
+}
+
+// LoadBranches returns all previously persisted branch metadata.
+func (s *JSONLBranchStore) LoadBranches(_ context.Context) ([]BranchMeta, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.ensureLoaded(); err != nil {
+		return nil, err
+	}
+	out := make([]BranchMeta, len(s.entries))
+	copy(out, s.entries)
+	return out, nil
+}
+
+// Close closes the backing file. It is safe to call multiple times.
+func (s *JSONLBranchStore) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.file == nil {
+		return nil
+	}
+	err := s.file.Close()
+	s.file = nil
+	return err
 }
 
 // keepBranchID is used as the map key for recent BranchMeta records.
@@ -105,7 +224,16 @@ func (t *DefaultSessionTree) Branch(ctx context.Context, fromID string, opts ...
 	}
 	t.branches[branchID] = meta
 	gitSwitcher := t.gitSwitcher
+	branchStore := t.branchStore
 	t.mu.Unlock()
+
+	// Persist the branch metadata so it survives process restarts. I/O is
+	// done outside the lock; failures are logged as warnings.
+	if branchStore != nil {
+		if err := branchStore.AppendBranch(ctx, meta); err != nil {
+			logger.Warn("session_branch_persist_failed", "op", "session.branch", "branch_id", branchID, "err", err)
+		}
+	}
 
 	// Create the git branch when requested and a switcher is wired. Failures
 	// are logged as warnings but do not fail the session branch (graceful
@@ -167,15 +295,9 @@ func (t *DefaultSessionTree) Clone(ctx context.Context, fromBranchID, newBranchI
 	}
 
 	for _, e := range branch {
-		newEntry := &SessionEntry{
-			ID:        idMap[e.ID],
-			ParentID:  idMap[e.ParentID], // maps to new ID, or "" for the root
-			Type:      e.Type,
-			Content:   e.Content,
-			Timestamp: e.Timestamp,
-			Summary:   e.Summary,
-			IsSummary: e.IsSummary,
-		}
+		newEntry := e.clone()
+		newEntry.ID = idMap[e.ID]
+		newEntry.ParentID = idMap[e.ParentID] // maps to new ID, or "" for the root
 		if err := t.Append(ctx, newEntry); err != nil {
 			return fmt.Errorf("session: clone: append entry %q: %w", newEntry.ID, err)
 		}
@@ -189,14 +311,23 @@ func (t *DefaultSessionTree) Clone(ctx context.Context, fromBranchID, newBranchI
 	}
 
 	// Record branch metadata linking the clone to its source.
-	t.mu.Lock()
-	t.branches[newBranchID] = BranchMeta{
+	cloneMeta := BranchMeta{
 		BranchID:   newBranchID,
 		ParentID:   fromBranchID,
 		CreatedAt:  time.Now().UTC(),
 		BaseLeafID: newLeafID,
 	}
+	t.mu.Lock()
+	t.branches[newBranchID] = cloneMeta
+	branchStore := t.branchStore
 	t.mu.Unlock()
+
+	// Persist the clone's branch metadata. I/O is done outside the lock.
+	if branchStore != nil {
+		if err := branchStore.AppendBranch(ctx, cloneMeta); err != nil {
+			slog.Warn("session_clone_persist_failed", "op", "session.branch.clone", "branch_id", newBranchID, "err", err)
+		}
+	}
 
 	span.SetAttributes(
 		tracing.Attribute{Key: "from_branch", Value: fromBranchID},

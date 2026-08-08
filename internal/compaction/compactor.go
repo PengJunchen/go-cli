@@ -22,6 +22,8 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+
+	"github.com/pengjunchen/go-cli/internal/llm"
 )
 
 // Conversation roles assigned to TurnItem entries. These are deliberately
@@ -52,6 +54,14 @@ type TurnItem struct {
 	// caller has already computed one. It is informational and never trusted by
 	// the compactors, which re-estimate via TokenEstimator.
 	EstimatedTokens int `json:"estimated_tokens,omitempty"`
+	// ContentBlocks holds typed content parts for multimodal messages
+	// (text + images). When non-nil, it takes precedence over Content.
+	ContentBlocks []llm.ContentBlock `json:"content_blocks,omitempty"`
+	// ToolCalls holds tool invocations requested by the assistant.
+	ToolCalls []llm.ToolCall `json:"tool_calls,omitempty"`
+	// ToolCallID associates a tool-result message with the originating tool
+	// call.
+	ToolCallID string `json:"tool_call_id,omitempty"`
 }
 
 // Strategy identifies which compaction approach produced or was requested for a

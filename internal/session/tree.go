@@ -37,6 +37,9 @@ type DefaultSessionTree struct {
 	// gitSwitcher, when non-nil, is used by Branch to create git branches and
 	// by MoveTo to checkout git branches on resume.
 	gitSwitcher GitBranchSwitcher
+	// branchStore, when non-nil, persists branch metadata so it survives
+	// process restarts. Set via SetBranchStore.
+	branchStore BranchStore
 }
 
 var _ SessionTree = (*DefaultSessionTree)(nil)
@@ -203,6 +206,31 @@ func (t *DefaultSessionTree) SetBranchSummary(s BranchSummary) {
 func (t *DefaultSessionTree) SetGitBranchSwitcher(g GitBranchSwitcher) {
 	t.mu.Lock()
 	t.gitSwitcher = g
+	t.mu.Unlock()
+}
+
+// SetBranchStore wires a BranchStore into the tree. When non-nil, branch
+// operations are persisted so they survive process restarts. Existing
+// branches are loaded from the store and merged into the in-memory map;
+// only branches that don't already exist in the map are added.
+func (t *DefaultSessionTree) SetBranchStore(bs BranchStore) {
+	t.mu.Lock()
+	t.branchStore = bs
+	t.mu.Unlock()
+	if bs == nil {
+		return
+	}
+	loaded, err := bs.LoadBranches(context.Background())
+	if err != nil {
+		slog.Warn("session_tree_set_branch_store_load_failed", "err", err)
+		return
+	}
+	t.mu.Lock()
+	for _, meta := range loaded {
+		if _, exists := t.branches[meta.BranchID]; !exists {
+			t.branches[meta.BranchID] = meta
+		}
+	}
 	t.mu.Unlock()
 }
 
