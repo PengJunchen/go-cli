@@ -210,13 +210,34 @@ func TestFinalizeThinking_AlreadyCollapsed(t *testing.T) {
 	assert.Equal(t, "already done", entry.Summary)
 }
 
-// TestIsToolError verifies the error detection heuristic.
+// TestIsToolError verifies the structured error detection via the IsError
+// marker on tool_result events, replacing the former string-matching heuristic.
 func TestIsToolError(t *testing.T) {
-	assert.True(t, isToolError("Error: file not found"))
-	assert.True(t, isToolError("execution failed: timeout"))
-	assert.True(t, isToolError("panic: runtime error"))
-	assert.False(t, isToolError("success: file created"))
-	assert.False(t, isToolError("output: hello world"))
+	m := &teaModel{
+		accordion: NewAccordionModel(),
+		msgCh:     make(chan Msg, 1),
+	}
+
+	// Add a running tool_call entry.
+	m.accordion.Add(&AccordionEntry{
+		ContentType:  ContentTypeToolCall,
+		Summary:      "bash(test)",
+		Full:         "bash(test)",
+		ToolStatus:   ToolStatusRunning,
+		ToolStartTime: time.Now(),
+	})
+
+	// isError=true marks the result as an error.
+	m.updateToolResultStatusLocked(true)
+	entries := m.accordion.Entries()
+	assert.Equal(t, ToolStatusError, entries[0].ToolStatus)
+
+	// Reset to running for the next case.
+	entries[0].ToolStatus = ToolStatusRunning
+
+	// isError=false marks the result as completed.
+	m.updateToolResultStatusLocked(false)
+	assert.Equal(t, ToolStatusCompleted, entries[0].ToolStatus)
 }
 
 // TestThinkingVisibility_Hide verifies that thinking entries are skipped when

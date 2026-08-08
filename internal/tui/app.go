@@ -51,6 +51,10 @@ type AgentEvent struct {
 	// Stream identifies the output source for tool_output events: "stdout"
 	// or "stderr".
 	Stream string
+	// IsError marks a tool_result event as an error for structured
+	// detection. When true, the TUI sets the tool_call entry status to
+	// Error instead of Completed, without relying on string matching.
+	IsError bool
 }
 
 // TokenUsageData mirrors core.TokenUsage for the TUI layer.
@@ -844,7 +848,7 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 		m.mu.Unlock()
 	} else if ev.ContentType == ContentTypeToolResult {
 		m.mu.Lock()
-		m.updateToolResultStatusLocked(ev.Content)
+		m.updateToolResultStatusLocked(ev.IsError)
 		// Deactivate the global spinner only if no tool_call entries are still
 		// running.
 		m.spinnerActive = m.hasRunningToolLocked()
@@ -1283,15 +1287,14 @@ func (m *teaModel) finalizeThinking() {
 }
 
 // updateToolResultStatusLocked finds the last tool_call entry and updates its
-// status to Completed (or Error if the result content indicates failure). The
-// caller must hold m.mu.
-func (m *teaModel) updateToolResultStatusLocked(resultContent string) {
+// status to Completed (or Error if isError is true). The caller must hold m.mu.
+func (m *teaModel) updateToolResultStatusLocked(isError bool) {
 	for i := len(m.accordion.entries) - 1; i >= 0; i-- {
 		e := m.accordion.entries[i]
 		if e.ContentType == ContentTypeToolCall {
 			if e.ToolStatus == ToolStatusRunning || e.ToolStatus == ToolStatusPending {
 				e.ToolDuration = time.Since(e.ToolStartTime)
-				if isToolError(resultContent) {
+				if isError {
 					e.ToolStatus = ToolStatusError
 				} else {
 					e.ToolStatus = ToolStatusCompleted
@@ -1311,15 +1314,6 @@ func (m *teaModel) hasRunningToolLocked() bool {
 		}
 	}
 	return false
-}
-
-// isToolError heuristically detects whether a tool result content indicates an
-// error by checking for common error markers.
-func isToolError(content string) bool {
-	lower := strings.ToLower(content)
-	return strings.Contains(lower, "error:") ||
-		strings.Contains(lower, "failed:") ||
-		strings.Contains(lower, "panic:")
 }
 
 // handleApprovalKeyLocked processes a key while an approval request is pending.

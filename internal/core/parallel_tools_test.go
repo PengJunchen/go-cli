@@ -223,7 +223,7 @@ func TestExecutionModeSequentialDefault(t *testing.T) {
 }
 
 func TestExecuteSingleToolNoRegistry(t *testing.T) {
-	_, err := executeSingleTool(context.Background(), nil, tools.ToolCall{Name: "x"}, nil)
+	_, _, err := executeSingleTool(context.Background(), nil, tools.ToolCall{Name: "x"}, nil)
 	assert.Error(t, err)
 	assert.Equal(t, errNoTools, err)
 }

@@ -471,12 +471,16 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 
 		if l.executionMode == ExecutionModeParallel && len(resp.ToolCalls) > 1 {
 			// Parallel mode: emit all tool_call events, execute concurrently,
-			// then process results in input order.
+			// then match results by ToolCallID (not positional index) so that
+			// out-of-order completion does not cause mismatched results.
 			for _, tc := range resp.ToolCalls {
 				sendEvent(AgentEvent{Kind: "tool_call", Content: tc.Name, Timestamp: time.Now()})
 				logger.Info("core.loop.tool_call", "iteration", iter, "tool", tc.Name, "mode", "parallel")
 			}
 			results, perr := executeToolsParallel(spanCtx, l.tools, resp.ToolCalls, es)
+			if perr == nil {
+				results, perr = matchToolResultsByID(resp.ToolCalls, results)
+			}
 			for _, res := range results {
 				if res.Err != nil {
 					logger.Warn("core.loop.tool_error", "tool", res.Name, "err", res.Err)
@@ -487,7 +491,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 						return events, res.Err
 					}
 				}
-				sendEvent(AgentEvent{Kind: "tool_result", Content: res.Output, Timestamp: time.Now()})
+				sendEvent(AgentEvent{Kind: "tool_result", Content: res.Output, Timestamp: time.Now(), IsError: res.IsError})
 				messages = append(messages, llm.Message{
 					Role:       llm.RoleTool,
 					ToolCallID: res.ID,
@@ -509,17 +513,19 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 				sendEvent(AgentEvent{Kind: "tool_call", Content: tc.Name, Timestamp: time.Now()})
 				logger.Info("core.loop.tool_call", "iteration", iter, "tool", tc.Name)
 
-				resultText, execErr := l.executeTool(spanCtx, toToolsCall(tc), es)
+				resultText, isErr, execErr := l.executeTool(spanCtx, toToolsCall(tc), es)
+				isError := isErr
 				if execErr != nil {
 					logger.Warn("core.loop.tool_error", "tool", tc.Name, "err", execErr)
 					resultText = "Error: " + execErr.Error()
+					isError = true
 					if spanCtx.Err() != nil {
 						span.SetStatus(tracing.SpanStatusError, execErr.Error())
 						sendEvent(errEvent(execErr))
 						return events, execErr
 					}
 				}
-				sendEvent(AgentEvent{Kind: "tool_result", Content: resultText, Timestamp: time.Now()})
+				sendEvent(AgentEvent{Kind: "tool_result", Content: resultText, Timestamp: time.Now(), IsError: isError})
 				messages = append(messages, llm.Message{
 					Role:       llm.RoleTool,
 					ToolCallID: tc.ID,
@@ -738,35 +744,37 @@ func (s *eventStreamSink) Send(content, toolCallID, stream string) error {
 
 // executeTool looks up the tool and runs its definition against the registry.
 // When the tool implements tools.StreamingBashTool and an EventStream is
-// provided, it uses ExecuteStreaming to push output lines in real time.
-func (l *LoopAgent) executeTool(ctx context.Context, call tools.ToolCall, es EventStream) (string, error) {
+// provided, it uses ExecuteStreaming to push output lines in real time. The
+// returned isError flag is propagated from ToolResult.IsError so callers can
+// detect tool errors via a structured marker instead of string matching.
+func (l *LoopAgent) executeTool(ctx context.Context, call tools.ToolCall, es EventStream) (string, bool, error) {
 	if l.tools == nil {
-		return "", errors.New("core: agent loop has no tool registry")
+		return "", false, errors.New("core: agent loop has no tool registry")
 	}
 	def, err := l.tools.Get(ctx, call.Name)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	// Check if the tool supports streaming output.
 	if st, ok := def.(tools.StreamingBashTool); ok && es != nil {
 		sink := &eventStreamSink{es: es}
 		result, err := st.ExecuteStreaming(ctx, call, sink)
 		if err != nil {
-			return "", err
+			return "", false, err
 		}
 		if result == nil {
-			return "", nil
+			return "", false, nil
 		}
-		return result.Output, nil
+		return result.Output, result.IsError, nil
 	}
 	result, err := def.Execute(ctx, call)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if result == nil {
-		return "", nil
+		return "", false, nil
 	}
-	return result.Output, nil
+	return result.Output, result.IsError, nil
 }
 
 // toToolsCall converts an llm.ToolCall (Args is `any`) into a tools.ToolCall
