@@ -15,6 +15,7 @@ import (
 // reported by the API (nil when the stream did not include usage).
 func accumulateOpenAIStreamToolCalls(events <-chan SSEEvent, ch chan<- MessageChunk) (toolCalls []ToolCall, finishReason string, usage *Usage) {
 	var toolNameByIndex map[int]string
+	var toolIDByIndex map[int]string
 	var toolArgsBuf []string
 	emittedRole := false
 
@@ -67,6 +68,14 @@ func accumulateOpenAIStreamToolCalls(events <-chan SSEEvent, ch chan<- MessageCh
 			for len(toolArgsBuf) <= idx {
 				toolArgsBuf = append(toolArgsBuf, "")
 			}
+			if tc.ID != "" {
+				if toolIDByIndex == nil {
+					toolIDByIndex = make(map[int]string)
+				}
+				if toolIDByIndex[idx] == "" {
+					toolIDByIndex[idx] = tc.ID
+				}
+			}
 			if tc.Function.Name != "" {
 				if toolNameByIndex == nil {
 					toolNameByIndex = make(map[int]string)
@@ -94,8 +103,12 @@ func accumulateOpenAIStreamToolCalls(events <-chan SSEEvent, ch chan<- MessageCh
 					args = toolArgsBuf[idx]
 				}
 			}
+			id := toolIDByIndex[idx]
+			if id == "" {
+				id = fmt.Sprintf("call_%d", idx)
+			}
 			toolCalls[idx] = ToolCall{
-				ID:   fmt.Sprintf("call_%d", idx),
+				ID:   id,
 				Name: name,
 				Args: args,
 			}
