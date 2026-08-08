@@ -156,6 +156,11 @@ type assembleConfig struct {
 	thinkingLevel *llm.ThinkingLevel
 	// approvalCh, when non-nil, enables TUI-based approval via TeaApprovalCallback.
 	approvalCh chan tui.ApprovalRequest
+	// approveMode controls headless tool approval behavior when approvalCh is
+	// nil. ApproveAsk (default) uses SafetyPolicyClassifier with interactive
+	// callback; ApproveAuto uses AllowAllClassifier; ApproveDeny uses
+	// DenyAllClassifier.
+	approveMode ApproveMode
 }
 
 // WithMaxTokens sets the compaction token budget.
@@ -169,6 +174,14 @@ func WithMaxTokens(n int) AssembleOption {
 // to the BubbleteaApp via tui.WithApprovalChannel.
 func WithApprovalChannel(ch chan tui.ApprovalRequest) AssembleOption {
 	return func(c *assembleConfig) { c.approvalCh = ch }
+}
+
+// WithApproveMode sets the headless tool approval mode. This is used by the
+// prompt command when no TUI approval channel is available.
+// ApproveAuto automatically approves all tool calls; ApproveDeny automatically
+// denies all tool calls; ApproveAsk (default) prompts via InteractiveApprovalCallback.
+func WithApproveMode(mode ApproveMode) AssembleOption {
+	return func(c *assembleConfig) { c.approveMode = mode }
 }
 
 // WithResume enables session history restoration on startup.
@@ -451,30 +464,59 @@ func AssembleAgent(
 	hookChain := core.NewHookChain(extHooks...)
 
 	// 5. Wire approval + mutation middleware via decorator pattern.
-	classifier := approval.NewSafetyPolicyClassifier([]string{"bash"})
-	approvalStore := approval.NewInMemoryApprovalStore()
+	var classifier approval.ApprovalClassifier
 	var approvalCallback approval.ApprovalCallback
+	var autoApprove bool
+
 	if ac.approvalCh != nil {
 		// TUI-based approval: the TeaApprovalCallback sends requests through the
 		// channel for the BubbleteaApp to render interactively. A diff preview
 		// function is wired so edit/write approvals show the proposed change.
+		classifier = approval.NewSafetyPolicyClassifier([]string{"bash"})
 		approvalCallback = approval.NewTeaApprovalCallback(ac.approvalCh,
 			approval.WithDiffPreviewFunc(buildDiffPreviewFn(diffGen)),
 		)
+		autoApprove = false
 	} else {
-		// Fallback: stdin readline (auto-denies in non-interactive mode).
-		approvalCallback = approval.NewInteractiveApprovalCallback(os.Stdin, out)
+		// Headless mode: branch by approveMode.
+		switch ac.approveMode {
+		case ApproveAuto:
+			classifier = approval.AllowAllClassifier{}
+			approvalCallback = nil
+			autoApprove = true
+		case ApproveDeny:
+			classifier = approval.DenyAllClassifier{}
+			approvalCallback = nil
+			autoApprove = false
+		default: // ApproveAsk
+			classifier = approval.NewSafetyPolicyClassifier([]string{"bash"})
+			// Fallback: stdin readline (auto-denies in non-interactive mode).
+			// Use stderr so approval prompts don't corrupt JSON/stream output.
+			approvalCallback = approval.NewInteractiveApprovalCallback(os.Stdin, os.Stderr)
+			autoApprove = false
+		}
 	}
+
+	approvalStore := approval.NewInMemoryApprovalStore()
 	approvalCache := approval.NewApprovalCache("")
 	modeResolver := approval.NewDefaultPermissionModeResolver()
-	approvalMW := approval.NewApprovalMiddleware(
-		classifier,
-		approvalStore,
-		approval.WithAutoApprove(false),
-		approval.WithCallback(approvalCallback),
+
+	var mwOpts []approval.Option
+	mwOpts = append(mwOpts,
+		approval.WithAutoApprove(autoApprove),
 		approval.WithCache(approvalCache),
-		approval.WithPermissionModeResolver(modeResolver),
 	)
+	// Only wire the PermissionModeResolver in TUI mode. In headless mode the
+	// resolver overrides effectiveClassifier() and would replace the
+	// ApproveMode-selected classifier with a default SafetyPolicyClassifier(nil)
+	// that allows everything, defeating --approve deny.
+	if ac.approvalCh != nil {
+		mwOpts = append(mwOpts, approval.WithPermissionModeResolver(modeResolver))
+	}
+	if approvalCallback != nil {
+		mwOpts = append(mwOpts, approval.WithCallback(approvalCallback))
+	}
+	approvalMW := approval.NewApprovalMiddleware(classifier, approvalStore, mwOpts...)
 	reg.RegisterApprovalClassifier(&approvalClassifierAdapter{inner: classifier})
 	reg.RegisterApprovalStore(&approvalStoreAdapter{inner: approvalStore})
 	mutationQueue := tools.NewDefaultFileMutationQueue(

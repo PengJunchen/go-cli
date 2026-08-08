@@ -2,12 +2,14 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 
 	"github.com/pengjunchen/go-cli/internal/config"
+	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
@@ -58,10 +60,14 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) error {
 		modelFlag    string
 		providerFlag string
 		verboseFlag  bool
+		outputMode   OutputMode
+		approveMode  ApproveMode
 	)
 	fs.StringVar(&modelFlag, "model", "", "model name to use")
 	fs.StringVar(&providerFlag, "provider", "", "provider name to use")
 	fs.BoolVar(&verboseFlag, "verbose", false, "enable verbose output")
+	fs.Var(&outputMode, "output", "output format: json|stream|text (default text)")
+	fs.Var(&approveMode, "approve", "approval mode: auto|deny|ask (default ask)")
 	if err := fs.Parse(args); err != nil {
 		return newUsageError("prompt: %v", err)
 	}
@@ -109,7 +115,9 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	// Assemble the full agent runtime with all production wiring (same as
 	// interactive: model wrapping, tools, approval gates, retry/cost tracking,
 	// output guards, subagent, compaction).
-	assembly, err := AssembleAgent(dispatchCtx, rc, providerName, modelName, c.out)
+	assembly, err := AssembleAgent(dispatchCtx, rc, providerName, modelName, c.out,
+		WithApproveMode(approveMode),
+	)
 	if err != nil {
 		dispatchSpan.SetStatus(tracing.SpanStatusError, err.Error())
 		dispatchSpan.End()
@@ -125,48 +133,10 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	}
 
 	out := c.out
-	streaming := false
-	for ev := range stream.Events() {
-		if ev.Content == "" || ev.Kind == "done" {
-			continue
-		}
-		if ev.Incremental {
-			// Stream tokens as they arrive, without newlines (typewriter
-			// effect for terminals and pipes).
-			streaming = true
-			if _, werr := fmt.Fprint(out, ev.Content); werr != nil {
-				dispatchSpan.SetStatus(tracing.SpanStatusError, werr.Error())
-				dispatchSpan.End()
-				return newExecutionError("prompt: write output", werr)
-			}
-			continue
-		}
-		// Complete non-incremental assistant message.
-		if streaming {
-			// Content has already been streamed token-by-token; close the
-			// line with a trailing newline.
-			if _, werr := fmt.Fprintln(out); werr != nil {
-				dispatchSpan.SetStatus(tracing.SpanStatusError, werr.Error())
-				dispatchSpan.End()
-				return newExecutionError("prompt: write output", werr)
-			}
-		} else {
-			// Non-streaming response (e.g. provider without Stream support).
-			if _, werr := fmt.Fprintf(out, "%s\n", ev.Content); werr != nil {
-				dispatchSpan.SetStatus(tracing.SpanStatusError, werr.Error())
-				dispatchSpan.End()
-				return newExecutionError("prompt: write output", werr)
-			}
-		}
-		streaming = false
-	}
-	// If the last event was incremental, ensure a trailing newline.
-	if streaming {
-		if _, werr := fmt.Fprintln(out); werr != nil {
-			dispatchSpan.SetStatus(tracing.SpanStatusError, werr.Error())
-			dispatchSpan.End()
-			return newExecutionError("prompt: write output", werr)
-		}
+	if err := c.consumeEvents(out, stream.Events(), outputMode); err != nil {
+		dispatchSpan.SetStatus(tracing.SpanStatusError, err.Error())
+		dispatchSpan.End()
+		return newExecutionError("prompt: write output", err)
 	}
 
 	result, err := stream.Result()
@@ -183,6 +153,87 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) error {
 			"op", "cli.prompt.complete",
 			"result_len", len(result.Content),
 		)
+	}
+	return nil
+}
+
+// consumeEvents reads events from the stream and writes them to out according
+// to the specified output mode.
+func (c *promptCmd) consumeEvents(out io.Writer, events <-chan core.AgentEvent, mode OutputMode) error {
+	switch mode {
+	case OutputJSON:
+		return c.consumeEventsJSON(out, events)
+	case OutputStream:
+		return c.consumeEventsStream(out, events)
+	default:
+		return c.consumeEventsText(out, events)
+	}
+}
+
+// consumeEventsJSON writes each AgentEvent as a newline-delimited JSON object
+// (NDJSON), suitable for programmatic consumption in CI/CD pipelines.
+func (c *promptCmd) consumeEventsJSON(out io.Writer, events <-chan core.AgentEvent) error {
+	enc := json.NewEncoder(out)
+	for ev := range events {
+		if err := enc.Encode(ev); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// consumeEventsStream outputs raw content tokens without formatting, suitable
+// for piping to other tools. Only incremental message tokens are emitted to
+// avoid duplicating content from non-incremental complete messages.
+func (c *promptCmd) consumeEventsStream(out io.Writer, events <-chan core.AgentEvent) error {
+	for ev := range events {
+		if ev.Content == "" || ev.Kind == "done" {
+			continue
+		}
+		if !ev.Incremental && ev.Kind == "message" {
+			// Non-incremental complete message: output once with newline.
+			if _, err := fmt.Fprintln(out, ev.Content); err != nil {
+				return err
+			}
+			continue
+		}
+		if _, err := fmt.Fprint(out, ev.Content); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// consumeEventsText outputs human-readable text. Streams incremental tokens
+// and prints complete messages with newlines.
+func (c *promptCmd) consumeEventsText(out io.Writer, events <-chan core.AgentEvent) error {
+	streaming := false
+	for ev := range events {
+		if ev.Content == "" || ev.Kind == "done" {
+			continue
+		}
+		if ev.Incremental {
+			streaming = true
+			if _, err := fmt.Fprint(out, ev.Content); err != nil {
+				return err
+			}
+			continue
+		}
+		if streaming {
+			if _, err := fmt.Fprintln(out); err != nil {
+				return err
+			}
+		} else {
+			if _, err := fmt.Fprintf(out, "%s\n", ev.Content); err != nil {
+				return err
+			}
+		}
+		streaming = false
+	}
+	if streaming {
+		if _, err := fmt.Fprintln(out); err != nil {
+			return err
+		}
 	}
 	return nil
 }
