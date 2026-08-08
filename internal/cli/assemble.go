@@ -143,6 +143,12 @@ type AgentAssembly struct {
 	// ModelCycler rotates model selection across multiple providers. It is
 	// nil when model cycling is not configured.
 	ModelCycler *llm.ModelCycler
+	// LSPClient is the Language Server Protocol client wired for code
+	// completion. It is nil when no LSP server is configured or started.
+	LSPClient tools.LSPClient
+	// LSPWorkspaceRoot is the workspace root used to initialize the LSP
+	// server. Used by the LSPCompleter to construct file URIs.
+	LSPWorkspaceRoot string
 }
 
 // AssembleOption configures AssembleAgent behavior.
@@ -382,6 +388,12 @@ func AssembleAgent(
 	// collide with an existing (builtin) tool are skipped with a warning.
 	registerCustomTools(ctx, rc, tr, logger)
 
+	// lspClientField and lspWorkspaceRoot hold the LSP client and workspace
+	// root for the AgentAssembly return value. They remain nil/empty when no
+	// LSP server is configured or startup fails.
+	var lspClientField tools.LSPClient
+	var lspWorkspaceRoot string
+
 	// 3. Register MCP tools.
 	if mcpErr := registerMCPTools(ctx, rc, dtr); mcpErr != nil {
 		logger.Warn("assemble_mcp_failed", "err", mcpErr)
@@ -401,6 +413,8 @@ func AssembleAgent(
 				logger.Warn("assemble_lsp_register_failed", "err", regErr)
 				_ = lspClient.Shutdown(context.Background()) //nolint:errcheck
 			} else {
+				lspClientField = lspClient
+				lspWorkspaceRoot = resolveLSPWorkspaceRoot(rc)
 				lspCleanup := cleanup
 				cleanup = func() {
 					_ = lspClient.Shutdown(context.Background()) //nolint:errcheck
@@ -993,6 +1007,8 @@ func AssembleAgent(
 		MemoryExtractor:    memExtractor,
 		ThinkingLevel:      thinkingLevel,
 		ModelCycler:        modelCycler,
+		LSPClient:          lspClientField,
+		LSPWorkspaceRoot:   lspWorkspaceRoot,
 	}, nil
 }
 
@@ -1597,6 +1613,25 @@ func buildLSPClient(ctx context.Context, rc *config.Config, logger *slog.Logger)
 		return nil, false
 	}
 	return multi, true
+}
+
+// resolveLSPWorkspaceRoot determines the workspace root to use for LSP
+// completion. It prefers the legacy single-server WorkspaceRoot, then the
+// first multi-server entry, and finally falls back to the current working
+// directory.
+func resolveLSPWorkspaceRoot(rc *config.Config) string {
+	if rc != nil {
+		if rc.LSP.WorkspaceRoot != "" {
+			return rc.LSP.WorkspaceRoot
+		}
+		for _, srv := range rc.LSP.Servers {
+			if srv.WorkspaceRoot != "" {
+				return srv.WorkspaceRoot
+			}
+		}
+	}
+	wd, _ := os.Getwd() //nolint:errcheck
+	return wd
 }
 
 // buildSingleLSPClient starts and initializes a single DefaultLSPClient from
