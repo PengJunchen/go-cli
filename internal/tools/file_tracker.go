@@ -136,11 +136,19 @@ type CheckpointMeta struct {
 	// Existed reports whether the file existed before the checkpoint. false
 	// means the file was new (did not exist), so Restore will delete it.
 	Existed bool
+	// Mode is the file mode (permissions) of the original file at backup time.
+	// Restore uses it to preserve the original permissions. It is 0 for new
+	// files; Restore falls back to 0o600 when Mode is 0 for backward compat.
+	Mode os.FileMode
 }
 
 // maxCheckpoints is the maximum number of checkpoints retained in memory.
 // Older checkpoints are trimmed when this limit is exceeded.
 const maxCheckpoints = 50
+
+// maxBackupFileSize is the threshold above which Backup logs a warning. Files
+// larger than this are still backed up, but the warning surfaces the cost.
+const maxBackupFileSize = 10 * 1024 * 1024 // 10MB
 
 // Backup creates a checkpoint of the given file path. If the file exists,
 // it copies the content to a backup location. If the file doesn't exist
@@ -172,6 +180,9 @@ func (ft *FileTracker) Backup(path string) (string, error) {
 	}
 
 	// File exists - read its content.
+	if info.Size() > maxBackupFileSize {
+		slog.Warn("file_tracker.backup_large_file", "path", path, "size", info.Size())
+	}
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("backup: read %s: %w", path, err)
@@ -185,6 +196,7 @@ func (ft *FileTracker) Backup(path string) (string, error) {
 			Timestamp: now,
 			Size:      0,
 			Existed:   true,
+			Mode:      info.Mode(),
 		}, nil)
 		return id, nil
 	}
@@ -195,6 +207,7 @@ func (ft *FileTracker) Backup(path string) (string, error) {
 		Timestamp: now,
 		Size:      info.Size(),
 		Existed:   true,
+		Mode:      info.Mode(),
 	}, content)
 	return id, nil
 }
@@ -227,8 +240,21 @@ func (ft *FileTracker) Restore(checkpointID string) error {
 		return nil
 	}
 
-	if err := os.WriteFile(meta.Path, content, 0o600); err != nil {
+	// Preserve the original file permissions. Fall back to 0o600 when Mode
+	// was not set (backward compat with checkpoints created before the Mode
+	// field existed).
+	mode := meta.Mode
+	if mode == 0 {
+		mode = 0o600
+	}
+	if err := os.WriteFile(meta.Path, content, mode); err != nil {
 		return fmt.Errorf("restore: write %s: %w", meta.Path, err)
+	}
+	// os.WriteFile only applies perm when creating a new file; for an existing
+	// file it truncates without changing permissions. Chmod explicitly so the
+	// original mode is restored regardless.
+	if err := os.Chmod(meta.Path, mode); err != nil {
+		return fmt.Errorf("restore: chmod %s: %w", meta.Path, err)
 	}
 	return nil
 }

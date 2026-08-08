@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 )
 
@@ -74,6 +75,9 @@ func (t *WebSearchTool) Execute(ctx context.Context, call ToolCall) (*ToolResult
 	output := strings.TrimSuffix(sb.String(), "\n")
 
 	_, isMock := t.provider.(*MockSearchProvider)
+	if isMock {
+		slog.Warn("web_search.using_mock_provider", "query", query)
+	}
 
 	return &ToolResult{
 		Output:     output,
