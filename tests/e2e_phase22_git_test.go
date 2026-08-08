@@ -151,11 +151,11 @@ func TestET_git_config_from_yaml(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify GitConfig fields.
-	assert.True(t, cfg.Git.Enabled)
+	assert.True(t, *cfg.Git.Enabled)
 	assert.Equal(t, "/tmp/e2e-repo", cfg.Git.WorkDir)
 	assert.Equal(t, "origin", cfg.Git.DefaultRemote)
 	assert.Equal(t, "e2e/", cfg.Git.BranchPrefix)
-	assert.False(t, cfg.Git.AutoCommit)
+	assert.False(t, *cfg.Git.AutoCommit)
 	assert.Equal(t, "github", cfg.Git.Platform)
 	assert.Equal(t, "secret-token", cfg.Git.APIToken)
 }

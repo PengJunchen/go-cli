@@ -170,7 +170,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 			sessionTree = session.NewDefaultSessionTree()
 		}
 		// Wire Git-aware branch linkage when enabled in config.
-		if rc != nil && rc.Session.GitAwareBranch && assembly.GitTool != nil {
+		if rc != nil && rc.Session.GitAwareBranch != nil && *rc.Session.GitAwareBranch && assembly.GitTool != nil {
 			if dt, ok := sessionTree.(*session.DefaultSessionTree); ok {
 				dt.SetGitBranchSwitcher(assembly.GitTool)
 			}

@@ -124,7 +124,8 @@ type SessionConfig struct {
 	StorePath string `json:"store_path"`
 	// GitAwareBranch, when true, enables Git branch linkage during session
 	// fork/resume operations. Defaults to false for backward compatibility.
-	GitAwareBranch bool `json:"git_aware_branch"`
+	// Pointer allows explicit false override via env/flag.
+	GitAwareBranch *bool `json:"git_aware_branch"`
 }
 
 // CompactionConfig controls context compaction strategy and thresholds.
@@ -293,7 +294,8 @@ type ExtensionsConfig struct {
 	// extensions from.
 	PluginPaths []string `json:"plugin_paths"`
 	// Enabled controls whether extension loading is active.
-	Enabled bool `json:"enabled"`
+	// Pointer allows explicit false override via env/flag.
+	Enabled *bool `json:"enabled"`
 }
 
 // ACPConfig controls Agent Communication Protocol (ACP) multi-agent
@@ -318,7 +320,8 @@ type ACPConfig struct {
 // platform for PR creation.
 type GitConfig struct {
 	// Enabled controls whether git tools are registered. Defaults to false.
-	Enabled bool `json:"enabled"`
+	// Pointer allows explicit false override via env/flag.
+	Enabled *bool `json:"enabled"`
 	// WorkDir is the working directory for git commands. When empty, the
 	// process working directory is used.
 	WorkDir string `json:"workdir"`
@@ -328,7 +331,8 @@ type GitConfig struct {
 	// session fork --git command.
 	BranchPrefix string `json:"branch_prefix"`
 	// AutoCommit enables automatic committing of changes after tool mutations.
-	AutoCommit bool `json:"auto_commit"`
+	// Pointer allows explicit false override via env/flag.
+	AutoCommit *bool `json:"auto_commit"`
 	// Platform selects the hosting platform for PR creation: "github",
 	// "gitlab", or "bitbucket". Required when APIToken is non-empty.
 	Platform string `json:"platform"`
@@ -343,7 +347,8 @@ type GitConfig struct {
 // Strategy.
 type ModelCyclerConfig struct {
 	// Enabled controls whether model cycling is active.
-	Enabled bool `json:"enabled"`
+	// Pointer allows explicit false override via env/flag.
+	Enabled *bool `json:"enabled"`
 	// Strategy selects the rotation strategy: round_robin, weighted, or
 	// cost_priority. Empty defaults to round_robin.
 	Strategy string `json:"strategy"`

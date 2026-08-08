@@ -251,6 +251,23 @@ func loadFromEnv(prefix string) *Config {
 		cfg.LSP.WorkspaceRoot = root
 	}
 
+	// Boolean config fields use *bool so env can explicitly set false.
+	if v, ok := parseBoolEnv(envKey(prefix, "GIT_ENABLED")); ok {
+		cfg.Git.Enabled = &v
+	}
+	if v, ok := parseBoolEnv(envKey(prefix, "GIT_AUTOCOMMIT")); ok {
+		cfg.Git.AutoCommit = &v
+	}
+	if v, ok := parseBoolEnv(envKey(prefix, "EXTENSIONS_ENABLED")); ok {
+		cfg.Extensions.Enabled = &v
+	}
+	if v, ok := parseBoolEnv(envKey(prefix, "MODELCYCLER_ENABLED")); ok {
+		cfg.ModelCycler.Enabled = &v
+	}
+	if v, ok := parseBoolEnv(envKey(prefix, "SESSION_GIT_AWARE_BRANCH")); ok {
+		cfg.Session.GitAwareBranch = &v
+	}
+
 	return cfg
 }
 
