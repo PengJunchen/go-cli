@@ -24,6 +24,15 @@ type AgentMessage struct {
 	// the API. It is nil for user/system/tool messages and for assistant
 	// messages when the provider did not return usage data.
 	Usage *llm.Usage
+	// ToolCalls holds tool invocations requested by the assistant. Populated
+	// for assistant messages that request tool execution.
+	ToolCalls []llm.ToolCall `json:"tool_calls,omitempty"`
+	// ToolCallID associates a tool-result message with the originating tool
+	// call. Populated for "tool" role messages.
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	// ToolName is the name of the tool that produced this message. Populated
+	// for "tool" role messages.
+	ToolName string `json:"tool_name,omitempty"`
 }
 
 // String returns a compact one-line representation of the message.

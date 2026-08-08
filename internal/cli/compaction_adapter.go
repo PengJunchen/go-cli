@@ -28,13 +28,17 @@ func newCompactionHook(
 			return messages, nil
 		}
 
-		// Convert AgentMessage → TurnItem
+		// Convert AgentMessage -> TurnItem
 		items := make([]compaction.TurnItem, len(messages))
 		for i, msg := range messages {
 			items[i] = compaction.TurnItem{
-				ID:      fmt.Sprintf("msg-%d", i),
-				Role:    msg.Role,
-				Content: msg.Content,
+				ID:            fmt.Sprintf("msg-%d", i),
+				Role:          msg.Role,
+				Content:       msg.Content,
+				ContentBlocks: msg.ContentBlocks,
+				ToolCalls:     msg.ToolCalls,
+				ToolCallID:    msg.ToolCallID,
+				ToolName:      msg.ToolName,
 			}
 		}
 
@@ -44,12 +48,16 @@ func newCompactionHook(
 			return nil, fmt.Errorf("compaction hook: %w", err)
 		}
 
-		// Convert TurnItem → AgentMessage
+		// Convert TurnItem -> AgentMessage
 		result := make([]core.AgentMessage, len(compacted))
 		for i, item := range compacted {
 			result[i] = core.AgentMessage{
-				Role:    item.Role,
-				Content: item.Content,
+				Role:          item.Role,
+				Content:       item.Content,
+				ContentBlocks: item.ContentBlocks,
+				ToolCalls:     item.ToolCalls,
+				ToolCallID:    item.ToolCallID,
+				ToolName:      item.ToolName,
 			}
 		}
 
