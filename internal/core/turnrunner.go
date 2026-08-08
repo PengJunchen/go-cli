@@ -252,6 +252,7 @@ func (r *EinoTurnRunner) Steer(ctx context.Context, id, instruction string) erro
 			slog.Info("core.turn.runner.steer.sent", "id", id, "instruction", instruction)
 		default:
 			slog.Warn("core.turn.runner.steer.channel_full", "id", id)
+			return fmt.Errorf("steering channel full")
 		}
 	}
 	return nil
@@ -343,6 +344,7 @@ func (r *EinoTurnRunner) FollowUp(_ context.Context, id, content string) error {
 			slog.Info("core.turn.runner.followup.sent", "id", id, "content_len", len(content))
 		default:
 			slog.Warn("core.turn.runner.followup.channel_full", "id", id)
+			return fmt.Errorf("followup channel full")
 		}
 	}
 	return nil

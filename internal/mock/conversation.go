@@ -10,6 +10,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+
+	"github.com/pengjunchen/go-cli/internal/llm"
 )
 
 // ConversationTemplate defines a sequence of expected LLM responses. A
@@ -35,6 +37,9 @@ type ConversationTurn struct {
 	// (stop|length|tool_calls|content_filter). When "length", the response
 	// was truncated due to max_tokens.
 	FinishReason string `json:"finish_reason,omitempty"`
+	// Usage optionally sets token-usage data on the response's final chunk.
+	// When nil, no usage is reported (matching providers that omit it).
+	Usage *llm.Usage `json:"usage,omitempty"`
 }
 
 // ExpectedToolCall is an expected tool call issued by the model.

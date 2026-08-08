@@ -436,3 +436,171 @@ func TestAdapterParallelDispatch(t *testing.T) {
 	assert.Equal(t, "gpt-4", fd.task.Model)
 	fd.mu.Unlock()
 }
+
+// TestParallelDispatchWaitsAllForwardEvents verifies that ParallelDispatch
+// does not return until all sub-agent events have been forwarded through
+// onEvent. Without the wg.Add(1) tracking the forwardEvents goroutine, the
+// dispatcher could return while events are still being drained.
+func TestParallelDispatchWaitsAllForwardEvents(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	sub := newFakeSubAgent("w1", AgentMessage{Role: "assistant", Content: "done"})
+	sub.events = []AgentEvent{
+		{Kind: "status", Content: "e1", Timestamp: time.Now()},
+		{Kind: "status", Content: "e2", Timestamp: time.Now()},
+		{Kind: "status", Content: "e3", Timestamp: time.Now()},
+	}
+	factory := &fakeSubAgentFactory{subs: []SubAgent{sub}}
+	d := NewDefaultSubagentDispatcher(factory)
+
+	var mu sync.Mutex
+	var forwarded []string
+	d.SetEventForwarder(func(_ string, ev AgentEvent) {
+		time.Sleep(10 * time.Millisecond) // simulate slow event processing
+		mu.Lock()
+		forwarded = append(forwarded, ev.Content)
+		mu.Unlock()
+	})
+
+	_, err := d.ParallelDispatch(context.Background(), []SubagentTask{
+		{ID: "t1", Prompt: "go"},
+	})
+	require.NoError(t, err)
+
+	// After ParallelDispatch returns, every event must have been forwarded.
+	// Without the forwardEvents wg tracking, this would race and forwarded
+	// would typically be empty or incomplete.
+	mu.Lock()
+	assert.Len(t, forwarded, 3)
+	mu.Unlock()
+}
+
+// TestParallelDispatchAllEventsBeforeResults verifies that all events from all
+// tasks are forwarded before ParallelDispatch returns its results.
+func TestParallelDispatchAllEventsBeforeResults(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	sub1 := newFakeSubAgent("w1", AgentMessage{Role: "assistant", Content: "r1"})
+	sub1.events = []AgentEvent{
+		{Kind: "status", Content: "1a", Timestamp: time.Now()},
+		{Kind: "status", Content: "1b", Timestamp: time.Now()},
+	}
+	sub2 := newFakeSubAgent("w2", AgentMessage{Role: "assistant", Content: "r2"})
+	sub2.events = []AgentEvent{
+		{Kind: "status", Content: "2a", Timestamp: time.Now()},
+		{Kind: "status", Content: "2b", Timestamp: time.Now()},
+	}
+	factory := &fakeSubAgentFactory{subs: []SubAgent{sub1, sub2}}
+	d := NewDefaultSubagentDispatcher(factory)
+
+	var mu sync.Mutex
+	var forwarded []string
+	d.SetEventForwarder(func(_ string, ev AgentEvent) {
+		time.Sleep(5 * time.Millisecond)
+		mu.Lock()
+		forwarded = append(forwarded, ev.Content)
+		mu.Unlock()
+	})
+
+	results, err := d.ParallelDispatch(context.Background(), []SubagentTask{
+		{ID: "t1", Prompt: "go"},
+		{ID: "t2", Prompt: "go"},
+	})
+	require.NoError(t, err)
+	require.Len(t, results, 2)
+
+	// All 4 events must have been forwarded before results were returned.
+	mu.Lock()
+	assert.Len(t, forwarded, 4)
+	mu.Unlock()
+
+	// Results are in input order.
+	assert.Equal(t, "r1", results[0].Content)
+	assert.Equal(t, "r2", results[1].Content)
+}
+
+// TestParallelDispatchMultipleTasks verifies that ParallelDispatch with three
+// concurrent tasks correctly forwards all events and returns all results.
+func TestParallelDispatchMultipleTasks(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	subs := []SubAgent{}
+	for i := 0; i < 3; i++ {
+		s := newFakeSubAgent("w", AgentMessage{Role: "assistant", Content: "result"})
+		s.events = []AgentEvent{
+			{Kind: "status", Content: "running", Timestamp: time.Now()},
+			{Kind: "status", Content: "done", Timestamp: time.Now()},
+		}
+		subs = append(subs, s)
+	}
+	factory := &fakeSubAgentFactory{subs: subs}
+	d := NewDefaultSubagentDispatcher(factory)
+
+	var mu sync.Mutex
+	var count int
+	d.SetEventForwarder(func(_ string, _ AgentEvent) {
+		mu.Lock()
+		count++
+		mu.Unlock()
+	})
+
+	tasks := []SubagentTask{
+		{ID: "t1", Prompt: "go"},
+		{ID: "t2", Prompt: "go"},
+		{ID: "t3", Prompt: "go"},
+	}
+	results, err := d.ParallelDispatch(context.Background(), tasks)
+	require.NoError(t, err)
+	require.Len(t, results, 3)
+
+	// 3 tasks × 2 events = 6 forwarded events.
+	mu.Lock()
+	assert.Equal(t, 6, count)
+	mu.Unlock()
+
+	for i, r := range results {
+		assert.Equal(t, tasks[i].ID, r.TaskID)
+		assert.Equal(t, "result", r.Content)
+	}
+}
+
+// TestParallelDispatchRaceClean runs ParallelDispatch repeatedly with multiple
+// tasks to surface data races when run under -race.
+func TestParallelDispatchRaceClean(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	for i := 0; i < 10; i++ {
+		subs := []SubAgent{}
+		for j := 0; j < 3; j++ {
+			s := newFakeSubAgent("w", AgentMessage{Role: "assistant", Content: "ok"})
+			s.events = []AgentEvent{
+				{Kind: "status", Content: "start", Timestamp: time.Now()},
+				{Kind: "status", Content: "end", Timestamp: time.Now()},
+			}
+			subs = append(subs, s)
+		}
+		factory := &fakeSubAgentFactory{subs: subs}
+		d := NewDefaultSubagentDispatcher(factory)
+
+		var mu sync.Mutex
+		var n int
+		d.SetEventForwarder(func(_ string, _ AgentEvent) {
+			mu.Lock()
+			n++
+			mu.Unlock()
+		})
+
+		tasks := []SubagentTask{
+			{ID: "t1", Prompt: "go"},
+			{ID: "t2", Prompt: "go"},
+			{ID: "t3", Prompt: "go"},
+		}
+		results, err := d.ParallelDispatch(context.Background(), tasks)
+		require.NoError(t, err)
+		require.Len(t, results, 3)
+
+		mu.Lock()
+		assert.Equal(t, 6, n, "iteration %d: expected 6 forwarded events", i)
+		mu.Unlock()
+	}
+}

@@ -262,7 +262,11 @@ func (d *DefaultSubagentDispatcher) ParallelDispatch(ctx context.Context, tasks 
 				return
 			}
 
-			go d.forwardEvents(t.ID, evCh)
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				d.forwardEvents(t.ID, evCh)
+			}()
 
 			final, waitErr := subs[idx].Wait(ctx)
 			results[idx] = SubagentResult{
