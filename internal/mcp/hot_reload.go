@@ -285,10 +285,12 @@ func (h *DefaultHotReloader) detectAndMaybeReconnect(ctx context.Context) {
 // The first successful visit only establishes the baseline. It returns true
 // once per observable change (creation, modification, or removal).
 func (h *DefaultHotReloader) detectChange() bool {
+	// Read the file outside the lock to avoid blocking other callers (Stop,
+	// Reload, scheduleReconnect) during I/O.
+	snap, present := readSnapshot(h.path)
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
-
-	snap, present := readSnapshot(h.path)
 
 	if !h.baseline {
 		h.baseline = true
@@ -336,7 +338,7 @@ func (h *DefaultHotReloader) reconnectLoop(ctx context.Context) {
 		stopped := h.stopped
 		h.mu.Unlock()
 		if hadPending && !stopped {
-			h.scheduleReconnect(context.Background())
+			h.scheduleReconnect(ctx)
 		}
 	}()
 

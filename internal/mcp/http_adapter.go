@@ -103,6 +103,9 @@ func (a *HTTPClientAdapter) Connect(ctx context.Context) error {
 			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		slog.Warn("mcp.sse.scan", "server", a.cfg.Name, "err", err)
+	}
 	resp.Body.Close() //nolint:errcheck,gosec
 
 	if a.endpoint == "" {

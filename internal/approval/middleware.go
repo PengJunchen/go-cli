@@ -186,6 +186,10 @@ func (m *ApprovalMiddleware) decide(ctx context.Context, key string, call tools.
 	m.sessionStore(key, c)
 	if err := m.store.Set(ctx, key, c); err != nil {
 		slog.Warn("approval.store_set", "key", key, "error", err)
+		// Invalidate the session cache entry so that a subsequent call
+		// re-classifies and re-attempts persistence instead of trusting a
+		// value that was never durably stored.
+		m.sessionDelete(key)
 	}
 	return m.record(span, call, c, false), false
 }
@@ -270,4 +274,10 @@ func (m *ApprovalMiddleware) sessionStore(key string, c Classification) {
 	m.sessionMu.Lock()
 	defer m.sessionMu.Unlock()
 	m.session[key] = c
+}
+
+func (m *ApprovalMiddleware) sessionDelete(key string) {
+	m.sessionMu.Lock()
+	defer m.sessionMu.Unlock()
+	delete(m.session, key)
 }
