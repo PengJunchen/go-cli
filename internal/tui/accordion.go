@@ -9,6 +9,44 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
+// ToolStatus represents the lifecycle state of a tool_call entry.
+type ToolStatus int
+
+const (
+	// ToolStatusPending means the tool call has been sent but execution has
+	// not started yet. Rendered as ⏳.
+	ToolStatusPending ToolStatus = iota
+	// ToolStatusRunning means the tool is currently executing. Rendered as a
+	// spinner glyph (⠋).
+	ToolStatusRunning
+	// ToolStatusCompleted means the tool finished successfully. Rendered as ✓.
+	ToolStatusCompleted
+	// ToolStatusError means the tool returned an error. Rendered as ✗.
+	ToolStatusError
+)
+
+// toolStatusIcon returns the glyph for a tool status. Running uses the entry's
+// spinner frame to produce an animated effect.
+func toolStatusIcon(status ToolStatus, spinnerFrame int) string {
+	switch status {
+	case ToolStatusPending:
+		return "⏳"
+	case ToolStatusRunning:
+		frames := []string{"⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"}
+		return frames[spinnerFrame%len(frames)]
+	case ToolStatusCompleted:
+		return "✓"
+	case ToolStatusError:
+		return "✗"
+	default:
+		return " "
+	}
+}
+
+// maxResultLines is the default number of lines to show for a tool result
+// before truncating with a "showing N of M lines" notice.
+const maxResultLines = 20
+
 // AccordionEntry is a single renderable item in the accordion view. Each entry
 // tracks its own collapsed state and carries both a one-line summary (shown
 // when collapsed) and the full rendered content (shown when expanded).
@@ -20,8 +58,9 @@ type AccordionEntry struct {
 	// Full is the complete rendered text shown when expanded.
 	Full string
 	// Collapsed controls whether only the summary (true) or the full content
-	// (false) is displayed. tool_call, tool_result and thinking entries
-	// default to collapsed; assistant/user messages default to expanded.
+	// (false) is displayed. tool_call and tool_result entries default to
+	// collapsed; thinking entries default to expanded (auto-collapsed on
+	// completion); assistant/user messages default to expanded.
 	Collapsed bool
 	// Timestamp records when the entry was created (for debug/logging).
 	Timestamp time.Time
@@ -30,6 +69,19 @@ type AccordionEntry struct {
 	// a group header and children are shown indented beneath it when
 	// expanded.
 	Children []*AccordionEntry
+	// ToolStatus is the lifecycle state of a tool_call entry. Only meaningful
+	// for ContentTypeToolCall entries; other entry types leave it at zero.
+	ToolStatus ToolStatus
+	// ToolStartTime records when the tool call began (for duration display).
+	ToolStartTime time.Time
+	// ToolDuration is the total execution time, set when the tool completes.
+	ToolDuration time.Duration
+	// SpinnerFrame is the current animation frame for a running tool entry.
+	// Advanced by the global spinner tick.
+	SpinnerFrame int
+	// MaxResultLines caps the number of lines shown for a tool_result entry.
+	// 0 means use the default (maxResultLines). Set to -1 to disable truncation.
+	MaxResultLines int
 }
 
 // AccordionModel holds the ordered list of entries and the index of the
@@ -120,10 +172,12 @@ func (m *AccordionModel) CollapseAll() {
 }
 
 // defaultCollapsed reports whether an entry should be collapsed by default
-// based on its content type.
+// based on its content type. tool_call and tool_result entries are collapsed
+// by default; thinking entries are expanded by default (auto-collapsed to a
+// duration summary when the next non-thinking event arrives).
 func defaultCollapsed(contentType string) bool {
 	switch contentType {
-	case ContentTypeToolCall, ContentTypeToolResult, ContentTypeThinking:
+	case ContentTypeToolCall, ContentTypeToolResult:
 		return true
 	default:
 		return false
@@ -134,6 +188,8 @@ func defaultCollapsed(contentType string) bool {
 // show only their summary; expanded entries show their full content plus any
 // expanded children (indented). The selected entry is prefixed with "▶ " when
 // collapsed or "▼ " when expanded; unselected entries are prefixed with "  ".
+// Tool_call entries are prefixed with a status icon (⏳/⠋/✓/✗) when collapsed.
+// Tool_result children are truncated to MaxResultLines lines (default 20).
 func (m *AccordionModel) Render() string {
 	if len(m.entries) == 0 {
 		return ""
@@ -148,16 +204,22 @@ func (m *AccordionModel) Render() string {
 				marker = "▼ "
 			}
 		}
+		// Prepend a status icon for tool_call entries.
+		statusPrefix := ""
+		if e.ContentType == ContentTypeToolCall {
+			statusPrefix = toolStatusIcon(e.ToolStatus, e.SpinnerFrame) + " "
+		}
 		if e.Collapsed {
-			sb.WriteString(marker + e.Summary + "\n")
+			sb.WriteString(marker + statusPrefix + e.Summary + "\n")
 		} else {
-			sb.WriteString(marker + e.Full + "\n")
+			sb.WriteString(marker + statusPrefix + e.Full + "\n")
 			for _, child := range e.Children {
 				cMarker := "  "
 				if child.Collapsed {
 					sb.WriteString(cMarker + "  " + child.Summary + "\n")
 				} else {
-					for _, line := range strings.Split(child.Full, "\n") {
+					rendered := truncateToolResult(child)
+					for _, line := range strings.Split(rendered, "\n") {
 						sb.WriteString(cMarker + "  " + line + "\n")
 					}
 				}
@@ -165,6 +227,28 @@ func (m *AccordionModel) Render() string {
 		}
 	}
 	return strings.TrimRight(sb.String(), "\n")
+}
+
+// truncateToolResult truncates a tool_result entry's Full content to
+// MaxResultLines lines (default maxResultLines), appending a "showing N of M
+// lines" notice when truncated. Set MaxResultLines to -1 to disable.
+func truncateToolResult(e *AccordionEntry) string {
+	if e.ContentType != ContentTypeToolResult {
+		return e.Full
+	}
+	limit := e.MaxResultLines
+	if limit == 0 {
+		limit = maxResultLines
+	}
+	if limit < 0 {
+		return e.Full
+	}
+	lines := strings.Split(e.Full, "\n")
+	if len(lines) <= limit {
+		return e.Full
+	}
+	shown := strings.Join(lines[:limit], "\n")
+	return shown + fmt.Sprintf("\n... showing %d of %d lines", limit, len(lines))
 }
 
 // Len returns the number of top-level entries.

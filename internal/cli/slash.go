@@ -37,6 +37,10 @@ type slashContext struct {
 	sessionStore  *session.JSONLSessionStore
 	memoryStore   memory.MemoryStore
 	contextWindow int
+	// thinkingVisibility controls how thinking entries are displayed in the TUI.
+	// "show" (default) expands them, "collapse" folds them to a summary, "hide"
+	// suppresses them entirely. Set by the /thinking slash command.
+	thinkingVisibility string
 }
 
 // defaultSlashReg is the fully populated registry shared by all interactive
@@ -94,6 +98,9 @@ func buildSlashCommandRegistry() *SlashCommandRegistry {
 	add(&SaveHandler{})
 	add(&LoadHandler{})
 	add(&MemoryHandler{})
+
+	// TUI display commands.
+	add(&ThinkingHandler{})
 
 	// Aliases.
 	reg.RegisterAlias("h", "help")

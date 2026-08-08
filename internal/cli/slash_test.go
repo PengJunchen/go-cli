@@ -54,6 +54,7 @@ func TestBuildSlashCommandRegistry(t *testing.T) {
 	want := []string{
 		"help", "cost", "compact", "clear", "tools", "model", "session",
 		"undo", "diff", "plan", "config", "history", "save", "load", "memory",
+		"thinking",
 	}
 	assert.ElementsMatch(t, want, reg.Names())
 
@@ -84,6 +85,7 @@ func TestSlashHelp(t *testing.T) {
 	for _, want := range []string{
 		"/help", "/cost", "/compact", "/clear", "/tools", "/model", "/session",
 		"/undo", "/diff", "/plan", "/config", "/history", "/save", "/load", "/memory",
+		"/thinking",
 		"exit",
 	} {
 		assert.Contains(t, output, want, "help output should list %s", want)
