@@ -356,11 +356,23 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 	messages = append(messages, llm.Message{Role: llm.RoleSystem, Content: sysPrompt})
 
 	for _, hm := range submission.History {
-		messages = append(messages, llm.Message{
+		msg := llm.Message{
 			Role:          llm.Role(hm.Role),
 			Content:       hm.Content,
 			ContentBlocks: hm.ContentBlocks,
-		})
+		}
+		// Forward ToolCalls from assistant messages so the LLM can
+		// correlate tool calls with tool results across turns.
+		if len(hm.ToolCalls) > 0 {
+			msg.ToolCalls = hm.ToolCalls
+		}
+		// Forward ToolCallID and tool name on tool-result messages so
+		// the LLM can match results to their originating calls.
+		if hm.ToolCallID != "" {
+			msg.ToolCallID = hm.ToolCallID
+			msg.Name = hm.ToolName
+		}
+		messages = append(messages, msg)
 	}
 	if len(messages) == 0 || messages[len(messages)-1].Role != llm.RoleUser {
 		messages = append(messages, llm.Message{Role: llm.RoleUser, Content: submission.Content})
@@ -444,9 +456,12 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 		// Emit the complete assistant message as a non-incremental event for
 		// every LLM response. Downstream consumers (harness result,
 		// lastMessageEvent) depend on it. The TUI skips duplicates when
-		// incremental streaming has already rendered the content.
-		if resp.Content != "" {
-			sendEvent(AgentEvent{Kind: "message", Content: resp.Content, Timestamp: time.Now(), Usage: resp.Usage})
+		// incremental streaming has already rendered the content. Pure tool
+		// call responses (empty content but non-empty ToolCalls) must also
+		// emit a message event so they enter history and subsequent turns
+		// retain tool call context.
+		if resp.Content != "" || len(resp.ToolCalls) > 0 {
+			sendEvent(AgentEvent{Kind: "message", Content: resp.Content, Timestamp: time.Now(), Usage: resp.Usage, ToolCalls: resp.ToolCalls})
 		}
 
 		if len(resp.ToolCalls) == 0 {
