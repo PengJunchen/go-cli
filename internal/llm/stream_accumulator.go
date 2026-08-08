@@ -11,8 +11,9 @@ import (
 // It emits a role-only MessageChunk on the first content or tool-call delta
 // (matching streamClaude's message_start behaviour) so callers can render an
 // assistant placeholder early. Returns the accumulated tool calls (nil when no
-// tool calls were seen) and the finish reason from the stream.
-func accumulateOpenAIStreamToolCalls(events <-chan SSEEvent, ch chan<- MessageChunk) (toolCalls []ToolCall, finishReason string) {
+// tool calls were seen), the finish reason from the stream, and the usage
+// reported by the API (nil when the stream did not include usage).
+func accumulateOpenAIStreamToolCalls(events <-chan SSEEvent, ch chan<- MessageChunk) (toolCalls []ToolCall, finishReason string, usage *Usage) {
 	var toolNameByIndex map[int]string
 	var toolArgsBuf []string
 	emittedRole := false
@@ -29,6 +30,15 @@ func accumulateOpenAIStreamToolCalls(events <-chan SSEEvent, ch chan<- MessageCh
 		if err := json.Unmarshal([]byte(event.Data), &chunk); err != nil {
 			slog.Warn("llm_stream_parse_skip", "err", err)
 			continue
+		}
+		// OpenAI sends usage in a final chunk with an empty choices array
+		// when stream_options.include_usage is true.
+		if chunk.Usage != nil {
+			usage = &Usage{
+				InputTokens:  chunk.Usage.PromptTokens,
+				OutputTokens: chunk.Usage.CompletionTokens,
+				TotalTokens:  chunk.Usage.PromptTokens + chunk.Usage.CompletionTokens,
+			}
 		}
 		if len(chunk.Choices) == 0 {
 			continue
@@ -92,5 +102,5 @@ func accumulateOpenAIStreamToolCalls(events <-chan SSEEvent, ch chan<- MessageCh
 		}
 	}
 
-	return toolCalls, finishReason
+	return toolCalls, finishReason, usage
 }
