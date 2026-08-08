@@ -187,6 +187,18 @@ func (h *SessionHandler) Description() string {
 	return "Session operations (subcommands: tree, fork, resume, branches, clone, switch)"
 }
 
+// Subcommands returns the subcommands supported by /session for tab completion.
+func (h *SessionHandler) Subcommands() []Subcommand {
+	return []Subcommand{
+		{Name: "tree", Description: "Show session tree (default)"},
+		{Name: "fork", Description: "Fork the current session"},
+		{Name: "resume", Description: "Resume a previous session"},
+		{Name: "branches", Description: "List session branches"},
+		{Name: "clone", Description: "Clone the current session"},
+		{Name: "switch", Description: "Switch to a different session"},
+	}
+}
+
 func (h *SessionHandler) Handle(ctx context.Context, args []string, sc *slashContext) error {
 	if sc.sessionHandler == nil {
 		fmt.Fprintln(sc.out, "Session tree not configured.") //nolint:errcheck
@@ -300,6 +312,14 @@ var _ SlashCommandHandler = (*PlanHandler)(nil)
 
 func (h *PlanHandler) Name() string        { return "plan" }
 func (h *PlanHandler) Description() string { return "Enter or exit plan mode (read-only exploration)" }
+
+// Subcommands returns the subcommands supported by /plan for tab completion.
+func (h *PlanHandler) Subcommands() []Subcommand {
+	return []Subcommand{
+		{Name: "enter", Description: "Enter plan mode"},
+		{Name: "exit", Description: "Exit plan mode"},
+	}
+}
 
 func (h *PlanHandler) Handle(ctx context.Context, args []string, sc *slashContext) error {
 	if sc.planCtrl == nil {
@@ -488,6 +508,15 @@ var _ SlashCommandHandler = (*ThinkingHandler)(nil)
 func (h *ThinkingHandler) Name() string { return "thinking" }
 func (h *ThinkingHandler) Description() string {
 	return "Control thinking-chain display: show, collapse, or hide"
+}
+
+// Subcommands returns the subcommands supported by /thinking for tab completion.
+func (h *ThinkingHandler) Subcommands() []Subcommand {
+	return []Subcommand{
+		{Name: "show", Description: "Expand all thinking entries (default)"},
+		{Name: "collapse", Description: "Fold thinking entries to a one-line summary"},
+		{Name: "hide", Description: "Suppress thinking entries entirely"},
+	}
 }
 
 func (h *ThinkingHandler) Handle(_ context.Context, args []string, sc *slashContext) error {

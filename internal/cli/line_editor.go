@@ -603,11 +603,19 @@ func (le *DefaultLineEditor) applyCompletions(buf *[]rune, pos *int, completions
 		*buf = replaceRange(*buf, start, *pos, []rune(prefix))
 		*pos = start + len(prefix)
 	}
-	// Display options.
+	// Display options with aligned descriptions.
 	fmt.Fprint(le.out, "\r\n") //nolint:errcheck
+	maxTextWidth := 0
+	for _, c := range completions {
+		if w := displayWidth([]rune(c.Text)); w > maxTextWidth {
+			maxTextWidth = w
+		}
+	}
 	for _, c := range completions {
 		if c.Description != "" {
-			fmt.Fprintf(le.out, "  %s\t(%s)\r\n", c.Text, c.Description) //nolint:errcheck
+			textWidth := displayWidth([]rune(c.Text))
+			padding := strings.Repeat(" ", maxTextWidth-textWidth)
+			fmt.Fprintf(le.out, "  %s%s  %s\r\n", c.Text, padding, c.Description) //nolint:errcheck
 		} else {
 			fmt.Fprintf(le.out, "  %s\r\n", c.Text) //nolint:errcheck
 		}

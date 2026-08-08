@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
@@ -64,4 +65,48 @@ func TestReadLineNonTTY_BackwardCompat(t *testing.T) {
 	// Third read should return EOF.
 	_, err = le.ReadLine(ctx, "> ")
 	assert.ErrorIs(t, err, io.EOF)
+}
+
+// TestApplyCompletions_AlignedDisplay verifies that when multiple completion
+// candidates are displayed, their descriptions are column-aligned using the
+// longest Text width.
+func TestApplyCompletions_AlignedDisplay(t *testing.T) {
+	var out bytes.Buffer
+	le := NewDefaultLineEditor(strings.NewReader(""), &out)
+
+	completions := []Completion{
+		{Text: "list", Description: "List all stored memories"},
+		{Text: "add", Description: "Add a manual memory"},
+		{Text: "delete", Description: "Delete a memory by ID"},
+	}
+
+	input := []rune("/memory ")
+	pos := len(input)
+	le.applyCompletions(&input, &pos, completions, 8, "> ")
+
+	output := out.String()
+	lines := strings.Split(output, "\r\n")
+
+	// Extract the column at which each description starts.
+	descs := []string{
+		"List all stored memories",
+		"Add a manual memory",
+		"Delete a memory by ID",
+	}
+	var descCols []int
+	for _, desc := range descs {
+		found := false
+		for _, line := range lines {
+			if idx := strings.Index(line, desc); idx >= 0 {
+				descCols = append(descCols, idx)
+				found = true
+				break
+			}
+		}
+		require.True(t, found, "description %q not found in output", desc)
+	}
+
+	require.Len(t, descCols, 3)
+	assert.Equal(t, descCols[0], descCols[1], "descriptions should be aligned (list vs add)")
+	assert.Equal(t, descCols[1], descCols[2], "descriptions should be aligned (add vs delete)")
 }
