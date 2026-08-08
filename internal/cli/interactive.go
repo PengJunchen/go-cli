@@ -24,6 +24,8 @@ import (
 	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 	"github.com/pengjunchen/go-cli/internal/tui"
+
+	tea "github.com/charmbracelet/bubbletea"
 )
 
 // Interactive command constants. They live in one place so the scanner does not
@@ -824,11 +826,62 @@ var _ Command = (*interactiveCmd)(nil)
 
 // cliHITLEmitter implements core.HITLQuestionEmitter for the interactive CLI.
 // It prints the question to the output writer and reads the answer from stdin.
+//
+// When program is non-nil (TUI mode), Emit routes the question through the
+// bubbletea program via program.Send(HITLMessage{...}) instead of writing
+// directly to stdout. Writing to stdout while bubbletea owns the terminal
+// corrupts the display, so the program path must be used whenever a TUI is
+// running. When program is nil (plain CLI mode), Emit falls back to direct
+// stdout output.
 type cliHITLEmitter struct {
-	out io.Writer
+	out     io.Writer
+	program *tea.Program
+}
+
+// HITLMessage is a bubbletea message carrying a HITL question to the TUI. The
+// TUI renders the question, collects the user's answer, and sends a single
+// HITLResponse on ResponseCh so the emitter can deliver it to the agent.
+type HITLMessage struct {
+	QuestionID string
+	Question   string
+	Options    []string
+	ResponseCh chan HITLResponse
+}
+
+// HITLResponse is the user's answer to a HITLMessage, sent back by the TUI.
+type HITLResponse struct {
+	Answer string
+	Err    error
 }
 
 func (e *cliHITLEmitter) Emit(ctx context.Context, event core.HITLQuestionEvent) error {
+	// TUI mode: route the question through the bubbletea program so it renders
+	// inside the TUI instead of corrupting stdout.
+	if e.program != nil {
+		respCh := make(chan HITLResponse, 1)
+		e.program.Send(HITLMessage{
+			QuestionID: event.QuestionID,
+			Question:   event.Question,
+			Options:    event.Options,
+			ResponseCh: respCh,
+		})
+		select {
+		case resp := <-respCh:
+			if resp.Err != nil {
+				return resp.Err
+			}
+			select {
+			case event.ResponseCh <- core.HITLAnswer{QuestionID: event.QuestionID, Answer: resp.Answer}:
+				return nil
+			case <-ctx.Done():
+				return ctx.Err()
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+
+	// Plain CLI mode: write directly to stdout and read from stdin.
 	fmt.Fprintf(e.out, "\n[ask_user] %s\n", event.Question) //nolint:errcheck
 	for i, opt := range event.Options {
 		fmt.Fprintf(e.out, "  %d. %s\n", i+1, opt) //nolint:errcheck
