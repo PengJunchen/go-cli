@@ -2,6 +2,8 @@ package core //exempt:scan009
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -149,8 +151,8 @@ func NewDefaultSystemPromptBuilder() *DefaultSystemPromptBuilder {
 //  8. Append prompt (if non-empty)
 //
 // The assembled prompt is cached: if the inputs (tools, context files, skills,
-// memories, custom/append prompts, cwd) have not changed since the last Build,
-// the cached prompt is returned without rebuilding.
+// memories, custom/append prompts, cwd, and the calendar day) have not changed
+// since the last Build, the cached prompt is returned without rebuilding.
 func (b *DefaultSystemPromptBuilder) Build(_ context.Context, opts SystemPromptOptions) string {
 	version := computeCacheVersion(opts)
 
@@ -169,33 +171,45 @@ func (b *DefaultSystemPromptBuilder) Build(_ context.Context, opts SystemPromptO
 	return prompt
 }
 
-// computeCacheVersion builds a string that uniquely represents all inputs that
-// affect the assembled prompt. Two identical version strings guarantee the same
-// prompt output (ignoring the non-deterministic current date).
+// computeCacheVersion returns a fixed-length digest that uniquely represents
+// all inputs affecting the assembled prompt: tool names, context files,
+// skills, memories, custom/append prompts, cwd, and the calendar day. Each
+// field is length-prefixed before hashing so that distinct inputs can never
+// collide (e.g. one tool named "a,b" vs two tools "a","b", or an empty
+// context-file content vs a path equal to another path+content).
+//
+// Two identical digests guarantee the same prompt output, assuming each
+// tool's PromptGuidelines are stable for a given tool name (true for all
+// built-in tools — guidelines are intentionally excluded so cache hits avoid
+// re-invoking them). The calendar day is included so a long-running process
+// rebuilds with the correct date when the day changes.
 func computeCacheVersion(opts SystemPromptOptions) string {
-	var sb strings.Builder
+	h := sha256.New()
+	writeField := func(s string) {
+		fmt.Fprintf(h, "%d:%s", len(s), s)
+	}
 	for _, t := range opts.Tools {
-		sb.WriteString(t.Name())
-		sb.WriteString(",")
+		writeField(t.Name())
 	}
 	for _, cf := range opts.ContextFiles {
-		sb.WriteString(cf.Path)
-		sb.WriteString(cf.Content)
+		writeField(cf.Path)
+		writeField(cf.Content)
 	}
 	for _, s := range opts.Skills {
-		sb.WriteString(s.Name)
-		sb.WriteString(s.Description)
-		sb.WriteString(s.Category)
+		writeField(s.Name)
+		writeField(s.Description)
+		writeField(s.Category)
 	}
 	for _, m := range opts.Memories {
-		sb.WriteString(m.ID)
-		sb.WriteString(m.Content)
-		sb.WriteString(m.Category)
+		writeField(m.ID)
+		writeField(m.Content)
+		writeField(m.Category)
 	}
-	sb.WriteString(opts.CustomPrompt)
-	sb.WriteString(opts.AppendPrompt)
-	sb.WriteString(opts.Cwd)
-	return sb.String()
+	writeField(opts.CustomPrompt)
+	writeField(opts.AppendPrompt)
+	writeField(opts.Cwd)
+	writeField(time.Now().Format("2006-01-02"))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // buildInner assembles the system prompt from opts without consulting the

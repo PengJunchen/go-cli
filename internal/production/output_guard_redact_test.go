@@ -91,3 +91,42 @@ func TestRedactingOutputGuardName(t *testing.T) {
 	g2 := NewRedactingOutputGuard(WithName("custom-redact"))
 	assert.Equal(t, "custom-redact", g2.Name())
 }
+
+// TestRedactEmptyPatternIgnored verifies that an empty pattern is silently
+// ignored rather than corrupting the output by matching at every position.
+func TestRedactEmptyPatternIgnored(t *testing.T) {
+	t.Parallel()
+
+	g := NewRedactingOutputGuard()
+	g.AddRedactPattern("")
+	g.AddRedactPattern(`sk-[A-Za-z0-9]+`)
+
+	text := "Keys: sk-abc123 and plain text"
+	result, err := g.Check(context.Background(), text)
+	require.NoError(t, err)
+
+	assert.True(t, result.Allowed)
+	assert.NotContains(t, result.Sanitized, "sk-abc123")
+	assert.Contains(t, result.Sanitized, "[REDACTED]")
+	// The plain text must be preserved character-for-character, not
+	// punctuated with [REDACTED] between every character.
+	assert.Contains(t, result.Sanitized, "plain text")
+}
+
+// TestRedactInvalidPatternIgnored verifies that an invalid regex pattern is
+// silently ignored without affecting other registered patterns.
+func TestRedactInvalidPatternIgnored(t *testing.T) {
+	t.Parallel()
+
+	g := NewRedactingOutputGuard()
+	g.AddRedactPattern(`[invalid(`) // unbalanced bracket
+	g.AddRedactPattern(`sk-[A-Za-z0-9]+`)
+
+	text := "key sk-abc123 leaked"
+	result, err := g.Check(context.Background(), text)
+	require.NoError(t, err)
+
+	assert.True(t, result.Allowed)
+	assert.NotContains(t, result.Sanitized, "sk-abc123")
+	assert.Contains(t, result.Sanitized, "[REDACTED]")
+}
