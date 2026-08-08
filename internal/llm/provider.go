@@ -325,7 +325,11 @@ func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 				finishReason = parsed.Choices[0].FinishReason
 			}
 			if content != "" {
-				ch <- MessageChunk{Role: RoleAssistant, Content: content}
+				select {
+				case ch <- MessageChunk{Role: RoleAssistant, Content: content}:
+				case <-ctx.Done():
+					return
+				}
 			}
 			final := MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
 			if parsed.Usage != nil {
@@ -335,7 +339,10 @@ func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 					TotalTokens:  parsed.Usage.PromptTokens + parsed.Usage.CompletionTokens,
 				}
 			}
-			ch <- final
+			select {
+			case ch <- final:
+			case <-ctx.Done():
+			}
 			return
 		}
 
@@ -344,12 +351,15 @@ func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 		parser := NewDefaultSSEParser()
 		events, _ := parser.Parse(reader) //nolint:errcheck
 
-		toolCalls, finishReason, usage := accumulateOpenAIStreamToolCalls(events, ch)
+		toolCalls, finishReason, usage := accumulateOpenAIStreamToolCalls(ctx, events, ch)
 		final := MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
 		if usage != nil {
 			final.Usage = usage
 		}
-		ch <- final
+		select {
+		case ch <- final:
+		case <-ctx.Done():
+		}
 	}()
 
 	return ch, nil

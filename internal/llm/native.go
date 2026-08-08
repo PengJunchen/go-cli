@@ -399,7 +399,11 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 				finishReason = parsed.Choices[0].FinishReason
 			}
 			if content != "" {
-				ch <- MessageChunk{Role: RoleAssistant, Content: content}
+				select {
+				case ch <- MessageChunk{Role: RoleAssistant, Content: content}:
+				case <-ctx.Done():
+					return
+				}
 			}
 			final := MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
 			if parsed.Usage != nil {
@@ -409,19 +413,25 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 					TotalTokens:  parsed.Usage.PromptTokens + parsed.Usage.CompletionTokens,
 				}
 			}
-			ch <- final
+			select {
+			case ch <- final:
+			case <-ctx.Done():
+			}
 			return
 		}
 
 		parser := NewDefaultSSEParser()
 		events, _ := parser.Parse(reader) //nolint:errcheck
 
-		toolCalls, finishReason, usage := accumulateOpenAIStreamToolCalls(events, ch)
+		toolCalls, finishReason, usage := accumulateOpenAIStreamToolCalls(ctx, events, ch)
 		final := MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
 		if usage != nil {
 			final.Usage = usage
 		}
-		ch <- final
+		select {
+		case ch <- final:
+		case <-ctx.Done():
+		}
 	}()
 
 	return ch, nil
@@ -511,8 +521,12 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 		var inputTokens, outputTokens int
 		var hasUsage bool
 		finalSent := false
+		cancelled := false
 
 		for event := range events {
+			if cancelled {
+				continue
+			}
 			if event.Data == "" {
 				continue
 			}
@@ -525,7 +539,12 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 			switch ce.Type {
 			case "message_start":
 				if ce.Message != nil {
-					ch <- MessageChunk{Role: RoleAssistant}
+					select {
+					case ch <- MessageChunk{Role: RoleAssistant}:
+					case <-ctx.Done():
+						cancelled = true
+						continue
+					}
 					if ce.Message.Usage != nil {
 						inputTokens = ce.Message.Usage.InputTokens
 						hasUsage = true
@@ -551,7 +570,12 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 				switch ce.Delta.Type {
 				case "text_delta":
 					if ce.Delta.Text != "" {
-						ch <- MessageChunk{Role: RoleAssistant, Content: ce.Delta.Text}
+						select {
+						case ch <- MessageChunk{Role: RoleAssistant, Content: ce.Delta.Text}:
+						case <-ctx.Done():
+							cancelled = true
+							continue
+						}
 					}
 				case "input_json_delta":
 					if accum, ok := tools[ce.Index]; ok {
@@ -599,14 +623,19 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 						TotalTokens:  inputTokens + outputTokens,
 					}
 				}
-				ch <- final
-				finalSent = true
+				select {
+				case ch <- final:
+					finalSent = true
+				case <-ctx.Done():
+					cancelled = true
+					continue
+				}
 			}
 		}
 
 		// If the stream ended without message_stop, emit a final chunk so
 		// the caller is not left waiting.
-		if !finalSent {
+		if !finalSent && ctx.Err() == nil {
 			fallback := MessageChunk{Role: RoleAssistant, Final: true, FinishReason: stopReason}
 			if hasUsage {
 				fallback.Usage = &Usage{
@@ -615,7 +644,10 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 					TotalTokens:  inputTokens + outputTokens,
 				}
 			}
-			ch <- fallback
+			select {
+			case ch <- fallback:
+			case <-ctx.Done():
+			}
 		}
 	}()
 
@@ -662,7 +694,11 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 		var finishReason string
 		var toolCalls []ToolCall
 		var usage *Usage
+		cancelled := false
 		for event := range events {
+			if cancelled {
+				continue
+			}
 			if event.Data == "" {
 				continue
 			}
@@ -701,7 +737,12 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 						}
 					}
 					if sb.Len() > 0 {
-						ch <- MessageChunk{Role: RoleAssistant, Content: sb.String()}
+						select {
+						case ch <- MessageChunk{Role: RoleAssistant, Content: sb.String()}:
+						case <-ctx.Done():
+							cancelled = true
+							continue
+						}
 					}
 				}
 			}
@@ -711,7 +752,10 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 		if usage != nil {
 			final.Usage = usage
 		}
-		ch <- final
+		select {
+		case ch <- final:
+		case <-ctx.Done():
+		}
 	}()
 
 	return ch, nil

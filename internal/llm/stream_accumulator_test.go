@@ -258,7 +258,7 @@ func runStreamAccumulator(t *testing.T, eventData ...string) ([]ToolCall, string
 	close(events)
 
 	ch := make(chan MessageChunk, 64)
-	toolCalls, finishReason, _ := accumulateOpenAIStreamToolCalls(events, ch)
+	toolCalls, finishReason, _ := accumulateOpenAIStreamToolCalls(context.Background(), events, ch)
 	close(ch)
 
 	var chunks []MessageChunk

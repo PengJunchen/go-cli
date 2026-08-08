@@ -274,7 +274,11 @@ func (m *cycledModel) Stream(ctx context.Context, msgs []Message, opts ...Option
 		defer cleanup()
 		defer close(out)
 		for chunk := range ch {
-			out <- chunk
+			select {
+			case out <- chunk:
+			case <-ctx.Done():
+				return
+			}
 		}
 	}()
 	return out, nil

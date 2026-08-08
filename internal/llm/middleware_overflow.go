@@ -157,7 +157,11 @@ func (m *overflowRecoveryModel) Stream(ctx context.Context, msgs []Message, opts
 
 				for chunk := range ch {
 					gotChunk = true
-					outCh <- chunk // Real-time forward
+					select {
+					case outCh <- chunk:
+					case <-ctx.Done():
+						return
+					}
 					if chunk.Content != "" {
 						contentBuf.WriteString(chunk.Content)
 					}
@@ -172,7 +176,7 @@ func (m *overflowRecoveryModel) Stream(ctx context.Context, msgs []Message, opts
 				}
 
 				// Post-hoc continuation for length truncation.
-				if gotChunk && finishReason == finishReasonLength {
+				if gotChunk && finishReason == finishReasonLength && ctx.Err() == nil {
 					result := &Message{
 						Role:         RoleAssistant,
 						Content:      contentBuf.String(),
@@ -184,13 +188,21 @@ func (m *overflowRecoveryModel) Stream(ctx context.Context, msgs []Message, opts
 					if contResult != nil && len(contResult.Content) > origLen {
 						extra := contResult.Content[origLen:]
 						if extra != "" {
-							outCh <- MessageChunk{Role: RoleAssistant, Content: extra}
+							select {
+							case outCh <- MessageChunk{Role: RoleAssistant, Content: extra}:
+							case <-ctx.Done():
+								return
+							}
 						}
-						outCh <- MessageChunk{
+						select {
+						case outCh <- MessageChunk{
 							Role:         RoleAssistant,
 							Final:        true,
 							FinishReason: contResult.FinishReason,
 							ToolCalls:    contResult.ToolCalls,
+						}:
+						case <-ctx.Done():
+							return
 						}
 					}
 				}
