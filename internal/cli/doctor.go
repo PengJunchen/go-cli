@@ -13,7 +13,6 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/config"
@@ -475,15 +474,6 @@ func (c *DiskSpaceChecker) Check(_ context.Context) DoctorCheck {
 	}
 	return DoctorCheck{Name: "disk-space", Status: doctorFail,
 		Message: fmt.Sprintf("only %s available (min %s)", humanBytes(avail), humanBytes(min))}
-}
-
-// diskFreeBytes returns the available bytes on the filesystem holding path.
-func diskFreeBytes(path string) (uint64, error) {
-	var stat syscall.Statfs_t
-	if err := syscall.Statfs(path, &stat); err != nil {
-		return 0, err
-	}
-	return uint64(stat.Bavail) * uint64(stat.Bsize), nil
 }
 
 // humanBytes formats n as a human-readable size.
