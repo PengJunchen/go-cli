@@ -264,7 +264,7 @@ func AssembleAgent(
 	// wraps the primary model so each Generate/Stream call can be routed to
 	// a different provider according to the configured strategy.
 	var modelCycler *llm.ModelCycler
-	if rc != nil && rc.ModelCycler.Enabled && len(rc.ModelCycler.Models) > 0 {
+	if rc != nil && rc.ModelCycler.Enabled != nil && *rc.ModelCycler.Enabled && len(rc.ModelCycler.Models) > 0 {
 		entries := make([]llm.ModelEntry, len(rc.ModelCycler.Models))
 		for i, m := range rc.ModelCycler.Models {
 			entries[i] = llm.ModelEntry{
@@ -421,7 +421,7 @@ func AssembleAgent(
 	// assembled below.
 	var extHooks []core.Hook
 	var extMiddleware []core.Middleware
-	if rc != nil && rc.Extensions.Enabled && len(rc.Extensions.PluginPaths) > 0 {
+	if rc != nil && rc.Extensions.Enabled != nil && *rc.Extensions.Enabled && len(rc.Extensions.PluginPaths) > 0 {
 		pm := extension.NewPluginManager(extension.NewDefaultPluginLoader())
 		_ = pm.Load(ctx, rc.Extensions.PluginPaths) //nolint:errcheck
 		_ = pm.Init(ctx)                            //nolint:errcheck
