@@ -106,7 +106,7 @@ func TestExecuteToolStreamingDetected(t *testing.T) {
 	loop := NewLoopAgent(WithTools(tr))
 	es := &collectingEventStream{}
 
-	out, err := loop.executeTool(context.Background(), tools.ToolCall{
+	out, _, err := loop.executeTool(context.Background(), tools.ToolCall{
 		ID:   "tc1",
 		Name: "stream_tool",
 		Args: map[string]any{},
@@ -129,7 +129,7 @@ func TestExecuteToolNonStreamingUsesExecute(t *testing.T) {
 	loop := NewLoopAgent(WithTools(tr))
 	es := &collectingEventStream{}
 
-	out, err := loop.executeTool(context.Background(), tools.ToolCall{
+	out, _, err := loop.executeTool(context.Background(), tools.ToolCall{
 		ID:   "tc1",
 		Name: "plain",
 		Args: map[string]any{},
@@ -158,7 +158,7 @@ func TestExecuteToolStreamingSendsToolOutputEvents(t *testing.T) {
 	loop := NewLoopAgent(WithTools(tr))
 	es := &collectingEventStream{}
 
-	out, err := loop.executeTool(context.Background(), tools.ToolCall{
+	out, _, err := loop.executeTool(context.Background(), tools.ToolCall{
 		ID:   "call-42",
 		Name: "stream_tool",
 		Args: map[string]any{},
@@ -189,7 +189,7 @@ func TestExecuteToolNilEventStreamFallsBack(t *testing.T) {
 	loop := NewLoopAgent(WithTools(tr))
 
 	// Pass nil EventStream — should use Execute, not ExecuteStreaming.
-	out, err := loop.executeTool(context.Background(), tools.ToolCall{
+	out, _, err := loop.executeTool(context.Background(), tools.ToolCall{
 		ID:   "tc1",
 		Name: "stream_tool",
 		Args: map[string]any{},

@@ -77,6 +77,10 @@ type AgentEvent struct {
 	// ToolCalls carries the tool invocations requested by the assistant
 	// for "message" events. It is nil for events with no tool calls.
 	ToolCalls []llm.ToolCall `json:"tool_calls,omitempty"`
+	// IsError marks a "tool_result" event as an error for structured
+	// detection. When true, consumers use this boolean instead of string
+	// matching on Content to determine whether the tool failed.
+	IsError bool `json:"is_error,omitempty"`
 }
 
 // TokenUsage carries token consumption and cost data for a token_usage event.

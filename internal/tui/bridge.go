@@ -55,6 +55,7 @@ func CoreEventToAgentEvent(ev core.AgentEvent) AgentEvent {
 		Incremental: ev.Incremental,
 		ToolCallID:  ev.ToolCallID,
 		Stream:      ev.Stream,
+		IsError:     ev.IsError,
 	}
 	if ev.TokenUsage != nil {
 		ae.TokenUsage = &TokenUsageData{

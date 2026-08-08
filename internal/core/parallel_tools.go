@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 
@@ -40,6 +41,10 @@ type ParallelToolResult struct {
 	Output string
 	// Err is the execution error, if any.
 	Err error
+	// IsError marks the result as an error for structured detection. It is
+	// true when the tool returned a Go error or when ToolResult.IsError was
+	// set by the tool implementation.
+	IsError bool
 }
 
 // executeToolsParallel runs multiple tool calls concurrently against the
@@ -75,12 +80,13 @@ func executeToolsParallel(ctx context.Context, tr tools.ToolRegistry, calls []ll
 				"call_id", call.ID,
 			)
 
-			output, err := executeSingleTool(ctx, tr, toToolsCall(call), es)
+			output, isErr, err := executeSingleTool(ctx, tr, toToolsCall(call), es)
 			results[idx] = ParallelToolResult{
-				ID:     call.ID,
-				Name:   call.Name,
-				Output: output,
-				Err:    err,
+				ID:      call.ID,
+				Name:    call.Name,
+				Output:  output,
+				Err:     err,
+				IsError: isErr || err != nil,
 			}
 		}(i, tc)
 	}
@@ -123,35 +129,66 @@ func executeToolsParallel(ctx context.Context, tr tools.ToolRegistry, calls []ll
 }
 
 // executeSingleTool looks up the tool in the registry and runs it, returning
-// the output string. It is shared by both sequential and parallel execution
-// paths. When the tool implements tools.StreamingBashTool and es is non-nil,
-// it uses ExecuteStreaming to push output lines in real time.
-func executeSingleTool(ctx context.Context, tr tools.ToolRegistry, call tools.ToolCall, es EventStream) (string, error) {
+// the output string and an isError flag propagated from ToolResult.IsError.
+// It is shared by both sequential and parallel execution paths. When the tool
+// implements tools.StreamingBashTool and es is non-nil, it uses
+// ExecuteStreaming to push output lines in real time.
+func executeSingleTool(ctx context.Context, tr tools.ToolRegistry, call tools.ToolCall, es EventStream) (string, bool, error) {
 	if tr == nil {
-		return "", errNoTools
+		return "", false, errNoTools
 	}
 	def, err := tr.Get(ctx, call.Name)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	// Check if the tool supports streaming output.
 	if st, ok := def.(tools.StreamingBashTool); ok && es != nil {
 		sink := &eventStreamSink{es: es}
 		result, err := st.ExecuteStreaming(ctx, call, sink)
 		if err != nil {
-			return "", err
+			return "", false, err
 		}
 		if result == nil {
-			return "", nil
+			return "", false, nil
 		}
-		return result.Output, nil
+		return result.Output, result.IsError, nil
 	}
 	result, err := def.Execute(ctx, call)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if result == nil {
-		return "", nil
+		return "", false, nil
 	}
-	return result.Output, nil
+	return result.Output, result.IsError, nil
+}
+
+// errUnknownToolCallID is returned by matchToolResultsByID when a result's
+// ToolCallID does not match any of the input calls.
+var errUnknownToolCallID = errors.New("core: tool result has unknown ToolCallID")
+
+// matchToolResultsByID builds a ToolCallID-to-index map from calls and
+// reorders results to match the call order by ID. This avoids the positional-
+// index assumption that breaks when parallel results arrive in a different
+// order. A result whose ToolCallID is not present in calls produces
+// errUnknownToolCallID.
+func matchToolResultsByID(calls []llm.ToolCall, results []ParallelToolResult) ([]ParallelToolResult, error) {
+	if len(results) == 0 {
+		return results, nil
+	}
+
+	indexByID := make(map[string]int, len(calls))
+	for i, tc := range calls {
+		indexByID[tc.ID] = i
+	}
+
+	matched := make([]ParallelToolResult, len(calls))
+	for _, res := range results {
+		idx, ok := indexByID[res.ID]
+		if !ok {
+			return nil, fmt.Errorf("%w: %s", errUnknownToolCallID, res.ID)
+		}
+		matched[idx] = res
+	}
+	return matched, nil
 }

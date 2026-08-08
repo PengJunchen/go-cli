@@ -27,6 +27,10 @@ type ToolResult struct {
 	Metadata map[string]any `json:"metadata,omitempty"`
 	// ToolCallID links the result back to the originating call.
 	ToolCallID string `json:"tool_call_id,omitempty"`
+	// IsError marks the result as an error for structured detection. When
+	// true, consumers (e.g. the TUI) can detect tool errors via this boolean
+	// instead of fragile string matching on the Output text.
+	IsError bool `json:"is_error,omitempty"`
 }
 
 // ExecutionMode describes how a set of tool calls should be run.
