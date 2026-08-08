@@ -124,7 +124,9 @@ func TestAccordionRenderEmpty(t *testing.T) {
 func TestDefaultCollapsed(t *testing.T) {
 	assert.True(t, defaultCollapsed(ContentTypeToolCall))
 	assert.True(t, defaultCollapsed(ContentTypeToolResult))
-	assert.True(t, defaultCollapsed(ContentTypeThinking))
+	// Thinking entries default to expanded; they are auto-collapsed to a
+	// duration summary when the next non-thinking event arrives.
+	assert.False(t, defaultCollapsed(ContentTypeThinking))
 	assert.False(t, defaultCollapsed(ContentTypeAssistant))
 	assert.False(t, defaultCollapsed(ContentTypeUser))
 	assert.False(t, defaultCollapsed(ContentTypeStatus))

@@ -358,6 +358,9 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		if assembly.ApprovalChannel != nil {
 			appOpts = append(appOpts, tui.WithApprovalChannel(assembly.ApprovalChannel))
 		}
+		if slashCtx.thinkingVisibility != "" {
+			appOpts = append(appOpts, tui.WithThinkingVisibility(slashCtx.thinkingVisibility))
+		}
 		appOpts = append(appOpts,
 			tui.WithSteerCallback(func(input string) {
 				turnID := assembly.TurnRunner.RunningTurnID()

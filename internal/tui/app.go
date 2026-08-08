@@ -150,6 +150,13 @@ func WithApprovalChannel(ch <-chan ApprovalRequest) AppOption {
 	return func(a *BubbleteaApp) { a.approvalCh = ch }
 }
 
+// WithThinkingVisibility controls how thinking-chain entries are displayed:
+// "show" (default) expands them, "collapse" folds them to a summary, "hide"
+// suppresses them entirely.
+func WithThinkingVisibility(mode string) AppOption {
+	return func(a *BubbleteaApp) { a.thinkingVisibility = mode }
+}
+
 // BubbleteaApp is the default App implementation. It is a thin adapter over a
 // bubbletea tea.Program: the teaModel owns all TUI state (accordion, streaming,
 // steer, token usage, spinner) and the event-handling logic, while this struct
@@ -191,6 +198,7 @@ type BubbleteaApp struct {
 	pauseCallback  func()
 	resumeCallback func()
 	approvalCh     <-chan ApprovalRequest
+	thinkingVisibility string
 }
 
 // NewBubbleteaApp constructs an app wired to the given event source, using a
@@ -365,6 +373,10 @@ type teaModel struct {
 	approvalCh      <-chan ApprovalRequest
 	pendingApproval *ApprovalRequest
 
+	// thinkingVisibility controls how thinking entries are rendered:
+	// "show" (default), "collapse", or "hide".
+	thinkingVisibility string
+
 	// token usage
 	tokenInput  int
 	tokenOutput int
@@ -405,8 +417,9 @@ func newTeaModel(a *BubbleteaApp) *teaModel {
 		cancelCallback: a.cancelCallback,
 		pauseCallback:  a.pauseCallback,
 		resumeCallback: a.resumeCallback,
-		approvalCh:     a.approvalCh,
-		spinner:        spinner.New(spinner.WithSpinner(spinner.MiniDot)),
+		approvalCh:         a.approvalCh,
+		thinkingVisibility: a.thinkingVisibility,
+		spinner:            spinner.New(spinner.WithSpinner(spinner.MiniDot)),
 	}
 }
 
@@ -457,6 +470,15 @@ func (m *teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.spinner, cmd = m.spinner.Update(msg)
 		active := m.spinnerActive
+		// Advance the per-entry spinner frame for all running tool_call
+		// entries so each tool shows its own animated spinner icon.
+		if active {
+			for _, e := range m.accordion.entries {
+				if e.ContentType == ContentTypeToolCall && e.ToolStatus == ToolStatusRunning {
+					e.SpinnerFrame++
+				}
+			}
+		}
 		m.mu.Unlock()
 		if !active {
 			return m, nil
@@ -679,17 +701,29 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 		return nil
 	}
 
-	// Update spinner state for tool lifecycle events. The spinner is
-	// activated on tool_call and deactivated on tool_result.
+	// Finalize any active thinking entries before processing the new event.
+	// When a non-thinking, non-incremental event arrives, the last thinking
+	// entry is auto-collapsed with a "thought for Xs" duration summary.
+	if ev.ContentType != ContentTypeThinking && ev.ContentType != ContentTypeStreamingThink {
+		m.finalizeThinking()
+	}
+
+	// Track tool lifecycle: tool_call sets the entry to Running; tool_result
+	// updates the last tool_call entry to Completed or Error. The global
+	// spinner is activated when any tool is running and deactivated when all
+	// tools have completed.
 	activateSpinner := false
-	if ev.ContentType == ContentTypeToolCall || ev.ContentType == ContentTypeToolResult {
+	if ev.ContentType == ContentTypeToolCall {
 		m.mu.Lock()
-		if ev.ContentType == ContentTypeToolCall {
-			m.spinnerActive = true
-			activateSpinner = true
-		} else {
-			m.spinnerActive = false
-		}
+		m.spinnerActive = true
+		activateSpinner = true
+		m.mu.Unlock()
+	} else if ev.ContentType == ContentTypeToolResult {
+		m.mu.Lock()
+		m.updateToolResultStatusLocked(ev.Content)
+		// Deactivate the global spinner only if no tool_call entries are still
+		// running.
+		m.spinnerActive = m.hasRunningToolLocked()
 		m.mu.Unlock()
 	}
 
@@ -751,7 +785,60 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 		// Fall through to addEntry if no tool_call entry to append to.
 	}
 
+	// Respect the thinking visibility setting: "hide" skips the entry entirely,
+	// "collapse" forces it collapsed (overriding the default expanded state).
+	if ct == ContentTypeThinking {
+		if m.thinkingVisibility == "hide" {
+			slog.DebugContext(ctx, "tui.app.render",
+				"content_type", ct,
+				"trace_id", ev.TraceID,
+				"span_id", ev.SpanID,
+				"latency_us", time.Since(start).Microseconds(),
+				"skipped", "thinking_visibility=hide",
+			)
+			return nil
+		}
+	}
+
 	m.addEntry(ct, out)
+
+	// Apply thinking visibility: "collapse" forces the entry collapsed.
+	if ct == ContentTypeThinking && m.thinkingVisibility == "collapse" {
+		m.mu.Lock()
+		if len(m.accordion.entries) > 0 {
+			last := m.accordion.entries[len(m.accordion.entries)-1]
+			if last.ContentType == ContentTypeThinking {
+				last.Collapsed = true
+			}
+		}
+		m.mu.Unlock()
+	}
+
+	// Set tool_call entry status to Running and record the start time so the
+	// status icon (spinner) and duration display work correctly.
+	if ct == ContentTypeToolCall {
+		m.mu.Lock()
+		if len(m.accordion.entries) > 0 {
+			last := m.accordion.entries[len(m.accordion.entries)-1]
+			if last.ContentType == ContentTypeToolCall {
+				last.ToolStatus = ToolStatusRunning
+				last.ToolStartTime = time.Now()
+			}
+		}
+		m.mu.Unlock()
+	}
+	// Record thinking start time for duration display when auto-collapsed.
+	if ct == ContentTypeThinking {
+		m.mu.Lock()
+		if len(m.accordion.entries) > 0 {
+			last := m.accordion.entries[len(m.accordion.entries)-1]
+			if last.ContentType == ContentTypeThinking {
+				last.ToolStartTime = time.Now()
+			}
+		}
+		m.mu.Unlock()
+	}
+
 	slog.DebugContext(ctx, "tui.app.render",
 		"content_type", ct,
 		"trace_id", ev.TraceID,
@@ -1050,6 +1137,63 @@ func (m *teaModel) handleSteerKeyLocked(msg tea.KeyMsg) tea.Cmd {
 		}
 	}
 	return nil
+}
+
+// finalizeThinking collapses the last thinking entry (if any) and replaces its
+// summary with a "thought for Xs" duration string. It is called when a
+// non-thinking event arrives. The caller must NOT hold m.mu.
+func (m *teaModel) finalizeThinking() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for i := len(m.accordion.entries) - 1; i >= 0; i-- {
+		e := m.accordion.entries[i]
+		if e.ContentType == ContentTypeThinking && !e.Collapsed && !e.ToolStartTime.IsZero() {
+			e.Collapsed = true
+			e.ToolDuration = time.Since(e.ToolStartTime)
+			e.Summary = fmt.Sprintf("thought for %.1fs", e.ToolDuration.Seconds())
+			break
+		}
+	}
+}
+
+// updateToolResultStatusLocked finds the last tool_call entry and updates its
+// status to Completed (or Error if the result content indicates failure). The
+// caller must hold m.mu.
+func (m *teaModel) updateToolResultStatusLocked(resultContent string) {
+	for i := len(m.accordion.entries) - 1; i >= 0; i-- {
+		e := m.accordion.entries[i]
+		if e.ContentType == ContentTypeToolCall {
+			if e.ToolStatus == ToolStatusRunning || e.ToolStatus == ToolStatusPending {
+				e.ToolDuration = time.Since(e.ToolStartTime)
+				if isToolError(resultContent) {
+					e.ToolStatus = ToolStatusError
+				} else {
+					e.ToolStatus = ToolStatusCompleted
+				}
+			}
+			break
+		}
+	}
+}
+
+// hasRunningToolLocked reports whether any tool_call entry is currently in the
+// Running state. The caller must hold m.mu.
+func (m *teaModel) hasRunningToolLocked() bool {
+	for _, e := range m.accordion.entries {
+		if e.ContentType == ContentTypeToolCall && e.ToolStatus == ToolStatusRunning {
+			return true
+		}
+	}
+	return false
+}
+
+// isToolError heuristically detects whether a tool result content indicates an
+// error by checking for common error markers.
+func isToolError(content string) bool {
+	lower := strings.ToLower(content)
+	return strings.Contains(lower, "error:") ||
+		strings.Contains(lower, "failed:") ||
+		strings.Contains(lower, "panic:")
 }
 
 // handleApprovalKeyLocked processes a key while an approval request is pending.

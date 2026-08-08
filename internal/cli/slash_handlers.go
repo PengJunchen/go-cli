@@ -468,3 +468,47 @@ func truncatePreview(content string) string {
 	}
 	return content[:maxHistoryPreview] + "..."
 }
+
+// ----------------------------------------------------------------------------
+// TUI display commands
+// ----------------------------------------------------------------------------
+
+// ThinkingHandler implements the /thinking command, which controls how
+// thinking-chain entries are displayed in the TUI. Sub-commands:
+//
+//	/thinking show     — expand all thinking entries (default)
+//	/thinking collapse — fold thinking entries to a one-line summary
+//	/thinking hide     — suppress thinking entries entirely
+//
+// With no argument, /thinking reports the current mode.
+type ThinkingHandler struct{}
+
+var _ SlashCommandHandler = (*ThinkingHandler)(nil)
+
+func (h *ThinkingHandler) Name() string        { return "thinking" }
+func (h *ThinkingHandler) Description() string { return "Control thinking-chain display: show, collapse, or hide" }
+
+func (h *ThinkingHandler) Handle(_ context.Context, args []string, sc *slashContext) error {
+	if len(args) == 0 {
+		mode := sc.thinkingVisibility
+		if mode == "" {
+			mode = "show"
+		}
+		fmt.Fprintf(sc.out, "Thinking display mode: %s\n", mode)
+		return nil
+	}
+	switch strings.ToLower(args[0]) {
+	case "show":
+		sc.thinkingVisibility = "show"
+		fmt.Fprintln(sc.out, "Thinking entries will be expanded.")
+	case "collapse":
+		sc.thinkingVisibility = "collapse"
+		fmt.Fprintln(sc.out, "Thinking entries will be collapsed to a summary.")
+	case "hide":
+		sc.thinkingVisibility = "hide"
+		fmt.Fprintln(sc.out, "Thinking entries will be hidden.")
+	default:
+		return fmt.Errorf("unknown sub-command %q: use show, collapse, or hide", args[0])
+	}
+	return nil
+}
