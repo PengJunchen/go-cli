@@ -542,7 +542,7 @@ func AssembleAgent(
 	production.RegisterTelemetry(telemetry)
 
 	var auditLog production.AuditLog
-	if rc != nil && rc.Production.Audit.Enabled {
+	if rc != nil && rc.Production.Audit.Enabled != nil && *rc.Production.Audit.Enabled {
 		auditPath := rc.Production.Audit.Path
 		if auditPath == "" {
 			if home, homeErr := os.UserHomeDir(); homeErr == nil && home != "" {

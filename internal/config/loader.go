@@ -263,6 +263,7 @@ func parseCommandString(s string) []string {
 // defaultConfig returns the built-in default configuration.
 func defaultConfig() *Config {
 	enabled := true
+	auditEnabled := true
 	return &Config{
 		Provider: ProviderConfig{MaxTokens: defaultMaxTokens},
 		Model:    ModelConfig{MaxTokens: defaultMaxTokens},
@@ -274,6 +275,9 @@ func defaultConfig() *Config {
 		Compaction: CompactionConfig{
 			Strategy:  "micro_first",
 			MaxTokens: defaultCompactionMaxTokens,
+		},
+		Production: ProductionConfig{
+			Audit: AuditConfig{Enabled: &auditEnabled},
 		},
 	}
 }

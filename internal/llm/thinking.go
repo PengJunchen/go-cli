@@ -3,16 +3,13 @@
 // This file defines the ThinkingLevel type, ThinkingConfig, the
 // ThinkingAdapter interface and provider-specific implementations, plus a
 // WithThinking Option that attaches thinking configuration to a generation
-// call. Because GenerationOptions is declared in llm.go and cannot be extended
-// from another file, WithThinking stores the config in a package-level
-// sync.Map keyed by the *GenerationOptions pointer; ThinkingFromOpts retrieves
-// it during request encoding.
+// call. WithThinking sets the Thinking field on GenerationOptions directly;
+// ThinkingFromOpts retrieves it during request encoding.
 package llm
 
 import (
 	"fmt"
 	"strings"
-	"sync"
 )
 
 // ThinkingLevel controls LLM reasoning depth.
@@ -126,37 +123,23 @@ func (GeminiThinkingAdapter) Apply(opts map[string]any, cfg ThinkingConfig) {
 	}
 }
 
-// thinkingConfigs stores ThinkingConfig values keyed by *GenerationOptions
-// pointer. This allows WithThinking to attach thinking configuration without
-// modifying the GenerationOptions struct (which is declared in llm.go).
-var thinkingConfigs sync.Map
-
 // WithThinking returns an Option that attaches a ThinkingConfig to the
-// generation call. The config is stored in a package-level map keyed by the
-// *GenerationOptions pointer and can be retrieved with ThinkingFromOpts during
-// request encoding.
+// generation call. The config is stored directly on the GenerationOptions
+// struct and can be retrieved with ThinkingFromOpts during request encoding.
 func WithThinking(cfg ThinkingConfig) Option {
 	return func(o *GenerationOptions) {
-		thinkingConfigs.Store(o, cfg)
+		o.Thinking = &cfg
 	}
 }
 
-// ThinkingFromOpts retrieves the ThinkingConfig stored by WithThinking for the
+// ThinkingFromOpts retrieves the ThinkingConfig stored by WithThinking on the
 // given GenerationOptions. It returns the config and true if a thinking config
 // was set, or a zero-value config and false otherwise.
 func ThinkingFromOpts(o *GenerationOptions) (ThinkingConfig, bool) {
-	v, ok := thinkingConfigs.Load(o)
-	if !ok {
+	if o == nil || o.Thinking == nil {
 		return ThinkingConfig{}, false
 	}
-	return v.(ThinkingConfig), true
-}
-
-// DeleteThinking removes the ThinkingConfig stored for the given
-// GenerationOptions. Callers should invoke this after retrieving the config to
-// avoid leaking memory.
-func DeleteThinking(o *GenerationOptions) {
-	thinkingConfigs.Delete(o)
+	return *o.Thinking, true
 }
 
 // ParseThinkingLevel converts a string to a ThinkingLevel. An empty string

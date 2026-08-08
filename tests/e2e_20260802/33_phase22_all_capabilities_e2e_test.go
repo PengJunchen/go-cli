@@ -277,7 +277,8 @@ func TestET_Phase22_AllCapabilities_AC3_GitToolsFunctional(t *testing.T) {
 // AssembleAgent wires all production resilience components as non-nil.
 func TestET_Phase22_AllCapabilities_AC4_ProductionComponentsNotNil(t *testing.T) {
 	cfg := phase33TestConfig()
-	cfg.Production.Audit.Enabled = true
+	auditEnabled := true
+	cfg.Production.Audit.Enabled = &auditEnabled
 	cfg.Production.Audit.Path = filepath.Join(t.TempDir(), "audit.jsonl")
 
 	assembly := phase33Assemble(t, cfg)
