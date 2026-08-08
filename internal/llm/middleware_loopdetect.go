@@ -135,27 +135,33 @@ func (m *loopDetectModel) Generate(ctx context.Context, msgs []Message, opts ...
 	return resp, nil
 }
 
-// Stream forwards the stream while accumulating chunk content. Once the stream
-// completes, the accumulated content is checked for a loop; if a loop is
-// detected the buffered chunks are dropped and the error is returned.
+// Stream forwards chunks from the inner model in real-time via a goroutine.
+// After the stream completes, the accumulated content is checked for a loop
+// (post-hoc detection). If a loop is detected a warning is logged; the
+// chunks have already been forwarded so no error can be returned to the
+// caller, but the loop history is recorded so subsequent calls will detect
+// the loop and return an error.
 func (m *loopDetectModel) Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
 	ch, err := m.next.Stream(ctx, msgs, opts...)
 	if err != nil {
 		return nil, err
 	}
-	var chunks []MessageChunk
-	var acc strings.Builder
-	for chunk := range ch {
-		chunks = append(chunks, chunk)
-		acc.WriteString(chunk.Content)
-	}
-	if err := m.checkLoop(acc.String()); err != nil {
-		return nil, err
-	}
-	out := make(chan MessageChunk, len(chunks))
-	for _, c := range chunks {
-		out <- c
-	}
-	close(out)
+
+	out := make(chan MessageChunk, 16)
+	go func() {
+		defer close(out)
+		var acc strings.Builder
+		for chunk := range ch {
+			out <- chunk // Real-time forward
+			acc.WriteString(chunk.Content)
+		}
+		// Post-hoc loop detection after all chunks have been forwarded.
+		if loopErr := m.checkLoop(acc.String()); loopErr != nil {
+			m.logger.Warn("loopdetection.stream.post_hoc",
+				"op", "loopdetection.stream.post_hoc",
+				"error", loopErr.Error(),
+			)
+		}
+	}()
 	return out, nil
 }
