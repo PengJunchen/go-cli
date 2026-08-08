@@ -183,7 +183,7 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Re
 		}
 	}
 
-	endSpan, _ := tracing.SpanFromContext(ctx, "turn.end", tracing.SpanKindInternal)
+	endSpan, _ := tracing.SpanFromContext(spanCtx, "turn.end", tracing.SpanKindInternal)
 	endSpan.SetAttributes(tracing.Attribute{Key: "turn_id", Value: id}, tracing.Attribute{Key: "status", Value: turn.Status.String()})
 	endSpan.End()
 
