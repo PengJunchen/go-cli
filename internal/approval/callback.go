@@ -9,6 +9,8 @@ import (
 	"os"
 	"strings"
 	"sync"
+
+	"github.com/pengjunchen/go-cli/internal/tui"
 )
 
 // ApprovalResult represents the user's decision.
@@ -93,6 +95,79 @@ func isTerminalReader(r io.Reader) bool {
 		return false
 	}
 	return fi.Mode()&os.ModeCharDevice != 0
+}
+
+// DiffPreviewFunc generates a unified diff preview string for a tool call. It
+// returns "" when no preview is available (e.g. for non-file tools). The
+// function is called from TeaApprovalCallback before sending the request to the
+// TUI so the user can see the proposed change before approving.
+type DiffPreviewFunc func(toolName string, args map[string]any) string
+
+// TeaApprovalCallback sends approval requests to the TUI via a channel instead
+// of blocking on stdin readline. It implements ApprovalCallback so it can be a
+// drop-in replacement for InteractiveApprovalCallback: the middleware calls
+// RequestApproval, which sends a tui.ApprovalRequest on the channel and blocks
+// until the TUI delivers a tui.ApprovalResponse (or the context is canceled).
+type TeaApprovalCallback struct {
+	requestCh    chan<- tui.ApprovalRequest
+	diffPreviewFn DiffPreviewFunc
+}
+
+var _ ApprovalCallback = (*TeaApprovalCallback)(nil)
+
+// NewTeaApprovalCallback builds a TeaApprovalCallback that forwards approval
+// requests to the given channel. The channel is typically shared with the
+// BubbleteaApp's approval listener (see tui.WithApprovalChannel). An optional
+// diffPreviewFn generates a unified diff for edit/write tool calls.
+func NewTeaApprovalCallback(ch chan<- tui.ApprovalRequest, opts ...TeaApprovalOption) *TeaApprovalCallback {
+	c := &TeaApprovalCallback{requestCh: ch}
+	for _, opt := range opts {
+		opt(c)
+	}
+	return c
+}
+
+// TeaApprovalOption configures a TeaApprovalCallback at construction time.
+type TeaApprovalOption func(*TeaApprovalCallback)
+
+// WithDiffPreviewFunc sets the function used to generate diff previews for
+// edit/write tool calls.
+func WithDiffPreviewFunc(fn DiffPreviewFunc) TeaApprovalOption {
+	return func(c *TeaApprovalCallback) { c.diffPreviewFn = fn }
+}
+
+// RequestApproval sends an ApprovalRequest to the TUI and blocks until the user
+// responds. If the context is canceled before a response arrives, the call is
+// denied and the context error is returned. When a DiffPreviewFunc is wired,
+// the diff preview is generated and included in the request for edit/write tools.
+func (c *TeaApprovalCallback) RequestApproval(ctx context.Context, toolName string, args map[string]any) (ApprovalResult, error) {
+	respCh := make(chan tui.ApprovalResponse, 1)
+	req := tui.ApprovalRequest{
+		ToolName:   toolName,
+		Args:        args,
+		ResponseCh: respCh,
+	}
+	if c.diffPreviewFn != nil {
+		req.DiffPreview = c.diffPreviewFn(toolName, args)
+	}
+	select {
+	case c.requestCh <- req:
+	case <-ctx.Done():
+		return ApprovalDeny, ctx.Err()
+	}
+	select {
+	case resp := <-respCh:
+		switch resp.Decision {
+		case tui.ApprovalAllow:
+			return ApprovalAllow, nil
+		case tui.ApprovalAlwaysAllow:
+			return ApprovalAlwaysAllow, nil
+		default:
+			return ApprovalDeny, nil
+		}
+	case <-ctx.Done():
+		return ApprovalDeny, ctx.Err()
+	}
 }
 
 // ApprovalCache persists always-allow decisions so subsequent identical calls

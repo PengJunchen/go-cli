@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/acp"
@@ -26,6 +27,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/skill"
 	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tracing"
+	"github.com/pengjunchen/go-cli/internal/tui"
 )
 
 // defaultMaxTokens is the default compaction token budget used when no
@@ -111,6 +113,11 @@ type AgentAssembly struct {
 	// steering messages here when the user presses Esc and types an
 	// instruction.
 	SteerChannel chan string
+	// ApprovalChannel is the shared channel between the TeaApprovalCallback
+	// (writer, inside the approval middleware) and the BubbleteaApp (reader,
+	// via tui.WithApprovalChannel). It is nil when the assembly was built
+	// without TUI-based approval (non-interactive mode).
+	ApprovalChannel chan tui.ApprovalRequest
 	// FollowUpChannel is the shared follow-up channel between the
 	// TurnRunner (writer) and the LoopAgent (reader). The REPL writes
 	// follow-up messages here so the running loop picks them up between LLM
@@ -147,11 +154,21 @@ type assembleConfig struct {
 	enableSession bool
 	agentName     string
 	thinkingLevel *llm.ThinkingLevel
+	// approvalCh, when non-nil, enables TUI-based approval via TeaApprovalCallback.
+	approvalCh chan tui.ApprovalRequest
 }
 
 // WithMaxTokens sets the compaction token budget.
 func WithMaxTokens(n int) AssembleOption {
 	return func(c *assembleConfig) { c.maxTokens = n }
+}
+
+// WithApprovalChannel enables TUI-based interactive approval. When set,
+// AssembleAgent constructs a TeaApprovalCallback backed by this channel instead
+// of the fallback InteractiveApprovalCallback. The same channel must be passed
+// to the BubbleteaApp via tui.WithApprovalChannel.
+func WithApprovalChannel(ch chan tui.ApprovalRequest) AssembleOption {
+	return func(c *assembleConfig) { c.approvalCh = ch }
 }
 
 // WithResume enables session history restoration on startup.
@@ -436,7 +453,18 @@ func AssembleAgent(
 	// 5. Wire approval + mutation middleware via decorator pattern.
 	classifier := approval.NewSafetyPolicyClassifier([]string{"bash"})
 	approvalStore := approval.NewInMemoryApprovalStore()
-	approvalCallback := approval.NewInteractiveApprovalCallback(os.Stdin, out)
+	var approvalCallback approval.ApprovalCallback
+	if ac.approvalCh != nil {
+		// TUI-based approval: the TeaApprovalCallback sends requests through the
+		// channel for the BubbleteaApp to render interactively. A diff preview
+		// function is wired so edit/write approvals show the proposed change.
+		approvalCallback = approval.NewTeaApprovalCallback(ac.approvalCh,
+			approval.WithDiffPreviewFunc(buildDiffPreviewFn(diffGen)),
+		)
+	} else {
+		// Fallback: stdin readline (auto-denies in non-interactive mode).
+		approvalCallback = approval.NewInteractiveApprovalCallback(os.Stdin, out)
+	}
 	approvalCache := approval.NewApprovalCache("")
 	modeResolver := approval.NewDefaultPermissionModeResolver()
 	approvalMW := approval.NewApprovalMiddleware(
@@ -915,6 +943,7 @@ func AssembleAgent(
 		Telemetry:          telemetry,
 		TurnRunner:         turnRunner,
 		SteerChannel:       steerCh,
+		ApprovalChannel:    ac.approvalCh,
 		FollowUpChannel:    followUpCh,
 		LoopAgent:          loopAgent,
 		GitTool:            gitTool,
@@ -1548,4 +1577,52 @@ func buildSingleLSPClient(ctx context.Context, srv config.LSPServerConfig, logge
 	}
 	logger.Info("assemble_lsp_server_ready", "command", srv.ServerCommand, "extensions", srv.FileExtensions)
 	return client, true
+}
+
+// buildDiffPreviewFn returns a DiffPreviewFunc that generates a unified diff
+// preview for edit and write tool calls using the shared DiffGenerator. For
+// other tools it returns "". The function reads the current file content from
+// disk to compute the before/after diff.
+func buildDiffPreviewFn(diffGen tools.DiffGenerator) approval.DiffPreviewFunc {
+	return func(toolName string, args map[string]any) string {
+		if diffGen == nil {
+			return ""
+		}
+		switch toolName {
+		case "write":
+			path, _ := args["path"].(string)
+			content, _ := args["content"].(string)
+			if path == "" {
+				return ""
+			}
+			old, err := os.ReadFile(path)
+			if err != nil {
+				// New file: show all lines as additions.
+				old = nil
+			}
+			diff, err := diffGen.Generate(string(old), content, path)
+			if err != nil || diff == "" {
+				return ""
+			}
+			return diff
+		case "edit":
+			path, _ := args["file_path"].(string)
+			oldStr, _ := args["old_string"].(string)
+			newStr, _ := args["new_string"].(string)
+			if path == "" {
+				return ""
+			}
+			old, err := os.ReadFile(path)
+			if err != nil {
+				return ""
+			}
+			newContent := strings.Replace(string(old), oldStr, newStr, 1)
+			diff, err := diffGen.Generate(string(old), newContent, path)
+			if err != nil || diff == "" {
+				return ""
+			}
+			return diff
+		}
+		return ""
+	}
 }

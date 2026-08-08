@@ -128,13 +128,25 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 	// Assemble the full agent runtime with all production wiring (model
 	// wrapping, tools, approval gates, retry/cost tracking, output guards,
 	// subagent, session persistence, compaction).
-	assembly, err := AssembleAgent(spanCtx, rc, providerName, modelName, c.out,
+	//
+	// When running in an interactive TTY, create a shared approval channel so
+	// the TUI can render approval prompts inline (TeaApprovalCallback) instead
+	// of blocking on stdin readline. The same channel is passed to each
+	// per-turn BubbleteaApp via tui.WithApprovalChannel.
+	var approvalCh chan tui.ApprovalRequest
+	assembleOpts := []AssembleOption{
 		WithMaxTokens(maxTokensFlag),
 		WithResume(resumeFlag),
 		WithSessionPersistence(true),
 		WithAgentName("interactive"),
 		WithThinkingLevel(thinkingLevel),
-	)
+	}
+	if tui.IsTerminal() {
+		approvalCh = make(chan tui.ApprovalRequest, 8)
+		assembleOpts = append(assembleOpts, WithApprovalChannel(approvalCh))
+	}
+	assembly, err := AssembleAgent(spanCtx, rc, providerName, modelName, c.out,
+		assembleOpts...)
 	if err != nil {
 		span.SetStatus(tracing.SpanStatusError, err.Error())
 		return newExecutionError("interactive: assemble agent", err)
@@ -327,7 +339,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		isTTY := tui.IsTerminal()
 		tsp := tui.NewDefaultTerminalSizeProvider()
 		termWidth := tsp.Width()
-		app := tui.NewBubbleteaApp(tuiEvents,
+		appOpts := []tui.AppOption{
 			tui.WithWidth(termWidth),
 			tui.WithOnUpdate(func(view string) {
 				if isTTY {
@@ -342,6 +354,11 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 					fmt.Fprintln(c.out, view) //nolint:errcheck
 				}
 			}),
+		}
+		if assembly.ApprovalChannel != nil {
+			appOpts = append(appOpts, tui.WithApprovalChannel(assembly.ApprovalChannel))
+		}
+		appOpts = append(appOpts,
 			tui.WithSteerCallback(func(input string) {
 				turnID := assembly.TurnRunner.RunningTurnID()
 				if turnID != "" {
@@ -369,6 +386,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 				}
 			}),
 		)
+		app := tui.NewBubbleteaApp(tuiEvents, appOpts...)
 
 		go func() {
 			if runErr := app.Run(turnCtx); runErr != nil && runErr != context.Canceled {

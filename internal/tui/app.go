@@ -143,6 +143,13 @@ func WithResumeCallback(cb func()) AppOption {
 	return func(a *BubbleteaApp) { a.resumeCallback = cb }
 }
 
+// WithApprovalChannel wires a channel that delivers ApprovalRequest values
+// from the approval middleware. When a request arrives the TUI renders an
+// interactive approval entry and the user resolves it with y/a/n/d keys.
+func WithApprovalChannel(ch <-chan ApprovalRequest) AppOption {
+	return func(a *BubbleteaApp) { a.approvalCh = ch }
+}
+
 // BubbleteaApp is the default App implementation. It is a thin adapter over a
 // bubbletea tea.Program: the teaModel owns all TUI state (accordion, streaming,
 // steer, token usage, spinner) and the event-handling logic, while this struct
@@ -183,6 +190,7 @@ type BubbleteaApp struct {
 	cancelCallback func()
 	pauseCallback  func()
 	resumeCallback func()
+	approvalCh     <-chan ApprovalRequest
 }
 
 // NewBubbleteaApp constructs an app wired to the given event source, using a
@@ -352,6 +360,11 @@ type teaModel struct {
 	resumeCallback func()
 	paused         bool
 
+	// approval flow: approvalCh delivers requests from the middleware;
+	// pendingApproval is the request currently awaiting a user decision.
+	approvalCh      <-chan ApprovalRequest
+	pendingApproval *ApprovalRequest
+
 	// token usage
 	tokenInput  int
 	tokenOutput int
@@ -392,20 +405,25 @@ func newTeaModel(a *BubbleteaApp) *teaModel {
 		cancelCallback: a.cancelCallback,
 		pauseCallback:  a.pauseCallback,
 		resumeCallback: a.resumeCallback,
+		approvalCh:     a.approvalCh,
 		spinner:        spinner.New(spinner.WithSpinner(spinner.MiniDot)),
 	}
 }
 
-// Init starts the bubbletea command loop. It arms three listeners: one for the
-// agent event stream, one for messages pushed via Send, and one for the quit
-// signal. The spinner tick is started on demand when a tool call begins.
+// Init starts the bubbletea command loop. It arms listeners for the agent event
+// stream, messages pushed via Send, the quit signal, and (when wired) approval
+// requests from the middleware. The spinner tick is started on demand.
 func (m *teaModel) Init() tea.Cmd {
 	done := m.runDone
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		waitForEvent(m.events, done),
 		waitForMsg(m.msgCh, done),
 		waitForQuit(m.quitCh, done),
-	)
+	}
+	if m.approvalCh != nil {
+		cmds = append(cmds, waitForApproval(m.approvalCh, done))
+	}
+	return tea.Batch(cmds...)
 }
 
 // Update handles all incoming tea.Msg values: agent events from the stream,
@@ -416,6 +434,16 @@ func (m *teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.eventsSeen.Add(1)
 		cmd := m.handleEvent(msg.event)
 		return m, tea.Batch(waitForEvent(m.events, m.runDone), cmd)
+	case approvalRequestMsg:
+		m.mu.Lock()
+		m.pendingApproval = &msg.req
+		view := ""
+		if m.shouldNotify() {
+			view = m.renderViewLocked()
+		}
+		m.mu.Unlock()
+		m.notify(view)
+		return m, waitForApproval(m.approvalCh, m.runDone)
 	case tea.KeyMsg:
 		return m, m.handleKey(msg)
 	case tea.WindowSizeMsg:
@@ -464,6 +492,11 @@ func (m *teaModel) renderViewLocked() string {
 		sb.WriteString(m.spinner.View())
 		sb.WriteString(" working...")
 	}
+	// Pending approval entry (interactive approval flow).
+	if m.pendingApproval != nil {
+		sb.WriteString("\n")
+		sb.WriteString(renderApprovalRequest(m.pendingApproval))
+	}
 	// Steer input prompt.
 	if m.steerInputMode {
 		sb.WriteString("\n> steer> ")
@@ -511,6 +544,29 @@ func (m *teaModel) renderStatusBarLocked() string {
 // model can distinguish stream events from messages pushed via Send.
 type agentEventMsg struct {
 	event AgentEvent
+}
+
+// approvalRequestMsg wraps an ApprovalRequest delivered from the approval
+// channel so the model can render it as an interactive approval entry.
+type approvalRequestMsg struct {
+	req ApprovalRequest
+}
+
+// waitForApproval returns a tea.Cmd that blocks until an ApprovalRequest
+// arrives on the channel. When done closes (the run is ending) it returns nil
+// so the command goroutine exits instead of leaking.
+func waitForApproval(ch <-chan ApprovalRequest, done <-chan struct{}) tea.Cmd {
+	return func() tea.Msg {
+		select {
+		case req, ok := <-ch:
+			if !ok {
+				return nil
+			}
+			return approvalRequestMsg{req: req}
+		case <-done:
+			return nil
+		}
+	}
 }
 
 // waitForEvent returns a tea.Cmd that blocks until an event arrives on the
@@ -918,6 +974,11 @@ func (m *teaModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	if m.steerInputMode {
 		return m.handleSteerKeyLocked(msg)
 	}
+	// When an approval request is pending, intercept y/a/n/d keys to resolve
+	// it before any other key processing.
+	if m.pendingApproval != nil {
+		return m.handleApprovalKeyLocked(msg)
+	}
 	switch msg.Type {
 	case tea.KeyTab:
 		// Enter steer input mode.
@@ -987,6 +1048,31 @@ func (m *teaModel) handleSteerKeyLocked(msg tea.KeyMsg) tea.Cmd {
 			m.steerInput = m.steerInput[:m.steerCursor] + string(r) + m.steerInput[m.steerCursor:]
 			m.steerCursor++
 		}
+	}
+	return nil
+}
+
+// handleApprovalKeyLocked processes a key while an approval request is pending.
+// y allows once, a always allows, n denies, and d toggles the diff preview
+// (currently informational only). Any other key is ignored. The caller must
+// hold m.mu.
+func (m *teaModel) handleApprovalKeyLocked(msg tea.KeyMsg) tea.Cmd {
+	if msg.Type != tea.KeyRunes {
+		return nil
+	}
+	switch string(msg.Runes) {
+	case "y":
+		m.pendingApproval.ResponseCh <- ApprovalResponse{Decision: ApprovalAllow}
+		m.pendingApproval = nil
+	case "a":
+		m.pendingApproval.ResponseCh <- ApprovalResponse{Decision: ApprovalAlwaysAllow}
+		m.pendingApproval = nil
+	case "n":
+		m.pendingApproval.ResponseCh <- ApprovalResponse{Decision: ApprovalDeny}
+		m.pendingApproval = nil
+	case "d":
+		// Diff preview is always shown when available; 'd' is a no-op
+		// placeholder for future toggle behavior.
 	}
 	return nil
 }
