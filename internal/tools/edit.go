@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -95,17 +94,18 @@ func (t *EditFileTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 		newString = v
 	}
 
-	abspath := path
-	if !filepath.IsAbs(abspath) && t.Workdir != "" {
-		abspath = filepath.Join(t.Workdir, abspath)
+	abspath, err := resolveWithinWorkdir("edit", t.Workdir, path)
+	if err != nil {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		logger.Error("edit.path_traversal", "path", path, "err", err)
+		return nil, err
 	}
-	abspath = filepath.Clean(abspath)
 
 	info, statErr := os.Stat(abspath)
 	if statErr != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("edit.stat_failed", "path", abspath, "err", statErr)
-		return &ToolResult{Output: ""}, fmt.Errorf("edit: %w", statErr)
+		return nil, fmt.Errorf("edit: %w", statErr)
 	}
 	if info.IsDir() {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
@@ -117,7 +117,7 @@ func (t *EditFileTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 	if readErr != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("edit.read_failed", "path", abspath, "err", readErr)
-		return &ToolResult{Output: ""}, fmt.Errorf("edit: %w", readErr)
+		return nil, fmt.Errorf("edit: %w", readErr)
 	}
 
 	data := string(content)
@@ -126,13 +126,13 @@ func (t *EditFileTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 	case 0:
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("edit.no_match", "path", abspath, "old_string", oldString)
-		return &ToolResult{Output: ""}, fmt.Errorf("edit: old_string not found in %s", abspath)
+		return nil, fmt.Errorf("edit: old_string not found in %s", abspath)
 	case 1:
 		// OK: exactly one occurrence.
 	default:
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("edit.multiple_match", "path", abspath, "old_string", oldString, "count", count)
-		return &ToolResult{Output: ""}, fmt.Errorf("edit: old_string matches %d times in %s, expected exactly once", count, abspath)
+		return nil, fmt.Errorf("edit: old_string matches %d times in %s, expected exactly once", count, abspath)
 	}
 
 	updated := strings.Replace(data, oldString, newString, 1)
@@ -161,7 +161,7 @@ func (t *EditFileTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 	if _, werr := writeAtomic(abspath, []byte(updated)); werr != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("edit.write_failed", "path", abspath, "err", werr)
-		return &ToolResult{Output: ""}, fmt.Errorf("edit: %w", werr)
+		return nil, fmt.Errorf("edit: %w", werr)
 	}
 
 	span.SetAttributes(tracing.Attribute{Key: "success", Value: true})

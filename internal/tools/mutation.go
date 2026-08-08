@@ -89,6 +89,12 @@ type DefaultFileMutationQueue struct {
 	// mu guards closed and workers during shutdown.
 	mu     sync.Mutex
 	closed bool
+	// sendWG tracks in-flight Enqueue sends so Close can wait for them
+	// before closing worker channels (prevents send-on-closed-channel).
+	sendWG sync.WaitGroup
+	// workerWG tracks worker goroutines so Close can wait for them to
+	// drain and exit, releasing all goroutines.
+	workerWG sync.WaitGroup
 }
 
 var _ FileMutationQueue = (*DefaultFileMutationQueue)(nil)
@@ -184,11 +190,18 @@ func (q *DefaultFileMutationQueue) Enqueue(ctx context.Context, mutation FileMut
 		q.mu.Unlock()
 		return nil, err
 	}
+	// Track the in-flight send so Close can wait for it before closing
+	// the worker channel. Add must happen under the lock so that Close's
+	// closed=true (also under the lock) is observed before Add: if Close
+	// runs first, workerForLocked returns an error and we never reach here.
+	q.sendWG.Add(1)
+	q.mu.Unlock()
+
 	select {
 	case input <- queuedMutation{mutation: mutation, result: resultCh, ctx: ctx}:
-		q.mu.Unlock()
+		q.sendWG.Done()
 	case <-ctx.Done():
-		q.mu.Unlock()
+		q.sendWG.Done()
 		return nil, fmt.Errorf("mutation: enqueue %s: %w", realPath, ctx.Err())
 	}
 	return resultCh, nil
@@ -196,8 +209,9 @@ func (q *DefaultFileMutationQueue) Enqueue(ctx context.Context, mutation FileMut
 
 // workerForLocked returns the worker channel for realPath, creating it lazily
 // on the first use. If the queue is closed it returns an error. The caller must
-// hold q.mu so that Close cannot close the channel between the closed check and
-// the subsequent send in Enqueue.
+// hold q.mu so that the closed check is atomic with the sendWG.Add(1) that
+// follows in Enqueue, preventing Close from closing the channel between the
+// check and the send.
 func (q *DefaultFileMutationQueue) workerForLocked(realPath string) (chan queuedMutation, error) {
 	if q.closed {
 		return nil, fmt.Errorf("mutation: queue is closed")
@@ -224,7 +238,9 @@ func (q *DefaultFileMutationQueue) workerForLocked(realPath string) (chan queued
 // worker goroutine; instead the panic is reported as an error result and the
 // loop continues.
 func (q *DefaultFileMutationQueue) startWorker(input chan queuedMutation) {
+	q.workerWG.Add(1)
 	go func() {
+		defer q.workerWG.Done()
 		for qm := range input {
 			tr, err := q.applySafe(qm.ctx, qm.mutation)
 			res := FileMutationResult{
@@ -360,8 +376,17 @@ func (q *DefaultFileMutationQueue) Close() error {
 	})
 	q.mu.Unlock()
 
+	// Wait for in-flight sends to complete so no goroutine is mid-send
+	// when we close the channels (prevents send-on-closed-channel panic).
+	q.sendWG.Wait()
+
 	for _, ch := range channels {
 		close(ch)
 	}
+
+	// Wait for all workers to drain their channels and exit so no
+	// goroutines are leaked.
+	q.workerWG.Wait()
+
 	return nil
 }

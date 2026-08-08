@@ -113,6 +113,9 @@ func (ft *FileTracker) Reset() {
 
 	ft.hashes = make(map[string]string)
 	ft.changes = make([]FileChange, 0)
+	ft.checkpoints = make(map[string]CheckpointMeta)
+	ft.checkpointOrder = make([]string, 0)
+	ft.backupContent = make(map[string][]byte)
 	slog.Debug("file_tracker.reset")
 }
 
