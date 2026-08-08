@@ -8,9 +8,10 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"os/exec"
 	"strings"
 	"unicode/utf8"
+
+	"golang.org/x/term"
 )
 
 // LineEditor reads user input with optional line editing, history, and
@@ -108,27 +109,19 @@ func (le *DefaultLineEditor) HistoryStore() *HistoryStore {
 	return le.history
 }
 
-// terminalWidth returns the terminal width in columns. It queries stty once
-// and caches the result. Falls back to 80 when the terminal size cannot be
-// determined.
+// terminalWidth returns the terminal width in columns. It queries the
+// terminal once and caches the result. Falls back to 80 when the terminal
+// size cannot be determined.
 func (le *DefaultLineEditor) terminalWidth() int {
 	if le.cachedTermWidth > 0 {
 		return le.cachedTermWidth
 	}
 	le.cachedTermWidth = 80
-	f, ok := le.in.(*os.File)
+	f, ok := le.termFile()
 	if !ok {
 		return le.cachedTermWidth
 	}
-	cmd := exec.Command("stty", "size")
-	cmd.Stdin = f
-	out, err := cmd.Output()
-	if err != nil {
-		return le.cachedTermWidth
-	}
-	var rows, cols int
-	_, _ = fmt.Sscanf(strings.TrimSpace(string(out)), "%d %d", &rows, &cols) //nolint:errcheck // best-effort parse
-	if cols > 0 {
+	if cols, _, err := term.GetSize(int(f.Fd())); err == nil && cols > 0 {
 		le.cachedTermWidth = cols
 	}
 	return le.cachedTermWidth
@@ -193,26 +186,17 @@ func (le *DefaultLineEditor) SetCompleter(c Completer) {
 	le.completer = c
 }
 
-// detectTTY checks once whether the input reader is a terminal and stty is
-// available for raw mode.
+// detectTTY checks once whether the input reader is an interactive terminal.
 func (le *DefaultLineEditor) detectTTY() bool {
 	if le.ttyChecked {
 		return le.isTTY
 	}
 	le.ttyChecked = true
-	f, ok := le.in.(*os.File)
+	f, ok := le.termFile()
 	if !ok {
 		return false
 	}
-	fi, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	if fi.Mode()&os.ModeCharDevice == 0 {
-		return false
-	}
-	if _, err := exec.LookPath("stty"); err != nil {
-		slog.Debug("cli_line_editor_stty_not_found")
+	if !term.IsTerminal(int(f.Fd())) {
 		return false
 	}
 	le.isTTY = true
@@ -601,44 +585,40 @@ func (le *DefaultLineEditor) renderBuf(prompt string, buf []rune, pos int) {
 // Terminal helpers
 // ---------------------------------------------------------------------------
 
+// termFile returns the underlying *os.File of the editor's input reader and
+// whether the assertion succeeded. It is a convenience helper used by the
+// terminal control methods.
+func (le *DefaultLineEditor) termFile() (*os.File, bool) {
+	f, ok := le.in.(*os.File)
+	return f, ok
+}
+
 // setRawMode saves the current terminal state and enables raw mode on the
-// given file descriptor. It returns the saved state string for later
+// given file descriptor. It returns the saved *term.State for later
 // restoration.
-func setRawMode(in io.Reader) (string, error) {
+func setRawMode(in io.Reader) (*term.State, error) {
 	f, ok := in.(*os.File)
 	if !ok {
-		return "", fmt.Errorf("input is not a *os.File")
+		return nil, fmt.Errorf("input is not a *os.File")
 	}
-	// Save current terminal state.
-	out, err := exec.Command("stty", "-g").Output()
+	fd := int(f.Fd())
+	saved, err := term.GetState(fd)
 	if err != nil {
-		// stty -g writes to stdout; try with stdin set explicitly.
-		cmd := exec.Command("stty", "-g")
-		cmd.Stdin = f
-		out, err = cmd.Output()
-		if err != nil {
-			return "", err
-		}
+		return nil, err
 	}
-	saved := strings.TrimSpace(string(out))
-
-	cmd := exec.Command("stty", "raw", "-echo")
-	cmd.Stdin = f
-	if err := cmd.Run(); err != nil {
-		return "", err
+	if _, err := term.MakeRaw(fd); err != nil {
+		return nil, err
 	}
 	return saved, nil
 }
 
-// restoreMode restores the terminal state from the saved string.
-func restoreMode(in io.Reader, saved string) error {
+// restoreMode restores the terminal state from the saved *term.State.
+func restoreMode(in io.Reader, saved *term.State) error {
 	f, ok := in.(*os.File)
 	if !ok {
 		return fmt.Errorf("input is not a *os.File")
 	}
-	cmd := exec.Command("stty", saved)
-	cmd.Stdin = f
-	return cmd.Run()
+	return term.Restore(int(f.Fd()), saved)
 }
 
 // ---------------------------------------------------------------------------
