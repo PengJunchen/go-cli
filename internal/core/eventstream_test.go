@@ -304,3 +304,115 @@ func TestEventStreamSendBlockedThenCloseNoDeadlock(t *testing.T) {
 
 	<-sendDone
 }
+
+// TestDiscardOldestEvictsOldest verifies AC-3: when the buffer is full,
+// DiscardOldest evicts the oldest event to make room for the new one
+// instead of blocking the sender.
+func TestDiscardOldestEvictsOldest(t *testing.T) {
+	stream := NewEventStream(2, WithEventDiscardPolicy(DiscardOldest))
+
+	// Fill the buffer.
+	require.NoError(t, stream.Send(AgentEvent{Kind: "message", Content: "A"}))
+	require.NoError(t, stream.Send(AgentEvent{Kind: "message", Content: "B"}))
+
+	// Send a third event — should evict "A" and store "C" without blocking.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		require.NoError(t, stream.Send(AgentEvent{Kind: "message", Content: "C"}))
+	}()
+
+	select {
+	case <-done:
+		// Send completed without blocking — AC-3 satisfied.
+	case <-time.After(2 * time.Second):
+		t.Fatal("DiscardOldest Send blocked on full buffer")
+	}
+
+	stream.Close()
+	got := drainEvents(stream)
+
+	// "A" should have been evicted; "B" and "C" should remain.
+	assert.Len(t, got, 2)
+	assert.Equal(t, "B", got[0].Content)
+	assert.Equal(t, "C", got[1].Content)
+}
+
+// TestDiscardNewestDropsIncoming verifies AC-4: when the buffer is full,
+// DiscardNewest drops the incoming event instead of blocking the sender.
+func TestDiscardNewestDropsIncoming(t *testing.T) {
+	stream := NewEventStream(2, WithEventDiscardPolicy(DiscardNewest))
+
+	// Fill the buffer.
+	require.NoError(t, stream.Send(AgentEvent{Kind: "message", Content: "A"}))
+	require.NoError(t, stream.Send(AgentEvent{Kind: "message", Content: "B"}))
+
+	// Send a third event — should be dropped without blocking.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		require.NoError(t, stream.Send(AgentEvent{Kind: "message", Content: "C"}))
+	}()
+
+	select {
+	case <-done:
+		// Send completed without blocking — AC-4 satisfied.
+	case <-time.After(2 * time.Second):
+		t.Fatal("DiscardNewest Send blocked on full buffer")
+	}
+
+	stream.Close()
+	got := drainEvents(stream)
+
+	// "C" should have been dropped; "A" and "B" should remain.
+	assert.Len(t, got, 2)
+	assert.Equal(t, "A", got[0].Content)
+	assert.Equal(t, "B", got[1].Content)
+}
+
+// TestBlockUntilConsumedBlocksOnFullBuffer verifies AC-5: when the buffer
+// is full, BlockUntilConsumed blocks the sender until a consumer reads.
+func TestBlockUntilConsumedBlocksOnFullBuffer(t *testing.T) {
+	stream := NewEventStream(1, WithEventDiscardPolicy(BlockUntilConsumed))
+
+	// Fill the buffer.
+	require.NoError(t, stream.Send(AgentEvent{Kind: "message", Content: "A"}))
+
+	// A second send should block because the buffer is full.
+	sendDone := make(chan struct{})
+	go func() {
+		defer close(sendDone)
+		//nolint:errcheck,gosec // Send returns nil; best-effort under test.
+		stream.Send(AgentEvent{Kind: "message", Content: "B"})
+	}()
+
+	// Verify the send is blocked.
+	select {
+	case <-sendDone:
+		t.Fatal("BlockUntilConsumed Send did not block on full buffer")
+	case <-time.After(50 * time.Millisecond):
+		// Expected: send is still blocked — AC-5 satisfied.
+	}
+
+	// Consume one event to unblock the sender.
+	ev := <-stream.Events()
+	assert.Equal(t, "A", ev.Content)
+
+	// Now the send should complete.
+	select {
+	case <-sendDone:
+		// Sender unblocked after consumer read.
+	case <-time.After(2 * time.Second):
+		t.Fatal("BlockUntilConsumed Send did not unblock after consumer read")
+	}
+
+	stream.Close()
+}
+
+// TestHarnessDefaultDiscardIsBlock verifies that a harness created without
+// WithDiscardPolicy defaults to BlockUntilConsumed, preserving backward
+// compatibility.
+func TestHarnessDefaultDiscardIsBlock(t *testing.T) {
+	h := NewHarnessImpl(&fakeEventStreamAgent{}, WithEventBuffer(1))
+	assert.Equal(t, BlockUntilConsumed, h.discard)
+}

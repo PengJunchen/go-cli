@@ -39,16 +39,33 @@ type EventStreamImpl struct {
 	hasRes    bool
 	err       error
 	sentCount int
+	discard   DiscardPolicy
 }
 
 var _ EventStream = (*EventStreamImpl)(nil)
 
+// EventStreamOption configures an EventStreamImpl at construction time.
+type EventStreamOption func(*EventStreamImpl)
+
+// WithEventDiscardPolicy sets the policy applied when the bounded event
+// buffer is full: DiscardOldest evicts the oldest event, DiscardNewest
+// drops the incoming event, BlockUntilConsumed (default) blocks the
+// sender until a consumer reads.
+func WithEventDiscardPolicy(p DiscardPolicy) EventStreamOption {
+	return func(s *EventStreamImpl) { s.discard = p }
+}
+
 // NewEventStream creates an EventStreamImpl with the given buffer capacity.
-func NewEventStream(capacity int) *EventStreamImpl {
-	return &EventStreamImpl{
-		events: make(chan AgentEvent, capacity),
-		done:   make(chan struct{}),
+func NewEventStream(capacity int, opts ...EventStreamOption) *EventStreamImpl {
+	s := &EventStreamImpl{
+		events:  make(chan AgentEvent, capacity),
+		done:    make(chan struct{}),
+		discard: BlockUntilConsumed, // preserve backward-compatible blocking behaviour
 	}
+	for _, o := range opts {
+		o(s)
+	}
+	return s
 }
 
 // Send enqueues an event. It returns nil after close so a best-effort send
@@ -56,6 +73,11 @@ func NewEventStream(capacity int) *EventStreamImpl {
 // done channel together ensure that a send never blocks after Close and
 // never panics on a closed channel. The sendMu read-lock guarantees that
 // Close cannot close the events channel while a send is in-flight.
+//
+// The discard policy controls behaviour when the bounded buffer is full:
+//   - DiscardNewest: drop the incoming event (non-blocking).
+//   - DiscardOldest: evict the oldest buffered event to make room (non-blocking).
+//   - BlockUntilConsumed (default): block the sender until a consumer reads.
 func (s *EventStreamImpl) Send(event AgentEvent) error {
 	if s.closed.Load() {
 		return nil
@@ -65,15 +87,68 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 	if s.closed.Load() {
 		return nil
 	}
-	select {
-	case <-s.done:
-		return nil
-	case s.events <- event:
-		s.mu.Lock()
-		s.sentCount++
-		s.mu.Unlock()
-		slog.Info("core.eventstream.send", "kind", event.Kind)
-		return nil
+
+	switch s.discard {
+	case DiscardNewest:
+		// Non-blocking: drop the new event if the buffer is full.
+		select {
+		case <-s.done:
+			return nil
+		case s.events <- event:
+			s.mu.Lock()
+			s.sentCount++
+			s.mu.Unlock()
+			slog.Info("core.eventstream.send", "kind", event.Kind, "policy", "discard_newest")
+			return nil
+		default:
+			slog.Warn("core.eventstream.discard", "kind", event.Kind, "policy", "discard_newest")
+			return nil
+		}
+
+	case DiscardOldest:
+		// Non-blocking: pop the oldest event to make room for the new one.
+		select {
+		case <-s.done:
+			return nil
+		case s.events <- event:
+			s.mu.Lock()
+			s.sentCount++
+			s.mu.Unlock()
+			slog.Info("core.eventstream.send", "kind", event.Kind, "policy", "discard_oldest")
+			return nil
+		default:
+			// Buffer full: evict the oldest event.
+			select {
+			case <-s.events:
+				slog.Warn("core.eventstream.discard", "action", "evict_oldest", "policy", "discard_oldest")
+			default:
+			}
+			select {
+			case <-s.done:
+				return nil
+			case s.events <- event:
+				s.mu.Lock()
+				s.sentCount++
+				s.mu.Unlock()
+				slog.Info("core.eventstream.send", "kind", event.Kind, "policy", "discard_oldest")
+				return nil
+			default:
+				// Still full after eviction (concurrent sender); drop new event.
+				return nil
+			}
+		}
+
+	default: // BlockUntilConsumed
+		select {
+		case <-s.done:
+			return nil
+		case s.events <- event:
+			s.mu.Lock()
+			s.sentCount++
+			s.mu.Unlock()
+			slog.Info("core.eventstream.send", "kind", event.Kind, "policy", "block")
+			return nil
+		}
 	}
 }
 

@@ -30,8 +30,8 @@ func WithEventBuffer(n int) HarnessOption {
 }
 
 // WithDiscardPolicy sets the discard policy applied when a bounded stream
-// buffer is full. The underlying EventStreamImpl enforces its own backpressure;
-// this option is retained for API completeness and forward compatibility.
+// buffer is full. The policy is forwarded to each EventStreamImpl created by
+// the harness. See DiscardPolicy constants for available strategies.
 func WithDiscardPolicy(p DiscardPolicy) HarnessOption {
 	return func(c *harnessConfig) { c.discard = p }
 }
@@ -66,6 +66,7 @@ type HarnessImpl struct {
 	agent         Agent
 	startSpanName string
 	bufferSize    int
+	discard       DiscardPolicy
 	tracer        *tracing.Tracer
 	runSlot       RunSlotGuard
 }
@@ -78,7 +79,10 @@ func NewHarnessImpl(agent Agent, opts ...HarnessOption) *HarnessImpl {
 	if agent == nil {
 		panic("core: harness requires a non-nil Agent")
 	}
-	cfg := harnessConfig{startSpan: "harness.start"}
+	cfg := harnessConfig{
+		startSpan: "harness.start",
+		discard:   BlockUntilConsumed, // preserve backward-compatible blocking
+	}
 	for _, o := range opts {
 		o(&cfg)
 	}
@@ -89,6 +93,7 @@ func NewHarnessImpl(agent Agent, opts ...HarnessOption) *HarnessImpl {
 		agent:         agent,
 		startSpanName: cfg.startSpan,
 		bufferSize:    cfg.bufferSize,
+		discard:       cfg.discard,
 		tracer:        cfg.tracer,
 		runSlot:       cfg.runSlot,
 	}
@@ -117,7 +122,7 @@ func (h *HarnessImpl) Submit(ctx context.Context, msg string) (EventStream, erro
 	logger := tracing.NewTraceLogger(span, nil)
 	logger.Info("core.harness.start", "msg", msg)
 
-	stream := NewEventStream(h.bufferSize)
+	stream := NewEventStream(h.bufferSize, WithEventDiscardPolicy(h.discard))
 	if stream == nil {
 		return nil, context.Canceled
 	}

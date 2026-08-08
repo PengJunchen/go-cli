@@ -39,7 +39,7 @@ func (t SubmissionType) String() string {
 type DiscardPolicy int
 
 const (
-	// DiscardOldest drops the oldest buffered event (default).
+	// DiscardOldest drops the oldest buffered event to make room.
 	DiscardOldest DiscardPolicy = iota
 	// DiscardNewest drops the newest event.
 	DiscardNewest
