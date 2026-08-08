@@ -447,11 +447,11 @@ func TestFileMutationQueueSerialization(t *testing.T) {
 	var mu sync.Mutex
 	var appliedOrder []string
 
-	handler := func(_ context.Context, m tools.FileMutation) error {
+	handler := func(_ context.Context, m tools.FileMutation) (*tools.ToolResult, error) {
 		mu.Lock()
 		appliedOrder = append(appliedOrder, m.Operation+":"+m.FilePath)
 		mu.Unlock()
-		return nil
+		return nil, nil
 	}
 
 	q := tools.NewDefaultFileMutationQueue(tools.WithMutationHandler(handler))

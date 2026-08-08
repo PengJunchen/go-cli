@@ -86,12 +86,26 @@ func WithMutationQueue(queue FileMutationQueue, next func(ctx context.Context, c
 		select {
 		case res := <-resCh:
 			if res.Error != nil {
-				return &ToolResult{Output: "", Metadata: map[string]any{"path": path, "queued": true}}, res.Error
+				return nil, res.Error
 			}
-			return &ToolResult{
-				Output:   fmt.Sprintf("%s queued and applied for %s", call.Name, path),
-				Metadata: map[string]any{"path": path, "queued": true},
-			}, nil
+			result := res.ToolResult
+			if result == nil {
+				// Backward compat: synthesize a minimal ToolResult when the
+				// handler did not produce one.
+				return &ToolResult{
+					Output:   fmt.Sprintf("%s queued and applied for %s", call.Name, path),
+					Metadata: map[string]any{"path": path, "queued": true},
+				}, nil
+			}
+			// Shallow-copy the Metadata before adding the "queued" marker so
+			// the underlying tool's map is not mutated across calls.
+			newMeta := make(map[string]any, len(result.Metadata)+1)
+			for k, v := range result.Metadata {
+				newMeta[k] = v
+			}
+			newMeta["queued"] = true
+			result.Metadata = newMeta
+			return result, nil
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}
