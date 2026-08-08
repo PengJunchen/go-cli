@@ -21,6 +21,23 @@ var (
 	defaultTelemetry      Telemetry
 )
 
+// ResetDefaults clears all registered production components, resetting the
+// registry to its initial state. This is primarily intended for test isolation
+// to prevent state leakage between test cases.
+func ResetDefaults() {
+	registryMu.Lock()
+	defer registryMu.Unlock()
+	outputGuardMu.Lock()
+	defer outputGuardMu.Unlock()
+	defaultLoopDetector = nil
+	defaultCircuitBreaker = nil
+	defaultRetryPolicy = nil
+	defaultIdempotent = nil
+	defaultAudit = nil
+	defaultTelemetry = nil
+	defaultOutputGuard = nil
+}
+
 // RegisterLoopDetector sets the active LoopDetector. A nil value resets to a
 // fresh DefaultLoopDetector.
 func RegisterLoopDetector(d LoopDetector) {
