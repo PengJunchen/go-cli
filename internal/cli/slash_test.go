@@ -106,6 +106,26 @@ func TestSlashCost(t *testing.T) {
 	assert.Contains(t, output, "Total calls: 1")
 }
 
+// TestCostHandlerWorksWithSnapshot verifies that CostHandler.Handle renders the
+// sub-agent cost breakdown using SubagentCostSnapshot without direct field
+// access.
+func TestCostHandlerWorksWithSnapshot(t *testing.T) {
+	tracker := production.NewCostTracker(nil)
+	_, err := tracker.RecordSubagent("task-research", "gpt-4o", 2000, 1000)
+	require.NoError(t, err)
+	_, err = tracker.RecordSubagent("task-implement", "gpt-4o-mini", 500, 200)
+	require.NoError(t, err)
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf, costTracker: tracker}
+	c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "cost"}, sc)
+	output := buf.String()
+
+	assert.Contains(t, output, "Sub-agent costs:")
+	assert.Contains(t, output, "task-research:")
+	assert.Contains(t, output, "task-implement:")
+}
+
 func TestSlashCostWithStats(t *testing.T) {
 	tracker := production.NewCostTracker(nil)
 	_, err := tracker.Record("gpt-4o", 1000, 500)

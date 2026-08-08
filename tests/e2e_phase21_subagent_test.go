@@ -169,7 +169,7 @@ func TestET_subagent_researcher_no_bash(t *testing.T) {
 }
 
 // TestET_subagent_cost_breakdown verifies that CostTracker.RecordSubagent
-// records per-task cost breakdown in the SubagentCosts map, enabling /cost
+// records per-task cost breakdown exposed via SubagentCostSnapshot, enabling /cost
 // to show subagent cost breakdown.
 func TestET_subagent_cost_breakdown(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
@@ -195,17 +195,32 @@ func TestET_subagent_cost_breakdown(t *testing.T) {
 	assert.Greater(t, tracker.Total(), 0.0)
 
 	// Verify sub-agent cost breakdown.
-	assert.Equal(t, 2, len(tracker.SubagentCosts), "should have 2 subagent cost entries")
+	snapshot := tracker.SubagentCostSnapshot()
+	assert.Equal(t, 2, len(snapshot), "should have 2 subagent cost entries")
 
-	researchCost, ok := tracker.SubagentCosts["task-research"]
-	require.True(t, ok)
+	var researchCost production.SubagentCostRecord
+	var researchFound bool
+	for _, r := range snapshot {
+		if r.TaskID == "task-research" {
+			researchCost = r
+			researchFound = true
+		}
+	}
+	require.True(t, researchFound)
 	assert.Equal(t, 1, researchCost.Calls)
 	assert.Equal(t, 2000, researchCost.TokensIn)
 	assert.Equal(t, 1000, researchCost.TokensOut)
 	assert.Greater(t, researchCost.Cost, 0.0)
 
-	implCost, ok := tracker.SubagentCosts["task-implement"]
-	require.True(t, ok)
+	var implCost production.SubagentCostRecord
+	var implFound bool
+	for _, r := range snapshot {
+		if r.TaskID == "task-implement" {
+			implCost = r
+			implFound = true
+		}
+	}
+	require.True(t, implFound)
 	assert.Equal(t, 1, implCost.Calls)
 	assert.Greater(t, implCost.Cost, 0.0)
 
