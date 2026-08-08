@@ -106,7 +106,7 @@ func TestWithMutationQueueEnqueueErrorWrapped(t *testing.T) {
 }
 
 // TestWithMutationQueueResultErrorPropagated verifies a worker-reported failure
-// is returned as the tool error while still tagging the result metadata.
+// is returned as the tool error with a nil ToolResult (no synthesized result).
 func TestWithMutationQueueResultErrorPropagated(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -120,9 +120,7 @@ func TestWithMutationQueueResultErrorPropagated(t *testing.T) {
 	q.resultCh <- FileMutationResult{Success: false, Error: boom}
 	res, err := wrapped(context.Background(), ToolCall{Name: "write", Args: map[string]any{"path": "a.txt", "content": "x"}})
 	require.ErrorIs(t, err, boom)
-	require.NotNil(t, res)
-	assert.Empty(t, res.Output)
-	assert.Equal(t, true, res.Metadata["queued"])
+	assert.Nil(t, res, "error branch must return nil ToolResult")
 }
 
 // TestWithMutationQueueContextCancellation confirms a canceled context wins the

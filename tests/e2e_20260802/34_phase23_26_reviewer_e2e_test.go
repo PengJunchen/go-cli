@@ -334,12 +334,12 @@ func TestET_Phase25_PerFileSerialization(t *testing.T) {
 
 	var mu sync.Mutex
 	var order []int
-	handler := func(_ context.Context, m tools.FileMutation) error {
+	handler := func(_ context.Context, m tools.FileMutation) (*tools.ToolResult, error) {
 		mu.Lock()
 		order = append(order, m.Content.(int))
 		mu.Unlock()
 		time.Sleep(10 * time.Millisecond) // simulate work
-		return nil
+		return nil, nil
 	}
 
 	q := tools.NewDefaultFileMutationQueue(tools.WithMutationHandler(handler))
@@ -429,8 +429,8 @@ func TestET_Phase25_LifecycleClose(t *testing.T) {
 
 	filePath := filepath.Join(t.TempDir(), "lifecycle.txt")
 
-	handler := func(_ context.Context, _ tools.FileMutation) error {
-		return nil
+	handler := func(_ context.Context, _ tools.FileMutation) (*tools.ToolResult, error) {
+		return nil, nil
 	}
 	q := tools.NewDefaultFileMutationQueue(tools.WithMutationHandler(handler))
 	cq := q.(*tools.DefaultFileMutationQueue)

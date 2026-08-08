@@ -40,6 +40,11 @@ type FileMutationResult struct {
 	Success bool `json:"success"`
 	// Error holds the error that prevented the mutation from applying, if any.
 	Error error `json:"-"`
+	// ToolResult carries the underlying tool's ToolResult (e.g. write/edit)
+	// so callers like WithMutationQueue can surface the real output and
+	// metadata (path, bytes, diff) instead of a synthesized placeholder.
+	// It is nil when the handler did not produce one (e.g. on error/panic).
+	ToolResult *ToolResult `json:"-"`
 }
 
 // FileMutationQueue serializes write/edit mutations per file so that mutations
@@ -56,8 +61,10 @@ type FileMutationQueue interface {
 }
 
 // MutationHandler applies a single mutation. Workers call it to perform the
-// actual write/edit against the filesystem (or via an underlying tool).
-type MutationHandler func(ctx context.Context, m FileMutation) error
+// actual write/edit against the filesystem (or via an underlying tool). It
+// returns the tool's ToolResult so callers can surface the real output and
+// metadata (path, bytes, diff) instead of a synthesized placeholder.
+type MutationHandler func(ctx context.Context, m FileMutation) (*ToolResult, error)
 
 // queuedMutation bundles a mutation with the result channel for that specific
 // Enqueue call, so the file worker can route the outcome back to exactly one
@@ -218,7 +225,12 @@ func (q *DefaultFileMutationQueue) workerForLocked(realPath string) (chan queued
 func (q *DefaultFileMutationQueue) startWorker(input chan queuedMutation) {
 	go func() {
 		for qm := range input {
-			res := q.applySafe(qm.mutation)
+			tr, err := q.applySafe(qm.mutation)
+			res := FileMutationResult{
+				Success:    err == nil,
+				Error:      err,
+				ToolResult: tr,
+			}
 			qm.result <- res
 			close(qm.result)
 		}
@@ -227,22 +239,22 @@ func (q *DefaultFileMutationQueue) startWorker(input chan queuedMutation) {
 
 // applySafe runs the configured handler inside a recover block so a panic
 // is converted into an error result instead of killing the worker goroutine.
-func (q *DefaultFileMutationQueue) applySafe(m FileMutation) (res FileMutationResult) {
+// On panic the returned ToolResult is nil.
+func (q *DefaultFileMutationQueue) applySafe(m FileMutation) (tr *ToolResult, err error) {
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("mutation: handler panicked", "path", m.FilePath, "operation", m.Operation, "panic", r)
-			res = FileMutationResult{Success: false, Error: fmt.Errorf("mutation: handler panic for %s: %v", m.FilePath, r)}
+			tr = nil
+			err = fmt.Errorf("mutation: handler panic for %s: %v", m.FilePath, r)
 		}
 	}()
-	if err := q.apply(context.Background(), m); err != nil {
-		return FileMutationResult{Success: false, Error: err}
-	}
-	return FileMutationResult{Success: true}
+	tr, err = q.apply(context.Background(), m)
+	return tr, err
 }
 
 // apply runs the configured handler, falling back to the built-in write/edit
 // dispatch when no custom handler is configured.
-func (q *DefaultFileMutationQueue) apply(ctx context.Context, m FileMutation) error {
+func (q *DefaultFileMutationQueue) apply(ctx context.Context, m FileMutation) (*ToolResult, error) {
 	h := q.handler
 	if h == nil {
 		h = defaultMutationHandler
@@ -256,7 +268,7 @@ func (q *DefaultFileMutationQueue) apply(ctx context.Context, m FileMutation) er
 // mutations are applied through the queue. When both ft and dg are nil the
 // behavior is equivalent to the package-level defaultMutationHandler.
 func newConfiguredMutationHandler(ft *FileTracker, dg DiffGenerator) MutationHandler {
-	return func(ctx context.Context, m FileMutation) error {
+	return func(ctx context.Context, m FileMutation) (*ToolResult, error) {
 		switch m.Operation {
 		case "write":
 			toolOpts := []WriteToolOption{WithOverwrite(true)}
@@ -271,8 +283,7 @@ func newConfiguredMutationHandler(ft *FileTracker, dg DiffGenerator) MutationHan
 			if s, ok := m.Content.(string); ok {
 				call.Args["content"] = s
 			}
-			_, err := tool.Execute(ctx, call)
-			return err
+			return tool.Execute(ctx, call)
 		case "edit":
 			call := ToolCall{Args: map[string]any{"file_path": m.FilePath}}
 			if cm, ok := m.Content.(map[string]any); ok {
@@ -291,16 +302,15 @@ func newConfiguredMutationHandler(ft *FileTracker, dg DiffGenerator) MutationHan
 				toolOpts = append(toolOpts, WithEditDiffGenerator(dg))
 			}
 			tool := NewEditFileTool(toolOpts...)
-			_, err := tool.Execute(ctx, call)
-			return err
+			return tool.Execute(ctx, call)
 		default:
-			return fmt.Errorf("mutation: unsupported operation %q", m.Operation)
+			return nil, fmt.Errorf("mutation: unsupported operation %q", m.Operation)
 		}
 	}
 }
 
 // defaultMutationHandler applies a mutation using the built-in write/edit tools.
-func defaultMutationHandler(ctx context.Context, m FileMutation) error {
+func defaultMutationHandler(ctx context.Context, m FileMutation) (*ToolResult, error) {
 	switch m.Operation {
 	case "write":
 		tool := NewWriteTool(WithOverwrite(true))
@@ -308,8 +318,7 @@ func defaultMutationHandler(ctx context.Context, m FileMutation) error {
 		if s, ok := m.Content.(string); ok {
 			call.Args["content"] = s
 		}
-		_, err := tool.Execute(ctx, call)
-		return err
+		return tool.Execute(ctx, call)
 	case "edit":
 		call := ToolCall{Args: map[string]any{"file_path": m.FilePath}}
 		if cm, ok := m.Content.(map[string]any); ok {
@@ -321,10 +330,9 @@ func defaultMutationHandler(ctx context.Context, m FileMutation) error {
 			}
 		}
 		tool := NewEditFileTool()
-		_, err := tool.Execute(ctx, call)
-		return err
+		return tool.Execute(ctx, call)
 	default:
-		return fmt.Errorf("mutation: unsupported operation %q", m.Operation)
+		return nil, fmt.Errorf("mutation: unsupported operation %q", m.Operation)
 	}
 }
 
