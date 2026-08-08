@@ -100,6 +100,38 @@ func TestLoad_OverrideDisablesTracing(t *testing.T) {
 	assert.False(t, *cfg.Tracing.Enabled)
 }
 
+// TestLoaderExplicitFalse verifies that a *bool field with a true default can
+// be explicitly overridden to false. With a plain bool this would be
+// impossible because false == not-set in the overlay logic.
+func TestLoaderExplicitFalse(t *testing.T) {
+	off := false
+	override := &Config{Production: ProductionConfig{Audit: AuditConfig{Enabled: &off}}}
+	cfg, err := NewLoader().WithOverride(override).Load(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Production.Audit.Enabled, "Enabled should be non-nil after explicit override")
+	assert.False(t, *cfg.Production.Audit.Enabled, "explicit false override should win over default true")
+}
+
+// TestLoaderDefaultWhenOmitted verifies that when the field is omitted from
+// all layers, the default-true value from defaultConfig is preserved.
+func TestLoaderDefaultWhenOmitted(t *testing.T) {
+	cfg, err := NewLoader().Load(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Production.Audit.Enabled, "Enabled should default to non-nil")
+	assert.True(t, *cfg.Production.Audit.Enabled, "default should be true when omitted")
+}
+
+// TestLoaderExplicitTrue verifies that explicitly setting the field to true
+// via an override layer produces true (consistent with the default).
+func TestLoaderExplicitTrue(t *testing.T) {
+	on := true
+	override := &Config{Production: ProductionConfig{Audit: AuditConfig{Enabled: &on}}}
+	cfg, err := NewLoader().WithOverride(override).Load(context.Background())
+	require.NoError(t, err)
+	require.NotNil(t, cfg.Production.Audit.Enabled)
+	assert.True(t, *cfg.Production.Audit.Enabled)
+}
+
 func TestLoad_FlagVerboseWinsOverride(t *testing.T) {
 	flag := &Config{verbose: true}
 	cfg, err := NewLoader().WithFlag(flag).Load(context.Background())

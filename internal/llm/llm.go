@@ -129,6 +129,9 @@ type GenerationOptions struct {
 	MaxTokens   *int
 	StopStrings []string
 	Tools       []ToolDefinition
+	// Thinking carries the reasoning-depth configuration for this call.
+	// When nil, no thinking parameters are injected.
+	Thinking *ThinkingConfig
 }
 
 // Option configures a generation call.

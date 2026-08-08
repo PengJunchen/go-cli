@@ -191,8 +191,9 @@ type ProductionConfig struct {
 // AuditConfig controls the audit log that records tool calls and their
 // outcomes as JSON-lines for later inspection.
 type AuditConfig struct {
-	// Enabled controls whether the audit log is active.
-	Enabled bool `json:"enabled"`
+	// Enabled controls whether the audit log is active. Defaults to true
+	// when nil; set to a pointer to false to explicitly disable.
+	Enabled *bool `json:"enabled"`
 	// Path is the JSONL file path where audit entries are appended.
 	Path string `json:"path"`
 }

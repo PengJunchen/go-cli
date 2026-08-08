@@ -170,7 +170,8 @@ func TestET_Phase22_Production_AuditLog(t *testing.T) {
 	auditPath := filepath.Join(dir, "audit.jsonl")
 
 	cfg := phase22ProdTestConfig()
-	cfg.Production.Audit.Enabled = true
+	auditEnabled := true
+	cfg.Production.Audit.Enabled = &auditEnabled
 	cfg.Production.Audit.Path = auditPath
 
 	assembly := phase22ProdAssemble(t, cfg)

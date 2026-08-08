@@ -291,18 +291,16 @@ func withStreamFlag(body []byte) ([]byte, error) {
 }
 
 // injectThinking retrieves the ThinkingConfig stored by WithThinking on
-// genOpts (deleting the entry to prevent memory leaks), and if present with a
-// non-None level, decodes the JSON body into a map, applies the provider
-// adapter, and re-encodes. When targetKey is non-empty the adapter is applied
-// to the nested sub-map (e.g. "generationConfig" for Gemini) instead of the
-// top-level map. If no thinking config was set or the level is None the body
-// is returned unchanged.
+// genOpts, and if present with a non-None level, decodes the JSON body into a
+// map, applies the provider adapter, and re-encodes. When targetKey is
+// non-empty the adapter is applied to the nested sub-map (e.g.
+// "generationConfig" for Gemini) instead of the top-level map. If no thinking
+// config was set or the level is None the body is returned unchanged.
 func injectThinking(data []byte, genOpts *GenerationOptions, adapter ThinkingAdapter, targetKey string) ([]byte, error) {
 	cfg, ok := ThinkingFromOpts(genOpts)
 	if !ok {
 		return data, nil
 	}
-	DeleteThinking(genOpts)
 	if cfg.Level == ThinkingNone {
 		return data, nil
 	}
