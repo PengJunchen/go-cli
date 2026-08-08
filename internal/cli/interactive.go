@@ -339,8 +339,10 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		// Create an EventStream for this turn and wire it to the TurnRunner
 		// so events are streamed in real time to the TUI. RunTurn is
 		// blocking, so it runs in a goroutine that closes the stream when
-		// the turn finishes.
-		stream := core.NewEventStream(64)
+		// the turn finishes. DiscardOldest prevents goroutine leaks if the
+		// TUI consumer falls behind: old events are evicted rather than
+		// blocking the agent loop indefinitely.
+		stream := core.NewEventStream(64, core.WithEventDiscardPolicy(core.DiscardOldest))
 		assembly.TurnRunner.SetStream(stream)
 
 		var turnResult core.Result
