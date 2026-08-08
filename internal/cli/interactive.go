@@ -33,6 +33,9 @@ const (
 	spanInteractiveRun = "interactive.run"
 	// spanInteractiveTurn is the span for a single turn in the session.
 	spanInteractiveTurn = "interactive.turn"
+	// spanInteractiveMentionExpand is the span for @-mention file expansion
+	// within a single turn.
+	spanInteractiveMentionExpand = "interactive.mention_expand"
 	// exitCommand is the user input that terminates the interactive session.
 	exitCommand = "exit"
 )
@@ -41,9 +44,10 @@ const (
 // session with TUI rendering, MCP tool support, skill execution, and automatic
 // session compaction.
 type interactiveCmd struct {
-	out        io.Writer
-	in         io.Reader
-	lineEditor LineEditor
+	out             io.Writer
+	in              io.Reader
+	lineEditor      LineEditor
+	mentionExpander *MentionExpander
 }
 
 // newInteractiveCmd creates an interactive command reading from in and writing
@@ -255,6 +259,16 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		le = dle
 	}
 
+	// Initialize the @-mention expander using the current working directory
+	// so relative @path tokens resolve correctly.
+	if c.mentionExpander == nil {
+		cwd, err := os.Getwd()
+		if err != nil {
+			cwd = "."
+		}
+		c.mentionExpander = NewMentionExpander(cwd, 0)
+	}
+
 	for {
 		line, err := le.ReadLine(ctx, "> ")
 		if err != nil {
@@ -287,6 +301,25 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 
 		turnSpan, turnCtx := tracing.SpanFromContext(spanCtx, spanInteractiveTurn, tracing.SpanKindInternal)
 		turnSpan.SetAttributes(tracing.SensitiveAttribute("user_message", line))
+
+		// Expand @-mentions before processing. The SensitiveAttribute above
+		// already captured the original user input; Expand modifies line so
+		// the inlined file content reaches the agent via RunTurn.
+		if c.mentionExpander != nil {
+			mentionSpan, mentionCtx := tracing.SpanFromContext(turnCtx, spanInteractiveMentionExpand, tracing.SpanKindInternal)
+			expanded, files, totalBytes, mErr := c.mentionExpander.Expand(mentionCtx, line)
+			if mErr == nil {
+				mentionSpan.SetAttributes(
+					tracing.Attribute{Key: "mention.count", Value: len(files)},
+					tracing.Attribute{Key: "mention.files", Value: strings.Join(files, ",")},
+					tracing.Attribute{Key: "mention.total_bytes", Value: totalBytes},
+				)
+				if expanded != line {
+					line = expanded
+				}
+			}
+			mentionSpan.End()
+		}
 
 		// Wrap the turn context in a cancellable context so the user can
 		// interrupt the in-progress agent turn via Ctrl+C (non-TTY) or Esc
