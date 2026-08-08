@@ -126,7 +126,7 @@ func (c *SummaryCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 	if summary == "" {
 		summary = summaryPlaceholder
 	}
-	if summary = c.clampSummary(summary); summary == "" {
+	if summary = c.clampSummary(summary, estimator); summary == "" {
 		summary = summaryPlaceholder
 	}
 
@@ -200,20 +200,34 @@ func (c *SummaryCompactor) buildSummaryPrompt(items []TurnItem) string {
 	return sb.String()
 }
 
-// clampSummary bounds the summary text to maxSummaryTokens using the heuristic,
-// so the compaction entry cannot balloon past the intended size.
-func (c *SummaryCompactor) clampSummary(summary string) string {
+// clampSummary bounds the summary text to maxSummaryTokens using the provided
+// estimator, so the compaction entry cannot balloon past the intended size.
+// Truncation is performed at rune boundaries to avoid splitting multi-byte
+// characters.
+func (c *SummaryCompactor) clampSummary(summary string, estimator TokenEstimator) string {
 	if c.maxSummaryTokens <= 0 {
 		return summary
 	}
-	if len(summary)/4 <= c.maxSummaryTokens {
+	if estimateLength(summary, estimator) <= c.maxSummaryTokens {
 		return summary
 	}
-	limit := c.maxSummaryTokens * 4
-	if limit < 0 || limit >= len(summary) {
+	// Binary search for the longest rune prefix whose estimate fits the budget.
+	// Token estimates are monotonically non-decreasing with prefix length (every
+	// rune contributes a non-negative weight), so binary search is valid.
+	runes := []rune(summary)
+	lo, hi := 0, len(runes)
+	for lo < hi {
+		mid := lo + (hi-lo+1)/2
+		if estimateLength(string(runes[:mid]), estimator) <= c.maxSummaryTokens {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
+	}
+	if lo <= 0 {
 		return summary
 	}
-	return summary[:limit]
+	return string(runes[:lo])
 }
 
 // isFileOp reports whether a tool name is a file-operation tool.

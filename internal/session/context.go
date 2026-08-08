@@ -6,13 +6,13 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/pengjunchen/go-cli/internal/compaction"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
-// EstimateTokensPerChar is the heuristic number of tokens attributed to each
-// character of entry content. It is intentionally coarse; compaction summaries
-// are typically much denser, but no tokenizer is available in this package.
-const EstimateTokensPerChar = 4
+// defaultEstimator is the Unicode-aware estimator used for session token
+// estimates. It is stateless, so a single shared instance suffices.
+var defaultEstimator = compaction.NewHeuristicTokenEstimator()
 
 // ContextManager reconstructs the effective, replayable context for a session
 // leaf. It walks from the leaf back to the root, folding Compaction entries
@@ -105,8 +105,10 @@ func (m *DefaultContextManager) BuildContext(ctx context.Context, leafID string)
 	return sc, nil
 }
 
-// estimateTokens returns a coarse token estimate for a piece of content using
-// the EstimateTokensPerChar heuristic.
+// estimateTokens returns a Unicode-aware token estimate for a piece of content
+// using the compaction package's HeuristicTokenEstimator, which weights CJK
+// runes higher than ASCII to avoid underestimating non-English text.
 func estimateTokens(content string) int {
-	return len(content) / EstimateTokensPerChar
+	n, _ := defaultEstimator.Estimate(content)
+	return n
 }

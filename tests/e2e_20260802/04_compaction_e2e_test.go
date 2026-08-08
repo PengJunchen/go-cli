@@ -283,9 +283,9 @@ func TestCompaction_TokenEstimation(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 2, n)
 
-		n, err = est.Estimate("hello world, how are you?") // 26 chars / 4 = 6
+		n, err = est.Estimate("hello world, how are you?") // 8.25 -> 8 tokens
 		require.NoError(t, err)
-		assert.Equal(t, 6, n)
+		assert.Equal(t, 8, n)
 
 		n, err = est.Estimate("") // 0 chars
 		require.NoError(t, err)
@@ -293,9 +293,9 @@ func TestCompaction_TokenEstimation(t *testing.T) {
 	})
 
 	t.Run("unicode string estimation", func(t *testing.T) {
-		n, err := est.Estimate("こんにちは世界") // 7 characters, 21 bytes in UTF-8 / 4 = 5
+		n, err := est.Estimate("こんにちは世界") // 7 CJK chars * 2 = 14 tokens
 		require.NoError(t, err)
-		assert.Equal(t, 5, n)
+		assert.Equal(t, 14, n)
 	})
 
 	t.Run("estimate tokens for full conversation items", func(t *testing.T) {
@@ -305,8 +305,8 @@ func TestCompaction_TokenEstimation(t *testing.T) {
 			{Role: compaction.RoleTool, ToolName: "read", ToolResult: "tool result content"},
 		}
 		tokens := tokenSum(items, est)
-		// system prompt here (17/4=4) + user question (13/4=3) + tool result content (19/4=4) = 11
-		assert.Equal(t, 11, tokens)
+		// system prompt here (5) + user question (4) + tool result content (5) = 14
+		assert.Equal(t, 14, tokens)
 	})
 }
 

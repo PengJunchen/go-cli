@@ -64,8 +64,8 @@ func TestEmitTokenUsageEvent_PrefersAPIUsage(t *testing.T) {
 // message has API-reported Usage, emitTokenUsageEvent falls back to estimating
 // tokens from message content via the estimator.
 func TestEmitTokenUsageEvent_FallbackToEstimate(t *testing.T) {
-	// "hello world" = 11 chars => 11/4 = 2 tokens (input)
-	// "hi there" = 8 chars => 8/4 = 2 tokens (output)
+	// "hello world" = 10 letters * 0.25 + 1 space * 0.5 = 3 tokens (input)
+	// "hi there" = 7 letters * 0.25 + 1 space * 0.5 = 2.25 -> 2 tokens (output)
 	agent := core.NewAgentImpl("test", noopLoop{}, core.WithHistory([]core.AgentMessage{
 		{Role: "user", Content: "hello world"},
 		{Role: "assistant", Content: "hi there"},
@@ -84,8 +84,8 @@ func TestEmitTokenUsageEvent_FallbackToEstimate(t *testing.T) {
 	case ev := <-stream.Events():
 		require.Equal(t, "token_usage", ev.Kind)
 		require.NotNil(t, ev.TokenUsage)
-		// Estimated values: input=2, output=2.
-		assert.Equal(t, 2, ev.TokenUsage.InputTokens)
+		// Estimated values: input=3, output=2.
+		assert.Equal(t, 3, ev.TokenUsage.InputTokens)
 		assert.Equal(t, 2, ev.TokenUsage.OutputTokens)
 		assert.Equal(t, 4096, ev.TokenUsage.MaxTokens)
 	default:
