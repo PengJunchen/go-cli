@@ -585,17 +585,59 @@ func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel,
 // detection and continuation. When the model's finish_reason is "length"
 // (output cut off by max_tokens), the partial assistant response is appended
 // to the conversation and the model is asked to continue. The continuation
-// content (and any tool calls) are merged into the original response. At most
-// maxContinuationAttempts retries are issued; if the output is still
-// truncated after that, a warning is logged and the accumulated content is
-// returned.
+// content is merged into the original response. Tool calls from a truncated
+// response are partial (JSON args cut off) and are dropped before execution;
+// only tool calls from a non-truncated (finish_reason != "length") response
+// are kept. At most maxContinuationAttempts retries are issued; if the output
+// is still truncated after that, a warning is logged, any remaining partial
+// tool calls are dropped, and the accumulated content is returned.
 func (l *LoopAgent) generateWithContinuation(ctx context.Context, model llm.BaseChatModel, messages []llm.Message, toolOpts []llm.Option, es EventStream, logger *slog.Logger) (*llm.Message, error) {
 	resp, err := l.streamGenerate(ctx, model, messages, toolOpts, es, logger)
 	if err != nil || resp == nil {
 		return resp, err
 	}
 
+	// Lazily create a continuation span only when the response is truncated.
+	// The span is a child of the loop.run span (ctx carries it). When tracing
+	// is disabled, SpanFromContext returns a noop span with zero overhead.
+	var contSpan tracing.TraceSpan
+	var droppedCount int
+	var attemptCount int
+	if resp.FinishReason == "length" {
+		contSpan, _ = tracing.SpanFromContext(ctx, "loop.continuation", tracing.SpanKindInternal)
+	}
+	defer func() {
+		if contSpan == nil {
+			return
+		}
+		contSpan.SetAttributes(
+			tracing.Attribute{Key: "attempts", Value: attemptCount},
+			tracing.Attribute{Key: "partial_tool_calls_dropped", Value: droppedCount},
+			tracing.Attribute{Key: "finish_reason", Value: resp.FinishReason},
+		)
+		if resp.FinishReason == "length" {
+			contSpan.SetStatus(tracing.SpanStatusError,
+				"max continuation attempts exceeded with truncated output")
+		}
+		contSpan.End()
+	}()
+
 	for attempt := 0; attempt < maxContinuationAttempts && resp.FinishReason == "length"; attempt++ {
+		attemptCount = attempt + 1
+
+		// When the response is truncated by max_tokens, any tool calls in it
+		// are partial (JSON args cut off, fields missing) and must not be
+		// executed. Drop them before building the continuation request.
+		if resp.FinishReason == "length" && len(resp.ToolCalls) > 0 {
+			logger.Warn("partial_tool_calls_dropped", "count", len(resp.ToolCalls))
+			if contSpan != nil {
+				contSpan.AddEvent("partial_tool_calls_dropped",
+					tracing.Attribute{Key: "count", Value: len(resp.ToolCalls)})
+			}
+			droppedCount += len(resp.ToolCalls)
+			resp.ToolCalls = nil
+		}
+
 		// Build a continuation conversation: the original messages plus the
 		// partial assistant response so the model picks up where it left off.
 		contMsgs := make([]llm.Message, len(messages), len(messages)+1)
@@ -614,15 +656,27 @@ func (l *LoopAgent) generateWithContinuation(ctx context.Context, model llm.Base
 			break
 		}
 
-		// Merge the continuation into the original response.
+		// Merge the continuation into the original response. Content is
+		// concatenated; tool calls are replaced (not appended) because any
+		// previous tool calls were partial and have been dropped.
 		resp.Content += contResp.Content
 		resp.FinishReason = contResp.FinishReason
-		if len(contResp.ToolCalls) > 0 {
-			resp.ToolCalls = append(resp.ToolCalls, contResp.ToolCalls...)
-		}
+		resp.ToolCalls = contResp.ToolCalls
 	}
 
+	// If the output is still truncated after exhausting all continuation
+	// attempts, drop any remaining partial tool calls so they are not
+	// executed, and log a warning.
 	if resp.FinishReason == "length" {
+		if len(resp.ToolCalls) > 0 {
+			logger.Warn("partial_tool_calls_dropped", "count", len(resp.ToolCalls))
+			if contSpan != nil {
+				contSpan.AddEvent("partial_tool_calls_dropped",
+					tracing.Attribute{Key: "count", Value: len(resp.ToolCalls)})
+			}
+			droppedCount += len(resp.ToolCalls)
+			resp.ToolCalls = nil
+		}
 		slog.WarnContext(ctx, "core.loop.truncation_max_attempts",
 			"max_attempts", maxContinuationAttempts)
 	}

@@ -182,3 +182,177 @@ func TestContinuationEmptyFinishReasonNoContinuation(t *testing.T) {
 	require.Len(t, messages, 1)
 	assert.Equal(t, "done", messages[0])
 }
+
+// TestContinuationDropsPartialToolCalls verifies that tool calls from a
+// truncated response (finish_reason="length") are dropped and not executed,
+// while tool calls from the complete continuation response are executed
+// normally. Content from both responses is merged.
+func TestContinuationDropsPartialToolCalls(t *testing.T) {
+	toolSrv := mock.NewMockToolServer()
+	_, err := toolSrv.RegisterReadFileTool("file contents")
+	require.NoError(t, err)
+
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"SL-08", "drop-partial-tool-calls",
+		mock.ConversationTurn{
+			AssistantContent: "partial",
+			AssistantToolCalls: []mock.ExpectedToolCall{
+				{ID: "partial-tc", Name: "read_file", Args: map[string]any{"path": "a.go"}},
+			},
+			FinishReason: "length",
+		},
+		mock.ConversationTurn{
+			AssistantContent: " complete",
+			AssistantToolCalls: []mock.ExpectedToolCall{
+				{ID: "complete-tc", Name: "read_file", Args: map[string]any{"path": "b.go"}},
+			},
+			FinishReason: "stop",
+		},
+		mock.ConversationTurn{AssistantContent: "done"},
+	))
+	loop := NewLoopAgent(WithLLM(model), WithTools(toolSrv))
+
+	events, err := loop.Run(context.Background(), Submission{Content: "go"})
+	require.NoError(t, err)
+
+	// 3 LLM calls: 1 original + 1 continuation + 1 after tool execution.
+	assert.Equal(t, 3, model.CallCount())
+
+	// Only the complete tool call (from the continuation) should execute.
+	// The partial tool call from the truncated response must be dropped.
+	toolCalls := findEvents(events, "tool_call")
+	require.Len(t, toolCalls, 1)
+	assert.Equal(t, "read_file", toolCalls[0])
+
+	// Content from the first two responses is merged; the third response
+	// ("done") is emitted after tool execution.
+	messages := findEvents(events, "message")
+	require.Len(t, messages, 2)
+	assert.Equal(t, "partial complete", messages[0])
+	assert.Equal(t, "done", messages[1])
+}
+
+// TestContinuationMergesContentNoToolCalls verifies that pure text truncation
+// (no tool calls) merges content correctly across continuation requests.
+func TestContinuationMergesContentNoToolCalls(t *testing.T) {
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"SL-09", "merge-content-no-tools",
+		mock.ConversationTurn{
+			AssistantContent: "Hello ",
+			FinishReason:     "length",
+		},
+		mock.ConversationTurn{
+			AssistantContent: "World",
+			FinishReason:     "stop",
+		},
+	))
+	loop := NewLoopAgent(WithLLM(model))
+
+	events, err := loop.Run(context.Background(), Submission{Content: "greet"})
+	require.NoError(t, err)
+	assert.Equal(t, 2, model.CallCount())
+
+	messages := findEvents(events, "message")
+	require.Len(t, messages, 1)
+	assert.Equal(t, "Hello World", messages[0])
+
+	// No tool calls should be present.
+	assert.Empty(t, findEvents(events, "tool_call"))
+}
+
+// TestContinuationMaxAttemptsStillPartialSafe verifies that when the model
+// keeps returning finish_reason="length" with partial tool calls on every
+// attempt, the loop exhausts maxContinuationAttempts without panicking, drops
+// all partial tool calls (none are executed), and returns the merged content.
+func TestContinuationMaxAttemptsStillPartialSafe(t *testing.T) {
+	toolSrv := mock.NewMockToolServer()
+	_, err := toolSrv.RegisterReadFileTool("content")
+	require.NoError(t, err)
+
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"SL-10", "max-attempts-partial-tc",
+		mock.ConversationTurn{
+			AssistantContent: "p1",
+			AssistantToolCalls: []mock.ExpectedToolCall{
+				{ID: "tc1", Name: "read_file", Args: map[string]any{"path": "a.go"}},
+			},
+			FinishReason: "length",
+		},
+		mock.ConversationTurn{
+			AssistantContent: "p2",
+			AssistantToolCalls: []mock.ExpectedToolCall{
+				{ID: "tc2", Name: "read_file", Args: map[string]any{"path": "b.go"}},
+			},
+			FinishReason: "length",
+		},
+		mock.ConversationTurn{
+			AssistantContent: "p3",
+			AssistantToolCalls: []mock.ExpectedToolCall{
+				{ID: "tc3", Name: "read_file", Args: map[string]any{"path": "c.go"}},
+			},
+			FinishReason: "length",
+		},
+		mock.ConversationTurn{
+			AssistantContent: "p4",
+			AssistantToolCalls: []mock.ExpectedToolCall{
+				{ID: "tc4", Name: "read_file", Args: map[string]any{"path": "d.go"}},
+			},
+			FinishReason: "length",
+		},
+	))
+	loop := NewLoopAgent(WithLLM(model), WithTools(toolSrv))
+
+	events, err := loop.Run(context.Background(), Submission{Content: "go"})
+	require.NoError(t, err)
+
+	// 1 original + 3 continuations = 4 total calls.
+	assert.Equal(t, 4, model.CallCount())
+
+	// No tool calls should have been executed — all were partial and dropped.
+	assert.Empty(t, findEvents(events, "tool_call"))
+	assert.Empty(t, findEvents(events, "tool_result"))
+
+	// Content from all four partial responses is merged.
+	messages := findEvents(events, "message")
+	require.Len(t, messages, 1)
+	assert.Equal(t, "p1p2p3p4", messages[0])
+}
+
+// TestNoContinuationWhenFinishReasonStop verifies that a normal finish_reason
+// of "stop" with tool calls does not trigger continuation, and the tool calls
+// execute normally (regression test).
+func TestNoContinuationWhenFinishReasonStop(t *testing.T) {
+	toolSrv := mock.NewMockToolServer()
+	_, err := toolSrv.RegisterReadFileTool("content")
+	require.NoError(t, err)
+
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"SL-11", "stop-with-tool-calls",
+		mock.ConversationTurn{
+			AssistantContent: "let me read",
+			AssistantToolCalls: []mock.ExpectedToolCall{
+				{ID: "tc1", Name: "read_file", Args: map[string]any{"path": "a.go"}},
+			},
+			FinishReason: "stop",
+		},
+		mock.ConversationTurn{AssistantContent: "done"},
+	))
+	loop := NewLoopAgent(WithLLM(model), WithTools(toolSrv))
+
+	events, err := loop.Run(context.Background(), Submission{Content: "go"})
+	require.NoError(t, err)
+
+	// 2 LLM calls: 1 original (no continuation) + 1 after tool execution.
+	assert.Equal(t, 2, model.CallCount())
+
+	// The tool call executes normally.
+	toolCalls := findEvents(events, "tool_call")
+	require.Len(t, toolCalls, 1)
+	assert.Equal(t, "read_file", toolCalls[0])
+
+	// Both messages are emitted.
+	messages := findEvents(events, "message")
+	require.Len(t, messages, 2)
+	assert.Equal(t, "let me read", messages[0])
+	assert.Equal(t, "done", messages[1])
+}
