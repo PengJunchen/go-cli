@@ -685,7 +685,13 @@ func (l *LoopAgent) generateWithContinuation(ctx context.Context, model llm.Base
 		resp.FinishReason = contResp.FinishReason
 		resp.ToolCalls = contResp.ToolCalls
 		if contResp.Usage != nil {
-			resp.Usage = contResp.Usage
+			if resp.Usage == nil {
+				resp.Usage = contResp.Usage
+			} else {
+				resp.Usage.InputTokens += contResp.Usage.InputTokens
+				resp.Usage.OutputTokens += contResp.Usage.OutputTokens
+				resp.Usage.TotalTokens += contResp.Usage.TotalTokens
+			}
 		}
 	}
 
