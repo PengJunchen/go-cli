@@ -2,6 +2,7 @@ package llm
 
 import (
 	"bufio"
+	"bytes"
 	"io"
 	"strings"
 )
@@ -102,4 +103,25 @@ func (p *DefaultSSEParser) Parse(reader io.Reader) (<-chan SSEEvent, error) {
 	}()
 
 	return ch, nil
+}
+
+// detectJSONResponse peeks at the reader to determine if the response is a
+// plain JSON document (non-SSE) rather than an SSE stream. When the first
+// non-whitespace byte is '{' or '[', the entire body is read and returned as
+// JSON. Otherwise the reader is left untouched for SSE parsing. Returns
+// (isJSON, peekedBytes, error).
+func detectJSONResponse(reader *bufio.Reader) (bool, []byte, error) {
+	peeked, err := reader.Peek(64)
+	if err != nil && err != io.EOF {
+		return false, nil, err
+	}
+	trimmed := bytes.TrimLeft(peeked, " \t\r\n")
+	if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') {
+		all, err := io.ReadAll(reader)
+		if err != nil {
+			return false, nil, err
+		}
+		return true, all, nil
+	}
+	return false, nil, nil
 }

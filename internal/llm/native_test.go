@@ -243,10 +243,11 @@ func TestNativeChatModelStreamSingleChunk(t *testing.T) {
 	for c := range ch {
 		chunks = append(chunks, c)
 	}
-	require.Len(t, chunks, 2)
+	require.Len(t, chunks, 3)
 	assert.Equal(t, RoleAssistant, chunks[0].Role)
-	assert.Equal(t, "streamed", chunks[0].Content)
-	assert.True(t, chunks[1].Final)
+	assert.Equal(t, "", chunks[0].Content) // role-only placeholder chunk
+	assert.Equal(t, "streamed", chunks[1].Content)
+	assert.True(t, chunks[2].Final)
 }
 
 func TestNativeChatModelHTTP500(t *testing.T) {
