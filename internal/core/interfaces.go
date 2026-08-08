@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"log/slog"
 
 	"github.com/pengjunchen/go-cli/internal/extension"
 	"github.com/pengjunchen/go-cli/internal/llm"
@@ -23,9 +22,8 @@ const (
 	SubmissionFollowUp
 )
 
-// String returns the textual name of the submission type and logs it.
+// String returns the textual name of the submission type.
 func (t SubmissionType) String() string {
-	slog.Info("core.submission.type", "type", int(t))
 	switch t {
 	case SubmissionSteering:
 		return "steering"
@@ -74,9 +72,8 @@ const (
 	ClassificationRequireApproval
 )
 
-// String returns the textual name of the classification and logs it.
+// String returns the textual name of the classification.
 func (c Classification) String() string {
-	slog.Info("core.approval.classification", "classification", int(c))
 	switch c {
 	case ClassificationDeny:
 		return "deny"

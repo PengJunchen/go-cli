@@ -1,7 +1,6 @@
 package core
 
 import (
-	"log/slog"
 	"time"
 )
 
@@ -21,9 +20,8 @@ const (
 	TurnFailed
 )
 
-// String returns the textual name of the turn status and logs it.
+// String returns the textual name of the turn status.
 func (s TurnStatus) String() string {
-	slog.Info("core.turn.status", "status", int(s))
 	switch s {
 	case TurnRunning:
 		return "running"
