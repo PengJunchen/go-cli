@@ -57,7 +57,10 @@ func TestTeaModel_HandlesIncremental(t *testing.T) {
 	m.Update(agentEventMsg{event: AgentEvent{
 		ContentType: ContentTypeStreaming, Content: "world", Incremental: true,
 	}})
-	assert.Contains(t, m.View(), "Hello world")
+	// Glamour renders streaming markdown with per-word ANSI styling, so the
+	// contiguous "Hello world" is split across styled spans. Strip escapes to
+	// assert the visible payload.
+	assert.Contains(t, stripEscape(m.View()), "Hello world")
 	require.Equal(t, 1, m.accordion.Len(), "incremental chunks accumulate into one entry")
 }
 

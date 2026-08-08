@@ -82,10 +82,11 @@ func TestStripANSIUnicodeColumns(t *testing.T) {
 // owns SGR sequence construction now, so there is nothing to unit-test here.
 
 // TestMarkdownRendererPreservesContent verifies markdown output contains the
-// full content. The AST-based renderer does not wrap paragraph text.
+// full content. Glamour renders paragraph text verbatim.
 func TestMarkdownRendererPreservesContent(t *testing.T) {
-	out := (MarkdownRenderer{}).Render(context.Background(), "abcdefgh", RenderOpts{Theme: DarkTheme{}, Width: 4})
-	assert.Contains(t, out, "abcdefgh")
+	r := NewMarkdownRenderer()
+	out := r.Render(context.Background(), "abcdefgh", RenderOpts{Theme: DarkTheme{}, Width: 4})
+	assert.Contains(t, stripEscape(out), "abcdefgh")
 }
 
 // TestTableRendererPreservesRowOrder verifies table header emphasis is applied

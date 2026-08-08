@@ -5,9 +5,10 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
 
+	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/pengjunchen/go-cli/internal/tui/markdown"
 )
 
 // renderTheme resolves the theme to apply, falling back to a light-safe dark
@@ -60,55 +61,92 @@ func stripANSI(text string, maxCols int) string {
 
 // ---------- markdown ----------
 
-// themeAdapter wraps a Theme to satisfy the markdown.ThemeAdapter interface.
-// It bridges the tui.Theme accessors (which return Style) to the simpler
-// string-returning methods that the markdown renderer expects.
-type themeAdapter struct{ theme Theme }
+// glamourStyleFor maps the active theme to a glamour standard-style name.
+// LightTheme selects the "light" preset; every other theme (Dark, Monokai,
+// Solarized, Mock, or a nil theme) falls back to "dark" so text stays legible
+// on dark backgrounds. Glamour owns all syntax highlighting via chroma, so the
+// theme is only consulted to pick the colour palette.
+func glamourStyleFor(opts RenderOpts) string {
+	if opts.Theme != nil {
+		switch opts.Theme.(type) {
+		case LightTheme:
+			return "light"
+		}
+	}
+	return "dark"
+}
 
-func (a themeAdapter) Bold(text string) string          { return a.theme.Bold().Render(text) }
-func (a themeAdapter) Italic(text string) string        { return a.theme.Italic().Render(text) }
-func (a themeAdapter) Faint(text string) string         { return a.theme.Faint().Render(text) }
-func (a themeAdapter) Primary(text string) string       { return a.theme.Primary().Render(text) }
-func (a themeAdapter) Secondary(text string) string     { return a.theme.Secondary().Render(text) }
-func (a themeAdapter) Error(text string) string         { return a.theme.Error().Render(text) }
-func (a themeAdapter) Underline(text string) string     { return NewStyle().Underline(true).Render(text) }
-func (a themeAdapter) Strikethrough(text string) string { return NewStyle().Strikethrough(true).Render(text) }
-
-// MarkdownRenderer parses markdown content into an AST and renders it with
-// ANSI styling via the markdown.MarkdownASTRenderer. An optional CodeHighlighter
-// provides syntax highlighting for fenced code blocks.
+// MarkdownRenderer renders markdown content via glamour (GFM + chroma syntax
+// highlighting). It lazily builds and caches a *glamour.TermRenderer keyed by
+// (style, width), rebuilding it only when either value changes, so repeated
+// Render calls with stable options avoid re-parsing the glamour style config.
 type MarkdownRenderer struct {
-	highlighter CodeHighlighter
+	mu       sync.Mutex
+	renderer *glamour.TermRenderer
+	style    string
+	width    int
 }
 
 var _ Renderer = (*MarkdownRenderer)(nil)
 
-// NewMarkdownRenderer returns a MarkdownRenderer wired to the given highlighter.
-// If hl is nil the renderer falls back to a DefaultCodeHighlighter at render time.
-func NewMarkdownRenderer(hl CodeHighlighter) *MarkdownRenderer {
-	return &MarkdownRenderer{highlighter: hl}
+// NewMarkdownRenderer returns a MarkdownRenderer. No highlighter argument is
+// required: glamour provides syntax highlighting for fenced code blocks via
+// chroma, replacing the previous self-implemented highlighter.
+func NewMarkdownRenderer() *MarkdownRenderer {
+	return &MarkdownRenderer{}
 }
 
-// Render parses content as markdown, walks the AST, and returns ANSI-styled text.
-func (m MarkdownRenderer) Render(ctx context.Context, content string, opts RenderOpts) string {
-	hl := m.highlighter
-	if hl == nil {
-		hl = NewDefaultCodeHighlighter()
+// termRenderer returns a cached *glamour.TermRenderer for the given style and
+// width, rebuilding it only when either value changes. The caller must hold m.mu.
+func (m *MarkdownRenderer) termRenderer(style string, width int) (*glamour.TermRenderer, error) {
+	if m.renderer != nil && m.style == style && m.width == width {
+		return m.renderer, nil
 	}
-	parser := markdown.NewParser()
-	ast := parser.Parse(content)
-	adapter := themeAdapter{theme: renderTheme(opts)}
-	r := markdown.NewMarkdownASTRenderer(adapter, opts.Width, hl)
-	out := r.Render(ast)
+	r, err := glamour.NewTermRenderer(
+		glamour.WithStandardStyle(style),
+		glamour.WithWordWrap(width),
+	)
+	if err != nil {
+		return nil, err
+	}
+	m.renderer = r
+	m.style = style
+	m.width = width
+	return r, nil
+}
+
+// Render renders content as markdown via glamour and returns ANSI-styled text.
+// On any renderer-construction or render error it falls back to the raw
+// content so callers never receive an empty string for non-empty input.
+func (m *MarkdownRenderer) Render(ctx context.Context, content string, opts RenderOpts) string {
+	width := opts.Width
+	if width <= 0 {
+		width = 80
+	}
+	style := glamourStyleFor(opts)
+
+	m.mu.Lock()
+	r, err := m.termRenderer(style, width)
+	m.mu.Unlock()
+	if err != nil || r == nil {
+		logRender(ctx, "markdown", opts.ContentType, len(content))
+		return content
+	}
+	out, err := r.Render(content)
+	if err != nil {
+		logRender(ctx, "markdown", opts.ContentType, len(content))
+		return content
+	}
+	out = strings.TrimRight(out, "\n")
 	logRender(ctx, "markdown", opts.ContentType, len(out))
 	return out
 }
 
 // Name identifies the renderer.
-func (MarkdownRenderer) Name() string { return "markdown" }
+func (*MarkdownRenderer) Name() string { return "markdown" }
 
 // Supports reports whether the renderer handles the content type.
-func (MarkdownRenderer) Supports(ct string) bool { return ct == ContentTypeMarkdown }
+func (*MarkdownRenderer) Supports(ct string) bool { return ct == ContentTypeMarkdown }
 
 // ---------- code ----------
 

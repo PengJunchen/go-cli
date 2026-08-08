@@ -15,7 +15,7 @@ import (
 // Renderer).
 var allRenderers = func() []Renderer {
 	return []Renderer{
-		MarkdownRenderer{}, CodeRenderer{}, TableRenderer{}, DiffRenderer{},
+		NewMarkdownRenderer(), CodeRenderer{}, TableRenderer{}, DiffRenderer{},
 		ErrorRenderer{}, ToolCallRenderer{}, ToolResultRenderer{}, ToolOutputRenderer{}, ThinkingRenderer{},
 		ProgressRenderer{}, FileTreeRenderer{}, ImageRenderer{}, LinkRenderer{},
 		SystemRenderer{}, UserRenderer{}, AssistantRenderer{}, ApprovalRenderer{},
@@ -137,7 +137,7 @@ func TestStreamingRenderersImplementMarker(t *testing.T) {
 		assert.True(t, sm.streaming())
 	}
 	// Non-streaming renderers are not markers.
-	_, ok := Renderer(MarkdownRenderer{}).(streamMarker)
+	_, ok := Renderer(NewMarkdownRenderer()).(streamMarker)
 	assert.False(t, ok)
 }
 

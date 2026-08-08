@@ -153,7 +153,7 @@ func (r *RendererRegistry) List() map[string]Renderer {
 // RegisterDefaultRenderers registers all built-in renderers into the given
 // registry.
 func RegisterDefaultRenderers(reg *RendererRegistry) {
-	reg.Register(NewMarkdownRenderer(NewDefaultCodeHighlighter()))
+	reg.Register(NewMarkdownRenderer())
 	reg.Register(CodeRenderer{})
 	reg.Register(TableRenderer{})
 	reg.Register(DiffRenderer{})

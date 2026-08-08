@@ -136,15 +136,17 @@ func TestEachPresetProducesDistinctPrimary(t *testing.T) {
 }
 
 // TestRenderersDrawWithThemeManager verifies going through a ThemeManager
-// applies the active theme's styling to a renderer end-to-end.
+// applies the active theme's styling to a renderer end-to-end. Glamour renders
+// markdown links using its own link styling (underline + color), so the output
+// contains escape sequences and the link display text "hi".
 func TestRenderersDrawWithThemeManager(t *testing.T) {
 	mgr := NewThemeManager()
 	require.NoError(t, mgr.Set("light"))
-	out := (MarkdownRenderer{}).Render(context.Background(), "[hi](http://x)", RenderOpts{Theme: mgr.Get()})
-	require.True(t, strings.HasPrefix(out, "\x1b["), "light primary should style the link, got %q", out)
-	// lipgloss applies underline per-rune on the link display text, fragmenting
-	// the raw output, so verify the visible payload via stripEscape.
-	require.Contains(t, stripEscape(out), "[hi]")
+	r := NewMarkdownRenderer()
+	out := r.Render(context.Background(), "[hi](http://x)", RenderOpts{Theme: mgr.Get()})
+	require.Contains(t, out, "\x1b[", "glamour should style the link with escape sequences, got %q", out)
+	// Glamour strips the markdown link syntax, rendering only the display text.
+	require.Contains(t, stripEscape(out), "hi")
 }
 
 // TestRendererRegistryEmptyVerifiesNewRegistryIsEmpty verifies a freshly
