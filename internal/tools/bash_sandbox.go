@@ -301,14 +301,18 @@ func stripSubShells(s string) string {
 	return b.String()
 }
 
-// splitCommands splits a command string on command separators (;), pipes (|)
-// and logical operators (&& and ||), returning the trimmed non-empty segments.
+// splitCommands splits a command string on command separators (;, &, newlines),
+// pipes (|), and logical operators (&& and ||), returning the trimmed non-empty
+// segments. The & operator is handled after && so that logical-AND is not
+// broken into two background operators.
 func splitCommands(s string) []string {
 	const delim = "\x00"
 	s = strings.ReplaceAll(s, "&&", delim)
 	s = strings.ReplaceAll(s, "||", delim)
 	s = strings.ReplaceAll(s, "|", delim)
 	s = strings.ReplaceAll(s, ";", delim)
+	s = strings.ReplaceAll(s, "&", delim)
+	s = strings.ReplaceAll(s, "\n", delim)
 	parts := strings.Split(s, delim)
 	result := make([]string, 0, len(parts))
 	for _, p := range parts {

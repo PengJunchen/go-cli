@@ -7,7 +7,6 @@ import (
 	"io"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -204,11 +203,8 @@ func (t *ReadTool) PromptGuidelines() []string {
 	return []string{"Use read to examine files instead of cat or sed"}
 }
 
-// resolvePath resolves a possibly-relative path against the workdir and cleans
-// the result.
+// resolvePath resolves a possibly-relative path against the workdir, cleans
+// the result, and prevents path traversal outside the workdir.
 func (t *ReadTool) resolvePath(path string) (string, error) {
-	if !filepath.IsAbs(path) && t.workdir != "" {
-		path = filepath.Join(t.workdir, path)
-	}
-	return filepath.Clean(path), nil
+	return resolveWithinWorkdir("read", t.workdir, path)
 }

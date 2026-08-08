@@ -55,6 +55,33 @@ func WithFileTracker(ft *FileTracker) WriteToolOption {
 	return func(t *WriteTool) { t.fileTracker = ft }
 }
 
+// resolveWithinWorkdir resolves a relative path against the workdir and
+// prevents path traversal. When the path is relative and a workdir is set,
+// the resolved path must remain within the workdir. Absolute paths are used
+// as-is.
+func resolveWithinWorkdir(toolName, workdir, path string) (string, error) {
+	abspath := path
+	if !filepath.IsAbs(abspath) && workdir != "" {
+		abspath = filepath.Join(workdir, abspath)
+	}
+	abspath = filepath.Clean(abspath)
+
+	// Prevent path traversal: when the path is relative and a workdir is
+	// set, verify the resolved path stays within the workdir.
+	if workdir != "" && !filepath.IsAbs(path) {
+		workdirAbs, err := filepath.Abs(filepath.Clean(workdir))
+		if err == nil {
+			pathAbs, err := filepath.Abs(abspath)
+			if err == nil && pathAbs != workdirAbs &&
+				!strings.HasPrefix(pathAbs, workdirAbs+string(filepath.Separator)) {
+				return abspath, fmt.Errorf("%s: path %q escapes workdir", toolName, path)
+			}
+		}
+	}
+
+	return abspath, nil
+}
+
 // WriteTool writes content to files, creating parent directories as needed.
 // It implements the ToolDefinition interface.
 type WriteTool struct {
@@ -116,11 +143,12 @@ func (t *WriteTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, er
 		content = v
 	}
 
-	abspath := path
-	if !filepath.IsAbs(abspath) && t.Workdir != "" {
-		abspath = filepath.Join(t.Workdir, abspath)
+	abspath, err := resolveWithinWorkdir("write", t.Workdir, path)
+	if err != nil {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		logger.Error("write.path_traversal", "path", path, "err", err)
+		return nil, err
 	}
-	abspath = filepath.Clean(abspath)
 
 	if len(content) > t.MaxBytes {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})

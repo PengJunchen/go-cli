@@ -121,8 +121,9 @@ func (r *DefaultDeferredToolRegistry) Load(ctx context.Context, name string) (To
 
 	def, err := loader()
 	if err != nil {
-		// Fall back to a stub: execution neither blocks nor panics, and the
-		// loader stays registered so a later Load can retry.
+		// Fall back to a stub: execution neither blocks nor panics. The stub
+		// is cached in the loaded map so subsequent Loads return it
+		// immediately without re-invoking the loader.
 		stub := &deferredStub{name: name}
 		r.loaded[name] = stub
 		span.SetAttributes(tracing.Attribute{Key: "tool_name", Value: name}, tracing.Attribute{Key: "status", Value: "stub"})
