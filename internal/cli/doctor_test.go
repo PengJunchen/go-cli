@@ -5,6 +5,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
 	"time"
 
@@ -219,3 +221,42 @@ type stubChecker struct {
 }
 
 func (s *stubChecker) Check(_ context.Context) DoctorCheck { return s.check }
+
+// --- OSInfoChecker ---
+
+// TestDoctorDarwinOSInfo verifies that getOSInfo returns a non-empty string
+// containing "macOS" when running on Darwin.
+func TestDoctorDarwinOSInfo(t *testing.T) {
+	if runtime.GOOS != "darwin" {
+		t.Skip("test only runs on darwin")
+	}
+	info := getOSInfo()
+	assert.NotEmpty(t, info)
+	assert.Contains(t, strings.ToLower(info), "macos")
+}
+
+// TestDoctorCheckAllPlatforms verifies that all default doctor checks can
+// run on any platform without panicking and each returns a valid status.
+func TestDoctorCheckAllPlatforms(t *testing.T) {
+	runner := NewDoctorRunner()
+	results := runner.Run(context.Background())
+	assert.NotEmpty(t, results)
+	for _, r := range results {
+		assert.Contains(t, []string{doctorPass, doctorWarn, doctorFail}, r.Status,
+			"check %q returned invalid status %q", r.Name, r.Status)
+		assert.NotEmpty(t, r.Name)
+	}
+}
+
+// TestDoctorMissingToolGraceful verifies that a missing required tool is
+// reported with a fail status (not a panic) and the message identifies the
+// missing tool.
+func TestDoctorMissingToolGraceful(t *testing.T) {
+	assert.NotPanics(t, func() {
+		c := NewToolsChecker([]string{"definitely-not-a-real-tool-xyz"})
+		chk := c.Check(context.Background())
+		assert.Equal(t, doctorFail, chk.Status)
+		assert.Contains(t, chk.Message, "missing tools")
+		assert.Contains(t, chk.Message, "definitely-not-a-real-tool-xyz")
+	})
+}

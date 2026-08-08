@@ -56,6 +56,7 @@ func NewDoctorRunner() *DoctorRunner {
 		NewPermissionsChecker(nil),
 		NewNetworkChecker("", 0),
 		NewDiskSpaceChecker("", 0),
+		NewOSInfoChecker(),
 	}}
 }
 
@@ -499,6 +500,92 @@ func humanBytes(n uint64) string {
 	return fmt.Sprintf("%.1f %ciB", float64(n)/float64(div), "KMGTPE"[exp])
 }
 
+// ---------------------------------------------------------------------------
+// OSInfoChecker
+// ---------------------------------------------------------------------------
+
+// OSInfoChecker reports operating system information.
+type OSInfoChecker struct{}
+
+// NewOSInfoChecker returns a checker that reports OS information.
+func NewOSInfoChecker() *OSInfoChecker {
+	return &OSInfoChecker{}
+}
+
+// Check implements DoctorChecker.
+func (c *OSInfoChecker) Check(_ context.Context) DoctorCheck {
+	return DoctorCheck{Name: "os-info", Status: doctorPass, Message: getOSInfo()}
+}
+
+// getOSInfo returns a human-readable description of the operating system.
+// It branches on runtime.GOOS so that the correct mechanism is used on each
+// platform:
+//   - darwin: calls sw_vers
+//   - linux: reads /etc/os-release (falling back to /proc/version)
+//   - other: returns a generic string from runtime values
+func getOSInfo() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return getDarwinOSInfo()
+	case "linux":
+		return getLinuxOSInfo()
+	default:
+		return runtime.GOOS + " " + runtime.GOARCH
+	}
+}
+
+// getDarwinOSInfo calls sw_vers and returns "ProductName ProductVersion".
+func getDarwinOSInfo() string {
+	out, err := exec.Command("sw_vers").CombinedOutput()
+	if err != nil {
+		return "macOS (version unknown)"
+	}
+	var name, version string
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.HasPrefix(line, "ProductName:") {
+			name = strings.TrimSpace(strings.TrimPrefix(line, "ProductName:"))
+		}
+		if strings.HasPrefix(line, "ProductVersion:") {
+			version = strings.TrimSpace(strings.TrimPrefix(line, "ProductVersion:"))
+		}
+	}
+	if name != "" && version != "" {
+		return name + " " + version
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// getLinuxOSInfo reads /etc/os-release (falling back to /proc/version) to
+// produce a distribution name and version string.
+func getLinuxOSInfo() string {
+	data, err := os.ReadFile("/etc/os-release")
+	if err == nil {
+		var name, version string
+		for _, line := range strings.Split(string(data), "\n") {
+			if strings.HasPrefix(line, "PRETTY_NAME=") {
+				return strings.Trim(strings.TrimPrefix(line, "PRETTY_NAME="), `"`)
+			}
+			if strings.HasPrefix(line, "NAME=") {
+				name = strings.Trim(strings.TrimPrefix(line, "NAME="), `"`)
+			}
+			if strings.HasPrefix(line, "VERSION=") {
+				version = strings.Trim(strings.TrimPrefix(line, "VERSION="), `"`)
+			}
+		}
+		if name != "" {
+			if version != "" {
+				return name + " " + version
+			}
+			return name
+		}
+	}
+	data, err = os.ReadFile("/proc/version")
+	if err == nil {
+		return strings.TrimSpace(string(data))
+	}
+	return "Linux (distribution unknown)"
+}
+
 // doctorCmd implements Command and runs diagnostic checks.
 type doctorCmd struct {
 	out io.Writer
@@ -541,4 +628,5 @@ var (
 	_ DoctorChecker = (*PermissionsChecker)(nil)
 	_ DoctorChecker = (*NetworkChecker)(nil)
 	_ DoctorChecker = (*DiskSpaceChecker)(nil)
+	_ DoctorChecker = (*OSInfoChecker)(nil)
 )
