@@ -242,7 +242,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 			WithHistoryMaxLen(historyMaxLen),
 		)
 		dle.SetCompleter(NewCompositeCompleter(
-			NewSlashCommandCompleter(slashCommandNames()),
+			NewSlashCommandCompleterFromRegistry(defaultSlashReg),
 			NewFilePathCompleter(),
 		))
 

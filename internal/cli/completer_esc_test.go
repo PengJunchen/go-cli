@@ -159,8 +159,73 @@ func TestCompositeCompleter_NilChildSkipped(t *testing.T) {
 }
 
 // -----------------------------------------------------------------------------
-// Esc-key monitor tests
+// Registry-backed completer tests
 // -----------------------------------------------------------------------------
+
+// TestSlashCommandCompleter_RegistryReturnsRealDescription verifies that a
+// registry-backed completer returns the handler's real Description instead of
+// the hardcoded "slash command" string.
+func TestSlashCommandCompleter_RegistryReturnsRealDescription(t *testing.T) {
+	c := NewSlashCommandCompleterFromRegistry(defaultSlashReg)
+	completions, _ := c.Complete("/mem", 4)
+	require.Len(t, completions, 1)
+	assert.Equal(t, "/memory", completions[0].Text)
+	assert.Equal(t, "Manage cross-session memories: list, add, delete, search, clear",
+		completions[0].Description)
+}
+
+// TestSlashCommandCompleter_SubcommandCompletion verifies that subcommand
+// completion works for handlers implementing SubcommandProvider.
+func TestSlashCommandCompleter_SubcommandCompletion(t *testing.T) {
+	c := NewSlashCommandCompleterFromRegistry(defaultSlashReg)
+
+	// "/memory " (trailing space, cursor at end) returns all subcommands.
+	completions, start := c.Complete("/memory ", 8)
+	require.Len(t, completions, 5)
+	assert.Equal(t, 8, start) // subcommand starts right after the space
+	names := make([]string, len(completions))
+	for i, comp := range completions {
+		names[i] = comp.Text
+	}
+	assert.Contains(t, names, "list")
+	assert.Contains(t, names, "add")
+	assert.Contains(t, names, "delete")
+	assert.Contains(t, names, "search")
+	assert.Contains(t, names, "clear")
+
+	// "/memory li" returns only "list".
+	completions, start = c.Complete("/memory li", 10)
+	require.Len(t, completions, 1)
+	assert.Equal(t, "list", completions[0].Text)
+	assert.Equal(t, "List all stored memories", completions[0].Description)
+	assert.Equal(t, 8, start)
+}
+
+// TestSlashCommandCompleter_NoSubcommandsFallsThrough verifies that a handler
+// without SubcommandProvider returns nil on space (backward compat).
+func TestSlashCommandCompleter_NoSubcommandsFallsThrough(t *testing.T) {
+	c := NewSlashCommandCompleterFromRegistry(defaultSlashReg)
+	// /cost does not implement SubcommandProvider.
+	completions, _ := c.Complete("/cost ", 6)
+	assert.Nil(t, completions)
+}
+
+// TestSlashCommandCompleter_BackwardCompatNamesOnly verifies that the old
+// constructor with []string still works: descriptions are "slash command" and
+// spaces return nil.
+func TestSlashCommandCompleter_BackwardCompatNamesOnly(t *testing.T) {
+	c := NewSlashCommandCompleter([]string{"help", "cost", "exit"})
+
+	// Command name completion with default description.
+	completions, _ := c.Complete("/he", 3)
+	require.Len(t, completions, 1)
+	assert.Equal(t, "/help", completions[0].Text)
+	assert.Equal(t, "slash command", completions[0].Description)
+
+	// Space returns nil (no registry, no subcommand completion).
+	completions, _ = c.Complete("/help ", 6)
+	assert.Nil(t, completions)
+}
 
 // TestEscStandalone_TriggersCancel verifies that a standalone ESC byte (with
 // no following bytes within escSequenceTimeout) triggers cancelFn.

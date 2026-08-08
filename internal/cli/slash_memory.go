@@ -19,6 +19,17 @@ func (h *MemoryHandler) Description() string {
 	return "Manage cross-session memories: list, add, delete, search, clear"
 }
 
+// Subcommands returns the subcommands supported by /memory for tab completion.
+func (h *MemoryHandler) Subcommands() []Subcommand {
+	return []Subcommand{
+		{Name: "list", Description: "List all stored memories"},
+		{Name: "add", Description: "Add a manual memory"},
+		{Name: "delete", Description: "Delete a memory by ID"},
+		{Name: "search", Description: "Search memories by keyword"},
+		{Name: "clear", Description: "Delete all memories (requires confirm)"},
+	}
+}
+
 func (h *MemoryHandler) Handle(ctx context.Context, args []string, sc *slashContext) error {
 	if sc.memoryStore == nil {
 		fmt.Fprintln(sc.out, "Memory store not configured.") //nolint:errcheck
