@@ -263,10 +263,11 @@ func TestContextManagerCompactionTokenEstimate(t *testing.T) {
 	mg := NewDefaultContextManager(tree)
 	sc, err := mg.BuildContext(context.Background(), "comp")
 	require.NoError(t, err)
-	require.Len(t, sc.Messages, 2)
-	// Content of "a" is "content-a" (9 chars -> 2 tokens) + summary "summary8" (8 chars -> 2 tokens).
-	assert.GreaterOrEqual(t, sc.EstimatedTokens, 4)
-	assert.Equal(t, "summary8", sc.Messages[1].Content, "compaction must fold to its summary")
+	// With compaction-point behavior, only the compaction summary is in Messages.
+	require.Len(t, sc.Messages, 1)
+	// Summary "summary8" (8 chars -> 2 tokens).
+	assert.GreaterOrEqual(t, sc.EstimatedTokens, 2)
+	assert.Equal(t, "summary8", sc.Messages[0].Content, "compaction must fold to its summary")
 }
 
 // TestMemoryStoreConcurrentCopySafety verifies concurrent Get returns copies

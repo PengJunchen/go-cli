@@ -233,13 +233,16 @@ func (s *JSONLSessionStore) loadEntriesLocked() error {
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), jsonlScannerMaxBuffer)
+	lineNum := 0
 	for scanner.Scan() {
+		lineNum++
 		line := scanner.Bytes()
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}
 		var e SessionEntry
 		if err := json.Unmarshal(line, &e); err != nil {
+			slog.Warn("session.jsonl.corrupt_line", "line", lineNum, "err", err)
 			continue // skip corrupt lines, keep the rest.
 		}
 		if _, exists := s.entries[e.ID]; !exists {

@@ -78,7 +78,12 @@ func TestClone_PreservesContentBlocks(t *testing.T) {
 	require.Len(t, cloned.ContentBlocks, 1)
 	assert.Equal(t, "block-content", cloned.ContentBlocks[0].Text)
 	require.Len(t, cloned.ToolCalls, 1)
-	assert.Equal(t, "tc-1", cloned.ToolCalls[0].ID)
+	// Task 35-32: Clone remaps ToolCall IDs so cloned branches don't share
+	// IDs with the original. Verify the ID is remapped but still traceable
+	// back to the original "tc-1".
+	assert.NotEqual(t, "tc-1", cloned.ToolCalls[0].ID)
+	assert.Contains(t, cloned.ToolCalls[0].ID, "tc-1")
+	assert.Contains(t, cloned.ToolCalls[0].ID, "cloned")
 	assert.Equal(t, "write", cloned.ToolCalls[0].Name)
 }
 

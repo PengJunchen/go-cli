@@ -36,17 +36,18 @@ func TestContextManager_BuildContextOrderAndFold(t *testing.T) {
 	require.NotNil(t, sc)
 
 	// Messages are ordered root to leaf; the compaction is folded to a summary.
-	require.Len(t, sc.Messages, 4)
-	assert.Equal(t, "a", sc.Messages[0].ID)
-	assert.Equal(t, EntryTypeCompaction, sc.Messages[1].Type)
-	assert.Equal(t, "earlier conversation summary", sc.Messages[1].Content)
-	assert.Equal(t, "b", sc.Messages[2].ID)
-	assert.Equal(t, "c", sc.Messages[3].ID)
+	// With the compaction-point behavior, entries before the last compaction
+	// are replaced by the compaction summary, so Messages starts at "comp".
+	require.Len(t, sc.Messages, 3)
+	assert.Equal(t, EntryTypeCompaction, sc.Messages[0].Type)
+	assert.Equal(t, "earlier conversation summary", sc.Messages[0].Content)
+	assert.Equal(t, "b", sc.Messages[1].ID)
+	assert.Equal(t, "c", sc.Messages[2].ID)
 
 	// RootID, LeafID, EntryCount.
 	assert.Equal(t, "c", sc.LeafID)
-	assert.Equal(t, "a", sc.RootID)
-	assert.Equal(t, 4, sc.EntryCount)
+	assert.Equal(t, "comp", sc.RootID)
+	assert.Equal(t, 3, sc.EntryCount)
 
 	// Traversed are the raw entries visited in walk (leaf to root) order,
 	// following the parent chain: c -> b -> comp -> a.

@@ -66,6 +66,14 @@ func (e *SessionEntry) clone() *SessionEntry {
 	if e.ContentBlocks != nil {
 		cp.ContentBlocks = make([]llm.ContentBlock, len(e.ContentBlocks))
 		copy(cp.ContentBlocks, e.ContentBlocks)
+		for i := range cp.ContentBlocks {
+			if cp.ContentBlocks[i].ImageURL != nil {
+				cp.ContentBlocks[i].ImageURL = &llm.ImageURL{
+					URL:    cp.ContentBlocks[i].ImageURL.URL,
+					Detail: cp.ContentBlocks[i].ImageURL.Detail,
+				}
+			}
+		}
 	}
 	if e.ToolCalls != nil {
 		cp.ToolCalls = make([]llm.ToolCall, len(e.ToolCalls))
