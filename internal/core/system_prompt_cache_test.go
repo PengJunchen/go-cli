@@ -189,3 +189,25 @@ func TestSystemPromptCacheConcurrentSafety(t *testing.T) {
 		assert.Equal(t, results[0], results[i], "all concurrent builds must return the same prompt")
 	}
 }
+
+// TestSystemPromptCacheNoDelimiterCollision verifies that two distinct option
+// sets whose raw concatenation used to produce the same cache version (e.g.
+// Path "a"+Content "b" == Path "ab"+Content "") no longer share a cache entry.
+// This guards against stale-cache bugs caused by unframed field concatenation.
+func TestSystemPromptCacheNoDelimiterCollision(t *testing.T) {
+	builder := NewDefaultSystemPromptBuilder()
+
+	first := builder.Build(context.Background(), SystemPromptOptions{
+		ContextFiles: []ContextFile{{Path: "a", Content: "b"}},
+	})
+	assert.Contains(t, first, "--- a ---")
+	assert.Contains(t, first, "b")
+
+	// Previously collided: "a"+"b" == "ab"+"". The empty-content file renders
+	// nothing, so the second prompt must NOT contain the first file's content.
+	second := builder.Build(context.Background(), SystemPromptOptions{
+		ContextFiles: []ContextFile{{Path: "ab", Content: ""}},
+	})
+	assert.NotEqual(t, first, second, "colliding inputs must not share a cache entry")
+	assert.NotContains(t, second, "--- a ---", "empty-content file must not render stale content from a colliding key")
+}

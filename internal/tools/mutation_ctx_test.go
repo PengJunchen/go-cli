@@ -31,11 +31,10 @@ func TestMutationRespectsContextCancellation(t *testing.T) {
 	assert.Contains(t, err.Error(), "context canceled")
 }
 
-// TestMutationApplySafeNilContextPanics is a sanity check that a nil context
-// (which should never happen in practice) is caught by ctx.Err() rather than
-// causing a nil-pointer dereference inside applySafe. context.Context(nil).Err()
-// would panic, so applySafe's caller must always pass a non-nil context. This
-// test documents that contract by ensuring a normal background context works.
+// TestMutationApplySafeBackgroundContext verifies the normal (non-cancelled)
+// path through applySafe. Note: applySafe does NOT defend against a nil context
+// — ctx.Err() is called before the recover defer is installed, so a nil context
+// would panic unrecovered. Callers must always pass a non-nil context.
 func TestMutationApplySafeBackgroundContext(t *testing.T) {
 	q := &DefaultFileMutationQueue{
 		handler: func(ctx context.Context, m FileMutation) (*ToolResult, error) {

@@ -42,9 +42,13 @@ func NewRedactingOutputGuard(opts ...Option) *RedactingOutputGuard {
 
 // AddRedactPattern compiles pattern and registers it for masking. Patterns
 // added after the first Check call are still applied on subsequent checks.
-// Invalid patterns are silently ignored to match the behaviour of the other
-// regex-based guards.
+// Invalid patterns and empty patterns are silently ignored — an empty pattern
+// matches at every position and would corrupt the output — to match the
+// behaviour of the other regex-based guards.
 func (g *RedactingOutputGuard) AddRedactPattern(pattern string) {
+	if pattern == "" {
+		return
+	}
 	re, err := regexp.Compile(pattern)
 	if err != nil {
 		return
