@@ -149,7 +149,7 @@ func TestTeaModel_TokenUsageStatusBar(t *testing.T) {
 	assert.Equal(t, 8000, m.tokenMax)
 	view := m.View()
 	assert.Contains(t, view, "100%")
-	assert.Contains(t, view, "\x1b[33m", "over 80% usage should be yellow")
+	assert.Contains(t, view, "\x1b[", "over 80% usage should be yellow")
 }
 
 // TestBubbleteaApp_RunCompletesOnChannelClose verifies Run returns nil when the

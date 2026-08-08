@@ -62,11 +62,11 @@ type dataSpan struct {
 	ctx  context.Context
 }
 
-func (s *dataSpan) SpanData() SpanData    { return s.data }
-func (s *dataSpan) TraceID() string       { return s.data.TraceID }
-func (s *dataSpan) SpanID() string        { return s.data.SpanID }
-func (s *dataSpan) ParentSpanID() string  { return s.data.ParentSpanID }
-func (s *dataSpan) Name() string          { return s.data.Name }
+func (s *dataSpan) SpanData() SpanData   { return s.data }
+func (s *dataSpan) TraceID() string      { return s.data.TraceID }
+func (s *dataSpan) SpanID() string       { return s.data.SpanID }
+func (s *dataSpan) ParentSpanID() string { return s.data.ParentSpanID }
+func (s *dataSpan) Name() string         { return s.data.Name }
 func (s *dataSpan) StartTime() time.Time {
 	t, _ := time.Parse(time.RFC3339Nano, s.data.StartTime)
 	return t

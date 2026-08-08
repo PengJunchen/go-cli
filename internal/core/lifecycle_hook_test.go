@@ -276,8 +276,8 @@ func TestHookAwareToolMiddlewareBlock(t *testing.T) {
 	blockErr := errors.New("blocked by policy")
 
 	blockingHook := &lifecycleHookWithBefore{
-		name:        "blocker",
-		beforeErr:   blockErr,
+		name:      "blocker",
+		beforeErr: blockErr,
 		LifecycleHookImpl: LifecycleHookImpl{
 			HookImpl: HookImpl{name: "blocker"},
 		},
@@ -362,8 +362,8 @@ func TestHookChainLifecycleErrorStops(t *testing.T) {
 	errSentinel := errors.New("hook error")
 
 	errHook := &lifecycleHookWithError{
-		name:             "err",
-		turnStartErr:     errSentinel,
+		name:         "err",
+		turnStartErr: errSentinel,
 		LifecycleHookImpl: LifecycleHookImpl{
 			HookImpl: HookImpl{name: "err"},
 		},

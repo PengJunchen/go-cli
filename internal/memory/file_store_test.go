@@ -220,8 +220,8 @@ func TestSearch_RelevanceRanking(t *testing.T) {
 	ctx := context.Background()
 
 	// N=4; "go" in d1 and d2 (df=2 => idf=log(4/3)>0).
-	require.NoError(t, s.Add(ctx, Memory{ID: "d1", Content: "go go go"}))                    // tf=3/3=1.0
-	require.NoError(t, s.Add(ctx, Memory{ID: "d2", Content: "go something else long"}))      // tf=1/4=0.25
+	require.NoError(t, s.Add(ctx, Memory{ID: "d1", Content: "go go go"}))               // tf=3/3=1.0
+	require.NoError(t, s.Add(ctx, Memory{ID: "d2", Content: "go something else long"})) // tf=1/4=0.25
 	require.NoError(t, s.Add(ctx, Memory{ID: "d3", Content: "rust programming language"}))
 	require.NoError(t, s.Add(ctx, Memory{ID: "d4", Content: "java enterprise beans"}))
 

@@ -142,7 +142,7 @@ This has **bold**, *italic*, ~~strikethrough~~, and a [link](https://x.com).
 		"underline(4)":     "\x1b[4;4m",
 		"strikethrough(9)": "\x1b[9m",
 		"reset(0)":         "\x1b[0m",
-		"color(primary)":   "38;2;125;86;244", // #7D56F4 (DarkTheme Primary)
+		"color(primary)":   "38;2;125;86;244",  // #7D56F4 (DarkTheme Primary)
 		"color(secondary)": "38;2;108;112;134", // #6C7086 (DarkTheme Secondary)
 	}
 

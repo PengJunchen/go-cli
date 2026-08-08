@@ -17,16 +17,16 @@ import (
 // takes. It records whether ExecuteStreaming or Execute was invoked and
 // optionally pushes canned lines through the StreamSink.
 type mockStreamingTool struct {
-	mu               sync.Mutex
-	name             string
-	streamingCalled  bool
-	executeCalled    bool
-	streamingCalls   int
-	executeCalls     int
-	output           string
-	sinkLines        []string // lines pushed through the sink when streaming
-	sinkStream       string   // stream tag for sink lines ("stdout"/"stderr")
-	err              error
+	mu              sync.Mutex
+	name            string
+	streamingCalled bool
+	executeCalled   bool
+	streamingCalls  int
+	executeCalls    int
+	output          string
+	sinkLines       []string // lines pushed through the sink when streaming
+	sinkStream      string   // stream tag for sink lines ("stdout"/"stderr")
+	err             error
 }
 
 func (t *mockStreamingTool) Name() string        { return t.name }

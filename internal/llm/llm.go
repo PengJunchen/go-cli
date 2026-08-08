@@ -41,8 +41,8 @@ type Usage struct {
 
 // Message is a single message in a conversation.
 type Message struct {
-	Role       Role       `json:"role"`
-	Content    string     `json:"content"`
+	Role    Role   `json:"role"`
+	Content string `json:"content"`
 	// ContentBlocks holds typed content parts for multimodal messages
 	// (text + images). When non-nil, encoders use ContentBlocks instead of
 	// Content. When nil, Content is used as before (backward compatible).
@@ -67,7 +67,7 @@ type ImageURL struct {
 // When Message.ContentBlocks is non-nil, encoders use it instead of
 // the plain Content string.
 type ContentBlock struct {
-	Type     string    `json:"type"`               // "text" | "image_url"
+	Type     string    `json:"type"`                // "text" | "image_url"
 	Text     string    `json:"text,omitempty"`      // when Type == "text"
 	ImageURL *ImageURL `json:"image_url,omitempty"` // when Type == "image_url"
 }

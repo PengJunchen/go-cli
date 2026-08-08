@@ -5,24 +5,24 @@ import "time"
 // Config is the root application configuration. It is deeply nested into
 // sections mirroring the go-cli configuration file / environment schema.
 type Config struct {
-	Provider   ProviderConfig   `json:"provider"`
-	Model      ModelConfig      `json:"model"`
-	Agent      AgentConfig      `json:"agent"`
-	Tools      ToolsConfig      `json:"tools"`
-	Tracing    TracingConfig    `json:"tracing"`
-	Approval   ApprovalConfig   `json:"approval"`
-	Session    SessionConfig    `json:"session"`
-	Compaction CompactionConfig `json:"compaction"`
-	MCP        MCPConfig        `json:"mcp"`
-	Skill      SkillConfig      `json:"skill"`
-	WebSearch  WebSearchConfig  `json:"web_search"`
-	Production ProductionConfig `json:"production"`
-	Sandbox    SandboxConfig    `json:"sandbox"`
-	LSP        LSPConfig        `json:"lsp"`
-	Remote     RemoteConfig     `json:"remote"`
-	Extensions ExtensionsConfig `json:"extensions"`
-	ACP        ACPConfig        `json:"acp"`
-	Git        GitConfig        `json:"git"`
+	Provider    ProviderConfig    `json:"provider"`
+	Model       ModelConfig       `json:"model"`
+	Agent       AgentConfig       `json:"agent"`
+	Tools       ToolsConfig       `json:"tools"`
+	Tracing     TracingConfig     `json:"tracing"`
+	Approval    ApprovalConfig    `json:"approval"`
+	Session     SessionConfig     `json:"session"`
+	Compaction  CompactionConfig  `json:"compaction"`
+	MCP         MCPConfig         `json:"mcp"`
+	Skill       SkillConfig       `json:"skill"`
+	WebSearch   WebSearchConfig   `json:"web_search"`
+	Production  ProductionConfig  `json:"production"`
+	Sandbox     SandboxConfig     `json:"sandbox"`
+	LSP         LSPConfig         `json:"lsp"`
+	Remote      RemoteConfig      `json:"remote"`
+	Extensions  ExtensionsConfig  `json:"extensions"`
+	ACP         ACPConfig         `json:"acp"`
+	Git         GitConfig         `json:"git"`
 	ModelCycler ModelCyclerConfig `json:"model_cycler"`
 	History     HistoryConfig     `json:"history"`
 	TUI         TUIConfig         `json:"tui" yaml:"tui"`

@@ -485,8 +485,10 @@ type ThinkingHandler struct{}
 
 var _ SlashCommandHandler = (*ThinkingHandler)(nil)
 
-func (h *ThinkingHandler) Name() string        { return "thinking" }
-func (h *ThinkingHandler) Description() string { return "Control thinking-chain display: show, collapse, or hide" }
+func (h *ThinkingHandler) Name() string { return "thinking" }
+func (h *ThinkingHandler) Description() string {
+	return "Control thinking-chain display: show, collapse, or hide"
+}
 
 func (h *ThinkingHandler) Handle(_ context.Context, args []string, sc *slashContext) error {
 	if len(args) == 0 {

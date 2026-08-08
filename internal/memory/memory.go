@@ -10,8 +10,8 @@ import (
 type Memory struct {
 	ID        string    `json:"id"`
 	Content   string    `json:"content"`
-	Category  string    `json:"category"`            // preference | fact | decision | convention
-	Source    string    `json:"source"`              // auto | manual
+	Category  string    `json:"category"` // preference | fact | decision | convention
+	Source    string    `json:"source"`   // auto | manual
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	Relevance float64   `json:"relevance,omitempty"` // 0-1, filled during retrieval

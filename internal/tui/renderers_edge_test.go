@@ -99,6 +99,7 @@ func TestTableRendererPreservesRowOrder(t *testing.T) {
 	assert.True(t, strings.HasPrefix(lines[0], "\x1b["))
 	assert.Equal(t, "c\td", lines[1])
 }
+
 // TestDiffRendererEmptyContent verifies diff on a single blank line renders the
 // context (fg) style applied to the empty line without panicking. The fg style
 // wraps an empty payload, so after stripping escapes the visible text is empty.
