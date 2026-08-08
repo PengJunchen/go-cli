@@ -61,9 +61,9 @@ func (h *CostHandler) Handle(_ context.Context, _ []string, sc *slashContext) er
 			fmt.Fprintf(sc.out, "\nSub-agent costs:\n")                 //nolint:errcheck
 			fmt.Fprintf(sc.out, "  Sub-agent total: $%.4f\n", subTotal) //nolint:errcheck
 			fmt.Fprintf(sc.out, "  Sub-agent calls: %d\n", subCalls)    //nolint:errcheck
-			for taskID, summary := range sc.costTracker.SubagentCosts { //nolint:errcheck
+			for _, rec := range sc.costTracker.SubagentCostSnapshot() { //nolint:errcheck
 				fmt.Fprintf(sc.out, "    %s: $%.4f (%d calls, %d in / %d out tokens)\n", //nolint:errcheck
-					taskID, summary.Cost, summary.Calls, summary.TokensIn, summary.TokensOut)
+					rec.TaskID, rec.Cost, rec.Calls, rec.TokensIn, rec.TokensOut)
 			}
 		}
 	} else {

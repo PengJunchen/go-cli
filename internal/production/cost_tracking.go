@@ -51,6 +51,17 @@ type CostSummary struct {
 	TokensOut int
 }
 
+// SubagentCostRecord pairs a sub-agent task ID with its accumulated cost
+// summary. It is a value type returned by SubagentCostSnapshot so callers
+// receive an independent defensive copy that is safe to use without holding
+// the tracker's lock.
+type SubagentCostRecord struct {
+	// TaskID is the sub-agent task identifier.
+	TaskID string
+	// CostSummary is the accumulated cost, calls, and token usage for the task.
+	CostSummary
+}
+
 // CostTracker accumulates costs across a session. It is safe for concurrent
 // use.
 type CostTracker struct {
@@ -58,7 +69,7 @@ type CostTracker struct {
 	tiers         map[string]CostTier
 	total         float64
 	calls         int
-	SubagentCosts map[string]CostSummary
+	subagentCosts map[string]CostSummary
 }
 
 // Compile-time assertion that CostTracker satisfies CostCalculator.
@@ -75,7 +86,7 @@ func NewCostTracker(tiers []CostTier) *CostTracker {
 		tm[t.Model] = t
 	}
 	slog.Debug("production.cost_tracker.new", "tiers", len(tm))
-	return &CostTracker{tiers: tm, SubagentCosts: make(map[string]CostSummary)}
+	return &CostTracker{tiers: tm, subagentCosts: make(map[string]CostSummary)}
 }
 
 // CalculateCost returns the cost of a single model call. It returns an error
@@ -137,12 +148,12 @@ func (t *CostTracker) RecordSubagent(taskID, model string, inputTokens, outputTo
 		return 0, err
 	}
 	t.mu.Lock()
-	entry := t.SubagentCosts[taskID]
+	entry := t.subagentCosts[taskID]
 	entry.Cost += cost
 	entry.Calls++
 	entry.TokensIn += inputTokens
 	entry.TokensOut += outputTokens
-	t.SubagentCosts[taskID] = entry
+	t.subagentCosts[taskID] = entry
 	t.mu.Unlock()
 	slog.Debug("production.cost_tracker.record_subagent",
 		"task_id", taskID,
@@ -153,13 +164,28 @@ func (t *CostTracker) RecordSubagent(taskID, model string, inputTokens, outputTo
 	return cost, nil
 }
 
+// SubagentCostSnapshot returns a defensive copy of the current sub-agent cost
+// records. The returned slice and its elements are safe to use without holding
+// any lock; mutations to the returned slice do not affect the tracker. The
+// snapshot is taken under the same mutex used by RecordSubagent, so it is safe
+// to call concurrently with writers.
+func (t *CostTracker) SubagentCostSnapshot() []SubagentCostRecord {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	out := make([]SubagentCostRecord, 0, len(t.subagentCosts))
+	for taskID, summary := range t.subagentCosts {
+		out = append(out, SubagentCostRecord{TaskID: taskID, CostSummary: summary})
+	}
+	return out
+}
+
 // SubagentTotal returns the aggregate cost across all recorded sub-agent
 // calls.
 func (t *CostTracker) SubagentTotal() float64 {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	var sum float64
-	for _, s := range t.SubagentCosts {
+	for _, s := range t.subagentCosts {
 		sum += s.Cost
 	}
 	return sum
@@ -170,7 +196,7 @@ func (t *CostTracker) SubagentCalls() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	var sum int
-	for _, s := range t.SubagentCosts {
+	for _, s := range t.subagentCosts {
 		sum += s.Calls
 	}
 	return sum
