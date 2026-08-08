@@ -228,7 +228,7 @@ func TestIsToolError(t *testing.T) {
 	})
 
 	// isError=true marks the result as an error.
-	m.updateToolResultStatusLocked(true)
+	m.updateToolResultStatusLocked("", true)
 	entries := m.accordion.Entries()
 	assert.Equal(t, ToolStatusError, entries[0].ToolStatus)
 
@@ -236,8 +236,99 @@ func TestIsToolError(t *testing.T) {
 	entries[0].ToolStatus = ToolStatusRunning
 
 	// isError=false marks the result as completed.
-	m.updateToolResultStatusLocked(false)
+	m.updateToolResultStatusLocked("", false)
 	assert.Equal(t, ToolStatusCompleted, entries[0].ToolStatus)
+}
+
+// TestFindByToolCallID verifies that FindByToolCallID returns the correct
+// entry by ToolCallID, and returns nil for empty/unknown IDs.
+func TestFindByToolCallID(t *testing.T) {
+	m := NewAccordionModel()
+	m.Add(&AccordionEntry{ContentType: ContentTypeToolCall, ToolCallID: "tc-1", Summary: "tool A"})
+	m.Add(&AccordionEntry{ContentType: ContentTypeToolCall, ToolCallID: "tc-2", Summary: "tool B"})
+	m.Add(&AccordionEntry{ContentType: ContentTypeThinking, Summary: "thinking"})
+
+	// Exact match.
+	found := m.FindByToolCallID("tc-2")
+	assert.NotNil(t, found)
+	assert.Equal(t, "tool B", found.Summary)
+
+	// Non-tool_call entry type is ignored even if ToolCallID matches.
+	m.Add(&AccordionEntry{ContentType: ContentTypeThinking, ToolCallID: "tc-3"})
+	assert.Nil(t, m.FindByToolCallID("tc-3"))
+
+	// Unknown ID.
+	assert.Nil(t, m.FindByToolCallID("nonexistent"))
+
+	// Empty ID returns nil.
+	assert.Nil(t, m.FindByToolCallID(""))
+}
+
+// TestParallelToolResultGroupingByToolCallID verifies that when tool_results
+// arrive out of order (as in parallel mode), they are correctly grouped under
+// the originating tool_call entry by ToolCallID, not by position.
+func TestParallelToolResultGroupingByToolCallID(t *testing.T) {
+	m := NewAccordionModel()
+	// Two tool_call entries issued in parallel.
+	m.Add(&AccordionEntry{ContentType: ContentTypeToolCall, ToolCallID: "tc-A", Summary: "tool A"})
+	m.Add(&AccordionEntry{ContentType: ContentTypeToolCall, ToolCallID: "tc-B", Summary: "tool B"})
+
+	// tool_result for B arrives first (out-of-order completion).
+	m.Add(&AccordionEntry{ContentType: ContentTypeToolResult, ToolCallID: "tc-B", Summary: "result B"})
+
+	// tool_result for A arrives second.
+	m.Add(&AccordionEntry{ContentType: ContentTypeToolResult, ToolCallID: "tc-A", Summary: "result A"})
+
+	entries := m.Entries()
+	assert.Len(t, entries, 2, "should have 2 top-level tool_call entries")
+
+	// Verify grouping: each tool_call should have its own result as a child.
+	entryA := m.FindByToolCallID("tc-A")
+	assert.NotNil(t, entryA)
+	assert.Len(t, entryA.Children, 1)
+	assert.Equal(t, "result A", entryA.Children[0].Summary)
+
+	entryB := m.FindByToolCallID("tc-B")
+	assert.NotNil(t, entryB)
+	assert.Len(t, entryB.Children, 1)
+	assert.Equal(t, "result B", entryB.Children[0].Summary)
+}
+
+// TestUpdateToolResultStatusByToolCallID verifies that
+// updateToolResultStatusLocked matches by ToolCallID to update the correct
+// tool_call entry, even when multiple tool_calls exist.
+func TestUpdateToolResultStatusByToolCallID(t *testing.T) {
+	m := &teaModel{
+		accordion: NewAccordionModel(),
+		msgCh:     make(chan Msg, 1),
+	}
+	m.accordion.Add(&AccordionEntry{
+		ContentType:   ContentTypeToolCall,
+		ToolCallID:    "tc-A",
+		Summary:       "tool A",
+		ToolStatus:    ToolStatusRunning,
+		ToolStartTime: time.Now(),
+	})
+	m.accordion.Add(&AccordionEntry{
+		ContentType:   ContentTypeToolCall,
+		ToolCallID:    "tc-B",
+		Summary:       "tool B",
+		ToolStatus:    ToolStatusRunning,
+		ToolStartTime: time.Now(),
+	})
+
+	// Mark tc-A as completed while tc-B is still running.
+	m.updateToolResultStatusLocked("tc-A", false)
+
+	entryA := m.accordion.FindByToolCallID("tc-A")
+	entryB := m.accordion.FindByToolCallID("tc-B")
+	assert.Equal(t, ToolStatusCompleted, entryA.ToolStatus)
+	assert.Equal(t, ToolStatusRunning, entryB.ToolStatus, "tc-B should still be running")
+
+	// Now mark tc-B as error.
+	m.updateToolResultStatusLocked("tc-B", true)
+	assert.Equal(t, ToolStatusError, entryB.ToolStatus)
+	assert.Equal(t, ToolStatusCompleted, entryA.ToolStatus, "tc-A should remain completed")
 }
 
 // TestThinkingVisibility_Hide verifies that thinking entries are skipped when

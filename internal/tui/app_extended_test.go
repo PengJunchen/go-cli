@@ -13,8 +13,8 @@ import (
 // accordion model in order.
 func TestAppDrawAppendNonStreaming(t *testing.T) {
 	app := NewBubbleteaApp(nil)
-	app.model.addEntry("status", "first")
-	app.model.addEntry("status", "second")
+	app.model.addEntry("status", "first", "")
+	app.model.addEntry("status", "second", "")
 	view := app.View()
 	assert.Contains(t, view, "first")
 	assert.Contains(t, view, "second")
@@ -24,8 +24,8 @@ func TestAppDrawAppendNonStreaming(t *testing.T) {
 // previous frame instead of appending.
 func TestAppDrawReplaceStreaming(t *testing.T) {
 	app := NewBubbleteaApp(nil)
-	app.model.addEntry("streaming", "a")
-	app.model.addEntry("streaming", "b")
+	app.model.addEntry("streaming", "a", "")
+	app.model.addEntry("streaming", "b", "")
 	view := app.View()
 	assert.Contains(t, view, "b")
 	assert.NotContains(t, view, "a")
@@ -35,7 +35,7 @@ func TestAppDrawReplaceStreaming(t *testing.T) {
 // when the buffer is empty (no last frame to replace yet).
 func TestAppDrawStreamingFirstAppends(t *testing.T) {
 	app := NewBubbleteaApp(nil)
-	app.model.addEntry("streaming", "only")
+	app.model.addEntry("streaming", "only", "")
 	assert.Contains(t, app.View(), "only")
 }
 

@@ -192,10 +192,10 @@ func TestRendererRegistryGetEmptyString(t *testing.T) {
 // mixed sequence.
 func TestStreamingAndNonStreamingDrawBehaviour(t *testing.T) {
 	app := NewBubbleteaApp(make(chan AgentEvent, 1))
-	app.model.addEntry("streaming", "b")
-	app.model.addEntry("streaming", "c")
-	app.model.addEntry("code", "d")
-	app.model.addEntry("status", "a")
+	app.model.addEntry("streaming", "b", "")
+	app.model.addEntry("streaming", "c", "")
+	app.model.addEntry("code", "d", "")
+	app.model.addEntry("status", "a", "")
 	// Streaming replaces, static appends: ["c", "d", "a"].
 	view := app.View()
 	require.Contains(t, view, "c")

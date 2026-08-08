@@ -474,7 +474,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 			// then match results by ToolCallID (not positional index) so that
 			// out-of-order completion does not cause mismatched results.
 			for _, tc := range resp.ToolCalls {
-				sendEvent(AgentEvent{Kind: "tool_call", Content: tc.Name, Timestamp: time.Now()})
+				sendEvent(AgentEvent{Kind: "tool_call", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID})
 				logger.Info("core.loop.tool_call", "iteration", iter, "tool", tc.Name, "mode", "parallel")
 			}
 			results, perr := executeToolsParallel(spanCtx, l.tools, resp.ToolCalls, es)
@@ -491,7 +491,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 						return events, res.Err
 					}
 				}
-				sendEvent(AgentEvent{Kind: "tool_result", Content: res.Output, Timestamp: time.Now(), IsError: res.IsError})
+				sendEvent(AgentEvent{Kind: "tool_result", Content: res.Output, Timestamp: time.Now(), IsError: res.IsError, ToolCallID: res.ID})
 				messages = append(messages, llm.Message{
 					Role:       llm.RoleTool,
 					ToolCallID: res.ID,
@@ -510,7 +510,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 					sendEvent(errEvent(err))
 					return events, err
 				}
-				sendEvent(AgentEvent{Kind: "tool_call", Content: tc.Name, Timestamp: time.Now()})
+				sendEvent(AgentEvent{Kind: "tool_call", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID})
 				logger.Info("core.loop.tool_call", "iteration", iter, "tool", tc.Name)
 
 				resultText, isErr, execErr := l.executeTool(spanCtx, toToolsCall(tc), es)
@@ -525,7 +525,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 						return events, execErr
 					}
 				}
-				sendEvent(AgentEvent{Kind: "tool_result", Content: resultText, Timestamp: time.Now(), IsError: isError})
+				sendEvent(AgentEvent{Kind: "tool_result", Content: resultText, Timestamp: time.Now(), IsError: isError, ToolCallID: tc.ID})
 				messages = append(messages, llm.Message{
 					Role:       llm.RoleTool,
 					ToolCallID: tc.ID,

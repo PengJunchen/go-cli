@@ -837,9 +837,9 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 	}
 
 	// Track tool lifecycle: tool_call sets the entry to Running; tool_result
-	// updates the last tool_call entry to Completed or Error. The global
-	// spinner is activated when any tool is running and deactivated when all
-	// tools have completed.
+	// updates the matching tool_call entry (by ToolCallID, fallback to last)
+	// to Completed or Error. The global spinner is activated when any tool is
+	// running and deactivated when all tools have completed.
 	activateSpinner := false
 	if ev.ContentType == ContentTypeToolCall {
 		m.mu.Lock()
@@ -848,7 +848,7 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 		m.mu.Unlock()
 	} else if ev.ContentType == ContentTypeToolResult {
 		m.mu.Lock()
-		m.updateToolResultStatusLocked(ev.IsError)
+		m.updateToolResultStatusLocked(ev.ToolCallID, ev.IsError)
 		// Deactivate the global spinner only if no tool_call entries are still
 		// running.
 		m.spinnerActive = m.hasRunningToolLocked()
@@ -876,27 +876,35 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 		})
 	}
 
-	// tool_output events append to the last tool_call entry instead of
-	// creating a new top-level entry, keeping streaming output grouped
-	// with its originating tool call.
+	// tool_output events append to the originating tool_call entry (matched
+	// by ToolCallID) instead of creating a new top-level entry, keeping
+	// streaming output grouped with its tool call. Falls back to the last
+	// tool_call entry when ToolCallID is not populated.
 	if ct == ContentTypeToolOutput {
 		var view string
 		notify := m.shouldNotify()
 		appended := false
 		m.mu.Lock()
-		if len(m.accordion.entries) > 0 {
-			last := m.accordion.entries[len(m.accordion.entries)-1]
-			if last.ContentType == ContentTypeToolCall {
-				if last.Full != "" {
-					last.Full += "\n" + out
-				} else {
-					last.Full = out
+		target := m.accordion.FindByToolCallID(ev.ToolCallID)
+		if target == nil {
+			for i := len(m.accordion.entries) - 1; i >= 0; i-- {
+				e := m.accordion.entries[i]
+				if e.ContentType == ContentTypeToolCall {
+					target = e
+					break
 				}
-				last.Summary = summarizeFirstLine(last.Full, 80)
-				appended = true
-				if notify {
-					view = m.renderViewLocked()
-				}
+			}
+		}
+		if target != nil {
+			if target.Full != "" {
+				target.Full += "\n" + out
+			} else {
+				target.Full = out
+			}
+			target.Summary = summarizeFirstLine(target.Full, 80)
+			appended = true
+			if notify {
+				view = m.renderViewLocked()
 			}
 		}
 		m.mu.Unlock()
@@ -928,7 +936,7 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 		}
 	}
 
-	m.addEntry(ct, out)
+	m.addEntry(ct, out, ev.ToolCallID)
 
 	// Apply thinking visibility: "collapse" forces the entry collapsed.
 	if ct == ContentTypeThinking && m.thinkingVisibility == "collapse" {
@@ -1038,7 +1046,7 @@ func (m *teaModel) handleIncremental(ctx context.Context, ev AgentEvent) {
 	}
 
 	if m.streamingEntry == nil {
-		entry := entryFor(ct, out, m.interactive)
+		entry := entryFor(ct, out, m.interactive, "")
 		entry.Collapsed = false
 		m.accordion.Add(entry)
 		m.streamingEntry = entry
@@ -1073,13 +1081,13 @@ func (m *teaModel) isStreamingMarkdown(ct string) bool {
 // effect. After mutating the model the view is rendered (under the lock) and
 // the onUpdate callback is invoked outside the lock so it can safely write to
 // the terminal.
-func (m *teaModel) addEntry(ct string, out string) {
+func (m *teaModel) addEntry(ct string, out string, toolCallID string) {
 	var view string
 	notify := m.shouldNotify()
 	m.mu.Lock()
 	if isStreamingRenderContentType(ct) {
 		if m.accordion.Len() == 0 {
-			m.accordion.Add(entryFor(ct, out, m.interactive))
+			m.accordion.Add(entryFor(ct, out, m.interactive, toolCallID))
 		} else {
 			last := m.accordion.Entries()[m.accordion.Len()-1]
 			last.Full = out
@@ -1087,7 +1095,7 @@ func (m *teaModel) addEntry(ct string, out string) {
 			last.Collapsed = false
 		}
 	} else {
-		entry := entryFor(ct, out, m.interactive)
+		entry := entryFor(ct, out, m.interactive, toolCallID)
 		if !m.interactive {
 			entry.Collapsed = false
 			for _, c := range entry.Children {
@@ -1129,7 +1137,7 @@ func isStreamingRenderContentType(ct string) bool {
 
 // entryFor creates an AccordionEntry from a rendered output string. The entry
 // is collapsed by default for gated content types when interactive mode is on.
-func entryFor(ct, out string, interactive bool) *AccordionEntry {
+func entryFor(ct, out string, interactive bool, toolCallID string) *AccordionEntry {
 	collapsed := interactive && defaultCollapsed(ct)
 	return &AccordionEntry{
 		ContentType: ct,
@@ -1137,6 +1145,7 @@ func entryFor(ct, out string, interactive bool) *AccordionEntry {
 		Full:        out,
 		Collapsed:   collapsed,
 		Timestamp:   time.Now(),
+		ToolCallID:  toolCallID,
 	}
 }
 
@@ -1286,21 +1295,29 @@ func (m *teaModel) finalizeThinking() {
 	}
 }
 
-// updateToolResultStatusLocked finds the last tool_call entry and updates its
-// status to Completed (or Error if isError is true). The caller must hold m.mu.
-func (m *teaModel) updateToolResultStatusLocked(isError bool) {
-	for i := len(m.accordion.entries) - 1; i >= 0; i-- {
-		e := m.accordion.entries[i]
-		if e.ContentType == ContentTypeToolCall {
-			if e.ToolStatus == ToolStatusRunning || e.ToolStatus == ToolStatusPending {
-				e.ToolDuration = time.Since(e.ToolStartTime)
-				if isError {
-					e.ToolStatus = ToolStatusError
-				} else {
-					e.ToolStatus = ToolStatusCompleted
-				}
+// updateToolResultStatusLocked finds the tool_call entry matching toolCallID
+// (or the last tool_call entry as fallback) and updates its status to
+// Completed (or Error if isError is true). The caller must hold m.mu.
+func (m *teaModel) updateToolResultStatusLocked(toolCallID string, isError bool) {
+	target := m.accordion.FindByToolCallID(toolCallID)
+	if target == nil {
+		for i := len(m.accordion.entries) - 1; i >= 0; i-- {
+			e := m.accordion.entries[i]
+			if e.ContentType == ContentTypeToolCall {
+				target = e
+				break
 			}
-			break
+		}
+	}
+	if target == nil {
+		return
+	}
+	if target.ToolStatus == ToolStatusRunning || target.ToolStatus == ToolStatusPending {
+		target.ToolDuration = time.Since(target.ToolStartTime)
+		if isError {
+			target.ToolStatus = ToolStatusError
+		} else {
+			target.ToolStatus = ToolStatusCompleted
 		}
 	}
 }
