@@ -68,10 +68,11 @@ type MutationHandler func(ctx context.Context, m FileMutation) (*ToolResult, err
 
 // queuedMutation bundles a mutation with the result channel for that specific
 // Enqueue call, so the file worker can route the outcome back to exactly one
-// caller.
+// caller. It carries the Enqueue context so the worker can honor cancellation.
 type queuedMutation struct {
 	mutation FileMutation
 	result   chan FileMutationResult
+	ctx      context.Context
 }
 
 // DefaultFileMutationQueue routes each mutation to a per-file worker goroutine.
@@ -184,7 +185,7 @@ func (q *DefaultFileMutationQueue) Enqueue(ctx context.Context, mutation FileMut
 		return nil, err
 	}
 	select {
-	case input <- queuedMutation{mutation: mutation, result: resultCh}:
+	case input <- queuedMutation{mutation: mutation, result: resultCh, ctx: ctx}:
 		q.mu.Unlock()
 	case <-ctx.Done():
 		q.mu.Unlock()
@@ -225,7 +226,7 @@ func (q *DefaultFileMutationQueue) workerForLocked(realPath string) (chan queued
 func (q *DefaultFileMutationQueue) startWorker(input chan queuedMutation) {
 	go func() {
 		for qm := range input {
-			tr, err := q.applySafe(qm.mutation)
+			tr, err := q.applySafe(qm.ctx, qm.mutation)
 			res := FileMutationResult{
 				Success:    err == nil,
 				Error:      err,
@@ -239,8 +240,13 @@ func (q *DefaultFileMutationQueue) startWorker(input chan queuedMutation) {
 
 // applySafe runs the configured handler inside a recover block so a panic
 // is converted into an error result instead of killing the worker goroutine.
-// On panic the returned ToolResult is nil.
-func (q *DefaultFileMutationQueue) applySafe(m FileMutation) (tr *ToolResult, err error) {
+// On panic the returned ToolResult is nil. It honors the caller's context: if
+// the context is already cancelled the mutation is not applied and the context
+// error is returned.
+func (q *DefaultFileMutationQueue) applySafe(ctx context.Context, m FileMutation) (tr *ToolResult, err error) {
+	if cerr := ctx.Err(); cerr != nil {
+		return nil, fmt.Errorf("mutation: apply %s: %w", m.FilePath, cerr)
+	}
 	defer func() {
 		if r := recover(); r != nil {
 			slog.Error("mutation: handler panicked", "path", m.FilePath, "operation", m.Operation, "panic", r)
@@ -248,7 +254,7 @@ func (q *DefaultFileMutationQueue) applySafe(m FileMutation) (tr *ToolResult, er
 			err = fmt.Errorf("mutation: handler panic for %s: %v", m.FilePath, r)
 		}
 	}()
-	tr, err = q.apply(context.Background(), m)
+	tr, err = q.apply(ctx, m)
 	return tr, err
 }
 
