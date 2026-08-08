@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
@@ -101,11 +102,12 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...Ev
 		evs = []AgentEvent{}
 	}
 	finalMsg := lastMessageEvent(evs)
+	finalUsage := lastMessageUsage(evs)
 
 	a.mu.Lock()
 	a.events = evs
 	if finalMsg != "" {
-		a.history = append(a.history, AgentMessage{Role: "assistant", Content: finalMsg})
+		a.history = append(a.history, AgentMessage{Role: "assistant", Content: finalMsg, Usage: finalUsage})
 	}
 	a.mu.Unlock()
 
@@ -195,4 +197,16 @@ func lastMessageEvent(events []AgentEvent) string {
 		}
 	}
 	return final
+}
+
+// lastMessageUsage returns the Usage from the final non-empty "message" event,
+// or nil when the event did not carry usage data.
+func lastMessageUsage(events []AgentEvent) *llm.Usage {
+	var usage *llm.Usage
+	for _, ev := range events {
+		if ev.Kind == "message" && ev.Content != "" {
+			usage = ev.Usage
+		}
+	}
+	return usage
 }

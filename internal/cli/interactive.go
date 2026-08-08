@@ -746,19 +746,41 @@ func slashCommandNames() []string {
 // emitTokenUsageEvent estimates the total token usage from the agent's message
 // history and the accumulated cost from the CostTracker, then sends a
 // token_usage event to the stream so the TUI status bar can update.
+//
+// When the last assistant message carries API-reported Usage (captured during
+// streaming), those values are preferred over the local estimation because
+// they reflect the actual token consumption billed by the provider. When no
+// API usage is available, the function falls back to estimating tokens from
+// message content via the configured TokenEstimator.
 func emitTokenUsageEvent(stream *core.EventStreamImpl, assembly *AgentAssembly) {
-	if assembly.Estimator == nil || assembly.Agent == nil {
+	if assembly.Agent == nil {
 		return
 	}
+	messages := assembly.Agent.Messages()
+
 	var inputTokens, outputTokens int
-	for _, msg := range assembly.Agent.Messages() {
-		n, _ := assembly.Estimator.Estimate(msg.Content) //nolint:errcheck
-		if msg.Role == "assistant" {
-			outputTokens += n
-		} else {
-			inputTokens += n
+
+	// Prefer API-reported usage from the last assistant message that has it.
+	// API usage reflects the actual token consumption for the full
+	// conversation (input = prompt tokens, output = completion tokens).
+	if usage := lastAssistantAPIUsage(messages); usage != nil {
+		inputTokens = usage.InputTokens
+		outputTokens = usage.OutputTokens
+	} else {
+		// Fall back to local estimation when the API did not report usage.
+		if assembly.Estimator == nil {
+			return
+		}
+		for _, msg := range messages {
+			n, _ := assembly.Estimator.Estimate(msg.Content) //nolint:errcheck
+			if msg.Role == "assistant" {
+				outputTokens += n
+			} else {
+				inputTokens += n
+			}
 		}
 	}
+
 	cost := 0.0
 	if assembly.CostTracker != nil {
 		cost = assembly.CostTracker.Total()
@@ -773,6 +795,18 @@ func emitTokenUsageEvent(stream *core.EventStreamImpl, assembly *AgentAssembly) 
 			Cost:         cost,
 		},
 	})
+}
+
+// lastAssistantAPIUsage scans messages from the end and returns the Usage from
+// the last assistant message that carries non-nil API-reported usage, or nil
+// when none is found.
+func lastAssistantAPIUsage(messages []core.AgentMessage) *llm.Usage {
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == "assistant" && messages[i].Usage != nil {
+			return messages[i].Usage
+		}
+	}
+	return nil
 }
 
 var _ Command = (*interactiveCmd)(nil)

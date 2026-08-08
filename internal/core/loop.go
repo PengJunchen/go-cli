@@ -446,7 +446,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 		// lastMessageEvent) depend on it. The TUI skips duplicates when
 		// incremental streaming has already rendered the content.
 		if resp.Content != "" {
-			sendEvent(AgentEvent{Kind: "message", Content: resp.Content, Timestamp: time.Now()})
+			sendEvent(AgentEvent{Kind: "message", Content: resp.Content, Timestamp: time.Now(), Usage: resp.Usage})
 		}
 
 		if len(resp.ToolCalls) == 0 {
@@ -538,6 +538,7 @@ func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel,
 	var contentBuf strings.Builder
 	var toolCalls []llm.ToolCall
 	var finishReason string
+	var usage *llm.Usage
 	gotChunk := false
 
 	for chunk := range ch {
@@ -565,6 +566,11 @@ func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel,
 				finishReason = chunk.FinishReason
 			}
 		}
+		// Track the last non-nil Usage so it propagates to the returned
+		// Message. Providers set Usage on the Final chunk.
+		if chunk.Usage != nil {
+			usage = chunk.Usage
+		}
 	}
 
 	// No chunks at all indicates the model returned an empty response.
@@ -578,6 +584,7 @@ func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel,
 		Content:      contentBuf.String(),
 		ToolCalls:    toolCalls,
 		FinishReason: finishReason,
+		Usage:        usage,
 	}, nil
 }
 
@@ -662,6 +669,9 @@ func (l *LoopAgent) generateWithContinuation(ctx context.Context, model llm.Base
 		resp.Content += contResp.Content
 		resp.FinishReason = contResp.FinishReason
 		resp.ToolCalls = contResp.ToolCalls
+		if contResp.Usage != nil {
+			resp.Usage = contResp.Usage
+		}
 	}
 
 	// If the output is still truncated after exhausting all continuation

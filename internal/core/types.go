@@ -20,6 +20,10 @@ type AgentMessage struct {
 	// ContentBlocks holds typed content parts for multimodal messages
 	// (text + images). When non-nil, it takes precedence over Content.
 	ContentBlocks []llm.ContentBlock
+	// Usage reports the token consumption for this message as reported by
+	// the API. It is nil for user/system/tool messages and for assistant
+	// messages when the provider did not return usage data.
+	Usage *llm.Usage
 }
 
 // String returns a compact one-line representation of the message.
@@ -57,6 +61,10 @@ type AgentEvent struct {
 	// Stream identifies the output source for "tool_output" events:
 	// "stdout" or "stderr". Empty for other event kinds.
 	Stream string
+	// Usage carries the API-reported token consumption for "message"
+	// events. It is nil for all other event kinds and for "message"
+	// events when the provider did not return usage data.
+	Usage *llm.Usage
 }
 
 // TokenUsage carries token consumption and cost data for a token_usage event.

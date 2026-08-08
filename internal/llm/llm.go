@@ -89,6 +89,11 @@ type MessageChunk struct {
 	// FinishReason, populated on the Final chunk, reports why the model
 	// stopped generating (stop|length|tool_calls|content_filter).
 	FinishReason string `json:"finish_reason,omitempty"`
+
+	// Usage, populated on the Final chunk, reports the token consumption
+	// for the generation as reported by the API. When the provider does not
+	// stream usage, it remains nil and callers fall back to estimation.
+	Usage *Usage `json:"usage,omitempty"`
 }
 
 // ModelInfo describes a model exposed by a provider.

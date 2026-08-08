@@ -403,15 +403,27 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 			if content != "" {
 				ch <- MessageChunk{Role: RoleAssistant, Content: content}
 			}
-			ch <- MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
+			final := MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
+			if parsed.Usage != nil {
+				final.Usage = &Usage{
+					InputTokens:  parsed.Usage.PromptTokens,
+					OutputTokens: parsed.Usage.CompletionTokens,
+					TotalTokens:  parsed.Usage.PromptTokens + parsed.Usage.CompletionTokens,
+				}
+			}
+			ch <- final
 			return
 		}
 
 		parser := NewDefaultSSEParser()
 		events, _ := parser.Parse(reader) //nolint:errcheck
 
-		toolCalls, finishReason := accumulateOpenAIStreamToolCalls(events, ch)
-		ch <- MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
+		toolCalls, finishReason, usage := accumulateOpenAIStreamToolCalls(events, ch)
+		final := MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
+		if usage != nil {
+			final.Usage = usage
+		}
+		ch <- final
 	}()
 
 	return ch, nil
@@ -432,7 +444,8 @@ type claudeStreamEvent struct {
 
 // claudeStreamMessage carries the top-level message metadata from message_start.
 type claudeStreamMessage struct {
-	Role string `json:"role"`
+	Role  string       `json:"role"`
+	Usage *claudeUsage `json:"usage,omitempty"`
 }
 
 // claudeStreamBlock describes a content block from content_block_start.
@@ -444,10 +457,11 @@ type claudeStreamBlock struct {
 
 // claudeStreamDelta carries the incremental delta from content_block_delta.
 type claudeStreamDelta struct {
-	Type        string `json:"type"`                   // "text_delta" or "input_json_delta"
-	Text        string `json:"text,omitempty"`         // text_delta text
-	PartialJSON string `json:"partial_json,omitempty"` // input_json_delta fragment
-	StopReason  string `json:"stop_reason,omitempty"`  // message_delta stop_reason
+	Type        string       `json:"type"`                   // "text_delta" or "input_json_delta"
+	Text        string       `json:"text,omitempty"`         // text_delta text
+	PartialJSON string       `json:"partial_json,omitempty"` // input_json_delta fragment
+	StopReason  string       `json:"stop_reason,omitempty"`  // message_delta stop_reason
+	Usage       *claudeUsage `json:"usage,omitempty"`        // message_delta output_tokens
 }
 
 // claudeToolAccum accumulates a single tool call's fragments across chunks.
@@ -496,6 +510,8 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 		tools := map[int]*claudeToolAccum{}
 		var toolIndices []int // preserve insertion order
 		var stopReason string
+		var inputTokens, outputTokens int
+		var hasUsage bool
 		finalSent := false
 
 		for event := range events {
@@ -512,6 +528,10 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 			case "message_start":
 				if ce.Message != nil {
 					ch <- MessageChunk{Role: RoleAssistant}
+					if ce.Message.Usage != nil {
+						inputTokens = ce.Message.Usage.InputTokens
+						hasUsage = true
+					}
 				}
 
 			case "content_block_start":
@@ -542,8 +562,14 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 				}
 
 			case "message_delta":
-				if ce.Delta != nil && ce.Delta.StopReason != "" {
-					stopReason = ce.Delta.StopReason
+				if ce.Delta != nil {
+					if ce.Delta.StopReason != "" {
+						stopReason = ce.Delta.StopReason
+					}
+					if ce.Delta.Usage != nil {
+						outputTokens = ce.Delta.Usage.OutputTokens
+						hasUsage = true
+					}
 				}
 
 			case "message_stop":
@@ -568,6 +594,13 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 						})
 					}
 				}
+				if hasUsage {
+					final.Usage = &Usage{
+						InputTokens:  inputTokens,
+						OutputTokens: outputTokens,
+						TotalTokens:  inputTokens + outputTokens,
+					}
+				}
 				ch <- final
 				finalSent = true
 			}
@@ -576,7 +609,15 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 		// If the stream ended without message_stop, emit a final chunk so
 		// the caller is not left waiting.
 		if !finalSent {
-			ch <- MessageChunk{Role: RoleAssistant, Final: true, FinishReason: stopReason}
+			fallback := MessageChunk{Role: RoleAssistant, Final: true, FinishReason: stopReason}
+			if hasUsage {
+				fallback.Usage = &Usage{
+					InputTokens:  inputTokens,
+					OutputTokens: outputTokens,
+					TotalTokens:  inputTokens + outputTokens,
+				}
+			}
+			ch <- fallback
 		}
 	}()
 
@@ -622,6 +663,7 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 
 		var finishReason string
 		var toolCalls []ToolCall
+		var usage *Usage
 		for event := range events {
 			if event.Data == "" {
 				continue
@@ -630,6 +672,15 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 			if err := json.Unmarshal([]byte(event.Data), &parsed); err != nil {
 				slog.Warn("llm_stream_parse_skip", "err", err)
 				continue
+			}
+			// Gemini sends usageMetadata in the response chunks; the final
+			// chunk carries the cumulative totals.
+			if parsed.UsageMetadata != nil {
+				usage = &Usage{
+					InputTokens:  parsed.UsageMetadata.PromptTokenCount,
+					OutputTokens: parsed.UsageMetadata.CandidatesTokenCount,
+					TotalTokens:  parsed.UsageMetadata.PromptTokenCount + parsed.UsageMetadata.CandidatesTokenCount,
+				}
 			}
 			if len(parsed.Candidates) > 0 {
 				candidate := parsed.Candidates[0]
@@ -658,7 +709,11 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 			}
 		}
 
-		ch <- MessageChunk{Role: RoleAssistant, Final: true, FinishReason: finishReason, ToolCalls: toolCalls}
+		final := MessageChunk{Role: RoleAssistant, Final: true, FinishReason: finishReason, ToolCalls: toolCalls}
+		if usage != nil {
+			final.Usage = usage
+		}
+		ch <- final
 	}()
 
 	return ch, nil

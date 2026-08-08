@@ -327,7 +327,15 @@ func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 			if content != "" {
 				ch <- MessageChunk{Role: RoleAssistant, Content: content}
 			}
-			ch <- MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
+			final := MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
+			if parsed.Usage != nil {
+				final.Usage = &Usage{
+					InputTokens:  parsed.Usage.PromptTokens,
+					OutputTokens: parsed.Usage.CompletionTokens,
+					TotalTokens:  parsed.Usage.PromptTokens + parsed.Usage.CompletionTokens,
+				}
+			}
+			ch <- final
 			return
 		}
 
@@ -336,8 +344,12 @@ func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 		parser := NewDefaultSSEParser()
 		events, _ := parser.Parse(reader) //nolint:errcheck
 
-		toolCalls, finishReason := accumulateOpenAIStreamToolCalls(events, ch)
-		ch <- MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
+		toolCalls, finishReason, usage := accumulateOpenAIStreamToolCalls(events, ch)
+		final := MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
+		if usage != nil {
+			final.Usage = usage
+		}
+		ch <- final
 	}()
 
 	return ch, nil
@@ -346,6 +358,9 @@ func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 // openAIStreamChunk is one SSE data payload of a streaming response.
 type openAIStreamChunk struct {
 	Choices []openAIStreamChoice `json:"choices"`
+	// Usage is populated only on the final chunk (empty choices) when
+	// stream_options.include_usage is true.
+	Usage *openAIUsage `json:"usage,omitempty"`
 }
 
 // openAIStreamChoice carries the incremental delta of an OpenAI stream.
