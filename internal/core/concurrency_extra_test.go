@@ -181,10 +181,10 @@ func TestLastMessageEventTable(t *testing.T) {
 			{Kind: "message", Content: "a"},
 			{Kind: "message", Content: "b"},
 		}, "b"},
-		{"trailing empty keeps prior", []AgentEvent{
+		{"trailing empty overwrites prior", []AgentEvent{
 			{Kind: "message", Content: "a"},
 			{Kind: "message", Content: ""},
-		}, "a"},
+		}, ""},
 		{"non-message ignored", []AgentEvent{{Kind: "tool", Content: "x"}}, ""},
 	}
 	for _, tt := range tests {

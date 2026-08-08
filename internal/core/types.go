@@ -74,6 +74,9 @@ type AgentEvent struct {
 	// events. It is nil for all other event kinds and for "message"
 	// events when the provider did not return usage data.
 	Usage *llm.Usage
+	// ToolCalls carries the tool invocations requested by the assistant
+	// for "message" events. It is nil for events with no tool calls.
+	ToolCalls []llm.ToolCall `json:"tool_calls,omitempty"`
 }
 
 // TokenUsage carries token consumption and cost data for a token_usage event.

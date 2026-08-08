@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"sync"
 
-	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
@@ -101,13 +100,17 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...Ev
 	if evs == nil {
 		evs = []AgentEvent{}
 	}
-	finalMsg := lastMessageEvent(evs)
-	finalUsage := lastMessageUsage(evs)
+	lastAssistant := lastAssistantMessage(evs)
 
 	a.mu.Lock()
 	a.events = evs
-	if finalMsg != "" {
-		a.history = append(a.history, AgentMessage{Role: "assistant", Content: finalMsg, Usage: finalUsage})
+	if lastAssistant != nil {
+		a.history = append(a.history, AgentMessage{
+			Role:      "assistant",
+			Content:   lastAssistant.Content,
+			Usage:     lastAssistant.Usage,
+			ToolCalls: lastAssistant.ToolCalls,
+		})
 	}
 	a.mu.Unlock()
 
@@ -130,6 +133,11 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...Ev
 	}
 
 	logger.Info("core.agent.done", "name", a.name, "events", len(evs), "success", err == nil)
+
+	finalMsg := ""
+	if lastAssistant != nil {
+		finalMsg = lastAssistant.Content
+	}
 	return Result{Message: finalMsg, Success: err == nil}, err
 }
 
@@ -187,26 +195,29 @@ func (a *AgentImpl) Compact(ctx context.Context) error {
 	return nil
 }
 
-// lastMessageEvent returns the content of the final non-empty "message" event,
-// or the empty string if none exists.
+// lastMessageEvent returns the content of the final "message" event, or the
+// empty string if none exists. It matches by Kind only so that pure tool call
+// responses (empty Content) are still returned.
 func lastMessageEvent(events []AgentEvent) string {
 	final := ""
 	for _, ev := range events {
-		if ev.Kind == "message" && ev.Content != "" {
+		if ev.Kind == "message" {
 			final = ev.Content
 		}
 	}
 	return final
 }
 
-// lastMessageUsage returns the Usage from the final non-empty "message" event,
-// or nil when the event did not carry usage data.
-func lastMessageUsage(events []AgentEvent) *llm.Usage {
-	var usage *llm.Usage
-	for _, ev := range events {
-		if ev.Kind == "message" && ev.Content != "" {
-			usage = ev.Usage
+// lastAssistantMessage returns a pointer to the final "message" event, or nil
+// when no message event exists. It matches by Kind only so that pure tool call
+// responses (empty Content but non-empty ToolCalls) are returned. The caller
+// can then access Content, Usage, and ToolCalls from the single event.
+func lastAssistantMessage(events []AgentEvent) *AgentEvent {
+	var last *AgentEvent
+	for i := range events {
+		if events[i].Kind == "message" {
+			last = &events[i]
 		}
 	}
-	return usage
+	return last
 }
