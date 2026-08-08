@@ -35,34 +35,39 @@ func stripEscape(s string) string {
 func TestRenderersStripToPayload(t *testing.T) {
 	ctx := context.Background()
 	cases := map[string]struct {
-		r       Renderer
-		content string
-		want    string
+		r        Renderer
+		content  string
+		want     string
+		contains bool // true when the renderer transforms/pads output (e.g. glamour markdown)
 	}{
-		ContentTypeMarkdown:       {MarkdownRenderer{}, "md", "md"},
-		ContentTypeCode:           {CodeRenderer{}, "func", "func"},
-		ContentTypeError:          {ErrorRenderer{}, "err", "err"},
-		ContentTypeToolCall:       {ToolCallRenderer{}, "call", "[tool] call"},
-		ContentTypeToolResult:     {ToolResultRenderer{}, "res", "[result] res"},
-		ContentTypeThinking:       {ThinkingRenderer{}, "think", "think"},
-		ContentTypeLink:           {LinkRenderer{}, "https://x", "https://x"},
-		ContentTypeSystem:         {SystemRenderer{}, "sys", "sys"},
-		ContentTypeUser:           {UserRenderer{}, "ui", "you: ui"},
-		ContentTypeAssistant:      {AssistantRenderer{}, "ai", "AI: ai"},
-		ContentTypeApproval:       {ApprovalRenderer{}, "ap", "[approval] ap"},
-		ContentTypePrompt:         {PromptRenderer{}, "pr", "pr"},
-		ContentTypeCompaction:     {CompactionRenderer{}, "co", "co"},
-		ContentTypeStreaming:      {StreamingRenderer{}, "st", "st"},
-		ContentTypeStreamingCode:  {StreamingCodeRenderer{}, "sc", "sc"},
-		ContentTypeStreamingThink: {StreamingThinkingRenderer{}, "sth", "sth"},
-		ContentTypeImage:          {ImageRenderer{}, "img", "[image: img]"},
-		ContentTypeStatus:         {StatusRenderer{}, "status", "status"},
+		ContentTypeMarkdown:       {NewMarkdownRenderer(), "md", "md", true},
+		ContentTypeCode:           {CodeRenderer{}, "func", "func", false},
+		ContentTypeError:          {ErrorRenderer{}, "err", "err", false},
+		ContentTypeToolCall:       {ToolCallRenderer{}, "call", "[tool] call", false},
+		ContentTypeToolResult:     {ToolResultRenderer{}, "res", "[result] res", false},
+		ContentTypeThinking:       {ThinkingRenderer{}, "think", "think", false},
+		ContentTypeLink:           {LinkRenderer{}, "https://x", "https://x", false},
+		ContentTypeSystem:         {SystemRenderer{}, "sys", "sys", false},
+		ContentTypeUser:           {UserRenderer{}, "ui", "you: ui", false},
+		ContentTypeAssistant:      {AssistantRenderer{}, "ai", "AI: ai", false},
+		ContentTypeApproval:       {ApprovalRenderer{}, "ap", "[approval] ap", false},
+		ContentTypePrompt:         {PromptRenderer{}, "pr", "pr", false},
+		ContentTypeCompaction:     {CompactionRenderer{}, "co", "co", false},
+		ContentTypeStreaming:      {StreamingRenderer{}, "st", "st", false},
+		ContentTypeStreamingCode:  {StreamingCodeRenderer{}, "sc", "sc", false},
+		ContentTypeStreamingThink: {StreamingThinkingRenderer{}, "sth", "sth", false},
+		ContentTypeImage:          {ImageRenderer{}, "img", "[image: img]", false},
+		ContentTypeStatus:         {StatusRenderer{}, "status", "status", false},
 	}
 	for ct, tc := range cases {
 		t.Run(ct, func(t *testing.T) {
 			out := tc.r.Render(ctx, tc.content, RenderOpts{Theme: DarkTheme{}})
 			got := stripEscape(out)
-			require.Equal(t, tc.want, got, "visible payload for %s mismatched", ct)
+			if tc.contains {
+				assert.Contains(t, got, tc.want, "visible payload for %s mismatched", ct)
+			} else {
+				require.Equal(t, tc.want, got, "visible payload for %s mismatched", ct)
+			}
 			assert.NotContains(t, got, "\x1b", "stripped output must not retain escapes")
 		})
 	}

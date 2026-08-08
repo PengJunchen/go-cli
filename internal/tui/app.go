@@ -334,6 +334,10 @@ type teaModel struct {
 	streamBuf      map[string]*strings.Builder
 	streamingEntry *AccordionEntry
 	streamingBuf   strings.Builder
+	// streamingMD caches rendered markdown lines during incremental streaming
+	// so each token chunk does not trigger an O(n²) full re-render. It is
+	// lazily created and Reset when a new streaming message begins.
+	streamingMD *StreamingMarkdownRenderer
 
 	// steer input
 	steerInputMode bool
@@ -709,6 +713,11 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 // creates a new accordion entry; on subsequent chunks it appends to the
 // accumulated content and re-renders the entry in place, producing a live
 // typewriter effect.
+//
+// For markdown-style content (assistant text/code streaming) the rendering goes
+// through StreamingMarkdownRenderer, which caches already-rendered stable lines
+// and re-renders only the trailing unstable lines. This avoids re-parsing the
+// full accumulated buffer on every token chunk, which was O(n²).
 func (m *teaModel) handleIncremental(ctx context.Context, ev AgentEvent) {
 	ct := ev.ContentType
 	r, ok := m.reg.Get(ct)
@@ -724,18 +733,37 @@ func (m *teaModel) handleIncremental(ctx context.Context, ev AgentEvent) {
 	m.streamingBuf.WriteString(ev.Content)
 	accumulated := m.streamingBuf.String()
 
+	theme := Theme(DarkTheme{})
+	if m.themeMgr != nil {
+		theme = m.themeMgr.Get()
+	}
+	opts := RenderOpts{
+		Theme:       theme,
+		Width:       m.width,
+		ContentType: ct,
+	}
+
+	// A nil streamingEntry marks the first chunk of a new streaming message.
+	// Reset the streaming markdown cache before rendering so stale rendered
+	// lines from the previous message are dropped.
+	if m.streamingEntry == nil && m.streamingMD != nil {
+		m.streamingMD.Reset()
+	}
+
 	// Render the accumulated content so styles wrap the full message.
 	out := accumulated
 	if ok && r != nil {
-		theme := Theme(DarkTheme{})
-		if m.themeMgr != nil {
-			theme = m.themeMgr.Get()
+		if m.isStreamingMarkdown(ct) {
+			// Incremental markdown rendering: cache stable lines and only
+			// re-render the unstable tail, avoiding an O(n²) full re-render
+			// per streaming token.
+			if m.streamingMD == nil {
+				m.streamingMD = NewStreamingMarkdownRenderer(NewMarkdownRenderer())
+			}
+			out = m.streamingMD.RenderIncremental(ctx, accumulated, opts)
+		} else {
+			out = r.Render(ctx, accumulated, opts)
 		}
-		out = r.Render(ctx, accumulated, RenderOpts{
-			Theme:       theme,
-			Width:       m.width,
-			ContentType: ct,
-		})
 	}
 
 	if m.streamingEntry == nil {
@@ -754,6 +782,19 @@ func (m *teaModel) handleIncremental(ctx context.Context, ev AgentEvent) {
 	m.mu.Unlock()
 
 	m.notify(view)
+}
+
+// isStreamingMarkdown reports whether an incremental event of content type ct
+// should be rendered as streaming markdown via StreamingMarkdownRenderer
+// instead of the registry's renderer. Assistant text (markdown and the
+// streaming text/code variants) is treated as markdown; streaming thinking is
+// faint plain text and keeps the registry's StreamingThinkingRenderer.
+func (m *teaModel) isStreamingMarkdown(ct string) bool {
+	switch ct {
+	case ContentTypeMarkdown, ContentTypeStreaming, ContentTypeStreamingCode:
+		return true
+	}
+	return false
 }
 
 // addEntry appends a rendered frame to the accordion model. Streaming

@@ -86,8 +86,11 @@ func TestE2EThemeManagerDrivesRendering(t *testing.T) {
 
 	app := NewBubbleteaApp(events, WithThemeManager(mgr))
 	require.NoError(t, app.Run(context.Background()))
-	// Light theme primary = #1E66F5 (truecolor blue).
-	require.Contains(t, app.View(), "38;2;30;102;245")
+	// Glamour renders the markdown link with its own light style (escape sequences
+	// and the display text "accent"). The theme's primary colour is no longer
+	// applied directly; glamour owns the colour palette.
+	require.Contains(t, app.View(), "\x1b[", "glamour should style markdown with escape sequences")
+	require.Contains(t, stripEscape(app.View()), "accent")
 }
 
 // TestE2ERegistryCannedRenderer verifies a registered custom renderer is used

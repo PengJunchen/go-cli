@@ -31,16 +31,16 @@ func TestRenderersTable(t *testing.T) {
 	ctx := context.Background()
 	cases := []rendererCase{
 		{
-			name:     "markdown heading applies bold styling",
-			renderer: MarkdownRenderer{},
+			name:     "markdown heading renders heading text",
+			renderer: NewMarkdownRenderer(),
 			content:  "# Heading",
 			opts:     RenderOpts{Theme: DarkTheme{}, Width: 20},
-			want:     []string{"\x1b[1m", "# Heading"}, // heading is rendered bold
+			want:     []string{"Heading"}, // glamour renders headings without the "#"
 			notWant:  []string{},
 		},
 		{
 			name:     "markdown renders plain content",
-			renderer: MarkdownRenderer{},
+			renderer: NewMarkdownRenderer(),
 			content:  "plain",
 			opts:     RenderOpts{Theme: DarkTheme{}},
 			want:     []string{"plain"},
