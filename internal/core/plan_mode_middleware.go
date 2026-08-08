@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"log/slog"
 	"time"
+
+	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 // PlanModeMiddleware is an agent-level Middleware that blocks write-tool
@@ -105,6 +107,10 @@ func extractToolNames(submission Submission) []string {
 			if s, ok := item.(string); ok {
 				names = append(names, s)
 			}
+		}
+	case []tools.ToolCall:
+		for _, tc := range v {
+			names = append(names, tc.Name)
 		}
 	}
 

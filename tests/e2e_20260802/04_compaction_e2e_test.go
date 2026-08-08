@@ -503,8 +503,11 @@ func TestCompaction_EdgeCases(t *testing.T) {
 	})
 
 	t.Run("all tool results no user content", func(t *testing.T) {
-		items := make([]compaction.TurnItem, 6)
-		for i := 0; i < 6; i++ {
+		// Micro replaces tool results with placeholders. Each placeholder
+		// "[compacted tool result]" is ~7 tokens, so 3 items need ~21 tokens.
+		// Use a budget of 30 with 3 items to stay under the threshold.
+		items := make([]compaction.TurnItem, 3)
+		for i := 0; i < 3; i++ {
 			items[i] = compaction.TurnItem{
 				Role:       compaction.RoleTool,
 				ToolName:   "read",
@@ -512,7 +515,6 @@ func TestCompaction_EdgeCases(t *testing.T) {
 			}
 		}
 
-		// Micro replaces tool results with placeholders with a tight budget.
 		micro := compaction.NewMicroCompactor()
 		out, err := micro.Compact(ctx, items, 30, est)
 		require.NoError(t, err)
