@@ -9,6 +9,8 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"unicode/utf8"
 
 	"golang.org/x/term"
@@ -59,8 +61,14 @@ type DefaultLineEditor struct {
 	isTTY      bool
 
 	// Render state for multi-line wrapping support.
-	cachedTermWidth int // 0 = not queried yet
-	prevVisualLines int // visual lines used by the previous render
+	termWidth atomic.Int64 // 0 = not queried yet (needs re-query)
+	prevVisualLines int    // visual lines used by the previous render
+
+	// SIGWINCH monitoring for dynamic terminal resize.
+	winchStop chan struct{} // closed to signal the monitor goroutine to exit
+	winchDone chan struct{} // closed when the monitor goroutine has exited
+	winchOnce sync.Once     // guards lazy startup of monitorResize
+	stopOnce  sync.Once     // guards idempotent closing of winchStop
 }
 
 // LineEditorOption configures a DefaultLineEditor at construction time.
@@ -109,22 +117,65 @@ func (le *DefaultLineEditor) HistoryStore() *HistoryStore {
 	return le.history
 }
 
-// terminalWidth returns the terminal width in columns. It queries the
-// terminal once and caches the result. Falls back to 80 when the terminal
-// size cannot be determined.
+// terminalWidth returns the terminal width in columns. It returns the cached
+// value if available (non-zero); otherwise it queries the terminal and caches
+// the result. Falls back to 80 when the terminal size cannot be determined.
 func (le *DefaultLineEditor) terminalWidth() int {
-	if le.cachedTermWidth > 0 {
-		return le.cachedTermWidth
+	if w := le.termWidth.Load(); w > 0 {
+		return int(w)
 	}
-	le.cachedTermWidth = 80
+	return le.queryTermWidth()
+}
+
+// invalidateTermWidth clears the cached terminal width so that the next call
+// to terminalWidth re-queries the actual size. It is called on SIGWINCH and
+// at the start of each readLineTTY to ensure fresh measurements.
+func (le *DefaultLineEditor) invalidateTermWidth() {
+	le.termWidth.Store(0)
+}
+
+// queryTermWidth queries the terminal size via term.GetSize and stores the
+// result in the atomic cache. If the query fails or the input is not a TTY,
+// 80 is stored as a valid fallback. Returns the stored value.
+func (le *DefaultLineEditor) queryTermWidth() int {
+	width := int64(80)
 	f, ok := le.termFile()
-	if !ok {
-		return le.cachedTermWidth
+	if ok {
+		if cols, _, err := term.GetSize(int(f.Fd())); err == nil && cols > 0 {
+			width = int64(cols)
+		}
 	}
-	if cols, _, err := term.GetSize(int(f.Fd())); err == nil && cols > 0 {
-		le.cachedTermWidth = cols
-	}
-	return le.cachedTermWidth
+	le.termWidth.Store(width)
+	return int(width)
+}
+
+// startResizeMonitor lazily starts the SIGWINCH monitoring goroutine on the
+// first readLineTTY call. It is safe to call multiple times; only the first
+// invocation starts the goroutine.
+func (le *DefaultLineEditor) startResizeMonitor() {
+	le.winchOnce.Do(func() {
+		le.winchStop = make(chan struct{})
+		le.winchDone = make(chan struct{})
+		go le.monitorResize()
+	})
+}
+
+// Stop shuts down the SIGWINCH monitoring goroutine. It is safe to call
+// multiple times and safe to call even if startResizeMonitor was never
+// invoked.
+func (le *DefaultLineEditor) Stop() {
+	le.winchOnce.Do(func() {
+		// monitorResize was never started; initialise channels so the
+		// wait below succeeds. winchDone is closed immediately since no
+		// goroutine is running.
+		le.winchStop = make(chan struct{})
+		le.winchDone = make(chan struct{})
+		close(le.winchDone)
+	})
+	le.stopOnce.Do(func() {
+		close(le.winchStop)
+	})
+	<-le.winchDone
 }
 
 // visualLineCount calculates how many terminal visual lines the prompt + buffer
@@ -244,6 +295,12 @@ type byteResult struct {
 // readLineTTY reads input in raw terminal mode with line editing, history
 // navigation, tab completion, and multi-line support.
 func (le *DefaultLineEditor) readLineTTY(ctx context.Context, prompt string) (string, error) {
+	// Ensure the SIGWINCH monitor is running (lazy, started once) and
+	// invalidate the cached width so each ReadLine re-queries the actual
+	// terminal size.
+	le.startResizeMonitor()
+	le.invalidateTermWidth()
+
 	saved, err := setRawMode(le.in)
 	if err != nil {
 		slog.Warn("cli_line_editor_raw_mode_failed", "err", err)
