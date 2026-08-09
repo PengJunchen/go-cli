@@ -55,7 +55,7 @@ func TestBuildSlashCommandRegistry(t *testing.T) {
 	want := []string{
 		"help", "cost", "compact", "clear", "tools", "model", "session",
 		"undo", "diff", "plan", "config", "history", "save", "load", "memory",
-		"thinking", "theme", "worktree",
+		"thinking", "theme", "worktree", "revert",
 	}
 	assert.ElementsMatch(t, want, reg.Names())
 

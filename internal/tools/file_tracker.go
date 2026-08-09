@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"context"
 	"crypto/md5" //nolint:gosec // md5 used for file tracking, not security
 	"encoding/hex"
 	"fmt"
@@ -34,6 +35,7 @@ type FileTracker struct {
 	checkpointOrder []string // checkpoint IDs in creation order
 	backupContent   map[string][]byte
 	workdir         string // working directory for worktree-aware operations
+	snapshotMgr     *SnapshotManager // optional git snapshot manager
 }
 
 // NewFileTracker returns an empty FileTracker.
@@ -61,6 +63,32 @@ func (ft *FileTracker) Workdir() string {
 	ft.mu.RLock()
 	defer ft.mu.RUnlock()
 	return ft.workdir
+}
+
+// SetSnapshotManager injects a SnapshotManager. When set, RecordMutation
+// captures a git working-tree snapshot before each file mutation so the file
+// can be reverted later via /revert.
+func (ft *FileTracker) SetSnapshotManager(sm *SnapshotManager) {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	ft.snapshotMgr = sm
+}
+
+// RecordMutation captures a git snapshot before a file mutation. It is safe
+// to call when no SnapshotManager is configured (no-op). The snapshot captures
+// the working-tree state so the file can be reverted later. The RLock is
+// released before calling TakeSnapshot, which has its own mutex, avoiding
+// holding ft.mu during a git subprocess.
+func (ft *FileTracker) RecordMutation(ctx context.Context, toolName, filePath string) {
+	ft.mu.RLock()
+	sm := ft.snapshotMgr
+	ft.mu.RUnlock()
+	if sm == nil {
+		return
+	}
+	if err := sm.TakeSnapshot(ctx, toolName, filePath); err != nil {
+		slog.Warn("file_tracker.snapshot_failed", "tool", toolName, "file", filePath, "err", err)
+	}
 }
 
 // resolve joins a relative path with the configured workdir. When workdir is
