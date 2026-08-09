@@ -167,12 +167,14 @@ func TestUnmarshalConfig_AssignSliceFromMapping(t *testing.T) {
 	require.Error(t, err)
 }
 
-// TestUnmarshalConfig_MappingToSliceString verifies that a `{}` literal (parsed
-// as the string "{}", not a map) assigned to a slice surfaces an error.
-func TestUnmarshalConfig_MappingToSliceString(t *testing.T) {
+// TestUnmarshalConfig_EmptyFlowMapToSlice verifies that an empty flow map
+// ({}) is parsed as an empty map and assigned to a slice field as an empty
+// slice (graceful handling).
+func TestUnmarshalConfig_EmptyFlowMapToSlice(t *testing.T) {
 	doc := "tools:\n  builtin: {}\n"
 	var cfg Config
-	require.Error(t, UnmarshalConfig([]byte(doc), ConfigFormatYAML, &cfg))
+	require.NoError(t, UnmarshalConfig([]byte(doc), ConfigFormatYAML, &cfg))
+	assert.Empty(t, cfg.Tools.Builtin)
 }
 
 // ---------------------------------------------------------------------------
