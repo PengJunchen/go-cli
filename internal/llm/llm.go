@@ -98,8 +98,14 @@ type MessageChunk struct {
 
 // ModelInfo describes a model exposed by a provider.
 type ModelInfo struct {
-	Name          string `json:"name"`
-	ContextWindow int    `json:"context_window"`
+	Name            string  `json:"name"`
+	ContextWindow   int     `json:"context_window"`
+	MaxOutputTokens int     `json:"max_output_tokens,omitempty"`
+	InputPrice      float64 `json:"input_price,omitempty"`
+	OutputPrice     float64 `json:"output_price,omitempty"`
+	Modality        string  `json:"modality,omitempty"`
+	APIBase         string  `json:"api_base,omitempty"`
+	Description     string  `json:"description,omitempty"`
 }
 
 // ModelConfig configures how a provider should build a chat model.

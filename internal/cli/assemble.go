@@ -143,6 +143,10 @@ type AgentAssembly struct {
 	// ModelCycler rotates model selection across multiple providers. It is
 	// nil when model cycling is not configured.
 	ModelCycler *llm.ModelCycler
+	// ModelRegistry is the external model metadata registry (e.g.
+	// models.dev) used to enrich model info with pricing, context window and
+	// modality. It is nil when the model registry is not enabled.
+	ModelRegistry llm.ModelRegistry
 	// LSPClient is the Language Server Protocol client wired for code
 	// completion. It is nil when no LSP server is configured or started.
 	LSPClient tools.LSPClient
@@ -303,6 +307,24 @@ func AssembleAgent(
 			"strategy", rc.ModelCycler.Strategy,
 			"models", len(entries),
 		)
+	}
+
+	// 1c-bis. Wire the models.dev model registry when enabled. The registry is
+	// refreshed best-effort on startup; failures are logged but do not block
+	// assembly. When disabled, a NoopModelRegistry is used so callers always
+	// have a non-nil registry to consult.
+	var modelRegistry llm.ModelRegistry = llm.NoopModelRegistry{}
+	if rc != nil && rc.ModelRegistry.Enabled {
+		ttl := time.Duration(rc.ModelRegistry.TTLHours) * time.Hour
+		mr := llm.NewModelsDevRegistry(rc.ModelRegistry.CachePath, ttl)
+		if rErr := mr.Refresh(ctx); rErr != nil {
+			logger.Warn("assemble_model_registry_refresh_failed", "err", rErr)
+		} else {
+			logger.Info("assemble_model_registry_ready",
+				"providers", len(mr.Providers()),
+			)
+		}
+		modelRegistry = mr
 	}
 
 	// 1d. Build small model and ModelSelector. When small_model is configured,
@@ -1051,6 +1073,7 @@ func AssembleAgent(
 		MemoryExtractor:    memExtractor,
 		ThinkingLevel:      thinkingLevel,
 		ModelCycler:        modelCycler,
+		ModelRegistry:      modelRegistry,
 		LSPClient:          lspClientField,
 		LSPWorkspaceRoot:   lspWorkspaceRoot,
 	}, nil
