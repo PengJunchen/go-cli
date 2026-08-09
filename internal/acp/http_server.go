@@ -77,6 +77,7 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 	mux.HandleFunc("/send", s.handleSend)
 	mux.HandleFunc("/disconnect", s.handleDisconnect)
 	mux.HandleFunc("/stream", s.handleStream)
+	mux.HandleFunc("/events", s.handleEvents)
 
 	srv := &http.Server{
 		Addr:    s.addr,
@@ -350,6 +351,57 @@ func (s *HTTPServer) writeMessages(w http.ResponseWriter, msgs []ACPMessage) {
 			continue
 		}
 		fmt.Fprintf(w, "%s\n", data) //nolint:errcheck // best-effort stream write
+	}
+}
+
+// handleEvents processes GET /events requests. It opens an SSE long-lived
+// connection that streams core.AgentEvents from the session's events channel.
+// The connection stays open until the client disconnects, the session is
+// closed, or the server shuts down. A keep-alive comment is sent every 15
+// seconds to prevent intermediary proxies from closing idle connections.
+func (s *HTTPServer) handleEvents(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	senderID := r.URL.Query().Get("sender_id")
+	if senderID == "" {
+		http.Error(w, "sender_id query parameter is required", http.StatusBadRequest)
+		return
+	}
+
+	sess := s.getSession(senderID)
+	if sess == nil {
+		http.Error(w, "session not found", http.StatusNotFound)
+		return
+	}
+
+	sse, ok := NewSSEWriter(w)
+	if !ok {
+		http.Error(w, "streaming not supported", http.StatusInternalServerError)
+		return
+	}
+
+	ticker := time.NewTicker(15 * time.Second)
+	defer ticker.Stop()
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case ev, ok := <-sess.Events():
+			if !ok {
+				// Session closed; end the stream.
+				return
+			}
+			if err := sse.WriteEvent(ev.Kind, ev); err != nil {
+				return
+			}
+		case <-ticker.C:
+			sse.WriteComment("keep-alive")
+		}
 	}
 }
 

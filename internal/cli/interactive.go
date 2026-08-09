@@ -396,7 +396,12 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		// rendering in TTY mode (raw mode, diff-based repaint on stderr), so
 		// the legacy onUpdate manual redraw and ANSI cursor logic has been
 		// removed.
-		tuiEvents := tui.BridgeEvents(turnCtx, stream)
+		var tuiEvents <-chan tui.AgentEvent
+		if rc != nil && rc.TUI.Mode == "remote" && rc.TUI.RemoteURL != "" {
+			tuiEvents = tui.NewACPStreamAdapter(rc.TUI.RemoteURL).Stream(turnCtx)
+		} else {
+			tuiEvents = tui.BridgeEvents(turnCtx, stream)
+		}
 		turnCounter++
 		isTTY := tui.IsTerminal()
 		tsp := tui.NewDefaultTerminalSizeProvider()

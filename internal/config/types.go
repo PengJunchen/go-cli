@@ -419,6 +419,13 @@ type TUIConfig struct {
 	// DiffStyle selects the diff preview style: unified, split, or auto.
 	// Empty defaults to auto.
 	DiffStyle string `json:"diff_style" yaml:"diff_style"`
+	// Mode selects the TUI event source: "local" (default) consumes events
+	// from the in-process EventStream; "remote" consumes SSE events from a
+	// remote ACP HTTP server specified by RemoteURL.
+	Mode string `json:"mode" yaml:"mode"`
+	// RemoteURL is the SSE endpoint URL used when Mode is "remote". It should
+	// include any required query parameters (e.g. sender_id).
+	RemoteURL string `json:"remote_url,omitempty" yaml:"remote_url,omitempty"`
 }
 
 // Source enumerates the five configuration layers, ordered by ascending

@@ -52,28 +52,28 @@ type AgentTool struct {
 // Consumers (e.g. the TUI or a test harness) stream these from an EventStream.
 type AgentEvent struct {
 	// Kind classifies the event (e.g. "message", "tool", "status").
-	Kind string
+	Kind string `json:"kind"`
 	// Content carries the event payload.
-	Content string
+	Content string `json:"content"`
 	// Timestamp records when the event was produced.
-	Timestamp time.Time
+	Timestamp time.Time `json:"timestamp"`
 	// Incremental marks a partial "message" event that contains only a
 	// fragment of the assistant's response (one or more tokens from a
 	// streaming LLM). The TUI accumulates these into the full message.
-	Incremental bool
+	Incremental bool `json:"incremental,omitempty"`
 	// TokenUsage carries token consumption data for "token_usage" events.
 	// It is nil for all other event kinds.
-	TokenUsage *TokenUsage
+	TokenUsage *TokenUsage `json:"token_usage,omitempty"`
 	// ToolCallID associates streaming output with the originating tool
 	// call. Populated for "tool_output" events; empty for other kinds.
-	ToolCallID string
+	ToolCallID string `json:"tool_call_id,omitempty"`
 	// Stream identifies the output source for "tool_output" events:
 	// "stdout" or "stderr". Empty for other event kinds.
-	Stream string
+	Stream string `json:"stream,omitempty"`
 	// Usage carries the API-reported token consumption for "message"
 	// events. It is nil for all other event kinds and for "message"
 	// events when the provider did not return usage data.
-	Usage *llm.Usage
+	Usage *llm.Usage `json:"usage,omitempty"`
 	// ToolCalls carries the tool invocations requested by the assistant
 	// for "message" events. It is nil for events with no tool calls.
 	ToolCalls []llm.ToolCall `json:"tool_calls,omitempty"`
@@ -86,13 +86,13 @@ type AgentEvent struct {
 // TokenUsage carries token consumption and cost data for a token_usage event.
 type TokenUsage struct {
 	// InputTokens is the total prompt tokens consumed so far.
-	InputTokens int
+	InputTokens int `json:"input_tokens"`
 	// OutputTokens is the total completion tokens consumed so far.
-	OutputTokens int
+	OutputTokens int `json:"output_tokens"`
 	// MaxTokens is the token budget for the session.
-	MaxTokens int
+	MaxTokens int `json:"max_tokens,omitempty"`
 	// Cost is the accumulated monetary cost in USD.
-	Cost float64
+	Cost float64 `json:"cost,omitempty"`
 }
 
 // String returns a time-stamped representation of the event and logs it.

@@ -12,18 +12,23 @@ import (
 )
 
 // Session represents a connected ACP client's state. Each session tracks
-// pending messages queued for delivery via the /stream endpoint.
+// pending messages queued for delivery via the /stream endpoint and an events
+// channel for streaming core.AgentEvents to SSE clients via /events.
 type Session struct {
 	id      string
 	mu      sync.Mutex
 	pending []ACPMessage
 	closed  bool
+	events  chan core.AgentEvent
 }
 
 // NewSession creates a Session with the given id (typically the client's
 // SenderID).
 func NewSession(id string) *Session {
-	return &Session{id: id}
+	return &Session{
+		id:     id,
+		events: make(chan core.AgentEvent, 128),
+	}
 }
 
 // ID returns the session identifier.
@@ -54,10 +59,15 @@ func (s *Session) Drain() []ACPMessage {
 }
 
 // Close marks the session as closed. Subsequent Enqueue calls are no-ops.
+// The events channel is closed so SSE consumers unblock.
 func (s *Session) Close() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
 	s.closed = true
+	close(s.events)
 }
 
 // IsClosed reports whether the session has been closed.
@@ -65,6 +75,26 @@ func (s *Session) IsClosed() bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.closed
+}
+
+// Events returns the channel for streaming core.AgentEvents to SSE clients.
+func (s *Session) Events() <-chan core.AgentEvent {
+	return s.events
+}
+
+// PublishEvent sends an event to the events channel. Non-blocking: if the
+// channel is full, the event is dropped.
+func (s *Session) PublishEvent(event core.AgentEvent) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return
+	}
+	select {
+	case s.events <- event:
+	default:
+		// Channel full, drop event.
+	}
 }
 
 // CoreHandler processes inbound ACP messages by dispatching them to a

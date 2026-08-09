@@ -136,6 +136,9 @@ func RunWithRegistry(ctx context.Context, cfg Config, args []string, out io.Writ
 	if err := reg.Register(newServeCmd(out)); err != nil {
 		slog.Default().Info("built-in serve command already registered; keeping caller's", "err", err)
 	}
+	if err := reg.Register(newModelsCmd(out)); err != nil {
+		slog.Default().Info("built-in models command already registered; keeping caller's", "err", err)
+	}
 
 	if showVersion {
 		return runCommand(ctx, cfg, newVersionCmd(out), nil)
