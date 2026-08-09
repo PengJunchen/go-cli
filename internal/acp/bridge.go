@@ -167,6 +167,20 @@ func (a *ACPMiddlewareAdapter) handleMessage(ctx context.Context, msg ACPMessage
 		return
 	}
 
+	if a.dispatcher == nil {
+		reply := ACPMessage{
+			Type:       TypeError,
+			SenderID:   msg.ReceiverID,
+			ReceiverID: msg.SenderID,
+			Content:    "no sub-agent dispatcher configured",
+			Timestamp:  time.Now(),
+		}
+		if sendErr := a.client.SendMessage(ctx, reply); sendErr != nil {
+			slog.Warn("acp.bridge.reply_failed", "err", sendErr, "receiver", msg.SenderID)
+		}
+		return
+	}
+
 	task := core.SubagentTask{
 		ID:     fmt.Sprintf("acp-%s", msg.SenderID),
 		Prompt: msg.Content,

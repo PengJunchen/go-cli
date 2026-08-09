@@ -52,7 +52,6 @@ func (r *realSubAgentRunner) Run(ctx context.Context, prompt string, inbox <-cha
 	if d, ok := ctx.Value(subagentDepthKey{}).(int); ok && d > depth {
 		depth = d
 	}
-	r.depth = depth
 
 	// Enforce the recursion depth limit before spawning the sub-agent.
 	maxDepth := r.maxDepth

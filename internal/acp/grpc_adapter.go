@@ -82,8 +82,10 @@ func (a *gRPCAdapter) Connect(ctx context.Context) error {
 		span.SetStatus(tracing.SpanStatusOK, "")
 		return nil
 	}
-	done := a.done
-	inbound := a.inbound
+	done := make(chan struct{})
+	inbound := make(chan ACPMessage, 16)
+	a.done = done
+	a.inbound = inbound
 	a.mu.Unlock()
 
 	connectMsg := ACPMessage{Type: TypeConnect, SenderID: a.name, Timestamp: time.Now()}
