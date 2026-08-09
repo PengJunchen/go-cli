@@ -26,16 +26,19 @@ func (h *WorktreeHandler) Handle(ctx context.Context, args []string, sc *slashCo
 		return h.handleCreate(ctx, sc)
 	case "remove":
 		return h.handleRemove(ctx, args[1:], sc)
+	case "cleanup":
+		return h.handleCleanup(ctx, sc)
 	default:
-		return newUsageError("worktree: unknown subcommand %q (use: list, create, remove)", sub)
+		return newUsageError("worktree: unknown subcommand %q (use: list, create, remove, cleanup)", sub)
 	}
 }
 
 func (h *WorktreeHandler) printUsage(sc *slashContext) {
-	fmt.Fprintln(sc.out, "Usage: /worktree <list|create|remove>")
+	fmt.Fprintln(sc.out, "Usage: /worktree <list|create|remove|cleanup>")
 	fmt.Fprintln(sc.out, "  list    - List active worktrees")
 	fmt.Fprintln(sc.out, "  create  - Create a worktree for the current session")
 	fmt.Fprintln(sc.out, "  remove  - Remove the worktree for the current session")
+	fmt.Fprintln(sc.out, "  cleanup - Remove orphaned worktrees not tied to any session")
 }
 
 func (h *WorktreeHandler) handleList(ctx context.Context, sc *slashContext) error {
@@ -98,5 +101,31 @@ func (h *WorktreeHandler) handleRemove(ctx context.Context, args []string, sc *s
 		return fmt.Errorf("worktree remove: %w", err)
 	}
 	fmt.Fprintf(sc.out, "Removed worktree for session %s\n", sessionID)
+	return nil
+}
+
+func (h *WorktreeHandler) handleCleanup(ctx context.Context, sc *slashContext) error {
+	if sc.worktreeManager == nil {
+		return fmt.Errorf("worktree isolation is not enabled")
+	}
+	orphans, err := sc.worktreeManager.ScanOrphans()
+	if err != nil {
+		return fmt.Errorf("worktree scan: %w", err)
+	}
+	if len(orphans) == 0 {
+		fmt.Fprintln(sc.out, "No orphan worktrees found.")
+		return nil
+	}
+	fmt.Fprintln(sc.out, "SESSION ID\tPATH\tSTATUS")
+	removed := 0
+	for _, p := range orphans {
+		if err := sc.worktreeManager.RemoveOrphan(ctx, p); err != nil {
+			fmt.Fprintf(sc.out, "(orphan)\t%s\tFAILED: %v\n", p, err)
+			continue
+		}
+		fmt.Fprintf(sc.out, "(orphan)\t%s\tREMOVED\n", p)
+		removed++
+	}
+	fmt.Fprintf(sc.out, "Cleaned up %d/%d orphan worktree(s).\n", removed, len(orphans))
 	return nil
 }
