@@ -41,8 +41,8 @@ func TestStripYAMLComment_None(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestBuildYAMLLines_ListTaggingAndIndent verifies list items are tagged and
-// space-indentation is measured. Tab characters do not advance indentWidth (the
-// parser only counts spaces), so tab-only lines report indent 0.
+// space-indentation is measured. Tab characters count as 4 spaces (tab-stop
+// rounding), so a single-tab-indented line reports indent 4.
 func TestBuildYAMLLines_ListTaggingAndIndent(t *testing.T) {
 	lines := buildYAMLLines([]byte("tools:\n\tbuiltin:\n  - a\n  plain: x\n"))
 	// Five elements: four significant lines plus the trailing-newline blank.
@@ -52,9 +52,9 @@ func TestBuildYAMLLines_ListTaggingAndIndent(t *testing.T) {
 	assert.False(t, lines[0].listItem)
 	assert.Equal(t, 0, lines[0].indent)
 
-	// Tab-indented "builtin:" — the tab contributes no space indent.
+	// Tab-indented "builtin:" — tab counts as 4 spaces.
 	assert.False(t, lines[1].listItem)
-	assert.Equal(t, 0, lines[1].indent)
+	assert.Equal(t, 4, lines[1].indent)
 
 	// Two-space "- a" is a list item.
 	assert.True(t, lines[2].listItem)
