@@ -866,6 +866,25 @@ func (s *assembleState) assembleApproval() {
 		}
 	}
 
+	// Determine the permission mode for audit metadata.
+	auditMode := approval.PermissionDefault
+	if s.ac.approvalCh == nil {
+		switch s.ac.approveMode {
+		case ApproveAuto:
+			auditMode = approval.PermissionAutoFull
+		case ApproveDeny:
+			auditMode = approval.PermissionDefault
+		default:
+			auditMode = approval.PermissionDefault
+		}
+	}
+
+	// Wrap the classifier with an append-only audit trail so every classification
+	// decision is recorded to .go-cli/audit/{date}.jsonl.
+	auditDir := filepath.Join(s.gitCwd, ".go-cli", "audit")
+	auditTrail := approval.NewAuditTrail(auditDir)
+	classifier = approval.NewAuditClassifier(classifier, auditTrail, auditMode, s.sessionID)
+
 	approvalStore := approval.NewInMemoryApprovalStore()
 	approvalCache := approval.NewApprovalCache("")
 	s.modeResolver = approval.NewDefaultPermissionModeResolver()
@@ -876,7 +895,13 @@ func (s *assembleState) assembleApproval() {
 		approval.WithCache(approvalCache),
 	)
 	if s.ac.approvalCh != nil {
-		mwOpts = append(mwOpts, approval.WithPermissionModeResolver(s.modeResolver))
+		// Wrap the resolver with an AuditResolver so that classifiers produced
+		// by Resolve are also audit-recording. Without this the middleware's
+		// effectiveClassifier path would bypass the AuditClassifier wrapper and
+		// TUI interactive mode (the primary approval scenario) would not write
+		// audit records.
+		auditResolver := approval.NewAuditResolver(s.modeResolver, auditTrail, s.sessionID)
+		mwOpts = append(mwOpts, approval.WithPermissionModeResolver(auditResolver))
 	}
 	if approvalCallback != nil {
 		mwOpts = append(mwOpts, approval.WithCallback(approvalCallback))

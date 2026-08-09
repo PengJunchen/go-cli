@@ -3,6 +3,7 @@ package approval
 import (
 	"context"
 	"log/slog"
+	"time"
 
 	"github.com/pengjunchen/go-cli/internal/tools"
 )
@@ -108,4 +109,80 @@ func toSet(items []string) map[string]struct{} {
 		set[item] = struct{}{}
 	}
 	return set
+}
+
+// AuditClassifier wraps an ApprovalClassifier and records each classification
+// decision to an AuditTrail. It is transparent: the wrapped classifier's
+// decision is returned unchanged. If the AuditTrail is nil or Record fails,
+// the decision is still returned — auditing must never block or alter approval.
+type AuditClassifier struct {
+	inner   ApprovalClassifier
+	audit   *AuditTrail
+	mode    PermissionMode
+	session string
+}
+
+var _ ApprovalClassifier = (*AuditClassifier)(nil)
+
+// NewAuditClassifier wraps inner with an audit-recording decorator. The mode
+// and session are recorded as metadata on each audit entry.
+func NewAuditClassifier(inner ApprovalClassifier, audit *AuditTrail, mode PermissionMode, session string) *AuditClassifier {
+	return &AuditClassifier{inner: inner, audit: audit, mode: mode, session: session}
+}
+
+// Name returns the wrapped classifier's name.
+func (c *AuditClassifier) Name() string { return c.inner.Name() }
+
+// Classify delegates to the wrapped classifier and records the decision. Audit
+// failures are logged as warnings but never propagated.
+func (c *AuditClassifier) Classify(ctx context.Context, call tools.ToolCall) Classification {
+	result := c.inner.Classify(ctx, call)
+	if c.audit != nil {
+		entry := AuditEntry{
+			Timestamp:      time.Now().UTC(),
+			Tool:           call.Name,
+			ArgsSummary:    summarizeArgs(call.Args),
+			Decision:       result.String(),
+			Classifier:     c.inner.Name(),
+			PermissionMode: c.mode.String(),
+			SessionID:      c.session,
+		}
+		if err := c.audit.Record(entry); err != nil {
+			slog.Warn("approval.audit.record_failed", "err", err)
+		}
+	}
+	return result
+}
+
+// AuditResolver wraps a PermissionModeResolver so that every classifier
+// returned by Resolve is itself wrapped with an AuditClassifier. This keeps
+// audit recording in effect when the ApprovalMiddleware selects its classifier
+// dynamically via the resolver path (e.g. TUI interactive mode), instead of the
+// statically bound classifier. When the AuditTrail is nil the inner classifier
+// is returned unchanged.
+type AuditResolver struct {
+	inner   PermissionModeResolver
+	audit   *AuditTrail
+	session string
+}
+
+var _ PermissionModeResolver = (*AuditResolver)(nil)
+
+// NewAuditResolver wraps inner so each resolved classifier records audit
+// entries. The session is recorded as metadata on each audit entry.
+func NewAuditResolver(inner PermissionModeResolver, audit *AuditTrail, session string) *AuditResolver {
+	return &AuditResolver{inner: inner, audit: audit, session: session}
+}
+
+// Name returns the wrapped resolver's identifier.
+func (r *AuditResolver) Name() string { return r.inner.Name() }
+
+// Resolve delegates to the wrapped resolver and decorates the returned
+// classifier with an AuditClassifier when an AuditTrail is configured.
+func (r *AuditResolver) Resolve(mode PermissionMode) ApprovalClassifier {
+	inner := r.inner.Resolve(mode)
+	if r.audit == nil {
+		return inner
+	}
+	return NewAuditClassifier(inner, r.audit, mode, r.session)
 }
