@@ -3,6 +3,8 @@ package tui
 import (
 	"log/slog"
 	"os"
+
+	"github.com/pengjunchen/go-cli/internal/term"
 )
 
 // TerminalSizeProvider provides terminal dimensions.
@@ -41,7 +43,7 @@ func (d *DefaultTerminalSizeProvider) Width() int {
 	if !isStdoutTerminal() {
 		return defaultTerminalWidth
 	}
-	w, _ := getTerminalSize()
+	w, _ := term.GetSize()
 	if w <= 0 {
 		return defaultTerminalWidth
 	}
@@ -55,7 +57,7 @@ func (d *DefaultTerminalSizeProvider) Height() int {
 	if !isStdoutTerminal() {
 		return defaultTerminalHeight
 	}
-	_, h := getTerminalSize()
+	_, h := term.GetSize()
 	if h <= 0 {
 		return defaultTerminalHeight
 	}
