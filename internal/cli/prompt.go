@@ -10,6 +10,7 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/session"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
@@ -62,12 +63,14 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) error {
 		verboseFlag  bool
 		outputMode   OutputMode
 		approveMode  ApproveMode
+		forkFlag     string
 	)
 	fs.StringVar(&modelFlag, "model", "", "model name to use")
 	fs.StringVar(&providerFlag, "provider", "", "provider name to use")
 	fs.BoolVar(&verboseFlag, "verbose", false, "enable verbose output")
 	fs.Var(&outputMode, "output", "output format: json|stream|text (default text)")
 	fs.Var(&approveMode, "approve", "approval mode: auto|deny|ask (default ask)")
+	fs.StringVar(&forkFlag, "fork", "", "fork from an existing session id")
 	if err := fs.Parse(args); err != nil {
 		return newUsageError("prompt: %v", err)
 	}
@@ -115,15 +118,30 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	// Assemble the full agent runtime with all production wiring (same as
 	// interactive: model wrapping, tools, approval gates, retry/cost tracking,
 	// output guards, subagent, compaction).
+	assembleOpts := []AssembleOption{WithApproveMode(approveMode)}
+	if forkFlag != "" {
+		// --fork requires a session store to build the tree from.
+		assembleOpts = append(assembleOpts, WithSessionPersistence(true))
+	}
 	assembly, err := AssembleAgent(dispatchCtx, rc, providerName, modelName, c.out,
-		WithApproveMode(approveMode),
-	)
+		assembleOpts...)
 	if err != nil {
 		dispatchSpan.SetStatus(tracing.SpanStatusError, err.Error())
 		dispatchSpan.End()
 		return newExecutionError("prompt: assemble agent", err)
 	}
 	defer assembly.Cleanup()
+
+	// Fork from an existing session: build a SessionTree from the store,
+	// zero-copy branch at the requested entry, rebuild context, and inject
+	// the resulting history into the agent.
+	if forkFlag != "" {
+		if err := c.forkSession(dispatchCtx, assembly, forkFlag); err != nil {
+			dispatchSpan.SetStatus(tracing.SpanStatusError, err.Error())
+			dispatchSpan.End()
+			return newExecutionError("prompt: fork session", err)
+		}
+	}
 
 	stream, err := assembly.Harness.Submit(dispatchCtx, prompt)
 	if err != nil {
@@ -247,6 +265,40 @@ func (c *promptCmd) emitClosedown(ctx context.Context, command string) {
 	)
 	stopSpan.SetStatus(tracing.SpanStatusOK, "")
 	stopSpan.End()
+}
+
+// forkSession builds a SessionTree from the assembled store, zero-copy branches
+// at the requested session entry, rebuilds the context, and injects the
+// resulting history into the agent. This enables headless continuation from any
+// point in a previous conversation without affecting the original session.
+func (c *promptCmd) forkSession(ctx context.Context, assembly *AgentAssembly, sessionID string) error {
+	if assembly.SessionStore == nil {
+		return fmt.Errorf("session store unavailable (configure session.store_path)")
+	}
+
+	treeBuilder := session.NewDefaultSessionTreeBuilder()
+	sessionTree, err := treeBuilder.BuildFromStore(ctx, assembly.SessionStore)
+	if err != nil {
+		return fmt.Errorf("build session tree: %w", err)
+	}
+	if sessionTree.CurrentLeaf() == "" {
+		return fmt.Errorf("session store is empty, nothing to fork from")
+	}
+
+	// Branch zero-copy repoints the leaf at the requested entry.
+	if err := sessionTree.Branch(ctx, sessionID); err != nil {
+		return fmt.Errorf("fork from session %q: %w", sessionID, err)
+	}
+
+	// Rebuild context for the forked branch.
+	sc, err := sessionTree.BuildContext(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("rebuild context: %w", err)
+	}
+
+	assembly.Agent.SetHistory(session.EntriesToAgentMessages(sc.Messages))
+	slog.Info("cli_prompt_fork", "op", "cli.prompt.fork", "session_id", sessionID, "messages", len(sc.Messages))
+	return nil
 }
 
 // resolveModelName returns the effective model name, preferring the CLI flag
