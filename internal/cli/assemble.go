@@ -51,6 +51,14 @@ type AgentAssembly struct {
 	Estimator     compaction.TokenEstimator
 	MidTurn       *compaction.MidTurnCompact
 	MaxTokens     int
+	// EventBus is the shared event bus that receives a copy of every event
+	// emitted by the harness's EventStream. It is exposed so the SSE server
+	// can Subscribe for fan-out to multiple /events consumers.
+	EventBus core.EventBus
+	// Dispatcher is the sub-agent dispatcher used for ACP message dispatch.
+	// It is exposed so the serve command can wire it into the CoreHandler
+	// for remote SSE bridging.
+	Dispatcher *core.DefaultSubagentDispatcher
 	// ContextWindow is the model's total context window size (in tokens),
 	// used for TUI status bar and /cost occupancy display. Falls back to
 	// MaxTokens when the model doesn't report a context window.
@@ -282,7 +290,7 @@ func AssembleAgent(
 		agentOpts = append(agentOpts, core.WithHistory(restoredHistory))
 	}
 	agent := core.NewAgentImpl(s.ac.agentName, s.loop, agentOpts...)
-	h := core.NewHarnessImpl(agent, core.WithEventBuffer(64), core.WithHarnessTracer(s.tracer), core.WithRunSlotGuard(s.runSlotGuard))
+	h := core.NewHarnessImpl(agent, core.WithEventBuffer(64), core.WithHarnessTracer(s.tracer), core.WithRunSlotGuard(s.runSlotGuard), core.WithHarnessEventBus(s.eventBus))
 
 	// Build TurnRunner wired with the shared steering channel and agent.
 	turnRunner := core.NewEinoTurnRunner(s.loop)
@@ -324,6 +332,8 @@ func AssembleAgent(
 		Estimator:          s.estimator,
 		MidTurn:            s.midTurn,
 		MaxTokens:          s.ac.maxTokens,
+		EventBus:           s.eventBus,
+		Dispatcher:         s.dispatcher,
 		ContextWindow:      contextWindow,
 		Cleanup:            s.runCleanup,
 		Registry:           s.reg,
@@ -416,6 +426,7 @@ func newAssembleState(
 		modelName:     modelName,
 		out:           out,
 		thinkingLevel: thinkingLevel,
+		eventBus:      core.NewMemoryEventBus(),
 	}
 	return s, thinkingLevel
 }
@@ -482,6 +493,7 @@ type assembleState struct {
 	// SubAgent section
 	acpAdapter *acp.ACPMiddlewareAdapter
 	acpClient  acp.ACPClient
+	dispatcher *core.DefaultSubagentDispatcher
 
 	// Extra tools section
 	hitlEmitter *cliHITLEmitter
@@ -496,6 +508,9 @@ type assembleState struct {
 	memExtractor  memory.MemoryExtractor
 	promptBuilder core.SystemPromptBuilder
 	contextLoader core.ProjectContextLoader
+
+	// EventBus section
+	eventBus core.EventBus
 
 	// Middleware section
 	loopDetector       production.LoopDetector
@@ -526,6 +541,9 @@ func (s *assembleState) runCleanup() {
 // LIFO cleanup because they are appended after all subsystem cleanups.
 func (s *assembleState) appendFinalCleanup() {
 	s.cleanupList = append(s.cleanupList, func() {
+		if s.eventBus != nil {
+			s.eventBus.Close()
+		}
 		if s.acpAdapter != nil {
 			s.acpAdapter.Close()
 		}
@@ -935,6 +953,7 @@ func (s *assembleState) assembleSubAgent() {
 	)
 	core.RegisterSubAgentFactory(subAgentFactory)
 	dispatcher := core.NewDefaultSubagentDispatcher(nil)
+	s.dispatcher = dispatcher
 	if subErr := s.tr.Register(s.ctx, core.NewSubagentTool(dispatcher)); subErr != nil {
 		s.logger.Warn("assemble_subagent_tool_failed", "err", subErr)
 	}

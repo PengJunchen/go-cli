@@ -40,6 +40,7 @@ type EventStreamImpl struct {
 	err       error
 	sentCount int
 	discard   DiscardPolicy
+	bus       EventBus
 }
 
 var _ EventStream = (*EventStreamImpl)(nil)
@@ -53,6 +54,13 @@ type EventStreamOption func(*EventStreamImpl)
 // sender until a consumer reads.
 func WithEventDiscardPolicy(p DiscardPolicy) EventStreamOption {
 	return func(s *EventStreamImpl) { s.discard = p }
+}
+
+// WithEventBus wires an EventBus that receives a copy of every event
+// successfully sent to the stream. The publish is non-blocking and
+// nil-safe: when bus is nil, no dual-write occurs.
+func WithEventBus(bus EventBus) EventStreamOption {
+	return func(s *EventStreamImpl) { s.bus = bus }
 }
 
 // NewEventStream creates an EventStreamImpl with the given buffer capacity.
@@ -98,6 +106,7 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 			s.mu.Lock()
 			s.sentCount++
 			s.mu.Unlock()
+			s.publishToBus(event)
 			slog.Debug("core.eventstream.send", "kind", event.Kind, "policy", "discard_newest")
 			return nil
 		default:
@@ -114,6 +123,7 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 			s.mu.Lock()
 			s.sentCount++
 			s.mu.Unlock()
+			s.publishToBus(event)
 			slog.Debug("core.eventstream.send", "kind", event.Kind, "policy", "discard_oldest")
 			return nil
 		default:
@@ -130,6 +140,7 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 				s.mu.Lock()
 				s.sentCount++
 				s.mu.Unlock()
+				s.publishToBus(event)
 				slog.Debug("core.eventstream.send", "kind", event.Kind, "policy", "discard_oldest")
 				return nil
 			default:
@@ -146,6 +157,7 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 			s.mu.Lock()
 			s.sentCount++
 			s.mu.Unlock()
+			s.publishToBus(event)
 			slog.Debug("core.eventstream.send", "kind", event.Kind, "policy", "block")
 			return nil
 		}
@@ -159,6 +171,14 @@ func (s *EventStreamImpl) SentCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.sentCount
+}
+
+// publishToBus forwards a copy of the event to the wired EventBus (if any).
+// The call is non-blocking and nil-safe.
+func (s *EventStreamImpl) publishToBus(event AgentEvent) {
+	if s.bus != nil {
+		s.bus.Publish(event)
+	}
 }
 
 // Events returns the event channel.

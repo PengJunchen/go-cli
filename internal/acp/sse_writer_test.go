@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -181,4 +182,116 @@ func TestSession_PublishEventAfterClose(t *testing.T) {
 	assert.NotPanics(t, func() {
 		sess.PublishEvent(core.AgentEvent{Kind: "message"})
 	})
+}
+
+// TestLastEventID verifies SSE Last-Event-ID reconnection: after a client
+// disconnects and reconnects with a Last-Event-ID header, the server replays
+// only events whose ID exceeds the header value from the session ring buffer.
+//
+// An EventBus is wired to the server so that live events are read from a
+// per-connection bus subscription (not the per-session channel). This avoids
+// duplicate delivery of events that are already in the ring buffer.
+func TestLastEventID(t *testing.T) {
+	bus := core.NewMemoryEventBus()
+	defer bus.Close()
+
+	handler := NewCoreHandler(nil, nil)
+	srv, baseURL := startTestHTTPServer(t, handler)
+	srv.SetEventBus(bus)
+
+	// Create session.
+	postACP(t, baseURL, "/connect", ACPMessage{
+		Type:     TypeConnect,
+		SenderID: "lei-client",
+	}).Body.Close()
+
+	sess := srv.getSession("lei-client")
+	require.NotNil(t, sess)
+
+	// Publish 3 events to populate the session ring buffer.
+	for _, content := range []string{"first", "second", "third"} {
+		sess.PublishEvent(core.AgentEvent{
+			Kind:      "message",
+			Content:   content,
+			Timestamp: time.Now(),
+		})
+	}
+
+	// Allow events to settle in the ring buffer.
+	time.Sleep(50 * time.Millisecond)
+
+	// --- First connection: read all 3 events from ring buffer replay ---
+	resp1, err := http.Get(baseURL + "/events?sender_id=lei-client")
+	require.NoError(t, err)
+
+	var ids1 []uint64
+	var contents1 []string
+	sc := bufio.NewScanner(resp1.Body)
+	var curID uint64
+	var dataLine string
+	for sc.Scan() {
+		line := sc.Text()
+		if strings.HasPrefix(line, "id: ") {
+			curID, _ = strconv.ParseUint(strings.TrimPrefix(line, "id: "), 10, 64)
+		} else if strings.HasPrefix(line, "data: ") {
+			dataLine = strings.TrimPrefix(line, "data: ")
+		} else if line == "" && dataLine != "" {
+			var ev core.AgentEvent
+			if err := json.Unmarshal([]byte(dataLine), &ev); err == nil {
+				ids1 = append(ids1, curID)
+				contents1 = append(contents1, ev.Content)
+			}
+			dataLine = ""
+			curID = 0
+			if len(ids1) >= 3 {
+				break
+			}
+		}
+	}
+	resp1.Body.Close()
+
+	require.Len(t, ids1, 3, "first connection should receive all 3 events")
+	assert.Equal(t, []uint64{1, 2, 3}, ids1)
+	assert.Equal(t, []string{"first", "second", "third"}, contents1)
+
+	// Allow the server to clean up the first connection.
+	time.Sleep(50 * time.Millisecond)
+
+	// --- Second connection with Last-Event-ID=1: replay events 2 and 3 ---
+	req2, err := http.NewRequest(http.MethodGet, baseURL+"/events?sender_id=lei-client", nil)
+	require.NoError(t, err)
+	req2.Header.Set("Last-Event-ID", "1")
+
+	resp2, err := http.DefaultClient.Do(req2)
+	require.NoError(t, err)
+
+	var ids2 []uint64
+	var contents2 []string
+	sc2 := bufio.NewScanner(resp2.Body)
+	var curID2 uint64
+	var dataLine2 string
+	for sc2.Scan() {
+		line := sc2.Text()
+		if strings.HasPrefix(line, "id: ") {
+			curID2, _ = strconv.ParseUint(strings.TrimPrefix(line, "id: "), 10, 64)
+		} else if strings.HasPrefix(line, "data: ") {
+			dataLine2 = strings.TrimPrefix(line, "data: ")
+		} else if line == "" && dataLine2 != "" {
+			var ev core.AgentEvent
+			if err := json.Unmarshal([]byte(dataLine2), &ev); err == nil {
+				ids2 = append(ids2, curID2)
+				contents2 = append(contents2, ev.Content)
+			}
+			dataLine2 = ""
+			curID2 = 0
+			if len(ids2) >= 2 {
+				break
+			}
+		}
+	}
+	resp2.Body.Close()
+
+	require.Len(t, ids2, 2, "second connection should receive 2 replayed events")
+	assert.Equal(t, []uint64{2, 3}, ids2)
+	assert.Equal(t, []string{"second", "third"}, contents2)
 }
