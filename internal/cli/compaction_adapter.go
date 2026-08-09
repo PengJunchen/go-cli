@@ -29,18 +29,7 @@ func newCompactionHook(
 		}
 
 		// Convert AgentMessage -> TurnItem
-		items := make([]compaction.TurnItem, len(messages))
-		for i, msg := range messages {
-			items[i] = compaction.TurnItem{
-				ID:            fmt.Sprintf("msg-%d", i),
-				Role:          msg.Role,
-				Content:       msg.Content,
-				ContentBlocks: msg.ContentBlocks,
-				ToolCalls:     msg.ToolCalls,
-				ToolCallID:    msg.ToolCallID,
-				ToolName:      msg.ToolName,
-			}
-		}
+		items := messagesToTurnItems(messages)
 
 		// Run compaction
 		compacted, err := compactor.Compact(ctx, items, maxTokens, estimator)
@@ -49,17 +38,7 @@ func newCompactionHook(
 		}
 
 		// Convert TurnItem -> AgentMessage
-		result := make([]core.AgentMessage, len(compacted))
-		for i, item := range compacted {
-			result[i] = core.AgentMessage{
-				Role:          item.Role,
-				Content:       item.Content,
-				ContentBlocks: item.ContentBlocks,
-				ToolCalls:     item.ToolCalls,
-				ToolCallID:    item.ToolCallID,
-				ToolName:      item.ToolName,
-			}
-		}
+		result := turnItemsToMessages(compacted)
 
 		slog.Info("cli_compaction_hook",
 			"op", "cli.compaction.hook",

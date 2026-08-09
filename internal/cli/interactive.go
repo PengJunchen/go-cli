@@ -18,10 +18,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
-	"github.com/pengjunchen/go-cli/internal/mcp"
 	"github.com/pengjunchen/go-cli/internal/session"
-	"github.com/pengjunchen/go-cli/internal/skill"
-	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 	"github.com/pengjunchen/go-cli/internal/tui"
 
@@ -448,6 +445,20 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 					}
 				}
 			}),
+			tui.WithFollowUpCallback(func(input string) {
+				turnID := assembly.TurnRunner.RunningTurnID()
+				if turnID != "" {
+					if err := assembly.TurnRunner.FollowUp(turnCtx, turnID, input); err != nil {
+						logger.Warn("cli_interactive_followup_callback_failed", "err", err)
+					}
+				} else if assembly.FollowUpChannel != nil {
+					select {
+					case assembly.FollowUpChannel <- input:
+					default:
+						logger.Warn("cli_interactive_followup_channel_full")
+					}
+				}
+			}),
 			tui.WithCancelCallback(func() {
 				cancelTurn()
 			}),
@@ -469,6 +480,21 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 				logger.Debug("cli_interactive_tui_error", "err", runErr)
 			}
 		}()
+
+		// Wait for the tea.Program to be initialized so HITL can route
+		// through it. The program is created inside Run (which runs in the
+		// goroutine above), so we poll app.Program() until it is non-nil.
+		// In TTY mode this routes HITL questions through bubbletea instead
+		// of corrupting stdout.
+		if assembly.HITLEmitter != nil {
+			for i := 0; i < 100; i++ {
+				if prog := app.Program(); prog != nil {
+					assembly.HITLEmitter.program = prog
+					break
+				}
+				time.Sleep(10 * time.Millisecond)
+			}
+		}
 
 		// Wait for the render loop to finish. The app exits when the bridge
 		// channel closes (stream closed by the RunTurn goroutine). Steer
@@ -504,6 +530,13 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 					}
 				}
 			}
+		}
+
+		// Clear the HITL program reference now that the turn is complete.
+		// The bubbletea program from this turn has exited; leaving a stale
+		// reference would cause the next turn to send to a dead program.
+		if assembly.HITLEmitter != nil {
+			assembly.HITLEmitter.program = nil
 		}
 
 		// Wait for RunTurn to finish so turnResult and turnErr are populated.
@@ -631,101 +664,25 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 	return nil
 }
 
-// estimateTurnTokens sums the estimated token counts of all turn items.
-func estimateTurnTokens(items []compaction.TurnItem, estimator compaction.TokenEstimator) int {
-	total := 0
-	for _, it := range items {
-		if it.Content != "" {
-			n, _ := estimator.Estimate(it.Content) //nolint:errcheck
-			total += n
-		}
-		if it.ToolResult != "" {
-			n, _ := estimator.Estimate(it.ToolResult) //nolint:errcheck
-			total += n
-		}
-	}
-	return total
-}
-
-// RegisterMCPToolsFromClients connects the given MCP clients and registers
-// their tools. This is the public API for programmatic MCP tool registration.
-func RegisterMCPToolsFromClients(ctx context.Context, clients []mcp.MCPClient, tr tools.ToolRegistry) error {
-	for _, client := range clients {
-		if err := client.Connect(ctx); err != nil {
-			slog.Warn("cli_interactive_mcp_connect_failed", "server", client.Name(), "err", err)
-			continue
-		}
-		mcpTools, err := client.ListTools(ctx)
-		if err != nil {
-			slog.Warn("cli_interactive_mcp_list_tools_failed", "server", client.Name(), "err", err)
-			continue
-		}
-		for _, tool := range mcpTools {
-			adapter := mcp.NewMCPToolAdapter(client, tool)
-			if regErr := tr.Register(ctx, adapter); regErr != nil {
-				slog.Warn("cli_interactive_mcp_register_failed",
-					"server", client.Name(),
-					"tool", tool.Name,
-					"err", regErr,
-				)
-			}
-		}
-		slog.Info("cli_interactive_mcp_registered",
-			"server", client.Name(),
-			"tools", len(mcpTools),
-		)
-	}
-	return nil
-}
-
-// RegisterSkillToolsFromDir loads skills from the given directory and registers
-// them as tools. This is the public API for programmatic skill registration.
-func RegisterSkillToolsFromDir(ctx context.Context, dir string, tr tools.ToolRegistry) error {
-	loader := skill.NewYAMLSkillLoader()
-	defs, err := loader.LoadDir(ctx, dir)
-	if err != nil {
-		return fmt.Errorf("interactive: load skills from %s: %w", dir, err)
-	}
-	reg := skill.NewDefaultSkillRegistry()
-	for _, def := range defs {
-		if def == nil {
-			continue
-		}
-		if regErr := reg.Register(ctx, *def); regErr != nil {
-			slog.Warn("cli_interactive_skill_register_failed",
-				"skill", (*def).Name(),
-				"err", regErr,
-			)
-		}
-	}
-	skills := reg.List(ctx)
-	for _, s := range skills {
-		adapter := skill.NewSkillAdapter(s)
-		if regErr := tr.Register(ctx, adapter); regErr != nil {
-			slog.Warn("cli_interactive_skill_adapter_failed",
-				"skill", s.Name(),
-				"err", regErr,
-			)
-		}
-	}
-	slog.Info("cli_interactive_skills_registered", "count", len(skills))
-	return nil
-}
-
 // messagesToTurnItems converts core.AgentMessage slice to compaction.TurnItem
 // slice for the compaction pipeline.
 func messagesToTurnItems(msgs []core.AgentMessage) []compaction.TurnItem {
 	items := make([]compaction.TurnItem, len(msgs))
 	for i, m := range msgs {
-		items[i] = compaction.TurnItem{
+		item := compaction.TurnItem{
 			ID:            fmt.Sprintf("msg-%d", i),
 			Role:          m.Role,
-			Content:       m.Content,
 			ContentBlocks: m.ContentBlocks,
 			ToolCalls:     m.ToolCalls,
 			ToolCallID:    m.ToolCallID,
 			ToolName:      m.ToolName,
 		}
+		if m.Role == compaction.RoleTool {
+			item.ToolResult = m.Content
+		} else {
+			item.Content = m.Content
+		}
+		items[i] = item
 	}
 	return items
 }
@@ -735,18 +692,22 @@ func messagesToTurnItems(msgs []core.AgentMessage) []compaction.TurnItem {
 func turnItemsToMessages(items []compaction.TurnItem) []core.AgentMessage {
 	msgs := make([]core.AgentMessage, len(items))
 	for i, it := range items {
-		content := it.Content
-		if it.IsCompaction && it.Content == "" {
-			content = "[compacted]"
-		}
-		msgs[i] = core.AgentMessage{
+		msg := core.AgentMessage{
 			Role:          it.Role,
-			Content:       content,
 			ContentBlocks: it.ContentBlocks,
 			ToolCalls:     it.ToolCalls,
 			ToolCallID:    it.ToolCallID,
 			ToolName:      it.ToolName,
 		}
+		if it.Role == compaction.RoleTool {
+			msg.Content = it.ToolResult
+		} else {
+			msg.Content = it.Content
+			if it.IsCompaction && it.Content == "" {
+				msg.Content = "[compacted]"
+			}
+		}
+		msgs[i] = msg
 	}
 	return msgs
 }
