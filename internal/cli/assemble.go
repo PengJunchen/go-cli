@@ -9,8 +9,10 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/acp"
@@ -440,15 +442,15 @@ func newAssembleState(
 // methods. It is internal to the assembly process and not exposed to callers.
 type assembleState struct {
 	// Common dependencies
-	ctx          context.Context
-	rc           *config.Config
-	ac           assembleConfig
-	logger       *slog.Logger
-	reg          *core.DefaultRegistry
-	sessionID    string
-	providerName string
-	modelName    string
-	out          io.Writer
+	ctx           context.Context
+	rc            *config.Config
+	ac            assembleConfig
+	logger        *slog.Logger
+	reg           *core.DefaultRegistry
+	sessionID     string
+	providerName  string
+	modelName     string
+	out           io.Writer
 	thinkingLevel llm.ThinkingLevel
 
 	// Model section
@@ -727,7 +729,18 @@ func (s *assembleState) assembleTools() error {
 			s.logger.Warn("assemble_worktree_base_dir_failed", "err", err)
 		}
 		wtMgr := s.worktreeMgr
+		// Register a SIGINT/SIGTERM handler so that worktrees are cleaned up
+		// even when the process is interrupted before normal shutdown. The
+		// goroutine exits without cleaning up when wtDone is closed (normal
+		// shutdown path), avoiding duplicate cleanup. Cleanup is idempotent
+		// (sync.Once), so a concurrent signal during shutdown is safe.
+		wtSigCh := make(chan os.Signal, 1)
+		signal.Notify(wtSigCh, syscall.SIGINT, syscall.SIGTERM)
+		wtDone := make(chan struct{})
+		wtMgr.StartSignalCleanup(wtSigCh, wtDone)
 		s.cleanupList = append(s.cleanupList, func() {
+			signal.Stop(wtSigCh)
+			close(wtDone)
 			if err := wtMgr.Cleanup(context.Background()); err != nil {
 				s.logger.Warn("assemble_worktree_cleanup_failed", "err", err)
 			}
@@ -802,7 +815,7 @@ func (s *assembleState) assembleExtensions() {
 	if s.rc != nil && s.rc.Extensions.Enabled != nil && *s.rc.Extensions.Enabled && len(s.rc.Extensions.PluginPaths) > 0 {
 		pm := extension.NewPluginManager(extension.NewDefaultPluginLoader())
 		_ = pm.Load(s.ctx, s.rc.Extensions.PluginPaths) //nolint:errcheck
-		_ = pm.Init(s.ctx)                            //nolint:errcheck
+		_ = pm.Init(s.ctx)                              //nolint:errcheck
 		for _, t := range pm.Tools() {
 			if regErr := s.tr.Register(s.ctx, t); regErr != nil {
 				s.logger.Warn("assemble_extension_tool_register_failed", "tool", t.Name(), "err", regErr)
