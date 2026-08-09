@@ -363,6 +363,13 @@ type GitConfig struct {
 	// APIToken is the API token for the hosting platform. When non-empty,
 	// Platform must be set.
 	APIToken string `json:"api_token"`
+	// WorktreeEnabled controls whether parallel sessions are isolated via git
+	// worktrees. When true, each session gets its own worktree on a dedicated
+	// branch.
+	WorktreeEnabled bool `json:"worktree_enabled"`
+	// WorktreeDir is the parent directory where session worktrees are created.
+	// When empty, it defaults to <gitCwd>/.go-cli/worktrees.
+	WorktreeDir string `json:"worktree_dir"`
 }
 
 // ModelCyclerConfig controls model rotation across multiple providers. When

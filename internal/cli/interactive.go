@@ -188,21 +188,22 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		}
 	}
 	slashCtx := slashContext{
-		agent:          assembly.Agent,
-		costTracker:    assembly.CostTracker,
-		statsRegistry:  assembly.StatsRegistry,
-		sessionID:      assembly.SessionID,
-		toolRegistry:   assembly.ToolRegistry,
-		modelName:      modelName,
-		sessionHandler: sessionHandler,
-		out:            c.out,
-		config:         rc,
-		sessionStore:   assembly.SessionStore,
-		fileTracker:    assembly.FileTracker,
-		diffGenerator:  assembly.DiffGenerator,
-		planCtrl:       assembly.PlanCtrl,
-		memoryStore:    assembly.MemoryStore,
-		contextWindow:  assembly.ContextWindow,
+		agent:           assembly.Agent,
+		costTracker:     assembly.CostTracker,
+		statsRegistry:   assembly.StatsRegistry,
+		sessionID:       assembly.SessionID,
+		toolRegistry:    assembly.ToolRegistry,
+		modelName:       modelName,
+		sessionHandler:  sessionHandler,
+		out:             c.out,
+		config:          rc,
+		sessionStore:    assembly.SessionStore,
+		fileTracker:     assembly.FileTracker,
+		diffGenerator:   assembly.DiffGenerator,
+		planCtrl:        assembly.PlanCtrl,
+		memoryStore:     assembly.MemoryStore,
+		contextWindow:   assembly.ContextWindow,
+		worktreeManager: assembly.WorktreeManager,
 	}
 
 	// Create a shared ThemeManager so /theme can switch themes at runtime

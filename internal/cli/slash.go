@@ -45,6 +45,9 @@ type slashContext struct {
 	// "show" (default) expands them, "collapse" folds them to a summary, "hide"
 	// suppresses them entirely. Set by the /thinking slash command.
 	thinkingVisibility string
+	// worktreeManager manages git worktrees for parallel session isolation.
+	// It is nil when worktree isolation is not enabled in config.
+	worktreeManager *tools.WorktreeManager
 	// themeMgr enables runtime theme switching via the /theme slash command.
 	// It is nil in headless mode; the ThemeHandler degrades gracefully.
 	themeMgr *tui.ThemeManager
@@ -113,6 +116,9 @@ func buildSlashCommandRegistry() *SlashCommandRegistry {
 	// TUI display commands.
 	add(&ThinkingHandler{})
 	add(&ThemeHandler{})
+
+	// Git worktree management.
+	add(&WorktreeHandler{})
 
 	// Aliases.
 	reg.RegisterAlias("h", "help")
