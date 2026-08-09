@@ -137,10 +137,10 @@ func (m *loopDetectModel) Generate(ctx context.Context, msgs []Message, opts ...
 
 // Stream forwards chunks from the inner model in real-time via a goroutine.
 // After the stream completes, the accumulated content is checked for a loop
-// (post-hoc detection). If a loop is detected a warning is logged; the
-// chunks have already been forwarded so no error can be returned to the
-// caller, but the loop history is recorded so subsequent calls will detect
-// the loop and return an error.
+// (post-hoc detection). If a loop is detected, a warning is logged and a
+// final MessageChunk carrying the loop error is sent so the caller can
+// terminate the turn. The loop history is also recorded so subsequent calls
+// will detect the loop earlier.
 func (m *loopDetectModel) Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
 	ch, err := m.next.Stream(ctx, msgs, opts...)
 	if err != nil {
@@ -165,6 +165,10 @@ func (m *loopDetectModel) Stream(ctx context.Context, msgs []Message, opts ...Op
 				"op", "loopdetection.stream.post_hoc",
 				"error", loopErr.Error(),
 			)
+			select {
+			case out <- MessageChunk{Final: true, Error: loopErr}:
+			case <-ctx.Done():
+			}
 		}
 	}()
 	return out, nil

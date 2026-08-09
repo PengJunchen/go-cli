@@ -406,7 +406,7 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 		}
 
 		parser := NewDefaultSSEParser()
-		events, _ := parser.Parse(reader) //nolint:errcheck
+		events, _ := parser.Parse(ctx, reader) //nolint:errcheck
 
 		toolCalls, finishReason, usage := accumulateOpenAIStreamToolCalls(ctx, events, ch)
 		final := MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
@@ -497,7 +497,7 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 		}()
 
 		parser := NewDefaultSSEParser()
-		events, _ := parser.Parse(respBody) //nolint:errcheck
+		events, _ := parser.Parse(ctx, respBody) //nolint:errcheck
 
 		// Tool-call accumulation keyed by content block index.
 		tools := map[int]*claudeToolAccum{}
@@ -674,7 +674,7 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 		}()
 
 		parser := NewDefaultSSEParser()
-		events, _ := parser.Parse(respBody) //nolint:errcheck
+		events, _ := parser.Parse(ctx, respBody) //nolint:errcheck
 
 		var finishReason string
 		var toolCalls []ToolCall

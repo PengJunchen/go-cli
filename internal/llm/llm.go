@@ -94,6 +94,12 @@ type MessageChunk struct {
 	// for the generation as reported by the API. When the provider does not
 	// stream usage, it remains nil and callers fall back to estimation.
 	Usage *Usage `json:"usage,omitempty"`
+
+	// Error carries an error detected by middleware (e.g. loop detection)
+	// so it can be propagated to the caller through the chunk stream. It is
+	// never JSON-serialized. When non-nil, the caller should stop consuming
+	// the stream and return the error.
+	Error error `json:"-"`
 }
 
 // ModelInfo describes a model exposed by a provider.

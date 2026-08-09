@@ -72,9 +72,8 @@ func (m *outputGuardModel) Stream(ctx context.Context, msgs []llm.Message, opts 
 }
 
 // circuitBreakerModel wraps an llm.BaseChatModel with CircuitBreaker protection.
-// When the circuit is Open, Generate returns a fallback response instead of
-// calling the underlying model. Stream calls pass through directly (the breaker
-// guards the synchronous Generate path only).
+// When the circuit is Open, both Generate and Stream return a fallback response
+// instead of calling the underlying model.
 type circuitBreakerModel struct {
 	inner   llm.BaseChatModel
 	breaker production.CircuitBreaker
@@ -109,7 +108,33 @@ func (m *circuitBreakerModel) Generate(ctx context.Context, msgs []llm.Message, 
 }
 
 func (m *circuitBreakerModel) Stream(ctx context.Context, msgs []llm.Message, opts ...llm.Option) (<-chan llm.MessageChunk, error) {
-	return m.inner.Stream(ctx, msgs, opts...)
+	result, err := m.breaker.Execute(ctx, func() (any, error) {
+		return m.inner.Stream(ctx, msgs, opts...)
+	})
+	if err != nil {
+		if errors.Is(err, production.ErrCircuitOpen) {
+			slog.WarnContext(ctx, "circuit_breaker_open_fallback_stream",
+				"breaker", m.breaker.Name(),
+			)
+			ch := make(chan llm.MessageChunk, 1)
+			ch <- llm.MessageChunk{
+				Role:    llm.RoleAssistant,
+				Content: "Service temporarily unavailable, please retry later.",
+				Final:   true,
+			}
+			close(ch)
+			return ch, nil
+		}
+		return nil, err
+	}
+	if result == nil {
+		return nil, fmt.Errorf("circuit breaker: stream returned nil result")
+	}
+	innerCh, ok := result.(<-chan llm.MessageChunk)
+	if !ok {
+		return nil, fmt.Errorf("circuit breaker: unexpected stream result type %T", result)
+	}
+	return innerCh, nil
 }
 
 // telemetryModel wraps an llm.BaseChatModel to record LLM token usage metrics
