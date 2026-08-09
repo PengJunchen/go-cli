@@ -349,7 +349,7 @@ func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 		// SSE path: parse using the shared DefaultSSEParser and accumulate
 		// tool-call fragments via the shared helper.
 		parser := NewDefaultSSEParser()
-		events, _ := parser.Parse(reader) //nolint:errcheck
+		events, _ := parser.Parse(ctx, reader) //nolint:errcheck
 
 		toolCalls, finishReason, usage := accumulateOpenAIStreamToolCalls(ctx, events, ch)
 		final := MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}

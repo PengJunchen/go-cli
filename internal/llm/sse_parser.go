@@ -3,6 +3,7 @@ package llm
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"io"
 	"strings"
 )
@@ -19,7 +20,7 @@ type SSEEvent struct {
 
 // SSEParser parses Server-Sent Events from an io.Reader.
 type SSEParser interface {
-	Parse(reader io.Reader) (<-chan SSEEvent, error)
+	Parse(ctx context.Context, reader io.Reader) (<-chan SSEEvent, error)
 }
 
 // DefaultSSEParser implements SSEParser using bufio.Scanner. It follows the
@@ -36,10 +37,12 @@ func NewDefaultSSEParser() *DefaultSSEParser {
 	return &DefaultSSEParser{}
 }
 
-// Parse reads SSE events from reader and sends them to the returned unbuffered
+// Parse reads SSE events from reader and sends them to the returned buffered
 // channel. The channel is closed when the reader is exhausted. The returned
-// error is always nil; malformed lines are silently skipped.
-func (p *DefaultSSEParser) Parse(reader io.Reader) (<-chan SSEEvent, error) {
+// error is always nil; malformed lines are silently skipped. Parse respects
+// ctx: when ctx is canceled the goroutine stops scanning and closes the
+// channel promptly.
+func (p *DefaultSSEParser) Parse(ctx context.Context, reader io.Reader) (<-chan SSEEvent, error) {
 	ch := make(chan SSEEvent, 4)
 
 	go func() {
@@ -55,15 +58,21 @@ func (p *DefaultSSEParser) Parse(reader io.Reader) (<-chan SSEEvent, error) {
 			if eventType == "" && len(dataLines) == 0 {
 				return
 			}
-			ch <- SSEEvent{
-				Type: eventType,
-				Data: strings.Join(dataLines, "\n"),
+			select {
+			case ch <- SSEEvent{Type: eventType, Data: strings.Join(dataLines, "\n")}:
+			case <-ctx.Done():
+				return
 			}
 			eventType = ""
 			dataLines = dataLines[:0]
 		}
 
 		for scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
 			line := scanner.Text()
 
 			// A blank line dispatches the accumulated event.

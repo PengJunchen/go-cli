@@ -86,7 +86,7 @@ func TestET_Phase20_Streaming_AC1_SSEParser(t *testing.T) {
 		phase20SSEEvent("content_block_delta", `{"type":"content_block_delta"}`) +
 		phase20SSEData(`{"choices":[]}`)
 
-	ch, err := parser.Parse(strings.NewReader(input))
+	ch, err := parser.Parse(context.Background(), strings.NewReader(input))
 	require.NoError(t, err)
 
 	var events []llm.SSEEvent

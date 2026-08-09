@@ -118,7 +118,7 @@ func TestET_Phase20_CrossScenario(t *testing.T) {
 		// Parse SSE stream concurrently.
 		go func() {
 			defer wg.Done()
-			ch, err := parser.Parse(strings.NewReader(sseInput))
+			ch, err := parser.Parse(ctx, strings.NewReader(sseInput))
 			sseErr = err
 			if err == nil {
 				for e := range ch {
