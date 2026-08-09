@@ -42,6 +42,33 @@ func assertSpanEventually(t testing.TB, exp *mock.MockTraceExporter, name string
 	t.Fatalf("expected span %q not found", name)
 }
 
+// findSpanEventually waits (briefly) for an asynchronously exported span with
+// the given name and returns it, so callers can assert on its attributes.
+func findSpanEventually(t testing.TB, exp *mock.MockTraceExporter, name string) tracing.SpanData {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, s := range exp.Spans() {
+			if s.Name == name {
+				return s
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("expected span %q not found", name)
+	return tracing.SpanData{}
+}
+
+// spanAttributeKeys returns the set of attribute keys on a span for quick
+// containment checks in tests.
+func spanAttributeKeys(s tracing.SpanData) map[string]bool {
+	keys := make(map[string]bool, len(s.Attributes))
+	for _, a := range s.Attributes {
+		keys[a.Key] = true
+	}
+	return keys
+}
+
 // tracedEstimator is a convenience for tests that need a real estimator.
 func tracedEstimator() *HeuristicTokenEstimator {
 	return NewHeuristicTokenEstimator()

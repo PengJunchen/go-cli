@@ -30,6 +30,7 @@ type UnifiedCompactor struct {
 	summary       Compactor
 	truncating    Compactor
 	triggerReason string
+	evaluator     QualityEvaluator
 
 	lastStrategy Strategy
 }
@@ -62,6 +63,14 @@ func WithTruncating(c Compactor) UnifiedCompactorOption {
 // was requested (for example threshold|overflow|manual).
 func WithTriggerReason(reason string) UnifiedCompactorOption {
 	return func(u *UnifiedCompactor) { u.triggerReason = reason }
+}
+
+// WithQualityEvaluator wires a QualityEvaluator that runs after a strategy
+// succeeds, emitting coverage/info_loss/compression_ratio to a child
+// "compaction.quality" span and to slog. When nil (the default) quality
+// evaluation is skipped, so the change is safe to roll out gradually.
+func WithQualityEvaluator(evaluator QualityEvaluator) UnifiedCompactorOption {
+	return func(u *UnifiedCompactor) { u.evaluator = evaluator }
 }
 
 // NewUnifiedCompactor returns a UnifiedCompactor with sensible defaults: a real
@@ -119,7 +128,7 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 		span.AddEvent("trying_micro")
 		result, err := u.micro.Compact(sctx, items, maxTokens, estimator)
 		if err == nil {
-			return u.finish(logger, span, items, maxTokens, estimator, result, StrategyMicro), nil
+			return u.finish(sctx, logger, span, items, maxTokens, estimator, result, StrategyMicro), nil
 		}
 		logger.Debug("compaction.unified.escalate", "from", "micro", "err", err)
 	}
@@ -130,7 +139,7 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 		span.AddEvent("trying_summary")
 		result, err := u.summary.Compact(sctx, items, maxTokens, estimator)
 		if err == nil {
-			return u.finish(logger, span, items, maxTokens, estimator, result, StrategySummary), nil
+			return u.finish(sctx, logger, span, items, maxTokens, estimator, result, StrategySummary), nil
 		}
 		logger.Debug("compaction.unified.escalate", "from", "summary", "err", err)
 	}
@@ -140,7 +149,7 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 		span.AddEvent("trying_truncating")
 		result, err := u.truncating.Compact(sctx, items, maxTokens, estimator)
 		if err == nil {
-			return u.finish(logger, span, items, maxTokens, estimator, result, StrategyTruncating), nil
+			return u.finish(sctx, logger, span, items, maxTokens, estimator, result, StrategyTruncating), nil
 		}
 		return nil, err
 	}
@@ -150,9 +159,9 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 	return nil, ErrRequiresTruncating
 }
 
-// finish records the winning strategy, emits the result attributes, and returns
-// the compacted items.
-func (u *UnifiedCompactor) finish(logger *slog.Logger, span tracing.TraceSpan, items []TurnItem, maxTokens int, estimator TokenEstimator, result []TurnItem, strategy Strategy) []TurnItem {
+// finish records the winning strategy, emits the result attributes, runs the
+// quality evaluator (when configured), and returns the compacted items.
+func (u *UnifiedCompactor) finish(ctx context.Context, logger *slog.Logger, span tracing.TraceSpan, items []TurnItem, maxTokens int, estimator TokenEstimator, result []TurnItem, strategy Strategy) []TurnItem {
 	u.setLastStrategy(strategy)
 
 	after := estimateTokens(result, estimator)
@@ -168,5 +177,21 @@ func (u *UnifiedCompactor) finish(logger *slog.Logger, span tracing.TraceSpan, i
 		"tokens_in", estimateTokens(items, estimator),
 		"tokens_out", after,
 		"max_tokens", maxTokens)
+
+	// Quality evaluation is opt-in. The evaluator creates its own
+	// "compaction.quality" child span recording coverage/info_loss/
+	// compression_ratio, so here we only invoke it and log the result.
+	if u.evaluator != nil {
+		metrics, err := u.evaluator.Evaluate(ctx, items, result)
+		if err != nil {
+			logger.Warn("compaction.quality.failed", "strategy", strategy.String(), "err", err)
+		} else if metrics != nil {
+			logger.Info("compaction.quality.metrics",
+				"strategy", strategy.String(),
+				"coverage", metrics.Coverage,
+				"info_loss", metrics.InfoLoss,
+				"compression_ratio", metrics.CompressionRatio)
+		}
+	}
 	return result
 }

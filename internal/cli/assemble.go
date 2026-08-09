@@ -1195,25 +1195,42 @@ func (s *assembleState) assembleMiddleware() {
 // assembleCompactor creates the compaction components and wires mid-turn
 // compaction into the loop agent.
 func (s *assembleState) assembleCompactor() error {
-	compactorFactory := compaction.NewDefaultCompactorFactory()
+	// The estimator is needed both for the quality evaluator and the
+	// compactor adapter, so build it before the factory.
+	s.estimator = compaction.NewUnicodeTokenEstimator()
+
+	qualityEvaluator := compaction.NewDefaultQualityEvaluator(s.estimator)
+
 	strategy := "unified"
 	if s.rc != nil && s.rc.Compaction.Strategy != "" {
 		strategy = s.rc.Compaction.Strategy
 	}
+
+	// When a small model is available, inject its summarizer through the
+	// factory rather than bypassing it, so the factory owns compactor
+	// construction for every strategy.
+	var factoryOpts []compaction.DefaultCompactorFactoryOption
+	if s.smallModel != nil && (strategy == "" || strategy == "unified" || strategy == "micro_first") {
+		summarizer := &llmModelSummarizer{model: s.smallModel}
+		factoryOpts = append(factoryOpts, compaction.WithFactorySummarizer(summarizer))
+		s.logger.Info("assemble_compaction_small_model_wired")
+	}
+	compactorFactory := compaction.NewDefaultCompactorFactory(factoryOpts...)
+
 	compactor, err := compactorFactory.Create(strategy)
 	if err != nil {
 		return fmt.Errorf("assemble: create compactor: %w", err)
 	}
-	if s.smallModel != nil && (strategy == "" || strategy == "unified" || strategy == "micro_first") {
-		summarizer := &llmModelSummarizer{model: s.smallModel}
-		summaryCompactor := compaction.NewSummaryCompactor(summarizer)
-		compactor = compaction.NewUnifiedCompactor(
-			compaction.WithSummary(summaryCompactor),
-		)
-		s.logger.Info("assemble_compaction_small_model_wired")
+
+	// Inject the quality evaluator into the UnifiedCompactor. The option is a
+	// closure over *UnifiedCompactor, so it can be applied to an existing
+	// instance. For non-unified strategies the assertion fails and evaluation
+	// is skipped, which is the desired behaviour.
+	if uc, ok := compactor.(*compaction.UnifiedCompactor); ok {
+		compaction.WithQualityEvaluator(qualityEvaluator)(uc)
 	}
+
 	s.compactor = compactor
-	s.estimator = compaction.NewUnicodeTokenEstimator()
 	s.midTurn = compaction.NewMidTurnCompact()
 	s.reg.RegisterCompactor(&compactorAdapter{inner: s.compactor, estimator: s.estimator})
 	s.reg.RegisterTokenEstimator(&tokenEstimatorAdapter{inner: s.estimator})
