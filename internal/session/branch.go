@@ -92,20 +92,23 @@ func (s *JSONLBranchStore) ensureLoaded() error {
 	if err := s.loadLocked(); err != nil {
 		return err
 	}
-	// Mark entries as loaded immediately so that a failed file open below
-	// does not cause loadLocked to run again (and duplicate entries) on retry.
-	s.loaded = true
 	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, filePerm)
 	if err != nil {
 		return fmt.Errorf("session: open branch store file: %w", err)
 	}
 	s.file = f
+	s.loaded = true
 	return nil
 }
 
 // loadLocked reads existing JSONL lines into memory. It must be called with
 // s.mu held.
 func (s *JSONLBranchStore) loadLocked() error {
+	// Reset entries so a retry after a failed file-open does not duplicate
+	// them. This is safe because loadLocked is only called from ensureLoaded
+	// (with s.mu held) and no entries can exist before the first successful
+	// ensureLoaded.
+	s.entries = s.entries[:0]
 	f, err := os.Open(s.path)
 	if err != nil {
 		if os.IsNotExist(err) {

@@ -210,14 +210,12 @@ func (s *JSONLSessionStore) ensureLoaded() error {
 	if err := s.loadEntriesLocked(); err != nil {
 		return err
 	}
-	// Mark entries as loaded immediately so that a failed file open below
-	// does not cause loadEntriesLocked to run again on retry.
-	s.loaded = true
 	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, filePerm)
 	if err != nil {
 		return fmt.Errorf("session: open store file: %w", err)
 	}
 	s.file = f
+	s.loaded = true
 	return nil
 }
 

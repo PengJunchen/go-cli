@@ -27,6 +27,7 @@ type Savepoint struct {
 // It is safe for concurrent use.
 type PendingSessionWrites struct {
 	mu      sync.Mutex
+	flushMu sync.Mutex // serializes flush operations to prevent duplicate writes
 	pending []SessionWrite
 	flushed int
 }
@@ -88,8 +89,12 @@ func (p *PendingSessionWrites) Flush(ctx context.Context, store SessionStore) er
 	if store == nil {
 		return fmt.Errorf("session: nil store")
 	}
+	p.flushMu.Lock()
+	defer p.flushMu.Unlock()
+
 	p.mu.Lock()
-	writes := p.pending
+	writes := make([]SessionWrite, len(p.pending))
+	copy(writes, p.pending)
 	p.mu.Unlock()
 
 	for _, w := range writes {
@@ -108,7 +113,9 @@ func (p *PendingSessionWrites) Flush(ctx context.Context, store SessionStore) er
 	p.flushed += len(writes)
 	// Remove only the flushed prefix; items enqueued concurrently
 	// between the two lock acquisitions must be preserved.
-	p.pending = p.pending[len(writes):]
+	if len(writes) <= len(p.pending) {
+		p.pending = p.pending[len(writes):]
+	}
 	p.mu.Unlock()
 
 	slog.Info("session.pending_writes.flush",
@@ -120,10 +127,13 @@ func (p *PendingSessionWrites) Flush(ctx context.Context, store SessionStore) er
 // FlushToSavepoint flushes only the entries that were pending at the time the
 // savepoint was created. Entries enqueued after the savepoint remain in the
 // buffer.
-func (p *PendingSessionWrites) FlushToSavepoint(sp Savepoint, store SessionStore) error {
+func (p *PendingSessionWrites) FlushToSavepoint(ctx context.Context, sp Savepoint, store SessionStore) error {
 	if store == nil {
 		return fmt.Errorf("session: nil store")
 	}
+	p.flushMu.Lock()
+	defer p.flushMu.Unlock()
+
 	p.mu.Lock()
 	if sp.index > len(p.pending) {
 		sp.index = len(p.pending)
@@ -134,7 +144,7 @@ func (p *PendingSessionWrites) FlushToSavepoint(sp Savepoint, store SessionStore
 
 	for _, w := range writes {
 		entry := w.Entry
-		if err := store.Append(context.Background(), &entry); err != nil {
+		if err := store.Append(ctx, &entry); err != nil {
 			slog.Error("session.pending_writes.flush_to_savepoint",
 				"error_type", "append_failed",
 				"entry_id", w.Entry.ID,
@@ -147,7 +157,9 @@ func (p *PendingSessionWrites) FlushToSavepoint(sp Savepoint, store SessionStore
 	p.mu.Lock()
 	p.flushed += len(writes)
 	// Remove the flushed prefix from the pending buffer.
-	p.pending = p.pending[sp.index:]
+	if sp.index <= len(p.pending) {
+		p.pending = p.pending[sp.index:]
+	}
 	p.mu.Unlock()
 
 	slog.Info("session.pending_writes.flush_to_savepoint",
