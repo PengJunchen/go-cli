@@ -83,8 +83,9 @@ func (m *failoverModel) orderedModels() []BaseChatModel {
 }
 
 // Generate tries each model in order, returning the first successful response.
-// If all models fail it returns the last error. Each failover attempt is
-// traced at debug level.
+// If all models fail it returns the last error. Fatal errors (auth,
+// permission) short-circuit: the error is returned immediately without trying
+// fallbacks. Each failover attempt is traced at debug level.
 func (m *failoverModel) Generate(ctx context.Context, msgs []Message, opts ...Option) (*Message, error) {
 	models := m.orderedModels()
 	var lastErr error
@@ -94,6 +95,10 @@ func (m *failoverModel) Generate(ctx context.Context, msgs []Message, opts ...Op
 			return resp, nil
 		}
 		lastErr = err
+		// Fatal errors (auth, permission) should not trigger a fallback.
+		if classifyError(err) == categoryFatal {
+			return nil, err
+		}
 		if i < len(models)-1 {
 			m.logger.Debug("failover.generate.failed_trying_next",
 				"index", i, "error", err)
@@ -104,8 +109,9 @@ func (m *failoverModel) Generate(ctx context.Context, msgs []Message, opts ...Op
 
 // Stream tries each model in order, returning the first successful stream.
 // Only the initial Stream call error triggers a fallback; errors that occur
-// mid-stream (after a channel has been returned) are not retried. Each
-// failover attempt is traced at debug level.
+// mid-stream (after a channel has been returned) are not retried. Fatal errors
+// (auth, permission) short-circuit: the error is returned immediately without
+// trying fallbacks. Each failover attempt is traced at debug level.
 func (m *failoverModel) Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
 	models := m.orderedModels()
 	var lastErr error
@@ -115,6 +121,10 @@ func (m *failoverModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 			return ch, nil
 		}
 		lastErr = err
+		// Fatal errors (auth, permission) should not trigger a fallback.
+		if classifyError(err) == categoryFatal {
+			return nil, err
+		}
 		if i < len(models)-1 {
 			m.logger.Debug("failover.stream.failed_trying_next",
 				"index", i, "error", err)

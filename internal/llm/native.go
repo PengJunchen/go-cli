@@ -195,7 +195,7 @@ func (m *nativeChatModel) generate(ctx context.Context, msgs []Message, opts ...
 		if rerr != nil {
 			return nil, fmt.Errorf("llm: read error response: %w", rerr)
 		}
-		return nil, fmt.Errorf("llm: provider returned %s: %s", resp.Status, strings.TrimSpace(string(payload)))
+		return nil, newProviderError(resp.StatusCode, m.provider, string(payload))
 	}
 
 	data, rerr := io.ReadAll(resp.Body)
@@ -255,7 +255,7 @@ func (m *nativeChatModel) streamRoundTrip(ctx context.Context, body []byte, endp
 		if rerr != nil {
 			return nil, fmt.Errorf("llm: read error response: %w", rerr)
 		}
-		return nil, fmt.Errorf("llm: provider returned %s: %s", resp.Status, strings.TrimSpace(string(payload)))
+		return nil, newProviderError(resp.StatusCode, m.provider, string(payload))
 	}
 	return resp.Body, nil
 }

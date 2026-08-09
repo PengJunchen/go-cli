@@ -140,3 +140,91 @@ func TestFailoverModelMiddleware_StreamAllFail(t *testing.T) {
 	require.Error(t, err)
 	assert.Nil(t, ch)
 }
+
+// TestFailoverModelMiddleware_FatalErrorNoFallback verifies that a fatal error
+// (ProviderError with ErrTypeAuth) from the primary model short-circuits: the
+// fallback model is NOT consulted and the original error is returned
+// immediately. This applies to both Generate and Stream.
+func TestFailoverModelMiddleware_FatalErrorNoFallback(t *testing.T) {
+	authErr := &ProviderError{
+		StatusCode: 401,
+		ErrorType:  ErrTypeAuth,
+		Provider:   "primary",
+		Message:    "invalid api key",
+	}
+
+	t.Run("generate", func(t *testing.T) {
+		primary := &fbMockModel{genErr: authErr}
+		fb1 := &fbMockModel{genContent: "fallback-ok"}
+		mw := NewFailoverModelMiddleware(WithFallbackModels(fb1))
+		wrapped := mw.WrapModel(primary)
+
+		resp, err := wrapped.Generate(context.Background(), nil)
+		require.Error(t, err)
+		assert.Nil(t, resp)
+		// Fatal error must short-circuit: fallback not called.
+		assert.Equal(t, 1, primary.genCalls)
+		assert.Equal(t, 0, fb1.genCalls, "fallback must not be called on fatal auth error")
+		// The returned error should be the original ProviderError.
+		var pe *ProviderError
+		assert.True(t, errors.As(err, &pe))
+		assert.Equal(t, ErrTypeAuth, pe.ErrorType)
+	})
+
+	t.Run("stream", func(t *testing.T) {
+		primary := &fbMockModel{streamErr: authErr}
+		fb1 := &fbMockModel{streamText: "fallback-stream"}
+		mw := NewFailoverModelMiddleware(WithFallbackModels(fb1))
+		wrapped := mw.WrapModel(primary)
+
+		ch, err := wrapped.Stream(context.Background(), nil)
+		require.Error(t, err)
+		assert.Nil(t, ch)
+		assert.Equal(t, 1, primary.streamCalls)
+		assert.Equal(t, 0, fb1.streamCalls, "fallback must not be called on fatal auth error")
+	})
+}
+
+// TestFailoverModelMiddleware_OverflowFatalNoFallback verifies that an overflow
+// error (also classified as fatal) short-circuits failover, since retrying the
+// same oversized payload on a fallback would likely produce the same error.
+func TestFailoverModelMiddleware_OverflowFatalNoFallback(t *testing.T) {
+	overflowErr := &ProviderError{
+		StatusCode: 400,
+		ErrorType:  ErrTypeOverflow,
+		Provider:   "primary",
+		Message:    "context_length_exceeded",
+	}
+	primary := &fbMockModel{genErr: overflowErr}
+	fb1 := &fbMockModel{genContent: "fallback-ok"}
+	mw := NewFailoverModelMiddleware(WithFallbackModels(fb1))
+	wrapped := mw.WrapModel(primary)
+
+	resp, err := wrapped.Generate(context.Background(), nil)
+	require.Error(t, err)
+	assert.Nil(t, resp)
+	assert.Equal(t, 1, primary.genCalls)
+	assert.Equal(t, 0, fb1.genCalls, "fallback must not be called on fatal overflow error")
+}
+
+// TestFailoverModelMiddleware_TransientErrorTriggersFallback verifies that a
+// transient (non-fatal) ProviderError still triggers fallback, contrasting with
+// the fatal short-circuit behavior.
+func TestFailoverModelMiddleware_TransientErrorTriggersFallback(t *testing.T) {
+	serverErr := &ProviderError{
+		StatusCode: 500,
+		ErrorType:  ErrTypeServer,
+		Provider:   "primary",
+		Message:    "internal error",
+	}
+	primary := &fbMockModel{genErr: serverErr}
+	fb1 := &fbMockModel{genContent: "fallback-ok"}
+	mw := NewFailoverModelMiddleware(WithFallbackModels(fb1))
+	wrapped := mw.WrapModel(primary)
+
+	resp, err := wrapped.Generate(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, "fallback-ok", resp.Content)
+	assert.Equal(t, 1, primary.genCalls)
+	assert.Equal(t, 1, fb1.genCalls, "fallback must be called on transient server error")
+}
