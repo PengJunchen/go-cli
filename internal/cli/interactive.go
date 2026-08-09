@@ -177,23 +177,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		}
 		sessionHandler = session.NewSessionSlashHandler(sessionTree, assembly.SessionStore)
 		sessionHandler.OnResume = func(ctx context.Context, entries []session.SessionEntry) error {
-			// Convert SessionEntry to AgentMessage and replace agent history.
-			msgs := make([]core.AgentMessage, 0, len(entries))
-			for _, e := range entries {
-				var role string
-				switch e.Type {
-				case session.EntryTypeUser:
-					role = "user"
-				case session.EntryTypeAssistant:
-					role = "assistant"
-				case session.EntryTypeSystem:
-					role = "system"
-				default:
-					continue // skip tool/compaction entries
-				}
-				msgs = append(msgs, core.AgentMessage{Role: role, Content: e.Content, ContentBlocks: e.ContentBlocks, ToolCalls: e.ToolCalls, ToolCallID: e.ToolCallID, ToolName: e.ToolName})
-			}
-			assembly.Agent.SetHistory(msgs)
+			assembly.Agent.SetHistory(session.EntriesToAgentMessages(entries))
 			return nil
 		}
 	}

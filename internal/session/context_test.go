@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/verify"
 )
 
@@ -152,4 +153,30 @@ func TestTokenEstimateMixed(t *testing.T) {
 
 func TestTokenEstimateEmpty(t *testing.T) {
 	assert.Equal(t, 0, estimateTokens(""))
+}
+
+func TestEntriesToAgentMessages(t *testing.T) {
+	entries := []SessionEntry{
+		{ID: "1", Type: EntryTypeUser, Content: "hello"},
+		{ID: "2", Type: EntryTypeAssistant, Content: "hi there", ToolCalls: []llm.ToolCall{{ID: "tc1", Name: "bash"}}, ToolCallID: "tc1", ToolName: "bash"},
+		{ID: "3", Type: EntryTypeTool, Content: "tool result"},
+		{ID: "4", Type: EntryTypeCompaction, Summary: "compacted"},
+		{ID: "5", Type: EntryTypeSystem, Content: "system note"},
+	}
+	msgs := EntriesToAgentMessages(entries)
+	assert.Len(t, msgs, 3)
+	assert.Equal(t, "user", msgs[0].Role)
+	assert.Equal(t, "hello", msgs[0].Content)
+	assert.Equal(t, "assistant", msgs[1].Role)
+	assert.Equal(t, "hi there", msgs[1].Content)
+	assert.Len(t, msgs[1].ToolCalls, 1)
+	assert.Equal(t, "tc1", msgs[1].ToolCallID)
+	assert.Equal(t, "bash", msgs[1].ToolName)
+	assert.Equal(t, "system", msgs[2].Role)
+	assert.Equal(t, "system note", msgs[2].Content)
+}
+
+func TestEntriesToAgentMessages_Empty(t *testing.T) {
+	msgs := EntriesToAgentMessages(nil)
+	assert.Empty(t, msgs)
 }
