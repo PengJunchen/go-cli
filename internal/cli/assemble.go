@@ -833,7 +833,61 @@ func (s *assembleState) assembleExtensions() {
 		})
 	}
 
+	// Load user-configured shell hooks from .go-cli/hooks.yaml.
+	hooksPath := filepath.Join(s.gitCwd, ".go-cli", "hooks.yaml")
+	if _, statErr := os.Stat(hooksPath); statErr == nil {
+		s.loadShellHooks(hooksPath)
+	}
+
 	s.hookChain = core.NewHookChain(s.extHooks...)
+}
+
+// loadShellHooks reads a hooks.yaml file, parses shell hook definitions, and
+// appends a HookManager to s.extHooks.
+func (s *assembleState) loadShellHooks(path string) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		s.logger.Warn("assemble_hooks_read_failed", "path", path, "err", err)
+		return
+	}
+	var hooksCfg config.HooksConfig
+	if err := config.UnmarshalConfig(data, config.ConfigFormatYAML, &hooksCfg); err != nil {
+		s.logger.Warn("assemble_hooks_parse_failed", "path", path, "err", err)
+		return
+	}
+	var shellHooks []core.HookSystem
+	for i, hc := range hooksCfg.Hooks {
+		event, eventErr := parseHookEvent(hc.Event)
+		if eventErr != nil {
+			s.logger.Warn("assemble_hook_event_unknown", "index", i, "event", hc.Event, "err", eventErr)
+			continue
+		}
+		timeoutStr := hc.Timeout
+		if timeoutStr == "" {
+			timeoutStr = "10s"
+		}
+		timeout, timeoutErr := time.ParseDuration(timeoutStr)
+		if timeoutErr != nil {
+			s.logger.Warn("assemble_hook_timeout_parse_failed", "index", i, "timeout", hc.Timeout, "err", timeoutErr)
+			timeout = 10 * time.Second
+		}
+		name := fmt.Sprintf("shell-hook-%d", i)
+		shellHooks = append(shellHooks, core.NewShellHook(name, event, hc.Command, timeout))
+	}
+	if len(shellHooks) > 0 {
+		s.extHooks = append(s.extHooks, core.NewHookManager(shellHooks...))
+	}
+	s.logger.Info("assemble_hooks_ready", "path", path, "count", len(shellHooks))
+}
+
+// parseHookEvent converts a config event string to a core.HookEvent.
+func parseHookEvent(s string) (core.HookEvent, error) {
+	switch core.HookEvent(s) {
+	case core.EventPreToolUse, core.EventPostToolUse, core.EventSessionStart, core.EventSessionEnd:
+		return core.HookEvent(s), nil
+	default:
+		return "", fmt.Errorf("unknown hook event: %q", s)
+	}
 }
 
 // assembleApproval wires the approval middleware and mutation queue, wrapping

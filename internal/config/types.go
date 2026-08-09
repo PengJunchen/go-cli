@@ -23,6 +23,7 @@ type Config struct {
 	LSP           LSPConfig           `json:"lsp"`
 	Remote        RemoteConfig        `json:"remote"`
 	Extensions    ExtensionsConfig    `json:"extensions"`
+	Hooks         HooksConfig         `json:"hooks" yaml:"hooks"`
 	ACP           ACPConfig           `json:"acp"`
 	Git           GitConfig           `json:"git"`
 	ModelCycler   ModelCyclerConfig   `json:"model_cycler"`
@@ -320,6 +321,19 @@ type ExtensionsConfig struct {
 	// Enabled controls whether extension loading is active.
 	// Pointer allows explicit false override via env/flag.
 	Enabled *bool `json:"enabled"`
+}
+
+// HooksConfig holds user-configured shell hooks loaded from
+// .go-cli/hooks.yaml.
+type HooksConfig struct {
+	Hooks []HookConfig `json:"hooks" yaml:"hooks"`
+}
+
+// HookConfig describes a single shell hook.
+type HookConfig struct {
+	Event   string `json:"event" yaml:"event"`     // pre_tool_use, post_tool_use, session_start, session_end
+	Command string `json:"command" yaml:"command"` // shell command to execute
+	Timeout string `json:"timeout" yaml:"timeout"` // duration string (e.g. "10s"), default "10s"
 }
 
 // ACPConfig controls Agent Communication Protocol (ACP) multi-agent
