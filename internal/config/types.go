@@ -5,29 +5,30 @@ import "time"
 // Config is the root application configuration. It is deeply nested into
 // sections mirroring the go-cli configuration file / environment schema.
 type Config struct {
-	Provider    ProviderConfig    `json:"provider"`
-	Model       ModelConfig       `json:"model"`
-	SmallModel  SmallModelConfig  `json:"small_model"`
-	Agent       AgentConfig       `json:"agent"`
-	Tools       ToolsConfig       `json:"tools"`
-	Tracing     TracingConfig     `json:"tracing"`
-	Approval    ApprovalConfig    `json:"approval"`
-	Session     SessionConfig     `json:"session"`
-	Compaction  CompactionConfig  `json:"compaction"`
-	MCP         MCPConfig         `json:"mcp"`
-	Skill       SkillConfig       `json:"skill"`
-	Commands    CommandsConfig    `json:"commands"`
-	WebSearch   WebSearchConfig   `json:"web_search"`
-	Production  ProductionConfig  `json:"production"`
-	Sandbox     SandboxConfig     `json:"sandbox"`
-	LSP         LSPConfig         `json:"lsp"`
-	Remote      RemoteConfig      `json:"remote"`
-	Extensions  ExtensionsConfig  `json:"extensions"`
-	ACP         ACPConfig         `json:"acp"`
-	Git         GitConfig         `json:"git"`
-	ModelCycler ModelCyclerConfig `json:"model_cycler"`
-	History     HistoryConfig     `json:"history"`
-	TUI         TUIConfig         `json:"tui" yaml:"tui"`
+	Provider      ProviderConfig      `json:"provider"`
+	Model         ModelConfig         `json:"model"`
+	SmallModel    SmallModelConfig    `json:"small_model"`
+	Agent         AgentConfig         `json:"agent"`
+	Tools         ToolsConfig         `json:"tools"`
+	Tracing       TracingConfig       `json:"tracing"`
+	Approval      ApprovalConfig      `json:"approval"`
+	Session       SessionConfig       `json:"session"`
+	Compaction    CompactionConfig    `json:"compaction"`
+	MCP           MCPConfig           `json:"mcp"`
+	Skill         SkillConfig         `json:"skill"`
+	Commands      CommandsConfig      `json:"commands"`
+	WebSearch     WebSearchConfig     `json:"web_search"`
+	Production    ProductionConfig    `json:"production"`
+	Sandbox       SandboxConfig       `json:"sandbox"`
+	LSP           LSPConfig           `json:"lsp"`
+	Remote        RemoteConfig        `json:"remote"`
+	Extensions    ExtensionsConfig    `json:"extensions"`
+	ACP           ACPConfig           `json:"acp"`
+	Git           GitConfig           `json:"git"`
+	ModelCycler   ModelCyclerConfig   `json:"model_cycler"`
+	ModelRegistry ModelRegistryConfig `json:"model_registry"`
+	History       HistoryConfig       `json:"history"`
+	TUI           TUIConfig           `json:"tui" yaml:"tui"`
 
 	verbose bool
 }
@@ -391,6 +392,15 @@ type ModelEntry struct {
 	// (chat, summary, title, extraction). When non-empty, the cycler
 	// prefers this model for calls with a matching task type.
 	TaskType string `json:"task_type,omitempty"`
+}
+
+// ModelRegistryConfig controls the models.dev model registry integration. When
+// Enabled is true, a ModelsDevRegistry is created and refreshed on startup so
+// model metadata (pricing, context window, modality) is available to the CLI.
+type ModelRegistryConfig struct {
+	Enabled   bool   `json:"enabled"`
+	CachePath string `json:"cache_path,omitempty"`
+	TTLHours  int    `json:"ttl_hours,omitempty"`
 }
 
 // HistoryConfig controls REPL command history persistence.

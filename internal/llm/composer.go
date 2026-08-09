@@ -54,6 +54,7 @@ package llm
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sort"
 	"sync"
@@ -131,6 +132,7 @@ type ProviderSourceFunc func(context.Context) ([]ModelProvider, error)
 type composerOptions struct {
 	configSource    ProviderSourceFunc
 	extensionSource ProviderSourceFunc
+	modelRegistry   ModelRegistry
 }
 
 // ProviderComposerOption configures a DefaultProviderComposer.
@@ -163,6 +165,12 @@ func WithExtensionProviders(providers []ModelProvider) ProviderComposerOption {
 	})
 }
 
+// WithModelRegistry sets the ModelRegistry available to the composed
+// ProviderRegistry for lazy model metadata enrichment.
+func WithModelRegistry(reg ModelRegistry) ProviderComposerOption {
+	return func(o *composerOptions) { o.modelRegistry = reg }
+}
+
 // DefaultProviderComposer is the default ProviderComposer. It owns the
 // three-layer collection, the Extension > Config > Builtin priority resolution
 // and the "llm.provider_compose" trace span.
@@ -170,6 +178,7 @@ type DefaultProviderComposer struct {
 	name            string
 	configSource    ProviderSourceFunc
 	extensionSource ProviderSourceFunc
+	modelRegistry   ModelRegistry
 }
 
 // Compile-time assertion that DefaultProviderComposer satisfies ProviderComposer.
@@ -192,6 +201,7 @@ func NewDefaultProviderComposer(opts ...ProviderComposerOption) ProviderComposer
 		name:            "default-provider-composer",
 		configSource:    o.configSource,
 		extensionSource: o.extensionSource,
+		modelRegistry:   o.modelRegistry,
 	}
 }
 
@@ -251,6 +261,7 @@ func (d *DefaultProviderComposer) Compose(ctx context.Context) (*ProviderRegistr
 	winners := selectWinningProviders(entries)
 
 	reg := &ProviderRegistry{providers: map[string]ModelProvider{}}
+	reg.modelRegistry = d.modelRegistry
 	for _, winner := range winners {
 		// Winners are unique by name, so Register cannot fail; a failed
 		// registration is logged defensively.
@@ -276,6 +287,12 @@ func (d *DefaultProviderComposer) Compose(ctx context.Context) (*ProviderRegistr
 		"extension_count", len(extensionProviders),
 		"total_count", len(winners),
 	)
+	if d.modelRegistry != nil {
+		logger.Info("llm_provider_compose_model_registry_available",
+			"op", spanNameProviderCompose,
+			"registry_type", fmt.Sprintf("%T", d.modelRegistry),
+		)
+	}
 	return reg, nil
 }
 
