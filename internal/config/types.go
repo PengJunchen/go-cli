@@ -7,6 +7,7 @@ import "time"
 type Config struct {
 	Provider    ProviderConfig    `json:"provider"`
 	Model       ModelConfig       `json:"model"`
+	SmallModel  SmallModelConfig  `json:"small_model"`
 	Agent       AgentConfig       `json:"agent"`
 	Tools       ToolsConfig       `json:"tools"`
 	Tracing     TracingConfig     `json:"tracing"`
@@ -47,6 +48,19 @@ type ProviderConfig struct {
 // ModelConfig holds the default model selection and generation parameters.
 type ModelConfig struct {
 	Name        string  `json:"name"`
+	Temperature float64 `json:"temperature"`
+	MaxTokens   int     `json:"max_tokens"`
+}
+
+// SmallModelConfig holds settings for a lightweight model used for background
+// tasks (summaries, title generation, memory extraction). When Provider and
+// Model are empty, the small model is not built and all tasks fall back to the
+// primary model.
+type SmallModelConfig struct {
+	Provider    string  `json:"provider"`
+	APIKey      string  `json:"api_key"`
+	BaseURL     string  `json:"base_url"`
+	Model       string  `json:"model"`
 	Temperature float64 `json:"temperature"`
 	MaxTokens   int     `json:"max_tokens"`
 }
@@ -373,6 +387,10 @@ type ModelEntry struct {
 	Model string `json:"model"`
 	// Weight is used by the weighted and cost_priority strategies.
 	Weight int `json:"weight"`
+	// TaskType optionally tags this model for a specific task type
+	// (chat, summary, title, extraction). When non-empty, the cycler
+	// prefers this model for calls with a matching task type.
+	TaskType string `json:"task_type,omitempty"`
 }
 
 // HistoryConfig controls REPL command history persistence.

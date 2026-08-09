@@ -55,6 +55,10 @@ type ModelEntry struct {
 	Provider string // openai | claude | gemini
 	Model    string // model name
 	Weight   int    // weight for weighted strategy
+	// TaskType optionally tags this model for a specific task type
+	// (chat, summary, title, extraction). When non-empty, the cycler
+	// prefers this model for calls with a matching task type from context.
+	TaskType TaskType
 }
 
 // ModelCycler implements model rotation across multiple providers. It is
@@ -103,11 +107,21 @@ func (c *ModelCycler) WrapModel(next BaseChatModel) BaseChatModel {
 
 // selectModel returns the index of the selected model based on the configured
 // strategy. When session affinity is enabled and sessionID is non-empty, the
-// same sessionID always maps to the same model index.
-func (c *ModelCycler) selectModel(sessionID string) int {
+// same sessionID always maps to the same model index. When taskType is non-empty
+// and a model with a matching TaskType tag exists, that model is preferred
+// regardless of strategy or session affinity.
+func (c *ModelCycler) selectModel(sessionID string, taskType TaskType) int {
 	n := len(c.config.Models)
 	if n == 0 {
 		return 0
+	}
+	// Prefer a model explicitly tagged for the requested task type.
+	if taskType != "" && taskType != TaskTypeChat {
+		for i, m := range c.config.Models {
+			if m.TaskType == taskType {
+				return i
+			}
+		}
 	}
 	if c.config.SessionAffinity && sessionID != "" {
 		c.mu.Lock()
@@ -222,7 +236,8 @@ func (m *cycledModel) buildSelectedModel(ctx context.Context, idx int) (BaseChat
 // build failure or generation error it falls back to the primary model.
 func (m *cycledModel) Generate(ctx context.Context, msgs []Message, opts ...Option) (*Message, error) {
 	sessionID := sessionIDFromContext(ctx)
-	idx := m.cycler.selectModel(sessionID)
+	taskType := TaskTypeFromContext(ctx)
+	idx := m.cycler.selectModel(sessionID, taskType)
 
 	model, cleanup, err := m.buildSelectedModel(ctx, idx)
 	if err != nil {
@@ -247,7 +262,8 @@ func (m *cycledModel) Generate(ctx context.Context, msgs []Message, opts ...Opti
 // channel is returned without a wrapper.
 func (m *cycledModel) Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
 	sessionID := sessionIDFromContext(ctx)
-	idx := m.cycler.selectModel(sessionID)
+	taskType := TaskTypeFromContext(ctx)
+	idx := m.cycler.selectModel(sessionID, taskType)
 
 	model, cleanup, err := m.buildSelectedModel(ctx, idx)
 	if err != nil {

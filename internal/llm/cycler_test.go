@@ -28,9 +28,9 @@ func TestModelCycler_RoundRobin(t *testing.T) {
 		Models:   threeModels,
 		Strategy: StrategyRoundRobin,
 	})
-	assert.Equal(t, 0, c.selectModel(""))
-	assert.Equal(t, 1, c.selectModel(""))
-	assert.Equal(t, 2, c.selectModel(""))
+	assert.Equal(t, 0, c.selectModel("", TaskTypeChat))
+	assert.Equal(t, 1, c.selectModel("", TaskTypeChat))
+	assert.Equal(t, 2, c.selectModel("", TaskTypeChat))
 }
 
 // TestModelCycler_RoundRobin_WrapsAround verifies that the counter wraps back
@@ -42,11 +42,11 @@ func TestModelCycler_RoundRobin_WrapsAround(t *testing.T) {
 	})
 	// Exhaust one full cycle.
 	for i := 0; i < 3; i++ {
-		c.selectModel("")
+		c.selectModel("", TaskTypeChat)
 	}
 	// The next call should wrap to index 0.
-	assert.Equal(t, 0, c.selectModel(""))
-	assert.Equal(t, 1, c.selectModel(""))
+	assert.Equal(t, 0, c.selectModel("", TaskTypeChat))
+	assert.Equal(t, 1, c.selectModel("", TaskTypeChat))
 }
 
 // TestModelCycler_SessionAffinity_SameSession verifies that the same sessionID
@@ -57,9 +57,9 @@ func TestModelCycler_SessionAffinity_SameSession(t *testing.T) {
 		Strategy:        StrategyRoundRobin,
 		SessionAffinity: true,
 	})
-	first := c.selectModel("session-A")
+	first := c.selectModel("session-A", TaskTypeChat)
 	for i := 0; i < 10; i++ {
-		assert.Equal(t, first, c.selectModel("session-A"),
+		assert.Equal(t, first, c.selectModel("session-A", TaskTypeChat),
 			"session-A should always return the same model index")
 	}
 }
@@ -72,9 +72,9 @@ func TestModelCycler_SessionAffinity_DifferentSessions(t *testing.T) {
 		Strategy:        StrategyRoundRobin,
 		SessionAffinity: true,
 	})
-	idxA := c.selectModel("session-A")
-	idxB := c.selectModel("session-B")
-	idxC := c.selectModel("session-C")
+	idxA := c.selectModel("session-A", TaskTypeChat)
+	idxB := c.selectModel("session-B", TaskTypeChat)
+	idxC := c.selectModel("session-C", TaskTypeChat)
 
 	// With round-robin and three models, three new sessions should cover
 	// all three indices.
@@ -82,9 +82,9 @@ func TestModelCycler_SessionAffinity_DifferentSessions(t *testing.T) {
 	assert.Len(t, seen, 3, "three different sessions should map to three different indices")
 
 	// Repeated calls keep their original assignment.
-	assert.Equal(t, idxA, c.selectModel("session-A"))
-	assert.Equal(t, idxB, c.selectModel("session-B"))
-	assert.Equal(t, idxC, c.selectModel("session-C"))
+	assert.Equal(t, idxA, c.selectModel("session-A", TaskTypeChat))
+	assert.Equal(t, idxB, c.selectModel("session-B", TaskTypeChat))
+	assert.Equal(t, idxC, c.selectModel("session-C", TaskTypeChat))
 }
 
 // TestModelCycler_Weighted verifies that higher-weight models are selected
@@ -102,7 +102,7 @@ func TestModelCycler_Weighted(t *testing.T) {
 	const iterations = 10000
 	counts := make([]int, len(models))
 	for i := 0; i < iterations; i++ {
-		idx := c.selectModel("")
+		idx := c.selectModel("", TaskTypeChat)
 		counts[idx]++
 	}
 
@@ -126,7 +126,7 @@ func TestModelCycler_Weighted_AllZeroWeights(t *testing.T) {
 		Strategy: StrategyWeighted,
 	})
 	// Should not crash and should return valid indices.
-	idx := c.selectModel("")
+	idx := c.selectModel("", TaskTypeChat)
 	assert.GreaterOrEqual(t, idx, 0)
 	assert.Less(t, idx, len(models))
 }
@@ -135,8 +135,8 @@ func TestModelCycler_Weighted_AllZeroWeights(t *testing.T) {
 // crash and always returns 0.
 func TestModelCycler_EmptyConfig(t *testing.T) {
 	c := NewModelCycler(ModelCyclerConfig{})
-	assert.Equal(t, 0, c.selectModel(""))
-	assert.Equal(t, 0, c.selectModel("session-A"))
+	assert.Equal(t, 0, c.selectModel("", TaskTypeChat))
+	assert.Equal(t, 0, c.selectModel("session-A", TaskTypeChat))
 }
 
 // TestModelCycler_EmptyConfig_WithStrategy verifies that empty config is safe
@@ -144,7 +144,7 @@ func TestModelCycler_EmptyConfig(t *testing.T) {
 func TestModelCycler_EmptyConfig_WithStrategy(t *testing.T) {
 	for _, s := range []string{StrategyRoundRobin, StrategyWeighted, StrategyCostPriority} {
 		c := NewModelCycler(ModelCyclerConfig{Strategy: s})
-		assert.Equal(t, 0, c.selectModel(""), "strategy %s should return 0 for empty config", s)
+		assert.Equal(t, 0, c.selectModel("", TaskTypeChat), "strategy %s should return 0 for empty config", s)
 	}
 }
 
@@ -157,7 +157,7 @@ func TestModelCycler_SingleModel(t *testing.T) {
 	for _, s := range []string{StrategyRoundRobin, StrategyWeighted, StrategyCostPriority} {
 		c := NewModelCycler(ModelCyclerConfig{Models: models, Strategy: s})
 		for i := 0; i < 5; i++ {
-			assert.Equal(t, 0, c.selectModel(""),
+			assert.Equal(t, 0, c.selectModel("", TaskTypeChat),
 				"strategy %s should always return 0 for a single model", s)
 		}
 	}
@@ -177,7 +177,7 @@ func TestModelCycler_CostPriority(t *testing.T) {
 	})
 	// Model at index 1 has the highest weight (50), so it should always win.
 	for i := 0; i < 10; i++ {
-		assert.Equal(t, 1, c.selectModel(""))
+		assert.Equal(t, 1, c.selectModel("", TaskTypeChat))
 	}
 }
 
@@ -192,7 +192,7 @@ func TestModelCycler_CostPriority_Ties(t *testing.T) {
 		Models:   models,
 		Strategy: StrategyCostPriority,
 	})
-	assert.Equal(t, 0, c.selectModel(""))
+	assert.Equal(t, 0, c.selectModel("", TaskTypeChat))
 }
 
 // TestModelCycler_SessionAffinity_EmptySessionID verifies that an empty
@@ -204,9 +204,9 @@ func TestModelCycler_SessionAffinity_EmptySessionID(t *testing.T) {
 		SessionAffinity: true,
 	})
 	// With empty sessionID, round-robin should advance normally.
-	assert.Equal(t, 0, c.selectModel(""))
-	assert.Equal(t, 1, c.selectModel(""))
-	assert.Equal(t, 2, c.selectModel(""))
+	assert.Equal(t, 0, c.selectModel("", TaskTypeChat))
+	assert.Equal(t, 1, c.selectModel("", TaskTypeChat))
+	assert.Equal(t, 2, c.selectModel("", TaskTypeChat))
 	assert.Empty(t, c.sessions, "no sessions should be tracked for empty sessionIDs")
 }
 
