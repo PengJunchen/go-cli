@@ -112,8 +112,8 @@ func NewModelsDevRegistry(cachePath string, ttl time.Duration) *ModelsDevRegistr
 // Lookup returns enriched ModelInfo for the given provider and model ID. When
 // the registry has not yet been loaded, it lazily loads from cache or fetches
 // from the upstream.
-func (r *ModelsDevRegistry) Lookup(provider, model string) (ModelInfo, bool) {
-	_ = r.ensureLoaded(context.Background())
+func (r *ModelsDevRegistry) Lookup(ctx context.Context, provider, model string) (ModelInfo, bool) {
+	_ = r.ensureLoaded(ctx)
 
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -328,6 +328,14 @@ func (r *ModelsDevRegistry) toModelInfo(providerID string, m modelsDevModel) Mod
 		InputPrice:      m.Cost.Input,
 		OutputPrice:     m.Cost.Output,
 		Modality:        modalityString(m.Modalities),
+		Reasoning:       m.Reasoning,
+		ToolCall:        m.ToolCall,
+		StructuredOutput: m.StructuredOutput,
+		CacheReadPrice:  m.Cost.CacheRead,
+		CacheWritePrice: m.Cost.CacheWrite,
+		InputTokenLimit: m.Limit.Input,
+		Knowledge:       m.Knowledge,
+		ReleaseDate:     m.ReleaseDate,
 	}
 	if p, ok := r.data[providerID]; ok {
 		info.APIBase = p.API

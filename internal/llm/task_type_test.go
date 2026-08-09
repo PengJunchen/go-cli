@@ -133,3 +133,133 @@ func TestCycledModel_Generate_TaskTypeContextPropagation(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "primary-ok", resp.Content) // fallback to primary since no registry
 }
+
+// --- SelectModelWithTokens tests ---
+
+// mockRegistry is a configurable ModelRegistry for token-aware selector tests.
+// It returns the configured ModelInfo for a single (provider, model) pair and
+// false for all other lookups.
+type mockRegistry struct {
+	provider    string
+	model       string
+	info        ModelInfo
+	lookupCount int
+}
+
+func (m *mockRegistry) Lookup(_ context.Context, provider, model string) (ModelInfo, bool) {
+	m.lookupCount++
+	if provider == m.provider && model == m.model {
+		return m.info, true
+	}
+	return ModelInfo{}, false
+}
+
+func (m *mockRegistry) Providers() []ProviderMetadata                  { return nil }
+func (m *mockRegistry) ModelsForProvider(_ string) []ModelInfo          { return nil }
+func (m *mockRegistry) Refresh(_ context.Context) error                 { return nil }
+
+var _ ModelRegistry = (*mockRegistry)(nil)
+
+// TestSelectorWithRegistry verifies SelectModelWithTokens token-aware routing
+// against a mock ModelRegistry, covering: nil registry fallback, zero-token
+// fallback, within-limit passthrough, overflow switch to small, overflow with
+// no small model, small-task bypass, ContextWindow fallback, and unknown-model
+// fallback.
+func TestSelectorWithRegistry(t *testing.T) {
+	primary := &fbMockModel{genContent: "primary"}
+	small := &fbMockModel{genContent: "small"}
+
+	t.Run("nil_registry_falls_back_to_static_routing", func(t *testing.T) {
+		sel := NewDefaultModelSelector(primary, small)
+		// No registry set → SelectModelWithTokens should behave like SelectModel.
+		got := sel.SelectModelWithTokens(context.Background(), TaskTypeChat, 999999)
+		assert.Same(t, primary, got, "nil registry should return static routing result")
+		assert.Nil(t, sel.Registry(), "Registry() should be nil when not configured")
+	})
+
+	t.Run("zero_or_negative_tokens_falls_back", func(t *testing.T) {
+		reg := &mockRegistry{provider: "openai", model: "gpt-4o", info: ModelInfo{InputTokenLimit: 1000}}
+		sel := NewDefaultModelSelector(primary, small).
+			WithModelRegistry(reg).
+			WithModelNames("openai", "gpt-4o", "openai", "gpt-4o-mini")
+
+		// estimatedTokens=0 → no limit check, returns static result (primary for chat).
+		got := sel.SelectModelWithTokens(context.Background(), TaskTypeChat, 0)
+		assert.Same(t, primary, got)
+		// negative tokens → same fallback.
+		got = sel.SelectModelWithTokens(context.Background(), TaskTypeChat, -1)
+		assert.Same(t, primary, got)
+		// registry should not have been queried for tokens.
+		assert.Equal(t, 0, reg.lookupCount, "zero/negative tokens should not query registry")
+	})
+
+	t.Run("within_limit_returns_primary", func(t *testing.T) {
+		reg := &mockRegistry{provider: "openai", model: "gpt-4o", info: ModelInfo{InputTokenLimit: 128000}}
+		sel := NewDefaultModelSelector(primary, small).
+			WithModelRegistry(reg).
+			WithModelNames("openai", "gpt-4o", "openai", "gpt-4o-mini")
+
+		got := sel.SelectModelWithTokens(context.Background(), TaskTypeChat, 50000)
+		assert.Same(t, primary, got, "tokens within limit should return primary")
+	})
+
+	t.Run("overflow_switches_to_small", func(t *testing.T) {
+		reg := &mockRegistry{provider: "openai", model: "gpt-4o", info: ModelInfo{InputTokenLimit: 128000}}
+		sel := NewDefaultModelSelector(primary, small).
+			WithModelRegistry(reg).
+			WithModelNames("openai", "gpt-4o", "openai", "gpt-4o-mini")
+
+		got := sel.SelectModelWithTokens(context.Background(), TaskTypeChat, 200000)
+		assert.Same(t, small, got, "overflow should switch to small model")
+	})
+
+	t.Run("overflow_no_small_returns_primary", func(t *testing.T) {
+		reg := &mockRegistry{provider: "openai", model: "gpt-4o", info: ModelInfo{InputTokenLimit: 128000}}
+		sel := NewDefaultModelSelector(primary, nil). // no small model
+								WithModelRegistry(reg).
+								WithModelNames("openai", "gpt-4o", "", "")
+
+		got := sel.SelectModelWithTokens(context.Background(), TaskTypeChat, 200000)
+		assert.Same(t, primary, got, "overflow with no small should still return primary")
+	})
+
+	t.Run("small_task_bypasses_limit_check", func(t *testing.T) {
+		reg := &mockRegistry{provider: "openai", model: "gpt-4o", info: ModelInfo{InputTokenLimit: 1000}}
+		sel := NewDefaultModelSelector(primary, small).
+			WithModelRegistry(reg).
+			WithModelNames("openai", "gpt-4o", "openai", "gpt-4o-mini")
+
+		// TaskTypeSummary → SelectModel returns small (not primary).
+		// SelectModelWithTokens should return small without checking primary limit.
+		got := sel.SelectModelWithTokens(context.Background(), TaskTypeSummary, 999999)
+		assert.Same(t, small, got, "small task should bypass primary limit check")
+	})
+
+	t.Run("context_window_fallback_when_input_limit_zero", func(t *testing.T) {
+		// InputTokenLimit=0 but ContextWindow=100000 → should use ContextWindow.
+		reg := &mockRegistry{provider: "openai", model: "gpt-4o", info: ModelInfo{InputTokenLimit: 0, ContextWindow: 100000}}
+		sel := NewDefaultModelSelector(primary, small).
+			WithModelRegistry(reg).
+			WithModelNames("openai", "gpt-4o", "openai", "gpt-4o-mini")
+
+		// 50000 < 100000 (ContextWindow) → primary.
+		got := sel.SelectModelWithTokens(context.Background(), TaskTypeChat, 50000)
+		assert.Same(t, primary, got, "should use ContextWindow as fallback limit")
+
+		// 150000 > 100000 → switch to small.
+		got = sel.SelectModelWithTokens(context.Background(), TaskTypeChat, 150000)
+		assert.Same(t, small, got, "overflow against ContextWindow should switch to small")
+	})
+
+	t.Run("unknown_model_returns_primary", func(t *testing.T) {
+		// Registry does not know the configured primary model → Lookup returns
+		// false → limit=0 → no overflow check → returns primary.
+		reg := &mockRegistry{provider: "openai", model: "gpt-4o", info: ModelInfo{InputTokenLimit: 1000}}
+		sel := NewDefaultModelSelector(primary, small).
+			WithModelRegistry(reg).
+			WithModelNames("unknown-provider", "unknown-model", "openai", "gpt-4o-mini")
+
+		got := sel.SelectModelWithTokens(context.Background(), TaskTypeChat, 999999)
+		assert.Same(t, primary, got, "unknown model should return primary (limit=0, no overflow)")
+	})
+}

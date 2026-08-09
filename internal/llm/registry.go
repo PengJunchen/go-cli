@@ -116,12 +116,12 @@ func (r *ProviderRegistry) Default() ModelProvider {
 // GetModelInfo returns the ModelInfo for the named model exposed by the named
 // provider. It returns an empty ModelInfo when the provider or model is not
 // found.
-func (r *ProviderRegistry) GetModelInfo(provider, model string) ModelInfo {
+func (r *ProviderRegistry) GetModelInfo(ctx context.Context, provider, model string) ModelInfo {
 	p, err := r.Get(provider)
 	if err != nil {
 		// Provider not registered locally; try the external registry.
 		if r.modelRegistry != nil {
-			if info, ok := r.modelRegistry.Lookup(provider, model); ok {
+			if info, ok := r.modelRegistry.Lookup(ctx, provider, model); ok {
 				return info
 			}
 		}
@@ -134,7 +134,7 @@ func (r *ProviderRegistry) GetModelInfo(provider, model string) ModelInfo {
 	}
 	// Model not in the provider's built-in list; try the external registry.
 	if r.modelRegistry != nil {
-		if info, ok := r.modelRegistry.Lookup(provider, model); ok {
+		if info, ok := r.modelRegistry.Lookup(ctx, provider, model); ok {
 			return info
 		}
 	}
