@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/compaction"
+	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
@@ -142,4 +143,34 @@ func estimateTokensForEntry(e SessionEntry) int {
 		}
 	}
 	return tokens
+}
+
+// EntriesToAgentMessages converts a slice of SessionEntry values into
+// core.AgentMessage values suitable for restoring agent history. Tool and
+// compaction entries are skipped because they are not part of the replayable
+// conversation history.
+func EntriesToAgentMessages(entries []SessionEntry) []core.AgentMessage {
+	msgs := make([]core.AgentMessage, 0, len(entries))
+	for _, e := range entries {
+		var role string
+		switch e.Type {
+		case EntryTypeUser:
+			role = "user"
+		case EntryTypeAssistant:
+			role = "assistant"
+		case EntryTypeSystem:
+			role = "system"
+		default:
+			continue // skip tool/compaction entries
+		}
+		msgs = append(msgs, core.AgentMessage{
+			Role:          role,
+			Content:       e.Content,
+			ContentBlocks: e.ContentBlocks,
+			ToolCalls:     e.ToolCalls,
+			ToolCallID:    e.ToolCallID,
+			ToolName:      e.ToolName,
+		})
+	}
+	return msgs
 }
