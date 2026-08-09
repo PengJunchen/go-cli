@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/pengjunchen/go-cli/internal/session"
 )
@@ -480,13 +481,15 @@ func (h *LoadHandler) Handle(ctx context.Context, _ []string, sc *slashContext) 
 	return nil
 }
 
-// truncatePreview shortens content to at most maxHistoryPreview characters,
-// appending an ellipsis when truncated.
+// truncatePreview shortens content to at most maxHistoryPreview runes,
+// appending an ellipsis when truncated. Rune-based slicing avoids splitting
+// multi-byte UTF-8 characters (e.g. CJK text) that byte-slicing would corrupt.
 func truncatePreview(content string) string {
-	if len(content) <= maxHistoryPreview {
+	if utf8.RuneCountInString(content) <= maxHistoryPreview {
 		return content
 	}
-	return content[:maxHistoryPreview] + "..."
+	runes := []rune(content)
+	return string(runes[:maxHistoryPreview]) + "..."
 }
 
 // ----------------------------------------------------------------------------

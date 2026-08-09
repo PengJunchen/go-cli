@@ -225,7 +225,9 @@ func (c *SummaryCompactor) clampSummary(summary string, estimator TokenEstimator
 		}
 	}
 	if lo <= 0 {
-		return summary
+		// Even a single rune does not fit the budget; return empty so the
+		// caller can substitute a placeholder.
+		return ""
 	}
 	return string(runes[:lo])
 }

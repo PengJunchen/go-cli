@@ -68,6 +68,7 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	case <-ctx.Done():
 	case <-sigCh:
 	}
+	signal.Stop(sigCh)
 
 	// Use a fresh context for shutdown so in-flight requests can complete
 	// even if the parent context was canceled.
