@@ -100,6 +100,17 @@ type RemoteInfo struct {
 	Type string
 }
 
+// WorktreeInfo describes a single git worktree entry from `git worktree list`.
+type WorktreeInfo struct {
+	// Path is the absolute filesystem path of the worktree.
+	Path string
+	// Head is the commit hash the worktree is at.
+	Head string
+	// Branch is the refs/heads/... name when the worktree is on a branch,
+	// empty for detached HEAD.
+	Branch string
+}
+
 // GitTool wraps git command execution with zero dependencies (exec.Command).
 // Implementations run git against a fixed working directory and return parsed
 // results.
@@ -142,6 +153,15 @@ type GitTool interface {
 	Pull(ctx context.Context, remote string, branch string) error
 	// Remote lists the configured remote repositories.
 	Remote(ctx context.Context) ([]RemoteInfo, error)
+	// WorktreeAdd creates a new worktree at the given path. When branch is
+	// non-empty, a new branch named branch is created for the worktree;
+	// otherwise a detached worktree at HEAD is created.
+	WorktreeAdd(ctx context.Context, path string, branch string) error
+	// WorktreeList lists all worktrees of the repository.
+	WorktreeList(ctx context.Context) ([]WorktreeInfo, error)
+	// WorktreeRemove removes the worktree at the given path. The --force flag
+	// is used so that worktrees with untracked files are also removed.
+	WorktreeRemove(ctx context.Context, path string) error
 }
 
 // DefaultGitTool implements GitTool by shelling out to the system git binary.
@@ -730,4 +750,89 @@ func porcelainStatus(code byte) string {
 	default:
 		return "modified"
 	}
+}
+
+// WorktreeAdd creates a new worktree at the given path. When branch is
+// non-empty, a new branch named branch is created for the worktree via
+// `git worktree add -b <branch> <path>`. When branch is empty, a detached
+// worktree is created at HEAD via `git worktree add --detach <path>`.
+func (g *DefaultGitTool) WorktreeAdd(ctx context.Context, path string, branch string) error {
+	if err := g.ensureRepo(ctx); err != nil {
+		return err
+	}
+	args := []string{"worktree", "add"}
+	if branch != "" {
+		args = append(args, "-b", branch, "--", path)
+	} else {
+		args = append(args, "--detach", "--", path)
+	}
+	_, err := g.run(ctx, args...)
+	return err
+}
+
+// WorktreeList lists all worktrees of the repository via
+// `git worktree list --porcelain`.
+func (g *DefaultGitTool) WorktreeList(ctx context.Context) ([]WorktreeInfo, error) {
+	if err := g.ensureRepo(ctx); err != nil {
+		return nil, err
+	}
+	out, err := g.run(ctx, "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, err
+	}
+	return parseWorktreePorcelain(out), nil
+}
+
+// WorktreeRemove removes the worktree at the given path. The --force flag is
+// used so that worktrees with untracked or modified files are also removed.
+func (g *DefaultGitTool) WorktreeRemove(ctx context.Context, path string) error {
+	if err := g.ensureRepo(ctx); err != nil {
+		return err
+	}
+	_, err := g.run(ctx, "worktree", "remove", "--force", "--", path)
+	return err
+}
+
+// parseWorktreePorcelain parses the output of `git worktree list --porcelain`
+// into a slice of WorktreeInfo. The porcelain format uses one record per
+// worktree, with fields prefixed by their key ("worktree", "HEAD", "branch")
+// and records separated by blank lines.
+func parseWorktreePorcelain(out string) []WorktreeInfo {
+	var infos []WorktreeInfo
+	var current *WorktreeInfo
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			if current != nil {
+				infos = append(infos, *current)
+				current = nil
+			}
+			continue
+		}
+		parts := strings.SplitN(line, " ", 2)
+		key := parts[0]
+		var value string
+		if len(parts) > 1 {
+			value = parts[1]
+		}
+		switch key {
+		case "worktree":
+			if current != nil {
+				infos = append(infos, *current)
+			}
+			current = &WorktreeInfo{Path: value}
+		case "HEAD":
+			if current != nil {
+				current.Head = value
+			}
+		case "branch":
+			if current != nil {
+				current.Branch = value
+			}
+		}
+	}
+	if current != nil {
+		infos = append(infos, *current)
+	}
+	return infos
 }

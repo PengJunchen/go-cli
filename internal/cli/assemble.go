@@ -130,6 +130,9 @@ type AgentAssembly struct {
 	// exposed so the interactive session can wire it into the session tree
 	// for Git-aware branch linkage.
 	GitTool tools.GitTool
+	// WorktreeManager manages git worktrees for parallel session isolation.
+	// It is nil when worktree isolation is not enabled in config.
+	WorktreeManager *tools.WorktreeManager
 	// MemoryStore persists cross-session memories for the /memory slash
 	// command and system prompt injection.
 	MemoryStore *memory.FileMemoryStore
@@ -408,6 +411,29 @@ func AssembleAgent(
 		gitCwd = rc.Git.WorkDir
 	}
 	gitTool := tools.NewDefaultGitTool(gitCwd)
+
+	// Create a WorktreeManager when worktree isolation is enabled. Each
+	// session gets its own worktree, allowing parallel sessions to operate
+	// on different branches without interference.
+	var worktreeMgr *tools.WorktreeManager
+	if rc != nil && rc.Git.WorktreeEnabled {
+		wtDir := rc.Git.WorktreeDir
+		if wtDir == "" {
+			wtDir = filepath.Join(gitCwd, ".go-cli", "worktrees")
+		}
+		worktreeMgr = tools.NewWorktreeManager(gitTool, wtDir)
+		if err := worktreeMgr.EnsureBaseDir(); err != nil {
+			logger.Warn("assemble_worktree_base_dir_failed", "err", err)
+		}
+		// Wire cleanup so worktrees are removed on exit.
+		prevCleanup := cleanup
+		cleanup = func() {
+			if err := worktreeMgr.Cleanup(context.Background()); err != nil {
+				logger.Warn("assemble_worktree_cleanup_failed", "err", err)
+			}
+			prevCleanup()
+		}
+	}
 
 	// Wrap the UnifiedDiffGenerator with GitDiffGenerator so that /diff uses
 	// `git diff` when inside a git repository (better rename/binary handling)
@@ -1069,6 +1095,7 @@ func AssembleAgent(
 		FollowUpChannel:    followUpCh,
 		LoopAgent:          loopAgent,
 		GitTool:            gitTool,
+		WorktreeManager:    worktreeMgr,
 		MemoryStore:        memStore,
 		MemoryExtractor:    memExtractor,
 		ThinkingLevel:      thinkingLevel,

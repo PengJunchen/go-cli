@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -32,6 +33,7 @@ type FileTracker struct {
 	checkpoints     map[string]CheckpointMeta
 	checkpointOrder []string // checkpoint IDs in creation order
 	backupContent   map[string][]byte
+	workdir         string // working directory for worktree-aware operations
 }
 
 // NewFileTracker returns an empty FileTracker.
@@ -45,6 +47,32 @@ func NewFileTracker() *FileTracker {
 	}
 }
 
+// SetWorkdir sets the working directory used for worktree-aware file
+// operations. When set, relative paths in tracking operations are resolved
+// against this directory.
+func (ft *FileTracker) SetWorkdir(path string) {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	ft.workdir = path
+}
+
+// Workdir returns the current working directory, or empty when unset.
+func (ft *FileTracker) Workdir() string {
+	ft.mu.RLock()
+	defer ft.mu.RUnlock()
+	return ft.workdir
+}
+
+// resolve joins a relative path with the configured workdir. When workdir is
+// empty or the path is already absolute, the path is returned unchanged. The
+// caller must hold ft.mu.
+func (ft *FileTracker) resolve(path string) string {
+	if ft.workdir != "" && !filepath.IsAbs(path) {
+		return filepath.Join(ft.workdir, path)
+	}
+	return path
+}
+
 // Track records the state of the file at path with the given content. If the
 // content differs from the previously recorded state (or the file is tracked
 // for the first time), a FileChange entry is appended.
@@ -52,6 +80,7 @@ func (ft *FileTracker) Track(path string, content string) {
 	ft.mu.Lock()
 	defer ft.mu.Unlock()
 
+	path = ft.resolve(path)
 	newHash := hashContent(content)
 	oldHash, existed := ft.hashes[path]
 
@@ -116,6 +145,7 @@ func (ft *FileTracker) Reset() {
 	ft.checkpoints = make(map[string]CheckpointMeta)
 	ft.checkpointOrder = make([]string, 0)
 	ft.backupContent = make(map[string][]byte)
+	ft.workdir = ""
 	slog.Debug("file_tracker.reset")
 }
 
@@ -163,6 +193,7 @@ func (ft *FileTracker) Backup(path string) (string, error) {
 	ft.mu.Lock()
 	defer ft.mu.Unlock()
 
+	path = ft.resolve(path)
 	now := time.Now()
 	id := fmt.Sprintf("cp_%d", now.UnixNano())
 
@@ -228,10 +259,12 @@ func (ft *FileTracker) Restore(checkpointID string) error {
 		return fmt.Errorf("restore: checkpoint %s not found", checkpointID)
 	}
 
+	resolvedPath := ft.resolve(meta.Path)
+
 	if !meta.Existed {
 		// The file was new (did not exist before) - remove it.
-		if err := os.Remove(meta.Path); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("restore: remove %s: %w", meta.Path, err)
+		if err := os.Remove(resolvedPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("restore: remove %s: %w", resolvedPath, err)
 		}
 		return nil
 	}
@@ -250,14 +283,14 @@ func (ft *FileTracker) Restore(checkpointID string) error {
 	if mode == 0 {
 		mode = 0o600
 	}
-	if err := os.WriteFile(meta.Path, content, mode); err != nil {
-		return fmt.Errorf("restore: write %s: %w", meta.Path, err)
+	if err := os.WriteFile(resolvedPath, content, mode); err != nil {
+		return fmt.Errorf("restore: write %s: %w", resolvedPath, err)
 	}
 	// os.WriteFile only applies perm when creating a new file; for an existing
 	// file it truncates without changing permissions. Chmod explicitly so the
 	// original mode is restored regardless.
-	if err := os.Chmod(meta.Path, mode); err != nil {
-		return fmt.Errorf("restore: chmod %s: %w", meta.Path, err)
+	if err := os.Chmod(resolvedPath, mode); err != nil {
+		return fmt.Errorf("restore: chmod %s: %w", resolvedPath, err)
 	}
 	return nil
 }
