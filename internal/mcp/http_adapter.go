@@ -193,6 +193,7 @@ func (a *HTTPClientAdapter) request(ctx context.Context, method string, params m
 	a.mu.Lock()
 	id := a.nextID
 	a.nextID++
+	endpoint := a.endpoint
 	a.mu.Unlock()
 
 	body, err := json.Marshal(map[string]any{
@@ -205,7 +206,7 @@ func (a *HTTPClientAdapter) request(ctx context.Context, method string, params m
 		return nil, fmt.Errorf("mcp: marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint, strings.NewReader(string(body)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
 	if err != nil {
 		return nil, fmt.Errorf("mcp: build request: %w", err)
 	}
