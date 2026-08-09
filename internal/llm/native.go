@@ -209,9 +209,8 @@ func (m *nativeChatModel) generate(ctx context.Context, msgs []Message, opts ...
 // three known providers (openai, claude, gemini) it performs true SSE-based
 // streaming: the request is sent with stream=true (or the streaming endpoint
 // for Gemini) and the response body is parsed as Server-Sent Events, emitting
-// one MessageChunk per content delta. For unknown providers it falls back to
-// the fake single-chunk approach (Generate then emit). The channel is always
-// closed.
+// one MessageChunk per content delta. For unknown providers it returns an
+// error; callers should use Generate instead.
 func (m *nativeChatModel) Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
 	switch m.provider {
 	case claudeProviderName:
@@ -221,22 +220,8 @@ func (m *nativeChatModel) Stream(ctx context.Context, msgs []Message, opts ...Op
 	case openaiProviderName:
 		return m.streamOpenAI(ctx, msgs, opts)
 	default:
-		return m.streamFake(ctx, msgs, opts)
+		return nil, fmt.Errorf("llm: provider %q does not support native streaming; use Generate instead", m.provider)
 	}
-}
-
-// streamFake is the fallback streaming implementation: it calls Generate and
-// delivers the full response as a single chunk before closing the channel.
-func (m *nativeChatModel) streamFake(ctx context.Context, msgs []Message, opts []Option) (<-chan MessageChunk, error) {
-	ch := make(chan MessageChunk, 1)
-	resp, err := m.Generate(ctx, msgs, opts...)
-	if err != nil {
-		close(ch)
-		return ch, err
-	}
-	ch <- MessageChunk{Role: resp.Role, Content: resp.Content}
-	close(ch)
-	return ch, nil
 }
 
 // streamRoundTrip builds the HTTP request, executes it, and verifies a 2xx
