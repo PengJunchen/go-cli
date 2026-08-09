@@ -238,6 +238,137 @@ func AssembleAgent(
 	out io.Writer,
 	opts ...AssembleOption,
 ) (*AgentAssembly, error) {
+	s, thinkingLevel := newAssembleState(ctx, rc, providerName, modelName, out, opts...)
+
+	// Assemble subsystems in dependency order.
+	if err := s.assembleModel(); err != nil {
+		s.runCleanup()
+		return nil, err
+	}
+	s.assembleTracing()
+	if err := s.assembleTools(); err != nil {
+		s.runCleanup()
+		return nil, err
+	}
+	s.assembleExtensions()
+	s.assembleApproval()
+	s.assembleProductionResilience()
+	s.assembleOutputGuards()
+	s.assembleSubAgent()
+	s.assembleExtraTools()
+	s.assembleLoopAgent()
+	s.assembleMiddleware()
+	if err := s.assembleCompactor(); err != nil {
+		s.runCleanup()
+		return nil, err
+	}
+	s.assembleSession()
+	s.appendFinalCleanup()
+
+	// Resume history from session store if requested.
+	var restoredHistory []core.AgentMessage
+	if s.ac.resumeFlag && s.sessionStore != nil {
+		restoredHistory, _ = loadSessionHistory(s.sessionStore.FilePath()) //nolint:errcheck
+		if len(restoredHistory) > 0 {
+			s.logger.Info("assemble_session_resumed", "messages", len(restoredHistory))
+		}
+	}
+
+	// Build AgentImpl + HarnessImpl.
+	agentOpts := []core.AgentOption{
+		core.WithCompactionHook(newCompactionHook(s.compactor, s.estimator, s.ac.maxTokens)),
+	}
+	if len(restoredHistory) > 0 {
+		agentOpts = append(agentOpts, core.WithHistory(restoredHistory))
+	}
+	agent := core.NewAgentImpl(s.ac.agentName, s.loop, agentOpts...)
+	h := core.NewHarnessImpl(agent, core.WithEventBuffer(64), core.WithHarnessTracer(s.tracer), core.WithRunSlotGuard(s.runSlotGuard))
+
+	// Build TurnRunner wired with the shared steering channel and agent.
+	turnRunner := core.NewEinoTurnRunner(s.loop)
+	turnRunner.SetSteerChannel(s.steerCh)
+	turnRunner.SetFollowUpChannel(s.followUpCh)
+	turnRunner.SetAgent(agent)
+	turnRunner.SetHookChain(s.hookChain)
+	turnRunner.SetRunSlotGuard(s.runSlotGuard)
+	s.reg.RegisterTurnRunner(turnRunner)
+
+	// Emit assemble span for observability.
+	asmSpan, _ := tracing.SpanFromContext(ctx, "assemble.agent", tracing.SpanKindInternal)
+	asmSpan.SetAttributes(
+		tracing.Attribute{Key: "agent_name", Value: s.ac.agentName},
+		tracing.Attribute{Key: "model", Value: modelName},
+		tracing.Attribute{Key: "session_enabled", Value: s.ac.enableSession},
+		tracing.Attribute{Key: "resume", Value: s.ac.resumeFlag},
+	)
+	asmSpan.SetStatus(tracing.SpanStatusOK, "")
+	asmSpan.End()
+
+	// Resolve the context window for TUI status bar and /cost occupancy.
+	contextWindow := s.modelInfo.ContextWindow
+	if contextWindow <= 0 {
+		contextWindow = s.ac.maxTokens
+	}
+
+	return &AgentAssembly{
+		Harness:            h,
+		Agent:              agent,
+		ToolRegistry:       s.tr,
+		CostTracker:        s.costTracker,
+		StatsRegistry:      s.statsRegistry,
+		SessionStore:       s.sessionStore,
+		SessionID:          s.sessionID,
+		Model:              s.model,
+		ModelName:          modelName,
+		Compactor:          s.compactor,
+		Estimator:          s.estimator,
+		MidTurn:            s.midTurn,
+		MaxTokens:          s.ac.maxTokens,
+		ContextWindow:      contextWindow,
+		Cleanup:            s.runCleanup,
+		Registry:           s.reg,
+		FileTracker:        s.fileTracker,
+		DiffGenerator:      s.diffGen,
+		PlanCtrl:           s.planCtrl,
+		ModeResolver:       s.modeResolver,
+		PromptBuilder:      s.promptBuilder,
+		ContextLoader:      s.contextLoader,
+		Tracer:             s.tracer,
+		ReminderManager:    s.reminderMgr,
+		HookChain:          s.hookChain,
+		FailureSynthesizer: s.failureSynthesizer,
+		CircuitBreaker:     s.circuitBreaker,
+		LoopDetector:       s.loopDetector,
+		IdempotentCache:    s.idempotentCache,
+		AuditLog:           s.auditLog,
+		Telemetry:          s.telemetry,
+		TurnRunner:         turnRunner,
+		SteerChannel:       s.steerCh,
+		ApprovalChannel:    s.ac.approvalCh,
+		FollowUpChannel:    s.followUpCh,
+		HITLEmitter:        s.hitlEmitter,
+		LoopAgent:          s.loopAgent,
+		GitTool:            s.gitTool,
+		WorktreeManager:    s.worktreeMgr,
+		MemoryStore:        s.memStore,
+		MemoryExtractor:    s.memExtractor,
+		ThinkingLevel:      thinkingLevel,
+		ModelCycler:        s.modelCycler,
+		ModelRegistry:      s.modelRegistry,
+		LSPClient:          s.lspClientField,
+		LSPWorkspaceRoot:   s.lspWorkspaceRoot,
+	}, nil
+}
+
+// newAssembleState resolves the assembleConfig, thinking level, logger,
+// registry, and session ID, then constructs the shared assembleState.
+func newAssembleState(
+	ctx context.Context,
+	rc *config.Config,
+	providerName, modelName string,
+	out io.Writer,
+	opts ...AssembleOption,
+) (*assembleState, llm.ThinkingLevel) {
 	ac := assembleConfig{
 		maxTokens:     0, // 0 means "not set"; resolved below
 		enableSession: false,
@@ -266,10 +397,6 @@ func AssembleAgent(
 	}
 
 	logger := slog.Default()
-
-	// Registry: assemble components are also registered here so callers can
-	// retrieve or override any subsystem via RegisterXxx. The registry is
-	// additive; it does not change how components are constructed or wired.
 	reg := core.NewRegistry().(*core.DefaultRegistry) //nolint:errcheck
 
 	// Resolve session ID: config.Session.ID takes priority, fallback to agentName.
@@ -278,26 +405,166 @@ func AssembleAgent(
 		sessionID = rc.Session.ID
 	}
 
-	// 1. Build model.
-	model, modelInfo, modelCleanup, err := buildModel(ctx, rc, providerName, modelName)
-	if err != nil {
-		return nil, fmt.Errorf("assemble: build model: %w", err)
+	s := &assembleState{
+		ctx:           ctx,
+		rc:            rc,
+		ac:            ac,
+		logger:        logger,
+		reg:           reg,
+		sessionID:     sessionID,
+		providerName:  providerName,
+		modelName:     modelName,
+		out:           out,
+		thinkingLevel: thinkingLevel,
 	}
-	reg.RegisterModelProvider(&chatModelProvider{name: modelName, model: model})
+	return s, thinkingLevel
+}
 
-	cleanup := func() {
-		if modelCleanup != nil {
-			modelCleanup()
+// assembleState holds intermediate assembly state shared across assembleXXX
+// methods. It is internal to the assembly process and not exposed to callers.
+type assembleState struct {
+	// Common dependencies
+	ctx          context.Context
+	rc           *config.Config
+	ac           assembleConfig
+	logger       *slog.Logger
+	reg          *core.DefaultRegistry
+	sessionID    string
+	providerName string
+	modelName    string
+	out          io.Writer
+	thinkingLevel llm.ThinkingLevel
+
+	// Model section
+	model         llm.BaseChatModel
+	modelInfo     llm.ModelInfo
+	modelCycler   *llm.ModelCycler
+	modelRegistry llm.ModelRegistry
+	smallModel    llm.BaseChatModel
+
+	// Tracing section
+	tracer        *tracing.Tracer
+	traceExporter tracing.TraceExporter
+
+	// Tools section
+	tr               tools.ToolRegistry
+	underlyingReg    tools.ToolRegistry
+	fileTracker      *tools.FileTracker
+	diffGen          tools.DiffGenerator
+	gitTool          tools.GitTool
+	gitCwd           string
+	worktreeMgr      *tools.WorktreeManager
+	htmlConverter    *tools.DefaultHTMLConverter
+	lspClientField   tools.LSPClient
+	lspWorkspaceRoot string
+	skillInfos       []core.SkillInfo
+
+	// Extensions section
+	extHooks      []core.Hook
+	extMiddleware []core.Middleware
+	hookChain     *core.HookChain
+
+	// Approval section
+	modeResolver approval.PermissionModeResolver
+
+	// Production resilience section
+	planCtrl        core.PlanModeController
+	pw              *production.ProductionModelWrapper
+	modelChain      *llm.DefaultModelMiddlewareChain
+	circuitBreaker  production.CircuitBreaker
+	guardChain      *production.OutputGuardChain
+	telemetry       production.Telemetry
+	costTracker     *production.CostTracker
+	statsRegistry   *production.StatsRegistry
+	idempotentCache production.IdempotentCache
+	auditLog        production.AuditLog
+
+	// SubAgent section
+	acpAdapter *acp.ACPMiddlewareAdapter
+	acpClient  acp.ACPClient
+
+	// Extra tools section
+	hitlEmitter *cliHITLEmitter
+
+	// LoopAgent section
+	steerCh       chan string
+	followUpCh    chan string
+	runSlotGuard  core.RunSlotGuard
+	loopAgent     *core.LoopAgent
+	loop          core.AgentLoop
+	memStore      *memory.FileMemoryStore
+	memExtractor  memory.MemoryExtractor
+	promptBuilder core.SystemPromptBuilder
+	contextLoader core.ProjectContextLoader
+
+	// Middleware section
+	loopDetector       production.LoopDetector
+	reminderMgr        *core.DefaultSystemReminderManager
+	failureSynthesizer core.FailureTurnSynthesizer
+
+	// Compactor section
+	compactor compaction.Compactor
+	estimator compaction.TokenEstimator
+	midTurn   *compaction.MidTurnCompact
+
+	// Session section
+	sessionStore *session.JSONLSessionStore
+
+	// Cleanup
+	cleanupList []func()
+}
+
+// runCleanup executes all registered cleanup functions in reverse order (LIFO).
+func (s *assembleState) runCleanup() {
+	for i := len(s.cleanupList) - 1; i >= 0; i-- {
+		s.cleanupList[i]()
+	}
+}
+
+// appendFinalCleanup adds the terminal cleanup closure for ACP client,
+// session store, memory store, and trace exporter. These run first during
+// LIFO cleanup because they are appended after all subsystem cleanups.
+func (s *assembleState) appendFinalCleanup() {
+	s.cleanupList = append(s.cleanupList, func() {
+		if s.acpAdapter != nil {
+			s.acpAdapter.Close()
 		}
+		if s.acpClient != nil {
+			_ = s.acpClient.Disconnect(context.Background()) //nolint:errcheck
+		}
+		if s.sessionStore != nil {
+			s.sessionStore.Close() //nolint:errcheck,gosec
+		}
+		if s.memStore != nil {
+			_ = s.memStore.Close() //nolint:errcheck
+		}
+		if s.traceExporter != nil {
+			if s.tracer != nil {
+				s.tracer.Flush()
+			}
+			_ = s.traceExporter.Shutdown(context.Background()) //nolint:errcheck
+		}
+	})
+}
+
+// assembleModel builds the primary model, ModelCycler, ModelRegistry, and small
+// model. It registers the model provider and appends model cleanups.
+func (s *assembleState) assembleModel() error {
+	model, modelInfo, modelCleanup, err := buildModel(s.ctx, s.rc, s.providerName, s.modelName)
+	if err != nil {
+		return fmt.Errorf("assemble: build model: %w", err)
+	}
+	s.reg.RegisterModelProvider(&chatModelProvider{name: s.modelName, model: model})
+	s.model = model
+	s.modelInfo = modelInfo
+	if modelCleanup != nil {
+		s.cleanupList = append(s.cleanupList, modelCleanup)
 	}
 
-	// 1c. Wire ModelCycler when enabled models are configured. The cycler
-	// wraps the primary model so each Generate/Stream call can be routed to
-	// a different provider according to the configured strategy.
-	var modelCycler *llm.ModelCycler
-	if rc != nil && rc.ModelCycler.Enabled != nil && *rc.ModelCycler.Enabled && len(rc.ModelCycler.Models) > 0 {
-		entries := make([]llm.ModelEntry, len(rc.ModelCycler.Models))
-		for i, m := range rc.ModelCycler.Models {
+	// Wire ModelCycler when enabled models are configured.
+	if s.rc != nil && s.rc.ModelCycler.Enabled != nil && *s.rc.ModelCycler.Enabled && len(s.rc.ModelCycler.Models) > 0 {
+		entries := make([]llm.ModelEntry, len(s.rc.ModelCycler.Models))
+		for i, m := range s.rc.ModelCycler.Models {
 			entries[i] = llm.ModelEntry{
 				Provider: m.Provider,
 				Model:    m.Model,
@@ -305,274 +572,231 @@ func AssembleAgent(
 				TaskType: llm.TaskType(m.TaskType),
 			}
 		}
-		modelCycler = llm.NewModelCycler(llm.ModelCyclerConfig{
+		s.modelCycler = llm.NewModelCycler(llm.ModelCyclerConfig{
 			Models:   entries,
-			Strategy: rc.ModelCycler.Strategy,
+			Strategy: s.rc.ModelCycler.Strategy,
 		})
-		modelCycler.WithRegistry(llm.NewProviderRegistry())
-		model = modelCycler.WrapModel(model)
-		logger.Info("assemble_model_cycler_enabled",
-			"strategy", rc.ModelCycler.Strategy,
+		s.modelCycler.WithRegistry(llm.NewProviderRegistry())
+		s.model = s.modelCycler.WrapModel(s.model)
+		s.logger.Info("assemble_model_cycler_enabled",
+			"strategy", s.rc.ModelCycler.Strategy,
 			"models", len(entries),
 		)
 	}
 
-	// 1c-bis. Wire the models.dev model registry when enabled. The registry is
-	// refreshed best-effort on startup; failures are logged but do not block
-	// assembly. When disabled, a NoopModelRegistry is used so callers always
-	// have a non-nil registry to consult.
-	var modelRegistry llm.ModelRegistry = llm.NoopModelRegistry{}
-	if rc != nil && rc.ModelRegistry.Enabled {
-		ttl := time.Duration(rc.ModelRegistry.TTLHours) * time.Hour
-		mr := llm.NewModelsDevRegistry(rc.ModelRegistry.CachePath, ttl)
-		if rErr := mr.Refresh(ctx); rErr != nil {
-			logger.Warn("assemble_model_registry_refresh_failed", "err", rErr)
+	// Wire the models.dev model registry when enabled.
+	s.modelRegistry = llm.NoopModelRegistry{}
+	if s.rc != nil && s.rc.ModelRegistry.Enabled {
+		ttl := time.Duration(s.rc.ModelRegistry.TTLHours) * time.Hour
+		mr := llm.NewModelsDevRegistry(s.rc.ModelRegistry.CachePath, ttl)
+		if rErr := mr.Refresh(s.ctx); rErr != nil {
+			s.logger.Warn("assemble_model_registry_refresh_failed", "err", rErr)
 		} else {
-			logger.Info("assemble_model_registry_ready",
+			s.logger.Info("assemble_model_registry_ready",
 				"providers", len(mr.Providers()),
 			)
 		}
-		modelRegistry = mr
+		s.modelRegistry = mr
 	}
 
-	// 1d. Build small model and ModelSelector. When small_model is configured,
-	// a separate lightweight model is built for background tasks (summaries,
-	// title generation, memory extraction).
-	var smallModel llm.BaseChatModel
-	if rc != nil && rc.SmallModel.Model != "" {
-		smallProvider := rc.SmallModel.Provider
+	// Build small model for background tasks.
+	if s.rc != nil && s.rc.SmallModel.Model != "" {
+		smallProvider := s.rc.SmallModel.Provider
 		if smallProvider == "" {
-			smallProvider = providerName
+			smallProvider = s.providerName
 		}
-		sm, _, smallCleanup, smErr := buildSmallModel(ctx, rc, smallProvider, rc.SmallModel.Model)
+		sm, _, smallCleanup, smErr := buildSmallModel(s.ctx, s.rc, smallProvider, s.rc.SmallModel.Model)
 		if smErr != nil {
-			logger.Warn("assemble_small_model_failed", "err", smErr, "model", rc.SmallModel.Model)
+			s.logger.Warn("assemble_small_model_failed", "err", smErr, "model", s.rc.SmallModel.Model)
 		} else {
-			smallModel = sm
-			prevCleanup := cleanup
-			cleanup = func() {
-				if smallCleanup != nil {
-					smallCleanup()
-				}
-				prevCleanup()
+			s.smallModel = sm
+			if smallCleanup != nil {
+				s.cleanupList = append(s.cleanupList, smallCleanup)
 			}
-			logger.Info("assemble_small_model_enabled", "model", rc.SmallModel.Model)
+			s.logger.Info("assemble_small_model_enabled", "model", s.rc.SmallModel.Model)
 		}
 	}
 
-	// 1b. Wire tracing from config. When tracing.enabled is true, create the
-	// appropriate TraceExporter (jsonl, stdout, otlp) and a Tracer. When
-	// disabled, tracer remains nil so all SpanFromContext calls return noop
-	// spans (zero overhead).
-	var tracer *tracing.Tracer
-	var traceExporter tracing.TraceExporter
-	if rc != nil && rc.Tracing.Enabled != nil && *rc.Tracing.Enabled {
-		traceExporter = buildTraceExporter(rc.Tracing, sessionID, logger)
-		if traceExporter != nil {
-			// Determine redaction level from config (default: redact).
+	return nil
+}
+
+// assembleTracing wires the tracer and trace exporter from config.
+func (s *assembleState) assembleTracing() {
+	if s.rc != nil && s.rc.Tracing.Enabled != nil && *s.rc.Tracing.Enabled {
+		s.traceExporter = buildTraceExporter(s.rc.Tracing, s.sessionID, s.logger)
+		if s.traceExporter != nil {
 			redactionLevel := tracing.RedactionLevelRedact
-			if rc.Tracing.RedactionLevel != "" {
-				redactionLevel = tracing.RedactionLevel(rc.Tracing.RedactionLevel)
+			if s.rc.Tracing.RedactionLevel != "" {
+				redactionLevel = tracing.RedactionLevel(s.rc.Tracing.RedactionLevel)
 			}
-			traceExporter = tracing.NewRedactingExporter(traceExporter, redactionLevel)
-			tracer = tracing.NewTracer(sessionID, traceExporter)
-			reg.RegisterTraceExporter(traceExporter)
-			logger.Info("assemble_tracing_enabled", "exporter", rc.Tracing.Exporter, "level", rc.Tracing.Level)
+			s.traceExporter = tracing.NewRedactingExporter(s.traceExporter, redactionLevel)
+			s.tracer = tracing.NewTracer(s.sessionID, s.traceExporter)
+			s.reg.RegisterTraceExporter(s.traceExporter)
+			s.logger.Info("assemble_tracing_enabled", "exporter", s.rc.Tracing.Exporter, "level", s.rc.Tracing.Level)
 		}
 	}
+}
 
-	// 2. Create tool registry + register defaults.
-	underlyingReg := tools.NewDefaultToolRegistry()
-	dtr := tools.NewDeferredToolRegistryAdapter(underlyingReg)
-	var tr tools.ToolRegistry = dtr
+// assembleTools creates the tool registry, registers builtins, custom tools,
+// MCP tools, LSP tools, remote bash, and skill tools.
+func (s *assembleState) assembleTools() error {
+	s.underlyingReg = tools.NewDefaultToolRegistry()
+	dtr := tools.NewDeferredToolRegistryAdapter(s.underlyingReg)
+	s.tr = dtr
 
-	// Create shared component instances for the PARTIAL tools (D5, D6, D7, D9).
-	fileTracker := tools.NewFileTracker()
-	var diffGen tools.DiffGenerator = tools.NewUnifiedDiffGenerator(0, false)
-	// Build the bash sandbox from config. WithAllowedPaths defaults to the
-	// current working directory when no paths are configured (safe default).
+	// Create shared component instances for the PARTIAL tools.
+	s.fileTracker = tools.NewFileTracker()
+	s.diffGen = tools.NewUnifiedDiffGenerator(0, false)
+
+	// Build the bash sandbox from config.
 	var sandboxOpts []tools.SandboxOption
 	var resourceLimits tools.ResourceLimits
-	if rc != nil {
-		sandboxOpts = append(sandboxOpts, tools.WithAllowedPaths(rc.Sandbox.AllowedPaths))
+	if s.rc != nil {
+		sandboxOpts = append(sandboxOpts, tools.WithAllowedPaths(s.rc.Sandbox.AllowedPaths))
 		resourceLimits = tools.ResourceLimits{
-			MaxCPU:    rc.Sandbox.MaxCPU,
-			MaxMemory: rc.Sandbox.MaxMemory,
+			MaxCPU:    s.rc.Sandbox.MaxCPU,
+			MaxMemory: s.rc.Sandbox.MaxMemory,
 		}
 	} else {
 		sandboxOpts = append(sandboxOpts, tools.WithAllowedPaths(nil))
 	}
 	bashSandbox := tools.NewDefaultBashSandbox(sandboxOpts...)
 
-	htmlConverter := tools.NewDefaultHTMLConverter()
+	s.htmlConverter = tools.NewDefaultHTMLConverter()
 
-	// Resolve the working directory for git tools. Use GitConfig.WorkDir when
-	// configured, otherwise fall back to the process working directory.
+	// Resolve the working directory for git tools.
 	gitCwd, err := os.Getwd()
 	if err != nil {
 		gitCwd = "."
 	}
-	if rc != nil && rc.Git.WorkDir != "" {
-		gitCwd = rc.Git.WorkDir
+	if s.rc != nil && s.rc.Git.WorkDir != "" {
+		gitCwd = s.rc.Git.WorkDir
 	}
-	gitTool := tools.NewDefaultGitTool(gitCwd)
+	s.gitCwd = gitCwd
+	s.gitTool = tools.NewDefaultGitTool(gitCwd)
 
-	// Create a WorktreeManager when worktree isolation is enabled. Each
-	// session gets its own worktree, allowing parallel sessions to operate
-	// on different branches without interference.
-	var worktreeMgr *tools.WorktreeManager
-	if rc != nil && rc.Git.WorktreeEnabled {
-		wtDir := rc.Git.WorktreeDir
+	// Create a WorktreeManager when worktree isolation is enabled.
+	if s.rc != nil && s.rc.Git.WorktreeEnabled {
+		wtDir := s.rc.Git.WorktreeDir
 		if wtDir == "" {
-			wtDir = filepath.Join(gitCwd, ".go-cli", "worktrees")
+			wtDir = filepath.Join(s.gitCwd, ".go-cli", "worktrees")
 		}
-		worktreeMgr = tools.NewWorktreeManager(gitTool, wtDir)
-		if err := worktreeMgr.EnsureBaseDir(); err != nil {
-			logger.Warn("assemble_worktree_base_dir_failed", "err", err)
+		s.worktreeMgr = tools.NewWorktreeManager(s.gitTool, wtDir)
+		if err := s.worktreeMgr.EnsureBaseDir(); err != nil {
+			s.logger.Warn("assemble_worktree_base_dir_failed", "err", err)
 		}
-		// Wire cleanup so worktrees are removed on exit.
-		prevCleanup := cleanup
-		cleanup = func() {
-			if err := worktreeMgr.Cleanup(context.Background()); err != nil {
-				logger.Warn("assemble_worktree_cleanup_failed", "err", err)
+		wtMgr := s.worktreeMgr
+		s.cleanupList = append(s.cleanupList, func() {
+			if err := wtMgr.Cleanup(context.Background()); err != nil {
+				s.logger.Warn("assemble_worktree_cleanup_failed", "err", err)
 			}
-			prevCleanup()
-		}
+		})
 	}
 
-	// Wrap the UnifiedDiffGenerator with GitDiffGenerator so that /diff uses
-	// `git diff` when inside a git repository (better rename/binary handling)
-	// and falls back to the LCS-based diff otherwise.
-	diffGen = tools.NewGitDiffGenerator(gitTool, diffGen)
+	// Wrap the UnifiedDiffGenerator with GitDiffGenerator.
+	s.diffGen = tools.NewGitDiffGenerator(s.gitTool, s.diffGen)
 
 	regOpts := []tools.RegisterDefaultsOption{
-		tools.WithRegisteredFileTracker(fileTracker),
-		tools.WithRegisteredDiffGenerator(diffGen),
+		tools.WithRegisteredFileTracker(s.fileTracker),
+		tools.WithRegisteredDiffGenerator(s.diffGen),
 		tools.WithRegisteredBashSandbox(bashSandbox),
 		tools.WithRegisteredResourceLimits(resourceLimits),
-		tools.WithRegisteredGitTool(gitTool),
+		tools.WithRegisteredGitTool(s.gitTool),
 	}
-	// When a builtin whitelist is configured, only the named builtins are
-	// registered; otherwise all builtins are registered (default behavior).
-	if rc != nil && len(rc.Tools.Builtin) > 0 {
-		regOpts = append(regOpts, tools.WithRegisteredBuiltinWhitelist(rc.Tools.Builtin))
+	if s.rc != nil && len(s.rc.Tools.Builtin) > 0 {
+		regOpts = append(regOpts, tools.WithRegisteredBuiltinWhitelist(s.rc.Tools.Builtin))
 	}
-	if registerErr := tools.RegisterDefaults(ctx, tr, regOpts...); registerErr != nil {
-		cleanup()
-		return nil, fmt.Errorf("assemble: register tools: %w", registerErr)
+	if registerErr := tools.RegisterDefaults(s.ctx, s.tr, regOpts...); registerErr != nil {
+		return fmt.Errorf("assemble: register tools: %w", registerErr)
 	}
 
-	// 2b. Register config-driven custom command tools. They are registered
-	// after the builtins so they extend the toolset; custom tool names that
-	// collide with an existing (builtin) tool are skipped with a warning.
-	registerCustomTools(ctx, rc, tr, logger)
+	// Register config-driven custom command tools.
+	registerCustomTools(s.ctx, s.rc, s.tr, s.logger)
 
-	// lspClientField and lspWorkspaceRoot hold the LSP client and workspace
-	// root for the AgentAssembly return value. They remain nil/empty when no
-	// LSP server is configured or startup fails.
-	var lspClientField tools.LSPClient
-	var lspWorkspaceRoot string
-
-	// 3. Register MCP tools.
-	if mcpErr := registerMCPTools(ctx, rc, dtr); mcpErr != nil {
-		logger.Warn("assemble_mcp_failed", "err", mcpErr)
+	// Register MCP tools.
+	if mcpErr := registerMCPTools(s.ctx, s.rc, dtr); mcpErr != nil {
+		s.logger.Warn("assemble_mcp_failed", "err", mcpErr)
 	}
 
-	// 3b. Register LSP tool (if configured). Supports both the legacy
-	// single-server format (ServerCommand/WorkspaceRoot) and the new
-	// multi-server format (Servers). When multiple servers are configured,
-	// a MultiLSPClient routes requests by file extension. A single server
-	// uses a plain DefaultLSPClient (backward compatible). LSP server
-	// startup failures are logged as warnings and do not crash the main
-	// flow (graceful degradation).
-	if rc != nil && (len(rc.LSP.ServerCommand) > 0 || len(rc.LSP.Servers) > 0) {
-		lspClient, lspStarted := buildLSPClient(ctx, rc, logger)
+	// Register LSP tool (if configured).
+	if s.rc != nil && (len(s.rc.LSP.ServerCommand) > 0 || len(s.rc.LSP.Servers) > 0) {
+		lspClient, lspStarted := buildLSPClient(s.ctx, s.rc, s.logger)
 		if lspClient != nil && lspStarted {
-			if regErr := tr.Register(ctx, tools.NewLSPTool(lspClient)); regErr != nil {
-				logger.Warn("assemble_lsp_register_failed", "err", regErr)
+			if regErr := s.tr.Register(s.ctx, tools.NewLSPTool(lspClient)); regErr != nil {
+				s.logger.Warn("assemble_lsp_register_failed", "err", regErr)
 				_ = lspClient.Shutdown(context.Background()) //nolint:errcheck
 			} else {
-				lspClientField = lspClient
-				lspWorkspaceRoot = resolveLSPWorkspaceRoot(rc)
-				lspCleanup := cleanup
-				cleanup = func() {
-					_ = lspClient.Shutdown(context.Background()) //nolint:errcheck
-					lspCleanup()
-				}
-				logger.Info("assemble_lsp_ready")
+				s.lspClientField = lspClient
+				s.lspWorkspaceRoot = resolveLSPWorkspaceRoot(s.rc)
+				client := lspClient
+				s.cleanupList = append(s.cleanupList, func() {
+					_ = client.Shutdown(context.Background()) //nolint:errcheck
+				})
+				s.logger.Info("assemble_lsp_ready")
 			}
 		}
 	}
 
-	// 3c. Register remote bash tool (if SSH hosts are configured).
-	if rc != nil && len(rc.Remote.Hosts) > 0 {
-		remoteTool := buildRemoteBashTool(ctx, rc, logger)
+	// Register remote bash tool (if SSH hosts are configured).
+	if s.rc != nil && len(s.rc.Remote.Hosts) > 0 {
+		remoteTool := buildRemoteBashTool(s.ctx, s.rc, s.logger)
 		if remoteTool != nil {
-			if regErr := tr.Register(ctx, remoteTool); regErr != nil {
-				logger.Warn("assemble_remote_bash_register_failed", "err", regErr)
+			if regErr := s.tr.Register(s.ctx, remoteTool); regErr != nil {
+				s.logger.Warn("assemble_remote_bash_register_failed", "err", regErr)
 			} else {
-				logger.Info("assemble_remote_bash_ready", "default_host", rc.Remote.DefaultHost)
+				s.logger.Info("assemble_remote_bash_ready", "default_host", s.rc.Remote.DefaultHost)
 			}
 		}
 	}
 
-	// 4. Register skill tools.
-	skillInfos := registerSkillTools(ctx, rc, dtr)
+	// Register skill tools.
+	s.skillInfos = registerSkillTools(s.ctx, s.rc, dtr)
 
-	// 4b. Load and initialize extensions (if configured). Extension-provided
-	// tools are registered into the tool registry before the middleware wraps
-	// it, so they participate in approval gates and production wrappers.
-	// Extension hooks and middleware are bridged into the runtime via adapters
-	// (extension_bridge.go) and wired into the HookChain and MiddlewareChain
-	// assembled below.
-	var extHooks []core.Hook
-	var extMiddleware []core.Middleware
-	if rc != nil && rc.Extensions.Enabled != nil && *rc.Extensions.Enabled && len(rc.Extensions.PluginPaths) > 0 {
+	return nil
+}
+
+// assembleExtensions loads and initializes extensions, registering their tools,
+// hooks, and middleware. It also builds the hook chain.
+func (s *assembleState) assembleExtensions() {
+	if s.rc != nil && s.rc.Extensions.Enabled != nil && *s.rc.Extensions.Enabled && len(s.rc.Extensions.PluginPaths) > 0 {
 		pm := extension.NewPluginManager(extension.NewDefaultPluginLoader())
-		_ = pm.Load(ctx, rc.Extensions.PluginPaths) //nolint:errcheck
-		_ = pm.Init(ctx)                            //nolint:errcheck
+		_ = pm.Load(s.ctx, s.rc.Extensions.PluginPaths) //nolint:errcheck
+		_ = pm.Init(s.ctx)                            //nolint:errcheck
 		for _, t := range pm.Tools() {
-			if regErr := tr.Register(ctx, t); regErr != nil {
-				logger.Warn("assemble_extension_tool_register_failed", "tool", t.Name(), "err", regErr)
+			if regErr := s.tr.Register(s.ctx, t); regErr != nil {
+				s.logger.Warn("assemble_extension_tool_register_failed", "tool", t.Name(), "err", regErr)
 			}
 		}
 		for _, h := range pm.Hooks() {
-			extHooks = append(extHooks, newExtensionHookAdapter(h))
+			s.extHooks = append(s.extHooks, newExtensionHookAdapter(h))
 		}
 		for _, m := range pm.Middleware() {
-			extMiddleware = append(extMiddleware, newExtensionMiddlewareAdapter(m))
+			s.extMiddleware = append(s.extMiddleware, newExtensionMiddlewareAdapter(m))
 		}
-		logger.Info("assemble_extensions_ready", "extensions", len(pm.Extensions()), "paths", len(rc.Extensions.PluginPaths), "hooks", len(extHooks), "middleware", len(extMiddleware))
-		extCleanup := cleanup
-		cleanup = func() {
+		s.logger.Info("assemble_extensions_ready", "extensions", len(pm.Extensions()), "paths", len(s.rc.Extensions.PluginPaths), "hooks", len(s.extHooks), "middleware", len(s.extMiddleware))
+		s.cleanupList = append(s.cleanupList, func() {
 			_ = pm.Shutdown(context.Background()) //nolint:errcheck
-			extCleanup()
-		}
+		})
 	}
 
-	// 4c. Build the hook chain from extension-registered hooks. The chain is
-	// created early so it can be wired into both the tool middleware
-	// (BeforeToolCall/AfterToolCall) and the agent-level middleware
-	// (BeforeRun/AfterRun), as well as the TurnRunner for lifecycle events.
-	hookChain := core.NewHookChain(extHooks...)
+	s.hookChain = core.NewHookChain(s.extHooks...)
+}
 
-	// 5. Wire approval + mutation middleware via decorator pattern.
+// assembleApproval wires the approval middleware and mutation queue, wrapping
+// the tool registry.
+func (s *assembleState) assembleApproval() {
 	var classifier approval.ApprovalClassifier
 	var approvalCallback approval.ApprovalCallback
 	var autoApprove bool
 
-	if ac.approvalCh != nil {
-		// TUI-based approval: the TeaApprovalCallback sends requests through the
-		// channel for the BubbleteaApp to render interactively. A diff preview
-		// function is wired so edit/write approvals show the proposed change.
+	if s.ac.approvalCh != nil {
 		classifier = approval.NewSafetyPolicyClassifier([]string{"bash"})
-		approvalCallback = approval.NewTeaApprovalCallback(ac.approvalCh,
-			approval.WithDiffPreviewFunc(buildDiffPreviewFn(diffGen)),
+		approvalCallback = approval.NewTeaApprovalCallback(s.ac.approvalCh,
+			approval.WithDiffPreviewFunc(buildDiffPreviewFn(s.diffGen)),
 		)
 		autoApprove = false
 	} else {
-		// Headless mode: branch by approveMode.
-		switch ac.approveMode {
+		switch s.ac.approveMode {
 		case ApproveAuto:
 			classifier = approval.AllowAllClassifier{}
 			approvalCallback = nil
@@ -581,10 +805,8 @@ func AssembleAgent(
 			classifier = approval.DenyAllClassifier{}
 			approvalCallback = nil
 			autoApprove = false
-		default: // ApproveAsk
+		default:
 			classifier = approval.NewSafetyPolicyClassifier([]string{"bash"})
-			// Fallback: stdin readline (auto-denies in non-interactive mode).
-			// Use stderr so approval prompts don't corrupt JSON/stream output.
 			approvalCallback = approval.NewInteractiveApprovalCallback(os.Stdin, os.Stderr)
 			autoApprove = false
 		}
@@ -592,63 +814,56 @@ func AssembleAgent(
 
 	approvalStore := approval.NewInMemoryApprovalStore()
 	approvalCache := approval.NewApprovalCache("")
-	modeResolver := approval.NewDefaultPermissionModeResolver()
+	s.modeResolver = approval.NewDefaultPermissionModeResolver()
 
 	var mwOpts []approval.Option
 	mwOpts = append(mwOpts,
 		approval.WithAutoApprove(autoApprove),
 		approval.WithCache(approvalCache),
 	)
-	// Only wire the PermissionModeResolver in TUI mode. In headless mode the
-	// resolver overrides effectiveClassifier() and would replace the
-	// ApproveMode-selected classifier with a default SafetyPolicyClassifier(nil)
-	// that allows everything, defeating --approve deny.
-	if ac.approvalCh != nil {
-		mwOpts = append(mwOpts, approval.WithPermissionModeResolver(modeResolver))
+	if s.ac.approvalCh != nil {
+		mwOpts = append(mwOpts, approval.WithPermissionModeResolver(s.modeResolver))
 	}
 	if approvalCallback != nil {
 		mwOpts = append(mwOpts, approval.WithCallback(approvalCallback))
 	}
 	approvalMW := approval.NewApprovalMiddleware(classifier, approvalStore, mwOpts...)
-	reg.RegisterApprovalClassifier(&approvalClassifierAdapter{inner: classifier})
-	reg.RegisterApprovalStore(&approvalStoreAdapter{inner: approvalStore})
+	s.reg.RegisterApprovalClassifier(&approvalClassifierAdapter{inner: classifier})
+	s.reg.RegisterApprovalStore(&approvalStoreAdapter{inner: approvalStore})
 	mutationQueue := tools.NewDefaultFileMutationQueue(
-		tools.WithMutationFileTracker(fileTracker),
-		tools.WithMutationDiffGenerator(diffGen),
+		tools.WithMutationFileTracker(s.fileTracker),
+		tools.WithMutationDiffGenerator(s.diffGen),
 	)
-	tr = tools.NewMiddlewareToolRegistry(tr, approvalMW.WrapToolCall, tools.NewMutationQueueWrapper(mutationQueue))
-	reg.RegisterToolRegistry(tr)
+	s.tr = tools.NewMiddlewareToolRegistry(s.tr, approvalMW.WrapToolCall, tools.NewMutationQueueWrapper(mutationQueue))
+	s.reg.RegisterToolRegistry(s.tr)
 
-	// Close the mutation queue on cleanup so pending mutations are flushed and
-	// worker goroutines are released.
-	mqCleanup := cleanup
-	cleanup = func() {
-		if cq, ok := mutationQueue.(*tools.DefaultFileMutationQueue); ok {
+	mq := mutationQueue
+	s.cleanupList = append(s.cleanupList, func() {
+		if cq, ok := mq.(*tools.DefaultFileMutationQueue); ok {
 			_ = cq.Close() //nolint:errcheck
 		}
-		mqCleanup()
-	}
+	})
+}
 
-	// 6. Wire production resilience (retry + cost tracking).
+// assembleProductionResilience wires retry, cost tracking, circuit breaker,
+// idempotent cache, audit log, telemetry, and the plan-mode controller. It
+// wraps the tool registry with production middleware.
+func (s *assembleState) assembleProductionResilience() {
 	retryPolicy := production.NewDefaultRetryPolicy(production.RetryConfig{
 		MaxAttempts: 3,
 		BaseDelay:   time.Second,
 		MaxDelay:    10 * time.Second,
 	})
-	costTracker := production.NewCostTracker(nil)
-	statsRegistry := production.NewStatsRegistry()
-	pw := production.NewProductionModelWrapper(
-		production.WithWrapperCostTracker(costTracker),
-		production.WithWrapperStatsRegistry(statsRegistry),
-		production.WithWrapperModelName(modelName),
-		production.WithWrapperSessionID(sessionID),
+	s.costTracker = production.NewCostTracker(nil)
+	s.statsRegistry = production.NewStatsRegistry()
+	s.pw = production.NewProductionModelWrapper(
+		production.WithWrapperCostTracker(s.costTracker),
+		production.WithWrapperStatsRegistry(s.statsRegistry),
+		production.WithWrapperModelName(s.modelName),
+		production.WithWrapperSessionID(s.sessionID),
 	)
 
-	// 6a. Build the 7-layer model middleware chain (failover -> retry ->
-	// timeout -> sanitize -> loop detection -> validate -> overflow). This
-	// replaces the production wrapper's built-in retry so that retry is
-	// composed as a discrete middleware layer alongside the others.
-	modelChain := llm.NewStandardMiddlewareChain(
+	s.modelChain = llm.NewStandardMiddlewareChain(
 		llm.NewFailoverModelMiddleware(),
 		llm.NewRetryModelMiddleware(llm.WithRetryPolicy(&retryPolicyAdapter{inner: retryPolicy})),
 		llm.NewTimeoutModelMiddleware(),
@@ -658,117 +873,109 @@ func AssembleAgent(
 		llm.NewOverflowRecoveryMiddleware(),
 	)
 
-	// 6b. Wire circuit breaker to protect the LLM model from cascading failures.
+	// Wire circuit breaker.
 	cbCfg := production.CircuitBreakerConfig{}
-	if rc != nil {
-		cbCfg.FailureThreshold = rc.Production.CircuitBreaker.Threshold
-		cbCfg.RecoveryTimeout = rc.Production.CircuitBreaker.ResetTimeout
+	if s.rc != nil {
+		cbCfg.FailureThreshold = s.rc.Production.CircuitBreaker.Threshold
+		cbCfg.RecoveryTimeout = s.rc.Production.CircuitBreaker.ResetTimeout
 	}
-	circuitBreaker := production.NewDefaultCircuitBreaker(cbCfg,
+	s.circuitBreaker = production.NewDefaultCircuitBreaker(cbCfg,
 		production.WithName("model-breaker"),
 	)
-	production.RegisterCircuitBreaker(circuitBreaker)
+	production.RegisterCircuitBreaker(s.circuitBreaker)
 
-	// 6c. Wire idempotent cache, audit log, and telemetry for tool calls.
-	idempotentCache := production.NewFIFOIdempotentCache(1024)
-	production.RegisterIdempotentCache(idempotentCache)
+	// Wire idempotent cache, audit log, and telemetry.
+	s.idempotentCache = production.NewFIFOIdempotentCache(1024)
+	production.RegisterIdempotentCache(s.idempotentCache)
 
-	telemetry := production.NewDefaultTelemetry()
-	production.RegisterTelemetry(telemetry)
+	s.telemetry = production.NewDefaultTelemetry()
+	production.RegisterTelemetry(s.telemetry)
 
-	var auditLog production.AuditLog
-	if rc != nil && rc.Production.Audit.Enabled != nil && *rc.Production.Audit.Enabled {
-		auditPath := rc.Production.Audit.Path
+	if s.rc != nil && s.rc.Production.Audit.Enabled != nil && *s.rc.Production.Audit.Enabled {
+		auditPath := s.rc.Production.Audit.Path
 		if auditPath == "" {
 			if home, homeErr := os.UserHomeDir(); homeErr == nil && home != "" {
 				auditPath = filepath.Join(home, ".go-cli", "audit.jsonl")
 			}
 		}
 		if auditPath != "" {
-			auditLog = production.NewDefaultAuditLog(auditPath)
-			production.RegisterAuditLog(auditLog)
+			s.auditLog = production.NewDefaultAuditLog(auditPath)
+			production.RegisterAuditLog(s.auditLog)
 		}
 	}
 
-	// 6d. Wrap tool registry with idempotent cache + audit + telemetry so that
-	// identical tool calls return cached results and every call is recorded.
-	// The hook-aware middleware is added so BeforeToolCall/AfterToolCall
-	// lifecycle hooks fire around every tool execution.
-	// Argument preparation (path normalization + schema validation) is the
-	// outermost wrapper so arguments are prepared before any other middleware
-	// sees them. The schema validator uses the underlying (unwrapped) registry
-	// to avoid recursive lookups through the middleware chain.
-	hookToolMW := core.NewHookAwareToolMiddleware(hookChain)
-	planCtrl := core.NewDefaultPlanModeController()
+	// Wrap tool registry with production middleware.
+	hookToolMW := core.NewHookAwareToolMiddleware(s.hookChain)
+	s.planCtrl = core.NewDefaultPlanModeController()
 	pathNormalizer := tools.NewPathNormalizer("")
-	schemaValidator := tools.NewSchemaValidator(underlyingReg)
-	tr = tools.NewMiddlewareToolRegistry(tr,
-		core.NewPlanModeToolWrapper(planCtrl),
+	schemaValidator := tools.NewSchemaValidator(s.underlyingReg)
+	s.tr = tools.NewMiddlewareToolRegistry(s.tr,
+		core.NewPlanModeToolWrapper(s.planCtrl),
 		tools.WithArgumentPreparation(pathNormalizer, schemaValidator),
-		newProductionToolWrapper(idempotentCache, auditLog, telemetry, sessionID),
+		newProductionToolWrapper(s.idempotentCache, s.auditLog, s.telemetry, s.sessionID),
 		hookToolMW.WrapToolCall,
 	)
-	reg.RegisterToolRegistry(tr)
+	s.reg.RegisterToolRegistry(s.tr)
+}
 
-	// 7. Wire output guards (PII + code injection + length).
-	guardChain := production.NewOutputGuardChain([]production.OutputGuard{
+// assembleOutputGuards wires the output guard chain (PII + code injection + length).
+func (s *assembleState) assembleOutputGuards() {
+	s.guardChain = production.NewOutputGuardChain([]production.OutputGuard{
 		production.NewPIIOutputGuard(),
 		production.NewCodeInjectionGuard(),
 		production.NewLengthGuard(100000),
 	})
+}
 
-	// 8. Wire real SubAgent execution (replaces simulated runner).
-	subAgentFactory := core.NewRealSubAgentFactory(model, llm.NewProviderRegistry(), tr,
-		core.WithModelWrapper(newModelWrapperWithChain(pw, modelChain, circuitBreaker, guardChain, telemetry)),
+// assembleSubAgent wires the real SubAgent factory, dispatcher, and ACP
+// multi-agent communication.
+func (s *assembleState) assembleSubAgent() {
+	subAgentFactory := core.NewRealSubAgentFactory(s.model, llm.NewProviderRegistry(), s.tr,
+		core.WithModelWrapper(newModelWrapperWithChain(s.pw, s.modelChain, s.circuitBreaker, s.guardChain, s.telemetry)),
 	)
 	core.RegisterSubAgentFactory(subAgentFactory)
 	dispatcher := core.NewDefaultSubagentDispatcher(nil)
-	if subErr := tr.Register(ctx, core.NewSubagentTool(dispatcher)); subErr != nil {
-		logger.Warn("assemble_subagent_tool_failed", "err", subErr)
+	if subErr := s.tr.Register(s.ctx, core.NewSubagentTool(dispatcher)); subErr != nil {
+		s.logger.Warn("assemble_subagent_tool_failed", "err", subErr)
 	}
 
-	// 8b. Wire ACP multi-agent communication (if configured). When the config
-	// supplies a transport and at least one endpoint, create an ACPClient,
-	// connect it, and build an ACPMiddlewareAdapter that routes inbound ACP
-	// messages to the SubagentDispatcher above.
-	var acpAdapter *acp.ACPMiddlewareAdapter
-	var acpClient acp.ACPClient
-	if rc != nil && rc.ACP.Transport != "" && len(rc.ACP.Endpoints) > 0 {
-		switch rc.ACP.Transport {
+	// Wire ACP multi-agent communication (if configured).
+	if s.rc != nil && s.rc.ACP.Transport != "" && len(s.rc.ACP.Endpoints) > 0 {
+		switch s.rc.ACP.Transport {
 		case "stdio":
-			acpClient = acp.NewStdioAdapter(os.Stdin, os.Stdout)
+			s.acpClient = acp.NewStdioAdapter(os.Stdin, os.Stdout)
 		case "grpc":
-			acpClient = acp.NewGRPCAdapter(rc.ACP.Endpoints[0])
+			s.acpClient = acp.NewGRPCAdapter(s.rc.ACP.Endpoints[0])
 		default:
-			logger.Warn("assemble_acp_unknown_transport", "transport", rc.ACP.Transport)
+			s.logger.Warn("assemble_acp_unknown_transport", "transport", s.rc.ACP.Transport)
 		}
-		if acpClient != nil {
-			if connErr := acpClient.Connect(ctx); connErr != nil {
-				logger.Warn("assemble_acp_connect_failed", "err", connErr)
-				acpClient = nil
+		if s.acpClient != nil {
+			if connErr := s.acpClient.Connect(s.ctx); connErr != nil {
+				s.logger.Warn("assemble_acp_connect_failed", "err", connErr)
+				s.acpClient = nil
 			} else {
-				acpMW := acp.NewACPMiddleware("acp-bridge", acpClient)
-				acpAdapter = acp.NewACPMiddlewareAdapter(acpMW, dispatcher, acpClient)
-				logger.Info("assemble_acp_connected", "transport", rc.ACP.Transport)
+				acpMW := acp.NewACPMiddleware("acp-bridge", s.acpClient)
+				s.acpAdapter = acp.NewACPMiddlewareAdapter(acpMW, dispatcher, s.acpClient)
+				s.logger.Info("assemble_acp_connected", "transport", s.rc.ACP.Transport)
 			}
 		}
 	}
+}
 
-	// 9. Register remaining unconnected tools (todo, task, goal, web, plan_mode, etc.).
+// assembleExtraTools registers remaining tools (todo, task, goal, web, plan_mode, etc.).
+func (s *assembleState) assembleExtraTools() {
 	todoStore := tools.NewTodoStore()
 	taskStore := tools.NewTaskStore()
 	goalStore, _ := tools.NewDefaultGoalStore("") //nolint:errcheck
-	hitlEmitter := &cliHITLEmitter{out: out}
+	s.hitlEmitter = &cliHITLEmitter{out: s.out}
 
-	// Build the web search tool from config. Default is MockSearchProvider;
-	// "fetch" uses DuckDuckGo HTML scraping, "brave" uses the Brave API.
 	webSearchTool := tools.NewWebSearchTool()
-	if rc != nil {
-		switch rc.WebSearch.Provider {
+	if s.rc != nil {
+		switch s.rc.WebSearch.Provider {
 		case "brave":
-			if rc.WebSearch.APIKey != "" {
+			if s.rc.WebSearch.APIKey != "" {
 				webSearchTool = tools.NewWebSearchTool(tools.WithSearchProvider(
-					tools.NewBraveSearchProvider(rc.WebSearch.APIKey),
+					tools.NewBraveSearchProvider(s.rc.WebSearch.APIKey),
 				))
 			}
 		case "fetch":
@@ -788,71 +995,68 @@ func AssembleAgent(
 		tools.NewGoalUpdateTool(goalStore),
 		tools.NewGoalListTool(goalStore, taskStore),
 		tools.NewGoalGetTool(goalStore, taskStore),
-		tools.NewWebFetchTool(tools.WithHTMLConverter(htmlConverter)),
+		tools.NewWebFetchTool(tools.WithHTMLConverter(s.htmlConverter)),
 		webSearchTool,
-		core.NewAskUserQuestionTool(hitlEmitter, 30*time.Second),
-		tools.NewEnterPlanModeTool(planCtrl),
-		tools.NewExitPlanModeTool(planCtrl),
-		tools.NewGitPRCreateTool(gitCwd),
+		core.NewAskUserQuestionTool(s.hitlEmitter, 30*time.Second),
+		tools.NewEnterPlanModeTool(s.planCtrl),
+		tools.NewExitPlanModeTool(s.planCtrl),
+		tools.NewGitPRCreateTool(s.gitCwd),
 	}
 	for _, t := range extraTools {
-		if regErr := tr.Register(ctx, t); regErr != nil {
-			logger.Warn("assemble_tool_register_failed", "tool", t.Name(), "err", regErr)
+		if regErr := s.tr.Register(s.ctx, t); regErr != nil {
+			s.logger.Warn("assemble_tool_register_failed", "tool", t.Name(), "err", regErr)
 		}
 	}
-	// tool_search needs visibility into all registered tools, so register last.
-	if searchErr := tr.Register(ctx, tools.NewToolSearchTool(tr)); searchErr != nil {
-		logger.Warn("assemble_tool_register_failed", "tool", "tool_search", "err", searchErr)
+	if searchErr := s.tr.Register(s.ctx, tools.NewToolSearchTool(s.tr)); searchErr != nil {
+		s.logger.Warn("assemble_tool_register_failed", "tool", "tool_search", "err", searchErr)
 	}
+}
 
-	// 10. Build loop agent with model wrapper.
-	steerCh := make(chan string, 16)
-	followUpCh := make(chan string, 16)
-	runSlotGuard := core.NewDefaultRunSlotGuard()
+// assembleLoopAgent builds the LoopAgent with model wrapper, memory store,
+// and system prompt builder.
+func (s *assembleState) assembleLoopAgent() {
+	s.steerCh = make(chan string, 16)
+	s.followUpCh = make(chan string, 16)
+	s.runSlotGuard = core.NewDefaultRunSlotGuard()
 	loopOpts := []core.LoopOption{
-		core.WithLLM(model),
-		core.WithTools(tr),
-		core.WithModelWrapper(newModelWrapperWithChain(pw, modelChain, circuitBreaker, guardChain, telemetry)),
+		core.WithLLM(s.model),
+		core.WithTools(s.tr),
+		core.WithModelWrapper(newModelWrapperWithChain(s.pw, s.modelChain, s.circuitBreaker, s.guardChain, s.telemetry)),
 		core.WithExecutionMode(core.ExecutionModeParallel),
-		core.WithTracer(tracer),
-		core.WithSteeringChannel(steerCh),
-		core.WithFollowUpChannel(followUpCh),
-		core.WithThinkingConfig(llm.ThinkingConfigForLevel(thinkingLevel)),
+		core.WithTracer(s.tracer),
+		core.WithSteeringChannel(s.steerCh),
+		core.WithFollowUpChannel(s.followUpCh),
+		core.WithThinkingConfig(llm.ThinkingConfigForLevel(s.thinkingLevel)),
 	}
-	if rc != nil && rc.Agent.MaxIterations != 0 {
-		loopOpts = append(loopOpts, core.WithMaxIterations(rc.Agent.MaxIterations))
+	if s.rc != nil && s.rc.Agent.MaxIterations != 0 {
+		loopOpts = append(loopOpts, core.WithMaxIterations(s.rc.Agent.MaxIterations))
 	}
-	// Allow config to override parallel execution to sequential.
-	if rc != nil && rc.Tools.Parallel != nil && !*rc.Tools.Parallel {
+	if s.rc != nil && s.rc.Tools.Parallel != nil && !*s.rc.Tools.Parallel {
 		loopOpts = append(loopOpts, core.WithExecutionMode(core.ExecutionModeSequential))
 	}
 
-	// 10b. Wire memory store for cross-session memory persistence. The store
-	// is backed by a JSONL file in the config directory (~/.go-cli/ by
-	// default). Existing memories are loaded and injected into the system
-	// prompt so the agent is aware of them from the first turn.
-	var memStore *memory.FileMemoryStore
+	// Wire memory store for cross-session memory persistence.
 	memoryPath := ""
 	if home, homeErr := os.UserHomeDir(); homeErr == nil && home != "" {
 		memoryPath = filepath.Join(home, ".go-cli", "memories.jsonl")
 	}
 	if memoryPath != "" {
 		if mkErr := os.MkdirAll(filepath.Dir(memoryPath), 0o755); mkErr != nil {
-			logger.Warn("assemble_memory_mkdir_failed", "err", mkErr)
+			s.logger.Warn("assemble_memory_mkdir_failed", "err", mkErr)
 		}
 		ms, msErr := memory.NewFileMemoryStore(memoryPath)
 		if msErr != nil {
-			logger.Warn("assemble_memory_store_failed", "err", msErr)
+			s.logger.Warn("assemble_memory_store_failed", "err", msErr)
 		} else {
-			memStore = ms
+			s.memStore = ms
 		}
 	}
 
 	var memoryEntries []core.MemoryEntry
-	if memStore != nil {
-		memories, memErr := memStore.List(ctx)
+	if s.memStore != nil {
+		memories, memErr := s.memStore.List(s.ctx)
 		if memErr != nil {
-			logger.Warn("assemble_memory_list_failed", "err", memErr)
+			s.logger.Warn("assemble_memory_list_failed", "err", memErr)
 		}
 		for _, m := range memories {
 			memoryEntries = append(memoryEntries, core.MemoryEntry{
@@ -863,262 +1067,117 @@ func AssembleAgent(
 		}
 	}
 
-	// Create memory extractor for LLM-based fact extraction. The extractor
-	// uses the small model when available (extraction is a lightweight task),
-	// falling back to the primary model. The store is used for deduplication.
-	var memExtractor memory.MemoryExtractor
-	if memStore != nil {
-		extractModel := model
-		if smallModel != nil {
-			extractModel = smallModel
+	// Create memory extractor.
+	if s.memStore != nil {
+		extractModel := s.model
+		if s.smallModel != nil {
+			extractModel = s.smallModel
 		}
-		memExtractor = memory.NewLLMMemoryExtractor(extractModel, memStore)
+		s.memExtractor = memory.NewLLMMemoryExtractor(extractModel, s.memStore)
 	}
 
-	// 10c. Wire dynamic system prompt builder with project context.
-	contextLoader := core.NewDefaultProjectContextLoader()
-	promptBuilder := core.NewDefaultSystemPromptBuilder()
+	// Wire dynamic system prompt builder with project context.
+	s.contextLoader = core.NewDefaultProjectContextLoader()
+	s.promptBuilder = core.NewDefaultSystemPromptBuilder()
 	cwd, _ := os.Getwd() //nolint:errcheck
-	contextFiles, ctxErr := contextLoader.Load(ctx, cwd)
+	contextFiles, ctxErr := s.contextLoader.Load(s.ctx, cwd)
 	if ctxErr != nil {
-		logger.Warn("assemble_context_load_failed", "err", ctxErr)
+		s.logger.Warn("assemble_context_load_failed", "err", ctxErr)
 	}
 	var customPrompt, appendPrompt string
-	if rc != nil {
-		customPrompt = rc.Agent.SystemPrompt
-		appendPrompt = rc.Agent.AppendSystemPrompt
+	if s.rc != nil {
+		customPrompt = s.rc.Agent.SystemPrompt
+		appendPrompt = s.rc.Agent.AppendSystemPrompt
 	}
 	loopOpts = append(loopOpts,
-		core.WithSystemPromptBuilder(promptBuilder),
+		core.WithSystemPromptBuilder(s.promptBuilder),
 		core.WithSystemPromptOptions(core.SystemPromptOptions{
 			Cwd:          cwd,
 			ContextFiles: contextFiles,
-			Skills:       skillInfos,
+			Skills:       s.skillInfos,
 			Memories:     memoryEntries,
 			CustomPrompt: customPrompt,
 			AppendPrompt: appendPrompt,
 		}),
 	)
 
-	var loop core.AgentLoop = core.NewLoopAgent(loopOpts...)
-	// Keep a reference to the raw LoopAgent so the REPL can call Pause/Resume.
-	var loopAgent *core.LoopAgent
-	if la, ok := loop.(*core.LoopAgent); ok {
-		loopAgent = la
-		loopAgent.WithToolSearchThreshold(30)
+	s.loop = core.NewLoopAgent(loopOpts...)
+	if la, ok := s.loop.(*core.LoopAgent); ok {
+		s.loopAgent = la
+		s.loopAgent.WithToolSearchThreshold(30)
 	}
+}
 
-	// 10b. Wire loop detector + system reminder injector.
+// assembleMiddleware wires the loop detector, reminder manager, failure
+// synthesizer, and applies the middleware chain around the loop agent.
+func (s *assembleState) assembleMiddleware() {
 	ldCfg := production.LoopDetectionConfig{}
-	if rc != nil {
-		ldCfg.EditThreshold = rc.Production.LoopDetector.EditThreshold
-		ldCfg.TestFailureThreshold = rc.Production.LoopDetector.TestFailureThreshold
-		ldCfg.SameToolCallThreshold = rc.Production.LoopDetector.SameToolCallThreshold
+	if s.rc != nil {
+		ldCfg.EditThreshold = s.rc.Production.LoopDetector.EditThreshold
+		ldCfg.TestFailureThreshold = s.rc.Production.LoopDetector.TestFailureThreshold
+		ldCfg.SameToolCallThreshold = s.rc.Production.LoopDetector.SameToolCallThreshold
 	}
-	loopDetector := production.NewDefaultLoopDetector(ldCfg)
-	production.RegisterLoopDetector(loopDetector)
-	reminderMgr := core.NewDefaultSystemReminderManager()
+	s.loopDetector = production.NewDefaultLoopDetector(ldCfg)
+	production.RegisterLoopDetector(s.loopDetector)
+	s.reminderMgr = core.NewDefaultSystemReminderManager()
+	s.failureSynthesizer = core.NewDefaultFailureTurnSynthesizer()
 
-	// 10c. Wire failure synthesis. The hook chain was created earlier (step
-	// 4c) so it can be shared between the tool middleware, the agent-level
-	// middleware, and the TurnRunner.
-	failureSynthesizer := core.NewDefaultFailureTurnSynthesizer()
-
-	// 11. Apply middleware chain (onion model) around the loop agent.
-	// Order (outermost first): logging -> loop-detector -> plan-mode ->
-	// system-reminder -> failure-synthesis -> hook. The loop detector
-	// observes events after Run and registers a SystemReminder; the
-	// SystemReminderInjector injects it on the next turn. FailureSynthesis
-	// retries recoverable errors once with a synthesized message. The Hook
-	// middleware runs pre/post-turn hooks. When ACP is configured the
-	// ACPMiddlewareAdapter is appended innermost so it runs closest to the
-	// core loop while still routing inbound peer messages.
 	chain := []core.Middleware{
-		core.NewLoggingMiddleware(ac.agentName),
-		&loopDetectorMiddleware{detector: loopDetector, manager: reminderMgr},
-		core.NewPlanModeMiddleware(planCtrl),
-		core.NewSystemReminderInjector(reminderMgr),
-		core.NewFailureSynthesisMiddleware(failureSynthesizer),
-		core.NewHookMiddleware(hookChain),
+		core.NewLoggingMiddleware(s.ac.agentName),
+		&loopDetectorMiddleware{detector: s.loopDetector, manager: s.reminderMgr},
+		core.NewPlanModeMiddleware(s.planCtrl),
+		core.NewSystemReminderInjector(s.reminderMgr),
+		core.NewFailureSynthesisMiddleware(s.failureSynthesizer),
+		core.NewHookMiddleware(s.hookChain),
 	}
-	if acpAdapter != nil {
-		chain = append(chain, acpAdapter)
+	if s.acpAdapter != nil {
+		chain = append(chain, s.acpAdapter)
 	}
-	// Extension-registered middleware (bridged from extension.Middleware to
-	// core.Middleware) are appended innermost so they run closest to the core
-	// loop while still participating in the onion chain.
-	chain = append(chain, extMiddleware...)
-	loop = core.NewMiddlewareChain(chain...).Wrap(loop)
+	chain = append(chain, s.extMiddleware...)
+	s.loop = core.NewMiddlewareChain(chain...).Wrap(s.loop)
+}
 
-	// 12. Create compaction components (strategy from config, default unified).
-	// When a small model is configured, wire it as the summarizer so
-	// compaction uses the small model instead of the primary model.
+// assembleCompactor creates the compaction components and wires mid-turn
+// compaction into the loop agent.
+func (s *assembleState) assembleCompactor() error {
 	compactorFactory := compaction.NewDefaultCompactorFactory()
 	strategy := "unified"
-	if rc != nil && rc.Compaction.Strategy != "" {
-		strategy = rc.Compaction.Strategy
+	if s.rc != nil && s.rc.Compaction.Strategy != "" {
+		strategy = s.rc.Compaction.Strategy
 	}
 	compactor, err := compactorFactory.Create(strategy)
 	if err != nil {
-		cleanup()
-		return nil, fmt.Errorf("assemble: create compactor: %w", err)
+		return fmt.Errorf("assemble: create compactor: %w", err)
 	}
-	// Inject small-model summarizer into a unified compactor when available.
-	// Only override when the strategy is unified-compatible; if the user
-	// explicitly chose micro/truncating, respect that choice.
-	if smallModel != nil && (strategy == "" || strategy == "unified" || strategy == "micro_first") {
-		summarizer := &llmModelSummarizer{model: smallModel}
+	if s.smallModel != nil && (strategy == "" || strategy == "unified" || strategy == "micro_first") {
+		summarizer := &llmModelSummarizer{model: s.smallModel}
 		summaryCompactor := compaction.NewSummaryCompactor(summarizer)
 		compactor = compaction.NewUnifiedCompactor(
 			compaction.WithSummary(summaryCompactor),
 		)
-		logger.Info("assemble_compaction_small_model_wired")
+		s.logger.Info("assemble_compaction_small_model_wired")
 	}
-	estimator := compaction.NewUnicodeTokenEstimator()
-	midTurn := compaction.NewMidTurnCompact()
-	reg.RegisterCompactor(&compactorAdapter{inner: compactor, estimator: estimator})
-	reg.RegisterTokenEstimator(&tokenEstimatorAdapter{inner: estimator})
+	s.compactor = compactor
+	s.estimator = compaction.NewUnicodeTokenEstimator()
+	s.midTurn = compaction.NewMidTurnCompact()
+	s.reg.RegisterCompactor(&compactorAdapter{inner: s.compactor, estimator: s.estimator})
+	s.reg.RegisterTokenEstimator(&tokenEstimatorAdapter{inner: s.estimator})
 
-	// Wire mid-turn (intra-turn) compaction into the loop so the context is
-	// compacted when it grows beyond the threshold fraction of the token
-	// budget mid-turn, preventing context overflow during long ReAct loops.
-	// SetMidTurnCompaction is used instead of a LoopOption because the
-	// compactor components are created after NewLoopAgent in this function.
-	if loopAgent != nil {
-		loopAgent.SetMidTurnCompaction(midTurn, compactor, estimator, ac.maxTokens)
+	if s.loopAgent != nil {
+		s.loopAgent.SetMidTurnCompaction(s.midTurn, s.compactor, s.estimator, s.ac.maxTokens)
 	}
+	return nil
+}
 
-	// 13. Wire session persistence (if enabled).
-	var sessionStore *session.JSONLSessionStore
-	if ac.enableSession && rc != nil && rc.Session.StorePath != "" {
-		sessionStore = session.NewJSONLSessionStore(rc.Session.StorePath)
-		if openErr := sessionStore.Open(ctx); openErr != nil {
-			logger.Warn("assemble_session_open_failed", "err", openErr)
-			sessionStore = nil
+// assembleSession wires session persistence (if enabled).
+func (s *assembleState) assembleSession() {
+	if s.ac.enableSession && s.rc != nil && s.rc.Session.StorePath != "" {
+		s.sessionStore = session.NewJSONLSessionStore(s.rc.Session.StorePath)
+		if openErr := s.sessionStore.Open(s.ctx); openErr != nil {
+			s.logger.Warn("assemble_session_open_failed", "err", openErr)
+			s.sessionStore = nil
 		}
 	}
-
-	// Extend cleanup to include ACP client, session store and trace exporter.
-	prevCleanup := cleanup
-	cleanup = func() {
-		if acpAdapter != nil {
-			acpAdapter.Close()
-		}
-		if acpClient != nil {
-			_ = acpClient.Disconnect(context.Background()) //nolint:errcheck
-		}
-		if sessionStore != nil {
-			sessionStore.Close() //nolint:errcheck,gosec
-		}
-		if memStore != nil {
-			_ = memStore.Close() //nolint:errcheck
-		}
-		if traceExporter != nil {
-			if tracer != nil {
-				tracer.Flush()
-			}
-			_ = traceExporter.Shutdown(context.Background()) //nolint:errcheck
-		}
-		prevCleanup()
-	}
-
-	// 14. Resume history from session store if requested.
-	var restoredHistory []core.AgentMessage
-	if ac.resumeFlag && sessionStore != nil {
-		restoredHistory, _ = loadSessionHistory(sessionStore.FilePath()) //nolint:errcheck
-		if len(restoredHistory) > 0 {
-			logger.Info("assemble_session_resumed", "messages", len(restoredHistory))
-		}
-	}
-
-	// 15. Build AgentImpl + HarnessImpl.
-	agentOpts := []core.AgentOption{
-		core.WithCompactionHook(newCompactionHook(compactor, estimator, ac.maxTokens)),
-	}
-	if len(restoredHistory) > 0 {
-		agentOpts = append(agentOpts, core.WithHistory(restoredHistory))
-	}
-	agent := core.NewAgentImpl(ac.agentName, loop, agentOpts...)
-	h := core.NewHarnessImpl(agent, core.WithEventBuffer(64), core.WithHarnessTracer(tracer), core.WithRunSlotGuard(runSlotGuard))
-
-	// 15b. Build TurnRunner wired with the shared steering channel and agent
-	// so Steer calls are delivered to the running loop between LLM
-	// iterations, and RunTurn delegates to agent.Run (with history).
-	turnRunner := core.NewEinoTurnRunner(loop)
-	turnRunner.SetSteerChannel(steerCh)
-	turnRunner.SetFollowUpChannel(followUpCh)
-	turnRunner.SetAgent(agent)
-	turnRunner.SetHookChain(hookChain)
-	turnRunner.SetRunSlotGuard(runSlotGuard)
-	reg.RegisterTurnRunner(turnRunner)
-
-	// Emit assemble span for observability.
-	asmSpan, _ := tracing.SpanFromContext(ctx, "assemble.agent", tracing.SpanKindInternal)
-	asmSpan.SetAttributes(
-		tracing.Attribute{Key: "agent_name", Value: ac.agentName},
-		tracing.Attribute{Key: "model", Value: modelName},
-		tracing.Attribute{Key: "session_enabled", Value: ac.enableSession},
-		tracing.Attribute{Key: "resume", Value: ac.resumeFlag},
-	)
-	asmSpan.SetStatus(tracing.SpanStatusOK, "")
-	asmSpan.End()
-
-	// Resolve the context window for TUI status bar and /cost occupancy.
-	// When the model reports a context window, use it; otherwise fall back
-	// to the compaction budget (MaxTokens) so the display still works.
-	contextWindow := modelInfo.ContextWindow
-	if contextWindow <= 0 {
-		contextWindow = ac.maxTokens
-	}
-
-	return &AgentAssembly{
-		Harness:            h,
-		Agent:              agent,
-		ToolRegistry:       tr,
-		CostTracker:        costTracker,
-		StatsRegistry:      statsRegistry,
-		SessionStore:       sessionStore,
-		SessionID:          sessionID,
-		Model:              model,
-		ModelName:          modelName,
-		Compactor:          compactor,
-		Estimator:          estimator,
-		MidTurn:            midTurn,
-		MaxTokens:          ac.maxTokens,
-		ContextWindow:      contextWindow,
-		Cleanup:            cleanup,
-		Registry:           reg,
-		FileTracker:        fileTracker,
-		DiffGenerator:      diffGen,
-		PlanCtrl:           planCtrl,
-		ModeResolver:       modeResolver,
-		PromptBuilder:      promptBuilder,
-		ContextLoader:      contextLoader,
-		Tracer:             tracer,
-		ReminderManager:    reminderMgr,
-		HookChain:          hookChain,
-		FailureSynthesizer: failureSynthesizer,
-		CircuitBreaker:     circuitBreaker,
-		LoopDetector:       loopDetector,
-		IdempotentCache:    idempotentCache,
-		AuditLog:           auditLog,
-		Telemetry:          telemetry,
-		TurnRunner:         turnRunner,
-		SteerChannel:       steerCh,
-		ApprovalChannel:    ac.approvalCh,
-		FollowUpChannel:    followUpCh,
-		HITLEmitter:        hitlEmitter,
-		LoopAgent:          loopAgent,
-		GitTool:            gitTool,
-		WorktreeManager:    worktreeMgr,
-		MemoryStore:        memStore,
-		MemoryExtractor:    memExtractor,
-		ThinkingLevel:      thinkingLevel,
-		ModelCycler:        modelCycler,
-		ModelRegistry:      modelRegistry,
-		LSPClient:          lspClientField,
-		LSPWorkspaceRoot:   lspWorkspaceRoot,
-	}, nil
 }
 
 // buildModel resolves an llm.BaseChatModel from the loaded configuration.
