@@ -116,7 +116,7 @@ func TestPendingSessionWrites_CreateSavepointAndFlushToSavepoint(t *testing.T) {
 	assert.Equal(t, 3, pw.PendingCount())
 
 	// Flush only up to the savepoint.
-	require.NoError(t, pw.FlushToSavepoint(sp, store))
+	require.NoError(t, pw.FlushToSavepoint(context.Background(), sp, store))
 	assert.Equal(t, 1, pw.PendingCount(), "only post-savepoint items should remain")
 	assert.Equal(t, 2, pw.FlushedCount())
 
@@ -146,7 +146,7 @@ func TestPendingSessionWrites_FlushToSavepointNilStore(t *testing.T) {
 		Entry:     SessionEntry{ID: "e1", Type: EntryTypeUser, Content: "hello"},
 	})
 	sp := pw.CreateSavepoint()
-	err := pw.FlushToSavepoint(sp, nil)
+	err := pw.FlushToSavepoint(context.Background(), sp, nil)
 	require.Error(t, err)
 }
 
