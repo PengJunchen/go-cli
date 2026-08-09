@@ -283,6 +283,12 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 			cwd = "."
 		}
 		c.mentionExpander = NewMentionExpander(cwd, 0)
+		// Wire typed mention resolvers from the assembled components.
+		c.mentionExpander.SetResolver("symbol", NewSymbolMentionResolver(assembly.LSPClient, assembly.LSPWorkspaceRoot, cwd))
+		c.mentionExpander.SetResolver("url", NewURLMentionResolver())
+		if assembly.SessionStore != nil {
+			c.mentionExpander.SetResolver("session", NewSessionMentionResolver(assembly.SessionStore))
+		}
 	}
 
 	for {
