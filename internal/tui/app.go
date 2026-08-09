@@ -129,6 +129,14 @@ func WithSteerCallback(cb func(string)) AppOption {
 	return func(a *BubbleteaApp) { a.steerCallback = cb }
 }
 
+// WithFollowUpCallback registers a callback invoked when the user submits
+// follow-up text (Enter in follow-up input mode). The callback receives the
+// typed text and runs in a separate goroutine so it does not block the render
+// loop.
+func WithFollowUpCallback(cb func(string)) AppOption {
+	return func(a *BubbleteaApp) { a.followUpCallback = cb }
+}
+
 // WithCancelCallback registers a callback invoked when the user presses 'q' or
 // Ctrl+C to quit/cancel. The callback typically calls TurnRunner.Cancel to
 // cancel the running turn.
@@ -248,6 +256,7 @@ type BubbleteaApp struct {
 
 	onUpdate           func(string)
 	steerCallback      func(string)
+	followUpCallback   func(string)
 	cancelCallback     func()
 	pauseCallback      func()
 	resumeCallback     func()
@@ -359,6 +368,12 @@ func (a *BubbleteaApp) Quit() {
 // up and exited, enabling callers to wait on quit completion.
 func (a *BubbleteaApp) Done() <-chan struct{} { return a.done }
 
+// Program returns the underlying tea.Program after Run has started.
+// Returns nil before Run is called or after it has exited.
+func (a *BubbleteaApp) Program() *tea.Program {
+	return a.program
+}
+
 // EventsProcessed reports how many agent events the loop has consumed.
 func (a *BubbleteaApp) EventsProcessed() int64 { return a.model.eventsSeen.Load() }
 
@@ -432,6 +447,12 @@ type teaModel struct {
 	steerCursor    int
 	steerCallback  func(string)
 
+	// follow-up input
+	followUpInputMode bool
+	followUpInput     string
+	followUpCursor    int
+	followUpCallback  func(string)
+
 	// callbacks
 	onUpdate       func(string)
 	cancelCallback func()
@@ -494,6 +515,7 @@ func newTeaModel(a *BubbleteaApp) *teaModel {
 		accordion:          NewAccordionModel(),
 		onUpdate:           a.onUpdate,
 		steerCallback:      a.steerCallback,
+		followUpCallback:   a.followUpCallback,
 		cancelCallback:     a.cancelCallback,
 		pauseCallback:      a.pauseCallback,
 		resumeCallback:     a.resumeCallback,
@@ -670,6 +692,13 @@ func (m *teaModel) renderViewLocked() string {
 	if m.steerInputMode {
 		sb.WriteString("\n> steer> ")
 		sb.WriteString(m.steerInput)
+		// Render a block cursor.
+		sb.WriteString("\u2588")
+	}
+	// Follow-up input prompt.
+	if m.followUpInputMode {
+		sb.WriteString("\n> followup> ")
+		sb.WriteString(m.followUpInput)
 		// Render a block cursor.
 		sb.WriteString("\u2588")
 	}
@@ -1267,6 +1296,9 @@ func (m *teaModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	if m.steerInputMode {
 		return m.handleSteerKeyLocked(msg)
 	}
+	if m.followUpInputMode {
+		return m.handleFollowUpKeyLocked(msg)
+	}
 	// When an approval request is pending, intercept y/a/n/d keys to resolve
 	// it before any other key processing.
 	if m.pendingApproval != nil {
@@ -1296,6 +1328,11 @@ func (m *teaModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.accordion.ExpandAll()
 		case "c":
 			m.accordion.CollapseAll()
+		case "f":
+			// Enter follow-up input mode.
+			m.followUpInputMode = true
+			m.followUpInput = ""
+			m.followUpCursor = 0
 		}
 	}
 	return nil
@@ -1340,6 +1377,52 @@ func (m *teaModel) handleSteerKeyLocked(msg tea.KeyMsg) tea.Cmd {
 		for _, r := range msg.Runes {
 			m.steerInput = m.steerInput[:m.steerCursor] + string(r) + m.steerInput[m.steerCursor:]
 			m.steerCursor++
+		}
+	}
+	return nil
+}
+
+// handleFollowUpKeyLocked processes a key received while in follow-up input
+// mode. The caller must hold m.mu. It returns a tea.Cmd (tea.Quit on Esc, nil
+// otherwise).
+func (m *teaModel) handleFollowUpKeyLocked(msg tea.KeyMsg) tea.Cmd {
+	switch msg.Type {
+	case tea.KeyEsc:
+		// Esc exits follow-up mode without submitting.
+		m.followUpInputMode = false
+		m.followUpInput = ""
+		m.followUpCursor = 0
+	case tea.KeyEnter:
+		// Enter submits the follow-up text via the callback and exits
+		// follow-up mode.
+		input := m.followUpInput
+		m.followUpInputMode = false
+		m.followUpInput = ""
+		m.followUpCursor = 0
+		if m.followUpCallback != nil && input != "" {
+			cb := m.followUpCallback
+			// Run in a goroutine so it does not block the render loop.
+			go cb(input)
+		}
+	case tea.KeyBackspace:
+		if m.followUpCursor > 0 {
+			m.followUpInput = m.followUpInput[:m.followUpCursor-1] + m.followUpInput[m.followUpCursor:]
+			m.followUpCursor--
+		}
+	case tea.KeyCtrlA:
+		m.followUpCursor = 0
+	case tea.KeyCtrlE:
+		m.followUpCursor = len(m.followUpInput)
+	case tea.KeyCtrlW:
+		m.deleteFollowUpWordLocked()
+	case tea.KeyCtrlU:
+		// Ctrl+U clears the follow-up input line.
+		m.followUpInput = ""
+		m.followUpCursor = 0
+	case tea.KeyRunes:
+		for _, r := range msg.Runes {
+			m.followUpInput = m.followUpInput[:m.followUpCursor] + string(r) + m.followUpInput[m.followUpCursor:]
+			m.followUpCursor++
 		}
 	}
 	return nil
@@ -1468,6 +1551,23 @@ func (m *teaModel) deleteWordLocked() {
 	}
 	m.steerInput = m.steerInput[:end] + m.steerInput[m.steerCursor:]
 	m.steerCursor = end
+}
+
+// deleteFollowUpWordLocked deletes the word before the cursor in the follow-up
+// input (Ctrl+W behavior). The caller must hold m.mu.
+func (m *teaModel) deleteFollowUpWordLocked() {
+	if m.followUpCursor == 0 {
+		return
+	}
+	end := m.followUpCursor
+	for end > 0 && m.followUpInput[end-1] == ' ' {
+		end--
+	}
+	for end > 0 && m.followUpInput[end-1] != ' ' {
+		end--
+	}
+	m.followUpInput = m.followUpInput[:end] + m.followUpInput[m.followUpCursor:]
+	m.followUpCursor = end
 }
 
 // ---------- terminal detection ----------

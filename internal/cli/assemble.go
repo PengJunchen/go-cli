@@ -123,6 +123,11 @@ type AgentAssembly struct {
 	// follow-up messages here so the running loop picks them up between LLM
 	// iterations.
 	FollowUpChannel chan string
+	// HITLEmitter is the CLI HITL question emitter used by the ask_user
+	// tool. It is exposed so the REPL can set its program field to the
+	// running tea.Program, routing HITL questions through the TUI instead
+	// of stdout.
+	HITLEmitter *cliHITLEmitter
 	// LoopAgent is the raw LoopAgent before middleware wrapping. It is
 	// exposed so the REPL can call Pause()/Resume() on it.
 	LoopAgent *core.LoopAgent
@@ -974,6 +979,15 @@ func AssembleAgent(
 	reg.RegisterCompactor(&compactorAdapter{inner: compactor, estimator: estimator})
 	reg.RegisterTokenEstimator(&tokenEstimatorAdapter{inner: estimator})
 
+	// Wire mid-turn (intra-turn) compaction into the loop so the context is
+	// compacted when it grows beyond the threshold fraction of the token
+	// budget mid-turn, preventing context overflow during long ReAct loops.
+	// SetMidTurnCompaction is used instead of a LoopOption because the
+	// compactor components are created after NewLoopAgent in this function.
+	if loopAgent != nil {
+		loopAgent.SetMidTurnCompaction(midTurn, compactor, estimator, ac.maxTokens)
+	}
+
 	// 13. Wire session persistence (if enabled).
 	var sessionStore *session.JSONLSessionStore
 	if ac.enableSession && rc != nil && rc.Session.StorePath != "" {
@@ -1093,6 +1107,7 @@ func AssembleAgent(
 		SteerChannel:       steerCh,
 		ApprovalChannel:    ac.approvalCh,
 		FollowUpChannel:    followUpCh,
+		HITLEmitter:        hitlEmitter,
 		LoopAgent:          loopAgent,
 		GitTool:            gitTool,
 		WorktreeManager:    worktreeMgr,
@@ -1524,6 +1539,16 @@ type cachedToolResult struct {
 	expiry time.Time
 }
 
+// noCacheTools lists tools that must never be served from the idempotent
+// cache. These are mutation tools whose every invocation must pass through
+// the approval middleware; caching their results would let a duplicate call
+// bypass user approval.
+var noCacheTools = map[string]bool{
+	"write": true,
+	"edit":  true,
+	"bash":  true,
+}
+
 // newProductionToolWrapper returns a ToolExecutorWrapper that applies
 // idempotent caching, audit logging, and telemetry recording to every tool
 // call. On a cache hit (within the TTL) the wrapper short-circuits and returns
@@ -1541,8 +1566,13 @@ func newProductionToolWrapper(
 			start := time.Now()
 			cacheKey := toolCacheKey(call.Name, call.Args)
 
-			// Check idempotent cache.
-			if cache != nil {
+			// Mutation tools bypass the cache so they always reach the
+			// approval middleware. Caching their results would let a
+			// duplicate call skip user approval.
+			skipCache := noCacheTools[call.Name]
+
+			// Check idempotent cache (skipped for mutation tools).
+			if !skipCache && cache != nil {
 				if cached, ok := cache.Get(ctx, cacheKey); ok {
 					if entry, ok := cached.(*cachedToolResult); ok && time.Now().Before(entry.expiry) {
 						duration := time.Since(start)
@@ -1557,7 +1587,7 @@ func newProductionToolWrapper(
 			result, err := next(ctx, call)
 			duration := time.Since(start)
 
-			if err == nil && result != nil && cache != nil {
+			if !skipCache && err == nil && result != nil && cache != nil {
 				_ = cache.Set(ctx, cacheKey, &cachedToolResult{ //nolint:errcheck
 					result: result,
 					expiry: time.Now().Add(defaultCacheTTL),
