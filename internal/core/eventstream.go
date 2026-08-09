@@ -98,7 +98,7 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 			s.mu.Lock()
 			s.sentCount++
 			s.mu.Unlock()
-			slog.Info("core.eventstream.send", "kind", event.Kind, "policy", "discard_newest")
+			slog.Debug("core.eventstream.send", "kind", event.Kind, "policy", "discard_newest")
 			return nil
 		default:
 			slog.Warn("core.eventstream.discard", "kind", event.Kind, "policy", "discard_newest")
@@ -114,7 +114,7 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 			s.mu.Lock()
 			s.sentCount++
 			s.mu.Unlock()
-			slog.Info("core.eventstream.send", "kind", event.Kind, "policy", "discard_oldest")
+			slog.Debug("core.eventstream.send", "kind", event.Kind, "policy", "discard_oldest")
 			return nil
 		default:
 			// Buffer full: evict the oldest event.
@@ -130,7 +130,7 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 				s.mu.Lock()
 				s.sentCount++
 				s.mu.Unlock()
-				slog.Info("core.eventstream.send", "kind", event.Kind, "policy", "discard_oldest")
+				slog.Debug("core.eventstream.send", "kind", event.Kind, "policy", "discard_oldest")
 				return nil
 			default:
 				// Still full after eviction (concurrent sender); drop new event.
@@ -146,7 +146,7 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 			s.mu.Lock()
 			s.sentCount++
 			s.mu.Unlock()
-			slog.Info("core.eventstream.send", "kind", event.Kind, "policy", "block")
+			slog.Debug("core.eventstream.send", "kind", event.Kind, "policy", "block")
 			return nil
 		}
 	}
