@@ -201,6 +201,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		memoryStore:     assembly.MemoryStore,
 		contextWindow:   assembly.ContextWindow,
 		worktreeManager: assembly.WorktreeManager,
+		snapshotManager: assembly.SnapshotMgr,
 	}
 
 	// Create a shared ThemeManager so /theme can switch themes at runtime

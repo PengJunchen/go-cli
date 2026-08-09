@@ -291,6 +291,9 @@ func (q *DefaultFileMutationQueue) apply(ctx context.Context, m FileMutation) (*
 // behavior is equivalent to the package-level defaultMutationHandler.
 func newConfiguredMutationHandler(ft *FileTracker, dg DiffGenerator) MutationHandler {
 	return func(ctx context.Context, m FileMutation) (*ToolResult, error) {
+		if ft != nil {
+			ft.RecordMutation(ctx, m.ToolName, m.FilePath)
+		}
 		switch m.Operation {
 		case "write":
 			toolOpts := []WriteToolOption{WithOverwrite(true)}

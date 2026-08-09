@@ -48,6 +48,10 @@ type slashContext struct {
 	// worktreeManager manages git worktrees for parallel session isolation.
 	// It is nil when worktree isolation is not enabled in config.
 	worktreeManager *tools.WorktreeManager
+	// snapshotManager captures git working-tree snapshots before file
+	// mutations so files can be reverted to a previous state via /revert.
+	// It is nil when not in a git repository.
+	snapshotManager *tools.SnapshotManager
 	// themeMgr enables runtime theme switching via the /theme slash command.
 	// It is nil in headless mode; the ThemeHandler degrades gracefully.
 	themeMgr *tui.ThemeManager
@@ -119,6 +123,9 @@ func buildSlashCommandRegistry() *SlashCommandRegistry {
 
 	// Git worktree management.
 	add(&WorktreeHandler{})
+
+	// Snapshot revert for file state rollback.
+	add(&RevertHandler{})
 
 	// Aliases.
 	reg.RegisterAlias("h", "help")

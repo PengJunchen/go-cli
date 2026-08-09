@@ -148,6 +148,10 @@ type AgentAssembly struct {
 	// WorktreeManager manages git worktrees for parallel session isolation.
 	// It is nil when worktree isolation is not enabled in config.
 	WorktreeManager *tools.WorktreeManager
+	// SnapshotMgr captures git working-tree snapshots before file mutations so
+	// files can be reverted to a previous state via the /revert slash command.
+	// It is nil when the working directory is not a git repository.
+	SnapshotMgr *tools.SnapshotManager
 	// MemoryStore persists cross-session memories for the /memory slash
 	// command and system prompt injection.
 	MemoryStore *memory.FileMemoryStore
@@ -366,6 +370,7 @@ func AssembleAgent(
 		LoopAgent:          s.loopAgent,
 		GitTool:            s.gitTool,
 		WorktreeManager:    s.worktreeMgr,
+		SnapshotMgr:        s.snapshotMgr,
 		MemoryStore:        s.memStore,
 		MemoryExtractor:    s.memExtractor,
 		ThinkingLevel:      thinkingLevel,
@@ -473,6 +478,7 @@ type assembleState struct {
 	gitTool          tools.GitTool
 	gitCwd           string
 	worktreeMgr      *tools.WorktreeManager
+	snapshotMgr      *tools.SnapshotManager
 	htmlConverter    *tools.DefaultHTMLConverter
 	lspClientField   tools.LSPClient
 	lspWorkspaceRoot string
@@ -717,6 +723,13 @@ func (s *assembleState) assembleTools() error {
 	}
 	s.gitCwd = gitCwd
 	s.gitTool = tools.NewDefaultGitTool(gitCwd)
+
+	// Create a SnapshotManager anchored at the git working directory. When the
+	// directory is not a git repository the manager disables itself (AC-5).
+	// Wire it into the FileTracker so every queued mutation captures a
+	// pre-mutation snapshot that /revert can roll back to.
+	s.snapshotMgr = tools.NewSnapshotManager(gitCwd)
+	s.fileTracker.SetSnapshotManager(s.snapshotMgr)
 
 	// Create a WorktreeManager when worktree isolation is enabled.
 	if s.rc != nil && s.rc.Git.WorktreeEnabled {
