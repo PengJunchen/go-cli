@@ -125,13 +125,14 @@ func TestRegisterMCPClientWithExplicitNameDoesNotOverride(t *testing.T) {
 	}
 }
 
-func TestRegisterMCPClientWithNilRegistryDoesNotPanic(t *testing.T) {
+func TestRegisterMCPClientWithNilRegistryReturnsError(t *testing.T) {
 	t.Parallel()
 	c := newRecordingMCPClient("srv", nil)
 
-	// A nil registry is replaced with a fresh one internally; the call must
-	// succeed without panicking.
-	require.NoError(t, RegisterMCPClient(nil, "srv", c))
+	// A nil registry cannot accept registrations; the call must return an
+	// error rather than panicking or silently dropping the registration.
+	err := RegisterMCPClient(nil, "srv", c)
+	require.Error(t, err)
 }
 
 func TestRegisterMCPClientRejectsNilClientWithEmptyName(t *testing.T) {
