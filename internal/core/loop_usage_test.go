@@ -54,7 +54,7 @@ func TestStreamGenerate_PropagatesUsageToMessage(t *testing.T) {
 
 	loop := NewLoopAgent(WithLLM(model))
 
-	msg, err := loop.streamGenerate(context.Background(), model, nil, nil, nil, nil)
+	msg, err := loop.streamGenerate(context.Background(), model, nil, nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, msg)
 
@@ -78,7 +78,7 @@ func TestStreamGenerate_NoUsageWhenNotProvided(t *testing.T) {
 
 	loop := NewLoopAgent(WithLLM(model))
 
-	msg, err := loop.streamGenerate(context.Background(), model, nil, nil, nil, nil)
+	msg, err := loop.streamGenerate(context.Background(), model, nil, nil, nil)
 	require.NoError(t, err)
 	require.NotNil(t, msg)
 	assert.Nil(t, msg.Usage, "Usage should be nil when stream has no usage")

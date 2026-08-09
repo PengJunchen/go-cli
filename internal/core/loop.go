@@ -3,11 +3,13 @@ package core //exempt:scan009
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/pengjunchen/go-cli/internal/compaction"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tracing"
@@ -46,6 +48,10 @@ type loopConfig struct {
 	steerCh              chan string
 	followUpCh           chan string
 	thinkingConfig       *llm.ThinkingConfig
+	midTurnCompactor     *compaction.MidTurnCompact
+	compactor            compaction.Compactor
+	estimator            compaction.TokenEstimator
+	maxTokens            int
 }
 
 // LoopOption configures a LoopAgent at construction time.
@@ -137,6 +143,10 @@ type LoopAgent struct {
 	steerCh              chan string
 	followUpCh           chan string
 	thinkingConfig       *llm.ThinkingConfig
+	midTurnCompactor     *compaction.MidTurnCompact
+	compactor            compaction.Compactor
+	estimator            compaction.TokenEstimator
+	maxTokens            int
 	// toolSearchThreshold is the maximum number of tools to expose to the LLM
 	// without filtering. When the tool count exceeds this, tools are
 	// dynamically scored and filtered by relevance to the current query.
@@ -216,6 +226,10 @@ func NewLoopAgent(opts ...LoopOption) *LoopAgent {
 		steerCh:              cfg.steerCh,
 		followUpCh:           cfg.followUpCh,
 		thinkingConfig:       cfg.thinkingConfig,
+		midTurnCompactor:     cfg.midTurnCompactor,
+		compactor:            cfg.compactor,
+		estimator:            cfg.estimator,
+		maxTokens:            cfg.maxTokens,
 	}
 	slog.Info("core.loop.new",
 		"max_iterations", la.maxIterations,
@@ -230,6 +244,16 @@ func NewLoopAgent(opts ...LoopOption) *LoopAgent {
 func (l *LoopAgent) WithToolSearchThreshold(n int) *LoopAgent {
 	l.toolSearchThreshold = n
 	return l
+}
+
+// SetMidTurnCompaction wires the mid-turn compaction guard post-construction.
+// This is used when the compactor components are created after NewLoopAgent
+// (e.g. in the assemble layer where the compactor factory runs later).
+func (l *LoopAgent) SetMidTurnCompaction(mtc *compaction.MidTurnCompact, compactor compaction.Compactor, estimator compaction.TokenEstimator, maxTokens int) {
+	l.midTurnCompactor = mtc
+	l.compactor = compactor
+	l.estimator = estimator
+	l.maxTokens = maxTokens
 }
 
 // Run executes the ReAct loop for the submission and returns the events fired
@@ -534,6 +558,25 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 				})
 			}
 		}
+
+		// Mid-turn compaction: if the context has grown beyond the
+		// threshold fraction of the token budget, compact before the
+		// next LLM call to avoid overflowing the context window
+		// mid-turn.
+		if l.midTurnCompactor != nil && l.compactor != nil && l.estimator != nil && l.maxTokens > 0 {
+			items := messagesToTurnItems(messages)
+			compacted, result, cerr := l.midTurnCompactor.CompactIfNeeded(spanCtx, items, l.maxTokens, l.estimator, l.compactor)
+			if cerr != nil {
+				logger.Warn("core.loop.midturn_compact_error", "err", cerr)
+			} else if result.Triggered {
+				messages = turnItemsToMessages(compacted)
+				logger.Info("core.loop.midturn_compact",
+					"reason", result.Reason.String(),
+					"messages_before", len(items),
+					"messages_after", len(compacted),
+				)
+			}
+		}
 	}
 
 	// Iteration budget exhausted.
@@ -543,17 +586,71 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 	return events, errMaxIterations
 }
 
+// messagesToTurnItems converts []llm.Message to []compaction.TurnItem for the
+// mid-turn compaction pipeline. Tool-result messages are mapped to the
+// TurnItem.ToolResult field so compactors (e.g. MicroCompactor) can replace
+// them with placeholders.
+func messagesToTurnItems(msgs []llm.Message) []compaction.TurnItem {
+	items := make([]compaction.TurnItem, len(msgs))
+	for i, m := range msgs {
+		item := compaction.TurnItem{
+			ID:            fmt.Sprintf("msg-%d", i),
+			Role:          string(m.Role),
+			ContentBlocks: m.ContentBlocks,
+			ToolCalls:     m.ToolCalls,
+			ToolCallID:    m.ToolCallID,
+			ToolName:      m.Name,
+		}
+		if m.Role == llm.RoleTool {
+			item.ToolResult = m.Content
+		} else {
+			item.Content = m.Content
+		}
+		items[i] = item
+	}
+	return items
+}
+
+// turnItemsToMessages converts []compaction.TurnItem back to []llm.Message
+// after mid-turn compaction. Compaction summary entries with empty content are
+// replaced with "[compacted]" so the model sees a non-empty placeholder.
+func turnItemsToMessages(items []compaction.TurnItem) []llm.Message {
+	msgs := make([]llm.Message, len(items))
+	for i, it := range items {
+		msg := llm.Message{
+			Role:          llm.Role(it.Role),
+			ContentBlocks: it.ContentBlocks,
+			ToolCalls:     it.ToolCalls,
+			ToolCallID:    it.ToolCallID,
+			Name:          it.ToolName,
+		}
+		if it.Role == compaction.RoleTool {
+			msg.Content = it.ToolResult
+		} else {
+			msg.Content = it.Content
+			if it.IsCompaction && it.Content == "" {
+				msg.Content = "[compacted]"
+			}
+		}
+		msgs[i] = msg
+	}
+	return msgs
+}
+
 // streamGenerate calls the LLM in streaming mode. It consumes chunks from
 // model.Stream() in real time, emitting incremental "message" events via the
 // EventStream so the TUI can render tokens as they arrive. The complete
 // response (with accumulated tool calls) is returned.
-func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel, messages []llm.Message, toolOpts []llm.Option, es EventStream, logger *slog.Logger) (*llm.Message, error) {
+func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel, messages []llm.Message, toolOpts []llm.Option, es EventStream) (*llm.Message, error) {
 	ch, err := model.Stream(ctx, messages, toolOpts...)
 	if err != nil {
 		// Stream failed — propagate the error directly rather than falling
 		// back to Generate, because Generate would advance the model's
 		// call index a second time and return a different result.
 		return nil, err
+	}
+	if ch == nil {
+		return nil, fmt.Errorf("streamGenerate: nil channel from model")
 	}
 
 	var contentBuf strings.Builder
@@ -563,6 +660,9 @@ func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel,
 	gotChunk := false
 
 	for chunk := range ch {
+		if chunk.Error != nil {
+			return nil, chunk.Error
+		}
 		gotChunk = true
 		if chunk.Content != "" {
 			contentBuf.WriteString(chunk.Content)
@@ -620,7 +720,7 @@ func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel,
 // is still truncated after that, a warning is logged, any remaining partial
 // tool calls are dropped, and the accumulated content is returned.
 func (l *LoopAgent) generateWithContinuation(ctx context.Context, model llm.BaseChatModel, messages []llm.Message, toolOpts []llm.Option, es EventStream, logger *slog.Logger) (*llm.Message, error) {
-	resp, err := l.streamGenerate(ctx, model, messages, toolOpts, es, logger)
+	resp, err := l.streamGenerate(ctx, model, messages, toolOpts, es)
 	if err != nil || resp == nil {
 		return resp, err
 	}
@@ -679,7 +779,7 @@ func (l *LoopAgent) generateWithContinuation(ctx context.Context, model llm.Base
 
 		logger.Info("core.loop.continuation", "attempt", attempt+1)
 
-		contResp, contErr := l.streamGenerate(ctx, model, contMsgs, toolOpts, es, logger)
+		contResp, contErr := l.streamGenerate(ctx, model, contMsgs, toolOpts, es)
 		if contErr != nil || contResp == nil {
 			break
 		}
