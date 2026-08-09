@@ -290,6 +290,7 @@ func AssembleAgent(
 				Provider: m.Provider,
 				Model:    m.Model,
 				Weight:   m.Weight,
+				TaskType: llm.TaskType(m.TaskType),
 			}
 		}
 		modelCycler = llm.NewModelCycler(llm.ModelCyclerConfig{
@@ -302,6 +303,31 @@ func AssembleAgent(
 			"strategy", rc.ModelCycler.Strategy,
 			"models", len(entries),
 		)
+	}
+
+	// 1d. Build small model and ModelSelector. When small_model is configured,
+	// a separate lightweight model is built for background tasks (summaries,
+	// title generation, memory extraction).
+	var smallModel llm.BaseChatModel
+	if rc != nil && rc.SmallModel.Model != "" {
+		smallProvider := rc.SmallModel.Provider
+		if smallProvider == "" {
+			smallProvider = providerName
+		}
+		sm, _, smallCleanup, smErr := buildSmallModel(ctx, rc, smallProvider, rc.SmallModel.Model)
+		if smErr != nil {
+			logger.Warn("assemble_small_model_failed", "err", smErr, "model", rc.SmallModel.Model)
+		} else {
+			smallModel = sm
+			prevCleanup := cleanup
+			cleanup = func() {
+				if smallCleanup != nil {
+					smallCleanup()
+				}
+				prevCleanup()
+			}
+			logger.Info("assemble_small_model_enabled", "model", rc.SmallModel.Model)
+		}
 	}
 
 	// 1b. Wire tracing from config. When tracing.enabled is true, create the
@@ -785,10 +811,15 @@ func AssembleAgent(
 	}
 
 	// Create memory extractor for LLM-based fact extraction. The extractor
-	// uses the model to analyze conversations and the store for deduplication.
+	// uses the small model when available (extraction is a lightweight task),
+	// falling back to the primary model. The store is used for deduplication.
 	var memExtractor memory.MemoryExtractor
 	if memStore != nil {
-		memExtractor = memory.NewLLMMemoryExtractor(model, memStore)
+		extractModel := model
+		if smallModel != nil {
+			extractModel = smallModel
+		}
+		memExtractor = memory.NewLLMMemoryExtractor(extractModel, memStore)
 	}
 
 	// 10c. Wire dynamic system prompt builder with project context.
@@ -867,6 +898,8 @@ func AssembleAgent(
 	loop = core.NewMiddlewareChain(chain...).Wrap(loop)
 
 	// 12. Create compaction components (strategy from config, default unified).
+	// When a small model is configured, wire it as the summarizer so
+	// compaction uses the small model instead of the primary model.
 	compactorFactory := compaction.NewDefaultCompactorFactory()
 	strategy := "unified"
 	if rc != nil && rc.Compaction.Strategy != "" {
@@ -876,6 +909,17 @@ func AssembleAgent(
 	if err != nil {
 		cleanup()
 		return nil, fmt.Errorf("assemble: create compactor: %w", err)
+	}
+	// Inject small-model summarizer into a unified compactor when available.
+	// Only override when the strategy is unified-compatible; if the user
+	// explicitly chose micro/truncating, respect that choice.
+	if smallModel != nil && (strategy == "" || strategy == "unified" || strategy == "micro_first") {
+		summarizer := &llmModelSummarizer{model: smallModel}
+		summaryCompactor := compaction.NewSummaryCompactor(summarizer)
+		compactor = compaction.NewUnifiedCompactor(
+			compaction.WithSummary(summaryCompactor),
+		)
+		logger.Info("assemble_compaction_small_model_wired")
 	}
 	estimator := compaction.NewUnicodeTokenEstimator()
 	midTurn := compaction.NewMidTurnCompact()
@@ -1044,6 +1088,81 @@ func buildModel(ctx context.Context, rc *config.Config, providerName, modelName 
 		return nil, llm.ModelInfo{}, cleanup, err
 	}
 	return m, findModelInfo(provider.Models(), modelName), cleanup, nil
+}
+
+// buildSmallModel builds a lightweight model from the SmallModelConfig section.
+// It uses the small model's own provider/BaseURL/APIKey when provided, falling
+// back to the primary provider settings.
+func buildSmallModel(ctx context.Context, rc *config.Config, providerName, modelName string) (llm.BaseChatModel, llm.ModelInfo, func(), error) {
+	if rc == nil {
+		return nil, llm.ModelInfo{}, nil, fmt.Errorf("assemble: buildSmallModel: config is nil")
+	}
+	cfg := llm.ModelConfig{
+		Model:       modelName,
+		Temperature: rc.SmallModel.Temperature,
+		MaxTokens:   rc.SmallModel.MaxTokens,
+	}
+
+	baseURL := rc.SmallModel.BaseURL
+	apiKey := rc.SmallModel.APIKey
+	if baseURL == "" {
+		baseURL = rc.Provider.BaseURL
+	}
+	if apiKey == "" {
+		apiKey = rc.Provider.APIKey
+	}
+
+	if baseURL != "" || apiKey != "" {
+		provider := llm.NewEinoProvider(
+			llm.WithProviderName(providerName),
+			llm.WithBaseURL(baseURL),
+			llm.WithAPIKey(apiKey),
+			llm.WithDefaultModel(modelName),
+		)
+		m, cleanup, err := provider.Build(ctx, cfg)
+		if err != nil {
+			return nil, llm.ModelInfo{}, cleanup, err
+		}
+		return m, findModelInfo(provider.Models(), modelName), cleanup, nil
+	}
+
+	reg := llm.NewProviderRegistry()
+	provider, err := reg.Get(providerName)
+	if err != nil {
+		return nil, llm.ModelInfo{}, nil, err
+	}
+	m, cleanup, err := provider.Build(ctx, cfg)
+	if err != nil {
+		return nil, llm.ModelInfo{}, cleanup, err
+	}
+	return m, findModelInfo(provider.Models(), modelName), cleanup, nil
+}
+
+// llmModelSummarizer adapts an llm.BaseChatModel to the compaction.Summarizer
+// interface. It lives in the cli package to avoid an import cycle between
+// compaction and llm.
+type llmModelSummarizer struct {
+	model llm.BaseChatModel
+}
+
+// Compile-time assertion that llmModelSummarizer satisfies compaction.Summarizer.
+var _ compaction.Summarizer = (*llmModelSummarizer)(nil)
+
+// Summarize sends the conversation text as a single user message and returns
+// the model's response as the summary.
+func (s *llmModelSummarizer) Summarize(ctx context.Context, conversation string) (string, error) {
+	ctx = llm.WithTaskType(ctx, llm.TaskTypeSummary)
+	msgs := []llm.Message{
+		{Role: llm.RoleUser, Content: conversation},
+	}
+	resp, err := s.model.Generate(ctx, msgs)
+	if err != nil {
+		return "", err
+	}
+	if resp == nil {
+		return "", nil
+	}
+	return resp.Content, nil
 }
 
 // findModelInfo searches a slice of ModelInfo for a model whose Name matches

@@ -69,6 +69,7 @@ func (e *LLMMemoryExtractor) Extract(ctx context.Context, messages []llm.Message
 		{Role: llm.RoleUser, Content: prompt},
 	}
 
+	ctx = llm.WithTaskType(ctx, llm.TaskTypeExtraction)
 	resp, err := e.model.Generate(ctx, extractionMessages)
 	if err != nil {
 		return nil, fmt.Errorf("memory: extract: %w", err)

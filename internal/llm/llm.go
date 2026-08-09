@@ -169,6 +169,17 @@ type BaseChatModel interface {
 	Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error)
 }
 
+// ModelSelector routes an LLM call to the appropriate model based on the
+// given TaskType. Implementations typically hold a primary model for full chat
+// turns and a smaller, cheaper model for lightweight tasks (summaries, title
+// generation, extraction).
+type ModelSelector interface {
+	// SelectModel returns the BaseChatModel to use for the given taskType.
+	// When no small model is configured, implementations return the primary
+	// model for all task types.
+	SelectModel(taskType TaskType) BaseChatModel
+}
+
 // ModelProvider is the contract a provider registry satisfies. It can build
 // concrete chat models and report the models it exposes.
 type ModelProvider interface {
