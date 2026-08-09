@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -308,25 +309,20 @@ func (m *overflowRecoveryModel) continueGeneration(ctx context.Context, msgs []M
 }
 
 // isOverflowError checks whether an error indicates a context length
-// overflow from the model provider.
+// overflow from the model provider. It first tries a structured ProviderError
+// type assertion (errors.As traverses the Unwrap chain). For non-ProviderError
+// errors it falls back to keyword matching for backward compatibility.
 func isOverflowError(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := strings.ToLower(err.Error())
-	indicators := []string{
-		"context_length_exceeded",
-		"maximum context length",
-		"context window",
-		"token limit exceeded",
-		"context_length",
+	// Prefer structured ProviderError (errors.As traverses the Unwrap chain).
+	var pe *ProviderError
+	if errors.As(err, &pe) {
+		return pe.ErrorType == ErrTypeOverflow
 	}
-	for _, ind := range indicators {
-		if strings.Contains(msg, ind) {
-			return true
-		}
-	}
-	return false
+	// Fallback: keyword matching for non-ProviderError errors (backward compat).
+	return containsOverflowIndicator(err.Error())
 }
 
 // trimMessages removes the oldest fraction of messages from the slice.

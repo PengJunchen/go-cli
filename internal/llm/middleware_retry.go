@@ -77,15 +77,31 @@ func (c errorCategory) retryable() bool {
 	return c != categoryNone && c != categoryFatal
 }
 
-// classifyError determines if an error is retryable using basic string
-// matching. This is a simplified version of production.DefaultRetryPolicy.Classify
-// that avoids importing production (which would create a cycle).
+// classifyError determines if an error is retryable. It first attempts a
+// structured ProviderError type assertion (errors.As traverses the Unwrap
+// chain). For non-ProviderError errors (e.g. net.Error timeout) it falls back
+// to keyword matching for backward compatibility. Unknown errors default to
+// categoryTransient (retryable).
 // When the production RetryPolicy is wired in via WithRetryPolicy, its
 // Classify method is used instead.
 func classifyError(err error) errorCategory {
 	if err == nil {
 		return categoryNone
 	}
+	// Prefer structured ProviderError (errors.As traverses the Unwrap chain).
+	var pe *ProviderError
+	if errors.As(err, &pe) {
+		switch pe.ErrorType {
+		case ErrTypeRateLimit:
+			return categoryRateLimit
+		case ErrTypeAuth, ErrTypeOverflow:
+			return categoryFatal
+		case ErrTypeServer, ErrTypeNetwork:
+			return categoryTransient
+		}
+	}
+	// Fallback: keyword matching for non-ProviderError errors (e.g. net.Error
+	// timeout, connection refused) to preserve backward compatibility.
 	msg := strings.ToLower(err.Error())
 	// Check the full error chain for more robust matching.
 	for e := errors.Unwrap(err); e != nil; e = errors.Unwrap(e) {
@@ -109,7 +125,7 @@ func classifyError(err error) errorCategory {
 	if strings.Contains(msg, "connection reset") || strings.Contains(msg, "connection refused") || strings.Contains(msg, "transient") {
 		return categoryTransient
 	}
-	return categoryFatal // default: don't retry unknown errors
+	return categoryTransient // default: retry unknown errors
 }
 
 // ShouldRetry reports whether attempt may be retried: true when the attempt
