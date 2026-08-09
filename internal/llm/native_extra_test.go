@@ -326,7 +326,7 @@ func TestNativeChatModel_StreamError(t *testing.T) {
 	m := &nativeChatModel{
 		client:   http.DefaultClient,
 		endpoint: srv.URL,
-		provider: "x",
+		provider: openaiProviderName,
 		model:    "m",
 		encode:   func(_ []Message, _ []Option) ([]byte, error) { return []byte("{}"), nil },
 		decode:   func(_ []byte) (*Message, error) { return &Message{Role: RoleAssistant}, nil },
