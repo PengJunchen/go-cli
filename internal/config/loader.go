@@ -310,7 +310,9 @@ func mergeConfigs(base, over *Config) *Config {
 
 // overlayValue copies non-zero exported fields from src onto dst recursively.
 // Pointers are replaced wholesale (nil means "unset"), enabling explicit
-// false/zero overrides.
+// false/zero overrides. Plain bool fields are an exception: both true and
+// false are copied unconditionally because false is indistinguishable from
+// "unset" — use *bool where that distinction matters.
 func overlayValue(dst, src reflect.Value) {
 	if !dst.IsValid() || !src.IsValid() || dst.Type() != src.Type() {
 		return
@@ -328,9 +330,11 @@ func overlayValue(dst, src reflect.Value) {
 			dst.SetString(v)
 		}
 	case reflect.Bool:
-		if src.Bool() {
-			dst.SetBool(true)
-		}
+		// Plain bool cannot distinguish "set to false" from "unset" (both
+		// are the zero value). Unconditionally copy so an explicit false is
+		// not silently dropped. Prefer *bool for overlay fields where
+		// "unset" must be distinguishable from false.
+		dst.SetBool(src.Bool())
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
 		if v := src.Int(); v != 0 {
 			dst.SetInt(v)
@@ -383,6 +387,8 @@ func countReflect(v reflect.Value, n *int) {
 			*n++
 		}
 	case reflect.Bool:
+		// Only count true; false is the zero value and indistinguishable
+		// from "unset" for plain bool fields.
 		if v.Bool() {
 			*n++
 		}
