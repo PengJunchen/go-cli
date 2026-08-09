@@ -42,7 +42,7 @@ func (s *stubTool) Execute(_ context.Context, _ tools.ToolCall) (*tools.ToolResu
 // newTestCmd returns an interactiveCmd and buffer pair for slash dispatch tests.
 func newTestCmd() (*interactiveCmd, *bytes.Buffer) {
 	var buf bytes.Buffer
-	return &interactiveCmd{out: &buf}, &buf
+	return &interactiveCmd{out: &buf, slashReg: defaultSlashReg}, &buf
 }
 
 // ---------------------------------------------------------------------------
@@ -609,7 +609,7 @@ func TestSlashCommandsTableDriven(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			c := &interactiveCmd{out: &buf}
+			c := &interactiveCmd{out: &buf, slashReg: defaultSlashReg}
 			// Use a fresh agent per iteration so /clear in one sub-test
 			// does not affect another.
 			testAgent := core.NewAgentImpl("test", stubLoop{}, core.WithHistory([]core.AgentMessage{
