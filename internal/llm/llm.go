@@ -112,6 +112,27 @@ type ModelInfo struct {
 	Modality        string  `json:"modality,omitempty"`
 	APIBase         string  `json:"api_base,omitempty"`
 	Description     string  `json:"description,omitempty"`
+	// Reasoning reports whether the model supports extended reasoning
+	// (chain-of-thought / thinking) tokens.
+	Reasoning bool `json:"reasoning"`
+	// ToolCall reports whether the model supports function/tool calling.
+	ToolCall bool `json:"tool_call"`
+	// StructuredOutput reports whether the model supports structured/JSON
+	// output mode.
+	StructuredOutput bool `json:"structured_output"`
+	// CacheReadPrice is the per-million-token price for reading cached
+	// prompt tokens, sourced from the external registry.
+	CacheReadPrice float64 `json:"cache_read_price,omitempty"`
+	// CacheWritePrice is the per-million-token price for writing prompt
+	// tokens to the cache, sourced from the external registry.
+	CacheWritePrice float64 `json:"cache_write_price,omitempty"`
+	// InputTokenLimit is the maximum number of input tokens the model
+	// accepts, sourced from the external registry.
+	InputTokenLimit int `json:"input_token_limit,omitempty"`
+	// Knowledge is the model's knowledge cutoff date (e.g. "2024-04").
+	Knowledge string `json:"knowledge,omitempty"`
+	// ReleaseDate is the model's release date (e.g. "2024-05-13").
+	ReleaseDate string `json:"release_date,omitempty"`
 }
 
 // ModelConfig configures how a provider should build a chat model.

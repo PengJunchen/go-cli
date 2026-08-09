@@ -163,6 +163,10 @@ type AgentAssembly struct {
 	// models.dev) used to enrich model info with pricing, context window and
 	// modality. It is nil when the model registry is not enabled.
 	ModelRegistry llm.ModelRegistry
+	// ModelSelector is the DefaultModelSelector wrapping the primary and
+	// small models with optional registry-aware token routing. It is always
+	// non-nil after assembly.
+	ModelSelector *llm.DefaultModelSelector
 	// LSPClient is the Language Server Protocol client wired for code
 	// completion. It is nil when no LSP server is configured or started.
 	LSPClient tools.LSPClient
@@ -365,6 +369,7 @@ func AssembleAgent(
 		ThinkingLevel:      thinkingLevel,
 		ModelCycler:        s.modelCycler,
 		ModelRegistry:      s.modelRegistry,
+		ModelSelector:      s.modelSelector,
 		LSPClient:          s.lspClientField,
 		LSPWorkspaceRoot:   s.lspWorkspaceRoot,
 	}, nil
@@ -452,6 +457,7 @@ type assembleState struct {
 	modelCycler   *llm.ModelCycler
 	modelRegistry llm.ModelRegistry
 	smallModel    llm.BaseChatModel
+	modelSelector *llm.DefaultModelSelector
 
 	// Tracing section
 	tracer        *tracing.Tracer
@@ -634,6 +640,23 @@ func (s *assembleState) assembleModel() error {
 			s.logger.Info("assemble_small_model_enabled", "model", s.rc.SmallModel.Model)
 		}
 	}
+
+	// Build the DefaultModelSelector with registry awareness for token-aware
+	// model routing. The selector wraps the primary and small models and,
+	// when the registry is available, can query it for model limits via
+	// SelectModelWithTokens.
+	smallProvider := ""
+	smallModelName := ""
+	if s.rc != nil && s.rc.SmallModel.Model != "" {
+		smallProvider = s.rc.SmallModel.Provider
+		if smallProvider == "" {
+			smallProvider = s.providerName
+		}
+		smallModelName = s.rc.SmallModel.Model
+	}
+	s.modelSelector = llm.NewDefaultModelSelector(s.model, s.smallModel).
+		WithModelRegistry(s.modelRegistry).
+		WithModelNames(s.providerName, s.modelName, smallProvider, smallModelName)
 
 	return nil
 }

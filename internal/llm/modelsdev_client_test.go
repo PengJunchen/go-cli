@@ -33,7 +33,9 @@ func sampleModelsDevAPI() string {
         "tool_call": true,
         "structured_output": true,
         "temperature": true,
-        "cost": {"input": 0.005, "output": 0.015},
+        "knowledge": "2023-10",
+        "release_date": "2024-05-13",
+        "cost": {"input": 0.005, "output": 0.015, "cache_read": 0.0025, "cache_write": 0.005},
         "limit": {"context": 128000, "input": 128000, "output": 16384},
         "modalities": {"input": ["text", "image"], "output": ["text"]}
       },
@@ -64,7 +66,9 @@ func sampleModelsDevAPI() string {
         "tool_call": true,
         "structured_output": true,
         "temperature": true,
-        "cost": {"input": 0.003, "output": 0.015},
+        "knowledge": "2024-04",
+        "release_date": "2024-06-20",
+        "cost": {"input": 0.003, "output": 0.015, "cache_read": 0.003, "cache_write": 0.00375},
         "limit": {"context": 200000, "input": 200000, "output": 8192},
         "modalities": {"input": ["text", "image"], "output": ["text"]}
       }
@@ -93,7 +97,7 @@ func TestModelsDevClient_ParseAndLookup(t *testing.T) {
 	require.NoError(t, reg.Refresh(context.Background()))
 
 	// Lookup an existing model and verify enriched fields.
-	info, ok := reg.Lookup("openai", "gpt-4o")
+	info, ok := reg.Lookup(context.Background(), "openai", "gpt-4o")
 	require.True(t, ok)
 	assert.Equal(t, "GPT-4o", info.Name)
 	assert.Equal(t, 128000, info.ContextWindow)
@@ -103,7 +107,7 @@ func TestModelsDevClient_ParseAndLookup(t *testing.T) {
 	assert.Equal(t, "text+image\u2192text", info.Modality)
 
 	// Lookup a model from a second provider.
-	info2, ok := reg.Lookup("anthropic", "claude-3-5-sonnet")
+	info2, ok := reg.Lookup(context.Background(), "anthropic", "claude-3-5-sonnet")
 	require.True(t, ok)
 	assert.Equal(t, "Claude 3.5 Sonnet", info2.Name)
 	assert.Equal(t, 200000, info2.ContextWindow)
@@ -112,11 +116,11 @@ func TestModelsDevClient_ParseAndLookup(t *testing.T) {
 	assert.Equal(t, 0.015, info2.OutputPrice)
 
 	// Unknown provider returns false.
-	_, ok = reg.Lookup("nope", "gpt-4o")
+	_, ok = reg.Lookup(context.Background(), "nope", "gpt-4o")
 	assert.False(t, ok)
 
 	// Unknown model returns false.
-	_, ok = reg.Lookup("openai", "nope")
+	_, ok = reg.Lookup(context.Background(), "openai", "nope")
 	assert.False(t, ok)
 
 	// Providers returns all provider metadata.
@@ -173,7 +177,7 @@ func TestModelsDevClient_CacheHit(t *testing.T) {
 	reg2 := NewModelsDevRegistry(cachePath, time.Hour)
 	reg2.url = server.URL
 
-	info, ok := reg2.Lookup("openai", "gpt-4o")
+	info, ok := reg2.Lookup(context.Background(), "openai", "gpt-4o")
 	require.True(t, ok)
 	assert.Equal(t, "GPT-4o", info.Name)
 	assert.Equal(t, 128000, info.ContextWindow)
@@ -217,13 +221,13 @@ func TestModelsDevClient_OfflineFallback(t *testing.T) {
 
 	// Lookup triggers ensureLoaded, which finds the stale cache, tries to
 	// refresh, fails, and falls back to the stale cache.
-	info, ok := reg2.Lookup("openai", "gpt-4o")
+	info, ok := reg2.Lookup(context.Background(), "openai", "gpt-4o")
 	require.True(t, ok)
 	assert.Equal(t, "GPT-4o", info.Name)
 	assert.Equal(t, 128000, info.ContextWindow)
 	assert.Equal(t, 16384, info.MaxOutputTokens)
 
-	info2, ok := reg2.Lookup("anthropic", "claude-3-5-sonnet")
+	info2, ok := reg2.Lookup(context.Background(), "anthropic", "claude-3-5-sonnet")
 	require.True(t, ok)
 	assert.Equal(t, "Claude 3.5 Sonnet", info2.Name)
 }
@@ -244,4 +248,63 @@ func TestComposerWithRegistry(t *testing.T) {
 	p, err := reg.Get("eino")
 	require.NoError(t, err)
 	assert.Equal(t, "eino", p.Name())
+}
+
+// TestModelInfoFields verifies that toModelInfo maps the extended ModelInfo
+// fields (Reasoning, ToolCall, StructuredOutput, CacheReadPrice,
+// CacheWritePrice, InputTokenLimit, Knowledge, ReleaseDate) from the upstream
+// models.dev JSON into ModelInfo.
+func TestModelInfoFields(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte(sampleModelsDevAPI()))
+	}))
+	defer server.Close()
+
+	cachePath := filepath.Join(t.TempDir(), "cache.json")
+	reg := NewModelsDevRegistry(cachePath, time.Hour)
+	reg.url = server.URL
+	require.NoError(t, reg.Refresh(context.Background()))
+
+	// GPT-4o: reasoning=false, tool_call=true, structured_output=true.
+	info, ok := reg.Lookup(context.Background(), "openai", "gpt-4o")
+	require.True(t, ok)
+	assert.Equal(t, "GPT-4o", info.Name)
+	assert.False(t, info.Reasoning, "gpt-4o reasoning should be false")
+	assert.True(t, info.ToolCall, "gpt-4o tool_call should be true")
+	assert.True(t, info.StructuredOutput, "gpt-4o structured_output should be true")
+	assert.Equal(t, 0.0025, info.CacheReadPrice, "cache_read_price should map from cost.cache_read")
+	assert.Equal(t, 0.005, info.CacheWritePrice, "cache_write_price should map from cost.cache_write")
+	assert.Equal(t, 128000, info.InputTokenLimit, "input_token_limit should map from limit.input")
+	assert.Equal(t, "2023-10", info.Knowledge, "knowledge should map from knowledge field")
+	assert.Equal(t, "2024-05-13", info.ReleaseDate, "release_date should map from release_date field")
+
+	// Claude 3.5 Sonnet: reasoning=true.
+	info2, ok := reg.Lookup(context.Background(), "anthropic", "claude-3-5-sonnet")
+	require.True(t, ok)
+	assert.Equal(t, "Claude 3.5 Sonnet", info2.Name)
+	assert.True(t, info2.Reasoning, "claude-3-5-sonnet reasoning should be true")
+	assert.True(t, info2.ToolCall, "claude-3-5-sonnet tool_call should be true")
+	assert.True(t, info2.StructuredOutput, "claude-3-5-sonnet structured_output should be true")
+	assert.Equal(t, 0.003, info2.CacheReadPrice)
+	assert.Equal(t, 0.00375, info2.CacheWritePrice)
+	assert.Equal(t, 200000, info2.InputTokenLimit)
+	assert.Equal(t, "2024-04", info2.Knowledge)
+	assert.Equal(t, "2024-06-20", info2.ReleaseDate)
+
+	// GPT-4o mini: reasoning=false, no cache/knowledge/release fields in JSON
+	// → zero values should be reported.
+	info3, ok := reg.Lookup(context.Background(), "openai", "gpt-4o-mini")
+	require.True(t, ok)
+	assert.False(t, info3.Reasoning)
+	assert.True(t, info3.ToolCall)
+	assert.True(t, info3.StructuredOutput)
+	assert.Equal(t, 0.0, info3.CacheReadPrice, "missing cache_read should default to 0")
+	assert.Equal(t, 0.0, info3.CacheWritePrice, "missing cache_write should default to 0")
+	assert.Equal(t, 128000, info3.InputTokenLimit)
+	assert.Empty(t, info3.Knowledge, "missing knowledge should be empty string")
+	assert.Empty(t, info3.ReleaseDate, "missing release_date should be empty string")
 }
