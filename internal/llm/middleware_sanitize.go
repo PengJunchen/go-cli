@@ -112,14 +112,26 @@ func (m *sanitizeModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 	out := make(chan MessageChunk)
 	go func() {
 		defer close(out)
-		for chunk := range ch {
-			original := chunk.Content
-			chunk.Content = sanitizeContent(original)
-			if chunk.Content != original {
-				m.logger.Debug("sanitize.stream.modified",
-					"before_len", len(original), "after_len", len(chunk.Content))
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case chunk, ok := <-ch:
+				if !ok {
+					return
+				}
+				original := chunk.Content
+				chunk.Content = sanitizeContent(original)
+				if chunk.Content != original {
+					m.logger.Debug("sanitize.stream.modified",
+						"before_len", len(original), "after_len", len(chunk.Content))
+				}
+				select {
+				case out <- chunk:
+				case <-ctx.Done():
+					return
+				}
 			}
-			out <- chunk
 		}
 	}()
 	return out, nil

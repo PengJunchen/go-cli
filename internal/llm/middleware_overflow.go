@@ -93,7 +93,16 @@ func (m *overflowRecoveryModel) Generate(ctx context.Context, msgs []Message, op
 			// max_tokens (FinishReason == "length"), automatically
 			// request continuation(s) to retrieve the remaining content.
 			if result != nil && result.FinishReason == finishReasonLength {
-				result, _ = m.continueGeneration(ctx, currentMsgs, result, opts)
+				contResult, contErr := m.continueGeneration(ctx, currentMsgs, result, opts)
+				if contErr != nil {
+					m.mw.logger.Warn("middleware.overflow.continue_error",
+						"op", "middleware.overflow.continue_error",
+						"err", contErr,
+					)
+				}
+				if contResult != nil {
+					result = contResult
+				}
 			}
 			return result, nil
 		}
@@ -184,7 +193,13 @@ func (m *overflowRecoveryModel) Stream(ctx context.Context, msgs []Message, opts
 						FinishReason: finishReason,
 					}
 					origLen := len(result.Content)
-					contResult, _ := m.continueGeneration(ctx, currentMsgs, result, opts)
+					contResult, contErr := m.continueGeneration(ctx, currentMsgs, result, opts)
+					if contErr != nil {
+						m.mw.logger.Warn("middleware.overflow.stream_continue_error",
+							"op", "middleware.overflow.stream_continue_error",
+							"err", contErr,
+						)
+					}
 					if contResult != nil && len(contResult.Content) > origLen {
 						extra := contResult.Content[origLen:]
 						if extra != "" {
@@ -266,6 +281,11 @@ func (m *overflowRecoveryModel) continueGeneration(ctx context.Context, msgs []M
 
 		contResp, err := m.inner.Generate(ctx, contMsgs, opts...)
 		if err != nil || contResp == nil {
+			m.mw.logger.Warn("middleware.overflow.continue_failed",
+				"op", "middleware.overflow.continue_failed",
+				"attempt", attempt+1,
+				"err", err,
+			)
 			break
 		}
 
