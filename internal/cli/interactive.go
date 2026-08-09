@@ -50,12 +50,13 @@ type interactiveCmd struct {
 	in              io.Reader
 	lineEditor      LineEditor
 	mentionExpander *MentionExpander
+	slashReg        *SlashCommandRegistry
 }
 
 // newInteractiveCmd creates an interactive command reading from in and writing
 // to out.
 func newInteractiveCmd(in io.Reader, out io.Writer) *interactiveCmd {
-	return &interactiveCmd{out: out, in: in}
+	return &interactiveCmd{out: out, in: in, slashReg: defaultSlashReg}
 }
 
 // Name implements Command.
@@ -101,6 +102,11 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 	if v, ok := cfg.(*config.Config); ok {
 		rc = v
 	}
+
+	// Build the dynamic slash command registry: built-in commands plus any
+	// custom Markdown commands from .go-cli/commands/. Built-in commands take
+	// priority over custom commands with the same name.
+	c.slashReg = buildDynamicRegistry(rc)
 
 	modelName := resolveModelName(modelFlag, rc)
 	providerName := resolveProviderName(providerFlag, rc)
@@ -256,7 +262,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 			lspCompleter = NewLSPCompleter(assembly.LSPClient, assembly.LSPWorkspaceRoot)
 		}
 		dle.SetCompleter(NewCompositeCompleter(
-			NewSlashCommandCompleterFromRegistry(defaultSlashReg),
+			NewSlashCommandCompleterFromRegistry(c.slashReg),
 			NewFilePathCompleter(),
 			lspCompleter,
 		))
@@ -303,7 +309,15 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 				break
 			}
 			c.handleSlashCommand(spanCtx, cmd, &slashCtx)
-			continue
+			// Custom Markdown command handlers may set pendingInput to inject
+			// a prompt template that the REPL loop processes as user input.
+			if slashCtx.pendingInput != "" {
+				line = slashCtx.pendingInput
+				slashCtx.pendingInput = ""
+				// Fall through to process as a normal user message.
+			} else {
+				continue
+			}
 		}
 		if strings.EqualFold(line, exitCommand) {
 			logger.Info("cli_interactive_exit", "op", "cli.interactive.exit")
@@ -760,12 +774,6 @@ func loadSessionHistory(path string) ([]core.AgentMessage, error) {
 		}
 	}
 	return messages, scanner.Err()
-}
-
-// slashCommandNames returns the canonical names of all registered slash
-// commands plus "exit", for use by the tab completer.
-func slashCommandNames() []string {
-	return append(defaultSlashReg.Names(), "exit")
 }
 
 // emitTokenUsageEvent estimates the total token usage from the agent's message

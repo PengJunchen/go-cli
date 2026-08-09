@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
+	"os"
+	"path/filepath"
 
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/core"
@@ -45,6 +48,10 @@ type slashContext struct {
 	// themeMgr enables runtime theme switching via the /theme slash command.
 	// It is nil in headless mode; the ThemeHandler degrades gracefully.
 	themeMgr *tui.ThemeManager
+	// pendingInput, when set by a slash command handler, is picked up by the
+	// REPL loop as the next user message instead of reading from stdin. This
+	// enables custom Markdown commands to inject prompt templates.
+	pendingInput string
 }
 
 // defaultSlashReg is the fully populated registry shared by all interactive
@@ -61,7 +68,7 @@ func (c *interactiveCmd) handleSlashCommand(ctx context.Context, cmd session.Sla
 	span.SetAttributes(tracing.Attribute{Key: "command_name", Value: cmd.Name})
 	defer span.End()
 
-	handler, ok := defaultSlashReg.Lookup(cmd.Name)
+	handler, ok := c.slashReg.Lookup(cmd.Name)
 	if !ok {
 		fmt.Fprintf(sc.out, "Unknown command: /%s. Type /help for available commands.\n", cmd.Name) //nolint:errcheck
 		return
@@ -112,4 +119,68 @@ func buildSlashCommandRegistry() *SlashCommandRegistry {
 	reg.RegisterAlias("c", "cost")
 
 	return reg
+}
+
+// buildDynamicRegistry creates a SlashCommandRegistry that starts with all
+// built-in commands (from buildSlashCommandRegistry) and then loads custom
+// Markdown commands from .go-cli/commands/ (or rc.Commands.Dir). Built-in
+// commands take priority — custom commands with conflicting names are skipped.
+// When rc is nil or no commands directory is found, the result is identical
+// to buildSlashCommandRegistry().
+func buildDynamicRegistry(rc *config.Config) *SlashCommandRegistry {
+	reg := buildSlashCommandRegistry()
+
+	cmdDir := ""
+	if rc != nil && rc.Commands.Dir != "" {
+		cmdDir = rc.Commands.Dir
+	} else {
+		cmdDir = discoverCommandDir()
+	}
+	if cmdDir == "" {
+		return reg
+	}
+
+	loader := &MarkdownCommandLoader{}
+	cmds, err := loader.LoadDir(context.Background(), cmdDir)
+	if err != nil {
+		slog.Warn("slash_dynamic_load_failed", "dir", cmdDir, "err", err)
+		return reg
+	}
+
+	count := 0
+	for _, cmd := range cmds {
+		// Skip custom commands that conflict with built-in names.
+		if _, exists := reg.Lookup(cmd.name); exists {
+			slog.Warn("slash_dynamic_skip_conflict", "name", cmd.name, "dir", cmdDir)
+			continue
+		}
+		h := &MarkdownCommandHandler{cmd: cmd}
+		if err := reg.Register(h); err != nil {
+			slog.Warn("slash_dynamic_register_failed", "name", cmd.name, "err", err)
+			continue
+		}
+		count++
+	}
+	if count > 0 {
+		slog.Info("slash_dynamic_registered", "dir", cmdDir, "count", count)
+	}
+	return reg
+}
+
+// discoverCommandDir probes default custom command directories and returns the
+// first one that exists. The search order is:
+//  1. .go-cli/commands (project-local, conventional location)
+//  2. ~/.config/go-cli/commands (global user-level)
+func discoverCommandDir() string {
+	candidates := []string{".go-cli/commands"}
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		candidates = append(candidates, filepath.Join(home, ".config", "go-cli", "commands"))
+	}
+	for _, dir := range candidates {
+		if fi, err := os.Stat(dir); err == nil && fi.IsDir() {
+			slog.Info("slash_dynamic_dir_discovered", "dir", dir)
+			return dir
+		}
+	}
+	return ""
 }

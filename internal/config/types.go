@@ -15,6 +15,7 @@ type Config struct {
 	Compaction  CompactionConfig  `json:"compaction"`
 	MCP         MCPConfig         `json:"mcp"`
 	Skill       SkillConfig       `json:"skill"`
+	Commands    CommandsConfig    `json:"commands"`
 	WebSearch   WebSearchConfig   `json:"web_search"`
 	Production  ProductionConfig  `json:"production"`
 	Sandbox     SandboxConfig     `json:"sandbox"`
@@ -168,6 +169,14 @@ type MCPServersMap map[string]struct {
 // SkillConfig holds skill loading settings.
 type SkillConfig struct {
 	// Dir is the directory to load skill definitions from.
+	Dir string `json:"dir"`
+}
+
+// CommandsConfig holds custom slash command loading settings.
+type CommandsConfig struct {
+	// Dir is the directory to load custom Markdown command definitions from.
+	// When empty, auto-discovery checks .go-cli/commands and
+	// ~/.config/go-cli/commands.
 	Dir string `json:"dir"`
 }
 
