@@ -543,3 +543,56 @@ func (h *ThinkingHandler) Handle(_ context.Context, args []string, sc *slashCont
 	}
 	return nil
 }
+
+// ThemeHandler implements the /theme command, which lists or switches TUI
+// themes at runtime. Sub-commands:
+//
+//	/theme           — list available themes and mark the active one
+//	/theme <name>    — switch to the named theme immediately
+//
+// When themeMgr is nil (headless mode), the handler prints a friendly message
+// instead of crashing.
+type ThemeHandler struct{}
+
+var _ SlashCommandHandler = (*ThemeHandler)(nil)
+
+func (h *ThemeHandler) Name() string { return "theme" }
+func (h *ThemeHandler) Description() string {
+	return "Switch or list TUI themes: dark, light, monokai, solarized"
+}
+
+// Subcommands returns the built-in theme names for tab completion.
+func (h *ThemeHandler) Subcommands() []Subcommand {
+	return []Subcommand{
+		{Name: "dark", Description: "Dark theme (default)"},
+		{Name: "light", Description: "Light theme"},
+		{Name: "monokai", Description: "Monokai theme"},
+		{Name: "solarized", Description: "Solarized theme"},
+	}
+}
+
+func (h *ThemeHandler) Handle(_ context.Context, args []string, sc *slashContext) error {
+	if sc.themeMgr == nil {
+		fmt.Fprintln(sc.out, "Theme switching is only available in interactive TUI mode.")
+		return nil
+	}
+	if len(args) == 0 {
+		current := sc.themeMgr.CurrentName()
+		fmt.Fprintln(sc.out, "Available themes:")
+		for _, name := range sc.themeMgr.Names() {
+			marker := ""
+			if name == current {
+				marker = " (active)"
+			}
+			fmt.Fprintf(sc.out, "  %s%s\n", name, marker)
+		}
+		return nil
+	}
+	name := strings.TrimSpace(strings.ToLower(args[0]))
+	if err := sc.themeMgr.Set(name); err != nil {
+		fmt.Fprintf(sc.out, "Error: %v\nAvailable themes: %s\n", err, strings.Join(sc.themeMgr.Names(), ", "))
+		return nil
+	}
+	fmt.Fprintf(sc.out, "Theme switched to: %s\n", name)
+	return nil
+}

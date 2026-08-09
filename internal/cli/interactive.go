@@ -215,6 +215,22 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		contextWindow:  assembly.ContextWindow,
 	}
 
+	// Create a shared ThemeManager so /theme can switch themes at runtime
+	// without restarting. The initial theme is set from config; subsequent
+	// switches via /theme persist across turns because the same manager is
+	// passed to every BubbleteaApp via WithThemeManager.
+	sharedThemeMgr := tui.NewThemeManager()
+	if rc != nil {
+		themeName := strings.TrimSpace(strings.ToLower(rc.TUI.Theme))
+		if themeName == "" || themeName == "auto" {
+			themeName = "dark"
+		}
+		if err := sharedThemeMgr.Set(themeName); err != nil {
+			logger.Warn("cli_interactive_theme_init", "theme", themeName, "err", err)
+		}
+	}
+	slashCtx.themeMgr = sharedThemeMgr
+
 	entryCounter := len(assembly.Agent.Messages())
 	turnCounter := 0
 
@@ -399,14 +415,15 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		} else {
 			appOpts = append(appOpts, tui.WithModeLabel("chat"))
 		}
-		// TUIConfig: theme, word wrap, diff style.
+		// TUIConfig: word wrap, diff style. The shared theme manager is
+		// passed separately so runtime /theme switches persist across turns.
 		if rc != nil {
 			appOpts = append(appOpts,
-				tui.WithThemeConfig(rc.TUI.Theme),
 				tui.WithWordWrap(rc.TUI.WordWrap),
 				tui.WithDiffStyle(rc.TUI.DiffStyle),
 			)
 		}
+		appOpts = append(appOpts, tui.WithThemeManager(sharedThemeMgr))
 		if assembly.ApprovalChannel != nil {
 			appOpts = append(appOpts, tui.WithApprovalChannel(assembly.ApprovalChannel))
 		}

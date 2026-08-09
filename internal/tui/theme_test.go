@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"sort"
 	"strings"
 	"testing"
 
@@ -95,6 +96,30 @@ func TestThemeManagerRegisterAndSwitch(t *testing.T) {
 	mgr.Register("custom", MockTheme{})
 	require.NoError(t, mgr.Set("custom"))
 	require.Equal(t, MockTheme{}, mgr.Get())
+}
+
+func TestThemeManagerNames(t *testing.T) {
+	mgr := NewThemeManager()
+	names := mgr.Names()
+	assert.Len(t, names, 4)
+	assert.Contains(t, names, "dark")
+	assert.Contains(t, names, "light")
+	assert.Contains(t, names, "monokai")
+	assert.Contains(t, names, "solarized")
+	// Names should be sorted alphabetically.
+	assert.True(t, sort.StringsAreSorted(names))
+}
+
+func TestThemeManagerCurrentName(t *testing.T) {
+	mgr := NewThemeManager()
+	assert.Equal(t, "dark", mgr.CurrentName())
+
+	require.NoError(t, mgr.Set("light"))
+	assert.Equal(t, "light", mgr.CurrentName())
+
+	// Failed switch does not change current name.
+	require.Error(t, mgr.Set("nonexistent"))
+	assert.Equal(t, "light", mgr.CurrentName())
 }
 
 func TestThemePresetStruct(t *testing.T) {

@@ -12,6 +12,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/session"
 	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tracing"
+	"github.com/pengjunchen/go-cli/internal/tui"
 )
 
 // slashContext holds the references that slash command handlers need. It is
@@ -41,6 +42,9 @@ type slashContext struct {
 	// "show" (default) expands them, "collapse" folds them to a summary, "hide"
 	// suppresses them entirely. Set by the /thinking slash command.
 	thinkingVisibility string
+	// themeMgr enables runtime theme switching via the /theme slash command.
+	// It is nil in headless mode; the ThemeHandler degrades gracefully.
+	themeMgr *tui.ThemeManager
 }
 
 // defaultSlashReg is the fully populated registry shared by all interactive
@@ -101,6 +105,7 @@ func buildSlashCommandRegistry() *SlashCommandRegistry {
 
 	// TUI display commands.
 	add(&ThinkingHandler{})
+	add(&ThemeHandler{})
 
 	// Aliases.
 	reg.RegisterAlias("h", "help")
