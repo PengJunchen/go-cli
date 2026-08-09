@@ -129,7 +129,7 @@ func (c *SplitTurnCompactor) ShouldSplit(content string, estimator TokenEstimato
 // Split divides the content at its midpoint and produces a summary for each
 // half. The result includes the original and post-split token counts so callers
 // can verify the reduction.
-func (c *SplitTurnCompactor) Split(content string, estimator TokenEstimator) SplitTurnResult {
+func (c *SplitTurnCompactor) Split(ctx context.Context, content string, estimator TokenEstimator) SplitTurnResult {
 	originalTokens := estimateLength(content, estimator)
 
 	mid := len(content) / 2
@@ -151,12 +151,12 @@ func (c *SplitTurnCompactor) Split(content string, estimator TokenEstimator) Spl
 	summarizer := c.summarizer
 	c.mu.Unlock()
 
-	firstSummary, err := summarizer.Summarize(context.Background(), firstHalf)
+	firstSummary, err := summarizer.Summarize(ctx, firstHalf)
 	if err != nil || firstSummary == "" {
 		slog.Warn("compaction.split_turn.first_half_failed", "err", err)
 		firstSummary = firstHalf
 	}
-	secondSummary, err := summarizer.Summarize(context.Background(), secondHalf)
+	secondSummary, err := summarizer.Summarize(ctx, secondHalf)
 	if err != nil || secondSummary == "" {
 		slog.Warn("compaction.split_turn.second_half_failed", "err", err)
 		secondSummary = secondHalf

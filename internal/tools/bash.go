@@ -203,8 +203,8 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		logger.Error("bash.timeout",
 			"tool", "bash",
 			"duration_ms", ms,
-			"timeout", t.Timeout.String())
-		return &ToolResult{Output: output, Metadata: metadata}, fmt.Errorf("bash: timed out after %s: %w", t.Timeout.String(), execCtx.Err())
+			"timeout", timeout.String())
+		return &ToolResult{Output: output, Metadata: metadata}, fmt.Errorf("bash: timed out after %s: %w", timeout.String(), execCtx.Err())
 	}
 
 	if runErr != nil {

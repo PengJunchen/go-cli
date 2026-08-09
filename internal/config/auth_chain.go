@@ -123,10 +123,14 @@ func lookupAuthFile(provider string) (string, error) {
 	path := authFilePath()
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("config.auth.file_read_error", "path", path, "err", err)
+		}
 		return "", ErrAuthNotFound
 	}
 	var m map[string]string
 	if err := json.Unmarshal(data, &m); err != nil {
+		slog.Warn("config.auth.file_parse_error", "path", path, "err", err)
 		return "", ErrAuthNotFound
 	}
 	if v, ok := m[provider]; ok && v != "" {
@@ -153,6 +157,9 @@ func lookupModelsJSON(provider string) (string, error) {
 	path := modelsConfigPath()
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("config.auth.models_read_error", "path", path, "err", err)
+		}
 		return "", ErrAuthNotFound
 	}
 
