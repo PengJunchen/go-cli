@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -15,8 +16,9 @@ const defaultMentionMaxBytes = 64 * 1024
 
 // MentionExpander expands @filepath tokens in user input by inlining file content.
 type MentionExpander struct {
-	cwd      string
-	maxBytes int
+	cwd       string
+	maxBytes  int
+	resolvers map[string]MentionResolver
 }
 
 // NewMentionExpander creates a MentionExpander rooted at cwd. If maxBytes is
@@ -25,21 +27,62 @@ func NewMentionExpander(cwd string, maxBytes int) *MentionExpander {
 	if maxBytes <= 0 {
 		maxBytes = defaultMentionMaxBytes
 	}
-	return &MentionExpander{cwd: cwd, maxBytes: maxBytes}
+	return &MentionExpander{cwd: cwd, maxBytes: maxBytes, resolvers: make(map[string]MentionResolver)}
+}
+
+// SetResolver registers a resolver for a typed mention prefix (e.g. "symbol",
+// "url", "session"). Must be called before the first Expand call (during
+// initialization); Expand is not safe to call concurrently with SetResolver.
+func (e *MentionExpander) SetResolver(typ string, r MentionResolver) {
+	e.resolvers[typ] = r
 }
 
 // mentionRegexp matches @path tokens while avoiding email addresses.
 // The leading capture group ensures @ is not preceded by a word char, dot, @, or hyphen.
 var mentionRegexp = regexp.MustCompile(`(^|[^\w.@-])@([\w./\-~]+)`)
 
-// Expand scans input for @path tokens and replaces them with file content.
-// It returns the expanded string, the list of files that were inlined, the
-// total number of content bytes inlined, and any error.
+// typedMentionRegexp matches typed @-mentions such as @symbol:func:main or
+// @url:https://example.com. Capture groups: prefix, type, payload.
+var typedMentionRegexp = regexp.MustCompile(`(^|[^\w.@-])@(symbol|url|session):(\S+)`)
+
+// Expand scans input for typed @-mentions (Phase 1) and @path file tokens
+// (Phase 2), replacing them with resolved content. It returns the expanded
+// string, the list of mentions that were resolved, the total number of content
+// bytes inlined, and any error.
 func (e *MentionExpander) Expand(ctx context.Context, input string) (string, []string, int, error) {
 	var files []string
 	var totalBytes int
 
-	result := mentionRegexp.ReplaceAllStringFunc(input, func(match string) string {
+	// Phase 1: typed mentions (@symbol:, @url:, @session:).
+	phase1 := input
+	if len(e.resolvers) > 0 {
+		phase1 = typedMentionRegexp.ReplaceAllStringFunc(input, func(match string) string {
+			sub := typedMentionRegexp.FindStringSubmatch(match)
+			if len(sub) < 4 {
+				return match
+			}
+			prefix, typ, payload := sub[1], sub[2], sub[3]
+
+			resolver, ok := e.resolvers[typ]
+			if !ok {
+				return match
+			}
+
+			content, err := resolver.Resolve(ctx, payload)
+			if err != nil {
+				slog.Warn("mention_resolver_failed", "type", typ, "payload", payload, "err", err)
+				return match
+			}
+
+			files = append(files, typ+":"+payload)
+			totalBytes += len(content)
+
+			return prefix + fmt.Sprintf(`<mention type="%s">%s</mention>`, typ, content)
+		})
+	}
+
+	// Phase 2: file @path mentions (unchanged, operates on Phase 1 output).
+	result := mentionRegexp.ReplaceAllStringFunc(phase1, func(match string) string {
 		// Extract the @path part (skip leading non-word char if present)
 		idx := strings.Index(match, "@")
 		if idx < 0 {
