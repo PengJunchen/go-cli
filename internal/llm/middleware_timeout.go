@@ -86,7 +86,7 @@ func (t *timeoutModel) Generate(ctx context.Context, msgs []Message, opts ...Opt
 	defer cancel()
 
 	msg, err := t.next.Generate(ctx, msgs, opts...)
-	if err != nil && ctx.Err() != nil {
+	if ctx.Err() != nil {
 		t.logger.Debug("middleware.timeout",
 			"op", "generate",
 			"status", "timeout",
