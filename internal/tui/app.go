@@ -373,6 +373,12 @@ func (a *BubbleteaApp) View() string {
 	return a.model.View()
 }
 
+// ThemeManager returns the theme manager used by this app. Callers can use it
+// to switch themes at runtime via Set().
+func (a *BubbleteaApp) ThemeManager() *ThemeManager {
+	return a.themeMgr
+}
+
 // cleanup resets per-run state and closes the done channel exactly once. It is
 // called from Run's deferred cleanup path.
 func (a *BubbleteaApp) cleanup() {

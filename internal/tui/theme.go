@@ -15,6 +15,7 @@ package tui
 import (
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 
 	"github.com/charmbracelet/lipgloss"
@@ -214,17 +215,19 @@ func defaultThemeRegistry() map[string]Theme {
 // ThemeManager owns the set of registered themes and the currently active one.
 // It can switch themes by name and is safe for concurrent use.
 type ThemeManager struct {
-	mu      sync.RWMutex
-	themes  map[string]Theme
-	current Theme
+	mu          sync.RWMutex
+	themes      map[string]Theme
+	current     Theme
+	currentName string
 }
 
 // NewThemeManager returns a ThemeManager preloaded with the four built-in
 // presets. The dark theme is active initially.
 func NewThemeManager() *ThemeManager {
 	manager := &ThemeManager{
-		themes:  defaultThemeRegistry(),
-		current: DarkTheme{},
+		themes:      defaultThemeRegistry(),
+		current:     DarkTheme{},
+		currentName: "dark",
 	}
 	slog.Debug("tui.theme.init", "themes", len(manager.themes))
 	return manager
@@ -240,6 +243,7 @@ func (m *ThemeManager) Set(name string) error {
 		return fmt.Errorf("tui: unknown theme %q", name)
 	}
 	m.current = theme
+	m.currentName = name
 	slog.Debug("tui.theme.set", "theme", name)
 	return nil
 }
@@ -257,4 +261,23 @@ func (m *ThemeManager) Register(name string, theme Theme) {
 	defer m.mu.Unlock()
 	m.themes[name] = theme
 	slog.Debug("tui.theme.register", "theme", name)
+}
+
+// Names returns the sorted list of registered theme names.
+func (m *ThemeManager) Names() []string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	names := make([]string, 0, len(m.themes))
+	for name := range m.themes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// CurrentName returns the name of the currently active theme.
+func (m *ThemeManager) CurrentName() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.currentName
 }
