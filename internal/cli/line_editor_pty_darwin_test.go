@@ -13,7 +13,7 @@ import (
 )
 
 // openPTY creates a pseudo-terminal pair and returns the slave end as an
-// *os.File (which reports true for term.IsTerminal).
+// *os.File (which reports true for xterm.IsTerminal).
 func openPTY(t *testing.T) (*os.File, func()) {
 	t.Helper()
 	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR|unix.O_NOCTTY, 0)

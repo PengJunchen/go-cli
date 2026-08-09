@@ -13,7 +13,7 @@ import (
 	"sync/atomic"
 	"unicode/utf8"
 
-	"golang.org/x/term"
+	xterm "golang.org/x/term"
 )
 
 // LineEditor reads user input with optional line editing, history, and
@@ -134,14 +134,14 @@ func (le *DefaultLineEditor) invalidateTermWidth() {
 	le.termWidth.Store(0)
 }
 
-// queryTermWidth queries the terminal size via term.GetSize and stores the
+// queryTermWidth queries the terminal size via xterm.GetSize and stores the
 // result in the atomic cache. If the query fails or the input is not a TTY,
 // 80 is stored as a valid fallback. Returns the stored value.
 func (le *DefaultLineEditor) queryTermWidth() int {
 	width := int64(80)
 	f, ok := le.termFile()
 	if ok {
-		if cols, _, err := term.GetSize(int(f.Fd())); err == nil && cols > 0 {
+		if cols, _, err := xterm.GetSize(int(f.Fd())); err == nil && cols > 0 {
 			width = int64(cols)
 		}
 	}
@@ -246,7 +246,7 @@ func (le *DefaultLineEditor) detectTTY() bool {
 	if !ok {
 		return false
 	}
-	if !term.IsTerminal(int(f.Fd())) {
+	if !xterm.IsTerminal(int(f.Fd())) {
 		return false
 	}
 	le.isTTY = true
@@ -658,31 +658,31 @@ func (le *DefaultLineEditor) termFile() (*os.File, bool) {
 }
 
 // setRawMode saves the current terminal state and enables raw mode on the
-// given file descriptor. It returns the saved *term.State for later
+// given file descriptor. It returns the saved *xterm.State for later
 // restoration.
-func setRawMode(in io.Reader) (*term.State, error) {
+func setRawMode(in io.Reader) (*xterm.State, error) {
 	f, ok := in.(*os.File)
 	if !ok {
 		return nil, fmt.Errorf("input is not a *os.File")
 	}
 	fd := int(f.Fd())
-	saved, err := term.GetState(fd)
+	saved, err := xterm.GetState(fd)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := term.MakeRaw(fd); err != nil {
+	if _, err := xterm.MakeRaw(fd); err != nil {
 		return nil, err
 	}
 	return saved, nil
 }
 
-// restoreMode restores the terminal state from the saved *term.State.
-func restoreMode(in io.Reader, saved *term.State) error {
+// restoreMode restores the terminal state from the saved *xterm.State.
+func restoreMode(in io.Reader, saved *xterm.State) error {
 	f, ok := in.(*os.File)
 	if !ok {
 		return fmt.Errorf("input is not a *os.File")
 	}
-	return term.Restore(int(f.Fd()), saved)
+	return xterm.Restore(int(f.Fd()), saved)
 }
 
 // ---------------------------------------------------------------------------

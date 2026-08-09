@@ -1,6 +1,6 @@
-//go:build linux
+//go:build darwin
 
-package cli
+package term
 
 import (
 	"os"
@@ -8,7 +8,7 @@ import (
 	"unsafe"
 )
 
-// winsize mirrors the struct winsize used by TIOCGWINSZ on Linux.
+// winsize mirrors the Darwin struct winsize used by TIOCGWINSZ.
 type winsize struct {
 	Row    uint16
 	Col    uint16
@@ -16,10 +16,9 @@ type winsize struct {
 	Ypixel uint16
 }
 
-// GetTerminalSize returns the terminal size (columns, rows) of stdout via
-// the TIOCGWINSZ ioctl. It returns (0, 0) when stdout is not a terminal or
-// the ioctl fails.
-func GetTerminalSize() (int, int) {
+// getSize queries the terminal size of stdout via the TIOCGWINSZ ioctl.
+// It returns (0, 0) when the ioctl fails.
+func getSize() (int, int) {
 	ws := &winsize{}
 	_, _, errno := syscall.Syscall(syscall.SYS_IOCTL,
 		os.Stdout.Fd(), syscall.TIOCGWINSZ, uintptr(unsafe.Pointer(ws)))
