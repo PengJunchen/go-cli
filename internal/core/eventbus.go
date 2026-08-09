@@ -2,7 +2,9 @@ package core
 
 import (
 	"context"
+	"log/slog"
 	"sync"
+	"sync/atomic"
 )
 
 // EventBus is a pub/sub indirection layer for AgentEvent. It allows multiple
@@ -22,10 +24,11 @@ type EventBus interface {
 
 // MemoryEventBus is an in-memory EventBus implementation.
 type MemoryEventBus struct {
-	mu          sync.RWMutex
-	subscribers map[chan AgentEvent]struct{}
-	closed      bool
-	closedCh    chan struct{}
+	mu            sync.RWMutex
+	subscribers   map[chan AgentEvent]struct{}
+	closed        bool
+	closedCh      chan struct{}
+	droppedEvents atomic.Uint64
 }
 
 // NewMemoryEventBus creates a new MemoryEventBus.
@@ -61,7 +64,8 @@ func (b *MemoryEventBus) Subscribe(ctx context.Context) <-chan AgentEvent {
 }
 
 // Publish sends an event to all subscribers. If a subscriber's channel is full,
-// the event is dropped for that subscriber (non-blocking).
+// the event is dropped for that subscriber (non-blocking) and the drop is
+// counted and logged.
 func (b *MemoryEventBus) Publish(event AgentEvent) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -73,8 +77,20 @@ func (b *MemoryEventBus) Publish(event AgentEvent) {
 		case ch <- event:
 		default:
 			// Subscriber buffer full, drop event.
+			b.droppedEvents.Add(1)
+			slog.Warn("core.eventbus.drop",
+				"kind", event.Kind,
+				"reason", "subscriber_buffer_full",
+				"total_dropped", b.droppedEvents.Load(),
+			)
 		}
 	}
+}
+
+// DroppedEvents returns the total number of events dropped because a
+// subscriber's buffer was full. The counter is monotonically increasing.
+func (b *MemoryEventBus) DroppedEvents() uint64 {
+	return b.droppedEvents.Load()
 }
 
 // Close shuts down the bus and closes all subscriber channels.

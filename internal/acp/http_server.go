@@ -7,9 +7,12 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/pengjunchen/go-cli/internal/core"
 )
 
 // HTTPServer implements ACPServer, serving the ACP JSON-over-HTTP protocol.
@@ -25,9 +28,10 @@ import (
 // pending messages across sessions are drained (backward compatible with the
 // existing gRPCAdapter client which does not send sender_id in GET requests).
 type HTTPServer struct {
-	name    string
-	addr    string
-	handler *CoreHandler
+	name     string
+	addr     string
+	handler  *CoreHandler
+	eventBus core.EventBus
 
 	mu       sync.Mutex
 	sessions map[string]*Session
@@ -50,6 +54,14 @@ func NewHTTPServer(name, addr string, handler *CoreHandler) *HTTPServer {
 		handler:  handler,
 		sessions: make(map[string]*Session),
 	}
+}
+
+// SetEventBus wires an EventBus for SSE fan-out. When set, the /events
+// endpoint subscribes to the bus for live event streaming (each SSE
+// connection gets its own independent channel). When nil (or not called),
+// the /events endpoint falls back to the per-session events channel.
+func (s *HTTPServer) SetEventBus(bus core.EventBus) {
+	s.eventBus = bus
 }
 
 // Start brings the HTTP server up and begins serving. It binds the listener
@@ -355,10 +367,19 @@ func (s *HTTPServer) writeMessages(w http.ResponseWriter, msgs []ACPMessage) {
 }
 
 // handleEvents processes GET /events requests. It opens an SSE long-lived
-// connection that streams core.AgentEvents from the session's events channel.
-// The connection stays open until the client disconnects, the session is
-// closed, or the server shuts down. A keep-alive comment is sent every 15
-// seconds to prevent intermediary proxies from closing idle connections.
+// connection that streams core.AgentEvents. The connection stays open until
+// the client disconnects, the session is closed, or the server shuts down.
+// A keep-alive comment is sent every 15 seconds to prevent intermediary
+// proxies from closing idle connections.
+//
+// Last-Event-ID reconnection: when the client sends a Last-Event-ID request
+// header, the server replays missed events from the session's ring buffer
+// (entries whose ID exceeds the header value) before streaming live events.
+//
+// EventBus fan-out: when an EventBus is wired (via SetEventBus), live events
+// are read from a per-connection subscription channel. When no bus is
+// configured, live events are read from the per-session events channel
+// (backward compatible).
 func (s *HTTPServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -383,6 +404,36 @@ func (s *HTTPServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// --- Last-Event-ID reconnection ---
+	// Parse the Last-Event-ID header (if present) and replay missed events
+	// from the session's ring buffer. EventHistorySince returns the missed
+	// entries and the current last sequence ID atomically, so we can safely
+	// assign IDs to subsequent live-stream reads starting from lastSeq+1.
+	var afterID uint64
+	if idStr := r.Header.Get("Last-Event-ID"); idStr != "" {
+		if id, err := strconv.ParseUint(idStr, 10, 64); err == nil {
+			afterID = id
+		}
+	}
+	entries, lastSeq := sess.EventHistorySince(afterID)
+	nextID := lastSeq + 1
+	for _, e := range entries {
+		if err := sse.WriteEventWithID(e.ID, e.Event.Kind, e.Event); err != nil {
+			return
+		}
+	}
+
+	// --- Live event source ---
+	// When an EventBus is wired, subscribe for fan-out (each connection gets
+	// its own independent channel). Otherwise, fall back to the per-session
+	// events channel.
+	var eventCh <-chan core.AgentEvent
+	if s.eventBus != nil {
+		eventCh = s.eventBus.Subscribe(r.Context())
+	} else {
+		eventCh = sess.Events()
+	}
+
 	ticker := time.NewTicker(15 * time.Second)
 	defer ticker.Stop()
 
@@ -391,14 +442,15 @@ func (s *HTTPServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-ctx.Done():
 			return
-		case ev, ok := <-sess.Events():
+		case ev, ok := <-eventCh:
 			if !ok {
-				// Session closed; end the stream.
+				// Channel closed (session closed or bus shut down).
 				return
 			}
-			if err := sse.WriteEvent(ev.Kind, ev); err != nil {
+			if err := sse.WriteEventWithID(nextID, ev.Kind, ev); err != nil {
 				return
 			}
+			nextID++
 		case <-ticker.C:
 			sse.WriteComment("keep-alive")
 		}

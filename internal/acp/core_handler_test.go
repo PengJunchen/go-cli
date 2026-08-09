@@ -8,6 +8,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/pengjunchen/go-cli/internal/core"
 )
 
@@ -406,4 +409,126 @@ func TestCoreHandler_OtherMessageTypesIgnored(t *testing.T) {
 	if drained != nil {
 		t.Fatalf("expected no messages for lifecycle types, got %v", drained)
 	}
+}
+
+// --- SSE Bridge test infrastructure ---
+
+// sseBridgeSubAgent is a minimal core.SubAgent that emits pre-programmed
+// events and returns a fixed result. Used to test the CoreHandler event bridge.
+type sseBridgeSubAgent struct {
+	name   string
+	result core.AgentMessage
+	events []core.AgentEvent
+	done   chan struct{}
+}
+
+func (s *sseBridgeSubAgent) Name() string { return s.name }
+
+func (s *sseBridgeSubAgent) Run(_ context.Context, _ string) (<-chan core.AgentEvent, error) {
+	ch := make(chan core.AgentEvent, len(s.events))
+	for _, ev := range s.events {
+		ch <- ev
+	}
+	close(ch)
+	close(s.done)
+	return ch, nil
+}
+
+func (s *sseBridgeSubAgent) Send(_ context.Context, _ string) error { return nil }
+func (s *sseBridgeSubAgent) Interrupt(_ context.Context) error      { return nil }
+func (s *sseBridgeSubAgent) Wait(_ context.Context) (core.AgentMessage, error) {
+	<-s.done
+	return s.result, nil
+}
+
+// sseBridgeFactory is a minimal core.SubAgentFactory that returns
+// pre-programmed sub-agents.
+type sseBridgeFactory struct {
+	subs []core.SubAgent
+	idx  int
+}
+
+func (f *sseBridgeFactory) Create(_ context.Context, _ string, _ core.SubAgentConfig) (core.SubAgent, error) {
+	if f.idx < len(f.subs) {
+		sub := f.subs[f.idx]
+		f.idx++
+		return sub, nil
+	}
+	return nil, errors.New("sseBridgeFactory: no sub programmed")
+}
+
+// TestSSEBridge verifies that CoreHandler bridges sub-agent events to both the
+// session (SSE /events path via PublishEvent) and the EventBus (fan-out path).
+// It uses a real DefaultSubagentDispatcher with a fake SubAgent that emits
+// events, then checks that the events arrive on both the session's events
+// channel and the bus subscriber's channel.
+func TestSSEBridge(t *testing.T) {
+	sub := &sseBridgeSubAgent{
+		name:   "bridge-worker",
+		result: core.AgentMessage{Role: "assistant", Content: "done"},
+		events: []core.AgentEvent{
+			{Kind: "status", Content: "starting", Timestamp: time.Now()},
+			{Kind: "message", Content: "working", Timestamp: time.Now()},
+		},
+		done: make(chan struct{}),
+	}
+	factory := &sseBridgeFactory{subs: []core.SubAgent{sub}}
+	dispatcher := core.NewDefaultSubagentDispatcher(factory)
+
+	bus := core.NewMemoryEventBus()
+	defer bus.Close()
+
+	handler := NewCoreHandler(dispatcher, nil)
+	handler.SetEventBus(bus)
+
+	// Subscribe to bus before dispatch to capture bridged events.
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	busCh := bus.Subscribe(ctx)
+
+	sess := NewSession("bridge-client")
+	defer sess.Close()
+
+	// ProcessMessage dispatches synchronously: by the time it returns, the
+	// sub-agent has run, events have been forwarded, and the result is ready.
+	handler.ProcessMessage(context.Background(), ACPMessage{
+		Type:       TypeMessage,
+		SenderID:   "bridge-client",
+		ReceiverID: "server",
+		Content:    "do work",
+	}, sess)
+
+	// Verify events arrived on the session's events channel (SSE path).
+	var sessionEvents []core.AgentEvent
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) && len(sessionEvents) < 2 {
+		select {
+		case ev, ok := <-sess.Events():
+			if !ok {
+				break
+			}
+			sessionEvents = append(sessionEvents, ev)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	require.Len(t, sessionEvents, 2, "session should receive 2 bridged events")
+	assert.Equal(t, "starting", sessionEvents[0].Content)
+	assert.Equal(t, "working", sessionEvents[1].Content)
+
+	// Verify events arrived on the EventBus (fan-out path).
+	var busEvents []core.AgentEvent
+	busDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(busDeadline) && len(busEvents) < 2 {
+		select {
+		case ev, ok := <-busCh:
+			if !ok {
+				break
+			}
+			busEvents = append(busEvents, ev)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+	require.Len(t, busEvents, 2, "bus should receive 2 bridged events")
+	assert.Equal(t, "starting", busEvents[0].Content)
+	assert.Equal(t, "working", busEvents[1].Content)
 }

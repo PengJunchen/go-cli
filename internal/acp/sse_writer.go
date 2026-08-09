@@ -42,6 +42,22 @@ func (s *SSEWriter) WriteEvent(eventType string, data interface{}) error {
 	return nil
 }
 
+// WriteEventWithID marshals data as JSON and writes it as an SSE event with
+// the given event type and an explicit id field. The id enables Last-Event-ID
+// reconnection: clients send the last received id via the Last-Event-ID
+// request header, and the server replays events with ids greater than that.
+func (s *SSEWriter) WriteEventWithID(id uint64, eventType string, data interface{}) error {
+	jsonBytes, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(s.w, "id: %d\nevent: %s\ndata: %s\n\n", id, eventType, jsonBytes); err != nil {
+		return err
+	}
+	s.flusher.Flush()
+	return nil
+}
+
 // WriteComment writes an SSE comment line (used for keep-alive).
 func (s *SSEWriter) WriteComment(comment string) {
 	fmt.Fprintf(s.w, ": %s\n\n", comment) //nolint:errcheck // best-effort keep-alive

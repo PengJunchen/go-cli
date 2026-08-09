@@ -416,3 +416,55 @@ func TestHarnessDefaultDiscardIsBlock(t *testing.T) {
 	h := NewHarnessImpl(&fakeEventStreamAgent{}, WithEventBuffer(1))
 	assert.Equal(t, BlockUntilConsumed, h.discard)
 }
+
+// TestEventStreamDualWrite verifies that when an EventBus is wired via
+// WithEventBus, every event successfully sent to the stream is also published
+// to the bus (dual-write). It also verifies the nil-safe path: when no bus is
+// wired, Send works normally without publishing.
+func TestEventStreamDualWrite(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	bus := NewMemoryEventBus()
+	defer bus.Close()
+
+	busCh := bus.Subscribe(ctx)
+
+	stream := NewEventStream(4, WithEventBus(bus))
+
+	events := []AgentEvent{
+		{Kind: "message", Content: "first"},
+		{Kind: "status", Content: "thinking"},
+		{Kind: "done", Content: "complete"},
+	}
+
+	for _, ev := range events {
+		require.NoError(t, stream.Send(ev))
+	}
+
+	stream.Close()
+
+	// Verify events arrive on the stream's Events() channel.
+	streamGot := drainEvents(stream)
+	require.Len(t, streamGot, 3)
+	assert.Equal(t, "first", streamGot[0].Content)
+	assert.Equal(t, "thinking", streamGot[1].Content)
+	assert.Equal(t, "complete", streamGot[2].Content)
+
+	// Verify the same events arrive on the bus (dual-write).
+	busGot := receiveEvents(t, busCh, 3, 2*time.Second)
+	require.Len(t, busGot, 3)
+	assert.Equal(t, "first", busGot[0].Content)
+	assert.Equal(t, "thinking", busGot[1].Content)
+	assert.Equal(t, "complete", busGot[2].Content)
+
+	// Nil-safe path: a stream without a bus should work identically.
+	nilStream := NewEventStream(2)
+	require.NoError(t, nilStream.Send(AgentEvent{Kind: "message", Content: "nil-bus"}))
+	nilStream.Close()
+	nilGot := drainEvents(nilStream)
+	require.Len(t, nilGot, 1)
+	assert.Equal(t, "nil-bus", nilGot[0].Content)
+}

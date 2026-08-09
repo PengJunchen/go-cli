@@ -11,6 +11,18 @@ import (
 	"github.com/pengjunchen/go-cli/internal/core"
 )
 
+// eventHistorySize is the maximum number of events retained in the Session
+// ring buffer for Last-Event-ID reconnection. When this limit is exceeded,
+// the oldest entries are evicted.
+const eventHistorySize = 256
+
+// EventEntry pairs an AgentEvent with its monotonically increasing sequence
+// ID for Last-Event-ID reconnection support.
+type EventEntry struct {
+	ID    uint64
+	Event core.AgentEvent
+}
+
 // Session represents a connected ACP client's state. Each session tracks
 // pending messages queued for delivery via the /stream endpoint and an events
 // channel for streaming core.AgentEvents to SSE clients via /events.
@@ -20,6 +32,14 @@ type Session struct {
 	pending []ACPMessage
 	closed  bool
 	events  chan core.AgentEvent
+
+	// eventSeq is a monotonically increasing counter assigned to each event
+	// via PublishEvent. eventHistory is a ring buffer of the last
+	// eventHistorySize entries, used for Last-Event-ID reconnection: when a
+	// client reconnects with a Last-Event-ID header, the server replays
+	// entries whose ID exceeds that value.
+	eventSeq     uint64
+	eventHistory []EventEntry
 }
 
 // NewSession creates a Session with the given id (typically the client's
@@ -83,18 +103,52 @@ func (s *Session) Events() <-chan core.AgentEvent {
 }
 
 // PublishEvent sends an event to the events channel. Non-blocking: if the
-// channel is full, the event is dropped.
+// channel is full, the event is dropped. The event is always recorded in the
+// ring buffer with a monotonically increasing ID so that Last-Event-ID
+// reconnection can replay it even if the channel delivery was dropped.
 func (s *Session) PublishEvent(event core.AgentEvent) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.closed {
 		return
 	}
+	s.eventSeq++
+	s.appendHistory(EventEntry{ID: s.eventSeq, Event: event})
 	select {
 	case s.events <- event:
 	default:
-		// Channel full, drop event.
+		// Channel full, drop event from live stream. It remains in the
+		// ring buffer for Last-Event-ID reconnection.
 	}
+}
+
+// appendHistory adds an entry to the ring buffer, evicting the oldest entry
+// when the buffer is full. Caller must hold s.mu.
+func (s *Session) appendHistory(entry EventEntry) {
+	if len(s.eventHistory) < eventHistorySize {
+		s.eventHistory = append(s.eventHistory, entry)
+		return
+	}
+	// Ring buffer: shift left and append at the end.
+	copy(s.eventHistory, s.eventHistory[1:])
+	s.eventHistory[eventHistorySize-1] = entry
+}
+
+// EventHistorySince returns all entries with ID greater than afterID, plus
+// the current last event sequence number. Both reads are atomic with respect
+// to PublishEvent (protected by the same mutex), so callers can safely use
+// the returned lastSeq to assign IDs to subsequent live-stream reads without
+// gaps or duplicates.
+func (s *Session) EventHistorySince(afterID uint64) ([]EventEntry, uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var entries []EventEntry
+	for _, e := range s.eventHistory {
+		if e.ID > afterID {
+			entries = append(entries, e)
+		}
+	}
+	return entries, s.eventSeq
 }
 
 // CoreHandler processes inbound ACP messages by dispatching them to a
@@ -105,6 +159,12 @@ func (s *Session) PublishEvent(event core.AgentEvent) {
 type CoreHandler struct {
 	dispatcher core.SubagentDispatcher
 	rpc        *RPCDispatcher
+	eventBus   core.EventBus
+
+	// bridgeOnce ensures the event forwarder is installed at most once.
+	bridgeOnce sync.Once
+	// sessions maps taskID -> *Session for event routing during dispatch.
+	sessions sync.Map
 }
 
 // NewCoreHandler creates a CoreHandler with the given dispatchers. Either
@@ -115,6 +175,36 @@ func NewCoreHandler(dispatcher core.SubagentDispatcher, rpc *RPCDispatcher) *Cor
 		dispatcher: dispatcher,
 		rpc:        rpc,
 	}
+}
+
+// SetEventBus wires an EventBus that receives a copy of every agent event
+// bridged from the dispatcher. When nil (or not called), no bus publishing
+// occurs. This is the integration seam for SSE fan-out via /events.
+func (h *CoreHandler) SetEventBus(bus core.EventBus) {
+	h.eventBus = bus
+}
+
+// ensureBridge installs the event forwarder on the dispatcher at most once.
+// The forwarder routes sub-agent events to the originating session via
+// PublishEvent (SSE /events path) and, when an EventBus is wired, publishes
+// a copy for fan-out. When the dispatcher is not a
+// *core.DefaultSubagentDispatcher the bridge is a no-op (graceful
+// degradation).
+func (h *CoreHandler) ensureBridge() {
+	h.bridgeOnce.Do(func() {
+		d, ok := h.dispatcher.(*core.DefaultSubagentDispatcher)
+		if !ok {
+			return
+		}
+		d.SetEventForwarder(func(taskID string, ev core.AgentEvent) {
+			if val, ok := h.sessions.Load(taskID); ok {
+				val.(*Session).PublishEvent(ev)
+			}
+			if h.eventBus != nil {
+				h.eventBus.Publish(ev)
+			}
+		})
+	})
 }
 
 // ProcessMessage handles an inbound ACPMessage and enqueues any response
@@ -135,6 +225,9 @@ func (h *CoreHandler) ProcessMessage(ctx context.Context, msg ACPMessage, sessio
 
 // handleMessage dispatches a TypeMessage to the SubagentDispatcher and
 // enqueues the response (TypeResponse or TypeError) onto the session.
+// When the dispatcher supports event forwarding, sub-agent events are
+// bridged to the session via PublishEvent (SSE /events path) and, when
+// an EventBus is wired, published for fan-out.
 func (h *CoreHandler) handleMessage(ctx context.Context, msg ACPMessage, session *Session) {
 	if h.dispatcher == nil {
 		session.Enqueue(ACPMessage{
@@ -154,6 +247,13 @@ func (h *CoreHandler) handleMessage(ctx context.Context, msg ACPMessage, session
 	if role, ok := msg.Metadata["role"]; ok {
 		task.Role = role
 	}
+
+	// Register the session so the event forwarder can route events by
+	// taskID, then ensure the forwarder is installed. The bridge is
+	// idempotent (sync.Once) and nil-safe.
+	h.sessions.Store(task.ID, session)
+	defer h.sessions.Delete(task.ID)
+	h.ensureBridge()
 
 	result, err := h.dispatcher.Dispatch(ctx, task)
 

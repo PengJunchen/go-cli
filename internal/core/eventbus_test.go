@@ -151,6 +151,45 @@ drain:
 	assert.LessOrEqual(t, count, 64, "should not receive more than buffer capacity")
 }
 
+// TestEventBusPublish verifies that Publish delivers events to subscribers and
+// that the DroppedEvents counter correctly tracks events dropped when a
+// subscriber's buffer is full.
+func TestEventBusPublish(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	bus := NewMemoryEventBus()
+	defer bus.Close()
+
+	// Part 1: basic publish/subscribe.
+	ch := bus.Subscribe(ctx)
+
+	bus.Publish(AgentEvent{Kind: "message", Content: "event-1"})
+	bus.Publish(AgentEvent{Kind: "done", Content: "event-2"})
+
+	got := receiveEvents(t, ch, 2, 2*time.Second)
+	require.Len(t, got, 2)
+	assert.Equal(t, "event-1", got[0].Content)
+	assert.Equal(t, "event-2", got[1].Content)
+
+	// Part 2: DroppedEvents counter.
+	// Add a subscriber that never reads so its 64-slot buffer fills and
+	// subsequent publishes are dropped and counted.
+	staleCh := bus.Subscribe(ctx)
+	_ = staleCh
+
+	assert.Equal(t, uint64(0), bus.DroppedEvents())
+
+	for i := 0; i < 200; i++ {
+		bus.Publish(AgentEvent{Kind: "message", Content: "overflow"})
+	}
+
+	dropped := bus.DroppedEvents()
+	assert.Greater(t, dropped, uint64(0), "DroppedEvents should be > 0 after buffer overflow")
+}
+
 // receiveEvents reads up to n events from ch within the timeout. It does not
 // require the channel to close; it returns as soon as n events are collected.
 func receiveEvents(t *testing.T, ch <-chan AgentEvent, n int, timeout time.Duration) []AgentEvent {

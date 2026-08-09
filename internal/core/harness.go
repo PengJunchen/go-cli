@@ -15,6 +15,7 @@ type harnessConfig struct {
 	discard    DiscardPolicy
 	tracer     *tracing.Tracer
 	runSlot    RunSlotGuard
+	bus        EventBus
 }
 
 // HarnessOption configures a HarnessImpl at construction time.
@@ -60,6 +61,15 @@ func WithRunSlotGuard(g RunSlotGuard) HarnessOption {
 	return func(c *harnessConfig) { c.runSlot = g }
 }
 
+// WithHarnessEventBus wires an EventBus that is forwarded to every
+// EventStream created by the harness. Each event successfully sent to a
+// stream is dual-written to the bus, enabling fan-out to multiple
+// consumers (e.g. the SSE /events endpoint). When nil (or not set), no
+// dual-write occurs and behaviour is unchanged.
+func WithHarnessEventBus(bus EventBus) HarnessOption {
+	return func(c *harnessConfig) { c.bus = bus }
+}
+
 // HarnessImpl is the full runtime facade. It accepts a user message and
 // returns an EventStream that streams agent events until the run completes.
 type HarnessImpl struct {
@@ -69,6 +79,7 @@ type HarnessImpl struct {
 	discard       DiscardPolicy
 	tracer        *tracing.Tracer
 	runSlot       RunSlotGuard
+	bus           EventBus
 }
 
 var _ Harness = (*HarnessImpl)(nil)
@@ -96,6 +107,7 @@ func NewHarnessImpl(agent Agent, opts ...HarnessOption) *HarnessImpl {
 		discard:       cfg.discard,
 		tracer:        cfg.tracer,
 		runSlot:       cfg.runSlot,
+		bus:           cfg.bus,
 	}
 	slog.Info("core.harness.new",
 		"agent", agent.Name(),
@@ -122,7 +134,11 @@ func (h *HarnessImpl) Submit(ctx context.Context, msg string) (EventStream, erro
 	logger := tracing.NewTraceLogger(span, nil)
 	logger.Info("core.harness.start", "msg", msg)
 
-	stream := NewEventStream(h.bufferSize, WithEventDiscardPolicy(h.discard))
+	streamOpts := []EventStreamOption{WithEventDiscardPolicy(h.discard)}
+	if h.bus != nil {
+		streamOpts = append(streamOpts, WithEventBus(h.bus))
+	}
+	stream := NewEventStream(h.bufferSize, streamOpts...)
 	if stream == nil {
 		return nil, context.Canceled
 	}
