@@ -221,6 +221,11 @@ func (s *DefaultSubAgent) Run(ctx context.Context, prompt string) (<-chan AgentE
 // runAndFinalize drives the runner, streams its events to the out channel, and
 // finalizes state once the runner returns or the context is canceled.
 func (s *DefaultSubAgent) runAndFinalize(ctx context.Context, prompt string, out chan<- AgentEvent, inbox <-chan string) {
+	// Ensure channels are always closed, even if the runner panics, so that
+	// consumers waiting on out or s.done do not block forever.
+	defer close(s.done)
+	defer close(out)
+
 	span, spanCtx := tracing.SpanFromContext(ctx, "subagent.run", tracing.SpanKindInternal)
 	span.SetAttributes(
 		tracing.Attribute{Key: "subagent_name", Value: s.config.Name},
@@ -253,8 +258,6 @@ func (s *DefaultSubAgent) runAndFinalize(ctx context.Context, prompt string, out
 	s.result = result
 	s.doneErr = finalErr
 	s.mu.Unlock()
-	close(out)
-	close(s.done)
 
 	slog.Info("core.subagent.done", "name", s.config.Name, "state", status)
 }
