@@ -166,6 +166,7 @@ func (h *HarnessImpl) Submit(ctx context.Context, msg string) (EventStream, erro
 // consumers can observe completion without a goroutine leak. The claim is
 // released by ExecuteClaimedRun when the run finishes (or panics).
 func (h *HarnessImpl) run(ctx context.Context, stream *EventStreamImpl, submission Submission, claim RunClaim) {
+	defer stream.Close()
 	// Pass the EventStream to the agent so events are emitted in real time
 	// as the LLM streams tokens. The agent also stores events internally
 	// for backward-compatible retrieval via the eventSource interface.
@@ -189,13 +190,11 @@ func (h *HarnessImpl) run(ctx context.Context, stream *EventStreamImpl, submissi
 	if err != nil {
 		stream.SetResult(AgentMessage{Role: "assistant", Content: result.Message}, err)
 		bestEffort(stream.Send(errEvent(err)))
-		stream.Close()
 		return
 	}
 
 	stream.SetResult(AgentMessage{Role: "assistant", Content: result.Message}, nil)
 	bestEffort(stream.Send(AgentEvent{Kind: "done", Content: result.Message, Timestamp: time.Now()}))
-	stream.Close()
 }
 
 // bestEffort discards an error that is intentionally not actionable. EventStream.Send

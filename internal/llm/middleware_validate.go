@@ -105,7 +105,15 @@ func (v *validateModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 	}
 
 	// Peek at the first chunk; if the channel closes immediately, return an error.
-	first, ok := <-ch
+	// Use select with ctx.Done() so the call does not block forever if the
+	// upstream provider hangs without sending or closing the channel.
+	var first MessageChunk
+	var ok bool
+	select {
+	case first, ok = <-ch:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
 	if !ok {
 		v.logger.Debug("middleware.validate",
 			"status", "fail",

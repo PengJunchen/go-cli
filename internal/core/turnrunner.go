@@ -93,6 +93,8 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Re
 	r.running[id] = cancel
 	hookChain := r.hookChain
 	runSlot := r.runSlot
+	agent := r.agent
+	stream := r.stream
 	r.mu.Unlock()
 
 	if runSlot == nil {
@@ -108,7 +110,7 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Re
 
 	// Capture message count before the run for compaction detection.
 	var beforeMsgCount int
-	if ms, ok := r.agent.(messageSource); ok {
+	if ms, ok := agent.(messageSource); ok {
 		beforeMsgCount = len(ms.Messages())
 	}
 
@@ -125,17 +127,17 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Re
 	} else {
 		runErr = runSlot.ExecuteClaimedRun(claim, func() error {
 			var e error
-			if r.agent != nil {
+			if agent != nil {
 				// Delegate to the agent (includes history management). Pass the
 				// stream if one is set so events are streamed in real time.
-				if r.stream != nil {
-					result, e = r.agent.Run(spanCtx, submission, r.stream)
+				if stream != nil {
+					result, e = agent.Run(spanCtx, submission, stream)
 				} else {
-					result, e = r.agent.Run(spanCtx, submission)
+					result, e = agent.Run(spanCtx, submission)
 				}
-			} else if r.stream != nil {
+			} else if stream != nil {
 				var events []AgentEvent
-				events, e = r.loop.Run(spanCtx, submission, r.stream)
+				events, e = r.loop.Run(spanCtx, submission, stream)
 				result = Result{Message: lastMessageEvent(events), Success: e == nil}
 			} else {
 				var events []AgentEvent
