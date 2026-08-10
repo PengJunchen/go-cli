@@ -230,8 +230,9 @@ type BubbleteaApp struct {
 	model *teaModel
 
 	// program is created in Run (it needs the run context) and drives the
-	// bubbletea event loop.
-	program *tea.Program
+	// bubbletea event loop. Accessed atomically because Run writes it from
+	// a goroutine while Program() may be read from another.
+	program atomic.Pointer[tea.Program]
 
 	// done closes once Run has fully cleaned up and exited.
 	done chan struct{}
@@ -316,12 +317,14 @@ func (a *BubbleteaApp) Run(ctx context.Context) error {
 	defer cancelRun()
 	defer func() {
 		a.running.Store(false)
+		a.program.Store(nil)
 		a.cleanup()
 	}()
 
 	a.model.runDone = runCtx.Done()
-	a.program = tea.NewProgram(a.model, a.programOptions(runCtx)...)
-	_, err := a.program.Run()
+	prog := tea.NewProgram(a.model, a.programOptions(runCtx)...)
+	a.program.Store(prog)
+	_, err := prog.Run()
 	return err
 }
 
@@ -371,7 +374,7 @@ func (a *BubbleteaApp) Done() <-chan struct{} { return a.done }
 // Program returns the underlying tea.Program after Run has started.
 // Returns nil before Run is called or after it has exited.
 func (a *BubbleteaApp) Program() *tea.Program {
-	return a.program
+	return a.program.Load()
 }
 
 // EventsProcessed reports how many agent events the loop has consumed.

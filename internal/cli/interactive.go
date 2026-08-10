@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/compaction"
@@ -496,7 +497,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		if assembly.HITLEmitter != nil {
 			for i := 0; i < 100; i++ {
 				if prog := app.Program(); prog != nil {
-					assembly.HITLEmitter.program = prog
+					assembly.HITLEmitter.SetProgram(prog)
 					break
 				}
 				time.Sleep(10 * time.Millisecond)
@@ -543,7 +544,7 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 		// The bubbletea program from this turn has exited; leaving a stale
 		// reference would cause the next turn to send to a dead program.
 		if assembly.HITLEmitter != nil {
-			assembly.HITLEmitter.program = nil
+			assembly.HITLEmitter.SetProgram(nil)
 		}
 
 		// Wait for RunTurn to finish so turnResult and turnErr are populated.
@@ -829,7 +830,16 @@ var _ Command = (*interactiveCmd)(nil)
 // stdout output.
 type cliHITLEmitter struct {
 	out     io.Writer
+	mu      sync.RWMutex
 	program *tea.Program
+}
+
+// SetProgram sets the bubbletea program used to route HITL questions through
+// the TUI. It is safe for concurrent use with Emit.
+func (e *cliHITLEmitter) SetProgram(p *tea.Program) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.program = p
 }
 
 // HITLMessage is a bubbletea message carrying a HITL question to the TUI. The
@@ -851,9 +861,12 @@ type HITLResponse struct {
 func (e *cliHITLEmitter) Emit(ctx context.Context, event core.HITLQuestionEvent) error {
 	// TUI mode: route the question through the bubbletea program so it renders
 	// inside the TUI instead of corrupting stdout.
-	if e.program != nil {
+	e.mu.RLock()
+	prog := e.program
+	e.mu.RUnlock()
+	if prog != nil {
 		respCh := make(chan HITLResponse, 1)
-		e.program.Send(HITLMessage{
+		prog.Send(HITLMessage{
 			QuestionID: event.QuestionID,
 			Question:   event.Question,
 			Options:    event.Options,

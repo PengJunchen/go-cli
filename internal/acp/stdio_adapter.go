@@ -190,48 +190,56 @@ func writeLine(w io.Writer, msg ACPMessage) error {
 // context cancellation, or an end-of-stream on the reader.
 func (s *StdioAdapter) readLoop(ctx context.Context, done chan struct{}, inbound chan ACPMessage) {
 	defer close(inbound)
-	for {
-		line, err := s.readLine(ctx, done)
-		if err != nil {
-			if err != io.EOF && err != io.ErrClosedPipe {
-				slog.Warn("acp.receive.read", "name", s.name, "err", err)
+
+	type readResult struct {
+		line []byte
+		err  error
+	}
+	lineCh := make(chan readResult, 1)
+
+	// Single persistent reader goroutine: avoids spawning a new goroutine per
+	// readLine call (which would leak when done/ctx fires mid-read). The
+	// goroutine exits when the reader returns an error or when done is closed
+	// during a channel send.
+	go func() {
+		for {
+			line, err := s.in.ReadBytes('\n')
+			select {
+			case lineCh <- readResult{line: line, err: err}:
+			case <-done:
+				return
 			}
-			return
+			if err != nil {
+				return
+			}
 		}
-		var msg ACPMessage
-		if err := json.Unmarshal(line, &msg); err != nil {
-			continue
-		}
-		debugMessage(ctx, "acp.receive", msg)
+	}()
+
+	for {
 		select {
-		case inbound <- msg:
 		case <-done:
 			return
 		case <-ctx.Done():
 			return
+		case res := <-lineCh:
+			if res.err != nil {
+				if res.err != io.EOF && res.err != io.ErrClosedPipe {
+					slog.Warn("acp.receive.read", "name", s.name, "err", res.err)
+				}
+				return
+			}
+			var msg ACPMessage
+			if err := json.Unmarshal(res.line, &msg); err != nil {
+				continue
+			}
+			debugMessage(ctx, "acp.receive", msg)
+			select {
+			case inbound <- msg:
+			case <-done:
+				return
+			case <-ctx.Done():
+				return
+			}
 		}
-	}
-}
-
-// readLine reads a single newline-delimited line, honoring session teardown
-// and context cancellation where the underlying reader is a pipe.
-func (s *StdioAdapter) readLine(ctx context.Context, done chan struct{}) ([]byte, error) {
-	type result struct {
-		line []byte
-		err  error
-	}
-	resCh := make(chan result, 1)
-	go func() {
-		line, err := s.in.ReadBytes('\n')
-		resCh <- result{line: line, err: err}
-	}()
-
-	select {
-	case <-done:
-		return nil, io.ErrClosedPipe
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	case res := <-resCh:
-		return res.line, res.err
 	}
 }
