@@ -139,7 +139,7 @@ func (c *DefaultSSHClient) Close() error {
 // Connect and Exec. The remote command is appended by the caller.
 func (c *DefaultSSHClient) baseArgs() []string {
 	args := []string{
-		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "StrictHostKeyChecking=yes",
 		"-o", "ConnectTimeout=10",
 	}
 	if c.config.Port != 0 && c.config.Port != 22 {

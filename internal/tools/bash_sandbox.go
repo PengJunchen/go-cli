@@ -19,6 +19,14 @@ var defaultCommandBlacklist = []string{
 	"eval", "bash", "sh", "source", "exec",
 }
 
+// commandPrefixes lists commands that prefix another command and would bypass
+// the first-token blacklist check (e.g. "sudo rm" has first token "sudo").
+var commandPrefixes = map[string]bool{
+	"sudo": true, "doas": true, "su": true, "env": true,
+	"nohup": true, "time": true, "nice": true, "command": true,
+	"xargs": true, "strace": true, "ltrace": true, "timeout": true,
+}
+
 // BashSandbox validates bash commands before execution. Implementations check
 // constraints such as allowed working directories and blocked commands.
 type BashSandbox interface {
@@ -91,7 +99,7 @@ func (f CommandFilter) hasBlocked(s string) bool {
 	// then split on operators and check each segment.
 	stripped := stripSubShells(s)
 	for _, seg := range splitCommands(stripped) {
-		name := firstToken(seg)
+		name := effectiveCommand(seg)
 		if name == "" {
 			continue
 		}
@@ -332,4 +340,19 @@ func firstToken(s string) string {
 		return ""
 	}
 	return fields[0]
+}
+
+// effectiveCommand returns the effective command name from a segment, skipping
+// known prefix/wrapper commands like sudo, doas, env, etc. This prevents
+// blacklist bypass via "sudo rm" where the first token "sudo" is not
+// blacklisted but the actual command "rm" is.
+func effectiveCommand(s string) string {
+	fields := strings.Fields(s)
+	for _, f := range fields {
+		if commandPrefixes[f] {
+			continue
+		}
+		return f
+	}
+	return ""
 }
