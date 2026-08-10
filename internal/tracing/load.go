@@ -55,20 +55,32 @@ func buildSpanTree(spans []SpanData) (*SpanNode, error) {
 		nodeMap[span.SpanID] = &SpanNode{Span: span}
 	}
 
-	var root *SpanNode
+	var roots []*SpanNode
 	for _, node := range nodeMap {
 		if node.Span.ParentSpanID == "" {
-			root = node
+			roots = append(roots, node)
 		} else if parent, ok := nodeMap[node.Span.ParentSpanID]; ok {
 			parent.Children = append(parent.Children, node)
 		}
 	}
 
+	var root *SpanNode
+	if len(roots) == 1 {
+		root = roots[0]
+	} else if len(roots) > 1 {
+		// Multiple root spans: link them under a synthetic root so no data
+		// is lost. The synthetic root has an empty SpanID.
+		root = &SpanNode{Span: SpanData{SpanID: "<root>"}}
+		for _, r := range roots {
+			root.Children = append(root.Children, r)
+		}
+	}
+
 	if root == nil {
-		// No explicit root; fall back to the first (earliest start_time) span.
-		for _, node := range nodeMap {
-			root = node
-			break
+		// No explicit root; fall back to the earliest span (spans is sorted
+		// by StartTime at the top of this function).
+		if len(spans) > 0 {
+			root = nodeMap[spans[0].SpanID]
 		}
 	}
 

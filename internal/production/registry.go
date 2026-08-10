@@ -19,6 +19,23 @@ var (
 	defaultIdempotent     IdempotentCache
 	defaultAudit          AuditLog
 	defaultTelemetry      Telemetry
+
+	// once guards ensure lazy defaults are created only once so stateful
+	// components (circuit breaker, loop detector, etc.) accumulate state
+	// across calls instead of being silently reset.
+	loopDetectorOnce   sync.Once
+	circuitBreakerOnce sync.Once
+	retryPolicyOnce    sync.Once
+	idempotentOnce     sync.Once
+	auditOnce          sync.Once
+	telemetryOnce      sync.Once
+
+	loopDetectorInstance   LoopDetector
+	circuitBreakerInstance CircuitBreaker
+	retryPolicyInstance    RetryPolicy
+	idempotentInstance     IdempotentCache
+	auditInstance          AuditLog
+	telemetryInstance      Telemetry
 )
 
 // ResetDefaults clears all registered production components, resetting the
@@ -36,6 +53,13 @@ func ResetDefaults() {
 	defaultAudit = nil
 	defaultTelemetry = nil
 	defaultOutputGuard = nil
+	// Reset once guards so lazy defaults are recreated after a reset.
+	loopDetectorOnce = sync.Once{}
+	circuitBreakerOnce = sync.Once{}
+	retryPolicyOnce = sync.Once{}
+	idempotentOnce = sync.Once{}
+	auditOnce = sync.Once{}
+	telemetryOnce = sync.Once{}
 }
 
 // RegisterLoopDetector sets the active LoopDetector. A nil value resets to a
@@ -54,11 +78,17 @@ func RegisterLoopDetector(d LoopDetector) {
 // DefaultLoopDetector when none has been registered.
 func GetLoopDetector() LoopDetector {
 	registryMu.RLock()
-	defer registryMu.RUnlock()
-	if defaultLoopDetector == nil {
-		return NewDefaultLoopDetector(LoopDetectionConfig{})
+	if defaultLoopDetector != nil {
+		d := defaultLoopDetector
+		registryMu.RUnlock()
+		return d
 	}
-	return defaultLoopDetector
+	registryMu.RUnlock()
+
+	loopDetectorOnce.Do(func() {
+		loopDetectorInstance = NewDefaultLoopDetector(LoopDetectionConfig{})
+	})
+	return loopDetectorInstance
 }
 
 // RegisterCircuitBreaker sets the active CircuitBreaker. A nil value resets to
@@ -77,11 +107,17 @@ func RegisterCircuitBreaker(b CircuitBreaker) {
 // DefaultCircuitBreaker when none has been registered.
 func GetCircuitBreaker() CircuitBreaker {
 	registryMu.RLock()
-	defer registryMu.RUnlock()
-	if defaultCircuitBreaker == nil {
-		return NewDefaultCircuitBreaker(CircuitBreakerConfig{})
+	if defaultCircuitBreaker != nil {
+		b := defaultCircuitBreaker
+		registryMu.RUnlock()
+		return b
 	}
-	return defaultCircuitBreaker
+	registryMu.RUnlock()
+
+	circuitBreakerOnce.Do(func() {
+		circuitBreakerInstance = NewDefaultCircuitBreaker(CircuitBreakerConfig{})
+	})
+	return circuitBreakerInstance
 }
 
 // RegisterRetryPolicy sets the active RetryPolicy. A nil value resets to a
@@ -100,11 +136,17 @@ func RegisterRetryPolicy(p RetryPolicy) {
 // DefaultRetryPolicy when none has been registered.
 func GetRetryPolicy() RetryPolicy {
 	registryMu.RLock()
-	defer registryMu.RUnlock()
-	if defaultRetryPolicy == nil {
-		return NewDefaultRetryPolicy(RetryConfig{})
+	if defaultRetryPolicy != nil {
+		p := defaultRetryPolicy
+		registryMu.RUnlock()
+		return p
 	}
-	return defaultRetryPolicy
+	registryMu.RUnlock()
+
+	retryPolicyOnce.Do(func() {
+		retryPolicyInstance = NewDefaultRetryPolicy(RetryConfig{})
+	})
+	return retryPolicyInstance
 }
 
 // RegisterIdempotentCache sets the active IdempotentCache. A nil value resets
@@ -123,11 +165,17 @@ func RegisterIdempotentCache(c IdempotentCache) {
 // a FIFOIdempotentCache when none has been registered.
 func GetIdempotentCache() IdempotentCache {
 	registryMu.RLock()
-	defer registryMu.RUnlock()
-	if defaultIdempotent == nil {
-		return NewFIFOIdempotentCache(0)
+	if defaultIdempotent != nil {
+		c := defaultIdempotent
+		registryMu.RUnlock()
+		return c
 	}
-	return defaultIdempotent
+	registryMu.RUnlock()
+
+	idempotentOnce.Do(func() {
+		idempotentInstance = NewFIFOIdempotentCache(0)
+	})
+	return idempotentInstance
 }
 
 // RegisterAuditLog sets the active AuditLog. A nil value resets to a
@@ -146,11 +194,17 @@ func RegisterAuditLog(l AuditLog) {
 // DefaultAuditLog when none has been registered.
 func GetAuditLog() AuditLog {
 	registryMu.RLock()
-	defer registryMu.RUnlock()
-	if defaultAudit == nil {
-		return NewDefaultAuditLog("")
+	if defaultAudit != nil {
+		a := defaultAudit
+		registryMu.RUnlock()
+		return a
 	}
-	return defaultAudit
+	registryMu.RUnlock()
+
+	auditOnce.Do(func() {
+		auditInstance = NewDefaultAuditLog("")
+	})
+	return auditInstance
 }
 
 // RegisterTelemetry sets the active Telemetry. A nil value resets to a fresh
@@ -169,9 +223,15 @@ func RegisterTelemetry(t Telemetry) {
 // DefaultTelemetry when none has been registered.
 func GetTelemetry() Telemetry {
 	registryMu.RLock()
-	defer registryMu.RUnlock()
-	if defaultTelemetry == nil {
-		return NewDefaultTelemetry()
+	if defaultTelemetry != nil {
+		t := defaultTelemetry
+		registryMu.RUnlock()
+		return t
 	}
-	return defaultTelemetry
+	registryMu.RUnlock()
+
+	telemetryOnce.Do(func() {
+		telemetryInstance = NewDefaultTelemetry()
+	})
+	return telemetryInstance
 }

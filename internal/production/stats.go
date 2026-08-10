@@ -42,7 +42,8 @@ func NewStatsRegistry() *StatsRegistry {
 }
 
 // GetOrCreate returns the SessionStats for sessionID, creating an empty entry
-// if one does not yet exist.
+// if one does not yet exist. It returns a defensive copy so callers cannot
+// race with internal Record* methods.
 func (r *StatsRegistry) GetOrCreate(sessionID string) *SessionStats {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -52,7 +53,8 @@ func (r *StatsRegistry) GetOrCreate(sessionID string) *SessionStats {
 		r.stats[sessionID] = s
 		slog.Debug("production.stats.create", "session", sessionID)
 	}
-	return s
+	cp := *s
+	return &cp
 }
 
 // RecordTurn increments the turn counter for the given session.
