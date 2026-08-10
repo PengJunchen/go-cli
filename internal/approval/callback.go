@@ -101,7 +101,7 @@ func isTerminalReader(r io.Reader) bool {
 // returns "" when no preview is available (e.g. for non-file tools). The
 // function is called from TeaApprovalCallback before sending the request to the
 // TUI so the user can see the proposed change before approving.
-type DiffPreviewFunc func(toolName string, args map[string]any) string
+type DiffPreviewFunc func(ctx context.Context, toolName string, args map[string]any) string
 
 // TeaApprovalCallback sends approval requests to the TUI via a channel instead
 // of blocking on stdin readline. It implements ApprovalCallback so it can be a
@@ -148,7 +148,7 @@ func (c *TeaApprovalCallback) RequestApproval(ctx context.Context, toolName stri
 		ResponseCh: respCh,
 	}
 	if c.diffPreviewFn != nil {
-		req.DiffPreview = c.diffPreviewFn(toolName, args)
+		req.DiffPreview = c.diffPreviewFn(ctx, toolName, args)
 	}
 	select {
 	case c.requestCh <- req:

@@ -150,7 +150,7 @@ func (t *EditFileTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 	// error is silently ignored.
 	var diffPreview string
 	if t.diffGenerator != nil {
-		if d, derr := t.diffGenerator.Generate(data, updated, path); derr == nil {
+		if d, derr := t.diffGenerator.Generate(ctx, data, updated, path); derr == nil {
 			diffPreview = d
 		}
 	}

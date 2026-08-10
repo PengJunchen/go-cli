@@ -179,7 +179,7 @@ func TestET_git_diff_in_repo(t *testing.T) {
 	gen := tools.NewGitDiffGenerator(git, fallback)
 
 	// Generate diff - should use git diff since we're in a repo.
-	diff, err := gen.Generate("# test\n", "# modified content\n", "README.md")
+	diff, err := gen.Generate(context.Background(), "# test\n", "# modified content\n", "README.md")
 	require.NoError(t, err)
 	assert.NotEmpty(t, diff)
 	// Git diff output should contain git diff markers.

@@ -7,7 +7,7 @@ import (
 
 // DiffGenerator generates unified diffs between old and new content.
 type DiffGenerator interface {
-	Generate(oldContent, newContent, path string) (string, error)
+	Generate(ctx context.Context, oldContent, newContent, path string) (string, error)
 }
 
 // ANSI color codes used when color output is enabled.
@@ -56,7 +56,7 @@ type diffEntry struct {
 // file (empty newContent) yields all removed lines; identical content yields an
 // empty string. When maxLines is positive the body is truncated to roughly
 // maxLines lines (first half + "..." + last half).
-func (g *UnifiedDiffGenerator) Generate(oldContent, newContent, path string) (string, error) {
+func (g *UnifiedDiffGenerator) Generate(_ context.Context, oldContent, newContent, path string) (string, error) {
 	// New file: every line is an addition.
 	if oldContent == "" {
 		lines := splitDiffLines(newContent)
@@ -261,12 +261,12 @@ func NewGitDiffGenerator(git GitTool, fallback DiffGenerator) *GitDiffGenerator 
 // Generate tries `git diff -- <path>` first. When the git diff succeeds and
 // returns non-empty output, it is returned directly. Otherwise (not in a git
 // repo, no changes, or error), the fallback DiffGenerator is used.
-func (g *GitDiffGenerator) Generate(oldContent, newContent, path string) (string, error) {
+func (g *GitDiffGenerator) Generate(ctx context.Context, oldContent, newContent, path string) (string, error) {
 	if g.git != nil && strings.TrimSpace(path) != "" {
-		out, err := g.git.Diff(context.Background(), GitDiffOptions{Path: path})
+		out, err := g.git.Diff(ctx, GitDiffOptions{Path: path})
 		if err == nil && strings.TrimSpace(out) != "" {
 			return out, nil
 		}
 	}
-	return g.fallback.Generate(oldContent, newContent, path)
+	return g.fallback.Generate(ctx, oldContent, newContent, path)
 }

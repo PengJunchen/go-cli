@@ -262,7 +262,7 @@ var _ SlashCommandHandler = (*DiffHandler)(nil)
 func (h *DiffHandler) Name() string        { return "diff" }
 func (h *DiffHandler) Description() string { return "Show the diff of the most recent file change" }
 
-func (h *DiffHandler) Handle(_ context.Context, _ []string, sc *slashContext) error {
+func (h *DiffHandler) Handle(ctx context.Context, _ []string, sc *slashContext) error {
 	if sc.fileTracker == nil {
 		fmt.Fprintln(sc.out, "File tracking not configured.") //nolint:errcheck
 		return nil
@@ -291,7 +291,7 @@ func (h *DiffHandler) Handle(_ context.Context, _ []string, sc *slashContext) er
 		return nil
 	}
 
-	diff, genErr := sc.diffGenerator.Generate(oldContent, string(newBytes), latest.Path)
+	diff, genErr := sc.diffGenerator.Generate(ctx, oldContent, string(newBytes), latest.Path)
 	if genErr != nil {
 		fmt.Fprintf(sc.out, "Diff failed: %v\n", genErr) //nolint:errcheck
 		return nil
