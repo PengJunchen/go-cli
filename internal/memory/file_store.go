@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"math"
 	"os"
 	"sort"
@@ -295,21 +296,28 @@ func (s *FileMemoryStore) Close() error {
 
 // rewriteFileLocked truncates and rewrites the entire JSONL file from the
 // in-memory items, then reopens the file for appending. It must be called while
-// holding the write lock.
+// holding the write lock. On any error path it attempts to reopen the file in
+// append mode so the store remains usable for subsequent operations.
 func (s *FileMemoryStore) rewriteFileLocked() error {
 	if err := s.file.Close(); err != nil {
+		s.file = nil
+		s.tryReopenLocked()
 		return fmt.Errorf("memory: close for rewrite: %w", err)
 	}
+	s.file = nil
+
 	var buf bytes.Buffer
 	for _, m := range s.items {
 		data, err := json.Marshal(m)
 		if err != nil {
+			s.tryReopenLocked()
 			return fmt.Errorf("memory: encode entry: %w", err)
 		}
 		buf.Write(data)
 		buf.WriteByte('\n')
 	}
 	if err := os.WriteFile(s.path, buf.Bytes(), memoryFilePerm); err != nil {
+		s.tryReopenLocked()
 		return fmt.Errorf("memory: rewrite file: %w", err)
 	}
 	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, memoryFilePerm)
@@ -318,6 +326,19 @@ func (s *FileMemoryStore) rewriteFileLocked() error {
 	}
 	s.file = f
 	return nil
+}
+
+// tryReopenLocked attempts to reopen the store file in append mode after an
+// error. It must be called while holding the write lock. If reopening fails,
+// the store's file handle remains nil and subsequent writes will error, but
+// the in-memory state is preserved.
+func (s *FileMemoryStore) tryReopenLocked() {
+	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, memoryFilePerm)
+	if err != nil {
+		slog.Error("memory.reopen_failed", "path", s.path, "err", err)
+		return
+	}
+	s.file = f
 }
 
 // indexDocument adds a document to the TF-IDF index. It must be called while
