@@ -316,10 +316,8 @@ func (r *EinoTurnRunner) SetStream(s EventStream) {
 func (r *EinoTurnRunner) RunningTurnID() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for id, turn := range r.turns {
-		if turn.Status == TurnRunning {
-			return id
-		}
+	for id := range r.running {
+		return id
 	}
 	return ""
 }

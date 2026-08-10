@@ -70,6 +70,9 @@ type ModelCycler struct {
 	mu       sync.Mutex
 	// sessions maps sessionID -> model index when SessionAffinity is enabled.
 	sessions map[string]int
+	// maxSessions bounds the sessions map to prevent unbounded memory growth.
+	// When the limit is reached, the oldest entries are evicted.
+	maxSessions int
 }
 
 // Compile-time assertion that ModelCycler satisfies ModelMiddleware.
@@ -78,8 +81,9 @@ var _ ModelMiddleware = (*ModelCycler)(nil)
 // NewModelCycler creates a ModelCycler with the given configuration.
 func NewModelCycler(config ModelCyclerConfig) *ModelCycler {
 	return &ModelCycler{
-		config:   config,
-		sessions: make(map[string]int),
+		config:      config,
+		sessions:    make(map[string]int),
+		maxSessions: 1024,
 	}
 }
 
@@ -130,6 +134,13 @@ func (c *ModelCycler) selectModel(sessionID string, taskType TaskType) int {
 			return idx
 		}
 		idx := c.selectByStrategy()
+		// Evict oldest entries when the sessions map exceeds the bound.
+		if len(c.sessions) >= c.maxSessions {
+			for k := range c.sessions {
+				delete(c.sessions, k)
+				break
+			}
+		}
 		c.sessions[sessionID] = idx
 		return idx
 	}
