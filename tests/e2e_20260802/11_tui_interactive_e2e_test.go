@@ -46,6 +46,21 @@ func waitForStream(ctx context.Context, stream core.EventStream) (core.AgentMess
 	}
 }
 
+// waitForTUIEvents polls app.EventsProcessed() until it reaches minCount or
+// the timeout expires. The harness calls SetResult before stream.Close(), so
+// waitForStream may return while events are still in-flight to the TUI. This
+// helper bridges that gap so the TUI has a chance to process events before
+// Quit is called.
+func waitForTUIEvents(app *tui.BubbleteaApp, minCount int64, timeout time.Duration) {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if app.EventsProcessed() >= minCount {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // =============================================================================
 // 1. TestE2EInteractive_TUIBridgePipeline
 // =============================================================================
@@ -88,6 +103,7 @@ func TestE2EInteractive_TUIBridgePipeline(t *testing.T) {
 
 	// Wait for the stream to complete.
 	result, streamErr := waitForStream(ctx, stream)
+	waitForTUIEvents(app, 1, 2*time.Second)
 	app.Quit()
 
 	select {
@@ -171,6 +187,7 @@ func TestE2EInteractive_MCPToolExecution(t *testing.T) {
 
 	// Wait for stream completion.
 	_, streamErr := waitForStream(ctx, stream)
+	waitForTUIEvents(app, 2, 2*time.Second)
 	app.Quit()
 
 	select {
@@ -251,6 +268,7 @@ func TestE2EInteractive_SkillExecution(t *testing.T) {
 
 	// Wait for stream completion.
 	_, streamErr := waitForStream(ctx, stream)
+	waitForTUIEvents(app, 2, 2*time.Second)
 	app.Quit()
 
 	select {
@@ -426,6 +444,7 @@ func TestE2EInteractive_FullPipeline(t *testing.T) {
 
 	// Wait for the stream to complete.
 	result, streamErr := waitForStream(ctx, stream)
+	waitForTUIEvents(app, 5, 2*time.Second)
 	app.Quit()
 
 	select {
