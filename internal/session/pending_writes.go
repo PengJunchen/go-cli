@@ -97,7 +97,7 @@ func (p *PendingSessionWrites) Flush(ctx context.Context, store SessionStore) er
 	copy(writes, p.pending)
 	p.mu.Unlock()
 
-	for _, w := range writes {
+	for i, w := range writes {
 		entry := w.Entry
 		if err := store.Append(ctx, &entry); err != nil {
 			slog.Error("session.pending_writes.flush",
@@ -105,6 +105,16 @@ func (p *PendingSessionWrites) Flush(ctx context.Context, store SessionStore) er
 				"entry_id", w.Entry.ID,
 				"err", err,
 			)
+			// Remove entries that were already flushed so they are not
+			// re-written on retry. Without this, a partial failure would
+			// leave already-persisted entries in the buffer, causing every
+			// subsequent retry to fail on the first duplicate.
+			p.mu.Lock()
+			p.flushed += i
+			if i <= len(p.pending) {
+				p.pending = p.pending[i:]
+			}
+			p.mu.Unlock()
 			return fmt.Errorf("session: flush entry %q: %w", w.Entry.ID, err)
 		}
 	}
@@ -142,7 +152,7 @@ func (p *PendingSessionWrites) FlushToSavepoint(ctx context.Context, sp Savepoin
 	copy(writes, p.pending[:sp.index])
 	p.mu.Unlock()
 
-	for _, w := range writes {
+	for i, w := range writes {
 		entry := w.Entry
 		if err := store.Append(ctx, &entry); err != nil {
 			slog.Error("session.pending_writes.flush_to_savepoint",
@@ -150,6 +160,14 @@ func (p *PendingSessionWrites) FlushToSavepoint(ctx context.Context, sp Savepoin
 				"entry_id", w.Entry.ID,
 				"err", err,
 			)
+			// Remove entries that were already flushed so they are not
+			// re-written on retry.
+			p.mu.Lock()
+			p.flushed += i
+			if i <= len(p.pending) {
+				p.pending = p.pending[i:]
+			}
+			p.mu.Unlock()
 			return fmt.Errorf("session: flush entry %q: %w", w.Entry.ID, err)
 		}
 	}
