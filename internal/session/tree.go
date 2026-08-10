@@ -311,7 +311,13 @@ func (t *DefaultSessionTree) CurrentLeaf() string {
 func (t *DefaultSessionTree) walkBranchLocked(leafID string) ([]*SessionEntry, bool) {
 	var reversed []*SessionEntry
 	cur := leafID
+	visited := make(map[string]bool)
 	for cur != "" {
+		if visited[cur] {
+			// Cycle detected in ParentID chain — corrupted data.
+			return nil, false
+		}
+		visited[cur] = true
 		e, ok := t.entries[cur]
 		if !ok {
 			return nil, false

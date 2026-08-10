@@ -240,13 +240,24 @@ func RegisterSettings(s Settings) {
 	defaultSettings = s
 }
 
-// GetSettings returns the active Settings, lazily defaulting to a
-// DefaultSettings when none has been registered.
+// GetSettings returns the active Settings, lazily initializing a
+// DefaultSettings when none has been registered. The lazy initialization
+// stores the instance so subsequent calls return the same Settings, preventing
+// silent loss of modifications made by callers.
 func GetSettings() Settings {
 	settingsMu.RLock()
-	defer settingsMu.RUnlock()
+	if defaultSettings != nil {
+		s := defaultSettings
+		settingsMu.RUnlock()
+		return s
+	}
+	settingsMu.RUnlock()
+
+	settingsMu.Lock()
+	defer settingsMu.Unlock()
+	// Double-check after acquiring write lock.
 	if defaultSettings == nil {
-		return NewDefaultSettings()
+		defaultSettings = NewDefaultSettings()
 	}
 	return defaultSettings
 }
