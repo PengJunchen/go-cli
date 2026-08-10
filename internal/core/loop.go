@@ -374,7 +374,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 	} else {
 		sysPrompt = l.systemPromptOverride
 		if sysPrompt == "" {
-			sysPrompt = systemPrompt(l.tools)
+			sysPrompt = systemPrompt(spanCtx, l.tools)
 		}
 	}
 	messages = append(messages, llm.Message{Role: llm.RoleSystem, Content: sysPrompt})
@@ -965,7 +965,7 @@ func buildToolOpts(defs []tools.ToolDefinition, thinkingCfg *llm.ThinkingConfig)
 // systemPrompt returns the system instruction that tells the model its role
 // and encourages it to use tools when appropriate. When the tool registry is
 // nil or empty, a minimal prompt is returned.
-func systemPrompt(tr tools.ToolRegistry) string {
+func systemPrompt(ctx context.Context, tr tools.ToolRegistry) string {
 	base := `You are a helpful AI assistant embedded in a developer CLI. When the user asks you to perform an action, you MUST use the available tools to accomplish it and persist until the task is fully complete.
 
 Rules:
@@ -977,7 +977,7 @@ Rules:
 	if tr == nil {
 		return base
 	}
-	defs, err := tr.List(context.Background())
+	defs, err := tr.List(ctx)
 	if err != nil || len(defs) == 0 {
 		return base
 	}

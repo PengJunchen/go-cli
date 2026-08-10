@@ -83,7 +83,8 @@ func (h *ShellHook) PreToolUse(ctx context.Context, tool string, args map[string
 	payload := hookPayload{Event: string(h.event), Tool: tool, Args: args}
 	output, err := h.execCommand(timeoutCtx, payload)
 	if err != nil {
-		if timeoutCtx.Err() == context.DeadlineExceeded {
+		if timeoutCtx.Err() != nil {
+			// Timeout or parent context cancellation — treat as allow (AC-5).
 			slog.Warn("core.hook.timeout", "hook", h.name, "event", h.event, "command", h.command)
 			return true, nil // AC-5
 		}

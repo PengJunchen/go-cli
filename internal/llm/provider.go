@@ -500,7 +500,13 @@ func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadClos
 		if rerr != nil {
 			return nil, fmt.Errorf("llm: read error response: %w", rerr)
 		}
-		return nil, fmt.Errorf("llm: provider returned %s: %s", resp.Status, strings.TrimSpace(string(payload)))
+		// Truncate the error payload to avoid leaking large response bodies
+		// (which may contain sensitive data) into logs and error chains.
+		truncated := strings.TrimSpace(string(payload))
+		if len(truncated) > 512 {
+			truncated = truncated[:512] + "..."
+		}
+		return nil, fmt.Errorf("llm: provider returned %s: %s", resp.Status, truncated)
 	}
 	return resp.Body, nil
 }
