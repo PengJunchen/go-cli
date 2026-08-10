@@ -22,7 +22,7 @@ func TestDiffNewFileAllAddedLines(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	g := &UnifiedDiffGenerator{}
-	out, err := g.Generate("", "line1\nline2\nline3\n", "new.txt")
+	out, err := g.Generate(context.Background(), "", "line1\nline2\nline3\n", "new.txt")
 	require.NoError(t, err)
 
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
@@ -40,7 +40,7 @@ func TestDiffDeletedFileAllRemovedLines(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	g := &UnifiedDiffGenerator{}
-	out, err := g.Generate("gone1\ngone2\n", "", "gone.txt")
+	out, err := g.Generate(context.Background(), "gone1\ngone2\n", "", "gone.txt")
 	require.NoError(t, err)
 
 	lines := strings.Split(strings.TrimRight(out, "\n"), "\n")
@@ -59,7 +59,7 @@ func TestDiffModifiedFileHasAddAndRemove(t *testing.T) {
 	g := &UnifiedDiffGenerator{}
 	old := "alpha\nbeta\ngamma\n"
 	new := "alpha\ndelta\ngamma\n"
-	out, err := g.Generate(old, new, "mod.txt")
+	out, err := g.Generate(context.Background(), old, new, "mod.txt")
 	require.NoError(t, err)
 
 	assert.Contains(t, out, "--- a/mod.txt")
@@ -75,7 +75,7 @@ func TestDiffNoChangesReturnsEmpty(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	g := &UnifiedDiffGenerator{}
-	out, err := g.Generate("same\ncontent\n", "same\ncontent\n", "same.txt")
+	out, err := g.Generate(context.Background(), "same\ncontent\n", "same\ncontent\n", "same.txt")
 	require.NoError(t, err)
 	assert.Empty(t, out)
 }
@@ -95,7 +95,7 @@ func TestDiffLargeFileTruncation(t *testing.T) {
 	}
 
 	g := &UnifiedDiffGenerator{maxLines: 10}
-	out, err := g.Generate(oldSB.String(), newSB.String(), "big.txt")
+	out, err := g.Generate(context.Background(), oldSB.String(), newSB.String(), "big.txt")
 	require.NoError(t, err)
 
 	assert.Contains(t, out, "...")
@@ -108,7 +108,7 @@ func TestDiffLargeFileTruncation(t *testing.T) {
 
 	// Compare against an unbounded generator: truncated output must be shorter.
 	unbounded := &UnifiedDiffGenerator{}
-	full, err := unbounded.Generate(oldSB.String(), newSB.String(), "big.txt")
+	full, err := unbounded.Generate(context.Background(), oldSB.String(), newSB.String(), "big.txt")
 	require.NoError(t, err)
 	assert.Less(t, len(out), len(full))
 }
@@ -117,7 +117,7 @@ func TestDiffColorOutputContainsANSICodes(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	g := &UnifiedDiffGenerator{color: true}
-	out, err := g.Generate("a\n", "b\n", "color.txt")
+	out, err := g.Generate(context.Background(), "a\n", "b\n", "color.txt")
 	require.NoError(t, err)
 
 	assert.Contains(t, out, "\033[31m") // red
@@ -129,7 +129,7 @@ func TestDiffNoColorHasNoANSICodes(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	g := &UnifiedDiffGenerator{color: false}
-	out, err := g.Generate("a\n", "b\n", "plain.txt")
+	out, err := g.Generate(context.Background(), "a\n", "b\n", "plain.txt")
 	require.NoError(t, err)
 
 	assert.NotContains(t, out, "\033[")
@@ -139,7 +139,7 @@ func TestDiffPathInHeader(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	g := &UnifiedDiffGenerator{}
-	out, err := g.Generate("x\n", "y\n", "src/main.go")
+	out, err := g.Generate(context.Background(), "x\n", "y\n", "src/main.go")
 	require.NoError(t, err)
 
 	assert.Contains(t, out, "--- a/src/main.go")
@@ -152,7 +152,7 @@ func TestDiffAppendsAndRemovesMultipleLines(t *testing.T) {
 	g := &UnifiedDiffGenerator{}
 	old := "keep\nremove1\nremove2\nkeep2\n"
 	new := "keep\nadd1\nadd2\nkeep2\n"
-	out, err := g.Generate(old, new, "multi.txt")
+	out, err := g.Generate(context.Background(), old, new, "multi.txt")
 	require.NoError(t, err)
 
 	assert.Contains(t, out, "-remove1")

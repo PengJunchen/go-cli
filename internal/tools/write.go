@@ -199,7 +199,7 @@ func (t *WriteTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, er
 			if appendMode {
 				newFull = string(oldBytes) + content
 			}
-			if d, derr := t.diffGenerator.Generate(string(oldBytes), newFull, path); derr == nil {
+			if d, derr := t.diffGenerator.Generate(ctx, string(oldBytes), newFull, path); derr == nil {
 				diffPreview = d
 			}
 		}

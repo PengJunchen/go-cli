@@ -2083,7 +2083,7 @@ func buildSingleLSPClient(ctx context.Context, srv config.LSPServerConfig, logge
 // other tools it returns "". The function reads the current file content from
 // disk to compute the before/after diff.
 func buildDiffPreviewFn(diffGen tools.DiffGenerator) approval.DiffPreviewFunc {
-	return func(toolName string, args map[string]any) string {
+	return func(ctx context.Context, toolName string, args map[string]any) string {
 		if diffGen == nil {
 			return ""
 		}
@@ -2099,7 +2099,7 @@ func buildDiffPreviewFn(diffGen tools.DiffGenerator) approval.DiffPreviewFunc {
 				// New file: show all lines as additions.
 				old = nil
 			}
-			diff, err := diffGen.Generate(string(old), content, path)
+			diff, err := diffGen.Generate(ctx, string(old), content, path)
 			if err != nil || diff == "" {
 				return ""
 			}
@@ -2116,7 +2116,7 @@ func buildDiffPreviewFn(diffGen tools.DiffGenerator) approval.DiffPreviewFunc {
 				return ""
 			}
 			newContent := strings.Replace(string(old), oldStr, newStr, 1)
-			diff, err := diffGen.Generate(string(old), newContent, path)
+			diff, err := diffGen.Generate(ctx, string(old), newContent, path)
 			if err != nil || diff == "" {
 				return ""
 			}

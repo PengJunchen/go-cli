@@ -437,7 +437,7 @@ type recordingDiffGen struct {
 	path   string
 }
 
-func (r *recordingDiffGen) Generate(oldContent, newContent, path string) (string, error) {
+func (r *recordingDiffGen) Generate(_ context.Context, oldContent, newContent, path string) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.called = true
