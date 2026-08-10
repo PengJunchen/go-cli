@@ -90,6 +90,91 @@ func TestPendingSessionWrites_FlushDuplicatePreservesBuffer(t *testing.T) {
 	assert.Equal(t, 1, pw.PendingCount(), "buffer should be preserved on error")
 }
 
+func TestPendingSessionWrites_FlushPartialFailureRemovesFlushedEntries(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	pw := NewPendingSessionWrites()
+	store := NewMemoryStore()
+
+	// Pre-seed the store with "e2" so it will fail when the flush reaches it.
+	require.NoError(t, store.Append(context.Background(), &SessionEntry{ID: "e2", Type: EntryTypeUser, Content: "pre-existing"}))
+
+	// Enqueue e1 (will succeed), e2 (will fail - duplicate), e3 (never reached).
+	pw.Enqueue(SessionWrite{
+		SessionID: "sess1",
+		Entry:     SessionEntry{ID: "e1", Type: EntryTypeUser, Content: "first"},
+	})
+	pw.Enqueue(SessionWrite{
+		SessionID: "sess1",
+		Entry:     SessionEntry{ID: "e2", Type: EntryTypeUser, Content: "second"},
+	})
+	pw.Enqueue(SessionWrite{
+		SessionID: "sess1",
+		Entry:     SessionEntry{ID: "e3", Type: EntryTypeUser, Content: "third"},
+	})
+
+	// First flush should fail on e2 (duplicate).
+	err := pw.Flush(context.Background(), store)
+	require.Error(t, err, "flush should fail on duplicate e2")
+
+	// e1 was successfully flushed and should be removed from the buffer.
+	// e2 and e3 should remain.
+	assert.Equal(t, 2, pw.PendingCount(), "only unflushed entries should remain in buffer")
+	assert.Equal(t, 1, pw.FlushedCount(), "one entry was successfully flushed before the error")
+
+	// Verify e1 is in the store with the correct content.
+	got, err := store.Get(context.Background(), "e1")
+	require.NoError(t, err)
+	assert.Equal(t, "first", got.Content)
+
+	// Remove the pre-existing e2 so retry can succeed.
+	// Use a fresh store to simulate fixing the conflict.
+	store2 := NewMemoryStore()
+	// Re-add e1 so the new store has it (simulating the already-persisted state).
+	require.NoError(t, store2.Append(context.Background(), &SessionEntry{ID: "e1", Type: EntryTypeUser, Content: "first"}))
+
+	// Retry flush — now e2 and e3 should both succeed.
+	// But e1 is already in store2, and e1 is NOT in the pending buffer anymore.
+	require.NoError(t, pw.Flush(context.Background(), store2))
+	assert.Equal(t, 0, pw.PendingCount(), "buffer should be empty after successful retry")
+	assert.Equal(t, 3, pw.FlushedCount())
+
+	// All three entries should be in the store.
+	_, err = store2.Get(context.Background(), "e2")
+	require.NoError(t, err)
+	_, err = store2.Get(context.Background(), "e3")
+	require.NoError(t, err)
+}
+
+func TestPendingSessionWrites_FlushToSavepointPartialFailureRemovesFlushedEntries(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	pw := NewPendingSessionWrites()
+	store := NewMemoryStore()
+
+	// Pre-seed the store with "e2" so it will fail when the flush reaches it.
+	require.NoError(t, store.Append(context.Background(), &SessionEntry{ID: "e2", Type: EntryTypeUser, Content: "pre-existing"}))
+
+	pw.Enqueue(SessionWrite{
+		SessionID: "sess1",
+		Entry:     SessionEntry{ID: "e1", Type: EntryTypeUser, Content: "first"},
+	})
+	pw.Enqueue(SessionWrite{
+		SessionID: "sess1",
+		Entry:     SessionEntry{ID: "e2", Type: EntryTypeUser, Content: "second"},
+	})
+
+	sp := pw.CreateSavepoint()
+
+	// FlushToSavepoint should fail on e2 (duplicate).
+	err := pw.FlushToSavepoint(context.Background(), sp, store)
+	require.Error(t, err)
+
+	// e1 was successfully flushed, e2 remains.
+	assert.Equal(t, 1, pw.PendingCount(), "only unflushed entry should remain")
+	assert.Equal(t, 1, pw.FlushedCount())
+}
+
 func TestPendingSessionWrites_CreateSavepointAndFlushToSavepoint(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
