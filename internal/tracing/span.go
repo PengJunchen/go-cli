@@ -242,17 +242,23 @@ func (s *localSpan) End() {
 	}
 	s.ended = true
 	s.endTime = time.Now()
+	// Add to WaitGroup while still holding the lock to prevent a race
+	// where Flush() returns before the export goroutine is launched.
+	if s.exporter != nil && s.wg != nil {
+		s.wg.Add(1)
+	}
+	exporter := s.exporter
+	wg := s.wg
 	s.mu.Unlock()
 
-	if s.exporter != nil {
-		if s.wg != nil {
-			s.wg.Add(1)
-		}
+	if exporter != nil {
 		go func() {
-			if s.wg != nil {
-				defer s.wg.Done()
+			if wg != nil {
+				defer wg.Done()
 			}
-			if err := s.exporter.ExportSpan(context.Background(), s); err != nil {
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			if err := exporter.ExportSpan(ctx, s); err != nil {
 				slog.Warn("failed to export span", "span_id", s.spanID, "err", err)
 			}
 		}()
