@@ -114,9 +114,13 @@ func (e *OTLPTraceExporter) flushLoop(interval time.Duration) {
 	for {
 		select {
 		case <-e.trigger:
-			_ = e.flushBatch(context.Background()) //nolint:errcheck // best-effort; errors logged inside
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_ = e.flushBatch(ctx) //nolint:errcheck // best-effort; errors logged inside
+			cancel()
 		case <-ticker.C:
-			_ = e.flushBatch(context.Background()) //nolint:errcheck // best-effort; errors logged inside
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_ = e.flushBatch(ctx) //nolint:errcheck // best-effort; errors logged inside
+			cancel()
 		case <-e.done:
 			return
 		}

@@ -3,6 +3,7 @@ package extension
 import (
 	"context"
 	"log/slog"
+	"sync"
 
 	"github.com/pengjunchen/go-cli/internal/tools"
 )
@@ -13,7 +14,9 @@ import (
 type PluginManager struct {
 	loader      PluginLoader
 	coordinator *extensionCoordinator
-	extensions  []Extension
+
+	mu         sync.RWMutex
+	extensions []Extension
 }
 
 // NewPluginManager creates a PluginManager using the given PluginLoader. When
@@ -39,7 +42,9 @@ func (pm *PluginManager) Load(ctx context.Context, paths []string) error {
 			slog.Warn("extension.plugin_manager.load_failed", "path", path, "err", err)
 			continue
 		}
+		pm.mu.Lock()
 		pm.extensions = append(pm.extensions, exts...)
+		pm.mu.Unlock()
 	}
 	return nil
 }
@@ -48,7 +53,11 @@ func (pm *PluginManager) Load(ctx context.Context, paths []string) error {
 // ExtensionRegistry. An init error for one extension does not prevent the
 // remaining extensions from being initialized.
 func (pm *PluginManager) Init(ctx context.Context) error {
-	for _, ext := range pm.extensions {
+	pm.mu.RLock()
+	exts := make([]Extension, len(pm.extensions))
+	copy(exts, pm.extensions)
+	pm.mu.RUnlock()
+	for _, ext := range exts {
 		if err := pm.coordinator.initExtension(ctx, ext); err != nil {
 			slog.Warn("extension.plugin_manager.init_failed", "extension", ext.Name(), "err", err)
 		}
@@ -60,8 +69,12 @@ func (pm *PluginManager) Init(ctx context.Context) error {
 // error for one extension does not prevent the remaining extensions from being
 // shut down.
 func (pm *PluginManager) Shutdown(ctx context.Context) error {
-	for i := len(pm.extensions) - 1; i >= 0; i-- {
-		ext := pm.extensions[i]
+	pm.mu.RLock()
+	exts := make([]Extension, len(pm.extensions))
+	copy(exts, pm.extensions)
+	pm.mu.RUnlock()
+	for i := len(exts) - 1; i >= 0; i-- {
+		ext := exts[i]
 		if err := pm.coordinator.shutdownExtension(ctx, ext); err != nil {
 			slog.Warn("extension.plugin_manager.shutdown_failed", "extension", ext.Name(), "err", err)
 		}
@@ -72,7 +85,11 @@ func (pm *PluginManager) Shutdown(ctx context.Context) error {
 // Extensions returns the extensions loaded by Load. The slice is empty before
 // Load is called.
 func (pm *PluginManager) Extensions() []Extension {
-	return pm.extensions
+	pm.mu.RLock()
+	defer pm.mu.RUnlock()
+	out := make([]Extension, len(pm.extensions))
+	copy(out, pm.extensions)
+	return out
 }
 
 // Registry returns the ExtensionRegistry that extensions register their

@@ -28,6 +28,9 @@ type BridgeEvent struct {
 type EventBridge struct {
 	source <-chan BridgeEvent
 	wg     sync.WaitGroup
+
+	forwardOnce sync.Once
+	out         chan BridgeEvent
 }
 
 // NewEventBridge creates an EventBridge that drains the given source channel.
@@ -38,12 +41,15 @@ func NewEventBridge(source <-chan BridgeEvent) *EventBridge {
 // Forward starts a goroutine that drains the source and forwards each event to
 // the returned buffered channel, preserving FIFO order and completeness. The
 // returned channel is closed when forwarding completes (source closed or
-// context canceled).
+// context canceled). Forward may be called multiple times; every call returns
+// the same channel and only the first call starts the forwarding goroutine.
 func (b *EventBridge) Forward(ctx context.Context) <-chan BridgeEvent {
-	out := make(chan BridgeEvent, 64)
-	b.wg.Add(1)
-	go b.forwardEvents(ctx, out)
-	return out
+	b.forwardOnce.Do(func() {
+		b.out = make(chan BridgeEvent, 64)
+		b.wg.Add(1)
+		go b.forwardEvents(ctx, b.out)
+	})
+	return b.out
 }
 
 // forwardEvents drains the source channel and forwards each event to out,

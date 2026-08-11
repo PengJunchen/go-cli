@@ -146,7 +146,7 @@ func (m *costTrackingModel) recordUsage(resp *llm.Message) {
 	}
 	if m.tracker != nil {
 		if _, err := m.tracker.Record(m.modelName, in, out); err != nil {
-			slog.Debug("production.llm_integration.cost_record_failed",
+			slog.Warn("production.llm_integration.cost_record_failed",
 				"err", err,
 				"model", m.modelName,
 			)

@@ -58,7 +58,8 @@ func TestMultiExporterContinuesAfterPartialFailure(t *testing.T) {
 }
 
 // TestMultiExporterShutdownContinuesOnError verifies that Shutdown keeps going
-// when one exporter's Shutdown fails, and logs the failure without aborting.
+// when one exporter's Shutdown fails, logs the failure, and returns the first
+// error encountered without aborting remaining shutdowns.
 func TestMultiExporterShutdownContinuesOnError(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -66,9 +67,10 @@ func TestMultiExporterShutdownContinuesOnError(t *testing.T) {
 	ctx := lc.Attach(context.Background())
 	defer lc.Detach()
 
+	rec := &recordingExporter{}
 	bad := &shutdownErrorExporter{}
-	m := NewMultiExporter(bad, &shutdownErrorExporter{}, &recordingExporter{})
-	require.NoError(t, m.Shutdown(ctx), "MultiExporter.Shutdown must swallow per-exporter errors")
+	m := NewMultiExporter(bad, &shutdownErrorExporter{}, rec)
+	require.Error(t, m.Shutdown(ctx), "MultiExporter.Shutdown must propagate the first per-exporter error")
 
 	require.Eventually(t, func() bool {
 		for _, e := range lc.Entries() {
@@ -78,6 +80,9 @@ func TestMultiExporterShutdownContinuesOnError(t *testing.T) {
 		}
 		return false
 	}, 2*time.Second, 5*time.Millisecond)
+
+	// Verify all exporters were still shut down despite the errors.
+	require.True(t, rec.shutdownCalled, "MultiExporter.Shutdown must continue shutting down all exporters even when some fail")
 }
 
 // shutdownErrorExporter always fails on Shutdown.

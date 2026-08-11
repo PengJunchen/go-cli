@@ -15,8 +15,9 @@ import (
 // It is concurrency-safe because localSpan.End() may call ExportSpan from a
 // background goroutine while the test reads the collected spans.
 type recordingExporter struct {
-	mu  sync.Mutex
-	got []TraceSpan
+	mu              sync.Mutex
+	got             []TraceSpan
+	shutdownCalled  bool
 }
 
 func (r *recordingExporter) ExportSpan(_ context.Context, span TraceSpan) error {
@@ -26,7 +27,12 @@ func (r *recordingExporter) ExportSpan(_ context.Context, span TraceSpan) error 
 	return nil
 }
 
-func (r *recordingExporter) Shutdown(context.Context) error { return nil }
+func (r *recordingExporter) Shutdown(context.Context) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.shutdownCalled = true
+	return nil
+}
 
 // Len returns the number of collected spans in a concurrency-safe manner.
 func (r *recordingExporter) Len() int {

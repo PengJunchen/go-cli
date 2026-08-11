@@ -191,24 +191,30 @@ func NewMultiExporter(exporters ...TraceExporter) *MultiExporter {
 }
 
 // ExportSpan exports the span to every exporter, returning the last error seen.
+// Earlier errors are logged so they are not silently swallowed.
 func (m *MultiExporter) ExportSpan(ctx context.Context, span TraceSpan) error {
 	var lastErr error
 	for _, exp := range m.exporters {
 		if err := exp.ExportSpan(ctx, span); err != nil {
+			slog.Warn("multi-exporter: export failed", "err", err)
 			lastErr = err
 		}
 	}
 	return lastErr
 }
 
-// Shutdown shuts down all exporters.
+// Shutdown shuts down all exporters, returning the first error encountered.
 func (m *MultiExporter) Shutdown(ctx context.Context) error {
+	var firstErr error
 	for _, exp := range m.exporters {
 		if err := exp.Shutdown(ctx); err != nil {
 			slog.Warn("exporter shutdown failed", "err", err)
+			if firstErr == nil {
+				firstErr = err
+			}
 		}
 	}
-	return nil
+	return firstErr
 }
 
 var _ TraceExporter = (*MultiExporter)(nil)
@@ -261,7 +267,9 @@ func (e *JSONLTraceExporter) Shutdown(_ context.Context) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.file != nil {
-		return e.file.Close()
+		err := e.file.Close()
+		e.file = nil
+		return err
 	}
 	return nil
 }
