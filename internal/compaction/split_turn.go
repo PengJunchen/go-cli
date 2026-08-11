@@ -58,11 +58,12 @@ type splitFallbackSummarizer struct{}
 var _ Summarizer = (*splitFallbackSummarizer)(nil)
 
 func (splitFallbackSummarizer) Summarize(_ context.Context, text string) (string, error) {
-	const maxLen = 500
-	if len(text) <= maxLen {
+	const maxRunes = 500
+	if utf8.RuneCountInString(text) <= maxRunes {
 		return text, nil
 	}
-	return text[:maxLen], nil
+	runes := []rune(text)
+	return string(runes[:maxRunes]), nil
 }
 
 // NewSplitTurnCompactor returns a SplitTurnCompactor with the given threshold.

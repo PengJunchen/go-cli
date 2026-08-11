@@ -169,9 +169,8 @@ func (c *adapterCore) Connect(ctx context.Context) error {
 		}
 		c.proc = cmd
 		c.conn = NewJSONRPCLineTransport(stdout, stdin, func() error {
-			if c.proc != nil {
-				return c.proc.Process.Kill()
-			}
+			// Closing the transport does not kill the process; Disconnect
+			// handles process teardown explicitly to avoid a double-Kill.
 			return nil
 		})
 	}

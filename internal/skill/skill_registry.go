@@ -238,7 +238,7 @@ func (r *DefaultSkillRegistry) Unregister(ctx context.Context, name string) erro
 	def, ok := r.byName[name]
 	if !ok {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-		span.SetStatus(tracing.SpanStatusOK, "")
+		span.SetStatus(tracing.SpanStatusError, ErrSkillNotFound.Error())
 		slog.Info("skill.unregister.not_found", "name", name)
 		return ErrSkillNotFound
 	}
