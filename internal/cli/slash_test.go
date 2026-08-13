@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/production"
 	"github.com/pengjunchen/go-cli/internal/session"
 	"github.com/pengjunchen/go-cli/internal/tools"
@@ -226,6 +228,90 @@ func TestSlashModel(t *testing.T) {
 	c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "model"}, sc)
 
 	assert.Contains(t, buf.String(), "Current model: gpt-4o-test")
+}
+
+func TestModelSwitch_List(t *testing.T) {
+	models := []llm.ModelInfo{
+		{Name: "gpt-4o", Description: "flagship model"},
+		{Name: "gpt-4o-mini", Description: "fast and affordable"},
+		{Name: "o1-preview", Description: "reasoning model"},
+	}
+	sel := llm.NewDefaultModelSelector(&stubModel{}, nil).
+		WithModelNames("openai", "gpt-4o", "", "").
+		WithModelLister(func() []llm.ModelInfo { return models })
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf, modelSelector: sel}
+	c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "model"}, sc)
+
+	out := buf.String()
+	assert.Contains(t, out, "Available models:")
+	assert.Contains(t, out, "* gpt-4o - flagship model")
+	assert.Contains(t, out, "  gpt-4o-mini - fast and affordable")
+	assert.Contains(t, out, "  o1-preview - reasoning model")
+	assert.Contains(t, out, "Current: gpt-4o")
+}
+
+func TestModelSwitch_Switch(t *testing.T) {
+	var switched llm.BaseChatModel
+	sel := llm.NewDefaultModelSelector(&stubModel{}, nil).
+		WithModelNames("openai", "gpt-4o", "", "").
+		WithModelBuilder(func(_ context.Context, name string) (llm.BaseChatModel, func(), error) {
+			return &stubModel{}, nil, nil
+		}).
+		WithModelSwitchCallback(func(m llm.BaseChatModel) {
+			switched = m
+		}).
+		WithModelLister(func() []llm.ModelInfo {
+			return []llm.ModelInfo{
+				{Name: "gpt-4o"},
+				{Name: "gpt-4o-mini"},
+			}
+		})
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf, modelSelector: sel}
+	c.handleSlashCommand(context.Background(), session.SlashCommand{
+		Name: "model",
+		Args: []string{"gpt-4o-mini"},
+	}, sc)
+
+	assert.Contains(t, buf.String(), "Switched to model: gpt-4o-mini")
+	assert.Equal(t, "gpt-4o-mini", sel.PrimaryModelName())
+	assert.NotNil(t, switched, "switch callback should have been called")
+}
+
+func TestModelSwitch_InvalidName(t *testing.T) {
+	sel := llm.NewDefaultModelSelector(&stubModel{}, nil).
+		WithModelNames("openai", "gpt-4o", "", "").
+		WithModelBuilder(func(_ context.Context, name string) (llm.BaseChatModel, func(), error) {
+			return nil, nil, errors.New("unknown model: " + name)
+		})
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf, modelSelector: sel}
+	c.handleSlashCommand(context.Background(), session.SlashCommand{
+		Name: "model",
+		Args: []string{"nonexistent-model"},
+	}, sc)
+
+	out := buf.String()
+	assert.Contains(t, out, "Error:")
+	assert.Contains(t, out, "switch model")
+	assert.Contains(t, out, "nonexistent-model")
+	assert.Equal(t, "gpt-4o", sel.PrimaryModelName(), "model name should not change on error")
+}
+
+func TestModelSwitch_NoSelector(t *testing.T) {
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf, modelName: "test-model"}
+	c.handleSlashCommand(context.Background(), session.SlashCommand{
+		Name: "model",
+		Args: []string{"some-model"},
+	}, sc)
+
+	assert.Contains(t, buf.String(), "Error:")
+	assert.Contains(t, buf.String(), "model switching not available")
 }
 
 func TestSlashUnknown(t *testing.T) {

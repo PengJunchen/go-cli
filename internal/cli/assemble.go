@@ -671,7 +671,19 @@ func (s *assembleState) assembleModel() error {
 	}
 	s.modelSelector = llm.NewDefaultModelSelector(s.model, s.smallModel).
 		WithModelRegistry(s.modelRegistry).
-		WithModelNames(s.providerName, s.modelName, smallProvider, smallModelName)
+		WithModelNames(s.providerName, s.modelName, smallProvider, smallModelName).
+		WithModelBuilder(func(ctx context.Context, name string) (llm.BaseChatModel, func(), error) {
+			m, _, cleanup, err := buildModel(ctx, s.rc, s.providerName, name)
+			return m, cleanup, err
+		}).
+		WithModelLister(func() []llm.ModelInfo {
+			return listAvailableModels(s.rc, s.providerName)
+		}).
+		WithModelSwitchCallback(func(m llm.BaseChatModel) {
+			if s.loopAgent != nil {
+				s.loopAgent.SetModel(m)
+			}
+		})
 
 	return nil
 }
@@ -1383,6 +1395,27 @@ func buildModel(ctx context.Context, rc *config.Config, providerName, modelName 
 		return nil, llm.ModelInfo{}, cleanup, err
 	}
 	return m, findModelInfo(provider.Models(), modelName), cleanup, nil
+}
+
+// listAvailableModels returns the models exposed by the provider identified by
+// providerName. It mirrors the provider-resolution logic in buildModel: when
+// the config supplies a BaseURL or APIKey, a custom EinoProvider is built;
+// otherwise the default provider registry is used.
+func listAvailableModels(rc *config.Config, providerName string) []llm.ModelInfo {
+	if rc != nil && (rc.Provider.BaseURL != "" || rc.Provider.APIKey != "") {
+		provider := llm.NewEinoProvider(
+			llm.WithProviderName(providerName),
+			llm.WithBaseURL(rc.Provider.BaseURL),
+			llm.WithAPIKey(rc.Provider.APIKey),
+		)
+		return provider.Models()
+	}
+	reg := llm.NewProviderRegistry()
+	provider, err := reg.Get(providerName)
+	if err != nil {
+		return nil
+	}
+	return provider.Models()
 }
 
 // buildSmallModel builds a lightweight model from the SmallModelConfig section.

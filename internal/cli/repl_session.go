@@ -271,6 +271,7 @@ func (s *REPLSession) setupSlashContext() {
 		contextWindow:   s.assembly.ContextWindow,
 		worktreeManager: s.assembly.WorktreeManager,
 		snapshotManager: s.assembly.SnapshotMgr,
+		modelSelector:   s.assembly.ModelSelector,
 	}
 
 	// Create a shared ThemeManager so /theme can switch themes at runtime
@@ -555,7 +556,7 @@ func (s *REPLSession) renderTUI() {
 	tsp := tui.NewDefaultTerminalSizeProvider()
 	appOpts := []tui.AppOption{
 		tui.WithWidth(tsp.Width()),
-		tui.WithModelInfo(s.modelName),
+		tui.WithModelInfo(s.slashCtx.ModelName()),
 		tui.WithTurnCount(s.turnCounter),
 		tui.WithSessionInfo(s.assembly.SessionID),
 	}

@@ -163,16 +163,58 @@ func (h *ToolsHandler) Handle(ctx context.Context, _ []string, deps Dependencies
 	return "", nil
 }
 
-// ModelHandler prints the name of the model currently in use.
+// ModelHandler shows or switches the current model. With no arguments it lists
+// available models from the provider, marking the active one. With a model name
+// argument it switches to that model at runtime (no restart needed).
 type ModelHandler struct{}
 
 var _ SlashCommandHandler = (*ModelHandler)(nil)
 
-func (h *ModelHandler) Name() string        { return "model" }
-func (h *ModelHandler) Description() string { return "Show the current model name" }
+func (h *ModelHandler) Name() string { return "model" }
+func (h *ModelHandler) Description() string {
+	return "Show or switch the current model (/model [name])"
+}
 
-func (h *ModelHandler) Handle(_ context.Context, _ []string, deps Dependencies) (string, error) {
-	fmt.Fprintf(deps.Out(), "Current model: %s\n", deps.ModelName()) //nolint:errcheck
+func (h *ModelHandler) Handle(ctx context.Context, args []string, deps Dependencies) (string, error) {
+	sel := deps.ModelSelector()
+
+	if len(args) == 0 {
+		// List available models.
+		if sel == nil {
+			fmt.Fprintf(deps.Out(), "Current model: %s\n", deps.ModelName()) //nolint:errcheck
+			return "", nil
+		}
+		current := sel.PrimaryModelName()
+		models := sel.AvailableModels()
+		if len(models) == 0 {
+			fmt.Fprintf(deps.Out(), "Current model: %s\n", current) //nolint:errcheck
+			return "", nil
+		}
+		fmt.Fprintln(deps.Out(), "Available models:") //nolint:errcheck
+		for _, m := range models {
+			marker := "  "
+			if m.Name == current {
+				marker = "* "
+			}
+			fmt.Fprintf(deps.Out(), "%s%s", marker, m.Name) //nolint:errcheck
+			if m.Description != "" {
+				fmt.Fprintf(deps.Out(), " - %s", m.Description) //nolint:errcheck
+			}
+			fmt.Fprintln(deps.Out()) //nolint:errcheck
+		}
+		fmt.Fprintf(deps.Out(), "\nCurrent: %s\n", current) //nolint:errcheck
+		return "", nil
+	}
+
+	// Switch model.
+	modelName := args[0]
+	if sel == nil {
+		return "", fmt.Errorf("model switching not available")
+	}
+	if err := sel.SwitchModel(ctx, modelName); err != nil {
+		return "", fmt.Errorf("switch model: %w", err)
+	}
+	fmt.Fprintf(deps.Out(), "Switched to model: %s\n", modelName) //nolint:errcheck
 	return "", nil
 }
 
