@@ -5,8 +5,10 @@ import (
 	"context"
 	"io"
 	"os"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -109,4 +111,111 @@ func TestApplyCompletions_AlignedDisplay(t *testing.T) {
 	require.Len(t, descCols, 3)
 	assert.Equal(t, descCols[0], descCols[1], "descriptions should be aligned (list vs add)")
 	assert.Equal(t, descCols[1], descCols[2], "descriptions should be aligned (add vs delete)")
+}
+
+// TestNonTTYCancel verifies that readLineNonTTY returns promptly when ctx is
+// canceled (AC-3: within 100ms) and that the scanner goroutine does not leak
+// after the reader is closed (AC-5).
+func TestNonTTYCancel(t *testing.T) {
+	r, w := io.Pipe()
+	le := NewDefaultLineEditor(r, io.Discard)
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		_, err := le.ReadLine(ctx, "> ")
+		assert.ErrorIs(t, err, context.Canceled)
+		close(done)
+	}()
+
+	// Give the goroutine time to enter scanner.Scan().
+	time.Sleep(50 * time.Millisecond)
+
+	beforeCancel := runtime.NumGoroutine()
+
+	start := time.Now()
+	cancel()
+
+	// AC-3: ReadLine must return within 100ms of cancel.
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("ReadLine did not return within 200ms of cancel")
+	}
+	elapsed := time.Since(start)
+	assert.Less(t, elapsed, 100*time.Millisecond, "should return within 100ms of cancel")
+
+	// Close the pipe to unblock the scanner goroutine (AC-5: no leak).
+	w.Close()
+
+	// Poll for the scanner goroutine to exit instead of a fixed sleep.
+	deadline := time.After(500 * time.Millisecond)
+	for {
+		if runtime.NumGoroutine() < beforeCancel {
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("scanner goroutine did not exit after pipe close (goroutines: before=%d, now=%d)",
+				beforeCancel, runtime.NumGoroutine())
+		default:
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// TestNonTTYCancel_Reenter verifies that ReadLine can be safely called again
+// after a context cancellation while the previous scanner goroutine is still
+// in-flight. The fix uses a scanDone channel to serialize access to the
+// non-thread-safe bufio.Scanner. This test would fail under -race without
+// the fix.
+func TestNonTTYCancel_Reenter(t *testing.T) {
+	r, w := io.Pipe()
+	le := NewDefaultLineEditor(r, io.Discard)
+
+	// First call: cancel while the scanner is blocked on Scan().
+	ctx1, cancel1 := context.WithCancel(context.Background())
+	done1 := make(chan error, 1)
+	go func() {
+		_, err := le.ReadLine(ctx1, "> ")
+		done1 <- err
+	}()
+
+	time.Sleep(50 * time.Millisecond) // let the scanner enter Scan()
+	cancel1()
+
+	select {
+	case err := <-done1:
+		assert.ErrorIs(t, err, context.Canceled)
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("first ReadLine did not return within 200ms of cancel")
+	}
+
+	// At this point the scanner goroutine from the first call is still
+	// blocked on Scan() because the pipe writer is still open. The second
+	// ReadLine call must wait for it to exit before using the scanner.
+
+	// Write TWO lines then close the pipe. The first line unblocks the
+	// orphaned scanner goroutine (whose result nobody reads — it goes to
+	// the buffered resultCh and is discarded). Because le.scanner is reused
+	// across calls, the second line remains in the scanner's internal buffer
+	// and is returned by the second ReadLine call.
+	go func() {
+		w.Write([]byte("unblock first\nsecond line\n"))
+		w.Close()
+	}()
+
+	// Second call with a fresh context — must not race with the first
+	// goroutine. Under -race, a concurrent scanner access would be detected.
+	ctx2, cancel2 := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel2()
+
+	line, err := le.ReadLine(ctx2, "> ")
+	require.NoError(t, err)
+	assert.Equal(t, "second line", line)
+
+	// Subsequent reads should return EOF (pipe is closed, buffer exhausted).
+	_, err = le.ReadLine(ctx2, "> ")
+	assert.ErrorIs(t, err, io.EOF)
 }
