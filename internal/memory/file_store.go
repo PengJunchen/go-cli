@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"math"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -79,6 +80,7 @@ func (s *FileMemoryStore) load() error {
 		}
 		var m Memory
 		if err := json.Unmarshal(line, &m); err != nil {
+			slog.Warn("memory.load_skip_corrupt_line", "path", s.path, "err", err)
 			continue // skip corrupt lines, keep the rest
 		}
 		if m.ID == "" {
@@ -98,7 +100,10 @@ func (s *FileMemoryStore) load() error {
 
 // Add stores a memory entry. If mem.ID is empty a unique ID is generated. The
 // entry is appended to the JSONL file and added to the in-memory index.
-func (s *FileMemoryStore) Add(_ context.Context, mem Memory) error {
+func (s *FileMemoryStore) Add(ctx context.Context, mem Memory) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("memory: add cancelled: %w", err)
+	}
 	if mem.ID == "" {
 		id, err := newMemoryID()
 		if err != nil {
@@ -167,11 +172,15 @@ func (s *FileMemoryStore) List(_ context.Context) ([]Memory, error) {
 }
 
 // Delete removes the memory with the given ID and rewrites the backing file.
-func (s *FileMemoryStore) Delete(_ context.Context, id string) error {
+func (s *FileMemoryStore) Delete(ctx context.Context, id string) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("memory: delete cancelled: %w", err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, ok := s.items[id]; !ok {
+	m, ok := s.items[id]
+	if !ok {
 		return ErrMemoryNotFound
 	}
 	delete(s.items, id)
@@ -179,10 +188,20 @@ func (s *FileMemoryStore) Delete(_ context.Context, id string) error {
 	// Rebuild the search index from the remaining items.
 	s.termIdx = make(map[string][]string)
 	s.docLen = make(map[string]int)
-	for _, m := range s.items {
-		s.indexDocument(m)
+	for _, mm := range s.items {
+		s.indexDocument(mm)
 	}
-	return s.rewriteFileLocked()
+	if err := s.rewriteFileLocked(); err != nil {
+		// Rollback: restore the deleted item and rebuild the index.
+		s.items[id] = m
+		s.termIdx = make(map[string][]string)
+		s.docLen = make(map[string]int)
+		for _, mm := range s.items {
+			s.indexDocument(mm)
+		}
+		return err
+	}
+	return nil
 }
 
 // Search returns memories matching the query, scored with TF-IDF and sorted by
@@ -316,12 +335,34 @@ func (s *FileMemoryStore) rewriteFileLocked() error {
 		buf.Write(data)
 		buf.WriteByte('\n')
 	}
-	if err := os.WriteFile(s.path, buf.Bytes(), memoryFilePerm); err != nil {
+
+	// Atomic write: write to a temp file in the same directory, then rename.
+	dir := filepath.Dir(s.path)
+	tmp, err := os.CreateTemp(dir, "memories-*.jsonl.tmp")
+	if err != nil {
 		s.tryReopenLocked()
-		return fmt.Errorf("memory: rewrite file: %w", err)
+		return fmt.Errorf("memory: create temp file: %w", err)
 	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }() //nolint:errcheck
+
+	if _, err := tmp.Write(buf.Bytes()); err != nil {
+		_ = tmp.Close() //nolint:errcheck
+		s.tryReopenLocked()
+		return fmt.Errorf("memory: write temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		s.tryReopenLocked()
+		return fmt.Errorf("memory: close temp file: %w", err)
+	}
+	if err := os.Rename(tmpName, s.path); err != nil {
+		s.tryReopenLocked()
+		return fmt.Errorf("memory: rename temp file: %w", err)
+	}
+
 	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, memoryFilePerm)
 	if err != nil {
+		s.tryReopenLocked()
 		return fmt.Errorf("memory: reopen store file: %w", err)
 	}
 	s.file = f

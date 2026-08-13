@@ -496,9 +496,18 @@ func parseScalar(s string) any {
 	return s
 }
 
+const maxFlowMapDepth = 100
+
 // parseFlowMap parses a YAML flow map like {key: value, key2: value2} into
 // a map[string]any. Supports quoted keys/values and nested flow maps.
 func parseFlowMap(s string) (map[string]any, error) {
+	return parseFlowMapDepth(s, 0)
+}
+
+func parseFlowMapDepth(s string, depth int) (map[string]any, error) {
+	if depth > maxFlowMapDepth {
+		return nil, fmt.Errorf("yaml: flow map nesting too deep (>%d)", maxFlowMapDepth)
+	}
 	s = strings.TrimSpace(s)
 	if !strings.HasPrefix(s, "{") || !strings.HasSuffix(s, "}") {
 		return nil, fmt.Errorf("yaml: invalid flow map: %q", s)
@@ -524,7 +533,7 @@ func parseFlowMap(s string) (map[string]any, error) {
 		}
 		val = strings.TrimSpace(val)
 		if strings.HasPrefix(val, "{") {
-			nested, err := parseFlowMap(val)
+			nested, err := parseFlowMapDepth(val, depth+1)
 			if err != nil {
 				return nil, err
 			}
@@ -558,6 +567,9 @@ func splitFlowItems(s string) []string {
 			depth++
 		case '}', ']':
 			depth--
+			if depth < 0 {
+				depth = 0
+			}
 		case ',':
 			if depth == 0 {
 				parts = append(parts, s[start:i])

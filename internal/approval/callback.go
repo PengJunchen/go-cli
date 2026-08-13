@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 
@@ -211,7 +212,7 @@ func (c *ApprovalCache) LoadFromFile(path string) error {
 	return nil
 }
 
-// SaveToFile writes the cache entries as JSON to the given path.
+// SaveToFile writes the cache entries as JSON to the given path atomically.
 func (c *ApprovalCache) SaveToFile(path string) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -220,8 +221,25 @@ func (c *ApprovalCache) SaveToFile(path string) error {
 	if err != nil {
 		return fmt.Errorf("marshal approval cache: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
-		return fmt.Errorf("write approval cache: %w", err)
+
+	// Atomic write: temp file + rename to avoid corruption on crash.
+	dir := filepath.Dir(path)
+	tmp, err := os.CreateTemp(dir, "approval-cache-*.json")
+	if err != nil {
+		return fmt.Errorf("create temp file: %w", err)
+	}
+	tmpName := tmp.Name()
+	defer func() { _ = os.Remove(tmpName) }() //nolint:errcheck
+
+	if _, err := tmp.Write(data); err != nil {
+		_ = tmp.Close() //nolint:errcheck
+		return fmt.Errorf("write temp file: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp file: %w", err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		return fmt.Errorf("rename temp file: %w", err)
 	}
 	return nil
 }

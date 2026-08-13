@@ -206,7 +206,8 @@ func (l *Loader) resolveVerbose() bool {
 	if l.flag != nil && l.flag.verbose {
 		return true
 	}
-	return os.Getenv(envKey(l.envPrefix, "VERBOSE")) == "1"
+	v, ok := parseBoolEnv(envKey(l.envPrefix, "VERBOSE"))
+	return ok && v
 }
 
 // envKey returns the environment variable name for the given key using the
@@ -216,7 +217,7 @@ func envKey(prefix, key string) string { return prefix + "_" + key }
 // loadFromEnv builds a partial Config from GO_CLI_* environment variables.
 func loadFromEnv(prefix string) *Config {
 	cfg := &Config{}
-	if os.Getenv(envKey(prefix, "VERBOSE")) == "1" {
+	if v, ok := parseBoolEnv(envKey(prefix, "VERBOSE")); ok && v {
 		cfg.verbose = true
 	}
 	cfg.Provider.Name = os.Getenv(envKey(prefix, "PROVIDER_NAME"))

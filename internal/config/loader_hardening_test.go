@@ -100,12 +100,16 @@ func TestLoadFromEnv_TracingEnabledFalse(t *testing.T) {
 // resolveVerbose edge cases
 // ---------------------------------------------------------------------------
 
-// TestResolveVerbose_BadEnvValues treats any value other than "1" as not
-// verbose, even a truthy one, because the loader compares against "1".
+// TestResolveVerbose_BadEnvValues verifies that non-truthy and unrecognized
+// values do not enable verbose, while truthy values (1, true, yes, on) do.
 func TestResolveVerbose_BadEnvValues(t *testing.T) {
-	for _, val := range []string{"true", "yes", "0", "on", "garbage"} {
+	for _, val := range []string{"0", "false", "no", "off", "garbage", ""} {
 		t.Setenv("GO_CLI_VERBOSE", val)
 		assert.False(t, NewLoader().resolveVerbose(), "value %q must not enable verbose", val)
+	}
+	for _, val := range []string{"1", "true", "yes", "on"} {
+		t.Setenv("GO_CLI_VERBOSE", val)
+		assert.True(t, NewLoader().resolveVerbose(), "value %q must enable verbose", val)
 	}
 }
 
