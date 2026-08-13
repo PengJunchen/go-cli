@@ -309,6 +309,12 @@ func (c *testLSPClient) Rename(ctx context.Context, uri string, line, char int, 
 	return &edit, err
 }
 
+func (c *testLSPClient) WorkspaceSymbol(ctx context.Context, query string) ([]tools.SymbolInformation, error) {
+	var symbols []tools.SymbolInformation
+	err := c.rpc.Call(ctx, "workspace/symbol", map[string]any{"query": query}, &symbols)
+	return symbols, err
+}
+
 func (c *testLSPClient) Shutdown(ctx context.Context) error {
 	var result any
 	return c.rpc.Call(ctx, "shutdown", nil, &result)
@@ -471,6 +477,9 @@ func (c *mockRoutingLSPClient) TypeDefinition(_ context.Context, _ string, _, _ 
 	return nil, nil
 }
 func (c *mockRoutingLSPClient) Rename(_ context.Context, _ string, _, _ int, _ string) (*tools.WorkspaceEdit, error) {
+	return nil, nil
+}
+func (c *mockRoutingLSPClient) WorkspaceSymbol(_ context.Context, _ string) ([]tools.SymbolInformation, error) {
 	return nil, nil
 }
 func (c *mockRoutingLSPClient) Shutdown(_ context.Context) error { return nil }
