@@ -219,3 +219,202 @@ func TestNonTTYCancel_Reenter(t *testing.T) {
 	_, err = le.ReadLine(ctx2, "> ")
 	assert.ErrorIs(t, err, io.EOF)
 }
+
+// TestReverseSearch verifies Ctrl+R reverse incremental search:
+// enter search mode, type to filter, Enter confirms the matched entry.
+func TestReverseSearch(t *testing.T) {
+	history := []string{"hello world", "foo bar", "hello there"}
+	le := NewDefaultLineEditor(strings.NewReader(""), io.Discard)
+	le.SetHistory(history)
+
+	// Key sequence: Ctrl+R, 'h', 'e', 'l', 'l', 'o', Enter
+	keys := []byte{0x12, 'h', 'e', 'l', 'l', 'o', '\r'}
+	idx := 0
+	readByte := func() (byte, error) {
+		if idx >= len(keys) {
+			return 0, io.EOF
+		}
+		b := keys[idx]
+		idx++
+		return b, nil
+	}
+
+	line, err := le.readSingleLineTTY(readByte, "> ")
+	require.NoError(t, err)
+	// "hello there" is the newest match (index 2, searched in reverse).
+	assert.Equal(t, "hello there", line)
+}
+
+// TestReverseSearch_NextMatch verifies that pressing Ctrl+R again cycles
+// to the next older match.
+func TestReverseSearch_NextMatch(t *testing.T) {
+	history := []string{"hello world", "foo bar", "hello there"}
+	le := NewDefaultLineEditor(strings.NewReader(""), io.Discard)
+	le.SetHistory(history)
+
+	// Ctrl+R, 'h', 'e', 'l', 'l', 'o', Ctrl+R (next match), Enter
+	keys := []byte{0x12, 'h', 'e', 'l', 'l', 'o', 0x12, '\r'}
+	idx := 0
+	readByte := func() (byte, error) {
+		if idx >= len(keys) {
+			return 0, io.EOF
+		}
+		b := keys[idx]
+		idx++
+		return b, nil
+	}
+
+	line, err := le.readSingleLineTTY(readByte, "> ")
+	require.NoError(t, err)
+	// First match: "hello there" (index 2). Second Ctrl+R: "hello world" (index 0).
+	assert.Equal(t, "hello world", line)
+}
+
+// TestReverseSearch_Cancel verifies that Esc cancels search and restores
+// the original buffer content.
+func TestReverseSearch_Cancel(t *testing.T) {
+	history := []string{"hello world", "foo bar"}
+	le := NewDefaultLineEditor(strings.NewReader(""), io.Discard)
+	le.SetHistory(history)
+
+	// Type "abc", Ctrl+R, 'h', Esc, Enter
+	// After Esc, buffer should be restored to "abc".
+	keys := []byte{'a', 'b', 'c', 0x12, 'h', 0x1B, '\r'}
+	idx := 0
+	readByte := func() (byte, error) {
+		if idx >= len(keys) {
+			return 0, io.EOF
+		}
+		b := keys[idx]
+		idx++
+		return b, nil
+	}
+
+	line, err := le.readSingleLineTTY(readByte, "> ")
+	require.NoError(t, err)
+	assert.Equal(t, "abc", line, "Esc should restore original buffer")
+}
+
+// TestReverseSearch_NoMatch verifies behavior when no history entry matches.
+func TestReverseSearch_NoMatch(t *testing.T) {
+	history := []string{"hello world", "foo bar"}
+	le := NewDefaultLineEditor(strings.NewReader(""), io.Discard)
+	le.SetHistory(history)
+
+	// Ctrl+R, 'x', 'y', 'z', Enter — no match, should restore original buffer.
+	keys := []byte{0x12, 'x', 'y', 'z', '\r'}
+	idx := 0
+	readByte := func() (byte, error) {
+		if idx >= len(keys) {
+			return 0, io.EOF
+		}
+		b := keys[idx]
+		idx++
+		return b, nil
+	}
+
+	line, err := le.readSingleLineTTY(readByte, "> ")
+	require.NoError(t, err)
+	assert.Equal(t, "", line, "no match should restore empty original buffer")
+}
+
+// TestHomeEndKeys verifies that ESC[H moves cursor to beginning and ESC[F
+// moves cursor to end.
+func TestHomeEndKeys(t *testing.T) {
+	le := NewDefaultLineEditor(strings.NewReader(""), io.Discard)
+
+	// Type "hello", Home (ESC[H), type "X" → "Xhello"
+	// Then End (ESC[F), type "Y" → "XhelloY"
+	keys := []byte{'h', 'e', 'l', 'l', 'o', 0x1B, '[', 'H', 'X', 0x1B, '[', 'F', 'Y', '\r'}
+	idx := 0
+	readByte := func() (byte, error) {
+		if idx >= len(keys) {
+			return 0, io.EOF
+		}
+		b := keys[idx]
+		idx++
+		return b, nil
+	}
+
+	line, err := le.readSingleLineTTY(readByte, "> ")
+	require.NoError(t, err)
+	assert.Equal(t, "XhelloY", line)
+}
+
+// TestCtrlACtrlE verifies that Ctrl+A moves cursor to beginning of line and
+// Ctrl+E moves cursor to end of line, and that they coexist with Home/End
+// without conflicts (AC-6).
+func TestCtrlACtrlE(t *testing.T) {
+	le := NewDefaultLineEditor(strings.NewReader(""), io.Discard)
+
+	// Type "hello", Ctrl+A (beginning), type "X" → "Xhello"
+	// Then Ctrl+E (end), type "Y" → "XhelloY"
+	keys := []byte{'h', 'e', 'l', 'l', 'o', 0x01, 'X', 0x05, 'Y', '\r'}
+	idx := 0
+	readByte := func() (byte, error) {
+		if idx >= len(keys) {
+			return 0, io.EOF
+		}
+		b := keys[idx]
+		idx++
+		return b, nil
+	}
+
+	line, err := le.readSingleLineTTY(readByte, "> ")
+	require.NoError(t, err)
+	assert.Equal(t, "XhelloY", line)
+}
+
+// TestCtrlAE_HomeEnd_NoConflict verifies that Ctrl+A/E and Home/End can be
+// interleaved without interfering with each other (AC-6).
+func TestCtrlAE_HomeEnd_NoConflict(t *testing.T) {
+	le := NewDefaultLineEditor(strings.NewReader(""), io.Discard)
+
+	// Type "abc", Ctrl+A (beginning), type "1" → "1abc"
+	// Home (ESC[H) is already at beginning, type "2" → "21abc"
+	// Ctrl+E (end), type "3" → "21abc3"
+	// End (ESC[F) is already at end, type "4" → "21abc34"
+	keys := []byte{'a', 'b', 'c', 0x01, '1', 0x1B, '[', 'H', '2', 0x05, '3', 0x1B, '[', 'F', '4', '\r'}
+	idx := 0
+	readByte := func() (byte, error) {
+		if idx >= len(keys) {
+			return 0, io.EOF
+		}
+		b := keys[idx]
+		idx++
+		return b, nil
+	}
+
+	line, err := le.readSingleLineTTY(readByte, "> ")
+	require.NoError(t, err)
+	assert.Equal(t, "21abc34", line)
+}
+
+// TestFindReverseMatch unit-tests the search helper directly.
+func TestFindReverseMatch(t *testing.T) {
+	entries := []string{"hello world", "foo bar", "hello there", "World peace"}
+
+	// Search "hello" — newest match first (index 2).
+	idx := findReverseMatch(entries, "hello", -1)
+	assert.Equal(t, 2, idx)
+
+	// Next match (older): index 0.
+	idx = findReverseMatch(entries, "hello", idx)
+	assert.Equal(t, 0, idx)
+
+	// No more matches.
+	idx = findReverseMatch(entries, "hello", idx)
+	assert.Equal(t, -1, idx)
+
+	// Case-insensitive: "world" matches both "hello world" and "World peace".
+	idx = findReverseMatch(entries, "world", -1)
+	assert.Equal(t, 3, idx) // "World peace" (newest)
+	idx = findReverseMatch(entries, "world", idx)
+	assert.Equal(t, 0, idx) // "hello world"
+
+	// No match.
+	assert.Equal(t, -1, findReverseMatch(entries, "xyz", -1))
+
+	// Empty query returns -1.
+	assert.Equal(t, -1, findReverseMatch(entries, "", -1))
+}
