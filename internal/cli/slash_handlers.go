@@ -534,6 +534,71 @@ func truncatePreview(content string) string {
 	return string(runes[:maxHistoryPreview]) + "..."
 }
 
+// RetryHandler regenerates the last assistant response by removing the last
+// assistant message (and any trailing tool messages) from the agent's history
+// and re-submitting the last user message as pendingInput.
+type RetryHandler struct{}
+
+var _ SlashCommandHandler = (*RetryHandler)(nil)
+
+func (h *RetryHandler) Name() string        { return "retry" }
+func (h *RetryHandler) Description() string { return "Regenerate the last assistant response" }
+
+func (h *RetryHandler) Handle(_ context.Context, _ []string, deps Dependencies) (string, error) {
+	if deps.Agent() == nil {
+		fmt.Fprintln(deps.Out(), "Agent not configured.") //nolint:errcheck
+		return "", nil
+	}
+
+	msgs := deps.Agent().Messages()
+
+	// Walk backward to find the last assistant message, skipping any
+	// trailing "tool" role messages (tool results).
+	lastAssistantIdx := -1
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == "tool" {
+			continue
+		}
+		if msgs[i].Role == "assistant" {
+			lastAssistantIdx = i
+			break
+		}
+		// Found a non-assistant, non-tool message before any assistant
+		// message — no assistant response to retry.
+		break
+	}
+
+	if lastAssistantIdx == -1 {
+		fmt.Fprintln(deps.Out(), "No assistant message to retry.") //nolint:errcheck
+		return "", nil
+	}
+
+	// Find the last user message before the assistant message.
+	lastUserIdx := -1
+	for i := lastAssistantIdx - 1; i >= 0; i-- {
+		if msgs[i].Role == "user" {
+			lastUserIdx = i
+			break
+		}
+	}
+
+	if lastUserIdx == -1 {
+		fmt.Fprintln(deps.Out(), "No user message to retry.") //nolint:errcheck
+		return "", nil
+	}
+
+	lastUserContent := msgs[lastUserIdx].Content
+
+	// Truncate history: keep everything before the last user message.
+	// The last user message will be re-appended by Agent.Run when the
+	// REPL loop processes the pendingInput, so it must be removed here
+	// to avoid duplication.
+	deps.Agent().SetHistory(msgs[:lastUserIdx])
+
+	fmt.Fprintln(deps.Out(), "Retrying last message...") //nolint:errcheck
+	return lastUserContent, nil
+}
+
 // ----------------------------------------------------------------------------
 // TUI display commands
 // ----------------------------------------------------------------------------

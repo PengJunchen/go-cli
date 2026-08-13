@@ -57,7 +57,7 @@ func TestBuildSlashCommandRegistry(t *testing.T) {
 	want := []string{
 		"help", "cost", "compact", "clear", "tools", "model", "session",
 		"undo", "diff", "plan", "config", "history", "save", "load", "memory",
-		"thinking", "theme", "worktree", "revert",
+		"thinking", "theme", "worktree", "revert", "retry",
 	}
 	assert.ElementsMatch(t, want, reg.Names())
 
@@ -88,7 +88,7 @@ func TestSlashHelp(t *testing.T) {
 	for _, want := range []string{
 		"/help", "/cost", "/compact", "/clear", "/tools", "/model", "/session",
 		"/undo", "/diff", "/plan", "/config", "/history", "/save", "/load", "/memory",
-		"/thinking", "/theme", "/worktree",
+		"/thinking", "/theme", "/worktree", "/retry",
 		"exit",
 	} {
 		assert.Contains(t, output, want, "help output should list %s", want)
@@ -712,4 +712,109 @@ func TestSlashCommandsTableDriven(t *testing.T) {
 			assert.Contains(t, buf.String(), tt.wantSub)
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// /retry command
+// ---------------------------------------------------------------------------
+
+func TestRetry_RemovesAssistantMessage(t *testing.T) {
+	agent := core.NewAgentImpl("test", stubLoop{}, core.WithHistory([]core.AgentMessage{
+		{Role: "user", Content: "first question"},
+		{Role: "assistant", Content: "first answer"},
+		{Role: "user", Content: "second question"},
+		{Role: "assistant", Content: "second answer"},
+	}))
+	require.Len(t, agent.Messages(), 4)
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf, agent: agent}
+	pendingInput := c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "retry"}, sc)
+
+	assert.Contains(t, buf.String(), "Retrying last message...")
+	assert.Equal(t, "second question", pendingInput)
+
+	// History should be truncated to remove the last user+assistant pair.
+	msgs := agent.Messages()
+	assert.Len(t, msgs, 2, "history should have first user+assistant pair only")
+	assert.Equal(t, "first question", msgs[0].Content)
+	assert.Equal(t, "first answer", msgs[1].Content)
+}
+
+func TestRetry_ResubmitsUserMessage(t *testing.T) {
+	agent := core.NewAgentImpl("test", stubLoop{}, core.WithHistory([]core.AgentMessage{
+		{Role: "user", Content: "what is 2+2?"},
+		{Role: "assistant", Content: "4"},
+	}))
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf, agent: agent}
+	pendingInput := c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "retry"}, sc)
+
+	assert.Equal(t, "what is 2+2?", pendingInput, "pendingInput should be the last user message")
+	assert.Empty(t, agent.Messages(), "history should be empty after removing the only user+assistant pair")
+}
+
+func TestRetry_NoAssistantMessage(t *testing.T) {
+	agent := core.NewAgentImpl("test", stubLoop{}, core.WithHistory([]core.AgentMessage{
+		{Role: "user", Content: "hello"},
+	}))
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf, agent: agent}
+	pendingInput := c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "retry"}, sc)
+
+	assert.Empty(t, pendingInput, "pendingInput should be empty when no assistant message")
+	assert.Contains(t, buf.String(), "No assistant message to retry.")
+	assert.Len(t, agent.Messages(), 1, "history should be unchanged")
+}
+
+func TestRetry_EmptyHistory(t *testing.T) {
+	agent := core.NewAgentImpl("test", stubLoop{})
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf, agent: agent}
+	pendingInput := c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "retry"}, sc)
+
+	assert.Empty(t, pendingInput)
+	assert.Contains(t, buf.String(), "No assistant message to retry.")
+}
+
+func TestRetry_AgentNotConfigured(t *testing.T) {
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf}
+	pendingInput := c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "retry"}, sc)
+
+	assert.Empty(t, pendingInput)
+	assert.Contains(t, buf.String(), "Agent not configured")
+}
+
+func TestRetry_RemovesTrailingToolMessages(t *testing.T) {
+	agent := core.NewAgentImpl("test", stubLoop{}, core.WithHistory([]core.AgentMessage{
+		{Role: "user", Content: "read a file"},
+		{Role: "assistant", Content: "let me check"},
+		{Role: "tool", Content: "file content", ToolCallID: "tc1", ToolName: "read_file"},
+	}))
+	require.Len(t, agent.Messages(), 3)
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf, agent: agent}
+	pendingInput := c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "retry"}, sc)
+
+	assert.Equal(t, "read a file", pendingInput)
+	assert.Empty(t, agent.Messages(), "history should be empty after removing user+assistant+tool")
+}
+
+func TestRetry_AliasR(t *testing.T) {
+	agent := core.NewAgentImpl("test", stubLoop{}, core.WithHistory([]core.AgentMessage{
+		{Role: "user", Content: "hello"},
+		{Role: "assistant", Content: "hi"},
+	}))
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf, agent: agent}
+	pendingInput := c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "r"}, sc)
+
+	assert.Equal(t, "hello", pendingInput)
+	assert.Contains(t, buf.String(), "Retrying last message...")
 }
