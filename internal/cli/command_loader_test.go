@@ -139,9 +139,9 @@ func TestMarkdownCommandHandler_Handle_SetsPendingInput(t *testing.T) {
 		content: "Review this code carefully.",
 	}}
 	sc := &slashContext{}
-	err := h.Handle(context.Background(), nil, sc)
+	pendingInput, err := h.Handle(context.Background(), nil, sc)
 	require.NoError(t, err)
-	assert.Equal(t, "Review this code carefully.", sc.pendingInput)
+	assert.Equal(t, "Review this code carefully.", pendingInput)
 }
 
 func TestMarkdownCommandHandler_Handle_WithArgs(t *testing.T) {
@@ -150,10 +150,10 @@ func TestMarkdownCommandHandler_Handle_WithArgs(t *testing.T) {
 		content: "Review this code carefully.",
 	}}
 	sc := &slashContext{}
-	err := h.Handle(context.Background(), []string{"src/main.go", "src/util.go"}, sc)
+	pendingInput, err := h.Handle(context.Background(), []string{"src/main.go", "src/util.go"}, sc)
 	require.NoError(t, err)
-	assert.Contains(t, sc.pendingInput, "Review this code carefully.")
-	assert.Contains(t, sc.pendingInput, "src/main.go src/util.go")
+	assert.Contains(t, pendingInput, "Review this code carefully.")
+	assert.Contains(t, pendingInput, "src/main.go src/util.go")
 }
 
 func TestBuildDynamicRegistry_NoCommandsDir(t *testing.T) {
@@ -278,10 +278,10 @@ func TestMarkdownCommandHandler_Handle_EmptyContent(t *testing.T) {
 	h := &MarkdownCommandHandler{cmd: MarkdownCommand{name: "empty"}}
 	var out bytes.Buffer
 	sc := &slashContext{out: &out}
-	err := h.Handle(context.Background(), nil, sc)
+	pendingInput, err := h.Handle(context.Background(), nil, sc)
 	require.NoError(t, err)
-	// Should NOT set pendingInput.
-	assert.Equal(t, "", sc.pendingInput)
+	// Should NOT return pendingInput.
+	assert.Equal(t, "", pendingInput)
 	// Should write a diagnostic message.
 	assert.Contains(t, out.String(), "has no content")
 	assert.Contains(t, out.String(), "/empty")

@@ -30,15 +30,15 @@ var _ SlashCommandHandler = (*HelpHandler)(nil)
 func (h *HelpHandler) Name() string        { return "help" }
 func (h *HelpHandler) Description() string { return "Show available slash commands" }
 
-func (h *HelpHandler) Handle(_ context.Context, _ []string, sc *slashContext) error {
-	fmt.Fprintln(sc.out, "Available commands:") //nolint:errcheck
+func (h *HelpHandler) Handle(_ context.Context, _ []string, deps Dependencies) (string, error) {
+	fmt.Fprintln(deps.Out(), "Available commands:") //nolint:errcheck
 	if h != nil && h.reg != nil {
 		for _, cmd := range h.reg.List() {
-			fmt.Fprintf(sc.out, "  /%-8s %s\n", cmd.Name(), cmd.Description()) //nolint:errcheck
+			fmt.Fprintf(deps.Out(), "  /%-8s %s\n", cmd.Name(), cmd.Description()) //nolint:errcheck
 		}
 	}
-	fmt.Fprintln(sc.out, "  exit      Exit the interactive session") //nolint:errcheck
-	return nil
+	fmt.Fprintln(deps.Out(), "  exit      Exit the interactive session") //nolint:errcheck
+	return "", nil
 }
 
 // CostHandler prints the accumulated cost, call count, and per-session
@@ -50,46 +50,46 @@ var _ SlashCommandHandler = (*CostHandler)(nil)
 func (h *CostHandler) Name() string        { return "cost" }
 func (h *CostHandler) Description() string { return "Show accumulated cost and usage statistics" }
 
-func (h *CostHandler) Handle(_ context.Context, _ []string, sc *slashContext) error {
-	if sc.costTracker != nil {
-		fmt.Fprintf(sc.out, "Total cost: $%.4f\n", sc.costTracker.Total()) //nolint:errcheck
-		fmt.Fprintf(sc.out, "Total calls: %d\n", sc.costTracker.Calls())   //nolint:errcheck
+func (h *CostHandler) Handle(_ context.Context, _ []string, deps Dependencies) (string, error) {
+	if deps.CostTracker() != nil {
+		fmt.Fprintf(deps.Out(), "Total cost: $%.4f\n", deps.CostTracker().Total()) //nolint:errcheck
+		fmt.Fprintf(deps.Out(), "Total calls: %d\n", deps.CostTracker().Calls())   //nolint:errcheck
 
 		// Sub-agent cost breakdown.
-		subTotal := sc.costTracker.SubagentTotal()
-		subCalls := sc.costTracker.SubagentCalls()
+		subTotal := deps.CostTracker().SubagentTotal()
+		subCalls := deps.CostTracker().SubagentCalls()
 		if subCalls > 0 {
-			fmt.Fprintf(sc.out, "\nSub-agent costs:\n")                 //nolint:errcheck
-			fmt.Fprintf(sc.out, "  Sub-agent total: $%.4f\n", subTotal) //nolint:errcheck
-			fmt.Fprintf(sc.out, "  Sub-agent calls: %d\n", subCalls)    //nolint:errcheck
-			for _, rec := range sc.costTracker.SubagentCostSnapshot() { //nolint:errcheck
-				fmt.Fprintf(sc.out, "    %s: $%.4f (%d calls, %d in / %d out tokens)\n", //nolint:errcheck
+			fmt.Fprintf(deps.Out(), "\nSub-agent costs:\n")                 //nolint:errcheck
+			fmt.Fprintf(deps.Out(), "  Sub-agent total: $%.4f\n", subTotal) //nolint:errcheck
+			fmt.Fprintf(deps.Out(), "  Sub-agent calls: %d\n", subCalls)    //nolint:errcheck
+			for _, rec := range deps.CostTracker().SubagentCostSnapshot() { //nolint:errcheck
+				fmt.Fprintf(deps.Out(), "    %s: $%.4f (%d calls, %d in / %d out tokens)\n", //nolint:errcheck
 					rec.TaskID, rec.Cost, rec.Calls, rec.TokensIn, rec.TokensOut)
 			}
 		}
 	} else {
-		fmt.Fprintln(sc.out, "Cost tracking not configured.") //nolint:errcheck
+		fmt.Fprintln(deps.Out(), "Cost tracking not configured.") //nolint:errcheck
 	}
-	if sc.statsRegistry != nil && sc.sessionID != "" {
-		if stats, ok := sc.statsRegistry.GetSessionStats(sc.sessionID); ok {
-			fmt.Fprintf(sc.out, "Session stats:\n")                    //nolint:errcheck
-			fmt.Fprintf(sc.out, "  Turns:     %d\n", stats.Turns)      //nolint:errcheck
-			fmt.Fprintf(sc.out, "  Tool calls: %d\n", stats.ToolCalls) //nolint:errcheck
-			fmt.Fprintf(sc.out, "  Tokens in:  %d\n", stats.TokensIn)  //nolint:errcheck
-			fmt.Fprintf(sc.out, "  Tokens out: %d\n", stats.TokensOut) //nolint:errcheck
+	if deps.StatsRegistry() != nil && deps.SessionID() != "" {
+		if stats, ok := deps.StatsRegistry().GetSessionStats(deps.SessionID()); ok {
+			fmt.Fprintf(deps.Out(), "Session stats:\n")                    //nolint:errcheck
+			fmt.Fprintf(deps.Out(), "  Turns:     %d\n", stats.Turns)      //nolint:errcheck
+			fmt.Fprintf(deps.Out(), "  Tool calls: %d\n", stats.ToolCalls) //nolint:errcheck
+			fmt.Fprintf(deps.Out(), "  Tokens in:  %d\n", stats.TokensIn)  //nolint:errcheck
+			fmt.Fprintf(deps.Out(), "  Tokens out: %d\n", stats.TokensOut) //nolint:errcheck
 		}
 	}
-	if sc.contextWindow > 0 {
+	if deps.ContextWindow() > 0 {
 		totalTokens := 0
-		if sc.statsRegistry != nil && sc.sessionID != "" {
-			if stats, ok := sc.statsRegistry.GetSessionStats(sc.sessionID); ok {
+		if deps.StatsRegistry() != nil && deps.SessionID() != "" {
+			if stats, ok := deps.StatsRegistry().GetSessionStats(deps.SessionID()); ok {
 				totalTokens = stats.TokensIn + stats.TokensOut
 			}
 		}
-		pct := totalTokens * 100 / sc.contextWindow
-		fmt.Fprintf(sc.out, "  Context:   %d/%d (%d%%)\n", totalTokens, sc.contextWindow, pct) //nolint:errcheck
+		pct := totalTokens * 100 / deps.ContextWindow()
+		fmt.Fprintf(deps.Out(), "  Context:   %d/%d (%d%%)\n", totalTokens, deps.ContextWindow(), pct) //nolint:errcheck
 	}
-	return nil
+	return "", nil
 }
 
 // CompactHandler manually triggers the compaction hook on the agent's history
@@ -101,19 +101,19 @@ var _ SlashCommandHandler = (*CompactHandler)(nil)
 func (h *CompactHandler) Name() string        { return "compact" }
 func (h *CompactHandler) Description() string { return "Manually compact conversation history" }
 
-func (h *CompactHandler) Handle(ctx context.Context, _ []string, sc *slashContext) error {
-	if sc.agent == nil {
-		fmt.Fprintln(sc.out, "Agent not configured.") //nolint:errcheck
-		return nil
+func (h *CompactHandler) Handle(ctx context.Context, _ []string, deps Dependencies) (string, error) {
+	if deps.Agent() == nil {
+		fmt.Fprintln(deps.Out(), "Agent not configured.") //nolint:errcheck
+		return "", nil
 	}
-	before := len(sc.agent.Messages())
-	if err := sc.agent.Compact(ctx); err != nil {
-		fmt.Fprintf(sc.out, "Compaction failed: %v\n", err) //nolint:errcheck
-		return nil
+	before := len(deps.Agent().Messages())
+	if err := deps.Agent().Compact(ctx); err != nil {
+		fmt.Fprintf(deps.Out(), "Compaction failed: %v\n", err) //nolint:errcheck
+		return "", nil
 	}
-	after := len(sc.agent.Messages())
-	fmt.Fprintf(sc.out, "Compacted history: %d -> %d messages\n", before, after) //nolint:errcheck
-	return nil
+	after := len(deps.Agent().Messages())
+	fmt.Fprintf(deps.Out(), "Compacted history: %d -> %d messages\n", before, after) //nolint:errcheck
+	return "", nil
 }
 
 // ClearHandler clears the agent's conversation history and confirms the action.
@@ -124,14 +124,14 @@ var _ SlashCommandHandler = (*ClearHandler)(nil)
 func (h *ClearHandler) Name() string        { return "clear" }
 func (h *ClearHandler) Description() string { return "Clear conversation history" }
 
-func (h *ClearHandler) Handle(_ context.Context, _ []string, sc *slashContext) error {
-	if sc.agent == nil {
-		fmt.Fprintln(sc.out, "Agent not configured.") //nolint:errcheck
-		return nil
+func (h *ClearHandler) Handle(_ context.Context, _ []string, deps Dependencies) (string, error) {
+	if deps.Agent() == nil {
+		fmt.Fprintln(deps.Out(), "Agent not configured.") //nolint:errcheck
+		return "", nil
 	}
-	sc.agent.ClearHistory()
-	fmt.Fprintln(sc.out, "Conversation history cleared.") //nolint:errcheck
-	return nil
+	deps.Agent().ClearHistory()
+	fmt.Fprintln(deps.Out(), "Conversation history cleared.") //nolint:errcheck
+	return "", nil
 }
 
 // ToolsHandler lists all registered tools with their names and descriptions.
@@ -142,25 +142,25 @@ var _ SlashCommandHandler = (*ToolsHandler)(nil)
 func (h *ToolsHandler) Name() string        { return "tools" }
 func (h *ToolsHandler) Description() string { return "List registered tools" }
 
-func (h *ToolsHandler) Handle(ctx context.Context, _ []string, sc *slashContext) error {
-	if sc.toolRegistry == nil {
-		fmt.Fprintln(sc.out, "Tool registry not configured.") //nolint:errcheck
-		return nil
+func (h *ToolsHandler) Handle(ctx context.Context, _ []string, deps Dependencies) (string, error) {
+	if deps.ToolRegistry() == nil {
+		fmt.Fprintln(deps.Out(), "Tool registry not configured.") //nolint:errcheck
+		return "", nil
 	}
-	defs, err := sc.toolRegistry.List(ctx)
+	defs, err := deps.ToolRegistry().List(ctx)
 	if err != nil {
-		fmt.Fprintf(sc.out, "Error listing tools: %v\n", err) //nolint:errcheck
-		return nil
+		fmt.Fprintf(deps.Out(), "Error listing tools: %v\n", err) //nolint:errcheck
+		return "", nil
 	}
 	if len(defs) == 0 {
-		fmt.Fprintln(sc.out, "No tools registered.") //nolint:errcheck
-		return nil
+		fmt.Fprintln(deps.Out(), "No tools registered.") //nolint:errcheck
+		return "", nil
 	}
-	fmt.Fprintf(sc.out, "Registered tools (%d):\n", len(defs)) //nolint:errcheck
+	fmt.Fprintf(deps.Out(), "Registered tools (%d):\n", len(defs)) //nolint:errcheck
 	for _, def := range defs {
-		fmt.Fprintf(sc.out, "  %s: %s\n", def.Name(), def.Description()) //nolint:errcheck
+		fmt.Fprintf(deps.Out(), "  %s: %s\n", def.Name(), def.Description()) //nolint:errcheck
 	}
-	return nil
+	return "", nil
 }
 
 // ModelHandler prints the name of the model currently in use.
@@ -171,9 +171,9 @@ var _ SlashCommandHandler = (*ModelHandler)(nil)
 func (h *ModelHandler) Name() string        { return "model" }
 func (h *ModelHandler) Description() string { return "Show the current model name" }
 
-func (h *ModelHandler) Handle(_ context.Context, _ []string, sc *slashContext) error {
-	fmt.Fprintf(sc.out, "Current model: %s\n", sc.modelName) //nolint:errcheck
-	return nil
+func (h *ModelHandler) Handle(_ context.Context, _ []string, deps Dependencies) (string, error) {
+	fmt.Fprintf(deps.Out(), "Current model: %s\n", deps.ModelName()) //nolint:errcheck
+	return "", nil
 }
 
 // SessionHandler delegates to the SessionSlashHandler for session tree
@@ -200,10 +200,10 @@ func (h *SessionHandler) Subcommands() []Subcommand {
 	}
 }
 
-func (h *SessionHandler) Handle(ctx context.Context, args []string, sc *slashContext) error {
-	if sc.sessionHandler == nil {
-		fmt.Fprintln(sc.out, "Session tree not configured.") //nolint:errcheck
-		return nil
+func (h *SessionHandler) Handle(ctx context.Context, args []string, deps Dependencies) (string, error) {
+	if deps.SessionHandler() == nil {
+		fmt.Fprintln(deps.Out(), "Session tree not configured.") //nolint:errcheck
+		return "", nil
 	}
 	// Map /session to /tree when no subcommand is given; otherwise use the
 	// first argument as the subcommand name (e.g. /session fork name -> fork).
@@ -212,13 +212,13 @@ func (h *SessionHandler) Handle(ctx context.Context, args []string, sc *slashCon
 		subCmd.Name = args[0]
 		subCmd.Args = args[1:]
 	}
-	output, err := sc.sessionHandler.Handle(ctx, subCmd)
+	output, err := deps.SessionHandler().Handle(ctx, subCmd)
 	if err != nil {
-		fmt.Fprintf(sc.out, "Error: %v\n", err) //nolint:errcheck
-		return nil
+		fmt.Fprintf(deps.Out(), "Error: %v\n", err) //nolint:errcheck
+		return "", nil
 	}
-	fmt.Fprint(sc.out, output) //nolint:errcheck
-	return nil
+	fmt.Fprint(deps.Out(), output) //nolint:errcheck
+	return "", nil
 }
 
 // ----------------------------------------------------------------------------
@@ -234,23 +234,23 @@ var _ SlashCommandHandler = (*UndoHandler)(nil)
 func (h *UndoHandler) Name() string        { return "undo" }
 func (h *UndoHandler) Description() string { return "Restore the most recent file checkpoint" }
 
-func (h *UndoHandler) Handle(_ context.Context, _ []string, sc *slashContext) error {
-	if sc.fileTracker == nil {
-		fmt.Fprintln(sc.out, "File tracking not configured.") //nolint:errcheck
-		return nil
+func (h *UndoHandler) Handle(_ context.Context, _ []string, deps Dependencies) (string, error) {
+	if deps.FileTracker() == nil {
+		fmt.Fprintln(deps.Out(), "File tracking not configured.") //nolint:errcheck
+		return "", nil
 	}
-	checkpoints := sc.fileTracker.ListCheckpoints()
+	checkpoints := deps.FileTracker().ListCheckpoints()
 	if len(checkpoints) == 0 {
-		fmt.Fprintln(sc.out, "No checkpoints to undo.") //nolint:errcheck
-		return nil
+		fmt.Fprintln(deps.Out(), "No checkpoints to undo.") //nolint:errcheck
+		return "", nil
 	}
 	latest := checkpoints[len(checkpoints)-1]
-	if err := sc.fileTracker.Restore(latest.ID); err != nil {
-		fmt.Fprintf(sc.out, "Undo failed: %v\n", err) //nolint:errcheck
-		return nil
+	if err := deps.FileTracker().Restore(latest.ID); err != nil {
+		fmt.Fprintf(deps.Out(), "Undo failed: %v\n", err) //nolint:errcheck
+		return "", nil
 	}
-	fmt.Fprintf(sc.out, "Restored %s to checkpoint %s.\n", latest.Path, latest.ID) //nolint:errcheck
-	return nil
+	fmt.Fprintf(deps.Out(), "Restored %s to checkpoint %s.\n", latest.Path, latest.ID) //nolint:errcheck
+	return "", nil
 }
 
 // DiffHandler shows a unified diff of the most recent file change recorded by
@@ -262,46 +262,46 @@ var _ SlashCommandHandler = (*DiffHandler)(nil)
 func (h *DiffHandler) Name() string        { return "diff" }
 func (h *DiffHandler) Description() string { return "Show the diff of the most recent file change" }
 
-func (h *DiffHandler) Handle(ctx context.Context, _ []string, sc *slashContext) error {
-	if sc.fileTracker == nil {
-		fmt.Fprintln(sc.out, "File tracking not configured.") //nolint:errcheck
-		return nil
+func (h *DiffHandler) Handle(ctx context.Context, _ []string, deps Dependencies) (string, error) {
+	if deps.FileTracker() == nil {
+		fmt.Fprintln(deps.Out(), "File tracking not configured.") //nolint:errcheck
+		return "", nil
 	}
-	checkpoints := sc.fileTracker.ListCheckpoints()
+	checkpoints := deps.FileTracker().ListCheckpoints()
 	if len(checkpoints) == 0 {
-		fmt.Fprintln(sc.out, "No file changes recorded.") //nolint:errcheck
-		return nil
+		fmt.Fprintln(deps.Out(), "No file changes recorded.") //nolint:errcheck
+		return "", nil
 	}
 	latest := checkpoints[len(checkpoints)-1]
 
-	if sc.diffGenerator == nil {
-		fmt.Fprintf(sc.out, "Recent change: %s (checkpoint %s)\n", latest.Path, latest.ID) //nolint:errcheck
-		return nil
+	if deps.DiffGenerator() == nil {
+		fmt.Fprintf(deps.Out(), "Recent change: %s (checkpoint %s)\n", latest.Path, latest.ID) //nolint:errcheck
+		return "", nil
 	}
 
 	// Old content comes from the backup checkpoint; new content is the file's
 	// current state on disk.
 	oldContent := ""
-	if backup, ok := sc.fileTracker.BackupContent(latest.ID); ok {
+	if backup, ok := deps.FileTracker().BackupContent(latest.ID); ok {
 		oldContent = string(backup)
 	}
 	newBytes, err := os.ReadFile(latest.Path)
 	if err != nil {
-		fmt.Fprintf(sc.out, "Recent change: %s (checkpoint %s, current content unreadable: %v)\n", latest.Path, latest.ID, err) //nolint:errcheck
-		return nil
+		fmt.Fprintf(deps.Out(), "Recent change: %s (checkpoint %s, current content unreadable: %v)\n", latest.Path, latest.ID, err) //nolint:errcheck
+		return "", nil
 	}
 
-	diff, genErr := sc.diffGenerator.Generate(ctx, oldContent, string(newBytes), latest.Path)
+	diff, genErr := deps.DiffGenerator().Generate(ctx, oldContent, string(newBytes), latest.Path)
 	if genErr != nil {
-		fmt.Fprintf(sc.out, "Diff failed: %v\n", genErr) //nolint:errcheck
-		return nil
+		fmt.Fprintf(deps.Out(), "Diff failed: %v\n", genErr) //nolint:errcheck
+		return "", nil
 	}
 	if diff == "" {
-		fmt.Fprintf(sc.out, "No changes for %s.\n", latest.Path) //nolint:errcheck
-		return nil
+		fmt.Fprintf(deps.Out(), "No changes for %s.\n", latest.Path) //nolint:errcheck
+		return "", nil
 	}
-	fmt.Fprint(sc.out, diff) //nolint:errcheck
-	return nil
+	fmt.Fprint(deps.Out(), diff) //nolint:errcheck
+	return "", nil
 }
 
 // PlanHandler enters or exits plan mode. With no arguments it toggles the
@@ -322,46 +322,46 @@ func (h *PlanHandler) Subcommands() []Subcommand {
 	}
 }
 
-func (h *PlanHandler) Handle(ctx context.Context, args []string, sc *slashContext) error {
-	if sc.planCtrl == nil {
-		fmt.Fprintln(sc.out, "Plan mode not configured.") //nolint:errcheck
-		return nil
+func (h *PlanHandler) Handle(ctx context.Context, args []string, deps Dependencies) (string, error) {
+	if deps.PlanCtrl() == nil {
+		fmt.Fprintln(deps.Out(), "Plan mode not configured.") //nolint:errcheck
+		return "", nil
 	}
 
 	if len(args) > 0 && args[0] == "exit" {
 		summary := strings.Join(args[1:], " ")
-		if err := sc.planCtrl.Exit(ctx, summary); err != nil {
-			fmt.Fprintf(sc.out, "Failed to exit plan mode: %v\n", err) //nolint:errcheck
-			return nil
+		if err := deps.PlanCtrl().Exit(ctx, summary); err != nil {
+			fmt.Fprintf(deps.Out(), "Failed to exit plan mode: %v\n", err) //nolint:errcheck
+			return "", nil
 		}
-		fmt.Fprintln(sc.out, "Exited plan mode.") //nolint:errcheck
-		return nil
+		fmt.Fprintln(deps.Out(), "Exited plan mode.") //nolint:errcheck
+		return "", nil
 	}
 	if len(args) > 0 && args[0] == "enter" {
 		reason := strings.Join(args[1:], " ")
-		if err := sc.planCtrl.Enter(ctx, reason); err != nil {
-			fmt.Fprintf(sc.out, "Failed to enter plan mode: %v\n", err) //nolint:errcheck
-			return nil
+		if err := deps.PlanCtrl().Enter(ctx, reason); err != nil {
+			fmt.Fprintf(deps.Out(), "Failed to enter plan mode: %v\n", err) //nolint:errcheck
+			return "", nil
 		}
-		fmt.Fprintf(sc.out, "Entered plan mode: %s\n", reason) //nolint:errcheck
-		return nil
+		fmt.Fprintf(deps.Out(), "Entered plan mode: %s\n", reason) //nolint:errcheck
+		return "", nil
 	}
 
 	// No explicit subcommand: toggle.
-	if sc.planCtrl.IsActive() {
-		if err := sc.planCtrl.Exit(ctx, ""); err != nil {
-			fmt.Fprintf(sc.out, "Failed to exit plan mode: %v\n", err) //nolint:errcheck
-			return nil
+	if deps.PlanCtrl().IsActive() {
+		if err := deps.PlanCtrl().Exit(ctx, ""); err != nil {
+			fmt.Fprintf(deps.Out(), "Failed to exit plan mode: %v\n", err) //nolint:errcheck
+			return "", nil
 		}
-		fmt.Fprintln(sc.out, "Exited plan mode.") //nolint:errcheck
-		return nil
+		fmt.Fprintln(deps.Out(), "Exited plan mode.") //nolint:errcheck
+		return "", nil
 	}
-	if err := sc.planCtrl.Enter(ctx, "user requested"); err != nil {
-		fmt.Fprintf(sc.out, "Failed to enter plan mode: %v\n", err) //nolint:errcheck
-		return nil
+	if err := deps.PlanCtrl().Enter(ctx, "user requested"); err != nil {
+		fmt.Fprintf(deps.Out(), "Failed to enter plan mode: %v\n", err) //nolint:errcheck
+		return "", nil
 	}
-	fmt.Fprintln(sc.out, "Entered plan mode.") //nolint:errcheck
-	return nil
+	fmt.Fprintln(deps.Out(), "Entered plan mode.") //nolint:errcheck
+	return "", nil
 }
 
 // ConfigHandler prints a summary of the current application configuration.
@@ -372,28 +372,28 @@ var _ SlashCommandHandler = (*ConfigHandler)(nil)
 func (h *ConfigHandler) Name() string        { return "config" }
 func (h *ConfigHandler) Description() string { return "Display the current configuration summary" }
 
-func (h *ConfigHandler) Handle(_ context.Context, _ []string, sc *slashContext) error {
-	if sc.config == nil {
-		fmt.Fprintln(sc.out, "Config not available.") //nolint:errcheck
-		return nil
+func (h *ConfigHandler) Handle(_ context.Context, _ []string, deps Dependencies) (string, error) {
+	if deps.Config() == nil {
+		fmt.Fprintln(deps.Out(), "Config not available.") //nolint:errcheck
+		return "", nil
 	}
-	cfg := sc.config
-	fmt.Fprintln(sc.out, "Configuration summary:")                         //nolint:errcheck
-	fmt.Fprintf(sc.out, "  Provider:   %s\n", nonEmpty(cfg.Provider.Name)) //nolint:errcheck
-	fmt.Fprintf(sc.out, "  Model:      %s\n", nonEmpty(cfg.Model.Name))    //nolint:errcheck
+	cfg := deps.Config()
+	fmt.Fprintln(deps.Out(), "Configuration summary:")                         //nolint:errcheck
+	fmt.Fprintf(deps.Out(), "  Provider:   %s\n", nonEmpty(cfg.Provider.Name)) //nolint:errcheck
+	fmt.Fprintf(deps.Out(), "  Model:      %s\n", nonEmpty(cfg.Model.Name))    //nolint:errcheck
 	if cfg.Agent.MaxIterations != 0 {
-		fmt.Fprintf(sc.out, "  Max iters:  %d\n", cfg.Agent.MaxIterations) //nolint:errcheck
+		fmt.Fprintf(deps.Out(), "  Max iters:  %d\n", cfg.Agent.MaxIterations) //nolint:errcheck
 	}
 	if cfg.Approval.Mode != "" {
-		fmt.Fprintf(sc.out, "  Approval:   %s\n", cfg.Approval.Mode) //nolint:errcheck
+		fmt.Fprintf(deps.Out(), "  Approval:   %s\n", cfg.Approval.Mode) //nolint:errcheck
 	}
 	if cfg.Session.StorePath != "" {
-		fmt.Fprintf(sc.out, "  Session:    %s\n", cfg.Session.StorePath) //nolint:errcheck
+		fmt.Fprintf(deps.Out(), "  Session:    %s\n", cfg.Session.StorePath) //nolint:errcheck
 	}
 	if cfg.Compaction.Strategy != "" {
-		fmt.Fprintf(sc.out, "  Compaction: %s\n", cfg.Compaction.Strategy) //nolint:errcheck
+		fmt.Fprintf(deps.Out(), "  Compaction: %s\n", cfg.Compaction.Strategy) //nolint:errcheck
 	}
-	return nil
+	return "", nil
 }
 
 // nonEmpty returns value, or "(none)" when empty, for display.
@@ -413,21 +413,21 @@ var _ SlashCommandHandler = (*HistoryHandler)(nil)
 func (h *HistoryHandler) Name() string        { return "history" }
 func (h *HistoryHandler) Description() string { return "Show conversation history summary" }
 
-func (h *HistoryHandler) Handle(_ context.Context, _ []string, sc *slashContext) error {
-	if sc.agent == nil {
-		fmt.Fprintln(sc.out, "Agent not configured.") //nolint:errcheck
-		return nil
+func (h *HistoryHandler) Handle(_ context.Context, _ []string, deps Dependencies) (string, error) {
+	if deps.Agent() == nil {
+		fmt.Fprintln(deps.Out(), "Agent not configured.") //nolint:errcheck
+		return "", nil
 	}
-	msgs := sc.agent.Messages()
+	msgs := deps.Agent().Messages()
 	if len(msgs) == 0 {
-		fmt.Fprintln(sc.out, "No conversation history.") //nolint:errcheck
-		return nil
+		fmt.Fprintln(deps.Out(), "No conversation history.") //nolint:errcheck
+		return "", nil
 	}
-	fmt.Fprintf(sc.out, "Conversation history (%d messages):\n", len(msgs)) //nolint:errcheck
+	fmt.Fprintf(deps.Out(), "Conversation history (%d messages):\n", len(msgs)) //nolint:errcheck
 	for i, m := range msgs {
-		fmt.Fprintf(sc.out, "  %d. [%s] %s\n", i+1, m.Role, truncatePreview(m.Content)) //nolint:errcheck
+		fmt.Fprintf(deps.Out(), "  %d. [%s] %s\n", i+1, m.Role, truncatePreview(m.Content)) //nolint:errcheck
 	}
-	return nil
+	return "", nil
 }
 
 // SaveHandler explicitly flushes the session store to disk.
@@ -438,17 +438,17 @@ var _ SlashCommandHandler = (*SaveHandler)(nil)
 func (h *SaveHandler) Name() string        { return "save" }
 func (h *SaveHandler) Description() string { return "Explicitly save the current session" }
 
-func (h *SaveHandler) Handle(ctx context.Context, _ []string, sc *slashContext) error {
-	if sc.sessionStore == nil {
-		fmt.Fprintln(sc.out, "Session store not configured.") //nolint:errcheck
-		return nil
+func (h *SaveHandler) Handle(ctx context.Context, _ []string, deps Dependencies) (string, error) {
+	if deps.SessionStore() == nil {
+		fmt.Fprintln(deps.Out(), "Session store not configured.") //nolint:errcheck
+		return "", nil
 	}
-	if err := sc.sessionStore.Save(ctx); err != nil {
-		fmt.Fprintf(sc.out, "Save failed: %v\n", err) //nolint:errcheck
-		return nil
+	if err := deps.SessionStore().Save(ctx); err != nil {
+		fmt.Fprintf(deps.Out(), "Save failed: %v\n", err) //nolint:errcheck
+		return "", nil
 	}
-	fmt.Fprintf(sc.out, "Session saved to %s.\n", sc.sessionStore.FilePath()) //nolint:errcheck
-	return nil
+	fmt.Fprintf(deps.Out(), "Session saved to %s.\n", deps.SessionStore().FilePath()) //nolint:errcheck
+	return "", nil
 }
 
 // LoadHandler reads the persisted session entries from the store and prints a
@@ -460,25 +460,25 @@ var _ SlashCommandHandler = (*LoadHandler)(nil)
 func (h *LoadHandler) Name() string        { return "load" }
 func (h *LoadHandler) Description() string { return "Load and summarize the stored session" }
 
-func (h *LoadHandler) Handle(ctx context.Context, _ []string, sc *slashContext) error {
-	if sc.sessionStore == nil {
-		fmt.Fprintln(sc.out, "Session store not configured.") //nolint:errcheck
-		return nil
+func (h *LoadHandler) Handle(ctx context.Context, _ []string, deps Dependencies) (string, error) {
+	if deps.SessionStore() == nil {
+		fmt.Fprintln(deps.Out(), "Session store not configured.") //nolint:errcheck
+		return "", nil
 	}
-	entries, err := sc.sessionStore.List(ctx)
+	entries, err := deps.SessionStore().List(ctx)
 	if err != nil {
-		fmt.Fprintf(sc.out, "Load failed: %v\n", err) //nolint:errcheck
-		return nil
+		fmt.Fprintf(deps.Out(), "Load failed: %v\n", err) //nolint:errcheck
+		return "", nil
 	}
 	if len(entries) == 0 {
-		fmt.Fprintln(sc.out, "No stored session entries.") //nolint:errcheck
-		return nil
+		fmt.Fprintln(deps.Out(), "No stored session entries.") //nolint:errcheck
+		return "", nil
 	}
-	fmt.Fprintf(sc.out, "Loaded %d session entries from %s:\n", len(entries), sc.sessionStore.FilePath()) //nolint:errcheck
+	fmt.Fprintf(deps.Out(), "Loaded %d session entries from %s:\n", len(entries), deps.SessionStore().FilePath()) //nolint:errcheck
 	for _, e := range entries {
-		fmt.Fprintf(sc.out, "  [%s] %s: %s\n", e.Type, e.ID, truncatePreview(e.Content)) //nolint:errcheck
+		fmt.Fprintf(deps.Out(), "  [%s] %s: %s\n", e.Type, e.ID, truncatePreview(e.Content)) //nolint:errcheck
 	}
-	return nil
+	return "", nil
 }
 
 // truncatePreview shortens content to at most maxHistoryPreview runes,
@@ -522,29 +522,29 @@ func (h *ThinkingHandler) Subcommands() []Subcommand {
 	}
 }
 
-func (h *ThinkingHandler) Handle(_ context.Context, args []string, sc *slashContext) error {
+func (h *ThinkingHandler) Handle(_ context.Context, args []string, deps Dependencies) (string, error) {
 	if len(args) == 0 {
-		mode := sc.thinkingVisibility
+		mode := deps.ThinkingVisibility()
 		if mode == "" {
 			mode = "show"
 		}
-		fmt.Fprintf(sc.out, "Thinking display mode: %s\n", mode)
-		return nil
+		fmt.Fprintf(deps.Out(), "Thinking display mode: %s\n", mode)
+		return "", nil
 	}
 	switch strings.ToLower(args[0]) {
 	case "show":
-		sc.thinkingVisibility = "show"
-		fmt.Fprintln(sc.out, "Thinking entries will be expanded.")
+		deps.SetThinkingVisibility("show")
+		fmt.Fprintln(deps.Out(), "Thinking entries will be expanded.")
 	case "collapse":
-		sc.thinkingVisibility = "collapse"
-		fmt.Fprintln(sc.out, "Thinking entries will be collapsed to a summary.")
+		deps.SetThinkingVisibility("collapse")
+		fmt.Fprintln(deps.Out(), "Thinking entries will be collapsed to a summary.")
 	case "hide":
-		sc.thinkingVisibility = "hide"
-		fmt.Fprintln(sc.out, "Thinking entries will be hidden.")
+		deps.SetThinkingVisibility("hide")
+		fmt.Fprintln(deps.Out(), "Thinking entries will be hidden.")
 	default:
-		return fmt.Errorf("unknown sub-command %q: use show, collapse, or hide", args[0])
+		return "", fmt.Errorf("unknown sub-command %q: use show, collapse, or hide", args[0])
 	}
-	return nil
+	return "", nil
 }
 
 // ThemeHandler implements the /theme command, which lists or switches TUI
@@ -574,28 +574,28 @@ func (h *ThemeHandler) Subcommands() []Subcommand {
 	}
 }
 
-func (h *ThemeHandler) Handle(_ context.Context, args []string, sc *slashContext) error {
-	if sc.themeMgr == nil {
-		fmt.Fprintln(sc.out, "Theme switching is only available in interactive TUI mode.")
-		return nil
+func (h *ThemeHandler) Handle(_ context.Context, args []string, deps Dependencies) (string, error) {
+	if deps.ThemeMgr() == nil {
+		fmt.Fprintln(deps.Out(), "Theme switching is only available in interactive TUI mode.")
+		return "", nil
 	}
 	if len(args) == 0 {
-		current := sc.themeMgr.CurrentName()
-		fmt.Fprintln(sc.out, "Available themes:")
-		for _, name := range sc.themeMgr.Names() {
+		current := deps.ThemeMgr().CurrentName()
+		fmt.Fprintln(deps.Out(), "Available themes:")
+		for _, name := range deps.ThemeMgr().Names() {
 			marker := ""
 			if name == current {
 				marker = " (active)"
 			}
-			fmt.Fprintf(sc.out, "  %s%s\n", name, marker)
+			fmt.Fprintf(deps.Out(), "  %s%s\n", name, marker)
 		}
-		return nil
+		return "", nil
 	}
 	name := strings.TrimSpace(strings.ToLower(args[0]))
-	if err := sc.themeMgr.Set(name); err != nil {
-		fmt.Fprintf(sc.out, "Error: %v\nAvailable themes: %s\n", err, strings.Join(sc.themeMgr.Names(), ", "))
-		return nil
+	if err := deps.ThemeMgr().Set(name); err != nil {
+		fmt.Fprintf(deps.Out(), "Error: %v\nAvailable themes: %s\n", err, strings.Join(deps.ThemeMgr().Names(), ", "))
+		return "", nil
 	}
-	fmt.Fprintf(sc.out, "Theme switched to: %s\n", name)
-	return nil
+	fmt.Fprintf(deps.Out(), "Theme switched to: %s\n", name)
+	return "", nil
 }

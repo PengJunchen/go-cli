@@ -391,12 +391,12 @@ func (s *REPLSession) readInput() {
 			if cmd.Name == "exit" {
 				break
 			}
-			s.cmd.handleSlashCommand(s.spanCtx, cmd, &s.slashCtx)
-			// Custom Markdown command handlers may set pendingInput to inject
-			// a prompt template that the REPL loop processes as user input.
-			if s.slashCtx.pendingInput != "" {
-				line = s.slashCtx.pendingInput
-				s.slashCtx.pendingInput = ""
+			// Custom Markdown command handlers may return a pendingInput to
+			// inject a prompt template that the REPL loop processes as user
+			// input.
+			pendingInput := s.cmd.handleSlashCommand(s.spanCtx, cmd, &s.slashCtx)
+			if pendingInput != "" {
+				line = pendingInput
 				// Fall through to process as a normal user message.
 			} else {
 				continue
