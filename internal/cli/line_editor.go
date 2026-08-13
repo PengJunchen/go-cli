@@ -54,7 +54,8 @@ type DefaultLineEditor struct {
 	completer Completer
 
 	// Non-TTY state (lazy-initialized scanner shared across ReadLine calls).
-	scanner *bufio.Scanner
+	scanner  *bufio.Scanner
+	scanDone chan struct{} // closed when the in-flight scan goroutine exits; nil when none is running
 
 	// TTY state (checked once).
 	ttyChecked bool
@@ -257,25 +258,73 @@ func (le *DefaultLineEditor) detectTTY() bool {
 // Non-TTY fallback
 // ---------------------------------------------------------------------------
 
-// readLineNonTTY reads a single line using bufio.Scanner, preserving the
-// exact behavior of the original REPL input loop.
+// readLineNonTTY reads a single line using bufio.Scanner. The blocking
+// scanner.Scan() call runs in a goroutine so that ReadLine returns promptly
+// when ctx is canceled. The result channel is buffered (size 1) so the
+// scanner goroutine can always send its result and exit even after the caller
+// has returned due to context cancellation.
+//
+// Note: if the underlying reader never returns (e.g. an open pipe with no
+// data), the scanner goroutine will remain blocked on Scan() and cannot be
+// interrupted. The caller is responsible for closing the reader to unblock it.
+//
+// To prevent concurrent access to le.scanner (which is not goroutine-safe),
+// a scanDone channel tracks the in-flight goroutine. If ReadLine is called
+// again after a cancellation (while the previous goroutine is still running),
+// the new call waits for the previous goroutine to exit before proceeding.
 func (le *DefaultLineEditor) readLineNonTTY(ctx context.Context, prompt string) (string, error) {
 	if err := ctx.Err(); err != nil {
 		return "", err
 	}
+
+	// If a previous scan goroutine is still in-flight (e.g. after a context
+	// cancellation), wait for it to exit before touching the scanner.
+	if le.scanDone != nil {
+		select {
+		case <-le.scanDone:
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+		le.scanDone = nil
+	}
+
 	if le.scanner == nil {
 		le.scanner = bufio.NewScanner(le.in)
 	}
 	fmt.Fprint(le.out, prompt) //nolint:errcheck
-	if !le.scanner.Scan() {
-		if err := le.scanner.Err(); err != nil {
-			return "", err
-		}
-		return "", io.EOF
+
+	type scanResult struct {
+		line string
+		err  error
 	}
-	line := le.scanner.Text()
-	le.history.Add(line)
-	return line, nil
+	resultCh := make(chan scanResult, 1)
+	done := make(chan struct{})
+	le.scanDone = done
+
+	go func() {
+		defer close(done)
+		if !le.scanner.Scan() {
+			err := le.scanner.Err()
+			if err == nil {
+				err = io.EOF
+			}
+			resultCh <- scanResult{err: err}
+			return
+		}
+		resultCh <- scanResult{line: le.scanner.Text()}
+	}()
+
+	select {
+	case res := <-resultCh:
+		le.scanDone = nil
+		if res.err != nil {
+			return "", res.err
+		}
+		le.history.Add(res.line)
+		return res.line, nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
 }
 
 // ---------------------------------------------------------------------------
