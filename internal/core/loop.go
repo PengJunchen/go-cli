@@ -256,6 +256,15 @@ func (l *LoopAgent) SetMidTurnCompaction(mtc *compaction.MidTurnCompact, compact
 	l.maxTokens = maxTokens
 }
 
+// SetModel replaces the LLM model at runtime. The next Run call will use the
+// new model. This is used by the /model slash command to switch models
+// without restarting the process.
+func (l *LoopAgent) SetModel(m llm.BaseChatModel) {
+	l.pauseMu.Lock()
+	l.model = m
+	l.pauseMu.Unlock()
+}
+
 // Run executes the ReAct loop for the submission and returns the events fired
 // during execution. When stream is non-nil, events are sent in real time as
 // they happen (streaming mode); otherwise they are collected into the returned

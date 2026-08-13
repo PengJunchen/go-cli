@@ -10,6 +10,7 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/memory"
 	"github.com/pengjunchen/go-cli/internal/production"
 	"github.com/pengjunchen/go-cli/internal/session"
@@ -66,6 +67,12 @@ type ConfigAccessor interface {
 	Config() *config.Config
 }
 
+// ModelAccessor provides access to the model selector for runtime model
+// switching via the /model slash command.
+type ModelAccessor interface {
+	ModelSelector() *llm.DefaultModelSelector
+}
+
 // Dependencies combines all accessor interfaces. Slash handlers receive
 // this composite interface and use only the parts they need.
 type Dependencies interface {
@@ -75,6 +82,7 @@ type Dependencies interface {
 	DisplayAccessor
 	MemoryAccessor
 	ConfigAccessor
+	ModelAccessor
 }
 
 // slashContext holds the references that slash command handlers need. It is
@@ -115,6 +123,9 @@ type slashContext struct {
 	// themeMgr enables runtime theme switching via the /theme slash command.
 	// It is nil in headless mode; the ThemeHandler degrades gracefully.
 	themeMgr *tui.ThemeManager
+	// modelSelector enables runtime model switching via the /model slash
+	// command. It is nil when the selector was not wired (e.g. in tests).
+	modelSelector *llm.DefaultModelSelector
 }
 
 // Compile-time assertion that *slashContext satisfies Dependencies.
@@ -126,7 +137,12 @@ func (sc *slashContext) Agent() *core.AgentImpl           { return sc.agent }
 func (sc *slashContext) CostTracker() *production.CostTracker { return sc.costTracker }
 func (sc *slashContext) StatsRegistry() *production.StatsRegistry { return sc.statsRegistry }
 func (sc *slashContext) ContextWindow() int               { return sc.contextWindow }
-func (sc *slashContext) ModelName() string                { return sc.modelName }
+func (sc *slashContext) ModelName() string {
+	if sc.modelSelector != nil {
+		return sc.modelSelector.PrimaryModelName()
+	}
+	return sc.modelName
+}
 
 // --- SessionAccessor ---
 
@@ -157,6 +173,10 @@ func (sc *slashContext) MemoryStore() memory.MemoryStore { return sc.memoryStore
 // --- ConfigAccessor ---
 
 func (sc *slashContext) Config() *config.Config { return sc.config }
+
+// --- ModelAccessor ---
+
+func (sc *slashContext) ModelSelector() *llm.DefaultModelSelector { return sc.modelSelector }
 
 // defaultSlashReg is the fully populated registry shared by all interactive
 // sessions. It is built once at package initialization; the handlers it
