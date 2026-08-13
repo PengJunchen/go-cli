@@ -30,6 +30,14 @@ type Location struct {
 	Range Range  `json:"range"`
 }
 
+// SymbolInformation represents a symbol found by a workspace/symbol query.
+type SymbolInformation struct {
+	Name          string   `json:"name"`
+	Kind          int      `json:"kind"`
+	Location      Location `json:"location"`
+	ContainerName string   `json:"containerName,omitempty"`
+}
+
 // Diagnostic reported by the language server for a document range.
 type Diagnostic struct {
 	Range    Range  `json:"range"`
@@ -95,6 +103,9 @@ type LSPClient interface {
 	// Rename returns the workspace edits for renaming the symbol at the
 	// given position.
 	Rename(ctx context.Context, uri string, line, character int, newName string) (*WorkspaceEdit, error)
+	// WorkspaceSymbol queries the server for symbols matching the query
+	// string across the workspace.
+	WorkspaceSymbol(ctx context.Context, query string) ([]SymbolInformation, error)
 	// Shutdown sends the LSP shutdown request and exit notification, then
 	// terminates the server subprocess.
 	Shutdown(ctx context.Context) error
@@ -385,6 +396,18 @@ func (c *DefaultLSPClient) Rename(ctx context.Context, uri string, line, charact
 		return nil, fmt.Errorf("lsp: rename: %w", err)
 	}
 	return &edit, nil
+}
+
+// WorkspaceSymbol queries the server for symbols matching the query string
+// across the entire workspace.
+func (c *DefaultLSPClient) WorkspaceSymbol(ctx context.Context, query string) ([]SymbolInformation, error) {
+	params := map[string]any{"query": query}
+
+	var symbols []SymbolInformation
+	if err := c.rpc.Call(ctx, "workspace/symbol", params, &symbols); err != nil {
+		return nil, fmt.Errorf("lsp: workspace/symbol: %w", err)
+	}
+	return symbols, nil
 }
 
 // Shutdown sends the LSP shutdown request and exit notification, then

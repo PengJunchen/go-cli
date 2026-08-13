@@ -170,6 +170,17 @@ func (m *MultiLSPClient) Rename(ctx context.Context, uri string, line, character
 	return c.Rename(ctx, uri, line, character, newName)
 }
 
+// WorkspaceSymbol delegates to the default client. Workspace symbol queries
+// are not document-specific, so routing by URI is not applicable.
+func (m *MultiLSPClient) WorkspaceSymbol(ctx context.Context, query string) ([]SymbolInformation, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.defaultClient == nil {
+		return nil, fmt.Errorf("lsp multi: no clients registered")
+	}
+	return m.defaultClient.WorkspaceSymbol(ctx, query)
+}
+
 // Shutdown sends shutdown to all registered clients.
 func (m *MultiLSPClient) Shutdown(ctx context.Context) error {
 	m.mu.Lock()

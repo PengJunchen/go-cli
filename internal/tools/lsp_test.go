@@ -947,6 +947,9 @@ func (m *mockLSPClient) TypeDefinition(_ context.Context, _ string, _, _ int) ([
 func (m *mockLSPClient) Rename(_ context.Context, _ string, _, _ int, _ string) (*WorkspaceEdit, error) {
 	return m.edit, nil
 }
+func (m *mockLSPClient) WorkspaceSymbol(_ context.Context, _ string) ([]SymbolInformation, error) {
+	return nil, nil
+}
 func (m *mockLSPClient) Shutdown(_ context.Context) error { m.closed = true; return nil }
 
 var _ LSPClient = (*mockLSPClient)(nil)

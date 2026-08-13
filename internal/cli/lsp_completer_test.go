@@ -15,6 +15,9 @@ type mockLSPClient struct {
 	items         []tools.CompletionItem
 	openedURI     string
 	openedContent string
+	workspaceSyms []tools.SymbolInformation
+	workspaceErr  error
+	hover         string
 }
 
 func (m *mockLSPClient) Initialize(_ context.Context, _ string) error { return nil }
@@ -25,7 +28,7 @@ func (m *mockLSPClient) References(_ context.Context, _ string, _, _ int) ([]too
 	return nil, nil
 }
 func (m *mockLSPClient) Hover(_ context.Context, _ string, _, _ int) (string, error) {
-	return "", nil
+	return m.hover, nil
 }
 func (m *mockLSPClient) Diagnostics(_ context.Context, _ string) ([]tools.Diagnostic, error) {
 	return nil, nil
@@ -50,6 +53,12 @@ func (m *mockLSPClient) TypeDefinition(_ context.Context, _ string, _, _ int) ([
 }
 func (m *mockLSPClient) Rename(_ context.Context, _ string, _, _ int, _ string) (*tools.WorkspaceEdit, error) {
 	return nil, nil
+}
+func (m *mockLSPClient) WorkspaceSymbol(_ context.Context, _ string) ([]tools.SymbolInformation, error) {
+	if m.workspaceErr != nil {
+		return nil, m.workspaceErr
+	}
+	return m.workspaceSyms, nil
 }
 func (m *mockLSPClient) Shutdown(_ context.Context) error { return nil }
 
