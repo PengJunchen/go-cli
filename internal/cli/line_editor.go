@@ -456,10 +456,66 @@ func (le *DefaultLineEditor) readSingleLineTTY(readByte func() (byte, error), pr
 		le.prevVisualLines = visualLineCount(prompt, buf, termW)
 	}
 
+	// Reverse-i-search state.
+	var searchMode bool
+	var searchQuery []rune
+	var searchOrigBuf []rune
+	var searchOrigPos int
+	var searchMatchIdx int = -1
+
+	renderSearch := func() {
+		if le.prevVisualLines > 1 {
+			fmt.Fprintf(le.out, "\033[%dA", le.prevVisualLines-1) //nolint:errcheck
+		}
+		fmt.Fprint(le.out, "\r\033[J") //nolint:errcheck
+		match := ""
+		if searchMatchIdx >= 0 && searchMatchIdx < len(entries) {
+			match = entries[searchMatchIdx]
+		}
+		fmt.Fprintf(le.out, "(reverse-i-search)`%s': %s", string(searchQuery), match) //nolint:errcheck
+		le.prevVisualLines = 1
+	}
+
 	for {
 		b, err := readByte()
 		if err != nil {
 			return "", err
+		}
+
+		// In search mode, intercept all key handling.
+		if searchMode {
+			switch {
+			case b == '\r' || b == '\n': // Enter — confirm and submit
+				searchMode = false
+				if searchMatchIdx >= 0 {
+					buf = []rune(entries[searchMatchIdx])
+				} else {
+					buf = searchOrigBuf
+				}
+				fmt.Fprint(le.out, "\r\n") //nolint:errcheck
+				return string(buf), nil
+			case b == 0x1B: // Esc — cancel
+				searchMode = false
+				buf = searchOrigBuf
+				pos = searchOrigPos
+				render()
+			case b == 0x08 || b == 0x7F: // Backspace
+				if len(searchQuery) > 0 {
+					searchQuery = searchQuery[:len(searchQuery)-1]
+					searchMatchIdx = findReverseMatch(entries, string(searchQuery), -1)
+				}
+				renderSearch()
+			case b == 0x12: // Ctrl+R — next older match
+				searchMatchIdx = findReverseMatch(entries, string(searchQuery), searchMatchIdx)
+				renderSearch()
+			case b >= 0x20 && b < 0x7F: // Printable
+				searchQuery = append(searchQuery, rune(b))
+				searchMatchIdx = findReverseMatch(entries, string(searchQuery), -1)
+				renderSearch()
+			default:
+				// Ignore other control keys in search mode.
+			}
+			continue
 		}
 
 		switch {
@@ -504,6 +560,14 @@ func (le *DefaultLineEditor) readSingleLineTTY(readByte func() (byte, error), pr
 				pos = start
 				render()
 			}
+
+		case b == 0x12: // Ctrl+R — reverse incremental search
+			searchMode = true
+			searchQuery = nil
+			searchOrigBuf = buf
+			searchOrigPos = pos
+			searchMatchIdx = -1
+			renderSearch()
 
 		case b == 0x09: // Tab
 			if le.completer != nil {
@@ -571,6 +635,12 @@ func (le *DefaultLineEditor) readSingleLineTTY(readByte func() (byte, error), pr
 					pos--
 					fmt.Fprintf(le.out, "\033[%dD", w) //nolint:errcheck
 				}
+			case 'H': // Home — beginning of line
+				pos = 0
+				render()
+			case 'F': // End — end of line
+				pos = len(buf)
+				render()
 			}
 
 		case b >= 0x20 && b < 0x7F: // Printable ASCII
@@ -779,6 +849,27 @@ func longestCommonPrefix(strs []string) string {
 		}
 	}
 	return prefix
+}
+
+// findReverseMatch searches entries in reverse order (newest first) for one
+// containing query (case-insensitive). startIdx is the index of the last match;
+// search begins from startIdx-1. If startIdx is -1, search starts from the last
+// entry. Returns the index of the match, or -1 if no match is found.
+func findReverseMatch(entries []string, query string, startIdx int) int {
+	if len(query) == 0 || startIdx == 0 {
+		return -1
+	}
+	q := strings.ToLower(query)
+	start := startIdx - 1
+	if start < 0 {
+		start = len(entries) - 1
+	}
+	for i := start; i >= 0; i-- {
+		if strings.Contains(strings.ToLower(entries[i]), q) {
+			return i
+		}
+	}
+	return -1
 }
 
 // runeWidth returns the display width of a rune in terminal columns.
