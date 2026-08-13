@@ -241,6 +241,15 @@ type BubbleteaApp struct {
 	quitOnce sync.Once
 	quitCh   chan struct{}
 
+	// programReady is closed once Run has stored the tea.Program, allowing
+	// callers to wait for program availability without polling. It is closed
+	// at most once via readyOnce so Run can be called again on the same
+	// instance without panicking (the channel remains closed for subsequent
+	// runs; callers should always pair ProgramReady with a nil-check on
+	// Program()).
+	programReady chan struct{}
+	readyOnce    sync.Once
+
 	// running guards against concurrent Run invocations.
 	running atomic.Bool
 	// cleaned tracks whether cleanup has already closed done.
@@ -284,9 +293,10 @@ func NewBubbleteaApp(events <-chan AgentEvent, opts ...AppOption) *BubbleteaApp 
 		reg:         NewDefaultRegistry(),
 		themeMgr:    NewThemeManager(),
 		events:      events,
-		done:        make(chan struct{}),
-		quitCh:      make(chan struct{}),
-		interactive: isTerminal(),
+		done:           make(chan struct{}),
+		quitCh:         make(chan struct{}),
+		programReady:   make(chan struct{}),
+		interactive:    isTerminal(),
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -324,6 +334,7 @@ func (a *BubbleteaApp) Run(ctx context.Context) error {
 	a.model.runDone = runCtx.Done()
 	prog := tea.NewProgram(a.model, a.programOptions(runCtx)...)
 	a.program.Store(prog)
+	a.readyOnce.Do(func() { close(a.programReady) })
 	_, err := prog.Run()
 	return err
 }
@@ -375,6 +386,18 @@ func (a *BubbleteaApp) Done() <-chan struct{} { return a.done }
 // Returns nil before Run is called or after it has exited.
 func (a *BubbleteaApp) Program() *tea.Program {
 	return a.program.Load()
+}
+
+// ProgramReady returns a channel that closes once Run has stored the
+// tea.Program. Callers can wait on it instead of polling Program().
+// The channel is already-closed if Run has started, and remains open
+// if Run has not been called yet. The channel is closed at most once;
+// if Run is called again on the same instance the channel stays closed
+// from the first run, so callers should always pair ProgramReady with
+// a nil-check on Program() to handle the window where the program has
+// not yet been stored.
+func (a *BubbleteaApp) ProgramReady() <-chan struct{} {
+	return a.programReady
 }
 
 // EventsProcessed reports how many agent events the loop has consumed.

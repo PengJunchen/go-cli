@@ -15,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/tui"
 )
 
 // hitlTestModel is a minimal tea.Model used to drive cliHITLEmitter in tests.
@@ -252,5 +253,189 @@ func TestHITLMultipleEventsAllForwarded(t *testing.T) {
 	for i, hm := range got {
 		assert.Equal(t, fmt.Sprintf("q%d", i), hm.QuestionID,
 			"events must be forwarded in FIFO order")
+	}
+}
+
+// TestHITLProgramReadyBeforeTurn verifies that BubbleteaApp.ProgramReady()
+// channel is open before Run starts and closes once Run has stored the
+// tea.Program. After the channel closes, Program() must return non-nil.
+// This replaces the former polling loop that called Program() up to 100 times.
+func TestHITLProgramReadyBeforeTurn(t *testing.T) {
+	events := make(chan tui.AgentEvent)
+	app := tui.NewBubbleteaApp(events)
+
+	// Before Run, ProgramReady should be open (not closed).
+	select {
+	case <-app.ProgramReady():
+		t.Fatal("ProgramReady should not be closed before Run")
+	default:
+	}
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+
+	go func() {
+		_ = app.Run(runCtx)
+	}()
+
+	// Wait for ProgramReady to close (program stored).
+	select {
+	case <-app.ProgramReady():
+	case <-time.After(3 * time.Second):
+		t.Fatal("ProgramReady did not close within timeout")
+	}
+
+	// Program must now be available.
+	prog := app.Program()
+	require.NotNil(t, prog, "Program must be non-nil after ProgramReady closes")
+
+	// Clean up: close events to make the app exit, then wait for Done.
+	close(events)
+	cancelRun()
+	select {
+	case <-app.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("app did not shut down within timeout")
+	}
+}
+
+// TestHITLProgramReadyChannelSync verifies the full integration: after
+// ProgramReady fires, the program can be wired to a cliHITLEmitter and
+// Emit routes through it successfully. This validates the channel-based
+// replacement for the polling loop in interactive.go.
+func TestHITLProgramReadyChannelSync(t *testing.T) {
+	events := make(chan tui.AgentEvent)
+	app := tui.NewBubbleteaApp(events)
+
+	runCtx, cancelRun := context.WithCancel(context.Background())
+	defer cancelRun()
+
+	go func() {
+		_ = app.Run(runCtx)
+	}()
+
+	// Wait for program readiness via channel (no polling).
+	select {
+	case <-app.ProgramReady():
+	case <-time.After(3 * time.Second):
+		t.Fatal("ProgramReady did not close within timeout")
+	}
+
+	prog := app.Program()
+	require.NotNil(t, prog)
+
+	// Verify the emitter integration: wire a program to a HITL emitter
+	// and confirm Emit routes through it, exactly as interactive.go does
+	// after ProgramReady fires. We use a standalone program (not the
+	// BubbleteaApp's program) because the app's program runs a teaModel
+	// that cannot handle HITLMessage; the hitlTestModel can.
+	model := &hitlTestModel{
+		respond: func(_ HITLMessage) HITLResponse {
+			return HITLResponse{Answer: "channel-sync"}
+		},
+	}
+	// The hitlTestModel needs to be the model behind the program. Since
+	// we're testing the emitter's SetProgram path, we use a standalone
+	// program to receive the HITLMessage.
+	hitlProg, hitlDone := newHitlProgram(t, model)
+	defer stopHitlProgram(t, hitlProg, hitlDone)
+
+	emitter := &cliHITLEmitter{out: io.Discard}
+	emitter.SetProgram(hitlProg)
+
+	event := core.HITLQuestionEvent{
+		QuestionID: "sync-q",
+		Question:   "Channel sync?",
+		ResponseCh: make(chan core.HITLAnswer, 1),
+	}
+	ctx, cancel := emitCtx()
+	defer cancel()
+	err := emitter.Emit(ctx, event)
+	require.NoError(t, err)
+
+	select {
+	case ans := <-event.ResponseCh:
+		assert.Equal(t, "sync-q", ans.QuestionID)
+		assert.Equal(t, "channel-sync", ans.Answer)
+	case <-time.After(time.Second):
+		t.Fatal("did not receive answer via channel-synced program")
+	}
+
+	// Clean up the BubbleteaApp.
+	close(events)
+	cancelRun()
+	select {
+	case <-app.Done():
+	case <-time.After(3 * time.Second):
+		t.Fatal("app did not shut down within timeout")
+	}
+}
+
+// TestHITLStaleProgramCleared verifies that after SetProgram(nil) is called
+// (as interactive.go does at the end of each turn), Emit falls back to
+// direct stdout output instead of attempting to use a stale program.
+// This ensures no stale program reference leaks across turns.
+func TestHITLStaleProgramCleared(t *testing.T) {
+	model := &hitlTestModel{
+		respond: func(_ HITLMessage) HITLResponse {
+			return HITLResponse{Answer: "stale"}
+		},
+	}
+	program, runDone := newHitlProgram(t, model)
+	defer stopHitlProgram(t, program, runDone)
+
+	var out bytes.Buffer
+	emitter := &cliHITLEmitter{out: &out, program: program}
+
+	// Verify program is initially wired and Emit routes through it.
+	event1 := core.HITLQuestionEvent{
+		QuestionID: "stale-q1",
+		Question:   "Before clear?",
+		ResponseCh: make(chan core.HITLAnswer, 1),
+	}
+	ctx1, cancel1 := emitCtx()
+	defer cancel1()
+	err := emitter.Emit(ctx1, event1)
+	require.NoError(t, err)
+	assert.Empty(t, out.String(), "should route through program, not stdout")
+
+	// Clear the program (simulating end-of-turn cleanup).
+	emitter.SetProgram(nil)
+
+	// After clearing, Emit must fall back to direct stdout.
+	origStdin := os.Stdin
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stdin = r
+	t.Cleanup(func() {
+		os.Stdin = origStdin
+		r.Close()
+		w.Close()
+	})
+	_, err = w.Write([]byte("fallback\n"))
+	require.NoError(t, err)
+
+	out.Reset()
+	event2 := core.HITLQuestionEvent{
+		QuestionID: "stale-q2",
+		Question:   "After clear?",
+		Options:    []string{"fallback", "no"},
+		ResponseCh: make(chan core.HITLAnswer, 1),
+	}
+	ctx2, cancel2 := emitCtx()
+	defer cancel2()
+	err = emitter.Emit(ctx2, event2)
+	require.NoError(t, err)
+
+	// Must have fallen back to direct stdout output.
+	assert.Contains(t, out.String(), "[ask_user]")
+	assert.Contains(t, out.String(), "After clear?")
+
+	select {
+	case ans := <-event2.ResponseCh:
+		assert.Equal(t, "stale-q2", ans.QuestionID)
+		assert.Equal(t, "fallback", ans.Answer)
+	case <-time.After(time.Second):
+		t.Fatal("did not receive answer after stale program cleared")
 	}
 }
