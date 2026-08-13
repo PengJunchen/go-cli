@@ -250,10 +250,14 @@ func buildSlashCommandRegistry() *SlashCommandRegistry {
 	// Retry regenerates the last assistant response.
 	add(&RetryHandler{})
 
+	// Edit opens an external editor for composing a message.
+	add(&EditHandler{})
+
 	// Aliases.
 	reg.RegisterAlias("h", "help")
 	reg.RegisterAlias("c", "cost")
 	reg.RegisterAlias("r", "retry")
+	reg.RegisterAlias("vim", "edit")
 
 	return reg
 }

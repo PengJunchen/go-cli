@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"strings"
 	"unicode/utf8"
 
@@ -705,4 +706,90 @@ func (h *ThemeHandler) Handle(_ context.Context, args []string, deps Dependencie
 	}
 	fmt.Fprintf(deps.Out(), "Theme switched to: %s\n", name)
 	return "", nil
+}
+
+// ----------------------------------------------------------------------------
+// External editor command
+// ----------------------------------------------------------------------------
+
+// EditHandler implements the /edit command, which opens an external editor
+// for composing a message. The edited content is returned as pendingInput
+// for the REPL loop to submit as the next user message.
+//
+//	/edit             — open a temp file in $EDITOR (default vi)
+//	/edit <filename>  — open the specified file in $EDITOR
+type EditHandler struct{}
+
+var _ SlashCommandHandler = (*EditHandler)(nil)
+
+func (h *EditHandler) Name() string        { return "edit" }
+func (h *EditHandler) Description() string { return "Open external editor to compose a message" }
+
+func (h *EditHandler) Handle(_ context.Context, args []string, deps Dependencies) (string, error) {
+	var filename string
+	if len(args) > 0 {
+		filename = args[0]
+	}
+
+	content, err := openEditor(filename)
+	if err != nil {
+		return "", fmt.Errorf("edit: %w", err)
+	}
+
+	// AC-5: empty content (whitespace-only) = no submission.
+	if strings.TrimSpace(content) == "" {
+		fmt.Fprintln(deps.Out(), "Empty content, not submitting.") //nolint:errcheck
+		return "", nil
+	}
+
+	return content, nil
+}
+
+// openEditor opens the configured editor ($EDITOR, default vi) on the given
+// file. If filename is empty, a temporary file is created and removed after
+// reading. The editor command is split on whitespace and the filename is
+// appended as the last argument.
+func openEditor(filename string) (string, error) {
+	tmpFile := filename
+	isTemp := false
+
+	if tmpFile == "" {
+		f, err := os.CreateTemp("", "go-cli-edit-*.md")
+		if err != nil {
+			return "", fmt.Errorf("create temp file: %w", err)
+		}
+		tmpFile = f.Name()
+		f.Close()
+		isTemp = true
+	}
+
+	defer func() {
+		if isTemp {
+			os.Remove(tmpFile) //nolint:errcheck
+		}
+	}()
+
+	editor := strings.TrimSpace(os.Getenv("EDITOR"))
+	if editor == "" {
+		editor = "vi"
+	}
+
+	parts := strings.Fields(editor)
+	parts = append(parts, tmpFile)
+
+	cmd := exec.Command(parts[0], parts[1:]...)
+	cmd.Stdin = os.Stdin
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+
+	if err := cmd.Run(); err != nil {
+		return "", fmt.Errorf("editor exited with error: %w", err)
+	}
+
+	data, err := os.ReadFile(tmpFile)
+	if err != nil {
+		return "", fmt.Errorf("read edited file: %w", err)
+	}
+
+	return string(data), nil
 }

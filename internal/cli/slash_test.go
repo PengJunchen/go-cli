@@ -57,7 +57,7 @@ func TestBuildSlashCommandRegistry(t *testing.T) {
 	want := []string{
 		"help", "cost", "compact", "clear", "tools", "model", "session",
 		"undo", "diff", "plan", "config", "history", "save", "load", "memory",
-		"thinking", "theme", "worktree", "revert", "retry",
+		"thinking", "theme", "worktree", "revert", "retry", "edit",
 	}
 	assert.ElementsMatch(t, want, reg.Names())
 
@@ -88,7 +88,7 @@ func TestSlashHelp(t *testing.T) {
 	for _, want := range []string{
 		"/help", "/cost", "/compact", "/clear", "/tools", "/model", "/session",
 		"/undo", "/diff", "/plan", "/config", "/history", "/save", "/load", "/memory",
-		"/thinking", "/theme", "/worktree", "/retry",
+		"/thinking", "/theme", "/worktree", "/retry", "/edit",
 		"exit",
 	} {
 		assert.Contains(t, output, want, "help output should list %s", want)
@@ -817,4 +817,125 @@ func TestRetry_AliasR(t *testing.T) {
 
 	assert.Equal(t, "hello", pendingInput)
 	assert.Contains(t, buf.String(), "Retrying last message...")
+}
+
+// ---------------------------------------------------------------------------
+// /edit command tests
+// ---------------------------------------------------------------------------
+
+// withTestEditor sets EDITOR to a command that copies a source file to the
+// editor's target file, simulating an editor session. It returns a cleanup
+// function that restores the original EDITOR.
+func withTestEditor(t *testing.T, sourceContent string) func() {
+	t.Helper()
+	sourceFile, err := os.CreateTemp("", "edit-source-*.txt")
+	require.NoError(t, err)
+	_, err = sourceFile.WriteString(sourceContent)
+	require.NoError(t, err)
+	sourceFile.Close()
+
+	oldEditor := os.Getenv("EDITOR")
+	os.Setenv("EDITOR", "cp "+sourceFile.Name())
+
+	return func() {
+		os.Setenv("EDITOR", oldEditor)
+		os.Remove(sourceFile.Name())
+	}
+}
+
+// TestEditCommand_ContentSubmitted verifies AC-4: editor content is returned
+// as pendingInput for submission.
+func TestEditCommand_ContentSubmitted(t *testing.T) {
+	cleanup := withTestEditor(t, "Hello from editor!\nMultiple lines.\n")
+	defer cleanup()
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf}
+	pendingInput := c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "edit"}, sc)
+
+	assert.Equal(t, "Hello from editor!\nMultiple lines.\n", pendingInput)
+}
+
+// TestEditCommand_EmptyContent verifies AC-5: empty content is not submitted.
+func TestEditCommand_EmptyContent(t *testing.T) {
+	oldEditor := os.Getenv("EDITOR")
+	os.Setenv("EDITOR", "true")
+	defer os.Setenv("EDITOR", oldEditor)
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf}
+	pendingInput := c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "edit"}, sc)
+
+	assert.Empty(t, pendingInput)
+	assert.Contains(t, buf.String(), "Empty content")
+}
+
+// TestEditCommand_AliasVim verifies that /vim dispatches to /edit.
+func TestEditCommand_AliasVim(t *testing.T) {
+	cleanup := withTestEditor(t, "vim alias works\n")
+	defer cleanup()
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf}
+	pendingInput := c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "vim"}, sc)
+
+	assert.Equal(t, "vim alias works\n", pendingInput)
+}
+
+// TestEditCommand_FilenameArg verifies /edit <filename> opens the specified file.
+func TestEditCommand_FilenameArg(t *testing.T) {
+	// Create a target file with initial content.
+	targetFile, err := os.CreateTemp("", "edit-target-*.md")
+	require.NoError(t, err)
+	targetFile.Close()
+	defer os.Remove(targetFile.Name())
+
+	// Use a source file to copy content into the target via the editor.
+	sourceFile, err := os.CreateTemp("", "edit-source-*.txt")
+	require.NoError(t, err)
+	_, err = sourceFile.WriteString("file content\n")
+	require.NoError(t, err)
+	sourceFile.Close()
+	defer os.Remove(sourceFile.Name())
+
+	oldEditor := os.Getenv("EDITOR")
+	os.Setenv("EDITOR", "cp "+sourceFile.Name())
+	defer os.Setenv("EDITOR", oldEditor)
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf}
+	pendingInput := c.handleSlashCommand(context.Background(),
+		session.SlashCommand{Name: "edit", Args: []string{targetFile.Name()}}, sc)
+
+	assert.Equal(t, "file content\n", pendingInput)
+}
+
+// TestEditCommand_EditorFailure verifies that when the editor exits with a
+// non-zero status, the error is reported and no content is submitted.
+func TestEditCommand_EditorFailure(t *testing.T) {
+	oldEditor := os.Getenv("EDITOR")
+	os.Setenv("EDITOR", "false") // exits with non-zero status
+	defer os.Setenv("EDITOR", oldEditor)
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf}
+	pendingInput := c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "edit"}, sc)
+
+	assert.Empty(t, pendingInput)
+	assert.Contains(t, buf.String(), "Error:")
+	assert.Contains(t, buf.String(), "editor exited with error")
+}
+
+// TestEditCommand_WhitespaceOnlyContent verifies that whitespace-only content
+// is treated the same as empty content (AC-5).
+func TestEditCommand_WhitespaceOnlyContent(t *testing.T) {
+	cleanup := withTestEditor(t, "   \n\t\n  \n")
+	defer cleanup()
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf}
+	pendingInput := c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "edit"}, sc)
+
+	assert.Empty(t, pendingInput)
+	assert.Contains(t, buf.String(), "Empty content")
 }
