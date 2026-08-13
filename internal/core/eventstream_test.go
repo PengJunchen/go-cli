@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -467,4 +468,75 @@ func TestEventStreamDualWrite(t *testing.T) {
 	nilGot := drainEvents(nilStream)
 	require.Len(t, nilGot, 1)
 	assert.Equal(t, "nil-bus", nilGot[0].Content)
+}
+
+// TestEventStreamOverflow verifies AC-3: when a producer sends 200+ events
+// with a delayed consumer, all tool_result events are available in the
+// Events() channel (not discarded by DiscardOldest) when the buffer is
+// sized at 256.
+func TestEventStreamOverflow(t *testing.T) {
+	stream := NewEventStream(256, WithEventDiscardPolicy(DiscardOldest))
+
+	totalEvents := 220
+	toolResultCount := 0
+
+	// Send 200+ events without a consumer (delayed consumption).
+	for i := 0; i < totalEvents; i++ {
+		kind := "message"
+		if i%10 == 0 {
+			kind = "tool_result"
+			toolResultCount++
+		}
+		require.NoError(t, stream.Send(AgentEvent{
+			Kind:    kind,
+			Content: fmt.Sprintf("event-%d", i),
+		}))
+	}
+	stream.Close()
+
+	// Now consume all events.
+	got := drainEvents(stream)
+
+	// With 256 capacity and 220 events, no events should be discarded.
+	assert.Len(t, got, totalEvents)
+
+	// Verify all tool_result events are present.
+	gotToolResults := 0
+	for _, ev := range got {
+		if ev.Kind == "tool_result" {
+			gotToolResults++
+		}
+	}
+	assert.Equal(t, toolResultCount, gotToolResults, "all tool_result events should be present")
+}
+
+// TestEventStreamOverflowExceedsBuffer verifies that when events exceed
+// the buffer capacity with DiscardOldest, tool_result events that fit in
+// the buffer are still consumable (the most recent 256 events are retained).
+func TestEventStreamOverflowExceedsBuffer(t *testing.T) {
+	const cap = 256
+	stream := NewEventStream(cap, WithEventDiscardPolicy(DiscardOldest))
+
+	// Send 300 events — 44 will be discarded (oldest).
+	totalEvents := 300
+	for i := 0; i < totalEvents; i++ {
+		kind := "message"
+		if i%10 == 0 {
+			kind = "tool_result"
+		}
+		require.NoError(t, stream.Send(AgentEvent{
+			Kind:    kind,
+			Content: fmt.Sprintf("event-%d", i),
+		}))
+	}
+	stream.Close()
+
+	got := drainEvents(stream)
+
+	// Only the most recent `cap` events should remain.
+	assert.Len(t, got, cap, "should retain exactly cap events after overflow")
+
+	// The first retained event should be event-%d (index totalEvents - cap).
+	firstContent := fmt.Sprintf("event-%d", totalEvents-cap)
+	assert.Equal(t, firstContent, got[0].Content, "oldest events should have been discarded")
 }

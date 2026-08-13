@@ -213,7 +213,7 @@ func (s *REPLSession) setupAgent(ctx context.Context) error {
 		WithThinkingLevel(s.thinkingLevel),
 	}
 	if tui.IsTerminal() {
-		approvalCh = make(chan tui.ApprovalRequest, 8)
+		approvalCh = make(chan tui.ApprovalRequest, 32)
 		assembleOpts = append(assembleOpts, WithApprovalChannel(approvalCh))
 	}
 	assembly, err := AssembleAgent(s.spanCtx, s.rc, s.providerName, s.modelName, s.out,
@@ -507,8 +507,10 @@ func (s *REPLSession) setupTurn() {
 	// blocking, so it runs in a goroutine that closes the stream when
 	// the turn finishes. DiscardOldest prevents goroutine leaks if the
 	// TUI consumer falls behind: old events are evicted rather than
-	// blocking the agent loop indefinitely.
-	s.stream = core.NewEventStream(64, core.WithEventDiscardPolicy(core.DiscardOldest))
+	// blocking the agent loop indefinitely. Buffer is 256 so that
+	// 200+ events (including all tool_result events) fit without
+	// being discarded under normal load.
+	s.stream = core.NewEventStream(256, core.WithEventDiscardPolicy(core.DiscardOldest))
 	s.assembly.TurnRunner.SetStream(s.stream)
 }
 
