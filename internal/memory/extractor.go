@@ -129,6 +129,20 @@ func parseExtractionResponse(content string) ([]extractedFact, error) {
 	if trimmed == "" {
 		return nil, fmt.Errorf("empty response")
 	}
+
+	// Strip markdown code block wrapping (```json ... ``` or ``` ... ```).
+	if strings.HasPrefix(trimmed, "```") {
+		// Remove opening fence.
+		if idx := strings.Index(trimmed[3:], "\n"); idx >= 0 {
+			trimmed = trimmed[3+idx+1:]
+		}
+		// Remove closing fence.
+		if idx := strings.LastIndex(trimmed, "```"); idx >= 0 {
+			trimmed = trimmed[:idx]
+		}
+		trimmed = strings.TrimSpace(trimmed)
+	}
+
 	var facts []extractedFact
 	if err := json.Unmarshal([]byte(trimmed), &facts); err != nil {
 		return nil, err

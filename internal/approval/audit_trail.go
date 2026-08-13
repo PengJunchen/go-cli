@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 )
 
 // AuditEntry records a single approval classification decision for the
@@ -92,7 +93,12 @@ func summarizeArgs(args map[string]any) string {
 	sort.Strings(keys)
 	summary := strings.Join(keys, ",")
 	if len(summary) > 200 {
-		summary = summary[:200] + "..."
+		// Truncate at the last valid UTF-8 boundary <= 200 bytes.
+		trunc := summary[:200]
+		for len(trunc) > 0 && !utf8.ValidString(trunc) {
+			trunc = trunc[:len(trunc)-1]
+		}
+		summary = trunc + "..."
 	}
 	return summary
 }

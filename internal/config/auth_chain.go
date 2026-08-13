@@ -133,8 +133,11 @@ func lookupAuthFile(provider string) (string, error) {
 		slog.Warn("config.auth.file_parse_error", "path", path, "err", err)
 		return "", ErrAuthNotFound
 	}
-	if v, ok := m[provider]; ok && v != "" {
-		return v, nil
+	// Case-insensitive lookup to match provider names regardless of casing.
+	for k, v := range m {
+		if strings.EqualFold(k, provider) && v != "" {
+			return v, nil
+		}
 	}
 	return "", ErrAuthNotFound
 }
@@ -166,17 +169,21 @@ func lookupModelsJSON(provider string) (string, error) {
 	// Try flat map[string]string first.
 	var flat map[string]string
 	if err := json.Unmarshal(data, &flat); err == nil {
-		if v, ok := flat[provider]; ok && v != "" {
-			return v, nil
+		for k, v := range flat {
+			if strings.EqualFold(k, provider) && v != "" {
+				return v, nil
+			}
 		}
 	}
 
 	// Fall back to nested map[string]map[string]any.
 	var nested map[string]map[string]any
 	if err := json.Unmarshal(data, &nested); err == nil {
-		if entry, ok := nested[provider]; ok {
-			if v, ok := entry["api_key"].(string); ok && v != "" {
-				return v, nil
+		for k, entry := range nested {
+			if strings.EqualFold(k, provider) {
+				if v, ok := entry["api_key"].(string); ok && v != "" {
+					return v, nil
+				}
 			}
 		}
 	}
