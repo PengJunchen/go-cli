@@ -304,7 +304,7 @@ func AssembleAgent(
 		agentOpts = append(agentOpts, core.WithHistory(restoredHistory))
 	}
 	agent := core.NewAgentImpl(s.ac.agentName, s.loop, agentOpts...)
-	h := core.NewHarnessImpl(agent, core.WithEventBuffer(64), core.WithHarnessTracer(s.tracer), core.WithRunSlotGuard(s.runSlotGuard), core.WithHarnessEventBus(s.eventBus))
+	h := core.NewHarnessImpl(agent, core.WithEventBuffer(256), core.WithHarnessTracer(s.tracer), core.WithRunSlotGuard(s.runSlotGuard), core.WithHarnessEventBus(s.eventBus))
 
 	// Build TurnRunner wired with the shared steering channel and agent.
 	turnRunner := core.NewEinoTurnRunner(s.loop)
