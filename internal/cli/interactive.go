@@ -638,7 +638,9 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 				}
 				memStore := assembly.MemoryStore
 				extractor := assembly.MemoryExtractor
+				assembly.MemoryWG.Add(1)
 				go func() {
+					defer assembly.MemoryWG.Done()
 					ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 					defer cancel()
 					extracted, err := extractor.Extract(ctx, msgs)
