@@ -12,6 +12,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -158,6 +159,9 @@ type AgentAssembly struct {
 	// MemoryExtractor extracts key facts from conversations for memory
 	// storage.
 	MemoryExtractor memory.MemoryExtractor
+	// MemoryWG tracks in-flight memory extraction goroutines so Cleanup
+	// can wait for them before closing the MemoryStore.
+	MemoryWG *sync.WaitGroup
 	// ThinkingLevel is the resolved LLM reasoning depth applied to every
 	// Generate/Stream call. Defaults to ThinkingMedium when no explicit
 	// option or config value is provided.
@@ -373,6 +377,7 @@ func AssembleAgent(
 		SnapshotMgr:        s.snapshotMgr,
 		MemoryStore:        s.memStore,
 		MemoryExtractor:    s.memExtractor,
+		MemoryWG:           &s.memWG,
 		ThinkingLevel:      thinkingLevel,
 		ModelCycler:        s.modelCycler,
 		ModelRegistry:      s.modelRegistry,
@@ -520,6 +525,7 @@ type assembleState struct {
 	loop          core.AgentLoop
 	memStore      *memory.FileMemoryStore
 	memExtractor  memory.MemoryExtractor
+	memWG         sync.WaitGroup
 	promptBuilder core.SystemPromptBuilder
 	contextLoader core.ProjectContextLoader
 
@@ -568,6 +574,7 @@ func (s *assembleState) appendFinalCleanup() {
 			s.sessionStore.Close() //nolint:errcheck,gosec
 		}
 		if s.memStore != nil {
+			s.memWG.Wait()
 			_ = s.memStore.Close() //nolint:errcheck
 		}
 		if s.traceExporter != nil {
