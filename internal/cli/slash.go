@@ -247,9 +247,13 @@ func buildSlashCommandRegistry() *SlashCommandRegistry {
 	// Snapshot revert for file state rollback.
 	add(&RevertHandler{})
 
+	// Retry regenerates the last assistant response.
+	add(&RetryHandler{})
+
 	// Aliases.
 	reg.RegisterAlias("h", "help")
 	reg.RegisterAlias("c", "cost")
+	reg.RegisterAlias("r", "retry")
 
 	return reg
 }
