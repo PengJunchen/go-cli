@@ -491,16 +491,21 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 
 		// Wait for the tea.Program to be initialized so HITL can route
 		// through it. The program is created inside Run (which runs in the
-		// goroutine above), so we poll app.Program() until it is non-nil.
+		// goroutine above); instead of polling, we wait on the
+		// ProgramReady channel which closes once the program is stored.
 		// In TTY mode this routes HITL questions through bubbletea instead
 		// of corrupting stdout.
 		if assembly.HITLEmitter != nil {
-			for i := 0; i < 100; i++ {
+			select {
+			case <-app.ProgramReady():
 				if prog := app.Program(); prog != nil {
 					assembly.HITLEmitter.SetProgram(prog)
-					break
 				}
-				time.Sleep(10 * time.Millisecond)
+			case <-time.After(5 * time.Second):
+				logger.Warn("cli_interactive_hitl_program_timeout",
+					"op", "cli.interactive.hitl.program_timeout",
+				)
+			case <-turnCtx.Done():
 			}
 		}
 
