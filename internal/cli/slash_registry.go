@@ -15,8 +15,10 @@ type SlashCommandHandler interface {
 	// Description is a short, user-facing summary shown by /help.
 	Description() string
 	// Handle executes the command. args are the tokens following the command
-	// name. sc carries the runtime dependencies the handler needs.
-	Handle(ctx context.Context, args []string, sc *slashContext) error
+	// name. deps carries the runtime dependencies the handler needs via
+	// domain accessor interfaces. The returned string is the pendingInput
+	// (non-empty when the handler injects a prompt for the REPL loop).
+	Handle(ctx context.Context, args []string, deps Dependencies) (string, error)
 }
 
 // SlashCommandRegistry manages slash command handlers. It is safe for

@@ -18,9 +18,69 @@ import (
 	"github.com/pengjunchen/go-cli/internal/tui"
 )
 
+// ---------------------------------------------------------------------------
+// Domain accessor interfaces
+// ---------------------------------------------------------------------------
+
+// AgentAccessor provides access to agent runtime.
+type AgentAccessor interface {
+	Agent() *core.AgentImpl
+	CostTracker() *production.CostTracker
+	StatsRegistry() *production.StatsRegistry
+	ContextWindow() int
+	ModelName() string
+}
+
+// SessionAccessor provides access to session state.
+type SessionAccessor interface {
+	SessionID() string
+	SessionStore() *session.JSONLSessionStore
+	SessionHandler() *session.SessionSlashHandler
+}
+
+// ToolAccessor provides access to tools and file operations.
+type ToolAccessor interface {
+	ToolRegistry() tools.ToolRegistry
+	FileTracker() *tools.FileTracker
+	DiffGenerator() tools.DiffGenerator
+	PlanCtrl() core.PlanModeController
+	WorktreeManager() *tools.WorktreeManager
+	SnapshotManager() *tools.SnapshotManager
+}
+
+// DisplayAccessor provides access to output and TUI.
+type DisplayAccessor interface {
+	Out() io.Writer
+	ThemeMgr() *tui.ThemeManager
+	ThinkingVisibility() string
+	SetThinkingVisibility(v string)
+}
+
+// MemoryAccessor provides access to the memory store.
+type MemoryAccessor interface {
+	MemoryStore() memory.MemoryStore
+}
+
+// ConfigAccessor provides access to configuration.
+type ConfigAccessor interface {
+	Config() *config.Config
+}
+
+// Dependencies combines all accessor interfaces. Slash handlers receive
+// this composite interface and use only the parts they need.
+type Dependencies interface {
+	AgentAccessor
+	SessionAccessor
+	ToolAccessor
+	DisplayAccessor
+	MemoryAccessor
+	ConfigAccessor
+}
+
 // slashContext holds the references that slash command handlers need. It is
 // built once after the agent and harness are created and passed to each
-// handler invocation.
+// handler invocation. It implements the Dependencies interface via getter
+// methods so handlers never access its fields directly.
 type slashContext struct {
 	agent          *core.AgentImpl
 	costTracker    *production.CostTracker
@@ -55,11 +115,48 @@ type slashContext struct {
 	// themeMgr enables runtime theme switching via the /theme slash command.
 	// It is nil in headless mode; the ThemeHandler degrades gracefully.
 	themeMgr *tui.ThemeManager
-	// pendingInput, when set by a slash command handler, is picked up by the
-	// REPL loop as the next user message instead of reading from stdin. This
-	// enables custom Markdown commands to inject prompt templates.
-	pendingInput string
 }
+
+// Compile-time assertion that *slashContext satisfies Dependencies.
+var _ Dependencies = (*slashContext)(nil)
+
+// --- AgentAccessor ---
+
+func (sc *slashContext) Agent() *core.AgentImpl           { return sc.agent }
+func (sc *slashContext) CostTracker() *production.CostTracker { return sc.costTracker }
+func (sc *slashContext) StatsRegistry() *production.StatsRegistry { return sc.statsRegistry }
+func (sc *slashContext) ContextWindow() int               { return sc.contextWindow }
+func (sc *slashContext) ModelName() string                { return sc.modelName }
+
+// --- SessionAccessor ---
+
+func (sc *slashContext) SessionID() string                          { return sc.sessionID }
+func (sc *slashContext) SessionStore() *session.JSONLSessionStore   { return sc.sessionStore }
+func (sc *slashContext) SessionHandler() *session.SessionSlashHandler { return sc.sessionHandler }
+
+// --- ToolAccessor ---
+
+func (sc *slashContext) ToolRegistry() tools.ToolRegistry       { return sc.toolRegistry }
+func (sc *slashContext) FileTracker() *tools.FileTracker         { return sc.fileTracker }
+func (sc *slashContext) DiffGenerator() tools.DiffGenerator     { return sc.diffGenerator }
+func (sc *slashContext) PlanCtrl() core.PlanModeController      { return sc.planCtrl }
+func (sc *slashContext) WorktreeManager() *tools.WorktreeManager { return sc.worktreeManager }
+func (sc *slashContext) SnapshotManager() *tools.SnapshotManager { return sc.snapshotManager }
+
+// --- DisplayAccessor ---
+
+func (sc *slashContext) Out() io.Writer                    { return sc.out }
+func (sc *slashContext) ThemeMgr() *tui.ThemeManager       { return sc.themeMgr }
+func (sc *slashContext) ThinkingVisibility() string         { return sc.thinkingVisibility }
+func (sc *slashContext) SetThinkingVisibility(v string)     { sc.thinkingVisibility = v }
+
+// --- MemoryAccessor ---
+
+func (sc *slashContext) MemoryStore() memory.MemoryStore { return sc.memoryStore }
+
+// --- ConfigAccessor ---
+
+func (sc *slashContext) Config() *config.Config { return sc.config }
 
 // defaultSlashReg is the fully populated registry shared by all interactive
 // sessions. It is built once at package initialization; the handlers it
@@ -69,20 +166,23 @@ var defaultSlashReg = buildSlashCommandRegistry()
 
 // handleSlashCommand dispatches a parsed slash command to the appropriate
 // handler via the registry. It emits a tracing span so command invocations are
-// observable.
-func (c *interactiveCmd) handleSlashCommand(ctx context.Context, cmd session.SlashCommand, sc *slashContext) {
+// observable. It returns the pendingInput string (non-empty when a custom
+// Markdown command injects a prompt template for the REPL loop to process).
+func (c *interactiveCmd) handleSlashCommand(ctx context.Context, cmd session.SlashCommand, deps Dependencies) string {
 	span, spanCtx := tracing.SpanFromContext(ctx, "slash.command", tracing.SpanKindInternal)
 	span.SetAttributes(tracing.Attribute{Key: "command_name", Value: cmd.Name})
 	defer span.End()
 
 	handler, ok := c.slashReg.Lookup(cmd.Name)
 	if !ok {
-		fmt.Fprintf(sc.out, "Unknown command: /%s. Type /help for available commands.\n", cmd.Name) //nolint:errcheck
-		return
+		fmt.Fprintf(deps.Out(), "Unknown command: /%s. Type /help for available commands.\n", cmd.Name) //nolint:errcheck
+		return ""
 	}
-	if err := handler.Handle(spanCtx, cmd.Args, sc); err != nil {
-		fmt.Fprintf(sc.out, "Error: %v\n", err) //nolint:errcheck
+	pendingInput, err := handler.Handle(spanCtx, cmd.Args, deps)
+	if err != nil {
+		fmt.Fprintf(deps.Out(), "Error: %v\n", err) //nolint:errcheck
 	}
+	return pendingInput
 }
 
 // buildSlashCommandRegistry creates a SlashCommandRegistry populated with every

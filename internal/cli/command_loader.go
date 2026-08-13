@@ -204,18 +204,17 @@ func (h *MarkdownCommandHandler) Name() string { return h.cmd.name }
 func (h *MarkdownCommandHandler) Description() string { return h.cmd.description }
 
 // Handle implements SlashCommandHandler. It builds the prompt by concatenating
-// the command's Markdown content with any args, then sets it as the pending
+// the command's Markdown content with any args, then returns it as the pending
 // input for the REPL loop to process. If the command has no content and no
-// args, it writes a diagnostic instead of setting empty pendingInput.
-func (h *MarkdownCommandHandler) Handle(ctx context.Context, args []string, sc *slashContext) error {
+// args, it writes a diagnostic instead of returning empty pendingInput.
+func (h *MarkdownCommandHandler) Handle(_ context.Context, args []string, deps Dependencies) (string, error) {
 	prompt := h.cmd.content
 	if len(args) > 0 {
 		prompt = prompt + "\n\n" + strings.Join(args, " ")
 	}
 	if strings.TrimSpace(prompt) == "" {
-		fmt.Fprintf(sc.out, "Command /%s has no content. Edit its Markdown file to add a prompt body.\n", h.cmd.name) //nolint:errcheck
-		return nil
+		fmt.Fprintf(deps.Out(), "Command /%s has no content. Edit its Markdown file to add a prompt body.\n", h.cmd.name) //nolint:errcheck
+		return "", nil
 	}
-	sc.pendingInput = prompt
-	return nil
+	return prompt, nil
 }

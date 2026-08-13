@@ -68,7 +68,7 @@ func TestCostHandler(t *testing.T) {
 	}
 
 	h := &CostHandler{}
-	err := h.Handle(context.Background(), nil, sc)
+	_, err := h.Handle(context.Background(), nil, sc)
 	require.NoError(t, err)
 
 	output := buf.String()

@@ -13,42 +13,42 @@ type WorktreeHandler struct{}
 func (h *WorktreeHandler) Name() string        { return "worktree" }
 func (h *WorktreeHandler) Description() string { return "Manage git worktrees for session isolation" }
 
-func (h *WorktreeHandler) Handle(ctx context.Context, args []string, sc *slashContext) error {
+func (h *WorktreeHandler) Handle(ctx context.Context, args []string, deps Dependencies) (string, error) {
 	if len(args) == 0 {
-		h.printUsage(sc)
-		return nil
+		h.printUsage(deps)
+		return "", nil
 	}
 	sub := args[0]
 	switch sub {
 	case "list":
-		return h.handleList(ctx, sc)
+		return "", h.handleList(ctx, deps)
 	case "create":
-		return h.handleCreate(ctx, sc)
+		return "", h.handleCreate(ctx, deps)
 	case "remove":
-		return h.handleRemove(ctx, args[1:], sc)
+		return "", h.handleRemove(ctx, args[1:], deps)
 	case "cleanup":
-		return h.handleCleanup(ctx, sc)
+		return "", h.handleCleanup(ctx, deps)
 	default:
-		return newUsageError("worktree: unknown subcommand %q (use: list, create, remove, cleanup)", sub)
+		return "", newUsageError("worktree: unknown subcommand %q (use: list, create, remove, cleanup)", sub)
 	}
 }
 
-func (h *WorktreeHandler) printUsage(sc *slashContext) {
-	fmt.Fprintln(sc.out, "Usage: /worktree <list|create|remove|cleanup>")
-	fmt.Fprintln(sc.out, "  list    - List active worktrees")
-	fmt.Fprintln(sc.out, "  create  - Create a worktree for the current session")
-	fmt.Fprintln(sc.out, "  remove  - Remove the worktree for the current session")
-	fmt.Fprintln(sc.out, "  cleanup - Remove orphaned worktrees not tied to any session")
+func (h *WorktreeHandler) printUsage(deps Dependencies) {
+	fmt.Fprintln(deps.Out(), "Usage: /worktree <list|create|remove|cleanup>")
+	fmt.Fprintln(deps.Out(), "  list    - List active worktrees")
+	fmt.Fprintln(deps.Out(), "  create  - Create a worktree for the current session")
+	fmt.Fprintln(deps.Out(), "  remove  - Remove the worktree for the current session")
+	fmt.Fprintln(deps.Out(), "  cleanup - Remove orphaned worktrees not tied to any session")
 }
 
-func (h *WorktreeHandler) handleList(ctx context.Context, sc *slashContext) error {
-	if sc.worktreeManager == nil {
-		fmt.Fprintln(sc.out, "Worktree isolation is not enabled. Set git.worktree_enabled in config.")
+func (h *WorktreeHandler) handleList(ctx context.Context, deps Dependencies) error {
+	if deps.WorktreeManager() == nil {
+		fmt.Fprintln(deps.Out(), "Worktree isolation is not enabled. Set git.worktree_enabled in config.")
 		return nil
 	}
-	sessions := sc.worktreeManager.List()
+	sessions := deps.WorktreeManager().List()
 	if len(sessions) == 0 {
-		fmt.Fprintln(sc.out, "No active worktrees.")
+		fmt.Fprintln(deps.Out(), "No active worktrees.")
 		return nil
 	}
 	ids := make([]string, 0, len(sessions))
@@ -56,76 +56,76 @@ func (h *WorktreeHandler) handleList(ctx context.Context, sc *slashContext) erro
 		ids = append(ids, id)
 	}
 	sort.Strings(ids)
-	fmt.Fprintln(sc.out, "SESSION ID\tWORKTREE PATH")
+	fmt.Fprintln(deps.Out(), "SESSION ID\tWORKTREE PATH")
 	for _, id := range ids {
-		fmt.Fprintf(sc.out, "%s\t%s\n", id, sessions[id])
+		fmt.Fprintf(deps.Out(), "%s\t%s\n", id, sessions[id])
 	}
 	return nil
 }
 
-func (h *WorktreeHandler) handleCreate(ctx context.Context, sc *slashContext) error {
-	if sc.worktreeManager == nil {
+func (h *WorktreeHandler) handleCreate(ctx context.Context, deps Dependencies) error {
+	if deps.WorktreeManager() == nil {
 		return fmt.Errorf("worktree isolation is not enabled")
 	}
-	sessionID := sc.sessionID
+	sessionID := deps.SessionID()
 	if sessionID == "" {
 		return fmt.Errorf("no active session")
 	}
 	branchPrefix := ""
-	if sc.config != nil {
-		branchPrefix = sc.config.Git.BranchPrefix
+	if deps.Config() != nil {
+		branchPrefix = deps.Config().Git.BranchPrefix
 	}
-	path, err := sc.worktreeManager.CreateForSession(ctx, sessionID, branchPrefix)
+	path, err := deps.WorktreeManager().CreateForSession(ctx, sessionID, branchPrefix)
 	if err != nil {
 		return fmt.Errorf("worktree create: %w", err)
 	}
-	if sc.fileTracker != nil {
-		sc.fileTracker.SetWorkdir(path)
+	if deps.FileTracker() != nil {
+		deps.FileTracker().SetWorkdir(path)
 	}
-	fmt.Fprintf(sc.out, "Created worktree for session %s at %s\n", sessionID, path)
+	fmt.Fprintf(deps.Out(), "Created worktree for session %s at %s\n", sessionID, path)
 	return nil
 }
 
-func (h *WorktreeHandler) handleRemove(ctx context.Context, args []string, sc *slashContext) error {
-	if sc.worktreeManager == nil {
+func (h *WorktreeHandler) handleRemove(ctx context.Context, args []string, deps Dependencies) error {
+	if deps.WorktreeManager() == nil {
 		return fmt.Errorf("worktree isolation is not enabled")
 	}
-	sessionID := sc.sessionID
+	sessionID := deps.SessionID()
 	if len(args) > 0 {
 		sessionID = args[0]
 	}
 	if sessionID == "" {
 		return fmt.Errorf("no session specified")
 	}
-	if err := sc.worktreeManager.RemoveForSession(ctx, sessionID); err != nil {
+	if err := deps.WorktreeManager().RemoveForSession(ctx, sessionID); err != nil {
 		return fmt.Errorf("worktree remove: %w", err)
 	}
-	fmt.Fprintf(sc.out, "Removed worktree for session %s\n", sessionID)
+	fmt.Fprintf(deps.Out(), "Removed worktree for session %s\n", sessionID)
 	return nil
 }
 
-func (h *WorktreeHandler) handleCleanup(ctx context.Context, sc *slashContext) error {
-	if sc.worktreeManager == nil {
+func (h *WorktreeHandler) handleCleanup(ctx context.Context, deps Dependencies) error {
+	if deps.WorktreeManager() == nil {
 		return fmt.Errorf("worktree isolation is not enabled")
 	}
-	orphans, err := sc.worktreeManager.ScanOrphans()
+	orphans, err := deps.WorktreeManager().ScanOrphans()
 	if err != nil {
 		return fmt.Errorf("worktree scan: %w", err)
 	}
 	if len(orphans) == 0 {
-		fmt.Fprintln(sc.out, "No orphan worktrees found.")
+		fmt.Fprintln(deps.Out(), "No orphan worktrees found.")
 		return nil
 	}
-	fmt.Fprintln(sc.out, "SESSION ID\tPATH\tSTATUS")
+	fmt.Fprintln(deps.Out(), "SESSION ID\tPATH\tSTATUS")
 	removed := 0
 	for _, p := range orphans {
-		if err := sc.worktreeManager.RemoveOrphan(ctx, p); err != nil {
-			fmt.Fprintf(sc.out, "(orphan)\t%s\tFAILED: %v\n", p, err)
+		if err := deps.WorktreeManager().RemoveOrphan(ctx, p); err != nil {
+			fmt.Fprintf(deps.Out(), "(orphan)\t%s\tFAILED: %v\n", p, err)
 			continue
 		}
-		fmt.Fprintf(sc.out, "(orphan)\t%s\tREMOVED\n", p)
+		fmt.Fprintf(deps.Out(), "(orphan)\t%s\tREMOVED\n", p)
 		removed++
 	}
-	fmt.Fprintf(sc.out, "Cleaned up %d/%d orphan worktree(s).\n", removed, len(orphans))
+	fmt.Fprintf(deps.Out(), "Cleaned up %d/%d orphan worktree(s).\n", removed, len(orphans))
 	return nil
 }

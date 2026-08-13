@@ -14,46 +14,46 @@ type RevertHandler struct{}
 func (h *RevertHandler) Name() string        { return "revert" }
 func (h *RevertHandler) Description() string { return "Revert file state to a previous snapshot" }
 
-func (h *RevertHandler) Handle(ctx context.Context, args []string, sc *slashContext) error {
-	if sc.snapshotManager == nil || !sc.snapshotManager.Enabled() {
-		fmt.Fprintln(sc.out, "Snapshot revert is not available (not in a git repository).")
-		return nil
+func (h *RevertHandler) Handle(ctx context.Context, args []string, deps Dependencies) (string, error) {
+	if deps.SnapshotManager() == nil || !deps.SnapshotManager().Enabled() {
+		fmt.Fprintln(deps.Out(), "Snapshot revert is not available (not in a git repository).")
+		return "", nil
 	}
 	if len(args) == 0 {
-		h.printUsage(sc)
-		return nil
+		h.printUsage(deps)
+		return "", nil
 	}
 	switch args[0] {
 	case "list":
-		return h.handleList(sc)
+		return "", h.handleList(deps)
 	default:
-		return h.handleRevert(ctx, args[0], sc)
+		return "", h.handleRevert(ctx, args[0], deps)
 	}
 }
 
-func (h *RevertHandler) printUsage(sc *slashContext) {
-	fmt.Fprintln(sc.out, "Usage: /revert <list|<n>>")
-	fmt.Fprintln(sc.out, "  list  - List available snapshots")
-	fmt.Fprintln(sc.out, "  <n>   - Revert file state to snapshot n")
+func (h *RevertHandler) printUsage(deps Dependencies) {
+	fmt.Fprintln(deps.Out(), "Usage: /revert <list|<n>>")
+	fmt.Fprintln(deps.Out(), "  list  - List available snapshots")
+	fmt.Fprintln(deps.Out(), "  <n>   - Revert file state to snapshot n")
 }
 
-func (h *RevertHandler) handleList(sc *slashContext) error {
-	snapshots := sc.snapshotManager.List()
+func (h *RevertHandler) handleList(deps Dependencies) error {
+	snapshots := deps.SnapshotManager().List()
 	if len(snapshots) == 0 {
-		fmt.Fprintln(sc.out, "No snapshots available.")
+		fmt.Fprintln(deps.Out(), "No snapshots available.")
 		return nil
 	}
-	fmt.Fprintf(sc.out, "%-4s  %-20s  %-10s  %s\n", "ID", "TIMESTAMP", "TOOL", "FILE")
+	fmt.Fprintf(deps.Out(), "%-4s  %-20s  %-10s  %s\n", "ID", "TIMESTAMP", "TOOL", "FILE")
 	for _, s := range snapshots {
-		fmt.Fprintf(sc.out, "%-4s  %-20s  %-10s  %s\n", s.ID, s.Timestamp.Format("2006-01-02 15:04:05"), s.ToolName, s.FilePath)
+		fmt.Fprintf(deps.Out(), "%-4s  %-20s  %-10s  %s\n", s.ID, s.Timestamp.Format("2006-01-02 15:04:05"), s.ToolName, s.FilePath)
 	}
 	return nil
 }
 
-func (h *RevertHandler) handleRevert(ctx context.Context, id string, sc *slashContext) error {
-	if err := sc.snapshotManager.Revert(ctx, id); err != nil {
+func (h *RevertHandler) handleRevert(ctx context.Context, id string, deps Dependencies) error {
+	if err := deps.SnapshotManager().Revert(ctx, id); err != nil {
 		return fmt.Errorf("revert: %w", err)
 	}
-	fmt.Fprintf(sc.out, "Reverted to snapshot %s.\n", id)
+	fmt.Fprintf(deps.Out(), "Reverted to snapshot %s.\n", id)
 	return nil
 }
