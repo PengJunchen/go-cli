@@ -23,6 +23,9 @@ func TestDefaultAPIKeyPatterns(t *testing.T) {
 		`Bearer\s+[a-zA-Z0-9_.-]{20,}`,
 		`AKIA[0-9A-Z]{16}`,
 		`(?i)aws_secret_access_key\s*[=:]\s*[A-Za-z0-9/+=]{40}`,
+		`gh[pousr]_[a-zA-Z0-9]{36,}`,
+		`glpat-[a-zA-Z0-9_-]{20,}`,
+		`xox[baprs]-[a-zA-Z0-9-]{10,}`,
 	}
 
 	assert.Len(t, patterns, len(expected), "pattern count mismatch")
@@ -74,6 +77,26 @@ func TestRegisterAPIKeyRedaction(t *testing.T) {
 			name:     "aws secret access key",
 			input:    "aws_secret_access_key=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
 			redacted: true,
+		},
+		{
+			name:     "github pat",
+			input:    "ghp_1234567890abcdefghijklmnopqrstuvwxyz1234",
+			redacted: true,
+		},
+		{
+			name:     "gitlab pat",
+			input:    "glpat-1234567890abcdefghij",
+			redacted: true,
+		},
+		{
+			name:     "slack token",
+			input:    "xoxb-1234567890-abcdefghij",
+			redacted: true,
+		},
+		{
+			name:      "ghp substring not redacted",
+			input:     "the word ghp appears in this text",
+			unchanged: true,
 		},
 		{
 			name:      "normal text",

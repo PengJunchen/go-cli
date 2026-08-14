@@ -23,6 +23,9 @@ package production
 //   - Generic bearer token: Bearer <token>
 //   - AWS Access Key ID: AKIA…
 //   - AWS Secret Access Key: aws_secret_access_key=<value>
+//   - GitHub PAT: ghp_/gho_/ghu_/ghs_/ghr_…
+//   - GitLab PAT: glpat-…
+//   - Slack token: xox[baprs]-…
 func DefaultAPIKeyPatterns() []string {
 	return []string{
 		// Anthropic/Claude API key. The "sk-ant-" prefix is more specific
@@ -52,6 +55,21 @@ func DefaultAPIKeyPatterns() []string {
 		// case-insensitively, separated by = or :, and the value is a
 		// 40-character base64 string.
 		`(?i)aws_secret_access_key\s*[=:]\s*[A-Za-z0-9/+=]{40}`,
+
+		// GitHub Personal Access Token (classic). The prefixes ghp_
+		// (personal), gho_ (OAuth), ghu_ (server-to-server), ghs_ (bot),
+		// and ghr_ (refresh) are followed by 36+ alphanumeric characters.
+		`gh[pousr]_[a-zA-Z0-9]{36,}`,
+
+		// GitLab Personal Access Token. The "glpat-" prefix is followed
+		// by 20+ alphanumeric characters (including underscores and
+		// hyphens).
+		`glpat-[a-zA-Z0-9_-]{20,}`,
+
+		// Slack token. The "xox[baprs]-" prefix covers bot (b), app (a),
+		// user (p), refresh (r), and session (s) tokens, followed by 10+
+		// alphanumeric characters (including hyphens).
+		`xox[baprs]-[a-zA-Z0-9-]{10,}`,
 	}
 }
 
