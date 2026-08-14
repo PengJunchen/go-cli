@@ -32,15 +32,15 @@ const (
 var ErrInvalidTransition = errors.New("core: invalid agent state transition")
 
 // validTransitions enumerates the transitions allowed by the agent lifecycle
-// state machine. Terminal states (Stopped, Error) have no outgoing
-// transitions. Running may re-enter Running to support multiple runs.
+// state machine. Terminal states (Stopped, Error) can transition back to
+// Running so that an agent can be reused across multiple Run calls.
 var validTransitions = map[AgentState][]AgentState{
 	StateCreated:     {StateInitialized, StateError},
 	StateInitialized: {StateRunning, StateStopped, StateError},
 	StateRunning:     {StatePaused, StateStopped, StateError, StateRunning},
 	StatePaused:      {StateRunning, StateStopped, StateError},
-	StateStopped:     {},
-	StateError:       {},
+	StateStopped:     {StateRunning, StateError},
+	StateError:       {StateRunning, StateStopped},
 }
 
 // canTransition reports whether transitioning from one AgentState to another

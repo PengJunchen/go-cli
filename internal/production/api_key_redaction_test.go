@@ -17,6 +17,7 @@ func TestDefaultAPIKeyPatterns(t *testing.T) {
 
 	expected := []string{
 		`sk-ant-[a-zA-Z0-9_-]{20,}`,
+		`sk-proj-[a-zA-Z0-9_-]{20,}`,
 		`sk-[a-zA-Z0-9]{20,}`,
 		`AIza[a-zA-Z0-9_-]{35}`,
 		`Bearer\s+[a-zA-Z0-9_.-]{20,}`,

@@ -42,7 +42,7 @@ func TestImageReadTool_Execute_Success(t *testing.T) {
 	content := []byte{0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A, 'f', 'a', 'k', 'e'}
 	require.NoError(t, os.WriteFile(path, content, 0o600))
 
-	tool := NewImageReadTool()
+	tool := NewImageReadTool(WithImageAllowedDirs([]string{dir}))
 	res, err := tool.Execute(context.Background(), ToolCall{Args: map[string]any{"path": path}})
 	require.NoError(t, err)
 

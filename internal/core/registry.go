@@ -255,12 +255,13 @@ func (r *DefaultRegistry) RegisterPluginLoader(n PluginLoader) PluginLoader {
 // ---------------------------------------------------------------------------
 
 // RegisterAgentLoopWithDisposer replaces the AgentLoop implementation,
-// returns the old one, and registers a disposer for cleanup. The disposer
-// logs the disposal and is stored internally so DisposeAll can invoke it.
+// returns the old one, and registers a disposer that restores the previous
+// implementation when called.
 func (r *DefaultRegistry) RegisterAgentLoopWithDisposer(n AgentLoop) (AgentLoop, Disposer) {
 	prev := replace(r, &r.agentLoop, "AgentLoop", n)
 	d := Disposer(func() {
 		slog.Info("core.registry.dispose", "component", "AgentLoop")
+		replace(r, &r.agentLoop, "AgentLoop", prev)
 	})
 	r.mu.Lock()
 	r.disposers = append(r.disposers, d)
@@ -269,11 +270,13 @@ func (r *DefaultRegistry) RegisterAgentLoopWithDisposer(n AgentLoop) (AgentLoop,
 }
 
 // RegisterAgentWithDisposer replaces the Agent implementation, returns the
-// old one, and registers a disposer for cleanup.
+// old one, and registers a disposer that restores the previous implementation
+// when called.
 func (r *DefaultRegistry) RegisterAgentWithDisposer(n Agent) (Agent, Disposer) {
 	prev := replace(r, &r.agent, "Agent", n)
 	d := Disposer(func() {
 		slog.Info("core.registry.dispose", "component", "Agent")
+		replace(r, &r.agent, "Agent", prev)
 	})
 	r.mu.Lock()
 	r.disposers = append(r.disposers, d)
@@ -282,11 +285,13 @@ func (r *DefaultRegistry) RegisterAgentWithDisposer(n Agent) (Agent, Disposer) {
 }
 
 // RegisterHarnessWithDisposer replaces the Harness implementation, returns
-// the old one, and registers a disposer for cleanup.
+// the old one, and registers a disposer that restores the previous
+// implementation when called.
 func (r *DefaultRegistry) RegisterHarnessWithDisposer(n Harness) (Harness, Disposer) {
 	prev := replace(r, &r.harness, "Harness", n)
 	d := Disposer(func() {
 		slog.Info("core.registry.dispose", "component", "Harness")
+		replace(r, &r.harness, "Harness", prev)
 	})
 	r.mu.Lock()
 	r.disposers = append(r.disposers, d)
@@ -295,11 +300,13 @@ func (r *DefaultRegistry) RegisterHarnessWithDisposer(n Harness) (Harness, Dispo
 }
 
 // RegisterToolRegistryWithDisposer replaces the ToolRegistry implementation,
-// returns the old one, and registers a disposer for cleanup.
+// returns the old one, and registers a disposer that restores the previous
+// implementation when called.
 func (r *DefaultRegistry) RegisterToolRegistryWithDisposer(n tools.ToolRegistry) (tools.ToolRegistry, Disposer) {
 	prev := replace(r, &r.toolRegistry, "ToolRegistry", n)
 	d := Disposer(func() {
 		slog.Info("core.registry.dispose", "component", "ToolRegistry")
+		replace(r, &r.toolRegistry, "ToolRegistry", prev)
 	})
 	r.mu.Lock()
 	r.disposers = append(r.disposers, d)
@@ -308,11 +315,13 @@ func (r *DefaultRegistry) RegisterToolRegistryWithDisposer(n tools.ToolRegistry)
 }
 
 // RegisterModelProviderWithDisposer replaces the ModelProvider implementation,
-// returns the old one, and registers a disposer for cleanup.
+// returns the old one, and registers a disposer that restores the previous
+// implementation when called.
 func (r *DefaultRegistry) RegisterModelProviderWithDisposer(n llm.ModelProvider) (llm.ModelProvider, Disposer) {
 	prev := replace(r, &r.modelProvider, "ModelProvider", n)
 	d := Disposer(func() {
 		slog.Info("core.registry.dispose", "component", "ModelProvider")
+		replace(r, &r.modelProvider, "ModelProvider", prev)
 	})
 	r.mu.Lock()
 	r.disposers = append(r.disposers, d)
