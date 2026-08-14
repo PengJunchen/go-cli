@@ -32,6 +32,22 @@ const (
 	EntryTypeSystem EntryType = "system"
 )
 
+// SurfaceOp controls how an entry is projected into the model-visible message
+// stream by DeriveMessages. It separates the storage format from the
+// model-visible format.
+type SurfaceOp string
+
+const (
+	// SurfaceOpVisible marks an entry as included in the model context. This
+	// is the default behaviour when SurfaceOp is empty.
+	SurfaceOpVisible SurfaceOp = "visible"
+	// SurfaceOpCompacted marks an entry as replaced by a compaction summary.
+	// It is not included individually in the model context.
+	SurfaceOpCompacted SurfaceOp = "compacted"
+	// SurfaceOpHidden marks an entry as excluded from the model context.
+	SurfaceOpHidden SurfaceOp = "hidden"
+)
+
 // SessionEntry is a single immutable record in a session. Entries are linked
 // into a tree via ParentID and are never mutated once appended.
 type SessionEntry struct {
@@ -54,6 +70,13 @@ type SessionEntry struct {
 	// ToolName is the name of the tool that produced this entry. Populated
 	// for tool entries.
 	ToolName string `json:"tool_name,omitempty"`
+	// SurfaceOp controls how DeriveMessages projects this entry into the
+	// model-visible message stream. An empty value is treated as
+	// SurfaceOpVisible.
+	SurfaceOp SurfaceOp `json:"surface_op,omitempty"`
+	// Seq is a monotonically increasing sequence number assigned by the
+	// session tree when the entry is appended. It is zero when unset.
+	Seq uint64 `json:"seq"`
 }
 
 // clone returns a defensive copy of the entry so callers cannot mutate the
@@ -80,6 +103,13 @@ func (e *SessionEntry) clone() *SessionEntry {
 		copy(cp.ToolCalls, e.ToolCalls)
 	}
 	return &cp
+}
+
+// SurfaceVisible reports whether the entry should be included in the
+// model-visible message stream. It returns true when SurfaceOp is empty
+// (the default) or explicitly set to SurfaceOpVisible.
+func (e SessionEntry) SurfaceVisible() bool {
+	return e.SurfaceOp == "" || e.SurfaceOp == SurfaceOpVisible
 }
 
 // SessionContext is the effective, replayable context for a session branch.

@@ -34,6 +34,9 @@ type DefaultSessionTree struct {
 	branchSummary BranchSummary
 	// summarySeq generates unique ids for appended branch-summary entries.
 	summarySeq atomic.Uint64
+	// seqCounter assigns monotonically increasing Seq numbers to appended
+	// entries that do not already carry one.
+	seqCounter atomic.Uint64
 	// gitSwitcher, when non-nil, is used by Branch to create git branches and
 	// by MoveTo to checkout git branches on resume.
 	gitSwitcher GitBranchSwitcher
@@ -74,6 +77,11 @@ func (t *DefaultSessionTree) Append(ctx context.Context, entry *SessionEntry) er
 	)
 
 	cp := entry.clone()
+	// Assign a monotonically increasing sequence number when the caller did
+	// not provide one, so every stored entry has a Seq for log integrity.
+	if entry.Seq == 0 {
+		cp.Seq = t.seqCounter.Add(1)
+	}
 	t.mu.Lock()
 	if _, exists := t.entries[cp.ID]; exists {
 		t.mu.Unlock()
