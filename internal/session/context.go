@@ -68,14 +68,13 @@ func (m *DefaultContextManager) BuildContext(ctx context.Context, leafID string)
 	}
 
 	// Find the last compaction point; entries before it are replaced by the
-	// compaction summary.
-	startIdx := 0
-	for i := len(branch) - 1; i >= 0; i-- {
-		if branch[i].Type == EntryTypeCompaction {
-			startIdx = i
-			break
-		}
+	// compaction summary. findLastCompactionPoint operates on []SessionEntry,
+	// so dereference the pointer slice once.
+	branchVals := make([]SessionEntry, len(branch))
+	for i, e := range branch {
+		branchVals[i] = *e
 	}
+	startIdx := findLastCompactionPoint(branchVals)
 	slog.Debug("context_rebuild.compaction_point", "start_idx", startIdx, "compaction", startIdx > 0)
 
 	// Messages are ordered root to leaf, with Compaction entries folded into a
@@ -96,6 +95,9 @@ func (m *DefaultContextManager) BuildContext(ctx context.Context, leafID string)
 				Timestamp: e.Timestamp,
 			})
 			estimatedTokens += estimateTokens(e.Summary)
+			continue
+		}
+		if !e.SurfaceVisible() {
 			continue
 		}
 		messages = append(messages, *e)
