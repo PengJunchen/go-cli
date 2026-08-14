@@ -39,11 +39,18 @@ type DefaultRegistry struct {
 	// Extension layer.
 	configProvider extension.ConfigProvider
 	pluginLoader   PluginLoader
+
+	// Disposers collected from RegisterXxxWithDisposer calls, invoked in
+	// reverse order (LIFO) by DisposeAll.
+	disposers []Disposer
 }
 
 // Compile-time guarantee that DefaultRegistry satisfies the Registry
 // interface (DIP / dependency-inversion).
 var _ Registry = (*DefaultRegistry)(nil)
+
+// Compile-time guarantee that DefaultRegistry satisfies DisposableRegistry.
+var _ DisposableRegistry = (*DefaultRegistry)(nil)
 
 // NewRegistry returns a Registry whose every field is bound to a default stub
 // implementation. No field is left as a nil interface.
@@ -241,4 +248,86 @@ func (r *DefaultRegistry) PluginLoader() PluginLoader { return get(r, &r.pluginL
 // the old one. It panics if n is nil.
 func (r *DefaultRegistry) RegisterPluginLoader(n PluginLoader) PluginLoader {
 	return replace(r, &r.pluginLoader, "PluginLoader", n)
+}
+
+// ---------------------------------------------------------------------------
+// Reversible registration (disposer pattern)
+// ---------------------------------------------------------------------------
+
+// RegisterAgentLoopWithDisposer replaces the AgentLoop implementation,
+// returns the old one, and registers a disposer for cleanup. The disposer
+// logs the disposal and is stored internally so DisposeAll can invoke it.
+func (r *DefaultRegistry) RegisterAgentLoopWithDisposer(n AgentLoop) (AgentLoop, Disposer) {
+	prev := replace(r, &r.agentLoop, "AgentLoop", n)
+	d := Disposer(func() {
+		slog.Info("core.registry.dispose", "component", "AgentLoop")
+	})
+	r.mu.Lock()
+	r.disposers = append(r.disposers, d)
+	r.mu.Unlock()
+	return prev, d
+}
+
+// RegisterAgentWithDisposer replaces the Agent implementation, returns the
+// old one, and registers a disposer for cleanup.
+func (r *DefaultRegistry) RegisterAgentWithDisposer(n Agent) (Agent, Disposer) {
+	prev := replace(r, &r.agent, "Agent", n)
+	d := Disposer(func() {
+		slog.Info("core.registry.dispose", "component", "Agent")
+	})
+	r.mu.Lock()
+	r.disposers = append(r.disposers, d)
+	r.mu.Unlock()
+	return prev, d
+}
+
+// RegisterHarnessWithDisposer replaces the Harness implementation, returns
+// the old one, and registers a disposer for cleanup.
+func (r *DefaultRegistry) RegisterHarnessWithDisposer(n Harness) (Harness, Disposer) {
+	prev := replace(r, &r.harness, "Harness", n)
+	d := Disposer(func() {
+		slog.Info("core.registry.dispose", "component", "Harness")
+	})
+	r.mu.Lock()
+	r.disposers = append(r.disposers, d)
+	r.mu.Unlock()
+	return prev, d
+}
+
+// RegisterToolRegistryWithDisposer replaces the ToolRegistry implementation,
+// returns the old one, and registers a disposer for cleanup.
+func (r *DefaultRegistry) RegisterToolRegistryWithDisposer(n tools.ToolRegistry) (tools.ToolRegistry, Disposer) {
+	prev := replace(r, &r.toolRegistry, "ToolRegistry", n)
+	d := Disposer(func() {
+		slog.Info("core.registry.dispose", "component", "ToolRegistry")
+	})
+	r.mu.Lock()
+	r.disposers = append(r.disposers, d)
+	r.mu.Unlock()
+	return prev, d
+}
+
+// RegisterModelProviderWithDisposer replaces the ModelProvider implementation,
+// returns the old one, and registers a disposer for cleanup.
+func (r *DefaultRegistry) RegisterModelProviderWithDisposer(n llm.ModelProvider) (llm.ModelProvider, Disposer) {
+	prev := replace(r, &r.modelProvider, "ModelProvider", n)
+	d := Disposer(func() {
+		slog.Info("core.registry.dispose", "component", "ModelProvider")
+	})
+	r.mu.Lock()
+	r.disposers = append(r.disposers, d)
+	r.mu.Unlock()
+	return prev, d
+}
+
+// DisposeAll calls all stored disposers in reverse registration order (LIFO)
+// and clears the internal slice. It is safe to call multiple times;
+// subsequent calls are no-ops.
+func (r *DefaultRegistry) DisposeAll() {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for i := len(r.disposers) - 1; i >= 0; i-- {
+		r.disposers[i]()
+	}
+	r.disposers = nil
 }
