@@ -15,7 +15,7 @@ import (
 func TestBashEcho(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tool := NewBashTool()
+	tool := NewBashTool(WithNoSandbox())
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"command": "echo hi"},
 	})
@@ -27,7 +27,7 @@ func TestBashEcho(t *testing.T) {
 func TestBashEnvPassed(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tool := NewBashTool(WithEnv(map[string]string{"FOO": "bar"}))
+	tool := NewBashTool(WithEnv(map[string]string{"FOO": "bar"}), WithNoSandbox())
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"command": "echo $FOO"},
 	})
@@ -39,7 +39,7 @@ func TestBashWorkdir(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	dir := t.TempDir()
-	tool := NewBashTool(WithBashWorkdir(dir))
+	tool := NewBashTool(WithBashWorkdir(dir), WithNoSandbox())
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"command": "pwd"},
 	})
@@ -61,7 +61,7 @@ func TestBashMissingCommand(t *testing.T) {
 func TestBashCommandNotFound(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tool := NewBashTool()
+	tool := NewBashTool(WithNoSandbox())
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"command": "definitely_not_a_real_command_xyz"},
 	})
@@ -73,7 +73,7 @@ func TestBashContextCancel(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	tool := NewBashTool(WithTimeout(10 * time.Second))
+	tool := NewBashTool(WithTimeout(10*time.Second), WithNoSandbox())
 
 	cancel()
 
@@ -86,7 +86,7 @@ func TestBashContextCancel(t *testing.T) {
 func TestBashTimeout(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tool := NewBashTool(WithTimeout(200 * time.Millisecond))
+	tool := NewBashTool(WithTimeout(200*time.Millisecond), WithNoSandbox())
 	_, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"command": "sleep 2"},
 	})
@@ -133,7 +133,7 @@ func TestBashOutputTruncation(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	// Use a very small max output to force truncation.
-	tool := NewBashTool(WithMaxOutput(20))
+	tool := NewBashTool(WithMaxOutput(20), WithNoSandbox())
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"command": "echo 012345678901234567890123456789"},
 	})

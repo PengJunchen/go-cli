@@ -43,13 +43,15 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	fs.SetOutput(c.out)
 
 	var (
-		addr        string
-		modelFlag   string
+		addr         string
+		modelFlag    string
 		providerFlag string
+		noSandbox    bool
 	)
 	fs.StringVar(&addr, "addr", ":9090", "listen address for the ACP HTTP server")
 	fs.StringVar(&modelFlag, "model", "", "model name to use")
 	fs.StringVar(&providerFlag, "provider", "", "provider name to use")
+	fs.BoolVar(&noSandbox, "no-sandbox", false, "disable bash sandbox enforcement")
 	if err := fs.Parse(args); err != nil {
 		return newUsageError("serve: %v", err)
 	}
@@ -72,8 +74,12 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 		modelName := resolveModelName(modelFlag, rc)
 		providerName := resolveProviderName(providerFlag, rc)
 
+		assembleOpts := []AssembleOption{WithApproveMode(ApproveAuto)}
+		if noSandbox {
+			assembleOpts = append(assembleOpts, WithNoSandbox())
+		}
 		assembly, err := AssembleAgent(ctx, rc, providerName, modelName, c.out,
-			WithApproveMode(ApproveAuto),
+			assembleOpts...,
 		)
 		if err != nil {
 			slog.Warn("serve: agent assembly failed, falling back to echo mode", "err", err)

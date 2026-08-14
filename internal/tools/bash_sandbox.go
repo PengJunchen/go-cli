@@ -33,6 +33,16 @@ type BashSandbox interface {
 	Validate(ctx context.Context, cmd string, workDir string) error
 }
 
+// AllowAllSandbox is a no-op BashSandbox that permits every command and
+// working directory. It is the "no-sandbox" equivalent used by
+// WithNoSandbox() to explicitly opt out of sandbox enforcement.
+type AllowAllSandbox struct{}
+
+var _ BashSandbox = AllowAllSandbox{}
+
+// Validate always returns nil, allowing any command in any directory.
+func (AllowAllSandbox) Validate(_ context.Context, _, _ string) error { return nil }
+
 // PathWhitelist checks if a working directory falls under one of the allowed
 // base paths. An empty whitelist allows any path.
 type PathWhitelist struct {

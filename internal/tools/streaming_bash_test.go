@@ -46,7 +46,7 @@ func (m *mockStreamSink) getEvents() []streamEvent {
 // TestStreamingBashEcho verifies that a simple echo command produces the
 // expected output.
 func TestStreamingBashEcho(t *testing.T) {
-	tool := NewStreamingBashTool()
+	tool := NewStreamingBashTool(WithNoSandbox())
 	result, err := tool.Execute(context.Background(), ToolCall{
 		ID:   "call-1",
 		Name: "bash",
@@ -60,7 +60,7 @@ func TestStreamingBashEcho(t *testing.T) {
 // TestStreamingBashStdoutStderrSeparated verifies that stdout and stderr are
 // captured in separate streams and correctly combined in the output.
 func TestStreamingBashStdoutStderrSeparated(t *testing.T) {
-	tool := NewStreamingBashTool()
+	tool := NewStreamingBashTool(WithNoSandbox())
 	sink := &mockStreamSink{}
 	result, err := tool.ExecuteStreaming(context.Background(), ToolCall{
 		ID:   "call-sep",
@@ -92,7 +92,7 @@ func TestStreamingBashStdoutStderrSeparated(t *testing.T) {
 // TestStreamingBashStreamSink verifies that the StreamSink receives
 // tool_output events with correct fields.
 func TestStreamingBashStreamSink(t *testing.T) {
-	tool := NewStreamingBashTool()
+	tool := NewStreamingBashTool(WithNoSandbox())
 	sink := &mockStreamSink{}
 	_, err := tool.ExecuteStreaming(context.Background(), ToolCall{
 		ID:   "call-stream",
@@ -114,7 +114,7 @@ func TestStreamingBashStreamSink(t *testing.T) {
 // TestStreamingBashTimeout verifies that a command exceeding the timeout is
 // killed and returns an error.
 func TestStreamingBashTimeout(t *testing.T) {
-	tool := NewStreamingBashTool(WithTimeout(200 * time.Millisecond))
+	tool := NewStreamingBashTool(WithTimeout(200*time.Millisecond), WithNoSandbox())
 	result, err := tool.Execute(context.Background(), ToolCall{
 		ID:   "call-timeout",
 		Name: "bash",
@@ -130,7 +130,7 @@ func TestStreamingBashTimeout(t *testing.T) {
 // truncated with the "[output truncated]" marker.
 func TestStreamingBashTruncation(t *testing.T) {
 	// Set a very small max output so truncation is triggered.
-	tool := NewStreamingBashTool(WithMaxOutput(20))
+	tool := NewStreamingBashTool(WithMaxOutput(20), WithNoSandbox())
 	result, err := tool.Execute(context.Background(), ToolCall{
 		ID:   "call-trunc",
 		Name: "bash",
@@ -158,7 +158,7 @@ func TestStreamingBashSandbox(t *testing.T) {
 // TestStreamingBashBackwardCompatible verifies that Execute (nil sink) works
 // correctly and produces the same output as ExecuteStreaming with nil.
 func TestStreamingBashBackwardCompatible(t *testing.T) {
-	tool := NewStreamingBashTool()
+	tool := NewStreamingBashTool(WithNoSandbox())
 
 	// Execute uses nil sink internally.
 	result1, err := tool.Execute(context.Background(), ToolCall{
@@ -182,7 +182,7 @@ func TestStreamingBashBackwardCompatible(t *testing.T) {
 // TestStreamingBashExitCode verifies that a failing command returns the
 // correct exit code in metadata.
 func TestStreamingBashExitCode(t *testing.T) {
-	tool := NewStreamingBashTool()
+	tool := NewStreamingBashTool(WithNoSandbox())
 	result, err := tool.Execute(context.Background(), ToolCall{
 		ID:   "call-exit",
 		Name: "bash",
@@ -208,7 +208,7 @@ func TestStreamingBashMissingCommand(t *testing.T) {
 // TestStreamingBashMultilineOutput verifies that multiple lines of output are
 // each streamed as separate events.
 func TestStreamingBashMultilineOutput(t *testing.T) {
-	tool := NewStreamingBashTool()
+	tool := NewStreamingBashTool(WithNoSandbox())
 	sink := &mockStreamSink{}
 	result, err := tool.ExecuteStreaming(context.Background(), ToolCall{
 		ID:   "call-multi",

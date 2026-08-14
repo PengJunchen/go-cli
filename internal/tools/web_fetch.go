@@ -94,6 +94,11 @@ func (t *WebFetchTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 		return nil, errors.New("web_fetch: missing string argument 'url'")
 	}
 
+	if err := ValidateURL(url); err != nil {
+		slog.Debug("web_fetch.url_validation_failed", "url", url, "err", err)
+		return nil, fmt.Errorf("web_fetch: %w", err)
+	}
+
 	slog.Debug("web_fetch.start", "url", url, "timeout", t.Timeout.String())
 
 	fetchCtx, cancel := context.WithTimeout(ctx, t.Timeout)
@@ -107,7 +112,7 @@ func (t *WebFetchTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 
 	client := t.Client
 	if client == nil {
-		client = http.DefaultClient
+		client = NewSSRFSafeHTTPClient(t.Timeout)
 	}
 
 	resp, err := client.Do(req)
