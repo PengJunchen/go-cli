@@ -65,11 +65,12 @@ type PathWhitelist struct {
 }
 
 // NewPathWhitelist builds a PathWhitelist from the given base paths. Each path
-// is cleaned with filepath.Clean before storage.
+// is cleaned with filepath.Clean and resolved with resolveSymlinks before
+// storage, so that whitelist comparisons operate on real paths.
 func NewPathWhitelist(paths []string) PathWhitelist {
 	cleaned := make([]string, 0, len(paths))
 	for _, p := range paths {
-		cleaned = append(cleaned, filepath.Clean(p))
+		cleaned = append(cleaned, resolveSymlinks(filepath.Clean(p)))
 	}
 	return PathWhitelist{paths: cleaned}
 }
@@ -81,7 +82,7 @@ func (wl PathWhitelist) IsAllowed(workDir string) bool {
 	if len(wl.paths) == 0 {
 		return true
 	}
-	cleaned := filepath.Clean(workDir)
+	cleaned := resolveSymlinks(filepath.Clean(workDir))
 	for _, base := range wl.paths {
 		if cleaned == base {
 			return true
@@ -114,6 +115,10 @@ func (f CommandFilter) IsBlocked(cmd string) bool {
 }
 
 func (f CommandFilter) hasBlocked(s string) bool {
+	// Block heredoc syntax (<<) which can write arbitrary content to files.
+	if containsHeredoc(s) {
+		return true
+	}
 	// Recursively inspect command substitutions.
 	for _, inner := range extractSubShells(s) {
 		if f.hasBlocked(inner) {
@@ -146,6 +151,38 @@ func (f CommandFilter) isBlacklisted(name string) bool {
 		}
 	}
 	return false
+}
+
+// containsHeredoc reports whether the command string contains a heredoc
+// redirection (<< or <<-). Heredocs can write arbitrary content to any
+// file path and are therefore blocked in the sandbox.
+func containsHeredoc(s string) bool {
+	return strings.Contains(s, "<<")
+}
+
+// resolveSymlinks resolves symbolic links in path. Unlike filepath.EvalSymlinks,
+// which fails when any component of the path does not exist, resolveSymlinks
+// walks up the path to find the longest existing prefix, resolves it, and
+// re-appends the non-existent suffix. This ensures consistent comparison
+// even when the workDir or whitelist base has not been created yet.
+func resolveSymlinks(path string) string {
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		return resolved
+	}
+	// Walk up to the longest existing ancestor, resolve it, then
+	// re-append the non-existent suffix.
+	dir := filepath.Dir(path)
+	suffix := filepath.Base(path)
+	for {
+		if resolved, err := filepath.EvalSymlinks(dir); err == nil {
+			return filepath.Join(resolved, suffix)
+		}
+		if dir == "/" || dir == "." || dir == filepath.Dir(dir) {
+			return path
+		}
+		suffix = filepath.Join(filepath.Base(dir), suffix)
+		dir = filepath.Dir(dir)
+	}
 }
 
 // DefaultBashSandbox implements BashSandbox using a PathWhitelist, a

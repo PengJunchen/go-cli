@@ -433,3 +433,76 @@ func TestCommandFilter_LegitimateCommandsNotBlocked(t *testing.T) {
 	assert.False(t, f.IsBlocked("pwd"))
 	assert.False(t, f.IsBlocked("cat file.txt"))
 }
+
+// --- Symlink bypass tests (task 46-2) ---
+
+func TestPathWhitelist_SymlinkBypassBlocked(t *testing.T) {
+	safeDir := t.TempDir()
+	outsideDir := t.TempDir()
+	// Create a symlink inside safeDir pointing to outsideDir.
+	link := filepath.Join(safeDir, "escape")
+	require.NoError(t, os.Symlink(outsideDir, link))
+
+	wl := NewPathWhitelist([]string{safeDir})
+	// Without EvalSymlinks, link would be allowed (it's under safeDir).
+	// With EvalSymlinks, link resolves to outsideDir which is NOT in whitelist.
+	assert.False(t, wl.IsAllowed(link), "symlink pointing outside whitelist should be blocked")
+}
+
+func TestPathWhitelist_RealNestedSymlinkAllowed(t *testing.T) {
+	safeDir := t.TempDir()
+	nested := filepath.Join(safeDir, "subdir")
+	require.NoError(t, os.Mkdir(nested, 0o750))
+
+	wl := NewPathWhitelist([]string{safeDir})
+	// A real directory inside safeDir (no symlink) should still be allowed.
+	assert.True(t, wl.IsAllowed(nested))
+}
+
+// --- Heredoc detection tests (task 46-2) ---
+
+func TestCommandFilter_HeredocBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked("cat << EOF > /etc/cron.d/evil"))
+	assert.True(t, f.IsBlocked("cat <<EOF"))
+	assert.True(t, f.IsBlocked("cat <<-EOF"))
+}
+
+func TestCommandFilter_NoHeredoc(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	// Commands without << should not be blocked by heredoc detection.
+	assert.False(t, f.IsBlocked("echo hello"))
+	assert.False(t, f.IsBlocked("ls -la"))
+	// Single < (input redirection) is not a heredoc.
+	assert.False(t, f.IsBlocked("cat < /etc/hostname"))
+}
+
+// --- Sandbox integration tests (task 46-2) ---
+
+func TestSandbox_HeredocBlocked(t *testing.T) {
+	sb := NewDefaultBashSandbox()
+	err := sb.Validate(context.Background(), "cat << EOF > /etc/cron.d/evil", "/anywhere")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "blacklist")
+}
+
+func TestSandbox_SymlinkBypassBlocked(t *testing.T) {
+	safeDir := t.TempDir()
+	outsideDir := t.TempDir()
+	link := filepath.Join(safeDir, "escape")
+	require.NoError(t, os.Symlink(outsideDir, link))
+
+	sb := NewDefaultBashSandbox(WithWhitelist([]string{safeDir}))
+	err := sb.Validate(context.Background(), "echo hello", link)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "whitelist")
+}
+
+func TestSandbox_LegitimateAfterHeredocCheck(t *testing.T) {
+	sb := NewDefaultBashSandbox()
+	err := sb.Validate(context.Background(), "echo hello", "/anywhere")
+	require.NoError(t, err)
+
+	err = sb.Validate(context.Background(), "ls -la", "/anywhere")
+	require.NoError(t, err)
+}
