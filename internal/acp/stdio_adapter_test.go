@@ -1,7 +1,9 @@
 package acp
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"io"
 	"testing"
 	"time"
@@ -163,6 +165,101 @@ func TestStdioAdapterDisconnectWithCanceledContext(t *testing.T) {
 	err := client.Disconnect(canceled)
 	assert.Error(t, err)
 	assert.Equal(t, context.Canceled, err)
+}
+
+// TestStdioAdapterDisconnectUnreadPipeReturns verifies that Disconnect returns
+// within a reasonable time even when the peer never reads from the output pipe
+// (io.Pipe writes block until read). This guards against goroutine leaks that
+// would accumulate if the best-effort disconnect write blocked forever.
+func TestStdioAdapterDisconnectUnreadPipeReturns(t *testing.T) {
+	clientR, serverW := io.Pipe() // client reads, server writes
+	serverR, clientW := io.Pipe() // server reads, client writes
+
+	client := NewStdioAdapter(clientR, clientW, WithName("client"))
+
+	// Drain only the connect frame so Connect doesn't block; stop reading
+	// afterwards so the disconnect frame write blocks forever.
+	go func() {
+		rd := bufio.NewReader(serverR)
+		_, _ = rd.ReadBytes('\n') //nolint:errcheck // drain connect frame only
+	}()
+
+	ctx := context.Background()
+	require.NoError(t, client.Connect(ctx))
+
+	// Close the client's input so readLoop's blocked reader unblocks.
+	closeIgnored(serverW)
+
+	// Disconnect must return promptly even though the disconnect write blocks.
+	done := make(chan error, 1)
+	go func() {
+		done <- client.Disconnect(ctx)
+	}()
+	select {
+	case err := <-done:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Disconnect blocked when peer pipe was never read")
+	}
+
+	// Cleanup: closing serverR unblocks the leaked inner writeLine goroutine.
+	closeIgnored(clientW)
+	closeIgnored(serverR)
+	closeIgnored(clientR)
+}
+
+// TestStdioAdapterDisconnectDeliversFrame verifies that when the peer reads
+// normally, the disconnect frame is delivered correctly.
+func TestStdioAdapterDisconnectDeliversFrame(t *testing.T) {
+	clientR, serverW := io.Pipe() // client reads, server writes
+	serverR, clientW := io.Pipe() // server reads, client writes
+
+	client := NewStdioAdapter(clientR, clientW, WithName("client"))
+
+	// Continuously read frames the client sends.
+	frames := make(chan []byte, 4)
+	go func() {
+		rd := bufio.NewReader(serverR)
+		for {
+			line, err := rd.ReadBytes('\n')
+			if len(line) > 0 {
+				frames <- line
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	ctx := context.Background()
+	require.NoError(t, client.Connect(ctx))
+
+	// Consume the connect frame.
+	select {
+	case <-frames:
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for connect frame")
+	}
+
+	// Close the client's input so readLoop exits after Disconnect.
+	closeIgnored(serverW)
+
+	require.NoError(t, client.Disconnect(ctx))
+
+	// The disconnect frame should arrive promptly.
+	select {
+	case line := <-frames:
+		var msg ACPMessage
+		require.NoError(t, json.Unmarshal(line, &msg))
+		assert.Equal(t, TypeDisconnect, msg.Type)
+		assert.Equal(t, "client", msg.SenderID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for disconnect frame")
+	}
+
+	closeIgnored(clientW)
+	closeIgnored(serverR)
+	closeIgnored(clientR)
 }
 
 // waitForSpan polls the exporter until a span with the given name is collected.
