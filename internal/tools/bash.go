@@ -68,9 +68,17 @@ func WithMaxOutput(n int) BashToolOption {
 // WithBashSandbox attaches a BashSandbox that validates commands before
 // execution. When set, Execute calls Validate before running the command and
 // returns the error without executing if validation fails. When unset (the
-// default) no validation is performed, preserving backward compatibility.
+// default) Execute returns an error indicating a sandbox is required; use
+// WithNoSandbox() to explicitly opt out.
 func WithBashSandbox(sb BashSandbox) BashToolOption {
 	return func(t *BashTool) { t.Sandbox = sb }
+}
+
+// WithNoSandbox explicitly disables sandbox enforcement by setting an
+// AllowAllSandbox that permits every command. This is the opt-out path for
+// callers that intentionally want unrestricted command execution.
+func WithNoSandbox() BashToolOption {
+	return func(t *BashTool) { t.Sandbox = AllowAllSandbox{} }
 }
 
 // WithResourceLimits attaches process-level CPU and memory limits that are
@@ -149,19 +157,24 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		return nil, errors.New("bash: missing string argument 'command'")
 	}
 
-	// When a sandbox is configured, validate the command before execution.
-	if t.Sandbox != nil {
-		// Resolve workDir to an absolute path so that relative values like
-		// "." are checked against the whitelist correctly.
-		workDir := t.Workdir
-		if absDir, absErr := filepath.Abs(t.Workdir); absErr == nil {
-			workDir = absDir
-		}
-		if err := t.Sandbox.Validate(ctx, command, workDir); err != nil {
-			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-			logger.Error("bash.sandbox_blocked", "tool", "bash", "err", err)
-			return nil, err
-		}
+	// A sandbox is required by default. When Sandbox is nil, return an
+	// error unless the caller explicitly opted out via WithNoSandbox().
+	if t.Sandbox == nil {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		logger.Error("bash.sandbox_required", "tool", "bash")
+		return nil, errors.New("bash: sandbox is required but not configured; use --no-sandbox to override")
+	}
+
+	// Resolve workDir to an absolute path so that relative values like
+	// "." are checked against the whitelist correctly.
+	workDir := t.Workdir
+	if absDir, absErr := filepath.Abs(t.Workdir); absErr == nil {
+		workDir = absDir
+	}
+	if err := t.Sandbox.Validate(ctx, command, workDir); err != nil {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		logger.Error("bash.sandbox_blocked", "tool", "bash", "err", err)
+		return nil, err
 	}
 
 	// Determine the effective timeout. When TimeoutTier is enabled, the

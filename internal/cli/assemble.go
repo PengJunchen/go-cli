@@ -194,6 +194,9 @@ type assembleConfig struct {
 	enableSession bool
 	agentName     string
 	thinkingLevel *llm.ThinkingLevel
+	// noSandbox disables bash sandbox enforcement, replacing the default
+	// sandbox with an AllowAllSandbox that permits every command.
+	noSandbox bool
 	// approvalCh, when non-nil, enables TUI-based approval via TeaApprovalCallback.
 	approvalCh chan tui.ApprovalRequest
 	// approveMode controls headless tool approval behavior when approvalCh is
@@ -244,6 +247,13 @@ func WithAgentName(name string) AssembleOption {
 // back to ThinkingMedium.
 func WithThinkingLevel(level llm.ThinkingLevel) AssembleOption {
 	return func(c *assembleConfig) { c.thinkingLevel = &level }
+}
+
+// WithNoSandbox disables bash sandbox enforcement. When set, the bash tool
+// uses an AllowAllSandbox that permits every command instead of the default
+// sandbox derived from configuration.
+func WithNoSandbox() AssembleOption {
+	return func(c *assembleConfig) { c.noSandbox = true }
 }
 
 // AssembleAgent wires all production components (model wrapping, tool
@@ -717,18 +727,23 @@ func (s *assembleState) assembleTools() error {
 	s.diffGen = tools.NewUnifiedDiffGenerator(0, false)
 
 	// Build the bash sandbox from config.
-	var sandboxOpts []tools.SandboxOption
+	var bashSandbox tools.BashSandbox
 	var resourceLimits tools.ResourceLimits
-	if s.rc != nil {
-		sandboxOpts = append(sandboxOpts, tools.WithAllowedPaths(s.rc.Sandbox.AllowedPaths))
-		resourceLimits = tools.ResourceLimits{
-			MaxCPU:    s.rc.Sandbox.MaxCPU,
-			MaxMemory: s.rc.Sandbox.MaxMemory,
-		}
+	if s.ac.noSandbox {
+		bashSandbox = tools.AllowAllSandbox{}
 	} else {
-		sandboxOpts = append(sandboxOpts, tools.WithAllowedPaths(nil))
+		var sandboxOpts []tools.SandboxOption
+		if s.rc != nil {
+			sandboxOpts = append(sandboxOpts, tools.WithAllowedPaths(s.rc.Sandbox.AllowedPaths))
+			resourceLimits = tools.ResourceLimits{
+				MaxCPU:    s.rc.Sandbox.MaxCPU,
+				MaxMemory: s.rc.Sandbox.MaxMemory,
+			}
+		} else {
+			sandboxOpts = append(sandboxOpts, tools.WithAllowedPaths(nil))
+		}
+		bashSandbox = tools.NewDefaultBashSandbox(sandboxOpts...)
 	}
-	bashSandbox := tools.NewDefaultBashSandbox(sandboxOpts...)
 
 	s.htmlConverter = tools.NewDefaultHTMLConverter()
 
@@ -1083,12 +1098,19 @@ func (s *assembleState) assembleProductionResilience() {
 	s.reg.RegisterToolRegistry(s.tr)
 }
 
-// assembleOutputGuards wires the output guard chain (PII + code injection + length).
+// assembleOutputGuards wires the output guard chain (PII + code injection +
+// length + redacting). The redacting guard masks common API key formats so
+// that secrets leaking into model output are replaced with [REDACTED] before
+// the output propagates downstream.
 func (s *assembleState) assembleOutputGuards() {
+	redactingGuard := production.NewRedactingOutputGuard()
+	production.RegisterAPIKeyRedaction(redactingGuard)
+
 	s.guardChain = production.NewOutputGuardChain([]production.OutputGuard{
 		production.NewPIIOutputGuard(),
 		production.NewCodeInjectionGuard(),
 		production.NewLengthGuard(100000),
+		redactingGuard,
 	})
 }
 

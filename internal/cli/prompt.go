@@ -64,6 +64,7 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) error {
 		outputMode   OutputMode
 		approveMode  ApproveMode
 		forkFlag     string
+		noSandbox    bool
 	)
 	fs.StringVar(&modelFlag, "model", "", "model name to use")
 	fs.StringVar(&providerFlag, "provider", "", "provider name to use")
@@ -71,6 +72,7 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	fs.Var(&outputMode, "output", "output format: json|stream|text (default text)")
 	fs.Var(&approveMode, "approve", "approval mode: auto|deny|ask (default ask)")
 	fs.StringVar(&forkFlag, "fork", "", "fork from an existing session id")
+	fs.BoolVar(&noSandbox, "no-sandbox", false, "disable bash sandbox enforcement")
 	if err := fs.Parse(args); err != nil {
 		return newUsageError("prompt: %v", err)
 	}
@@ -122,6 +124,9 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	if forkFlag != "" {
 		// --fork requires a session store to build the tree from.
 		assembleOpts = append(assembleOpts, WithSessionPersistence(true))
+	}
+	if noSandbox {
+		assembleOpts = append(assembleOpts, WithNoSandbox())
 	}
 	assembly, err := AssembleAgent(dispatchCtx, rc, providerName, modelName, c.out,
 		assembleOpts...)

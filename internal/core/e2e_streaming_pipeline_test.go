@@ -33,7 +33,7 @@ func TestET_streaming_bash_full_pipeline(t *testing.T) {
 	defer cancel()
 
 	// Set up a real StreamingBashTool in a real registry.
-	bashTool := tools.NewStreamingBashTool()
+	bashTool := tools.NewStreamingBashTool(tools.WithNoSandbox())
 	reg := tools.NewDefaultToolRegistry()
 	require.NoError(t, reg.Register(ctx, bashTool))
 
@@ -89,7 +89,7 @@ func TestET_streaming_bash_stderr_pipeline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	bashTool := tools.NewStreamingBashTool()
+	bashTool := tools.NewStreamingBashTool(tools.WithNoSandbox())
 	reg := tools.NewDefaultToolRegistry()
 	require.NoError(t, reg.Register(ctx, bashTool))
 
@@ -137,7 +137,7 @@ func TestET_streaming_bash_parallel_pipeline(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	bashTool := tools.NewStreamingBashTool()
+	bashTool := tools.NewStreamingBashTool(tools.WithNoSandbox())
 	reg := tools.NewDefaultToolRegistry()
 	require.NoError(t, reg.Register(ctx, bashTool))
 

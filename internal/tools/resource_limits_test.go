@@ -44,7 +44,7 @@ func TestBashTool_ResourceLimitsSimpleCommand(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	limits := ResourceLimits{MaxMemory: 256 * 1024 * 1024} // 256MB
-	tool := NewBashTool(WithResourceLimits(limits), WithTimeout(10*time.Second))
+	tool := NewBashTool(WithResourceLimits(limits), WithTimeout(10*time.Second), WithNoSandbox())
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"command": "echo limited"},
 	})
@@ -60,7 +60,7 @@ func TestBashTool_ResourceLimitsMemoryOOM(t *testing.T) {
 
 	// 10MB memory limit — allocating 100MB should fail.
 	limits := ResourceLimits{MaxMemory: 10 * 1024 * 1024}
-	tool := NewBashTool(WithResourceLimits(limits), WithTimeout(10*time.Second))
+	tool := NewBashTool(WithResourceLimits(limits), WithTimeout(10*time.Second), WithNoSandbox())
 	_, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"command": "perl -e 'my $x = \"a\" x (100*1024*1024)'"},
 	})
@@ -131,7 +131,7 @@ func TestWithTimeoutTier(t *testing.T) {
 func TestBashTool_TimeoutTierFastCommandSucceeds(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tool := NewBashTool(WithTimeoutTier(true))
+	tool := NewBashTool(WithTimeoutTier(true), WithNoSandbox())
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"command": "echo fast"},
 	})

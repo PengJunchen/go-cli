@@ -282,6 +282,7 @@ func TestET_Phase24_TimeoutTierClassification(t *testing.T) {
 	tool := tools.NewBashTool(
 		tools.WithTimeoutTier(true),
 		tools.WithBashWorkdir(workDir),
+		tools.WithNoSandbox(),
 	)
 
 	// The option must set the field.

@@ -61,7 +61,7 @@ func TestE2EBashStreamingEcho(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	tool := NewStreamingBashTool()
+	tool := NewStreamingBashTool(WithNoSandbox())
 	sink := &mockStreamSink{}
 
 	result, err := tool.ExecuteStreaming(ctx, ToolCall{
@@ -94,7 +94,7 @@ func TestE2EBashStreamingEventOrder(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	tool := NewStreamingBashTool()
+	tool := NewStreamingBashTool(WithNoSandbox())
 	sink := &orderedStreamSink{}
 
 	result, err := tool.ExecuteStreaming(ctx, ToolCall{
@@ -137,7 +137,7 @@ func TestE2EBashStreamingLargeOutput(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	tool := NewStreamingBashTool(WithMaxOutput(5000))
+	tool := NewStreamingBashTool(WithMaxOutput(5000), WithNoSandbox())
 	sink := &mockStreamSink{}
 
 	done := make(chan struct{})
@@ -179,7 +179,7 @@ func TestE2EBashStreamingTimeoutCancel(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	tool := NewStreamingBashTool(WithTimeout(200 * time.Millisecond))
+	tool := NewStreamingBashTool(WithTimeout(200*time.Millisecond), WithNoSandbox())
 
 	start := time.Now()
 
@@ -210,7 +210,7 @@ func TestE2EBashStreamingStdoutStderrSeparation(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	tool := NewStreamingBashTool()
+	tool := NewStreamingBashTool(WithNoSandbox())
 	sink := &mockStreamSink{}
 
 	_, err := tool.ExecuteStreaming(ctx, ToolCall{
@@ -251,7 +251,7 @@ func BenchmarkStreamingBashVsBashTool(b *testing.B) {
 	}
 
 	b.Run("StreamingBashTool", func(b *testing.B) {
-		tool := NewStreamingBashTool()
+		tool := NewStreamingBashTool(WithNoSandbox())
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			_, err := tool.ExecuteStreaming(ctx, call, nil)
@@ -262,7 +262,7 @@ func BenchmarkStreamingBashVsBashTool(b *testing.B) {
 	})
 
 	b.Run("OriginalBashTool", func(b *testing.B) {
-		tool := NewBashTool()
+		tool := NewBashTool(WithNoSandbox())
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
 			_, err := tool.Execute(ctx, call)

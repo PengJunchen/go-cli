@@ -81,17 +81,23 @@ func (t *StreamingBashToolImpl) ExecuteStreaming(ctx context.Context, call ToolC
 		return nil, errors.New("bash: missing string argument 'command'")
 	}
 
-	// Sandbox validation (reuse t.Sandbox).
-	if t.Sandbox != nil {
-		workDir := t.Workdir
-		if absDir, absErr := filepath.Abs(t.Workdir); absErr == nil {
-			workDir = absDir
-		}
-		if err := t.Sandbox.Validate(ctx, command, workDir); err != nil {
-			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-			logger.Error("streaming_bash.sandbox_blocked", "tool", "bash", "err", err)
-			return nil, err
-		}
+	// A sandbox is required by default. When Sandbox is nil, return an
+	// error unless the caller explicitly opted out via WithNoSandbox().
+	if t.Sandbox == nil {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		logger.Error("streaming_bash.sandbox_required", "tool", "bash")
+		return nil, errors.New("bash: sandbox is required but not configured; use --no-sandbox to override")
+	}
+
+	// Sandbox validation.
+	workDir := t.Workdir
+	if absDir, absErr := filepath.Abs(t.Workdir); absErr == nil {
+		workDir = absDir
+	}
+	if err := t.Sandbox.Validate(ctx, command, workDir); err != nil {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		logger.Error("streaming_bash.sandbox_blocked", "tool", "bash", "err", err)
+		return nil, err
 	}
 
 	// Determine the effective timeout.

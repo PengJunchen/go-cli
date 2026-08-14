@@ -45,6 +45,7 @@ type REPLSession struct {
 	thinkingFlag  string
 	verboseFlag   bool
 	resumeFlag    bool
+	noSandboxFlag bool
 
 	// Agent assembly
 	assembly   *AgentAssembly
@@ -133,6 +134,7 @@ func (s *REPLSession) parseFlags() error {
 		verboseFlag   bool
 		resumeFlag    bool
 		thinkingFlag  string
+		noSandboxFlag bool
 	)
 	fs.StringVar(&modelFlag, "model", "", "model name to use")
 	fs.StringVar(&providerFlag, "provider", "", "provider name to use")
@@ -140,6 +142,7 @@ func (s *REPLSession) parseFlags() error {
 	fs.BoolVar(&verboseFlag, "verbose", false, "enable verbose output")
 	fs.BoolVar(&resumeFlag, "resume", false, "resume previous session from store path")
 	fs.StringVar(&thinkingFlag, "thinking", "medium", "thinking level: none|minimal|low|medium|high|max")
+	fs.BoolVar(&noSandboxFlag, "no-sandbox", false, "disable bash sandbox enforcement")
 	if err := fs.Parse(s.args); err != nil {
 		return newUsageError("interactive: %v", err)
 	}
@@ -171,6 +174,7 @@ func (s *REPLSession) parseFlags() error {
 	s.thinkingFlag = thinkingFlag
 	s.verboseFlag = verboseFlag
 	s.resumeFlag = resumeFlag
+	s.noSandboxFlag = noSandboxFlag
 	return nil
 }
 
@@ -211,6 +215,9 @@ func (s *REPLSession) setupAgent(ctx context.Context) error {
 		WithSessionPersistence(true),
 		WithAgentName("interactive"),
 		WithThinkingLevel(s.thinkingLevel),
+	}
+	if s.noSandboxFlag {
+		assembleOpts = append(assembleOpts, WithNoSandbox())
 	}
 	if tui.IsTerminal() {
 		approvalCh = make(chan tui.ApprovalRequest, 32)
