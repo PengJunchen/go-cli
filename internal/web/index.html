@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>go-cli Web UI</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: #f5f5f7;
+            color: #1d1d1f;
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            background-color: #1d1d1f;
+            color: #ffffff;
+            padding: 16px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            box-shadow: 0 1px 3px rgba(0, 0, 0, 0.12);
+        }
+
+        header h1 {
+            font-size: 20px;
+            font-weight: 600;
+        }
+
+        .status-indicator {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 14px;
+        }
+
+        .status-dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background-color: #ff3b30;
+            transition: background-color 0.3s ease;
+        }
+
+        .status-dot.connected {
+            background-color: #34c759;
+        }
+
+        .status-dot.connecting {
+            background-color: #ff9500;
+        }
+
+        main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            max-width: 800px;
+            width: 100%;
+            margin: 0 auto;
+            padding: 24px 16px;
+            min-height: 0;
+        }
+
+        .message-list {
+            flex: 1;
+            overflow-y: auto;
+            background-color: #ffffff;
+            border-radius: 12px;
+            padding: 20px;
+            box-shadow: 0 1px 4px rgba(0, 0, 0, 0.08);
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+            min-height: 0;
+        }
+
+        .message {
+            max-width: 75%;
+            padding: 12px 16px;
+            border-radius: 16px;
+            font-size: 15px;
+            line-height: 1.5;
+            word-wrap: break-word;
+        }
+
+        .message.user {
+            align-self: flex-end;
+            background-color: #007aff;
+            color: #ffffff;
+            border-bottom-right-radius: 4px;
+        }
+
+        .message.bot {
+            align-self: flex-start;
+            background-color: #e9e9eb;
+            color: #1d1d1f;
+            border-bottom-left-radius: 4px;
+        }
+
+        .input-area {
+            display: flex;
+            gap: 12px;
+            padding: 16px 0 0;
+        }
+
+        .input-area input {
+            flex: 1;
+            padding: 12px 16px;
+            border: 1px solid #d2d2d7;
+            border-radius: 10px;
+            font-size: 15px;
+            outline: none;
+            transition: border-color 0.2s ease;
+        }
+
+        .input-area input:focus {
+            border-color: #007aff;
+        }
+
+        .input-area button {
+            padding: 12px 28px;
+            background-color: #007aff;
+            color: #ffffff;
+            border: none;
+            border-radius: 10px;
+            font-size: 15px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background-color 0.2s ease;
+        }
+
+        .input-area button:hover {
+            background-color: #0066d6;
+        }
+
+        .input-area button:disabled {
+            background-color: #b0b0b5;
+            cursor: not-allowed;
+        }
+    </style>
+</head>
+<body>
+    <header>
+        <h1>go-cli Web UI</h1>
+        <div class="status-indicator">
+            <span class="status-dot" id="statusDot"></span>
+            <span id="statusText">Disconnected</span>
+        </div>
+    </header>
+
+    <main>
+        <div class="message-list" id="messageList"></div>
+        <div class="input-area">
+            <input type="text" id="messageInput" placeholder="Type a message..." autocomplete="off">
+            <button id="sendButton" onclick="sendMessage()">Send</button>
+        </div>
+    </main>
+
+    <script>
+        var messageList = document.getElementById("messageList");
+        var messageInput = document.getElementById("messageInput");
+        var sendButton = document.getElementById("sendButton");
+        var statusDot = document.getElementById("statusDot");
+        var statusText = document.getElementById("statusText");
+
+        messageInput.addEventListener("keydown", function(e) {
+            if (e.key === "Enter") {
+                sendMessage();
+            }
+        });
+
+        function addMessage(text, sender) {
+            var msg = document.createElement("div");
+            msg.className = "message " + sender;
+            msg.textContent = text;
+            messageList.appendChild(msg);
+            messageList.scrollTop = messageList.scrollHeight;
+        }
+
+        function setStatus(state, text) {
+            statusDot.className = "status-dot " + state;
+            statusText.textContent = text;
+        }
+
+        function sendMessage() {
+            var message = messageInput.value.trim();
+            if (!message) {
+                return;
+            }
+
+            addMessage(message, "user");
+            messageInput.value = "";
+            sendButton.disabled = true;
+
+            fetch("/api/chat", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({ message: message })
+            })
+            .then(function(response) {
+                if (!response.ok) {
+                    throw new Error("HTTP " + response.status);
+                }
+                return response.json();
+            })
+            .then(function(data) {
+                addMessage(data.response, "bot");
+            })
+            .catch(function(err) {
+                addMessage("Error: " + err.message, "bot");
+            })
+            .finally(function() {
+                sendButton.disabled = false;
+                messageInput.focus();
+            });
+        }
+
+        function connectStream() {
+            setStatus("connecting", "Connecting...");
+
+            var es = new EventSource("/ws");
+
+            es.addEventListener("connected", function() {
+                setStatus("connected", "Connected");
+            });
+
+            es.onerror = function() {
+                setStatus("", "Disconnected");
+                es.close();
+                // Attempt to reconnect after 3 seconds.
+                setTimeout(connectStream, 3000);
+            };
+        }
+
+        connectStream();
+        messageInput.focus();
+    </script>
+</body>
+</html>
