@@ -387,3 +387,49 @@ func TestFindSubShells_BacktickAndDollarParen(t *testing.T) {
 func TestFindSubShells_NoSubShells(t *testing.T) {
 	assert.Empty(t, findSubShells("echo hello world"))
 }
+
+// --- Interpreter & network tool blacklist tests (task 46-1) ---
+
+func TestCommandFilter_Python3Blocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked("python3 -c 'import os; os.system(\"rm -rf /\")'"))
+}
+
+func TestCommandFilter_CurlBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked("curl http://example.com"))
+}
+
+func TestCommandFilter_NcBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked("nc example.com 4444"))
+}
+
+func TestCommandFilter_WgetBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked("wget http://example.com/file"))
+}
+
+func TestCommandFilter_PerlBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked("perl -e 'system(\"rm -rf /\")'"))
+}
+
+func TestCommandFilter_NodeBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked("node -e 'require(\"child_process\").execSync(\"rm -rf /\")'"))
+}
+
+func TestCommandFilter_RubyBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked("ruby -e 'system(\"rm -rf /\")'"))
+}
+
+// Ensure existing legitimate commands remain allowed after the expansion.
+func TestCommandFilter_LegitimateCommandsNotBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.False(t, f.IsBlocked("echo hello"))
+	assert.False(t, f.IsBlocked("ls -la"))
+	assert.False(t, f.IsBlocked("pwd"))
+	assert.False(t, f.IsBlocked("cat file.txt"))
+}
