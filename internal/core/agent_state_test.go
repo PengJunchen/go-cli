@@ -34,13 +34,18 @@ func TestAgentState_Transitions(t *testing.T) {
 }
 
 func TestAgentState_InvalidTransition(t *testing.T) {
-	// Stopped is terminal: no outgoing transitions.
-	err := assertTransition(StateStopped, StateRunning)
+	// Stopped cannot transition to Initialized or Created.
+	err := assertTransition(StateStopped, StateInitialized)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrInvalidTransition)
 
-	// Error is terminal: no outgoing transitions.
-	err = assertTransition(StateError, StateRunning)
+	// Error cannot transition to Initialized or Created.
+	err = assertTransition(StateError, StateCreated)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, ErrInvalidTransition)
+
+	// Created cannot jump directly to Running.
+	err = assertTransition(StateCreated, StateRunning)
 	require.Error(t, err)
 	assert.ErrorIs(t, err, ErrInvalidTransition)
 }
@@ -102,16 +107,16 @@ func TestCanTransition(t *testing.T) {
 		{"Paused->Created", StatePaused, StateCreated, false},
 		{"Paused->Paused", StatePaused, StatePaused, false},
 
-		// Stopped is terminal: no outgoing transitions.
-		{"Stopped->Running", StateStopped, StateRunning, false},
+		// Stopped can transition back to Running or Error for agent reuse.
+		{"Stopped->Running", StateStopped, StateRunning, true},
 		{"Stopped->Initialized", StateStopped, StateInitialized, false},
-		{"Stopped->Error", StateStopped, StateError, false},
+		{"Stopped->Error", StateStopped, StateError, true},
 		{"Stopped->Stopped", StateStopped, StateStopped, false},
 
-		// Error is terminal: no outgoing transitions.
-		{"Error->Running", StateError, StateRunning, false},
+		// Error can transition back to Running or Stopped for agent reuse.
+		{"Error->Running", StateError, StateRunning, true},
 		{"Error->Initialized", StateError, StateInitialized, false},
-		{"Error->Stopped", StateError, StateStopped, false},
+		{"Error->Stopped", StateError, StateStopped, true},
 		{"Error->Error", StateError, StateError, false},
 	}
 	for _, tt := range tests {

@@ -370,11 +370,14 @@ func effectiveCommand(s string) string {
 		if isVariableAssignment(f) {
 			continue
 		}
-		if commandPrefixes[f] {
+		// Use filepath.Base so that /usr/bin/sudo is reduced to "sudo".
+		base := filepath.Base(f)
+		// Skip known prefix/wrapper commands (checked by base name so
+		// that /usr/bin/sudo is recognized as "sudo").
+		if commandPrefixes[base] {
 			continue
 		}
-		// Use filepath.Base so that /usr/bin/rm is reduced to "rm".
-		return filepath.Base(f)
+		return base
 	}
 	return ""
 }
@@ -411,6 +414,8 @@ func (f CommandFilter) hasBlockedAssignment(seg string) bool {
 		}
 		idx := strings.Index(field, "=")
 		value := field[idx+1:]
+		// Strip surrounding quotes so that x="rm" and x='rm' are detected.
+		value = strings.Trim(value, "\"'")
 		value = filepath.Base(value)
 		if f.isBlacklisted(value) {
 			return true
