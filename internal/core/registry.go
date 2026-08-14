@@ -332,11 +332,16 @@ func (r *DefaultRegistry) RegisterModelProviderWithDisposer(n llm.ModelProvider)
 // DisposeAll calls all stored disposers in reverse registration order (LIFO)
 // and clears the internal slice. It is safe to call multiple times;
 // subsequent calls are no-ops.
+//
+// The disposers slice is copied and the lock is released before invoking
+// disposers, because each disposer calls replace() which acquires the same
+// mutex — Go's sync.Mutex is not reentrant.
 func (r *DefaultRegistry) DisposeAll() {
 	r.mu.Lock()
-	defer r.mu.Unlock()
-	for i := len(r.disposers) - 1; i >= 0; i-- {
-		r.disposers[i]()
-	}
+	disposers := r.disposers
 	r.disposers = nil
+	r.mu.Unlock()
+	for i := len(disposers) - 1; i >= 0; i-- {
+		disposers[i]()
+	}
 }

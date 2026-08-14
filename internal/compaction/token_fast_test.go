@@ -17,16 +17,16 @@ func TestFastTokenEstimator(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, 2, n, "11 ASCII chars / 4 = 2")
 
-	// CJK text: rune_count * 1.5.
+	// CJK text: cjk * 1.5 + non_cjk * 0.25 = 4 * 1.5 + 0 * 0.25 = 6.
 	n, err = est.Estimate("你好世界") // 4 CJK runes
 	require.NoError(t, err)
-	assert.Equal(t, 6, n, "round(4 runes * 1.5) = 6")
+	assert.Equal(t, 6, n, "round(4 CJK * 1.5 + 0 non-CJK * 0.25) = 6")
 
-	// Mixed text with enough CJK to trigger CJK formula.
+	// Mixed text with enough CJK to trigger weighted formula.
 	n, err = est.Estimate("你好abc") // 2 CJK + 3 ASCII = 5 runes, 9 bytes
 	require.NoError(t, err)
-	// cjk=2, runeCount=5, 2 > 5/3=1 -> CJK formula: round(5*1.5)=8
-	assert.Equal(t, 8, n, "round(5 runes * 1.5) = 8")
+	// cjk=2, runeCount=5, 2 > 5/3=1 -> weighted: round(2*1.5 + 3*0.25) = round(3.75) = 4
+	assert.Equal(t, 4, n, "round(2 CJK * 1.5 + 3 non-CJK * 0.25) = round(3.75) = 4")
 }
 
 func TestCompositeTokenEstimator_ShortText(t *testing.T) {

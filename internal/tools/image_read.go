@@ -159,14 +159,27 @@ func (t *ImageReadTool) Execute(ctx context.Context, call ToolCall) (*ToolResult
 }
 
 // isPathAllowed reports whether absPath is equal to or nested under one of the
-// allowed directories.
+// allowed directories. Symlinks are resolved on both the target path and the
+// allowed directories to prevent bypass via symlinks pointing to external
+// files.
 func (t *ImageReadTool) isPathAllowed(absPath string) bool {
-	cleaned := filepath.Clean(absPath)
+	// Resolve symlinks to prevent bypass via symlink to external files.
+	resolved, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return false
+	}
+	cleaned := filepath.Clean(resolved)
 	for _, dir := range t.allowedDirs {
-		if cleaned == dir {
+		resolvedDir, err := filepath.EvalSymlinks(dir)
+		if err != nil {
+			resolvedDir = filepath.Clean(dir)
+		} else {
+			resolvedDir = filepath.Clean(resolvedDir)
+		}
+		if cleaned == resolvedDir {
 			return true
 		}
-		if strings.HasPrefix(cleaned, dir+string(filepath.Separator)) {
+		if strings.HasPrefix(cleaned, resolvedDir+string(filepath.Separator)) {
 			return true
 		}
 	}

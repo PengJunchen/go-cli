@@ -81,7 +81,7 @@ func (s *WebServer) middleware(next http.Handler) http.Handler {
 		// Security headers.
 		w.Header().Set("X-Content-Type-Options", "nosniff")
 		w.Header().Set("X-Frame-Options", "DENY")
-		w.Header().Set("X-XSS-Protection", "1; mode=block")
+		w.Header().Set("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self'")
 		w.Header().Set("Referrer-Policy", "no-referrer")
 
 		// Authentication: skip for the index page so the UI can load,
