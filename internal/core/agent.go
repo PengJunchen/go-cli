@@ -41,6 +41,7 @@ type AgentImpl struct {
 	history        []AgentMessage
 	events         []AgentEvent
 	compactionHook CompactionHook
+	state          AgentState
 }
 
 var _ Agent = (*AgentImpl)(nil)
@@ -65,13 +66,39 @@ func NewAgentImpl(name string, loop AgentLoop, opts ...AgentOption) *AgentImpl {
 		loop:           loop,
 		history:        append([]AgentMessage{}, cfg.history...),
 		compactionHook: cfg.compactionHook,
+		state:          StateCreated,
 	}
+	// Advance the lifecycle from Created to Initialized now that the agent is
+	// fully constructed and ready to accept Run calls.
+	a.transitionState(StateInitialized)
 	slog.Info("core.agent.new", "name", name, "history", len(a.history))
 	return a
 }
 
 // Name returns the agent identifier.
 func (a *AgentImpl) Name() string { return a.name }
+
+// State returns the current lifecycle state of the agent. It is thread-safe.
+func (a *AgentImpl) State() AgentState {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.state
+}
+
+// transitionState validates and applies a state transition. It is advisory:
+// when the transition is invalid it logs a warning but still updates the
+// state, preserving backward compatibility with callers that drive the agent
+// through runs the state machine does not model.
+func (a *AgentImpl) transitionState(to AgentState) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	from := a.state
+	if err := assertTransition(from, to); err != nil {
+		slog.Warn("core.agent.invalid_state_transition",
+			"name", a.name, "from", from, "to", to, "err", err)
+	}
+	a.state = to
+}
 
 // Run appends the submission to the agent's history, executes the loop, records
 // the events it fired, and returns the final result. It is thread-safe. Success
@@ -81,6 +108,11 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...Ev
 	defer span.End()
 	logger := tracing.NewTraceLogger(span, nil)
 	logger.Info("core.agent.run", "name", a.name, "type", submission.Type, "content", submission.Content)
+
+	// Mark the agent as running before dispatching to the loop. The state
+	// machine is advisory: an invalid transition logs a warning but does not
+	// abort the run, preserving backward compatibility.
+	a.transitionState(StateRunning)
 
 	a.mu.Lock()
 	a.history = append(a.history, AgentMessage{Role: "user", Content: submission.Content})
@@ -133,6 +165,13 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...Ev
 	}
 
 	logger.Info("core.agent.done", "name", a.name, "events", len(evs), "success", err == nil)
+
+	// Advance the lifecycle to a terminal state based on the run outcome.
+	if err != nil {
+		a.transitionState(StateError)
+	} else {
+		a.transitionState(StateStopped)
+	}
 
 	finalMsg := ""
 	if lastAssistant != nil {

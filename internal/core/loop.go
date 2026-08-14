@@ -503,37 +503,59 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 		}
 
 		if l.executionMode == ExecutionModeParallel && len(resp.ToolCalls) > 1 {
-			// Parallel mode: emit all tool_call events, execute concurrently,
-			// then match results by ToolCallID (not positional index) so that
-			// out-of-order completion does not cause mismatched results.
+			// Parallel mode: emit pre-tool-call events, then execute
+			// non-cancelled tools concurrently, matching results by
+			// ToolCallID (not positional index) so that out-of-order
+			// completion does not cause mismatched results.
+			var activeCalls []llm.ToolCall
 			for _, tc := range resp.ToolCalls {
+				preEv := &PreToolCallEvent{
+					ToolName:   tc.Name,
+					ToolCallID: tc.ID,
+					Args:       toToolsCall(tc).Args,
+				}
+				sendEvent(AgentEvent{Kind: EventKindPreToolCall, Timestamp: time.Now(), PreToolCall: preEv})
+				if preEv.IsCancelled() {
+					logger.Info("core.loop.tool_cancelled", "tool", tc.Name, "id", tc.ID)
+					sendEvent(AgentEvent{Kind: "tool_cancelled", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID})
+					messages = append(messages, llm.Message{
+						Role:       llm.RoleTool,
+						ToolCallID: tc.ID,
+						Name:       tc.Name,
+						Content:    "Tool call cancelled by interceptor",
+					})
+					continue
+				}
+				activeCalls = append(activeCalls, tc)
 				sendEvent(AgentEvent{Kind: "tool_call", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID})
 				logger.Info("core.loop.tool_call", "iteration", iter, "tool", tc.Name, "mode", "parallel")
 			}
-			results, perr := executeToolsParallel(spanCtx, l.tools, resp.ToolCalls, es)
-			if perr == nil {
-				results, perr = matchToolResultsByID(resp.ToolCalls, results)
-			}
-			for _, res := range results {
-				if res.Err != nil {
-					logger.Warn("core.loop.tool_error", "tool", res.Name, "err", res.Err)
-					res.Output = "Error: " + res.Err.Error()
-					if spanCtx.Err() != nil {
-						span.SetStatus(tracing.SpanStatusError, res.Err.Error())
-						sendEvent(errEvent(res.Err))
-						return events, res.Err
-					}
+			if len(activeCalls) > 0 {
+				results, perr := executeToolsParallel(spanCtx, l.tools, activeCalls, es)
+				if perr == nil {
+					results, perr = matchToolResultsByID(activeCalls, results)
 				}
-				sendEvent(AgentEvent{Kind: "tool_result", Content: res.Output, Timestamp: time.Now(), IsError: res.IsError, ToolCallID: res.ID})
-				messages = append(messages, llm.Message{
-					Role:       llm.RoleTool,
-					ToolCallID: res.ID,
-					Name:       res.Name,
-					Content:    res.Output,
-				})
-			}
-			if perr != nil {
-				return events, perr
+				for _, res := range results {
+					if res.Err != nil {
+						logger.Warn("core.loop.tool_error", "tool", res.Name, "err", res.Err)
+						res.Output = "Error: " + res.Err.Error()
+						if spanCtx.Err() != nil {
+							span.SetStatus(tracing.SpanStatusError, res.Err.Error())
+							sendEvent(errEvent(res.Err))
+							return events, res.Err
+						}
+					}
+					sendEvent(AgentEvent{Kind: "tool_result", Content: res.Output, Timestamp: time.Now(), IsError: res.IsError, ToolCallID: res.ID})
+					messages = append(messages, llm.Message{
+						Role:       llm.RoleTool,
+						ToolCallID: res.ID,
+						Name:       res.Name,
+						Content:    res.Output,
+					})
+				}
+				if perr != nil {
+					return events, perr
+				}
 			}
 		} else {
 			// Sequential mode: execute one tool at a time.
@@ -543,6 +565,27 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 					sendEvent(errEvent(err))
 					return events, err
 				}
+
+				// Emit a pre-tool-call event so external interceptors
+				// can cancel the tool call before it executes.
+				preEv := &PreToolCallEvent{
+					ToolName:   tc.Name,
+					ToolCallID: tc.ID,
+					Args:       toToolsCall(tc).Args,
+				}
+				sendEvent(AgentEvent{Kind: EventKindPreToolCall, Timestamp: time.Now(), PreToolCall: preEv})
+				if preEv.IsCancelled() {
+					logger.Info("core.loop.tool_cancelled", "tool", tc.Name, "id", tc.ID)
+					sendEvent(AgentEvent{Kind: "tool_cancelled", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID})
+					messages = append(messages, llm.Message{
+						Role:       llm.RoleTool,
+						ToolCallID: tc.ID,
+						Name:       tc.Name,
+						Content:    "Tool call cancelled by interceptor",
+					})
+					continue
+				}
+
 				sendEvent(AgentEvent{Kind: "tool_call", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID})
 				logger.Info("core.loop.tool_call", "iteration", iter, "tool", tc.Name)
 

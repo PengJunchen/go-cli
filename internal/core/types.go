@@ -11,6 +11,13 @@ import (
 	"github.com/pengjunchen/go-cli/internal/llm"
 )
 
+// Event kind constants used by AgentEvent.Kind.
+const (
+	// EventKindPreToolCall marks an event emitted before each tool execution,
+	// allowing external interceptors to cancel the call via PreToolCall.Cancel.
+	EventKindPreToolCall = "pre_tool_call"
+)
+
 // AgentMessage is a single message exchanged within a conversation.
 type AgentMessage struct {
 	// Role identifies the speaker ("user", "assistant", "system", "tool").
@@ -81,6 +88,10 @@ type AgentEvent struct {
 	// detection. When true, consumers use this boolean instead of string
 	// matching on Content to determine whether the tool failed.
 	IsError bool `json:"is_error,omitempty"`
+	// PreToolCall carries a cancelable handle for "pre_tool_call" events.
+	// External interceptors call PreToolCall.Cancel() to prevent the
+	// tool from executing. It is nil for all other event kinds.
+	PreToolCall *PreToolCallEvent `json:"pre_tool_call,omitempty"`
 }
 
 // TokenUsage carries token consumption and cost data for a token_usage event.
