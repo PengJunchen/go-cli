@@ -154,6 +154,15 @@ type LoopAgent struct {
 	toolSearchThreshold int
 	pauseMu             sync.Mutex
 	pauseCh             chan struct{}
+
+	// toolDefsCache caches the LLM tool definitions so they are not
+	// rebuilt on every Run call. The cache is invalidated when the tool
+	// registry version changes. When the registry does not support
+	// versioning (Version() returns 0), the cache is always considered
+	// valid after the first build.
+	toolDefsCache   []llm.ToolDefinition
+	toolDefsVersion int
+	toolDefsMu      sync.RWMutex
 }
 
 var _ AgentLoop = (*LoopAgent)(nil)
@@ -246,6 +255,54 @@ func (l *LoopAgent) WithToolSearchThreshold(n int) *LoopAgent {
 	return l
 }
 
+// buildToolDefinitions returns the cached LLM tool definitions, rebuilding
+// them only when the tool registry version has changed. When the registry
+// does not support versioning (Version() returns 0), the cache is always
+// considered valid after the first build.
+func (l *LoopAgent) buildToolDefinitions(ctx context.Context) ([]llm.ToolDefinition, error) {
+	if l.tools == nil {
+		return nil, nil
+	}
+
+	version := 0
+	if v, ok := l.tools.(interface{ Version() int }); ok {
+		version = v.Version()
+	}
+
+	l.toolDefsMu.RLock()
+	cached := l.toolDefsCache
+	cachedVersion := l.toolDefsVersion
+	l.toolDefsMu.RUnlock()
+
+	if cached != nil && version == cachedVersion {
+		return cached, nil
+	}
+
+	defs, err := l.tools.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	llmTools := make([]llm.ToolDefinition, 0, len(defs))
+	for _, d := range defs {
+		td := llm.ToolDefinition{
+			Name:        d.Name(),
+			Description: d.Description(),
+		}
+		if p, ok := d.(tools.Parameterized); ok {
+			td.Parameters = p.Parameters()
+		}
+		llmTools = append(llmTools, td)
+	}
+
+	l.toolDefsMu.Lock()
+	l.toolDefsCache = llmTools
+	l.toolDefsVersion = version
+	l.toolDefsMu.Unlock()
+
+	return llmTools, nil
+}
+
 // SetMidTurnCompaction wires the mid-turn compaction guard post-construction.
 // This is used when the compactor components are created after NewLoopAgent
 // (e.g. in the assemble layer where the compactor factory runs later).
@@ -311,26 +368,16 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 	var searchTool *tools.ToolSearchTool
 	needToolFiltering := false
 	if l.tools != nil {
-		defs, listErr := l.tools.List(spanCtx)
+		llmTools, listErr := l.buildToolDefinitions(spanCtx)
 		if listErr != nil {
 			logger.Warn("core.loop.list_tools_failed", "err", listErr)
-		} else if len(defs) > 0 {
-			llmTools := make([]llm.ToolDefinition, 0, len(defs))
-			for _, d := range defs {
-				td := llm.ToolDefinition{
-					Name:        d.Name(),
-					Description: d.Description(),
-				}
-				if p, ok := d.(tools.Parameterized); ok {
-					td.Parameters = p.Parameters()
-				}
-				llmTools = append(llmTools, td)
-			}
+		} else if len(llmTools) > 0 {
 			toolOpts = append(toolOpts, llm.WithTools(llmTools))
 
 			// Dynamic tool filtering: when the tool count exceeds the
 			// threshold, score and filter to reduce context bloat.
-			if l.toolSearchThreshold > 0 && len(defs) > l.toolSearchThreshold {
+			if l.toolSearchThreshold > 0 && len(llmTools) > l.toolSearchThreshold {
+				defs, _ := l.tools.List(spanCtx)
 				for _, d := range defs {
 					if st, ok := d.(*tools.ToolSearchTool); ok {
 						searchTool = st

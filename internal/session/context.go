@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"sync"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/compaction"
@@ -29,6 +30,15 @@ type ContextManager interface {
 // entries.
 type DefaultContextManager struct {
 	tree SessionTree
+
+	// Cache for incremental token estimation. When the same leaf is queried
+	// again and the branch has only grown, only the delta (new entries) is
+	// estimated; the cached total is reused for the already-seen entries.
+	cacheMu        sync.Mutex
+	cachedLeafID   string
+	cachedStartIdx int
+	cachedTokens   int
+	cachedBranchLen int // total branch length when the cache was built
 }
 
 var _ ContextManager = (*DefaultContextManager)(nil)
@@ -80,12 +90,32 @@ func (m *DefaultContextManager) BuildContext(ctx context.Context, leafID string)
 	// Messages are ordered root to leaf, with Compaction entries folded into a
 	// single summary message.
 	messages := make([]SessionEntry, 0, len(branch)-startIdx)
+
+	// Check the incremental token-estimation cache. When the same leaf is
+	// queried again with the same compaction point and the branch has only
+	// grown, we reuse the cached token total for already-seen entries and
+	// only estimate the delta (new entries beyond cachedBranchLen).
+	m.cacheMu.Lock()
+	cacheValid := m.cachedLeafID == leafID &&
+		m.cachedStartIdx == startIdx &&
+		len(branch) >= m.cachedBranchLen
+	cachedTokens := m.cachedTokens
+	cachedBranchLen := m.cachedBranchLen
+	m.cacheMu.Unlock()
+
 	var estimatedTokens int
+	if cacheValid {
+		estimatedTokens = cachedTokens
+	}
 	var last time.Time
-	for _, e := range branch[startIdx:] {
+	for i := startIdx; i < len(branch); i++ {
+		e := branch[i]
 		if e.Timestamp.After(last) {
 			last = e.Timestamp
 		}
+		// Skip token estimation for entries already accounted for in the
+		// cached total; only estimate the delta (new entries).
+		estimateEntry := !cacheValid || i >= cachedBranchLen
 		if e.Type == EntryTypeCompaction {
 			messages = append(messages, SessionEntry{
 				ID:        e.ID,
@@ -94,15 +124,27 @@ func (m *DefaultContextManager) BuildContext(ctx context.Context, leafID string)
 				Content:   e.Summary,
 				Timestamp: e.Timestamp,
 			})
-			estimatedTokens += estimateTokens(e.Summary)
+			if estimateEntry {
+				estimatedTokens += estimateTokens(e.Summary)
+			}
 			continue
 		}
 		if !e.SurfaceVisible() {
 			continue
 		}
 		messages = append(messages, *e)
-		estimatedTokens += estimateTokensForEntry(*e)
+		if estimateEntry {
+			estimatedTokens += estimateTokensForEntry(*e)
+		}
 	}
+
+	// Update the cache for the next call.
+	m.cacheMu.Lock()
+	m.cachedLeafID = leafID
+	m.cachedStartIdx = startIdx
+	m.cachedTokens = estimatedTokens
+	m.cachedBranchLen = len(branch)
+	m.cacheMu.Unlock()
 
 	sc := &SessionContext{
 		LeafID:          leafID,
