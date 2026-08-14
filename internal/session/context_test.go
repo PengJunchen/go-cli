@@ -135,6 +135,91 @@ func TestContextManager_RebuildSpan(t *testing.T) {
 	exp.AssertSpanExists(t, "context.rebuild")
 }
 
+func TestContextManager_BuildContextExcludesHidden(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	tree := NewDefaultSessionTree()
+	require.NoError(t, tree.Append(context.Background(), newTestEntry("a", "", EntryTypeUser)))
+	// "b" is hidden and should be excluded from the model-visible messages.
+	hidden := &SessionEntry{
+		ID:        "b",
+		ParentID:  "a",
+		Type:      EntryTypeUser,
+		Content:   "hidden-content",
+		Timestamp: time.Date(2024, 5, 1, 12, 0, 'b', 0, time.UTC),
+		SurfaceOp: SurfaceOpHidden,
+	}
+	require.NoError(t, tree.Append(context.Background(), hidden))
+	require.NoError(t, tree.Append(context.Background(), newTestEntry("c", "b", EntryTypeAssistant)))
+
+	mg := NewDefaultContextManager(tree)
+	sc, err := mg.BuildContext(context.Background(), "c")
+	require.NoError(t, err)
+	require.NotNil(t, sc)
+
+	// "b" is hidden, so only "a" and "c" appear in Messages.
+	require.Len(t, sc.Messages, 2)
+	assert.Equal(t, "a", sc.Messages[0].ID)
+	assert.Equal(t, "c", sc.Messages[1].ID)
+
+	// Traversed still includes all raw entries (leaf to root): c -> b -> a.
+	require.Len(t, sc.Traversed, 3)
+	assert.Equal(t, "c", sc.Traversed[0].ID)
+	assert.Equal(t, "b", sc.Traversed[1].ID)
+	assert.Equal(t, "a", sc.Traversed[2].ID)
+}
+
+func TestContextManager_BuildContextConsistentWithDeriveMessages(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	tree := NewDefaultSessionTree()
+	require.NoError(t, tree.Append(context.Background(), newTestEntry("a", "", EntryTypeUser)))
+	require.NoError(t, tree.Append(context.Background(), newCompactionEntry("comp", "a", "summary of earlier")))
+	// Visible entry after compaction.
+	require.NoError(t, tree.Append(context.Background(), newTestEntry("b", "comp", EntryTypeAssistant)))
+	// Hidden entry after compaction — must be excluded from both paths.
+	hidden := &SessionEntry{
+		ID:        "c",
+		ParentID:  "b",
+		Type:      EntryTypeUser,
+		Content:   "hidden-content",
+		Timestamp: time.Date(2024, 5, 1, 12, 0, 'c', 0, time.UTC),
+		SurfaceOp: SurfaceOpHidden,
+	}
+	require.NoError(t, tree.Append(context.Background(), hidden))
+	// Another visible entry.
+	require.NoError(t, tree.Append(context.Background(), newTestEntry("d", "c", EntryTypeUser)))
+
+	mg := NewDefaultContextManager(tree)
+	sc, err := mg.BuildContext(context.Background(), "d")
+	require.NoError(t, err)
+
+	// Retrieve the same branch and convert to []SessionEntry for DeriveMessages.
+	branch, err := tree.GetBranch(context.Background(), "d")
+	require.NoError(t, err)
+	entries := make([]SessionEntry, len(branch))
+	for i, e := range branch {
+		entries[i] = *e
+	}
+	derived := DeriveMessages(entries)
+
+	// BuildContext.Messages must match DeriveMessages output exactly, proving
+	// the compaction-point logic and SurfaceVisible filtering are unified.
+	require.Len(t, sc.Messages, len(derived))
+	for i := range sc.Messages {
+		assert.Equal(t, derived[i], sc.Messages[i], "entry %d mismatch", i)
+	}
+
+	// Sanity: the compaction point is identified — first message is the folded
+	// compaction summary, and the hidden entry "c" is absent.
+	require.NotEmpty(t, sc.Messages)
+	assert.Equal(t, EntryTypeCompaction, sc.Messages[0].Type)
+	assert.Equal(t, "summary of earlier", sc.Messages[0].Content)
+	for _, m := range sc.Messages {
+		assert.NotEqual(t, "c", m.ID, "hidden entry should not appear in messages")
+	}
+}
+
 func TestTokenEstimateASCII(t *testing.T) {
 	// Pure ASCII alphanumerics: ~0.25 tokens per char.
 	assert.Equal(t, 2, estimateTokens("abcdefgh")) // 8 * 0.25 = 2
