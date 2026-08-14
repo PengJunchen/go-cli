@@ -102,8 +102,11 @@ func NewFastTokenEstimator() *FastTokenEstimator {
 
 // Estimate approximates the token count using simple length-based heuristics.
 // When the text is pure ASCII it returns len(text)/4. When the text contains
-// a significant proportion of CJK runes it returns rune_count*1.5. Otherwise
-// it falls back to len(text)/4. The error is always nil.
+// a significant proportion of CJK runes it uses a weighted formula that
+// splits CJK and non-CJK characters: CJK runes contribute ~1.5 tokens each
+// while non-CJK runes contribute ~0.25 tokens each (≈4 chars per token).
+// This avoids the ~50% underestimation that a naive len/4 produces for
+// mixed Chinese-English text. The error is always nil.
 func (e *FastTokenEstimator) Estimate(text string) (int, error) {
 	runeCount := utf8.RuneCountInString(text)
 	// Pure-ASCII fast path: no rune iteration needed.
@@ -121,11 +124,16 @@ func (e *FastTokenEstimator) Estimate(text string) (int, error) {
 	}
 	var n int
 	if cjk > runeCount/3 {
-		n = int(math.Round(float64(runeCount) * 1.5))
+		// CJK-heavy text: weight CJK runes at 1.5 tokens and non-CJK
+		// runes at 0.25 tokens (≈4 chars/token for ASCII).
+		nonCJK := runeCount - cjk
+		n = int(math.Round(float64(cjk)*1.5 + float64(nonCJK)*0.25))
 	} else {
+		// Mixed or mostly-ASCII text with some multi-byte chars:
+		// use byte-length/4 as a reasonable approximation.
 		n = len(text) / 4
 	}
-	slog.Debug("compaction.estimate", "chars", runeCount, "estimated_tokens", n, "estimator", "fast")
+	slog.Debug("compaction.estimate", "chars", runeCount, "cjk", cjk, "estimated_tokens", n, "estimator", "fast")
 	return n, nil
 }
 

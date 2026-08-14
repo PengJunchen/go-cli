@@ -29,7 +29,11 @@ func DefaultAPIKeyPatterns() []string {
 		// than OpenAI's "sk-" prefix, so it must appear first.
 		`sk-ant-[a-zA-Z0-9_-]{20,}`,
 
-		// OpenAI API key.
+		// OpenAI project API key. The "sk-proj-" prefix is more specific
+		// than the general "sk-" prefix, so it must appear before it.
+		`sk-proj-[a-zA-Z0-9_-]{20,}`,
+
+		// OpenAI API key (legacy and current formats).
 		`sk-[a-zA-Z0-9]{20,}`,
 
 		// Google/Gemini API key. The "AIza" prefix is followed by exactly

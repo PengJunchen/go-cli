@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"crypto/subtle"
 	"embed"
 	"encoding/json"
 	"fmt"
@@ -16,6 +17,13 @@ import (
 //go:embed index.html
 var indexHTML embed.FS
 
+// maxChatBodySize limits the JSON request body for /api/chat to 1 MiB.
+const maxChatBodySize = 1 << 20
+
+// maxSSEConnections limits the number of concurrent SSE connections to
+// prevent resource exhaustion.
+const maxSSEConnections = 64
+
 // WebServer is a self-contained HTTP server that provides a browser-based
 // Web UI for interacting with the go-cli. It exposes a simple chat interface
 // backed by JSON HTTP endpoints and an SSE streaming placeholder.
@@ -23,26 +31,81 @@ var indexHTML embed.FS
 // The server has no dependency on the CLI assembly; chat responses are
 // placeholder echoes. Real CLI integration will be wired later.
 type WebServer struct {
-	addr    string
-	handler http.Handler
+	addr     string
+	authToken string
+	handler  http.Handler
 
-	mu     sync.Mutex
-	server *http.Server
-	ln     net.Listener
+	mu           sync.Mutex
+	server       *http.Server
+	ln           net.Listener
+	sseSem       chan struct{} // concurrency limiter for SSE
+}
+
+// WebServerOption configures a WebServer.
+type WebServerOption func(*WebServer)
+
+// WithAuthToken sets a bearer token that clients must supply in the
+// Authorization header. When set, all API endpoints require
+// "Authorization: Bearer <token>". When empty (the default), no
+// authentication is enforced.
+func WithAuthToken(token string) WebServerOption {
+	return func(s *WebServer) { s.authToken = token }
 }
 
 // NewWebServer creates a WebServer listening on addr.
-func NewWebServer(addr string) *WebServer {
-	mux := http.NewServeMux()
-	mux.HandleFunc("/", handleIndex)
-	mux.HandleFunc("/api/health", handleHealth)
-	mux.HandleFunc("/api/chat", handleChat)
-	mux.HandleFunc("/ws", handleWS)
-
-	return &WebServer{
-		addr:    addr,
-		handler: mux,
+func NewWebServer(addr string, opts ...WebServerOption) *WebServer {
+	s := &WebServer{
+		addr:   addr,
+		sseSem: make(chan struct{}, maxSSEConnections),
 	}
+	for _, opt := range opts {
+		opt(s)
+	}
+
+	mux := http.NewServeMux()
+	mux.HandleFunc("/", s.handleIndex)
+	mux.HandleFunc("/api/health", s.handleHealth)
+	mux.HandleFunc("/api/chat", s.handleChat)
+	mux.HandleFunc("/ws", s.handleWS)
+
+	// Wrap with security-headers + auth middleware.
+	s.handler = s.middleware(mux)
+
+	return s
+}
+
+// middleware wraps the given handler with security headers and optional
+// bearer-token authentication.
+func (s *WebServer) middleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Security headers.
+		w.Header().Set("X-Content-Type-Options", "nosniff")
+		w.Header().Set("X-Frame-Options", "DENY")
+		w.Header().Set("X-XSS-Protection", "1; mode=block")
+		w.Header().Set("Referrer-Policy", "no-referrer")
+
+		// Authentication: skip for the index page so the UI can load,
+		// but enforce on all API endpoints.
+		if s.authToken != "" && r.URL.Path != "/" {
+			if !s.checkAuth(r) {
+				http.Error(w, "unauthorized", http.StatusUnauthorized)
+				return
+			}
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// checkAuth verifies the Authorization header against the configured token
+// using constant-time comparison.
+func (s *WebServer) checkAuth(r *http.Request) bool {
+	auth := r.Header.Get("Authorization")
+	const prefix = "Bearer "
+	if len(auth) <= len(prefix) || auth[:len(prefix)] != prefix {
+		return false
+	}
+	token := auth[len(prefix):]
+	return subtle.ConstantTimeCompare([]byte(token), []byte(s.authToken)) == 1
 }
 
 // Start binds the listener synchronously so that bind errors (e.g. port in
@@ -107,7 +170,7 @@ func (s *WebServer) Addr() string {
 }
 
 // handleIndex serves the embedded index.html at the root path.
-func handleIndex(w http.ResponseWriter, r *http.Request) {
+func (s *WebServer) handleIndex(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -126,7 +189,7 @@ func handleIndex(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleHealth returns a simple health check response.
-func handleHealth(w http.ResponseWriter, r *http.Request) {
+func (s *WebServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
@@ -148,15 +211,18 @@ type chatResponse struct {
 
 // handleChat accepts a chat message and returns a placeholder response.
 // The actual CLI integration will be wired later.
-func handleChat(w http.ResponseWriter, r *http.Request) {
+func (s *WebServer) handleChat(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
+	// Limit request body size to prevent memory exhaustion.
+	r.Body = http.MaxBytesReader(w, r.Body, maxChatBodySize)
+
 	var req chatRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		http.Error(w, "invalid JSON body", http.StatusBadRequest)
 		return
 	}
 
@@ -171,10 +237,20 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 
 // handleWS is an SSE streaming placeholder. It echoes back a welcome event
 // and keeps the connection alive with periodic comments. Real streaming
-// integration will be wired later.
-func handleWS(w http.ResponseWriter, r *http.Request) {
+// integration will be wired later. Concurrent connections are limited by
+// maxSSEConnections to prevent resource exhaustion.
+func (s *WebServer) handleWS(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	// Acquire a semaphore slot; reject when at capacity.
+	select {
+	case s.sseSem <- struct{}{}:
+		defer func() { <-s.sseSem }()
+	default:
+		http.Error(w, "too many concurrent connections", http.StatusServiceUnavailable)
 		return
 	}
 

@@ -89,8 +89,11 @@ func ValidateURL(rawURL string) error {
 	}
 
 	// Resolve the hostname and reject if any resolved address is private.
-	// This catches hostnames that point at internal infrastructure.
-	ips, err := net.DefaultResolver.LookupIPAddr(context.Background(), hostname)
+	// This catches hostnames that point at internal infrastructure. A 5s
+	// timeout prevents hanging on unresponsive DNS servers.
+	resolveCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	ips, err := net.DefaultResolver.LookupIPAddr(resolveCtx, hostname)
 	if err != nil {
 		return fmt.Errorf("%w: cannot resolve %s: %v", ErrBlockedHost, hostname, err)
 	}

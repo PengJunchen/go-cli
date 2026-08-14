@@ -70,7 +70,9 @@ func NewAgentImpl(name string, loop AgentLoop, opts ...AgentOption) *AgentImpl {
 	}
 	// Advance the lifecycle from Created to Initialized now that the agent is
 	// fully constructed and ready to accept Run calls.
-	a.transitionState(StateInitialized)
+	if err := a.transitionState(StateInitialized); err != nil {
+		slog.Error("core.agent.init_transition_failed", "name", name, "err", err)
+	}
 	slog.Info("core.agent.new", "name", name, "history", len(a.history))
 	return a
 }
@@ -85,19 +87,20 @@ func (a *AgentImpl) State() AgentState {
 	return a.state
 }
 
-// transitionState validates and applies a state transition. It is advisory:
-// when the transition is invalid it logs a warning but still updates the
-// state, preserving backward compatibility with callers that drive the agent
-// through runs the state machine does not model.
-func (a *AgentImpl) transitionState(to AgentState) {
+// transitionState validates and applies a state transition. When the
+// transition is invalid it logs a warning and returns ErrInvalidTransition
+// without updating the state, enforcing the lifecycle contract.
+func (a *AgentImpl) transitionState(to AgentState) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	from := a.state
 	if err := assertTransition(from, to); err != nil {
 		slog.Warn("core.agent.invalid_state_transition",
 			"name", a.name, "from", from, "to", to, "err", err)
+		return err
 	}
 	a.state = to
+	return nil
 }
 
 // Run appends the submission to the agent's history, executes the loop, records
@@ -109,10 +112,13 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...Ev
 	logger := tracing.NewTraceLogger(span, nil)
 	logger.Info("core.agent.run", "name", a.name, "type", submission.Type, "content", submission.Content)
 
-	// Mark the agent as running before dispatching to the loop. The state
-	// machine is advisory: an invalid transition logs a warning but does not
-	// abort the run, preserving backward compatibility.
-	a.transitionState(StateRunning)
+	// Mark the agent as running before dispatching to the loop. If the
+	// state transition is rejected (e.g. the agent is in an incompatible
+	// state), log the error but proceed — the state machine is best-effort
+	// and must not block execution.
+	if err := a.transitionState(StateRunning); err != nil {
+		slog.Warn("core.agent.run_state_transition_failed", "name", a.name, "err", err)
+	}
 
 	a.mu.Lock()
 	a.history = append(a.history, AgentMessage{Role: "user", Content: submission.Content})
@@ -168,9 +174,13 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...Ev
 
 	// Advance the lifecycle to a terminal state based on the run outcome.
 	if err != nil {
-		a.transitionState(StateError)
+		if terr := a.transitionState(StateError); terr != nil {
+			slog.Warn("core.agent.error_state_transition_failed", "name", a.name, "err", terr)
+		}
 	} else {
-		a.transitionState(StateStopped)
+		if terr := a.transitionState(StateStopped); terr != nil {
+			slog.Warn("core.agent.stop_state_transition_failed", "name", a.name, "err", terr)
+		}
 	}
 
 	finalMsg := ""

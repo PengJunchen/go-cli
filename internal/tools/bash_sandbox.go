@@ -109,6 +109,10 @@ func (f CommandFilter) hasBlocked(s string) bool {
 	// then split on operators and check each segment.
 	stripped := stripSubShells(s)
 	for _, seg := range splitCommands(stripped) {
+		// Check variable assignments for blacklisted values (e.g. x=rm).
+		if f.hasBlockedAssignment(seg) {
+			return true
+		}
 		name := effectiveCommand(seg)
 		if name == "" {
 			continue
@@ -355,14 +359,62 @@ func firstToken(s string) string {
 // effectiveCommand returns the effective command name from a segment, skipping
 // known prefix/wrapper commands like sudo, doas, env, etc. This prevents
 // blacklist bypass via "sudo rm" where the first token "sudo" is not
-// blacklisted but the actual command "rm" is.
+// blacklisted but the actual command "rm" is. It also applies filepath.Base
+// to the command token so that path-prefixed invocations like "/usr/bin/rm"
+// are reduced to "rm" before the blacklist check.
 func effectiveCommand(s string) string {
 	fields := strings.Fields(s)
 	for _, f := range fields {
+		// Skip variable assignments (e.g. FOO=bar). The assigned value is
+		// checked separately by hasBlockedAssignment.
+		if isVariableAssignment(f) {
+			continue
+		}
 		if commandPrefixes[f] {
 			continue
 		}
-		return f
+		// Use filepath.Base so that /usr/bin/rm is reduced to "rm".
+		return filepath.Base(f)
 	}
 	return ""
+}
+
+// isVariableAssignment reports whether token looks like a shell variable
+// assignment (NAME=value). A leading name must consist of alphanumeric
+// characters and underscores, starting with a letter or underscore.
+func isVariableAssignment(token string) bool {
+	idx := strings.Index(token, "=")
+	if idx <= 0 {
+		return false
+	}
+	name := token[:idx]
+	for i, r := range name {
+		if i == 0 && !(r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')) {
+			return false
+		}
+		if !(r == '_' || (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')) {
+			return false
+		}
+	}
+	return true
+}
+
+// hasBlockedAssignment checks whether any variable assignment in the segment
+// has a blacklisted command as its value. This prevents bypasses like
+// "x=rm; $x file" where a blacklisted command is assigned to a variable and
+// then invoked indirectly.
+func (f CommandFilter) hasBlockedAssignment(seg string) bool {
+	fields := strings.Fields(seg)
+	for _, field := range fields {
+		if !isVariableAssignment(field) {
+			continue
+		}
+		idx := strings.Index(field, "=")
+		value := field[idx+1:]
+		value = filepath.Base(value)
+		if f.isBlacklisted(value) {
+			return true
+		}
+	}
+	return false
 }
