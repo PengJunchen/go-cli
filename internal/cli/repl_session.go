@@ -48,8 +48,10 @@ type REPLSession struct {
 	noSandboxFlag bool
 
 	// Agent assembly
-	assembly   *AgentAssembly
-	approvalCh chan tui.ApprovalRequest
+	assembly        *AgentAssembly
+	approvalCh      chan tui.ApprovalRequest
+	memoryCtx       context.Context
+	memoryCtxCancel context.CancelFunc
 
 	// Slash command
 	slashCtx slashContext
@@ -778,11 +780,16 @@ func (s *REPLSession) persistSession() {
 // cross-session context continuity.
 func (s *REPLSession) extractMemory() {
 	// Asynchronously extract memories from the conversation for
-	// cross-session context continuity. Uses a detached context
-	// so it survives turn cancellation. Errors are logged only
-	// and do not block the main interaction loop.
+	// cross-session context continuity. Uses a stored cancellable context
+	// (derived from context.Background so it survives turn cancellation)
+	// that Cleanup can cancel to promptly release goroutines. Errors are
+	// logged only and do not block the main interaction loop.
 	if s.assembly.MemoryExtractor == nil || s.assembly.MemoryStore == nil {
 		return
+	}
+	// Lazily initialise the cancellable memory context on first use.
+	if s.memoryCtxCancel == nil {
+		s.memoryCtx, s.memoryCtxCancel = context.WithCancel(context.Background())
 	}
 	agentMsgs := s.assembly.Agent.Messages()
 	msgs := make([]llm.Message, 0, len(agentMsgs))
@@ -794,10 +801,11 @@ func (s *REPLSession) extractMemory() {
 	}
 	memStore := s.assembly.MemoryStore
 	extractor := s.assembly.MemoryExtractor
+	memCtx := s.memoryCtx
 	s.assembly.MemoryWG.Add(1)
 	go func() {
 		defer s.assembly.MemoryWG.Done()
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(memCtx, 30*time.Second)
 		defer cancel()
 		extracted, err := extractor.Extract(ctx, msgs)
 		if err != nil {
@@ -815,6 +823,18 @@ func (s *REPLSession) extractMemory() {
 // cleanup saves the line editor history, stops the editor, and prints the
 // session-ended message.
 func (s *REPLSession) cleanup() {
+	// Wait for in-flight memory extraction goroutines to finish before
+	// closing shared resources (MemoryStore, etc.). This ensures the
+	// extraction completes and writes memories before the store is closed.
+	// After the wait, cancel the memory context to release any remaining
+	// resources held by the context (no-op if extraction already finished).
+	if s.assembly != nil && s.assembly.MemoryWG != nil {
+		s.assembly.MemoryWG.Wait()
+	}
+	if s.memoryCtxCancel != nil {
+		s.memoryCtxCancel()
+	}
+
 	// Save history on exit (covers EOF, /exit, and exit text paths).
 	if dle, ok := s.lineEditor.(*DefaultLineEditor); ok {
 		if hs := dle.HistoryStore(); hs != nil {

@@ -3,8 +3,8 @@ package compaction
 import (
 	"log/slog"
 	"math"
-	"sync"
 	"unicode"
+	"unicode/utf8"
 )
 
 // TokenEstimator estimates the token count of a piece of text. Estimators let
@@ -85,40 +85,83 @@ func (e *UnicodeTokenEstimator) Estimate(text string) (int, error) {
 	return n, nil
 }
 
-// CompositeTokenEstimator wraps a primary estimator and optionally a precise
-// tokenizer. When a precise tokenizer is available, it is used; otherwise
-// the primary (heuristic) estimator is used.
+// FastTokenEstimator provides a fast token estimate using simple heuristics
+// instead of a per-character category scan. For ASCII-heavy text it uses
+// len(text)/4 (roughly 4 characters per token). For CJK-heavy text it uses
+// rune_count*1.5 (each CJK character is roughly 1-2 tokens). Pure-ASCII input
+// skips the rune scan entirely via utf8.RuneCountInString.
+type FastTokenEstimator struct{}
+
+// Compile-time assertion that FastTokenEstimator satisfies TokenEstimator.
+var _ TokenEstimator = (*FastTokenEstimator)(nil)
+
+// NewFastTokenEstimator returns a default-configured fast estimator.
+func NewFastTokenEstimator() *FastTokenEstimator {
+	return &FastTokenEstimator{}
+}
+
+// Estimate approximates the token count using simple length-based heuristics.
+// When the text is pure ASCII it returns len(text)/4. When the text contains
+// a significant proportion of CJK runes it returns rune_count*1.5. Otherwise
+// it falls back to len(text)/4. The error is always nil.
+func (e *FastTokenEstimator) Estimate(text string) (int, error) {
+	runeCount := utf8.RuneCountInString(text)
+	// Pure-ASCII fast path: no rune iteration needed.
+	if len(text) == runeCount {
+		n := len(text) / 4
+		slog.Debug("compaction.estimate", "chars", runeCount, "estimated_tokens", n, "estimator", "fast")
+		return n, nil
+	}
+	// Multi-byte text: count CJK runes to decide the formula.
+	cjk := 0
+	for _, r := range text {
+		if isCJK(r) {
+			cjk++
+		}
+	}
+	var n int
+	if cjk > runeCount/3 {
+		n = int(math.Round(float64(runeCount) * 1.5))
+	} else {
+		n = len(text) / 4
+	}
+	slog.Debug("compaction.estimate", "chars", runeCount, "estimated_tokens", n, "estimator", "fast")
+	return n, nil
+}
+
+// CompositeTokenEstimator combines a fast estimator with a precise one. For
+// texts shorter than threshold characters it uses the precise
+// UnicodeTokenEstimator; for longer texts it falls back to the
+// FastTokenEstimator to avoid the expensive per-character scan.
 type CompositeTokenEstimator struct {
-	mu      sync.RWMutex
-	primary TokenEstimator
-	precise TokenEstimator // optional, nil means use primary
+	fast      *FastTokenEstimator
+	precise   *UnicodeTokenEstimator
+	threshold int
 }
 
 // Compile-time assertion that CompositeTokenEstimator satisfies TokenEstimator.
 var _ TokenEstimator = (*CompositeTokenEstimator)(nil)
 
-// NewCompositeTokenEstimator returns a composite estimator that delegates to
-// primary when no precise tokenizer has been configured.
-func NewCompositeTokenEstimator(primary TokenEstimator) *CompositeTokenEstimator {
-	return &CompositeTokenEstimator{primary: primary}
-}
-
-// SetPrecise installs a precise tokenizer that, when set, takes precedence
-// over the primary heuristic estimator.
-func (e *CompositeTokenEstimator) SetPrecise(p TokenEstimator) {
-	e.mu.Lock()
-	e.precise = p
-	e.mu.Unlock()
-}
-
-// Estimate delegates to the precise tokenizer when available, otherwise to
-// the primary estimator.
-func (e *CompositeTokenEstimator) Estimate(text string) (int, error) {
-	e.mu.RLock()
-	precise := e.precise
-	e.mu.RUnlock()
-	if precise != nil {
-		return precise.Estimate(text)
+// NewCompositeTokenEstimator returns a composite estimator that uses the
+// precise UnicodeTokenEstimator for texts shorter than threshold characters
+// and the FastTokenEstimator for longer texts. A threshold of zero or less
+// defaults to 10000.
+func NewCompositeTokenEstimator(threshold int) *CompositeTokenEstimator {
+	if threshold <= 0 {
+		threshold = 10000
 	}
-	return e.primary.Estimate(text)
+	return &CompositeTokenEstimator{
+		fast:      NewFastTokenEstimator(),
+		precise:   NewUnicodeTokenEstimator(),
+		threshold: threshold,
+	}
+}
+
+// Estimate delegates to the precise estimator for short texts and to the fast
+// estimator for texts at or above the threshold.
+func (e *CompositeTokenEstimator) Estimate(text string) (int, error) {
+	if len(text) < e.threshold {
+		return e.precise.Estimate(text)
+	}
+	return e.fast.Estimate(text)
 }

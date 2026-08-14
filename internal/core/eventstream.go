@@ -5,10 +5,15 @@ import (
 	"log/slog"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // errNoResult reports that an EventStream has not yet received a result.
 var errNoResult = errors.New("core: no result recorded on event stream")
+
+// ErrSendTimeout reports that a Send on an EventStream using the
+// BlockUntilConsumed policy timed out waiting for a consumer.
+var ErrSendTimeout = errors.New("core: event stream send timed out")
 
 // EventStream is the asynchronous stream through which an agent emits events.
 // It supports back-pressure-aware sending and closes when the run completes.
@@ -38,9 +43,10 @@ type EventStreamImpl struct {
 	result    AgentMessage
 	hasRes    bool
 	err       error
-	sentCount int
-	discard   DiscardPolicy
-	bus       EventBus
+	sentCount    int
+	discard      DiscardPolicy
+	blockTimeout time.Duration
+	bus          EventBus
 }
 
 var _ EventStream = (*EventStreamImpl)(nil)
@@ -61,6 +67,14 @@ func WithEventDiscardPolicy(p DiscardPolicy) EventStreamOption {
 // nil-safe: when bus is nil, no dual-write occurs.
 func WithEventBus(bus EventBus) EventStreamOption {
 	return func(s *EventStreamImpl) { s.bus = bus }
+}
+
+// WithEventBlockTimeout sets the maximum duration a Send blocks under the
+// BlockUntilConsumed policy before returning ErrSendTimeout. When d <= 0
+// (the default) Send blocks forever, preserving backward-compatible
+// behaviour.
+func WithEventBlockTimeout(d time.Duration) EventStreamOption {
+	return func(s *EventStreamImpl) { s.blockTimeout = d }
 }
 
 // NewEventStream creates an EventStreamImpl with the given buffer capacity.
@@ -150,6 +164,21 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 		}
 
 	default: // BlockUntilConsumed
+		if s.blockTimeout > 0 {
+			select {
+			case <-s.done:
+				return nil
+			case s.events <- event:
+				s.mu.Lock()
+				s.sentCount++
+				s.mu.Unlock()
+				s.publishToBus(event)
+				slog.Debug("core.eventstream.send", "kind", event.Kind, "policy", "block")
+				return nil
+			case <-time.After(s.blockTimeout):
+				return ErrSendTimeout
+			}
+		}
 		select {
 		case <-s.done:
 			return nil
