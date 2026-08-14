@@ -12,11 +12,26 @@ import (
 // defaultCommandBlacklist lists commands that are too destructive to allow
 // inside a sandboxed bash tool. It also blocks commands that can be used to
 // bypass the sandbox by spawning a new shell or evaluating arbitrary input.
+//
+// The list is organized into three categories:
+//  1. Destructive commands that can damage the system or user data.
+//  2. Shell escape / eval commands that bypass the sandbox by spawning a new
+//     shell or evaluating arbitrary input.
+//  3. Script interpreters (python, perl, ruby, etc.) that can execute arbitrary
+//     code and thereby bypass the command blacklist. Network tools (curl, wget,
+//     nc, etc.) are also blocked to prevent data exfiltration and unauthorized
+//     outbound connections from within the sandbox.
 var defaultCommandBlacklist = []string{
+	// Destructive commands.
 	"rm", "rmdir", "dd", "mkfs", "fdisk",
 	"shutdown", "reboot", "halt", "poweroff",
 	"kill", "killall", "pkill",
+	// Shell escape / eval commands.
 	"eval", "bash", "sh", "source", "exec",
+	// Script interpreters: can execute arbitrary code, bypassing the blacklist.
+	"python", "python3", "perl", "ruby", "node", "php", "lua",
+	// Network tools: can exfiltrate data or open unauthorized connections.
+	"curl", "wget", "nc", "ncat", "telnet", "scp", "rsync",
 }
 
 // commandPrefixes lists commands that prefix another command and would bypass
