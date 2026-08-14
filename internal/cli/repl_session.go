@@ -220,7 +220,6 @@ func (s *REPLSession) setupAgent(ctx context.Context) error {
 		assembleOpts...)
 	if err != nil {
 		s.span.SetStatus(tracing.SpanStatusError, err.Error())
-		s.span.SetStatus(tracing.SpanStatusOK, "")
 		s.span.End()
 		return newExecutionError("interactive: assemble agent", err)
 	}
