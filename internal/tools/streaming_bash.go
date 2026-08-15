@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -114,7 +113,7 @@ func (t *StreamingBashToolImpl) ExecuteStreaming(ctx context.Context, call ToolC
 
 	cmd := exec.CommandContext(execCtx, "bash", "-lc", command)
 	cmd.Dir = t.Workdir
-	cmd.Env = append(os.Environ(), envSlice(t.Env)...)
+	cmd.Env = filteredEnv(t.Env)
 
 	stdoutPipe, err := cmd.StdoutPipe()
 	if err != nil {

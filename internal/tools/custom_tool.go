@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"os"
 	"os/exec"
 	"time"
 
@@ -119,7 +118,7 @@ func (t *CustomCommandTool) Execute(ctx context.Context, call ToolCall) (*ToolRe
 	if t.workingDir != "" {
 		cmd.Dir = t.workingDir
 	}
-	cmd.Env = append(os.Environ(), envSlice(t.env)...)
+	cmd.Env = filteredEnv(t.env)
 
 	var buf bytes.Buffer
 	limited := &limitedWriter{max: t.maxOutput, buf: &buf}

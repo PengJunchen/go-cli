@@ -193,7 +193,7 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 
 	cmd := exec.CommandContext(execCtx, "bash", "-lc", command)
 	cmd.Dir = t.Workdir
-	cmd.Env = append(os.Environ(), envSlice(t.Env)...)
+	cmd.Env = filteredEnv(t.Env)
 
 	var buf bytes.Buffer
 	// Bound the amount of data buffered so hostile or noisy output cannot
@@ -259,6 +259,40 @@ func envSlice(env map[string]string) []string {
 		out = append(out, k+"="+v)
 	}
 	return out
+}
+
+// envWhitelist is the set of environment variables inherited from the parent
+// process when spawning subprocesses. Variables not in this list — including
+// any matching *_API_KEY, *_TOKEN, or *_SECRET — are dropped to prevent
+// accidental secret leakage to child processes (AC-1).
+var envWhitelist = map[string]bool{
+	"PATH":     true,
+	"HOME":     true,
+	"USER":     true,
+	"SHELL":    true,
+	"LANG":     true,
+	"LC_ALL":   true,
+	"LC_CTYPE": true,
+	"TERM":     true,
+}
+
+// filteredEnv builds the environment slice for a subprocess by inheriting
+// only whitelisted variables from os.Environ() and appending the tool's
+// extra environment. This prevents secrets such as *_API_KEY, *_TOKEN, and
+// *_SECRET from leaking into child processes (AC-1).
+func filteredEnv(extra map[string]string) []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		key, _, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		if envWhitelist[key] {
+			env = append(env, kv)
+		}
+	}
+	env = append(env, envSlice(extra)...)
+	return env
 }
 
 // fastCommands are read-only or quick commands that get the fast timeout tier.
