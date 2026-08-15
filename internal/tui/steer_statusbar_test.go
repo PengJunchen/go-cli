@@ -6,6 +6,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
@@ -389,4 +390,90 @@ func TestRenderViewWithSteerPrompt(t *testing.T) {
 	view := app.View()
 	assert.Contains(t, view, "> steer> ")
 	assert.Contains(t, view, "hello")
+}
+
+// TestSteerInputChineseBackspace verifies that Backspace on Chinese characters
+// deletes a complete rune instead of slicing a multi-byte sequence in half.
+func TestSteerInputChineseBackspace(t *testing.T) {
+	m := NewBubbleteaApp(make(chan AgentEvent, 1)).model
+	m.interactive = false
+
+	updateKey(m, keyMsg(tea.KeyTab))
+	for _, ch := range "你好世界" {
+		updateKey(m, runeKey(ch))
+	}
+	assert.Equal(t, "你好世界", m.steerInput)
+	assert.Equal(t, 12, m.steerCursor) // 4 CJK chars × 3 bytes each
+
+	// Backspace should delete "界" (one full rune).
+	updateKey(m, keyMsg(tea.KeyBackspace))
+	assert.True(t, utf8.ValidString(m.steerInput), "steerInput must remain valid UTF-8 after backspace")
+	assert.Equal(t, "你好世", m.steerInput)
+	assert.Equal(t, 9, m.steerCursor)
+
+	// Another backspace deletes "世".
+	updateKey(m, keyMsg(tea.KeyBackspace))
+	assert.True(t, utf8.ValidString(m.steerInput))
+	assert.Equal(t, "你好", m.steerInput)
+	assert.Equal(t, 6, m.steerCursor)
+}
+
+// TestSteerInputChineseCtrlW verifies that Ctrl+W traverses by rune and does
+// not split a multi-byte CJK character.
+func TestSteerInputChineseCtrlW(t *testing.T) {
+	m := NewBubbleteaApp(make(chan AgentEvent, 1)).model
+	m.interactive = false
+
+	updateKey(m, keyMsg(tea.KeyTab))
+	for _, ch := range "你好 世界" {
+		updateKey(m, runeKey(ch))
+	}
+	assert.Equal(t, "你好 世界", m.steerInput)
+
+	// Ctrl+W should delete "世界" (two CJK runes), leaving "你好 ".
+	updateKey(m, keyMsg(tea.KeyCtrlW))
+	assert.True(t, utf8.ValidString(m.steerInput), "steerInput must remain valid UTF-8 after Ctrl+W")
+	assert.Equal(t, "你好 ", m.steerInput)
+	assert.Equal(t, 7, m.steerCursor) // 2 CJK (6 bytes) + 1 space
+}
+
+// TestFollowUpInputChineseBackspace verifies that Backspace on Chinese
+// characters in follow-up mode deletes a complete rune.
+func TestFollowUpInputChineseBackspace(t *testing.T) {
+	m := NewBubbleteaApp(make(chan AgentEvent, 1)).model
+	m.interactive = false
+
+	// 'f' enters follow-up mode.
+	updateKey(m, runeKey('f'))
+	assert.True(t, m.followUpInputMode)
+
+	for _, ch := range "你好" {
+		updateKey(m, runeKey(ch))
+	}
+	assert.Equal(t, "你好", m.followUpInput)
+	assert.Equal(t, 6, m.followUpCursor)
+
+	// Backspace deletes "好".
+	updateKey(m, keyMsg(tea.KeyBackspace))
+	assert.True(t, utf8.ValidString(m.followUpInput))
+	assert.Equal(t, "你", m.followUpInput)
+	assert.Equal(t, 3, m.followUpCursor)
+}
+
+// TestFollowUpInputChineseCtrlW verifies Ctrl+W in follow-up mode traverses
+// by rune with CJK characters.
+func TestFollowUpInputChineseCtrlW(t *testing.T) {
+	m := NewBubbleteaApp(make(chan AgentEvent, 1)).model
+	m.interactive = false
+
+	updateKey(m, runeKey('f'))
+	for _, ch := range "你好 世界" {
+		updateKey(m, runeKey(ch))
+	}
+
+	// Ctrl+W deletes "世界".
+	updateKey(m, keyMsg(tea.KeyCtrlW))
+	assert.True(t, utf8.ValidString(m.followUpInput))
+	assert.Equal(t, "你好 ", m.followUpInput)
+	assert.Equal(t, 7, m.followUpCursor)
 }

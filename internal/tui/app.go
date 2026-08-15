@@ -11,6 +11,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -1386,8 +1387,9 @@ func (m *teaModel) handleSteerKeyLocked(msg tea.KeyMsg) tea.Cmd {
 		}
 	case tea.KeyBackspace:
 		if m.steerCursor > 0 {
-			m.steerInput = m.steerInput[:m.steerCursor-1] + m.steerInput[m.steerCursor:]
-			m.steerCursor--
+			_, size := utf8.DecodeLastRuneInString(m.steerInput[:m.steerCursor])
+			m.steerInput = m.steerInput[:m.steerCursor-size] + m.steerInput[m.steerCursor:]
+			m.steerCursor -= size
 		}
 	case tea.KeyCtrlA:
 		m.steerCursor = 0
@@ -1402,7 +1404,7 @@ func (m *teaModel) handleSteerKeyLocked(msg tea.KeyMsg) tea.Cmd {
 	case tea.KeyRunes:
 		for _, r := range msg.Runes {
 			m.steerInput = m.steerInput[:m.steerCursor] + string(r) + m.steerInput[m.steerCursor:]
-			m.steerCursor++
+			m.steerCursor += utf8.RuneLen(r)
 		}
 	}
 	return nil
@@ -1432,8 +1434,9 @@ func (m *teaModel) handleFollowUpKeyLocked(msg tea.KeyMsg) tea.Cmd {
 		}
 	case tea.KeyBackspace:
 		if m.followUpCursor > 0 {
-			m.followUpInput = m.followUpInput[:m.followUpCursor-1] + m.followUpInput[m.followUpCursor:]
-			m.followUpCursor--
+			_, size := utf8.DecodeLastRuneInString(m.followUpInput[:m.followUpCursor])
+			m.followUpInput = m.followUpInput[:m.followUpCursor-size] + m.followUpInput[m.followUpCursor:]
+			m.followUpCursor -= size
 		}
 	case tea.KeyCtrlA:
 		m.followUpCursor = 0
@@ -1448,7 +1451,7 @@ func (m *teaModel) handleFollowUpKeyLocked(msg tea.KeyMsg) tea.Cmd {
 	case tea.KeyRunes:
 		for _, r := range msg.Runes {
 			m.followUpInput = m.followUpInput[:m.followUpCursor] + string(r) + m.followUpInput[m.followUpCursor:]
-			m.followUpCursor++
+			m.followUpCursor += utf8.RuneLen(r)
 		}
 	}
 	return nil
@@ -1566,14 +1569,22 @@ func (m *teaModel) deleteWordLocked() {
 	if m.steerCursor == 0 {
 		return
 	}
-	// Skip trailing spaces.
 	end := m.steerCursor
-	for end > 0 && m.steerInput[end-1] == ' ' {
-		end--
+	// Skip trailing spaces (traverse by rune to stay on UTF-8 boundaries).
+	for end > 0 {
+		r, size := utf8.DecodeLastRuneInString(m.steerInput[:end])
+		if r != ' ' {
+			break
+		}
+		end -= size
 	}
-	// Skip word characters.
-	for end > 0 && m.steerInput[end-1] != ' ' {
-		end--
+	// Skip word characters (traverse by rune).
+	for end > 0 {
+		r, size := utf8.DecodeLastRuneInString(m.steerInput[:end])
+		if r == ' ' {
+			break
+		}
+		end -= size
 	}
 	m.steerInput = m.steerInput[:end] + m.steerInput[m.steerCursor:]
 	m.steerCursor = end
@@ -1586,11 +1597,21 @@ func (m *teaModel) deleteFollowUpWordLocked() {
 		return
 	}
 	end := m.followUpCursor
-	for end > 0 && m.followUpInput[end-1] == ' ' {
-		end--
+	// Skip trailing spaces (traverse by rune to stay on UTF-8 boundaries).
+	for end > 0 {
+		r, size := utf8.DecodeLastRuneInString(m.followUpInput[:end])
+		if r != ' ' {
+			break
+		}
+		end -= size
 	}
-	for end > 0 && m.followUpInput[end-1] != ' ' {
-		end--
+	// Skip word characters (traverse by rune).
+	for end > 0 {
+		r, size := utf8.DecodeLastRuneInString(m.followUpInput[:end])
+		if r == ' ' {
+			break
+		}
+		end -= size
 	}
 	m.followUpInput = m.followUpInput[:end] + m.followUpInput[m.followUpCursor:]
 	m.followUpCursor = end
