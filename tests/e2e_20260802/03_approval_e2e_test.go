@@ -826,15 +826,14 @@ func TestApproval_EdgeCases(t *testing.T) {
 		assert.False(t, execCalled, "executor must not be called when Ask resolves to Deny")
 	})
 
-	t.Run("middleware with nil classifier defaults to allow-all", func(t *testing.T) {
+	t.Run("middleware with nil classifier defaults to deny-all", func(t *testing.T) {
 		store := approval.NewInMemoryApprovalStore()
 		mw := approval.NewApprovalMiddleware(nil, store)
 
 		wrapped := mw.WrapToolCall(dummyExec)
 		res, err := wrapped(ctx, toolCall("any_tool"))
-		require.NoError(t, err)
-		require.NotNil(t, res)
-		assert.Equal(t, "ok", res.Output)
+		require.ErrorIs(t, err, approval.ErrToolDenied)
+		require.Nil(t, res)
 	})
 
 	t.Run("middleware with nil store uses in-memory store", func(t *testing.T) {
