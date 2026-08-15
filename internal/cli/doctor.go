@@ -570,7 +570,7 @@ func NewMCPServersChecker() *MCPServersChecker {
 // Check implements DoctorChecker.
 func (c *MCPServersChecker) Check(ctx context.Context) DoctorCheck {
 	cfg, _ := c.configLoader()
-	servers := loadMCPServers(cfg)
+	servers := loadMCPServers(ctx, cfg)
 	if len(servers) == 0 {
 		return DoctorCheck{Name: "mcp-servers", Status: doctorPass,
 			Message: "no MCP servers configured"}
