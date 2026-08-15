@@ -3,6 +3,7 @@ package tracing
 import (
 	"context"
 	"crypto/rand"
+	"encoding/binary"
 	"encoding/hex"
 	"log/slog"
 	"sync"
@@ -77,7 +78,6 @@ type Tracer struct {
 	traceID  string
 	exporter TraceExporter
 	enabled  atomic.Bool
-	wg       sync.WaitGroup
 }
 
 // NewTracer creates a new Tracer. When traceID is empty a random ID is
@@ -101,10 +101,9 @@ func (t *Tracer) TraceID() string { return t.traceID }
 // so tracing is effectively zero-overhead until re-enabled.
 func (t *Tracer) SetEnabled(enabled bool) { t.enabled.Store(enabled) }
 
-// Flush waits for all in-flight span export goroutines to complete. Callers
-// must invoke Flush before shutting down the underlying exporter to ensure no
-// span writes race with file closure.
-func (t *Tracer) Flush() { t.wg.Wait() }
+// Flush is retained for backward compatibility. With synchronous export in
+// End, there are no in-flight export goroutines, so Flush returns immediately.
+func (t *Tracer) Flush() {}
 
 // Start creates and starts a new Span. If ctx carries parent span information,
 // the new span inherits it as its parent_span_id. The returned context carries
@@ -116,7 +115,7 @@ func (t *Tracer) Start(ctx context.Context, name string, kind SpanKind) (TraceSp
 	}
 
 	parentSpanID := spanIDFromContext(ctx)
-	spanID := generateID()
+	spanID := generateSpanID()
 	span := &localSpan{
 		traceID:      t.traceID,
 		spanID:       spanID,
@@ -125,7 +124,6 @@ func (t *Tracer) Start(ctx context.Context, name string, kind SpanKind) (TraceSp
 		name:         name,
 		startTime:    time.Now(),
 		exporter:     t.exporter,
-		wg:           &t.wg,
 	}
 
 	sc := spanContext{traceID: t.traceID, spanID: spanID}
@@ -161,6 +159,27 @@ func SpanFromContext(ctx context.Context, name string, kind SpanKind) (TraceSpan
 	return &noopSpan{}, ctx
 }
 
+// spanIDCounter is an atomic counter that produces unique span IDs without
+// the per-call cost of crypto/rand. It is seeded once at package init from
+// crypto/rand so IDs are unpredictable across processes.
+var spanIDCounter atomic.Uint64
+
+func init() {
+	var seed [8]byte
+	_, _ = rand.Read(seed[:])
+	spanIDCounter.Store(binary.BigEndian.Uint64(seed[:]))
+}
+
+// generateSpanID returns a unique 16-char hex ID derived from an atomic
+// counter. It replaces crypto/rand for span ID generation to avoid the
+// per-span cost of a system call.
+func generateSpanID() string {
+	id := spanIDCounter.Add(1)
+	var buf [8]byte
+	binary.BigEndian.PutUint64(buf[:], id)
+	return hex.EncodeToString(buf[:])
+}
+
 // generateID returns a random 32-char hex ID.
 func generateID() string {
 	b := make([]byte, 16)
@@ -182,7 +201,6 @@ type localSpan struct {
 	attributes   []Attribute
 	events       []SpanEvent
 	exporter     TraceExporter
-	wg           *sync.WaitGroup
 	ctx          context.Context
 
 	mu    sync.Mutex
@@ -233,7 +251,7 @@ func (s *localSpan) SetStatus(status SpanStatus, msg string) {
 func (s *localSpan) Context() context.Context { return s.ctx }
 
 // End finalizes the span. End is idempotent: only the first call records the
-// end time and triggers an asynchronous export when an exporter is present.
+// end time and exports the span synchronously when an exporter is present.
 func (s *localSpan) End() {
 	s.mu.Lock()
 	if s.ended {
@@ -242,26 +260,15 @@ func (s *localSpan) End() {
 	}
 	s.ended = true
 	s.endTime = time.Now()
-	// Add to WaitGroup while still holding the lock to prevent a race
-	// where Flush() returns before the export goroutine is launched.
-	if s.exporter != nil && s.wg != nil {
-		s.wg.Add(1)
-	}
 	exporter := s.exporter
-	wg := s.wg
 	s.mu.Unlock()
 
 	if exporter != nil {
-		go func() {
-			if wg != nil {
-				defer wg.Done()
-			}
-			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := exporter.ExportSpan(ctx, s); err != nil {
-				slog.Warn("failed to export span", "span_id", s.spanID, "err", err)
-			}
-		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := exporter.ExportSpan(ctx, s); err != nil {
+			slog.Warn("failed to export span", "span_id", s.spanID, "err", err)
+		}
 	}
 }
 
