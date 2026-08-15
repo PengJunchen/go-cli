@@ -331,8 +331,24 @@ func (le *DefaultLineEditor) readLineNonTTY(ctx context.Context, prompt string) 
 // TTY raw-mode implementation
 // ---------------------------------------------------------------------------
 
-// errInterrupted is returned when the user presses Ctrl+C.
+// errInterrupted is a sentinel error for Ctrl+C interrupts. The concrete
+// type returned by the line editor is *interruptedError, which carries
+// information about whether the input buffer had content when the interrupt
+// occurred, enabling graded Ctrl+C semantics (clear line vs. exit prompt).
 var errInterrupted = errors.New("interrupted")
+
+// interruptedError is the concrete error returned when the user presses
+// Ctrl+C. HadContent reports whether the input buffer (including any
+// accumulated multi-line content) had text when the interrupt occurred.
+type interruptedError struct {
+	hadContent bool
+}
+
+func (e *interruptedError) Error() string { return "interrupted" }
+
+// Is implements errors.Is so that errors.Is(err, errInterrupted) returns
+// true for any *interruptedError.
+func (e *interruptedError) Is(target error) bool { return target == errInterrupted }
 
 // byteResult is the result of reading a single byte from stdin.
 type byteResult struct {
@@ -403,6 +419,15 @@ func (le *DefaultLineEditor) readLineTTY(ctx context.Context, prompt string) (st
 		line, rErr := le.readSingleLineTTY(readByte, currentPrompt)
 		if rErr != nil {
 			joined := strings.Join(lines, "\n")
+			// If interrupting with accumulated multi-line content, mark
+			// the error so the caller treats it as "had content" (clear
+			// line rather than exit prompt).
+			if joined != "" {
+				var ie *interruptedError
+				if errors.As(rErr, &ie) {
+					ie.hadContent = true
+				}
+			}
 			return joined, rErr
 		}
 
@@ -577,7 +602,7 @@ func (le *DefaultLineEditor) readSingleLineTTY(readByte func() (byte, error), pr
 
 		case b == 0x03: // Ctrl+C
 			fmt.Fprint(le.out, "\r\n") //nolint:errcheck
-			return "", errInterrupted
+			return "", &interruptedError{hadContent: len(buf) > 0}
 
 		case b == 0x04: // Ctrl+D
 			if len(buf) == 0 {

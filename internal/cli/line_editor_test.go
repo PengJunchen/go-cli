@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"os"
 	"runtime"
@@ -417,4 +418,173 @@ func TestFindReverseMatch(t *testing.T) {
 
 	// Empty query returns -1.
 	assert.Equal(t, -1, findReverseMatch(entries, "", -1))
+}
+
+// ---------------------------------------------------------------------------
+// Graded Ctrl+C semantics tests
+// ---------------------------------------------------------------------------
+
+// TestInterruptedError_ErrorsIs verifies that *interruptedError satisfies
+// errors.Is(err, errInterrupted) so the REPL loop can detect Ctrl+C.
+func TestInterruptedError_ErrorsIs(t *testing.T) {
+	err := &interruptedError{hadContent: true}
+	assert.True(t, errors.Is(err, errInterrupted))
+	assert.True(t, errors.Is(err, errInterrupted))
+
+	err2 := &interruptedError{hadContent: false}
+	assert.True(t, errors.Is(err2, errInterrupted))
+}
+
+// TestInterruptedError_ErrorsAs verifies that the hadContent field can be
+// extracted via errors.As.
+func TestInterruptedError_ErrorsAs(t *testing.T) {
+	err := &interruptedError{hadContent: true}
+	var ie *interruptedError
+	require.True(t, errors.As(err, &ie))
+	assert.True(t, ie.hadContent)
+
+	err2 := &interruptedError{hadContent: false}
+	var ie2 *interruptedError
+	require.True(t, errors.As(err2, &ie2))
+	assert.False(t, ie2.hadContent)
+}
+
+// TestReadSingleLineTTY_CtrlC_WithContent verifies that pressing Ctrl+C
+// when the buffer has content returns an interruptedError with
+// hadContent=true (AC-1: clears current input and re-prompts).
+func TestReadSingleLineTTY_CtrlC_WithContent(t *testing.T) {
+	var out bytes.Buffer
+	le := NewDefaultLineEditor(strings.NewReader(""), &out)
+
+	// Type "hello", then Ctrl+C
+	keys := []byte{'h', 'e', 'l', 'l', 'o', 0x03}
+	idx := 0
+	readByte := func() (byte, error) {
+		if idx >= len(keys) {
+			return 0, io.EOF
+		}
+		b := keys[idx]
+		idx++
+		return b, nil
+	}
+
+	line, err := le.readSingleLineTTY(readByte, "> ")
+	assert.Equal(t, "", line)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, errInterrupted))
+
+	var ie *interruptedError
+	require.True(t, errors.As(err, &ie))
+	assert.True(t, ie.hadContent, "hadContent should be true when buffer has text")
+}
+
+// TestReadSingleLineTTY_CtrlC_EmptyBuffer verifies that pressing Ctrl+C
+// on an empty buffer returns an interruptedError with hadContent=false
+// (AC-2: shows 'press again to exit' message).
+func TestReadSingleLineTTY_CtrlC_EmptyBuffer(t *testing.T) {
+	var out bytes.Buffer
+	le := NewDefaultLineEditor(strings.NewReader(""), &out)
+
+	// Just Ctrl+C on empty line
+	keys := []byte{0x03}
+	idx := 0
+	readByte := func() (byte, error) {
+		if idx >= len(keys) {
+			return 0, io.EOF
+		}
+		b := keys[idx]
+		idx++
+		return b, nil
+	}
+
+	line, err := le.readSingleLineTTY(readByte, "> ")
+	assert.Equal(t, "", line)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, errInterrupted))
+
+	var ie *interruptedError
+	require.True(t, errors.As(err, &ie))
+	assert.False(t, ie.hadContent, "hadContent should be false when buffer is empty")
+}
+
+// TestEvaluateCtrlC_HadContent verifies that when the input buffer had
+// content, the action is always ctrlCClearLine regardless of timing
+// (AC-1).
+func TestEvaluateCtrlC_HadContent(t *testing.T) {
+	now := time.Now()
+	last := now.Add(-500 * time.Millisecond)
+
+	action, newLast := evaluateCtrlC(true, last, now, ctrlCDoublePressWindow)
+	assert.Equal(t, ctrlCClearLine, action)
+	assert.True(t, newLast.IsZero(), "timer should be reset after clear-line")
+
+	// Even if within the double-press window, content present → clear line.
+	action, newLast = evaluateCtrlC(true, now.Add(-100*time.Millisecond), now, ctrlCDoublePressWindow)
+	assert.Equal(t, ctrlCClearLine, action)
+	assert.True(t, newLast.IsZero())
+}
+
+// TestEvaluateCtrlC_EmptyFirstPress verifies that the first Ctrl+C on an
+// empty line shows the exit prompt (AC-2).
+func TestEvaluateCtrlC_EmptyFirstPress(t *testing.T) {
+	now := time.Now()
+
+	action, newLast := evaluateCtrlC(false, time.Time{}, now, ctrlCDoublePressWindow)
+	assert.Equal(t, ctrlCShowExitPrompt, action)
+	assert.Equal(t, now, newLast, "timestamp should be recorded")
+}
+
+// TestEvaluateCtrlC_DoublePressWithinWindow verifies that a second Ctrl+C
+// within the window exits the REPL (AC-3).
+func TestEvaluateCtrlC_DoublePressWithinWindow(t *testing.T) {
+	now := time.Now()
+	last := now.Add(-800 * time.Millisecond) // 800ms < 1500ms window
+
+	action, newLast := evaluateCtrlC(false, last, now, ctrlCDoublePressWindow)
+	assert.Equal(t, ctrlCExit, action)
+	assert.True(t, newLast.IsZero(), "timer should be reset after exit")
+}
+
+// TestEvaluateCtrlC_DoublePressAfterWindow verifies that a Ctrl+C after
+// the window expires shows the exit prompt again instead of exiting.
+func TestEvaluateCtrlC_DoublePressAfterWindow(t *testing.T) {
+	now := time.Now()
+	last := now.Add(-2 * time.Second) // 2000ms > 1500ms window
+
+	action, newLast := evaluateCtrlC(false, last, now, ctrlCDoublePressWindow)
+	assert.Equal(t, ctrlCShowExitPrompt, action)
+	assert.Equal(t, now, newLast, "timestamp should be refreshed")
+}
+
+// TestEvaluateCtrlC_DoublePressAtWindowBoundary verifies the boundary
+// condition: exactly at the window limit, the press still exits.
+func TestEvaluateCtrlC_DoublePressAtWindowBoundary(t *testing.T) {
+	now := time.Now()
+	last := now.Add(-ctrlCDoublePressWindow) // exactly at boundary
+
+	action, _ := evaluateCtrlC(false, last, now, ctrlCDoublePressWindow)
+	assert.Equal(t, ctrlCExit, action, "press at exactly the window boundary should exit")
+}
+
+// TestEvaluateCtrlC_Sequence simulates the full double-press sequence:
+// first press → show prompt, second press (within window) → exit.
+func TestEvaluateCtrlC_Sequence(t *testing.T) {
+	window := ctrlCDoublePressWindow
+	var lastInterrupt time.Time
+
+	// First Ctrl+C on empty line.
+	t1 := time.Now()
+	action, lastInterrupt := evaluateCtrlC(false, lastInterrupt, t1, window)
+	assert.Equal(t, ctrlCShowExitPrompt, action)
+
+	// Second Ctrl+C within window.
+	t2 := t1.Add(500 * time.Millisecond)
+	action, lastInterrupt = evaluateCtrlC(false, lastInterrupt, t2, window)
+	assert.Equal(t, ctrlCExit, action)
+	assert.True(t, lastInterrupt.IsZero())
+
+	// After exit, a new press should show the prompt again (timer reset).
+	t3 := t2.Add(200 * time.Millisecond)
+	action, lastInterrupt = evaluateCtrlC(false, lastInterrupt, t3, window)
+	assert.Equal(t, ctrlCShowExitPrompt, action)
 }

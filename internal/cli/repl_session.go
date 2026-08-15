@@ -70,6 +70,10 @@ type REPLSession struct {
 	entryCounter int
 	turnCounter  int
 
+	// Ctrl+C graded semantics: records the time of the last Ctrl+C on an
+	// empty line. A second Ctrl+C within ctrlCDoublePressWindow exits.
+	lastInterruptTime time.Time
+
 	// Logging
 	logger *slog.Logger
 
@@ -375,17 +379,54 @@ func (s *REPLSession) setupEditors() {
 	}
 }
 
+// ctrlCDoublePressWindow is the time window within which a second Ctrl+C on
+// an empty line exits the REPL.
+const ctrlCDoublePressWindow = 1500 * time.Millisecond
+
+// ctrlCAction represents the action to take when Ctrl+C is pressed.
+type ctrlCAction int
+
+const (
+	ctrlCClearLine      ctrlCAction = iota // clear current input and re-prompt
+	ctrlCShowExitPrompt                    // show "press again to exit" message
+	ctrlCExit                              // exit the REPL
+)
+
+// evaluateCtrlC determines the graded Ctrl+C action based on whether the
+// input buffer had content and the timing of the previous empty-line Ctrl+C.
+// It returns the action to take and the new lastInterrupt timestamp to store.
+func evaluateCtrlC(hadContent bool, lastInterrupt, now time.Time, window time.Duration) (ctrlCAction, time.Time) {
+	if hadContent {
+		// Non-empty input: clear the line and reset the double-press timer.
+		return ctrlCClearLine, time.Time{}
+	}
+	// Empty input: check for double-press within the window.
+	if !lastInterrupt.IsZero() && now.Sub(lastInterrupt) <= window {
+		return ctrlCExit, time.Time{}
+	}
+	// First press on empty line (or window expired): show exit prompt.
+	return ctrlCShowExitPrompt, now
+}
+
 // readInput is the REPL for loop. It reads user input, routes slash commands,
 // expands @-mentions, and delegates each turn to executeTurn.
 func (s *REPLSession) readInput() {
 	for {
 		line, err := s.lineEditor.ReadLine(s.spanCtx, "> ")
 		if err != nil {
+			if errors.Is(err, errInterrupted) {
+				if s.handleInterrupt(err) {
+					break
+				}
+				continue
+			}
 			if !errors.Is(err, io.EOF) {
 				s.logger.Warn("cli_interactive_readline_error", "err", err)
 			}
 			break
 		}
+		// Successful input resets the double-press timer.
+		s.lastInterruptTime = time.Time{}
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -419,6 +460,28 @@ func (s *REPLSession) readInput() {
 		s.line = line
 		s.executeTurn()
 	}
+}
+
+// handleInterrupt processes a Ctrl+C interrupt (errInterrupted) and returns
+// true if the REPL should exit. It implements the graded Ctrl+C semantics:
+// non-empty input clears the line; empty input shows an exit prompt; a second
+// Ctrl+C within ctrlCDoublePressWindow on an empty line exits the REPL.
+func (s *REPLSession) handleInterrupt(err error) bool {
+	var ie *interruptedError
+	hadContent := errors.As(err, &ie) && ie.hadContent
+	action, newTime := evaluateCtrlC(hadContent, s.lastInterruptTime, time.Now(), ctrlCDoublePressWindow)
+	s.lastInterruptTime = newTime
+	switch action {
+	case ctrlCClearLine:
+		return false
+	case ctrlCShowExitPrompt:
+		fmt.Fprintln(s.out, "(press Ctrl+C again to exit)") //nolint:errcheck
+		return false
+	case ctrlCExit:
+		s.logger.Info("cli_interactive_exit_interrupt", "op", "cli.interactive.exit.interrupt")
+		return true
+	}
+	return false
 }
 
 // executeTurn orchestrates a single agent turn: it sets up the turn context,
