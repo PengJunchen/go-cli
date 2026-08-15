@@ -41,8 +41,8 @@ func (f *fakeClient) CallTool(_ context.Context, name string, args map[string]an
 	return &MCPToolResult{Content: "echo:" + stringOf(args["msg"])}, nil
 }
 
-func (f *fakeClient) Name() string              { return f.name }
-func (f *fakeClient) ProtocolVersion() string    { return LatestProtocolVersion }
+func (f *fakeClient) Name() string            { return f.name }
+func (f *fakeClient) ProtocolVersion() string { return LatestProtocolVersion }
 
 func TestMCPToolAdapterNameNormalized(t *testing.T) {
 	client := &fakeClient{name: "srv"}

@@ -89,11 +89,11 @@ func TestPluginLoaderingHTTPNonOK(t *testing.T) {
 func TestPluginLoaderSSRFBlocksPrivateIPs(t *testing.T) {
 	loader := extension.NewDefaultPluginLoader()
 	for _, endpoint := range []string{
-		"https://169.254.1.1/ext",   // link-local
-		"https://10.0.0.1/ext",      // RFC 1918 10/8
-		"https://172.16.0.1/ext",    // RFC 1918 172.16/12 lower bound
+		"https://169.254.1.1/ext",    // link-local
+		"https://10.0.0.1/ext",       // RFC 1918 10/8
+		"https://172.16.0.1/ext",     // RFC 1918 172.16/12 lower bound
 		"https://172.31.255.255/ext", // RFC 1918 172.16/12 upper bound
-		"https://192.168.1.1/ext",   // RFC 1918 192.168/16
+		"https://192.168.1.1/ext",    // RFC 1918 192.168/16
 	} {
 		_, err := loader.Load(context.Background(), endpoint)
 		require.Error(t, err, "endpoint %q should be blocked", endpoint)
