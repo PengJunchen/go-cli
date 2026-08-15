@@ -15,6 +15,14 @@ type AgentInput struct {
 	Message string
 	// Data carries optional structured context.
 	Data any
+	// History carries the prior conversation messages so middleware can
+	// inspect or augment the full context. When bridged from core, this
+	// holds []core.AgentMessage.
+	History any
+	// Type carries the submission type semantics ("user", "steering",
+	// "followup") so middleware can distinguish normal messages from
+	// steering or follow-up inputs.
+	Type string
 }
 
 // AgentOutput is the output produced by an agent function.
@@ -23,6 +31,9 @@ type AgentOutput struct {
 	Text string
 	// Data carries optional structured result data.
 	Data any
+	// Events carries the full slice of agent events produced by the inner
+	// loop. When bridged from core, this holds []core.AgentEvent.
+	Events any
 }
 
 // AgentFunc is the underlying agent computation that middleware wraps.
