@@ -141,7 +141,7 @@ func TestForkSession(t *testing.T) {
 	require.NoError(t, store.Append(ctx, &session.SessionEntry{ID: "e4", ParentID: "e3", Type: session.EntryTypeAssistant, Content: "4"}))
 
 	agent := core.NewAgentImpl("test", stubLoop{})
-	assembly := &AgentAssembly{SessionStore: store, Agent: agent}
+	assembly := &AgentAssembly{SessionManagement: SessionManagement{SessionStore: store}, CoreRuntime: CoreRuntime{Agent: agent}}
 
 	cmd := newPromptCmd(&bytes.Buffer{})
 	// Fork from e2 — history should contain e1 (user) and e2 (assistant).
@@ -159,7 +159,7 @@ func TestForkSession(t *testing.T) {
 // when no session store is available.
 func TestForkSession_NilStore(t *testing.T) {
 	agent := core.NewAgentImpl("test", stubLoop{})
-	assembly := &AgentAssembly{SessionStore: nil, Agent: agent}
+	assembly := &AgentAssembly{SessionManagement: SessionManagement{SessionStore: nil}, CoreRuntime: CoreRuntime{Agent: agent}}
 	cmd := newPromptCmd(&bytes.Buffer{})
 	err := cmd.forkSession(context.Background(), assembly, "some-id")
 	require.Error(t, err)
@@ -179,7 +179,7 @@ func TestForkSession_NotFound(t *testing.T) {
 	require.NoError(t, store.Append(ctx, &session.SessionEntry{ID: "e1", ParentID: "", Type: session.EntryTypeUser, Content: "hello"}))
 
 	agent := core.NewAgentImpl("test", stubLoop{})
-	assembly := &AgentAssembly{SessionStore: store, Agent: agent}
+	assembly := &AgentAssembly{SessionManagement: SessionManagement{SessionStore: store}, CoreRuntime: CoreRuntime{Agent: agent}}
 	cmd := newPromptCmd(&bytes.Buffer{})
 	err := cmd.forkSession(ctx, assembly, "nonexistent")
 	require.Error(t, err)
@@ -197,7 +197,7 @@ func TestForkSession_EmptyStore(t *testing.T) {
 	require.NoError(t, store.Open(context.Background()))
 
 	agent := core.NewAgentImpl("test", stubLoop{})
-	assembly := &AgentAssembly{SessionStore: store, Agent: agent}
+	assembly := &AgentAssembly{SessionManagement: SessionManagement{SessionStore: store}, CoreRuntime: CoreRuntime{Agent: agent}}
 	cmd := newPromptCmd(&bytes.Buffer{})
 	err := cmd.forkSession(context.Background(), assembly, "any-id")
 	require.Error(t, err)

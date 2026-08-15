@@ -39,9 +39,9 @@ func TestEmitTokenUsageEvent_PrefersAPIUsage(t *testing.T) {
 
 	stream := core.NewEventStream(64)
 	assembly := &AgentAssembly{
-		Agent:         agent,
-		Estimator:     compaction.NewHeuristicTokenEstimator(),
-		ContextWindow: 8000,
+		CoreRuntime:       CoreRuntime{Agent: agent},
+		SessionManagement: SessionManagement{Estimator: compaction.NewHeuristicTokenEstimator()},
+		ModelConfig:       ModelConfig{ContextWindow: 8000},
 	}
 
 	emitTokenUsageEvent(stream, assembly)
@@ -73,9 +73,9 @@ func TestEmitTokenUsageEvent_FallbackToEstimate(t *testing.T) {
 
 	stream := core.NewEventStream(64)
 	assembly := &AgentAssembly{
-		Agent:         agent,
-		Estimator:     compaction.NewHeuristicTokenEstimator(),
-		ContextWindow: 4096,
+		CoreRuntime:       CoreRuntime{Agent: agent},
+		SessionManagement: SessionManagement{Estimator: compaction.NewHeuristicTokenEstimator()},
+		ModelConfig:       ModelConfig{ContextWindow: 4096},
 	}
 
 	emitTokenUsageEvent(stream, assembly)
@@ -104,8 +104,8 @@ func TestEmitTokenUsageEvent_NoEstimatorNoUsage(t *testing.T) {
 
 	stream := core.NewEventStream(64)
 	assembly := &AgentAssembly{
-		Agent:     agent,
-		Estimator: nil, // no estimator, no API usage
+		CoreRuntime: CoreRuntime{Agent: agent},
+		// no estimator, no API usage
 	}
 
 	emitTokenUsageEvent(stream, assembly)
