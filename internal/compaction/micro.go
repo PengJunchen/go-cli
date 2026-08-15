@@ -37,19 +37,34 @@ func (c *MicroCompactor) Compact(ctx context.Context, items []TurnItem, maxToken
 	result := make([]TurnItem, len(items))
 	copy(result, items)
 
+	// Pre-compute the total token count once. The loop below maintains this
+	// total incrementally instead of re-estimating the entire list on every
+	// iteration, avoiding the O(n²) behaviour of the previous approach.
 	tokensBefore := estimateTokens(result, estimator)
+	total := tokensBefore
+
 	span.SetAttributes(
 		tracing.Attribute{Key: "items_in", Value: len(items)},
 		tracing.Attribute{Key: "tokens_before", Value: tokensBefore},
 	)
 
+	// Pre-compute the placeholder token count once.
+	placeholderTokens := estimateLength(compactedToolResult, estimator)
+
 	// Repeatedly replace the oldest un-compacted tool result until the budget
-	// is satisfied or there is nothing left to replace.
-	for estimateTokens(result, estimator) > maxTokens {
+	// is satisfied or there is nothing left to replace. A cursor avoids
+	// re-scanning already-compacted items, and the running total is updated
+	// incrementally by subtracting the replaced item's tool-result tokens
+	// and adding the placeholder tokens.
+	cursor := 0
+	for total > maxTokens {
 		replaced := false
-		for i := range result {
+		for i := cursor; i < len(result); i++ {
 			if result[i].ToolResult != "" && result[i].ToolResult != compactedToolResult {
+				oldTRTokens := estimateLength(result[i].ToolResult, estimator)
+				total -= oldTRTokens - placeholderTokens
 				result[i].ToolResult = compactedToolResult
+				cursor = i + 1
 				replaced = true
 				break
 			}

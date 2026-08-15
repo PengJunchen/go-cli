@@ -82,16 +82,28 @@ func NewSummaryCompactor(summarizer Summarizer, opts ...SummaryCompactorOption) 
 // dangling tool result. When no cut satisfies the budget, it returns len(items)
 // (i.e. summarize everything).
 func (c *SummaryCompactor) findCutPoint(items []TurnItem, maxTokens int, estimator TokenEstimator) int {
-	placeholder := estimateTokens([]TurnItem{{Content: summaryPlaceholder}}, estimator)
-	for cut := 0; cut <= len(items); cut++ {
-		if cut < len(items) && items[cut].Role == RoleTool {
+	placeholder := estimateLength(summaryPlaceholder, estimator)
+
+	// Build a suffix sum array so range queries are O(1) instead of
+	// re-estimating the entire tail on every iteration. suffixSum[i] holds
+	// the total estimated tokens for items[i:]. estimateItemTokens caches
+	// each item's estimate, so the pre-computation is O(n) and subsequent
+	// callers (e.g. MicroCompactor) reuse the cached values.
+	n := len(items)
+	suffixSum := make([]int, n+1)
+	for i := n - 1; i >= 0; i-- {
+		suffixSum[i] = suffixSum[i+1] + estimateItemTokens(&items[i], estimator)
+	}
+
+	for cut := 0; cut <= n; cut++ {
+		if cut < n && items[cut].Role == RoleTool {
 			continue
 		}
-		if placeholder+estimateTokens(items[cut:], estimator) <= maxTokens {
+		if placeholder+suffixSum[cut] <= maxTokens {
 			return cut
 		}
 	}
-	return len(items)
+	return n
 }
 
 // Compact summarizes the oldest region and keeps the newest turns whole.

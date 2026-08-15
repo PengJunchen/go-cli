@@ -39,7 +39,8 @@ func makeBenchItems(n int) []TurnItem {
 
 // BenchmarkMicroCompactor measures the zero-LLM compaction strategy across
 // different conversation sizes. The token budget is set to 10*n so the
-// compactor must replace all tool results to fit.
+// compactor must replace all tool results to fit. The optimised implementation
+// uses incremental decrement instead of re-estimating on every iteration.
 func BenchmarkMicroCompactor(b *testing.B) {
 	est := NewHeuristicTokenEstimator()
 	ctx := context.Background()
@@ -56,8 +57,50 @@ func BenchmarkMicroCompactor(b *testing.B) {
 	}
 }
 
+// BenchmarkMicroCompactorFullScan demonstrates the pre-fix O(n²) behaviour
+// where estimateTokens is called on every loop iteration. It serves as a
+// baseline for comparing against BenchmarkMicroCompactor.
+func BenchmarkMicroCompactorFullScan(b *testing.B) {
+	est := NewHeuristicTokenEstimator()
+	ctx := context.Background()
+
+	for _, n := range []int{10, 50, 100, 500} {
+		b.Run(fmt.Sprintf("items_%d", n), func(b *testing.B) {
+			items := makeBenchItems(n)
+			maxTokens := 10 * n
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_, _ = microCompactorFullScan(ctx, items, maxTokens, est)
+			}
+		})
+	}
+}
+
+// microCompactorFullScan replicates the pre-fix MicroCompactor.Compact
+// algorithm that calls estimateTokens on every loop iteration, producing
+// O(n²) behaviour.
+func microCompactorFullScan(_ context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator) ([]TurnItem, error) {
+	result := make([]TurnItem, len(items))
+	copy(result, items)
+	for estimateTokens(result, estimator) > maxTokens {
+		replaced := false
+		for i := range result {
+			if result[i].ToolResult != "" && result[i].ToolResult != compactedToolResult {
+				result[i].ToolResult = compactedToolResult
+				replaced = true
+				break
+			}
+		}
+		if !replaced {
+			break
+		}
+	}
+	return result, nil
+}
+
 // BenchmarkUnifiedCompactor measures the routing compactor (micro → truncating)
-// across different conversation sizes.
+// across different conversation sizes. The optimised implementation pre-computes
+// token counts and caches them for sub-compactors.
 func BenchmarkUnifiedCompactor(b *testing.B) {
 	est := NewHeuristicTokenEstimator()
 	ctx := context.Background()
@@ -73,6 +116,56 @@ func BenchmarkUnifiedCompactor(b *testing.B) {
 			}
 		})
 	}
+}
+
+// BenchmarkFindCutPoint measures the suffix-sum-optimised findCutPoint across
+// different conversation sizes. The suffix sum array allows O(1) range queries
+// instead of re-estimating the tail on every iteration.
+func BenchmarkFindCutPoint(b *testing.B) {
+	est := NewHeuristicTokenEstimator()
+	compactor := NewSummaryCompactor(nil)
+
+	for _, n := range []int{10, 50, 100, 500} {
+		b.Run(fmt.Sprintf("items_%d", n), func(b *testing.B) {
+			items := makeBenchItems(n)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = compactor.findCutPoint(items, 10*n, est)
+			}
+		})
+	}
+}
+
+// BenchmarkFindCutPointFullScan demonstrates the pre-fix O(n²) behaviour
+// where estimateTokens is called for every tail slice. It serves as a baseline
+// for comparing against BenchmarkFindCutPoint.
+func BenchmarkFindCutPointFullScan(b *testing.B) {
+	est := NewHeuristicTokenEstimator()
+
+	for _, n := range []int{10, 50, 100, 500} {
+		b.Run(fmt.Sprintf("items_%d", n), func(b *testing.B) {
+			items := makeBenchItems(n)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				_ = findCutPointFullScan(items, 10*n, est)
+			}
+		})
+	}
+}
+
+// findCutPointFullScan replicates the pre-fix findCutPoint algorithm that
+// calls estimateTokens on items[cut:] for every cut, producing O(n²) behaviour.
+func findCutPointFullScan(items []TurnItem, maxTokens int, estimator TokenEstimator) int {
+	placeholder := estimateTokens([]TurnItem{{Content: summaryPlaceholder}}, estimator)
+	for cut := 0; cut <= len(items); cut++ {
+		if cut < len(items) && items[cut].Role == RoleTool {
+			continue
+		}
+		if placeholder+estimateTokens(items[cut:], estimator) <= maxTokens {
+			return cut
+		}
+	}
+	return len(items)
 }
 
 // BenchmarkMidTurnEstimate verifies that the incremental midturn estimation

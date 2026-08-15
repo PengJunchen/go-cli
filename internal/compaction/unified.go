@@ -114,7 +114,13 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 	defer span.End()
 	logger := tracing.NewTraceLogger(span, slog.Default())
 
-	current := estimateTokens(items, estimator)
+	// Pre-compute token counts per item, caching results in EstimatedTokens so
+	// sub-compactors (micro, summary) reuse the cached values instead of
+	// re-estimating from scratch.
+	current := 0
+	for i := range items {
+		current += estimateItemTokens(&items[i], estimator)
+	}
 	span.SetAttributes(
 		tracing.Attribute{Key: "trigger_reason", Value: u.triggerReason},
 		tracing.Attribute{Key: "current_tokens", Value: current},
@@ -128,7 +134,7 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 		span.AddEvent("trying_micro")
 		result, err := u.micro.Compact(sctx, items, maxTokens, estimator)
 		if err == nil {
-			return u.finish(sctx, logger, span, items, maxTokens, estimator, result, StrategyMicro), nil
+			return u.finish(sctx, logger, span, items, current, maxTokens, estimator, result, StrategyMicro), nil
 		}
 		logger.Debug("compaction.unified.escalate", "from", "micro", "err", err)
 	}
@@ -139,7 +145,7 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 		span.AddEvent("trying_summary")
 		result, err := u.summary.Compact(sctx, items, maxTokens, estimator)
 		if err == nil {
-			return u.finish(sctx, logger, span, items, maxTokens, estimator, result, StrategySummary), nil
+			return u.finish(sctx, logger, span, items, current, maxTokens, estimator, result, StrategySummary), nil
 		}
 		logger.Debug("compaction.unified.escalate", "from", "summary", "err", err)
 	}
@@ -149,7 +155,7 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 		span.AddEvent("trying_truncating")
 		result, err := u.truncating.Compact(sctx, items, maxTokens, estimator)
 		if err == nil {
-			return u.finish(sctx, logger, span, items, maxTokens, estimator, result, StrategyTruncating), nil
+			return u.finish(sctx, logger, span, items, current, maxTokens, estimator, result, StrategyTruncating), nil
 		}
 		return nil, err
 	}
@@ -161,7 +167,9 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 
 // finish records the winning strategy, emits the result attributes, runs the
 // quality evaluator (when configured), and returns the compacted items.
-func (u *UnifiedCompactor) finish(ctx context.Context, logger *slog.Logger, span tracing.TraceSpan, items []TurnItem, maxTokens int, estimator TokenEstimator, result []TurnItem, strategy Strategy) []TurnItem {
+// tokensIn is the pre-computed total for the input items, passed from Compact
+// to avoid a redundant re-estimation.
+func (u *UnifiedCompactor) finish(ctx context.Context, logger *slog.Logger, span tracing.TraceSpan, items []TurnItem, tokensIn, maxTokens int, estimator TokenEstimator, result []TurnItem, strategy Strategy) []TurnItem {
 	u.setLastStrategy(strategy)
 
 	after := estimateTokens(result, estimator)
@@ -174,7 +182,7 @@ func (u *UnifiedCompactor) finish(ctx context.Context, logger *slog.Logger, span
 		"strategy", strategy.String(),
 		"items_in", len(items),
 		"items_out", len(result),
-		"tokens_in", estimateTokens(items, estimator),
+		"tokens_in", tokensIn,
 		"tokens_out", after,
 		"max_tokens", maxTokens)
 
