@@ -506,3 +506,229 @@ func TestSandbox_LegitimateAfterHeredocCheck(t *testing.T) {
 	err = sb.Validate(context.Background(), "ls -la", "/anywhere")
 	require.NoError(t, err)
 }
+
+// --- Task 47-3 AC-1: Shell quoting/escape/function normalization ---
+
+func TestNormalizeCommandToken_SingleQuote(t *testing.T) {
+	assert.Equal(t, "rm", normalizeCommandToken("'rm'"))
+}
+
+func TestNormalizeCommandToken_DoubleQuote(t *testing.T) {
+	assert.Equal(t, "rm", normalizeCommandToken(`"rm"`))
+}
+
+func TestNormalizeCommandToken_DollarSingleQuote(t *testing.T) {
+	assert.Equal(t, "rm", normalizeCommandToken("$'rm'"))
+}
+
+func TestNormalizeCommandToken_Backslash(t *testing.T) {
+	assert.Equal(t, "rm", normalizeCommandToken(`\rm`))
+}
+
+func TestNormalizeCommandToken_FunctionDef(t *testing.T) {
+	assert.Equal(t, "rm", normalizeCommandToken("rm(){}"))
+}
+
+func TestNormalizeCommandToken_PlainToken(t *testing.T) {
+	assert.Equal(t, "ls", normalizeCommandToken("ls"))
+}
+
+func TestCommandFilter_QuotedRm_SingleQuote(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked(`'rm' file`))
+}
+
+func TestCommandFilter_QuotedRm_DoubleQuote(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked(`"rm" file`))
+}
+
+func TestCommandFilter_QuotedRm_DollarSingleQuote(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked(`$'rm' file`))
+}
+
+func TestCommandFilter_QuotedRm_BackslashEscape(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked(`\rm file`))
+}
+
+func TestCommandFilter_FunctionDefinitionBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked("rm(){ rm file; }"))
+}
+
+func TestCommandFilter_FunctionBodyBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	// Function name "helper" is not blacklisted, but its body contains "rm".
+	assert.True(t, f.IsBlocked("helper(){ rm file; }"))
+}
+
+func TestCommandFilter_FunctionKeywordBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked("function rm { rm file; }"))
+}
+
+func TestCommandFilter_QuotedRmWithSudo(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked(`sudo 'rm' file`))
+	assert.True(t, f.IsBlocked(`sudo "rm" file`))
+	assert.True(t, f.IsBlocked(`sudo \rm file`))
+}
+
+func TestCommandFilter_QuotedRmInSubshell(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked(`echo $('rm' file)`))
+}
+
+func TestCommandFilter_VariableAssignmentQuoted(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked(`x="rm"`))
+	assert.True(t, f.IsBlocked(`x='rm'`))
+	assert.True(t, f.IsBlocked(`x=$'rm'`))
+	assert.True(t, f.IsBlocked(`x=\rm`))
+}
+
+// --- Task 47-3 AC-2: Indirect executors ---
+
+func TestCommandFilter_AwkSystemBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked(`awk '{system("rm file")}'`))
+}
+
+func TestCommandFilter_AwkNoSystemAllowed(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.False(t, f.IsBlocked(`awk '{print $1}'`))
+}
+
+func TestCommandFilter_GawkSystemBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked(`gawk 'BEGIN{system("rm")}'`))
+}
+
+func TestCommandFilter_FindExecBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked(`find . -exec rm {} \;`))
+}
+
+func TestCommandFilter_FindExecdirBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked(`find . -execdir rm {} \;`))
+}
+
+func TestCommandFilter_FindNoExecAllowed(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.False(t, f.IsBlocked(`find . -name '*.go'`))
+}
+
+func TestCommandFilter_MakeFileBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked(`make -f /tmp/evil.mk`))
+}
+
+func TestCommandFilter_MakeLongFileBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked(`make --file /tmp/evil.mk`))
+}
+
+func TestCommandFilter_MakeMakefileBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked(`make --makefile /tmp/evil.mk`))
+}
+
+func TestCommandFilter_MakeNoFileAllowed(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.False(t, f.IsBlocked(`make build`))
+}
+
+func TestCommandFilter_GitConfigBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked(`git -c core.hooksPath=/tmp/x status`))
+}
+
+func TestCommandFilter_GitLongConfigBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked(`git --config core.hooksPath=/tmp/x status`))
+}
+
+func TestCommandFilter_GitStatusAllowed(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.False(t, f.IsBlocked(`git status`))
+}
+
+// --- Task 47-3 AC-3: env / printenv blacklist ---
+
+func TestCommandFilter_EnvBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked("env"))
+	assert.True(t, f.IsBlocked("env | grep SECRET"))
+}
+
+func TestCommandFilter_PrintenvBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked("printenv"))
+	assert.True(t, f.IsBlocked("printenv PATH"))
+}
+
+func TestCommandFilter_EnvRmBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	// "env rm" must be blocked — env is blacklisted directly.
+	assert.True(t, f.IsBlocked("env rm file"))
+}
+
+// --- Task 47-3 AC-4: Whitelist mode ---
+
+func TestCommandFilter_WhitelistAllowsKnownPrefix(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	f.whitelist = DefaultCommandWhitelist
+	assert.False(t, f.IsBlocked("go test ./..."))
+	assert.False(t, f.IsBlocked("ls -la"))
+	assert.False(t, f.IsBlocked("git status"))
+}
+
+func TestCommandFilter_WhitelistBlocksUnknown(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	f.whitelist = DefaultCommandWhitelist
+	assert.True(t, f.IsBlocked("docker build ."))
+	assert.True(t, f.IsBlocked("npm install"))
+}
+
+func TestCommandFilter_WhitelistStillBlocksBlacklisted(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	f.whitelist = DefaultCommandWhitelist
+	assert.True(t, f.IsBlocked("rm -rf /"))
+}
+
+func TestCommandFilter_WhitelistEmptyDisablesMode(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.False(t, f.IsBlocked("docker build ."))
+	assert.False(t, f.IsBlocked("npm install"))
+}
+
+func TestCommandFilter_WhitelistGoTestOnly(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	f.whitelist = []string{"go test"}
+	assert.False(t, f.IsBlocked("go test ./..."))
+	assert.True(t, f.IsBlocked("go run main.go"))
+}
+
+func TestSandbox_WhitelistModeBlocks(t *testing.T) {
+	sb := NewDefaultBashSandbox(WithCommandWhitelist(DefaultCommandWhitelist))
+	err := sb.Validate(context.Background(), "docker build .", "/anywhere")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "whitelist")
+}
+
+func TestSandbox_WhitelistModeAllows(t *testing.T) {
+	sb := NewDefaultBashSandbox(WithCommandWhitelist(DefaultCommandWhitelist))
+	err := sb.Validate(context.Background(), "go test ./...", "/anywhere")
+	require.NoError(t, err)
+}
+
+func TestSandbox_WhitelistModeBlocksIndirectExecutor(t *testing.T) {
+	sb := NewDefaultBashSandbox(WithCommandWhitelist(DefaultCommandWhitelist))
+	// find is in the whitelist, but -exec is an indirect executor.
+	err := sb.Validate(context.Background(), "find . -exec rm {} \\;", "/anywhere")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "blacklist")
+}
