@@ -1,6 +1,7 @@
 package config
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -151,4 +152,63 @@ func TestYAMLBlockScalar(t *testing.T) {
 	require.True(t, ok)
 	assert.Empty(t, emptyText)
 	assert.Equal(t, "ok", m8["next"])
+}
+
+// ---------------------------------------------------------------------------
+// HI-12: Deep nesting and large input hardening (task 48-14)
+// ---------------------------------------------------------------------------
+
+// TestYAMLFlowMap_DeepNesting100Levels verifies that a flow map nested 100
+// levels deep does not crash or stack-overflow (AC-3).
+func TestYAMLFlowMap_DeepNesting100Levels(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString("key: ")
+	for i := 0; i < 100; i++ {
+		sb.WriteString("{a: ")
+	}
+	sb.WriteString("value")
+	for i := 0; i < 100; i++ {
+		sb.WriteString("}")
+	}
+	tree, err := parseYAMLTree([]byte(sb.String()))
+	require.NoError(t, err)
+	m, ok := tree.(map[string]any)
+	require.True(t, ok)
+	// Walk to the innermost value.
+	inner := m["key"]
+	for i := 0; i < 100; i++ {
+		mp, ok := inner.(map[string]any)
+		require.True(t, ok, "level %d", i)
+		inner = mp["a"]
+	}
+	assert.Equal(t, "value", inner)
+}
+
+// TestYAMLFlowMap_DeepNestingExceedsLimit verifies that flow map nesting
+// beyond the max depth returns an error rather than crashing.
+func TestYAMLFlowMap_DeepNestingExceedsLimit(t *testing.T) {
+	var sb strings.Builder
+	sb.WriteString("key: ")
+	for i := 0; i < 102; i++ {
+		sb.WriteString("{a: ")
+	}
+	sb.WriteString("value")
+	for i := 0; i < 102; i++ {
+		sb.WriteString("}")
+	}
+	_, err := parseYAMLTree([]byte(sb.String()))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "too deep")
+}
+
+// TestYAML_VeryLongValue verifies that a value exceeding 1MB does not crash
+// the parser.
+func TestYAML_VeryLongValue(t *testing.T) {
+	longVal := strings.Repeat("x", 1<<20) // 1 MiB
+	doc := "key: " + longVal + "\n"
+	tree, err := parseYAMLTree([]byte(doc))
+	require.NoError(t, err)
+	m, ok := tree.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, longVal, m["key"])
 }
