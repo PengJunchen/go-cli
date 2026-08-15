@@ -752,7 +752,7 @@ func (le *DefaultLineEditor) readSingleLineTTY(readByte func() (byte, error), pr
 							fmt.Fprintf(le.out, "\033[%dA", le.prevVisualLines-1) //nolint:errcheck
 						}
 						fmt.Fprint(le.out, "\r\033[J")                                    //nolint:errcheck
-						fmt.Fprint(le.out, prompt)                                         //nolint:errcheck
+						fmt.Fprint(le.out, prompt)                                        //nolint:errcheck
 						fmt.Fprint(le.out, strings.ReplaceAll(string(buf), "\n", "\r\n")) //nolint:errcheck
 						le.prevVisualLines = visualLineCount(prompt, buf, termW)
 						fmt.Fprint(le.out, "\r\n") //nolint:errcheck

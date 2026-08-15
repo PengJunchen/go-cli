@@ -43,8 +43,8 @@ type stubACPClient struct {
 	name string
 }
 
-func (c *stubACPClient) Connect(_ context.Context) error            { return nil }
-func (c *stubACPClient) Disconnect(_ context.Context) error         { return nil }
+func (c *stubACPClient) Connect(_ context.Context) error    { return nil }
+func (c *stubACPClient) Disconnect(_ context.Context) error { return nil }
 func (c *stubACPClient) SendMessage(_ context.Context, msg acp.ACPMessage) error {
 	c.mu.Lock()
 	c.sent = append(c.sent, msg)
