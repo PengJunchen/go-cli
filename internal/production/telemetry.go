@@ -3,6 +3,8 @@ package production
 import (
 	"context"
 	"log/slog"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -56,7 +58,7 @@ func NewDefaultTelemetry(opts ...Option) Telemetry {
 }
 
 // Record stores a metric, summing the value into the running total for its
-// name. It emits a telemetry.record span and a debug-level log.
+// name+labels composite key. It emits a telemetry.record span and a debug-level log.
 func (t *DefaultTelemetry) Record(ctx context.Context, metric TelemetryMetric) error {
 	span, ctx := tracing.SpanFromContext(ctx, "telemetry.record", tracing.SpanKindInternal)
 	defer span.End()
@@ -69,9 +71,10 @@ func (t *DefaultTelemetry) Record(ctx context.Context, metric TelemetryMetric) e
 		ts = time.Now()
 	}
 
+	key := metricKey(metric.Name, metric.Labels)
 	t.mu.Lock()
-	t.values[metric.Name] += metric.Value
-	t.lastSeen[metric.Name] = ts
+	t.values[key] += metric.Value
+	t.lastSeen[key] = ts
 	t.mu.Unlock()
 
 	span.SetAttributes(
@@ -88,7 +91,8 @@ func (t *DefaultTelemetry) Record(ctx context.Context, metric TelemetryMetric) e
 	return nil
 }
 
-// Snapshot returns a copy of the aggregated metric values keyed by name.
+// Snapshot returns a copy of the aggregated metric values keyed by the
+// name+labels composite key (e.g. "http_requests{method=GET,status=200}").
 func (t *DefaultTelemetry) Snapshot() map[string]float64 {
 	t.mu.RLock()
 	defer t.mu.RUnlock()
@@ -101,3 +105,30 @@ func (t *DefaultTelemetry) Snapshot() map[string]float64 {
 
 // Name returns the telemetry identifier.
 func (t *DefaultTelemetry) Name() string { return t.name }
+
+// metricKey builds a composite storage key from a metric name and its labels.
+// Labels are sorted by key for deterministic output. Metrics with no labels
+// use the bare name as the key.
+func metricKey(name string, labels map[string]string) string {
+	if len(labels) == 0 {
+		return name
+	}
+	keys := make([]string, 0, len(labels))
+	for k := range labels {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	b.WriteString(name)
+	b.WriteByte('{')
+	for i, k := range keys {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		b.WriteString(k)
+		b.WriteByte('=')
+		b.WriteString(labels[k])
+	}
+	b.WriteByte('}')
+	return b.String()
+}

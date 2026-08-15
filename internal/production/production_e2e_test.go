@@ -201,7 +201,7 @@ func TestAuditTelemetryEndToEnd(t *testing.T) {
 	}
 
 	snap := tel.Snapshot()
-	assert.Equal(t, float64(n), snap["tool_run_total"])
+	assert.Equal(t, float64(n), snap["tool_run_total{tool=editor}"])
 }
 
 // TestTelemetryAndIdempotentCacheIntegration records metrics per cache
