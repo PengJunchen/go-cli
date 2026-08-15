@@ -1,8 +1,10 @@
 package production
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -382,4 +384,28 @@ func TestWithGuardSeverityOverridesDefault(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, res.Allowed)
 	assert.Equal(t, GuardCritical, res.Severity)
+}
+
+// TestRegexOutputGuardWarnsOnInvalidPattern verifies that when a regex pattern
+// fails to compile, a slog.Warn is emitted with the pattern and error so the
+// failure is visible instead of silently swallowed.
+func TestRegexOutputGuardWarnsOnInvalidPattern(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	var buf bytes.Buffer
+	orig := slog.Default()
+	defer slog.SetDefault(orig)
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+
+	g := NewRegexOutputGuard([]string{`[invalid`})
+	require.NotNil(t, g)
+
+	logOutput := buf.String()
+	assert.Contains(t, logOutput, "output_guard.regex_compile_failed")
+	assert.Contains(t, logOutput, "[invalid")
+
+	// The guard still works (fail-safe: skips the bad pattern, allows output).
+	res, err := g.Check(context.Background(), "arr")
+	require.NoError(t, err)
+	assert.True(t, res.Allowed)
 }

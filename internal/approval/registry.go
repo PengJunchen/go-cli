@@ -20,7 +20,7 @@ type registry struct {
 var (
 	registryMu sync.RWMutex
 	defaultReg = &registry{
-		classifier:             &AllowAllClassifier{},
+		classifier:             &DenyAllClassifier{},
 		store:                  NewInMemoryApprovalStore(),
 		permissionModeResolver: NewDefaultPermissionModeResolver(),
 		permissionMode:         PermissionDefault,
@@ -29,12 +29,12 @@ var (
 )
 
 // RegisterApprovalClassifier swaps in a new active classifier. Pass nil to
-// reset to the allow-all classifier.
+// reset to the deny-all classifier.
 func RegisterApprovalClassifier(classifier ApprovalClassifier) {
 	registryMu.Lock()
 	defer registryMu.Unlock()
 	if classifier == nil {
-		classifier = &AllowAllClassifier{}
+		classifier = &DenyAllClassifier{}
 	}
 	slog.Info("approval.register.classifier", "classifier", classifier.Name())
 	defaultReg.classifier = classifier
