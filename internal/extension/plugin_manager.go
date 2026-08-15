@@ -2,6 +2,8 @@ package extension
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 
@@ -34,19 +36,22 @@ func NewPluginManager(loader PluginLoader) *PluginManager {
 
 // Load iterates the given paths, loading extensions from each via the
 // PluginLoader. A load error for one path does not prevent the remaining paths
-// from being processed; the error is logged and execution continues.
+// from being processed; the error is logged and execution continues. All
+// errors are aggregated and returned at the end.
 func (pm *PluginManager) Load(ctx context.Context, paths []string) error {
+	var errs []error
 	for _, path := range paths {
 		exts, err := pm.loader.Load(ctx, path)
 		if err != nil {
 			slog.Warn("extension.plugin_manager.load_failed", "path", path, "err", err)
+			errs = append(errs, fmt.Errorf("plugin %q: %w", path, err))
 			continue
 		}
 		pm.mu.Lock()
 		pm.extensions = append(pm.extensions, exts...)
 		pm.mu.Unlock()
 	}
-	return nil
+	return errors.Join(errs...)
 }
 
 // Init initializes every loaded extension by calling Init against the internal

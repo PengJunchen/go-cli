@@ -85,7 +85,7 @@ func (p testProvider) Models() []llm.ModelInfo { return nil }
 var _ llm.ModelProvider = (*testProvider)(nil)
 
 // ExtensionRegistry exposes the five registration methods and the default
-// implementation stores by name (last writer wins) with getters.
+// implementation stores by name with getters.
 func TestExtensionRegistryRegisterAndGet(t *testing.T) {
 	ctx := context.Background()
 	reg, ok := NewExtensionRegistry().(*DefaultExtensionRegistry)
@@ -115,23 +115,27 @@ func TestExtensionRegistryRegisterAndGet(t *testing.T) {
 	assert.Equal(t, "m1", reg.Middleware("m1").Name())
 }
 
-// duplicate registrations overwrite (last writer wins) and command errors
-// propagate.
+// duplicate registrations return an error, the original entry is preserved,
+// and command errors propagate.
 func TestExtensionRegistryDuplicatesAndErrors(t *testing.T) {
 	ctx := context.Background()
 	reg, ok := NewExtensionRegistry().(*DefaultExtensionRegistry)
 	require.True(t, ok)
 
 	require.NoError(t, reg.RegisterTool(ctx, testTool{name: "read"}))
-	require.NoError(t, reg.RegisterTool(ctx, testTool{name: "read"}))
+	err := reg.RegisterTool(ctx, testTool{name: "read"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "extension already registered: read")
 	assert.Equal(t, "read", reg.tool("read").Name())
 
-	calledA, calledB := false, false
+	calledA := false
 	require.NoError(t, reg.RegisterCommand("run", func([]string) error { calledA = true; return nil }))
-	require.NoError(t, reg.RegisterCommand("run", func([]string) error { calledB = true; return nil }))
+	err = reg.RegisterCommand("run", func([]string) error { return nil })
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "extension already registered: run")
+	// The original command should still be the one registered.
 	require.NoError(t, reg.command("run")(nil))
-	assert.False(t, calledA)
-	assert.True(t, calledB)
+	assert.True(t, calledA)
 
 	sentinel := errors.New("boom")
 	require.NoError(t, reg.RegisterCommand("fail", func([]string) error { return sentinel }))
