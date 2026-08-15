@@ -1,13 +1,19 @@
 package mcp
 
 import (
+	"bufio"
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"os"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -255,4 +261,128 @@ func TestHTTPAdapterCallToolSSE(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "hello", result.Content)
 	assert.False(t, result.IsError)
+}
+
+// ---------------------------------------------------------------------------
+// OAuth CSRF state parameter tests
+// ---------------------------------------------------------------------------
+
+// TestGenerateOAuthState verifies that generateOAuthState returns a
+// 64-character hex-encoded string (32 bytes of cryptographic randomness).
+func TestGenerateOAuthState(t *testing.T) {
+	t.Parallel()
+	state, err := generateOAuthState()
+	require.NoError(t, err)
+	assert.Len(t, state, 64, "state should be 32 bytes hex-encoded (64 chars)")
+	decoded, err := hex.DecodeString(state)
+	require.NoError(t, err, "state should be valid hex")
+	assert.Len(t, decoded, 32, "decoded state should be 32 bytes")
+}
+
+// TestGenerateOAuthStateUniqueness verifies that successive calls to
+// generateOAuthState produce different values.
+func TestGenerateOAuthStateUniqueness(t *testing.T) {
+	t.Parallel()
+	seen := make(map[string]bool, 100)
+	for i := 0; i < 100; i++ {
+		s, err := generateOAuthState()
+		require.NoError(t, err)
+		assert.False(t, seen[s], "state %q already generated", s)
+		seen[s] = true
+	}
+}
+
+// TestOAuthFlowStateParameter verifies that:
+//  1. The state parameter is present in the authorization URL and matches the
+//     value stored on the adapter.
+//  2. A callback with a missing state parameter is rejected (HTTP 400).
+//  3. A callback with a mismatched state parameter is rejected (HTTP 400).
+//  4. A callback with the correct state parameter succeeds (HTTP 200) and the
+//     OAuth flow completes with a valid access token.
+//
+// This test does NOT run in parallel because it temporarily replaces
+// os.Stderr to capture the printed authorization URL.
+func TestOAuthFlowStateParameter(t *testing.T) {
+	// Token endpoint that returns a valid access token.
+	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"access_token": "token-xyz",
+			"token_type":   "Bearer",
+		})
+	}))
+	t.Cleanup(tokenSrv.Close)
+
+	adapter := NewHTTPClientAdapter(MCPServerConfig{
+		Name: "oauth-srv",
+		OAuthConfig: &OAuthConfig{
+			AuthorizationURL: "https://auth.example.com/authorize",
+			TokenURL:         tokenSrv.URL,
+			ClientID:         "test-client",
+		},
+	})
+
+	// Capture stderr to extract the printed authorization URL.
+	oldStderr := os.Stderr
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+	os.Stderr = w
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- adapter.doOAuthFlow(ctx, "")
+	}()
+
+	// Read the authorization URL from the captured stderr.
+	scanner := bufio.NewScanner(r)
+	var authURLStr string
+	for scanner.Scan() {
+		line := strings.TrimSpace(scanner.Text())
+		if strings.HasPrefix(line, "http") {
+			authURLStr = line
+			break
+		}
+	}
+	os.Stderr = oldStderr
+	_ = w.Close()
+
+	require.NotEmpty(t, authURLStr, "authorization URL should have been printed to stderr")
+
+	authURL, err := url.Parse(authURLStr)
+	require.NoError(t, err)
+
+	// Verify the state parameter is present in the authorization URL.
+	state := authURL.Query().Get("state")
+	require.NotEmpty(t, state, "state parameter must be present in the authorization URL")
+	assert.Equal(t, adapter.oauthState, state, "stored state should match URL state")
+
+	// Verify the redirect_uri (callback URL) is present.
+	redirectURI := authURL.Query().Get("redirect_uri")
+	require.NotEmpty(t, redirectURI, "redirect_uri must be present in the authorization URL")
+
+	// Callback with missing state parameter must be rejected.
+	resp, err := http.Get(redirectURI + "?code=test-code")
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	_ = resp.Body.Close()
+
+	// Callback with mismatched state parameter must be rejected.
+	resp, err = http.Get(redirectURI + "?code=test-code&state=wrong-state")
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
+	_ = resp.Body.Close()
+
+	// Callback with the correct state parameter must succeed.
+	resp, err = http.Get(redirectURI + "?code=test-code&state=" + url.QueryEscape(state))
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	_ = resp.Body.Close()
+
+	// The OAuth flow should complete successfully with the token.
+	err = <-errCh
+	require.NoError(t, err)
+	assert.Equal(t, "token-xyz", adapter.token)
 }
