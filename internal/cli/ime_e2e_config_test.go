@@ -43,28 +43,20 @@ func TestE2E_RealConfigScenario_FullPipeline(t *testing.T) {
 	t.Chdir(tempDir)
 
 	// --- Setup: mock MCP HTTP server ---
-	mcpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mcpSrv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodPost {
-			// Respond to initialize
-			if strings.Contains(r.URL.Path, "initialize") || r.Header.Get("Content-Type") != "" {
-				body, _ := json.Marshal(map[string]any{ //nolint:errcheck
-					"jsonrpc": "2.0",
-					"id":      0,
-					"result": map[string]any{
-						"tools": []map[string]any{
-							{"name": "webSearchPro", "description": "Professional web search"},
-							{"name": "webSearchStd", "description": "Standard web search"},
-						},
-					},
-				})
-				//nolint:errcheck // test HTTP response
-				_, _ = w.Write(body) //nolint:errcheck
-				return
-			}
-		}
+		body, _ := json.Marshal(map[string]any{ //nolint:errcheck
+			"jsonrpc": "2.0",
+			"id":      0,
+			"result": map[string]any{
+				"tools": []map[string]any{
+					{"name": "webSearchPro", "description": "Professional web search"},
+					{"name": "webSearchStd", "description": "Standard web search"},
+				},
+			},
+		})
 		//nolint:errcheck // test HTTP response
-		_, _ = w.Write([]byte(`{}`)) //nolint:errcheck
+		_, _ = w.Write(body) //nolint:errcheck
 	}))
 	defer mcpSrv.Close()
 
@@ -198,7 +190,7 @@ func TestE2E_RealConfigScenario_MCPDescriptionPropagated(t *testing.T) {
 	t.Chdir(tempDir)
 
 	// Mock MCP server that returns a tool with a specific description.
-	mcpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mcpSrv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		body, _ := json.Marshal(map[string]any{ //nolint:errcheck
 			"jsonrpc": "2.0",
@@ -253,6 +245,7 @@ func TestE2E_RealConfigScenario_MCPDescriptionPropagated(t *testing.T) {
 // This tests the scenario the user might hit: they have .go-cli/skills/
 // and .go-cli/mcp.json but forgot to add them to .go-cli.yaml.
 func TestE2E_RealConfigScenario_AutoDiscoveryFallback(t *testing.T) {
+	setupTestTrust(t)
 	ctx := context.Background()
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
@@ -278,7 +271,7 @@ Body.
 	require.NoError(t, os.WriteFile(filepath.Join(skillDir, "SKILL.md"), []byte(skillContent), 0o600))
 
 	// --- Setup: .go-cli/mcp.json (should be auto-discovered) ---
-	mcpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mcpSrv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		body, _ := json.Marshal(map[string]any{ //nolint:errcheck
 			"jsonrpc": "2.0",
@@ -346,7 +339,7 @@ func TestE2E_RealConfigScenario_ConfigWinsOverAutoDiscovery(t *testing.T) {
 	t.Chdir(tempDir)
 
 	// Config server.
-	configSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	configSrv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		//nolint:errcheck // test HTTP response
 		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"fromConfig","description":"From config"}]}}`)) //nolint:errcheck
@@ -354,7 +347,7 @@ func TestE2E_RealConfigScenario_ConfigWinsOverAutoDiscovery(t *testing.T) {
 	defer configSrv.Close()
 
 	// Auto-discovery server (should NOT be used).
-	autoSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	autoSrv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		//nolint:errcheck // test HTTP response
 		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"fromAuto","description":"From auto"}]}}`)) //nolint:errcheck
