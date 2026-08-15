@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -19,6 +21,19 @@ import (
 	"github.com/pengjunchen/go-cli/internal/tracing"
 	"github.com/pengjunchen/go-cli/internal/tui"
 )
+
+// newEntryID generates a unique entry ID using crypto/rand. The resulting ID
+// has the form "entry-<16 hex chars>" which avoids collisions with existing
+// entries even when resuming a session that contains sequentially-numbered
+// IDs.
+func newEntryID() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		// Fallback to timestamp-based ID if crypto/rand fails.
+		return fmt.Sprintf("entry-%d", time.Now().UnixNano())
+	}
+	return "entry-" + hex.EncodeToString(b[:])
+}
 
 // REPLSession holds the state of an interactive read-eval-print loop session.
 // It is constructed by interactiveCmd.Run and encapsulates all session-level
@@ -46,6 +61,7 @@ type REPLSession struct {
 	verboseFlag   bool
 	resumeFlag    bool
 	noSandboxFlag bool
+	noOnboardingFlag bool
 
 	// Agent assembly
 	assembly        *AgentAssembly
@@ -122,11 +138,24 @@ func (s *REPLSession) Run(ctx context.Context, cfg Config, args []string) error 
 	return nil
 }
 
-// start performs all one-time session setup: flag parsing, agent assembly,
-// slash-context wiring, and editor/mention-expander initialization.
+// start performs all one-time session setup: flag parsing, onboarding, agent
+// assembly, slash-context wiring, and editor/mention-expander initialization.
 func (s *REPLSession) start(ctx context.Context) error {
 	if err := s.parseFlags(); err != nil {
 		return err
+	}
+	// Run first-run onboarding wizard after flag parsing so that invalid
+	// flags produce a UsageError before the wizard runs. Skipped via
+	// --no-onboarding flag or GO_CLI_NO_ONBOARDING env, and when the API
+	// key is already configured.
+	if s.rc != nil && !s.noOnboardingFlag {
+		in := s.in
+		if in == nil {
+			in = os.Stdin
+		}
+		if err := RunOnboarding(s.rc, in, s.out); err != nil {
+			return err
+		}
 	}
 	if err := s.setupAgent(ctx); err != nil {
 		return err
@@ -150,6 +179,7 @@ func (s *REPLSession) parseFlags() error {
 		resumeFlag    bool
 		thinkingFlag  string
 		noSandboxFlag bool
+		noOnboardingFlag bool
 	)
 	fs.StringVar(&modelFlag, "model", "", "model name to use")
 	fs.StringVar(&providerFlag, "provider", "", "provider name to use")
@@ -158,6 +188,7 @@ func (s *REPLSession) parseFlags() error {
 	fs.BoolVar(&resumeFlag, "resume", false, "resume previous session from store path")
 	fs.StringVar(&thinkingFlag, "thinking", "medium", "thinking level: none|minimal|low|medium|high|max")
 	fs.BoolVar(&noSandboxFlag, "no-sandbox", false, "disable bash sandbox enforcement")
+	fs.BoolVar(&noOnboardingFlag, "no-onboarding", false, "skip first-run onboarding wizard")
 	if err := fs.Parse(s.args); err != nil {
 		return newUsageError("interactive: %v", err)
 	}
@@ -190,6 +221,7 @@ func (s *REPLSession) parseFlags() error {
 	s.verboseFlag = verboseFlag
 	s.resumeFlag = resumeFlag
 	s.noSandboxFlag = noSandboxFlag
+	s.noOnboardingFlag = noOnboardingFlag
 	return nil
 }
 
@@ -272,6 +304,14 @@ func (s *REPLSession) setupSlashContext() {
 		s.sessionHandler.OnResume = func(ctx context.Context, entries []session.SessionEntry) error {
 			s.assembly.Agent.SetHistory(session.EntriesToAgentMessages(entries))
 			return nil
+		}
+		// In directory mode, configure the session ID on the store. When
+		// resuming, keep the existing session file; otherwise create a new
+		// per-session file.
+		if s.assembly.SessionStore.DirMode() {
+			if err := s.assembly.SessionStore.SetSessionID(s.assembly.SessionID, !s.resumeFlag); err != nil {
+				s.logger.Warn("cli_interactive_session_set_id_failed", "err", err)
+			}
 		}
 	}
 	s.slashCtx = slashContext{
@@ -862,7 +902,7 @@ func (s *REPLSession) persistSession() {
 		parentID = s.sessionTree.CurrentLeaf()
 	}
 	userEntry := &session.SessionEntry{
-		ID:        fmt.Sprintf("entry-%d", s.entryCounter),
+		ID:        newEntryID(),
 		ParentID:  parentID,
 		Type:      session.EntryTypeUser,
 		Content:   s.line,
@@ -879,14 +919,13 @@ func (s *REPLSession) persistSession() {
 			s.logger.Warn("cli_interactive_session_tree_append_failed", "err", treeErr)
 		}
 	}
-	s.entryCounter++
 	if s.turnResult.Message != "" {
 		parentID := ""
 		if s.sessionTree != nil {
 			parentID = s.sessionTree.CurrentLeaf()
 		}
 		assistantEntry := &session.SessionEntry{
-			ID:        fmt.Sprintf("entry-%d", s.entryCounter),
+			ID:        newEntryID(),
 			ParentID:  parentID,
 			Type:      session.EntryTypeAssistant,
 			Content:   s.turnResult.Message,
@@ -901,7 +940,6 @@ func (s *REPLSession) persistSession() {
 				s.logger.Warn("cli_interactive_session_tree_append_failed", "err", treeErr)
 			}
 		}
-		s.entryCounter++
 	}
 	// Flush all buffered entries to the store in a single batch.
 	if s.pendingWrites != nil {
