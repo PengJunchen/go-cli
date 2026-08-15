@@ -38,9 +38,24 @@ func NewJSONRPCLineTransport(in io.Reader, out io.Writer, closeFn func() error) 
 	return &JSONRPCLineTransport{in: bufio.NewReader(in), out: out, closeF: closeFn}
 }
 
+// defaultJSONRPCTimeout bounds individual JSON-RPC requests when the caller
+// has not set its own deadline. This prevents a hung server from blocking
+// the agent loop indefinitely.
+const defaultJSONRPCTimeout = 30 * time.Second
+
 // Request sends a JSON-RPC request with a fresh id and blocks until a response
 // with a matching id arrives. It returns the parsed result object.
+//
+// If the caller's context has no deadline, a default 30-second timeout is
+// applied to prevent unbounded blocking on an unresponsive server.
 func (t *JSONRPCLineTransport) Request(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
+	// Apply a default timeout when the caller hasn't set a deadline.
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultJSONRPCTimeout)
+		defer cancel()
+	}
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
 

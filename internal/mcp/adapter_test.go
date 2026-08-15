@@ -442,3 +442,43 @@ func TestConcurrentRequestsDoNotCorruptResponses(t *testing.T) {
 	}
 	require.Empty(t, errs, "concurrent requests must each receive their own response")
 }
+
+// ---------------------------------------------------------------------------
+// JSON-RPC default timeout tests (MD-13)
+// ---------------------------------------------------------------------------
+
+// TestTransportRequestRespectsCallerDeadline verifies that a caller-provided
+// deadline is honored even when the server sends non-matching frames that keep
+// the read loop iterating.
+func TestTransportRequestRespectsCallerDeadline(t *testing.T) {
+	t.Parallel()
+
+	pr, pw := io.Pipe()
+	var out bytes.Buffer
+	tr := NewJSONRPCLineTransport(pr, &out, nil)
+
+	// Writer goroutine: sends non-matching frames so the read loop iterates
+	// and checks ctx.Done() between reads.
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		for i := 1000; ; i++ {
+			frame := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":{}}`+"\n", i)
+			if _, err := pw.Write([]byte(frame)); err != nil {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	_, err := tr.Request(ctx, "ping", nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+
+	// Clean up the writer goroutine.
+	_ = pw.Close()
+	<-writerDone
+}
