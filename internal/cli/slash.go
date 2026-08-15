@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/pengjunchen/go-cli/internal/compaction"
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
@@ -73,6 +74,19 @@ type ModelAccessor interface {
 	ModelSelector() *llm.DefaultModelSelector
 }
 
+// EstimatorAccessor provides access to the token estimator for /context
+// token breakdown visualization.
+type EstimatorAccessor interface {
+	Estimator() compaction.TokenEstimator
+}
+
+// PromptBuilderAccessor provides access to the system prompt builder and
+// context loader for /context token breakdown visualization.
+type PromptBuilderAccessor interface {
+	PromptBuilder() core.SystemPromptBuilder
+	ContextLoader() core.ProjectContextLoader
+}
+
 // Dependencies combines all accessor interfaces. Slash handlers receive
 // this composite interface and use only the parts they need.
 type Dependencies interface {
@@ -83,6 +97,8 @@ type Dependencies interface {
 	MemoryAccessor
 	ConfigAccessor
 	ModelAccessor
+	EstimatorAccessor
+	PromptBuilderAccessor
 }
 
 // slashContext holds the references that slash command handlers need. It is
@@ -126,6 +142,15 @@ type slashContext struct {
 	// modelSelector enables runtime model switching via the /model slash
 	// command. It is nil when the selector was not wired (e.g. in tests).
 	modelSelector *llm.DefaultModelSelector
+	// estimator provides token count estimates for the /context command.
+	// It is nil when the estimator was not wired (e.g. in tests).
+	estimator compaction.TokenEstimator
+	// promptBuilder assembles the system prompt for the /context command.
+	// It is nil when not wired; /context degrades gracefully.
+	promptBuilder core.SystemPromptBuilder
+	// contextLoader loads CLAUDE.md / AGENTS.md files for the /context
+	// command. It is nil when not wired; /context degrades gracefully.
+	contextLoader core.ProjectContextLoader
 }
 
 // Compile-time assertion that *slashContext satisfies Dependencies.
@@ -177,6 +202,15 @@ func (sc *slashContext) Config() *config.Config { return sc.config }
 // --- ModelAccessor ---
 
 func (sc *slashContext) ModelSelector() *llm.DefaultModelSelector { return sc.modelSelector }
+
+// --- EstimatorAccessor ---
+
+func (sc *slashContext) Estimator() compaction.TokenEstimator { return sc.estimator }
+
+// --- PromptBuilderAccessor ---
+
+func (sc *slashContext) PromptBuilder() core.SystemPromptBuilder  { return sc.promptBuilder }
+func (sc *slashContext) ContextLoader() core.ProjectContextLoader { return sc.contextLoader }
 
 // defaultSlashReg is the fully populated registry shared by all interactive
 // sessions. It is built once at package initialization; the handlers it
@@ -252,6 +286,9 @@ func buildSlashCommandRegistry() *SlashCommandRegistry {
 
 	// Edit opens an external editor for composing a message.
 	add(&EditHandler{})
+
+	// Context shows token breakdown of the context window by category.
+	add(&ContextHandler{})
 
 	// Aliases.
 	reg.RegisterAlias("h", "help")
