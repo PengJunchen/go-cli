@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"strings"
 	"sync"
@@ -388,7 +389,13 @@ func TestHTTPOAuthFlow(t *testing.T) {
 			http.Error(w, "missing redirect_uri", http.StatusBadRequest)
 			return
 		}
-		http.Redirect(w, r, redirectURI+"?code=fake-auth-code", http.StatusFound)
+		// Forward the state parameter to satisfy CSRF verification on the callback.
+		state := r.URL.Query().Get("state")
+		redirectURL := redirectURI + "?code=fake-auth-code"
+		if state != "" {
+			redirectURL += "&state=" + url.QueryEscape(state)
+		}
+		http.Redirect(w, r, redirectURL, http.StatusFound)
 	}))
 	t.Cleanup(authSrv.Close)
 

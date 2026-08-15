@@ -3,6 +3,8 @@ package mcp
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -33,6 +35,7 @@ type HTTPClientAdapter struct {
 
 	protocolVersion string
 	token           string // OAuth/bearer token obtained after authentication
+	oauthState      string // CSRF state parameter for the current OAuth flow
 }
 
 var _ MCPClient = (*HTTPClientAdapter)(nil)
@@ -404,15 +407,35 @@ func (a *HTTPClientAdapter) doInitializeLocked(ctx context.Context) error {
 	return nil
 }
 
+// generateOAuthState generates a cryptographically random 32-byte hex-encoded
+// string used as the OAuth state parameter to prevent CSRF attacks on the
+// authorization code flow.
+func generateOAuthState() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
 // doOAuthFlow performs the OAuth 2.1 authorization code flow: starts a local
 // callback server, opens the user's browser to the authorization URL, receives
 // the authorization code, and exchanges it for an access token. The token is
-// stored in a.token and used for subsequent requests.
+// stored in a.token and used for subsequent requests. A random state parameter
+// is included in the authorization URL and verified on callback to prevent
+// CSRF attacks.
 func (a *HTTPClientAdapter) doOAuthFlow(ctx context.Context, _ string) error {
 	oauth := a.cfg.OAuthConfig
 	if oauth == nil {
 		return fmt.Errorf("mcp: no OAuth config")
 	}
+
+	// Generate and store the CSRF state parameter.
+	state, err := generateOAuthState()
+	if err != nil {
+		return fmt.Errorf("mcp: generate oauth state: %w", err)
+	}
+	a.oauthState = state
 
 	// Start a local callback server to receive the authorization code.
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
@@ -425,16 +448,24 @@ func (a *HTTPClientAdapter) doOAuthFlow(ctx context.Context, _ string) error {
 	codeCh := make(chan string, 1)
 	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		code := r.URL.Query().Get("code")
-		if code != "" {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte("Authorization complete. You may close this window."))
-			select {
-			case codeCh <- code:
-			default:
-			}
-		} else {
+		callbackState := r.URL.Query().Get("state")
+		if code == "" {
 			w.WriteHeader(http.StatusBadRequest)
 			_, _ = w.Write([]byte("Missing authorization code."))
+			return
+		}
+		// Verify the CSRF state parameter to prevent cross-site request
+		// forgery attacks on the authorization code flow.
+		if callbackState == "" || callbackState != state {
+			w.WriteHeader(http.StatusBadRequest)
+			_, _ = w.Write([]byte("Invalid state parameter."))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("Authorization complete. You may close this window."))
+		select {
+		case codeCh <- code:
+		default:
 		}
 	})}
 	go func() { _ = srv.Serve(listener) }()
@@ -449,6 +480,7 @@ func (a *HTTPClientAdapter) doOAuthFlow(ctx context.Context, _ string) error {
 	q.Set("response_type", "code")
 	q.Set("client_id", oauth.ClientID)
 	q.Set("redirect_uri", redirectURL)
+	q.Set("state", state)
 	if len(oauth.Scopes) > 0 {
 		q.Set("scope", strings.Join(oauth.Scopes, " "))
 	}
