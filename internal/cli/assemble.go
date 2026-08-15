@@ -573,6 +573,7 @@ func (s *assembleState) runCleanup() {
 // LIFO cleanup because they are appended after all subsystem cleanups.
 func (s *assembleState) appendFinalCleanup() {
 	s.cleanupList = append(s.cleanupList, func() {
+		StopHotReloaders()
 		if s.eventBus != nil {
 			s.eventBus.Close()
 		}
@@ -1535,16 +1536,72 @@ func findModelInfo(models []llm.ModelInfo, name string) llm.ModelInfo {
 	return llm.ModelInfo{}
 }
 
+// hotReloadersMu guards activeHotReloaders.
+var hotReloadersMu sync.Mutex
+
+// activeHotReloaders holds all running MCP HotReloaders so they can be
+// stopped on session cleanup and manually triggered by /mcp reload.
+var activeHotReloaders []mcp.HotReloader
+
+// addHotReloader appends a running HotReloader to the package-level list.
+func addHotReloader(hr mcp.HotReloader) {
+	hotReloadersMu.Lock()
+	defer hotReloadersMu.Unlock()
+	activeHotReloaders = append(activeHotReloaders, hr)
+}
+
+// StopHotReloaders stops all active MCP HotReloaders. It is safe to call from
+// session cleanup and is idempotent.
+func StopHotReloaders() {
+	hotReloadersMu.Lock()
+	reloaders := activeHotReloaders
+	activeHotReloaders = nil
+	hotReloadersMu.Unlock()
+
+	for _, hr := range reloaders {
+		if err := hr.Stop(); err != nil {
+			slog.Warn("assemble_mcp_hot_reload_stop_failed", "reloader", hr.Name(), "err", err)
+		}
+	}
+}
+
+// ReloadAllHotReloaders manually triggers Reload on every active HotReloader.
+// It returns the number of reloaders that were triggered.
+func ReloadAllHotReloaders(ctx context.Context) int {
+	hotReloadersMu.Lock()
+	reloaders := make([]mcp.HotReloader, len(activeHotReloaders))
+	copy(reloaders, activeHotReloaders)
+	hotReloadersMu.Unlock()
+
+	for _, hr := range reloaders {
+		if err := hr.Reload(ctx); err != nil {
+			slog.Warn("assemble_mcp_hot_reload_manual_failed", "reloader", hr.Name(), "err", err)
+		}
+	}
+	return len(reloaders)
+}
+
 // registerMCPTools connects to configured MCP servers and registers their
 // tools into the tool registry. When no MCP servers are configured in the
 // main config file, it auto-loads from .go-cli/mcp.json or
 // ~/.config/go-cli/mcp.json if either exists. Servers are connected in
 // parallel using errgroup to reduce startup latency.
+//
+// When servers are auto-discovered from a config file, a HotReloader is
+// created for each connected server so that editing the config file
+// automatically triggers a reconnect and tool re-registration.
 func registerMCPTools(ctx context.Context, rc *config.Config, tr tools.DeferredRegistry) error {
-	servers := loadMCPServers(ctx, rc)
+	servers, configPath := loadMCPServersWithConfigPath(ctx, rc)
 	if len(servers) == 0 {
 		return nil
 	}
+
+	// connected collects successfully connected clients so HotReloaders can be
+	// created after the errgroup completes.
+	var (
+		connectedMu sync.Mutex
+		connected   []mcp.MCPClient
+	)
 
 	g, gctx := errgroup.WithContext(ctx)
 	for _, srv := range servers {
@@ -1585,28 +1642,80 @@ func registerMCPTools(ctx context.Context, rc *config.Config, tr tools.DeferredR
 				return nil
 			}
 
-			for _, t := range mcpTools {
-				toolName := mcp.NormalizeToolName(client.Name(), t.Name)
-				clientRef := client
-				toolRef := t
-				if regErr := tr.RegisterDeferred(gctx, toolName, func() (tools.ToolDefinition, error) {
-					return mcp.NewMCPToolAdapter(clientRef, toolRef), nil
-				}); regErr != nil {
-					slog.Warn("assemble_mcp_register_failed", "tool", t.Name, "err", regErr)
-				}
-			}
+			registerMCPToolBatch(gctx, tr, client, mcpTools)
 			slog.Info("assemble_mcp_registered", "server", srv.Name, "tools", len(mcpTools))
+
+			connectedMu.Lock()
+			connected = append(connected, client)
+			connectedMu.Unlock()
 			return nil
 		})
 	}
-	return g.Wait()
+	if err := g.Wait(); err != nil {
+		return err
+	}
+
+	// Create a HotReloader for each connected server when a config file path
+	// was discovered. The reloader watches the file and, on change, reconnects
+	// the client and re-registers its tools.
+	if configPath != "" {
+		for _, client := range connected {
+			createAndStartHotReloader(ctx, configPath, client, tr)
+		}
+	}
+
+	return nil
+}
+
+// registerMCPToolBatch registers a batch of MCP tools from a single server
+// into the deferred registry. It is shared by the initial connection path and
+// the HotReloader re-registration callback.
+func registerMCPToolBatch(ctx context.Context, tr tools.DeferredRegistry, client mcp.MCPClient, mcpTools []mcp.MCPTool) {
+	for _, t := range mcpTools {
+		toolName := mcp.NormalizeToolName(client.Name(), t.Name)
+		clientRef := client
+		toolRef := t
+		if regErr := tr.RegisterDeferred(ctx, toolName, func() (tools.ToolDefinition, error) {
+			return mcp.NewMCPToolAdapter(clientRef, toolRef), nil
+		}); regErr != nil {
+			slog.Warn("assemble_mcp_register_failed", "tool", t.Name, "err", regErr)
+		}
+	}
+}
+
+// createAndStartHotReloader builds a HotReloader for a single MCP client,
+// starts watching the config file, and registers it for shutdown.
+func createAndStartHotReloader(ctx context.Context, configPath string, client mcp.MCPClient, tr tools.DeferredRegistry) {
+	clientRef := client
+	registerFn := mcp.RegisterToolsFunc(func(mcpTools []mcp.MCPTool) {
+		registerMCPToolBatch(context.Background(), tr, clientRef, mcpTools)
+		slog.Info("assemble_mcp_hot_reload_reregistered", "server", clientRef.Name(), "tools", len(mcpTools))
+	})
+	hr := mcp.NewDefaultHotReloader(client, registerFn)
+	if watchErr := hr.Watch(ctx, configPath); watchErr != nil {
+		slog.Warn("assemble_mcp_hot_reload_watch_failed", "server", client.Name(), "err", watchErr)
+		return
+	}
+	addHotReloader(hr)
+	slog.Info("assemble_mcp_hot_reload_started", "server", client.Name(), "config_path", configPath)
 }
 
 // loadMCPServers returns MCP server configs from the main config, or
-// auto-discovered from default paths when the main config has none.
+// auto-discovered from default paths when the main config has none. It is a
+// thin wrapper around loadMCPServersWithConfigPath for callers that do not
+// need the discovered config file path.
 func loadMCPServers(ctx context.Context, rc *config.Config) []config.MCPServerConfig {
+	servers, _ := loadMCPServersWithConfigPath(ctx, rc)
+	return servers
+}
+
+// loadMCPServersWithConfigPath is like loadMCPServers but also returns the
+// config file path that was auto-discovered (e.g. ".go-cli/mcp.json"). The
+// path is empty when servers come from the main config or when no config file
+// was found. The path is used by the HotReloader to watch for changes.
+func loadMCPServersWithConfigPath(ctx context.Context, rc *config.Config) ([]config.MCPServerConfig, string) {
 	if rc != nil && len(rc.MCP.Servers) > 0 {
-		return rc.MCP.Servers
+		return rc.MCP.Servers, ""
 	}
 
 	// Auto-discover MCP config from default paths.
@@ -1660,10 +1769,10 @@ func loadMCPServers(ctx context.Context, rc *config.Config) []config.MCPServerCo
 		}
 		if len(result) > 0 {
 			slog.Info("assemble_mcp_config_discovered", "path", path, "servers", len(result))
-			return result
+			return result, path
 		}
 	}
-	return nil
+	return nil, ""
 }
 
 // registerSkillTools loads skills from the configured directory (or default

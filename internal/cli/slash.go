@@ -290,6 +290,9 @@ func buildSlashCommandRegistry() *SlashCommandRegistry {
 	// Context shows token breakdown of the context window by category.
 	add(&ContextHandler{})
 
+	// MCP server management (reload hot reloaders).
+	add(&MCPHandler{})
+
 	// Aliases.
 	reg.RegisterAlias("h", "help")
 	reg.RegisterAlias("c", "cost")
