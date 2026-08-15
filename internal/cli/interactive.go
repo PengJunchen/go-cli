@@ -59,6 +59,8 @@ func (c *interactiveCmd) Synopsis() string {
 }
 
 // Run implements Command. It constructs a REPLSession and delegates to it.
+// First-run onboarding is handled inside REPLSession.start() after flag
+// parsing so that invalid flags produce a UsageError before the wizard runs.
 func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	rs := &REPLSession{
 		cmd:             c,
