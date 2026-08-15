@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -259,9 +260,16 @@ func TestET_Phase22_Production_Telemetry(t *testing.T) {
 	require.NoError(t, err)
 
 	snapshot = dt.Snapshot()
-	assert.Contains(t, snapshot, "tool.call.count",
-		"telemetry should record tool.call.count after tool execution")
-	assert.Greater(t, snapshot["tool.call.count"], 0.0)
+	// Telemetry now uses composite keys with labels (MD-7): name{k=v,...}
+	var foundToolCall bool
+	for k, v := range snapshot {
+		if strings.HasPrefix(k, "tool.call.count{") && v > 0.0 {
+			foundToolCall = true
+			break
+		}
+	}
+	assert.True(t, foundToolCall,
+		"telemetry should record tool.call.count with labels after tool execution")
 }
 
 // =============================================================================
