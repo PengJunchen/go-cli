@@ -122,6 +122,15 @@ func (wl PathWhitelist) IsAllowed(workDir string) bool {
 // (&& and ||), command substitution $(...) and `...`, and normalizes shell
 // quoting/escapes/function definitions before matching so that 'rm', "rm",
 // $'rm', \rm and rm(){} are all reduced to "rm".
+//
+// SECURITY NOTE: CommandFilter is a defense-in-depth layer, not a complete
+// security boundary. It performs static pattern matching and cannot fully
+// evaluate shell semantics (variable expansion, arithmetic expansion,
+// parameter indirection, etc.). Sufficiently obfuscated input may still
+// evade detection, so authoritative security controls must be enforced at
+// the execution layer (e.g. a real sandbox with reduced privileges, seccomp,
+// namespaces). The filter's role is to catch common bypass vectors early and
+// fail closed.
 type CommandFilter struct {
 	blacklist []string
 	whitelist []string
@@ -161,10 +170,19 @@ func (f CommandFilter) blockReason(s string) (bool, string) {
 	if containsHeredoc(s) {
 		return true, "blacklisted heredoc redirection"
 	}
-	// Recursively inspect command substitutions.
+	// Recursively inspect command substitutions. In addition to checking
+	// whether the substitution's own command is blocked, also scan for
+	// blacklisted command names that could be constructed at runtime via
+	// echo/printf (e.g. "$(echo rm) file" resolves to "rm file"). Since the
+	// sandbox cannot evaluate shell substitution, it conservatively
+	// (deny-first) blocks any substitution whose inner content contains a
+	// blacklisted command name as a literal token.
 	for _, inner := range extractSubShells(s) {
 		if blocked, reason := f.blockReason(inner); blocked {
 			return true, reason
+		}
+		if name, found := f.blockedTokenInSubstitution(inner); found {
+			return true, "blacklisted command in substitution: " + name
 		}
 	}
 	// Recursively inspect function-definition bodies so that commands hidden
@@ -626,6 +644,25 @@ func (f CommandFilter) hasBlockedAssignment(seg string) bool {
 		}
 	}
 	return false
+}
+
+// blockedTokenInSubstitution scans the inner content of a command substitution
+// for blacklisted command names appearing as literal tokens. Because the
+// sandbox cannot evaluate shell substitution at filter time, it conservatively
+// (deny-first) treats any blacklisted command name found inside a $(...) or
+// `...` construct as a potential runtime bypass: "$(echo rm) file" resolves to
+// "rm file" at runtime even though the literal inner command "echo rm" is not
+// itself blacklisted. Tokens are normalized (shell quoting/escapes stripped)
+// and filepath.Base is applied so that "/usr/bin/rm" is reduced to "rm". It
+// returns the matched blacklisted name and true when a match is found.
+func (f CommandFilter) blockedTokenInSubstitution(inner string) (string, bool) {
+	for _, field := range strings.Fields(inner) {
+		name := filepath.Base(normalizeCommandToken(field))
+		if f.isBlacklisted(name) {
+			return name, true
+		}
+	}
+	return "", false
 }
 
 // systemCallRe matches a call to the system() function inside interpreters

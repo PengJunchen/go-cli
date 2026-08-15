@@ -732,3 +732,76 @@ func TestSandbox_WhitelistModeBlocksIndirectExecutor(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "blacklist")
 }
+
+// --- Task 48-4: command substitution bypass detection ---
+//
+// A blacklisted command hidden inside $() or backticks (e.g. "$(echo rm)")
+// resolves to that command at runtime. The sandbox cannot evaluate shell
+// substitution, so it conservatively (deny-first) blocks any substitution
+// whose inner content contains a blacklisted command name as a literal token.
+
+func TestCommandFilter_SubstitutionEchoRmBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	// "$(echo rm) file" resolves to "rm file" at runtime.
+	assert.True(t, f.IsBlocked("$(echo rm) file"))
+}
+
+func TestCommandFilter_BacktickEchoRmBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked("`echo rm` file"))
+}
+
+func TestCommandFilter_SubstitutionPrintfRmBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked("$(printf rm)"))
+}
+
+func TestCommandFilter_BacktickPrintfRmBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked("`printf rm`"))
+}
+
+func TestCommandFilter_SubstitutionPathRmBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	// Path-prefixed blacklisted command inside a substitution.
+	assert.True(t, f.IsBlocked("$(echo /usr/bin/rm) file"))
+}
+
+func TestCommandFilter_SubstitutionQuotedRmBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked(`$(echo 'rm') file`))
+	assert.True(t, f.IsBlocked(`$(echo "rm") file`))
+}
+
+func TestCommandFilter_SubstitutionSafeDateNotBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	// echo is not blacklisted and date is not blacklisted.
+	assert.False(t, f.IsBlocked("echo $(date)"))
+	assert.False(t, f.IsBlocked("echo `date`"))
+}
+
+func TestCommandFilter_SubstitutionSafeLsNotBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	// A substitution of a safe command with args must not be falsely blocked.
+	assert.False(t, f.IsBlocked("echo $(ls -la)"))
+}
+
+func TestSandbox_SubstitutionEchoRmBlocked(t *testing.T) {
+	sb := NewDefaultBashSandbox()
+	err := sb.Validate(context.Background(), "$(echo rm) file", "/anywhere")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "substitution")
+}
+
+func TestSandbox_BacktickEchoRmBlocked(t *testing.T) {
+	sb := NewDefaultBashSandbox()
+	err := sb.Validate(context.Background(), "`echo rm` file", "/anywhere")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "substitution")
+}
+
+func TestSandbox_SubstitutionSafeDateNotBlocked(t *testing.T) {
+	sb := NewDefaultBashSandbox()
+	err := sb.Validate(context.Background(), "echo $(date)", "/anywhere")
+	require.NoError(t, err)
+}
