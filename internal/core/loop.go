@@ -152,6 +152,10 @@ type LoopAgent struct {
 	// dynamically scored and filtered by relevance to the current query.
 	// Zero means no filtering (all tools exposed).
 	toolSearchThreshold int
+	// mu protects runtime mutable fields (model, midTurnCompactor, compactor,
+	// estimator, maxTokens, toolSearchThreshold) from data races between
+	// concurrent setter calls and Run.
+	mu     sync.RWMutex
 	pauseMu             sync.Mutex
 	pauseCh             chan struct{}
 
@@ -251,7 +255,9 @@ func NewLoopAgent(opts ...LoopOption) *LoopAgent {
 // WithToolSearchThreshold sets the maximum number of tools exposed to the
 // LLM before dynamic filtering kicks in.
 func (l *LoopAgent) WithToolSearchThreshold(n int) *LoopAgent {
+	l.mu.Lock()
 	l.toolSearchThreshold = n
+	l.mu.Unlock()
 	return l
 }
 
@@ -307,19 +313,21 @@ func (l *LoopAgent) buildToolDefinitions(ctx context.Context) ([]llm.ToolDefinit
 // This is used when the compactor components are created after NewLoopAgent
 // (e.g. in the assemble layer where the compactor factory runs later).
 func (l *LoopAgent) SetMidTurnCompaction(mtc *compaction.MidTurnCompact, compactor compaction.Compactor, estimator compaction.TokenEstimator, maxTokens int) {
+	l.mu.Lock()
 	l.midTurnCompactor = mtc
 	l.compactor = compactor
 	l.estimator = estimator
 	l.maxTokens = maxTokens
+	l.mu.Unlock()
 }
 
 // SetModel replaces the LLM model at runtime. The next Run call will use the
 // new model. This is used by the /model slash command to switch models
 // without restarting the process.
 func (l *LoopAgent) SetModel(m llm.BaseChatModel) {
-	l.pauseMu.Lock()
+	l.mu.Lock()
 	l.model = m
-	l.pauseMu.Unlock()
+	l.mu.Unlock()
 }
 
 // Run executes the ReAct loop for the submission and returns the events fired
@@ -327,6 +335,18 @@ func (l *LoopAgent) SetModel(m llm.BaseChatModel) {
 // they happen (streaming mode); otherwise they are collected into the returned
 // slice (batch mode, for backward compatibility).
 func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...EventStream) ([]AgentEvent, error) {
+	// Snapshot runtime mutable fields under a read lock to avoid data races
+	// with concurrent setter calls (SetModel, SetMidTurnCompaction,
+	// WithToolSearchThreshold). The local copies are used throughout Run.
+	l.mu.RLock()
+	model := l.model
+	toolSearchThreshold := l.toolSearchThreshold
+	midTurnCompactor := l.midTurnCompactor
+	compactor := l.compactor
+	estimator := l.estimator
+	maxTokens := l.maxTokens
+	l.mu.RUnlock()
+
 	// Inject the Tracer into the context so that all downstream
 	// SpanFromContext calls (middleware, loop internals, tools) create real
 	// spans sharing the same trace. When l.tracer is nil, SpanFromContext
@@ -345,14 +365,13 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 		es = stream[0]
 	}
 
-	if l.model == nil {
+	if model == nil {
 		span.SetStatus(tracing.SpanStatusError, errNilModel.Error())
 		return nil, errNilModel
 	}
 
 	// Apply the model wrapper (if any) before the first LLM call. The
 	// wrapper may add middleware such as retry, cost tracking, etc.
-	model := l.model
 	if l.modelWrapper != nil {
 		if wrapped := l.modelWrapper(model); wrapped != nil {
 			if m, ok := wrapped.(llm.BaseChatModel); ok {
@@ -376,7 +395,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 
 			// Dynamic tool filtering: when the tool count exceeds the
 			// threshold, score and filter to reduce context bloat.
-			if l.toolSearchThreshold > 0 && len(llmTools) > l.toolSearchThreshold {
+			if toolSearchThreshold > 0 && len(llmTools) > toolSearchThreshold {
 				defs, _ := l.tools.List(spanCtx)
 				for _, d := range defs {
 					if st, ok := d.(*tools.ToolSearchTool); ok {
@@ -499,13 +518,13 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 		if needToolFiltering && searchTool != nil {
 			query := lastUserQuery(messages)
 			if query != "" {
-				filtered, ferr := searchTool.TopTools(spanCtx, query, l.toolSearchThreshold)
+				filtered, ferr := searchTool.TopTools(spanCtx, query, toolSearchThreshold)
 				if ferr == nil && len(filtered) > 0 {
 					iterOpts = buildToolOpts(filtered, l.thinkingConfig)
 					logger.Info("core.loop.tool_search_filter",
 						"query", query,
 						"filtered_tools", len(filtered),
-						"threshold", l.toolSearchThreshold,
+						"threshold", toolSearchThreshold,
 					)
 				}
 			}
@@ -662,9 +681,9 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 		// threshold fraction of the token budget, compact before the
 		// next LLM call to avoid overflowing the context window
 		// mid-turn.
-		if l.midTurnCompactor != nil && l.compactor != nil && l.estimator != nil && l.maxTokens > 0 {
+		if midTurnCompactor != nil && compactor != nil && estimator != nil && maxTokens > 0 {
 			items := messagesToTurnItems(messages)
-			compacted, result, cerr := l.midTurnCompactor.CompactIfNeeded(spanCtx, items, l.maxTokens, l.estimator, l.compactor)
+			compacted, result, cerr := midTurnCompactor.CompactIfNeeded(spanCtx, items, maxTokens, estimator, compactor)
 			if cerr != nil {
 				logger.Warn("core.loop.midturn_compact_error", "err", cerr)
 			} else if result.Triggered {

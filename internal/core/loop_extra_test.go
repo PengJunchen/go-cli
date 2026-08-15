@@ -673,3 +673,30 @@ func TestHistoryForwardUserSystemUnaffected(t *testing.T) {
 		}
 	}
 }
+
+// TestLoopConcurrentSetModelAndRun verifies that concurrent SetModel and Run
+// calls do not trigger a data race (ARCH-5/PERF-M7). Run with -race to verify.
+func TestLoopConcurrentSetModelAndRun(t *testing.T) {
+	model1 := &scriptedChatModel{seq: []*llm.Message{
+		{Role: llm.RoleAssistant, Content: "m1"},
+	}}
+	model2 := &scriptedChatModel{seq: []*llm.Message{
+		{Role: llm.RoleAssistant, Content: "m2"},
+	}}
+
+	loop := NewLoopAgent(WithLLM(model1))
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			loop.SetModel(model2)
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = loop.Run(context.Background(), Submission{Content: "hi"})
+		}()
+	}
+	wg.Wait()
+}
