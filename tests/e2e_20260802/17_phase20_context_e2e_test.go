@@ -78,7 +78,6 @@ func TestE2E_Phase20_SessionPersistence(t *testing.T) {
 
 	store := session.NewJSONLSessionStore(storePath)
 	require.NoError(t, store.Open(context.Background()))
-	defer store.Close() //nolint:errcheck,gosec
 
 	require.NoError(t, store.Append(context.Background(), &session.SessionEntry{
 		ID:        "entry-0",
@@ -93,6 +92,10 @@ func TestE2E_Phase20_SessionPersistence(t *testing.T) {
 		Timestamp: time.Now(),
 	}))
 	require.NoError(t, store.Save(context.Background()))
+
+	// Close store before opening store2 on the same path — flock (added in
+	// 47-13) prevents two store instances from holding the same file.
+	require.NoError(t, store.Close())
 
 	info, err := os.Stat(storePath)
 	require.NoError(t, err)
