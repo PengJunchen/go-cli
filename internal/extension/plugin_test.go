@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -80,4 +81,50 @@ func TestPluginLoaderingHTTPNonOK(t *testing.T) {
 	_, err := loader.Load(context.Background(), srv.URL)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "500")
+}
+
+// TestPluginLoaderSSRFBlocksPrivateIPs verifies that endpoints at private or
+// link-local IP ranges are rejected (AC-1). HTTPS is used so the HTTPS gate
+// passes and the IP check is the layer that rejects.
+func TestPluginLoaderSSRFBlocksPrivateIPs(t *testing.T) {
+	loader := extension.NewDefaultPluginLoader()
+	for _, endpoint := range []string{
+		"https://169.254.1.1/ext",   // link-local
+		"https://10.0.0.1/ext",      // RFC 1918 10/8
+		"https://172.16.0.1/ext",    // RFC 1918 172.16/12 lower bound
+		"https://172.31.255.255/ext", // RFC 1918 172.16/12 upper bound
+		"https://192.168.1.1/ext",   // RFC 1918 192.168/16
+	} {
+		_, err := loader.Load(context.Background(), endpoint)
+		require.Error(t, err, "endpoint %q should be blocked", endpoint)
+		assert.Contains(t, err.Error(), "blocked")
+	}
+}
+
+// TestPluginLoaderSSRFResponseSizeLimit verifies that a response body exceeding
+// 10MB is rejected (AC-2). The test server runs on 127.0.0.1 so the HTTPS and
+// IP checks pass, leaving the size check as the only rejection point.
+func TestPluginLoaderSSRFResponseSizeLimit(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"extensions":[`)) //nolint:errcheck // best-effort
+		chunk := []byte(strings.Repeat(" ", 4096))
+		for i := 0; i < 10*1024*1024/4096+1; i++ {
+			_, _ = w.Write(chunk) //nolint:errcheck // best-effort
+		}
+	}))
+	defer srv.Close()
+
+	loader := extension.NewDefaultPluginLoader()
+	_, err := loader.Load(context.Background(), srv.URL)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds")
+}
+
+// TestPluginLoaderSSRFRejectsNonHTTPS verifies that non-HTTPS endpoints are
+// rejected when the host is not localhost (AC-3).
+func TestPluginLoaderSSRFRejectsNonHTTPS(t *testing.T) {
+	loader := extension.NewDefaultPluginLoader()
+	_, err := loader.Load(context.Background(), "http://example.com/ext")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "HTTPS")
 }
