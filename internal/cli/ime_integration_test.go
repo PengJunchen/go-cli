@@ -94,6 +94,7 @@ func TestIntegration_SkillDescriptionOmittedWhenEmpty(t *testing.T) {
 // This tests the fix for the issue where skills were silently skipped when
 // the config didn't explicitly set skill.dir.
 func TestIntegration_SkillAutoDiscovery(t *testing.T) {
+	setupTestTrust(t)
 	ctx := context.Background()
 	tempDir := t.TempDir()
 
@@ -190,10 +191,11 @@ func TestIntegration_SkillAutoDiscoveryNotFound(t *testing.T) {
 // auto-discovered from .go-cli/mcp.json when the main config has no servers.
 // This tests the "servers" array format.
 func TestIntegration_MCPAutoDiscovery_ArrayFormat(t *testing.T) {
+	setupTestTrust(t)
 	ctx := context.Background()
 
 	// Start a mock MCP HTTP server.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodPost {
 			//nolint:errcheck // test HTTP response
@@ -239,9 +241,10 @@ func TestIntegration_MCPAutoDiscovery_ArrayFormat(t *testing.T) {
 // auto-discovered from .go-cli/mcp.json using the "mcpServers" map format
 // (the common format used by Claude Desktop and other tools).
 func TestIntegration_MCPAutoDiscovery_MapFormat(t *testing.T) {
+	setupTestTrust(t)
 	ctx := context.Background()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodPost {
 			//nolint:errcheck // test HTTP response
@@ -287,7 +290,7 @@ func TestIntegration_MCPConfigOverridesAutoDiscovery(t *testing.T) {
 	ctx := context.Background()
 
 	// Two mock servers: one for config, one for auto-discovery.
-	configSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	configSrv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodPost {
 			//nolint:errcheck // test HTTP response
@@ -299,7 +302,7 @@ func TestIntegration_MCPConfigOverridesAutoDiscovery(t *testing.T) {
 	}))
 	defer configSrv.Close()
 
-	autoSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	autoSrv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodPost {
 			//nolint:errcheck // test HTTP response
@@ -367,6 +370,7 @@ func TestIntegration_LoadMCPServers_NoFiles(t *testing.T) {
 // SkillInfo into the DefaultSystemPromptBuilder to verify the full pipeline
 // produces a system prompt containing the skill name and description.
 func TestIntegration_FullSystemPromptWithAutoDiscoveredSkills(t *testing.T) {
+	setupTestTrust(t)
 	ctx := context.Background()
 	tempDir := t.TempDir()
 
