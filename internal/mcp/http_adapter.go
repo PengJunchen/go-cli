@@ -45,6 +45,26 @@ var _ MCPClient = (*HTTPClientAdapter)(nil)
 // without a cap a hung server would block the agent loop forever.
 const defaultHTTPTimeout = 60 * time.Second
 
+// maxHTTPResponseSize caps the size of an HTTP response body read by the
+// adapter. This prevents a malicious or buggy server from exhausting memory
+// by streaming an arbitrarily large response.
+const maxHTTPResponseSize = 10 * 1024 * 1024 // 10 MB
+
+// readLimitedBody reads at most maxHTTPResponseSize bytes from r. If the body
+// exceeds the limit, an error is returned so the caller can abort instead of
+// allocating unbounded memory.
+func readLimitedBody(r io.Reader) ([]byte, error) {
+	limited := io.LimitReader(r, maxHTTPResponseSize+1)
+	raw, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(raw)) > maxHTTPResponseSize {
+		return nil, fmt.Errorf("mcp: response body exceeds %d byte limit", maxHTTPResponseSize)
+	}
+	return raw, nil
+}
+
 // NewHTTPClientAdapter returns an HTTPClientAdapter for the given config.
 func NewHTTPClientAdapter(cfg MCPServerConfig) *HTTPClientAdapter {
 	return &HTTPClientAdapter{
@@ -236,7 +256,7 @@ func (a *HTTPClientAdapter) request(ctx context.Context, method string, params m
 	}
 	defer func() { _ = resp.Body.Close() }() //nolint:errcheck
 
-	raw, err := io.ReadAll(resp.Body)
+	raw, err := readLimitedBody(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("mcp: read response: %w", err)
 	}
@@ -383,7 +403,7 @@ func (a *HTTPClientAdapter) doInitializeLocked(ctx context.Context) error {
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	raw, err := io.ReadAll(resp.Body)
+	raw, err := readLimitedBody(resp.Body)
 	if err != nil {
 		return fmt.Errorf("mcp: read response: %w", err)
 	}
@@ -526,7 +546,7 @@ func (a *HTTPClientAdapter) exchangeCodeForToken(ctx context.Context, oauth *OAu
 	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
-		raw, _ := io.ReadAll(resp.Body)
+		raw, _ := readLimitedBody(resp.Body)
 		return fmt.Errorf("mcp: token exchange failed (status %d): %s", resp.StatusCode, truncate(string(raw), 200))
 	}
 
@@ -534,7 +554,7 @@ func (a *HTTPClientAdapter) exchangeCodeForToken(ctx context.Context, oauth *OAu
 		AccessToken string `json:"access_token"`
 		TokenType   string `json:"token_type"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&tokenResp); err != nil {
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxHTTPResponseSize)).Decode(&tokenResp); err != nil {
 		return fmt.Errorf("mcp: decode token response: %w", err)
 	}
 	if tokenResp.AccessToken == "" {

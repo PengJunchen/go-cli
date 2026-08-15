@@ -386,3 +386,81 @@ func TestOAuthFlowStateParameter(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "token-xyz", adapter.token)
 }
+
+// ---------------------------------------------------------------------------
+// HTTP response size limit tests (HI-8)
+// ---------------------------------------------------------------------------
+
+// TestHTTPAdapterResponseSizeLimit verifies that responses exceeding the 10MB
+// limit are rejected with an error instead of consuming unbounded memory.
+func TestHTTPAdapterResponseSizeLimit(t *testing.T) {
+	t.Parallel()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Method string `json:"method"`
+		}
+		body, _ := io.ReadAll(r.Body)
+		_ = json.Unmarshal(body, &req)
+
+		var result map[string]any
+		switch req.Method {
+		case "initialize":
+			result = map[string]any{
+				"protocolVersion": LatestProtocolVersion,
+				"capabilities":    map[string]any{},
+				"serverInfo":      map[string]any{"name": "test", "version": "1.0"},
+			}
+		case "notifications/initialized":
+			result = map[string]any{}
+		case "tools/call":
+			// Return a response larger than 10MB to trigger the size limit.
+			big := strings.Repeat("x", 11*1024*1024)
+			result = map[string]any{"content": big}
+		default:
+			http.Error(w, "unsupported", http.StatusBadRequest)
+			return
+		}
+
+		frame := map[string]any{"jsonrpc": "2.0", "id": 0, "result": result}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(frame)
+	}))
+	t.Cleanup(srv.Close)
+
+	adapter := NewHTTPClientAdapter(MCPServerConfig{
+		Name:      "srv",
+		Transport: MCPTransportStreamableHTTP,
+		URL:       srv.URL,
+	})
+
+	ctx := context.Background()
+	require.NoError(t, adapter.Connect(ctx))
+
+	_, err := adapter.CallTool(ctx, "echo", nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds")
+}
+
+// TestReadLimitedBody verifies the readLimitedBody helper enforces the size
+// limit correctly.
+func TestReadLimitedBody(t *testing.T) {
+	t.Parallel()
+
+	// Under the limit: returns the data.
+	small := strings.NewReader("hello")
+	raw, err := readLimitedBody(small)
+	require.NoError(t, err)
+	assert.Equal(t, "hello", string(raw))
+
+	// Over the limit: returns an error.
+	big := strings.NewReader(strings.Repeat("x", maxHTTPResponseSize+100))
+	_, err = readLimitedBody(big)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds")
+
+	// Exactly at the limit: succeeds.
+	exact := strings.NewReader(strings.Repeat("x", maxHTTPResponseSize))
+	raw, err = readLimitedBody(exact)
+	require.NoError(t, err)
+	assert.Len(t, raw, maxHTTPResponseSize)
+}
