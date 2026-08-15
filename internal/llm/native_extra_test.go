@@ -755,3 +755,107 @@ func TestEncodeGeminiRequest_ToolResultNonJSON(t *testing.T) {
 	resp := req.Contents[0].Parts[0].FunctionResponse.Response
 	assert.Equal(t, "plain text result", resp["content"])
 }
+
+// ---------------------------------------------------------------------------
+// HTTP timeout (AC-2, AC-3)
+// ---------------------------------------------------------------------------
+
+// TestNativeProviderDefaultHTTPTimeout verifies that all three native
+// providers set a default 120s timeout on their HTTP client (AC-2).
+func TestNativeProviderDefaultHTTPTimeout(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	oa := NewOpenAIProvider()
+	require.NotNil(t, oa.httpClient)
+	assert.Equal(t, nativeDefaultHTTPTimeout, oa.httpClient.Timeout)
+
+	cl := NewClaudeProvider()
+	require.NotNil(t, cl.httpClient)
+	assert.Equal(t, nativeDefaultHTTPTimeout, cl.httpClient.Timeout)
+
+	ge := NewGeminiProvider()
+	require.NotNil(t, ge.httpClient)
+	assert.Equal(t, nativeDefaultHTTPTimeout, ge.httpClient.Timeout)
+}
+
+// TestNativeGenerateClientTimeout verifies that non-streaming Generate
+// requests are terminated by the client timeout (AC-2).
+func TestNativeGenerateClientTimeout(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	shortTimeoutClient := &http.Client{Timeout: 50 * time.Millisecond}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		writeResponse(t, w, `{"choices":[{"message":{"role":"assistant","content":"late"}}]}`)
+	}))
+	defer srv.Close()
+
+	provider := NewOpenAIProvider(WithNativeBaseURL(srv.URL), WithNativeHTTPClient(shortTimeoutClient))
+	model, _, err := provider.Build(context.Background(), ModelConfig{Model: "m"})
+	require.NoError(t, err)
+
+	_, err = model.Generate(context.Background(), nil)
+	require.Error(t, err)
+}
+
+// TestNativeStreamingBypassesClientTimeout verifies that streaming SSE
+// connections are NOT terminated by the client-level timeout. A server that
+// delays its response body beyond the client timeout should still deliver
+// data to the stream, because streamRoundTrip uses a client copy with
+// Timeout=0 (AC-2).
+func TestNativeStreamingBypassesClientTimeout(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	shortTimeoutClient := &http.Client{Timeout: 50 * time.Millisecond}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		time.Sleep(200 * time.Millisecond)
+		writeResponse(t, w, "data: {\"choices\":[{\"delta\":{\"content\":\"late\"}}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	provider := NewOpenAIProvider(WithNativeBaseURL(srv.URL), WithNativeHTTPClient(shortTimeoutClient))
+	model, _, err := provider.Build(context.Background(), ModelConfig{Model: "m"})
+	require.NoError(t, err)
+
+	ch, err := model.Stream(context.Background(), nil)
+	require.NoError(t, err)
+
+	var gotContent string
+	for c := range ch {
+		if c.Content != "" {
+			gotContent = c.Content
+		}
+	}
+	assert.Equal(t, "late", gotContent)
+}
+
+// TestNativeGenerateContextCancel verifies that cancelling the context
+// cancels the HTTP request (AC-3).
+func TestNativeGenerateContextCancel(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(500 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		writeResponse(t, w, `{"choices":[{"message":{"role":"assistant","content":"never"}}]}`)
+	}))
+	defer srv.Close()
+
+	provider := NewOpenAIProvider(WithNativeBaseURL(srv.URL))
+	model, _, err := provider.Build(context.Background(), ModelConfig{Model: "m"})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_, err = model.Generate(ctx, nil)
+	require.Error(t, err)
+}

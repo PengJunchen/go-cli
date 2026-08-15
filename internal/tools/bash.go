@@ -276,10 +276,38 @@ var envWhitelist = map[string]bool{
 	"TERM":     true,
 }
 
+// sensitiveEnvSuffixes lists the case-insensitive name suffixes that mark an
+// environment variable as sensitive. Variables matching any suffix are filtered
+// out of the extra environment to prevent credential leakage to child
+// processes (AC-1).
+var sensitiveEnvSuffixes = []string{
+	"_KEY",
+	"_TOKEN",
+	"_SECRET",
+	"_PASSWORD",
+	"_CREDENTIAL",
+	"_API_KEY",
+}
+
+// isSensitiveEnvVar returns true when name matches a sensitive pattern
+// (case-insensitive suffix match). Used to filter credentials such as
+// OPENAI_API_KEY, GITHUB_TOKEN, CLIENT_SECRET, DB_PASSWORD from child
+// process environments.
+func isSensitiveEnvVar(name string) bool {
+	upper := strings.ToUpper(name)
+	for _, suffix := range sensitiveEnvSuffixes {
+		if strings.HasSuffix(upper, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
 // filteredEnv builds the environment slice for a subprocess by inheriting
 // only whitelisted variables from os.Environ() and appending the tool's
-// extra environment. This prevents secrets such as *_API_KEY, *_TOKEN, and
-// *_SECRET from leaking into child processes (AC-1).
+// extra environment. Sensitive variables (matching *_KEY, *_TOKEN, *_SECRET,
+// *_PASSWORD, *_CREDENTIAL) in the extra environment are filtered out to
+// prevent secret leakage to child processes (AC-1).
 func filteredEnv(extra map[string]string) []string {
 	var env []string
 	for _, kv := range os.Environ() {
@@ -291,7 +319,17 @@ func filteredEnv(extra map[string]string) []string {
 			env = append(env, kv)
 		}
 	}
-	env = append(env, envSlice(extra)...)
+	// Filter sensitive variables from the extra environment to prevent
+	// credential leakage to child processes (AC-1).
+	filtered := make(map[string]string, len(extra))
+	for k, v := range extra {
+		if isSensitiveEnvVar(k) {
+			slog.Debug("bash.filtered_sensitive_env", "var", k)
+			continue
+		}
+		filtered[k] = v
+	}
+	env = append(env, envSlice(filtered)...)
 	return env
 }
 

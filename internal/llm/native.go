@@ -94,6 +94,12 @@ const (
 	// geminiStreamAction is the streaming RPC action; alt=sse forces SSE
 	// framing instead of newline-delimited JSON.
 	geminiStreamAction = ":streamGenerateContent?alt=sse"
+
+	// nativeDefaultHTTPTimeout is the default timeout for non-streaming LLM
+	// HTTP requests, preventing indefinite hangs (AC-2). Streaming (SSE)
+	// requests bypass this client-level timeout and rely on context
+	// cancellation instead so long-lived streams are not cut off.
+	nativeDefaultHTTPTimeout = 120 * time.Second
 )
 
 // nativeChatModel is a BaseChatModel shared by the OpenAI, Claude and Gemini
@@ -227,7 +233,20 @@ func (m *nativeChatModel) Stream(ctx context.Context, msgs []Message, opts ...Op
 // streamRoundTrip builds the HTTP request, executes it, and verifies a 2xx
 // status. It returns the response body for SSE parsing. The caller is
 // responsible for closing the returned ReadCloser.
+//
+// For streaming, a shallow copy of the client is made with Timeout=0 so that
+// SSE streams are not cut off by the client-level timeout. The caller's
+// context provides cancellation instead (AC-2, AC-3).
 func (m *nativeChatModel) streamRoundTrip(ctx context.Context, body []byte, endpoint string) (io.ReadCloser, error) {
+	// Copy the client and clear the Timeout so long-lived SSE streams are
+	// not terminated by the default 120s client timeout. Context
+	// cancellation still applies (AC-3).
+	streamClient := &http.Client{}
+	if m.client != nil {
+		*streamClient = *m.client
+	}
+	streamClient.Timeout = 0
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("llm: build request: %w", err)
@@ -240,7 +259,7 @@ func (m *nativeChatModel) streamRoundTrip(ctx context.Context, body []byte, endp
 		}
 	}
 
-	resp, err := m.client.Do(req)
+	resp, err := streamClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("llm: do request: %w", err)
 	}
@@ -864,7 +883,7 @@ func NewOpenAIProvider(opts ...NativeProviderOption) *OpenAIProvider {
 		name:           openaiProviderName,
 		defaultBaseURL: openaiDefaultBaseURL,
 		defaultModel:   openaiDefaultModel,
-		httpClient:     http.DefaultClient,
+		httpClient:     &http.Client{Timeout: nativeDefaultHTTPTimeout},
 	}
 	p.applyNativeOptions(opts)
 	return p
@@ -1020,7 +1039,7 @@ func NewClaudeProvider(opts ...NativeProviderOption) *ClaudeProvider {
 		name:           claudeProviderName,
 		defaultBaseURL: claudeDefaultBaseURL,
 		defaultModel:   claudeDefaultModel,
-		httpClient:     http.DefaultClient,
+		httpClient:     &http.Client{Timeout: nativeDefaultHTTPTimeout},
 	}
 	p.applyNativeOptions(opts)
 	return p
@@ -1231,7 +1250,7 @@ func NewGeminiProvider(opts ...NativeProviderOption) *GeminiProvider {
 		name:           geminiProviderName,
 		defaultBaseURL: geminiDefaultBaseURL,
 		defaultModel:   geminiDefaultModel,
-		httpClient:     http.DefaultClient,
+		httpClient:     &http.Client{Timeout: nativeDefaultHTTPTimeout},
 	}
 	p.applyNativeOptions(opts)
 	return p
