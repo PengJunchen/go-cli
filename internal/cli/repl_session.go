@@ -62,6 +62,15 @@ type REPLSession struct {
 	sessionHandler *session.SessionSlashHandler
 	sharedThemeMgr *tui.ThemeManager
 
+	// pendingWrites buffers session entries for batched persistence,
+	// reducing syscall overhead by flushing multiple entries in a single
+	// pass instead of writing each one individually.
+	pendingWrites *session.PendingSessionWrites
+
+	// flushTicker periodically flushes pending writes as a safety net.
+	flushTicker *time.Ticker
+	flushDone   chan struct{}
+
 	// Editor/expander
 	lineEditor      LineEditor
 	mentionExpander *MentionExpander
@@ -304,6 +313,13 @@ func (s *REPLSession) setupSlashContext() {
 
 	s.entryCounter = len(s.assembly.Agent.Messages())
 	s.turnCounter = 0
+
+	// Initialize batched session persistence. PendingSessionWrites buffers
+	// entry writes and flushes them in batches, reducing syscall overhead.
+	if s.assembly.SessionStore != nil {
+		s.pendingWrites = session.NewPendingSessionWrites()
+		s.startFlushTicker()
+	}
 }
 
 // setupEditors initializes the input reader, line editor (with history and
@@ -382,6 +398,45 @@ func (s *REPLSession) setupEditors() {
 // ctrlCDoublePressWindow is the time window within which a second Ctrl+C on
 // an empty line exits the REPL.
 const ctrlCDoublePressWindow = 1500 * time.Millisecond
+
+// pendingWritesFlushInterval is how often the background goroutine flushes
+// buffered session writes as a safety net against data loss on crash.
+const pendingWritesFlushInterval = 1 * time.Second
+
+// startFlushTicker launches a background goroutine that periodically flushes
+// pending session writes to the store. It is stopped by stopFlushTicker.
+func (s *REPLSession) startFlushTicker() {
+	s.flushTicker = time.NewTicker(pendingWritesFlushInterval)
+	s.flushDone = make(chan struct{})
+	go func() {
+		for {
+			select {
+			case <-s.flushTicker.C:
+				if s.pendingWrites == nil || s.assembly.SessionStore == nil {
+					continue
+				}
+				if err := s.pendingWrites.Flush(s.spanCtx, s.assembly.SessionStore); err != nil {
+					s.logger.Warn("cli_interactive_pending_writes_flush_failed", "err", err)
+				}
+			case <-s.flushDone:
+				return
+			}
+		}
+	}()
+}
+
+// stopFlushTicker stops the background flush goroutine. It is safe to call
+// when the ticker was never started.
+func (s *REPLSession) stopFlushTicker() {
+	if s.flushTicker != nil {
+		s.flushTicker.Stop()
+		s.flushTicker = nil
+	}
+	if s.flushDone != nil {
+		close(s.flushDone)
+		s.flushDone = nil
+	}
+}
 
 // ctrlCAction represents the action to take when Ctrl+C is pressed.
 type ctrlCAction int
@@ -784,7 +839,9 @@ func (s *REPLSession) handleSteer(steerMsg string) {
 }
 
 // persistSession appends user and assistant entries to the session store and
-// tree, saves the store, and triggers memory extraction.
+// tree, saves the store, and triggers memory extraction. Entries are buffered
+// through PendingSessionWrites and flushed in a single batch, reducing the
+// number of individual store writes.
 func (s *REPLSession) persistSession() {
 	// Persist to session store (even on interruption to preserve history).
 	// Use spanCtx, not turnCtx, because turnCtx may be canceled by the
@@ -803,9 +860,12 @@ func (s *REPLSession) persistSession() {
 		Content:   s.line,
 		Timestamp: time.Now(),
 	}
-	if appendErr := s.assembly.SessionStore.Append(s.spanCtx, userEntry); appendErr != nil {
-		s.logger.Warn("cli_interactive_session_save_failed", "err", appendErr)
-	}
+	// Buffer the write through PendingSessionWrites instead of appending
+	// directly to the store.
+	s.pendingWrites.Enqueue(session.SessionWrite{
+		SessionID: s.assembly.SessionID,
+		Entry:     *userEntry,
+	})
 	if s.sessionTree != nil {
 		if treeErr := s.sessionTree.Append(s.spanCtx, userEntry); treeErr != nil {
 			s.logger.Warn("cli_interactive_session_tree_append_failed", "err", treeErr)
@@ -824,15 +884,22 @@ func (s *REPLSession) persistSession() {
 			Content:   s.turnResult.Message,
 			Timestamp: time.Now(),
 		}
-		if appendErr := s.assembly.SessionStore.Append(s.spanCtx, assistantEntry); appendErr != nil {
-			s.logger.Warn("cli_interactive_session_save_failed", "err", appendErr)
-		}
+		s.pendingWrites.Enqueue(session.SessionWrite{
+			SessionID: s.assembly.SessionID,
+			Entry:     *assistantEntry,
+		})
 		if s.sessionTree != nil {
 			if treeErr := s.sessionTree.Append(s.spanCtx, assistantEntry); treeErr != nil {
 				s.logger.Warn("cli_interactive_session_tree_append_failed", "err", treeErr)
 			}
 		}
 		s.entryCounter++
+	}
+	// Flush all buffered entries to the store in a single batch.
+	if s.pendingWrites != nil {
+		if flushErr := s.pendingWrites.Flush(s.spanCtx, s.assembly.SessionStore); flushErr != nil {
+			s.logger.Warn("cli_interactive_session_save_failed", "err", flushErr)
+		}
 	}
 	_ = s.assembly.SessionStore.Save(s.spanCtx) //nolint:errcheck
 
@@ -886,6 +953,19 @@ func (s *REPLSession) extractMemory() {
 // cleanup saves the line editor history, stops the editor, and prints the
 // session-ended message.
 func (s *REPLSession) cleanup() {
+	// Stop the background flush goroutine first to prevent concurrent
+	// flushes during the final drain.
+	s.stopFlushTicker()
+
+	// Flush any remaining buffered session entries and sync the store
+	// before tearing down shared resources.
+	if s.assembly != nil && s.assembly.SessionStore != nil && s.pendingWrites != nil {
+		if flushErr := s.pendingWrites.Flush(s.spanCtx, s.assembly.SessionStore); flushErr != nil {
+			s.logger.Warn("cli_interactive_session_flush_final", "err", flushErr)
+		}
+		_ = s.assembly.SessionStore.Save(s.spanCtx) //nolint:errcheck
+	}
+
 	// Wait for in-flight memory extraction goroutines to finish before
 	// closing shared resources (MemoryStore, etc.). This ensures the
 	// extraction completes and writes memories before the store is closed.
