@@ -57,7 +57,7 @@ func (a *AuditTrail) Record(entry AuditEntry) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
-	if err := os.MkdirAll(a.dir, 0o755); err != nil {
+	if err := os.MkdirAll(a.dir, 0o700); err != nil {
 		return fmt.Errorf("audit: mkdir: %w", err)
 	}
 

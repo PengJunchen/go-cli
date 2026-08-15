@@ -816,3 +816,112 @@ func TestHTTPServer_GlobalDrainBlockedWithAuth(t *testing.T) {
 		t.Errorf("expected ack in stream, got: %s", string(body))
 	}
 }
+
+// --- Security: rate limiting tests (MD-5) ---
+
+// TestHTTPServer_RateLimit verifies that the semaphore-based concurrency
+// limiter rejects excess requests with 503 Service Unavailable.
+func TestHTTPServer_RateLimit(t *testing.T) {
+	srv := NewHTTPServer("test", "127.0.0.1:0", nil)
+	srv.maxConcurrency = 1
+	if err := srv.Start(context.Background()); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop(context.Background()) })
+
+	baseURL := "http://" + srv.Addr()
+
+	// Poll until the server accepts connections.
+	for i := 0; i < 50; i++ {
+		resp, err := http.Get(baseURL + "/stream")
+		if err == nil {
+			resp.Body.Close()
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Create a session first (needed for /events).
+	postACP(t, baseURL, "/connect", ACPMessage{
+		Type:     TypeConnect,
+		SenderID: "rate-test",
+	}).Body.Close()
+
+	// Open a long-lived /events connection to consume the single semaphore slot.
+	eventsCtx, eventsCancel := context.WithCancel(context.Background())
+	defer eventsCancel()
+	eventsReq, _ := http.NewRequest(http.MethodGet, baseURL+"/events?sender_id=rate-test", nil)
+	eventsReq = eventsReq.WithContext(eventsCtx)
+
+	eventsEstablished := make(chan struct{})
+	go func() {
+		resp, err := http.DefaultClient.Do(eventsReq)
+		if err != nil {
+			close(eventsEstablished)
+			return
+		}
+		defer resp.Body.Close()
+		// Signal that the connection is established (semaphore acquired).
+		close(eventsEstablished)
+		// Block until the context is canceled to keep the connection alive.
+		<-eventsCtx.Done()
+	}()
+
+	// Wait for the /events connection to be established.
+	<-eventsEstablished
+
+	// Send another request — should be rejected with 503.
+	resp := postACP(t, baseURL, "/connect", ACPMessage{
+		Type:     TypeConnect,
+		SenderID: "rate-test-2",
+	})
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Errorf("expected 503 (too many concurrent requests), got %d", resp.StatusCode)
+	}
+}
+
+// --- Security: session TTL tests (MD-10) ---
+
+// TestHTTPServer_SessionTTL verifies that idle sessions are cleaned up after
+// the sessionTTL expires.
+func TestHTTPServer_SessionTTL(t *testing.T) {
+	srv := NewHTTPServer("test", "127.0.0.1:0", nil)
+	srv.sessionTTL = 50 * time.Millisecond
+	srv.cleanupInterval = 20 * time.Millisecond
+	if err := srv.Start(context.Background()); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop(context.Background()) })
+
+	baseURL := "http://" + srv.Addr()
+
+	// Poll until the server accepts connections.
+	for i := 0; i < 50; i++ {
+		resp, err := http.Get(baseURL + "/stream")
+		if err == nil {
+			resp.Body.Close()
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Create a session.
+	postACP(t, baseURL, "/connect", ACPMessage{
+		Type:     TypeConnect,
+		SenderID: "ttl-test",
+	}).Body.Close()
+
+	if n := srv.ActiveSessions(); n != 1 {
+		t.Fatalf("expected 1 session, got %d", n)
+	}
+
+	// Wait for TTL to expire and cleanup to run.
+	time.Sleep(200 * time.Millisecond)
+
+	// Session should be cleaned up.
+	if n := srv.ActiveSessions(); n != 0 {
+		t.Errorf("expected 0 sessions after TTL, got %d", n)
+	}
+}
