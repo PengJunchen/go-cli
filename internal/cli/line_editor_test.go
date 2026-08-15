@@ -588,3 +588,234 @@ func TestEvaluateCtrlC_Sequence(t *testing.T) {
 	action, lastInterrupt = evaluateCtrlC(false, lastInterrupt, t3, window)
 	assert.Equal(t, ctrlCShowExitPrompt, action)
 }
+
+// ---------------------------------------------------------------------------
+// Bracketed paste support tests
+// ---------------------------------------------------------------------------
+
+// pasteStartSeq returns the bracketed paste start sequence ESC[200~.
+func pasteStartSeq() []byte {
+	return []byte{0x1B, '[', '2', '0', '0', '~'}
+}
+
+// pasteEndSeq returns the bracketed paste end sequence ESC[201~.
+func pasteEndSeq() []byte {
+	return []byte{0x1B, '[', '2', '0', '1', '~'}
+}
+
+// makeReadByte returns a readByte function that feeds the given key sequence.
+func makeReadByte(keys []byte) func() (byte, error) {
+	idx := 0
+	return func() (byte, error) {
+		if idx >= len(keys) {
+			return 0, io.EOF
+		}
+		b := keys[idx]
+		idx++
+		return b, nil
+	}
+}
+
+// TestBracketedPaste_SingleLine verifies that a single-line paste inserts
+// the content into the buffer and allows continued editing.
+func TestBracketedPaste_SingleLine(t *testing.T) {
+	le := NewDefaultLineEditor(strings.NewReader(""), io.Discard)
+
+	// Type "a", paste "bc", type "d", Enter
+	keys := []byte{}
+	keys = append(keys, 'a')
+	keys = append(keys, pasteStartSeq()...)
+	keys = append(keys, 'b', 'c')
+	keys = append(keys, pasteEndSeq()...)
+	keys = append(keys, 'd', '\r')
+
+	line, err := le.readSingleLineTTY(makeReadByte(keys), "> ")
+	require.NoError(t, err)
+	assert.Equal(t, "abcd", line)
+}
+
+// TestBracketedPaste_MultiLine verifies that a multi-line paste returns the
+// full content as a single multi-line string (AC-1).
+func TestBracketedPaste_MultiLine(t *testing.T) {
+	le := NewDefaultLineEditor(strings.NewReader(""), io.Discard)
+
+	keys := pasteStartSeq()
+	keys = append(keys, "hello\nworld"...)
+	keys = append(keys, pasteEndSeq()...)
+
+	line, err := le.readSingleLineTTY(makeReadByte(keys), "> ")
+	require.NoError(t, err)
+	assert.Equal(t, "hello\nworld", line)
+}
+
+// TestBracketedPaste_EmptyLines verifies that pasting text with empty lines
+// enters multi-line editing mode (AC-1).
+func TestBracketedPaste_EmptyLines(t *testing.T) {
+	le := NewDefaultLineEditor(strings.NewReader(""), io.Discard)
+
+	keys := pasteStartSeq()
+	keys = append(keys, "line1\n\nline3"...)
+	keys = append(keys, pasteEndSeq()...)
+
+	line, err := le.readSingleLineTTY(makeReadByte(keys), "> ")
+	require.NoError(t, err)
+	assert.Equal(t, "line1\n\nline3", line)
+}
+
+// TestBracketedPaste_NormalInputNoRegression verifies that normal input
+// (without paste) still works correctly after the paste detection code
+// was added.
+func TestBracketedPaste_NormalInputNoRegression(t *testing.T) {
+	le := NewDefaultLineEditor(strings.NewReader(""), io.Discard)
+
+	keys := []byte{'h', 'e', 'l', 'l', 'o', '\r'}
+	line, err := le.readSingleLineTTY(makeReadByte(keys), "> ")
+	require.NoError(t, err)
+	assert.Equal(t, "hello", line)
+}
+
+// TestBracketedPaste_ArrowKeysNoRegression verifies that arrow key sequences
+// (which also start with ESC[) still work correctly alongside paste detection.
+func TestBracketedPaste_ArrowKeysNoRegression(t *testing.T) {
+	le := NewDefaultLineEditor(strings.NewReader(""), io.Discard)
+
+	// Type "abc", Left, Left, type "X" → "aXbc", Enter
+	keys := []byte{'a', 'b', 'c', 0x1B, '[', 'D', 0x1B, '[', 'D', 'X', '\r'}
+	line, err := le.readSingleLineTTY(makeReadByte(keys), "> ")
+	require.NoError(t, err)
+	assert.Equal(t, "aXbc", line)
+}
+
+// TestBracketedPaste_InsertKeyNoRegression verifies that the Insert key
+// (ESC[2~) is still handled (ignored) without being mistaken for a paste.
+func TestBracketedPaste_InsertKeyNoRegression(t *testing.T) {
+	le := NewDefaultLineEditor(strings.NewReader(""), io.Discard)
+
+	// Type "a", Insert key (ESC[2~), type "b", Enter
+	keys := []byte{'a', 0x1B, '[', '2', '~', 'b', '\r'}
+	line, err := le.readSingleLineTTY(makeReadByte(keys), "> ")
+	require.NoError(t, err)
+	assert.Equal(t, "ab", line)
+}
+
+// TestBracketedPaste_CRLFNormalized verifies that \r\n in paste content
+// is normalized to \n.
+func TestBracketedPaste_CRLFNormalized(t *testing.T) {
+	le := NewDefaultLineEditor(strings.NewReader(""), io.Discard)
+
+	keys := pasteStartSeq()
+	keys = append(keys, "hello\r\nworld"...)
+	keys = append(keys, pasteEndSeq()...)
+
+	line, err := le.readSingleLineTTY(makeReadByte(keys), "> ")
+	require.NoError(t, err)
+	assert.Equal(t, "hello\nworld", line)
+}
+
+// TestBracketedPaste_HistoryNotLineByLine verifies that multi-line paste
+// content is returned as a single string, ensuring it is added to history
+// once rather than line by line (AC-2).
+func TestBracketedPaste_HistoryNotLineByLine(t *testing.T) {
+	le := NewDefaultLineEditor(strings.NewReader(""), io.Discard)
+
+	keys := pasteStartSeq()
+	keys = append(keys, "line1\nline2\nline3"...)
+	keys = append(keys, pasteEndSeq()...)
+
+	line, err := le.readSingleLineTTY(makeReadByte(keys), "> ")
+	require.NoError(t, err)
+	// The returned string should contain all three lines as a single
+	// multi-line string, not just the first line. If the paste were
+	// processed line by line, readSingleLineTTY would return only "line1".
+	assert.Equal(t, "line1\nline2\nline3", line)
+}
+
+// TestBracketedPaste_EmptyPaste verifies that an empty paste (start
+// immediately followed by end) does not crash or alter the buffer.
+func TestBracketedPaste_EmptyPaste(t *testing.T) {
+	le := NewDefaultLineEditor(strings.NewReader(""), io.Discard)
+
+	// Type "a", paste nothing, type "b", Enter
+	keys := []byte{'a'}
+	keys = append(keys, pasteStartSeq()...)
+	keys = append(keys, pasteEndSeq()...)
+	keys = append(keys, 'b', '\r')
+
+	line, err := le.readSingleLineTTY(makeReadByte(keys), "> ")
+	require.NoError(t, err)
+	assert.Equal(t, "ab", line)
+}
+
+// TestBracketedPaste_PasteAtCursor verifies that pasted content is inserted
+// at the cursor position, not just appended.
+func TestBracketedPaste_PasteAtCursor(t *testing.T) {
+	le := NewDefaultLineEditor(strings.NewReader(""), io.Discard)
+
+	// Type "hello", move to beginning (Ctrl+A), paste "X", Enter
+	// Result should be "Xhello"
+	keys := []byte{'h', 'e', 'l', 'l', 'o', 0x01}
+	keys = append(keys, pasteStartSeq()...)
+	keys = append(keys, 'X')
+	keys = append(keys, pasteEndSeq()...)
+	keys = append(keys, '\r')
+
+	line, err := le.readSingleLineTTY(makeReadByte(keys), "> ")
+	require.NoError(t, err)
+	assert.Equal(t, "Xhello", line)
+}
+
+// TestReadPasteContent verifies the paste content reader correctly
+// collects bytes until the paste end sequence.
+func TestReadPasteContent(t *testing.T) {
+	keys := []byte{}
+	keys = append(keys, "hello"...)
+	keys = append(keys, pasteEndSeq()...)
+
+	content, err := readPasteContent(makeReadByte(keys))
+	require.NoError(t, err)
+	assert.Equal(t, "hello", content)
+}
+
+// TestReadPasteContent_WithNewlines verifies paste content with newlines
+// is collected correctly.
+func TestReadPasteContent_WithNewlines(t *testing.T) {
+	keys := []byte{}
+	keys = append(keys, "a\nb\nc"...)
+	keys = append(keys, pasteEndSeq()...)
+
+	content, err := readPasteContent(makeReadByte(keys))
+	require.NoError(t, err)
+	assert.Equal(t, "a\nb\nc", content)
+}
+
+// TestReadPasteContent_Empty verifies that an empty paste (immediate end
+// sequence) returns empty content.
+func TestReadPasteContent_Empty(t *testing.T) {
+	keys := pasteEndSeq()
+
+	content, err := readPasteContent(makeReadByte(keys))
+	require.NoError(t, err)
+	assert.Equal(t, "", content)
+}
+
+// TestVisualLineCount_WithNewlines verifies that visualLineCount correctly
+// counts lines when the buffer contains explicit newlines.
+func TestVisualLineCount_WithNewlines(t *testing.T) {
+	// No newlines: single line
+	assert.Equal(t, 1, visualLineCount("> ", []rune("hello"), 80))
+
+	// One newline: two lines
+	assert.Equal(t, 2, visualLineCount("> ", []rune("hello\nworld"), 80))
+
+	// Empty lines count as lines too
+	assert.Equal(t, 3, visualLineCount("> ", []rune("a\n\nb"), 80))
+
+	// Only newlines
+	assert.Equal(t, 3, visualLineCount("> ", []rune("\n\n"), 80))
+
+	// Empty buffer with prompt
+	assert.Equal(t, 1, visualLineCount("> ", []rune(""), 80))
+
+	// Empty buffer and empty prompt
+	assert.Equal(t, 1, visualLineCount("", []rune(""), 80))
+}
