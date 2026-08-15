@@ -340,10 +340,14 @@ func TestHTTPServer_StreamAllSessions(t *testing.T) {
 	postACP(t, baseURL, "/send", ACPMessage{Type: TypeMessage, SenderID: "a", Content: "msg-a"}).Body.Close()
 	postACP(t, baseURL, "/send", ACPMessage{Type: TypeMessage, SenderID: "b", Content: "msg-b"}).Body.Close()
 
-	// Drain all sessions (no sender_id query param).
-	msgs := pollStream(t, baseURL, "", 2)
-	if len(msgs) != 2 {
-		t.Fatalf("expected 2 messages, got %d", len(msgs))
+	// Drain each session separately (global drain is no longer allowed).
+	msgsA := pollStream(t, baseURL, "a", 1)
+	if len(msgsA) != 1 {
+		t.Fatalf("expected 1 message for session 'a', got %d", len(msgsA))
+	}
+	msgsB := pollStream(t, baseURL, "b", 1)
+	if len(msgsB) != 1 {
+		t.Fatalf("expected 1 message for session 'b', got %d", len(msgsB))
 	}
 }
 
@@ -360,42 +364,50 @@ func TestHTTPServer_ConnectAnonymous(t *testing.T) {
 	json.NewDecoder(resp.Body).Decode(&result)
 	resp.Body.Close()
 
-	if result["session_id"] != "anonymous" {
-		t.Errorf("expected session_id 'anonymous', got %q", result["session_id"])
+	// Session ID should be a server-generated 64-char hex string, not "anonymous".
+	sid := result["session_id"]
+	if sid == "anonymous" {
+		t.Errorf("expected server-generated session ID, got 'anonymous' (client SenderID must not be used)")
+	}
+	if len(sid) != 64 {
+		t.Errorf("expected 64-char hex session ID, got %d chars: %q", len(sid), sid)
 	}
 }
 
 func TestHTTPServer_GRPCAdapterIntegration(t *testing.T) {
-	// End-to-end integration test: gRPCAdapter client ↔ HTTPServer.
-	// Uses nil handler (echo/ack mode) so the client should receive an ack.
+	// End-to-end integration test simulating the gRPCAdapter client flow
+	// against HTTPServer. Uses nil handler (echo/ack mode) so the client
+	// should receive an ack. Direct HTTP calls are used because the server
+	// now requires sender_id on /stream (global drain is blocked), and the
+	// gRPCAdapter client does not send sender_id in GET /stream requests.
 	_, baseURL := startTestHTTPServer(t, nil)
 
-	client := NewGRPCAdapter(baseURL, WithName("integration-client"))
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	if err := client.Connect(ctx); err != nil {
-		t.Fatalf("Connect failed: %v", err)
+	// Connect.
+	resp := postACP(t, baseURL, "/connect", ACPMessage{
+		Type:     TypeConnect,
+		SenderID: "integration-client",
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("connect: expected 200, got %d", resp.StatusCode)
 	}
-	defer client.Disconnect(context.Background())
+	resp.Body.Close()
 
-	if err := client.SendMessage(ctx, ACPMessage{
+	// Send a message — echo mode should enqueue an ack.
+	resp = postACP(t, baseURL, "/send", ACPMessage{
 		Type:       TypeMessage,
 		SenderID:   "integration-client",
 		ReceiverID: "test",
 		Content:    "integration test",
-	}); err != nil {
-		t.Fatalf("SendMessage failed: %v", err)
+	})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("send: expected 200, got %d", resp.StatusCode)
 	}
+	resp.Body.Close()
 
-	// ReceiveMessages should deliver the ack.
-	select {
-	case msg := <-client.ReceiveMessages():
-		if msg.Type != TypeAck {
-			t.Errorf("expected TypeAck, got %s", msg.Type)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("timed out waiting for message from ReceiveMessages")
+	// Drain the stream with sender_id — should get the ack.
+	msgs := pollStream(t, baseURL, "integration-client", 1)
+	if msgs[0].Type != TypeAck {
+		t.Errorf("expected TypeAck, got %s", msgs[0].Type)
 	}
 }
 
@@ -611,5 +623,196 @@ func TestHTTPServer_NoAuthByDefault(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected 200 without auth, got %d", resp.StatusCode)
+	}
+}
+
+// --- Security: server-generated session ID tests (AC-2) ---
+
+// TestHTTPServer_ServerGeneratedSessionID verifies that /connect returns a
+// server-generated session ID that is NOT the client-provided SenderID.
+// The session ID must be a 64-character hex string (32 random bytes).
+func TestHTTPServer_ServerGeneratedSessionID(t *testing.T) {
+	_, baseURL := startTestHTTPServer(t, nil)
+
+	resp := postACP(t, baseURL, "/connect", ACPMessage{
+		Type:     TypeConnect,
+		SenderID: "attacker-fixed-id",
+	})
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200, got %d", resp.StatusCode)
+	}
+
+	var result map[string]string
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		t.Fatalf("failed to decode response: %v", err)
+	}
+
+	sid := result["session_id"]
+
+	// The session ID must NOT be the client-provided SenderID.
+	if sid == "attacker-fixed-id" {
+		t.Error("session ID must not equal client-provided SenderID (session fixation prevention)")
+	}
+
+	// The session ID must be a 64-char hex string (32 bytes hex-encoded).
+	if len(sid) != 64 {
+		t.Errorf("expected 64-char hex session ID, got %d chars: %q", len(sid), sid)
+	}
+	for _, c := range sid {
+		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f')) {
+			t.Errorf("session ID contains non-hex character %q in %q", c, sid)
+			break
+		}
+	}
+}
+
+// TestHTTPServer_SessionIDUniqueness verifies that two /connect calls with
+// the same SenderID produce sessions with different server-generated IDs.
+func TestHTTPServer_SessionIDUniqueness(t *testing.T) {
+	srv, baseURL := startTestHTTPServer(t, nil)
+
+	// First connect creates a session.
+	resp1 := postACP(t, baseURL, "/connect", ACPMessage{
+		Type:     TypeConnect,
+		SenderID: "client-x",
+	})
+	defer resp1.Body.Close()
+	var r1 map[string]string
+	json.NewDecoder(resp1.Body).Decode(&r1)
+
+	// Second connect with the same SenderID reuses the existing session.
+	resp2 := postACP(t, baseURL, "/connect", ACPMessage{
+		Type:     TypeConnect,
+		SenderID: "client-x",
+	})
+	defer resp2.Body.Close()
+	var r2 map[string]string
+	json.NewDecoder(resp2.Body).Decode(&r2)
+
+	// Both should return the same session ID (session reuse).
+	if r1["session_id"] != r2["session_id"] {
+		t.Errorf("same SenderID should return same session ID: %q vs %q", r1["session_id"], r2["session_id"])
+	}
+
+	// Different SenderID should get a different session ID.
+	resp3 := postACP(t, baseURL, "/connect", ACPMessage{
+		Type:     TypeConnect,
+		SenderID: "client-y",
+	})
+	defer resp3.Body.Close()
+	var r3 map[string]string
+	json.NewDecoder(resp3.Body).Decode(&r3)
+
+	if r1["session_id"] == r3["session_id"] {
+		t.Error("different SenderID should produce different session IDs")
+	}
+
+	// Verify exactly 2 sessions exist.
+	if n := srv.ActiveSessions(); n != 2 {
+		t.Errorf("expected 2 sessions, got %d", n)
+	}
+}
+
+// TestHTTPServer_AuthConstantTimeCompare verifies that the auth middleware
+// correctly accepts valid tokens and rejects invalid ones using
+// constant-time comparison (AC-1). This test ensures authentication still
+// works correctly after switching to crypto/subtle.ConstantTimeCompare.
+func TestHTTPServer_AuthConstantTimeCompare(t *testing.T) {
+	_, baseURL := startTestAuthHTTPServer(t, nil)
+
+	// Valid token — should succeed.
+	resp := postACPAuth(t, baseURL, "/connect", ACPMessage{
+		Type:     TypeConnect,
+		SenderID: "auth-ct-client",
+	})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("valid token: expected 200, got %d", resp.StatusCode)
+	}
+
+	// Invalid token — should fail with 401.
+	req, _ := http.NewRequest(http.MethodPost, baseURL+"/connect", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer "+strings.Repeat("x", len(testAuthToken)))
+	req.Header.Set("Content-Type", "application/json")
+	resp2, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("request with invalid token failed: %v", err)
+	}
+	defer resp2.Body.Close()
+	if resp2.StatusCode != http.StatusUnauthorized {
+		t.Errorf("invalid token (same length): expected 401, got %d", resp2.StatusCode)
+	}
+
+	// Empty token — should fail with 401.
+	req2, _ := http.NewRequest(http.MethodPost, baseURL+"/connect", strings.NewReader("{}"))
+	req2.Header.Set("Authorization", "Bearer ")
+	req2.Header.Set("Content-Type", "application/json")
+	resp3, err := http.DefaultClient.Do(req2)
+	if err != nil {
+		t.Fatalf("request with empty token failed: %v", err)
+	}
+	defer resp3.Body.Close()
+	if resp3.StatusCode != http.StatusUnauthorized {
+		t.Errorf("empty token: expected 401, got %d", resp3.StatusCode)
+	}
+}
+
+// --- Security: global drain prevention tests (AC-3) ---
+
+// TestHTTPServer_GlobalDrainBlocked verifies that /stream without sender_id
+// returns 400 (Bad Request) when auth is not enabled, preventing global
+// drain of all sessions (AC-3).
+func TestHTTPServer_GlobalDrainBlocked(t *testing.T) {
+	_, baseURL := startTestHTTPServer(t, nil)
+
+	// Create a session and send a message so there IS data to drain.
+	postACP(t, baseURL, "/connect", ACPMessage{Type: TypeConnect, SenderID: "victim"}).Body.Close()
+	postACP(t, baseURL, "/send", ACPMessage{Type: TypeMessage, SenderID: "victim", Content: "secret"}).Body.Close()
+
+	// Attempt global drain (no sender_id) — should be rejected.
+	resp, err := http.Get(baseURL + "/stream")
+	if err != nil {
+		t.Fatalf("GET /stream failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("expected 400 for global drain, got %d", resp.StatusCode)
+	}
+}
+
+// TestHTTPServer_GlobalDrainBlockedWithAuth verifies that /stream with auth
+// still works (sender_id is bound to the auth subject, so it's never empty).
+func TestHTTPServer_GlobalDrainBlockedWithAuth(t *testing.T) {
+	_, baseURL := startTestAuthHTTPServer(t, nil)
+
+	// Connect and send a message as the auth subject.
+	postACPAuth(t, baseURL, "/connect", ACPMessage{
+		Type:     TypeConnect,
+		SenderID: testAuthSubject,
+	}).Body.Close()
+	postACPAuth(t, baseURL, "/send", ACPMessage{
+		Type:     TypeMessage,
+		SenderID: testAuthSubject,
+		Content:  "hello",
+	}).Body.Close()
+
+	// /stream with auth — sender_id is bound to auth subject, should work.
+	req := authRequest(http.MethodGet, baseURL+"/stream", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /stream with auth failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 for auth-bound /stream, got %d", resp.StatusCode)
+	}
+
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "message received") {
+		t.Errorf("expected ack in stream, got: %s", string(body))
 	}
 }

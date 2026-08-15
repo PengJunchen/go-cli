@@ -2,6 +2,9 @@ package acp
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -28,14 +31,15 @@ const authSubjectKey contextKey = iota
 //   - POST /disconnect  — tear down a session
 //   - GET  /stream      — drain pending response messages (NDJSON)
 //
-// Sessions are tracked by SenderID. The /stream endpoint accepts an optional
-// ?sender_id= query parameter for per-session streaming; when omitted, all
-// pending messages across sessions are drained (backward compatible with the
-// existing gRPCAdapter client which does not send sender_id in GET requests).
+// Sessions are tracked by SenderID (used as an internal routing key). The
+// /stream endpoint requires a ?sender_id= query parameter for per-session
+// streaming; global drain (all sessions without sender_id) is not allowed
+// to prevent cross-session data leakage.
 //
 // When auth is enabled via SetAuth, all routes require a Bearer token and
 // the /stream, /events endpoints bind sender_id to the authenticated subject
-// instead of an arbitrary query parameter.
+// instead of an arbitrary query parameter. Session IDs are always generated
+// server-side using crypto/rand to prevent session fixation attacks.
 type HTTPServer struct {
 	name        string
 	addr        string
@@ -94,7 +98,7 @@ func (s *HTTPServer) authMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		token := strings.TrimPrefix(auth, "Bearer ")
-		if token != s.authToken {
+		if subtle.ConstantTimeCompare([]byte(token), []byte(s.authToken)) != 1 {
 			w.Header().Set("WWW-Authenticate", "Bearer")
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
@@ -220,14 +224,27 @@ func (s *HTTPServer) Running() bool {
 	return s.running
 }
 
+// generateSessionID generates a cryptographically random 32-byte session ID,
+// returned as a 64-character hex-encoded string. The ID is generated
+// server-side to prevent session fixation attacks — client-provided SenderIDs
+// are never used as session identifiers.
+func generateSessionID() string {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		panic(fmt.Sprintf("acp: crypto/rand failed: %v", err))
+	}
+	return hex.EncodeToString(b)
+}
+
 // getOrCreateSession returns the session for senderID, creating one if it
-// does not exist.
+// does not exist. New sessions are assigned a server-generated random ID
+// (not the client-provided senderID) to prevent session fixation.
 func (s *HTTPServer) getOrCreateSession(senderID string) *Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	sess, ok := s.sessions[senderID]
 	if !ok {
-		sess = NewSession(senderID)
+		sess = NewSession(generateSessionID())
 		s.sessions[senderID] = sess
 	}
 	return sess
@@ -253,7 +270,9 @@ func (s *HTTPServer) removeSession(senderID string) *Session {
 }
 
 // handleConnect processes POST /connect requests. It creates a session for
-// the client's SenderID and returns the session ID in the response body.
+// the client's SenderID and returns the server-generated session ID in the
+// response body. The client-provided SenderID is used as an internal routing
+// key but is never exposed as the session ID, preventing session fixation.
 func (s *HTTPServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -271,14 +290,14 @@ func (s *HTTPServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 		senderID = "anonymous"
 	}
 
-	s.getOrCreateSession(senderID)
+	sess := s.getOrCreateSession(senderID)
 
-	slog.Info("acp.server.connect", "sender", senderID)
+	slog.Info("acp.server.connect", "sender", senderID, "session_id", sess.ID())
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
-		"session_id": senderID,
+		"session_id": sess.ID(),
 		"status":     "connected",
 	})
 }
@@ -365,8 +384,10 @@ func (s *HTTPServer) handleDisconnect(w http.ResponseWriter, r *http.Request) {
 
 // handleStream processes GET /stream requests. It drains pending messages
 // for the requested session (via ?sender_id= query parameter) and writes
-// them as newline-delimited JSON. If no sender_id is provided, all pending
-// messages across all sessions are drained.
+// them as newline-delimited JSON. A sender_id query parameter is always
+// required — draining all sessions (global drain) is not allowed, to
+// prevent unauthorized access to other clients' messages. When auth is
+// enabled, sender_id is bound to the authenticated subject.
 func (s *HTTPServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -380,32 +401,27 @@ func (s *HTTPServer) handleStream(w http.ResponseWriter, r *http.Request) {
 		senderID = subject
 	}
 
+	// Require sender_id — global drain (all sessions) is not allowed
+	// to prevent cross-session data leakage.
+	if senderID == "" {
+		http.Error(w, "sender_id query parameter is required", http.StatusBadRequest)
+		return
+	}
+
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.WriteHeader(http.StatusOK)
 
 	flusher, _ := w.(http.Flusher)
 
-	if senderID != "" {
-		// Drain messages for a specific session.
-		sess := s.getSession(senderID)
-		if sess == nil {
-			return
+	// Drain messages for a specific session.
+	sess := s.getSession(senderID)
+	if sess == nil {
+		if flusher != nil {
+			flusher.Flush()
 		}
-		s.writeMessages(w, sess.Drain())
-	} else {
-		// Drain all sessions (backward compatible with gRPCAdapter
-		// which does not send sender_id in GET /stream).
-		s.mu.Lock()
-		sessions := make([]*Session, 0, len(s.sessions))
-		for _, sess := range s.sessions {
-			sessions = append(sessions, sess)
-		}
-		s.mu.Unlock()
-
-		for _, sess := range sessions {
-			s.writeMessages(w, sess.Drain())
-		}
+		return
 	}
+	s.writeMessages(w, sess.Drain())
 
 	if flusher != nil {
 		flusher.Flush()
