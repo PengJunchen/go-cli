@@ -2,7 +2,9 @@ package session
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -204,4 +206,81 @@ func TestSessionSlashHandler_NilTree(t *testing.T) {
 	handler := NewSessionSlashHandler(nil, nil)
 	_, err := handler.Handle(context.Background(), SlashCommand{Name: "tree"})
 	require.Error(t, err)
+}
+
+// --- /resume list selector tests ---
+
+func TestSessionSlashHandler_ResumeListSelector(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	storeDir := t.TempDir()
+
+	// Create two sessions in the store directory.
+	store1 := NewJSONLSessionStore(storeDir)
+	require.NoError(t, store1.SetSessionID("sess-alpha", true))
+	require.NoError(t, store1.Append(context.Background(), &SessionEntry{
+		ID: "a1", Type: EntryTypeUser, Content: "alpha message",
+		Timestamp: time.Now(),
+	}))
+	require.NoError(t, store1.Save(context.Background()))
+	require.NoError(t, store1.Close())
+
+	time.Sleep(10 * time.Millisecond)
+
+	store2 := NewJSONLSessionStore(storeDir)
+	require.NoError(t, store2.SetSessionID("sess-beta", true))
+	require.NoError(t, store2.Append(context.Background(), &SessionEntry{
+		ID: "b1", Type: EntryTypeUser, Content: "beta message",
+		Timestamp: time.Now(),
+	}))
+	require.NoError(t, store2.Save(context.Background()))
+	require.NoError(t, store2.Close())
+
+	// Create a handler with the store and call /resume without args.
+	store3 := NewJSONLSessionStore(storeDir)
+	tree := NewDefaultSessionTree()
+	handler := NewSessionSlashHandler(tree, store3)
+
+	out, err := handler.Handle(context.Background(), SlashCommand{Name: "resume"})
+	require.NoError(t, err)
+	assert.Contains(t, out, "Available sessions")
+	assert.Contains(t, out, "sess-alpha")
+	assert.Contains(t, out, "sess-beta")
+	assert.Contains(t, out, "alpha message")
+	assert.Contains(t, out, "beta message")
+
+	require.NoError(t, store3.Close())
+}
+
+func TestSessionSlashHandler_ResumeListSelectorEmpty(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	storeDir := t.TempDir()
+	store := NewJSONLSessionStore(storeDir)
+	tree := NewDefaultSessionTree()
+	handler := NewSessionSlashHandler(tree, store)
+
+	out, err := handler.Handle(context.Background(), SlashCommand{Name: "resume"})
+	require.NoError(t, err)
+	assert.Contains(t, out, "No previous sessions")
+
+	require.NoError(t, store.Close())
+}
+
+func TestSessionSlashHandler_ResumeListSelectorLegacyStore(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	// Legacy (single-file) store does not implement SessionLister in a
+	// meaningful way — ListSessions returns nil. The /resume without args
+	// should still list "No previous sessions" since the list is empty.
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	store := NewJSONLSessionStore(path)
+	tree := NewDefaultSessionTree()
+	handler := NewSessionSlashHandler(tree, store)
+
+	out, err := handler.Handle(context.Background(), SlashCommand{Name: "resume"})
+	require.NoError(t, err)
+	assert.Contains(t, out, "No previous sessions")
+
+	require.NoError(t, store.Close())
 }

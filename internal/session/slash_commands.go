@@ -169,12 +169,16 @@ func (h *SessionSlashHandler) handleFork(ctx context.Context, args []string) (st
 // handleResume resumes a previous session by moving the current leaf to the
 // given session/entry id, rebuilding the branch context, and invoking the
 // OnResume callback (if set) so the caller can restore agent history.
+//
+// When called without arguments and the store implements SessionLister, it
+// lists available session files (timestamp + preview) for interactive
+// selection.
 func (h *SessionSlashHandler) handleResume(ctx context.Context, args []string) (string, error) {
 	if h.tree == nil {
 		return "", fmt.Errorf("session: no session tree configured")
 	}
 	if len(args) == 0 || args[0] == "" {
-		return "", fmt.Errorf("session: /resume requires a session id")
+		return h.listSessionsForResume(ctx)
 	}
 	target := args[0]
 	if err := h.tree.MoveTo(ctx, target); err != nil {
@@ -197,6 +201,40 @@ func (h *SessionSlashHandler) handleResume(ctx context.Context, args []string) (
 	msg := fmt.Sprintf("Resumed session at %q (%d messages)", target, len(sessCtx.Messages))
 	slog.Info("session.slash.resume", "target", target, "messages", len(sessCtx.Messages))
 	return msg, nil
+}
+
+// listSessionsForResume enumerates available session files via the
+// SessionLister interface and returns a formatted list suitable for
+// interactive selection. Each line shows the session timestamp, ID, entry
+// count, and a truncated preview of the first message.
+func (h *SessionSlashHandler) listSessionsForResume(ctx context.Context) (string, error) {
+	lister, ok := h.store.(SessionLister)
+	if !ok {
+		return "", fmt.Errorf("session: /resume requires a session id")
+	}
+	metas, err := lister.ListSessions(ctx)
+	if err != nil {
+		return "", fmt.Errorf("session: list sessions: %w", err)
+	}
+	if len(metas) == 0 {
+		return "No previous sessions found.", nil
+	}
+	var sb strings.Builder
+	sb.WriteString(fmt.Sprintf("Available sessions (%d):\n", len(metas)))
+	for _, m := range metas {
+		preview := m.Preview
+		if preview == "" {
+			preview = "(no preview)"
+		}
+		sb.WriteString(fmt.Sprintf("  %s  [%s]  (%d entries)  %s\n",
+			m.Timestamp.Format("2006-01-02 15:04:05"),
+			m.ID,
+			m.EntryCount,
+			truncateForDisplay(preview, 60),
+		))
+	}
+	sb.WriteString("\nUse /resume <session-id> to resume a specific session.")
+	return sb.String(), nil
 }
 
 // handleBranches lists all branches recorded in the session tree, marking the

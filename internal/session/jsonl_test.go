@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -158,4 +159,137 @@ func TestJSONL_TraceSpans(t *testing.T) {
 	validateSpan(t, exp, "session.open")
 	validateSpan(t, exp, "session.save")
 	validateSpan(t, exp, "session.load")
+}
+
+// --- Directory mode tests ---
+
+func TestJSONL_DirectoryMode_SetSessionID(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	storeDir := t.TempDir()
+	store := NewJSONLSessionStore(storeDir)
+	require.True(t, store.DirMode(), "store should be in directory mode")
+
+	require.NoError(t, store.SetSessionID("sess-abc", true))
+	require.NoError(t, store.Append(context.Background(), newTestEntry("e1", "", EntryTypeUser)))
+	require.NoError(t, store.Append(context.Background(), newTestEntry("e2", "e1", EntryTypeAssistant)))
+	require.NoError(t, store.Save(context.Background()))
+	require.NoError(t, store.Close())
+
+	entries, err := os.ReadDir(filepath.Join(storeDir, "sessions"))
+	require.NoError(t, err)
+	require.Len(t, entries, 1)
+	assert.True(t, strings.HasSuffix(entries[0].Name(), "-sess-abc.jsonl"))
+}
+
+func TestJSONL_DirectoryMode_ListSessions(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	storeDir := t.TempDir()
+
+	store1 := NewJSONLSessionStore(storeDir)
+	require.NoError(t, store1.SetSessionID("sess-first", true))
+	require.NoError(t, store1.Append(context.Background(), &SessionEntry{
+		ID: "a1", Type: EntryTypeUser, Content: "first message",
+		Timestamp: time.Now(),
+	}))
+	require.NoError(t, store1.Save(context.Background()))
+	require.NoError(t, store1.Close())
+
+	time.Sleep(10 * time.Millisecond)
+
+	store2 := NewJSONLSessionStore(storeDir)
+	require.NoError(t, store2.SetSessionID("sess-second", true))
+	require.NoError(t, store2.Append(context.Background(), &SessionEntry{
+		ID: "b1", Type: EntryTypeUser, Content: "second message",
+		Timestamp: time.Now(),
+	}))
+	require.NoError(t, store2.Save(context.Background()))
+	require.NoError(t, store2.Close())
+
+	store3 := NewJSONLSessionStore(storeDir)
+	metas, err := store3.ListSessions(context.Background())
+	require.NoError(t, err)
+	require.Len(t, metas, 2)
+
+	assert.Equal(t, "sess-second", metas[0].ID)
+	assert.Contains(t, metas[0].Preview, "second message")
+	assert.Equal(t, "sess-first", metas[1].ID)
+	assert.Contains(t, metas[1].Preview, "first message")
+	assert.GreaterOrEqual(t, metas[0].EntryCount, 1)
+	assert.GreaterOrEqual(t, metas[1].EntryCount, 1)
+
+	require.NoError(t, store3.Close())
+}
+
+func TestJSONL_DirectoryMode_ResumeKeepsSessionFile(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	storeDir := t.TempDir()
+
+	store1 := NewJSONLSessionStore(storeDir)
+	require.NoError(t, store1.SetSessionID("sess-resume", true))
+	require.NoError(t, store1.Append(context.Background(), newTestEntry("r1", "", EntryTypeUser)))
+	require.NoError(t, store1.Append(context.Background(), newTestEntry("r2", "r1", EntryTypeAssistant)))
+	require.NoError(t, store1.Save(context.Background()))
+	require.NoError(t, store1.Close())
+
+	store2 := NewJSONLSessionStore(storeDir)
+	require.NoError(t, store2.Open(context.Background()))
+	require.NoError(t, store2.SetSessionID("sess-resume", false))
+
+	got, err := store2.Get(context.Background(), "r1")
+	require.NoError(t, err)
+	assert.Equal(t, "content-r1", got.Content)
+
+	require.NoError(t, store2.Append(context.Background(), newTestEntry("r3", "r2", EntryTypeUser)))
+	require.NoError(t, store2.Save(context.Background()))
+	require.NoError(t, store2.Close())
+
+	entries, err := os.ReadDir(filepath.Join(storeDir, "sessions"))
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "resume should not create a new session file")
+}
+
+func TestJSONL_DirectoryMode_LegacyFileNotAffected(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	store := NewJSONLSessionStore(path)
+	assert.False(t, store.DirMode(), "store with .jsonl path should be in legacy mode")
+
+	require.NoError(t, store.SetSessionID("ignored", true))
+	require.NoError(t, store.Append(context.Background(), newTestEntry("x1", "", EntryTypeUser)))
+	require.NoError(t, store.Close())
+
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.Contains(t, string(data), "content-x1")
+
+	_, err = os.Stat(filepath.Join(filepath.Dir(path), "sessions"))
+	assert.True(t, os.IsNotExist(err), "legacy mode should not create sessions dir")
+}
+
+func TestJSONL_DirectoryMode_EntryIDNoConflict(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	storeDir := t.TempDir()
+
+	store1 := NewJSONLSessionStore(storeDir)
+	require.NoError(t, store1.SetSessionID("sess-conflict", true))
+	require.NoError(t, store1.Append(context.Background(), newTestEntry("entry-0", "", EntryTypeUser)))
+	require.NoError(t, store1.Append(context.Background(), newTestEntry("entry-1", "entry-0", EntryTypeAssistant)))
+	require.NoError(t, store1.Save(context.Background()))
+	require.NoError(t, store1.Close())
+
+	store2 := NewJSONLSessionStore(storeDir)
+	require.NoError(t, store2.Open(context.Background()))
+	require.NoError(t, store2.SetSessionID("sess-conflict", false))
+
+	err := store2.Append(context.Background(), newTestEntry("entry-0", "", EntryTypeUser))
+	require.Error(t, err, "duplicate entry ID should be rejected")
+
+	require.NoError(t, store2.Append(context.Background(), newTestEntry("entry-2", "entry-1", EntryTypeUser)))
+	require.NoError(t, store2.Save(context.Background()))
+	require.NoError(t, store2.Close())
 }
