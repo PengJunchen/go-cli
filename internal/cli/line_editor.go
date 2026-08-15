@@ -180,16 +180,39 @@ func (le *DefaultLineEditor) Stop() {
 }
 
 // visualLineCount calculates how many terminal visual lines the prompt + buffer
-// will occupy, accounting for CJK double-width characters and line wrapping.
+// will occupy, accounting for CJK double-width characters, line wrapping, and
+// explicit newlines (e.g. from a multi-line paste).
 func visualLineCount(prompt string, buf []rune, termWidth int) int {
 	if termWidth <= 0 {
 		termWidth = 80
 	}
-	total := displayWidth([]rune(prompt)) + displayWidth(buf)
-	if total == 0 {
+	// Split buf by newlines to handle explicit line breaks. Each
+	// segment's wrapped line count is summed; the prompt only contributes
+	// to the first segment's width.
+	var totalLines int
+	segStart := 0
+	for i := 0; i <= len(buf); i++ {
+		if i < len(buf) && buf[i] != '\n' {
+			continue
+		}
+		seg := buf[segStart:i]
+		var w int
+		if totalLines == 0 {
+			w = displayWidth([]rune(prompt)) + displayWidth(seg)
+		} else {
+			w = displayWidth(seg)
+		}
+		if w == 0 {
+			totalLines++
+		} else {
+			totalLines += (w + termWidth - 1) / termWidth
+		}
+		segStart = i + 1
+	}
+	if totalLines == 0 {
 		return 1
 	}
-	return (total + termWidth - 1) / termWidth
+	return totalLines
 }
 
 // stripANSI removes all ANSI escape sequences from s, returning only the
@@ -371,10 +394,16 @@ func (le *DefaultLineEditor) readLineTTY(ctx context.Context, prompt string) (st
 		return le.readLineNonTTY(ctx, prompt)
 	}
 	defer func() {
+		// Disable bracketed paste mode before restoring terminal state.
+		fmt.Fprint(le.out, "\x1b[?2004l") //nolint:errcheck
 		if rErr := restoreMode(le.in, saved); rErr != nil {
 			slog.Warn("cli_line_editor_restore_mode_failed", "err", rErr)
 		}
 	}()
+
+	// Enable bracketed paste mode so pasted content is wrapped in
+	// ESC[200~...ESC[201~ and can be detected as a single unit.
+	fmt.Fprint(le.out, "\x1b[?2004h") //nolint:errcheck
 
 	// Single reader goroutine for the duration of this ReadLine call.
 	readCh := make(chan byteResult)
@@ -666,6 +695,71 @@ func (le *DefaultLineEditor) readSingleLineTTY(readByte func() (byte, error), pr
 			case 'F': // End — end of line
 				pos = len(buf)
 				render()
+			case '2':
+				// Possible bracketed paste sequence: ESC[200~ (start) or
+				// ESC[201~ (end), or Insert key: ESC[2~.
+				fourth, err := readByte()
+				if err != nil {
+					return "", err
+				}
+				if fourth == '~' {
+					// Insert key — ignore.
+					continue
+				}
+				if fourth != '0' {
+					// Unknown CSI sequence — ignore.
+					continue
+				}
+				fifth, err := readByte()
+				if err != nil {
+					return "", err
+				}
+				sixth, err := readByte()
+				if err != nil {
+					return "", err
+				}
+				if sixth != '~' {
+					// Unknown sequence — ignore.
+					continue
+				}
+				if fifth == '0' {
+					// Paste start: ESC[200~
+					content, pErr := readPasteContent(readByte)
+					if pErr != nil {
+						return "", pErr
+					}
+					// Normalize CRLF and CR to LF.
+					content = strings.ReplaceAll(content, "\r\n", "\n")
+					content = strings.ReplaceAll(content, "\r", "\n")
+					if !strings.Contains(content, "\n") {
+						// Single-line paste: insert into buffer and
+						// continue editing.
+						for _, r := range content {
+							buf = insertRune(buf, pos, r)
+							pos++
+						}
+						render()
+					} else {
+						// Multi-line paste: insert into buffer and
+						// return immediately as a single multi-line
+						// input so the content is not submitted or
+						// added to history line by line.
+						for _, r := range content {
+							buf = insertRune(buf, pos, r)
+							pos++
+						}
+						if le.prevVisualLines > 1 {
+							fmt.Fprintf(le.out, "\033[%dA", le.prevVisualLines-1) //nolint:errcheck
+						}
+						fmt.Fprint(le.out, "\r\033[J")                                    //nolint:errcheck
+						fmt.Fprint(le.out, prompt)                                         //nolint:errcheck
+						fmt.Fprint(le.out, strings.ReplaceAll(string(buf), "\n", "\r\n")) //nolint:errcheck
+						le.prevVisualLines = visualLineCount(prompt, buf, termW)
+						fmt.Fprint(le.out, "\r\n") //nolint:errcheck
+						return string(buf), nil
+					}
+				}
+				// fifth == '1' → paste end (ESC[201~), ignore outside paste.
 			}
 
 		case b >= 0x20 && b < 0x7F: // Printable ASCII
@@ -716,6 +810,45 @@ func (le *DefaultLineEditor) readSingleLineTTY(readByte func() (byte, error), pr
 		default:
 			// Ignore other control bytes.
 		}
+	}
+}
+
+// readPasteContent reads bytes from readByte until the bracketed paste end
+// sequence ESC[201~ is encountered. It returns the collected content
+// (without the end sequence). If readByte returns an error before the end
+// sequence is seen, the partial content and the error are returned.
+func readPasteContent(readByte func() (byte, error)) (string, error) {
+	var buf []byte
+	pasteEnd := []byte{0x1B, '[', '2', '0', '1', '~'}
+	for {
+		b, err := readByte()
+		if err != nil {
+			return string(buf), err
+		}
+		if b != 0x1B {
+			buf = append(buf, b)
+			continue
+		}
+		// ESC: check if this is the start of the paste end sequence.
+		seq := []byte{b}
+		matched := true
+		for i := 1; i < len(pasteEnd); i++ {
+			nb, err := readByte()
+			if err != nil {
+				buf = append(buf, seq...)
+				return string(buf), err
+			}
+			seq = append(seq, nb)
+			if nb != pasteEnd[i] {
+				matched = false
+				break
+			}
+		}
+		if matched {
+			return string(buf), nil
+		}
+		// Not the paste end sequence; add consumed bytes to content.
+		buf = append(buf, seq...)
 	}
 }
 
