@@ -206,7 +206,7 @@ func TestMiddlewareAskCallbackAlwaysAllow(t *testing.T) {
 	assert.Equal(t, "ran:read_file", res.Output)
 
 	// The always-allow decision must be persisted to the cache.
-	key, err := sessionKey(call("read_file"))
+	key, err := sessionKey(call("read_file"), PermissionDefault)
 	require.NoError(t, err)
 	allowed, ok := cache.Get(key)
 	assert.True(t, ok, "cache should contain the key after AlwaysAllow")
@@ -239,7 +239,7 @@ func TestMiddlewareAskCallbackCacheHitSkipsCallback(t *testing.T) {
 	cache := NewApprovalCache("")
 
 	// Pre-populate the cache so the callback should never be reached.
-	key, err := sessionKey(call("read_file"))
+	key, err := sessionKey(call("read_file"), PermissionDefault)
 	require.NoError(t, err)
 	cache.Set(key)
 

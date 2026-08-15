@@ -83,14 +83,16 @@ func WithCache(cache *ApprovalCache) Option {
 type ApprovalMiddleware struct {
 	classifier ApprovalClassifier
 	resolver   PermissionModeResolver
-	mode       PermissionMode
 	store      ApprovalStore
 	opts       approvalOptions
 
-	// session is the per-middleware cache keyed by "tool_name:args_hash". Values
-	// shared across calls within the same process are the "session" cache.
+	// session is the per-middleware cache keyed by "mode:tool_name:args_hash".
+	// Values shared across calls within the same process are the "session"
+	// cache. sessionMu guards both session and mode (mode may be switched at
+	// runtime via SetPermissionMode).
 	sessionMu sync.RWMutex
 	session   map[string]Classification
+	mode      PermissionMode
 }
 
 var _ core.ToolMiddleware = (*ApprovalMiddleware)(nil)
@@ -125,21 +127,23 @@ func NewApprovalMiddleware(classifier ApprovalClassifier, store ApprovalStore, o
 // Name returns the middleware identifier.
 func (m *ApprovalMiddleware) Name() string { return "approval" }
 
-// sessionKey builds a stable decision key from the tool name and canonical
-// (sorted-key) JSON of its arguments. Identical arguments hash identically.
-func sessionKey(call tools.ToolCall) (string, error) {
+// sessionKey builds a stable decision key from the current permission mode,
+// the tool name, and canonical (sorted-key) JSON of its arguments. Including
+// the permission mode prevents an Allow cached under one mode (e.g. AutoFull)
+// from being reused after a switch to a stricter mode (e.g. Default).
+func sessionKey(call tools.ToolCall, mode PermissionMode) (string, error) {
 	argsBytes, err := json.Marshal(call.Args)
 	if err != nil {
 		return "", fmt.Errorf("marshal tool args: %w", err)
 	}
 	sum := sha256.Sum256(argsBytes)
-	return call.Name + ":" + hex.EncodeToString(sum[:]), nil
+	return mode.String() + ":" + call.Name + ":" + hex.EncodeToString(sum[:]), nil
 }
 
 // WrapToolCall returns an approval gate around the next tool executor.
 func (m *ApprovalMiddleware) WrapToolCall(next func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error)) func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
 	return func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
-		key, err := sessionKey(call)
+		key, err := sessionKey(call, m.currentMode())
 		if err != nil {
 			slog.Warn("approval.session_key", "tool", call.Name, "error", err)
 			return nil, err
@@ -234,18 +238,42 @@ func (m *ApprovalMiddleware) resolveAsk(ctx context.Context, key string, call to
 // otherwise it returns the statically bound classifier.
 func (m *ApprovalMiddleware) effectiveClassifier() ApprovalClassifier {
 	if m.resolver != nil {
-		return m.resolver.Resolve(m.mode)
+		return m.resolver.Resolve(m.currentMode())
 	}
 	return m.classifier
 }
 
 // currentMode returns the permission mode used for decision telemetry. When no
 // resolver is wired the mode defaults to PermissionDefault for the attribute.
+// The mode is read under the session lock because SetPermissionMode may update
+// it concurrently.
 func (m *ApprovalMiddleware) currentMode() PermissionMode {
 	if m.resolver == nil {
 		return PermissionDefault
 	}
+	m.sessionMu.RLock()
+	defer m.sessionMu.RUnlock()
 	return m.mode
+}
+
+// SetPermissionMode switches the effective permission mode and clears the
+// in-session cache so decisions cached under the previous mode are not reused.
+// This prevents an Allow cached in AutoFull mode from being applied in Default
+// mode after a switch.
+func (m *ApprovalMiddleware) SetPermissionMode(mode PermissionMode) {
+	m.sessionMu.Lock()
+	defer m.sessionMu.Unlock()
+	m.mode = mode
+	m.session = make(map[string]Classification)
+	slog.Info("approval.mode_switch", "mode", mode.String())
+}
+
+// ClearSession empties the in-session decision cache so subsequent calls
+// re-classify instead of trusting cached decisions.
+func (m *ApprovalMiddleware) ClearSession() {
+	m.sessionMu.Lock()
+	defer m.sessionMu.Unlock()
+	m.session = make(map[string]Classification)
 }
 
 // record attaches the decision attributes to the span and returns the decision.
