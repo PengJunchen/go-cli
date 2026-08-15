@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"testing"
@@ -407,5 +408,208 @@ func TestEnsureServerName(t *testing.T) {
 	}
 	if got := ensureServerName("custom"); got != "custom" {
 		t.Errorf("expected 'custom', got %q", got)
+	}
+}
+
+// --- Auth tests ---
+
+const (
+	testAuthToken   = "test-secret-token"
+	testAuthSubject = "test-subject"
+)
+
+// startTestAuthHTTPServer creates an HTTPServer with auth enabled and starts
+// it on an ephemeral port.
+func startTestAuthHTTPServer(t *testing.T, handler *CoreHandler) (*HTTPServer, string) {
+	t.Helper()
+	srv := NewHTTPServer("test", "127.0.0.1:0", handler)
+	srv.SetAuth(testAuthToken, testAuthSubject)
+	if err := srv.Start(context.Background()); err != nil {
+		t.Fatalf("Start failed: %v", err)
+	}
+	t.Cleanup(func() { _ = srv.Stop(context.Background()) })
+
+	baseURL := "http://" + srv.Addr()
+
+	ready := false
+	for i := 0; i < 50; i++ {
+		resp, err := http.Get(baseURL + "/stream")
+		if err == nil {
+			resp.Body.Close()
+			ready = true
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !ready {
+		t.Fatal("server did not become ready")
+	}
+	return srv, baseURL
+}
+
+// authRequest creates an http.Request with the Bearer auth header.
+func authRequest(method, url string, body io.Reader) *http.Request {
+	req, _ := http.NewRequest(method, url, body)
+	req.Header.Set("Authorization", "Bearer "+testAuthToken)
+	return req
+}
+
+// postACPAuth sends an authenticated POST with a JSON ACPMessage body.
+func postACPAuth(t *testing.T, baseURL, path string, msg ACPMessage) *http.Response {
+	t.Helper()
+	body, _ := json.Marshal(msg)
+	req := authRequest(http.MethodPost, baseURL+path, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST %s failed: %v", path, err)
+	}
+	return resp
+}
+
+// TestHTTPServer_AuthRejectsMissingToken verifies that routes without an
+// Authorization header return 401 (AC-2).
+func TestHTTPServer_AuthRejectsMissingToken(t *testing.T) {
+	_, baseURL := startTestAuthHTTPServer(t, nil)
+
+	for _, path := range []string{"/connect", "/send", "/disconnect", "/stream", "/events"} {
+		resp, err := http.Post(baseURL+path, "application/json", strings.NewReader("{}"))
+		if err != nil {
+			t.Fatalf("POST %s failed: %v", path, err)
+		}
+		if resp.StatusCode != http.StatusUnauthorized {
+			t.Errorf("%s: expected 401, got %d", path, resp.StatusCode)
+		}
+		if v := resp.Header.Get("WWW-Authenticate"); v != "Bearer" {
+			t.Errorf("%s: expected WWW-Authenticate: Bearer, got %q", path, v)
+		}
+		resp.Body.Close()
+	}
+}
+
+// TestHTTPServer_AuthRejectsInvalidToken verifies that an incorrect token
+// returns 401 (AC-2).
+func TestHTTPServer_AuthRejectsInvalidToken(t *testing.T) {
+	_, baseURL := startTestAuthHTTPServer(t, nil)
+
+	req, _ := http.NewRequest(http.MethodPost, baseURL+"/connect", strings.NewReader("{}"))
+	req.Header.Set("Authorization", "Bearer wrong-token")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("POST /connect failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("expected 401 for invalid token, got %d", resp.StatusCode)
+	}
+}
+
+// TestHTTPServer_AuthAllowsValidToken verifies that a correct token allows
+// access (AC-2).
+func TestHTTPServer_AuthAllowsValidToken(t *testing.T) {
+	_, baseURL := startTestAuthHTTPServer(t, nil)
+
+	resp := postACPAuth(t, baseURL, "/connect", ACPMessage{
+		Type:     TypeConnect,
+		SenderID: "auth-client",
+	})
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 with valid token, got %d", resp.StatusCode)
+	}
+}
+
+// TestHTTPServer_AuthStreamBoundToSubject verifies that when auth is enabled,
+// /stream binds sender_id to the authenticated subject regardless of the
+// query parameter (AC-4).
+func TestHTTPServer_AuthStreamBoundToSubject(t *testing.T) {
+	srv, baseURL := startTestAuthHTTPServer(t, nil)
+
+	// Connect as the auth subject.
+	postACPAuth(t, baseURL, "/connect", ACPMessage{
+		Type:     TypeConnect,
+		SenderID: testAuthSubject,
+	}).Body.Close()
+
+	// Send a message — echo mode enqueues an ack.
+	postACPAuth(t, baseURL, "/send", ACPMessage{
+		Type:     TypeMessage,
+		SenderID: testAuthSubject,
+		Content:  "hello",
+	}).Body.Close()
+
+	// Drain /stream with a *different* sender_id query param. Because auth
+	// is enabled, sender_id should be overridden to the auth subject.
+	req := authRequest(http.MethodGet, baseURL+"/stream?sender_id=attacker", nil)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /stream failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), "message received") {
+		t.Errorf("expected ack from auth subject's session, got: %s", string(body))
+	}
+
+	// Verify the "attacker" session was never created.
+	if sess := srv.getSession("attacker"); sess != nil {
+		t.Error("expected no session for 'attacker' sender_id")
+	}
+}
+
+// TestHTTPServer_AuthEventsBoundToSubject verifies that when auth is enabled,
+// /events binds sender_id to the authenticated subject (AC-4).
+func TestHTTPServer_AuthEventsBoundToSubject(t *testing.T) {
+	srv, baseURL := startTestAuthHTTPServer(t, nil)
+
+	// Connect as the auth subject.
+	postACPAuth(t, baseURL, "/connect", ACPMessage{
+		Type:     TypeConnect,
+		SenderID: testAuthSubject,
+	}).Body.Close()
+
+	// Request /events with a different sender_id — should be overridden.
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	req := authRequest(http.MethodGet, baseURL+"/events?sender_id=attacker", nil)
+	req = req.WithContext(ctx)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("GET /events failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	// If sender_id were "attacker", we'd get 404 (session not found).
+	// With auth binding, sender_id is overridden to testAuthSubject, so
+	// we should get 200 (session exists).
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 (session found via auth subject), got %d", resp.StatusCode)
+	}
+
+	// Verify the "attacker" session was never created.
+	if sess := srv.getSession("attacker"); sess != nil {
+		t.Error("expected no session for 'attacker' sender_id")
+	}
+}
+
+// TestHTTPServer_NoAuthByDefault verifies that a server without SetAuth does
+// not require authentication (backward compatibility).
+func TestHTTPServer_NoAuthByDefault(t *testing.T) {
+	_, baseURL := startTestHTTPServer(t, nil)
+
+	// No Authorization header — should work fine.
+	resp := postACP(t, baseURL, "/connect", ACPMessage{
+		Type:     TypeConnect,
+		SenderID: "no-auth-client",
+	})
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 without auth, got %d", resp.StatusCode)
 	}
 }
