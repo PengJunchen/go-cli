@@ -1329,8 +1329,11 @@ func (s *assembleState) assembleMiddleware() {
 // compaction into the loop agent.
 func (s *assembleState) assembleCompactor() error {
 	// The estimator is needed both for the quality evaluator and the
-	// compactor adapter, so build it before the factory.
-	s.estimator = compaction.NewUnicodeTokenEstimator()
+	// compactor adapter, so build it before the factory. Use the composite
+	// estimator so short texts get precise per-rune weighting while long
+	// texts fall back to the O(1) length-based fast path, avoiding the
+	// O(n²) per-character scan of UnicodeTokenEstimator on large contexts.
+	s.estimator = compaction.NewCompositeTokenEstimator(0)
 
 	qualityEvaluator := compaction.NewDefaultQualityEvaluator(s.estimator)
 

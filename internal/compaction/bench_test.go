@@ -74,3 +74,53 @@ func BenchmarkUnifiedCompactor(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkMidTurnEstimate verifies that the incremental midturn estimation
+// avoids the O(n²) full-scan behaviour. Each iteration simulates the agent
+// loop adding one more item and calling CompactIfNeeded. With incremental
+// estimation, each call estimates only the single new item rather than
+// re-scanning the entire conversation, yielding O(n) total work.
+func BenchmarkMidTurnEstimate(b *testing.B) {
+	est := NewCompositeTokenEstimator(0)
+	compactor := NewRecordingCompactor("micro")
+	ctx := context.Background()
+
+	for _, n := range []int{50, 100, 200} {
+		b.Run(fmt.Sprintf("items_%d", n), func(b *testing.B) {
+			base := makeBenchItems(n)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				mtc := NewMidTurnCompact()
+				// Simulate the loop: each iteration adds one item
+				// and calls CompactIfNeeded. A fresh slice is created
+				// each iteration (mirroring messagesToTurnItems).
+				for j := 1; j <= n; j++ {
+					items := make([]TurnItem, j)
+					copy(items, base[:j])
+					_, _, _ = mtc.CompactIfNeeded(ctx, items, 1000000, est, compactor)
+				}
+			}
+		})
+	}
+}
+
+// BenchmarkMidTurnEstimateFullScan demonstrates the pre-fix O(n²) behaviour
+// where every item is re-estimated on every iteration. It serves as a
+// baseline for comparing against BenchmarkMidTurnEstimate.
+func BenchmarkMidTurnEstimateFullScan(b *testing.B) {
+	est := NewCompositeTokenEstimator(0)
+
+	for _, n := range []int{50, 100, 200} {
+		b.Run(fmt.Sprintf("items_%d", n), func(b *testing.B) {
+			base := makeBenchItems(n)
+			b.ResetTimer()
+			for i := 0; i < b.N; i++ {
+				for j := 1; j <= n; j++ {
+					items := make([]TurnItem, j)
+					copy(items, base[:j])
+					_ = estimateTokens(items, est)
+				}
+			}
+		})
+	}
+}

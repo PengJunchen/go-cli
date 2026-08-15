@@ -173,3 +173,38 @@ func (e *CompositeTokenEstimator) Estimate(text string) (int, error) {
 	}
 	return e.fast.Estimate(text)
 }
+
+// estimateItemTokens returns the estimated token count for a single TurnItem.
+// When the item's EstimatedTokens field is already set (> 0), the cached value
+// is returned without re-estimating. Otherwise the item's content, tool result,
+// and content blocks are estimated via the provided estimator and the result is
+// cached on the item's EstimatedTokens field for future reuse. This satisfies
+// AC-3: each TurnItem is estimated once and the result is cached.
+func estimateItemTokens(item *TurnItem, estimator TokenEstimator) int {
+	if item.EstimatedTokens > 0 {
+		return item.EstimatedTokens
+	}
+	total := 0
+	if item.Content != "" {
+		total += estimateLength(item.Content, estimator)
+	}
+	if item.ToolResult != "" {
+		total += estimateLength(item.ToolResult, estimator)
+	}
+	for _, block := range item.ContentBlocks {
+		switch block.Type {
+		case "text":
+			if block.Text != "" {
+				total += estimateLength(block.Text, estimator)
+			}
+		case "image_url":
+			total += 85
+		default:
+			if block.Text != "" {
+				total += estimateLength(block.Text, estimator)
+			}
+		}
+	}
+	item.EstimatedTokens = total
+	return total
+}
