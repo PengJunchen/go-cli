@@ -39,69 +39,47 @@ import (
 // explicit value is provided via AssembleOption.
 const defaultMaxTokens = 8000
 
-// AgentAssembly holds the fully wired agent runtime components produced by
-// AssembleAgent. Callers use the Harness to submit prompts and access the
-// other fields for slash commands, cost reporting, and session management.
-type AgentAssembly struct {
-	Harness       *core.HarnessImpl
-	Agent         *core.AgentImpl
-	ToolRegistry  tools.ToolRegistry
-	CostTracker   *production.CostTracker
-	StatsRegistry *production.StatsRegistry
-	SessionStore  *session.JSONLSessionStore
-	SessionID     string
-	Model         llm.BaseChatModel
-	ModelName     string
-	Compactor     compaction.Compactor
-	Estimator     compaction.TokenEstimator
-	MidTurn       *compaction.MidTurnCompact
-	MaxTokens     int
-	// EventBus is the shared event bus that receives a copy of every event
-	// emitted by the harness's EventStream. It is exposed so the SSE server
-	// can Subscribe for fan-out to multiple /events consumers.
-	EventBus core.EventBus
+// CoreRuntime holds the primary agent execution components.
+type CoreRuntime struct {
+	Harness      *core.HarnessImpl
+	Agent        *core.AgentImpl
+	ToolRegistry tools.ToolRegistry
+	TurnRunner   *core.EinoTurnRunner
+	LoopAgent    *core.LoopAgent
 	// Dispatcher is the sub-agent dispatcher used for ACP message dispatch.
 	// It is exposed so the serve command can wire it into the CoreHandler
 	// for remote SSE bridging.
 	Dispatcher *core.DefaultSubagentDispatcher
+	// EventBus is the shared event bus that receives a copy of every event
+	// emitted by the harness's EventStream. It is exposed so the SSE server
+	// can Subscribe for fan-out to multiple /events consumers.
+	EventBus core.EventBus
+}
+
+// ModelConfig holds LLM model configuration and selection.
+type ModelConfig struct {
+	Model         llm.BaseChatModel
+	ModelName     string
+	ModelSelector *llm.DefaultModelSelector
+	// ModelCycler rotates model selection across multiple providers. It is
+	// nil when model cycling is not configured.
+	ModelCycler *llm.ModelCycler
+	// ModelRegistry is the external model metadata registry (e.g.
+	// models.dev) used to enrich model info with pricing, context window and
+	// modality. It is nil when the model registry is not enabled.
+	ModelRegistry llm.ModelRegistry
 	// ContextWindow is the model's total context window size (in tokens),
 	// used for TUI status bar and /cost occupancy display. Falls back to
 	// MaxTokens when the model doesn't report a context window.
 	ContextWindow int
-	Cleanup       func()
-	// Registry exposes the assembled components through the core.DefaultRegistry
-	// so callers can retrieve or override any subsystem via RegisterXxx. It is
-	// additive: the components above are still constructed and wired exactly as
-	// before, they are also registered here for dependency-injection use.
-	Registry *core.DefaultRegistry
-	// FileTracker is the shared file tracker wired into WriteTool and
-	// EditFileTool for backup/restore checkpoints.
-	FileTracker *tools.FileTracker
-	// DiffGenerator is the shared diff generator wired into WriteTool and
-	// EditFileTool for change previews.
-	DiffGenerator tools.DiffGenerator
-	// PlanCtrl is the plan-mode controller exposed for slash commands.
-	PlanCtrl core.PlanModeController
-	// ModeResolver is the PermissionModeResolver wired into the ApprovalMiddleware
-	// so the effective classifier can switch dynamically based on PermissionMode.
-	ModeResolver approval.PermissionModeResolver
-	// PromptBuilder is the SystemPromptBuilder wired into the LoopAgent for
-	// dynamic system prompt assembly.
-	PromptBuilder core.SystemPromptBuilder
-	// ContextLoader is the ProjectContextLoader used to discover and load
-	// AGENTS.md / CLAUDE.md files from the file system.
-	ContextLoader core.ProjectContextLoader
-	// Tracer is the tracing.Tracer created from config.Tracing. It is nil when
-	// tracing is disabled (noop spans, zero overhead).
-	Tracer *tracing.Tracer
-	// ReminderManager manages system-reminder injections wired into the
-	// middleware chain.
-	ReminderManager core.SystemReminderManager
-	// HookChain is the hook chain wired into the middleware chain. Hooks are
-	// invoked before and after each turn.
-	HookChain *core.HookChain
-	// FailureSynthesizer converts recoverable errors into retry messages.
-	FailureSynthesizer core.FailureTurnSynthesizer
+	// ThinkingLevel is the resolved LLM reasoning depth applied to every
+	// Generate/Stream call. Defaults to ThinkingMedium when no explicit
+	// option or config value is provided.
+	ThinkingLevel llm.ThinkingLevel
+}
+
+// ProductionResilience holds fault tolerance and monitoring components.
+type ProductionResilience struct {
 	// CircuitBreaker protects the LLM model from cascading failures. When the
 	// breaker is Open, Generate returns a fallback response.
 	CircuitBreaker production.CircuitBreaker
@@ -111,16 +89,59 @@ type AgentAssembly struct {
 	// IdempotentCache caches tool call results so that identical calls with
 	// identical arguments return the stored result without re-executing.
 	IdempotentCache production.IdempotentCache
-	// AuditLog records tool calls as JSON-lines for later inspection. It is
-	// nil when audit logging is disabled.
-	AuditLog production.AuditLog
+	CostTracker     *production.CostTracker
+	StatsRegistry   *production.StatsRegistry
 	// Telemetry collects runtime metrics (LLM token usage, tool call counts,
 	// execution duration) queryable for cost reporting.
 	Telemetry production.Telemetry
-	// TurnRunner is the TurnRunner wired with the same steering channel as
-	// the LoopAgent, so Steer calls are delivered to the running loop
-	// between LLM iterations.
-	TurnRunner *core.EinoTurnRunner
+}
+
+// SessionManagement holds session persistence and memory components.
+type SessionManagement struct {
+	SessionStore *session.JSONLSessionStore
+	SessionID    string
+	// MemoryStore persists cross-session memories for the /memory slash
+	// command and system prompt injection.
+	MemoryStore *memory.FileMemoryStore
+	// MemoryExtractor extracts key facts from conversations for memory
+	// storage.
+	MemoryExtractor memory.MemoryExtractor
+	// MemoryWG tracks in-flight memory extraction goroutines so Cleanup
+	// can wait for them before closing the MemoryStore.
+	MemoryWG  *sync.WaitGroup
+	Compactor compaction.Compactor
+	Estimator compaction.TokenEstimator
+	MidTurn   *compaction.MidTurnCompact
+	MaxTokens int
+}
+
+// GitIntegration holds Git-related tools and managers.
+type GitIntegration struct {
+	// GitTool is the default git tool wired into the tool registry. It is
+	// exposed so the interactive session can wire it into the session tree
+	// for Git-aware branch linkage.
+	GitTool tools.GitTool
+	// WorktreeManager manages git worktrees for parallel session isolation.
+	// It is nil when worktree isolation is not enabled in config.
+	WorktreeManager *tools.WorktreeManager
+	// SnapshotMgr captures git working-tree snapshots before file mutations so
+	// files can be reverted to a previous state via the /revert slash command.
+	// It is nil when the working directory is not a git repository.
+	SnapshotMgr *tools.SnapshotManager
+}
+
+// Observability holds tracing and audit components.
+type Observability struct {
+	// Tracer is the tracing.Tracer created from config.Tracing. It is nil when
+	// tracing is disabled (noop spans, zero overhead).
+	Tracer *tracing.Tracer
+	// AuditLog records tool calls as JSON-lines for later inspection. It is
+	// nil when audit logging is disabled.
+	AuditLog production.AuditLog
+}
+
+// InteractiveControl holds channels and emitters for interactive sessions.
+type InteractiveControl struct {
 	// SteerChannel is the shared steering channel between the
 	// InterruptHandler (writer) and the LoopAgent (reader). The REPL writes
 	// steering messages here when the user presses Esc and types an
@@ -141,50 +162,67 @@ type AgentAssembly struct {
 	// running tea.Program, routing HITL questions through the TUI instead
 	// of stdout.
 	HITLEmitter *cliHITLEmitter
-	// LoopAgent is the raw LoopAgent before middleware wrapping. It is
-	// exposed so the REPL can call Pause()/Resume() on it.
-	LoopAgent *core.LoopAgent
-	// GitTool is the default git tool wired into the tool registry. It is
-	// exposed so the interactive session can wire it into the session tree
-	// for Git-aware branch linkage.
-	GitTool tools.GitTool
-	// WorktreeManager manages git worktrees for parallel session isolation.
-	// It is nil when worktree isolation is not enabled in config.
-	WorktreeManager *tools.WorktreeManager
-	// SnapshotMgr captures git working-tree snapshots before file mutations so
-	// files can be reverted to a previous state via the /revert slash command.
-	// It is nil when the working directory is not a git repository.
-	SnapshotMgr *tools.SnapshotManager
-	// MemoryStore persists cross-session memories for the /memory slash
-	// command and system prompt injection.
-	MemoryStore *memory.FileMemoryStore
-	// MemoryExtractor extracts key facts from conversations for memory
-	// storage.
-	MemoryExtractor memory.MemoryExtractor
-	// MemoryWG tracks in-flight memory extraction goroutines so Cleanup
-	// can wait for them before closing the MemoryStore.
-	MemoryWG *sync.WaitGroup
-	// ThinkingLevel is the resolved LLM reasoning depth applied to every
-	// Generate/Stream call. Defaults to ThinkingMedium when no explicit
-	// option or config value is provided.
-	ThinkingLevel llm.ThinkingLevel
-	// ModelCycler rotates model selection across multiple providers. It is
-	// nil when model cycling is not configured.
-	ModelCycler *llm.ModelCycler
-	// ModelRegistry is the external model metadata registry (e.g.
-	// models.dev) used to enrich model info with pricing, context window and
-	// modality. It is nil when the model registry is not enabled.
-	ModelRegistry llm.ModelRegistry
-	// ModelSelector is the DefaultModelSelector wrapping the primary and
-	// small models with optional registry-aware token routing. It is always
-	// non-nil after assembly.
-	ModelSelector *llm.DefaultModelSelector
+}
+
+// ToolingSupport holds tooling auxiliaries wired into the assembly.
+type ToolingSupport struct {
+	// FileTracker is the shared file tracker wired into WriteTool and
+	// EditFileTool for backup/restore checkpoints.
+	FileTracker *tools.FileTracker
+	// DiffGenerator is the shared diff generator wired into WriteTool and
+	// EditFileTool for change previews.
+	DiffGenerator tools.DiffGenerator
+	// PlanCtrl is the plan-mode controller exposed for slash commands.
+	PlanCtrl core.PlanModeController
+	// ModeResolver is the PermissionModeResolver wired into the ApprovalMiddleware
+	// so the effective classifier can switch dynamically based on PermissionMode.
+	ModeResolver approval.PermissionModeResolver
+	// PromptBuilder is the SystemPromptBuilder wired into the LoopAgent for
+	// dynamic system prompt assembly.
+	PromptBuilder core.SystemPromptBuilder
+	// ContextLoader is the ProjectContextLoader used to discover and load
+	// AGENTS.md / CLAUDE.md files from the file system.
+	ContextLoader core.ProjectContextLoader
+	// ReminderManager manages system-reminder injections wired into the
+	// middleware chain.
+	ReminderManager core.SystemReminderManager
+	// HookChain is the hook chain wired into the middleware chain. Hooks are
+	// invoked before and after each turn.
+	HookChain *core.HookChain
+	// FailureSynthesizer converts recoverable errors into retry messages.
+	FailureSynthesizer core.FailureTurnSynthesizer
 	// LSPClient is the Language Server Protocol client wired for code
 	// completion. It is nil when no LSP server is configured or started.
 	LSPClient tools.LSPClient
 	// LSPWorkspaceRoot is the workspace root used to initialize the LSP
 	// server. Used by the LSPCompleter to construct file URIs.
 	LSPWorkspaceRoot string
+}
+
+// AgentAssembly holds the fully wired agent runtime components produced by
+// AssembleAgent. Callers use the Harness to submit prompts and access the
+// other fields for slash commands, cost reporting, and session management.
+//
+// The struct is composed of focused sub-structs, each grouping fields by
+// architectural responsibility. Fields are accessible both via the sub-struct
+// (e.g. assembly.CoreRuntime.Harness) and via Go's promoted-field shorthand
+// (e.g. assembly.Harness) for backward compatibility.
+type AgentAssembly struct {
+	CoreRuntime
+	ModelConfig
+	ProductionResilience
+	SessionManagement
+	GitIntegration
+	Observability
+	InteractiveControl
+	ToolingSupport
+
+	// Registry exposes the assembled components through the core.DefaultRegistry
+	// so callers can retrieve or override any subsystem via RegisterXxx. It is
+	// additive: the components above are still constructed and wired exactly as
+	// before, they are also registered here for dependency-injection use.
+	Registry *core.DefaultRegistry
+	Cleanup  func()
 }
 
 // AssembleOption configures AssembleAgent behavior.
@@ -345,57 +383,73 @@ func AssembleAgent(
 	}
 
 	return &AgentAssembly{
-		Harness:            h,
-		Agent:              agent,
-		ToolRegistry:       s.tr,
-		CostTracker:        s.costTracker,
-		StatsRegistry:      s.statsRegistry,
-		SessionStore:       s.sessionStore,
-		SessionID:          s.sessionID,
-		Model:              s.model,
-		ModelName:          modelName,
-		Compactor:          s.compactor,
-		Estimator:          s.estimator,
-		MidTurn:            s.midTurn,
-		MaxTokens:          s.ac.maxTokens,
-		EventBus:           s.eventBus,
-		Dispatcher:         s.dispatcher,
-		ContextWindow:      contextWindow,
-		Cleanup:            s.runCleanup,
-		Registry:           s.reg,
-		FileTracker:        s.fileTracker,
-		DiffGenerator:      s.diffGen,
-		PlanCtrl:           s.planCtrl,
-		ModeResolver:       s.modeResolver,
-		PromptBuilder:      s.promptBuilder,
-		ContextLoader:      s.contextLoader,
-		Tracer:             s.tracer,
-		ReminderManager:    s.reminderMgr,
-		HookChain:          s.hookChain,
-		FailureSynthesizer: s.failureSynthesizer,
-		CircuitBreaker:     s.circuitBreaker,
-		LoopDetector:       s.loopDetector,
-		IdempotentCache:    s.idempotentCache,
-		AuditLog:           s.auditLog,
-		Telemetry:          s.telemetry,
-		TurnRunner:         turnRunner,
-		SteerChannel:       s.steerCh,
-		ApprovalChannel:    s.ac.approvalCh,
-		FollowUpChannel:    s.followUpCh,
-		HITLEmitter:        s.hitlEmitter,
-		LoopAgent:          s.loopAgent,
-		GitTool:            s.gitTool,
-		WorktreeManager:    s.worktreeMgr,
-		SnapshotMgr:        s.snapshotMgr,
-		MemoryStore:        s.memStore,
-		MemoryExtractor:    s.memExtractor,
-		MemoryWG:           &s.memWG,
-		ThinkingLevel:      thinkingLevel,
-		ModelCycler:        s.modelCycler,
-		ModelRegistry:      s.modelRegistry,
-		ModelSelector:      s.modelSelector,
-		LSPClient:          s.lspClientField,
-		LSPWorkspaceRoot:   s.lspWorkspaceRoot,
+		CoreRuntime: CoreRuntime{
+			Harness:      h,
+			Agent:        agent,
+			ToolRegistry: s.tr,
+			TurnRunner:   turnRunner,
+			LoopAgent:    s.loopAgent,
+			Dispatcher:   s.dispatcher,
+			EventBus:     s.eventBus,
+		},
+		ModelConfig: ModelConfig{
+			Model:         s.model,
+			ModelName:     modelName,
+			ModelSelector: s.modelSelector,
+			ModelCycler:   s.modelCycler,
+			ModelRegistry: s.modelRegistry,
+			ContextWindow: contextWindow,
+			ThinkingLevel: thinkingLevel,
+		},
+		ProductionResilience: ProductionResilience{
+			CircuitBreaker:  s.circuitBreaker,
+			LoopDetector:    s.loopDetector,
+			IdempotentCache: s.idempotentCache,
+			CostTracker:     s.costTracker,
+			StatsRegistry:   s.statsRegistry,
+			Telemetry:       s.telemetry,
+		},
+		SessionManagement: SessionManagement{
+			SessionStore:    s.sessionStore,
+			SessionID:       s.sessionID,
+			MemoryStore:     s.memStore,
+			MemoryExtractor: s.memExtractor,
+			MemoryWG:        &s.memWG,
+			Compactor:       s.compactor,
+			Estimator:       s.estimator,
+			MidTurn:         s.midTurn,
+			MaxTokens:       s.ac.maxTokens,
+		},
+		GitIntegration: GitIntegration{
+			GitTool:         s.gitTool,
+			WorktreeManager: s.worktreeMgr,
+			SnapshotMgr:     s.snapshotMgr,
+		},
+		Observability: Observability{
+			Tracer:   s.tracer,
+			AuditLog: s.auditLog,
+		},
+		InteractiveControl: InteractiveControl{
+			SteerChannel:    s.steerCh,
+			ApprovalChannel: s.ac.approvalCh,
+			FollowUpChannel: s.followUpCh,
+			HITLEmitter:     s.hitlEmitter,
+		},
+		ToolingSupport: ToolingSupport{
+			FileTracker:        s.fileTracker,
+			DiffGenerator:      s.diffGen,
+			PlanCtrl:           s.planCtrl,
+			ModeResolver:       s.modeResolver,
+			PromptBuilder:      s.promptBuilder,
+			ContextLoader:      s.contextLoader,
+			ReminderManager:    s.reminderMgr,
+			HookChain:          s.hookChain,
+			FailureSynthesizer: s.failureSynthesizer,
+			LSPClient:          s.lspClientField,
+			LSPWorkspaceRoot:   s.lspWorkspaceRoot,
+		},
+		Registry: s.reg,
+		Cleanup:  s.runCleanup,
 	}, nil
 }
 
