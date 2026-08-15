@@ -173,7 +173,7 @@ func (c *TeaApprovalCallback) RequestApproval(ctx context.Context, toolName stri
 
 // ApprovalCache persists always-allow decisions so subsequent identical calls
 // skip the interactive prompt. It is a concurrency-safe map of decision keys
-// (format "toolName:argsHash", matching sessionKey in middleware.go) to a
+// (format "mode:toolName:argsHash", matching sessionKey in middleware.go) to a
 // boolean allowed flag. The cache can be loaded from and saved to a JSON file.
 type ApprovalCache struct {
 	mu      sync.RWMutex
