@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -13,7 +14,7 @@ import (
 // inside a sandboxed bash tool. It also blocks commands that can be used to
 // bypass the sandbox by spawning a new shell or evaluating arbitrary input.
 //
-// The list is organized into three categories:
+// The list is organized into categories:
 //  1. Destructive commands that can damage the system or user data.
 //  2. Shell escape / eval commands that bypass the sandbox by spawning a new
 //     shell or evaluating arbitrary input.
@@ -21,6 +22,8 @@ import (
 //     code and thereby bypass the command blacklist. Network tools (curl, wget,
 //     nc, etc.) are also blocked to prevent data exfiltration and unauthorized
 //     outbound connections from within the sandbox.
+//  4. Environment disclosure commands (env, printenv) that leak secrets stored
+//     in environment variables.
 var defaultCommandBlacklist = []string{
 	// Destructive commands.
 	"rm", "rmdir", "dd", "mkfs", "fdisk",
@@ -32,14 +35,33 @@ var defaultCommandBlacklist = []string{
 	"python", "python3", "perl", "ruby", "node", "php", "lua",
 	// Network tools: can exfiltrate data or open unauthorized connections.
 	"curl", "wget", "nc", "ncat", "telnet", "scp", "rsync",
+	// Environment disclosure: leak secrets stored in env vars.
+	"env", "printenv",
 }
 
 // commandPrefixes lists commands that prefix another command and would bypass
-// the first-token blacklist check (e.g. "sudo rm" has first token "sudo").
+// the first-token blacklist check (e.g. "sudo rm" has first token "sudo"). The
+// "function" keyword is included so that "function rm { ... }" definitions are
+// reduced to the defined name ("rm") before the blacklist comparison. Note that
+// "env" is intentionally NOT a prefix: it is blacklisted directly (see AC-3) so
+// that bare "env" / "printenv" invocations are blocked regardless of args.
 var commandPrefixes = map[string]bool{
-	"sudo": true, "doas": true, "su": true, "env": true,
+	"sudo": true, "doas": true, "su": true,
 	"nohup": true, "time": true, "nice": true, "command": true,
 	"xargs": true, "strace": true, "ltrace": true, "timeout": true,
+	"function": true,
+}
+
+// DefaultCommandWhitelist lists command prefixes that are considered safe to run
+// without explicit approval when the sandbox operates in whitelist mode (see
+// WithCommandWhitelist). Entries may be multi-token (e.g. "go test") to scope
+// the allowance to a specific subcommand. Blacklisted commands and indirect
+// executors are always blocked, even when they appear in this list.
+var DefaultCommandWhitelist = []string{
+	"go test", "go build", "go vet", "go fmt", "go run", "go mod", "go list", "go doc",
+	"ls", "cat", "echo", "pwd", "head", "tail", "wc", "grep", "sort", "uniq", "tr", "cut",
+	"git status", "git diff", "git log", "git show", "git branch",
+	"mkdir", "touch", "date", "which", "file", "stat", "find",
 }
 
 // BashSandbox validates bash commands before execution. Implementations check
@@ -95,34 +117,61 @@ func (wl PathWhitelist) IsAllowed(workDir string) bool {
 }
 
 // CommandFilter checks parsed command strings against a blacklist of
-// disallowed command names. It understands command separators (;), pipes (|),
-// logical operators (&& and ||), and command substitution $(...) and `...`.
+// disallowed command names and, optionally, a whitelist of approved command
+// prefixes. It understands command separators (;), pipes (|), logical operators
+// (&& and ||), command substitution $(...) and `...`, and normalizes shell
+// quoting/escapes/function definitions before matching so that 'rm', "rm",
+// $'rm', \rm and rm(){} are all reduced to "rm".
 type CommandFilter struct {
 	blacklist []string
+	whitelist []string
 }
 
-// NewCommandFilter builds a CommandFilter from the given blacklist.
+// NewCommandFilter builds a CommandFilter from the given blacklist. The
+// whitelist is empty (whitelist mode disabled) unless WithCommandWhitelist is
+// used.
 func NewCommandFilter(blacklist []string) CommandFilter {
 	return CommandFilter{blacklist: blacklist}
 }
 
-// IsBlocked reports whether any command referenced by cmd is on the blacklist.
-// The command string is split on semicolons, pipes and logical operators and
-// each segment's first token is checked. Command substitutions $(...) and
-// backticks `...` are recursively inspected.
+// IsBlocked reports whether any command referenced by cmd is blocked. A command
+// is blocked when it matches the blacklist, uses an indirect executor, or
+// (when a whitelist is configured) does not match any whitelisted prefix.
 func (f CommandFilter) IsBlocked(cmd string) bool {
-	return f.hasBlocked(cmd)
+	blocked, _ := f.blockReason(cmd)
+	return blocked
 }
 
-func (f CommandFilter) hasBlocked(s string) bool {
+// BlockReason returns a non-empty human-readable reason when cmd is blocked, or
+// "" when the command is allowed. It is used by Validate to produce descriptive
+// errors.
+func (f CommandFilter) BlockReason(cmd string) string {
+	_, reason := f.blockReason(cmd)
+	return reason
+}
+
+// blockReason is the recursive core of the filter. It returns whether the
+// command string is blocked and, when it is, a short reason category. The
+// command string is split on semicolons, pipes and logical operators and each
+// segment's effective command is checked after normalization. Command
+// substitutions $(...) and backticks `...` and function-definition bodies are
+// recursively inspected.
+func (f CommandFilter) blockReason(s string) (bool, string) {
 	// Block heredoc syntax (<<) which can write arbitrary content to files.
 	if containsHeredoc(s) {
-		return true
+		return true, "blacklisted heredoc redirection"
 	}
 	// Recursively inspect command substitutions.
 	for _, inner := range extractSubShells(s) {
-		if f.hasBlocked(inner) {
-			return true
+		if blocked, reason := f.blockReason(inner); blocked {
+			return true, reason
+		}
+	}
+	// Recursively inspect function-definition bodies so that commands hidden
+	// inside a function (e.g. "helper(){ rm file; }") are caught.
+	for _, body := range extractFunctionBodies(s) {
+		if blocked, reason := f.blockReason(body); blocked {
+			return true, reason
 		}
 	}
 	// Remove substitutions so they don't pollute first-token extraction,
@@ -131,17 +180,24 @@ func (f CommandFilter) hasBlocked(s string) bool {
 	for _, seg := range splitCommands(stripped) {
 		// Check variable assignments for blacklisted values (e.g. x=rm).
 		if f.hasBlockedAssignment(seg) {
-			return true
+			return true, "blacklisted command in variable assignment"
 		}
 		name := effectiveCommand(seg)
-		if name == "" {
-			continue
+		if name != "" && f.isBlacklisted(name) {
+			return true, "blacklisted command: " + name
 		}
-		if f.isBlacklisted(name) {
-			return true
+		if hasIndirectExecutor(seg) {
+			return true, "blacklisted indirect executor"
+		}
+		// Whitelist mode: when configured, any segment whose effective command
+		// is not a structural token and does not match a whitelisted prefix
+		// requires approval (i.e. is blocked). Structural tokens (braces) and
+		// empty names (pure variable assignments) are exempt.
+		if len(f.whitelist) > 0 && name != "" && name != "{" && name != "}" && !f.matchesWhitelist(seg) {
+			return true, "command not in whitelist (approval required): " + name
 		}
 	}
-	return false
+	return false, ""
 }
 
 func (f CommandFilter) isBlacklisted(name string) bool {
@@ -226,6 +282,15 @@ func WithBlacklist(blacklist []string) SandboxOption {
 	return func(s *DefaultBashSandbox) { s.filter = NewCommandFilter(blacklist) }
 }
 
+// WithCommandWhitelist enables whitelist mode for the sandbox. When set, only
+// commands whose leading tokens match one of the given prefixes are allowed
+// without approval; everything else is blocked (requires approval). Blacklisted
+// commands and indirect executors are always blocked regardless of the
+// whitelist. An empty slice disables whitelist mode.
+func WithCommandWhitelist(commands []string) SandboxOption {
+	return func(s *DefaultBashSandbox) { s.filter.whitelist = commands }
+}
+
 // WithMaxCPU sets the maximum CPU duration allowed for a command.
 func WithMaxCPU(d time.Duration) SandboxOption {
 	return func(s *DefaultBashSandbox) { s.maxCPU = d }
@@ -250,13 +315,14 @@ func NewDefaultBashSandbox(opts ...SandboxOption) *DefaultBashSandbox {
 }
 
 // Validate checks the working directory against the whitelist and the command
-// against the blacklist. It returns a descriptive error if any check fails.
+// against the blacklist/whitelist filter. It returns a descriptive error if any
+// check fails.
 func (s *DefaultBashSandbox) Validate(_ context.Context, cmd, workDir string) error {
 	if !s.whitelist.IsAllowed(workDir) {
 		return fmt.Errorf("bash sandbox: workdir %q is not in the path whitelist", workDir)
 	}
-	if s.filter.IsBlocked(cmd) {
-		return fmt.Errorf("bash sandbox: command contains a blacklisted command: %s", cmd)
+	if reason := s.filter.BlockReason(cmd); reason != "" {
+		return fmt.Errorf("bash sandbox: command blocked (%s): %s", reason, cmd)
 	}
 	return nil
 }
@@ -409,29 +475,115 @@ func firstToken(s string) string {
 }
 
 // effectiveCommand returns the effective command name from a segment, skipping
-// known prefix/wrapper commands like sudo, doas, env, etc. This prevents
-// blacklist bypass via "sudo rm" where the first token "sudo" is not
-// blacklisted but the actual command "rm" is. It also applies filepath.Base
-// to the command token so that path-prefixed invocations like "/usr/bin/rm"
-// are reduced to "rm" before the blacklist check.
+// known prefix/wrapper commands like sudo, doas, etc. This prevents blacklist
+// bypass via "sudo rm" where the first token "sudo" is not blacklisted but the
+// actual command "rm" is. The command token is normalized for shell
+// quotes/escapes/function definitions (so 'rm', "rm", $'rm', \rm and rm(){}
+// all reduce to "rm") and filepath.Base is applied so that path-prefixed
+// invocations like "/usr/bin/rm" are reduced to "rm" before the blacklist check.
 func effectiveCommand(s string) string {
-	fields := strings.Fields(s)
-	for _, f := range fields {
-		// Skip variable assignments (e.g. FOO=bar). The assigned value is
-		// checked separately by hasBlockedAssignment.
+	cmd, _ := effectiveCommandAndArgs(strings.Fields(s))
+	return cmd
+}
+
+// effectiveCommandAndArgs returns the effective command name and the argument
+// tokens that follow it. It skips leading variable assignments (FOO=bar) and
+// known prefix/wrapper commands (sudo, doas, function, ...). The command token
+// is normalized via normalizeCommandToken before filepath.Base is applied.
+func effectiveCommandAndArgs(fields []string) (cmd string, args []string) {
+	for i, f := range fields {
 		if isVariableAssignment(f) {
 			continue
 		}
-		// Use filepath.Base so that /usr/bin/sudo is reduced to "sudo".
-		base := filepath.Base(f)
-		// Skip known prefix/wrapper commands (checked by base name so
-		// that /usr/bin/sudo is recognized as "sudo").
+		base := filepath.Base(normalizeCommandToken(f))
 		if commandPrefixes[base] {
 			continue
 		}
-		return base
+		return base, fields[i+1:]
+	}
+	return "", nil
+}
+
+// normalizeCommandToken reduces a single command token to its bare command name
+// by stripping shell quoting and escape characters and by recognizing function
+// definitions. For example 'rm', "rm", $'rm', \rm and rm(){} all reduce to
+// "rm".
+func normalizeCommandToken(token string) string {
+	token = stripQuotes(token)
+	if name := extractFunctionName(token); name != "" {
+		return name
+	}
+	return token
+}
+
+// stripQuotes removes surrounding shell quoting from a token: single quotes
+// ('...'), double quotes ("..."), ANSI-C dollar quotes ($'...'), and leading
+// backslash escapes (\rm -> rm). Unterminated quotes are left untouched.
+func stripQuotes(token string) string {
+	if len(token) == 0 {
+		return token
+	}
+	// $'...' ANSI-C quoting.
+	if strings.HasPrefix(token, "$'") && strings.HasSuffix(token, "'") && len(token) >= 3 {
+		return token[2 : len(token)-1]
+	}
+	// '...' single quote.
+	if token[0] == '\'' && len(token) >= 2 && token[len(token)-1] == '\'' {
+		return token[1 : len(token)-1]
+	}
+	// "..." double quote.
+	if token[0] == '"' && len(token) >= 2 && token[len(token)-1] == '"' {
+		return token[1 : len(token)-1]
+	}
+	// Leading backslash escapes (e.g. \rm or \\rm) -> rm.
+	if strings.HasPrefix(token, "\\") {
+		return strings.TrimLeft(token, "\\")
+	}
+	return token
+}
+
+// funcNameRe matches a shell function definition header "name()" at the start
+// of a token, capturing the function name.
+var funcNameRe = regexp.MustCompile(`^([A-Za-z_][A-Za-z0-9_-]*)\s*\(\s*\)`)
+
+// extractFunctionName returns the function name when token begins with a
+// "name()" definition header (e.g. "rm(){}" -> "rm"), or "" otherwise.
+func extractFunctionName(token string) string {
+	if m := funcNameRe.FindStringSubmatch(token); m != nil {
+		return m[1]
 	}
 	return ""
+}
+
+// funcBodyRe matches the opening of a function definition body: either
+// "name() {" or "function name {". The brace that opens the body is the last
+// character matched.
+var funcBodyRe = regexp.MustCompile(`(?:[A-Za-z_][A-Za-z0-9_-]*\s*\(\s*\)|function\s+[A-Za-z_][A-Za-z0-9_-]*)\s*\{`)
+
+// extractFunctionBodies finds shell function definitions in s and returns their
+// inner body strings (the text between the matching braces) so that callers can
+// recursively inspect them for blocked commands. Brace matching is balanced.
+func extractFunctionBodies(s string) []string {
+	locs := funcBodyRe.FindAllStringIndex(s, -1)
+	var bodies []string
+	for _, loc := range locs {
+		bodyStart := loc[1] // index just after '{'
+		depth := 1
+		i := bodyStart
+		for i < len(s) && depth > 0 {
+			switch s[i] {
+			case '{':
+				depth++
+			case '}':
+				depth--
+				if depth == 0 {
+					bodies = append(bodies, s[bodyStart:i])
+				}
+			}
+			i++
+		}
+	}
+	return bodies
 }
 
 // isVariableAssignment reports whether token looks like a shell variable
@@ -466,12 +618,87 @@ func (f CommandFilter) hasBlockedAssignment(seg string) bool {
 		}
 		idx := strings.Index(field, "=")
 		value := field[idx+1:]
-		// Strip surrounding quotes so that x="rm" and x='rm' are detected.
-		value = strings.Trim(value, "\"'")
-		value = filepath.Base(value)
+		// Normalize shell quoting/escapes so that x="rm", x='rm', x=$'rm',
+		// and x=\rm are all reduced to "rm" before the blacklist check.
+		value = filepath.Base(normalizeCommandToken(value))
 		if f.isBlacklisted(value) {
 			return true
 		}
 	}
 	return false
+}
+
+// systemCallRe matches a call to the system() function inside interpreters
+// like awk/gawk/mawk, which can execute arbitrary shell commands.
+var systemCallRe = regexp.MustCompile(`\bsystem\s*\(`)
+
+// hasIndirectExecutor reports whether seg uses an indirect executor that can
+// run arbitrary commands, bypassing the first-token blacklist. This covers:
+//   - awk/gawk/mawk with a system() call
+//   - find -exec / -execdir
+//   - make -f / --file / --makefile
+//   - git -c / --config
+func hasIndirectExecutor(seg string) bool {
+	fields := strings.Fields(seg)
+	if len(fields) == 0 {
+		return false
+	}
+	cmd := filepath.Base(normalizeCommandToken(fields[0]))
+	switch cmd {
+	case "awk", "gawk", "mawk":
+		return systemCallRe.MatchString(seg)
+	case "find":
+		return containsAny(fields, "-exec", "-execdir")
+	case "make":
+		return containsAny(fields, "-f", "--file", "--makefile")
+	case "git":
+		return containsAny(fields, "-c", "--config")
+	}
+	return false
+}
+
+// containsAny reports whether any element of fields equals any of the given
+// values.
+func containsAny(fields []string, values ...string) bool {
+	for _, f := range fields {
+		for _, v := range values {
+			if f == v {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// matchesWhitelist reports whether seg's leading tokens match at least one
+// entry in the whitelist. Each whitelist entry is tokenized and compared as a
+// prefix: "go test" matches "go test ./..." but not "go run main.go". When the
+// whitelist is empty, whitelist mode is disabled and this method is not called
+// by blockReason.
+func (f CommandFilter) matchesWhitelist(seg string) bool {
+	cmd, args := effectiveCommandAndArgs(strings.Fields(seg))
+	if cmd == "" {
+		return false
+	}
+	leading := append([]string{cmd}, args...)
+	for _, entry := range f.whitelist {
+		if prefixTokens(strings.Fields(entry), leading) {
+			return true
+		}
+	}
+	return false
+}
+
+// prefixTokens reports whether leading begins with all tokens of prefix (in
+// order). An empty prefix matches everything.
+func prefixTokens(prefix, leading []string) bool {
+	if len(prefix) > len(leading) {
+		return false
+	}
+	for i, p := range prefix {
+		if p != leading[i] {
+			return false
+		}
+	}
+	return true
 }
