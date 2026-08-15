@@ -44,7 +44,7 @@ func TestMCPNoReconnectWhenConnected(t *testing.T) {
 	}()
 
 	conn := NewJSONRPCLineTransport(clientConn, clientConn, clientConn.Close)
-	adapter := NewOfficialSDKAdapter(MCPServerConfig{Name: "srv", Transport: MCPTransportStdio}, WithConnection(conn))
+	adapter := NewOfficialSDKAdapter(MCPServerConfig{Name: "srv", Transport: MCPTransportStdio}, WithConnection(conn), WithoutInitialize())
 	require.NoError(t, adapter.Connect(context.Background()))
 
 	result, err := adapter.CallTool(context.Background(), "echo", nil)
@@ -68,7 +68,7 @@ func TestMCPReconnectMaxAttemptsExhausted(t *testing.T) {
 	closeConn(serverConn)
 
 	conn := NewJSONRPCLineTransport(clientConn, clientConn, clientConn.Close)
-	adapter := NewOfficialSDKAdapter(MCPServerConfig{Name: "srv", Transport: MCPTransportStdio}, WithConnection(conn))
+	adapter := NewOfficialSDKAdapter(MCPServerConfig{Name: "srv", Transport: MCPTransportStdio}, WithConnection(conn), WithoutInitialize())
 	require.NoError(t, adapter.Connect(context.Background()))
 
 	// Limit reconnect attempts to 1 to keep the test fast (1s backoff).
@@ -112,7 +112,7 @@ func TestMCPReconnectRPCErrorNoReconnect(t *testing.T) {
 	}()
 
 	conn := NewJSONRPCLineTransport(clientConn, clientConn, clientConn.Close)
-	adapter := NewOfficialSDKAdapter(MCPServerConfig{Name: "srv", Transport: MCPTransportStdio}, WithConnection(conn))
+	adapter := NewOfficialSDKAdapter(MCPServerConfig{Name: "srv", Transport: MCPTransportStdio}, WithConnection(conn), WithoutInitialize())
 	require.NoError(t, adapter.Connect(context.Background()))
 
 	_, err := adapter.CallTool(context.Background(), "echo", nil)
@@ -166,7 +166,7 @@ func TestMCPReconnectSucceeds(t *testing.T) {
 	}()
 
 	conn := NewJSONRPCLineTransport(clientConn1, clientConn1, clientConn1.Close)
-	adapter := NewOfficialSDKAdapter(MCPServerConfig{Name: "srv", Transport: MCPTransportStdio}, WithConnection(conn))
+	adapter := NewOfficialSDKAdapter(MCPServerConfig{Name: "srv", Transport: MCPTransportStdio}, WithConnection(conn), WithoutInitialize())
 	require.NoError(t, adapter.Connect(context.Background()))
 
 	// Prepare a second connection that will be used after reconnection.

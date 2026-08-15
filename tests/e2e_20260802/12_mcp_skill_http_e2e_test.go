@@ -122,6 +122,14 @@ func (s *mockHTTPMCPServer) handlePost(w http.ResponseWriter, r *http.Request) {
 
 	var result map[string]any
 	switch req.Method {
+	case "initialize":
+		result = map[string]any{
+			"protocolVersion": "2025-06-18",
+			"capabilities":    map[string]any{},
+			"serverInfo":      map[string]any{"name": "mock", "version": "1.0"},
+		}
+	case "notifications/initialized":
+		result = map[string]any{}
 	case "tools/list":
 		result = map[string]any{"tools": s.tools}
 	case "tools/call":

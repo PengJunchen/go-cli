@@ -74,6 +74,9 @@ func (c *recordingMCPClient) CallTool(_ context.Context, _ string, _ map[string]
 	return nil, errors.New("not implemented")
 }
 
+// ProtocolVersion implements MCPClient.
+func (c *recordingMCPClient) ProtocolVersion() string { return LatestProtocolVersion }
+
 // counts returns a snapshot of the lifecycle call counters.
 func (c *recordingMCPClient) counts() (connects, disconnects, lists int) {
 	c.mu.Lock()

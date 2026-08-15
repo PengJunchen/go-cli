@@ -107,6 +107,14 @@ func newHTTPMCPServer(t *testing.T, getStatus int, sse bool) *httptest.Server {
 
 			var result map[string]any
 			switch req.Method {
+			case "initialize":
+				result = map[string]any{
+					"protocolVersion": LatestProtocolVersion,
+					"capabilities":    map[string]any{},
+					"serverInfo":      map[string]any{"name": "test", "version": "1.0"},
+				}
+			case "notifications/initialized":
+				result = map[string]any{}
 			case "tools/list":
 				result = map[string]any{
 					"tools": []map[string]any{

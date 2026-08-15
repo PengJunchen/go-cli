@@ -69,6 +69,14 @@ func runFakeMCPServer(conn net.Conn) {
 			continue
 		}
 
+		// Skip JSON-RPC notifications (no id field) — they must not receive a response.
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(sc.Bytes(), &raw); err == nil {
+			if _, hasID := raw["id"]; !hasID {
+				continue
+			}
+		}
+
 		var res map[string]any
 		switch req.Method {
 		case "tools/list":
@@ -79,6 +87,12 @@ func runFakeMCPServer(conn net.Conn) {
 			}
 		case "tools/call":
 			res = map[string]any{"content": "hello"}
+		case "initialize":
+			res = map[string]any{
+				"protocolVersion": LatestProtocolVersion,
+				"capabilities":    map[string]any{},
+				"serverInfo":      map[string]any{"name": "fake", "version": "1.0"},
+			}
 		}
 
 		frame := map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": res}
@@ -286,7 +300,7 @@ func TestAdapterDisconnectPreservesExternalConnection(t *testing.T) {
 		io.Discard,
 		func() error { closed.Store(true); return nil },
 	)
-	adapter := NewOfficialSDKAdapter(MCPServerConfig{Name: "srv", Transport: MCPTransportStdio}, WithConnection(tr))
+	adapter := NewOfficialSDKAdapter(MCPServerConfig{Name: "srv", Transport: MCPTransportStdio}, WithConnection(tr), WithoutInitialize())
 
 	require.NoError(t, adapter.Connect(context.Background()))
 	require.NoError(t, adapter.Disconnect(context.Background()))
@@ -301,7 +315,7 @@ func TestAdapterDisconnectAllowsStdioReconnect(t *testing.T) {
 		Command:   "sh",
 		Args:      []string{"-c", fmt.Sprintf("touch %s; cat", marker)},
 	}
-	adapter := NewOfficialSDKAdapter(cfg)
+	adapter := NewOfficialSDKAdapter(cfg, WithoutInitialize())
 	ctx := context.Background()
 
 	require.NoError(t, adapter.Connect(ctx), "first Connect must succeed")
@@ -357,11 +371,11 @@ func TestAdapterCallToolSurfacesIsErrorAndDefaultsContent(t *testing.T) {
 	}()
 
 	conn := NewJSONRPCLineTransport(clientConn, clientConn, clientConn.Close)
-	adapter := NewOfficialSDKAdapter(MCPServerConfig{Name: "srv", Transport: MCPTransportStdio}, WithConnection(conn))
+	adapter := NewOfficialSDKAdapter(MCPServerConfig{Name: "srv", Transport: MCPTransportStdio}, WithConnection(conn), WithoutInitialize())
 	require.NoError(t, adapter.Connect(context.Background()))
 
 	result, err := adapter.CallTool(context.Background(), "echo", nil)
-	require.NoError(t, err, "a server-side IsError must not be surfaced as a Go error")
+	require.NoError(t, err)
 	assert.True(t, result.IsError, "IsError must be propagated to the caller")
 	assert.Equal(t, "", result.Content, "missing content must default to an empty string")
 }
