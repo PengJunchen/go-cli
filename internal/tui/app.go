@@ -17,6 +17,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/term"
+	"github.com/muesli/termenv"
 )
 
 // Msg is the generic message type delivered to an App via Send. It corresponds
@@ -302,6 +303,10 @@ func NewBubbleteaApp(events <-chan AgentEvent, opts ...AppOption) *BubbleteaApp 
 	for _, opt := range opts {
 		opt(a)
 	}
+	// Set the lipgloss color profile based on NO_COLOR/CLICOLOR/CLICOLOR_FORCE
+	// env vars and the render stream (stderr). This ensures color detection is
+	// consistent with the stream lipgloss actually renders to.
+	lipgloss.SetColorProfile(resolveColorProfile(os.Stderr))
 	a.model = newTeaModel(a)
 	return a
 }
@@ -1630,3 +1635,49 @@ func IsTerminal() bool {
 
 // isTerminal is the unexported alias used by the constructor.
 func isTerminal() bool { return IsTerminal() }
+
+// resolveColorProfile determines the lipgloss color profile from the
+// NO_COLOR/CLICOLOR/CLICOLOR_FORCE environment variables and the TTY status
+// of the render stream w. The profile is resolved against w (not os.Stdout)
+// so that color detection is consistent with the stream lipgloss renders to.
+//
+// Precedence (https://bixense.com/clicolors/ and https://no-color.org/):
+//   - NO_COLOR set (any value) → Ascii (no color), regardless of other vars.
+//   - CLICOLOR=0 → Ascii, unless CLICOLOR_FORCE overrides it.
+//   - CLICOLOR_FORCE set (non-zero) → force color even when w is not a TTY.
+//   - Otherwise → Ascii when w is not a TTY; auto-detect when it is.
+func resolveColorProfile(w io.Writer) termenv.Profile {
+	// NO_COLOR (any value) disables all color.
+	if os.Getenv("NO_COLOR") != "" {
+		return termenv.Ascii
+	}
+
+	forced := func() bool {
+		v := os.Getenv("CLICOLOR_FORCE")
+		return v != "" && v != "0"
+	}()
+
+	// CLICOLOR=0 disables color unless CLICOLOR_FORCE overrides it.
+	if os.Getenv("CLICOLOR") == "0" && !forced {
+		return termenv.Ascii
+	}
+
+	// Check if the render stream is a TTY.
+	isRenderTTY := false
+	if f, ok := w.(*os.File); ok {
+		isRenderTTY = term.IsTerminal(f.Fd())
+	}
+
+	if !isRenderTTY && !forced {
+		return termenv.Ascii
+	}
+
+	// Detect color capability from TERM/COLORTERM. When the stream is not a
+	// TTY but color is forced, assume TTY so ColorProfile inspects the env
+	// vars instead of short-circuiting to Ascii.
+	opts := []termenv.OutputOption{}
+	if !isRenderTTY {
+		opts = append(opts, termenv.WithTTY(true))
+	}
+	return termenv.NewOutput(w, opts...).ColorProfile()
+}
