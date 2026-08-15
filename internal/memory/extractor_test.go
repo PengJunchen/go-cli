@@ -1,7 +1,9 @@
 package memory
 
 import (
+	"bytes"
 	"context"
+	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -103,6 +105,12 @@ func TestExtract_NormalConversation_DoesNotWriteToStore(t *testing.T) {
 }
 
 func TestExtract_JSONParseFailure(t *testing.T) {
+	// Capture slog output to verify the warning is logged.
+	var buf bytes.Buffer
+	orig := slog.Default()
+	defer slog.SetDefault(orig)
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
+
 	server := mock.NewMockLLMServer(mock.NewConversationTemplate("T", "bad-json",
 		mock.ConversationTurn{AssistantContent: "This is not JSON at all"},
 	))
@@ -117,6 +125,12 @@ func TestExtract_JSONParseFailure(t *testing.T) {
 	mems, err := extractor.Extract(context.Background(), msgs)
 	require.NoError(t, err)
 	assert.Empty(t, mems)
+
+	// The parse failure should have been logged as a warning, not silently
+	// swallowed.
+	logOutput := buf.String()
+	assert.Contains(t, logOutput, "failed to parse extraction response")
+	assert.Contains(t, logOutput, "This is not JSON at all")
 }
 
 func TestExtract_EmptyResponse(t *testing.T) {

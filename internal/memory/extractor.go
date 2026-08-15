@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 
 	"github.com/pengjunchen/go-cli/internal/llm"
@@ -81,6 +82,11 @@ func (e *LLMMemoryExtractor) Extract(ctx context.Context, messages []llm.Message
 	facts, err := parseExtractionResponse(resp.Content)
 	if err != nil {
 		// Graceful degradation: unparseable JSON yields no memories, no error.
+		// Log the failure so it is not silently swallowed.
+		slog.Warn("memory: failed to parse extraction response as JSON",
+			"err", err,
+			"response", resp.Content,
+		)
 		return []Memory{}, nil
 	}
 
