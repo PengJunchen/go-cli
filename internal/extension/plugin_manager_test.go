@@ -61,8 +61,8 @@ func TestPluginManagerLoadCollectsExtensions(t *testing.T) {
 	assert.Equal(t, "ext-2", exts[1].Name())
 }
 
-// Load with a non-existent path handles the error gracefully: the error is
-// not propagated and other paths are still loaded.
+// Load with a non-existent path returns an error but other paths are still
+// loaded.
 func TestPluginManagerLoadHandlesErrorsGracefully(t *testing.T) {
 	loader := newMgrTestPluginLoader("test")
 	loader.SetError("bad-path", errors.New("file not found"))
@@ -70,10 +70,33 @@ func TestPluginManagerLoadHandlesErrorsGracefully(t *testing.T) {
 	loader.SetResult("good-path", []Extension{goodExt})
 
 	pm := NewPluginManager(loader)
-	require.NoError(t, pm.Load(context.Background(), []string{"bad-path", "good-path"}))
+	err := pm.Load(context.Background(), []string{"bad-path", "good-path"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bad-path")
 
 	exts := pm.Extensions()
 	require.Len(t, exts, 1, "good-path extensions should still be loaded")
+	assert.Equal(t, "good", exts[0].Name())
+}
+
+// Load with multiple failing paths returns an aggregated error containing all
+// failed paths while still loading successful ones.
+func TestPluginManagerLoadAggregatesMultipleErrors(t *testing.T) {
+	loader := newMgrTestPluginLoader("test")
+	loader.SetError("path-a", errors.New("error a"))
+	loader.SetError("path-b", errors.New("error b"))
+	goodExt := newMgrTestExt("good")
+	loader.SetResult("good-path", []Extension{goodExt})
+
+	pm := NewPluginManager(loader)
+	err := pm.Load(context.Background(), []string{"path-a", "good-path", "path-b"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "path-a")
+	assert.Contains(t, err.Error(), "path-b")
+
+	// The good path should still have been loaded.
+	exts := pm.Extensions()
+	require.Len(t, exts, 1)
 	assert.Equal(t, "good", exts[0].Name())
 }
 
@@ -179,13 +202,16 @@ func TestPluginManagerNilLoader(t *testing.T) {
 	require.NoError(t, pm.Load(context.Background(), nil))
 }
 
-// Load with a path that returns an error does not add partial extensions.
+// Load with a path that returns an error does not add partial extensions and
+// returns the error.
 func TestPluginManagerLoadErrorNoPartialExtensions(t *testing.T) {
 	loader := newMgrTestPluginLoader("test")
 	loader.SetError("err-path", errors.New("load failed"))
 
 	pm := NewPluginManager(loader)
-	require.NoError(t, pm.Load(context.Background(), []string{"err-path"}))
+	err := pm.Load(context.Background(), []string{"err-path"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "err-path")
 	assert.Empty(t, pm.Extensions())
 }
 
