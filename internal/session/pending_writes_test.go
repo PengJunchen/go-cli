@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -264,4 +265,126 @@ func TestPendingSessionWrites_Concurrent(t *testing.T) {
 	require.NoError(t, pw.Flush(context.Background(), store))
 	assert.Equal(t, 0, pw.PendingCount())
 	assert.Equal(t, n, pw.FlushedCount())
+}
+
+// countingStore wraps a SessionStore and counts Append calls. It is used to
+// verify that PendingSessionWrites batches multiple entries into a single
+// flush rather than writing each one individually.
+type countingStore struct {
+	SessionStore
+	appendCount int
+	mu          sync.Mutex
+}
+
+func (c *countingStore) Append(ctx context.Context, entry *SessionEntry) error {
+	c.mu.Lock()
+	c.appendCount++
+	c.mu.Unlock()
+	return c.SessionStore.Append(ctx, entry)
+}
+
+func (c *countingStore) AppendCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.appendCount
+}
+
+// TestPendingSessionWrites_BatchBuffering verifies that multiple Enqueue calls
+// do not trigger any store writes, and that a single Flush writes all buffered
+// entries in one batch. This is the core batching guarantee: entries are
+// buffered in memory and only hit the store when Flush is called.
+func TestPendingSessionWrites_BatchBuffering(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	pw := NewPendingSessionWrites()
+	store := &countingStore{SessionStore: NewMemoryStore()}
+
+	const n = 5
+	// Enqueue multiple entries — none should reach the store yet.
+	for i := 0; i < n; i++ {
+		pw.Enqueue(SessionWrite{
+			SessionID: "sess1",
+			Entry: SessionEntry{
+				ID:      fmt.Sprintf("e%d", i),
+				Type:    EntryTypeUser,
+				Content: fmt.Sprintf("content %d", i),
+			},
+		})
+	}
+
+	// Verify entries are buffered, not yet in the store.
+	assert.Equal(t, n, pw.PendingCount(), "all entries should be buffered")
+	assert.Equal(t, 0, pw.FlushedCount(), "nothing should be flushed yet")
+	assert.Equal(t, 0, store.AppendCount(), "store should have zero Append calls before flush")
+
+	// Verify none of the entries are in the store yet.
+	for i := 0; i < n; i++ {
+		_, err := store.Get(context.Background(), fmt.Sprintf("e%d", i))
+		assert.ErrorIs(t, err, ErrNotFound, "entry should not be in store before flush")
+	}
+
+	// Flush — all entries are written in a single batch.
+	require.NoError(t, pw.Flush(context.Background(), store))
+
+	assert.Equal(t, 0, pw.PendingCount(), "buffer should be empty after flush")
+	assert.Equal(t, n, pw.FlushedCount(), "all entries should be flushed")
+	assert.Equal(t, n, store.AppendCount(), "store should have received all entries via Append")
+
+	// Verify all entries are now in the store with correct content.
+	for i := 0; i < n; i++ {
+		got, err := store.Get(context.Background(), fmt.Sprintf("e%d", i))
+		require.NoError(t, err)
+		assert.Equal(t, fmt.Sprintf("content %d", i), got.Content)
+	}
+}
+
+// TestPendingSessionWrites_PersistencePatternSimulatesReplSession verifies
+// that the persistSession pattern (enqueue user + assistant entries, then a
+// single Flush) results in exactly one batch flush with both entries written
+// together — not two individual store writes.
+func TestPendingSessionWrites_PersistencePatternSimulatesReplSession(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	pw := NewPendingSessionWrites()
+	store := &countingStore{SessionStore: NewMemoryStore()}
+
+	// Simulate persistSession: enqueue user entry, then assistant entry,
+	// then flush once.
+	pw.Enqueue(SessionWrite{
+		SessionID: "sess-repl",
+		Entry: SessionEntry{
+			ID:      "entry-0",
+			Type:    EntryTypeUser,
+			Content: "user message",
+		},
+	})
+	pw.Enqueue(SessionWrite{
+		SessionID: "sess-repl",
+		Entry: SessionEntry{
+			ID:      "entry-1",
+			Type:    EntryTypeAssistant,
+			Content: "assistant response",
+		},
+	})
+
+	// Before flush: two entries buffered, zero store writes.
+	assert.Equal(t, 2, pw.PendingCount())
+	assert.Equal(t, 0, store.AppendCount())
+
+	// Single flush writes both entries in one batch.
+	require.NoError(t, pw.Flush(context.Background(), store))
+	assert.Equal(t, 0, pw.PendingCount())
+	assert.Equal(t, 2, pw.FlushedCount())
+	assert.Equal(t, 2, store.AppendCount(), "both entries written via single flush")
+
+	// Verify both entries are in the store.
+	got, err := store.Get(context.Background(), "entry-0")
+	require.NoError(t, err)
+	assert.Equal(t, "user message", got.Content)
+	assert.Equal(t, EntryTypeUser, got.Type)
+
+	got, err = store.Get(context.Background(), "entry-1")
+	require.NoError(t, err)
+	assert.Equal(t, "assistant response", got.Content)
+	assert.Equal(t, EntryTypeAssistant, got.Type)
 }
