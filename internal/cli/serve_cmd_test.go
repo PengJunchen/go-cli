@@ -248,3 +248,57 @@ func TestServeCustomTokenUsed(t *testing.T) {
 	cancel()
 	<-done
 }
+
+// TestServeFallbackWarnsEchoMode verifies that when the server falls back to
+// echo mode (no config available), a prominent WARNING is printed to the
+// output so users notice the degraded mode.
+func TestServeFallbackWarnsEchoMode(t *testing.T) {
+	out := &safeBuffer{}
+	c := newServeCmd(out)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		// NewDefaultConfig(false) returns a *defaultConfig, not a
+		// *config.Config, so rc will be nil and the server falls back
+		// to echo mode.
+		done <- c.Run(ctx, NewDefaultConfig(false), []string{
+			"--no-auth",
+			"--addr", "127.0.0.1:0",
+		})
+	}()
+
+	// Wait for the server to start.
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(out.String(), "listening") {
+			break
+		}
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Fatalf("server failed to start: %v", err)
+			}
+			return
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+
+	output := out.String()
+	if !strings.Contains(output, "listening") {
+		t.Fatal("server did not start within timeout")
+	}
+
+	// The fallback should produce a prominent WARNING about echo mode.
+	if !strings.Contains(output, "WARNING") {
+		t.Errorf("expected 'WARNING' in output when falling back to echo mode, got: %s", output)
+	}
+	if !strings.Contains(output, "echo mode") {
+		t.Errorf("expected 'echo mode' in output when falling back, got: %s", output)
+	}
+
+	cancel()
+	<-done
+}

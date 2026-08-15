@@ -117,6 +117,8 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 		)
 		if err != nil {
 			slog.Warn("serve: agent assembly failed, falling back to echo mode", "err", err)
+			fmt.Fprintf(c.out, "WARNING: Agent assembly failed — falling back to echo mode (no agent dispatch).\n")
+			fmt.Fprintf(c.out, "  Error: %v\n", err)
 		} else {
 			cleanup = assembly.Cleanup
 			handler = acp.NewCoreHandler(assembly.Dispatcher, nil)
@@ -130,6 +132,10 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	}
 
 	if handler == nil {
+		if rc == nil {
+			slog.Warn("serve: no config available, falling back to echo mode")
+			fmt.Fprintf(c.out, "WARNING: No configuration found — running in echo mode (no agent dispatch).\n")
+		}
 		handler = acp.NewCoreHandler(nil, nil)
 	}
 
