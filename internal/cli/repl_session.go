@@ -293,6 +293,9 @@ func (s *REPLSession) setupSlashContext() {
 		worktreeManager: s.assembly.WorktreeManager,
 		snapshotManager: s.assembly.SnapshotMgr,
 		modelSelector:   s.assembly.ModelSelector,
+		estimator:       s.assembly.Estimator,
+		promptBuilder:   s.assembly.PromptBuilder,
+		contextLoader:   s.assembly.ContextLoader,
 	}
 
 	// Create a shared ThemeManager so /theme can switch themes at runtime
