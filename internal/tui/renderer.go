@@ -65,6 +65,7 @@ const (
 	ContentTypeStatus         = "status"
 	ContentTypeBox            = "box"
 	ContentTypeSpinner        = "spinner"
+	ContentTypeTodo           = "todo"
 )
 
 // contentTypes lists every content type the TUI layer supports. The order is

@@ -432,6 +432,7 @@ func (a *BubbleteaApp) cleanup() {
 	if a.model != nil {
 		a.model.mu.Lock()
 		a.model.streamBuf = make(map[string]*strings.Builder)
+		a.model.todoSnapshot = nil
 		a.model.mu.Unlock()
 	}
 	if !a.cleaned {
@@ -523,6 +524,11 @@ type teaModel struct {
 	// quitting is set when the user requests quit so View can render a
 	// goodbye line.
 	quitting bool
+
+	// todoSnapshot holds the latest todo list snapshot for the persistent
+	// progress panel. It is updated when a ContentTypeTodo event or a
+	// TodoUpdateMsg arrives, and rendered above the status bar.
+	todoSnapshot []TodoItem
 
 	// concurrency: guards all mutable state above. Update runs single-threaded
 	// inside bubbletea, but external callers (tests, View) access the model
@@ -631,6 +637,18 @@ func (m *teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case tea.QuitMsg:
 		return m, nil
+	case TodoUpdateMsg:
+		m.msgsSeen.Add(1)
+		var view string
+		notify := m.shouldNotify()
+		m.mu.Lock()
+		m.todoSnapshot = msg.Items
+		if notify {
+			view = m.renderViewLocked()
+		}
+		m.mu.Unlock()
+		m.notify(view)
+		return m, waitForMsg(m.msgCh, m.runDone)
 	default:
 		// A message pushed via Send that is not a recognized tea message.
 		m.msgsSeen.Add(1)
@@ -733,6 +751,11 @@ func (m *teaModel) renderViewLocked() string {
 		sb.WriteString(m.followUpInput)
 		// Render a block cursor.
 		sb.WriteString("\u2588")
+	}
+	// Todo progress panel (persistent, above the status bar).
+	if todoPanel := m.renderTodoPanelLocked(); todoPanel != "" {
+		sb.WriteString("\n")
+		sb.WriteString(todoPanel)
 	}
 	// Status bar (model/turn/session/mode + tokens/cost). Shown when any
 	// status info is available.
@@ -928,6 +951,26 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 		m.tokenOutput = ev.TokenUsage.OutputTokens
 		m.tokenMax = ev.TokenUsage.MaxTokens
 		m.tokenCost = ev.TokenUsage.Cost
+		if notify {
+			view = m.renderViewLocked()
+		}
+		m.mu.Unlock()
+		m.notify(view)
+		return nil
+	}
+
+	// Handle todo events by capturing the todo list snapshot and
+	// re-rendering the persistent progress panel.
+	if ev.ContentType == ContentTypeTodo {
+		items, err := parseTodoItems(ev.Content)
+		if err != nil {
+			slog.DebugContext(ctx, "tui.app.todo_parse_error", "err", err)
+			return nil
+		}
+		var view string
+		notify := m.shouldNotify()
+		m.mu.Lock()
+		m.todoSnapshot = items
 		if notify {
 			view = m.renderViewLocked()
 		}
