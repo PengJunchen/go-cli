@@ -6,10 +6,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 
 	"github.com/pengjunchen/go-cli/internal/tui"
 )
@@ -191,7 +192,10 @@ func NewApprovalCache(path string) *ApprovalCache {
 }
 
 // LoadFromFile reads the cache entries from a JSON file mapping key->true. A
-// missing file leaves the cache empty and returns nil.
+// missing file leaves the cache empty and returns nil. For security, the file
+// must have 0600 permissions and be owned by the current user; otherwise the
+// load is rejected to prevent tampering via world-readable or foreign-owned
+// cache files.
 func (c *ApprovalCache) LoadFromFile(path string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -199,11 +203,31 @@ func (c *ApprovalCache) LoadFromFile(path string) error {
 	c.path = path
 	c.entries = make(map[string]bool)
 
-	data, err := os.ReadFile(path)
+	info, err := os.Stat(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil
 		}
+		return fmt.Errorf("stat approval cache: %w", err)
+	}
+
+	// Verify file permissions: only the owner may read or write the cache.
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		slog.Warn("approval.cache_insecure_permissions", "path", path, "perm", fmt.Sprintf("%o", perm))
+		return fmt.Errorf("approval cache %s has permissions %o, expected 0600", path, perm)
+	}
+
+	// Verify file ownership on Unix-like systems. On platforms where the
+	// Sys() call does not return *syscall.Stat_t, the check is skipped.
+	if stat, ok := info.Sys().(*syscall.Stat_t); ok {
+		if stat.Uid != uint32(os.Getuid()) {
+			slog.Warn("approval.cache_foreign_owner", "path", path, "uid", stat.Uid, "expected", os.Getuid())
+			return fmt.Errorf("approval cache %s owned by uid %d, expected %d", path, stat.Uid, os.Getuid())
+		}
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
 		return fmt.Errorf("read approval cache: %w", err)
 	}
 	if err := json.Unmarshal(data, &c.entries); err != nil {
@@ -212,7 +236,10 @@ func (c *ApprovalCache) LoadFromFile(path string) error {
 	return nil
 }
 
-// SaveToFile writes the cache entries as JSON to the given path atomically.
+// SaveToFile writes the cache entries as JSON to the given path with 0600
+// permissions (owner read/write only). If the file already exists with broader
+// permissions, they are tightened to 0600 to prevent other users from reading
+// or tampering with the cache.
 func (c *ApprovalCache) SaveToFile(path string) error {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
@@ -222,24 +249,23 @@ func (c *ApprovalCache) SaveToFile(path string) error {
 		return fmt.Errorf("marshal approval cache: %w", err)
 	}
 
-	// Atomic write: temp file + rename to avoid corruption on crash.
-	dir := filepath.Dir(path)
-	tmp, err := os.CreateTemp(dir, "approval-cache-*.json")
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
-		return fmt.Errorf("create temp file: %w", err)
+		return fmt.Errorf("create approval cache file: %w", err)
 	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }() //nolint:errcheck
 
-	if _, err := tmp.Write(data); err != nil {
-		_ = tmp.Close() //nolint:errcheck
-		return fmt.Errorf("write temp file: %w", err)
+	if _, err := f.Write(data); err != nil {
+		_ = f.Close() //nolint:errcheck
+		return fmt.Errorf("write approval cache: %w", err)
 	}
-	if err := tmp.Close(); err != nil {
-		return fmt.Errorf("close temp file: %w", err)
+	if err := f.Close(); err != nil {
+		return fmt.Errorf("close approval cache: %w", err)
 	}
-	if err := os.Rename(tmpName, path); err != nil {
-		return fmt.Errorf("rename temp file: %w", err)
+
+	// Ensure 0600 even if the file already existed with broader permissions
+	// (OpenFile does not change permissions of an existing file).
+	if err := os.Chmod(path, 0o600); err != nil {
+		return fmt.Errorf("set approval cache permissions: %w", err)
 	}
 	return nil
 }
