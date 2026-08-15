@@ -238,6 +238,15 @@ func saveOnboardingConfig(cfg *config.Config, out io.Writer) error {
 	return nil
 }
 
+// yamlSingleQuote wraps s in YAML single-quote style. In single-quoted YAML
+// strings every character is literal except the single quote itself, which is
+// escaped by doubling it (” → '). This safely handles special YAML
+// characters such as :, #, {, }, ", and \ in values without relying on
+// escape-sequence processing by the reader.
+func yamlSingleQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
+}
+
 // serializeOnboardingYAML produces a simple YAML representation of the config
 // fields set by the onboarding wizard. Only the provider, model, and tui
 // sections are written so the output stays minimal and human-editable.
@@ -250,7 +259,7 @@ func serializeOnboardingYAML(cfg *config.Config) string {
 		fmt.Fprintf(&b, "  name: %s\n", cfg.Provider.Name)
 	}
 	if cfg.Provider.APIKey != "" {
-		fmt.Fprintf(&b, "  api_key: %s\n", cfg.Provider.APIKey)
+		fmt.Fprintf(&b, "  api_key: %s\n", yamlSingleQuote(cfg.Provider.APIKey))
 	}
 	if cfg.Provider.BaseURL != "" {
 		fmt.Fprintf(&b, "  base_url: %s\n", cfg.Provider.BaseURL)
