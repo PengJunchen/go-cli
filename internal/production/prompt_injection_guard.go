@@ -25,6 +25,13 @@ const (
 	untrustedCloseTag = "</untrusted-external-content>"
 )
 
+// guardBlockedOutput is the safe placeholder substituted for tool output when
+// the prompt-injection guard encounters an internal error and cannot run.
+// Fail-closed: we prefer to block potentially-safe output rather than risk
+// leaking injection that the guard was unable to inspect. This mirrors the
+// fail-closed behavior of OutputGuardMiddleware.
+const guardBlockedOutput = "[output blocked due to security guard error]"
+
 // promptInjectionPatterns are regex patterns that match common
 // prompt-injection phrases in English and Chinese. The patterns target LLM
 // instruction injection (e.g. "ignore previous instructions") rather than
@@ -141,7 +148,10 @@ func escapeUntrustedTags(text string) string {
 // every tool result's Output using the given PromptInjectionGuard. When
 // injection is detected, the output is replaced with the wrapped (untrusted)
 // version so the model receives the content inside protective tags. Tools that
-// return errors or nil results are passed through unchanged.
+// return errors or nil results are passed through unchanged. When the guard
+// itself encounters an internal error, the wrapper fails closed: the output is
+// replaced with a safe placeholder (guardBlockedOutput) rather than passing
+// through potentially-malicious content.
 func NewPromptInjectionToolWrapper(guard *PromptInjectionGuard) tools.ToolExecutorWrapper {
 	return func(next func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error)) func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
 		return func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
@@ -151,8 +161,15 @@ func NewPromptInjectionToolWrapper(guard *PromptInjectionGuard) tools.ToolExecut
 			}
 			res, guardErr := guard.Check(ctx, result.Output)
 			if guardErr != nil {
-				// Guard could not run; pass the result through unchanged
-				// rather than blocking potentially-safe output.
+				// Fail closed: a guard that cannot run must not leak raw
+				// output. Replace the output with a safe placeholder and
+				// log the error for debugging. This is consistent with
+				// OutputGuardMiddleware's fail-closed behavior.
+				slog.Warn("prompt_injection_tool_wrapper: guard error, blocking output",
+					slog.String("guard_name", guard.Name()),
+					slog.String("guard_error", guardErr.Error()),
+				)
+				result.Output = guardBlockedOutput
 				return result, nil
 			}
 			if !res.Allowed {
