@@ -135,9 +135,12 @@ func NewRegexOutputGuard(patterns []string, opts ...Option) *RegexOutputGuard {
 		severity: severity,
 	}
 	for _, p := range patterns {
-		if re, err := regexp.Compile(p); err == nil {
-			g.patterns = append(g.patterns, re)
+		re, err := regexp.Compile(p)
+		if err != nil {
+			slog.Warn("output_guard.regex_compile_failed", "pattern", p, "error", err)
+			continue
 		}
+		g.patterns = append(g.patterns, re)
 	}
 	return g
 }
@@ -194,9 +197,12 @@ func NewPIIOutputGuard(opts ...Option) *PIIOutputGuard {
 	}
 	g := &PIIOutputGuard{name: name}
 	for _, p := range piiPatterns {
-		if re, err := regexp.Compile(p); err == nil {
-			g.patterns = append(g.patterns, re)
+		re, err := regexp.Compile(p)
+		if err != nil {
+			slog.Warn("output_guard.regex_compile_failed", "pattern", p, "error", err)
+			continue
 		}
+		g.patterns = append(g.patterns, re)
 	}
 	return g
 }
@@ -257,9 +263,12 @@ func NewCodeInjectionGuard(opts ...Option) *CodeInjectionGuard {
 	}
 	g := &CodeInjectionGuard{name: name}
 	for _, p := range codeInjectionPatterns {
-		if re, err := regexp.Compile(p); err == nil {
-			g.patterns = append(g.patterns, re)
+		re, err := regexp.Compile(p)
+		if err != nil {
+			slog.Warn("output_guard.regex_compile_failed", "pattern", p, "error", err)
+			continue
 		}
+		g.patterns = append(g.patterns, re)
 	}
 	return g
 }

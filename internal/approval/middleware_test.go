@@ -112,6 +112,24 @@ func TestMiddlewareDenyFirstDoesNotCallNext(t *testing.T) {
 	assert.False(t, called, "denied tool must not be executed")
 }
 
+// TestMiddlewareNilClassifierDefaultsToDenyAll verifies that when a nil
+// classifier is passed to NewApprovalMiddleware, it falls back to
+// DenyAllClassifier so tool calls are denied by default (fail-safe).
+func TestMiddlewareNilClassifierDefaultsToDenyAll(t *testing.T) {
+	mw := NewApprovalMiddleware(nil, newStubStore())
+	called := false
+	inner := func(_ context.Context, _ tools.ToolCall) (*tools.ToolResult, error) {
+		called = true
+		return nil, nil
+	}
+	wrapped := mw.WrapToolCall(inner)
+	res, err := wrapped(context.Background(), call("read_file"))
+	require.Error(t, err)
+	require.ErrorIs(t, err, ErrToolDenied)
+	assert.Nil(t, res)
+	assert.False(t, called, "nil classifier must default to DenyAll")
+}
+
 func TestMiddlewareSessionCacheSkipsClassifier(t *testing.T) {
 	classifier := &countingClassifier{decision: Allow}
 	mw := NewApprovalMiddleware(classifier, newStubStore())

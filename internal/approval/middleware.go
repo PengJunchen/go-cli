@@ -105,7 +105,7 @@ func NewApprovalMiddleware(classifier ApprovalClassifier, store ApprovalStore, o
 		opt(&options)
 	}
 	if classifier == nil {
-		classifier = &AllowAllClassifier{}
+		classifier = &DenyAllClassifier{}
 	}
 	if store == nil {
 		store = NewInMemoryApprovalStore()
