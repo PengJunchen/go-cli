@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"log/slog"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -60,4 +62,73 @@ func TestDefaultValidator_InvalidCompaction(t *testing.T) {
 	err := NewDefaultValidator().Validate(*cfg)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "compaction")
+}
+
+func TestDefaultValidator_InsecureBaseURL(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider.BaseURL = "http://api.openai.com/v1"
+	err := NewDefaultValidator().Validate(*cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "base_url must use HTTPS")
+}
+
+func TestDefaultValidator_LocalhostHTTPBaseURL(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider.BaseURL = "http://localhost:8080/v1"
+	err := NewDefaultValidator().Validate(*cfg)
+	require.NoError(t, err)
+
+	cfg = defaultConfig()
+	cfg.Provider.BaseURL = "http://127.0.0.1:8080/v1"
+	err = NewDefaultValidator().Validate(*cfg)
+	require.NoError(t, err)
+}
+
+func TestDefaultValidator_HTTPSBaseURL(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Provider.BaseURL = "https://api.openai.com/v1"
+	err := NewDefaultValidator().Validate(*cfg)
+	require.NoError(t, err)
+}
+
+func TestDefaultValidator_PathTraversal(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Tracing.FilePath = "../../etc/passwd"
+	err := NewDefaultValidator().Validate(*cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "path traversal")
+
+	// SSH key path with traversal should also be rejected.
+	cfg = defaultConfig()
+	cfg.Remote.Hosts = map[string]SSHHostConfig{
+		"myhost": {Host: "example.com", User: "root", KeyPath: "../../../.ssh/id_rsa"},
+	}
+	err = NewDefaultValidator().Validate(*cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "path traversal")
+}
+
+func TestDefaultValidator_CleanPath(t *testing.T) {
+	cfg := defaultConfig()
+	cfg.Tracing.FilePath = "/var/log/go-cli/trace.jsonl"
+	cfg.Skill.Dir = "/etc/go-cli/skills"
+	err := NewDefaultValidator().Validate(*cfg)
+	require.NoError(t, err)
+}
+
+func TestDefaultValidator_SSHPasswordWarning(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	v := &DefaultValidator{logger: logger}
+
+	cfg := defaultConfig()
+	cfg.Remote.Hosts = map[string]SSHHostConfig{
+		"myhost": {Host: "example.com", User: "root", Password: "s3cret"},
+	}
+
+	err := v.Validate(*cfg)
+	require.NoError(t, err) // password is a warning, not an error
+	output := buf.String()
+	assert.Contains(t, output, "insecure_ssh_password")
+	assert.Contains(t, output, "key-based authentication")
 }
