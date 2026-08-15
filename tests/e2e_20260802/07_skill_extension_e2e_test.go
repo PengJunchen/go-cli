@@ -378,11 +378,13 @@ func TestExtension_Registry_DuplicateRegistration(t *testing.T) {
 	mw2 := mock.NewMockMiddleware("same-name")
 
 	require.NoError(t, reg.RegisterMiddleware(ctx, mw1))
-	require.NoError(t, reg.RegisterMiddleware(ctx, mw2))
+	// Duplicate registration now returns error (deny-first, MD-8).
+	err := reg.RegisterMiddleware(ctx, mw2)
+	require.Error(t, err)
 
 	dr := reg.(*extension.DefaultExtensionRegistry) //nolint:errcheck,gosec
-	// Last write wins.
-	assert.Equal(t, mw2, dr.Middleware("same-name"))
+	// Original registration is preserved.
+	assert.Equal(t, mw1, dr.Middleware("same-name"))
 }
 
 // =============================================================================
