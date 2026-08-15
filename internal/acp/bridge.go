@@ -45,6 +45,11 @@ func (d *RPCDispatcher) Dispatch(ctx context.Context, msg RPCMessage) (any, erro
 	return handler(ctx, msg.Params)
 }
 
+// maxMessageSize is the maximum allowed size (in bytes) of an inbound ACP
+// message content. Messages whose content exceeds this limit are rejected to
+// prevent oversized payloads from reaching the dispatcher.
+const maxMessageSize = 64 * 1024 // 64KB
+
 // ACPMiddlewareAdapter bridges the extension.Middleware-based ACPMiddleware
 // into the core.Middleware model used by the LoopAgent middleware chain. It
 // also routes inbound ACP messages received from the ACPClient to a
@@ -60,6 +65,11 @@ type ACPMiddlewareAdapter struct {
 	dispatcher    core.SubagentDispatcher
 	client        ACPClient
 	rpcDispatcher *RPCDispatcher
+
+	// authorizedSenders, when non-empty, restricts inbound message processing
+	// to the listed sender IDs. When nil/empty all senders are accepted
+	// (backward-compatible zero-config fallback).
+	authorizedSenders map[string]bool
 
 	mu      sync.Mutex
 	started bool
@@ -83,6 +93,17 @@ func NewACPMiddlewareAdapter(mw *ACPMiddleware, dispatcher core.SubagentDispatch
 // WithRPCDispatcher sets the RPC dispatcher for method-based routing.
 func (a *ACPMiddlewareAdapter) WithRPCDispatcher(d *RPCDispatcher) *ACPMiddlewareAdapter {
 	a.rpcDispatcher = d
+	return a
+}
+
+// WithAuthorizedSenders restricts inbound message processing to the given
+// sender IDs. If senders is empty the restriction is not applied and all
+// senders are accepted (backward-compatible zero-config fallback).
+func (a *ACPMiddlewareAdapter) WithAuthorizedSenders(senders []string) *ACPMiddlewareAdapter {
+	a.authorizedSenders = make(map[string]bool, len(senders))
+	for _, s := range senders {
+		a.authorizedSenders[s] = true
+	}
 	return a
 }
 
@@ -154,10 +175,47 @@ func (a *ACPMiddlewareAdapter) routeMessages(ctx context.Context, done chan stru
 	}
 }
 
-// handleMessage converts an ACP message to a SubagentTask, dispatches it, and
-// relays the result back to the peer. RPC messages are routed to the
-// RPCDispatcher. Other non-TypeMessage messages are ignored.
+// handleMessage validates and processes an inbound ACP message. It enforces a
+// maximum content size and verifies the sender against the configured
+// allow-list before routing: TypeMessage is converted to a SubagentTask,
+// dispatched, and the result relayed back; TypeRPC is routed to the
+// RPCDispatcher. Other message types are ignored. Error replies use generic
+// messages to avoid leaking internal details.
 func (a *ACPMiddlewareAdapter) handleMessage(ctx context.Context, msg ACPMessage) {
+	// Enforce a maximum message size before any processing to guard against
+	// oversized payloads. The error reply uses a generic message to avoid
+	// leaking internal details.
+	if len(msg.Content) > maxMessageSize {
+		reply := ACPMessage{
+			Type:       TypeError,
+			SenderID:   msg.ReceiverID,
+			ReceiverID: msg.SenderID,
+			Content:    "message too large",
+			Timestamp:  time.Now(),
+		}
+		if sendErr := a.client.SendMessage(ctx, reply); sendErr != nil {
+			slog.Warn("acp.bridge.reply_failed", "err", sendErr, "receiver", msg.SenderID)
+		}
+		return
+	}
+
+	// Verify the sender against the configured allow-list. When no list is
+	// configured all senders are accepted. The error reply uses a generic
+	// message to avoid leaking internal details.
+	if len(a.authorizedSenders) > 0 && !a.authorizedSenders[msg.SenderID] {
+		reply := ACPMessage{
+			Type:       TypeError,
+			SenderID:   msg.ReceiverID,
+			ReceiverID: msg.SenderID,
+			Content:    "unauthorized",
+			Timestamp:  time.Now(),
+		}
+		if sendErr := a.client.SendMessage(ctx, reply); sendErr != nil {
+			slog.Warn("acp.bridge.reply_failed", "err", sendErr, "receiver", msg.SenderID)
+		}
+		return
+	}
+
 	if msg.Type == TypeRPC {
 		a.handleRPC(ctx, msg)
 		return
