@@ -109,17 +109,32 @@ func (g *PromptInjectionGuard) Check(ctx context.Context, text string) (*GuardRe
 func (g *PromptInjectionGuard) Name() string { return g.name }
 
 // wrapUntrusted wraps text in untrusted-external-content tags with a warning
-// prefix.
+// prefix. Any occurrence of the containment tags within the text itself is
+// escaped so that untrusted content cannot break out of the boundary by
+// embedding a premature closing tag (or a spurious opening tag).
 func wrapUntrusted(text string) string {
+	escaped := escapeUntrustedTags(text)
 	var b strings.Builder
 	b.WriteString(promptInjectionWarning)
 	b.WriteByte('\n')
 	b.WriteString(untrustedOpenTag)
 	b.WriteByte('\n')
-	b.WriteString(text)
+	b.WriteString(escaped)
 	b.WriteByte('\n')
 	b.WriteString(untrustedCloseTag)
 	return b.String()
+}
+
+// escapeUntrustedTags replaces literal occurrences of the untrusted-external-content
+// opening and closing tags within text with HTML-entity-escaped equivalents.
+// This prevents untrusted content from terminating (or nesting) the containment
+// boundary established by wrapUntrusted while keeping the text readable for the
+// downstream model. Escaping the angle brackets to &lt;/&gt; ensures the tags
+// are no longer interpreted as markup yet remain recognizable to the model.
+func escapeUntrustedTags(text string) string {
+	text = strings.ReplaceAll(text, untrustedCloseTag, "&lt;/untrusted-external-content&gt;")
+	text = strings.ReplaceAll(text, untrustedOpenTag, "&lt;untrusted-external-content&gt;")
+	return text
 }
 
 // NewPromptInjectionToolWrapper returns a tools.ToolExecutorWrapper that scans
