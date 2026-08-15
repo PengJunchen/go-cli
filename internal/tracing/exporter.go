@@ -3,6 +3,7 @@ package tracing
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -190,17 +191,19 @@ func NewMultiExporter(exporters ...TraceExporter) *MultiExporter {
 	return &MultiExporter{exporters: exporters}
 }
 
-// ExportSpan exports the span to every exporter, returning the last error seen.
-// Earlier errors are logged so they are not silently swallowed.
+// ExportSpan exports the span to every exporter, returning all errors
+// aggregated via errors.Join. A failure in one exporter does not prevent the
+// others from running; every exporter is attempted. The returned error is nil
+// only when all exporters succeed.
 func (m *MultiExporter) ExportSpan(ctx context.Context, span TraceSpan) error {
-	var lastErr error
+	var errs []error
 	for _, exp := range m.exporters {
 		if err := exp.ExportSpan(ctx, span); err != nil {
 			slog.Warn("multi-exporter: export failed", "err", err)
-			lastErr = err
+			errs = append(errs, err)
 		}
 	}
-	return lastErr
+	return errors.Join(errs...)
 }
 
 // Shutdown shuts down all exporters, returning the first error encountered.

@@ -62,14 +62,38 @@ type SubagentCostRecord struct {
 	CostSummary
 }
 
+// BudgetExceededError is returned by CheckBudget (and surfaced from Record)
+// when the accumulated cost exceeds the configured budget limit. A zero budget
+// means no limit, in which case this error is never produced.
+type BudgetExceededError struct {
+	// Spent is the total cost accumulated so far.
+	Spent float64
+	// Budget is the configured spending cap.
+	Budget float64
+}
+
+// Error implements the error interface.
+func (e *BudgetExceededError) Error() string {
+	return fmt.Sprintf("cost_tracker: budget exceeded: spent $%.4f, budget $%.4f", e.Spent, e.Budget)
+}
+
+// BudgetCallback is invoked after a Record call pushes the running total past
+// the budget limit. It receives the current spent total and the configured
+// budget. The callback is invoked without holding the tracker's mutex, so it
+// may safely query the tracker (e.g. Total) or trigger external actions such
+// as pausing processing.
+type BudgetCallback func(spent, budget float64)
+
 // CostTracker accumulates costs across a session. It is safe for concurrent
 // use.
 type CostTracker struct {
-	mu            sync.Mutex
-	tiers         map[string]CostTier
-	total         float64
-	calls         int
-	subagentCosts map[string]CostSummary
+	mu             sync.Mutex
+	tiers          map[string]CostTier
+	total          float64
+	calls          int
+	subagentCosts  map[string]CostSummary
+	budgetLimit    float64
+	budgetCallback BudgetCallback
 }
 
 // Compile-time assertion that CostTracker satisfies CostCalculator.
@@ -107,7 +131,11 @@ func (t *CostTracker) CalculateCost(model string, inputTokens, outputTokens int)
 }
 
 // Record calculates the cost of a call and adds it to the running total. It
-// returns the cost of the call or an error if the model is unknown.
+// returns the cost of the call or an error if the model is unknown. After
+// updating the total, Record checks the budget: when a positive budget limit is
+// exceeded it fires the configured BudgetCallback (if any) and returns the
+// recorded cost together with a *BudgetExceededError. A budget of 0 (the
+// default) means no limit and Record never returns a budget error.
 func (t *CostTracker) Record(model string, inputTokens, outputTokens int) (float64, error) {
 	cost, err := t.CalculateCost(model, inputTokens, outputTokens)
 	if err != nil {
@@ -117,12 +145,22 @@ func (t *CostTracker) Record(model string, inputTokens, outputTokens int) (float
 	t.total += cost
 	t.calls++
 	calls := t.calls
+	total := t.total
+	budget := t.budgetLimit
+	cb := t.budgetCallback
 	t.mu.Unlock()
 	slog.Debug("production.cost_tracker.record",
 		"model", model,
 		"cost", cost,
 		"calls", calls,
 	)
+	// Budget check after each record. A budget of 0 means no limit.
+	if budget > 0 && total > budget {
+		if cb != nil {
+			cb(total, budget)
+		}
+		return cost, &BudgetExceededError{Spent: total, Budget: budget}
+	}
 	return cost, nil
 }
 
@@ -138,6 +176,43 @@ func (t *CostTracker) Calls() int {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return t.calls
+}
+
+// SetBudgetLimit configures the spending cap in USD. A limit of 0 (the default)
+// means no limit. When the running total exceeds a positive limit, Record
+// returns a *BudgetExceededError and fires the configured BudgetCallback, if
+// any.
+func (t *CostTracker) SetBudgetLimit(limit float64) {
+	t.mu.Lock()
+	t.budgetLimit = limit
+	t.mu.Unlock()
+}
+
+// SetBudgetCallback registers a callback invoked when a Record call pushes the
+// running total past the configured budget. Set to nil to disable. The callback
+// is invoked without holding the tracker's mutex.
+func (t *CostTracker) SetBudgetCallback(cb BudgetCallback) {
+	t.mu.Lock()
+	t.budgetCallback = cb
+	t.mu.Unlock()
+}
+
+// CheckBudget returns a *BudgetExceededError if the accumulated total exceeds
+// the configured budget limit. It returns nil when the budget is 0 (no limit)
+// or when the total is within budget. CheckBudget is side-effect free: it does
+// not invoke the BudgetCallback.
+func (t *CostTracker) CheckBudget() error {
+	t.mu.Lock()
+	total := t.total
+	budget := t.budgetLimit
+	t.mu.Unlock()
+	if budget <= 0 {
+		return nil
+	}
+	if total > budget {
+		return &BudgetExceededError{Spent: total, Budget: budget}
+	}
+	return nil
 }
 
 // RecordSubagent records a sub-agent's token usage under the given taskID,

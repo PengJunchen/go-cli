@@ -3,12 +3,15 @@ package tracing
 import (
 	"bufio"
 	"context"
+	"errors"
 	"os"
 	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/verify"
 )
 
 // readLines reads a file and returns each non-empty line as a byte slice.
@@ -152,4 +155,61 @@ func TestRedactionLevelFull_NoMasking(t *testing.T) {
 	public := findAttr(data.Attributes, "public")
 	require.NotNil(t, public)
 	assert.Equal(t, "visible", public.Value)
+}
+
+// stringErrorExporter fails every ExportSpan with a caller-supplied message so
+// tests can distinguish failures from different exporters.
+type stringErrorExporter struct {
+	msg string
+}
+
+func (e *stringErrorExporter) ExportSpan(context.Context, TraceSpan) error {
+	return errors.New(e.msg)
+}
+
+func (e *stringErrorExporter) Shutdown(context.Context) error { return nil }
+
+// TestMultiExporterAggregatesAllErrors verifies that when multiple exporters
+// fail, ExportSpan returns an error aggregating every failure (via errors.Join)
+// rather than only the last one, while still attempting every exporter.
+func TestMultiExporterAggregatesAllErrors(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	failA := &stringErrorExporter{msg: "exporter-A-failed"}
+	ok := &recordingExporter{}
+	failB := &stringErrorExporter{msg: "exporter-B-failed"}
+
+	m := NewMultiExporter(failA, ok, failB)
+	tr := NewTracer("trace-agg", nil)
+	span, _ := tr.Start(context.Background(), "op", SpanKindInternal)
+
+	err := m.ExportSpan(context.Background(), span)
+	require.Error(t, err)
+
+	// Every exporter must have been attempted despite failures.
+	require.Len(t, ok.got, 1, "pass-through exporter must still receive the span")
+
+	// The aggregated error must contain both distinct failures; errors.Join
+	// concatenates the wrapped errors' messages.
+	msg := err.Error()
+	assert.Contains(t, msg, "exporter-A-failed", "first failure must be present")
+	assert.Contains(t, msg, "exporter-B-failed", "second failure must be present")
+}
+
+// TestMultiExporterNoErrorsReturnsNil verifies that when every exporter
+// succeeds, ExportSpan returns nil.
+func TestMultiExporterNoErrorsReturnsNil(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	ok1 := &recordingExporter{}
+	ok2 := &recordingExporter{}
+	m := NewMultiExporter(ok1, ok2)
+
+	tr := NewTracer("trace-noerr", nil)
+	span, _ := tr.Start(context.Background(), "op", SpanKindInternal)
+
+	err := m.ExportSpan(context.Background(), span)
+	require.NoError(t, err, "no errors when all exporters succeed")
+	require.Len(t, ok1.got, 1)
+	require.Len(t, ok2.got, 1)
 }
