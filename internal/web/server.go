@@ -31,14 +31,14 @@ const maxSSEConnections = 64
 // The server has no dependency on the CLI assembly; chat responses are
 // placeholder echoes. Real CLI integration will be wired later.
 type WebServer struct {
-	addr     string
+	addr      string
 	authToken string
-	handler  http.Handler
+	handler   http.Handler
 
-	mu           sync.Mutex
-	server       *http.Server
-	ln           net.Listener
-	sseSem       chan struct{} // concurrency limiter for SSE
+	mu     sync.Mutex
+	server *http.Server
+	ln     net.Listener
+	sseSem chan struct{} // concurrency limiter for SSE
 }
 
 // WebServerOption configures a WebServer.

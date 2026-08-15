@@ -106,11 +106,11 @@ func TestSession_ConcurrentEnqueueDrain(t *testing.T) {
 // --- mockSubagentDispatcher ---
 
 type mockSubagentDispatcher struct {
-	mu       sync.Mutex
-	tasks    []core.SubagentTask
-	result   core.SubagentResult
-	err      error
-	delay    time.Duration
+	mu         sync.Mutex
+	tasks      []core.SubagentTask
+	result     core.SubagentResult
+	err        error
+	delay      time.Duration
 	dispatched chan struct{}
 }
 

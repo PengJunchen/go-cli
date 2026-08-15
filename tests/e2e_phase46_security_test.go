@@ -457,7 +457,7 @@ func TestE2E_Phase46_StdioAdapterNormalDisconnect(t *testing.T) {
 // countingRegistry wraps a ToolRegistry and counts List() calls so tests can
 // verify cache hit/miss behavior.
 type countingRegistry struct {
-	inner    tools.ToolRegistry
+	inner     tools.ToolRegistry
 	listCount int
 }
 

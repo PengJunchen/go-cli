@@ -118,7 +118,7 @@ func TestRegistryConcurrentSafe(t *testing.T) {
 			defer wg.Done()
 			// Mix of reads and writes.
 			_ = reg.Register(ctx, &stubTool{name: toolName(n % 10)}) // overwrite
-			_, _ = reg.Get(ctx, toolName(n % 10))
+			_, _ = reg.Get(ctx, toolName(n%10))
 			_, _ = reg.List(ctx)
 		}(w)
 	}

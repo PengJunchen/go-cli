@@ -133,10 +133,10 @@ var _ Dependencies = (*slashContext)(nil)
 
 // --- AgentAccessor ---
 
-func (sc *slashContext) Agent() *core.AgentImpl           { return sc.agent }
-func (sc *slashContext) CostTracker() *production.CostTracker { return sc.costTracker }
+func (sc *slashContext) Agent() *core.AgentImpl                   { return sc.agent }
+func (sc *slashContext) CostTracker() *production.CostTracker     { return sc.costTracker }
 func (sc *slashContext) StatsRegistry() *production.StatsRegistry { return sc.statsRegistry }
-func (sc *slashContext) ContextWindow() int               { return sc.contextWindow }
+func (sc *slashContext) ContextWindow() int                       { return sc.contextWindow }
 func (sc *slashContext) ModelName() string {
 	if sc.modelSelector != nil {
 		return sc.modelSelector.PrimaryModelName()
@@ -146,25 +146,25 @@ func (sc *slashContext) ModelName() string {
 
 // --- SessionAccessor ---
 
-func (sc *slashContext) SessionID() string                          { return sc.sessionID }
-func (sc *slashContext) SessionStore() *session.JSONLSessionStore   { return sc.sessionStore }
+func (sc *slashContext) SessionID() string                            { return sc.sessionID }
+func (sc *slashContext) SessionStore() *session.JSONLSessionStore     { return sc.sessionStore }
 func (sc *slashContext) SessionHandler() *session.SessionSlashHandler { return sc.sessionHandler }
 
 // --- ToolAccessor ---
 
-func (sc *slashContext) ToolRegistry() tools.ToolRegistry       { return sc.toolRegistry }
+func (sc *slashContext) ToolRegistry() tools.ToolRegistry        { return sc.toolRegistry }
 func (sc *slashContext) FileTracker() *tools.FileTracker         { return sc.fileTracker }
-func (sc *slashContext) DiffGenerator() tools.DiffGenerator     { return sc.diffGenerator }
-func (sc *slashContext) PlanCtrl() core.PlanModeController      { return sc.planCtrl }
+func (sc *slashContext) DiffGenerator() tools.DiffGenerator      { return sc.diffGenerator }
+func (sc *slashContext) PlanCtrl() core.PlanModeController       { return sc.planCtrl }
 func (sc *slashContext) WorktreeManager() *tools.WorktreeManager { return sc.worktreeManager }
 func (sc *slashContext) SnapshotManager() *tools.SnapshotManager { return sc.snapshotManager }
 
 // --- DisplayAccessor ---
 
-func (sc *slashContext) Out() io.Writer                    { return sc.out }
-func (sc *slashContext) ThemeMgr() *tui.ThemeManager       { return sc.themeMgr }
-func (sc *slashContext) ThinkingVisibility() string         { return sc.thinkingVisibility }
-func (sc *slashContext) SetThinkingVisibility(v string)     { sc.thinkingVisibility = v }
+func (sc *slashContext) Out() io.Writer                 { return sc.out }
+func (sc *slashContext) ThemeMgr() *tui.ThemeManager    { return sc.themeMgr }
+func (sc *slashContext) ThinkingVisibility() string     { return sc.thinkingVisibility }
+func (sc *slashContext) SetThinkingVisibility(v string) { sc.thinkingVisibility = v }
 
 // --- MemoryAccessor ---
 

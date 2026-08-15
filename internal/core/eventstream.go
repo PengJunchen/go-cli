@@ -34,15 +34,15 @@ type EventStream interface {
 // EventStreamImpl is the default in-memory EventStream. It buffers events and
 // records the final result and error of a run.
 type EventStreamImpl struct {
-	mu        sync.Mutex
-	sendMu    sync.RWMutex
-	events    chan AgentEvent
-	closed    atomic.Bool
-	closeOnce sync.Once
-	done      chan struct{}
-	result    AgentMessage
-	hasRes    bool
-	err       error
+	mu           sync.Mutex
+	sendMu       sync.RWMutex
+	events       chan AgentEvent
+	closed       atomic.Bool
+	closeOnce    sync.Once
+	done         chan struct{}
+	result       AgentMessage
+	hasRes       bool
+	err          error
 	sentCount    int
 	discard      DiscardPolicy
 	blockTimeout time.Duration

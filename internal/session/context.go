@@ -34,10 +34,10 @@ type DefaultContextManager struct {
 	// Cache for incremental token estimation. When the same leaf is queried
 	// again and the branch has only grown, only the delta (new entries) is
 	// estimated; the cached total is reused for the already-seen entries.
-	cacheMu        sync.Mutex
-	cachedLeafID   string
-	cachedStartIdx int
-	cachedTokens   int
+	cacheMu         sync.Mutex
+	cachedLeafID    string
+	cachedStartIdx  int
+	cachedTokens    int
 	cachedBranchLen int // total branch length when the cache was built
 }
 

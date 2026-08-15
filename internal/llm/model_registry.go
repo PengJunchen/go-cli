@@ -34,7 +34,9 @@ type ModelRegistry interface {
 type NoopModelRegistry struct{}
 
 // Lookup always returns false.
-func (NoopModelRegistry) Lookup(_ context.Context, _, _ string) (ModelInfo, bool) { return ModelInfo{}, false }
+func (NoopModelRegistry) Lookup(_ context.Context, _, _ string) (ModelInfo, bool) {
+	return ModelInfo{}, false
+}
 
 // Providers always returns nil.
 func (NoopModelRegistry) Providers() []ProviderMetadata { return nil }

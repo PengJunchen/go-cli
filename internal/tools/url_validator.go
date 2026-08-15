@@ -114,7 +114,7 @@ func ValidateURL(rawURL string) error {
 // between the ValidateURL check and the actual dial.
 func NewSSRFSafeHTTPClient(timeout time.Duration) *http.Client {
 	dialer := &net.Dialer{
-		Timeout:  timeout,
+		Timeout:   timeout,
 		KeepAlive: 30 * time.Second,
 		Control: func(network, address string, _ syscall.RawConn) error {
 			host, _, err := net.SplitHostPort(address)
