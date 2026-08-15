@@ -1089,11 +1089,13 @@ func (s *assembleState) assembleProductionResilience() {
 	s.planCtrl = core.NewDefaultPlanModeController()
 	pathNormalizer := tools.NewPathNormalizer("")
 	schemaValidator := tools.NewSchemaValidator(s.underlyingReg)
+	resultMasker := tools.NewResultMasker(nil)
 	s.tr = tools.NewMiddlewareToolRegistry(s.tr,
 		core.NewPlanModeToolWrapper(s.planCtrl),
 		tools.WithArgumentPreparation(pathNormalizer, schemaValidator),
 		newProductionToolWrapper(s.idempotentCache, s.auditLog, s.telemetry, s.sessionID),
 		hookToolMW.WrapToolCall,
+		tools.NewResultMaskingWrapper(resultMasker),
 	)
 	s.reg.RegisterToolRegistry(s.tr)
 }
