@@ -89,6 +89,27 @@ func (t *JSONRPCLineTransport) Request(ctx context.Context, method string, param
 	}
 }
 
+// Send sends a JSON-RPC notification (no id, no response expected) to the
+// server. It is used for the notifications/initialized message in the MCP
+// handshake.
+func (t *JSONRPCLineTransport) Send(method string, params map[string]any) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	msg, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  method,
+		"params":  params,
+	})
+	if err != nil {
+		return fmt.Errorf("mcp: marshal notification: %w", err)
+	}
+	if _, err := fmt.Fprintln(t.out, string(msg)); err != nil {
+		return fmt.Errorf("mcp: write notification: %w", err)
+	}
+	return nil
+}
+
 // Close releases the underlying connection, if one was supplied.
 func (t *JSONRPCLineTransport) Close() error {
 	if t.closeF != nil {
@@ -107,6 +128,13 @@ func WithConnection(conn *JSONRPCLineTransport) AdapterOption {
 	return func(c *adapterCore) { c.conn = conn; c.externalConn = true }
 }
 
+// WithoutInitialize disables the automatic MCP initialize/initialized
+// handshake during Connect. It is used by tests that drive lightweight fake
+// servers which do not implement the initialize method.
+func WithoutInitialize() AdapterOption {
+	return func(c *adapterCore) { c.skipInitialize = true }
+}
+
 // adapterCore holds the shared state and MCPClient logic used by both SDK
 // adapters. The OfficialSDKAdapter and Mark3labsAdapter embed it so they are
 // interchangeable MCPClient implementations backed by the same self-contained
@@ -121,6 +149,8 @@ type adapterCore struct {
 	connected         bool
 	maxReconnect      int
 	reconnectAttempts int
+	skipInitialize    bool
+	protocolVersion   string
 }
 
 // defaultMaxReconnect is the number of reconnection attempts made when a Call
@@ -176,6 +206,22 @@ func (c *adapterCore) Connect(ctx context.Context) error {
 	}
 
 	c.connected = true
+
+	if !c.skipInitialize {
+		if err := c.doInitializeLocked(ctx); err != nil {
+			c.connected = false
+			if !c.externalConn && c.conn != nil {
+				_ = c.conn.Close() //nolint:errcheck
+				c.conn = nil
+			}
+			if c.proc != nil {
+				_ = c.proc.Process.Kill() //nolint:errcheck
+				c.proc = nil
+			}
+			return fmt.Errorf("mcp: initialize handshake: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -378,6 +424,39 @@ func (c *adapterCore) CallTool(ctx context.Context, name string, args map[string
 
 // Name returns the logical server name.
 func (c *adapterCore) Name() string { return c.cfg.Name }
+
+// ProtocolVersion returns the protocol version negotiated during the
+// initialize handshake, or "" before Connect.
+func (c *adapterCore) ProtocolVersion() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.protocolVersion
+}
+
+// doInitializeLocked performs the MCP initialize/initialized handshake. The
+// caller must hold c.mu. It sends an initialize request, validates the
+// returned protocolVersion against SupportedProtocolVersions, stores the
+// negotiated version, and sends notifications/initialized.
+func (c *adapterCore) doInitializeLocked(ctx context.Context) error {
+	conn := c.conn
+	if conn == nil {
+		return fmt.Errorf("mcp: connection is not established")
+	}
+	res, err := conn.Request(ctx, "initialize", map[string]any{
+		"protocolVersion": LatestProtocolVersion,
+		"capabilities":    map[string]any{},
+		"clientInfo":      map[string]any{"name": "go-cli", "version": "1.0.0"},
+	})
+	if err != nil {
+		return err
+	}
+	version, _ := res["protocolVersion"].(string)
+	if !IsSupportedProtocolVersion(version) {
+		return fmt.Errorf("unsupported protocol version: %s", version)
+	}
+	c.protocolVersion = version
+	return conn.Send("notifications/initialized", map[string]any{})
+}
 
 // OfficialSDKAdapter is an MCPClient adapter that corresponds to the official
 // Go MCP SDK's client transports. It uses a self-contained in-process

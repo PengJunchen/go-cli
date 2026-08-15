@@ -58,6 +58,8 @@ func (c *testMCPClient) CallTool(_ context.Context, _ string, _ map[string]any) 
 
 func (c *testMCPClient) Name() string { return c.name }
 
+func (c *testMCPClient) ProtocolVersion() string { return mcp.LatestProtocolVersion }
+
 var _ mcp.MCPClient = (*testMCPClient)(nil)
 
 // alwaysFailRegistry is a tools.ToolRegistry whose Register always errors.
