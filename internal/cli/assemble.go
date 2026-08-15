@@ -1090,7 +1090,9 @@ func (s *assembleState) assembleProductionResilience() {
 	pathNormalizer := tools.NewPathNormalizer("")
 	schemaValidator := tools.NewSchemaValidator(s.underlyingReg)
 	resultMasker := tools.NewResultMasker(nil)
+	promptInjectionGuard := production.NewPromptInjectionGuard()
 	s.tr = tools.NewMiddlewareToolRegistry(s.tr,
+		production.NewPromptInjectionToolWrapper(promptInjectionGuard),
 		core.NewPlanModeToolWrapper(s.planCtrl),
 		tools.WithArgumentPreparation(pathNormalizer, schemaValidator),
 		newProductionToolWrapper(s.idempotentCache, s.auditLog, s.telemetry, s.sessionID),
