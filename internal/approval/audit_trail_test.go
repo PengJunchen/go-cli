@@ -213,3 +213,19 @@ func splitLines(s string) []string {
 	}
 	return lines
 }
+
+// TestAuditTrail_DirectoryPermissions verifies that the audit directory is
+// created with 0o700 permissions (owner-only access) for security (MD-11).
+func TestAuditTrail_DirectoryPermissions(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "audit")
+	trail := NewAuditTrail(dir)
+
+	ts := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	entry := AuditEntry{Timestamp: ts, Tool: "bash", Decision: "deny"}
+	require.NoError(t, trail.Record(entry))
+
+	info, err := os.Stat(dir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), info.Mode().Perm(),
+		"audit directory should have 0700 permissions")
+}

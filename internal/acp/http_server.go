@@ -55,6 +55,20 @@ type HTTPServer struct {
 	ctx      context.Context
 	cancel   context.CancelFunc
 	running  bool
+
+	// maxConcurrency limits the number of concurrent in-flight requests.
+	// Default: 64. Set before calling Start.
+	maxConcurrency int
+	sem            chan struct{}
+
+	// sessionTTL is the maximum idle duration before a session is cleaned up.
+	// Default: 30 minutes.
+	sessionTTL time.Duration
+	// cleanupInterval is how often the cleanup goroutine checks for idle
+	// sessions. Default: 5 minutes.
+	cleanupInterval time.Duration
+	// lastActivity tracks the last activity time for each session (by senderID).
+	lastActivity map[string]time.Time
 }
 
 var _ ACPServer = (*HTTPServer)(nil)
@@ -64,10 +78,14 @@ var _ ACPServer = (*HTTPServer)(nil)
 // agent dispatch, useful for connectivity testing).
 func NewHTTPServer(name, addr string, handler *CoreHandler) *HTTPServer {
 	return &HTTPServer{
-		name:     name,
-		addr:     addr,
-		handler:  handler,
-		sessions: make(map[string]*Session),
+		name:            name,
+		addr:            addr,
+		handler:         handler,
+		sessions:        make(map[string]*Session),
+		maxConcurrency:  64,
+		sessionTTL:      30 * time.Minute,
+		cleanupInterval: 5 * time.Minute,
+		lastActivity:    make(map[string]time.Time),
 	}
 }
 
@@ -115,6 +133,22 @@ func authSubjectFromContext(ctx context.Context) string {
 	return v
 }
 
+// rateLimitMiddleware wraps next with a semaphore-based concurrency limiter.
+// When the number of in-flight requests reaches maxConcurrency, additional
+// requests receive 503 Service Unavailable.
+func (s *HTTPServer) rateLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case s.sem <- struct{}{}:
+			defer func() { <-s.sem }()
+			next.ServeHTTP(w, r)
+		default:
+			http.Error(w, "too many concurrent requests", http.StatusServiceUnavailable)
+			return
+		}
+	})
+}
+
 // Start brings the HTTP server up and begins serving. It binds the listener
 // synchronously so that bind errors (e.g. port in use) are returned to the
 // caller rather than silently logged.
@@ -125,6 +159,10 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 		return nil
 	}
 	s.running = true
+	if s.maxConcurrency <= 0 {
+		s.maxConcurrency = 64
+	}
+	s.sem = make(chan struct{}, s.maxConcurrency)
 	s.mu.Unlock()
 
 	ln, err := net.Listen("tcp", s.addr)
@@ -146,6 +184,7 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 	if s.authToken != "" {
 		handler = s.authMiddleware(handler)
 	}
+	handler = s.rateLimitMiddleware(handler)
 
 	srv := &http.Server{
 		Addr:    s.addr,
@@ -164,6 +203,10 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 			slog.Error("acp.server.serve_failed", "err", err)
 		}
 	}()
+
+	// Start session cleanup goroutine for idle session reclamation.
+	go s.sessionCleanupLoop()
+
 	return nil
 }
 
@@ -188,6 +231,7 @@ func (s *HTTPServer) Stop(ctx context.Context) error {
 		sess.Close()
 		delete(s.sessions, id)
 	}
+	s.lastActivity = make(map[string]time.Time)
 	s.mu.Unlock()
 
 	// Cancel server context to abort in-flight dispatch goroutines.
@@ -247,6 +291,7 @@ func (s *HTTPServer) getOrCreateSession(senderID string) *Session {
 		sess = NewSession(generateSessionID())
 		s.sessions[senderID] = sess
 	}
+	s.lastActivity[senderID] = time.Now()
 	return sess
 }
 
@@ -254,7 +299,11 @@ func (s *HTTPServer) getOrCreateSession(senderID string) *Session {
 func (s *HTTPServer) getSession(senderID string) *Session {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.sessions[senderID]
+	sess := s.sessions[senderID]
+	if sess != nil {
+		s.lastActivity[senderID] = time.Now()
+	}
+	return sess
 }
 
 // removeSession closes and removes the session for senderID.
@@ -266,6 +315,7 @@ func (s *HTTPServer) removeSession(senderID string) *Session {
 		return nil
 	}
 	delete(s.sessions, senderID)
+	delete(s.lastActivity, senderID)
 	return sess
 }
 
@@ -542,6 +592,37 @@ func (s *HTTPServer) ActiveSessions() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.sessions)
+}
+
+// sessionCleanupLoop periodically removes sessions that have been idle longer
+// than sessionTTL. The loop exits when the server context is canceled.
+func (s *HTTPServer) sessionCleanupLoop() {
+	ticker := time.NewTicker(s.cleanupInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.ctx.Done():
+			return
+		case <-ticker.C:
+			s.cleanupIdleSessions()
+		}
+	}
+}
+
+// cleanupIdleSessions removes sessions whose last activity exceeds sessionTTL.
+func (s *HTTPServer) cleanupIdleSessions() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := time.Now()
+	for id, last := range s.lastActivity {
+		if now.Sub(last) > s.sessionTTL {
+			if sess, ok := s.sessions[id]; ok {
+				sess.Close()
+			}
+			delete(s.sessions, id)
+			delete(s.lastActivity, id)
+		}
+	}
 }
 
 // ensureServerName returns a non-empty server name, defaulting to "acp-server".
