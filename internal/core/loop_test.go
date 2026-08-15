@@ -331,6 +331,49 @@ func TestLoopToolDefCache_NonVersionedRegistry(t *testing.T) {
 		"non-versioned registry should still cache tool defs (only systemPrompt calls List)")
 }
 
+// TestLoopToolDefCache_InvalidateOnRegister_MiddlewareRegistry verifies that
+// hot-registering a tool through a MiddlewareToolRegistry wrapper invalidates
+// the loop's tool-definition cache, so the next Run sees the new tool.
+// This is a regression test for ARCH-2: MiddlewareToolRegistry previously did
+// not forward Version(), so the cache never invalidated.
+func TestLoopToolDefCache_InvalidateOnRegister_MiddlewareRegistry(t *testing.T) {
+	reg := tools.NewDefaultToolRegistry()
+	require.NoError(t, reg.Register(context.Background(), &nameDescTool{name: "tool_a", description: "does a"}))
+
+	// Wrap with MiddlewareToolRegistry — the decorator whose Version() was
+	// previously missing, breaking cache invalidation.
+	wrapped := tools.NewMiddlewareToolRegistry(reg)
+
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"TC-MW", "mw-cache-invalidate",
+		mock.ConversationTurn{AssistantContent: "done"},
+	))
+	loop := NewLoopAgent(WithLLM(model), WithTools(wrapped))
+
+	// First Run — cache is cold.
+	_, err := loop.Run(context.Background(), Submission{Content: "hi"})
+	require.NoError(t, err)
+
+	// Hot-register a new tool through the wrapper.
+	require.NoError(t, wrapped.Register(context.Background(), &nameDescTool{name: "tool_b", description: "does b"}))
+
+	// Second Run — cache should be invalidated because Version() now forwards
+	// through the middleware decorator.
+	_, err = loop.Run(context.Background(), Submission{Content: "hi again"})
+	require.NoError(t, err)
+
+	// Verify the second Run's tools include the newly registered tool.
+	callLog := model.CallLog()
+	require.NotEmpty(t, callLog)
+	passedTools := toolsFromOpts(callLog[len(callLog)-1].Options)
+	var names []string
+	for _, td := range passedTools {
+		names = append(names, td.Name)
+	}
+	assert.Contains(t, names, "tool_b",
+		"hot-registered tool must be visible to the LLM after cache invalidation")
+}
+
 // TestBuildToolDefinitions_NilTools verifies that buildToolDefinitions
 // returns nil when no tool registry is wired.
 func TestBuildToolDefinitions_NilTools(t *testing.T) {

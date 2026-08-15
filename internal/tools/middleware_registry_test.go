@@ -132,3 +132,61 @@ func TestMiddlewareToolRegistry_PassthroughNoWrappers(t *testing.T) {
 	require.NotNil(t, res)
 	assert.Equal(t, "executed:read", res.Output)
 }
+
+// TestMiddlewareToolRegistry_VersionDelegates verifies that Version() forwards
+// to the inner registry's Version(), so the tool-definition cache in the agent
+// loop can detect hot-registered tools through the middleware decorator.
+func TestMiddlewareToolRegistry_VersionDelegates(t *testing.T) {
+	inner := &recordingToolDef{name: "read", desc: "read tool"}
+	tr := newRegistryWithTool(t, inner)
+
+	wrapped := tools.NewMiddlewareToolRegistry(tr)
+
+	// Version must reflect the inner registry's version (1 registration so far).
+	v0 := wrapped.Version()
+	assert.Equal(t, 1, v0, "Version() should forward inner registry's version")
+
+	// Register a second tool through the wrapper (delegates to inner).
+	require.NoError(t, wrapped.Register(context.Background(), &recordingToolDef{name: "write", desc: "write tool"}))
+
+	v1 := wrapped.Version()
+	assert.Equal(t, 2, v1, "Version() should increment after Register")
+
+	// The type assertion used by the loop's cache must succeed.
+	cacher, ok := interface{}(wrapped).(interface{ Version() int })
+	require.True(t, ok, "MiddlewareToolRegistry must satisfy interface{ Version() int }")
+	assert.Equal(t, v1, cacher.Version())
+}
+
+// TestMiddlewareToolRegistry_HotRegistrationVisible verifies that a tool
+// registered at runtime through the wrapper is immediately visible via Get
+// and List, and that Version() reflects the change.
+func TestMiddlewareToolRegistry_HotRegistrationVisible(t *testing.T) {
+	tr := tools.NewDefaultToolRegistry()
+	require.NoError(t, tr.Register(context.Background(), &recordingToolDef{name: "read", desc: "read tool"}))
+
+	wrapped := tools.NewMiddlewareToolRegistry(tr)
+	vBefore := wrapped.Version()
+
+	// Hot-register a new tool through the wrapper.
+	require.NoError(t, wrapped.Register(context.Background(), &recordingToolDef{name: "write", desc: "write tool"}))
+
+	// Version must have incremented.
+	assert.Greater(t, wrapped.Version(), vBefore, "Version() must increase after hot-registration")
+
+	// The new tool must be visible through the wrapper.
+	def, err := wrapped.Get(context.Background(), "write")
+	require.NoError(t, err)
+	require.NotNil(t, def)
+	assert.Equal(t, "write", def.Name())
+
+	// And appear in List.
+	list, err := wrapped.List(context.Background())
+	require.NoError(t, err)
+	var names []string
+	for _, d := range list {
+		names = append(names, d.Name())
+	}
+	assert.Contains(t, names, "write")
+	assert.Contains(t, names, "read")
+}

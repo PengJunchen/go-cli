@@ -66,6 +66,19 @@ func (r *MiddlewareToolRegistry) List(ctx context.Context) ([]ToolDefinition, er
 	return r.inner.List(ctx)
 }
 
+// Version delegates to the inner registry when it supports versioning. This
+// keeps the tool-definition cache (which type-asserts to
+// interface{ Version() int }) working through the middleware decorator: a
+// hot-registered tool bumps the inner version, and the cache sees the new
+// version through this forwarder. When the inner registry does not implement
+// Version(), 0 is returned (cache stays valid after first build).
+func (r *MiddlewareToolRegistry) Version() int {
+	if v, ok := r.inner.(interface{ Version() int }); ok {
+		return v.Version()
+	}
+	return 0
+}
+
 // wrappedToolDef adapts a ToolDefinition so that Execute passes through
 // the configured wrappers. Name and Description delegate directly.
 type wrappedToolDef struct {
