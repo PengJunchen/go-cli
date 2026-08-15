@@ -351,10 +351,10 @@ func TestApproval_ClassifierRegistry(t *testing.T) {
 	approval.RegisterApprovalClassifier(denyAll)
 	assert.Same(t, denyAll, approval.GetApprovalClassifier())
 
-	// Register nil resets to allow-all.
+	// Register nil resets to deny-all (deny-first security default).
 	approval.RegisterApprovalClassifier(nil)
 	restored := approval.GetApprovalClassifier()
-	assert.Equal(t, "allow_all", restored.Name())
+	assert.Equal(t, "deny_all", restored.Name())
 
 	// Restore original state.
 	approval.RegisterApprovalClassifier(defaultCl)
