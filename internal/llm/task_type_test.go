@@ -154,9 +154,9 @@ func (m *mockRegistry) Lookup(_ context.Context, provider, model string) (ModelI
 	return ModelInfo{}, false
 }
 
-func (m *mockRegistry) Providers() []ProviderMetadata                  { return nil }
-func (m *mockRegistry) ModelsForProvider(_ string) []ModelInfo          { return nil }
-func (m *mockRegistry) Refresh(_ context.Context) error                 { return nil }
+func (m *mockRegistry) Providers() []ProviderMetadata          { return nil }
+func (m *mockRegistry) ModelsForProvider(_ string) []ModelInfo { return nil }
+func (m *mockRegistry) Refresh(_ context.Context) error        { return nil }
 
 var _ ModelRegistry = (*mockRegistry)(nil)
 

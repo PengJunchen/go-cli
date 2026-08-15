@@ -322,20 +322,20 @@ func (r *ModelsDevRegistry) writeCache(data modelsDevAPIResponse, fetchedAt time
 // toModelInfo converts a models.dev model entry into a ModelInfo.
 func (r *ModelsDevRegistry) toModelInfo(providerID string, m modelsDevModel) ModelInfo {
 	info := ModelInfo{
-		Name:            m.Name,
-		ContextWindow:   m.Limit.Context,
-		MaxOutputTokens: m.Limit.Output,
-		InputPrice:      m.Cost.Input,
-		OutputPrice:     m.Cost.Output,
-		Modality:        modalityString(m.Modalities),
-		Reasoning:       m.Reasoning,
-		ToolCall:        m.ToolCall,
+		Name:             m.Name,
+		ContextWindow:    m.Limit.Context,
+		MaxOutputTokens:  m.Limit.Output,
+		InputPrice:       m.Cost.Input,
+		OutputPrice:      m.Cost.Output,
+		Modality:         modalityString(m.Modalities),
+		Reasoning:        m.Reasoning,
+		ToolCall:         m.ToolCall,
 		StructuredOutput: m.StructuredOutput,
-		CacheReadPrice:  m.Cost.CacheRead,
-		CacheWritePrice: m.Cost.CacheWrite,
-		InputTokenLimit: m.Limit.Input,
-		Knowledge:       m.Knowledge,
-		ReleaseDate:     m.ReleaseDate,
+		CacheReadPrice:   m.Cost.CacheRead,
+		CacheWritePrice:  m.Cost.CacheWrite,
+		InputTokenLimit:  m.Limit.Input,
+		Knowledge:        m.Knowledge,
+		ReleaseDate:      m.ReleaseDate,
 	}
 	if p, ok := r.data[providerID]; ok {
 		info.APIBase = p.API

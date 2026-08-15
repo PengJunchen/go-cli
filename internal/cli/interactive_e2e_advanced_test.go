@@ -225,5 +225,3 @@ func TestE2E_EOFExitsCleanly(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, out.String(), "Session ended")
 }
-
-

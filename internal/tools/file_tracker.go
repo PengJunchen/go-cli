@@ -34,7 +34,7 @@ type FileTracker struct {
 	checkpoints     map[string]CheckpointMeta
 	checkpointOrder []string // checkpoint IDs in creation order
 	backupContent   map[string][]byte
-	workdir         string // working directory for worktree-aware operations
+	workdir         string           // working directory for worktree-aware operations
 	snapshotMgr     *SnapshotManager // optional git snapshot manager
 }
 

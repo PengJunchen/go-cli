@@ -81,10 +81,10 @@ func TestNewProviderError_StatusMapping(t *testing.T) {
 // non-ProviderError errors, and defaults unknown errors to categoryTransient.
 func TestClassifyError(t *testing.T) {
 	cases := []struct {
-		name     string
-		err      error
-		wantCat  errorCategory
-		wantType bool // when true, also assert the category is retryable or not
+		name      string
+		err       error
+		wantCat   errorCategory
+		wantType  bool // when true, also assert the category is retryable or not
 		retryable bool
 	}{
 		// nil error.

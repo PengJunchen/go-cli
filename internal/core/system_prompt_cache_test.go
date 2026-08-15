@@ -20,8 +20,8 @@ type cacheTestTool struct {
 	description string
 	guidelines  []string
 
-	mu               sync.Mutex
-	guidelineCalls   int
+	mu             sync.Mutex
+	guidelineCalls int
 }
 
 func (t *cacheTestTool) Name() string        { return t.name }
@@ -147,7 +147,7 @@ func TestSystemPromptRebuiltOnConfigChange(t *testing.T) {
 		CustomPrompt: "You are assistant B",
 		AppendPrompt: "Extra rules",
 		ContextFiles: []ContextFile{{Path: "AGENTS.md", Content: "be careful"}},
-		Skills: []SkillInfo{{Name: "my-skill", Description: "does things"}},
+		Skills:       []SkillInfo{{Name: "my-skill", Description: "does things"}},
 	})
 	assert.NotEqual(t, fifth, sixth, "adding skills should rebuild")
 	assert.Contains(t, sixth, "my-skill")
@@ -158,8 +158,8 @@ func TestSystemPromptRebuiltOnConfigChange(t *testing.T) {
 		CustomPrompt: "You are assistant B",
 		AppendPrompt: "Extra rules",
 		ContextFiles: []ContextFile{{Path: "AGENTS.md", Content: "be careful"}},
-		Skills:      []SkillInfo{{Name: "my-skill", Description: "does things"}},
-		Memories:    []MemoryEntry{{ID: "1", Content: "remember this", Category: "fact"}},
+		Skills:       []SkillInfo{{Name: "my-skill", Description: "does things"}},
+		Memories:     []MemoryEntry{{ID: "1", Content: "remember this", Category: "fact"}},
 	})
 	assert.NotEqual(t, sixth, seventh, "adding memories should rebuild")
 	assert.Contains(t, seventh, "remember this")

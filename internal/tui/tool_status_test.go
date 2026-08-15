@@ -220,10 +220,10 @@ func TestIsToolError(t *testing.T) {
 
 	// Add a running tool_call entry.
 	m.accordion.Add(&AccordionEntry{
-		ContentType:  ContentTypeToolCall,
-		Summary:      "bash(test)",
-		Full:         "bash(test)",
-		ToolStatus:   ToolStatusRunning,
+		ContentType:   ContentTypeToolCall,
+		Summary:       "bash(test)",
+		Full:          "bash(test)",
+		ToolStatus:    ToolStatusRunning,
 		ToolStartTime: time.Now(),
 	})
 

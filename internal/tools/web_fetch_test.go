@@ -96,7 +96,7 @@ func TestWebFetchTimeout(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebFetchTool(WithWebFetchClient(srv.Client()), WithWebFetchTimeout(100 * time.Millisecond))
+	tool := NewWebFetchTool(WithWebFetchClient(srv.Client()), WithWebFetchTimeout(100*time.Millisecond))
 	_, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"url": srv.URL},
 	})
@@ -113,7 +113,7 @@ func TestWebFetchContextCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	tool := NewWebFetchTool(WithWebFetchClient(srv.Client()), WithWebFetchTimeout(10 * time.Second))
+	tool := NewWebFetchTool(WithWebFetchClient(srv.Client()), WithWebFetchTimeout(10*time.Second))
 	_, err := tool.Execute(ctx, ToolCall{
 		Args: map[string]any{"url": srv.URL},
 	})

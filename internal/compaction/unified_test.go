@@ -147,11 +147,11 @@ func TestUnifiedCompactorCompileGuard(t *testing.T) {
 // recordingEvaluator is a QualityEvaluator fake that records every call so
 // tests can assert the evaluator was invoked with the right before/after items.
 type recordingEvaluator struct {
-	called     bool
-	before     []TurnItem
-	after      []TurnItem
-	metrics    *QualityMetrics
-	evalErr    error
+	called  bool
+	before  []TurnItem
+	after   []TurnItem
+	metrics *QualityMetrics
+	evalErr error
 }
 
 var _ QualityEvaluator = (*recordingEvaluator)(nil)

@@ -290,13 +290,13 @@ type BubbleteaApp struct {
 // Run where the run context is available.
 func NewBubbleteaApp(events <-chan AgentEvent, opts ...AppOption) *BubbleteaApp {
 	a := &BubbleteaApp{
-		reg:         NewDefaultRegistry(),
-		themeMgr:    NewThemeManager(),
-		events:      events,
-		done:           make(chan struct{}),
-		quitCh:         make(chan struct{}),
-		programReady:   make(chan struct{}),
-		interactive:    isTerminal(),
+		reg:          NewDefaultRegistry(),
+		themeMgr:     NewThemeManager(),
+		events:       events,
+		done:         make(chan struct{}),
+		quitCh:       make(chan struct{}),
+		programReady: make(chan struct{}),
+		interactive:  isTerminal(),
 	}
 	for _, opt := range opts {
 		opt(a)

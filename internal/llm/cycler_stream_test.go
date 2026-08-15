@@ -34,8 +34,8 @@ func (p *testStreamProvider) Models() []ModelInfo { return nil }
 
 // delayedStreamModel sends chunks with configurable delays between them.
 type delayedStreamModel struct {
-	chunks  []MessageChunk
-	delays  []time.Duration
+	chunks    []MessageChunk
+	delays    []time.Duration
 	streamErr error
 }
 
