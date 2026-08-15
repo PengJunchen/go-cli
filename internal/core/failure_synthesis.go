@@ -156,8 +156,63 @@ type failureSynthesisLoop struct {
 	next        AgentLoop
 }
 
+// eventsToTurnMessages reconstructs the AgentMessage slice produced during a
+// turn from the events fired by the loop. It preserves assistant messages
+// (with tool calls) and tool results so a retry can continue from where the
+// previous attempt left off instead of replaying from the beginning.
+//
+// Incremental "message" events (streaming fragments) are skipped; only the
+// final non-incremental "message" event carries the complete assistant
+// response and tool calls.
+func eventsToTurnMessages(events []AgentEvent) []AgentMessage {
+	// Build a map of ToolCallID -> tool name from "tool_call" events so we
+	// can populate ToolName on tool-result messages.
+	toolNames := make(map[string]string)
+	for _, ev := range events {
+		if ev.Kind == "tool_call" {
+			toolNames[ev.ToolCallID] = ev.Content
+		}
+	}
+
+	var msgs []AgentMessage
+	for _, ev := range events {
+		switch ev.Kind {
+		case "message":
+			if ev.Incremental {
+				continue // Skip streaming fragments
+			}
+			msgs = append(msgs, AgentMessage{
+				Role:      "assistant",
+				Content:   ev.Content,
+				ToolCalls: ev.ToolCalls,
+				Usage:     ev.Usage,
+			})
+		case "tool_result":
+			msgs = append(msgs, AgentMessage{
+				Role:       "tool",
+				Content:    ev.Content,
+				ToolCallID: ev.ToolCallID,
+				ToolName:   toolNames[ev.ToolCallID],
+			})
+		case "tool_cancelled":
+			// For cancelled events, Content holds the tool name.
+			msgs = append(msgs, AgentMessage{
+				Role:       "tool",
+				Content:    "Tool call cancelled by interceptor",
+				ToolCallID: ev.ToolCallID,
+				ToolName:   ev.Content,
+			})
+		}
+	}
+	return msgs
+}
+
 // Run delegates to the wrapped loop. On a recoverable error it synthesizes a
-// recovery message, injects it into the submission history, and retries once.
+// recovery message, injects it at the interruption point, and retries once.
+// The retry resumes from the failure point: already-completed tool calls and
+// their results are preserved as context so the LLM continues instead of
+// replaying the entire turn (which would re-execute tools and cause duplicate
+// side effects).
 func (l *failureSynthesisLoop) Run(ctx context.Context, submission Submission, stream ...EventStream) ([]AgentEvent, error) {
 	span, spanCtx := tracing.SpanFromContext(ctx, "middleware.failure-synthesis", tracing.SpanKindInternal)
 	defer span.End()
@@ -185,13 +240,28 @@ func (l *failureSynthesisLoop) Run(ctx context.Context, submission Submission, s
 	logger.Info("failure_synthesis.retry", "original_error", msg.OriginalError, "recoverable", true)
 	slog.Info("core.failure_synthesis.retry", "error", msg.OriginalError)
 
-	// Prepend the synthesized system message to the history so the LLM sees
-	// the recovery strategy before the original conversation.
-	retrySubmission := submission
-	retrySubmission.History = append(
-		[]AgentMessage{{Role: msg.Role, Content: msg.Content}},
-		submission.History...,
-	)
+	// Reconstruct the turn messages (assistant responses + tool results)
+	// from the events produced by the failed attempt. This allows the retry
+	// to continue from the failure point instead of replaying the entire
+	// turn, which would re-execute already-completed tool calls.
+	turnMessages := eventsToTurnMessages(events)
 
-	return l.next.Run(spanCtx, retrySubmission, stream...)
+	// Build the retry history: original history + the original user message
+	// (now part of history) + the turn messages from the failed attempt.
+	// The synthesized message becomes the new submission content so it is
+	// injected at the interruption point as a user message, prompting the
+	// LLM to continue from where it left off.
+	retryHistory := make([]AgentMessage, 0, len(submission.History)+len(turnMessages)+1)
+	retryHistory = append(retryHistory, submission.History...)
+	retryHistory = append(retryHistory, AgentMessage{Role: "user", Content: submission.Content})
+	retryHistory = append(retryHistory, turnMessages...)
+
+	retrySubmission := Submission{
+		Type:    submission.Type,
+		Content: msg.Content,
+		History: retryHistory,
+	}
+
+	retryEvents, retryErr := l.next.Run(spanCtx, retrySubmission, stream...)
+	return append(events, retryEvents...), retryErr
 }
