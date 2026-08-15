@@ -116,7 +116,7 @@ func TestRunOnboarding_ConfigFileWritten(t *testing.T) {
 	data, err := os.ReadFile(configPath)
 	require.NoError(t, err)
 	content := string(data)
-	assert.Contains(t, content, "api_key: sk-test-key")
+	assert.Contains(t, content, "api_key: 'sk-test-key'")
 	assert.Contains(t, content, "model: gpt-4o-mini")
 	assert.Contains(t, content, "theme: dark")
 }
@@ -278,9 +278,53 @@ func TestSerializeOnboardingYAML(t *testing.T) {
 	yaml := serializeOnboardingYAML(cfg)
 	assert.Contains(t, yaml, "provider:")
 	assert.Contains(t, yaml, "name: openai")
-	assert.Contains(t, yaml, "api_key: sk-test")
+	assert.Contains(t, yaml, "api_key: 'sk-test'")
 	assert.Contains(t, yaml, "model: gpt-4o-mini")
 	assert.Contains(t, yaml, "max_tokens: 4096")
 	assert.Contains(t, yaml, "tui:")
 	assert.Contains(t, yaml, "theme: dark")
+}
+
+// TestSerializeOnboardingYAML_APIKeyEscaping verifies that API keys containing
+// special YAML characters are properly single-quoted in the output and can be
+// round-tripped through the YAML loader without corruption.
+func TestSerializeOnboardingYAML_APIKeyEscaping(t *testing.T) {
+	cases := []struct {
+		name   string
+		apiKey string
+	}{
+		{"normal alphanumeric", "sk-test-key-123"},
+		{"contains colon", "sk-test:key"},
+		{"contains hash", "sk-test#key"},
+		{"contains braces", "sk-test{key}"},
+		{"contains brackets", "sk-test[key]"},
+		{"contains double quote", `sk-test"key`},
+		{"contains backslash", `sk-test\key`},
+		{"contains multiple special", `sk:test#"key{}\`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.Config{
+				Provider: config.ProviderConfig{
+					APIKey: tc.apiKey,
+					Model:  "gpt-4o-mini",
+				},
+			}
+			cfg.TUI.Theme = "dark"
+
+			yaml := serializeOnboardingYAML(cfg)
+
+			// The key must be single-quoted in the output.
+			assert.Contains(t, yaml, "api_key: '"+tc.apiKey+"'")
+
+			// The generated YAML must parse back correctly via yaml_loader.
+			var parsed config.Config
+			err := config.UnmarshalConfig([]byte(yaml), config.ConfigFormatYAML, &parsed)
+			require.NoError(t, err, "YAML should parse without error")
+
+			assert.Equal(t, tc.apiKey, parsed.Provider.APIKey,
+				"API key should round-trip through YAML serialization")
+		})
+	}
 }
