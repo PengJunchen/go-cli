@@ -1538,7 +1538,7 @@ func findModelInfo(models []llm.ModelInfo, name string) llm.ModelInfo {
 // main config file, it auto-loads from .go-cli/mcp.json or
 // ~/.config/go-cli/mcp.json if either exists.
 func registerMCPTools(ctx context.Context, rc *config.Config, tr tools.DeferredRegistry) error {
-	servers := loadMCPServers(rc)
+	servers := loadMCPServers(ctx, rc)
 	if len(servers) == 0 {
 		return nil
 	}
@@ -1596,7 +1596,7 @@ func registerMCPTools(ctx context.Context, rc *config.Config, tr tools.DeferredR
 
 // loadMCPServers returns MCP server configs from the main config, or
 // auto-discovered from default paths when the main config has none.
-func loadMCPServers(rc *config.Config) []config.MCPServerConfig {
+func loadMCPServers(ctx context.Context, rc *config.Config) []config.MCPServerConfig {
 	if rc != nil && len(rc.MCP.Servers) > 0 {
 		return rc.MCP.Servers
 	}
@@ -1606,7 +1606,24 @@ func loadMCPServers(rc *config.Config) []config.MCPServerConfig {
 	if home, err := os.UserHomeDir(); err == nil && home != "" {
 		candidates = append(candidates, filepath.Join(home, ".config", "go-cli", "mcp.json"))
 	}
+
+	cwd, _ := os.Getwd()
+	tm := approval.GetTrustManager()
+
 	for _, path := range candidates {
+		isProjectLevel := path == ".go-cli/mcp.json"
+		if isProjectLevel {
+			if !tm.IsTrusted(ctx, cwd) {
+				slog.Warn("assemble_mcp_config_skip_untrusted", "path", path, "reason", "project not trusted")
+				continue
+			}
+		} else {
+			if err := approval.ValidateGlobalConfigFile(path); err != nil {
+				slog.Warn("assemble_mcp_config_global_rejected", "path", path, "err", err)
+				continue
+			}
+		}
+
 		data, err := os.ReadFile(path)
 		if err != nil {
 			continue
@@ -1651,14 +1668,26 @@ func loadMCPServers(rc *config.Config) []config.MCPServerConfig {
 // for injection into the system prompt.
 func registerSkillTools(ctx context.Context, rc *config.Config, tr tools.DeferredRegistry) []core.SkillInfo {
 	skillDir := ""
+	autoDiscovered := false
 	if rc != nil && rc.Skill.Dir != "" {
 		skillDir = rc.Skill.Dir
 	} else {
 		// Auto-discover default skill directories.
+		autoDiscovered = true
 		skillDir = discoverSkillDir()
 	}
 	if skillDir == "" {
 		return nil
+	}
+
+	// Trust check: skip auto-discovered project-level skill directory if
+	// project is not trusted.
+	if autoDiscovered && !filepath.IsAbs(skillDir) {
+		cwd, _ := os.Getwd()
+		if !approval.GetTrustManager().IsTrusted(ctx, cwd) {
+			slog.Warn("assemble_skill_skip_untrusted", "dir", skillDir, "reason", "project not trusted")
+			return nil
+		}
 	}
 
 	loader := skill.NewYAMLSkillLoader()
@@ -1718,6 +1747,15 @@ func discoverSkillDir() string {
 // name collides with an already-registered tool, is skipped with a warning.
 func registerCustomTools(ctx context.Context, rc *config.Config, tr tools.ToolRegistry, logger *slog.Logger) {
 	if rc == nil || len(rc.Tools.CustomTools) == 0 {
+		return
+	}
+
+	// Trust check: skip custom tools if project is not trusted. Custom tools
+	// from project config are already gated by LoadTrusted, but this provides
+	// defense-in-depth for code paths that bypass LoadTrusted.
+	cwd, _ := os.Getwd()
+	if !approval.GetTrustManager().IsTrusted(ctx, cwd) {
+		logger.Warn("assemble_custom_tools_skip_untrusted", "reason", "project not trusted")
 		return
 	}
 

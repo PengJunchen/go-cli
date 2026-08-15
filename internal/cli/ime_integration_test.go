@@ -354,10 +354,10 @@ func TestIntegration_LoadMCPServers_NoFiles(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
 
-	servers := loadMCPServers(nil)
+	servers := loadMCPServers(context.Background(), nil)
 	assert.Empty(t, servers)
 
-	servers = loadMCPServers(&config.Config{})
+	servers = loadMCPServers(context.Background(), &config.Config{})
 	assert.Empty(t, servers)
 }
 
