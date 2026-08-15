@@ -205,3 +205,29 @@ func TestRegisterDefaultsEmptyWhitelistRegistersAll(t *testing.T) {
 	_, err = reg.Get(ctx, "bash")
 	assert.NoError(t, err)
 }
+
+// TestRegisterDefaultsWithPathWhitelist verifies that RegisterDefaults wires the
+// path whitelist into both WriteTool and EditFileTool when the option is passed.
+func TestRegisterDefaultsWithPathWhitelist(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	ctx := context.Background()
+	reg := NewDefaultToolRegistry()
+	dir := t.TempDir()
+
+	require.NoError(t, RegisterDefaults(ctx, reg, WithRegisteredPathWhitelist([]string{dir})))
+
+	// WriteTool should have the whitelist configured.
+	wt, err := reg.Get(ctx, "write")
+	require.NoError(t, err)
+	wtConcrete, ok := wt.(*WriteTool)
+	require.True(t, ok)
+	assert.True(t, len(wtConcrete.whitelist.paths) > 0)
+
+	// EditFileTool should have the whitelist configured.
+	et, err := reg.Get(ctx, "edit")
+	require.NoError(t, err)
+	etConcrete, ok := et.(*EditFileTool)
+	require.True(t, ok)
+	assert.True(t, len(etConcrete.whitelist.paths) > 0)
+}
