@@ -92,6 +92,15 @@ func mockServerBridge(conn net.Conn, server *MockMCPServerImpl) {
 
 		var res map[string]any
 		switch req.Method {
+		case "initialize":
+			res = map[string]any{
+				"protocolVersion": "2025-06-18",
+				"capabilities":    map[string]any{},
+				"serverInfo":      map[string]any{"name": "mock", "version": "1.0"},
+			}
+		case "notifications/initialized":
+			// Notification — no response needed, but we acknowledge.
+			continue
 		case "tools/list":
 			tls, err := server.ListTools(context.Background())
 			if err == nil {

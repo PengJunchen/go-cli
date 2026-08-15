@@ -128,10 +128,15 @@ func TestApproval_SafetyPolicyClassifier(t *testing.T) {
 		assert.Equal(t, approval.Allow, cl.Classify(ctx, toolCall("ls")))
 	})
 
-	t.Run("no dangerous tools allows all", func(t *testing.T) {
+	t.Run("no dangerous tools asks for non-readonly", func(t *testing.T) {
 		cl := approval.NewSafetyPolicyClassifier(nil)
-		assert.Equal(t, approval.Allow, cl.Classify(ctx, toolCall("bash")))
-		assert.Equal(t, approval.Allow, cl.Classify(ctx, toolCall("write")))
+		// With whitelist semantics, non-readonly tools like bash/write
+		// default to Ask (not Allow) even when no forbidden list is set.
+		assert.Equal(t, approval.Ask, cl.Classify(ctx, toolCall("bash")))
+		assert.Equal(t, approval.Ask, cl.Classify(ctx, toolCall("write")))
+		// Read-only tools are still auto-allowed.
+		assert.Equal(t, approval.Allow, cl.Classify(ctx, toolCall("read")))
+		assert.Equal(t, approval.Allow, cl.Classify(ctx, toolCall("grep")))
 	})
 
 	t.Run("name returns safety_policy", func(t *testing.T) {
