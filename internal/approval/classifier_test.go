@@ -54,8 +54,40 @@ func TestSafetyPolicyClassifierDeniesForbidden(t *testing.T) {
 	assert.Equal(t, "safety_policy", c.Name())
 	assert.Equal(t, Deny, c.Classify(ctx(), call("delete")))
 	assert.Equal(t, Deny, c.Classify(ctx(), call("rm_remote")))
+	// read-only tools are auto-allowed
 	assert.Equal(t, Allow, c.Classify(ctx(), call("read_file")))
 	assert.Equal(t, Allow, c.Classify(ctx(), call("search")))
+}
+
+func TestSafetyPolicyClassifierReadOnlyToolsAllowed(t *testing.T) {
+	c := NewSafetyPolicyClassifier(nil)
+	for _, name := range []string{"read", "read_file", "ls", "grep", "glob", "find", "search", "list"} {
+		assert.Equal(t, Allow, c.Classify(ctx(), call(name)), "tool %s should be allowed", name)
+	}
+}
+
+func TestSafetyPolicyClassifierRemoteBashTriggersAsk(t *testing.T) {
+	c := NewSafetyPolicyClassifier(nil)
+	assert.Equal(t, Ask, c.Classify(ctx(), call("remote_bash")))
+}
+
+func TestSafetyPolicyClassifierMCPToolTriggersAsk(t *testing.T) {
+	c := NewSafetyPolicyClassifier(nil)
+	assert.Equal(t, Ask, c.Classify(ctx(), call("mcp_github_create_issue")))
+	assert.Equal(t, Ask, c.Classify(ctx(), call("mcp_slack_send_message")))
+}
+
+func TestSafetyPolicyClassifierCustomToolTriggersAsk(t *testing.T) {
+	c := NewSafetyPolicyClassifier(nil)
+	assert.Equal(t, Ask, c.Classify(ctx(), call("custom_tool")))
+	assert.Equal(t, Ask, c.Classify(ctx(), call("my_custom_widget")))
+}
+
+func TestSafetyPolicyClassifierWriteToolsTriggersAsk(t *testing.T) {
+	c := NewSafetyPolicyClassifier(nil)
+	assert.Equal(t, Ask, c.Classify(ctx(), call("bash")))
+	assert.Equal(t, Ask, c.Classify(ctx(), call("write")))
+	assert.Equal(t, Ask, c.Classify(ctx(), call("edit")))
 }
 
 func TestClassifiersSatisfyInterface(t *testing.T) {

@@ -74,32 +74,59 @@ func (c *StaticClassifier) Classify(_ context.Context, call tools.ToolCall) Clas
 	return Deny
 }
 
-// SafetyPolicyClassifier is the sensible deny-first policy. It carries a
-// configured set of dangerous/forbidden tool names and denies any call whose
-// tool is in that set; every other tool is allowed.
+// builtinReadOnlyTools is the set of built-in read-only tools that are safe
+// to auto-allow without human approval. Any tool not in this set defaults to
+// Ask, requiring explicit approval before execution.
+var builtinReadOnlyTools = map[string]struct{}{
+	"read":      {},
+	"read_file": {},
+	"ls":        {},
+	"grep":      {},
+	"glob":      {},
+	"find":      {},
+	"search":    {},
+	"list":      {},
+}
+
+// SafetyPolicyClassifier is the sensible deny-first policy with whitelist
+// semantics. It carries a configured set of dangerous/forbidden tool names
+// (denied outright) and a built-in read-only whitelist (auto-allowed). Any
+// tool that is neither forbidden nor read-only defaults to Ask, requiring
+// human approval before execution. This covers remote_bash, MCP tools (prefix
+// "mcp_"), custom tools, bash, write, edit, and any other non-read-only tool.
 type SafetyPolicyClassifier struct {
-	forbidden map[string]struct{}
+	forbidden     map[string]struct{}
+	readOnlyAllow map[string]struct{}
 }
 
 var _ ApprovalClassifier = (*SafetyPolicyClassifier)(nil)
 
 // NewSafetyPolicyClassifier builds a SafetyPolicyClassifier that denies the
-// given dangerous tool names and allows everything else.
+// given forbidden tool names outright, auto-allows built-in read-only tools,
+// and asks for approval on everything else.
 func NewSafetyPolicyClassifier(forbidden []string) *SafetyPolicyClassifier {
-	return &SafetyPolicyClassifier{forbidden: toSet(forbidden)}
+	return &SafetyPolicyClassifier{
+		forbidden:     toSet(forbidden),
+		readOnlyAllow: builtinReadOnlyTools,
+	}
 }
 
 // Name returns the classifier identifier.
 func (c *SafetyPolicyClassifier) Name() string { return "safety_policy" }
 
-// Classify denies calls targeting a forbidden tool and allows all others.
+// Classify denies calls targeting a forbidden tool, allows calls targeting
+// built-in read-only tools, and asks for everything else.
 func (c *SafetyPolicyClassifier) Classify(_ context.Context, call tools.ToolCall) Classification {
 	if _, bad := c.forbidden[call.Name]; bad {
 		slog.Info("approval.classify.safety_policy", "tool", call.Name, "decision", "deny")
 		return Deny
 	}
-	slog.Info("approval.classify.safety_policy", "tool", call.Name, "decision", "allow")
-	return Allow
+	if _, ro := c.readOnlyAllow[call.Name]; ro {
+		slog.Info("approval.classify.safety_policy", "tool", call.Name, "decision", "allow")
+		return Allow
+	}
+	slog.Info("approval.classify.safety_policy", "tool", call.Name, "decision", "ask")
+	return Ask
 }
 
 // toSet converts a string slice into a set for O(1) lookups.
