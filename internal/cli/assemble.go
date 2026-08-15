@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -31,6 +32,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 	"github.com/pengjunchen/go-cli/internal/tui"
+	"golang.org/x/sync/errgroup"
 )
 
 // defaultMaxTokens is the default compaction token budget used when no
@@ -1536,62 +1538,68 @@ func findModelInfo(models []llm.ModelInfo, name string) llm.ModelInfo {
 // registerMCPTools connects to configured MCP servers and registers their
 // tools into the tool registry. When no MCP servers are configured in the
 // main config file, it auto-loads from .go-cli/mcp.json or
-// ~/.config/go-cli/mcp.json if either exists.
+// ~/.config/go-cli/mcp.json if either exists. Servers are connected in
+// parallel using errgroup to reduce startup latency.
 func registerMCPTools(ctx context.Context, rc *config.Config, tr tools.DeferredRegistry) error {
 	servers := loadMCPServers(ctx, rc)
 	if len(servers) == 0 {
 		return nil
 	}
 
+	g, gctx := errgroup.WithContext(ctx)
 	for _, srv := range servers {
-		cfg := mcp.MCPServerConfig{
-			Name: srv.Name,
-			URL:  srv.URL,
-		}
-		if srv.Command != "" {
-			cfg.Transport = mcp.MCPTransportStdio
-			cfg.Command = srv.Command
-			cfg.Args = srv.Args
-			for k, v := range srv.Env {
-				cfg.Env = append(cfg.Env, k+"="+v)
+		srv := srv
+		g.Go(func() error {
+			cfg := mcp.MCPServerConfig{
+				Name: srv.Name,
+				URL:  srv.URL,
 			}
-		} else if srv.URL != "" {
-			cfg.Transport = mcp.MCPTransportSSE
-		} else {
-			continue
-		}
-
-		var client mcp.MCPClient
-		if cfg.Transport == mcp.MCPTransportSSE {
-			client = mcp.NewHTTPClientAdapter(cfg)
-		} else {
-			client = mcp.NewOfficialSDKAdapter(cfg)
-		}
-
-		if err := client.Connect(ctx); err != nil {
-			slog.Warn("assemble_mcp_connect_failed", "server", srv.Name, "err", err)
-			continue
-		}
-
-		mcpTools, err := client.ListTools(ctx)
-		if err != nil {
-			slog.Warn("assemble_mcp_list_failed", "server", srv.Name, "err", err)
-			continue
-		}
-
-		for _, t := range mcpTools {
-			toolName := mcp.NormalizeToolName(client.Name(), t.Name)
-			clientRef := client
-			toolRef := t
-			if regErr := tr.RegisterDeferred(ctx, toolName, func() (tools.ToolDefinition, error) {
-				return mcp.NewMCPToolAdapter(clientRef, toolRef), nil
-			}); regErr != nil {
-				slog.Warn("assemble_mcp_register_failed", "tool", t.Name, "err", regErr)
+			if srv.Command != "" {
+				cfg.Transport = mcp.MCPTransportStdio
+				cfg.Command = srv.Command
+				cfg.Args = srv.Args
+				for k, v := range srv.Env {
+					cfg.Env = append(cfg.Env, k+"="+v)
+				}
+			} else if srv.URL != "" {
+				cfg.Transport = mcp.MCPTransportSSE
+			} else {
+				return nil
 			}
-		}
-		slog.Info("assemble_mcp_registered", "server", srv.Name, "tools", len(mcpTools))
+
+			var client mcp.MCPClient
+			if cfg.Transport == mcp.MCPTransportSSE {
+				client = mcp.NewHTTPClientAdapter(cfg)
+			} else {
+				client = mcp.NewOfficialSDKAdapter(cfg)
+			}
+
+			if err := client.Connect(gctx); err != nil {
+				slog.Warn("assemble_mcp_connect_failed", "server", srv.Name, "err", err)
+				return nil
+			}
+
+			mcpTools, err := client.ListTools(gctx)
+			if err != nil {
+				slog.Warn("assemble_mcp_list_failed", "server", srv.Name, "err", err)
+				return nil
+			}
+
+			for _, t := range mcpTools {
+				toolName := mcp.NormalizeToolName(client.Name(), t.Name)
+				clientRef := client
+				toolRef := t
+				if regErr := tr.RegisterDeferred(gctx, toolName, func() (tools.ToolDefinition, error) {
+					return mcp.NewMCPToolAdapter(clientRef, toolRef), nil
+				}); regErr != nil {
+					slog.Warn("assemble_mcp_register_failed", "tool", t.Name, "err", regErr)
+				}
+			}
+			slog.Info("assemble_mcp_registered", "server", srv.Name, "tools", len(mcpTools))
+			return nil
+		})
 	}
-	return nil
+	return g.Wait()
 }
 
 // loadMCPServers returns MCP server configs from the main config, or
@@ -2123,22 +2131,28 @@ func buildLSPClient(ctx context.Context, rc *config.Config, logger *slog.Logger)
 		return buildSingleLSPClient(ctx, servers[0], logger)
 	}
 
-	// Multiple servers: use MultiLSPClient.
+	// Multiple servers: use MultiLSPClient, starting each server in parallel.
 	multi := tools.NewMultiLSPClient()
-	anyStarted := false
+	var anyStarted atomic.Bool
+	g, gctx := errgroup.WithContext(ctx)
 	for _, srv := range servers {
-		client, started := buildSingleLSPClient(ctx, srv, logger)
-		if !started {
-			continue
-		}
-		anyStarted = true
-		if len(srv.FileExtensions) > 0 {
-			multi.Register(client, srv.FileExtensions...)
-		} else {
-			multi.SetDefaultClient(client)
-		}
+		srv := srv
+		g.Go(func() error {
+			client, started := buildSingleLSPClient(gctx, srv, logger)
+			if !started {
+				return nil
+			}
+			anyStarted.Store(true)
+			if len(srv.FileExtensions) > 0 {
+				multi.Register(client, srv.FileExtensions...)
+			} else {
+				multi.SetDefaultClient(client)
+			}
+			return nil
+		})
 	}
-	if !anyStarted {
+	_ = g.Wait()
+	if !anyStarted.Load() {
 		return nil, false
 	}
 	return multi, true
