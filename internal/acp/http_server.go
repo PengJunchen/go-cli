@@ -15,6 +15,11 @@ import (
 	"github.com/pengjunchen/go-cli/internal/core"
 )
 
+// contextKey is an unexported type used for context value keys in this package.
+type contextKey int
+
+const authSubjectKey contextKey = iota
+
 // HTTPServer implements ACPServer, serving the ACP JSON-over-HTTP protocol.
 // It exposes four routes that mirror the gRPCAdapter client contract:
 //
@@ -27,11 +32,17 @@ import (
 // ?sender_id= query parameter for per-session streaming; when omitted, all
 // pending messages across sessions are drained (backward compatible with the
 // existing gRPCAdapter client which does not send sender_id in GET requests).
+//
+// When auth is enabled via SetAuth, all routes require a Bearer token and
+// the /stream, /events endpoints bind sender_id to the authenticated subject
+// instead of an arbitrary query parameter.
 type HTTPServer struct {
-	name     string
-	addr     string
-	handler  *CoreHandler
-	eventBus core.EventBus
+	name        string
+	addr        string
+	handler     *CoreHandler
+	eventBus    core.EventBus
+	authToken   string
+	authSubject string
 
 	mu       sync.Mutex
 	sessions map[string]*Session
@@ -64,6 +75,42 @@ func (s *HTTPServer) SetEventBus(bus core.EventBus) {
 	s.eventBus = bus
 }
 
+// SetAuth enables bearer-token authentication. When set, all routes require
+// an Authorization: Bearer <token> header and /stream, /events bind sender_id
+// to the authenticated subject instead of an arbitrary query parameter.
+func (s *HTTPServer) SetAuth(token, subject string) {
+	s.authToken = token
+	s.authSubject = subject
+}
+
+// authMiddleware wraps next with bearer-token authentication. Requests
+// without a valid Bearer token receive 401 with a WWW-Authenticate header.
+func (s *HTTPServer) authMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if !strings.HasPrefix(auth, "Bearer ") {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		token := strings.TrimPrefix(auth, "Bearer ")
+		if token != s.authToken {
+			w.Header().Set("WWW-Authenticate", "Bearer")
+			http.Error(w, "unauthorized", http.StatusUnauthorized)
+			return
+		}
+		ctx := context.WithValue(r.Context(), authSubjectKey, s.authSubject)
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+// authSubjectFromContext returns the authenticated subject from the request
+// context, or "" if auth is not enabled.
+func authSubjectFromContext(ctx context.Context) string {
+	v, _ := ctx.Value(authSubjectKey).(string)
+	return v
+}
+
 // Start brings the HTTP server up and begins serving. It binds the listener
 // synchronously so that bind errors (e.g. port in use) are returned to the
 // caller rather than silently logged.
@@ -91,9 +138,14 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 	mux.HandleFunc("/stream", s.handleStream)
 	mux.HandleFunc("/events", s.handleEvents)
 
+	handler := http.Handler(mux)
+	if s.authToken != "" {
+		handler = s.authMiddleware(handler)
+	}
+
 	srv := &http.Server{
 		Addr:    s.addr,
-		Handler: mux,
+		Handler: handler,
 	}
 
 	s.mu.Lock()
@@ -323,6 +375,11 @@ func (s *HTTPServer) handleStream(w http.ResponseWriter, r *http.Request) {
 
 	senderID := r.URL.Query().Get("sender_id")
 
+	// When auth is enabled, bind sender_id to the authenticated subject.
+	if subject := authSubjectFromContext(r.Context()); subject != "" {
+		senderID = subject
+	}
+
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.WriteHeader(http.StatusOK)
 
@@ -387,6 +444,12 @@ func (s *HTTPServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 	}
 
 	senderID := r.URL.Query().Get("sender_id")
+
+	// When auth is enabled, bind sender_id to the authenticated subject.
+	if subject := authSubjectFromContext(r.Context()); subject != "" {
+		senderID = subject
+	}
+
 	if senderID == "" {
 		http.Error(w, "sender_id query parameter is required", http.StatusBadRequest)
 		return
