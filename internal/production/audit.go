@@ -153,15 +153,17 @@ func (l *DefaultAuditLog) appendLine(data []byte) error {
 	return err
 }
 
-// Query reads the log file and returns entries that match filter, oldest first.
+// Query streams the log file line by line and returns entries that match
+// filter, oldest first. Only matching entries are held in memory, avoiding
+// loading the entire file for large logs.
 func (l *DefaultAuditLog) Query(ctx context.Context, filter AuditFilter) ([]AuditEntry, error) {
 	span, _ := tracing.SpanFromContext(ctx, "audit.query", tracing.SpanKindInternal)
 	defer span.End()
 
 	l.mu.RLock()
-	entries, err := l.readAll()
-	l.mu.RUnlock()
+	defer l.mu.RUnlock()
 
+	f, err := os.Open(l.path)
 	if err != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		span.SetStatus(tracing.SpanStatusError, err.Error())
@@ -170,12 +172,30 @@ func (l *DefaultAuditLog) Query(ctx context.Context, filter AuditFilter) ([]Audi
 		}
 		return nil, err
 	}
+	defer func() { _ = f.Close() }() //nolint:errcheck // best-effort close during scan.
 
-	filtered := make([]AuditEntry, 0, len(entries))
-	for _, e := range entries {
-		if filter.Matches(e) {
-			filtered = append(filtered, e)
+	var filtered []AuditEntry
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
+	for scanner.Scan() {
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
 		}
+		var entry AuditEntry
+		if err := json.Unmarshal(line, &entry); err != nil {
+			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+			span.SetStatus(tracing.SpanStatusError, err.Error())
+			return nil, err
+		}
+		if filter.Matches(entry) {
+			filtered = append(filtered, entry)
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		span.SetStatus(tracing.SpanStatusError, err.Error())
+		return nil, err
 	}
 
 	span.SetAttributes(
@@ -184,34 +204,6 @@ func (l *DefaultAuditLog) Query(ctx context.Context, filter AuditFilter) ([]Audi
 	)
 	span.SetStatus(tracing.SpanStatusOK, "")
 	return filtered, nil
-}
-
-// readAll reads and decodes every JSON line. It must be called while l.mu is held.
-func (l *DefaultAuditLog) readAll() ([]AuditEntry, error) {
-	f, err := os.Open(l.path)
-	if err != nil {
-		return nil, err
-	}
-	defer func() { _ = f.Close() }() //nolint:errcheck // best-effort close during scan.
-
-	var entries []AuditEntry
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := scanner.Bytes()
-		if len(line) == 0 {
-			continue
-		}
-		var entry AuditEntry
-		if err := json.Unmarshal(line, &entry); err != nil {
-			return nil, err
-		}
-		entries = append(entries, entry)
-	}
-	if err := scanner.Err(); err != nil {
-		return nil, err
-	}
-	return entries, nil
 }
 
 // Name returns the log identifier.

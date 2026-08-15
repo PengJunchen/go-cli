@@ -3,6 +3,7 @@ package production
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -138,4 +139,69 @@ func TestAuditLogContextCancellation(t *testing.T) {
 	entries, err := l.Query(ctx, AuditFilter{})
 	require.NoError(t, err)
 	assert.Len(t, entries, 1)
+}
+
+func TestAuditLogStreamingFilterOnLargeFile(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	l := NewDefaultAuditLog(path)
+
+	// Write a large number of entries; only a subset matches the filter.
+	const total = 5000
+	const matchingOp = "match.me"
+	base := time.Now()
+	for i := 0; i < total; i++ {
+		op := "other"
+		if i%10 == 0 {
+			op = matchingOp
+		}
+		require.NoError(t, l.Log(ctx, AuditEntry{
+			Timestamp: base.Add(time.Duration(i) * time.Millisecond),
+			Operation: op,
+			ToolName:  "bulk",
+		}))
+	}
+
+	// Streaming filter should return only matching entries without loading
+	// the entire file into an intermediate slice.
+	entries, err := l.Query(ctx, AuditFilter{Operation: matchingOp})
+	require.NoError(t, err)
+	assert.Len(t, entries, total/10)
+	for _, e := range entries {
+		assert.Equal(t, matchingOp, e.Operation)
+	}
+
+	// No-filter query returns all entries.
+	all, err := l.Query(ctx, AuditFilter{})
+	require.NoError(t, err)
+	assert.Len(t, all, total)
+}
+
+func TestAuditLogStreamingHandlesLargeLines(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	l := NewDefaultAuditLog(path)
+
+	// Create an entry with large Args payload (> 64 KB default scanner buffer).
+	big := make(map[string]any)
+	big["data"] = strings.Repeat("x", 128*1024)
+	require.NoError(t, l.Log(ctx, AuditEntry{
+		Operation: "big.entry",
+		Args:      big,
+	}))
+	require.NoError(t, l.Log(ctx, AuditEntry{Operation: "small.entry"}))
+
+	entries, err := l.Query(ctx, AuditFilter{})
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+	assert.Equal(t, "big.entry", entries[0].Operation)
+	assert.Equal(t, "small.entry", entries[1].Operation)
+
+	// Filter should also work with large lines.
+	filtered, err := l.Query(ctx, AuditFilter{Operation: "big.entry"})
+	require.NoError(t, err)
+	require.Len(t, filtered, 1)
+	assert.Equal(t, "big.entry", filtered[0].Operation)
 }
