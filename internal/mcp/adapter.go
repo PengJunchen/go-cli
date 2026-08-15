@@ -28,14 +28,20 @@ type JSONRPCLineTransport struct {
 	out    io.Writer
 	closeF func() error
 
-	mu     sync.Mutex
-	nextID int64
+	mu            sync.Mutex
+	nextID        int64
+	notifications chan json.RawMessage
 }
 
 // NewJSONRPCLineTransport returns a transport that writes frames to out and
 // reads them from in. closeFn is invoked when Close is called and may be nil.
 func NewJSONRPCLineTransport(in io.Reader, out io.Writer, closeFn func() error) *JSONRPCLineTransport {
-	return &JSONRPCLineTransport{in: bufio.NewReader(in), out: out, closeF: closeFn}
+	return &JSONRPCLineTransport{
+		in:            bufio.NewReader(in),
+		out:           out,
+		closeF:        closeFn,
+		notifications: make(chan json.RawMessage, 16),
+	}
 }
 
 // defaultJSONRPCTimeout bounds individual JSON-RPC requests when the caller
@@ -91,6 +97,19 @@ func (t *JSONRPCLineTransport) Request(ctx context.Context, method string, param
 		if err := json.Unmarshal([]byte(line), &frame); err != nil {
 			continue
 		}
+
+		// Forward notifications (frames without an id field) to the
+		// notification channel. Non-blocking: if the channel is full the
+		// notification is dropped so request/response handling is never
+		// stalled.
+		if _, hasID := frame["id"]; !hasID {
+			select {
+			case t.notifications <- json.RawMessage(strings.TrimSpace(line)):
+			default:
+			}
+			continue
+		}
+
 		if fid, ok := frame["id"].(float64); ok && int64(fid) == id {
 			if errVal, hasErr := frame["error"]; hasErr && errVal != nil {
 				return nil, fmt.Errorf("mcp: rpc error: %v", errVal)
@@ -131,6 +150,14 @@ func (t *JSONRPCLineTransport) Close() error {
 		return t.closeF()
 	}
 	return nil
+}
+
+// Notifications returns a read-only channel that yields JSON-RPC notification
+// frames (messages without an id field) received from the server. The channel
+// is buffered; if it is full, additional notifications are silently dropped so
+// that request/response handling is never blocked.
+func (t *JSONRPCLineTransport) Notifications() <-chan json.RawMessage {
+	return t.notifications
 }
 
 // AdapterOption configures an SDK adapter.
@@ -446,6 +473,18 @@ func (c *adapterCore) ProtocolVersion() string {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.protocolVersion
+}
+
+// Notifications returns a read-only channel that yields JSON-RPC notification
+// frames received from the server, or nil if the adapter is not connected.
+func (c *adapterCore) Notifications() <-chan json.RawMessage {
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn == nil {
+		return nil
+	}
+	return conn.Notifications()
 }
 
 // doInitializeLocked performs the MCP initialize/initialized handshake. The

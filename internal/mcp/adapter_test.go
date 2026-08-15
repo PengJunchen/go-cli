@@ -482,3 +482,131 @@ func TestTransportRequestRespectsCallerDeadline(t *testing.T) {
 	_ = pw.Close()
 	<-writerDone
 }
+
+// ---------------------------------------------------------------------------
+// JSON-RPC notification forwarding tests (MD-12)
+// ---------------------------------------------------------------------------
+
+// TestTransportForwardsNotifications verifies that JSON-RPC frames without an
+// id field (notifications) are forwarded to the Notifications() channel while
+// the request/response loop continues to process the matching response.
+func TestTransportForwardsNotifications(t *testing.T) {
+	t.Parallel()
+	// Input: a notification (no id) followed by a response with id 0.
+	input := `{"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":50}}` + "\n" +
+		`{"jsonrpc":"2.0","id":0,"result":{"ok":true}}` + "\n"
+	in := bytes.NewReader([]byte(input))
+	var out bytes.Buffer
+	tr := NewJSONRPCLineTransport(in, &out, nil)
+
+	res, err := tr.Request(context.Background(), "ping", nil)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"ok": true}, res)
+
+	// The notification should have been forwarded to the channel.
+	select {
+	case notif := <-tr.Notifications():
+		var frame map[string]any
+		require.NoError(t, json.Unmarshal(notif, &frame))
+		assert.Equal(t, "notifications/progress", frame["method"])
+	case <-time.After(time.Second):
+		t.Fatal("notification was not forwarded to the Notifications() channel")
+	}
+}
+
+// TestTransportNotificationsDontBlockRequests verifies that a flood of
+// notifications before the matching response does not stall the Request call.
+// The notification channel is buffered (size 16); excess notifications are
+// silently dropped.
+func TestTransportNotificationsDontBlockRequests(t *testing.T) {
+	t.Parallel()
+
+	// Build input with 30 notifications followed by the matching response.
+	var input bytes.Buffer
+	for i := 0; i < 30; i++ {
+		fmt.Fprintf(&input, `{"jsonrpc":"2.0","method":"notifications/progress","params":{"i":%d}}`+"\n", i)
+	}
+	input.WriteString(`{"jsonrpc":"2.0","id":0,"result":{"ok":true}}` + "\n")
+
+	in := bytes.NewReader(input.Bytes())
+	var out bytes.Buffer
+	tr := NewJSONRPCLineTransport(in, &out, nil)
+
+	res, err := tr.Request(context.Background(), "ping", nil)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"ok": true}, res)
+
+	// At least one notification should have been forwarded (channel buffer is 16).
+	select {
+	case <-tr.Notifications():
+	case <-time.After(time.Second):
+		t.Fatal("expected at least one forwarded notification")
+	}
+}
+
+// TestAdapterForwardsNotifications verifies that notifications sent by the
+// server (before a response) are forwarded to the adapter's Notifications()
+// channel and do not block request handling.
+func TestAdapterForwardsNotifications(t *testing.T) {
+	t.Parallel()
+	serverConn, clientConn := net.Pipe()
+	defer closeConn(serverConn)
+
+	go func() {
+		sc := bufio.NewScanner(serverConn)
+		for sc.Scan() {
+			var req struct {
+				ID     int64  `json:"id"`
+				Method string `json:"method"`
+			}
+			if json.Unmarshal(sc.Bytes(), &req) != nil {
+				continue
+			}
+			// Skip client-side notifications (no id field).
+			var raw map[string]json.RawMessage
+			if json.Unmarshal(sc.Bytes(), &raw) == nil {
+				if _, hasID := raw["id"]; !hasID {
+					continue
+				}
+			}
+
+			if req.Method == "tools/list" {
+				// Send a notification first, then the response.
+				notif := `{"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":50}}`
+				fmt.Fprintf(serverConn, "%s\n", notif)
+				res := map[string]any{
+					"tools": []map[string]any{
+						{"name": "echo", "description": "echoes"},
+					},
+				}
+				frame := map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": res}
+				b, _ := json.Marshal(frame)
+				fmt.Fprintf(serverConn, "%s\n", b)
+			}
+		}
+		closeConn(serverConn)
+	}()
+
+	conn := NewJSONRPCLineTransport(clientConn, clientConn, clientConn.Close)
+	adapter := NewOfficialSDKAdapter(
+		MCPServerConfig{Name: "srv", Transport: MCPTransportStdio},
+		WithConnection(conn), WithoutInitialize(),
+	)
+	require.NoError(t, adapter.Connect(context.Background()))
+
+	// ListTools should succeed despite the notification preceding the response.
+	tools, err := adapter.ListTools(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tools, 1)
+	assert.Equal(t, "echo", tools[0].Name)
+
+	// The notification should be available on the Notifications() channel.
+	select {
+	case notif := <-adapter.Notifications():
+		var frame map[string]any
+		require.NoError(t, json.Unmarshal(notif, &frame))
+		assert.Equal(t, "notifications/progress", frame["method"])
+	case <-time.After(time.Second):
+		t.Fatal("notification was not forwarded to the adapter's Notifications() channel")
+	}
+}
