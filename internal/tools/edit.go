@@ -15,6 +15,14 @@ import (
 // EditFileToolOption configures an EditFileTool.
 type EditFileToolOption func(*EditFileTool)
 
+// WithEditPathWhitelist sets the allowed base paths for edit operations.
+// When configured, both the resolved real path (after symlink resolution) and
+// the target file itself (via Lstat) are validated against the whitelist.
+// An empty slice allows all paths (no restriction).
+func WithEditPathWhitelist(paths []string) EditFileToolOption {
+	return func(t *EditFileTool) { t.whitelist = NewPathWhitelist(paths) }
+}
+
 // WithEditDiffGenerator sets the DiffGenerator used to produce a change preview
 // before applying an edit. When nil (the default) no diff is generated.
 func WithEditDiffGenerator(dg DiffGenerator) EditFileToolOption {
@@ -32,6 +40,9 @@ func WithEditFileTracker(ft *FileTracker) EditFileToolOption {
 type EditFileTool struct {
 	// Workdir is the base directory relative paths are resolved against.
 	Workdir string
+	// whitelist, when configured, restricts edits to paths within the
+	// allowed base directories. Symlink escape is detected and rejected.
+	whitelist PathWhitelist
 	// diffGenerator, when set, produces a diff preview of the edit. It is
 	// included in the ToolResult metadata under "diff".
 	diffGenerator DiffGenerator
@@ -94,7 +105,7 @@ func (t *EditFileTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 		newString = v
 	}
 
-	abspath, err := resolveWithinWorkdir("edit", t.Workdir, path)
+	abspath, err := resolveAndValidatePath("edit", t.Workdir, path, t.whitelist)
 	if err != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("edit.path_traversal", "path", path, "err", err)

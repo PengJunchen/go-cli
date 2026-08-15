@@ -16,6 +16,7 @@ type registerDefaultsConfig struct {
 	resourceLimits   ResourceLimits
 	gitTool          GitTool
 	builtinWhitelist map[string]bool
+	pathWhitelist    []string
 }
 
 // WithRegisteredFileTracker wires a FileTracker into the WriteTool and
@@ -65,6 +66,14 @@ func WithRegisteredBuiltinWhitelist(names []string) RegisterDefaultsOption {
 	}
 }
 
+// WithRegisteredPathWhitelist wires a path whitelist into the WriteTool and
+// EditFileTool registered by RegisterDefaults. When configured, write and edit
+// operations are restricted to paths within the allowed base directories,
+// matching the defense-in-depth provided by the bash sandbox.
+func WithRegisteredPathWhitelist(paths []string) RegisterDefaultsOption {
+	return func(c *registerDefaultsConfig) { c.pathWhitelist = paths }
+}
+
 // RegisterDefaults registers the built-in read, bash, write, edit, grep, find
 // and ls tools into the given registry. It returns an error if any
 // registration conflicts with an existing tool name. Options may be passed to
@@ -88,6 +97,9 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDef
 	if cfg.diffGenerator != nil {
 		writeOpts = append(writeOpts, WithDiffGenerator(cfg.diffGenerator))
 	}
+	if len(cfg.pathWhitelist) > 0 {
+		writeOpts = append(writeOpts, WithWritePathWhitelist(cfg.pathWhitelist))
+	}
 
 	// Build EditFileTool options.
 	editOpts := []EditFileToolOption{}
@@ -96,6 +108,9 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDef
 	}
 	if cfg.diffGenerator != nil {
 		editOpts = append(editOpts, WithEditDiffGenerator(cfg.diffGenerator))
+	}
+	if len(cfg.pathWhitelist) > 0 {
+		editOpts = append(editOpts, WithEditPathWhitelist(cfg.pathWhitelist))
 	}
 
 	// Build BashTool options.
