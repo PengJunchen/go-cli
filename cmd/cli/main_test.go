@@ -55,6 +55,8 @@ func TestRunSuccessHelp(t *testing.T) {
 }
 
 func TestRunSuccessNoArgs(t *testing.T) {
+	// Skip first-run onboarding wizard so the test reaches interactive mode.
+	t.Setenv("GO_CLI_NO_ONBOARDING", "1")
 	var stdout, stderr bytes.Buffer
 	code := run(nil, &stdout, &stderr, func() (*config.Config, error) {
 		return disabledCfg(), nil
