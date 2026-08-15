@@ -409,19 +409,26 @@ const pendingWritesFlushInterval = 1 * time.Second
 // startFlushTicker launches a background goroutine that periodically flushes
 // pending session writes to the store. It is stopped by stopFlushTicker.
 func (s *REPLSession) startFlushTicker() {
-	s.flushTicker = time.NewTicker(pendingWritesFlushInterval)
-	s.flushDone = make(chan struct{})
+	ticker := time.NewTicker(pendingWritesFlushInterval)
+	done := make(chan struct{})
+	s.flushTicker = ticker
+	s.flushDone = done
+	// Snapshot fields to avoid concurrent access from the ticker goroutine.
+	pw := s.pendingWrites
+	store := s.assembly.SessionStore
+	ctx := s.spanCtx
+	logger := s.logger
 	go func() {
 		for {
 			select {
-			case <-s.flushTicker.C:
-				if s.pendingWrites == nil || s.assembly.SessionStore == nil {
+			case <-ticker.C:
+				if pw == nil || store == nil {
 					continue
 				}
-				if err := s.pendingWrites.Flush(s.spanCtx, s.assembly.SessionStore); err != nil {
-					s.logger.Warn("cli_interactive_pending_writes_flush_failed", "err", err)
+				if err := pw.Flush(ctx, store); err != nil {
+					logger.Warn("cli_interactive_pending_writes_flush_failed", "err", err)
 				}
-			case <-s.flushDone:
+			case <-done:
 				return
 			}
 		}
@@ -433,11 +440,9 @@ func (s *REPLSession) startFlushTicker() {
 func (s *REPLSession) stopFlushTicker() {
 	if s.flushTicker != nil {
 		s.flushTicker.Stop()
-		s.flushTicker = nil
 	}
 	if s.flushDone != nil {
 		close(s.flushDone)
-		s.flushDone = nil
 	}
 }
 
