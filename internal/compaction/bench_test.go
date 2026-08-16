@@ -217,3 +217,48 @@ func BenchmarkMidTurnEstimateFullScan(b *testing.B) {
 		})
 	}
 }
+
+// BenchmarkTokenEstimate compares the per-character HeuristicTokenEstimator
+// against the length-based FastTokenEstimator on the same text. The fast
+// estimator's pure-ASCII path skips the rune scan entirely, so it should
+// be noticeably faster on ASCII-heavy input while remaining competitive on
+// mixed CJK content.
+func BenchmarkTokenEstimate(b *testing.B) {
+	heuristic := NewHeuristicTokenEstimator()
+	fast := NewFastTokenEstimator()
+
+	asciiText := strings.Repeat("The quick brown fox jumps over the lazy dog. ", 100)
+	mixedText := asciiText + strings.Repeat("这是一个中文测试句子，用于验证分词器的准确性。", 50)
+
+	b.Run("heuristic/ascii", func(b *testing.B) {
+		b.ResetTimer()
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_, _ = heuristic.Estimate(asciiText)
+		}
+	})
+
+	b.Run("fast/ascii", func(b *testing.B) {
+		b.ResetTimer()
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_, _ = fast.Estimate(asciiText)
+		}
+	})
+
+	b.Run("heuristic/mixed", func(b *testing.B) {
+		b.ResetTimer()
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_, _ = heuristic.Estimate(mixedText)
+		}
+	})
+
+	b.Run("fast/mixed", func(b *testing.B) {
+		b.ResetTimer()
+		b.ReportAllocs()
+		for i := 0; i < b.N; i++ {
+			_, _ = fast.Estimate(mixedText)
+		}
+	})
+}
