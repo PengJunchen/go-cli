@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,6 +15,12 @@ import (
 
 // errTurnUnknown reports that a turn id is not managed by the runner.
 var errTurnUnknown = errors.New("core: unknown or inactive turn")
+
+// maxTurnsHistory bounds the number of completed turns retained in the turns
+// map. Once the count of completed turns exceeds this value, the oldest ones
+// are pruned to prevent unbounded memory growth in long sessions. Turns that
+// are still running are never pruned.
+const maxTurnsHistory = 100
 
 // messageSource is satisfied by Agent implementations that expose their
 // accumulated message history. The TurnRunner uses it to detect compaction
@@ -161,6 +168,10 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Re
 	default:
 		turn.Status = TurnCompleted
 	}
+	// Prune completed turns beyond maxTurnsHistory to prevent unbounded
+	// memory growth. Only terminal turns are eligible; running turns are
+	// always retained.
+	r.pruneCompletedTurns()
 	r.mu.Unlock()
 
 	// Post-run lifecycle hooks. OnError fires when the run failed; OnCompaction
@@ -382,4 +393,39 @@ func (r *EinoTurnRunner) Get(_ context.Context, id string) (Turn, error) {
 	turn.Steerings = append([]Submission{}, t.Steerings...)
 	turn.FollowUps = append([]Submission{}, t.FollowUps...)
 	return turn, nil
+}
+
+// pruneCompletedTurns removes the oldest completed turns when the turns map
+// exceeds maxTurnsHistory. It must be called with r.mu held. Only turns in a
+// terminal state (completed, canceled, failed) are eligible for removal;
+// running turns are always retained. The most recent maxTurnsHistory
+// completed turns are kept.
+func (r *EinoTurnRunner) pruneCompletedTurns() {
+	if len(r.turns) <= maxTurnsHistory {
+		return
+	}
+
+	// Collect completed turns as pruning candidates.
+	type turnEntry struct {
+		id        string
+		startTime time.Time
+	}
+	var completed []turnEntry
+	for id, t := range r.turns {
+		if t.Done() {
+			completed = append(completed, turnEntry{id: id, startTime: t.StartTime})
+		}
+	}
+	if len(completed) <= maxTurnsHistory {
+		return
+	}
+
+	// Sort by StartTime ascending (oldest first) and remove the excess.
+	sort.Slice(completed, func(i, j int) bool {
+		return completed[i].startTime.Before(completed[j].startTime)
+	})
+	excess := len(completed) - maxTurnsHistory
+	for i := 0; i < excess; i++ {
+		delete(r.turns, completed[i].id)
+	}
 }
