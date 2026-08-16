@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+
+	"github.com/pengjunchen/go-cli/internal/llm"
 )
 
 // CancelSynthesizer converts cancellation errors into system messages that can
@@ -59,4 +61,60 @@ func (s *CancelSynthesizer) SynthesizeCancel(_ context.Context, err error) Synth
 		Content:       content,
 		OriginalError: original,
 	}
+}
+
+// synthesizeCanceledToolResults appends error tool_result messages for any
+// tool calls in the last assistant message that don't already have a
+// corresponding tool_result in messages. This keeps the message history
+// complete (every tool_call has a matching tool_result) when the loop is
+// cancelled mid-execution, preventing subsequent LLM requests from rejecting
+// the conversation due to orphaned tool calls.
+//
+// It returns the updated messages slice and the list of tool calls for which
+// a synthetic result was produced (so the caller can emit matching events).
+func synthesizeCanceledToolResults(messages []llm.Message, canceledErr error) ([]llm.Message, []llm.ToolCall) {
+	if len(messages) == 0 {
+		return messages, nil
+	}
+
+	// Find the last assistant message with tool calls.
+	var toolCalls []llm.ToolCall
+	for i := len(messages) - 1; i >= 0; i-- {
+		if messages[i].Role == llm.RoleAssistant && len(messages[i].ToolCalls) > 0 {
+			toolCalls = messages[i].ToolCalls
+			break
+		}
+	}
+	if len(toolCalls) == 0 {
+		return messages, nil
+	}
+
+	// Build a set of ToolCallIDs that already have tool_results, so we
+	// don't synthesize duplicates.
+	hasResult := make(map[string]bool, len(toolCalls))
+	for _, m := range messages {
+		if m.Role == llm.RoleTool && m.ToolCallID != "" {
+			hasResult[m.ToolCallID] = true
+		}
+	}
+
+	errMsg := "tool call canceled"
+	if canceledErr != nil {
+		errMsg = canceledErr.Error()
+	}
+
+	var synthesized []llm.ToolCall
+	for _, tc := range toolCalls {
+		if hasResult[tc.ID] {
+			continue
+		}
+		messages = append(messages, llm.Message{
+			Role:       llm.RoleTool,
+			ToolCallID: tc.ID,
+			Name:       tc.Name,
+			Content:    "Error: " + errMsg,
+		})
+		synthesized = append(synthesized, tc)
+	}
+	return messages, synthesized
 }

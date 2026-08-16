@@ -477,6 +477,29 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 		messages = append(messages, llm.Message{Role: llm.RoleUser, Content: submission.Content})
 	}
 
+	// emitCanceledToolResults synthesizes error tool_result messages for any
+	// tool calls in the last assistant message that lack a matching
+	// tool_result, and emits corresponding events. This keeps the message
+	// history complete when the loop is cancelled mid-execution so
+	// subsequent LLM requests don't reject the conversation.
+	emitCanceledToolResults := func(canceledErr error) {
+		var synthCalls []llm.ToolCall
+		messages, synthCalls = synthesizeCanceledToolResults(messages, canceledErr)
+		errMsg := "tool call canceled"
+		if canceledErr != nil {
+			errMsg = canceledErr.Error()
+		}
+		for _, tc := range synthCalls {
+			sendEvent(AgentEvent{
+				Kind:       "tool_result",
+				Content:    "Error: " + errMsg,
+				Timestamp:  time.Now(),
+				IsError:    true,
+				ToolCallID: tc.ID,
+			})
+		}
+	}
+
 	for iter := 0; l.maxIterations < 0 || iter < l.maxIterations; iter++ {
 		if err := spanCtx.Err(); err != nil {
 			span.SetStatus(tracing.SpanStatusError, err.Error())
@@ -607,6 +630,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 						res.Output = "Error: " + res.Err.Error()
 						if spanCtx.Err() != nil {
 							span.SetStatus(tracing.SpanStatusError, res.Err.Error())
+							emitCanceledToolResults(res.Err)
 							sendEvent(errEvent(res.Err))
 							return events, res.Err
 						}
@@ -620,6 +644,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 					})
 				}
 				if perr != nil {
+					emitCanceledToolResults(perr)
 					return events, perr
 				}
 			}
@@ -628,6 +653,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 			for _, tc := range resp.ToolCalls {
 				if err := spanCtx.Err(); err != nil {
 					logger.Error("core.loop.canceled", "err", err)
+					emitCanceledToolResults(err)
 					sendEvent(errEvent(err))
 					return events, err
 				}
@@ -663,6 +689,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 					isError = true
 					if spanCtx.Err() != nil {
 						span.SetStatus(tracing.SpanStatusError, execErr.Error())
+						emitCanceledToolResults(execErr)
 						sendEvent(errEvent(execErr))
 						return events, execErr
 					}
