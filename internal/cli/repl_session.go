@@ -615,7 +615,12 @@ func (s *REPLSession) executeTurn() {
 	s.app.Quit()
 
 	if s.turnErr != nil && !interrupted {
-		fmt.Fprintf(s.out, "Error: %v\n", s.turnErr) //nolint:errcheck
+		if ufe := classifyError(s.turnErr); ufe != nil {
+			fmt.Fprintf(s.out, "Error: %s\n", ufe.Action) //nolint:errcheck
+			fmt.Fprintf(s.out, "Hint: %s\n", ufe.Hint)    //nolint:errcheck
+		} else {
+			fmt.Fprintf(s.out, "Error: %v\n", s.turnErr) //nolint:errcheck
+		}
 		return
 	}
 
