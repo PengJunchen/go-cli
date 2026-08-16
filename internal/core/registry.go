@@ -49,6 +49,19 @@ type DefaultRegistry struct {
 // interface (DIP / dependency-inversion).
 var _ Registry = (*DefaultRegistry)(nil)
 
+// Compile-time guarantees that DefaultRegistry satisfies each sub-interface
+// produced by the Interface Segregation Principle split.
+var (
+	_ CoreRegistry          = (*DefaultRegistry)(nil)
+	_ SessionRegistry       = (*DefaultRegistry)(nil)
+	_ CompactorRegistry     = (*DefaultRegistry)(nil)
+	_ ToolRegistryAccessor  = (*DefaultRegistry)(nil)
+	_ ModelProviderRegistry = (*DefaultRegistry)(nil)
+	_ ApprovalRegistry      = (*DefaultRegistry)(nil)
+	_ TracingRegistry       = (*DefaultRegistry)(nil)
+	_ PluginRegistry        = (*DefaultRegistry)(nil)
+)
+
 // Compile-time guarantee that DefaultRegistry satisfies DisposableRegistry.
 var _ DisposableRegistry = (*DefaultRegistry)(nil)
 
