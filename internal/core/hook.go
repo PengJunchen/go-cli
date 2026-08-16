@@ -4,7 +4,6 @@ import (
 	"context"
 	"log/slog"
 
-	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
@@ -111,32 +110,6 @@ func (c *HookChain) OnTurnEnd(ctx context.Context, turnID string, result Result,
 	for _, h := range c.hooks {
 		if lh, ok := h.(LifecycleHook); ok {
 			if lerr := lh.OnTurnEnd(ctx, turnID, result, err); lerr != nil {
-				return lerr
-			}
-		}
-	}
-	return nil
-}
-
-// BeforeToolCall invokes BeforeToolCall on every hook that implements
-// LifecycleHook, in application order. It returns the first error encountered.
-func (c *HookChain) BeforeToolCall(ctx context.Context, call tools.ToolCall) error {
-	for _, h := range c.hooks {
-		if lh, ok := h.(LifecycleHook); ok {
-			if err := lh.BeforeToolCall(ctx, call); err != nil {
-				return err
-			}
-		}
-	}
-	return nil
-}
-
-// AfterToolCall invokes AfterToolCall on every hook that implements
-// LifecycleHook, in application order. It returns the first error encountered.
-func (c *HookChain) AfterToolCall(ctx context.Context, call tools.ToolCall, result *tools.ToolResult, err error) error {
-	for _, h := range c.hooks {
-		if lh, ok := h.(LifecycleHook); ok {
-			if lerr := lh.AfterToolCall(ctx, call, result, err); lerr != nil {
 				return lerr
 			}
 		}

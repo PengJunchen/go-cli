@@ -33,16 +33,17 @@ type Hook interface {
 // LifecycleHook is an optional interface that extensions can implement to
 // observe finer-grained lifecycle events beyond BeforeRun/AfterRun. Hooks
 // that do not implement this interface are unaffected (backward compatible).
+//
+// Tool-call interception (pre-tool-call blocking) is handled by the unified
+// ToolInterceptor mechanism (see pre_tool_call.go). Post-tool-call observation
+// is handled by tool-level middleware. These concerns are no longer part of
+// the LifecycleHook interface.
 type LifecycleHook interface {
 	Hook
 	// OnTurnStart is invoked at the beginning of each turn.
 	OnTurnStart(ctx context.Context, turnID string) error
 	// OnTurnEnd is invoked after a turn completes (success or failure).
 	OnTurnEnd(ctx context.Context, turnID string, result Result, err error) error
-	// BeforeToolCall is invoked before a tool is executed.
-	BeforeToolCall(ctx context.Context, call tools.ToolCall) error
-	// AfterToolCall is invoked after a tool executes.
-	AfterToolCall(ctx context.Context, call tools.ToolCall, result *tools.ToolResult, err error) error
 	// OnCompaction is invoked after context compaction reduces message count.
 	OnCompaction(ctx context.Context, beforeCount, afterCount int) error
 	// OnError is invoked when an unrecoverable error occurs during a turn.
@@ -226,14 +227,6 @@ func (h *LifecycleHookImpl) OnTurnStart(_ context.Context, _ string) error { ret
 
 // OnTurnEnd is a no-op invoked after a turn completes.
 func (h *LifecycleHookImpl) OnTurnEnd(_ context.Context, _ string, _ Result, _ error) error {
-	return nil
-}
-
-// BeforeToolCall is a no-op invoked before a tool is executed.
-func (h *LifecycleHookImpl) BeforeToolCall(_ context.Context, _ tools.ToolCall) error { return nil }
-
-// AfterToolCall is a no-op invoked after a tool executes.
-func (h *LifecycleHookImpl) AfterToolCall(_ context.Context, _ tools.ToolCall, _ *tools.ToolResult, _ error) error {
 	return nil
 }
 

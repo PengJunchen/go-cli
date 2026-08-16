@@ -214,30 +214,42 @@ func (m *HookManager) AfterRun(_ context.Context, _ Submission, _ Result, _ erro
 	return nil
 }
 
-// BeforeToolCall invokes PreToolUse on every managed hook. A hook returning
-// allow=false blocks the tool call (AC-4). A hook returning an error is logged
-// and the chain continues (AC-5).
-func (m *HookManager) BeforeToolCall(ctx context.Context, call tools.ToolCall) error {
-	for _, h := range m.hooks {
-		allow, err := h.PreToolUse(ctx, call.Name, call.Args)
-		if err != nil {
-			slog.Warn("core.hook_manager.pre_tool_use_error", "err", err)
-			continue // AC-5
+// PreToolUseInterceptor returns a ToolInterceptor that invokes PreToolUse on
+// every managed hook. A hook returning allow=false blocks the tool call
+// (AC-4). A hook returning an error is logged and the chain continues (AC-5).
+//
+// The ToolInterceptor signature does not carry a context, so the hooks run
+// under context.Background(); each shell hook applies its own timeout.
+func (m *HookManager) PreToolUseInterceptor() ToolInterceptor {
+	return func(toolName, _ string, args map[string]any) error {
+		ctx := context.Background()
+		for _, h := range m.hooks {
+			allow, err := h.PreToolUse(ctx, toolName, args)
+			if err != nil {
+				slog.Warn("core.hook_manager.pre_tool_use_error", "err", err)
+				continue // AC-5
+			}
+			if !allow {
+				return fmt.Errorf("tool %s blocked by hook", toolName) // AC-4
+			}
 		}
-		if !allow {
-			return fmt.Errorf("tool %s blocked by hook", call.Name) // AC-4
-		}
+		return nil
 	}
-	return nil
 }
 
-// AfterToolCall invokes PostToolUse on every managed hook. It always returns
-// nil; post-tool hooks are fire-and-forget.
-func (m *HookManager) AfterToolCall(ctx context.Context, call tools.ToolCall, result *tools.ToolResult, _ error) error {
-	for _, h := range m.hooks {
-		h.PostToolUse(ctx, call.Name, call.Args, result)
+// PostToolUseWrapper returns a tools.ToolExecutorWrapper that invokes
+// PostToolUse on every managed hook after the tool executes. Post-tool hooks
+// are fire-and-forget; they observe the result but cannot modify it.
+func (m *HookManager) PostToolUseWrapper() tools.ToolExecutorWrapper {
+	return func(next func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error)) func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
+		return func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
+			result, err := next(ctx, call)
+			for _, h := range m.hooks {
+				h.PostToolUse(ctx, call.Name, call.Args, result)
+			}
+			return result, err
+		}
 	}
-	return nil
 }
 
 // OnTurnStart invokes SessionStart on every managed hook.
