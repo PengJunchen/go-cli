@@ -62,16 +62,26 @@ type SubagentDispatcher interface {
 // sub-agent events are drained silently.
 type SubagentEventForwarder func(taskID string, ev AgentEvent)
 
+// defaultMaxConcurrentSubagents bounds how many sub-agent runs may execute at
+// once across both Dispatch and ParallelDispatch. It protects the host from
+// resource exhaustion when many sub-tasks are dispatched concurrently.
+const defaultMaxConcurrentSubagents = 5
+
 // DefaultSubagentDispatcher is the default SubagentDispatcher. It uses a
 // SubAgentFactory to spawn sub-agents, tracks in-flight tasks, and emits
 // slog.Debug tracing around dispatch lifecycle events.
 type DefaultSubagentDispatcher struct {
 	factory SubAgentFactory
 	onEvent SubagentEventForwarder
-	wg      sync.WaitGroup
 
 	mu      sync.Mutex
 	running map[string]SubagentTask
+
+	// sem is a buffered channel (capacity defaultMaxConcurrentSubagents) used
+	// as a global concurrency semaphore. It is shared by Dispatch and
+	// ParallelDispatch so that the in-flight sub-agent count never exceeds the
+	// limit regardless of which entry point produced the work.
+	sem chan struct{}
 }
 
 var _ SubagentDispatcher = (*DefaultSubagentDispatcher)(nil)
@@ -85,6 +95,7 @@ func NewDefaultSubagentDispatcher(factory SubAgentFactory) *DefaultSubagentDispa
 	return &DefaultSubagentDispatcher{
 		factory: factory,
 		running: make(map[string]SubagentTask),
+		sem:     make(chan struct{}, defaultMaxConcurrentSubagents),
 	}
 }
 
@@ -147,6 +158,21 @@ func (d *DefaultSubagentDispatcher) Dispatch(ctx context.Context, task SubagentT
 		d.mu.Unlock()
 	}()
 
+	// Acquire the global concurrency semaphore before running the sub-agent.
+	// The semaphore is shared with ParallelDispatch so the total in-flight
+	// sub-agent count never exceeds defaultMaxConcurrentSubagents. The acquire
+	// honors context cancellation so a caller waiting for a slot is unblocked
+	// when its context is canceled. Release is deferred so the slot is always
+	// returned, even on panic or an early return from sub.Run.
+	select {
+	case d.sem <- struct{}{}:
+		defer func() { <-d.sem }()
+	case <-ctx.Done():
+		res := SubagentResult{TaskID: task.ID, Error: ctx.Err(), Duration: time.Since(start)}
+		slog.Debug("core.subagent_dispatcher.sem_canceled", "task_id", task.ID, "error", ctx.Err())
+		return res, ctx.Err()
+	}
+
 	// Pass the parent ctx (which carries the tracer) to the sub-agent so it can
 	// create child spans linked to the parent span for trace continuity.
 	slog.Debug("core.subagent_dispatcher.tracer_inherit", "task_id", task.ID)
@@ -160,15 +186,18 @@ func (d *DefaultSubagentDispatcher) Dispatch(ctx context.Context, task SubagentT
 	// Forward the event stream so the sub-agent is never blocked publishing
 	// events while we wait for the final message. When an event forwarder is
 	// registered, events are forwarded to the parent; otherwise they are
-	// silently drained.
-	d.wg.Add(1)
+	// silently drained. A local WaitGroup (rather than a shared dispatcher
+	// field) ensures concurrent Dispatch calls don't race on Add/Wait when the
+	// counter transitions through zero.
+	var wg sync.WaitGroup
+	wg.Add(1)
 	go func() {
-		defer d.wg.Done()
+		defer wg.Done()
 		d.forwardEvents(task.ID, evCh)
 	}()
 
 	final, waitErr := sub.Wait(ctx)
-	d.wg.Wait() // ensure all forwarded events are processed before returning
+	wg.Wait() // ensure all forwarded events are processed before returning
 	duration := time.Since(start)
 
 	slog.Debug("core.subagent_dispatcher.complete",
@@ -253,6 +282,24 @@ func (d *DefaultSubagentDispatcher) ParallelDispatch(ctx context.Context, tasks 
 				delete(d.running, t.ID)
 				d.mu.Unlock()
 			}()
+
+			// Acquire the shared concurrency semaphore before running the
+			// sub-agent. This is the same semaphore used by Dispatch, so the
+			// combined in-flight count across both entry points is bounded.
+			// Honoring context cancellation here prevents a canceled
+			// ParallelDispatch from hanging on a full semaphore.
+			select {
+			case d.sem <- struct{}{}:
+				defer func() { <-d.sem }()
+			case <-ctx.Done():
+				results[idx] = SubagentResult{TaskID: t.ID, Error: ctx.Err(), Duration: time.Since(starts[idx])}
+				errMu.Lock()
+				if firstErr == nil {
+					firstErr = ctx.Err()
+				}
+				errMu.Unlock()
+				return
+			}
 
 			// Pass the parent ctx (which carries the tracer) to the sub-agent so
 			// it can create child spans linked to the parent span for trace
