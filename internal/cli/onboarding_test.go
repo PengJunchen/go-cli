@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/pengjunchen/go-cli/internal/config"
+	"github.com/pengjunchen/go-cli/internal/llm"
 )
 
 // setupOnboardingTest overrides the config-existence check, config path, auth
@@ -29,11 +31,13 @@ func setupOnboardingTest(t *testing.T, configExists bool) (string, func()) {
 	oldAuthPath := onboardingAuthPathFunc
 	oldTTY := stdinIsTTYFunc
 	oldSaveAPIKey := saveAPIKeyFunc
+	oldRegistryBuilder := onboardingRegistryBuilder
 	configExistsFunc = func() bool { return configExists }
 	onboardingConfigPathFunc = func() string { return configPath }
 	onboardingAuthPathFunc = func() string { return authPath }
 	stdinIsTTYFunc = func() bool { return false }
 	saveAPIKeyFunc = saveAuthFile // file fallback; skip the real keychain
+	onboardingRegistryBuilder = func() llm.ModelRegistry { return llm.NoopModelRegistry{} }
 
 	return configPath, func() {
 		configExistsFunc = oldExists
@@ -41,6 +45,7 @@ func setupOnboardingTest(t *testing.T, configExists bool) (string, func()) {
 		onboardingAuthPathFunc = oldAuthPath
 		stdinIsTTYFunc = oldTTY
 		saveAPIKeyFunc = oldSaveAPIKey
+		onboardingRegistryBuilder = oldRegistryBuilder
 	}
 }
 
@@ -411,4 +416,119 @@ func TestRunOnboarding_APIKeyInAuthJSONNotYAML(t *testing.T) {
 	var m map[string]string
 	require.NoError(t, json.Unmarshal(authData, &m))
 	assert.Equal(t, "sk-onboarding-key", m["api_key"])
+}
+
+// mockModelRegistry is a test double for llm.ModelRegistry. It returns
+// canned provider and model data without any network access.
+type mockModelRegistry struct {
+	providers []llm.ProviderMetadata
+	models    map[string][]llm.ModelInfo
+	refreshFn func(context.Context) error
+}
+
+func (m *mockModelRegistry) Lookup(_ context.Context, _, _ string) (llm.ModelInfo, bool) {
+	return llm.ModelInfo{}, false
+}
+func (m *mockModelRegistry) Providers() []llm.ProviderMetadata { return m.providers }
+func (m *mockModelRegistry) ModelsForProvider(id string) []llm.ModelInfo {
+	return m.models[id]
+}
+func (m *mockModelRegistry) Refresh(ctx context.Context) error {
+	if m.refreshFn != nil {
+		return m.refreshFn(ctx)
+	}
+	return nil
+}
+
+// TestPromptModelDynamicFromRegistry verifies that when the registry contains
+// model data, promptModel displays those models and stores the user's choice.
+func TestPromptModelDynamicFromRegistry(t *testing.T) {
+	registry := &mockModelRegistry{
+		providers: []llm.ProviderMetadata{
+			{ID: "openai", Name: "OpenAI"},
+		},
+		models: map[string][]llm.ModelInfo{
+			"openai": {
+				{Name: "gpt-4o", ContextWindow: 128000},
+				{Name: "gpt-4o-mini", ContextWindow: 128000},
+			},
+		},
+	}
+
+	cfg := &config.Config{}
+	reader := bufio.NewReader(strings.NewReader("2\n"))
+	var out bytes.Buffer
+
+	err := promptModel(cfg, reader, &out, registry)
+	require.NoError(t, err)
+
+	output := out.String()
+	assert.Contains(t, output, "gpt-4o")
+	assert.Contains(t, output, "gpt-4o-mini")
+	// Index 2 = gpt-4o-mini (second in the dynamic list)
+	assert.Equal(t, "gpt-4o-mini", cfg.Provider.Model)
+	assert.Equal(t, "gpt-4o-mini", cfg.Model.Name)
+}
+
+// TestPromptModelFallbackOnNetworkError verifies that when the registry returns
+// no models (simulating a network error or empty registry), promptModel falls
+// back to the hardcoded onboardingModelChoices list.
+func TestPromptModelFallbackOnNetworkError(t *testing.T) {
+	cfg := &config.Config{}
+	reader := bufio.NewReader(strings.NewReader("1\n"))
+	var out bytes.Buffer
+
+	// NoopModelRegistry returns no providers/models — simulates network failure.
+	err := promptModel(cfg, reader, &out, llm.NoopModelRegistry{})
+	require.NoError(t, err)
+
+	output := out.String()
+	// Should contain the first hardcoded fallback model.
+	assert.Contains(t, output, onboardingModelChoices[0].Name)
+	assert.Equal(t, onboardingModelChoices[0].Name, cfg.Provider.Model)
+}
+
+// TestPromptModelProviderFilter verifies that fetchModelsFromRegistry collects
+// models from all providers returned by the registry, filters out deprecated
+// models, and deduplicates by name.
+func TestPromptModelProviderFilter(t *testing.T) {
+	registry := &mockModelRegistry{
+		providers: []llm.ProviderMetadata{
+			{ID: "openai", Name: "OpenAI"},
+			{ID: "anthropic", Name: "Anthropic"},
+		},
+		models: map[string][]llm.ModelInfo{
+			"openai": {
+				{Name: "gpt-4o", ContextWindow: 128000},
+				{Name: "gpt-4-32k", ContextWindow: 32768}, // deprecated
+			},
+			"anthropic": {
+				{Name: "claude-3-5-sonnet", ContextWindow: 200000},
+				{Name: "claude-3-opus", ContextWindow: 200000}, // deprecated
+			},
+		},
+	}
+
+	choices := fetchModelsFromRegistry(registry)
+
+	names := make(map[string]bool)
+	for _, c := range choices {
+		names[c.Name] = true
+	}
+
+	// Non-deprecated models from both providers should be present.
+	assert.True(t, names["gpt-4o"], "gpt-4o should be included")
+	assert.True(t, names["claude-3-5-sonnet"], "claude-3-5-sonnet should be included")
+
+	// Deprecated models should be filtered out.
+	assert.False(t, names["gpt-4-32k"], "deprecated gpt-4-32k should be filtered")
+	assert.False(t, names["claude-3-opus"], "deprecated claude-3-opus should be filtered")
+
+	// Descriptions should include the provider name.
+	descByName := make(map[string]string)
+	for _, c := range choices {
+		descByName[c.Name] = c.Desc
+	}
+	assert.Contains(t, descByName["gpt-4o"], "OpenAI")
+	assert.Contains(t, descByName["claude-3-5-sonnet"], "Anthropic")
 }
