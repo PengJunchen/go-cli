@@ -70,6 +70,14 @@ type DefaultLineEditor struct {
 	winchDone chan struct{} // closed when the monitor goroutine has exited
 	winchOnce sync.Once     // guards lazy startup of monitorResize
 	stopOnce  sync.Once     // guards idempotent closing of winchStop
+
+	// IME (input method editor) detection and cooked mode fallback.
+	// When IME activity is detected in raw TTY mode, a one-time warning
+	// is printed and the user can press Ctrl+\ to switch to cooked mode
+	// for better CJK input support.
+	imeDetected    bool
+	imePromptShown bool
+	cookedMode     bool
 }
 
 // LineEditorOption configures a DefaultLineEditor at construction time.
@@ -354,11 +362,145 @@ func (le *DefaultLineEditor) readLineNonTTY(ctx context.Context, prompt string) 
 // TTY raw-mode implementation
 // ---------------------------------------------------------------------------
 
+// markIMEDetected flags that IME (input method editor) activity has been
+// detected in raw TTY mode. On the first detection, a one-time warning is
+// printed to the editor's output stream informing the user that CJK input
+// may not work correctly and that Ctrl+\ switches to cooked mode.
+func (le *DefaultLineEditor) markIMEDetected() {
+	if le.imeDetected {
+		return
+	}
+	le.imeDetected = true
+	if !le.imePromptShown {
+		le.imePromptShown = true
+		fmt.Fprint(le.out, "\n⚠ IME (input method editor) detected. CJK input may not work correctly in raw mode.\n") //nolint:errcheck
+		fmt.Fprint(le.out, "Press Ctrl+\\ to switch to cooked mode for better IME support.\n")                          //nolint:errcheck
+	}
+}
+
+// readLineCooked reads a single line using bufio.Scanner with the terminal
+// in cooked mode. The caller is responsible for restoring the terminal to
+// cooked mode before calling this method. A goroutine runs the blocking
+// Scanner.Scan() call so that the method returns promptly when ctx is
+// canceled.
+func (le *DefaultLineEditor) readLineCooked(ctx context.Context, prompt string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
+	fmt.Fprint(le.out, prompt) //nolint:errcheck
+
+	scanner := bufio.NewScanner(le.in)
+	type scanResult struct {
+		line string
+		err  error
+	}
+	resultCh := make(chan scanResult, 1)
+
+	go func() {
+		if !scanner.Scan() {
+			err := scanner.Err()
+			if err == nil {
+				err = io.EOF
+			}
+			resultCh <- scanResult{err: err}
+			return
+		}
+		resultCh <- scanResult{line: scanner.Text()}
+	}()
+
+	select {
+	case res := <-resultCh:
+		if res.err != nil {
+			return "", res.err
+		}
+		return res.line, nil
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+}
+
+// readLineCookedMulti reads input in cooked mode with multi-line
+// accumulation support (backslash continuation and triple-quote detection).
+// lines contains any previously accumulated lines from a raw-mode session;
+// nil should be passed when starting fresh.
+//
+// A single bufio.Scanner is created once and reused across all line reads.
+// This is critical because Scanner internally buffers data from the underlying
+// reader; creating a new Scanner per line would lose buffered bytes and cause
+// premature EOF on the second read.
+func (le *DefaultLineEditor) readLineCookedMulti(ctx context.Context, prompt string, lines []string) (string, error) {
+	currentPrompt := prompt
+	scanner := bufio.NewScanner(le.in)
+
+	type scanResult struct {
+		line string
+		err  error
+	}
+
+	for {
+		if err := ctx.Err(); err != nil {
+			return strings.Join(lines, "\n"), err
+		}
+		fmt.Fprint(le.out, currentPrompt) //nolint:errcheck
+
+		resultCh := make(chan scanResult, 1)
+		go func() {
+			if !scanner.Scan() {
+				err := scanner.Err()
+				if err == nil {
+					err = io.EOF
+				}
+				resultCh <- scanResult{err: err}
+				return
+			}
+			resultCh <- scanResult{line: scanner.Text()}
+		}()
+
+		var line string
+		select {
+		case res := <-resultCh:
+			if res.err != nil {
+				joined := strings.Join(lines, "\n")
+				if joined != "" {
+					var ie *interruptedError
+					if errors.As(res.err, &ie) {
+						ie.hadContent = true
+					}
+				}
+				return joined, res.err
+			}
+			line = res.line
+		case <-ctx.Done():
+			return strings.Join(lines, "\n"), ctx.Err()
+		}
+
+		hasBackslash := strings.HasSuffix(line, "\\")
+		if hasBackslash {
+			line = strings.TrimSuffix(line, "\\")
+		}
+		lines = append(lines, line)
+		combined := strings.Join(lines, "\n")
+
+		inTripleQuote := strings.Count(combined, "'''")%2 == 1
+		if !hasBackslash && !inTripleQuote {
+			le.history.Add(combined)
+			return combined, nil
+		}
+		currentPrompt = "... "
+	}
+}
+
 // errInterrupted is a sentinel error for Ctrl+C interrupts. The concrete
 // type returned by the line editor is *interruptedError, which carries
 // information about whether the input buffer had content when the interrupt
 // occurred, enabling graded Ctrl+C semantics (clear line vs. exit prompt).
 var errInterrupted = errors.New("interrupted")
+
+// errToggleCooked is a sentinel error returned by readSingleLineTTY when
+// the user presses Ctrl+\ to request a switch from raw mode to cooked mode.
+// readLineTTY catches this error, restores the terminal to cooked mode, and
+// reads subsequent input via bufio.Scanner.
+var errToggleCooked = errors.New("toggle cooked mode")
 
 // interruptedError is the concrete error returned when the user presses
 // Ctrl+C. HadContent reports whether the input buffer (including any
@@ -388,6 +530,13 @@ func (le *DefaultLineEditor) readLineTTY(ctx context.Context, prompt string) (st
 	le.startResizeMonitor()
 	le.invalidateTermWidth()
 
+	// If cooked mode is active (set by a previous Ctrl+\ toggle), read
+	// directly via bufio.Scanner without entering raw mode. The terminal
+	// is already in cooked mode from the previous ReadLine call.
+	if le.cookedMode {
+		return le.readLineCookedMulti(ctx, prompt, nil)
+	}
+
 	saved, err := setRawMode(le.in)
 	if err != nil {
 		slog.Warn("cli_line_editor_raw_mode_failed", "err", err)
@@ -408,6 +557,8 @@ func (le *DefaultLineEditor) readLineTTY(ctx context.Context, prompt string) (st
 	// Single reader goroutine for the duration of this ReadLine call.
 	readCh := make(chan byteResult)
 	done := make(chan struct{})
+	var doneOnce sync.Once
+	closeDone := func() { doneOnce.Do(func() { close(done) }) }
 	go func() {
 		for {
 			buf := make([]byte, 1)
@@ -430,7 +581,7 @@ func (le *DefaultLineEditor) readLineTTY(ctx context.Context, prompt string) (st
 			}
 		}
 	}()
-	defer close(done)
+	defer closeDone()
 
 	readByte := func() (byte, error) {
 		select {
@@ -447,6 +598,18 @@ func (le *DefaultLineEditor) readLineTTY(ctx context.Context, prompt string) (st
 	for {
 		line, rErr := le.readSingleLineTTY(readByte, currentPrompt)
 		if rErr != nil {
+			if errors.Is(rErr, errToggleCooked) {
+				// User pressed Ctrl+\ to switch to cooked mode. Stop the
+				// reader goroutine, restore the terminal to cooked mode,
+				// and continue reading via bufio.Scanner.
+				le.cookedMode = true
+				closeDone()
+				fmt.Fprint(le.out, "\x1b[?2004l") //nolint:errcheck
+				if rErr := restoreMode(le.in, saved); rErr != nil {
+					slog.Warn("cli_line_editor_restore_mode_failed", "err", rErr)
+				}
+				return le.readLineCookedMulti(ctx, currentPrompt, lines)
+			}
 			joined := strings.Join(lines, "\n")
 			// If interrupting with accumulated multi-line content, mark
 			// the error so the caller treats it as "had content" (clear
@@ -643,6 +806,10 @@ func (le *DefaultLineEditor) readSingleLineTTY(readByte func() (byte, error), pr
 				render()
 			}
 
+		case b == 0x1C: // Ctrl+\ — toggle cooked mode for IME support
+			le.cookedMode = true
+			return "", errToggleCooked
+
 		case b == 0x1B: // ESC — possible arrow key sequence
 			next, err := readByte()
 			if err != nil {
@@ -803,6 +970,7 @@ func (le *DefaultLineEditor) readSingleLineTTY(readByte func() (byte, error), pr
 			if r == utf8.RuneError {
 				continue
 			}
+			le.markIMEDetected()
 			buf = insertRune(buf, pos, r)
 			pos++
 			render()
