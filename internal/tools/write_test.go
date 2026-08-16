@@ -394,3 +394,142 @@ func TestWriteNoWhitelistAllowsRegularFile(t *testing.T) {
 	require.NoError(t, rerr)
 	assert.Equal(t, "ok", string(data))
 }
+
+// --- O_NOFOLLOW default-enabled security tests (SEC-7) ---
+//
+// These tests verify that resolveAndValidatePath performs the O_NOFOLLOW
+// (Lstat) symlink check even when no whitelist is configured. Only the
+// resolveSymlinks+IsAllowed whitelist check is skipped when the whitelist is
+// empty; the final-component symlink rejection is always active.
+
+// TestWrite_SymlinkBlockedNoWhitelist verifies AC-1: with an empty whitelist,
+// writing through a symlink that points at /etc/passwd is rejected by the
+// default-enabled O_NOFOLLOW check. No write may occur.
+func TestWrite_SymlinkBlockedNoWhitelist(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	link := filepath.Join(dir, "link.txt")
+	require.NoError(t, os.Symlink("/etc/passwd", link))
+	t.Cleanup(func() { _ = os.Remove(link) })
+
+	tool := NewWriteTool(WithWriteWorkdir(dir))
+
+	_, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"path": "link.txt", "content": "evil"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "symlink")
+
+	// The symlink must still be a symlink (no write occurred through it).
+	li, lerr := os.Lstat(link)
+	require.NoError(t, lerr)
+	assert.NotZero(t, li.Mode()&os.ModeSymlink)
+}
+
+// TestWrite_NormalFileNoWhitelist verifies AC-2: with an empty whitelist,
+// writing to a regular file (including via nested parent directories) is
+// unaffected by the default-enabled O_NOFOLLOW check.
+func TestWrite_NormalFileNoWhitelist(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	tool := NewWriteTool(WithWriteWorkdir(dir))
+
+	rel := filepath.Join("sub", "deep", "file.txt")
+	res, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"path": rel, "content": "hello"},
+	})
+	require.NoError(t, err)
+	assert.Contains(t, res.Output, "wrote 5 bytes")
+
+	data, rerr := os.ReadFile(filepath.Join(dir, rel))
+	require.NoError(t, rerr)
+	assert.Equal(t, "hello", string(data))
+}
+
+// TestWrite_SymlinkInIntermediateDir verifies that the O_NOFOLLOW check only
+// blocks a symlink at the final path component. A symlink in an intermediate
+// directory (where the final component is a regular, non-existent file) is
+// still allowed when no whitelist is configured.
+func TestWrite_SymlinkInIntermediateDir(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	realDir := filepath.Join(dir, "realdir")
+	require.NoError(t, os.MkdirAll(realDir, 0o750)) //nolint:gosec
+
+	// Intermediate symlink: dir/linkdir -> dir/realdir.
+	linkDir := filepath.Join(dir, "linkdir")
+	require.NoError(t, os.Symlink(realDir, linkDir))
+	t.Cleanup(func() { _ = os.Remove(linkDir) })
+
+	tool := NewWriteTool(WithWriteWorkdir(dir))
+
+	// Write to linkdir/file.txt — final component is not a symlink, so
+	// O_NOFOLLOW allows it; the write lands in the real directory.
+	_, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"path": filepath.Join("linkdir", "file.txt"), "content": "via-link"},
+	})
+	require.NoError(t, err)
+
+	data, rerr := os.ReadFile(filepath.Join(realDir, "file.txt"))
+	require.NoError(t, rerr)
+	assert.Equal(t, "via-link", string(data))
+}
+
+// TestWrite_OverwriteSymlinkBlocked verifies that overwriting an existing
+// symlink is rejected by the default-enabled O_NOFOLLOW check even with no
+// whitelist. The symlink's target must remain unchanged.
+func TestWrite_OverwriteSymlinkBlocked(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.txt")
+	require.NoError(t, os.WriteFile(target, []byte("original"), 0o600))
+
+	link := filepath.Join(dir, "link.txt")
+	require.NoError(t, os.Symlink(target, link))
+	t.Cleanup(func() { _ = os.Remove(link) })
+
+	tool := NewWriteTool(WithWriteWorkdir(dir), WithOverwrite(true))
+
+	_, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"path": "link.txt", "content": "new"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "symlink")
+
+	// The target file must be unchanged.
+	data, rerr := os.ReadFile(target)
+	require.NoError(t, rerr)
+	assert.Equal(t, "original", string(data))
+}
+
+// TestWrite_AppendSymlinkBlocked verifies that appending to an existing
+// symlink is rejected by the default-enabled O_NOFOLLOW check even with no
+// whitelist. No append may occur.
+func TestWrite_AppendSymlinkBlocked(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.txt")
+	require.NoError(t, os.WriteFile(target, []byte("original"), 0o600))
+
+	link := filepath.Join(dir, "link.txt")
+	require.NoError(t, os.Symlink(target, link))
+	t.Cleanup(func() { _ = os.Remove(link) })
+
+	tool := NewWriteTool(WithWriteWorkdir(dir))
+
+	_, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"path": "link.txt", "content": " appended", "append": true},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "symlink")
+
+	// The target file must be unchanged (no append occurred).
+	data, rerr := os.ReadFile(target)
+	require.NoError(t, rerr)
+	assert.Equal(t, "original", string(data))
+}
