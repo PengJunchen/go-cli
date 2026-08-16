@@ -53,6 +53,8 @@ type HTTPServer struct {
 	eventBus    core.EventBus
 	authToken   string
 	authSubject string
+	tlsCertFile string
+	tlsKeyFile  string
 
 	mu       sync.Mutex
 	sessions map[string]*Session
@@ -109,6 +111,14 @@ func (s *HTTPServer) SetEventBus(bus core.EventBus) {
 func (s *HTTPServer) SetAuth(token, subject string) {
 	s.authToken = token
 	s.authSubject = subject
+}
+
+// SetTLS configures the server to serve HTTPS using the provided certificate
+// and key file paths. Both must be non-empty for TLS to be enabled. This must
+// be called before Start.
+func (s *HTTPServer) SetTLS(certFile, keyFile string) {
+	s.tlsCertFile = certFile
+	s.tlsKeyFile = keyFile
 }
 
 // authMiddleware wraps next with bearer-token authentication. Requests
@@ -214,10 +224,16 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 	s.ctx, s.cancel = context.WithCancel(ctx)
 	s.mu.Unlock()
 
-	slog.Info("acp.server.start", "name", s.name, "addr", ln.Addr().String())
+	slog.Info("acp.server.start", "name", s.name, "addr", ln.Addr().String(), "tls", s.tlsCertFile != "")
 	go func() {
-		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
-			slog.Error("acp.server.serve_failed", "err", err)
+		if s.tlsCertFile != "" && s.tlsKeyFile != "" {
+			if err := srv.ServeTLS(ln, s.tlsCertFile, s.tlsKeyFile); err != nil && err != http.ErrServerClosed {
+				slog.Error("acp.server.serve_tls_failed", "err", err)
+			}
+		} else {
+			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+				slog.Error("acp.server.serve_failed", "err", err)
+			}
 		}
 	}()
 
@@ -663,4 +679,20 @@ func ensureServerName(name string) string {
 		return "acp-server"
 	}
 	return name
+}
+
+// IsLoopbackAddr reports whether addr binds to a loopback interface. An addr
+// without a host:port suffix (e.g. ":9090") or with a loopback host
+// (127.0.0.1, localhost, ::1) is considered loopback. Binding to 0.0.0.0 or
+// a specific external IP is not.
+func IsLoopbackAddr(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	switch host {
+	case "127.0.0.1", "localhost", "::1", "":
+		return true
+	}
+	return false
 }

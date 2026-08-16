@@ -65,6 +65,8 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 		showToken    bool
 		noAuth       bool
 		noSandbox    bool
+		tlsCert      string
+		tlsKey       string
 	)
 	fs.StringVar(&addr, "addr", "127.0.0.1:9090", "listen address for the ACP HTTP server")
 	fs.StringVar(&modelFlag, "model", "", "model name to use")
@@ -75,6 +77,8 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	fs.BoolVar(&showToken, "show-token", false, "print the auth token to stderr")
 	fs.BoolVar(&noAuth, "no-auth", false, "disable bearer-token authentication (insecure)")
 	fs.BoolVar(&noSandbox, "no-sandbox", false, "disable bash sandbox enforcement")
+	fs.StringVar(&tlsCert, "tls-cert", "", "TLS certificate file path")
+	fs.StringVar(&tlsKey, "tls-key", "", "TLS key file path")
 	if err := fs.Parse(args); err != nil {
 		return newUsageError("serve: %v", err)
 	}
@@ -84,6 +88,32 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	// allow unauthenticated remote RCE.
 	if approveMode == ApproveAuto && noAuth {
 		return newUsageError("serve: --approve auto requires authentication; cannot use with --no-auth")
+	}
+
+	// --- Non-loopback security checks (SEC-17) ---
+	// When the server binds to a non-loopback address (e.g. 0.0.0.0),
+	// it is reachable from the network. Without TLS the traffic is
+	// unencrypted; without auth any client can execute tool calls.
+	// We warn about the former and reject the latter.
+	loopback := acp.IsLoopbackAddr(addr)
+	if !loopback {
+		if noAuth {
+			return newUsageError("serve: --no-auth is not allowed with a non-loopback address %q (use --addr 127.0.0.1:9090 or enable auth)", addr)
+		}
+		if tlsCert == "" || tlsKey == "" {
+			fmt.Fprintf(c.errWriter(), "WARNING: Serving on non-loopback address %s without TLS — traffic is unencrypted.\n", addr)
+			fmt.Fprintf(c.errWriter(), "  Consider using --tls-cert and --tls-key to enable HTTPS.\n")
+		}
+	}
+
+	// --- TLS certificate validation ---
+	if tlsCert != "" || tlsKey != "" {
+		if tlsCert == "" || tlsKey == "" {
+			return newUsageError("serve: --tls-cert and --tls-key must both be provided")
+		}
+		if err := validateTLSFiles(tlsCert, tlsKey); err != nil {
+			return newExecutionError("serve: TLS configuration", err)
+		}
 	}
 
 	// Determine the auth token. When auth is enabled (default), a token
@@ -145,7 +175,12 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 		if err != nil {
 			slog.Warn("serve: agent assembly failed, falling back to echo mode", "err", err)
 			fmt.Fprintf(c.out, "WARNING: Agent assembly failed — falling back to echo mode (no agent dispatch).\n")
-			fmt.Fprintf(c.out, "  Error: %v\n", err)
+			if ufe := classifyError(err); ufe != nil {
+				fmt.Fprintf(c.out, "  Error: %s\n", ufe.Action)
+				fmt.Fprintf(c.out, "  Hint: %s\n", ufe.Hint)
+			} else {
+				fmt.Fprintf(c.out, "  Error: %v\n", err)
+			}
 		} else {
 			cleanup = assembly.Cleanup
 			handler = acp.NewCoreHandler(assembly.Dispatcher, nil)
@@ -172,6 +207,9 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	}
 	if authToken != "" {
 		server.SetAuth(authToken, authSubject)
+	}
+	if tlsCert != "" && tlsKey != "" {
+		server.SetTLS(tlsCert, tlsKey)
 	}
 
 	if err := server.Start(ctx); err != nil {
@@ -256,6 +294,32 @@ func generateServeToken() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
+}
+
+// validateTLSFiles verifies that the TLS certificate and key files exist and
+// are readable.
+func validateTLSFiles(certFile, keyFile string) error {
+	if err := checkReadableFile(certFile, "certificate"); err != nil {
+		return err
+	}
+	if err := checkReadableFile(keyFile, "key"); err != nil {
+		return err
+	}
+	return nil
+}
+
+// checkReadableFile verifies that path exists and is readable, returning a
+// descriptive error labeled with kind (e.g. "certificate", "key").
+func checkReadableFile(path, kind string) error {
+	if path == "" {
+		return fmt.Errorf("TLS %s file path is empty", kind)
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("TLS %s file %q: %w", kind, path, err)
+	}
+	f.Close()
+	return nil
 }
 
 var _ Command = (*serveCmd)(nil)
