@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -354,4 +356,159 @@ func TestToolCallID_MatchesNonStreaming(t *testing.T) {
 	assert.Equal(t, "call_abc123", streamCalls[0].ID)
 	assert.Equal(t, nonStreamCalls[0].Name, streamCalls[0].Name)
 	assert.Equal(t, nonStreamCalls[0].Args, streamCalls[0].Args)
+}
+
+// makeToolCallInitEvent builds an SSE event data string carrying the tool call
+// ID and function name for the given index. This is the "header" event that
+// precedes argument fragments.
+func makeToolCallInitEvent(index int, id, name string) string {
+	idJSON, _ := json.Marshal(id)
+	nameJSON, _ := json.Marshal(name)
+	return fmt.Sprintf(`{"choices":[{"delta":{"tool_calls":[{"index":%d,"id":%s,"type":"function","function":{"name":%s,"arguments":""}}]}}]}`, index, idJSON, nameJSON)
+}
+
+// makeToolCallArgEvent builds an SSE event data string carrying an argument
+// fragment for the tool call at the given index.
+func makeToolCallArgEvent(index int, arguments string) string {
+	argsJSON, _ := json.Marshal(arguments)
+	return fmt.Sprintf(`{"choices":[{"delta":{"tool_calls":[{"index":%d,"function":{"arguments":%s}}]}}]}`, index, argsJSON)
+}
+
+// TestAccumulateOpenAIStreamToolCalls_BuilderCorrectness verifies that 100
+// argument fragments producing a ~10 KB JSON payload are correctly accumulated
+// by the strings.Builder-based accumulator.
+func TestAccumulateOpenAIStreamToolCalls_BuilderCorrectness(t *testing.T) {
+	largeValue := strings.Repeat("a", 10*1024)
+	fullJSON := `{"key":"` + largeValue + `"}`
+
+	events := []string{makeToolCallInitEvent(0, "call_0", "big_tool")}
+
+	n := 100
+	chunkSize := len(fullJSON) / n
+	for i := 0; i < n; i++ {
+		start := i * chunkSize
+		end := start + chunkSize
+		if i == n-1 {
+			end = len(fullJSON)
+		}
+		events = append(events, makeToolCallArgEvent(0, fullJSON[start:end]))
+	}
+	events = append(events, `{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`)
+
+	toolCalls, _, _ := runStreamAccumulator(t, events...)
+	require.Len(t, toolCalls, 1)
+	assert.Equal(t, "call_0", toolCalls[0].ID)
+	assert.Equal(t, "big_tool", toolCalls[0].Name)
+
+	args, ok := toolCalls[0].Args.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, largeValue, args["key"])
+}
+
+// TestAccumulateOpenAIStreamToolCalls_MultipleTools verifies that interleaved
+// argument fragments for multiple tools are accumulated independently by each
+// tool's strings.Builder.
+func TestAccumulateOpenAIStreamToolCalls_MultipleTools(t *testing.T) {
+	events := []string{
+		makeToolCallInitEvent(0, "call_a", "tool_a"),
+		makeToolCallInitEvent(1, "call_b", "tool_b"),
+		// Interleave fragments so each Builder must stay independent.
+		makeToolCallArgEvent(0, `{"msg":"`),
+		makeToolCallArgEvent(1, `{"msg":"`),
+		makeToolCallArgEvent(0, `hello`),
+		makeToolCallArgEvent(1, `world`),
+		makeToolCallArgEvent(0, `"}`),
+		makeToolCallArgEvent(1, `"}`),
+		`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+	}
+
+	toolCalls, _, _ := runStreamAccumulator(t, events...)
+	require.Len(t, toolCalls, 2)
+
+	assert.Equal(t, "call_a", toolCalls[0].ID)
+	assert.Equal(t, "tool_a", toolCalls[0].Name)
+	args0, ok := toolCalls[0].Args.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "hello", args0["msg"])
+
+	assert.Equal(t, "call_b", toolCalls[1].ID)
+	assert.Equal(t, "tool_b", toolCalls[1].Name)
+	args1, ok := toolCalls[1].Args.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "world", args1["msg"])
+}
+
+// TestAccumulateOpenAIStreamToolCalls_Race runs the accumulator concurrently
+// from multiple goroutines to verify there is no shared mutable state (the
+// race detector will fail if any data race exists).
+func TestAccumulateOpenAIStreamToolCalls_Race(t *testing.T) {
+	const goroutines = 8
+	var wg sync.WaitGroup
+	wg.Add(goroutines)
+	for g := 0; g < goroutines; g++ {
+		go func() {
+			defer wg.Done()
+			events := []string{
+				makeToolCallInitEvent(0, "call_0", "tool"),
+				makeToolCallArgEvent(0, `{"x":1}`),
+				`{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`,
+			}
+			ev := make(chan SSEEvent, len(events)+1)
+			for _, e := range events {
+				ev <- SSEEvent{Data: e}
+			}
+			ev <- SSEEvent{Data: "[DONE]"}
+			close(ev)
+
+			ch := make(chan MessageChunk, 64)
+			accumulateOpenAIStreamToolCalls(context.Background(), ev, ch)
+			close(ch)
+			for range ch {
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// BenchmarkAccumulateToolCalls_Builder measures the allocation profile of the
+// strings.Builder-based accumulator with 100 argument fragments producing a
+// ~10 KB JSON payload. With Builder, allocs/op should be O(log n) and B/op
+// O(n), in contrast to the O(n²) bytes of the old string-concat approach.
+func BenchmarkAccumulateToolCalls_Builder(b *testing.B) {
+	largeValue := strings.Repeat("a", 10*1024)
+	fullJSON := `{"key":"` + largeValue + `"}`
+
+	initEvent := makeToolCallInitEvent(0, "call_0", "big_tool")
+	finishEvent := `{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}`
+
+	n := 100
+	chunkSize := len(fullJSON) / n
+	argEvents := make([]string, n)
+	for i := 0; i < n; i++ {
+		start := i * chunkSize
+		end := start + chunkSize
+		if i == n-1 {
+			end = len(fullJSON)
+		}
+		argEvents[i] = makeToolCallArgEvent(0, fullJSON[start:end])
+	}
+
+	b.ReportAllocs()
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		events := make(chan SSEEvent, n+4)
+		events <- SSEEvent{Data: initEvent}
+		for _, e := range argEvents {
+			events <- SSEEvent{Data: e}
+		}
+		events <- SSEEvent{Data: finishEvent}
+		events <- SSEEvent{Data: "[DONE]"}
+		close(events)
+
+		ch := make(chan MessageChunk, 64)
+		accumulateOpenAIStreamToolCalls(context.Background(), events, ch)
+		close(ch)
+		for range ch {
+		}
+	}
 }
