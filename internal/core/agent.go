@@ -37,7 +37,7 @@ var _ eventSource = (*AgentImpl)(nil)
 type AgentImpl struct {
 	name           string
 	loop           AgentLoop
-	mu             sync.Mutex
+	mu             sync.RWMutex
 	history        []AgentMessage
 	events         []AgentEvent
 	compactionHook CompactionHook
@@ -82,8 +82,8 @@ func (a *AgentImpl) Name() string { return a.name }
 
 // State returns the current lifecycle state of the agent. It is thread-safe.
 func (a *AgentImpl) State() AgentState {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.state
 }
 
@@ -155,9 +155,9 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...Ev
 	// Apply compaction hook if set: the hook may trim or summarize the
 	// history to keep it within the token budget.
 	if a.compactionHook != nil {
-		a.mu.Lock()
+		a.mu.RLock()
 		historyCopy := append([]AgentMessage{}, a.history...)
-		a.mu.Unlock()
+		a.mu.RUnlock()
 
 		compacted, compErr := a.compactionHook(spanCtx, historyCopy)
 		if compErr != nil {
@@ -192,15 +192,15 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...Ev
 
 // Events returns a copy of the events produced by the most recent Run call.
 func (a *AgentImpl) Events() []AgentEvent {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return append([]AgentEvent{}, a.events...)
 }
 
 // Messages returns a copy of the accumulated message history.
 func (a *AgentImpl) Messages() []AgentMessage {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return append([]AgentMessage{}, a.history...)
 }
 
@@ -229,9 +229,9 @@ func (a *AgentImpl) Compact(ctx context.Context) error {
 	if a.compactionHook == nil {
 		return nil
 	}
-	a.mu.Lock()
+	a.mu.RLock()
 	historyCopy := append([]AgentMessage{}, a.history...)
-	a.mu.Unlock()
+	a.mu.RUnlock()
 
 	compacted, err := a.compactionHook(ctx, historyCopy)
 	if err != nil {
