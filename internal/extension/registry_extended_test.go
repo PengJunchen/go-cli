@@ -94,43 +94,53 @@ func TestRegistryMissingGetters(t *testing.T) {
 	assert.Nil(t, reg.Middleware("nope"))
 }
 
-// TestRegistryHookAndProviderOverwrite verifies last-writer-wins for hooks and
-// providers.
-func TestRegistryHookAndProviderOverwrite(t *testing.T) {
+// TestRegistryHookAndProviderDuplicateError verifies that duplicate hook and
+// provider registrations return an error and the original entry is preserved.
+func TestRegistryHookAndProviderDuplicateError(t *testing.T) {
 	ctx := context.Background()
 	reg := newConcreteRegistry()
 
 	h1 := newRegTestHook("h")
 	h2 := newRegTestHook("h")
 	require.NoError(t, reg.RegisterHook(ctx, h1))
-	require.NoError(t, reg.RegisterHook(ctx, h2))
-	assert.Same(t, h2, reg.Hook("h"), "second hook should overwrite the first")
+	err := reg.RegisterHook(ctx, h2)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "extension already registered: h")
+	assert.Same(t, h1, reg.Hook("h"), "original hook should be preserved")
 
 	require.NoError(t, reg.RegisterProvider(testProvider{name: "p"}))
-	require.NoError(t, reg.RegisterProvider(testProvider{name: "p"}))
+	err = reg.RegisterProvider(testProvider{name: "p"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "extension already registered: p")
 	assert.Equal(t, "p", reg.provider("p").Name())
 }
 
-// TestRegistryMiddlewareOverwrite verifies last-writer-wins for middleware.
-func TestRegistryMiddlewareOverwrite(t *testing.T) {
+// TestRegistryMiddlewareDuplicateError verifies that duplicate middleware
+// registration returns an error and the original entry is preserved.
+func TestRegistryMiddlewareDuplicateError(t *testing.T) {
 	ctx := context.Background()
 	reg := newConcreteRegistry()
 	m1 := newRegTestMiddleware("m")
 	m2 := newRegTestMiddleware("m")
 	require.NoError(t, reg.RegisterMiddleware(ctx, m1))
-	require.NoError(t, reg.RegisterMiddleware(ctx, m2))
-	assert.Same(t, m2, reg.Middleware("m"))
+	err := reg.RegisterMiddleware(ctx, m2)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "extension already registered: m")
+	assert.Same(t, m1, reg.Middleware("m"))
 }
 
-// TestRegistryCommandOverwrite verifies the last registered command runs.
-func TestRegistryCommandOverwrite(t *testing.T) {
+// TestRegistryCommandDuplicateError verifies that duplicate command
+// registration returns an error and the original command is preserved.
+func TestRegistryCommandDuplicateError(t *testing.T) {
 	reg := newConcreteRegistry()
 	first, second := false, false
 	require.NoError(t, reg.RegisterCommand("run", func([]string) error { first = true; return nil }))
-	require.NoError(t, reg.RegisterCommand("run", func([]string) error { second = true; return nil }))
+	err := reg.RegisterCommand("run", func([]string) error { second = true; return nil })
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "extension already registered: run")
 	require.NoError(t, reg.command("run")(nil))
-	assert.False(t, first)
-	assert.True(t, second)
+	assert.True(t, first)
+	assert.False(t, second)
 }
 
 // TestRegistryConcurrentConcurrentRW exercises concurrent registration and
@@ -145,11 +155,11 @@ func TestRegistryConcurrentConcurrentRW(t *testing.T) {
 		go func(i int) {
 			defer wg.Done()
 			name := string(rune('a' + i%26))
-			_ = reg.RegisterTool(ctx, testTool{name: name})                         //nolint:errcheck // registration returns nil error
-			_ = reg.RegisterProvider(testProvider{name: name})                      //nolint:errcheck // registration returns nil error
-			_ = reg.RegisterHook(ctx, newRegTestHook(name))                         //nolint:errcheck // registration returns nil error
-			_ = reg.RegisterMiddleware(ctx, newRegTestMiddleware(name))             //nolint:errcheck // registration returns nil error
-			_ = reg.RegisterCommand(name, func(args []string) error { return nil }) //nolint:errcheck // registration returns nil error
+			_ = reg.RegisterTool(ctx, testTool{name: name})                         //nolint:errcheck // duplicate registration returns an error
+			_ = reg.RegisterProvider(testProvider{name: name})                      //nolint:errcheck // duplicate registration returns an error
+			_ = reg.RegisterHook(ctx, newRegTestHook(name))                         //nolint:errcheck // duplicate registration returns an error
+			_ = reg.RegisterMiddleware(ctx, newRegTestMiddleware(name))             //nolint:errcheck // duplicate registration returns an error
+			_ = reg.RegisterCommand(name, func(args []string) error { return nil }) //nolint:errcheck // duplicate registration returns an error
 			_ = reg.tool(name)
 			_ = reg.provider(name)
 			_ = reg.Hook(name)
