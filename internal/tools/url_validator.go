@@ -113,6 +113,20 @@ func ValidateURL(rawURL string) error {
 // ranges. This prevents DNS-rebinding attacks where the DNS response changes
 // between the ValidateURL check and the actual dial.
 func NewSSRFSafeHTTPClient(timeout time.Duration) *http.Client {
+	return newSSRFSafeHTTPClient(timeout, false)
+}
+
+// NewSSRFSafeHTTPClientAllowLoopback is like NewSSRFSafeHTTPClient but permits
+// loopback addresses (127.0.0.0/8 and ::1). It is intended for callers that
+// connect to user-configured endpoints where a local server is a legitimate
+// target (e.g. loading an extension bundle or an MCP server from localhost),
+// while still blocking all other private, link-local, and cloud-metadata
+// ranges at dial time.
+func NewSSRFSafeHTTPClientAllowLoopback(timeout time.Duration) *http.Client {
+	return newSSRFSafeHTTPClient(timeout, true)
+}
+
+func newSSRFSafeHTTPClient(timeout time.Duration, allowLoopback bool) *http.Client {
 	dialer := &net.Dialer{
 		Timeout:   timeout,
 		KeepAlive: 30 * time.Second,
@@ -124,6 +138,11 @@ func NewSSRFSafeHTTPClient(timeout time.Duration) *http.Client {
 			ip := net.ParseIP(host)
 			if ip == nil {
 				return fmt.Errorf("%w: non-IP dial address %s", ErrPrivateIP, host)
+			}
+			// When loopback is allowed, permit 127.0.0.0/8 and ::1 before the
+			// private-range check (privateNets includes loopback).
+			if allowLoopback && ip.IsLoopback() {
+				return nil
 			}
 			if isPrivateIP(ip) {
 				return fmt.Errorf("%w: %s", ErrPrivateIP, ip.String())
