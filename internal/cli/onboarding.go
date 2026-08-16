@@ -2,12 +2,15 @@ package cli
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+
+	xterm "golang.org/x/term"
 
 	"github.com/pengjunchen/go-cli/internal/config"
 )
@@ -35,6 +38,22 @@ var configExistsFunc = configFilesExist
 // the config file. It is a package-level variable so tests can override it to
 // redirect writes to a temp directory.
 var onboardingConfigPathFunc = defaultOnboardingConfigPath
+
+// onboardingAuthPathFunc returns the path where the onboarding wizard saves
+// the auth.json file containing the API key. Overridable for tests.
+var onboardingAuthPathFunc = defaultAuthFilePath
+
+// stdinIsTTYFunc reports whether stdin is an interactive terminal. The wizard
+// uses it to decide between term.ReadPassword (no echo) and a plain
+// bufio.ReadString fallback. Overridable for tests so the non-TTY path is
+// always exercised.
+var stdinIsTTYFunc = func() bool {
+	return xterm.IsTerminal(int(os.Stdin.Fd()))
+}
+
+// saveAPIKeyFunc persists the API key to the keychain (preferred) or auth.json
+// fallback. Overridable for tests to avoid touching the real keychain.
+var saveAPIKeyFunc = defaultSaveAPIKey
 
 // RunOnboarding runs the first-run onboarding wizard. When no config file
 // exists it guides the user through API key input, model selection, and theme
@@ -114,12 +133,14 @@ func printWelcome(out io.Writer) {
 
 // promptAPIKey prompts the user for their API key and stores it in cfg. It
 // retries on empty input until a non-empty key is provided or input ends.
+// When stdin is a TTY the input is masked (no echo) via term.ReadPassword;
+// otherwise it falls back to a plain ReadString so piped/CI input still works.
 func promptAPIKey(cfg *config.Config, reader *bufio.Reader, out io.Writer) error {
 	for {
 		fmt.Fprintln(out, "Step 1: API Key")
 		fmt.Fprintln(out, "  Enter your LLM provider API key (e.g. sk-...).")
 		fmt.Fprint(out, "  API Key: ")
-		line, err := reader.ReadString('\n')
+		line, err := readPasswordMasked(reader, out)
 		key := strings.TrimSpace(line)
 		if key != "" {
 			if cfg != nil {
@@ -138,6 +159,19 @@ func promptAPIKey(cfg *config.Config, reader *bufio.Reader, out io.Writer) error
 		fmt.Fprintln(out, "  ✗ API key cannot be empty. Please try again.")
 		fmt.Fprintln(out, "")
 	}
+}
+
+// readPasswordMasked reads a single line of input. In a TTY it uses
+// term.ReadPassword so the key is not echoed; in non-TTY environments (pipes,
+// CI) it falls back to reader.ReadString so automated input still works. A
+// newline is printed after the masked read to keep the prompt formatting tidy.
+func readPasswordMasked(reader *bufio.Reader, out io.Writer) (string, error) {
+	if stdinIsTTYFunc() {
+		b, err := xterm.ReadPassword(int(os.Stdin.Fd()))
+		fmt.Fprintln(out)
+		return string(b), err
+	}
+	return reader.ReadString('\n')
 }
 
 // promptModel lists available models and lets the user pick one. An invalid or
@@ -214,7 +248,9 @@ func promptTheme(cfg *config.Config, reader *bufio.Reader, out io.Writer) error 
 }
 
 // saveOnboardingConfig writes the config to the path returned by
-// onboardingConfigPathFunc, creating the parent directory if needed.
+// onboardingConfigPathFunc, creating the parent directory if needed. The API
+// key is NOT stored in config.yaml; it is persisted separately to the OS
+// keychain (preferred) or auth.json fallback via saveAPIKeyFunc.
 func saveOnboardingConfig(cfg *config.Config, out io.Writer) error {
 	path := onboardingConfigPathFunc()
 	if path == "" {
@@ -231,6 +267,13 @@ func saveOnboardingConfig(cfg *config.Config, out io.Writer) error {
 		return fmt.Errorf("onboarding: write config: %w", err)
 	}
 
+	// Persist the API key to the keychain or auth.json — never config.yaml.
+	if cfg.Provider.APIKey != "" {
+		if err := saveAPIKeyFunc(cfg.Provider.APIKey); err != nil {
+			return fmt.Errorf("onboarding: save API key: %w", err)
+		}
+	}
+
 	fmt.Fprintf(out, "✓ Configuration saved to %s\n", path)
 	fmt.Fprintln(out, "")
 	fmt.Fprintln(out, "You're all set! Type 'exit' or press Ctrl+C to quit.")
@@ -238,18 +281,11 @@ func saveOnboardingConfig(cfg *config.Config, out io.Writer) error {
 	return nil
 }
 
-// yamlSingleQuote wraps s in YAML single-quote style. In single-quoted YAML
-// strings every character is literal except the single quote itself, which is
-// escaped by doubling it (” → '). This safely handles special YAML
-// characters such as :, #, {, }, ", and \ in values without relying on
-// escape-sequence processing by the reader.
-func yamlSingleQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "''") + "'"
-}
-
 // serializeOnboardingYAML produces a simple YAML representation of the config
 // fields set by the onboarding wizard. Only the provider, model, and tui
-// sections are written so the output stays minimal and human-editable.
+// sections are written so the output stays minimal and human-editable. The
+// API key is intentionally excluded — it is persisted to the keychain or
+// auth.json, never to config.yaml.
 func serializeOnboardingYAML(cfg *config.Config) string {
 	var b strings.Builder
 	b.WriteString("# go-cli configuration (generated by onboarding wizard)\n\n")
@@ -257,9 +293,6 @@ func serializeOnboardingYAML(cfg *config.Config) string {
 	b.WriteString("provider:\n")
 	if cfg.Provider.Name != "" {
 		fmt.Fprintf(&b, "  name: %s\n", cfg.Provider.Name)
-	}
-	if cfg.Provider.APIKey != "" {
-		fmt.Fprintf(&b, "  api_key: %s\n", yamlSingleQuote(cfg.Provider.APIKey))
 	}
 	if cfg.Provider.BaseURL != "" {
 		fmt.Fprintf(&b, "  base_url: %s\n", cfg.Provider.BaseURL)
@@ -295,6 +328,52 @@ func defaultOnboardingConfigPath() string {
 		return ""
 	}
 	return filepath.Join(home, ".go-cli", "config.yaml")
+}
+
+// defaultAuthFilePath returns the auth.json path used by the wizard, typically
+// ~/.config/go-cli/auth.json. This mirrors the path consulted by the config
+// package's lookupAuthFile so the two stay in sync.
+func defaultAuthFilePath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".config", "go-cli", "auth.json")
+}
+
+// saveAuthFile writes the API key to auth.json as {"api_key":"..."} with 0600
+// permissions, creating the parent directory if needed.
+func saveAuthFile(apiKey string) error {
+	path := onboardingAuthPathFunc()
+	if path == "" {
+		return fmt.Errorf("onboarding: cannot determine auth file path")
+	}
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return fmt.Errorf("onboarding: create auth dir: %w", err)
+	}
+	data, err := json.Marshal(map[string]string{"api_key": apiKey})
+	if err != nil {
+		return fmt.Errorf("onboarding: marshal auth: %w", err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		return fmt.Errorf("onboarding: write auth: %w", err)
+	}
+	return nil
+}
+
+// defaultSaveAPIKey persists the API key to the OS keychain when available
+// (macOS), falling back to the auth.json file on other platforms or when the
+// keychain write fails.
+func defaultSaveAPIKey(key string) error {
+	kc := config.NewKeychainSource()
+	if kc.Available() {
+		if err := kc.Set(key); err == nil {
+			return nil
+		}
+		// Fall through to the file-based fallback on keychain errors.
+	}
+	return saveAuthFile(key)
 }
 
 // configFilesExist checks whether any config file already exists in the
