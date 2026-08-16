@@ -15,6 +15,11 @@ var errNoResult = errors.New("core: no result recorded on event stream")
 // BlockUntilConsumed policy timed out waiting for a consumer.
 var ErrSendTimeout = errors.New("core: event stream send timed out")
 
+// defaultBlockTimeout is the fallback applied by NewEventStream when
+// WithEventBlockTimeout is not used. It prevents the agent loop from
+// freezing indefinitely when a consumer is slow or absent.
+const defaultBlockTimeout = 30 * time.Second
+
 // EventStream is the asynchronous stream through which an agent emits events.
 // It supports back-pressure-aware sending and closes when the run completes.
 type EventStream interface {
@@ -43,7 +48,7 @@ type EventStreamImpl struct {
 	result       AgentMessage
 	hasRes       bool
 	err          error
-	sentCount    int
+	sentCount    atomic.Int64
 	discard      DiscardPolicy
 	blockTimeout time.Duration
 	bus          EventBus
@@ -80,9 +85,10 @@ func WithEventBlockTimeout(d time.Duration) EventStreamOption {
 // NewEventStream creates an EventStreamImpl with the given buffer capacity.
 func NewEventStream(capacity int, opts ...EventStreamOption) *EventStreamImpl {
 	s := &EventStreamImpl{
-		events:  make(chan AgentEvent, capacity),
-		done:    make(chan struct{}),
-		discard: BlockUntilConsumed, // preserve backward-compatible blocking behaviour
+		events:       make(chan AgentEvent, capacity),
+		done:         make(chan struct{}),
+		discard:      BlockUntilConsumed, // preserve backward-compatible blocking behaviour
+		blockTimeout: defaultBlockTimeout,
 	}
 	for _, o := range opts {
 		o(s)
@@ -117,9 +123,7 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 		case <-s.done:
 			return nil
 		case s.events <- event:
-			s.mu.Lock()
-			s.sentCount++
-			s.mu.Unlock()
+			s.sentCount.Add(1)
 			s.publishToBus(event)
 			slog.Debug("core.eventstream.send", "kind", event.Kind, "policy", "discard_newest")
 			return nil
@@ -134,9 +138,7 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 		case <-s.done:
 			return nil
 		case s.events <- event:
-			s.mu.Lock()
-			s.sentCount++
-			s.mu.Unlock()
+			s.sentCount.Add(1)
 			s.publishToBus(event)
 			slog.Debug("core.eventstream.send", "kind", event.Kind, "policy", "discard_oldest")
 			return nil
@@ -151,9 +153,7 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 			case <-s.done:
 				return nil
 			case s.events <- event:
-				s.mu.Lock()
-				s.sentCount++
-				s.mu.Unlock()
+				s.sentCount.Add(1)
 				s.publishToBus(event)
 				slog.Debug("core.eventstream.send", "kind", event.Kind, "policy", "discard_oldest")
 				return nil
@@ -169,9 +169,7 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 			case <-s.done:
 				return nil
 			case s.events <- event:
-				s.mu.Lock()
-				s.sentCount++
-				s.mu.Unlock()
+				s.sentCount.Add(1)
 				s.publishToBus(event)
 				slog.Debug("core.eventstream.send", "kind", event.Kind, "policy", "block")
 				return nil
@@ -183,14 +181,12 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 		case <-s.done:
 			return nil
 		case s.events <- event:
-			s.mu.Lock()
-			s.sentCount++
-			s.mu.Unlock()
-			s.publishToBus(event)
-			slog.Debug("core.eventstream.send", "kind", event.Kind, "policy", "block")
-			return nil
-		}
+		s.sentCount.Add(1)
+		s.publishToBus(event)
+		slog.Debug("core.eventstream.send", "kind", event.Kind, "policy", "block")
+		return nil
 	}
+}
 }
 
 // SentCount returns the number of events that were successfully sent to the
