@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 )
 
 // accumulateOpenAIStreamToolCalls processes SSE events from an OpenAI-compatible
@@ -17,7 +18,7 @@ import (
 func accumulateOpenAIStreamToolCalls(ctx context.Context, events <-chan SSEEvent, ch chan<- MessageChunk) (toolCalls []ToolCall, finishReason string, usage *Usage) {
 	var toolNameByIndex map[int]string
 	var toolIDByIndex map[int]string
-	var toolArgsBuf []string
+	var toolArgsBuf []*strings.Builder
 	emittedRole := false
 	cancelled := false
 
@@ -81,7 +82,7 @@ func accumulateOpenAIStreamToolCalls(ctx context.Context, events <-chan SSEEvent
 			}
 			idx := *tc.Index
 			for len(toolArgsBuf) <= idx {
-				toolArgsBuf = append(toolArgsBuf, "")
+				toolArgsBuf = append(toolArgsBuf, &strings.Builder{})
 			}
 			if tc.ID != "" {
 				if toolIDByIndex == nil {
@@ -100,7 +101,7 @@ func accumulateOpenAIStreamToolCalls(ctx context.Context, events <-chan SSEEvent
 				}
 			}
 			if tc.Function.Arguments != "" {
-				toolArgsBuf[idx] += tc.Function.Arguments
+				toolArgsBuf[idx].WriteString(tc.Function.Arguments)
 			}
 		}
 	}
@@ -110,12 +111,12 @@ func accumulateOpenAIStreamToolCalls(ctx context.Context, events <-chan SSEEvent
 		toolCalls = make([]ToolCall, len(toolArgsBuf))
 		for idx, name := range toolNameByIndex {
 			var args any
-			if idx < len(toolArgsBuf) && toolArgsBuf[idx] != "" {
+			if idx < len(toolArgsBuf) && toolArgsBuf[idx].Len() != 0 {
 				var decoded any
-				if err := json.Unmarshal([]byte(toolArgsBuf[idx]), &decoded); err == nil {
+				if err := json.Unmarshal([]byte(toolArgsBuf[idx].String()), &decoded); err == nil {
 					args = decoded
 				} else {
-					args = toolArgsBuf[idx]
+					args = toolArgsBuf[idx].String()
 				}
 			}
 			id := toolIDByIndex[idx]
