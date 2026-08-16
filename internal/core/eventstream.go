@@ -76,8 +76,8 @@ func WithEventBus(bus EventBus) EventStreamOption {
 
 // WithEventBlockTimeout sets the maximum duration a Send blocks under the
 // BlockUntilConsumed policy before returning ErrSendTimeout. When d <= 0
-// (the default) Send blocks forever, preserving backward-compatible
-// behaviour.
+// Send blocks forever, preserving backward-compatible behaviour. When the
+// option is omitted, NewEventStream applies defaultBlockTimeout (30s).
 func WithEventBlockTimeout(d time.Duration) EventStreamOption {
 	return func(s *EventStreamImpl) { s.blockTimeout = d }
 }
@@ -181,21 +181,19 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 		case <-s.done:
 			return nil
 		case s.events <- event:
-		s.sentCount.Add(1)
-		s.publishToBus(event)
-		slog.Debug("core.eventstream.send", "kind", event.Kind, "policy", "block")
-		return nil
+			s.sentCount.Add(1)
+			s.publishToBus(event)
+			slog.Debug("core.eventstream.send", "kind", event.Kind, "policy", "block")
+			return nil
+		}
 	}
-}
 }
 
 // SentCount returns the number of events that were successfully sent to the
 // stream. It is used by the harness to decide whether to fall back to fanning
 // out the agent's stored events.
 func (s *EventStreamImpl) SentCount() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.sentCount
+	return int(s.sentCount.Load())
 }
 
 // publishToBus forwards a copy of the event to the wired EventBus (if any).
