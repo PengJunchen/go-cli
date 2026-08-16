@@ -293,3 +293,178 @@ func TestJSONL_DirectoryMode_EntryIDNoConflict(t *testing.T) {
 	require.NoError(t, store2.Save(context.Background()))
 	require.NoError(t, store2.Close())
 }
+
+// --- Buffered write tests ---
+
+func TestJSONLSessionStore_BufferedWritePersistence(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	store := NewJSONLSessionStore(path)
+
+	const n = 100
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("entry-%d", i)
+		require.NoError(t, store.Append(context.Background(), newTestEntry(id, "", EntryTypeUser)))
+	}
+	require.NoError(t, store.Save(context.Background()))
+	require.NoError(t, store.Close())
+
+	reopened := NewJSONLSessionStore(path)
+	require.NoError(t, reopened.Open(context.Background()))
+	entries, err := reopened.List(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, entries, n)
+	for _, e := range entries {
+		got, err := reopened.Get(context.Background(), e.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "content-"+e.ID, got.Content)
+	}
+	require.NoError(t, reopened.Close())
+}
+
+func TestJSONLSessionStore_CloseFlushesBuffer(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	store := NewJSONLSessionStore(path)
+
+	// Append records WITHOUT calling Save — Close must flush the buffer.
+	const n = 20
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("close-%d", i)
+		require.NoError(t, store.Append(context.Background(), newTestEntry(id, "", EntryTypeUser)))
+	}
+	require.NoError(t, store.Close())
+
+	// Reopen and verify all data persisted even though Save was never called.
+	reopened := NewJSONLSessionStore(path)
+	require.NoError(t, reopened.Open(context.Background()))
+	entries, err := reopened.List(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, entries, n)
+	require.NoError(t, reopened.Close())
+}
+
+func TestJSONLSessionStore_DirModeBufferedWrite(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	storeDir := t.TempDir()
+	store := NewJSONLSessionStore(storeDir)
+	require.True(t, store.DirMode())
+
+	require.NoError(t, store.SetSessionID("sess-buf", true))
+
+	const n = 50
+	for i := 0; i < n; i++ {
+		id := fmt.Sprintf("dir-%d", i)
+		require.NoError(t, store.Append(context.Background(), newTestEntry(id, "", EntryTypeUser)))
+	}
+	require.NoError(t, store.Save(context.Background()))
+	require.NoError(t, store.Close())
+
+	// Reopen in dir mode and verify.
+	reopened := NewJSONLSessionStore(storeDir)
+	require.NoError(t, reopened.Open(context.Background()))
+	require.NoError(t, reopened.SetSessionID("sess-buf", false))
+	entries, err := reopened.List(context.Background())
+	require.NoError(t, err)
+	assert.Len(t, entries, n)
+	for _, e := range entries {
+		got, err := reopened.Get(context.Background(), e.ID)
+		require.NoError(t, err)
+		assert.Equal(t, "content-"+e.ID, got.Content)
+	}
+	require.NoError(t, reopened.Close())
+}
+
+func TestJSONLSessionStore_BufferedWriteRace(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	path := filepath.Join(t.TempDir(), "session.jsonl")
+	store := NewJSONLSessionStore(path)
+	defer func() { require.NoError(t, store.Close()) }()
+
+	const numWriters = 10
+	const writesPerGoroutine = 20
+	var wg sync.WaitGroup
+	wg.Add(numWriters + 1)
+
+	// Writers: concurrent Append calls.
+	for w := 0; w < numWriters; w++ {
+		go func(w int) {
+			defer wg.Done()
+			for i := 0; i < writesPerGoroutine; i++ {
+				id := fmt.Sprintf("race-%d-%d", w, i)
+				require.NoError(t, store.Append(context.Background(), newTestEntry(id, "", EntryTypeUser)))
+			}
+		}(w)
+	}
+
+	// Saver: concurrent Save calls while writers are appending.
+	go func() {
+		defer wg.Done()
+		for i := 0; i < 5; i++ {
+			_ = store.Save(context.Background()) //nolint:errcheck // best-effort flush during race test
+		}
+	}()
+
+	wg.Wait()
+
+	// Verify no corruption: every appended entry should be readable.
+	require.NoError(t, store.Save(context.Background()))
+	entries, err := store.List(context.Background())
+	require.NoError(t, err)
+	expected := numWriters * writesPerGoroutine
+	assert.Len(t, entries, expected)
+}
+
+func BenchmarkJSONLSessionStore_BatchAppend(b *testing.B) {
+	const n = 100
+
+	b.Run("buffered", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			b.StopTimer()
+			path := filepath.Join(b.TempDir(), "session.jsonl")
+			store := NewJSONLSessionStore(path)
+			b.StartTimer()
+
+			for j := 0; j < n; j++ {
+				_ = store.Append(context.Background(), &SessionEntry{
+					ID:        fmt.Sprintf("e-%d", j),
+					Type:      EntryTypeUser,
+					Content:   "benchmark content",
+					Timestamp: time.Now(),
+				})
+			}
+			_ = store.Save(context.Background())
+
+			b.StopTimer()
+			_ = store.Close()
+			b.StartTimer()
+		}
+	})
+
+	b.Run("flush_each", func(b *testing.B) {
+		for i := 0; i < b.N; i++ {
+			b.StopTimer()
+			path := filepath.Join(b.TempDir(), "session.jsonl")
+			store := NewJSONLSessionStore(path)
+			b.StartTimer()
+
+			for j := 0; j < n; j++ {
+				_ = store.Append(context.Background(), &SessionEntry{
+					ID:        fmt.Sprintf("e-%d", j),
+					Type:      EntryTypeUser,
+					Content:   "benchmark content",
+					Timestamp: time.Now(),
+				})
+				_ = store.Save(context.Background())
+			}
+
+			b.StopTimer()
+			_ = store.Close()
+			b.StartTimer()
+		}
+	})
+}

@@ -135,9 +135,10 @@ func TestMemoryStoreAppendValidation(t *testing.T) {
 	assert.Equal(t, 0, len(s.entries))
 }
 
-// TestWriteJSONLineNilFile verifies writing to a nil file reports an error.
+// TestWriteJSONLineNilFile verifies writing to a nil writer reports an error.
 func TestWriteJSONLineNilFile(t *testing.T) {
-	err := writeJSONLine(nil, newTestEntry("a", "", EntryTypeUser))
+	s := &JSONLSessionStore{}
+	err := s.writeJSONLine(newTestEntry("a", "", EntryTypeUser))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not open")
 }

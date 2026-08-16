@@ -75,6 +75,7 @@ type JSONLSessionStore struct {
 	path    string // current file path (session file in dirMode, original path otherwise)
 	entries map[string]*SessionEntry
 	file    *os.File
+	bw      *bufio.Writer // buffered writer wrapping file to batch write syscalls
 	loaded  bool
 
 	// dirMode fields (zero-valued in legacy mode)
@@ -185,6 +186,7 @@ func (s *JSONLSessionStore) SetSessionID(id string, newSession bool) error {
 		return fmt.Errorf("session: lock session file: %w", err)
 	}
 	s.file = f
+	s.bw = bufio.NewWriter(f)
 	s.loaded = true
 	return nil
 }
@@ -275,7 +277,7 @@ func (s *JSONLSessionStore) Append(ctx context.Context, entry *SessionEntry) err
 		logger.Error("session_save", "op", "session.save", "error_type", "duplicate_entry", "entry_type", string(cp.Type), "entry_id", cp.ID)
 		return fmt.Errorf("session: entry %q already exists", cp.ID)
 	}
-	if err := writeJSONLine(s.file, cp); err != nil {
+	if err := s.writeJSONLine(cp); err != nil {
 		s.mu.Unlock()
 		span.SetStatus(tracing.SpanStatusError, err.Error())
 		logger.Error("session_save", "op", "session.save", "error_type", "write_failed", "entry_id", cp.ID, "err", err)
@@ -343,6 +345,13 @@ func (s *JSONLSessionStore) Save(ctx context.Context) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.file != nil {
+		if s.bw != nil {
+			if err := s.bw.Flush(); err != nil {
+				span.SetStatus(tracing.SpanStatusError, err.Error())
+				logger.Error("session_flush", "op", "session.flush", "error_type", "flush_failed", "err", err)
+				return fmt.Errorf("session: flush store file: %w", err)
+			}
+		}
 		if err := s.file.Sync(); err != nil {
 			span.SetStatus(tracing.SpanStatusError, err.Error())
 			logger.Error("session_flush", "op", "session.flush", "error_type", "sync_failed", "err", err)
@@ -368,9 +377,13 @@ func (s *JSONLSessionStore) closeFileLocked() error {
 	if s.file == nil {
 		return nil
 	}
+	if s.bw != nil {
+		_ = s.bw.Flush() //nolint:errcheck // best-effort flush before close
+	}
 	_ = flockUnlock(s.file) //nolint:errcheck // best-effort unlock
 	err := s.file.Close()
 	s.file = nil
+	s.bw = nil
 	return err
 }
 
@@ -418,6 +431,7 @@ func (s *JSONLSessionStore) ensureLoaded() error {
 		return fmt.Errorf("session: lock store file: %w", err)
 	}
 	s.file = f
+	s.bw = bufio.NewWriter(f)
 	s.loaded = true
 	return nil
 }
@@ -507,12 +521,13 @@ func (s *JSONLSessionStore) loadEntriesLocked() error {
 	return nil
 }
 
-// writeJSONLine encodes entry as a single JSONL line written to f.
-func writeJSONLine(f *os.File, entry *SessionEntry) error {
-	if f == nil {
-		return errors.New("session: store file is not open")
+// writeJSONLine encodes entry as a single JSONL line written to the buffered
+// writer. Caller must hold s.mu.
+func (s *JSONLSessionStore) writeJSONLine(entry *SessionEntry) error {
+	if s.bw == nil {
+		return errors.New("session: store writer is not open")
 	}
-	return json.NewEncoder(f).Encode(entry)
+	return json.NewEncoder(s.bw).Encode(entry)
 }
 
 // readSessionPreview reads the first user-type entry from a session file and
