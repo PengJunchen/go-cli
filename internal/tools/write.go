@@ -95,40 +95,41 @@ func resolveWithinWorkdir(toolName, workdir, path string) (string, error) {
 // applies. It performs three layers of defense:
 //
 //  1. resolveWithinWorkdir: relative path traversal prevention.
-//  2. O_NOFOLLOW: when a whitelist is configured, if the path exists and is a
+//  2. O_NOFOLLOW: always enabled. If the final path component exists and is a
 //     symlink (checked via Lstat), the operation is rejected. This prevents
-//     writing through symlinks.
+//     writing through symlinks regardless of whether a whitelist is set.
 //  3. Symlink escape: when a whitelist is configured, the path is resolved
 //     with resolveSymlinks (which follows symlinks in any component) and the
 //     real path must fall within one of the whitelisted base directories.
-//
-// When the whitelist is empty all paths are allowed (backward-compatible with
-// callers that have not configured a whitelist).
+//     When no whitelist is configured this check is skipped (backward-
+//     compatible with callers that have not configured a whitelist), but the
+//     O_NOFOLLOW check above still applies.
 func resolveAndValidatePath(toolName, workdir, path string, whitelist PathWhitelist) (string, error) {
 	abspath, err := resolveWithinWorkdir(toolName, workdir, path)
 	if err != nil {
 		return abspath, err
 	}
 
-	// When a whitelist is configured, apply the full security checks:
-	// O_NOFOLLOW and symlink escape detection. When no whitelist is
-	// configured, behavior is unchanged (backward-compatible).
-	if len(whitelist.paths) == 0 {
-		return abspath, nil
-	}
-
-	// O_NOFOLLOW semantics: reject if the final path component is a symlink.
-	// Lstat does not follow symlinks, so a symlink at abspath is detected
-	// and rejected regardless of where it points.
+	// O_NOFOLLOW semantics: always reject if the final path component is a
+	// symlink. Lstat does not follow symlinks, so a symlink at abspath is
+	// detected and rejected regardless of where it points or whether a
+	// whitelist is configured. This default-enabled defense guards against
+	// symlink attacks even when no whitelist is set.
 	if li, lerr := os.Lstat(abspath); lerr == nil {
 		if li.Mode()&os.ModeSymlink != 0 {
 			return abspath, fmt.Errorf("%s: path %q is a symlink (O_NOFOLLOW)", toolName, path)
 		}
 	}
 
-	// Resolve all symlinks in the path and verify the real path stays
-	// within an allowed base. This catches symlinks in intermediate
-	// directories that escape the whitelist.
+	// When a whitelist is configured, resolve all symlinks in the path and
+	// verify the real path stays within an allowed base. This catches
+	// symlinks in intermediate directories that escape the whitelist. When
+	// no whitelist is configured this check is skipped, but the O_NOFOLLOW
+	// check above still applies.
+	if len(whitelist.paths) == 0 {
+		return abspath, nil
+	}
+
 	realPath := resolveSymlinks(abspath)
 	if !whitelist.IsAllowed(realPath) {
 		return abspath, fmt.Errorf("%s: path %q escapes the path whitelist", toolName, path)

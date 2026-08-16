@@ -158,16 +158,27 @@ func TestMutationQueueRealpathSymlink(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	realFile := filepath.Join(dir, "real-target.txt")
+	// Use an intermediate directory symlink rather than a file symlink. Under
+	// SEC-7 resolveAndValidatePath's O_NOFOLLOW check is always enabled and
+	// rejects a symlink at the final path component, but a symlink in an
+	// intermediate directory (where the final component is a regular file)
+	// is still permitted. This lets the realpath-based worker routing be
+	// exercised end to end with two successful writes.
+	realDir := filepath.Join(dir, "realdir")
+	require.NoError(t, os.MkdirAll(realDir, 0o750)) //nolint:gosec
+	realFile := filepath.Join(realDir, "target.txt")
 	require.NoError(t, os.WriteFile(realFile, []byte("original"), 0o600))
 
-	link := filepath.Join(dir, "link-target.txt")
-	require.NoError(t, os.Symlink(realFile, link))
+	linkDir := filepath.Join(dir, "linkdir")
+	require.NoError(t, os.Symlink(realDir, linkDir))
+	t.Cleanup(func() { _ = os.Remove(linkDir) })
 
-	// Unit-level: realpath resolution maps the symlink and the real path to the
-	// same canonical location.
-	require.Equal(t, resolveRealPath(link), resolveRealPath(realFile),
-		"symlink path must resolve to the same real path as the target")
+	linkedPath := filepath.Join(linkDir, "target.txt")
+
+	// Unit-level: realpath resolution maps the symlinked path and the real
+	// path to the same canonical location.
+	require.Equal(t, resolveRealPath(linkedPath), resolveRealPath(realFile),
+		"symlinked path must resolve to the same real path as the target")
 
 	// Use the built-in handler so mutations perform real writes against the
 	// underlying file, proving FIFO serialization on a shared worker.
@@ -175,8 +186,8 @@ func TestMutationQueueRealpathSymlink(t *testing.T) {
 	cq := q.(*DefaultFileMutationQueue) //nolint:errcheck
 	defer func() { require.NoError(t, cq.Close()) }()
 
-	// Enqueue via the symlink path and then via the real path.
-	resCh1, err := q.Enqueue(context.Background(), FileMutation{FilePath: link, Operation: "write", Content: "via-link", ToolName: "write"})
+	// Enqueue via the symlinked path and then via the real path.
+	resCh1, err := q.Enqueue(context.Background(), FileMutation{FilePath: linkedPath, Operation: "write", Content: "via-link", ToolName: "write"})
 	require.NoError(t, err)
 	resCh2, err := q.Enqueue(context.Background(), FileMutation{FilePath: realFile, Operation: "write", Content: "via-real", ToolName: "write"})
 	require.NoError(t, err)
