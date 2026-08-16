@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -20,12 +21,22 @@ import (
 
 // serveCmd implements Command and starts an ACP HTTP server.
 type serveCmd struct {
-	out io.Writer
+	out    io.Writer
+	errOut io.Writer
 }
 
 // newServeCmd creates a serve command writing to out.
 func newServeCmd(out io.Writer) *serveCmd {
 	return &serveCmd{out: out}
+}
+
+// errWriter returns the writer used for token-related output. It defaults
+// to os.Stderr so that tokens never leak to stdout.
+func (c *serveCmd) errWriter() io.Writer {
+	if c.errOut != nil {
+		return c.errOut
+	}
+	return os.Stderr
 }
 
 // Name implements Command.
@@ -50,6 +61,8 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 		providerFlag string
 		approveMode  ApproveMode
 		tokenFlag    string
+		tokenFile    string
+		showToken    bool
 		noAuth       bool
 		noSandbox    bool
 	)
@@ -58,6 +71,8 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	fs.StringVar(&providerFlag, "provider", "", "provider name to use")
 	fs.Var(&approveMode, "approve", "approval mode: auto|deny|ask (default ask)")
 	fs.StringVar(&tokenFlag, "token", "", "bearer token for HTTP auth (auto-generated if empty)")
+	fs.StringVar(&tokenFile, "token-file", "", "path to write the auto-generated auth token (default ~/.config/go-cli/serve-token)")
+	fs.BoolVar(&showToken, "show-token", false, "print the auth token to stderr")
 	fs.BoolVar(&noAuth, "no-auth", false, "disable bearer-token authentication (insecure)")
 	fs.BoolVar(&noSandbox, "no-sandbox", false, "disable bash sandbox enforcement")
 	if err := fs.Parse(args); err != nil {
@@ -78,6 +93,7 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	// the authenticated subject.
 	authToken := ""
 	authSubject := "cli"
+	tokenWrittenTo := ""
 	if !noAuth {
 		if tokenFlag != "" {
 			authToken = tokenFlag
@@ -87,6 +103,17 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 				return newExecutionError("serve: generate token", err)
 			}
 			authToken = generated
+
+			// Write the auto-generated token to a file with 0600
+			// permissions so it never leaks to stdout.
+			path := tokenFile
+			if path == "" {
+				path = defaultServeTokenPath()
+			}
+			if err := writeTokenFile(path, authToken); err != nil {
+				return newExecutionError("serve: write token file", err)
+			}
+			tokenWrittenTo = path
 		}
 	}
 
@@ -156,8 +183,18 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 
 	fmt.Fprintf(c.out, "ACP HTTP server listening on %s\n", addr)
 	if authToken != "" {
-		fmt.Fprintf(c.out, "Auth token: %s\n", authToken)
-		fmt.Fprintf(c.out, "Use: Authorization: Bearer %s\n", authToken)
+		ew := c.errWriter()
+		if tokenWrittenTo != "" {
+			fmt.Fprintf(ew, "Auth token written to %s (mode 0600)\n", tokenWrittenTo)
+		} else {
+			fmt.Fprintf(ew, "Auth token configured via --token\n")
+		}
+		if showToken {
+			fmt.Fprintf(ew, "Auth token: %s\n", authToken)
+			fmt.Fprintf(ew, "Use: Authorization: Bearer %s\n", authToken)
+		} else {
+			fmt.Fprintf(ew, "Use --show-token to display the token on stderr.\n")
+		}
 	}
 	fmt.Fprintf(c.out, "Routes:\n")
 	fmt.Fprintf(c.out, "  POST /connect     - establish a session\n")
@@ -189,6 +226,26 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	}
 	fmt.Fprintf(c.out, "ACP HTTP server stopped.\n")
 	return nil
+}
+
+// defaultServeTokenPath returns the default path for the serve token file,
+// following the same config directory pattern (~/.config/go-cli/serve-token).
+func defaultServeTokenPath() string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return filepath.Join(".config", "go-cli", "serve-token")
+	}
+	return filepath.Join(home, ".config", "go-cli", "serve-token")
+}
+
+// writeTokenFile writes the token to path with 0600 permissions, creating
+// the parent directory (0700) if necessary.
+func writeTokenFile(path, token string) error {
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(path, []byte(token), 0o600)
 }
 
 // generateServeToken generates a cryptographically random hex token for
