@@ -2,6 +2,7 @@ package production
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -204,4 +205,115 @@ func TestAuditLogStreamingHandlesLargeLines(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, filtered, 1)
 	assert.Equal(t, "big.entry", filtered[0].Operation)
+}
+
+func TestAuditLogHashChain(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	l := NewDefaultAuditLog(path)
+
+	require.NoError(t, l.Log(ctx, AuditEntry{Operation: "op1"}))
+	require.NoError(t, l.Log(ctx, AuditEntry{Operation: "op2"}))
+	require.NoError(t, l.Log(ctx, AuditEntry{Operation: "op3"}))
+
+	entries, err := l.Query(ctx, AuditFilter{})
+	require.NoError(t, err)
+	require.Len(t, entries, 3)
+
+	// First entry has empty PrevHash (genesis of the chain).
+	assert.Empty(t, entries[0].PrevHash, "first entry should have empty prev_hash")
+
+	// Each entry's PrevHash equals the previous entry's Hash.
+	for i := 1; i < len(entries); i++ {
+		assert.Equal(t, entries[i-1].Hash, entries[i].PrevHash,
+			"entry %d prev_hash should equal entry %d hash", i, i-1)
+	}
+
+	// Every entry should have a non-empty Hash.
+	for i, e := range entries {
+		assert.NotEmpty(t, e.Hash, "entry %d should have a hash", i)
+	}
+
+	// VerifyChain should pass on the intact chain.
+	al := l.(*DefaultAuditLog)
+	assert.NoError(t, al.VerifyChain())
+}
+
+func TestAuditLogTamperDetection(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	l := NewDefaultAuditLog(path)
+
+	require.NoError(t, l.Log(ctx, AuditEntry{Operation: "op1", UserID: "u1"}))
+	require.NoError(t, l.Log(ctx, AuditEntry{Operation: "op2", UserID: "u2"}))
+	require.NoError(t, l.Log(ctx, AuditEntry{Operation: "op3", UserID: "u3"}))
+
+	al := l.(*DefaultAuditLog)
+	require.NoError(t, al.VerifyChain())
+
+	// Tamper: modify a field in the second entry.
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	tampered := strings.Replace(string(raw), "op2", "opX", 1)
+	require.NotEqual(t, string(raw), tampered, "tamper should change file content")
+	require.NoError(t, os.WriteFile(path, []byte(tampered), 0o600))
+
+	// VerifyChain should detect the tampering.
+	err = al.VerifyChain()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "hash mismatch")
+}
+
+func TestAuditLogRotation(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	l := NewDefaultAuditLog(path, WithMaxSize(512))
+
+	// Write enough entries to trigger at least one rotation.
+	for i := 0; i < 10; i++ {
+		require.NoError(t, l.Log(ctx, AuditEntry{Operation: "op", UserID: "u"}))
+	}
+
+	// Rotation should have created path+".1".
+	_, err := os.Stat(path + ".1")
+	assert.NoError(t, err, "rotated file path.1 should exist")
+
+	// The current file should still exist and be queryable.
+	entries, err := l.Query(ctx, AuditFilter{})
+	require.NoError(t, err)
+	assert.NotEmpty(t, entries, "current file should have entries")
+
+	// VerifyChain should pass on the current file (new chain after rotation).
+	al := l.(*DefaultAuditLog)
+	assert.NoError(t, al.VerifyChain())
+}
+
+func TestAuditLogConcurrentWrite(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	l := NewDefaultAuditLog(path)
+
+	var wg sync.WaitGroup
+	const goroutines = 100
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			discardErr(l.Log(ctx, AuditEntry{Operation: "op"}))
+		}()
+	}
+	wg.Wait()
+
+	// All 100 entries should be present.
+	entries, err := l.Query(ctx, AuditFilter{})
+	require.NoError(t, err)
+	assert.Len(t, entries, goroutines)
+
+	// Hash chain should be intact despite concurrent writes.
+	al := l.(*DefaultAuditLog)
+	assert.NoError(t, al.VerifyChain())
 }
