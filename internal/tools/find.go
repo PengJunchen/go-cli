@@ -44,6 +44,15 @@ func WithFindForceNode(b bool) FindToolOption {
 	return func(t *FindTool) { t.forceNode = b }
 }
 
+// WithFindPathWhitelist sets the allowed base paths for find operations.
+// When configured, the resolved real path (after symlink resolution) is
+// validated against the whitelist, providing defense-in-depth against symlink
+// escape and absolute path access outside the workdir. An empty slice allows
+// all paths (no restriction beyond traversal checks).
+func WithFindPathWhitelist(paths []string) FindToolOption {
+	return func(t *FindTool) { t.whitelist = NewPathWhitelist(paths) }
+}
+
 // FindTool searches for files and directories under a path using a pattern,
 // preferring the external `fd` binary when available, followed by `find`, and
 // falling back to a pure-Go implementation. It implements the ToolDefinition
@@ -54,6 +63,9 @@ type FindTool struct {
 	// forceNode bypasses external binary discovery and always uses the Go
 	// walker.
 	forceNode bool
+	// whitelist, when configured, restricts searches to paths within the
+	// allowed base directories. Symlink escape is detected and rejected.
+	whitelist PathWhitelist
 }
 
 var _ ToolDefinition = (*FindTool)(nil)
@@ -90,10 +102,13 @@ func (t *FindTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 	if v := getStringArg(call, "path"); strings.TrimSpace(v) != "" {
 		searchPath = v
 	}
-	if !filepath.IsAbs(searchPath) {
-		searchPath = filepath.Join(t.Workdir, searchPath)
+
+	searchPath, err := resolveAndValidatePath("find", t.Workdir, searchPath, t.whitelist)
+	if err != nil {
+		span.SetAttributes(tracing.Attribute{Key: "path", Value: searchPath}, tracing.Attribute{Key: "success", Value: false})
+		logger.Error("find.path_traversal", "tool", "find", "path", searchPath, "err", err)
+		return nil, err
 	}
-	searchPath = filepath.Clean(searchPath)
 
 	pattern := getStringArg(call, "pattern")
 	kind := strings.ToLower(strings.TrimSpace(getStringArg(call, "type")))

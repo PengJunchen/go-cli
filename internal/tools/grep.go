@@ -63,6 +63,15 @@ func WithGrepMaxOutput(n int) GrepToolOption {
 	return func(t *GrepTool) { t.MaxOutput = n }
 }
 
+// WithGrepPathWhitelist sets the allowed base paths for grep operations.
+// When configured, the resolved real path (after symlink resolution) is
+// validated against the whitelist, providing defense-in-depth against symlink
+// escape and absolute path access outside the workdir. An empty slice allows
+// all paths (no restriction beyond traversal checks).
+func WithGrepPathWhitelist(paths []string) GrepToolOption {
+	return func(t *GrepTool) { t.whitelist = NewPathWhitelist(paths) }
+}
+
 // GrepTool searches for a regular expression across files in a directory,
 // preferring ripgrep (rg) when available and falling back to a pure-Go
 // implementation. It implements the ToolDefinition interface.
@@ -76,6 +85,9 @@ type GrepTool struct {
 	MaxOutput int
 	// forcePureGo bypasses ripgrep discovery and always uses the Go fallback.
 	forcePureGo bool
+	// whitelist, when configured, restricts searches to paths within the
+	// allowed base directories. Symlink escape is detected and rejected.
+	whitelist PathWhitelist
 }
 
 var _ ToolDefinition = (*GrepTool)(nil)
@@ -133,10 +145,13 @@ func (t *GrepTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 	if v, ok := call.Args["path"].(string); ok && strings.TrimSpace(v) != "" {
 		searchPath = v
 	}
-	if !filepath.IsAbs(searchPath) {
-		searchPath = filepath.Join(t.Workdir, searchPath)
+
+	searchPath, err = resolveAndValidatePath("grep", t.Workdir, searchPath, t.whitelist)
+	if err != nil {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		logger.Error("grep.path_traversal", "tool", "grep", "path", searchPath, "err", err)
+		return nil, err
 	}
-	searchPath = filepath.Clean(searchPath)
 
 	ms, truncated, err := t.search(ctx, re, searchPath, glob)
 	if err != nil {

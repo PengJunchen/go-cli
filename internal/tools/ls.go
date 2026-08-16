@@ -22,19 +22,44 @@ const (
 	lsDefaultPath = "."
 )
 
+// LSToolOption configures an LSTool.
+type LSToolOption func(*LSTool)
+
+// WithLSWorkdir sets the base directory that relative paths are resolved
+// against.
+func WithLSWorkdir(dir string) LSToolOption {
+	return func(t *LSTool) { t.Workdir = dir }
+}
+
+// WithLSPathWhitelist sets the allowed base paths for ls operations.
+// When configured, the resolved real path (after symlink resolution) is
+// validated against the whitelist, providing defense-in-depth against symlink
+// escape and absolute path access outside the workdir. An empty slice allows
+// all paths (no restriction beyond traversal checks).
+func WithLSPathWhitelist(paths []string) LSToolOption {
+	return func(t *LSTool) { t.whitelist = NewPathWhitelist(paths) }
+}
+
 // LSTool lists the entries of a directory in pure Go, with optional dotfile
 // inclusion, long (ls -l style) formatting and name/time/size sorting. It
 // implements the ToolDefinition interface.
 type LSTool struct {
 	// Workdir is the base directory relative paths are resolved against.
 	Workdir string
+	// whitelist, when configured, restricts listings to paths within the
+	// allowed base directories. Symlink escape is detected and rejected.
+	whitelist PathWhitelist
 }
 
 var _ ToolDefinition = (*LSTool)(nil)
 
 // NewLSTool returns an LSTool with a default workdir of ".".
-func NewLSTool() *LSTool {
-	return &LSTool{Workdir: lsDefaultWorkdir}
+func NewLSTool(opts ...LSToolOption) *LSTool {
+	t := &LSTool{Workdir: lsDefaultWorkdir}
+	for _, opt := range opts {
+		opt(t)
+	}
+	return t
 }
 
 // Name returns the tool name.
@@ -66,10 +91,13 @@ func (t *LSTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, error
 	if v := getStringArg(call, "path"); strings.TrimSpace(v) != "" {
 		listPath = v
 	}
-	if !filepath.IsAbs(listPath) {
-		listPath = filepath.Join(t.Workdir, listPath)
+
+	listPath, err := resolveAndValidatePath("ls", t.Workdir, listPath, t.whitelist)
+	if err != nil {
+		span.SetAttributes(tracing.Attribute{Key: "path", Value: listPath}, tracing.Attribute{Key: "success", Value: false})
+		logger.Error("ls.path_traversal", "tool", "ls", "path", listPath, "err", err)
+		return nil, err
 	}
-	listPath = filepath.Clean(listPath)
 
 	all := getBoolArg(call, "all")
 	long := getBoolArg(call, "long")

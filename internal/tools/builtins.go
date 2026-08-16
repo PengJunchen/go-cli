@@ -122,14 +122,32 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDef
 		bashOpts = append(bashOpts, WithResourceLimits(cfg.resourceLimits))
 	}
 
+	// Build GrepTool options.
+	grepOpts := []GrepToolOption{}
+	if len(cfg.pathWhitelist) > 0 {
+		grepOpts = append(grepOpts, WithGrepPathWhitelist(cfg.pathWhitelist))
+	}
+
+	// Build FindTool options.
+	findOpts := []FindToolOption{}
+	if len(cfg.pathWhitelist) > 0 {
+		findOpts = append(findOpts, WithFindPathWhitelist(cfg.pathWhitelist))
+	}
+
+	// Build LSTool options.
+	lsOpts := []LSToolOption{}
+	if len(cfg.pathWhitelist) > 0 {
+		lsOpts = append(lsOpts, WithLSPathWhitelist(cfg.pathWhitelist))
+	}
+
 	defs := []ToolDefinition{
 		NewReadTool(),
 		NewStreamingBashTool(bashOpts...),
 		NewWriteTool(writeOpts...),
 		NewEditFileTool(editOpts...),
-		NewGrepTool(),
-		NewFindTool(),
-		NewLSTool(),
+		NewGrepTool(grepOpts...),
+		NewFindTool(findOpts...),
+		NewLSTool(lsOpts...),
 	}
 
 	// Register git tools when a GitTool is wired.
