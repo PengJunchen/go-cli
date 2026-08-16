@@ -1,7 +1,9 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,21 +15,32 @@ import (
 	"github.com/pengjunchen/go-cli/internal/config"
 )
 
-// setupOnboardingTest overrides the config-existence check and config path to
-// use a temp directory, returning the config path and a cleanup function.
+// setupOnboardingTest overrides the config-existence check, config path, auth
+// path, TTY detection, and API-key saver to use a temp directory and the
+// non-TTY file fallback. It returns the config path and a cleanup function.
 func setupOnboardingTest(t *testing.T, configExists bool) (string, func()) {
 	t.Helper()
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.yaml")
+	authPath := filepath.Join(tmpDir, "auth.json")
 
 	oldExists := configExistsFunc
 	oldPath := onboardingConfigPathFunc
+	oldAuthPath := onboardingAuthPathFunc
+	oldTTY := stdinIsTTYFunc
+	oldSaveAPIKey := saveAPIKeyFunc
 	configExistsFunc = func() bool { return configExists }
 	onboardingConfigPathFunc = func() string { return configPath }
+	onboardingAuthPathFunc = func() string { return authPath }
+	stdinIsTTYFunc = func() bool { return false }
+	saveAPIKeyFunc = saveAuthFile // file fallback; skip the real keychain
 
 	return configPath, func() {
 		configExistsFunc = oldExists
 		onboardingConfigPathFunc = oldPath
+		onboardingAuthPathFunc = oldAuthPath
+		stdinIsTTYFunc = oldTTY
+		saveAPIKeyFunc = oldSaveAPIKey
 	}
 }
 
@@ -101,7 +114,8 @@ func TestRunOnboarding_ThemeSelection(t *testing.T) {
 }
 
 // TestRunOnboarding_ConfigFileWritten verifies the config file is created on
-// disk with the correct content after onboarding.
+// disk with the correct content after onboarding. The API key must NOT appear
+// in config.yaml; it is stored separately in auth.json with 0600 permissions.
 func TestRunOnboarding_ConfigFileWritten(t *testing.T) {
 	configPath, cleanup := setupOnboardingTest(t, false)
 	defer cleanup()
@@ -116,9 +130,20 @@ func TestRunOnboarding_ConfigFileWritten(t *testing.T) {
 	data, err := os.ReadFile(configPath)
 	require.NoError(t, err)
 	content := string(data)
-	assert.Contains(t, content, "api_key: 'sk-test-key'")
+	assert.NotContains(t, content, "api_key")
 	assert.Contains(t, content, "model: gpt-4o-mini")
 	assert.Contains(t, content, "theme: dark")
+
+	// API key should be in auth.json, not config.yaml.
+	authPath := filepath.Join(filepath.Dir(configPath), "auth.json")
+	authData, err := os.ReadFile(authPath)
+	require.NoError(t, err)
+	assert.Contains(t, string(authData), "sk-test-key")
+
+	// auth.json should have 0600 permissions.
+	info, err := os.Stat(authPath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
 }
 
 // TestRunOnboarding_SkippedWhenConfigExistsAndAPIKeyPresent verifies the
@@ -259,7 +284,7 @@ func TestHasNoOnboardingFlag(t *testing.T) {
 }
 
 // TestSerializeOnboardingYAML verifies the YAML output contains the expected
-// fields.
+// fields and excludes the API key.
 func TestSerializeOnboardingYAML(t *testing.T) {
 	cfg := &config.Config{
 		Provider: config.ProviderConfig{
@@ -278,17 +303,18 @@ func TestSerializeOnboardingYAML(t *testing.T) {
 	yaml := serializeOnboardingYAML(cfg)
 	assert.Contains(t, yaml, "provider:")
 	assert.Contains(t, yaml, "name: openai")
-	assert.Contains(t, yaml, "api_key: 'sk-test'")
+	assert.NotContains(t, yaml, "api_key")
+	assert.NotContains(t, yaml, "sk-test")
 	assert.Contains(t, yaml, "model: gpt-4o-mini")
 	assert.Contains(t, yaml, "max_tokens: 4096")
 	assert.Contains(t, yaml, "tui:")
 	assert.Contains(t, yaml, "theme: dark")
 }
 
-// TestSerializeOnboardingYAML_APIKeyEscaping verifies that API keys containing
-// special YAML characters are properly single-quoted in the output and can be
-// round-tripped through the YAML loader without corruption.
-func TestSerializeOnboardingYAML_APIKeyEscaping(t *testing.T) {
+// TestSerializeOnboardingYAML_APIKeyNotLeaked verifies that API keys containing
+// special characters are never written to config.yaml regardless of their
+// content. The key is persisted to auth.json or the keychain instead.
+func TestSerializeOnboardingYAML_APIKeyNotLeaked(t *testing.T) {
 	cases := []struct {
 		name   string
 		apiKey string
@@ -314,17 +340,75 @@ func TestSerializeOnboardingYAML_APIKeyEscaping(t *testing.T) {
 			cfg.TUI.Theme = "dark"
 
 			yaml := serializeOnboardingYAML(cfg)
-
-			// The key must be single-quoted in the output.
-			assert.Contains(t, yaml, "api_key: '"+tc.apiKey+"'")
-
-			// The generated YAML must parse back correctly via yaml_loader.
-			var parsed config.Config
-			err := config.UnmarshalConfig([]byte(yaml), config.ConfigFormatYAML, &parsed)
-			require.NoError(t, err, "YAML should parse without error")
-
-			assert.Equal(t, tc.apiKey, parsed.Provider.APIKey,
-				"API key should round-trip through YAML serialization")
+			assert.NotContains(t, yaml, "api_key", "API key field must not appear in config.yaml")
+			assert.NotContains(t, yaml, tc.apiKey, "API key value must not leak into YAML")
 		})
 	}
+}
+
+// TestReadPasswordMasked_NonTTYFallback verifies that when stdin is not a TTY
+// (pipes, CI), readPasswordMasked falls back to a plain ReadString so the
+// input is still consumed correctly.
+func TestReadPasswordMasked_NonTTYFallback(t *testing.T) {
+	oldTTY := stdinIsTTYFunc
+	stdinIsTTYFunc = func() bool { return false }
+	defer func() { stdinIsTTYFunc = oldTTY }()
+
+	reader := bufio.NewReader(strings.NewReader("sk-secret-key\n"))
+	var out bytes.Buffer
+	line, err := readPasswordMasked(reader, &out)
+	require.NoError(t, err)
+	assert.Equal(t, "sk-secret-key\n", line)
+}
+
+// TestSaveAuthFile_ContentAndPermissions verifies that saveAuthFile writes the
+// API key as JSON with 0600 permissions.
+func TestSaveAuthFile_ContentAndPermissions(t *testing.T) {
+	tmpDir := t.TempDir()
+	authPath := filepath.Join(tmpDir, "auth.json")
+
+	oldPath := onboardingAuthPathFunc
+	onboardingAuthPathFunc = func() string { return authPath }
+	defer func() { onboardingAuthPathFunc = oldPath }()
+
+	require.NoError(t, saveAuthFile("sk-my-secret"))
+
+	data, err := os.ReadFile(authPath)
+	require.NoError(t, err)
+
+	var m map[string]string
+	require.NoError(t, json.Unmarshal(data, &m))
+	assert.Equal(t, "sk-my-secret", m["api_key"])
+
+	info, err := os.Stat(authPath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+}
+
+// TestRunOnboarding_APIKeyInAuthJSONNotYAML verifies end-to-end that the API
+// key entered during onboarding ends up in auth.json and never in config.yaml.
+func TestRunOnboarding_APIKeyInAuthJSONNotYAML(t *testing.T) {
+	configPath, cleanup := setupOnboardingTest(t, false)
+	defer cleanup()
+
+	cfg := &config.Config{}
+	input := "sk-onboarding-key\n1\n1\n"
+	var out bytes.Buffer
+
+	require.NoError(t, RunOnboarding(cfg, strings.NewReader(input), &out))
+
+	// config.yaml must not contain the key.
+	yamlData, err := os.ReadFile(configPath)
+	require.NoError(t, err)
+	assert.NotContains(t, string(yamlData), "sk-onboarding-key")
+	assert.NotContains(t, string(yamlData), "api_key")
+
+	// auth.json must contain the key as JSON.
+	authPath := filepath.Join(filepath.Dir(configPath), "auth.json")
+	authData, err := os.ReadFile(authPath)
+	require.NoError(t, err)
+
+	var m map[string]string
+	require.NoError(t, json.Unmarshal(authData, &m))
+	assert.Equal(t, "sk-onboarding-key", m["api_key"])
 }
