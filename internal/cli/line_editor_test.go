@@ -819,3 +819,152 @@ func TestVisualLineCount_WithNewlines(t *testing.T) {
 	// Empty buffer and empty prompt
 	assert.Equal(t, 1, visualLineCount("", []rune(""), 80))
 }
+
+// ---------------------------------------------------------------------------
+// IME detection and cooked mode fallback tests
+// ---------------------------------------------------------------------------
+
+// TestIMEDetection verifies that receiving a multi-byte UTF-8 sequence (CJK
+// character) in raw TTY mode sets imeDetected and prints a one-time warning.
+func TestIMEDetection(t *testing.T) {
+	var out bytes.Buffer
+	le := NewDefaultLineEditor(strings.NewReader(""), &out)
+
+	// CJK character "你" (U+4F60) = 3-byte UTF-8: E4 BD A0, then Enter.
+	keys := []byte{0xE4, 0xBD, 0xA0, '\r'}
+	line, err := le.readSingleLineTTY(makeReadByte(keys), "> ")
+	require.NoError(t, err)
+	assert.Equal(t, "你", line)
+	assert.True(t, le.imeDetected, "imeDetected should be true after CJK input")
+	assert.True(t, le.imePromptShown, "imePromptShown should be true after first detection")
+	assert.Contains(t, out.String(), "IME", "warning message should be printed")
+	assert.Contains(t, out.String(), "Ctrl+\\", "warning should mention Ctrl+\\ shortcut")
+}
+
+// TestIMEDetection_OneTimeWarning verifies that the IME warning is only
+// printed once even if multiple CJK characters are entered across separate
+// readSingleLineTTY calls.
+func TestIMEDetection_OneTimeWarning(t *testing.T) {
+	var out bytes.Buffer
+	le := NewDefaultLineEditor(strings.NewReader(""), &out)
+
+	// First CJK character triggers the warning.
+	keys1 := []byte{0xE4, 0xBD, 0xA0, '\r'} // 你
+	_, err := le.readSingleLineTTY(makeReadByte(keys1), "> ")
+	require.NoError(t, err)
+	assert.True(t, le.imeDetected)
+
+	warningCount := strings.Count(out.String(), "IME (input method editor) detected")
+	assert.Equal(t, 1, warningCount, "warning should appear exactly once")
+
+	// Second CJK character should NOT trigger another warning.
+	out.Reset()
+	keys2 := []byte{0xE5, 0xA5, 0xBD, '\r'} // 好
+	_, err = le.readSingleLineTTY(makeReadByte(keys2), "> ")
+	require.NoError(t, err)
+	assert.NotContains(t, out.String(), "IME (input method editor) detected",
+		"warning should not be repeated")
+}
+
+// TestCookedModeSwitch verifies that pressing Ctrl+\ (0x1C) in raw TTY mode
+// returns errToggleCooked and sets cookedMode to true.
+func TestCookedModeSwitch(t *testing.T) {
+	var out bytes.Buffer
+	le := NewDefaultLineEditor(strings.NewReader(""), &out)
+
+	keys := []byte{0x1C} // Ctrl+\
+	_, err := le.readSingleLineTTY(makeReadByte(keys), "> ")
+	assert.ErrorIs(t, err, errToggleCooked)
+	assert.True(t, le.cookedMode, "cookedMode should be true after Ctrl+\\")
+}
+
+// TestCookedModeSwitch_PreservesBufferContent verifies that Ctrl+\ can be
+// pressed after typing some text — the typed text is discarded (cooked mode
+// starts fresh) but the toggle still works.
+func TestCookedModeSwitch_AfterTyping(t *testing.T) {
+	var out bytes.Buffer
+	le := NewDefaultLineEditor(strings.NewReader(""), &out)
+
+	// Type "abc" then Ctrl+\
+	keys := []byte{'a', 'b', 'c', 0x1C}
+	_, err := le.readSingleLineTTY(makeReadByte(keys), "> ")
+	assert.ErrorIs(t, err, errToggleCooked)
+	assert.True(t, le.cookedMode, "cookedMode should be true after Ctrl+\\")
+}
+
+// TestIMEDetectionNonTTY verifies that IME detection does NOT trigger in
+// non-TTY (piped) input. CJK characters in piped input should be read
+// normally without setting imeDetected.
+func TestIMEDetectionNonTTY(t *testing.T) {
+	le := NewDefaultLineEditor(strings.NewReader("你好\n"), io.Discard)
+
+	ctx := context.Background()
+	line, err := le.ReadLine(ctx, "> ")
+	require.NoError(t, err)
+	assert.Equal(t, "你好", line)
+	assert.False(t, le.imeDetected, "imeDetected should stay false in non-TTY mode")
+	assert.False(t, le.imePromptShown, "imePromptShown should stay false in non-TTY mode")
+}
+
+// TestCookedModeInput verifies that readLineCooked reads a line via
+// bufio.Scanner and displays the prompt.
+func TestCookedModeInput(t *testing.T) {
+	var out bytes.Buffer
+	le := NewDefaultLineEditor(strings.NewReader("hello from cooked mode\n"), &out)
+
+	ctx := context.Background()
+	line, err := le.readLineCooked(ctx, "> ")
+	require.NoError(t, err)
+	assert.Equal(t, "hello from cooked mode", line)
+	assert.Contains(t, out.String(), "> ", "prompt should be displayed")
+}
+
+// TestCookedModeInput_MultiLine verifies that readLineCookedMulti handles
+// backslash continuation and triple-quote detection in cooked mode.
+func TestCookedModeInput_MultiLine(t *testing.T) {
+	var out bytes.Buffer
+	le := NewDefaultLineEditor(strings.NewReader("line1 \\\nline2\n"), &out)
+
+	ctx := context.Background()
+	result, err := le.readLineCookedMulti(ctx, "> ", nil)
+	require.NoError(t, err)
+	assert.Equal(t, "line1 \nline2", result)
+}
+
+// TestCookedModeInput_EOF verifies that readLineCooked returns io.EOF when
+// the input is exhausted.
+func TestCookedModeInput_EOF(t *testing.T) {
+	le := NewDefaultLineEditor(strings.NewReader(""), io.Discard)
+
+	ctx := context.Background()
+	_, err := le.readLineCooked(ctx, "> ")
+	assert.ErrorIs(t, err, io.EOF)
+}
+
+// TestCookedModeInput_Cancel verifies that readLineCooked returns
+// context.Canceled promptly when the context is canceled.
+func TestCookedModeInput_Cancel(t *testing.T) {
+	r, w := io.Pipe()
+	le := NewDefaultLineEditor(r, io.Discard)
+	defer w.Close()
+	defer r.Close()
+
+	ctx, cancel := context.WithCancel(context.Background())
+
+	done := make(chan struct{})
+	go func() {
+		_, err := le.readLineCooked(ctx, "> ")
+		assert.ErrorIs(t, err, context.Canceled)
+		close(done)
+	}()
+
+	// Give the goroutine time to enter scanner.Scan().
+	time.Sleep(50 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("readLineCooked did not return within 200ms of cancel")
+	}
+}
