@@ -925,3 +925,132 @@ func TestHTTPServer_SessionTTL(t *testing.T) {
 		t.Errorf("expected 0 sessions after TTL, got %d", n)
 	}
 }
+
+// --- Security: request body size limit tests (SEC-2) ---
+
+// postOversizedBody sends a POST request with a JSON body exceeding
+// maxRequestBodySize (1 MB) to verify 413 rejection.
+func postOversizedBody(t *testing.T, baseURL, path string) *http.Response {
+	t.Helper()
+	// Build a valid JSON object whose serialized size exceeds maxRequestBodySize.
+	big := strings.Repeat("x", maxRequestBodySize+1024)
+	body := `{"sender_id":"oversized","content":"` + big + `"}`
+	resp, err := http.Post(baseURL+path, "application/json", strings.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST %s failed: %v", path, err)
+	}
+	return resp
+}
+
+// TestACPHTTP_BodySizeLimit_Connect verifies that POST /connect with a body
+// exceeding 1 MB is rejected with 413 and no session is created (SEC-2 AC-1).
+func TestACPHTTP_BodySizeLimit_Connect(t *testing.T) {
+	srv, baseURL := startTestHTTPServer(t, nil)
+
+	resp := postOversizedBody(t, baseURL, "/connect")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413, got %d", resp.StatusCode)
+	}
+
+	// No session should be created for an oversized request.
+	if n := srv.ActiveSessions(); n != 0 {
+		t.Errorf("expected 0 sessions, got %d", n)
+	}
+}
+
+// TestACPHTTP_BodySizeLimit_Send verifies that POST /send with a body
+// exceeding 1 MB is rejected with 413 and ProcessMessage is not called
+// (SEC-2 AC-1).
+func TestACPHTTP_BodySizeLimit_Send(t *testing.T) {
+	dispatched := make(chan struct{}, 1)
+	d := &mockSubagentDispatcher{
+		result:     core.SubagentResult{Content: "reply"},
+		dispatched: dispatched,
+	}
+	handler := NewCoreHandler(d, nil)
+
+	srv, baseURL := startTestHTTPServer(t, handler)
+
+	resp := postOversizedBody(t, baseURL, "/send")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413, got %d", resp.StatusCode)
+	}
+
+	// ProcessMessage must not be called for an oversized body.
+	select {
+	case <-dispatched:
+		t.Error("ProcessMessage should not be called for oversized body")
+	case <-time.After(100 * time.Millisecond):
+		// Good — no dispatch occurred.
+	}
+
+	// No session should be created.
+	if n := srv.ActiveSessions(); n != 0 {
+		t.Errorf("expected 0 sessions, got %d", n)
+	}
+}
+
+// TestACPHTTP_BodySizeLimit_Disconnect verifies that POST /disconnect with a
+// body exceeding 1 MB is rejected with 413 (SEC-2 AC-1).
+func TestACPHTTP_BodySizeLimit_Disconnect(t *testing.T) {
+	_, baseURL := startTestHTTPServer(t, nil)
+
+	resp := postOversizedBody(t, baseURL, "/disconnect")
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Errorf("expected 413, got %d", resp.StatusCode)
+	}
+}
+
+// TestACPHTTP_NormalBodyAccepted verifies that a normal-sized request body
+// is accepted and processed normally (SEC-2 AC-2).
+func TestACPHTTP_NormalBodyAccepted(t *testing.T) {
+	srv, baseURL := startTestHTTPServer(t, nil)
+
+	resp := postACP(t, baseURL, "/connect", ACPMessage{
+		Type:     TypeConnect,
+		SenderID: "normal-body-test",
+	})
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 for normal body, got %d", resp.StatusCode)
+	}
+
+	// Session should be created.
+	if n := srv.ActiveSessions(); n != 1 {
+		t.Errorf("expected 1 session, got %d", n)
+	}
+}
+
+// TestACPHTTP_EmptyBodyDisconnect verifies that POST /disconnect with an
+// empty body is still accepted (backward compatibility) and returns 200
+// (SEC-2 constraint: handleDisconnect empty body compat must be preserved).
+func TestACPHTTP_EmptyBodyDisconnect(t *testing.T) {
+	_, baseURL := startTestHTTPServer(t, nil)
+
+	// Create a session first.
+	postACP(t, baseURL, "/connect", ACPMessage{
+		Type:     TypeConnect,
+		SenderID: "empty-body-test",
+	}).Body.Close()
+
+	// Disconnect with an empty body — should be accepted.
+	// With an empty body, msg.SenderID defaults to "" so the handler
+	// falls through to the sender_id query param (also absent here).
+	// The key assertion is that the request is accepted (200), not rejected.
+	resp, err := http.Post(baseURL+"/disconnect", "application/json", strings.NewReader(""))
+	if err != nil {
+		t.Fatalf("POST /disconnect failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("expected 200 for empty body disconnect, got %d", resp.StatusCode)
+	}
+}
