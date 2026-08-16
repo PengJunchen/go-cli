@@ -6,6 +6,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net"
@@ -22,6 +23,11 @@ import (
 type contextKey int
 
 const authSubjectKey contextKey = iota
+
+// maxRequestBodySize caps the size of a request body accepted by the ACP
+// HTTP server. This prevents a malicious client from exhausting server
+// memory by sending an arbitrarily large request body (DoS mitigation).
+const maxRequestBodySize = 1 * 1024 * 1024 // 1 MB
 
 // HTTPServer implements ACPServer, serving the ACP JSON-over-HTTP protocol.
 // It exposes four routes that mirror the gRPCAdapter client contract:
@@ -149,6 +155,16 @@ func (s *HTTPServer) rateLimitMiddleware(next http.Handler) http.Handler {
 	})
 }
 
+// bodyLimitMiddleware wraps r.Body with an http.MaxBytesReader so that any
+// handler reading the body is capped at maxRequestBodySize. Handlers detect
+// the resulting *http.MaxBytesError from json.Decode and return 413.
+func (s *HTTPServer) bodyLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, maxRequestBodySize)
+		next.ServeHTTP(w, r)
+	})
+}
+
 // Start brings the HTTP server up and begins serving. It binds the listener
 // synchronously so that bind errors (e.g. port in use) are returned to the
 // caller rather than silently logged.
@@ -181,6 +197,7 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 	mux.HandleFunc("/events", s.handleEvents)
 
 	handler := http.Handler(mux)
+	handler = s.bodyLimitMiddleware(handler)
 	if s.authToken != "" {
 		handler = s.authMiddleware(handler)
 	}
@@ -331,6 +348,11 @@ func (s *HTTPServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 
 	var msg ACPMessage
 	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -362,6 +384,11 @@ func (s *HTTPServer) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	var msg ACPMessage
 	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
 		return
 	}
@@ -413,6 +440,11 @@ func (s *HTTPServer) handleDisconnect(w http.ResponseWriter, r *http.Request) {
 
 	var msg ACPMessage
 	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
 		// Allow empty body disconnect.
 		msg.SenderID = ""
 	}
