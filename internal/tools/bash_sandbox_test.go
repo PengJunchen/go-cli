@@ -4,6 +4,8 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -803,5 +805,180 @@ func TestSandbox_BacktickEchoRmBlocked(t *testing.T) {
 func TestSandbox_SubstitutionSafeDateNotBlocked(t *testing.T) {
 	sb := NewDefaultBashSandbox()
 	err := sb.Validate(context.Background(), "echo $(date)", "/anywhere")
+	require.NoError(t, err)
+}
+
+// --- Task 49-3: Variable concatenation bypass detection (SEC-3) ---
+//
+// Detect patterns where a blacklisted command name is assembled from
+// multiple variable assignments (e.g. "a=r;b=m;c=$a$b;$c -rf /") and then
+// invoked via a $VAR indirect call. Normal variable usage such as
+// "PATH=/usr/bin:$PATH echo hello" must NOT be blocked.
+
+func TestCommandFilter_VariableIndirectCall(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked("x=rm; $x -rf /"))
+	reason := f.BlockReason("x=rm; $x -rf /")
+	assert.True(t,
+		strings.Contains(reason, "variable") || strings.Contains(reason, "indirect"),
+		"reason should mention variable or indirect, got: %s", reason)
+}
+
+func TestCommandFilter_VariableConcatenation(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked("a=r;b=m;c=$a$b;$c -rf /"))
+	reason := f.BlockReason("a=r;b=m;c=$a$b;$c -rf /")
+	assert.True(t,
+		strings.Contains(reason, "concatenation") || strings.Contains(reason, "variable"),
+		"reason should mention concatenation or variable, got: %s", reason)
+}
+
+func TestCommandFilter_BraceVarSyntax(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked("x=rm; ${x} -rf /"))
+}
+
+func TestCommandFilter_NormalVariableNotBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.False(t, f.IsBlocked("PATH=/usr/bin:$PATH echo hello"))
+	assert.Equal(t, "", f.BlockReason("PATH=/usr/bin:$PATH echo hello"))
+}
+
+func TestCommandFilter_VariableBypassRace(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	inputs := []string{
+		"x=rm; $x -rf /",
+		"a=r;b=m;c=$a$b;$c -rf /",
+		"PATH=/usr/bin:$PATH echo hello",
+		"x=rm; ${x} -rf /",
+		"a=r;b=m;$a$b -rf /",
+		"echo hello",
+	}
+	expect := map[string]bool{
+		"x=rm; $x -rf /":                true,
+		"a=r;b=m;c=$a$b;$c -rf /":       true,
+		"PATH=/usr/bin:$PATH echo hello": false,
+		"x=rm; ${x} -rf /":              true,
+		"a=r;b=m;$a$b -rf /":            true,
+		"echo hello":                    false,
+	}
+	var wg sync.WaitGroup
+	for n := 0; n < 4; n++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for i := 0; i < 500; i++ {
+				in := inputs[i%len(inputs)]
+				got := f.IsBlocked(in)
+				assert.Equal(t, expect[in], got, "inconsistent result for %q", in)
+			}
+		}()
+	}
+	wg.Wait()
+}
+
+// --- Task 49-3: additional unit and edge-case tests ---
+
+func TestExtractVariableReferences(t *testing.T) {
+	tests := []struct {
+		input string
+		want  []string
+	}{
+		{"$a$b", []string{"a", "b"}},
+		{"${a}${b}", []string{"a", "b"}},
+		{"$a${b}$c", []string{"a", "b", "c"}},
+		{"/usr/bin:$PATH", []string{"PATH"}},
+		{"hello", nil},
+		{"$1", nil},  // positional parameter — not tracked
+		{"$_", []string{"_"}},
+		{"${VAR}", []string{"VAR"}},
+	}
+	for _, tt := range tests {
+		got := extractVariableReferences(tt.input)
+		assert.Equal(t, tt.want, got, "input: %s", tt.input)
+	}
+}
+
+func TestExpandVariableRefs(t *testing.T) {
+	assignments := map[string]string{"a": "r", "b": "m"}
+	assert.Equal(t, "rm", expandVariableRefs("$a$b", assignments))
+	assert.Equal(t, "rm", expandVariableRefs("${a}${b}", assignments))
+	assert.Equal(t, "rX", expandVariableRefs("${a}X", assignments))
+	// Unknown variables expand to empty string.
+	assert.Equal(t, "Z", expandVariableRefs("Z$unknown", assignments))
+	assert.Equal(t, "", expandVariableRefs("$unknown", assignments))
+}
+
+func TestEffectiveCommandAndArgs_VariableIndirect(t *testing.T) {
+	cmd, args := effectiveCommandAndArgs(strings.Fields("$x -rf /"))
+	assert.Equal(t, "$x", cmd)
+	assert.Equal(t, []string{"-rf", "/"}, args)
+}
+
+func TestEffectiveCommandAndArgs_BraceVariableIndirect(t *testing.T) {
+	cmd, _ := effectiveCommandAndArgs(strings.Fields("${x} -rf /"))
+	assert.Equal(t, "${x}", cmd)
+}
+
+func TestEffectiveCommandAndArgs_QuotedVariableIndirect(t *testing.T) {
+	cmd, _ := effectiveCommandAndArgs(strings.Fields(`"$x" -rf /`))
+	assert.Equal(t, "$x", cmd)
+}
+
+func TestCommandFilter_VariableConcatInCommand(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	// Concatenation happens in the command token itself, not in an assignment.
+	assert.True(t, f.IsBlocked("a=r;b=m;$a$b -rf /"))
+}
+
+func TestCommandFilter_VariableConcatQuotedAssignment(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	// Quoted assignment values must still be resolved.
+	assert.True(t, f.IsBlocked(`a=r;b=m;c="$a$b";$c -rf /`))
+	assert.True(t, f.IsBlocked(`a=r;b=m;c='$a$b';$c -rf /`))
+}
+
+func TestCommandFilter_VariableIndirectWithSudo(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.True(t, f.IsBlocked("x=rm; sudo $x -rf /"))
+}
+
+func TestCommandFilter_VariableReferenceChain(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	// Chain: y=rm; x=$y; $x — x resolves to "rm" via y.
+	assert.True(t, f.IsBlocked("y=rm; x=$y; $x -rf /"))
+}
+
+func TestCommandFilter_NormalVariableAssignmentNotBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	assert.False(t, f.IsBlocked("FOO=bar echo hello"))
+	assert.False(t, f.IsBlocked("X=$Y echo hello"))
+	assert.False(t, f.IsBlocked("a=r;b=m")) // assignments without invocation
+}
+
+func TestCommandFilter_PathAppendNotBlocked(t *testing.T) {
+	f := NewCommandFilter(defaultCommandBlacklist)
+	// Common pattern: appending to PATH must not trigger a false positive.
+	assert.False(t, f.IsBlocked("PATH=$PATH:/usr/local/bin echo hello"))
+	assert.False(t, f.IsBlocked("LD_LIBRARY_PATH=/opt/lib:$LD_LIBRARY_PATH ls"))
+}
+
+func TestSandbox_VariableIndirectCallBlocked(t *testing.T) {
+	sb := NewDefaultBashSandbox()
+	err := sb.Validate(context.Background(), "x=rm; $x -rf /", "/anywhere")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "variable")
+}
+
+func TestSandbox_VariableConcatenationBlocked(t *testing.T) {
+	sb := NewDefaultBashSandbox()
+	err := sb.Validate(context.Background(), "a=r;b=m;c=$a$b;$c -rf /", "/anywhere")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "concatenation")
+}
+
+func TestSandbox_NormalVariableNotBlocked(t *testing.T) {
+	sb := NewDefaultBashSandbox()
+	err := sb.Validate(context.Background(), "PATH=/usr/bin:$PATH echo hello", "/anywhere")
 	require.NoError(t, err)
 }

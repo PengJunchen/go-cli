@@ -130,7 +130,10 @@ func (wl PathWhitelist) IsAllowed(workDir string) bool {
 // evade detection, so authoritative security controls must be enforced at
 // the execution layer (e.g. a real sandbox with reduced privileges, seccomp,
 // namespaces). The filter's role is to catch common bypass vectors early and
-// fail closed.
+// fail closed. Variable concatenation bypasses (e.g. "a=r;b=m;c=$a$b;$c")
+// are detected by tracking NAME=value assignments within a single command
+// string, but variables inherited from the environment cannot be resolved
+// statically and may still evade detection.
 type CommandFilter struct {
 	blacklist []string
 	whitelist []string
@@ -195,7 +198,15 @@ func (f CommandFilter) blockReason(s string) (bool, string) {
 	// Remove substitutions so they don't pollute first-token extraction,
 	// then split on operators and check each segment.
 	stripped := stripSubShells(s)
-	for _, seg := range splitCommands(stripped) {
+	segments := splitCommands(stripped)
+	// Detect variable concatenation bypass across all segments. This catches
+	// patterns like "a=r;b=m;c=$a$b;$c -rf /" where a blacklisted command name
+	// is assembled from multiple variable assignments and then invoked via a
+	// $VAR indirect call. See hasVariableConcatBypass for details.
+	if blocked, reason := f.hasVariableConcatBypass(segments); blocked {
+		return true, reason
+	}
+	for _, seg := range segments {
 		// Check variable assignments for blacklisted values (e.g. x=rm).
 		if f.hasBlockedAssignment(seg) {
 			return true, "blacklisted command in variable assignment"
@@ -508,12 +519,24 @@ func effectiveCommand(s string) string {
 // tokens that follow it. It skips leading variable assignments (FOO=bar) and
 // known prefix/wrapper commands (sudo, doas, function, ...). The command token
 // is normalized via normalizeCommandToken before filepath.Base is applied.
+//
+// For $-prefixed tokens (variable indirect calls like $VAR or ${VAR}) the
+// normalized token is returned WITHOUT filepath.Base so that callers such as
+// hasVariableConcatBypass can resolve the variable reference before applying
+// filepath.Base to the expanded result.
 func effectiveCommandAndArgs(fields []string) (cmd string, args []string) {
 	for i, f := range fields {
 		if isVariableAssignment(f) {
 			continue
 		}
-		base := filepath.Base(normalizeCommandToken(f))
+		normalized := normalizeCommandToken(f)
+		// Variable indirect call ($VAR or ${VAR}): return the normalized
+		// token without filepath.Base so callers can resolve the reference
+		// before applying filepath.Base to the expanded value.
+		if strings.HasPrefix(normalized, "$") {
+			return normalized, fields[i+1:]
+		}
+		base := filepath.Base(normalized)
 		if commandPrefixes[base] {
 			continue
 		}
@@ -624,6 +647,53 @@ func isVariableAssignment(token string) bool {
 	return true
 }
 
+// varRefRe matches shell variable references in $VAR and ${VAR} forms,
+// capturing the variable name (without $ or {}) so callers can resolve
+// references against an assignment map. Positional parameters ($1, $@, etc.)
+// and parameter-expansion operators (${VAR:-default}) are intentionally not
+// matched because the sandbox only tracks simple NAME=value assignments.
+var varRefRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)\}|\$([A-Za-z_][A-Za-z0-9_]*)`)
+
+// extractVariableReferences returns the names of all variable references
+// ($VAR and ${VAR}) found in s, in order of appearance. It is used by
+// hasVariableConcatBypass to determine whether an assignment value is built
+// from other variables (and therefore warrants cross-segment resolution).
+func extractVariableReferences(s string) []string {
+	matches := varRefRe.FindAllStringSubmatch(s, -1)
+	if len(matches) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(matches))
+	for _, m := range matches {
+		if m[1] != "" { // ${VAR} form
+			names = append(names, m[1])
+		} else { // $VAR form
+			names = append(names, m[2])
+		}
+	}
+	return names
+}
+
+// expandVariableRefs replaces $VAR and ${VAR} references in s with their
+// values from assignments. Unknown variables expand to the empty string,
+// matching bash semantics with set -u disabled. This is the deny-first
+// choice: an unresolvable reference contributes nothing, but a value that
+// becomes a blacklisted command after partial resolution is still caught.
+func expandVariableRefs(s string, assignments map[string]string) string {
+	return varRefRe.ReplaceAllStringFunc(s, func(match string) string {
+		var name string
+		if strings.HasPrefix(match, "${") {
+			name = match[2 : len(match)-1]
+		} else {
+			name = match[1:]
+		}
+		if v, ok := assignments[name]; ok {
+			return v
+		}
+		return ""
+	})
+}
+
 // hasBlockedAssignment checks whether any variable assignment in the segment
 // has a blacklisted command as its value. This prevents bypasses like
 // "x=rm; $x file" where a blacklisted command is assigned to a variable and
@@ -644,6 +714,64 @@ func (f CommandFilter) hasBlockedAssignment(seg string) bool {
 		}
 	}
 	return false
+}
+
+// hasVariableConcatBypass detects variable concatenation bypass patterns where
+// multiple variable assignments are concatenated (directly or via $VAR
+// references) to form a blacklisted command, or where a $VAR indirect call
+// resolves to a blacklisted command. It scans all segments together so that
+// assignments in earlier segments (e.g. "a=r;b=m;c=$a$b;$c -rf /") are visible
+// to later segments.
+//
+// Direct single-value assignments like "x=rm" are handled by
+// hasBlockedAssignment; this function focuses on values that involve variable
+// references (concatenation) and on $VAR indirect command calls. Normal usage
+// such as "PATH=/usr/bin:$PATH echo hello" is not blocked because the resolved
+// assignment value ("/usr/bin:" or similar) is not a blacklisted command name.
+// Variables inherited from the environment cannot be resolved statically and
+// are treated as empty (deny-first): a partially resolved value that becomes a
+// blacklisted command is still caught.
+func (f CommandFilter) hasVariableConcatBypass(segments []string) (bool, string) {
+	assignments := map[string]string{}
+	for _, seg := range segments {
+		fields := strings.Fields(seg)
+		if len(fields) == 0 {
+			continue
+		}
+		// Process leading variable assignments, resolving $VAR / ${VAR}
+		// references against previously seen assignments so that chains
+		// like "a=r;b=m;c=$a$b" are fully resolved (c => "rm").
+		for _, field := range fields {
+			if !isVariableAssignment(field) {
+				break
+			}
+			idx := strings.Index(field, "=")
+			name := field[:idx]
+			value := normalizeCommandToken(field[idx+1:])
+			refs := extractVariableReferences(value)
+			resolved := expandVariableRefs(value, assignments)
+			assignments[name] = resolved
+			// Flag concatenation only when the value actually contained
+			// variable references; plain "x=rm" is left to
+			// hasBlockedAssignment to avoid duplicate reporting.
+			if len(refs) > 0 && f.isBlacklisted(filepath.Base(resolved)) {
+				return true, "blacklisted command via variable concatenation: " + name
+			}
+		}
+		// Detect $VAR indirect calls: when the effective command starts
+		// with '$', resolve it via the assignment map and check the
+		// blacklist. effectiveCommandAndArgs returns the normalized token
+		// (without filepath.Base) for $-prefixed commands so that the full
+		// reference is preserved for expansion.
+		cmd, _ := effectiveCommandAndArgs(fields)
+		if cmd != "" && strings.HasPrefix(cmd, "$") {
+			resolved := expandVariableRefs(cmd, assignments)
+			if f.isBlacklisted(filepath.Base(resolved)) {
+				return true, "blacklisted command via variable indirect call: " + cmd
+			}
+		}
+	}
+	return false, ""
 }
 
 // blockedTokenInSubstitution scans the inner content of a command substitution
