@@ -382,11 +382,22 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 	}
 
 	// Build tool definitions for the model from the tool registry so the LLM
-	// knows what tools it can invoke.
+	// knows what tools it can invoke. The raw tool definitions are cached in
+	// toolDefs for the duration of this Run so that subsequent paths (tool
+	// filtering, prompt builder, system prompt) reuse the same snapshot
+	// instead of calling List again. buildToolDefinitions has its own
+	// version-based cache and is left untouched.
+	var toolDefs []tools.ToolDefinition
 	var toolOpts []llm.Option
 	var searchTool *tools.ToolSearchTool
 	needToolFiltering := false
 	if l.tools != nil {
+		if defs, err := l.tools.List(spanCtx); err == nil {
+			toolDefs = defs
+		} else {
+			logger.Warn("core.loop.list_tools_failed", "err", err)
+		}
+
 		llmTools, listErr := l.buildToolDefinitions(spanCtx)
 		if listErr != nil {
 			logger.Warn("core.loop.list_tools_failed", "err", listErr)
@@ -396,8 +407,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 			// Dynamic tool filtering: when the tool count exceeds the
 			// threshold, score and filter to reduce context bloat.
 			if toolSearchThreshold > 0 && len(llmTools) > toolSearchThreshold {
-				defs, _ := l.tools.List(spanCtx)
-				for _, d := range defs {
+				for _, d := range toolDefs {
 					if st, ok := d.(*tools.ToolSearchTool); ok {
 						searchTool = st
 						needToolFiltering = true
@@ -439,17 +449,13 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 	if l.promptBuilder != nil {
 		opts := l.promptOpts
 		if l.tools != nil {
-			if defs, listErr := l.tools.List(spanCtx); listErr == nil {
-				opts.Tools = defs
-			} else {
-				logger.Warn("core.loop.list_tools_for_prompt_failed", "err", listErr)
-			}
+			opts.Tools = toolDefs
 		}
 		sysPrompt = l.promptBuilder.Build(spanCtx, opts)
 	} else {
 		sysPrompt = l.systemPromptOverride
 		if sysPrompt == "" {
-			sysPrompt = systemPrompt(spanCtx, l.tools)
+			sysPrompt = systemPromptFromDefs(toolDefs)
 		}
 	}
 	messages = append(messages, llm.Message{Role: llm.RoleSystem, Content: sysPrompt})
@@ -1107,10 +1113,11 @@ func buildToolOpts(defs []tools.ToolDefinition, thinkingCfg *llm.ThinkingConfig)
 	return opts
 }
 
-// systemPrompt returns the system instruction that tells the model its role
-// and encourages it to use tools when appropriate. When the tool registry is
-// nil or empty, a minimal prompt is returned.
-func systemPrompt(ctx context.Context, tr tools.ToolRegistry) string {
+// systemPromptFromDefs returns the system instruction that tells the model
+// its role and encourages it to use tools when appropriate, using pre-fetched
+// tool definitions so no additional List call is needed. When defs is empty,
+// a minimal prompt is returned.
+func systemPromptFromDefs(defs []tools.ToolDefinition) string {
 	base := `You are a helpful AI assistant embedded in a developer CLI. When the user asks you to perform an action, you MUST use the available tools to accomplish it and persist until the task is fully complete.
 
 Rules:
@@ -1119,11 +1126,7 @@ Rules:
 3. Keep iterating (call tools, observe results, adjust) until the user's request is fully satisfied. Only produce a final text answer with NO tool calls when the task is genuinely complete.
 4. Do not guess or fabricate information when a tool can provide the answer.
 5. If a skill tool is available and relevant, call it first to obtain expert instructions, then follow those instructions using other tools.`
-	if tr == nil {
-		return base
-	}
-	defs, err := tr.List(ctx)
-	if err != nil || len(defs) == 0 {
+	if len(defs) == 0 {
 		return base
 	}
 	names := make([]string, 0, len(defs))
@@ -1131,4 +1134,18 @@ Rules:
 		names = append(names, d.Name())
 	}
 	return base + "\n\nYou have access to these tools: " + strings.Join(names, ", ") + "."
+}
+
+// systemPrompt returns the system instruction that tells the model its role
+// and encourages it to use tools when appropriate. When the tool registry is
+// nil or empty, a minimal prompt is returned.
+func systemPrompt(ctx context.Context, tr tools.ToolRegistry) string {
+	if tr == nil {
+		return systemPromptFromDefs(nil)
+	}
+	defs, err := tr.List(ctx)
+	if err != nil {
+		return systemPromptFromDefs(nil)
+	}
+	return systemPromptFromDefs(defs)
 }
