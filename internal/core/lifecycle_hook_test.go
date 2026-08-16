@@ -10,7 +10,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/verify"
 )
 
@@ -56,16 +55,6 @@ func (h *spyLifecycleHook) OnTurnEnd(_ context.Context, _ string, _ Result, _ er
 	return nil
 }
 
-func (h *spyLifecycleHook) BeforeToolCall(_ context.Context, _ tools.ToolCall) error {
-	h.add("beforeToolCall:" + h.name)
-	return nil
-}
-
-func (h *spyLifecycleHook) AfterToolCall(_ context.Context, _ tools.ToolCall, _ *tools.ToolResult, _ error) error {
-	h.add("afterToolCall:" + h.name)
-	return nil
-}
-
 func (h *spyLifecycleHook) OnCompaction(_ context.Context, _, _ int) error {
 	h.add("onCompaction:" + h.name)
 	return nil
@@ -101,8 +90,8 @@ func (a *compactingAgent) Messages() []AgentMessage {
 	return append([]AgentMessage{}, a.msgs...)
 }
 
-// TestLifecycleHook verifies that all six lifecycle callbacks are triggered
-// when exercised through the HookChain and HookAwareToolMiddleware.
+// TestLifecycleHook verifies that lifecycle callbacks are triggered
+// when exercised through the HookChain.
 func TestLifecycleHook(t *testing.T) {
 	var order []string
 	h := &spyLifecycleHook{name: "lh", order: &order}
@@ -115,25 +104,11 @@ func TestLifecycleHook(t *testing.T) {
 	require.NoError(t, chain.OnCompaction(ctx, 10, 5))
 	require.NoError(t, chain.OnError(ctx, "turn-1", errors.New("boom")))
 
-	// Tool call lifecycle via HookAwareToolMiddleware.
-	mw := NewHookAwareToolMiddleware(chain)
-	called := false
-	wrapped := mw.WrapToolCall(func(_ context.Context, _ tools.ToolCall) (*tools.ToolResult, error) {
-		called = true
-		return &tools.ToolResult{Output: "ok"}, nil
-	})
-	res, err := wrapped(ctx, tools.ToolCall{Name: "echo"})
-	require.NoError(t, err)
-	assert.Equal(t, "ok", res.Output)
-	assert.True(t, called)
-
 	rec := h.recorded()
 	assert.Contains(t, rec, "onTurnStart:lh")
 	assert.Contains(t, rec, "onTurnEnd:lh")
 	assert.Contains(t, rec, "onCompaction:lh")
 	assert.Contains(t, rec, "onError:lh")
-	assert.Contains(t, rec, "beforeToolCall:lh")
-	assert.Contains(t, rec, "afterToolCall:lh")
 }
 
 // TestLifecycleHookTurnRunner verifies that OnTurnStart, OnTurnEnd, and
@@ -184,8 +159,6 @@ func TestHookBackwardCompat(t *testing.T) {
 	// Lifecycle methods must be no-ops (hook doesn't implement LifecycleHook).
 	require.NoError(t, chain.OnTurnStart(ctx, "t1"))
 	require.NoError(t, chain.OnTurnEnd(ctx, "t1", Result{}, nil))
-	require.NoError(t, chain.BeforeToolCall(ctx, tools.ToolCall{Name: "x"}))
-	require.NoError(t, chain.AfterToolCall(ctx, tools.ToolCall{Name: "x"}, nil, nil))
 	require.NoError(t, chain.OnCompaction(ctx, 5, 3))
 	require.NoError(t, chain.OnError(ctx, "t1", errors.New("e")))
 
@@ -193,8 +166,6 @@ func TestHookBackwardCompat(t *testing.T) {
 	for _, ev := range plain.recorded() {
 		assert.NotContains(t, ev, "onTurnStart")
 		assert.NotContains(t, ev, "onTurnEnd")
-		assert.NotContains(t, ev, "beforeToolCall")
-		assert.NotContains(t, ev, "afterToolCall")
 		assert.NotContains(t, ev, "onCompaction")
 		assert.NotContains(t, ev, "onError")
 	}
@@ -270,50 +241,6 @@ func TestHookOrderingWithError(t *testing.T) {
 	assert.Equal(t, "onTurnEnd:lh", rec[4])
 }
 
-// TestHookAwareToolMiddlewareBlock verifies that a BeforeToolCall error blocks
-// the tool call.
-func TestHookAwareToolMiddlewareBlock(t *testing.T) {
-	blockErr := errors.New("blocked by policy")
-
-	blockingHook := &lifecycleHookWithBefore{
-		name:      "blocker",
-		beforeErr: blockErr,
-		LifecycleHookImpl: LifecycleHookImpl{
-			HookImpl: HookImpl{name: "blocker"},
-		},
-	}
-	chain := NewHookChain(blockingHook)
-	mw := NewHookAwareToolMiddleware(chain)
-
-	innerCalled := false
-	wrapped := mw.WrapToolCall(func(_ context.Context, _ tools.ToolCall) (*tools.ToolResult, error) {
-		innerCalled = true
-		return &tools.ToolResult{Output: "should not reach"}, nil
-	})
-	res, err := wrapped(context.Background(), tools.ToolCall{Name: "danger"})
-	require.Error(t, err)
-	assert.Nil(t, res)
-	assert.Contains(t, err.Error(), "tool call blocked by hook")
-	assert.False(t, innerCalled)
-}
-
-// TestHookAwareToolMiddlewareNilChain verifies that a nil chain is a
-// pass-through.
-func TestHookAwareToolMiddlewareNilChain(t *testing.T) {
-	mw := NewHookAwareToolMiddleware(nil)
-	assert.Equal(t, "hook-aware-tool", mw.Name())
-
-	called := false
-	wrapped := mw.WrapToolCall(func(_ context.Context, _ tools.ToolCall) (*tools.ToolResult, error) {
-		called = true
-		return &tools.ToolResult{Output: "ok"}, nil
-	})
-	res, err := wrapped(context.Background(), tools.ToolCall{Name: "x"})
-	require.NoError(t, err)
-	assert.True(t, called)
-	assert.Equal(t, "ok", res.Output)
-}
-
 // TestLifecycleHookImplNoop verifies the stub implements all methods as
 // no-ops.
 func TestLifecycleHookImplNoop(t *testing.T) {
@@ -322,8 +249,6 @@ func TestLifecycleHookImplNoop(t *testing.T) {
 
 	require.NoError(t, h.OnTurnStart(ctx, "t1"))
 	require.NoError(t, h.OnTurnEnd(ctx, "t1", Result{}, nil))
-	require.NoError(t, h.BeforeToolCall(ctx, tools.ToolCall{Name: "x"}))
-	require.NoError(t, h.AfterToolCall(ctx, tools.ToolCall{Name: "x"}, nil, nil))
 	require.NoError(t, h.OnCompaction(ctx, 5, 3))
 	require.NoError(t, h.OnError(ctx, "t1", fmt.Errorf("e")))
 	// Base Hook methods also work.
@@ -378,19 +303,6 @@ func TestHookChainLifecycleErrorStops(t *testing.T) {
 	// h2 should NOT have been called.
 	rec := h2.recorded()
 	assert.NotContains(t, rec, "onTurnStart:h2")
-}
-
-// lifecycleHookWithBefore lets you inject a BeforeToolCall error.
-type lifecycleHookWithBefore struct {
-	LifecycleHookImpl
-	name      string
-	beforeErr error
-}
-
-func (h *lifecycleHookWithBefore) Name() string { return h.name }
-
-func (h *lifecycleHookWithBefore) BeforeToolCall(_ context.Context, _ tools.ToolCall) error {
-	return h.beforeErr
 }
 
 // lifecycleHookWithError lets you inject an OnTurnStart error.

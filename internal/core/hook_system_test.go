@@ -89,7 +89,8 @@ func TestHookSystem_ShellHookReceivesJSON(t *testing.T) {
 func TestHookSystem_HookManagerBlocksToolCall(t *testing.T) {
 	hook := NewShellHook("test", EventPreToolUse, "exit 1", 5*time.Second)
 	manager := NewHookManager(hook)
-	err := manager.BeforeToolCall(context.Background(), tools.ToolCall{Name: "bash"})
+	interceptor := manager.PreToolUseInterceptor()
+	err := interceptor("bash", "call-1", nil)
 	if err == nil {
 		t.Fatal("expected error for blocked tool call (AC-4), got nil")
 	}
@@ -98,7 +99,8 @@ func TestHookSystem_HookManagerBlocksToolCall(t *testing.T) {
 func TestHookSystem_HookManagerAllowsToolCall(t *testing.T) {
 	hook := NewShellHook("test", EventPreToolUse, "exit 0", 5*time.Second)
 	manager := NewHookManager(hook)
-	err := manager.BeforeToolCall(context.Background(), tools.ToolCall{Name: "bash"})
+	interceptor := manager.PreToolUseInterceptor()
+	err := interceptor("bash", "call-1", nil)
 	if err != nil {
 		t.Fatalf("expected nil error for allowed tool call, got %v", err)
 	}
@@ -109,7 +111,8 @@ func TestHookSystem_HookManagerExecutionFailureContinues(t *testing.T) {
 	// should continue and return nil (AC-5).
 	timeoutHook := NewShellHook("timeout", EventPreToolUse, "sleep 30", 50*time.Millisecond)
 	manager := NewHookManager(timeoutHook)
-	err := manager.BeforeToolCall(context.Background(), tools.ToolCall{Name: "bash"})
+	interceptor := manager.PreToolUseInterceptor()
+	err := interceptor("bash", "call-1", nil)
 	if err != nil {
 		t.Fatalf("expected nil on hook timeout (AC-5), got %v", err)
 	}
@@ -121,7 +124,8 @@ func TestHookSystem_HookManagerExecutionFailureContinues(t *testing.T) {
 		preToolErr:   errors.New("mock execution error"),
 	}
 	manager2 := NewHookManager(errHook)
-	err = manager2.BeforeToolCall(context.Background(), tools.ToolCall{Name: "bash"})
+	interceptor2 := manager2.PreToolUseInterceptor()
+	err = interceptor2("bash", "call-1", nil)
 	if err != nil {
 		t.Fatalf("expected nil on hook error (AC-5), got %v", err)
 	}
@@ -130,10 +134,22 @@ func TestHookSystem_HookManagerExecutionFailureContinues(t *testing.T) {
 func TestHookSystem_HookManagerPostToolUse(t *testing.T) {
 	mock := &mockHookSystem{event: EventPostToolUse}
 	manager := NewHookManager(mock)
-	result := &tools.ToolResult{Output: "test-output"}
-	err := manager.AfterToolCall(context.Background(), tools.ToolCall{Name: "bash"}, result, nil)
+	wrapper := manager.PostToolUseWrapper()
+
+	called := false
+	wrapped := wrapper(func(_ context.Context, _ tools.ToolCall) (*tools.ToolResult, error) {
+		called = true
+		return &tools.ToolResult{Output: "test-output"}, nil
+	})
+	result, err := wrapped(context.Background(), tools.ToolCall{Name: "bash"})
 	if err != nil {
 		t.Fatalf("expected nil error, got %v", err)
+	}
+	if !called {
+		t.Fatal("expected inner executor to be called")
+	}
+	if result == nil || result.Output != "test-output" {
+		t.Fatalf("expected result output=test-output, got %v", result)
 	}
 	if !mock.postToolCalled {
 		t.Fatal("expected PostToolUse to be called")

@@ -559,6 +559,7 @@ type assembleState struct {
 	extHooks      []core.Hook
 	extMiddleware []core.Middleware
 	hookChain     *core.HookChain
+	hookMgr       *core.HookManager
 
 	// Approval section
 	modeResolver approval.PermissionModeResolver
@@ -979,7 +980,8 @@ func (s *assembleState) loadShellHooks(path string) {
 		shellHooks = append(shellHooks, core.NewShellHook(name, event, hc.Command, timeout))
 	}
 	if len(shellHooks) > 0 {
-		s.extHooks = append(s.extHooks, core.NewHookManager(shellHooks...))
+		s.hookMgr = core.NewHookManager(shellHooks...)
+		s.extHooks = append(s.extHooks, s.hookMgr)
 	}
 	s.logger.Info("assemble_hooks_ready", "path", path, "count", len(shellHooks))
 }
@@ -1142,20 +1144,22 @@ func (s *assembleState) assembleProductionResilience() {
 	}
 
 	// Wrap tool registry with production middleware.
-	hookToolMW := core.NewHookAwareToolMiddleware(s.hookChain)
 	s.planCtrl = core.NewDefaultPlanModeController()
 	pathNormalizer := tools.NewPathNormalizer("")
 	schemaValidator := tools.NewSchemaValidator(s.underlyingReg)
 	resultMasker := tools.NewResultMasker(nil)
 	promptInjectionGuard := production.NewPromptInjectionGuard()
-	s.tr = tools.NewMiddlewareToolRegistry(s.tr,
+	wrappers := []tools.ToolExecutorWrapper{
 		production.NewPromptInjectionToolWrapper(promptInjectionGuard),
 		core.NewPlanModeToolWrapper(s.planCtrl),
 		tools.WithArgumentPreparation(pathNormalizer, schemaValidator),
 		newProductionToolWrapper(s.idempotentCache, s.auditLog, s.telemetry, s.sessionID),
-		hookToolMW.WrapToolCall,
 		tools.NewResultMaskingWrapper(resultMasker),
-	)
+	}
+	if s.hookMgr != nil {
+		wrappers = append(wrappers, s.hookMgr.PostToolUseWrapper())
+	}
+	s.tr = tools.NewMiddlewareToolRegistry(s.tr, wrappers...)
 	s.reg.RegisterToolRegistry(s.tr)
 }
 
@@ -1371,10 +1375,17 @@ func (s *assembleState) assembleMiddleware() {
 	s.reminderMgr = core.NewDefaultSystemReminderManager()
 	s.failureSynthesizer = core.NewDefaultFailureTurnSynthesizer()
 
+	// Register unified ToolInterceptors (PreToolCallEvent is the single
+	// interception mechanism). Plan-mode blocking and shell-hook pre-tool-use
+	// both go through this path instead of separate middlewares.
+	core.RegisterToolInterceptor(core.NewPlanModeToolInterceptor(s.planCtrl))
+	if s.hookMgr != nil {
+		core.RegisterToolInterceptor(s.hookMgr.PreToolUseInterceptor())
+	}
+
 	chain := []core.Middleware{
 		core.NewLoggingMiddleware(s.ac.agentName),
 		&loopDetectorMiddleware{detector: s.loopDetector, manager: s.reminderMgr},
-		core.NewPlanModeMiddleware(s.planCtrl),
 		core.NewSystemReminderInjector(s.reminderMgr),
 		core.NewFailureSynthesisMiddleware(s.failureSynthesizer),
 		core.NewHookMiddleware(s.hookChain),
