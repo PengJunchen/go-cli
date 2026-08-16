@@ -525,6 +525,12 @@ type teaModel struct {
 	// goodbye line.
 	quitting bool
 
+	// helpOverlay is set when the user presses '?' to show the keyboard
+	// shortcut help overlay. While true the overlay is modal: only Esc or
+	// '?' close it and all other keys are ignored. It does not block agent
+	// event flow — it only affects UI rendering.
+	helpOverlay bool
+
 	// todoSnapshot holds the latest todo list snapshot for the persistent
 	// progress panel. It is updated when a ContentTypeTodo event or a
 	// TodoUpdateMsg arrives, and rendered above the status bar.
@@ -677,6 +683,11 @@ const splitWidthThreshold = 120
 // horizontally with a vertical separator. Below the threshold, or when no tool
 // entries exist, the classic single-column layout is used.
 func (m *teaModel) renderViewLocked() string {
+	// When the help overlay is open, render it instead of the normal view.
+	// Agent event flow is unaffected — only UI rendering is redirected.
+	if m.helpOverlay {
+		return m.renderHelpOverlay()
+	}
 	var sb strings.Builder
 
 	// --- Accordion content (split or single-column) ---
@@ -776,6 +787,55 @@ func (m *teaModel) renderViewLocked() string {
 
 // statusBarLineStyle styles the first status bar line (model/turn/session/mode).
 var statusBarLineStyle = lipgloss.NewStyle().Bold(true)
+
+// helpOverlayTitleStyle styles the help overlay title.
+var helpOverlayTitleStyle = lipgloss.NewStyle().Bold(true).Underline(true)
+
+// helpOverlayKeyStyle styles the key column in the help overlay.
+var helpOverlayKeyStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#7D56F4"))
+
+// renderHelpOverlay returns a styled string listing all keyboard shortcuts.
+// The caller must hold m.mu.
+func (m *teaModel) renderHelpOverlay() string {
+	shortcuts := []struct{ key, desc string }{
+		{"Tab", "Toggle steer mode"},
+		{"Esc", "Cancel / Close overlay"},
+		{"Space", "Pause/resume agent"},
+		{"q", "Quit"},
+		{"e", "Expand all tool calls"},
+		{"c", "Collapse all tool calls"},
+		{"f", "Follow-up mode"},
+		{"Up/Down", "Navigate accordion"},
+		{"Enter", "Toggle entry"},
+		{"?", "Show this help"},
+		{"Ctrl+C", "Force quit"},
+		{"Ctrl+A", "Move cursor to start"},
+		{"Ctrl+E", "Move cursor to end"},
+		{"Ctrl+W", "Delete previous word"},
+		{"Ctrl+U", "Clear input line"},
+	}
+
+	var sb strings.Builder
+	sb.WriteString(helpOverlayTitleStyle.Render("Keyboard Shortcuts"))
+	sb.WriteString("\n")
+	sb.WriteString(strings.Repeat("─", 40))
+	sb.WriteString("\n")
+	for _, sc := range shortcuts {
+		key := helpOverlayKeyStyle.Render(fmt.Sprintf("%-10s", sc.key))
+		sb.WriteString(key)
+		sb.WriteString("  ")
+		sb.WriteString(sc.desc)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n")
+	sb.WriteString(lipgloss.NewStyle().Faint(true).Render("Press ? or Esc to close"))
+
+	return lipgloss.NewStyle().
+		Padding(1, 2).
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#7D56F4")).
+		Render(sb.String())
+}
 
 // statusBarWarnStyle styles the token usage line when usage exceeds 80%.
 var statusBarWarnStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FFC000"))
@@ -1379,6 +1439,14 @@ func (m *teaModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	if m.pendingApproval != nil {
 		return m.handleApprovalKeyLocked(msg)
 	}
+	// The help overlay is modal: while open only Esc or '?' close it and
+	// all other keys are ignored. It does not affect agent event flow.
+	if m.helpOverlay {
+		if msg.Type == tea.KeyEsc || (msg.Type == tea.KeyRunes && len(msg.Runes) > 0 && msg.Runes[0] == '?') {
+			m.helpOverlay = false
+		}
+		return nil
+	}
 	switch msg.Type {
 	case tea.KeyTab:
 		// Enter steer input mode.
@@ -1397,6 +1465,10 @@ func (m *teaModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 		m.accordion.Toggle()
 	case tea.KeyRunes:
 		switch string(msg.Runes) {
+		case "?":
+			// Show the keyboard shortcut help overlay.
+			m.helpOverlay = true
+			return nil
 		case "q":
 			return m.quitLocked()
 		case "e":
