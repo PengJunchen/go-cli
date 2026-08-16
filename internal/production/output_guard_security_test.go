@@ -2,6 +2,7 @@ package production
 
 import (
 	"context"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -314,5 +315,130 @@ func TestCodeInjectionGuardMidTextInjection(t *testing.T) {
 		res, err := g.Check(ctx, in)
 		require.NoError(t, err)
 		assert.False(t, res.Allowed, "embedded injection must be caught: %q", in)
+	}
+}
+
+// TestPIIOutputGuardSSN verifies that US Social Security Numbers are detected.
+func TestPIIOutputGuardSSN(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx := context.Background()
+	g := NewPIIOutputGuard()
+
+	res, err := g.Check(ctx, "SSN is 123-45-6789 on file")
+	require.NoError(t, err)
+	assert.False(t, res.Allowed, "SSN should be flagged as PII")
+	assert.Equal(t, GuardHigh, res.Severity)
+	assert.Contains(t, res.Reason, "US SSN")
+}
+
+// TestPIIOutputGuardCreditCard verifies that valid credit card numbers are
+// detected while Luhn-invalid numbers are not flagged.
+func TestPIIOutputGuardCreditCard(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx := context.Background()
+	g := NewPIIOutputGuard()
+
+	valid := []string{
+		"4111111111111111",      // Visa test number
+		"4111 1111 1111 1111",   // with spaces
+		"4012 8888 8888 1881",   // another test card
+		"5500 0000 0000 0004",   // Mastercard test number
+	}
+	for _, in := range valid {
+		res, err := g.Check(ctx, in)
+		require.NoError(t, err)
+		assert.False(t, res.Allowed, "valid card should be flagged: %q", in)
+	}
+
+	// Luhn-invalid 16-digit number is NOT flagged (regex matches but Luhn fails).
+	res, err := g.Check(ctx, "4111111111111112")
+	require.NoError(t, err)
+	assert.True(t, res.Allowed, "Luhn-invalid number should not be flagged")
+}
+
+// TestPIIOutputGuardAPIKey verifies that API keys with common prefixes are
+// detected as PII.
+func TestPIIOutputGuardAPIKey(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx := context.Background()
+	g := NewPIIOutputGuard()
+
+	keys := []string{
+		"sk-proj-abcdef1234567890abcd",
+		"pk-proj-abcdef1234567890abcd",
+		"rk-proj-abcdef1234567890abcd",
+	}
+	for _, in := range keys {
+		res, err := g.Check(ctx, "token: "+in)
+		require.NoError(t, err)
+		assert.False(t, res.Allowed, "API key should be flagged: %q", in)
+		assert.Contains(t, res.Reason, "API Key")
+	}
+}
+
+// TestPIIOutputGuardInternationalPhone verifies that international phone numbers
+// with a + prefix are detected.
+func TestPIIOutputGuardInternationalPhone(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx := context.Background()
+	g := NewPIIOutputGuard()
+
+	phones := []string{
+		"+1-202-555-0173",
+		"+44 20 7946 0958",
+		"+86-138-1234-5678",
+	}
+	for _, in := range phones {
+		res, err := g.Check(ctx, "call "+in)
+		require.NoError(t, err)
+		assert.False(t, res.Allowed, "international phone should be flagged: %q", in)
+	}
+}
+
+// TestPIIOutputGuardCustomPatterns verifies that user-supplied patterns are
+// applied in addition to the built-in patterns.
+func TestPIIOutputGuardCustomPatterns(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx := context.Background()
+
+	custom := PIIPattern{
+		Pattern: regexp.MustCompile(`INTERNAL-TKT-\d{6}`),
+		Name:    "Internal Ticket",
+	}
+	g := NewPIIOutputGuard(WithCustomPIIPatterns(custom))
+
+	res, err := g.Check(ctx, "see INTERNAL-TKT-123456 for details")
+	require.NoError(t, err)
+	assert.False(t, res.Allowed, "custom pattern should match")
+	assert.Contains(t, res.Reason, "Internal Ticket")
+
+	// Built-in patterns still work alongside custom ones.
+	res, err = g.Check(ctx, "email me at joe@example.com")
+	require.NoError(t, err)
+	assert.False(t, res.Allowed, "built-in email pattern should still work")
+
+	// Text that matches neither built-in nor custom patterns is allowed.
+	res, err = g.Check(ctx, "no sensitive data here")
+	require.NoError(t, err)
+	assert.True(t, res.Allowed)
+}
+
+// TestPIIOutputGuardNoFalsePositives verifies that version numbers and ordinary
+// text are not flagged as PII.
+func TestPIIOutputGuardNoFalsePositives(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx := context.Background()
+	g := NewPIIOutputGuard()
+
+	benign := []string{
+		"version 1.2.3.4",
+		"the quick brown fox jumps over the lazy dog",
+		"meeting at 3pm in room 42",
+		"order #1001 shipped on 2024-01-15",
+	}
+	for _, in := range benign {
+		res, err := g.Check(ctx, in)
+		require.NoError(t, err)
+		assert.True(t, res.Allowed, "benign text should not be flagged: %q", in)
 	}
 }
