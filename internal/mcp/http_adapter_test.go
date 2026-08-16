@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -17,6 +18,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 // ---------------------------------------------------------------------------
@@ -463,4 +466,85 @@ func TestReadLimitedBody(t *testing.T) {
 	raw, err = readLimitedBody(exact)
 	require.NoError(t, err)
 	assert.Len(t, raw, maxHTTPResponseSize)
+}
+
+// ---------------------------------------------------------------------------
+// SSRF protection tests (SEC-4 / SEC-8)
+// ---------------------------------------------------------------------------
+
+// TestMCPAdapter_SSRSafeClient verifies that the MCP HTTPClientAdapter uses an
+// SSRF-safe HTTP client: requests to internal IP ranges are blocked at dial
+// time (AC-2), and DNS-rebinding attacks are caught by the dial-time Control
+// even when a listener is reachable on a loopback address (AC-4).
+func TestMCPAdapter_SSRSafeClient(t *testing.T) {
+	t.Parallel()
+
+	// --- Internal IP ranges are blocked ---
+	// Connect swallows GET failures (it falls back to direct POST), so the
+	// SSRF block surfaces on the first POST (ListTools).
+	for _, endpoint := range []string{
+		"http://10.0.0.1/mcp",        // RFC 1918
+		"http://169.254.169.254/mcp", // cloud metadata / link-local
+		"http://192.168.1.1/mcp",     // RFC 1918
+		"http://172.16.0.1/mcp",      // RFC 1918
+	} {
+		adapter := NewHTTPClientAdapter(MCPServerConfig{
+			Name:      "internal",
+			Transport: MCPTransportStreamableHTTP,
+			URL:       endpoint,
+		})
+		_ = adapter.Connect(context.Background())
+		_, err := adapter.ListTools(context.Background())
+		require.Error(t, err, "endpoint %q should be blocked", endpoint)
+		assert.ErrorIs(t, err, tools.ErrPrivateIP, "endpoint %q", endpoint)
+	}
+
+	// --- DNS rebinding: dial-time Control blocks even a reachable listener ---
+	// A listener on 127.0.0.1 simulates the destination a rebinding attack
+	// would redirect to at dial time. NewSSRFSafeHTTPClient (non-loopback)
+	// refuses the connection before it is established.
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		conn, _ := ln.Accept()
+		if conn != nil {
+			_ = conn.Close()
+		}
+	}()
+
+	addr := ln.Addr().String()
+	adapter := NewHTTPClientAdapterWithClient(MCPServerConfig{
+		Name: "rebinding",
+		URL:  "http://" + addr + "/mcp",
+	}, tools.NewSSRFSafeHTTPClient(2*time.Second))
+	_ = adapter.Connect(context.Background())
+	_, err = adapter.ListTools(context.Background())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, tools.ErrPrivateIP)
+}
+
+// TestMCPOAuth_TokenEndpointSSRF verifies that the OAuth token exchange uses
+// the SSRF-safe client: when TokenURL points to an internal IP, the request is
+// blocked at dial time and the error wraps tools.ErrPrivateIP.
+func TestMCPOAuth_TokenEndpointSSRF(t *testing.T) {
+	t.Parallel()
+
+	adapter := NewHTTPClientAdapter(MCPServerConfig{
+		Name: "oauth-ssrf",
+		OAuthConfig: &OAuthConfig{
+			AuthorizationURL: "https://auth.example.com/authorize",
+			TokenURL:         "http://10.0.0.1/token", // internal IP
+			ClientID:         "test-client",
+		},
+	})
+
+	err := adapter.exchangeCodeForToken(
+		context.Background(),
+		adapter.cfg.OAuthConfig,
+		"fake-code",
+		"http://127.0.0.1/callback",
+	)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, tools.ErrPrivateIP)
 }

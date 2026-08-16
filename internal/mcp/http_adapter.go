@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
@@ -65,21 +66,24 @@ func readLimitedBody(r io.Reader) ([]byte, error) {
 	return raw, nil
 }
 
-// NewHTTPClientAdapter returns an HTTPClientAdapter for the given config.
+// NewHTTPClientAdapter returns an HTTPClientAdapter for the given config. The
+// underlying *http.Client is SSRF-safe: it blocks private, link-local, and
+// cloud-metadata IP ranges at dial time (defending against DNS rebinding)
+// while permitting loopback so local MCP servers keep working.
 func NewHTTPClientAdapter(cfg MCPServerConfig) *HTTPClientAdapter {
 	return &HTTPClientAdapter{
-		cfg: cfg,
-		client: &http.Client{
-			Timeout: defaultHTTPTimeout,
-		},
+		cfg:    cfg,
+		client: tools.NewSSRFSafeHTTPClientAllowLoopback(defaultHTTPTimeout),
 	}
 }
 
 // NewHTTPClientAdapterWithClient returns an HTTPClientAdapter using the given
-// *http.Client, allowing callers to override transport or timeouts.
+// *http.Client, allowing callers to override transport or timeouts. When client
+// is nil, a loopback-allowing SSRF-safe client is used so that OAuth token
+// exchange and all other requests are protected against internal-IP targeting.
 func NewHTTPClientAdapterWithClient(cfg MCPServerConfig, client *http.Client) *HTTPClientAdapter {
 	if client == nil {
-		client = &http.Client{Timeout: defaultHTTPTimeout}
+		client = tools.NewSSRFSafeHTTPClientAllowLoopback(defaultHTTPTimeout)
 	}
 	return &HTTPClientAdapter{cfg: cfg, client: client}
 }
