@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -9,21 +10,111 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	xterm "golang.org/x/term"
 
 	"github.com/pengjunchen/go-cli/internal/config"
+	"github.com/pengjunchen/go-cli/internal/llm"
 )
 
-// onboardingModelChoices lists the models offered during the first-run wizard.
-var onboardingModelChoices = []struct {
+// modelChoice is a single model entry shown during the onboarding model
+// selection step.
+type modelChoice struct {
 	Name string
 	Desc string
-}{
+}
+
+// onboardingModelChoices lists the models offered during the first-run wizard.
+// It serves as the fallback when the dynamic registry fetch fails or returns no
+// data.
+var onboardingModelChoices = []modelChoice{
 	{"gpt-4o-mini", "Fast and affordable (OpenAI)"},
 	{"gpt-4o", "Most capable (OpenAI)"},
 	{"claude-3-5-sonnet", "Balanced (Anthropic)"},
 	{"claude-3-opus", "Most capable (Anthropic)"},
+}
+
+// onboardingRegistryBuilder creates the model registry used during onboarding.
+// It is a package-level variable so tests can override it to avoid network
+// access.
+var onboardingRegistryBuilder = func() llm.ModelRegistry {
+	return llm.NewModelsDevRegistry("", 0)
+}
+
+// onboardingModelProvider fetches the list of model choices from the registry.
+// It is a package-level variable so tests can override it to simulate different
+// registry states (e.g. network error, specific provider data).
+var onboardingModelProvider = fetchModelsFromRegistry
+
+// fetchModelsFromRegistry queries the registry for all models across all
+// providers, filters out deprecated models, deduplicates by name, and returns
+// them as modelChoice entries. It returns nil when the registry is nil or
+// empty, prompting the caller to fall back to the hardcoded list.
+func fetchModelsFromRegistry(registry llm.ModelRegistry) []modelChoice {
+	if registry == nil {
+		return nil
+	}
+	var choices []modelChoice
+	seen := make(map[string]bool)
+	for _, p := range registry.Providers() {
+		for _, info := range registry.ModelsForProvider(p.ID) {
+			if isDeprecatedModel(info) {
+				continue
+			}
+			if seen[info.Name] {
+				continue
+			}
+			seen[info.Name] = true
+			choices = append(choices, modelChoice{
+				Name: info.Name,
+				Desc: buildModelDesc(info, p),
+			})
+		}
+	}
+	return choices
+}
+
+// isDeprecatedModel reports whether a model should be excluded from the
+// onboarding list. It matches known deprecated model name patterns.
+func isDeprecatedModel(info llm.ModelInfo) bool {
+	name := strings.ToLower(info.Name)
+	for _, pattern := range deprecatedModelPatterns {
+		if strings.Contains(name, pattern) {
+			return true
+		}
+	}
+	return false
+}
+
+// deprecatedModelPatterns lists lowercase substrings that identify deprecated
+// or superseded models. Models whose names contain any of these patterns are
+// excluded from the dynamic onboarding list.
+var deprecatedModelPatterns = []string{
+	"claude-3-opus",
+	"gpt-4-32k",
+	"gpt-4-0314",
+	"gpt-4-0613",
+	"gpt-3.5-turbo-0301",
+	"gpt-3.5-turbo-0613",
+	"text-davinci",
+}
+
+// buildModelDesc constructs a human-readable description for a model from its
+// registry metadata and provider info. It prefers the registry's own
+// description and falls back to a compact "Provider · NK ctx" signature.
+func buildModelDesc(info llm.ModelInfo, provider llm.ProviderMetadata) string {
+	if info.Description != "" {
+		return info.Description
+	}
+	var parts []string
+	if provider.Name != "" {
+		parts = append(parts, provider.Name)
+	}
+	if info.ContextWindow > 0 {
+		parts = append(parts, fmt.Sprintf("%dK ctx", info.ContextWindow/1000))
+	}
+	return strings.Join(parts, " · ")
 }
 
 // onboardingThemeChoices lists the themes offered during the first-run wizard.
@@ -86,7 +177,16 @@ func RunOnboarding(cfg *config.Config, in io.Reader, out io.Writer) error {
 		if err := promptAPIKey(cfg, reader, out); err != nil {
 			return err
 		}
-		if err := promptModel(cfg, reader, out); err != nil {
+		registry := onboardingRegistryBuilder()
+		// Best-effort refresh with a short timeout. On failure the registry is
+		// replaced with a no-op so promptModel falls back to the hardcoded list
+		// without further network attempts.
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		if err := registry.Refresh(ctx); err != nil {
+			registry = llm.NoopModelRegistry{}
+		}
+		cancel()
+		if err := promptModel(cfg, reader, out, registry); err != nil {
 			return err
 		}
 		if err := promptTheme(cfg, reader, out); err != nil {
@@ -174,14 +274,23 @@ func readPasswordMasked(reader *bufio.Reader, out io.Writer) (string, error) {
 	return reader.ReadString('\n')
 }
 
-// promptModel lists available models and lets the user pick one. An invalid or
-// empty choice falls back to the first model in the list.
-func promptModel(cfg *config.Config, reader *bufio.Reader, out io.Writer) error {
+// promptModel lists available models and lets the user pick one. It fetches
+// the model list dynamically from the registry via onboardingModelProvider;
+// when the registry returns no models (network error, empty data) it falls
+// back to the hardcoded onboardingModelChoices. An invalid or empty choice
+// falls back to the first model in the list.
+func promptModel(cfg *config.Config, reader *bufio.Reader, out io.Writer, registry llm.ModelRegistry) error {
 	fmt.Fprintln(out, "Step 2: Model Selection")
-	for i, m := range onboardingModelChoices {
+
+	choices := onboardingModelProvider(registry)
+	if len(choices) == 0 {
+		choices = onboardingModelChoices
+	}
+
+	for i, m := range choices {
 		fmt.Fprintf(out, "  %d. %-22s %s\n", i+1, m.Name, m.Desc)
 	}
-	fmt.Fprintf(out, "  Choose a model [1-%d] (default: 1): ", len(onboardingModelChoices))
+	fmt.Fprintf(out, "  Choose a model [1-%d] (default: 1): ", len(choices))
 
 	line, err := reader.ReadString('\n')
 	if err != nil && err != io.EOF {
@@ -192,14 +301,14 @@ func promptModel(cfg *config.Config, reader *bufio.Reader, out io.Writer) error 
 	idx := 0
 	if line != "" {
 		n, parseErr := strconv.Atoi(line)
-		if parseErr != nil || n < 1 || n > len(onboardingModelChoices) {
-			fmt.Fprintf(out, "  Invalid choice, using default: %s\n", onboardingModelChoices[0].Name)
+		if parseErr != nil || n < 1 || n > len(choices) {
+			fmt.Fprintf(out, "  Invalid choice, using default: %s\n", choices[0].Name)
 		} else {
 			idx = n - 1
 		}
 	}
 
-	chosen := onboardingModelChoices[idx].Name
+	chosen := choices[idx].Name
 	if cfg != nil {
 		if cfg.Provider.Model == "" {
 			cfg.Provider.Model = chosen
