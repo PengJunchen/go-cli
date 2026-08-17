@@ -53,14 +53,14 @@ type REPLSession struct {
 	rc   *config.Config
 
 	// Flags
-	modelName     string
-	providerName  string
-	maxTokens     int
-	thinkingLevel llm.ThinkingLevel
-	thinkingFlag  string
-	verboseFlag   bool
-	resumeFlag    bool
-	noSandboxFlag bool
+	modelName        string
+	providerName     string
+	maxTokens        int
+	thinkingLevel    llm.ThinkingLevel
+	thinkingFlag     string
+	verboseFlag      bool
+	resumeFlag       bool
+	noSandboxFlag    bool
 	noOnboardingFlag bool
 
 	// Agent assembly
@@ -172,13 +172,13 @@ func (s *REPLSession) parseFlags() error {
 	fs.SetOutput(s.out)
 
 	var (
-		modelFlag     string
-		providerFlag  string
-		maxTokensFlag int
-		verboseFlag   bool
-		resumeFlag    bool
-		thinkingFlag  string
-		noSandboxFlag bool
+		modelFlag        string
+		providerFlag     string
+		maxTokensFlag    int
+		verboseFlag      bool
+		resumeFlag       bool
+		thinkingFlag     string
+		noSandboxFlag    bool
 		noOnboardingFlag bool
 	)
 	fs.StringVar(&modelFlag, "model", "", "model name to use")

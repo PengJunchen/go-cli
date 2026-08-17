@@ -65,10 +65,10 @@ func mockMCPHandshake(next http.HandlerFunc) http.HandlerFunc {
 // It is used in tests to bypass trust checks for auto-discovery.
 type alwaysTrustManager struct{}
 
-func (alwaysTrustManager) IsTrusted(context.Context, string) bool   { return true }
+func (alwaysTrustManager) IsTrusted(context.Context, string) bool     { return true }
 func (alwaysTrustManager) TrustProject(context.Context, string) error { return nil }
-func (alwaysTrustManager) RevokeTrust(context.Context, string) error { return nil }
-func (alwaysTrustManager) TrustedProjects() []string                 { return nil }
+func (alwaysTrustManager) RevokeTrust(context.Context, string) error  { return nil }
+func (alwaysTrustManager) TrustedProjects() []string                  { return nil }
 
 // setupTestTrust registers a trust manager that trusts all projects, so
 // tests using auto-discovery (which requires project trust) can proceed.

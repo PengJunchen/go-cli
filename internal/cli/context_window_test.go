@@ -33,10 +33,10 @@ func TestTokenUsageEvent(t *testing.T) {
 	costTracker := production.NewCostTracker(nil)
 
 	assembly := &AgentAssembly{
-		CoreRuntime:         CoreRuntime{Agent: agent},
-		SessionManagement:   SessionManagement{Estimator: estimator, MaxTokens: 8000},
+		CoreRuntime:          CoreRuntime{Agent: agent},
+		SessionManagement:    SessionManagement{Estimator: estimator, MaxTokens: 8000},
 		ProductionResilience: ProductionResilience{CostTracker: costTracker},
-		ModelConfig:         ModelConfig{ContextWindow: 128000},
+		ModelConfig:          ModelConfig{ContextWindow: 128000},
 	}
 
 	stream := core.NewEventStream(16)

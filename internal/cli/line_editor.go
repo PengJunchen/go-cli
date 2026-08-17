@@ -374,7 +374,7 @@ func (le *DefaultLineEditor) markIMEDetected() {
 	if !le.imePromptShown {
 		le.imePromptShown = true
 		fmt.Fprint(le.out, "\n⚠ IME (input method editor) detected. CJK input may not work correctly in raw mode.\n") //nolint:errcheck
-		fmt.Fprint(le.out, "Press Ctrl+\\ to switch to cooked mode for better IME support.\n")                          //nolint:errcheck
+		fmt.Fprint(le.out, "Press Ctrl+\\ to switch to cooked mode for better IME support.\n")                        //nolint:errcheck
 	}
 }
 

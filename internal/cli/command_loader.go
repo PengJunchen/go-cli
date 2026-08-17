@@ -8,8 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/pengjunchen/go-cli/internal/tracing"
 	"log/slog"
+
+	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
 // MarkdownCommand represents a user-defined slash command loaded from a

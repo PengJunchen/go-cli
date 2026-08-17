@@ -92,8 +92,8 @@ func phase47MockMCPHandler(tools []mcp.MCPTool) http.HandlerFunc {
 		}
 
 		var req struct {
-			ID     any             `json:"id"`
-			Method string          `json:"method"`
+			ID     any    `json:"id"`
+			Method string `json:"method"`
 		}
 		if decodeErr := json.Unmarshal(body, &req); decodeErr != nil {
 			w.WriteHeader(http.StatusBadRequest)

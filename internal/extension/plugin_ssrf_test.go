@@ -24,11 +24,11 @@ func TestPluginLoadHTTP_SSRSafeClient(t *testing.T) {
 	t.Parallel()
 	loader := extension.NewDefaultPluginLoader()
 	for _, endpoint := range []string{
-		"https://10.0.0.1/ext",          // RFC 1918 private
-		"https://169.254.169.254/ext",   // cloud metadata / link-local
-		"https://192.168.1.1/ext",       // RFC 1918 private
-		"https://172.16.0.1/ext",        // RFC 1918 private
-		"https://[fc00::1]/ext",         // IPv6 unique local
+		"https://10.0.0.1/ext",        // RFC 1918 private
+		"https://169.254.169.254/ext", // cloud metadata / link-local
+		"https://192.168.1.1/ext",     // RFC 1918 private
+		"https://172.16.0.1/ext",      // RFC 1918 private
+		"https://[fc00::1]/ext",       // IPv6 unique local
 	} {
 		_, err := loader.Load(context.Background(), endpoint)
 		require.Error(t, err, "endpoint %q should be blocked", endpoint)

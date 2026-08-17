@@ -35,11 +35,11 @@ var ErrAuthNotFound = errors.New("auth: key not found in source")
 // authSourceCLI, authSourceKeychain, authSourceAuthFile, authSourceEnv,
 // authSourceModels are the ordered names of the default auth sources.
 const (
-	authSourceCLI       = "cli-flag"
-	authSourceKeychain  = "keychain"
-	authSourceAuthFile  = "auth.json"
-	authSourceEnv       = "env"
-	authSourceModels    = "models.json"
+	authSourceCLI      = "cli-flag"
+	authSourceKeychain = "keychain"
+	authSourceAuthFile = "auth.json"
+	authSourceEnv      = "env"
+	authSourceModels   = "models.json"
 )
 
 // NewAuthChain returns an AuthChain with the default sources configured in
