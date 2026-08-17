@@ -111,16 +111,25 @@ func (v *DefaultValidator) Validate(cfg Config) error {
 		errs = append(errs, "tui word_wrap must be non-negative")
 	}
 
-	// Security: BaseURL HTTPS verification. Prevents sending API keys over
-	// unencrypted connections to non-localhost hosts.
+	// Security: BaseURL HTTPS verification. Non-HTTPS URLs to non-localhost
+	// hosts risk exposing API keys over unencrypted connections, so log a
+	// warning rather than hard-failing to allow internal HTTP endpoints.
 	if cfg.Provider.BaseURL != "" {
 		if err := validateBaseURLHTTPS(cfg.Provider.BaseURL, "provider"); err != nil {
-			errs = append(errs, err.Error())
+			v.logger.Warn("insecure_base_url",
+				"op", "config_validate",
+				"component", "provider",
+				"reason", err.Error(),
+			)
 		}
 	}
 	if cfg.SmallModel.BaseURL != "" {
 		if err := validateBaseURLHTTPS(cfg.SmallModel.BaseURL, "small_model"); err != nil {
-			errs = append(errs, err.Error())
+			v.logger.Warn("insecure_base_url",
+				"op", "config_validate",
+				"component", "small_model",
+				"reason", err.Error(),
+			)
 		}
 	}
 
