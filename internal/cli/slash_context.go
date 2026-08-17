@@ -23,8 +23,10 @@ type ContextHandler struct{}
 
 var _ SlashCommandHandler = (*ContextHandler)(nil)
 
-func (h *ContextHandler) Name() string        { return "context" }
-func (h *ContextHandler) Description() string { return "Show token breakdown of the current context window" }
+func (h *ContextHandler) Name() string { return "context" }
+func (h *ContextHandler) Description() string {
+	return "Show token breakdown of the current context window"
+}
 
 func (h *ContextHandler) Handle(ctx context.Context, _ []string, deps Dependencies) (string, error) {
 	out := deps.Out()
@@ -55,7 +57,7 @@ func (h *ContextHandler) Handle(ctx context.Context, _ []string, deps Dependenci
 
 	// Print breakdown table.
 	fmt.Fprintln(out, "Context window breakdown:") //nolint:errcheck
-	fmt.Fprintln(out)                               //nolint:errcheck
+	fmt.Fprintln(out)                              //nolint:errcheck
 
 	printContextRow(out, "System prompt", systemPromptTokens, contextWindow)
 	printContextRow(out, "Tool definitions", toolDefTokens, contextWindow)
@@ -69,7 +71,7 @@ func (h *ContextHandler) Handle(ctx context.Context, _ []string, deps Dependenci
 		pct = total * 100 / contextWindow
 	}
 	fmt.Fprintf(out, "Total:     %d tokens (%d%% of %d)\n", total, pct, contextWindow) //nolint:errcheck
-	fmt.Fprintf(out, "Remaining: %d tokens\n", remaining)                                //nolint:errcheck
+	fmt.Fprintf(out, "Remaining: %d tokens\n", remaining)                              //nolint:errcheck
 
 	return "", nil
 }

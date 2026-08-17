@@ -855,12 +855,12 @@ func TestCommandFilter_VariableBypassRace(t *testing.T) {
 		"echo hello",
 	}
 	expect := map[string]bool{
-		"x=rm; $x -rf /":                true,
-		"a=r;b=m;c=$a$b;$c -rf /":       true,
+		"x=rm; $x -rf /":                 true,
+		"a=r;b=m;c=$a$b;$c -rf /":        true,
 		"PATH=/usr/bin:$PATH echo hello": false,
-		"x=rm; ${x} -rf /":              true,
-		"a=r;b=m;$a$b -rf /":            true,
-		"echo hello":                    false,
+		"x=rm; ${x} -rf /":               true,
+		"a=r;b=m;$a$b -rf /":             true,
+		"echo hello":                     false,
 	}
 	var wg sync.WaitGroup
 	for n := 0; n < 4; n++ {
@@ -889,7 +889,7 @@ func TestExtractVariableReferences(t *testing.T) {
 		{"$a${b}$c", []string{"a", "b", "c"}},
 		{"/usr/bin:$PATH", []string{"PATH"}},
 		{"hello", nil},
-		{"$1", nil},  // positional parameter — not tracked
+		{"$1", nil}, // positional parameter — not tracked
 		{"$_", []string{"_"}},
 		{"${VAR}", []string{"VAR"}},
 	}

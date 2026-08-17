@@ -339,10 +339,10 @@ func TestPIIOutputGuardCreditCard(t *testing.T) {
 	g := NewPIIOutputGuard()
 
 	valid := []string{
-		"4111111111111111",      // Visa test number
-		"4111 1111 1111 1111",   // with spaces
-		"4012 8888 8888 1881",   // another test card
-		"5500 0000 0000 0004",   // Mastercard test number
+		"4111111111111111",    // Visa test number
+		"4111 1111 1111 1111", // with spaces
+		"4012 8888 8888 1881", // another test card
+		"5500 0000 0000 0004", // Mastercard test number
 	}
 	for _, in := range valid {
 		res, err := g.Check(ctx, in)

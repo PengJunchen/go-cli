@@ -155,9 +155,9 @@ type LoopAgent struct {
 	// mu protects runtime mutable fields (model, midTurnCompactor, compactor,
 	// estimator, maxTokens, toolSearchThreshold) from data races between
 	// concurrent setter calls and Run.
-	mu     sync.RWMutex
-	pauseMu             sync.Mutex
-	pauseCh             chan struct{}
+	mu      sync.RWMutex
+	pauseMu sync.Mutex
+	pauseCh chan struct{}
 
 	// toolDefsCache caches the LLM tool definitions so they are not
 	// rebuilt on every Run call. The cache is invalidated when the tool
