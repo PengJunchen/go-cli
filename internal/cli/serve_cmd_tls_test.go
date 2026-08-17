@@ -170,11 +170,11 @@ func TestServeCmdTLSMissingKey(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error when --tls-cert is provided without --tls-key")
 	}
-	ue, ok := err.(*UsageError)
+	usageErr, ok := err.(*UsageError)
 	if !ok {
 		t.Fatalf("expected UsageError, got %T: %v", err, err)
 	}
-	if !strings.Contains(ue.Error(), "tls-key") {
+	if !strings.Contains(usageErr.Error(), "tls-key") {
 		t.Errorf("error should mention --tls-key, got: %v", err)
 	}
 

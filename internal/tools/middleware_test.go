@@ -409,9 +409,9 @@ func TestWithArgumentPreparation_ChainsPreparers(t *testing.T) {
 	// Preparer 1: tag the call.
 	tagPreparer := &taggingPreparer{tag: "first"}
 	// Preparer 2: PathNormalizer.
-	pn := NewPathNormalizer("/base")
+	pathNorm := NewPathNormalizer("/base")
 
-	wrapper := WithArgumentPreparation(tagPreparer, pn)
+	wrapper := WithArgumentPreparation(tagPreparer, pathNorm)
 	var received ToolCall
 	wrapped := wrapper(func(_ context.Context, call ToolCall) (*ToolResult, error) {
 		received = call
