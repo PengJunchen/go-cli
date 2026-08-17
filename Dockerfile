@@ -20,7 +20,7 @@ FROM alpine:3.20
 
 # Install only the strictly necessary packages.
 # ca-certificates is required for TLS; git and bash are needed for the bash tool.
-RUN apk add --no-cache ca-certificates=20240705-r0 git=2.45.3-r0 bash=5.2.26-r0
+RUN apk add --no-cache ca-certificates git bash
 
 # Create a non-root user and group for running the application.
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
