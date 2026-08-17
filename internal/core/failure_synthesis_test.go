@@ -153,13 +153,13 @@ func TestEventsToTurnMessages_AssistantAndToolResult(t *testing.T) {
 
 func TestEventsToTurnMessages_SkipsIncremental(t *testing.T) {
 	events := []AgentEvent{
-		{Kind: "message", Content: "Hel", Incremental: true, Timestamp: time.Now()},
-		{Kind: "message", Content: "lo", Incremental: true, Timestamp: time.Now()},
-		{Kind: "message", Content: "Hello", Incremental: false, Timestamp: time.Now()},
+		{Kind: "message", Content: "Hi", Incremental: true, Timestamp: time.Now()},
+		{Kind: "message", Content: "!", Incremental: true, Timestamp: time.Now()},
+		{Kind: "message", Content: "Hi!", Incremental: false, Timestamp: time.Now()},
 	}
 	msgs := eventsToTurnMessages(events)
 	require.Len(t, msgs, 1)
-	assert.Equal(t, "Hello", msgs[0].Content)
+	assert.Equal(t, "Hi!", msgs[0].Content)
 }
 
 func TestEventsToTurnMessages_ToolCancelled(t *testing.T) {
