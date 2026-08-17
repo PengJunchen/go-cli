@@ -80,7 +80,7 @@ This project has a timeline that reads like a part-time developer's diary:
 
 ### Prerequisites
 
-- Go 1.23+
+- Go 1.24+
 
 ### Build & Run
 
@@ -131,15 +131,31 @@ EinoProvider implements OpenAI-compatible protocol via `net/http`, zero external
 
 ### Built-in Tools
 
-| Tool | Description |
-|---|---|
-| `bash` | Execute shell commands |
-| `read` | Read files |
-| `write` | Write files |
-| `edit` | Diff edit (old/new replacement) |
-| `grep` | Regex search (pure Go mode supported) |
-| `find`/`ls` | File search & listing |
-| `search` | Semantic search |
+| Category | Tool | Description |
+|---|---|---|
+| File/Shell | `bash` | Execute shell commands (streaming output, sandbox & resource limits) |
+| File/Shell | `read` | Read files (supports images) |
+| File/Shell | `write` | Write files |
+| File/Shell | `edit` | Diff edit (old/new replacement) |
+| File/Shell | `grep` | Regex search (pure Go mode supported) |
+| File/Shell | `find`/`ls` | File search & listing |
+| Git | `git_diff`/`git_status`/`git_log`/`git_blame` | Git inspection |
+| Git | `git_commit`/`git_branch`/`git_create_branch`/`git_checkout` | Git branching & commits |
+| Git | `git_push`/`git_pull`/`git_fetch`/`git_remote` | Git remote operations |
+| Git | `git_merge`/`git_stash`/`git_stash_pop`/`git_reset`/`git_revert` | Git workflow |
+| Git | `git_pr_create` | Pull request creation |
+| Web | `web_fetch` | Fetch URL content |
+| Web | `web_search` | Web search (mock/fetch/brave providers) |
+| Web | `tool_search` | Semantic tool search |
+| Productivity | `todo_write` | Todo list management |
+| Productivity | `task_create`/`task_get`/`task_list`/`task_update` | Task store |
+| Productivity | `goal_create`/`goal_update`/`goal_list`/`goal_get` | Goal store |
+| Code | `lsp_query` | Language Server Protocol queries |
+| Multimodal | `image_read` | Read & decode images |
+| Interaction | `ask_user` | Human-in-the-loop question |
+| Interaction | `enter_plan_mode`/`exit_plan_mode` | Plan mode toggle |
+| Agent | `dispatch_subagent` | SubAgent dispatch |
+| Agent | `remote_bash` | Remote shell via SSH |
 
 ### Compaction Strategies
 
@@ -233,7 +249,7 @@ optional body markdown
 
 ### TUI
 
-Bubbletea-driven render loop, dispatches by ContentType to Renderer. Supports streaming renderers (replace last frame) and non-streaming renderers (append). 24 built-in renderers.
+Bubbletea-driven render loop, dispatches by ContentType to Renderer. Supports streaming renderers (replace last frame) and non-streaming renderers (append). 26 built-in renderers.
 
 ### Full-chain Tracing
 
@@ -250,7 +266,7 @@ cli.invocation
                            └─ tool.call (tool_name=edit|grep|...)
 ```
 
-Exporters: `stdout` / `jsonl` (file) / `otlp` (HTTP)
+Exporters: `stdout` / `jsonl` (file) / `otlp` (HTTP) / `kafka`
 
 ### Verification Framework
 
@@ -259,7 +275,7 @@ Exporters: `stdout` / `jsonl` (file) / `otlp` (HTTP)
 | **Scanner** | AST scanning, 13 rules detecting mock imports, hardcoded credentials, test URLs, etc. |
 | **LogCapturer** | Intercepts slog global handler, asserts log entries/sequences |
 | **GoLeakChecker** | Goroutine leak detection, 2-second polling timeout |
-| **VerifyRunner** | 26 verification rules (VQ/VT/VS/VC/VH/VP/VG/VE) |
+| **VerifyRunner** | 36 verification rules (VQ/VT/VS/VC/VH/VP/VG/VE) |
 
 ## Configuration
 
@@ -305,11 +321,22 @@ Ascending override: `Default` → `File` → `Env` → `Flag` → `Override`
 | Phase 2 | 100+ turn long conversation stability, auto-compaction, session recovery, trace chain integrity, quality metrics |
 | Phase 3 | Approval gating, MCP calls, loop detection, circuit breaker degradation, retry, idempotent dedup, audit records |
 | Phase 4 | Skill loading, extension registration, SubAgent generation, TUI rendering, YAML config, Provider composition, ACP communication, OTLP export |
+| Phase 20+ | REPL, git tools, streaming, token estimation, interrupt/steer, system prompt, cross-scenario |
+| Phase 21+ | SubAgent, TUI, production hardening, all-capabilities integration |
+| Phase 22–26 | Reviewer-driven E2E, production, LSP, full wiring |
+| Phase 39 | Interactive REPL sessions |
+| Phase 46–49 | Security hardening & boundary edge cases |
 
 Run:
 
 ```bash
 go test -race -count=1 -v -run "TestPhase2|TestPhase3|TestPhase4" ./tests/...
+```
+
+Full E2E suite (organized under `tests/e2e_20260802/`):
+
+```bash
+go test -race -count=1 ./tests/...
 ```
 
 ## Project Structure
@@ -336,12 +363,15 @@ go-cli/
 │   ├── tui/                # Terminal UI
 │   └── verify/             # Verification framework (Scanner/Leak/Log)
 ├── tests/                  # End-to-end integration tests
+│   ├── e2e_20260802/       # Full E2E suite (36 files, phases 1–47)
 │   ├── phase2_e2e_test.go  # Long conversation + compaction + session
 │   ├── phase3_e2e_test.go  # Resilience + approval + MCP
-│   └── phase4_e2e_test.go  # Skill + extension + SubAgent + TUI + ACP
+│   ├── phase4_e2e_test.go  # Skill + extension + SubAgent + TUI + ACP
+│   ├── e2e_phase20_steer_test.go ... e2e_phase49_test.go  # Phase-specific E2E
+│   └── smoke_test.go       # Smoke tests
 ├── .github/workflows/      # CI/CD
 ├── Makefile                # Build/test/verify
-└── go.mod                  # Go 1.23+, test dependencies only
+└── go.mod                  # Go 1.24+, test dependencies only
 ```
 
 ## Design Principles
