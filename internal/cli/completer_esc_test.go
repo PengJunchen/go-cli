@@ -56,7 +56,7 @@ func TestCompositeCompleter_FilePath(t *testing.T) {
 		NewSlashCommandCompleter([]string{"help"}),
 		NewFilePathCompleter(),
 	)
-	completions, start := c.Complete("hel", 3)
+	completions, start := c.Complete("he", 2)
 	require.Len(t, completions, 1)
 	assert.Equal(t, "hello.txt", completions[0].Text)
 	assert.Equal(t, "file", completions[0].Description)
