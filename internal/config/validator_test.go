@@ -65,11 +65,15 @@ func TestDefaultValidator_InvalidCompaction(t *testing.T) {
 }
 
 func TestDefaultValidator_InsecureBaseURL(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn}))
+	v := &DefaultValidator{logger: logger}
+
 	cfg := defaultConfig()
 	cfg.Provider.BaseURL = "http://api.openai.com/v1"
-	err := NewDefaultValidator().Validate(*cfg)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "base_url must use HTTPS")
+	err := v.Validate(*cfg)
+	require.NoError(t, err) // HTTP base_url is a warning, not an error
+	assert.Contains(t, buf.String(), "insecure_base_url")
 }
 
 func TestDefaultValidator_LocalhostHTTPBaseURL(t *testing.T) {
