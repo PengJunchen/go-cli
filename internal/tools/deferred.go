@@ -121,8 +121,9 @@ func (r *DefaultDeferredToolRegistry) Load(ctx context.Context, name string) (To
 
 	def, err := loader()
 	if err != nil {
-		// Fall back to a stub: execution neither blocks nor panics, and the
-		// loader stays registered so a later Load can retry.
+		// Fall back to a stub: execution neither blocks nor panics. The stub
+		// is cached in the loaded map so subsequent Loads return it
+		// immediately without re-invoking the loader.
 		stub := &deferredStub{name: name}
 		r.loaded[name] = stub
 		span.SetAttributes(tracing.Attribute{Key: "tool_name", Value: name}, tracing.Attribute{Key: "status", Value: "stub"})
@@ -204,4 +205,90 @@ func GetDeferredToolRegistry() DeferredToolRegistry {
 		return NewDefaultDeferredToolRegistry(NewDefaultToolRegistry())
 	}
 	return defaultDeferred
+}
+
+// DeferredRegistry combines ToolRegistry and DeferredToolRegistry so callers
+// can use both eager Register and lazy RegisterDeferred through a single value.
+type DeferredRegistry interface {
+	ToolRegistry
+	DeferredToolRegistry
+}
+
+// DeferredToolRegistryAdapter implements ToolRegistry by delegating to a
+// DefaultDeferredToolRegistry. Register calls pass through to the underlying
+// registry. Get first checks the underlying registry; if not found, it
+// attempts to Load the deferred tool. List returns eager tools plus stubs
+// for unloaded deferred tools.
+type DeferredToolRegistryAdapter struct {
+	*DefaultDeferredToolRegistry
+}
+
+var _ ToolRegistry = (*DeferredToolRegistryAdapter)(nil)
+
+// NewDeferredToolRegistryAdapter wraps the given underlying ToolRegistry in a
+// DefaultDeferredToolRegistry and returns an adapter that satisfies both
+// ToolRegistry and DeferredRegistry.
+func NewDeferredToolRegistryAdapter(underlying ToolRegistry) *DeferredToolRegistryAdapter {
+	dtr := NewDefaultDeferredToolRegistry(underlying)
+	return &DeferredToolRegistryAdapter{DefaultDeferredToolRegistry: dtr.(*DefaultDeferredToolRegistry)} //nolint:errcheck // dtr is always *DefaultDeferredToolRegistry
+}
+
+// Register delegates to the underlying registry (eager registration).
+func (a *DeferredToolRegistryAdapter) Register(ctx context.Context, def ToolDefinition) error {
+	return a.underlying.Register(ctx, def)
+}
+
+// Get returns the tool with the given name. It first checks the underlying
+// registry; if not found, it attempts to Load the deferred tool (which
+// registers it into the underlying registry on success). If the name is
+// unknown or loading fails, ErrToolNotFound is returned.
+func (a *DeferredToolRegistryAdapter) Get(ctx context.Context, name string) (ToolDefinition, error) {
+	def, err := a.underlying.Get(ctx, name)
+	if err == nil {
+		return def, nil
+	}
+	if !errors.Is(err, ErrToolNotFound) {
+		return nil, err
+	}
+
+	// Try to materialize a deferred tool.
+	if _, loadErr := a.Load(ctx, name); loadErr != nil {
+		if errors.Is(loadErr, ErrDeferredToolNotFound) {
+			return nil, ErrToolNotFound
+		}
+		return nil, fmt.Errorf("tools: load deferred %q: %w", name, loadErr)
+	}
+
+	// Load succeeded and registered into the underlying registry.
+	return a.underlying.Get(ctx, name)
+}
+
+// List returns all eagerly registered tools from the underlying registry plus
+// placeholder stubs for unloaded deferred tools. Already-loaded deferred tools
+// appear once (via the underlying registry); unloaded ones appear as stubs.
+func (a *DeferredToolRegistryAdapter) List(ctx context.Context) ([]ToolDefinition, error) {
+	eager, err := a.underlying.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+
+	seen := make(map[string]bool, len(eager))
+	for _, d := range eager {
+		seen[d.Name()] = true
+	}
+	for name := range a.loaders {
+		if _, loaded := a.loaded[name]; loaded {
+			// Loaded tools are already in the underlying registry (or a
+			// failed-load stub that we intentionally hide from List).
+			continue
+		}
+		if !seen[name] {
+			eager = append(eager, &deferredStub{name: name})
+			seen[name] = true
+		}
+	}
+	return eager, nil
 }

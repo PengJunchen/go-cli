@@ -16,6 +16,7 @@ type registerDefaultsConfig struct {
 	resourceLimits   ResourceLimits
 	gitTool          GitTool
 	builtinWhitelist map[string]bool
+	pathWhitelist    []string
 }
 
 // WithRegisteredFileTracker wires a FileTracker into the WriteTool and
@@ -43,7 +44,8 @@ func WithRegisteredResourceLimits(limits ResourceLimits) RegisterDefaultsOption 
 }
 
 // WithRegisteredGitTool wires a GitTool into the git tools (diff, status,
-// commit, log, branch, checkout, blame, push) registered by RegisterDefaults.
+// commit, log, branch, checkout, blame, push, create_branch, merge, stash,
+// stash_pop, reset, revert, fetch, pull, remote) registered by RegisterDefaults.
 func WithRegisteredGitTool(git GitTool) RegisterDefaultsOption {
 	return func(c *registerDefaultsConfig) { c.gitTool = git }
 }
@@ -62,6 +64,14 @@ func WithRegisteredBuiltinWhitelist(names []string) RegisterDefaultsOption {
 			c.builtinWhitelist[n] = true
 		}
 	}
+}
+
+// WithRegisteredPathWhitelist wires a path whitelist into the WriteTool and
+// EditFileTool registered by RegisterDefaults. When configured, write and edit
+// operations are restricted to paths within the allowed base directories,
+// matching the defense-in-depth provided by the bash sandbox.
+func WithRegisteredPathWhitelist(paths []string) RegisterDefaultsOption {
+	return func(c *registerDefaultsConfig) { c.pathWhitelist = paths }
 }
 
 // RegisterDefaults registers the built-in read, bash, write, edit, grep, find
@@ -87,6 +97,9 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDef
 	if cfg.diffGenerator != nil {
 		writeOpts = append(writeOpts, WithDiffGenerator(cfg.diffGenerator))
 	}
+	if len(cfg.pathWhitelist) > 0 {
+		writeOpts = append(writeOpts, WithWritePathWhitelist(cfg.pathWhitelist))
+	}
 
 	// Build EditFileTool options.
 	editOpts := []EditFileToolOption{}
@@ -95,6 +108,9 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDef
 	}
 	if cfg.diffGenerator != nil {
 		editOpts = append(editOpts, WithEditDiffGenerator(cfg.diffGenerator))
+	}
+	if len(cfg.pathWhitelist) > 0 {
+		editOpts = append(editOpts, WithEditPathWhitelist(cfg.pathWhitelist))
 	}
 
 	// Build BashTool options.
@@ -106,14 +122,32 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDef
 		bashOpts = append(bashOpts, WithResourceLimits(cfg.resourceLimits))
 	}
 
+	// Build GrepTool options.
+	grepOpts := []GrepToolOption{}
+	if len(cfg.pathWhitelist) > 0 {
+		grepOpts = append(grepOpts, WithGrepPathWhitelist(cfg.pathWhitelist))
+	}
+
+	// Build FindTool options.
+	findOpts := []FindToolOption{}
+	if len(cfg.pathWhitelist) > 0 {
+		findOpts = append(findOpts, WithFindPathWhitelist(cfg.pathWhitelist))
+	}
+
+	// Build LSTool options.
+	lsOpts := []LSToolOption{}
+	if len(cfg.pathWhitelist) > 0 {
+		lsOpts = append(lsOpts, WithLSPathWhitelist(cfg.pathWhitelist))
+	}
+
 	defs := []ToolDefinition{
 		NewReadTool(),
-		NewBashTool(bashOpts...),
+		NewStreamingBashTool(bashOpts...),
 		NewWriteTool(writeOpts...),
 		NewEditFileTool(editOpts...),
-		NewGrepTool(),
-		NewFindTool(),
-		NewLSTool(),
+		NewGrepTool(grepOpts...),
+		NewFindTool(findOpts...),
+		NewLSTool(lsOpts...),
 	}
 
 	// Register git tools when a GitTool is wired.
@@ -127,6 +161,15 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDef
 			NewGitCheckoutTool(cfg.gitTool),
 			NewGitBlameTool(cfg.gitTool),
 			NewGitPushTool(cfg.gitTool),
+			NewGitCreateBranchTool(cfg.gitTool),
+			NewGitMergeTool(cfg.gitTool),
+			NewGitStashTool(cfg.gitTool),
+			NewGitStashPopTool(cfg.gitTool),
+			NewGitResetTool(cfg.gitTool),
+			NewGitRevertTool(cfg.gitTool),
+			NewGitFetchTool(cfg.gitTool),
+			NewGitPullTool(cfg.gitTool),
+			NewGitRemoteTool(cfg.gitTool),
 		)
 	}
 

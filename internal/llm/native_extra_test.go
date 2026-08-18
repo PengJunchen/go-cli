@@ -6,6 +6,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -325,7 +326,7 @@ func TestNativeChatModel_StreamError(t *testing.T) {
 	m := &nativeChatModel{
 		client:   http.DefaultClient,
 		endpoint: srv.URL,
-		provider: "x",
+		provider: openaiProviderName,
 		model:    "m",
 		encode:   func(_ []Message, _ []Option) ([]byte, error) { return []byte("{}"), nil },
 		decode:   func(_ []byte) (*Message, error) { return &Message{Role: RoleAssistant}, nil },
@@ -444,4 +445,417 @@ func TestNativeChatModelHeaders(t *testing.T) {
 	_, err = m.Generate(context.Background(), nil)
 	require.NoError(t, err)
 	assert.Equal(t, "", gotAuth)
+}
+
+// ---------------------------------------------------------------------------
+// Gemini function-call streaming and decoding
+// ---------------------------------------------------------------------------
+
+// TestStreamGemini_FunctionCallAccumulation verifies that a functionCall part
+// in a Gemini SSE stream is accumulated into the Final chunk's ToolCalls with
+// a synthesized ID and the correct Name/Args.
+func TestStreamGemini_FunctionCallAccumulation(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	sseBody := strings.Join([]string{
+		`data: {"candidates":[{"content":{"parts":[{"text":"Let me check "}]}}]}`,
+		"",
+		`data: {"candidates":[{"content":{"parts":[{"text":"the weather."}]}}]}`,
+		"",
+		`data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"get_weather","args":{"city":"SF"}}}]},"finishReason":"STOP"}]}`,
+		"",
+	}, "\n")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeResponse(t, w, sseBody)
+	}))
+	defer srv.Close()
+
+	provider := NewGeminiProvider(WithNativeBaseURL(srv.URL))
+	model, _, err := provider.Build(context.Background(), ModelConfig{Model: "m"})
+	require.NoError(t, err)
+
+	ch, err := model.Stream(context.Background(), nil)
+	require.NoError(t, err)
+
+	var chunks []MessageChunk
+	for c := range ch {
+		chunks = append(chunks, c)
+	}
+
+	// Expect: two text chunks + final chunk.
+	require.Len(t, chunks, 3)
+	assert.Equal(t, "Let me check ", chunks[0].Content)
+	assert.Equal(t, "the weather.", chunks[1].Content)
+
+	final := chunks[2]
+	assert.True(t, final.Final)
+	assert.Equal(t, "STOP", final.FinishReason)
+	require.Len(t, final.ToolCalls, 1)
+
+	tc := final.ToolCalls[0]
+	assert.True(t, strings.HasPrefix(tc.ID, "call_"), "ID should start with call_, got %s", tc.ID)
+	assert.Equal(t, "get_weather", tc.Name)
+	args, ok := tc.Args.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "SF", args["city"])
+}
+
+// TestStreamGemini_MultipleFunctionCalls verifies that multiple functionCall
+// parts in a single response are all accumulated with distinct synthesized IDs.
+func TestStreamGemini_MultipleFunctionCalls(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	sseBody := strings.Join([]string{
+		`data: {"candidates":[{"content":{"parts":[` +
+			`{"functionCall":{"name":"get_weather","args":{"city":"SF"}}},` +
+			`{"functionCall":{"name":"get_time","args":{"timezone":"PST"}}}` +
+			`]},"finishReason":"STOP"}]}`,
+		"",
+	}, "\n")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeResponse(t, w, sseBody)
+	}))
+	defer srv.Close()
+
+	provider := NewGeminiProvider(WithNativeBaseURL(srv.URL))
+	model, _, err := provider.Build(context.Background(), ModelConfig{Model: "m"})
+	require.NoError(t, err)
+
+	ch, err := model.Stream(context.Background(), nil)
+	require.NoError(t, err)
+
+	var chunks []MessageChunk
+	for c := range ch {
+		chunks = append(chunks, c)
+	}
+
+	// Only the final chunk (no text content was emitted).
+	require.Len(t, chunks, 1)
+	final := chunks[0]
+	assert.True(t, final.Final)
+	require.Len(t, final.ToolCalls, 2)
+
+	// First tool call.
+	tc0 := final.ToolCalls[0]
+	assert.True(t, strings.HasPrefix(tc0.ID, "call_"), "ID should start with call_, got %s", tc0.ID)
+	assert.Equal(t, "get_weather", tc0.Name)
+	args0, ok := tc0.Args.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "SF", args0["city"])
+
+	// Second tool call.
+	tc1 := final.ToolCalls[1]
+	assert.True(t, strings.HasPrefix(tc1.ID, "call_"), "ID should start with call_, got %s", tc1.ID)
+	assert.Equal(t, "get_time", tc1.Name)
+	args1, ok := tc1.Args.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "PST", args1["timezone"])
+}
+
+// TestStreamGemini_TextAndToolCallMixed verifies that text and functionCall
+// parts interleaved across stream chunks are all processed correctly.
+func TestStreamGemini_TextAndToolCallMixed(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	sseBody := strings.Join([]string{
+		// First chunk: text only.
+		`data: {"candidates":[{"content":{"parts":[{"text":"I'll search "}]}}]}`,
+		"",
+		// Second chunk: functionCall only.
+		`data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"search","args":{"q":"golang"}}}]},"finishReason":"STOP"}]}`,
+		"",
+		// Third chunk: text after the function call (e.g. another candidate
+		// segment).
+		`data: {"candidates":[{"content":{"parts":[{"text":"done"}]}}]}`,
+		"",
+	}, "\n")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeResponse(t, w, sseBody)
+	}))
+	defer srv.Close()
+
+	provider := NewGeminiProvider(WithNativeBaseURL(srv.URL))
+	model, _, err := provider.Build(context.Background(), ModelConfig{Model: "m"})
+	require.NoError(t, err)
+
+	ch, err := model.Stream(context.Background(), nil)
+	require.NoError(t, err)
+
+	var chunks []MessageChunk
+	for c := range ch {
+		chunks = append(chunks, c)
+	}
+
+	// Expect: "I'll search ", "done", final chunk with tool call.
+	require.Len(t, chunks, 3)
+	assert.Equal(t, "I'll search ", chunks[0].Content)
+	assert.Equal(t, "done", chunks[1].Content)
+
+	final := chunks[2]
+	assert.True(t, final.Final)
+	require.Len(t, final.ToolCalls, 1)
+	assert.Equal(t, "search", final.ToolCalls[0].Name)
+	args, ok := final.ToolCalls[0].Args.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "golang", args["q"])
+}
+
+// TestDecodeGeminiResponse_FunctionCall verifies that a non-streaming
+// generateContent response with functionCall parts populates msg.ToolCalls.
+func TestDecodeGeminiResponse_FunctionCall(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	body := `{
+		"candidates":[{
+			"content":{
+				"parts":[
+					{"text":"Calling tool now."},
+					{"functionCall":{"name":"get_weather","args":{"city":"SF","unit":"celsius"}}}
+				]
+			},
+			"finishReason":"STOP"
+		}],
+		"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":5}
+	}`
+
+	msg, err := decodeGeminiResponse([]byte(body))
+	require.NoError(t, err)
+	assert.Equal(t, RoleAssistant, msg.Role)
+	assert.Equal(t, "Calling tool now.", msg.Content)
+	assert.Equal(t, "STOP", msg.FinishReason)
+	require.Len(t, msg.ToolCalls, 1)
+
+	tc := msg.ToolCalls[0]
+	assert.True(t, strings.HasPrefix(tc.ID, "call_"), "ID should start with call_, got %s", tc.ID)
+	assert.Equal(t, "get_weather", tc.Name)
+	args, ok := tc.Args.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "SF", args["city"])
+	assert.Equal(t, "celsius", args["unit"])
+}
+
+// TestDecodeGeminiResponse_MultipleFunctionCalls verifies multiple functionCall
+// parts in a non-streaming response.
+func TestDecodeGeminiResponse_MultipleFunctionCalls(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	body := `{
+		"candidates":[{
+			"content":{
+				"parts":[
+					{"functionCall":{"name":"get_weather","args":{"city":"SF"}}},
+					{"functionCall":{"name":"get_time","args":{"tz":"PST"}}}
+				]
+			},
+			"finishReason":"STOP"
+		}]
+	}`
+
+	msg, err := decodeGeminiResponse([]byte(body))
+	require.NoError(t, err)
+	assert.Empty(t, msg.Content)
+	require.Len(t, msg.ToolCalls, 2)
+	assert.Equal(t, "get_weather", msg.ToolCalls[0].Name)
+	assert.Equal(t, "get_time", msg.ToolCalls[1].Name)
+}
+
+// TestEncodeGeminiRequest_AssistantToolCalls verifies that an assistant message
+// with ToolCalls is encoded as functionCall parts.
+func TestEncodeGeminiRequest_AssistantToolCalls(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	body, err := encodeGeminiRequest(ModelConfig{}, []Message{
+		{Role: RoleUser, Content: "What's the weather?"},
+		{
+			Role:    RoleAssistant,
+			Content: "Let me check.",
+			ToolCalls: []ToolCall{
+				{Name: "get_weather", Args: map[string]any{"city": "SF"}},
+			},
+		},
+	}, nil)
+	require.NoError(t, err)
+
+	var req geminiRequest
+	require.NoError(t, json.Unmarshal(body, &req))
+	require.Len(t, req.Contents, 2)
+
+	// Assistant content should have a text part followed by a functionCall part.
+	assistant := req.Contents[1]
+	assert.Equal(t, "assistant", assistant.Role)
+	require.Len(t, assistant.Parts, 2)
+	assert.Equal(t, "Let me check.", assistant.Parts[0].Text)
+	require.NotNil(t, assistant.Parts[1].FunctionCall)
+	assert.Equal(t, "get_weather", assistant.Parts[1].FunctionCall.Name)
+	assert.Equal(t, "SF", assistant.Parts[1].FunctionCall.Args["city"])
+}
+
+// TestEncodeGeminiRequest_ToolResult verifies that a tool result message is
+// encoded as a functionResponse part.
+func TestEncodeGeminiRequest_ToolResult(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	body, err := encodeGeminiRequest(ModelConfig{}, []Message{
+		{Role: RoleUser, Content: "What's the weather?"},
+		{
+			Role:    RoleAssistant,
+			Content: "",
+			ToolCalls: []ToolCall{
+				{Name: "get_weather", Args: map[string]any{"city": "SF"}},
+			},
+		},
+		{
+			Role:    RoleTool,
+			Name:    "get_weather",
+			Content: `{"temperature":72,"condition":"sunny"}`,
+		},
+	}, nil)
+	require.NoError(t, err)
+
+	var req geminiRequest
+	require.NoError(t, json.Unmarshal(body, &req))
+	require.Len(t, req.Contents, 3)
+
+	// Tool result message: role folded to "user", single functionResponse part.
+	toolMsg := req.Contents[2]
+	assert.Equal(t, "user", toolMsg.Role)
+	require.Len(t, toolMsg.Parts, 1)
+	require.NotNil(t, toolMsg.Parts[0].FunctionResponse)
+	assert.Equal(t, "get_weather", toolMsg.Parts[0].FunctionResponse.Name)
+	resp := toolMsg.Parts[0].FunctionResponse.Response
+	assert.Equal(t, float64(72), resp["temperature"])
+	assert.Equal(t, "sunny", resp["condition"])
+}
+
+// TestEncodeGeminiRequest_ToolResultNonJSON verifies that a non-JSON tool
+// result is wrapped under a "content" key in the functionResponse.
+func TestEncodeGeminiRequest_ToolResultNonJSON(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	body, err := encodeGeminiRequest(ModelConfig{}, []Message{
+		{
+			Role:    RoleTool,
+			Name:    "echo",
+			Content: "plain text result",
+		},
+	}, nil)
+	require.NoError(t, err)
+
+	var req geminiRequest
+	require.NoError(t, json.Unmarshal(body, &req))
+	require.Len(t, req.Contents, 1)
+	require.Len(t, req.Contents[0].Parts, 1)
+	require.NotNil(t, req.Contents[0].Parts[0].FunctionResponse)
+	resp := req.Contents[0].Parts[0].FunctionResponse.Response
+	assert.Equal(t, "plain text result", resp["content"])
+}
+
+// ---------------------------------------------------------------------------
+// HTTP timeout (AC-2, AC-3)
+// ---------------------------------------------------------------------------
+
+// TestNativeProviderDefaultHTTPTimeout verifies that all three native
+// providers set a default 120s timeout on their HTTP client (AC-2).
+func TestNativeProviderDefaultHTTPTimeout(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	oa := NewOpenAIProvider()
+	require.NotNil(t, oa.httpClient)
+	assert.Equal(t, nativeDefaultHTTPTimeout, oa.httpClient.Timeout)
+
+	cl := NewClaudeProvider()
+	require.NotNil(t, cl.httpClient)
+	assert.Equal(t, nativeDefaultHTTPTimeout, cl.httpClient.Timeout)
+
+	ge := NewGeminiProvider()
+	require.NotNil(t, ge.httpClient)
+	assert.Equal(t, nativeDefaultHTTPTimeout, ge.httpClient.Timeout)
+}
+
+// TestNativeGenerateClientTimeout verifies that non-streaming Generate
+// requests are terminated by the client timeout (AC-2).
+func TestNativeGenerateClientTimeout(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	shortTimeoutClient := &http.Client{Timeout: 50 * time.Millisecond}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		writeResponse(t, w, `{"choices":[{"message":{"role":"assistant","content":"late"}}]}`)
+	}))
+	defer srv.Close()
+
+	provider := NewOpenAIProvider(WithNativeBaseURL(srv.URL), WithNativeHTTPClient(shortTimeoutClient))
+	model, _, err := provider.Build(context.Background(), ModelConfig{Model: "m"})
+	require.NoError(t, err)
+
+	_, err = model.Generate(context.Background(), nil)
+	require.Error(t, err)
+}
+
+// TestNativeStreamingBypassesClientTimeout verifies that streaming SSE
+// connections are NOT terminated by the client-level timeout. A server that
+// delays its response body beyond the client timeout should still deliver
+// data to the stream, because streamRoundTrip uses a client copy with
+// Timeout=0 (AC-2).
+func TestNativeStreamingBypassesClientTimeout(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	shortTimeoutClient := &http.Client{Timeout: 50 * time.Millisecond}
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		time.Sleep(200 * time.Millisecond)
+		writeResponse(t, w, "data: {\"choices\":[{\"delta\":{\"content\":\"late\"}}]}\n\ndata: [DONE]\n\n")
+	}))
+	defer srv.Close()
+
+	provider := NewOpenAIProvider(WithNativeBaseURL(srv.URL), WithNativeHTTPClient(shortTimeoutClient))
+	model, _, err := provider.Build(context.Background(), ModelConfig{Model: "m"})
+	require.NoError(t, err)
+
+	ch, err := model.Stream(context.Background(), nil)
+	require.NoError(t, err)
+
+	var gotContent string
+	for c := range ch {
+		if c.Content != "" {
+			gotContent = c.Content
+		}
+	}
+	assert.Equal(t, "late", gotContent)
+}
+
+// TestNativeGenerateContextCancel verifies that cancelling the context
+// cancels the HTTP request (AC-3).
+func TestNativeGenerateContextCancel(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(500 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		writeResponse(t, w, `{"choices":[{"message":{"role":"assistant","content":"never"}}]}`)
+	}))
+	defer srv.Close()
+
+	provider := NewOpenAIProvider(WithNativeBaseURL(srv.URL))
+	model, _, err := provider.Build(context.Background(), ModelConfig{Model: "m"})
+	require.NoError(t, err)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	_, err = model.Generate(ctx, nil)
+	require.Error(t, err)
 }

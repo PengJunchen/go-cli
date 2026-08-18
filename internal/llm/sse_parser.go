@@ -2,6 +2,8 @@ package llm
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"io"
 	"strings"
 )
@@ -18,7 +20,7 @@ type SSEEvent struct {
 
 // SSEParser parses Server-Sent Events from an io.Reader.
 type SSEParser interface {
-	Parse(reader io.Reader) (<-chan SSEEvent, error)
+	Parse(ctx context.Context, reader io.Reader) (<-chan SSEEvent, error)
 }
 
 // DefaultSSEParser implements SSEParser using bufio.Scanner. It follows the
@@ -35,10 +37,12 @@ func NewDefaultSSEParser() *DefaultSSEParser {
 	return &DefaultSSEParser{}
 }
 
-// Parse reads SSE events from reader and sends them to the returned unbuffered
+// Parse reads SSE events from reader and sends them to the returned buffered
 // channel. The channel is closed when the reader is exhausted. The returned
-// error is always nil; malformed lines are silently skipped.
-func (p *DefaultSSEParser) Parse(reader io.Reader) (<-chan SSEEvent, error) {
+// error is always nil; malformed lines are silently skipped. Parse respects
+// ctx: when ctx is canceled the goroutine stops scanning and closes the
+// channel promptly.
+func (p *DefaultSSEParser) Parse(ctx context.Context, reader io.Reader) (<-chan SSEEvent, error) {
 	ch := make(chan SSEEvent, 4)
 
 	go func() {
@@ -54,15 +58,21 @@ func (p *DefaultSSEParser) Parse(reader io.Reader) (<-chan SSEEvent, error) {
 			if eventType == "" && len(dataLines) == 0 {
 				return
 			}
-			ch <- SSEEvent{
-				Type: eventType,
-				Data: strings.Join(dataLines, "\n"),
+			select {
+			case ch <- SSEEvent{Type: eventType, Data: strings.Join(dataLines, "\n")}:
+			case <-ctx.Done():
+				return
 			}
 			eventType = ""
 			dataLines = dataLines[:0]
 		}
 
 		for scanner.Scan() {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+			}
 			line := scanner.Text()
 
 			// A blank line dispatches the accumulated event.
@@ -102,4 +112,25 @@ func (p *DefaultSSEParser) Parse(reader io.Reader) (<-chan SSEEvent, error) {
 	}()
 
 	return ch, nil
+}
+
+// detectJSONResponse peeks at the reader to determine if the response is a
+// plain JSON document (non-SSE) rather than an SSE stream. When the first
+// non-whitespace byte is '{' or '[', the entire body is read and returned as
+// JSON. Otherwise the reader is left untouched for SSE parsing. Returns
+// (isJSON, peekedBytes, error).
+func detectJSONResponse(reader *bufio.Reader) (bool, []byte, error) {
+	peeked, err := reader.Peek(64)
+	if err != nil && err != io.EOF {
+		return false, nil, err
+	}
+	trimmed := bytes.TrimLeft(peeked, " \t\r\n")
+	if len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') {
+		all, err := io.ReadAll(reader)
+		if err != nil {
+			return false, nil, err
+		}
+		return true, all, nil
+	}
+	return false, nil, nil
 }

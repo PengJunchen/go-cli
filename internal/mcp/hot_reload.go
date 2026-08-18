@@ -131,6 +131,7 @@ type DefaultHotReloader struct {
 	path string
 
 	mu             sync.Mutex
+	pollCtx        context.Context
 	pollCancel     context.CancelFunc
 	pollDone       chan struct{}
 	stopCh         chan struct{}
@@ -193,6 +194,7 @@ func (h *DefaultHotReloader) Watch(ctx context.Context, configPath string) error
 
 	h.path = configPath
 	pollCtx, cancel := context.WithCancel(ctx)
+	h.pollCtx = pollCtx
 	h.pollCancel = cancel
 	h.pollDone = make(chan struct{})
 	h.stopCh = make(chan struct{})
@@ -285,10 +287,12 @@ func (h *DefaultHotReloader) detectAndMaybeReconnect(ctx context.Context) {
 // The first successful visit only establishes the baseline. It returns true
 // once per observable change (creation, modification, or removal).
 func (h *DefaultHotReloader) detectChange() bool {
+	// Read the file outside the lock to avoid blocking other callers (Stop,
+	// Reload, scheduleReconnect) during I/O.
+	snap, present := readSnapshot(h.path)
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
-
-	snap, present := readSnapshot(h.path)
 
 	if !h.baseline {
 		h.baseline = true
@@ -306,7 +310,7 @@ func (h *DefaultHotReloader) detectChange() bool {
 // scheduleReconnect kicks off one reconnect cycle on a background goroutine. If
 // a cycle is already running, the change is recorded as pending and re-run once
 // the active cycle finishes.
-func (h *DefaultHotReloader) scheduleReconnect(ctx context.Context) {
+func (h *DefaultHotReloader) scheduleReconnect(_ context.Context) {
 	h.mu.Lock()
 	if h.stopped {
 		h.mu.Unlock()
@@ -318,6 +322,9 @@ func (h *DefaultHotReloader) scheduleReconnect(ctx context.Context) {
 		return
 	}
 	h.connecting = true
+	// Use the reloader's own pollCtx so reconnect cycles are not canceled
+	// by a short-lived caller context (e.g. an HTTP request).
+	ctx := h.pollCtx
 	h.mu.Unlock()
 
 	go h.reconnectLoop(ctx)
@@ -336,7 +343,7 @@ func (h *DefaultHotReloader) reconnectLoop(ctx context.Context) {
 		stopped := h.stopped
 		h.mu.Unlock()
 		if hadPending && !stopped {
-			h.scheduleReconnect(context.Background())
+			h.scheduleReconnect(ctx)
 		}
 	}()
 

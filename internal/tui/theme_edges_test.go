@@ -6,32 +6,33 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// TestStyleBackgroundRendersBackgroundSGR verifies the background color maps to
-// the correct SGR (foreground code + 10) when rendered end-to-end.
+// TestStyleBackgroundRendersBackgroundSGR verifies the background color renders
+// a truecolor 48;2 sequence end-to-end.
 func TestStyleBackgroundRendersBackgroundSGR(t *testing.T) {
-	s := NewStyle().Background(colorGreen) // 32 -> 42
+	s := NewStyle().Background(lipgloss.Color("#04E762"))
 	out := s.Render("bg")
-	require.True(t, strings.Contains(out, "42"), "expected bg SGR 42 in %q", out)
-	require.True(t, strings.HasPrefix(out, "\x1b[42m"))
-	require.True(t, strings.HasSuffix(out, ansiReset))
+	require.True(t, strings.Contains(out, "48;2;"), "expected truecolor bg SGR in %q", out)
+	require.True(t, strings.HasPrefix(out, "\x1b["))
+	require.True(t, strings.HasSuffix(out, "\x1b[0m"))
 	require.Equal(t, "bg", stripEscape(out))
 }
 
-// TestStyleForegroundAndBackgroundTogether verifies fg+bg appear together in
-// the SGR body.
+// TestStyleForegroundAndBackgroundTogether verifies fg+bg both appear as
+// truecolor sequences in the rendered SGR body.
 func TestStyleForegroundAndBackgroundTogether(t *testing.T) {
-	s := NewStyle().Foreground(colorRed).Background(colorBlue)
-	body := s.String() // e.g. \x1b[31;44m
-	require.Contains(t, body, "31")
-	require.Contains(t, body, "44")
+	s := NewStyle().Foreground(lipgloss.Color("#FF5C5C")).Background(lipgloss.Color("#1E66F5"))
+	body := s.Render("x")
+	require.Contains(t, body, "38;2;")
+	require.Contains(t, body, "48;2;")
 }
 
-// TestStyleFlagsIndependent verifies toggling each boolean attribute on and off
-// leaves the SGR body with only the enabled attribute.
+// TestStyleFlagsIndependent verifies toggling each boolean attribute on yields a
+// distinct SGR escape under the forced truecolor profile.
 func TestStyleFlagsIndependent(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -46,23 +47,24 @@ func TestStyleFlagsIndependent(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			out := tc.style.Render("x")
-			require.Contains(t, out, "\x1b["+tc.code+"m", "expected only SGR %s", tc.code)
-			// No other flag code should be present.
+			require.Contains(t, out, "\x1b["+tc.code, "expected SGR %s prefix", tc.code)
+			// No other flag code should be present as a standalone SGR.
 			for _, other := range []string{"1", "2", "3", "4"} {
 				if other == tc.code {
 					continue
 				}
+				assert.NotContains(t, out, "\x1b["+other+";", "unexpected attribute %s", other)
 				assert.NotContains(t, out, "\x1b["+other+"m", "unexpected attribute %s", other)
 			}
 		})
 	}
 }
 
-// TestStyleResetViaSetFalse verifies calling a setter with false is a no-op that
-// yields an empty style again.
+// TestStyleResetViaSetFalse verifies calling a setter with false removes the
+// attribute, yielding an empty style that renders plain text.
 func TestStyleResetViaSetFalse(t *testing.T) {
 	s := NewStyle().Bold(true).Italic(true).Bold(false).Italic(false)
-	require.Equal(t, "", s.String(), "flag disabled should remove the attribute")
+	require.Equal(t, "x", s.Render("x"), "flag disabled should remove the attribute")
 }
 
 // TestThemeManagerSetEmptyName verifies switching to an empty name yields an
@@ -126,7 +128,7 @@ func TestEachPresetProducesDistinctPrimary(t *testing.T) {
 		"monokai":   MonokaiTheme{},
 		"solarized": SolarizedTheme{},
 	} {
-		body := th.Primary().String()
+		body := th.Primary().Render("x")
 		require.NotEmpty(t, body, "preset %q primary should be non-empty", name)
 		seen[body] = true
 	}
@@ -134,12 +136,17 @@ func TestEachPresetProducesDistinctPrimary(t *testing.T) {
 }
 
 // TestRenderersDrawWithThemeManager verifies going through a ThemeManager
-// applies the active theme's styling to a renderer end-to-end.
+// applies the active theme's styling to a renderer end-to-end. Glamour renders
+// markdown links using its own link styling (underline + color), so the output
+// contains escape sequences and the link display text "hi".
 func TestRenderersDrawWithThemeManager(t *testing.T) {
 	mgr := NewThemeManager()
 	require.NoError(t, mgr.Set("light"))
-	out := (MarkdownRenderer{}).Render(context.Background(), "hi", RenderOpts{Theme: mgr.Get()})
-	require.True(t, strings.HasPrefix(out, "\x1b[34m"), "light primary should be blue (34), got %q", out)
+	r := NewMarkdownRenderer()
+	out := r.Render(context.Background(), "[hi](http://x)", RenderOpts{Theme: mgr.Get()})
+	require.Contains(t, out, "\x1b[", "glamour should style the link with escape sequences, got %q", out)
+	// Glamour strips the markdown link syntax, rendering only the display text.
+	require.Contains(t, stripEscape(out), "hi")
 }
 
 // TestRendererRegistryEmptyVerifiesNewRegistryIsEmpty verifies a freshly
@@ -168,7 +175,7 @@ func TestRendererRegistryListIsACopy(t *testing.T) {
 	delete(snap, ContentTypeCode)
 	_, ok := reg.Get(ContentTypeCode)
 	require.True(t, ok, "removing from the snapshot must not affect the registry")
-	require.Len(t, snap, 23)
+	require.Len(t, snap, 25)
 }
 
 // TestRendererRegistryGetEmptyString verifies an empty content type is absent
@@ -185,10 +192,10 @@ func TestRendererRegistryGetEmptyString(t *testing.T) {
 // mixed sequence.
 func TestStreamingAndNonStreamingDrawBehaviour(t *testing.T) {
 	app := NewBubbleteaApp(make(chan AgentEvent, 1))
-	app.addEntry("streaming", "b")
-	app.addEntry("streaming", "c")
-	app.addEntry("code", "d")
-	app.addEntry("status", "a")
+	app.model.addEntry("streaming", "b", "")
+	app.model.addEntry("streaming", "c", "")
+	app.model.addEntry("code", "d", "")
+	app.model.addEntry("status", "a", "")
 	// Streaming replaces, static appends: ["c", "d", "a"].
 	view := app.View()
 	require.Contains(t, view, "c")
@@ -197,12 +204,12 @@ func TestStreamingAndNonStreamingDrawBehaviour(t *testing.T) {
 	require.NotContains(t, view, "b")
 }
 
-// TestStyleEmptyStringRoundTrip verifies String() on a non-empty style returns
-// the opening SGR only and Render returns a balanced open/close pair.
+// TestStyleEmptyStringRoundTrip verifies Render on a foreground style wraps the
+// payload in a truecolor open sequence and a trailing reset.
 func TestStyleEmptyStringRoundTrip(t *testing.T) {
-	s := NewStyle().Foreground(colorWhite)
-	open := s.String()
-	require.Equal(t, "\x1b[37m", open)
+	s := NewStyle().Foreground(lipgloss.Color("#CDD6F4"))
 	rendered := s.Render("X")
-	require.Equal(t, "\x1b[37mX\x1b[0m", rendered)
+	require.True(t, strings.HasPrefix(rendered, "\x1b[38;2;205;214;243m"))
+	require.True(t, strings.HasSuffix(rendered, "\x1b[0m"))
+	require.Contains(t, rendered, "X")
 }

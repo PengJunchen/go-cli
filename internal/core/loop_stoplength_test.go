@@ -1,0 +1,514 @@
+package core
+
+import (
+	"context"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/llm"
+	"github.com/pengjunchen/go-cli/internal/mock"
+)
+
+// TestStopReasonDoesNotTriggerContinuation verifies that a normal finish_reason
+// of "stop" does not cause any continuation requests.
+func TestStopReasonDoesNotTriggerContinuation(t *testing.T) {
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"SL-01", "no-continuation",
+		mock.ConversationTurn{
+			AssistantContent: "hello from model",
+			FinishReason:     "stop",
+		},
+	))
+	loop := NewLoopAgent(WithLLM(model))
+
+	events, err := loop.Run(context.Background(), Submission{Content: "hi"})
+	require.NoError(t, err)
+
+	// Only one LLM call — no continuation.
+	assert.Equal(t, 1, model.CallCount())
+
+	messages := findEvents(events, "message")
+	require.Len(t, messages, 1)
+	assert.Equal(t, "hello from model", messages[0])
+}
+
+// TestLengthReasonTriggersContinuation verifies that finish_reason="length"
+// causes the loop to issue a continuation request.
+func TestLengthReasonTriggersContinuation(t *testing.T) {
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"SL-02", "continuation",
+		mock.ConversationTurn{
+			AssistantContent: "partial",
+			FinishReason:     "length",
+		},
+		mock.ConversationTurn{
+			AssistantContent: " complete",
+			FinishReason:     "stop",
+		},
+	))
+	loop := NewLoopAgent(WithLLM(model))
+
+	events, err := loop.Run(context.Background(), Submission{Content: "go"})
+	require.NoError(t, err)
+
+	// Two LLM calls: original + one continuation.
+	assert.Equal(t, 2, model.CallCount())
+
+	messages := findEvents(events, "message")
+	require.Len(t, messages, 1)
+	assert.Equal(t, "partial complete", messages[0])
+}
+
+// TestContinuationMergesResponses verifies that the continuation content is
+// merged with the original partial content.
+func TestContinuationMergesResponses(t *testing.T) {
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"SL-03", "merge",
+		mock.ConversationTurn{
+			AssistantContent: "The answer is ",
+			FinishReason:     "length",
+		},
+		mock.ConversationTurn{
+			AssistantContent: "forty-two.",
+			FinishReason:     "stop",
+		},
+	))
+	loop := NewLoopAgent(WithLLM(model))
+
+	events, err := loop.Run(context.Background(), Submission{Content: "what is the answer"})
+	require.NoError(t, err)
+	assert.Equal(t, 2, model.CallCount())
+
+	messages := findEvents(events, "message")
+	require.Len(t, messages, 1)
+	assert.Equal(t, "The answer is forty-two.", messages[0])
+}
+
+// TestContinuationAppendsPartialContent verifies that the continuation request
+// includes the partial assistant response in the conversation.
+func TestContinuationAppendsPartialContent(t *testing.T) {
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"SL-04", "append-partial",
+		mock.ConversationTurn{
+			AssistantContent: "partial text",
+			FinishReason:     "length",
+		},
+		mock.ConversationTurn{
+			AssistantContent: " done",
+			FinishReason:     "stop",
+		},
+	))
+	loop := NewLoopAgent(WithLLM(model))
+
+	_, err := loop.Run(context.Background(), Submission{Content: "go"})
+	require.NoError(t, err)
+	require.Equal(t, 2, model.CallCount())
+
+	// The second call's messages must include an assistant message carrying
+	// the partial content, proving the continuation request was built correctly.
+	secondCallMsgs := model.CallLog()[1].Messages
+	var foundPartial bool
+	for _, m := range secondCallMsgs {
+		if m.Role == llm.RoleAssistant && m.Content == "partial text" {
+			foundPartial = true
+		}
+	}
+	assert.True(t, foundPartial, "continuation request must include the partial assistant response")
+}
+
+// TestMaxContinuationAttemptsEnforced verifies that at most 3 continuation
+// attempts are issued even if the model keeps returning finish_reason="length".
+func TestMaxContinuationAttemptsEnforced(t *testing.T) {
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"SL-05", "max-attempts",
+		mock.ConversationTurn{AssistantContent: "p1", FinishReason: "length"},
+		mock.ConversationTurn{AssistantContent: "p2", FinishReason: "length"},
+		mock.ConversationTurn{AssistantContent: "p3", FinishReason: "length"},
+		mock.ConversationTurn{AssistantContent: "p4", FinishReason: "length"},
+	))
+	loop := NewLoopAgent(WithLLM(model))
+
+	events, err := loop.Run(context.Background(), Submission{Content: "go"})
+	require.NoError(t, err)
+
+	// 1 original + 3 continuations = 4 total calls.
+	assert.Equal(t, 4, model.CallCount())
+
+	// The merged content includes all four partial chunks.
+	messages := findEvents(events, "message")
+	require.Len(t, messages, 1)
+	assert.Equal(t, "p1p2p3p4", messages[0])
+}
+
+// TestContinuationMultipleChunks verifies that multi-chunk continuation works:
+// the first response is truncated, then two continuation requests complete it.
+func TestContinuationMultipleChunks(t *testing.T) {
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"SL-06", "multi-continuation",
+		mock.ConversationTurn{AssistantContent: "A", FinishReason: "length"},
+		mock.ConversationTurn{AssistantContent: "B", FinishReason: "length"},
+		mock.ConversationTurn{AssistantContent: "C", FinishReason: "stop"},
+	))
+	loop := NewLoopAgent(WithLLM(model))
+
+	events, err := loop.Run(context.Background(), Submission{Content: "go"})
+	require.NoError(t, err)
+
+	// 1 original + 2 continuations = 3 total calls.
+	assert.Equal(t, 3, model.CallCount())
+
+	messages := findEvents(events, "message")
+	require.Len(t, messages, 1)
+	assert.Equal(t, "ABC", messages[0])
+}
+
+// TestContinuationEmptyFinishReasonNoContinuation verifies that an empty
+// finish_reason (e.g. from a provider that doesn't send one) does not trigger
+// continuation.
+func TestContinuationEmptyFinishReasonNoContinuation(t *testing.T) {
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"SL-07", "empty-finish",
+		mock.ConversationTurn{AssistantContent: "done"},
+	))
+	loop := NewLoopAgent(WithLLM(model))
+
+	events, err := loop.Run(context.Background(), Submission{Content: "go"})
+	require.NoError(t, err)
+	assert.Equal(t, 1, model.CallCount())
+
+	messages := findEvents(events, "message")
+	require.Len(t, messages, 1)
+	assert.Equal(t, "done", messages[0])
+}
+
+// TestContinuationDropsPartialToolCalls verifies that tool calls from a
+// truncated response (finish_reason="length") are dropped and not executed,
+// while tool calls from the complete continuation response are executed
+// normally. Content from both responses is merged.
+func TestContinuationDropsPartialToolCalls(t *testing.T) {
+	toolSrv := mock.NewMockToolServer()
+	_, err := toolSrv.RegisterReadFileTool("file contents")
+	require.NoError(t, err)
+
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"SL-08", "drop-partial-tool-calls",
+		mock.ConversationTurn{
+			AssistantContent: "partial",
+			AssistantToolCalls: []mock.ExpectedToolCall{
+				{ID: "partial-tc", Name: "read_file", Args: map[string]any{"path": "a.go"}},
+			},
+			FinishReason: "length",
+		},
+		mock.ConversationTurn{
+			AssistantContent: " complete",
+			AssistantToolCalls: []mock.ExpectedToolCall{
+				{ID: "complete-tc", Name: "read_file", Args: map[string]any{"path": "b.go"}},
+			},
+			FinishReason: "stop",
+		},
+		mock.ConversationTurn{AssistantContent: "done"},
+	))
+	loop := NewLoopAgent(WithLLM(model), WithTools(toolSrv))
+
+	events, err := loop.Run(context.Background(), Submission{Content: "go"})
+	require.NoError(t, err)
+
+	// 3 LLM calls: 1 original + 1 continuation + 1 after tool execution.
+	assert.Equal(t, 3, model.CallCount())
+
+	// Only the complete tool call (from the continuation) should execute.
+	// The partial tool call from the truncated response must be dropped.
+	toolCalls := findEvents(events, "tool_call")
+	require.Len(t, toolCalls, 1)
+	assert.Equal(t, "read_file", toolCalls[0])
+
+	// Content from the first two responses is merged; the third response
+	// ("done") is emitted after tool execution.
+	messages := findEvents(events, "message")
+	require.Len(t, messages, 2)
+	assert.Equal(t, "partial complete", messages[0])
+	assert.Equal(t, "done", messages[1])
+}
+
+// TestContinuationMergesContentNoToolCalls verifies that pure text truncation
+// (no tool calls) merges content correctly across continuation requests.
+func TestContinuationMergesContentNoToolCalls(t *testing.T) {
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"SL-09", "merge-content-no-tools",
+		mock.ConversationTurn{
+			AssistantContent: "Hello ",
+			FinishReason:     "length",
+		},
+		mock.ConversationTurn{
+			AssistantContent: "World",
+			FinishReason:     "stop",
+		},
+	))
+	loop := NewLoopAgent(WithLLM(model))
+
+	events, err := loop.Run(context.Background(), Submission{Content: "greet"})
+	require.NoError(t, err)
+	assert.Equal(t, 2, model.CallCount())
+
+	messages := findEvents(events, "message")
+	require.Len(t, messages, 1)
+	assert.Equal(t, "Hello World", messages[0])
+
+	// No tool calls should be present.
+	assert.Empty(t, findEvents(events, "tool_call"))
+}
+
+// TestContinuationMaxAttemptsStillPartialSafe verifies that when the model
+// keeps returning finish_reason="length" with partial tool calls on every
+// attempt, the loop exhausts maxContinuationAttempts without panicking, drops
+// all partial tool calls (none are executed), and returns the merged content.
+func TestContinuationMaxAttemptsStillPartialSafe(t *testing.T) {
+	toolSrv := mock.NewMockToolServer()
+	_, err := toolSrv.RegisterReadFileTool("content")
+	require.NoError(t, err)
+
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"SL-10", "max-attempts-partial-tc",
+		mock.ConversationTurn{
+			AssistantContent: "p1",
+			AssistantToolCalls: []mock.ExpectedToolCall{
+				{ID: "tc1", Name: "read_file", Args: map[string]any{"path": "a.go"}},
+			},
+			FinishReason: "length",
+		},
+		mock.ConversationTurn{
+			AssistantContent: "p2",
+			AssistantToolCalls: []mock.ExpectedToolCall{
+				{ID: "tc2", Name: "read_file", Args: map[string]any{"path": "b.go"}},
+			},
+			FinishReason: "length",
+		},
+		mock.ConversationTurn{
+			AssistantContent: "p3",
+			AssistantToolCalls: []mock.ExpectedToolCall{
+				{ID: "tc3", Name: "read_file", Args: map[string]any{"path": "c.go"}},
+			},
+			FinishReason: "length",
+		},
+		mock.ConversationTurn{
+			AssistantContent: "p4",
+			AssistantToolCalls: []mock.ExpectedToolCall{
+				{ID: "tc4", Name: "read_file", Args: map[string]any{"path": "d.go"}},
+			},
+			FinishReason: "length",
+		},
+	))
+	loop := NewLoopAgent(WithLLM(model), WithTools(toolSrv))
+
+	events, err := loop.Run(context.Background(), Submission{Content: "go"})
+	require.NoError(t, err)
+
+	// 1 original + 3 continuations = 4 total calls.
+	assert.Equal(t, 4, model.CallCount())
+
+	// No tool calls should have been executed — all were partial and dropped.
+	assert.Empty(t, findEvents(events, "tool_call"))
+	assert.Empty(t, findEvents(events, "tool_result"))
+
+	// Content from all four partial responses is merged.
+	messages := findEvents(events, "message")
+	require.Len(t, messages, 1)
+	assert.Equal(t, "p1p2p3p4", messages[0])
+}
+
+// TestNoContinuationWhenFinishReasonStop verifies that a normal finish_reason
+// of "stop" with tool calls does not trigger continuation, and the tool calls
+// execute normally (regression test).
+func TestNoContinuationWhenFinishReasonStop(t *testing.T) {
+	toolSrv := mock.NewMockToolServer()
+	_, err := toolSrv.RegisterReadFileTool("content")
+	require.NoError(t, err)
+
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"SL-11", "stop-with-tool-calls",
+		mock.ConversationTurn{
+			AssistantContent: "let me read",
+			AssistantToolCalls: []mock.ExpectedToolCall{
+				{ID: "tc1", Name: "read_file", Args: map[string]any{"path": "a.go"}},
+			},
+			FinishReason: "stop",
+		},
+		mock.ConversationTurn{AssistantContent: "done"},
+	))
+	loop := NewLoopAgent(WithLLM(model), WithTools(toolSrv))
+
+	events, err := loop.Run(context.Background(), Submission{Content: "go"})
+	require.NoError(t, err)
+
+	// 2 LLM calls: 1 original (no continuation) + 1 after tool execution.
+	assert.Equal(t, 2, model.CallCount())
+
+	// The tool call executes normally.
+	toolCalls := findEvents(events, "tool_call")
+	require.Len(t, toolCalls, 1)
+	assert.Equal(t, "read_file", toolCalls[0])
+
+	// Both messages are emitted.
+	messages := findEvents(events, "message")
+	require.Len(t, messages, 2)
+	assert.Equal(t, "let me read", messages[0])
+	assert.Equal(t, "done", messages[1])
+}
+
+// lastMessageUsage returns the Usage from the last "message" event, or nil if
+// no message event carries usage data.
+func lastMessageUsage(events []AgentEvent) *llm.Usage {
+	for i := len(events) - 1; i >= 0; i-- {
+		if events[i].Kind == "message" {
+			return events[i].Usage
+		}
+	}
+	return nil
+}
+
+// TestContinuationAccumulatesInputTokens verifies that InputTokens from the
+// original and continuation responses are added together.
+func TestContinuationAccumulatesInputTokens(t *testing.T) {
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"SL-12", "accumulate-input",
+		mock.ConversationTurn{
+			AssistantContent: "partial",
+			FinishReason:     "length",
+			Usage:            &llm.Usage{InputTokens: 100, OutputTokens: 10, TotalTokens: 110},
+		},
+		mock.ConversationTurn{
+			AssistantContent: " complete",
+			FinishReason:     "stop",
+			Usage:            &llm.Usage{InputTokens: 200, OutputTokens: 20, TotalTokens: 220},
+		},
+	))
+	loop := NewLoopAgent(WithLLM(model))
+
+	events, err := loop.Run(context.Background(), Submission{Content: "go"})
+	require.NoError(t, err)
+
+	usage := lastMessageUsage(events)
+	require.NotNil(t, usage)
+	assert.Equal(t, 300, usage.InputTokens, "input tokens should accumulate: 100 + 200")
+}
+
+// TestContinuationAccumulatesOutputTokens verifies that OutputTokens and
+// TotalTokens from the original and continuation responses are added together.
+func TestContinuationAccumulatesOutputTokens(t *testing.T) {
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"SL-13", "accumulate-output",
+		mock.ConversationTurn{
+			AssistantContent: "partial",
+			FinishReason:     "length",
+			Usage:            &llm.Usage{InputTokens: 10, OutputTokens: 50, TotalTokens: 60},
+		},
+		mock.ConversationTurn{
+			AssistantContent: " complete",
+			FinishReason:     "stop",
+			Usage:            &llm.Usage{InputTokens: 20, OutputTokens: 70, TotalTokens: 90},
+		},
+	))
+	loop := NewLoopAgent(WithLLM(model))
+
+	events, err := loop.Run(context.Background(), Submission{Content: "go"})
+	require.NoError(t, err)
+
+	usage := lastMessageUsage(events)
+	require.NotNil(t, usage)
+	assert.Equal(t, 120, usage.OutputTokens, "output tokens should accumulate: 50 + 70")
+	assert.Equal(t, 150, usage.TotalTokens, "total tokens should accumulate: 60 + 90")
+}
+
+// TestContinuationNilOriginalAssigns verifies that when the original response
+// has nil Usage (provider omitted it), the continuation's Usage is assigned
+// directly.
+func TestContinuationNilOriginalAssigns(t *testing.T) {
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"SL-14", "nil-original",
+		mock.ConversationTurn{
+			AssistantContent: "partial",
+			FinishReason:     "length",
+			// Usage intentionally nil — provider omitted usage on first response.
+		},
+		mock.ConversationTurn{
+			AssistantContent: " complete",
+			FinishReason:     "stop",
+			Usage:            &llm.Usage{InputTokens: 100, OutputTokens: 50, TotalTokens: 150},
+		},
+	))
+	loop := NewLoopAgent(WithLLM(model))
+
+	events, err := loop.Run(context.Background(), Submission{Content: "go"})
+	require.NoError(t, err)
+
+	usage := lastMessageUsage(events)
+	require.NotNil(t, usage, "usage should be assigned from continuation when original is nil")
+	assert.Equal(t, 100, usage.InputTokens)
+	assert.Equal(t, 50, usage.OutputTokens)
+	assert.Equal(t, 150, usage.TotalTokens)
+}
+
+// TestContinuationNilContinuationKeepsOriginal verifies that when the
+// continuation response has nil Usage, the original Usage is preserved
+// unchanged.
+func TestContinuationNilContinuationKeepsOriginal(t *testing.T) {
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"SL-15", "nil-continuation",
+		mock.ConversationTurn{
+			AssistantContent: "partial",
+			FinishReason:     "length",
+			Usage:            &llm.Usage{InputTokens: 100, OutputTokens: 50, TotalTokens: 150},
+		},
+		mock.ConversationTurn{
+			AssistantContent: " complete",
+			FinishReason:     "stop",
+			// Usage intentionally nil — provider omitted usage on continuation.
+		},
+	))
+	loop := NewLoopAgent(WithLLM(model))
+
+	events, err := loop.Run(context.Background(), Submission{Content: "go"})
+	require.NoError(t, err)
+
+	usage := lastMessageUsage(events)
+	require.NotNil(t, usage, "original usage should be preserved when continuation is nil")
+	assert.Equal(t, 100, usage.InputTokens)
+	assert.Equal(t, 50, usage.OutputTokens)
+	assert.Equal(t, 150, usage.TotalTokens)
+}
+
+// TestMultipleContinuationsAccumulate verifies that Usage from multiple
+// continuation responses all accumulate into the final total.
+func TestMultipleContinuationsAccumulate(t *testing.T) {
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"SL-16", "multi-accumulate",
+		mock.ConversationTurn{
+			AssistantContent: "A",
+			FinishReason:     "length",
+			Usage:            &llm.Usage{InputTokens: 10, OutputTokens: 5, TotalTokens: 15},
+		},
+		mock.ConversationTurn{
+			AssistantContent: "B",
+			FinishReason:     "length",
+			Usage:            &llm.Usage{InputTokens: 20, OutputTokens: 10, TotalTokens: 30},
+		},
+		mock.ConversationTurn{
+			AssistantContent: "C",
+			FinishReason:     "stop",
+			Usage:            &llm.Usage{InputTokens: 30, OutputTokens: 15, TotalTokens: 45},
+		},
+	))
+	loop := NewLoopAgent(WithLLM(model))
+
+	events, err := loop.Run(context.Background(), Submission{Content: "go"})
+	require.NoError(t, err)
+	assert.Equal(t, 3, model.CallCount())
+
+	usage := lastMessageUsage(events)
+	require.NotNil(t, usage)
+	assert.Equal(t, 60, usage.InputTokens, "10 + 20 + 30")
+	assert.Equal(t, 30, usage.OutputTokens, "5 + 10 + 15")
+	assert.Equal(t, 90, usage.TotalTokens, "15 + 30 + 45")
+}

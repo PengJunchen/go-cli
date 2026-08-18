@@ -2,8 +2,11 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -304,4 +307,52 @@ func TestModelMiddlewareChain_ConcurrentAccess(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+// TestSevenLayer verifies that NewStandardMiddlewareChain registers all 7
+// standard middlewares in the correct order: failover, retry, timeout,
+// sanitize, loopdetection, validate, overflow.
+func TestSevenLayer(t *testing.T) {
+	chain := NewStandardMiddlewareChain(
+		NewFailoverModelMiddleware(),
+		NewRetryModelMiddleware(),
+		NewTimeoutModelMiddleware(),
+		NewSanitizeModelMiddleware(),
+		NewLoopDetectionModelMiddleware(),
+		NewValidateModelMiddleware(),
+		NewOverflowRecoveryMiddleware(),
+	)
+
+	list := chain.List()
+	require.Len(t, list, 7, "chain must have exactly 7 middlewares")
+
+	expected := []string{"failover", "retry", "timeout", "sanitize", "loopdetection", "validate", "overflow"}
+	for i, mw := range list {
+		assert.Equal(t, expected[i], mw.Name(), "middleware at index %d must be %s", i, expected[i])
+	}
+}
+
+// TestRetryInChain verifies that the retry middleware inside a chain retries
+// transient failures the expected number of times and ultimately succeeds.
+func TestRetryInChain(t *testing.T) {
+	var calls int32
+	model := &mockModel{
+		generateFn: func(_ context.Context, _ []Message, _ ...Option) (*Message, error) {
+			n := atomic.AddInt32(&calls, 1)
+			if n < 3 { // fail twice, succeed on 3rd call
+				return nil, errors.New("transient")
+			}
+			return &Message{Role: RoleAssistant, Content: "recovered"}, nil
+		},
+	}
+
+	chain := NewStandardMiddlewareChain(
+		NewRetryModelMiddleware(WithRetryPolicy(&testRetryPolicy{maxRetries: 3, baseDelay: 1 * time.Millisecond})),
+	)
+
+	wrapped := chain.Wrap(model)
+	resp, err := wrapped.Generate(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, "recovered", resp.Content)
+	assert.Equal(t, int32(3), atomic.LoadInt32(&calls), "model must be called exactly 3 times")
 }

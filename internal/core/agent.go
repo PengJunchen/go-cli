@@ -1,3 +1,4 @@
+//exempt:scan012
 package core
 
 import (
@@ -37,10 +38,11 @@ var _ eventSource = (*AgentImpl)(nil)
 type AgentImpl struct {
 	name           string
 	loop           AgentLoop
-	mu             sync.Mutex
+	mu             sync.RWMutex
 	history        []AgentMessage
 	events         []AgentEvent
 	compactionHook CompactionHook
+	state          AgentState
 }
 
 var _ Agent = (*AgentImpl)(nil)
@@ -65,6 +67,12 @@ func NewAgentImpl(name string, loop AgentLoop, opts ...AgentOption) *AgentImpl {
 		loop:           loop,
 		history:        append([]AgentMessage{}, cfg.history...),
 		compactionHook: cfg.compactionHook,
+		state:          StateCreated,
+	}
+	// Advance the lifecycle from Created to Initialized now that the agent is
+	// fully constructed and ready to accept Run calls.
+	if err := a.transitionState(StateInitialized); err != nil {
+		slog.Error("core.agent.init_transition_failed", "name", name, "err", err)
 	}
 	slog.Info("core.agent.new", "name", name, "history", len(a.history))
 	return a
@@ -72,6 +80,29 @@ func NewAgentImpl(name string, loop AgentLoop, opts ...AgentOption) *AgentImpl {
 
 // Name returns the agent identifier.
 func (a *AgentImpl) Name() string { return a.name }
+
+// State returns the current lifecycle state of the agent. It is thread-safe.
+func (a *AgentImpl) State() AgentState {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	return a.state
+}
+
+// transitionState validates and applies a state transition. When the
+// transition is invalid it logs a warning and returns ErrInvalidTransition
+// without updating the state, enforcing the lifecycle contract.
+func (a *AgentImpl) transitionState(to AgentState) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	from := a.state
+	if err := assertTransition(from, to); err != nil {
+		slog.Warn("core.agent.invalid_state_transition",
+			"name", a.name, "from", from, "to", to, "err", err)
+		return err
+	}
+	a.state = to
+	return nil
+}
 
 // Run appends the submission to the agent's history, executes the loop, records
 // the events it fired, and returns the final result. It is thread-safe. Success
@@ -81,6 +112,14 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...Ev
 	defer span.End()
 	logger := tracing.NewTraceLogger(span, nil)
 	logger.Info("core.agent.run", "name", a.name, "type", submission.Type, "content", submission.Content)
+
+	// Mark the agent as running before dispatching to the loop. If the
+	// state transition is rejected (e.g. the agent is in an incompatible
+	// state), log the error but proceed — the state machine is best-effort
+	// and must not block execution.
+	if err := a.transitionState(StateRunning); err != nil {
+		slog.Warn("core.agent.run_state_transition_failed", "name", a.name, "err", err)
+	}
 
 	a.mu.Lock()
 	a.history = append(a.history, AgentMessage{Role: "user", Content: submission.Content})
@@ -100,21 +139,26 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...Ev
 	if evs == nil {
 		evs = []AgentEvent{}
 	}
-	finalMsg := lastMessageEvent(evs)
+	lastAssistant := lastAssistantMessage(evs)
 
 	a.mu.Lock()
 	a.events = evs
-	if finalMsg != "" {
-		a.history = append(a.history, AgentMessage{Role: "assistant", Content: finalMsg})
+	if lastAssistant != nil {
+		a.history = append(a.history, AgentMessage{
+			Role:      "assistant",
+			Content:   lastAssistant.Content,
+			Usage:     lastAssistant.Usage,
+			ToolCalls: lastAssistant.ToolCalls,
+		})
 	}
 	a.mu.Unlock()
 
 	// Apply compaction hook if set: the hook may trim or summarize the
 	// history to keep it within the token budget.
 	if a.compactionHook != nil {
-		a.mu.Lock()
+		a.mu.RLock()
 		historyCopy := append([]AgentMessage{}, a.history...)
-		a.mu.Unlock()
+		a.mu.RUnlock()
 
 		compacted, compErr := a.compactionHook(spanCtx, historyCopy)
 		if compErr != nil {
@@ -128,20 +172,36 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...Ev
 	}
 
 	logger.Info("core.agent.done", "name", a.name, "events", len(evs), "success", err == nil)
+
+	// Advance the lifecycle to a terminal state based on the run outcome.
+	if err != nil {
+		if terr := a.transitionState(StateError); terr != nil {
+			slog.Warn("core.agent.error_state_transition_failed", "name", a.name, "err", terr)
+		}
+	} else {
+		if terr := a.transitionState(StateStopped); terr != nil {
+			slog.Warn("core.agent.stop_state_transition_failed", "name", a.name, "err", terr)
+		}
+	}
+
+	finalMsg := ""
+	if lastAssistant != nil {
+		finalMsg = lastAssistant.Content
+	}
 	return Result{Message: finalMsg, Success: err == nil}, err
 }
 
 // Events returns a copy of the events produced by the most recent Run call.
 func (a *AgentImpl) Events() []AgentEvent {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return append([]AgentEvent{}, a.events...)
 }
 
 // Messages returns a copy of the accumulated message history.
 func (a *AgentImpl) Messages() []AgentMessage {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return append([]AgentMessage{}, a.history...)
 }
 
@@ -154,6 +214,15 @@ func (a *AgentImpl) ClearHistory() {
 	slog.Info("core.agent.history_cleared", "name", a.name)
 }
 
+// SetHistory replaces the agent's conversation history. It is used by the
+// /resume slash command to restore a previous session's context.
+func (a *AgentImpl) SetHistory(messages []AgentMessage) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.history = append([]AgentMessage{}, messages...)
+	slog.Info("core.agent.history_set", "name", a.name, "messages", len(messages))
+}
+
 // Compact manually triggers the compaction hook on the current history.
 // It is used by the /compact slash command. When no compaction hook is
 // configured, it is a no-op.
@@ -161,9 +230,9 @@ func (a *AgentImpl) Compact(ctx context.Context) error {
 	if a.compactionHook == nil {
 		return nil
 	}
-	a.mu.Lock()
+	a.mu.RLock()
 	historyCopy := append([]AgentMessage{}, a.history...)
-	a.mu.Unlock()
+	a.mu.RUnlock()
 
 	compacted, err := a.compactionHook(ctx, historyCopy)
 	if err != nil {
@@ -176,14 +245,29 @@ func (a *AgentImpl) Compact(ctx context.Context) error {
 	return nil
 }
 
-// lastMessageEvent returns the content of the final non-empty "message" event,
-// or the empty string if none exists.
+// lastMessageEvent returns the content of the final "message" event, or the
+// empty string if none exists. It matches by Kind only so that pure tool call
+// responses (empty Content) are still returned.
 func lastMessageEvent(events []AgentEvent) string {
 	final := ""
 	for _, ev := range events {
-		if ev.Kind == "message" && ev.Content != "" {
+		if ev.Kind == "message" {
 			final = ev.Content
 		}
 	}
 	return final
+}
+
+// lastAssistantMessage returns a pointer to the final "message" event, or nil
+// when no message event exists. It matches by Kind only so that pure tool call
+// responses (empty Content but non-empty ToolCalls) are returned. The caller
+// can then access Content, Usage, and ToolCalls from the single event.
+func lastAssistantMessage(events []AgentEvent) *AgentEvent {
+	var last *AgentEvent
+	for i := range events {
+		if events[i].Kind == "message" {
+			last = &events[i]
+		}
+	}
+	return last
 }

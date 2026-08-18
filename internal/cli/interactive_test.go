@@ -167,49 +167,6 @@ func TestTurnItemsToMessages(t *testing.T) {
 	})
 }
 
-// TestEstimateTurnTokens tests the token estimation for turn items.
-func TestEstimateTurnTokens(t *testing.T) {
-	estimator := compaction.NewHeuristicTokenEstimator()
-
-	t.Run("empty items", func(t *testing.T) {
-		total := estimateTurnTokens(nil, estimator)
-		assert.Equal(t, 0, total)
-	})
-
-	t.Run("items with content only", func(t *testing.T) {
-		items := []compaction.TurnItem{
-			{Role: "user", Content: "hello world"}, // 11 chars => 2 tokens
-		}
-		total := estimateTurnTokens(items, estimator)
-		assert.Equal(t, 11/4, total)
-	})
-
-	t.Run("items with tool result only", func(t *testing.T) {
-		items := []compaction.TurnItem{
-			{Role: "tool", ToolResult: "file contents here"}, // 18 chars => 4 tokens
-		}
-		total := estimateTurnTokens(items, estimator)
-		assert.Equal(t, 18/4, total)
-	})
-
-	t.Run("items with both content and tool result", func(t *testing.T) {
-		items := []compaction.TurnItem{
-			{Role: "tool", Content: "call info", ToolResult: "result data"}, // 9/4 + 11/4 = 2 + 2 = 4 tokens
-		}
-		total := estimateTurnTokens(items, estimator)
-		assert.Equal(t, 9/4+11/4, total)
-	})
-
-	t.Run("items with empty content skipped", func(t *testing.T) {
-		items := []compaction.TurnItem{
-			{Role: "user", Content: ""},
-			{Role: "assistant", Content: "hi"}, // 2 chars => 0 tokens
-		}
-		total := estimateTurnTokens(items, estimator)
-		assert.Equal(t, 0, total)
-	})
-}
-
 // messageStubLoop is a minimal AgentLoop that returns a single assistant
 // message event with the configured content. It is used by compaction tests
 // that need the agent to accumulate user+assistant history across turns.

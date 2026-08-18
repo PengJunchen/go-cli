@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -14,6 +15,19 @@ import (
 
 // errTurnUnknown reports that a turn id is not managed by the runner.
 var errTurnUnknown = errors.New("core: unknown or inactive turn")
+
+// maxTurnsHistory bounds the number of completed turns retained in the turns
+// map. Once the count of completed turns exceeds this value, the oldest ones
+// are pruned to prevent unbounded memory growth in long sessions. Turns that
+// are still running are never pruned.
+const maxTurnsHistory = 100
+
+// messageSource is satisfied by Agent implementations that expose their
+// accumulated message history. The TurnRunner uses it to detect compaction
+// (a decrease in message count) during a turn.
+type messageSource interface {
+	Messages() []AgentMessage
+}
 
 // EinoTurnRunner is the default TurnRunner. It manages the lifecycle of each
 // turn it executes, exposing Cancel, Steer and FollowUp to act on a running
@@ -25,14 +39,17 @@ var errTurnUnknown = errors.New("core: unknown or inactive turn")
 // steering channel is set via SetSteerChannel, Steer sends the instruction to
 // that channel so the running loop picks it up between LLM iterations.
 type EinoTurnRunner struct {
-	loop    AgentLoop
-	agent   Agent
-	stream  EventStream
-	steerCh chan string
-	mu      sync.Mutex
-	turns   map[string]*Turn
-	running map[string]context.CancelFunc
-	idSeq   atomic.Uint64
+	loop       AgentLoop
+	agent      Agent
+	stream     EventStream
+	steerCh    chan string
+	followUpCh chan string
+	hookChain  *HookChain
+	runSlot    RunSlotGuard
+	mu         sync.Mutex
+	turns      map[string]*Turn
+	running    map[string]context.CancelFunc
+	idSeq      atomic.Uint64
 }
 
 var _ TurnRunner = (*EinoTurnRunner)(nil)
@@ -81,26 +98,61 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Re
 	r.mu.Lock()
 	r.turns[id] = turn
 	r.running[id] = cancel
+	hookChain := r.hookChain
+	runSlot := r.runSlot
+	agent := r.agent
+	stream := r.stream
 	r.mu.Unlock()
+
+	if runSlot == nil {
+		runSlot = defaultRunSlotGuard
+	}
+
+	// OnTurnStart lifecycle hook (invoked before the run begins).
+	if hookChain != nil {
+		if herr := hookChain.OnTurnStart(spanCtx, id); herr != nil {
+			slog.Warn("core.turn.runner.hook.turn_start", "id", id, "err", herr)
+		}
+	}
+
+	// Capture message count before the run for compaction detection.
+	var beforeMsgCount int
+	if ms, ok := agent.(messageSource); ok {
+		beforeMsgCount = len(ms.Messages())
+	}
 
 	var result Result
 	var runErr error
-	if r.agent != nil {
-		// Delegate to the agent (includes history management). Pass the
-		// stream if one is set so events are streamed in real time.
-		if r.stream != nil {
-			result, runErr = r.agent.Run(spanCtx, submission, r.stream)
-		} else {
-			result, runErr = r.agent.Run(spanCtx, submission)
-		}
-	} else if r.stream != nil {
-		events, err := r.loop.Run(spanCtx, submission, r.stream)
-		runErr = err
-		result = Result{Message: lastMessageEvent(events), Success: runErr == nil}
+
+	// Claim the run slot before executing the turn so concurrent turns
+	// fail fast when a run is already in progress.
+	claimCtx, claimCancel := context.WithTimeout(spanCtx, 200*time.Millisecond)
+	claim, claimErr := runSlot.ClaimRun(claimCtx)
+	claimCancel()
+	if claimErr != nil {
+		runErr = claimErr
 	} else {
-		events, err := r.loop.Run(spanCtx, submission)
-		runErr = err
-		result = Result{Message: lastMessageEvent(events), Success: runErr == nil}
+		runErr = runSlot.ExecuteClaimedRun(claim, func() error {
+			var e error
+			if agent != nil {
+				// Delegate to the agent (includes history management). Pass the
+				// stream if one is set so events are streamed in real time.
+				if stream != nil {
+					result, e = agent.Run(spanCtx, submission, stream)
+				} else {
+					result, e = agent.Run(spanCtx, submission)
+				}
+			} else if stream != nil {
+				var events []AgentEvent
+				events, e = r.loop.Run(spanCtx, submission, stream)
+				result = Result{Message: lastMessageEvent(events), Success: e == nil}
+			} else {
+				var events []AgentEvent
+				events, e = r.loop.Run(spanCtx, submission)
+				result = Result{Message: lastMessageEvent(events), Success: e == nil}
+			}
+			return e
+		})
 	}
 
 	r.mu.Lock()
@@ -116,9 +168,35 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Re
 	default:
 		turn.Status = TurnCompleted
 	}
+	// Prune completed turns beyond maxTurnsHistory to prevent unbounded
+	// memory growth. Only terminal turns are eligible; running turns are
+	// always retained.
+	r.pruneCompletedTurns()
 	r.mu.Unlock()
 
-	endSpan, _ := tracing.SpanFromContext(ctx, "turn.end", tracing.SpanKindInternal)
+	// Post-run lifecycle hooks. OnError fires when the run failed; OnCompaction
+	// fires when the agent's message count decreased during the turn; OnTurnEnd
+	// always fires to signal the turn is complete.
+	if hookChain != nil {
+		if runErr != nil {
+			if herr := hookChain.OnError(spanCtx, id, runErr); herr != nil {
+				slog.Warn("core.turn.runner.hook.on_error", "id", id, "err", herr)
+			}
+		}
+		if ms, ok := r.agent.(messageSource); ok {
+			afterMsgCount := len(ms.Messages())
+			if afterMsgCount < beforeMsgCount {
+				if herr := hookChain.OnCompaction(spanCtx, beforeMsgCount, afterMsgCount); herr != nil {
+					slog.Warn("core.turn.runner.hook.compaction", "id", id, "err", herr)
+				}
+			}
+		}
+		if herr := hookChain.OnTurnEnd(spanCtx, id, result, runErr); herr != nil {
+			slog.Warn("core.turn.runner.hook.turn_end", "id", id, "err", herr)
+		}
+	}
+
+	endSpan, _ := tracing.SpanFromContext(spanCtx, "turn.end", tracing.SpanKindInternal)
 	endSpan.SetAttributes(tracing.Attribute{Key: "turn_id", Value: id}, tracing.Attribute{Key: "status", Value: turn.Status.String()})
 	endSpan.End()
 
@@ -187,6 +265,7 @@ func (r *EinoTurnRunner) Steer(ctx context.Context, id, instruction string) erro
 			slog.Info("core.turn.runner.steer.sent", "id", id, "instruction", instruction)
 		default:
 			slog.Warn("core.turn.runner.steer.channel_full", "id", id)
+			return fmt.Errorf("steering channel full")
 		}
 	}
 	return nil
@@ -200,6 +279,14 @@ func (r *EinoTurnRunner) SetSteerChannel(ch chan string) {
 	r.steerCh = ch
 }
 
+// SetFollowUpChannel sets the channel used to deliver follow-up user messages
+// to the running loop. It must be called before RunTurn starts the turn.
+func (r *EinoTurnRunner) SetFollowUpChannel(ch chan string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.followUpCh = ch
+}
+
 // SetAgent sets the Agent that RunTurn delegates to when non-nil. When set,
 // RunTurn calls agent.Run (which includes history management) instead of
 // calling the loop directly.
@@ -207,6 +294,24 @@ func (r *EinoTurnRunner) SetAgent(a Agent) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.agent = a
+}
+
+// SetHookChain sets the HookChain used to dispatch lifecycle events
+// (OnTurnStart, OnTurnEnd, OnError, OnCompaction) during RunTurn. Set to nil
+// to disable lifecycle hook dispatch.
+func (r *EinoTurnRunner) SetHookChain(chain *HookChain) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.hookChain = chain
+}
+
+// SetRunSlotGuard sets the RunSlotGuard used to enforce single-run
+// exclusivity. When nil (or not set), the runner uses the noop default so
+// concurrent turns are allowed.
+func (r *EinoTurnRunner) SetRunSlotGuard(g RunSlotGuard) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.runSlot = g
 }
 
 // SetStream sets the EventStream that RunTurn passes to the agent or loop so
@@ -222,19 +327,38 @@ func (r *EinoTurnRunner) SetStream(s EventStream) {
 func (r *EinoTurnRunner) RunningTurnID() string {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	for id, turn := range r.turns {
-		if turn.Status == TurnRunning {
-			return id
-		}
+	for id := range r.running {
+		return id
 	}
 	return ""
 }
 
 // FollowUp appends a follow-up user message to a running turn. It is recorded
-// on the turn and surfaced via Get; it returns an error if the turn is unknown
-// or not running.
+// on the turn and surfaced via Get. When a follow-up channel is set, the
+// instruction is also sent to that channel so the running loop picks it up
+// between LLM iterations. It returns an error if the turn is unknown or not
+// running.
 func (r *EinoTurnRunner) FollowUp(_ context.Context, id, content string) error {
-	return r.inject(id, Submission{Type: SubmissionFollowUp, Content: content}, "followup")
+	if err := r.inject(id, Submission{Type: SubmissionFollowUp, Content: content}, "followup"); err != nil {
+		return err
+	}
+	// Send to the follow-up channel so the running loop drains it between
+	// LLM iterations. The send is non-blocking: if the channel is full,
+	// the message is still recorded on the Turn (above) and the loop will
+	// pick up whatever is in the buffer.
+	r.mu.Lock()
+	ch := r.followUpCh
+	r.mu.Unlock()
+	if ch != nil {
+		select {
+		case ch <- content:
+			slog.Info("core.turn.runner.followup.sent", "id", id, "content_len", len(content))
+		default:
+			slog.Warn("core.turn.runner.followup.channel_full", "id", id)
+			return fmt.Errorf("followup channel full")
+		}
+	}
+	return nil
 }
 
 // inject appends a submission of the given kind to a running turn's
@@ -269,4 +393,39 @@ func (r *EinoTurnRunner) Get(_ context.Context, id string) (Turn, error) {
 	turn.Steerings = append([]Submission{}, t.Steerings...)
 	turn.FollowUps = append([]Submission{}, t.FollowUps...)
 	return turn, nil
+}
+
+// pruneCompletedTurns removes the oldest completed turns when the turns map
+// exceeds maxTurnsHistory. It must be called with r.mu held. Only turns in a
+// terminal state (completed, canceled, failed) are eligible for removal;
+// running turns are always retained. The most recent maxTurnsHistory
+// completed turns are kept.
+func (r *EinoTurnRunner) pruneCompletedTurns() {
+	if len(r.turns) <= maxTurnsHistory {
+		return
+	}
+
+	// Collect completed turns as pruning candidates.
+	type turnEntry struct {
+		id        string
+		startTime time.Time
+	}
+	var completed []turnEntry
+	for id, t := range r.turns {
+		if t.Done() {
+			completed = append(completed, turnEntry{id: id, startTime: t.StartTime})
+		}
+	}
+	if len(completed) <= maxTurnsHistory {
+		return
+	}
+
+	// Sort by StartTime ascending (oldest first) and remove the excess.
+	sort.Slice(completed, func(i, j int) bool {
+		return completed[i].startTime.Before(completed[j].startTime)
+	})
+	excess := len(completed) - maxTurnsHistory
+	for i := 0; i < excess; i++ {
+		delete(r.turns, completed[i].id)
+	}
 }

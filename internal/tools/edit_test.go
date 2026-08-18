@@ -269,3 +269,129 @@ func TestEditWithFileTrackerOption(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, "package main\n\nvar version = 1\n", string(content))
 }
+
+// --- Path whitelist + symlink security tests (SEC-04) ---
+
+// TestEditRejectsAbsolutePathOutsideWhitelist verifies AC-1: an absolute path
+// that falls outside the configured whitelist is rejected.
+func TestEditRejectsAbsolutePathOutsideWhitelist(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	outside := t.TempDir()
+
+	// Create a file outside the whitelist.
+	outsideFile := filepath.Join(outside, "target.txt")
+	require.NoError(t, os.WriteFile(outsideFile, []byte("data"), 0o600))
+
+	tool := NewEditFileTool(WithEditPathWhitelist([]string{dir}))
+
+	_, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{
+			"file_path":  outsideFile,
+			"old_string": "data",
+			"new_string": "modified",
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "whitelist")
+
+	// File must be unchanged.
+	data, rerr := os.ReadFile(outsideFile)
+	require.NoError(t, rerr)
+	assert.Equal(t, "data", string(data))
+}
+
+// TestEditRejectsSymlinkDirectoryEscape verifies AC-2: a symlink in an
+// intermediate directory that resolves outside the whitelist is rejected.
+func TestEditRejectsSymlinkDirectoryEscape(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	outside := t.TempDir()
+
+	// Create a real file in the outside directory.
+	realFile := filepath.Join(outside, "real.txt")
+	require.NoError(t, os.WriteFile(realFile, []byte("original"), 0o600))
+
+	// Create a symlink directory inside dir pointing to outside.
+	linkDir := filepath.Join(dir, "escape")
+	require.NoError(t, os.Symlink(outside, linkDir))
+
+	tool := NewEditFileTool(WithEditPathWhitelist([]string{dir}))
+
+	// Editing dir/escape/real.txt — the file itself is a regular file (so
+	// Lstat won't flag it as a symlink), but resolveSymlinks resolves
+	// dir/escape → outside which is not in the whitelist.
+	_, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{
+			"file_path":  filepath.Join(dir, "escape", "real.txt"),
+			"old_string": "original",
+			"new_string": "modified",
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "whitelist")
+
+	// File must be unchanged.
+	data, rerr := os.ReadFile(realFile)
+	require.NoError(t, rerr)
+	assert.Equal(t, "original", string(data))
+}
+
+// TestEditRejectsSymlinkTarget verifies AC-3: O_NOFOLLOW semantics — if the
+// target file itself is a symlink, the edit is rejected even when the symlink
+// points within the whitelist.
+func TestEditRejectsSymlinkTarget(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+
+	// Create a regular file and a symlink to it (both inside dir).
+	target := filepath.Join(dir, "target.txt")
+	require.NoError(t, os.WriteFile(target, []byte("original"), 0o600))
+	link := filepath.Join(dir, "link.txt")
+	require.NoError(t, os.Symlink(target, link))
+
+	tool := NewEditFileTool(WithEditPathWhitelist([]string{dir}))
+
+	_, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{
+			"file_path":  link,
+			"old_string": "original",
+			"new_string": "modified",
+		},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "symlink")
+
+	// Original file must be unchanged.
+	data, rerr := os.ReadFile(target)
+	require.NoError(t, rerr)
+	assert.Equal(t, "original", string(data))
+}
+
+// TestEditValidPathWithinWhitelist verifies that editing a valid file inside
+// the whitelist succeeds.
+func TestEditValidPathWithinWhitelist(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "main.go")
+	require.NoError(t, os.WriteFile(path, []byte("package main\n"), 0o600))
+
+	tool := NewEditFileTool(WithEditPathWhitelist([]string{dir}))
+
+	_, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{
+			"file_path":  path,
+			"old_string": "package main",
+			"new_string": "package main // edited",
+		},
+	})
+	require.NoError(t, err)
+
+	data, rerr := os.ReadFile(path)
+	require.NoError(t, rerr)
+	assert.Contains(t, string(data), "edited")
+}

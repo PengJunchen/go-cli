@@ -135,9 +135,12 @@ func NewRegexOutputGuard(patterns []string, opts ...Option) *RegexOutputGuard {
 		severity: severity,
 	}
 	for _, p := range patterns {
-		if re, err := regexp.Compile(p); err == nil {
-			g.patterns = append(g.patterns, re)
+		re, err := regexp.Compile(p)
+		if err != nil {
+			slog.Warn("output_guard.regex_compile_failed", "pattern", p, "error", err)
+			continue
 		}
+		g.patterns = append(g.patterns, re)
 	}
 	return g
 }
@@ -165,27 +168,55 @@ func (g *RegexOutputGuard) Check(ctx context.Context, text string) (*GuardResult
 // Name returns the guard identifier.
 func (g *RegexOutputGuard) Name() string { return g.name }
 
-// PII patterns detect personal-identifiable information.
-var piiPatterns = []string{
+// PIIPattern pairs a compiled regex with a human-readable label describing the
+// kind of PII it detects.
+type PIIPattern struct {
+	Pattern *regexp.Regexp
+	Name    string
+}
+
+// creditCardPIIName identifies the credit card pattern so that Luhn validation
+// can be applied selectively in PIIOutputGuard.Check.
+const creditCardPIIName = "Credit Card"
+
+// piiPatterns are the built-in PII detection patterns.
+var piiPatterns = []PIIPattern{
 	// Email addresses.
-	`[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(\.[A-Za-z0-9\-]+)+`,
+	{regexp.MustCompile(`[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(\.[A-Za-z0-9\-]+)+`), "Email"},
 	// Mainland China mobile phone numbers (11 digits starting 1[3-9]).
-	`\b1[3-9][0-9]{9}\b`,
+	{regexp.MustCompile(`\b1[3-9][0-9]{9}\b`), "China Phone"},
 	// Mainland China resident ID card numbers (18 chars, check digit 0-9/X).
-	`\b[1-9][0-9]{5}(18|19|20)[0-9]{2}(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])[0-9]{3}[0-9Xx]\b`,
+	{regexp.MustCompile(`\b[1-9][0-9]{5}(18|19|20)[0-9]{2}(0[1-9]|1[0-2])(0[1-9]|[12][0-9]|3[01])[0-9]{3}[0-9Xx]\b`), "China ID Card"},
+	// US Social Security Number (SSN).
+	{regexp.MustCompile(`\b\d{3}-\d{2}-\d{4}\b`), "US SSN"},
+	// International phone number (+ prefix).
+	{regexp.MustCompile(`\+\d{1,3}[\s.-]?\(?\d{1,4}\)?[\s.-]?\d{3,4}[\s.-]?\d{4}\b`), "International Phone"},
+	// API Key patterns (common prefixes: sk-, pk-, rk-).
+	{regexp.MustCompile(`\b(?:sk|pk|rk)-[a-zA-Z0-9_-]{20,}\b`), "API Key"},
+	// Credit card number (13-19 digits, optional spaces/dashes). Luhn-validated
+	// in Check to reduce false positives.
+	{regexp.MustCompile(`\b(?:\d[ -]*?){13,19}\b`), creditCardPIIName},
 }
 
 // PIIOutputGuard detects and blocks personal-identifiable information.
 type PIIOutputGuard struct {
-	name     string
-	patterns []*regexp.Regexp
+	name           string
+	patterns       []PIIPattern
+	customPatterns []PIIPattern
 }
 
 // Compile-time assertion that PIIOutputGuard satisfies OutputGuard.
 var _ OutputGuard = (*PIIOutputGuard)(nil)
 
-// NewPIIOutputGuard returns a PIIOutputGuard that blocks emails, phone
-// numbers and Chinese ID card numbers.
+// WithCustomPIIPatterns adds user-supplied PII patterns to a PIIOutputGuard in
+// addition to the built-in patterns.
+func WithCustomPIIPatterns(patterns ...PIIPattern) Option {
+	return func(o *options) { o.customPIIPatterns = patterns }
+}
+
+// NewPIIOutputGuard returns a PIIOutputGuard that blocks emails, phone numbers,
+// Chinese ID card numbers, US SSNs, credit card numbers, international phone
+// numbers and API keys. Custom patterns may be added via WithCustomPIIPatterns.
 func NewPIIOutputGuard(opts ...Option) *PIIOutputGuard {
 	o := applyOptions(opts)
 	name := o.name
@@ -193,31 +224,77 @@ func NewPIIOutputGuard(opts ...Option) *PIIOutputGuard {
 		name = "pii-output-guard"
 	}
 	g := &PIIOutputGuard{name: name}
-	for _, p := range piiPatterns {
-		if re, err := regexp.Compile(p); err == nil {
-			g.patterns = append(g.patterns, re)
-		}
+	g.patterns = append(g.patterns, piiPatterns...)
+	if len(o.customPIIPatterns) > 0 {
+		g.customPatterns = append(g.customPatterns, o.customPIIPatterns...)
 	}
 	return g
 }
 
-// Check denies the text when any PII regex matches.
+// Check denies the text when any PII regex matches. Credit card matches are
+// additionally validated with the Luhn algorithm to reduce false positives.
 func (g *PIIOutputGuard) Check(ctx context.Context, text string) (*GuardResult, error) {
 	if err := checkContext(ctx); err != nil {
 		return nil, err
 	}
 	res := &GuardResult{Allowed: true, Sanitized: text, Severity: GuardHigh}
 	logger := slog.Default()
-	for _, re := range g.patterns {
-		if re.MatchString(text) {
-			res.Allowed = false
-			res.Sanitized = ""
-			res.Reason = "output contains PII matching " + re.String()
-			break
-		}
+	if p, ok := g.findPII(text); ok {
+		res.Allowed = false
+		res.Sanitized = ""
+		res.Reason = "output contains PII matching " + p.Name
 	}
 	emitGuardResult(ctx, logger, g.Name(), res)
 	return res, nil
+}
+
+// findPII returns the first built-in or custom pattern that matches text.
+// Credit card patterns require Luhn validation to confirm a real card number.
+func (g *PIIOutputGuard) findPII(text string) (PIIPattern, bool) {
+	for _, group := range [2][]PIIPattern{g.patterns, g.customPatterns} {
+		for _, p := range group {
+			if !p.Pattern.MatchString(text) {
+				continue
+			}
+			if p.Name == creditCardPIIName && !luhnMatched(p.Pattern, text) {
+				continue
+			}
+			return p, true
+		}
+	}
+	return PIIPattern{}, false
+}
+
+// luhnMatched reports whether any match of re in text passes the Luhn checksum.
+func luhnMatched(re *regexp.Regexp, text string) bool {
+	for _, m := range re.FindAllString(text, -1) {
+		if luhnValid(m) {
+			return true
+		}
+	}
+	return false
+}
+
+// luhnValid reports whether cardNumber passes the Luhn checksum algorithm.
+// Non-digit characters are stripped before validation.
+func luhnValid(cardNumber string) bool {
+	var sum, pos int
+	for i := len(cardNumber) - 1; i >= 0; i-- {
+		c := cardNumber[i]
+		if c < '0' || c > '9' {
+			continue
+		}
+		d := int(c - '0')
+		if pos%2 == 1 {
+			d *= 2
+			if d > 9 {
+				d -= 9
+			}
+		}
+		sum += d
+		pos++
+	}
+	return pos >= 13 && sum%10 == 0
 }
 
 // Name returns the guard identifier.
@@ -257,9 +334,12 @@ func NewCodeInjectionGuard(opts ...Option) *CodeInjectionGuard {
 	}
 	g := &CodeInjectionGuard{name: name}
 	for _, p := range codeInjectionPatterns {
-		if re, err := regexp.Compile(p); err == nil {
-			g.patterns = append(g.patterns, re)
+		re, err := regexp.Compile(p)
+		if err != nil {
+			slog.Warn("output_guard.regex_compile_failed", "pattern", p, "error", err)
+			continue
 		}
+		g.patterns = append(g.patterns, re)
 	}
 	return g
 }

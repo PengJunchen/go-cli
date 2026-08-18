@@ -34,8 +34,15 @@ const (
 
 // Attribute is a key-value property attached to a Span.
 type Attribute struct {
-	Key   string `json:"key"`
-	Value any    `json:"value"`
+	Key       string `json:"key"`
+	Value     any    `json:"value"`
+	Sensitive bool   `json:"sensitive,omitempty"`
+}
+
+// SensitiveAttribute creates an Attribute marked as sensitive. Sensitive
+// attributes are masked by the RedactingExporter before export.
+func SensitiveAttribute(key string, value any) Attribute {
+	return Attribute{Key: key, Value: value, Sensitive: true}
 }
 
 // SpanEvent is a timestamped log entry within a Span.

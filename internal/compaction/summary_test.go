@@ -5,6 +5,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -193,4 +194,94 @@ func TestNoopSummarizerFailsLoudly(t *testing.T) {
 	compactor := NewSummaryCompactor(nil) // fallback summarizer
 	_, err := compactor.Compact(ctx, items, 30, est)
 	require.ErrorIs(t, err, errNoSummarizer)
+}
+
+// runeCountEstimator returns the rune count as the token count, letting tests
+// distinguish estimator-driven truncation from len()/4 truncation.
+type runeCountEstimator struct{}
+
+func (runeCountEstimator) Estimate(text string) (int, error) {
+	return utf8.RuneCountInString(text), nil
+}
+
+func TestClampSummaryUsesEstimator(t *testing.T) {
+	est := runeCountEstimator{} // 1 token per rune
+	compactor := NewSummaryCompactor(nil, WithMaxSummaryTokens(10))
+
+	summary := strings.Repeat("x", 100) // 100 runes = 100 tokens
+	clamped := compactor.clampSummary(summary, est)
+
+	// With the rune-count estimator the budget of 10 means 10 runes.
+	// If len()/4 were used instead, the result would be 40 chars.
+	assert.Equal(t, 10, utf8.RuneCountInString(clamped))
+	n, _ := est.Estimate(clamped)
+	assert.LessOrEqual(t, n, 10)
+}
+
+func TestClampSummaryCJKAccuracy(t *testing.T) {
+	est := NewHeuristicTokenEstimator() // unicode-aware: CJK = 2 tokens
+	compactor := NewSummaryCompactor(nil, WithMaxSummaryTokens(50))
+
+	summary := strings.Repeat("你", 100) // 100 CJK chars = 200 tokens
+	clamped := compactor.clampSummary(summary, est)
+
+	// Budget 50 / 2 tokens-per-CJK = 25 runes. The old len()/4 approach would
+	// compute 300 bytes / 4 = 75 tokens and truncate at byte 200 (66.7 CJK
+	// chars, splitting a multi-byte rune). The estimator-based approach
+	// truncates cleanly at 25 runes.
+	assert.Equal(t, 25, utf8.RuneCountInString(clamped))
+	n, _ := est.Estimate(clamped)
+	assert.LessOrEqual(t, n, 50)
+}
+
+// TestSummarySmallModel verifies that when a small-model-backed Summarizer is
+// injected, the UnifiedCompactor routes to the summary strategy (AC-5) and the
+// summarizer is actually invoked. It also verifies that without a summarizer
+// the router falls back to truncating and never selects summary (AC-6).
+func TestSummarySmallModel(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	ctx, _ := newTracedCtx(t)
+	est := tracedEstimator()
+
+	// Items with large user/assistant messages and no tool results. Micro
+	// cannot shrink these (it only placeholders tool results), so the
+	// UnifiedCompactor must escalate to summary or truncating.
+	items := []TurnItem{
+		{Role: RoleUser, Content: strings.Repeat("u", 500)},
+		{Role: RoleAssistant, Content: strings.Repeat("a", 500)},
+		{Role: RoleUser, Content: strings.Repeat("u", 500)},
+		{Role: RoleAssistant, Content: strings.Repeat("a", 500)},
+		{Role: RoleUser, Content: "recent question"},
+		{Role: RoleAssistant, Content: "recent answer"},
+	}
+
+	// AC-5: When a small-model-backed summarizer is configured, compaction
+	// routes to the summary strategy and the summarizer is invoked.
+	smallSummarizer := &fakeSummarizer{summary: "small model summary"}
+	summaryCompactor := NewSummaryCompactor(smallSummarizer)
+	uni := NewUnifiedCompactor(WithSummary(summaryCompactor))
+
+	out, err := uni.Compact(ctx, items, 30, est)
+	require.NoError(t, err)
+	assert.Equal(t, StrategySummary, uni.LastStrategy(),
+		"should use summary strategy when small model is configured")
+
+	// The small model summarizer was actually called.
+	require.NotEmpty(t, smallSummarizer.conversations(),
+		"small model summarizer must be invoked")
+
+	// The summary entry is present at the head.
+	require.NotEmpty(t, out)
+	assert.True(t, out[0].IsCompaction)
+	assert.Equal(t, "small model summary", out[0].Content)
+
+	// AC-6: Without a small-model summarizer, compaction falls back to
+	// truncating and never invokes summary.
+	uniNoSmall := NewUnifiedCompactor()
+	out2, err2 := uniNoSmall.Compact(ctx, items, 30, est)
+	require.NoError(t, err2)
+	assert.NotEqual(t, StrategySummary, uniNoSmall.LastStrategy(),
+		"should not use summary when no small model configured")
+	assert.LessOrEqual(t, estimateTokens(out2, est), 30)
 }

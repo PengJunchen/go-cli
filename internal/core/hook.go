@@ -91,6 +91,58 @@ func (c *HookChain) After(ctx context.Context, submission Submission, result Res
 	return firstErr
 }
 
+// OnTurnStart invokes OnTurnStart on every hook that implements LifecycleHook,
+// in application order. It returns the first error encountered.
+func (c *HookChain) OnTurnStart(ctx context.Context, turnID string) error {
+	for _, h := range c.hooks {
+		if lh, ok := h.(LifecycleHook); ok {
+			if err := lh.OnTurnStart(ctx, turnID); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// OnTurnEnd invokes OnTurnEnd on every hook that implements LifecycleHook,
+// in application order. It returns the first error encountered.
+func (c *HookChain) OnTurnEnd(ctx context.Context, turnID string, result Result, err error) error {
+	for _, h := range c.hooks {
+		if lh, ok := h.(LifecycleHook); ok {
+			if lerr := lh.OnTurnEnd(ctx, turnID, result, err); lerr != nil {
+				return lerr
+			}
+		}
+	}
+	return nil
+}
+
+// OnCompaction invokes OnCompaction on every hook that implements
+// LifecycleHook, in application order. It returns the first error encountered.
+func (c *HookChain) OnCompaction(ctx context.Context, beforeCount, afterCount int) error {
+	for _, h := range c.hooks {
+		if lh, ok := h.(LifecycleHook); ok {
+			if err := lh.OnCompaction(ctx, beforeCount, afterCount); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// OnError invokes OnError on every hook that implements LifecycleHook, in
+// application order. It returns the first error encountered.
+func (c *HookChain) OnError(ctx context.Context, turnID string, err error) error {
+	for _, h := range c.hooks {
+		if lh, ok := h.(LifecycleHook); ok {
+			if lerr := lh.OnError(ctx, turnID, err); lerr != nil {
+				return lerr
+			}
+		}
+	}
+	return nil
+}
+
 // HookMiddleware is an agent-level Middleware that wraps an AgentLoop with a
 // HookChain. Before each Run, it invokes the chain's Before phase (which may
 // halt the run); after the Run completes, it invokes the After phase so hooks

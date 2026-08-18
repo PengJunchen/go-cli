@@ -95,14 +95,35 @@ func TestTrustedProjects_StoreLoadError(t *testing.T) {
 	assert.Nil(t, tm.TrustedProjects(), "store error must yield nil")
 }
 
-func TestFingerprint(t *testing.T) {
-	fp1 := fingerprint("/repo/a")
-	fp2 := fingerprint("/repo/a")
+func TestContentFingerprint_PathFallback(t *testing.T) {
+	// When the file does not exist, contentFingerprint falls back to hashing
+	// the path string.
+	fp1 := contentFingerprint("/repo/a")
+	fp2 := contentFingerprint("/repo/a")
 	assert.Equal(t, fp1, fp2, "same input must yield same fingerprint")
 	assert.Len(t, fp1, 64, "SHA-256 hex must be 64 characters")
 
-	fp3 := fingerprint("/repo/b")
+	fp3 := contentFingerprint("/repo/b")
 	assert.NotEqual(t, fp1, fp3, "different input must yield different fingerprint")
+}
+
+func TestContentFingerprint_BasedOnContent(t *testing.T) {
+	// Two different paths with the same content must yield the same fingerprint.
+	dir := t.TempDir()
+	path1 := filepath.Join(dir, "config1.json")
+	path2 := filepath.Join(dir, "config2.json")
+	content := []byte(`{"servers":[]}`)
+	require.NoError(t, os.WriteFile(path1, content, 0o600))
+	require.NoError(t, os.WriteFile(path2, content, 0o600))
+
+	fp1 := contentFingerprint(path1)
+	fp2 := contentFingerprint(path2)
+	assert.Equal(t, fp1, fp2, "same content must yield same fingerprint regardless of path")
+
+	// Change content of path2 — fingerprint must differ.
+	require.NoError(t, os.WriteFile(path2, []byte(`{"servers":["x"]}`), 0o600))
+	fp3 := contentFingerprint(path2)
+	assert.NotEqual(t, fp1, fp3, "different content must yield different fingerprint")
 }
 
 func TestFileTrustStore_SaveRoundTrip(t *testing.T) {

@@ -2,6 +2,7 @@ package acp
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -234,4 +235,148 @@ func TestACPMiddlewareAdapterIgnoresNonMessageTypes(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 
 	assert.Empty(t, dispatcher.getTasks(), "non-message types must not be dispatched")
+}
+
+// TestACPMiddlewareAdapterRejectsUnauthorizedSender verifies that when an
+// authorizedSenders allow-list is configured, messages from senders not on the
+// list are rejected with a generic "unauthorized" error and never reach the
+// dispatcher.
+func TestACPMiddlewareAdapterRejectsUnauthorizedSender(t *testing.T) {
+	client := newStubClient()
+	dispatcher := &stubDispatcher{}
+
+	mw := NewACPMiddleware("acp-bridge", client)
+	adapter := NewACPMiddlewareAdapter(mw, dispatcher, client).
+		WithAuthorizedSenders([]string{"alice"})
+	t.Cleanup(adapter.Close)
+
+	inner := &echoLoop{}
+	wrapped := adapter.Wrap(inner)
+	_, _ = wrapped.Run(context.Background(), core.Submission{Content: "start"}) //nolint:errcheck
+
+	client.recv <- ACPMessage{
+		Type:     TypeMessage,
+		SenderID: "mallory",
+		Content:  "do work",
+	}
+
+	require.Eventually(t, func() bool {
+		return client.sentCount() > 0
+	}, 2*time.Second, 10*time.Millisecond, "unauthorized reply should be sent")
+
+	reply := client.lastSent()
+	assert.Equal(t, TypeError, reply.Type)
+	assert.Equal(t, "mallory", reply.ReceiverID)
+	// Error response must be generic and not leak internal details.
+	assert.Equal(t, "unauthorized", reply.Content)
+	// The dispatcher must not have been invoked.
+	assert.Empty(t, dispatcher.getTasks(), "unauthorized sender must not be dispatched")
+}
+
+// TestACPMiddlewareAdapterAcceptsAuthorizedSender verifies that when an
+// authorizedSenders allow-list is configured, messages from listed senders are
+// processed normally and the result is relayed back.
+func TestACPMiddlewareAdapterAcceptsAuthorizedSender(t *testing.T) {
+	client := newStubClient()
+	dispatcher := &stubDispatcher{
+		result: core.SubagentResult{TaskID: "acp-alice", Content: "ok"},
+	}
+
+	mw := NewACPMiddleware("acp-bridge", client)
+	adapter := NewACPMiddlewareAdapter(mw, dispatcher, client).
+		WithAuthorizedSenders([]string{"alice"})
+	t.Cleanup(adapter.Close)
+
+	inner := &echoLoop{}
+	wrapped := adapter.Wrap(inner)
+	_, _ = wrapped.Run(context.Background(), core.Submission{Content: "start"}) //nolint:errcheck
+
+	client.recv <- ACPMessage{
+		Type:     TypeMessage,
+		SenderID: "alice",
+		Content:  "do work",
+	}
+
+	require.Eventually(t, func() bool {
+		return len(dispatcher.getTasks()) > 0
+	}, 2*time.Second, 10*time.Millisecond, "dispatcher should receive a task")
+
+	tasks := dispatcher.getTasks()
+	require.Len(t, tasks, 1)
+	assert.Equal(t, "do work", tasks[0].Prompt)
+
+	// The result must be relayed back as a TypeResponse through the client.
+	require.Eventually(t, func() bool {
+		return client.sentCount() > 0
+	}, 2*time.Second, 10*time.Millisecond, "response should be sent back")
+
+	reply := client.lastSent()
+	assert.Equal(t, TypeResponse, reply.Type)
+	assert.Equal(t, "alice", reply.ReceiverID)
+	assert.Equal(t, "ok", reply.Content)
+}
+
+// TestACPMiddlewareAdapterRejectsOversizedMessage verifies that messages whose
+// content exceeds the 64KB limit are rejected with a generic "message too
+// large" error and never reach the dispatcher.
+func TestACPMiddlewareAdapterRejectsOversizedMessage(t *testing.T) {
+	client := newStubClient()
+	dispatcher := &stubDispatcher{}
+
+	mw := NewACPMiddleware("acp-bridge", client)
+	adapter := NewACPMiddlewareAdapter(mw, dispatcher, client)
+	t.Cleanup(adapter.Close)
+
+	inner := &echoLoop{}
+	wrapped := adapter.Wrap(inner)
+	_, _ = wrapped.Run(context.Background(), core.Submission{Content: "start"}) //nolint:errcheck
+
+	// Build a payload one byte larger than the limit.
+	client.recv <- ACPMessage{
+		Type:     TypeMessage,
+		SenderID: "peer",
+		Content:  strings.Repeat("x", maxMessageSize+1),
+	}
+
+	require.Eventually(t, func() bool {
+		return client.sentCount() > 0
+	}, 2*time.Second, 10*time.Millisecond, "oversize reply should be sent")
+
+	reply := client.lastSent()
+	assert.Equal(t, TypeError, reply.Type)
+	// Error response must be generic and not leak internal details.
+	assert.Equal(t, "message too large", reply.Content)
+	assert.Empty(t, dispatcher.getTasks(), "oversized message must not be dispatched")
+}
+
+// TestACPMiddlewareAdapterNilAuthorizedSendersAllowsAll verifies that when no
+// authorizedSenders allow-list is configured, all senders are accepted
+// (backward-compatible zero-config behavior).
+func TestACPMiddlewareAdapterNilAuthorizedSendersAllowsAll(t *testing.T) {
+	client := newStubClient()
+	dispatcher := &stubDispatcher{
+		result: core.SubagentResult{TaskID: "acp-anyone", Content: "ok"},
+	}
+
+	mw := NewACPMiddleware("acp-bridge", client)
+	adapter := NewACPMiddlewareAdapter(mw, dispatcher, client)
+	t.Cleanup(adapter.Close)
+
+	inner := &echoLoop{}
+	wrapped := adapter.Wrap(inner)
+	_, _ = wrapped.Run(context.Background(), core.Submission{Content: "start"}) //nolint:errcheck
+
+	client.recv <- ACPMessage{
+		Type:     TypeMessage,
+		SenderID: "anyone",
+		Content:  "do work",
+	}
+
+	require.Eventually(t, func() bool {
+		return len(dispatcher.getTasks()) > 0
+	}, 2*time.Second, 10*time.Millisecond, "dispatcher should receive a task")
+
+	tasks := dispatcher.getTasks()
+	require.Len(t, tasks, 1)
+	assert.Equal(t, "do work", tasks[0].Prompt)
 }

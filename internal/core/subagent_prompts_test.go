@@ -1,98 +1,58 @@
 package core
 
 import (
-	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-
-	"github.com/pengjunchen/go-cli/internal/llm"
-	"github.com/pengjunchen/go-cli/internal/mock"
 )
 
-func TestRolePromptReturnsTemplates(t *testing.T) {
-	assert.Equal(t, ResearcherPrompt, RolePrompt("researcher"))
-	assert.Equal(t, ImplementerPrompt, RolePrompt("implementer"))
-	assert.Equal(t, ReviewerPrompt, RolePrompt("reviewer"))
-	assert.Equal(t, TesterPrompt, RolePrompt("tester"))
+func TestRoleToolsKnownRoles(t *testing.T) {
+	cases := []struct {
+		role     string
+		expected []string
+	}{
+		{"researcher", []string{"read", "grep", "find", "ls", "web_fetch"}},
+		{"implementer", []string{"read", "write", "edit", "bash", "grep", "find"}},
+		{"reviewer", []string{"read", "grep", "find", "git_diff", "git_status"}},
+		{"tester", []string{"read", "bash", "grep", "go_test"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.role, func(t *testing.T) {
+			got := RoleTools(tc.role)
+			assert.Equal(t, tc.expected, got)
+		})
+	}
 }
 
-func TestRolePromptUnknownRoleIsEmpty(t *testing.T) {
-	assert.Empty(t, RolePrompt("architect"))
-	assert.Empty(t, RolePrompt(""))
+func TestRoleToolsUnknownRoleReturnsNil(t *testing.T) {
+	assert.Nil(t, RoleTools("unknown"))
+	assert.Nil(t, RoleTools(""))
 }
 
-func TestResolveSubAgentSystemPromptExplicitWins(t *testing.T) {
-	task := SubagentTask{SystemPrompt: "custom instructions", Role: "researcher"}
-	assert.Equal(t, "custom instructions", resolveSubAgentSystemPrompt(task))
+func TestRoleToolsReturnsCopy(t *testing.T) {
+	original := RoleTools("researcher")
+	original[0] = "mutated"
+	again := RoleTools("researcher")
+	assert.Equal(t, "read", again[0], "RoleTools must return a copy, not the underlying slice")
 }
 
-func TestResolveSubAgentSystemPromptRoleTemplate(t *testing.T) {
-	task := SubagentTask{Role: "reviewer"}
-	assert.Equal(t, ReviewerPrompt, resolveSubAgentSystemPrompt(task))
+func TestResolveSubAgentToolsExplicitWins(t *testing.T) {
+	task := SubagentTask{
+		Role:  "researcher",
+		Tools: []string{"bash", "write"},
+	}
+	got := resolveSubAgentTools(task)
+	assert.Equal(t, []string{"bash", "write"}, got)
 }
 
-func TestResolveSubAgentSystemPromptDefault(t *testing.T) {
+func TestResolveSubAgentToolsRoleWhitelist(t *testing.T) {
+	task := SubagentTask{Role: "implementer"}
+	got := resolveSubAgentTools(task)
+	assert.Equal(t, []string{"read", "write", "edit", "bash", "grep", "find"}, got)
+}
+
+func TestResolveSubAgentToolsNoRoleNoTools(t *testing.T) {
 	task := SubagentTask{}
-	assert.Equal(t, DefaultSubAgentPrompt, resolveSubAgentSystemPrompt(task))
-}
-
-func TestResolveSubAgentSystemPromptUnknownRoleFallsBackToDefault(t *testing.T) {
-	task := SubagentTask{Role: "architect"}
-	assert.Equal(t, DefaultSubAgentPrompt, resolveSubAgentSystemPrompt(task))
-}
-
-// TestLoopAgentWithSystemPromptOverrides proves WithSystemPrompt replaces the
-// tool-aware default system prompt sent to the model.
-func TestLoopAgentWithSystemPromptOverrides(t *testing.T) {
-	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
-		"SYS", "override",
-		mock.ConversationTurn{AssistantContent: "ok"},
-	))
-
-	loop := NewLoopAgent(WithLLM(model), WithSystemPrompt("OVERRIDE-PROMPT"))
-	_, err := loop.Run(context.Background(), Submission{Content: "go"})
-	require.NoError(t, err)
-
-	require.Equal(t, 1, model.CallCount())
-	msgs := model.CallLog()[0].Messages
-	require.NotEmpty(t, msgs)
-	assert.Equal(t, llm.RoleSystem, msgs[0].Role)
-	assert.Equal(t, "OVERRIDE-PROMPT", msgs[0].Content)
-}
-
-// TestLoopAgentDefaultSystemPromptWhenNoOverride proves that without an
-// override the loop still sends its built-in tool-aware system prompt.
-func TestLoopAgentDefaultSystemPromptWhenNoOverride(t *testing.T) {
-	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
-		"SYS", "default",
-		mock.ConversationTurn{AssistantContent: "ok"},
-	))
-
-	loop := NewLoopAgent(WithLLM(model))
-	_, err := loop.Run(context.Background(), Submission{Content: "go"})
-	require.NoError(t, err)
-
-	require.Equal(t, 1, model.CallCount())
-	msgs := model.CallLog()[0].Messages
-	require.NotEmpty(t, msgs)
-	assert.Equal(t, llm.RoleSystem, msgs[0].Role)
-	assert.Contains(t, msgs[0].Content, "helpful AI assistant")
-}
-
-// TestLoopAgentEmptySystemPromptFallsBackToDefault proves an empty override is
-// treated as "not set" so the default is preserved (backward compatible).
-func TestLoopAgentEmptySystemPromptFallsBackToDefault(t *testing.T) {
-	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
-		"SYS", "empty-override",
-		mock.ConversationTurn{AssistantContent: "ok"},
-	))
-
-	loop := NewLoopAgent(WithLLM(model), WithSystemPrompt(""))
-	_, err := loop.Run(context.Background(), Submission{Content: "go"})
-	require.NoError(t, err)
-
-	msgs := model.CallLog()[0].Messages
-	assert.Contains(t, msgs[0].Content, "helpful AI assistant")
+	got := resolveSubAgentTools(task)
+	assert.Nil(t, got)
 }

@@ -18,9 +18,9 @@ func TestStatsRegistryGetOrCreate(t *testing.T) {
 	require.NotNil(t, s1)
 	assert.Equal(t, "s1", s1.SessionID)
 
-	// Second call returns the same pointer.
+	// Second call returns an equal value (defensive copy, not same pointer).
 	s2 := r.GetOrCreate("s1")
-	assert.Same(t, s1, s2)
+	assert.Equal(t, s1, s2)
 }
 
 func TestStatsRegistryRecordTurn(t *testing.T) {

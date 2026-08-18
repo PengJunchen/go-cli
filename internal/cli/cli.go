@@ -3,6 +3,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -133,6 +134,12 @@ func RunWithRegistry(ctx context.Context, cfg Config, args []string, out io.Writ
 	if err := reg.Register(newDoctorCmd(out)); err != nil {
 		slog.Default().Info("built-in doctor command already registered; keeping caller's", "err", err)
 	}
+	if err := reg.Register(newServeCmd(out)); err != nil {
+		slog.Default().Info("built-in serve command already registered; keeping caller's", "err", err)
+	}
+	if err := reg.Register(newModelsCmd(out)); err != nil {
+		slog.Default().Info("built-in models command already registered; keeping caller's", "err", err)
+	}
 
 	if showVersion {
 		return runCommand(ctx, cfg, newVersionCmd(out), nil)
@@ -190,6 +197,17 @@ func runCommand(ctx context.Context, cfg Config, cmd Command, args []string) err
 		slog.Default().Info("command_end", "command", name, "success", false, "duration_ms", time.Since(start).Milliseconds())
 		span.SetStatus(tracing.SpanStatusError, err.Error())
 		span.End()
+		// Usage errors (bad flags, unknown commands) should pass through
+		// without a generic hint — they already explain the fix.
+		var ue *UsageError
+		if !errors.As(err, &ue) {
+			if ufe := classifyError(err); ufe != nil {
+				return &ExecutionError{
+					msg: fmt.Sprintf("%s: %s", name, ufe.Action),
+					err: ufe,
+				}
+			}
+		}
 		return newExecutionError(name, err)
 	}
 

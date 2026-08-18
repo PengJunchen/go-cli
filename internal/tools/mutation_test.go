@@ -27,7 +27,7 @@ type trackingHandler struct {
 }
 
 func (h *trackingHandler) handle() MutationHandler {
-	return func(_ context.Context, m FileMutation) error {
+	return func(_ context.Context, m FileMutation) (*ToolResult, error) {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		key := m.FilePath
@@ -35,7 +35,7 @@ func (h *trackingHandler) handle() MutationHandler {
 			key = h.keyFn(m)
 		}
 		h.order = append(h.order, key)
-		return nil
+		return nil, nil
 	}
 }
 
@@ -105,7 +105,7 @@ func TestMutationQueueCrossFileParallelism(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	var active, maxActive, applied int64
-	handler := MutationHandler(func(_ context.Context, _ FileMutation) error {
+	handler := MutationHandler(func(_ context.Context, _ FileMutation) (*ToolResult, error) {
 		cur := atomic.AddInt64(&active, 1)
 		for {
 			old := atomic.LoadInt64(&maxActive)
@@ -116,7 +116,7 @@ func TestMutationQueueCrossFileParallelism(t *testing.T) {
 		defer atomic.AddInt64(&active, -1)
 		atomic.AddInt64(&applied, 1)
 		time.Sleep(30 * time.Millisecond)
-		return nil
+		return nil, nil
 	})
 
 	q := NewDefaultFileMutationQueue(WithMutationHandler(handler))
@@ -158,16 +158,27 @@ func TestMutationQueueRealpathSymlink(t *testing.T) {
 	}
 
 	dir := t.TempDir()
-	realFile := filepath.Join(dir, "real-target.txt")
+	// Use an intermediate directory symlink rather than a file symlink. Under
+	// SEC-7 resolveAndValidatePath's O_NOFOLLOW check is always enabled and
+	// rejects a symlink at the final path component, but a symlink in an
+	// intermediate directory (where the final component is a regular file)
+	// is still permitted. This lets the realpath-based worker routing be
+	// exercised end to end with two successful writes.
+	realDir := filepath.Join(dir, "realdir")
+	require.NoError(t, os.MkdirAll(realDir, 0o750)) //nolint:gosec
+	realFile := filepath.Join(realDir, "target.txt")
 	require.NoError(t, os.WriteFile(realFile, []byte("original"), 0o600))
 
-	link := filepath.Join(dir, "link-target.txt")
-	require.NoError(t, os.Symlink(realFile, link))
+	linkDir := filepath.Join(dir, "linkdir")
+	require.NoError(t, os.Symlink(realDir, linkDir))
+	t.Cleanup(func() { _ = os.Remove(linkDir) })
 
-	// Unit-level: realpath resolution maps the symlink and the real path to the
-	// same canonical location.
-	require.Equal(t, resolveRealPath(link), resolveRealPath(realFile),
-		"symlink path must resolve to the same real path as the target")
+	linkedPath := filepath.Join(linkDir, "target.txt")
+
+	// Unit-level: realpath resolution maps the symlinked path and the real
+	// path to the same canonical location.
+	require.Equal(t, resolveRealPath(linkedPath), resolveRealPath(realFile),
+		"symlinked path must resolve to the same real path as the target")
 
 	// Use the built-in handler so mutations perform real writes against the
 	// underlying file, proving FIFO serialization on a shared worker.
@@ -175,8 +186,8 @@ func TestMutationQueueRealpathSymlink(t *testing.T) {
 	cq := q.(*DefaultFileMutationQueue) //nolint:errcheck
 	defer func() { require.NoError(t, cq.Close()) }()
 
-	// Enqueue via the symlink path and then via the real path.
-	resCh1, err := q.Enqueue(context.Background(), FileMutation{FilePath: link, Operation: "write", Content: "via-link", ToolName: "write"})
+	// Enqueue via the symlinked path and then via the real path.
+	resCh1, err := q.Enqueue(context.Background(), FileMutation{FilePath: linkedPath, Operation: "write", Content: "via-link", ToolName: "write"})
 	require.NoError(t, err)
 	resCh2, err := q.Enqueue(context.Background(), FileMutation{FilePath: realFile, Operation: "write", Content: "via-real", ToolName: "write"})
 	require.NoError(t, err)
@@ -219,8 +230,8 @@ func TestMutationQueueResultChannel(t *testing.T) {
 func TestMutationQueueErrorResult(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	q := NewDefaultFileMutationQueue(WithMutationHandler(func(_ context.Context, _ FileMutation) error {
-		return assert.AnError
+	q := NewDefaultFileMutationQueue(WithMutationHandler(func(_ context.Context, _ FileMutation) (*ToolResult, error) {
+		return nil, assert.AnError
 	}))
 	defer closeQueue(t, q)
 
@@ -269,10 +280,10 @@ func TestMutationQueueConcurrentEnqueueCloseNoPanic(t *testing.T) {
 	var started sync.WaitGroup
 	started.Add(1)
 
-	q := NewDefaultFileMutationQueue(WithMutationHandler(func(_ context.Context, _ FileMutation) error {
+	q := NewDefaultFileMutationQueue(WithMutationHandler(func(_ context.Context, _ FileMutation) (*ToolResult, error) {
 		started.Wait()
 		time.Sleep(5 * time.Millisecond)
-		return nil
+		return nil, nil
 	}))
 	cq := q.(*DefaultFileMutationQueue) //nolint:errcheck
 
@@ -320,12 +331,12 @@ func TestMutationQueueHandlerPanicDoesNotDeadlock(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	var callCount int64
-	q := NewDefaultFileMutationQueue(WithMutationHandler(func(_ context.Context, m FileMutation) error {
+	q := NewDefaultFileMutationQueue(WithMutationHandler(func(_ context.Context, m FileMutation) (*ToolResult, error) {
 		cur := atomic.AddInt64(&callCount, 1)
 		if cur == 1 {
 			panic("handler boom")
 		}
-		return nil
+		return nil, nil
 	}))
 	defer closeQueue(t, q)
 
@@ -356,8 +367,8 @@ func TestMutationMiddlewarePassthroughAndQueued(t *testing.T) {
 		return &ToolResult{Output: "ran:" + call.Name, Metadata: map[string]any{"path": "seen"}}, nil
 	}
 
-	q := NewDefaultFileMutationQueue(WithMutationHandler(func(_ context.Context, _ FileMutation) error {
-		return nil
+	q := NewDefaultFileMutationQueue(WithMutationHandler(func(_ context.Context, _ FileMutation) (*ToolResult, error) {
+		return nil, nil
 	}))
 	defer closeQueue(t, q)
 
@@ -437,7 +448,7 @@ type recordingDiffGen struct {
 	path   string
 }
 
-func (r *recordingDiffGen) Generate(oldContent, newContent, path string) (string, error) {
+func (r *recordingDiffGen) Generate(_ context.Context, oldContent, newContent, path string) (string, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.called = true
@@ -508,11 +519,11 @@ func TestNewMutationQueueWrapper_MutationToolQueued(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	var handlerCalled bool
-	q := NewDefaultFileMutationQueue(WithMutationHandler(func(_ context.Context, m FileMutation) error {
+	q := NewDefaultFileMutationQueue(WithMutationHandler(func(_ context.Context, m FileMutation) (*ToolResult, error) {
 		handlerCalled = true
 		assert.Equal(t, "write", m.Operation)
 		assert.Equal(t, "/tmp/wrapper-queued.txt", m.FilePath)
-		return nil
+		return nil, nil
 	}))
 	defer closeQueue(t, q)
 
@@ -554,4 +565,213 @@ func TestNewMutationQueueWrapper_NonMutationPassthrough(t *testing.T) {
 	require.NoError(t, err)
 	assert.True(t, nextCalled, "next must run for non-mutation tools")
 	assert.Equal(t, "passthrough:read", res.Output)
+}
+
+// =============================================================================
+// ToolResult preservation tests (task 35-11)
+// =============================================================================
+
+// TestWithMutationQueue_PreservesWriteToolResult verifies that a write through
+// the mutation queue returns the real WriteTool ToolResult-including path,
+// bytes, and diff preview in Metadata-instead of a synthesized placeholder.
+func TestWithMutationQueue_PreservesWriteToolResult(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	writePath := filepath.Join(dir, "overwrite.txt")
+	require.NoError(t, os.WriteFile(writePath, []byte("old"), 0o600))
+
+	dg := &recordingDiffGen{}
+	q := NewDefaultFileMutationQueue(WithMutationDiffGenerator(dg))
+	defer closeQueue(t, q)
+
+	wrapped := WithMutationQueue(q, func(_ context.Context, _ ToolCall) (*ToolResult, error) {
+		t.Fatal("next must not run for mutation tools")
+		return nil, nil
+	})
+
+	res, err := wrapped(context.Background(), ToolCall{
+		Name: "write",
+		Args: map[string]any{"path": writePath, "content": "new"},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, res)
+
+	// The real WriteTool output format, not the synthesized "queued and applied".
+	assert.Contains(t, res.Output, "wrote", "must carry real WriteTool output")
+	assert.Contains(t, res.Output, writePath)
+
+	// Metadata must carry the real tool's keys plus the "queued" marker.
+	assert.Equal(t, writePath, res.Metadata["path"])
+	assert.NotNil(t, res.Metadata["bytes"])
+	assert.Equal(t, "mock-diff", res.Metadata["diff"], "diff preview must be preserved")
+	assert.Equal(t, true, res.Metadata["queued"])
+}
+
+// TestWithMutationQueue_PreservesEditToolResult verifies that an edit through
+// the mutation queue returns the real EditFileTool ToolResult with the diff
+// preview in Metadata.
+func TestWithMutationQueue_PreservesEditToolResult(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	editPath := filepath.Join(dir, "edit.txt")
+	require.NoError(t, os.WriteFile(editPath, []byte("hello world"), 0o600))
+
+	dg := &recordingDiffGen{}
+	q := NewDefaultFileMutationQueue(WithMutationDiffGenerator(dg))
+	defer closeQueue(t, q)
+
+	wrapped := WithMutationQueue(q, func(_ context.Context, _ ToolCall) (*ToolResult, error) {
+		t.Fatal("next must not run for mutation tools")
+		return nil, nil
+	})
+
+	res, err := wrapped(context.Background(), ToolCall{
+		Name: "edit",
+		Args: map[string]any{"file_path": editPath, "old_string": "hello", "new_string": "goodbye"},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, res)
+
+	// The real EditFileTool output format.
+	assert.Contains(t, res.Output, "replaced", "must carry real EditFileTool output")
+	assert.Contains(t, res.Output, editPath)
+
+	assert.Equal(t, editPath, res.Metadata["path"])
+	assert.NotNil(t, res.Metadata["bytes"])
+	assert.Equal(t, "mock-diff", res.Metadata["diff"], "diff preview must be preserved")
+	assert.Equal(t, true, res.Metadata["queued"])
+}
+
+// TestWithMutationQueue_ErrorPropagatesToolResult verifies that when an edit
+// fails (non-existent old_string), the error propagates and the returned
+// ToolResult is nil (no synthesized success result).
+func TestWithMutationQueue_ErrorPropagatesToolResult(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	editPath := filepath.Join(dir, "err.txt")
+	require.NoError(t, os.WriteFile(editPath, []byte("hello"), 0o600))
+
+	q := NewDefaultFileMutationQueue()
+	defer closeQueue(t, q)
+
+	wrapped := WithMutationQueue(q, func(_ context.Context, _ ToolCall) (*ToolResult, error) {
+		t.Fatal("next must not run for mutation tools")
+		return nil, nil
+	})
+
+	res, err := wrapped(context.Background(), ToolCall{
+		Name: "edit",
+		Args: map[string]any{"file_path": editPath, "old_string": "nonexistent", "new_string": "x"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "old_string not found")
+	assert.Nil(t, res, "error branch must return nil ToolResult")
+}
+
+// TestMutationHandler_ReturnsToolResult verifies that a custom MutationHandler
+// returning a specific ToolResult has it carried through FileMutationResult.
+func TestMutationHandler_ReturnsToolResult(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	custom := &ToolResult{Output: "custom-output", Metadata: map[string]any{"k": "v"}}
+	q := NewDefaultFileMutationQueue(WithMutationHandler(func(_ context.Context, _ FileMutation) (*ToolResult, error) {
+		return custom, nil
+	}))
+	defer closeQueue(t, q)
+
+	resCh, err := q.Enqueue(context.Background(), FileMutation{
+		FilePath: "/tmp/custom.txt", Operation: "write", Content: "x", ToolName: "write",
+	})
+	require.NoError(t, err)
+	res := <-resCh
+	assert.True(t, res.Success)
+	assert.NoError(t, res.Error)
+	require.NotNil(t, res.ToolResult, "FileMutationResult.ToolResult must carry handler result")
+	assert.Equal(t, "custom-output", res.ToolResult.Output)
+	assert.Equal(t, "v", res.ToolResult.Metadata["k"])
+}
+
+// TestWithMutationQueue_NonMutationPassThrough verifies that non-mutation
+// tools (e.g. read) pass straight through to next without "queued" metadata.
+func TestWithMutationQueue_NonMutationPassThrough(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	q := NewDefaultFileMutationQueue()
+	defer closeQueue(t, q)
+
+	wrapped := WithMutationQueue(q, func(_ context.Context, call ToolCall) (*ToolResult, error) {
+		return &ToolResult{Output: "read-done", Metadata: map[string]any{"path": "x"}}, nil
+	})
+
+	res, err := wrapped(context.Background(), ToolCall{Name: "read", Args: map[string]any{"path": "/tmp/x"}})
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.Equal(t, "read-done", res.Output)
+	_, hasQueued := res.Metadata["queued"]
+	assert.False(t, hasQueued, "non-mutation passthrough must not add queued metadata")
+}
+
+// TestWithMutationQueue_MetadataNotMutated verifies that the shallow copy of
+// Metadata isolates results across calls: modifying the first call's Metadata
+// does not pollute the second call's Metadata.
+func TestWithMutationQueue_MetadataNotMutated(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	// The handler reuses the same underlying Metadata map to simulate a tool
+	// that returns a persistent map. The shallow copy in WithMutationQueue must
+	// ensure mutations to the returned Metadata don't leak back.
+	sharedMeta := map[string]any{"path": "/tmp/iso.txt", "bytes": 4}
+	q := NewDefaultFileMutationQueue(WithMutationHandler(func(_ context.Context, _ FileMutation) (*ToolResult, error) {
+		return &ToolResult{Output: "ok", Metadata: sharedMeta}, nil
+	}))
+	defer closeQueue(t, q)
+
+	wrapped := WithMutationQueue(q, func(_ context.Context, _ ToolCall) (*ToolResult, error) {
+		t.Fatal("next must not run for mutation tools")
+		return nil, nil
+	})
+
+	// First call: get result and pollute its Metadata.
+	res1, err := wrapped(context.Background(), ToolCall{Name: "write", Args: map[string]any{"path": "/tmp/iso.txt", "content": "data"}})
+	require.NoError(t, err)
+	require.NotNil(t, res1)
+	assert.Equal(t, true, res1.Metadata["queued"])
+	res1.Metadata["polluted"] = true
+
+	// The underlying sharedMeta must not have been polluted with "queued".
+	_, sharedQueued := sharedMeta["queued"]
+	assert.False(t, sharedQueued, "shallow copy must not write 'queued' into the underlying map")
+
+	// Second call: Metadata must be clean (no "polluted" key from first call).
+	res2, err := wrapped(context.Background(), ToolCall{Name: "write", Args: map[string]any{"path": "/tmp/iso.txt", "content": "data"}})
+	require.NoError(t, err)
+	require.NotNil(t, res2)
+	assert.Equal(t, true, res2.Metadata["queued"])
+	_, polluted := res2.Metadata["polluted"]
+	assert.False(t, polluted, "shallow copy must isolate Metadata between calls")
+}
+
+// TestApplySafe_PanicReturnsNilToolResult verifies that when the handler
+// panics, FileMutationResult.ToolResult is nil and the Error contains panic
+// information.
+func TestApplySafe_PanicReturnsNilToolResult(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	q := NewDefaultFileMutationQueue(WithMutationHandler(func(_ context.Context, _ FileMutation) (*ToolResult, error) {
+		panic("boom")
+	}))
+	defer closeQueue(t, q)
+
+	resCh, err := q.Enqueue(context.Background(), FileMutation{
+		FilePath: "/tmp/panic.txt", Operation: "write", Content: "x", ToolName: "write",
+	})
+	require.NoError(t, err)
+	res := <-resCh
+	assert.False(t, res.Success)
+	require.Error(t, res.Error)
+	assert.Contains(t, res.Error.Error(), "panic", "error must contain panic info")
+	assert.Nil(t, res.ToolResult, "ToolResult must be nil on panic")
 }

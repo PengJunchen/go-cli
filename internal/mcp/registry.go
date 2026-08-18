@@ -102,7 +102,7 @@ func (r *MCPClientRegistry) List(_ context.Context) []MCPClient {
 // empty. It exists to mirror the design's minimal registration API.
 func RegisterMCPClient(reg *MCPClientRegistry, name string, client MCPClient) error {
 	if reg == nil {
-		reg = NewMCPClientRegistry()
+		return errors.New("mcp: cannot register a client into a nil registry")
 	}
 	if name == "" && client != nil {
 		name = client.Name()

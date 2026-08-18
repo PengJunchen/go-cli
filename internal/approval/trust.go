@@ -4,8 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"sort"
+	"syscall"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/tracing"
@@ -79,11 +83,13 @@ func (m *DefaultTrustManager) lookup(projectPath string) (TrustEntry, bool, erro
 }
 
 // TrustProject marks the project trusted with the current timestamp and logs
-// the change.
+// the change. The fingerprint is computed from the content of the project's
+// .go-cli/mcp.json config file so that any config change is detectable.
 func (m *DefaultTrustManager) TrustProject(_ context.Context, projectPath string) error {
+	configPath := filepath.Join(projectPath, ".go-cli", "mcp.json")
 	entry := TrustEntry{
 		Path:        projectPath,
-		Fingerprint: fingerprint(projectPath),
+		Fingerprint: contentFingerprint(configPath),
 		TrustedAt:   time.Now().Format(time.RFC3339),
 	}
 	if err := m.store.Add(projectPath, entry); err != nil {
@@ -137,8 +143,44 @@ func trustClassification(trusted bool) string {
 	return "deny"
 }
 
-// fingerprint returns a stable SHA-256 fingerprint of path.
-func fingerprint(path string) string {
-	sum := sha256.Sum256([]byte(path))
+// contentFingerprint returns a SHA-256 fingerprint of the content of the file
+// at filePath. If the file cannot be read, it falls back to hashing the path
+// string itself so a fingerprint is always produced.
+func contentFingerprint(filePath string) string {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		sum := sha256.Sum256([]byte(filePath))
+		return hex.EncodeToString(sum[:])
+	}
+	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+// ValidateGlobalConfigFile validates that a global config file (e.g.
+// ~/.config/go-cli/mcp.json) is owned by the current user and has 0600
+// permissions (owner read/write only). This prevents tampering via
+// world-writable or foreign-owned config files. On non-Unix systems where
+// file ownership cannot be determined, the owner check is skipped.
+func ValidateGlobalConfigFile(path string) error {
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode().Perm() != 0o600 {
+		return fmt.Errorf("global config %s has permissions %o, expected 0600", path, info.Mode().Perm())
+	}
+	return validateFileOwner(info, path)
+}
+
+// validateFileOwner checks that the file is owned by the current user. On
+// non-Unix systems where ownership cannot be determined, it is a no-op.
+func validateFileOwner(info os.FileInfo, path string) error {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return nil
+	}
+	if stat.Uid != uint32(os.Getuid()) {
+		return fmt.Errorf("global config %s owned by uid %d, expected %d", path, stat.Uid, os.Getuid())
+	}
+	return nil
 }

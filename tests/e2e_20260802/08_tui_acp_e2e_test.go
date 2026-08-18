@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -298,10 +299,10 @@ func TestTUI_ProgressRenderer(t *testing.T) {
 	r := tui.ProgressRenderer{}
 	assert.True(t, r.Supports(tui.ContentTypeProgress))
 
-	// 50% progress.
+	// 50% progress — enhanced renderer uses █/░ bar characters.
 	out := r.Render(context.Background(), "0.5", tui.RenderOpts{Width: 40})
 	assert.NotEmpty(t, out)
-	assert.Contains(t, out, "=")
+	assert.Contains(t, out, "█")
 
 	// 100% progress.
 	out = r.Render(context.Background(), "1.0", tui.RenderOpts{Width: 20})
@@ -492,7 +493,9 @@ func TestTUI_DarkTheme(t *testing.T) {
 	assert.NotEmpty(t, th.Warning().String())
 	assert.NotEmpty(t, th.Error().String())
 	assert.NotEmpty(t, th.Fg().String())
-	assert.NotEmpty(t, th.Bg().String())
+	// DarkTheme.Bg() is intentionally transparent (empty style) — its String()
+	// correctly produces no SGR sequence.
+	assert.Empty(t, th.Bg().String())
 	assert.NotEmpty(t, th.Faint().String())
 	assert.NotEmpty(t, th.Bold().String())
 	assert.NotEmpty(t, th.Italic().String())
@@ -520,12 +523,14 @@ func TestTUI_SolarizedTheme(t *testing.T) {
 }
 
 func TestTUI_StyleANSIEscapeSequences(t *testing.T) {
-	s := tui.NewStyle().Foreground(32).Bold(true).Italic(true)
+	// lipgloss uses truecolor (#RRGGBB) rather than 8-bit ANSI codes, so we
+	// style with a hex color and assert the rendered output carries an escape
+	// sequence plus the bold/italic SGR attributes.
+	s := tui.NewStyle().Foreground(lipgloss.Color("#04E762")).Bold(true).Italic(true)
 	esc := s.String()
 
 	assert.NotEmpty(t, esc)
 	assert.Contains(t, esc, "\x1b[")
-	assert.Contains(t, esc, "32")
 	assert.Contains(t, esc, "1") // bold
 	assert.Contains(t, esc, "3") // italic
 
@@ -542,13 +547,17 @@ func TestTUI_StyleEmptyStringWhenNothingSet(t *testing.T) {
 }
 
 func TestTUI_StyleChaining(t *testing.T) {
-	s := tui.NewStyle().Foreground(31).Background(42).Bold(true).Underline(true)
+	// With truecolor, foreground/background are expressed as 38;2;...;m and
+	// 48;2;...;m sequences. We render text and assert the output carries the
+	// truecolor foreground/background escapes plus bold (1) and underline (4).
+	s := tui.NewStyle().Foreground(lipgloss.Color("#FF5C5C")).Background(lipgloss.Color("#04E762")).Bold(true).Underline(true)
 
-	esc := s.String()
-	assert.Contains(t, esc, "31") // fg red
-	assert.Contains(t, esc, "52") // bg green (42+10)
-	assert.Contains(t, esc, "1")  // bold
-	assert.Contains(t, esc, "4")  // underline
+	rendered := s.Render("x")
+	assert.Contains(t, rendered, "38;2;") // fg truecolor
+	assert.Contains(t, rendered, "48;2;") // bg truecolor
+	assert.Contains(t, rendered, "1")     // bold
+	assert.Contains(t, rendered, "4")     // underline
+	assert.Contains(t, rendered, "x")
 }
 
 func TestTUI_StyleFaintAttribute(t *testing.T) {
@@ -606,19 +615,30 @@ func TestTUI_ThemeManagerRegisterCustom(t *testing.T) {
 	assert.Contains(t, styled, "x")
 }
 
-// customTestTheme implements tui.Theme for testing.
+// customTestTheme implements tui.Theme for testing. Colors use truecolor hex
+// values compatible with the lipgloss-backed Style alias.
 type customTestTheme struct{}
 
-func (c *customTestTheme) Primary() tui.Style   { return tui.NewStyle().Foreground(35) }
-func (c *customTestTheme) Secondary() tui.Style { return tui.NewStyle().Foreground(36) }
-func (c *customTestTheme) Success() tui.Style   { return tui.NewStyle().Foreground(32) }
-func (c *customTestTheme) Warning() tui.Style   { return tui.NewStyle().Foreground(33) }
-func (c *customTestTheme) Error() tui.Style     { return tui.NewStyle().Foreground(31) }
-func (c *customTestTheme) Bg() tui.Style        { return tui.NewStyle() }
-func (c *customTestTheme) Fg() tui.Style        { return tui.NewStyle() }
-func (c *customTestTheme) Faint() tui.Style     { return tui.NewStyle() }
-func (c *customTestTheme) Bold() tui.Style      { return tui.NewStyle() }
-func (c *customTestTheme) Italic() tui.Style    { return tui.NewStyle() }
+func (c *customTestTheme) Primary() tui.Style {
+	return tui.NewStyle().Foreground(lipgloss.Color("#FF00FF"))
+}
+func (c *customTestTheme) Secondary() tui.Style {
+	return tui.NewStyle().Foreground(lipgloss.Color("#00D9FF"))
+}
+func (c *customTestTheme) Success() tui.Style {
+	return tui.NewStyle().Foreground(lipgloss.Color("#04E762"))
+}
+func (c *customTestTheme) Warning() tui.Style {
+	return tui.NewStyle().Foreground(lipgloss.Color("#FFC000"))
+}
+func (c *customTestTheme) Error() tui.Style {
+	return tui.NewStyle().Foreground(lipgloss.Color("#FF5C5C"))
+}
+func (c *customTestTheme) Bg() tui.Style     { return tui.NewStyle() }
+func (c *customTestTheme) Fg() tui.Style     { return tui.NewStyle() }
+func (c *customTestTheme) Faint() tui.Style  { return tui.NewStyle() }
+func (c *customTestTheme) Bold() tui.Style   { return tui.NewStyle() }
+func (c *customTestTheme) Italic() tui.Style { return tui.NewStyle() }
 
 // Verify the Primary Render contains what we set.
 func (c *customTestTheme) ensureCustom() {}

@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -13,9 +14,11 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/production"
 	"github.com/pengjunchen/go-cli/internal/session"
 	"github.com/pengjunchen/go-cli/internal/tools"
+	"github.com/pengjunchen/go-cli/internal/tui"
 )
 
 // stubLoop is a minimal AgentLoop used by slash command tests. It never
@@ -41,7 +44,7 @@ func (s *stubTool) Execute(_ context.Context, _ tools.ToolCall) (*tools.ToolResu
 // newTestCmd returns an interactiveCmd and buffer pair for slash dispatch tests.
 func newTestCmd() (*interactiveCmd, *bytes.Buffer) {
 	var buf bytes.Buffer
-	return &interactiveCmd{out: &buf}, &buf
+	return &interactiveCmd{out: &buf, slashReg: defaultSlashReg}, &buf
 }
 
 // ---------------------------------------------------------------------------
@@ -53,7 +56,9 @@ func TestBuildSlashCommandRegistry(t *testing.T) {
 
 	want := []string{
 		"help", "cost", "compact", "clear", "tools", "model", "session",
-		"undo", "diff", "plan", "config", "history", "save", "load",
+		"undo", "diff", "plan", "config", "history", "save", "load", "memory",
+		"thinking", "theme", "worktree", "revert", "retry", "edit", "context",
+		"mcp",
 	}
 	assert.ElementsMatch(t, want, reg.Names())
 
@@ -83,11 +88,47 @@ func TestSlashHelp(t *testing.T) {
 
 	for _, want := range []string{
 		"/help", "/cost", "/compact", "/clear", "/tools", "/model", "/session",
-		"/undo", "/diff", "/plan", "/config", "/history", "/save", "/load",
+		"/undo", "/diff", "/plan", "/config", "/history", "/save", "/load", "/memory",
+		"/thinking", "/theme", "/worktree", "/retry", "/edit",
 		"exit",
 	} {
 		assert.Contains(t, output, want, "help output should list %s", want)
 	}
+}
+
+func TestThemeHandler(t *testing.T) {
+	// --- List themes (no args) ---
+	c, buf := newTestCmd()
+	mgr := tui.NewThemeManager()
+	sc := &slashContext{out: buf, themeMgr: mgr}
+	c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "theme"}, sc)
+	output := buf.String()
+	assert.Contains(t, output, "dark")
+	assert.Contains(t, output, "light")
+	assert.Contains(t, output, "monokai")
+	assert.Contains(t, output, "solarized")
+	assert.Contains(t, output, "(active)") // dark should be marked active
+
+	// --- Switch to a valid theme ---
+	buf.Reset()
+	c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "theme", Args: []string{"light"}}, sc)
+	assert.Contains(t, buf.String(), "Theme switched to: light")
+	assert.Equal(t, "light", mgr.CurrentName())
+
+	// --- Switch to an invalid theme ---
+	buf.Reset()
+	c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "theme", Args: []string{"nonexistent"}}, sc)
+	output = buf.String()
+	assert.Contains(t, output, "unknown theme")
+	assert.Contains(t, output, "Available themes:")
+	// Current theme should be unchanged.
+	assert.Equal(t, "light", mgr.CurrentName())
+
+	// --- Nil themeMgr graceful degradation ---
+	buf.Reset()
+	scNil := &slashContext{out: buf, themeMgr: nil}
+	c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "theme"}, scNil)
+	assert.Contains(t, buf.String(), "only available in interactive TUI mode")
 }
 
 func TestSlashCost(t *testing.T) {
@@ -102,6 +143,26 @@ func TestSlashCost(t *testing.T) {
 
 	assert.Contains(t, output, "Total cost:")
 	assert.Contains(t, output, "Total calls: 1")
+}
+
+// TestCostHandlerWorksWithSnapshot verifies that CostHandler.Handle renders the
+// sub-agent cost breakdown using SubagentCostSnapshot without direct field
+// access.
+func TestCostHandlerWorksWithSnapshot(t *testing.T) {
+	tracker := production.NewCostTracker(nil)
+	_, err := tracker.RecordSubagent("task-research", "gpt-4o", 2000, 1000)
+	require.NoError(t, err)
+	_, err = tracker.RecordSubagent("task-implement", "gpt-4o-mini", 500, 200)
+	require.NoError(t, err)
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf, costTracker: tracker}
+	c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "cost"}, sc)
+	output := buf.String()
+
+	assert.Contains(t, output, "Sub-agent costs:")
+	assert.Contains(t, output, "task-research:")
+	assert.Contains(t, output, "task-implement:")
 }
 
 func TestSlashCostWithStats(t *testing.T) {
@@ -168,6 +229,90 @@ func TestSlashModel(t *testing.T) {
 	c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "model"}, sc)
 
 	assert.Contains(t, buf.String(), "Current model: gpt-4o-test")
+}
+
+func TestModelSwitch_List(t *testing.T) {
+	models := []llm.ModelInfo{
+		{Name: "gpt-4o", Description: "flagship model"},
+		{Name: "gpt-4o-mini", Description: "fast and affordable"},
+		{Name: "o1-preview", Description: "reasoning model"},
+	}
+	sel := llm.NewDefaultModelSelector(&stubModel{}, nil).
+		WithModelNames("openai", "gpt-4o", "", "").
+		WithModelLister(func() []llm.ModelInfo { return models })
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf, modelSelector: sel}
+	c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "model"}, sc)
+
+	out := buf.String()
+	assert.Contains(t, out, "Available models:")
+	assert.Contains(t, out, "* gpt-4o - flagship model")
+	assert.Contains(t, out, "  gpt-4o-mini - fast and affordable")
+	assert.Contains(t, out, "  o1-preview - reasoning model")
+	assert.Contains(t, out, "Current: gpt-4o")
+}
+
+func TestModelSwitch_Switch(t *testing.T) {
+	var switched llm.BaseChatModel
+	sel := llm.NewDefaultModelSelector(&stubModel{}, nil).
+		WithModelNames("openai", "gpt-4o", "", "").
+		WithModelBuilder(func(_ context.Context, name string) (llm.BaseChatModel, func(), error) {
+			return &stubModel{}, nil, nil
+		}).
+		WithModelSwitchCallback(func(m llm.BaseChatModel) {
+			switched = m
+		}).
+		WithModelLister(func() []llm.ModelInfo {
+			return []llm.ModelInfo{
+				{Name: "gpt-4o"},
+				{Name: "gpt-4o-mini"},
+			}
+		})
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf, modelSelector: sel}
+	c.handleSlashCommand(context.Background(), session.SlashCommand{
+		Name: "model",
+		Args: []string{"gpt-4o-mini"},
+	}, sc)
+
+	assert.Contains(t, buf.String(), "Switched to model: gpt-4o-mini")
+	assert.Equal(t, "gpt-4o-mini", sel.PrimaryModelName())
+	assert.NotNil(t, switched, "switch callback should have been called")
+}
+
+func TestModelSwitch_InvalidName(t *testing.T) {
+	sel := llm.NewDefaultModelSelector(&stubModel{}, nil).
+		WithModelNames("openai", "gpt-4o", "", "").
+		WithModelBuilder(func(_ context.Context, name string) (llm.BaseChatModel, func(), error) {
+			return nil, nil, errors.New("unknown model: " + name)
+		})
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf, modelSelector: sel}
+	c.handleSlashCommand(context.Background(), session.SlashCommand{
+		Name: "model",
+		Args: []string{"nonexistent-model"},
+	}, sc)
+
+	out := buf.String()
+	assert.Contains(t, out, "Error:")
+	assert.Contains(t, out, "switch model")
+	assert.Contains(t, out, "nonexistent-model")
+	assert.Equal(t, "gpt-4o", sel.PrimaryModelName(), "model name should not change on error")
+}
+
+func TestModelSwitch_NoSelector(t *testing.T) {
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf, modelName: "test-model"}
+	c.handleSlashCommand(context.Background(), session.SlashCommand{
+		Name: "model",
+		Args: []string{"some-model"},
+	}, sc)
+
+	assert.Contains(t, buf.String(), "Error:")
+	assert.Contains(t, buf.String(), "model switching not available")
 }
 
 func TestSlashUnknown(t *testing.T) {
@@ -551,7 +696,7 @@ func TestSlashCommandsTableDriven(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var buf bytes.Buffer
-			c := &interactiveCmd{out: &buf}
+			c := &interactiveCmd{out: &buf, slashReg: defaultSlashReg}
 			// Use a fresh agent per iteration so /clear in one sub-test
 			// does not affect another.
 			testAgent := core.NewAgentImpl("test", stubLoop{}, core.WithHistory([]core.AgentMessage{
@@ -568,4 +713,230 @@ func TestSlashCommandsTableDriven(t *testing.T) {
 			assert.Contains(t, buf.String(), tt.wantSub)
 		})
 	}
+}
+
+// ---------------------------------------------------------------------------
+// /retry command
+// ---------------------------------------------------------------------------
+
+func TestRetry_RemovesAssistantMessage(t *testing.T) {
+	agent := core.NewAgentImpl("test", stubLoop{}, core.WithHistory([]core.AgentMessage{
+		{Role: "user", Content: "first question"},
+		{Role: "assistant", Content: "first answer"},
+		{Role: "user", Content: "second question"},
+		{Role: "assistant", Content: "second answer"},
+	}))
+	require.Len(t, agent.Messages(), 4)
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf, agent: agent}
+	pendingInput := c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "retry"}, sc)
+
+	assert.Contains(t, buf.String(), "Retrying last message...")
+	assert.Equal(t, "second question", pendingInput)
+
+	// History should be truncated to remove the last user+assistant pair.
+	msgs := agent.Messages()
+	assert.Len(t, msgs, 2, "history should have first user+assistant pair only")
+	assert.Equal(t, "first question", msgs[0].Content)
+	assert.Equal(t, "first answer", msgs[1].Content)
+}
+
+func TestRetry_ResubmitsUserMessage(t *testing.T) {
+	agent := core.NewAgentImpl("test", stubLoop{}, core.WithHistory([]core.AgentMessage{
+		{Role: "user", Content: "what is 2+2?"},
+		{Role: "assistant", Content: "4"},
+	}))
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf, agent: agent}
+	pendingInput := c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "retry"}, sc)
+
+	assert.Equal(t, "what is 2+2?", pendingInput, "pendingInput should be the last user message")
+	assert.Empty(t, agent.Messages(), "history should be empty after removing the only user+assistant pair")
+}
+
+func TestRetry_NoAssistantMessage(t *testing.T) {
+	agent := core.NewAgentImpl("test", stubLoop{}, core.WithHistory([]core.AgentMessage{
+		{Role: "user", Content: "hello"},
+	}))
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf, agent: agent}
+	pendingInput := c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "retry"}, sc)
+
+	assert.Empty(t, pendingInput, "pendingInput should be empty when no assistant message")
+	assert.Contains(t, buf.String(), "No assistant message to retry.")
+	assert.Len(t, agent.Messages(), 1, "history should be unchanged")
+}
+
+func TestRetry_EmptyHistory(t *testing.T) {
+	agent := core.NewAgentImpl("test", stubLoop{})
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf, agent: agent}
+	pendingInput := c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "retry"}, sc)
+
+	assert.Empty(t, pendingInput)
+	assert.Contains(t, buf.String(), "No assistant message to retry.")
+}
+
+func TestRetry_AgentNotConfigured(t *testing.T) {
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf}
+	pendingInput := c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "retry"}, sc)
+
+	assert.Empty(t, pendingInput)
+	assert.Contains(t, buf.String(), "Agent not configured")
+}
+
+func TestRetry_RemovesTrailingToolMessages(t *testing.T) {
+	agent := core.NewAgentImpl("test", stubLoop{}, core.WithHistory([]core.AgentMessage{
+		{Role: "user", Content: "read a file"},
+		{Role: "assistant", Content: "let me check"},
+		{Role: "tool", Content: "file content", ToolCallID: "tc1", ToolName: "read_file"},
+	}))
+	require.Len(t, agent.Messages(), 3)
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf, agent: agent}
+	pendingInput := c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "retry"}, sc)
+
+	assert.Equal(t, "read a file", pendingInput)
+	assert.Empty(t, agent.Messages(), "history should be empty after removing user+assistant+tool")
+}
+
+func TestRetry_AliasR(t *testing.T) {
+	agent := core.NewAgentImpl("test", stubLoop{}, core.WithHistory([]core.AgentMessage{
+		{Role: "user", Content: "hello"},
+		{Role: "assistant", Content: "hi"},
+	}))
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf, agent: agent}
+	pendingInput := c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "r"}, sc)
+
+	assert.Equal(t, "hello", pendingInput)
+	assert.Contains(t, buf.String(), "Retrying last message...")
+}
+
+// ---------------------------------------------------------------------------
+// /edit command tests
+// ---------------------------------------------------------------------------
+
+// withTestEditor sets EDITOR to a command that copies a source file to the
+// editor's target file, simulating an editor session. It returns a cleanup
+// function that restores the original EDITOR.
+func withTestEditor(t *testing.T, sourceContent string) func() {
+	t.Helper()
+	sourceFile, err := os.CreateTemp("", "edit-source-*.txt")
+	require.NoError(t, err)
+	_, err = sourceFile.WriteString(sourceContent)
+	require.NoError(t, err)
+	sourceFile.Close()
+
+	oldEditor := os.Getenv("EDITOR")
+	os.Setenv("EDITOR", "cp "+sourceFile.Name())
+
+	return func() {
+		os.Setenv("EDITOR", oldEditor)
+		os.Remove(sourceFile.Name())
+	}
+}
+
+// TestEditCommand_ContentSubmitted verifies AC-4: editor content is returned
+// as pendingInput for submission.
+func TestEditCommand_ContentSubmitted(t *testing.T) {
+	cleanup := withTestEditor(t, "Hello from editor!\nMultiple lines.\n")
+	defer cleanup()
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf}
+	pendingInput := c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "edit"}, sc)
+
+	assert.Equal(t, "Hello from editor!\nMultiple lines.\n", pendingInput)
+}
+
+// TestEditCommand_EmptyContent verifies AC-5: empty content is not submitted.
+func TestEditCommand_EmptyContent(t *testing.T) {
+	oldEditor := os.Getenv("EDITOR")
+	os.Setenv("EDITOR", "true")
+	defer os.Setenv("EDITOR", oldEditor)
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf}
+	pendingInput := c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "edit"}, sc)
+
+	assert.Empty(t, pendingInput)
+	assert.Contains(t, buf.String(), "Empty content")
+}
+
+// TestEditCommand_AliasVim verifies that /vim dispatches to /edit.
+func TestEditCommand_AliasVim(t *testing.T) {
+	cleanup := withTestEditor(t, "vim alias works\n")
+	defer cleanup()
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf}
+	pendingInput := c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "vim"}, sc)
+
+	assert.Equal(t, "vim alias works\n", pendingInput)
+}
+
+// TestEditCommand_FilenameArg verifies /edit <filename> opens the specified file.
+func TestEditCommand_FilenameArg(t *testing.T) {
+	// Create a target file with initial content.
+	targetFile, err := os.CreateTemp("", "edit-target-*.md")
+	require.NoError(t, err)
+	targetFile.Close()
+	defer os.Remove(targetFile.Name())
+
+	// Use a source file to copy content into the target via the editor.
+	sourceFile, err := os.CreateTemp("", "edit-source-*.txt")
+	require.NoError(t, err)
+	_, err = sourceFile.WriteString("file content\n")
+	require.NoError(t, err)
+	sourceFile.Close()
+	defer os.Remove(sourceFile.Name())
+
+	oldEditor := os.Getenv("EDITOR")
+	os.Setenv("EDITOR", "cp "+sourceFile.Name())
+	defer os.Setenv("EDITOR", oldEditor)
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf}
+	pendingInput := c.handleSlashCommand(context.Background(),
+		session.SlashCommand{Name: "edit", Args: []string{targetFile.Name()}}, sc)
+
+	assert.Equal(t, "file content\n", pendingInput)
+}
+
+// TestEditCommand_EditorFailure verifies that when the editor exits with a
+// non-zero status, the error is reported and no content is submitted.
+func TestEditCommand_EditorFailure(t *testing.T) {
+	oldEditor := os.Getenv("EDITOR")
+	os.Setenv("EDITOR", "false") // exits with non-zero status
+	defer os.Setenv("EDITOR", oldEditor)
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf}
+	pendingInput := c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "edit"}, sc)
+
+	assert.Empty(t, pendingInput)
+	assert.Contains(t, buf.String(), "Error:")
+	assert.Contains(t, buf.String(), "editor exited with error")
+}
+
+// TestEditCommand_WhitespaceOnlyContent verifies that whitespace-only content
+// is treated the same as empty content (AC-5).
+func TestEditCommand_WhitespaceOnlyContent(t *testing.T) {
+	cleanup := withTestEditor(t, "   \n\t\n  \n")
+	defer cleanup()
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf}
+	pendingInput := c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "edit"}, sc)
+
+	assert.Empty(t, pendingInput)
+	assert.Contains(t, buf.String(), "Empty content")
 }

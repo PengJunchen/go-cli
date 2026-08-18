@@ -146,7 +146,7 @@ func TestEditTool(t *testing.T) {
 // Test 4: Bash tool (echo, pipe, error exit, timeout)
 // ---------------------------------------------------------------------------
 func TestBashTool(t *testing.T) {
-	bash := tools.NewBashTool()
+	bash := tools.NewBashTool(tools.WithNoSandbox())
 
 	// echo
 	res, err := bash.Execute(context.Background(), tools.ToolCall{
@@ -169,7 +169,7 @@ func TestBashTool(t *testing.T) {
 	require.Error(t, err)
 
 	// timeout
-	bashTimeout := tools.NewBashTool(tools.WithTimeout(10 * time.Millisecond))
+	bashTimeout := tools.NewBashTool(tools.WithTimeout(10*time.Millisecond), tools.WithNoSandbox())
 	_, err = bashTimeout.Execute(context.Background(), tools.ToolCall{
 		Args: map[string]any{"command": "sleep 5"},
 	})
@@ -587,7 +587,7 @@ func TestLargeOutputHandling(t *testing.T) {
 	assert.Contains(t, err.Error(), "too large")
 
 	// large bash output — should be truncated but still succeed (exit 0)
-	bash := tools.NewBashTool(tools.WithMaxOutput(50))
+	bash := tools.NewBashTool(tools.WithMaxOutput(50), tools.WithNoSandbox())
 	res, err := bash.Execute(context.Background(), tools.ToolCall{
 		Args: map[string]any{"command": "dd if=/dev/zero bs=1024 count=1 2>/dev/null | xxd"},
 	})

@@ -307,3 +307,396 @@ func TestToToolsCallConversion(t *testing.T) {
 	withNil := toToolsCall(llm.ToolCall{ID: "i2", Name: "n2", Args: nil})
 	assert.Nil(t, withNil.Args)
 }
+
+// messageEvents returns all "message" events from the slice, preserving order.
+func messageEvents(events []AgentEvent) []AgentEvent {
+	var out []AgentEvent
+	for _, ev := range events {
+		if ev.Kind == "message" {
+			out = append(out, ev)
+		}
+	}
+	return out
+}
+
+// --- Task 35-2 loop-level test cases ---
+
+// TestPureToolCallEmitsMessageEvent verifies that a pure tool call response
+// (empty Content, non-empty ToolCalls) emits a "message" event so it enters
+// history. Before the fix, such responses were silently dropped because the
+// emission condition was `if resp.Content != ""`.
+func TestPureToolCallEmitsMessageEvent(t *testing.T) {
+	toolSrv := mock.NewMockToolServer()
+	_, err := toolSrv.RegisterReadFileTool("contents")
+	require.NoError(t, err)
+
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"LX-PT-01", "pure-tool-call",
+		mock.ConversationTurn{
+			AssistantToolCalls: []mock.ExpectedToolCall{
+				{ID: "tc1", Name: "read_file", Args: map[string]any{"path": "a.go"}},
+			},
+		},
+		mock.ConversationTurn{AssistantContent: "done"},
+	))
+	loop := NewLoopAgent(WithLLM(model), WithTools(toolSrv))
+
+	events, err := loop.Run(context.Background(), Submission{Content: "read a.go"})
+	require.NoError(t, err)
+
+	// Two message events: one for the pure tool call turn, one for the final.
+	msgEvents := messageEvents(events)
+	require.Len(t, msgEvents, 2)
+
+	// First message event has empty content but non-empty ToolCalls.
+	assert.Empty(t, msgEvents[0].Content)
+	require.Len(t, msgEvents[0].ToolCalls, 1)
+	assert.Equal(t, "read_file", msgEvents[0].ToolCalls[0].Name)
+	assert.Equal(t, "tc1", msgEvents[0].ToolCalls[0].ID)
+
+	// Second message event is the final text response.
+	assert.Equal(t, "done", msgEvents[1].Content)
+	assert.Empty(t, msgEvents[1].ToolCalls)
+}
+
+// TestTextAndToolCallsRegression verifies that a response with both text
+// content and tool calls still emits a single message event carrying both.
+func TestTextAndToolCallsRegression(t *testing.T) {
+	toolSrv := mock.NewMockToolServer()
+	_, err := toolSrv.RegisterReadFileTool("contents")
+	require.NoError(t, err)
+
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"LX-PT-02", "text-and-tool",
+		mock.ConversationTurn{
+			AssistantContent: "let me read",
+			AssistantToolCalls: []mock.ExpectedToolCall{
+				{ID: "tc1", Name: "read_file", Args: map[string]any{"path": "a.go"}},
+			},
+		},
+		mock.ConversationTurn{AssistantContent: "done"},
+	))
+	loop := NewLoopAgent(WithLLM(model), WithTools(toolSrv))
+
+	events, err := loop.Run(context.Background(), Submission{Content: "read a.go"})
+	require.NoError(t, err)
+
+	msgEvents := messageEvents(events)
+	require.Len(t, msgEvents, 2)
+
+	// First message event has both content and tool calls.
+	assert.Equal(t, "let me read", msgEvents[0].Content)
+	require.Len(t, msgEvents[0].ToolCalls, 1)
+	assert.Equal(t, "read_file", msgEvents[0].ToolCalls[0].Name)
+	assert.Equal(t, "tc1", msgEvents[0].ToolCalls[0].ID)
+}
+
+// TestEndToEndMultiTurnToolUse verifies a full multi-turn tool-use conversation
+// works end-to-end, including pure tool call turns entering history and being
+// forwarded to the LLM on subsequent calls.
+func TestEndToEndMultiTurnToolUse(t *testing.T) {
+	toolSrv := mock.NewMockToolServer()
+	_, err := toolSrv.RegisterReadFileTool("file contents")
+	require.NoError(t, err)
+
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"LX-PT-03", "e2e-multiturn",
+		mock.ConversationTurn{
+			AssistantToolCalls: []mock.ExpectedToolCall{
+				{ID: "tc1", Name: "read_file", Args: map[string]any{"path": "a.go"}},
+			},
+		},
+		mock.ConversationTurn{AssistantContent: "final answer"},
+	))
+	loop := NewLoopAgent(WithLLM(model), WithTools(toolSrv))
+
+	events, err := loop.Run(context.Background(), Submission{Content: "read a.go"})
+	require.NoError(t, err)
+	assert.Equal(t, 2, model.CallCount())
+
+	// The second LLM call must have received the assistant message with
+	// ToolCalls forwarded from the first turn.
+	secondCallMsgs := model.CallLog()[1].Messages
+	var assistantWithTools *llm.Message
+	for i := range secondCallMsgs {
+		if secondCallMsgs[i].Role == llm.RoleAssistant && len(secondCallMsgs[i].ToolCalls) > 0 {
+			assistantWithTools = &secondCallMsgs[i]
+			break
+		}
+	}
+	require.NotNil(t, assistantWithTools)
+	require.Len(t, assistantWithTools.ToolCalls, 1)
+	assert.Equal(t, "read_file", assistantWithTools.ToolCalls[0].Name)
+	assert.Equal(t, "tc1", assistantWithTools.ToolCalls[0].ID)
+
+	// The second LLM call must also have received the tool result with
+	// matching ToolCallID.
+	assert.True(t, hasToolMessage(secondCallMsgs, "tc1"))
+
+	// Final message is the text answer.
+	msgEvents := messageEvents(events)
+	require.Len(t, msgEvents, 2)
+	assert.Equal(t, "final answer", msgEvents[1].Content)
+}
+
+// --- Task 35-3 history forwarding test cases ---
+
+// TestHistoryForwardToolCalls verifies that ToolCalls from assistant history
+// messages are forwarded to the LLM.
+func TestHistoryForwardToolCalls(t *testing.T) {
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"LX-HF-01", "forward-toolcalls",
+		mock.ConversationTurn{AssistantContent: "ok"},
+	))
+	loop := NewLoopAgent(WithLLM(model))
+
+	history := []AgentMessage{
+		{Role: "user", Content: "read file"},
+		{Role: "assistant", Content: "", ToolCalls: []llm.ToolCall{
+			{ID: "tc1", Name: "read_file", Args: map[string]any{"path": "a.go"}},
+		}},
+		{Role: "tool", Content: "file contents", ToolCallID: "tc1", ToolName: "read_file"},
+	}
+
+	_, err := loop.Run(context.Background(), Submission{
+		Content: "thanks",
+		History: history,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, model.CallCount())
+
+	msgs := model.CallLog()[0].Messages
+
+	// The assistant message in forwarded history must carry ToolCalls.
+	var assistantMsg *llm.Message
+	for i := range msgs {
+		if msgs[i].Role == llm.RoleAssistant && len(msgs[i].ToolCalls) > 0 {
+			assistantMsg = &msgs[i]
+			break
+		}
+	}
+	require.NotNil(t, assistantMsg)
+	require.Len(t, assistantMsg.ToolCalls, 1)
+	assert.Equal(t, "tc1", assistantMsg.ToolCalls[0].ID)
+	assert.Equal(t, "read_file", assistantMsg.ToolCalls[0].Name)
+}
+
+// TestHistoryForwardToolCallID verifies that ToolCallID from tool-role history
+// messages is forwarded to the LLM.
+func TestHistoryForwardToolCallID(t *testing.T) {
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"LX-HF-02", "forward-toolcallid",
+		mock.ConversationTurn{AssistantContent: "ok"},
+	))
+	loop := NewLoopAgent(WithLLM(model))
+
+	history := []AgentMessage{
+		{Role: "user", Content: "read file"},
+		{Role: "assistant", Content: "", ToolCalls: []llm.ToolCall{
+			{ID: "tc-id-1", Name: "read_file"},
+		}},
+		{Role: "tool", Content: "result", ToolCallID: "tc-id-1", ToolName: "read_file"},
+	}
+
+	_, err := loop.Run(context.Background(), Submission{
+		Content: "thanks",
+		History: history,
+	})
+	require.NoError(t, err)
+
+	msgs := model.CallLog()[0].Messages
+
+	var toolMsg *llm.Message
+	for i := range msgs {
+		if msgs[i].Role == llm.RoleTool {
+			toolMsg = &msgs[i]
+			break
+		}
+	}
+	require.NotNil(t, toolMsg)
+	assert.Equal(t, "tc-id-1", toolMsg.ToolCallID)
+}
+
+// TestHistoryForwardToolName verifies that ToolName from tool-role history
+// messages is forwarded to the LLM as the Name field.
+func TestHistoryForwardToolName(t *testing.T) {
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"LX-HF-03", "forward-toolname",
+		mock.ConversationTurn{AssistantContent: "ok"},
+	))
+	loop := NewLoopAgent(WithLLM(model))
+
+	history := []AgentMessage{
+		{Role: "user", Content: "read file"},
+		{Role: "assistant", Content: "", ToolCalls: []llm.ToolCall{
+			{ID: "tc-id-2", Name: "read_file"},
+		}},
+		{Role: "tool", Content: "result", ToolCallID: "tc-id-2", ToolName: "read_file"},
+	}
+
+	_, err := loop.Run(context.Background(), Submission{
+		Content: "thanks",
+		History: history,
+	})
+	require.NoError(t, err)
+
+	msgs := model.CallLog()[0].Messages
+
+	var toolMsg *llm.Message
+	for i := range msgs {
+		if msgs[i].Role == llm.RoleTool {
+			toolMsg = &msgs[i]
+			break
+		}
+	}
+	require.NotNil(t, toolMsg)
+	assert.Equal(t, "read_file", toolMsg.Name)
+}
+
+// TestHistoryForwardEndToEndMultiTurn verifies that a full multi-turn history
+// (user, assistant with tool calls, tool result, text assistant) is forwarded
+// completely to the LLM, including ToolCalls and ToolCallID.
+func TestHistoryForwardEndToEndMultiTurn(t *testing.T) {
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"LX-HF-04", "e2e-forward",
+		mock.ConversationTurn{AssistantContent: "ok"},
+	))
+	loop := NewLoopAgent(WithLLM(model))
+
+	history := []AgentMessage{
+		{Role: "user", Content: "read a.go"},
+		{Role: "assistant", Content: "let me read", ToolCalls: []llm.ToolCall{
+			{ID: "tc1", Name: "read_file", Args: map[string]any{"path": "a.go"}},
+		}},
+		{Role: "tool", Content: "file contents", ToolCallID: "tc1", ToolName: "read_file"},
+		{Role: "assistant", Content: "the file contains file contents"},
+	}
+
+	_, err := loop.Run(context.Background(), Submission{
+		Content: "summarize please",
+		History: history,
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, model.CallCount())
+
+	msgs := model.CallLog()[0].Messages
+
+	// System prompt prepended by the loop.
+	assert.Equal(t, llm.RoleSystem, msgs[0].Role)
+
+	// The assistant message with ToolCalls must be forwarded.
+	var assistantWithTools *llm.Message
+	for i := range msgs {
+		if msgs[i].Role == llm.RoleAssistant && len(msgs[i].ToolCalls) > 0 {
+			assistantWithTools = &msgs[i]
+			break
+		}
+	}
+	require.NotNil(t, assistantWithTools)
+	require.Len(t, assistantWithTools.ToolCalls, 1)
+	assert.Equal(t, "tc1", assistantWithTools.ToolCalls[0].ID)
+	assert.Equal(t, "read_file", assistantWithTools.ToolCalls[0].Name)
+
+	// The tool result must have ToolCallID and Name forwarded.
+	assert.True(t, hasToolMessage(msgs, "tc1"))
+	var toolMsg *llm.Message
+	for i := range msgs {
+		if msgs[i].Role == llm.RoleTool {
+			toolMsg = &msgs[i]
+			break
+		}
+	}
+	require.NotNil(t, toolMsg)
+	assert.Equal(t, "read_file", toolMsg.Name)
+
+	// The text-only assistant message must be forwarded without ToolCalls.
+	var textAssistant *llm.Message
+	for i := range msgs {
+		if msgs[i].Role == llm.RoleAssistant && len(msgs[i].ToolCalls) == 0 {
+			textAssistant = &msgs[i]
+			break
+		}
+	}
+	require.NotNil(t, textAssistant)
+	assert.Equal(t, "the file contains file contents", textAssistant.Content)
+
+	// The submission content is appended as a trailing user message.
+	assert.Equal(t, "summarize please", msgs[len(msgs)-1].Content)
+	assert.Equal(t, llm.RoleUser, msgs[len(msgs)-1].Role)
+}
+
+// TestHistoryForwardUserSystemUnaffected verifies that user and system messages
+// in history are forwarded without ToolCalls or ToolCallID fields.
+func TestHistoryForwardUserSystemUnaffected(t *testing.T) {
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"LX-HF-05", "user-system-unaffected",
+		mock.ConversationTurn{AssistantContent: "ok"},
+	))
+	loop := NewLoopAgent(WithLLM(model))
+
+	history := []AgentMessage{
+		{Role: "system", Content: "you are helpful"},
+		{Role: "user", Content: "hello"},
+		{Role: "assistant", Content: "hi there"},
+	}
+
+	_, err := loop.Run(context.Background(), Submission{
+		Content: "thanks",
+		History: history,
+	})
+	require.NoError(t, err)
+
+	msgs := model.CallLog()[0].Messages
+
+	// User messages must not carry ToolCalls, ToolCallID, or Name.
+	for _, m := range msgs {
+		if m.Role == llm.RoleUser {
+			assert.Empty(t, m.ToolCalls, "user message should not have ToolCalls")
+			assert.Empty(t, m.ToolCallID, "user message should not have ToolCallID")
+			assert.Empty(t, m.Name, "user message should not have Name")
+		}
+	}
+
+	// System messages must not carry ToolCalls or ToolCallID either.
+	for _, m := range msgs {
+		if m.Role == llm.RoleSystem {
+			assert.Empty(t, m.ToolCalls, "system message should not have ToolCalls")
+			assert.Empty(t, m.ToolCallID, "system message should not have ToolCallID")
+		}
+	}
+
+	// The text-only assistant message must not have ToolCalls.
+	for _, m := range msgs {
+		if m.Role == llm.RoleAssistant {
+			assert.Empty(t, m.ToolCalls, "text-only assistant should not have ToolCalls")
+			assert.Empty(t, m.ToolCallID, "assistant message should not have ToolCallID")
+		}
+	}
+}
+
+// TestLoopConcurrentSetModelAndRun verifies that concurrent SetModel and Run
+// calls do not trigger a data race (ARCH-5/PERF-M7). Run with -race to verify.
+func TestLoopConcurrentSetModelAndRun(t *testing.T) {
+	model1 := &scriptedChatModel{seq: []*llm.Message{
+		{Role: llm.RoleAssistant, Content: "m1"},
+	}}
+	model2 := &scriptedChatModel{seq: []*llm.Message{
+		{Role: llm.RoleAssistant, Content: "m2"},
+	}}
+
+	loop := NewLoopAgent(WithLLM(model1))
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			loop.SetModel(model2)
+		}()
+		go func() {
+			defer wg.Done()
+			_, _ = loop.Run(context.Background(), Submission{Content: "hi"})
+		}()
+	}
+	wg.Wait()
+}

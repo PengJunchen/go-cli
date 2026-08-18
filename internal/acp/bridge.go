@@ -2,6 +2,7 @@ package acp
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -9,6 +10,45 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/core"
 )
+
+// RPCHandler is a function that handles a JSON-RPC method call.
+type RPCHandler func(ctx context.Context, params json.RawMessage) (any, error)
+
+// RPCDispatcher routes JSON-RPC method calls to registered handlers.
+type RPCDispatcher struct {
+	mu       sync.RWMutex
+	handlers map[string]RPCHandler
+}
+
+// NewRPCDispatcher creates an empty RPCDispatcher.
+func NewRPCDispatcher() *RPCDispatcher {
+	return &RPCDispatcher{handlers: make(map[string]RPCHandler)}
+}
+
+// Register associates method with handler. Overwrites any previous
+// registration for the same method name.
+func (d *RPCDispatcher) Register(method string, handler RPCHandler) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.handlers[method] = handler
+}
+
+// Dispatch routes the RPCMessage to its registered handler. Returns
+// the handler's result or an error if the method is not found.
+func (d *RPCDispatcher) Dispatch(ctx context.Context, msg RPCMessage) (any, error) {
+	d.mu.RLock()
+	handler, ok := d.handlers[msg.Method]
+	d.mu.RUnlock()
+	if !ok {
+		return nil, &RPCError{Code: RPCCodeMethodNotFound, Message: "method not found: " + msg.Method}
+	}
+	return handler(ctx, msg.Params)
+}
+
+// maxMessageSize is the maximum allowed size (in bytes) of an inbound ACP
+// message content. Messages whose content exceeds this limit are rejected to
+// prevent oversized payloads from reaching the dispatcher.
+const maxMessageSize = 64 * 1024 // 64KB
 
 // ACPMiddlewareAdapter bridges the extension.Middleware-based ACPMiddleware
 // into the core.Middleware model used by the LoopAgent middleware chain. It
@@ -24,6 +64,12 @@ type ACPMiddlewareAdapter struct {
 	acpMiddleware *ACPMiddleware
 	dispatcher    core.SubagentDispatcher
 	client        ACPClient
+	rpcDispatcher *RPCDispatcher
+
+	// authorizedSenders, when non-empty, restricts inbound message processing
+	// to the listed sender IDs. When nil/empty all senders are accepted
+	// (backward-compatible zero-config fallback).
+	authorizedSenders map[string]bool
 
 	mu      sync.Mutex
 	started bool
@@ -42,6 +88,23 @@ func NewACPMiddlewareAdapter(mw *ACPMiddleware, dispatcher core.SubagentDispatch
 		dispatcher:    dispatcher,
 		client:        client,
 	}
+}
+
+// WithRPCDispatcher sets the RPC dispatcher for method-based routing.
+func (a *ACPMiddlewareAdapter) WithRPCDispatcher(d *RPCDispatcher) *ACPMiddlewareAdapter {
+	a.rpcDispatcher = d
+	return a
+}
+
+// WithAuthorizedSenders restricts inbound message processing to the given
+// sender IDs. If senders is empty the restriction is not applied and all
+// senders are accepted (backward-compatible zero-config fallback).
+func (a *ACPMiddlewareAdapter) WithAuthorizedSenders(senders []string) *ACPMiddlewareAdapter {
+	a.authorizedSenders = make(map[string]bool, len(senders))
+	for _, s := range senders {
+		a.authorizedSenders[s] = true
+	}
+	return a
 }
 
 // Name returns the middleware identifier, delegating to the wrapped
@@ -73,12 +136,12 @@ func (l *acpBridgeLoop) Run(ctx context.Context, submission core.Submission, str
 }
 
 // startRouter starts the background goroutine that reads inbound ACP messages
-// and dispatches them to the SubagentDispatcher. It is idempotent and safe to
-// call from multiple goroutines.
+// and dispatches them to the SubagentDispatcher or RPCDispatcher. It is
+// idempotent and safe to call from multiple goroutines.
 func (a *ACPMiddlewareAdapter) startRouter() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.started || a.client == nil || a.dispatcher == nil {
+	if a.started || a.client == nil || (a.dispatcher == nil && a.rpcDispatcher == nil) {
 		return
 	}
 	a.started = true
@@ -112,10 +175,67 @@ func (a *ACPMiddlewareAdapter) routeMessages(ctx context.Context, done chan stru
 	}
 }
 
-// handleMessage converts an ACP message to a SubagentTask, dispatches it, and
-// relays the result back to the peer. Non-TypeMessage messages are ignored.
+// handleMessage validates and processes an inbound ACP message. It enforces a
+// maximum content size and verifies the sender against the configured
+// allow-list before routing: TypeMessage is converted to a SubagentTask,
+// dispatched, and the result relayed back; TypeRPC is routed to the
+// RPCDispatcher. Other message types are ignored. Error replies use generic
+// messages to avoid leaking internal details.
 func (a *ACPMiddlewareAdapter) handleMessage(ctx context.Context, msg ACPMessage) {
+	// Enforce a maximum message size before any processing to guard against
+	// oversized payloads. The error reply uses a generic message to avoid
+	// leaking internal details.
+	if len(msg.Content) > maxMessageSize {
+		reply := ACPMessage{
+			Type:       TypeError,
+			SenderID:   msg.ReceiverID,
+			ReceiverID: msg.SenderID,
+			Content:    "message too large",
+			Timestamp:  time.Now(),
+		}
+		if sendErr := a.client.SendMessage(ctx, reply); sendErr != nil {
+			slog.Warn("acp.bridge.reply_failed", "err", sendErr, "receiver", msg.SenderID)
+		}
+		return
+	}
+
+	// Verify the sender against the configured allow-list. When no list is
+	// configured all senders are accepted. The error reply uses a generic
+	// message to avoid leaking internal details.
+	if len(a.authorizedSenders) > 0 && !a.authorizedSenders[msg.SenderID] {
+		reply := ACPMessage{
+			Type:       TypeError,
+			SenderID:   msg.ReceiverID,
+			ReceiverID: msg.SenderID,
+			Content:    "unauthorized",
+			Timestamp:  time.Now(),
+		}
+		if sendErr := a.client.SendMessage(ctx, reply); sendErr != nil {
+			slog.Warn("acp.bridge.reply_failed", "err", sendErr, "receiver", msg.SenderID)
+		}
+		return
+	}
+
+	if msg.Type == TypeRPC {
+		a.handleRPC(ctx, msg)
+		return
+	}
+
 	if msg.Type != TypeMessage {
+		return
+	}
+
+	if a.dispatcher == nil {
+		reply := ACPMessage{
+			Type:       TypeError,
+			SenderID:   msg.ReceiverID,
+			ReceiverID: msg.SenderID,
+			Content:    "no sub-agent dispatcher configured",
+			Timestamp:  time.Now(),
+		}
+		if sendErr := a.client.SendMessage(ctx, reply); sendErr != nil {
+			slog.Warn("acp.bridge.reply_failed", "err", sendErr, "receiver", msg.SenderID)
+		}
 		return
 	}
 
@@ -148,6 +268,61 @@ func (a *ACPMiddlewareAdapter) handleMessage(ctx context.Context, msg ACPMessage
 	}
 	if sendErr := a.client.SendMessage(ctx, reply); sendErr != nil {
 		slog.Warn("acp.bridge.reply_failed", "err", sendErr, "receiver", msg.SenderID)
+	}
+}
+
+// handleRPC parses a JSON-RPC 2.0 request from the ACP message content,
+// dispatches it to the RPCDispatcher, and relays the response back to the
+// peer. Notifications (ID == 0) do not receive a response.
+func (a *ACPMiddlewareAdapter) handleRPC(ctx context.Context, msg ACPMessage) {
+	var rpcMsg RPCMessage
+	if err := json.Unmarshal([]byte(msg.Content), &rpcMsg); err != nil {
+		slog.Warn("acp.bridge.rpc_parse_failed", "err", err)
+		return
+	}
+
+	// Notifications (ID == 0) don't get a response.
+	if rpcMsg.ID == 0 {
+		if a.rpcDispatcher != nil {
+			_, _ = a.rpcDispatcher.Dispatch(ctx, rpcMsg) //nolint:errcheck
+		}
+		return
+	}
+
+	var resp RPCResponse
+	resp.JSONRPC = "2.0"
+	resp.ID = rpcMsg.ID
+
+	if a.rpcDispatcher == nil {
+		resp.Error = &RPCError{Code: RPCCodeInternalError, Message: "no RPC dispatcher configured"}
+	} else {
+		result, err := a.rpcDispatcher.Dispatch(ctx, rpcMsg)
+		if err != nil {
+			if rpcErr, ok := err.(*RPCError); ok {
+				resp.Error = rpcErr
+			} else {
+				resp.Error = &RPCError{Code: RPCCodeInternalError, Message: err.Error()}
+			}
+		} else {
+			resp.Result = result
+		}
+	}
+
+	respData, err := json.Marshal(resp)
+	if err != nil {
+		slog.Warn("acp.bridge.rpc_marshal_failed", "err", err)
+		return
+	}
+
+	reply := ACPMessage{
+		Type:       TypeRPC,
+		SenderID:   msg.ReceiverID,
+		ReceiverID: msg.SenderID,
+		Content:    string(respData),
+		Timestamp:  time.Now(),
+	}
+	if sendErr := a.client.SendMessage(ctx, reply); sendErr != nil {
+		slog.Warn("acp.bridge.rpc_reply_failed", "err", sendErr)
 	}
 }
 

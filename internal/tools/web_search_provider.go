@@ -11,7 +11,6 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
-	"sync"
 	"time"
 )
 
@@ -306,104 +305,6 @@ func parseBraveJSON(data []byte, max int) ([]SearchResult, error) {
 		})
 	}
 	return results, nil
-}
-
-// ---------------------------------------------------------------------------
-// RateLimiter
-// ---------------------------------------------------------------------------
-
-// RateLimiter enforces a minimum interval between successive Wait calls.
-type RateLimiter struct {
-	interval time.Duration
-	mu       sync.Mutex
-	last     time.Time
-	stop     chan struct{}
-}
-
-// NewRateLimiterWithInterval returns a RateLimiter that enforces the given
-// minimum interval between calls.
-func NewRateLimiterWithInterval(d time.Duration) *RateLimiter {
-	return &RateLimiter{
-		interval: d,
-		stop:     make(chan struct{}),
-	}
-}
-
-// Wait blocks until at least interval has elapsed since the previous Wait.
-// The first call returns immediately.
-func (rl *RateLimiter) Wait() {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	if !rl.last.IsZero() {
-		elapsed := time.Since(rl.last)
-		if remaining := rl.interval - elapsed; remaining > 0 {
-			select {
-			case <-time.After(remaining):
-			case <-rl.stop:
-			}
-		}
-	}
-	rl.last = time.Now()
-}
-
-// Stop releases resources and unblocks any pending Wait.
-func (rl *RateLimiter) Stop() {
-	rl.mu.Lock()
-	defer rl.mu.Unlock()
-	select {
-	case <-rl.stop:
-	default:
-		close(rl.stop)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// ResultCache
-// ---------------------------------------------------------------------------
-
-// cacheEntry holds cached search results with an expiry time.
-type cacheEntry struct {
-	results []SearchResult
-	expires time.Time
-}
-
-// ResultCache is a simple TTL cache for search results.
-type ResultCache struct {
-	ttl  time.Duration
-	mu   sync.RWMutex
-	data map[string]cacheEntry
-}
-
-// NewResultCacheWithTTL returns a ResultCache with the given TTL.
-func NewResultCacheWithTTL(ttl time.Duration) *ResultCache {
-	return &ResultCache{
-		ttl:  ttl,
-		data: make(map[string]cacheEntry),
-	}
-}
-
-// Set stores results for the given key with the configured TTL.
-func (c *ResultCache) Set(key string, results []SearchResult) {
-	c.mu.Lock()
-	c.data[key] = cacheEntry{
-		results: results,
-		expires: time.Now().Add(c.ttl),
-	}
-	c.mu.Unlock()
-}
-
-// Get returns the cached results for the key if present and not expired.
-func (c *ResultCache) Get(key string) ([]SearchResult, bool) {
-	c.mu.RLock()
-	entry, ok := c.data[key]
-	c.mu.RUnlock()
-	if !ok {
-		return nil, false
-	}
-	if time.Now().After(entry.expires) {
-		return nil, false
-	}
-	return entry.results, true
 }
 
 // ---------------------------------------------------------------------------

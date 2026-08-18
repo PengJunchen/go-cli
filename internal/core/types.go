@@ -5,7 +5,18 @@
 // core has zero downward dependencies on any service or extension package.
 package core
 
-import "time"
+import (
+	"time"
+
+	"github.com/pengjunchen/go-cli/internal/llm"
+)
+
+// Event kind constants used by AgentEvent.Kind.
+const (
+	// EventKindPreToolCall marks an event emitted before each tool execution,
+	// allowing external interceptors to cancel the call via PreToolCall.Cancel.
+	EventKindPreToolCall = "pre_tool_call"
+)
 
 // AgentMessage is a single message exchanged within a conversation.
 type AgentMessage struct {
@@ -13,6 +24,22 @@ type AgentMessage struct {
 	Role string
 	// Content is the textual payload of the message.
 	Content string
+	// ContentBlocks holds typed content parts for multimodal messages
+	// (text + images). When non-nil, it takes precedence over Content.
+	ContentBlocks []llm.ContentBlock
+	// Usage reports the token consumption for this message as reported by
+	// the API. It is nil for user/system/tool messages and for assistant
+	// messages when the provider did not return usage data.
+	Usage *llm.Usage
+	// ToolCalls holds tool invocations requested by the assistant. Populated
+	// for assistant messages that request tool execution.
+	ToolCalls []llm.ToolCall `json:"tool_calls,omitempty"`
+	// ToolCallID associates a tool-result message with the originating tool
+	// call. Populated for "tool" role messages.
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	// ToolName is the name of the tool that produced this message. Populated
+	// for "tool" role messages.
+	ToolName string `json:"tool_name,omitempty"`
 }
 
 // String returns a compact one-line representation of the message.
@@ -32,15 +59,51 @@ type AgentTool struct {
 // Consumers (e.g. the TUI or a test harness) stream these from an EventStream.
 type AgentEvent struct {
 	// Kind classifies the event (e.g. "message", "tool", "status").
-	Kind string
+	Kind string `json:"kind"`
 	// Content carries the event payload.
-	Content string
+	Content string `json:"content"`
 	// Timestamp records when the event was produced.
-	Timestamp time.Time
+	Timestamp time.Time `json:"timestamp"`
 	// Incremental marks a partial "message" event that contains only a
 	// fragment of the assistant's response (one or more tokens from a
 	// streaming LLM). The TUI accumulates these into the full message.
-	Incremental bool
+	Incremental bool `json:"incremental,omitempty"`
+	// TokenUsage carries token consumption data for "token_usage" events.
+	// It is nil for all other event kinds.
+	TokenUsage *TokenUsage `json:"token_usage,omitempty"`
+	// ToolCallID associates streaming output with the originating tool
+	// call. Populated for "tool_output" events; empty for other kinds.
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	// Stream identifies the output source for "tool_output" events:
+	// "stdout" or "stderr". Empty for other event kinds.
+	Stream string `json:"stream,omitempty"`
+	// Usage carries the API-reported token consumption for "message"
+	// events. It is nil for all other event kinds and for "message"
+	// events when the provider did not return usage data.
+	Usage *llm.Usage `json:"usage,omitempty"`
+	// ToolCalls carries the tool invocations requested by the assistant
+	// for "message" events. It is nil for events with no tool calls.
+	ToolCalls []llm.ToolCall `json:"tool_calls,omitempty"`
+	// IsError marks a "tool_result" event as an error for structured
+	// detection. When true, consumers use this boolean instead of string
+	// matching on Content to determine whether the tool failed.
+	IsError bool `json:"is_error,omitempty"`
+	// PreToolCall carries a cancelable handle for "pre_tool_call" events.
+	// External interceptors call PreToolCall.Cancel() to prevent the
+	// tool from executing. It is nil for all other event kinds.
+	PreToolCall *PreToolCallEvent `json:"pre_tool_call,omitempty"`
+}
+
+// TokenUsage carries token consumption and cost data for a token_usage event.
+type TokenUsage struct {
+	// InputTokens is the total prompt tokens consumed so far.
+	InputTokens int `json:"input_tokens"`
+	// OutputTokens is the total completion tokens consumed so far.
+	OutputTokens int `json:"output_tokens"`
+	// MaxTokens is the token budget for the session.
+	MaxTokens int `json:"max_tokens,omitempty"`
+	// Cost is the accumulated monetary cost in USD.
+	Cost float64 `json:"cost,omitempty"`
 }
 
 // String returns a time-stamped representation of the event and logs it.

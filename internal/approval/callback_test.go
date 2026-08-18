@@ -3,6 +3,8 @@ package approval
 import (
 	"bytes"
 	"context"
+	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -12,6 +14,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/pengjunchen/go-cli/internal/tools"
+	"github.com/pengjunchen/go-cli/internal/verify"
 )
 
 // MockApprovalCallback is a test double for ApprovalCallback that records how
@@ -162,6 +165,93 @@ func TestApprovalCacheConcurrentAccess(t *testing.T) {
 	wg.Wait()
 }
 
+// --- ApprovalCache permission tests ---
+
+func TestApprovalCacheSaveFilePermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.json")
+	cache := NewApprovalCache(path)
+	cache.Set("bash:abc")
+
+	require.NoError(t, cache.SaveToFile(path))
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm(),
+		"saved cache file must have 0600 permissions")
+}
+
+func TestApprovalCacheSaveTightensExistingPermissions(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "cache.json")
+
+	// Pre-create the file with overly permissive permissions.
+	require.NoError(t, os.WriteFile(path, []byte(`{"old":true}`), 0o644))
+
+	cache := NewApprovalCache(path)
+	cache.Set("bash:abc")
+	require.NoError(t, cache.SaveToFile(path))
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm(),
+		"existing file with broader permissions must be tightened to 0600")
+}
+
+func TestApprovalCacheLoadRejects0644(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"bash:abc":true}`), 0o644))
+
+	cache := NewApprovalCache("")
+	err := cache.LoadFromFile(path)
+	require.Error(t, err, "0644 permissions must be rejected")
+	assert.Contains(t, err.Error(), "expected 0600")
+}
+
+func TestApprovalCacheLoadRejects0666(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"bash:abc":true}`), 0o666))
+
+	cache := NewApprovalCache("")
+	err := cache.LoadFromFile(path)
+	require.Error(t, err, "0666 permissions must be rejected")
+	assert.Contains(t, err.Error(), "expected 0600")
+}
+
+func TestApprovalCacheLoadCorrectPermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"bash:abc":true}`), 0o600))
+
+	cache := NewApprovalCache("")
+	require.NoError(t, cache.LoadFromFile(path))
+
+	allowed, ok := cache.Get("bash:abc")
+	assert.True(t, ok)
+	assert.True(t, allowed)
+}
+
+func TestApprovalCacheLoadWarnsOnIncorrectPermissions(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "cache.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"bash:abc":true}`), 0o644))
+
+	lc := verify.NewLogCapturer()
+	lc.Attach(t.Context())
+	defer lc.Detach()
+
+	cache := NewApprovalCache("")
+	err := cache.LoadFromFile(path)
+	require.Error(t, err)
+
+	entries := lc.Entries()
+	found := false
+	for _, e := range entries {
+		if e.Level == slog.LevelWarn && strings.Contains(e.Message, "insecure_permissions") {
+			found = true
+			break
+		}
+	}
+	assert.True(t, found, "a warning log should be emitted for insecure permissions")
+}
+
 // --- Middleware with callback tests ---
 
 func TestMiddlewareAskCallbackAllow(t *testing.T) {
@@ -206,7 +296,7 @@ func TestMiddlewareAskCallbackAlwaysAllow(t *testing.T) {
 	assert.Equal(t, "ran:read_file", res.Output)
 
 	// The always-allow decision must be persisted to the cache.
-	key, err := sessionKey(call("read_file"))
+	key, err := sessionKey(call("read_file"), PermissionDefault)
 	require.NoError(t, err)
 	allowed, ok := cache.Get(key)
 	assert.True(t, ok, "cache should contain the key after AlwaysAllow")
@@ -239,7 +329,7 @@ func TestMiddlewareAskCallbackCacheHitSkipsCallback(t *testing.T) {
 	cache := NewApprovalCache("")
 
 	// Pre-populate the cache so the callback should never be reached.
-	key, err := sessionKey(call("read_file"))
+	key, err := sessionKey(call("read_file"), PermissionDefault)
 	require.NoError(t, err)
 	cache.Set(key)
 

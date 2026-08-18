@@ -3,10 +3,13 @@ package core //exempt:scan009
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/pengjunchen/go-cli/internal/compaction"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tracing"
@@ -17,6 +20,12 @@ import (
 // Complex multi-step tasks (install dependencies, write code, run, debug)
 // legitimately need many turns, so the default is generous.
 const defaultMaxIterations = 200
+
+// maxContinuationAttempts bounds the number of automatic continuation
+// requests the loop issues when the model output is truncated by max_tokens
+// (finish_reason == "length"). After this many attempts the loop proceeds
+// with whatever content has been accumulated and logs a warning.
+const maxContinuationAttempts = 3
 
 // errNilModel reports that a LoopAgent has no chat model wired up.
 var errNilModel = errors.New("core: agent loop has no chat model")
@@ -37,6 +46,12 @@ type loopConfig struct {
 	promptOpts           SystemPromptOptions
 	tracer               *tracing.Tracer
 	steerCh              chan string
+	followUpCh           chan string
+	thinkingConfig       *llm.ThinkingConfig
+	midTurnCompactor     *compaction.MidTurnCompact
+	compactor            compaction.Compactor
+	estimator            compaction.TokenEstimator
+	maxTokens            int
 }
 
 // LoopOption configures a LoopAgent at construction time.
@@ -93,6 +108,24 @@ func WithSteeringChannel(ch chan string) LoopOption {
 	return func(c *loopConfig) { c.steerCh = ch }
 }
 
+// WithFollowUpChannel sets the channel the loop drains for follow-up user
+// messages between LLM iterations. Like steering, follow-ups are injected as
+// user messages before the next LLM call. Follow-ups are drained after
+// steering so the model sees steering context first, then the follow-up.
+func WithFollowUpChannel(ch chan string) LoopOption {
+	return func(c *loopConfig) { c.followUpCh = ch }
+}
+
+// WithThinkingConfig sets the thinking configuration applied to every LLM
+// Generate/Stream call. When set, the loop appends llm.WithThinking(cfg) to
+// the generation options so the provider can enable reasoning according to the
+// configured level. When nil, no thinking option is added.
+func WithThinkingConfig(cfg llm.ThinkingConfig) LoopOption {
+	return func(c *loopConfig) {
+		c.thinkingConfig = &cfg
+	}
+}
+
 // LoopAgent is the pure ReAct (think -> act -> observe) loop. It is stateless
 // with respect to a session: given a Submission it drives a conversation with
 // the injected chat model, servicing any tool calls the model requests, and
@@ -108,9 +141,77 @@ type LoopAgent struct {
 	promptOpts           SystemPromptOptions
 	tracer               *tracing.Tracer
 	steerCh              chan string
+	followUpCh           chan string
+	thinkingConfig       *llm.ThinkingConfig
+	midTurnCompactor     *compaction.MidTurnCompact
+	compactor            compaction.Compactor
+	estimator            compaction.TokenEstimator
+	maxTokens            int
+	// toolSearchThreshold is the maximum number of tools to expose to the LLM
+	// without filtering. When the tool count exceeds this, tools are
+	// dynamically scored and filtered by relevance to the current query.
+	// Zero means no filtering (all tools exposed).
+	toolSearchThreshold int
+	// mu protects runtime mutable fields (model, midTurnCompactor, compactor,
+	// estimator, maxTokens, toolSearchThreshold) from data races between
+	// concurrent setter calls and Run.
+	mu      sync.RWMutex
+	pauseMu sync.Mutex
+	pauseCh chan struct{}
+
+	// toolDefsCache caches the LLM tool definitions so they are not
+	// rebuilt on every Run call. The cache is invalidated when the tool
+	// registry version changes. When the registry does not support
+	// versioning (Version() returns 0), the cache is always considered
+	// valid after the first build.
+	toolDefsCache   []llm.ToolDefinition
+	toolDefsVersion int
+	toolDefsMu      sync.RWMutex
 }
 
 var _ AgentLoop = (*LoopAgent)(nil)
+
+// Pause causes the loop to block at the top of the next iteration until Resume
+// is called. It is safe to call from a different goroutine than Run. Calling
+// Pause when already paused is a no-op.
+func (l *LoopAgent) Pause() {
+	l.pauseMu.Lock()
+	defer l.pauseMu.Unlock()
+	if l.pauseCh == nil {
+		l.pauseCh = make(chan struct{})
+		slog.Info("core.loop.pause")
+	}
+}
+
+// Resume unblocks the loop after a Pause. It is safe to call from a different
+// goroutine than Run. Calling Resume when not paused is a no-op.
+func (l *LoopAgent) Resume() {
+	l.pauseMu.Lock()
+	defer l.pauseMu.Unlock()
+	if l.pauseCh != nil {
+		close(l.pauseCh)
+		l.pauseCh = nil
+		slog.Info("core.loop.resume")
+	}
+}
+
+// pauseWait blocks until the loop is resumed or the context is canceled. It
+// returns nil when resumed, or the context error when canceled.
+func (l *LoopAgent) pauseWait(ctx context.Context) error {
+	l.pauseMu.Lock()
+	pch := l.pauseCh
+	l.pauseMu.Unlock()
+	if pch == nil {
+		return nil
+	}
+	slog.Info("core.loop.pause_wait")
+	select {
+	case <-pch:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
 
 // NewLoopAgent builds a LoopAgent from functional options. Missing optional
 // dependencies are left nil and reported at Run time so the loop can fail with
@@ -136,6 +237,12 @@ func NewLoopAgent(opts ...LoopOption) *LoopAgent {
 		promptOpts:           cfg.promptOpts,
 		tracer:               cfg.tracer,
 		steerCh:              cfg.steerCh,
+		followUpCh:           cfg.followUpCh,
+		thinkingConfig:       cfg.thinkingConfig,
+		midTurnCompactor:     cfg.midTurnCompactor,
+		compactor:            cfg.compactor,
+		estimator:            cfg.estimator,
+		maxTokens:            cfg.maxTokens,
 	}
 	slog.Info("core.loop.new",
 		"max_iterations", la.maxIterations,
@@ -145,11 +252,101 @@ func NewLoopAgent(opts ...LoopOption) *LoopAgent {
 	return la
 }
 
+// WithToolSearchThreshold sets the maximum number of tools exposed to the
+// LLM before dynamic filtering kicks in.
+func (l *LoopAgent) WithToolSearchThreshold(n int) *LoopAgent {
+	l.mu.Lock()
+	l.toolSearchThreshold = n
+	l.mu.Unlock()
+	return l
+}
+
+// buildToolDefinitions returns the cached LLM tool definitions, rebuilding
+// them only when the tool registry version has changed. When the registry
+// does not support versioning (Version() returns 0), the cache is always
+// considered valid after the first build.
+func (l *LoopAgent) buildToolDefinitions(ctx context.Context) ([]llm.ToolDefinition, error) {
+	if l.tools == nil {
+		return nil, nil
+	}
+
+	version := 0
+	if v, ok := l.tools.(interface{ Version() int }); ok {
+		version = v.Version()
+	}
+
+	l.toolDefsMu.RLock()
+	cached := l.toolDefsCache
+	cachedVersion := l.toolDefsVersion
+	l.toolDefsMu.RUnlock()
+
+	if cached != nil && version == cachedVersion {
+		return cached, nil
+	}
+
+	defs, err := l.tools.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	llmTools := make([]llm.ToolDefinition, 0, len(defs))
+	for _, d := range defs {
+		td := llm.ToolDefinition{
+			Name:        d.Name(),
+			Description: d.Description(),
+		}
+		if p, ok := d.(tools.Parameterized); ok {
+			td.Parameters = p.Parameters()
+		}
+		llmTools = append(llmTools, td)
+	}
+
+	l.toolDefsMu.Lock()
+	l.toolDefsCache = llmTools
+	l.toolDefsVersion = version
+	l.toolDefsMu.Unlock()
+
+	return llmTools, nil
+}
+
+// SetMidTurnCompaction wires the mid-turn compaction guard post-construction.
+// This is used when the compactor components are created after NewLoopAgent
+// (e.g. in the assemble layer where the compactor factory runs later).
+func (l *LoopAgent) SetMidTurnCompaction(mtc *compaction.MidTurnCompact, compactor compaction.Compactor, estimator compaction.TokenEstimator, maxTokens int) {
+	l.mu.Lock()
+	l.midTurnCompactor = mtc
+	l.compactor = compactor
+	l.estimator = estimator
+	l.maxTokens = maxTokens
+	l.mu.Unlock()
+}
+
+// SetModel replaces the LLM model at runtime. The next Run call will use the
+// new model. This is used by the /model slash command to switch models
+// without restarting the process.
+func (l *LoopAgent) SetModel(m llm.BaseChatModel) {
+	l.mu.Lock()
+	l.model = m
+	l.mu.Unlock()
+}
+
 // Run executes the ReAct loop for the submission and returns the events fired
 // during execution. When stream is non-nil, events are sent in real time as
 // they happen (streaming mode); otherwise they are collected into the returned
 // slice (batch mode, for backward compatibility).
 func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...EventStream) ([]AgentEvent, error) {
+	// Snapshot runtime mutable fields under a read lock to avoid data races
+	// with concurrent setter calls (SetModel, SetMidTurnCompaction,
+	// WithToolSearchThreshold). The local copies are used throughout Run.
+	l.mu.RLock()
+	model := l.model
+	toolSearchThreshold := l.toolSearchThreshold
+	midTurnCompactor := l.midTurnCompactor
+	compactor := l.compactor
+	estimator := l.estimator
+	maxTokens := l.maxTokens
+	l.mu.RUnlock()
+
 	// Inject the Tracer into the context so that all downstream
 	// SpanFromContext calls (middleware, loop internals, tools) create real
 	// spans sharing the same trace. When l.tracer is nil, SpanFromContext
@@ -168,14 +365,13 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 		es = stream[0]
 	}
 
-	if l.model == nil {
+	if model == nil {
 		span.SetStatus(tracing.SpanStatusError, errNilModel.Error())
 		return nil, errNilModel
 	}
 
 	// Apply the model wrapper (if any) before the first LLM call. The
 	// wrapper may add middleware such as retry, cost tracking, etc.
-	model := l.model
 	if l.modelWrapper != nil {
 		if wrapped := l.modelWrapper(model); wrapped != nil {
 			if m, ok := wrapped.(llm.BaseChatModel); ok {
@@ -186,26 +382,46 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 	}
 
 	// Build tool definitions for the model from the tool registry so the LLM
-	// knows what tools it can invoke.
+	// knows what tools it can invoke. The raw tool definitions are cached in
+	// toolDefs for the duration of this Run so that subsequent paths (tool
+	// filtering, prompt builder, system prompt) reuse the same snapshot
+	// instead of calling List again. buildToolDefinitions has its own
+	// version-based cache and is left untouched.
+	var toolDefs []tools.ToolDefinition
 	var toolOpts []llm.Option
+	var searchTool *tools.ToolSearchTool
+	needToolFiltering := false
 	if l.tools != nil {
-		defs, listErr := l.tools.List(spanCtx)
+		if defs, err := l.tools.List(spanCtx); err == nil {
+			toolDefs = defs
+		} else {
+			logger.Warn("core.loop.list_tools_failed", "err", err)
+		}
+
+		llmTools, listErr := l.buildToolDefinitions(spanCtx)
 		if listErr != nil {
 			logger.Warn("core.loop.list_tools_failed", "err", listErr)
-		} else if len(defs) > 0 {
-			llmTools := make([]llm.ToolDefinition, 0, len(defs))
-			for _, d := range defs {
-				td := llm.ToolDefinition{
-					Name:        d.Name(),
-					Description: d.Description(),
-				}
-				if p, ok := d.(tools.Parameterized); ok {
-					td.Parameters = p.Parameters()
-				}
-				llmTools = append(llmTools, td)
-			}
+		} else if len(llmTools) > 0 {
 			toolOpts = append(toolOpts, llm.WithTools(llmTools))
+
+			// Dynamic tool filtering: when the tool count exceeds the
+			// threshold, score and filter to reduce context bloat.
+			if toolSearchThreshold > 0 && len(llmTools) > toolSearchThreshold {
+				for _, d := range toolDefs {
+					if st, ok := d.(*tools.ToolSearchTool); ok {
+						searchTool = st
+						needToolFiltering = true
+						break
+					}
+				}
+			}
 		}
+	}
+
+	// Apply thinking configuration to every LLM call so the provider can
+	// enable reasoning according to the configured level.
+	if l.thinkingConfig != nil {
+		toolOpts = append(toolOpts, llm.WithThinking(*l.thinkingConfig))
 	}
 
 	var events []AgentEvent
@@ -233,26 +449,61 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 	if l.promptBuilder != nil {
 		opts := l.promptOpts
 		if l.tools != nil {
-			if defs, listErr := l.tools.List(spanCtx); listErr == nil {
-				opts.Tools = defs
-			} else {
-				logger.Warn("core.loop.list_tools_for_prompt_failed", "err", listErr)
-			}
+			opts.Tools = toolDefs
 		}
 		sysPrompt = l.promptBuilder.Build(spanCtx, opts)
 	} else {
 		sysPrompt = l.systemPromptOverride
 		if sysPrompt == "" {
-			sysPrompt = systemPrompt(l.tools)
+			sysPrompt = systemPromptFromDefs(toolDefs)
 		}
 	}
 	messages = append(messages, llm.Message{Role: llm.RoleSystem, Content: sysPrompt})
 
 	for _, hm := range submission.History {
-		messages = append(messages, llm.Message{Role: llm.Role(hm.Role), Content: hm.Content})
+		msg := llm.Message{
+			Role:          llm.Role(hm.Role),
+			Content:       hm.Content,
+			ContentBlocks: hm.ContentBlocks,
+		}
+		// Forward ToolCalls from assistant messages so the LLM can
+		// correlate tool calls with tool results across turns.
+		if len(hm.ToolCalls) > 0 {
+			msg.ToolCalls = hm.ToolCalls
+		}
+		// Forward ToolCallID and tool name on tool-result messages so
+		// the LLM can match results to their originating calls.
+		if hm.ToolCallID != "" {
+			msg.ToolCallID = hm.ToolCallID
+			msg.Name = hm.ToolName
+		}
+		messages = append(messages, msg)
 	}
 	if len(messages) == 0 || messages[len(messages)-1].Role != llm.RoleUser {
 		messages = append(messages, llm.Message{Role: llm.RoleUser, Content: submission.Content})
+	}
+
+	// emitCanceledToolResults synthesizes error tool_result messages for any
+	// tool calls in the last assistant message that lack a matching
+	// tool_result, and emits corresponding events. This keeps the message
+	// history complete when the loop is canceled mid-execution so
+	// subsequent LLM requests don't reject the conversation.
+	emitCanceledToolResults := func(canceledErr error) {
+		var synthCalls []llm.ToolCall
+		messages, synthCalls = synthesizeCanceledToolResults(messages, canceledErr)
+		errMsg := "tool call canceled"
+		if canceledErr != nil {
+			errMsg = canceledErr.Error()
+		}
+		for _, tc := range synthCalls {
+			sendEvent(AgentEvent{
+				Kind:       "tool_result",
+				Content:    "Error: " + errMsg,
+				Timestamp:  time.Now(),
+				IsError:    true,
+				ToolCallID: tc.ID,
+			})
+		}
 	}
 
 	for iter := 0; l.maxIterations < 0 || iter < l.maxIterations; iter++ {
@@ -261,6 +512,15 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 			logger.Error("core.loop.canceled", "iteration", iter, "err", err)
 			sendEvent(errEvent(err))
 			return events, err
+		}
+
+		// Block here if the loop has been paused via Pause(). This allows
+		// the user to suspend agent execution between LLM iterations.
+		if perr := l.pauseWait(spanCtx); perr != nil {
+			span.SetStatus(tracing.SpanStatusError, perr.Error())
+			logger.Error("core.loop.canceled_during_pause", "iteration", iter, "err", perr)
+			sendEvent(errEvent(perr))
+			return events, perr
 		}
 
 		// Drain any pending steering messages from the steer channel.
@@ -272,8 +532,34 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 			drainSteerMessages(l.steerCh, &messages, logger)
 		}
 
+		// Drain any pending follow-up messages from the follow-up channel.
+		// Follow-ups are injected as user messages after steering so the
+		// model sees steering context first, then the follow-up.
+		if l.followUpCh != nil {
+			drainFollowUpMessages(l.followUpCh, &messages, logger)
+		}
+
 		// ---- LLM call (streaming) ----
-		resp, err := l.streamGenerate(spanCtx, model, messages, toolOpts, es, logger)
+		// Dynamic tool filtering: when the tool count exceeds the threshold,
+		// rebuild tool options with only the tools relevant to the current
+		// query so the LLM context isn't bloated by irrelevant tool schemas.
+		iterOpts := toolOpts
+		if needToolFiltering && searchTool != nil {
+			query := lastUserQuery(messages)
+			if query != "" {
+				filtered, ferr := searchTool.TopTools(spanCtx, query, toolSearchThreshold)
+				if ferr == nil && len(filtered) > 0 {
+					iterOpts = buildToolOpts(filtered, l.thinkingConfig)
+					logger.Info("core.loop.tool_search_filter",
+						"query", query,
+						"filtered_tools", len(filtered),
+						"threshold", toolSearchThreshold,
+					)
+				}
+			}
+		}
+
+		resp, err := l.generateWithContinuation(spanCtx, model, messages, iterOpts, es, logger)
 		if err != nil {
 			span.SetStatus(tracing.SpanStatusError, err.Error())
 			logger.Error("core.loop.generate_error", "iteration", iter, "err", err)
@@ -298,9 +584,12 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 		// Emit the complete assistant message as a non-incremental event for
 		// every LLM response. Downstream consumers (harness result,
 		// lastMessageEvent) depend on it. The TUI skips duplicates when
-		// incremental streaming has already rendered the content.
-		if resp.Content != "" {
-			sendEvent(AgentEvent{Kind: "message", Content: resp.Content, Timestamp: time.Now()})
+		// incremental streaming has already rendered the content. Pure tool
+		// call responses (empty content but non-empty ToolCalls) must also
+		// emit a message event so they enter history and subsequent turns
+		// retain tool call context.
+		if resp.Content != "" || len(resp.ToolCalls) > 0 {
+			sendEvent(AgentEvent{Kind: "message", Content: resp.Content, Timestamp: time.Now(), Usage: resp.Usage, ToolCalls: resp.ToolCalls})
 		}
 
 		if len(resp.ToolCalls) == 0 {
@@ -309,59 +598,134 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 		}
 
 		if l.executionMode == ExecutionModeParallel && len(resp.ToolCalls) > 1 {
-			// Parallel mode: emit all tool_call events, execute concurrently,
-			// then process results in input order.
+			// Parallel mode: emit pre-tool-call events, then execute
+			// non-canceled tools concurrently, matching results by
+			// ToolCallID (not positional index) so that out-of-order
+			// completion does not cause mismatched results.
+			var activeCalls []llm.ToolCall
 			for _, tc := range resp.ToolCalls {
-				sendEvent(AgentEvent{Kind: "tool_call", Content: tc.Name, Timestamp: time.Now()})
+				preEv := &PreToolCallEvent{
+					ToolName:   tc.Name,
+					ToolCallID: tc.ID,
+					Args:       toToolsCall(tc).Args,
+				}
+				sendEvent(AgentEvent{Kind: EventKindPreToolCall, Timestamp: time.Now(), PreToolCall: preEv})
+				if preEv.IsCancelled() {
+					logger.Info("core.loop.tool_canceled", "tool", tc.Name, "id", tc.ID)
+					sendEvent(AgentEvent{Kind: "tool_canceled", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID})
+					messages = append(messages, llm.Message{
+						Role:       llm.RoleTool,
+						ToolCallID: tc.ID,
+						Name:       tc.Name,
+						Content:    "Tool call canceled by interceptor",
+					})
+					continue
+				}
+				activeCalls = append(activeCalls, tc)
+				sendEvent(AgentEvent{Kind: "tool_call", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID})
 				logger.Info("core.loop.tool_call", "iteration", iter, "tool", tc.Name, "mode", "parallel")
 			}
-			results := executeToolsParallel(spanCtx, l.tools, resp.ToolCalls)
-			for _, res := range results {
-				if res.Err != nil {
-					logger.Warn("core.loop.tool_error", "tool", res.Name, "err", res.Err)
-					res.Output = "Error: " + res.Err.Error()
-					if spanCtx.Err() != nil {
-						span.SetStatus(tracing.SpanStatusError, res.Err.Error())
-						sendEvent(errEvent(res.Err))
-						return events, res.Err
-					}
+			if len(activeCalls) > 0 {
+				results, perr := executeToolsParallel(spanCtx, l.tools, activeCalls, es)
+				if perr == nil {
+					results, perr = matchToolResultsByID(activeCalls, results)
 				}
-				sendEvent(AgentEvent{Kind: "tool_result", Content: res.Output, Timestamp: time.Now()})
-				messages = append(messages, llm.Message{
-					Role:       llm.RoleTool,
-					ToolCallID: res.ID,
-					Name:       res.Name,
-					Content:    res.Output,
-				})
+				for _, res := range results {
+					if res.Err != nil {
+						logger.Warn("core.loop.tool_error", "tool", res.Name, "err", res.Err)
+						res.Output = "Error: " + res.Err.Error()
+						if spanCtx.Err() != nil {
+							span.SetStatus(tracing.SpanStatusError, res.Err.Error())
+							emitCanceledToolResults(res.Err)
+							sendEvent(errEvent(res.Err))
+							return events, res.Err
+						}
+					}
+					sendEvent(AgentEvent{Kind: "tool_result", Content: res.Output, Timestamp: time.Now(), IsError: res.IsError, ToolCallID: res.ID})
+					messages = append(messages, llm.Message{
+						Role:       llm.RoleTool,
+						ToolCallID: res.ID,
+						Name:       res.Name,
+						Content:    res.Output,
+					})
+				}
+				if perr != nil {
+					emitCanceledToolResults(perr)
+					return events, perr
+				}
 			}
 		} else {
 			// Sequential mode: execute one tool at a time.
 			for _, tc := range resp.ToolCalls {
 				if err := spanCtx.Err(); err != nil {
 					logger.Error("core.loop.canceled", "err", err)
+					emitCanceledToolResults(err)
 					sendEvent(errEvent(err))
 					return events, err
 				}
-				sendEvent(AgentEvent{Kind: "tool_call", Content: tc.Name, Timestamp: time.Now()})
+
+				// Emit a pre-tool-call event so external interceptors
+				// can cancel the tool call before it executes.
+				preEv := &PreToolCallEvent{
+					ToolName:   tc.Name,
+					ToolCallID: tc.ID,
+					Args:       toToolsCall(tc).Args,
+				}
+				sendEvent(AgentEvent{Kind: EventKindPreToolCall, Timestamp: time.Now(), PreToolCall: preEv})
+				if preEv.IsCancelled() {
+					logger.Info("core.loop.tool_canceled", "tool", tc.Name, "id", tc.ID)
+					sendEvent(AgentEvent{Kind: "tool_canceled", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID})
+					messages = append(messages, llm.Message{
+						Role:       llm.RoleTool,
+						ToolCallID: tc.ID,
+						Name:       tc.Name,
+						Content:    "Tool call canceled by interceptor",
+					})
+					continue
+				}
+
+				sendEvent(AgentEvent{Kind: "tool_call", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID})
 				logger.Info("core.loop.tool_call", "iteration", iter, "tool", tc.Name)
 
-				resultText, execErr := l.executeTool(spanCtx, toToolsCall(tc))
+				resultText, isErr, execErr := l.executeTool(spanCtx, toToolsCall(tc), es)
+				isError := isErr
 				if execErr != nil {
 					logger.Warn("core.loop.tool_error", "tool", tc.Name, "err", execErr)
 					resultText = "Error: " + execErr.Error()
+					isError = true
 					if spanCtx.Err() != nil {
 						span.SetStatus(tracing.SpanStatusError, execErr.Error())
+						emitCanceledToolResults(execErr)
 						sendEvent(errEvent(execErr))
 						return events, execErr
 					}
 				}
-				sendEvent(AgentEvent{Kind: "tool_result", Content: resultText, Timestamp: time.Now()})
+				sendEvent(AgentEvent{Kind: "tool_result", Content: resultText, Timestamp: time.Now(), IsError: isError, ToolCallID: tc.ID})
 				messages = append(messages, llm.Message{
 					Role:       llm.RoleTool,
 					ToolCallID: tc.ID,
 					Name:       tc.Name,
 					Content:    resultText,
 				})
+			}
+		}
+
+		// Mid-turn compaction: if the context has grown beyond the
+		// threshold fraction of the token budget, compact before the
+		// next LLM call to avoid overflowing the context window
+		// mid-turn.
+		if midTurnCompactor != nil && compactor != nil && estimator != nil && maxTokens > 0 {
+			items := messagesToTurnItems(messages)
+			compacted, result, cerr := midTurnCompactor.CompactIfNeeded(spanCtx, items, maxTokens, estimator, compactor)
+			if cerr != nil {
+				logger.Warn("core.loop.midturn_compact_error", "err", cerr)
+			} else if result.Triggered {
+				messages = turnItemsToMessages(compacted)
+				logger.Info("core.loop.midturn_compact",
+					"reason", result.Reason.String(),
+					"messages_before", len(items),
+					"messages_after", len(compacted),
+				)
 			}
 		}
 	}
@@ -373,11 +737,62 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 	return events, errMaxIterations
 }
 
+// messagesToTurnItems converts []llm.Message to []compaction.TurnItem for the
+// mid-turn compaction pipeline. Tool-result messages are mapped to the
+// TurnItem.ToolResult field so compactors (e.g. MicroCompactor) can replace
+// them with placeholders.
+func messagesToTurnItems(msgs []llm.Message) []compaction.TurnItem {
+	items := make([]compaction.TurnItem, len(msgs))
+	for i, m := range msgs {
+		item := compaction.TurnItem{
+			ID:            fmt.Sprintf("msg-%d", i),
+			Role:          string(m.Role),
+			ContentBlocks: m.ContentBlocks,
+			ToolCalls:     m.ToolCalls,
+			ToolCallID:    m.ToolCallID,
+			ToolName:      m.Name,
+		}
+		if m.Role == llm.RoleTool {
+			item.ToolResult = m.Content
+		} else {
+			item.Content = m.Content
+		}
+		items[i] = item
+	}
+	return items
+}
+
+// turnItemsToMessages converts []compaction.TurnItem back to []llm.Message
+// after mid-turn compaction. Compaction summary entries with empty content are
+// replaced with "[compacted]" so the model sees a non-empty placeholder.
+func turnItemsToMessages(items []compaction.TurnItem) []llm.Message {
+	msgs := make([]llm.Message, len(items))
+	for i, it := range items {
+		msg := llm.Message{
+			Role:          llm.Role(it.Role),
+			ContentBlocks: it.ContentBlocks,
+			ToolCalls:     it.ToolCalls,
+			ToolCallID:    it.ToolCallID,
+			Name:          it.ToolName,
+		}
+		if it.Role == compaction.RoleTool {
+			msg.Content = it.ToolResult
+		} else {
+			msg.Content = it.Content
+			if it.IsCompaction && it.Content == "" {
+				msg.Content = "[compacted]"
+			}
+		}
+		msgs[i] = msg
+	}
+	return msgs
+}
+
 // streamGenerate calls the LLM in streaming mode. It consumes chunks from
 // model.Stream() in real time, emitting incremental "message" events via the
 // EventStream so the TUI can render tokens as they arrive. The complete
 // response (with accumulated tool calls) is returned.
-func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel, messages []llm.Message, toolOpts []llm.Option, es EventStream, logger *slog.Logger) (*llm.Message, error) {
+func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel, messages []llm.Message, toolOpts []llm.Option, es EventStream) (*llm.Message, error) {
 	ch, err := model.Stream(ctx, messages, toolOpts...)
 	if err != nil {
 		// Stream failed — propagate the error directly rather than falling
@@ -385,12 +800,20 @@ func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel,
 		// call index a second time and return a different result.
 		return nil, err
 	}
+	if ch == nil {
+		return nil, fmt.Errorf("streamGenerate: nil channel from model")
+	}
 
 	var contentBuf strings.Builder
 	var toolCalls []llm.ToolCall
+	var finishReason string
+	var usage *llm.Usage
 	gotChunk := false
 
 	for chunk := range ch {
+		if chunk.Error != nil {
+			return nil, chunk.Error
+		}
 		gotChunk = true
 		if chunk.Content != "" {
 			contentBuf.WriteString(chunk.Content)
@@ -411,6 +834,14 @@ func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel,
 			if len(chunk.ToolCalls) > 0 {
 				toolCalls = chunk.ToolCalls
 			}
+			if chunk.FinishReason != "" {
+				finishReason = chunk.FinishReason
+			}
+		}
+		// Track the last non-nil Usage so it propagates to the returned
+		// Message. Providers set Usage on the Final chunk.
+		if chunk.Usage != nil {
+			usage = chunk.Usage
 		}
 	}
 
@@ -421,29 +852,180 @@ func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel,
 	}
 
 	return &llm.Message{
-		Role:      llm.RoleAssistant,
-		Content:   contentBuf.String(),
-		ToolCalls: toolCalls,
+		Role:         llm.RoleAssistant,
+		Content:      contentBuf.String(),
+		ToolCalls:    toolCalls,
+		FinishReason: finishReason,
+		Usage:        usage,
 	}, nil
 }
 
+// generateWithContinuation wraps streamGenerate with automatic truncation
+// detection and continuation. When the model's finish_reason is "length"
+// (output cut off by max_tokens), the partial assistant response is appended
+// to the conversation and the model is asked to continue. The continuation
+// content is merged into the original response. Tool calls from a truncated
+// response are partial (JSON args cut off) and are dropped before execution;
+// only tool calls from a non-truncated (finish_reason != "length") response
+// are kept. At most maxContinuationAttempts retries are issued; if the output
+// is still truncated after that, a warning is logged, any remaining partial
+// tool calls are dropped, and the accumulated content is returned.
+func (l *LoopAgent) generateWithContinuation(ctx context.Context, model llm.BaseChatModel, messages []llm.Message, toolOpts []llm.Option, es EventStream, logger *slog.Logger) (*llm.Message, error) {
+	resp, err := l.streamGenerate(ctx, model, messages, toolOpts, es)
+	if err != nil || resp == nil {
+		return resp, err
+	}
+
+	// Lazily create a continuation span only when the response is truncated.
+	// The span is a child of the loop.run span (ctx carries it). When tracing
+	// is disabled, SpanFromContext returns a noop span with zero overhead.
+	var contSpan tracing.TraceSpan
+	var droppedCount int
+	var attemptCount int
+	if resp.FinishReason == "length" {
+		contSpan, _ = tracing.SpanFromContext(ctx, "loop.continuation", tracing.SpanKindInternal)
+	}
+	defer func() {
+		if contSpan == nil {
+			return
+		}
+		contSpan.SetAttributes(
+			tracing.Attribute{Key: "attempts", Value: attemptCount},
+			tracing.Attribute{Key: "partial_tool_calls_dropped", Value: droppedCount},
+			tracing.Attribute{Key: "finish_reason", Value: resp.FinishReason},
+		)
+		if resp.FinishReason == "length" {
+			contSpan.SetStatus(tracing.SpanStatusError,
+				"max continuation attempts exceeded with truncated output")
+		}
+		contSpan.End()
+	}()
+
+	for attempt := 0; attempt < maxContinuationAttempts && resp.FinishReason == "length"; attempt++ {
+		attemptCount = attempt + 1
+
+		// When the response is truncated by max_tokens, any tool calls in it
+		// are partial (JSON args cut off, fields missing) and must not be
+		// executed. Drop them before building the continuation request.
+		if resp.FinishReason == "length" && len(resp.ToolCalls) > 0 {
+			logger.Warn("partial_tool_calls_dropped", "count", len(resp.ToolCalls))
+			if contSpan != nil {
+				contSpan.AddEvent("partial_tool_calls_dropped",
+					tracing.Attribute{Key: "count", Value: len(resp.ToolCalls)})
+			}
+			droppedCount += len(resp.ToolCalls)
+			resp.ToolCalls = nil
+		}
+
+		// Build a continuation conversation: the original messages plus the
+		// partial assistant response so the model picks up where it left off.
+		contMsgs := make([]llm.Message, len(messages), len(messages)+1)
+		copy(contMsgs, messages)
+		contMsgs = append(contMsgs, llm.Message{
+			Role:         llm.RoleAssistant,
+			Content:      resp.Content,
+			ToolCalls:    resp.ToolCalls,
+			FinishReason: resp.FinishReason,
+		})
+
+		logger.Info("core.loop.continuation", "attempt", attempt+1)
+
+		contResp, contErr := l.streamGenerate(ctx, model, contMsgs, toolOpts, es)
+		if contErr != nil || contResp == nil {
+			break
+		}
+
+		// Merge the continuation into the original response. Content is
+		// concatenated; tool calls are replaced (not appended) because any
+		// previous tool calls were partial and have been dropped.
+		resp.Content += contResp.Content
+		resp.FinishReason = contResp.FinishReason
+		resp.ToolCalls = contResp.ToolCalls
+		if contResp.Usage != nil {
+			if resp.Usage == nil {
+				resp.Usage = contResp.Usage
+			} else {
+				resp.Usage.InputTokens += contResp.Usage.InputTokens
+				resp.Usage.OutputTokens += contResp.Usage.OutputTokens
+				resp.Usage.TotalTokens += contResp.Usage.TotalTokens
+			}
+		}
+	}
+
+	// If the output is still truncated after exhausting all continuation
+	// attempts, drop any remaining partial tool calls so they are not
+	// executed, and log a warning.
+	if resp.FinishReason == "length" {
+		if len(resp.ToolCalls) > 0 {
+			logger.Warn("partial_tool_calls_dropped", "count", len(resp.ToolCalls))
+			if contSpan != nil {
+				contSpan.AddEvent("partial_tool_calls_dropped",
+					tracing.Attribute{Key: "count", Value: len(resp.ToolCalls)})
+			}
+			droppedCount += len(resp.ToolCalls)
+			resp.ToolCalls = nil
+		}
+		slog.WarnContext(ctx, "core.loop.truncation_max_attempts",
+			"max_attempts", maxContinuationAttempts)
+	}
+
+	return resp, nil
+}
+
+// eventStreamSink adapts a core.EventStream to satisfy tools.StreamSink.
+// It bridges streaming tool output (stdout/stderr lines) into the same
+// EventStream the loop uses for all other agent events. Each Send produces a
+// "tool_output" AgentEvent carrying the ToolCallID and Stream ("stdout"/
+// "stderr") so consumers can associate the line with its originating call.
+type eventStreamSink struct {
+	es EventStream
+}
+
+// Send wraps content as a "tool_output" AgentEvent and forwards it to the
+// underlying EventStream.
+func (s *eventStreamSink) Send(content, toolCallID, stream string) error {
+	return s.es.Send(AgentEvent{
+		Kind:       "tool_output",
+		Content:    content,
+		Timestamp:  time.Now(),
+		ToolCallID: toolCallID,
+		Stream:     stream,
+	})
+}
+
 // executeTool looks up the tool and runs its definition against the registry.
-func (l *LoopAgent) executeTool(ctx context.Context, call tools.ToolCall) (string, error) {
+// When the tool implements tools.StreamingBashTool and an EventStream is
+// provided, it uses ExecuteStreaming to push output lines in real time. The
+// returned isError flag is propagated from ToolResult.IsError so callers can
+// detect tool errors via a structured marker instead of string matching.
+func (l *LoopAgent) executeTool(ctx context.Context, call tools.ToolCall, es EventStream) (string, bool, error) {
 	if l.tools == nil {
-		return "", errors.New("core: agent loop has no tool registry")
+		return "", false, errors.New("core: agent loop has no tool registry")
 	}
 	def, err := l.tools.Get(ctx, call.Name)
 	if err != nil {
-		return "", err
+		return "", false, err
+	}
+	// Check if the tool supports streaming output.
+	if st, ok := def.(tools.StreamingBashTool); ok && es != nil {
+		sink := &eventStreamSink{es: es}
+		result, err := st.ExecuteStreaming(ctx, call, sink)
+		if err != nil {
+			return "", false, err
+		}
+		if result == nil {
+			return "", false, nil
+		}
+		return result.Output, result.IsError, nil
 	}
 	result, err := def.Execute(ctx, call)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if result == nil {
-		return "", nil
+		return "", false, nil
 	}
-	return result.Output, nil
+	return result.Output, result.IsError, nil
 }
 
 // toToolsCall converts an llm.ToolCall (Args is `any`) into a tools.ToolCall
@@ -477,10 +1059,65 @@ func drainSteerMessages(ch chan string, msgs *[]llm.Message, logger *slog.Logger
 	}
 }
 
-// systemPrompt returns the system instruction that tells the model its role
-// and encourages it to use tools when appropriate. When the tool registry is
-// nil or empty, a minimal prompt is returned.
-func systemPrompt(tr tools.ToolRegistry) string {
+// drainFollowUpMessages non-blockingly drains all pending follow-up messages
+// from ch and appends each as a user message to *msgs. This mirrors
+// drainSteerMessages but is called after it so the model sees steering
+// context first, then the follow-up.
+func drainFollowUpMessages(ch chan string, msgs *[]llm.Message, logger *slog.Logger) {
+	for {
+		select {
+		case content := <-ch:
+			*msgs = append(*msgs, llm.Message{Role: llm.RoleUser, Content: content})
+			logger.Info("core.loop.followup_injected", "content_len", len(content))
+		default:
+			return
+		}
+	}
+}
+
+// lastUserQuery returns the content of the last user message in msgs, or ""
+// when there is none.
+func lastUserQuery(msgs []llm.Message) string {
+	for i := len(msgs) - 1; i >= 0; i-- {
+		if msgs[i].Role == llm.RoleUser {
+			return msgs[i].Content
+		}
+	}
+	return ""
+}
+
+// defsToLLMTools converts tool definitions to LLM tool definitions.
+func defsToLLMTools(defs []tools.ToolDefinition) []llm.ToolDefinition {
+	llmTools := make([]llm.ToolDefinition, 0, len(defs))
+	for _, d := range defs {
+		td := llm.ToolDefinition{
+			Name:        d.Name(),
+			Description: d.Description(),
+		}
+		if p, ok := d.(tools.Parameterized); ok {
+			td.Parameters = p.Parameters()
+		}
+		llmTools = append(llmTools, td)
+	}
+	return llmTools
+}
+
+// buildToolOpts builds LLM generation options from tool definitions and an
+// optional thinking config. Used to rebuild tool options per-iteration when
+// dynamic tool filtering is active.
+func buildToolOpts(defs []tools.ToolDefinition, thinkingCfg *llm.ThinkingConfig) []llm.Option {
+	opts := []llm.Option{llm.WithTools(defsToLLMTools(defs))}
+	if thinkingCfg != nil {
+		opts = append(opts, llm.WithThinking(*thinkingCfg))
+	}
+	return opts
+}
+
+// systemPromptFromDefs returns the system instruction that tells the model
+// its role and encourages it to use tools when appropriate, using pre-fetched
+// tool definitions so no additional List call is needed. When defs is empty,
+// a minimal prompt is returned.
+func systemPromptFromDefs(defs []tools.ToolDefinition) string {
 	base := `You are a helpful AI assistant embedded in a developer CLI. When the user asks you to perform an action, you MUST use the available tools to accomplish it and persist until the task is fully complete.
 
 Rules:
@@ -489,11 +1126,7 @@ Rules:
 3. Keep iterating (call tools, observe results, adjust) until the user's request is fully satisfied. Only produce a final text answer with NO tool calls when the task is genuinely complete.
 4. Do not guess or fabricate information when a tool can provide the answer.
 5. If a skill tool is available and relevant, call it first to obtain expert instructions, then follow those instructions using other tools.`
-	if tr == nil {
-		return base
-	}
-	defs, err := tr.List(context.Background())
-	if err != nil || len(defs) == 0 {
+	if len(defs) == 0 {
 		return base
 	}
 	names := make([]string, 0, len(defs))
@@ -501,4 +1134,20 @@ Rules:
 		names = append(names, d.Name())
 	}
 	return base + "\n\nYou have access to these tools: " + strings.Join(names, ", ") + "."
+}
+
+// systemPrompt returns the system instruction that tells the model its role
+// and encourages it to use tools when appropriate. When the tool registry is
+// nil or empty, a minimal prompt is returned.
+//
+//nolint:unused
+func systemPrompt(ctx context.Context, tr tools.ToolRegistry) string {
+	if tr == nil {
+		return systemPromptFromDefs(nil)
+	}
+	defs, err := tr.List(ctx)
+	if err != nil {
+		return systemPromptFromDefs(nil)
+	}
+	return systemPromptFromDefs(defs)
 }

@@ -42,6 +42,14 @@ func WithOverwrite(b bool) WriteToolOption {
 	return func(t *WriteTool) { t.Overwrite = b }
 }
 
+// WithWritePathWhitelist sets the allowed base paths for write operations.
+// When configured, both the resolved real path (after symlink resolution) and
+// the target file itself (via Lstat) are validated against the whitelist.
+// An empty slice allows all paths (no restriction).
+func WithWritePathWhitelist(paths []string) WriteToolOption {
+	return func(t *WriteTool) { t.whitelist = NewPathWhitelist(paths) }
+}
+
 // WithDiffGenerator sets the DiffGenerator used to produce a change preview
 // before overwriting an existing file. When nil (the default) no diff is
 // generated.
@@ -55,6 +63,81 @@ func WithFileTracker(ft *FileTracker) WriteToolOption {
 	return func(t *WriteTool) { t.fileTracker = ft }
 }
 
+// resolveWithinWorkdir resolves a relative path against the workdir and
+// prevents path traversal. When the path is relative and a workdir is set,
+// the resolved path must remain within the workdir. Absolute paths are used
+// as-is.
+func resolveWithinWorkdir(toolName, workdir, path string) (string, error) {
+	abspath := path
+	if !filepath.IsAbs(abspath) && workdir != "" {
+		abspath = filepath.Join(workdir, abspath)
+	}
+	abspath = filepath.Clean(abspath)
+
+	// Prevent path traversal: when the path is relative and a workdir is
+	// set, verify the resolved path stays within the workdir.
+	if workdir != "" && !filepath.IsAbs(path) {
+		workdirAbs, err := filepath.Abs(filepath.Clean(workdir))
+		if err == nil {
+			pathAbs, err := filepath.Abs(abspath)
+			if err == nil && pathAbs != workdirAbs &&
+				!strings.HasPrefix(pathAbs, workdirAbs+string(filepath.Separator)) {
+				return abspath, fmt.Errorf("%s: path %q escapes workdir", toolName, path)
+			}
+		}
+	}
+
+	return abspath, nil
+}
+
+// resolveAndValidatePath resolves the target path against the workdir and
+// enforces the same path whitelist and symlink checks that the bash sandbox
+// applies. It performs three layers of defense:
+//
+//  1. resolveWithinWorkdir: relative path traversal prevention.
+//  2. O_NOFOLLOW: always enabled. If the final path component exists and is a
+//     symlink (checked via Lstat), the operation is rejected. This prevents
+//     writing through symlinks regardless of whether a whitelist is set.
+//  3. Symlink escape: when a whitelist is configured, the path is resolved
+//     with resolveSymlinks (which follows symlinks in any component) and the
+//     real path must fall within one of the whitelisted base directories.
+//     When no whitelist is configured this check is skipped (backward-
+//     compatible with callers that have not configured a whitelist), but the
+//     O_NOFOLLOW check above still applies.
+func resolveAndValidatePath(toolName, workdir, path string, whitelist PathWhitelist) (string, error) {
+	abspath, err := resolveWithinWorkdir(toolName, workdir, path)
+	if err != nil {
+		return abspath, err
+	}
+
+	// O_NOFOLLOW semantics: always reject if the final path component is a
+	// symlink. Lstat does not follow symlinks, so a symlink at abspath is
+	// detected and rejected regardless of where it points or whether a
+	// whitelist is configured. This default-enabled defense guards against
+	// symlink attacks even when no whitelist is set.
+	if li, lerr := os.Lstat(abspath); lerr == nil {
+		if li.Mode()&os.ModeSymlink != 0 {
+			return abspath, fmt.Errorf("%s: path %q is a symlink (O_NOFOLLOW)", toolName, path)
+		}
+	}
+
+	// When a whitelist is configured, resolve all symlinks in the path and
+	// verify the real path stays within an allowed base. This catches
+	// symlinks in intermediate directories that escape the whitelist. When
+	// no whitelist is configured this check is skipped, but the O_NOFOLLOW
+	// check above still applies.
+	if len(whitelist.paths) == 0 {
+		return abspath, nil
+	}
+
+	realPath := resolveSymlinks(abspath)
+	if !whitelist.IsAllowed(realPath) {
+		return abspath, fmt.Errorf("%s: path %q escapes the path whitelist", toolName, path)
+	}
+
+	return abspath, nil
+}
+
 // WriteTool writes content to files, creating parent directories as needed.
 // It implements the ToolDefinition interface.
 type WriteTool struct {
@@ -64,6 +147,9 @@ type WriteTool struct {
 	MaxBytes int
 	// Overwrite controls whether an existing file may be replaced.
 	Overwrite bool
+	// whitelist, when configured, restricts writes to paths within the
+	// allowed base directories. Symlink escape is detected and rejected.
+	whitelist PathWhitelist
 	// diffGenerator, when set, produces a diff preview for overwrites of
 	// existing files. It is included in the ToolResult metadata under "diff".
 	diffGenerator DiffGenerator
@@ -116,11 +202,12 @@ func (t *WriteTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, er
 		content = v
 	}
 
-	abspath := path
-	if !filepath.IsAbs(abspath) && t.Workdir != "" {
-		abspath = filepath.Join(t.Workdir, abspath)
+	abspath, err := resolveAndValidatePath("write", t.Workdir, path, t.whitelist)
+	if err != nil {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		logger.Error("write.path_traversal", "path", path, "err", err)
+		return nil, err
 	}
-	abspath = filepath.Clean(abspath)
 
 	if len(content) > t.MaxBytes {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
@@ -171,7 +258,7 @@ func (t *WriteTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, er
 			if appendMode {
 				newFull = string(oldBytes) + content
 			}
-			if d, derr := t.diffGenerator.Generate(string(oldBytes), newFull, path); derr == nil {
+			if d, derr := t.diffGenerator.Generate(ctx, string(oldBytes), newFull, path); derr == nil {
 				diffPreview = d
 			}
 		}

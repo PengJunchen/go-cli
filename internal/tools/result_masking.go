@@ -1,19 +1,43 @@
 package tools
 
 import (
+	"context"
 	"log/slog"
 	"regexp"
 	"sync"
 )
 
-// DefaultMaskPatterns are regex patterns for common sensitive data. They match
-// API keys, GitHub tokens, password fields in JSON, and credit card numbers.
-var DefaultMaskPatterns = []string{
-	`(sk-[a-zA-Z0-9]{20,})`,                        // API keys
-	`(ghp_[a-zA-Z0-9]{36,})`,                       // GitHub tokens
+// DefaultAPIKeyPatterns returns regex patterns that match common API key and
+// secret token formats. This is the single source of truth for API key
+// patterns used by both the tools package (via DefaultMaskPatterns) and the
+// production package (via production.DefaultAPIKeyPatterns which delegates
+// here).
+func DefaultAPIKeyPatterns() []string {
+	return []string{
+		`sk-ant-[a-zA-Z0-9_-]{20,}`,
+		`sk-proj-[a-zA-Z0-9_-]{20,}`,
+		`sk-[a-zA-Z0-9]{20,}`,
+		`AIza[a-zA-Z0-9_-]{35}`,
+		`Bearer\s+[a-zA-Z0-9_.-]{20,}`,
+		`AKIA[0-9A-Z]{16}`,
+		`(?i)aws_secret_access_key\s*[=:]\s*[A-Za-z0-9/+=]{40}`,
+		`gh[pousr]_[a-zA-Z0-9]{36,}`,
+		`glpat-[a-zA-Z0-9_-]{20,}`,
+		`xox[baprs]-[a-zA-Z0-9-]{10,}`,
+	}
+}
+
+// extraMaskPatterns are additional sensitive-data patterns beyond API keys:
+// password fields in JSON and credit card numbers.
+var extraMaskPatterns = []string{
 	`("[^"]*password[^"]*"\s*:\s*")[^"]*(")`,       // Password fields
 	`(\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b)`, // Credit card numbers
 }
+
+// DefaultMaskPatterns are regex patterns for common sensitive data. They are
+// built from DefaultAPIKeyPatterns (the single source of truth for API key
+// formats) plus extraMaskPatterns (password fields, credit card numbers).
+var DefaultMaskPatterns = append(DefaultAPIKeyPatterns(), extraMaskPatterns...)
 
 // defaultMask is the replacement text used when no explicit mask is set.
 const defaultMask = "[REDACTED]"
@@ -90,4 +114,19 @@ func (m *ResultMasker) SetMask(mask string) {
 		mask = defaultMask
 	}
 	m.mask = mask
+}
+
+// NewResultMaskingWrapper returns a ToolExecutorWrapper that masks sensitive
+// data in tool result output using the given ResultMasker. When the masker is
+// nil or the tool returns an error, the result is passed through unchanged.
+func NewResultMaskingWrapper(masker *ResultMasker) ToolExecutorWrapper {
+	return func(next func(ctx context.Context, call ToolCall) (*ToolResult, error)) func(ctx context.Context, call ToolCall) (*ToolResult, error) {
+		return func(ctx context.Context, call ToolCall) (*ToolResult, error) {
+			result, err := next(ctx, call)
+			if err == nil && result != nil && masker != nil {
+				result.Output = masker.Mask(result.Output)
+			}
+			return result, err
+		}
+	}
 }

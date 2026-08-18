@@ -58,6 +58,8 @@ func (c *testMCPClient) CallTool(_ context.Context, _ string, _ map[string]any) 
 
 func (c *testMCPClient) Name() string { return c.name }
 
+func (c *testMCPClient) ProtocolVersion() string { return mcp.LatestProtocolVersion }
+
 var _ mcp.MCPClient = (*testMCPClient)(nil)
 
 // alwaysFailRegistry is a tools.ToolRegistry whose Register always errors.
@@ -105,168 +107,12 @@ func writeSkillFile(t *testing.T, dir, name, content string) {
 }
 
 // ---------------------------------------------------------------------------
-// RegisterMCPToolsFromClients tests
-// ---------------------------------------------------------------------------
-
-func TestRegisterMCPToolsFromClients_Success(t *testing.T) {
-	ctx := t.Context()
-	tr := tools.NewDefaultToolRegistry()
-	client := &testMCPClient{
-		name: "test-server",
-		tools: []mcp.MCPTool{
-			{Name: "tool1", Description: "First tool"},
-			{Name: "tool2", Description: "Second tool"},
-		},
-	}
-
-	err := RegisterMCPToolsFromClients(ctx, []mcp.MCPClient{client}, tr)
-	require.NoError(t, err)
-	assert.True(t, client.connected)
-
-	tool1, err := tr.Get(ctx, mcp.NormalizeToolName("test-server", "tool1"))
-	require.NoError(t, err)
-	assert.NotNil(t, tool1)
-
-	tool2, err := tr.Get(ctx, mcp.NormalizeToolName("test-server", "tool2"))
-	require.NoError(t, err)
-	assert.NotNil(t, tool2)
-}
-
-func TestRegisterMCPToolsFromClients_ConnectFailure(t *testing.T) {
-	ctx := t.Context()
-	tr := tools.NewDefaultToolRegistry()
-	client := &testMCPClient{
-		name:       "failing-server",
-		connectErr: fmt.Errorf("connection refused"),
-		tools:      []mcp.MCPTool{{Name: "tool1"}},
-	}
-
-	err := RegisterMCPToolsFromClients(ctx, []mcp.MCPClient{client}, tr)
-	require.NoError(t, err) // Connect failures are logged, not propagated.
-	assert.False(t, client.connected)
-
-	registered, err := tr.List(ctx)
-	require.NoError(t, err)
-	assert.Empty(t, registered)
-}
-
-func TestRegisterMCPToolsFromClients_ListToolsFailure(t *testing.T) {
-	ctx := t.Context()
-	tr := tools.NewDefaultToolRegistry()
-	client := &testMCPClient{
-		name:    "list-fail-server",
-		listErr: fmt.Errorf("list tools failed"),
-	}
-
-	err := RegisterMCPToolsFromClients(ctx, []mcp.MCPClient{client}, tr)
-	require.NoError(t, err)
-	assert.True(t, client.connected)
-
-	registered, err := tr.List(ctx)
-	require.NoError(t, err)
-	assert.Empty(t, registered)
-}
-
-func TestRegisterMCPToolsFromClients_EmptyClients(t *testing.T) {
-	ctx := t.Context()
-	tr := tools.NewDefaultToolRegistry()
-
-	err := RegisterMCPToolsFromClients(ctx, nil, tr)
-	require.NoError(t, err)
-
-	err = RegisterMCPToolsFromClients(ctx, []mcp.MCPClient{}, tr)
-	require.NoError(t, err)
-}
-
-func TestRegisterMCPToolsFromClients_RegisterFailure(t *testing.T) {
-	ctx := t.Context()
-	tr := alwaysFailRegistry{}
-	client := &testMCPClient{
-		name: "reg-fail-server",
-		tools: []mcp.MCPTool{
-			{Name: "tool1", Description: "First tool"},
-			{Name: "tool2", Description: "Second tool"},
-		},
-	}
-
-	err := RegisterMCPToolsFromClients(ctx, []mcp.MCPClient{client}, tr)
-	require.NoError(t, err) // Registration failures are logged, not propagated.
-	assert.True(t, client.connected)
-}
-
-// ---------------------------------------------------------------------------
-// RegisterSkillToolsFromDir tests
-// ---------------------------------------------------------------------------
-
-func TestRegisterSkillToolsFromDir_ValidDir(t *testing.T) {
-	ctx := t.Context()
-	dir := t.TempDir()
-
-	skill1 := `---
-name: test-skill
-description: A test skill
-version: "1.0"
-category: test
-prompt: Do something useful
----
-This is the skill body.
-`
-	skill2 := `---
-name: another-skill
-description: Another test skill
-version: "2.0"
-category: test
-prompt: Do another thing
----
-Another body.
-`
-	writeSkillFile(t, dir, "test-skill.md", skill1)
-	writeSkillFile(t, dir, "another-skill.yaml", skill2)
-
-	tr := tools.NewDefaultToolRegistry()
-	err := RegisterSkillToolsFromDir(ctx, dir, tr)
-	require.NoError(t, err)
-
-	tool, err := tr.Get(ctx, "test-skill")
-	require.NoError(t, err)
-	assert.NotNil(t, tool)
-	assert.Equal(t, "test-skill", tool.Name())
-
-	tool2, err := tr.Get(ctx, "another-skill")
-	require.NoError(t, err)
-	assert.NotNil(t, tool2)
-	assert.Equal(t, "another-skill", tool2.Name())
-}
-
-func TestRegisterSkillToolsFromDir_InvalidDir(t *testing.T) {
-	ctx := t.Context()
-	tr := tools.NewDefaultToolRegistry()
-
-	err := RegisterSkillToolsFromDir(ctx, "/nonexistent/directory/path", tr)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "nonexistent")
-}
-
-func TestRegisterSkillToolsFromDir_EmptyDir(t *testing.T) {
-	ctx := t.Context()
-	dir := t.TempDir()
-	tr := tools.NewDefaultToolRegistry()
-
-	err := RegisterSkillToolsFromDir(ctx, dir, tr)
-	require.NoError(t, err)
-
-	registered, err := tr.List(ctx)
-	require.NoError(t, err)
-	assert.Empty(t, registered)
-}
-
-// ---------------------------------------------------------------------------
 // interactiveCmd.registerMCPTools tests
 // ---------------------------------------------------------------------------
 
 func TestInteractiveCmd_RegisterMCPTools_NilConfig(t *testing.T) {
 	ctx := t.Context()
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 
 	err := registerMCPTools(ctx, nil, tr)
 	require.NoError(t, err)
@@ -274,7 +120,7 @@ func TestInteractiveCmd_RegisterMCPTools_NilConfig(t *testing.T) {
 
 func TestInteractiveCmd_RegisterMCPTools_EmptyServers(t *testing.T) {
 	ctx := t.Context()
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 	rc := &config.Config{}
 
 	err := registerMCPTools(ctx, rc, tr)
@@ -283,7 +129,7 @@ func TestInteractiveCmd_RegisterMCPTools_EmptyServers(t *testing.T) {
 
 func TestInteractiveCmd_RegisterMCPTools_StdioServer(t *testing.T) {
 	ctx := t.Context()
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 	rc := &config.Config{
 		MCP: config.MCPConfig{
 			Servers: []config.MCPServerConfig{
@@ -307,7 +153,7 @@ func TestInteractiveCmd_RegisterMCPTools_StdioServer(t *testing.T) {
 
 func TestInteractiveCmd_RegisterMCPTools_SSEServer(t *testing.T) {
 	ctx := t.Context()
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodPost {
 			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"sse-tool","description":"An SSE tool"}]}}`)) //nolint:errcheck
@@ -317,7 +163,7 @@ func TestInteractiveCmd_RegisterMCPTools_SSEServer(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 	rc := &config.Config{
 		MCP: config.MCPConfig{
 			Servers: []config.MCPServerConfig{
@@ -337,7 +183,7 @@ func TestInteractiveCmd_RegisterMCPTools_SSEServer(t *testing.T) {
 
 func TestInteractiveCmd_RegisterMCPTools_NoTransport(t *testing.T) {
 	ctx := t.Context()
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 	rc := &config.Config{
 		MCP: config.MCPConfig{
 			Servers: []config.MCPServerConfig{
@@ -360,7 +206,7 @@ func TestInteractiveCmd_RegisterMCPTools_NoTransport(t *testing.T) {
 
 func TestInteractiveCmd_RegisterSkillTools_NilConfig(t *testing.T) {
 	ctx := t.Context()
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 
 	infos := registerSkillTools(ctx, nil, tr)
 	assert.Empty(t, infos)
@@ -368,7 +214,7 @@ func TestInteractiveCmd_RegisterSkillTools_NilConfig(t *testing.T) {
 
 func TestInteractiveCmd_RegisterSkillTools_EmptyDir(t *testing.T) {
 	ctx := t.Context()
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 	rc := &config.Config{}
 
 	infos := registerSkillTools(ctx, rc, tr)
@@ -377,7 +223,7 @@ func TestInteractiveCmd_RegisterSkillTools_EmptyDir(t *testing.T) {
 
 func TestInteractiveCmd_RegisterSkillTools_LoadError(t *testing.T) {
 	ctx := t.Context()
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 	rc := &config.Config{
 		Skill: config.SkillConfig{
 			Dir: "/nonexistent/directory/path",
@@ -407,7 +253,7 @@ Skill body text.
 `
 	writeSkillFile(t, dir, "registered-skill.md", skillContent)
 
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 	rc := &config.Config{
 		Skill: config.SkillConfig{Dir: dir},
 	}
@@ -442,7 +288,7 @@ func TestPromptCmd_BuildModel_WithConfig(t *testing.T) {
 		},
 	}
 
-	model, cleanup, err := buildModel(t.Context(), rc, "test", "test-model")
+	model, _, cleanup, err := buildModel(t.Context(), rc, "test", "test-model")
 	require.NoError(t, err)
 	assert.NotNil(t, model)
 	require.NotNil(t, cleanup)
@@ -451,7 +297,7 @@ func TestPromptCmd_BuildModel_WithConfig(t *testing.T) {
 
 func TestPromptCmd_BuildModel_WithNilConfig(t *testing.T) {
 	t.Run("default provider succeeds", func(t *testing.T) {
-		model, cleanup, err := buildModel(t.Context(), nil, "eino", "test-model")
+		model, _, cleanup, err := buildModel(t.Context(), nil, "eino", "test-model")
 		require.NoError(t, err)
 		assert.NotNil(t, model)
 		require.NotNil(t, cleanup)
@@ -459,7 +305,7 @@ func TestPromptCmd_BuildModel_WithNilConfig(t *testing.T) {
 	})
 
 	t.Run("nonexistent provider fails", func(t *testing.T) {
-		model, _, err := buildModel(t.Context(), nil, "nonexistent-provider", "test-model")
+		model, _, _, err := buildModel(t.Context(), nil, "nonexistent-provider", "test-model")
 		require.Error(t, err)
 		assert.Nil(t, model)
 	})
@@ -480,7 +326,7 @@ func TestInteractiveCmd_BuildModel_WithConfig(t *testing.T) {
 		},
 	}
 
-	model, cleanup, err := buildModel(t.Context(), rc, "test", "test-model")
+	model, _, cleanup, err := buildModel(t.Context(), rc, "test", "test-model")
 	require.NoError(t, err)
 	assert.NotNil(t, model)
 	require.NotNil(t, cleanup)
@@ -489,7 +335,7 @@ func TestInteractiveCmd_BuildModel_WithConfig(t *testing.T) {
 
 func TestInteractiveCmd_BuildModel_WithNilConfig(t *testing.T) {
 	t.Run("default provider succeeds", func(t *testing.T) {
-		model, cleanup, err := buildModel(t.Context(), nil, "eino", "test-model")
+		model, _, cleanup, err := buildModel(t.Context(), nil, "eino", "test-model")
 		require.NoError(t, err)
 		assert.NotNil(t, model)
 		require.NotNil(t, cleanup)
@@ -497,7 +343,7 @@ func TestInteractiveCmd_BuildModel_WithNilConfig(t *testing.T) {
 	})
 
 	t.Run("nonexistent provider fails", func(t *testing.T) {
-		model, _, err := buildModel(t.Context(), nil, "nonexistent-provider", "test-model")
+		model, _, _, err := buildModel(t.Context(), nil, "nonexistent-provider", "test-model")
 		require.Error(t, err)
 		assert.Nil(t, model)
 	})

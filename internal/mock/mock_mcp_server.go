@@ -167,6 +167,12 @@ func (s *MockMCPServerImpl) CallTool(_ context.Context, name string, args map[st
 	return &mcp.MCPToolResult{Content: result}, nil
 }
 
+// ProtocolVersion implements mcp.MCPClient by returning the latest supported
+// protocol version. The mock does not perform a real handshake.
+func (s *MockMCPServerImpl) ProtocolVersion() string {
+	return mcp.LatestProtocolVersion
+}
+
 // CallLog returns a copy of all recorded invocations.
 func (s *MockMCPServerImpl) CallLog() []MCPCallRecord {
 	s.mu.Lock()

@@ -80,6 +80,37 @@ type GitBlameLine struct {
 	Content string
 }
 
+// MergeResult describes the outcome of a git merge operation.
+type MergeResult struct {
+	// Success reports whether the merge completed without conflicts.
+	Success bool
+	// Conflicts lists the files with merge conflicts (when Success is false).
+	Conflicts []string
+	// Message is a human-readable summary of the merge result.
+	Message string
+}
+
+// RemoteInfo describes a single remote repository entry from git remote -v.
+type RemoteInfo struct {
+	// Name is the remote name (e.g. "origin").
+	Name string
+	// URL is the fetch/push URL.
+	URL string
+	// Type is "fetch" or "push".
+	Type string
+}
+
+// WorktreeInfo describes a single git worktree entry from `git worktree list`.
+type WorktreeInfo struct {
+	// Path is the absolute filesystem path of the worktree.
+	Path string
+	// Head is the commit hash the worktree is at.
+	Head string
+	// Branch is the refs/heads/... name when the worktree is on a branch,
+	// empty for detached HEAD.
+	Branch string
+}
+
 // GitTool wraps git command execution with zero dependencies (exec.Command).
 // Implementations run git against a fixed working directory and return parsed
 // results.
@@ -101,6 +132,36 @@ type GitTool interface {
 	Blame(ctx context.Context, file string, startLine, endLine int) ([]GitBlameLine, error)
 	// Push pushes the named branch to the named remote, optionally forcing.
 	Push(ctx context.Context, remote string, branch string, force bool) error
+	// CreateBranch creates a new branch named name from the given base commit
+	// or branch. When base is empty, the current HEAD is used.
+	CreateBranch(ctx context.Context, name string, base string) error
+	// Merge merges the named branch into the current branch. It returns a
+	// MergeResult describing whether conflicts occurred.
+	Merge(ctx context.Context, branch string) (*MergeResult, error)
+	// Stash saves uncommitted changes via git stash.
+	Stash(ctx context.Context) error
+	// StashPop restores the most recently stashed changes via git stash pop.
+	StashPop(ctx context.Context) error
+	// Reset performs git reset with the given mode (e.g. "hard", "soft",
+	// "mixed"). This is a destructive operation.
+	Reset(ctx context.Context, mode string) error
+	// Revert creates a new commit that undoes the given commit.
+	Revert(ctx context.Context, commit string) error
+	// Fetch downloads objects and refs from the named remote.
+	Fetch(ctx context.Context, remote string) error
+	// Pull fetches from and integrate with the named remote and branch.
+	Pull(ctx context.Context, remote string, branch string) error
+	// Remote lists the configured remote repositories.
+	Remote(ctx context.Context) ([]RemoteInfo, error)
+	// WorktreeAdd creates a new worktree at the given path. When branch is
+	// non-empty, a new branch named branch is created for the worktree;
+	// otherwise a detached worktree at HEAD is created.
+	WorktreeAdd(ctx context.Context, path string, branch string) error
+	// WorktreeList lists all worktrees of the repository.
+	WorktreeList(ctx context.Context) ([]WorktreeInfo, error)
+	// WorktreeRemove removes the worktree at the given path. The --force flag
+	// is used so that worktrees with untracked files are also removed.
+	WorktreeRemove(ctx context.Context, path string) error
 }
 
 // DefaultGitTool implements GitTool by shelling out to the system git binary.
@@ -400,6 +461,217 @@ func (g *DefaultGitTool) Push(ctx context.Context, remote string, branch string,
 	return nil
 }
 
+// CreateBranch runs `git branch <name> [<base>]` to create a new branch from
+// the given base. When base is empty, the current HEAD is used.
+func (g *DefaultGitTool) CreateBranch(ctx context.Context, name string, base string) error {
+	if strings.TrimSpace(name) == "" {
+		return fmt.Errorf("git: branch name is required")
+	}
+	if err := g.ensureRepo(ctx); err != nil {
+		return err
+	}
+
+	args := []string{"branch", name}
+	if strings.TrimSpace(base) != "" {
+		args = append(args, base)
+	}
+
+	if _, err := g.run(ctx, args...); err != nil {
+		return fmt.Errorf("git: create branch %s: %w", name, err)
+	}
+
+	slog.Debug("git.create_branch", "name", name, "base", base)
+	return nil
+}
+
+// Merge runs `git merge <branch>` and parses the output to detect conflicts.
+// When conflicts are present, the MergeResult.Success is false and Conflicts
+// lists the conflicting files (parsed from git diff --name-only --diff-filter=U).
+func (g *DefaultGitTool) Merge(ctx context.Context, branch string) (*MergeResult, error) {
+	if strings.TrimSpace(branch) == "" {
+		return nil, fmt.Errorf("git: branch name is required")
+	}
+	if err := g.ensureRepo(ctx); err != nil {
+		return nil, err
+	}
+
+	out, err := g.run(ctx, "merge", branch)
+	if err != nil {
+		// Merge conflicts cause git merge to exit non-zero. Check whether
+		// there are unmerged files to distinguish conflicts from other errors.
+		conflictOut, cErr := g.run(ctx, "diff", "--name-only", "--diff-filter=U")
+		if cErr == nil {
+			var conflicts []string
+			for _, line := range strings.Split(conflictOut, "\n") {
+				if f := strings.TrimSpace(line); f != "" {
+					conflicts = append(conflicts, f)
+				}
+			}
+			if len(conflicts) > 0 {
+				return &MergeResult{
+					Success:   false,
+					Conflicts: conflicts,
+					Message:   fmt.Sprintf("merge conflicts in %d file(s)", len(conflicts)),
+				}, nil
+			}
+		}
+		return nil, fmt.Errorf("git: merge %s: %w", branch, err)
+	}
+
+	slog.Debug("git.merge", "branch", branch)
+	return &MergeResult{
+		Success: true,
+		Message: strings.TrimSpace(out),
+	}, nil
+}
+
+// Stash runs `git stash` to save uncommitted changes.
+func (g *DefaultGitTool) Stash(ctx context.Context) error {
+	if err := g.ensureRepo(ctx); err != nil {
+		return err
+	}
+
+	if _, err := g.run(ctx, "stash"); err != nil {
+		return fmt.Errorf("git: stash: %w", err)
+	}
+
+	slog.Debug("git.stash")
+	return nil
+}
+
+// StashPop runs `git stash pop` to restore the most recently stashed changes.
+func (g *DefaultGitTool) StashPop(ctx context.Context) error {
+	if err := g.ensureRepo(ctx); err != nil {
+		return err
+	}
+
+	if _, err := g.run(ctx, "stash", "pop"); err != nil {
+		return fmt.Errorf("git: stash pop: %w", err)
+	}
+
+	slog.Debug("git.stash_pop")
+	return nil
+}
+
+// Reset runs `git reset --<mode>` to reset the working tree. The mode must be
+// one of "hard", "soft", "mixed", "keep", or "merge". This is a destructive
+// operation that can discard uncommitted changes.
+func (g *DefaultGitTool) Reset(ctx context.Context, mode string) error {
+	validModes := map[string]bool{"hard": true, "soft": true, "mixed": true, "keep": true, "merge": true}
+	if !validModes[mode] {
+		return fmt.Errorf("git: invalid reset mode %q (valid: hard, soft, mixed, keep, merge)", mode)
+	}
+	if err := g.ensureRepo(ctx); err != nil {
+		return err
+	}
+
+	if _, err := g.run(ctx, "reset", "--"+mode); err != nil {
+		return fmt.Errorf("git: reset --%s: %w", mode, err)
+	}
+
+	slog.Debug("git.reset", "mode", mode)
+	return nil
+}
+
+// Revert runs `git revert <commit>` to create a new commit that undoes the
+// given commit. This is a potentially destructive operation.
+func (g *DefaultGitTool) Revert(ctx context.Context, commit string) error {
+	if strings.TrimSpace(commit) == "" {
+		return fmt.Errorf("git: commit is required")
+	}
+	if err := g.ensureRepo(ctx); err != nil {
+		return err
+	}
+
+	if _, err := g.run(ctx, "revert", "--no-edit", commit); err != nil {
+		return fmt.Errorf("git: revert %s: %w", commit, err)
+	}
+
+	slog.Debug("git.revert", "commit", commit)
+	return nil
+}
+
+// Fetch runs `git fetch <remote>` to download objects and refs from the named
+// remote. When remote is empty, "origin" is used.
+func (g *DefaultGitTool) Fetch(ctx context.Context, remote string) error {
+	if err := g.ensureRepo(ctx); err != nil {
+		return err
+	}
+
+	if strings.TrimSpace(remote) == "" {
+		remote = "origin"
+	}
+
+	if _, err := g.run(ctx, "fetch", remote); err != nil {
+		return fmt.Errorf("git: fetch %s: %w", remote, err)
+	}
+
+	slog.Debug("git.fetch", "remote", remote)
+	return nil
+}
+
+// Pull runs `git pull <remote> <branch>` to fetch and integrate changes. When
+// remote is empty, "origin" is used. When branch is empty, the current branch
+// is used.
+func (g *DefaultGitTool) Pull(ctx context.Context, remote string, branch string) error {
+	if err := g.ensureRepo(ctx); err != nil {
+		return err
+	}
+
+	if strings.TrimSpace(remote) == "" {
+		remote = "origin"
+	}
+
+	args := []string{"pull", remote}
+	if strings.TrimSpace(branch) != "" {
+		args = append(args, branch)
+	}
+
+	if _, err := g.run(ctx, args...); err != nil {
+		return fmt.Errorf("git: pull %s %s: %w", remote, branch, err)
+	}
+
+	slog.Debug("git.pull", "remote", remote, "branch", branch)
+	return nil
+}
+
+// Remote runs `git remote -v` and parses the result into RemoteInfo entries.
+// Each remote appears twice (once for fetch, once for push) unless they share
+// the same URL.
+func (g *DefaultGitTool) Remote(ctx context.Context) ([]RemoteInfo, error) {
+	if err := g.ensureRepo(ctx); err != nil {
+		return nil, err
+	}
+
+	out, err := g.run(ctx, "remote", "-v")
+	if err != nil {
+		return nil, err
+	}
+
+	var remotes []RemoteInfo
+	for _, line := range strings.Split(out, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		// Format: <name>\t<url> (fetch|push)
+		parts := strings.Fields(line)
+		if len(parts) < 3 {
+			continue
+		}
+		name := parts[0]
+		url := parts[1]
+		remoteType := strings.Trim(parts[2], "()")
+		remotes = append(remotes, RemoteInfo{
+			Name: name,
+			URL:  url,
+			Type: remoteType,
+		})
+	}
+
+	slog.Debug("git.remote", "remotes", len(remotes))
+	return remotes, nil
+}
+
 // run executes a git command in cwd and returns its combined stdout+stderr.
 func (g *DefaultGitTool) run(ctx context.Context, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
@@ -478,4 +750,89 @@ func porcelainStatus(code byte) string {
 	default:
 		return "modified"
 	}
+}
+
+// WorktreeAdd creates a new worktree at the given path. When branch is
+// non-empty, a new branch named branch is created for the worktree via
+// `git worktree add -b <branch> <path>`. When branch is empty, a detached
+// worktree is created at HEAD via `git worktree add --detach <path>`.
+func (g *DefaultGitTool) WorktreeAdd(ctx context.Context, path string, branch string) error {
+	if err := g.ensureRepo(ctx); err != nil {
+		return err
+	}
+	args := []string{"worktree", "add"}
+	if branch != "" {
+		args = append(args, "-b", branch, "--", path)
+	} else {
+		args = append(args, "--detach", "--", path)
+	}
+	_, err := g.run(ctx, args...)
+	return err
+}
+
+// WorktreeList lists all worktrees of the repository via
+// `git worktree list --porcelain`.
+func (g *DefaultGitTool) WorktreeList(ctx context.Context) ([]WorktreeInfo, error) {
+	if err := g.ensureRepo(ctx); err != nil {
+		return nil, err
+	}
+	out, err := g.run(ctx, "worktree", "list", "--porcelain")
+	if err != nil {
+		return nil, err
+	}
+	return parseWorktreePorcelain(out), nil
+}
+
+// WorktreeRemove removes the worktree at the given path. The --force flag is
+// used so that worktrees with untracked or modified files are also removed.
+func (g *DefaultGitTool) WorktreeRemove(ctx context.Context, path string) error {
+	if err := g.ensureRepo(ctx); err != nil {
+		return err
+	}
+	_, err := g.run(ctx, "worktree", "remove", "--force", "--", path)
+	return err
+}
+
+// parseWorktreePorcelain parses the output of `git worktree list --porcelain`
+// into a slice of WorktreeInfo. The porcelain format uses one record per
+// worktree, with fields prefixed by their key ("worktree", "HEAD", "branch")
+// and records separated by blank lines.
+func parseWorktreePorcelain(out string) []WorktreeInfo {
+	var infos []WorktreeInfo
+	var current *WorktreeInfo
+	for _, line := range strings.Split(out, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			if current != nil {
+				infos = append(infos, *current)
+				current = nil
+			}
+			continue
+		}
+		parts := strings.SplitN(line, " ", 2)
+		key := parts[0]
+		var value string
+		if len(parts) > 1 {
+			value = parts[1]
+		}
+		switch key {
+		case "worktree":
+			if current != nil {
+				infos = append(infos, *current)
+			}
+			current = &WorktreeInfo{Path: value}
+		case "HEAD":
+			if current != nil {
+				current.Head = value
+			}
+		case "branch":
+			if current != nil {
+				current.Branch = value
+			}
+		}
+	}
+	if current != nil {
+		infos = append(infos, *current)
+	}
+	return infos
 }

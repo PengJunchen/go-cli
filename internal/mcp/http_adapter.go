@@ -3,15 +3,21 @@ package mcp
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/url"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
@@ -27,6 +33,10 @@ type HTTPClientAdapter struct {
 	mu        sync.Mutex
 	connected bool
 	nextID    int64
+
+	protocolVersion string
+	token           string // OAuth/bearer token obtained after authentication
+	oauthState      string // CSRF state parameter for the current OAuth flow
 }
 
 var _ MCPClient = (*HTTPClientAdapter)(nil)
@@ -36,21 +46,44 @@ var _ MCPClient = (*HTTPClientAdapter)(nil)
 // without a cap a hung server would block the agent loop forever.
 const defaultHTTPTimeout = 60 * time.Second
 
-// NewHTTPClientAdapter returns an HTTPClientAdapter for the given config.
+// maxHTTPResponseSize caps the size of an HTTP response body read by the
+// adapter. This prevents a malicious or buggy server from exhausting memory
+// by streaming an arbitrarily large response.
+const maxHTTPResponseSize = 10 * 1024 * 1024 // 10 MB
+
+// readLimitedBody reads at most maxHTTPResponseSize bytes from r. If the body
+// exceeds the limit, an error is returned so the caller can abort instead of
+// allocating unbounded memory.
+func readLimitedBody(r io.Reader) ([]byte, error) {
+	limited := io.LimitReader(r, maxHTTPResponseSize+1)
+	raw, err := io.ReadAll(limited)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(raw)) > maxHTTPResponseSize {
+		return nil, fmt.Errorf("mcp: response body exceeds %d byte limit", maxHTTPResponseSize)
+	}
+	return raw, nil
+}
+
+// NewHTTPClientAdapter returns an HTTPClientAdapter for the given config. The
+// underlying *http.Client is SSRF-safe: it blocks private, link-local, and
+// cloud-metadata IP ranges at dial time (defending against DNS rebinding)
+// while permitting loopback so local MCP servers keep working.
 func NewHTTPClientAdapter(cfg MCPServerConfig) *HTTPClientAdapter {
 	return &HTTPClientAdapter{
-		cfg: cfg,
-		client: &http.Client{
-			Timeout: defaultHTTPTimeout,
-		},
+		cfg:    cfg,
+		client: tools.NewSSRFSafeHTTPClientAllowLoopback(defaultHTTPTimeout),
 	}
 }
 
 // NewHTTPClientAdapterWithClient returns an HTTPClientAdapter using the given
-// *http.Client, allowing callers to override transport or timeouts.
+// *http.Client, allowing callers to override transport or timeouts. When client
+// is nil, a loopback-allowing SSRF-safe client is used so that OAuth token
+// exchange and all other requests are protected against internal-IP targeting.
 func NewHTTPClientAdapterWithClient(cfg MCPServerConfig, client *http.Client) *HTTPClientAdapter {
 	if client == nil {
-		client = &http.Client{Timeout: defaultHTTPTimeout}
+		client = tools.NewSSRFSafeHTTPClientAllowLoopback(defaultHTTPTimeout)
 	}
 	return &HTTPClientAdapter{cfg: cfg, client: client}
 }
@@ -78,6 +111,7 @@ func (a *HTTPClientAdapter) Connect(ctx context.Context) error {
 		return fmt.Errorf("mcp: build SSE request: %w", err)
 	}
 	req.Header.Set("Accept", "application/json, text/event-stream")
+	a.applyAuthHeaders(req)
 
 	resp, err := a.client.Do(req)
 	if err != nil {
@@ -103,6 +137,9 @@ func (a *HTTPClientAdapter) Connect(ctx context.Context) error {
 			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		slog.Warn("mcp.sse.scan", "server", a.cfg.Name, "err", err)
+	}
 	resp.Body.Close() //nolint:errcheck,gosec
 
 	if a.endpoint == "" {
@@ -118,6 +155,12 @@ func (a *HTTPClientAdapter) Connect(ctx context.Context) error {
 
 	a.connected = true
 	slog.Info("mcp.http.connect", "server", a.cfg.Name, "endpoint", a.endpoint)
+
+	if err := a.doInitializeLocked(ctx); err != nil {
+		a.connected = false
+		return fmt.Errorf("mcp: initialize handshake: %w", err)
+	}
+
 	return nil
 }
 
@@ -190,6 +233,7 @@ func (a *HTTPClientAdapter) request(ctx context.Context, method string, params m
 	a.mu.Lock()
 	id := a.nextID
 	a.nextID++
+	endpoint := a.endpoint
 	a.mu.Unlock()
 
 	body, err := json.Marshal(map[string]any{
@@ -202,12 +246,13 @@ func (a *HTTPClientAdapter) request(ctx context.Context, method string, params m
 		return nil, fmt.Errorf("mcp: marshal request: %w", err)
 	}
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint, strings.NewReader(string(body)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
 	if err != nil {
 		return nil, fmt.Errorf("mcp: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
+	a.applyAuthHeaders(req)
 
 	resp, err := a.client.Do(req)
 	if err != nil {
@@ -215,38 +260,11 @@ func (a *HTTPClientAdapter) request(ctx context.Context, method string, params m
 	}
 	defer func() { _ = resp.Body.Close() }() //nolint:errcheck
 
-	raw, err := io.ReadAll(resp.Body)
+	raw, err := readLimitedBody(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("mcp: read response: %w", err)
 	}
-
-	// The response may be plain JSON or SSE-formatted. Streamable HTTP MCP
-	// servers (e.g. Zhipu) wrap the JSON-RPC payload in SSE:
-	//
-	//   id:1
-	//   event:message
-	//   data:{"jsonrpc":"2.0","id":1,"result":{...}}
-	//
-	// Extract the JSON from data: lines when the body is not valid JSON.
-	jsonBytes := raw
-	if len(raw) > 0 && raw[0] != '{' {
-		jsonBytes = extractSSEData(raw)
-	}
-
-	var frame map[string]any
-	if err := json.Unmarshal(jsonBytes, &frame); err != nil {
-		return nil, fmt.Errorf("mcp: decode response: %w (body: %s)", err, truncate(string(raw), 500))
-	}
-
-	if errVal, hasErr := frame["error"]; hasErr && errVal != nil {
-		return nil, fmt.Errorf("mcp: rpc error: %v", errVal)
-	}
-
-	result, ok := frame["result"].(map[string]any)
-	if !ok {
-		return nil, nil
-	}
-	return result, nil
+	return parseHTTPResponse(raw)
 }
 
 // extractSSEData scans SSE-formatted text and concatenates all data: line
@@ -274,4 +292,279 @@ func truncate(s string, n int) string {
 		return s
 	}
 	return s[:n] + "..."
+}
+
+// parseHTTPResponse parses the raw HTTP response body into a JSON-RPC result
+// map. It handles both plain JSON and SSE-formatted responses (where the
+// JSON-RPC payload is wrapped in data: lines).
+func parseHTTPResponse(raw []byte) (map[string]any, error) {
+	jsonBytes := raw
+	if len(raw) > 0 && raw[0] != '{' {
+		jsonBytes = extractSSEData(raw)
+	}
+
+	var frame map[string]any
+	if err := json.Unmarshal(jsonBytes, &frame); err != nil {
+		return nil, fmt.Errorf("mcp: decode response: %w (body: %s)", err, truncate(string(raw), 500))
+	}
+
+	if errVal, hasErr := frame["error"]; hasErr && errVal != nil {
+		return nil, fmt.Errorf("mcp: rpc error: %v", errVal)
+	}
+
+	result, ok := frame["result"].(map[string]any)
+	if !ok {
+		return nil, nil
+	}
+	return result, nil
+}
+
+// ProtocolVersion returns the protocol version negotiated during the
+// initialize handshake, or "" before Connect.
+func (a *HTTPClientAdapter) ProtocolVersion() string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.protocolVersion
+}
+
+// applyAuthHeaders sets custom headers and the Bearer token Authorization
+// header on the given request. The Bearer token from config takes precedence
+// over any OAuth-obtained token.
+func (a *HTTPClientAdapter) applyAuthHeaders(req *http.Request) {
+	for k, v := range a.cfg.Headers {
+		req.Header.Set(k, v)
+	}
+	token := a.cfg.BearerToken
+	if token == "" && a.token != "" {
+		token = a.token
+	}
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+}
+
+// doPost sends a JSON-RPC POST request and returns the raw HTTP response. The
+// caller is responsible for closing the response body. The caller must hold
+// a.mu (this method is called from doInitializeLocked which runs under the
+// Connect lock).
+func (a *HTTPClientAdapter) doPost(ctx context.Context, method string, params map[string]any) (*http.Response, error) {
+	id := a.nextID
+	a.nextID++
+	endpoint := a.endpoint
+
+	body, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"method":  method,
+		"params":  params,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("mcp: marshal request: %w", err)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
+	if err != nil {
+		return nil, fmt.Errorf("mcp: build request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json, text/event-stream")
+	a.applyAuthHeaders(req)
+
+	return a.client.Do(req)
+}
+
+// doInitializeLocked performs the MCP initialize/initialized handshake over
+// HTTP. The caller must hold a.mu. If the server responds with 401 and an
+// OAuthConfig is set, it triggers the OAuth 2.1 authorization code flow and
+// retries the initialize request with the obtained token.
+func (a *HTTPClientAdapter) doInitializeLocked(ctx context.Context) error {
+	initParams := map[string]any{
+		"protocolVersion": LatestProtocolVersion,
+		"capabilities":    map[string]any{},
+		"clientInfo":      map[string]any{"name": "go-cli", "version": "1.0.0"},
+	}
+
+	resp, err := a.doPost(ctx, "initialize", initParams)
+	if err != nil {
+		return fmt.Errorf("mcp: initialize request: %w", err)
+	}
+
+	if resp.StatusCode == http.StatusUnauthorized {
+		wwwAuth := resp.Header.Get("WWW-Authenticate")
+		_ = resp.Body.Close()
+
+		if a.cfg.OAuthConfig != nil {
+			if err := a.doOAuthFlow(ctx, wwwAuth); err != nil {
+				return fmt.Errorf("mcp: oauth flow: %w", err)
+			}
+			resp, err = a.doPost(ctx, "initialize", initParams)
+			if err != nil {
+				return fmt.Errorf("mcp: initialize retry: %w", err)
+			}
+		} else {
+			return fmt.Errorf("mcp: authentication required (401 Unauthorized)")
+		}
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	raw, err := readLimitedBody(resp.Body)
+	if err != nil {
+		return fmt.Errorf("mcp: read response: %w", err)
+	}
+	result, err := parseHTTPResponse(raw)
+	if err != nil {
+		return err
+	}
+
+	version, _ := result["protocolVersion"].(string)
+	if !IsSupportedProtocolVersion(version) {
+		return fmt.Errorf("unsupported protocol version: %s", version)
+	}
+	a.protocolVersion = version
+
+	// Send notifications/initialized (best-effort).
+	if notifResp, nErr := a.doPost(ctx, "notifications/initialized", map[string]any{}); nErr == nil {
+		_ = notifResp.Body.Close()
+	}
+
+	slog.Info("mcp.http.initialized", "server", a.cfg.Name, "protocolVersion", version)
+	return nil
+}
+
+// generateOAuthState generates a cryptographically random 32-byte hex-encoded
+// string used as the OAuth state parameter to prevent CSRF attacks on the
+// authorization code flow.
+func generateOAuthState() (string, error) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// doOAuthFlow performs the OAuth 2.1 authorization code flow: starts a local
+// callback server, opens the user's browser to the authorization URL, receives
+// the authorization code, and exchanges it for an access token. The token is
+// stored in a.token and used for subsequent requests. A random state parameter
+// is included in the authorization URL and verified on callback to prevent
+// CSRF attacks.
+func (a *HTTPClientAdapter) doOAuthFlow(ctx context.Context, _ string) error {
+	oauth := a.cfg.OAuthConfig
+	if oauth == nil {
+		return fmt.Errorf("mcp: no OAuth config")
+	}
+
+	// Generate and store the CSRF state parameter.
+	state, err := generateOAuthState()
+	if err != nil {
+		return fmt.Errorf("mcp: generate oauth state: %w", err)
+	}
+	a.oauthState = state
+
+	// Start a local callback server to receive the authorization code.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return fmt.Errorf("mcp: start callback listener: %w", err)
+	}
+	port := listener.Addr().(*net.TCPAddr).Port //nolint:errcheck // listener is always *net.TCPAddr
+	redirectURL := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
+
+	codeCh := make(chan string, 1)
+	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		code := r.URL.Query().Get("code")
+		callbackState := r.URL.Query().Get("state")
+		if code == "" {
+			w.WriteHeader(http.StatusBadRequest)                  //nolint:errcheck
+			_, _ = w.Write([]byte("Missing authorization code.")) //nolint:errcheck
+			return
+		}
+		// Verify the CSRF state parameter to prevent cross-site request
+		// forgery attacks on the authorization code flow.
+		if callbackState == "" || callbackState != state {
+			w.WriteHeader(http.StatusBadRequest)               //nolint:errcheck
+			_, _ = w.Write([]byte("Invalid state parameter.")) //nolint:errcheck
+			return
+		}
+		w.WriteHeader(http.StatusOK)                                                 //nolint:errcheck
+		_, _ = w.Write([]byte("Authorization complete. You may close this window.")) //nolint:errcheck
+		select {
+		case codeCh <- code:
+		default:
+		}
+	})}
+	go func() { _ = srv.Serve(listener) }()
+	defer func() { _ = srv.Shutdown(ctx) }()
+
+	// Build the authorization URL.
+	authURL, err := url.Parse(oauth.AuthorizationURL)
+	if err != nil {
+		return fmt.Errorf("mcp: parse authorization URL: %w", err)
+	}
+	q := authURL.Query()
+	q.Set("response_type", "code")
+	q.Set("client_id", oauth.ClientID)
+	q.Set("redirect_uri", redirectURL)
+	q.Set("state", state)
+	if len(oauth.Scopes) > 0 {
+		q.Set("scope", strings.Join(oauth.Scopes, " "))
+	}
+	authURL.RawQuery = q.Encode()
+
+	slog.Info("mcp.oauth.authorize", "url", authURL.String(), "server", a.cfg.Name)
+	fmt.Fprintf(os.Stderr, "\nMCP server requires authentication. Open this URL to authorize:\n  %s\n\n", authURL.String()) //nolint:errcheck
+
+	// Wait for the callback.
+	select {
+	case code := <-codeCh:
+		return a.exchangeCodeForToken(ctx, oauth, code, redirectURL)
+	case <-time.After(5 * time.Minute):
+		return fmt.Errorf("mcp: oauth flow timed out waiting for authorization")
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// exchangeCodeForToken exchanges the authorization code for an access token
+// via the token endpoint.
+func (a *HTTPClientAdapter) exchangeCodeForToken(ctx context.Context, oauth *OAuthConfig, code, redirectURL string) error {
+	form := url.Values{}
+	form.Set("grant_type", "authorization_code")
+	form.Set("code", code)
+	form.Set("redirect_uri", redirectURL)
+	form.Set("client_id", oauth.ClientID)
+	if oauth.ClientSecret != "" {
+		form.Set("client_secret", oauth.ClientSecret)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, oauth.TokenURL, strings.NewReader(form.Encode()))
+	if err != nil {
+		return fmt.Errorf("mcp: build token request: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := a.client.Do(req)
+	if err != nil {
+		return fmt.Errorf("mcp: token request: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+
+	if resp.StatusCode != http.StatusOK {
+		raw, _ := readLimitedBody(resp.Body)
+		return fmt.Errorf("mcp: token exchange failed (status %d): %s", resp.StatusCode, truncate(string(raw), 200))
+	}
+
+	var tokenResp struct {
+		AccessToken string `json:"access_token"`
+		TokenType   string `json:"token_type"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, maxHTTPResponseSize)).Decode(&tokenResp); err != nil {
+		return fmt.Errorf("mcp: decode token response: %w", err)
+	}
+	if tokenResp.AccessToken == "" {
+		return fmt.Errorf("mcp: token response missing access_token")
+	}
+	a.token = tokenResp.AccessToken
+	slog.Info("mcp.oauth.token_obtained", "server", a.cfg.Name)
+	return nil
 }

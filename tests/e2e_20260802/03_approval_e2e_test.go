@@ -128,10 +128,15 @@ func TestApproval_SafetyPolicyClassifier(t *testing.T) {
 		assert.Equal(t, approval.Allow, cl.Classify(ctx, toolCall("ls")))
 	})
 
-	t.Run("no dangerous tools allows all", func(t *testing.T) {
+	t.Run("no dangerous tools asks for non-readonly", func(t *testing.T) {
 		cl := approval.NewSafetyPolicyClassifier(nil)
-		assert.Equal(t, approval.Allow, cl.Classify(ctx, toolCall("bash")))
-		assert.Equal(t, approval.Allow, cl.Classify(ctx, toolCall("write")))
+		// With whitelist semantics, non-readonly tools like bash/write
+		// default to Ask (not Allow) even when no forbidden list is set.
+		assert.Equal(t, approval.Ask, cl.Classify(ctx, toolCall("bash")))
+		assert.Equal(t, approval.Ask, cl.Classify(ctx, toolCall("write")))
+		// Read-only tools are still auto-allowed.
+		assert.Equal(t, approval.Allow, cl.Classify(ctx, toolCall("read")))
+		assert.Equal(t, approval.Allow, cl.Classify(ctx, toolCall("grep")))
 	})
 
 	t.Run("name returns safety_policy", func(t *testing.T) {
@@ -346,10 +351,10 @@ func TestApproval_ClassifierRegistry(t *testing.T) {
 	approval.RegisterApprovalClassifier(denyAll)
 	assert.Same(t, denyAll, approval.GetApprovalClassifier())
 
-	// Register nil resets to allow-all.
+	// Register nil resets to deny-all (deny-first security default).
 	approval.RegisterApprovalClassifier(nil)
 	restored := approval.GetApprovalClassifier()
-	assert.Equal(t, "allow_all", restored.Name())
+	assert.Equal(t, "deny_all", restored.Name())
 
 	// Restore original state.
 	approval.RegisterApprovalClassifier(defaultCl)
@@ -821,15 +826,14 @@ func TestApproval_EdgeCases(t *testing.T) {
 		assert.False(t, execCalled, "executor must not be called when Ask resolves to Deny")
 	})
 
-	t.Run("middleware with nil classifier defaults to allow-all", func(t *testing.T) {
+	t.Run("middleware with nil classifier defaults to deny-all", func(t *testing.T) {
 		store := approval.NewInMemoryApprovalStore()
 		mw := approval.NewApprovalMiddleware(nil, store)
 
 		wrapped := mw.WrapToolCall(dummyExec)
 		res, err := wrapped(ctx, toolCall("any_tool"))
-		require.NoError(t, err)
-		require.NotNil(t, res)
-		assert.Equal(t, "ok", res.Output)
+		require.ErrorIs(t, err, approval.ErrToolDenied)
+		require.Nil(t, res)
 	})
 
 	t.Run("middleware with nil store uses in-memory store", func(t *testing.T) {

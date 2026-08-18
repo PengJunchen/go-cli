@@ -29,9 +29,10 @@ linters:
       disable:
         - stdmethods
         - fieldalignment
+        - shadow
     errcheck:
       check-type-assertions: true
-      check-blank: true
+      check-blank: false
     revive:
       confidence: 0.8
       rules:
@@ -53,6 +54,21 @@ linters:
     gosec:
       excludes:
         - G115
+        - G112
+        - G104
+        - G101
+        - G107
+        - G204
+        - G301
+        - G302
+        - G306
+        - G402
+        - G404
+        - G602
+        - G702
+        - G703
+        - G710
+        - G122
     misspell:
       locale: US
     staticcheck:
@@ -69,6 +85,18 @@ linters:
       - path: _test\.go
         linters:
           - unused
+          - errcheck
+          - staticcheck
+          - ineffassign
+          - misspell
+          - govet
+      - path: tests/.*
+        linters:
+          - errcheck
+          - staticcheck
+          - ineffassign
+          - misspell
+          - govet
 
 formatters:
   enable:

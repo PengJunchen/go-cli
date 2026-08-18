@@ -1,11 +1,13 @@
 package tools
 
 import (
+	"context"
 	"crypto/md5" //nolint:gosec // md5 used for file tracking, not security
 	"encoding/hex"
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"sync"
 	"time"
 )
@@ -32,6 +34,8 @@ type FileTracker struct {
 	checkpoints     map[string]CheckpointMeta
 	checkpointOrder []string // checkpoint IDs in creation order
 	backupContent   map[string][]byte
+	workdir         string           // working directory for worktree-aware operations
+	snapshotMgr     *SnapshotManager // optional git snapshot manager
 }
 
 // NewFileTracker returns an empty FileTracker.
@@ -45,6 +49,58 @@ func NewFileTracker() *FileTracker {
 	}
 }
 
+// SetWorkdir sets the working directory used for worktree-aware file
+// operations. When set, relative paths in tracking operations are resolved
+// against this directory.
+func (ft *FileTracker) SetWorkdir(path string) {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	ft.workdir = path
+}
+
+// Workdir returns the current working directory, or empty when unset.
+func (ft *FileTracker) Workdir() string {
+	ft.mu.RLock()
+	defer ft.mu.RUnlock()
+	return ft.workdir
+}
+
+// SetSnapshotManager injects a SnapshotManager. When set, RecordMutation
+// captures a git working-tree snapshot before each file mutation so the file
+// can be reverted later via /revert.
+func (ft *FileTracker) SetSnapshotManager(sm *SnapshotManager) {
+	ft.mu.Lock()
+	defer ft.mu.Unlock()
+	ft.snapshotMgr = sm
+}
+
+// RecordMutation captures a git snapshot before a file mutation. It is safe
+// to call when no SnapshotManager is configured (no-op). The snapshot captures
+// the working-tree state so the file can be reverted later. The RLock is
+// released before calling TakeSnapshot, which has its own mutex, avoiding
+// holding ft.mu during a git subprocess.
+func (ft *FileTracker) RecordMutation(ctx context.Context, toolName, filePath string) {
+	ft.mu.RLock()
+	sm := ft.snapshotMgr
+	ft.mu.RUnlock()
+	if sm == nil {
+		return
+	}
+	if err := sm.TakeSnapshot(ctx, toolName, filePath); err != nil {
+		slog.Warn("file_tracker.snapshot_failed", "tool", toolName, "file", filePath, "err", err)
+	}
+}
+
+// resolve joins a relative path with the configured workdir. When workdir is
+// empty or the path is already absolute, the path is returned unchanged. The
+// caller must hold ft.mu.
+func (ft *FileTracker) resolve(path string) string {
+	if ft.workdir != "" && !filepath.IsAbs(path) {
+		return filepath.Join(ft.workdir, path)
+	}
+	return path
+}
+
 // Track records the state of the file at path with the given content. If the
 // content differs from the previously recorded state (or the file is tracked
 // for the first time), a FileChange entry is appended.
@@ -52,6 +108,7 @@ func (ft *FileTracker) Track(path string, content string) {
 	ft.mu.Lock()
 	defer ft.mu.Unlock()
 
+	path = ft.resolve(path)
 	newHash := hashContent(content)
 	oldHash, existed := ft.hashes[path]
 
@@ -113,6 +170,10 @@ func (ft *FileTracker) Reset() {
 
 	ft.hashes = make(map[string]string)
 	ft.changes = make([]FileChange, 0)
+	ft.checkpoints = make(map[string]CheckpointMeta)
+	ft.checkpointOrder = make([]string, 0)
+	ft.backupContent = make(map[string][]byte)
+	ft.workdir = ""
 	slog.Debug("file_tracker.reset")
 }
 
@@ -136,11 +197,19 @@ type CheckpointMeta struct {
 	// Existed reports whether the file existed before the checkpoint. false
 	// means the file was new (did not exist), so Restore will delete it.
 	Existed bool
+	// Mode is the file mode (permissions) of the original file at backup time.
+	// Restore uses it to preserve the original permissions. It is 0 for new
+	// files; Restore falls back to 0o600 when Mode is 0 for backward compat.
+	Mode os.FileMode
 }
 
 // maxCheckpoints is the maximum number of checkpoints retained in memory.
 // Older checkpoints are trimmed when this limit is exceeded.
 const maxCheckpoints = 50
+
+// maxBackupFileSize is the threshold above which Backup logs a warning. Files
+// larger than this are still backed up, but the warning surfaces the cost.
+const maxBackupFileSize = 10 * 1024 * 1024 // 10MB
 
 // Backup creates a checkpoint of the given file path. If the file exists,
 // it copies the content to a backup location. If the file doesn't exist
@@ -152,6 +221,7 @@ func (ft *FileTracker) Backup(path string) (string, error) {
 	ft.mu.Lock()
 	defer ft.mu.Unlock()
 
+	path = ft.resolve(path)
 	now := time.Now()
 	id := fmt.Sprintf("cp_%d", now.UnixNano())
 
@@ -172,6 +242,9 @@ func (ft *FileTracker) Backup(path string) (string, error) {
 	}
 
 	// File exists - read its content.
+	if info.Size() > maxBackupFileSize {
+		slog.Warn("file_tracker.backup_large_file", "path", path, "size", info.Size())
+	}
 	content, err := os.ReadFile(path)
 	if err != nil {
 		return "", fmt.Errorf("backup: read %s: %w", path, err)
@@ -185,6 +258,7 @@ func (ft *FileTracker) Backup(path string) (string, error) {
 			Timestamp: now,
 			Size:      0,
 			Existed:   true,
+			Mode:      info.Mode(),
 		}, nil)
 		return id, nil
 	}
@@ -195,6 +269,7 @@ func (ft *FileTracker) Backup(path string) (string, error) {
 		Timestamp: now,
 		Size:      info.Size(),
 		Existed:   true,
+		Mode:      info.Mode(),
 	}, content)
 	return id, nil
 }
@@ -212,10 +287,12 @@ func (ft *FileTracker) Restore(checkpointID string) error {
 		return fmt.Errorf("restore: checkpoint %s not found", checkpointID)
 	}
 
+	resolvedPath := ft.resolve(meta.Path)
+
 	if !meta.Existed {
 		// The file was new (did not exist before) - remove it.
-		if err := os.Remove(meta.Path); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("restore: remove %s: %w", meta.Path, err)
+		if err := os.Remove(resolvedPath); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("restore: remove %s: %w", resolvedPath, err)
 		}
 		return nil
 	}
@@ -227,8 +304,21 @@ func (ft *FileTracker) Restore(checkpointID string) error {
 		return nil
 	}
 
-	if err := os.WriteFile(meta.Path, content, 0o600); err != nil {
-		return fmt.Errorf("restore: write %s: %w", meta.Path, err)
+	// Preserve the original file permissions. Fall back to 0o600 when Mode
+	// was not set (backward compat with checkpoints created before the Mode
+	// field existed).
+	mode := meta.Mode
+	if mode == 0 {
+		mode = 0o600
+	}
+	if err := os.WriteFile(resolvedPath, content, mode); err != nil {
+		return fmt.Errorf("restore: write %s: %w", resolvedPath, err)
+	}
+	// os.WriteFile only applies perm when creating a new file; for an existing
+	// file it truncates without changing permissions. Chmod explicitly so the
+	// original mode is restored regardless.
+	if err := os.Chmod(resolvedPath, mode); err != nil {
+		return fmt.Errorf("restore: chmod %s: %w", resolvedPath, err)
 	}
 	return nil
 }

@@ -206,7 +206,8 @@ func (l *Loader) resolveVerbose() bool {
 	if l.flag != nil && l.flag.verbose {
 		return true
 	}
-	return os.Getenv(envKey(l.envPrefix, "VERBOSE")) == "1"
+	v, ok := parseBoolEnv(envKey(l.envPrefix, "VERBOSE"))
+	return ok && v
 }
 
 // envKey returns the environment variable name for the given key using the
@@ -216,7 +217,7 @@ func envKey(prefix, key string) string { return prefix + "_" + key }
 // loadFromEnv builds a partial Config from GO_CLI_* environment variables.
 func loadFromEnv(prefix string) *Config {
 	cfg := &Config{}
-	if os.Getenv(envKey(prefix, "VERBOSE")) == "1" {
+	if v, ok := parseBoolEnv(envKey(prefix, "VERBOSE")); ok && v {
 		cfg.verbose = true
 	}
 	cfg.Provider.Name = os.Getenv(envKey(prefix, "PROVIDER_NAME"))
@@ -243,12 +244,44 @@ func loadFromEnv(prefix string) *Config {
 	cfg.Compaction.Strategy = os.Getenv(envKey(prefix, "COMPACTION_STRATEGY"))
 	cfg.Compaction.MaxTokens = parseIntEnv(envKey(prefix, "COMPACTION_MAX_TOKENS"))
 
+	// LSP server command: space-separated string (e.g. "gopls serve").
+	if cmd := os.Getenv(envKey(prefix, "LSP_SERVER_COMMAND")); cmd != "" {
+		cfg.LSP.ServerCommand = parseCommandString(cmd)
+	}
+	if root := os.Getenv(envKey(prefix, "LSP_WORKSPACE_ROOT")); root != "" {
+		cfg.LSP.WorkspaceRoot = root
+	}
+
+	// Boolean config fields use *bool so env can explicitly set false.
+	if v, ok := parseBoolEnv(envKey(prefix, "GIT_ENABLED")); ok {
+		cfg.Git.Enabled = &v
+	}
+	if v, ok := parseBoolEnv(envKey(prefix, "GIT_AUTOCOMMIT")); ok {
+		cfg.Git.AutoCommit = &v
+	}
+	if v, ok := parseBoolEnv(envKey(prefix, "EXTENSIONS_ENABLED")); ok {
+		cfg.Extensions.Enabled = &v
+	}
+	if v, ok := parseBoolEnv(envKey(prefix, "MODELCYCLER_ENABLED")); ok {
+		cfg.ModelCycler.Enabled = &v
+	}
+	if v, ok := parseBoolEnv(envKey(prefix, "SESSION_GIT_AWARE_BRANCH")); ok {
+		cfg.Session.GitAwareBranch = &v
+	}
+
 	return cfg
+}
+
+// parseCommandString splits a command string by whitespace into a command
+// and its arguments, suitable for the LSP ServerCommand field.
+func parseCommandString(s string) []string {
+	return strings.Fields(s)
 }
 
 // defaultConfig returns the built-in default configuration.
 func defaultConfig() *Config {
 	enabled := true
+	auditEnabled := true
 	return &Config{
 		Provider: ProviderConfig{MaxTokens: defaultMaxTokens},
 		Model:    ModelConfig{MaxTokens: defaultMaxTokens},
@@ -260,6 +293,9 @@ func defaultConfig() *Config {
 		Compaction: CompactionConfig{
 			Strategy:  "micro_first",
 			MaxTokens: defaultCompactionMaxTokens,
+		},
+		Production: ProductionConfig{
+			Audit: AuditConfig{Enabled: &auditEnabled},
 		},
 	}
 }
@@ -275,7 +311,9 @@ func mergeConfigs(base, over *Config) *Config {
 
 // overlayValue copies non-zero exported fields from src onto dst recursively.
 // Pointers are replaced wholesale (nil means "unset"), enabling explicit
-// false/zero overrides.
+// false/zero overrides. Plain bool fields are treated like other primitives:
+// false (the zero value) means "unset" and does not overwrite a true from a
+// lower layer. Use *bool where an explicit false override is needed.
 func overlayValue(dst, src reflect.Value) {
 	if !dst.IsValid() || !src.IsValid() || dst.Type() != src.Type() {
 		return
@@ -293,6 +331,10 @@ func overlayValue(dst, src reflect.Value) {
 			dst.SetString(v)
 		}
 	case reflect.Bool:
+		// Plain bool cannot distinguish "set to false" from "unset" (both
+		// are the zero value). Treat false as "unset" so a higher layer
+		// that omits the field does not clobber a true from a lower layer.
+		// Use *bool where an explicit false override is needed.
 		if src.Bool() {
 			dst.SetBool(true)
 		}
@@ -348,6 +390,8 @@ func countReflect(v reflect.Value, n *int) {
 			*n++
 		}
 	case reflect.Bool:
+		// Only count true; false is the zero value and indistinguishable
+		// from "unset" for plain bool fields.
 		if v.Bool() {
 			*n++
 		}

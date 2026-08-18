@@ -42,7 +42,8 @@ func NewStatsRegistry() *StatsRegistry {
 }
 
 // GetOrCreate returns the SessionStats for sessionID, creating an empty entry
-// if one does not yet exist.
+// if one does not yet exist. It returns a defensive copy so callers cannot
+// race with internal Record* methods.
 func (r *StatsRegistry) GetOrCreate(sessionID string) *SessionStats {
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -52,7 +53,8 @@ func (r *StatsRegistry) GetOrCreate(sessionID string) *SessionStats {
 		r.stats[sessionID] = s
 		slog.Debug("production.stats.create", "session", sessionID)
 	}
-	return s
+	cp := *s
+	return &cp
 }
 
 // RecordTurn increments the turn counter for the given session.
@@ -99,23 +101,29 @@ func (r *StatsRegistry) RecordTokens(sessionID string, in, out int) {
 	)
 }
 
-// GetSessionStats returns the stats for the given session and whether it
-// existed.
+// GetSessionStats returns a copy of the stats for the given session and
+// whether it existed.
 func (r *StatsRegistry) GetSessionStats(sessionID string) (*SessionStats, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	s, ok := r.stats[sessionID]
-	return s, ok
+	if !ok {
+		return nil, false
+	}
+	cp := *s
+	return &cp, ok
 }
 
 // GetAll returns a snapshot of all session stats keyed by session ID. The
-// returned map is a copy and may be modified freely.
+// returned map and all SessionStats values are copies and may be modified
+// freely.
 func (r *StatsRegistry) GetAll() map[string]*SessionStats {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	out := make(map[string]*SessionStats, len(r.stats))
 	for k, v := range r.stats {
-		out[k] = v
+		cp := *v
+		out[k] = &cp
 	}
 	return out
 }

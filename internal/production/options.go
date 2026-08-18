@@ -15,6 +15,9 @@ type options struct {
 	// guardSeverity overrides the denial severity used by the OutputGuard
 	// implementations. It is ignored by components that are not guards.
 	guardSeverity GuardSeverity
+	// customPIIPatterns holds user-supplied patterns appended to the built-in
+	// PII patterns when constructing a PIIOutputGuard.
+	customPIIPatterns []PIIPattern
 }
 
 // Option configures a production component at construction time.

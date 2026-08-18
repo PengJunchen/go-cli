@@ -230,10 +230,13 @@ func TestRetryModelMiddleware_DefaultPolicy(t *testing.T) {
 	})
 
 	assert.Equal(t, "default-retry", p.Name())
-	assert.True(t, p.ShouldRetry(context.Background(), errors.New("err"), 0))
-	assert.True(t, p.ShouldRetry(context.Background(), errors.New("err"), 1))
-	assert.True(t, p.ShouldRetry(context.Background(), errors.New("err"), 2))
-	assert.False(t, p.ShouldRetry(context.Background(), errors.New("err"), 3))
+	// Use a transient error so ShouldRetry returns true; the default policy
+	// classifies unknown errors as fatal and does not retry them.
+	transient := errors.New("connection reset")
+	assert.True(t, p.ShouldRetry(context.Background(), transient, 0))
+	assert.True(t, p.ShouldRetry(context.Background(), transient, 1))
+	assert.True(t, p.ShouldRetry(context.Background(), transient, 2))
+	assert.False(t, p.ShouldRetry(context.Background(), transient, 3))
 	assert.False(t, p.ShouldRetry(context.Background(), nil, 0))
 
 	// Without jitter, backoff is pure exponential.
@@ -244,4 +247,69 @@ func TestRetryModelMiddleware_DefaultPolicy(t *testing.T) {
 	assert.Equal(t, 100*time.Millisecond, p2.NextBackoff(context.Background(), 0))
 	assert.Equal(t, 200*time.Millisecond, p2.NextBackoff(context.Background(), 1))
 	assert.Equal(t, 400*time.Millisecond, p2.NextBackoff(context.Background(), 2))
+}
+
+func TestDefaultPolicyClassifyBusy(t *testing.T) {
+	p := newDefaultRetryPolicy(RetryConfig{MaxAttempts: 3})
+	assert.False(t, p.ShouldRetry(context.Background(), errors.New("harness is busy"), 0))
+}
+
+func TestDefaultPolicyClassifyHookRejected(t *testing.T) {
+	p := newDefaultRetryPolicy(RetryConfig{MaxAttempts: 3})
+	assert.False(t, p.ShouldRetry(context.Background(), errors.New("hook rejected the run"), 0))
+}
+
+func TestDefaultPolicyClassifyRateLimit(t *testing.T) {
+	p := newDefaultRetryPolicy(RetryConfig{MaxAttempts: 3})
+	assert.True(t, p.ShouldRetry(context.Background(), errors.New("429 too many requests"), 0))
+}
+
+func TestDefaultPolicyClassifyTimeout(t *testing.T) {
+	p := newDefaultRetryPolicy(RetryConfig{MaxAttempts: 3})
+	assert.True(t, p.ShouldRetry(context.Background(), errors.New("request timeout"), 0))
+}
+
+func TestDefaultPolicyClassifyFatal(t *testing.T) {
+	p := newDefaultRetryPolicy(RetryConfig{MaxAttempts: 3})
+	assert.False(t, p.ShouldRetry(context.Background(), errors.New("permission denied"), 0))
+}
+
+func TestDefaultPolicyClassifyTransient(t *testing.T) {
+	p := newDefaultRetryPolicy(RetryConfig{MaxAttempts: 3})
+	assert.True(t, p.ShouldRetry(context.Background(), errors.New("connection reset"), 0))
+}
+
+func TestNoRetryOnFatal(t *testing.T) {
+	model := &mockModel{
+		generateFn: func(_ context.Context, _ []Message, _ ...Option) (*Message, error) {
+			return nil, errors.New("permission denied")
+		},
+	}
+	mw := NewRetryModelMiddleware() // uses default policy
+	wrapped := mw.WrapModel(model)
+
+	_, err := wrapped.Generate(context.Background(), nil)
+	require.Error(t, err)
+	// Fatal error should not be retried: only 1 call.
+	assert.Equal(t, int32(1), atomic.LoadInt32(&model.generateCalls))
+}
+
+func TestRetryOnTransient(t *testing.T) {
+	var calls int32
+	model := &mockModel{
+		generateFn: func(_ context.Context, _ []Message, _ ...Option) (*Message, error) {
+			n := atomic.AddInt32(&calls, 1)
+			if n < 2 {
+				return nil, errors.New("connection reset")
+			}
+			return &Message{Role: RoleAssistant, Content: "ok"}, nil
+		},
+	}
+	mw := NewRetryModelMiddleware() // uses default policy
+	wrapped := mw.WrapModel(model)
+
+	resp, err := wrapped.Generate(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, "ok", resp.Content)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&calls))
 }

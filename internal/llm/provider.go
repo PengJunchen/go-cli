@@ -233,7 +233,7 @@ func (m *HTTPChatModel) generate(ctx context.Context, msgs []Message, opts ...Op
 	msg := &Message{Role: RoleAssistant}
 	if len(parsed.Choices) > 0 {
 		choice := parsed.Choices[0]
-		msg.Content = choice.Message.Content
+		msg.Content = contentToString(choice.Message.Content)
 		msg.Role = RoleAssistant
 		msg.ToolCalls = convertAssistantToolCalls(choice.Message.ToolCalls)
 	}
@@ -303,162 +303,63 @@ func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 
 		reader := bufio.NewReaderSize(respBody, 64*1024)
 
-		// Peek at the first bytes to detect SSE vs plain JSON.
-		isJSON := false
-		peek, err := reader.Peek(64)
-		if err != nil && err != io.EOF {
+		// Detect non-SSE JSON responses (e.g. error responses returned as
+		// plain JSON instead of an event stream).
+		isJSON, jsonBody, err := detectJSONResponse(reader)
+		if err != nil {
 			slog.Error("llm_stream_peek_error", "err", err)
 			return
 		}
-		// Trim leading whitespace to find the first meaningful character.
-		trimmed := bytes.TrimLeft(peek, " \t\r\n")
-		if len(trimmed) > 0 && trimmed[0] == '{' {
-			isJSON = true
-		}
-
 		if isJSON {
-			// Server returned a regular JSON response instead of SSE.
-			body, err := io.ReadAll(reader)
-			if err != nil {
-				slog.Error("llm_stream_json_read_error", "err", err)
-				return
-			}
 			var parsed openAIResponse
-			if err := json.Unmarshal(body, &parsed); err != nil {
+			if err := json.Unmarshal(jsonBody, &parsed); err != nil {
 				slog.Error("llm_stream_json_parse_error", "err", err)
 				return
 			}
 			var content string
 			var toolCalls []ToolCall
+			var finishReason string
 			if len(parsed.Choices) > 0 {
-				content = parsed.Choices[0].Message.Content
+				content = contentToString(parsed.Choices[0].Message.Content)
 				toolCalls = convertAssistantToolCalls(parsed.Choices[0].Message.ToolCalls)
+				finishReason = parsed.Choices[0].FinishReason
 			}
 			if content != "" {
-				ch <- MessageChunk{Role: RoleAssistant, Content: content}
-			}
-			ch <- MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls}
-			return
-		}
-
-		// SSE path: parse data: lines from the buffered reader.
-		scanner := bufio.NewScanner(reader)
-		scanner.Buffer(make([]byte, 64*1024), 1024*1024)
-
-		// Per-request accumulation: tool_call index → name + args fragments.
-		var toolNameByIndex map[int]string
-		var toolArgsBuf []string
-		emittedRole := false
-
-		for scanner.Scan() {
-			line := scanner.Text()
-			line = strings.TrimSpace(line)
-			if line == "" || !strings.HasPrefix(line, "data:") {
-				continue
-			}
-			payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
-			// SSE termination sentinel.
-			if payload == "[DONE]" {
-				break
-			}
-
-			var chunk openAIStreamChunk
-			if err := json.Unmarshal([]byte(payload), &chunk); err != nil {
-				slog.Warn("llm_stream_parse_skip", "err", err)
-				continue
-			}
-			if len(chunk.Choices) == 0 {
-				continue
-			}
-			delta := chunk.Choices[0].Delta
-
-			if !emittedRole {
-				// Emit a role-only chunk early so the loop can start
-				// rendering the assistant message placeholder.
-				ch <- MessageChunk{Role: RoleAssistant, Content: ""}
-				emittedRole = true
-			}
-
-			if delta.Content != "" {
-				ch <- MessageChunk{Role: RoleAssistant, Content: delta.Content}
-			}
-
-			// Accumulate tool_call fragments emitted across chunks.
-			for ci, tc := range delta.ToolCalls {
-				if tc.Index == nil {
-					tc.Index = &ci
-				}
-				idx := *tc.Index
-				for len(toolArgsBuf) <= idx {
-					toolArgsBuf = append(toolArgsBuf, "")
-				}
-				if tc.Function.Name != "" {
-					if toolNameByIndex == nil {
-						toolNameByIndex = make(map[int]string)
-					}
-					if toolNameByIndex[idx] == "" {
-						toolNameByIndex[idx] = tc.Function.Name
-					}
-				}
-				if tc.Function.Arguments != "" {
-					toolArgsBuf[idx] += tc.Function.Arguments
-				}
-			}
-		}
-
-		if scanErr := scanner.Err(); scanErr != nil {
-			slog.Error("llm_stream_scan_error", "err", scanErr)
-		}
-
-		// Fallback: if no SSE lines were found, try to parse the response
-		// as JSON. This handles edge cases where the peek didn't work correctly.
-		if !emittedRole {
-			body, readErr := io.ReadAll(reader)
-			if readErr != nil {
-				slog.Error("llm_stream_fallback_read_error", "err", readErr)
-			} else {
-				var parsed openAIResponse
-				if unmarshalErr := json.Unmarshal(body, &parsed); unmarshalErr != nil {
-					slog.Error("llm_stream_fallback_parse_error", "err", unmarshalErr)
-				} else {
-					var content string
-					var toolCalls []ToolCall
-					if len(parsed.Choices) > 0 {
-						content = parsed.Choices[0].Message.Content
-						toolCalls = convertAssistantToolCalls(parsed.Choices[0].Message.ToolCalls)
-					}
-					if content != "" {
-						ch <- MessageChunk{Role: RoleAssistant, Content: content}
-					}
-					ch <- MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls}
+				select {
+				case ch <- MessageChunk{Role: RoleAssistant, Content: content}:
+				case <-ctx.Done():
 					return
 				}
 			}
-		}
-
-		// Emit the final accumulated assistant message so callers can build
-		// the complete Message including tool calls.
-		final := MessageChunk{Role: RoleAssistant, Final: true}
-		if toolNameByIndex != nil {
-			final.ToolCalls = make([]ToolCall, len(toolArgsBuf))
-			for idx, name := range toolNameByIndex {
-				var args any
-				if idx < len(toolArgsBuf) && toolArgsBuf[idx] != "" {
-					var decoded any
-					if err := json.Unmarshal([]byte(toolArgsBuf[idx]), &decoded); err == nil {
-						args = decoded
-					} else {
-						args = toolArgsBuf[idx]
-					}
-				}
-				final.ToolCalls[idx] = ToolCall{
-					ID:   fmt.Sprintf("call_%d", idx),
-					Name: name,
-					Args: args,
+			final := MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
+			if parsed.Usage != nil {
+				final.Usage = &Usage{
+					InputTokens:  parsed.Usage.PromptTokens,
+					OutputTokens: parsed.Usage.CompletionTokens,
+					TotalTokens:  parsed.Usage.PromptTokens + parsed.Usage.CompletionTokens,
 				}
 			}
+			select {
+			case ch <- final:
+			case <-ctx.Done():
+			}
+			return
 		}
-		ch <- final
+
+		// SSE path: parse using the shared DefaultSSEParser and accumulate
+		// tool-call fragments via the shared helper.
+		parser := NewDefaultSSEParser()
+		events, _ := parser.Parse(ctx, reader) //nolint:errcheck
+
+		toolCalls, finishReason, usage := accumulateOpenAIStreamToolCalls(ctx, events, ch)
+		final := MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
+		if usage != nil {
+			final.Usage = usage
+		}
+		select {
+		case ch <- final:
+		case <-ctx.Done():
+		}
 	}()
 
 	return ch, nil
@@ -467,6 +368,9 @@ func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 // openAIStreamChunk is one SSE data payload of a streaming response.
 type openAIStreamChunk struct {
 	Choices []openAIStreamChoice `json:"choices"`
+	// Usage is populated only on the final chunk (empty choices) when
+	// stream_options.include_usage is true.
+	Usage *openAIUsage `json:"usage,omitempty"`
 }
 
 // openAIStreamChoice carries the incremental delta of an OpenAI stream.
@@ -475,6 +379,7 @@ type openAIStreamChoice struct {
 		Content   string           `json:"content"`
 		ToolCalls []openAIToolCall `json:"tool_calls"`
 	} `json:"delta"`
+	FinishReason string `json:"finish_reason,omitempty"`
 }
 
 // buildBody serializes the conversation and options into the OpenAI chat
@@ -489,7 +394,7 @@ func (m *HTTPChatModel) buildBody(msgs []Message, opts ...Option) ([]byte, error
 	for _, msg := range msgs {
 		om := openAIMessage{
 			Role:    string(msg.Role),
-			Content: msg.Content,
+			Content: buildOpenAIContent(msg),
 			Name:    msg.Name,
 		}
 		if msg.ToolCallID != "" {
@@ -595,7 +500,13 @@ func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadClos
 		if rerr != nil {
 			return nil, fmt.Errorf("llm: read error response: %w", rerr)
 		}
-		return nil, fmt.Errorf("llm: provider returned %s: %s", resp.Status, strings.TrimSpace(string(payload)))
+		// Truncate the error payload to avoid leaking large response bodies
+		// (which may contain sensitive data) into logs and error chains.
+		truncated := strings.TrimSpace(string(payload))
+		if len(truncated) > 512 {
+			truncated = truncated[:512] + "..."
+		}
+		return nil, fmt.Errorf("llm: provider returned %s: %s", resp.Status, truncated)
 	}
 	return resp.Body, nil
 }
@@ -627,10 +538,64 @@ type openAIToolFunction struct {
 // openAIMessage is a single message in an OpenAI chat request/response.
 type openAIMessage struct {
 	Role       string           `json:"role"`
-	Content    string           `json:"content"`
+	Content    any              `json:"content,omitempty"` // string or []openAIContentPart
 	Name       string           `json:"name,omitempty"`
 	ToolCallID string           `json:"tool_call_id,omitempty"`
 	ToolCalls  []openAIToolCall `json:"tool_calls,omitempty"`
+}
+
+// openAIContentPart is a single typed part within a multimodal message
+// (text or image_url).
+type openAIContentPart struct {
+	Type     string          `json:"type"` // "text" or "image_url"
+	Text     string          `json:"text,omitempty"`
+	ImageURL *openAIImageURL `json:"image_url,omitempty"`
+}
+
+// openAIImageURL wraps an image URL or data URI for the OpenAI vision API.
+type openAIImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"`
+}
+
+// contentToString extracts the text from an openAIMessage.Content value, which
+// is `any` (string or []openAIContentPart). For assistant responses the content
+// is always a plain string; this helper safely coerces it back.
+func contentToString(v any) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	return ""
+}
+
+// buildOpenAIContent returns the value to assign to openAIMessage.Content. When
+// the message has ContentBlocks, it builds a []openAIContentPart slice; otherwise
+// it returns the plain Content string (backward compatible).
+func buildOpenAIContent(msg Message) any {
+	if msg.ContentBlocks == nil {
+		return msg.Content
+	}
+	parts := make([]openAIContentPart, 0, len(msg.ContentBlocks))
+	for _, cb := range msg.ContentBlocks {
+		switch cb.Type {
+		case "text":
+			parts = append(parts, openAIContentPart{Type: "text", Text: cb.Text})
+		case "image_url":
+			if cb.ImageURL != nil {
+				parts = append(parts, openAIContentPart{
+					Type: "image_url",
+					ImageURL: &openAIImageURL{
+						URL:    cb.ImageURL.URL,
+						Detail: cb.ImageURL.Detail,
+					},
+				})
+			}
+		}
+	}
+	return parts
 }
 
 // openAIResponse is the OpenAI chat completions response body.
@@ -641,7 +606,8 @@ type openAIResponse struct {
 
 // openAIChoice is one completion choice.
 type openAIChoice struct {
-	Message openAIMessage `json:"message"`
+	Message      openAIMessage `json:"message"`
+	FinishReason string        `json:"finish_reason,omitempty"`
 }
 
 // openAIUsage reports token consumption.

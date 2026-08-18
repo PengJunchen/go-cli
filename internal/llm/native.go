@@ -1,6 +1,7 @@
 package llm
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -24,6 +25,32 @@ import (
 // to that vendor's chat-completions-style REST endpoint and the response is
 // decoded with the standard library. All three share the nativeChatModel helper
 // so the HTTP mechanics and the "llm.request" span are defined once.
+
+// parseDataURI splits a "data:image/<mime>;base64,<data>" URI into its media
+// type and base64 payload. It returns ok=false when the string is not a data
+// URI, in which case the caller should pass the URL as-is (e.g. for OpenAI).
+func parseDataURI(s string) (mediaType, data string, ok bool) {
+	const prefix = "data:"
+	if !strings.HasPrefix(s, prefix) {
+		return "", "", false
+	}
+	rest := s[len(prefix):]
+	// The comma separates the metadata from the data payload.
+	comma := strings.IndexByte(rest, ',')
+	if comma < 0 {
+		return "", "", false
+	}
+	meta := rest[:comma]
+	data = rest[comma+1:]
+	// meta looks like "image/png;base64" — extract the media type.
+	semi := strings.IndexByte(meta, ';')
+	if semi >= 0 {
+		mediaType = meta[:semi]
+	} else {
+		mediaType = meta
+	}
+	return mediaType, data, true
+}
 
 // Native provider constants. Grouped in one const block.
 const (
@@ -67,6 +94,12 @@ const (
 	// geminiStreamAction is the streaming RPC action; alt=sse forces SSE
 	// framing instead of newline-delimited JSON.
 	geminiStreamAction = ":streamGenerateContent?alt=sse"
+
+	// nativeDefaultHTTPTimeout is the default timeout for non-streaming LLM
+	// HTTP requests, preventing indefinite hangs (AC-2). Streaming (SSE)
+	// requests bypass this client-level timeout and rely on context
+	// cancellation instead so long-lived streams are not cut off.
+	nativeDefaultHTTPTimeout = 120 * time.Second
 )
 
 // nativeChatModel is a BaseChatModel shared by the OpenAI, Claude and Gemini
@@ -168,7 +201,7 @@ func (m *nativeChatModel) generate(ctx context.Context, msgs []Message, opts ...
 		if rerr != nil {
 			return nil, fmt.Errorf("llm: read error response: %w", rerr)
 		}
-		return nil, fmt.Errorf("llm: provider returned %s: %s", resp.Status, strings.TrimSpace(string(payload)))
+		return nil, newProviderError(resp.StatusCode, m.provider, string(payload))
 	}
 
 	data, rerr := io.ReadAll(resp.Body)
@@ -182,9 +215,8 @@ func (m *nativeChatModel) generate(ctx context.Context, msgs []Message, opts ...
 // three known providers (openai, claude, gemini) it performs true SSE-based
 // streaming: the request is sent with stream=true (or the streaming endpoint
 // for Gemini) and the response body is parsed as Server-Sent Events, emitting
-// one MessageChunk per content delta. For unknown providers it falls back to
-// the fake single-chunk approach (Generate then emit). The channel is always
-// closed.
+// one MessageChunk per content delta. For unknown providers it returns an
+// error; callers should use Generate instead.
 func (m *nativeChatModel) Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
 	switch m.provider {
 	case claudeProviderName:
@@ -194,28 +226,27 @@ func (m *nativeChatModel) Stream(ctx context.Context, msgs []Message, opts ...Op
 	case openaiProviderName:
 		return m.streamOpenAI(ctx, msgs, opts)
 	default:
-		return m.streamFake(ctx, msgs, opts)
+		return nil, fmt.Errorf("llm: provider %q does not support native streaming; use Generate instead", m.provider)
 	}
-}
-
-// streamFake is the fallback streaming implementation: it calls Generate and
-// delivers the full response as a single chunk before closing the channel.
-func (m *nativeChatModel) streamFake(ctx context.Context, msgs []Message, opts []Option) (<-chan MessageChunk, error) {
-	ch := make(chan MessageChunk, 1)
-	resp, err := m.Generate(ctx, msgs, opts...)
-	if err != nil {
-		close(ch)
-		return ch, err
-	}
-	ch <- MessageChunk{Role: resp.Role, Content: resp.Content}
-	close(ch)
-	return ch, nil
 }
 
 // streamRoundTrip builds the HTTP request, executes it, and verifies a 2xx
 // status. It returns the response body for SSE parsing. The caller is
 // responsible for closing the returned ReadCloser.
+//
+// For streaming, a shallow copy of the client is made with Timeout=0 so that
+// SSE streams are not cut off by the client-level timeout. The caller's
+// context provides cancellation instead (AC-2, AC-3).
 func (m *nativeChatModel) streamRoundTrip(ctx context.Context, body []byte, endpoint string) (io.ReadCloser, error) {
+	// Copy the client and clear the Timeout so long-lived SSE streams are
+	// not terminated by the default 120s client timeout. Context
+	// cancellation still applies (AC-3).
+	streamClient := &http.Client{}
+	if m.client != nil {
+		*streamClient = *m.client
+	}
+	streamClient.Timeout = 0
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
 		return nil, fmt.Errorf("llm: build request: %w", err)
@@ -228,7 +259,7 @@ func (m *nativeChatModel) streamRoundTrip(ctx context.Context, body []byte, endp
 		}
 	}
 
-	resp, err := m.client.Do(req)
+	resp, err := streamClient.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("llm: do request: %w", err)
 	}
@@ -243,7 +274,7 @@ func (m *nativeChatModel) streamRoundTrip(ctx context.Context, body []byte, endp
 		if rerr != nil {
 			return nil, fmt.Errorf("llm: read error response: %w", rerr)
 		}
-		return nil, fmt.Errorf("llm: provider returned %s: %s", resp.Status, strings.TrimSpace(string(payload)))
+		return nil, newProviderError(resp.StatusCode, m.provider, string(payload))
 	}
 	return resp.Body, nil
 }
@@ -259,6 +290,43 @@ func withStreamFlag(body []byte) ([]byte, error) {
 	out, err := json.Marshal(reqMap)
 	if err != nil {
 		return nil, fmt.Errorf("llm: marshal stream request: %w", err)
+	}
+	return out, nil
+}
+
+// injectThinking retrieves the ThinkingConfig stored by WithThinking on
+// genOpts, and if present with a non-None level, decodes the JSON body into a
+// map, applies the provider adapter, and re-encodes. When targetKey is
+// non-empty the adapter is applied to the nested sub-map (e.g.
+// "generationConfig" for Gemini) instead of the top-level map. If no thinking
+// config was set or the level is None the body is returned unchanged.
+func injectThinking(data []byte, genOpts *GenerationOptions, adapter ThinkingAdapter, targetKey string) ([]byte, error) {
+	cfg, ok := ThinkingFromOpts(genOpts)
+	if !ok {
+		return data, nil
+	}
+	if cfg.Level == ThinkingNone {
+		return data, nil
+	}
+	var reqMap map[string]any
+	if err := json.Unmarshal(data, &reqMap); err != nil {
+		return nil, fmt.Errorf("llm: decode request for thinking: %w", err)
+	}
+	target := reqMap
+	if targetKey != "" {
+		sub, ok := reqMap[targetKey].(map[string]any)
+		if !ok {
+			sub = map[string]any{}
+		}
+		target = sub
+	}
+	adapter.Apply(target, cfg)
+	if targetKey != "" {
+		reqMap[targetKey] = target
+	}
+	out, err := json.Marshal(reqMap)
+	if err != nil {
+		return nil, fmt.Errorf("llm: marshal request with thinking: %w", err)
 	}
 	return out, nil
 }
@@ -284,6 +352,18 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 		close(ch)
 		return ch, err
 	}
+	// Ensure stream_options.include_usage is set so usage stats are streamed.
+	var streamReqMap map[string]any
+	if jErr := json.Unmarshal(streamBody, &streamReqMap); jErr == nil {
+		if streamReqMap["stream_options"] == nil {
+			streamReqMap["stream_options"] = map[string]any{"include_usage": true}
+			streamBody, err = json.Marshal(streamReqMap)
+			if err != nil {
+				close(ch)
+				return ch, err
+			}
+		}
+	}
 
 	respBody, err := m.streamRoundTrip(ctx, streamBody, m.endpoint)
 	if err != nil {
@@ -299,80 +379,63 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 			}
 		}()
 
+		reader := bufio.NewReaderSize(respBody, 64*1024)
+
+		// Detect non-SSE JSON responses (e.g. error responses returned as
+		// plain JSON instead of an event stream).
+		isJSON, jsonBody, err := detectJSONResponse(reader)
+		if err != nil {
+			slog.Error("llm_stream_peek_error", "err", err)
+			return
+		}
+		if isJSON {
+			var parsed openAIResponse
+			if err := json.Unmarshal(jsonBody, &parsed); err != nil {
+				slog.Error("llm_stream_json_parse_error", "err", err)
+				return
+			}
+			var content string
+			var toolCalls []ToolCall
+			var finishReason string
+			if len(parsed.Choices) > 0 {
+				content = contentToString(parsed.Choices[0].Message.Content)
+				toolCalls = convertAssistantToolCalls(parsed.Choices[0].Message.ToolCalls)
+				finishReason = parsed.Choices[0].FinishReason
+			}
+			if content != "" {
+				select {
+				case ch <- MessageChunk{Role: RoleAssistant, Content: content}:
+				case <-ctx.Done():
+					return
+				}
+			}
+			final := MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
+			if parsed.Usage != nil {
+				final.Usage = &Usage{
+					InputTokens:  parsed.Usage.PromptTokens,
+					OutputTokens: parsed.Usage.CompletionTokens,
+					TotalTokens:  parsed.Usage.PromptTokens + parsed.Usage.CompletionTokens,
+				}
+			}
+			select {
+			case ch <- final:
+			case <-ctx.Done():
+			}
+			return
+		}
+
 		parser := NewDefaultSSEParser()
-		events, _ := parser.Parse(respBody) //nolint:errcheck
+		events, _ := parser.Parse(ctx, reader) //nolint:errcheck
 
-		// Per-request tool-call accumulation.
-		var toolNameByIndex map[int]string
-		var toolArgsBuf []string
-
-		for event := range events {
-			if event.Data == "[DONE]" {
-				break
-			}
-			if event.Data == "" {
-				continue
-			}
-
-			var chunk openAIStreamChunk
-			if err := json.Unmarshal([]byte(event.Data), &chunk); err != nil {
-				slog.Warn("llm_stream_parse_skip", "err", err)
-				continue
-			}
-			if len(chunk.Choices) == 0 {
-				continue
-			}
-			delta := chunk.Choices[0].Delta
-
-			if delta.Content != "" {
-				ch <- MessageChunk{Role: RoleAssistant, Content: delta.Content}
-			}
-
-			// Accumulate tool_call fragments emitted across chunks.
-			for ci, tc := range delta.ToolCalls {
-				if tc.Index == nil {
-					tc.Index = &ci
-				}
-				idx := *tc.Index
-				for len(toolArgsBuf) <= idx {
-					toolArgsBuf = append(toolArgsBuf, "")
-				}
-				if tc.Function.Name != "" {
-					if toolNameByIndex == nil {
-						toolNameByIndex = make(map[int]string)
-					}
-					if toolNameByIndex[idx] == "" {
-						toolNameByIndex[idx] = tc.Function.Name
-					}
-				}
-				if tc.Function.Arguments != "" {
-					toolArgsBuf[idx] += tc.Function.Arguments
-				}
-			}
+		toolCalls, finishReason, usage := accumulateOpenAIStreamToolCalls(ctx, events, ch)
+		final := MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
+		if usage != nil {
+			final.Usage = usage
 		}
-
-		// Emit the final accumulated assistant message.
-		final := MessageChunk{Role: RoleAssistant, Final: true}
-		if toolNameByIndex != nil {
-			final.ToolCalls = make([]ToolCall, len(toolArgsBuf))
-			for idx, name := range toolNameByIndex {
-				var args any
-				if idx < len(toolArgsBuf) && toolArgsBuf[idx] != "" {
-					var decoded any
-					if err := json.Unmarshal([]byte(toolArgsBuf[idx]), &decoded); err == nil {
-						args = decoded
-					} else {
-						args = toolArgsBuf[idx]
-					}
-				}
-				final.ToolCalls[idx] = ToolCall{
-					ID:   fmt.Sprintf("call_%d", idx),
-					Name: name,
-					Args: args,
-				}
-			}
+		select {
+		case ch <- final:
+		case <-ctx.Done():
 		}
-		ch <- final
 	}()
 
 	return ch, nil
@@ -393,7 +456,8 @@ type claudeStreamEvent struct {
 
 // claudeStreamMessage carries the top-level message metadata from message_start.
 type claudeStreamMessage struct {
-	Role string `json:"role"`
+	Role  string       `json:"role"`
+	Usage *claudeUsage `json:"usage,omitempty"`
 }
 
 // claudeStreamBlock describes a content block from content_block_start.
@@ -405,9 +469,11 @@ type claudeStreamBlock struct {
 
 // claudeStreamDelta carries the incremental delta from content_block_delta.
 type claudeStreamDelta struct {
-	Type        string `json:"type"`                   // "text_delta" or "input_json_delta"
-	Text        string `json:"text,omitempty"`         // text_delta text
-	PartialJSON string `json:"partial_json,omitempty"` // input_json_delta fragment
+	Type        string       `json:"type"`                   // "text_delta" or "input_json_delta"
+	Text        string       `json:"text,omitempty"`         // text_delta text
+	PartialJSON string       `json:"partial_json,omitempty"` // input_json_delta fragment
+	StopReason  string       `json:"stop_reason,omitempty"`  // message_delta stop_reason
+	Usage       *claudeUsage `json:"usage,omitempty"`        // message_delta output_tokens
 }
 
 // claudeToolAccum accumulates a single tool call's fragments across chunks.
@@ -450,14 +516,21 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 		}()
 
 		parser := NewDefaultSSEParser()
-		events, _ := parser.Parse(respBody) //nolint:errcheck
+		events, _ := parser.Parse(ctx, respBody) //nolint:errcheck
 
 		// Tool-call accumulation keyed by content block index.
 		tools := map[int]*claudeToolAccum{}
 		var toolIndices []int // preserve insertion order
+		var stopReason string
+		var inputTokens, outputTokens int
+		var hasUsage bool
 		finalSent := false
+		canceled := false
 
 		for event := range events {
+			if canceled {
+				continue
+			}
 			if event.Data == "" {
 				continue
 			}
@@ -470,7 +543,16 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 			switch ce.Type {
 			case "message_start":
 				if ce.Message != nil {
-					ch <- MessageChunk{Role: RoleAssistant}
+					select {
+					case ch <- MessageChunk{Role: RoleAssistant}:
+					case <-ctx.Done():
+						canceled = true
+						continue
+					}
+					if ce.Message.Usage != nil {
+						inputTokens = ce.Message.Usage.InputTokens
+						hasUsage = true
+					}
 				}
 
 			case "content_block_start":
@@ -492,7 +574,12 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 				switch ce.Delta.Type {
 				case "text_delta":
 					if ce.Delta.Text != "" {
-						ch <- MessageChunk{Role: RoleAssistant, Content: ce.Delta.Text}
+						select {
+						case ch <- MessageChunk{Role: RoleAssistant, Content: ce.Delta.Text}:
+						case <-ctx.Done():
+							canceled = true
+							continue
+						}
 					}
 				case "input_json_delta":
 					if accum, ok := tools[ce.Index]; ok {
@@ -500,8 +587,19 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 					}
 				}
 
+			case "message_delta":
+				if ce.Delta != nil {
+					if ce.Delta.StopReason != "" {
+						stopReason = ce.Delta.StopReason
+					}
+					if ce.Delta.Usage != nil {
+						outputTokens = ce.Delta.Usage.OutputTokens
+						hasUsage = true
+					}
+				}
+
 			case "message_stop":
-				final := MessageChunk{Role: RoleAssistant, Final: true}
+				final := MessageChunk{Role: RoleAssistant, Final: true, FinishReason: stopReason}
 				if len(toolIndices) > 0 {
 					final.ToolCalls = make([]ToolCall, 0, len(toolIndices))
 					for _, idx := range toolIndices {
@@ -522,15 +620,38 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 						})
 					}
 				}
-				ch <- final
-				finalSent = true
+				if hasUsage {
+					final.Usage = &Usage{
+						InputTokens:  inputTokens,
+						OutputTokens: outputTokens,
+						TotalTokens:  inputTokens + outputTokens,
+					}
+				}
+				select {
+				case ch <- final:
+					finalSent = true
+				case <-ctx.Done():
+					canceled = true
+					continue
+				}
 			}
 		}
 
 		// If the stream ended without message_stop, emit a final chunk so
 		// the caller is not left waiting.
-		if !finalSent {
-			ch <- MessageChunk{Role: RoleAssistant, Final: true}
+		if !finalSent && ctx.Err() == nil {
+			fallback := MessageChunk{Role: RoleAssistant, Final: true, FinishReason: stopReason}
+			if hasUsage {
+				fallback.Usage = &Usage{
+					InputTokens:  inputTokens,
+					OutputTokens: outputTokens,
+					TotalTokens:  inputTokens + outputTokens,
+				}
+			}
+			select {
+			case ch <- fallback:
+			case <-ctx.Done():
+			}
 		}
 	}()
 
@@ -572,9 +693,16 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 		}()
 
 		parser := NewDefaultSSEParser()
-		events, _ := parser.Parse(respBody) //nolint:errcheck
+		events, _ := parser.Parse(ctx, respBody) //nolint:errcheck
 
+		var finishReason string
+		var toolCalls []ToolCall
+		var usage *Usage
+		canceled := false
 		for event := range events {
+			if canceled {
+				continue
+			}
 			if event.Data == "" {
 				continue
 			}
@@ -583,18 +711,55 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 				slog.Warn("llm_stream_parse_skip", "err", err)
 				continue
 			}
-			if len(parsed.Candidates) > 0 && parsed.Candidates[0].Content != nil {
-				var sb strings.Builder
-				for _, part := range parsed.Candidates[0].Content.Parts {
-					sb.WriteString(part.Text)
+			// Gemini sends usageMetadata in the response chunks; the final
+			// chunk carries the cumulative totals.
+			if parsed.UsageMetadata != nil {
+				usage = &Usage{
+					InputTokens:  parsed.UsageMetadata.PromptTokenCount,
+					OutputTokens: parsed.UsageMetadata.CandidatesTokenCount,
+					TotalTokens:  parsed.UsageMetadata.PromptTokenCount + parsed.UsageMetadata.CandidatesTokenCount,
 				}
-				if sb.Len() > 0 {
-					ch <- MessageChunk{Role: RoleAssistant, Content: sb.String()}
+			}
+			if len(parsed.Candidates) > 0 {
+				candidate := parsed.Candidates[0]
+				if candidate.FinishReason != "" {
+					finishReason = candidate.FinishReason
+				}
+				if candidate.Content != nil {
+					var sb strings.Builder
+					for _, part := range candidate.Content.Parts {
+						sb.WriteString(part.Text)
+						// Gemini sends complete functionCall parts (name+args
+						// together, not fragmented like OpenAI), so we just
+						// append when encountered.
+						if part.FunctionCall != nil {
+							toolCalls = append(toolCalls, ToolCall{
+								ID:   fmt.Sprintf("call_%d", len(toolCalls)),
+								Name: part.FunctionCall.Name,
+								Args: part.FunctionCall.Args,
+							})
+						}
+					}
+					if sb.Len() > 0 {
+						select {
+						case ch <- MessageChunk{Role: RoleAssistant, Content: sb.String()}:
+						case <-ctx.Done():
+							canceled = true
+							continue
+						}
+					}
 				}
 			}
 		}
 
-		ch <- MessageChunk{Role: RoleAssistant, Final: true}
+		final := MessageChunk{Role: RoleAssistant, Final: true, FinishReason: finishReason, ToolCalls: toolCalls}
+		if usage != nil {
+			final.Usage = usage
+		}
+		select {
+		case ch <- final:
+		case <-ctx.Done():
+		}
 	}()
 
 	return ch, nil
@@ -718,7 +883,7 @@ func NewOpenAIProvider(opts ...NativeProviderOption) *OpenAIProvider {
 		name:           openaiProviderName,
 		defaultBaseURL: openaiDefaultBaseURL,
 		defaultModel:   openaiDefaultModel,
-		httpClient:     http.DefaultClient,
+		httpClient:     &http.Client{Timeout: nativeDefaultHTTPTimeout},
 	}
 	p.applyNativeOptions(opts)
 	return p
@@ -768,7 +933,7 @@ func encodeOpenAIRequest(cfg ModelConfig, model string, msgs []Message, opts []O
 	for _, msg := range msgs {
 		om := openAIMessage{
 			Role:    string(msg.Role),
-			Content: msg.Content,
+			Content: buildOpenAIContent(msg),
 			Name:    msg.Name,
 		}
 		if msg.ToolCallID != "" {
@@ -828,7 +993,7 @@ func encodeOpenAIRequest(cfg ModelConfig, model string, msgs []Message, opts []O
 	if err != nil {
 		return nil, fmt.Errorf("llm: marshal request: %w", err)
 	}
-	return data, nil
+	return injectThinking(data, genOpts, OpenAIThinkingAdapter{}, "")
 }
 
 // decodeOpenAIResponse parses an OpenAI chat completions response.
@@ -840,8 +1005,9 @@ func decodeOpenAIResponse(body []byte) (*Message, error) {
 	msg := &Message{Role: RoleAssistant}
 	if len(parsed.Choices) > 0 {
 		choice := parsed.Choices[0]
-		msg.Content = choice.Message.Content
+		msg.Content = contentToString(choice.Message.Content)
 		msg.ToolCalls = convertAssistantToolCalls(choice.Message.ToolCalls)
+		msg.FinishReason = choice.FinishReason
 	}
 	if parsed.Usage != nil {
 		msg.Usage = &Usage{
@@ -873,7 +1039,7 @@ func NewClaudeProvider(opts ...NativeProviderOption) *ClaudeProvider {
 		name:           claudeProviderName,
 		defaultBaseURL: claudeDefaultBaseURL,
 		defaultModel:   claudeDefaultModel,
-		httpClient:     http.DefaultClient,
+		httpClient:     &http.Client{Timeout: nativeDefaultHTTPTimeout},
 	}
 	p.applyNativeOptions(opts)
 	return p
@@ -928,22 +1094,66 @@ type claudeUserMessage struct {
 	Content []claudeBlock `json:"content"`
 }
 
-// claudeBlock is a single content item (text only in this model).
+// claudeBlock is a single content item (text or image).
 type claudeBlock struct {
-	Type string `json:"type"`
-	Text string `json:"text,omitempty"`
+	Type   string             `json:"type"`
+	Text   string             `json:"text,omitempty"`
+	Source *claudeImageSource `json:"source,omitempty"` // when Type == "image"
+}
+
+// claudeImageSource is the Anthropic image source: a base64-encoded blob with
+// its media type.
+type claudeImageSource struct {
+	Type      string `json:"type"` // "base64"
+	MediaType string `json:"media_type"`
+	Data      string `json:"data"`
 }
 
 // claudeResponse is the Anthropic messages response body.
 type claudeResponse struct {
-	Content []claudeBlock `json:"content"`
-	Usage   *claudeUsage  `json:"usage,omitempty"`
+	Content    []claudeBlock `json:"content"`
+	Usage      *claudeUsage  `json:"usage,omitempty"`
+	StopReason string        `json:"stop_reason,omitempty"`
 }
 
 // claudeUsage reports token consumption.
 type claudeUsage struct {
 	InputTokens  int `json:"input_tokens"`
 	OutputTokens int `json:"output_tokens"`
+}
+
+// buildClaudeBlocks converts a Message into a slice of claudeBlock values.
+// When ContentBlocks is non-nil, it maps text and image blocks to the Anthropic
+// format (image blocks require a base64 data URI). Otherwise it falls back to a
+// single text block built from Content.
+func buildClaudeBlocks(msg Message) []claudeBlock {
+	if msg.ContentBlocks == nil {
+		return []claudeBlock{{Type: "text", Text: msg.Content}}
+	}
+	blocks := make([]claudeBlock, 0, len(msg.ContentBlocks))
+	for _, cb := range msg.ContentBlocks {
+		switch cb.Type {
+		case "text":
+			blocks = append(blocks, claudeBlock{Type: "text", Text: cb.Text})
+		case "image_url":
+			if cb.ImageURL == nil {
+				continue
+			}
+			mediaType, data, ok := parseDataURI(cb.ImageURL.URL)
+			if !ok {
+				continue // Claude requires base64 data URIs
+			}
+			blocks = append(blocks, claudeBlock{
+				Type: "image",
+				Source: &claudeImageSource{
+					Type:      "base64",
+					MediaType: mediaType,
+					Data:      data,
+				},
+			})
+		}
+	}
+	return blocks
 }
 
 // encodeClaudeRequest marshals a conversation into the Anthropic message body.
@@ -977,8 +1187,8 @@ func encodeClaudeRequest(cfg ModelConfig, model string, msgs []Message, opts []O
 	reqMsgs := make([]claudeUserMessage, 0, len(conv))
 	for _, msg := range conv {
 		role := string(msg.Role)
-		block := claudeBlock{Type: "text", Text: msg.Content}
-		reqMsgs = append(reqMsgs, claudeUserMessage{Role: role, Content: []claudeBlock{block}})
+		blocks := buildClaudeBlocks(msg)
+		reqMsgs = append(reqMsgs, claudeUserMessage{Role: role, Content: blocks})
 	}
 
 	req := claudeRequest{
@@ -991,7 +1201,7 @@ func encodeClaudeRequest(cfg ModelConfig, model string, msgs []Message, opts []O
 	if err != nil {
 		return nil, fmt.Errorf("llm: marshal request: %w", err)
 	}
-	return data, nil
+	return injectThinking(data, genOpts, ClaudeThinkingAdapter{}, "")
 }
 
 // decodeClaudeResponse parses an Anthropic messages response, joining any text
@@ -1008,6 +1218,7 @@ func decodeClaudeResponse(body []byte) (*Message, error) {
 		}
 	}
 	msg := &Message{Role: RoleAssistant, Content: sb.String()}
+	msg.FinishReason = parsed.StopReason
 	if parsed.Usage != nil {
 		msg.Usage = &Usage{
 			InputTokens:  parsed.Usage.InputTokens,
@@ -1039,7 +1250,7 @@ func NewGeminiProvider(opts ...NativeProviderOption) *GeminiProvider {
 		name:           geminiProviderName,
 		defaultBaseURL: geminiDefaultBaseURL,
 		defaultModel:   geminiDefaultModel,
-		httpClient:     http.DefaultClient,
+		httpClient:     &http.Client{Timeout: nativeDefaultHTTPTimeout},
 	}
 	p.applyNativeOptions(opts)
 	return p
@@ -1090,9 +1301,32 @@ type geminiContent struct {
 	Parts []geminiPart `json:"parts"`
 }
 
-// geminiPart is a single content part (text only in this model).
+// geminiFunctionCall represents a function call in a Gemini response.
+type geminiFunctionCall struct {
+	Name string         `json:"name"`
+	Args map[string]any `json:"args"`
+}
+
+// geminiFunctionResponse represents a function response in a Gemini request.
+type geminiFunctionResponse struct {
+	Name     string         `json:"name"`
+	Response map[string]any `json:"response"`
+}
+
+// geminiPart is a single content part (text, inline image data, or a
+// function call/response).
 type geminiPart struct {
-	Text string `json:"text,omitempty"`
+	Text             string                  `json:"text,omitempty"`
+	InlineData       *geminiInlineData       `json:"inline_data,omitempty"`      // when image
+	FunctionCall     *geminiFunctionCall     `json:"functionCall,omitempty"`     // when model calls a tool
+	FunctionResponse *geminiFunctionResponse `json:"functionResponse,omitempty"` // when feeding back a tool result
+}
+
+// geminiInlineData is the Google GenAI inline image: base64-encoded data with
+// its MIME type.
+type geminiInlineData struct {
+	MimeType string `json:"mime_type"`
+	Data     string `json:"data"`
 }
 
 // geminiGenConfig carries optional sampling knobs. maxOutputTokens is the
@@ -1110,13 +1344,117 @@ type geminiResponse struct {
 
 // geminiCandidate is a ranked generation result.
 type geminiCandidate struct {
-	Content *geminiContent `json:"content,omitempty"`
+	Content      *geminiContent `json:"content,omitempty"`
+	FinishReason string         `json:"finishReason,omitempty"`
 }
 
 // geminiUsage reports token consumption.
 type geminiUsage struct {
 	PromptTokenCount     int `json:"promptTokenCount"`
 	CandidatesTokenCount int `json:"candidatesTokenCount"`
+}
+
+// buildGeminiParts converts a Message into a slice of geminiPart values.
+// When ContentBlocks is non-nil, it maps text and image blocks to the Gemini
+// format (image blocks require a base64 data URI). Otherwise it falls back to a
+// single text part built from Content.
+//
+// Tool-related messages are handled specially:
+//   - Assistant messages with ToolCalls produce functionCall parts (one per
+//     call), optionally preceded by a text part when Content is non-empty.
+//   - Tool result messages (RoleTool) produce a single functionResponse part
+//     whose Response carries the tool output.
+func buildGeminiParts(msg Message) []geminiPart {
+	// Tool result messages become functionResponse parts.
+	if msg.Role == RoleTool {
+		return []geminiPart{{
+			FunctionResponse: &geminiFunctionResponse{
+				Name:     msg.Name,
+				Response: contentToResponseMap(msg.Content),
+			},
+		}}
+	}
+
+	// Assistant messages with tool calls become functionCall parts.
+	if len(msg.ToolCalls) > 0 {
+		var parts []geminiPart
+		// Include any leading text content before the function calls.
+		if msg.Content != "" {
+			parts = append(parts, geminiPart{Text: msg.Content})
+		}
+		for _, tc := range msg.ToolCalls {
+			parts = append(parts, geminiPart{
+				FunctionCall: &geminiFunctionCall{
+					Name: tc.Name,
+					Args: argsToMap(tc.Args),
+				},
+			})
+		}
+		return parts
+	}
+
+	if msg.ContentBlocks == nil {
+		return []geminiPart{{Text: msg.Content}}
+	}
+	parts := make([]geminiPart, 0, len(msg.ContentBlocks))
+	for _, cb := range msg.ContentBlocks {
+		switch cb.Type {
+		case "text":
+			parts = append(parts, geminiPart{Text: cb.Text})
+		case "image_url":
+			if cb.ImageURL == nil {
+				continue
+			}
+			mediaType, data, ok := parseDataURI(cb.ImageURL.URL)
+			if !ok {
+				continue // Gemini requires base64 data URIs
+			}
+			parts = append(parts, geminiPart{
+				InlineData: &geminiInlineData{
+					MimeType: mediaType,
+					Data:     data,
+				},
+			})
+		}
+	}
+	return parts
+}
+
+// argsToMap converts a ToolCall.Args value (typically map[string]any from JSON
+// decoding) into the map[string]any required by geminiFunctionCall. When the
+// value is not already a map it is round-tripped through JSON; values that
+// still cannot be represented as a map are wrapped under a "value" key.
+func argsToMap(args any) map[string]any {
+	if args == nil {
+		return nil
+	}
+	if m, ok := args.(map[string]any); ok {
+		return m
+	}
+	data, err := json.Marshal(args)
+	if err != nil {
+		return map[string]any{"value": args}
+	}
+	var m map[string]any
+	if err := json.Unmarshal(data, &m); err != nil {
+		return map[string]any{"value": args}
+	}
+	return m
+}
+
+// contentToResponseMap converts a tool result Content string into the
+// map[string]any required by geminiFunctionResponse. When the content is valid
+// JSON that decodes to a map it is used directly; otherwise the raw string is
+// wrapped under a "content" key so the result is never lost.
+func contentToResponseMap(content string) map[string]any {
+	if content == "" {
+		return map[string]any{}
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(content), &m); err == nil {
+		return m
+	}
+	return map[string]any{"content": content}
 }
 
 // encodeGeminiRequest marshals the conversation into the generateContent body.
@@ -1139,7 +1477,7 @@ func encodeGeminiRequest(cfg ModelConfig, msgs []Message, opts []Option) ([]byte
 		}
 		contents = append(contents, geminiContent{
 			Role:  role,
-			Parts: []geminiPart{{Text: msg.Content}},
+			Parts: buildGeminiParts(msg),
 		})
 	}
 
@@ -1163,23 +1501,35 @@ func encodeGeminiRequest(cfg ModelConfig, msgs []Message, opts []Option) ([]byte
 	if err != nil {
 		return nil, fmt.Errorf("llm: marshal request: %w", err)
 	}
-	return data, nil
+	return injectThinking(data, genOpts, GeminiThinkingAdapter{}, "generationConfig")
 }
 
 // decodeGeminiResponse parses a generateContent response, joining the first
-// candidate's text parts into the message content.
+// candidate's text parts into the message content and extracting any
+// functionCall parts into ToolCalls.
 func decodeGeminiResponse(body []byte) (*Message, error) {
 	var parsed geminiResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
 		return nil, fmt.Errorf("llm: decode response: %w", err)
 	}
 	msg := &Message{Role: RoleAssistant}
-	if len(parsed.Candidates) > 0 && parsed.Candidates[0].Content != nil {
-		var sb strings.Builder
-		for _, part := range parsed.Candidates[0].Content.Parts {
-			sb.WriteString(part.Text)
+	if len(parsed.Candidates) > 0 {
+		candidate := parsed.Candidates[0]
+		msg.FinishReason = candidate.FinishReason
+		if candidate.Content != nil {
+			var sb strings.Builder
+			for _, part := range candidate.Content.Parts {
+				sb.WriteString(part.Text)
+				if part.FunctionCall != nil {
+					msg.ToolCalls = append(msg.ToolCalls, ToolCall{
+						ID:   fmt.Sprintf("call_%d", len(msg.ToolCalls)),
+						Name: part.FunctionCall.Name,
+						Args: part.FunctionCall.Args,
+					})
+				}
+			}
+			msg.Content = sb.String()
 		}
-		msg.Content = sb.String()
 	}
 	if parsed.UsageMetadata != nil {
 		msg.Usage = &Usage{

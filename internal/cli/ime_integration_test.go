@@ -94,6 +94,7 @@ func TestIntegration_SkillDescriptionOmittedWhenEmpty(t *testing.T) {
 // This tests the fix for the issue where skills were silently skipped when
 // the config didn't explicitly set skill.dir.
 func TestIntegration_SkillAutoDiscovery(t *testing.T) {
+	setupTestTrust(t)
 	ctx := context.Background()
 	tempDir := t.TempDir()
 
@@ -135,7 +136,7 @@ Flat skill body.
 	// Change to the temp dir so discoverSkillDir finds .go-cli/skills.
 	t.Chdir(tempDir)
 
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 
 	// Pass a config with no skill.dir — the auto-discovery should kick in.
 	rc := &config.Config{}
@@ -175,7 +176,7 @@ func TestIntegration_SkillAutoDiscoveryNotFound(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
 
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 	rc := &config.Config{}
 	infos := registerSkillTools(ctx, rc, tr)
 
@@ -190,10 +191,11 @@ func TestIntegration_SkillAutoDiscoveryNotFound(t *testing.T) {
 // auto-discovered from .go-cli/mcp.json when the main config has no servers.
 // This tests the "servers" array format.
 func TestIntegration_MCPAutoDiscovery_ArrayFormat(t *testing.T) {
+	setupTestTrust(t)
 	ctx := context.Background()
 
 	// Start a mock MCP HTTP server.
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodPost {
 			//nolint:errcheck // test HTTP response
@@ -221,9 +223,9 @@ func TestIntegration_MCPAutoDiscovery_ArrayFormat(t *testing.T) {
 
 	t.Chdir(tempDir)
 
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 
-	// Pass a config with no MCP servers — auto-discovery should find mcp.json.
+	// Pass a config with no MCP servers - auto-discovery should find mcp.json.
 	rc := &config.Config{}
 	require.NoError(t, registerMCPTools(ctx, rc, tr))
 
@@ -239,9 +241,10 @@ func TestIntegration_MCPAutoDiscovery_ArrayFormat(t *testing.T) {
 // auto-discovered from .go-cli/mcp.json using the "mcpServers" map format
 // (the common format used by Claude Desktop and other tools).
 func TestIntegration_MCPAutoDiscovery_MapFormat(t *testing.T) {
+	setupTestTrust(t)
 	ctx := context.Background()
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodPost {
 			//nolint:errcheck // test HTTP response
@@ -271,7 +274,7 @@ func TestIntegration_MCPAutoDiscovery_MapFormat(t *testing.T) {
 
 	t.Chdir(tempDir)
 
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 	rc := &config.Config{}
 	require.NoError(t, registerMCPTools(ctx, rc, tr))
 
@@ -287,7 +290,7 @@ func TestIntegration_MCPConfigOverridesAutoDiscovery(t *testing.T) {
 	ctx := context.Background()
 
 	// Two mock servers: one for config, one for auto-discovery.
-	configSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	configSrv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodPost {
 			//nolint:errcheck // test HTTP response
@@ -299,7 +302,7 @@ func TestIntegration_MCPConfigOverridesAutoDiscovery(t *testing.T) {
 	}))
 	defer configSrv.Close()
 
-	autoSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	autoSrv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		if r.Method == http.MethodPost {
 			//nolint:errcheck // test HTTP response
@@ -326,9 +329,9 @@ func TestIntegration_MCPConfigOverridesAutoDiscovery(t *testing.T) {
 
 	t.Chdir(tempDir)
 
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 
-	// Config has its own MCP server — should take priority over mcp.json.
+	// Config has its own MCP server - should take priority over mcp.json.
 	rc := &config.Config{
 		MCP: config.MCPConfig{
 			Servers: []config.MCPServerConfig{
@@ -354,10 +357,10 @@ func TestIntegration_LoadMCPServers_NoFiles(t *testing.T) {
 	tempDir := t.TempDir()
 	t.Chdir(tempDir)
 
-	servers := loadMCPServers(nil)
+	servers := loadMCPServers(context.Background(), nil)
 	assert.Empty(t, servers)
 
-	servers = loadMCPServers(&config.Config{})
+	servers = loadMCPServers(context.Background(), &config.Config{})
 	assert.Empty(t, servers)
 }
 
@@ -367,6 +370,7 @@ func TestIntegration_LoadMCPServers_NoFiles(t *testing.T) {
 // SkillInfo into the DefaultSystemPromptBuilder to verify the full pipeline
 // produces a system prompt containing the skill name and description.
 func TestIntegration_FullSystemPromptWithAutoDiscoveredSkills(t *testing.T) {
+	setupTestTrust(t)
 	ctx := context.Background()
 	tempDir := t.TempDir()
 
@@ -391,7 +395,7 @@ This skill guides integration test execution.
 	t.Chdir(tempDir)
 
 	// Step 1: Auto-discover and register skills (no skill.dir in config).
-	tr := tools.NewDefaultToolRegistry()
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 	rc := &config.Config{}
 	infos := registerSkillTools(ctx, rc, tr)
 	require.Len(t, infos, 1)

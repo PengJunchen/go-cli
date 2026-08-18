@@ -10,10 +10,14 @@ import (
 // lazily selects a default chain of the built-in guards.
 
 // defaultOutputGuardChain builds the default chain of built-in guards.
+// The chain runs in order: code-injection and PII guards block outright;
+// prompt-injection guard wraps flagged content as untrusted; length guard
+// truncates last so any wrapping/tagging is accounted for before truncation.
 func defaultOutputGuardChain() OutputGuard {
 	return NewOutputGuardChain([]OutputGuard{
 		NewCodeInjectionGuard(),
 		NewPIIOutputGuard(),
+		NewPromptInjectionGuard(),
 		NewLengthGuard(8192),
 	})
 }

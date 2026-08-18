@@ -3,6 +3,7 @@ package production
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -117,6 +118,10 @@ func NewDefaultCircuitBreaker(cfg CircuitBreakerConfig, opts ...Option) CircuitB
 // configured fallback, when provided) while Open. It records the outcome to
 // drive state transitions.
 func (b *DefaultCircuitBreaker) Execute(ctx context.Context, fn func() (any, error)) (any, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+
 	b.mu.Lock()
 
 	allowed, fallback := b.allowLocked(ctx)
@@ -129,7 +134,15 @@ func (b *DefaultCircuitBreaker) Execute(ctx context.Context, fn func() (any, err
 		return nil, ErrCircuitOpen
 	}
 
-	result, err := fn()
+	result, err := func() (any, error) {
+		defer func() {
+			if r := recover(); r != nil {
+				b.record(ctx, fmt.Errorf("panic: %v", r))
+				panic(r)
+			}
+		}()
+		return fn()
+	}()
 	b.record(ctx, err)
 	return result, err
 }

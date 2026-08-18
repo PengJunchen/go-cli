@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync/atomic"
 	"time"
 )
@@ -74,6 +75,8 @@ type SubagentTool struct {
 }
 
 var _ ToolDefinition = (*SubagentTool)(nil)
+var _ Parameterized = (*SubagentTool)(nil)
+var _ PromptGuideliner = (*SubagentTool)(nil)
 
 // NewSubagentTool builds a SubagentTool backed by dispatcher.
 func NewSubagentTool(dispatcher SubagentDispatcher) *SubagentTool {
@@ -102,9 +105,105 @@ func (t *SubagentTool) Description() string {
 		"The sub-agent will return its result as content."
 }
 
+// Parameters returns the OpenAI-compatible JSON Schema describing the tool's
+// input parameters.
+func (t *SubagentTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"prompt": map[string]any{
+				"type":        "string",
+				"description": "A clear, specific task description. Write it so the sub-agent can execute without extra context.",
+			},
+			"role": map[string]any{
+				"type":        "string",
+				"enum":        []string{"researcher", "implementer", "reviewer", "tester"},
+				"description": "Selects a built-in role template when system_prompt is empty.",
+			},
+			"tools": map[string]any{
+				"type":        "array",
+				"items":       map[string]any{"type": "string"},
+				"description": "Tool names available to the sub-agent. When omitted, the role-based whitelist is used.",
+			},
+			"model": map[string]any{
+				"type":        "string",
+				"description": "Model name to override the sub-agent's LLM. When omitted, inherits the parent model.",
+			},
+			"max_turns": map[string]any{
+				"type":        "integer",
+				"description": "Bound on the sub-agent turn loop. Zero leaves it unset.",
+			},
+			"parallel": map[string]any{
+				"type":        "boolean",
+				"description": "When true, dispatch the tasks array concurrently instead of a single prompt.",
+			},
+			"tasks": map[string]any{
+				"type":        "array",
+				"description": "Array of tasks for parallel mode. Each task has prompt, role, tools, model, and max_turns fields.",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"prompt": map[string]any{
+							"type":        "string",
+							"description": "Task description for this parallel sub-task.",
+						},
+						"role": map[string]any{
+							"type":        "string",
+							"enum":        []string{"researcher", "implementer", "reviewer", "tester"},
+							"description": "Role for this parallel sub-task.",
+						},
+						"tools": map[string]any{
+							"type":        "array",
+							"items":       map[string]any{"type": "string"},
+							"description": "Tools for this parallel sub-task.",
+						},
+						"model": map[string]any{
+							"type":        "string",
+							"description": "Model override for this parallel sub-task.",
+						},
+						"max_turns": map[string]any{
+							"type":        "integer",
+							"description": "Turn limit for this parallel sub-task.",
+						},
+					},
+				},
+			},
+			"system_prompt": map[string]any{
+				"type":        "string",
+				"description": "An explicit system prompt for the sub-agent. Takes precedence over role.",
+			},
+			"id": map[string]any{
+				"type":        "string",
+				"description": "A unique task identifier; generated when omitted.",
+			},
+		},
+		"required":             []string{"prompt"},
+		"additionalProperties": false,
+	}
+}
+
+// PromptGuidelines returns usage hints injected into the system prompt.
+func (t *SubagentTool) PromptGuidelines() []string {
+	return []string{
+		"Use dispatch_subagent to delegate self-contained tasks to a focused sub-agent (roles: researcher, implementer, reviewer, tester)",
+		"Set parallel=true with a tasks array to run independent sub-tasks concurrently and aggregate their results",
+		"Avoid dispatching trivial tasks that a single direct tool call can handle",
+	}
+}
+
 // Execute parses a sub-agent task from call.Args, dispatches it via the
-// dispatcher, and returns the sub-agent's final answer.
+// dispatcher, and returns the sub-agent's final answer. When the parallel
+// parameter is true or a tasks array is provided, it dispatches all tasks
+// concurrently via ParallelDispatch and returns a structured summary.
 func (t *SubagentTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, error) {
+	parallel, _ := call.Args["parallel"].(bool) //nolint:errcheck
+	tasksRaw := call.Args["tasks"]
+
+	// Parallel mode: dispatch multiple tasks concurrently.
+	if parallel || tasksRaw != nil {
+		return t.executeParallel(ctx, call, tasksRaw)
+	}
+
 	prompt, ok := call.Args["prompt"].(string)
 	if !ok || prompt == "" {
 		return nil, errors.New("dispatch_subagent: missing string argument 'prompt'")
@@ -155,6 +254,136 @@ func (t *SubagentTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 	}
 
 	return &ToolResult{Output: res.Content, Metadata: metadata}, nil
+}
+
+// executeParallel builds tasks from the tasks array (or a single prompt in
+// parallel mode), dispatches them concurrently, and returns a structured
+// summary of the results.
+func (t *SubagentTool) executeParallel(ctx context.Context, call ToolCall, tasksRaw any) (*ToolResult, error) {
+	tasks := buildParallelTasks(call, tasksRaw)
+	if len(tasks) == 0 {
+		return nil, errors.New("dispatch_subagent: parallel mode requires at least one task")
+	}
+
+	slog.Debug("tools.subagent.execute_parallel",
+		"task_count", len(tasks),
+	)
+
+	results, err := t.dispatcher.ParallelDispatch(ctx, tasks)
+	if err != nil {
+		return nil, fmt.Errorf("dispatch_subagent: parallel dispatch: %w", err)
+	}
+
+	// Format results as structured text.
+	var sb strings.Builder
+	var firstErr error
+	totalDuration := time.Duration(0)
+	for i, res := range results {
+		role := tasks[i].Role
+		if role == "" {
+			role = "default"
+		}
+		fmt.Fprintf(&sb, "Task %d (%s): ", i+1, role) //nolint:errcheck
+		if res.Error != nil {
+			sb.WriteString(res.Error.Error())
+			if firstErr == nil {
+				firstErr = res.Error
+			}
+		} else {
+			sb.WriteString(res.Content)
+		}
+		sb.WriteString("\n")
+		totalDuration += res.Duration
+	}
+
+	metadata := map[string]any{
+		"task_count": len(results),
+		"duration":   totalDuration,
+		"parallel":   true,
+	}
+	if firstErr != nil {
+		metadata["first_error"] = firstErr.Error()
+	}
+
+	output := strings.TrimRight(sb.String(), "\n")
+	return &ToolResult{Output: output, Metadata: metadata}, nil
+}
+
+// buildParallelTasks constructs a slice of SubagentTask from the tasks array
+// in the tool call. When parallel is true but no tasks array is provided, it
+// builds a single task from the top-level prompt.
+func buildParallelTasks(call ToolCall, tasksRaw any) []SubagentTask {
+	// If a tasks array is provided, build tasks from it.
+	if taskMaps, ok := toAnySlice(tasksRaw); ok && len(taskMaps) > 0 {
+		tasks := make([]SubagentTask, 0, len(taskMaps))
+		for i, tm := range taskMaps {
+			m, ok := tm.(map[string]any)
+			if !ok || m == nil {
+				continue
+			}
+			id, ok := m["id"].(string)
+			if !ok || id == "" {
+				id = nextRequestID(fmt.Sprintf("task-%d", i+1))
+			}
+			tasks = append(tasks, SubagentTask{
+				ID:           id,
+				Prompt:       getString(m, "prompt"),
+				SystemPrompt: getString(m, "system_prompt"),
+				Role:         getString(m, "role"),
+				Tools:        toStringSlice(m["tools"]),
+				Model:        getString(m, "model"),
+				MaxTurns:     toInt(m["max_turns"]),
+			})
+		}
+		return tasks
+	}
+
+	// Parallel mode without tasks array: build a single task from top-level
+	// args so the caller can use parallel=true with a single prompt.
+	prompt, ok := call.Args["prompt"].(string)
+	if !ok || prompt == "" {
+		return nil
+	}
+	id, ok := call.Args["id"].(string)
+	if !ok || id == "" {
+		id = nextRequestID("task")
+	}
+	return []SubagentTask{{
+		ID:           id,
+		Prompt:       prompt,
+		SystemPrompt: getString(call.Args, "system_prompt"),
+		Role:         getString(call.Args, "role"),
+		Tools:        toStringSlice(call.Args["tools"]),
+		Model:        getString(call.Args, "model"),
+		MaxTurns:     toInt(call.Args["max_turns"]),
+	}}
+}
+
+// getString safely extracts a string value from a map[string]any.
+func getString(m map[string]any, key string) string {
+	if m == nil {
+		return ""
+	}
+	s, ok := m[key].(string)
+	if !ok {
+		return ""
+	}
+	return s
+}
+
+// toAnySlice coerces a value into a []any, accepting []any and []map[string]any.
+func toAnySlice(v any) ([]any, bool) {
+	switch s := v.(type) {
+	case []any:
+		return s, true
+	case []map[string]any:
+		out := make([]any, len(s))
+		for i, m := range s {
+			out[i] = m
+		}
+		return out, true
+	}
+	return nil, false
 }
 
 // nextRequestID generates a unique-ish identifier for requests that do not

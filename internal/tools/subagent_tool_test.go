@@ -4,214 +4,169 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
-// fakeSubagentDispatcher is a tools.SubagentDispatcher stub.
-type fakeSubagentDispatcher struct {
-	task    SubagentTask
-	res     SubagentResult
-	err     error
-	listing []SubagentTask
+func TestSubagentToolImplementsParameterized(t *testing.T) {
+	tool := NewSubagentTool(nil)
+	_, ok := any(tool).(Parameterized)
+	assert.True(t, ok, "SubagentTool must implement Parameterized")
 }
 
-func (f *fakeSubagentDispatcher) Dispatch(_ context.Context, task SubagentTask) (SubagentResult, error) {
-	f.task = task
-	return f.res, f.err
+func TestSubagentToolImplementsPromptGuideliner(t *testing.T) {
+	tool := NewSubagentTool(nil)
+	_, ok := any(tool).(PromptGuideliner)
+	assert.True(t, ok, "SubagentTool must implement PromptGuideliner")
 }
 
-func (f *fakeSubagentDispatcher) ParallelDispatch(_ context.Context, tasks []SubagentTask) ([]SubagentResult, error) {
-	if len(tasks) > 0 {
-		f.task = tasks[0]
+func TestSubagentToolParametersSchema(t *testing.T) {
+	tool := NewSubagentTool(nil)
+	schema := tool.Parameters()
+
+	m, ok := schema.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "object", m["type"])
+
+	props, ok := m["properties"].(map[string]any)
+	require.True(t, ok)
+
+	// Verify all expected properties exist.
+	expectedProps := []string{"prompt", "role", "tools", "model", "max_turns", "parallel", "tasks"}
+	for _, p := range expectedProps {
+		assert.Contains(t, props, p, "schema should include property %q", p)
+	}
+
+	// Verify role enum.
+	roleProp, ok := props["role"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, []string{"researcher", "implementer", "reviewer", "tester"}, roleProp["enum"])
+
+	// Verify required includes prompt.
+	required, ok := m["required"].([]string)
+	require.True(t, ok)
+	assert.Contains(t, required, "prompt")
+}
+
+func TestSubagentToolPromptGuidelines(t *testing.T) {
+	tool := NewSubagentTool(nil)
+	guidelines := tool.PromptGuidelines()
+	assert.NotEmpty(t, guidelines)
+	// Each guideline should mention dispatch_subagent or sub-agent.
+	for _, g := range guidelines {
+		assert.NotEmpty(t, g)
+	}
+}
+
+// fakeDispatcher is a tools.SubagentDispatcher stub for testing.
+type fakeToolDispatcher struct {
+	parallelDispatched bool
+	singleDispatched   bool
+	tasks              []SubagentTask
+	results            []SubagentResult
+	err                error
+}
+
+func (f *fakeToolDispatcher) Dispatch(_ context.Context, task SubagentTask) (SubagentResult, error) {
+	f.singleDispatched = true
+	f.tasks = []SubagentTask{task}
+	if len(f.results) > 0 {
+		return f.results[0], f.err
+	}
+	return SubagentResult{TaskID: task.ID, Content: "single-result"}, f.err
+}
+
+func (f *fakeToolDispatcher) ParallelDispatch(_ context.Context, tasks []SubagentTask) ([]SubagentResult, error) {
+	f.parallelDispatched = true
+	f.tasks = tasks
+	if len(f.results) > 0 {
+		return f.results, f.err
 	}
 	results := make([]SubagentResult, len(tasks))
-	for i, t := range tasks {
-		results[i] = SubagentResult{TaskID: t.ID, Content: f.res.Content, Error: f.err}
+	for i, task := range tasks {
+		results[i] = SubagentResult{TaskID: task.ID, Content: "parallel-result-" + task.ID}
 	}
 	return results, f.err
 }
 
-func (f *fakeSubagentDispatcher) ListRunning() []SubagentTask { return f.listing }
+func (f *fakeToolDispatcher) ListRunning() []SubagentTask { return nil }
 
-func TestSubagentToolImplementsToolDefinition(t *testing.T) {
-	var _ ToolDefinition = (*SubagentTool)(nil)
-}
-
-func TestSubagentToolNameAndDescription(t *testing.T) {
-	tool := NewSubagentTool(&fakeSubagentDispatcher{})
-	assert.Equal(t, "dispatch_subagent", tool.Name())
-	assert.NotEmpty(t, tool.Description())
-}
-
-func TestSubagentToolExecuteSuccess(t *testing.T) {
-	d := &fakeSubagentDispatcher{
-		res: SubagentResult{TaskID: "t1", Content: "final answer", Duration: 3 * time.Millisecond},
-	}
-	tool := NewSubagentTool(d)
+func TestSubagentToolParallelDispatchWithTasksArray(t *testing.T) {
+	fd := &fakeToolDispatcher{}
+	tool := NewSubagentTool(fd)
 
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{
-			"prompt":    "summarize",
-			"id":        "t1",
-			"tools":     []string{"bash"},
-			"max_turns": 4,
+			"tasks": []any{
+				map[string]any{"prompt": "task1", "role": "researcher"},
+				map[string]any{"prompt": "task2", "role": "implementer"},
+			},
 		},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, "final answer", res.Output)
-	assert.Equal(t, "t1", res.Metadata["task_id"])
-	assert.Equal(t, 3*time.Millisecond, res.Metadata["duration"])
-
-	assert.Equal(t, "t1", d.task.ID)
-	assert.Equal(t, "summarize", d.task.Prompt)
-	assert.Equal(t, []string{"bash"}, d.task.Tools)
-	assert.Equal(t, 4, d.task.MaxTurns)
+	assert.True(t, fd.parallelDispatched)
+	assert.False(t, fd.singleDispatched)
+	assert.Contains(t, res.Output, "Task 1 (researcher):")
+	assert.Contains(t, res.Output, "Task 2 (implementer):")
+	parallel, ok := res.Metadata["parallel"].(bool)
+	assert.True(t, ok && parallel)
 }
 
-func TestSubagentToolExecuteParsesJSONShapes(t *testing.T) {
-	d := &fakeSubagentDispatcher{res: SubagentResult{Content: "ok"}}
-	tool := NewSubagentTool(d)
+func TestSubagentToolParallelDispatchWithParallelFlag(t *testing.T) {
+	fd := &fakeToolDispatcher{}
+	tool := NewSubagentTool(fd)
 
-	// JSON-decoded shapes: tools as []any, max_turns as float64.
-	_, err := tool.Execute(context.Background(), ToolCall{
+	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{
-			"prompt":    "hi",
-			"tools":     []any{"a", "b"},
-			"max_turns": float64(7),
+			"prompt":   "do something",
+			"parallel": true,
 		},
 	})
 	require.NoError(t, err)
-	assert.Equal(t, []string{"a", "b"}, d.task.Tools)
-	assert.Equal(t, 7, d.task.MaxTurns)
-	assert.NotEmpty(t, d.task.ID, "id should be generated when omitted")
+	assert.True(t, fd.parallelDispatched)
+	assert.Contains(t, res.Output, "Task 1")
 }
 
-func TestSubagentToolExecuteMissingPrompt(t *testing.T) {
-	tool := NewSubagentTool(&fakeSubagentDispatcher{})
-	_, err := tool.Execute(context.Background(), ToolCall{Args: map[string]any{}})
-	require.Error(t, err)
+func TestSubagentToolSingleDispatchWhenNotParallel(t *testing.T) {
+	fd := &fakeToolDispatcher{}
+	tool := NewSubagentTool(fd)
 
-	_, err = tool.Execute(context.Background(), ToolCall{Args: map[string]any{"prompt": ""}})
-	require.Error(t, err)
-
-	// non-string prompt is rejected too
-	_, err = tool.Execute(context.Background(), ToolCall{Args: map[string]any{"prompt": 123}})
-	require.Error(t, err)
+	res, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{
+			"prompt": "do something",
+		},
+	})
+	require.NoError(t, err)
+	assert.True(t, fd.singleDispatched)
+	assert.False(t, fd.parallelDispatched)
+	assert.Equal(t, "single-result", res.Output)
 }
 
-func TestSubagentToolExecuteDispatchError(t *testing.T) {
-	d := &fakeSubagentDispatcher{err: errors.New("boom")}
-	tool := NewSubagentTool(d)
-
-	_, err := tool.Execute(context.Background(), ToolCall{Args: map[string]any{"prompt": "x"}})
-	require.Error(t, err)
-}
-
-func TestSubagentToolExecuteResultError(t *testing.T) {
-	d := &fakeSubagentDispatcher{
-		res: SubagentResult{Content: "partial", Error: errors.New("sub failed")},
-	}
-	tool := NewSubagentTool(d)
-
-	res, err := tool.Execute(context.Background(), ToolCall{Args: map[string]any{"prompt": "x"}})
-	require.Error(t, err)
-	assert.Equal(t, "partial", res.Output)
-	assert.Equal(t, "sub failed", res.Metadata["error"])
-}
-
-func TestSubagentToolListRunningPassThrough(t *testing.T) {
-	d := &fakeSubagentDispatcher{listing: []SubagentTask{{ID: "a"}, {ID: "b"}}}
-	tool := NewSubagentTool(d)
-	assert.Len(t, tool.dispatcher.ListRunning(), 2)
-}
-
-func TestSubagentToolExecuteParsesSystemPrompt(t *testing.T) {
-	d := &fakeSubagentDispatcher{res: SubagentResult{Content: "ok"}}
-	tool := NewSubagentTool(d)
+func TestSubagentToolParallelDispatchErrorPropagation(t *testing.T) {
+	fd := &fakeToolDispatcher{err: errors.New("dispatch failed")}
+	tool := NewSubagentTool(fd)
 
 	_, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{
-			"prompt":        "do research",
-			"system_prompt": "you are a researcher",
+			"tasks": []any{
+				map[string]any{"prompt": "task1"},
+			},
 		},
 	})
-	require.NoError(t, err)
-
-	assert.Equal(t, "you are a researcher", d.task.SystemPrompt)
-	assert.Empty(t, d.task.Role, "role must not be set when only system_prompt is given")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parallel dispatch")
 }
 
-func TestSubagentToolExecuteParsesRole(t *testing.T) {
-	d := &fakeSubagentDispatcher{res: SubagentResult{Content: "ok"}}
-	tool := NewSubagentTool(d)
+func TestSubagentToolParallelDispatchEmptyTasks(t *testing.T) {
+	fd := &fakeToolDispatcher{}
+	tool := NewSubagentTool(fd)
 
 	_, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{
-			"prompt": "review this",
-			"role":   "reviewer",
+			"parallel": true,
 		},
 	})
-	require.NoError(t, err)
-
-	assert.Equal(t, "reviewer", d.task.Role)
-	assert.Empty(t, d.task.SystemPrompt, "system_prompt must remain empty so the dispatcher applies the role template")
-}
-
-func TestSubagentToolExecuteSystemPromptAndRoleBothParsed(t *testing.T) {
-	d := &fakeSubagentDispatcher{res: SubagentResult{Content: "ok"}}
-	tool := NewSubagentTool(d)
-
-	_, err := tool.Execute(context.Background(), ToolCall{
-		Args: map[string]any{
-			"prompt":        "go",
-			"system_prompt": "explicit",
-			"role":          "tester",
-		},
-	})
-	require.NoError(t, err)
-
-	assert.Equal(t, "explicit", d.task.SystemPrompt)
-	assert.Equal(t, "tester", d.task.Role)
-}
-
-func TestSubagentToolDescriptionIncludesGuidance(t *testing.T) {
-	tool := NewSubagentTool(&fakeSubagentDispatcher{})
-	desc := tool.Description()
-
-	assert.Contains(t, desc, "sub-agent")
-	assert.Contains(t, desc, "system_prompt")
-	assert.Contains(t, desc, "role")
-	assert.Contains(t, desc, "researcher, implementer, reviewer, tester")
-	assert.Contains(t, desc, "model")
-	assert.Contains(t, desc, "return its result")
-}
-
-func TestSubagentToolExecuteParsesModel(t *testing.T) {
-	d := &fakeSubagentDispatcher{res: SubagentResult{Content: "ok"}}
-	tool := NewSubagentTool(d)
-
-	_, err := tool.Execute(context.Background(), ToolCall{
-		Args: map[string]any{
-			"prompt": "go",
-			"model":  "gpt-4",
-		},
-	})
-	require.NoError(t, err)
-
-	assert.Equal(t, "gpt-4", d.task.Model)
-}
-
-func TestSubagentToolExecuteModelDefaultsToEmpty(t *testing.T) {
-	d := &fakeSubagentDispatcher{res: SubagentResult{Content: "ok"}}
-	tool := NewSubagentTool(d)
-
-	_, err := tool.Execute(context.Background(), ToolCall{
-		Args: map[string]any{"prompt": "go"},
-	})
-	require.NoError(t, err)
-
-	assert.Empty(t, d.task.Model)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "at least one task")
 }

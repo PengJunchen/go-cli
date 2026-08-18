@@ -61,8 +61,20 @@ type CompactResult struct {
 // budget and, when it has, triggers a compaction so the next turn retries with a
 // smaller context. It is deliberately trigger-only: the actual rewriting is
 // delegated to a caller-supplied Compactor.
+//
+// To avoid the O(n²) full-scan that re-estimating every item on every loop
+// iteration would cause, MidTurnCompact tracks how many items have already
+// been estimated (lastIdx) and the running total (runningTotal). Each
+// CompactIfNeeded call only estimates items that are new since the last call,
+// yielding O(1) work per iteration instead of O(n).
 type MidTurnCompact struct {
 	thresholdRatio float64
+	// lastIdx is the number of items already estimated in previous
+	// CompactIfNeeded calls within the same turn. Items[0:lastIdx] are
+	// assumed unchanged; only items[lastIdx:] are estimated.
+	lastIdx int
+	// runningTotal is the accumulated token estimate for items[0:lastIdx].
+	runningTotal int
 }
 
 // MidTurnCompactOption configures a MidTurnCompact.
@@ -100,16 +112,52 @@ func (m *MidTurnCompact) thresholdTokens(maxTokens int) int {
 	return limit
 }
 
+// Reset clears the incremental estimation state. Call this when the
+// conversation items are replaced (e.g. at the start of a new turn or after
+// compaction) so the next CompactIfNeeded re-estimates from scratch.
+func (m *MidTurnCompact) Reset() {
+	m.lastIdx = 0
+	m.runningTotal = 0
+}
+
+// estimateIncremental returns the total token estimate for items without
+// re-scanning items that were already estimated in a previous call. It appends
+// the estimate of each new item (items[lastIdx:]) to runningTotal, caching the
+// per-item result in TurnItem.EstimatedTokens. When the item count shrinks
+// (e.g. a new turn starts with fewer items) the state is reset and all items
+// are estimated from scratch. This satisfies AC-2: the midturn guard does not
+// do a full scan every iteration.
+func (m *MidTurnCompact) estimateIncremental(items []TurnItem, estimator TokenEstimator) int {
+	if len(items) < m.lastIdx {
+		// Items shrank: new turn or external replacement. Reset and
+		// re-estimate everything.
+		m.lastIdx = 0
+		m.runningTotal = 0
+	}
+	for i := m.lastIdx; i < len(items); i++ {
+		m.runningTotal += estimateItemTokens(&items[i], estimator)
+	}
+	m.lastIdx = len(items)
+	return m.runningTotal
+}
+
 // CompactIfNeeded triggers compaction only when the current context estimate
 // exceeds the configured threshold fraction of maxTokens. When it does not, the
 // items are returned unchanged with Triggered=false. When it does, compaction
 // runs and the result is returned together with a Triggered=true result whose
 // Reason is TriggerThreshold.
+//
+// Estimation is incremental: only items new since the last call are estimated,
+// avoiding the O(n²) full-scan that would otherwise occur when the guard is
+// called on every loop iteration with a growing conversation.
 func (m *MidTurnCompact) CompactIfNeeded(ctx context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator, compactor Compactor) ([]TurnItem, CompactResult, error) {
-	current := estimateTokens(items, estimator)
+	current := m.estimateIncremental(items, estimator)
 	if current <= m.thresholdTokens(maxTokens) {
 		return items, CompactResult{Triggered: false, Reason: TriggerNone}, nil
 	}
+	// Compaction will replace items; reset incremental state so the next
+	// call re-estimates from scratch.
+	m.Reset()
 	return compactWithReason(ctx, items, maxTokens, estimator, compactor, TriggerThreshold)
 }
 
@@ -118,6 +166,8 @@ func (m *MidTurnCompact) CompactIfNeeded(ctx context.Context, items []TurnItem, 
 // (manual, or an already-observed overflow) and reports Reason TriggerManual; a
 // caller that knows the overflow source may replace the reason as needed.
 func (m *MidTurnCompact) CompactTriggered(ctx context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator, compactor Compactor) ([]TurnItem, CompactResult, error) {
+	// Compaction will replace items; reset incremental state.
+	m.Reset()
 	return compactWithReason(ctx, items, maxTokens, estimator, compactor, TriggerManual)
 }
 

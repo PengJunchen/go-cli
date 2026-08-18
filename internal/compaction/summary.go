@@ -82,16 +82,28 @@ func NewSummaryCompactor(summarizer Summarizer, opts ...SummaryCompactorOption) 
 // dangling tool result. When no cut satisfies the budget, it returns len(items)
 // (i.e. summarize everything).
 func (c *SummaryCompactor) findCutPoint(items []TurnItem, maxTokens int, estimator TokenEstimator) int {
-	placeholder := estimateTokens([]TurnItem{{Content: summaryPlaceholder}}, estimator)
-	for cut := 0; cut <= len(items); cut++ {
-		if cut < len(items) && items[cut].Role == RoleTool {
+	placeholder := estimateLength(summaryPlaceholder, estimator)
+
+	// Build a suffix sum array so range queries are O(1) instead of
+	// re-estimating the entire tail on every iteration. suffixSum[i] holds
+	// the total estimated tokens for items[i:]. estimateItemTokens caches
+	// each item's estimate, so the pre-computation is O(n) and subsequent
+	// callers (e.g. MicroCompactor) reuse the cached values.
+	n := len(items)
+	suffixSum := make([]int, n+1)
+	for i := n - 1; i >= 0; i-- {
+		suffixSum[i] = suffixSum[i+1] + estimateItemTokens(&items[i], estimator)
+	}
+
+	for cut := 0; cut <= n; cut++ {
+		if cut < n && items[cut].Role == RoleTool {
 			continue
 		}
-		if placeholder+estimateTokens(items[cut:], estimator) <= maxTokens {
+		if placeholder+suffixSum[cut] <= maxTokens {
 			return cut
 		}
 	}
-	return len(items)
+	return n
 }
 
 // Compact summarizes the oldest region and keeps the newest turns whole.
@@ -126,7 +138,7 @@ func (c *SummaryCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 	if summary == "" {
 		summary = summaryPlaceholder
 	}
-	if summary = c.clampSummary(summary); summary == "" {
+	if summary = c.clampSummary(summary, estimator); summary == "" {
 		summary = summaryPlaceholder
 	}
 
@@ -200,20 +212,36 @@ func (c *SummaryCompactor) buildSummaryPrompt(items []TurnItem) string {
 	return sb.String()
 }
 
-// clampSummary bounds the summary text to maxSummaryTokens using the heuristic,
-// so the compaction entry cannot balloon past the intended size.
-func (c *SummaryCompactor) clampSummary(summary string) string {
+// clampSummary bounds the summary text to maxSummaryTokens using the provided
+// estimator, so the compaction entry cannot balloon past the intended size.
+// Truncation is performed at rune boundaries to avoid splitting multi-byte
+// characters.
+func (c *SummaryCompactor) clampSummary(summary string, estimator TokenEstimator) string {
 	if c.maxSummaryTokens <= 0 {
 		return summary
 	}
-	if len(summary)/4 <= c.maxSummaryTokens {
+	if estimateLength(summary, estimator) <= c.maxSummaryTokens {
 		return summary
 	}
-	limit := c.maxSummaryTokens * 4
-	if limit < 0 || limit >= len(summary) {
-		return summary
+	// Binary search for the longest rune prefix whose estimate fits the budget.
+	// Token estimates are monotonically non-decreasing with prefix length (every
+	// rune contributes a non-negative weight), so binary search is valid.
+	runes := []rune(summary)
+	lo, hi := 0, len(runes)
+	for lo < hi {
+		mid := lo + (hi-lo+1)/2
+		if estimateLength(string(runes[:mid]), estimator) <= c.maxSummaryTokens {
+			lo = mid
+		} else {
+			hi = mid - 1
+		}
 	}
-	return summary[:limit]
+	if lo <= 0 {
+		// Even a single rune does not fit the budget; return empty so the
+		// caller can substitute a placeholder.
+		return ""
+	}
+	return string(runes[:lo])
 }
 
 // isFileOp reports whether a tool name is a file-operation tool.

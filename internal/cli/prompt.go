@@ -2,12 +2,15 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
 	"log/slog"
 
 	"github.com/pengjunchen/go-cli/internal/config"
+	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/session"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
@@ -58,10 +61,18 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) error {
 		modelFlag    string
 		providerFlag string
 		verboseFlag  bool
+		outputMode   OutputMode
+		approveMode  ApproveMode
+		forkFlag     string
+		noSandbox    bool
 	)
 	fs.StringVar(&modelFlag, "model", "", "model name to use")
 	fs.StringVar(&providerFlag, "provider", "", "provider name to use")
 	fs.BoolVar(&verboseFlag, "verbose", false, "enable verbose output")
+	fs.Var(&outputMode, "output", "output format: json|stream|text (default text)")
+	fs.Var(&approveMode, "approve", "approval mode: auto|deny|ask (default ask)")
+	fs.StringVar(&forkFlag, "fork", "", "fork from an existing session id")
+	fs.BoolVar(&noSandbox, "no-sandbox", false, "disable bash sandbox enforcement")
 	if err := fs.Parse(args); err != nil {
 		return newUsageError("prompt: %v", err)
 	}
@@ -109,13 +120,33 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	// Assemble the full agent runtime with all production wiring (same as
 	// interactive: model wrapping, tools, approval gates, retry/cost tracking,
 	// output guards, subagent, compaction).
-	assembly, err := AssembleAgent(dispatchCtx, rc, providerName, modelName, c.out)
+	assembleOpts := []AssembleOption{WithApproveMode(approveMode)}
+	if forkFlag != "" {
+		// --fork requires a session store to build the tree from.
+		assembleOpts = append(assembleOpts, WithSessionPersistence(true))
+	}
+	if noSandbox {
+		assembleOpts = append(assembleOpts, WithNoSandbox())
+	}
+	assembly, err := AssembleAgent(dispatchCtx, rc, providerName, modelName, c.out,
+		assembleOpts...)
 	if err != nil {
 		dispatchSpan.SetStatus(tracing.SpanStatusError, err.Error())
 		dispatchSpan.End()
 		return newExecutionError("prompt: assemble agent", err)
 	}
 	defer assembly.Cleanup()
+
+	// Fork from an existing session: build a SessionTree from the store,
+	// zero-copy branch at the requested entry, rebuild context, and inject
+	// the resulting history into the agent.
+	if forkFlag != "" {
+		if err := c.forkSession(dispatchCtx, assembly, forkFlag); err != nil {
+			dispatchSpan.SetStatus(tracing.SpanStatusError, err.Error())
+			dispatchSpan.End()
+			return newExecutionError("prompt: fork session", err)
+		}
+	}
 
 	stream, err := assembly.Harness.Submit(dispatchCtx, prompt)
 	if err != nil {
@@ -125,48 +156,10 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	}
 
 	out := c.out
-	streaming := false
-	for ev := range stream.Events() {
-		if ev.Content == "" || ev.Kind == "done" {
-			continue
-		}
-		if ev.Incremental {
-			// Stream tokens as they arrive, without newlines (typewriter
-			// effect for terminals and pipes).
-			streaming = true
-			if _, werr := fmt.Fprint(out, ev.Content); werr != nil {
-				dispatchSpan.SetStatus(tracing.SpanStatusError, werr.Error())
-				dispatchSpan.End()
-				return newExecutionError("prompt: write output", werr)
-			}
-			continue
-		}
-		// Complete non-incremental assistant message.
-		if streaming {
-			// Content has already been streamed token-by-token; close the
-			// line with a trailing newline.
-			if _, werr := fmt.Fprintln(out); werr != nil {
-				dispatchSpan.SetStatus(tracing.SpanStatusError, werr.Error())
-				dispatchSpan.End()
-				return newExecutionError("prompt: write output", werr)
-			}
-		} else {
-			// Non-streaming response (e.g. provider without Stream support).
-			if _, werr := fmt.Fprintf(out, "%s\n", ev.Content); werr != nil {
-				dispatchSpan.SetStatus(tracing.SpanStatusError, werr.Error())
-				dispatchSpan.End()
-				return newExecutionError("prompt: write output", werr)
-			}
-		}
-		streaming = false
-	}
-	// If the last event was incremental, ensure a trailing newline.
-	if streaming {
-		if _, werr := fmt.Fprintln(out); werr != nil {
-			dispatchSpan.SetStatus(tracing.SpanStatusError, werr.Error())
-			dispatchSpan.End()
-			return newExecutionError("prompt: write output", werr)
-		}
+	if err := c.consumeEvents(out, stream.Events(), outputMode); err != nil {
+		dispatchSpan.SetStatus(tracing.SpanStatusError, err.Error())
+		dispatchSpan.End()
+		return newExecutionError("prompt: write output", err)
 	}
 
 	result, err := stream.Result()
@@ -187,6 +180,87 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	return nil
 }
 
+// consumeEvents reads events from the stream and writes them to out according
+// to the specified output mode.
+func (c *promptCmd) consumeEvents(out io.Writer, events <-chan core.AgentEvent, mode OutputMode) error {
+	switch mode {
+	case OutputJSON:
+		return c.consumeEventsJSON(out, events)
+	case OutputStream:
+		return c.consumeEventsStream(out, events)
+	default:
+		return c.consumeEventsText(out, events)
+	}
+}
+
+// consumeEventsJSON writes each AgentEvent as a newline-delimited JSON object
+// (NDJSON), suitable for programmatic consumption in CI/CD pipelines.
+func (c *promptCmd) consumeEventsJSON(out io.Writer, events <-chan core.AgentEvent) error {
+	enc := json.NewEncoder(out)
+	for ev := range events {
+		if err := enc.Encode(ev); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// consumeEventsStream outputs raw content tokens without formatting, suitable
+// for piping to other tools. Only incremental message tokens are emitted to
+// avoid duplicating content from non-incremental complete messages.
+func (c *promptCmd) consumeEventsStream(out io.Writer, events <-chan core.AgentEvent) error {
+	for ev := range events {
+		if ev.Content == "" || ev.Kind == "done" {
+			continue
+		}
+		if !ev.Incremental && ev.Kind == "message" {
+			// Non-incremental complete message: output once with newline.
+			if _, err := fmt.Fprintln(out, ev.Content); err != nil { //nolint:errcheck
+				return err
+			}
+			continue
+		}
+		if _, err := fmt.Fprint(out, ev.Content); err != nil { //nolint:errcheck
+			return err
+		}
+	}
+	return nil
+}
+
+// consumeEventsText outputs human-readable text. Streams incremental tokens
+// and prints complete messages with newlines.
+func (c *promptCmd) consumeEventsText(out io.Writer, events <-chan core.AgentEvent) error {
+	streaming := false
+	for ev := range events {
+		if ev.Content == "" || ev.Kind == "done" {
+			continue
+		}
+		if ev.Incremental {
+			streaming = true
+			if _, err := fmt.Fprint(out, ev.Content); err != nil { //nolint:errcheck
+				return err
+			}
+			continue
+		}
+		if streaming {
+			if _, err := fmt.Fprintln(out); err != nil { //nolint:errcheck
+				return err
+			}
+		} else {
+			if _, err := fmt.Fprintf(out, "%s\n", ev.Content); err != nil { //nolint:errcheck
+				return err
+			}
+		}
+		streaming = false
+	}
+	if streaming {
+		if _, err := fmt.Fprintln(out); err != nil { //nolint:errcheck
+			return err
+		}
+	}
+	return nil
+}
+
 // emitClosedown records the closedown span emitted once the harness has
 // finished producing events for a prompt run.
 func (c *promptCmd) emitClosedown(ctx context.Context, command string) {
@@ -196,6 +270,40 @@ func (c *promptCmd) emitClosedown(ctx context.Context, command string) {
 	)
 	stopSpan.SetStatus(tracing.SpanStatusOK, "")
 	stopSpan.End()
+}
+
+// forkSession builds a SessionTree from the assembled store, zero-copy branches
+// at the requested session entry, rebuilds the context, and injects the
+// resulting history into the agent. This enables headless continuation from any
+// point in a previous conversation without affecting the original session.
+func (c *promptCmd) forkSession(ctx context.Context, assembly *AgentAssembly, sessionID string) error {
+	if assembly.SessionStore == nil {
+		return fmt.Errorf("session store unavailable (configure session.store_path)")
+	}
+
+	treeBuilder := session.NewDefaultSessionTreeBuilder()
+	sessionTree, err := treeBuilder.BuildFromStore(ctx, assembly.SessionStore)
+	if err != nil {
+		return fmt.Errorf("build session tree: %w", err)
+	}
+	if sessionTree.CurrentLeaf() == "" {
+		return fmt.Errorf("session store is empty, nothing to fork from")
+	}
+
+	// Branch zero-copy repoints the leaf at the requested entry.
+	if err := sessionTree.Branch(ctx, sessionID); err != nil {
+		return fmt.Errorf("fork from session %q: %w", sessionID, err)
+	}
+
+	// Rebuild context for the forked branch.
+	sc, err := sessionTree.BuildContext(ctx, sessionID)
+	if err != nil {
+		return fmt.Errorf("rebuild context: %w", err)
+	}
+
+	assembly.Agent.SetHistory(session.EntriesToAgentMessages(sc.Messages))
+	slog.Info("cli_prompt_fork", "op", "cli.prompt.fork", "session_id", sessionID, "messages", len(sc.Messages))
+	return nil
 }
 
 // resolveModelName returns the effective model name, preferring the CLI flag

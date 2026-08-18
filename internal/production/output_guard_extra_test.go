@@ -185,7 +185,7 @@ func TestOutputGuardChainGuardsReturnsCopy(t *testing.T) {
 	assert.Len(t, chain.Guards(), 2)
 }
 
-// OutputGuard registry default chain composes the three built-in guards and
+// OutputGuard registry default chain composes the four built-in guards and
 // blocks via each member.
 func TestDefaultOutputGuardChainComposition(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
@@ -193,7 +193,7 @@ func TestDefaultOutputGuardChainComposition(t *testing.T) {
 	chain := defaultOutputGuardChain()
 	c, ok := chain.(*OutputGuardChain)
 	require.True(t, ok, "default guard chain must be an OutputGuardChain")
-	require.Len(t, c.Guards(), 3)
+	require.Len(t, c.Guards(), 4)
 
 	// Code injection is denied with critical severity.
 	res, err := chain.Check(ctx, "DROP TABLE users")

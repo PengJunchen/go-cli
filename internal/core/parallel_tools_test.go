@@ -54,7 +54,7 @@ func TestExecuteToolsParallel(t *testing.T) {
 	}
 
 	start := time.Now()
-	results := executeToolsParallel(context.Background(), toolSrv, calls)
+	results, _ := executeToolsParallel(context.Background(), toolSrv, calls, nil)
 	elapsed := time.Since(start)
 
 	require.Len(t, results, 3)
@@ -82,7 +82,7 @@ func TestExecuteToolsParallel(t *testing.T) {
 
 func TestExecuteToolsParallelEmpty(t *testing.T) {
 	toolSrv := mock.NewMockToolServer()
-	results := executeToolsParallel(context.Background(), toolSrv, nil)
+	results, _ := executeToolsParallel(context.Background(), toolSrv, nil, nil)
 	assert.Empty(t, results)
 }
 
@@ -103,7 +103,7 @@ func TestExecuteToolsParallelWithError(t *testing.T) {
 		{ID: "2", Name: "bad"},
 	}
 
-	results := executeToolsParallel(context.Background(), toolSrv, calls)
+	results, _ := executeToolsParallel(context.Background(), toolSrv, calls, nil)
 	require.Len(t, results, 2)
 
 	assert.NoError(t, results[0].Err)
@@ -125,7 +125,7 @@ func TestExecuteToolsParallelSingleCall(t *testing.T) {
 	require.NoError(t, err)
 
 	calls := []llm.ToolCall{{ID: "1", Name: "only"}}
-	results := executeToolsParallel(context.Background(), toolSrv, calls)
+	results, _ := executeToolsParallel(context.Background(), toolSrv, calls, nil)
 
 	require.Len(t, results, 1)
 	assert.Equal(t, "single", results[0].Output)
@@ -223,7 +223,7 @@ func TestExecutionModeSequentialDefault(t *testing.T) {
 }
 
 func TestExecuteSingleToolNoRegistry(t *testing.T) {
-	_, err := executeSingleTool(context.Background(), nil, tools.ToolCall{Name: "x"})
+	_, _, err := executeSingleTool(context.Background(), nil, tools.ToolCall{Name: "x"}, nil)
 	assert.Error(t, err)
 	assert.Equal(t, errNoTools, err)
 }
@@ -266,7 +266,7 @@ func TestExecuteToolsParallelConcurrency(t *testing.T) {
 		{ID: "5", Name: "concurrent_4"},
 	}
 
-	results := executeToolsParallel(context.Background(), toolSrv, calls)
+	results, _ := executeToolsParallel(context.Background(), toolSrv, calls, nil)
 	require.Len(t, results, 5)
 
 	for _, r := range results {

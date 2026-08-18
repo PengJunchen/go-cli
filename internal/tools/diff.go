@@ -1,10 +1,13 @@
 package tools
 
-import "strings"
+import (
+	"context"
+	"strings"
+)
 
 // DiffGenerator generates unified diffs between old and new content.
 type DiffGenerator interface {
-	Generate(oldContent, newContent, path string) (string, error)
+	Generate(ctx context.Context, oldContent, newContent, path string) (string, error)
 }
 
 // ANSI color codes used when color output is enabled.
@@ -53,7 +56,7 @@ type diffEntry struct {
 // file (empty newContent) yields all removed lines; identical content yields an
 // empty string. When maxLines is positive the body is truncated to roughly
 // maxLines lines (first half + "..." + last half).
-func (g *UnifiedDiffGenerator) Generate(oldContent, newContent, path string) (string, error) {
+func (g *UnifiedDiffGenerator) Generate(_ context.Context, oldContent, newContent, path string) (string, error) {
 	// New file: every line is an addition.
 	if oldContent == "" {
 		lines := splitDiffLines(newContent)
@@ -233,4 +236,37 @@ func maxInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// GitDiffGenerator implements DiffGenerator by delegating to `git diff` when
+// inside a git repository. When the path is not inside a git repo (or the git
+// command fails), it falls back to a wrapped DiffGenerator (typically
+// UnifiedDiffGenerator). This gives more accurate diffs in git repos (rename
+// detection, binary handling) while remaining backward-compatible outside.
+type GitDiffGenerator struct {
+	git      GitTool
+	fallback DiffGenerator
+}
+
+// Compile-time check that GitDiffGenerator satisfies DiffGenerator.
+var _ DiffGenerator = (*GitDiffGenerator)(nil)
+
+// NewGitDiffGenerator returns a GitDiffGenerator that uses the given GitTool
+// for `git diff` and falls back to fallback when git is unavailable or the diff
+// is empty. Both git and fallback must be non-nil.
+func NewGitDiffGenerator(git GitTool, fallback DiffGenerator) *GitDiffGenerator {
+	return &GitDiffGenerator{git: git, fallback: fallback}
+}
+
+// Generate tries `git diff -- <path>` first. When the git diff succeeds and
+// returns non-empty output, it is returned directly. Otherwise (not in a git
+// repo, no changes, or error), the fallback DiffGenerator is used.
+func (g *GitDiffGenerator) Generate(ctx context.Context, oldContent, newContent, path string) (string, error) {
+	if g.git != nil && strings.TrimSpace(path) != "" {
+		out, err := g.git.Diff(ctx, GitDiffOptions{Path: path})
+		if err == nil && strings.TrimSpace(out) != "" {
+			return out, nil
+		}
+	}
+	return g.fallback.Generate(ctx, oldContent, newContent, path)
 }

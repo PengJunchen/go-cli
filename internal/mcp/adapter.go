@@ -28,19 +28,40 @@ type JSONRPCLineTransport struct {
 	out    io.Writer
 	closeF func() error
 
-	mu     sync.Mutex
-	nextID int64
+	mu            sync.Mutex
+	nextID        int64
+	notifications chan json.RawMessage
 }
 
 // NewJSONRPCLineTransport returns a transport that writes frames to out and
 // reads them from in. closeFn is invoked when Close is called and may be nil.
 func NewJSONRPCLineTransport(in io.Reader, out io.Writer, closeFn func() error) *JSONRPCLineTransport {
-	return &JSONRPCLineTransport{in: bufio.NewReader(in), out: out, closeF: closeFn}
+	return &JSONRPCLineTransport{
+		in:            bufio.NewReader(in),
+		out:           out,
+		closeF:        closeFn,
+		notifications: make(chan json.RawMessage, 16),
+	}
 }
+
+// defaultJSONRPCTimeout bounds individual JSON-RPC requests when the caller
+// has not set its own deadline. This prevents a hung server from blocking
+// the agent loop indefinitely.
+const defaultJSONRPCTimeout = 30 * time.Second
 
 // Request sends a JSON-RPC request with a fresh id and blocks until a response
 // with a matching id arrives. It returns the parsed result object.
+//
+// If the caller's context has no deadline, a default 30-second timeout is
+// applied to prevent unbounded blocking on an unresponsive server.
 func (t *JSONRPCLineTransport) Request(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
+	// Apply a default timeout when the caller hasn't set a deadline.
+	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultJSONRPCTimeout)
+		defer cancel()
+	}
+
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -56,7 +77,7 @@ func (t *JSONRPCLineTransport) Request(ctx context.Context, method string, param
 		return nil, fmt.Errorf("mcp: marshal request: %w", err)
 	}
 
-	if _, err := fmt.Fprintln(t.out, string(req)); err != nil {
+	if _, err := fmt.Fprintln(t.out, string(req)); err != nil { //nolint:errcheck
 		return nil, fmt.Errorf("mcp: write request: %w", err)
 	}
 
@@ -76,6 +97,19 @@ func (t *JSONRPCLineTransport) Request(ctx context.Context, method string, param
 		if err := json.Unmarshal([]byte(line), &frame); err != nil {
 			continue
 		}
+
+		// Forward notifications (frames without an id field) to the
+		// notification channel. Non-blocking: if the channel is full the
+		// notification is dropped so request/response handling is never
+		// stalled.
+		if _, hasID := frame["id"]; !hasID {
+			select {
+			case t.notifications <- json.RawMessage(strings.TrimSpace(line)):
+			default:
+			}
+			continue
+		}
+
 		if fid, ok := frame["id"].(float64); ok && int64(fid) == id {
 			if errVal, hasErr := frame["error"]; hasErr && errVal != nil {
 				return nil, fmt.Errorf("mcp: rpc error: %v", errVal)
@@ -89,12 +123,41 @@ func (t *JSONRPCLineTransport) Request(ctx context.Context, method string, param
 	}
 }
 
+// Send sends a JSON-RPC notification (no id, no response expected) to the
+// server. It is used for the notifications/initialized message in the MCP
+// handshake.
+func (t *JSONRPCLineTransport) Send(method string, params map[string]any) error {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+
+	msg, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  method,
+		"params":  params,
+	})
+	if err != nil {
+		return fmt.Errorf("mcp: marshal notification: %w", err)
+	}
+	if _, err := fmt.Fprintln(t.out, string(msg)); err != nil { //nolint:errcheck
+		return fmt.Errorf("mcp: write notification: %w", err)
+	}
+	return nil
+}
+
 // Close releases the underlying connection, if one was supplied.
 func (t *JSONRPCLineTransport) Close() error {
 	if t.closeF != nil {
 		return t.closeF()
 	}
 	return nil
+}
+
+// Notifications returns a read-only channel that yields JSON-RPC notification
+// frames (messages without an id field) received from the server. The channel
+// is buffered; if it is full, additional notifications are silently dropped so
+// that request/response handling is never blocked.
+func (t *JSONRPCLineTransport) Notifications() <-chan json.RawMessage {
+	return t.notifications
 }
 
 // AdapterOption configures an SDK adapter.
@@ -107,6 +170,13 @@ func WithConnection(conn *JSONRPCLineTransport) AdapterOption {
 	return func(c *adapterCore) { c.conn = conn; c.externalConn = true }
 }
 
+// WithoutInitialize disables the automatic MCP initialize/initialized
+// handshake during Connect. It is used by tests that drive lightweight fake
+// servers which do not implement the initialize method.
+func WithoutInitialize() AdapterOption {
+	return func(c *adapterCore) { c.skipInitialize = true }
+}
+
 // adapterCore holds the shared state and MCPClient logic used by both SDK
 // adapters. The OfficialSDKAdapter and Mark3labsAdapter embed it so they are
 // interchangeable MCPClient implementations backed by the same self-contained
@@ -117,13 +187,21 @@ type adapterCore struct {
 	externalConn bool
 	proc         *exec.Cmd
 
-	mu        sync.Mutex
-	connected bool
+	mu                sync.Mutex
+	connected         bool
+	maxReconnect      int
+	reconnectAttempts int
+	skipInitialize    bool
+	protocolVersion   string
 }
+
+// defaultMaxReconnect is the number of reconnection attempts made when a Call
+// fails due to a transport-level connection loss before giving up.
+const defaultMaxReconnect = 3
 
 // newAdapterCore builds the core for a given config and options.
 func newAdapterCore(cfg MCPServerConfig, opts []AdapterOption) *adapterCore {
-	c := &adapterCore{cfg: cfg}
+	c := &adapterCore{cfg: cfg, maxReconnect: defaultMaxReconnect}
 	for _, opt := range opts {
 		opt(c)
 	}
@@ -163,14 +241,29 @@ func (c *adapterCore) Connect(ctx context.Context) error {
 		}
 		c.proc = cmd
 		c.conn = NewJSONRPCLineTransport(stdout, stdin, func() error {
-			if c.proc != nil {
-				return c.proc.Process.Kill()
-			}
+			// Closing the transport does not kill the process; Disconnect
+			// handles process teardown explicitly to avoid a double-Kill.
 			return nil
 		})
 	}
 
 	c.connected = true
+
+	if !c.skipInitialize {
+		if err := c.doInitializeLocked(ctx); err != nil {
+			c.connected = false
+			if !c.externalConn && c.conn != nil {
+				_ = c.conn.Close() //nolint:errcheck
+				c.conn = nil
+			}
+			if c.proc != nil {
+				_ = c.proc.Process.Kill() //nolint:errcheck
+				c.proc = nil
+			}
+			return fmt.Errorf("mcp: initialize handshake: %w", err)
+		}
+	}
+
 	return nil
 }
 
@@ -209,10 +302,103 @@ func (c *adapterCore) Disconnect(_ context.Context) error {
 	return err
 }
 
+// reconnect tears down the current session and re-establishes it. It is called
+// by callWithReconnect when a transport-level error suggests the connection was
+// lost. The caller is responsible for enforcing the maxReconnect budget and
+// backoff between attempts.
+func (c *adapterCore) reconnect(ctx context.Context) error {
+	// Disconnect ignoring errors — we are already in a degraded state.
+	_ = c.Disconnect(ctx) //nolint:errcheck // best-effort teardown
+	return c.Connect(ctx)
+}
+
+// reconnectBackoff returns the delay before the (zero-based) attempt-th
+// reconnection try: 1s, 2s, 4s, 8s, ... capped at 8s.
+func reconnectBackoff(attempt int) time.Duration {
+	d := time.Second
+	for i := 0; i < attempt; i++ {
+		d *= 2
+		if d >= 8*time.Second {
+			return 8 * time.Second
+		}
+	}
+	return d
+}
+
+// isConnectionError reports whether err likely indicates a transport-level
+// connection loss rather than a server-side RPC error. RPC errors are
+// server-level responses and must not trigger a reconnect.
+func isConnectionError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "rpc error") {
+		return false
+	}
+	return strings.Contains(msg, "write request") ||
+		strings.Contains(msg, "read response") ||
+		strings.Contains(msg, "broken pipe") ||
+		strings.Contains(msg, "EOF")
+}
+
+// requestLocked snapshots c.conn under c.mu and sends a JSON-RPC request.
+// Holding the lock only for the pointer read (not the blocking Request call)
+// prevents a nil-pointer dereference when a concurrent Disconnect or reconnect
+// nils out c.conn between the read and the call.
+func (c *adapterCore) requestLocked(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn == nil {
+		return nil, fmt.Errorf("mcp: connection is not established")
+	}
+	return conn.Request(ctx, method, params)
+}
+
+// callWithReconnect sends a JSON-RPC request and, when the error looks like a
+// transport-level connection loss, attempts to reconnect (with exponential
+// backoff) up to maxReconnect times before returning. On a successful
+// reconnect the request is retried once.
+func (c *adapterCore) callWithReconnect(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
+	res, err := c.requestLocked(ctx, method, params)
+	if err == nil {
+		return res, nil
+	}
+	if !isConnectionError(err) {
+		return nil, err
+	}
+
+	for attempt := 0; attempt < c.maxReconnect; attempt++ {
+		c.mu.Lock()
+		c.reconnectAttempts++
+		c.mu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(reconnectBackoff(attempt)):
+		}
+
+		if rErr := c.reconnect(ctx); rErr != nil {
+			err = rErr
+			continue
+		}
+		// Reconnected — retry the request.
+		if res, err = c.requestLocked(ctx, method, params); err == nil {
+			return res, nil
+		}
+		if !isConnectionError(err) {
+			return nil, err
+		}
+	}
+	return nil, err
+}
+
 // ListTools returns the tools declared by the server via the tools/list
 // JSON-RPC method.
 func (c *adapterCore) ListTools(ctx context.Context) ([]MCPTool, error) {
-	res, err := c.conn.Request(ctx, "tools/list", map[string]any{})
+	res, err := c.callWithReconnect(ctx, "tools/list", map[string]any{})
 	if err != nil {
 		return nil, fmt.Errorf("mcp: list tools: %w", err)
 	}
@@ -251,7 +437,7 @@ func (c *adapterCore) CallTool(ctx context.Context, name string, args map[string
 	defer span.End()
 
 	start := time.Now()
-	res, err := c.conn.Request(spanCtx, "tools/call", map[string]any{
+	res, err := c.callWithReconnect(spanCtx, "tools/call", map[string]any{
 		"name":      name,
 		"arguments": args,
 	})
@@ -280,6 +466,51 @@ func (c *adapterCore) CallTool(ctx context.Context, name string, args map[string
 
 // Name returns the logical server name.
 func (c *adapterCore) Name() string { return c.cfg.Name }
+
+// ProtocolVersion returns the protocol version negotiated during the
+// initialize handshake, or "" before Connect.
+func (c *adapterCore) ProtocolVersion() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.protocolVersion
+}
+
+// Notifications returns a read-only channel that yields JSON-RPC notification
+// frames received from the server, or nil if the adapter is not connected.
+func (c *adapterCore) Notifications() <-chan json.RawMessage {
+	c.mu.Lock()
+	conn := c.conn
+	c.mu.Unlock()
+	if conn == nil {
+		return nil
+	}
+	return conn.Notifications()
+}
+
+// doInitializeLocked performs the MCP initialize/initialized handshake. The
+// caller must hold c.mu. It sends an initialize request, validates the
+// returned protocolVersion against SupportedProtocolVersions, stores the
+// negotiated version, and sends notifications/initialized.
+func (c *adapterCore) doInitializeLocked(ctx context.Context) error {
+	conn := c.conn
+	if conn == nil {
+		return fmt.Errorf("mcp: connection is not established")
+	}
+	res, err := conn.Request(ctx, "initialize", map[string]any{
+		"protocolVersion": LatestProtocolVersion,
+		"capabilities":    map[string]any{},
+		"clientInfo":      map[string]any{"name": "go-cli", "version": "1.0.0"},
+	})
+	if err != nil {
+		return err
+	}
+	version, _ := res["protocolVersion"].(string)
+	if !IsSupportedProtocolVersion(version) {
+		return fmt.Errorf("unsupported protocol version: %s", version)
+	}
+	c.protocolVersion = version
+	return conn.Send("notifications/initialized", map[string]any{})
+}
 
 // OfficialSDKAdapter is an MCPClient adapter that corresponds to the official
 // Go MCP SDK's client transports. It uses a self-contained in-process

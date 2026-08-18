@@ -12,7 +12,7 @@ import (
 )
 
 // AuthChain resolves API keys through a priority chain:
-// CLI flag -> auth.json -> environment variable -> models.json.
+// CLI flag -> keychain -> auth.json -> environment variable -> models.json.
 // Each source is consulted in order; the first non-empty key wins.
 type AuthChain struct {
 	mu      sync.RWMutex
@@ -32,21 +32,25 @@ type AuthSource struct {
 // provider has no key in that source.
 var ErrAuthNotFound = errors.New("auth: key not found in source")
 
-// authSourceCLI, authSourceAuthFile, authSourceEnv, authSourceModels are the
-// ordered names of the default auth sources.
+// authSourceCLI, authSourceKeychain, authSourceAuthFile, authSourceEnv,
+// authSourceModels are the ordered names of the default auth sources.
 const (
 	authSourceCLI      = "cli-flag"
+	authSourceKeychain = "keychain"
 	authSourceAuthFile = "auth.json"
 	authSourceEnv      = "env"
 	authSourceModels   = "models.json"
 )
 
 // NewAuthChain returns an AuthChain with the default sources configured in
-// priority order: CLI flag -> auth.json -> environment variable -> models.json.
+// priority order: CLI flag -> keychain -> auth.json -> environment variable ->
+// models.json.
 func NewAuthChain() *AuthChain {
 	c := &AuthChain{cliKeys: make(map[string]string)}
+	kc := NewKeychainSource()
 	c.sources = []AuthSource{
 		{Name: authSourceCLI, Lookup: c.lookupCLIFlag},
+		{Name: authSourceKeychain, Lookup: kc.Lookup},
 		{Name: authSourceAuthFile, Lookup: lookupAuthFile},
 		{Name: authSourceEnv, Lookup: lookupEnv},
 		{Name: authSourceModels, Lookup: lookupModelsJSON},
@@ -117,20 +121,35 @@ func (c *AuthChain) lookupCLIFlag(provider string) (string, error) {
 }
 
 // lookupAuthFile reads the API key for provider from
-// ~/.config/go-cli/auth.json, expected to be a JSON object mapping provider
-// names to API keys.
+// ~/.config/go-cli/auth.json. The file is expected to have 0600 permissions
+// and may be either a single-key object {"api_key": "..."} (written by the
+// onboarding wizard) or a JSON object mapping provider names to API keys for
+// backward compatibility.
 func lookupAuthFile(provider string) (string, error) {
 	path := authFilePath()
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("config.auth.file_read_error", "path", path, "err", err)
+		}
 		return "", ErrAuthNotFound
 	}
+	// Try the single-key {"api_key": "..."} format first.
+	var single struct {
+		APIKey string `json:"api_key"`
+	}
+	if err := json.Unmarshal(data, &single); err == nil && single.APIKey != "" {
+		return single.APIKey, nil
+	}
+	// Fall back to a provider -> key map.
 	var m map[string]string
-	if err := json.Unmarshal(data, &m); err != nil {
-		return "", ErrAuthNotFound
-	}
-	if v, ok := m[provider]; ok && v != "" {
-		return v, nil
+	if err := json.Unmarshal(data, &m); err == nil {
+		// Case-insensitive lookup to match provider names regardless of casing.
+		for k, v := range m {
+			if strings.EqualFold(k, provider) && v != "" {
+				return v, nil
+			}
+		}
 	}
 	return "", ErrAuthNotFound
 }
@@ -153,23 +172,30 @@ func lookupModelsJSON(provider string) (string, error) {
 	path := modelsConfigPath()
 	data, err := os.ReadFile(path)
 	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			slog.Warn("config.auth.models_read_error", "path", path, "err", err)
+		}
 		return "", ErrAuthNotFound
 	}
 
 	// Try flat map[string]string first.
 	var flat map[string]string
 	if err := json.Unmarshal(data, &flat); err == nil {
-		if v, ok := flat[provider]; ok && v != "" {
-			return v, nil
+		for k, v := range flat {
+			if strings.EqualFold(k, provider) && v != "" {
+				return v, nil
+			}
 		}
 	}
 
 	// Fall back to nested map[string]map[string]any.
 	var nested map[string]map[string]any
 	if err := json.Unmarshal(data, &nested); err == nil {
-		if entry, ok := nested[provider]; ok {
-			if v, ok := entry["api_key"].(string); ok && v != "" {
-				return v, nil
+		for k, entry := range nested {
+			if strings.EqualFold(k, provider) {
+				if v, ok := entry["api_key"].(string); ok && v != "" {
+					return v, nil
+				}
 			}
 		}
 	}
