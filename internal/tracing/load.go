@@ -71,9 +71,7 @@ func buildSpanTree(spans []SpanData) (*SpanNode, error) {
 		// Multiple root spans: link them under a synthetic root so no data
 		// is lost. The synthetic root has an empty SpanID.
 		root = &SpanNode{Span: SpanData{SpanID: "<root>"}}
-		for _, r := range roots {
-			root.Children = append(root.Children, r)
-		}
+		root.Children = append(root.Children, roots...)
 	}
 
 	if root == nil {

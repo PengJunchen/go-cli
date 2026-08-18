@@ -3,7 +3,7 @@ package core
 import "sync"
 
 // ToolInterceptor is a callback invoked synchronously before a tool executes.
-// If it returns a non-nil error, the tool call is cancelled (skipped). The
+// If it returns a non-nil error, the tool call is canceled (skipped). The
 // interceptor receives the tool name, call ID, and arguments.
 //
 // Interceptors are registered globally via RegisterToolInterceptor or
@@ -51,29 +51,29 @@ type PreToolCallEvent struct {
 	ToolCallID string
 	// Args holds the arguments passed to the tool.
 	Args map[string]any
-	// cancelled records whether the tool call was cancelled by an interceptor.
-	cancelled bool
+	// canceled records whether the tool call was canceled by an interceptor.
+	canceled bool
 	// interceptorsRun ensures registered ToolInterceptors fire exactly once
 	// per event. It is set to true after the first IsCancelled call (or by
 	// Cancel), so subsequent calls return the cached result.
 	interceptorsRun bool
-	// mu protects cancelled and interceptorsRun from concurrent access.
+	// mu protects canceled and interceptorsRun from concurrent access.
 	mu sync.Mutex
 }
 
-// Cancel marks the tool call as cancelled. It is safe to call from a different
+// Cancel marks the tool call as canceled. It is safe to call from a different
 // goroutine than the one that emitted the event.
 func (e *PreToolCallEvent) Cancel() {
 	e.mu.Lock()
-	e.cancelled = true
+	e.canceled = true
 	e.mu.Unlock()
 }
 
-// IsCancelled returns whether the tool call was cancelled.
+// IsCancelled returns whether the tool call was canceled.
 //
 // On the first call it synchronously runs all registered ToolInterceptors
-// (unless the event was already cancelled via Cancel). If any interceptor
-// returns an error, the event is marked cancelled. Subsequent calls return
+// (unless the event was already canceled via Cancel). If any interceptor
+// returns an error, the event is marked canceled. Subsequent calls return
 // the cached result without re-running interceptors.
 //
 // This is the synchronous interception point: loop.go calls IsCancelled
@@ -82,8 +82,8 @@ func (e *PreToolCallEvent) IsCancelled() bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
-	// If already cancelled (e.g. via Cancel()), skip interceptors.
-	if e.cancelled {
+	// If already canceled (e.g. via Cancel()), skip interceptors.
+	if e.canceled {
 		return true
 	}
 	// Run interceptors exactly once.
@@ -101,10 +101,10 @@ func (e *PreToolCallEvent) IsCancelled() bool {
 
 	for _, f := range interceptors {
 		if err := f(e.ToolName, e.ToolCallID, e.Args); err != nil {
-			e.cancelled = true
+			e.canceled = true
 			break
 		}
 	}
 
-	return e.cancelled
+	return e.canceled
 }

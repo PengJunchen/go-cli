@@ -194,11 +194,11 @@ func eventsToTurnMessages(events []AgentEvent) []AgentMessage {
 				ToolCallID: ev.ToolCallID,
 				ToolName:   toolNames[ev.ToolCallID],
 			})
-		case "tool_cancelled":
-			// For cancelled events, Content holds the tool name.
+		case "tool_canceled":
+			// For canceled events, Content holds the tool name.
 			msgs = append(msgs, AgentMessage{
 				Role:       "tool",
-				Content:    "Tool call cancelled by interceptor",
+				Content:    "Tool call canceled by interceptor",
 				ToolCallID: ev.ToolCallID,
 				ToolName:   ev.Content,
 			})

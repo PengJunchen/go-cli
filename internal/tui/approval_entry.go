@@ -79,7 +79,7 @@ func renderApprovalRequest(req *ApprovalRequest) string {
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
-			fmt.Fprintf(&sb, "    %s: %v\n", k, req.Args[k])
+			fmt.Fprintf(&sb, "    %s: %v\n", k, req.Args[k]) //nolint:errcheck
 		}
 	}
 
@@ -94,7 +94,7 @@ func renderApprovalRequest(req *ApprovalRequest) string {
 			case strings.HasPrefix(line, "-"):
 				styled = approvalDiffDelStyle.Render(line)
 			}
-			fmt.Fprintf(&sb, "    %s\n", styled)
+			fmt.Fprintf(&sb, "    %s\n", styled) //nolint:errcheck
 		}
 	}
 
@@ -103,7 +103,7 @@ func renderApprovalRequest(req *ApprovalRequest) string {
 	if req.DiffPreview != "" {
 		opts += "  [d] toggle diff"
 	}
-	fmt.Fprintf(&sb, "%s\n", opts)
+	fmt.Fprintf(&sb, "%s\n", opts) //nolint:errcheck
 
 	return strings.TrimRight(sb.String(), "\n")
 }

@@ -191,7 +191,7 @@ func writeLine(w io.Writer, msg ACPMessage) error {
 	if err != nil {
 		return fmt.Errorf("acp: marshal message: %w", err)
 	}
-	if _, err := fmt.Fprintln(w, string(data)); err != nil {
+	if _, err := fmt.Fprintln(w, string(data)); err != nil { //nolint:errcheck
 		return fmt.Errorf("acp: write message: %w", err)
 	}
 	return nil

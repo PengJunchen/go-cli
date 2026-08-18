@@ -324,7 +324,7 @@ func (a *BubbleteaApp) Run(ctx context.Context) error {
 	if !a.running.CompareAndSwap(false, true) {
 		return errAlreadyRunning
 	}
-	// runCtx is cancelled when Run returns so any waitForEvent/waitForMsg
+	// runCtx is canceled when Run returns so any waitForEvent/waitForMsg
 	// command goroutines still blocked on their channels unblock and exit
 	// (bubbletea cannot kill a cmd func blocked on a user channel). It is also
 	// passed to the program as its context so context cancellation propagates

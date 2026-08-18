@@ -525,10 +525,10 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 		var inputTokens, outputTokens int
 		var hasUsage bool
 		finalSent := false
-		cancelled := false
+		canceled := false
 
 		for event := range events {
-			if cancelled {
+			if canceled {
 				continue
 			}
 			if event.Data == "" {
@@ -546,7 +546,7 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 					select {
 					case ch <- MessageChunk{Role: RoleAssistant}:
 					case <-ctx.Done():
-						cancelled = true
+						canceled = true
 						continue
 					}
 					if ce.Message.Usage != nil {
@@ -577,7 +577,7 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 						select {
 						case ch <- MessageChunk{Role: RoleAssistant, Content: ce.Delta.Text}:
 						case <-ctx.Done():
-							cancelled = true
+							canceled = true
 							continue
 						}
 					}
@@ -631,7 +631,7 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 				case ch <- final:
 					finalSent = true
 				case <-ctx.Done():
-					cancelled = true
+					canceled = true
 					continue
 				}
 			}
@@ -698,9 +698,9 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 		var finishReason string
 		var toolCalls []ToolCall
 		var usage *Usage
-		cancelled := false
+		canceled := false
 		for event := range events {
-			if cancelled {
+			if canceled {
 				continue
 			}
 			if event.Data == "" {
@@ -744,7 +744,7 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 						select {
 						case ch <- MessageChunk{Role: RoleAssistant, Content: sb.String()}:
 						case <-ctx.Done():
-							cancelled = true
+							canceled = true
 							continue
 						}
 					}

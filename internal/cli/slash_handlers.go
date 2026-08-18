@@ -636,19 +636,19 @@ func (h *ThinkingHandler) Handle(_ context.Context, args []string, deps Dependen
 		if mode == "" {
 			mode = "show"
 		}
-		fmt.Fprintf(deps.Out(), "Thinking display mode: %s\n", mode)
+		fmt.Fprintf(deps.Out(), "Thinking display mode: %s\n", mode) //nolint:errcheck
 		return "", nil
 	}
 	switch strings.ToLower(args[0]) {
 	case "show":
 		deps.SetThinkingVisibility("show")
-		fmt.Fprintln(deps.Out(), "Thinking entries will be expanded.")
+		fmt.Fprintln(deps.Out(), "Thinking entries will be expanded.") //nolint:errcheck
 	case "collapse":
 		deps.SetThinkingVisibility("collapse")
-		fmt.Fprintln(deps.Out(), "Thinking entries will be collapsed to a summary.")
+		fmt.Fprintln(deps.Out(), "Thinking entries will be collapsed to a summary.") //nolint:errcheck
 	case "hide":
 		deps.SetThinkingVisibility("hide")
-		fmt.Fprintln(deps.Out(), "Thinking entries will be hidden.")
+		fmt.Fprintln(deps.Out(), "Thinking entries will be hidden.") //nolint:errcheck
 	default:
 		return "", fmt.Errorf("unknown sub-command %q: use show, collapse, or hide", args[0])
 	}
@@ -684,27 +684,27 @@ func (h *ThemeHandler) Subcommands() []Subcommand {
 
 func (h *ThemeHandler) Handle(_ context.Context, args []string, deps Dependencies) (string, error) {
 	if deps.ThemeMgr() == nil {
-		fmt.Fprintln(deps.Out(), "Theme switching is only available in interactive TUI mode.")
+		fmt.Fprintln(deps.Out(), "Theme switching is only available in interactive TUI mode.") //nolint:errcheck
 		return "", nil
 	}
 	if len(args) == 0 {
 		current := deps.ThemeMgr().CurrentName()
-		fmt.Fprintln(deps.Out(), "Available themes:")
+		fmt.Fprintln(deps.Out(), "Available themes:") //nolint:errcheck
 		for _, name := range deps.ThemeMgr().Names() {
 			marker := ""
 			if name == current {
 				marker = " (active)"
 			}
-			fmt.Fprintf(deps.Out(), "  %s%s\n", name, marker)
+			fmt.Fprintf(deps.Out(), "  %s%s\n", name, marker) //nolint:errcheck
 		}
 		return "", nil
 	}
 	name := strings.TrimSpace(strings.ToLower(args[0]))
 	if err := deps.ThemeMgr().Set(name); err != nil {
-		fmt.Fprintf(deps.Out(), "Error: %v\nAvailable themes: %s\n", err, strings.Join(deps.ThemeMgr().Names(), ", "))
+		fmt.Fprintf(deps.Out(), "Error: %v\nAvailable themes: %s\n", err, strings.Join(deps.ThemeMgr().Names(), ", ")) //nolint:errcheck
 		return "", nil
 	}
-	fmt.Fprintf(deps.Out(), "Theme switched to: %s\n", name)
+	fmt.Fprintf(deps.Out(), "Theme switched to: %s\n", name) //nolint:errcheck
 	return "", nil
 }
 
@@ -759,7 +759,7 @@ func openEditor(filename string) (string, error) {
 			return "", fmt.Errorf("create temp file: %w", err)
 		}
 		tmpFile = f.Name()
-		f.Close()
+		_ = f.Close()
 		isTemp = true
 	}
 

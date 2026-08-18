@@ -24,7 +24,7 @@ type BridgeEvent struct {
 // to be fully drained.
 //
 // The destination channel is closed when the source closes or the context is
-// canceled, signalling end-of-stream to consumers.
+// canceled, signaling end-of-stream to consumers.
 type EventBridge struct {
 	source <-chan BridgeEvent
 	wg     sync.WaitGroup

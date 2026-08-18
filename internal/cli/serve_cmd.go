@@ -101,8 +101,8 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 			return newUsageError("serve: --no-auth is not allowed with a non-loopback address %q (use --addr 127.0.0.1:9090 or enable auth)", addr)
 		}
 		if tlsCert == "" || tlsKey == "" {
-			fmt.Fprintf(c.errWriter(), "WARNING: Serving on non-loopback address %s without TLS — traffic is unencrypted.\n", addr)
-			fmt.Fprintf(c.errWriter(), "  Consider using --tls-cert and --tls-key to enable HTTPS.\n")
+			fmt.Fprintf(c.errWriter(), "WARNING: Serving on non-loopback address %s without TLS — traffic is unencrypted.\n", addr) //nolint:errcheck
+			fmt.Fprintf(c.errWriter(), "  Consider using --tls-cert and --tls-key to enable HTTPS.\n")                              //nolint:errcheck
 		}
 	}
 
@@ -174,12 +174,12 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 		)
 		if err != nil {
 			slog.Warn("serve: agent assembly failed, falling back to echo mode", "err", err)
-			fmt.Fprintf(c.out, "WARNING: Agent assembly failed — falling back to echo mode (no agent dispatch).\n")
+			fmt.Fprintf(c.out, "WARNING: Agent assembly failed — falling back to echo mode (no agent dispatch).\n") //nolint:errcheck
 			if ufe := classifyError(err); ufe != nil {
-				fmt.Fprintf(c.out, "  Error: %s\n", ufe.Action)
-				fmt.Fprintf(c.out, "  Hint: %s\n", ufe.Hint)
+				fmt.Fprintf(c.out, "  Error: %s\n", ufe.Action) //nolint:errcheck
+				fmt.Fprintf(c.out, "  Hint: %s\n", ufe.Hint)    //nolint:errcheck
 			} else {
-				fmt.Fprintf(c.out, "  Error: %v\n", err)
+				fmt.Fprintf(c.out, "  Error: %v\n", err) //nolint:errcheck
 			}
 		} else {
 			cleanup = assembly.Cleanup
@@ -196,7 +196,7 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	if handler == nil {
 		if rc == nil {
 			slog.Warn("serve: no config available, falling back to echo mode")
-			fmt.Fprintf(c.out, "WARNING: No configuration found — running in echo mode (no agent dispatch).\n")
+			fmt.Fprintf(c.out, "WARNING: No configuration found — running in echo mode (no agent dispatch).\n") //nolint:errcheck
 		}
 		handler = acp.NewCoreHandler(nil, nil)
 	}
@@ -219,28 +219,28 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 		return newExecutionError("serve: start server", err)
 	}
 
-	fmt.Fprintf(c.out, "ACP HTTP server listening on %s\n", addr)
+	fmt.Fprintf(c.out, "ACP HTTP server listening on %s\n", addr) //nolint:errcheck
 	if authToken != "" {
 		ew := c.errWriter()
 		if tokenWrittenTo != "" {
-			fmt.Fprintf(ew, "Auth token written to %s (mode 0600)\n", tokenWrittenTo)
+			fmt.Fprintf(ew, "Auth token written to %s (mode 0600)\n", tokenWrittenTo) //nolint:errcheck
 		} else {
-			fmt.Fprintf(ew, "Auth token configured via --token\n")
+			fmt.Fprintf(ew, "Auth token configured via --token\n") //nolint:errcheck
 		}
 		if showToken {
-			fmt.Fprintf(ew, "Auth token: %s\n", authToken)
-			fmt.Fprintf(ew, "Use: Authorization: Bearer %s\n", authToken)
+			fmt.Fprintf(ew, "Auth token: %s\n", authToken)                //nolint:errcheck
+			fmt.Fprintf(ew, "Use: Authorization: Bearer %s\n", authToken) //nolint:errcheck
 		} else {
-			fmt.Fprintf(ew, "Use --show-token to display the token on stderr.\n")
+			fmt.Fprintf(ew, "Use --show-token to display the token on stderr.\n") //nolint:errcheck
 		}
 	}
-	fmt.Fprintf(c.out, "Routes:\n")
-	fmt.Fprintf(c.out, "  POST /connect     - establish a session\n")
-	fmt.Fprintf(c.out, "  POST /send        - deliver an ACP message\n")
-	fmt.Fprintf(c.out, "  POST /disconnect  - tear down a session\n")
-	fmt.Fprintf(c.out, "  GET  /stream      - drain pending response messages\n")
-	fmt.Fprintf(c.out, "  GET  /events      - stream agent events (SSE)\n")
-	fmt.Fprintf(c.out, "\nPress Ctrl+C to stop.\n")
+	fmt.Fprintf(c.out, "Routes:\n")                                               //nolint:errcheck
+	fmt.Fprintf(c.out, "  POST /connect     - establish a session\n")             //nolint:errcheck
+	fmt.Fprintf(c.out, "  POST /send        - deliver an ACP message\n")          //nolint:errcheck
+	fmt.Fprintf(c.out, "  POST /disconnect  - tear down a session\n")             //nolint:errcheck
+	fmt.Fprintf(c.out, "  GET  /stream      - drain pending response messages\n") //nolint:errcheck
+	fmt.Fprintf(c.out, "  GET  /events      - stream agent events (SSE)\n")       //nolint:errcheck
+	fmt.Fprintf(c.out, "\nPress Ctrl+C to stop.\n")                               //nolint:errcheck
 
 	// Wait for context cancellation or interrupt signal.
 	sigCh := make(chan os.Signal, 1)
@@ -262,7 +262,7 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	if cleanup != nil {
 		cleanup()
 	}
-	fmt.Fprintf(c.out, "ACP HTTP server stopped.\n")
+	fmt.Fprintf(c.out, "ACP HTTP server stopped.\n") //nolint:errcheck
 	return nil
 }
 
@@ -318,7 +318,7 @@ func checkReadableFile(path, kind string) error {
 	if err != nil {
 		return fmt.Errorf("TLS %s file %q: %w", kind, path, err)
 	}
-	f.Close()
+	_ = f.Close()
 	return nil
 }
 

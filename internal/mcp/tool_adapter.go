@@ -45,7 +45,7 @@ var promptInjectionPatterns = []string{
 	`新指令`,
 }
 
-// compiledPromptInjectionPatterns is initialised once at package load time.
+// compiledPromptInjectionPatterns is initialized once at package load time.
 var compiledPromptInjectionPatterns = func() []*regexp.Regexp {
 	var compiled []*regexp.Regexp
 	for _, p := range promptInjectionPatterns {

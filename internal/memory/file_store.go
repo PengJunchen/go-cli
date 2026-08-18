@@ -102,7 +102,7 @@ func (s *FileMemoryStore) load() error {
 // entry is appended to the JSONL file and added to the in-memory index.
 func (s *FileMemoryStore) Add(ctx context.Context, mem Memory) error {
 	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("memory: add cancelled: %w", err)
+		return fmt.Errorf("memory: add canceled: %w", err)
 	}
 	if mem.ID == "" {
 		id, err := newMemoryID()
@@ -174,7 +174,7 @@ func (s *FileMemoryStore) List(_ context.Context) ([]Memory, error) {
 // Delete removes the memory with the given ID and rewrites the backing file.
 func (s *FileMemoryStore) Delete(ctx context.Context, id string) error {
 	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("memory: delete cancelled: %w", err)
+		return fmt.Errorf("memory: delete canceled: %w", err)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

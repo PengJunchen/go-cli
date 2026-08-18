@@ -1,4 +1,4 @@
-// Package llm: thinking configuration and provider adaptation.
+// Package llm contains thinking configuration and provider adaptation.
 //
 // This file defines the ThinkingLevel type, ThinkingConfig, the
 // ThinkingAdapter interface and provider-specific implementations, plus a

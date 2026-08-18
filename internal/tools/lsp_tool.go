@@ -178,7 +178,7 @@ func formatLocations(locs []Location) string {
 		if i > 0 {
 			sb.WriteString("\n")
 		}
-		fmt.Fprintf(&sb, "%s:%d:%d", loc.URI, loc.Range.Start.Line, loc.Range.Start.Character)
+		fmt.Fprintf(&sb, "%s:%d:%d", loc.URI, loc.Range.Start.Line, loc.Range.Start.Character) //nolint:errcheck
 	}
 	return sb.String()
 }
@@ -197,7 +197,7 @@ func formatDiagnostics(diags []Diagnostic) string {
 		if src == "" {
 			src = "lsp"
 		}
-		fmt.Fprintf(&sb, "[%s] %d:%d %s", src, d.Range.Start.Line, d.Range.Start.Character, d.Message)
+		fmt.Fprintf(&sb, "[%s] %d:%d %s", src, d.Range.Start.Line, d.Range.Start.Character, d.Message) //nolint:errcheck
 	}
 	return sb.String()
 }
@@ -213,9 +213,9 @@ func formatCompletionItems(items []CompletionItem) string {
 			sb.WriteString("\n")
 		}
 		if item.Detail != "" {
-			fmt.Fprintf(&sb, "%s (%d): %s", item.Label, item.Kind, item.Detail)
+			fmt.Fprintf(&sb, "%s (%d): %s", item.Label, item.Kind, item.Detail) //nolint:errcheck
 		} else {
-			fmt.Fprintf(&sb, "%s (%d)", item.Label, item.Kind)
+			fmt.Fprintf(&sb, "%s (%d)", item.Label, item.Kind) //nolint:errcheck
 		}
 	}
 	return sb.String()
@@ -234,7 +234,7 @@ func formatWorkspaceEdit(edit *WorkspaceEdit) string {
 				sb.WriteString("\n")
 			}
 			first = false
-			fmt.Fprintf(&sb, "%s:%d:%d -> %s", uri, te.Range.Start.Line, te.Range.Start.Character, te.NewText)
+			fmt.Fprintf(&sb, "%s:%d:%d -> %s", uri, te.Range.Start.Line, te.Range.Start.Character, te.NewText) //nolint:errcheck
 		}
 	}
 	return sb.String()

@@ -77,7 +77,7 @@ func (t *JSONRPCLineTransport) Request(ctx context.Context, method string, param
 		return nil, fmt.Errorf("mcp: marshal request: %w", err)
 	}
 
-	if _, err := fmt.Fprintln(t.out, string(req)); err != nil {
+	if _, err := fmt.Fprintln(t.out, string(req)); err != nil { //nolint:errcheck
 		return nil, fmt.Errorf("mcp: write request: %w", err)
 	}
 
@@ -138,7 +138,7 @@ func (t *JSONRPCLineTransport) Send(method string, params map[string]any) error 
 	if err != nil {
 		return fmt.Errorf("mcp: marshal notification: %w", err)
 	}
-	if _, err := fmt.Fprintln(t.out, string(msg)); err != nil {
+	if _, err := fmt.Fprintln(t.out, string(msg)); err != nil { //nolint:errcheck
 		return fmt.Errorf("mcp: write notification: %w", err)
 	}
 	return nil

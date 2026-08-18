@@ -65,7 +65,7 @@ func WithRunSlotGuard(g RunSlotGuard) HarnessOption {
 // EventStream created by the harness. Each event successfully sent to a
 // stream is dual-written to the bus, enabling fan-out to multiple
 // consumers (e.g. the SSE /events endpoint). When nil (or not set), no
-// dual-write occurs and behaviour is unchanged.
+// dual-write occurs and behavior is unchanged.
 func WithHarnessEventBus(bus EventBus) HarnessOption {
 	return func(c *harnessConfig) { c.bus = bus }
 }

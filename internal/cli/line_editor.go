@@ -174,7 +174,7 @@ func (le *DefaultLineEditor) startResizeMonitor() {
 // invoked.
 func (le *DefaultLineEditor) Stop() {
 	le.winchOnce.Do(func() {
-		// monitorResize was never started; initialise channels so the
+		// monitorResize was never started; initialize channels so the
 		// wait below succeeds. winchDone is closed immediately since no
 		// goroutine is running.
 		le.winchStop = make(chan struct{})
@@ -226,6 +226,8 @@ func visualLineCount(prompt string, buf []rune, termWidth int) int {
 // stripANSI removes all ANSI escape sequences from s, returning only the
 // visible text. This is needed to calculate the true display width of styled
 // TUI output.
+//
+//nolint:unused
 func stripANSI(s string) string {
 	var sb strings.Builder
 	inEscape := false
@@ -703,7 +705,7 @@ func (le *DefaultLineEditor) readSingleLineTTY(readByte func() (byte, error), pr
 		if searchMode {
 			switch {
 			case b == '\r' || b == '\n': // Enter — confirm and submit
-				searchMode = false
+				searchMode = false //nolint:ineffassign
 				if searchMatchIdx >= 0 {
 					buf = []rune(entries[searchMatchIdx])
 				} else {

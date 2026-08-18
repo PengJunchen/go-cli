@@ -39,7 +39,7 @@ func (c *MicroCompactor) Compact(ctx context.Context, items []TurnItem, maxToken
 
 	// Pre-compute the total token count once. The loop below maintains this
 	// total incrementally instead of re-estimating the entire list on every
-	// iteration, avoiding the O(n²) behaviour of the previous approach.
+	// iteration, avoiding the O(n²) behavior of the previous approach.
 	tokensBefore := estimateTokens(result, estimator)
 	total := tokensBefore
 

@@ -968,7 +968,7 @@ func (s *REPLSession) extractMemory() {
 	if s.assembly.MemoryExtractor == nil || s.assembly.MemoryStore == nil {
 		return
 	}
-	// Lazily initialise the cancellable memory context on first use.
+	// Lazily initialize the cancellable memory context on first use.
 	if s.memoryCtxCancel == nil {
 		s.memoryCtx, s.memoryCtxCancel = context.WithCancel(context.Background())
 	}

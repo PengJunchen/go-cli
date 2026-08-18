@@ -186,7 +186,7 @@ func (b *DefaultSystemPromptBuilder) Build(_ context.Context, opts SystemPromptO
 func computeCacheVersion(opts SystemPromptOptions) string {
 	h := sha256.New()
 	writeField := func(s string) {
-		fmt.Fprintf(h, "%d:%s", len(s), s)
+		fmt.Fprintf(h, "%d:%s", len(s), s) //nolint:errcheck
 	}
 	for _, t := range opts.Tools {
 		writeField(t.Name())

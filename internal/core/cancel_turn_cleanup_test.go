@@ -182,7 +182,7 @@ func TestLoop_CancelParallelModeSynthesizesToolResults(t *testing.T) {
 
 	// "fast" completes immediately and signals done; "slow" blocks until
 	// cancelled. The fastDone channel lets the test wait for the fast tool
-	// to finish before cancelling, ensuring the parallel snapshot records
+	// to finish before canceling, ensuring the parallel snapshot records
 	// its real result rather than treating it as still-running.
 	fastDone := make(chan struct{})
 	fastDef := &testToolDef{

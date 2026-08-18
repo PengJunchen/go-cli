@@ -1,3 +1,4 @@
+// Package web provides the web server for the go-cli dashboard.
 package web
 
 import (

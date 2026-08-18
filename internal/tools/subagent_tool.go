@@ -283,7 +283,7 @@ func (t *SubagentTool) executeParallel(ctx context.Context, call ToolCall, tasks
 		if role == "" {
 			role = "default"
 		}
-		fmt.Fprintf(&sb, "Task %d (%s): ", i+1, role)
+		fmt.Fprintf(&sb, "Task %d (%s): ", i+1, role) //nolint:errcheck
 		if res.Error != nil {
 			sb.WriteString(res.Error.Error())
 			if firstErr == nil {

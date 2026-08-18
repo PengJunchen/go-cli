@@ -41,6 +41,7 @@ func setupPhase22GitRepo(t *testing.T) string {
 	phase22WriteFile(t, dir, "README.md", "# test\n")
 	phase22RunGit(t, dir, "add", "README.md")
 	phase22RunGit(t, dir, "commit", "-m", "initial commit")
+	phase22RunGit(t, dir, "branch", "-m", "main") // ensure default branch is "main"
 	return dir
 }
 

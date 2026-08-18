@@ -39,7 +39,7 @@ func todoCheckbox(status string) string {
 		return todoCheckboxStyle.Render("☑")
 	case "in_progress":
 		return todoCheckboxStyle.Render("◐")
-	case "cancelled":
+	case "canceled":
 		return todoCheckboxStyle.Render("⊘")
 	default:
 		return todoCheckboxStyle.Render("☐")
@@ -82,7 +82,7 @@ func (m *teaModel) renderTodoPanelLocked() string {
 		switch item.Status {
 		case "completed":
 			text = todoDoneStyle.Render(text)
-		case "cancelled":
+		case "canceled":
 			text = todoCancelledStyle.Render(text)
 		}
 		lines = append(lines, fmt.Sprintf("  %s %s", checkbox, text))

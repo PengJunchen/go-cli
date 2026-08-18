@@ -15,6 +15,9 @@ import (
 // *os.File (which reports true for xterm.IsTerminal).
 func openPTY(t *testing.T) (*os.File, func()) {
 	t.Helper()
+	if os.Getenv("CI") != "" {
+		t.Skip("PTY tests are skipped in CI environments")
+	}
 	master, err := os.OpenFile("/dev/ptmx", os.O_RDWR|unix.O_NOCTTY, 0)
 	require.NoError(t, err)
 

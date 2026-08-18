@@ -14,8 +14,8 @@ func TestSynthesizeCancel_UserCancel(t *testing.T) {
 	if msg.Role != "system" {
 		t.Fatalf("expected role %q, got %q", "system", msg.Role)
 	}
-	if !strings.Contains(msg.Content, "cancelled by the user") {
-		t.Fatalf("expected content to mention %q, got %q", "cancelled by the user", msg.Content)
+	if !strings.Contains(msg.Content, "canceled by the user") {
+		t.Fatalf("expected content to mention %q, got %q", "canceled by the user", msg.Content)
 	}
 	if !strings.Contains(msg.Content, "conversation continues from here") {
 		t.Fatalf("expected content to mention continuation, got %q", msg.Content)
@@ -67,7 +67,7 @@ func TestSynthesizeCancel_WrappedCanceled(t *testing.T) {
 	s := NewCancelSynthesizer()
 	msg := s.SynthesizeCancel(context.Background(), wrapped)
 
-	if !strings.Contains(msg.Content, "cancelled by the user") {
-		t.Fatalf("expected wrapped context.Canceled to mention %q, got %q", "cancelled by the user", msg.Content)
+	if !strings.Contains(msg.Content, "canceled by the user") {
+		t.Fatalf("expected wrapped context.Canceled to mention %q, got %q", "canceled by the user", msg.Content)
 	}
 }

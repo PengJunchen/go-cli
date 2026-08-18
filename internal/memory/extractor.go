@@ -123,7 +123,7 @@ func (e *LLMMemoryExtractor) Extract(ctx context.Context, messages []llm.Message
 func formatConversation(messages []llm.Message) string {
 	var b strings.Builder
 	for _, m := range messages {
-		fmt.Fprintf(&b, "%s: %s\n", m.Role, m.Content)
+		fmt.Fprintf(&b, "%s: %s\n", m.Role, m.Content) //nolint:errcheck
 	}
 	return b.String()
 }

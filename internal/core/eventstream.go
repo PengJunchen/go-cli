@@ -76,7 +76,7 @@ func WithEventBus(bus EventBus) EventStreamOption {
 
 // WithEventBlockTimeout sets the maximum duration a Send blocks under the
 // BlockUntilConsumed policy before returning ErrSendTimeout. When d <= 0
-// Send blocks forever, preserving backward-compatible behaviour. When the
+// Send blocks forever, preserving backward-compatible behavior. When the
 // option is omitted, NewEventStream applies defaultBlockTimeout (30s).
 func WithEventBlockTimeout(d time.Duration) EventStreamOption {
 	return func(s *EventStreamImpl) { s.blockTimeout = d }
@@ -87,7 +87,7 @@ func NewEventStream(capacity int, opts ...EventStreamOption) *EventStreamImpl {
 	s := &EventStreamImpl{
 		events:       make(chan AgentEvent, capacity),
 		done:         make(chan struct{}),
-		discard:      BlockUntilConsumed, // preserve backward-compatible blocking behaviour
+		discard:      BlockUntilConsumed, // preserve backward-compatible blocking behavior
 		blockTimeout: defaultBlockTimeout,
 	}
 	for _, o := range opts {
@@ -102,7 +102,7 @@ func NewEventStream(capacity int, opts ...EventStreamOption) *EventStreamImpl {
 // never panics on a closed channel. The sendMu read-lock guarantees that
 // Close cannot close the events channel while a send is in-flight.
 //
-// The discard policy controls behaviour when the bounded buffer is full:
+// The discard policy controls behavior when the bounded buffer is full:
 //   - DiscardNewest: drop the incoming event (non-blocking).
 //   - DiscardOldest: evict the oldest buffered event to make room (non-blocking).
 //   - BlockUntilConsumed (default): block the sender until a consumer reads.

@@ -214,7 +214,7 @@ func readPipe(pipe io.Reader, stream string, sink StreamSink, toolCallID string,
 		buf.WriteString(line)
 		buf.WriteByte('\n')
 		if sink != nil {
-			sink.Send(line, toolCallID, stream)
+			_ = sink.Send(line, toolCallID, stream) //nolint:errcheck // best-effort streaming
 		}
 	}
 }

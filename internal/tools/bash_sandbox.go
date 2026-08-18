@@ -495,6 +495,8 @@ func splitCommands(s string) []string {
 
 // firstToken returns the first whitespace-delimited token of s, or "" if s is
 // blank.
+//
+//nolint:unused
 func firstToken(s string) string {
 	fields := strings.Fields(s)
 	if len(fields) == 0 {

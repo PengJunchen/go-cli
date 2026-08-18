@@ -82,7 +82,7 @@ func TestBridgeNoEventLoss(t *testing.T) {
 }
 
 // TestBridgeCloseOnSourceClose verifies that closing the source channel causes
-// the bridge to close the destination channel, signalling end-of-stream to
+// the bridge to close the destination channel, signaling end-of-stream to
 // consumers. Wait returns once the forwarding goroutine has exited.
 func TestBridgeCloseOnSourceClose(t *testing.T) {
 	src := make(chan BridgeEvent)

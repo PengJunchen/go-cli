@@ -14,7 +14,7 @@ func TestTodoCheckboxStates(t *testing.T) {
 	assert.Contains(t, todoCheckbox("pending"), "☐")
 	assert.Contains(t, todoCheckbox("in_progress"), "◐")
 	assert.Contains(t, todoCheckbox("completed"), "☑")
-	assert.Contains(t, todoCheckbox("cancelled"), "⊘")
+	assert.Contains(t, todoCheckbox("canceled"), "⊘")
 	// Unknown status falls back to the pending checkbox.
 	assert.Contains(t, todoCheckbox("unknown"), "☐")
 	assert.Contains(t, todoCheckbox(""), "☐")
@@ -159,20 +159,20 @@ func TestTodoPanelAllCompleted(t *testing.T) {
 	assert.Contains(t, view, "Todos [3/3 completed]")
 }
 
-// TestTodoPanelCancelledNotCompleted verifies cancelled items are not counted
+// TestTodoPanelCanceledNotCompleted verifies cancelled items are not counted
 // as completed.
-func TestTodoPanelCancelledNotCompleted(t *testing.T) {
+func TestTodoPanelCanceledNotCompleted(t *testing.T) {
 	m := newTestModel(make(chan AgentEvent, 1))
 	m.Update(TodoUpdateMsg{Items: []TodoItem{
 		{ID: "1", Content: "Done", Status: "completed"},
-		{ID: "2", Content: "Cancelled", Status: "cancelled"},
+		{ID: "2", Content: "Canceled", Status: "canceled"},
 		{ID: "3", Content: "Pending", Status: "pending"},
 	}})
 
 	view := stripEscape(m.View())
 	assert.Contains(t, view, "Todos [1/3 completed]")
 	assert.Contains(t, view, "⊘")
-	assert.Contains(t, view, "Cancelled")
+	assert.Contains(t, view, "Canceled")
 }
 
 // TestParseTodoItemsEmpty verifies empty content returns nil.

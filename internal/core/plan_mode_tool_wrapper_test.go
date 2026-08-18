@@ -5,9 +5,10 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 // mockExecutor returns a next executor function that increments callCount

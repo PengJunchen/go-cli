@@ -39,7 +39,7 @@ func makeBenchItems(n int) []TurnItem {
 
 // BenchmarkMicroCompactor measures the zero-LLM compaction strategy across
 // different conversation sizes. The token budget is set to 10*n so the
-// compactor must replace all tool results to fit. The optimised implementation
+// compactor must replace all tool results to fit. The optimized implementation
 // uses incremental decrement instead of re-estimating on every iteration.
 func BenchmarkMicroCompactor(b *testing.B) {
 	est := NewHeuristicTokenEstimator()
@@ -99,7 +99,7 @@ func microCompactorFullScan(_ context.Context, items []TurnItem, maxTokens int, 
 }
 
 // BenchmarkUnifiedCompactor measures the routing compactor (micro → truncating)
-// across different conversation sizes. The optimised implementation pre-computes
+// across different conversation sizes. The optimized implementation pre-computes
 // token counts and caches them for sub-compactors.
 func BenchmarkUnifiedCompactor(b *testing.B) {
 	est := NewHeuristicTokenEstimator()
@@ -118,7 +118,7 @@ func BenchmarkUnifiedCompactor(b *testing.B) {
 	}
 }
 
-// BenchmarkFindCutPoint measures the suffix-sum-optimised findCutPoint across
+// BenchmarkFindCutPoint measures the suffix-sum-optimized findCutPoint across
 // different conversation sizes. The suffix sum array allows O(1) range queries
 // instead of re-estimating the tail on every iteration.
 func BenchmarkFindCutPoint(b *testing.B) {
