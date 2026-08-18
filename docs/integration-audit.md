@@ -1,11 +1,11 @@
 # go-cli 集成审计报告（Integration Audit）
 
-> 初次审计日期：2025-08（基于早期 main 分支代码）
-> 复审计日期：2026-08-06（基于当前 main 分支代码，全链路重新静态跟踪）
+> 初次审计日期：2026-08（基于早期 main 分支代码）
+> 复审计日期：2026-08-07（基于当前 main 分支代码，全链路重新静态跟踪）
 > 审计方式：以 `interactive` 交互入口为起点，沿 `assemble.go` 全链路静态跟踪运行时接线
 > 审计目的：客观回答 —— 各功能模块是否真正"有机组合"并服务于客户，包括 SubAgent 等子系统的真实使用情况；对照成熟 CLI Agent 的差距清单。
 
-> **复审说明（2026-08-06）**：本项目自初次审计以来已显著改善。初次审计标记的大部分关键缺口（SubAgent、审批、会话持久化、压缩回写、中间件链、Registry）均已修复并接入运行时。当前状态：核心 ReAct Loop + 工具 + 审批 + 子智能体 + 会话 + 压缩 + 生产化治理 + 中间件链均已接线。剩余缺口集中在 ACP、FileMutationQueue、PluginLoader、Extension 系统。
+> **复审说明（2026-08-07）**：本项目自初次审计以来已显著改善。初次审计标记的全部关键缺口（SubAgent、审批、会话持久化、压缩回写、中间件链、Registry、ACP、FileMutationQueue、PluginLoader、Extension、BashSandbox、会话分支、Undo/Checkpoint）均已修复并接入运行时。Phase 24-27（M27-M30）也已全部完成：跨会话记忆（FileMemoryStore+TF-IDF）、6级ThinkingLevel+ModelCycler、TUI Markdown两阶段AST+10语言高亮、StreamingBash实时流。源码复审新发现：7层模型中间件链（Failover->Retry->Timeout->Sanitize->LoopDetection->Validate->Overflow）已在 assemble.go:479-487 通过 NewStandardMiddlewareChain 构造，经 newModelWrapperWithChain 接线运行时（loop.go:243），F-020 从 GAP-ENHANCE 修正为 ALIGNED。Tracing 三级 RedactingExporter 脱敏已实现（exporter.go:100-149, assemble.go:272-276），F-048 修正为 ALIGNED。DeferredToolRegistry 已用于 MCP/Skill 懒加载（assemble.go:285-286）。新发现运行时缺口：LLMMemoryExtractor 在 assemble.go:694 构造但运行时无 Extract 调用，自动事实提取链路断开。
 
 ---
 
@@ -17,7 +17,7 @@
 
 以客户视角，当前可用能力 ≈ 一个**带审批、带会话恢复、带子任务委派、带重试熔断、上下文有压缩上限**的"多轮对话 + 工具执行"Agent，已具备进入生产的基本条件。
 
-**剩余缺口**：ACP 协议层完全孤立；`FileMutationQueue` 已实现但未接线（仅 `MutationWrapper` 被使用）；`DeferredToolRegistry` 未使用；PluginLoader 返回 stub；Extension 系统无宿主驱动。
+**剩余缺口**：LLMMemoryExtractor 死接线（assemble.go:694 构造但运行时无 Extract 调用，自动事实提取链路断开）；TUI 未暴露实时窗口占用百分比。架构级缺口：无 OS 级沙箱、无 OAuth/PKCE 认证流程、无完整 Hooks 生命周期系统、无多模态支持、模型 Provider 较少（4 个 vs pi 30+）、无 IDE 集成协议。
 
 ---
 
@@ -34,7 +34,7 @@ main() → config.Load() → newTracing() → cli.Run()
     → registerSkillTools（YAML frontmatter + Adapter）         // assemble.go:226
     → ApprovalMiddleware（deny-first + Classifier + TrustStore
       + Callback + Cache + PermissionModeResolver）            // assemble.go:229-244
-    → MutationWrapper（写/编辑串行化，注：非完整 FileMutationQueue）// assemble.go:244
+    → MutationQueueWrapper（FileMutationQueue 完整队列串行化）  // assemble.go:359-363
     → ProductionModelWrapper（Retry + CostTracker + Stats）    // assemble.go:248-261
     → CircuitBreaker（连续失败保护）                           // assemble.go:264-272
     → IdempotentCache + AuditLog + Telemetry（工具调用层）     // assemble.go:275-299
@@ -82,6 +82,12 @@ main() → config.Load() → newTracing() → cli.Run()
 | 环路检测（重复编辑/测试失败/相同工具调用 → SystemReminder） | ✅ 真接线 | `assemble.go:424-432` + 中间件链 |
 | 失败合成（可恢复错误 → 合成重试消息） | ✅ 真接线 | `assemble.go:435` `FailureTurnSynthesizer` |
 | Git 工具（diff/status/commit） | ✅ 真接线 | `assemble.go:367-369` |
+| BashSandbox（路径白名单 + CPU/Memory 限制） | ✅ 真接线 | `assemble.go:222-233` `NewDefaultBashSandbox` + `:248` `WithRegisteredBashSandbox` |
+| FileMutationQueue（per-file worker 串行化） | ✅ 真接线 | `assemble.go:359-363` `NewDefaultFileMutationQueue` + `NewMutationQueueWrapper` |
+| ACP 多 Agent 通信（stdio/gRPC，配置驱动） | ✅ 真接线 | `assemble.go:448-473` ACPClient + ACPMiddlewareAdapter；`:604-606` 中间件链 |
+| Extension 系统（Plugin Load→Init→Shutdown） | ✅ 真接线 | `assemble.go:318-341` PluginManager + Tools/Hooks/Middleware 桥接 |
+| 会话分支树（/session tree\|fork\|resume） | ✅ 真接线 | `interactive.go:135-141` SessionTreeBuilder + `slash_handlers.go:155-174` |
+| Undo / Checkpoint（/undo 恢复文件检查点） | ✅ 真接线 | `slash_handlers.go:192-218` UndoHandler + FileTracker.Restore |
 | Mock 框架 / 测试基建（2.8 万行实现 vs 4.8 万行测试） | ✅ 使用充分 | mock LLM/Tool/MCP server、conversation template |
 
 ---
@@ -99,7 +105,7 @@ main() → config.Load() → newTracing() → cli.Run()
 ### ✅ 2.2 Approval（审批/安全层）—— 已修复
 
 - `assemble.go:229-244` 接入完整审批链：`ApprovalMiddleware`（deny-first）+ `SafetyPolicyClassifier`（bash 为危险操作）+ `InMemoryApprovalStore` + `InteractiveApprovalCallback`（os.Stdin 交互确认）+ `ApprovalCache` + `DefaultPermissionModeResolver`。
-- 工具注册表通过 `tools.NewMiddlewareToolRegistry(tr, approvalMW.WrapToolCall, tools.NewMutationWrapper())` 包装，**所有工具调用都经过审批门**。
+- 工具注册表通过 `tools.NewMiddlewareToolRegistry(tr, approvalMW.WrapToolCall, tools.NewMutationQueueWrapper(mutationQueue))` 包装，**所有工具调用都经过审批门 + 变更队列串行化**。
 - Bash 工具现在会触发审批确认，`--auto-approve` 可通过 `approval.WithAutoApprove(false)` 配置。
 - 配套的 `production` 层（重试/熔断/幂等缓存/审计/Telemetry）也全部接入运行时（`assemble.go:248-299`）。
 
@@ -134,13 +140,14 @@ main() → config.Load() → newTracing() → cli.Run()
 - 后续通过 `reg.RegisterModelProvider`、`reg.RegisterApprovalClassifier`、`reg.RegisterApprovalStore`、`reg.RegisterToolRegistry`（两次）、`reg.RegisterCompactor`、`reg.RegisterTokenEstimator`、`reg.RegisterTraceExporter` 等注册子系统。
 - Registry 中的默认实现不再是死代码，`AgentAssembly.Registry` 暴露给调用方用于依赖注入。
 
-### 🟠 2.7 MutationQueue / DeferredTools / ACP / Plugin / Extension —— 仍为剩余缺口
+### ✅ 2.7 MutationQueue / ACP / Plugin / Extension / BashSandbox —— 已全部接入（2026-08-06 源码复审）
 
-- **FileMutationQueue**：`internal/tools/mutation.go` 的 `DefaultFileMutationQueue`（写/编辑按文件串行化、symlink 归并、per-file worker goroutine）有完整实现，但 `assemble.go:244` 只使用了 `tools.NewMutationWrapper()`（轻量互斥锁包装），**未调用 `tools.WithMutationQueue`** 接入完整的队列。队列的高级能力（异步排队、per-file worker、结果 channel）在运行时未生效。
-- **DeferredToolRegistry**：`internal/tools/deferred.go` 的懒加载工具注册表有实现，但 `assemble.go` 不使用，生产路径中所有工具在启动时全量注册。
-- **ACP 协议层**（`internal/acp`：gRPC/stdio 适配 + middleware）：整个包零外部生产引用，完全孤立。仅在 e2e 测试和 AGENTS.md 文档中被引用。
-- **PluginLoader**：仍返回 `errPluginsUnsupported`（`internal/core/stubs.go`），插件热加载未实现。
-- **Extension 系统**：`internal/extension` 的 `Manager`/`Registry`/`Coordinator` 框架存在，但无宿主驱动，`assemble.go` 不引用 `internal/extension`。
+- **FileMutationQueue**：`assemble.go:359-363` 使用 `tools.NewDefaultFileMutationQueue(...)` 创建完整队列实例（per-file worker goroutine、symlink 归并、异步排队），并通过 `tools.NewMutationQueueWrapper(mutationQueue)` 包装工具注册表。`assemble.go:368-374` cleanup 闭包调用 `cq.Close()` 刷新待处理变更并释放 worker goroutine。
+- **ACP 协议层**：`assemble.go:448-473` 当 `rc.ACP.Transport` 和 `rc.ACP.Endpoints` 非空时，创建 ACPClient（stdio 或 gRPC），连接后构建 `ACPMiddlewareAdapter`。`assemble.go:604-606` 将适配器追加到中间件链最内层，路由入站 ACP 消息到 SubagentDispatcher。
+- **PluginLoader**：`assemble.go:321` 使用 `extension.NewDefaultPluginLoader()`，对应 `extension/plugin.go`（build tag `!no_plugin`）为默认编译的真实实现，支持 Go .so 插件和 JSON-over-HTTP 端点。`extension/plugin_stub.go`（build tag `no_plugin`）仅在显式 `-tags no_plugin` 时生效。
+- **Extension 系统**：`assemble.go:318-341` 当 `rc.Extensions.Enabled` 且 `PluginPaths` 非空时，创建 PluginManager，执行 Load → Init 生命周期，将扩展提供的 Tools / Hooks / Middleware 桥接进运行时。扩展 Hooks 通过 `newExtensionHookAdapter` 转为 `core.Hook` 注入 HookChain；扩展 Middleware 通过 `newExtensionMiddlewareAdapter` 追加到中间件链。cleanup 闭包调用 `pm.Shutdown` 管理完整生命周期。
+- **BashSandbox**：`assemble.go:222-233` 从 config 构建 `tools.NewDefaultBashSandbox(sandboxOpts...)`，支持 `WithAllowedPaths`（默认 cwd 白名单）+ `ResourceLimits`（MaxCPU/MaxMemory）。`assemble.go:248` 通过 `WithRegisteredBashSandbox(bashSandbox)` 注入 bash 工具。
+- **DeferredToolRegistry**：`assemble.go:285-286` 使用 `tools.NewDeferredToolRegistryAdapter(underlyingReg)` 创建懒加载适配器。MCP 工具（assemble.go:972）和 Skill 工具（assemble.go:1064）通过 `RegisterDeferred` 注册，在首次调用时才实例化，减少启动开销。
 
 ---
 
@@ -152,9 +159,9 @@ main() → config.Load() → newTracing() → cli.Run()
 |---|---|---|
 | 1 | 危险操作人工确认（bash/删改文件 y/n 提示、auto-approve 档位） | ✅ 已接线。`assemble.go:229-244` ApprovalMiddleware 完整接入 |
 | 2 | 会话恢复/续聊（`--resume`、`--continue`） | ✅ 已接线。`assemble.go:493-499` + `interactive.go:321-342` |
-| 3 | 会话分支与回滚问答 | ❌ 分支树 `session/tree.go` 仍为 dead code，未接入交互 |
+| 3 | 会话分支与回滚问答 | ✅ 已接线。`interactive.go:135-141` SessionTreeBuilder + SessionSlashHandler；`slash_handlers.go:155-174` `/session tree\|fork\|resume` |
 | 4 | 斜杠命令（`/help` `/compact` `/undo` `/model` `/cost`） | ✅ 已接线。`internal/cli/slash.go` + `slash_handlers.go` + `slash_registry.go` |
-| 5 | Undo / Checkpoint | 🟡 部分。`FileTracker` 已接线用于备份/恢复，但无斜杠命令暴露 undo |
+| 5 | Undo / Checkpoint | ✅ 已接线。`slash_handlers.go:192-218` UndoHandler + FileTracker.Restore，`/undo` 恢复最近文件检查点 |
 | 6 | 写文件前 diff 预览 | ✅ 已接线。`DiffGenerator` 注入 WriteTool/EditFileTool |
 | 7 | Token 用量 / 成本统计 | ✅ 已接线。`CostTracker` + `StatsRegistry` + `Telemetry` |
 | 8 | 上下文占用可视化（已用窗口 %） | 🟡 部分。压缩已回写 history，但 TUI 未暴露实时窗口占比 |
@@ -168,19 +175,19 @@ main() → config.Load() → newTracing() → cli.Run()
 | 11 | LLM 失败重试 / 指数退避 | ✅ 已接线。`assemble.go:248-261` ProductionModelWrapper + RetryPolicy |
 | 12 | 熔断器（连续失败保护） | ✅ 已接线。`assemble.go:264-272` CircuitBreaker |
 | 13 | 输出质量守卫（空回复/格式违规拦截） | ✅ 已接线。`assemble.go:303-307` OutputGuardChain（PII + 代码注入 + 长度） |
-| 14 | 窗口溢出时切小模型 / 降级重试 | ❌ 无。溢出中间件 `llm/middleware_overflow.go` 已实现但未接入 |
+| 14 | 窗口溢出时切小模型 / 降级重试 | ✅ 已接线。7层模型中间件链在 assemble.go:479-487 构造（含 OverflowRecoveryMiddleware），经 newModelWrapperWithChain 接线运行时。Overflow 中间件检测 context_length_exceeded 后裁剪旧消息重试（最多 2 次，裁剪 30%） |
 | 15 | 并行工具执行（ExecutionModeParallel 已定义） | ✅ 已接线。`assemble.go:386` 默认并行 |
-| 16 | 工作区沙箱 / 路径白名单 | 🟡 部分。`BashSandbox` 已接线，但 FileMutationQueue 未接入（仅 MutationWrapper） |
+| 16 | 工作区沙箱 / 路径白名单 | ✅ 已接线。`assemble.go:222-233` `NewDefaultBashSandbox` + `WithAllowedPaths`（默认 cwd）+ `ResourceLimits`（CPU/Memory）；`:248` `WithRegisteredBashSandbox` |
 
 ### 3.3 生态类
 
 | # | 能力 | 现状 |
 |---|---|---|
-| 17 | 插件热加载 | ❌ PluginLoader 仍为 stub（`errPluginsUnsupported`） |
-| 18 | 扩展规范被运行时驱动 | ❌ ExtensionRegistry/Manager 从未被 `assemble.go` 调用 |
-| 19 | ACP 协议互通 | ❌ `internal/acp` 完全孤立，零外部生产引用 |
-| 20 | FileMutationQueue 完整接入 | ❌ `DefaultFileMutationQueue` 已实现，仅 `MutationWrapper` 被使用 |
-| 21 | DeferredToolRegistry 懒加载 | ❌ 已实现，生产路径不使用 |
+| 17 | 插件热加载 | ✅ 已接线。`assemble.go:321` `NewDefaultPluginLoader()` 为真实实现（`extension/plugin.go`，build tag `!no_plugin`） |
+| 18 | 扩展规范被运行时驱动 | ✅ 已接线。`assemble.go:318-341` PluginManager Load → Init → Shutdown，Tools/Hooks/Middleware 桥接进运行时 |
+| 19 | ACP 协议互通 | ✅ 已接线（配置驱动）。`assemble.go:448-473` ACPClient（stdio/gRPC）+ ACPMiddlewareAdapter；`:604-606` 追加到中间件链 |
+| 20 | FileMutationQueue 完整接入 | ✅ 已接线。`assemble.go:359-363` `NewDefaultFileMutationQueue(...)` + `NewMutationQueueWrapper(mutationQueue)` |
+| 21 | DeferredToolRegistry 懒加载 | ✅ 已接线。`assemble.go:285-286` `NewDeferredToolRegistryAdapter` 创建 dtr，MCP 工具（assemble.go:972）和 Skill 工具（assemble.go:1064）通过 `RegisterDeferred` 懒加载 |
 
 ---
 
@@ -202,14 +209,13 @@ main() → config.Load() → newTracing() → cli.Run()
 
 按对客户价值的排序：
 
-1. **FileMutationQueue 完整接线**：在 `assemble.go` 中用 `tools.WithMutationQueue(NewDefaultFileMutationQueue(), ...)` 替换或补充 `MutationWrapper`，使写/编辑操作经过 per-file worker 串行化队列，获得异步排队、symlink 归并、结果 channel 等高级能力。
-2. **ACP 协议集成**：将 `internal/acp` 的 gRPC/stdio 适配器接入运行时，使 go-cli 能作为 ACP 客户端/服务端与其他 Agent 运行时互通，打开多 Agent 协作生态。
-3. **PluginLoader + Extension 系统**：实现插件热加载（替换 `errPluginsUnsupported` stub），将 `internal/extension` 的 Manager/Registry 接入 `assemble.go`，使第三方扩展能通过规范接口注入工具/中间件/模型。
-4. **Steer 全集成**：将中断/转向（interrupt/steer）能力与中间件链深度集成，支持运行时动态修改 Agent 行为（已有 `interrupt.go` 基础，需与 HookChain 联动）。
-5. **多智能体编排**：在 SubAgent 真实执行的基础上，实现多 Agent 并行编排与结果聚合（复用 SubAgentFactory + EventStream），落地 AGENTS.md 的"三角色"研发范式。
-6. **Git 深度集成**：扩展 Git 工具至分支管理、冲突解决、PR 创建，与 Session 分支树联动实现问答级回滚。
-7. **LSP 集成**：接入语言服务器协议，为 read/edit/grep 工具提供语义级代码理解能力（符号跳转、引用查找、类型信息）。
-8. **窗口溢出降级**：将 `llm/middleware_overflow.go` 接入模型中间件链，实现上下文溢出时自动切小模型或降级重试。
+1. **LLMMemoryExtractor 接线**：在会话结束或轮次结束时调用 `assembly.MemoryExtractor.Extract()`，将提取的事实写入 FileMemoryStore，打通自动事实提取链路。当前 assemble.go:694 构造了 extractor 但运行时无调用点。
+2. **TUI 实时窗口占比**：在 `/cost` 或 TUI 状态栏中显示当前上下文窗口占用百分比（需配合 maxTokens 计算）。
+3. **多模态支持**：Message.Content 当前为 string，无法携带图片。需扩展为支持 image content，以接入视觉模型（2026 年 CLI Agent 标配）。
+4. **完整 Hooks 生命周期**：当前仅 BeforeToolCall/AfterToolCall，需扩展为完整的事件观察者（EventObserver）+ 生命周期 Hooks。
+5. **OS 级沙箱**：当前仅应用层 BashSandbox（路径白名单+命令黑名单+ulimit），需增加 OS 级隔离（如 Linux namespace/seccomp）。
+6. **MCP Resource/Prompt 支持**：当前 MCP 仅覆盖 Tools，需补齐 Resource 和 Prompt 能力。
+7. **Session Tree 导航命令**：会话树数据结构已实现，需在 CLI 暴露 /tree/fork/clone/resume/export 导航命令。
 
 ---
 
@@ -234,8 +240,14 @@ main() → config.Load() → newTracing() → cli.Run()
 | 并行工具执行 | `assemble.go:386` `WithExecutionMode(core.ExecutionModeParallel)` |
 | 动态系统提示词 | `assemble.go:397-419` `SystemPromptBuilder` + 项目上下文 + Skills |
 | 环路检测 | `assemble.go:424-432` `LoopDetector` + 中间件链注入 SystemReminder |
-| FileMutationQueue 未接线 | `assemble.go:244` 仅用 `NewMutationWrapper()`，未用 `WithMutationQueue` |
-| DeferredToolRegistry 未使用 | `assemble.go` 不引用 `tools.DeferredToolRegistry` |
-| ACP 完全孤立 | `grep -rln "internal/acp"` 非测试仅 AGENTS.md（文档） |
-| PluginLoader 仍 stub | `internal/core/stubs.go` `errPluginsUnsupported` |
-| Extension 无宿主驱动 | `assemble.go` 不 import `internal/extension` |
+| FileMutationQueue 已完整接入 | `assemble.go:359-363` `NewDefaultFileMutationQueue(...)` + `NewMutationQueueWrapper(mutationQueue)`；`:368-374` cleanup Close |
+| DeferredToolRegistry 已接线 | `assemble.go:285-286` `NewDeferredToolRegistryAdapter(underlyingReg)`；MCP assemble.go:972 + Skill assemble.go:1064 通过 `RegisterDeferred` 懒加载 |
+| 7层模型中间件链已接线 | `assemble.go:479-487` `NewStandardMiddlewareChain(Failover, Retry, Timeout, Sanitize, LoopDetection, Validate, Overflow)`；`assemble.go:548,640` 经 `newModelWrapperWithChain` 注入；`output_guard_adapter.go:186-214` 组合 pw+chain+breaker+guard+telemetry；`loop.go:243-249` 运行时执行 |
+| Tracing 脱敏已实现 | `exporter.go:100-149` RedactingExporter 三级（full/redact/off）；`assemble.go:272-276` 从 config 读取 RedactionLevel 包装 exporter |
+| LLMMemoryExtractor 死接线 | `assemble.go:694` 构造 `NewLLMMemoryExtractor(model, memStore)` 但运行时无 `.Extract()` 调用。FileMemoryStore 完整接线（assemble.go:658-688 注入系统提示 + /memory 命令），自动事实提取链路断开 |
+| ACP 已接线（配置驱动） | `assemble.go:448-473` ACPClient（stdio/gRPC）+ ACPMiddlewareAdapter；`:604-606` 追加到中间件链 |
+| PluginLoader 真实实现已生效 | `extension/plugin.go`（build tag `!no_plugin`）为默认编译；`assemble.go:321` 使用 `NewDefaultPluginLoader()` |
+| Extension 已有宿主驱动 | `assemble.go:318-341` PluginManager Load → Init → Shutdown；Tools/Hooks/Middleware 桥接进运行时 |
+| BashSandbox 已接线 | `assemble.go:222-233` `NewDefaultBashSandbox` + `WithAllowedPaths` + `ResourceLimits`；`:248` `WithRegisteredBashSandbox` |
+| 会话分支已接线 | `interactive.go:135-141` SessionTreeBuilder + SessionSlashHandler；`slash_handlers.go:155-174` `/session` |
+| Undo / Checkpoint 已接线 | `slash_handlers.go:192-218` UndoHandler + FileTracker.Restore |

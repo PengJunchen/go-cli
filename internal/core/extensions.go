@@ -30,6 +30,26 @@ type Hook interface {
 	AfterRun(ctx context.Context, submission Submission, result Result, err error) error
 }
 
+// LifecycleHook is an optional interface that extensions can implement to
+// observe finer-grained lifecycle events beyond BeforeRun/AfterRun. Hooks
+// that do not implement this interface are unaffected (backward compatible).
+//
+// Tool-call interception (pre-tool-call blocking) is handled by the unified
+// ToolInterceptor mechanism (see pre_tool_call.go). Post-tool-call observation
+// is handled by tool-level middleware. These concerns are no longer part of
+// the LifecycleHook interface.
+type LifecycleHook interface {
+	Hook
+	// OnTurnStart is invoked at the beginning of each turn.
+	OnTurnStart(ctx context.Context, turnID string) error
+	// OnTurnEnd is invoked after a turn completes (success or failure).
+	OnTurnEnd(ctx context.Context, turnID string, result Result, err error) error
+	// OnCompaction is invoked after context compaction reduces message count.
+	OnCompaction(ctx context.Context, beforeCount, afterCount int) error
+	// OnError is invoked when an unrecoverable error occurs during a turn.
+	OnError(ctx context.Context, turnID string, err error) error
+}
+
 // Middleware wraps an AgentLoop to intercept and augment its behavior
 // (onion model).
 type Middleware interface {
@@ -191,6 +211,31 @@ func (h *HookImpl) AfterRun(_ context.Context, _ Submission, _ Result, _ error) 
 	slog.Info("core.hook.after", "name", h.Name())
 	return nil
 }
+
+// LifecycleHookImpl is the default LifecycleHook stub. It embeds HookImpl for
+// the base Hook methods and provides no-op implementations of the six
+// lifecycle callbacks. Extensions may embed this struct and override only the
+// callbacks they care about.
+type LifecycleHookImpl struct {
+	HookImpl
+}
+
+var _ LifecycleHook = (*LifecycleHookImpl)(nil)
+
+// OnTurnStart is a no-op invoked at the beginning of each turn.
+func (h *LifecycleHookImpl) OnTurnStart(_ context.Context, _ string) error { return nil }
+
+// OnTurnEnd is a no-op invoked after a turn completes.
+func (h *LifecycleHookImpl) OnTurnEnd(_ context.Context, _ string, _ Result, _ error) error {
+	return nil
+}
+
+// OnCompaction is a no-op invoked after context compaction reduces message
+// count.
+func (h *LifecycleHookImpl) OnCompaction(_ context.Context, _, _ int) error { return nil }
+
+// OnError is a no-op invoked when an unrecoverable error occurs during a turn.
+func (h *LifecycleHookImpl) OnError(_ context.Context, _ string, _ error) error { return nil }
 
 // MiddlewareImpl is the default Middleware stub. It is a pass-through that
 // returns the underlying AgentLoop unchanged.

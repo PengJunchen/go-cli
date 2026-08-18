@@ -7,6 +7,20 @@ import (
 	"time"
 )
 
+// ConditionEvaluator evaluates whether a SystemReminder should fire.
+// When non-nil, it is checked after the Interval check passes but before
+// the reminder is collected.
+type ConditionEvaluator interface {
+	Evaluate(ctx context.Context) bool
+}
+
+// ConditionFunc is a function adapter implementing ConditionEvaluator.
+type ConditionFunc func(ctx context.Context) bool
+
+func (f ConditionFunc) Evaluate(ctx context.Context) bool {
+	return f(ctx)
+}
+
 // SystemReminder represents a timed or conditional system message injection.
 type SystemReminder struct {
 	// ID uniquely identifies the reminder.
@@ -19,6 +33,11 @@ type SystemReminder struct {
 	// eligible (subject to Interval). Non-empty conditions are stored and
 	// logged; predicate evaluation is reserved for a future hook.
 	Condition string
+	// Evaluator, when non-nil, is called after the Interval check passes.
+	// If it returns false the reminder is skipped and lastFired is NOT
+	// updated, so the reminder will be retried on the next CheckAndCollect
+	// pass.
+	Evaluator ConditionEvaluator
 }
 
 // SystemReminderManager manages active reminders.
@@ -110,6 +129,13 @@ func (m *DefaultSystemReminderManager) CheckAndCollect(ctx context.Context) []st
 			isDue = !fired || now.Sub(last) >= r.Interval
 		}
 		if !isDue {
+			continue
+		}
+		// Condition evaluation: when an Evaluator is set, it must return
+		// true for the reminder to fire. If it returns false, the reminder
+		// is skipped WITHOUT updating lastFired so it will be retried on
+		// the next CheckAndCollect pass.
+		if r.Evaluator != nil && !r.Evaluator.Evaluate(ctx) {
 			continue
 		}
 		due = append(due, r.Content)

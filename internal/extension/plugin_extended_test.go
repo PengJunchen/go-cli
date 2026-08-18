@@ -136,12 +136,9 @@ func TestPluginLoaderHTTPS(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	// Temporarily trust the test server's self-signed cert.
-	old := http.DefaultClient
-	http.DefaultClient = srv.Client()
-	defer func() { http.DefaultClient = old }()
-
-	loader := extension.NewDefaultPluginLoader()
+	// Inject a client that trusts the test server's self-signed certificate.
+	// (The loader's default SSRF-safe client uses the standard trust store.)
+	loader := extension.NewDefaultPluginLoader(extension.WithPluginHTTPClient(srv.Client()))
 	exts, err := loader.Load(context.Background(), srv.URL)
 	require.NoError(t, err)
 	require.Len(t, exts, 1)

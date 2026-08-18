@@ -238,7 +238,7 @@ func TestWebFetchHTMLConversion(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebFetchTool(WithHTMLConverter(NewDefaultHTMLConverter()))
+	tool := NewWebFetchTool(WithWebFetchClient(srv.Client()), WithHTMLConverter(NewDefaultHTMLConverter()))
 	res, err := tool.Execute(context.Background(), ToolCall{
 		ID:   "call-1",
 		Name: "web_fetch",
@@ -257,7 +257,7 @@ func TestWebFetchNonHTMLNoConversion(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	tool := NewWebFetchTool(WithHTMLConverter(NewDefaultHTMLConverter()))
+	tool := NewWebFetchTool(WithWebFetchClient(srv.Client()), WithHTMLConverter(NewDefaultHTMLConverter()))
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"url": srv.URL},
 	})
@@ -274,7 +274,7 @@ func TestWebFetchNoConverterRawHTML(t *testing.T) {
 	defer srv.Close()
 
 	// Without a converter the tool returns the raw body (backward compatible).
-	tool := NewWebFetchTool()
+	tool := NewWebFetchTool(WithWebFetchClient(srv.Client()))
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"url": srv.URL},
 	})

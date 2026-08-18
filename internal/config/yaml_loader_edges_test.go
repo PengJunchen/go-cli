@@ -41,8 +41,8 @@ func TestStripYAMLComment_None(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 // TestBuildYAMLLines_ListTaggingAndIndent verifies list items are tagged and
-// space-indentation is measured. Tab characters do not advance indentWidth (the
-// parser only counts spaces), so tab-only lines report indent 0.
+// space-indentation is measured. Tab characters count as 4 spaces (tab-stop
+// rounding), so a single-tab-indented line reports indent 4.
 func TestBuildYAMLLines_ListTaggingAndIndent(t *testing.T) {
 	lines := buildYAMLLines([]byte("tools:\n\tbuiltin:\n  - a\n  plain: x\n"))
 	// Five elements: four significant lines plus the trailing-newline blank.
@@ -52,9 +52,9 @@ func TestBuildYAMLLines_ListTaggingAndIndent(t *testing.T) {
 	assert.False(t, lines[0].listItem)
 	assert.Equal(t, 0, lines[0].indent)
 
-	// Tab-indented "builtin:" — the tab contributes no space indent.
+	// Tab-indented "builtin:" — tab counts as 4 spaces.
 	assert.False(t, lines[1].listItem)
-	assert.Equal(t, 0, lines[1].indent)
+	assert.Equal(t, 4, lines[1].indent)
 
 	// Two-space "- a" is a list item.
 	assert.True(t, lines[2].listItem)
@@ -277,4 +277,349 @@ func TestYAMLConfigLoader_ExplicitJSONPath(t *testing.T) {
 	_, err := NewYAMLConfigLoader().Load(context.Background(), path)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "detect format")
+}
+
+// ---------------------------------------------------------------------------
+// HI-12: YAML parser edge case tests (task 48-14)
+//
+// These tests exercise the hand-written YAML parser against edge cases that
+// could cause configuration corruption or crashes. Where the parser has a
+// known limitation, the test documents the actual behavior with a TODO comment
+// rather than changing the parser.
+// ---------------------------------------------------------------------------
+
+// TestParseYAMLTree_CommentInQuotedString verifies that a '#' inside a
+// double-quoted value is NOT treated as a comment (AC-1).
+func TestParseYAMLTree_CommentInQuotedString(t *testing.T) {
+	tree, err := parseYAMLTree([]byte(`key: "value # not a comment"`))
+	require.NoError(t, err)
+	m, ok := tree.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "value # not a comment", m["key"])
+}
+
+// TestParseYAMLTree_CommentInSingleQuotedString verifies that a '#' inside a
+// single-quoted value is NOT treated as a comment.
+func TestParseYAMLTree_CommentInSingleQuotedString(t *testing.T) {
+	tree, err := parseYAMLTree([]byte(`key: 'value # not a comment'`))
+	require.NoError(t, err)
+	m, ok := tree.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "value # not a comment", m["key"])
+}
+
+// TestParseYAMLTree_QuotedHashFollowedByComment verifies a quoted value
+// containing '#' followed by a real inline comment parses correctly.
+func TestParseYAMLTree_QuotedHashFollowedByComment(t *testing.T) {
+	tree, err := parseYAMLTree([]byte(`key: "value#1" # real comment`))
+	require.NoError(t, err)
+	m, ok := tree.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "value#1", m["key"])
+}
+
+// TestParseYAMLTree_VersionNumberUnquoted verifies that an unquoted "1.0" is
+// parsed as a float (a known limitation of the simple scalar coercer).
+// TODO: parser treats unquoted 1.0 as float64(1.0), not string "1.0".
+func TestParseYAMLTree_VersionNumberUnquoted(t *testing.T) {
+	tree, err := parseYAMLTree([]byte("version: 1.0\n"))
+	require.NoError(t, err)
+	m, ok := tree.(map[string]any)
+	require.True(t, ok)
+	// The parser coerces 1.0 to float64; use quotes to preserve as string.
+	assert.Equal(t, float64(1.0), m["version"])
+}
+
+// TestParseYAMLTree_VersionNumberQuoted verifies that a quoted "1.0" is
+// preserved as a string (AC-2).
+func TestParseYAMLTree_VersionNumberQuoted(t *testing.T) {
+	tree, err := parseYAMLTree([]byte(`version: "1.0"` + "\n"))
+	require.NoError(t, err)
+	m, ok := tree.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "1.0", m["version"])
+}
+
+// TestParseYAMLTree_EmptyValueYieldsEmptyMap verifies that "key:" with nothing
+// after it yields an empty map (tolerant default).
+func TestParseYAMLTree_EmptyValueYieldsEmptyMap(t *testing.T) {
+	tree, err := parseYAMLTree([]byte("key:\n"))
+	require.NoError(t, err)
+	m, ok := tree.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, map[string]any{}, m["key"])
+}
+
+// TestParseYAMLTree_SpecialCharColonInQuotedValue verifies that ": " inside a
+// quoted value is preserved.
+func TestParseYAMLTree_SpecialCharColonInQuotedValue(t *testing.T) {
+	tree, err := parseYAMLTree([]byte(`key: "a: b"`))
+	require.NoError(t, err)
+	m, ok := tree.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "a: b", m["key"])
+}
+
+// TestParseYAMLTree_SpecialCharBracesInQuotedValue verifies that "{}" inside a
+// quoted value is preserved as a string, not parsed as a flow map.
+func TestParseYAMLTree_SpecialCharBracesInQuotedValue(t *testing.T) {
+	tree, err := parseYAMLTree([]byte(`key: "{}"`))
+	require.NoError(t, err)
+	m, ok := tree.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "{}", m["key"])
+}
+
+// TestParseYAMLTree_SpecialCharBracketsInQuotedValue verifies that "[]" inside
+// a quoted value is preserved as a string.
+func TestParseYAMLTree_SpecialCharBracketsInQuotedValue(t *testing.T) {
+	tree, err := parseYAMLTree([]byte(`key: "[a, b]"`))
+	require.NoError(t, err)
+	m, ok := tree.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "[a, b]", m["key"])
+}
+
+// TestParseYAMLTree_BackslashInSingleQuotedValue verifies that a backslash
+// inside a single-quoted value is preserved literally (no escape processing).
+func TestParseYAMLTree_BackslashInSingleQuotedValue(t *testing.T) {
+	tree, err := parseYAMLTree([]byte(`key: 'a\b\c'`))
+	require.NoError(t, err)
+	m, ok := tree.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, `a\b\c`, m["key"])
+}
+
+// TestParseYAMLTree_UnicodeCJKInKeysAndValues verifies CJK characters in keys
+// and values parse correctly.
+func TestParseYAMLTree_UnicodeCJKInKeysAndValues(t *testing.T) {
+	tree, err := parseYAMLTree([]byte("名称: 你好世界\n"))
+	require.NoError(t, err)
+	m, ok := tree.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "你好世界", m["名称"])
+}
+
+// TestParseYAMLTree_UnicodeEmojiInValue verifies emoji in values parse
+// correctly.
+func TestParseYAMLTree_UnicodeEmojiInValue(t *testing.T) {
+	tree, err := parseYAMLTree([]byte("key: 🚀🎉\n"))
+	require.NoError(t, err)
+	m, ok := tree.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "🚀🎉", m["key"])
+}
+
+// TestParseYAMLTree_BooleanLikeStringYes verifies that a quoted "yes" is
+// parsed as a string, not a boolean.
+func TestParseYAMLTree_BooleanLikeStringYes(t *testing.T) {
+	tree, err := parseYAMLTree([]byte(`key: "yes"`))
+	require.NoError(t, err)
+	m, ok := tree.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "yes", m["key"])
+}
+
+// TestParseYAMLTree_BooleanLikeStringNo verifies that a quoted "no" is parsed
+// as a string, not a boolean.
+func TestParseYAMLTree_BooleanLikeStringNo(t *testing.T) {
+	tree, err := parseYAMLTree([]byte(`key: "no"`))
+	require.NoError(t, err)
+	m, ok := tree.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "no", m["key"])
+}
+
+// TestParseYAMLTree_UnquotedYesIsString verifies that an unquoted "yes" is
+// parsed as a string (the parser only recognizes lowercase true/false as
+// booleans, following YAML 1.2).
+func TestParseYAMLTree_UnquotedYesIsString(t *testing.T) {
+	tree, err := parseYAMLTree([]byte("key: yes\n"))
+	require.NoError(t, err)
+	m, ok := tree.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "yes", m["key"])
+}
+
+// TestParseYAMLTree_LeadingZeroNumber verifies that a number with leading zeros
+// like "007" is parsed as integer 7 (strconv.ParseInt base 10 strips leading
+// zeros).
+func TestParseYAMLTree_LeadingZeroNumber(t *testing.T) {
+	tree, err := parseYAMLTree([]byte("key: 007\n"))
+	require.NoError(t, err)
+	m, ok := tree.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, int64(7), m["key"])
+}
+
+// TestParseYAMLTree_LeadingZeroQuoted verifies that a quoted "007" is preserved
+// as a string.
+func TestParseYAMLTree_LeadingZeroQuoted(t *testing.T) {
+	tree, err := parseYAMLTree([]byte(`key: "007"`))
+	require.NoError(t, err)
+	m, ok := tree.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "007", m["key"])
+}
+
+// TestParseYAMLTree_AnchorNotSupported verifies that YAML anchors (&anchor) are
+// not processed — the value is kept as a literal string.
+// TODO: parser does not support anchors/aliases (documented limitation).
+func TestParseYAMLTree_AnchorNotSupported(t *testing.T) {
+	tree, err := parseYAMLTree([]byte("key: &anchor value\n"))
+	require.NoError(t, err)
+	m, ok := tree.(map[string]any)
+	require.True(t, ok)
+	// The anchor marker is not stripped; the whole thing is a string.
+	assert.Equal(t, "&anchor value", m["key"])
+}
+
+// TestParseYAMLTree_AliasNotSupported verifies that YAML aliases (*anchor) are
+// not processed — the value is kept as a literal string.
+// TODO: parser does not support anchors/aliases (documented limitation).
+func TestParseYAMLTree_AliasNotSupported(t *testing.T) {
+	tree, err := parseYAMLTree([]byte("key: *anchor\n"))
+	require.NoError(t, err)
+	m, ok := tree.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "*anchor", m["key"])
+}
+
+// TestParseYAMLTree_FlowSequenceNotSupported verifies that flow sequences
+// ([a, b, c]) are not parsed as lists — the value is kept as a literal string.
+// TODO: parser does not support flow sequences, only flow maps.
+func TestParseYAMLTree_FlowSequenceNotSupported(t *testing.T) {
+	tree, err := parseYAMLTree([]byte("key: [a, b, c]\n"))
+	require.NoError(t, err)
+	m, ok := tree.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "[a, b, c]", m["key"])
+}
+
+// TestParseYAMLTree_TrailingWhitespaceTrimmed verifies that trailing whitespace
+// after an unquoted value is trimmed.
+func TestParseYAMLTree_TrailingWhitespaceTrimmed(t *testing.T) {
+	tree, err := parseYAMLTree([]byte("key: value   \n"))
+	require.NoError(t, err)
+	m, ok := tree.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "value", m["key"])
+}
+
+// TestParseYAMLTree_NullRepresentations verifies the various null
+// representations. The parser recognizes "null" and "~" as nil.
+// TODO: parser does not recognize "NULL", "Null" as null (only lowercase
+// "null" and "~").
+func TestParseYAMLTree_NullRepresentations(t *testing.T) {
+	cases := []struct {
+		in   string
+		want any
+	}{
+		{"null", nil},
+		{"~", nil},
+		// TODO: "NULL" and "Null" are not recognized as null by the parser.
+		{"NULL", "NULL"},
+		{"Null", "Null"},
+	}
+	for _, tc := range cases {
+		tree, err := parseYAMLTree([]byte("key: " + tc.in + "\n"))
+		require.NoError(t, err, "input %q", tc.in)
+		m, ok := tree.(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, tc.want, m["key"], "input %q", tc.in)
+	}
+}
+
+// TestParseYAMLTree_BooleanRepresentations verifies boolean parsing. The parser
+// only recognizes lowercase "true" and "false".
+// TODO: parser does not recognize "True", "False", "TRUE", "FALSE", "yes",
+// "no", "on", "off" as booleans.
+func TestParseYAMLTree_BooleanRepresentations(t *testing.T) {
+	cases := []struct {
+		in   string
+		want any
+	}{
+		{"true", true},
+		{"false", false},
+		// TODO: these are not recognized as booleans by the parser.
+		{"True", "True"},
+		{"False", "False"},
+		{"TRUE", "TRUE"},
+		{"FALSE", "FALSE"},
+		{"yes", "yes"},
+		{"no", "no"},
+		{"on", "on"},
+		{"off", "off"},
+	}
+	for _, tc := range cases {
+		tree, err := parseYAMLTree([]byte("key: " + tc.in + "\n"))
+		require.NoError(t, err, "input %q", tc.in)
+		m, ok := tree.(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, tc.want, m["key"], "input %q", tc.in)
+	}
+}
+
+// TestParseYAMLTree_NegativeNumbersAndFloats verifies negative integers and
+// floats are parsed correctly.
+func TestParseYAMLTree_NegativeNumbersAndFloats(t *testing.T) {
+	cases := []struct {
+		in   string
+		want any
+	}{
+		{"-123", int64(-123)},
+		{"3.14", 3.14},
+		{"-0.5", -0.5},
+		{"-100", int64(-100)},
+		{"0", int64(0)},
+		{"-0", int64(0)},
+	}
+	for _, tc := range cases {
+		tree, err := parseYAMLTree([]byte("key: " + tc.in + "\n"))
+		require.NoError(t, err, "input %q", tc.in)
+		m, ok := tree.(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, tc.want, m["key"], "input %q", tc.in)
+	}
+}
+
+// TestParseYAMLTree_MixedTypesInBlockSequence verifies that a block-style
+// sequence with mixed scalar types parses each element to the correct type.
+func TestParseYAMLTree_MixedTypesInBlockSequence(t *testing.T) {
+	tree, err := parseYAMLTree([]byte("key:\n  - 1\n  - \"two\"\n  - true\n  - null\n"))
+	require.NoError(t, err)
+	m, ok := tree.(map[string]any)
+	require.True(t, ok)
+	list, ok := m["key"].([]any)
+	require.True(t, ok)
+	require.Len(t, list, 4)
+	assert.Equal(t, int64(1), list[0])
+	assert.Equal(t, "two", list[1])
+	assert.Equal(t, true, list[2])
+	assert.Nil(t, list[3])
+}
+
+// TestParseYAMLTree_CRLFLineEndings verifies that Windows-style CRLF line
+// endings are handled correctly through the full parse pipeline.
+func TestParseYAMLTree_CRLFLineEndings(t *testing.T) {
+	doc := "a: 1\r\nb: 2\r\n"
+	tree, err := parseYAMLTree([]byte(doc))
+	require.NoError(t, err)
+	m, ok := tree.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, int64(1), m["a"])
+	assert.Equal(t, int64(2), m["b"])
+}
+
+// TestUnmarshalConfig_YAMLMultipleDocumentsNotSupported verifies that the YAML
+// multi-document separator "---" is not supported. Since "---" starts with
+// "-", the parser treats it as a list item, making the top level a list rather
+// than a mapping, which UnmarshalConfig rejects.
+// TODO: parser does not support multi-document streams.
+func TestUnmarshalConfig_YAMLMultipleDocumentsNotSupported(t *testing.T) {
+	doc := "---\na: 1\n---\nb: 2\n"
+	var cfg Config
+	err := UnmarshalConfig([]byte(doc), ConfigFormatYAML, &cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must be a mapping")
 }

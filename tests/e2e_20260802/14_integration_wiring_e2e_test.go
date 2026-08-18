@@ -1089,16 +1089,18 @@ func TestET_Pipeline_MultiTurnEventSequence(t *testing.T) {
 	}
 
 	// Verify the event sequence:
-	// message, tool_call, tool_result, message, tool_call, tool_result, message, done
+	// message, pre_tool_call, tool_call, tool_result, message, pre_tool_call, tool_call, tool_result, message, done
 	expectedKinds := []string{
-		"message",     // Turn 1 content
-		"tool_call",   // read_file
-		"tool_result", // read_file result
-		"message",     // Turn 2 content
-		"tool_call",   // bash
-		"tool_result", // bash result
-		"message",     // Turn 3 content
-		"done",        // harness done
+		"message",       // Turn 1 content
+		"pre_tool_call", // before read_file
+		"tool_call",     // read_file
+		"tool_result",   // read_file result
+		"message",       // Turn 2 content
+		"pre_tool_call", // before bash
+		"tool_call",     // bash
+		"tool_result",   // bash result
+		"message",       // Turn 3 content
+		"done",          // harness done
 	}
 
 	require.Len(t, seq, len(expectedKinds),

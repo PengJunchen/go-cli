@@ -69,6 +69,14 @@ func runFakeMCPServer(conn net.Conn) {
 			continue
 		}
 
+		// Skip JSON-RPC notifications (no id field) — they must not receive a response.
+		var raw map[string]json.RawMessage
+		if err := json.Unmarshal(sc.Bytes(), &raw); err == nil {
+			if _, hasID := raw["id"]; !hasID {
+				continue
+			}
+		}
+
 		var res map[string]any
 		switch req.Method {
 		case "tools/list":
@@ -79,6 +87,12 @@ func runFakeMCPServer(conn net.Conn) {
 			}
 		case "tools/call":
 			res = map[string]any{"content": "hello"}
+		case "initialize":
+			res = map[string]any{
+				"protocolVersion": LatestProtocolVersion,
+				"capabilities":    map[string]any{},
+				"serverInfo":      map[string]any{"name": "fake", "version": "1.0"},
+			}
 		}
 
 		frame := map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": res}
@@ -286,7 +300,7 @@ func TestAdapterDisconnectPreservesExternalConnection(t *testing.T) {
 		io.Discard,
 		func() error { closed.Store(true); return nil },
 	)
-	adapter := NewOfficialSDKAdapter(MCPServerConfig{Name: "srv", Transport: MCPTransportStdio}, WithConnection(tr))
+	adapter := NewOfficialSDKAdapter(MCPServerConfig{Name: "srv", Transport: MCPTransportStdio}, WithConnection(tr), WithoutInitialize())
 
 	require.NoError(t, adapter.Connect(context.Background()))
 	require.NoError(t, adapter.Disconnect(context.Background()))
@@ -301,7 +315,7 @@ func TestAdapterDisconnectAllowsStdioReconnect(t *testing.T) {
 		Command:   "sh",
 		Args:      []string{"-c", fmt.Sprintf("touch %s; cat", marker)},
 	}
-	adapter := NewOfficialSDKAdapter(cfg)
+	adapter := NewOfficialSDKAdapter(cfg, WithoutInitialize())
 	ctx := context.Background()
 
 	require.NoError(t, adapter.Connect(ctx), "first Connect must succeed")
@@ -357,11 +371,11 @@ func TestAdapterCallToolSurfacesIsErrorAndDefaultsContent(t *testing.T) {
 	}()
 
 	conn := NewJSONRPCLineTransport(clientConn, clientConn, clientConn.Close)
-	adapter := NewOfficialSDKAdapter(MCPServerConfig{Name: "srv", Transport: MCPTransportStdio}, WithConnection(conn))
+	adapter := NewOfficialSDKAdapter(MCPServerConfig{Name: "srv", Transport: MCPTransportStdio}, WithConnection(conn), WithoutInitialize())
 	require.NoError(t, adapter.Connect(context.Background()))
 
 	result, err := adapter.CallTool(context.Background(), "echo", nil)
-	require.NoError(t, err, "a server-side IsError must not be surfaced as a Go error")
+	require.NoError(t, err)
 	assert.True(t, result.IsError, "IsError must be propagated to the caller")
 	assert.Equal(t, "", result.Content, "missing content must default to an empty string")
 }
@@ -427,4 +441,172 @@ func TestConcurrentRequestsDoNotCorruptResponses(t *testing.T) {
 		errs = append(errs, e)
 	}
 	require.Empty(t, errs, "concurrent requests must each receive their own response")
+}
+
+// ---------------------------------------------------------------------------
+// JSON-RPC default timeout tests (MD-13)
+// ---------------------------------------------------------------------------
+
+// TestTransportRequestRespectsCallerDeadline verifies that a caller-provided
+// deadline is honored even when the server sends non-matching frames that keep
+// the read loop iterating.
+func TestTransportRequestRespectsCallerDeadline(t *testing.T) {
+	t.Parallel()
+
+	pr, pw := io.Pipe()
+	var out bytes.Buffer
+	tr := NewJSONRPCLineTransport(pr, &out, nil)
+
+	// Writer goroutine: sends non-matching frames so the read loop iterates
+	// and checks ctx.Done() between reads.
+	writerDone := make(chan struct{})
+	go func() {
+		defer close(writerDone)
+		for i := 1000; ; i++ {
+			frame := fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":{}}`+"\n", i)
+			if _, err := pw.Write([]byte(frame)); err != nil {
+				return
+			}
+			time.Sleep(10 * time.Millisecond)
+		}
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+
+	_, err := tr.Request(ctx, "ping", nil)
+	require.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+
+	// Clean up the writer goroutine.
+	_ = pw.Close()
+	<-writerDone
+}
+
+// ---------------------------------------------------------------------------
+// JSON-RPC notification forwarding tests (MD-12)
+// ---------------------------------------------------------------------------
+
+// TestTransportForwardsNotifications verifies that JSON-RPC frames without an
+// id field (notifications) are forwarded to the Notifications() channel while
+// the request/response loop continues to process the matching response.
+func TestTransportForwardsNotifications(t *testing.T) {
+	t.Parallel()
+	// Input: a notification (no id) followed by a response with id 0.
+	input := `{"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":50}}` + "\n" +
+		`{"jsonrpc":"2.0","id":0,"result":{"ok":true}}` + "\n"
+	in := bytes.NewReader([]byte(input))
+	var out bytes.Buffer
+	tr := NewJSONRPCLineTransport(in, &out, nil)
+
+	res, err := tr.Request(context.Background(), "ping", nil)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"ok": true}, res)
+
+	// The notification should have been forwarded to the channel.
+	select {
+	case notif := <-tr.Notifications():
+		var frame map[string]any
+		require.NoError(t, json.Unmarshal(notif, &frame))
+		assert.Equal(t, "notifications/progress", frame["method"])
+	case <-time.After(time.Second):
+		t.Fatal("notification was not forwarded to the Notifications() channel")
+	}
+}
+
+// TestTransportNotificationsDontBlockRequests verifies that a flood of
+// notifications before the matching response does not stall the Request call.
+// The notification channel is buffered (size 16); excess notifications are
+// silently dropped.
+func TestTransportNotificationsDontBlockRequests(t *testing.T) {
+	t.Parallel()
+
+	// Build input with 30 notifications followed by the matching response.
+	var input bytes.Buffer
+	for i := 0; i < 30; i++ {
+		fmt.Fprintf(&input, `{"jsonrpc":"2.0","method":"notifications/progress","params":{"i":%d}}`+"\n", i)
+	}
+	input.WriteString(`{"jsonrpc":"2.0","id":0,"result":{"ok":true}}` + "\n")
+
+	in := bytes.NewReader(input.Bytes())
+	var out bytes.Buffer
+	tr := NewJSONRPCLineTransport(in, &out, nil)
+
+	res, err := tr.Request(context.Background(), "ping", nil)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{"ok": true}, res)
+
+	// At least one notification should have been forwarded (channel buffer is 16).
+	select {
+	case <-tr.Notifications():
+	case <-time.After(time.Second):
+		t.Fatal("expected at least one forwarded notification")
+	}
+}
+
+// TestAdapterForwardsNotifications verifies that notifications sent by the
+// server (before a response) are forwarded to the adapter's Notifications()
+// channel and do not block request handling.
+func TestAdapterForwardsNotifications(t *testing.T) {
+	t.Parallel()
+	serverConn, clientConn := net.Pipe()
+	defer closeConn(serverConn)
+
+	go func() {
+		sc := bufio.NewScanner(serverConn)
+		for sc.Scan() {
+			var req struct {
+				ID     int64  `json:"id"`
+				Method string `json:"method"`
+			}
+			if json.Unmarshal(sc.Bytes(), &req) != nil {
+				continue
+			}
+			// Skip client-side notifications (no id field).
+			var raw map[string]json.RawMessage
+			if json.Unmarshal(sc.Bytes(), &raw) == nil {
+				if _, hasID := raw["id"]; !hasID {
+					continue
+				}
+			}
+
+			if req.Method == "tools/list" {
+				// Send a notification first, then the response.
+				notif := `{"jsonrpc":"2.0","method":"notifications/progress","params":{"progress":50}}`
+				fmt.Fprintf(serverConn, "%s\n", notif)
+				res := map[string]any{
+					"tools": []map[string]any{
+						{"name": "echo", "description": "echoes"},
+					},
+				}
+				frame := map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": res}
+				b, _ := json.Marshal(frame)
+				fmt.Fprintf(serverConn, "%s\n", b)
+			}
+		}
+		closeConn(serverConn)
+	}()
+
+	conn := NewJSONRPCLineTransport(clientConn, clientConn, clientConn.Close)
+	adapter := NewOfficialSDKAdapter(
+		MCPServerConfig{Name: "srv", Transport: MCPTransportStdio},
+		WithConnection(conn), WithoutInitialize(),
+	)
+	require.NoError(t, adapter.Connect(context.Background()))
+
+	// ListTools should succeed despite the notification preceding the response.
+	tools, err := adapter.ListTools(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tools, 1)
+	assert.Equal(t, "echo", tools[0].Name)
+
+	// The notification should be available on the Notifications() channel.
+	select {
+	case notif := <-adapter.Notifications():
+		var frame map[string]any
+		require.NoError(t, json.Unmarshal(notif, &frame))
+		assert.Equal(t, "notifications/progress", frame["method"])
+	case <-time.After(time.Second):
+		t.Fatal("notification was not forwarded to the adapter's Notifications() channel")
+	}
 }

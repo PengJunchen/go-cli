@@ -389,7 +389,7 @@ func TestPhase3RegistryInventory(t *testing.T) {
 	approval.RegisterApprovalStore(nil)
 	approval.RegisterPermissionModeResolver(nil)
 	approval.RegisterTrustManager(nil)
-	require.Equal(t, "allow_all", approval.GetApprovalClassifier().Name())
+	require.Equal(t, "deny_all", approval.GetApprovalClassifier().Name())
 	require.NotNil(t, approval.GetApprovalStore())
 	require.NotNil(t, approval.GetTrustManager())
 

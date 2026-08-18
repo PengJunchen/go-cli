@@ -9,11 +9,14 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/url"
 	"plugin"
 	"strings"
 	"time"
+
+	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 // This file defines the PluginLoader contract and the default implementation.
@@ -51,15 +54,32 @@ type PluginLoader interface {
 // DefaultPluginLoader is the default PluginLoader supporting Go plugins and
 // JSON-over-HTTP endpoints.
 type DefaultPluginLoader struct {
-	name string
+	name       string
+	httpClient *http.Client
 }
 
 var _ PluginLoader = (*DefaultPluginLoader)(nil)
 
+// PluginLoaderOption configures a DefaultPluginLoader.
+type PluginLoaderOption func(*DefaultPluginLoader)
+
+// WithPluginHTTPClient overrides the HTTP client used to fetch remote extension
+// bundles. It is intended for tests that need a custom transport (e.g. trusting
+// a self-signed test TLS certificate). When unset, a loopback-allowing
+// SSRF-safe client is used so that localhost development endpoints work while
+// other private ranges are blocked at dial time.
+func WithPluginHTTPClient(c *http.Client) PluginLoaderOption {
+	return func(l *DefaultPluginLoader) { l.httpClient = c }
+}
+
 // NewDefaultPluginLoader creates a DefaultPluginLoader. A nil-safe default is
 // provided by the process-wide registry in manager.go.
-func NewDefaultPluginLoader() PluginLoader {
-	return &DefaultPluginLoader{name: "default-plugin-loader"}
+func NewDefaultPluginLoader(opts ...PluginLoaderOption) PluginLoader {
+	l := &DefaultPluginLoader{name: "default-plugin-loader"}
+	for _, opt := range opts {
+		opt(l)
+	}
+	return l
 }
 
 // Name returns the loader identifier.
@@ -153,6 +173,23 @@ type httpBundle struct {
 	Extensions []httpDescriptor `json:"extensions"`
 }
 
+// maxHTTPResponseSize limits the response body read from an HTTP extension
+// endpoint to prevent memory exhaustion from oversized responses.
+const maxHTTPResponseSize = 10 * 1024 * 1024 // 10MB
+
+// isLocalhostHost reports whether host refers to the local machine via the
+// "localhost" name or a loopback IP literal.
+func isLocalhostHost(host string) bool {
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "::1":
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
+		return true
+	}
+	return false
+}
+
 // loadHTTP fetches a JSON bundle from the endpoint and wraps each descriptor as
 // an rpcExtension. This is the documented zero-dependency adaptation of the
 // gRPC remote-loading scheme.
@@ -160,6 +197,12 @@ func (l *DefaultPluginLoader) loadHTTP(ctx context.Context, endpoint string) ([]
 	u, err := url.Parse(endpoint)
 	if err != nil {
 		return nil, fmt.Errorf("extension: parse endpoint %q: %w", endpoint, err)
+	}
+
+	// SSRF protection: require HTTPS except for localhost development.
+	host := u.Hostname()
+	if u.Scheme != "https" && !isLocalhostHost(host) {
+		return nil, fmt.Errorf("extension: endpoint %q must use HTTPS (non-HTTPS is only allowed for localhost)", endpoint)
 	}
 
 	reqCtx := ctx
@@ -174,7 +217,17 @@ func (l *DefaultPluginLoader) loadHTTP(ctx context.Context, endpoint string) ([]
 		return nil, fmt.Errorf("extension: build http request: %w", err)
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	// SSRF protection: a loopback-allowing SSRF-safe client provides dial-time
+	// control so that internal/link-local/cloud-metadata IPs are blocked even
+	// when a pre-check would pass (defending against DNS rebinding). Loopback
+	// is permitted so localhost development endpoints keep working. The shared
+	// implementation lives in tools/url_validator.go.
+	client := l.httpClient
+	if client == nil {
+		client = tools.NewSSRFSafeHTTPClientAllowLoopback(10 * time.Second)
+	}
+
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, fmt.Errorf("extension: query endpoint %q: %w", endpoint, err)
 	}
@@ -184,9 +237,13 @@ func (l *DefaultPluginLoader) loadHTTP(ctx context.Context, endpoint string) ([]
 		return nil, fmt.Errorf("extension: endpoint %q returned status %d", endpoint, resp.StatusCode)
 	}
 
-	body, err := io.ReadAll(resp.Body)
+	// SSRF protection: limit response body to maxHTTPResponseSize.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxHTTPResponseSize+1))
 	if err != nil {
 		return nil, fmt.Errorf("extension: read endpoint response: %w", err)
+	}
+	if int64(len(body)) > maxHTTPResponseSize {
+		return nil, fmt.Errorf("extension: endpoint %q response exceeds %d bytes", endpoint, maxHTTPResponseSize)
 	}
 
 	var bundle httpBundle

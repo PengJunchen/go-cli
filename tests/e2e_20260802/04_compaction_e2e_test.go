@@ -283,9 +283,9 @@ func TestCompaction_TokenEstimation(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, 2, n)
 
-		n, err = est.Estimate("hello world, how are you?") // 26 chars / 4 = 6
+		n, err = est.Estimate("hello world, how are you?") // 8.25 -> 8 tokens
 		require.NoError(t, err)
-		assert.Equal(t, 6, n)
+		assert.Equal(t, 8, n)
 
 		n, err = est.Estimate("") // 0 chars
 		require.NoError(t, err)
@@ -293,9 +293,9 @@ func TestCompaction_TokenEstimation(t *testing.T) {
 	})
 
 	t.Run("unicode string estimation", func(t *testing.T) {
-		n, err := est.Estimate("こんにちは世界") // 7 characters, 21 bytes in UTF-8 / 4 = 5
+		n, err := est.Estimate("こんにちは世界") // 7 CJK chars * 2 = 14 tokens
 		require.NoError(t, err)
-		assert.Equal(t, 5, n)
+		assert.Equal(t, 14, n)
 	})
 
 	t.Run("estimate tokens for full conversation items", func(t *testing.T) {
@@ -305,8 +305,8 @@ func TestCompaction_TokenEstimation(t *testing.T) {
 			{Role: compaction.RoleTool, ToolName: "read", ToolResult: "tool result content"},
 		}
 		tokens := tokenSum(items, est)
-		// system prompt here (17/4=4) + user question (13/4=3) + tool result content (19/4=4) = 11
-		assert.Equal(t, 11, tokens)
+		// system prompt here (5) + user question (4) + tool result content (5) = 14
+		assert.Equal(t, 14, tokens)
 	})
 }
 
@@ -503,8 +503,11 @@ func TestCompaction_EdgeCases(t *testing.T) {
 	})
 
 	t.Run("all tool results no user content", func(t *testing.T) {
-		items := make([]compaction.TurnItem, 6)
-		for i := 0; i < 6; i++ {
+		// Micro replaces tool results with placeholders. Each placeholder
+		// "[compacted tool result]" is ~7 tokens, so 3 items need ~21 tokens.
+		// Use a budget of 30 with 3 items to stay under the threshold.
+		items := make([]compaction.TurnItem, 3)
+		for i := 0; i < 3; i++ {
 			items[i] = compaction.TurnItem{
 				Role:       compaction.RoleTool,
 				ToolName:   "read",
@@ -512,7 +515,6 @@ func TestCompaction_EdgeCases(t *testing.T) {
 			}
 		}
 
-		// Micro replaces tool results with placeholders with a tight budget.
 		micro := compaction.NewMicroCompactor()
 		out, err := micro.Compact(ctx, items, 30, est)
 		require.NoError(t, err)

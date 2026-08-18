@@ -66,7 +66,12 @@ func (s *FileTrustStore) Load() (map[string]TrustEntry, error) {
 func (s *FileTrustStore) Save(entries map[string]TrustEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.writeLocked(entries)
+	// Defensive copy so json.Marshal does not race with caller mutations.
+	copied := make(map[string]TrustEntry, len(entries))
+	for k, v := range entries {
+		copied[k] = v
+	}
+	return s.writeLocked(copied)
 }
 
 // Add upserts a single entry without touching the rest of the store.
@@ -174,7 +179,10 @@ func (s *InMemoryTrustStore) Load() (map[string]TrustEntry, error) {
 func (s *InMemoryTrustStore) Save(entries map[string]TrustEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.entries = entries
+	s.entries = make(map[string]TrustEntry, len(entries))
+	for k, v := range entries {
+		s.entries[k] = v
+	}
 	return nil
 }
 

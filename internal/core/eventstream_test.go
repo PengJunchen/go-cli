@@ -3,12 +3,15 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/verify"
 )
 
 func TestEventStreamBoundedBuffering(t *testing.T) {
@@ -194,4 +197,346 @@ func TestHarnessFansOutAgentEventsToStream(t *testing.T) {
 	require.Len(t, done, 1)
 	assert.Equal(t, "hello", done[0])
 	assert.Equal(t, 1, agent.callCount())
+}
+
+// TestEventStreamConcurrentSendAndCloseNoPanicNoRecover exercises 32 senders
+// and 2 closers racing against each other with a drain goroutine consuming
+// events. The stream must not panic and no goroutine may leak.
+func TestEventStreamConcurrentSendAndCloseNoPanicNoRecover(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	stream := NewEventStream(8)
+
+	// Drain goroutine consuming Events() until the channel closes.
+	drainDone := make(chan struct{})
+	go func() {
+		defer close(drainDone)
+		for range stream.Events() {
+		}
+	}()
+
+	const numSenders = 32
+	var sendWg sync.WaitGroup
+	sendWg.Add(numSenders)
+	for range numSenders {
+		go func() {
+			defer sendWg.Done()
+			//nolint:errcheck,gosec // Send returns nil; best-effort under test.
+			stream.Send(AgentEvent{Kind: "message", Content: "x"})
+		}()
+	}
+
+	// Two closers racing — sync.Once must make this safe.
+	var closeWg sync.WaitGroup
+	closeWg.Add(2)
+	for range 2 {
+		go func() {
+			defer closeWg.Done()
+			stream.Close()
+		}()
+	}
+
+	sendWg.Wait()
+	closeWg.Wait()
+	<-drainDone
+}
+
+// TestEventStreamResultNeverBlockedBySlowConsumer verifies that Result and
+// SetResult work immediately even when a Send is blocked on a zero-capacity
+// channel with no consumer. The mutex is not held during the channel send,
+// so result access is never blocked by back-pressure.
+func TestEventStreamResultNeverBlockedBySlowConsumer(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	stream := NewEventStream(0)
+
+	sendDone := make(chan struct{})
+	go func() {
+		defer close(sendDone)
+		//nolint:errcheck,gosec // Send returns nil; best-effort under test.
+		stream.Send(AgentEvent{Kind: "message", Content: "blocked"})
+	}()
+
+	// Allow the goroutine to enter the blocking select.
+	time.Sleep(10 * time.Millisecond)
+
+	// SetResult and Result must succeed while Send is blocked.
+	stream.SetResult(AgentMessage{Role: "assistant", Content: "final"}, nil)
+	res, err := stream.Result()
+	require.NoError(t, err)
+	assert.Equal(t, "final", res.Content)
+
+	// Unblock the send.
+	stream.Close()
+	<-sendDone
+}
+
+// TestEventStreamSendBlockedThenCloseNoDeadlock verifies that Close does not
+// deadlock when a Send is blocked on a zero-capacity channel with no
+// consumer. The done channel in the select allows Send to exit promptly.
+func TestEventStreamSendBlockedThenCloseNoDeadlock(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	stream := NewEventStream(0)
+
+	sendDone := make(chan struct{})
+	go func() {
+		defer close(sendDone)
+		//nolint:errcheck,gosec // Send returns nil; best-effort under test.
+		stream.Send(AgentEvent{Kind: "message", Content: "blocked"})
+	}()
+
+	// Allow the goroutine to enter the blocking select.
+	time.Sleep(10 * time.Millisecond)
+
+	// Close must complete promptly — the done channel unblocks the select.
+	closeDone := make(chan struct{})
+	go func() {
+		defer close(closeDone)
+		stream.Close()
+	}()
+
+	select {
+	case <-closeDone:
+		// Close completed without deadlock.
+	case <-time.After(2 * time.Second):
+		t.Fatal("Close deadlocked while Send was blocked")
+	}
+
+	<-sendDone
+}
+
+// TestDiscardOldestEvictsOldest verifies AC-3: when the buffer is full,
+// DiscardOldest evicts the oldest event to make room for the new one
+// instead of blocking the sender.
+func TestDiscardOldestEvictsOldest(t *testing.T) {
+	stream := NewEventStream(2, WithEventDiscardPolicy(DiscardOldest))
+
+	// Fill the buffer.
+	require.NoError(t, stream.Send(AgentEvent{Kind: "message", Content: "A"}))
+	require.NoError(t, stream.Send(AgentEvent{Kind: "message", Content: "B"}))
+
+	// Send a third event — should evict "A" and store "C" without blocking.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		require.NoError(t, stream.Send(AgentEvent{Kind: "message", Content: "C"}))
+	}()
+
+	select {
+	case <-done:
+		// Send completed without blocking — AC-3 satisfied.
+	case <-time.After(2 * time.Second):
+		t.Fatal("DiscardOldest Send blocked on full buffer")
+	}
+
+	stream.Close()
+	got := drainEvents(stream)
+
+	// "A" should have been evicted; "B" and "C" should remain.
+	assert.Len(t, got, 2)
+	assert.Equal(t, "B", got[0].Content)
+	assert.Equal(t, "C", got[1].Content)
+}
+
+// TestDiscardNewestDropsIncoming verifies AC-4: when the buffer is full,
+// DiscardNewest drops the incoming event instead of blocking the sender.
+func TestDiscardNewestDropsIncoming(t *testing.T) {
+	stream := NewEventStream(2, WithEventDiscardPolicy(DiscardNewest))
+
+	// Fill the buffer.
+	require.NoError(t, stream.Send(AgentEvent{Kind: "message", Content: "A"}))
+	require.NoError(t, stream.Send(AgentEvent{Kind: "message", Content: "B"}))
+
+	// Send a third event — should be dropped without blocking.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		require.NoError(t, stream.Send(AgentEvent{Kind: "message", Content: "C"}))
+	}()
+
+	select {
+	case <-done:
+		// Send completed without blocking — AC-4 satisfied.
+	case <-time.After(2 * time.Second):
+		t.Fatal("DiscardNewest Send blocked on full buffer")
+	}
+
+	stream.Close()
+	got := drainEvents(stream)
+
+	// "C" should have been dropped; "A" and "B" should remain.
+	assert.Len(t, got, 2)
+	assert.Equal(t, "A", got[0].Content)
+	assert.Equal(t, "B", got[1].Content)
+}
+
+// TestBlockUntilConsumedBlocksOnFullBuffer verifies AC-5: when the buffer
+// is full, BlockUntilConsumed blocks the sender until a consumer reads.
+func TestBlockUntilConsumedBlocksOnFullBuffer(t *testing.T) {
+	stream := NewEventStream(1, WithEventDiscardPolicy(BlockUntilConsumed))
+
+	// Fill the buffer.
+	require.NoError(t, stream.Send(AgentEvent{Kind: "message", Content: "A"}))
+
+	// A second send should block because the buffer is full.
+	sendDone := make(chan struct{})
+	go func() {
+		defer close(sendDone)
+		//nolint:errcheck,gosec // Send returns nil; best-effort under test.
+		stream.Send(AgentEvent{Kind: "message", Content: "B"})
+	}()
+
+	// Verify the send is blocked.
+	select {
+	case <-sendDone:
+		t.Fatal("BlockUntilConsumed Send did not block on full buffer")
+	case <-time.After(50 * time.Millisecond):
+		// Expected: send is still blocked — AC-5 satisfied.
+	}
+
+	// Consume one event to unblock the sender.
+	ev := <-stream.Events()
+	assert.Equal(t, "A", ev.Content)
+
+	// Now the send should complete.
+	select {
+	case <-sendDone:
+		// Sender unblocked after consumer read.
+	case <-time.After(2 * time.Second):
+		t.Fatal("BlockUntilConsumed Send did not unblock after consumer read")
+	}
+
+	stream.Close()
+}
+
+// TestHarnessDefaultDiscardIsBlock verifies that a harness created without
+// WithDiscardPolicy defaults to BlockUntilConsumed, preserving backward
+// compatibility.
+func TestHarnessDefaultDiscardIsBlock(t *testing.T) {
+	h := NewHarnessImpl(&fakeEventStreamAgent{}, WithEventBuffer(1))
+	assert.Equal(t, BlockUntilConsumed, h.discard)
+}
+
+// TestEventStreamDualWrite verifies that when an EventBus is wired via
+// WithEventBus, every event successfully sent to the stream is also published
+// to the bus (dual-write). It also verifies the nil-safe path: when no bus is
+// wired, Send works normally without publishing.
+func TestEventStreamDualWrite(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	bus := NewMemoryEventBus()
+	defer bus.Close()
+
+	busCh := bus.Subscribe(ctx)
+
+	stream := NewEventStream(4, WithEventBus(bus))
+
+	events := []AgentEvent{
+		{Kind: "message", Content: "first"},
+		{Kind: "status", Content: "thinking"},
+		{Kind: "done", Content: "complete"},
+	}
+
+	for _, ev := range events {
+		require.NoError(t, stream.Send(ev))
+	}
+
+	stream.Close()
+
+	// Verify events arrive on the stream's Events() channel.
+	streamGot := drainEvents(stream)
+	require.Len(t, streamGot, 3)
+	assert.Equal(t, "first", streamGot[0].Content)
+	assert.Equal(t, "thinking", streamGot[1].Content)
+	assert.Equal(t, "complete", streamGot[2].Content)
+
+	// Verify the same events arrive on the bus (dual-write).
+	busGot := receiveEvents(t, busCh, 3, 2*time.Second)
+	require.Len(t, busGot, 3)
+	assert.Equal(t, "first", busGot[0].Content)
+	assert.Equal(t, "thinking", busGot[1].Content)
+	assert.Equal(t, "complete", busGot[2].Content)
+
+	// Nil-safe path: a stream without a bus should work identically.
+	nilStream := NewEventStream(2)
+	require.NoError(t, nilStream.Send(AgentEvent{Kind: "message", Content: "nil-bus"}))
+	nilStream.Close()
+	nilGot := drainEvents(nilStream)
+	require.Len(t, nilGot, 1)
+	assert.Equal(t, "nil-bus", nilGot[0].Content)
+}
+
+// TestEventStreamOverflow verifies AC-3: when a producer sends 200+ events
+// with a delayed consumer, all tool_result events are available in the
+// Events() channel (not discarded by DiscardOldest) when the buffer is
+// sized at 256.
+func TestEventStreamOverflow(t *testing.T) {
+	stream := NewEventStream(256, WithEventDiscardPolicy(DiscardOldest))
+
+	totalEvents := 220
+	toolResultCount := 0
+
+	// Send 200+ events without a consumer (delayed consumption).
+	for i := 0; i < totalEvents; i++ {
+		kind := "message"
+		if i%10 == 0 {
+			kind = "tool_result"
+			toolResultCount++
+		}
+		require.NoError(t, stream.Send(AgentEvent{
+			Kind:    kind,
+			Content: fmt.Sprintf("event-%d", i),
+		}))
+	}
+	stream.Close()
+
+	// Now consume all events.
+	got := drainEvents(stream)
+
+	// With 256 capacity and 220 events, no events should be discarded.
+	assert.Len(t, got, totalEvents)
+
+	// Verify all tool_result events are present.
+	gotToolResults := 0
+	for _, ev := range got {
+		if ev.Kind == "tool_result" {
+			gotToolResults++
+		}
+	}
+	assert.Equal(t, toolResultCount, gotToolResults, "all tool_result events should be present")
+}
+
+// TestEventStreamOverflowExceedsBuffer verifies that when events exceed
+// the buffer capacity with DiscardOldest, tool_result events that fit in
+// the buffer are still consumable (the most recent 256 events are retained).
+func TestEventStreamOverflowExceedsBuffer(t *testing.T) {
+	const cap = 256
+	stream := NewEventStream(cap, WithEventDiscardPolicy(DiscardOldest))
+
+	// Send 300 events — 44 will be discarded (oldest).
+	totalEvents := 300
+	for i := 0; i < totalEvents; i++ {
+		kind := "message"
+		if i%10 == 0 {
+			kind = "tool_result"
+		}
+		require.NoError(t, stream.Send(AgentEvent{
+			Kind:    kind,
+			Content: fmt.Sprintf("event-%d", i),
+		}))
+	}
+	stream.Close()
+
+	got := drainEvents(stream)
+
+	// Only the most recent `cap` events should remain.
+	assert.Len(t, got, cap, "should retain exactly cap events after overflow")
+
+	// The first retained event should be event-%d (index totalEvents - cap).
+	firstContent := fmt.Sprintf("event-%d", totalEvents-cap)
+	assert.Equal(t, firstContent, got[0].Content, "oldest events should have been discarded")
 }

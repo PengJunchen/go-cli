@@ -19,9 +19,9 @@ type fakeHandler struct {
 
 func (h *fakeHandler) Name() string        { return h.name }
 func (h *fakeHandler) Description() string { return h.desc }
-func (h *fakeHandler) Handle(_ context.Context, args []string, sc *slashContext) error {
-	fmt.Fprintf(sc.out, "%s called with %v\n", h.name, args) //nolint:errcheck
-	return nil
+func (h *fakeHandler) Handle(_ context.Context, args []string, deps Dependencies) (string, error) {
+	fmt.Fprintf(deps.Out(), "%s called with %v\n", h.name, args) //nolint:errcheck
+	return "", nil
 }
 
 var _ SlashCommandHandler = (*fakeHandler)(nil)

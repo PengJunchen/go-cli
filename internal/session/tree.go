@@ -34,6 +34,15 @@ type DefaultSessionTree struct {
 	branchSummary BranchSummary
 	// summarySeq generates unique ids for appended branch-summary entries.
 	summarySeq atomic.Uint64
+	// seqCounter assigns monotonically increasing Seq numbers to appended
+	// entries that do not already carry one.
+	seqCounter atomic.Uint64
+	// gitSwitcher, when non-nil, is used by Branch to create git branches and
+	// by MoveTo to checkout git branches on resume.
+	gitSwitcher GitBranchSwitcher
+	// branchStore, when non-nil, persists branch metadata so it survives
+	// process restarts. Set via SetBranchStore.
+	branchStore BranchStore
 }
 
 var _ SessionTree = (*DefaultSessionTree)(nil)
@@ -68,6 +77,11 @@ func (t *DefaultSessionTree) Append(ctx context.Context, entry *SessionEntry) er
 	)
 
 	cp := entry.clone()
+	// Assign a monotonically increasing sequence number when the caller did
+	// not provide one, so every stored entry has a Seq for log integrity.
+	if entry.Seq == 0 {
+		cp.Seq = t.seqCounter.Add(1)
+	}
 	t.mu.Lock()
 	if _, exists := t.entries[cp.ID]; exists {
 		t.mu.Unlock()
@@ -127,7 +141,32 @@ func (t *DefaultSessionTree) MoveTo(ctx context.Context, leafID string) error {
 		}
 	}
 	summarizer := t.branchSummary
+
+	// Look up the git branch associated with the target leaf. A branch's
+	// BaseLeafID is the entry the branch was forked from; when we move to
+	// that entry, we check out the associated git branch.
+	var gitBranch string
+	var switcher GitBranchSwitcher
+	if t.gitSwitcher != nil {
+		switcher = t.gitSwitcher
+		for _, meta := range t.branches {
+			if meta.BaseLeafID == leafID && meta.GitBranch != "" {
+				gitBranch = meta.GitBranch
+				break
+			}
+		}
+	}
 	t.mu.Unlock()
+
+	// Check out the associated git branch. Failures are logged as warnings
+	// but do not fail the session branch switch (graceful degradation).
+	if gitBranch != "" && switcher != nil {
+		if err := switcher.Checkout(ctx, gitBranch); err != nil {
+			logger.Warn("session_tree_move_git_checkout_failed", "op", "session.tree.move", "leaf_id", leafID, "git_branch", gitBranch, "err", err)
+		} else {
+			logger.Info("session_tree_move_git_checkout", "op", "session.tree.move", "leaf_id", leafID, "git_branch", gitBranch)
+		}
+	}
 
 	if len(departEntries) > 0 {
 		summary, err := summarizer.Summarize(ctx, departEntries)
@@ -167,6 +206,40 @@ func (t *DefaultSessionTree) SetBranchSummary(s BranchSummary) {
 	if s != nil {
 		slog.Info("session_tree_set_branch_summary", "op", "session.tree.set_branch_summary", "name", s.Name())
 	}
+}
+
+// SetGitBranchSwitcher wires a GitBranchSwitcher into the tree. When non-nil,
+// Branch creates the corresponding git branch (via WithGitBranch) and MoveTo
+// checks out the associated git branch when switching to a branch that has one.
+func (t *DefaultSessionTree) SetGitBranchSwitcher(g GitBranchSwitcher) {
+	t.mu.Lock()
+	t.gitSwitcher = g
+	t.mu.Unlock()
+}
+
+// SetBranchStore wires a BranchStore into the tree. When non-nil, branch
+// operations are persisted so they survive process restarts. Existing
+// branches are loaded from the store and merged into the in-memory map;
+// only branches that don't already exist in the map are added.
+func (t *DefaultSessionTree) SetBranchStore(bs BranchStore) {
+	t.mu.Lock()
+	t.branchStore = bs
+	t.mu.Unlock()
+	if bs == nil {
+		return
+	}
+	loaded, err := bs.LoadBranches(context.Background())
+	if err != nil {
+		slog.Warn("session_tree_set_branch_store_load_failed", "err", err)
+		return
+	}
+	t.mu.Lock()
+	for _, meta := range loaded {
+		if _, exists := t.branches[meta.BranchID]; !exists {
+			t.branches[meta.BranchID] = meta
+		}
+	}
+	t.mu.Unlock()
 }
 
 // nextSummaryID returns a unique id for a branch-summary entry.
@@ -246,7 +319,13 @@ func (t *DefaultSessionTree) CurrentLeaf() string {
 func (t *DefaultSessionTree) walkBranchLocked(leafID string) ([]*SessionEntry, bool) {
 	var reversed []*SessionEntry
 	cur := leafID
+	visited := make(map[string]bool)
 	for cur != "" {
+		if visited[cur] {
+			// Cycle detected in ParentID chain — corrupted data.
+			return nil, false
+		}
+		visited[cur] = true
 		e, ok := t.entries[cur]
 		if !ok {
 			return nil, false

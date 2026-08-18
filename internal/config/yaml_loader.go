@@ -142,8 +142,10 @@ func (l *YAMLConfigLoader) Load(ctx context.Context, path string) (*Config, erro
 // top-level mapping whose values are scalar fields, one level of nested
 // mappings (provider/model/tracing/...), and lists of scalar strings (tools
 // builtin/registry). Unquoted scalars are coerced to bool/int/float/string so
-// typed Config fields populate correctly. It does not implement anchors,
-// aliases, multi-line block scalars or flow maps.
+// typed Config fields populate correctly. It also supports tab-indented
+// lines (tab = 4-space tab-stops), flow maps ({key: value}), and block
+// scalars (| literal and > folded, with optional - strip chomping). It does
+// not implement anchors, aliases, or multi-document streams.
 // ---------------------------------------------------------------------------
 
 // yamlLine is a single significant line from a YAML document.
@@ -305,10 +307,22 @@ func (p *yamlParser) parseMapOrList(ln yamlLine) (any, error) {
 
 // valueFor parses the value that follows a `key:` at the given indent. An
 // inline scalar returns immediately; an empty value collects the deeper
-// (map or list) block that follows.
+// (map or list) block that follows. Flow maps ({...}) and block scalars
+// (| and >) are detected from the inline value.
 func (p *yamlParser) valueFor(key, inline string, indent int) (any, error) {
-	if strings.TrimSpace(inline) != "" {
-		return parseScalar(inline), nil
+	v := strings.TrimSpace(inline)
+	if v != "" {
+		// Flow map: {key: value, ...}
+		if strings.HasPrefix(v, "{") {
+			return parseFlowMap(v)
+		}
+		// Block scalar indicators: | (literal) or > (folded), with optional
+		// chomping suffix (- strip trailing newline, + keep, none = clip).
+		if v == "|" || v == ">" || strings.HasPrefix(v, "|-") || strings.HasPrefix(v, ">-") {
+			strip := strings.HasSuffix(v, "-")
+			return p.parseBlockScalar(indent, v[0], strip)
+		}
+		return parseScalar(v), nil
 	}
 	child, ok := p.peek()
 	if !ok {
@@ -324,6 +338,74 @@ func (p *yamlParser) valueFor(key, inline string, indent int) (any, error) {
 	return map[string]any{}, nil
 }
 
+// parseBlockScalar collects subsequent lines that are deeper than the given
+// indent and joins them as a block scalar. mode '|' preserves newlines;
+// mode '>' folds single newlines into spaces (paragraph breaks from blank
+// lines remain). When strip is true (the |- or >- indicator), the trailing
+// newline is omitted. The method advances p.pos past the consumed block lines.
+func (p *yamlParser) parseBlockScalar(parentIndent int, mode byte, strip bool) (string, error) {
+	var lines []string
+	blockIndent := -1
+	for {
+		if p.pos >= len(p.lines) {
+			break
+		}
+		ln := p.lines[p.pos]
+		if ln.isBlank {
+			lines = append(lines, "")
+			p.pos++
+			continue
+		}
+		if blockIndent < 0 {
+			blockIndent = ln.indent
+			if blockIndent <= parentIndent {
+				break // no deeper content; block scalar is empty
+			}
+		}
+		if ln.indent < blockIndent {
+			break
+		}
+		// Dedent the line by blockIndent (for content alignment)
+		content := ln.trimmed
+		if ln.indent > blockIndent {
+			content = strings.Repeat(" ", ln.indent-blockIndent) + content
+		}
+		lines = append(lines, content)
+		p.pos++
+	}
+
+	// Remove trailing empty lines
+	for len(lines) > 0 && lines[len(lines)-1] == "" {
+		lines = lines[:len(lines)-1]
+	}
+
+	trailingNL := "\n"
+	if strip {
+		trailingNL = ""
+	}
+
+	if len(lines) == 0 {
+		return "", nil // empty block scalar yields empty string
+	}
+
+	if mode == '|' {
+		return strings.Join(lines, "\n") + trailingNL, nil
+	}
+	// Folded mode '>': single newlines become spaces, blank lines become newlines
+	var result strings.Builder
+	for i, line := range lines {
+		if i > 0 {
+			if lines[i-1] == "" || line == "" {
+				result.WriteString("\n")
+			} else {
+				result.WriteString(" ")
+			}
+		}
+		result.WriteString(line)
+	}
+	return result.String() + trailingNL, nil
+}
+
 // splitKeyValue splits a line at the first colon into a key and the remainder.
 func splitKeyValue(line string) (key, rest string, ok bool) {
 	idx := strings.Index(line, ":")
@@ -337,11 +419,26 @@ func splitKeyValue(line string) (key, rest string, ok bool) {
 	return key, strings.TrimSpace(line[idx+1:]), true
 }
 
-// indentWidth returns the number of leading space characters in line.
+// indentWidth returns the indentation width of line, counting spaces and tabs.
+// A tab advances to the next multiple of 4 (equivalent to 4-space tab stops).
 func indentWidth(line string) int {
 	n := 0
-	for n < len(line) && line[n] == ' ' {
-		n++
+	hasTab := false
+	hasSpace := false
+	for i := 0; i < len(line); i++ {
+		switch line[i] {
+		case ' ':
+			n++
+			hasSpace = true
+		case '\t':
+			n = ((n + 4) / 4) * 4
+			hasTab = true
+		default:
+			if hasTab && hasSpace {
+				slog.Warn("yaml_mixed_indent", "line", line, "reason", "mixed tabs and spaces")
+			}
+			return n
+		}
 	}
 	return n
 }
@@ -397,6 +494,91 @@ func parseScalar(s string) any {
 		return f
 	}
 	return s
+}
+
+const maxFlowMapDepth = 100
+
+// parseFlowMap parses a YAML flow map like {key: value, key2: value2} into
+// a map[string]any. Supports quoted keys/values and nested flow maps.
+func parseFlowMap(s string) (map[string]any, error) {
+	return parseFlowMapDepth(s, 0)
+}
+
+func parseFlowMapDepth(s string, depth int) (map[string]any, error) {
+	if depth > maxFlowMapDepth {
+		return nil, fmt.Errorf("yaml: flow map nesting too deep (>%d)", maxFlowMapDepth)
+	}
+	s = strings.TrimSpace(s)
+	if !strings.HasPrefix(s, "{") || !strings.HasSuffix(s, "}") {
+		return nil, fmt.Errorf("yaml: invalid flow map: %q", s)
+	}
+	inner := strings.TrimSpace(s[1 : len(s)-1])
+	if inner == "" {
+		return map[string]any{}, nil
+	}
+	m := map[string]any{}
+	parts := splitFlowItems(inner)
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		key, val, ok := splitKeyValue(part)
+		if !ok || key == "" {
+			return nil, fmt.Errorf("yaml: invalid flow map entry: %q", part)
+		}
+		// Strip quotes from key if present
+		if len(key) >= 2 && (key[0] == '"' || key[0] == '\'') && key[len(key)-1] == key[0] {
+			key = key[1 : len(key)-1]
+		}
+		val = strings.TrimSpace(val)
+		if strings.HasPrefix(val, "{") {
+			nested, err := parseFlowMapDepth(val, depth+1)
+			if err != nil {
+				return nil, err
+			}
+			m[key] = nested
+		} else {
+			m[key] = parseScalar(val)
+		}
+	}
+	return m, nil
+}
+
+// splitFlowItems splits a flow collection body by top-level commas,
+// respecting nested braces and quoted strings.
+func splitFlowItems(s string) []string {
+	var parts []string
+	depth := 0
+	var quote byte
+	start := 0
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		if quote != 0 {
+			if c == quote {
+				quote = 0
+			}
+			continue
+		}
+		switch c {
+		case '"', '\'':
+			quote = c
+		case '{', '[':
+			depth++
+		case '}', ']':
+			depth--
+			if depth < 0 {
+				depth = 0
+			}
+		case ',':
+			if depth == 0 {
+				parts = append(parts, s[start:i])
+				start = i + 1
+			}
+		}
+	}
+	parts = append(parts, s[start:])
+	return parts
 }
 
 // assignFromMap fills an addressable struct target from a parsed YAML mapping,

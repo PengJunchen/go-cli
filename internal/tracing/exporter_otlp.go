@@ -13,13 +13,17 @@ import (
 	"time"
 )
 
-// OTLP payload envelope. This is a JSON-over-HTTP interpretation of the OTLP
-// HTTP /v1/traces contract. The real contract uses length-delimited protobuf
-// SerializeTraceServiceRequest bodies; here each batch is carried as a JSON
-// object with the span list under the "spans" key so the exporter stays free
-// of the opentelemetry-proto and protobuf dependencies. A collector built on
-// the true OTLP HTTP contract would need a gateway/converter; this framing is
-// documented as a deliberate simplification.
+// otlpPayload is the wire-format envelope for exported spans.
+//
+// Format limitation: This is a JSON-over-HTTP interpretation of the OTLP
+// HTTP /v1/traces contract, NOT the standard OTLP format. The real contract
+// uses length-delimited protobuf SerializeTraceServiceRequest bodies; here
+// each batch is carried as a JSON object with the span list under the "spans"
+// key so the exporter stays free of the opentelemetry-proto and protobuf
+// dependencies. A collector built on the true OTLP HTTP contract would need
+// a gateway/converter; this framing is documented as a deliberate
+// simplification intended for lightweight tracing, not production OTLP
+// compatibility.
 type otlpPayload struct {
 	Spans []SpanData `json:"spans"`
 }
@@ -30,6 +34,17 @@ type otlpPayload struct {
 // performs the HTTP flushes so ExportSpan stays non-blocking. It does not emit
 // its own spans; failures are logged with slog.ErrorContext and export latency
 // with slog.DebugContext.
+//
+// IMPORTANT — Non-standard wire format: This exporter is NOT a standard OTLP
+// implementation. The official OTLP/HTTP protocol sends length-delimited
+// protobuf SerializeTraceServiceRequest bodies to /v1/traces. This exporter
+// instead sends a simplified JSON object ({"spans": [...]}) with
+// Content-Type: application/json. Standard OTLP collectors (e.g. the upstream
+// OpenTelemetry Collector, Jaeger's OTLP receiver, or any collector expecting
+// protobuf) will NOT accept this format without a gateway/converter in front.
+// This is a deliberate trade-off to keep the exporter free of
+// opentelemetry-proto and protobuf dependencies, making it suitable for
+// lightweight tracing and development—not for production OTLP compatibility.
 type OTLPTraceExporter struct {
 	cfg          OTLPTraceExporterConfig
 	client       *http.Client
@@ -114,9 +129,13 @@ func (e *OTLPTraceExporter) flushLoop(interval time.Duration) {
 	for {
 		select {
 		case <-e.trigger:
-			_ = e.flushBatch(context.Background()) //nolint:errcheck // best-effort; errors logged inside
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_ = e.flushBatch(ctx) //nolint:errcheck // best-effort; errors logged inside
+			cancel()
 		case <-ticker.C:
-			_ = e.flushBatch(context.Background()) //nolint:errcheck // best-effort; errors logged inside
+			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+			_ = e.flushBatch(ctx) //nolint:errcheck // best-effort; errors logged inside
+			cancel()
 		case <-e.done:
 			return
 		}

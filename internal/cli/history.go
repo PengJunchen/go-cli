@@ -6,12 +6,14 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // HistoryStore manages command history with optional JSONL persistence.
 // It is a simple in-memory ring buffer that can optionally load from and save
 // to a file in JSONL format (one JSON-encoded string per line).
 type HistoryStore struct {
+	mu       sync.RWMutex
 	entries  []string
 	maxLen   int
 	filePath string
@@ -33,6 +35,9 @@ func NewHistoryStore(maxLen int, filePath string) *HistoryStore {
 // duplicates are skipped. When the buffer exceeds maxLen, the oldest entry
 // is evicted (FIFO).
 func (h *HistoryStore) Add(entry string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
 	if strings.TrimSpace(entry) == "" {
 		return
 	}
@@ -45,8 +50,22 @@ func (h *HistoryStore) Add(entry string) {
 	}
 }
 
+// Set replaces all history entries. The slice is copied.
+func (h *HistoryStore) Set(entries []string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.entries = make([]string, len(entries))
+	copy(h.entries, entries)
+	if len(h.entries) > h.maxLen {
+		h.entries = h.entries[len(h.entries)-h.maxLen:]
+	}
+}
+
 // List returns a copy of the current history entries.
 func (h *HistoryStore) List() []string {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
 	out := make([]string, len(h.entries))
 	copy(out, h.entries)
 	return out
@@ -55,6 +74,9 @@ func (h *HistoryStore) List() []string {
 // Save writes the history to the configured file in JSONL format. If no file
 // path is set, it is a no-op. The parent directory is created if necessary.
 func (h *HistoryStore) Save() error {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
 	if h.filePath == "" {
 		return nil
 	}
@@ -79,6 +101,9 @@ func (h *HistoryStore) Save() error {
 // Load reads the history from the configured file. If no file path is set or
 // the file does not exist, it is a no-op. Existing entries are replaced.
 func (h *HistoryStore) Load() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
 	if h.filePath == "" {
 		return nil
 	}

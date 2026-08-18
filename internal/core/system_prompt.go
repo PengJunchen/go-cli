@@ -2,8 +2,12 @@ package core //exempt:scan009
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
+	"log/slog"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/tools"
@@ -30,6 +34,14 @@ type SkillInfo struct {
 	Category string
 }
 
+// MemoryEntry is the core-layer representation of a memory, used to inject
+// cross-session memories into the system prompt without importing the memory package.
+type MemoryEntry struct {
+	ID       string
+	Content  string
+	Category string // preference | fact | decision | convention
+}
+
 // SystemPromptOptions carries all the data the SystemPromptBuilder needs to
 // assemble the final system prompt string.
 type SystemPromptOptions struct {
@@ -45,6 +57,9 @@ type SystemPromptOptions struct {
 	ContextFiles []ContextFile
 	// Skills lists registered skills rendered as XML in the prompt.
 	Skills []SkillInfo
+	// Memories lists cross-session memories injected as a <memory> XML block
+	// into the prompt, grouped by category.
+	Memories []MemoryEntry
 	// CustomPrompt, when non-empty, replaces the default base prompt
 	// entirely. This typically comes from a SYSTEM.md file or the
 	// agent.system_prompt config field.
@@ -75,9 +90,46 @@ Rules:
 4. Do not guess or fabricate information when a tool can provide the answer.
 5. If a skill tool is available and relevant, call it first to obtain expert instructions, then follow those instructions using other tools.`
 
+// subagentStrategy is the SubAgent usage guidance injected into the system
+// prompt. It teaches the model when to delegate, the available roles, how to
+// aggregate results, and the recursion constraints.
+const subagentStrategy = `
+Sub-Agent Delegation Strategy
+
+You have access to the dispatch_subagent tool, which delegates a task to a focused sub-agent and returns its result. Use sub-agents as an architecture-level parallel capability, not just an occasional convenience.
+
+When to delegate:
+- Delegate when a sub-task is self-contained and can be described in a single prompt without requiring your ongoing judgment.
+- Delegate research-heavy tasks (codebase exploration, API discovery) to avoid consuming your own context window.
+- Delegate parallelizable tasks by setting parallel=true or providing a tasks array, so independent work runs concurrently.
+- Do NOT delegate trivial one-liner tasks that you can complete faster with a direct tool call.
+- Do NOT delegate when the result requires tight back-and-forth iteration with the user.
+
+Available roles:
+1. researcher — investigates and gathers information; returns a structured summary of findings.
+2. implementer — writes code following existing patterns; returns the code changes and a brief explanation.
+3. reviewer — reviews code changes for correctness, security, performance, and maintainability; returns issues with severity ratings.
+4. tester — writes tests focusing on edge cases, error paths, and coverage; returns the test code and coverage notes.
+
+Result aggregation guidelines:
+- When dispatching multiple sub-agents in parallel, collect all results, then synthesize them before responding.
+- Merge findings into a single coherent answer; do not simply concatenate raw sub-agent outputs.
+- If sub-agent results conflict, investigate the discrepancy yourself before presenting the answer.
+- Cite which sub-agent (by role) produced each key finding when it adds clarity.
+
+Recursion constraints:
+- Sub-agents operate with a recursion depth limit (default 3). A sub-agent may itself dispatch further sub-agents up to this limit.
+- Do not attempt to bypass the depth limit by restructuring tasks; instead, break the work into smaller independent pieces.
+- Each sub-agent has its own tool whitelist based on its role, so it cannot perform actions outside its scope.`
+
 // DefaultSystemPromptBuilder is the default SystemPromptBuilder implementation.
-// It is stateless and safe for concurrent use.
-type DefaultSystemPromptBuilder struct{}
+// It caches the assembled prompt and only rebuilds when the inputs that affect
+// the prompt change. It is safe for concurrent use.
+type DefaultSystemPromptBuilder struct {
+	mu           sync.Mutex
+	cachedPrompt string
+	cacheVersion string // hash of inputs that affect the prompt
+}
 
 // Compile-time assertion that DefaultSystemPromptBuilder satisfies
 // SystemPromptBuilder.
@@ -94,9 +146,75 @@ func NewDefaultSystemPromptBuilder() *DefaultSystemPromptBuilder {
 //  3. Tool guidelines (from tools implementing PromptGuideliner)
 //  4. Project context (from ContextFiles)
 //  5. Skills (rendered as XML)
-//  6. Current date and working directory
-//  7. Append prompt (if non-empty)
+//  6. Memories (rendered as a <memory> XML block, grouped by category)
+//  7. Current date and working directory
+//  8. Append prompt (if non-empty)
+//
+// The assembled prompt is cached: if the inputs (tools, context files, skills,
+// memories, custom/append prompts, cwd, and the calendar day) have not changed
+// since the last Build, the cached prompt is returned without rebuilding.
 func (b *DefaultSystemPromptBuilder) Build(_ context.Context, opts SystemPromptOptions) string {
+	version := computeCacheVersion(opts)
+
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	if version == b.cacheVersion && b.cachedPrompt != "" {
+		slog.Debug("system_prompt.cache", "hit", true)
+		return b.cachedPrompt
+	}
+
+	slog.Debug("system_prompt.cache", "hit", false)
+	prompt := b.buildInner(opts)
+	b.cachedPrompt = prompt
+	b.cacheVersion = version
+	return prompt
+}
+
+// computeCacheVersion returns a fixed-length digest that uniquely represents
+// all inputs affecting the assembled prompt: tool names, context files,
+// skills, memories, custom/append prompts, cwd, and the calendar day. Each
+// field is length-prefixed before hashing so that distinct inputs can never
+// collide (e.g. one tool named "a,b" vs two tools "a","b", or an empty
+// context-file content vs a path equal to another path+content).
+//
+// Two identical digests guarantee the same prompt output, assuming each
+// tool's PromptGuidelines are stable for a given tool name (true for all
+// built-in tools — guidelines are intentionally excluded so cache hits avoid
+// re-invoking them). The calendar day is included so a long-running process
+// rebuilds with the correct date when the day changes.
+func computeCacheVersion(opts SystemPromptOptions) string {
+	h := sha256.New()
+	writeField := func(s string) {
+		fmt.Fprintf(h, "%d:%s", len(s), s) //nolint:errcheck
+	}
+	for _, t := range opts.Tools {
+		writeField(t.Name())
+	}
+	for _, cf := range opts.ContextFiles {
+		writeField(cf.Path)
+		writeField(cf.Content)
+	}
+	for _, s := range opts.Skills {
+		writeField(s.Name)
+		writeField(s.Description)
+		writeField(s.Category)
+	}
+	for _, m := range opts.Memories {
+		writeField(m.ID)
+		writeField(m.Content)
+		writeField(m.Category)
+	}
+	writeField(opts.CustomPrompt)
+	writeField(opts.AppendPrompt)
+	writeField(opts.Cwd)
+	writeField(time.Now().Format("2006-01-02"))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// buildInner assembles the system prompt from opts without consulting the
+// cache. It is called by Build when the cache version does not match.
+func (b *DefaultSystemPromptBuilder) buildInner(opts SystemPromptOptions) string {
 	var sb strings.Builder
 
 	// 1. Base prompt or custom replacement.
@@ -132,6 +250,10 @@ func (b *DefaultSystemPromptBuilder) Build(_ context.Context, opts SystemPromptO
 		}
 	}
 
+	// 3b. Sub-Agent delegation strategy.
+	sb.WriteString("\n\n")
+	sb.WriteString(subagentStrategy)
+
 	// 4. Project context files.
 	for _, cf := range opts.ContextFiles {
 		if cf.Content == "" {
@@ -159,7 +281,55 @@ func (b *DefaultSystemPromptBuilder) Build(_ context.Context, opts SystemPromptO
 		sb.WriteString("</skills>")
 	}
 
-	// 6. Current date and working directory.
+	// 6. Memories as XML, grouped by category.
+	if len(opts.Memories) > 0 {
+		sb.WriteString("\n\n<memory>")
+		memoryCategories := []struct {
+			category string
+			header   string
+		}{
+			{"preference", "## User Preferences"},
+			{"convention", "## Project Conventions"},
+			{"fact", "## Facts"},
+			{"decision", "## Decisions"},
+		}
+		for _, mc := range memoryCategories {
+			var lines []string
+			for _, m := range opts.Memories {
+				if m.Category == mc.category {
+					lines = append(lines, "- "+m.Content)
+				}
+			}
+			if len(lines) > 0 {
+				sb.WriteString("\n")
+				sb.WriteString(mc.header)
+				for _, l := range lines {
+					sb.WriteString("\n")
+					sb.WriteString(l)
+				}
+			}
+		}
+		// Any category that is not one of the four known ones.
+		var otherLines []string
+		for _, m := range opts.Memories {
+			switch m.Category {
+			case "preference", "convention", "fact", "decision":
+				continue
+			default:
+				otherLines = append(otherLines, "- "+m.Content)
+			}
+		}
+		if len(otherLines) > 0 {
+			sb.WriteString("\n## Other")
+			for _, l := range otherLines {
+				sb.WriteString("\n")
+				sb.WriteString(l)
+			}
+		}
+		sb.WriteString("\n</memory>")
+	}
+
+	// 7. Current date and working directory.
 	sb.WriteString("\n\nCurrent date: ")
 	sb.WriteString(time.Now().Format("2006-01-02"))
 	if opts.Cwd != "" {
@@ -167,7 +337,7 @@ func (b *DefaultSystemPromptBuilder) Build(_ context.Context, opts SystemPromptO
 		sb.WriteString(opts.Cwd)
 	}
 
-	// 7. Append prompt.
+	// 8. Append prompt.
 	if opts.AppendPrompt != "" {
 		sb.WriteString("\n\n")
 		sb.WriteString(opts.AppendPrompt)

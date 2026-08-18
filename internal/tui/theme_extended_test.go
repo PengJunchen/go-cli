@@ -4,27 +4,29 @@ import (
 	"sync"
 	"testing"
 
+	"github.com/charmbracelet/lipgloss"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 // TestStyleIsImmutable verifies every Style modifier returns a copy and leaves
-// the original receiver unmodified.
+// the original receiver unmodified. lipgloss.Style is a value type, so chained
+// modifiers do not mutate the receiver.
 func TestStyleIsImmutable(t *testing.T) {
 	base := NewStyle()
-	_ = base.Foreground(colorRed).Background(colorBlue).Bold(true).Faint(true).Italic(true).Underline(true)
-	// Receiver must be untouched.
-	require.Equal(t, "", base.String())
+	_ = base.Foreground(lipgloss.Color("#FF0000")).Background(lipgloss.Color("#1E66F5")).
+		Bold(true).Faint(true).Italic(true).Underline(true)
+	// Receiver must be untouched: it renders plain text with no escapes.
 	require.Equal(t, "x", base.Render("x"))
 }
 
-// TestStyleRenderRoundTrip verifies Render wraps content in a self-contained SGR
-// sequence: it starts with the open sequence and ends with the reset.
+// TestStyleRenderRoundTrip verifies Render wraps content in a self-contained
+// SGR sequence with a trailing reset.
 func TestStyleRenderRoundTrip(t *testing.T) {
-	s := NewStyle().Foreground(colorGreen).Bold(true)
+	s := NewStyle().Foreground(lipgloss.Color("#04E762")).Bold(true)
 	out := s.Render("ok")
-	require.True(t, hasPrefix(out, "\x1b[1;32m") || hasPrefix(out, "\x1b[32;1m"))
-	require.True(t, hasSuffix(out, ansiReset))
+	require.True(t, hasPrefix(out, "\x1b[1;38;2;") || hasPrefix(out, "\x1b[38;2;"), "expected truecolor+bold SGR open, got %q", out)
+	require.True(t, hasSuffix(out, "\x1b[0m"))
 	// The payload must be preserved between the escape and the reset.
 	assert.Contains(t, out, "ok")
 }
@@ -32,24 +34,6 @@ func TestStyleRenderRoundTrip(t *testing.T) {
 func hasPrefix(s, p string) bool { return len(s) >= len(p) && s[:len(p)] == p }
 func hasSuffix(s, suf string) bool {
 	return len(s) >= len(suf) && s[len(s)-len(suf):] == suf
-}
-
-// TestStyleCodesStableOrder verifies the aggregated SGR codes appear in the
-// documented stable order regardless of how flags were set.
-func TestStyleCodesStableOrder(t *testing.T) {
-	s := NewStyle().Foreground(colorCyan).Background(colorBlack).Underline(true).Faint(true).Bold(true).Italic(true)
-	codes := s.codes()
-	expected := []int{colorCyan, colorBlack + 10, styleAttrBold, styleAttrFaint, styleAttrItalic, styleAttrUnderline}
-	require.Len(t, codes, len(expected))
-	for i, e := range expected {
-		assert.Equal(t, e, codes[i])
-	}
-}
-
-// TestStyleEmptyCodes verifies an empty Style reports no SGR codes.
-func TestStyleEmptyCodes(t *testing.T) {
-	assert.Empty(t, NewStyle().codes())
-	assert.Len(t, NewStyle().Foreground(noColor).codes(), 0)
 }
 
 // TestThemePresetsDistinct checks that primary/secondary/fg/faint styles differ
@@ -62,17 +46,17 @@ func TestThemePresetsDistinct(t *testing.T) {
 		"solarized": SolarizedTheme{},
 	}
 
-	// Light's fg (dark text) must differ from dark/monokai/solarized fg.
-	darkFg := presets["dark"].Fg().String()
-	assert.NotEqual(t, darkFg, presets["light"].Fg().String())
+	// Light's fg (dark text) must differ from dark fg.
+	darkFg := presets["dark"].Fg().Render("x")
+	assert.NotEqual(t, darkFg, presets["light"].Fg().Render("x"))
 	// Monokai secondary differs from solarized secondary.
-	assert.NotEqual(t, presets["monokai"].Secondary().String(), presets["solarized"].Secondary().String())
+	assert.NotEqual(t, presets["monokai"].Secondary().Render("x"), presets["solarized"].Secondary().Render("x"))
 
 	for name, th := range presets {
 		t.Run(name, func(t *testing.T) {
-			assert.NotEmpty(t, th.Primary().String())
-			assert.NotEmpty(t, th.Error().String())
-			assert.NotEmpty(t, th.Success().String())
+			assert.NotEmpty(t, th.Primary().Render("x"))
+			assert.NotEmpty(t, th.Error().Render("x"))
+			assert.NotEmpty(t, th.Success().Render("x"))
 		})
 	}
 }
@@ -115,7 +99,8 @@ func TestThemeManagerRegisterOverwrites(t *testing.T) {
 }
 
 // TestThemeDefaultMethodsTable verifies each DarkTheme accessor returns the
-// exact expected Style.
+// expected truecolor style by comparing rendered output against a freshly
+// reconstructed lipgloss.Style.
 func TestThemeDefaultMethodsTable(t *testing.T) {
 	dark := DarkTheme{}
 	tests := []struct {
@@ -123,33 +108,34 @@ func TestThemeDefaultMethodsTable(t *testing.T) {
 		fn   func() Style
 		want string
 	}{
-		{"Primary", dark.Primary, NewStyle().Foreground(colorBrightCyan).String()},
-		{"Secondary", dark.Secondary, NewStyle().Foreground(colorBrightBlack).String()},
-		{"Success", dark.Success, NewStyle().Foreground(colorGreen).String()},
-		{"Warning", dark.Warning, NewStyle().Foreground(colorYellow).String()},
-		{"Error", dark.Error, NewStyle().Foreground(colorRed).String()},
-		{"Fg", dark.Fg, NewStyle().Foreground(colorWhite).String()},
-		{"Faint", dark.Faint, NewStyle().Foreground(colorBrightBlack).Faint(true).String()},
-		{"Bold", dark.Bold, NewStyle().Bold(true).String()},
-		{"Italic", dark.Italic, NewStyle().Italic(true).String()},
+		{"Primary", dark.Primary, NewStyle().Foreground(lipgloss.Color("#7D56F4")).Render("x")},
+		{"Secondary", dark.Secondary, NewStyle().Foreground(lipgloss.Color("#6C7086")).Render("x")},
+		{"Success", dark.Success, NewStyle().Foreground(lipgloss.Color("#04E762")).Render("x")},
+		{"Warning", dark.Warning, NewStyle().Foreground(lipgloss.Color("#FFC000")).Render("x")},
+		{"Error", dark.Error, NewStyle().Foreground(lipgloss.Color("#FF5C5C")).Render("x")},
+		{"Fg", dark.Fg, NewStyle().Foreground(lipgloss.Color("#CDD6F4")).Render("x")},
+		{"Faint", dark.Faint, NewStyle().Foreground(lipgloss.Color("#6C7086")).Faint(true).Render("x")},
+		{"Bold", dark.Bold, NewStyle().Bold(true).Render("x")},
+		{"Italic", dark.Italic, NewStyle().Italic(true).Render("x")},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			assert.Equal(t, tc.want, tc.fn().String())
+			assert.Equal(t, tc.want, tc.fn().Render("x"))
 		})
 	}
 
-	// Dark Bg uses black background.
-	assert.Equal(t, NewStyle().Background(colorBlack).String(), dark.Bg().String())
+	// Dark Bg has no background set, so it renders plain text.
+	assert.Equal(t, NewStyle().Render("x"), dark.Bg().Render("x"))
 }
 
 // TestThemePresetStructRoundTrip verifies ThemePreset carries a name and a
 // styles map that can be used to hydrate styling.
 func TestThemePresetStructRoundTrip(t *testing.T) {
-	p := ThemePreset{Name: "custom", Styles: map[string]Style{"fg": NewStyle().Foreground(colorRed).Bold(true)}}
+	p := ThemePreset{Name: "custom", Styles: map[string]Style{"fg": NewStyle().Foreground(lipgloss.Color("#FF0000")).Bold(true)}}
 	require.Equal(t, "custom", p.Name)
-	assert.Contains(t, p.Styles["fg"].String(), "31")
-	assert.Contains(t, p.Styles["fg"].String(), "1")
+	out := p.Styles["fg"].Render("x")
+	assert.Contains(t, out, "38;2;255;0;0") // red foreground
+	assert.Contains(t, out, "1")            // bold
 }
 
 // TestDefaultThemeRegistryKeys verifies the built-in preset registration keys.

@@ -243,7 +243,8 @@ func TestRunCommand_WrapsErrorAsExecutionError(t *testing.T) {
 
 	var execErr *ExecutionError
 	assert.True(t, errors.As(err, &execErr))
-	assert.Equal(t, "fail", execErr.msg)
+	// The error is wrapped with classifyError which adds an action suffix.
+	assert.Contains(t, execErr.msg, "fail")
 }
 
 // failingCommand is a Command that always returns an error.

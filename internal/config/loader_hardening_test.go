@@ -100,12 +100,16 @@ func TestLoadFromEnv_TracingEnabledFalse(t *testing.T) {
 // resolveVerbose edge cases
 // ---------------------------------------------------------------------------
 
-// TestResolveVerbose_BadEnvValues treats any value other than "1" as not
-// verbose, even a truthy one, because the loader compares against "1".
+// TestResolveVerbose_BadEnvValues verifies that non-truthy and unrecognized
+// values do not enable verbose, while truthy values (1, true, yes, on) do.
 func TestResolveVerbose_BadEnvValues(t *testing.T) {
-	for _, val := range []string{"true", "yes", "0", "on", "garbage"} {
+	for _, val := range []string{"0", "false", "no", "off", "garbage", ""} {
 		t.Setenv("GO_CLI_VERBOSE", val)
 		assert.False(t, NewLoader().resolveVerbose(), "value %q must not enable verbose", val)
+	}
+	for _, val := range []string{"1", "true", "yes", "on"} {
+		t.Setenv("GO_CLI_VERBOSE", val)
+		assert.True(t, NewLoader().resolveVerbose(), "value %q must enable verbose", val)
 	}
 }
 
@@ -277,4 +281,48 @@ func TestExpandEnv_DepthBounded(t *testing.T) {
 	// Drive expansion of the deepest token; it must terminate (bounded).
 	out := ExpandEnv("${" + prev + "}")
 	assert.NotEqual(t, "", out)
+}
+
+// ---------------------------------------------------------------------------
+// Plain bool overlay semantics (MD-14)
+// ---------------------------------------------------------------------------
+
+// TestMergeConfigs_PlainBoolFalseDoesNotOverride verifies that a plain bool
+// field with a zero value (false) in a higher-priority layer does NOT overwrite
+// a true value from a lower-priority layer. This is the MD-14 fix: plain bool
+// false is treated as "unset" during overlay, consistent with how string/int/
+// float zero values are handled. Use *bool where an explicit false override
+// is needed.
+func TestMergeConfigs_PlainBoolFalseDoesNotOverride(t *testing.T) {
+	base := defaultConfig()
+	// Set a plain bool field to true in the base (lower-priority) layer.
+	base.Git.WorktreeEnabled = true
+
+	// A higher-priority layer that omits the field (zero value false)
+	// must not clobber the true from the base.
+	over := &Config{}
+	merged := mergeConfigs(base, over)
+	assert.True(t, merged.Git.WorktreeEnabled,
+		"plain bool false in higher layer must not overwrite true from lower layer")
+
+	// Same check via the full Load path: an override layer that does not
+	// set WorktreeEnabled must preserve a true set by the flag layer.
+	flag := &Config{Git: GitConfig{WorktreeEnabled: true}}
+	cfg, err := NewLoader().WithFlag(flag).WithOverride(&Config{}).Load(context.Background())
+	require.NoError(t, err)
+	assert.True(t, cfg.Git.WorktreeEnabled,
+		"override with unset bool must not clobber flag layer true")
+}
+
+// TestMergeConfigs_PlainBoolTrueOverrides verifies that a plain bool true in a
+// higher-priority layer still overwrites false in a lower-priority layer,
+// ensuring the fix only affects the false (zero-value) direction.
+func TestMergeConfigs_PlainBoolTrueOverrides(t *testing.T) {
+	base := defaultConfig()
+	// Base has WorktreeEnabled = false (zero value).
+
+	over := &Config{Git: GitConfig{WorktreeEnabled: true}}
+	merged := mergeConfigs(base, over)
+	assert.True(t, merged.Git.WorktreeEnabled,
+		"plain bool true in higher layer must overwrite false from lower layer")
 }

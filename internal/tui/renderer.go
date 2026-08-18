@@ -29,6 +29,9 @@ type RenderOpts struct {
 	ContentType string
 	// Language is an optional language hint (used by code renderers).
 	Language string
+	// Stream identifies the output source for tool_output events: "stdout"
+	// or "stderr".
+	Stream string
 }
 
 // Content type constants are the canonical identifiers used to route agent
@@ -58,19 +61,23 @@ const (
 	ContentTypeStreamingThink = "streaming_thinking"
 	ContentTypeBlank          = "blank"
 	ContentTypeSeparator      = "separator"
+	ContentTypeToolOutput     = "tool_output"
 	ContentTypeStatus         = "status"
+	ContentTypeBox            = "box"
+	ContentTypeSpinner        = "spinner"
+	ContentTypeTodo           = "todo"
 )
 
 // contentTypes lists every content type the TUI layer supports. The order is
 // the canonical registry order.
 var contentTypes = []string{
 	ContentTypeMarkdown, ContentTypeCode, ContentTypeTable, ContentTypeDiff,
-	ContentTypeError, ContentTypeToolCall, ContentTypeToolResult, ContentTypeThinking,
-	ContentTypeProgress, ContentTypeFileTree, ContentTypeImage, ContentTypeLink,
-	ContentTypeSystem, ContentTypeUser, ContentTypeAssistant, ContentTypeApproval,
-	ContentTypePrompt, ContentTypeCompaction, ContentTypeStreaming,
-	ContentTypeStreamingCode, ContentTypeStreamingThink, ContentTypeBlank,
-	ContentTypeSeparator, ContentTypeStatus,
+	ContentTypeError, ContentTypeToolCall, ContentTypeToolResult, ContentTypeThinking, ContentTypeProgress,
+	ContentTypeFileTree, ContentTypeImage, ContentTypeLink, ContentTypeSystem,
+	ContentTypeUser, ContentTypeAssistant, ContentTypeApproval, ContentTypePrompt,
+	ContentTypeCompaction, ContentTypeStreaming, ContentTypeStreamingCode,
+	ContentTypeStreamingThink, ContentTypeBlank, ContentTypeSeparator,
+	ContentTypeStatus, ContentTypeBox, ContentTypeSpinner, ContentTypeToolOutput,
 }
 
 // DefaultContentType is the fallback content type used when an event carries an
@@ -104,7 +111,7 @@ func NewRendererRegistry() *RendererRegistry {
 	return &RendererRegistry{byType: make(map[string]Renderer)}
 }
 
-// NewDefaultRegistry returns a registry pre-populated with all 24 built-in
+// NewDefaultRegistry returns a registry pre-populated with all built-in
 // renderers.
 func NewDefaultRegistry() *RendererRegistry {
 	reg := NewRendererRegistry()
@@ -144,16 +151,17 @@ func (r *RendererRegistry) List() map[string]Renderer {
 	return out
 }
 
-// RegisterDefaultRenderers registers all 24 built-in renderers into the given
+// RegisterDefaultRenderers registers all built-in renderers into the given
 // registry.
 func RegisterDefaultRenderers(reg *RendererRegistry) {
-	reg.Register(MarkdownRenderer{})
+	reg.Register(NewMarkdownRenderer())
 	reg.Register(CodeRenderer{})
 	reg.Register(TableRenderer{})
 	reg.Register(DiffRenderer{})
 	reg.Register(ErrorRenderer{})
 	reg.Register(ToolCallRenderer{})
 	reg.Register(ToolResultRenderer{})
+	reg.Register(ToolOutputRenderer{})
 	reg.Register(ThinkingRenderer{})
 	reg.Register(ProgressRenderer{})
 	reg.Register(FileTreeRenderer{})
@@ -171,4 +179,5 @@ func RegisterDefaultRenderers(reg *RendererRegistry) {
 	reg.Register(BlankRenderer{})
 	reg.Register(SeparatorRenderer{})
 	reg.Register(StatusRenderer{})
+	reg.Register(BoxRenderer{})
 }

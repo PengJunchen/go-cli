@@ -2,6 +2,7 @@ package extension
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"sync"
 
@@ -15,7 +16,7 @@ import (
 
 // ExtensionRegistry is the registry an extension uses to register its building
 // blocks (tools, commands, providers, hooks, middleware). Duplicate
-// registrations overwrite the previous entry (last writer wins).
+// registrations return an error.
 type ExtensionRegistry interface {
 	// RegisterTool registers a tool definition.
 	RegisterTool(ctx context.Context, t tools.ToolDefinition) error
@@ -52,48 +53,67 @@ func NewExtensionRegistry() ExtensionRegistry {
 	}
 }
 
-// RegisterTool stores a tool by name, overwriting any previous entry.
+// RegisterTool stores a tool by name. It returns an error if a tool with the
+// same name is already registered.
 func (r *DefaultExtensionRegistry) RegisterTool(_ context.Context, t tools.ToolDefinition) error {
 	slog.Info("extension.register.tool", "tool", t.Name())
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, exists := r.tools[t.Name()]; exists {
+		return fmt.Errorf("extension already registered: %s", t.Name())
+	}
 	r.tools[t.Name()] = t
 	return nil
 }
 
-// RegisterCommand stores a command by name, overwriting any previous entry.
+// RegisterCommand stores a command by name. It returns an error if a command
+// with the same name is already registered.
 func (r *DefaultExtensionRegistry) RegisterCommand(name string, fn func(args []string) error) error {
 	slog.Info("extension.register.command", "name", name)
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, exists := r.commands[name]; exists {
+		return fmt.Errorf("extension already registered: %s", name)
+	}
 	r.commands[name] = fn
 	return nil
 }
 
-// RegisterProvider stores a provider by name, overwriting any previous entry.
+// RegisterProvider stores a provider by name. It returns an error if a provider
+// with the same name is already registered.
 func (r *DefaultExtensionRegistry) RegisterProvider(p llm.ModelProvider) error {
 	slog.Info("extension.register.provider", "name", p.Name())
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, exists := r.providers[p.Name()]; exists {
+		return fmt.Errorf("extension already registered: %s", p.Name())
+	}
 	r.providers[p.Name()] = p
 	return nil
 }
 
-// RegisterHook stores a hook by name, overwriting any previous entry.
+// RegisterHook stores a hook by name. It returns an error if a hook with the
+// same name is already registered.
 func (r *DefaultExtensionRegistry) RegisterHook(_ context.Context, h Hook) error {
 	slog.Info("extension.register.hook", "name", h.Name())
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, exists := r.hooks[h.Name()]; exists {
+		return fmt.Errorf("extension already registered: %s", h.Name())
+	}
 	r.hooks[h.Name()] = h
 	return nil
 }
 
-// RegisterMiddleware stores a middleware by name, overwriting any previous
-// entry.
+// RegisterMiddleware stores a middleware by name. It returns an error if a
+// middleware with the same name is already registered.
 func (r *DefaultExtensionRegistry) RegisterMiddleware(_ context.Context, m Middleware) error {
 	slog.Info("extension.register.middleware", "name", m.Name())
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if _, exists := r.middlewares[m.Name()]; exists {
+		return fmt.Errorf("extension already registered: %s", m.Name())
+	}
 	r.middlewares[m.Name()] = m
 	return nil
 }

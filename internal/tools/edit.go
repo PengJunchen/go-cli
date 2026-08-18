@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -15,6 +14,14 @@ import (
 
 // EditFileToolOption configures an EditFileTool.
 type EditFileToolOption func(*EditFileTool)
+
+// WithEditPathWhitelist sets the allowed base paths for edit operations.
+// When configured, both the resolved real path (after symlink resolution) and
+// the target file itself (via Lstat) are validated against the whitelist.
+// An empty slice allows all paths (no restriction).
+func WithEditPathWhitelist(paths []string) EditFileToolOption {
+	return func(t *EditFileTool) { t.whitelist = NewPathWhitelist(paths) }
+}
 
 // WithEditDiffGenerator sets the DiffGenerator used to produce a change preview
 // before applying an edit. When nil (the default) no diff is generated.
@@ -33,6 +40,9 @@ func WithEditFileTracker(ft *FileTracker) EditFileToolOption {
 type EditFileTool struct {
 	// Workdir is the base directory relative paths are resolved against.
 	Workdir string
+	// whitelist, when configured, restricts edits to paths within the
+	// allowed base directories. Symlink escape is detected and rejected.
+	whitelist PathWhitelist
 	// diffGenerator, when set, produces a diff preview of the edit. It is
 	// included in the ToolResult metadata under "diff".
 	diffGenerator DiffGenerator
@@ -95,17 +105,18 @@ func (t *EditFileTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 		newString = v
 	}
 
-	abspath := path
-	if !filepath.IsAbs(abspath) && t.Workdir != "" {
-		abspath = filepath.Join(t.Workdir, abspath)
+	abspath, err := resolveAndValidatePath("edit", t.Workdir, path, t.whitelist)
+	if err != nil {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		logger.Error("edit.path_traversal", "path", path, "err", err)
+		return nil, err
 	}
-	abspath = filepath.Clean(abspath)
 
 	info, statErr := os.Stat(abspath)
 	if statErr != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("edit.stat_failed", "path", abspath, "err", statErr)
-		return &ToolResult{Output: ""}, fmt.Errorf("edit: %w", statErr)
+		return nil, fmt.Errorf("edit: %w", statErr)
 	}
 	if info.IsDir() {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
@@ -117,7 +128,7 @@ func (t *EditFileTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 	if readErr != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("edit.read_failed", "path", abspath, "err", readErr)
-		return &ToolResult{Output: ""}, fmt.Errorf("edit: %w", readErr)
+		return nil, fmt.Errorf("edit: %w", readErr)
 	}
 
 	data := string(content)
@@ -126,13 +137,13 @@ func (t *EditFileTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 	case 0:
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("edit.no_match", "path", abspath, "old_string", oldString)
-		return &ToolResult{Output: ""}, fmt.Errorf("edit: old_string not found in %s", abspath)
+		return nil, fmt.Errorf("edit: old_string not found in %s", abspath)
 	case 1:
 		// OK: exactly one occurrence.
 	default:
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("edit.multiple_match", "path", abspath, "old_string", oldString, "count", count)
-		return &ToolResult{Output: ""}, fmt.Errorf("edit: old_string matches %d times in %s, expected exactly once", count, abspath)
+		return nil, fmt.Errorf("edit: old_string matches %d times in %s, expected exactly once", count, abspath)
 	}
 
 	updated := strings.Replace(data, oldString, newString, 1)
@@ -150,7 +161,7 @@ func (t *EditFileTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 	// error is silently ignored.
 	var diffPreview string
 	if t.diffGenerator != nil {
-		if d, derr := t.diffGenerator.Generate(data, updated, path); derr == nil {
+		if d, derr := t.diffGenerator.Generate(ctx, data, updated, path); derr == nil {
 			diffPreview = d
 		}
 	}
@@ -161,7 +172,7 @@ func (t *EditFileTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 	if _, werr := writeAtomic(abspath, []byte(updated)); werr != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("edit.write_failed", "path", abspath, "err", werr)
-		return &ToolResult{Output: ""}, fmt.Errorf("edit: %w", werr)
+		return nil, fmt.Errorf("edit: %w", werr)
 	}
 
 	span.SetAttributes(tracing.Attribute{Key: "success", Value: true})

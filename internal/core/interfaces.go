@@ -2,7 +2,6 @@ package core
 
 import (
 	"context"
-	"log/slog"
 
 	"github.com/pengjunchen/go-cli/internal/extension"
 	"github.com/pengjunchen/go-cli/internal/llm"
@@ -23,9 +22,8 @@ const (
 	SubmissionFollowUp
 )
 
-// String returns the textual name of the submission type and logs it.
+// String returns the textual name of the submission type.
 func (t SubmissionType) String() string {
-	slog.Info("core.submission.type", "type", int(t))
 	switch t {
 	case SubmissionSteering:
 		return "steering"
@@ -41,7 +39,7 @@ func (t SubmissionType) String() string {
 type DiscardPolicy int
 
 const (
-	// DiscardOldest drops the oldest buffered event (default).
+	// DiscardOldest drops the oldest buffered event to make room.
 	DiscardOldest DiscardPolicy = iota
 	// DiscardNewest drops the newest event.
 	DiscardNewest
@@ -74,9 +72,8 @@ const (
 	ClassificationRequireApproval
 )
 
-// String returns the textual name of the classification and logs it.
+// String returns the textual name of the classification.
 func (c Classification) String() string {
-	slog.Info("core.approval.classification", "classification", int(c))
 	switch c {
 	case ClassificationDeny:
 		return "deny"
@@ -196,11 +193,16 @@ type PluginLoader interface {
 	Load(ctx context.Context, path string) (Extension, error)
 }
 
-// Registry is the dependency-inversion hub of the runtime. It exposes one
-// getter and one RegisterXxx method per subsystem. Consumers depend on this
-// interface rather than on any concrete implementation, so the bound
-// subsystem can be swapped without coupling callers to a concrete type.
-type Registry interface {
+// The Registry interface hierarchy follows the Interface Segregation
+// Principle: the monolithic 30+ method interface is split into cohesive
+// sub-interfaces grouped by subsystem. Consumers that only need a subset of
+// subsystems can depend on the narrower sub-interface instead of the full
+// Registry. The top-level Registry interface embeds all sub-interfaces, so
+// it remains backward compatible.
+
+// CoreRegistry covers the core runtime components: the agent loop, agent,
+// harness, and turn runner.
+type CoreRegistry interface {
 	// AgentLoop returns the bound AgentLoop implementation.
 	AgentLoop() AgentLoop
 	// RegisterAgentLoop replaces the AgentLoop implementation and returns the
@@ -224,7 +226,11 @@ type Registry interface {
 	// RegisterTurnRunner replaces the TurnRunner implementation and returns
 	// the old one. It panics if n is nil.
 	RegisterTurnRunner(n TurnRunner) TurnRunner
+}
 
+// SessionRegistry covers session persistence, branching, and context
+// reconstruction.
+type SessionRegistry interface {
 	// SessionStore returns the bound SessionStore implementation.
 	SessionStore() SessionStore
 	// RegisterSessionStore replaces the SessionStore implementation and
@@ -242,7 +248,10 @@ type Registry interface {
 	// RegisterContextManager replaces the ContextManager implementation and
 	// returns the old one. It panics if n is nil.
 	RegisterContextManager(n ContextManager) ContextManager
+}
 
+// CompactorRegistry covers context compaction and token estimation.
+type CompactorRegistry interface {
 	// Compactor returns the bound Compactor implementation.
 	Compactor() Compactor
 	// RegisterCompactor replaces the Compactor implementation and returns the
@@ -254,19 +263,28 @@ type Registry interface {
 	// RegisterTokenEstimator replaces the TokenEstimator implementation and
 	// returns the old one. It panics if n is nil.
 	RegisterTokenEstimator(n TokenEstimator) TokenEstimator
+}
 
+// ToolRegistryAccessor covers tool registry management.
+type ToolRegistryAccessor interface {
 	// ToolRegistry returns the bound ToolRegistry implementation.
 	ToolRegistry() tools.ToolRegistry
 	// RegisterToolRegistry replaces the ToolRegistry implementation and
 	// returns the old one. It panics if n is nil.
 	RegisterToolRegistry(n tools.ToolRegistry) tools.ToolRegistry
+}
 
+// ModelProviderRegistry covers model provider management.
+type ModelProviderRegistry interface {
 	// ModelProvider returns the bound ModelProvider implementation.
 	ModelProvider() llm.ModelProvider
 	// RegisterModelProvider replaces the ModelProvider implementation and
 	// returns the old one. It panics if n is nil.
 	RegisterModelProvider(n llm.ModelProvider) llm.ModelProvider
+}
 
+// ApprovalRegistry covers approval classification and storage.
+type ApprovalRegistry interface {
 	// ApprovalClassifier returns the bound ApprovalClassifier implementation.
 	ApprovalClassifier() ApprovalClassifier
 	// RegisterApprovalClassifier replaces the ApprovalClassifier
@@ -278,13 +296,19 @@ type Registry interface {
 	// RegisterApprovalStore replaces the ApprovalStore implementation and
 	// returns the old one. It panics if n is nil.
 	RegisterApprovalStore(n ApprovalStore) ApprovalStore
+}
 
+// TracingRegistry covers trace export.
+type TracingRegistry interface {
 	// TraceExporter returns the bound TraceExporter implementation.
 	TraceExporter() tracing.TraceExporter
 	// RegisterTraceExporter replaces the TraceExporter implementation and
 	// returns the old one. It panics if n is nil.
 	RegisterTraceExporter(n tracing.TraceExporter) tracing.TraceExporter
+}
 
+// PluginRegistry covers extension configuration and plugin loading.
+type PluginRegistry interface {
 	// ConfigProvider returns the bound ConfigProvider implementation.
 	ConfigProvider() extension.ConfigProvider
 	// RegisterConfigProvider replaces the ConfigProvider implementation and
@@ -296,4 +320,19 @@ type Registry interface {
 	// RegisterPluginLoader replaces the PluginLoader implementation and
 	// returns the old one. It panics if n is nil.
 	RegisterPluginLoader(n PluginLoader) PluginLoader
+}
+
+// Registry is the dependency-inversion hub of the runtime. It is the
+// composite interface that embeds all subsystem sub-interfaces. It remains
+// backward compatible: every method previously declared directly on Registry
+// is still available via the embedded sub-interfaces.
+type Registry interface {
+	CoreRegistry
+	SessionRegistry
+	CompactorRegistry
+	ToolRegistryAccessor
+	ModelProviderRegistry
+	ApprovalRegistry
+	TracingRegistry
+	PluginRegistry
 }

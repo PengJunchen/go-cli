@@ -14,6 +14,8 @@ type harnessConfig struct {
 	bufferSize int
 	discard    DiscardPolicy
 	tracer     *tracing.Tracer
+	runSlot    RunSlotGuard
+	bus        EventBus
 }
 
 // HarnessOption configures a HarnessImpl at construction time.
@@ -29,8 +31,8 @@ func WithEventBuffer(n int) HarnessOption {
 }
 
 // WithDiscardPolicy sets the discard policy applied when a bounded stream
-// buffer is full. The underlying EventStreamImpl enforces its own backpressure;
-// this option is retained for API completeness and forward compatibility.
+// buffer is full. The policy is forwarded to each EventStreamImpl created by
+// the harness. See DiscardPolicy constants for available strategies.
 func WithDiscardPolicy(p DiscardPolicy) HarnessOption {
 	return func(c *harnessConfig) { c.discard = p }
 }
@@ -52,13 +54,32 @@ func WithHarnessTracer(t *tracing.Tracer) HarnessOption {
 	return func(c *harnessConfig) { c.tracer = t }
 }
 
+// WithRunSlotGuard sets the RunSlotGuard used to enforce single-run
+// exclusivity. When nil (or not set), the harness uses the noop default so
+// concurrent Submits are allowed.
+func WithRunSlotGuard(g RunSlotGuard) HarnessOption {
+	return func(c *harnessConfig) { c.runSlot = g }
+}
+
+// WithHarnessEventBus wires an EventBus that is forwarded to every
+// EventStream created by the harness. Each event successfully sent to a
+// stream is dual-written to the bus, enabling fan-out to multiple
+// consumers (e.g. the SSE /events endpoint). When nil (or not set), no
+// dual-write occurs and behavior is unchanged.
+func WithHarnessEventBus(bus EventBus) HarnessOption {
+	return func(c *harnessConfig) { c.bus = bus }
+}
+
 // HarnessImpl is the full runtime facade. It accepts a user message and
 // returns an EventStream that streams agent events until the run completes.
 type HarnessImpl struct {
 	agent         Agent
 	startSpanName string
 	bufferSize    int
+	discard       DiscardPolicy
 	tracer        *tracing.Tracer
+	runSlot       RunSlotGuard
+	bus           EventBus
 }
 
 var _ Harness = (*HarnessImpl)(nil)
@@ -69,15 +90,24 @@ func NewHarnessImpl(agent Agent, opts ...HarnessOption) *HarnessImpl {
 	if agent == nil {
 		panic("core: harness requires a non-nil Agent")
 	}
-	cfg := harnessConfig{startSpan: "harness.start"}
+	cfg := harnessConfig{
+		startSpan: "harness.start",
+		discard:   BlockUntilConsumed, // preserve backward-compatible blocking
+	}
 	for _, o := range opts {
 		o(&cfg)
+	}
+	if cfg.runSlot == nil {
+		cfg.runSlot = defaultRunSlotGuard
 	}
 	h := &HarnessImpl{
 		agent:         agent,
 		startSpanName: cfg.startSpan,
 		bufferSize:    cfg.bufferSize,
+		discard:       cfg.discard,
 		tracer:        cfg.tracer,
+		runSlot:       cfg.runSlot,
+		bus:           cfg.bus,
 	}
 	slog.Info("core.harness.new",
 		"agent", agent.Name(),
@@ -104,26 +134,48 @@ func (h *HarnessImpl) Submit(ctx context.Context, msg string) (EventStream, erro
 	logger := tracing.NewTraceLogger(span, nil)
 	logger.Info("core.harness.start", "msg", msg)
 
-	stream := NewEventStream(h.bufferSize)
+	streamOpts := []EventStreamOption{WithEventDiscardPolicy(h.discard)}
+	if h.bus != nil {
+		streamOpts = append(streamOpts, WithEventBus(h.bus))
+	}
+	stream := NewEventStream(h.bufferSize, streamOpts...)
 	if stream == nil {
 		return nil, context.Canceled
 	}
 
+	// Claim the run slot before launching the goroutine so concurrent
+	// Submits fail fast when a run is already in progress. The 200ms
+	// timeout bounds how long a caller waits for the slot.
+	claimCtx, claimCancel := context.WithTimeout(ctx, 200*time.Millisecond)
+	claim, err := h.runSlot.ClaimRun(claimCtx)
+	claimCancel()
+	if err != nil {
+		slog.Warn("core.harness.claim_failed", "err", err)
+		return nil, err
+	}
+
 	submission := Submission{Type: SubmissionUserMessage, Content: msg}
 
-	go h.run(spanCtx, stream, submission)
+	go h.run(spanCtx, stream, submission, claim)
 
 	return stream, nil
 }
 
 // run executes the agent and fans its events out to the stream. It always
 // records a terminal result, sends a closing event, and closes the stream so
-// consumers can observe completion without a goroutine leak.
-func (h *HarnessImpl) run(ctx context.Context, stream *EventStreamImpl, submission Submission) {
+// consumers can observe completion without a goroutine leak. The claim is
+// released by ExecuteClaimedRun when the run finishes (or panics).
+func (h *HarnessImpl) run(ctx context.Context, stream *EventStreamImpl, submission Submission, claim RunClaim) {
+	defer stream.Close()
 	// Pass the EventStream to the agent so events are emitted in real time
 	// as the LLM streams tokens. The agent also stores events internally
 	// for backward-compatible retrieval via the eventSource interface.
-	result, err := h.agent.Run(ctx, submission, stream)
+	var result Result
+	err := h.runSlot.ExecuteClaimedRun(claim, func() error {
+		r, e := h.agent.Run(ctx, submission, stream)
+		result = r
+		return e
+	})
 
 	// If the agent didn't send any events to the stream (e.g. it doesn't
 	// support streaming), fall back to fanning out its stored events.
@@ -138,13 +190,11 @@ func (h *HarnessImpl) run(ctx context.Context, stream *EventStreamImpl, submissi
 	if err != nil {
 		stream.SetResult(AgentMessage{Role: "assistant", Content: result.Message}, err)
 		bestEffort(stream.Send(errEvent(err)))
-		stream.Close()
 		return
 	}
 
 	stream.SetResult(AgentMessage{Role: "assistant", Content: result.Message}, nil)
 	bestEffort(stream.Send(AgentEvent{Kind: "done", Content: result.Message, Timestamp: time.Now()}))
-	stream.Close()
 }
 
 // bestEffort discards an error that is intentionally not actionable. EventStream.Send
@@ -157,7 +207,7 @@ func bestEffort(_ error) {}
 func (s *EventStreamImpl) SetResult(msg AgentMessage, err error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.closed {
+	if s.closed.Load() {
 		return
 	}
 	s.result = msg

@@ -55,7 +55,7 @@ func TestSplitTurnCompactor_SplitProducesTwoParts(t *testing.T) {
 	// Create content with a clear midpoint boundary.
 	content := strings.Repeat("first half content. ", 20) + "\n" + strings.Repeat("second half content. ", 20)
 
-	result := c.Split(content, est)
+	result := c.Split(context.Background(), content, est)
 
 	assert.NotEmpty(t, result.FirstPart)
 	assert.NotEmpty(t, result.SecondPart)
@@ -71,7 +71,7 @@ func TestSplitTurnCompactor_SplitShortContent(t *testing.T) {
 	est := NewHeuristicTokenEstimator()
 	content := "a"
 
-	result := c.Split(content, est)
+	result := c.Split(context.Background(), content, est)
 
 	// Content too short to split (mid == 0): first part is the content, second is empty.
 	assert.Equal(t, "a", result.FirstPart)
@@ -111,7 +111,7 @@ func TestSplitTurnCompactor_WithInjectedSummarizer(t *testing.T) {
 	content := strings.Repeat("a", 100) + "\n" + strings.Repeat("b", 100)
 	require.True(t, c.ShouldSplit(content, est))
 
-	result := c.Split(content, est)
+	result := c.Split(context.Background(), content, est)
 	// The mock summarizer returns "SUMMARY:" + the text it received.
 	assert.Contains(t, result.FirstPart, "SUMMARY:")
 	assert.Contains(t, result.FirstPart, "a")
@@ -119,7 +119,8 @@ func TestSplitTurnCompactor_WithInjectedSummarizer(t *testing.T) {
 	assert.Contains(t, result.SecondPart, "SUMMARY:")
 	assert.Contains(t, result.SecondPart, "b")
 	assert.NotContains(t, result.SecondPart, "a", "second part should only contain b's")
-	assert.Equal(t, 50, result.OriginalTokens)
+	// 200 alphanumerics (0.25 each) + 1 newline (0.5) = 50.5 → rounds to 51.
+	assert.Equal(t, 51, result.OriginalTokens)
 }
 
 func TestSplitTurnCompactor_SummarizerErrorFallback(t *testing.T) {
@@ -131,7 +132,7 @@ func TestSplitTurnCompactor_SummarizerErrorFallback(t *testing.T) {
 	est := NewHeuristicTokenEstimator()
 
 	content := strings.Repeat("x", 200)
-	result := c.Split(content, est)
+	result := c.Split(context.Background(), content, est)
 
 	// When summarizer fails, the raw half should be used.
 	assert.NotEmpty(t, result.FirstPart)
@@ -149,7 +150,7 @@ func TestSplitTurnCompactor_Concurrent(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func() {
 			defer wg.Done()
-			result := c.Split(content, est)
+			result := c.Split(context.Background(), content, est)
 			assert.NotEmpty(t, result.FirstPart)
 		}()
 	}

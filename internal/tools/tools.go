@@ -27,6 +27,10 @@ type ToolResult struct {
 	Metadata map[string]any `json:"metadata,omitempty"`
 	// ToolCallID links the result back to the originating call.
 	ToolCallID string `json:"tool_call_id,omitempty"`
+	// IsError marks the result as an error for structured detection. When
+	// true, consumers (e.g. the TUI) can detect tool errors via this boolean
+	// instead of fragile string matching on the Output text.
+	IsError bool `json:"is_error,omitempty"`
 }
 
 // ExecutionMode describes how a set of tool calls should be run.
@@ -63,6 +67,15 @@ type Parameterized interface {
 	// Parameters returns the JSON Schema object describing the tool's
 	// input parameters, or nil if the tool has no structured parameters.
 	Parameters() any
+}
+
+// ArgumentPreparer preprocesses tool call arguments before execution. It can
+// normalize paths, fill defaults, validate against schema, or transform types.
+// Preparers are applied in order; the output of one feeds into the next.
+type ArgumentPreparer interface {
+	// PrepareArguments transforms the call's arguments and returns a new
+	// (or modified) ToolCall. Returning an error prevents execution.
+	PrepareArguments(ctx context.Context, call ToolCall) (ToolCall, error)
 }
 
 // PromptGuideliner is an optional interface that tools can implement to

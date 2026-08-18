@@ -68,9 +68,17 @@ func WithMaxOutput(n int) BashToolOption {
 // WithBashSandbox attaches a BashSandbox that validates commands before
 // execution. When set, Execute calls Validate before running the command and
 // returns the error without executing if validation fails. When unset (the
-// default) no validation is performed, preserving backward compatibility.
+// default) Execute returns an error indicating a sandbox is required; use
+// WithNoSandbox() to explicitly opt out.
 func WithBashSandbox(sb BashSandbox) BashToolOption {
 	return func(t *BashTool) { t.Sandbox = sb }
+}
+
+// WithNoSandbox explicitly disables sandbox enforcement by setting an
+// AllowAllSandbox that permits every command. This is the opt-out path for
+// callers that intentionally want unrestricted command execution.
+func WithNoSandbox() BashToolOption {
+	return func(t *BashTool) { t.Sandbox = AllowAllSandbox{} }
 }
 
 // WithResourceLimits attaches process-level CPU and memory limits that are
@@ -149,19 +157,24 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		return nil, errors.New("bash: missing string argument 'command'")
 	}
 
-	// When a sandbox is configured, validate the command before execution.
-	if t.Sandbox != nil {
-		// Resolve workDir to an absolute path so that relative values like
-		// "." are checked against the whitelist correctly.
-		workDir := t.Workdir
-		if absDir, absErr := filepath.Abs(t.Workdir); absErr == nil {
-			workDir = absDir
-		}
-		if err := t.Sandbox.Validate(ctx, command, workDir); err != nil {
-			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-			logger.Error("bash.sandbox_blocked", "tool", "bash", "err", err)
-			return nil, err
-		}
+	// A sandbox is required by default. When Sandbox is nil, return an
+	// error unless the caller explicitly opted out via WithNoSandbox().
+	if t.Sandbox == nil {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		logger.Error("bash.sandbox_required", "tool", "bash")
+		return nil, errors.New("bash: sandbox is required but not configured; use --no-sandbox to override")
+	}
+
+	// Resolve workDir to an absolute path so that relative values like
+	// "." are checked against the whitelist correctly.
+	workDir := t.Workdir
+	if absDir, absErr := filepath.Abs(t.Workdir); absErr == nil {
+		workDir = absDir
+	}
+	if err := t.Sandbox.Validate(ctx, command, workDir); err != nil {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		logger.Error("bash.sandbox_blocked", "tool", "bash", "err", err)
+		return nil, err
 	}
 
 	// Determine the effective timeout. When TimeoutTier is enabled, the
@@ -180,7 +193,7 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 
 	cmd := exec.CommandContext(execCtx, "bash", "-lc", command)
 	cmd.Dir = t.Workdir
-	cmd.Env = append(os.Environ(), envSlice(t.Env)...)
+	cmd.Env = filteredEnv(t.Env)
 
 	var buf bytes.Buffer
 	// Bound the amount of data buffered so hostile or noisy output cannot
@@ -203,8 +216,8 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		logger.Error("bash.timeout",
 			"tool", "bash",
 			"duration_ms", ms,
-			"timeout", t.Timeout.String())
-		return &ToolResult{Output: output, Metadata: metadata}, fmt.Errorf("bash: timed out after %s: %w", t.Timeout.String(), execCtx.Err())
+			"timeout", timeout.String())
+		return &ToolResult{Output: output, Metadata: metadata}, fmt.Errorf("bash: timed out after %s: %w", timeout.String(), execCtx.Err())
 	}
 
 	if runErr != nil {
@@ -246,6 +259,78 @@ func envSlice(env map[string]string) []string {
 		out = append(out, k+"="+v)
 	}
 	return out
+}
+
+// envWhitelist is the set of environment variables inherited from the parent
+// process when spawning subprocesses. Variables not in this list — including
+// any matching *_API_KEY, *_TOKEN, or *_SECRET — are dropped to prevent
+// accidental secret leakage to child processes (AC-1).
+var envWhitelist = map[string]bool{
+	"PATH":     true,
+	"HOME":     true,
+	"USER":     true,
+	"SHELL":    true,
+	"LANG":     true,
+	"LC_ALL":   true,
+	"LC_CTYPE": true,
+	"TERM":     true,
+}
+
+// sensitiveEnvSuffixes lists the case-insensitive name suffixes that mark an
+// environment variable as sensitive. Variables matching any suffix are filtered
+// out of the extra environment to prevent credential leakage to child
+// processes (AC-1).
+var sensitiveEnvSuffixes = []string{
+	"_KEY",
+	"_TOKEN",
+	"_SECRET",
+	"_PASSWORD",
+	"_CREDENTIAL",
+	"_API_KEY",
+}
+
+// isSensitiveEnvVar returns true when name matches a sensitive pattern
+// (case-insensitive suffix match). Used to filter credentials such as
+// OPENAI_API_KEY, GITHUB_TOKEN, CLIENT_SECRET, DB_PASSWORD from child
+// process environments.
+func isSensitiveEnvVar(name string) bool {
+	upper := strings.ToUpper(name)
+	for _, suffix := range sensitiveEnvSuffixes {
+		if strings.HasSuffix(upper, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// filteredEnv builds the environment slice for a subprocess by inheriting
+// only whitelisted variables from os.Environ() and appending the tool's
+// extra environment. Sensitive variables (matching *_KEY, *_TOKEN, *_SECRET,
+// *_PASSWORD, *_CREDENTIAL) in the extra environment are filtered out to
+// prevent secret leakage to child processes (AC-1).
+func filteredEnv(extra map[string]string) []string {
+	var env []string
+	for _, kv := range os.Environ() {
+		key, _, ok := strings.Cut(kv, "=")
+		if !ok {
+			continue
+		}
+		if envWhitelist[key] {
+			env = append(env, kv)
+		}
+	}
+	// Filter sensitive variables from the extra environment to prevent
+	// credential leakage to child processes (AC-1).
+	filtered := make(map[string]string, len(extra))
+	for k, v := range extra {
+		if isSensitiveEnvVar(k) {
+			slog.Debug("bash.filtered_sensitive_env", "var", k)
+			continue
+		}
+		filtered[k] = v
+	}
+	env = append(env, envSlice(filtered)...)
+	return env
 }
 
 // fastCommands are read-only or quick commands that get the fast timeout tier.

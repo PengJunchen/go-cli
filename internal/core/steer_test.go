@@ -298,3 +298,139 @@ func TestEinoTurnRunnerRunWithAgentAndStream(t *testing.T) {
 	assert.Equal(t, "assistant", agentMsgs[1].Role)
 	assert.Equal(t, "hello from agent", agentMsgs[1].Content)
 }
+
+// TestSteerReturnsErrorWhenFull verifies that Steer returns an error when the
+// steering channel buffer is full, rather than silently dropping the message.
+func TestSteerReturnsErrorWhenFull(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	bl := newBlockingTurnLoop()
+	runner := NewEinoTurnRunner(bl)
+	steerCh := make(chan string, 1) // buffer of 1
+	runner.SetSteerChannel(steerCh)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = runner.RunTurn(context.Background(), Submission{Content: "go"}) //nolint:errcheck
+	}()
+
+	<-bl.started
+	id := runningTurnID(t, runner)
+	require.NotEmpty(t, id)
+
+	// Fill the steering channel (buffer is 1).
+	steerCh <- "first steer"
+
+	// Second Steer should fail because the channel is full.
+	err := runner.Steer(context.Background(), id, "second steer")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "steering channel full")
+
+	close(bl.release)
+	<-done
+}
+
+// TestSteerReturnsNilOnSuccess verifies that Steer returns nil when there is
+// room in the steering channel.
+func TestSteerReturnsNilOnSuccess(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	bl := newBlockingTurnLoop()
+	runner := NewEinoTurnRunner(bl)
+	steerCh := make(chan string, 1)
+	runner.SetSteerChannel(steerCh)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = runner.RunTurn(context.Background(), Submission{Content: "go"}) //nolint:errcheck
+	}()
+
+	<-bl.started
+	id := runningTurnID(t, runner)
+	require.NotEmpty(t, id)
+
+	// Channel has room — Steer should succeed.
+	err := runner.Steer(context.Background(), id, "change direction")
+	require.NoError(t, err)
+
+	// The instruction should be in the channel.
+	select {
+	case msg := <-steerCh:
+		assert.Equal(t, "change direction", msg)
+	default:
+		t.Fatal("expected steering message in channel")
+	}
+
+	close(bl.release)
+	<-done
+}
+
+// TestFollowUpReturnsErrorWhenFull verifies that FollowUp returns an error when
+// the follow-up channel buffer is full.
+func TestFollowUpReturnsErrorWhenFull(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	bl := newBlockingTurnLoop()
+	runner := NewEinoTurnRunner(bl)
+	followUpCh := make(chan string, 1)
+	runner.SetFollowUpChannel(followUpCh)
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = runner.RunTurn(context.Background(), Submission{Content: "go"}) //nolint:errcheck
+	}()
+
+	<-bl.started
+	id := runningTurnID(t, runner)
+	require.NotEmpty(t, id)
+
+	// Fill the follow-up channel.
+	followUpCh <- "first followup"
+
+	// Second FollowUp should fail because the channel is full.
+	err := runner.FollowUp(context.Background(), id, "second followup")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "followup channel full")
+
+	close(bl.release)
+	<-done
+}
+
+// TestNilChannelStillWorks verifies that Steer and FollowUp return nil (and
+// record the submission on the turn) when no channel is set. Without a channel
+// there is nothing to send to, so no error should be returned.
+func TestNilChannelStillWorks(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	bl := newBlockingTurnLoop()
+	runner := NewEinoTurnRunner(bl)
+	// No steer/followup channel set — both are nil.
+
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = runner.RunTurn(context.Background(), Submission{Content: "go"}) //nolint:errcheck
+	}()
+
+	<-bl.started
+	id := runningTurnID(t, runner)
+	require.NotEmpty(t, id)
+
+	// Steer and FollowUp should succeed even without channels.
+	require.NoError(t, runner.Steer(context.Background(), id, "steer msg"))
+	require.NoError(t, runner.FollowUp(context.Background(), id, "followup msg"))
+
+	// The submissions should still be recorded on the turn.
+	turn, err := runner.Get(context.Background(), id)
+	require.NoError(t, err)
+	require.Len(t, turn.Steerings, 1)
+	assert.Equal(t, "steer msg", turn.Steerings[0].Content)
+	require.Len(t, turn.FollowUps, 1)
+	assert.Equal(t, "followup msg", turn.FollowUps[0].Content)
+
+	close(bl.release)
+	<-done
+}

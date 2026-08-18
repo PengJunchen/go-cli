@@ -135,9 +135,10 @@ func TestMemoryStoreAppendValidation(t *testing.T) {
 	assert.Equal(t, 0, len(s.entries))
 }
 
-// TestWriteJSONLineNilFile verifies writing to a nil file reports an error.
+// TestWriteJSONLineNilFile verifies writing to a nil writer reports an error.
 func TestWriteJSONLineNilFile(t *testing.T) {
-	err := writeJSONLine(nil, newTestEntry("a", "", EntryTypeUser))
+	s := &JSONLSessionStore{}
+	err := s.writeJSONLine(newTestEntry("a", "", EntryTypeUser))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not open")
 }
@@ -195,8 +196,9 @@ func TestContextManagerCompactionTraversedHasRawEntries(t *testing.T) {
 	require.Len(t, sc.Traversed, 2)
 	assert.Equal(t, EntryTypeCompaction, sc.Traversed[0].Type, "traversed is leaf-to-root, starting with the leaf")
 
-	// Messages folds the summary into Content.
-	assert.Equal(t, "folded", sc.Messages[1].Content)
+	// Messages folds the summary into Content. With compaction-point behavior,
+	// the compaction entry is the first (and only) message.
+	assert.Equal(t, "folded", sc.Messages[0].Content)
 }
 
 // TestContextManagerBuildContextWithSystemEntries verifies system entries pass

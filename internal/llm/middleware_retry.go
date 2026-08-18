@@ -11,7 +11,9 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/binary"
+	"errors"
 	"log/slog"
+	"strings"
 	"time"
 )
 
@@ -60,13 +62,82 @@ func newDefaultRetryPolicy(cfg RetryConfig) *defaultRetryPolicy {
 	return &defaultRetryPolicy{cfg: cfg, name: "default-retry"}
 }
 
+// errorCategory classifies an error's retryability within the llm package.
+type errorCategory int
+
+const (
+	categoryNone errorCategory = iota
+	categoryFatal
+	categoryRateLimit
+	categoryTimeout
+	categoryTransient
+)
+
+func (c errorCategory) retryable() bool {
+	return c != categoryNone && c != categoryFatal
+}
+
+// classifyError determines if an error is retryable. It first attempts a
+// structured ProviderError type assertion (errors.As traverses the Unwrap
+// chain). For non-ProviderError errors (e.g. net.Error timeout) it falls back
+// to keyword matching for backward compatibility. Unknown errors default to
+// categoryTransient (retryable).
+// When the production RetryPolicy is wired in via WithRetryPolicy, its
+// Classify method is used instead.
+func classifyError(err error) errorCategory {
+	if err == nil {
+		return categoryNone
+	}
+	// Prefer structured ProviderError (errors.As traverses the Unwrap chain).
+	var pe *ProviderError
+	if errors.As(err, &pe) {
+		switch pe.ErrorType {
+		case ErrTypeRateLimit:
+			return categoryRateLimit
+		case ErrTypeAuth, ErrTypeOverflow:
+			return categoryFatal
+		case ErrTypeServer, ErrTypeNetwork:
+			return categoryTransient
+		}
+	}
+	// Fallback: keyword matching for non-ProviderError errors (e.g. net.Error
+	// timeout, connection refused) to preserve backward compatibility.
+	msg := strings.ToLower(err.Error())
+	// Check the full error chain for more robust matching.
+	for e := errors.Unwrap(err); e != nil; e = errors.Unwrap(e) {
+		msg += " " + strings.ToLower(e.Error())
+	}
+	if strings.Contains(msg, "busy") || strings.Contains(msg, "already running") {
+		return categoryFatal
+	}
+	if strings.Contains(msg, "hook") && (strings.Contains(msg, "reject") || strings.Contains(msg, "halt")) {
+		return categoryFatal
+	}
+	if strings.Contains(msg, "permission denied") || strings.Contains(msg, "unauthorized") || strings.Contains(msg, "invalid api key") {
+		return categoryFatal
+	}
+	if strings.Contains(msg, "rate limit") || strings.Contains(msg, "429") || strings.Contains(msg, "too many requests") {
+		return categoryRateLimit
+	}
+	if strings.Contains(msg, "timeout") || strings.Contains(msg, "deadline exceeded") {
+		return categoryTimeout
+	}
+	if strings.Contains(msg, "connection reset") || strings.Contains(msg, "connection refused") || strings.Contains(msg, "transient") {
+		return categoryTransient
+	}
+	return categoryTransient // default: retry unknown errors
+}
+
 // ShouldRetry reports whether attempt may be retried: true when the attempt
-// count is below MaxAttempts and err is non-nil.
+// count is below MaxAttempts and the error is classified as retryable.
 func (p *defaultRetryPolicy) ShouldRetry(_ context.Context, err error, attempt int) bool {
 	if err == nil {
 		return false
 	}
-	return attempt < p.cfg.MaxAttempts
+	if attempt >= p.cfg.MaxAttempts {
+		return false
+	}
+	return classifyError(err).retryable()
 }
 
 // NextBackoff computes min(baseDelay*2^attempt + rand[0,jitter), MaxDelay).

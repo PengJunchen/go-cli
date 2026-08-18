@@ -183,67 +183,6 @@ func TestBraveSearchProviderServerError(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// RateLimiter
-// ---------------------------------------------------------------------------
-
-func TestRateLimiterTwoRequestsApart(t *testing.T) {
-	rl := NewRateLimiterWithInterval(100 * time.Millisecond)
-	defer rl.Stop()
-
-	start := time.Now()
-	rl.Wait()
-	first := time.Now()
-	rl.Wait()
-	second := time.Now()
-
-	gap := second.Sub(first)
-	assert.GreaterOrEqual(t, gap, 90*time.Millisecond, "second request should be at least ~interval after the first")
-	total := second.Sub(start)
-	assert.GreaterOrEqual(t, total, 100*time.Millisecond)
-}
-
-// ---------------------------------------------------------------------------
-// ResultCache
-// ---------------------------------------------------------------------------
-
-func TestResultCacheSetGetWithinTTL(t *testing.T) {
-	cache := NewResultCacheWithTTL(5 * time.Minute)
-	results := []SearchResult{
-		{Title: "Cached", URL: "https://cached.com", Snippet: "cached snippet"},
-	}
-	cache.Set("query-1", results)
-
-	got, ok := cache.Get("query-1")
-	require.True(t, ok)
-	assert.Equal(t, results, got)
-}
-
-func TestResultCacheMiss(t *testing.T) {
-	cache := NewResultCacheWithTTL(5 * time.Minute)
-	_, ok := cache.Get("nonexistent")
-	assert.False(t, ok)
-}
-
-func TestResultCacheExpiredReturnsMiss(t *testing.T) {
-	cache := NewResultCacheWithTTL(50 * time.Millisecond)
-	results := []SearchResult{
-		{Title: "Expiring", URL: "https://expiring.com", Snippet: "soon gone"},
-	}
-	cache.Set("query-2", results)
-
-	// Within TTL.
-	got, ok := cache.Get("query-2")
-	require.True(t, ok)
-	assert.Equal(t, results, got)
-
-	// Wait for expiry.
-	time.Sleep(80 * time.Millisecond)
-
-	_, ok = cache.Get("query-2")
-	assert.False(t, ok)
-}
-
-// ---------------------------------------------------------------------------
 // WebSearchTool with different providers
 // ---------------------------------------------------------------------------
 

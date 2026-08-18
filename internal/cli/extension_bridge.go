@@ -91,21 +91,55 @@ func newExtensionMiddlewareAdapter(m extension.Middleware) *extensionMiddlewareA
 // Name delegates to the underlying extension middleware.
 func (a *extensionMiddlewareAdapter) Name() string { return a.extMW.Name() }
 
+// bridgeStreamCtxKey is the context key used to thread the core.EventStream
+// through the extension AgentFunc boundary. The extension package cannot
+// import core, so the stream is carried via context rather than as a field
+// on AgentInput.
+type bridgeStreamCtxKey struct{}
+
 // Wrap composes the extension middleware over the given core.AgentLoop. The
 // loop is adapted into an extension.AgentFunc, wrapped by the extension
 // middleware, and re-exposed as an AgentLoop.
 func (a *extensionMiddlewareAdapter) Wrap(next core.AgentLoop) core.AgentLoop {
-	// agentFunc adapts the core.AgentLoop into an extension.AgentFunc.
+	// agentFunc adapts the core.AgentLoop into an extension.AgentFunc. It
+	// recovers the EventStream from context (set by extensionMiddlewareLoop.Run)
+	// and forwards it to the inner loop so real-time streaming is preserved.
 	agentFunc := func(ctx context.Context, input extension.AgentInput) (extension.AgentOutput, error) {
-		events, err := next.Run(ctx, core.Submission{
-			Type:     core.SubmissionUserMessage,
-			Content:  input.Message,
-			Metadata: toMetadata(input.Data),
-		})
+		var es core.EventStream
+		if s, ok := ctx.Value(bridgeStreamCtxKey{}).(core.EventStream); ok {
+			es = s
+		}
+
+		var history []core.AgentMessage
+		if h, ok := input.History.([]core.AgentMessage); ok {
+			history = h
+		}
+
+		var events []core.AgentEvent
+		var err error
+		if es != nil {
+			events, err = next.Run(ctx, core.Submission{
+				Type:     submissionTypeFromString(input.Type),
+				Content:  input.Message,
+				Metadata: toMetadata(input.Data),
+				History:  history,
+			}, es)
+		} else {
+			events, err = next.Run(ctx, core.Submission{
+				Type:     submissionTypeFromString(input.Type),
+				Content:  input.Message,
+				Metadata: toMetadata(input.Data),
+				History:  history,
+			})
+		}
 		if err != nil {
 			return extension.AgentOutput{}, err
 		}
-		return extension.AgentOutput{Text: lastBridgeMessage(events), Data: input.Data}, nil
+		return extension.AgentOutput{
+			Text:   lastBridgeMessage(events),
+			Data:   input.Data,
+			Events: events,
+		}, nil
 	}
 
 	wrapped := a.extMW.WrapAgent(agentFunc)
@@ -120,20 +154,64 @@ type extensionMiddlewareLoop struct {
 	fn extension.AgentFunc
 }
 
-func (l *extensionMiddlewareLoop) Run(ctx context.Context, submission core.Submission, _ ...core.EventStream) ([]core.AgentEvent, error) {
+func (l *extensionMiddlewareLoop) Run(ctx context.Context, submission core.Submission, stream ...core.EventStream) ([]core.AgentEvent, error) {
+	// Thread the EventStream through context so the inner agentFunc can
+	// forward it to the wrapped core.AgentLoop, preserving real-time
+	// streaming.
+	if len(stream) > 0 && stream[0] != nil {
+		ctx = context.WithValue(ctx, bridgeStreamCtxKey{}, stream[0])
+	}
 	input := extension.AgentInput{
 		Message: submission.Content,
 		Data:    submission.Metadata,
+		History: submission.History,
+		Type:    submission.Type.String(),
 	}
 	out, err := l.fn(ctx, input)
 	if err != nil {
 		return nil, err
 	}
+	return bridgeOutputToEvents(out), nil
+}
+
+// bridgeOutputToEvents converts an extension.AgentOutput back into a slice of
+// core.AgentEvent. When the middleware chain preserved the inner loop's events
+// (via AgentOutput.Events), those are returned directly so intermediate
+// streaming fragments, tool calls, and other event kinds are not lost. If the
+// middleware modified the final text, the last "message" event is updated to
+// reflect the change. When no events survived (e.g. the middleware built a
+// fresh AgentOutput with only Text), a single message event is synthesized.
+func bridgeOutputToEvents(out extension.AgentOutput) []core.AgentEvent {
+	if events, ok := out.Events.([]core.AgentEvent); ok && len(events) > 0 {
+		if out.Text != "" {
+			for i := len(events) - 1; i >= 0; i-- {
+				if events[i].Kind == "message" {
+					events[i].Content = out.Text
+					break
+				}
+			}
+		}
+		return events
+	}
 	var events []core.AgentEvent
 	if out.Text != "" {
 		events = append(events, core.AgentEvent{Kind: "message", Content: out.Text, Timestamp: time.Now()})
 	}
-	return events, nil
+	return events
+}
+
+// submissionTypeFromString converts the string representation of a submission
+// type back to core.SubmissionType. Unknown values default to
+// SubmissionUserMessage.
+func submissionTypeFromString(s string) core.SubmissionType {
+	switch s {
+	case "steering":
+		return core.SubmissionSteering
+	case "followup":
+		return core.SubmissionFollowUp
+	default:
+		return core.SubmissionUserMessage
+	}
 }
 
 // toMetadata coerces an opaque extension.AgentInput.Data value into the

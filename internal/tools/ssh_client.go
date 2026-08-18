@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"os"
 	"os/exec"
 	"strconv"
 )
@@ -88,27 +89,56 @@ func (c *DefaultSSHClient) Connect(ctx context.Context) error {
 	return nil
 }
 
+// sshCommandSpec describes the resolved command for an Exec invocation. The
+// env field is nil when the child process should inherit the parent
+// environment (key-based auth); when non-nil it is the exact environment for
+// the child (password-based auth, which delivers the password via SSHPASS).
+type sshCommandSpec struct {
+	name string
+	args []string
+	env  []string
+}
+
+// buildExecCommand constructs the command spec for running command on the
+// remote host. For password-based auth the password is delivered through the
+// SSHPASS environment variable (sshpass -e) rather than as a command-line
+// argument (sshpass -p), so it is not exposed in the process argument list.
+// The child environment is restricted to PATH, HOME and SSHPASS to avoid
+// leaking unrelated variables; ssh does not forward env vars to the remote
+// host unless SendEnv is configured, so SSHPASS is not propagated to
+// grandchildren such as the remote shell.
+func (c *DefaultSSHClient) buildExecCommand(command string) sshCommandSpec {
+	args := c.baseArgs()
+	args = append(args, command)
+
+	if c.config.Password != "" {
+		return sshCommandSpec{
+			name: "sshpass",
+			args: append([]string{"-e", "ssh"}, args...),
+			env: []string{
+				"SSHPASS=" + c.config.Password,
+				"PATH=" + os.Getenv("PATH"),
+				"HOME=" + os.Getenv("HOME"),
+			},
+		}
+	}
+	return sshCommandSpec{
+		name: "ssh",
+		args: args,
+	}
+}
+
 // Exec runs a command on the remote host via ssh. It returns captured stdout,
 // stderr, the remote exit code, and any transport-level error. A non-zero exit
 // code from the remote command is NOT treated as an error — it is reported via
 // exitCode with err == nil. Transport errors (context cancellation, ssh binary
 // not found, etc.) are returned via err with exitCode set to -1.
 func (c *DefaultSSHClient) Exec(ctx context.Context, command string) (string, string, int, error) {
-	args := c.baseArgs()
-	args = append(args, command)
-
-	var name string
-	var cmdArgs []string
-	if c.config.Password != "" {
-		// Prefix with sshpass for password-based auth.
-		name = "sshpass"
-		cmdArgs = append([]string{"-p", c.config.Password, "ssh"}, args...)
-	} else {
-		name = "ssh"
-		cmdArgs = args
+	spec := c.buildExecCommand(command)
+	cmd := exec.CommandContext(ctx, spec.name, spec.args...)
+	if spec.env != nil {
+		cmd.Env = spec.env
 	}
-
-	cmd := exec.CommandContext(ctx, name, cmdArgs...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -139,7 +169,7 @@ func (c *DefaultSSHClient) Close() error {
 // Connect and Exec. The remote command is appended by the caller.
 func (c *DefaultSSHClient) baseArgs() []string {
 	args := []string{
-		"-o", "StrictHostKeyChecking=accept-new",
+		"-o", "StrictHostKeyChecking=yes",
 		"-o", "ConnectTimeout=10",
 	}
 	if c.config.Port != 0 && c.config.Port != 22 {

@@ -15,7 +15,7 @@ import (
 func TestBashEcho(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tool := NewBashTool()
+	tool := NewBashTool(WithNoSandbox())
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"command": "echo hi"},
 	})
@@ -27,7 +27,7 @@ func TestBashEcho(t *testing.T) {
 func TestBashEnvPassed(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tool := NewBashTool(WithEnv(map[string]string{"FOO": "bar"}))
+	tool := NewBashTool(WithEnv(map[string]string{"FOO": "bar"}), WithNoSandbox())
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"command": "echo $FOO"},
 	})
@@ -39,7 +39,7 @@ func TestBashWorkdir(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	dir := t.TempDir()
-	tool := NewBashTool(WithBashWorkdir(dir))
+	tool := NewBashTool(WithBashWorkdir(dir), WithNoSandbox())
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"command": "pwd"},
 	})
@@ -61,7 +61,7 @@ func TestBashMissingCommand(t *testing.T) {
 func TestBashCommandNotFound(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tool := NewBashTool()
+	tool := NewBashTool(WithNoSandbox())
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"command": "definitely_not_a_real_command_xyz"},
 	})
@@ -73,7 +73,7 @@ func TestBashContextCancel(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	ctx, cancel := context.WithCancel(context.Background())
-	tool := NewBashTool(WithTimeout(10 * time.Second))
+	tool := NewBashTool(WithTimeout(10*time.Second), WithNoSandbox())
 
 	cancel()
 
@@ -86,7 +86,7 @@ func TestBashContextCancel(t *testing.T) {
 func TestBashTimeout(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	tool := NewBashTool(WithTimeout(200 * time.Millisecond))
+	tool := NewBashTool(WithTimeout(200*time.Millisecond), WithNoSandbox())
 	_, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"command": "sleep 2"},
 	})
@@ -133,7 +133,7 @@ func TestBashOutputTruncation(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	// Use a very small max output to force truncation.
-	tool := NewBashTool(WithMaxOutput(20))
+	tool := NewBashTool(WithMaxOutput(20), WithNoSandbox())
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"command": "echo 012345678901234567890123456789"},
 	})
@@ -144,5 +144,94 @@ func TestBashOutputTruncation(t *testing.T) {
 	} else {
 		// If no error, the output should contain the truncation marker.
 		assert.Contains(t, res.Output, "[output truncated]")
+	}
+}
+
+// TestBashFilteredEnvSensitiveVars verifies that sensitive environment
+// variables (matching *_KEY, *_TOKEN, *_SECRET, *_PASSWORD, *_CREDENTIAL)
+// are NOT passed to child processes (AC-1).
+func TestBashFilteredEnvSensitiveVars(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	tool := NewBashTool(
+		WithEnv(map[string]string{
+			"OPENAI_API_KEY": "sk-secret",
+			"GITHUB_TOKEN":   "ghp_secret",
+			"CLIENT_SECRET":  "secret-val",
+			"DB_PASSWORD":    "hunter2",
+			"MY_CREDENTIAL":  "cred-val",
+			"SAFE_VAR":       "ok",
+		}),
+		WithNoSandbox(),
+	)
+	res, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"command": "env"},
+	})
+	require.NoError(t, err)
+
+	// Sensitive variables must not appear in the child process environment.
+	assert.NotContains(t, res.Output, "OPENAI_API_KEY")
+	assert.NotContains(t, res.Output, "sk-secret")
+	assert.NotContains(t, res.Output, "GITHUB_TOKEN")
+	assert.NotContains(t, res.Output, "ghp_secret")
+	assert.NotContains(t, res.Output, "CLIENT_SECRET")
+	assert.NotContains(t, res.Output, "secret-val")
+	assert.NotContains(t, res.Output, "DB_PASSWORD")
+	assert.NotContains(t, res.Output, "hunter2")
+	assert.NotContains(t, res.Output, "MY_CREDENTIAL")
+	assert.NotContains(t, res.Output, "cred-val")
+
+	// Legitimate non-sensitive variables should still pass through.
+	assert.Contains(t, res.Output, "SAFE_VAR=ok")
+}
+
+// TestBashFilteredEnvCaseInsensitive verifies that sensitive pattern matching
+// is case-insensitive.
+func TestBashFilteredEnvCaseInsensitive(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	tool := NewBashTool(
+		WithEnv(map[string]string{
+			"openai_api_key": "sk-lower",
+			"Github_Token":   "ghp-mixed",
+			"client_SECRET":  "s-mixed",
+			"safe_VAR":       "ok",
+		}),
+		WithNoSandbox(),
+	)
+	res, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"command": "env"},
+	})
+	require.NoError(t, err)
+
+	assert.NotContains(t, res.Output, "openai_api_key")
+	assert.NotContains(t, res.Output, "sk-lower")
+	assert.NotContains(t, res.Output, "Github_Token")
+	assert.NotContains(t, res.Output, "ghp-mixed")
+	assert.NotContains(t, res.Output, "client_SECRET")
+	assert.NotContains(t, res.Output, "s-mixed")
+	assert.Contains(t, res.Output, "safe_VAR=ok")
+}
+
+// TestIsSensitiveEnvVar verifies the pattern matching logic directly.
+func TestIsSensitiveEnvVar(t *testing.T) {
+	sensitive := []string{
+		"OPENAI_API_KEY", "API_KEY", "SECRET_KEY",
+		"GITHUB_TOKEN", "ACCESS_TOKEN",
+		"CLIENT_SECRET", "APP_SECRET",
+		"DB_PASSWORD", "ROOT_PASSWORD",
+		"MY_CREDENTIAL", "AWS_CREDENTIAL",
+	}
+	for _, name := range sensitive {
+		assert.True(t, isSensitiveEnvVar(name), "expected %s to be sensitive", name)
+		assert.True(t, isSensitiveEnvVar(strings.ToLower(name)), "expected %s to be sensitive (lowercase)", name)
+	}
+
+	safe := []string{
+		"PATH", "HOME", "USER", "SHELL", "LANG", "TERM",
+		"FOO", "SAFE_VAR", "MY_KEYBINDING", "KEYBOARD_LAYOUT",
+	}
+	for _, name := range safe {
+		assert.False(t, isSensitiveEnvVar(name), "expected %s to NOT be sensitive", name)
 	}
 }

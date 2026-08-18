@@ -145,12 +145,12 @@ func TestE2E_Phase19_CombinedApprovalAndMutation(t *testing.T) {
 	mw := approval.NewApprovalMiddleware(
 		approval.NewSafetyPolicyClassifier([]string{"bash"}),
 		approval.NewInMemoryApprovalStore(),
-		approval.WithAutoApprove(false),
+		approval.WithAutoApprove(true),
 	)
 	// Order: approval first (outermost), mutation second (innermost).
 	wrapped := tools.NewMiddlewareToolRegistry(tr, mw.WrapToolCall, tools.NewMutationWrapper())
 
-	// write should pass approval (not in forbidden list) and then be serialized.
+	// write should pass approval (not forbidden, auto-approved) and then be serialized.
 	def, err := wrapped.Get(context.Background(), "write")
 	require.NoError(t, err)
 

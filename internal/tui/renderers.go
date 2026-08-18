@@ -5,6 +5,10 @@ import (
 	"log/slog"
 	"strconv"
 	"strings"
+	"sync"
+
+	"github.com/charmbracelet/glamour"
+	"github.com/charmbracelet/lipgloss"
 )
 
 // renderTheme resolves the theme to apply, falling back to a light-safe dark
@@ -57,23 +61,92 @@ func stripANSI(text string, maxCols int) string {
 
 // ---------- markdown ----------
 
-// MarkdownRenderer styles markdown content with the theme primary color.
-type MarkdownRenderer struct{}
+// glamourStyleFor maps the active theme to a glamour standard-style name.
+// LightTheme selects the "light" preset; every other theme (Dark, Monokai,
+// Solarized, Mock, or a nil theme) falls back to "dark" so text stays legible
+// on dark backgrounds. Glamour owns all syntax highlighting via chroma, so the
+// theme is only consulted to pick the color palette.
+func glamourStyleFor(opts RenderOpts) string {
+	if opts.Theme != nil {
+		switch opts.Theme.(type) {
+		case LightTheme:
+			return "light"
+		}
+	}
+	return "dark"
+}
+
+// MarkdownRenderer renders markdown content via glamour (GFM + chroma syntax
+// highlighting). It lazily builds and caches a *glamour.TermRenderer keyed by
+// (style, width), rebuilding it only when either value changes, so repeated
+// Render calls with stable options avoid re-parsing the glamour style config.
+type MarkdownRenderer struct {
+	mu       sync.Mutex
+	renderer *glamour.TermRenderer
+	style    string
+	width    int
+}
 
 var _ Renderer = (*MarkdownRenderer)(nil)
 
-// Render styles markdown content.
-func (MarkdownRenderer) Render(ctx context.Context, content string, opts RenderOpts) string {
-	out := renderTheme(opts).Primary().Render(wrapWidth(content, opts.Width))
+// NewMarkdownRenderer returns a MarkdownRenderer. No highlighter argument is
+// required: glamour provides syntax highlighting for fenced code blocks via
+// chroma, replacing the previous self-implemented highlighter.
+func NewMarkdownRenderer() *MarkdownRenderer {
+	return &MarkdownRenderer{}
+}
+
+// termRenderer returns a cached *glamour.TermRenderer for the given style and
+// width, rebuilding it only when either value changes. The caller must hold m.mu.
+func (m *MarkdownRenderer) termRenderer(style string, width int) (*glamour.TermRenderer, error) {
+	if m.renderer != nil && m.style == style && m.width == width {
+		return m.renderer, nil
+	}
+	r, err := glamour.NewTermRenderer(
+		glamour.WithStandardStyle(style),
+		glamour.WithWordWrap(width),
+	)
+	if err != nil {
+		return nil, err
+	}
+	m.renderer = r
+	m.style = style
+	m.width = width
+	return r, nil
+}
+
+// Render renders content as markdown via glamour and returns ANSI-styled text.
+// On any renderer-construction or render error it falls back to the raw
+// content so callers never receive an empty string for non-empty input.
+func (m *MarkdownRenderer) Render(ctx context.Context, content string, opts RenderOpts) string {
+	width := opts.Width
+	if width <= 0 {
+		width = 80
+	}
+	style := glamourStyleFor(opts)
+
+	m.mu.Lock()
+	r, err := m.termRenderer(style, width)
+	m.mu.Unlock()
+	if err != nil || r == nil {
+		logRender(ctx, "markdown", opts.ContentType, len(content))
+		return content
+	}
+	out, err := r.Render(content)
+	if err != nil {
+		logRender(ctx, "markdown", opts.ContentType, len(content))
+		return content
+	}
+	out = strings.TrimRight(out, "\n")
 	logRender(ctx, "markdown", opts.ContentType, len(out))
 	return out
 }
 
 // Name identifies the renderer.
-func (MarkdownRenderer) Name() string { return "markdown" }
+func (*MarkdownRenderer) Name() string { return "markdown" }
 
 // Supports reports whether the renderer handles the content type.
-func (MarkdownRenderer) Supports(ct string) bool { return ct == ContentTypeMarkdown }
+func (*MarkdownRenderer) Supports(ct string) bool { return ct == ContentTypeMarkdown }
 
 // ---------- code ----------
 
@@ -236,6 +309,38 @@ func (ToolResultRenderer) Name() string { return "tool_result" }
 // Supports reports whether the renderer handles the content type.
 func (ToolResultRenderer) Supports(ct string) bool { return ct == ContentTypeToolResult }
 
+// ---------- tool_output ----------
+
+// ToolOutputRenderer renders a line of streaming tool output. It is similar
+// to ToolResultRenderer but uses a distinct label so the user can distinguish
+// real-time output from a final result.
+type ToolOutputRenderer struct{}
+
+var _ Renderer = (*ToolOutputRenderer)(nil)
+
+// Render styles streaming tool output content. When opts.Stream is "stderr"
+// the output is rendered in the error style with an [err] label; otherwise
+// (stdout or empty) it uses the foreground style with an [output] label.
+func (ToolOutputRenderer) Render(ctx context.Context, content string, opts RenderOpts) string {
+	theme := renderTheme(opts)
+	if opts.Stream == "stderr" {
+		label := theme.Error().Bold(true).Render("[err]")
+		out := label + " " + theme.Error().Render(wrapWidth(content, opts.Width))
+		logRender(ctx, "tool_output", opts.ContentType, len(out))
+		return out
+	}
+	label := theme.Fg().Bold(true).Render("[output]")
+	out := label + " " + theme.Fg().Render(wrapWidth(content, opts.Width))
+	logRender(ctx, "tool_output", opts.ContentType, len(out))
+	return out
+}
+
+// Name identifies the renderer.
+func (ToolOutputRenderer) Name() string { return ContentTypeToolOutput }
+
+// Supports reports whether the renderer handles the content type.
+func (ToolOutputRenderer) Supports(ct string) bool { return ct == ContentTypeToolOutput }
+
 // ---------- thinking ----------
 
 // ThinkingRenderer renders internal reasoning in the faint/italic style.
@@ -259,13 +364,16 @@ func (ThinkingRenderer) Supports(ct string) bool { return ct == ContentTypeThink
 
 // ---------- progress ----------
 
-// ProgressRenderer renders a progress bar bounded by the render width.
+// ProgressRenderer renders a progress bar bounded by the render width. The bar
+// uses filled (█) and empty (░) cells, appends a percentage readout, and
+// selects the bar color by tier: green below 50 %, yellow from 50 % to 79 %,
+// red at 80 % and above.
 type ProgressRenderer struct{}
 
 var _ Renderer = (*ProgressRenderer)(nil)
 
 // Render draws a progress bar; content is expected to be a float value in
-// [0,1] as text. Non-numeric content is rendered verbatim in the primary style.
+// [0,1] as text. Non-numeric content is rendered as 0 %.
 func (ProgressRenderer) Render(ctx context.Context, content string, opts RenderOpts) string {
 	theme := renderTheme(opts)
 	width := opts.Width
@@ -273,14 +381,27 @@ func (ProgressRenderer) Render(ctx context.Context, content string, opts RenderO
 		width = 40
 	}
 	filled := progressFrac(content, width)
-	bar := strings.Repeat("=", filled) + strings.Repeat("-", width-filled)
-	out := theme.Primary().Bold(true).Render("[" + bar + "]")
+	pct := progressPct(content)
+	bar := strings.Repeat("█", filled) + strings.Repeat("░", width-filled)
+	style := progressStyle(theme, pct)
+	out := style.Bold(true).Render("["+bar+"]") + " " + strconv.Itoa(pct) + "%"
 	logRender(ctx, "progress", opts.ContentType, len(out))
 	return out
 }
 
 // progressFrac converts textual progress into a filled-cell count.
 func progressFrac(content string, width int) int {
+	return int(progressValue(content) * float64(width))
+}
+
+// progressPct converts textual progress into an integer percentage [0,100].
+func progressPct(content string) int {
+	return int(progressValue(content) * 100)
+}
+
+// progressValue parses a float in [0,1] from content, clamping out-of-range
+// values and returning 0 for non-numeric input.
+func progressValue(content string) float64 {
 	val, err := strconv.ParseFloat(content, 64)
 	if err != nil {
 		return 0
@@ -291,7 +412,19 @@ func progressFrac(content string, width int) int {
 	if val < 0 {
 		val = 0
 	}
-	return int(val * float64(width))
+	return val
+}
+
+// progressStyle selects the bar color by percentage tier.
+func progressStyle(theme Theme, pct int) Style {
+	switch {
+	case pct < 50:
+		return theme.Success()
+	case pct < 80:
+		return theme.Warning()
+	default:
+		return theme.Error()
+	}
 }
 
 // Name identifies the renderer.
@@ -466,7 +599,7 @@ var _ Renderer = (*PromptRenderer)(nil)
 // Render styles prompt content.
 func (PromptRenderer) Render(ctx context.Context, content string, opts RenderOpts) string {
 	theme := renderTheme(opts)
-	out := theme.Bold().Foreground(colorBrightWhite).Render(wrapWidth(content, opts.Width))
+	out := theme.Bold().Foreground(lipgloss.Color("#FFFFFF")).Render(wrapWidth(content, opts.Width))
 	logRender(ctx, "prompt", opts.ContentType, len(out))
 	return out
 }

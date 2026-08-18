@@ -42,7 +42,7 @@ func TestRegistryClassifierNilResets(t *testing.T) {
 	RegisterApprovalClassifier(&DenyAllClassifier{})
 	RegisterApprovalClassifier(nil)
 	got := GetApprovalClassifier()
-	assert.Equal(t, "allow_all", got.Name())
+	assert.Equal(t, "deny_all", got.Name())
 }
 
 func TestRegistryStoreRoundTrip(t *testing.T) {

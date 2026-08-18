@@ -1,0 +1,7 @@
+# typos spell checker configuration
+# https://github.com/crate-ci/typos
+
+[default.extend-identifiers]
+# Short variable names in Go code that trigger false positives
+typ = "typ"
+ue = "ue"

@@ -80,7 +80,7 @@
 
 ### 前置条件
 
-- Go 1.23+
+- Go 1.24+
 
 ### 构建与运行
 
@@ -131,15 +131,31 @@ EinoProvider 基于 `net/http` 实现 OpenAI 兼容协议，零外部依赖。
 
 ### 内置工具
 
-| 工具 | 说明 |
-|---|---|
-| `bash` | 执行 shell 命令 |
-| `read` | 读取文件 |
-| `write` | 写入文件 |
-| `edit` | 差异编辑 (old/new 替换) |
-| `grep` | 正则搜索 (支持纯 Go 模式) |
-| `find`/`ls` | 文件查找与列表 |
-| `search` | 语义搜索 |
+| 分类 | 工具 | 说明 |
+|---|---|---|
+| 文件/Shell | `bash` | 执行 shell 命令 (流式输出、沙箱与资源限制) |
+| 文件/Shell | `read` | 读取文件 (支持图片) |
+| 文件/Shell | `write` | 写入文件 |
+| 文件/Shell | `edit` | 差异编辑 (old/new 替换) |
+| 文件/Shell | `grep` | 正则搜索 (支持纯 Go 模式) |
+| 文件/Shell | `find`/`ls` | 文件查找与列表 |
+| Git | `git_diff`/`git_status`/`git_log`/`git_blame` | Git 检查 |
+| Git | `git_commit`/`git_branch`/`git_create_branch`/`git_checkout` | Git 分支与提交 |
+| Git | `git_push`/`git_pull`/`git_fetch`/`git_remote` | Git 远程操作 |
+| Git | `git_merge`/`git_stash`/`git_stash_pop`/`git_reset`/`git_revert` | Git 工作流 |
+| Git | `git_pr_create` | 创建 Pull Request |
+| Web | `web_fetch` | 抓取 URL 内容 |
+| Web | `web_search` | 网页搜索 (mock/fetch/brave 提供者) |
+| Web | `tool_search` | 语义工具搜索 |
+| 效率 | `todo_write` | Todo 列表管理 |
+| 效率 | `task_create`/`task_get`/`task_list`/`task_update` | 任务存储 |
+| 效率 | `goal_create`/`goal_update`/`goal_list`/`goal_get` | 目标存储 |
+| 代码 | `lsp_query` | 语言服务器协议查询 |
+| 多模态 | `image_read` | 读取并解码图片 |
+| 交互 | `ask_user` | 人机协作提问 |
+| 交互 | `enter_plan_mode`/`exit_plan_mode` | 计划模式切换 |
+| Agent | `dispatch_subagent` | SubAgent 调度 |
+| Agent | `remote_bash` | 通过 SSH 的远程 Shell |
 
 ### 压缩策略
 
@@ -233,7 +249,7 @@ optional body markdown
 
 ### TUI
 
-Bubbletea 驱动渲染循环，按 ContentType 分派到 Renderer。支持流式渲染器 (替换最后一帧) 和非流式渲染器 (追加)。内置 24 个渲染器。
+Bubbletea 驱动渲染循环，按 ContentType 分派到 Renderer。支持流式渲染器 (替换最后一帧) 和非流式渲染器 (追加)。内置 26 个渲染器。
 
 ### 全链路 Tracing
 
@@ -250,7 +266,7 @@ cli.invocation
                            └─ tool.call (tool_name=edit|grep|...)
 ```
 
-导出器：`stdout` / `jsonl` (文件) / `otlp` (HTTP)
+导出器：`stdout` / `jsonl` (文件) / `otlp` (HTTP) / `kafka`
 
 ### 验证框架
 
@@ -259,7 +275,7 @@ cli.invocation
 | **Scanner** | AST 扫描，13 条规则检测 mock 导入、硬编码凭据、测试 URL 等 |
 | **LogCapturer** | 拦截 slog 全局 handler，断言日志条目/序列 |
 | **GoLeakChecker** | goroutine 泄漏检测，2 秒轮询超时 |
-| **VerifyRunner** | 26 条验证规则 (VQ/VT/VS/VC/VH/VP/VG/VE) |
+| **VerifyRunner** | 36 条验证规则 (VQ/VT/VS/VC/VH/VP/VG/VE) |
 
 ## 配置
 
@@ -305,11 +321,22 @@ session:
 | Phase 2 | 100+ 轮长对话稳定、自动压缩、Session 恢复、Trace 链完整性、质量指标 |
 | Phase 3 | 审批门控、MCP 调用、循环检测、熔断降级、重试、幂等去重、审计记录 |
 | Phase 4 | Skill 加载、扩展注册、SubAgent 生成、TUI 渲染、YAML 配置、Provider 组合、ACP 通信、OTLP 导出 |
+| Phase 20+ | REPL、Git 工具、流式输出、Token 估算、中断/Steer、系统提示、跨场景 |
+| Phase 21+ | SubAgent、TUI、生产加固、全能力集成 |
+| Phase 22–26 | 评审驱动 E2E、生产、LSP、完整接线 |
+| Phase 39 | 交互式 REPL 会话 |
+| Phase 46–49 | 安全加固与边界边缘场景 |
 
 运行：
 
 ```bash
 go test -race -count=1 -v -run "TestPhase2|TestPhase3|TestPhase4" ./tests/...
+```
+
+完整 E2E 套件 (位于 `tests/e2e_20260802/`)：
+
+```bash
+go test -race -count=1 ./tests/...
 ```
 
 ## 项目结构
@@ -336,12 +363,15 @@ go-cli/
 │   ├── tui/                # 终端 UI
 │   └── verify/             # 验证框架 (Scanner/Leak/Log)
 ├── tests/                  # 端到端集成测试
+│   ├── e2e_20260802/       # 完整 E2E 套件 (36 个文件，Phase 1–47)
 │   ├── phase2_e2e_test.go  # 长对话 + 压缩 + Session
 │   ├── phase3_e2e_test.go  # 弹性 + 审批 + MCP
-│   └── phase4_e2e_test.go  # Skill + 扩展 + SubAgent + TUI + ACP
+│   ├── phase4_e2e_test.go  # Skill + 扩展 + SubAgent + TUI + ACP
+│   ├── e2e_phase20_steer_test.go ... e2e_phase49_test.go  # 按 Phase 的 E2E
+│   └── smoke_test.go       # 冒烟测试
 ├── .github/workflows/      # CI/CD
 ├── Makefile                # 构建/测试/验证
-└── go.mod                  # Go 1.23+, 仅测试依赖
+└── go.mod                  # Go 1.24+, 仅测试依赖
 ```
 
 ## 设计原则

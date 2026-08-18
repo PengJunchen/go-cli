@@ -23,9 +23,10 @@ var errProviderAlreadyRegistered = errors.New("llm: provider already registered"
 // NewProviderRegistry pre-registers a default EinoProvider so a freshly
 // constructed registry is always usable.
 type ProviderRegistry struct {
-	mu        sync.RWMutex
-	providers map[string]ModelProvider
-	order     []string
+	mu            sync.RWMutex
+	providers     map[string]ModelProvider
+	order         []string
+	modelRegistry ModelRegistry
 }
 
 // NewProviderRegistry creates a ProviderRegistry that already contains a
@@ -110,4 +111,32 @@ func (r *ProviderRegistry) Default() ModelProvider {
 		return nil
 	}
 	return r.providers[r.order[0]]
+}
+
+// GetModelInfo returns the ModelInfo for the named model exposed by the named
+// provider. It returns an empty ModelInfo when the provider or model is not
+// found.
+func (r *ProviderRegistry) GetModelInfo(ctx context.Context, provider, model string) ModelInfo {
+	p, err := r.Get(provider)
+	if err != nil {
+		// Provider not registered locally; try the external registry.
+		if r.modelRegistry != nil {
+			if info, ok := r.modelRegistry.Lookup(ctx, provider, model); ok {
+				return info
+			}
+		}
+		return ModelInfo{}
+	}
+	for _, m := range p.Models() {
+		if m.Name == model {
+			return m
+		}
+	}
+	// Model not in the provider's built-in list; try the external registry.
+	if r.modelRegistry != nil {
+		if info, ok := r.modelRegistry.Lookup(ctx, provider, model); ok {
+			return info
+		}
+	}
+	return ModelInfo{}
 }

@@ -2,6 +2,8 @@ package tui
 
 import (
 	"context"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
 // MockRenderer is a test double that returns a fixed result for every render
@@ -30,35 +32,41 @@ func (m MockRenderer) Name() string { return m.fixedName }
 func (m MockRenderer) Supports(ct string) bool { return ct == m.fixedType }
 
 // MockTheme is a test double that returns a fixed style (force red, bold) for
-// every accessor so tests can assert that a renderer applied some styling.
+// every accessor so tests can assert that a renderer applied some styling. It
+// uses truecolor hex values via lipgloss.Color, mirroring the production
+// presets.
 type MockTheme struct{}
 
-// Primary returns a fixed style.
-func (MockTheme) Primary() Style { return NewStyle().Foreground(colorRed).Bold(true) }
+// Primary returns a fixed style (red + bold).
+func (MockTheme) Primary() Style {
+	return NewStyle().Foreground(lipgloss.Color("#FF0000")).Bold(true)
+}
 
-// Secondary returns a fixed style.
-func (MockTheme) Secondary() Style { return NewStyle().Foreground(colorMagenta) }
+// Secondary returns a fixed style (magenta).
+func (MockTheme) Secondary() Style { return NewStyle().Foreground(lipgloss.Color("#FF00FF")) }
 
-// Success returns a fixed style.
-func (MockTheme) Success() Style { return NewStyle().Foreground(colorGreen) }
+// Success returns a fixed style (green).
+func (MockTheme) Success() Style { return NewStyle().Foreground(lipgloss.Color("#00FF00")) }
 
-// Warning returns a fixed style.
-func (MockTheme) Warning() Style { return NewStyle().Foreground(colorYellow) }
+// Warning returns a fixed style (yellow).
+func (MockTheme) Warning() Style { return NewStyle().Foreground(lipgloss.Color("#FFFF00")) }
 
-// Error returns a fixed style.
-func (MockTheme) Error() Style { return NewStyle().Foreground(colorRed) }
+// Error returns a fixed style (red).
+func (MockTheme) Error() Style { return NewStyle().Foreground(lipgloss.Color("#FF0000")) }
 
-// Bg returns a fixed style.
-func (MockTheme) Bg() Style { return NewStyle().Background(colorBlack) }
+// Bg returns a fixed style (black background).
+func (MockTheme) Bg() Style { return NewStyle().Background(lipgloss.Color("#000000")) }
 
-// Fg returns a fixed style.
-func (MockTheme) Fg() Style { return NewStyle().Foreground(colorWhite) }
+// Fg returns a fixed style (white).
+func (MockTheme) Fg() Style { return NewStyle().Foreground(lipgloss.Color("#FFFFFF")) }
 
-// Faint returns a fixed style.
-func (MockTheme) Faint() Style { return NewStyle().Foreground(colorBrightBlack).Faint(true) }
+// Faint returns a fixed style (bright black + faint).
+func (MockTheme) Faint() Style {
+	return NewStyle().Foreground(lipgloss.Color("#808080")).Faint(true)
+}
 
-// Bold returns a fixed style.
+// Bold returns a fixed style (bold).
 func (MockTheme) Bold() Style { return NewStyle().Bold(true) }
 
-// Italic returns a fixed style.
+// Italic returns a fixed style (italic).
 func (MockTheme) Italic() Style { return NewStyle().Italic(true) }

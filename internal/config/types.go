@@ -5,23 +5,31 @@ import "time"
 // Config is the root application configuration. It is deeply nested into
 // sections mirroring the go-cli configuration file / environment schema.
 type Config struct {
-	Provider   ProviderConfig   `json:"provider"`
-	Model      ModelConfig      `json:"model"`
-	Agent      AgentConfig      `json:"agent"`
-	Tools      ToolsConfig      `json:"tools"`
-	Tracing    TracingConfig    `json:"tracing"`
-	Approval   ApprovalConfig   `json:"approval"`
-	Session    SessionConfig    `json:"session"`
-	Compaction CompactionConfig `json:"compaction"`
-	MCP        MCPConfig        `json:"mcp"`
-	Skill      SkillConfig      `json:"skill"`
-	WebSearch  WebSearchConfig  `json:"web_search"`
-	Production ProductionConfig `json:"production"`
-	Sandbox    SandboxConfig    `json:"sandbox"`
-	LSP        LSPConfig        `json:"lsp"`
-	Remote     RemoteConfig     `json:"remote"`
-	Extensions ExtensionsConfig `json:"extensions"`
-	ACP        ACPConfig        `json:"acp"`
+	Provider      ProviderConfig      `json:"provider"`
+	Model         ModelConfig         `json:"model"`
+	SmallModel    SmallModelConfig    `json:"small_model"`
+	Agent         AgentConfig         `json:"agent"`
+	Tools         ToolsConfig         `json:"tools"`
+	Tracing       TracingConfig       `json:"tracing"`
+	Approval      ApprovalConfig      `json:"approval"`
+	Session       SessionConfig       `json:"session"`
+	Compaction    CompactionConfig    `json:"compaction"`
+	MCP           MCPConfig           `json:"mcp"`
+	Skill         SkillConfig         `json:"skill"`
+	Commands      CommandsConfig      `json:"commands"`
+	WebSearch     WebSearchConfig     `json:"web_search"`
+	Production    ProductionConfig    `json:"production"`
+	Sandbox       SandboxConfig       `json:"sandbox"`
+	LSP           LSPConfig           `json:"lsp"`
+	Remote        RemoteConfig        `json:"remote"`
+	Extensions    ExtensionsConfig    `json:"extensions"`
+	Hooks         HooksConfig         `json:"hooks" yaml:"hooks"`
+	ACP           ACPConfig           `json:"acp"`
+	Git           GitConfig           `json:"git"`
+	ModelCycler   ModelCyclerConfig   `json:"model_cycler"`
+	ModelRegistry ModelRegistryConfig `json:"model_registry"`
+	History       HistoryConfig       `json:"history"`
+	TUI           TUIConfig           `json:"tui" yaml:"tui"`
 
 	verbose bool
 }
@@ -46,6 +54,19 @@ type ModelConfig struct {
 	MaxTokens   int     `json:"max_tokens"`
 }
 
+// SmallModelConfig holds settings for a lightweight model used for background
+// tasks (summaries, title generation, memory extraction). When Provider and
+// Model are empty, the small model is not built and all tasks fall back to the
+// primary model.
+type SmallModelConfig struct {
+	Provider    string  `json:"provider"`
+	APIKey      string  `json:"api_key"`
+	BaseURL     string  `json:"base_url"`
+	Model       string  `json:"model"`
+	Temperature float64 `json:"temperature"`
+	MaxTokens   int     `json:"max_tokens"`
+}
+
 // AgentConfig holds agent loop behavior settings.
 type AgentConfig struct {
 	// MaxIterations bounds the number of think -> act -> observe turns the
@@ -59,6 +80,9 @@ type AgentConfig struct {
 	// assembled system prompt. This corresponds to the content of an
 	// APPEND_SYSTEM.md file.
 	AppendSystemPrompt string `json:"append_system_prompt"`
+	// Thinking controls the LLM reasoning depth. Valid values:
+	// none|minimal|low|medium|high|max. Empty defaults to medium.
+	Thinking string `json:"thinking"`
 }
 
 // ToolsConfig controls which builtin tools and tool registries are available.
@@ -98,10 +122,11 @@ type CustomToolConfig struct {
 
 // TracingConfig controls the trace logging exporter and level.
 type TracingConfig struct {
-	Enabled  *bool  `json:"enabled"`
-	Exporter string `json:"exporter"`
-	Level    string `json:"level"`
-	FilePath string `json:"file_path"`
+	Enabled        *bool  `json:"enabled"`
+	Exporter       string `json:"exporter"`
+	Level          string `json:"level"`
+	FilePath       string `json:"file_path"`
+	RedactionLevel string `json:"redaction_level"` // full, redact (default), off
 }
 
 // ApprovalConfig controls the approval mode and classifier selection.
@@ -114,6 +139,10 @@ type ApprovalConfig struct {
 type SessionConfig struct {
 	ID        string `json:"id"`
 	StorePath string `json:"store_path"`
+	// GitAwareBranch, when true, enables Git branch linkage during session
+	// fork/resume operations. Defaults to false for backward compatibility.
+	// Pointer allows explicit false override via env/flag.
+	GitAwareBranch *bool `json:"git_aware_branch"`
 }
 
 // CompactionConfig controls context compaction strategy and thresholds.
@@ -159,6 +188,14 @@ type SkillConfig struct {
 	Dir string `json:"dir"`
 }
 
+// CommandsConfig holds custom slash command loading settings.
+type CommandsConfig struct {
+	// Dir is the directory to load custom Markdown command definitions from.
+	// When empty, auto-discovery checks .go-cli/commands and
+	// ~/.config/go-cli/commands.
+	Dir string `json:"dir"`
+}
+
 // WebSearchConfig controls the web search provider selection. When Provider
 // is empty or "mock", the MockSearchProvider is used (default). "fetch" selects
 // the DuckDuckGo HTML scraping provider, and "brave" selects the Brave Search
@@ -180,8 +217,9 @@ type ProductionConfig struct {
 // AuditConfig controls the audit log that records tool calls and their
 // outcomes as JSON-lines for later inspection.
 type AuditConfig struct {
-	// Enabled controls whether the audit log is active.
-	Enabled bool `json:"enabled"`
+	// Enabled controls whether the audit log is active. Defaults to true
+	// when nil; set to a pointer to false to explicitly disable.
+	Enabled *bool `json:"enabled"`
 	// Path is the JSONL file path where audit entries are appended.
 	Path string `json:"path"`
 }
@@ -217,14 +255,34 @@ type SandboxConfig struct {
 	MaxMemory int64 `json:"max_memory"`
 }
 
+// LSPServerConfig describes a single LSP server instance bound to specific
+// file extensions.
+type LSPServerConfig struct {
+	// ServerCommand is the command and arguments used to launch the LSP
+	// server subprocess (e.g. ["gopls", "serve"]).
+	ServerCommand []string `json:"server_command" yaml:"server_command"`
+	// WorkspaceRoot is the root directory of the workspace, passed as the
+	// LSP root URI. When empty, the current working directory is used.
+	WorkspaceRoot string `json:"workspace_root" yaml:"workspace_root"`
+	// FileExtensions lists the file extensions (without dot, e.g. "go",
+	// "ts") that this server handles.
+	FileExtensions []string `json:"file_extensions" yaml:"file_extensions"`
+}
+
 // LSPConfig controls the Language Server Protocol integration.
 type LSPConfig struct {
 	// ServerCommand is the command and arguments used to launch the LSP
-	// server subprocess (e.g. ["gopls", "serve"]).
-	ServerCommand []string `json:"server_command"`
+	// server subprocess (e.g. ["gopls", "serve"]). This is the legacy
+	// single-server field; when set, it is treated as a single-element
+	// Servers list for backward compatibility.
+	ServerCommand []string `json:"server_command" yaml:"server_command"`
 	// WorkspaceRoot is the root directory of the workspace, passed as the
 	// LSP root URI. When empty, the current working directory is used.
-	WorkspaceRoot string `json:"workspace_root"`
+	WorkspaceRoot string `json:"workspace_root" yaml:"workspace_root"`
+	// Servers allows configuring multiple LSP servers, each handling
+	// different file extensions. When non-empty, this takes precedence
+	// over the legacy ServerCommand/WorkspaceRoot fields.
+	Servers []LSPServerConfig `json:"servers" yaml:"servers"`
 }
 
 // RemoteConfig holds SSH remote execution settings.
@@ -261,7 +319,21 @@ type ExtensionsConfig struct {
 	// extensions from.
 	PluginPaths []string `json:"plugin_paths"`
 	// Enabled controls whether extension loading is active.
-	Enabled bool `json:"enabled"`
+	// Pointer allows explicit false override via env/flag.
+	Enabled *bool `json:"enabled"`
+}
+
+// HooksConfig holds user-configured shell hooks loaded from
+// .go-cli/hooks.yaml.
+type HooksConfig struct {
+	Hooks []HookConfig `json:"hooks" yaml:"hooks"`
+}
+
+// HookConfig describes a single shell hook.
+type HookConfig struct {
+	Event   string `json:"event" yaml:"event"`     // pre_tool_use, post_tool_use, session_start, session_end
+	Command string `json:"command" yaml:"command"` // shell command to execute
+	Timeout string `json:"timeout" yaml:"timeout"` // duration string (e.g. "10s"), default "10s"
 }
 
 // ACPConfig controls Agent Communication Protocol (ACP) multi-agent
@@ -279,6 +351,102 @@ type ACPConfig struct {
 	Endpoints []string `json:"endpoints"`
 	// Timeout bounds ACP operations in seconds. Zero means no explicit timeout.
 	Timeout int `json:"timeout"`
+}
+
+// GitConfig controls Git integration settings: the working directory for git
+// operations, default remote, branch prefix, auto-commit behavior, and the
+// platform for PR creation.
+type GitConfig struct {
+	// Enabled controls whether git tools are registered. Defaults to false.
+	// Pointer allows explicit false override via env/flag.
+	Enabled *bool `json:"enabled"`
+	// WorkDir is the working directory for git commands. When empty, the
+	// process working directory is used.
+	WorkDir string `json:"workdir"`
+	// DefaultRemote is the default remote name (e.g. "origin").
+	DefaultRemote string `json:"default_remote"`
+	// BranchPrefix is an optional prefix applied to branches created by the
+	// session fork --git command.
+	BranchPrefix string `json:"branch_prefix"`
+	// AutoCommit enables automatic committing of changes after tool mutations.
+	// Pointer allows explicit false override via env/flag.
+	AutoCommit *bool `json:"auto_commit"`
+	// Platform selects the hosting platform for PR creation: "github",
+	// "gitlab", or "bitbucket". Required when APIToken is non-empty.
+	Platform string `json:"platform"`
+	// APIToken is the API token for the hosting platform. When non-empty,
+	// Platform must be set.
+	APIToken string `json:"api_token"`
+	// WorktreeEnabled controls whether parallel sessions are isolated via git
+	// worktrees. When true, each session gets its own worktree on a dedicated
+	// branch.
+	WorktreeEnabled bool `json:"worktree_enabled"`
+	// WorktreeDir is the parent directory where session worktrees are created.
+	// When empty, it defaults to <gitCwd>/.go-cli/worktrees.
+	WorktreeDir string `json:"worktree_dir"`
+}
+
+// ModelCyclerConfig controls model rotation across multiple providers. When
+// Enabled is true and Models is non-empty, the CLI creates a ModelCycler that
+// rotates model selection across the configured providers using the specified
+// Strategy.
+type ModelCyclerConfig struct {
+	// Enabled controls whether model cycling is active.
+	// Pointer allows explicit false override via env/flag.
+	Enabled *bool `json:"enabled"`
+	// Strategy selects the rotation strategy: round_robin, weighted, or
+	// cost_priority. Empty defaults to round_robin.
+	Strategy string `json:"strategy"`
+	// Models lists the models in the rotation pool.
+	Models []ModelEntry `json:"models"`
+}
+
+// ModelEntry represents a single model in the rotation pool.
+type ModelEntry struct {
+	// Provider is the provider name (e.g. openai, claude, gemini).
+	Provider string `json:"provider"`
+	// Model is the model name (e.g. gpt-4o, claude-3).
+	Model string `json:"model"`
+	// Weight is used by the weighted and cost_priority strategies.
+	Weight int `json:"weight"`
+	// TaskType optionally tags this model for a specific task type
+	// (chat, summary, title, extraction). When non-empty, the cycler
+	// prefers this model for calls with a matching task type.
+	TaskType string `json:"task_type,omitempty"`
+}
+
+// ModelRegistryConfig controls the models.dev model registry integration. When
+// Enabled is true, a ModelsDevRegistry is created and refreshed on startup so
+// model metadata (pricing, context window, modality) is available to the CLI.
+type ModelRegistryConfig struct {
+	Enabled   bool   `json:"enabled"`
+	CachePath string `json:"cache_path,omitempty"`
+	TTLHours  int    `json:"ttl_hours,omitempty"`
+}
+
+// HistoryConfig controls REPL command history persistence.
+type HistoryConfig struct {
+	Path   string `yaml:"path" json:"path"`
+	MaxLen int    `yaml:"max_len" json:"max_len"`
+}
+
+// TUIConfig configures the terminal UI layer.
+type TUIConfig struct {
+	// Theme selects the color theme: dark, light, monokai, solarized, or auto.
+	// Empty defaults to dark at runtime.
+	Theme string `json:"theme" yaml:"theme"`
+	// WordWrap sets the render word-wrap width in columns. Zero disables wrapping.
+	WordWrap int `json:"word_wrap" yaml:"word_wrap"`
+	// DiffStyle selects the diff preview style: unified, split, or auto.
+	// Empty defaults to auto.
+	DiffStyle string `json:"diff_style" yaml:"diff_style"`
+	// Mode selects the TUI event source: "local" (default) consumes events
+	// from the in-process EventStream; "remote" consumes SSE events from a
+	// remote ACP HTTP server specified by RemoteURL.
+	Mode string `json:"mode" yaml:"mode"`
+	// RemoteURL is the SSE endpoint URL used when Mode is "remote". It should
+	// include any required query parameters (e.g. sender_id).
+	RemoteURL string `json:"remote_url,omitempty" yaml:"remote_url,omitempty"`
 }
 
 // Source enumerates the five configuration layers, ordered by ascending

@@ -44,7 +44,17 @@ type gRPCAdapter struct {
 	connected bool
 	done      chan struct{}
 	inbound   chan ACPMessage
+
+	// Reconnection state (protected by reconnectMu).
+	reconnectMu  sync.Mutex
+	reconnecting bool
+	pendingMsgs  []ACPMessage
+	maxPending   int
 }
+
+// maxPendingMessages is the maximum number of messages buffered during
+// reconnection before messages are dropped with a warning.
+const maxPendingMessages = 64
 
 // Compile-time assertion that gRPCAdapter satisfies ACPClient.
 var _ ACPClient = (*gRPCAdapter)(nil)
@@ -54,12 +64,13 @@ var _ ACPClient = (*gRPCAdapter)(nil)
 // stdlib JSON-over-HTTP interpretation of the ACP gRPC contract.
 func NewGRPCAdapter(endpoint string, opts ...Option) ACPClient {
 	a := &gRPCAdapter{
-		name:      resolveName("grpc", opts),
-		endpoint:  strings.TrimRight(endpoint, "/"),
-		transport: ACPTransportGRPC,
-		client:    &http.Client{Timeout: 30 * time.Second},
-		done:      make(chan struct{}),
-		inbound:   make(chan ACPMessage, 16),
+		name:       resolveName("grpc", opts),
+		endpoint:   strings.TrimRight(endpoint, "/"),
+		transport:  ACPTransportGRPC,
+		client:     &http.Client{Timeout: 30 * time.Second},
+		done:       make(chan struct{}),
+		inbound:    make(chan ACPMessage, 16),
+		maxPending: maxPendingMessages,
 	}
 	return a
 }
@@ -82,8 +93,10 @@ func (a *gRPCAdapter) Connect(ctx context.Context) error {
 		span.SetStatus(tracing.SpanStatusOK, "")
 		return nil
 	}
-	done := a.done
-	inbound := a.inbound
+	done := make(chan struct{})
+	inbound := make(chan ACPMessage, 16)
+	a.done = done
+	a.inbound = inbound
 	a.mu.Unlock()
 
 	connectMsg := ACPMessage{Type: TypeConnect, SenderID: a.name, Timestamp: time.Now()}
@@ -147,6 +160,25 @@ func (a *gRPCAdapter) SendMessage(ctx context.Context, msg ACPMessage) error {
 	if msg.Timestamp.IsZero() {
 		msg.Timestamp = time.Now()
 	}
+
+	// During reconnection, queue messages instead of sending directly.
+	a.reconnectMu.Lock()
+	if a.reconnecting {
+		if len(a.pendingMsgs) >= a.maxPending {
+			a.reconnectMu.Unlock()
+			err := fmt.Errorf("acp: pending queue full, message dropped")
+			span.SetStatus(tracing.SpanStatusError, err.Error())
+			logger.Warn("acp.reconnect.queue.full", "message_type", msg.Type)
+			return err
+		}
+		a.pendingMsgs = append(a.pendingMsgs, msg)
+		a.reconnectMu.Unlock()
+		span.SetStatus(tracing.SpanStatusOK, "")
+		logger.Info("acp.reconnect.queued", "message_type", msg.Type, "receiver_id", msg.ReceiverID)
+		return nil
+	}
+	a.reconnectMu.Unlock()
+
 	if err := a.post(spanCtx, "/send", msg); err != nil {
 		span.SetStatus(tracing.SpanStatusError, err.Error())
 		logger.Error("acp.send.failed", "message_type", msg.Type, "receiver_id", msg.ReceiverID, "err", err)
@@ -211,25 +243,25 @@ func (a *gRPCAdapter) readLoop(ctx context.Context, done chan struct{}, inbound 
 		streamURL := a.endpoint + "/stream"
 		req, err := http.NewRequestWithContext(ctx, http.MethodGet, streamURL, nil)
 		if err != nil {
-			select {
-			case <-time.After(100 * time.Millisecond):
-				continue
-			case <-done:
-				return
-			case <-ctx.Done():
+			if !a.doReconnect(ctx, done) {
 				return
 			}
+			continue
 		}
 		resp, err := a.client.Do(req) //nolint:gosec // stream endpoint comes from trusted config
 		if err != nil {
-			select {
-			case <-time.After(100 * time.Millisecond):
-				continue
-			case <-done:
-				return
-			case <-ctx.Done():
+			if !a.doReconnect(ctx, done) {
 				return
 			}
+			continue
+		}
+
+		if resp.StatusCode >= 500 {
+			closeQuietly(resp.Body)
+			if !a.doReconnect(ctx, done) {
+				return
+			}
+			continue
 		}
 
 		sc := bufio.NewScanner(resp.Body)
@@ -261,6 +293,116 @@ func (a *gRPCAdapter) readLoop(ctx context.Context, done chan struct{}, inbound 
 			case <-ctx.Done():
 				return
 			}
+		}
+	}
+}
+
+// grpcReconnectBackoff returns the delay before the (zero-based) attempt-th
+// reconnection try: 1s, 2s, 4s, 8s, 16s, 30s (capped).
+func grpcReconnectBackoff(attempt int) time.Duration {
+	d := time.Second
+	for i := 0; i < attempt; i++ {
+		d *= 2
+		if d >= 30*time.Second {
+			return 30 * time.Second
+		}
+	}
+	return d
+}
+
+// Reconnect attempts to re-establish the gRPC session with exponential
+// backoff. It is safe to call concurrently; if a reconnection is already in
+// progress, the call waits for it to complete.
+func (a *gRPCAdapter) Reconnect(ctx context.Context) error {
+	a.mu.Lock()
+	connected := a.connected
+	done := a.done
+	a.mu.Unlock()
+	if !connected {
+		return fmt.Errorf("acp: %s adapter not connected", a.name)
+	}
+	if !a.doReconnect(ctx, done) {
+		return fmt.Errorf("acp: reconnection failed")
+	}
+	return nil
+}
+
+// doReconnect attempts to re-establish the session with exponential backoff.
+// It returns true if reconnection succeeded, or false if done/ctx was
+// canceled. If a reconnection is already in progress, it waits for the
+// existing one to complete.
+func (a *gRPCAdapter) doReconnect(ctx context.Context, done chan struct{}) bool {
+	a.reconnectMu.Lock()
+	if a.reconnecting {
+		a.reconnectMu.Unlock()
+		// Wait for the existing reconnection to complete.
+		for {
+			a.reconnectMu.Lock()
+			r := a.reconnecting
+			a.reconnectMu.Unlock()
+			if !r {
+				return true
+			}
+			select {
+			case <-time.After(10 * time.Millisecond):
+			case <-done:
+				return false
+			case <-ctx.Done():
+				return false
+			}
+		}
+	}
+	a.reconnecting = true
+	a.reconnectMu.Unlock()
+
+	for attempt := 0; ; attempt++ {
+		backoff := grpcReconnectBackoff(attempt)
+		slog.Info("acp.reconnect.attempt", "attempt", attempt+1, "delay", backoff, "endpoint", a.endpoint)
+
+		timer := time.NewTimer(backoff)
+		select {
+		case <-timer.C:
+		case <-done:
+			timer.Stop()
+			a.setReconnecting(false)
+			return false
+		case <-ctx.Done():
+			timer.Stop()
+			a.setReconnecting(false)
+			return false
+		}
+
+		connectMsg := ACPMessage{Type: TypeConnect, SenderID: a.name, Timestamp: time.Now()}
+		if err := a.post(ctx, "/connect", connectMsg); err != nil {
+			slog.Info("acp.reconnect.failed", "attempt", attempt+1, "err", err)
+			continue
+		}
+
+		a.flushPending(ctx)
+		slog.Info("acp.reconnect.success", "endpoint", a.endpoint, "attempts", attempt+1)
+		return true
+	}
+}
+
+// setReconnecting updates the reconnecting flag under the reconnectMu lock.
+func (a *gRPCAdapter) setReconnecting(v bool) {
+	a.reconnectMu.Lock()
+	a.reconnecting = v
+	a.reconnectMu.Unlock()
+}
+
+// flushPending sends queued messages after a successful reconnection and
+// clears the reconnecting flag.
+func (a *gRPCAdapter) flushPending(ctx context.Context) {
+	a.reconnectMu.Lock()
+	pending := a.pendingMsgs
+	a.pendingMsgs = nil
+	a.reconnecting = false
+	a.reconnectMu.Unlock()
+
+	for _, msg := range pending {
+		if err := a.post(ctx, "/send", msg); err != nil {
+			slog.Warn("acp.reconnect.flush.failed", "message_type", msg.Type, "err", err)
 		}
 	}
 }

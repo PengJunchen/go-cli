@@ -66,7 +66,7 @@ func TestE2EMixedStreamingAndStatic(t *testing.T) {
 // content flowing through the full app.
 func TestE2EWithWidthWraps(t *testing.T) {
 	events := make(chan AgentEvent, 4)
-	events <- AgentEvent{ContentType: ContentTypeMarkdown, Content: "0123456789"}
+	events <- AgentEvent{ContentType: ContentTypeCode, Content: "0123456789"}
 	close(events)
 
 	app := NewBubbleteaApp(events, WithWidth(3))
@@ -81,13 +81,16 @@ func TestE2EThemeManagerDrivesRendering(t *testing.T) {
 	require.NoError(t, mgr.Set("light"))
 
 	events := make(chan AgentEvent, 4)
-	events <- AgentEvent{ContentType: ContentTypeMarkdown, Content: "accent"}
+	events <- AgentEvent{ContentType: ContentTypeMarkdown, Content: "[accent](http://x)"}
 	close(events)
 
 	app := NewBubbleteaApp(events, WithThemeManager(mgr))
 	require.NoError(t, app.Run(context.Background()))
-	// Light theme primary = blue (34).
-	require.Contains(t, app.View(), "\x1b[34m")
+	// Glamour renders the markdown link with its own light style (escape sequences
+	// and the display text "accent"). The theme's primary color is no longer
+	// applied directly; glamour owns the color palette.
+	require.Contains(t, app.View(), "\x1b[", "glamour should style markdown with escape sequences")
+	require.Contains(t, stripEscape(app.View()), "accent")
 }
 
 // TestE2ERegistryCannedRenderer verifies a registered custom renderer is used

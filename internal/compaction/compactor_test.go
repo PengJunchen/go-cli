@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mock"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 	"github.com/pengjunchen/go-cli/internal/verify"
@@ -39,6 +40,33 @@ func assertSpanEventually(t testing.TB, exp *mock.MockTraceExporter, name string
 		time.Sleep(5 * time.Millisecond)
 	}
 	t.Fatalf("expected span %q not found", name)
+}
+
+// findSpanEventually waits (briefly) for an asynchronously exported span with
+// the given name and returns it, so callers can assert on its attributes.
+func findSpanEventually(t testing.TB, exp *mock.MockTraceExporter, name string) tracing.SpanData {
+	t.Helper()
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		for _, s := range exp.Spans() {
+			if s.Name == name {
+				return s
+			}
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	t.Fatalf("expected span %q not found", name)
+	return tracing.SpanData{}
+}
+
+// spanAttributeKeys returns the set of attribute keys on a span for quick
+// containment checks in tests.
+func spanAttributeKeys(s tracing.SpanData) map[string]bool {
+	keys := make(map[string]bool, len(s.Attributes))
+	for _, a := range s.Attributes {
+		keys[a.Key] = true
+	}
+	return keys
 }
 
 // tracedEstimator is a convenience for tests that need a real estimator.
@@ -90,4 +118,39 @@ func (erroringEstimator) Estimate(_ string) (int, error) {
 func TestErrRequiresTruncating(t *testing.T) {
 	assert.Error(t, ErrRequiresTruncating)
 	assert.Contains(t, ErrRequiresTruncating.Error(), "truncating")
+}
+
+// TestTurnItemJSONRoundTrip_NewFieldsOmitEmpty verifies that the new
+// ContentBlocks, ToolCalls, and ToolCallID fields are omitted from JSON when
+// empty, and that a round-trip with populated values preserves them.
+func TestTurnItemJSONRoundTrip_NewFieldsOmitEmpty(t *testing.T) {
+	// Empty fields should not appear in JSON.
+	empty := TurnItem{ID: "t1", Role: RoleUser, Content: "hi"}
+	data, err := json.Marshal(empty)
+	require.NoError(t, err)
+	assert.NotContains(t, string(data), "content_blocks")
+	assert.NotContains(t, string(data), "tool_calls")
+	assert.NotContains(t, string(data), "tool_call_id")
+
+	// Populated fields should survive a round-trip.
+	populated := TurnItem{
+		ID:      "t2",
+		Role:    RoleAssistant,
+		Content: "calling tool",
+		ContentBlocks: []llm.ContentBlock{
+			{Type: "text", Text: "hello"},
+		},
+		ToolCalls: []llm.ToolCall{
+			{ID: "call-1", Name: "read", Args: map[string]any{"path": "/tmp"}},
+		},
+		ToolCallID: "call-1",
+	}
+	data, err = json.Marshal(populated)
+	require.NoError(t, err)
+
+	var out TurnItem
+	require.NoError(t, json.Unmarshal(data, &out))
+	assert.Equal(t, populated.ContentBlocks, out.ContentBlocks)
+	assert.Equal(t, populated.ToolCalls, out.ToolCalls)
+	assert.Equal(t, populated.ToolCallID, out.ToolCallID)
 }

@@ -41,12 +41,35 @@ type Usage struct {
 
 // Message is a single message in a conversation.
 type Message struct {
-	Role       Role       `json:"role"`
-	Content    string     `json:"content"`
-	ToolCalls  []ToolCall `json:"tool_calls,omitempty"`
-	ToolCallID string     `json:"tool_call_id,omitempty"`
-	Name       string     `json:"name,omitempty"`
-	Usage      *Usage     `json:"usage,omitempty"`
+	Role    Role   `json:"role"`
+	Content string `json:"content"`
+	// ContentBlocks holds typed content parts for multimodal messages
+	// (text + images). When non-nil, encoders use ContentBlocks instead of
+	// Content. When nil, Content is used as before (backward compatible).
+	ContentBlocks []ContentBlock `json:"content_blocks,omitempty"`
+	ToolCalls     []ToolCall     `json:"tool_calls,omitempty"`
+	ToolCallID    string         `json:"tool_call_id,omitempty"`
+	Name          string         `json:"name,omitempty"`
+	Usage         *Usage         `json:"usage,omitempty"`
+	// FinishReason reports why the model stopped generating:
+	// stop|length|tool_calls|content_filter. When "length", the output was
+	// truncated due to max_tokens and the caller may request a continuation.
+	FinishReason string `json:"finish_reason,omitempty"`
+}
+
+// ImageURL represents an image specified by URL or base64 data URI.
+type ImageURL struct {
+	URL    string `json:"url"`
+	Detail string `json:"detail,omitempty"` // high|low|auto (OpenAI)
+}
+
+// ContentBlock is a typed content part within a multimodal message.
+// When Message.ContentBlocks is non-nil, encoders use it instead of
+// the plain Content string.
+type ContentBlock struct {
+	Type     string    `json:"type"`                // "text" | "image_url"
+	Text     string    `json:"text,omitempty"`      // when Type == "text"
+	ImageURL *ImageURL `json:"image_url,omitempty"` // when Type == "image_url"
 }
 
 // MessageChunk is a single incremental chunk emitted by streaming.
@@ -62,12 +85,54 @@ type MessageChunk struct {
 	// ToolCalls holds complete tool calls, populated only on the Final chunk
 	// after per-call argument fragments have been merged.
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+
+	// FinishReason, populated on the Final chunk, reports why the model
+	// stopped generating (stop|length|tool_calls|content_filter).
+	FinishReason string `json:"finish_reason,omitempty"`
+
+	// Usage, populated on the Final chunk, reports the token consumption
+	// for the generation as reported by the API. When the provider does not
+	// stream usage, it remains nil and callers fall back to estimation.
+	Usage *Usage `json:"usage,omitempty"`
+
+	// Error carries an error detected by middleware (e.g. loop detection)
+	// so it can be propagated to the caller through the chunk stream. It is
+	// never JSON-serialized. When non-nil, the caller should stop consuming
+	// the stream and return the error.
+	Error error `json:"-"`
 }
 
 // ModelInfo describes a model exposed by a provider.
 type ModelInfo struct {
-	Name          string `json:"name"`
-	ContextWindow int    `json:"context_window"`
+	Name            string  `json:"name"`
+	ContextWindow   int     `json:"context_window"`
+	MaxOutputTokens int     `json:"max_output_tokens,omitempty"`
+	InputPrice      float64 `json:"input_price,omitempty"`
+	OutputPrice     float64 `json:"output_price,omitempty"`
+	Modality        string  `json:"modality,omitempty"`
+	APIBase         string  `json:"api_base,omitempty"`
+	Description     string  `json:"description,omitempty"`
+	// Reasoning reports whether the model supports extended reasoning
+	// (chain-of-thought / thinking) tokens.
+	Reasoning bool `json:"reasoning"`
+	// ToolCall reports whether the model supports function/tool calling.
+	ToolCall bool `json:"tool_call"`
+	// StructuredOutput reports whether the model supports structured/JSON
+	// output mode.
+	StructuredOutput bool `json:"structured_output"`
+	// CacheReadPrice is the per-million-token price for reading cached
+	// prompt tokens, sourced from the external registry.
+	CacheReadPrice float64 `json:"cache_read_price,omitempty"`
+	// CacheWritePrice is the per-million-token price for writing prompt
+	// tokens to the cache, sourced from the external registry.
+	CacheWritePrice float64 `json:"cache_write_price,omitempty"`
+	// InputTokenLimit is the maximum number of input tokens the model
+	// accepts, sourced from the external registry.
+	InputTokenLimit int `json:"input_token_limit,omitempty"`
+	// Knowledge is the model's knowledge cutoff date (e.g. "2024-04").
+	Knowledge string `json:"knowledge,omitempty"`
+	// ReleaseDate is the model's release date (e.g. "2024-05-13").
+	ReleaseDate string `json:"release_date,omitempty"`
 }
 
 // ModelConfig configures how a provider should build a chat model.
@@ -97,6 +162,9 @@ type GenerationOptions struct {
 	MaxTokens   *int
 	StopStrings []string
 	Tools       []ToolDefinition
+	// Thinking carries the reasoning-depth configuration for this call.
+	// When nil, no thinking parameters are injected.
+	Thinking *ThinkingConfig
 }
 
 // Option configures a generation call.
@@ -132,6 +200,17 @@ type BaseChatModel interface {
 	// Stream produces the conversation response as a chunk channel. The
 	// channel must eventually be closed by the implementation.
 	Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error)
+}
+
+// ModelSelector routes an LLM call to the appropriate model based on the
+// given TaskType. Implementations typically hold a primary model for full chat
+// turns and a smaller, cheaper model for lightweight tasks (summaries, title
+// generation, extraction).
+type ModelSelector interface {
+	// SelectModel returns the BaseChatModel to use for the given taskType.
+	// When no small model is configured, implementations return the primary
+	// model for all task types.
+	SelectModel(taskType TaskType) BaseChatModel
 }
 
 // ModelProvider is the contract a provider registry satisfies. It can build

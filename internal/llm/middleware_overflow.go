@@ -2,10 +2,16 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
+)
+
+const (
+	finishReasonLength = "length"
+	maxContinuations   = 3
 )
 
 // OverflowRecoveryMiddleware detects context overflow errors from the model
@@ -84,6 +90,21 @@ func (m *overflowRecoveryModel) Generate(ctx context.Context, msgs []Message, op
 	for attempt := 0; attempt <= m.mw.maxRetries; attempt++ {
 		result, err := m.inner.Generate(ctx, currentMsgs, opts...)
 		if err == nil {
+			// Successful response: if the output was truncated by
+			// max_tokens (FinishReason == "length"), automatically
+			// request continuation(s) to retrieve the remaining content.
+			if result != nil && result.FinishReason == finishReasonLength {
+				contResult, contErr := m.continueGeneration(ctx, currentMsgs, result, opts)
+				if contErr != nil {
+					m.mw.logger.Warn("middleware.overflow.continue_error",
+						"op", "middleware.overflow.continue_error",
+						"err", contErr,
+					)
+				}
+				if contResult != nil {
+					result = contResult
+				}
+			}
 			return result, nil
 		}
 
@@ -122,14 +143,87 @@ func (m *overflowRecoveryModel) Generate(ctx context.Context, msgs []Message, op
 	return nil, fmt.Errorf("overflow: unexpected state")
 }
 
-// Stream implements BaseChatModel.
+// Stream implements BaseChatModel. It forwards chunks from the inner model
+// in real-time via a goroutine, avoiding the latency of buffering the entire
+// stream before returning. Overflow detection still occurs at the
+// m.inner.Stream() call level: when the inner model returns an overflow
+// error, the middleware trims messages and retries. After a successful
+// stream, if FinishReason is "length", continuation is requested via Generate
+// and the extra content is sent as additional chunks.
 func (m *overflowRecoveryModel) Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
 	currentMsgs := msgs
 
 	for attempt := 0; attempt <= m.mw.maxRetries; attempt++ {
 		ch, err := m.inner.Stream(ctx, currentMsgs, opts...)
 		if err == nil {
-			return ch, nil
+			// Success: forward chunks in real-time via a goroutine.
+			outCh := make(chan MessageChunk, 64)
+			go func() {
+				defer close(outCh)
+				var contentBuf strings.Builder
+				var toolCalls []ToolCall
+				var finishReason string
+				gotChunk := false
+
+				for chunk := range ch {
+					gotChunk = true
+					select {
+					case outCh <- chunk:
+					case <-ctx.Done():
+						return
+					}
+					if chunk.Content != "" {
+						contentBuf.WriteString(chunk.Content)
+					}
+					if chunk.Final {
+						if len(chunk.ToolCalls) > 0 {
+							toolCalls = chunk.ToolCalls
+						}
+						if chunk.FinishReason != "" {
+							finishReason = chunk.FinishReason
+						}
+					}
+				}
+
+				// Post-hoc continuation for length truncation.
+				if gotChunk && finishReason == finishReasonLength && ctx.Err() == nil {
+					result := &Message{
+						Role:         RoleAssistant,
+						Content:      contentBuf.String(),
+						ToolCalls:    toolCalls,
+						FinishReason: finishReason,
+					}
+					origLen := len(result.Content)
+					contResult, contErr := m.continueGeneration(ctx, currentMsgs, result, opts)
+					if contErr != nil {
+						m.mw.logger.Warn("middleware.overflow.stream_continue_error",
+							"op", "middleware.overflow.stream_continue_error",
+							"err", contErr,
+						)
+					}
+					if contResult != nil && len(contResult.Content) > origLen {
+						extra := contResult.Content[origLen:]
+						if extra != "" {
+							select {
+							case outCh <- MessageChunk{Role: RoleAssistant, Content: extra}:
+							case <-ctx.Done():
+								return
+							}
+						}
+						select {
+						case outCh <- MessageChunk{
+							Role:         RoleAssistant,
+							Final:        true,
+							FinishReason: contResult.FinishReason,
+							ToolCalls:    contResult.ToolCalls,
+						}:
+						case <-ctx.Done():
+							return
+						}
+					}
+				}
+			}()
+			return outCh, nil
 		}
 
 		if !isOverflowError(err) {
@@ -165,26 +259,70 @@ func (m *overflowRecoveryModel) Stream(ctx context.Context, msgs []Message, opts
 	return nil, fmt.Errorf("overflow: unexpected state")
 }
 
+// continueGeneration appends the partial assistant response to the
+// conversation and re-requests generation to obtain the remaining content.
+// Up to maxContinuations attempts are made. Results are merged into the
+// original response.
+func (m *overflowRecoveryModel) continueGeneration(ctx context.Context, msgs []Message, result *Message, opts []Option) (*Message, error) {
+	for attempt := 0; attempt < maxContinuations && result.FinishReason == finishReasonLength; attempt++ {
+		// Build continuation messages: original + partial assistant response.
+		contMsgs := make([]Message, len(msgs), len(msgs)+1)
+		copy(contMsgs, msgs)
+		contMsgs = append(contMsgs, Message{
+			Role:         RoleAssistant,
+			Content:      result.Content,
+			ToolCalls:    result.ToolCalls,
+			FinishReason: result.FinishReason,
+		})
+
+		m.mw.logger.Debug("middleware.overflow.continue",
+			"op", "middleware.overflow.continue",
+			"attempt", attempt+1,
+		)
+
+		contResp, err := m.inner.Generate(ctx, contMsgs, opts...)
+		if err != nil || contResp == nil {
+			m.mw.logger.Warn("middleware.overflow.continue_failed",
+				"op", "middleware.overflow.continue_failed",
+				"attempt", attempt+1,
+				"err", err,
+			)
+			break
+		}
+
+		// Merge continuation content.
+		result.Content += contResp.Content
+		result.FinishReason = contResp.FinishReason
+		if len(contResp.ToolCalls) > 0 {
+			result.ToolCalls = append(result.ToolCalls, contResp.ToolCalls...)
+		}
+	}
+
+	if result.FinishReason == finishReasonLength {
+		m.mw.logger.Warn("middleware.overflow.continue_exhausted",
+			"op", "middleware.overflow.continue_exhausted",
+			"max_continuations", maxContinuations,
+		)
+	}
+
+	return result, nil
+}
+
 // isOverflowError checks whether an error indicates a context length
-// overflow from the model provider.
+// overflow from the model provider. It first tries a structured ProviderError
+// type assertion (errors.As traverses the Unwrap chain). For non-ProviderError
+// errors it falls back to keyword matching for backward compatibility.
 func isOverflowError(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := strings.ToLower(err.Error())
-	indicators := []string{
-		"context_length_exceeded",
-		"maximum context length",
-		"context window",
-		"token limit exceeded",
-		"context_length",
+	// Prefer structured ProviderError (errors.As traverses the Unwrap chain).
+	var pe *ProviderError
+	if errors.As(err, &pe) {
+		return pe.ErrorType == ErrTypeOverflow
 	}
-	for _, ind := range indicators {
-		if strings.Contains(msg, ind) {
-			return true
-		}
-	}
-	return false
+	// Fallback: keyword matching for non-ProviderError errors (backward compat).
+	return containsOverflowIndicator(err.Error())
 }
 
 // trimMessages removes the oldest fraction of messages from the slice.

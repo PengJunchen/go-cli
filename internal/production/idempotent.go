@@ -87,6 +87,7 @@ func (c *FIFOIdempotentCache) Set(_ context.Context, key string, value any) erro
 	if _, exists := c.values[key]; !exists {
 		if len(c.order) >= c.maxSize {
 			oldest := c.order[0]
+			c.order[0] = "" // drop reference so the evicted key can be GC'd
 			c.order = c.order[1:]
 			delete(c.values, oldest)
 		}

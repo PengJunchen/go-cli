@@ -21,9 +21,10 @@ var ErrToolNotFound = errors.New("tools: tool not found")
 // registered definition (last registration wins), and the new definition is
 // appended to the registration order returned by List.
 type DefaultToolRegistry struct {
-	mu    sync.RWMutex
-	tools map[string]ToolDefinition
-	order []string
+	mu      sync.RWMutex
+	tools   map[string]ToolDefinition
+	order   []string
+	version int // incremented on every Register call
 }
 
 var _ ToolRegistry = (*DefaultToolRegistry)(nil)
@@ -54,8 +55,20 @@ func (r *DefaultToolRegistry) Register(_ context.Context, def ToolDefinition) er
 		r.order = append(r.order, name)
 	}
 	r.tools[name] = def
+	r.version++
 
 	return nil
+}
+
+// Version returns a monotonically increasing counter that changes every time
+// a tool is registered. Callers can use this to detect whether the registry
+// has changed since a previous snapshot and invalidate caches accordingly.
+// The value starts at 0 (before any registration) and increments by 1 for
+// each Register call.
+func (r *DefaultToolRegistry) Version() int {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.version
 }
 
 // Get returns the tool registered under name, or ErrToolNotFound.
