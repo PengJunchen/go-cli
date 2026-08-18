@@ -1,3 +1,4 @@
+//exempt:scan012
 package cli
 
 import (

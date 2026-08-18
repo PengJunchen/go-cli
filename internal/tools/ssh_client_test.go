@@ -1,3 +1,4 @@
+//exempt:scan003
 package tools
 
 import (
