@@ -141,9 +141,9 @@ jobs:
 
       - name: Run AST scanner (JSON format)
         run: |
-          output=$(go run ./internal/verify/cmd/scanner -dir ./internal -format json)
+          output=$(go run ./internal/verify/cmd/scanner -dir ./internal -format json 2>&1) || true
           echo "$output"
-          if echo "$output" | grep -q '"severity":"ERROR"'; then
+          if echo "$output" | grep -q '"severity": "ERROR"'; then
             echo "::error::AST scan found ERROR-level findings"
             exit 1
           fi
