@@ -145,7 +145,17 @@ jobs:
           echo "$output"
           # Filter out pre-existing findings: SCAN-012 (interface design decisions)
           # and SCAN-003 findings in test files (test fixtures use fake secrets).
-          errors=$(echo "$output" | grep '"severity": "ERROR"' | grep -v 'SCAN-012' | grep -v '_test.go' || true)
+          errors=$(echo "$output" | python3 -c "
+          import sys, json
+          data = json.loads(sys.stdin.read())
+          for f in data.get('findings', []):
+              if f['severity'] == 'ERROR':
+                  if f['rule_id'] == 'SCAN-012':
+                      continue
+                  if f['rule_id'] == 'SCAN-003' and '_test.go' in f['file']:
+                      continue
+                  print(f\"{f['rule_id']} {f['file']}:{f['line']} — {f['message']}\")
+          " || true)
           if [ -n "$errors" ]; then
             echo "::error::AST scan found ERROR-level findings in production code"
             echo "$errors"
