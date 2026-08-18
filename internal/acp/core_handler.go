@@ -198,7 +198,7 @@ func (h *CoreHandler) ensureBridge() {
 		}
 		d.SetEventForwarder(func(taskID string, ev core.AgentEvent) {
 			if val, ok := h.sessions.Load(taskID); ok {
-				val.(*Session).PublishEvent(ev)
+				val.(*Session).PublishEvent(ev) //nolint:errcheck // best-effort event forwarding
 			}
 			if h.eventBus != nil {
 				h.eventBus.Publish(ev)

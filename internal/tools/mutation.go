@@ -257,7 +257,7 @@ func (q *DefaultFileMutationQueue) startWorker(input chan queuedMutation) {
 // applySafe runs the configured handler inside a recover block so a panic
 // is converted into an error result instead of killing the worker goroutine.
 // On panic the returned ToolResult is nil. It honors the caller's context: if
-// the context is already cancelled the mutation is not applied and the context
+// the context is already canceled the mutation is not applied and the context
 // error is returned.
 func (q *DefaultFileMutationQueue) applySafe(ctx context.Context, m FileMutation) (tr *ToolResult, err error) {
 	if cerr := ctx.Err(); cerr != nil {

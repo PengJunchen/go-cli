@@ -486,7 +486,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 	// emitCanceledToolResults synthesizes error tool_result messages for any
 	// tool calls in the last assistant message that lack a matching
 	// tool_result, and emits corresponding events. This keeps the message
-	// history complete when the loop is cancelled mid-execution so
+	// history complete when the loop is canceled mid-execution so
 	// subsequent LLM requests don't reject the conversation.
 	emitCanceledToolResults := func(canceledErr error) {
 		var synthCalls []llm.ToolCall
@@ -599,7 +599,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 
 		if l.executionMode == ExecutionModeParallel && len(resp.ToolCalls) > 1 {
 			// Parallel mode: emit pre-tool-call events, then execute
-			// non-cancelled tools concurrently, matching results by
+			// non-canceled tools concurrently, matching results by
 			// ToolCallID (not positional index) so that out-of-order
 			// completion does not cause mismatched results.
 			var activeCalls []llm.ToolCall
@@ -611,13 +611,13 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 				}
 				sendEvent(AgentEvent{Kind: EventKindPreToolCall, Timestamp: time.Now(), PreToolCall: preEv})
 				if preEv.IsCancelled() {
-					logger.Info("core.loop.tool_cancelled", "tool", tc.Name, "id", tc.ID)
-					sendEvent(AgentEvent{Kind: "tool_cancelled", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID})
+					logger.Info("core.loop.tool_canceled", "tool", tc.Name, "id", tc.ID)
+					sendEvent(AgentEvent{Kind: "tool_canceled", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID})
 					messages = append(messages, llm.Message{
 						Role:       llm.RoleTool,
 						ToolCallID: tc.ID,
 						Name:       tc.Name,
-						Content:    "Tool call cancelled by interceptor",
+						Content:    "Tool call canceled by interceptor",
 					})
 					continue
 				}
@@ -673,13 +673,13 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 				}
 				sendEvent(AgentEvent{Kind: EventKindPreToolCall, Timestamp: time.Now(), PreToolCall: preEv})
 				if preEv.IsCancelled() {
-					logger.Info("core.loop.tool_cancelled", "tool", tc.Name, "id", tc.ID)
-					sendEvent(AgentEvent{Kind: "tool_cancelled", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID})
+					logger.Info("core.loop.tool_canceled", "tool", tc.Name, "id", tc.ID)
+					sendEvent(AgentEvent{Kind: "tool_canceled", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID})
 					messages = append(messages, llm.Message{
 						Role:       llm.RoleTool,
 						ToolCallID: tc.ID,
 						Name:       tc.Name,
-						Content:    "Tool call cancelled by interceptor",
+						Content:    "Tool call canceled by interceptor",
 					})
 					continue
 				}
@@ -1139,6 +1139,8 @@ Rules:
 // systemPrompt returns the system instruction that tells the model its role
 // and encourages it to use tools when appropriate. When the tool registry is
 // nil or empty, a minimal prompt is returned.
+//
+//nolint:unused
 func systemPrompt(ctx context.Context, tr tools.ToolRegistry) string {
 	if tr == nil {
 		return systemPromptFromDefs(nil)

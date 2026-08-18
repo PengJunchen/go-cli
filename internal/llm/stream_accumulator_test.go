@@ -272,7 +272,7 @@ func runStreamAccumulator(t *testing.T, eventData ...string) ([]ToolCall, string
 
 // TestStreamAccumulator_WithAPIIDsUsesRealID verifies that when the API
 // returns a tool call ID in the stream delta, the accumulator preserves it
-// instead of synthesising a "call_%d" ID.
+// instead of synthesizing a "call_%d" ID.
 func TestStreamAccumulator_WithAPIIDsUsesRealID(t *testing.T) {
 	toolCalls, _, _ := runStreamAccumulator(t,
 		`{"choices":[{"delta":{"role":"assistant","tool_calls":[{"index":0,"id":"call_abc123","type":"function","function":{"name":"get_weather","arguments":""}}]}}]}`,

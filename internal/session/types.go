@@ -39,7 +39,7 @@ type SurfaceOp string
 
 const (
 	// SurfaceOpVisible marks an entry as included in the model context. This
-	// is the default behaviour when SurfaceOp is empty.
+	// is the default behavior when SurfaceOp is empty.
 	SurfaceOpVisible SurfaceOp = "visible"
 	// SurfaceOpCompacted marks an entry as replaced by a compaction summary.
 	// It is not included individually in the model context.

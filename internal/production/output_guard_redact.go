@@ -44,7 +44,7 @@ func NewRedactingOutputGuard(opts ...Option) *RedactingOutputGuard {
 // added after the first Check call are still applied on subsequent checks.
 // Invalid patterns and empty patterns are silently ignored — an empty pattern
 // matches at every position and would corrupt the output — to match the
-// behaviour of the other regex-based guards.
+// behavior of the other regex-based guards.
 func (g *RedactingOutputGuard) AddRedactPattern(pattern string) {
 	if pattern == "" {
 		return

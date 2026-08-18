@@ -11,7 +11,7 @@ import (
 // accumulateOpenAIStreamToolCalls processes SSE events from an OpenAI-compatible
 // stream, accumulating tool-call fragments and forwarding content chunks to ch.
 // It emits a role-only MessageChunk on the first content or tool-call delta
-// (matching streamClaude's message_start behaviour) so callers can render an
+// (matching streamClaude's message_start behavior) so callers can render an
 // assistant placeholder early. Returns the accumulated tool calls (nil when no
 // tool calls were seen), the finish reason from the stream, and the usage
 // reported by the API (nil when the stream did not include usage).
@@ -20,10 +20,10 @@ func accumulateOpenAIStreamToolCalls(ctx context.Context, events <-chan SSEEvent
 	var toolIDByIndex map[int]string
 	var toolArgsBuf []*strings.Builder
 	emittedRole := false
-	cancelled := false
+	canceled := false
 
 	for event := range events {
-		if cancelled {
+		if canceled {
 			continue
 		}
 		if event.Data == "[DONE]" {
@@ -61,7 +61,7 @@ func accumulateOpenAIStreamToolCalls(ctx context.Context, events <-chan SSEEvent
 			case ch <- MessageChunk{Role: RoleAssistant, Content: ""}:
 				emittedRole = true
 			case <-ctx.Done():
-				cancelled = true
+				canceled = true
 				continue
 			}
 		}
@@ -70,7 +70,7 @@ func accumulateOpenAIStreamToolCalls(ctx context.Context, events <-chan SSEEvent
 			select {
 			case ch <- MessageChunk{Role: RoleAssistant, Content: delta.Content}:
 			case <-ctx.Done():
-				cancelled = true
+				canceled = true
 				continue
 			}
 		}

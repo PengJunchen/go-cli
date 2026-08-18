@@ -10,7 +10,7 @@ import (
 )
 
 // CancelSynthesizer converts cancellation errors into system messages that can
-// be appended to the session log when a Turn is cancelled, ensuring the log has
+// be appended to the session log when a Turn is canceled, ensuring the log has
 // no gaps. The synthesized message explains the cancellation so the agent (and
 // the user) can see why the turn ended and continue from there.
 type CancelSynthesizer struct{}
@@ -23,10 +23,10 @@ func NewCancelSynthesizer() *CancelSynthesizer {
 // SynthesizeCancel creates a SynthesizedMessage with role "system" that
 // explains the cancellation represented by err. The content follows the form:
 //
-//	"The previous turn was cancelled due to: <reason>. The conversation continues from here."
+//	"The previous turn was canceled due to: <reason>. The conversation continues from here."
 //
 // where <reason> is:
-//   - "The operation was cancelled by the user." when err is context.Canceled,
+//   - "The operation was canceled by the user." when err is context.Canceled,
 //   - "The operation timed out." when err is context.DeadlineExceeded,
 //   - the error's text for any other non-nil error.
 //
@@ -37,7 +37,7 @@ func (s *CancelSynthesizer) SynthesizeCancel(_ context.Context, err error) Synth
 	case err == nil:
 		reason = "unknown"
 	case errors.Is(err, context.Canceled):
-		reason = "The operation was cancelled by the user."
+		reason = "The operation was canceled by the user."
 	case errors.Is(err, context.DeadlineExceeded):
 		reason = "The operation timed out."
 	default:
@@ -50,7 +50,7 @@ func (s *CancelSynthesizer) SynthesizeCancel(_ context.Context, err error) Synth
 	}
 
 	content := fmt.Sprintf(
-		"The previous turn was cancelled due to: %s. The conversation continues from here.",
+		"The previous turn was canceled due to: %s. The conversation continues from here.",
 		reason,
 	)
 
@@ -67,7 +67,7 @@ func (s *CancelSynthesizer) SynthesizeCancel(_ context.Context, err error) Synth
 // tool calls in the last assistant message that don't already have a
 // corresponding tool_result in messages. This keeps the message history
 // complete (every tool_call has a matching tool_result) when the loop is
-// cancelled mid-execution, preventing subsequent LLM requests from rejecting
+// canceled mid-execution, preventing subsequent LLM requests from rejecting
 // the conversation due to orphaned tool calls.
 //
 // It returns the updated messages slice and the list of tool calls for which

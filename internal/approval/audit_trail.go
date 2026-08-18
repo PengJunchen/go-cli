@@ -13,7 +13,7 @@ import (
 )
 
 // AuditEntry records a single approval classification decision for the
-// append-only audit trail. Each field is exported so the entry serialises to
+// append-only audit trail. Each field is exported so the entry serializes to
 // JSON with stable key names.
 type AuditEntry struct {
 	// Timestamp is when the classification decision was made (UTC).
@@ -66,7 +66,7 @@ func (a *AuditTrail) Record(entry AuditEntry) error {
 	if err != nil {
 		return fmt.Errorf("audit: open: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	data, err := json.Marshal(entry)
 	if err != nil {

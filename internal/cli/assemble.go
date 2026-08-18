@@ -17,6 +17,8 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/pengjunchen/go-cli/internal/acp"
 	"github.com/pengjunchen/go-cli/internal/approval"
 	"github.com/pengjunchen/go-cli/internal/compaction"
@@ -32,7 +34,6 @@ import (
 	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 	"github.com/pengjunchen/go-cli/internal/tui"
-	"golang.org/x/sync/errgroup"
 )
 
 // defaultMaxTokens is the default compaction token budget used when no
@@ -1433,7 +1434,7 @@ func (s *assembleState) assembleCompactor() error {
 	// Inject the quality evaluator into the UnifiedCompactor. The option is a
 	// closure over *UnifiedCompactor, so it can be applied to an existing
 	// instance. For non-unified strategies the assertion fails and evaluation
-	// is skipped, which is the desired behaviour.
+	// is skipped, which is the desired behavior.
 	if uc, ok := compactor.(*compaction.UnifiedCompactor); ok {
 		compaction.WithQualityEvaluator(qualityEvaluator)(uc)
 	}

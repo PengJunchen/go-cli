@@ -212,6 +212,7 @@ func TestET_Phase48_BashSandbox_SubstitutionBypass(t *testing.T) {
 // TestET_Phase48_Onboarding_YAMLEscaping verifies that the onboarding wizard
 // single-quote-escapes API keys containing YAML special characters.
 func TestET_Phase48_Onboarding_YAMLEscaping(t *testing.T) {
+	t.Skip("API key is now stored in auth.json (JSON), not config.yaml (YAML)")
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	tmpDir := t.TempDir()
@@ -624,7 +625,7 @@ func TestET_Phase48_ConfigValidator_HTTPSAndTraversal(t *testing.T) {
 
 	v := config.NewDefaultValidator()
 
-	// Non-HTTPS provider base URL.
+	// Non-HTTPS provider base URL is allowed (downgraded to warning).
 	cfg := config.Config{
 		Compaction: config.CompactionConfig{Strategy: "micro_first", MaxTokens: 128000},
 		Provider: config.ProviderConfig{
@@ -632,8 +633,7 @@ func TestET_Phase48_ConfigValidator_HTTPSAndTraversal(t *testing.T) {
 		},
 	}
 	err := v.Validate(cfg)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "HTTPS", "should reject non-HTTPS base URL")
+	require.NoError(t, err, "non-HTTPS base URL should be a warning, not an error")
 
 	// Path traversal in remote host key_path.
 	// Use a relative path that retains ".." after filepath.Clean.

@@ -315,7 +315,7 @@ func (e *StdoutTraceExporter) ExportSpan(_ context.Context, span TraceSpan) erro
 		return fmt.Errorf("marshal span: %w", err)
 	}
 
-	_, err = fmt.Fprintf(e.w, "[TRACE] %s\n", dataBytes)
+	_, err = fmt.Fprintf(e.w, "[TRACE] %s\n", dataBytes) //nolint:errcheck
 	return err
 }
 

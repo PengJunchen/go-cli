@@ -466,7 +466,7 @@ func (a *HTTPClientAdapter) doOAuthFlow(ctx context.Context, _ string) error {
 	if err != nil {
 		return fmt.Errorf("mcp: start callback listener: %w", err)
 	}
-	port := listener.Addr().(*net.TCPAddr).Port
+	port := listener.Addr().(*net.TCPAddr).Port //nolint:errcheck // listener is always *net.TCPAddr
 	redirectURL := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
 
 	codeCh := make(chan string, 1)
@@ -474,19 +474,19 @@ func (a *HTTPClientAdapter) doOAuthFlow(ctx context.Context, _ string) error {
 		code := r.URL.Query().Get("code")
 		callbackState := r.URL.Query().Get("state")
 		if code == "" {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte("Missing authorization code."))
+			w.WriteHeader(http.StatusBadRequest)                  //nolint:errcheck
+			_, _ = w.Write([]byte("Missing authorization code.")) //nolint:errcheck
 			return
 		}
 		// Verify the CSRF state parameter to prevent cross-site request
 		// forgery attacks on the authorization code flow.
 		if callbackState == "" || callbackState != state {
-			w.WriteHeader(http.StatusBadRequest)
-			_, _ = w.Write([]byte("Invalid state parameter."))
+			w.WriteHeader(http.StatusBadRequest)               //nolint:errcheck
+			_, _ = w.Write([]byte("Invalid state parameter.")) //nolint:errcheck
 			return
 		}
-		w.WriteHeader(http.StatusOK)
-		_, _ = w.Write([]byte("Authorization complete. You may close this window."))
+		w.WriteHeader(http.StatusOK)                                                 //nolint:errcheck
+		_, _ = w.Write([]byte("Authorization complete. You may close this window.")) //nolint:errcheck
 		select {
 		case codeCh <- code:
 		default:
@@ -511,7 +511,7 @@ func (a *HTTPClientAdapter) doOAuthFlow(ctx context.Context, _ string) error {
 	authURL.RawQuery = q.Encode()
 
 	slog.Info("mcp.oauth.authorize", "url", authURL.String(), "server", a.cfg.Name)
-	fmt.Fprintf(os.Stderr, "\nMCP server requires authentication. Open this URL to authorize:\n  %s\n\n", authURL.String())
+	fmt.Fprintf(os.Stderr, "\nMCP server requires authentication. Open this URL to authorize:\n  %s\n\n", authURL.String()) //nolint:errcheck
 
 	// Wait for the callback.
 	select {

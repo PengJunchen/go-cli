@@ -35,7 +35,7 @@ func (s *SSEWriter) WriteEvent(eventType string, data interface{}) error {
 	if err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", eventType, jsonBytes); err != nil {
+	if _, err := fmt.Fprintf(s.w, "event: %s\ndata: %s\n\n", eventType, jsonBytes); err != nil { //nolint:errcheck
 		return err
 	}
 	s.flusher.Flush()
@@ -51,7 +51,7 @@ func (s *SSEWriter) WriteEventWithID(id uint64, eventType string, data interface
 	if err != nil {
 		return err
 	}
-	if _, err := fmt.Fprintf(s.w, "id: %d\nevent: %s\ndata: %s\n\n", id, eventType, jsonBytes); err != nil {
+	if _, err := fmt.Fprintf(s.w, "id: %d\nevent: %s\ndata: %s\n\n", id, eventType, jsonBytes); err != nil { //nolint:errcheck
 		return err
 	}
 	s.flusher.Flush()

@@ -81,7 +81,7 @@ func containsOverflowIndicator(msg string) bool {
 //   - other → ErrTypeServer (default, retryable)
 func newProviderError(statusCode int, provider, payload string) *ProviderError {
 	msg := strings.TrimSpace(payload)
-	errType := ErrTypeServer
+	errType := ErrTypeServer //nolint:ineffassign
 	switch {
 	case statusCode == 429:
 		errType = ErrTypeRateLimit

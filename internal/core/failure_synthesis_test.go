@@ -166,12 +166,12 @@ func TestEventsToTurnMessages_ToolCancelled(t *testing.T) {
 	events := []AgentEvent{
 		{Kind: "message", Content: "", ToolCalls: []llm.ToolCall{{ID: "tc1", Name: "bash"}}, Timestamp: time.Now()},
 		{Kind: "tool_call", Content: "bash", ToolCallID: "tc1", Timestamp: time.Now()},
-		{Kind: "tool_cancelled", Content: "bash", ToolCallID: "tc1", Timestamp: time.Now()},
+		{Kind: "tool_canceled", Content: "bash", ToolCallID: "tc1", Timestamp: time.Now()},
 	}
 	msgs := eventsToTurnMessages(events)
 	require.Len(t, msgs, 2)
 	assert.Equal(t, "tool", msgs[1].Role)
-	assert.Contains(t, msgs[1].Content, "cancelled")
+	assert.Contains(t, msgs[1].Content, "canceled")
 	assert.Equal(t, "bash", msgs[1].ToolName)
 }
 

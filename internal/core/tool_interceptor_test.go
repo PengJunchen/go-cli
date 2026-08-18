@@ -62,8 +62,8 @@ func TestToolInterceptor_CancelsBeforeExecution(t *testing.T) {
 	// Tool must NOT have been executed.
 	assert.False(t, tool.executed.Load(), "tool should not execute when interceptor cancels")
 
-	// A tool_cancelled event must be present.
-	cancelled := findEvents(events, "tool_cancelled")
+	// A tool_canceled event must be present.
+	cancelled := findEvents(events, "tool_canceled")
 	require.Len(t, cancelled, 1)
 	assert.Equal(t, "danger", cancelled[0])
 
@@ -138,7 +138,7 @@ func TestToolInterceptor_WorksWithoutEventStream(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.False(t, tool.executed.Load(), "tool should not execute even without event stream")
-	cancelled := findEvents(events, "tool_cancelled")
+	cancelled := findEvents(events, "tool_canceled")
 	require.Len(t, cancelled, 1)
 }
 
@@ -209,7 +209,7 @@ func TestLoopAgent_SetToolInterceptor(t *testing.T) {
 	require.NoError(t, err)
 
 	assert.False(t, tool.executed.Load(), "tool should not execute")
-	require.Len(t, findEvents(events, "tool_cancelled"), 1)
+	require.Len(t, findEvents(events, "tool_canceled"), 1)
 }
 
 // Verify interceptors run exactly once per event (idempotency).

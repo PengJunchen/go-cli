@@ -230,7 +230,7 @@ var _ ToolRegistry = (*DeferredToolRegistryAdapter)(nil)
 // ToolRegistry and DeferredRegistry.
 func NewDeferredToolRegistryAdapter(underlying ToolRegistry) *DeferredToolRegistryAdapter {
 	dtr := NewDefaultDeferredToolRegistry(underlying)
-	return &DeferredToolRegistryAdapter{DefaultDeferredToolRegistry: dtr.(*DefaultDeferredToolRegistry)}
+	return &DeferredToolRegistryAdapter{DefaultDeferredToolRegistry: dtr.(*DefaultDeferredToolRegistry)} //nolint:errcheck // dtr is always *DefaultDeferredToolRegistry
 }
 
 // Register delegates to the underlying registry (eager registration).

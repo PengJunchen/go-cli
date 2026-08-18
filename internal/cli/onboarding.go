@@ -223,12 +223,12 @@ func isOnboardingDisabled() bool {
 
 // printWelcome writes the wizard welcome banner to out.
 func printWelcome(out io.Writer) {
-	fmt.Fprintln(out, "")
-	fmt.Fprintln(out, "=== Welcome to go-cli! Let's get set up. ===")
-	fmt.Fprintln(out, "")
-	fmt.Fprintln(out, "This quick wizard will configure your API key,")
-	fmt.Fprintln(out, "default model, and theme preference.")
-	fmt.Fprintln(out, "")
+	fmt.Fprintln(out, "")                                               //nolint:errcheck
+	fmt.Fprintln(out, "=== Welcome to go-cli! Let's get set up. ===")   //nolint:errcheck
+	fmt.Fprintln(out, "")                                               //nolint:errcheck
+	fmt.Fprintln(out, "This quick wizard will configure your API key,") //nolint:errcheck
+	fmt.Fprintln(out, "default model, and theme preference.")           //nolint:errcheck
+	fmt.Fprintln(out, "")                                               //nolint:errcheck
 }
 
 // promptAPIKey prompts the user for their API key and stores it in cfg. It
@@ -237,17 +237,17 @@ func printWelcome(out io.Writer) {
 // otherwise it falls back to a plain ReadString so piped/CI input still works.
 func promptAPIKey(cfg *config.Config, reader *bufio.Reader, out io.Writer) error {
 	for {
-		fmt.Fprintln(out, "Step 1: API Key")
-		fmt.Fprintln(out, "  Enter your LLM provider API key (e.g. sk-...).")
-		fmt.Fprint(out, "  API Key: ")
+		fmt.Fprintln(out, "Step 1: API Key")                                  //nolint:errcheck
+		fmt.Fprintln(out, "  Enter your LLM provider API key (e.g. sk-...).") //nolint:errcheck
+		fmt.Fprint(out, "  API Key: ")                                        //nolint:errcheck
 		line, err := readPasswordMasked(reader, out)
 		key := strings.TrimSpace(line)
 		if key != "" {
 			if cfg != nil {
 				cfg.Provider.APIKey = key
 			}
-			fmt.Fprintln(out, "  ✓ API key saved.")
-			fmt.Fprintln(out, "")
+			fmt.Fprintln(out, "  ✓ API key saved.") //nolint:errcheck
+			fmt.Fprintln(out, "")                   //nolint:errcheck
 			return nil
 		}
 		if err == io.EOF {
@@ -256,8 +256,8 @@ func promptAPIKey(cfg *config.Config, reader *bufio.Reader, out io.Writer) error
 		if err != nil {
 			return fmt.Errorf("onboarding: read API key: %w", err)
 		}
-		fmt.Fprintln(out, "  ✗ API key cannot be empty. Please try again.")
-		fmt.Fprintln(out, "")
+		fmt.Fprintln(out, "  ✗ API key cannot be empty. Please try again.") //nolint:errcheck
+		fmt.Fprintln(out, "")                                               //nolint:errcheck
 	}
 }
 
@@ -268,7 +268,7 @@ func promptAPIKey(cfg *config.Config, reader *bufio.Reader, out io.Writer) error
 func readPasswordMasked(reader *bufio.Reader, out io.Writer) (string, error) {
 	if stdinIsTTYFunc() {
 		b, err := xterm.ReadPassword(int(os.Stdin.Fd()))
-		fmt.Fprintln(out)
+		fmt.Fprintln(out) //nolint:errcheck
 		return string(b), err
 	}
 	return reader.ReadString('\n')
@@ -280,7 +280,7 @@ func readPasswordMasked(reader *bufio.Reader, out io.Writer) (string, error) {
 // back to the hardcoded onboardingModelChoices. An invalid or empty choice
 // falls back to the first model in the list.
 func promptModel(cfg *config.Config, reader *bufio.Reader, out io.Writer, registry llm.ModelRegistry) error {
-	fmt.Fprintln(out, "Step 2: Model Selection")
+	fmt.Fprintln(out, "Step 2: Model Selection") //nolint:errcheck
 
 	choices := onboardingModelProvider(registry)
 	if len(choices) == 0 {
@@ -288,9 +288,9 @@ func promptModel(cfg *config.Config, reader *bufio.Reader, out io.Writer, regist
 	}
 
 	for i, m := range choices {
-		fmt.Fprintf(out, "  %d. %-22s %s\n", i+1, m.Name, m.Desc)
+		fmt.Fprintf(out, "  %d. %-22s %s\n", i+1, m.Name, m.Desc) //nolint:errcheck
 	}
-	fmt.Fprintf(out, "  Choose a model [1-%d] (default: 1): ", len(choices))
+	fmt.Fprintf(out, "  Choose a model [1-%d] (default: 1): ", len(choices)) //nolint:errcheck
 
 	line, err := reader.ReadString('\n')
 	if err != nil && err != io.EOF {
@@ -302,7 +302,7 @@ func promptModel(cfg *config.Config, reader *bufio.Reader, out io.Writer, regist
 	if line != "" {
 		n, parseErr := strconv.Atoi(line)
 		if parseErr != nil || n < 1 || n > len(choices) {
-			fmt.Fprintf(out, "  Invalid choice, using default: %s\n", choices[0].Name)
+			fmt.Fprintf(out, "  Invalid choice, using default: %s\n", choices[0].Name) //nolint:errcheck
 		} else {
 			idx = n - 1
 		}
@@ -317,19 +317,19 @@ func promptModel(cfg *config.Config, reader *bufio.Reader, out io.Writer, regist
 			cfg.Model.Name = chosen
 		}
 	}
-	fmt.Fprintf(out, "  ✓ Model set to: %s\n", chosen)
-	fmt.Fprintln(out, "")
+	fmt.Fprintf(out, "  ✓ Model set to: %s\n", chosen) //nolint:errcheck
+	fmt.Fprintln(out, "")                              //nolint:errcheck
 	return nil
 }
 
 // promptTheme lets the user pick a UI theme. An invalid or empty choice falls
 // back to the first theme in the list (dark).
 func promptTheme(cfg *config.Config, reader *bufio.Reader, out io.Writer) error {
-	fmt.Fprintln(out, "Step 3: Theme")
+	fmt.Fprintln(out, "Step 3: Theme") //nolint:errcheck
 	for i, th := range onboardingThemeChoices {
-		fmt.Fprintf(out, "  %d. %s\n", i+1, th)
+		fmt.Fprintf(out, "  %d. %s\n", i+1, th) //nolint:errcheck
 	}
-	fmt.Fprintf(out, "  Choose a theme [1-%d] (default: 1): ", len(onboardingThemeChoices))
+	fmt.Fprintf(out, "  Choose a theme [1-%d] (default: 1): ", len(onboardingThemeChoices)) //nolint:errcheck
 
 	line, err := reader.ReadString('\n')
 	if err != nil && err != io.EOF {
@@ -341,7 +341,7 @@ func promptTheme(cfg *config.Config, reader *bufio.Reader, out io.Writer) error 
 	if line != "" {
 		n, parseErr := strconv.Atoi(line)
 		if parseErr != nil || n < 1 || n > len(onboardingThemeChoices) {
-			fmt.Fprintf(out, "  Invalid choice, using default: %s\n", onboardingThemeChoices[0])
+			fmt.Fprintf(out, "  Invalid choice, using default: %s\n", onboardingThemeChoices[0]) //nolint:errcheck
 		} else {
 			idx = n - 1
 		}
@@ -351,8 +351,8 @@ func promptTheme(cfg *config.Config, reader *bufio.Reader, out io.Writer) error 
 	if cfg != nil {
 		cfg.TUI.Theme = chosen
 	}
-	fmt.Fprintf(out, "  ✓ Theme set to: %s\n", chosen)
-	fmt.Fprintln(out, "")
+	fmt.Fprintf(out, "  ✓ Theme set to: %s\n", chosen) //nolint:errcheck
+	fmt.Fprintln(out, "")                              //nolint:errcheck
 	return nil
 }
 
@@ -383,10 +383,10 @@ func saveOnboardingConfig(cfg *config.Config, out io.Writer) error {
 		}
 	}
 
-	fmt.Fprintf(out, "✓ Configuration saved to %s\n", path)
-	fmt.Fprintln(out, "")
-	fmt.Fprintln(out, "You're all set! Type 'exit' or press Ctrl+C to quit.")
-	fmt.Fprintln(out, "")
+	fmt.Fprintf(out, "✓ Configuration saved to %s\n", path)                   //nolint:errcheck
+	fmt.Fprintln(out, "")                                                     //nolint:errcheck
+	fmt.Fprintln(out, "You're all set! Type 'exit' or press Ctrl+C to quit.") //nolint:errcheck
+	fmt.Fprintln(out, "")                                                     //nolint:errcheck
 	return nil
 }
 
@@ -401,29 +401,29 @@ func serializeOnboardingYAML(cfg *config.Config) string {
 
 	b.WriteString("provider:\n")
 	if cfg.Provider.Name != "" {
-		fmt.Fprintf(&b, "  name: %s\n", cfg.Provider.Name)
+		fmt.Fprintf(&b, "  name: %s\n", cfg.Provider.Name) //nolint:errcheck
 	}
 	if cfg.Provider.BaseURL != "" {
-		fmt.Fprintf(&b, "  base_url: %s\n", cfg.Provider.BaseURL)
+		fmt.Fprintf(&b, "  base_url: %s\n", cfg.Provider.BaseURL) //nolint:errcheck
 	}
 	if cfg.Provider.Model != "" {
-		fmt.Fprintf(&b, "  model: %s\n", cfg.Provider.Model)
+		fmt.Fprintf(&b, "  model: %s\n", cfg.Provider.Model) //nolint:errcheck
 	}
 	if cfg.Provider.MaxTokens > 0 {
-		fmt.Fprintf(&b, "  max_tokens: %d\n", cfg.Provider.MaxTokens)
+		fmt.Fprintf(&b, "  max_tokens: %d\n", cfg.Provider.MaxTokens) //nolint:errcheck
 	}
 
 	b.WriteString("\nmodel:\n")
 	if cfg.Model.Name != "" {
-		fmt.Fprintf(&b, "  name: %s\n", cfg.Model.Name)
+		fmt.Fprintf(&b, "  name: %s\n", cfg.Model.Name) //nolint:errcheck
 	}
 	if cfg.Model.MaxTokens > 0 {
-		fmt.Fprintf(&b, "  max_tokens: %d\n", cfg.Model.MaxTokens)
+		fmt.Fprintf(&b, "  max_tokens: %d\n", cfg.Model.MaxTokens) //nolint:errcheck
 	}
 
 	b.WriteString("\ntui:\n")
 	if cfg.TUI.Theme != "" {
-		fmt.Fprintf(&b, "  theme: %s\n", cfg.TUI.Theme)
+		fmt.Fprintf(&b, "  theme: %s\n", cfg.TUI.Theme) //nolint:errcheck
 	}
 
 	return b.String()

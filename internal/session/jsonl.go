@@ -182,7 +182,7 @@ func (s *JSONLSessionStore) SetSessionID(id string, newSession bool) error {
 		return fmt.Errorf("session: create session file: %w", err)
 	}
 	if err := flockExclusive(f); err != nil {
-		f.Close()
+		_ = f.Close()
 		return fmt.Errorf("session: lock session file: %w", err)
 	}
 	s.file = f
@@ -427,7 +427,7 @@ func (s *JSONLSessionStore) ensureLoaded() error {
 	// Acquire advisory flock to prevent concurrent writes from other
 	// processes corrupting the file.
 	if err := flockExclusive(f); err != nil {
-		f.Close()
+		_ = f.Close()
 		return fmt.Errorf("session: lock store file: %w", err)
 	}
 	s.file = f

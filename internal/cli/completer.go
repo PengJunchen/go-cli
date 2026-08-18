@@ -44,7 +44,7 @@ func NewSlashCommandCompleterFromRegistry(reg *SlashCommandRegistry) *SlashComma
 // present, command names are completed with their real Description (when a
 // registry is available). When a space is present and the resolved handler
 // implements SubcommandProvider, subcommand names are completed; otherwise nil
-// is returned (backward compatible with the old behaviour).
+// is returned (backward compatible with the old behavior).
 func (c *SlashCommandCompleter) Complete(input string, pos int) ([]Completion, int) {
 	if !strings.HasPrefix(input, "/") {
 		return nil, 0

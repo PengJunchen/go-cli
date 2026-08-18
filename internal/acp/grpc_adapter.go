@@ -329,7 +329,7 @@ func (a *gRPCAdapter) Reconnect(ctx context.Context) error {
 
 // doReconnect attempts to re-establish the session with exponential backoff.
 // It returns true if reconnection succeeded, or false if done/ctx was
-// cancelled. If a reconnection is already in progress, it waits for the
+// canceled. If a reconnection is already in progress, it waits for the
 // existing one to complete.
 func (a *gRPCAdapter) doReconnect(ctx context.Context, done chan struct{}) bool {
 	a.reconnectMu.Lock()

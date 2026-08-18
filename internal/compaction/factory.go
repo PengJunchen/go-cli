@@ -11,7 +11,7 @@ type CompactorFactory interface {
 // A Summarizer injected via WithFactorySummarizer is forwarded to the
 // SummaryCompactor (for the "summary" strategy) and wired into the
 // UnifiedCompactor (for the "unified" strategy). When no summarizer is
-// configured the factory preserves the original behaviour, so a no-arg
+// configured the factory preserves the original behavior, so a no-arg
 // NewDefaultCompactorFactory call is fully backward compatible.
 type DefaultCompactorFactory struct {
 	summarizer Summarizer
@@ -35,7 +35,7 @@ func WithFactorySummarizer(s Summarizer) DefaultCompactorFactoryOption {
 // NewDefaultCompactorFactory creates a new DefaultCompactorFactory. The
 // variadic options keep the no-arg call site backward compatible: callers that
 // do not pass options get a factory with no summarizer, matching the previous
-// behaviour exactly.
+// behavior exactly.
 func NewDefaultCompactorFactory(opts ...DefaultCompactorFactoryOption) *DefaultCompactorFactory {
 	f := &DefaultCompactorFactory{}
 	for _, opt := range opts {

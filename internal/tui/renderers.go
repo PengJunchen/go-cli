@@ -65,7 +65,7 @@ func stripANSI(text string, maxCols int) string {
 // LightTheme selects the "light" preset; every other theme (Dark, Monokai,
 // Solarized, Mock, or a nil theme) falls back to "dark" so text stays legible
 // on dark backgrounds. Glamour owns all syntax highlighting via chroma, so the
-// theme is only consulted to pick the colour palette.
+// theme is only consulted to pick the color palette.
 func glamourStyleFor(opts RenderOpts) string {
 	if opts.Theme != nil {
 		switch opts.Theme.(type) {

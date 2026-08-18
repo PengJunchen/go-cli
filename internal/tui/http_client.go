@@ -164,7 +164,7 @@ func (a *ACPStreamAdapter) Stream(ctx context.Context) <-chan AgentEvent {
 
 			if resp.StatusCode != http.StatusOK {
 				slog.Warn("tui.http_client.bad_status", "url", a.remoteURL, "status", resp.StatusCode)
-				resp.Body.Close()
+				_ = resp.Body.Close()
 				if !a.scheduleReconnect(ctx, wait, reconnects) {
 					return
 				}
@@ -178,7 +178,7 @@ func (a *ACPStreamAdapter) Stream(ctx context.Context) <-chan AgentEvent {
 			}
 
 			ctxCanceled, id := a.processStream(ctx, resp.Body, ch, heartbeat)
-			resp.Body.Close()
+			_ = resp.Body.Close()
 
 			if id != "" {
 				lastEventID = id
@@ -264,7 +264,7 @@ func (a *ACPStreamAdapter) processStream(ctx context.Context, body io.ReadCloser
 	// processStream can return. Safe to call exactly once per invocation.
 	stopReader := func() {
 		close(done)
-		body.Close()
+		_ = body.Close()
 		<-scanDone
 	}
 

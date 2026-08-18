@@ -13,9 +13,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/config"
 )
 
 func TestDoctorFormat(t *testing.T) {

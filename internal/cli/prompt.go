@@ -215,12 +215,12 @@ func (c *promptCmd) consumeEventsStream(out io.Writer, events <-chan core.AgentE
 		}
 		if !ev.Incremental && ev.Kind == "message" {
 			// Non-incremental complete message: output once with newline.
-			if _, err := fmt.Fprintln(out, ev.Content); err != nil {
+			if _, err := fmt.Fprintln(out, ev.Content); err != nil { //nolint:errcheck
 				return err
 			}
 			continue
 		}
-		if _, err := fmt.Fprint(out, ev.Content); err != nil {
+		if _, err := fmt.Fprint(out, ev.Content); err != nil { //nolint:errcheck
 			return err
 		}
 	}
@@ -237,24 +237,24 @@ func (c *promptCmd) consumeEventsText(out io.Writer, events <-chan core.AgentEve
 		}
 		if ev.Incremental {
 			streaming = true
-			if _, err := fmt.Fprint(out, ev.Content); err != nil {
+			if _, err := fmt.Fprint(out, ev.Content); err != nil { //nolint:errcheck
 				return err
 			}
 			continue
 		}
 		if streaming {
-			if _, err := fmt.Fprintln(out); err != nil {
+			if _, err := fmt.Fprintln(out); err != nil { //nolint:errcheck
 				return err
 			}
 		} else {
-			if _, err := fmt.Fprintf(out, "%s\n", ev.Content); err != nil {
+			if _, err := fmt.Fprintf(out, "%s\n", ev.Content); err != nil { //nolint:errcheck
 				return err
 			}
 		}
 		streaming = false
 	}
 	if streaming {
-		if _, err := fmt.Fprintln(out); err != nil {
+		if _, err := fmt.Fprintln(out); err != nil { //nolint:errcheck
 			return err
 		}
 	}

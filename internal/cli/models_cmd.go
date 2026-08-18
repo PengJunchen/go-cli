@@ -53,17 +53,17 @@ func (c *modelsCmd) Run(ctx context.Context, cfg Config, args []string) error {
 
 	providers := reg.Providers()
 	if len(providers) == 0 {
-		fmt.Fprintln(c.out, "No model registry data available. Enable model_registry in config or check network connectivity.")
+		fmt.Fprintln(c.out, "No model registry data available. Enable model_registry in config or check network connectivity.") //nolint:errcheck
 		return nil
 	}
 
 	w := tabwriter.NewWriter(c.out, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "PROVIDER\tMODEL\tCONTEXT\tMAX OUT\tINPUT $/M\tOUTPUT $/M\tMODALITY")
+	fmt.Fprintln(w, "PROVIDER\tMODEL\tCONTEXT\tMAX OUT\tINPUT $/M\tOUTPUT $/M\tMODALITY") //nolint:errcheck
 
 	for _, p := range providers {
 		models := reg.ModelsForProvider(p.ID)
 		if len(models) == 0 {
-			fmt.Fprintf(w, "%s\t(none)\t-\t-\t-\t-\t-\n", p.Name)
+			fmt.Fprintf(w, "%s\t(none)\t-\t-\t-\t-\t-\n", p.Name) //nolint:errcheck
 			continue
 		}
 		for _, m := range models {
@@ -79,7 +79,7 @@ func (c *modelsCmd) Run(ctx context.Context, cfg Config, args []string) error {
 			if modality == "" {
 				modality = "-"
 			}
-			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%.2f\t%.2f\t%s\n",
+			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%.2f\t%.2f\t%s\n", //nolint:errcheck
 				p.Name, m.Name, ctxStr, maxOutStr, m.InputPrice, m.OutputPrice, modality)
 		}
 	}

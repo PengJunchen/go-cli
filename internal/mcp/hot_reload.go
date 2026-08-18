@@ -322,7 +322,7 @@ func (h *DefaultHotReloader) scheduleReconnect(_ context.Context) {
 		return
 	}
 	h.connecting = true
-	// Use the reloader's own pollCtx so reconnect cycles are not cancelled
+	// Use the reloader's own pollCtx so reconnect cycles are not canceled
 	// by a short-lived caller context (e.g. an HTTP request).
 	ctx := h.pollCtx
 	h.mu.Unlock()
