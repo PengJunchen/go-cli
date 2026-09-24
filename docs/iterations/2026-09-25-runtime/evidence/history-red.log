@@ -77,3 +77,11 @@ Sub-agent panic-containment RED, before adding the run-owner recovery defer:
   rtk env GOMAXPROCS=2 go test -p 2 -count=1 ./internal/core -run '^TestSubAgentPanicIsContainedAndFinalized$'
   exit=1: the runner-factory fixture panic escaped the sub-agent goroutine and
   terminated the Go test process before Wait/state/Send assertions could run.
+
+Unknown-outcome marker RED, after panic containment but before adding the typed
+outcome marker:
+
+  rtk env GOMAXPROCS=2 go test -p 2 -count=1 ./internal/core -run '^TestSubAgentPanicIsContainedAndFinalized$'
+  exit=1: factory and runner panic errors preserved ErrSubAgentPanicked but did
+  not implement OutcomeUnknown() bool; the runner fixture increments a side-
+  effect counter immediately before panic to demonstrate the uncertainty.

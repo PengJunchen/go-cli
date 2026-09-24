@@ -75,3 +75,14 @@ span, closes the event channel and done signal, and rejects a later Send. The
 test continues running after each panic, demonstrating that the host test
 process survives. Full core-package race remains pending lane 01's
 RunCanonical producer and integration.
+
+Panic outcome-uncertainty marker follow-up:
+
+  rtk env GOMAXPROCS=2 go test -race -p 2 -count=1 ./internal/core -run '^(TestSubAgentPanicIsContainedAndFinalized|TestSubagentSendReportsDroppedMessage|TestSubAgentSendDoesNotBlockOnFullInbox|TestSubAgentSendAfterTerminalIsRejected)$'
+  exit=0
+
+Both factory and runner panic Wait errors satisfy errors.Is(err,
+ErrSubAgentPanicked) and errors.As to the OutcomeUnknown() bool interface. The
+runner fixture records one simulated effect before panicking; the marker stays
+unknown for factory panics as a conservative outcome. No execution-done or
+pending marker is supplied.
