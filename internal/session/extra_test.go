@@ -208,6 +208,7 @@ func TestEntryTypeConstants(t *testing.T) {
 	assert.Equal(t, "tool", string(EntryTypeTool))
 	assert.Equal(t, "compaction", string(EntryTypeCompaction))
 	assert.Equal(t, "system", string(EntryTypeSystem))
+	assert.Equal(t, "checkpoint", string(EntryTypeCheckpoint))
 }
 
 // TestSessionEntryJSONTags verifies IsSummary serializes under its tag.
