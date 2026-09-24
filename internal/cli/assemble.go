@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -40,6 +42,10 @@ import (
 // defaultMaxTokens is the default compaction token budget used when no
 // explicit value is provided via AssembleOption.
 const defaultMaxTokens = 8000
+
+// cliDefaultOpenAICompatibleBaseURL mirrors EinoProvider's default so small
+// model credential reuse can compare origins when provider.base_url is empty.
+const cliDefaultOpenAICompatibleBaseURL = "https://api.openai.com/v1"
 
 // CoreRuntime holds the primary agent execution components.
 type CoreRuntime struct {
@@ -714,7 +720,7 @@ func (s *assembleState) assembleModel() error {
 		if smallProvider == "" {
 			smallProvider = s.providerName
 		}
-		sm, _, smallCleanup, smErr := buildSmallModel(s.ctx, s.rc, smallProvider, s.rc.SmallModel.Model)
+		sm, _, smallCleanup, smErr := buildSmallModel(s.ctx, s.rc, s.providerName, smallProvider, s.rc.SmallModel.Model)
 		if smErr != nil {
 			s.logger.Warn("assemble_small_model_failed", "err", smErr, "model", s.rc.SmallModel.Model)
 		} else {
@@ -1505,7 +1511,7 @@ func listAvailableModels(rc *config.Config, providerName string) []llm.ModelInfo
 // OpenAI-compatible defaults. Native Claude/Gemini identities are unavailable
 // in the CLI until their request and tool-call contracts are complete.
 func resolveCLIProvider(providerName, baseURL, apiKey string) (llm.ModelProvider, error) {
-	normalizedName := strings.ToLower(strings.TrimSpace(providerName))
+	normalizedName := normalizeProviderName(providerName)
 	switch normalizedName {
 	case "claude", "anthropic", "gemini":
 		return nil, fmt.Errorf("assemble: provider %q requires native protocol support, which is unavailable in the CLI; use a custom provider name only for an OpenAI-compatible BaseURL", providerName)
@@ -1535,10 +1541,15 @@ func resolveCLIProvider(providerName, baseURL, apiKey string) (llm.ModelProvider
 	return reg.Get(providerName)
 }
 
+func normalizeProviderName(providerName string) string {
+	return strings.ToLower(strings.TrimSpace(providerName))
+}
+
 // buildSmallModel builds a lightweight model from the SmallModelConfig section.
-// It uses the small model's own provider/BaseURL/APIKey when provided, falling
-// back to the primary provider settings.
-func buildSmallModel(ctx context.Context, rc *config.Config, providerName, modelName string) (llm.BaseChatModel, llm.ModelInfo, func(), error) {
+// Primary credentials are reused only when provider identity and effective
+// endpoint origin match; different identities or origins use small-model
+// settings only.
+func buildSmallModel(ctx context.Context, rc *config.Config, primaryProviderName, providerName, modelName string) (llm.BaseChatModel, llm.ModelInfo, func(), error) {
 	if rc == nil {
 		return nil, llm.ModelInfo{}, nil, fmt.Errorf("assemble: buildSmallModel: config is nil")
 	}
@@ -1548,13 +1559,9 @@ func buildSmallModel(ctx context.Context, rc *config.Config, providerName, model
 		MaxTokens:   rc.SmallModel.MaxTokens,
 	}
 
-	baseURL := rc.SmallModel.BaseURL
-	apiKey := rc.SmallModel.APIKey
-	if baseURL == "" {
-		baseURL = rc.Provider.BaseURL
-	}
-	if apiKey == "" {
-		apiKey = rc.Provider.APIKey
+	baseURL, apiKey, err := resolveSmallModelProviderSettings(primaryProviderName, providerName, rc)
+	if err != nil {
+		return nil, llm.ModelInfo{}, nil, err
 	}
 
 	provider, err := resolveCLIProvider(providerName, baseURL, apiKey)
@@ -1566,6 +1573,76 @@ func buildSmallModel(ctx context.Context, rc *config.Config, providerName, model
 		return nil, llm.ModelInfo{}, cleanup, err
 	}
 	return m, findModelInfo(provider.Models(), modelName), cleanup, nil
+}
+
+// resolveSmallModelProviderSettings prevents credentials from crossing a
+// provider identity or origin boundary. The small model inherits the primary
+// endpoint and credential only when its provider identity matches. If it
+// explicitly selects another endpoint, a primary key may be reused only when
+// the normalized origins still match.
+func resolveSmallModelProviderSettings(primaryProviderName, smallProviderName string, rc *config.Config) (baseURL, apiKey string, err error) {
+	baseURL = rc.SmallModel.BaseURL
+	apiKey = rc.SmallModel.APIKey
+	if providerIdentityMatches(primaryProviderName, smallProviderName) {
+		if baseURL == "" {
+			baseURL = rc.Provider.BaseURL
+			if apiKey == "" {
+				apiKey = rc.Provider.APIKey
+			}
+			return baseURL, apiKey, nil
+		}
+
+		if apiKey == "" && rc.Provider.APIKey != "" {
+			primaryOrigin, primaryOK := effectiveCLIProviderOrigin(primaryProviderName, rc.Provider.BaseURL)
+			smallOrigin, smallOK := effectiveCLIProviderOrigin(smallProviderName, baseURL)
+			if primaryOK && smallOK && primaryOrigin == smallOrigin {
+				apiKey = rc.Provider.APIKey
+			}
+		}
+		return baseURL, apiKey, nil
+	}
+
+	if baseURL == "" && apiKey == "" {
+		return "", "", fmt.Errorf("assemble: small provider %q differs from primary provider %q and has no own base_url or api_key", smallProviderName, primaryProviderName)
+	}
+	return baseURL, apiKey, nil
+}
+
+func providerIdentityMatches(primaryProviderName, smallProviderName string) bool {
+	primaryName := normalizeProviderName(primaryProviderName)
+	return primaryName != "" && primaryName == normalizeProviderName(smallProviderName)
+}
+
+func effectiveCLIProviderOrigin(providerName, baseURL string) (string, bool) {
+	if baseURL == "" {
+		switch normalizeProviderName(providerName) {
+		case "eino", "openai":
+			baseURL = cliDefaultOpenAICompatibleBaseURL
+		default:
+			return "", false
+		}
+	}
+
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Hostname() == "" {
+		return "", false
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	port := parsed.Port()
+	switch scheme {
+	case "http":
+		if port == "" {
+			port = "80"
+		}
+	case "https":
+		if port == "" {
+			port = "443"
+		}
+	default:
+		return "", false
+	}
+
+	return scheme + "://" + net.JoinHostPort(strings.ToLower(parsed.Hostname()), port), true
 }
 
 // llmModelSummarizer adapts an llm.BaseChatModel to the compaction.Summarizer
