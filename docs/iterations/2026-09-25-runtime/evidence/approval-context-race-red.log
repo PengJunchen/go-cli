@@ -1,0 +1,15 @@
+--- FAIL: TestTeaApprovalCallback_DeniesAlwaysAllowResponseAfterCancellation (0.00s)
+    tea_callback_test.go:82: 
+        	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/tui/internal/approval/tea_callback_test.go:82
+        	Error:      	Not equal: 
+        	            	expected: 0
+        	            	actual  : 2
+        	Test:       	TestTeaApprovalCallback_DeniesAlwaysAllowResponseAfterCancellation
+        	Messages:   	a canceled approval must not become an always-allow decision
+    tea_callback_test.go:83: 
+        	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/tui/internal/approval/tea_callback_test.go:83
+        	Error:      	Expected error with "context canceled" in chain but got nil.
+        	Test:       	TestTeaApprovalCallback_DeniesAlwaysAllowResponseAfterCancellation
+FAIL
+FAIL	github.com/pengjunchen/go-cli/internal/approval	0.014s
+FAIL

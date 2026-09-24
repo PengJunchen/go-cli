@@ -15,6 +15,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/session"
+	"github.com/pengjunchen/go-cli/internal/tui"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -243,21 +244,11 @@ func (e *cliHITLEmitter) SetProgram(p *tea.Program) {
 	e.program = p
 }
 
-// HITLMessage is a bubbletea message carrying a HITL question to the TUI. The
-// TUI renders the question, collects the user's answer, and sends a single
-// HITLResponse on ResponseCh so the emitter can deliver it to the agent.
-type HITLMessage struct {
-	QuestionID string
-	Question   string
-	Options    []string
-	ResponseCh chan HITLResponse
-}
+// HITLMessage is retained as an alias for compatibility with cli callers.
+type HITLMessage = tui.HITLMessage
 
-// HITLResponse is the user's answer to a HITLMessage, sent back by the TUI.
-type HITLResponse struct {
-	Answer string
-	Err    error
-}
+// HITLResponse is retained as an alias for compatibility with cli callers.
+type HITLResponse = tui.HITLResponse
 
 func (e *cliHITLEmitter) Emit(ctx context.Context, event core.HITLQuestionEvent) error {
 	// TUI mode: route the question through the bubbletea program so it renders
@@ -272,6 +263,7 @@ func (e *cliHITLEmitter) Emit(ctx context.Context, event core.HITLQuestionEvent)
 			Question:   event.Question,
 			Options:    event.Options,
 			ResponseCh: respCh,
+			Context:    ctx,
 		})
 		select {
 		case resp := <-respCh:

@@ -1,6 +1,7 @@
 package tui
 
 import (
+	"context"
 	"fmt"
 	"sort"
 	"strings"
@@ -24,6 +25,10 @@ const (
 // interactive resolution. The TUI renders it as a special accordion entry and
 // delivers the user's decision through ResponseCh.
 type ApprovalRequest struct {
+	// RequestID identifies this request within the TUI interaction queue.
+	RequestID string
+	// Context cancels this request if the approval waiter is no longer active.
+	Context context.Context
 	// ToolName is the name of the tool requesting approval.
 	ToolName string
 	// Args are the tool call arguments, displayed as key=value pairs.
@@ -59,6 +64,10 @@ var approvalDiffDelStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#FF5C5
 // entry. It shows the tool name, arguments, an optional diff preview, and the
 // keyboard shortcuts (y/a/n/d).
 func renderApprovalRequest(req *ApprovalRequest) string {
+	return renderApprovalRequestDisplay(req, true)
+}
+
+func renderApprovalRequestDisplay(req *ApprovalRequest, showDiff bool) string {
 	if req == nil {
 		return ""
 	}
@@ -84,7 +93,7 @@ func renderApprovalRequest(req *ApprovalRequest) string {
 	}
 
 	// Diff preview (if available).
-	if req.DiffPreview != "" {
+	if req.DiffPreview != "" && showDiff {
 		sb.WriteString("  diff:\n")
 		for _, line := range strings.Split(req.DiffPreview, "\n") {
 			styled := line
@@ -101,7 +110,11 @@ func renderApprovalRequest(req *ApprovalRequest) string {
 	// Options bar.
 	opts := "  [y] once  [a] always  [n] reject"
 	if req.DiffPreview != "" {
-		opts += "  [d] toggle diff"
+		if showDiff {
+			opts += "  [d] hide diff"
+		} else {
+			opts += "  [d] show diff"
+		}
 	}
 	fmt.Fprintf(&sb, "%s\n", opts) //nolint:errcheck
 
