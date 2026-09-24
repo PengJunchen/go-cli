@@ -148,6 +148,7 @@ func (c *TeaApprovalCallback) RequestApproval(ctx context.Context, toolName stri
 		ToolName:   toolName,
 		Args:       args,
 		ResponseCh: respCh,
+		Context:    ctx,
 	}
 	if c.diffPreviewFn != nil {
 		req.DiffPreview = c.diffPreviewFn(ctx, toolName, args)
@@ -159,16 +160,23 @@ func (c *TeaApprovalCallback) RequestApproval(ctx context.Context, toolName stri
 	}
 	select {
 	case resp := <-respCh:
-		switch resp.Decision {
-		case tui.ApprovalAllow:
-			return ApprovalAllow, nil
-		case tui.ApprovalAlwaysAllow:
-			return ApprovalAlwaysAllow, nil
-		default:
-			return ApprovalDeny, nil
-		}
+		return approvalResultFromResponse(ctx, resp)
 	case <-ctx.Done():
 		return ApprovalDeny, ctx.Err()
+	}
+}
+
+func approvalResultFromResponse(ctx context.Context, resp tui.ApprovalResponse) (ApprovalResult, error) {
+	if err := ctx.Err(); err != nil {
+		return ApprovalDeny, err
+	}
+	switch resp.Decision {
+	case tui.ApprovalAllow:
+		return ApprovalAllow, nil
+	case tui.ApprovalAlwaysAllow:
+		return ApprovalAlwaysAllow, nil
+	default:
+		return ApprovalDeny, nil
 	}
 }
 

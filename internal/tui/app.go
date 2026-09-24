@@ -493,10 +493,13 @@ type teaModel struct {
 	resumeCallback func()
 	paused         bool
 
-	// approval flow: approvalCh delivers requests from the middleware;
-	// pendingApproval is the request currently awaiting a user decision.
-	approvalCh      <-chan ApprovalRequest
-	pendingApproval *ApprovalRequest
+	// interaction flow serializes approval and ask_user modals in arrival order.
+	approvalCh          <-chan ApprovalRequest
+	approvalReaderDone  bool
+	activeInteraction   *pendingInteraction
+	queuedInteractions  []pendingInteraction
+	approvalSequence    uint64
+	interactionSequence uint64
 
 	// thinkingVisibility controls how thinking entries are rendered:
 	// "show" (default), "collapse", or "hide".
@@ -599,16 +602,52 @@ func (m *teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.eventsSeen.Add(1)
 		cmd := m.handleEvent(msg.event)
 		return m, tea.Batch(waitForEvent(m.events, m.runDone), cmd)
-	case approvalRequestMsg:
+	case agentEventStreamClosedMsg, quitRequestedMsg:
 		m.mu.Lock()
-		m.pendingApproval = &msg.req
+		m.cancelInteractionsLocked()
+		m.mu.Unlock()
+		return m, tea.Quit
+	case approvalChannelClosedMsg:
+		m.mu.Lock()
+		m.approvalReaderDone = true
+		m.cancelApprovalInteractionsLocked()
 		view := ""
 		if m.shouldNotify() {
 			view = m.renderViewLocked()
 		}
 		m.mu.Unlock()
 		m.notify(view)
-		return m, waitForApproval(m.approvalCh, m.runDone)
+		return m, nil
+	case approvalRequestMsg:
+		m.mu.Lock()
+		token, finished := m.enqueueApprovalLocked(msg.req)
+		view := ""
+		if m.shouldNotify() {
+			view = m.renderViewLocked()
+		}
+		var next tea.Cmd
+		if !m.approvalReaderDone && m.approvalCh != nil {
+			next = waitForApproval(m.approvalCh, m.runDone)
+		}
+		m.mu.Unlock()
+		m.notify(view)
+		var cancelWait tea.Cmd
+		if finished != nil {
+			cancelWait = waitForInteractionCancel(token, msg.req.Context, finished, m.runDone)
+		}
+		return m, tea.Batch(next, cancelWait)
+	case HITLMessage:
+		return m.handleHITLMessage(msg)
+	case interactionCanceledMsg:
+		m.mu.Lock()
+		m.cancelInteractionLocked(msg.token, msg.err)
+		view := ""
+		if m.shouldNotify() {
+			view = m.renderViewLocked()
+		}
+		m.mu.Unlock()
+		m.notify(view)
+		return m, nil
 	case tea.KeyMsg:
 		return m, m.handleKey(msg)
 	case tea.WindowSizeMsg:
@@ -744,10 +783,14 @@ func (m *teaModel) renderViewLocked() string {
 		sb.WriteString(m.spinner.View())
 		sb.WriteString(" working...")
 	}
-	// Pending approval entry (interactive approval flow).
-	if m.pendingApproval != nil {
+	// The active interaction is rendered as a modal above the status bar.
+	if current := m.activeInteraction; current != nil {
 		sb.WriteString("\n")
-		sb.WriteString(renderApprovalRequest(m.pendingApproval))
+		if current.approval != nil {
+			sb.WriteString(renderApprovalRequestDisplay(current.approval, current.showDiff))
+		} else if current.hitl != nil {
+			sb.WriteString(renderHITLQuestion(current.hitl, current.answer, current.selectedOption))
+		}
 	}
 	// Steer input prompt.
 	if m.steerInputMode {
@@ -907,10 +950,31 @@ type agentEventMsg struct {
 	event AgentEvent
 }
 
+type agentEventStreamClosedMsg struct{}
+
+type quitRequestedMsg struct{}
+
+type approvalChannelClosedMsg struct{}
+
 // approvalRequestMsg wraps an ApprovalRequest delivered from the approval
 // channel so the model can render it as an interactive approval entry.
 type approvalRequestMsg struct {
 	req ApprovalRequest
+}
+
+type pendingInteraction struct {
+	token          uint64
+	approval       *ApprovalRequest
+	hitl           *HITLMessage
+	answer         string
+	selectedOption int
+	showDiff       bool
+	finished       chan struct{}
+}
+
+type interactionCanceledMsg struct {
+	token uint64
+	err   error
 }
 
 // waitForApproval returns a tea.Cmd that blocks until an ApprovalRequest
@@ -921,7 +985,7 @@ func waitForApproval(ch <-chan ApprovalRequest, done <-chan struct{}) tea.Cmd {
 		select {
 		case req, ok := <-ch:
 			if !ok {
-				return nil
+				return approvalChannelClosedMsg{}
 			}
 			return approvalRequestMsg{req: req}
 		case <-done:
@@ -940,7 +1004,7 @@ func waitForEvent(events <-chan AgentEvent, done <-chan struct{}) tea.Cmd {
 		select {
 		case ev, ok := <-events:
 			if !ok {
-				return tea.Quit()
+				return agentEventStreamClosedMsg{}
 			}
 			return agentEventMsg{event: ev}
 		case <-done:
@@ -975,7 +1039,7 @@ func waitForQuit(ch <-chan struct{}, done <-chan struct{}) tea.Cmd {
 	return func() tea.Msg {
 		select {
 		case <-ch:
-			return tea.Quit()
+			return quitRequestedMsg{}
 		case <-done:
 			return nil
 		}
@@ -1428,16 +1492,14 @@ func stripANSIPlain(s string) string {
 func (m *teaModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.activeInteraction != nil {
+		return m.handleInteractionKeyLocked(msg)
+	}
 	if m.steerInputMode {
 		return m.handleSteerKeyLocked(msg)
 	}
 	if m.followUpInputMode {
 		return m.handleFollowUpKeyLocked(msg)
-	}
-	// When an approval request is pending, intercept y/a/n/d keys to resolve
-	// it before any other key processing.
-	if m.pendingApproval != nil {
-		return m.handleApprovalKeyLocked(msg)
 	}
 	// The help overlay is modal: while open only Esc or '?' close it and
 	// all other keys are ignored. It does not affect agent event flow.
@@ -1632,29 +1694,307 @@ func (m *teaModel) hasRunningToolLocked() bool {
 	return false
 }
 
-// handleApprovalKeyLocked processes a key while an approval request is pending.
-// y allows once, a always allows, n denies, and d toggles the diff preview
-// (currently informational only). Any other key is ignored. The caller must
-// hold m.mu.
+// handleInteractionKeyLocked gives the active modal exclusive keyboard focus.
+// The caller must hold m.mu.
+func (m *teaModel) handleInteractionKeyLocked(msg tea.KeyMsg) tea.Cmd {
+	if m.activeInteraction == nil {
+		return nil
+	}
+	if m.activeInteraction.approval != nil {
+		return m.handleApprovalKeyLocked(msg)
+	}
+	if m.activeInteraction.hitl != nil {
+		return m.handleHITLKeyLocked(msg)
+	}
+	return nil
+}
+
+// handleApprovalKeyLocked processes a key while an approval request is active.
+// y allows once, a always allows, n denies, and Esc denies the active request.
+// q or Ctrl+C resolves every queued waiter and cancels the turn. The caller
+// must hold m.mu.
 func (m *teaModel) handleApprovalKeyLocked(msg tea.KeyMsg) tea.Cmd {
-	if msg.Type != tea.KeyRunes {
+	if current := m.activeInteraction; current != nil && current.approval != nil && current.approval.Context != nil {
+		if err := current.approval.Context.Err(); err != nil {
+			m.cancelInteractionLocked(current.token, err)
+			return nil
+		}
+	}
+	switch {
+	case msg.Type == tea.KeyEsc:
+		m.resolveApprovalLocked(ApprovalDeny)
+	case msg.Type == tea.KeyCtrlC:
+		m.cancelInteractionsLocked()
+		return m.quitLocked()
+	case msg.Type == tea.KeyRunes && string(msg.Runes) == "q":
+		m.cancelInteractionsLocked()
+		return m.quitLocked()
+	case msg.Type != tea.KeyRunes:
 		return nil
 	}
 	switch string(msg.Runes) {
 	case "y":
-		m.pendingApproval.ResponseCh <- ApprovalResponse{Decision: ApprovalAllow}
-		m.pendingApproval = nil
+		m.resolveApprovalLocked(ApprovalAllow)
 	case "a":
-		m.pendingApproval.ResponseCh <- ApprovalResponse{Decision: ApprovalAlwaysAllow}
-		m.pendingApproval = nil
+		m.resolveApprovalLocked(ApprovalAlwaysAllow)
 	case "n":
-		m.pendingApproval.ResponseCh <- ApprovalResponse{Decision: ApprovalDeny}
-		m.pendingApproval = nil
+		m.resolveApprovalLocked(ApprovalDeny)
 	case "d":
-		// Diff preview is always shown when available; 'd' is a no-op
-		// placeholder for future toggle behavior.
+		if m.activeInteraction != nil && m.activeInteraction.approval != nil && m.activeInteraction.approval.DiffPreview != "" {
+			m.activeInteraction.showDiff = !m.activeInteraction.showDiff
+		}
 	}
 	return nil
+}
+
+func (m *teaModel) handleHITLKeyLocked(msg tea.KeyMsg) tea.Cmd {
+	current := m.activeInteraction
+	if current == nil || current.hitl == nil {
+		return nil
+	}
+	if current.hitl.Context != nil && current.hitl.Context.Err() != nil {
+		m.cancelInteractionLocked(current.token, current.hitl.Context.Err())
+		return nil
+	}
+	if msg.Type == tea.KeyEsc {
+		m.respondHITLLocked(HITLResponse{Err: context.Canceled})
+		m.finishActiveInteractionLocked()
+		return nil
+	}
+	if msg.Type == tea.KeyCtrlC {
+		m.cancelInteractionsLocked()
+		return m.quitLocked()
+	}
+
+	if len(current.hitl.Options) > 0 {
+		switch msg.Type {
+		case tea.KeyUp:
+			if current.selectedOption > 0 {
+				current.selectedOption--
+			}
+		case tea.KeyDown:
+			if current.selectedOption+1 < len(current.hitl.Options) {
+				current.selectedOption++
+			}
+		case tea.KeyEnter:
+			m.respondHITLLocked(HITLResponse{Answer: current.hitl.Options[current.selectedOption]})
+			m.finishActiveInteractionLocked()
+		case tea.KeyRunes:
+			if len(msg.Runes) == 1 && msg.Runes[0] >= '1' && msg.Runes[0] <= '9' {
+				option := int(msg.Runes[0] - '1')
+				if option < len(current.hitl.Options) {
+					m.respondHITLLocked(HITLResponse{Answer: current.hitl.Options[option]})
+					m.finishActiveInteractionLocked()
+				}
+			}
+		}
+		return nil
+	}
+
+	switch msg.Type {
+	case tea.KeyEnter:
+		m.respondHITLLocked(HITLResponse{Answer: current.answer})
+		m.finishActiveInteractionLocked()
+	case tea.KeyBackspace:
+		if current.answer != "" {
+			_, size := utf8.DecodeLastRuneInString(current.answer)
+			current.answer = current.answer[:len(current.answer)-size]
+		}
+	case tea.KeyRunes:
+		current.answer += string(msg.Runes)
+	}
+	return nil
+}
+
+func (m *teaModel) enqueueApprovalLocked(req ApprovalRequest) (uint64, <-chan struct{}) {
+	if req.RequestID == "" {
+		m.approvalSequence++
+		req.RequestID = fmt.Sprintf("approval-%d", m.approvalSequence)
+	}
+	if req.Context != nil && req.Context.Err() != nil {
+		respondApproval(req.ResponseCh, ApprovalDeny)
+		return 0, nil
+	}
+	interaction := pendingInteraction{approval: &req, showDiff: true, finished: make(chan struct{})}
+	token := m.enqueueInteractionLocked(interaction)
+	return token, interaction.finished
+}
+
+func (m *teaModel) enqueueHITLLocked(req HITLMessage) (uint64, <-chan struct{}) {
+	req.Options = append([]string(nil), req.Options...)
+	finished := make(chan struct{})
+	interaction := pendingInteraction{hitl: &req, finished: finished}
+	token := m.enqueueInteractionLocked(interaction)
+	return token, finished
+}
+
+func (m *teaModel) enqueueInteractionLocked(interaction pendingInteraction) uint64 {
+	m.interactionSequence++
+	interaction.token = m.interactionSequence
+	if m.activeInteraction == nil {
+		m.activeInteraction = &interaction
+		return interaction.token
+	}
+	m.queuedInteractions = append(m.queuedInteractions, interaction)
+	return interaction.token
+}
+
+func (m *teaModel) finishActiveInteractionLocked() {
+	if m.activeInteraction != nil && m.activeInteraction.finished != nil {
+		close(m.activeInteraction.finished)
+	}
+	m.activeInteraction = nil
+	if len(m.queuedInteractions) == 0 {
+		return
+	}
+	next := m.queuedInteractions[0]
+	m.queuedInteractions = m.queuedInteractions[1:]
+	m.activeInteraction = &next
+}
+
+func (m *teaModel) resolveApprovalLocked(decision ApprovalDecision) {
+	if m.activeInteraction == nil || m.activeInteraction.approval == nil {
+		return
+	}
+	if ctx := m.activeInteraction.approval.Context; ctx != nil && ctx.Err() != nil {
+		m.cancelInteractionLocked(m.activeInteraction.token, ctx.Err())
+		return
+	}
+	responseCh := m.activeInteraction.approval.ResponseCh
+	respondApproval(responseCh, decision)
+	m.finishActiveInteractionLocked()
+}
+
+func (m *teaModel) respondHITLLocked(response HITLResponse) {
+	if m.activeInteraction == nil || m.activeInteraction.hitl == nil {
+		return
+	}
+	sendHITLResponse(m.activeInteraction.hitl.ResponseCh, response)
+}
+
+func sendHITLResponse(responseCh chan HITLResponse, response HITLResponse) {
+	if responseCh == nil {
+		return
+	}
+	select {
+	case responseCh <- response:
+	default:
+	}
+}
+
+func (m *teaModel) cancelInteractionLocked(token uint64, err error) {
+	if err == nil {
+		err = context.Canceled
+	}
+	if current := m.activeInteraction; current != nil && current.token == token {
+		m.cancelPendingInteractionLocked(current, err)
+		m.finishActiveInteractionLocked()
+		return
+	}
+	for i := range m.queuedInteractions {
+		queued := &m.queuedInteractions[i]
+		if queued.token != token {
+			continue
+		}
+		m.cancelPendingInteractionLocked(queued, err)
+		m.queuedInteractions = append(m.queuedInteractions[:i], m.queuedInteractions[i+1:]...)
+		return
+	}
+}
+
+func (m *teaModel) cancelPendingInteractionLocked(interaction *pendingInteraction, err error) {
+	if interaction.approval != nil {
+		respondApproval(interaction.approval.ResponseCh, ApprovalDeny)
+	}
+	if interaction.hitl != nil {
+		sendHITLResponse(interaction.hitl.ResponseCh, HITLResponse{Err: err})
+	}
+	if interaction.finished != nil {
+		close(interaction.finished)
+		interaction.finished = nil
+	}
+}
+
+func (m *teaModel) cancelApprovalInteractionsLocked() {
+	remaining := make([]pendingInteraction, 0, len(m.queuedInteractions)+1)
+	if m.activeInteraction != nil {
+		if m.activeInteraction.approval != nil {
+			m.cancelPendingInteractionLocked(m.activeInteraction, context.Canceled)
+		} else {
+			remaining = append(remaining, *m.activeInteraction)
+		}
+		m.activeInteraction = nil
+	}
+	for i := range m.queuedInteractions {
+		interaction := &m.queuedInteractions[i]
+		if interaction.approval != nil {
+			m.cancelPendingInteractionLocked(interaction, context.Canceled)
+			continue
+		}
+		remaining = append(remaining, *interaction)
+	}
+	m.queuedInteractions = nil
+	if len(remaining) == 0 {
+		return
+	}
+	m.activeInteraction = &remaining[0]
+	if len(remaining) > 1 {
+		m.queuedInteractions = append(m.queuedInteractions, remaining[1:]...)
+	}
+}
+
+func respondApproval(responseCh chan ApprovalResponse, decision ApprovalDecision) {
+	if responseCh == nil {
+		return
+	}
+	select {
+	case responseCh <- ApprovalResponse{Decision: decision}:
+	default:
+	}
+}
+
+func (m *teaModel) cancelInteractionsLocked() {
+	if current := m.activeInteraction; current != nil {
+		m.cancelPendingInteractionLocked(current, context.Canceled)
+	}
+	for i := range m.queuedInteractions {
+		queued := &m.queuedInteractions[i]
+		m.cancelPendingInteractionLocked(queued, context.Canceled)
+	}
+	m.activeInteraction = nil
+	m.queuedInteractions = nil
+}
+
+func (m *teaModel) handleHITLMessage(msg HITLMessage) (tea.Model, tea.Cmd) {
+	if msg.Context != nil && msg.Context.Err() != nil {
+		sendHITLResponse(msg.ResponseCh, HITLResponse{Err: msg.Context.Err()})
+		return m, nil
+	}
+	m.mu.Lock()
+	token, finished := m.enqueueHITLLocked(msg)
+	view := ""
+	if m.shouldNotify() {
+		view = m.renderViewLocked()
+	}
+	m.mu.Unlock()
+	m.notify(view)
+	return m, waitForInteractionCancel(token, msg.Context, finished, m.runDone)
+}
+
+func waitForInteractionCancel(token uint64, ctx context.Context, finished, runDone <-chan struct{}) tea.Cmd {
+	if ctx == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		select {
+		case <-finished:
+			return nil
+		case <-ctx.Done():
+			return interactionCanceledMsg{token: token, err: ctx.Err()}
+		case <-runDone:
+			return nil
+		}
+	}
 }
 
 // togglePauseLocked flips the paused state and invokes the matching callback.
