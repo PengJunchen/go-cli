@@ -40,4 +40,18 @@ Corresponding outputs are in `evidence/tui-test-list.log`, `evidence/cli-test-li
 
 Environment comparison: the host shell exported `NO_COLOR=1` during final verification. The baseline `NO_COLOR=1` suite failed ANSI assertions; after the fix both the explicitly isolated and ambient runs pass the full TUI package, while the explicit product test still verifies that application rendering suppresses ANSI when requested. The test harness changes process-local test settings only; it does not change the user's shell or runtime environment.
 
+## E2E package ANSI harness follow-up
+
+The separate `tests/e2e_20260802` test binary also contains ANSI assertions and constructs `BubbleteaApp` instances. Its `TestMain` now unsets inherited `NO_COLOR` and pins `TERM=xterm-256color` in that test process, in addition to the existing truecolor settings. Before this follow-up, the full package race run under `NO_COLOR=1` failed the four theme and three ANSI-style tests; the same run now passes. Product behavior remains covered by `internal/tui/TestNoColorSuppressesANSI`, which explicitly launches with `NO_COLOR=1` and still passes.
+
+| Evidence | Exact command | Exit |
+|---|---|---:|
+| E2E ANSI test list | `rtk proxy go test ./tests/e2e_20260802 -list '^(TestTUI_DarkTheme|TestTUI_LightTheme|TestTUI_MonokaiTheme|TestTUI_SolarizedTheme|TestTUI_StyleANSIEscapeSequences|TestTUI_StyleChaining|TestTUI_StyleFaintAttribute)$'` | 0 |
+| Baseline E2E race under inherited `NO_COLOR=1` | `rtk proxy env GOMAXPROCS=2 NO_COLOR=1 go test -race -p=2 ./tests/e2e_20260802 -count=1` | 1 |
+| E2E ANSI assertions with ambient `NO_COLOR=1` | `rtk proxy env GOMAXPROCS=2 NO_COLOR=1 go test -count=1 ./tests/e2e_20260802 -run '^(TestTUI_DarkTheme|TestTUI_LightTheme|TestTUI_MonokaiTheme|TestTUI_SolarizedTheme|TestTUI_StyleANSIEscapeSequences|TestTUI_StyleChaining|TestTUI_StyleFaintAttribute)$'` | 0 |
+| Full E2E package race under ambient `NO_COLOR=1` | `rtk proxy env GOMAXPROCS=2 NO_COLOR=1 go test -race -p=2 ./tests/e2e_20260802 -count=1` | 0 |
+| Product `NO_COLOR` behavior after harness change | `rtk proxy env NO_COLOR=1 go test -count=1 ./internal/tui -run '^TestNoColorSuppressesANSI$' -v` | 0 |
+
+Outputs are in `evidence/tui-e2e-test-list.log`, `evidence/tui-e2e-no-color-red.log`, `evidence/tui-e2e-no-color-green.log`, `evidence/tui-e2e-race.log`, and `evidence/tui-no-color-contract-followup.log`.
+
 Commit SHA is reported with the lane delivery after commit creation.
