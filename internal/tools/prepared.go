@@ -43,6 +43,12 @@ var (
 	// ErrPreparedProxyNameMismatch indicates that a protected definition proxy
 	// was asked to execute a different tool than the one it represents.
 	ErrPreparedProxyNameMismatch = errors.New("tools: protected tool proxy name does not match the call")
+	// ErrPreparedProxyRegistrationStale indicates that the registry changed
+	// after the protected proxy captured its executor snapshot.
+	ErrPreparedProxyRegistrationStale = errors.New("tools: protected tool proxy registration is stale")
+	// ErrPreparedSchemaInvalid indicates that a registered parameter schema is
+	// malformed or uses syntax the prepared validator cannot safely enforce.
+	ErrPreparedSchemaInvalid = errors.New("tools: prepared parameter schema is invalid or unsupported")
 	// ErrPreparedMutationQueueUnavailable indicates that a mutation queue does
 	// not support captured prepared invocations.
 	ErrPreparedMutationQueueUnavailable = errors.New("tools: prepared mutation queue is unavailable")

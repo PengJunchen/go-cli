@@ -7,44 +7,59 @@ import (
 )
 
 type preparedToolDefinition struct {
-	registry *MiddlewareToolRegistry
-	def      ToolDefinition
-	fallback ToolDefinition
+	registry    *MiddlewareToolRegistry
+	def         ToolDefinition
+	description string
+	pin         protectedRegistrationPin
 }
 
-func newProtectedToolDefinition(registry *MiddlewareToolRegistry, def ToolDefinition, wrappers []ToolExecutorWrapper) (ToolDefinition, error) {
+type protectedRegistrationPin struct {
+	identity           TrustedToolIdentity
+	registryGeneration uint64
+}
+
+func newProtectedToolDefinition(registry *MiddlewareToolRegistry, snapshot registeredToolSnapshot) (ToolDefinition, error) {
+	def := snapshot.definition
 	if def == nil {
 		return nil, errors.New("tools: cannot protect a nil tool definition")
 	}
-	var fallback ToolDefinition = def
-	if len(wrappers) > 0 {
-		fallback = &wrappedToolDef{def: def, wrappers: append([]ToolExecutorWrapper(nil), wrappers...)}
+	core := &preparedToolDefinition{
+		registry:    registry,
+		def:         def,
+		description: snapshot.description,
+		pin: protectedRegistrationPin{
+			identity:           snapshot.identity,
+			registryGeneration: snapshot.generations.Registry,
+		},
 	}
-	core := &preparedToolDefinition{registry: registry, def: def, fallback: fallback}
 
 	var capabilities uint8
 	var parameterized parameterizedCapability
-	if definition, ok := def.(Parameterized); ok {
-		schema, err := freezeToolSchema(definition.Parameters())
-		if err != nil {
-			return nil, fmt.Errorf("tools: snapshot exposed schema for %q: %w", def.Name(), err)
-		}
-		parameterized.schema = schema
+	if snapshot.hasParameters {
+		parameterized.schema = snapshot.schema
 		capabilities |= capabilityParameterized
 	}
 	var guidelines promptGuidelineCapability
-	if definition, ok := def.(PromptGuideliner); ok {
-		guidelines.guidelines = append([]string(nil), definition.PromptGuidelines()...)
+	if snapshot.hasPromptGuidelines {
+		guidelines.guidelines = append([]string(nil), snapshot.promptGuidelines...)
 		capabilities |= capabilityPromptGuidelines
 	}
 	var streaming streamingCapability
-	if definition, ok := def.(StreamingBashTool); ok {
+	if snapshot.hasStreaming {
+		definition, ok := def.(StreamingBashTool)
+		if !ok {
+			return nil, ErrPreparedRegistrationUnavailable
+		}
 		streaming = streamingCapability{core: core, definition: definition}
 		capabilities |= capabilityStreaming
 	}
 	var topTools topToolsCapability
-	if definition, ok := def.(TopToolsProvider); ok {
-		topTools = topToolsCapability{registry: registry, provider: definition}
+	if snapshot.hasTopTools {
+		definition, ok := def.(TopToolsProvider)
+		if !ok {
+			return nil, ErrPreparedRegistrationUnavailable
+		}
+		topTools = topToolsCapability{registry: registry, provider: definition, pin: core.pin}
 		capabilities |= capabilityTopTools
 	}
 
@@ -93,27 +108,21 @@ const (
 	capabilityTopTools
 )
 
-func (d *preparedToolDefinition) Name() string        { return d.def.Name() }
-func (d *preparedToolDefinition) Description() string { return d.def.Description() }
+func (d *preparedToolDefinition) Name() string        { return d.pin.identity.ToolName() }
+func (d *preparedToolDefinition) Description() string { return d.description }
 
 func (d *preparedToolDefinition) Execute(ctx context.Context, call ToolCall) (*ToolResult, error) {
-	if call.Name != d.def.Name() {
+	if call.Name != d.pin.identity.ToolName() {
 		return nil, ErrPreparedProxyNameMismatch
 	}
-	enabled, generations, fence := d.registry.preparedExecutionState()
-	if enabled {
-		invocation, err := d.registry.PrepareToolCall(ctx, call)
-		if err != nil {
-			return nil, err
-		}
-		return invocation.Dispatch(ctx)
+	if d.registry == nil {
+		return nil, ErrPreparedInvocationUnavailable
 	}
-	if fence != nil {
-		if err := fence.commit(generations, func() {}); err != nil {
-			return nil, err
-		}
+	invocation, err := d.registry.prepareToolCall(ctx, call, &d.pin)
+	if err != nil {
+		return nil, err
 	}
-	return d.fallback.Execute(ctx, call)
+	return invocation.Dispatch(ctx)
 }
 
 type parameterizedCapability struct{ schema ToolSchemaSnapshot }
@@ -135,21 +144,10 @@ func (c streamingCapability) ExecuteStreaming(ctx context.Context, call ToolCall
 	if c.core == nil || c.definition == nil {
 		return nil, ErrPreparedInvocationUnavailable
 	}
-	if call.Name != c.core.def.Name() {
+	if call.Name != c.core.pin.identity.ToolName() {
 		return nil, ErrPreparedProxyNameMismatch
 	}
-	enabled, generations, fence := c.core.registry.preparedExecutionState()
-	if !enabled {
-		if fence != nil {
-			if err := fence.commit(generations, func() {}); err != nil {
-				return nil, err
-			}
-		}
-		// Legacy execution wrappers only wrap Execute. Keep that path instead of
-		// calling a raw streaming executor outside those wrappers.
-		return c.core.Execute(ctx, call)
-	}
-	invocation, err := c.core.registry.PrepareToolCall(ctx, call)
+	invocation, err := c.core.registry.prepareToolCall(ctx, call, &c.core.pin)
 	if err != nil {
 		return nil, err
 	}
@@ -163,11 +161,15 @@ func (c streamingCapability) ExecuteStreaming(ctx context.Context, call ToolCall
 type topToolsCapability struct {
 	registry *MiddlewareToolRegistry
 	provider TopToolsProvider
+	pin      protectedRegistrationPin
 }
 
 func (c topToolsCapability) TopTools(ctx context.Context, query string, k int) ([]ToolDefinition, error) {
 	if c.registry == nil || c.provider == nil {
 		return nil, ErrPreparedInvocationUnavailable
+	}
+	if err := c.registry.validateProxyPin(ctx, c.pin); err != nil {
+		return nil, err
 	}
 	defs, err := c.provider.TopTools(ctx, query, k)
 	if err != nil {
@@ -263,21 +265,4 @@ type protectedAllCapabilities struct {
 	promptGuidelineCapability
 	streamingCapability
 	topToolsCapability
-}
-
-func (r *MiddlewareToolRegistry) preparedExecutionState() (bool, DispatchFenceSnapshot, *DispatchFence) {
-	state, fence := r.preparedToolPipeline()
-	if state == nil || fence == nil {
-		return false, DispatchFenceSnapshot{}, nil
-	}
-	var enabled bool
-	var generations DispatchFenceSnapshot
-	if err := fence.read(func(current DispatchFenceSnapshot) {
-		generations = current
-		pipeline := state.snapshot()
-		enabled = pipeline.policyConfigured || pipeline.stagesConfigured
-	}); err != nil {
-		return true, DispatchFenceSnapshot{}, fence
-	}
-	return enabled, generations, fence
 }

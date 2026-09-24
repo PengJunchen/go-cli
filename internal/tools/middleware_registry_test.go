@@ -34,10 +34,9 @@ func newRegistryWithTool(t *testing.T, def tools.ToolDefinition) tools.ToolRegis
 	return tr
 }
 
-// TestMiddlewareToolRegistry_BlocksDeniedTool verifies that a deny classifier
-// short-circuits execution: the inner tool's Execute is never called and the
-// middleware surfaces ErrToolDenied.
-func TestMiddlewareToolRegistry_BlocksDeniedTool(t *testing.T) {
+// TestMiddlewareToolRegistryRejectsOpaqueApprovalWrapper verifies that an
+// unreviewed legacy wrapper cannot enter the protected registry dispatch path.
+func TestMiddlewareToolRegistryRejectsOpaqueApprovalWrapper(t *testing.T) {
 	inner := &recordingToolDef{name: "read", desc: "read tool"}
 	tr := newRegistryWithTool(t, inner)
 
@@ -49,19 +48,14 @@ func TestMiddlewareToolRegistry_BlocksDeniedTool(t *testing.T) {
 	wrapped := tools.NewMiddlewareToolRegistry(tr, mw.WrapToolCall)
 
 	def, err := wrapped.Get(context.Background(), "read")
-	require.NoError(t, err)
-	require.NotNil(t, def)
-
-	res, execErr := def.Execute(context.Background(), tools.ToolCall{ID: "1", Name: "read"})
-	require.Error(t, execErr)
-	assert.ErrorIs(t, execErr, approval.ErrToolDenied)
-	assert.Nil(t, res)
+	require.Nil(t, def)
+	require.ErrorIs(t, err, tools.ErrPreparedOpaqueWrapperUnsupported)
 	assert.False(t, inner.executed, "denied tool must not invoke the inner Execute")
 }
 
-// TestMiddlewareToolRegistry_AllowsSafeTool verifies that a SafetyPolicyClassifier
-// which only denies "bash" lets a "read" tool execute normally through the wrapper.
-func TestMiddlewareToolRegistry_AllowsSafeTool(t *testing.T) {
+// TestMiddlewareToolRegistryRejectsOpaqueSafetyWrapper verifies that an
+// opaque safety wrapper cannot create a legacy prepared-dispatch bypass.
+func TestMiddlewareToolRegistryRejectsOpaqueSafetyWrapper(t *testing.T) {
 	inner := &recordingToolDef{name: "read", desc: "read tool"}
 	tr := newRegistryWithTool(t, inner)
 
@@ -73,20 +67,14 @@ func TestMiddlewareToolRegistry_AllowsSafeTool(t *testing.T) {
 	wrapped := tools.NewMiddlewareToolRegistry(tr, mw.WrapToolCall)
 
 	def, err := wrapped.Get(context.Background(), "read")
-	require.NoError(t, err)
-	require.NotNil(t, def)
-
-	res, execErr := def.Execute(context.Background(), tools.ToolCall{ID: "1", Name: "read"})
-	require.NoError(t, execErr)
-	require.NotNil(t, res)
-	assert.Equal(t, "executed:read", res.Output)
-	assert.True(t, inner.executed, "safe tool must invoke the inner Execute")
+	require.Nil(t, def)
+	require.ErrorIs(t, err, tools.ErrPreparedOpaqueWrapperUnsupported)
+	assert.False(t, inner.executed, "opaque wrappers must not create an unprepared execution path")
 }
 
-// TestMiddlewareToolRegistry_AutoApprove verifies that an Ask classification
-// (from PlanClassifier) is resolved to Allow when auto-approve is enabled,
-// allowing the call to reach the inner tool.
-func TestMiddlewareToolRegistry_AutoApprove(t *testing.T) {
+// TestMiddlewareToolRegistryRejectsOpaquePlanWrapper verifies that a legacy
+// Plan wrapper is not silently treated as a prepared authorization policy.
+func TestMiddlewareToolRegistryRejectsOpaquePlanWrapper(t *testing.T) {
 	inner := &recordingToolDef{name: "write", desc: "write tool"}
 	tr := newRegistryWithTool(t, inner)
 
@@ -98,19 +86,13 @@ func TestMiddlewareToolRegistry_AutoApprove(t *testing.T) {
 	wrapped := tools.NewMiddlewareToolRegistry(tr, mw.WrapToolCall)
 
 	def, err := wrapped.Get(context.Background(), "write")
-	require.NoError(t, err)
-	require.NotNil(t, def)
-
-	res, execErr := def.Execute(context.Background(), tools.ToolCall{ID: "1", Name: "write"})
-	require.NoError(t, execErr)
-	require.NotNil(t, res)
-	assert.Equal(t, "executed:write", res.Output)
-	assert.True(t, inner.executed, "auto-approved Ask must invoke the inner Execute")
+	require.Nil(t, def)
+	require.ErrorIs(t, err, tools.ErrPreparedOpaqueWrapperUnsupported)
+	assert.False(t, inner.executed, "opaque approval wrappers must not create an unprepared execution path")
 }
 
-// TestMiddlewareToolRegistry_PassthroughNoWrappers verifies that even when no
-// execution wrappers are configured, Get returns a protected proxy rather
-// than exposing the raw registered executor.
+// TestMiddlewareToolRegistry_PassthroughNoWrappers verifies that a proxy is
+// unavailable until both prepared policy and stages are configured.
 func TestMiddlewareToolRegistry_PassthroughNoWrappers(t *testing.T) {
 	inner := &recordingToolDef{name: "read", desc: "read tool"}
 	tr := newRegistryWithTool(t, inner)
@@ -118,15 +100,9 @@ func TestMiddlewareToolRegistry_PassthroughNoWrappers(t *testing.T) {
 	wrapped := tools.NewMiddlewareToolRegistry(tr)
 
 	def, err := wrapped.Get(context.Background(), "read")
-	require.NoError(t, err)
-	require.NotNil(t, def)
-
-	assert.NotSame(t, inner, def, "Get must not expose the raw registered executor")
-
-	res, execErr := def.Execute(context.Background(), tools.ToolCall{ID: "1", Name: "read"})
-	require.NoError(t, execErr)
-	require.NotNil(t, res)
-	assert.Equal(t, "executed:read", res.Output)
+	require.Nil(t, def)
+	require.ErrorIs(t, err, tools.ErrPreparedToolPolicyUnavailable)
+	assert.False(t, inner.executed, "a proxy without a complete prepared policy must not execute")
 }
 
 // TestMiddlewareToolRegistry_VersionDelegates verifies that Version() forwards
@@ -162,6 +138,7 @@ func TestMiddlewareToolRegistry_HotRegistrationVisible(t *testing.T) {
 	require.NoError(t, tr.Register(context.Background(), &recordingToolDef{name: "read", desc: "read tool"}))
 
 	wrapped := tools.NewMiddlewareToolRegistry(tr)
+	requirePreparedAllowPolicy(t, wrapped)
 	vBefore := wrapped.Version()
 
 	// Hot-register a new tool through the wrapper.
@@ -185,4 +162,12 @@ func TestMiddlewareToolRegistry_HotRegistrationVisible(t *testing.T) {
 	}
 	assert.Contains(t, names, "write")
 	assert.Contains(t, names, "read")
+}
+
+func requirePreparedAllowPolicy(t *testing.T, registry *tools.MiddlewareToolRegistry) {
+	t.Helper()
+	require.NoError(t, registry.SetPreparedToolStages(tools.PreparedToolStages{}))
+	require.NoError(t, registry.SetPreparedToolPolicy(func(_ context.Context, request tools.PreparedPolicyRequest) (tools.PreparedPolicyDecision, error) {
+		return tools.PreparedPolicyDecision{Allowed: true, Generations: request.Generations}, nil
+	}))
 }
