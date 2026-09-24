@@ -316,6 +316,36 @@ func TestProviderRegistryRejectsCanonicalNameThatShadowsAlias(t *testing.T) {
 	assert.Equal(t, "first-compatible", resolved.ProviderID)
 }
 
+func TestProviderRegistryGetModelInfoUsesCanonicalIDForExternalLookup(t *testing.T) {
+	provider := &resolverSpecFixtureProvider{
+		name: "first-compatible",
+		spec: ProviderSpec{
+			ProviderID:              "first-compatible",
+			Aliases:                 []string{"second-compatible"},
+			ProtocolID:              ProtocolOpenAICompatible,
+			DefaultBaseURL:          "https://fixture.invalid/v1",
+			DefaultEndpointExplicit: true,
+			Enabled:                 true,
+		},
+	}
+	registry := NewProviderRegistry()
+	require.NoError(t, registry.Register(provider))
+	external := &recordingModelRegistry{info: ModelInfo{Name: "remote-model", ContextWindow: 1234}, found: true}
+	registry.modelRegistry = external
+
+	for _, providerID := range []string{"FIRST-COMPATIBLE", "SECOND-COMPATIBLE"} {
+		info := registry.GetModelInfo(context.Background(), providerID, "remote-model")
+		assert.Equal(t, "remote-model", info.Name)
+	}
+	assert.Equal(t, []string{"first-compatible", "first-compatible"}, external.providers,
+		"canonical names and aliases must query the same external metadata key")
+
+	external.found = false
+	missing := registry.GetModelInfo(context.Background(), "SECOND-COMPATIBLE", "unknown-model")
+	assert.Equal(t, ModelInfo{}, missing, "missing metadata must remain unknown")
+	assert.Equal(t, "first-compatible", external.providers[len(external.providers)-1])
+}
+
 func TestWithModelsCopiesCallerSlice(t *testing.T) {
 	models := []ModelInfo{{Name: "original", ContextWindow: 100}}
 	provider := NewEinoProvider(WithModels(models))
@@ -500,6 +530,20 @@ type resolverSpecFixtureProvider struct {
 	spec   ProviderSpec
 	models []ModelInfo
 }
+
+type recordingModelRegistry struct {
+	providers []string
+	info      ModelInfo
+	found     bool
+}
+
+func (r *recordingModelRegistry) Lookup(_ context.Context, provider, _ string) (ModelInfo, bool) {
+	r.providers = append(r.providers, provider)
+	return r.info, r.found
+}
+func (*recordingModelRegistry) Providers() []ProviderMetadata        { return nil }
+func (*recordingModelRegistry) ModelsForProvider(string) []ModelInfo { return nil }
+func (*recordingModelRegistry) Refresh(context.Context) error        { return nil }
 
 func (p *resolverSpecFixtureProvider) Name() string { return p.name }
 func (p *resolverSpecFixtureProvider) Models() []ModelInfo {

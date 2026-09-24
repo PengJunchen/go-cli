@@ -242,25 +242,22 @@ func (r *ProviderRegistry) Default() ModelProvider {
 // provider. It returns an empty ModelInfo when the provider or model is not
 // found.
 func (r *ProviderRegistry) GetModelInfo(ctx context.Context, provider, model string) ModelInfo {
-	provider = canonicalProviderID(provider)
-	p, err := r.Get(provider)
-	if err != nil {
-		// Provider not registered locally; try the external registry.
-		if r.modelRegistry != nil {
-			if info, ok := r.modelRegistry.Lookup(ctx, provider, model); ok {
-				return info
+	r.mu.RLock()
+	provider = r.canonicalProviderNameLocked(provider)
+	p, exists := r.providers[provider]
+	modelRegistry := r.modelRegistry
+	r.mu.RUnlock()
+	if exists {
+		for _, m := range p.Models() {
+			if m.Name == model {
+				return m
 			}
 		}
-		return ModelInfo{}
 	}
-	for _, m := range p.Models() {
-		if m.Name == model {
-			return m
-		}
-	}
-	// Model not in the provider's built-in list; try the external registry.
-	if r.modelRegistry != nil {
-		if info, ok := r.modelRegistry.Lookup(ctx, provider, model); ok {
+	// A local miss may be enriched by the external registry, but the lookup
+	// always uses the canonical provider identity selected above.
+	if modelRegistry != nil {
+		if info, ok := modelRegistry.Lookup(ctx, provider, model); ok {
 			return info
 		}
 	}
