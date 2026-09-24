@@ -38,6 +38,6 @@ All commands ran from the worktree. Test-list commands and targeted commands exi
 
 Corresponding outputs are in `evidence/tui-test-list.log`, `evidence/cli-test-list.log`, `evidence/approval-test-list.log`, `evidence/tui-targeted.log`, `evidence/cli-targeted.log`, `evidence/approval-targeted.log`, `evidence/tui-race.log`, `evidence/tui-no-color-after.log`, `evidence/tui-no-color-contract.log`, and `evidence/tui-ambient-after.log`. The late cancellation regressions' baseline failures are in `evidence/tui-cancel-race-red.log` and `evidence/approval-context-race-red.log`.
 
-Environment comparison: the baseline `NO_COLOR=1` suite failed ANSI assertions; after the fix the same environment passes the full TUI package, while the explicit product test still verifies that application rendering suppresses ANSI when requested. The test harness changes process-local test settings only; it does not change the user's shell or runtime environment.
+Environment comparison: the host shell exported `NO_COLOR=1` during final verification. The baseline `NO_COLOR=1` suite failed ANSI assertions; after the fix both the explicitly isolated and ambient runs pass the full TUI package, while the explicit product test still verifies that application rendering suppresses ANSI when requested. The test harness changes process-local test settings only; it does not change the user's shell or runtime environment.
 
 Commit SHA is reported with the lane delivery after commit creation.
