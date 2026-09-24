@@ -54,3 +54,11 @@ Result: PASS; tracing, cmd/cli, internal/llm, and internal/core packages passed 
 
 Affected-package race command: `rtk env GOMAXPROCS=2 go test -race -p 2 ./internal/tracing ./internal/llm ./internal/core ./cmd/cli -count=1`
 Result: PASS; tracing, llm, core, and cli packages passed.
+
+Failure-synthesis compatibility regression exact list:
+Command: `rtk proxy go test -list '^TestFailureTurnSynthesizer_ProviderErrorBodyKeywordsAreNotRecoverySignals$' ./internal/core`
+Result: PASS; the named regression test was discovered.
+Command: `rtk proxy go test ./internal/core -run '^TestFailureTurnSynthesizer_ProviderErrorBodyKeywordsAreNotRecoverySignals$' -count=1`
+Result: PASS.
+Race command: `rtk env GOMAXPROCS=2 go test -race -p 2 ./internal/core -run '^TestFailureTurnSynthesizer_ProviderErrorBodyKeywordsAreNotRecoverySignals$' -count=1`
+Result: PASS.
