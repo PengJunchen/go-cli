@@ -40,6 +40,11 @@ type AgentMessage struct {
 	// ToolName is the name of the tool that produced this message. Populated
 	// for "tool" role messages.
 	ToolName string `json:"tool_name,omitempty"`
+	// InputKind preserves whether a user-facing message came from an initial
+	// submission, steering input, or follow-up input.
+	InputKind string `json:"input_kind,omitempty"`
+	// ReceiptOutcome records the terminal truth for a tool receipt.
+	ReceiptOutcome string `json:"receipt_outcome,omitempty"`
 }
 
 // String returns a compact one-line representation of the message.
