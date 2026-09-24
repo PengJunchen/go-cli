@@ -666,7 +666,7 @@
         "Persist unresolved-action quarantine so a parent process crash cannot expose the same workspace to a conflicting mutation while its child/process group may still be running; do not kill by PID alone."
       ],
       "verification": [
-        "Planned tests: TestAppendFailurePreventsSavedAck, TestToolIntentDurableBeforeDispatch, TestCrashAfterActionMarksUnknownWithoutReplay, TestValidJSONTailWithoutNewlineIsPreserved, TestTruncatedJSONTailIsQuarantined, TestMalformedCompleteJSONLineFailsClosed, TestDirectoryStoreAppendOpensWriter.",
+        "Planned tests: TestAppendFailurePreventsSavedAck, TestToolIntentDurableBeforeDispatch, TestCrashAfterActionMarksUnknownWithoutReplay, TestValidJSONTailWithoutNewlineIsPreserved, TestTruncatedJSONTailIsQuarantined, TestMalformedCompleteJSONLineFailsClosed, TestDirectoryStoreAppendOpensWriter, TestAssemblyToolSearchFilteringSurvivesProtectedListProxy.",
         "Use injectable file writer failures and an actual child process killed after side effect but before receipt; assert side-effect count remains exactly one after restart. Kill the parent process while its child keeps writing; assert restart blocks conflicting writes but allows safe reads until verified child exit or explicit manual reconciliation.",
         "No test should require fsync for each token; assert only declared semantic commit points.",
         "Planned tests: TestRecoveryBlocksWorkspaceMutationWhileOrphanChildLives, TestRecoveryAllowsSafeReadWhileWorkspaceQuarantined."
