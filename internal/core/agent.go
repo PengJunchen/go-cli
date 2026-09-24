@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 
 	"github.com/pengjunchen/go-cli/internal/tracing"
@@ -40,7 +41,8 @@ var _ eventSource = (*AgentImpl)(nil)
 var ErrCanonicalTranscriptRequired = errors.New("core: canonical transcript required for tool or injected input run")
 
 // ErrCanonicalTranscriptInvalid indicates a CanonicalLoop returned a delta
-// that does not begin with exactly the current user submission.
+// that does not contain a valid current-run user input and closed tool-call
+// groups.
 var ErrCanonicalTranscriptInvalid = errors.New("core: invalid canonical transcript")
 
 // AgentImpl is a stateful wrapper around an AgentLoop. It maintains message
@@ -342,16 +344,78 @@ func validateCanonicalDelta(currentUserContent string, delta []AgentMessage) err
 	if first.Role != "user" || first.InputKind != InputKindUser || first.Content != currentUserContent {
 		return fmt.Errorf("%w: first entry must be the current user submission", ErrCanonicalTranscriptInvalid)
 	}
+	openCalls := make(map[string]string)
 	userInputs := 0
-	for _, message := range delta {
-		if message.InputKind == InputKindUser {
-			userInputs++
+	for i, message := range delta {
+		switch message.Role {
+		case "user":
+			if len(openCalls) > 0 {
+				return fmt.Errorf("%w: user input at entry %d precedes tool receipts", ErrCanonicalTranscriptInvalid, i)
+			}
+			if len(message.ToolCalls) > 0 || message.ToolCallID != "" || message.ToolName != "" || message.ReceiptOutcome != "" {
+				return fmt.Errorf("%w: user input at entry %d contains tool fields", ErrCanonicalTranscriptInvalid, i)
+			}
+			switch message.InputKind {
+			case InputKindUser:
+				userInputs++
+				if i != 0 {
+					return fmt.Errorf("%w: current user submission must be the first entry", ErrCanonicalTranscriptInvalid)
+				}
+			case InputKindSteering, InputKindFollowUp:
+			default:
+				return fmt.Errorf("%w: user input at entry %d has invalid input kind %q", ErrCanonicalTranscriptInvalid, i, message.InputKind)
+			}
+		case "assistant":
+			if len(openCalls) > 0 {
+				return fmt.Errorf("%w: assistant entry %d precedes tool receipts", ErrCanonicalTranscriptInvalid, i)
+			}
+			if message.InputKind != "" || message.ToolCallID != "" || message.ToolName != "" || message.ReceiptOutcome != "" {
+				return fmt.Errorf("%w: assistant entry %d contains input or receipt fields", ErrCanonicalTranscriptInvalid, i)
+			}
+			for _, call := range message.ToolCalls {
+				if strings.TrimSpace(call.ID) == "" || strings.TrimSpace(call.Name) == "" {
+					return fmt.Errorf("%w: assistant entry %d has a tool call without an id or name", ErrCanonicalTranscriptInvalid, i)
+				}
+				if _, exists := openCalls[call.ID]; exists {
+					return fmt.Errorf("%w: assistant entry %d repeats tool call id %q", ErrCanonicalTranscriptInvalid, i, call.ID)
+				}
+				openCalls[call.ID] = call.Name
+			}
+		case "tool":
+			if message.InputKind != "" || len(message.ToolCalls) > 0 {
+				return fmt.Errorf("%w: tool receipt at entry %d contains input or call fields", ErrCanonicalTranscriptInvalid, i)
+			}
+			toolName, exists := openCalls[message.ToolCallID]
+			if !exists {
+				return fmt.Errorf("%w: tool receipt at entry %d has no open assistant call", ErrCanonicalTranscriptInvalid, i)
+			}
+			if message.ToolName != toolName {
+				return fmt.Errorf("%w: tool receipt at entry %d names %q, expected %q", ErrCanonicalTranscriptInvalid, i, message.ToolName, toolName)
+			}
+			if !validReceiptOutcome(message.ReceiptOutcome) {
+				return fmt.Errorf("%w: tool receipt at entry %d has invalid outcome %q", ErrCanonicalTranscriptInvalid, i, message.ReceiptOutcome)
+			}
+			delete(openCalls, message.ToolCallID)
+		default:
+			return fmt.Errorf("%w: entry %d has unsupported role %q", ErrCanonicalTranscriptInvalid, i, message.Role)
 		}
 	}
 	if userInputs != 1 {
 		return fmt.Errorf("%w: expected exactly one current user submission, got %d", ErrCanonicalTranscriptInvalid, userInputs)
 	}
+	if len(openCalls) > 0 {
+		return fmt.Errorf("%w: transcript ended with %d unreceipted tool calls", ErrCanonicalTranscriptInvalid, len(openCalls))
+	}
 	return nil
+}
+
+func validReceiptOutcome(outcome string) bool {
+	switch outcome {
+	case ReceiptOutcomeSuccess, ReceiptOutcomeError, ReceiptOutcomeInterrupted, ReceiptOutcomeUnknown:
+		return true
+	default:
+		return false
+	}
 }
 
 func requiresCanonicalTranscript(events []AgentEvent, history []AgentMessage) bool {
