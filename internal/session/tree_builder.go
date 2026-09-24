@@ -58,7 +58,20 @@ func (b *DefaultSessionTreeBuilder) BuildFromStore(ctx context.Context, store Se
 		return tree, nil
 	}
 
-	// Build a lookup map, skipping invalid entries.
+	// Version one files are canonical recovery input: fail closed on malformed,
+	// duplicate, or orphan rows instead of rebuilding a partial history.
+	hasVersionOne := false
+	for _, entry := range entries {
+		if entry != nil && entry.RecordVersion == 1 {
+			hasVersionOne = true
+			break
+		}
+	}
+	if hasVersionOne {
+		return b.buildVersionOneTree(ctx, entries, tree)
+	}
+
+	// Legacy version zero stores retain their tolerant rebuild behavior.
 	entryMap := make(map[string]*SessionEntry, len(entries))
 	for _, e := range entries {
 		if e == nil || e.ID == "" || e.Type == "" {
@@ -101,6 +114,142 @@ func (b *DefaultSessionTreeBuilder) BuildFromStore(ctx context.Context, store Se
 	}
 
 	return tree, nil
+}
+
+func (b *DefaultSessionTreeBuilder) buildVersionOneTree(ctx context.Context, entries []*SessionEntry, tree SessionTree) (SessionTree, error) {
+	entryMap := make(map[string]*SessionEntry, len(entries))
+	seqIDs := make(map[uint64]string, len(entries))
+	for index, entry := range entries {
+		if entry == nil || entry.ID == "" || entry.Type == "" {
+			return nil, fmt.Errorf("session: invalid versioned tree entry at index %d", index)
+		}
+		if _, exists := entryMap[entry.ID]; exists {
+			return nil, fmt.Errorf("session: versioned tree repeats entry ID %q", entry.ID)
+		}
+		if entry.RecordVersion > 1 {
+			return nil, fmt.Errorf("session: unsupported record version %d at entry %q", entry.RecordVersion, entry.ID)
+		}
+		if entry.RecordVersion == 1 {
+			if err := validateVersion1EntryCoordinates(*entry); err != nil {
+				return nil, fmt.Errorf("session: invalid version 1 entry %q: %w", entry.ID, err)
+			}
+			if entry.Seq == 0 {
+				return nil, fmt.Errorf("session: version 1 entry %q has no sequence", entry.ID)
+			}
+		}
+		if entry.Seq != 0 {
+			if previous, exists := seqIDs[entry.Seq]; exists {
+				return nil, fmt.Errorf("session: entries %q and %q repeat sequence %d", previous, entry.ID, entry.Seq)
+			}
+			seqIDs[entry.Seq] = entry.ID
+		}
+		entryMap[entry.ID] = entry
+	}
+
+	for _, entry := range entryMap {
+		if entry.ParentID != "" {
+			parent, exists := entryMap[entry.ParentID]
+			if !exists {
+				return nil, fmt.Errorf("session: versioned tree entry %q has missing parent %q", entry.ID, entry.ParentID)
+			}
+			if parent.Seq != 0 && entry.Seq != 0 && parent.Seq >= entry.Seq {
+				return nil, fmt.Errorf("session: entry %q sequence %d does not follow parent %q sequence %d", entry.ID, entry.Seq, parent.ID, parent.Seq)
+			}
+		}
+		if entry.RecordVersion == 1 && entry.Type == EntryTypeCompaction {
+			boundary, exists := entryMap[entry.CompactedThroughEntryID]
+			if !exists || boundary.Seq >= entry.Seq {
+				return nil, fmt.Errorf("session: compaction entry %q has an unmappable source boundary %q", entry.ID, entry.CompactedThroughEntryID)
+			}
+		}
+		if entry.RecordVersion == 1 && entry.Type == EntryTypeCheckpoint && entry.ActiveLeafEntryID != "" && entry.ActiveLeafEntryID != entry.ID {
+			activeLeaf, exists := entryMap[entry.ActiveLeafEntryID]
+			if !exists || (activeLeaf.Seq != 0 && activeLeaf.Seq >= entry.Seq) {
+				return nil, fmt.Errorf("session: checkpoint entry %q has an unmappable active leaf %q", entry.ID, entry.ActiveLeafEntryID)
+			}
+		}
+	}
+
+	ordered, err := strictTopoSortEntries(entryMap)
+	if err != nil {
+		return nil, err
+	}
+	for _, entry := range ordered {
+		if err := tree.Append(ctx, entry); err != nil {
+			return nil, fmt.Errorf("session: append recovered entry %q: %w", entry.ID, err)
+		}
+	}
+
+	activeLeafID := ""
+	var activeCheckpointSeq uint64
+	var latestSeq uint64
+	var latestEntryID string
+	for _, entry := range ordered {
+		if entry.RecordVersion == 1 && entry.Type == EntryTypeCheckpoint && entry.ActiveLeafEntryID != "" && entry.Seq >= activeCheckpointSeq {
+			activeLeafID = entry.ActiveLeafEntryID
+			activeCheckpointSeq = entry.Seq
+		}
+		if entry.RecordVersion == 1 && entry.Seq >= latestSeq {
+			latestSeq = entry.Seq
+			latestEntryID = entry.ID
+		}
+	}
+	if activeCheckpointSeq < latestSeq {
+		activeLeafID = latestEntryID
+	}
+	if activeLeafID != "" {
+		if err := tree.MoveTo(ctx, activeLeafID); err != nil {
+			return nil, fmt.Errorf("session: restore active leaf %q: %w", activeLeafID, err)
+		}
+	}
+	return tree, nil
+}
+
+func strictTopoSortEntries(entryMap map[string]*SessionEntry) ([]*SessionEntry, error) {
+	children := make(map[string][]*SessionEntry, len(entryMap))
+	indegree := make(map[string]int, len(entryMap))
+	for id, entry := range entryMap {
+		indegree[id] = 0
+		if entry.ParentID != "" {
+			children[entry.ParentID] = append(children[entry.ParentID], entry)
+			indegree[id] = 1
+		}
+	}
+	less := func(left, right *SessionEntry) bool {
+		if left.Seq != right.Seq {
+			if left.Seq == 0 {
+				return true
+			}
+			if right.Seq == 0 {
+				return false
+			}
+			return left.Seq < right.Seq
+		}
+		return left.ID < right.ID
+	}
+	ready := make([]*SessionEntry, 0, len(entryMap))
+	for id, count := range indegree {
+		if count == 0 {
+			ready = append(ready, entryMap[id])
+		}
+	}
+	var ordered []*SessionEntry
+	for len(ready) > 0 {
+		sort.Slice(ready, func(i, j int) bool { return less(ready[i], ready[j]) })
+		entry := ready[0]
+		ready = ready[1:]
+		ordered = append(ordered, entry)
+		for _, child := range children[entry.ID] {
+			indegree[child.ID]--
+			if indegree[child.ID] == 0 {
+				ready = append(ready, child)
+			}
+		}
+	}
+	if len(ordered) != len(entryMap) {
+		return nil, fmt.Errorf("session: versioned tree contains a parent cycle")
+	}
+	return ordered, nil
 }
 
 // topoSortEntries returns entries ordered so that every parent appears before
