@@ -163,6 +163,62 @@ func TestSubagentSendReportsDroppedMessage(t *testing.T) {
 	require.NoError(t, err)
 }
 
+type panickingSubAgentRunner struct{}
+
+func (*panickingSubAgentRunner) Run(context.Context, string, <-chan string, func(AgentEvent)) (AgentMessage, error) {
+	panic("runner fixture panic")
+}
+
+func TestSubAgentPanicIsContainedAndFinalized(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	tests := []struct {
+		name    string
+		factory SubAgentRunnerFactory
+	}{
+		{
+			name: "runner factory",
+			factory: func(SubAgentConfig) subAgentRunner {
+				panic("factory fixture panic")
+			},
+		},
+		{
+			name: "runner",
+			factory: func(SubAgentConfig) subAgentRunner {
+				return &panickingSubAgentRunner{}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sub := mustSubAgent(NewDefaultSubAgent(
+				SubAgentConfig{Name: "panic-" + tt.name},
+				WithSubAgentRunner(tt.factory),
+			))
+			events, err := sub.Run(context.Background(), "trigger panic")
+			require.NoError(t, err)
+
+			waitCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			result, waitErr := sub.Wait(waitCtx)
+
+			require.ErrorIs(t, waitErr, ErrSubAgentPanicked, "panic must not be reported as successful completion")
+			assert.Empty(t, result)
+			assert.Equal(t, SubAgentFailed, sub.State())
+			assert.ErrorIs(t, sub.Send(context.Background(), "too late"), ErrSubAgentNotRunning)
+
+			var sawErrorEvent bool
+			for event := range events {
+				if event.Kind == "error" {
+					sawErrorEvent = true
+					assert.Contains(t, event.Content, "panic")
+				}
+			}
+			assert.True(t, sawErrorEvent, "panic failure should be recorded on the closed event stream")
+		})
+	}
+}
+
 func TestSubAgentInterruptStopsRun(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
