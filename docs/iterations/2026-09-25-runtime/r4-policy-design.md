@@ -1,6 +1,6 @@
 # R4 权限与工具边界预设计
 
-状态：设计草案，等待独立审查；不是 R4-DES-01 已完成，也不是实现验收。源码快照：3fe4389。R1 执行生命周期与 R3 协议/schema 验收仍是实现前置。
+状态：R4-DES-01 设计已获独立审查批准；R4-BLD-01 approval/Plan 实现与 R4-EFFECT-01 registry/effect 接线正在进行，尚未通过实现审查或完整 gate。D-01 保持当前 `exit_plan_mode` 行为。R1 已完成；R3 相关协议/schema 验收仍是相应实现范围的前置。
 
 ## 当前实证
 
@@ -18,13 +18,17 @@
 
 最小身份包括注册来源、具体执行器实例/注册代次、能力摘要、规范化工作目录和远端 endpoint scope；动态替换必须使旧授权失效。凭据不能进入身份明文或审计 key。默认先使用进程内注册代次与执行器绑定，跨进程授权只在能够验证稳定能力版本时复用，否则重新询问；不伪造持久身份。
 
-一次 Get 必须取得 definition 与对应身份的同一不可变快照，直到该次调用完成。审批后才重新 Get 同名工具会产生 TOCTOU，应禁止。等待审批期间同名注册代次变化，旧请求必须失效并重新解析/审批，不能继续用旧授权执行旧或新 definition。最终短临界区同时校验注册/权限/Plan Mode 代次并标记 dispatch committed；从这一点起固定执行同一 definition，后来替换不能偷换执行器。锁不跨用户等待或实际执行持有。工具 wrapper 在调度边界注入身份，所有嵌套 wrapper 必须保留它。
+一次 Get 必须取得 definition 与对应身份的同一不可变快照，直到该次调用完成。审批后才重新 Get 同名工具会产生 TOCTOU，应禁止。等待审批期间注册、approval-policy epoch 或 Plan 代次变化，旧 invocation 必须在 dispatch 前失效；当前 invocation 不得 rebase、静默重评或自动弹出第二次审批。新的用户调用才可基于新快照重新准备。最终短临界区同时校验注册/权限/Plan Mode 代次并标记 dispatch committed；从这一点起固定执行同一 definition，后来替换不能偷换执行器。锁不跨用户等待或实际执行持有。工具 wrapper 在调度边界注入身份，所有嵌套 wrapper 必须保留它。
 
 ## 决策与缓存
 
-每次审批捕获 mode、policy generation、Plan Mode 状态及代次、classifier、executor identity/注册代次 和 canonical args hash 的同一快照。缓存查询、实际分类、回调和审计使用这份快照。审批等待期间任何相关权限、Plan Mode 或注册代次变化，都在最终 dispatch commit 前检测；失效时重新评估或拒绝，不能使用刚过期的批准。尤其不能先通过 inactive Plan wrapper，再在审批等待时进入 Plan Mode 后继续执行 mutation。锁不跨用户等待或执行持有。
+每次审批捕获 mode、approval-policy epoch、Plan Mode 状态及代次、classifier、executor identity/注册代次和 canonical args hash 的同一快照。缓存查询、实际分类、回调和审计使用这份快照。approval-policy epoch 是独立的可撤销授权修订号；正向 memoization grant 的增加不推进它。审批等待期间任何相关权限、Plan Mode 或注册代次变化，都在最终 dispatch commit 前检测；失效时拒绝当前 invocation，不得使用过期批准、rebase 旧 permit、静默重评或自动发起第二次审批。尤其不能先通过 inactive Plan wrapper，再在审批等待时进入 Plan Mode 后继续执行 mutation。锁不跨用户等待或执行持有。
 
 仅合法 Allow 可以调用 next；非法 classification、未知 PermissionMode、nil resolver result、身份缺失均失败关闭，并给出明确错误。Allow Once 不写任何可复用缓存；Always Allow 的 UI 应说明当前作用域，其 key 包含上述真实身份。Deny 的记忆期限必须明确，不将用户单次拒绝固化为跨会话永久拒绝。
+
+正向 grant 与撤销修订分开发布，避免并行 `AlwaysAllow` 准备互相作废。`DispatchFenceSnapshot.Approval` 是独立 approval-policy epoch。一个授权范围内新增的正向缓存 grant 使用窄操作 `PublishApprovalGrant(expected DispatchFenceSnapshot, update func()) (DispatchFenceSnapshot, error)`：`expected` 必须提供，并在同一共享 fence 下精确比较 Registry、Approval、Plan 三个值；更新回调只做短暂内存发布，不执行 I/O。成功时不推进任何 generation，返回当前 post-grant tuple（没有并发撤销时可与 expected 完全相同）。`AlwaysAllow` 的当前调用许可绑定此返回 tuple；缓存项 key 必须同时包含可信 executor identity、canonical argument digest、registry generation、Plan generation 和 approval-policy epoch。这样 A、B 两个已准备调用都获得 `AlwaysAllow` 时，A 发布正向 grant 不会使 B 的 expected tuple 陈旧，二者仍各有一次执行许可。
+
+任何可能撤销或重定义既有授权的状态变化继续经共享 fence 的普通 `Publish` 推进对应 generation：mode/policy/classifier 替换、每次显式 Deny 决策发布、撤销状态写入、grant 清除/删除/替换/重载推进 Approval epoch；单次拒绝不因此被持久化为永久 deny；工具注册替换推进 Registry generation；Plan 转换推进 Plan generation。它们仍会使旧缓存 key 与旧 prepared permit 失效。若 `PublishApprovalGrant` 因完整 expected tuple 已变化而失败，当前 invocation 失败关闭，不将旧 permit 绑定到新 tuple，也不自动重开审批。
 
 Plan Mode 是独立的变更限制，优先于 auto_full。已验证的第一方只读工具及原先明确支持的只读网络工具可继续使用；workspace/git/network mutation、external_effect、unknown 被拒绝。控制工具逐个定义规则，不能因为归入 control 就全部放行。子代理继承同一限制，不能创建权限更高的 registry 或审批路径。Plan 激活若晚于 dispatch commit，无法撤销已经发生的副作用；界面必须显示仍在执行/清理的动作，不能把模式切换显示为进程已停止，取消与资源收敛由 R1 owner 保证。
 
@@ -43,7 +47,7 @@ grep/find/ls/read/remote capture 在收集源限制字节/条数，不能先无�
 ## 验收和拆分
 
 1. 身份与效果 seam：同名恶意替换、注册代次改变、原 definition 快照、子代理继承、可选接口经 wrapper 保留；先红后绿。
-2. 审批：unknown 枚举拒绝、Allow Once/Always Allow、切换模式的受控竞争测试、等待审批时降权/进入 Plan Mode/同名替换、List 执行不绕过、dispatch commit 前后受控竞争、真实 CLI/TUI 路径一致。
+2. 审批：unknown 枚举拒绝、Allow Once/Always Allow、并行 AlwaysAllow A/B 正向 grant 不推进 epoch 且两许可均可执行、PublishApprovalGrant 必须精确匹配全 tuple、mode/revoke/clear/delete/deny/reload/classifier、Plan 与 registry 更新仍使旧 permit 失效；等待审批时发生变更后当前请求不得 rebase 或二次弹窗。List 执行不绕过、dispatch commit 前后受控竞争、真实 CLI/TUI 路径一致。
 3. 工具完整性：默认注册表效果/schema 全枚举，非法参数零副作用、父路径 symlink、bounded capture、取消与无 provider 明确失败。
 4. 独立审计后运行 tools/approval/core/cli 相关 race 包；用 HTTP fixture 验证 endpoint 身份和 MCP 替换不会复用授权。
 
