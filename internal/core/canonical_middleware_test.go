@@ -1,9 +1,14 @@
 package core
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log/slog"
+	"strconv"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -185,4 +190,64 @@ func TestCanonicalFailureSynthesisDoesNotRetryOrRebuildTranscriptFromEvents(t *t
 	require.ErrorContains(t, err, "connection timeout")
 	assert.Equal(t, 1, base.canonicalCalls, "unknown tool outcome must never be retried")
 	assert.Equal(t, first, result, "typed transcript must be returned unchanged; event projections are not history authority")
+}
+
+type canonicalPrivacyHook struct {
+	beforeErr error
+	afterErr  error
+}
+
+func (*canonicalPrivacyHook) Name() string { return "privacy-test" }
+
+func (h *canonicalPrivacyHook) BeforeRun(context.Context, Submission) error { return h.beforeErr }
+
+func (h *canonicalPrivacyHook) AfterRun(context.Context, Submission, Result, error) error {
+	return h.afterErr
+}
+
+type alwaysRecoverableSynthesizer struct{}
+
+func (alwaysRecoverableSynthesizer) Synthesize(context.Context, error) (SynthesizedMessage, error) {
+	return SynthesizedMessage{}, nil
+}
+
+func (alwaysRecoverableSynthesizer) IsRecoverable(error) bool { return true }
+
+func TestCanonicalMiddlewareLogsErrorMetadataWithoutRawText(t *testing.T) {
+	var output bytes.Buffer
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&output, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	marker := strings.Repeat("z", 32) + strconv.FormatInt(time.Now().UnixNano(), 10)
+	synthesisErr := errors.New(marker)
+	synthesisBase := &canonicalMiddlewareLoopStub{errors: []error{synthesisErr}}
+	synthesisWrapped := NewMiddlewareChain(NewFailureSynthesisMiddleware(alwaysRecoverableSynthesizer{})).Wrap(synthesisBase)
+	synthesisCanonical, ok := synthesisWrapped.(CanonicalLoop)
+	require.True(t, ok)
+	_, _ = synthesisCanonical.RunCanonical(context.Background(), Submission{Content: "request"})
+
+	beforeHook := &canonicalPrivacyHook{beforeErr: errors.New(marker + "-before")}
+	beforeWrapped := NewMiddlewareChain(NewHookMiddleware(NewHookChain(beforeHook))).Wrap(&canonicalMiddlewareLoopStub{})
+	beforeCanonical, ok := beforeWrapped.(CanonicalLoop)
+	require.True(t, ok)
+	_, _ = beforeCanonical.RunCanonical(context.Background(), Submission{Content: "request"})
+
+	afterHook := &canonicalPrivacyHook{afterErr: errors.New(marker + "-after")}
+	afterBase := &canonicalMiddlewareLoopStub{results: []CanonicalRunResult{{
+		Transcript: []TranscriptEntry{{Message: AgentMessage{Role: "user", Content: "request", InputKind: InputKindUser}}},
+	}}}
+	afterWrapped := NewMiddlewareChain(NewHookMiddleware(NewHookChain(afterHook))).Wrap(afterBase)
+	afterCanonical, ok := afterWrapped.(CanonicalLoop)
+	require.True(t, ok)
+	_, _ = afterCanonical.RunCanonical(context.Background(), Submission{Content: "request"})
+
+	logged := output.String()
+	assert.NotContains(t, logged, marker, "canonical logs must not contain caller-controlled error text")
+	assert.Contains(t, logged, "error_type=*errors.errorString")
+	assert.Contains(t, logged, "error_len="+strconv.Itoa(len(marker)))
+	assert.Contains(t, logged, "core.failure_synthesis.canonical_retry_skipped")
+	assert.Contains(t, logged, "core.hookchain.before.halt")
+	assert.Contains(t, logged, "core.hookchain.after.error")
+	assert.Contains(t, logged, "core.hook.after_error")
 }
