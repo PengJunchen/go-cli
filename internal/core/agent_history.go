@@ -40,6 +40,13 @@ func cloneAgentMessages(messages []AgentMessage) []AgentMessage {
 	return cloned
 }
 
+// CloneAgentMessages returns an independent copy of canonical history values.
+// It copies protocol JSON values such as tool arguments, content blocks, and
+// usage accounting while preserving the message's canonical metadata.
+func CloneAgentMessages(messages []AgentMessage) []AgentMessage {
+	return cloneAgentMessages(messages)
+}
+
 func cloneUsage(usage *llm.Usage) *llm.Usage {
 	if usage == nil {
 		return nil

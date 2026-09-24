@@ -57,11 +57,19 @@ type TurnItem struct {
 	// ContentBlocks holds typed content parts for multimodal messages
 	// (text + images). When non-nil, it takes precedence over Content.
 	ContentBlocks []llm.ContentBlock `json:"content_blocks,omitempty"`
+	// Usage contains provider token accounting associated with this message.
+	Usage *llm.Usage `json:"usage,omitempty"`
+	// FinishReason records why the model ended this message, when provided.
+	FinishReason string `json:"finish_reason,omitempty"`
 	// ToolCalls holds tool invocations requested by the assistant.
 	ToolCalls []llm.ToolCall `json:"tool_calls,omitempty"`
 	// ToolCallID associates a tool-result message with the originating tool
 	// call.
 	ToolCallID string `json:"tool_call_id,omitempty"`
+	// InputKind preserves the source of user messages in canonical history.
+	InputKind string `json:"input_kind,omitempty"`
+	// ReceiptOutcome preserves the terminal outcome for canonical tool receipts.
+	ReceiptOutcome string `json:"receipt_outcome,omitempty"`
 }
 
 // Strategy identifies which compaction approach produced or was requested for a

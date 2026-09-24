@@ -77,15 +77,19 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 // messagesToTurnItems converts core.AgentMessage slice to compaction.TurnItem
 // slice for the compaction pipeline.
 func messagesToTurnItems(msgs []core.AgentMessage) []compaction.TurnItem {
-	items := make([]compaction.TurnItem, len(msgs))
-	for i, m := range msgs {
+	cloned := core.CloneAgentMessages(msgs)
+	items := make([]compaction.TurnItem, len(cloned))
+	for i, m := range cloned {
 		item := compaction.TurnItem{
-			ID:            fmt.Sprintf("msg-%d", i),
-			Role:          m.Role,
-			ContentBlocks: m.ContentBlocks,
-			ToolCalls:     m.ToolCalls,
-			ToolCallID:    m.ToolCallID,
-			ToolName:      m.ToolName,
+			ID:             fmt.Sprintf("msg-%d", i),
+			Role:           m.Role,
+			Usage:          m.Usage,
+			ContentBlocks:  m.ContentBlocks,
+			ToolCalls:      m.ToolCalls,
+			ToolCallID:     m.ToolCallID,
+			ToolName:       m.ToolName,
+			InputKind:      m.InputKind,
+			ReceiptOutcome: m.ReceiptOutcome,
 		}
 		if m.Role == compaction.RoleTool {
 			item.ToolResult = m.Content
@@ -103,11 +107,14 @@ func turnItemsToMessages(items []compaction.TurnItem) []core.AgentMessage {
 	msgs := make([]core.AgentMessage, len(items))
 	for i, it := range items {
 		msg := core.AgentMessage{
-			Role:          it.Role,
-			ContentBlocks: it.ContentBlocks,
-			ToolCalls:     it.ToolCalls,
-			ToolCallID:    it.ToolCallID,
-			ToolName:      it.ToolName,
+			Role:           it.Role,
+			Usage:          it.Usage,
+			ContentBlocks:  it.ContentBlocks,
+			ToolCalls:      it.ToolCalls,
+			ToolCallID:     it.ToolCallID,
+			ToolName:       it.ToolName,
+			InputKind:      it.InputKind,
+			ReceiptOutcome: it.ReceiptOutcome,
 		}
 		if it.Role == compaction.RoleTool {
 			msg.Content = it.ToolResult
@@ -119,7 +126,7 @@ func turnItemsToMessages(items []compaction.TurnItem) []core.AgentMessage {
 		}
 		msgs[i] = msg
 	}
-	return msgs
+	return core.CloneAgentMessages(msgs)
 }
 
 // loadSessionHistory reads a JSONL session file and reconstructs the message
