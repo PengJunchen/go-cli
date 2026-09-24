@@ -61,8 +61,11 @@ type SessionEntry struct {
 	Type          EntryType          `json:"type"`
 	Content       string             `json:"content"`
 	ContentBlocks []llm.ContentBlock `json:"content_blocks,omitempty"`
-	Timestamp     time.Time          `json:"timestamp"`
-	Summary       string             `json:"summary,omitempty"`
+	// Usage preserves token accounting reported on the canonical assistant
+	// message so durable history can be compared with the R1 transcript.
+	Usage     *llm.Usage `json:"usage,omitempty"`
+	Timestamp time.Time  `json:"timestamp"`
+	Summary   string     `json:"summary,omitempty"`
 	// IsSummary marks an entry as an auto-generated branch summary appended to
 	// a departed branch by SessionTree.MoveTo. It does not affect replay.
 	IsSummary bool `json:"is_summary,omitempty"`
@@ -154,6 +157,7 @@ func (e *SessionEntry) clone() *SessionEntry {
 		Role:           string(e.Type),
 		Content:        e.Content,
 		ContentBlocks:  e.ContentBlocks,
+		Usage:          e.Usage,
 		ToolCalls:      e.ToolCalls,
 		ToolCallID:     e.ToolCallID,
 		ToolName:       e.ToolName,
@@ -162,6 +166,7 @@ func (e *SessionEntry) clone() *SessionEntry {
 	}
 	cloned := core.CloneAgentMessages([]core.AgentMessage{message})[0]
 	cp.ContentBlocks = cloned.ContentBlocks
+	cp.Usage = cloned.Usage
 	cp.ToolCalls = cloned.ToolCalls
 	if e.ExecutionIdentity != nil {
 		identity := *e.ExecutionIdentity
