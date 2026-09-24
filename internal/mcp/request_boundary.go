@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 )
 
 // OutcomeUnknown marks a tool-call error where the request may have been
@@ -87,7 +88,7 @@ func parseIntegerJSON(raw json.RawMessage) (int64, bool) {
 // was sent. Responses that cannot be trusted as the result of that request
 // are marked as possibly dispatched, with no retry recommendation.
 func parseJSONRPCResponse(raw []byte, expectedID int64) (map[string]any, error) {
-	if err := rejectDuplicateJSONRPCEnvelopeFields(raw); err != nil {
+	if err := validateJSONRPCObjectFields(raw, "response envelope", "jsonrpc", "id", "result", "error"); err != nil {
 		return nil, newRequestBoundaryError(fmt.Errorf("mcp: invalid JSON-RPC response envelope: %w", err), true, false)
 	}
 
@@ -114,6 +115,9 @@ func parseJSONRPCResponse(raw []byte, expectedID int64) (map[string]any, error) 
 		return nil, newRequestBoundaryError(fmt.Errorf("mcp: response must contain exactly one of result or error"), true, false)
 	}
 	if errorPresent {
+		if err := validateJSONRPCObjectFields(frame.Error, "JSON-RPC error object", "code", "message"); err != nil {
+			return nil, newRequestBoundaryError(fmt.Errorf("mcp: invalid JSON-RPC error object: %w", err), true, false)
+		}
 		var errorObject map[string]json.RawMessage
 		if err := json.Unmarshal(frame.Error, &errorObject); err != nil || errorObject == nil {
 			return nil, newRequestBoundaryError(fmt.Errorf("mcp: invalid JSON-RPC error object"), true, false)
@@ -134,7 +138,7 @@ func parseJSONRPCResponse(raw []byte, expectedID int64) (map[string]any, error) 
 	return result, nil
 }
 
-func rejectDuplicateJSONRPCEnvelopeFields(raw []byte) error {
+func validateJSONRPCObjectFields(raw []byte, objectName string, protocolFields ...string) error {
 	decoder := json.NewDecoder(bytes.NewReader(raw))
 	start, err := decoder.Token()
 	if err != nil {
@@ -142,10 +146,14 @@ func rejectDuplicateJSONRPCEnvelopeFields(raw []byte) error {
 	}
 	delim, ok := start.(json.Delim)
 	if !ok || delim != '{' {
-		return fmt.Errorf("response envelope must be an object")
+		return fmt.Errorf("%s must be an object", objectName)
 	}
 
-	seen := make(map[string]struct{}, 4)
+	reserved := make(map[string]struct{}, len(protocolFields))
+	for _, field := range protocolFields {
+		reserved[field] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(protocolFields))
 	for decoder.More() {
 		token, err := decoder.Token()
 		if err != nil {
@@ -153,12 +161,21 @@ func rejectDuplicateJSONRPCEnvelopeFields(raw []byte) error {
 		}
 		key, ok := token.(string)
 		if !ok {
-			return fmt.Errorf("response envelope contains a non-string field name")
+			return fmt.Errorf("%s contains a non-string field name", objectName)
 		}
-		if _, exists := seen[key]; exists {
-			return fmt.Errorf("duplicate JSON-RPC envelope field %q", key)
+		for field := range reserved {
+			if !strings.EqualFold(key, field) {
+				continue
+			}
+			if key != field {
+				return fmt.Errorf("%s uses non-canonical spelling %q for protocol field %q", objectName, key, field)
+			}
+			if _, exists := seen[field]; exists {
+				return fmt.Errorf("duplicate protocol field %q in %s", field, objectName)
+			}
+			seen[field] = struct{}{}
+			break
 		}
-		seen[key] = struct{}{}
 
 		var value json.RawMessage
 		if err := decoder.Decode(&value); err != nil {
@@ -172,13 +189,13 @@ func rejectDuplicateJSONRPCEnvelopeFields(raw []byte) error {
 	}
 	endDelim, ok := end.(json.Delim)
 	if !ok || endDelim != '}' {
-		return fmt.Errorf("response envelope object is not terminated")
+		return fmt.Errorf("%s object is not terminated", objectName)
 	}
 
 	var trailing json.RawMessage
 	if err := decoder.Decode(&trailing); err != io.EOF {
 		if err == nil {
-			return fmt.Errorf("response envelope has trailing JSON value")
+			return fmt.Errorf("%s has trailing JSON value", objectName)
 		}
 		return err
 	}
