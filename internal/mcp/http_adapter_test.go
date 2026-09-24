@@ -198,6 +198,10 @@ func TestHTTPAdapterConnectStreamableHTTP(t *testing.T) {
 
 func TestHTTPAdapterRejectsCrossOriginSSEEndpointBeforeCredentials(t *testing.T) {
 	t.Parallel()
+	headerCanary, err := generateOAuthState()
+	require.NoError(t, err)
+	bearerCanary, err := generateOAuthState()
+	require.NoError(t, err)
 
 	foreignRequests := make(chan http.Header, 1)
 	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -220,17 +224,17 @@ func TestHTTPAdapterRejectsCrossOriginSSEEndpointBeforeCredentials(t *testing.T)
 		Name:        "srv",
 		Transport:   MCPTransportSSE,
 		URL:         configured.URL,
-		Headers:     map[string]string{"X-MCP-Canary": "header-secret"},
-		BearerToken: "bearer-secret",
+		Headers:     map[string]string{"X-MCP-Canary": headerCanary},
+		BearerToken: bearerCanary,
 	})
-	err := adapter.Connect(context.Background())
+	err = adapter.Connect(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "origin")
 
 	select {
 	case got := <-configuredHeaders:
-		assert.Equal(t, "header-secret", got.Get("X-MCP-Canary"))
-		assert.Equal(t, "Bearer bearer-secret", got.Get("Authorization"))
+		assert.Equal(t, headerCanary, got.Get("X-MCP-Canary"))
+		assert.Equal(t, "Bearer "+bearerCanary, got.Get("Authorization"))
 	default:
 		t.Fatal("configured MCP endpoint did not receive the handshake request")
 	}
@@ -243,6 +247,10 @@ func TestHTTPAdapterRejectsCrossOriginSSEEndpointBeforeCredentials(t *testing.T)
 
 func TestHTTPAdapterRejectsCrossOriginSSEEndpointWithOAuthToken(t *testing.T) {
 	t.Parallel()
+	headerCanary, err := generateOAuthState()
+	require.NoError(t, err)
+	oauthCanary, err := generateOAuthState()
+	require.NoError(t, err)
 
 	var foreignRequests atomic.Int32
 	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -260,15 +268,15 @@ func TestHTTPAdapterRejectsCrossOriginSSEEndpointWithOAuthToken(t *testing.T) {
 		Name:      "srv",
 		Transport: MCPTransportSSE,
 		URL:       configured.URL,
-		Headers:   map[string]string{"X-MCP-Canary": "header-secret"},
+		Headers:   map[string]string{"X-MCP-Canary": headerCanary},
 		OAuthConfig: &OAuthConfig{
 			AuthorizationURL: "http://auth.example/authorize",
 			TokenURL:         "http://auth.example/token",
 		},
 	})
-	adapter.token = "oauth-access-token"
+	adapter.token = oauthCanary
 
-	err := adapter.Connect(context.Background())
+	err = adapter.Connect(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "origin")
 	assert.Zero(t, foreignRequests.Load(), "foreign MCP endpoint must receive no OAuth or header credentials")
@@ -276,6 +284,10 @@ func TestHTTPAdapterRejectsCrossOriginSSEEndpointWithOAuthToken(t *testing.T) {
 
 func TestHTTPAdapterRejectsCrossOriginRedirectBeforeCredentials(t *testing.T) {
 	t.Parallel()
+	headerCanary, err := generateOAuthState()
+	require.NoError(t, err)
+	bearerCanary, err := generateOAuthState()
+	require.NoError(t, err)
 
 	var foreignRequests atomic.Int32
 	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -297,10 +309,10 @@ func TestHTTPAdapterRejectsCrossOriginRedirectBeforeCredentials(t *testing.T) {
 		Name:        "srv",
 		Transport:   MCPTransportSSE,
 		URL:         configured.URL,
-		Headers:     map[string]string{"X-MCP-Canary": "header-secret"},
-		BearerToken: "bearer-secret",
+		Headers:     map[string]string{"X-MCP-Canary": headerCanary},
+		BearerToken: bearerCanary,
 	})
-	err := adapter.Connect(context.Background())
+	err = adapter.Connect(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "redirect")
 	assert.Zero(t, foreignRequests.Load(), "foreign redirect target must receive no request")
@@ -308,6 +320,10 @@ func TestHTTPAdapterRejectsCrossOriginRedirectBeforeCredentials(t *testing.T) {
 
 func TestHTTPAdapterAllowsSameOriginRedirectWithCredentials(t *testing.T) {
 	t.Parallel()
+	headerCanary, err := generateOAuthState()
+	require.NoError(t, err)
+	bearerCanary, err := generateOAuthState()
+	require.NoError(t, err)
 
 	var redirectedRequests atomic.Int32
 	var missingCredentials atomic.Int32
@@ -321,7 +337,7 @@ func TestHTTPAdapterAllowsSameOriginRedirectWithCredentials(t *testing.T) {
 			return
 		}
 		redirectedRequests.Add(1)
-		if r.Header.Get("X-MCP-Canary") != "header-secret" || r.Header.Get("Authorization") != "Bearer bearer-secret" {
+		if r.Header.Get("X-MCP-Canary") != headerCanary || r.Header.Get("Authorization") != "Bearer "+bearerCanary {
 			missingCredentials.Add(1)
 		}
 		if r.Method == http.MethodGet {
@@ -360,8 +376,8 @@ func TestHTTPAdapterAllowsSameOriginRedirectWithCredentials(t *testing.T) {
 		Name:        "srv",
 		Transport:   MCPTransportSSE,
 		URL:         srv.URL + "/start",
-		Headers:     map[string]string{"X-MCP-Canary": "header-secret"},
-		BearerToken: "bearer-secret",
+		Headers:     map[string]string{"X-MCP-Canary": headerCanary},
+		BearerToken: bearerCanary,
 	})
 	require.NoError(t, adapter.Connect(context.Background()))
 	assert.GreaterOrEqual(t, redirectedRequests.Load(), int32(3), "GET, initialize, and initialized notification should reach the same-origin redirect target")

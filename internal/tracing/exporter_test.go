@@ -122,7 +122,7 @@ func TestRedaction_MasksSensitiveAttributes(t *testing.T) {
 func TestRedaction_DefaultSensitiveKeysPreserveMetadata(t *testing.T) {
 	const prompt = "prompt-carrying-secret"
 	const toolArgs = `todo_write:{"content":"tool-argument-secret"}`
-	const apiKey = "trace-canary-api-key"
+	apiKey := generateID()
 	const planReason = "plan-mode-raw-reason"
 	const hookOutput = "hook-output-secret"
 	mock := &mockExporter{}

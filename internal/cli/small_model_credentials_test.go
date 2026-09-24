@@ -2,6 +2,8 @@ package cli
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -13,17 +15,27 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func newTestCredentialCanary(t *testing.T) string {
+	t.Helper()
+
+	var random [16]byte
+	_, err := rand.Read(random[:])
+	require.NoError(t, err)
+	return "runtime-canary-" + hex.EncodeToString(random[:])
+}
+
 func TestSmallModelSameProviderReusesPrimaryCredential(t *testing.T) {
 	capture := &providerRequestCapture{}
 	srv := httptest.NewServer(http.HandlerFunc(capture.handler))
 	t.Cleanup(srv.Close)
 
 	const providerName = "custom-gateway"
+	primaryAPIKey := newTestCredentialCanary(t)
 	rc := &config.Config{
 		Provider: config.ProviderConfig{
 			Name:    providerName,
 			BaseURL: srv.URL,
-			APIKey:  "primary-provider-canary",
+			APIKey:  primaryAPIKey,
 		},
 		SmallModel: config.SmallModelConfig{Model: "small-model"},
 	}
@@ -40,7 +52,7 @@ func TestSmallModelSameProviderReusesPrimaryCredential(t *testing.T) {
 	count, path, authorization, _ := capture.snapshot()
 	assert.Equal(t, 1, count)
 	assert.Equal(t, "/chat/completions", path)
-	assert.Equal(t, "Bearer primary-provider-canary", authorization)
+	assert.Equal(t, "Bearer "+primaryAPIKey, authorization)
 }
 
 func TestSmallModelProviderChangeDoesNotInheritPrimaryConfiguration(t *testing.T) {
@@ -50,11 +62,12 @@ func TestSmallModelProviderChangeDoesNotInheritPrimaryConfiguration(t *testing.T
 
 	const primaryProviderName = "anthropic"
 	const smallProviderName = "openai"
+	primaryAPIKey := newTestCredentialCanary(t)
 	rc := &config.Config{
 		Provider: config.ProviderConfig{
 			Name:    primaryProviderName,
 			BaseURL: primarySrv.URL,
-			APIKey:  "primary-provider-canary",
+			APIKey:  primaryAPIKey,
 		},
 		SmallModel: config.SmallModelConfig{
 			Provider: smallProviderName,
@@ -74,8 +87,8 @@ func TestSmallModelProviderChangeDoesNotInheritPrimaryConfiguration(t *testing.T
 	assert.Nil(t, model)
 	count, _, authorization, body := primaryCapture.snapshot()
 	assert.Zero(t, count, "the primary endpoint must not receive a cross-provider request")
-	assert.NotContains(t, authorization, "primary-provider-canary")
-	assert.NotContains(t, body, "primary-provider-canary")
+	assert.NotContains(t, authorization, primaryAPIKey)
+	assert.NotContains(t, body, primaryAPIKey)
 }
 
 func TestSmallModelDifferentEndpointDoesNotInheritPrimaryCredential(t *testing.T) {
@@ -87,11 +100,12 @@ func TestSmallModelDifferentEndpointDoesNotInheritPrimaryCredential(t *testing.T
 	t.Cleanup(smallSrv.Close)
 
 	const providerName = "custom-gateway"
+	primaryAPIKey := newTestCredentialCanary(t)
 	rc := &config.Config{
 		Provider: config.ProviderConfig{
 			Name:    providerName,
 			BaseURL: primarySrv.URL,
-			APIKey:  "primary-provider-canary",
+			APIKey:  primaryAPIKey,
 		},
 		SmallModel: config.SmallModelConfig{
 			Provider: providerName,
@@ -112,10 +126,10 @@ func TestSmallModelDifferentEndpointDoesNotInheritPrimaryCredential(t *testing.T
 	primaryCount, _, primaryAuthorization, _ := primaryCapture.snapshot()
 	smallCount, _, smallAuthorization, smallBody := smallCapture.snapshot()
 	assert.Zero(t, primaryCount)
-	assert.NotContains(t, primaryAuthorization, "primary-provider-canary")
+	assert.NotContains(t, primaryAuthorization, primaryAPIKey)
 	assert.Equal(t, 1, smallCount)
 	assert.Empty(t, smallAuthorization, "an explicit different origin must not inherit the primary key")
-	assert.NotContains(t, smallBody, "primary-provider-canary")
+	assert.NotContains(t, smallBody, primaryAPIKey)
 }
 
 func TestSmallModelSameOriginMayReusePrimaryCredential(t *testing.T) {
@@ -124,11 +138,12 @@ func TestSmallModelSameOriginMayReusePrimaryCredential(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	const providerName = "custom-gateway"
+	primaryAPIKey := newTestCredentialCanary(t)
 	rc := &config.Config{
 		Provider: config.ProviderConfig{
 			Name:    providerName,
 			BaseURL: srv.URL + "/primary",
-			APIKey:  "primary-provider-canary",
+			APIKey:  primaryAPIKey,
 		},
 		SmallModel: config.SmallModelConfig{
 			Provider: providerName,
@@ -149,7 +164,7 @@ func TestSmallModelSameOriginMayReusePrimaryCredential(t *testing.T) {
 	count, path, authorization, _ := capture.snapshot()
 	assert.Equal(t, 1, count)
 	assert.Equal(t, "/small/chat/completions", path)
-	assert.Equal(t, "Bearer primary-provider-canary", authorization)
+	assert.Equal(t, "Bearer "+primaryAPIKey, authorization)
 }
 
 func TestSmallModelOwnCredentialStaysAtOwnOrigin(t *testing.T) {
@@ -160,16 +175,18 @@ func TestSmallModelOwnCredentialStaysAtOwnOrigin(t *testing.T) {
 	smallSrv := httptest.NewServer(http.HandlerFunc(smallCapture.handler))
 	t.Cleanup(smallSrv.Close)
 
+	primaryAPIKey := newTestCredentialCanary(t)
+	smallAPIKey := newTestCredentialCanary(t)
 	rc := &config.Config{
 		Provider: config.ProviderConfig{
 			Name:    "primary-gateway",
 			BaseURL: primarySrv.URL,
-			APIKey:  "primary-provider-canary",
+			APIKey:  primaryAPIKey,
 		},
 		SmallModel: config.SmallModelConfig{
 			Provider: "small-gateway",
 			BaseURL:  smallSrv.URL,
-			APIKey:   "small-provider-canary",
+			APIKey:   smallAPIKey,
 			Model:    "small-model",
 		},
 	}
@@ -186,14 +203,15 @@ func TestSmallModelOwnCredentialStaysAtOwnOrigin(t *testing.T) {
 	primaryCount, _, primaryAuthorization, _ := primaryCapture.snapshot()
 	smallCount, _, smallAuthorization, _ := smallCapture.snapshot()
 	assert.Zero(t, primaryCount)
-	assert.NotContains(t, primaryAuthorization, "small-provider-canary")
+	assert.NotContains(t, primaryAuthorization, smallAPIKey)
 	assert.Equal(t, 1, smallCount)
-	assert.Equal(t, "Bearer small-provider-canary", smallAuthorization)
+	assert.Equal(t, "Bearer "+smallAPIKey, smallAuthorization)
 }
 
 func TestSmallModelSameIdentityUsesNormalizedDefaultOrigin(t *testing.T) {
+	primaryAPIKey := newTestCredentialCanary(t)
 	rc := &config.Config{
-		Provider: config.ProviderConfig{APIKey: "primary-provider-canary"},
+		Provider: config.ProviderConfig{APIKey: primaryAPIKey},
 		SmallModel: config.SmallModelConfig{
 			BaseURL: "https://api.openai.com:443/v1/small",
 		},
@@ -202,5 +220,5 @@ func TestSmallModelSameIdentityUsesNormalizedDefaultOrigin(t *testing.T) {
 	baseURL, apiKey, err := resolveSmallModelProviderSettings("eino", "eino", rc)
 	require.NoError(t, err)
 	assert.Equal(t, rc.SmallModel.BaseURL, baseURL)
-	assert.Equal(t, rc.Provider.APIKey, apiKey, "an explicit path on the same default origin may reuse the provider credential")
+	assert.Equal(t, primaryAPIKey, apiKey, "an explicit path on the same default origin may reuse the provider credential")
 }
