@@ -610,7 +610,7 @@
       "depends_on": [
         "R1-REV-01"
       ],
-      "status": "pending",
+      "status": "in_progress",
       "commit_spec": "Reviewed record-format and crash-policy note only; preserve existing JSONL compatibility or document a versioned migration before implementation.",
       "phase_id": "R2",
       "source_status": "proposed"
@@ -644,7 +644,8 @@
         "SES-14"
       ],
       "depends_on": [
-        "R2-DES-01"
+        "R2-DES-01",
+        "R1-REV-01"
       ],
       "status": "pending",
       "commit_spec": "Separate identity/resume and loader/concurrency commits if contracts stay independent; each commit includes exact red-before-fix regression tests.",
@@ -680,7 +681,10 @@
         "CLI-11"
       ],
       "depends_on": [
-        "R2-DES-01"
+        "R2-DES-01",
+        "R2-BLD-01",
+        "R1-REV-01",
+        "R4-EFFECT-01"
       ],
       "status": "pending",
       "commit_spec": "One commit for durable journal and truthful acknowledgment; persistence format changes require explicit versioning and fixture compatibility tests.",
@@ -723,7 +727,9 @@
       ],
       "depends_on": [
         "R2-BLD-01",
-        "R2-BLD-02"
+        "R2-BLD-02",
+        "R1-REV-01",
+        "R4-EFFECT-01"
       ],
       "status": "pending",
       "commit_spec": "Reviewer adds no implementation; rejection creates an explicit fix task and re-review.",
@@ -968,6 +974,38 @@
       "source_status": "proposed"
     },
     {
+      "id": "R4-EFFECT-01",
+      "source_task_id": "R4-BLD-01",
+      "role": "builder",
+      "title": "Land trusted tool identity and effect metadata prerequisite",
+      "user_story": "As a user, workspace quarantine must classify the actual registered executor, not trust a tool name or caller-supplied label.",
+      "goal": "Deliver only the independently runnable trusted registration identity/effect seam needed by R2; do not implement full R4 permission behavior or decide D-01.",
+      "deliverable": [
+        "Immutable registry-bound executor identity and trusted EffectSet are queryable from the resolved executor/wrapper without relying on names or caller metadata.",
+        "A side-effect-free prepared-dispatch seam pins the exact executor, normalized call, registry/policy generations, and one-time authorization snapshot; after durable intent sync, one short final fence dispatches that captured executor once without name relookup.",
+        "MutationQueue preserves and dispatches the captured prepared invocation rather than reconstructing a Write/Edit tool or bypassing the captured wrapper. Registry List/wrappers cannot expose an unwrapped executable definition that bypasses the same identity/effect boundary.",
+        "Effect inventory covers derived execution; Git actions that may invoke repository-configured helpers remain unknown/composite until a trusted implementation disables those hooks or proves a restricted path.",
+        "The narrow seam is mapped to source R4-BLD-01. Full R4-BLD-01 retains its original source scope and remains pending until its complete approval/Plan Mode contract (including pending D-01) is implemented and reviewed."
+      ],
+      "verification": [
+        "Test same-name custom executor spoofing cannot inherit a built-in read-only identity/effect.",
+        "Test registry replacement/version changes produce distinct immutable executor identities.",
+        "Test approval Ask/allow and Ask/deny during preparation; no underlying executor starts before the durable dispatch boundary, and a stale registration/policy generation cannot dispatch.",
+        "Test MutationQueue executes the exact captured prepared executor once and never re-resolves by tool name.",
+        "Independent review verifies the trusted metadata is bound to the executor actually returned by the registry; no tool-name allowlist is accepted as proof."
+      ],
+      "rule_mapping": [
+        "APR-002",
+        "APR-004",
+        "APR-005"
+      ],
+      "depends_on": [],
+      "status": "pending",
+      "commit_spec": "Execution-only prerequisite split from R4-BLD-01. Design gates: docs/iterations/2026-09-25-runtime/r4-policy-design.md and its review, docs/iterations/2026-09-25-runtime/r4-tool-inventory.md, and the exact API/order/ownership contract in docs/iterations/2026-09-25-runtime/r4-prepared-dispatch-design.md. Scope excludes plan-exit D-01 and full policy enforcement.",
+      "phase_id": "R4",
+      "source_status": "execution_split"
+    },
+    {
       "id": "R4-BLD-01",
       "role": "builder",
       "title": "Enforce approval semantics and side-effect capability policy",
@@ -995,7 +1033,8 @@
       "depends_on": [
         "R4-DES-01",
         "R1-REV-01",
-        "R0-BLD-05"
+        "R0-BLD-05",
+        "R4-EFFECT-01"
       ],
       "status": "pending",
       "commit_spec": "Commit effect metadata and enforcement as a bounded slice; do not preserve compatibility by silently classifying unknown tools as safe.",
