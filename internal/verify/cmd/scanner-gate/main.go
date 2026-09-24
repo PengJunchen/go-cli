@@ -4,7 +4,6 @@
 package main
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -17,9 +16,16 @@ import (
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/verify"
+	"github.com/pengjunchen/go-cli/internal/verify/cmd/gatecapture"
 )
 
 const maxDiagnosticBytes = 4096
+
+var defaultCaptureLimits = gatecapture.Limits{
+	StdoutBytes: 32 << 20,
+	StderrBytes: 8 << 20,
+	WaitDelay:   gatecapture.DefaultWaitDelay,
+}
 
 type stringList []string
 
@@ -35,6 +41,10 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
+	return runWithCaptureLimits(args, stdout, stderr, defaultCaptureLimits)
+}
+
+func runWithCaptureLimits(args []string, stdout, stderr io.Writer, limits gatecapture.Limits) int {
 	fs := flag.NewFlagSet("verify-scanner-gate", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	dir := fs.String("dir", "./internal", "directory passed to the scanner")
@@ -61,26 +71,35 @@ func run(args []string, stdout, stderr io.Writer) int {
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
 
-	var scannerStdout, scannerStderr bytes.Buffer
 	cmd := exec.CommandContext(ctx, *command, scannerArgs...)
-	cmd.Stdout = &scannerStdout
-	cmd.Stderr = &scannerStderr
-	if err := cmd.Run(); err != nil {
+	capture, err := gatecapture.Run(cmd, limits)
+	if capture.StdoutExceeded {
+		_, _ = fmt.Fprintf(stderr, "scanner stdout exceeded capture limit of %d bytes; report is incomplete\n", limits.StdoutBytes) //nolint:errcheck // CLI diagnostic is best-effort
+	}
+	if capture.StderrExceeded {
+		_, _ = fmt.Fprintf(stderr, "scanner stderr exceeded capture limit of %d bytes\n", limits.StderrBytes) //nolint:errcheck // CLI diagnostic is best-effort
+	}
+	if capture.StdoutExceeded || capture.StderrExceeded {
+		writeDiagnostic(stderr, "scanner stderr", capture.Stderr)
+		writeDiagnostic(stderr, "scanner stdout", capture.Stdout)
+		return 1
+	}
+	if err != nil {
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			_, _ = fmt.Fprintf(stderr, "scanner command timed out after %s: %s\n", *timeout, *command) //nolint:errcheck // CLI diagnostic is best-effort
 		} else {
 			_, _ = fmt.Fprintf(stderr, "scanner command failed: %s: %v\n", *command, err) //nolint:errcheck // CLI diagnostic is best-effort
 		}
-		writeDiagnostic(stderr, "scanner stderr", scannerStderr.Bytes())
-		writeDiagnostic(stderr, "scanner stdout", scannerStdout.Bytes())
+		writeDiagnostic(stderr, "scanner stderr", capture.Stderr)
+		writeDiagnostic(stderr, "scanner stdout", capture.Stdout)
 		return 1
 	}
 
-	report, err := decodeReport(scannerStdout.Bytes())
+	report, err := decodeReport(capture.Stdout)
 	if err != nil {
 		_, _ = fmt.Fprintf(stderr, "scanner produced invalid JSON: %v\n", err) //nolint:errcheck // CLI diagnostic is best-effort
-		writeDiagnostic(stderr, "scanner stderr", scannerStderr.Bytes())
-		writeDiagnostic(stderr, "scanner stdout", scannerStdout.Bytes())
+		writeDiagnostic(stderr, "scanner stderr", capture.Stderr)
+		writeDiagnostic(stderr, "scanner stdout", capture.Stdout)
 		return 1
 	}
 
