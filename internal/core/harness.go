@@ -178,7 +178,6 @@ func (h *HarnessImpl) Submit(ctx context.Context, msg string) (EventStream, erro
 		} else {
 			bestEffort(stream.SendTerminal(AgentEvent{Kind: "done", Content: result.Message, Timestamp: time.Now()}))
 		}
-		stream.Close()
 	})
 	owner.SetEventGapSource(stream)
 	stream.SetRunStatusHandle(owner)
@@ -211,6 +210,14 @@ func (h *HarnessImpl) run(ctx context.Context, span tracing.TraceSpan, stream *E
 		}
 		return r, e
 	})
+	span.SetAttributes(
+		tracing.Attribute{Key: "run_id", Value: result.RunID},
+		tracing.Attribute{Key: "outcome", Value: string(result.Outcome)},
+		tracing.Attribute{Key: "execution_state", Value: string(result.ExecutionState)},
+	)
+	if err != nil {
+		span.SetStatus(tracing.SpanStatusError, err.Error())
+	}
 	stream.SetResult(AgentMessage{Role: "assistant", Content: result.Message}, err)
 	if err != nil {
 		bestEffort(stream.SendTerminal(errEvent(err)))

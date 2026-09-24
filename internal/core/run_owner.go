@@ -28,15 +28,16 @@ type runOutcomeUnknown interface {
 type runOwnerContextKey struct{}
 
 type runOwner struct {
-	mu          sync.Mutex
-	guard       RunSlotGuard
-	claim       RunClaim
-	ctx         context.Context
-	cancel      context.CancelFunc
-	done        chan struct{}
-	changed     chan struct{}
-	cleanup     chan struct{}
-	cleanupOnce sync.Once
+	mu                 sync.Mutex
+	guard              RunSlotGuard
+	claim              RunClaim
+	ctx                context.Context
+	cancel             context.CancelFunc
+	done               chan struct{}
+	changed            chan struct{}
+	cleanup            chan struct{}
+	backpressureSignal chan struct{}
+	cleanupOnce        sync.Once
 
 	status              RunStatus
 	result              Result
@@ -45,6 +46,8 @@ type runOwner struct {
 	transcriptCommitted bool
 	workers             int
 	resources           int
+	expiredBackpressure int
+	cleanupTimeout      time.Duration
 	unknown             bool
 	cancelRequested     bool
 	timedOut            bool
@@ -59,13 +62,14 @@ func newRunOwner(ctx context.Context, guard RunSlotGuard, claim RunClaim, timeou
 	}
 	ownerCtx, cancel := context.WithCancel(ctx)
 	return &runOwner{
-		guard:   guard,
-		claim:   claim,
-		ctx:     ownerCtx,
-		cancel:  cancel,
-		done:    make(chan struct{}),
-		changed: make(chan struct{}, 1),
-		cleanup: make(chan struct{}),
+		guard:              guard,
+		claim:              claim,
+		ctx:                ownerCtx,
+		cancel:             cancel,
+		done:               make(chan struct{}),
+		changed:            make(chan struct{}, 1),
+		cleanup:            make(chan struct{}),
+		backpressureSignal: make(chan struct{}, 1),
 		status: RunStatus{
 			RunID:          claim.ID,
 			ExecutionState: RunExecutionRunning,
@@ -195,90 +199,160 @@ func (o *runOwner) SetEventGapSource(source interface{ GapCount() uint64 }) {
 	o.mu.Unlock()
 }
 
-func (o *runOwner) StartCleanupDeadline() {
+func (o *runOwner) BeginBackpressure() func() {
 	o.mu.Lock()
-	if !o.released {
-		o.startCleanupLocked()
+	if o.released || o.timedOut || o.callbackFinished {
+		o.mu.Unlock()
+		return func() {}
 	}
+	timeout := o.cleanupTimeout
+	if timeout <= 0 {
+		timeout = defaultRunCleanupTimeout
+	}
+	lease := &runBackpressureLease{active: true}
+	lease.timer = time.AfterFunc(timeout, func() {
+		o.mu.Lock()
+		if lease.active && !o.released && !o.timedOut && !o.callbackFinished {
+			lease.expired = true
+			o.expiredBackpressure++
+			select {
+			case o.backpressureSignal <- struct{}{}:
+			default:
+			}
+		}
+		o.mu.Unlock()
+	})
 	o.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			o.mu.Lock()
+			if lease.active {
+				lease.active = false
+				if lease.expired && o.expiredBackpressure > 0 {
+					o.expiredBackpressure--
+				}
+				lease.timer.Stop()
+			}
+			o.mu.Unlock()
+		})
+	}
+}
+
+type runBackpressureLease struct {
+	timer   *time.Timer
+	active  bool
+	expired bool
 }
 
 func (o *runOwner) run(timeout time.Duration, fn func(context.Context) (Result, error)) (Result, error) {
 	if timeout <= 0 {
 		timeout = defaultRunCleanupTimeout
 	}
+	o.mu.Lock()
+	o.cleanupTimeout = timeout
+	o.mu.Unlock()
 	callbackCtx := withRunWorkerTracker(o.ctx, o)
 	go o.supervise()
-	go func() {
-		result, err, panicked := invokeRunCallback(callbackCtx, fn)
-		o.mu.Lock()
-		o.callbackFinished = true
-		commitFailure := errors.Is(err, ErrCanonicalTranscriptInvalid) || errors.Is(err, ErrCanonicalTranscriptRequired)
-		o.transcriptCommitted = !panicked && !commitFailure
-		o.result = result
-		o.runErr = err
-		if panicked || commitFailure {
-			o.unknown = true
-		}
-		var marker runOutcomeUnknown
-		if errors.As(err, &marker) && marker.OutcomeUnknown() {
-			o.unknown = true
-		}
-		switch {
-		case o.unknown || result.Outcome == RunOutcomeUnknown:
-			o.unknown = true
-			o.status.Outcome = RunOutcomeUnknown
-		case result.Outcome != "":
-			o.status.Outcome = result.Outcome
-		case err != nil && o.cancelRequested && errors.Is(err, context.Canceled):
-			o.status.Outcome = RunOutcomeCancelled
-		case err != nil:
-			o.status.Outcome = RunOutcomeError
-		default:
-			o.status.Outcome = RunOutcomeSuccess
-		}
-		if panicked || commitFailure {
-			o.status.ExecutionState = RunExecutionQuarantined
-			o.startCleanupLocked()
-		} else if o.status.ExecutionState != RunExecutionCleanupPending && o.status.ExecutionState != RunExecutionQuarantined {
-			o.status.ExecutionState = RunExecutionDraining
-		}
-		o.refreshPendingLocked()
-		if o.workers > 0 || o.resources > 0 {
-			o.startCleanupLocked()
-		}
-		o.signalLocked()
-		o.mu.Unlock()
-	}()
-	go func() {
-		select {
-		case <-o.ctx.Done():
-			o.MarkCancelRequested()
-		case <-o.done:
-		}
-	}()
+	if ctxErr := callbackCtx.Err(); ctxErr != nil {
+		o.finishUndispatched(ctxErr)
+	} else {
+		go func() {
+			result, err, panicked := invokeRunCallback(callbackCtx, fn)
+			o.mu.Lock()
+			o.callbackFinished = true
+			commitFailure := errors.Is(err, ErrCanonicalTranscriptInvalid) || errors.Is(err, ErrCanonicalTranscriptRequired)
+			o.transcriptCommitted = !panicked && !commitFailure
+			o.result = result
+			o.runErr = err
+			if panicked || commitFailure {
+				o.unknown = true
+			}
+			var marker runOutcomeUnknown
+			if errors.As(err, &marker) && marker.OutcomeUnknown() {
+				o.unknown = true
+			}
+			switch {
+			case o.unknown || result.Outcome == RunOutcomeUnknown:
+				o.unknown = true
+				o.status.Outcome = RunOutcomeUnknown
+			case result.Outcome != "":
+				o.status.Outcome = result.Outcome
+			case err != nil && o.ctx.Err() != nil && errors.Is(err, o.ctx.Err()):
+				o.status.Outcome = RunOutcomeCancelled
+			case err != nil:
+				o.status.Outcome = RunOutcomeError
+			default:
+				o.status.Outcome = RunOutcomeSuccess
+			}
+			if panicked || commitFailure {
+				o.status.ExecutionState = RunExecutionQuarantined
+				o.startCleanupLocked()
+			} else if o.status.ExecutionState != RunExecutionCleanupPending && o.status.ExecutionState != RunExecutionQuarantined {
+				o.status.ExecutionState = RunExecutionDraining
+			}
+			o.refreshPendingLocked()
+			if o.workers > 0 || o.resources > 0 {
+				o.startCleanupLocked()
+			}
+			o.signalLocked()
+			o.mu.Unlock()
+		}()
+		go func() {
+			select {
+			case <-o.ctx.Done():
+				o.MarkCancelRequested()
+			case <-o.done:
+			}
+		}()
+	}
 
-	select {
-	case <-o.done:
-		return o.returnSnapshot()
-	case <-o.cleanup:
-		if o.uncommittedCallbackFinished() {
-			return o.returnSnapshot()
-		}
-		timer := time.NewTimer(timeout)
-		defer timer.Stop()
+	for {
 		select {
 		case <-o.done:
 			return o.returnSnapshot()
-		case <-timer.C:
+		case <-o.cleanup:
+			if o.uncommittedCallbackFinished() {
+				return o.returnSnapshot()
+			}
+			timer := time.NewTimer(timeout)
+			defer timer.Stop()
 			select {
 			case <-o.done:
 				return o.returnSnapshot()
-			default:
+			case <-timer.C:
+				select {
+				case <-o.done:
+					return o.returnSnapshot()
+				default:
+				}
+				return o.cleanupPending()
 			}
-			return o.cleanupPending()
+		case <-o.backpressureSignal:
+			if o.backpressureIsStillExpired() {
+				return o.cleanupPending()
+			}
 		}
 	}
+}
+
+func (o *runOwner) finishUndispatched(err error) {
+	o.mu.Lock()
+	o.callbackFinished = true
+	o.transcriptCommitted = true
+	o.cancelRequested = true
+	o.runErr = err
+	o.status.Outcome = RunOutcomeCancelled
+	o.status.ExecutionState = RunExecutionDraining
+	o.signalLocked()
+	o.mu.Unlock()
+}
+
+func (o *runOwner) backpressureIsStillExpired() bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	return o.expiredBackpressure > 0 && !o.released && !o.timedOut
 }
 
 func invokeRunCallback(ctx context.Context, fn func(context.Context) (Result, error)) (result Result, err error, panicked bool) {
@@ -343,12 +417,12 @@ func (o *runOwner) cleanupPending() (Result, error) {
 		return result, runErr
 	}
 	o.timedOut = true
-	if o.transcriptCommitted {
-		o.status.ExecutionState = RunExecutionCleanupPending
-	} else {
-		o.status.ExecutionState = RunExecutionQuarantined
-	}
-	if o.workers > 0 {
+	// Return the caller's bounded-wait observation consistently. The supervisor
+	// may move the live status to Quarantined when the callback has not yet
+	// committed a transcript, but this immutable return snapshot records that
+	// cleanup remains pending at the point the caller stopped waiting.
+	o.status.ExecutionState = RunExecutionCleanupPending
+	if o.workers > 0 || !o.callbackFinished {
 		o.unknown = true
 		o.status.Outcome = RunOutcomeUnknown
 	} else if o.status.Outcome == "" && o.cancelRequested {

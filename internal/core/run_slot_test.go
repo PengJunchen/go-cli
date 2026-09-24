@@ -116,6 +116,51 @@ func TestRunSlotGuard_ClaimRun_CancelledContext(t *testing.T) {
 	g.Release(claim)
 }
 
+func TestRunSlotGuard_AlreadyCanceledContextNeverGetsClaim(t *testing.T) {
+	g := NewDefaultRunSlotGuard()
+	for attempt := 0; attempt < 100; attempt++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		claim, err := g.ClaimRun(ctx)
+		if err == nil {
+			g.Release(claim)
+		}
+		require.ErrorIs(t, err, context.Canceled, "attempt %d", attempt)
+	}
+}
+
+type cancelAfterFirstErrCheckContext struct {
+	context.Context
+	done  chan struct{}
+	calls atomic.Int32
+	once  sync.Once
+}
+
+func newCancelAfterFirstErrCheckContext() *cancelAfterFirstErrCheckContext {
+	return &cancelAfterFirstErrCheckContext{Context: context.Background(), done: make(chan struct{})}
+}
+
+func (c *cancelAfterFirstErrCheckContext) Done() <-chan struct{} { return c.done }
+
+func (c *cancelAfterFirstErrCheckContext) Err() error {
+	if c.calls.Add(1) < 2 {
+		return nil
+	}
+	c.once.Do(func() { close(c.done) })
+	return context.Canceled
+}
+
+func TestRunSlotGuard_ClaimRunCancellationAfterSemaphoreAcquireReturnsToken(t *testing.T) {
+	g := NewDefaultRunSlotGuard()
+	ctx := newCancelAfterFirstErrCheckContext()
+	_, err := g.ClaimRun(ctx)
+	require.ErrorIs(t, err, context.Canceled)
+
+	claim, err := g.ClaimRun(context.Background())
+	require.NoError(t, err, "the failed acquisition must return the semaphore token")
+	g.Release(claim)
+}
+
 func TestRunSlotGuard_ConcurrentAccess(t *testing.T) {
 	g := NewDefaultRunSlotGuard()
 	var wg sync.WaitGroup

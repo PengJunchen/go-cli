@@ -53,12 +53,19 @@ func NewDefaultRunSlotGuard() *DefaultRunSlotGuard {
 // ClaimRun acquires the single run slot. It blocks until the slot is available
 // or the context is canceled.
 func (g *DefaultRunSlotGuard) ClaimRun(ctx context.Context) (RunClaim, error) {
+	if err := ctx.Err(); err != nil {
+		return RunClaim{}, fmt.Errorf("run_slot: claim canceled: %w", err)
+	}
 	select {
 	case g.sem <- struct{}{}:
 		// Slot acquired.
 	case <-ctx.Done():
 		slog.Debug("core.run_slot.claim_canceled", "err", ctx.Err())
 		return RunClaim{}, fmt.Errorf("run_slot: claim canceled: %w", ctx.Err())
+	}
+	if err := ctx.Err(); err != nil {
+		<-g.sem
+		return RunClaim{}, fmt.Errorf("run_slot: claim canceled: %w", err)
 	}
 
 	claim := RunClaim{
@@ -117,7 +124,10 @@ type noopRunSlotGuard struct{}
 var defaultRunSlotGuard RunSlotGuard = noopRunSlotGuard{}
 
 // ClaimRun returns a no-op claim immediately.
-func (noopRunSlotGuard) ClaimRun(_ context.Context) (RunClaim, error) {
+func (noopRunSlotGuard) ClaimRun(ctx context.Context) (RunClaim, error) {
+	if err := ctx.Err(); err != nil {
+		return RunClaim{}, fmt.Errorf("run_slot: claim canceled: %w", err)
+	}
 	return RunClaim{ID: newClaimID(), AcquiredAt: time.Now()}, nil
 }
 
