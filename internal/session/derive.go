@@ -49,6 +49,9 @@ func SessionViewFromEntries(sessionID, branchID, revision string, branchEntries 
 		return SessionView{}, err
 	}
 	if err := validateProjectedToolGroups(entries); err != nil {
+		if errors.Is(err, errUnclosedToolCallGroup) {
+			return SessionView{}, fmt.Errorf("session: projected history is inconsistent: %v", err)
+		}
 		return SessionView{}, err
 	}
 

@@ -722,6 +722,44 @@ func TestDurableWriterRejectsSystemRowInsideOpenToolCallGroup(t *testing.T) {
 	})
 }
 
+func TestDurableWriterRejectsProjectedUnclosedGroupInsteadOfDeferring(t *testing.T) {
+	prepared, err := NewDurableJSONLSessionPreparer(t.TempDir(), nil).PrepareNew(context.Background(), "hidden receipt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Close()
+	zero, one, two := uint64(0), uint64(1), uint64(2)
+	ordinal := uint64(0)
+	_, err = prepared.DurableWriter().AppendAndSync(context.Background(),
+		SessionEntry{ID: "root-user", Type: EntryTypeUser, RunID: "run-hidden", TranscriptIndex: &zero},
+		SessionEntry{
+			ID: "assistant", ParentID: "root-user", Type: EntryTypeAssistant, RunID: "run-hidden",
+			TranscriptIndex: &one, AssistantTranscriptOrdinal: &ordinal,
+			ToolCalls: []llm.ToolCall{{ID: "call-1", Name: "read"}},
+		},
+		SessionEntry{
+			ID: "hidden-receipt", ParentID: "assistant", Type: EntryTypeTool, RunID: "run-hidden",
+			TranscriptIndex: &two, AssistantTranscriptOrdinal: &ordinal, ToolCallID: "call-1", ToolName: "read",
+			DispatchState: DispatchStateNotDispatched, ReceiptOutcome: "interrupted", SurfaceOp: SurfaceOpHidden,
+		},
+	)
+	if err == nil {
+		t.Fatal("a projected unclosed group is a hard validation error, not an open journal tail")
+	}
+	store := prepared.(*durablePreparedSession).store
+	info, err := store.file.Stat()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != 0 {
+		t.Fatalf("rejected projected history wrote %d bytes", info.Size())
+	}
+	view := prepared.View()
+	if len(view.Messages) != 0 || len(view.SourceEntryIDs) != 0 {
+		t.Fatalf("rejected projected history changed the published view: %#v", view)
+	}
+}
+
 type absentDispatchRecoveryAuthority struct{}
 
 func (absentDispatchRecoveryAuthority) ApplyDurableResolutions(context.Context, []ValidatedExecutionResolution) error {
