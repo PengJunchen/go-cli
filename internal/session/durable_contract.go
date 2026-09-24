@@ -29,13 +29,24 @@ func (v SessionView) Validate() error {
 	if v.SessionID == "" {
 		return errors.New("session: view requires a physical session ID")
 	}
+	if v.BranchID == "" {
+		return errors.New("session: view requires an active branch ID")
+	}
 	if len(v.Messages) != len(v.SourceEntryIDs) {
 		return fmt.Errorf("session: view has %d messages and %d source entry IDs", len(v.Messages), len(v.SourceEntryIDs))
 	}
+	if len(v.Messages) > 0 && v.Revision == "" {
+		return errors.New("session: non-empty view requires a durable revision")
+	}
+	seen := make(map[string]struct{}, len(v.SourceEntryIDs))
 	for i, id := range v.SourceEntryIDs {
 		if id == "" {
 			return fmt.Errorf("session: view source entry ID at index %d is empty", i)
 		}
+		if _, exists := seen[id]; exists {
+			return fmt.Errorf("session: view source entry ID %q is repeated", id)
+		}
+		seen[id] = struct{}{}
 	}
 	return nil
 }
@@ -184,6 +195,90 @@ func validDispatchMarkerState(state DispatchMarkerState) bool {
 	default:
 		return false
 	}
+}
+
+func validateVersion1EntryCoordinates(entry SessionEntry) error {
+	if entry.RecordVersion == 0 {
+		return nil
+	}
+	if entry.RecordVersion != 1 {
+		return fmt.Errorf("session: unsupported record version %d", entry.RecordVersion)
+	}
+
+	if entry.ActionState != "" {
+		if entry.Type != EntryTypeTool {
+			return errors.New("session: action journal row must have tool type")
+		}
+		if entry.RunID == "" || entry.AssistantTranscriptOrdinal == nil || entry.ToolCallID == "" || entry.ToolName == "" || entry.ActionBatchID == "" || entry.ActionID == "" {
+			return errors.New("session: action journal row has incomplete occurrence identity")
+		}
+		if entry.TranscriptIndex != nil {
+			return errors.New("session: action journal row cannot have a transcript index")
+		}
+		switch entry.ActionState {
+		case ActionStateIntent, ActionStateExecution:
+			return nil
+		default:
+			return fmt.Errorf("session: unsupported action state %q", entry.ActionState)
+		}
+	}
+
+	switch entry.Type {
+	case EntryTypeUser:
+		if entry.RunID == "" || entry.TranscriptIndex == nil {
+			return errors.New("session: version 1 user transcript row requires run ID and transcript index")
+		}
+	case EntryTypeAssistant:
+		if entry.RunID == "" || entry.TranscriptIndex == nil {
+			return errors.New("session: version 1 assistant transcript row requires run ID and transcript index")
+		}
+		if len(entry.ToolCalls) > 0 {
+			if entry.AssistantTranscriptOrdinal == nil {
+				return errors.New("session: assistant tool-call row requires an occurrence ordinal")
+			}
+			for i, call := range entry.ToolCalls {
+				if call.ID == "" || call.Name == "" {
+					return fmt.Errorf("session: assistant tool-call row has incomplete call at index %d", i)
+				}
+			}
+		}
+	case EntryTypeTool:
+		if entry.RunID == "" || entry.AssistantTranscriptOrdinal == nil || entry.TranscriptIndex == nil || entry.ToolCallID == "" || entry.ToolName == "" {
+			return errors.New("session: version 1 tool receipt has incomplete occurrence identity")
+		}
+		if entry.ReceiptOutcome != core.ReceiptOutcomeSuccess && entry.ReceiptOutcome != core.ReceiptOutcomeError && entry.ReceiptOutcome != core.ReceiptOutcomeInterrupted && entry.ReceiptOutcome != core.ReceiptOutcomeUnknown {
+			return fmt.Errorf("session: version 1 tool receipt has invalid outcome %q", entry.ReceiptOutcome)
+		}
+		if entry.DispatchState != DispatchStateNotDispatched && entry.DispatchState != DispatchStateDispatched {
+			return fmt.Errorf("session: version 1 tool receipt has invalid dispatch state %q", entry.DispatchState)
+		}
+	case EntryTypeCompaction:
+		if entry.CompactedThroughEntryID == "" {
+			return errors.New("session: version 1 compaction row requires a source boundary")
+		}
+	case EntryTypeCheckpoint:
+		if entry.CheckpointKind == "" {
+			return errors.New("session: version 1 checkpoint requires a checkpoint kind")
+		}
+		if entry.CheckpointKind == CheckpointExecutionResolution {
+			if entry.ExecutionResolution == nil || entry.RunID == "" || entry.ActionID == "" || entry.ExecutionResolution.RunID != entry.RunID || entry.ExecutionResolution.ActionID != entry.ActionID {
+				return errors.New("session: execution resolution checkpoint has mismatched typed proof")
+			}
+			if entry.ExecutionResolution.EvidenceRef == "" {
+				return errors.New("session: execution resolution checkpoint has no evidence reference")
+			}
+			switch entry.ExecutionResolution.Evidence {
+			case core.ResolutionNeverDispatched, core.ResolutionLocalResourcesStopped, core.ResolutionRemoteTerminal, core.ResolutionOperatorReconciled:
+			default:
+				return fmt.Errorf("session: execution resolution checkpoint has unsupported evidence %q", entry.ExecutionResolution.Evidence)
+			}
+		}
+	case EntryTypeSystem:
+		// System rows may be legacy-style user-visible context, not run transcript.
+	default:
+		return fmt.Errorf("session: version 1 entry has unsupported type %q", entry.Type)
+	}
+	return nil
 }
 
 type actionOccurrenceKey struct {
