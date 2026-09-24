@@ -1,0 +1,107 @@
+# R6-DES-01：入口身份、信任与 wire 生命周期
+
+状态：设计草案，待相关 reviewer（尤其 R2/R3/R4 边界）确认后交 builder。本文没有修改产品代码，也不代表 R2 持久会话或 R4 权限策略已实现。
+
+## 依据与取舍
+
+R6 的目标是让现有 prompt、REPL/TUI、serve、ACP、MCP 和 Web 路径使用一致的身份、权限、会话、取消与输出规则；不以“支持最新协议”为验收目标。[`execution-tasks.json:1256-1294`](execution-tasks.json#L1256) 要求先冻结具体 wire 版本，并明确 prototype Web 和远程审批的支持状态。R6-BLD-01/02 与 R6-REV-01 已列出真实 CLI 子进程、协议 peer、错误路径和 race 验收项（[`execution-tasks.json:1297-1428`](execution-tasks.json#L1297)）。
+
+本设计沿用 R1 的 `RunClaim.ID` 作为 `RunID`、Outcome 与 ExecutionState 分离、可读状态快照、有限等待后的 `cleanup_pending`/`quarantined` 和非权威 EventStream gap 计数（[`r1-contract.md:22-30`](r1-contract.md#L22)、[`r1-contract.md:42-75`](r1-contract.md#L42)）。R0 的默认 trace/log 隐私边界继续适用：身份、长度、状态可以记录，prompt、token、工具参数与远端错误正文不能因入口切换而重新落入默认日志（[`r0-contract.md:12-21`](r0-contract.md#L12)）。
+
+源码行号按已集成 R0/R1 快照 `codex/runtime-r1-integration` (`f00aa630`) 标注。当前实现的关键事实是：`AssembleAgent` 是现有组合根，但入口各自决定 session 与 dispatch（[`internal/cli/assemble.go:300-435`](../../../internal/cli/assemble.go#L300)；审计 [`06-cli-config-acp.md:221-245`](../../audits/2026-09-24/06-cli-config-acp.md#L221)）；main 先加载配置、再分发 help/version（[`cmd/cli/main.go:22-30`](../../../cmd/cli/main.go#L22)、[`internal/cli/cli.go:88-155`](../../../internal/cli/cli.go#L88)）；REPL 只有配置 `store_path` 时才实际创建 session store（[`internal/cli/assemble.go:1469-1477`](../../../internal/cli/assemble.go#L1469)）。因此实现应在现有入口与组装流程上补窄依赖，不另建通用 Runtime 框架。
+
+## 入口能力矩阵
+
+“目标”列是 R6 通过验收后允许宣传的能力；当前差距仍按未闭合处理。默认装配失败、协议降级或不支持的 capability 均不得回落成 echo、空成功或宽松授权。
+
+| 入口 | 当前路径/边界 | R6 目标与支持声明 |
+|---|---|---|
+| `prompt` | `AssembleAgent → Harness.Submit`；text、NDJSON event、raw stream 三种输出；仅显式 fork 才读 session（[`prompt.go:56-84,122-182,187-236`](../../../internal/cli/prompt.go#L56)）。 | 支持本地 one-shot Run。完整 positional 文本作为一次输入；text/raw 的 stdout 只含回答，JSON stdout 是版本化 NDJSON envelope；错误到 stderr/非零退出，span 反映真实 Outcome。没有 R2 durable commit 时不得声称已保存或可恢复。 |
+| REPL / TUI | `REPLSession → AssembleAgent → TurnRunner`；REPL 自己处理 turn、history 和 UI；TTY approval channel 与 headless stdin 目前并存（[`repl_session.go:250-322`](../../../internal/cli/repl_session.go#L250)）。 | 支持单个本地交互 session；TUI 是该入口的呈现方式，不是独立服务身份。一个物理 SessionID 下每轮新 RunID；是否可重启恢复由 R2 store 的 commit 结果决定。Ask 仅在有明确交互 owner 时可用；无 owner 时 fail closed。 |
+| `serve` / ACP HTTP | 实际实现是 `/connect,/send,/disconnect,/stream` JSON-over-HTTP 加 `/events` SSE；`gRPCAdapter` 并非 gRPC 栈（[`internal/acp/http_server.go:32-48`](../../../internal/acp/http_server.go#L32)、[`internal/acp/grpc_adapter.go:22-36`](../../../internal/acp/grpc_adapter.go#L22)）。Serve 装配失败目前会提示后进入 echo/ack 路径（[`serve_cmd.go:150-177`](../../../internal/cli/serve_cmd.go#L150)）。 | 只支持本仓自有 `go-cli-acp-json/1` profile，不能称为 gRPC 或官方 ACP 互操作。默认认证开启并执行真实 dispatch；显式 `--no-auth` 仍可在 loopback 上执行真实 dispatch，作为操作者选择的本机信任边界。wildcard/non-loopback `--no-auth` 拒绝；`--approve auto` 无认证也拒绝（[`serve_cmd.go:88-107`](../../../internal/cli/serve_cmd.go#L88)）。装配错误直接退出。每个 bearer subject 可拥有多个隔离的服务 SessionID 和 TaskID；`--no-auth` 使用共享 `local-loopback` scope；默认单 subject，不承诺多租户。`--approve ask` 的认证 ACP approval request/response roundtrip 是 R6 交付范围，按下文绑定一次性决策；loopback `--no-auth` 只接受本地交互 approver，缺 owner 时 fail closed。R4 未提供可判定的 effect/permission 时不派发工具。 |
+| ACP stdio | Adapter 直接读写注入的 `io.Reader/io.Writer`；当前用无行长上限的 `ReadBytes`，Disconnect 不一定能打断阻塞 read，`SendMessage` 没有与所有写路径共用 writer lock（[`stdio_adapter.go:90-128,131-198,200-250`](../../../internal/acp/stdio_adapter.go#L90)）。 | 只允许专用 `acp stdio` 进程模式，协议独占 stdin/stdout；默认 prompt、REPL、serve 不自动绑定 stdio adapter。按 `go-cli-acp-json/1` 单行 UTF-8 JSON frame。只有 reader 可关闭/进程可终止并 join 时才承诺取消收敛；否则标 unsupported，不把超时写成 quiescent。 |
+| MCP tool adapter | Assembly 从已信任配置载入 MCP server 并注册工具；stdio 与 HTTP(S) adapters 实现独立 JSON-RPC 路径。版本表当前含 `2024-11-05`、`2025-03-26`、`2025-06-18`，默认发送 `2025-06-18`（[`mcp.go:13-23`](../../../internal/mcp/mcp.go#L13)）。 | MCP 是工具 transport capability，不是独立 CLI Run 入口。R6 固定 **2025-06-18 handshake profile** 为待支持目标；旧版本不得因当前列表而自动宣传，只有各 transport fixture 通过才可加入矩阵。HTTP/SSE endpoint、headers、session 和 teardown 遵循下节。未通过 trust、schema/effect/approval 路径的 tool 不可 dispatch。 |
+| Web | `internal/web` 是 echo + SSE placeholder，未接 Agent，未由生产 CLI 调用；浏览器 Fetch API 可以设置自定义 `Authorization` header，但当前 `fetch` 没有附带 bearer；原生 `EventSource` 不能设置自定义 header（[`web/server.go:28-75,78-110,213-285`](../../../internal/web/server.go#L28)；[`06-cli-config-acp.md:207-217`](../../audits/2026-09-24/06-cli-config-acp.md#L207)）。 | 当前标为 prototype/unavailable，从 active help 和正式能力列表隐藏。若保留路由，chat 返回明确 501/503，而不是 echo 成功。只有同一 Run/Session/approval/auth 合同与真实浏览器认证测试通过后，才改为 supported；本设计不承诺该实现。 |
+
+## 统一身份、session 与 trust scope
+
+入口只传递一组窄的关联身份，不让客户端提供值覆盖本机或服务端 authority：
+
+| 字段 | Authority 与边界 |
+|---|---|
+| `PrincipalID` | 本机 CLI 来源于当前 OS 用户；认证 serve 来源于 bearer token 映射的配置主体；显式 loopback `--no-auth` 使用共享的 `local-loopback` scope，不能伪称识别了连接进程或 OS 用户。单个 serve token 是单一主体，不能把任意 `sender_id` 当认证用户。token 本身不写入日志、event 或 span。 |
+| `WorkspaceID` | 对规范化后的 workspace root 做稳定 digest；原始绝对路径只用于本机 trust/config 检查，不进跨入口协议或 action record。无法解析 canonical root 时，不加载 project config/extensions，也不执行 workspace-sensitive tools。R2 contract 已将 WorkspaceID 定义为 canonical root digest。 |
+| `SessionID` | R2 定义的物理 session file ID，由 store 随机生成；`agentName`、配置里的 session label、ACP `sender_id`、MCP `Mcp-Session-Id` 都不是它。服务 transport session 映射到本地 SessionID，不能直接指定本地文件路径。R2 contract 未审定前，只能把当前内存 session 作为临时关联，不可承诺重启恢复。 |
+| `TaskID` | 每次外部 dispatch 由服务端随机生成，代表一次 ACP/Web 请求；请求内的 client `request_id` 只作为去重/响应关联键。不得由可复用 `sender_id` 拼出 TaskID。 |
+| `RunID` | 由 R1 owner 从 `RunClaim.ID` 生成；一次模型 run 一个 ID。cancel 请求不等于终态，输出完整性要同时报告 Outcome、ExecutionState 和 EventGapCount（[`core/run_slot.go:13-20`](../../../internal/core/run_slot.go#L13)、[`core/run_status.go:14-43`](../../../internal/core/run_status.go#L14)）。 |
+
+不持有物理 session store 的入口明确是 ephemeral/sessionless。用户请求 `--resume`、fork、恢复或持久历史时，缺 store、文件打不开、写入未确认都返回错误；不可静默创建假的可恢复 session。R2 要求先 durable commit 初始输入，再发 provider 请求；终态保存确认先于“已保存/已完成”的用户提示（[`r2-contract.md:5-12`](r2-contract.md#L5)）。R6 只消费该接口，不实现 journal/recovery。
+
+Project trust 是“允许加载指定 workspace 的 project-sourced executable configuration”，不是工具执行授权或 sandbox bypass。一个 trust entry 绑定 canonical workspace root、逐项列出的 executable source manifest、记录时间和可选过期时间。manifest 至少覆盖：根配置候选 `.go-cli.yaml` 与 `.go-cli.json` 的逐个存在状态及现存文件内容，实际生效配置必须从其冻结字节解析（其中的 custom tools、MCP server 和 skill-dir 配置也随该字节内容受保护）；独立 `.go-cli/hooks.yaml`；被自动发现或配置引用的 `.go-cli/mcp.json`；以及实际读取的每个 project skill 文件（如 `.go-cli/skills/**/SKILL.md`），并为发现目录绑定排序后的成员列表以捕获新增、删除和重命名。若配置引用 workspace 内其他 executable config/source，也按独立 source 项纳入，不能仅以根 config 的路径或目录名代替内容指纹。指向 workspace 外的 project source 不得自动继承此 trust；若没有独立可验证的 trust identity，就拒绝加载。用户级配置不混入 project trust manifest。
+
+一次加载先解析出精确 source 集，再为每个 source 取得 canonical path、存在状态和不可变字节快照；指纹从快照计算，解析器和后续注册都消费同一份快照，禁止先 hash 再按路径重读形成 TOCTOU。可信记录逐项保存路径、存在状态、目录成员列表和摘要。原先为 absent 的可选 source 若新出现，视为 manifest 变化并拒绝本次 project source、要求重新授权；原先存在的 source 若消失、不可读、格式坏或内容变更，均 fail closed 并要求重新授权。workspace canonicalization 失败或 trust store 损坏也 fail closed。执行时不得回到原路径重新解析一份未校验的配置；若某类 loader 无法消费快照，就先拒绝该 project source。撤销立即影响下一次 load，并移除来自该 source 的 MCP tool registrations。
+
+授权命令按风险区分：`trust list` 是纯读取，`trust revoke` 是显式降权/撤销，二者都不要求 TTY 确认；只有授予新 project trust 时要求清晰的交互确认。非交互授予默认拒绝，未来如需自动化须增加明确、可审计的 noninteractive authorization 机制，不能默默信任。采用现有 `TrustManager` / `TrustStore`，用一份持久 manager 同时服务 `config.LoadTrusted` 与 `AssembleAgent` 的 project checks；生产路径不依赖 `approval` package 的另一个 global in-memory manager。可以增加一个窄的依赖传递点或 `AssembleOption`，不可新增通用注册容器。现状差距是 `main` 创建 `NewDefaultTrustManager(nil)`，assembler 查询全局 registry；`IsTrusted` 只检查存在/过期而不比对 fingerprint，`TrustProject` 只存 `mcp.json` fingerprint（[`main.go:22-29`](../../../cmd/cli/main.go#L22)、[`trust.go:43-72,85-108,146-156`](../../../internal/approval/trust.go#L43)、[`assemble.go:1872-1894,1956-1963,2026-2033`](../../../internal/cli/assemble.go#L1872)；APR-006 [`03-tools-approval.md:161-167`](../../audits/2026-09-24/03-tools-approval.md#L161)）。
+
+## Credentials、secret files 与配置启动
+
+Provider、protocol、normalized origin 与 credential 的规范绑定及 `CredentialRef` 解析由 R3 的唯一 `ResolveModel`/provider resolver 所有；R6 不定义第二个 factory 或并行凭据解析器。R6 只把既有 `AuthChain` 接入 R3 factory 的既定 secret-source/precedence seam，并通过真实入口确认主模型、小模型等请求最终消费该 resolver，而非从入口绕过它（R3 设计 [`r3-provider-design.md:9-12,56-70,99-115`](r3-provider-design.md#L9)）。来源名、provider alias、endpoint origin 可作诊断元数据；credential 值、Authorization header、MCP `bearer_token` 不入日志/trace。不同 provider 或 endpoint 不继承别处的凭证。MCP credential 仅发送给配置 endpoint 的同源请求；跨源 SSE endpoint、redirect 或 challenge 不得收到原 token。
+
+Provider `auth.json`、持久 trust JSON、serve bearer token 均按私密文件处理：父目录 `0700`，同目录唯一临时文件 `0600`，完整写入并 sync 后原子 rename，必要时 sync 目录；replace 之后 mode 仍为 `0600`。读取已有 credential 文件发现权限过宽或内容损坏时不得降级到空 key 或打印文件内容，应报来源错误并 fail closed。现有 onboarding 与 serve 使用 `os.WriteFile(..., 0600)`，覆盖已有宽权限文件不会收紧 mode（[`onboarding.go:453-471`](../../../internal/cli/onboarding.go#L453)、[`serve_cmd.go:279-287`](../../../internal/cli/serve_cmd.go#L279)）；现有 `FileTrustStore` 已用同目录 temp+rename，可沿用并补 sync/权限/覆盖回归（[`trust_store.go:41-53,124-150`](../../../internal/approval/trust_store.go#L41)）。`--token-file` 失败即不启动 listener；token 值不进 stdout、slog、trace 或错误正文，只向受控交互路径提供一次显示选项。
+
+Root command 必须先做不依赖配置的 help/version/usage 分流，再验证完整 config；其他 config 错误保持可诊断并落 stderr。`prompt` 将所有 positional token 按单空格拼为完整输入，或在协议中明确要求单参数；此设计选拼接，以满足自然 shell 输入预期。FlagSet usage/parse error 到 stderr，不进入 machine stdout。prompt span、`cli.invocation` span 和 exit code 使用真实失败结果，不能 defer 固定标记 OK（[`main.go:67-100,114-124`](../../../cmd/cli/main.go#L67)、[`prompt.go:80-105,153-180`](../../../internal/cli/prompt.go#L80)）。
+
+## 输出与远程审批
+
+机器模式输出协议定义为 `go-cli-output/1` NDJSON：每行 envelope 含 `version`, `run_id`, 可用时的 `session_id`, adapter 本地递增 `seq` 和一个 `event`。最后一行是 `run.terminal`，包括 `outcome`, `execution_state`, `event_gap_count`, `persistence`（`committed|disabled|failed`）和退出类别。只有 outcome=success、execution_state=quiescent 且所请求的 persistence 已 commit 时，终态可表达 durable completion。EventStream 丢事件时保留已收到事件和 terminal gap count；不能删掉所有过程事件来伪装完整。JSON stdout 之外的 usage、错误、日志和 trace 走 stderr 或私有文件；机器模式的 tracing 禁止 stdout exporter。现有 JSON 是直接编码 AgentEvent，stdout flag/trace 也可能混入（[`prompt.go:187-207`](../../../internal/cli/prompt.go#L187)、[`main.go:130-160`](../../../cmd/cli/main.go#L130)）。
+
+`text` 保留人类可读回答；`stream` stdout 保留 raw text，不插 JSON/status 行，终态通过进程退出码及 stderr 简短诊断表达。输出失败、provider 错误或 cancel 后已经可见的 partial text 仍标 error/cancelled/unknown，不能写成 success。Log/trace 继续遵守 R0 默认 redaction。
+
+ACP HTTP profile v1 中所有 dispatch、事件和 approval 都携带服务端 `session_id`、唯一 `task_id`/`request_id`、R1 `run_id` 与单调 `event_id`。`sender_id` 只可作为同一认证主体下的显示 alias。`/events` 订阅只绑定此 task/session sink，不从全局 EventBus 混流。SSE `id` 在一个 session 的事件序列内单调；合法 `Last-Event-ID` 从缓冲 ring 回放，早于最早保留 ID 时明确发 `event_gap`（含请求 cursor 与 earliest/latest），而不是悄悄从当前流继续。`/stream` response 同样包含关联 ID。R1 owner 的 EventGapCount 是运行事件投影缺口；ACP SSE 自己的 replay gap 是传输缺口，两者分开报告。现有 `Session` 已有事件 ring 与序号（[`core_handler.go:26-55,105-151`](../../../internal/acp/core_handler.go#L26)、[`sse_writer.go:45-58`](../../../internal/acp/sse_writer.go#L45)、[`http_server.go:584-601`](../../../internal/acp/http_server.go#L584)），但当前 HTTP fan-out 仍需保证按 task/session 隔离。
+
+远程 approval 使用服务端生成的一次性 `approval_id`，绑定 authenticated PrincipalID、SessionID、TaskID、RunID、工具 registration generation 与到期时间。R6 必须在 `go-cli-acp-json/1` private profile 内交付真实 request/response roundtrip；它不是官方 ACP 互操作承诺。approval request 只包含安全摘要，不回显完整 secret 参数；响应只接受 `allow_once` 或 `deny`，不接受未知 enum、不提供远程 `always_allow`。重复、过期、跨主体或跨 run 的 response 均拒绝；无回复超时即 deny 并取消该调用。`--no-auth` loopback 没有 authenticated remote approver，只可使用本地交互 owner；无 owner 时 fail closed。R4 未定稿前，approval 不得自行推断 tool effects/capabilities，也不得把 project trust 转成执行许可。当前服务的 `/send` 通过 SubagentDispatcher，而 serve 默认 Ask 仍可能等待进程 stdin（[`core_handler.go:154-205,231-276`](../../../internal/acp/core_handler.go#L154)、审计 [`06-cli-config-acp.md:49-61`](../../audits/2026-09-24/06-cli-config-acp.md#L49)）。
+
+## ACP 与 MCP wire profiles
+
+**ACP。** `go-cli-acp-json/1` 是 go-cli 私有 profile：connect 首包必须声明 profile version；不识别/缺失版本拒绝。HTTP 继续用 JSON routes，不冒称 gRPC；Bearer 校验先于 session/task 查找，server 生成不可猜 session ID，未认证的外部 `sender_id` 不能关联已有 session。默认认证开启，自动生成 token 仍只写私有 token file；显式 `--no-auth` 只能绑定明确 loopback，`--no-auth` + wildcard 拒绝（当前保护见 [`serve_cmd.go:93-107,119-147`](../../../internal/cli/serve_cmd.go#L93)）。HTTP 层设置 header/read/write/idle timeouts、最大 body/header、dispatch semaphore 与有界待处理队列；队列满返回明确 overload，不启动额外无界 goroutine。网络取消调用 R1 Cancel，等待有界 cleanup；返回 `cleanup_pending`/`quarantined` 时不清掉 run/session owner。
+
+ACP stdio 与 MCP stdio 均使用独占的 UTF-8、单 JSON-RPC/ACP object per line，embedded newline 非法，最大 frame 1 MiB。只将协议 frame 写 stdout；应用日志和 child stderr 可另行捕获到 stderr。每个 writer 单一 mutex 保证完整一行不交错；reader 检查 max frame，EOF/坏 JSON/超长帧明确结束 session。取消先取消 request context，再关闭 owned pipe/终止 owned child，join read/write/dispatch workers；generic 不可关闭 reader 的 disconnect 只承诺 bounded return，状态通过 R1 handle 明示 pending/quarantined，绝不谎报 quiescent。ACP 当前 `ReadBytes` 不限长且连接/发送 writer lock 不统一，见 [`stdio_adapter.go:46-88,90-128,131-250`](../../../internal/acp/stdio_adapter.go#L46)。
+
+**MCP 版本固定。** 本 lane 固定 `2025-06-18` handshake profile，是仓库目前 `LatestProtocolVersion` 明确请求的版本，而非追逐协议最新版。官方该版规定 HTTP 客户端在 initialize 后请求携带 `MCP-Protocol-Version`，并在服务端分配 `Mcp-Session-Id` 时后续请求持续携带；POST 的 `Accept` 同时列出 JSON 与 event-stream；会话删除使用 DELETE；SSE resume 使用同一 session 的 `Last-Event-ID`。见[版本化 transports 规范](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports)。authorization/OAuth 是服务端可选能力，R6 不把实现全套 OAuth client 当成必需交付；当前不支持的 OAuth challenge 必须明示 unsupported/auth failure 并 fail closed，不得弱化为无认证或把其他凭证转发过去。若要支持 OAuth，按[该版 authorization 规范](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization)和真实 peer 单独验收 resource/audience 与凭证隔离。
+
+MCP HTTP adapter 的具体约定：
+
+1. 初始 URL 必须是绝对 HTTP(S) URL；非 TLS HTTP 只允许 loopback。配置 endpoint 是唯一 origin authority。静态 bearer 只发往该 origin；redirect 和 SSE 回传 endpoint 跨 origin 即拒绝，不跟随且不转发 headers。MCP OAuth 是可选 authorization profile，不要求 R6 新建通用 OAuth client；只有现有实现具备并通过 resource/audience 绑定验证时才可使用。服务器要求 OAuth、而当前 client 没有受支持且已验证的 OAuth 配置时，明确返回 auth/unsupported error 并 fail closed，不发送其他 provider key 或静态凭证充当 OAuth。
+2. 对 `/mcp` endpoint 先 POST `initialize`，`Accept: application/json, text/event-stream`；成功响应为 HTTP 200，内容可以是 JSON 或 SSE。严格校验 HTTP status、JSON-RPC version、request ID、单一 result/error；对协商结果只接受本 lane 声明的 `2025-06-18`。其后每个 POST/GET 都发送 `MCP-Protocol-Version`；若收到 `Mcp-Session-Id`，将它绑定当前连接并随后的请求携带。GET stream 只使用同一 session/stream 的 `Last-Event-ID` 做恢复；cursor 过期或无法判断是否漏消息时显式报告 gap。接受的 JSON-RPC notification 用 HTTP 202；未授权为 401/403，非法版本/请求为 400，已过期 session 的 404 只触发新握手，不重放原 tool call。`tools/call` 正常结果里的 `isError=true` 映射成工具错误；nil/错 ID/错 envelope 不得映射成功。
+3. 处理连接在请求发送边界后的丢失而没有可信 JSON-RPC response 时，按 R0/R1 将 action outcome 标为 unknown，供 caller/Run owner 展示；只有 `tools/list` 等无副作用只读请求才可在固定次数内 reconnect/retry。相关边界已在 [`request_boundary.go:12-47,87-138`](../../../internal/mcp/request_boundary.go#L12)，主 contract 禁止 MCP 工具自动重放（[`r0-contract.md:17-21`](r0-contract.md#L17)）。
+4. 每次 reconnect 重新完成握手、重新取得 server tool definition 并原子替换该 server 的整组 tools；配置移除 server 时注销其 tools，关停旧 client、stream 与 reconnect worker。registry 更新失败时禁用该 server 的 tools，不保留 stale executable definition。配置 reload 不能令旧 approval/capability 作用到新 definition；registration generation/effect binding 依赖 R4。当前 reloader 有生命周期接口，但 CLI 当前 stale replacement 属于 TOOL-007（[`hot_reload.go:16-37,114-120,382-424`](../../../internal/mcp/hot_reload.go#L16)；[`03-tools-approval.md:73-81`](../../audits/2026-09-24/03-tools-approval.md#L73)）。
+5. Disconnect 先停止接收新请求，再取消并 join owned worker/stream，发送可行的 DELETE `Mcp-Session-Id`，disconnect client，移除 session 路由，停止 reloader。Shutdown 有 deadline；deadline 到而 worker 仍存活则保留 quarantined 状态，不报告 clean shutdown。
+
+当前 MCP HTTP adapter 已限制 endpoint/SSE URL 与 redirect 同源，且默认 client SSRF-safe（[`http_adapter.go:72-135,159-232`](../../../internal/mcp/http_adapter.go#L72)），但请求目前只统一写 Content-Type/Accept，并未携带协商后的 version/session headers（[`http_adapter.go:299-345`](../../../internal/mcp/http_adapter.go#L299)）；因此本设计选择固定 profile 后，header/session/error/reconnect 仍需真实 peer conformance 才可宣传。经典 HTTP+SSE 不作为 2025-06-18 Streamable HTTP 的隐式 fallback；若以后支持 2024-11-05，必须另建显式 profile 和 fixture。
+
+## Cancel、drain、事件与 teardown 的共同规则
+
+每个 adapter cancel 都定位到一个 RunID；取消的是逻辑请求和由该 run owner 管理的工作，不是 session 全局。HTTP request cancel、ACP disconnect、stdio EOF、MCP disconnect、CLI SIGINT/SIGTERM 最终都调用对应 owner 的 cancel/drain，再在有界时间内读取 R1 status snapshot。`cancel_requested` 不等于 `cancelled`；调用方等待到限只能报告 `cleanup_pending` 或 `quarantined`，RunID 仍占用对应 mutation/run slot，直到 R1 owner 证明 reader/worker/child 已结束并完成 transcript。不能因为 SSE/JSONL consumer 断开或事件 buffer 满就抹除执行状态。
+
+事件仅是投影，不是历史 authority：R1 typed transcript 决定 assistant/tool/result pairing，R2 durable store 决定已保存记录。适配器为自己的连接分配单调 sequence；每个 terminal summary 带 Outcome、ExecutionState 和累计 gap。事件重连只能重放尚在对应 stream/session ring 内的 projection，不能重放工具执行。无法补齐时显式提供 gap cursor，调用方可以读取 authoritative snapshot/session，而不能把空 gap 当成无遗漏。
+
+## R2 / R3 / R4 有限依赖
+
+| 依赖 | R6 消费的合同 | 明确留在后续 lane 的工作 |
+|---|---|---|
+| R1（contract 已批准；source 在 `f00aa630` integration snapshot） | RunClaim ID、Outcome/ExecutionState、status snapshot、pending cleanup、worker/quiescence ownership、EventGapCount、typed transcript 语义。 | R6 不再实现第二套 run owner，也不从 AgentEvent 重建 transcript。 |
+| R2（[`r2-contract.md:1-12`](r2-contract.md#L1) 标记待 joint review，尚不是已实现存储） | 物理 SessionID/EntryID、durable commit acknowledgment、resume/fork 的 authority、WorkspaceID digest、unfinished action reconciliation。 | R6 不实现 ActionJournal、session migration、自动 replay；未拿到 R2 durable acknowledgment 时只声明 ephemeral。 |
+| R3（[`r3-provider-design.md:9-12,56-70,99-115`](r3-provider-design.md#L9) 定义统一 resolver 方向） | 唯一 provider resolver 规范化 provider/protocol/origin 并解析 `CredentialRef`；R6 仅将 `AuthChain` 接入该 resolver 的既定 secret-source seam。 | R6 不另建 provider factory、credential resolver 或 precedence；如 R3 seam 未可用，credential-bearing provider 请求 fail closed。 |
+| R4（[`r4-prepared-dispatch-design.md:1-8`](r4-prepared-dispatch-design.md#L1) 为待 review seam，不是已落能力） | 同一次 resolver 的 tool identity/registration generation、trusted EffectSet、schema snapshot、一次性 prepared dispatch 与 approval binding。 | R6 trust 不授予 tool capability；R4 完成前 unknown/untrusted MCP/custom tool 默认 deny，不能以名称或 project trust 声称 read-only。 |
+
+## 真实 local-mock 验收
+
+验收走真实 CLI 子进程和默认 `AssembleAgent`/provider factory；网络依赖只用本机 provider/MCP/ACP `httptest.Server` 与可控 stdio peer，不用 mock `Run`/adapter 来证明生产接线。每个 subprocess 使用隔离 HOME、XDG config、工作目录和 trace/log 目录；同时捕获 stdout、stderr、私有 JSONL、HTTP headers 和 peer 收到的请求。保留 execution task 中命名的回归用例，并加入口矩阵覆盖：
+
+- **Config/auth/output：** 坏项目配置下 help/version 仍 0；同一完整 positional prompt 到达本机模型；R6 只把 `AuthChain` 来源接入 R3 唯一 provider resolver，由真实入口证明该 factory 使用 scoped credential 且 token 只发往配置 origin；prompt 成功/失败 span 与 exit status 相符；machine stdout 每行可按 `go-cli-output/1` 解码，diagnostics/trace 不混入；重新写入预置 `0644` auth/token/trust 文件后 mode 是 `0600`，文件内容不会出现在 log/trace。
+- **Trust/session：** `trust list` 与 `trust revoke` 在 TTY 和 non-TTY 都不要求确认；授予 trust 要求明确 TTY 确认，non-TTY 默认拒绝。对被加载的根项目 config、hooks、MCP、custom tools 与每个 skill source 分别改字节，逐项证明同次加载校验的就是被解析/注册的 frozen snapshot；覆盖原 absent source 后出现、原 present source 消失、不可读、格式坏和 trust store 损坏的 fail-closed 结果。重启仍可识别已授予 trust；revoke 后 project MCP/custom tool 均不再注册；缺 session store 的 `--resume` 和 session append/sync 失败均不得报告 saved/success。
+- **ACP：** 用真实 HTTP server/client pair 测 Bearer、错误版本、伪造 sender、两个并发 Session/Task 的 event 隔离、Last-Event-ID replay 和过期 cursor gap；实际 dispatcher 达到 concurrency/queue 上限后新任务有界拒绝；`ask` 的认证 ACP approval request/response roundtrip 在 R6 范围内，超时、重复、跨主体或跨 RunID 决策 deny。stdio peer 验证纯 frame stdout、1 MiB 边界、并发写不交错、静默 read 的取消/join。
+- **MCP：** 版本 fixture 固定 `2025-06-18`，检查 initialize/initialized、Accept、version/session headers、status、request IDs、isError/nil；同源与跨源 redirect/SSE endpoint、loopback/non-loopback HTTP、当前支持的静态 bearer origin scope、未支持 OAuth challenge 的明确 fail-closed、404 session reset；在 tools/call 请求已到 peer 而响应丢失时证明只返回 unknown 且没有第二次调用；真实 reload 增删/替换 tools 并 join reloader/client。
+- **Web：** 仅在此提交仍声明 prototype/unavailable 时，验收 production help 不宣传、chat 不返回伪 echo 成功。将来真实集成另以浏览器等效请求覆盖 login、session/run 隔离、SSE 和 approval；若使用原生 EventSource 认证，应采用受支持的同源机制或改为 fetch-based stream，不能归因于 Fetch 无法设置 Authorization header。
+
+每项要保留准确 test name、CLI argv、环境隔离方式、request/event transcript（脱敏）、exit code 和 source revision。单测通过、protocol fixture、实际二进制 journey、package race 分开报告；未实现的入口在 R6-REV-01 的结果矩阵中保留 unsupported/partial。
