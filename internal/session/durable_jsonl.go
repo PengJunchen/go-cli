@@ -153,25 +153,62 @@ func (p *DurableJSONLSessionPreparer) PrepareResume(ctx context.Context, physica
 	if err != nil {
 		return nil, err
 	}
-	if hasRecoveryEvidence(entries) && p.authority == nil {
-		return nil, errors.New("session: action history requires a recovery authority")
+	branchEntries, err := orderedDurableBranch(activeLeaf, entryMap)
+	if err != nil {
+		return nil, fmt.Errorf("session: validate durable branch before recovery: %w", err)
 	}
-	if hasRecoveryEvidence(entries) {
-		return nil, errors.New("session: recovery authority adapter is required to resolve action history")
+	if _, err := durableSessionView(physicalSessionID, activeBranch, maxSeq, branchEntries); err != nil && !errors.Is(err, errUnclosedToolCallGroup) {
+		return nil, fmt.Errorf("session: validate durable view before recovery: %w", err)
+	}
+	plan, err := analyzeDurableActionJournal(entries, physicalSessionID)
+	if err != nil {
+		return nil, fmt.Errorf("session: validate durable action journal: %w", err)
+	}
+	needsAuthority := len(plan.pending) > 0 || len(plan.resolutions) > 0
+	var decisions []PendingActionDecision
+	if needsAuthority {
+		if p.authority == nil {
+			return nil, errors.New("session: action history requires a recovery authority")
+		}
+		resolutions := append([]ValidatedExecutionResolution(nil), plan.resolutions...)
+		if err := p.authority.ApplyDurableResolutions(ctx, resolutions); err != nil {
+			return nil, fmt.Errorf("session: apply validated execution resolutions: %w", err)
+		}
+		if len(plan.pending) > 0 {
+			refs := append([]PendingActionRef(nil), plan.pending...)
+			decisions, err = p.authority.InspectDispatchMarkers(ctx, refs)
+			if err != nil {
+				return nil, fmt.Errorf("session: inspect pending dispatch markers: %w", err)
+			}
+			if err := validatePendingActionDecisions(plan.pending, decisions); err != nil {
+				return nil, err
+			}
+		}
 	}
 	if _, err := file.Seek(0, io.SeekEnd); err != nil {
 		return nil, fmt.Errorf("session: seek append position: %w", err)
 	}
-	branchEntries, err := orderedDurableBranch(activeLeaf, entryMap)
-	if err != nil {
-		return nil, err
-	}
-	view, err := durableSessionView(physicalSessionID, activeBranch, maxSeq, branchEntries)
-	if err != nil {
-		return nil, err
-	}
 	store := newDurableJSONLStore(file, physicalSessionID, label, activeBranch, entryMap, maxSeq, p.io)
 	store.activeLeafID = activeLeaf
+	if len(plan.pending) > 0 {
+		recoveryRows, err := buildRecoveryReceipts(plan, decisions, physicalSessionID, activeBranch, activeLeaf, entryMap)
+		if err != nil {
+			return nil, err
+		}
+		if len(recoveryRows) > 0 {
+			if _, err := store.AppendAndSync(ctx, recoveryRows...); err != nil {
+				return nil, fmt.Errorf("session: sync recovered tool receipts: %w", err)
+			}
+		}
+	}
+	branchEntries, err = orderedDurableBranch(store.activeLeafID, store.entries)
+	if err != nil {
+		return nil, err
+	}
+	view, err := durableSessionView(physicalSessionID, store.activeBranchID, store.maxSeq, branchEntries)
+	if err != nil {
+		return nil, err
+	}
 	store.view = view
 	failed = false
 	return &durablePreparedSession{store: store}, nil
@@ -382,6 +419,19 @@ func (s *durableJSONLStore) AppendAndSync(ctx context.Context, entries ...Sessio
 			candidateActiveLeafID = row.ActiveLeafEntryID
 		}
 		candidateActiveBranchID = row.BranchID
+	}
+	plan, err := analyzeDurableActionJournal(branchRows, s.sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("session: validate durable action journal: %w", err)
+	}
+	pending := make(map[PendingActionRef]struct{}, len(plan.pending))
+	for _, ref := range plan.pending {
+		pending[ref] = struct{}{}
+	}
+	for _, occurrence := range plan.occurrences {
+		if _, exists := pending[occurrence.ref]; exists && !durableEntryOnPath(available, occurrence.assistant.ID, candidateActiveLeafID) {
+			return nil, fmt.Errorf("session: pending action occurrence %q is outside the active branch", occurrence.ref.ToolCallID)
+		}
 	}
 	branchEntries, err := orderedDurableBranch(candidateActiveLeafID, available)
 	if err != nil {
@@ -632,15 +682,6 @@ func validateLoadedDurableEntries(entries []SessionEntry, sessionID string) (map
 		return nil, 0, "", "", "", err
 	}
 	return byID, maxSeq, sessionLabel, activeBranch, activeLeaf, nil
-}
-
-func hasRecoveryEvidence(entries []SessionEntry) bool {
-	for _, entry := range entries {
-		if entry.ActionState != "" || entry.CheckpointKind == CheckpointExecutionResolution {
-			return true
-		}
-	}
-	return false
 }
 
 func orderedDurableBranch(leafID string, entries map[string]*SessionEntry) ([]SessionEntry, error) {

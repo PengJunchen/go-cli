@@ -630,7 +630,7 @@ func TestDurableWriterRejectsSystemRowInsideOpenToolCallGroup(t *testing.T) {
 	ordinal := uint64(0)
 	assistant, err := writer.AppendAndSync(context.Background(), SessionEntry{
 		ID: "open-assistant", ParentID: root[0].ID, Type: EntryTypeAssistant, RunID: "run-boundary",
-		TranscriptIndex: &one, AssistantTranscriptOrdinal: &ordinal,
+		WorkspaceID: "workspace-boundary", TranscriptIndex: &one, AssistantTranscriptOrdinal: &ordinal,
 		ToolCalls: []llm.ToolCall{{ID: "call-1", Name: "read"}},
 	})
 	if err != nil {
@@ -673,7 +673,7 @@ func TestDurableWriterRejectsSystemRowInsideOpenToolCallGroup(t *testing.T) {
 		}
 		fixtureAssistant, err := fixture.DurableWriter().AppendAndSync(context.Background(), SessionEntry{
 			ID: "open-assistant", ParentID: fixtureRoot[0].ID, Type: EntryTypeAssistant, RunID: "run-forged",
-			TranscriptIndex: &one, AssistantTranscriptOrdinal: &ordinal,
+			WorkspaceID: "workspace-forged", TranscriptIndex: &one, AssistantTranscriptOrdinal: &ordinal,
 			ToolCalls: []llm.ToolCall{{ID: "call-1", Name: "read"}},
 		})
 		if err != nil {
@@ -808,6 +808,29 @@ func TestDurableWriterRejectsInvalidHistoryBeforeWriting(t *testing.T) {
 			},
 		},
 		{
+			name: "receipt action identity does not match its intent",
+			build: func(root, assistant SessionEntry) []SessionEntry {
+				ordinal, index := uint64(0), uint64(2)
+				intent := durableIntentFixture("intent-one", assistant.ID, "action-one", ordinal)
+				receipt := SessionEntry{
+					ID: "receipt-one", ParentID: intent.ID, Type: EntryTypeTool, RunID: "run-invalid", WorkspaceID: "workspace-invalid",
+					ActionBatchID: "batch-one", ActionID: "action-wrong", AssistantTranscriptOrdinal: &ordinal,
+					TranscriptIndex: &index, ToolCallID: "call-1", ToolName: "read",
+					ReceiptOutcome: "error", DispatchState: DispatchStateNotDispatched,
+				}
+				return []SessionEntry{intent, receipt}
+			},
+		},
+		{
+			name: "duplicate intent for one occurrence",
+			build: func(root, assistant SessionEntry) []SessionEntry {
+				ordinal := uint64(0)
+				first := durableIntentFixture("intent-one", assistant.ID, "action-one", ordinal)
+				second := durableIntentFixture("intent-two", first.ID, "action-two", ordinal)
+				return []SessionEntry{first, second}
+			},
+		},
+		{
 			name: "duplicate receipt",
 			build: func(root, assistant SessionEntry) []SessionEntry {
 				index2, index3, ordinal := uint64(2), uint64(3), uint64(0)
@@ -843,7 +866,7 @@ func TestDurableWriterRejectsInvalidHistoryBeforeWriting(t *testing.T) {
 			ordinal := uint64(0)
 			assistant, err := prepared.DurableWriter().AppendAndSync(context.Background(), SessionEntry{
 				ID: "open-assistant", ParentID: root[0].ID, Type: EntryTypeAssistant, RunID: "run-invalid",
-				TranscriptIndex: &one, AssistantTranscriptOrdinal: &ordinal,
+				WorkspaceID: "workspace-invalid", TranscriptIndex: &one, AssistantTranscriptOrdinal: &ordinal,
 				ToolCalls: []llm.ToolCall{{ID: "call-1", Name: "read"}},
 			})
 			if err != nil {
@@ -868,6 +891,20 @@ func TestDurableWriterRejectsInvalidHistoryBeforeWriting(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+func durableIntentFixture(id, parentID, actionID string, ordinal uint64) SessionEntry {
+	return SessionEntry{
+		ID: id, ParentID: parentID, Type: EntryTypeTool, RunID: "run-invalid", WorkspaceID: "workspace-invalid",
+		ActionBatchID: "batch-one", ActionID: actionID, ActionState: ActionStateIntent,
+		AssistantTranscriptOrdinal: &ordinal, ToolCallID: "call-1", ToolName: "read",
+		ArgumentDigest: strings.Repeat("a", 64), SchemaDigest: strings.Repeat("b", 64),
+		ToolIdentity: &tools.TrustedToolIdentitySnapshot{
+			RegistrationSource: "builtin", ToolName: "read", RegistrationGeneration: 1,
+			ExecutorFingerprint: strings.Repeat("c", 64), ScopeFingerprint: strings.Repeat("d", 64),
+		},
+		EffectSet: []tools.TrustedToolEffect{tools.EffectWorkspaceRead},
 	}
 }
 
