@@ -23,7 +23,8 @@ TUI 把 session history、运行时观察事件、交互请求、输入队列建
 | 可见对象 | 身份键 | 权威来源 | R5 投影要求 |
 |---|---|---|---|
 | 会话/当前分支 | R2 定义的 `SessionID`、分支/当前叶身份 | SessionTree/JSONL 恢复结果 | 加载哪个 branch 就显示哪个；分支切换或恢复后不能混入旧分支行。使用 R2 的正式字段，不在 TUI 发明 ID 转换。 |
-| 持久 transcript entry | `SessionID + EntryID`，并带选中的 branch 上下文 | R2 durable store 与 R1 typed canonical transcript | 用户、assistant、tool receipt、steer/follow-up 按 canonical 顺序各出现一次；行可标为已保存的前提是 store 确认了对应记录。 |
+| 持久 transcript entry | `SessionID + BranchID + EntryID` | R2 durable store 与 R1 typed canonical transcript | 用户、assistant、tool receipt、steer/follow-up 按 canonical 顺序各出现一次；行可标为已保存的前提是 store 确认了对应记录。UI 以 durable `EntryType` 投影行类型，不从 provider role 或 EventStream 推断。 |
+| compaction marker | `SessionID + BranchID + EntryID`，`EntryTypeCompaction` | R2 durable compaction entry；provider `SessionView.Messages` 是独立的有效模型上下文投影 | 显示为压缩摘要/历史边界，保留 durable entry identity；summary 不能画成新提交的 user prompt。Provider 恢复可将同一 summary 投影为带 untrusted-summary 前缀的 `Role="user"` 消息，但 UI transcript 不得复用该 role 推断原始行类型。 |
 | 本轮运行 | R1 `RunID` | TurnRunner/Run owner 状态快照 | 运行状态、logical outcome、cleanup/execution state 分开显示；`RunID` 不以 session ID 代替。 |
 | 工具调用及输出 | `RunID + assistant/group transcript ordinal + ToolCallID`，stdout/stderr 另带 stream；执行并持久化后由 R2 映射到真实 `ActionID` | R1 typed tool call/receipt；EventStream 仅提供实时观察；R2 typed commit sink 提供权威 durable 映射 | 同一 Run 的不同 provider completion 可能复用 `call_1`，不能只用 `ToolCallID` 归组。按 canonical assistant/group transcript 顺序区分调用，不能从文本、参数或时间猜身份；持久化后使用 R2 返回的真实 `ActionID`。并行完成顺序不能改变请求/结果配对。 |
 | approval / ask_user | 各自唯一的 `RequestID`；TUI 队列 token 只作进程内撤回定位 | 对应 request/response channel 和 request context | 活动项与排队项均保留各自身份；取消一个请求不能替代、覆盖或答复另一项。 |
@@ -39,7 +40,7 @@ R1 定义 `RunOutcome = success/error/cancelled/unknown`，并将其与 `RunExec
 ### 暂存、持久化和结束状态
 
 - 流式 assistant delta 与工具 stdout/stderr 是 provisional。可实时展示，但必须与已保存行有明确区分；将它们合并进 durable entry 时按稳定身份更新原行，不能再追加一份。
-- 用户输入、tool call/receipt、steer/follow-up 和最终 assistant 由 R1 canonical transcript、R2 session store 提供。EventStream 丢失/重复不改变权威历史。TUI 不从 `AgentEvent` 拼 session transcript。
+- 用户输入、tool call/receipt、steer/follow-up、compaction marker 和最终 assistant 由 R1 canonical transcript、R2 typed durable entries 提供。Provider 有效上下文 projection 与 UI durable transcript 分离；R2 将 compaction summary 作为 `Role="user"` 恢复给模型，不改变对应 durable 行的 `EntryTypeCompaction`。EventStream 丢失/重复不改变权威历史。TUI 不从 `AgentEvent` 或 provider message role 拼 session transcript。
 - `done` 只更新运行状态，不再将完整 assistant 文本作为第二条状态消息渲染。完整 assistant answer 只保留一条，且其 `EntryID` 与 durable store 对应。
 - 仅当 R1 确认 `Outcome=success`、`ExecutionState=quiescent` 且 R2 对最终 transcript 的语义提交成功，才显示“完成 · 已保存”。失败/取消时，仍单独展示已保存的 partial transcript 状态；`unknown` 必须写明结果未确定，不暗示成功或重放。
 - 状态对应关系：`running` 显示运行中；`cancel_requested` 显示已请求停止；`draining` 显示正在等待工具/reader 收尾；`cleanup_pending` 显示调用方已返回而后台清理未完；`quarantined` 显示仍无法证明资源已停止。若取消后状态句柄继续更新，界面可以更新状态，但不能发送第二个 terminal result。
@@ -58,18 +59,18 @@ R1 定义 `RunOutcome = success/error/cancelled/unknown`，并将其与 `RunExec
 | 并发审批/HITL | 所有 interaction 按接收顺序 FIFO 进入一个有 ID 的等待队列；焦点只在 active 项，footer 显示剩余数量和下一项短摘要。 | 两个或更多审批逐个都可回答/撤回；不同类型 modal 混排仍按序；取消队列项不移除 active 项。 |
 | steer / follow-up | 输入时明确标注将 steer 当前 run 或排队为后续输入；提交后先展示本地 submitting，R1 correlated-input 接口确认后才标 queued/accepted；消费时以 `InputID` 进入 canonical history，R2 返回 `EntryID` 后成为 durable 行。 | 重复文本按 opaque ID 而非内容关联；若 R1/R2 seam 未就绪，只显示无逐条 claim 的本地/aggregate 状态；队列满/回调失败能看见；编辑光标与插入位置一致。 |
 | cancel / cleanup | 取消动作显示 intent，之后显示 owner 提供的 draining/cleanup_pending/quarantined/quiescent 状态；工具 receipt unknown 时保留 unknown。 | cancel 不伪装 quiescent；清理待完成时不显示 done、不释放可见的 active 状态；已有或排队交互全部收敛。 |
-| resume / fork | R2 返回实际选择的 session 与 branch 后再渲染该分支 durable transcript；新 run 绑定此 branch。fork 作为 R2 已确认操作的分支身份切换投影，不复制 UI 内存历史作为 fork。 | `TestTUITranscriptRestoresSelectedBranch`；无旧 branch 行混入，tool groups 仍按 ID 完整；R2 `/resume` 修复和审查是前置。 |
+| resume / fork | R2 返回实际选择的 session 与 branch 后再渲染该分支 durable transcript；新 run 绑定此 branch。fork 作为 R2 已确认操作的分支身份切换投影，不复制 UI 内存历史作为 fork。 | `TestTUITranscriptRestoresSelectedBranch`；含 `EntryTypeCompaction` marker、marker 后 suffix 和 source boundary 的 fixture，断言 UI 行仍为 compaction 类型、summary 不成为新 user turn、EntryID/BranchID 不变，并分别验证 durable transcript 与 provider 有效上下文 projection；无旧 branch 行混入，tool groups 仍按 ID 完整。R2 `/resume` 修复和审查是前置。 |
 | export | 若最终 R2/CLI 提供 export，导出对象是所选 durable branch，而非截断后的可见窗口或未提交 delta；显示目标和完成/失败回执。没有可调用能力时，help/command surface 标记 unavailable。 | 不声称 TUI buffer 等于完整 session；导出失败可见。R5 不实现新 export 格式，通用 export workflow 属 R8/既有 CLI capability。 |
 
 ## 工具进度、审批可辨识和长内容
 
-工具行按 `RunID + assistant/group transcript ordinal + ToolCallID` 形成一个调用组；不同 provider completion 可复用 `call_1`，因此 `ToolCallID` 只在其 assistant/group 内唯一。显示 `tool name + concise args summary + lifecycle status + stdout/stderr + final receipt/error`。执行并持久化后，R2 typed commit sink 提供真实 durable `ActionID` 映射；UI 不自行生成权威 ID，也不按相同文本、参数或时间猜测对应关系。详情只引用 Runtime 已按 source cap 捕获的有限 payload；UI 不另存或复制一份无界 raw args/output 供展开。若上游没有提供有界 captured-payload 引用或来源截断标记，R5 必须先将该接口缺口交回 R1/R4 owner，不能由 TUI 自己补一个不受限缓存。审批出现时，主状态变为“等待授权”，调用本身不能被误画成正在运行。并行工具各自有 spinner/state，不能用全局单一 spinner 覆盖每个工具状态。Todo/Subagent 只在默认 local bridge 收到有类型、身份稳定的来源后列为支持功能；无 Runtime/CLI 来源时显示 unavailable，不凭空增加空的进度栏或子代理结论。
+工具行按 `RunID + assistant/group transcript ordinal + ToolCallID` 形成一个调用组；不同 provider completion 可复用 `call_1`，因此 `ToolCallID` 只在其 assistant/group 内唯一。显示 `tool name + concise args summary + lifecycle status + stdout/stderr + final receipt/error`。执行并持久化后，R2 typed commit sink 提供真实 durable `ActionID` 映射；UI 不自行生成权威 ID，也不按相同文本、参数或时间猜测对应关系。stdout/stderr 详情只引用相应 executor 按自身 source-capture contract 产生的有限 captured-payload；例如 Bash 使用其 `MaxOutput`，不以 R1 的 400,000-byte provider-candidate cap 代替工具输出上限。UI 不另存或复制一份无界原始输出供展开。若上游没有提供有界 captured-payload 引用或对应来源截断标记，R5 必须先将该接口缺口交回 executor owner，不能由 TUI 自己补一个不受限缓存。审批出现时，主状态变为“等待授权”，调用本身不能被误画成正在运行。并行工具各自有 spinner/state，不能用全局单一 spinner 覆盖每个工具状态。Todo/Subagent 只在默认 local bridge 收到有类型、身份稳定的来源后列为支持功能；无 Runtime/CLI 来源时显示 unavailable，不凭空增加空的进度栏或子代理结论。
 
-审批与 ask_user 必须在文本标题、色彩/图标、字段和按键提示上都能区分。approval 显示 R4 的效果类别与权限 scope（例如仅本请求、可复用规则的确切范围、拒绝/取消）；source-capped captured arguments/diff 不能因格式化或摘要被误改成另一条授权命令。始终允许应明确范围与持久期，完全跟随 R4 最终决策，不能借用竞品用语推导本项目缓存规则。Plan Mode exit request 待定时单独标成 confirmation pending，同时保留 current mode 指示。
+审批与 ask_user 必须在文本标题、色彩/图标、字段和按键提示上都能区分。approval 显示 R4 的效果类别与权限 scope（例如仅本请求、可复用规则的确切范围、拒绝/取消）；授权参数必须来自 R4 prepared call 的同一份完整规范化执行参数，并按 R4 决定脱敏。stdout/stderr 的 source-capture cap 不限制或替代 tool-call args，也不能因格式化/摘要把审批内容改成另一条授权命令。始终允许应明确范围与持久期，完全跟随 R4 最终决策，不能借用竞品用语推导本项目缓存规则。Plan Mode exit request 待定时单独标成 confirmation pending，同时保留 current mode 指示。
 
-长参数、命令和 diff 不能把操作行推到视口之外。弹层有有限高度的详情区，操作行固定可见；默认显示摘要，展开只能查看同一个 source-capped captured payload，不再保留无界原文副本。分别呈现 `source capped`（Runtime 未捕获的后续内容不可展开）和 `view truncated`（当前弹层暂未显示、但仍在该 bounded capture 内）状态；行数/字节数只有上游提供时才报告。source cap 截断的授权命令若无法由 Runtime 证明完整执行参数，Allow 不得生效；view 截断则在弹层内翻页/滚动可检查完整 captured payload。没有完整 detail viewer 时，对内容无法检查的请求不得把 Allow 作为可见/有效操作，须由权限边界拒绝或等待用户查看详情。该窄交互区不提供通用 transcript 搜索/浏览。
+长参数、命令和 diff 不能把操作行推到视口之外。弹层有有限高度的详情区，操作行固定可见；默认显示摘要，展开只能查看同一个有界 detail reference，不另存无界原文副本。工具 stdout/stderr 或 diff preview 只有在对应 executor/preview producer 的 source-capture contract 明确截断时才标 `source capped`；`view truncated` 表示当前弹层暂未显示、但仍在该 bounded capture 内。行数/字节数只有上游提供时才报告。审批参数则必须是 R4 prepared call 中完整、规范化并按 policy 脱敏的实际执行参数；不能把 provider candidate 限额或普通输出 source cap 当作参数上限。若 args 因 view truncation 无法完整检查，Allow 不得作为可见/有效操作，须由权限边界拒绝或等待用户在完整 detail viewer 中查看。该窄交互区不提供通用 transcript 搜索/浏览。
 
-普通工具输出沿用可折叠详情，展开时引用同一份 bounded Runtime capture，不复制 raw payload。若只有部分 capture 可见，明确区分 `source capped` 与 `view truncated`：前者说明源层已舍弃/未捕获的数据不可恢复；后者说明当前折叠/窗口隐藏的数据仍在受限 capture 中。不将任一摘要保存成 receipt。若 `Send` 或 EventStream 背压导致状态丢失，必须按 R1 的 gap 状态显示 incomplete，并交由 R2 canonical history reconciliation 收敛。`BubbleteaApp.Send` 在满队列时返回可检查错误；critical callsite 记录/展示错误或使用受控重试，不能静默丢弃。关键 Run/approval/transcript 生命周期不得只经 best-effort `Send` 发送。
+普通工具输出沿用可折叠详情，展开时引用同一份由 executor source-capture contract 限界的 Runtime capture，不复制 raw payload。若只有部分 capture 可见，明确区分 `source capped` 与 `view truncated`：前者说明对应工具 source-capture 层已舍弃/未捕获的数据不可恢复；后者说明当前折叠/窗口隐藏的数据仍在受限 capture 中。R1 的 400,000-byte CompleteResponseGuard 限制完整 provider candidate，并不定义任何 stdout/stderr 工具 source cap；source cap 必须按具体 executor/configuration 验证。不将任一摘要保存成 receipt。若 `Send` 或 EventStream 背压导致状态丢失，必须按 R1 的 gap 状态显示 incomplete，并交由 R2 canonical history reconciliation 收敛。`BubbleteaApp.Send` 在满队列时返回可检查错误；critical callsite 记录/展示错误或使用受控重试，不能静默丢弃。关键 Run/approval/transcript 生命周期不得只经 best-effort `Send` 发送。
 
 ## 键盘模式与可发现性
 
@@ -113,7 +114,7 @@ R5 builder handoff 需在 `R1-REV-01` 和 `R2-REV-01` 完成后进行。审批�
 
 - `TestTUIHandleHITLMessage`、`TestTUIApprovalQueueDoesNotLoseRequests`、`TestApprovalCanBeCancelled`：驱动生产 `teaModel.Update`，包含两个 approval、不同类型 modal 交错、按 ID 响应与取消，检查所有 waiter 最终收敛、无覆盖且 active/queued 顺序正确。
 - `TestTurnDoneDoesNotDuplicateAssistantText`、`TestTUIEventProjectionPreservesToolArgs`、`TestTUIWiresTodoAndSubagentEvents`：实际 bridge→model event journey；answer 唯一，ToolCallID/参数/stdout/stderr/error 关联正确。Todo/Subagent 有正式来源则验证接线；无来源则验证产品表面明确 unavailable，不伪造能力。
-- `TestTUITranscriptRestoresSelectedBranch`：从 R2 提供的真实 SessionTree fixture hydration，断言选定 branch 的 user/assistant/tool entries、durability 和调用分组，与 store 快照一致。
+- `TestTUITranscriptRestoresSelectedBranch`：从 R2 提供的真实 SessionTree fixture hydration，断言选定 branch 的 user/assistant/tool entries 与 `EntryTypeCompaction` marker、marker 后 suffix 和 source boundary，与 store 快照一致；压缩 summary 保持 typed compaction 行，并与 provider `Role="user"` context projection 分离。
 - `TestTUISendReportsBackpressure`：占满 queue 后 caller 收到明确 error；关键运行状态不被静默丢弃，UI 有 gap/error 说明。
 - `TestSteerEditorCaretTracksInsertion`、`TestHelpKeysMatchModalBindings`：中间插入后 caret 正确；测试按 registry 枚举的动作对照各 modal handler，help 无死键/漏键/误导性“Force quit”。
 - `TestTUIStopWaitShowsCleanupPending`：Cancel 后受控未退出 worker；在 `cleanup_pending` 时 TUI 仍显示停止未收敛，worker quiescent 之后才显示终止状态。
