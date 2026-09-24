@@ -266,7 +266,8 @@ func TestNativeChatModelGenerate_EncodeError(t *testing.T) {
 	assert.Contains(t, err.Error(), "encode boom")
 }
 
-// TestNativeChatModelGenerate_Non2xx verifies non-2xx surfaces the payload.
+// TestNativeChatModelGenerate_Non2xx verifies non-2xx preserves structured
+// status metadata but keeps the provider payload out of the error summary.
 func TestNativeChatModelGenerate_Non2xx(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -286,7 +287,11 @@ func TestNativeChatModelGenerate_Non2xx(t *testing.T) {
 	}
 	_, err := m.Generate(context.Background(), nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "player-error-payload")
+	assert.NotContains(t, err.Error(), "player-error-payload")
+	assert.Contains(t, err.Error(), "HTTP 400")
+	var providerErr *ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Equal(t, "player-error-payload", providerErr.Message)
 }
 
 // TestNativeChatModelGenerate_DecodeError verifies a decode failure surfaces.

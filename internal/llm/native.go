@@ -147,6 +147,7 @@ func (m *nativeChatModel) Generate(ctx context.Context, msgs []Message, opts ...
 
 	msg, err := m.generate(spanCtx, msgs, opts...)
 	if err != nil {
+		setProviderErrorSpanAttributes(span, err)
 		span.SetStatus(tracing.SpanStatusError, err.Error())
 	} else {
 		span.SetStatus(tracing.SpanStatusOK, "")

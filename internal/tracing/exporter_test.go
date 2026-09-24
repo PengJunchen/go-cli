@@ -159,6 +159,42 @@ func TestRedaction_DefaultSensitiveKeysPreserveMetadata(t *testing.T) {
 	assert.True(t, strings.Contains(serialized, "tool.completed"), "trace exporter must retain event identity")
 }
 
+func TestRedactingExporterRedactsStatusMessageAndKeepsSafeMetadata(t *testing.T) {
+	const canary = "PROVIDER-ERROR-BODY-CANARY"
+	mock := &mockExporter{}
+	data := exportOne(t, mock, RedactionLevelRedact, func(span TraceSpan) {
+		span.SetAttributes(
+			Attribute{Key: "error_type", Value: "server"},
+			Attribute{Key: "http_status_code", Value: 400},
+		)
+		span.SetStatus(SpanStatusError, "server error from test provider: "+canary)
+	})
+
+	assert.Equal(t, SpanStatusError, data.Status, "redaction must preserve the failed status")
+	if strings.Contains(data.StatusMessage, canary) {
+		t.Fatal("redaction leaked provider response text in span status")
+	}
+	assert.Contains(t, data.StatusMessage, redactedValue)
+	assert.Contains(t, data.StatusMessage, "bytes=")
+	errorType := findAttr(data.Attributes, "error_type")
+	require.NotNil(t, errorType)
+	assert.Equal(t, "server", errorType.Value)
+	statusCode := findAttr(data.Attributes, "http_status_code")
+	require.NotNil(t, statusCode)
+	assert.Equal(t, 400, statusCode.Value)
+
+	full := exportOne(t, &mockExporter{}, RedactionLevelFull, func(span TraceSpan) {
+		span.SetStatus(SpanStatusError, canary)
+	})
+	assert.Equal(t, canary, full.StatusMessage, "explicit full export must preserve status messages")
+
+	off := exportOne(t, &mockExporter{}, RedactionLevelOff, func(span TraceSpan) {
+		span.SetStatus(SpanStatusError, canary)
+	})
+	assert.Equal(t, SpanStatusError, off.Status)
+	assert.Empty(t, off.StatusMessage, "off mode must strip the unstructured status message")
+}
+
 func TestRedactingExporter_NonSensitiveNotMasked(t *testing.T) {
 	mock := &mockExporter{}
 	data := exportOne(t, mock, RedactionLevelRedact, func(span TraceSpan) {

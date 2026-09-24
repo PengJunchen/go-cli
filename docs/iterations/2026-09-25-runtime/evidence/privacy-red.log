@@ -57,3 +57,15 @@ Messages:   	trace must retain redacted byte lengths
 FAIL
 FAIL	github.com/pengjunchen/go-cli/cmd/cli	0.235s
 FAIL
+
+P1 provider-error regression canary run:
+Command: rtk proxy go test ./internal/tracing ./cmd/cli -run 'Test(RedactingExporterRedactsStatusMessageAndKeepsSafeMetadata|RedactingSlogHandlerMasksErrorFieldsAndKeepsDiagnostics|DefaultTraceAndLogsRedactProviderErrorBody)$' -count=1
+Result: expected red; all three new tests failed on the baseline implementation.
+- exporter test found provider response text in SpanData.StatusMessage.
+- slog test found an unredacted err/error/cause/original_error field.
+- production CLI capture found the provider error-body canary in default trace or log output.
+
+ProviderError compatibility assertions during implementation:
+Command: rtk env GOMAXPROCS=2 go test -race -p 2 ./internal/tracing ./internal/llm ./internal/core ./cmd/cli -count=1
+The prior tests `TestHTTPChatModelHTTP500`, `TestNativeChatModelGenerate_Non2xx`, and `TestNativeChatModelHTTP500` expected free-form provider response bodies in `err.Error()`; they failed after the safe error summary stopped exposing response text. Their assertions were updated to require HTTP code/type and confirm the original message remains available only on the structured `ProviderError.Message` field for internal classification.
+The first affected-package race run also exposed `TestTurnRunnerCancelMidRun`'s pre-existing concurrent `Cancel`/`RunTurn` race. It did not recur in the final full affected-package race run, which passed all four packages.

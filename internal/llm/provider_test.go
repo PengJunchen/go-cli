@@ -126,7 +126,12 @@ func TestHTTPChatModelHTTP500(t *testing.T) {
 	}
 	_, err := model.Generate(context.Background(), nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "boom")
+	assert.NotContains(t, err.Error(), "boom")
+	assert.Contains(t, err.Error(), "server")
+	assert.Contains(t, err.Error(), "500")
+	var providerErr *ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Contains(t, providerErr.Message, "boom")
 }
 
 // TestHTTPChatModelMalformedJSON verifies a malformed body surfaces as an error.

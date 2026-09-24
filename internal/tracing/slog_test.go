@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"strings"
@@ -201,6 +202,39 @@ func TestRedactingSlogHandlerMasksSensitiveGroups(t *testing.T) {
 	assert.True(t, strings.Contains(line, "nested.args"), "slog must retain nested operation identity")
 	assert.True(t, strings.Contains(line, "scoped.args"), "slog must retain scoped operation identity")
 	assert.True(t, strings.Contains(line, "bytes="), "slog must retain redacted value lengths")
+}
+
+func TestRedactingSlogHandlerMasksErrorFieldsAndKeepsDiagnostics(t *testing.T) {
+	const (
+		errCanary      = "ERR-FIELD-RAW-CANARY"
+		errorCanary    = "ERROR-FIELD-RAW-CANARY"
+		causeCanary    = "CAUSE-FIELD-RAW-CANARY"
+		originalCanary = "ORIGINAL-ERROR-RAW-CANARY"
+	)
+	var buf bytes.Buffer
+	base := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	logger := slog.New(NewRedactingSlogHandler(base))
+	logger.Error("provider.request.failed",
+		"err", errors.New(errCanary),
+		"error", errorCanary,
+		"cause", causeCanary,
+		"original_error", originalCanary,
+		"error_type", "server",
+		"http_status_code", 400,
+	)
+
+	line := buf.String()
+	for _, canary := range []string{errCanary, errorCanary, causeCanary, originalCanary} {
+		if strings.Contains(line, canary) {
+			t.Fatal("slog redaction leaked an error field")
+		}
+	}
+	assert.Contains(t, line, "provider.request.failed")
+	assert.Contains(t, line, "error_type")
+	assert.Contains(t, line, "server")
+	assert.Contains(t, line, "http_status_code")
+	assert.Contains(t, line, "400")
+	assert.Contains(t, line, "bytes=")
 }
 
 func TestRedactingSlogHandlerDoesNotMutateOriginalRecord(t *testing.T) {

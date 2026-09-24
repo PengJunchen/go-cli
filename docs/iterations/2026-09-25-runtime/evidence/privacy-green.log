@@ -41,3 +41,16 @@ ok  	github.com/pengjunchen/go-cli/internal/tracing	0.006s
 
 Tracing race: rtk env GOMAXPROCS=2 go test -race -p 2 ./internal/tracing -count=1
 ok  	github.com/pengjunchen/go-cli/internal/tracing	1.347s
+
+P1 provider-error redaction exact-list commands:
+- `rtk proxy go test -list '^(TestRedactingExporterRedactsStatusMessageAndKeepsSafeMetadata|TestRedactingSlogHandlerMasksErrorFieldsAndKeepsDiagnostics)$' ./internal/tracing`
+- `rtk proxy go test -list '^TestDefaultTraceAndLogsRedactProviderErrorBody$' ./cmd/cli`
+- `rtk proxy go test -list '^(TestHTTPChatModel_roundTripErrorBody|TestHTTPChatModelHTTP500|TestNativeChatModelGenerate_Non2xx|TestNativeChatModelHTTP500|TestProviderError_Error)$' ./internal/llm`
+
+Exact-list result: tracing lists `TestRedactingExporterRedactsStatusMessageAndKeepsSafeMetadata` and `TestRedactingSlogHandlerMasksErrorFieldsAndKeepsDiagnostics`; cmd/cli lists `TestDefaultTraceAndLogsRedactProviderErrorBody`; internal/llm lists all five named provider error tests. All list commands exit 0.
+
+Targeted P1 test command: `rtk proxy go test ./internal/tracing ./cmd/cli ./internal/llm ./internal/core -run 'Test(RedactingExporterRedactsStatusMessageAndKeepsSafeMetadata|RedactingSlogHandlerMasksErrorFieldsAndKeepsDiagnostics|DefaultTraceAndLogsRedactProviderErrorBody|HTTPChatModel_roundTripErrorBody|ProviderError_Error|HTTPChatModelHTTP500|NativeChatModelGenerate_Non2xx|NativeChatModelHTTP500)$' -count=1`
+Result: PASS; tracing, cmd/cli, internal/llm, and internal/core packages passed (core had no tests matching this focused list).
+
+Affected-package race command: `rtk env GOMAXPROCS=2 go test -race -p 2 ./internal/tracing ./internal/llm ./internal/core ./cmd/cli -count=1`
+Result: PASS; tracing, llm, core, and cli packages passed.

@@ -93,7 +93,7 @@ const (
 	RedactionLevelFull RedactionLevel = "full"
 	// RedactionLevelRedact masks sensitive attributes (default).
 	RedactionLevelRedact RedactionLevel = "redact"
-	// RedactionLevelOff strips ALL attributes from exported spans.
+	// RedactionLevelOff strips ALL attributes and unstructured status messages.
 	RedactionLevelOff RedactionLevel = "off"
 )
 
@@ -112,7 +112,8 @@ func isSensitiveAttributeKey(key string) bool {
 		"tool_args", "tool_arguments", "tool_call", "tool_calls", "input", "params",
 		"parameters", "query", "payload", "body", "request_body", "response_body",
 		"cache_key", "reason", "summary", "output", "command", "title", "token",
-		"secret", "password", "api_key", "authorization", "cookie", "private_key", "credential":
+		"secret", "password", "api_key", "authorization", "cookie", "private_key", "credential",
+		"err", "error", "cause", "original_error":
 		return true
 	default:
 		return strings.HasSuffix(key, "_args") || strings.HasSuffix(key, "_arguments") ||
@@ -136,8 +137,9 @@ func redactedValueWithLength(value any) string {
 }
 
 // RedactingExporter wraps a TraceExporter and masks or strips explicitly
-// sensitive and known user-input attributes before delegating to the inner
-// exporter. It is non-destructive: the original span is never modified.
+// sensitive and known user-input attributes, plus unstructured status messages,
+// before delegating to the inner exporter. It is non-destructive: the original
+// span is never modified.
 type RedactingExporter struct {
 	inner TraceExporter
 	level RedactionLevel
@@ -164,12 +166,16 @@ func (e *RedactingExporter) ExportSpan(ctx context.Context, span TraceSpan) erro
 	case RedactionLevelOff:
 		// Strip all attributes.
 		data.Attributes = nil
+		data.StatusMessage = ""
 		for i := range data.Events {
 			data.Events[i].Attributes = nil
 		}
 	case RedactionLevelFull:
 		// Export as-is, no modification.
 	default: // RedactionLevelRedact or empty
+		if data.StatusMessage != "" {
+			data.StatusMessage = redactedValueWithLength(data.StatusMessage)
+		}
 		for i := range data.Attributes {
 			if data.Attributes[i].Sensitive || isSensitiveAttributeKey(data.Attributes[i].Key) {
 				data.Attributes[i].Value = redactedValueWithLength(data.Attributes[i].Value)

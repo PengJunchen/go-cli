@@ -186,6 +186,7 @@ func (m *HTTPChatModel) Generate(ctx context.Context, msgs []Message, opts ...Op
 
 	msg, err := m.generate(spanCtx, msgs, opts...)
 	if err != nil {
+		setProviderErrorSpanAttributes(span, err)
 		span.SetStatus(tracing.SpanStatusError, err.Error())
 	} else {
 		span.SetStatus(tracing.SpanStatusOK, "")
@@ -506,7 +507,7 @@ func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadClos
 		if len(truncated) > 512 {
 			truncated = truncated[:512] + "..."
 		}
-		return nil, fmt.Errorf("llm: provider returned %s: %s", resp.Status, truncated)
+		return nil, newProviderError(resp.StatusCode, m.provider.name, truncated)
 	}
 	return resp.Body, nil
 }

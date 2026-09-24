@@ -587,6 +587,13 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 
 		resp, err := l.generateWithContinuation(spanCtx, model, messages, iterOpts, es, logger)
 		if err != nil {
+			var providerErr *llm.ProviderError
+			if errors.As(err, &providerErr) && providerErr != nil {
+				span.SetAttributes(
+					tracing.Attribute{Key: "error_type", Value: string(providerErr.ErrorType)},
+					tracing.Attribute{Key: "http_status_code", Value: providerErr.StatusCode},
+				)
+			}
 			span.SetStatus(tracing.SpanStatusError, err.Error())
 			logger.Error("core.loop.generate_error", "iteration", iter, "err", err)
 			sendEvent(errEvent(err))
