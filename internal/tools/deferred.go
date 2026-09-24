@@ -265,6 +265,24 @@ func (a *DeferredToolRegistryAdapter) RegisterTrustedControl(ctx context.Context
 	return registrar.RegisterTrustedControl(ctx, def)
 }
 
+// RegisterTrustedNetworkRead forwards the narrow reviewed network-reader
+// capability when the underlying registry supports it.
+func (a *DeferredToolRegistryAdapter) RegisterTrustedNetworkRead(ctx context.Context, def ToolDefinition) error {
+	registrar, ok := a.underlying.(TrustedNetworkReadRegistrar)
+	if !ok {
+		return ErrTrustedNetworkReadRegistrationUnavailable
+	}
+	return registrar.RegisterTrustedNetworkRead(ctx, def)
+}
+
+func (a *DeferredToolRegistryAdapter) registerTrustedWorkspaceWrite(ctx context.Context, def ToolDefinition) error {
+	registrar, ok := a.underlying.(trustedWorkspaceWriteRegistrar)
+	if !ok {
+		return ErrPreparedRegistrationUnavailable
+	}
+	return registrar.registerTrustedWorkspaceWrite(ctx, def)
+}
+
 func (a *DeferredToolRegistryAdapter) toolRegistrationSnapshot(ctx context.Context, name string) (registeredToolSnapshot, error) {
 	if _, err := a.Get(ctx, name); err != nil {
 		return registeredToolSnapshot{}, err

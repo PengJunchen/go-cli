@@ -108,9 +108,9 @@ func TestMiddlewareToolRegistry_AutoApprove(t *testing.T) {
 	assert.True(t, inner.executed, "auto-approved Ask must invoke the inner Execute")
 }
 
-// TestMiddlewareToolRegistry_PassthroughNoWrappers verifies that when no
-// wrappers are configured, Get returns the original ToolDefinition instance
-// unchanged (no wrapping adapter is applied).
+// TestMiddlewareToolRegistry_PassthroughNoWrappers verifies that even when no
+// execution wrappers are configured, Get returns a protected proxy rather
+// than exposing the raw registered executor.
 func TestMiddlewareToolRegistry_PassthroughNoWrappers(t *testing.T) {
 	inner := &recordingToolDef{name: "read", desc: "read tool"}
 	tr := newRegistryWithTool(t, inner)
@@ -121,11 +121,7 @@ func TestMiddlewareToolRegistry_PassthroughNoWrappers(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, def)
 
-	// With no wrappers, Get must return the exact original instance, not a
-	// wrapping adapter.
-	got, ok := def.(*recordingToolDef)
-	require.True(t, ok, "passthrough should return the original ToolDefinition type")
-	assert.Same(t, inner, got, "no wrappers should return the original ToolDefinition instance")
+	assert.NotSame(t, inner, def, "Get must not expose the raw registered executor")
 
 	res, execErr := def.Execute(context.Background(), tools.ToolCall{ID: "1", Name: "read"})
 	require.NoError(t, execErr)

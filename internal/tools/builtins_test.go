@@ -42,6 +42,34 @@ func TestRegisterDefaultsRegistersBuiltins(t *testing.T) {
 	}
 }
 
+func TestRegisterDefaultsMintsOnlyReviewedWriteEffects(t *testing.T) {
+	ctx := context.Background()
+	reg := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	require.NoError(t, RegisterDefaults(ctx, reg))
+
+	for _, name := range []string{"write", "edit"} {
+		snapshot, err := reg.toolRegistrationSnapshot(ctx, name)
+		require.NoError(t, err)
+		assert.Equal(t, RegistrationSourceBuiltin, snapshot.identity.RegistrationSource())
+		assert.Equal(t, []TrustedToolEffect{EffectWorkspaceWrite}, snapshot.effects.Values())
+		assert.Equal(t, [32]byte{}, snapshot.identity.Scope().Fingerprint(), "no path scope is asserted here")
+	}
+
+	for _, name := range []string{"read", "bash", "grep", "find", "ls"} {
+		snapshot, err := reg.toolRegistrationSnapshot(ctx, name)
+		require.NoError(t, err)
+		assert.Equal(t, RegistrationSourceToolRegistry, snapshot.identity.RegistrationSource())
+		assert.Equal(t, []TrustedToolEffect{EffectUnknown}, snapshot.effects.Values())
+	}
+
+	custom := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	require.NoError(t, custom.Register(ctx, NewWriteTool()))
+	customSnapshot, err := custom.toolRegistrationSnapshot(ctx, "write")
+	require.NoError(t, err)
+	assert.Equal(t, RegistrationSourceToolRegistry, customSnapshot.identity.RegistrationSource())
+	assert.Equal(t, []TrustedToolEffect{EffectUnknown}, customSnapshot.effects.Values())
+}
+
 func TestRegisterDefaultsNilRegistry(t *testing.T) {
 	assert.Error(t, RegisterDefaults(context.Background(), nil))
 }
