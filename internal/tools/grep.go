@@ -199,18 +199,25 @@ func (t *GrepTool) search(ctx context.Context, re *regexp.Regexp, searchPath, gl
 	return tms, truncated, nil
 }
 
-// grepWithRipgrep runs `rg --line-number -n -g <glob> <pattern> <path>` and
-// parses its output. The pattern is passed as a literal argument (not combined
-// with flags) to avoid shell-argument injection, and --no-ignore is not used so
-// behavior stays deterministic.
+// grepWithRipgrep runs `rg --no-config --line-number -n [-g <glob>] -e
+// <pattern> -- <path>` and parses its output. Pattern and glob values cannot
+// be parsed as options, and ripgrep cannot load ambient configuration.
 func grepWithRipgrep(ctx context.Context, re *regexp.Regexp, searchPath, glob string) ([]match, error) {
-	args := []string{"--line-number", "-n"}
+	args := []string{"--no-config", "--line-number", "-n"}
 	if glob != "" {
-		args = append(args, "-g", glob)
+		args = append(args, "--glob="+glob)
 	}
-	args = append(args, re.String(), searchPath)
+	args = append(args, "-e", re.String(), "--", searchPath)
 
 	cmd := exec.CommandContext(ctx, "rg", args...)
+	cmd.Env = make([]string, 0, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.EqualFold(key, "RIPGREP_CONFIG_PATH") {
+			continue
+		}
+		cmd.Env = append(cmd.Env, entry)
+	}
 	cmd.Stderr = &bytes.Buffer{}
 	out, err := cmd.Output()
 	if err != nil {

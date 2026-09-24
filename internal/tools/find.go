@@ -166,8 +166,10 @@ func (t *FindTool) find(ctx context.Context, searchPath, pattern, kind string, m
 	return findPureGo(ctx, searchPath, pattern, kind, maxDepth)
 }
 
-// findWithFd runs `fd --type <kind> --max-depth <n> <pattern> <path>` when the
-// fd binary is available. ok is false when fd is not on PATH or fails.
+// findWithFd runs `fd --type <kind> --max-depth <n> -- <pattern> <path>` when
+// the fd binary is available. The separator prevents a model-supplied pattern
+// from enabling fd execution options. ok is false when fd is not on PATH or
+// fails.
 func findWithFd(ctx context.Context, searchPath, pattern, kind string, maxDepth int) ([]string, bool, error) {
 	if _, err := exec.LookPath("fd"); err != nil {
 		return nil, false, nil
@@ -181,9 +183,7 @@ func findWithFd(ctx context.Context, searchPath, pattern, kind string, maxDepth 
 	if maxDepth > 0 {
 		args = append(args, "--max-depth", fmt.Sprintf("%d", maxDepth))
 	}
-	if pattern != "" {
-		args = append(args, pattern)
-	}
+	args = append(args, "--", pattern)
 	args = append(args, searchPath)
 
 	cmd := exec.CommandContext(ctx, "fd", args...)
