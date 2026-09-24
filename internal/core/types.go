@@ -122,6 +122,14 @@ type Result struct {
 	Message string
 	// Success reports whether the run completed without a fatal error.
 	Success bool
+	// RunID identifies the owned execution that produced this result.
+	RunID string
+	// Outcome records the logical outcome independently from resource cleanup.
+	Outcome RunOutcome
+	// ExecutionState records whether the run is still executing or has quiesced.
+	ExecutionState RunExecutionState
+	// StatusHandle provides a fresh immutable status snapshot while cleanup drains.
+	StatusHandle RunStatusHandle
 }
 
 // String returns a short summary of the result and logs it.
