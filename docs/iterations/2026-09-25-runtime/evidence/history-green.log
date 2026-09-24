@@ -42,3 +42,18 @@ RunCanonical implementation and integration:
 
 No full core-package or cli-package race run is claimed in this commit; the
 coordinated final pass will run after lane 01's LoopAgent implementation lands.
+
+Canonical input-integrity follow-up (exact registrations confirmed, both
+commands exit 0):
+
+  rtk proxy go test ./internal/core -list '^(TestAgentConsumesCanonicalDeltaAcrossRepeatedUserTurns|TestAgentCanonicalHistoryDeepCopiesToolCallArgs|TestAgentRejectsInvalidCanonicalDelta|TestAgentAcceptsCanonicalDeltaForEmptyUserInput|TestHistoryRejectsLegacyPureToolCallTurn|TestAgentLegacyLoopRejectsTextAndToolCalls|TestAgentLegacyPureToolCallIsNotSaved|TestAgentLegacyToolCallTurnsAreRejected|TestAgentWithHistoryPreservesOrder|TestAgentWithMultipleHistoryOptions|TestSubagentSendReportsDroppedMessage|TestSubAgentSendDoesNotBlockOnFullInbox|TestSubAgentSendAfterTerminalIsRejected)$'
+  Registered all 13 names in the expression.
+
+  rtk env GOMAXPROCS=2 go test -race -p 2 -count=1 ./internal/core -run '^(TestAgentConsumesCanonicalDeltaAcrossRepeatedUserTurns|TestAgentRejectsInvalidCanonicalDelta|TestAgentAcceptsCanonicalDeltaForEmptyUserInput|TestAgentCanonicalHistoryDeepCopiesToolCallArgs|TestHistoryRejectsLegacyPureToolCallTurn|TestAgentLegacyLoopRejectsTextAndToolCalls|TestAgentLegacyPureToolCallIsNotSaved|TestAgentLegacyToolCallTurnsAreRejected|TestAgentWithHistoryPreservesOrder|TestAgentWithMultipleHistoryOptions|TestSubagentSendReportsDroppedMessage|TestSubAgentSendDoesNotBlockOnFullInbox|TestSubAgentSendAfterTerminalIsRejected)$'
+  exit=0
+
+Canonical delta validation rejects an empty delta, a missing or malformed
+initial user entry, a content mismatch, and duplicate initial user entries. On
+rejection it returns ErrCanonicalTranscriptInvalid, reports unsuccessful with
+an empty unverified result message, and keeps the previously valid history
+unchanged. A valid initial user with empty content remains accepted.

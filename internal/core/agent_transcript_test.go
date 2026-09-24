@@ -321,6 +321,74 @@ func TestAgentConsumesCanonicalDeltaAcrossRepeatedUserTurns(t *testing.T) {
 	}, history, "each canonical per-call delta must append once even when user text repeats")
 }
 
+func TestAgentRejectsInvalidCanonicalDelta(t *testing.T) {
+	tests := []struct {
+		name       string
+		transcript []TranscriptEntry
+	}{
+		{name: "empty"},
+		{
+			name:       "missing initial user",
+			transcript: []TranscriptEntry{{Message: AgentMessage{Role: "assistant", Content: "answer"}}},
+		},
+		{
+			name: "initial user mismatch",
+			transcript: []TranscriptEntry{{Message: AgentMessage{
+				Role: "user", Content: "different request", InputKind: InputKindUser,
+			}}},
+		},
+		{
+			name:       "initial user kind missing",
+			transcript: []TranscriptEntry{{Message: AgentMessage{Role: "user", Content: "request"}}},
+		},
+		{
+			name: "duplicate initial user",
+			transcript: []TranscriptEntry{
+				{Message: AgentMessage{Role: "user", Content: "request", InputKind: InputKindUser}},
+				{Message: AgentMessage{Role: "user", Content: "request", InputKind: InputKindUser}},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			loop := &scriptedCanonicalAgentLoop{results: []CanonicalRunResult{{
+				Events:     []AgentEvent{{Kind: "message", Content: "answer"}},
+				Transcript: tt.transcript,
+			}}}
+			baseHistory := []AgentMessage{{Role: "system", Content: "prior context"}}
+			agent := NewAgentImpl("invalid-canonical-delta", loop, WithHistory(baseHistory))
+
+			result, err := agent.Run(context.Background(), Submission{Type: SubmissionUserMessage, Content: "request"})
+
+			require.ErrorIs(t, err, ErrCanonicalTranscriptInvalid)
+			assert.False(t, result.Success, "an invalid canonical delta must not report success")
+			assert.Empty(t, result.Message, "an invalid canonical delta must not expose an unverified assistant answer")
+			assert.Equal(t, baseHistory, agent.Messages(), "an invalid delta must not contaminate previously valid history")
+		})
+	}
+}
+
+func TestAgentAcceptsCanonicalDeltaForEmptyUserInput(t *testing.T) {
+	loop := &scriptedCanonicalAgentLoop{results: []CanonicalRunResult{{
+		Events: []AgentEvent{{Kind: "message", Content: "answer"}},
+		Transcript: []TranscriptEntry{
+			{Message: AgentMessage{Role: "user", Content: "", InputKind: InputKindUser}},
+			{Message: AgentMessage{Role: "assistant", Content: "answer"}},
+		},
+	}}}
+	agent := NewAgentImpl("empty-user-content", loop)
+
+	result, err := agent.Run(context.Background(), Submission{Type: SubmissionUserMessage, Content: ""})
+
+	require.NoError(t, err)
+	assert.True(t, result.Success)
+	assert.Equal(t, "answer", result.Message)
+	assert.Equal(t, []AgentMessage{
+		{Role: "user", Content: "", InputKind: InputKindUser},
+		{Role: "assistant", Content: "answer"},
+	}, agent.Messages())
+}
+
 func TestAgentCanonicalHistoryDeepCopiesToolCallArgs(t *testing.T) {
 	args := map[string]any{"nested": map[string]any{"value": "original"}}
 	blocks := []llm.ContentBlock{{Type: "image_url", ImageURL: &llm.ImageURL{URL: "original"}}}

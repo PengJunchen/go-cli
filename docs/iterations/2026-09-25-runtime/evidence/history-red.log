@@ -59,3 +59,12 @@ available and before AgentImpl consumed it:
   exit=1: the Agent invoked only legacy Run, appended only its user/final event
   projection instead of each CanonicalLoop delta, and shallow-copied nested
   ToolCall Args, ContentBlocks ImageURL, and Usage values.
+
+Canonical input-integrity RED, before adding delta validation:
+
+  rtk proxy go test ./internal/core -list '^TestAgentRejectsInvalidCanonicalDelta$'
+  exit=0; registered TestAgentRejectsInvalidCanonicalDelta.
+
+  rtk env GOMAXPROCS=2 go test -p 2 -count=1 ./internal/core -run '^TestAgentRejectsInvalidCanonicalDelta$'
+  exit=1: empty, missing-initial-user, mismatched-user, and duplicate-user
+  canonical deltas all returned success and left malformed runs unreported.
