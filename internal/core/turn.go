@@ -1,8 +1,6 @@
 package core
 
-import (
-	"time"
-)
+import "time"
 
 // TurnStatus describes the lifecycle state of a Turn.
 type TurnStatus int
@@ -66,6 +64,46 @@ type Turn struct {
 	Steerings []Submission
 	// FollowUps holds the follow-up submissions applied while running.
 	FollowUps []Submission
+}
+
+func cloneSubmission(submission Submission) Submission {
+	submission.Metadata = cloneStringAnyMap(submission.Metadata)
+	submission.History = cloneAgentMessages(submission.History)
+	return submission
+}
+
+func cloneTurn(turn Turn) Turn {
+	turn.Submission = cloneSubmission(turn.Submission)
+	if turn.Steerings != nil {
+		steerings := make([]Submission, len(turn.Steerings))
+		for i := range turn.Steerings {
+			steerings[i] = cloneSubmission(turn.Steerings[i])
+		}
+		turn.Steerings = steerings
+	}
+	if turn.FollowUps != nil {
+		followUps := make([]Submission, len(turn.FollowUps))
+		for i := range turn.FollowUps {
+			followUps[i] = cloneSubmission(turn.FollowUps[i])
+		}
+		turn.FollowUps = followUps
+	}
+	return turn
+}
+
+func cloneAgentMessage(message AgentMessage) AgentMessage {
+	return cloneAgentMessages([]AgentMessage{message})[0]
+}
+
+func cloneStringAnyMap(input map[string]any) map[string]any {
+	if input == nil {
+		return nil
+	}
+	cloned := make(map[string]any, len(input))
+	for key, value := range input {
+		cloned[key] = cloneProtocolJSONValue(value)
+	}
+	return cloned
 }
 
 // Done reports whether the turn has reached a terminal state.

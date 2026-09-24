@@ -10,12 +10,13 @@ import (
 
 // harnessConfig holds the configurable knobs of a HarnessImpl.
 type harnessConfig struct {
-	startSpan  string
-	bufferSize int
-	discard    DiscardPolicy
-	tracer     *tracing.Tracer
-	runSlot    RunSlotGuard
-	bus        EventBus
+	startSpan      string
+	bufferSize     int
+	discard        DiscardPolicy
+	tracer         *tracing.Tracer
+	runSlot        RunSlotGuard
+	cleanupTimeout time.Duration
+	bus            EventBus
 }
 
 // HarnessOption configures a HarnessImpl at construction time.
@@ -61,6 +62,16 @@ func WithRunSlotGuard(g RunSlotGuard) HarnessOption {
 	return func(c *harnessConfig) { c.runSlot = g }
 }
 
+// WithRunCleanupTimeout sets how long the harness waits for owned resources
+// after its top-level agent callback returns or cancellation is requested.
+func WithRunCleanupTimeout(timeout time.Duration) HarnessOption {
+	return func(c *harnessConfig) {
+		if timeout > 0 {
+			c.cleanupTimeout = timeout
+		}
+	}
+}
+
 // WithHarnessEventBus wires an EventBus that is forwarded to every
 // EventStream created by the harness. Each event successfully sent to a
 // stream is dual-written to the bus, enabling fan-out to multiple
@@ -73,13 +84,14 @@ func WithHarnessEventBus(bus EventBus) HarnessOption {
 // HarnessImpl is the full runtime facade. It accepts a user message and
 // returns an EventStream that streams agent events until the run completes.
 type HarnessImpl struct {
-	agent         Agent
-	startSpanName string
-	bufferSize    int
-	discard       DiscardPolicy
-	tracer        *tracing.Tracer
-	runSlot       RunSlotGuard
-	bus           EventBus
+	agent          Agent
+	startSpanName  string
+	bufferSize     int
+	discard        DiscardPolicy
+	tracer         *tracing.Tracer
+	runSlot        RunSlotGuard
+	cleanupTimeout time.Duration
+	bus            EventBus
 }
 
 var _ Harness = (*HarnessImpl)(nil)
@@ -91,8 +103,9 @@ func NewHarnessImpl(agent Agent, opts ...HarnessOption) *HarnessImpl {
 		panic("core: harness requires a non-nil Agent")
 	}
 	cfg := harnessConfig{
-		startSpan: "harness.start",
-		discard:   BlockUntilConsumed, // preserve backward-compatible blocking
+		startSpan:      "harness.start",
+		discard:        BlockUntilConsumed, // preserve backward-compatible blocking
+		cleanupTimeout: defaultRunCleanupTimeout,
 	}
 	for _, o := range opts {
 		o(&cfg)
@@ -101,13 +114,14 @@ func NewHarnessImpl(agent Agent, opts ...HarnessOption) *HarnessImpl {
 		cfg.runSlot = defaultRunSlotGuard
 	}
 	h := &HarnessImpl{
-		agent:         agent,
-		startSpanName: cfg.startSpan,
-		bufferSize:    cfg.bufferSize,
-		discard:       cfg.discard,
-		tracer:        cfg.tracer,
-		runSlot:       cfg.runSlot,
-		bus:           cfg.bus,
+		agent:          agent,
+		startSpanName:  cfg.startSpan,
+		bufferSize:     cfg.bufferSize,
+		discard:        cfg.discard,
+		tracer:         cfg.tracer,
+		runSlot:        cfg.runSlot,
+		cleanupTimeout: cfg.cleanupTimeout,
+		bus:            cfg.bus,
 	}
 	slog.Info("core.harness.new",
 		"agent", agent.Name(),
@@ -133,7 +147,6 @@ func (h *HarnessImpl) Submit(ctx context.Context, msg string) (EventStream, erro
 		tracing.SensitiveAttribute("user_message", msg),
 		tracing.Attribute{Key: "user_message_length", Value: len(msg)},
 	)
-	defer span.End()
 	logger := tracing.NewTraceLogger(span, nil)
 	logger.Info("core.harness.start", "msg_len", len(msg))
 
@@ -143,6 +156,7 @@ func (h *HarnessImpl) Submit(ctx context.Context, msg string) (EventStream, erro
 	}
 	stream := NewEventStream(h.bufferSize, streamOpts...)
 	if stream == nil {
+		span.End()
 		return nil, context.Canceled
 	}
 
@@ -154,12 +168,24 @@ func (h *HarnessImpl) Submit(ctx context.Context, msg string) (EventStream, erro
 	claimCancel()
 	if err != nil {
 		slog.Warn("core.harness.claim_failed", "err", err)
+		span.End()
 		return nil, err
 	}
+	owner := newRunOwner(spanCtx, h.runSlot, claim, func(result Result, err error) {
+		stream.SetResult(AgentMessage{Role: "assistant", Content: result.Message}, err)
+		if err != nil {
+			bestEffort(stream.SendTerminal(errEvent(err)))
+		} else {
+			bestEffort(stream.SendTerminal(AgentEvent{Kind: "done", Content: result.Message, Timestamp: time.Now()}))
+		}
+		stream.Close()
+	})
+	owner.SetEventGapSource(stream)
+	stream.SetRunStatusHandle(owner)
 
 	submission := Submission{Type: SubmissionUserMessage, Content: msg}
 
-	go h.run(spanCtx, stream, submission, claim)
+	go h.run(spanCtx, span, stream, submission, owner)
 
 	return stream, nil
 }
@@ -168,36 +194,29 @@ func (h *HarnessImpl) Submit(ctx context.Context, msg string) (EventStream, erro
 // records a terminal result, sends a closing event, and closes the stream so
 // consumers can observe completion without a goroutine leak. The claim is
 // released by ExecuteClaimedRun when the run finishes (or panics).
-func (h *HarnessImpl) run(ctx context.Context, stream *EventStreamImpl, submission Submission, claim RunClaim) {
+func (h *HarnessImpl) run(ctx context.Context, span tracing.TraceSpan, stream *EventStreamImpl, submission Submission, owner *runOwner) {
 	defer stream.Close()
+	defer span.End()
 	// Pass the EventStream to the agent so events are emitted in real time
 	// as the LLM streams tokens. The agent also stores events internally
 	// for backward-compatible retrieval via the eventSource interface.
-	var result Result
-	err := h.runSlot.ExecuteClaimedRun(claim, func() error {
-		r, e := h.agent.Run(ctx, submission, stream)
-		result = r
-		return e
-	})
-
-	// If the agent didn't send any events to the stream (e.g. it doesn't
-	// support streaming), fall back to fanning out its stored events.
-	if stream.SentCount() == 0 {
-		if es, ok := h.agent.(eventSource); ok {
-			for _, ev := range es.Events() {
-				bestEffort(stream.Send(ev))
+	result, err := owner.run(h.cleanupTimeout, func(runCtx context.Context) (Result, error) {
+		r, e := h.agent.Run(runCtx, submission, stream)
+		if stream.SentCount() == 0 {
+			if es, ok := h.agent.(eventSource); ok {
+				for _, ev := range es.Events() {
+					bestEffort(stream.Send(ev))
+				}
 			}
 		}
-	}
-
+		return r, e
+	})
+	stream.SetResult(AgentMessage{Role: "assistant", Content: result.Message}, err)
 	if err != nil {
-		stream.SetResult(AgentMessage{Role: "assistant", Content: result.Message}, err)
-		bestEffort(stream.Send(errEvent(err)))
-		return
+		bestEffort(stream.SendTerminal(errEvent(err)))
+	} else {
+		bestEffort(stream.SendTerminal(AgentEvent{Kind: "done", Content: result.Message, Timestamp: time.Now()}))
 	}
-
-	stream.SetResult(AgentMessage{Role: "assistant", Content: result.Message}, nil)
-	bestEffort(stream.Send(AgentEvent{Kind: "done", Content: result.Message, Timestamp: time.Now()}))
 }
 
 // bestEffort discards an error that is intentionally not actionable. EventStream.Send
@@ -213,7 +232,7 @@ func (s *EventStreamImpl) SetResult(msg AgentMessage, err error) {
 	if s.closed.Load() {
 		return
 	}
-	s.result = msg
+	s.result = cloneAgentMessage(msg)
 	s.hasRes = true
 	s.err = err
 	slog.Info("core.eventstream.result", "has_res", s.hasRes, "error", err != nil)

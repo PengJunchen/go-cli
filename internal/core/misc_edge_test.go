@@ -117,6 +117,7 @@ func TestTurnRunnerInjectOnCompletedTurnFails(t *testing.T) {
 func TestTurnRunnerGetDoesNotAliasSlices(t *testing.T) {
 	bl := newBlockingTurnLoop()
 	runner := NewEinoTurnRunner(bl)
+	runner.SetSteerChannel(make(chan string, 1))
 
 	var runErr error
 	done := make(chan struct{})
