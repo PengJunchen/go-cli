@@ -101,3 +101,10 @@ type ToolRegistry interface {
 	// List returns all registered tool definitions.
 	List(ctx context.Context) ([]ToolDefinition, error)
 }
+
+// TopToolsProvider exposes a ranked subset of tools for dynamic prompt or
+// model-context filtering. Registry decorators must protect every returned
+// definition before exposing it to execution callers.
+type TopToolsProvider interface {
+	TopTools(ctx context.Context, query string, k int) ([]ToolDefinition, error)
+}

@@ -59,6 +59,8 @@ type ToolSearchTool struct {
 	reg ToolRegistry // dependency held by interface.
 }
 
+var _ TopToolsProvider = (*ToolSearchTool)(nil)
+
 var _ ToolDefinition = (*ToolSearchTool)(nil)
 
 // NewToolSearchTool returns a ToolSearchTool backed by the given registry,
