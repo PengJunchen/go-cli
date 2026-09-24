@@ -73,6 +73,7 @@ type queuedMutation struct {
 	mutation FileMutation
 	result   chan FileMutationResult
 	ctx      context.Context
+	prepared *preparedInvocation
 }
 
 // DefaultFileMutationQueue routes each mutation to a per-file worker goroutine.
@@ -170,6 +171,17 @@ func resolveRealPath(p string) string {
 // per-file worker, and hands the mutation off for FIFO processing. It returns a
 // receive-only result channel that yields a single FileMutationResult.
 func (q *DefaultFileMutationQueue) Enqueue(ctx context.Context, mutation FileMutation) (<-chan FileMutationResult, error) {
+	return q.enqueue(ctx, mutation, nil)
+}
+
+func (q *DefaultFileMutationQueue) enqueuePrepared(ctx context.Context, mutation FileMutation, invocation *preparedInvocation) (<-chan FileMutationResult, error) {
+	if invocation == nil {
+		return nil, ErrPreparedInvocationUnavailable
+	}
+	return q.enqueue(ctx, mutation, invocation)
+}
+
+func (q *DefaultFileMutationQueue) enqueue(ctx context.Context, mutation FileMutation, invocation *preparedInvocation) (<-chan FileMutationResult, error) {
 	span, _ := tracing.SpanFromContext(ctx, mutationSpanName, tracing.SpanKindClient)
 	defer span.End()
 
@@ -198,7 +210,7 @@ func (q *DefaultFileMutationQueue) Enqueue(ctx context.Context, mutation FileMut
 	q.mu.Unlock()
 
 	select {
-	case input <- queuedMutation{mutation: mutation, result: resultCh, ctx: ctx}:
+	case input <- queuedMutation{mutation: mutation, result: resultCh, ctx: ctx, prepared: invocation}:
 		q.sendWG.Done()
 	case <-ctx.Done():
 		q.sendWG.Done()
@@ -242,7 +254,13 @@ func (q *DefaultFileMutationQueue) startWorker(input chan queuedMutation) {
 	go func() {
 		defer q.workerWG.Done()
 		for qm := range input {
-			tr, err := q.applySafe(qm.ctx, qm.mutation)
+			var tr *ToolResult
+			var err error
+			if qm.prepared != nil {
+				tr, err = qm.prepared.commitAndInvoke(qm.ctx)
+			} else {
+				tr, err = q.applySafe(qm.ctx, qm.mutation)
+			}
 			res := FileMutationResult{
 				Success:    err == nil,
 				Error:      err,

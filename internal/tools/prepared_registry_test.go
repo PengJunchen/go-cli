@@ -5,7 +5,9 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -61,6 +63,21 @@ type preparedCaptureSink struct {
 	content string
 	callID  string
 	stream  string
+}
+
+type preparedQueueGateContext struct {
+	context.Context
+	errCalls         atomic.Int32
+	workerCheckStart chan struct{}
+	allowWorkerCheck chan struct{}
+}
+
+func (c *preparedQueueGateContext) Err() error {
+	if c.errCalls.Add(1) == 3 {
+		close(c.workerCheckStart)
+		<-c.allowWorkerCheck
+	}
+	return c.Context.Err()
 }
 
 func (s *preparedCaptureSink) Send(content, callID, stream string) error {
@@ -243,6 +260,144 @@ func TestPreparedMutationFailsClosedUntilCapturedQueueIsConfigured(t *testing.T)
 	assert.Zero(t, policyCalls, "unsupported prepared mutations fail before approval")
 	_, err = os.Stat(path)
 	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestPreparedMutationUsesCapturedExecutorAndConsumesOnce(t *testing.T) {
+	ctx := context.Background()
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	tool := &preparedCaptureTool{name: "write"}
+	require.NoError(t, base.Register(ctx, tool))
+	var handlerCalls int
+	queue := NewDefaultFileMutationQueue(WithMutationHandler(func(context.Context, FileMutation) (*ToolResult, error) {
+		handlerCalls++
+		return &ToolResult{Output: "wrong queue handler"}, nil
+	}))
+	t.Cleanup(func() { assert.NoError(t, queue.(interface{ Close() error }).Close()) })
+	registry := NewMiddlewareToolRegistry(base)
+	root := t.TempDir()
+	configurePreparedRegistry(t, registry, allowPreparedCall, PreparedToolStages{
+		ArgumentPreparers: []ArgumentPreparer{NewPathNormalizer(root)},
+		MutationQueue:     queue,
+	})
+
+	path := filepath.Join(root, "queued.txt")
+	invocation, err := registry.PrepareToolCall(ctx, ToolCall{Name: "write", Args: map[string]any{"path": "queued.txt", "content": "payload"}})
+	require.NoError(t, err)
+	result, err := invocation.Dispatch(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, "write", result.Output)
+	assert.Equal(t, true, result.Metadata["queued"])
+	assert.True(t, invocation.DispatchCommitted())
+	_, err = invocation.Dispatch(ctx)
+	require.ErrorIs(t, err, ErrPreparedInvocationConsumed)
+	calls, executed := tool.snapshot()
+	assert.Equal(t, 1, calls)
+	assert.Equal(t, path, executed.Args["path"])
+	assert.Equal(t, "payload", executed.Args["content"])
+	assert.Zero(t, handlerCalls, "prepared jobs invoke the captured definition, not a reconstructed queue handler")
+}
+
+func TestPreparedMutationDequeueRejectsStaleRegistration(t *testing.T) {
+	ctx := context.Background()
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	registered := &preparedCaptureTool{name: "write"}
+	require.NoError(t, base.Register(ctx, registered))
+	queue := NewDefaultFileMutationQueue()
+	t.Cleanup(func() { assert.NoError(t, queue.(interface{ Close() error }).Close()) })
+	registry := NewMiddlewareToolRegistry(base)
+	configurePreparedRegistry(t, registry, allowPreparedCall, PreparedToolStages{MutationQueue: queue})
+
+	invocation, err := registry.PrepareToolCall(ctx, ToolCall{Name: "write", Args: map[string]any{
+		"path": filepath.Join(t.TempDir(), "stale.txt"), "content": "old executor",
+	}})
+	require.NoError(t, err)
+	replacement := &preparedCaptureTool{name: "write"}
+	require.NoError(t, base.Register(ctx, replacement))
+
+	_, err = invocation.Dispatch(ctx)
+	require.ErrorIs(t, err, ErrDispatchFenceChanged)
+	assert.False(t, invocation.DispatchCommitted())
+	assert.Zero(t, registered.snapshotCalls())
+	assert.Zero(t, replacement.snapshotCalls())
+	_, err = invocation.Dispatch(ctx)
+	assert.ErrorIs(t, err, ErrPreparedInvocationConsumed)
+}
+
+func TestPreparedMutationInvalidPayloadRejectedBeforePolicy(t *testing.T) {
+	ctx := context.Background()
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	require.NoError(t, base.Register(ctx, &preparedCaptureTool{name: "write"}))
+	queue := NewDefaultFileMutationQueue()
+	t.Cleanup(func() { assert.NoError(t, queue.(interface{ Close() error }).Close()) })
+	registry := NewMiddlewareToolRegistry(base)
+	var policyCalls int
+	configurePreparedRegistry(t, registry, func(_ context.Context, request PreparedPolicyRequest) (PreparedPolicyDecision, error) {
+		policyCalls++
+		return PreparedPolicyDecision{Allowed: true, Generations: request.Generations}, nil
+	}, PreparedToolStages{MutationQueue: queue})
+
+	_, err := registry.PrepareToolCall(ctx, ToolCall{Name: "write", Args: map[string]any{"path": filepath.Join(t.TempDir(), "bad.txt")}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "write requires a string argument 'content'")
+	assert.Zero(t, policyCalls, "malformed mutation payloads must be rejected before approval")
+}
+
+func TestPreparedMutationCanceledAtDequeueCannotCommitLater(t *testing.T) {
+	baseCtx, cancel := context.WithCancel(context.Background())
+	ctx := &preparedQueueGateContext{
+		Context:          baseCtx,
+		workerCheckStart: make(chan struct{}),
+		allowWorkerCheck: make(chan struct{}),
+	}
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	tool := &preparedCaptureTool{name: "write"}
+	require.NoError(t, base.Register(context.Background(), tool))
+	queue := NewDefaultFileMutationQueue()
+	t.Cleanup(func() {
+		select {
+		case <-ctx.allowWorkerCheck:
+		default:
+			close(ctx.allowWorkerCheck)
+		}
+		cancel()
+		assert.NoError(t, queue.(interface{ Close() error }).Close())
+	})
+	registry := NewMiddlewareToolRegistry(base)
+	configurePreparedRegistry(t, registry, allowPreparedCall, PreparedToolStages{MutationQueue: queue})
+	path := filepath.Join(t.TempDir(), "canceled.txt")
+	invocation, err := registry.PrepareToolCall(ctx, ToolCall{Name: "write", Args: map[string]any{"path": path, "content": "never"}})
+	require.NoError(t, err)
+
+	dispatchDone := make(chan error, 1)
+	go func() {
+		_, dispatchErr := invocation.Dispatch(ctx)
+		dispatchDone <- dispatchErr
+	}()
+	select {
+	case <-ctx.workerCheckStart:
+	case <-time.After(3 * time.Second):
+		t.Fatal("queue worker did not validate the original dispatch context")
+	}
+	cancel()
+	select {
+	case err := <-dispatchDone:
+		assert.ErrorIs(t, err, context.Canceled)
+	case <-time.After(3 * time.Second):
+		t.Fatal("canceled Dispatch did not return")
+	}
+	close(ctx.allowWorkerCheck)
+
+	barrier, err := queue.Enqueue(context.Background(), FileMutation{FilePath: path, Operation: "barrier"})
+	require.NoError(t, err)
+	select {
+	case <-barrier:
+	case <-time.After(3 * time.Second):
+		t.Fatal("queue worker did not drain the canceled job")
+	}
+	assert.False(t, invocation.DispatchCommitted())
+	assert.Zero(t, tool.snapshotCalls(), "a canceled queued invocation cannot execute after Dispatch returned")
+	_, err = invocation.Dispatch(context.Background())
+	assert.ErrorIs(t, err, ErrPreparedInvocationConsumed)
 }
 
 func TestProtectedRegistryGetListAndTopToolsPreserveCapabilities(t *testing.T) {
