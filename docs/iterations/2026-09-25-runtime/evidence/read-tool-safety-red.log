@@ -25,3 +25,19 @@ rtk env GOMAXPROCS=2 go test -p 2 ./internal/tools -run '^Test(GrepSeparatesPatt
 ```
 
 Exit code: `1`, as expected before implementation. The fake `rg` received the pattern in option position and inherited `RIPGREP_CONFIG_PATH`; fake `fd` received the model pattern without `--`; configured fsmonitor, external diff, and textconv scripts created their marker files; `git status` refreshed `.git/index`; a leading-dash Blame filename was parsed as an option and returned usage; the fake Git log command lacked the safe invocation flags and inherited config override variables.
+
+Error-chain regression discovery command:
+
+```text
+rtk env GOMAXPROCS=2 go test -list '^TestGitReadOnly(PreservesMissingExecutableError|PreservesContextCancellation|ErrorIncludesGitDiagnostic)$' ./internal/tools
+```
+
+Exit code: `0`; all three tests were listed.
+
+Error-chain RED command, against `28fa725` before the follow-up fix:
+
+```text
+rtk env GOMAXPROCS=2 go test -p 2 ./internal/tools -run '^TestGitReadOnly(PreservesMissingExecutableError|PreservesContextCancellation|ErrorIncludesGitDiagnostic)$' -count=1
+```
+
+Exit code: `1`, as expected. Missing Git produced an empty error and did not preserve `*exec.Error`; canceled execution returned no `context.Canceled` cause. The Git diagnostic-summary assertion passed.
