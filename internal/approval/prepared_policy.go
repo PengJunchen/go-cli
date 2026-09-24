@@ -52,7 +52,7 @@ func (m *ApprovalMiddleware) PreparedPolicy(ctx context.Context, req tools.Prepa
 
 	fence := m.fence
 	if m.initErr != nil {
-		return decision, fmt.Errorf("%w: %v", ErrPreparedPolicyUnavailable, m.initErr)
+		return decision, fmt.Errorf("%w: %w", ErrPreparedPolicyUnavailable, m.initErr)
 	}
 	if fence == nil || req.Fence == nil || req.Fence != fence {
 		return decision, ErrPreparedPolicyUnavailable
@@ -252,7 +252,10 @@ func (m *ApprovalMiddleware) preparedState() (PermissionMode, uint64, core.PlanM
 	m.sessionMu.RLock()
 	defer m.sessionMu.RUnlock()
 	mode := m.mode
-	if m.resolver == nil {
+	// Without a resolver, valid modes retain the legacy direct-classifier
+	// behavior under the default mode. Invalid explicitly stored values must
+	// remain visible so PreparedPolicy can fail closed instead of masking them.
+	if m.resolver == nil && validPermissionMode(mode) {
 		mode = PermissionDefault
 	}
 	return mode, m.policyEpoch, m.planMode
