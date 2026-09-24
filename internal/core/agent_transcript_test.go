@@ -403,6 +403,9 @@ func TestAgentCanonicalHistoryDeepCopiesToolCallArgs(t *testing.T) {
 				Usage:         usage,
 				ToolCalls:     []llm.ToolCall{{ID: "arg-call", Name: "inspect", Args: args}},
 			}},
+			{Message: AgentMessage{
+				Role: "tool", ToolCallID: "arg-call", ToolName: "inspect", ReceiptOutcome: ReceiptOutcomeSuccess,
+			}},
 		},
 	}}}
 	agent := NewAgentImpl("canonical-copy", loop)
@@ -416,7 +419,7 @@ func TestAgentCanonicalHistoryDeepCopiesToolCallArgs(t *testing.T) {
 	usage.OutputTokens = 99
 
 	returned := agent.Messages()
-	require.Len(t, returned, 2)
+	require.Len(t, returned, 3)
 	returnedArgs := returned[1].ToolCalls[0].Args.(map[string]any)
 	returnedArgs["nested"].(map[string]any)["value"] = "changed by caller"
 	returned[1].ContentBlocks[0].ImageURL.URL = "changed by caller"
@@ -428,4 +431,152 @@ func TestAgentCanonicalHistoryDeepCopiesToolCallArgs(t *testing.T) {
 		"neither the loop result nor Messages() caller may mutate authoritative history")
 	assert.Equal(t, "original", stored[1].ContentBlocks[0].ImageURL.URL)
 	assert.Equal(t, 3, stored[1].Usage.TotalTokens)
+}
+
+func TestAgentRejectsUnclosedCanonicalToolGroupsWithoutHistoryCommit(t *testing.T) {
+	toolCall := func(id, name string) llm.ToolCall {
+		return llm.ToolCall{ID: id, Name: name, Args: map[string]any{}}
+	}
+	user := AgentMessage{Role: "user", Content: "run", InputKind: InputKindUser}
+	assistant := func(calls ...llm.ToolCall) AgentMessage {
+		return AgentMessage{Role: "assistant", ToolCalls: calls}
+	}
+	receipt := func(id, name, outcome string) AgentMessage {
+		return AgentMessage{
+			Role: "tool", ToolCallID: id, ToolName: name, ReceiptOutcome: outcome,
+		}
+	}
+	tests := []struct {
+		name       string
+		transcript []AgentMessage
+	}{
+		{
+			name:       "missing receipt",
+			transcript: []AgentMessage{user, assistant(toolCall("call_1", "read"))},
+		},
+		{
+			name: "duplicate call id in group",
+			transcript: []AgentMessage{
+				user,
+				assistant(toolCall("call_1", "read"), toolCall("call_1", "write")),
+				receipt("call_1", "read", ReceiptOutcomeSuccess),
+			},
+		},
+		{
+			name: "receipt name mismatch",
+			transcript: []AgentMessage{
+				user,
+				assistant(toolCall("call_1", "read")),
+				receipt("call_1", "write", ReceiptOutcomeSuccess),
+			},
+		},
+		{
+			name: "unknown outcome",
+			transcript: []AgentMessage{
+				user,
+				assistant(toolCall("call_1", "read")),
+				receipt("call_1", "read", "maybe"),
+			},
+		},
+		{
+			name: "receipt before assistant call",
+			transcript: []AgentMessage{
+				user,
+				receipt("call_1", "read", ReceiptOutcomeSuccess),
+			},
+		},
+		{
+			name: "next assistant before group closes",
+			transcript: []AgentMessage{
+				user,
+				assistant(toolCall("call_1", "read"), toolCall("call_2", "grep")),
+				receipt("call_1", "read", ReceiptOutcomeSuccess),
+				assistant(),
+				receipt("call_2", "grep", ReceiptOutcomeSuccess),
+			},
+		},
+		{
+			name: "user input before group closes",
+			transcript: []AgentMessage{
+				user,
+				assistant(toolCall("call_1", "read")),
+				{Role: "user", Content: "steer", InputKind: InputKindSteering},
+				receipt("call_1", "read", ReceiptOutcomeSuccess),
+			},
+		},
+		{
+			name: "extra receipt after group closes",
+			transcript: []AgentMessage{
+				user,
+				assistant(toolCall("call_1", "read")),
+				receipt("call_1", "read", ReceiptOutcomeSuccess),
+				receipt("call_1", "read", ReceiptOutcomeSuccess),
+			},
+		},
+		{
+			name: "empty tool call id",
+			transcript: []AgentMessage{
+				user,
+				assistant(toolCall("", "read")),
+				receipt("", "read", ReceiptOutcomeSuccess),
+			},
+		},
+		{
+			name: "empty tool name",
+			transcript: []AgentMessage{
+				user,
+				assistant(toolCall("call_1", "")),
+				receipt("call_1", "", ReceiptOutcomeSuccess),
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transcript := make([]TranscriptEntry, len(tt.transcript))
+			for i, message := range tt.transcript {
+				transcript[i] = TranscriptEntry{Message: message}
+			}
+			loop := &scriptedCanonicalAgentLoop{results: []CanonicalRunResult{{
+				Events:     []AgentEvent{{Kind: "message", Content: "unverified answer"}},
+				Transcript: transcript,
+			}}}
+			baseHistory := []AgentMessage{{Role: "system", Content: "prior context"}}
+			agent := NewAgentImpl("unclosed-tool-group", loop, WithHistory(baseHistory))
+
+			result, err := agent.Run(context.Background(), Submission{Type: SubmissionUserMessage, Content: "run"})
+
+			require.ErrorIs(t, err, ErrCanonicalTranscriptInvalid)
+			assert.False(t, result.Success)
+			assert.Empty(t, result.Message)
+			assert.Equal(t, baseHistory, agent.Messages(), "an invalid tool group must not commit any part of its delta")
+		})
+	}
+}
+
+func TestAgentAcceptsRepeatedCallIDAcrossClosedCanonicalGroups(t *testing.T) {
+	transcript := []TranscriptEntry{
+		{Message: AgentMessage{Role: "user", Content: "run", InputKind: InputKindUser}},
+		{Message: AgentMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "call_1", Name: "read"}}}},
+		{Message: AgentMessage{Role: "tool", ToolCallID: "call_1", ToolName: "read", ReceiptOutcome: ReceiptOutcomeSuccess}},
+		{Message: AgentMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "call_1", Name: "grep"}}}},
+		{Message: AgentMessage{Role: "tool", ToolCallID: "call_1", ToolName: "grep", ReceiptOutcome: ReceiptOutcomeError}},
+		{Message: AgentMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "call_2", Name: "find"}}}},
+		{Message: AgentMessage{Role: "tool", ToolCallID: "call_2", ToolName: "find", ReceiptOutcome: ReceiptOutcomeInterrupted}},
+		{Message: AgentMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "call_3", Name: "bash"}}}},
+		{Message: AgentMessage{Role: "tool", ToolCallID: "call_3", ToolName: "bash", ReceiptOutcome: ReceiptOutcomeUnknown}},
+		{Message: AgentMessage{Role: "assistant", Content: "done"}},
+	}
+	loop := &scriptedCanonicalAgentLoop{results: []CanonicalRunResult{{
+		Events:     []AgentEvent{{Kind: "message", Content: "done"}},
+		Transcript: transcript,
+	}}}
+	agent := NewAgentImpl("closed-tool-groups", loop)
+
+	result, err := agent.Run(context.Background(), Submission{Type: SubmissionUserMessage, Content: "run"})
+
+	require.NoError(t, err)
+	assert.True(t, result.Success)
+	assert.Equal(t, "done", result.Message)
+	assert.Equal(t, len(transcript), len(agent.Messages()))
 }
