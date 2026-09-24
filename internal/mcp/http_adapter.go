@@ -325,18 +325,24 @@ func (a *HTTPClientAdapter) request(ctx context.Context, method string, params m
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	a.applyAuthHeaders(req)
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 
 	resp, err := a.doHTTP(req)
 	if err != nil {
-		return nil, fmt.Errorf("mcp: do request: %w", err)
+		return nil, newRequestBoundaryError(fmt.Errorf("mcp: do request: %w", err), true, false)
 	}
 	defer func() { _ = resp.Body.Close() }() //nolint:errcheck
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return nil, newRequestBoundaryError(fmt.Errorf("mcp: unexpected HTTP status %d", resp.StatusCode), true, false)
+	}
 
 	raw, err := readLimitedBody(resp.Body)
 	if err != nil {
-		return nil, fmt.Errorf("mcp: read response: %w", err)
+		return nil, newRequestBoundaryError(fmt.Errorf("mcp: read response: %w", err), true, false)
 	}
-	return parseHTTPResponse(raw)
+	return parseHTTPResponse(raw, id)
 }
 
 // extractSSEData scans SSE-formatted text and concatenates all data: line
@@ -369,26 +375,12 @@ func truncate(s string, n int) string {
 // parseHTTPResponse parses the raw HTTP response body into a JSON-RPC result
 // map. It handles both plain JSON and SSE-formatted responses (where the
 // JSON-RPC payload is wrapped in data: lines).
-func parseHTTPResponse(raw []byte) (map[string]any, error) {
-	jsonBytes := raw
-	if len(raw) > 0 && raw[0] != '{' {
+func parseHTTPResponse(raw []byte, expectedID int64) (map[string]any, error) {
+	jsonBytes := []byte(strings.TrimSpace(string(raw)))
+	if len(jsonBytes) > 0 && jsonBytes[0] != '{' {
 		jsonBytes = extractSSEData(raw)
 	}
-
-	var frame map[string]any
-	if err := json.Unmarshal(jsonBytes, &frame); err != nil {
-		return nil, fmt.Errorf("mcp: decode response: %w (body: %s)", err, truncate(string(raw), 500))
-	}
-
-	if errVal, hasErr := frame["error"]; hasErr && errVal != nil {
-		return nil, fmt.Errorf("mcp: rpc error: %v", errVal)
-	}
-
-	result, ok := frame["result"].(map[string]any)
-	if !ok {
-		return nil, nil
-	}
-	return result, nil
+	return parseJSONRPCResponse(jsonBytes, expectedID)
 }
 
 // ProtocolVersion returns the protocol version negotiated during the
@@ -419,14 +411,14 @@ func (a *HTTPClientAdapter) applyAuthHeaders(req *http.Request) {
 // caller is responsible for closing the response body. The caller must hold
 // a.mu (this method is called from doInitializeLocked which runs under the
 // Connect lock).
-func (a *HTTPClientAdapter) doPost(ctx context.Context, method string, params map[string]any) (*http.Response, error) {
+func (a *HTTPClientAdapter) doPost(ctx context.Context, method string, params map[string]any) (*http.Response, int64, error) {
 	id := a.nextID
 	a.nextID++
 	endpoint := a.endpoint
 	var err error
 	endpoint, err = resolveSameOriginEndpoint(a.cfg.URL, endpoint)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 
 	body, err := json.Marshal(map[string]any{
@@ -436,18 +428,19 @@ func (a *HTTPClientAdapter) doPost(ctx context.Context, method string, params ma
 		"params":  params,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("mcp: marshal request: %w", err)
+		return nil, 0, fmt.Errorf("mcp: marshal request: %w", err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
 	if err != nil {
-		return nil, fmt.Errorf("mcp: build request: %w", err)
+		return nil, 0, fmt.Errorf("mcp: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	a.applyAuthHeaders(req)
 
-	return a.doHTTP(req)
+	resp, err := a.doHTTP(req)
+	return resp, id, err
 }
 
 // doInitializeLocked performs the MCP initialize/initialized handshake over
@@ -461,7 +454,7 @@ func (a *HTTPClientAdapter) doInitializeLocked(ctx context.Context) error {
 		"clientInfo":      map[string]any{"name": "go-cli", "version": "1.0.0"},
 	}
 
-	resp, err := a.doPost(ctx, "initialize", initParams)
+	resp, id, err := a.doPost(ctx, "initialize", initParams)
 	if err != nil {
 		return fmt.Errorf("mcp: initialize request: %w", err)
 	}
@@ -474,7 +467,7 @@ func (a *HTTPClientAdapter) doInitializeLocked(ctx context.Context) error {
 			if err := a.doOAuthFlow(ctx, wwwAuth); err != nil {
 				return fmt.Errorf("mcp: oauth flow: %w", err)
 			}
-			resp, err = a.doPost(ctx, "initialize", initParams)
+			resp, id, err = a.doPost(ctx, "initialize", initParams)
 			if err != nil {
 				return fmt.Errorf("mcp: initialize retry: %w", err)
 			}
@@ -483,12 +476,15 @@ func (a *HTTPClientAdapter) doInitializeLocked(ctx context.Context) error {
 		}
 	}
 	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return newRequestBoundaryError(fmt.Errorf("mcp: unexpected HTTP status %d during initialize", resp.StatusCode), true, false)
+	}
 
 	raw, err := readLimitedBody(resp.Body)
 	if err != nil {
-		return fmt.Errorf("mcp: read response: %w", err)
+		return newRequestBoundaryError(fmt.Errorf("mcp: read response: %w", err), true, false)
 	}
-	result, err := parseHTTPResponse(raw)
+	result, err := parseHTTPResponse(raw, id)
 	if err != nil {
 		return err
 	}
@@ -500,7 +496,7 @@ func (a *HTTPClientAdapter) doInitializeLocked(ctx context.Context) error {
 	a.protocolVersion = version
 
 	// Send notifications/initialized (best-effort).
-	if notifResp, nErr := a.doPost(ctx, "notifications/initialized", map[string]any{}); nErr == nil {
+	if notifResp, _, nErr := a.doPost(ctx, "notifications/initialized", map[string]any{}); nErr == nil {
 		_ = notifResp.Body.Close()
 	}
 
