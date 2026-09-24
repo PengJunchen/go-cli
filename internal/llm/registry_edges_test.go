@@ -2,7 +2,6 @@ package llm
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -43,27 +42,22 @@ func TestProviderRegistry_DefaultOnFresh(t *testing.T) {
 	assert.Len(t, reg.List(), 1)
 }
 
-// TestProviderRegistry_GetModelBuildError verifies GetModel propagates a
-// provider build error along with a nil cleanup.
-func TestProviderRegistry_GetModelBuildError(t *testing.T) {
+// TestProviderRegistryRejectsUnspecifiedCustomProvider verifies that registry
+// presence alone cannot enable an unknown wire protocol.
+func TestProviderRegistryRejectsUnspecifiedCustomProvider(t *testing.T) {
 	reg := NewProviderRegistry()
-	// Build with a missing APIKey to force a provider build error on Eino? Use a
-	// stub that always fails to build instead, so the behavior is deterministic.
-	failing := &stubProvider{name: "boom", buildErr: errBoomBuild}
+	failing := &countingModelProvider{name: "boom"}
 	require.NoError(t, reg.Register(failing))
-	_, cleanup, err := reg.GetModel(context.Background(), "boom", ModelConfig{Model: "m"})
-	require.Error(t, err)
+	_, cleanup, err := reg.GetModel(context.Background(), "boom", ModelConfig{Model: "m", BaseURL: "http://127.0.0.1:8080/v1"})
+	require.ErrorIs(t, err, ErrUnsupportedProviderProtocol)
 	assert.Nil(t, cleanup)
+	assert.Zero(t, failing.buildCalls)
 }
-
-// errBoomBuild is a dedicated sentinel build error for stub-provider tests.
-var errBoomBuild = errors.New("llm: stub build failed intentionally")
 
 // stubProvider is a minimal ModelProvider used to exercise registry
 // error/registration paths without depending on a concrete provider.
 type stubProvider struct {
-	name     string
-	buildErr error
+	name string
 }
 
 func (s *stubProvider) Name() string {
@@ -74,9 +68,6 @@ func (s *stubProvider) Name() string {
 }
 
 func (s *stubProvider) Build(context.Context, ModelConfig) (BaseChatModel, func(), error) {
-	if s.buildErr != nil {
-		return nil, nil, s.buildErr
-	}
 	return &stubModel{}, func() {}, nil
 }
 
