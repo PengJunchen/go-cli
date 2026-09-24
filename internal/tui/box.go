@@ -3,7 +3,6 @@ package tui
 import (
 	"context"
 	"strings"
-	"unicode/utf8"
 )
 
 // BoxRenderer draws a box border around content using Unicode box-drawing
@@ -23,8 +22,9 @@ func (BoxRenderer) Render(ctx context.Context, content string, opts RenderOpts) 
 	lines := strings.Split(content, "\n")
 
 	maxLen := 0
-	for _, line := range lines {
-		if n := utf8.RuneCountInString(line); n > maxLen {
+	for i, line := range lines {
+		lines[i] = safeTerminalText(line)
+		if n := cellWidth(lines[i]); n > maxLen {
 			maxLen = n
 		}
 	}
@@ -35,7 +35,7 @@ func (BoxRenderer) Render(ctx context.Context, content string, opts RenderOpts) 
 	sb.WriteString(theme.Secondary().Render("┌" + horizontal + "┐"))
 	sb.WriteString("\n")
 	for _, line := range lines {
-		pad := strings.Repeat(" ", maxLen-utf8.RuneCountInString(line))
+		pad := strings.Repeat(" ", maxLen-cellWidth(line))
 		sb.WriteString(theme.Secondary().Render("│") + " " + line + pad + " " + theme.Secondary().Render("│"))
 		sb.WriteString("\n")
 	}
