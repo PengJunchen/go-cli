@@ -163,9 +163,12 @@ func TestSubagentSendReportsDroppedMessage(t *testing.T) {
 	require.NoError(t, err)
 }
 
-type panickingSubAgentRunner struct{}
+type panickingSubAgentRunner struct {
+	sideEffects *atomic.Int32
+}
 
-func (*panickingSubAgentRunner) Run(context.Context, string, <-chan string, func(AgentEvent)) (AgentMessage, error) {
+func (r *panickingSubAgentRunner) Run(context.Context, string, <-chan string, func(AgentEvent)) (AgentMessage, error) {
+	r.sideEffects.Add(1)
 	panic("runner fixture panic")
 }
 
@@ -191,9 +194,16 @@ func TestSubAgentPanicIsContainedAndFinalized(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			sideEffects := &atomic.Int32{}
+			factory := tt.factory
+			if tt.name == "runner" {
+				factory = func(SubAgentConfig) subAgentRunner {
+					return &panickingSubAgentRunner{sideEffects: sideEffects}
+				}
+			}
 			sub := mustSubAgent(NewDefaultSubAgent(
 				SubAgentConfig{Name: "panic-" + tt.name},
-				WithSubAgentRunner(tt.factory),
+				WithSubAgentRunner(factory),
 			))
 			events, err := sub.Run(context.Background(), "trigger panic")
 			require.NoError(t, err)
@@ -203,6 +213,12 @@ func TestSubAgentPanicIsContainedAndFinalized(t *testing.T) {
 			result, waitErr := sub.Wait(waitCtx)
 
 			require.ErrorIs(t, waitErr, ErrSubAgentPanicked, "panic must not be reported as successful completion")
+			var unknownOutcome interface{ OutcomeUnknown() bool }
+			require.ErrorAs(t, waitErr, &unknownOutcome)
+			assert.True(t, unknownOutcome.OutcomeUnknown(), "panic may follow an unobserved side effect")
+			if tt.name == "runner" {
+				assert.EqualValues(t, 1, sideEffects.Load(), "the runner may cause an effect before panicking")
+			}
 			assert.Empty(t, result)
 			assert.Equal(t, SubAgentFailed, sub.State())
 			assert.ErrorIs(t, sub.Send(context.Background(), "too late"), ErrSubAgentNotRunning)

@@ -121,6 +121,21 @@ var (
 	ErrSubAgentPanicked   = errors.New("core: sub-agent runner panicked")
 )
 
+type subAgentPanicError struct {
+	name  string
+	value any
+}
+
+func (e *subAgentPanicError) Error() string {
+	return fmt.Sprintf("%s: %q: %v", ErrSubAgentPanicked, e.name, e.value)
+}
+
+func (*subAgentPanicError) Unwrap() error { return ErrSubAgentPanicked }
+
+// OutcomeUnknown reports that a panic may have occurred after the runner
+// produced an external effect whose completion cannot be determined.
+func (*subAgentPanicError) OutcomeUnknown() bool { return true }
+
 // subAgentOptions holds the configurable fields of a sub-agent during
 // construction. It is an internal construction aid so that
 // SubAgentOption closures do not reference the concrete DefaultSubAgent type.
@@ -240,7 +255,7 @@ func (s *DefaultSubAgent) runAndFinalize(ctx context.Context, prompt string, out
 	defer span.End()
 	defer func() {
 		if recovered := recover(); recovered != nil {
-			panicErr := fmt.Errorf("%w: %q: %v", ErrSubAgentPanicked, s.config.Name, recovered)
+			panicErr := &subAgentPanicError{name: s.config.Name, value: recovered}
 			status, finalErr := s.finalizeOutcome(panicErr, false)
 			span.SetAttributes(tracing.Attribute{Key: "status", Value: status.String()})
 			span.SetStatus(tracing.SpanStatusError, finalErr.Error())
