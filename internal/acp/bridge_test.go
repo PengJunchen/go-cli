@@ -62,6 +62,23 @@ func (e *echoLoop) Run(_ context.Context, submission core.Submission, _ ...core.
 	return []core.AgentEvent{{Kind: "message", Content: submission.Content, Timestamp: time.Now()}}, nil
 }
 
+type canonicalEchoLoop struct{ called bool }
+
+func (l *canonicalEchoLoop) Run(context.Context, core.Submission, ...core.EventStream) ([]core.AgentEvent, error) {
+	return nil, nil
+}
+
+func (l *canonicalEchoLoop) RunCanonical(_ context.Context, submission core.Submission, _ ...core.EventStream) (core.CanonicalRunResult, error) {
+	l.called = true
+	return core.CanonicalRunResult{
+		Events: []core.AgentEvent{{Kind: "message", Content: "typed: " + submission.Content}},
+		Transcript: []core.TranscriptEntry{
+			{Message: core.AgentMessage{Role: "user", Content: submission.Content, InputKind: core.InputKindUser}},
+			{Message: core.AgentMessage{Role: "assistant", Content: "typed: " + submission.Content}},
+		},
+	}, nil
+}
+
 // TestACPMiddlewareAdapterImplementsCoreMiddleware verifies that
 // ACPMiddlewareAdapter satisfies the core.Middleware interface at compile time.
 func TestACPMiddlewareAdapterImplementsCoreMiddleware(t *testing.T) {
@@ -89,6 +106,20 @@ func TestACPMiddlewareAdapterWrapsLoop(t *testing.T) {
 	require.Len(t, events, 1)
 	assert.Equal(t, "hello", events[0].Content)
 	assert.True(t, inner.called, "inner loop must be called")
+}
+
+func TestACPMiddlewareAdapterPreservesCanonicalLoop(t *testing.T) {
+	adapter := NewACPMiddlewareAdapter(NewACPMiddleware("acp-bridge", nil), nil, nil)
+	inner := &canonicalEchoLoop{}
+	wrapped := core.NewMiddlewareChain(adapter).Wrap(inner)
+
+	canonical, ok := wrapped.(core.CanonicalLoop)
+	require.True(t, ok, "ACP router startup must preserve the typed transcript path")
+	result, err := canonical.RunCanonical(context.Background(), core.Submission{Content: "hello"})
+	require.NoError(t, err)
+	assert.True(t, inner.called)
+	require.Len(t, result.Transcript, 2)
+	assert.Equal(t, "typed: hello", result.Transcript[1].Message.Content)
 }
 
 // TestACPMiddlewareAdapterRoutesMessageToDispatcher verifies that an inbound

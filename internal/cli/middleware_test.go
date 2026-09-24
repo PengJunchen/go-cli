@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/core"
 )
 
@@ -50,4 +51,42 @@ func TestMiddlewareChainExecuted(t *testing.T) {
 	assert.Contains(t, logOutput, "core.logging_middleware.run")
 	assert.Contains(t, logOutput, "core.logging_middleware.done")
 	assert.Contains(t, logOutput, "interactive")
+}
+
+type canonicalAssemblyTestLoop struct{ calls int }
+
+func (*canonicalAssemblyTestLoop) Run(context.Context, core.Submission, ...core.EventStream) ([]core.AgentEvent, error) {
+	return nil, nil
+}
+
+func (l *canonicalAssemblyTestLoop) RunCanonical(_ context.Context, submission core.Submission, _ ...core.EventStream) (core.CanonicalRunResult, error) {
+	l.calls++
+	return core.CanonicalRunResult{
+		Events: []core.AgentEvent{{Kind: "message", Content: "assembled answer"}},
+		Transcript: []core.TranscriptEntry{
+			{Message: core.AgentMessage{Role: "user", Content: submission.Content, InputKind: core.InputKindUser}},
+			{Message: core.AgentMessage{Role: "assistant", Content: "assembled answer"}},
+		},
+	}, nil
+}
+
+func TestAssembleMiddlewarePreservesCanonicalLoop(t *testing.T) {
+	base := &canonicalAssemblyTestLoop{}
+	state := &assembleState{
+		ac:        assembleConfig{agentName: "canonical-assembly"},
+		rc:        &config.Config{},
+		loop:      base,
+		loopAgent: core.NewLoopAgent(),
+		hookChain: core.NewHookChain(),
+	}
+
+	state.assembleMiddleware()
+
+	canonical, ok := state.loop.(core.CanonicalLoop)
+	require.True(t, ok, "the default assembled logging/hook middleware chain must preserve RunCanonical")
+	result, err := canonical.RunCanonical(context.Background(), core.Submission{Content: "request"})
+	require.NoError(t, err)
+	assert.Equal(t, 1, base.calls)
+	require.Len(t, result.Transcript, 2)
+	assert.Equal(t, "assembled answer", result.Transcript[1].Message.Content)
 }

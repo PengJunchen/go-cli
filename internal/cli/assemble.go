@@ -2079,6 +2079,7 @@ type loopDetectorMiddleware struct {
 }
 
 var _ core.Middleware = (*loopDetectorMiddleware)(nil)
+var _ core.CanonicalMiddleware = (*loopDetectorMiddleware)(nil)
 
 // Name returns the middleware identifier.
 func (m *loopDetectorMiddleware) Name() string {
@@ -2091,6 +2092,10 @@ func (m *loopDetectorMiddleware) Name() string {
 // Wrap returns a wrapped AgentLoop that monitors events for loops.
 func (m *loopDetectorMiddleware) Wrap(next core.AgentLoop) core.AgentLoop {
 	return &loopDetectorLoop{detector: m.detector, manager: m.manager, next: next}
+}
+
+func (m *loopDetectorMiddleware) WrapCanonical(next core.CanonicalLoop) core.CanonicalLoop {
+	return &canonicalLoopDetectorLoop{detector: m.detector, manager: m.manager, next: next}
 }
 
 // loopDetectorLoop is the concrete wrapped loop produced by
@@ -2109,12 +2114,31 @@ func (l *loopDetectorLoop) Run(ctx context.Context, submission core.Submission, 
 	if err != nil {
 		return events, err
 	}
+	observeLoopDetector(ctx, l.detector, l.manager, events)
+	return events, nil
+}
 
+type canonicalLoopDetectorLoop struct {
+	detector production.LoopDetector
+	manager  *core.DefaultSystemReminderManager
+	next     core.CanonicalLoop
+}
+
+func (l *canonicalLoopDetectorLoop) RunCanonical(ctx context.Context, submission core.Submission, stream ...core.EventStream) (core.CanonicalRunResult, error) {
+	result, err := l.next.RunCanonical(ctx, submission, stream...)
+	if err != nil {
+		return result, err
+	}
+	observeLoopDetector(ctx, l.detector, l.manager, result.Events)
+	return result, nil
+}
+
+func observeLoopDetector(ctx context.Context, detector production.LoopDetector, manager *core.DefaultSystemReminderManager, events []core.AgentEvent) {
 	for _, ev := range events {
-		_ = l.detector.Observe(ctx, ev) //nolint:errcheck
+		_ = detector.Observe(ctx, ev) //nolint:errcheck
 	}
 
-	res := l.detector.Check(ctx)
+	res := detector.Check(ctx)
 	if res.Detected {
 		slog.WarnContext(ctx, "loop_detected",
 			"dimension", res.Dimension,
@@ -2122,13 +2146,11 @@ func (l *loopDetectorLoop) Run(ctx context.Context, submission core.Submission, 
 			"threshold", res.Threshold,
 			"message", res.Message,
 		)
-		l.manager.AddReminder(core.SystemReminder{
+		manager.AddReminder(core.SystemReminder{
 			ID:      "loop-detector",
 			Content: fmt.Sprintf("Loop detected: %s. Please try a different approach.", res.Message),
 		})
 	}
-
-	return events, err
 }
 
 // defaultCacheTTL is the default time-to-live for idempotent tool call results.
