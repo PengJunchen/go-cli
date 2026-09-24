@@ -141,6 +141,153 @@ func TestStreamingBashTruncation(t *testing.T) {
 	assert.Contains(t, result.Output, "[output truncated]")
 }
 
+// TestStreamingBashDrainsPastMaxOutput verifies that a finite command can
+// finish after output capture reaches its limit, while retained output and
+// streamed events stay bounded and the result reports truncation.
+func TestStreamingBashDrainsPastMaxOutput(t *testing.T) {
+	const (
+		maxOutput = 20
+		timeout   = 1200 * time.Millisecond
+	)
+	tool := NewStreamingBashTool(
+		WithTimeout(timeout),
+		WithMaxOutput(maxOutput),
+		WithNoSandbox(),
+	)
+	sink := &mockStreamSink{}
+	started := time.Now()
+	result, err := tool.ExecuteStreaming(context.Background(), ToolCall{
+		ID:   "call-drain",
+		Name: "bash",
+		Args: map[string]any{"command": "printf 'x\\n%.0s' {1..100000}"},
+	}, sink)
+	elapsed := time.Since(started)
+
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Less(t, elapsed, timeout)
+	assert.LessOrEqual(t, len(result.Output), maxOutput+len("\n[output truncated]"))
+	assert.Contains(t, result.Output, "[output truncated]")
+	assert.LessOrEqual(t, len(result.Output)-len("\n[output truncated]"), maxOutput)
+	assert.Equal(t, true, result.Metadata["truncated"])
+
+	var streamedBytes int
+	var truncationEvents int
+	for _, event := range sink.getEvents() {
+		if event.Content == "[output truncated]" {
+			truncationEvents++
+		}
+		streamedBytes += len(event.Content) + 1
+	}
+	assert.Equal(t, 1, truncationEvents)
+	assert.LessOrEqual(t, streamedBytes, maxOutput+len("\n[output truncated]"))
+}
+
+func TestStreamingBashDrainsConcurrentStdoutStderr(t *testing.T) {
+	const (
+		maxOutput = 20
+		timeout   = 3 * time.Second
+	)
+	tool := NewStreamingBashTool(
+		WithTimeout(timeout),
+		WithMaxOutput(maxOutput),
+		WithNoSandbox(),
+	)
+	sink := &mockStreamSink{}
+	result, err := tool.ExecuteStreaming(context.Background(), ToolCall{
+		ID:   "call-drain-both",
+		Name: "bash",
+		Args: map[string]any{"command": "for ((i=0; i<100000; i++)); do printf 'x\\n'; printf 'y\\n' >&2; done"},
+	}, sink)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.LessOrEqual(t, len(result.Output), maxOutput+len("\n[output truncated]"))
+	assert.Contains(t, result.Output, "[output truncated]")
+	assert.LessOrEqual(t, len(result.Output)-len("\n[output truncated]"), maxOutput)
+	assert.Equal(t, true, result.Metadata["truncated"])
+
+	var streamedBytes int
+	var truncationEvents int
+	for _, event := range sink.getEvents() {
+		if event.Content == "[output truncated]" {
+			truncationEvents++
+		}
+		streamedBytes += len(event.Content)
+		if event.Content != "[output truncated]" {
+			streamedBytes++
+		}
+	}
+	assert.Equal(t, 1, truncationEvents)
+	assert.LessOrEqual(t, streamedBytes, maxOutput+len("\n[output truncated]"))
+}
+
+func TestStreamingBashLongLineReportsScannerErrorAndDrains(t *testing.T) {
+	const (
+		maxOutput = 20
+		timeout   = 3 * time.Second
+	)
+	tool := NewStreamingBashTool(
+		WithTimeout(timeout),
+		WithMaxOutput(maxOutput),
+		WithNoSandbox(),
+	)
+	started := time.Now()
+	result, err := tool.Execute(context.Background(), ToolCall{
+		ID:   "call-long-line",
+		Name: "bash",
+		Args: map[string]any{"command": "printf '%2000000s' ''"},
+	})
+	elapsed := time.Since(started)
+
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "timed out")
+	require.NotNil(t, result)
+	assert.Less(t, elapsed, timeout)
+	assert.LessOrEqual(t, len(result.Output), maxOutput+len("\n[output truncated]"))
+	assert.Contains(t, result.Output, "[output truncated]")
+	assert.LessOrEqual(t, len(result.Output)-len("\n[output truncated]"), maxOutput)
+	assert.Equal(t, true, result.Metadata["truncated"])
+	assert.Contains(t, result.Metadata["read_error"], "token too long")
+}
+
+func TestStreamingBashCancellationWaitsForReaders(t *testing.T) {
+	tool := NewStreamingBashTool(
+		WithTimeout(5*time.Second),
+		WithMaxOutput(1<<20),
+		WithNoSandbox(),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sink := &mockStreamSink{}
+	done := make(chan error, 1)
+	go func() {
+		_, err := tool.ExecuteStreaming(ctx, ToolCall{
+			ID:   "call-cancel-readers",
+			Name: "bash",
+			Args: map[string]any{"command": "while :; do printf 'x\\n'; done"},
+		}, sink)
+		done <- err
+	}()
+
+	deadline := time.Now().Add(time.Second)
+	for len(sink.getEvents()) == 0 && time.Now().Before(deadline) {
+		time.Sleep(time.Millisecond)
+	}
+	require.NotEmpty(t, sink.getEvents(), "the command should start streaming before cancellation")
+	started := time.Now()
+	cancel()
+	select {
+	case err := <-done:
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Less(t, time.Since(started), time.Second)
+		finishedEvents := len(sink.getEvents())
+		time.Sleep(10 * time.Millisecond)
+		assert.Equal(t, finishedEvents, len(sink.getEvents()), "reader goroutines must be joined before ExecuteStreaming returns")
+	case <-time.After(time.Second):
+		t.Fatal("ExecuteStreaming did not return after context cancellation")
+	}
+}
+
 // TestStreamingBashSandbox verifies that sandbox validation blocks
 // blacklisted commands.
 func TestStreamingBashSandbox(t *testing.T) {
