@@ -1383,12 +1383,22 @@ func (s *assembleState) assembleMiddleware() {
 	s.reminderMgr = core.NewDefaultSystemReminderManager()
 	s.failureSynthesizer = core.NewDefaultFailureTurnSynthesizer()
 
-	// Bind shell-hook pre-tool-use to this Assembly's loop. Plan-mode tool
-	// blocking is enforced by the per-Assembly PlanModeToolWrapper installed
-	// when the tool registry is assembled.
+	// Bind this Assembly's pre-tool interceptors to its loop. Plan Mode runs
+	// first so blocked calls retain the tool_canceled event semantics; shell
+	// hooks then run only for calls allowed by Plan Mode. The executor wrapper
+	// remains a final Plan Mode guard for calls outside the loop path.
+	interceptors := []core.ToolInterceptor{core.NewPlanModeToolInterceptor(s.planCtrl)}
 	if s.hookMgr != nil {
-		s.loopAgent.SetToolInterceptor(s.hookMgr.PreToolUseInterceptor())
+		interceptors = append(interceptors, s.hookMgr.PreToolUseInterceptor())
 	}
+	s.loopAgent.SetToolInterceptor(func(toolName, toolCallID string, args map[string]any) error {
+		for _, interceptor := range interceptors {
+			if err := interceptor(toolName, toolCallID, args); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 
 	chain := []core.Middleware{
 		core.NewLoggingMiddleware(s.ac.agentName),
