@@ -197,7 +197,7 @@
         "VFY-10"
       ],
       "depends_on": [],
-      "status": "pending",
+      "status": "done",
       "commit_spec": "Designer creates a reviewed contract note and named red-before-fix cases; no product-code commit is required.",
       "phase_id": "R0",
       "source_status": "proposed"
@@ -224,7 +224,7 @@
       "depends_on": [
         "R0-DES-01"
       ],
-      "status": "pending",
+      "status": "done",
       "commit_spec": "One focused commit for approval and malformed mutation behavior after red-before-fix tests exist; keep unrelated safety changes out.",
       "phase_id": "R0",
       "source_status": "proposed"
@@ -255,7 +255,7 @@
       "depends_on": [
         "R0-DES-01"
       ],
-      "status": "pending",
+      "status": "in_progress",
       "commit_spec": "One commit per isolated service/provider/privacy boundary fix, with each risky path red before the patch and green afterward.",
       "phase_id": "R0",
       "source_status": "proposed"
@@ -283,7 +283,7 @@
       "depends_on": [
         "R0-DES-01"
       ],
-      "status": "pending",
+      "status": "in_progress",
       "commit_spec": "Keep the UI message fix and pipe-drain fix in separate commits so each regression can be bisected.",
       "phase_id": "R0",
       "source_status": "proposed"
@@ -320,7 +320,7 @@
       "depends_on": [
         "R0-DES-01"
       ],
-      "status": "pending",
+      "status": "in_progress",
       "commit_spec": "Separate protected Makefile/CI/rules changes from implementation commits; get the required repository approval before touching protected files.",
       "phase_id": "R0",
       "source_status": "proposed"
@@ -396,7 +396,7 @@
       "depends_on": [
         "R0-DES-01"
       ],
-      "status": "pending",
+      "status": "done",
       "commit_spec": "Focused interim safety commit; annotate it as temporary and tie replacement to R4 effect metadata acceptance.",
       "phase_id": "R0",
       "source_status": "proposed"
@@ -432,7 +432,7 @@
       "depends_on": [
         "R0-DES-01"
       ],
-      "status": "pending",
+      "status": "done",
       "commit_spec": "Reviewed contract artifact only; do not require a new runtime framework name or product code in the designer task.",
       "phase_id": "R1",
       "source_status": "proposed"
