@@ -13,6 +13,7 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
+	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 // EntryType categorizes a single immutable session entry.
@@ -126,6 +127,12 @@ type SessionEntry struct {
 	ArgumentDigest string `json:"argument_digest,omitempty"`
 	// SchemaDigest is the SHA-256 digest of the captured tool schema, in lowercase hex.
 	SchemaDigest string `json:"schema_digest,omitempty"`
+	// ToolIdentity is a durable description of the executor registration. It
+	// records facts only and cannot restore runtime dispatch authority.
+	ToolIdentity *tools.TrustedToolIdentitySnapshot `json:"tool_identity,omitempty"`
+	// EffectSet records trusted effect labels as facts. Recovery never turns
+	// these labels back into a trusted runtime effect set.
+	EffectSet []tools.TrustedToolEffect `json:"effect_set,omitempty"`
 	// ExecutionIdentity describes a verifiable local resource identity when one
 	// was captured. Its persisted values are diagnostics, not permission to signal
 	// a process after restart.
@@ -171,6 +178,13 @@ func (e *SessionEntry) clone() *SessionEntry {
 	if e.ExecutionIdentity != nil {
 		identity := *e.ExecutionIdentity
 		cp.ExecutionIdentity = &identity
+	}
+	if e.ToolIdentity != nil {
+		identity := *e.ToolIdentity
+		cp.ToolIdentity = &identity
+	}
+	if e.EffectSet != nil {
+		cp.EffectSet = append([]tools.TrustedToolEffect(nil), e.EffectSet...)
 	}
 	if e.ExecutionResolution != nil {
 		resolution := *e.ExecutionResolution
