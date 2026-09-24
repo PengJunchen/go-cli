@@ -1,0 +1,59 @@
+Branch: codex/runtime-r0-permissions
+
+Targeted regressions
+Command: rtk env GOMAXPROCS=2 go test -p 2 ./internal/approval -list '^TestMiddlewareCallbackAllowOnlyAppliesToCurrentCall$'
+Exit: 0
+Listed: TestMiddlewareCallbackAllowOnlyAppliesToCurrentCall
+Command: rtk env GOMAXPROCS=2 go test -p 2 ./internal/approval -run '^TestMiddlewareCallbackAllowOnlyAppliesToCurrentCall$' -count=1
+Exit: 0
+
+Command: rtk env GOMAXPROCS=2 go test -p 2 ./internal/tools -list '^(TestWriteMissingContentArg|TestWriteWrongContentTypeDoesNotChangeFile|TestWriteParametersRequireContent|TestEditMissingNewStringDoesNotChangeFile|TestEditWrongNewStringTypeDoesNotChangeFile|TestEditParametersRequireNewString|TestMutationQueueRejectsMalformedPayloadWithoutChangingFile|TestMutationQueueAllowsExplicitEmptyStrings)$'
+Exit: 0
+Listed: TestWriteMissingContentArg, TestWriteWrongContentTypeDoesNotChangeFile, TestWriteParametersRequireContent, TestEditMissingNewStringDoesNotChangeFile, TestEditWrongNewStringTypeDoesNotChangeFile, TestEditParametersRequireNewString, TestMutationQueueRejectsMalformedPayloadWithoutChangingFile, TestMutationQueueAllowsExplicitEmptyStrings
+Command: rtk env GOMAXPROCS=2 go test -p 2 ./internal/tools -run '^(TestWriteMissingContentArg|TestWriteWrongContentTypeDoesNotChangeFile|TestWriteParametersRequireContent|TestEditMissingNewStringDoesNotChangeFile|TestEditWrongNewStringTypeDoesNotChangeFile|TestEditParametersRequireNewString|TestMutationQueueRejectsMalformedPayloadWithoutChangingFile|TestMutationQueueAllowsExplicitEmptyStrings)$' -count=1
+Exit: 0
+
+Command: rtk env GOMAXPROCS=2 go test -p 2 ./internal/core -list '^(TestPlanModeToolInterceptor_FailsClosedForUnknownAndExternalTools|TestDefaultPlanModeController_ShouldBlockWrite_WhenActive|TestDefaultPlanModeController_ShouldNotBlockReadTools_WhenActive|TestDefaultPlanModeController_ShouldBlockWrite_UnknownTool)$'
+Exit: 0
+Listed: TestPlanModeToolInterceptor_FailsClosedForUnknownAndExternalTools, TestDefaultPlanModeController_ShouldBlockWrite_WhenActive, TestDefaultPlanModeController_ShouldNotBlockReadTools_WhenActive, TestDefaultPlanModeController_ShouldBlockWrite_UnknownTool
+Command: rtk env GOMAXPROCS=2 go test -p 2 ./internal/core -run '^(TestPlanModeToolInterceptor_FailsClosedForUnknownAndExternalTools|TestDefaultPlanModeController_ShouldBlockWrite_WhenActive|TestDefaultPlanModeController_ShouldNotBlockReadTools_WhenActive|TestDefaultPlanModeController_ShouldBlockWrite_UnknownTool)$' -count=1
+Exit: 0
+
+Plan Mode side-effect boundary recheck after enumerating the CLI tools:
+Command: rtk env GOMAXPROCS=2 go test -p 2 ./internal/core -list '^(TestDefaultPlanModeController_ShouldBlockWrite_WhenActive|TestPlanModeToolInterceptor_FailsClosedForUnknownAndExternalTools)$'
+Exit: 0
+Listed: TestDefaultPlanModeController_ShouldBlockWrite_WhenActive, TestPlanModeToolInterceptor_FailsClosedForUnknownAndExternalTools
+Command: rtk env GOMAXPROCS=2 go test -p 2 ./internal/core -run '^(TestDefaultPlanModeController_ShouldBlockWrite_WhenActive|TestPlanModeToolInterceptor_FailsClosedForUnknownAndExternalTools)$' -count=1
+Exit: 0
+
+Tool-executor wrapper boundary
+Command: rtk env GOMAXPROCS=2 go test -p 2 ./internal/core -list '^(TestPlanModeToolWrapper_FailsClosedForUnknownAndExternalTools|TestPlanModeToolWrapperAllowsReadOnlyNetworkTools)$'
+Exit: 0
+Listed: TestPlanModeToolWrapper_FailsClosedForUnknownAndExternalTools, TestPlanModeToolWrapperAllowsReadOnlyNetworkTools
+Command: rtk env GOMAXPROCS=2 go test -p 2 ./internal/core -run '^(TestPlanModeToolWrapper_FailsClosedForUnknownAndExternalTools|TestPlanModeToolWrapperAllowsReadOnlyNetworkTools)$' -count=1
+Exit: 0
+
+Explicit read-only/control names through the main Plan Mode interceptor
+Command: rtk env GOMAXPROCS=2 go test -p 2 ./internal/core -list '^TestPlanModeToolInterceptor_AllowsReadToolsWhenActive$'
+Exit: 0
+Listed: TestPlanModeToolInterceptor_AllowsReadToolsWhenActive
+Command: rtk env GOMAXPROCS=2 go test -p 2 ./internal/core -run '^TestPlanModeToolInterceptor_AllowsReadToolsWhenActive$' -count=1
+Exit: 0
+
+Complete affected package race suites
+Command: rtk env GOMAXPROCS=2 go test -p 2 -race -count=1 ./internal/approval
+Exit: 0
+Result: ok github.com/pengjunchen/go-cli/internal/approval 1.144s
+Command: rtk env GOMAXPROCS=2 go test -p 2 -race -count=1 ./internal/tools
+Exit: 0
+Result: ok github.com/pengjunchen/go-cli/internal/tools 35.083s
+Command: rtk env GOMAXPROCS=2 go test -p 2 -race -count=1 ./internal/core
+Exit: 0
+Result: ok github.com/pengjunchen/go-cli/internal/core 3.729s (final rerun after expanding main-path checks for read-only/control names; earlier complete runs also passed in 3.137s, 3.231s, and 3.318s)
+
+Code whitespace check
+Command: rtk git diff --check
+Exit: 0
+Staged documentation whitespace check
+Command: rtk proxy git diff --cached --check
+Exit: 0

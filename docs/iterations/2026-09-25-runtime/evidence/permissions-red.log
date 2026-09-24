@@ -1,0 +1,31 @@
+Baseline: 00149001e2350b18dd69d7fa41ab7fcd6ed0241a
+Branch: codex/runtime-r0-permissions
+
+All listed tests were confirmed with `go test -list` before running the targeted command. The targeted commands matched the named tests and exited 1 on the baseline implementation.
+
+Approval
+Command: rtk env GOMAXPROCS=2 go test -p 2 ./internal/approval -list '^TestMiddlewareCallbackAllowOnlyAppliesToCurrentCall$'
+Exit: 0
+Listed: TestMiddlewareCallbackAllowOnlyAppliesToCurrentCall
+
+Command: rtk env GOMAXPROCS=2 go test -p 2 ./internal/approval -run '^TestMiddlewareCallbackAllowOnlyAppliesToCurrentCall$' -count=1
+Exit: 1
+Failure: callback count expected 2, got 1; store GET count expected 2, got 1; store SET count expected 0, got 1. The second identical invocation reused the first callback Allow.
+
+File arguments and mutation queue
+Command: rtk env GOMAXPROCS=2 go test -p 2 ./internal/tools -list '^(TestWriteMissingContentArg|TestWriteWrongContentTypeDoesNotChangeFile|TestWriteParametersRequireContent|TestEditMissingNewStringDoesNotChangeFile|TestEditWrongNewStringTypeDoesNotChangeFile|TestEditParametersRequireNewString|TestMutationQueueRejectsMalformedPayloadWithoutChangingFile)$'
+Exit: 0
+Listed: TestWriteMissingContentArg, TestWriteWrongContentTypeDoesNotChangeFile, TestWriteParametersRequireContent, TestEditMissingNewStringDoesNotChangeFile, TestEditWrongNewStringTypeDoesNotChangeFile, TestEditParametersRequireNewString, TestMutationQueueRejectsMalformedPayloadWithoutChangingFile
+
+Command: rtk env GOMAXPROCS=2 go test -p 2 ./internal/tools -run '^(TestWriteMissingContentArg|TestWriteWrongContentTypeDoesNotChangeFile|TestWriteParametersRequireContent|TestEditMissingNewStringDoesNotChangeFile|TestEditWrongNewStringTypeDoesNotChangeFile|TestEditParametersRequireNewString|TestMutationQueueRejectsMalformedPayloadWithoutChangingFile)$' -count=1
+Exit: 1
+Failures: all seven named tests failed. The direct write/edit calls and four real FileMutationQueue cases returned success and changed the existing file to empty content; the schema checks accepted missing and wrong-typed payloads.
+
+Plan Mode
+Command: rtk env GOMAXPROCS=2 go test -p 2 ./internal/core -list '^(TestPlanModeToolInterceptor_FailsClosedForUnknownAndExternalTools|TestDefaultPlanModeController_ShouldBlockWrite_WhenActive|TestDefaultPlanModeController_ShouldNotBlockReadTools_WhenActive|TestDefaultPlanModeController_ShouldBlockWrite_UnknownTool)$'
+Exit: 0
+Listed: TestPlanModeToolInterceptor_FailsClosedForUnknownAndExternalTools, TestDefaultPlanModeController_ShouldBlockWrite_WhenActive, TestDefaultPlanModeController_ShouldNotBlockReadTools_WhenActive, TestDefaultPlanModeController_ShouldBlockWrite_UnknownTool
+
+Command: rtk env GOMAXPROCS=2 go test -p 2 ./internal/core -run '^(TestPlanModeToolInterceptor_FailsClosedForUnknownAndExternalTools|TestDefaultPlanModeController_ShouldBlockWrite_WhenActive|TestDefaultPlanModeController_ShouldNotBlockReadTools_WhenActive|TestDefaultPlanModeController_ShouldBlockWrite_UnknownTool)$' -count=1
+Exit: 1
+Failures: three of the four tests failed on the baseline. The active controller allowed remote_bash, registered Git mutations (including git_commit), dispatch_subagent, MCP/custom/extension names, and unknown names. The explicit read-tools test passed because the old implementation also allowed all unrecognized names.
