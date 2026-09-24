@@ -69,6 +69,8 @@ Keep the streaming path inside the same capability. Do not forward raw `Streamin
 
 The captured execution pipeline is the execution stage only. Split out the wrappers whose behavior has already occurred during preparation, including argument normalization/schema validation, approval/Plan decision, and MutationQueue scheduling; retain executor-required validation and tracing that still belong around the actual invocation. A queued worker calls the captured execution stage directly: it must not re-enter approval, re-normalize under a newer schema, or enqueue itself through the same MutationQueue a second time. If a wrapper cannot be safely split or pinned, preparation fails closed rather than invoking an unwrapped or reconstructed definition.
 
+`SetPreparedToolStages` and `RegisterTrustedControl` are explicit trusted-assembly boundaries, not general trust switches. The execution stage may retain only audited, effect-preserving runtime decorators such as result masking/guarding, audit, and telemetry; opaque legacy wrappers do not become trusted merely because they are placed in a stage. Arbitrary extension or `PostToolUse` callbacks are outside this declaration. Keep Plan-control dispatch isolated from the prepared tool path; if that separation and its behavior cannot be proved, leave the hook off the default prepared path and record the integration as partial pending the R7 lifecycle work. Do not add caller-controlled effect flags or a generic hook framework, and do not downgrade every audited safe decorator to `unknown` solely because it is a wrapper. Effect classification remains separate from workspace/path scope.
+
 ## Execution order and generation fence
 
 The prepared path owns this order for each assistant tool-call group:
