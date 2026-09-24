@@ -2279,19 +2279,30 @@ func recordToolTelemetry(ctx context.Context, telemetry production.Telemetry, to
 	if telemetry == nil {
 		return
 	}
+	toolClass := "other"
+	switch toolName {
+	case "read", "grep", "find", "ls", "image_read", "git_status", "git_diff", "git_log", "git_blame":
+		toolClass = "read"
+	case "write", "edit", "git_branch", "git_checkout", "git_commit", "git_create_branch", "git_fetch", "git_merge", "git_pr_create", "git_pull", "git_push", "git_reset", "git_revert", "git_stash", "git_stash_pop":
+		toolClass = "mutation"
+	case "bash", "remote_bash":
+		toolClass = "process"
+	case "web_fetch", "web_search":
+		toolClass = "web"
+	}
 	_ = telemetry.Record(ctx, production.TelemetryMetric{ //nolint:errcheck
 		Name:  "tool.call.count",
 		Value: 1,
 		Labels: map[string]string{
-			"tool":      toolName,
-			"cache_hit": fmt.Sprintf("%v", cacheHit),
+			"tool_class": toolClass,
+			"cache_hit":  fmt.Sprintf("%v", cacheHit),
 		},
 	})
 	_ = telemetry.Record(ctx, production.TelemetryMetric{ //nolint:errcheck
 		Name:  "tool.call.duration_ms",
 		Value: float64(duration.Milliseconds()),
 		Labels: map[string]string{
-			"tool": toolName,
+			"tool_class": toolClass,
 		},
 	})
 }
