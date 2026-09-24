@@ -1777,10 +1777,11 @@
         "R8-DES-01",
         "R5-REV-01"
       ],
-      "status": "pending",
+      "status": "in_progress",
       "commit_spec": "Separate rendering correctness from benchmark tuning; do not add snapshot-only tests that restate the renderer implementation.",
       "phase_id": "R8",
-      "source_status": "proposed"
+      "source_status": "proposed",
+      "execution_scope": "Parent-authorized partial helper slice only on branch codex/runtime-r8-tui-cells based at 98a6930: Unicode/cell-width helpers, box rendering and renderer integration covered by approved R8 design items 3 and 6. This is partial R8-BLD-01 progress; the remaining viewport/search/resize/accessibility work, declared R5-REV-01 prerequisite, full R5/R8 gate, and review remain open."
     },
     {
       "id": "R8-BLD-02",
