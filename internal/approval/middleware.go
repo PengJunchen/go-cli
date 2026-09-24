@@ -24,6 +24,11 @@ var ErrToolDenied = errors.New("tool call denied by approval policy")
 // fallback.
 var ErrInvalidPermissionMode = errors.New("approval: invalid permission mode")
 
+// ErrPreparedApprovalStoreUnsupported indicates that a custom ApprovalStore
+// has no adapter for the prepared dispatch fence and therefore cannot safely
+// participate in prepared tool decisions.
+var ErrPreparedApprovalStoreUnsupported = errors.New("approval: prepared policy requires a fenced approval store adapter")
+
 // approvalOptions configures how Ask classifications are resolved.
 type approvalOptions struct {
 	autoApprove            bool
@@ -163,11 +168,13 @@ func NewApprovalMiddleware(classifier ApprovalClassifier, store ApprovalStore, o
 	if options.cache != nil && options.dispatchFence != nil {
 		middleware.initErr = options.cache.bindFence(options.dispatchFence)
 	}
-	if preparedStore, ok := store.(*InMemoryApprovalStore); ok {
+	if preparedStore, ok := store.(*InMemoryApprovalStore); ok && preparedStore != nil {
 		middleware.preparedStore = preparedStore
 		if options.dispatchFence != nil && middleware.initErr == nil {
 			middleware.initErr = preparedStore.bindFence(options.dispatchFence)
 		}
+	} else {
+		middleware.initErr = errors.Join(middleware.initErr, fmt.Errorf("%w: %T", ErrPreparedApprovalStoreUnsupported, store))
 	}
 	return middleware
 }
