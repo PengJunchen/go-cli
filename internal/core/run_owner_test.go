@@ -294,11 +294,17 @@ func TestCleanupPendingRaceWithFinalReleaseDoesNotPublishPending(t *testing.T) {
 	assert.Equal(t, 1, baseGuard.releaseCount())
 }
 
-type contextErrorTool struct{ err error }
+type contextErrorTool struct {
+	err   error
+	calls *atomic.Int32
+}
 
 func (tool contextErrorTool) Name() string        { return "context-error" }
 func (tool contextErrorTool) Description() string { return "returns a context error after dispatch" }
 func (tool contextErrorTool) Execute(context.Context, tools.ToolCall) (*tools.ToolResult, error) {
+	if tool.calls != nil {
+		tool.calls.Add(1)
+	}
 	return nil, tool.err
 }
 
@@ -330,17 +336,18 @@ func (e knownInterruptedError) OutcomeUnknown() bool { return false }
 
 func TestDispatchedKnownInterruptedContextErrorIsNotUnknown(t *testing.T) {
 	parent, cancel := context.WithCancel(context.Background())
-	cancel()
 	guard := newCountingRunSlotGuard()
 	owner := newRunOwner(parent, guard, guard.claim, nil)
-	owner.MarkCancelRequested()
-	registry := scriptedRegistry(contextErrorTool{err: knownInterruptedError{cause: context.Canceled}})
+	var dispatches atomic.Int32
+	registry := scriptedRegistry(contextErrorTool{err: knownInterruptedError{cause: context.Canceled}, calls: &dispatches})
 
 	result, err := owner.run(time.Second, func(ctx context.Context) (Result, error) {
+		cancel()
 		_, _, toolErr := executeSingleTool(ctx, registry, tools.ToolCall{ID: "call-1", Name: "context-error"}, nil)
 		return Result{}, toolErr
 	})
 
+	assert.EqualValues(t, 1, dispatches.Load(), "the known-interrupted receipt must come from a dispatched tool")
 	require.ErrorIs(t, err, context.Canceled)
 	var explicit runOutcomeUnknown
 	require.ErrorAs(t, err, &explicit)
