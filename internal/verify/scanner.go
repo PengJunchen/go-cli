@@ -267,6 +267,15 @@ func Scan(cfg ScanConfig) (*ScanReport, error) {
 
 	// Phase 2: Run package-level scan rules.
 	// These rules need to analyze all files in a package together.
+	if cfg.CheckInterfaceDefaultImpl {
+		var corePackages []scan012PackageFiles
+		for _, pkg := range pkgGroups {
+			if isCorePackageDir(pkg.dir) {
+				corePackages = append(corePackages, scan012PackageFiles{dir: pkg.dir, files: pkg.files})
+			}
+		}
+		report.Findings = append(report.Findings, scanInterfaceDefaultImplPackages(internalProductionRoot(cfg.Dir), corePackages)...)
+	}
 	for _, pkg := range pkgGroups {
 		if cfg.CheckSlogUsage {
 			report.Findings = append(report.Findings, scanSlogUsage(pkg.dir, pkg.files)...)
@@ -282,9 +291,6 @@ func Scan(cfg ScanConfig) (*ScanReport, error) {
 		}
 		if cfg.CheckConfigMergePriority {
 			report.Findings = append(report.Findings, scanConfigMergePriority(pkg.dir, pkg.files)...)
-		}
-		if cfg.CheckInterfaceDefaultImpl {
-			report.Findings = append(report.Findings, scanInterfaceDefaultImpl(pkg.dir, pkg.files)...)
 		}
 		if cfg.CheckConcreteInInterface {
 			report.Findings = append(report.Findings, scanConcreteInInterface(pkg.dir, pkg.files)...)
@@ -305,6 +311,11 @@ func Scan(cfg ScanConfig) (*ScanReport, error) {
 	report.Summary.TotalFindings = len(report.Findings)
 
 	return report, nil
+}
+
+func isCorePackageDir(dir string) bool {
+	cleanDir := filepath.ToSlash(filepath.Clean(dir))
+	return cleanDir == "internal/core" || strings.HasSuffix(cleanDir, "/internal/core")
 }
 
 // scanMockImports detects mock-related imports in production code (SCAN-001).
