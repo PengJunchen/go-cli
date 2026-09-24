@@ -118,7 +118,7 @@ var defaultRunSlotGuard RunSlotGuard = noopRunSlotGuard{}
 
 // ClaimRun returns a no-op claim immediately.
 func (noopRunSlotGuard) ClaimRun(_ context.Context) (RunClaim, error) {
-	return RunClaim{ID: "noop", AcquiredAt: time.Now()}, nil
+	return RunClaim{ID: newClaimID(), AcquiredAt: time.Now()}, nil
 }
 
 // ExecuteClaimedRun runs fn directly without any slot enforcement.
