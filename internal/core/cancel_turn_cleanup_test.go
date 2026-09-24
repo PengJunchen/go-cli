@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -291,10 +292,15 @@ func TestLoop_CancelParallelModeSynthesizesToolResults(t *testing.T) {
 	// The fast tool should have its real result; the slow dispatched tool has
 	// an unknown side-effect outcome because it only returned ctx.Err().
 	receiptOutcomes := make(map[string]string)
+	receiptCounts := make(map[string]int)
 	for _, entry := range result.Transcript {
 		if entry.Message.Role == "tool" {
+			receiptCounts[entry.Message.ToolCallID]++
 			receiptOutcomes[entry.Message.ToolCallID] = entry.Message.ReceiptOutcome
 		}
+	}
+	for _, id := range toolCallIDs {
+		assert.Equal(t, 1, receiptCounts[id], "tool call %s should have exactly one canonical receipt", id)
 	}
 	assert.Equal(t, ReceiptOutcomeSuccess, receiptOutcomes["pc-1"])
 	assert.Equal(t, ReceiptOutcomeUnknown, receiptOutcomes["pc-2"])
@@ -305,7 +311,10 @@ func TestLoop_CancelParallelModeSynthesizesToolResults(t *testing.T) {
 			assert.False(t, ev.IsError)
 		}
 		if ev.Kind == "tool_result" && ev.ToolCallID == "pc-2" {
-			assert.Contains(t, ev.Content, "context canceled")
+			cancelText := strings.Contains(ev.Content, context.Canceled.Error())
+			unknownText := strings.Contains(ev.Content, (toolOutcomeUnknownError{cause: context.Canceled}).Error())
+			assert.True(t, cancelText || unknownText,
+				"slow tool error should describe cancellation or the normalized unknown outcome, got %q", ev.Content)
 			assert.True(t, ev.IsError)
 		}
 	}
