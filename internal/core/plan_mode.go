@@ -10,9 +10,9 @@ import (
 	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
-// PlanModeController manages plan mode state. When plan mode is active, write
-// tools are blocked so the agent can only research and propose a plan without
-// mutating the filesystem or executing commands.
+// PlanModeController manages plan mode state. When plan mode is active, tools
+// outside the explicit read-only set are blocked so the agent can research and
+// propose a plan without invoking unreviewed mutations.
 type PlanModeController interface {
 	// Enter activates plan mode, recording the reason for activation.
 	Enter(ctx context.Context, reason string) error
@@ -21,17 +21,22 @@ type PlanModeController interface {
 	// IsActive reports whether plan mode is currently active.
 	IsActive() bool
 	// ShouldBlockWrite reports whether the named tool should be blocked given
-	// the current plan-mode state.
+	// the current plan-mode state. In active Plan Mode, only explicitly
+	// allowlisted read-only tools pass.
 	ShouldBlockWrite(toolName string) bool
 }
 
-// writeToolNames is the set of built-in tool names that produce side effects
-// and are therefore blocked while plan mode is active.
-var writeToolNames = map[string]bool{
-	"write":    true,
-	"edit":     true,
-	"bash":     true,
-	"mutation": true,
+// planModeReadOnlyToolNames is the temporary Plan Mode allowlist. Unknown,
+// external, and mutating tools fail closed until tools declare effect metadata.
+// exit_plan_mode preserves its existing behavior while D-01 remains deferred.
+var planModeReadOnlyToolNames = map[string]struct{}{
+	"read": {}, "grep": {}, "find": {}, "ls": {},
+	"lsp_query": {}, "tool_search": {}, "ask_user": {},
+	"git_diff": {}, "git_status": {}, "git_log": {}, "git_branch": {},
+	"git_blame": {}, "git_remote": {},
+	"web_fetch": {}, "web_search": {},
+	"goal_get": {}, "goal_list": {}, "task_get": {}, "task_list": {},
+	"enter_plan_mode": {}, "exit_plan_mode": {},
 }
 
 // DefaultPlanModeController is a thread-safe PlanModeController backed by a
@@ -78,14 +83,16 @@ func (c *DefaultPlanModeController) IsActive() bool {
 }
 
 // ShouldBlockWrite reports whether the named tool should be blocked. It returns
-// true only when plan mode is active and the tool is a known write tool.
+// true when plan mode is active and the tool is not explicitly allowlisted as
+// read-only.
 func (c *DefaultPlanModeController) ShouldBlockWrite(toolName string) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if !c.active {
 		return false
 	}
-	blocked := writeToolNames[toolName]
+	_, readOnly := planModeReadOnlyToolNames[toolName]
+	blocked := !readOnly
 	if blocked {
 		slog.Debug("core.plan_mode.block_write", "tool", toolName)
 	}
@@ -101,14 +108,14 @@ func (c *DefaultPlanModeController) Reason() string {
 }
 
 // ErrPlanModeBlocked is returned by NewPlanModeToolWrapper when a tool call is
-// blocked because plan mode is active and the tool is a write tool.
+// blocked because plan mode is active and the tool is not allowlisted.
 var ErrPlanModeBlocked = errors.New("plan mode: tool blocked")
 
 // NewPlanModeToolWrapper returns a tools.ToolExecutorWrapper that intercepts
 // tool calls at the ToolExecutorWrapper chain level. When plan mode is active,
-// write tools (write, edit, bash, mutation) are blocked: the wrapper returns a
-// ToolResult with a descriptive message and ErrPlanModeBlocked, without
-// invoking the underlying executor. Read tools pass through unchanged.
+// only explicitly allowlisted read-only tools pass; unknown and side-effecting
+// tools return a descriptive message and ErrPlanModeBlocked without invoking
+// the underlying executor.
 //
 // When the controller is nil (zero-config fallback) or plan mode is inactive,
 // all calls pass through to next unchanged.
