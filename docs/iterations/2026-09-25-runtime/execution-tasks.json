@@ -255,7 +255,7 @@
       "depends_on": [
         "R0-DES-01"
       ],
-      "status": "in_progress",
+      "status": "done",
       "commit_spec": "One commit per isolated service/provider/privacy boundary fix, with each risky path red before the patch and green afterward.",
       "phase_id": "R0",
       "source_status": "proposed"
@@ -283,7 +283,7 @@
       "depends_on": [
         "R0-DES-01"
       ],
-      "status": "in_progress",
+      "status": "done",
       "commit_spec": "Keep the UI message fix and pipe-drain fix in separate commits so each regression can be bisected.",
       "phase_id": "R0",
       "source_status": "proposed"
@@ -461,7 +461,7 @@
       "depends_on": [
         "R1-DES-01"
       ],
-      "status": "pending",
+      "status": "in_progress",
       "commit_spec": "Commit the terminal-contract implementation separately from retry policy; regression tests must be red on audited baseline.",
       "phase_id": "R1",
       "source_status": "proposed"
@@ -496,7 +496,7 @@
       "depends_on": [
         "R1-DES-01"
       ],
-      "status": "pending",
+      "status": "in_progress",
       "commit_spec": "One commit for cancellation/history state machine and one for assembly scoping if independently reviewable; both must preserve current shared RunSlotGuard wiring.",
       "phase_id": "R1",
       "source_status": "proposed"
@@ -525,7 +525,7 @@
       "depends_on": [
         "R1-DES-01"
       ],
-      "status": "pending",
+      "status": "in_progress",
       "commit_spec": "Commit lifecycle/observability work in independently testable chunks; do not turn EventStream into the source of truth.",
       "phase_id": "R1",
       "source_status": "proposed"
@@ -584,14 +584,13 @@
         "Identity rules for physical session file, session ID, entry ID, branch/root parent and ToolCallID/ActionID.",
         "Commit points for user input, tool intent, tool receipt/unknown, compaction projection, final response and flush/sync acknowledgment.",
         "Recovery policy for complete lines, valid no-newline tail, truncated JSON tail, malformed complete record, duplicate IDs and unknown side effects.",
-        "Unresolved action records retain verifiable execution identity (not a bare PID); after parent CLI SIGKILL, recovery quarantines the conflicting session/workspace until child/process-group exit is proven or an operator reconciles it. Safe reads may continue.",
-        "Unresolved action records retain verifiable execution identity, not a bare PID. After parent CLI SIGKILL, recovery quarantines the conflicting session/workspace until child/process-group exit is proven or an operator reconciles it; safe reads may continue."
+        "Unresolved action records retain verifiable execution identity (not a bare PID); after parent CLI SIGKILL, recovery quarantines the conflicting session/workspace until child/process-group exit is proven or an operator reconciles it. Safe reads may continue."
       ],
       "verification": [
         "Review crash matrix before dispatch, after side effect before receipt, after receipt before final, during append/flush/sync.",
         "Verify unknown action is surfaced for reconciliation and never auto-dispatched on reopen.",
         "Kill the parent CLI while a child process continues writing; on restart, reject conflicting writes until independently verified exit or explicit quarantine reconciliation. Never kill based on a bare PID or clear a RunSlot as evidence.",
-        "Kill the parent CLI while a child process continues writing; on restart, reject conflicting writes until independently verified exit or explicit quarantine reconciliation. Never kill based on a bare PID or clear an in-memory RunSlot as evidence."
+        "During recovery, a workspace read is allowed only when the trusted resolved EffectSet proves read-only; unknown grep/fd/Git-helper effects remain blocked during a conflicting quarantine."
       ],
       "rule_mapping": [
         "SES-01",
@@ -620,16 +619,16 @@
       "role": "builder",
       "title": "Fix session identity, tree restoration and multi-process ownership",
       "user_story": "As a user, starting a new session cannot merge into another session, and resume must select the intended session and branch.",
-      "goal": "Repair new-file parent/root semantics, filename collision, resume ID type, compaction projection restoration, locking-before-read and tree defensive-copy/sequence behavior.",
+      "goal": "Repair physical session identity/resume, append-only tree/branch projection, compaction restore provenance, lock-before-read/recovery, and defensive-copy/sequence behavior.",
       "deliverable": [
         "Unique physical session file per session even within the same second.",
         "Resume resolves file/session ID then entry/branch ID without ambiguous conversion.",
-        "Restored Agent history includes compaction summary and valid tool-call groups.",
-        "Single-writer lock acquired before loading or repairing records; entry clones and sequence persistence are stable.",
+        "Restored Agent history includes compaction summary and valid tool-call groups; branch Clone shares the immutable canonical prefix without copying or rewriting ActionID/ToolCallID authority.",
+        "Single-writer lock acquired before loading or repairing records; unsupported platforms fail closed; entry clones and sequence persistence are stable. Pending action recovery cannot expose a ready SessionView without the injected marker authority.",
         "JSONL record size policy is symmetric between append and reopen."
       ],
       "verification": [
-        "Planned tests: TestNewSessionCreatesIndependentRootFile, TestResumeSessionIDSelectsTreeEntry, TestRestoreIncludesCompactionSummary, TestSessionLockAcquiredBeforeLoad, TestSessionTreeCloneDoesNotAliasNestedArgs, TestSessionSeqPersists, TestSessionSameSecondUsesUniqueFile, TestSessionLargeRecordRoundTrips.",
+        "Planned tests: TestNewSessionCreatesIndependentRootFile, TestResumeSessionIDSelectsTreeEntry, TestRestoreIncludesCompactionSummary, TestSessionLockAcquiredBeforeLoad, TestUnsupportedSessionLockFailsClosed, TestPendingActionsRequireRecoveryAuthority, TestRecoveryAuthorityMatchesEachPendingActionReference, TestCloneSharesCanonicalPrefixWithoutRewritingToolCallIDs, TestCloneAppendsDivergeFromSharedLeaf, TestSessionTreeCloneDoesNotAliasNestedArgs, TestSessionSeqPersists, TestSessionSameSecondUsesUniqueFile, TestSessionLargeRecordRoundTrips.",
         "Test record sizes at 1 MiB minus one, exactly 1 MiB and plus one; either read them back or reject before successful append.",
         "Run actual CLI resume in a child process against a temporary session directory."
       ],
@@ -660,13 +659,14 @@
       "goal": "Propagate append/flush/sync errors, persist action intent/result at semantic commit points, recover unknown outcomes without replay and handle torn tails conservatively.",
       "deliverable": [
         "Store writes create/append correctly for directory mode and fail to caller on append/flush/sync errors.",
-        "Tool intent is durable before dispatch and result/unknown receipt is durable afterward.",
+        "Typed Loop commit sink durably records input, complete assistant tool-call groups, per-action intent/reservation, receipts, resource-resolution checkpoints, compaction projection, and terminal commit at the defined semantic boundaries.",
+        "Tool intent and workspace dispatch-ready marker are both durable before dispatch; R4 prepared invocation pins trusted identity/effects and exact executor. Result/unknown receipt and separate resource-resolution evidence are durable before the next provider request.",
         "Final success/save UI acknowledgment follows durable commit.",
         "Only demonstrably truncated final JSON is quarantined/truncated; valid JSON without newline is preserved and delimited; malformed complete lines fail closed.",
         "Persist unresolved-action quarantine so a parent process crash cannot expose the same workspace to a conflicting mutation while its child/process group may still be running; do not kill by PID alone."
       ],
       "verification": [
-        "Planned tests: TestAppendFailurePreventsSavedAck, TestToolIntentDurableBeforeDispatch, TestCrashAfterActionMarksUnknownWithoutReplay, TestValidJSONTailWithoutNewlineIsPreserved, TestTruncatedJSONTailIsQuarantined, TestMalformedCompleteJSONLineFailsClosed, TestDirectoryStoreAppendOpensWriter, TestAssemblyToolSearchFilteringSurvivesProtectedListProxy.",
+        "Planned tests: TestAppendFailurePreventsSavedAck, TestToolIntentDurableBeforeDispatch, TestCrashAfterActionMarksUnknownWithoutReplay, TestUnknownReceiptWithLiveChildKeepsCrossSessionMutationBlocked, TestLateExecutionDoneResolvesQuarantineExactlyOnce, TestValidJSONTailWithoutNewlineIsPreserved, TestTruncatedJSONTailIsQuarantined, TestMalformedCompleteJSONLineFailsClosed, TestDirectoryStoreAppendOpensWriter, TestPendingSavepointUsesAbsoluteEnqueueSequenceAcrossFlush, TestSessionSyncFailurePoisonsWriterUntilReopen, TestAssemblyToolSearchFilteringSurvivesProtectedListProxy.",
         "Use injectable file writer failures and an actual child process killed after side effect but before receipt; assert side-effect count remains exactly one after restart. Kill the parent process while its child keeps writing; assert restart blocks conflicting writes but allows safe reads until verified child exit or explicit manual reconciliation.",
         "No test should require fsync for each token; assert only declared semantic commit points.",
         "Planned tests: TestRecoveryBlocksWorkspaceMutationWhileOrphanChildLives, TestRecoveryAllowsSafeReadWhileWorkspaceQuarantined."
@@ -982,17 +982,20 @@
       "goal": "Deliver only the independently runnable trusted registration identity/effect seam needed by R2; do not implement full R4 permission behavior or decide D-01.",
       "deliverable": [
         "Immutable registry-bound executor identity and trusted EffectSet are queryable from the resolved executor/wrapper without relying on names or caller metadata.",
-        "A side-effect-free prepared-dispatch seam pins the exact executor, normalized call, registry/policy generations, and one-time authorization snapshot; after durable intent sync, one short final fence dispatches that captured executor once without name relookup.",
-        "MutationQueue preserves and dispatches the captured prepared invocation rather than reconstructing a Write/Edit tool or bypassing the captured wrapper. Registry List/wrappers cannot expose an unwrapped executable definition that bypasses the same identity/effect boundary.",
+        "A side-effect-free prepared-dispatch seam pins the exact executor, normalized call, registry/policy generations, and one-time authorization snapshot. After durable intent sync, direct execution checks the final shared fence before dispatch; a queued mutation consumes one-use admission at enqueue and rechecks that same fence at dequeue before captured execution, without name relookup.",
+        "MutationQueue preserves the captured execution stage and original context, rather than reconstructing a Write/Edit tool or bypassing the captured wrapper. A queue worker cannot re-enter public dispatch, approval, normalization or the queue. Registry List/wrappers cannot expose an unwrapped executable definition; protected proxies preserve Parameterized, StreamingBashTool, PromptGuideliner and TopToolsProvider capabilities.",
         "Effect inventory covers derived execution; Git actions that may invoke repository-configured helpers remain unknown/composite until a trusted implementation disables those hooks or proves a restricted path.",
-        "The narrow seam is mapped to source R4-BLD-01. Full R4-BLD-01 retains its original source scope and remains pending until its complete approval/Plan Mode contract (including pending D-01) is implemented and reviewed."
+        "The narrow seam is mapped to source R4-BLD-01. Full R4-BLD-01 retains its original source scope and remains pending until its complete approval/Plan Mode contract (including pending D-01) is implemented and reviewed.",
+        "Grep/fd receive no workspace_read effect until fixed-argument and child-environment hardening is present: ripgrep passes patterns with -e, terminates path options with --, uses --no-config and removes RIPGREP_CONFIG_PATH; fd terminates options before user-controlled values and exposes no execution option. Helper-capable Git paths remain unknown/composite unless their captured executor disables or proves those helpers safe."
       ],
       "verification": [
         "Test same-name custom executor spoofing cannot inherit a built-in read-only identity/effect.",
         "Test registry replacement/version changes produce distinct immutable executor identities.",
         "Test approval Ask/allow and Ask/deny during preparation; no underlying executor starts before the durable dispatch boundary, and a stale registration/policy generation cannot dispatch.",
-        "Test MutationQueue executes the exact captured prepared executor once and never re-resolves by tool name.",
-        "Independent review verifies the trusted metadata is bound to the executor actually returned by the registry; no tool-name allowlist is accepted as proof."
+        "Test a queued generation change is caught at dequeue; successful queued work executes the captured executor once and never re-enters approval/queue or re-resolves by tool name. Test ordinary and streaming dispatch share one permit and raw streaming proxies cannot bypass preparation.",
+        "Independent review verifies the trusted metadata is bound to the executor actually returned by the registry; no tool-name allowlist is accepted as proof.",
+        "Through the real prepared path, prove grep pattern --pre=sh plus injected RIPGREP_CONFIG_PATH cannot run a helper, and fd pattern --exec plus an executable path cannot run a command; assert these registrations remain unknown until the hardening is implemented.",
+        "Verify git status/fsmonitor and diff/external-diff or textconv paths remain unknown/composite unless the captured executor disables the repository-configured helper or proves a restricted path."
       ],
       "rule_mapping": [
         "APR-002",
