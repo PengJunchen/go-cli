@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 
@@ -157,6 +158,223 @@ func TestProviderRegistryRejectsCrossOriginRedirectBeforeSecondDispatch(t *testi
 	assert.Empty(t, secondAuthorization)
 }
 
+func TestProviderRegistryRejectsCustomRedirectCallbackOriginRewrite(t *testing.T) {
+	const secret = "callback-redirect-secret-canary"
+	secondRequests := 0
+	secondAuthorization := ""
+	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		secondRequests++
+		secondAuthorization = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		writeResponse(t, w, `{"choices":[{"message":{"role":"assistant","content":"must-not-be-used"}}]}`)
+	}))
+	defer second.Close()
+
+	firstRequests := 0
+	first := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		firstRequests++
+		http.Redirect(w, r, "/same-origin-redirect", http.StatusTemporaryRedirect)
+	}))
+	defer first.Close()
+
+	secondEndpoint, err := url.Parse(second.URL + chatCompletionsPath)
+	require.NoError(t, err)
+	client := &http.Client{CheckRedirect: func(request *http.Request, _ []*http.Request) error {
+		request.Header.Set("Authorization", "Bearer "+secret)
+		request.URL = secondEndpoint
+		return nil
+	}}
+	registry := NewProviderRegistry()
+	require.NoError(t, registry.Register(NewEinoProvider(
+		WithProviderName("local-compatible"),
+		WithBaseURL(first.URL),
+		WithAPIKey(secret),
+		WithHTTPClient(client),
+	)))
+	model, cleanup, err := registry.GetModel(context.Background(), "local-compatible", ModelConfig{Model: "m", BaseURL: first.URL})
+	require.NoError(t, err)
+	defer cleanup()
+
+	_, err = model.Generate(context.Background(), []Message{{Role: RoleUser, Content: "hello"}})
+	require.Error(t, err, "callback-rewritten cross-origin redirects are not valid provider responses")
+	assert.Equal(t, 1, firstRequests)
+	assert.Zero(t, secondRequests, "callback must not redirect a scoped credential to another origin")
+	assert.Empty(t, secondAuthorization)
+}
+
+func TestProviderRegistryRejectsCustomRedirectCallbackHostRewrite(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		http.Redirect(w, r, "/same-origin-redirect", http.StatusTemporaryRedirect)
+	}))
+	defer server.Close()
+	client := &http.Client{CheckRedirect: func(request *http.Request, _ []*http.Request) error {
+		request.Host = "foreign.example.test"
+		return nil
+	}}
+	registry := NewProviderRegistry()
+	require.NoError(t, registry.Register(NewEinoProvider(
+		WithProviderName("local-compatible"),
+		WithBaseURL(server.URL),
+		WithAPIKey("host-rewrite-canary"),
+		WithHTTPClient(client),
+	)))
+	model, cleanup, err := registry.GetModel(context.Background(), "local-compatible", ModelConfig{Model: "m", BaseURL: server.URL})
+	require.NoError(t, err)
+	defer cleanup()
+
+	_, err = model.Generate(context.Background(), []Message{{Role: RoleUser, Content: "hello"}})
+	require.Error(t, err, "a redirected HTTP authority must remain inside the credential scope")
+	assert.Equal(t, 1, requests, "callback-mutated Host must be rejected before a second request")
+}
+
+func TestProviderRegistryRejectsCanonicalProviderNameCollision(t *testing.T) {
+	registry := NewProviderRegistry()
+	canonical, err := registry.Get("eino")
+	require.NoError(t, err)
+
+	err = registry.Register(NewEinoProvider(WithProviderName("EINO")))
+	require.ErrorIs(t, err, errProviderAlreadyRegistered)
+	upper, err := registry.Get("EINO")
+	require.NoError(t, err)
+	lower, err := registry.Get("eino")
+	require.NoError(t, err)
+	assert.Same(t, canonical, upper)
+	assert.Same(t, canonical, lower)
+	assert.Len(t, registry.List(), 1)
+
+	empty := &ProviderRegistry{}
+	err = empty.Register(NewEinoProvider(WithProviderName("EINO")))
+	assert.ErrorIs(t, err, errProviderNameNotCanonical, "first registration must also use the canonical spelling")
+}
+
+func TestProviderRegistryRejectsAliasThatShadowsCanonicalName(t *testing.T) {
+	registry := NewProviderRegistry()
+	provider := &resolverSpecFixtureProvider{
+		name: "local-compatible",
+		spec: ProviderSpec{
+			ProviderID:              "local-compatible",
+			Aliases:                 []string{"EINO"},
+			ProtocolID:              ProtocolOpenAICompatible,
+			DefaultBaseURL:          "https://fixture.invalid/v1",
+			DefaultEndpointExplicit: true,
+			Enabled:                 true,
+		},
+	}
+	require.Error(t, registry.Register(provider), "aliases must not shadow canonical provider IDs")
+	_, err := registry.Get("local-compatible")
+	assert.ErrorIs(t, err, errProviderNotFound)
+}
+
+func TestProviderRegistryRejectsDisabledNativeIdentityAlias(t *testing.T) {
+	registry := NewProviderRegistry()
+	provider := &resolverSpecFixtureProvider{
+		name: "local-compatible",
+		spec: ProviderSpec{
+			ProviderID:              "local-compatible",
+			Aliases:                 []string{"Anthropic"},
+			ProtocolID:              ProtocolOpenAICompatible,
+			DefaultBaseURL:          "https://fixture.invalid/v1",
+			DefaultEndpointExplicit: true,
+			Enabled:                 true,
+		},
+	}
+	assert.Error(t, registry.Register(provider), "native identities stay reserved even when an alias would target compatible wire")
+}
+
+func TestProviderRegistryRejectsCanonicalNameThatShadowsAlias(t *testing.T) {
+	registry := NewProviderRegistry()
+	first := &resolverSpecFixtureProvider{
+		name: "first-compatible",
+		spec: ProviderSpec{
+			ProviderID:              "first-compatible",
+			Aliases:                 []string{"second-compatible"},
+			ProtocolID:              ProtocolOpenAICompatible,
+			DefaultBaseURL:          "https://fixture.invalid/v1",
+			DefaultEndpointExplicit: true,
+			Enabled:                 true,
+		},
+	}
+	require.NoError(t, registry.Register(first))
+	second := &resolverSpecFixtureProvider{
+		name: "second-compatible",
+		spec: ProviderSpec{
+			ProviderID:              "second-compatible",
+			ProtocolID:              ProtocolOpenAICompatible,
+			DefaultBaseURL:          "https://fixture.invalid/v1",
+			DefaultEndpointExplicit: true,
+			Enabled:                 true,
+		},
+	}
+	require.Error(t, registry.Register(second), "canonical names must not shadow an existing alias")
+	got, err := registry.Get("SECOND-COMPATIBLE")
+	require.NoError(t, err)
+	assert.Same(t, first, got)
+	resolved, err := registry.SnapshotResolver().ResolveModel(context.Background(), ModelRequest{ProviderID: "SECOND-COMPATIBLE", ModelID: "alias-model"})
+	require.NoError(t, err)
+	assert.Equal(t, "first-compatible", resolved.ProviderID)
+}
+
+func TestWithModelsCopiesCallerSlice(t *testing.T) {
+	models := []ModelInfo{{Name: "original", ContextWindow: 100}}
+	provider := NewEinoProvider(WithModels(models))
+	models[0].Name = "mutated"
+
+	assert.Equal(t, "original", provider.Models()[0].Name)
+}
+
+func TestWithNativeModelsCopiesCallerSlice(t *testing.T) {
+	models := []ModelInfo{{Name: "original", ContextWindow: 100}}
+	provider := NewOpenAIProvider(WithNativeModels(models))
+	models[0].Name = "mutated"
+
+	assert.Equal(t, "original", provider.Models()[0].Name)
+}
+
+func TestModelResolverSnapshotsProviderModelMetadata(t *testing.T) {
+	provider := &resolverSpecFixtureProvider{
+		name:   "local-compatible",
+		models: []ModelInfo{{Name: "original", ContextWindow: 100}},
+		spec: ProviderSpec{
+			ProviderID:              "local-compatible",
+			ProtocolID:              ProtocolOpenAICompatible,
+			DefaultBaseURL:          "https://fixture.invalid/v1",
+			DefaultEndpointExplicit: true,
+			Enabled:                 true,
+		},
+	}
+	registry := NewProviderRegistry()
+	require.NoError(t, registry.Register(provider))
+	resolver := registry.SnapshotResolver()
+	provider.models[0].Name = "mutated"
+
+	resolved, err := resolver.ResolveModel(context.Background(), ModelRequest{ProviderID: provider.name, ModelID: "original"})
+	require.NoError(t, err)
+	assert.True(t, resolved.Model.Known)
+	assert.Equal(t, "original", resolved.Model.Info.Name)
+}
+
+func TestProviderSpecRequireCredentialAppliesToItsDefaultOrigin(t *testing.T) {
+	provider := NewEinoProvider(WithProviderName("secured-compatible"), WithBaseURL("https://credentials.example.test/v1"))
+	resolver := &ModelResolver{providers: map[string]providerDefinition{
+		"secured-compatible": {
+			provider: provider,
+			spec: ProviderSpec{
+				ProviderID:              "secured-compatible",
+				ProtocolID:              ProtocolOpenAICompatible,
+				DefaultBaseURL:          "https://credentials.example.test/v1",
+				DefaultEndpointExplicit: true,
+				RequireCredential:       true,
+				Enabled:                 true,
+			},
+		},
+	}}
+
+	_, err := resolver.ResolveModel(context.Background(), ModelRequest{ProviderID: "secured-compatible", ModelID: "m"})
+	assert.ErrorIs(t, err, ErrProviderCredentialRequired)
+}
+
 func TestProviderRegistryUnknownAliasNeedsExplicitEndpoint(t *testing.T) {
 	credentials := &countingCredentialResolver{key: "provider-only-secret-canary"}
 	registry := NewProviderRegistry()
@@ -275,6 +493,21 @@ type countingCredentialResolver struct {
 	wantProvider string
 	wantProtocol string
 	wantOrigin   string
+}
+
+type resolverSpecFixtureProvider struct {
+	name   string
+	spec   ProviderSpec
+	models []ModelInfo
+}
+
+func (p *resolverSpecFixtureProvider) Name() string { return p.name }
+func (p *resolverSpecFixtureProvider) Models() []ModelInfo {
+	return p.models
+}
+func (p *resolverSpecFixtureProvider) resolverSpec() ProviderSpec { return p.spec }
+func (p *resolverSpecFixtureProvider) Build(context.Context, ModelConfig) (BaseChatModel, func(), error) {
+	return &stubModel{}, func() {}, nil
 }
 
 func (c *countingCredentialResolver) ResolveCredential(_ context.Context, provider, protocol, origin string) (string, bool, error) {

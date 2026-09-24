@@ -46,8 +46,9 @@ type ProviderSpec struct {
 	DefaultBaseURL          string
 	DefaultModel            string
 	DefaultEndpointExplicit bool
-	RequireCredential       bool
-	Enabled                 bool
+	// RequireCredential requires scoped auth at this spec's default origin.
+	RequireCredential bool
+	Enabled           bool
 }
 
 // ModelSpec carries provider-scoped model metadata. Unknown model metadata is
@@ -90,6 +91,7 @@ type ScopedCredentialResolver interface {
 type providerDefinition struct {
 	spec     ProviderSpec
 	provider ModelProvider
+	models   []ModelInfo
 }
 
 // ModelResolver holds one immutable provider definition snapshot and resolves
@@ -149,7 +151,7 @@ func (r *ModelResolver) ResolveModel(ctx context.Context, request ModelRequest) 
 // It applies the same identity and endpoint checks as ResolveModel but does
 // not read secrets or construct an adapter.
 func (r *ModelResolver) CredentialRefFor(providerID, endpoint string) (CredentialRef, error) {
-	providerID = strings.ToLower(strings.TrimSpace(providerID))
+	providerID = canonicalProviderID(providerID)
 	definition, ok := r.lookupProvider(providerID)
 	if !ok {
 		return CredentialRef{}, fmt.Errorf("%w: %s", errProviderNotFound, providerID)
@@ -172,7 +174,7 @@ func (r *ModelResolver) CredentialRefFor(providerID, endpoint string) (Credentia
 }
 
 func (r *ModelResolver) resolveModel(ctx context.Context, request ModelRequest, inlineKey string) (ResolvedModel, error) {
-	providerID := strings.ToLower(strings.TrimSpace(request.ProviderID))
+	providerID := canonicalProviderID(request.ProviderID)
 	if providerID == "" {
 		return ResolvedModel{}, fmt.Errorf("llm: provider identity is required")
 	}
@@ -229,7 +231,7 @@ func (r *ModelResolver) resolveModel(ctx context.Context, request ModelRequest, 
 	if apiKey == "" {
 		apiKey = defaultCredentialForScope(definition.provider, origin)
 	}
-	if requiresOpenAIDefaultKey(spec.ProviderID, baseURL) && apiKey == "" {
+	if providerRequiresCredential(spec, origin) && apiKey == "" {
 		return ResolvedModel{}, fmt.Errorf("%w: %s (unscoped legacy credentials are not used)", ErrProviderCredentialRequired, spec.ProviderID)
 	}
 
@@ -240,7 +242,7 @@ func (r *ModelResolver) resolveModel(ctx context.Context, request ModelRequest, 
 	if modelID == "" {
 		return ResolvedModel{}, fmt.Errorf("llm: model identity is required for provider %s", spec.ProviderID)
 	}
-	modelSpec := resolveModelSpec(definition.provider, spec.ProviderID, modelID)
+	modelSpec := resolveModelSpec(definition.models, spec.ProviderID, modelID)
 	cfg := ModelConfig{
 		Model:              modelID,
 		Temperature:        request.Temperature,
@@ -263,6 +265,7 @@ func (r *ModelResolver) resolveModel(ctx context.Context, request ModelRequest, 
 }
 
 func (r *ModelResolver) lookupProvider(id string) (providerDefinition, bool) {
+	id = canonicalProviderID(id)
 	if canonical, ok := r.aliases[id]; ok {
 		id = canonical
 	}
@@ -275,9 +278,9 @@ func cloneProviderSpec(spec ProviderSpec) ProviderSpec {
 	return spec
 }
 
-func resolveModelSpec(provider ModelProvider, providerID, modelID string) ModelSpec {
+func resolveModelSpec(models []ModelInfo, providerID, modelID string) ModelSpec {
 	result := ModelSpec{ProviderID: providerID, ModelID: modelID}
-	for _, info := range provider.Models() {
+	for _, info := range models {
 		if info.Name == modelID {
 			result.Info = info
 			result.Known = true
@@ -292,7 +295,7 @@ func providerNeedsExplicitEndpoint(spec ProviderSpec) bool {
 }
 
 func isDisabledNativeIdentity(id string) bool {
-	switch strings.ToLower(id) {
+	switch canonicalProviderID(id) {
 	case "claude", "anthropic", "gemini", "google-gemini":
 		return true
 	default:
@@ -310,7 +313,7 @@ func isNativeProvider(provider ModelProvider) bool {
 }
 
 func inferProviderSpec(provider ModelProvider) (ProviderSpec, bool) {
-	name := strings.ToLower(strings.TrimSpace(provider.Name()))
+	name := canonicalProviderID(provider.Name())
 	if isDisabledNativeIdentity(name) || isNativeProvider(provider) {
 		return ProviderSpec{ProviderID: name, ProtocolID: protocolForNative(name), Enabled: false}, true
 	}
@@ -344,6 +347,7 @@ func inferProviderSpec(provider ModelProvider) (ProviderSpec, bool) {
 }
 
 func requiresOpenAIDefaultKey(providerID, baseURL string) bool {
+	providerID = canonicalProviderID(providerID)
 	if providerID != defaultProviderName && providerID != openaiProviderName {
 		return false
 	}
@@ -353,6 +357,18 @@ func requiresOpenAIDefaultKey(providerID, baseURL string) bool {
 	}
 	defaultOrigin, err := normalizeProviderOrigin(defaultProviderBaseURL)
 	return err == nil && origin == defaultOrigin
+}
+
+func providerRequiresCredential(spec ProviderSpec, origin string) bool {
+	if !spec.RequireCredential {
+		return false
+	}
+	defaultOrigin, err := normalizeProviderOrigin(spec.DefaultBaseURL)
+	return err == nil && defaultOrigin == origin
+}
+
+func canonicalProviderID(providerID string) string {
+	return strings.ToLower(strings.TrimSpace(providerID))
 }
 
 func protocolForNative(id string) ProtocolID {
@@ -430,19 +446,43 @@ func httpClientForResolvedScope(client *http.Client, cfg ModelConfig) (*http.Cli
 	clone := *client
 	previousCheck := client.CheckRedirect
 	clone.CheckRedirect = func(request *http.Request, via []*http.Request) error {
-		redirectOrigin, originErr := normalizeProviderOrigin(request.URL.String())
-		if originErr != nil || redirectOrigin != ref.Origin {
+		if !requestMatchesCredentialOrigin(request, ref.Origin) {
 			// Return the 3xx response to the caller instead of dispatching a
 			// scoped credential to a different origin.
 			return http.ErrUseLastResponse
 		}
 		if previousCheck != nil {
-			return previousCheck(request, via)
+			if err := previousCheck(request, via); err != nil {
+				return err
+			}
 		}
-		if len(via) >= 10 {
+		// A caller-supplied CheckRedirect can mutate the request after the first
+		// check. Revalidate the final URL and Host authority before net/http
+		// dispatches the redirected request.
+		if !requestMatchesCredentialOrigin(request, ref.Origin) {
+			return http.ErrUseLastResponse
+		}
+		if previousCheck == nil && len(via) >= 10 {
 			return errors.New("llm: stopped after 10 same-origin redirects")
 		}
 		return nil
 	}
 	return &clone, nil
+}
+
+func requestMatchesCredentialOrigin(request *http.Request, origin string) bool {
+	if request == nil || request.URL == nil {
+		return false
+	}
+	requestOrigin, err := normalizeProviderOrigin(request.URL.String())
+	if err != nil || requestOrigin != origin {
+		return false
+	}
+	if request.Host != "" {
+		hostOrigin, hostErr := normalizeProviderOrigin(request.URL.Scheme + "://" + request.Host)
+		if hostErr != nil || hostOrigin != origin {
+			return false
+		}
+	}
+	return true
 }

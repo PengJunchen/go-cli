@@ -1082,7 +1082,7 @@ func WithNativeAPIKey(key string) NativeProviderOption {
 
 // WithNativeModels sets the static model list reported by Models().
 func WithNativeModels(models []ModelInfo) NativeProviderOption {
-	return func(b *nativeProviderBase) { b.models = models }
+	return func(b *nativeProviderBase) { b.models = append([]ModelInfo(nil), models...) }
 }
 
 // WithNativeHTTPClient injects a custom *http.Client (tests, proxies, timeouts).
