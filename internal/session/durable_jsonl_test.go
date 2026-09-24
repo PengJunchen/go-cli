@@ -612,6 +612,130 @@ func TestDurableWriterPersistsOpenToolCallWithoutPublishingPartialView(t *testin
 	}
 }
 
+func TestDurableWriterRejectsSystemRowInsideOpenToolCallGroup(t *testing.T) {
+	preparer := NewDurableJSONLSessionPreparer(t.TempDir(), nil)
+	prepared, err := preparer.PrepareNew(context.Background(), "open group boundary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := prepared.View().SessionID
+	writer := prepared.DurableWriter()
+	zero, one, two := uint64(0), uint64(1), uint64(2)
+	root, err := writer.AppendAndSync(context.Background(), SessionEntry{
+		ID: "root-user", Type: EntryTypeUser, RunID: "run-boundary", TranscriptIndex: &zero,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinal := uint64(0)
+	assistant, err := writer.AppendAndSync(context.Background(), SessionEntry{
+		ID: "open-assistant", ParentID: root[0].ID, Type: EntryTypeAssistant, RunID: "run-boundary",
+		TranscriptIndex: &one, AssistantTranscriptOrdinal: &ordinal,
+		ToolCalls: []llm.ToolCall{{ID: "call-1", Name: "read"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(preparer.directory, "sessions", sessionID+".jsonl")
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writer.AppendAndSync(context.Background(), SessionEntry{
+		ID: "interleaved-system", ParentID: assistant[0].ID, Type: EntryTypeSystem,
+		RunID: "run-boundary", TranscriptIndex: &two, Content: "must not cross the receipt boundary",
+	}); err == nil {
+		t.Fatal("system row inside an open tool-call group must be rejected")
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatalf("rejected system row changed durable bytes: before=%d after=%d", len(before), len(after))
+	}
+	if err := prepared.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("resume rejects forged interleaving", func(t *testing.T) {
+		fixturePreparer := NewDurableJSONLSessionPreparer(t.TempDir(), nil)
+		fixture, err := fixturePreparer.PrepareNew(context.Background(), "forged open group")
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixtureSessionID := fixture.View().SessionID
+		fixtureRoot, err := fixture.DurableWriter().AppendAndSync(context.Background(), SessionEntry{
+			ID: "root-user", Type: EntryTypeUser, RunID: "run-forged", TranscriptIndex: &zero,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		fixtureAssistant, err := fixture.DurableWriter().AppendAndSync(context.Background(), SessionEntry{
+			ID: "open-assistant", ParentID: fixtureRoot[0].ID, Type: EntryTypeAssistant, RunID: "run-forged",
+			TranscriptIndex: &one, AssistantTranscriptOrdinal: &ordinal,
+			ToolCalls: []llm.ToolCall{{ID: "call-1", Name: "read"}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := fixture.Close(); err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(fixturePreparer.directory, "sessions", fixtureSessionID+".jsonl")
+		file, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		row := SessionEntry{
+			ID: "interleaved-system", ParentID: fixtureAssistant[0].ID, Type: EntryTypeSystem,
+			RunID: "run-forged", TranscriptIndex: &two, SessionID: fixtureSessionID,
+			SessionLabel: "forged open group", BranchID: "main", RecordVersion: 1,
+			Seq: 3, Content: "forged durable interleaving",
+		}
+		_, digest, err := canonicalEntryPayload(row)
+		if err != nil {
+			_ = file.Close()
+			t.Fatal(err)
+		}
+		row.PayloadDigest = digest
+		encoded, err := json.Marshal(row)
+		if err != nil {
+			_ = file.Close()
+			t.Fatal(err)
+		}
+		if _, err := file.Write(append(encoded, '\n')); err != nil {
+			_ = file.Close()
+			t.Fatal(err)
+		}
+		if err := file.Sync(); err != nil {
+			_ = file.Close()
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+		if resumed, err := NewDurableJSONLSessionPreparer(fixturePreparer.directory, absentDispatchRecoveryAuthority{}).PrepareResume(context.Background(), fixtureSessionID); err == nil {
+			_ = resumed.Close()
+			t.Fatal("resume must reject persisted system rows that split an open tool-call group")
+		}
+	})
+}
+
+type absentDispatchRecoveryAuthority struct{}
+
+func (absentDispatchRecoveryAuthority) ApplyDurableResolutions(context.Context, []ValidatedExecutionResolution) error {
+	return nil
+}
+
+func (absentDispatchRecoveryAuthority) InspectDispatchMarkers(_ context.Context, refs []PendingActionRef) ([]PendingActionDecision, error) {
+	decisions := make([]PendingActionDecision, len(refs))
+	for i, ref := range refs {
+		decisions[i] = PendingActionDecision{Action: ref, MarkerState: DispatchMarkerAbsent}
+	}
+	return decisions, nil
+}
+
 func TestDurableWriterRejectsInvalidHistoryBeforeWriting(t *testing.T) {
 	tests := []struct {
 		name  string
