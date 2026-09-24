@@ -68,6 +68,36 @@ func TestCellWidthAndClipUnicodeAndANSI(t *testing.T) {
 	require.Equal(t, 2, cellWidth(linkOpen+"go"+linkClose))
 }
 
+func TestCellHelpersResetBlackSGRAfterClipAndWrap(t *testing.T) {
+	cases := []struct {
+		name  string
+		input string
+	}{
+		{name: "indexed black color", input: "\x1b[38;5;0mabcdef"},
+		{name: "RGB black color", input: "\x1b[38;2;0;0;0mabcdef"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Run("sanitized output reset", func(t *testing.T) {
+				require.Equal(t, tc.input+"\x1b[0m", safeTerminalText(tc.input))
+			})
+			t.Run("clipped output reset", func(t *testing.T) {
+				clipped := truncateLine(tc.input, 3)
+				require.Equal(t, tc.input[:strings.Index(tc.input, "abcdef")]+"abc\x1b[0m", clipped)
+				require.Equal(t, 3, cellWidth(clipped))
+			})
+			t.Run("wrapped output reset", func(t *testing.T) {
+				wrapped := wrapWidth(tc.input, 3)
+				require.True(t, strings.HasSuffix(wrapped, "\x1b[0m"), "wrapped style must be closed at output boundary")
+				for _, line := range strings.Split(wrapped, "\n") {
+					require.LessOrEqual(t, cellWidth(line), 3)
+				}
+			})
+		})
+	}
+}
+
 func TestTabsExpandAtEightCellStops(t *testing.T) {
 	linkOpen := ansi.SetHyperlink("https://example.test")
 	linkClose := ansi.ResetHyperlink()
@@ -127,16 +157,27 @@ func TestTerminalTextDropsUnallowedControlsAndClosesLinks(t *testing.T) {
 		"file:///etc/passwd",
 		"https://user@example.test/path",
 		"https://example.test/control\nbyte",
+		"http://:80/path",
+		"http://example.test:/path",
+		"http://example.test:bad/path",
+		"http://example.test:65536/path",
 	} {
 		require.False(t, safeHyperlinkURL(uri), "URI %q must not be emitted as OSC-8", uri)
 	}
-
+	for _, uri := range []string{"http://example.test:80/path", "https://[::1]:8443/path"} {
+		require.True(t, safeHyperlinkURL(uri), "valid URI %q should remain available as OSC-8", uri)
+	}
 	linkOpen := ansi.SetHyperlink("https://example.test")
 	linkClose := ansi.ResetHyperlink()
 	require.Equal(t, linkOpen+"label"+linkClose, safeTerminalText(linkOpen+"label"))
 
 	// An unterminated OSC sequence is discarded in full, including its body.
 	require.Equal(t, "before", safeTerminalText("before\x1b]8;;https://example.testinside"))
+}
+
+func TestTerminalTextRejectsOSC8WithoutHostname(t *testing.T) {
+	input := "\x1b]8;;http://:80/path\x07unsafe\x1b]8;;\x07"
+	require.Equal(t, "unsafe", safeTerminalText(input))
 }
 
 func TestBoxRendererUsesTerminalCellWidths(t *testing.T) {

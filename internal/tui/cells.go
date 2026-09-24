@@ -29,7 +29,7 @@ func clipCells(text string, limit int) string {
 		return safe
 	}
 
-	return safeTerminalText(ansi.Cut(safe, 0, limit))
+	return ansi.Cut(safe, 0, limit)
 }
 
 // wrapCellText sanitizes terminal controls, then wraps without splitting
@@ -51,7 +51,7 @@ func safeTerminalText(text string) string {
 
 	parser := ansi.NewParser()
 	state := ansi.NormalState
-	sgrActive := false
+	sgrSeen := false
 	linkOpen := false
 	column := 0
 	for len(text) > 0 {
@@ -100,7 +100,7 @@ func safeTerminalText(text string) string {
 			switch {
 			case isSGR(seq, cmd):
 				out.WriteString(seq)
-				sgrActive = sgrStyleActive(seq, sgrActive)
+				sgrSeen = true
 			case isOSC8(seq, parser.Command(), parser.Data()):
 				uri, open, ok := parseOSC8(parser.Data())
 				if !ok {
@@ -127,10 +127,15 @@ func safeTerminalText(text string) string {
 	if linkOpen {
 		out.WriteString(ansi.ResetHyperlink())
 	}
-	if sgrActive {
+	if sgrSeen && !hasResetSGRSuffix(out.String()) {
 		out.WriteString("\x1b[0m")
 	}
 	return out.String()
+}
+
+func hasResetSGRSuffix(text string) bool {
+	return strings.HasSuffix(text, "\x1b[0m") || strings.HasSuffix(text, "\x1b[m") ||
+		strings.HasSuffix(text, "\x9b0m") || strings.HasSuffix(text, "\x9bm")
 }
 
 func isTerminalSequence(seq string) bool {
@@ -176,8 +181,13 @@ func safeHyperlinkURL(raw string) bool {
 	}
 
 	u, err := url.Parse(raw)
-	if err != nil || u.User != nil || u.Host == "" || u.Opaque != "" {
+	if err != nil || u.User != nil || u.Host == "" || u.Hostname() == "" || u.Opaque != "" || strings.HasSuffix(u.Host, ":") {
 		return false
+	}
+	if port := u.Port(); port != "" {
+		if _, err := strconv.ParseUint(port, 10, 16); err != nil {
+			return false
+		}
 	}
 	switch strings.ToLower(u.Scheme) {
 	case "http", "https":
@@ -185,30 +195,6 @@ func safeHyperlinkURL(raw string) bool {
 	default:
 		return false
 	}
-}
-
-func sgrStyleActive(seq string, active bool) bool {
-	body := seq
-	if strings.HasPrefix(body, "\x1b[") {
-		body = strings.TrimPrefix(body, "\x1b[")
-	} else if strings.HasPrefix(body, "\x9b") {
-		body = strings.TrimPrefix(body, "\x9b")
-	} else {
-		return true
-	}
-	body = strings.TrimSuffix(body, "m")
-	if body == "" {
-		return false
-	}
-	for _, field := range strings.FieldsFunc(body, func(r rune) bool { return r == ';' || r == ':' }) {
-		code, err := strconv.Atoi(field)
-		if err != nil {
-			active = true
-			continue
-		}
-		active = code != 0
-	}
-	return active
 }
 
 func writePrintableText(out *strings.Builder, text string) {
