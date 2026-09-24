@@ -8,7 +8,7 @@
 
 R2 的 JSONL + SessionTree 方向可以沿用，contract 中的稳定身份、追加同步、无自动重放、完整工具调用组和 compaction source boundary 也能映射到现有项目。但它不是只在 JSONL store 加一个 AppendAndSync 就能落地：当前 CLI 还没有物理 session 选择/切换运行时，AgentImpl 还没有消费 typed transcript，LoopAgent 还没有 CanonicalLoop 实现，工具分发也逐个执行。实现顺序必须先让 BLD-01 提供“锁住且已验证的 SessionView/store handle”，再让 BLD-02 接真实 run 和 CLI，不能让两条 lane 同时改 JSONL 内部。
 
-优先级最高的实际闭环是：选定或创建物理文件并持锁 → 恢复并验证树及模型历史 → 提交用户输入 → provider → 提交整组 tool call 与 dispatch marker → 执行 → 提交每个 receipt → 提交 compaction projection 与 terminal → 再向用户报告已保存/完成。任何一步持久化失败，都必须停止后续 provider/tool 工作，返回可见的持久化错误。
+优先级最高的实际闭环是：选定或创建物理文件并持锁 → 恢复并验证树及模型历史 → 提交用户输入 → provider → 先提交完整 assistant tool-call row → 按执行模式持久预备（sequential 每个调用一个 reservation/dispatch marker；parallel 整组 reservation/marker）→ 执行 → 提交 receipt 与必要的 execution resolution → 提交 compaction projection 与 terminal → 再向用户报告已保存/完成。任何一步持久化失败，都必须停止后续 provider/tool 工作；顺序模式在当前调用 receipt 持久化前不得准备后续调用，并返回可见的持久化错误。
 
 ## 实际入口与合同间差距
 
@@ -21,12 +21,12 @@ R2 的 JSONL + SessionTree 方向可以沿用，contract 中的稳定身份、�
 | REPL 持久化 | repl_session.go:897-960 在 turn 完成后才拼 user/final assistant 两条普通 entry；先 Append tree，后 enqueue/flush；错误只记日志，Save 错误被忽略。639 行处最终文本可能已输出，然后才 persistSession。它完全没有记录完整 typed transcript/tool receipts。 | 由 per-run commit sink 写入 semantic boundary；tree 只接收 AppendAndSync 返回的 canonical rows。最终同步失败要返回未保存状态，允许此前 streamed token 已显示，但不能报 durable ack。删除或限制一秒 flush ticker 对权威记录的写入责任。 |
 | 一次性 prompt | prompt.go:124-130 只有 --fork 时才启用 session；153-176 使用 Harness.Submit。fork 的选取/恢复见 277-306。 | 对启用了 session 的 prompt 使用相同 SessionRuntime 和 sink；未启用 session 的 prompt 不宣称 durable。若产品要求所有 prompt 都先落盘，必须显式把 prompt 接入 session，而非假定已有链路。 |
 | Core run | AgentImpl.Run 在 agent.go:124-153 先将 user 加到内存 history，调用 a.loop.Run，之后再从 lossy AgentEvent 拼一条 assistant。CanonicalLoop 目前只是 optional interface（canonical_loop.go:46-52），LoopAgent 没有 RunCanonical。Harness.run 与 TurnRunner 最后都直接走 Agent.Run（harness.go:171-181；turnrunner.go 的 Agent 路径），RunClaim.ID 尚未作为运行身份注入 context。 | 等 R1 typed transcript consumer 落地后，AgentImpl 每次只消费一份 CanonicalRunResult；run owner 在 Harness/TurnRunner 注入 RunID 和 commit sink。Agent history 与 SessionView provenance 在同一快照边界捕获，不能由 events 重建。 |
-| 工具批次 | loop.go:625-735 的并行模式先筛 active calls 再开 worker；顺序模式每个 call 经 interceptor 后立刻 executeTool。两条路径都没有“整组 preflight + 持久化完整批次 + dispatch-ready 后才执行”的边界。 | 把一次 assistant response 作为原子组：完整验证 ID 与参数，完成所有 pre-dispatch approval，再一次提交 assistant/tool-call entry、全部 intent 和 denial receipt；session batch 与全局 dispatch marker 均 sync 成功后才启动首个 executor。执行后每个 receipt 必须先持久化，再允许下一次 provider request。 |
+| 工具批次 | 当前 Loop 的 parallel 路径先筛 active calls 再启 worker；sequential 路径每个 call 经 interceptor 后立刻执行。两条路径都没有与持久化 sink 对齐的 dispatch 事务边界。 | 两种模式共用 canonical assistant tool-call row。sequential 先同步该 row，再对下一个 call 做 prepare/approval、单 action reservation + dispatch marker、dispatch、receipt，并在需要时等 execution resolution 后才进入下一 call；parallel 则整组 prepare/approval、一次同步所有 reservation/denial receipts 与 marker 后并发启动。各自适用的 marker 同步成功前均不得执行。 |
 | compaction | mid-turn compaction 在 loop.go:738-755 内就地替换 provider messages；当前 session projection 在 derive.go:13-35 按最后一条 compaction row 的物理位置裁剪，context.go:192-219 还会跳过 tool 和 compaction。 | Loop 在实际使用 summary 前提交独立 typed CompactionProjection。restore 按 CompactedThroughEntryID 的原始源边界选择 summary 并保留其后到当前 leaf 的未覆盖 suffix；不得按 marker row 的 ParentID/物理位置或有效数组下标猜边界。 |
 
 ## BLD-01 / BLD-02 的最小 ownership seam
 
-合同 ownership 表已将 JSONL schema/open/recovery 与 CLI/run integration 排成顺序 lane（r2-contract.md:145-149），这个约束必须保留。最小接法如下：
+合同 ownership 表已将 JSONL schema/open/recovery 与 CLI/run integration 排成顺序 lane（r2-contract.md:150-152），这个约束必须保留。最小接法如下：
 
 1. BLD-01 独占 internal/session/types.go、jsonl.go、durable_jsonl.go、tree/context/derive/snapshot 与 session 测试。它负责新 schema、物理 session 身份、文件锁、恢复/修复、序列号和 branch/tree 投影，并公开足够窄的 prepared/open 接口。
 2. BLD-01 应先提供等价于 PrepareNew(label) / PrepareResume(physicalSessionID) 的结果：不可变的 SessionView{SessionID, BranchID, Revision, Messages, SourceEntryIDs} 加上持锁、已恢复、可 DurableSessionWriter 写入的 store handle。准备失败不触碰当前 live handle。不能让 BLD-02 直接读取 JSONL 内部 fields 或重写 ensureLoaded。
@@ -53,8 +53,8 @@ R2 的 JSONL + SessionTree 方向可以沿用，contract 中的稳定身份、�
 
 合同已经覆盖 session intent prefix 与全局 dispatch-ready marker（r2-contract.md:65-87、114-123），但当前 JSONL Append 每条单独写且不 sync，随后 Save 才 Flush/Sync（jsonl.go:247-270、336-363）。新 AppendAndSync 的 partial prefix 可以留下完整 JSON 行，因此 writer 与 loader 必须按 ID/ActionBatchID 做幂等核对。
 
-- 固定批内顺序为 canonical assistant tool-call entry 优先，然后按原始 ToolCallID 顺序写 intent/预拒绝 receipt，最后 batch prepared/checkpoint。这样只要有 intent 前缀，loader 就能恢复完整 call 列表；如果 assistant row 尚未落盘且无 marker，证明没有 executor 开始，但不能凭不完整信息构造成功历史。
-- loader 先读可解析的完整 rows，不先要求 tool group 闭合；根据全局 index 确认 marker 是否存在，再为未闭合 call 持久化 interrupted（可证明无 marker）或 unknown（marker 存在/索引不可验证则 fail closed/quarantine），最后再做严格的 group validation。session lock 与 index lock 的获取顺序须一致，避免多进程死锁。
+- 工具组先持久化一条包含完整 ToolCalls 的 canonical assistant row。sequential 随后每次只预备当前 call：对应的一 action reservation 与 marker 成功后才 dispatch；receipt 同步完成（以及需要时 execution resolution）后才能预备下一 call。parallel 在 assistant row 后一次同步整组 reservations、已知 pre-dispatch denials 和 batch marker，之后才启动任何 worker。这样每个已标记的 occurrence 都唯一指向可恢复的 intent；未标记的后续 call 不会因前一个 call 写入失败而被误认为已执行。
+- loader 先读可解析的完整 rows，不先要求 tool group 闭合；逐个 occurrence / ActionBatchID 检查全局 index。sequential 中没有该 call marker 的 occurrence 为 interrupted；存在 marker 但缺 receipt 为 unknown。parallel 中无 batch marker 的完整预备组为 interrupted；marker 存在而有缺失 receipt 的 call 为 unknown。索引不可验证时 fail closed/quarantine。把合成 closure receipts sync 完后再做严格 group validation。session lock 与 index lock 的获取顺序须一致，避免多进程死锁。
 - 文件最后一行若是完整 JSON 但缺 LF，只补 LF 并 sync；不能当 torn JSON 丢弃。只有能由 parser 证明为截断的尾部才复制原始 suffix 到 sidecar 并 sync 后修复；完整但格式错误行和中段损坏必须失败关闭。当前 jsonl.go:500-521 通过 Scanner 跳过坏行，需由 BLD-01 替换为能保留原字节、识别完整边界的 reader。
 - 检测到同步错误的调用端必须 reopen/recover 后按稳定 EntryID + canonical payload 判断实际落盘状态；不能依赖 Append 返回值、FlushedCount、内存 tree 或事件流判定。dispatch-ready marker 即使发生在 Sync 返回错误之前也可能已经持久，所以恢复时 marker 存在等价于“动作可能已开始”。
 
@@ -75,8 +75,8 @@ R2 contract 把跨 session mutation quarantine 建在可信 EffectSet、Workspac
 1. new → 两次快速创建得到不同物理文件和空 root；resume list 中物理 session ID 能切换到该文件，失败时当前 session 仍能继续；resume 的 branch/entry 跳转只能在目标文件树内发生。
 2. 两进程同时打开同一物理文件：第二个进程须在读取/修复前等待或失败；AppendAndSync 后 reopen 两次，ID、payload、Seq、ParentID、当前 leaf 一致。对不同 session 同时追加时，各自身份不串线。
 3. 注入 user Append/Flush/Sync 错误，mock provider 调用数必须为 0；注入 assistant batch / index marker 错误，mock executor 调用数必须为 0；注入 receipt sync 错误，Loop 不得开始下一次 provider request。UI 允许已显示 delta，但必须报告持久化失败，不能显示已保存/完成。
-4. sequential 与 parallel 工具模式都必须在第一个 executor 前看到完整 assistant group、所有 intent、denial receipts 和 dispatch marker 已 sync；每个 receipt 保存原 provider ID，后续 group 或新 RunID 可以合法复用 call_1。重复/冲突 receipt、missing receipt、tool call ID 被错误跨 run 去重都要覆盖。
-5. 对一个 tool group 的每个写入前缀注入 crash：无 marker 时合成 interrupted 且不执行；marker 存在时缺失结果转 unknown 且不重放；合法完整 JSON 缺 LF 保留 receipt；明确 truncated EOF 才隔离尾部；完整 malformed/middle row 导致打开失败。
+4. sequential 模式验证每个调用单独 prepare/reserve/marker/dispatch/receipt 的先后顺序，并证明前一个 receipt 同步失败时后续调用不执行；parallel 模式验证整组 reservations/denials/marker 同步前第一个 worker 不启动。每个 receipt 保存原 provider ID，后续 group 或新 RunID 可以合法复用 call_1。重复/冲突 receipt、missing receipt、tool call ID 被错误跨 run 去重都要覆盖。
+5. 对 sequential 的 assistant row、单 action reservation/marker、receipt 和 execution-resolution 各边界，以及 parallel 的整组写入前缀注入 crash：按 occurrence marker 判定 interrupted/unknown，不重放；合法完整 JSON 缺 LF 保留 receipt；明确 truncated EOF 才隔离尾部；完整 malformed/middle row 导致打开失败。
 6. compaction 生成后、projection sync 前 crash 应恢复原始 transcript；sync 后重启应只见一条 untrusted summary + CompactedThroughEntryID 之后至 leaf 的全部 suffix，保留工具调用/receipt 配对。多个 projection 不得重复或重编号 cursor。
 7. 运行覆盖 REPL 和 --fork prompt 两个真实入口。未启用 session 的 prompt 单独断言为 ephemeral，不能被报告成 durable path。
 

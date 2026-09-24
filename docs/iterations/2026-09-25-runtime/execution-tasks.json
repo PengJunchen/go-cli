@@ -735,7 +735,7 @@
         "R2-DES-01",
         "R1-REV-01"
       ],
-      "status": "pending",
+      "status": "in_progress",
       "commit_spec": "Separate identity/resume and loader/concurrency commits if contracts stay independent; each commit includes exact red-before-fix regression tests.",
       "phase_id": "R2",
       "source_status": "proposed"
@@ -1092,7 +1092,7 @@
         "APR-005"
       ],
       "depends_on": [],
-      "status": "pending",
+      "status": "in_progress",
       "commit_spec": "Execution-only prerequisite split from R4-BLD-01. Design gates: docs/iterations/2026-09-25-runtime/r4-policy-design.md and its review, docs/iterations/2026-09-25-runtime/r4-tool-inventory.md, and the exact API/order/ownership contract in docs/iterations/2026-09-25-runtime/r4-prepared-dispatch-design.md. Scope excludes plan-exit D-01 and full policy enforcement.",
       "phase_id": "R4",
       "source_status": "execution_split"

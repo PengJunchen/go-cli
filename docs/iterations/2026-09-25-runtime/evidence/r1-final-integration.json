@@ -1,0 +1,121 @@
+{
+  "validated_source": "96b9f9d76975b063e49746dacb6dafecdfed0972",
+  "execution_branch": "codex/runtime-stabilization",
+  "integrated_commit": "ab115588f81cc604c5f71ed394e8920cbc094b91",
+  "code_difference_excluding_docs": [],
+  "commit_map": [
+    {
+      "integration_worktree": "0a227b9bb8272a71f0dd447f71935d46d25fc500",
+      "execution_branch": "f6eb8e6cf3da1a8af491998bb1910060e67c5916"
+    },
+    {
+      "integration_worktree": "946fd09fefab8e8d98285b79e5ca65f48e987964",
+      "execution_branch": "1e53ae10d7949acc12874409ffeaab9753c77f44"
+    },
+    {
+      "integration_worktree": "1fada440424ac407ac2192960b1609e2142dfb5d",
+      "execution_branch": "6e62be1f5978e3fe936a785b79b2d33262f14744"
+    },
+    {
+      "integration_worktree": "52e96d0300bca565abc4789f7b41d6e761868231",
+      "execution_branch": "961d62dbaaa1525d5d57db7e3b6c143e52e15e42"
+    },
+    {
+      "integration_worktree": "60eef36ef3af56560996eaadeeae6db5ea58e143",
+      "execution_branch": "db12bc3e19a942243d13dea1668048d254220d22"
+    },
+    {
+      "integration_worktree": "ec69b223d4c9d8e24d46ab1cdc66bac22f116809",
+      "execution_branch": "eca71867def2c9dcdb2b8cf6874576665e3b148a"
+    },
+    {
+      "integration_worktree": "3a312e60a6b26bb855d9347e24aaff8e2214bb0a",
+      "execution_branch": "0a12af2040c605346c83fd1ba9e9189ce611d717"
+    },
+    {
+      "integration_worktree": "a6cdeec28be7d4123045946cbe9d0e5a844870bb",
+      "execution_branch": "bb878c22012556fa8e238009f03775957616f910"
+    },
+    {
+      "integration_worktree": "168f6eacc584f9f64c07cf48fdbc21b1cc48c298",
+      "execution_branch": "ad0fca72e7e128ecf98c8a631cff568dd98492b8"
+    },
+    {
+      "integration_worktree": "9d03921eb65dd98311b228b8b48270bf1c3551b8",
+      "execution_branch": "d1b0673196b78fc772fddaa64fb07b7d6e2cf629"
+    },
+    {
+      "integration_worktree": "24ed02de4f83d1fd2ca6f2610ed2f10d46c6dc04",
+      "execution_branch": "2d297474bcf4bb8a67537dceaa1133cf1889f3be"
+    },
+    {
+      "integration_worktree": "20828d756bf3cfeb8e4d46b947181d50474b019b",
+      "execution_branch": "75ed73b9d1567dcada0687f5ced8b6c6b7872e5b"
+    },
+    {
+      "integration_worktree": "bde43beb63ad18508d46207e260a9ef78cdcf623",
+      "execution_branch": "df9f65a99de9f58d168cdfd5325e2d3639372515"
+    },
+    {
+      "integration_worktree": "c847496a1b5acabdd20e1ee14370e4cee285d792",
+      "execution_branch": "5937ca508e36af30fc5c6884a6c3086abc69e28f"
+    },
+    {
+      "integration_worktree": "37b0ef23bca6c3345a116adf5c442d4eef0665a9",
+      "execution_branch": "55fb188f195b75faf782e4479b91f53dd2af5618"
+    },
+    {
+      "integration_worktree": "93c443955d9d9f161ada0b3c0f66c5a4c9f8a0ed",
+      "execution_branch": "bfabb7f8bf011342736e7d5aac346d05baedc876"
+    },
+    {
+      "integration_worktree": "f00aa63057e64faea014e2af756a730462be5b07",
+      "execution_branch": "65af04640e835efd13f740165904faf2758cefc8"
+    },
+    {
+      "integration_worktree": "eff4ac3f0818575ec60eeb4d28ef459e7dc3c744",
+      "execution_branch": "75cf43df7900baf4b5d873a173356b2c40a3cc64"
+    },
+    {
+      "integration_worktree": "aec0bd915bc107b6c0fcbf385511a2a05174e5ed",
+      "execution_branch": "6d6db54171a4a9ffbec0d3eeb0091e30d4102402"
+    },
+    {
+      "integration_worktree": "3082213e67d96a955d27af9951f83bf42cc75f94",
+      "execution_branch": "f6cbc0294f96bafd534a12d74cfda4ef9de060a2"
+    },
+    {
+      "integration_worktree": "25de39d78a02c5b97b1dce4eb09bb5aa40de4641",
+      "execution_branch": "4a4ede66996e1b3ccafc881c44d84826f6101214"
+    },
+    {
+      "integration_worktree": "96b9f9d76975b063e49746dacb6dafecdfed0972",
+      "execution_branch": "ab115588f81cc604c5f71ed394e8920cbc094b91"
+    }
+  ],
+  "validation": {
+    "all_package_race_test_gate": {
+      "log": "r1-96b9f9d-all-test-gate.log",
+      "started": 5837,
+      "passed": 5835,
+      "failed": 0,
+      "skipped": 2,
+      "packages": 27,
+      "exit_code": 0,
+      "elapsed_seconds": 169.38
+    },
+    "scanner_gate": {
+      "log": "r1-96b9f9d-scanner-gate.log",
+      "files": 328,
+      "errors": 0,
+      "warnings": 1304,
+      "exit_code": 0,
+      "elapsed_seconds": 38.04
+    }
+  },
+  "limits": [
+    "Validation ran in isolated integration worktree; execution branch code is byte-equivalent excluding docs.",
+    "Protected Makefile and CI wiring are not changed or claimed complete.",
+    "Darwin memory-OOM skip and obsolete onboarding YAML skip remain explicitly recorded; latter is R6 follow-up."
+  ]
+}
