@@ -41,6 +41,7 @@ type loopConfig struct {
 	maxIterations        int
 	modelWrapper         ModelWrapper
 	executionMode        ExecutionMode
+	toolInterceptors     []ToolInterceptor
 	systemPromptOverride string
 	promptBuilder        SystemPromptBuilder
 	promptOpts           SystemPromptOptions
@@ -91,6 +92,16 @@ func WithTools(tr tools.ToolRegistry) LoopOption {
 	return func(c *loopConfig) { c.tools = tr }
 }
 
+// WithToolInterceptor adds an interceptor scoped to the LoopAgent being
+// constructed. A nil interceptor is ignored.
+func WithToolInterceptor(f ToolInterceptor) LoopOption {
+	return func(c *loopConfig) {
+		if f != nil {
+			c.toolInterceptors = append(c.toolInterceptors, f)
+		}
+	}
+}
+
 // WithMaxIterations bounds the number of ReAct turns. A value of -1
 // disables the iteration limit entirely. Zero falls back to the default.
 func WithMaxIterations(n int) LoopOption {
@@ -136,6 +147,7 @@ type LoopAgent struct {
 	maxIterations        int
 	modelWrapper         ModelWrapper
 	executionMode        ExecutionMode
+	toolInterceptors     []ToolInterceptor
 	systemPromptOverride string
 	promptBuilder        SystemPromptBuilder
 	promptOpts           SystemPromptOptions
@@ -232,6 +244,7 @@ func NewLoopAgent(opts ...LoopOption) *LoopAgent {
 		maxIterations:        cfg.maxIterations,
 		modelWrapper:         cfg.modelWrapper,
 		executionMode:        cfg.executionMode,
+		toolInterceptors:     append([]ToolInterceptor(nil), cfg.toolInterceptors...),
 		systemPromptOverride: cfg.systemPromptOverride,
 		promptBuilder:        cfg.promptBuilder,
 		promptOpts:           cfg.promptOpts,
@@ -250,6 +263,19 @@ func NewLoopAgent(opts ...LoopOption) *LoopAgent {
 		"tools_set", la.tools != nil,
 	)
 	return la
+}
+
+func (l *LoopAgent) newPreToolCallEvent(toolName, toolCallID string, args map[string]any) *PreToolCallEvent {
+	l.mu.RLock()
+	interceptors := append([]ToolInterceptor(nil), l.toolInterceptors...)
+	l.mu.RUnlock()
+
+	return &PreToolCallEvent{
+		ToolName:     toolName,
+		ToolCallID:   toolCallID,
+		Args:         args,
+		interceptors: interceptors,
+	}
 }
 
 // WithToolSearchThreshold sets the maximum number of tools exposed to the
@@ -604,11 +630,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 			// completion does not cause mismatched results.
 			var activeCalls []llm.ToolCall
 			for _, tc := range resp.ToolCalls {
-				preEv := &PreToolCallEvent{
-					ToolName:   tc.Name,
-					ToolCallID: tc.ID,
-					Args:       toToolsCall(tc).Args,
-				}
+				preEv := l.newPreToolCallEvent(tc.Name, tc.ID, toToolsCall(tc).Args)
 				sendEvent(AgentEvent{Kind: EventKindPreToolCall, Timestamp: time.Now(), PreToolCall: preEv})
 				if preEv.IsCancelled() {
 					logger.Info("core.loop.tool_canceled", "tool", tc.Name, "id", tc.ID)
@@ -666,11 +688,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 
 				// Emit a pre-tool-call event so external interceptors
 				// can cancel the tool call before it executes.
-				preEv := &PreToolCallEvent{
-					ToolName:   tc.Name,
-					ToolCallID: tc.ID,
-					Args:       toToolsCall(tc).Args,
-				}
+				preEv := l.newPreToolCallEvent(tc.Name, tc.ID, toToolsCall(tc).Args)
 				sendEvent(AgentEvent{Kind: EventKindPreToolCall, Timestamp: time.Now(), PreToolCall: preEv})
 				if preEv.IsCancelled() {
 					logger.Info("core.loop.tool_canceled", "tool", tc.Name, "id", tc.ID)

@@ -6,12 +6,13 @@ import "sync"
 // If it returns a non-nil error, the tool call is canceled (skipped). The
 // interceptor receives the tool name, call ID, and arguments.
 //
-// Interceptors are registered globally via RegisterToolInterceptor or
-// LoopAgent.SetToolInterceptor and are executed by PreToolCallEvent.IsCancelled
-// on its first invocation — the exact point where loop.go checks whether to
-// proceed with executeTool. This closes the ARCH-1 gap: the PreToolCall event
-// is sent asynchronously via EventStream (notification only), but the actual
-// interception happens synchronously inside IsCancelled, before the tool runs.
+// Interceptors are registered globally via RegisterToolInterceptor or on a
+// specific LoopAgent via LoopAgent.SetToolInterceptor. They are executed by
+// PreToolCallEvent.IsCancelled on its first invocation — the exact point where
+// loop.go checks whether to proceed with executeTool. This closes the ARCH-1
+// gap: the PreToolCall event is sent asynchronously via EventStream
+// (notification only), but the actual interception happens synchronously
+// inside IsCancelled, before the tool runs.
 type ToolInterceptor func(toolName, toolCallID string, args map[string]any) error
 
 // Global interceptor registry. Interceptors are called synchronously by
@@ -51,6 +52,8 @@ type PreToolCallEvent struct {
 	ToolCallID string
 	// Args holds the arguments passed to the tool.
 	Args map[string]any
+	// interceptors contains the LoopAgent-scoped interceptors for this event.
+	interceptors []ToolInterceptor
 	// canceled records whether the tool call was canceled by an interceptor.
 	canceled bool
 	// interceptorsRun ensures registered ToolInterceptors fire exactly once
@@ -92,7 +95,19 @@ func (e *PreToolCallEvent) IsCancelled() bool {
 	}
 	e.interceptorsRun = true
 
-	// Snapshot the interceptor list under the global read lock so that
+	// Loop-scoped interceptors are snapshotted when the event is created, so
+	// changing a LoopAgent's configuration cannot affect an event in progress.
+	for _, f := range e.interceptors {
+		if err := f(e.ToolName, e.ToolCallID, e.Args); err != nil {
+			e.canceled = true
+			break
+		}
+	}
+	if e.canceled {
+		return true
+	}
+
+	// Snapshot the global interceptor list under the read lock so that
 	// registration during iteration does not affect this call.
 	globalInterceptorsMu.RLock()
 	interceptors := make([]ToolInterceptor, len(globalInterceptors))

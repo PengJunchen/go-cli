@@ -1383,12 +1383,11 @@ func (s *assembleState) assembleMiddleware() {
 	s.reminderMgr = core.NewDefaultSystemReminderManager()
 	s.failureSynthesizer = core.NewDefaultFailureTurnSynthesizer()
 
-	// Register unified ToolInterceptors (PreToolCallEvent is the single
-	// interception mechanism). Plan-mode blocking and shell-hook pre-tool-use
-	// both go through this path instead of separate middlewares.
-	core.RegisterToolInterceptor(core.NewPlanModeToolInterceptor(s.planCtrl))
+	// Bind shell-hook pre-tool-use to this Assembly's loop. Plan-mode tool
+	// blocking is enforced by the per-Assembly PlanModeToolWrapper installed
+	// when the tool registry is assembled.
 	if s.hookMgr != nil {
-		core.RegisterToolInterceptor(s.hookMgr.PreToolUseInterceptor())
+		s.loopAgent.SetToolInterceptor(s.hookMgr.PreToolUseInterceptor())
 	}
 
 	chain := []core.Middleware{
