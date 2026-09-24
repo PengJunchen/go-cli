@@ -12,6 +12,9 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/pengjunchen/go-cli/internal/llm"
+	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 func TestReadDurableJSONLPreservesValidUnterminatedFinalRecord(t *testing.T) {
@@ -547,4 +550,291 @@ func encodedDurableRowLength(t *testing.T, store *durableJSONLStore, entry Sessi
 		t.Fatal(err)
 	}
 	return len(encoded)
+}
+
+func TestDurableWriterPersistsOpenToolCallWithoutPublishingPartialView(t *testing.T) {
+	prepared, err := NewDurableJSONLSessionPreparer(t.TempDir(), nil).PrepareNew(context.Background(), "open tool group")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer prepared.Close()
+	writer := prepared.DurableWriter()
+
+	userIndex := uint64(0)
+	if _, err := writer.AppendAndSync(context.Background(), SessionEntry{
+		ID: "user-entry", Type: EntryTypeUser, RunID: "run-open-group",
+		TranscriptIndex: &userIndex, Content: "run the tool",
+	}); err != nil {
+		t.Fatalf("append user input: %v", err)
+	}
+	beforeAssistant := prepared.View()
+	ordinal := uint64(0)
+	assistantIndex := uint64(1)
+	if _, err := writer.AppendAndSync(context.Background(), SessionEntry{
+		ID: "assistant-entry", ParentID: "user-entry", Type: EntryTypeAssistant,
+		RunID: "run-open-group", AssistantTranscriptOrdinal: &ordinal,
+		TranscriptIndex: &assistantIndex, ToolCalls: []llm.ToolCall{{ID: "call-1", Name: "read"}},
+	}, SessionEntry{
+		ID: "intent-entry", ParentID: "assistant-entry", Type: EntryTypeTool,
+		RunID: "run-open-group", WorkspaceID: "workspace-open-group", ActionBatchID: "batch-open-group", ActionID: "action-open-group",
+		ActionState: ActionStateIntent, AssistantTranscriptOrdinal: &ordinal, ToolCallID: "call-1", ToolName: "read",
+		ArgumentDigest: strings.Repeat("a", 64), SchemaDigest: strings.Repeat("b", 64),
+		ToolIdentity: &tools.TrustedToolIdentitySnapshot{
+			RegistrationSource: "builtin", ToolName: "read", RegistrationGeneration: 1,
+			ExecutorFingerprint: strings.Repeat("c", 64), ScopeFingerprint: strings.Repeat("d", 64),
+		},
+		EffectSet: []tools.TrustedToolEffect{tools.EffectWorkspaceRead},
+	}); err != nil {
+		t.Fatalf("persist assistant tool call and intent before its receipt: %v", err)
+	}
+	afterAssistant := prepared.View()
+	if len(afterAssistant.Messages) != len(beforeAssistant.Messages) || afterAssistant.Revision != beforeAssistant.Revision {
+		t.Fatalf("incomplete tool-call group was published to the model view: before=%#v after=%#v", beforeAssistant, afterAssistant)
+	}
+
+	receiptIndex := uint64(2)
+	if _, err := writer.AppendAndSync(context.Background(), SessionEntry{
+		ID: "receipt-entry", ParentID: "intent-entry", Type: EntryTypeTool,
+		RunID: "run-open-group", AssistantTranscriptOrdinal: &ordinal,
+		TranscriptIndex: &receiptIndex, ToolCallID: "call-1", ToolName: "read",
+		WorkspaceID: "workspace-open-group", ActionBatchID: "batch-open-group", ActionID: "action-open-group",
+		ReceiptOutcome: "error", DispatchState: DispatchStateNotDispatched,
+		Content: "denied before dispatch",
+	}); err != nil {
+		t.Fatalf("append terminal receipt: %v", err)
+	}
+	closedView := prepared.View()
+	if len(closedView.Messages) != 3 || closedView.SourceEntryIDs[1] != "assistant-entry" || closedView.SourceEntryIDs[2] != "receipt-entry" {
+		t.Fatalf("closed tool-call group did not publish its complete view: %#v", closedView)
+	}
+	if closedView.Revision == beforeAssistant.Revision {
+		t.Fatal("complete receipt group must advance the published view revision")
+	}
+}
+
+func TestDurableWriterRejectsInvalidHistoryBeforeWriting(t *testing.T) {
+	tests := []struct {
+		name  string
+		build func(root, assistant SessionEntry) []SessionEntry
+	}{
+		{
+			name: "intervening user",
+			build: func(root, assistant SessionEntry) []SessionEntry {
+				index := uint64(2)
+				return []SessionEntry{{ID: "later-user", ParentID: assistant.ID, Type: EntryTypeUser, RunID: "run-invalid", TranscriptIndex: &index}}
+			},
+		},
+		{
+			name: "second assistant before receipt",
+			build: func(root, assistant SessionEntry) []SessionEntry {
+				index, ordinal := uint64(2), uint64(1)
+				return []SessionEntry{{ID: "second-assistant", ParentID: assistant.ID, Type: EntryTypeAssistant, RunID: "run-invalid", TranscriptIndex: &index, AssistantTranscriptOrdinal: &ordinal}}
+			},
+		},
+		{
+			name: "orphan receipt",
+			build: func(root, assistant SessionEntry) []SessionEntry {
+				index, ordinal := uint64(2), uint64(0)
+				return []SessionEntry{{ID: "orphan-receipt", ParentID: assistant.ID, Type: EntryTypeTool, RunID: "run-invalid", TranscriptIndex: &index, AssistantTranscriptOrdinal: &ordinal, ToolCallID: "other-call", ToolName: "read", ReceiptOutcome: "error", DispatchState: DispatchStateDispatched}}
+			},
+		},
+		{
+			name: "mismatched tool name",
+			build: func(root, assistant SessionEntry) []SessionEntry {
+				index, ordinal := uint64(2), uint64(0)
+				return []SessionEntry{{ID: "wrong-name", ParentID: assistant.ID, Type: EntryTypeTool, RunID: "run-invalid", TranscriptIndex: &index, AssistantTranscriptOrdinal: &ordinal, ToolCallID: "call-1", ToolName: "write", ReceiptOutcome: "error", DispatchState: DispatchStateDispatched}}
+			},
+		},
+		{
+			name: "duplicate receipt",
+			build: func(root, assistant SessionEntry) []SessionEntry {
+				index2, index3, ordinal := uint64(2), uint64(3), uint64(0)
+				first := SessionEntry{ID: "receipt-one", ParentID: assistant.ID, Type: EntryTypeTool, RunID: "run-invalid", TranscriptIndex: &index2, AssistantTranscriptOrdinal: &ordinal, ToolCallID: "call-1", ToolName: "read", ReceiptOutcome: "error", DispatchState: DispatchStateDispatched}
+				second := SessionEntry{ID: "receipt-two", ParentID: first.ID, Type: EntryTypeTool, RunID: "run-invalid", TranscriptIndex: &index3, AssistantTranscriptOrdinal: &ordinal, ToolCallID: "call-1", ToolName: "read", ReceiptOutcome: "error", DispatchState: DispatchStateDispatched}
+				return []SessionEntry{first, second}
+			},
+		},
+		{
+			name: "duplicate transcript index",
+			build: func(root, assistant SessionEntry) []SessionEntry {
+				index := *root.TranscriptIndex
+				return []SessionEntry{{ID: "duplicate-index", ParentID: assistant.ID, Type: EntryTypeUser, RunID: "run-invalid", TranscriptIndex: &index}}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			preparer := NewDurableJSONLSessionPreparer(t.TempDir(), nil)
+			prepared, err := preparer.PrepareNew(context.Background(), "invalid history")
+			if err != nil {
+				t.Fatal(err)
+			}
+			sessionID := prepared.View().SessionID
+			zero, one := uint64(0), uint64(1)
+			root, err := prepared.DurableWriter().AppendAndSync(context.Background(), SessionEntry{
+				ID: "root-user", Type: EntryTypeUser, RunID: "run-invalid", TranscriptIndex: &zero,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ordinal := uint64(0)
+			assistant, err := prepared.DurableWriter().AppendAndSync(context.Background(), SessionEntry{
+				ID: "open-assistant", ParentID: root[0].ID, Type: EntryTypeAssistant, RunID: "run-invalid",
+				TranscriptIndex: &one, AssistantTranscriptOrdinal: &ordinal,
+				ToolCalls: []llm.ToolCall{{ID: "call-1", Name: "read"}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			path := filepath.Join(preparer.directory, "sessions", sessionID+".jsonl")
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := prepared.DurableWriter().AppendAndSync(context.Background(), test.build(root[0], assistant[0])...); err == nil {
+				t.Fatal("invalid or non-tail history update must be rejected")
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatalf("rejected append changed durable bytes: before=%d after=%d", len(before), len(after))
+			}
+			if err := prepared.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
+
+type failingMarshaler struct {
+	calls  *atomic.Int32
+	failAt int32
+}
+
+func (m *failingMarshaler) MarshalJSON() ([]byte, error) {
+	if m.calls.Add(1) == m.failAt {
+		return nil, errors.New("injected late marshal failure")
+	}
+	return []byte(`"ok"`), nil
+}
+
+func TestDurableWriterSerializesWholeBatchBeforeWriting(t *testing.T) {
+	preparer := NewDurableJSONLSessionPreparer(t.TempDir(), nil)
+	prepared, err := preparer.PrepareNew(context.Background(), "batch preflight")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := prepared.View().SessionID
+	calls := &atomic.Int32{}
+	zero, one := uint64(0), uint64(1)
+	first := SessionEntry{ID: "first", Type: EntryTypeUser, RunID: "run-1", TranscriptIndex: &zero, Content: "first"}
+	second := SessionEntry{
+		ID: "second", ParentID: first.ID, Type: EntryTypeUser, RunID: "run-1", TranscriptIndex: &one,
+		ToolCalls: []llm.ToolCall{{ID: "unused", Name: "read", Args: map[string]any{"value": &failingMarshaler{calls: calls, failAt: 3}}}},
+	}
+	if _, err := prepared.DurableWriter().AppendAndSync(context.Background(), first, second); err == nil {
+		t.Fatal("unsupported or late-failing JSON value must fail before writing the batch")
+	}
+	if err := prepared.Close(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(preparer.directory, "sessions", sessionID+".jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Size() != 0 {
+		t.Fatalf("failed batch left %d bytes on disk", info.Size())
+	}
+}
+
+func TestDurableWriterRejectsBranchCheckpointsWithUnknownMetadata(t *testing.T) {
+	t.Run("unknown parent branch", func(t *testing.T) {
+		prepared, err := NewDurableJSONLSessionPreparer(t.TempDir(), nil).PrepareNew(context.Background(), "branch proof")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer prepared.Close()
+		zero := uint64(0)
+		root, err := prepared.DurableWriter().AppendAndSync(context.Background(), SessionEntry{
+			ID: "root", Type: EntryTypeUser, RunID: "run-1", TranscriptIndex: &zero,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := prepared.DurableWriter().AppendAndSync(context.Background(), SessionEntry{
+			ID: "branch-feature", ParentID: root[0].ID, Type: EntryTypeCheckpoint,
+			BranchID: "feature", ParentBranchID: "ghost", BaseLeafEntryID: root[0].ID,
+			ActiveLeafEntryID: "branch-feature", CheckpointKind: CheckpointBranch,
+		}); err == nil {
+			t.Fatal("branch checkpoint with unknown parent branch must be rejected")
+		}
+	})
+
+	t.Run("unknown active branch", func(t *testing.T) {
+		prepared, err := NewDurableJSONLSessionPreparer(t.TempDir(), nil).PrepareNew(context.Background(), "branch proof")
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer prepared.Close()
+		zero := uint64(0)
+		root, err := prepared.DurableWriter().AppendAndSync(context.Background(), SessionEntry{
+			ID: "root", Type: EntryTypeUser, RunID: "run-1", TranscriptIndex: &zero,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := prepared.DurableWriter().AppendAndSync(context.Background(), SessionEntry{
+			ID: "active-ghost", ParentID: root[0].ID, Type: EntryTypeCheckpoint,
+			BranchID: "ghost", ActiveLeafEntryID: root[0].ID, CheckpointKind: CheckpointActiveLeaf,
+		}); err == nil {
+			t.Fatal("active-leaf checkpoint cannot name an unknown branch")
+		}
+	})
+}
+
+func TestDurableWriterAcceptsSharedPrefixFromAncestorBranch(t *testing.T) {
+	preparer := NewDurableJSONLSessionPreparer(t.TempDir(), nil)
+	prepared, err := preparer.PrepareNew(context.Background(), "shared branch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessionID := prepared.View().SessionID
+	zero, one := uint64(0), uint64(1)
+	root, err := prepared.DurableWriter().AppendAndSync(context.Background(), SessionEntry{
+		ID: "main-root", Type: EntryTypeUser, RunID: "run-1", TranscriptIndex: &zero, Content: "root",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	branch, err := prepared.DurableWriter().AppendAndSync(context.Background(), SessionEntry{
+		ID: "feature-base", ParentID: root[0].ID, Type: EntryTypeCheckpoint,
+		BranchID: "feature", ParentBranchID: "main", BaseLeafEntryID: root[0].ID,
+		ActiveLeafEntryID: "feature-base", CheckpointKind: CheckpointBranch,
+	})
+	if err != nil {
+		t.Fatalf("append branch checkpoint over shared main prefix: %v", err)
+	}
+	if _, err := prepared.DurableWriter().AppendAndSync(context.Background(), SessionEntry{
+		ID: "feature-user", ParentID: branch[0].ID, Type: EntryTypeUser, BranchID: "feature",
+		RunID: "run-1", TranscriptIndex: &one, Content: "feature continuation",
+	}); err != nil {
+		t.Fatalf("append child of a valid shared-prefix branch: %v", err)
+	}
+	if got := prepared.View().BranchID; got != "feature" {
+		t.Fatalf("active branch = %q, want feature", got)
+	}
+	if err := prepared.Close(); err != nil {
+		t.Fatal(err)
+	}
+	reopened, err := preparer.PrepareResume(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("resume valid shared-prefix branch: %v", err)
+	}
+	defer reopened.Close()
+	if got := reopened.View(); got.BranchID != "feature" || len(got.Messages) != 2 || got.Messages[0].Content != "root" || got.Messages[1].Content != "feature continuation" {
+		t.Fatalf("shared-prefix branch did not restore: %#v", got)
+	}
 }
