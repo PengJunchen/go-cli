@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -41,6 +42,8 @@ type HTTPClientAdapter struct {
 
 var _ MCPClient = (*HTTPClientAdapter)(nil)
 
+var errCrossOriginRedirect = errors.New("mcp: cross-origin redirect rejected")
+
 // defaultHTTPTimeout bounds individual HTTP requests. Network fetch
 // operations (e.g. web search) can legitimately take several seconds, but
 // without a cap a hung server would block the agent loop forever.
@@ -64,6 +67,71 @@ func readLimitedBody(r io.Reader) ([]byte, error) {
 		return nil, fmt.Errorf("mcp: response body exceeds %d byte limit", maxHTTPResponseSize)
 	}
 	return raw, nil
+}
+
+func sameHTTPOrigin(left, right *url.URL) bool {
+	if left == nil || right == nil {
+		return false
+	}
+	leftScheme := strings.ToLower(left.Scheme)
+	rightScheme := strings.ToLower(right.Scheme)
+	if leftScheme != rightScheme || (leftScheme != "http" && leftScheme != "https") {
+		return false
+	}
+	if !strings.EqualFold(left.Hostname(), right.Hostname()) {
+		return false
+	}
+	return effectiveHTTPPort(left) == effectiveHTTPPort(right)
+}
+
+func effectiveHTTPPort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		return port
+	}
+	if strings.EqualFold(u.Scheme, "https") {
+		return "443"
+	}
+	return "80"
+}
+
+func resolveSameOriginEndpoint(configuredURL, endpoint string) (string, error) {
+	base, err := url.Parse(configuredURL)
+	if err != nil {
+		return "", fmt.Errorf("mcp: parse configured endpoint: %w", err)
+	}
+	baseScheme := strings.ToLower(base.Scheme)
+	if base.Host == "" || (baseScheme != "http" && baseScheme != "https") {
+		return "", fmt.Errorf("mcp: configured endpoint must be an absolute HTTP URL")
+	}
+	ref, err := url.Parse(endpoint)
+	if err != nil {
+		return "", fmt.Errorf("mcp: parse SSE endpoint: %w", err)
+	}
+	resolved := base.ResolveReference(ref)
+	if !sameHTTPOrigin(base, resolved) {
+		return "", fmt.Errorf("mcp: SSE endpoint must remain on the configured origin %q", base.Host)
+	}
+	return resolved.String(), nil
+}
+
+// doHTTP preserves the configured client's transport and options while
+// refusing redirects that would move a request to a different origin.
+func (a *HTTPClientAdapter) doHTTP(req *http.Request) (*http.Response, error) {
+	client := *a.client
+	checkRedirect := client.CheckRedirect
+	client.CheckRedirect = func(next *http.Request, via []*http.Request) error {
+		if len(via) > 0 && !sameHTTPOrigin(via[0].URL, next.URL) {
+			return fmt.Errorf("%w: %s -> %s", errCrossOriginRedirect, via[0].URL, next.URL)
+		}
+		if checkRedirect != nil {
+			return checkRedirect(next, via)
+		}
+		if len(via) >= 10 {
+			return fmt.Errorf("stopped after 10 redirects")
+		}
+		return nil
+	}
+	return client.Do(req)
 }
 
 // NewHTTPClientAdapter returns an HTTPClientAdapter for the given config. The
@@ -103,8 +171,12 @@ func (a *HTTPClientAdapter) Connect(ctx context.Context) error {
 
 	// Determine the POST endpoint. Most modern MCP servers (streamable HTTP)
 	// use the configured URL directly; SSE-style servers send a POST-back
-	// endpoint on the initial GET stream.
-	a.endpoint = a.cfg.URL
+	// endpoint on the initial GET stream. Validate before attaching credentials.
+	endpoint, err := resolveSameOriginEndpoint(a.cfg.URL, a.cfg.URL)
+	if err != nil {
+		return err
+	}
+	a.endpoint = endpoint
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.cfg.URL, nil)
 	if err != nil {
@@ -113,8 +185,11 @@ func (a *HTTPClientAdapter) Connect(ctx context.Context) error {
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	a.applyAuthHeaders(req)
 
-	resp, err := a.client.Do(req)
+	resp, err := a.doHTTP(req)
 	if err != nil {
+		if errors.Is(err, errCrossOriginRedirect) {
+			return fmt.Errorf("mcp: GET handshake: %w", err)
+		}
 		// Server unreachable via GET; still try direct POST on the URL.
 		slog.Warn("mcp.sse.connect_get_failed", "server", a.cfg.Name, "err", err)
 		a.connected = true
@@ -124,6 +199,7 @@ func (a *HTTPClientAdapter) Connect(ctx context.Context) error {
 	// Read the first event from the SSE stream to find the endpoint.
 	scanner := bufio.NewScanner(resp.Body)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	var endpointErr error
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "event: endpoint") {
@@ -131,7 +207,7 @@ func (a *HTTPClientAdapter) Connect(ctx context.Context) error {
 			if scanner.Scan() {
 				dataLine := scanner.Text()
 				if strings.HasPrefix(dataLine, "data: ") {
-					a.endpoint = strings.TrimPrefix(dataLine, "data: ")
+					a.endpoint, endpointErr = resolveSameOriginEndpoint(a.cfg.URL, strings.TrimPrefix(dataLine, "data: "))
 					break
 				}
 			}
@@ -141,16 +217,8 @@ func (a *HTTPClientAdapter) Connect(ctx context.Context) error {
 		slog.Warn("mcp.sse.scan", "server", a.cfg.Name, "err", err)
 	}
 	resp.Body.Close() //nolint:errcheck,gosec
-
-	if a.endpoint == "" {
-		// No endpoint event: streamable HTTP server, use the URL directly.
-		a.endpoint = a.cfg.URL
-	} else if !strings.HasPrefix(a.endpoint, "http") {
-		// Resolve relative endpoint against the base URL
-		baseEnd := strings.LastIndex(a.cfg.URL, "/")
-		if baseEnd > 0 {
-			a.endpoint = a.cfg.URL[:baseEnd+1] + strings.TrimPrefix(a.endpoint, "/")
-		}
+	if endpointErr != nil {
+		return fmt.Errorf("mcp: reject SSE endpoint: %w", endpointErr)
 	}
 
 	a.connected = true
@@ -215,7 +283,7 @@ func (a *HTTPClientAdapter) CallTool(ctx context.Context, name string, args map[
 		"arguments": args,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("mcp: call tool %q: %w", name, err)
+		return nil, fmt.Errorf("mcp: call tool %q: %w", name, toolCallOutcomeError(name, err))
 	}
 
 	result := &MCPToolResult{
@@ -235,6 +303,10 @@ func (a *HTTPClientAdapter) request(ctx context.Context, method string, params m
 	a.nextID++
 	endpoint := a.endpoint
 	a.mu.Unlock()
+	endpoint, err := resolveSameOriginEndpoint(a.cfg.URL, endpoint)
+	if err != nil {
+		return nil, err
+	}
 
 	body, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
@@ -254,7 +326,7 @@ func (a *HTTPClientAdapter) request(ctx context.Context, method string, params m
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	a.applyAuthHeaders(req)
 
-	resp, err := a.client.Do(req)
+	resp, err := a.doHTTP(req)
 	if err != nil {
 		return nil, fmt.Errorf("mcp: do request: %w", err)
 	}
@@ -351,6 +423,11 @@ func (a *HTTPClientAdapter) doPost(ctx context.Context, method string, params ma
 	id := a.nextID
 	a.nextID++
 	endpoint := a.endpoint
+	var err error
+	endpoint, err = resolveSameOriginEndpoint(a.cfg.URL, endpoint)
+	if err != nil {
+		return nil, err
+	}
 
 	body, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
@@ -370,7 +447,7 @@ func (a *HTTPClientAdapter) doPost(ctx context.Context, method string, params ma
 	req.Header.Set("Accept", "application/json, text/event-stream")
 	a.applyAuthHeaders(req)
 
-	return a.client.Do(req)
+	return a.doHTTP(req)
 }
 
 // doInitializeLocked performs the MCP initialize/initialized handshake over
@@ -543,7 +620,7 @@ func (a *HTTPClientAdapter) exchangeCodeForToken(ctx context.Context, oauth *OAu
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := a.client.Do(req)
+	resp, err := a.doHTTP(req)
 	if err != nil {
 		return fmt.Errorf("mcp: token request: %w", err)
 	}
