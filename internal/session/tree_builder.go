@@ -133,6 +133,9 @@ func (b *DefaultSessionTreeBuilder) buildVersionOneTree(ctx context.Context, ent
 			if err := validateVersion1EntryCoordinates(*entry); err != nil {
 				return nil, fmt.Errorf("session: invalid version 1 entry %q: %w", entry.ID, err)
 			}
+			if err := validateTreeCheckpointCoordinates(*entry); err != nil {
+				return nil, fmt.Errorf("session: invalid version 1 entry %q: %w", entry.ID, err)
+			}
 			if entry.Seq == 0 {
 				return nil, fmt.Errorf("session: version 1 entry %q has no sequence", entry.ID)
 			}

@@ -291,3 +291,16 @@ func TestTreeBuilderRejectsCorruptVersionOneTree(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "parent")
 }
+
+func TestTreeBuilderRejectsChildSequenceBeforeParent(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	root := newR2UserEntry("root", "", 3, 0)
+	child := newR2UserEntry("child", "root", 2, 1)
+	require.NoError(t, store.Append(ctx, root))
+	require.NoError(t, store.Append(ctx, child))
+
+	_, err := NewDefaultSessionTreeBuilder().BuildFromStore(ctx, store)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parent")
+}
