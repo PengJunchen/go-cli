@@ -207,20 +207,22 @@ func TestLoopToolNilResult(t *testing.T) {
 	loop := NewLoopAgent(WithLLM(model), WithTools(toolSrv))
 
 	events, err := loop.Run(context.Background(), Submission{Content: "go"})
-	require.NoError(t, err)
-	// The nil tool result yields an empty tool_result event but no error.
+	require.ErrorContains(t, err, "tool execution returned no receipt")
+	// A nil receipt cannot be reported as successful tool execution.
 	toolResults := findEvents(events, "tool_result")
 	require.Len(t, toolResults, 1)
-	assert.Equal(t, "", toolResults[0])
+	assert.Contains(t, toolResults[0], "returned no receipt")
+	assert.NotEmpty(t, findEvents(events, "error"))
+	assert.Equal(t, 1, model.idx, "the model must not be called again after a missing receipt")
 }
 
-func TestLoopToolArgsNonMapDropped(t *testing.T) {
+func TestLoopToolArgsNonMapRejectedBeforeDispatch(t *testing.T) {
 	toolSrv := mock.NewMockToolServer()
 	_, err := toolSrv.RegisterReadFileTool("content")
 	require.NoError(t, err)
 
-	// llm.ToolCall.Args is a JSON primitive rather than map[string]any;
-	// toToolsCall must drop it without panicking.
+	// llm.ToolCall.Args is a JSON primitive rather than a complete argument
+	// object; the loop must reject it before dispatching the tool.
 	model := &scriptedChatModel{seq: []*llm.Message{
 		{
 			Role:      llm.RoleAssistant,
@@ -232,14 +234,10 @@ func TestLoopToolArgsNonMapDropped(t *testing.T) {
 	loop := NewLoopAgent(WithLLM(model), WithTools(toolSrv))
 
 	events, err := loop.Run(context.Background(), Submission{Content: "go"})
-	require.NoError(t, err)
-
-	// The tool eventually ran (a tool_result event exists) and finished.
-	toolResults := findEvents(events, "tool_result")
-	require.NotEmpty(t, toolResults)
-	messages := findEvents(events, "message")
-	require.Len(t, messages, 2)
-	assert.Equal(t, "done", messages[1])
+	require.ErrorContains(t, err, "invalid arguments")
+	assert.Empty(t, findEvents(events, "tool_call"))
+	assert.Empty(t, findEvents(events, "tool_result"))
+	assert.Empty(t, findEvents(events, "message"))
 }
 
 func TestLoopContextCancelTwoBranches(t *testing.T) {

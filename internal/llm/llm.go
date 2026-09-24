@@ -102,6 +102,27 @@ type MessageChunk struct {
 	Error error `json:"-"`
 }
 
+func sendStreamError(_ context.Context, ch chan MessageChunk, err error) {
+	if err == nil {
+		return
+	}
+	select {
+	case ch <- MessageChunk{Error: err}:
+	default:
+		// On terminal failure, prefer preserving the error signal over queued
+		// candidate deltas. The consumer must never mistake a truncated channel
+		// close for a successful stream.
+		select {
+		case <-ch:
+		default:
+		}
+		select {
+		case ch <- MessageChunk{Error: err}:
+		default:
+		}
+	}
+}
+
 // ModelInfo describes a model exposed by a provider.
 type ModelInfo struct {
 	Name            string  `json:"name"`

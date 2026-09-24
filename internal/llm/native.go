@@ -387,12 +387,18 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 		isJSON, jsonBody, err := detectJSONResponse(reader)
 		if err != nil {
 			slog.Error("llm_stream_peek_error", "err", err)
+			sendStreamError(ctx, ch, fmt.Errorf("llm: inspect OpenAI stream: %w", err))
 			return
 		}
 		if isJSON {
 			var parsed openAIResponse
 			if err := json.Unmarshal(jsonBody, &parsed); err != nil {
 				slog.Error("llm_stream_json_parse_error", "err", err)
+				sendStreamError(ctx, ch, fmt.Errorf("llm: decode OpenAI stream response: %w", err))
+				return
+			}
+			if len(parsed.Choices) == 0 {
+				sendStreamError(ctx, ch, fmt.Errorf("llm: OpenAI stream response contains no choices"))
 				return
 			}
 			var content string
@@ -428,7 +434,11 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 		parser := NewDefaultSSEParser()
 		events, _ := parser.Parse(ctx, reader) //nolint:errcheck
 
-		toolCalls, finishReason, usage := accumulateOpenAIStreamToolCalls(ctx, events, ch)
+		toolCalls, finishReason, usage, streamErr := accumulateOpenAIStreamToolCalls(ctx, events, ch)
+		if streamErr != nil {
+			sendStreamError(ctx, ch, streamErr)
+			return
+		}
 		final := MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
 		if usage != nil {
 			final.Usage = usage
@@ -519,36 +529,60 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 		parser := NewDefaultSSEParser()
 		events, _ := parser.Parse(ctx, respBody) //nolint:errcheck
 
-		// Tool-call accumulation keyed by content block index.
 		tools := map[int]*claudeToolAccum{}
-		var toolIndices []int // preserve insertion order
+		var toolIndices []int
 		var stopReason string
 		var inputTokens, outputTokens int
 		var hasUsage bool
-		finalSent := false
-		canceled := false
+		var eventCount int
+		var toolPayloadBytes int
+		messageStarted := false
+		messageStopped := false
 
 		for event := range events {
-			if canceled {
-				continue
+			if event.Error != nil {
+				sendStreamError(ctx, ch, event.Error)
+				return
+			}
+			if ctx.Err() != nil {
+				sendStreamError(ctx, ch, ctx.Err())
+				return
 			}
 			if event.Data == "" {
 				continue
 			}
+			eventCount++
+			if eventCount > GuardedStreamMaxChunks {
+				sendStreamError(ctx, ch, fmt.Errorf("llm: Claude stream exceeds %d events", GuardedStreamMaxChunks))
+				return
+			}
+			if messageStopped {
+				sendStreamError(ctx, ch, errors.New("llm: Claude stream contains data after message_stop"))
+				return
+			}
 			var ce claudeStreamEvent
 			if err := json.Unmarshal([]byte(event.Data), &ce); err != nil {
-				slog.Warn("llm_stream_parse_skip", "err", err)
-				continue
+				sendStreamError(ctx, ch, fmt.Errorf("llm: decode Claude stream event: %w", err))
+				return
+			}
+			if ce.Type == "error" {
+				sendStreamError(ctx, ch, errors.New("llm: Claude provider returned an error event"))
+				return
 			}
 
 			switch ce.Type {
 			case "message_start":
+				if messageStarted || ce.Message == nil || ce.Message.Role != "assistant" {
+					sendStreamError(ctx, ch, errors.New("llm: invalid Claude message_start event"))
+					return
+				}
+				messageStarted = true
 				if ce.Message != nil {
 					select {
 					case ch <- MessageChunk{Role: RoleAssistant}:
 					case <-ctx.Done():
-						canceled = true
-						continue
+						sendStreamError(ctx, ch, ctx.Err())
+						return
 					}
 					if ce.Message.Usage != nil {
 						inputTokens = ce.Message.Usage.InputTokens
@@ -559,18 +593,35 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 			case "content_block_start":
 				if ce.ContentBlock != nil && ce.ContentBlock.Type == "tool_use" {
 					idx := ce.Index
-					if _, ok := tools[idx]; !ok {
-						tools[idx] = &claudeToolAccum{
-							id:   ce.ContentBlock.ID,
-							name: ce.ContentBlock.Name,
-						}
-						toolIndices = append(toolIndices, idx)
+					if idx < 0 || idx >= GuardedStreamMaxToolCalls || len(tools) >= GuardedStreamMaxToolCalls {
+						sendStreamError(ctx, ch, fmt.Errorf("llm: Claude tool block index %d is outside the supported range", idx))
+						return
 					}
+					if ce.ContentBlock.ID == "" || ce.ContentBlock.Name == "" {
+						sendStreamError(ctx, ch, fmt.Errorf("llm: Claude tool block %d is missing an ID or name", idx))
+						return
+					}
+					if _, ok := tools[idx]; ok {
+						sendStreamError(ctx, ch, fmt.Errorf("llm: Claude tool block %d was declared more than once", idx))
+						return
+					}
+					nextBytes, ok := addBoundedStreamBytes(toolPayloadBytes, len(ce.ContentBlock.ID))
+					if ok {
+						nextBytes, ok = addBoundedStreamBytes(nextBytes, len(ce.ContentBlock.Name))
+					}
+					if !ok {
+						sendStreamError(ctx, ch, fmt.Errorf("llm: Claude tool payload exceeds %d-byte limit", GuardedStreamMaxBytes))
+						return
+					}
+					toolPayloadBytes = nextBytes
+					tools[idx] = &claudeToolAccum{id: ce.ContentBlock.ID, name: ce.ContentBlock.Name}
+					toolIndices = append(toolIndices, idx)
 				}
 
 			case "content_block_delta":
 				if ce.Delta == nil {
-					continue
+					sendStreamError(ctx, ch, errors.New("llm: Claude content_block_delta has no delta"))
+					return
 				}
 				switch ce.Delta.Type {
 				case "text_delta":
@@ -578,14 +629,26 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 						select {
 						case ch <- MessageChunk{Role: RoleAssistant, Content: ce.Delta.Text}:
 						case <-ctx.Done():
-							canceled = true
-							continue
+							sendStreamError(ctx, ch, ctx.Err())
+							return
 						}
 					}
 				case "input_json_delta":
-					if accum, ok := tools[ce.Index]; ok {
-						accum.args.WriteString(ce.Delta.PartialJSON)
+					accum, ok := tools[ce.Index]
+					if !ok {
+						sendStreamError(ctx, ch, fmt.Errorf("llm: Claude arguments reference unknown tool block %d", ce.Index))
+						return
 					}
+					nextBytes, ok := addBoundedStreamBytes(toolPayloadBytes, len(ce.Delta.PartialJSON))
+					if !ok {
+						sendStreamError(ctx, ch, fmt.Errorf("llm: Claude tool payload exceeds %d-byte limit", GuardedStreamMaxBytes))
+						return
+					}
+					toolPayloadBytes = nextBytes
+					accum.args.WriteString(ce.Delta.PartialJSON)
+				default:
+					sendStreamError(ctx, ch, fmt.Errorf("llm: unsupported Claude delta type %q", ce.Delta.Type))
+					return
 				}
 
 			case "message_delta":
@@ -600,59 +663,70 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 				}
 
 			case "message_stop":
-				final := MessageChunk{Role: RoleAssistant, Final: true, FinishReason: stopReason}
-				if len(toolIndices) > 0 {
-					final.ToolCalls = make([]ToolCall, 0, len(toolIndices))
-					for _, idx := range toolIndices {
-						accum := tools[idx]
-						var args any
-						if accum.args.Len() > 0 {
-							var decoded any
-							if err := json.Unmarshal([]byte(accum.args.String()), &decoded); err == nil {
-								args = decoded
-							} else {
-								args = accum.args.String()
-							}
-						}
-						final.ToolCalls = append(final.ToolCalls, ToolCall{
-							ID:   accum.id,
-							Name: accum.name,
-							Args: args,
-						})
-					}
+				if !messageStarted || stopReason == "" {
+					sendStreamError(ctx, ch, errors.New("llm: Claude message_stop arrived without a complete terminal reason"))
+					return
 				}
-				if hasUsage {
-					final.Usage = &Usage{
-						InputTokens:  inputTokens,
-						OutputTokens: outputTokens,
-						TotalTokens:  inputTokens + outputTokens,
-					}
-				}
-				select {
-				case ch <- final:
-					finalSent = true
-				case <-ctx.Done():
-					canceled = true
-					continue
-				}
+				messageStopped = true
+
+			case "ping", "content_block_stop":
+				// These are valid non-terminal protocol events.
 			}
 		}
 
-		// If the stream ended without message_stop, emit a final chunk so
-		// the caller is not left waiting.
-		if !finalSent && ctx.Err() == nil {
-			fallback := MessageChunk{Role: RoleAssistant, Final: true, FinishReason: stopReason}
-			if hasUsage {
-				fallback.Usage = &Usage{
-					InputTokens:  inputTokens,
-					OutputTokens: outputTokens,
-					TotalTokens:  inputTokens + outputTokens,
+		if ctx.Err() != nil {
+			sendStreamError(ctx, ch, ctx.Err())
+			return
+		}
+		if !messageStarted || !messageStopped {
+			sendStreamError(ctx, ch, errors.New("llm: Claude stream ended without message_stop"))
+			return
+		}
+		finishReason := stopReason
+		if stopReason == "max_tokens" {
+			finishReason = finishReasonLength
+		}
+		final := MessageChunk{Role: RoleAssistant, Final: true, FinishReason: finishReason}
+		if len(toolIndices) > 0 {
+			final.ToolCalls = make([]ToolCall, 0, len(toolIndices))
+			for _, idx := range toolIndices {
+				accum := tools[idx]
+				rawArgs := accum.args.String()
+				var args any
+				if rawArgs == "" {
+					if finishReason != finishReasonLength {
+						sendStreamError(ctx, ch, fmt.Errorf("llm: Claude tool call %q has no arguments", accum.id))
+						return
+					}
+					args = rawArgs
+				} else {
+					var object map[string]any
+					if err := json.Unmarshal([]byte(rawArgs), &object); err != nil {
+						if finishReason != finishReasonLength {
+							sendStreamError(ctx, ch, fmt.Errorf("llm: decode arguments for Claude tool call %q: %w", accum.id, err))
+							return
+						}
+						args = rawArgs
+					} else if object == nil {
+						if finishReason != finishReasonLength {
+							sendStreamError(ctx, ch, fmt.Errorf("llm: Claude tool call %q arguments must be a JSON object", accum.id))
+							return
+						}
+						args = rawArgs
+					} else {
+						args = object
+					}
 				}
+				final.ToolCalls = append(final.ToolCalls, ToolCall{ID: accum.id, Name: accum.name, Args: args})
 			}
-			select {
-			case ch <- fallback:
-			case <-ctx.Done():
-			}
+		}
+		if hasUsage {
+			final.Usage = &Usage{InputTokens: inputTokens, OutputTokens: outputTokens, TotalTokens: inputTokens + outputTokens}
+		}
+		select {
+		case ch <- final:
+		case <-ctx.Done():
+			sendStreamError(ctx, ch, ctx.Err())
 		}
 	}()
 
@@ -699,18 +773,30 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 		var finishReason string
 		var toolCalls []ToolCall
 		var usage *Usage
-		canceled := false
+		var eventCount int
+		var toolPayloadBytes int
+		terminalSeen := false
 		for event := range events {
-			if canceled {
-				continue
+			if event.Error != nil {
+				sendStreamError(ctx, ch, event.Error)
+				return
+			}
+			if ctx.Err() != nil {
+				sendStreamError(ctx, ch, ctx.Err())
+				return
 			}
 			if event.Data == "" {
 				continue
 			}
+			eventCount++
+			if eventCount > GuardedStreamMaxChunks {
+				sendStreamError(ctx, ch, fmt.Errorf("llm: Gemini stream exceeds %d events", GuardedStreamMaxChunks))
+				return
+			}
 			var parsed geminiResponse
 			if err := json.Unmarshal([]byte(event.Data), &parsed); err != nil {
-				slog.Warn("llm_stream_parse_skip", "err", err)
-				continue
+				sendStreamError(ctx, ch, fmt.Errorf("llm: decode Gemini stream event: %w", err))
+				return
 			}
 			// Gemini sends usageMetadata in the response chunks; the final
 			// chunk carries the cumulative totals.
@@ -722,9 +808,14 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 				}
 			}
 			if len(parsed.Candidates) > 0 {
+				if terminalSeen {
+					sendStreamError(ctx, ch, errors.New("llm: Gemini stream emitted candidates after a terminal finish reason"))
+					return
+				}
 				candidate := parsed.Candidates[0]
 				if candidate.FinishReason != "" {
 					finishReason = candidate.FinishReason
+					terminalSeen = true
 				}
 				if candidate.Content != nil {
 					var sb strings.Builder
@@ -734,25 +825,52 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 						// together, not fragmented like OpenAI), so we just
 						// append when encountered.
 						if part.FunctionCall != nil {
-							toolCalls = append(toolCalls, ToolCall{
+							if len(toolCalls) >= GuardedStreamMaxToolCalls || part.FunctionCall.Name == "" || part.FunctionCall.Args == nil {
+								sendStreamError(ctx, ch, errors.New("llm: Gemini function call is incomplete or exceeds the supported call count"))
+								return
+							}
+							call := ToolCall{
 								ID:   fmt.Sprintf("call_%d", len(toolCalls)),
 								Name: part.FunctionCall.Name,
 								Args: part.FunctionCall.Args,
-							})
+							}
+							encoded, marshalErr := json.Marshal(call)
+							if marshalErr != nil {
+								sendStreamError(ctx, ch, fmt.Errorf("llm: encode Gemini function call: %w", marshalErr))
+								return
+							}
+							nextBytes, ok := addBoundedStreamBytes(toolPayloadBytes, len(encoded))
+							if !ok {
+								sendStreamError(ctx, ch, fmt.Errorf("llm: Gemini tool payload exceeds %d-byte limit", GuardedStreamMaxBytes))
+								return
+							}
+							toolPayloadBytes = nextBytes
+							toolCalls = append(toolCalls, call)
 						}
 					}
 					if sb.Len() > 0 {
 						select {
 						case ch <- MessageChunk{Role: RoleAssistant, Content: sb.String()}:
 						case <-ctx.Done():
-							canceled = true
-							continue
+							sendStreamError(ctx, ch, ctx.Err())
+							return
 						}
 					}
 				}
 			}
 		}
 
+		if ctx.Err() != nil {
+			sendStreamError(ctx, ch, ctx.Err())
+			return
+		}
+		if finishReason == "" {
+			sendStreamError(ctx, ch, errors.New("llm: Gemini stream ended without a candidate finish reason"))
+			return
+		}
+		if finishReason == "MAX_TOKENS" {
+			finishReason = finishReasonLength
+		}
 		final := MessageChunk{Role: RoleAssistant, Final: true, FinishReason: finishReason, ToolCalls: toolCalls}
 		if usage != nil {
 			final.Usage = usage

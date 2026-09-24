@@ -131,15 +131,16 @@ func TestMaxContinuationAttemptsEnforced(t *testing.T) {
 	loop := NewLoopAgent(WithLLM(model))
 
 	events, err := loop.Run(context.Background(), Submission{Content: "go"})
-	require.NoError(t, err)
+	require.ErrorContains(t, err, "response remains truncated")
 
 	// 1 original + 3 continuations = 4 total calls.
 	assert.Equal(t, 4, model.CallCount())
 
-	// The merged content includes all four partial chunks.
-	messages := findEvents(events, "message")
-	require.Len(t, messages, 1)
-	assert.Equal(t, "p1p2p3p4", messages[0])
+	// Incomplete continuation chains do not become complete assistant
+	// messages or tool dispatches, even though unguarded live deltas may have
+	// already reached stream consumers.
+	assert.Empty(t, findEvents(events, "message"))
+	assert.NotEmpty(t, findEvents(events, "error"))
 }
 
 // TestContinuationMultipleChunks verifies that multi-chunk continuation works:
@@ -303,7 +304,7 @@ func TestContinuationMaxAttemptsStillPartialSafe(t *testing.T) {
 	loop := NewLoopAgent(WithLLM(model), WithTools(toolSrv))
 
 	events, err := loop.Run(context.Background(), Submission{Content: "go"})
-	require.NoError(t, err)
+	require.ErrorContains(t, err, "response remains truncated")
 
 	// 1 original + 3 continuations = 4 total calls.
 	assert.Equal(t, 4, model.CallCount())
@@ -312,10 +313,9 @@ func TestContinuationMaxAttemptsStillPartialSafe(t *testing.T) {
 	assert.Empty(t, findEvents(events, "tool_call"))
 	assert.Empty(t, findEvents(events, "tool_result"))
 
-	// Content from all four partial responses is merged.
-	messages := findEvents(events, "message")
-	require.Len(t, messages, 1)
-	assert.Equal(t, "p1p2p3p4", messages[0])
+	// The incomplete candidate must not be committed as an assistant turn.
+	assert.Empty(t, findEvents(events, "message"))
+	assert.NotEmpty(t, findEvents(events, "error"))
 }
 
 // TestNoContinuationWhenFinishReasonStop verifies that a normal finish_reason

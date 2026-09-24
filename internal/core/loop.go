@@ -2,6 +2,7 @@ package core //exempt:scan009
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -23,8 +24,8 @@ const defaultMaxIterations = 200
 
 // maxContinuationAttempts bounds the number of automatic continuation
 // requests the loop issues when the model output is truncated by max_tokens
-// (finish_reason == "length"). After this many attempts the loop proceeds
-// with whatever content has been accumulated and logs a warning.
+// (finish_reason == "length"). If that budget is exhausted, the incomplete
+// candidate is rejected rather than returned as a complete assistant turn.
 const maxContinuationAttempts = 3
 
 // errNilModel reports that a LoopAgent has no chat model wired up.
@@ -361,6 +362,21 @@ func (l *LoopAgent) SetModel(m llm.BaseChatModel) {
 // they happen (streaming mode); otherwise they are collected into the returned
 // slice (batch mode, for backward compatibility).
 func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...EventStream) ([]AgentEvent, error) {
+	result, err := l.RunCanonical(ctx, submission, stream...)
+	return result.Events, err
+}
+
+// RunCanonical executes one ReAct run and returns a typed transcript delta
+// owned by this invocation. Prior submission history remains model context
+// only and is never copied into Transcript.
+func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, stream ...EventStream) (CanonicalRunResult, error) {
+	events := make([]AgentEvent, 0)
+	transcript := []TranscriptEntry{{Message: AgentMessage{
+		Role:      string(llm.RoleUser),
+		Content:   submission.Content,
+		InputKind: InputKindUser,
+	}}}
+
 	// Snapshot runtime mutable fields under a read lock to avoid data races
 	// with concurrent setter calls (SetModel, SetMidTurnCompaction,
 	// WithToolSearchThreshold). The local copies are used throughout Run.
@@ -393,7 +409,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 
 	if model == nil {
 		span.SetStatus(tracing.SpanStatusError, errNilModel.Error())
-		return nil, errNilModel
+		return CanonicalRunResult{Transcript: transcript}, errNilModel
 	}
 
 	// Apply the model wrapper (if any) before the first LLM call. The
@@ -450,8 +466,6 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 		toolOpts = append(toolOpts, llm.WithThinking(*l.thinkingConfig))
 	}
 
-	var events []AgentEvent
-
 	// sendEvent emits an event both to the local events slice and (when
 	// streaming) to the EventStream in real time.
 	sendEvent := func(ev AgentEvent) {
@@ -505,7 +519,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 		}
 		messages = append(messages, msg)
 	}
-	if len(messages) == 0 || messages[len(messages)-1].Role != llm.RoleUser {
+	if len(messages) == 0 || messages[len(messages)-1].Role != llm.RoleUser || messages[len(messages)-1].Content != submission.Content {
 		messages = append(messages, llm.Message{Role: llm.RoleUser, Content: submission.Content})
 	}
 
@@ -522,6 +536,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 			errMsg = canceledErr.Error()
 		}
 		for _, tc := range synthCalls {
+			appendTranscriptToolReceipt(&transcript, tc, "Error: "+errMsg, ReceiptOutcomeInterrupted)
 			sendEvent(AgentEvent{
 				Kind:       "tool_result",
 				Content:    "Error: " + errMsg,
@@ -537,7 +552,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 			span.SetStatus(tracing.SpanStatusError, err.Error())
 			logger.Error("core.loop.canceled", "iteration", iter, "err", err)
 			sendEvent(errEvent(err))
-			return events, err
+			return CanonicalRunResult{Events: events, Transcript: transcript}, err
 		}
 
 		// Block here if the loop has been paused via Pause(). This allows
@@ -546,7 +561,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 			span.SetStatus(tracing.SpanStatusError, perr.Error())
 			logger.Error("core.loop.canceled_during_pause", "iteration", iter, "err", perr)
 			sendEvent(errEvent(perr))
-			return events, perr
+			return CanonicalRunResult{Events: events, Transcript: transcript}, perr
 		}
 
 		// Drain any pending steering messages from the steer channel.
@@ -555,14 +570,18 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 		// operation. Each steering message is injected as a user message
 		// so the model sees it on the next iteration.
 		if l.steerCh != nil {
-			drainSteerMessages(l.steerCh, &messages, logger)
+			for _, instruction := range drainSteerMessages(l.steerCh, &messages, logger) {
+				transcript = append(transcript, TranscriptEntry{Message: AgentMessage{Role: string(llm.RoleUser), Content: instruction, InputKind: InputKindSteering}})
+			}
 		}
 
 		// Drain any pending follow-up messages from the follow-up channel.
 		// Follow-ups are injected as user messages after steering so the
 		// model sees steering context first, then the follow-up.
 		if l.followUpCh != nil {
-			drainFollowUpMessages(l.followUpCh, &messages, logger)
+			for _, content := range drainFollowUpMessages(l.followUpCh, &messages, logger) {
+				transcript = append(transcript, TranscriptEntry{Message: AgentMessage{Role: string(llm.RoleUser), Content: content, InputKind: InputKindFollowUp}})
+			}
 		}
 
 		// ---- LLM call (streaming) ----
@@ -597,15 +616,27 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 			span.SetStatus(tracing.SpanStatusError, err.Error())
 			logger.Error("core.loop.generate_error", "iteration", iter, "err", err)
 			sendEvent(errEvent(err))
-			return events, err
+			return CanonicalRunResult{Events: events, Transcript: transcript}, err
 		}
 		if resp == nil {
 			err := errors.New("core: model returned a nil response")
 			span.SetStatus(tracing.SpanStatusError, err.Error())
 			logger.Error("core.loop.nil_response", "iteration", iter)
 			sendEvent(errEvent(err))
-			return events, err
+			return CanonicalRunResult{Events: events, Transcript: transcript}, err
 		}
+		if err := validateCompleteToolCalls(resp.ToolCalls); err != nil {
+			span.SetStatus(tracing.SpanStatusError, err.Error())
+			sendEvent(errEvent(err))
+			return CanonicalRunResult{Events: events, Transcript: transcript}, err
+		}
+		assistantEntry, err := transcriptAssistantEntry(resp)
+		if err != nil {
+			span.SetStatus(tracing.SpanStatusError, err.Error())
+			sendEvent(errEvent(err))
+			return CanonicalRunResult{Events: events, Transcript: transcript}, err
+		}
+		transcript = append(transcript, assistantEntry)
 
 		logger.Info("core.loop.turn",
 			"iteration", iter,
@@ -627,7 +658,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 
 		if len(resp.ToolCalls) == 0 {
 			logger.Info("core.loop.finish", "iterations", iter+1, "messages", len(messages))
-			return events, nil
+			return CanonicalRunResult{Events: events, Transcript: transcript}, nil
 		}
 
 		if l.executionMode == ExecutionModeParallel && len(resp.ToolCalls) > 1 {
@@ -636,61 +667,78 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 			// ToolCallID (not positional index) so that out-of-order
 			// completion does not cause mismatched results.
 			var activeCalls []llm.ToolCall
+			canceledCalls := make(map[string]bool)
 			for _, tc := range resp.ToolCalls {
 				preEv := l.newPreToolCallEvent(tc.Name, tc.ID, toToolsCall(tc).Args)
 				sendEvent(AgentEvent{Kind: EventKindPreToolCall, Timestamp: time.Now(), PreToolCall: preEv})
 				if preEv.IsCancelled() {
 					logger.Info("core.loop.tool_canceled", "tool", tc.Name, "id", tc.ID)
 					sendEvent(AgentEvent{Kind: "tool_canceled", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID})
-					messages = append(messages, llm.Message{
-						Role:       llm.RoleTool,
-						ToolCallID: tc.ID,
-						Name:       tc.Name,
-						Content:    "Tool call canceled by interceptor",
-					})
+					canceledCalls[tc.ID] = true
 					continue
 				}
 				activeCalls = append(activeCalls, tc)
 				sendEvent(AgentEvent{Kind: "tool_call", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID})
 				logger.Info("core.loop.tool_call", "iteration", iter, "tool", tc.Name, "mode", "parallel")
 			}
+			var parallelErr error
+			var unknownToolErr error
+			resultsByID := make(map[string]ParallelToolResult, len(activeCalls))
 			if len(activeCalls) > 0 {
-				results, perr := executeToolsParallel(spanCtx, l.tools, activeCalls, es)
-				if perr == nil {
-					results, perr = matchToolResultsByID(activeCalls, results)
-				}
-				for _, res := range results {
-					if res.Err != nil {
-						logger.Warn("core.loop.tool_error", "tool", res.Name, "err", res.Err)
-						res.Output = "Error: " + res.Err.Error()
-						if spanCtx.Err() != nil {
-							span.SetStatus(tracing.SpanStatusError, res.Err.Error())
-							emitCanceledToolResults(res.Err)
-							sendEvent(errEvent(res.Err))
-							return events, res.Err
-						}
+				results, execErr := executeToolsParallel(spanCtx, l.tools, activeCalls, es)
+				parallelErr = execErr
+				matched, matchErr := matchToolResultsByID(activeCalls, results)
+				if matchErr != nil {
+					parallelErr = errors.Join(parallelErr, matchErr)
+				} else {
+					for _, res := range matched {
+						resultsByID[res.ID] = res
 					}
-					sendEvent(AgentEvent{Kind: "tool_result", Content: res.Output, Timestamp: time.Now(), IsError: res.IsError, ToolCallID: res.ID})
-					messages = append(messages, llm.Message{
-						Role:       llm.RoleTool,
-						ToolCallID: res.ID,
-						Name:       res.Name,
-						Content:    res.Output,
-					})
 				}
-				if perr != nil {
-					emitCanceledToolResults(perr)
-					return events, perr
+			}
+			for _, tc := range resp.ToolCalls {
+				if canceledCalls[tc.ID] {
+					const canceledOutput = "Tool call canceled by interceptor"
+					sendEvent(AgentEvent{Kind: "tool_result", Content: canceledOutput, Timestamp: time.Now(), IsError: true, ToolCallID: tc.ID})
+					appendToolReceipt(&messages, &transcript, tc, canceledOutput, ReceiptOutcomeInterrupted)
+					continue
 				}
+				res, ok := resultsByID[tc.ID]
+				if !ok {
+					missingErr := fmt.Errorf("core: missing or uncorrelated result for tool call %q", tc.ID)
+					parallelErr = errors.Join(parallelErr, missingErr)
+					unknownToolErr = errors.Join(unknownToolErr, markUnknownToolOutcome(missingErr))
+					output := "Error: " + missingErr.Error()
+					sendEvent(AgentEvent{Kind: "tool_result", Content: output, Timestamp: time.Now(), IsError: true, ToolCallID: tc.ID})
+					appendToolReceipt(&messages, &transcript, tc, output, ReceiptOutcomeUnknown)
+					continue
+				}
+				if res.Err != nil {
+					logger.Warn("core.loop.tool_error", "tool", res.Name, "err", res.Err)
+					res.Output = "Error: " + res.Err.Error()
+					res.IsError = true
+				}
+				outcome := toolReceiptOutcome(spanCtx, res.Err, res.IsError)
+				sendEvent(AgentEvent{Kind: "tool_result", Content: res.Output, Timestamp: time.Now(), IsError: res.IsError, ToolCallID: res.ID})
+				appendToolReceipt(&messages, &transcript, tc, res.Output, outcome)
+				if outcome == ReceiptOutcomeUnknown && unknownToolErr == nil {
+					unknownToolErr = markUnknownToolOutcome(res.Err)
+				}
+			}
+			if parallelErr != nil || unknownToolErr != nil {
+				runErr := errors.Join(parallelErr, unknownToolErr)
+				span.SetStatus(tracing.SpanStatusError, runErr.Error())
+				sendEvent(errEvent(runErr))
+				return CanonicalRunResult{Events: events, Transcript: transcript}, runErr
 			}
 		} else {
 			// Sequential mode: execute one tool at a time.
-			for _, tc := range resp.ToolCalls {
+			for callIndex, tc := range resp.ToolCalls {
 				if err := spanCtx.Err(); err != nil {
 					logger.Error("core.loop.canceled", "err", err)
 					emitCanceledToolResults(err)
 					sendEvent(errEvent(err))
-					return events, err
+					return CanonicalRunResult{Events: events, Transcript: transcript}, err
 				}
 
 				// Emit a pre-tool-call event so external interceptors
@@ -700,12 +748,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 				if preEv.IsCancelled() {
 					logger.Info("core.loop.tool_canceled", "tool", tc.Name, "id", tc.ID)
 					sendEvent(AgentEvent{Kind: "tool_canceled", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID})
-					messages = append(messages, llm.Message{
-						Role:       llm.RoleTool,
-						ToolCallID: tc.ID,
-						Name:       tc.Name,
-						Content:    "Tool call canceled by interceptor",
-					})
+					appendToolReceipt(&messages, &transcript, tc, "Tool call canceled by interceptor", ReceiptOutcomeInterrupted)
 					continue
 				}
 
@@ -718,20 +761,36 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 					logger.Warn("core.loop.tool_error", "tool", tc.Name, "err", execErr)
 					resultText = "Error: " + execErr.Error()
 					isError = true
-					if spanCtx.Err() != nil {
-						span.SetStatus(tracing.SpanStatusError, execErr.Error())
-						emitCanceledToolResults(execErr)
-						sendEvent(errEvent(execErr))
-						return events, execErr
-					}
 				}
 				sendEvent(AgentEvent{Kind: "tool_result", Content: resultText, Timestamp: time.Now(), IsError: isError, ToolCallID: tc.ID})
-				messages = append(messages, llm.Message{
-					Role:       llm.RoleTool,
-					ToolCallID: tc.ID,
-					Name:       tc.Name,
-					Content:    resultText,
-				})
+				outcome := toolReceiptOutcome(spanCtx, execErr, isError)
+				appendToolReceipt(&messages, &transcript, tc, resultText, outcome)
+				if outcome == ReceiptOutcomeUnknown {
+					for _, undispatched := range resp.ToolCalls[callIndex+1:] {
+						skippedOutput := "Tool call not dispatched because a prior tool outcome is unknown"
+						if spanCtx.Err() != nil {
+							skippedOutput = "Tool call canceled because a prior tool outcome is unknown"
+						}
+						sendEvent(AgentEvent{Kind: "tool_result", Content: skippedOutput, Timestamp: time.Now(), IsError: true, ToolCallID: undispatched.ID})
+						appendToolReceipt(&messages, &transcript, undispatched, skippedOutput, ReceiptOutcomeInterrupted)
+					}
+					unknownErr := markUnknownToolOutcome(execErr)
+					span.SetStatus(tracing.SpanStatusError, unknownErr.Error())
+					sendEvent(errEvent(unknownErr))
+					return CanonicalRunResult{Events: events, Transcript: transcript}, unknownErr
+				}
+				if execErr != nil && spanCtx.Err() != nil {
+					span.SetStatus(tracing.SpanStatusError, execErr.Error())
+					emitCanceledToolResults(execErr)
+					sendEvent(errEvent(execErr))
+					return CanonicalRunResult{Events: events, Transcript: transcript}, execErr
+				}
+				if callIndex+1 < len(resp.ToolCalls) && spanCtx.Err() != nil {
+					cancelErr := spanCtx.Err()
+					emitCanceledToolResults(cancelErr)
+					sendEvent(errEvent(cancelErr))
+					return CanonicalRunResult{Events: events, Transcript: transcript}, cancelErr
+				}
 			}
 		}
 
@@ -759,7 +818,112 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 	span.SetStatus(tracing.SpanStatusError, errMaxIterations.Error())
 	logger.Error("core.loop.max_iterations", "max", l.maxIterations)
 	sendEvent(errEvent(errMaxIterations))
-	return events, errMaxIterations
+	return CanonicalRunResult{Events: events, Transcript: transcript}, errMaxIterations
+}
+
+func transcriptAssistantEntry(resp *llm.Message) (TranscriptEntry, error) {
+	entry := AgentMessage{Role: string(llm.RoleAssistant), Content: resp.Content}
+	if resp.Usage != nil {
+		usage := *resp.Usage
+		entry.Usage = &usage
+	}
+	if resp.ContentBlocks != nil {
+		entry.ContentBlocks = append([]llm.ContentBlock(nil), resp.ContentBlocks...)
+		for i := range entry.ContentBlocks {
+			if resp.ContentBlocks[i].ImageURL != nil {
+				imageURL := *resp.ContentBlocks[i].ImageURL
+				entry.ContentBlocks[i].ImageURL = &imageURL
+			}
+		}
+	}
+	if len(resp.ToolCalls) > 0 {
+		encoded, err := json.Marshal(resp.ToolCalls)
+		if err != nil {
+			return TranscriptEntry{}, fmt.Errorf("core: clone assistant tool calls for transcript: %w", err)
+		}
+		if err := json.Unmarshal(encoded, &entry.ToolCalls); err != nil {
+			return TranscriptEntry{}, fmt.Errorf("core: decode cloned assistant tool calls: %w", err)
+		}
+	}
+	return TranscriptEntry{Message: entry}, nil
+}
+
+func validateCompleteToolCalls(calls []llm.ToolCall) error {
+	if len(calls) > guardedStreamMaxToolCalls {
+		return fmt.Errorf("core: response contains more than %d tool calls", guardedStreamMaxToolCalls)
+	}
+	seen := make(map[string]struct{}, len(calls))
+	var payloadBytes int
+	for _, call := range calls {
+		if call.ID == "" || call.Name == "" {
+			return errors.New("core: tool call is missing its ID or name")
+		}
+		if _, exists := seen[call.ID]; exists {
+			return fmt.Errorf("core: response contains duplicate tool call ID %q", call.ID)
+		}
+		seen[call.ID] = struct{}{}
+		if call.Args != nil {
+			if _, ok := call.Args.(map[string]any); !ok {
+				return fmt.Errorf("core: tool call %q has invalid arguments", call.ID)
+			}
+		}
+		encoded, err := json.Marshal(call)
+		if err != nil {
+			return fmt.Errorf("core: encode tool call %q: %w", call.ID, err)
+		}
+		if len(encoded) > guardedStreamMaxBytes-payloadBytes {
+			return fmt.Errorf("core: tool calls exceed %d-byte payload limit", guardedStreamMaxBytes)
+		}
+		payloadBytes += len(encoded)
+	}
+	return nil
+}
+
+func appendToolReceipt(messages *[]llm.Message, transcript *[]TranscriptEntry, call llm.ToolCall, content, outcome string) {
+	*messages = append(*messages, llm.Message{
+		Role:       llm.RoleTool,
+		ToolCallID: call.ID,
+		Name:       call.Name,
+		Content:    content,
+	})
+	appendTranscriptToolReceipt(transcript, call, content, outcome)
+}
+
+func appendTranscriptToolReceipt(transcript *[]TranscriptEntry, call llm.ToolCall, content, outcome string) {
+	*transcript = append(*transcript, TranscriptEntry{Message: AgentMessage{
+		Role:           string(llm.RoleTool),
+		Content:        content,
+		ToolCallID:     call.ID,
+		ToolName:       call.Name,
+		ReceiptOutcome: outcome,
+	}})
+}
+
+func toolReceiptOutcome(ctx context.Context, err error, isError bool) string {
+	if err != nil {
+		if hasUnknownToolOutcome(err) {
+			return ReceiptOutcomeUnknown
+		}
+		var outcome interface{ OutcomeUnknown() bool }
+		if errors.As(err, &outcome) {
+			if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				return ReceiptOutcomeInterrupted
+			}
+		}
+		if ctx.Err() != nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return ReceiptOutcomeUnknown
+		}
+		return ReceiptOutcomeError
+	}
+	if isError {
+		return ReceiptOutcomeError
+	}
+	return ReceiptOutcomeSuccess
+}
+
+func hasUnknownToolOutcome(err error) bool {
+	var outcome interface{ OutcomeUnknown() bool }
+	return errors.As(err, &outcome) && outcome.OutcomeUnknown()
 }
 
 // messagesToTurnItems converts []llm.Message to []compaction.TurnItem for the
@@ -818,7 +982,13 @@ func turnItemsToMessages(items []compaction.TurnItem) []llm.Message {
 // EventStream so the TUI can render tokens as they arrive. The complete
 // response (with accumulated tool calls) is returned.
 func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel, messages []llm.Message, toolOpts []llm.Option, es EventStream) (*llm.Message, error) {
-	ch, err := model.Stream(ctx, messages, toolOpts...)
+	return l.streamGenerateWithBudget(ctx, model, messages, toolOpts, es, &guardedStreamBudget{}, true)
+}
+
+func (l *LoopAgent) streamGenerateWithBudget(ctx context.Context, model llm.BaseChatModel, messages []llm.Message, toolOpts []llm.Option, es EventStream, budget *guardedStreamBudget, publishIncremental bool) (*llm.Message, error) {
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	ch, err := model.Stream(streamCtx, messages, toolOpts...)
 	if err != nil {
 		// Stream failed — propagate the error directly rather than falling
 		// back to Generate, because Generate would advance the model's
@@ -833,20 +1003,46 @@ func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel,
 	var toolCalls []llm.ToolCall
 	var finishReason string
 	var usage *llm.Usage
-	gotChunk := false
+	finalSeen := false
 
-	for chunk := range ch {
+	for {
+		var chunk llm.MessageChunk
+		var ok bool
+		select {
+		case <-streamCtx.Done():
+			return nil, fmt.Errorf("core: stream canceled: %w", streamCtx.Err())
+		case chunk, ok = <-ch:
+			if !ok {
+				break
+			}
+		}
+		if !ok {
+			break
+		}
 		if chunk.Error != nil {
 			return nil, chunk.Error
 		}
-		gotChunk = true
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("core: stream canceled: %w", ctx.Err())
+		}
+		if finalSeen {
+			return nil, errors.New("core: stream emitted data after its final chunk")
+		}
+		if budget != nil {
+			if err := budget.accountChunk(chunk); err != nil {
+				return nil, err
+			}
+		}
+		if !chunk.Final && len(chunk.ToolCalls) > 0 {
+			return nil, errors.New("core: stream emitted tool calls before the final chunk")
+		}
 		if chunk.Content != "" {
 			contentBuf.WriteString(chunk.Content)
 			// Send incremental events only to the EventStream (real-time
 			// streaming for TUI consumers), not to the returned events slice.
 			// The complete non-incremental "message" event is emitted by the
 			// loop once the response finishes.
-			if es != nil {
+			if publishIncremental && es != nil {
 				_ = es.Send(AgentEvent{ //nolint:errcheck
 					Kind:        "message",
 					Content:     chunk.Content,
@@ -856,6 +1052,7 @@ func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel,
 			}
 		}
 		if chunk.Final {
+			finalSeen = true
 			if len(chunk.ToolCalls) > 0 {
 				toolCalls = chunk.ToolCalls
 			}
@@ -870,19 +1067,30 @@ func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel,
 		}
 	}
 
-	// No chunks at all indicates the model returned an empty response.
-	// Return nil so the loop's nil-response guard fires.
-	if !gotChunk {
-		return nil, nil
+	if ctx.Err() != nil {
+		return nil, fmt.Errorf("core: stream canceled: %w", ctx.Err())
+	}
+	if !finalSeen {
+		return nil, errors.New("core: stream ended without a final chunk")
 	}
 
-	return &llm.Message{
+	response := &llm.Message{
 		Role:         llm.RoleAssistant,
 		Content:      contentBuf.String(),
 		ToolCalls:    toolCalls,
 		FinishReason: finishReason,
 		Usage:        usage,
-	}, nil
+	}
+	if budget != nil {
+		candidateBytes, sizeErr := candidatePayloadBytes(response)
+		if sizeErr != nil {
+			return nil, sizeErr
+		}
+		if candidateBytes > guardedStreamMaxBytes {
+			return nil, fmt.Errorf("core: response segment exceeds %d-byte candidate limit", guardedStreamMaxBytes)
+		}
+	}
+	return response, nil
 }
 
 // generateWithContinuation wraps streamGenerate with automatic truncation
@@ -893,10 +1101,18 @@ func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel,
 // response are partial (JSON args cut off) and are dropped before execution;
 // only tool calls from a non-truncated (finish_reason != "length") response
 // are kept. At most maxContinuationAttempts retries are issued; if the output
-// is still truncated after that, a warning is logged, any remaining partial
-// tool calls are dropped, and the accumulated content is returned.
+// is still truncated after that, the candidate is rejected and no complete
+// assistant turn is returned.
 func (l *LoopAgent) generateWithContinuation(ctx context.Context, model llm.BaseChatModel, messages []llm.Message, toolOpts []llm.Option, es EventStream, logger *slog.Logger) (*llm.Message, error) {
-	resp, err := l.streamGenerate(ctx, model, messages, toolOpts, es)
+	guard, guarded := model.(CompleteResponseGuard)
+	if guarded {
+		if guard.MaxCandidateBytes() != guardedStreamMaxBytes {
+			return nil, fmt.Errorf("core: complete-response guard must advertise the %d-byte candidate limit", guardedStreamMaxBytes)
+		}
+		ctx = llm.WithLoopOwnedContinuation(ctx)
+	}
+	budget := &guardedStreamBudget{}
+	resp, err := l.streamGenerateWithBudget(ctx, model, messages, toolOpts, es, budget, !guarded)
 	if err != nil || resp == nil {
 		return resp, err
 	}
@@ -955,9 +1171,12 @@ func (l *LoopAgent) generateWithContinuation(ctx context.Context, model llm.Base
 
 		logger.Info("core.loop.continuation", "attempt", attempt+1)
 
-		contResp, contErr := l.streamGenerate(ctx, model, contMsgs, toolOpts, es)
-		if contErr != nil || contResp == nil {
-			break
+		contResp, contErr := l.streamGenerateWithBudget(ctx, model, contMsgs, toolOpts, es, budget, !guarded)
+		if contErr != nil {
+			return nil, fmt.Errorf("core: continuation %d failed: %w", attempt+1, contErr)
+		}
+		if contResp == nil {
+			return nil, fmt.Errorf("core: continuation %d returned a nil response", attempt+1)
 		}
 
 		// Merge the continuation into the original response. Content is
@@ -975,23 +1194,59 @@ func (l *LoopAgent) generateWithContinuation(ctx context.Context, model llm.Base
 				resp.Usage.TotalTokens += contResp.Usage.TotalTokens
 			}
 		}
+		candidateBytes, candidateErr := candidatePayloadBytes(resp)
+		if candidateErr != nil {
+			return nil, candidateErr
+		}
+		if candidateBytes > guardedStreamMaxBytes {
+			return nil, fmt.Errorf("core: complete response exceeds %d-byte candidate limit", guardedStreamMaxBytes)
+		}
 	}
 
-	// If the output is still truncated after exhausting all continuation
-	// attempts, drop any remaining partial tool calls so they are not
-	// executed, and log a warning.
+	// A still-truncated response is not a complete assistant turn and must not
+	// be exposed as a successful answer or dispatched as a tool call.
 	if resp.FinishReason == "length" {
-		if len(resp.ToolCalls) > 0 {
-			logger.Warn("partial_tool_calls_dropped", "count", len(resp.ToolCalls))
-			if contSpan != nil {
-				contSpan.AddEvent("partial_tool_calls_dropped",
-					tracing.Attribute{Key: "count", Value: len(resp.ToolCalls)})
-			}
-			droppedCount += len(resp.ToolCalls)
-			resp.ToolCalls = nil
-		}
 		slog.WarnContext(ctx, "core.loop.truncation_max_attempts",
 			"max_attempts", maxContinuationAttempts)
+		return nil, fmt.Errorf("core: response remains truncated after %d continuation attempts", maxContinuationAttempts)
+	}
+
+	candidateBytes, candidateErr := candidatePayloadBytes(resp)
+	if candidateErr != nil {
+		return nil, candidateErr
+	}
+	if candidateBytes > guardedStreamMaxBytes {
+		return nil, fmt.Errorf("core: complete response exceeds %d-byte candidate limit", guardedStreamMaxBytes)
+	}
+	if guarded {
+		if err := validateCompleteToolCalls(resp.ToolCalls); err != nil {
+			return nil, fmt.Errorf("core: reject invalid guarded tool candidate: %w", err)
+		}
+		checked, checkErr := guard.CheckCandidate(ctx, resp.Content)
+		if checkErr != nil {
+			return nil, fmt.Errorf("core: check complete response: %w", checkErr)
+		}
+		if checked == nil {
+			return nil, errors.New("core: complete-response guard returned nil result")
+		}
+		if checked.Sanitized != "" {
+			resp.Content = checked.Sanitized
+		} else if !checked.Allowed {
+			return nil, errors.New("core: complete-response guard denied candidate")
+		}
+		if len(resp.Content) > guard.MaxCandidateBytes() {
+			return nil, fmt.Errorf("core: guarded response exceeds %d-byte candidate limit", guard.MaxCandidateBytes())
+		}
+		candidateBytes, candidateErr = candidatePayloadBytes(resp)
+		if candidateErr != nil {
+			return nil, candidateErr
+		}
+		if candidateBytes > guard.MaxCandidateBytes() {
+			return nil, fmt.Errorf("core: guarded response payload exceeds %d-byte candidate limit", guard.MaxCandidateBytes())
+		}
+		if es != nil && resp.Content != "" {
+			_ = es.Send(AgentEvent{Kind: "message", Content: resp.Content, Timestamp: time.Now(), Incremental: true}) //nolint:errcheck
+		}
 	}
 
 	return resp, nil
@@ -1024,33 +1279,7 @@ func (s *eventStreamSink) Send(content, toolCallID, stream string) error {
 // returned isError flag is propagated from ToolResult.IsError so callers can
 // detect tool errors via a structured marker instead of string matching.
 func (l *LoopAgent) executeTool(ctx context.Context, call tools.ToolCall, es EventStream) (string, bool, error) {
-	if l.tools == nil {
-		return "", false, errors.New("core: agent loop has no tool registry")
-	}
-	def, err := l.tools.Get(ctx, call.Name)
-	if err != nil {
-		return "", false, err
-	}
-	// Check if the tool supports streaming output.
-	if st, ok := def.(tools.StreamingBashTool); ok && es != nil {
-		sink := &eventStreamSink{es: es}
-		result, err := st.ExecuteStreaming(ctx, call, sink)
-		if err != nil {
-			return "", false, err
-		}
-		if result == nil {
-			return "", false, nil
-		}
-		return result.Output, result.IsError, nil
-	}
-	result, err := def.Execute(ctx, call)
-	if err != nil {
-		return "", false, err
-	}
-	if result == nil {
-		return "", false, nil
-	}
-	return result.Output, result.IsError, nil
+	return executeSingleTool(ctx, l.tools, call, es)
 }
 
 // toToolsCall converts an llm.ToolCall (Args is `any`) into a tools.ToolCall
@@ -1072,14 +1301,19 @@ func errEvent(err error) AgentEvent {
 // ch and appends each as a user message to *msgs. This is how steering
 // instructions are injected between LLM iterations: the loop drains the
 // channel at the top of each iteration, before calling the LLM.
-func drainSteerMessages(ch chan string, msgs *[]llm.Message, logger *slog.Logger) {
+func drainSteerMessages(ch chan string, msgs *[]llm.Message, logger *slog.Logger) []string {
+	var consumed []string
 	for {
 		select {
-		case instruction := <-ch:
+		case instruction, ok := <-ch:
+			if !ok {
+				return consumed
+			}
 			*msgs = append(*msgs, llm.Message{Role: llm.RoleUser, Content: instruction})
+			consumed = append(consumed, instruction)
 			logger.Info("core.loop.steer_injected", "instruction", instruction)
 		default:
-			return
+			return consumed
 		}
 	}
 }
@@ -1088,14 +1322,19 @@ func drainSteerMessages(ch chan string, msgs *[]llm.Message, logger *slog.Logger
 // from ch and appends each as a user message to *msgs. This mirrors
 // drainSteerMessages but is called after it so the model sees steering
 // context first, then the follow-up.
-func drainFollowUpMessages(ch chan string, msgs *[]llm.Message, logger *slog.Logger) {
+func drainFollowUpMessages(ch chan string, msgs *[]llm.Message, logger *slog.Logger) []string {
+	var consumed []string
 	for {
 		select {
-		case content := <-ch:
+		case content, ok := <-ch:
+			if !ok {
+				return consumed
+			}
 			*msgs = append(*msgs, llm.Message{Role: llm.RoleUser, Content: content})
+			consumed = append(consumed, content)
 			logger.Info("core.loop.followup_injected", "content_len", len(content))
 		default:
-			return
+			return consumed
 		}
 	}
 }

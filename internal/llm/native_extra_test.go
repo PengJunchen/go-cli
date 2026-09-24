@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -469,6 +470,8 @@ func TestStreamGemini_FunctionCallAccumulation(t *testing.T) {
 		"",
 		`data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"get_weather","args":{"city":"SF"}}}]},"finishReason":"STOP"}]}`,
 		"",
+		`data: {"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2}}`,
+		"",
 	}, "\n")
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -505,6 +508,45 @@ func TestStreamGemini_FunctionCallAccumulation(t *testing.T) {
 	args, ok := tc.Args.(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "SF", args["city"])
+	require.NotNil(t, final.Usage, "usage-only Gemini frame after terminal candidate must be preserved")
+	assert.Equal(t, 5, final.Usage.TotalTokens)
+}
+
+func TestStreamGeminiRejectsCandidatesAfterTerminalFinishReason(t *testing.T) {
+	for name, latePart := range map[string]string{
+		"text":          `{"text":"injected"}`,
+		"function call": `{"functionCall":{"name":"late_action","args":{}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			sseBody := strings.Join([]string{
+				`data: {"candidates":[{"content":{"parts":[{"text":"complete"}]},"finishReason":"STOP"}]}`,
+				"",
+				`data: {"candidates":[{"content":{"parts":[` + latePart + `]}}]}`,
+				"",
+			}, "\n")
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				writeResponse(t, w, sseBody)
+			}))
+			t.Cleanup(server.Close)
+
+			model, _, err := NewGeminiProvider(WithNativeBaseURL(server.URL)).Build(context.Background(), ModelConfig{Model: "m"})
+			require.NoError(t, err)
+			ch, err := model.Stream(context.Background(), nil)
+			require.NoError(t, err)
+			var chunks []MessageChunk
+			for chunk := range ch {
+				chunks = append(chunks, chunk)
+			}
+			require.NotEmpty(t, chunks)
+			assert.Equal(t, "complete", chunks[0].Content)
+			assertStreamFailedWithoutSuccess(t, chunks)
+			for _, chunk := range chunks {
+				assert.NotContains(t, chunk.Content, "injected")
+				assert.Empty(t, chunk.ToolCalls)
+			}
+		})
+	}
 }
 
 // TestStreamGemini_MultipleFunctionCalls verifies that multiple functionCall
@@ -570,12 +612,8 @@ func TestStreamGemini_TextAndToolCallMixed(t *testing.T) {
 		// First chunk: text only.
 		`data: {"candidates":[{"content":{"parts":[{"text":"I'll search "}]}}]}`,
 		"",
-		// Second chunk: functionCall only.
-		`data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"search","args":{"q":"golang"}}}]},"finishReason":"STOP"}]}`,
-		"",
-		// Third chunk: text after the function call (e.g. another candidate
-		// segment).
-		`data: {"candidates":[{"content":{"parts":[{"text":"done"}]}}]}`,
+		// The terminal candidate includes the final text and function call.
+		`data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"search","args":{"q":"golang"}}},{"text":"done"}]},"finishReason":"STOP"}]}`,
 		"",
 	}, "\n")
 
@@ -822,7 +860,7 @@ func TestNativeStreamingBypassesClientTimeout(t *testing.T) {
 			f.Flush()
 		}
 		time.Sleep(200 * time.Millisecond)
-		writeResponse(t, w, "data: {\"choices\":[{\"delta\":{\"content\":\"late\"}}]}\n\ndata: [DONE]\n\n")
+		writeResponse(t, w, "data: {\"choices\":[{\"delta\":{\"content\":\"late\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
 	}))
 	defer srv.Close()
 
@@ -863,4 +901,34 @@ func TestNativeGenerateContextCancel(t *testing.T) {
 
 	_, err = model.Generate(ctx, nil)
 	require.Error(t, err)
+}
+
+func TestClaudeStreamRejectsNonObjectToolArguments(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		for _, event := range []string{
+			`{"type":"message_start","message":{"role":"assistant"}}`,
+			`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_1","name":"read"}}`,
+			`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"null"}}`,
+			`{"type":"message_delta","delta":{"stop_reason":"tool_use"}}`,
+			`{"type":"message_stop"}`,
+		} {
+			_, _ = fmt.Fprintf(w, "event: message\ndata: %s\n\n", event)
+		}
+	}))
+	defer srv.Close()
+
+	provider := NewClaudeProvider(WithNativeBaseURL(srv.URL))
+	model, _, err := provider.Build(context.Background(), ModelConfig{Model: "claude-test"})
+	require.NoError(t, err)
+	stream, err := model.Stream(context.Background(), []Message{{Role: RoleUser, Content: "read"}})
+	require.NoError(t, err)
+	var streamErr error
+	for chunk := range stream {
+		if chunk.Error != nil {
+			streamErr = chunk.Error
+		}
+	}
+	require.ErrorContains(t, streamErr, "arguments must be a JSON object")
 }

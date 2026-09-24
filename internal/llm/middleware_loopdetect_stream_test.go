@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -11,6 +12,48 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type loopDetectCancelModel struct {
+	done chan struct{}
+}
+
+func (*loopDetectCancelModel) Generate(context.Context, []Message, ...Option) (*Message, error) {
+	return nil, fmt.Errorf("unexpected Generate call")
+}
+
+func (m *loopDetectCancelModel) Stream(ctx context.Context, _ []Message, _ ...Option) (<-chan MessageChunk, error) {
+	ch := make(chan MessageChunk)
+	go func() {
+		defer close(m.done)
+		defer close(ch)
+		select {
+		case ch <- MessageChunk{Content: strings.Repeat("x", GuardedStreamMaxBytes+1)}:
+		case <-ctx.Done():
+			return
+		}
+		<-ctx.Done()
+	}()
+	return ch, nil
+}
+
+func TestLoopDetectStreamCapsAndCancelsInnerWorker(t *testing.T) {
+	inner := &loopDetectCancelModel{done: make(chan struct{})}
+	wrapped := NewLoopDetectionModelMiddleware().WrapModel(inner)
+
+	ch, err := wrapped.Stream(context.Background(), nil)
+	require.NoError(t, err)
+	var received []MessageChunk
+	for chunk := range ch {
+		received = append(received, chunk)
+	}
+	require.Len(t, received, 1)
+	require.ErrorContains(t, received[0].Error, "candidate limit")
+	select {
+	case <-inner.done:
+	case <-time.After(time.Second):
+		t.Fatal("inner stream worker did not observe wrapper cancellation")
+	}
+}
 
 // TestLoopDetectStreamRealTimeForwarding verifies that chunks are forwarded
 // in real-time, not buffered until the stream completes.
