@@ -242,11 +242,12 @@ type LoopDetectorConfig struct {
 	SameToolCallThreshold int `json:"same_tool_call_threshold"`
 }
 
-// SandboxConfig controls the workspace sandbox applied to the bash tool.
+// SandboxConfig controls workspace path scopes and resource limits for default tools.
 type SandboxConfig struct {
-	// AllowedPaths restricts command execution to these directories (and
-	// their subdirectories). When empty, the current working directory is
-	// used as a safe default.
+	// AllowedPaths restricts Bash working directories and, when explicitly
+	// nonempty, scopes default file tools to these directories and their
+	// subdirectories. When empty, Bash uses the current working directory as a
+	// safe default and default file tools remain unrestricted.
 	AllowedPaths []string `json:"allowed_paths"`
 	// MaxCPU bounds the CPU time a single command may consume.
 	MaxCPU time.Duration `json:"max_cpu"`
