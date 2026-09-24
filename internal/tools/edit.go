@@ -71,6 +71,19 @@ func (t *EditFileTool) Description() string {
 	return "edit: replaces an old_string block in a file with new_string. Args: file_path (string), old_string (string), new_string (string)."
 }
 
+// Parameters returns the JSON Schema describing the required edit arguments.
+func (t *EditFileTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"file_path":  map[string]any{"type": "string"},
+			"old_string": map[string]any{"type": "string"},
+			"new_string": map[string]any{"type": "string"},
+		},
+		"required": []any{"file_path", "old_string", "new_string"},
+	}
+}
+
 // PromptGuidelines returns usage hints for the edit tool.
 func (t *EditFileTool) PromptGuidelines() []string {
 	return []string{"Use edit to make targeted changes to existing files"}
@@ -100,9 +113,11 @@ func (t *EditFileTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 		return nil, errors.New("edit: missing string argument 'old_string'")
 	}
 
-	var newString string
-	if v, ok := call.Args["new_string"].(string); ok {
-		newString = v
+	newString, ok := call.Args["new_string"].(string)
+	if !ok {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		logger.Error("edit.invalid_new_string", "tool", "edit")
+		return nil, errors.New("edit: missing or non-string argument 'new_string'")
 	}
 
 	abspath, err := resolveAndValidatePath("edit", t.Workdir, path, t.whitelist)

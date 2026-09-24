@@ -2,6 +2,8 @@ package tools_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -177,6 +179,126 @@ func TestMutationWrapper_EditAlsoSerialized(t *testing.T) {
 
 	assert.Equal(t, int32(1), atomic.LoadInt32(&maxConcurrent),
 		"concurrent edits to the same file must be serialized")
+}
+
+func TestMutationQueueRejectsMalformedPayloadWithoutChangingFile(t *testing.T) {
+	cases := []struct {
+		name string
+		tool string
+		args map[string]any
+	}{
+		{
+			name: "write missing content",
+			tool: "write",
+			args: map[string]any{"path": "existing.txt"},
+		},
+		{
+			name: "write wrong content type",
+			tool: "write",
+			args: map[string]any{"path": "existing.txt", "content": true},
+		},
+		{
+			name: "edit missing new_string",
+			tool: "edit",
+			args: map[string]any{"file_path": "existing.txt", "old_string": "target"},
+		},
+		{
+			name: "edit wrong new_string type",
+			tool: "edit",
+			args: map[string]any{"file_path": "existing.txt", "old_string": "target", "new_string": false},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "existing.txt")
+			original := []byte("before target after")
+			require.NoError(t, os.WriteFile(path, original, 0o600))
+			if tc.tool == "write" {
+				tc.args["path"] = path
+			} else {
+				tc.args["file_path"] = path
+			}
+
+			registry := tools.NewDefaultToolRegistry()
+			if tc.tool == "write" {
+				require.NoError(t, registry.Register(context.Background(), tools.NewWriteTool(tools.WithOverwrite(true))))
+			} else {
+				require.NoError(t, registry.Register(context.Background(), tools.NewEditFileTool()))
+			}
+			queue := tools.NewDefaultFileMutationQueue()
+			defer func() {
+				require.NoError(t, queue.(*tools.DefaultFileMutationQueue).Close())
+			}()
+			wrapped := tools.NewMiddlewareToolRegistry(registry, tools.NewMutationQueueWrapper(queue))
+			def, err := wrapped.Get(context.Background(), tc.tool)
+			require.NoError(t, err)
+
+			_, err = def.Execute(context.Background(), tools.ToolCall{Name: tc.tool, Args: tc.args})
+			require.Error(t, err)
+
+			actual, readErr := os.ReadFile(path)
+			require.NoError(t, readErr)
+			assert.Equal(t, original, actual)
+		})
+	}
+}
+
+func TestMutationQueueAllowsExplicitEmptyStrings(t *testing.T) {
+	cases := []struct {
+		name     string
+		tool     string
+		args     map[string]any
+		expected []byte
+	}{
+		{
+			name:     "write empty content",
+			tool:     "write",
+			args:     map[string]any{"path": "existing.txt", "content": ""},
+			expected: []byte{},
+		},
+		{
+			name:     "edit empty new_string",
+			tool:     "edit",
+			args:     map[string]any{"file_path": "existing.txt", "old_string": "target", "new_string": ""},
+			expected: []byte("before  after"),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "existing.txt")
+			require.NoError(t, os.WriteFile(path, []byte("before target after"), 0o600))
+			if tc.tool == "write" {
+				tc.args["path"] = path
+			} else {
+				tc.args["file_path"] = path
+			}
+
+			registry := tools.NewDefaultToolRegistry()
+			if tc.tool == "write" {
+				require.NoError(t, registry.Register(context.Background(), tools.NewWriteTool(tools.WithOverwrite(true))))
+			} else {
+				require.NoError(t, registry.Register(context.Background(), tools.NewEditFileTool()))
+			}
+			queue := tools.NewDefaultFileMutationQueue()
+			defer func() {
+				require.NoError(t, queue.(*tools.DefaultFileMutationQueue).Close())
+			}()
+			wrapped := tools.NewMiddlewareToolRegistry(registry, tools.NewMutationQueueWrapper(queue))
+			def, err := wrapped.Get(context.Background(), tc.tool)
+			require.NoError(t, err)
+
+			_, err = def.Execute(context.Background(), tools.ToolCall{Name: tc.tool, Args: tc.args})
+			require.NoError(t, err)
+
+			actual, readErr := os.ReadFile(path)
+			require.NoError(t, readErr)
+			assert.Equal(t, tc.expected, actual)
+		})
+	}
 }
 
 // mockMutationTool is a test ToolDefinition with a configurable Execute function.

@@ -198,17 +198,57 @@ func TestWriteMissingContentArg(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	dir := t.TempDir()
+	path := filepath.Join(dir, "empty.txt")
+	require.NoError(t, os.WriteFile(path, []byte("keep this content"), 0o600))
 	tool := NewWriteTool(WithWriteWorkdir(dir), WithOverwrite(true))
 
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"path": "empty.txt"},
 	})
-	require.NoError(t, err)
-	assert.NotNil(t, res)
+	require.Error(t, err)
+	assert.Nil(t, res)
 
-	data, rerr := os.ReadFile(filepath.Join(dir, "empty.txt"))
+	data, rerr := os.ReadFile(path)
 	require.NoError(t, rerr)
-	assert.Empty(t, data)
+	assert.Equal(t, []byte("keep this content"), data)
+}
+
+func TestWriteWrongContentTypeDoesNotChangeFile(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "existing.txt")
+	require.NoError(t, os.WriteFile(path, []byte("keep this content"), 0o600))
+	tool := NewWriteTool(WithWriteWorkdir(dir), WithOverwrite(true))
+
+	res, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"path": "existing.txt", "content": true},
+	})
+	require.Error(t, err)
+	assert.Nil(t, res)
+
+	data, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	assert.Equal(t, []byte("keep this content"), data)
+}
+
+func TestWriteParametersRequireContent(t *testing.T) {
+	ctx := context.Background()
+	reg := NewDefaultToolRegistry()
+	require.NoError(t, reg.Register(ctx, NewWriteTool()))
+	validator := NewSchemaValidator(reg)
+
+	_, err := validator.PrepareArguments(ctx, ToolCall{
+		Name: "write",
+		Args: map[string]any{"path": "existing.txt"},
+	})
+	require.Error(t, err)
+
+	_, err = validator.PrepareArguments(ctx, ToolCall{
+		Name: "write",
+		Args: map[string]any{"path": "existing.txt", "content": false},
+	})
+	require.Error(t, err)
 }
 
 // TestWriteWithFileTrackerOption verifies that WithFileTracker sets the
