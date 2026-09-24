@@ -9,6 +9,7 @@ import (
 
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // renderTheme resolves the theme to apply, falling back to a light-safe dark
@@ -32,31 +33,17 @@ func logRender(ctx context.Context, renderer, contentType string, outLen int) {
 
 // wrapWidth wraps text to the given width (0 or negative means no wrapping).
 func wrapWidth(text string, width int) string {
-	if width <= 0 || len(text) <= width {
-		return text
-	}
-	return stripANSI(text, width)
+	return wrapCellText(text, width)
 }
 
-// stripANSI returns a best-effort wrapped copy of text limited to maxCols
-// printable characters per line, ignoring ANSI escape sequences.
+// stripANSI removes terminal styling and wraps the remaining plain text to
+// maxCols cells. It always removes ANSI instead of preserving safe styling.
 func stripANSI(text string, maxCols int) string {
-	var sb strings.Builder
-	col := 0
-	for _, r := range text {
-		if r == '\n' {
-			sb.WriteRune('\n')
-			col = 0
-			continue
-		}
-		if col >= maxCols {
-			sb.WriteRune('\n')
-			col = 0
-		}
-		sb.WriteRune(r)
-		col++
+	plain := ansi.Strip(safeTerminalText(text))
+	if maxCols <= 0 {
+		return plain
 	}
-	return sb.String()
+	return ansi.GraphemeWidth.Hardwrap(plain, maxCols, true)
 }
 
 // ---------- markdown ----------

@@ -306,14 +306,14 @@ func (m *AccordionModel) RenderView(width, height int, toolOnly bool) string {
 	return strings.Join(lines, "\n")
 }
 
-// truncateLine clips a line to at most width visible display columns,
-// handling ANSI escape sequences correctly via lipgloss. An ellipsis is
-// not appended because lipgloss.MaxWidth handles the truncation.
+// truncateLine clips a line to at most width terminal cells without splitting
+// graphemes or terminal sequences. It does not append an ellipsis.
 func truncateLine(line string, width int) string {
-	if width <= 0 || lipgloss.Width(line) <= width {
-		return line
+	safe := safeTerminalText(line)
+	if width <= 0 || cellWidth(safe) <= width {
+		return safe
 	}
-	return lipgloss.NewStyle().MaxWidth(width).Render(line)
+	return clipCells(safe, width)
 }
 
 // truncateToolResult truncates a tool_result entry's Full content to
