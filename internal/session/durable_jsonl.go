@@ -6,6 +6,7 @@ import (
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 )
@@ -284,6 +286,9 @@ func (s *durableJSONLStore) AppendAndSync(ctx context.Context, entries ...Sessio
 	newRows := make([]SessionEntry, 0, len(entries))
 	var nextSeq = s.maxSeq
 	for i, input := range entries {
+		if err := validateDurableEntryJSONValues(input); err != nil {
+			return nil, fmt.Errorf("session: durable entry at index %d has unsupported JSON values: %w", i, err)
+		}
 		row := *input.clone()
 		if row.ID == "" || row.Type == "" {
 			return nil, fmt.Errorf("session: durable entry at index %d requires ID and type", i)
@@ -350,13 +355,6 @@ func (s *durableJSONLStore) AppendAndSync(ctx context.Context, entries ...Sessio
 
 		nextSeq++
 		row.Seq = nextSeq
-		encoded, err := json.Marshal(row)
-		if err != nil {
-			return nil, fmt.Errorf("session: serialize durable entry %q: %w", row.ID, err)
-		}
-		if len(encoded) > maxDurableJSONLineBytes {
-			return nil, fmt.Errorf("session: serialized entry %q exceeds %d bytes", row.ID, maxDurableJSONLineBytes)
-		}
 		staged[row.ID] = row.clone()
 		available[row.ID] = row.clone()
 		newRows = append(newRows, row)
@@ -364,6 +362,17 @@ func (s *durableJSONLStore) AppendAndSync(ctx context.Context, entries ...Sessio
 	}
 	if len(newRows) == 0 {
 		return cloneSessionEntries(canonical), nil
+	}
+	existingRows, err := entriesInSequence(s.entries)
+	if err != nil {
+		return nil, err
+	}
+	branchRows := append(existingRows, newRows...)
+	if err := validateDurableBranchJournal(branchRows); err != nil {
+		return nil, err
+	}
+	if err := validateDurableTranscriptCoordinates(branchRows); err != nil {
+		return nil, err
 	}
 	candidateActiveLeafID := s.activeLeafID
 	candidateActiveBranchID := s.activeBranchID
@@ -379,26 +388,32 @@ func (s *durableJSONLStore) AppendAndSync(ctx context.Context, entries ...Sessio
 		return nil, fmt.Errorf("session: validate durable branch projection: %w", err)
 	}
 	candidateView, err := durableSessionView(s.sessionID, candidateActiveBranchID, nextSeq, branchEntries)
-	if err != nil {
+	deferViewUpdate := errors.Is(err, errUnclosedToolCallGroup)
+	if err != nil && !deferViewUpdate {
 		return nil, fmt.Errorf("session: validate durable session view: %w", err)
 	}
 	newByID := make(map[string]*SessionEntry, len(newRows))
 	for i := range newRows {
 		newByID[newRows[i].ID] = newRows[i].clone()
 	}
+	var serializedBatch bytes.Buffer
 	for _, row := range newRows {
 		encoded, err := json.Marshal(row)
 		if err != nil {
 			return nil, fmt.Errorf("session: serialize durable entry %q: %w", row.ID, err)
 		}
-		if _, err := s.buffered.Write(encoded); err != nil {
-			s.poisoned = true
-			return nil, fmt.Errorf("session: append durable entry %q: %w", row.ID, err)
+		if len(encoded) > maxDurableJSONLineBytes {
+			return nil, fmt.Errorf("session: serialized entry %q exceeds %d bytes", row.ID, maxDurableJSONLineBytes)
 		}
-		if err := s.buffered.WriteByte('\n'); err != nil {
-			s.poisoned = true
-			return nil, fmt.Errorf("session: append durable entry delimiter %q: %w", row.ID, err)
-		}
+		serializedBatch.Write(encoded)
+		serializedBatch.WriteByte('\n')
+	}
+	if written, err := s.buffered.Write(serializedBatch.Bytes()); err != nil {
+		s.poisoned = true
+		return nil, fmt.Errorf("session: append durable entry batch: %w", err)
+	} else if written != serializedBatch.Len() {
+		s.poisoned = true
+		return nil, fmt.Errorf("session: append durable entry batch: %w", io.ErrShortWrite)
 	}
 	if err := s.buffered.Flush(); err != nil {
 		s.poisoned = true
@@ -415,7 +430,9 @@ func (s *durableJSONLStore) AppendAndSync(ctx context.Context, entries ...Sessio
 	s.maxSeq = nextSeq
 	s.activeLeafID = candidateActiveLeafID
 	s.activeBranchID = candidateActiveBranchID
-	s.view = candidateView
+	if !deferViewUpdate {
+		s.view = candidateView
+	}
 	return cloneSessionEntries(canonical), nil
 }
 
@@ -607,6 +624,12 @@ func validateLoadedDurableEntries(entries []SessionEntry, sessionID string) (map
 			}
 		}
 		byID[entry.ID] = entry.clone()
+	}
+	if err := validateDurableBranchJournal(entries); err != nil {
+		return nil, 0, "", "", "", err
+	}
+	if err := validateDurableTranscriptCoordinates(entries); err != nil {
+		return nil, 0, "", "", "", err
 	}
 	return byID, maxSeq, sessionLabel, activeBranch, activeLeaf, nil
 }
@@ -876,6 +899,80 @@ func canonicalEntryPayload(entry SessionEntry) ([]byte, string, error) {
 	}
 	digest := sha256Bytes(encoded)
 	return encoded, "sha256:" + hex.EncodeToString(digest[:]), nil
+}
+
+func validateDurableEntryJSONValues(entry SessionEntry) error {
+	for callIndex, call := range entry.ToolCalls {
+		if err := validateProtocolJSONArgument(call.Args); err != nil {
+			return fmt.Errorf("tool call %d arguments: %w", callIndex, err)
+		}
+	}
+	return nil
+}
+
+func validateProtocolJSONArgument(value any) error {
+	nodes := 0
+	return validateProtocolJSONValue(reflect.ValueOf(value), 0, &nodes)
+}
+
+func validateProtocolJSONValue(value reflect.Value, depth int, nodes *int) error {
+	if !value.IsValid() {
+		return nil
+	}
+	(*nodes)++
+	if *nodes > maxDurableJSONLineBytes || depth > 128 {
+		return errors.New("argument graph exceeds supported JSON depth or node limit")
+	}
+	if value.Kind() == reflect.Interface {
+		if value.IsNil() {
+			return nil
+		}
+		return validateProtocolJSONValue(value.Elem(), depth+1, nodes)
+	}
+	valueType := value.Type()
+	jsonMarshalerType := reflect.TypeOf((*json.Marshaler)(nil)).Elem()
+	textMarshalerType := reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
+	if valueType.Implements(jsonMarshalerType) || valueType.Implements(textMarshalerType) {
+		return fmt.Errorf("custom marshaler %s is not a protocol JSON value", valueType)
+	}
+	if valueType == reflect.TypeOf(json.Number("")) {
+		return nil
+	}
+	switch value.Kind() {
+	case reflect.Map:
+		if value.IsNil() {
+			return nil
+		}
+		if valueType.Key() != reflect.TypeOf("") {
+			return fmt.Errorf("map key type %s is not a JSON object key", valueType.Key())
+		}
+		iterator := value.MapRange()
+		for iterator.Next() {
+			if err := validateProtocolJSONValue(iterator.Value(), depth+1, nodes); err != nil {
+				return err
+			}
+		}
+	case reflect.Slice, reflect.Array:
+		if value.Kind() == reflect.Slice && value.IsNil() {
+			return nil
+		}
+		if value.Kind() == reflect.Slice && value.Type().Elem().Kind() == reflect.Uint8 {
+			return fmt.Errorf("byte slice %s is not a protocol JSON array", valueType)
+		}
+		for index := 0; index < value.Len(); index++ {
+			if err := validateProtocolJSONValue(value.Index(index), depth+1, nodes); err != nil {
+				return err
+			}
+		}
+	case reflect.Bool, reflect.String,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64:
+		return nil
+	default:
+		return fmt.Errorf("value type %s is not a protocol JSON value", valueType)
+	}
+	return nil
 }
 
 func sha256Bytes(payload []byte) [32]byte {
