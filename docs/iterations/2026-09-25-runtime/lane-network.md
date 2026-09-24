@@ -58,6 +58,14 @@ The focused output is in [network-boundary-targeted-green.log](evidence/network-
 
 Unknown tool outcomes expose `OutcomeUnknown() bool` through a stable error interface, and the wrapper preserves the underlying error chain with `Unwrap` for the R1 core to consume. SDK `ReadString` remains a blocking read: context cancellation is checked between lines and cannot interrupt an in-flight read. That existing lifecycle limit remains an R6 follow-up and is not claimed as closed here.
 
+## Independent review follow-up
+
+The review found eight CLI MCP tests whose mock servers always returned ID 0. The shared `writeMockMCPResult` fixture helper now reads and echoes the request's JSON-RPC ID, so initialize, initialized, and tools/list responses follow the live request. The exact eight-test selection first failed with request-ID mismatch and then passed; red and green logs are [cli-mcp-fixtures-red.log](evidence/cli-mcp-fixtures-red.log) and [cli-mcp-fixtures-green.log](evidence/cli-mcp-fixtures-green.log).
+
+`parseJSONRPCResponse` now rejects duplicate top-level JSON object members before decoding the envelope. Side-effect fixtures cover conflicting duplicate IDs whose last value matches the request, duplicate `result`, and duplicate `error`; each is an `OutcomeUnknown` failure and the server-side effect counter remains exactly one. A same-origin redirect positive control also verifies that redirected GET, initialize, and initialized requests arrive with the configured header and bearer credentials. The new red and targeted race green output is in [network-review-red.log](evidence/network-review-red.log) and [network-review-targeted-green.log](evidence/network-review-targeted-green.log).
+
+After the fixes, the full CLI race suite passed (`GOMAXPROCS=2`, `-p 2`); its output is [cli-mcp-fixtures-race.log](evidence/cli-mcp-fixtures-race.log). The full MCP race suite passed with the same limits; its output is [network-review-race.log](evidence/network-review-race.log). ACP and repository-wide verification were not repeated because these review follow-ups touch only CLI test fixtures and MCP response parsing/tests.
+
 ## Commits
 
 - `bc50965c87b08e3ca6ad323327ec92674e536888` — reject unauthenticated wildcard binds.

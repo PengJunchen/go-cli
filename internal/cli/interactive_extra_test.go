@@ -154,12 +154,9 @@ func TestInteractiveCmd_RegisterMCPTools_StdioServer(t *testing.T) {
 func TestInteractiveCmd_RegisterMCPTools_SSEServer(t *testing.T) {
 	ctx := t.Context()
 	srv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodPost {
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"sse-tool","description":"An SSE tool"}]}}`)) //nolint:errcheck
-		} else {
-			_, _ = w.Write([]byte(`{}`)) //nolint:errcheck
-		}
+		writeMockMCPResult(w, r, map[string]any{
+			"tools": []map[string]any{{"name": "sse-tool", "description": "An SSE tool"}},
+		})
 	}))
 	defer srv.Close()
 

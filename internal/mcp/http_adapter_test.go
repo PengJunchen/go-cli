@@ -306,6 +306,68 @@ func TestHTTPAdapterRejectsCrossOriginRedirectBeforeCredentials(t *testing.T) {
 	assert.Zero(t, foreignRequests.Load(), "foreign redirect target must receive no request")
 }
 
+func TestHTTPAdapterAllowsSameOriginRedirectWithCredentials(t *testing.T) {
+	t.Parallel()
+
+	var redirectedRequests atomic.Int32
+	var missingCredentials atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			http.Redirect(w, r, "/final", http.StatusTemporaryRedirect)
+			return
+		}
+		if r.URL.Path != "/final" {
+			http.NotFound(w, r)
+			return
+		}
+		redirectedRequests.Add(1)
+		if r.Header.Get("X-MCP-Canary") != "header-secret" || r.Header.Get("Authorization") != "Bearer bearer-secret" {
+			missingCredentials.Add(1)
+		}
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		var request struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if request.Method == "notifications/initialized" {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		response := map[string]any{
+			"jsonrpc": "2.0",
+			"id":      request.ID,
+			"result": map[string]any{
+				"protocolVersion": LatestProtocolVersion,
+				"capabilities":    map[string]any{},
+				"serverInfo":      map[string]any{"name": "redirect-test", "version": "1.0"},
+			},
+		}
+		if err := json.NewEncoder(w).Encode(response); err != nil {
+			t.Errorf("encode redirected MCP response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	adapter := NewHTTPClientAdapter(MCPServerConfig{
+		Name:        "srv",
+		Transport:   MCPTransportSSE,
+		URL:         srv.URL + "/start",
+		Headers:     map[string]string{"X-MCP-Canary": "header-secret"},
+		BearerToken: "bearer-secret",
+	})
+	require.NoError(t, adapter.Connect(context.Background()))
+	assert.GreaterOrEqual(t, redirectedRequests.Load(), int32(3), "GET, initialize, and initialized notification should reach the same-origin redirect target")
+	assert.Zero(t, missingCredentials.Load(), "same-origin redirects must preserve configured credentials")
+}
+
 func TestHTTPAdapterCallToolLostResponseHasUnknownOutcome(t *testing.T) {
 	t.Parallel()
 
@@ -408,6 +470,29 @@ func TestHTTPAdapterCallToolUntrustedResponsesHaveUnknownOutcome(t *testing.T) {
 			},
 		},
 		{
+			name:       "duplicate response ID",
+			statusCode: http.StatusOK,
+			response: func(id int64) []byte {
+				// The final value matches the request ID, but the earlier value
+				// makes the envelope ambiguous and must not be accepted.
+				return []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"id":%d,"result":{"content":[]}}`, id+1, id))
+			},
+		},
+		{
+			name:       "duplicate result",
+			statusCode: http.StatusOK,
+			response: func(id int64) []byte {
+				return []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":{"content":[]},"result":{"content":[]}}`, id))
+			},
+		},
+		{
+			name:       "duplicate error",
+			statusCode: http.StatusOK,
+			response: func(id int64) []byte {
+				return []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"error":{"code":-32000,"message":"failed"},"error":{"code":-32000,"message":"failed again"}}`, id))
+			},
+		},
+		{
 			name:       "error HTTP status",
 			statusCode: http.StatusServiceUnavailable,
 			response: func(id int64) []byte {
@@ -472,6 +557,7 @@ func TestHTTPAdapterCallToolUntrustedResponsesHaveUnknownOutcome(t *testing.T) {
 			assert.Nil(t, result)
 			assert.Contains(t, err.Error(), "outcome unknown")
 			assert.Contains(t, err.Error(), "may have executed")
+			assertToolOutcomeUnknown(t, err)
 			assert.EqualValues(t, 1, sideEffects.Load(), "the action must be counted once before its response is rejected")
 		})
 	}
