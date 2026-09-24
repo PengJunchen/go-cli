@@ -76,6 +76,22 @@ func (f *DispatchFence) Snapshot() DispatchFenceSnapshot {
 	return f.generations
 }
 
+// read runs a short, read-only callback while holding the fence's read lock.
+// Registry implementations use it to capture definition metadata and the
+// matching generation tuple without a check-then-read gap.
+func (f *DispatchFence) read(callback func(DispatchFenceSnapshot)) error {
+	if f == nil {
+		return ErrDispatchFenceUnavailable
+	}
+	if callback == nil {
+		return errors.New("tools: dispatch fence reader is nil")
+	}
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	callback(f.generations)
+	return nil
+}
+
 // Publish applies a short state update under the fence and advances its
 // generation domain. When expected is non-nil, the complete three-domain
 // snapshot must still match; this prevents an approval-cache update from
@@ -107,6 +123,29 @@ func (f *DispatchFence) Publish(domain DispatchFenceDomain, expected *DispatchFe
 	case DispatchFencePlan:
 		f.generations.Plan++
 	}
+	return f.generations, nil
+}
+
+// PublishApprovalGrant publishes a monotonic positive approval-cache grant
+// without invalidating other permits prepared from the same policy snapshot.
+// The complete generation tuple must still match expected. Revocation,
+// replacement, mode changes, and other decisions that can remove authority
+// must use Publish(DispatchFenceApproval, ...) so existing permits become
+// stale.
+func (f *DispatchFence) PublishApprovalGrant(expected DispatchFenceSnapshot, update func()) (DispatchFenceSnapshot, error) {
+	if f == nil {
+		return DispatchFenceSnapshot{}, ErrDispatchFenceUnavailable
+	}
+	if update == nil {
+		return DispatchFenceSnapshot{}, errors.New("tools: approval grant update is nil")
+	}
+
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.generations != expected {
+		return f.generations, ErrDispatchFenceChanged
+	}
+	update()
 	return f.generations, nil
 }
 
@@ -500,12 +539,14 @@ type PreparedToolPolicy func(context.Context, PreparedPolicyRequest) (PreparedPo
 
 // ToolCallPreparer prepares a tool call without invoking its executor.
 type ToolCallPreparer interface {
+	toolCallPreparerCapability()
 	PrepareToolCall(context.Context, ToolCall) (PreparedInvocation, error)
 }
 
 // PreparedInvocation is the one-use dispatch capability returned after schema
 // validation and policy approval.
 type PreparedInvocation interface {
+	preparedInvocationCapability()
 	ToolIdentity() TrustedToolIdentity
 	EffectSet() TrustedEffectSet
 	SchemaDigest() [32]byte
@@ -549,6 +590,8 @@ type preparedInvocation struct {
 }
 
 var _ PreparedInvocation = (*preparedInvocation)(nil)
+
+func (*preparedInvocation) preparedInvocationCapability() {}
 
 func newPreparedInvocation(config preparedInvocationConfig) *preparedInvocation {
 	return &preparedInvocation{

@@ -34,6 +34,53 @@ func TestDispatchFencePublishRejectsStaleFullSnapshot(t *testing.T) {
 	assert.Equal(t, updated, fence.Snapshot())
 }
 
+func TestDispatchFencePublishApprovalGrantAllowsParallelMonotonicGrants(t *testing.T) {
+	fence := NewDispatchFence()
+	expected := fence.Snapshot()
+	updates := 0
+	type grantResult struct {
+		snapshot DispatchFenceSnapshot
+		err      error
+	}
+	results := make(chan grantResult, 2)
+
+	for range 2 {
+		go func() {
+			snapshot, err := fence.PublishApprovalGrant(expected, func() { updates++ })
+			results <- grantResult{snapshot: snapshot, err: err}
+		}()
+	}
+
+	first := <-results
+	second := <-results
+	require.NoError(t, first.err)
+	require.NoError(t, second.err)
+	assert.Equal(t, expected, first.snapshot)
+	assert.Equal(t, expected, second.snapshot)
+	assert.Equal(t, expected, fence.Snapshot(), "positive grants do not stale permits prepared from the same policy tuple")
+	assert.Equal(t, 2, updates, "both concurrent positive grants publish")
+}
+
+func TestDispatchFencePublishApprovalGrantRejectsStaleAnyDomain(t *testing.T) {
+	for _, domain := range []DispatchFenceDomain{DispatchFenceRegistry, DispatchFenceApproval, DispatchFencePlan} {
+		t.Run(map[DispatchFenceDomain]string{
+			DispatchFenceRegistry: "registry",
+			DispatchFenceApproval: "approval_revoke_or_mode_change",
+			DispatchFencePlan:     "plan",
+		}[domain], func(t *testing.T) {
+			fence := NewDispatchFence()
+			stale := fence.Snapshot()
+			_, err := fence.Publish(domain, nil, func() {})
+			require.NoError(t, err)
+
+			updated := false
+			_, err = fence.PublishApprovalGrant(stale, func() { updated = true })
+			require.ErrorIs(t, err, ErrDispatchFenceChanged)
+			assert.False(t, updated, "a stale cache grant must not publish")
+		})
+	}
+}
+
 func TestDispatchFenceCommitChecksSnapshotBeforeMark(t *testing.T) {
 	fence := NewDispatchFence()
 	initial := fence.Snapshot()
