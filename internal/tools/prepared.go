@@ -31,6 +31,27 @@ var (
 	// ErrPreparedValueNotJSON indicates that a call or schema contains a value
 	// outside the supported JSON protocol tree.
 	ErrPreparedValueNotJSON = errors.New("tools: prepared value is not JSON-compatible")
+	// ErrPreparedToolPolicyUnavailable indicates that a controlled registry has
+	// no complete prepared policy and execution-stage configuration.
+	ErrPreparedToolPolicyUnavailable = errors.New("tools: prepared tool policy is unavailable")
+	// ErrPreparedToolPolicyDenied indicates that the prepared policy rejected
+	// the normalized call.
+	ErrPreparedToolPolicyDenied = errors.New("tools: prepared tool policy denied the call")
+	// ErrPreparedCallMutation indicates that an execution decorator attempted
+	// to change the normalized call after policy approval.
+	ErrPreparedCallMutation = errors.New("tools: execution decorator changed the frozen tool call")
+	// ErrPreparedProxyNameMismatch indicates that a protected definition proxy
+	// was asked to execute a different tool than the one it represents.
+	ErrPreparedProxyNameMismatch = errors.New("tools: protected tool proxy name does not match the call")
+	// ErrPreparedMutationQueueUnavailable indicates that a mutation queue does
+	// not support captured prepared invocations.
+	ErrPreparedMutationQueueUnavailable = errors.New("tools: prepared mutation queue is unavailable")
+	// ErrPreparedNormalizerUnsupported indicates that a configured preparer is
+	// not a reviewed pure normalizer and cannot run before the policy callback.
+	ErrPreparedNormalizerUnsupported = errors.New("tools: prepared argument normalizer is unsupported")
+	// ErrPreparedOpaqueWrapperUnsupported indicates that a legacy wrapper has
+	// not been assigned to a reviewed prepared stage and cannot be bypassed.
+	ErrPreparedOpaqueWrapperUnsupported = errors.New("tools: opaque legacy tool wrapper is unsupported for prepared dispatch")
 )
 
 // DispatchFenceDomain identifies a shared mutable state source that can
@@ -637,6 +658,18 @@ func (p *preparedInvocation) Dispatch(ctx context.Context) (*ToolResult, error) 
 		return nil, err
 	}
 	if p.execute == nil {
+		return nil, ErrPreparedInvocationUnavailable
+	}
+	if err := validatePreparedContext(ctx); err != nil {
+		return nil, err
+	}
+	return p.commitAndInvoke(ctx)
+}
+
+// commitAndInvoke performs final generation validation and invokes the exact
+// captured executor after public admission has been consumed.
+func (p *preparedInvocation) commitAndInvoke(ctx context.Context) (*ToolResult, error) {
+	if p == nil || p.execute == nil {
 		return nil, ErrPreparedInvocationUnavailable
 	}
 	if err := validatePreparedContext(ctx); err != nil {

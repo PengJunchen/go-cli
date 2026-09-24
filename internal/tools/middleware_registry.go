@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 )
 
 // ToolExecutorWrapper wraps a tool execution function, intercepting the call
@@ -14,10 +15,10 @@ import (
 // call before delegating to next.
 type ToolExecutorWrapper func(next func(ctx context.Context, call ToolCall) (*ToolResult, error)) func(ctx context.Context, call ToolCall) (*ToolResult, error)
 
-// MiddlewareToolRegistry is a ToolRegistry decorator that intercepts Get
-// to wrap the returned ToolDefinition's Execute method with one or more
-// ToolExecutorWrapper functions. Register and List delegate directly to
-// the inner registry.
+// MiddlewareToolRegistry is a ToolRegistry decorator that returns protected
+// proxies from Get and List. Legacy wrappers remain available for unprepared
+// execution; configured prepared dispatch pins the definition and runs only
+// explicitly configured execution stages.
 //
 // This enables approval gates, mutation queues, and other cross-cutting
 // concerns to be applied without modifying LoopAgent's core structure.
@@ -28,9 +29,10 @@ type MiddlewareToolRegistry struct {
 
 // Compile-time interface guarantees.
 var (
-	_ ToolRegistry            = (*MiddlewareToolRegistry)(nil)
-	_ DispatchFenceProvider   = (*MiddlewareToolRegistry)(nil)
-	_ TrustedControlRegistrar = (*MiddlewareToolRegistry)(nil)
+	_ ToolRegistry                = (*MiddlewareToolRegistry)(nil)
+	_ DispatchFenceProvider       = (*MiddlewareToolRegistry)(nil)
+	_ TrustedControlRegistrar     = (*MiddlewareToolRegistry)(nil)
+	_ TrustedNetworkReadRegistrar = (*MiddlewareToolRegistry)(nil)
 )
 
 // NewMiddlewareToolRegistry creates a decorator around inner that applies
@@ -100,6 +102,24 @@ func (r *MiddlewareToolRegistry) RegisterTrustedControl(ctx context.Context, def
 	return registrar.RegisterTrustedControl(ctx, def)
 }
 
+// RegisterTrustedNetworkRead forwards the narrow reviewed network-reader
+// capability when the wrapped registry supports it.
+func (r *MiddlewareToolRegistry) RegisterTrustedNetworkRead(ctx context.Context, def ToolDefinition) error {
+	registrar, ok := r.inner.(TrustedNetworkReadRegistrar)
+	if !ok {
+		return ErrTrustedNetworkReadRegistrationUnavailable
+	}
+	return registrar.RegisterTrustedNetworkRead(ctx, def)
+}
+
+func (r *MiddlewareToolRegistry) registerTrustedWorkspaceWrite(ctx context.Context, def ToolDefinition) error {
+	registrar, ok := r.inner.(trustedWorkspaceWriteRegistrar)
+	if !ok {
+		return ErrPreparedRegistrationUnavailable
+	}
+	return registrar.registerTrustedWorkspaceWrite(ctx, def)
+}
+
 func (r *MiddlewareToolRegistry) toolRegistrationSnapshot(ctx context.Context, name string) (registeredToolSnapshot, error) {
 	provider, ok := r.inner.(registrationSnapshotProvider)
 	if !ok {
@@ -108,23 +128,43 @@ func (r *MiddlewareToolRegistry) toolRegistrationSnapshot(ctx context.Context, n
 	return provider.toolRegistrationSnapshot(ctx, name)
 }
 
-// Get returns a wrapped ToolDefinition whose Execute method passes through
-// the configured wrappers before reaching the underlying tool.
+// Get returns a protected proxy whose Execute method uses prepared dispatch
+// when configured, or the legacy wrappers when it is not.
 func (r *MiddlewareToolRegistry) Get(ctx context.Context, name string) (ToolDefinition, error) {
 	def, err := r.inner.Get(ctx, name)
 	if err != nil {
 		return nil, err
 	}
-	if len(r.wrappers) == 0 {
-		return def, nil
-	}
-	return &wrappedToolDef{def: def, wrappers: r.wrappers}, nil
+	return newProtectedToolDefinition(r, def, r.wrappers)
 }
 
-// List delegates to the inner registry. The returned definitions are the
-// original (unwrapped) ones; wrapping happens lazily in Get.
+// List returns protected proxies for every eagerly registered definition and
+// each deferred placeholder. It never exposes raw executable definitions.
 func (r *MiddlewareToolRegistry) List(ctx context.Context) ([]ToolDefinition, error) {
-	return r.inner.List(ctx)
+	defs, err := r.inner.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	protected := make([]ToolDefinition, 0, len(defs))
+	for _, def := range defs {
+		if def == nil {
+			return nil, errors.New("tools: registry returned a nil definition")
+		}
+		if _, isDeferredPlaceholder := def.(*deferredStub); isDeferredPlaceholder {
+			wrapped, wrapErr := newProtectedToolDefinition(r, def, r.wrappers)
+			if wrapErr != nil {
+				return nil, wrapErr
+			}
+			protected = append(protected, wrapped)
+			continue
+		}
+		wrapped, getErr := r.Get(ctx, def.Name())
+		if getErr != nil {
+			return nil, getErr
+		}
+		protected = append(protected, wrapped)
+	}
+	return protected, nil
 }
 
 // Version delegates to the inner registry when it supports versioning. This

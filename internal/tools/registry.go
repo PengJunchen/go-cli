@@ -31,11 +31,13 @@ type DefaultToolRegistry struct {
 }
 
 var (
-	_ ToolRegistry                 = (*DefaultToolRegistry)(nil)
-	_ DispatchFenceProvider        = (*DefaultToolRegistry)(nil)
-	_ TrustedControlRegistrar      = (*DefaultToolRegistry)(nil)
-	_ registrationSnapshotProvider = (*DefaultToolRegistry)(nil)
-	_ preparedToolPipelineProvider = (*DefaultToolRegistry)(nil)
+	_ ToolRegistry                   = (*DefaultToolRegistry)(nil)
+	_ DispatchFenceProvider          = (*DefaultToolRegistry)(nil)
+	_ TrustedControlRegistrar        = (*DefaultToolRegistry)(nil)
+	_ TrustedNetworkReadRegistrar    = (*DefaultToolRegistry)(nil)
+	_ trustedWorkspaceWriteRegistrar = (*DefaultToolRegistry)(nil)
+	_ registrationSnapshotProvider   = (*DefaultToolRegistry)(nil)
+	_ preparedToolPipelineProvider   = (*DefaultToolRegistry)(nil)
 )
 
 // NewDefaultToolRegistry returns an empty, ready-to-use registry.

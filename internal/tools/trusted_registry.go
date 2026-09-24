@@ -16,6 +16,11 @@ const (
 	// RegistrationSourceTrustedControl identifies the narrow, explicit
 	// first-party control registration path.
 	RegistrationSourceTrustedControl = "builtin_control"
+	// RegistrationSourceBuiltin identifies reviewed first-party mutation tools.
+	RegistrationSourceBuiltin = "builtin_tool"
+	// RegistrationSourceTrustedNetworkRead identifies concrete first-party
+	// network readers registered through the narrow reviewed path.
+	RegistrationSourceTrustedNetworkRead = "builtin_network_read"
 )
 
 var (
@@ -25,6 +30,12 @@ var (
 	// ErrPreparedRegistrationUnavailable indicates that no registry snapshot
 	// provider can pin the requested definition and its generation.
 	ErrPreparedRegistrationUnavailable = errors.New("tools: prepared registry snapshot is unavailable")
+	// ErrTrustedNetworkReadRegistrationUnavailable indicates that the registry
+	// does not expose the narrow first-party network-read capability.
+	ErrTrustedNetworkReadRegistrationUnavailable = errors.New("tools: trusted network-read registration is unavailable")
+	// ErrUnreviewedNetworkReadDefinition indicates that the supplied definition
+	// is not one of the concrete reviewed first-party network readers.
+	ErrUnreviewedNetworkReadDefinition = errors.New("tools: network-read registration requires a reviewed concrete tool")
 )
 
 // TrustedControlRegistrar is the narrow registration capability used by
@@ -32,6 +43,12 @@ var (
 // calls, including MCP, extension, and user-defined tools, remain unknown.
 type TrustedControlRegistrar interface {
 	RegisterTrustedControl(context.Context, ToolDefinition) error
+}
+
+// TrustedNetworkReadRegistrar exposes only the reviewed first-party network
+// readers. It does not accept a caller-selected effect or scope.
+type TrustedNetworkReadRegistrar interface {
+	RegisterTrustedNetworkRead(context.Context, ToolDefinition) error
 }
 
 // DispatchFenceProvider exposes the shared fence used by a registry and its
@@ -75,7 +92,9 @@ type registrationSnapshotProvider interface {
 
 // PreparedToolStages separates argument normalization from execution
 // decoration and mutation scheduling. Effects and identity are intentionally
-// absent: only registration provenance can mint those values.
+// absent: only registration provenance can mint those values. ExecutionWrappers
+// must be audited, effect-preserving runtime decorators; extension hooks and
+// arbitrary side-effect wrappers must remain outside this stage.
 type PreparedToolStages struct {
 	ArgumentPreparers []ArgumentPreparer
 	ExecutionWrappers []ToolExecutorWrapper
@@ -137,6 +156,10 @@ type preparedToolPipelineProvider interface {
 	preparedToolPipeline() (*preparedToolPipelineState, *DispatchFence)
 }
 
+type trustedWorkspaceWriteRegistrar interface {
+	registerTrustedWorkspaceWrite(context.Context, ToolDefinition) error
+}
+
 func (r *DefaultToolRegistry) DispatchFence() *DispatchFence {
 	if r == nil {
 		return nil
@@ -153,6 +176,24 @@ func (r *DefaultToolRegistry) preparedToolPipeline() (*preparedToolPipelineState
 
 func (r *DefaultToolRegistry) RegisterTrustedControl(ctx context.Context, def ToolDefinition) error {
 	return r.registerDefinition(def, RegistrationSourceTrustedControl, newTrustedEffectSet(EffectControl))
+}
+
+func (r *DefaultToolRegistry) RegisterTrustedNetworkRead(ctx context.Context, def ToolDefinition) error {
+	switch def.(type) {
+	case *WebSearchTool, *WebFetchTool:
+		return r.registerDefinition(def, RegistrationSourceTrustedNetworkRead, newTrustedEffectSet(EffectNetworkRead))
+	default:
+		return ErrUnreviewedNetworkReadDefinition
+	}
+}
+
+func (r *DefaultToolRegistry) registerTrustedWorkspaceWrite(ctx context.Context, def ToolDefinition) error {
+	switch def.(type) {
+	case *WriteTool, *EditFileTool:
+		return r.registerDefinition(def, RegistrationSourceBuiltin, newTrustedEffectSet(EffectWorkspaceWrite))
+	default:
+		return errors.New("tools: workspace-write registration requires a reviewed concrete tool")
+	}
 }
 
 func (r *DefaultToolRegistry) registerDefinition(def ToolDefinition, source string, effects TrustedEffectSet) error {

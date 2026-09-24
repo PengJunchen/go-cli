@@ -255,6 +255,34 @@ func TestRegistryTrustedControlRequiresExplicitRegistrationAndSharesFence(t *tes
 	assert.Equal(t, uint64(2), controlSnapshot.identity.RegistrationGeneration())
 }
 
+func TestTrustedNetworkReadRegistrationAcceptsOnlyReviewedConcreteTools(t *testing.T) {
+	ctx := context.Background()
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	deferred := NewDeferredToolRegistryAdapter(base)
+	registry := NewMiddlewareToolRegistry(deferred)
+	registrar, ok := any(registry).(TrustedNetworkReadRegistrar)
+	require.True(t, ok)
+
+	err := registrar.RegisterTrustedNetworkRead(ctx, &stubTool{name: "web_search"})
+	require.ErrorIs(t, err, ErrUnreviewedNetworkReadDefinition)
+
+	webSearch := NewWebSearchTool()
+	require.NoError(t, registrar.RegisterTrustedNetworkRead(ctx, webSearch))
+	snapshot, err := base.toolRegistrationSnapshot(ctx, "web_search")
+	require.NoError(t, err)
+	assert.Same(t, webSearch, snapshot.definition)
+	assert.Equal(t, RegistrationSourceTrustedNetworkRead, snapshot.identity.RegistrationSource())
+	assert.Equal(t, []TrustedToolEffect{EffectNetworkRead}, snapshot.effects.Values())
+	assert.Equal(t, [32]byte{}, snapshot.identity.Scope().Fingerprint(), "network-read category does not assert endpoint scope")
+
+	ordinary := NewWebFetchTool()
+	require.NoError(t, registry.Register(ctx, ordinary))
+	ordinarySnapshot, err := base.toolRegistrationSnapshot(ctx, ordinary.Name())
+	require.NoError(t, err)
+	assert.Equal(t, RegistrationSourceToolRegistry, ordinarySnapshot.identity.RegistrationSource())
+	assert.Equal(t, []TrustedToolEffect{EffectUnknown}, ordinarySnapshot.effects.Values())
+}
+
 func TestPreparedRegistryPolicyAndStagesShareFenceAndInvalidatePermits(t *testing.T) {
 	ctx := context.Background()
 	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck

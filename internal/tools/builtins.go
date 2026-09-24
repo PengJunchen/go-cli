@@ -193,11 +193,21 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDef
 	}
 
 	for _, def := range defs {
-		if err := reg.Register(ctx, def); err != nil {
+		if err := registerDefaultTool(ctx, reg, def); err != nil {
 			return fmt.Errorf("tools: register %s: %w", def.Name(), err)
 		}
 		slog.Info("tools.register_default", "tool", def.Name())
 	}
 
 	return nil
+}
+
+func registerDefaultTool(ctx context.Context, reg ToolRegistry, def ToolDefinition) error {
+	switch def.(type) {
+	case *WriteTool, *EditFileTool:
+		if registrar, ok := reg.(trustedWorkspaceWriteRegistrar); ok {
+			return registrar.registerTrustedWorkspaceWrite(ctx, def)
+		}
+	}
+	return reg.Register(ctx, def)
 }
