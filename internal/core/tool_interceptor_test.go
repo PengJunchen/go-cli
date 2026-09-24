@@ -212,6 +212,51 @@ func TestLoopAgent_SetToolInterceptor(t *testing.T) {
 	require.Len(t, findEvents(events, "tool_canceled"), 1)
 }
 
+func TestLoopAgentInterceptorIsScopedToInstance(t *testing.T) {
+	t.Cleanup(ClearToolInterceptors)
+
+	toolA := &trackingTool{name: "mutate"}
+	toolB := &trackingTool{name: "mutate"}
+	modelA := &scriptedChatModel{seq: []*llm.Message{
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "a-call", Name: "mutate", Args: map[string]any{}}}},
+		{Role: llm.RoleAssistant, Content: "done A"},
+	}}
+	modelB := &scriptedChatModel{seq: []*llm.Message{
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "b-call", Name: "mutate", Args: map[string]any{}}}},
+		{Role: llm.RoleAssistant, Content: "done B"},
+	}}
+	loopA := NewLoopAgent(WithLLM(modelA), WithTools(scriptedRegistry(toolA)))
+	loopB := NewLoopAgent(WithLLM(modelB), WithTools(scriptedRegistry(toolB)))
+	loopA.SetToolInterceptor(func(string, string, map[string]any) error {
+		return errors.New("assembly A blocks its mutation")
+	})
+
+	_, err := loopB.Run(context.Background(), Submission{Content: "run B"})
+	require.NoError(t, err)
+	assert.True(t, toolB.executed.Load(), "loop A's interceptor must not cancel loop B's tool call")
+	assert.False(t, toolA.executed.Load(), "setting loop A's interceptor must not execute A's tool")
+}
+
+func TestWithToolInterceptorBlocksToolExecution(t *testing.T) {
+	tool := &trackingTool{name: "blocked"}
+	model := &scriptedChatModel{seq: []*llm.Message{
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "call", Name: "blocked", Args: map[string]any{}}}},
+		{Role: llm.RoleAssistant, Content: "done"},
+	}}
+	loop := NewLoopAgent(
+		WithLLM(model),
+		WithTools(scriptedRegistry(tool)),
+		WithToolInterceptor(func(string, string, map[string]any) error {
+			return errors.New("blocked by loop option")
+		}),
+	)
+
+	events, err := loop.Run(context.Background(), Submission{Content: "run"})
+	require.NoError(t, err)
+	assert.False(t, tool.executed.Load())
+	require.Len(t, findEvents(events, "tool_canceled"), 1)
+}
+
 // Verify interceptors run exactly once per event (idempotency).
 func TestPreToolCallEvent_InterceptorsRunOnce(t *testing.T) {
 	t.Cleanup(ClearToolInterceptors)
