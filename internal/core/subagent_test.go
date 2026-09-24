@@ -108,6 +108,61 @@ func TestSubAgentSendRecordsMessage(t *testing.T) {
 	require.NoError(t, werr)
 }
 
+type heldInboxSubAgentRunner struct {
+	started chan struct{}
+	release <-chan struct{}
+}
+
+func (r *heldInboxSubAgentRunner) Run(ctx context.Context, _ string, _ <-chan string, _ func(AgentEvent)) (AgentMessage, error) {
+	close(r.started)
+	select {
+	case <-r.release:
+		return AgentMessage{Role: "assistant", Content: "done"}, nil
+	case <-ctx.Done():
+		return AgentMessage{}, ctx.Err()
+	}
+}
+
+func TestSubagentSendReportsDroppedMessage(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseRunner := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseRunner()
+	runner := &heldInboxSubAgentRunner{started: started, release: release}
+	sub := mustSubAgent(NewDefaultSubAgent(
+		SubAgentConfig{Name: "held-inbox"},
+		WithSubAgentRunner(func(SubAgentConfig) subAgentRunner { return runner }),
+	))
+
+	_, err := sub.Run(context.Background(), "hold inbox")
+	require.NoError(t, err)
+	defer func() {
+		releaseRunner()
+		_, _ = sub.Wait(context.Background())
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("sub-agent runner did not start")
+	}
+
+	for i := range inboxBufferSize {
+		require.NoError(t, sub.Send(context.Background(), "queued-"+string(rune('a'+i))))
+	}
+
+	overflowErr := sub.Send(context.Background(), "overflow")
+	require.Error(t, overflowErr, "a full inbox must reject the message instead of reporting false success")
+	assert.Len(t, sub.Received(), inboxBufferSize,
+		"Received must contain only messages actually accepted into the inbox")
+
+	releaseRunner()
+	_, err = sub.Wait(context.Background())
+	require.NoError(t, err)
+}
+
 func TestSubAgentInterruptStopsRun(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 

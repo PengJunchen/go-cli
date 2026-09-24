@@ -1,0 +1,61 @@
+R1-BLD-02 red evidence: Agent history, sub-agent delivery, assembly isolation
+
+Worktree: /Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/r1-history
+Branch: codex/runtime-r1-history
+Base: 764ca0cf88bce99a4403594f05f0b90f695830b3
+Baseline note: this branch includes the integrated R0 fixes. These RED failures were
+observed on that R1 starting point, not on the original 2026-09-24 audit baseline.
+Production files were not changed for this evidence.
+
+Registered exact test names (commands exited 0):
+
+  rtk proxy go test ./internal/core -list '^(TestCancelClosesToolCallHistory|TestAgentHistoryIncludesSteeringAndFollowUp|TestAgentHistoryPairsParallelToolResultsByID|TestSubagentSendReportsDroppedMessage)$'
+  TestCancelClosesToolCallHistory
+  TestAgentHistoryIncludesSteeringAndFollowUp
+  TestAgentHistoryPairsParallelToolResultsByID
+  TestSubagentSendReportsDroppedMessage
+
+  rtk proxy go test ./internal/cli -list '^TestAssemblyInterceptorsAreIsolated$'
+  TestAssemblyInterceptorsAreIsolated
+
+  rtk proxy go test ./internal/core -list '^TestLoopAgentInterceptorIsScopedToInstance$'
+  TestLoopAgentInterceptorIsScopedToInstance
+
+Targeted RED commands (both compiled and ran the named tests; exit 1):
+
+  rtk env GOMAXPROCS=2 go test -p 2 -count=1 ./internal/core -run '^(TestCancelClosesToolCallHistory|TestAgentHistoryIncludesSteeringAndFollowUp|TestAgentHistoryPairsParallelToolResultsByID|TestSubagentSendReportsDroppedMessage)$'
+  exit=1
+  TestCancelClosesToolCallHistory: Agent history contained the assistant tool call but zero tool receipts after cooperative cancellation.
+  TestAgentHistoryIncludesSteeringAndFollowUp: the Loop consumed start, steering, and follow-up in order (confirmed from the mock call log), while Agent history retained only start.
+  TestAgentHistoryPairsParallelToolResultsByID: Agent history retained no assistant tool-call group or paired tool receipts for the completed parallel calls.
+  TestSubagentSendReportsDroppedMessage: after the inbox filled to capacity, Send("overflow") returned nil.
+
+  rtk env GOMAXPROCS=2 go test -p 2 -count=1 ./internal/cli -run '^TestAssemblyInterceptorsAreIsolated$'
+  exit=1
+  TestAssemblyInterceptorsAreIsolated: assembly A's active Plan Mode globally canceled assembly B's custom mutation; its executor call count was 0.
+
+  rtk env GOMAXPROCS=2 go test -p 2 -count=1 ./internal/core -run '^TestLoopAgentInterceptorIsScopedToInstance$'
+  exit=1
+  TestLoopAgentInterceptorIsScopedToInstance: setting an interceptor on loop A caused loop B's same-named tool call to be canceled.
+
+The assembly-isolation failure came from `assembleMiddleware` registering each
+Assembly's Plan Mode and shell-hook interceptors in the process-global registry.
+The new core test isolates the underlying API contract: `SetToolInterceptor`
+must affect only the LoopAgent on which it was called. These tests were run
+before changing production code.
+
+Other verification:
+
+  rtk gofmt -w internal/core/agent_transcript_test.go internal/core/subagent_test.go internal/cli/assemble_interceptor_isolation_test.go
+  exit=0
+
+  rtk git diff --check
+  exit=0
+
+Additional Agent-consumer REDs, after the shared CanonicalLoop interface was
+available and before AgentImpl consumed it:
+
+  rtk env GOMAXPROCS=2 go test -p 2 -count=1 ./internal/core -run '^(TestAgentConsumesCanonicalDeltaAcrossRepeatedUserTurns|TestAgentCanonicalHistoryDeepCopiesToolCallArgs)$'
+  exit=1: the Agent invoked only legacy Run, appended only its user/final event
+  projection instead of each CanonicalLoop delta, and shallow-copied nested
+  ToolCall Args, ContentBlocks ImageURL, and Usage values.
