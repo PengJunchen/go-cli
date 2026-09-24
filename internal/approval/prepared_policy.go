@@ -33,6 +33,7 @@ type preparedDecisionKeyInput struct {
 	SchemaDigest           string                    `json:"schema_digest"`
 	ArgumentDigest         string                    `json:"argument_digest"`
 	RegistryGeneration     uint64                    `json:"registry_generation"`
+	ApprovalGeneration     uint64                    `json:"approval_generation"`
 	PlanGeneration         uint64                    `json:"plan_generation"`
 	PermissionMode         PermissionMode            `json:"permission_mode"`
 	PolicyEpoch            uint64                    `json:"policy_epoch"`
@@ -140,6 +141,12 @@ func (m *ApprovalMiddleware) PreparedPolicy(ctx context.Context, req tools.Prepa
 		return decision, ErrToolDenied
 	}
 	classification := classifier.Classify(ctx, call)
+	if classification == Allow && !preparedClassifierAllowTrusted(req, mode) {
+		// Classifier name lists are compatibility policy inputs, not trusted
+		// registration facts. An unreviewed tool cannot receive a built-in
+		// read exemption by registering under a familiar name.
+		classification = Ask
+	}
 	switch classification {
 	case Allow:
 		return m.publishPreparedAllow(ctx, span, req, mode, key, false)
@@ -191,6 +198,9 @@ func (m *ApprovalMiddleware) resolvePreparedAsk(
 	case ApprovalAlwaysAllow:
 		return m.publishPreparedAllow(ctx, span, req, mode, key, true)
 	case ApprovalDeny:
+		if err := m.publishPreparedRevocation(req.Generations); err != nil {
+			return decision, fmt.Errorf("publish explicit approval denial: %w", err)
+		}
 		recordPreparedDecision(span, req, mode, "callback_deny", false, false, false)
 		return decision, ErrToolDenied
 	default:
@@ -226,9 +236,12 @@ func (m *ApprovalMiddleware) publishPreparedAllow(
 		return decision, tools.ErrDispatchFenceChanged
 	}
 	if m.preparedStore != nil {
-		if err := m.preparedStore.Set(ctx, key, Allow); err != nil {
-			slog.Warn("approval.prepared_store_set", "error", err)
+		if err := m.preparedStore.setPreparedGrant(req.Generations, key); err != nil {
+			return decision, fmt.Errorf("publish prepared approval-store grant: %w", err)
 		}
+	}
+	if m.fence.Snapshot() != req.Generations {
+		return decision, tools.ErrDispatchFenceChanged
 	}
 	decision.Allowed = true
 	recordPreparedDecision(span, req, mode, map[bool]string{true: "always_allow", false: "classifier_allow"}[cacheGrant], false, false, true)
@@ -274,6 +287,7 @@ func preparedDecisionKey(
 		SchemaDigest:           hex.EncodeToString(schemaDigest[:]),
 		ArgumentDigest:         hex.EncodeToString(argumentDigest[:]),
 		RegistryGeneration:     req.Generations.Registry,
+		ApprovalGeneration:     req.Generations.Approval,
 		PlanGeneration:         req.Generations.Plan,
 		PermissionMode:         mode,
 		PolicyEpoch:            policyEpoch,
@@ -312,6 +326,42 @@ func preparedPlanCallAllowed(req tools.PreparedPolicyRequest, name string) bool 
 	default:
 		return false
 	}
+}
+
+func preparedClassifierAllowTrusted(req tools.PreparedPolicyRequest, mode PermissionMode) bool {
+	if mode == PermissionAutoFull {
+		return true
+	}
+	identity := req.Identity.Snapshot()
+	effects := req.Effects.Values()
+	if len(effects) != 1 {
+		return false
+	}
+	switch effects[0] {
+	case tools.EffectWorkspaceRead:
+		return identity.RegistrationSource == tools.RegistrationSourceBuiltin && req.Identity.Scope().Fingerprint() != ([32]byte{})
+	case tools.EffectControl:
+		if identity.RegistrationSource != tools.RegistrationSourceTrustedControl {
+			return false
+		}
+		_, allowed := planModeTrustedControlNames[identity.ToolName]
+		return allowed
+	default:
+		return false
+	}
+}
+
+func (m *ApprovalMiddleware) publishPreparedRevocation(expected tools.DispatchFenceSnapshot) error {
+	if m.fence == nil {
+		return ErrPreparedPolicyUnavailable
+	}
+	_, err := m.fence.Publish(tools.DispatchFenceApproval, &expected, func() {
+		m.sessionMu.Lock()
+		defer m.sessionMu.Unlock()
+		m.policyEpoch++
+		m.session = make(map[string]Classification)
+	})
+	return err
 }
 
 var planModeTrustedControlNames = map[string]struct{}{

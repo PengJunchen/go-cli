@@ -66,6 +66,29 @@ func (s *InMemoryApprovalStore) Delete(_ context.Context, key string) error {
 	return s.publishUpdate("approval.store.delete", false, update)
 }
 
+// setPreparedGrant publishes a positive prepared-path decision only against
+// the generation snapshot that produced it. It deliberately does not rebase
+// on the current fence: an intervening revoke or policy replacement makes the
+// original approval obsolete.
+func (s *InMemoryApprovalStore) setPreparedGrant(expected tools.DispatchFenceSnapshot, key string) error {
+	s.mu.RLock()
+	fence := s.fence
+	s.mu.RUnlock()
+	if fence == nil {
+		return tools.ErrDispatchFenceUnavailable
+	}
+	_, err := publishApprovalGrant(fence, expected, func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		s.decisions[key] = Allow
+	})
+	if err != nil {
+		return err
+	}
+	slog.Info("approval.store.set")
+	return nil
+}
+
 func (s *InMemoryApprovalStore) bindFence(fence *tools.DispatchFence) error {
 	if fence == nil {
 		return tools.ErrDispatchFenceUnavailable
