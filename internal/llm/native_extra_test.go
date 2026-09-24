@@ -1145,6 +1145,67 @@ func TestClaudeStreamAllowsInterleavedContentBlocks(t *testing.T) {
 	assert.Equal(t, 12, final.Usage.TotalTokens)
 }
 
+func TestClaudeStreamRejectsOutOfOrderInterleavedText(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	chunks := collectClaudeStream(t, []string{
+		`{"type":"message_start","message":{"role":"assistant"}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text"}}`,
+		`{"type":"content_block_start","index":1,"content_block":{"type":"text"}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A1"}}`,
+		`{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"B1"}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A2"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"content_block_stop","index":1}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}`,
+		`{"type":"message_stop"}`,
+	})
+
+	var gotText strings.Builder
+	var streamErr error
+	var sawFinal bool
+	for _, chunk := range chunks {
+		if chunk.Error != nil {
+			streamErr = chunk.Error
+		}
+		gotText.WriteString(chunk.Content)
+		sawFinal = sawFinal || chunk.Final
+	}
+	require.Error(t, streamErr)
+	assert.Equal(t, "A1", gotText.String(), "the lower-index block's partial text may be visible before rejection")
+	assert.False(t, sawFinal)
+}
+
+func TestClaudeStreamPreservesTextOrderAfterLowerBlockStops(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	chunks := collectClaudeStream(t, []string{
+		`{"type":"message_start","message":{"role":"assistant"}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text"}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A1"}}`,
+		`{"type":"content_block_start","index":1,"content_block":{"type":"text"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"B1"}}`,
+		`{"type":"content_block_stop","index":1}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}`,
+		`{"type":"message_stop"}`,
+	})
+
+	var gotText strings.Builder
+	var streamErr error
+	var final *MessageChunk
+	for _, chunk := range chunks {
+		if chunk.Error != nil {
+			streamErr = chunk.Error
+		}
+		gotText.WriteString(chunk.Content)
+		if chunk.Final {
+			final = &chunk
+		}
+	}
+	require.NoError(t, streamErr)
+	assert.Equal(t, "A1B1", gotText.String())
+	require.NotNil(t, final)
+}
+
 func TestClaudeStreamAccumulatesMultipleMessageDeltas(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	chunks := collectClaudeStream(t, []string{

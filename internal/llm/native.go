@@ -699,6 +699,13 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 						sendStreamError(ctx, ch, errors.New("llm: Claude text delta does not match the active block type"))
 						return
 					}
+					for lowerIndex := 0; lowerIndex < *ce.Index; lowerIndex++ {
+						lowerBlock := blocks[lowerIndex]
+						if lowerBlock != nil && lowerBlock.blockType == "text" && !lowerBlock.closed {
+							sendStreamError(ctx, ch, fmt.Errorf("llm: Claude text block %d emitted before lower-index text block %d stopped", *ce.Index, lowerIndex))
+							return
+						}
+					}
 					if ce.Delta.Text != "" {
 						select {
 						case ch <- MessageChunk{Role: RoleAssistant, Content: ce.Delta.Text}:
