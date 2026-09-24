@@ -68,3 +68,12 @@ Canonical input-integrity RED, before adding delta validation:
   rtk env GOMAXPROCS=2 go test -p 2 -count=1 ./internal/core -run '^TestAgentRejectsInvalidCanonicalDelta$'
   exit=1: empty, missing-initial-user, mismatched-user, and duplicate-user
   canonical deltas all returned success and left malformed runs unreported.
+
+Sub-agent panic-containment RED, before adding the run-owner recovery defer:
+
+  rtk proxy go test ./internal/core -list '^TestSubAgentPanicIsContainedAndFinalized$'
+  exit=0; registered TestSubAgentPanicIsContainedAndFinalized.
+
+  rtk env GOMAXPROCS=2 go test -p 2 -count=1 ./internal/core -run '^TestSubAgentPanicIsContainedAndFinalized$'
+  exit=1: the runner-factory fixture panic escaped the sub-agent goroutine and
+  terminated the Go test process before Wait/state/Send assertions could run.

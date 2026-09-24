@@ -118,6 +118,7 @@ var _ SubAgent = (*DefaultSubAgent)(nil)
 var (
 	ErrSubAgentNotRunning = errors.New("core: sub-agent is not running")
 	ErrSubAgentInboxFull  = errors.New("core: sub-agent inbox is full")
+	ErrSubAgentPanicked   = errors.New("core: sub-agent runner panicked")
 )
 
 // subAgentOptions holds the configurable fields of a sub-agent during
@@ -236,6 +237,28 @@ func (s *DefaultSubAgent) runAndFinalize(ctx context.Context, prompt string, out
 	span.SetAttributes(
 		tracing.Attribute{Key: "subagent_name", Value: s.config.Name},
 	)
+	defer span.End()
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			panicErr := fmt.Errorf("%w: %q: %v", ErrSubAgentPanicked, s.config.Name, recovered)
+			status, finalErr := s.finalizeOutcome(panicErr, false)
+			span.SetAttributes(tracing.Attribute{Key: "status", Value: status.String()})
+			span.SetStatus(tracing.SpanStatusError, finalErr.Error())
+
+			s.mu.Lock()
+			s.result = AgentMessage{}
+			s.doneErr = finalErr
+			s.mu.Unlock()
+
+			// Record the failure when the event buffer has room. Never let
+			// reporting a panic block finalization if the consumer is not draining.
+			select {
+			case out <- errEvent(finalErr):
+			default:
+			}
+			slog.Error("core.subagent.runner_panicked", "name", s.config.Name, "panic", recovered)
+		}
+	}()
 
 	emit := func(ev AgentEvent) {
 		select {
@@ -244,8 +267,10 @@ func (s *DefaultSubAgent) runAndFinalize(ctx context.Context, prompt string, out
 		}
 	}
 
+	var result AgentMessage
+	var err error
 	runner := s.runnerFactory(s.config)
-	result, err := runner.Run(spanCtx, prompt, inbox, emit)
+	result, err = runner.Run(spanCtx, prompt, inbox, emit)
 
 	s.mu.Lock()
 	interrupted := s.interrupted
@@ -258,8 +283,6 @@ func (s *DefaultSubAgent) runAndFinalize(ctx context.Context, prompt string, out
 	} else {
 		span.SetStatus(tracing.SpanStatusOK, "")
 	}
-	span.End()
-
 	s.mu.Lock()
 	s.result = result
 	s.doneErr = finalErr

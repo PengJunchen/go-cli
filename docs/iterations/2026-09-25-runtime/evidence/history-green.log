@@ -57,3 +57,21 @@ initial user entry, a content mismatch, and duplicate initial user entries. On
 rejection it returns ErrCanonicalTranscriptInvalid, reports unsuccessful with
 an empty unverified result message, and keeps the previously valid history
 unchanged. A valid initial user with empty content remains accepted.
+
+Sub-agent panic containment (exact registrations confirmed; commands exit 0):
+
+  rtk proxy go test ./internal/core -list '^(TestSubAgentPanicIsContainedAndFinalized|TestSubagentSendReportsDroppedMessage|TestSubAgentSendDoesNotBlockOnFullInbox|TestSubAgentSendAfterTerminalIsRejected)$'
+  Registered TestSubAgentPanicIsContainedAndFinalized,
+  TestSubAgentSendAfterTerminalIsRejected, TestSubAgentSendDoesNotBlockOnFullInbox,
+  and TestSubagentSendReportsDroppedMessage.
+
+  rtk env GOMAXPROCS=2 go test -race -p 2 -count=1 ./internal/core -run '^(TestSubAgentPanicIsContainedAndFinalized|TestSubagentSendReportsDroppedMessage|TestSubAgentSendDoesNotBlockOnFullInbox|TestSubAgentSendAfterTerminalIsRejected)$'
+  exit=0
+
+The panic fixture covers both runner-factory and runner.Run panics. Each is
+converted to ErrSubAgentPanicked, marks the sub-agent Failed, stores an empty
+result and error, records an error event when the buffer has room, ends the run
+span, closes the event channel and done signal, and rejects a later Send. The
+test continues running after each panic, demonstrating that the host test
+process survives. Full core-package race remains pending lane 01's
+RunCanonical producer and integration.
