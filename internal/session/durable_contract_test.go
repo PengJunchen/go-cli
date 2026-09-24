@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
+	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 func TestSessionEntryV1JSONRoundTrip(t *testing.T) {
@@ -39,6 +41,14 @@ func TestSessionEntryV1JSONRoundTrip(t *testing.T) {
 		PayloadDigest:     "sha256:payload",
 		ArgumentDigest:    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 		SchemaDigest:      "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+		ToolIdentity: &tools.TrustedToolIdentitySnapshot{
+			RegistrationSource:     "builtin",
+			ToolName:               "read",
+			RegistrationGeneration: 3,
+			ExecutorFingerprint:    strings.Repeat("a", 64),
+			ScopeFingerprint:       strings.Repeat("b", 64),
+		},
+		EffectSet: []tools.TrustedToolEffect{tools.EffectWorkspaceRead},
 		ExecutionIdentity: &ExecutionIdentity{
 			Kind:              ExecutionIdentityProcessGroup,
 			Platform:          "linux",
@@ -83,6 +93,11 @@ func TestSessionEntryV1JSONRoundTrip(t *testing.T) {
 	cloned.Usage.InputTokens = 99
 	if decoded.Usage.InputTokens != 7 {
 		t.Fatal("SessionEntry.clone aliases token usage")
+	}
+	cloned.ToolIdentity.ToolName = "changed"
+	cloned.EffectSet[0] = tools.EffectUnknown
+	if decoded.ToolIdentity.ToolName != "read" || decoded.EffectSet[0] != tools.EffectWorkspaceRead {
+		t.Fatal("SessionEntry.clone aliases trusted identity or effect facts")
 	}
 }
 
@@ -172,6 +187,12 @@ func TestVersion1AssistantAndFirstReceiptRequirePresentZeroCoordinates(t *testin
 		Type: EntryTypeTool, RecordVersion: 1, ActionState: ActionStateIntent,
 		RunID: "run-1", ActionBatchID: "batch-1", ActionID: "action-1",
 		ToolCallID: "call-1", ToolName: "read", AssistantTranscriptOrdinal: &zero,
+		ArgumentDigest: strings.Repeat("a", 64), SchemaDigest: strings.Repeat("b", 64),
+		ToolIdentity: &tools.TrustedToolIdentitySnapshot{
+			RegistrationSource: "builtin", ToolName: "read", RegistrationGeneration: 1,
+			ExecutorFingerprint: strings.Repeat("c", 64), ScopeFingerprint: strings.Repeat("d", 64),
+		},
+		EffectSet: []tools.TrustedToolEffect{tools.EffectWorkspaceRead},
 	}
 	if err := validateVersion1EntryCoordinates(journalIntent); err != nil {
 		t.Fatalf("journal-only intent with no transcript index was rejected: %v", err)

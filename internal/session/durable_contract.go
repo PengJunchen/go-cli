@@ -6,6 +6,7 @@ import (
 	"fmt"
 
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 // DurableSessionWriter acknowledges entries only after the complete batch has
@@ -216,7 +217,26 @@ func validateVersion1EntryCoordinates(entry SessionEntry) error {
 			return errors.New("session: action journal row cannot have a transcript index")
 		}
 		switch entry.ActionState {
-		case ActionStateIntent, ActionStateExecution:
+		case ActionStateIntent:
+			if !isHexDigest(entry.ArgumentDigest) || !isHexDigest(entry.SchemaDigest) {
+				return errors.New("session: version 1 intent requires lowercase argument and schema digests")
+			}
+			if err := validateToolIdentitySnapshot(entry.ToolIdentity, entry.ToolName); err != nil {
+				return err
+			}
+			if len(entry.EffectSet) == 0 {
+				return errors.New("session: version 1 intent requires a captured effect set")
+			}
+			previous := ""
+			for i, effect := range entry.EffectSet {
+				value := string(effect)
+				if value == "" || (i > 0 && value <= previous) {
+					return errors.New("session: version 1 intent effect set must be non-empty, unique, and sorted")
+				}
+				previous = value
+			}
+			return nil
+		case ActionStateExecution:
 			return nil
 		default:
 			return fmt.Errorf("session: unsupported action state %q", entry.ActionState)
@@ -277,6 +297,13 @@ func validateVersion1EntryCoordinates(entry SessionEntry) error {
 		// System rows may be legacy-style user-visible context, not run transcript.
 	default:
 		return fmt.Errorf("session: version 1 entry has unsupported type %q", entry.Type)
+	}
+	return nil
+}
+
+func validateToolIdentitySnapshot(identity *tools.TrustedToolIdentitySnapshot, expectedTool string) error {
+	if identity == nil || identity.RegistrationSource == "" || identity.ToolName == "" || identity.RegistrationGeneration == 0 || identity.ToolName != expectedTool || !isHexDigest(identity.ExecutorFingerprint) || !isHexDigest(identity.ScopeFingerprint) {
+		return errors.New("session: version 1 intent has an incomplete trusted tool identity snapshot")
 	}
 	return nil
 }
