@@ -309,11 +309,10 @@ func (m *AccordionModel) RenderView(width, height int, toolOnly bool) string {
 // truncateLine clips a line to at most width terminal cells without splitting
 // graphemes or terminal sequences. It does not append an ellipsis.
 func truncateLine(line string, width int) string {
-	safe := safeTerminalText(line)
-	if width <= 0 || cellWidth(safe) <= width {
-		return safe
+	if width <= 0 {
+		return safeTerminalText(line)
 	}
-	return clipCells(safe, width)
+	return clipCells(line, width)
 }
 
 // truncateToolResult truncates a tool_result entry's Full content to
