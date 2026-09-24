@@ -85,7 +85,7 @@ func TestTreeBuilder_WithEntries(t *testing.T) {
 	assert.Equal(t, "c2", branch2[2].ID)
 }
 
-func TestTreeBuilder_CorruptedEntry(t *testing.T) {
+func TestTreeBuilder_CorruptedEntryFailsClosed(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	path := filepath.Join(t.TempDir(), "session.jsonl")
@@ -101,21 +101,17 @@ func TestTreeBuilder_CorruptedEntry(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
-	// Re-open from disk; the store skips corrupted lines during load.
+	// Re-open from disk; a corrupt complete row must not produce partial tree
+	// state by silently skipping part of the transcript.
 	reopened := NewJSONLSessionStore(path)
-	require.NoError(t, reopened.Open(context.Background()))
+	err = reopened.Open(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decode JSONL row")
 	defer func() { _ = reopened.Close() }() //nolint:errcheck
 
 	builder := NewDefaultSessionTreeBuilder()
-	tree, err := builder.BuildFromStore(context.Background(), reopened)
-	require.NoError(t, err)
-
-	// The corrupted entry is skipped; valid entries are present.
-	branch, err := tree.GetBranch(context.Background(), "b")
-	require.NoError(t, err)
-	require.Len(t, branch, 2)
-	assert.Equal(t, "a", branch[0].ID)
-	assert.Equal(t, "b", branch[1].ID)
+	_, err = builder.BuildFromStore(context.Background(), reopened)
+	require.Error(t, err)
 }
 
 func TestTreeBuilder_OrphanedEntry(t *testing.T) {

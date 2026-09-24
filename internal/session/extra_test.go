@@ -304,9 +304,9 @@ func TestJSONLSessionStoreCloseIdempotent(t *testing.T) {
 	require.NoError(t, store.Close(), "second Close must be a no-op")
 }
 
-// TestJSONLSessionStoreSkipsCorruptLines verifies corrupt JSONL lines are
-// ignored on load while valid entries remain readable.
-func TestJSONLSessionStoreSkipsCorruptLines(t *testing.T) {
+// TestJSONLSessionStoreRejectsCorruptLines verifies malformed complete rows
+// prevent loading a partial transcript.
+func TestJSONLSessionStoreRejectsCorruptLines(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "s.jsonl")
 	store := NewJSONLSessionStore(path)
 	require.NoError(t, store.Append(context.Background(), newTestEntry("a", "", EntryTypeUser)))
@@ -324,13 +324,9 @@ func TestJSONLSessionStoreSkipsCorruptLines(t *testing.T) {
 	require.NoError(t, f.Close())
 
 	reopened := NewJSONLSessionStore(path)
-	got, err := reopened.Get(context.Background(), "a")
-	require.NoError(t, err)
-	assert.Equal(t, "content-a", got.Content)
-
-	b, err := reopened.Get(context.Background(), "b")
-	require.NoError(t, err)
-	assert.Equal(t, EntryTypeTool, b.Type)
+	_, err = reopened.Get(context.Background(), "a")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decode JSONL row")
 	require.NoError(t, reopened.Close())
 }
 
