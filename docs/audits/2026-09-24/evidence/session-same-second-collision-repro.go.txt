@@ -1,0 +1,43 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"time"
+
+	"github.com/pengjunchen/go-cli/internal/session"
+)
+
+func main() {
+	ctx := context.Background()
+	dir, err := os.MkdirTemp("", "go-cli-session-collision-repro-")
+	must(err)
+	defer os.RemoveAll(dir)
+
+	store := session.NewJSONLSessionStore(dir)
+	must(store.Open(ctx))
+	must(store.SetSessionID("interactive", true))
+	firstPath := store.FilePath()
+	must(store.Append(ctx, &session.SessionEntry{ID: "entry-a", Type: session.EntryTypeUser, Content: "session A", Timestamp: time.Now()}))
+	must(store.Save(ctx))
+
+	must(store.SetSessionID("interactive", true))
+	secondPath := store.FilePath()
+	must(store.Append(ctx, &session.SessionEntry{ID: "entry-b", Type: session.EntryTypeUser, Content: "session B", Timestamp: time.Now()}))
+	must(store.Save(ctx))
+	must(store.Close())
+
+	reopened := session.NewJSONLSessionStore(dir)
+	must(reopened.Open(ctx))
+	defer reopened.Close()
+	entries, err := reopened.List(ctx)
+	must(err)
+	fmt.Printf("same_path=%t first=%q second=%q reopened_entries=%d\n", firstPath == secondPath, firstPath, secondPath, len(entries))
+}
+
+func must(err error) {
+	if err != nil {
+		panic(err)
+	}
+}
