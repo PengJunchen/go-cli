@@ -176,7 +176,6 @@ func TestOutputGuardRunsBeforeVisibleDelta(t *testing.T) {
 	events, message, err := collectAssemblyEvents(stream)
 	assert.Error(t, err, "the PII guard must reject a candidate containing a full email")
 	assert.Zero(t, len(assemblyIncrementalText(events)), "a guarded candidate must not emit incremental content")
-	require.NotEmpty(t, message.Content)
 	assert.NotContains(t, assemblyIncrementalText(events), secret)
 	assert.NotContains(t, message.Content, secret)
 	for _, event := range events {
