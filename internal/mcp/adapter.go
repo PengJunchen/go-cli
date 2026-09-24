@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -342,6 +343,13 @@ func isConnectionError(err error) bool {
 		strings.Contains(msg, "EOF")
 }
 
+func toolCallOutcomeError(name string, err error) error {
+	if !isConnectionError(err) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+		return err
+	}
+	return fmt.Errorf("outcome unknown; tool %q may have executed before the connection was lost: %w", name, err)
+}
+
 // requestLocked snapshots c.conn under c.mu and sends a JSON-RPC request.
 // Holding the lock only for the pointer read (not the blocking Request call)
 // prevents a nil-pointer dereference when a concurrent Disconnect or reconnect
@@ -437,11 +445,12 @@ func (c *adapterCore) CallTool(ctx context.Context, name string, args map[string
 	defer span.End()
 
 	start := time.Now()
-	res, err := c.callWithReconnect(spanCtx, "tools/call", map[string]any{
+	res, err := c.requestLocked(spanCtx, "tools/call", map[string]any{
 		"name":      name,
 		"arguments": args,
 	})
 	if err != nil {
+		err = toolCallOutcomeError(name, err)
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("mcp.tool.call.failed", "tool", name, "server", c.cfg.Name, "err", err)
 		return nil, fmt.Errorf("mcp: call tool %q: %w", name, err)

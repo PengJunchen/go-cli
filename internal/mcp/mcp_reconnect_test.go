@@ -56,8 +56,8 @@ func TestMCPNoReconnectWhenConnected(t *testing.T) {
 }
 
 // TestMCPReconnectMaxAttemptsExhausted verifies that when the connection is
-// lost, the adapter attempts to reconnect up to maxReconnect times and then
-// returns the error.
+// lost during a read-only request, the adapter attempts to reconnect up to
+// maxReconnect times and then returns the error.
 func TestMCPReconnectMaxAttemptsExhausted(t *testing.T) {
 	t.Parallel()
 
@@ -74,8 +74,8 @@ func TestMCPReconnectMaxAttemptsExhausted(t *testing.T) {
 	// Limit reconnect attempts to 1 to keep the test fast (1s backoff).
 	adapter.adapterCore.maxReconnect = 1
 
-	_, err := adapter.CallTool(context.Background(), "echo", nil)
-	require.Error(t, err, "CallTool must fail when the connection is lost")
+	_, err := adapter.ListTools(context.Background())
+	require.Error(t, err, "ListTools must fail when the connection is lost")
 
 	// Exactly 1 reconnection attempt should have been made.
 	assert.Equal(t, 1, adapter.adapterCore.reconnectAttempts,
@@ -124,8 +124,8 @@ func TestMCPReconnectRPCErrorNoReconnect(t *testing.T) {
 		"RPC errors must not trigger reconnection")
 }
 
-// TestMCPReconnectSucceeds verifies that when the connection drops and a
-// reconnect re-establishes it, the retried call succeeds.
+// TestMCPReconnectSucceeds verifies that a read-only request can be retried
+// after the connection drops and reconnects.
 func TestMCPReconnectSucceeds(t *testing.T) {
 	t.Parallel()
 
@@ -149,7 +149,7 @@ func TestMCPReconnectSucceeds(t *testing.T) {
 			if json.Unmarshal(sc.Bytes(), &req) != nil {
 				continue
 			}
-			if firstCall.Load() && req.Method == "tools/call" {
+			if firstCall.Load() && req.Method == "tools/list" {
 				firstCall.Store(false)
 				// Close the connection to simulate a drop.
 				closeConn(serverConn1)
@@ -185,7 +185,7 @@ func TestMCPReconnectSucceeds(t *testing.T) {
 			frame := map[string]any{
 				"jsonrpc": "2.0",
 				"id":      req.ID,
-				"result":  map[string]any{"content": "recovered"},
+				"result":  map[string]any{"tools": []any{}},
 			}
 			b, _ := json.Marshal(frame)
 			fmt.Fprintf(serverConn2, "%s\n", b)
@@ -209,10 +209,80 @@ func TestMCPReconnectSucceeds(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	result, err := adapter.CallTool(ctx, "echo", nil)
-	require.NoError(t, err, "CallTool should succeed after reconnection")
-	assert.Equal(t, "recovered", result.Content)
+	result, err := adapter.ListTools(ctx)
+	require.NoError(t, err, "ListTools should succeed after reconnection")
+	assert.Empty(t, result)
 	assert.GreaterOrEqual(t, adapter.adapterCore.reconnectAttempts, 1)
+}
+
+func TestMCPCallToolLostResponseIsUnknownAndNotRetried(t *testing.T) {
+	t.Parallel()
+
+	serverConn1, clientConn1 := net.Pipe()
+	var sideEffects atomic.Int32
+	callExecuted := make(chan struct{}, 1)
+	go func() {
+		sc := bufio.NewScanner(serverConn1)
+		for sc.Scan() {
+			var req struct {
+				Method string `json:"method"`
+			}
+			if json.Unmarshal(sc.Bytes(), &req) != nil || req.Method != "tools/call" {
+				continue
+			}
+			sideEffects.Add(1)
+			callExecuted <- struct{}{}
+			closeConn(serverConn1) // remote execution completed, response was lost
+			return
+		}
+	}()
+
+	conn1 := NewJSONRPCLineTransport(clientConn1, clientConn1, clientConn1.Close)
+	adapter := NewOfficialSDKAdapter(MCPServerConfig{Name: "srv", Transport: MCPTransportStdio}, WithConnection(conn1), WithoutInitialize())
+	require.NoError(t, adapter.Connect(context.Background()))
+	adapter.adapterCore.maxReconnect = 1
+
+	serverConn2, clientConn2 := net.Pipe()
+	defer closeConn(serverConn2)
+	go func() {
+		sc := bufio.NewScanner(serverConn2)
+		for sc.Scan() {
+			var req struct {
+				ID     int64  `json:"id"`
+				Method string `json:"method"`
+			}
+			if json.Unmarshal(sc.Bytes(), &req) != nil || req.Method != "tools/call" {
+				continue
+			}
+			sideEffects.Add(1)
+			frame := map[string]any{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"result":  map[string]any{"content": "retried"},
+			}
+			b, _ := json.Marshal(frame)
+			if _, err := fmt.Fprintf(serverConn2, "%s\n", b); err != nil {
+				return
+			}
+		}
+	}()
+
+	go func() {
+		<-callExecuted
+		adapter.adapterCore.mu.Lock()
+		adapter.adapterCore.conn = NewJSONRPCLineTransport(clientConn2, clientConn2, clientConn2.Close)
+		adapter.adapterCore.connected = false
+		adapter.adapterCore.mu.Unlock()
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, err := adapter.CallTool(ctx, "write", map[string]any{"path": "file"})
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "outcome unknown")
+	assert.Contains(t, err.Error(), "may have executed")
+	assert.EqualValues(t, 1, sideEffects.Load(), "a lost response must not trigger a second tool execution")
 }
 
 // TestReconnectBackoff verifies the exponential backoff schedule.
