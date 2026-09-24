@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"os"
+	"os/exec"
 	"sync/atomic"
 	"testing"
 
@@ -317,6 +319,45 @@ func TestPreparedDispatchPreservesFindAndGitNumericArguments(t *testing.T) {
 func TestPreparedValueRejectsNonJSONObjects(t *testing.T) {
 	_, err := freezeToolCall(ToolCall{Args: map[string]any{"invalid": errors.New("bad")}})
 	assert.ErrorIs(t, err, ErrPreparedValueNotJSON)
+}
+
+func TestPreparedValueRejectsCyclicContainersInSubprocess(t *testing.T) {
+	const cycleSubprocessEnv = "GOCLI_PREPARED_JSON_CYCLE_SUBPROCESS"
+	if os.Getenv(cycleSubprocessEnv) == "1" {
+		cyclicMap := map[string]any{}
+		cyclicMap["self"] = cyclicMap
+		if _, err := cloneProtocolJSON(cyclicMap); !errors.Is(err, ErrPreparedValueNotJSON) {
+			t.Fatalf("cyclic map error = %v, want ErrPreparedValueNotJSON", err)
+		}
+
+		cyclicSlice := make([]any, 1)
+		cyclicSlice[0] = cyclicSlice
+		if _, err := cloneProtocolJSON(cyclicSlice); !errors.Is(err, ErrPreparedValueNotJSON) {
+			t.Fatalf("cyclic slice error = %v, want ErrPreparedValueNotJSON", err)
+		}
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestPreparedValueRejectsCyclicContainersInSubprocess$")
+	cmd.Env = append(os.Environ(), cycleSubprocessEnv+"=1")
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "cycle regression subprocess failed: %s", output)
+}
+
+func TestPreparedValueEnforcesMaximumJSONDepth(t *testing.T) {
+	nested := func(depth int) any {
+		var value any = "leaf"
+		for range depth {
+			value = map[string]any{"next": value}
+		}
+		return value
+	}
+
+	_, err := cloneProtocolJSON(nested(maxPreparedJSONDepth))
+	require.NoError(t, err, "depth 128 remains valid")
+
+	_, err = cloneProtocolJSON(nested(maxPreparedJSONDepth + 1))
+	assert.ErrorIs(t, err, ErrPreparedValueNotJSON, "depth 129 is rejected")
 }
 
 func mustFreezeToolCall(t *testing.T, call ToolCall) FrozenToolCall {

@@ -394,9 +394,18 @@ func cloneFrozenMap(value map[string]any) map[string]any {
 var jsonMarshalerType = reflect.TypeOf((*json.Marshaler)(nil)).Elem()
 var jsonNumberType = reflect.TypeOf(json.Number(""))
 
+const maxPreparedJSONDepth = 128
+
 func cloneProtocolJSONValue(value reflect.Value) (reflect.Value, error) {
+	return cloneProtocolJSONValueAtDepth(value, 0)
+}
+
+func cloneProtocolJSONValueAtDepth(value reflect.Value, depth int) (reflect.Value, error) {
 	if !value.IsValid() {
 		return value, nil
+	}
+	if depth > maxPreparedJSONDepth {
+		return reflect.Value{}, ErrPreparedValueNotJSON
 	}
 	if value.Type() != jsonNumberType && value.Type().Implements(jsonMarshalerType) {
 		return reflect.Value{}, ErrPreparedValueNotJSON
@@ -407,7 +416,7 @@ func cloneProtocolJSONValue(value reflect.Value) (reflect.Value, error) {
 		if value.IsNil() {
 			return reflect.Zero(value.Type()), nil
 		}
-		cloned, err := cloneProtocolJSONValue(value.Elem())
+		cloned, err := cloneProtocolJSONValueAtDepth(value.Elem(), depth)
 		if err != nil {
 			return reflect.Value{}, err
 		}
@@ -424,7 +433,7 @@ func cloneProtocolJSONValue(value reflect.Value) (reflect.Value, error) {
 		result := reflect.MakeMapWithSize(value.Type(), value.Len())
 		iterator := value.MapRange()
 		for iterator.Next() {
-			cloned, err := cloneProtocolJSONValue(iterator.Value())
+			cloned, err := cloneProtocolJSONValueAtDepth(iterator.Value(), depth+1)
 			if err != nil {
 				return reflect.Value{}, err
 			}
@@ -437,7 +446,7 @@ func cloneProtocolJSONValue(value reflect.Value) (reflect.Value, error) {
 		}
 		result := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
 		for index := 0; index < value.Len(); index++ {
-			cloned, err := cloneProtocolJSONValue(value.Index(index))
+			cloned, err := cloneProtocolJSONValueAtDepth(value.Index(index), depth+1)
 			if err != nil {
 				return reflect.Value{}, err
 			}
@@ -447,7 +456,7 @@ func cloneProtocolJSONValue(value reflect.Value) (reflect.Value, error) {
 	case reflect.Array:
 		result := reflect.New(value.Type()).Elem()
 		for index := 0; index < value.Len(); index++ {
-			cloned, err := cloneProtocolJSONValue(value.Index(index))
+			cloned, err := cloneProtocolJSONValueAtDepth(value.Index(index), depth+1)
 			if err != nil {
 				return reflect.Value{}, err
 			}
