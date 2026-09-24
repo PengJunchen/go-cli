@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -114,6 +115,11 @@ type DefaultSubAgent struct {
 
 var _ SubAgent = (*DefaultSubAgent)(nil)
 
+var (
+	ErrSubAgentNotRunning = errors.New("core: sub-agent is not running")
+	ErrSubAgentInboxFull  = errors.New("core: sub-agent inbox is full")
+)
+
 // subAgentOptions holds the configurable fields of a sub-agent during
 // construction. It is an internal construction aid so that
 // SubAgentOption closures do not reference the concrete DefaultSubAgent type.
@@ -171,7 +177,7 @@ func (s *DefaultSubAgent) State() SubAgentState {
 	return s.state
 }
 
-// Received returns a copy of the messages delivered via Send so far.
+// Received returns a copy of the messages accepted into the running inbox.
 func (s *DefaultSubAgent) Received() []string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -284,24 +290,28 @@ func (s *DefaultSubAgent) setStateLocked(state SubAgentState) {
 	s.mu.Unlock()
 }
 
-// Send records and delivers a follow-up message to the running sub-agent.
-// Messages are recorded immediately under lock so they remain observable even
-// if the runner has already terminated.
-func (s *DefaultSubAgent) Send(_ context.Context, msg string) error {
+// Send queues a follow-up message and records it only after the inbox accepts
+// it. A full inbox or a sub-agent that has already finished is reported to the
+// caller instead of appearing as a successful delivery.
+func (s *DefaultSubAgent) Send(ctx context.Context, msg string) error {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+	}
 	s.mu.Lock()
-	s.received = append(s.received, msg)
-	s.mu.Unlock()
-
-	// Best-effort delivery: if the inbox buffer is full or the sub-task has
-	// ended, the message is still recorded above.
-	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.state != SubAgentRunning && s.state != SubAgentWaiting {
+		return fmt.Errorf("%w: %q (state %s)", ErrSubAgentNotRunning, s.config.Name, s.state)
+	}
 	inbox := s.inbox
-	s.mu.Unlock()
 	select {
 	case inbox <- msg:
+		s.received = append(s.received, msg)
+		return nil
 	default:
+		return fmt.Errorf("%w: %q", ErrSubAgentInboxFull, s.config.Name)
 	}
-	return nil
 }
 
 // Interrupt stops the running sub-agent: it flags the interrupt, cancels the
