@@ -931,17 +931,34 @@ func hasUnknownToolOutcome(err error) bool {
 // TurnItem.ToolResult field so compactors (e.g. MicroCompactor) can replace
 // them with placeholders.
 func messagesToTurnItems(msgs []llm.Message) []compaction.TurnItem {
-	items := make([]compaction.TurnItem, len(msgs))
+	canonical := make([]AgentMessage, len(msgs))
+	finishReasons := make([]string, len(msgs))
 	for i, m := range msgs {
-		item := compaction.TurnItem{
-			ID:            fmt.Sprintf("msg-%d", i),
+		canonical[i] = AgentMessage{
 			Role:          string(m.Role),
+			Content:       m.Content,
 			ContentBlocks: m.ContentBlocks,
+			Usage:         m.Usage,
 			ToolCalls:     m.ToolCalls,
 			ToolCallID:    m.ToolCallID,
 			ToolName:      m.Name,
 		}
-		if m.Role == llm.RoleTool {
+		finishReasons[i] = m.FinishReason
+	}
+	canonical = cloneAgentMessages(canonical)
+	items := make([]compaction.TurnItem, len(canonical))
+	for i, m := range canonical {
+		item := compaction.TurnItem{
+			ID:            fmt.Sprintf("msg-%d", i),
+			Role:          string(m.Role),
+			ContentBlocks: m.ContentBlocks,
+			Usage:         m.Usage,
+			FinishReason:  finishReasons[i],
+			ToolCalls:     m.ToolCalls,
+			ToolCallID:    m.ToolCallID,
+			ToolName:      m.ToolName,
+		}
+		if m.Role == compaction.RoleTool {
 			item.ToolResult = m.Content
 		} else {
 			item.Content = m.Content
@@ -955,24 +972,38 @@ func messagesToTurnItems(msgs []llm.Message) []compaction.TurnItem {
 // after mid-turn compaction. Compaction summary entries with empty content are
 // replaced with "[compacted]" so the model sees a non-empty placeholder.
 func turnItemsToMessages(items []compaction.TurnItem) []llm.Message {
-	msgs := make([]llm.Message, len(items))
+	canonical := make([]AgentMessage, len(items))
 	for i, it := range items {
-		msg := llm.Message{
-			Role:          llm.Role(it.Role),
+		canonical[i] = AgentMessage{
+			Role:          it.Role,
 			ContentBlocks: it.ContentBlocks,
+			Usage:         it.Usage,
 			ToolCalls:     it.ToolCalls,
 			ToolCallID:    it.ToolCallID,
-			Name:          it.ToolName,
+			ToolName:      it.ToolName,
 		}
 		if it.Role == compaction.RoleTool {
-			msg.Content = it.ToolResult
+			canonical[i].Content = it.ToolResult
 		} else {
-			msg.Content = it.Content
+			canonical[i].Content = it.Content
 			if it.IsCompaction && it.Content == "" {
-				msg.Content = "[compacted]"
+				canonical[i].Content = "[compacted]"
 			}
 		}
-		msgs[i] = msg
+	}
+	canonical = cloneAgentMessages(canonical)
+	msgs := make([]llm.Message, len(items))
+	for i, message := range canonical {
+		msgs[i] = llm.Message{
+			Role:          llm.Role(message.Role),
+			Content:       message.Content,
+			ContentBlocks: message.ContentBlocks,
+			ToolCalls:     message.ToolCalls,
+			ToolCallID:    message.ToolCallID,
+			Name:          message.ToolName,
+			Usage:         message.Usage,
+			FinishReason:  items[i].FinishReason,
+		}
 	}
 	return msgs
 }

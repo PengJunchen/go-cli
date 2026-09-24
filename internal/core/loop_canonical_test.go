@@ -13,6 +13,48 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func TestMidTurnCompactionMappingPreservesAndClonesMessageFields(t *testing.T) {
+	input := []llm.Message{
+		{
+			Role:    llm.RoleAssistant,
+			Content: "calling write",
+			ContentBlocks: []llm.ContentBlock{{
+				Type: "image_url", ImageURL: &llm.ImageURL{URL: "data:image/png;base64,abc", Detail: "low"},
+			}},
+			ToolCalls: []llm.ToolCall{{
+				ID: "call-1", Name: "write", Args: map[string]any{"path": "/tmp", "nested": map[string]any{"enabled": true}},
+			}},
+			Usage:        &llm.Usage{InputTokens: 17, OutputTokens: 4, TotalTokens: 21},
+			FinishReason: "tool_calls",
+		},
+		{
+			Role:       llm.RoleTool,
+			Content:    "write result",
+			ToolCallID: "call-1",
+			Name:       "write",
+			Usage:      &llm.Usage{InputTokens: 1, OutputTokens: 2, TotalTokens: 3},
+		},
+	}
+
+	items := messagesToTurnItems(input)
+	require.Equal(t, &llm.Usage{InputTokens: 17, OutputTokens: 4, TotalTokens: 21}, items[0].Usage)
+	require.Equal(t, "tool_calls", items[0].FinishReason)
+	require.Equal(t, "write result", items[1].ToolResult)
+	require.Equal(t, &llm.Usage{InputTokens: 1, OutputTokens: 2, TotalTokens: 3}, items[1].Usage)
+
+	got := turnItemsToMessages(items)
+	require.Equal(t, input, got)
+
+	got[0].Usage.InputTokens = 100
+	got[0].ContentBlocks[0].ImageURL.URL = "mutated"
+	gotArgs := got[0].ToolCalls[0].Args.(map[string]any)
+	gotArgs["nested"].(map[string]any)["enabled"] = false
+	require.Equal(t, 17, input[0].Usage.InputTokens)
+	require.Equal(t, "data:image/png;base64,abc", input[0].ContentBlocks[0].ImageURL.URL)
+	require.Equal(t, true, input[0].ToolCalls[0].Args.(map[string]any)["nested"].(map[string]any)["enabled"])
+
+}
+
 type canonicalTranscriptTestModel struct{ calls int }
 
 func (m *canonicalTranscriptTestModel) Generate(context.Context, []llm.Message, ...llm.Option) (*llm.Message, error) {
