@@ -911,6 +911,7 @@ func TestClaudeStreamRejectsNonObjectToolArguments(t *testing.T) {
 			`{"type":"message_start","message":{"role":"assistant"}}`,
 			`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_1","name":"read"}}`,
 			`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"null"}}`,
+			`{"type":"content_block_stop","index":0}`,
 			`{"type":"message_delta","delta":{"stop_reason":"tool_use"}}`,
 			`{"type":"message_stop"}`,
 		} {
@@ -931,4 +932,125 @@ func TestClaudeStreamRejectsNonObjectToolArguments(t *testing.T) {
 		}
 	}
 	require.ErrorContains(t, streamErr, "arguments must be a JSON object")
+}
+
+func TestClaudeStreamRejectsMalformedEventOrdering(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	tests := []struct {
+		name   string
+		events []string
+	}{
+		{
+			name: "delta before message start",
+			events: []string{
+				`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"early"}}`,
+				`{"type":"message_start","message":{"role":"assistant"}}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+				`{"type":"message_stop"}`,
+			},
+		},
+		{
+			name: "delta without active block",
+			events: []string{
+				`{"type":"message_start","message":{"role":"assistant"}}`,
+				`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"unframed"}}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+				`{"type":"message_stop"}`,
+			},
+		},
+		{
+			name: "delta references another block index",
+			events: []string{
+				`{"type":"message_start","message":{"role":"assistant"}}`,
+				`{"type":"content_block_start","index":0,"content_block":{"type":"text"}}`,
+				`{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"wrong block"}}`,
+				`{"type":"content_block_stop","index":0}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+				`{"type":"message_stop"}`,
+			},
+		},
+		{
+			name: "first block index is not zero",
+			events: []string{
+				`{"type":"message_start","message":{"role":"assistant"}}`,
+				`{"type":"content_block_start","index":2,"content_block":{"type":"text"}}`,
+				`{"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"gap"}}`,
+				`{"type":"content_block_stop","index":2}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+				`{"type":"message_stop"}`,
+			},
+		},
+		{
+			name: "block stop references another index",
+			events: []string{
+				`{"type":"message_start","message":{"role":"assistant"}}`,
+				`{"type":"content_block_start","index":0,"content_block":{"type":"text"}}`,
+				`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"text"}}`,
+				`{"type":"content_block_stop","index":1}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+				`{"type":"message_stop"}`,
+			},
+		},
+		{
+			name: "block stop omits index",
+			events: []string{
+				`{"type":"message_start","message":{"role":"assistant"}}`,
+				`{"type":"content_block_start","index":0,"content_block":{"type":"text"}}`,
+				`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"text"}}`,
+				`{"type":"content_block_stop"}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+				`{"type":"message_stop"}`,
+			},
+		},
+		{
+			name: "message delta before block stop",
+			events: []string{
+				`{"type":"message_start","message":{"role":"assistant"}}`,
+				`{"type":"content_block_start","index":0,"content_block":{"type":"text"}}`,
+				`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"open"}}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+				`{"type":"content_block_stop","index":0}`,
+				`{"type":"message_stop"}`,
+			},
+		},
+		{
+			name: "content block after message delta",
+			events: []string{
+				`{"type":"message_start","message":{"role":"assistant"}}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+				`{"type":"content_block_start","index":0,"content_block":{"type":"text"}}`,
+				`{"type":"content_block_stop","index":0}`,
+				`{"type":"message_stop"}`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				for _, event := range tt.events {
+					_, _ = fmt.Fprintf(w, "event: message\ndata: %s\n\n", event)
+				}
+			}))
+			defer srv.Close()
+
+			provider := NewClaudeProvider(WithNativeBaseURL(srv.URL), WithNativeAPIKey("test"))
+			model, _, err := provider.Build(context.Background(), ModelConfig{Model: "claude-test"})
+			require.NoError(t, err)
+			stream, err := model.Stream(context.Background(), nil)
+			require.NoError(t, err)
+
+			var streamErr error
+			var sawFinal bool
+			for chunk := range stream {
+				if chunk.Error != nil {
+					streamErr = chunk.Error
+				}
+				sawFinal = sawFinal || chunk.Final
+			}
+			require.Error(t, streamErr)
+			assert.False(t, sawFinal, "malformed Claude stream must not produce a successful final chunk")
+		})
+	}
 }
