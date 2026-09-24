@@ -3,8 +3,12 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -34,29 +38,71 @@ func newE2ETestConfig(t *testing.T, srvURL string) *config.Config {
 }
 
 // TestE2E_ToolExecutionViaInteractive drives a full tool-call cycle through
-// the interactive REPL. The mock LLM first returns a bash tool call; after the
-// loop executes (or denies) the tool and feeds the result back, the LLM
-// returns a final text response. The test verifies that the session completes
-// normally and the expected content reaches stdout.
+// the interactive REPL. The mock LLM first returns a read tool call; after the
+// loop executes the safe read and feeds its result back, the LLM returns a
+// final text response. The test verifies both the tool result sent to the
+// model and the final content reaching stdout.
 func TestE2E_ToolExecutionViaInteractive(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
+	fixtureDir, err := os.MkdirTemp(".", "interactive-e2e-read-")
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = os.RemoveAll(fixtureDir) })
+	fixtureContent := "interactive read fixture"
+	fixturePath := filepath.Join(fixtureDir, "fixture.txt")
+	require.NoError(t, os.WriteFile(fixturePath, []byte(fixtureContent), 0o600))
+	relativePath, err := filepath.Rel(".", fixturePath)
+	require.NoError(t, err)
+	toolArgs, err := json.Marshal(map[string]string{"path": filepath.ToSlash(relativePath)})
+	require.NoError(t, err)
+
 	var mu sync.Mutex
 	requestCount := 0
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	toolResultObserved := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, readErr := io.ReadAll(r.Body)
+		if readErr != nil {
+			http.Error(w, "failed to read request", http.StatusBadRequest)
+			return
+		}
+		_ = r.Body.Close()
+
 		mu.Lock()
 		requestCount++
 		n := requestCount
+		if strings.Contains(string(body), fixtureContent) {
+			toolResultObserved = true
+		}
 		mu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
 		if n == 1 {
-			// First request: return a bash tool call.
-			_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call_1","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo hello\"}"}}]}}]}`))
+			// First request: return a safe read tool call.
+			response, marshalErr := json.Marshal(map[string]any{
+				"choices": []any{map[string]any{
+					"message": map[string]any{
+						"role":    "assistant",
+						"content": nil,
+						"tool_calls": []any{map[string]any{
+							"id":   "call_1",
+							"type": "function",
+							"function": map[string]any{
+								"name":      "read",
+								"arguments": string(toolArgs),
+							},
+						}},
+					},
+				}},
+			})
+			if marshalErr != nil {
+				http.Error(w, "failed to marshal response", http.StatusInternalServerError)
+				return
+			}
+			_, _ = w.Write(response)
 			return
 		}
-		// Subsequent requests (tool result / extraction): return a final text response.
-		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Done: hello"}}]}`))
+		// Subsequent requests (tool result / extraction): return a final response.
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"role":"assistant","content":"Done: interactive read fixture"}}]}`))
 	}))
 	defer srv.Close()
 
@@ -64,7 +110,7 @@ func TestE2E_ToolExecutionViaInteractive(t *testing.T) {
 
 	var out bytes.Buffer
 	in := &delayedReader{
-		lines: []string{"run echo hello", "exit"},
+		lines: []string{"read the interactive fixture", "exit"},
 		delay: 200 * time.Millisecond,
 	}
 	cmd := newInteractiveCmd(in, &out)
@@ -72,10 +118,13 @@ func TestE2E_ToolExecutionViaInteractive(t *testing.T) {
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
-	err := cmd.Run(ctx, cfg, nil)
+	err = cmd.Run(ctx, cfg, nil)
 	require.NoError(t, err)
-	assert.Contains(t, out.String(), "hello")
+	assert.Contains(t, out.String(), "Done: interactive read fixture")
 	assert.Contains(t, out.String(), "Session ended")
+	mu.Lock()
+	defer mu.Unlock()
+	assert.True(t, toolResultObserved, "the successful read result must be sent back to the model")
 }
 
 // TestE2E_SlashCommandsViaInteractive verifies that slash commands are
