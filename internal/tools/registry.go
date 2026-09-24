@@ -21,43 +21,37 @@ var ErrToolNotFound = errors.New("tools: tool not found")
 // registered definition (last registration wins), and the new definition is
 // appended to the registration order returned by List.
 type DefaultToolRegistry struct {
-	mu      sync.RWMutex
-	tools   map[string]ToolDefinition
-	order   []string
-	version int // incremented on every Register call
+	mu       sync.RWMutex
+	tools    map[string]ToolDefinition
+	metadata map[string]toolRegistrationMetadata
+	order    []string
+	version  int // incremented on every Register call
+	fence    *DispatchFence
+	prepared *preparedToolPipelineState
 }
 
-var _ ToolRegistry = (*DefaultToolRegistry)(nil)
+var (
+	_ ToolRegistry                 = (*DefaultToolRegistry)(nil)
+	_ DispatchFenceProvider        = (*DefaultToolRegistry)(nil)
+	_ TrustedControlRegistrar      = (*DefaultToolRegistry)(nil)
+	_ registrationSnapshotProvider = (*DefaultToolRegistry)(nil)
+	_ preparedToolPipelineProvider = (*DefaultToolRegistry)(nil)
+)
 
 // NewDefaultToolRegistry returns an empty, ready-to-use registry.
 func NewDefaultToolRegistry() ToolRegistry {
 	return &DefaultToolRegistry{
-		tools: map[string]ToolDefinition{},
+		tools:    map[string]ToolDefinition{},
+		metadata: map[string]toolRegistrationMetadata{},
+		fence:    NewDispatchFence(),
+		prepared: &preparedToolPipelineState{},
 	}
 }
 
 // Register stores def under its name. It returns an error when def is nil.
 // Registering a name a second time overwrites the previous definition.
 func (r *DefaultToolRegistry) Register(_ context.Context, def ToolDefinition) error {
-	if def == nil {
-		return errors.New("tools: cannot register a nil tool definition")
-	}
-
-	name := def.Name()
-	if name == "" {
-		return errors.New("tools: cannot register a tool with an empty name")
-	}
-
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	if _, ok := r.tools[name]; !ok {
-		r.order = append(r.order, name)
-	}
-	r.tools[name] = def
-	r.version++
-
-	return nil
+	return r.registerDefinition(def, RegistrationSourceToolRegistry, unknownTrustedEffects())
 }
 
 // Version returns a monotonically increasing counter that changes every time
