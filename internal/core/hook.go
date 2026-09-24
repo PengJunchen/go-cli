@@ -53,6 +53,14 @@ func (c *HookChain) Hooks() []Hook { return append([]Hook{}, c.hooks...) }
 // returned alongside so callers know exactly why the chain stopped. When every
 // hook passes, it returns ContinueHookResult.
 func (c *HookChain) Before(ctx context.Context, submission Submission) (HookResult, error) {
+	return c.before(ctx, submission, false)
+}
+
+func (c *HookChain) beforeCanonical(ctx context.Context, submission Submission) (HookResult, error) {
+	return c.before(ctx, submission, true)
+}
+
+func (c *HookChain) before(ctx context.Context, submission Submission, canonical bool) (HookResult, error) {
 	span, spanCtx := tracing.SpanFromContext(ctx, "hook.before", tracing.SpanKindInternal)
 	defer span.End()
 	logger := tracing.NewTraceLogger(span, nil)
@@ -60,8 +68,14 @@ func (c *HookChain) Before(ctx context.Context, submission Submission) (HookResu
 
 	for _, h := range c.hooks {
 		if err := h.BeforeRun(spanCtx, submission); err != nil {
-			slog.Info("core.hookchain.before.halt", "hook", h.Name(), "err", err)
-			logger.Info("hook.before.halt", "hook", h.Name(), "err", err)
+			if canonical {
+				errAttrs := canonicalErrorLogAttrs(err)
+				slog.Info("core.hookchain.before.halt", append([]any{"hook", h.Name()}, errAttrs...)...)
+				logger.Info("hook.before.halt", append([]any{"hook", h.Name()}, errAttrs...)...)
+			} else {
+				slog.Info("core.hookchain.before.halt", "hook", h.Name(), "err", err)
+				logger.Info("hook.before.halt", "hook", h.Name(), "err", err)
+			}
 			return NewInterruptHookResult(err.Error()), err
 		}
 	}
@@ -73,6 +87,14 @@ func (c *HookChain) Before(ctx context.Context, submission Submission) (HookResu
 // every hook observes the run outcome. Its return is the first error observed,
 // if any.
 func (c *HookChain) After(ctx context.Context, submission Submission, result Result, err error) error {
+	return c.after(ctx, submission, result, err, false)
+}
+
+func (c *HookChain) afterCanonical(ctx context.Context, submission Submission, result Result, err error) error {
+	return c.after(ctx, submission, result, err, true)
+}
+
+func (c *HookChain) after(ctx context.Context, submission Submission, result Result, err error, canonical bool) error {
 	span, spanCtx := tracing.SpanFromContext(ctx, "hook.after", tracing.SpanKindInternal)
 	defer span.End()
 	logger := tracing.NewTraceLogger(span, nil)
@@ -81,8 +103,14 @@ func (c *HookChain) After(ctx context.Context, submission Submission, result Res
 	var firstErr error
 	for _, h := range c.hooks {
 		if aerr := h.AfterRun(spanCtx, submission, result, err); aerr != nil {
-			slog.Info("core.hookchain.after.error", "hook", h.Name(), "err", aerr)
-			logger.Info("hook.after.error", "hook", h.Name(), "err", aerr)
+			if canonical {
+				aerrAttrs := canonicalErrorLogAttrs(aerr)
+				slog.Info("core.hookchain.after.error", append([]any{"hook", h.Name()}, aerrAttrs...)...)
+				logger.Info("hook.after.error", append([]any{"hook", h.Name()}, aerrAttrs...)...)
+			} else {
+				slog.Info("core.hookchain.after.error", "hook", h.Name(), "err", aerr)
+				logger.Info("hook.after.error", "hook", h.Name(), "err", aerr)
+			}
 			if firstErr == nil {
 				firstErr = aerr
 			}
@@ -188,17 +216,17 @@ func (l *canonicalHookLoop) RunCanonical(ctx context.Context, submission Submiss
 	defer span.End()
 	logger := tracing.NewTraceLogger(span, nil)
 
-	result, err := l.chain.Before(spanCtx, submission)
+	result, err := l.chain.beforeCanonical(spanCtx, submission)
 	if err != nil {
-		logger.Info("hook.before.error", "err", err)
-		span.SetStatus(tracing.SpanStatusError, err.Error())
+		logger.Info("hook.before.error", canonicalErrorLogAttrs(err)...)
+		span.SetStatus(tracing.SpanStatusError, "canonical hook failed before run")
 		return CanonicalRunResult{
 			Events:     []AgentEvent{errEvent(err)},
 			Transcript: canonicalUserDelta(submission),
 		}, err
 	}
 	if result.Interrupted() {
-		logger.Info("hook.before.interrupt", "output", result.Output)
+		logger.Info("hook.before.interrupt", "output_len", len(result.Output))
 		return CanonicalRunResult{
 			Events:     []AgentEvent{{Kind: "status", Content: result.Output}},
 			Transcript: canonicalUserDelta(submission),
@@ -207,7 +235,7 @@ func (l *canonicalHookLoop) RunCanonical(ctx context.Context, submission Submiss
 
 	runResult, runErr := l.next.RunCanonical(spanCtx, submission, stream...)
 	if runErr != nil {
-		span.SetStatus(tracing.SpanStatusError, runErr.Error())
+		span.SetStatus(tracing.SpanStatusError, "canonical loop failed")
 	}
 	resultForHook := Result{Success: runErr == nil}
 	for _, entry := range runResult.Transcript {
@@ -215,8 +243,10 @@ func (l *canonicalHookLoop) RunCanonical(ctx context.Context, submission Submiss
 			resultForHook.Message = entry.Message.Content
 		}
 	}
-	if afterErr := l.chain.After(spanCtx, submission, resultForHook, runErr); afterErr != nil {
-		slog.Warn("core.hook.after_error", "err", afterErr)
+	if afterErr := l.chain.afterCanonical(spanCtx, submission, resultForHook, runErr); afterErr != nil {
+		afterErrAttrs := canonicalErrorLogAttrs(afterErr)
+		slog.Warn("core.hook.after_error", afterErrAttrs...)
+		logger.Warn("hook.after.error", afterErrAttrs...)
 	}
 	return runResult, runErr
 }

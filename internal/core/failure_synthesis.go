@@ -170,8 +170,9 @@ func (l *canonicalFailureSynthesisLoop) RunCanonical(ctx context.Context, submis
 		// receipt boundaries needed to construct a second canonical invocation.
 		// Preserve the first attempt's authoritative delta and leave retry to
 		// lower-level provider retry middleware, which runs inside the loop.
-		logger.Info("failure_synthesis.skip", "recoverable", true, "canonical_transcript", true, "error", err.Error())
-		slog.Info("core.failure_synthesis.canonical_retry_skipped", "error", err.Error())
+		errAttrs := canonicalErrorLogAttrs(err)
+		logger.Info("failure_synthesis.skip", append([]any{"recoverable", true, "canonical_transcript", true}, errAttrs...)...)
+		slog.Info("core.failure_synthesis.canonical_retry_skipped", append([]any{"recoverable", true}, errAttrs...)...)
 	}
 	return result, err
 }
