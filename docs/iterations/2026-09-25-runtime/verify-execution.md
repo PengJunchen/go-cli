@@ -17,3 +17,18 @@ All commands below ran in `/Users/pengjunchen/Documents/github/go-cli-runtime-wo
 | Diff whitespace check | `rtk git diff --check` | 0 | Tracked diff has no whitespace errors. Protected originals have no diff. |
 
 The full scanner-gate result is an R0 worktree static scan. It does not close the main release gate or attest to R1 runtime behavior. The 1,273 WARN findings are preserved; no blanket ignore or rule severity change was used.
+
+## Gate-hardening follow-up
+
+These entries are later fixes on top of the implementation above. They preserve the earlier baseline evidence and do not modify the protected proposal files.
+
+| Purpose | Command | Exit | Result |
+|---|---|---:|---|
+| TDD red: event-stream false greens | `rtk env GOMAXPROCS=2 go test -p 2 -count=1 ./internal/verify/cmd/test-gate` before parser hardening | 1 | The gate accepted a test `fail` event when the child exited zero; it also accepted an unterminated test, unknown action, missing package, and a `run` action without a test name. |
+| Gate process fixture race tests | `rtk env GOMAXPROCS=2 go test -p 2 -race -count=1 ./internal/verify/cmd/gatecapture ./internal/verify/cmd/test-gate ./internal/verify/cmd/scanner-gate` | 0 | Actual subprocesses exceeded stdout/stderr caps, timed out, and left descendants holding inherited pipes. The fixtures returned within the configured `WaitDelay`; each gate reported capture overflow. Scanner-gate nonzero child exit, malformed/partial JSON, summary mismatch, ERROR finding, and valid report paths were checked. |
+| Full verification race suite | `rtk env GOMAXPROCS=2 go test -p 2 -race -count=1 ./internal/verify/...` | 0 | `internal/verify` 97.457s; `gatecapture` 1.375s; scanner command 3.263s; scanner-gate 2.329s; test-gate 2.677s. |
+| Final verification race suite after fresh-run and benchmark gate corrections | `rtk env GOMAXPROCS=2 go test -p 2 -race -count=1 ./internal/verify/...` | 0 | `internal/verify` 97.840s; `gatecapture` 1.375s; scanner command 3.203s; scanner-gate 2.335s; test-gate 2.854s. |
+| Hardened worktree scanner gate | `rtk env GOMAXPROCS=2 go run ./internal/verify/cmd/scanner-gate -dir ./internal -scanner-command go -scanner-arg=run -scanner-arg=./internal/verify/cmd/scanner -scanner-arg=-dir -scanner-arg=./internal -scanner-arg=-format -scanner-arg=json > /tmp/r0-verify-scanner-gate-hardened.txt` | 0 | Report: 313 production Go files, 1,273 WARN, 0 ERROR. Runtime was not sampled separately. |
+| Protected-proposal integrity | `rtk sha256sum docs/iterations/2026-09-25-runtime/protected-changes.patch docs/iterations/2026-09-25-runtime/protected-changes.md` | 0 | Hashes remain `dce747ce55616e4a5faa8b3bc223853da5a318309be4c779bcb651a9479bbc07` and `7538750d4179f2ec31c6c3f17336fda7f1e3985979bdc9e14a79883971a5b359`; neither file was edited. |
+
+The Go event parser is exercised with actual `go test -json` output from a parallel test run twice (`-count=2`); another fixture runs the same module twice with the default fresh `-count=1` behavior. `bench` is accepted as a benchmark terminal and counted separately, while benchmark-only streams remain a failing behavioral test gate. These are worktree results; the protected CI/Makefile proposal remains pending approval and no default gate integration is claimed here.

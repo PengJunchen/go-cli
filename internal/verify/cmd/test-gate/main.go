@@ -12,11 +12,20 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"sort"
 	"strings"
 	"time"
+
+	"github.com/pengjunchen/go-cli/internal/verify/cmd/gatecapture"
 )
 
 const defaultTestTimeout = 15 * time.Minute
+
+var defaultCaptureLimits = gatecapture.Limits{
+	StdoutBytes: 128 << 20,
+	StderrBytes: 16 << 20,
+	WaitDelay:   gatecapture.DefaultWaitDelay,
+}
 
 type stringList []string
 
@@ -35,11 +44,16 @@ type testEvent struct {
 }
 
 type testCounts struct {
-	Packages int
-	Started  int
-	Passed   int
-	Failed   int
-	Skipped  int
+	Packages           int
+	Started            int
+	Passed             int
+	Benchmarked        int
+	Failed             int
+	PackageFailed      int
+	Skipped            int
+	FailedDetails      []string
+	Unfinished         []string
+	UnfinishedPackages []string
 }
 
 func main() {
@@ -47,6 +61,10 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) int {
+	return runWithCaptureLimits(args, stdout, stderr, defaultCaptureLimits)
+}
+
+func runWithCaptureLimits(args []string, stdout, stderr io.Writer, limits gatecapture.Limits) int {
 	fs := flag.NewFlagSet("verify-test-gate", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	dir := fs.String("dir", ".", "working directory for go test")
@@ -89,25 +107,39 @@ func run(args []string, stdout, stderr io.Writer) int {
 
 	ctx, cancel := context.WithTimeout(context.Background(), *timeout)
 	defer cancel()
-	commandArgs := append([]string{"test", "-json"}, goArgs...)
+	// Disable the Go test cache by default so a passing gate carries run events
+	// from this invocation. A caller's explicit -count option remains later and
+	// can request multiple executions such as -count=2.
+	commandArgs := append([]string{"test", "-json", "-count=1"}, goArgs...)
 	commandArgs = append(commandArgs, packages...)
 	cmd := exec.CommandContext(ctx, *goCommand, commandArgs...)
 	cmd.Dir = *dir
-	var childStdout, childStderr bytes.Buffer
-	cmd.Stdout = &childStdout
-	cmd.Stderr = &childStderr
-	err := cmd.Run()
+	capture, err := gatecapture.Run(cmd, limits)
 
-	events, counts, decodeErr := parseTestEvents(childStdout.Bytes())
+	events, counts, decodeErr := parseTestEvents(capture.Stdout)
 	if decodeErr == nil {
 		writeTestOutput(stdout, events)
 	} else {
-		writeDiagnostic(stderr, "go test stdout", childStdout.Bytes())
+		writeDiagnostic(stderr, "go test stdout", capture.Stdout)
 	}
-	writeDiagnostic(stderr, "go test stderr", childStderr.Bytes())
+	writeDiagnostic(stderr, "go test stderr", capture.Stderr)
+	if capture.StdoutExceeded {
+		_, _ = fmt.Fprintf(stderr, "go test stdout exceeded capture limit of %d bytes; test evidence is incomplete\n", limits.StdoutBytes) //nolint:errcheck // CLI diagnostic is best-effort
+	}
+	if capture.StderrExceeded {
+		_, _ = fmt.Fprintf(stderr, "go test stderr exceeded capture limit of %d bytes\n", limits.StderrBytes) //nolint:errcheck // CLI diagnostic is best-effort
+	}
 
 	if decodeErr != nil {
 		_, _ = fmt.Fprintf(stderr, "go test emitted invalid JSON events: %v\n", decodeErr) //nolint:errcheck // CLI diagnostic is best-effort
+	}
+	if len(counts.FailedDetails) > 0 {
+		for _, failure := range counts.FailedDetails {
+			_, _ = fmt.Fprintf(stderr, "go test event failure: %s\n", failure) //nolint:errcheck // CLI diagnostic is best-effort
+		}
+	}
+	if capture.StdoutExceeded || capture.StderrExceeded {
+		return 1
 	}
 	if err != nil {
 		if counts.Started > 0 {
@@ -128,15 +160,31 @@ func run(args []string, stdout, stderr io.Writer) int {
 	if decodeErr != nil {
 		return 1
 	}
+	if counts.Failed > 0 || counts.PackageFailed > 0 {
+		_, _ = fmt.Fprintf(stderr, "go test JSON reports %d failed test event(s) and %d failed package event(s)\n", counts.Failed, counts.PackageFailed) //nolint:errcheck // CLI diagnostic is best-effort
+		return 1
+	}
+	if len(counts.Unfinished) > 0 {
+		for _, testName := range counts.Unfinished {
+			_, _ = fmt.Fprintf(stderr, "go test test %s has no terminal event (pass, fail, or skip)\n", testName) //nolint:errcheck // CLI diagnostic is best-effort
+		}
+		return 1
+	}
+	if len(counts.UnfinishedPackages) > 0 {
+		for _, packageName := range counts.UnfinishedPackages {
+			_, _ = fmt.Fprintf(stderr, "go test package %s has no terminal event (pass, fail, or skip)\n", packageName) //nolint:errcheck // CLI diagnostic is best-effort
+		}
+		return 1
+	}
 	if counts.Started == 0 {
 		_, _ = fmt.Fprintf(stderr, "go test matched zero test functions across %d package(s); command: %s %s\n", counts.Packages, *goCommand, strings.Join(commandArgs, " ")) //nolint:errcheck // CLI diagnostic is best-effort
 		return 1
 	}
 	if counts.Passed == 0 {
-		_, _ = fmt.Fprintf(stderr, "go test ran %d test function(s) but none passed (failed=%d skipped=%d packages=%d)\n", counts.Started, counts.Failed, counts.Skipped, counts.Packages) //nolint:errcheck // CLI diagnostic is best-effort
+		_, _ = fmt.Fprintf(stderr, "go test ran %d test function(s) but no test or example passed (benchmarked=%d failed=%d skipped=%d packages=%d)\n", counts.Started, counts.Benchmarked, counts.Failed, counts.Skipped, counts.Packages) //nolint:errcheck // CLI diagnostic is best-effort
 		return 1
 	}
-	_, _ = fmt.Fprintf(stdout, "go test gate passed: %d test function(s) started, %d passed, %d failed, %d skipped across %d package(s)\n", counts.Started, counts.Passed, counts.Failed, counts.Skipped, counts.Packages) //nolint:errcheck // CLI output is best-effort
+	_, _ = fmt.Fprintf(stdout, "go test gate passed: %d test function(s) started, %d passed, %d benchmarked, %d failed, %d skipped across %d package(s)\n", counts.Started, counts.Passed, counts.Benchmarked, counts.Failed, counts.Skipped, counts.Packages) //nolint:errcheck // CLI output is best-effort
 	return 0
 }
 
@@ -144,7 +192,13 @@ func parseTestEvents(data []byte) ([]testEvent, testCounts, error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	var events []testEvent
 	packages := make(map[string]struct{})
+	packageStates := make(map[string]packageLifecycle)
+	tests := make(map[testKey]testLifecycle)
 	counts := testCounts{}
+	failures := make(map[string]struct{})
+	addFailure := func(detail string) {
+		failures[detail] = struct{}{}
+	}
 	for {
 		var event testEvent
 		if err := decoder.Decode(&event); err != nil {
@@ -153,26 +207,133 @@ func parseTestEvents(data []byte) ([]testEvent, testCounts, error) {
 			}
 			return events, counts, fmt.Errorf("decode event: %w", err)
 		}
-		events = append(events, event)
-		if event.Package != "" {
-			packages[event.Package] = struct{}{}
+		eventNumber := len(events) + 1
+		if strings.TrimSpace(event.Package) == "" {
+			return events, counts, fmt.Errorf("event %d action %q has missing package", eventNumber, event.Action)
 		}
-		if event.Test == "" {
+		packages[event.Package] = struct{}{}
+		events = append(events, event)
+		if event.Action == "start" {
+			if event.Test != "" {
+				return events, counts, fmt.Errorf("event %d action start must not name a test", eventNumber)
+			}
+			if packageStates[event.Package].started {
+				return events, counts, fmt.Errorf("event %d repeats package start for %s", eventNumber, event.Package)
+			}
+			packageStates[event.Package] = packageLifecycle{started: true}
+			continue
+		}
+		packageState, packageStarted := packageStates[event.Package]
+		if !packageStarted || !packageState.started {
+			return events, counts, fmt.Errorf("event %d action %q for package %s has no preceding start", eventNumber, event.Action, event.Package)
+		}
+		if packageState.terminal {
+			return events, counts, fmt.Errorf("event %d occurs after package %s terminal event", eventNumber, event.Package)
+		}
+		if event.Test != "" {
+			key := testKey{packageName: event.Package, testName: event.Test}
+			if strings.TrimSpace(event.Test) != event.Test {
+				return events, counts, fmt.Errorf("event %d action %q has invalid test name %q", eventNumber, event.Action, event.Test)
+			}
+			switch event.Action {
+			case "run":
+				state := tests[key]
+				if state.started && !state.terminal {
+					return events, counts, fmt.Errorf("event %d repeats run for active test %s", eventNumber, key)
+				}
+				tests[key] = testLifecycle{started: true}
+				counts.Started++
+			case "pause", "cont", "pass", "bench", "fail", "skip", "output":
+				state, ok := tests[key]
+				if !ok || !state.started || state.terminal {
+					return events, counts, fmt.Errorf("event %d action %q for test %s has no active run", eventNumber, event.Action, key)
+				}
+				switch event.Action {
+				case "pause":
+					if state.paused {
+						return events, counts, fmt.Errorf("event %d pauses already paused test %s", eventNumber, key)
+					}
+					state.paused = true
+				case "cont":
+					if !state.paused {
+						return events, counts, fmt.Errorf("event %d continues test %s that was not paused", eventNumber, key)
+					}
+					state.paused = false
+				case "pass", "bench", "fail", "skip":
+					if state.paused {
+						return events, counts, fmt.Errorf("event %d terminates paused test %s", eventNumber, key)
+					}
+					state.terminal = true
+					if event.Action == "pass" {
+						counts.Passed++
+					} else if event.Action == "bench" {
+						counts.Benchmarked++
+					} else if event.Action == "fail" {
+						counts.Failed++
+						addFailure("test " + key.String() + " failed")
+					} else {
+						counts.Skipped++
+					}
+				}
+				tests[key] = state
+			default:
+				return events, counts, fmt.Errorf("event %d has unknown action %q", eventNumber, event.Action)
+			}
 			continue
 		}
 		switch event.Action {
-		case "run":
-			counts.Started++
-		case "pass":
-			counts.Passed++
 		case "fail":
-			counts.Failed++
-		case "skip":
-			counts.Skipped++
+			counts.PackageFailed++
+			addFailure("package " + event.Package + " failed")
+			packageState.terminal = true
+		case "skip", "pass":
+			packageState.terminal = true
+		case "output":
+		case "run":
+			return events, counts, fmt.Errorf("event %d action run requires a test name", eventNumber)
+		case "pause", "cont", "bench":
+			return events, counts, fmt.Errorf("event %d action %q requires a test name", eventNumber, event.Action)
+		default:
+			return events, counts, fmt.Errorf("event %d has unknown action %q", eventNumber, event.Action)
 		}
+		packageStates[event.Package] = packageState
 	}
 	counts.Packages = len(packages)
+	for packageName, state := range packageStates {
+		if state.started && !state.terminal {
+			counts.UnfinishedPackages = append(counts.UnfinishedPackages, packageName)
+		}
+	}
+	for key, state := range tests {
+		if state.started && !state.terminal {
+			counts.Unfinished = append(counts.Unfinished, key.String())
+		}
+	}
+	for failure := range failures {
+		counts.FailedDetails = append(counts.FailedDetails, failure)
+	}
+	sort.Strings(counts.Unfinished)
+	sort.Strings(counts.UnfinishedPackages)
+	sort.Strings(counts.FailedDetails)
 	return events, counts, nil
+}
+
+type testKey struct {
+	packageName string
+	testName    string
+}
+
+func (key testKey) String() string { return key.packageName + "." + key.testName }
+
+type testLifecycle struct {
+	started  bool
+	paused   bool
+	terminal bool
+}
+
+type packageLifecycle struct {
+	started  bool
+	terminal bool
 }
 
 func writeTestOutput(writer io.Writer, events []testEvent) {
