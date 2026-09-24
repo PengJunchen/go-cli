@@ -2,6 +2,8 @@ package tools
 
 import (
 	"context"
+	"errors"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -22,6 +24,24 @@ type streamEvent struct {
 type mockStreamSink struct {
 	mu     sync.Mutex
 	events []streamEvent
+}
+
+type scriptedReadErrorReader struct {
+	data     []byte
+	readErr  error
+	drainErr error
+	sentData bool
+}
+
+func (r *scriptedReadErrorReader) Read(p []byte) (int, error) {
+	if !r.sentData {
+		r.sentData = true
+		return copy(p, r.data), r.readErr
+	}
+	if r.drainErr != nil {
+		return 0, r.drainErr
+	}
+	return 0, io.EOF
 }
 
 func (m *mockStreamSink) Send(content, toolCallID, stream string) error {
@@ -139,6 +159,47 @@ func TestStreamingBashTruncation(t *testing.T) {
 	// The command itself succeeds (exit 0), only the output is truncated.
 	require.NoError(t, err)
 	assert.Contains(t, result.Output, "[output truncated]")
+}
+
+func TestReadPipeReportsReaderErrorAfterDraining(t *testing.T) {
+	const maxOutput = 10
+	readErr := errors.New("injected reader failure")
+	reader := &scriptedReadErrorReader{
+		data:    []byte("kept\n"),
+		readErr: readErr,
+	}
+	capture := newStreamingBashOutputCapture(maxOutput)
+
+	drained, err := readPipe(reader, "stdout", nil, "call-reader-error", capture)
+	require.True(t, drained)
+	require.ErrorIs(t, err, readErr)
+	output, truncated := capture.output()
+	assert.True(t, truncated)
+	assert.Contains(t, output, "kept\n")
+	assert.Contains(t, output, "[output truncated]")
+	assert.LessOrEqual(t, len(output), maxOutput+len("\n[output truncated]"))
+}
+
+func TestReadPipeReportsDrainFailure(t *testing.T) {
+	const maxOutput = 10
+	readErr := errors.New("injected scanner read failure")
+	drainErr := errors.New("injected drain failure")
+	reader := &scriptedReadErrorReader{
+		data:     []byte("kept\n"),
+		readErr:  readErr,
+		drainErr: drainErr,
+	}
+	capture := newStreamingBashOutputCapture(maxOutput)
+
+	drained, err := readPipe(reader, "stderr", nil, "call-drain-error", capture)
+	assert.False(t, drained)
+	assert.ErrorIs(t, err, readErr)
+	assert.ErrorIs(t, err, drainErr)
+	output, truncated := capture.output()
+	assert.True(t, truncated)
+	assert.Contains(t, output, "kept\n")
+	assert.Contains(t, output, "[output truncated]")
+	assert.LessOrEqual(t, len(output), maxOutput+len("\n[output truncated]"))
 }
 
 // TestStreamingBashDrainsPastMaxOutput verifies that a finite command can
