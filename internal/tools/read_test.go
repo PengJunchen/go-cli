@@ -145,6 +145,88 @@ func TestReadFollowsSymlinkWhenEnabled(t *testing.T) {
 	assert.Equal(t, "via-link", res.Output)
 }
 
+func TestReadPathWhitelistAllowsInScopeAndRejectsAbsoluteEscape(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	allowedDir := t.TempDir()
+	allowedFile := filepath.Join(allowedDir, "inside.txt")
+	require.NoError(t, os.WriteFile(allowedFile, []byte("inside"), 0o600))
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "outside.txt")
+	require.NoError(t, os.WriteFile(outsideFile, []byte("outside"), 0o600))
+
+	tool := NewReadTool(WithWorkdir(allowedDir), WithReadPathWhitelist([]string{allowedDir}))
+	result, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"path": "inside.txt"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "inside", result.Output)
+
+	_, err = tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"path": outsideFile},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "path whitelist")
+}
+
+func TestReadPathWhitelistRejectsParentSymlinkEscape(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	allowedDir := t.TempDir()
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "secret.txt")
+	require.NoError(t, os.WriteFile(outsideFile, []byte("secret"), 0o600))
+	require.NoError(t, os.Symlink(outsideDir, filepath.Join(allowedDir, "escape")))
+
+	tool := NewReadTool(WithWorkdir(allowedDir), WithReadPathWhitelist([]string{allowedDir}))
+	_, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"path": filepath.Join("escape", "secret.txt")},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "path whitelist")
+}
+
+func TestReadPathWhitelistPreservesFollowSymlinksWithinScope(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	allowedDir := t.TempDir()
+	target := filepath.Join(allowedDir, "target.txt")
+	require.NoError(t, os.WriteFile(target, []byte("scoped target"), 0o600))
+	require.NoError(t, os.Symlink(target, filepath.Join(allowedDir, "link.txt")))
+
+	tool := NewReadTool(
+		WithWorkdir(allowedDir),
+		WithFollowSymlinks(true),
+		WithReadPathWhitelist([]string{allowedDir}),
+	)
+	result, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"path": "link.txt"},
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "scoped target", result.Output)
+}
+
+func TestReadPathWhitelistRejectsFollowedFinalSymlinkEscape(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	allowedDir := t.TempDir()
+	outsideDir := t.TempDir()
+	target := filepath.Join(outsideDir, "secret.txt")
+	require.NoError(t, os.WriteFile(target, []byte("secret"), 0o600))
+	require.NoError(t, os.Symlink(target, filepath.Join(allowedDir, "link.txt")))
+
+	tool := NewReadTool(
+		WithWorkdir(allowedDir),
+		WithFollowSymlinks(true),
+		WithReadPathWhitelist([]string{allowedDir}),
+	)
+	_, err := tool.Execute(context.Background(), ToolCall{
+		Args: map[string]any{"path": "link.txt"},
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "path whitelist")
+}
+
 func TestReadRejectsSpecialFile(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -180,6 +262,23 @@ func TestReadAbsolutePath(t *testing.T) {
 	})
 	require.NoError(t, err)
 	assert.Equal(t, "absolute", res.Output)
+}
+
+func TestReadEmptyPathWhitelistPreservesUnrestrictedBehavior(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "abs.txt")
+	require.NoError(t, os.WriteFile(path, []byte("unrestricted"), 0o600))
+
+	for _, paths := range [][]string{nil, []string{}} {
+		tool := NewReadTool(WithReadPathWhitelist(paths))
+		result, err := tool.Execute(context.Background(), ToolCall{
+			Args: map[string]any{"path": path},
+		})
+		require.NoError(t, err)
+		assert.Equal(t, "unrestricted", result.Output)
+	}
 }
 
 func TestReadEmptyPath(t *testing.T) {

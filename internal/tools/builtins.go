@@ -66,10 +66,10 @@ func WithRegisteredBuiltinWhitelist(names []string) RegisterDefaultsOption {
 	}
 }
 
-// WithRegisteredPathWhitelist wires a path whitelist into the WriteTool and
-// EditFileTool registered by RegisterDefaults. When configured, write and edit
-// operations are restricted to paths within the allowed base directories,
-// matching the defense-in-depth provided by the bash sandbox.
+// WithRegisteredPathWhitelist wires a path whitelist into the file tools
+// registered by RegisterDefaults. When configured, read, write, edit, grep,
+// find, and ls operations are restricted to paths within the allowed base
+// directories. An empty path list leaves file tools unrestricted.
 func WithRegisteredPathWhitelist(paths []string) RegisterDefaultsOption {
 	return func(c *registerDefaultsConfig) { c.pathWhitelist = paths }
 }
@@ -99,6 +99,12 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDef
 	}
 	if len(cfg.pathWhitelist) > 0 {
 		writeOpts = append(writeOpts, WithWritePathWhitelist(cfg.pathWhitelist))
+	}
+
+	// Build ReadTool options.
+	readOpts := []ReadToolOption{}
+	if len(cfg.pathWhitelist) > 0 {
+		readOpts = append(readOpts, WithReadPathWhitelist(cfg.pathWhitelist))
 	}
 
 	// Build EditFileTool options.
@@ -141,7 +147,7 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDef
 	}
 
 	defs := []ToolDefinition{
-		NewReadTool(),
+		NewReadTool(readOpts...),
 		NewStreamingBashTool(bashOpts...),
 		NewWriteTool(writeOpts...),
 		NewEditFileTool(editOpts...),

@@ -42,6 +42,13 @@ func WithFollowSymlinks(b bool) ReadToolOption {
 	return func(t *ReadTool) { t.FollowSymlinks = b }
 }
 
+// WithReadPathWhitelist restricts reads to the configured base paths after
+// resolving existing symlinks. An empty slice preserves the unrestricted
+// behavior for callers that do not configure a file-tool scope.
+func WithReadPathWhitelist(paths []string) ReadToolOption {
+	return func(t *ReadTool) { t.whitelist = NewPathWhitelist(paths) }
+}
+
 // ReadTool reads the contents of files and lists directories. It implements
 // the ToolDefinition interface.
 type ReadTool struct {
@@ -49,6 +56,7 @@ type ReadTool struct {
 	maxBytes       int
 	FollowSymlinks bool
 	names          []string
+	whitelist      PathWhitelist
 }
 
 var _ ToolDefinition = (*ReadTool)(nil)
@@ -203,8 +211,25 @@ func (t *ReadTool) PromptGuidelines() []string {
 	return []string{"Use read to examine files instead of cat or sed"}
 }
 
-// resolvePath resolves a possibly-relative path against the workdir, cleans
-// the result, and prevents path traversal outside the workdir.
+// resolvePath resolves a possibly-relative path against the workdir, prevents
+// workdir traversal, and applies the configured path whitelist.
 func (t *ReadTool) resolvePath(path string) (string, error) {
-	return resolveWithinWorkdir("read", t.workdir, path)
+	abspath, err := resolveWithinWorkdir("read", t.workdir, path)
+	if err != nil {
+		return abspath, err
+	}
+	if len(t.whitelist.paths) == 0 {
+		return abspath, nil
+	}
+
+	// Resolve existing symlink components, including the final component, so
+	// an allowed symlink can only be followed when its target remains in scope.
+	// Execute still applies the existing FollowSymlinks policy to the final link.
+	// This path check is check-then-use and is not a race-free OS sandbox: a
+	// concurrent symlink replacement between validation and open can race it.
+	realPath := resolveSymlinks(abspath)
+	if !t.whitelist.IsAllowed(realPath) {
+		return abspath, fmt.Errorf("read: path %q escapes the path whitelist", path)
+	}
+	return abspath, nil
 }

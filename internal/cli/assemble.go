@@ -870,6 +870,9 @@ func (s *assembleState) assembleTools() error {
 		tools.WithRegisteredResourceLimits(resourceLimits),
 		tools.WithRegisteredGitTool(s.gitTool),
 	}
+	if s.rc != nil && len(s.rc.Sandbox.AllowedPaths) > 0 {
+		regOpts = append(regOpts, tools.WithRegisteredPathWhitelist(s.rc.Sandbox.AllowedPaths))
+	}
 	if s.rc != nil && len(s.rc.Tools.Builtin) > 0 {
 		regOpts = append(regOpts, tools.WithRegisteredBuiltinWhitelist(s.rc.Tools.Builtin))
 	}

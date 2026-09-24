@@ -81,18 +81,25 @@ var _ BashSandbox = AllowAllSandbox{}
 func (AllowAllSandbox) Validate(_ context.Context, _, _ string) error { return nil }
 
 // PathWhitelist checks if a working directory falls under one of the allowed
-// base paths. An empty whitelist allows any path.
+// base paths. An empty whitelist allows any path; an invalid nonempty scope
+// denies every path. These path checks are not atomic against concurrent
+// symlink changes and do not provide an OS sandbox boundary.
 type PathWhitelist struct {
-	paths []string
+	paths   []string
+	invalid bool
 }
 
-// NewPathWhitelist builds a PathWhitelist from the given base paths. Each path
-// is cleaned with filepath.Clean and resolved with resolveSymlinks before
-// storage, so that whitelist comparisons operate on real paths.
+// NewPathWhitelist builds a PathWhitelist from the given base paths. Relative
+// paths are rooted at the current working directory; each path is then cleaned
+// and resolved with resolveSymlinks so whitelist comparisons use real paths.
 func NewPathWhitelist(paths []string) PathWhitelist {
 	cleaned := make([]string, 0, len(paths))
 	for _, p := range paths {
-		cleaned = append(cleaned, resolveSymlinks(filepath.Clean(p)))
+		absPath, err := filepath.Abs(filepath.Clean(p))
+		if err != nil {
+			return PathWhitelist{invalid: true}
+		}
+		cleaned = append(cleaned, resolveSymlinks(absPath))
 	}
 	return PathWhitelist{paths: cleaned}
 }
@@ -101,10 +108,17 @@ func NewPathWhitelist(paths []string) PathWhitelist {
 // the whitelisted base paths. When no paths are configured every directory is
 // allowed.
 func (wl PathWhitelist) IsAllowed(workDir string) bool {
+	if wl.invalid {
+		return false
+	}
 	if len(wl.paths) == 0 {
 		return true
 	}
-	cleaned := resolveSymlinks(filepath.Clean(workDir))
+	absPath, err := filepath.Abs(filepath.Clean(workDir))
+	if err != nil {
+		return false
+	}
+	cleaned := resolveSymlinks(absPath)
 	for _, base := range wl.paths {
 		if cleaned == base {
 			return true
