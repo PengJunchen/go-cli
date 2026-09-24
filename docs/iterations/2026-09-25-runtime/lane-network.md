@@ -35,6 +35,29 @@ exit 0: 752 passed across 3 packages
 
 Both green outputs are in [network-green.log](evidence/network-green.log). `git diff --check` passed.
 
+## Typed dispatch-boundary follow-up
+
+The follow-up replaces error-text matching with a typed request-boundary result. SDK write/read transport failures remain retryable for safe read-only calls, so `tools/list` reconnect behavior is preserved. Once a request may have been dispatched, a `tools/call` error is reported as unknown and is never replayed. Pre-dispatch validation failures and a valid JSON-RPC error response remain definite errors.
+
+An HTTP response is trusted only when the status is successful and the JSON-RPC 2.0 envelope contains this request's numeric ID plus exactly one valid result object or well-formed error object. A missing/wrong ID, malformed envelope/body, non-success HTTP status, or transport error after entering `Do` is treated as an unknown tool outcome.
+
+The new red tests were run before the implementation and failed on lost/custom-round-tripper responses, malformed JSON, a wrong response ID, an HTTP 503 response, and a matching SDK response with the wrong JSON-RPC version:
+
+```text
+rtk env GOMAXPROCS=2 go test -count=1 -p 2 ./internal/mcp -run "TestHTTPAdapterCallToolUntrustedResponsesHaveUnknownOutcome|TestHTTPAdapterCallToolCustomRoundTripperFailureIsUnknownAfterDispatch|TestMCPCallToolMalformedMatchingResponseIsUnknown"
+exit 1
+```
+
+The complete focused green list, including known RPC errors, pre-dispatch classification, SDK lost responses, reconnect behavior, and transport deadline tests, passed:
+
+```text
+rtk env GOMAXPROCS=2 go test -count=1 -p 2 ./internal/mcp -run "TestHTTPAdapterCallTool(UntrustedResponsesHaveUnknownOutcome|MatchingRPCErrorIsDefinite|CustomRoundTripperFailureIsUnknownAfterDispatch)|TestMCPCallTool(MalformedMatchingResponseIsUnknown|LostResponseIsUnknownAndNotRetried)|TestMCPReconnect|TestIsConnectionError|TestToolCallOutcomeErrorDoesNotMarkPreDispatchFailuresUnknown|TestTransportRequest"
+```
+
+The focused output is in [network-boundary-targeted-green.log](evidence/network-boundary-targeted-green.log). The full MCP race suite passed with `rtk env GOMAXPROCS=2 go test -race -count=1 -p 2 ./internal/mcp`; output is in [network-boundary-green.log](evidence/network-boundary-green.log). The HTTP fixture's dropped-response/custom-round-tripper tests assert the side-effect count remains exactly one.
+
+Unknown tool outcomes expose `OutcomeUnknown() bool` through a stable error interface, and the wrapper preserves the underlying error chain with `Unwrap` for the R1 core to consume. SDK `ReadString` remains a blocking read: context cancellation is checked between lines and cannot interrupt an in-flight read. That existing lifecycle limit remains an R6 follow-up and is not claimed as closed here.
+
 ## Commits
 
 - `bc50965c87b08e3ca6ad323327ec92674e536888` — reject unauthenticated wildcard binds.

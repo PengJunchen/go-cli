@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"sync/atomic"
@@ -118,6 +119,7 @@ func TestMCPReconnectRPCErrorNoReconnect(t *testing.T) {
 	_, err := adapter.CallTool(context.Background(), "echo", nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "rpc error")
+	assert.NotContains(t, err.Error(), "outcome unknown", "a matching valid JSON-RPC error is a definite response")
 
 	// RPC errors must not trigger reconnection.
 	assert.Equal(t, 0, adapter.adapterCore.reconnectAttempts,
@@ -282,7 +284,54 @@ func TestMCPCallToolLostResponseIsUnknownAndNotRetried(t *testing.T) {
 	assert.Nil(t, result)
 	assert.Contains(t, err.Error(), "outcome unknown")
 	assert.Contains(t, err.Error(), "may have executed")
+	assertToolOutcomeUnknown(t, err)
 	assert.EqualValues(t, 1, sideEffects.Load(), "a lost response must not trigger a second tool execution")
+}
+
+func TestMCPCallToolMalformedMatchingResponseIsUnknown(t *testing.T) {
+	t.Parallel()
+
+	serverConn, clientConn := net.Pipe()
+	var sideEffects atomic.Int32
+	go func() {
+		defer closeConn(serverConn)
+		sc := bufio.NewScanner(serverConn)
+		for sc.Scan() {
+			var req struct {
+				ID     int64  `json:"id"`
+				Method string `json:"method"`
+			}
+			if json.Unmarshal(sc.Bytes(), &req) != nil || req.Method != "tools/call" {
+				continue
+			}
+			sideEffects.Add(1)
+			// The response refers to this call but is not a valid JSON-RPC 2.0
+			// envelope, so it cannot establish whether the tool completed.
+			frame := map[string]any{
+				"jsonrpc": "1.0",
+				"id":      req.ID,
+				"result":  map[string]any{"content": "maybe done"},
+			}
+			b, _ := json.Marshal(frame)
+			_, _ = fmt.Fprintf(serverConn, "%s\n", b)
+			return
+		}
+	}()
+
+	adapter := NewOfficialSDKAdapter(
+		MCPServerConfig{Name: "srv", Transport: MCPTransportStdio},
+		WithConnection(NewJSONRPCLineTransport(clientConn, clientConn, clientConn.Close)),
+		WithoutInitialize(),
+	)
+	require.NoError(t, adapter.Connect(context.Background()))
+
+	result, err := adapter.CallTool(context.Background(), "write", map[string]any{"path": "file"})
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "outcome unknown")
+	assert.Contains(t, err.Error(), "may have executed")
+	assertToolOutcomeUnknown(t, err)
+	assert.EqualValues(t, 1, sideEffects.Load())
 }
 
 // TestReconnectBackoff verifies the exponential backoff schedule.
@@ -308,8 +357,32 @@ func TestReconnectBackoff(t *testing.T) {
 func TestIsConnectionError(t *testing.T) {
 	t.Parallel()
 
-	assert.True(t, isConnectionError(fmt.Errorf("mcp: write request: broken pipe")))
-	assert.True(t, isConnectionError(fmt.Errorf("mcp: read response: EOF")))
+	assert.True(t, isConnectionError(newRequestBoundaryError(fmt.Errorf("mcp: write request: broken pipe"), true, true)))
+	assert.True(t, isConnectionError(newRequestBoundaryError(fmt.Errorf("mcp: read response: EOF"), true, true)))
+	assert.False(t, isConnectionError(fmt.Errorf("mcp: read response: EOF")), "message text alone is not a retry signal")
 	assert.False(t, isConnectionError(fmt.Errorf("mcp: rpc error: tool not found")))
+	assert.False(t, isConnectionError(newRequestBoundaryError(fmt.Errorf("mcp: invalid JSON-RPC response"), true, false)))
 	assert.False(t, isConnectionError(nil))
+}
+
+func TestToolCallOutcomeErrorDoesNotMarkPreDispatchFailuresUnknown(t *testing.T) {
+	t.Parallel()
+
+	preDispatch := fmt.Errorf("mcp: endpoint must remain on configured origin")
+	assert.NotContains(t, toolCallOutcomeError("write", preDispatch).Error(), "outcome unknown")
+
+	cause := errors.New("connection reset")
+	dispatched := newRequestBoundaryError(cause, true, false)
+	unknownErr := toolCallOutcomeError("write", dispatched)
+	assert.Contains(t, unknownErr.Error(), "outcome unknown")
+	assert.ErrorIs(t, unknownErr, cause, "unknown wrappers preserve the underlying error chain")
+	assertToolOutcomeUnknown(t, unknownErr)
+}
+
+func assertToolOutcomeUnknown(t *testing.T, err error) {
+	t.Helper()
+	var outcome OutcomeUnknown
+	if assert.ErrorAs(t, err, &outcome) {
+		assert.True(t, outcome.OutcomeUnknown())
+	}
 }

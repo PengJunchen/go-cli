@@ -78,23 +78,26 @@ func (t *JSONRPCLineTransport) Request(ctx context.Context, method string, param
 		return nil, fmt.Errorf("mcp: marshal request: %w", err)
 	}
 
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	if _, err := fmt.Fprintln(t.out, string(req)); err != nil { //nolint:errcheck
-		return nil, fmt.Errorf("mcp: write request: %w", err)
+		return nil, newRequestBoundaryError(fmt.Errorf("mcp: write request: %w", err), true, true)
 	}
 
 	for {
 		select {
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return nil, newRequestBoundaryError(ctx.Err(), true, false)
 		default:
 		}
 
 		line, readErr := t.in.ReadString('\n')
 		if readErr != nil {
-			return nil, fmt.Errorf("mcp: read response: %w", readErr)
+			return nil, newRequestBoundaryError(fmt.Errorf("mcp: read response: %w", readErr), true, true)
 		}
 
-		var frame map[string]any
+		var frame map[string]json.RawMessage
 		if err := json.Unmarshal([]byte(line), &frame); err != nil {
 			continue
 		}
@@ -111,16 +114,11 @@ func (t *JSONRPCLineTransport) Request(ctx context.Context, method string, param
 			continue
 		}
 
-		if fid, ok := frame["id"].(float64); ok && int64(fid) == id {
-			if errVal, hasErr := frame["error"]; hasErr && errVal != nil {
-				return nil, fmt.Errorf("mcp: rpc error: %v", errVal)
-			}
-			result, ok := frame["result"].(map[string]any)
-			if !ok {
-				return nil, nil
-			}
-			return result, nil
+		var responseID int64
+		if len(frame["id"]) == 0 || json.Unmarshal(frame["id"], &responseID) != nil || responseID != id {
+			continue
 		}
+		return parseJSONRPCResponse([]byte(line), id)
 	}
 }
 
@@ -333,21 +331,15 @@ func isConnectionError(err error) bool {
 	if err == nil {
 		return false
 	}
-	msg := err.Error()
-	if strings.Contains(msg, "rpc error") {
-		return false
-	}
-	return strings.Contains(msg, "write request") ||
-		strings.Contains(msg, "read response") ||
-		strings.Contains(msg, "broken pipe") ||
-		strings.Contains(msg, "EOF")
+	var boundaryErr *requestBoundaryError
+	return errors.As(err, &boundaryErr) && boundaryErr.retryable
 }
 
 func toolCallOutcomeError(name string, err error) error {
-	if !isConnectionError(err) && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+	if !requestMayHaveBeenDispatched(err) {
 		return err
 	}
-	return fmt.Errorf("outcome unknown; tool %q may have executed before the connection was lost: %w", name, err)
+	return &unknownToolOutcomeError{tool: name, cause: err}
 }
 
 // requestLocked snapshots c.conn under c.mu and sends a JSON-RPC request.

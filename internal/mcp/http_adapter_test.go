@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -170,6 +171,12 @@ func newHTTPTestAdapter(srv *httptest.Server) *HTTPClientAdapter {
 		Transport: MCPTransportStreamableHTTP,
 		URL:       srv.URL,
 	})
+}
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
 }
 
 // ---------------------------------------------------------------------------
@@ -362,7 +369,239 @@ func TestHTTPAdapterCallToolLostResponseHasUnknownOutcome(t *testing.T) {
 	assert.Nil(t, result)
 	assert.Contains(t, err.Error(), "outcome unknown")
 	assert.Contains(t, err.Error(), "may have executed")
+	assertToolOutcomeUnknown(t, err)
 	assert.EqualValues(t, 1, sideEffects.Load(), "the remote side effect completed once before its response was lost")
+}
+
+func TestHTTPAdapterCallToolUntrustedResponsesHaveUnknownOutcome(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name       string
+		statusCode int
+		response   func(id int64) []byte
+	}{
+		{
+			name:       "malformed JSON",
+			statusCode: http.StatusOK,
+			response:   func(int64) []byte { return []byte("not-json") },
+		},
+		{
+			name:       "wrong response ID",
+			statusCode: http.StatusOK,
+			response: func(id int64) []byte {
+				return []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"error":{"code":-32000,"message":"failed"}}`, id+1))
+			},
+		},
+		{
+			name:       "missing response ID",
+			statusCode: http.StatusOK,
+			response: func(int64) []byte {
+				return []byte(`{"jsonrpc":"2.0","error":{"code":-32000,"message":"failed"}}`)
+			},
+		},
+		{
+			name:       "null response ID",
+			statusCode: http.StatusOK,
+			response: func(int64) []byte {
+				return []byte(`{"jsonrpc":"2.0","id":null,"error":{"code":-32000,"message":"failed"}}`)
+			},
+		},
+		{
+			name:       "error HTTP status",
+			statusCode: http.StatusServiceUnavailable,
+			response: func(id int64) []byte {
+				return []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"error":{"code":-32000,"message":"failed"}}`, id))
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var sideEffects atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method == http.MethodGet {
+					w.WriteHeader(http.StatusOK)
+					return
+				}
+				body, err := io.ReadAll(r.Body)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				var req struct {
+					ID     int64  `json:"id"`
+					Method string `json:"method"`
+				}
+				if err := json.Unmarshal(body, &req); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				if req.Method == "tools/call" {
+					sideEffects.Add(1)
+					w.Header().Set("Content-Type", "application/json")
+					w.WriteHeader(tt.statusCode)
+					_, _ = w.Write(tt.response(req.ID))
+					return
+				}
+
+				result := map[string]any{}
+				if req.Method == "initialize" {
+					result["protocolVersion"] = LatestProtocolVersion
+					result["capabilities"] = map[string]any{}
+					result["serverInfo"] = map[string]any{"name": "test", "version": "1.0"}
+				}
+				frame := map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result}
+				w.Header().Set("Content-Type", "application/json")
+				if err := json.NewEncoder(w).Encode(frame); err != nil {
+					t.Errorf("encode MCP response: %v", err)
+				}
+			}))
+			t.Cleanup(srv.Close)
+
+			adapter := NewHTTPClientAdapter(MCPServerConfig{
+				Name:      "srv",
+				Transport: MCPTransportStreamableHTTP,
+				URL:       srv.URL,
+			})
+			require.NoError(t, adapter.Connect(context.Background()))
+
+			result, err := adapter.CallTool(context.Background(), "write", map[string]any{"path": "file"})
+			require.Error(t, err)
+			assert.Nil(t, result)
+			assert.Contains(t, err.Error(), "outcome unknown")
+			assert.Contains(t, err.Error(), "may have executed")
+			assert.EqualValues(t, 1, sideEffects.Load(), "the action must be counted once before its response is rejected")
+		})
+	}
+}
+
+func TestHTTPAdapterCallToolMatchingRPCErrorIsDefinite(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		var req struct {
+			ID     int64  `json:"id"`
+			Method string `json:"method"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		frame := map[string]any{"jsonrpc": "2.0", "id": req.ID}
+		if req.Method == "initialize" {
+			frame["result"] = map[string]any{
+				"protocolVersion": LatestProtocolVersion,
+				"capabilities":    map[string]any{},
+				"serverInfo":      map[string]any{"name": "test", "version": "1.0"},
+			}
+		} else if req.Method == "tools/call" {
+			frame["error"] = map[string]any{"code": -32000, "message": "tool rejected"}
+		} else {
+			frame["result"] = map[string]any{}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(frame); err != nil {
+			t.Errorf("encode MCP response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	adapter := newHTTPTestAdapter(srv)
+	require.NoError(t, adapter.Connect(context.Background()))
+
+	result, err := adapter.CallTool(context.Background(), "write", nil)
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "rpc error")
+	assert.NotContains(t, err.Error(), "outcome unknown")
+	var outcome OutcomeUnknown
+	assert.False(t, errors.As(err, &outcome), "a trusted RPC error is not classified as unknown")
+}
+
+func TestHTTPAdapterCallToolCustomRoundTripperFailureIsUnknownAfterDispatch(t *testing.T) {
+	t.Parallel()
+
+	var sideEffects atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		var req struct {
+			ID     int64  `json:"id"`
+			Method string `json:"method"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		result := map[string]any{}
+		switch req.Method {
+		case "initialize":
+			result["protocolVersion"] = LatestProtocolVersion
+			result["capabilities"] = map[string]any{}
+			result["serverInfo"] = map[string]any{"name": "test", "version": "1.0"}
+		case "notifications/initialized":
+		case "tools/call":
+			sideEffects.Add(1)
+			result["content"] = "completed"
+		}
+		frame := map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(frame); err != nil {
+			t.Errorf("encode MCP response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		resp, err := http.DefaultTransport.RoundTrip(req)
+		if err != nil {
+			return nil, err
+		}
+		if req.Method == http.MethodPost && req.GetBody != nil {
+			body, err := req.GetBody()
+			if err == nil {
+				raw, readErr := io.ReadAll(body)
+				_ = body.Close()
+				if readErr == nil && strings.Contains(string(raw), `"method":"tools/call"`) {
+					_ = resp.Body.Close()
+					return nil, fmt.Errorf("connection reset by peer after dispatch")
+				}
+			}
+		}
+		return resp, nil
+	})
+	adapter := NewHTTPClientAdapterWithClient(MCPServerConfig{
+		Name:      "srv",
+		Transport: MCPTransportStreamableHTTP,
+		URL:       srv.URL,
+	}, &http.Client{Transport: transport})
+	require.NoError(t, adapter.Connect(context.Background()))
+
+	result, err := adapter.CallTool(context.Background(), "write", map[string]any{"path": "file"})
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "outcome unknown")
+	assert.Contains(t, err.Error(), "may have executed")
+	assertToolOutcomeUnknown(t, err)
+	assert.EqualValues(t, 1, sideEffects.Load(), "the server executed the request before the RoundTripper failed")
 }
 
 func TestHTTPAdapterConnectGETReturns400(t *testing.T) {
@@ -577,6 +816,7 @@ func TestHTTPAdapterResponseSizeLimit(t *testing.T) {
 	t.Parallel()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var req struct {
+			ID     int64  `json:"id"`
 			Method string `json:"method"`
 		}
 		body, _ := io.ReadAll(r.Body)
@@ -601,7 +841,7 @@ func TestHTTPAdapterResponseSizeLimit(t *testing.T) {
 			return
 		}
 
-		frame := map[string]any{"jsonrpc": "2.0", "id": 0, "result": result}
+		frame := map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(frame)
 	}))
