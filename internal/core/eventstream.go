@@ -185,7 +185,8 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 			s.publishToBus(event)
 			return nil
 		default:
-			s.notifyBackpressure()
+			resumeBackpressure := s.notifyBackpressure()
+			defer resumeBackpressure()
 		}
 		if s.blockTimeout > 0 {
 			select {
@@ -215,13 +216,16 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 	}
 }
 
-func (s *EventStreamImpl) notifyBackpressure() {
+func (s *EventStreamImpl) notifyBackpressure() func() {
 	s.mu.Lock()
 	handle := s.statusHandle
 	s.mu.Unlock()
-	if owner, ok := handle.(interface{ StartCleanupDeadline() }); ok {
-		owner.StartCleanupDeadline()
+	if owner, ok := handle.(interface{ BeginBackpressure() func() }); ok {
+		if resume := owner.BeginBackpressure(); resume != nil {
+			return resume
+		}
 	}
+	return func() {}
 }
 
 // SendTerminal makes one non-blocking attempt to enqueue the terminal event.

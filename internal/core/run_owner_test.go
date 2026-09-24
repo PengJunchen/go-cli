@@ -3,7 +3,9 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -11,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/pengjunchen/go-cli/internal/tools"
+	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
 type countingRunSlotGuard struct {
@@ -62,6 +65,160 @@ func TestRunOwnerNormalCallbackCanExceedCleanupTimeout(t *testing.T) {
 	assert.GreaterOrEqual(t, time.Since(started), 50*time.Millisecond)
 	assert.Equal(t, RunExecutionQuiescent, result.StatusHandle.Snapshot().ExecutionState)
 	assert.Equal(t, 1, guard.releaseCount())
+}
+
+func TestTransientBackpressureDoesNotCancelLongRun(t *testing.T) {
+	const cleanupTimeout = 40 * time.Millisecond
+	guard := newCountingRunSlotGuard()
+	owner := newRunOwner(context.Background(), guard, guard.claim, nil)
+	backpressure := &observedBackpressureStatus{runOwner: owner, began: make(chan struct{}), resumed: make(chan struct{})}
+	stream := NewEventStream(1)
+	stream.SetRunStatusHandle(backpressure)
+	secondSendDone := make(chan struct{})
+	callbackDone := make(chan struct{})
+	runDone := make(chan struct{})
+	var result Result
+	var runErr error
+	go func() {
+		defer close(runDone)
+		result, runErr = owner.run(cleanupTimeout, func(ctx context.Context) (Result, error) {
+			defer close(callbackDone)
+			if err := stream.Send(AgentEvent{Kind: "message", Content: "fills buffer"}); err != nil {
+				return Result{}, err
+			}
+			if err := stream.Send(AgentEvent{Kind: "message", Content: "blocked event"}); err != nil {
+				close(secondSendDone)
+				return Result{}, err
+			}
+			close(secondSendDone)
+			time.Sleep(3 * cleanupTimeout)
+			if err := ctx.Err(); err != nil {
+				return Result{}, err
+			}
+			return Result{Message: "completed after drain"}, nil
+		})
+	}()
+	<-backpressure.began
+	_, ok := <-stream.Events()
+	require.True(t, ok, "the initial event should fill the buffer")
+	select {
+	case <-backpressure.resumed:
+	case <-time.After(time.Second):
+		t.Fatal("blocked send did not resume after the consumer drained the buffer")
+	}
+	<-secondSendDone
+	select {
+	case <-runDone:
+	case <-time.After(time.Second):
+		t.Fatal("run did not finish after the callback completed")
+	}
+	<-callbackDone
+	stream.Close()
+
+	require.NoError(t, runErr)
+	assert.Equal(t, "completed after drain", result.Message)
+	assert.Equal(t, RunOutcomeSuccess, result.Outcome)
+	assert.Equal(t, 1, guard.releaseCount())
+}
+
+func TestContinuousBackpressureBoundsBlockedSendAndPublishesResult(t *testing.T) {
+	const cleanupTimeout = 25 * time.Millisecond
+	guard := newCountingRunSlotGuard()
+	stream := NewEventStream(1)
+	owner := newRunOwner(context.Background(), guard, guard.claim, func(result Result, err error) {
+		stream.SetResult(AgentMessage{Role: "assistant", Content: result.Message}, err)
+		_ = stream.SendTerminal(AgentEvent{Kind: "error", Content: "cleanup pending"})
+		stream.Close()
+	})
+	owner.SetEventGapSource(stream)
+	backpressure := &observedBackpressureStatus{runOwner: owner, began: make(chan struct{}), resumed: make(chan struct{})}
+	stream.SetRunStatusHandle(backpressure)
+	runDone := make(chan struct{})
+	var result Result
+	var runErr error
+	go func() {
+		defer close(runDone)
+		result, runErr = owner.run(cleanupTimeout, func(ctx context.Context) (Result, error) {
+			if err := stream.Send(AgentEvent{Kind: "message", Content: "fills buffer"}); err != nil {
+				return Result{}, err
+			}
+			if err := stream.Send(AgentEvent{Kind: "message", Content: "blocked"}); err != nil {
+				return Result{}, err
+			}
+			return Result{}, ctx.Err()
+		})
+	}()
+	<-backpressure.began
+	select {
+	case <-runDone:
+	case <-time.After(time.Second):
+		t.Fatal("sustained blocked Send did not trigger bounded cleanup")
+	}
+	require.ErrorIs(t, runErr, errRunCleanupPending)
+	for range stream.Events() {
+		// The initial event remains buffered when cleanup closes the stream.
+	}
+	_, streamErr := stream.Result()
+	require.ErrorIs(t, streamErr, errRunCleanupPending)
+	status := owner.Snapshot()
+	assert.Equal(t, RunOutcomeUnknown, status.Outcome)
+	assert.Greater(t, status.EventGapCount, uint64(0))
+	assert.Equal(t, RunExecutionCleanupPending, result.ExecutionState)
+	waitForOwnerState(t, result.StatusHandle, RunExecutionQuiescent)
+	assert.Equal(t, 1, guard.releaseCount())
+}
+
+type observedBackpressureStatus struct {
+	*runOwner
+	began      chan struct{}
+	resumed    chan struct{}
+	beginOnce  sync.Once
+	resumeOnce sync.Once
+}
+
+func (status *observedBackpressureStatus) BeginBackpressure() func() {
+	resume := status.runOwner.BeginBackpressure()
+	status.beginOnce.Do(func() { close(status.began) })
+	return func() {
+		resume()
+		status.resumeOnce.Do(func() { close(status.resumed) })
+	}
+}
+
+func TestOwnerDoesNotStartCallbackAfterClaimContextCanceled(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	guard := newCountingRunSlotGuard()
+	claim := guard.claim // the run slot was claimed before the caller canceled.
+	cancel()
+	owner := newRunOwner(parent, guard, claim, nil)
+	var callbackCalls atomic.Int32
+
+	result, err := owner.run(time.Second, func(context.Context) (Result, error) {
+		callbackCalls.Add(1)
+		return Result{Message: "should not run"}, nil
+	})
+
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Zero(t, callbackCalls.Load(), "a pre-canceled run must not dispatch provider or tool work")
+	assert.Equal(t, RunOutcomeCancelled, result.Outcome)
+	assert.Equal(t, RunExecutionQuiescent, result.ExecutionState)
+	assert.Equal(t, 1, guard.releaseCount())
+}
+
+func TestRunOwnerCancellationOutcomeDoesNotDependOnWatcherScheduling(t *testing.T) {
+	for attempt := 0; attempt < 100; attempt++ {
+		parent, cancel := context.WithCancel(context.Background())
+		guard := newCountingRunSlotGuard()
+		owner := newRunOwner(parent, guard, guard.claim, nil)
+		result, err := owner.run(time.Second, func(ctx context.Context) (Result, error) {
+			cancel()
+			return Result{}, ctx.Err()
+		})
+		require.ErrorIs(t, err, context.Canceled, "attempt %d", attempt)
+		assert.Equal(t, RunOutcomeCancelled, result.Outcome, "attempt %d", attempt)
+		assert.Equal(t, 1, guard.releaseCount(), "attempt %d", attempt)
+		cancel()
+	}
 }
 
 func TestCleanupPendingAfterQuiescencePreservesCompletedResult(t *testing.T) {
@@ -279,6 +436,228 @@ func TestRunOwnerCancellationKeepsClaimUntilWorkerStops(t *testing.T) {
 	waitForOwnerState(t, result.StatusHandle, RunExecutionQuiescent)
 	assert.Equal(t, 1, guard.releaseCount(), "the exact claim must be released once after worker completion")
 	assert.Equal(t, RunOutcomeUnknown, result.StatusHandle.Snapshot().Outcome)
+}
+
+func TestRunOwnerNonCooperativeCallbackReturnsPendingThenQuiesces(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	guard := newCountingRunSlotGuard()
+	owner := newRunOwner(parent, guard, guard.claim, nil)
+	callbackStarted := make(chan struct{})
+	callbackRelease := make(chan struct{})
+	runDone := make(chan struct{})
+	var result Result
+	var runErr error
+	go func() {
+		defer close(runDone)
+		result, runErr = owner.run(25*time.Millisecond, func(context.Context) (Result, error) {
+			close(callbackStarted)
+			<-callbackRelease // deliberately ignores cancellation
+			return Result{Message: "late completion"}, nil
+		})
+	}()
+	<-callbackStarted
+	cancel()
+	select {
+	case <-runDone:
+	case <-time.After(time.Second):
+		t.Fatal("non-cooperative callback exceeded the bounded return")
+	}
+	require.ErrorIs(t, runErr, errRunCleanupPending)
+	assert.Equal(t, RunOutcomeUnknown, result.Outcome)
+	assert.Equal(t, RunExecutionCleanupPending, result.ExecutionState)
+	assert.Equal(t, 0, guard.releaseCount())
+	waitForOwnerState(t, result.StatusHandle, RunExecutionQuarantined)
+
+	close(callbackRelease)
+	waitForOwnerState(t, result.StatusHandle, RunExecutionQuiescent)
+	assert.Equal(t, RunOutcomeUnknown, result.StatusHandle.Snapshot().Outcome)
+	assert.Equal(t, RunExecutionCleanupPending, result.ExecutionState, "the returned result is an immutable snapshot")
+	assert.Equal(t, 1, guard.releaseCount())
+}
+
+type pendingToolError struct {
+	done    <-chan struct{}
+	unknown bool
+}
+
+func (e pendingToolError) Error() string                  { return "tool execution remains active" }
+func (e pendingToolError) OutcomeUnknown() bool           { return e.unknown }
+func (e pendingToolError) ExecutionDone() <-chan struct{} { return e.done }
+func (e pendingToolError) Unwrap() error                  { return context.DeadlineExceeded }
+
+type pendingTool struct{ err error }
+
+func (tool pendingTool) Name() string        { return "pending" }
+func (tool pendingTool) Description() string { return "returns a pending execution error" }
+func (tool pendingTool) Execute(context.Context, tools.ToolCall) (*tools.ToolResult, error) {
+	return nil, tool.err
+}
+
+func TestRunOwnerPendingExecutionResourceHoldsClaimUntilDone(t *testing.T) {
+	for _, unknown := range []bool{true, false} {
+		t.Run(fmt.Sprintf("outcome-unknown-%t", unknown), func(t *testing.T) {
+			guard := newCountingRunSlotGuard()
+			owner := newRunOwner(context.Background(), guard, guard.claim, nil)
+			executionDone := make(chan struct{})
+			registry := scriptedRegistry(pendingTool{err: pendingToolError{done: executionDone, unknown: unknown}})
+			result, runErr := owner.run(20*time.Millisecond, func(ctx context.Context) (Result, error) {
+				_, _, err := executeSingleTool(ctx, registry, tools.ToolCall{ID: "pending-1", Name: "pending"}, nil)
+				return Result{}, err
+			})
+
+			require.Error(t, runErr)
+			assert.Equal(t, 1, result.StatusHandle.Snapshot().PendingWorkers)
+			assert.Equal(t, RunExecutionCleanupPending, result.ExecutionState)
+			if unknown {
+				assert.Equal(t, RunOutcomeUnknown, result.Outcome)
+			} else {
+				assert.Equal(t, RunOutcomeError, result.Outcome)
+			}
+			assert.Equal(t, 0, guard.releaseCount(), "an open ExecutionDone channel cannot release the claim")
+
+			close(executionDone)
+			waitForOwnerState(t, result.StatusHandle, RunExecutionQuiescent)
+			assert.Equal(t, result.Outcome, result.StatusHandle.Snapshot().Outcome)
+			assert.Equal(t, 1, guard.releaseCount())
+		})
+	}
+}
+
+func TestOwnerStatusTracksEventGapAndTerminalIsSentOnce(t *testing.T) {
+	guard := newCountingRunSlotGuard()
+	owner := newRunOwner(context.Background(), guard, guard.claim, nil)
+	stream := NewEventStream(1, WithEventDiscardPolicy(DiscardNewest))
+	owner.SetEventGapSource(stream)
+	stream.SetRunStatusHandle(owner)
+
+	require.NoError(t, stream.Send(AgentEvent{Kind: "message", Content: "kept"}))
+	require.NoError(t, stream.Send(AgentEvent{Kind: "message", Content: "dropped"}))
+	assert.Equal(t, uint64(1), owner.Snapshot().EventGapCount)
+	first, ok := <-stream.Events()
+	require.True(t, ok)
+	assert.Equal(t, "kept", first.Content)
+	_ = stream.SendTerminal(AgentEvent{Kind: "done", Content: "first terminal"})
+	_ = stream.SendTerminal(AgentEvent{Kind: "error", Content: "duplicate terminal"})
+	stream.Close()
+
+	var terminal []AgentEvent
+	for event := range stream.Events() {
+		terminal = append(terminal, event)
+	}
+	require.Len(t, terminal, 1)
+	assert.Equal(t, "done", terminal[0].Kind)
+	assert.Equal(t, "first terminal", terminal[0].Content)
+	assert.Equal(t, uint64(1), owner.Snapshot().EventGapCount)
+}
+
+type recordingOwnerSpanExporter struct {
+	mu    sync.Mutex
+	spans []tracing.SpanData
+}
+
+func (e *recordingOwnerSpanExporter) ExportSpan(_ context.Context, span tracing.TraceSpan) error {
+	e.mu.Lock()
+	e.spans = append(e.spans, tracing.SpanToData(span))
+	e.mu.Unlock()
+	return nil
+}
+
+func (*recordingOwnerSpanExporter) Shutdown(context.Context) error { return nil }
+
+func (e *recordingOwnerSpanExporter) find(name string) (tracing.SpanData, bool) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	for _, span := range e.spans {
+		if span.Name == name {
+			return span, true
+		}
+	}
+	return tracing.SpanData{}, false
+}
+
+type controlledHarnessAgent struct {
+	started      chan struct{}
+	release      <-chan struct{}
+	ignoreCancel bool
+}
+
+func (agent *controlledHarnessAgent) Name() string { return "controlled-harness" }
+
+func (agent *controlledHarnessAgent) Run(ctx context.Context, _ Submission, _ ...EventStream) (Result, error) {
+	close(agent.started)
+	if agent.ignoreCancel {
+		<-agent.release
+		return Result{Message: "late"}, nil
+	}
+	select {
+	case <-agent.release:
+		return Result{Message: "completed"}, nil
+	case <-ctx.Done():
+		return Result{}, ctx.Err()
+	}
+}
+
+func TestHarnessSpanEndsAfterRunAndIncludesOutcomeAttributes(t *testing.T) {
+	release := make(chan struct{})
+	agent := &controlledHarnessAgent{started: make(chan struct{}), release: release}
+	exporter := &recordingOwnerSpanExporter{}
+	tracer := tracing.NewTracer("owner-span", exporter)
+	harness := NewHarnessImpl(agent, WithHarnessTracer(tracer), WithRunCleanupTimeout(30*time.Millisecond))
+	stream, err := harness.Submit(context.Background(), "run")
+	require.NoError(t, err)
+	<-agent.started
+	time.Sleep(10 * time.Millisecond)
+	_, exported := exporter.find("harness.start")
+	assert.False(t, exported, "the root span stays open while the callback is active")
+	close(release)
+	for range stream.Events() {
+	}
+
+	span, exported := exporter.find("harness.start")
+	require.True(t, exported)
+	assert.NotEmpty(t, span.EndTime)
+	attrs := spanAttributes(span)
+	assert.Equal(t, string(RunOutcomeSuccess), attrs["outcome"])
+	assert.Equal(t, string(RunExecutionQuiescent), attrs["execution_state"])
+	assert.NotEmpty(t, attrs["run_id"])
+}
+
+func TestHarnessSpanEndsAtPendingCleanupWithUnknownAttributes(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	release := make(chan struct{})
+	agent := &controlledHarnessAgent{started: make(chan struct{}), release: release, ignoreCancel: true}
+	exporter := &recordingOwnerSpanExporter{}
+	tracer := tracing.NewTracer("owner-pending-span", exporter)
+	harness := NewHarnessImpl(agent, WithHarnessTracer(tracer), WithRunCleanupTimeout(20*time.Millisecond))
+	stream, err := harness.Submit(parent, "run")
+	require.NoError(t, err)
+	<-agent.started
+	cancel()
+	for range stream.Events() {
+	}
+
+	span, exported := exporter.find("harness.start")
+	require.True(t, exported, "the span must end when bounded cleanup returns")
+	assert.NotEmpty(t, span.EndTime)
+	attrs := spanAttributes(span)
+	assert.Equal(t, string(RunOutcomeUnknown), attrs["outcome"])
+	assert.Equal(t, string(RunExecutionCleanupPending), attrs["execution_state"])
+
+	close(release)
+	statusSource, ok := stream.(RunStatusSource)
+	require.True(t, ok)
+	waitForOwnerState(t, statusSource.RunStatusHandle(), RunExecutionQuiescent)
+	assert.Equal(t, string(RunExecutionCleanupPending), attrs["execution_state"], "exported span attributes are an immutable result snapshot")
+}
+
+func spanAttributes(span tracing.SpanData) map[string]any {
+	attrs := make(map[string]any, len(span.Attributes))
+	for _, attr := range span.Attributes {
+		attrs[attr.Key] = attr.Value
+	}
+	return attrs
 }
 
 func TestRunOwnerPanickedCallbackQuarantinesClaim(t *testing.T) {
