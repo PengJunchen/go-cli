@@ -291,19 +291,19 @@
     {
       "id": "R0-BLD-04",
       "role": "builder",
-      "title": "Make verification coverage and failure reporting trustworthy",
+      "title": "Make source-level verification coverage and failure reporting trustworthy",
       "user_story": "As a maintainer, the local and CI gate must run the intended packages and fail honestly on scanner errors, missing tools, bad JSON or zero behavior tests.",
-      "goal": "Make test coverage scope explicit, hermeticize color-dependent tests, inventory build tags/skips, and make scanner/RunVerify/format checks fail with actionable evidence.",
+      "goal": "Make direct source-level test and scanner gates explicit, hermeticize color-dependent tests, inventory build tags/skips, and make scanner/RunVerify failures actionable without changing protected default Makefile/CI wiring.",
       "deliverable": [
-        "Default test target covers cmd/cli consistently with CI.",
+        "Source-level direct test commands cover cmd/cli and named mock/e2e tagged suites; the execution copy does not claim the protected default Makefile/CI target includes them.",
         "Tagged suites and skip inventory have named entrypoints and reasons.",
-        "Scanner and verification output distinguishes static hint, skipped evidence and behavior-tested pass; CI cannot blanket-ignore a rule or swallow execution/parse failure.",
-        "Formatting check is read-only and tool versions are pinned, subject to protected-file approval."
+        "Scanner and verification output distinguishes static hint, skipped evidence and behavior-tested pass; no source path may blanket-ignore a rule or swallow execution/parse failure.",
+        "Formatting checks are read-only and tool versions are recorded; protected default gate wiring is split to R0-PROTECTED-GATE-01."
       ],
       "verification": [
         "Planned tests: TestVerifyDoesNotPassOnZeroBehaviorTests, TestScannerProcessFailureFailsGate, TestScannerInvalidJSONFailsGate, TestGateIgnoresExternalNoColorForANSIContractOnly.",
-        "Run make test and explicit mock/e2e tagged targets; run make verify in original host environment and with NO_COLOR cleared, preserving both logs and exit codes.",
-        "Check exact expected test names before targeted execution; full affected package race suite is mandatory."
+        "Run exact source-level test and scanner commands on a clean commit in the original host environment and with NO_COLOR cleared; preserve full logs, reports and exit codes.",
+        "Check exact expected test names before targeted execution; run full affected package race suites. A scanner or source-gate error remains visible and cannot be reclassified as a protected-gate approval."
       ],
       "rule_mapping": [
         "VFY-01",
@@ -321,24 +321,62 @@
         "R0-DES-01"
       ],
       "status": "in_progress",
-      "commit_spec": "Separate protected Makefile/CI/rules changes from implementation commits; get the required repository approval before touching protected files.",
+      "commit_spec": "Source-level implementation only. Protected Makefile, workflow, linter and infra rule edits belong to R0-PROTECTED-GATE-01 and require their explicit approval process.",
       "phase_id": "R0",
       "source_status": "proposed"
     },
     {
-      "id": "R0-REV-01",
-      "role": "reviewer",
-      "title": "Independently verify hotfixes and baseline gate",
-      "user_story": "As a release owner, I need proof that each immediate fix closes its source-confirmed failure without hiding the original evidence.",
-      "goal": "Review each fix at its actual CLI/runtime path and confirm the current gate cannot silently pass with no tests or swallowed scanner failures.",
+      "id": "R0-PROTECTED-GATE-01",
+      "source_task_id": "R0-BLD-04",
+      "role": "builder",
+      "title": "Prepare and wire approved protected default repository gates",
+      "user_story": "As a maintainer, I need the reviewed source-level gates connected to the repository defaults after the protected patch is explicitly approved.",
+      "goal": "Produce a reviewable exact patch for protected Makefile/CI/default gate wiring and apply it only after explicit user approval of that patch.",
       "deliverable": [
-        "Review report mapping every R0 case to source, red baseline and green fixed result.",
-        "New commit-bound logs for environment-controlled test and scan results.",
-        "Explicit list of remaining non-blocking scanner warnings and tagged skips."
+        "A separately reviewable proposed patch for the specific protected Makefile, CI workflow or repository rule changes needed to connect the already-tested source gates.",
+        "After explicit approval of the exact patch, integrated default commands invoke the intended tests/scanner and fail closed on missing tools, malformed output, zero behavior tests, or scanner errors.",
+        "No scanner exemption, ignored finding, severity downgrade or swallowed error is used to make the default gate pass."
       ],
       "verification": [
-        "Run full affected package race tests plus actual CLI child-process/fixture tests.",
-        "Re-run scan and verification from a clean worktree at the tested commit; assert exit codes, exact test registration and no false-green command substitution."
+        "Before applying any protected change, present the exact diff and record explicit user approval; absent approval, keep this task pending and do not modify protected files.",
+        "After approval and integration, run the exact default Makefile/CI-equivalent gate from a clean commit and preserve command, environment, snapshot hash, full output and exit code.",
+        "Independently verify every source-level scanner finding is either fixed or separately justified as a genuine false positive; never suppress it to green the gate."
+      ],
+      "rule_mapping": [
+        "VFY-01",
+        "VFY-02",
+        "VFY-03",
+        "VFY-04",
+        "VFY-05",
+        "VFY-06",
+        "VFY-07",
+        "VFY-08",
+        "VFY-09",
+        "VFY-10"
+      ],
+      "depends_on": [
+        "R0-BLD-04"
+      ],
+      "status": "pending",
+      "commit_spec": "Protected files are governed by go-cli-infra/CLAUDE.md and require explicit user approval for the exact proposed patch before any edit. This execution split does not grant that approval.",
+      "phase_id": "R0",
+      "source_status": "execution_split"
+    },
+    {
+      "id": "R0-SOURCE-REV-01",
+      "role": "reviewer",
+      "title": "Independently verify R0 source fixes and local source gates",
+      "user_story": "As a release owner, I need proof that each immediate fix closes its source-confirmed failure without hiding the original evidence.",
+      "goal": "Review each R0 source fix against the original failure, valid red/green evidence, and correct local source-level test/scanner results; this acceptance gate is sufficient for downstream engineering but does not accept protected default wiring.",
+      "deliverable": [
+        "Review report maps every R0 source case to source location, compiled red baseline, green fix, integrated commit and affected-package race evidence.",
+        "Commit-bound local test and scanner logs state exact command, environment, snapshot, test registration, findings and exit status.",
+        "Remaining scanner warnings, source errors, false positives and tagged skips are listed without suppression; source-level acceptance is explicitly distinct from protected release-gate acceptance."
+      ],
+      "verification": [
+        "Run full affected package race suites and actual CLI child-process/fixture tests at the reviewed source snapshot.",
+        "Run the correct direct source scanner and source verification commands from a clean worktree at that snapshot; assert exit codes, exact registered tests and no false-green command substitution.",
+        "Independently verify each proposed false-positive explanation against the rule and triggering source; scanner findings cannot be hidden to pass."
       ],
       "rule_mapping": [
         "APR-001",
@@ -370,10 +408,59 @@
         "R0-BLD-04",
         "R0-BLD-05"
       ],
-      "status": "pending",
-      "commit_spec": "Reviewer does not edit builder code; any fix-back is a new builder commit and is re-reviewed.",
+      "status": "done",
+      "commit_spec": "This is the source-review acceptance child mapped to source task R0-REV-01. It does not release the protected default-gate review child.",
       "phase_id": "R0",
-      "source_status": "proposed"
+      "source_status": "execution_split",
+      "source_task_id": "R0-REV-01"
+    },
+    {
+      "id": "R0-PROTECTED-REV-01",
+      "role": "reviewer",
+      "title": "Independently review protected default-gate release wiring",
+      "user_story": "As a release owner, I need proof that each immediate fix closes its source-confirmed failure without hiding the original evidence.",
+      "goal": "Review only the explicitly approved protected-gate patch and prove the repository default/CI entrypoints run the accepted source gates without suppressions.",
+      "deliverable": [
+        "Independent review report ties the approved protected diff to exact default and CI-equivalent commands and records any remaining release blockers.",
+        "Commit-bound gate output demonstrates the tested default entrypoints fail on prohibited scanner errors and cannot false-green."
+      ],
+      "verification": [
+        "Confirm a recorded explicit user approval exists for the exact protected patch before accepting any protected-file change.",
+        "From a clean integrated commit, run default Makefile and CI-equivalent gates and inspect full logs, actual test registration and scanner findings.",
+        "Reject scanner allowlists, ignored findings, severity downgrades or swallowed command errors used to obtain a green result."
+      ],
+      "rule_mapping": [
+        "APR-001",
+        "APR-002",
+        "TOOL-003",
+        "CLI-01",
+        "LLM-01",
+        "UI-01",
+        "UI-03",
+        "TOOL-002",
+        "MCP-01",
+        "MCP-02",
+        "TRACE-01",
+        "VFY-01",
+        "VFY-02",
+        "VFY-03",
+        "VFY-04",
+        "VFY-05",
+        "VFY-06",
+        "VFY-07",
+        "VFY-08",
+        "VFY-09",
+        "VFY-10"
+      ],
+      "depends_on": [
+        "R0-SOURCE-REV-01",
+        "R0-PROTECTED-GATE-01"
+      ],
+      "status": "pending",
+      "commit_spec": "This is the protected release-review child mapped to source task R0-REV-01. Overall source task R0-REV-01 remains incomplete until both mapped review children are accepted.",
+      "phase_id": "R0",
+      "source_status": "execution_split",
+      "source_task_id": "R0-REV-01"
     },
     {
       "id": "R0-BLD-05",
@@ -461,7 +548,7 @@
       "depends_on": [
         "R1-DES-01"
       ],
-      "status": "in_progress",
+      "status": "done",
       "commit_spec": "Commit the terminal-contract implementation separately from retry policy; regression tests must be red on audited baseline.",
       "phase_id": "R1",
       "source_status": "proposed"
@@ -496,7 +583,7 @@
       "depends_on": [
         "R1-DES-01"
       ],
-      "status": "in_progress",
+      "status": "done",
       "commit_spec": "One commit for cancellation/history state machine and one for assembly scoping if independently reviewable; both must preserve current shared RunSlotGuard wiring.",
       "phase_id": "R1",
       "source_status": "proposed"
@@ -525,7 +612,7 @@
       "depends_on": [
         "R1-DES-01"
       ],
-      "status": "in_progress",
+      "status": "done",
       "commit_spec": "Commit lifecycle/observability work in independently testable chunks; do not turn EventStream into the source of truth.",
       "phase_id": "R1",
       "source_status": "proposed"
@@ -567,9 +654,9 @@
         "R1-BLD-01",
         "R1-BLD-02",
         "R1-BLD-03",
-        "R0-REV-01"
+        "R0-SOURCE-REV-01"
       ],
-      "status": "pending",
+      "status": "done",
       "commit_spec": "No builder code changes; create separate fix task for any rejected invariant and re-review that commit.",
       "phase_id": "R1",
       "source_status": "proposed"
@@ -584,13 +671,15 @@
         "Identity rules for physical session file, session ID, entry ID, branch/root parent and ToolCallID/ActionID.",
         "Commit points for user input, tool intent, tool receipt/unknown, compaction projection, final response and flush/sync acknowledgment.",
         "Recovery policy for complete lines, valid no-newline tail, truncated JSON tail, malformed complete record, duplicate IDs and unknown side effects.",
+        "On restart, idempotently complete a previously synced, locally validated execution-resolution checkpoint in the global workspace index; never replay the action and keep quarantine active until the global resolution sync succeeds.",
         "Unresolved action records retain verifiable execution identity (not a bare PID); after parent CLI SIGKILL, recovery quarantines the conflicting session/workspace until child/process-group exit is proven or an operator reconciles it. Safe reads may continue."
       ],
       "verification": [
         "Review crash matrix before dispatch, after side effect before receipt, after receipt before final, during append/flush/sync.",
         "Verify unknown action is surfaced for reconciliation and never auto-dispatched on reopen.",
+        "Inject a crash after session resolution checkpoint Sync but before global index append/Sync; recovery appends the exact resolution once, clears quarantine only after Sync, and performs zero tool/provider replay.",
         "Kill the parent CLI while a child process continues writing; on restart, reject conflicting writes until independently verified exit or explicit quarantine reconciliation. Never kill based on a bare PID or clear a RunSlot as evidence.",
-        "During recovery, a workspace read is allowed only when the trusted resolved EffectSet proves read-only; unknown grep/fd/Git-helper effects remain blocked during a conflicting quarantine."
+        "During recovery, a workspace read is allowed only when the trusted resolved EffectSet proves read-only and the pinned executor enforces declared workspace/path scope; unknown effects and unscoped default Read/Grep/Find/Ls remain blocked during a conflicting quarantine."
       ],
       "rule_mapping": [
         "SES-01",
@@ -609,7 +698,7 @@
       "depends_on": [
         "R1-REV-01"
       ],
-      "status": "in_progress",
+      "status": "done",
       "commit_spec": "Reviewed record-format and crash-policy note only; preserve existing JSONL compatibility or document a versioned migration before implementation.",
       "phase_id": "R2",
       "source_status": "proposed"
@@ -624,11 +713,11 @@
         "Unique physical session file per session even within the same second.",
         "Resume resolves file/session ID then entry/branch ID without ambiguous conversion.",
         "Restored Agent history includes compaction summary and valid tool-call groups; branch Clone shares the immutable canonical prefix without copying or rewriting ActionID/ToolCallID authority.",
-        "Single-writer lock acquired before loading or repairing records; unsupported platforms fail closed; entry clones and sequence persistence are stable. Pending action recovery cannot expose a ready SessionView without the injected marker authority.",
+        "Single-writer lock acquired before loading or repairing records; unsupported platforms fail closed; entry clones and sequence persistence are stable. Pending action recovery validates local resolution checkpoints and cannot expose a ready SessionView without the injected marker authority applying those checkpoints to the global index and inspecting the resulting markers.",
         "JSONL record size policy is symmetric between append and reopen."
       ],
       "verification": [
-        "Planned tests: TestNewSessionCreatesIndependentRootFile, TestResumeSessionIDSelectsTreeEntry, TestRestoreIncludesCompactionSummary, TestSessionLockAcquiredBeforeLoad, TestUnsupportedSessionLockFailsClosed, TestPendingActionsRequireRecoveryAuthority, TestRecoveryAuthorityMatchesEachPendingActionReference, TestCloneSharesCanonicalPrefixWithoutRewritingToolCallIDs, TestCloneAppendsDivergeFromSharedLeaf, TestSessionTreeCloneDoesNotAliasNestedArgs, TestSessionSeqPersists, TestSessionSameSecondUsesUniqueFile, TestSessionLargeRecordRoundTrips.",
+        "Planned tests: TestNewSessionCreatesIndependentRootFile, TestResumeSessionIDSelectsTreeEntry, TestRestoreIncludesCompactionSummary, TestSessionLockAcquiredBeforeLoad, TestUnsupportedSessionLockFailsClosed, TestPendingActionsRequireRecoveryAuthority, TestRecoveryAuthorityMatchesEachPendingActionReference, TestRecoveryAppliesDurableExecutionResolutionAfterGlobalAppendCrashExactlyOnce, TestNeverDispatchedResolutionWithoutGlobalMarkerIsNoOp, TestResolutionConflictKeepsWorkspaceQuarantined, TestCloneSharesCanonicalPrefixWithoutRewritingToolCallIDs, TestCloneAppendsDivergeFromSharedLeaf, TestSessionTreeCloneDoesNotAliasNestedArgs, TestSessionSeqPersists, TestSessionSameSecondUsesUniqueFile, TestSessionLargeRecordRoundTrips.",
         "Test record sizes at 1 MiB minus one, exactly 1 MiB and plus one; either read them back or reject before successful append.",
         "Run actual CLI resume in a child process against a temporary session directory."
       ],
@@ -659,14 +748,14 @@
       "goal": "Propagate append/flush/sync errors, persist action intent/result at semantic commit points, recover unknown outcomes without replay and handle torn tails conservatively.",
       "deliverable": [
         "Store writes create/append correctly for directory mode and fail to caller on append/flush/sync errors.",
-        "Typed Loop commit sink durably records input, complete assistant tool-call groups, per-action intent/reservation, receipts, resource-resolution checkpoints, compaction projection, and terminal commit at the defined semantic boundaries.",
+        "Typed Loop commit sink durably records input, complete assistant tool-call groups, per-action intent/reservation, receipts, resource-resolution checkpoints, compaction projection, and terminal commit at the defined semantic boundaries. RecoveryAuthority applies a session-validated resolution checkpoint to the global workspace index idempotently; the global index remains quarantined until its matching resolution append and Sync succeed.",
         "Tool intent and workspace dispatch-ready marker are both durable before dispatch; R4 prepared invocation pins trusted identity/effects and exact executor. Result/unknown receipt and separate resource-resolution evidence are durable before the next provider request.",
         "Final success/save UI acknowledgment follows durable commit.",
         "Only demonstrably truncated final JSON is quarantined/truncated; valid JSON without newline is preserved and delimited; malformed complete lines fail closed.",
         "Persist unresolved-action quarantine so a parent process crash cannot expose the same workspace to a conflicting mutation while its child/process group may still be running; do not kill by PID alone."
       ],
       "verification": [
-        "Planned tests: TestAppendFailurePreventsSavedAck, TestToolIntentDurableBeforeDispatch, TestCrashAfterActionMarksUnknownWithoutReplay, TestUnknownReceiptWithLiveChildKeepsCrossSessionMutationBlocked, TestLateExecutionDoneResolvesQuarantineExactlyOnce, TestValidJSONTailWithoutNewlineIsPreserved, TestTruncatedJSONTailIsQuarantined, TestMalformedCompleteJSONLineFailsClosed, TestDirectoryStoreAppendOpensWriter, TestPendingSavepointUsesAbsoluteEnqueueSequenceAcrossFlush, TestSessionSyncFailurePoisonsWriterUntilReopen, TestAssemblyToolSearchFilteringSurvivesProtectedListProxy.",
+        "Planned tests: TestAppendFailurePreventsSavedAck, TestToolIntentDurableBeforeDispatch, TestCrashAfterActionMarksUnknownWithoutReplay, TestUnknownReceiptWithLiveChildKeepsCrossSessionMutationBlocked, TestLateExecutionDoneResolvesQuarantineExactlyOnce, TestUnknownExecutorWithoutPendingExecutionErrorCannotResolveQuarantine, TestRecoveryAppliesDurableExecutionResolutionAfterGlobalAppendCrashExactlyOnce, TestNeverDispatchedResolutionWithoutGlobalMarkerIsNoOp, TestResolutionConflictKeepsWorkspaceQuarantined, TestValidJSONTailWithoutNewlineIsPreserved, TestTruncatedJSONTailIsQuarantined, TestMalformedCompleteJSONLineFailsClosed, TestDirectoryStoreAppendOpensWriter, TestPendingSavepointUsesAbsoluteEnqueueSequenceAcrossFlush, TestSessionSyncFailurePoisonsWriterUntilReopen, TestAssemblyToolSearchFilteringSurvivesProtectedListProxy.",
         "Use injectable file writer failures and an actual child process killed after side effect but before receipt; assert side-effect count remains exactly one after restart. Kill the parent process while its child keeps writing; assert restart blocks conflicting writes but allows safe reads until verified child exit or explicit manual reconciliation.",
         "No test should require fsync for each token; assert only declared semantic commit points.",
         "Planned tests: TestRecoveryBlocksWorkspaceMutationWhileOrphanChildLives, TestRecoveryAllowsSafeReadWhileWorkspaceQuarantined."
@@ -1054,12 +1143,20 @@
         "Schemas and executor validation for Read/Write/Edit/Bash/Grep/Find/Ls and all shipped built-ins.",
         "TOOL-001 documentation accurately calls the existing allowlist a working-directory constraint unless an OS sandbox is selected.",
         "Read/write/edit/grep/find/ls relative-path behavior handles parent symlinks within declared contract.",
-        "Search/directory/remote output capture is bounded before accumulation; canceled Grep returns cancellation; unconfigured web search fails clearly instead of mock success."
+        "Any first-party executor that can start asynchronous child/helper resources exposes those resources to the R1 owner; a callback return or missing PendingExecutionError is not quiescence proof for an unknown/config-controlled executor, which must remain quarantined until verified stop or operator reconciliation.",
+        "Search/directory/remote output capture is bounded before accumulation; canceled Grep returns cancellation; unconfigured web search fails clearly instead of mock success.",
+        "Read-only effect and workspace/path scope are separate: the real CLI assembly must propagate its declared allowlist through constructors and resolvers for default Read/Grep/Find/Ls; absolute-path and symlink escapes are rejected before an instance can be classified workspace_read. Pure Go alone does not prove workspace scope."
       ],
       "verification": [
         "Planned tests: TestBuiltinToolSchemasMatchExecutors, TestReadRejectsParentSymlinkEscape, TestSearchStopsAtBoundedCapture, TestGrepCancelReturnsContextError, TestWebSearchMissingProviderFailsClosed, TestRemoteBashOutputAndMetadataBounded.",
         "For TOOL-001, test cwd acceptance separately from OS sandbox guarantees; never infer command-path isolation from shell string inspection.",
-        "Add mixed-provider tool schema fixtures to ensure wire schema matches execution validation."
+        "Add mixed-provider tool schema fixtures to ensure wire schema matches execution validation.",
+        "Planned test: TestRegisterDefaultsReadToolUsesConfiguredPathWhitelist.",
+        "Planned test: TestReadToolRejectsAbsolutePathOutsideAllowedPaths.",
+        "Planned test: TestReadToolRejectsSymlinkEscape.",
+        "Planned test: TestAssembleAgentPropagatesPathWhitelistToDefaultTools.",
+        "Planned test: TestDefaultReadGrepFindLsRejectAbsolutePathOutsideAllowedPaths.",
+        "Planned test: TestDefaultReadGrepFindLsRejectSymlinkEscape."
       ],
       "rule_mapping": [
         "TOOL-001",
@@ -1075,7 +1172,7 @@
         "R1-REV-01",
         "R3-REV-01"
       ],
-      "status": "pending",
+      "status": "in_progress",
       "commit_spec": "Keep path semantics, bounded capture and schemas separable when possible; one behavior contract per commit with a failing baseline test.",
       "phase_id": "R4",
       "source_status": "proposed"
