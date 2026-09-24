@@ -5,10 +5,28 @@ package verify
 import (
 	"encoding/json"
 	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
+)
+
+// EvidenceKind describes what a verification result actually observed.
+type EvidenceKind string
+
+const (
+	// EvidenceStatic identifies source or repository structure checks.
+	EvidenceStatic EvidenceKind = "static"
+	// EvidenceStaticHeuristic identifies heuristic source markers that need behavioral confirmation.
+	EvidenceStaticHeuristic EvidenceKind = "static_heuristic"
+	// EvidenceNotRun identifies a rule with no executed evidence.
+	EvidenceNotRun EvidenceKind = "not_run"
 )
 
 // VerifyRule represents a single verification rule.
@@ -29,8 +47,10 @@ type VerifyResult struct {
 	ID string `json:"id"`
 	// Name is the human-readable rule name.
 	Name string `json:"name"`
-	// Status is the outcome: PASS, FAIL, or SKIP.
+	// Status is the outcome: PASS, FAIL, SKIP, or HINT.
 	Status string `json:"status"`
+	// Evidence identifies whether the result is static, heuristic, or unexecuted.
+	Evidence EvidenceKind `json:"evidence"`
 	// DurationMs is the execution duration in milliseconds.
 	DurationMs int64 `json:"duration_ms"`
 	// Message provides additional context about the result.
@@ -63,6 +83,8 @@ type VerifySummary struct {
 	Failed int `json:"failed"`
 	// Skipped is the count of SKIP results.
 	Skipped int `json:"skipped"`
+	// Hints is the count of static heuristics that do not prove behavior.
+	Hints int `json:"hints"`
 }
 
 // AllRules returns the complete list of verification rules.
@@ -142,10 +164,11 @@ func RunVerify(dir string) *VerifyReport {
 	scanReport, err := Scan(scanCfg)
 	if err != nil {
 		report.Results = append(report.Results, VerifyResult{
-			ID:      "SCAN",
-			Name:    "AST Scanner",
-			Status:  "FAIL",
-			Message: fmt.Sprintf("scanner error: %v", err),
+			ID:       "SCAN",
+			Name:     "AST Scanner",
+			Status:   "FAIL",
+			Evidence: EvidenceStatic,
+			Message:  fmt.Sprintf("scanner error: %v", err),
 		})
 	} else {
 		report.Scan = scanReport
@@ -157,20 +180,19 @@ func RunVerify(dir string) *VerifyReport {
 			status = "FAIL"
 		}
 		report.Results = append(report.Results, VerifyResult{
-			ID:      "SCAN",
-			Name:    "AST Scanner (mock/hardcoded bypass detection)",
-			Status:  status,
-			Message: message,
+			ID:       "SCAN",
+			Name:     "AST Scanner (mock/hardcoded bypass detection)",
+			Status:   status,
+			Evidence: EvidenceStatic,
+			Message:  message,
 		})
 	}
 
 	// Phase 2: Check for Go-specific issues via file scanning.
 	report.Results = append(report.Results, checkGoFiles(dir)...)
 
-	// Phase 3: Run the VQ-*/VG-* AST heuristics and include the remaining V*
-	// rules as SKIP (pending package-level test implementation). The six
-	// VQ-001..004 / VG-001..002 rules produce PASS or FAIL from the source
-	// scan; every other rule stays SKIP.
+	// Phase 3: Run the VQ-*/VG-* AST heuristics as hints and include the
+	// remaining V* rules as SKIP (pending behavioral verification).
 	vqvgByID := make(map[string]VerifyResult, 6)
 	for _, r := range checkVQVG(dir) {
 		vqvgByID[r.ID] = r
@@ -181,10 +203,11 @@ func RunVerify(dir string) *VerifyReport {
 			continue
 		}
 		report.Results = append(report.Results, VerifyResult{
-			ID:      rule.ID,
-			Name:    rule.Name,
-			Status:  "SKIP",
-			Message: fmt.Sprintf("category=%s — pending in package tests", rule.Category),
+			ID:       rule.ID,
+			Name:     rule.Name,
+			Status:   "SKIP",
+			Evidence: EvidenceNotRun,
+			Message:  fmt.Sprintf("category=%s — no behavioral check has been run", rule.Category),
 		})
 	}
 
@@ -198,6 +221,8 @@ func RunVerify(dir string) *VerifyReport {
 			report.Summary.Failed++
 		case "SKIP":
 			report.Summary.Skipped++
+		case "HINT":
+			report.Summary.Hints++
 		}
 	}
 
@@ -212,17 +237,19 @@ func checkGoFiles(dir string) []VerifyResult {
 	goModPath := filepath.Join(dir, "go.mod")
 	if _, err := os.Stat(goModPath); err == nil {
 		results = append(results, VerifyResult{
-			ID:      "GOMOD",
-			Name:    "go.mod exists",
-			Status:  "PASS",
-			Message: goModPath,
+			ID:       "GOMOD",
+			Name:     "go.mod exists",
+			Status:   "PASS",
+			Evidence: EvidenceStatic,
+			Message:  goModPath,
 		})
 	} else {
 		results = append(results, VerifyResult{
-			ID:      "GOMOD",
-			Name:    "go.mod exists",
-			Status:  "FAIL",
-			Message: "go.mod not found",
+			ID:       "GOMOD",
+			Name:     "go.mod exists",
+			Status:   "FAIL",
+			Evidence: EvidenceStatic,
+			Message:  "go.mod not found",
 		})
 	}
 
@@ -230,25 +257,32 @@ func checkGoFiles(dir string) []VerifyResult {
 	lintPath := filepath.Join(dir, ".golangci.yml")
 	if _, err := os.Stat(lintPath); err == nil {
 		results = append(results, VerifyResult{
-			ID:      "LINT",
-			Name:    "golangci-lint config exists",
-			Status:  "PASS",
-			Message: lintPath,
+			ID:       "LINT",
+			Name:     "golangci-lint config exists",
+			Status:   "PASS",
+			Evidence: EvidenceStatic,
+			Message:  lintPath,
 		})
 	} else {
 		results = append(results, VerifyResult{
-			ID:      "LINT",
-			Name:    "golangci-lint config exists",
-			Status:  "FAIL",
-			Message: ".golangci.yml not found",
+			ID:       "LINT",
+			Name:     "golangci-lint config exists",
+			Status:   "FAIL",
+			Evidence: EvidenceStatic,
+			Message:  ".golangci.yml not found",
 		})
 	}
 
 	// Count Go files.
 	goFileCount := 0
 	testFileCount := 0
+	behaviorTestCount := 0
+	var testParseErrors []string
 	walkErr := filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
-		if err != nil || info.IsDir() {
+		if err != nil {
+			return err
+		}
+		if info.IsDir() {
 			return nil
 		}
 		if !strings.HasSuffix(path, ".go") {
@@ -256,6 +290,12 @@ func checkGoFiles(dir string) []VerifyResult {
 		}
 		if strings.HasSuffix(path, "_test.go") {
 			testFileCount++
+			count, parseErr := countBehaviorTestFunctions(path)
+			if parseErr != nil {
+				testParseErrors = append(testParseErrors, fmt.Sprintf("%s: %v", path, parseErr))
+			} else {
+				behaviorTestCount += count
+			}
 		} else {
 			goFileCount++
 		}
@@ -263,38 +303,120 @@ func checkGoFiles(dir string) []VerifyResult {
 	})
 	if walkErr != nil {
 		results = append(results, VerifyResult{
-			ID:      "GOFILES",
-			Name:    "Go source files scan",
-			Status:  "FAIL",
-			Message: fmt.Sprintf("filepath.Walk error: %v", walkErr),
+			ID:       "GOFILES",
+			Name:     "Go source files scan",
+			Status:   "FAIL",
+			Evidence: EvidenceStatic,
+			Message:  fmt.Sprintf("filepath.Walk error: %v", walkErr),
 		})
 		return results
 	}
 
-	results = append(results, VerifyResult{
-		ID:      "GOFILES",
-		Name:    "Go source files present",
-		Status:  "PASS",
-		Message: fmt.Sprintf("%d source files, %d test files", goFileCount, testFileCount),
-	})
+	goFilesResult := VerifyResult{
+		ID:       "GOFILES",
+		Name:     "Go source files present",
+		Status:   "PASS",
+		Evidence: EvidenceStatic,
+		Message:  fmt.Sprintf("%d source files, %d test files", goFileCount, testFileCount),
+	}
+	if goFileCount == 0 {
+		goFilesResult.Status = "FAIL"
+		goFilesResult.Message = "no source files found"
+	}
+	results = append(results, goFilesResult)
 
-	if testFileCount == 0 && goFileCount > 0 {
+	if len(testParseErrors) > 0 {
 		results = append(results, VerifyResult{
-			ID:      "TESTCOV",
-			Name:    "Test files exist for source",
-			Status:  "FAIL",
-			Message: "no test files found",
+			ID:       "TESTCOV",
+			Name:     "Behavioral test functions declared",
+			Status:   "FAIL",
+			Evidence: EvidenceStatic,
+			Message:  "could not inspect test files",
+			Details:  testParseErrors,
+		})
+	} else if behaviorTestCount == 0 {
+		message := fmt.Sprintf("no behavioral test functions found (%d test files inspected)", testFileCount)
+		if testFileCount == 0 {
+			message = "no test files found"
+		}
+		results = append(results, VerifyResult{
+			ID:       "TESTCOV",
+			Name:     "Behavioral test functions declared",
+			Status:   "FAIL",
+			Evidence: EvidenceStatic,
+			Message:  message,
 		})
 	} else {
 		results = append(results, VerifyResult{
-			ID:      "TESTCOV",
-			Name:    "Test files exist for source",
-			Status:  "PASS",
-			Message: fmt.Sprintf("%d test files", testFileCount),
+			ID:       "TESTCOV",
+			Name:     "Behavioral test functions declared",
+			Status:   "PASS",
+			Evidence: EvidenceStatic,
+			Message:  fmt.Sprintf("%d behavioral test functions in %d test files (not executed by RunVerify)", behaviorTestCount, testFileCount),
 		})
 	}
 
 	return results
+}
+
+func countBehaviorTestFunctions(path string) (int, error) {
+	file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+	if err != nil {
+		return 0, fmt.Errorf("parse test file: %w", err)
+	}
+	testingAliases := make(map[string]bool)
+	for _, imported := range file.Imports {
+		importPath, err := strconv.Unquote(imported.Path.Value)
+		if err != nil || importPath != "testing" {
+			continue
+		}
+		localName := "testing"
+		if imported.Name != nil {
+			localName = imported.Name.Name
+		}
+		if localName != "_" && localName != "." {
+			testingAliases[localName] = true
+		}
+	}
+	count := 0
+	for _, declaration := range file.Decls {
+		function, ok := declaration.(*ast.FuncDecl)
+		if ok && isBehaviorTestFunction(function, testingAliases) {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func isBehaviorTestFunction(function *ast.FuncDecl, testingAliases map[string]bool) bool {
+	if function == nil || function.Recv != nil || function.Type == nil || function.Type.Results != nil {
+		return false
+	}
+	if !strings.HasPrefix(function.Name.Name, "Test") {
+		return false
+	}
+	suffix := strings.TrimPrefix(function.Name.Name, "Test")
+	if suffix == "" {
+		return false
+	}
+	r, _ := utf8.DecodeRuneInString(suffix)
+	if unicode.IsLower(r) {
+		return false
+	}
+	params := function.Type.Params
+	if params == nil || len(params.List) != 1 || len(params.List[0].Names) > 1 {
+		return false
+	}
+	pointer, ok := params.List[0].Type.(*ast.StarExpr)
+	if !ok {
+		return false
+	}
+	testingT, ok := pointer.X.(*ast.SelectorExpr)
+	if !ok || testingT.Sel == nil || testingT.Sel.Name != "T" {
+		return false
+	}
+	packageName, ok := testingT.X.(*ast.Ident)
+	return ok && testingAliases[packageName.Name]
 }
 
 // SaveReport writes a verification report to a JSON file.
@@ -314,20 +436,19 @@ func FormatReportText(report *VerifyReport) string {
 	sb.WriteString("═══════════════════════════════════════════════\n")
 	sb.WriteString(fmt.Sprintf("Timestamp: %s\n", report.Timestamp))
 	sb.WriteString(fmt.Sprintf("Directory: %s\n", report.Dir))
-	sb.WriteString(fmt.Sprintf("Summary: %d total, %d passed, %d failed, %d skipped\n\n",
-		report.Summary.Total, report.Summary.Passed, report.Summary.Failed, report.Summary.Skipped))
+	sb.WriteString(fmt.Sprintf("Summary: %d total, %d passed, %d failed, %d skipped, %d hints\n\n",
+		report.Summary.Total, report.Summary.Passed, report.Summary.Failed, report.Summary.Skipped, report.Summary.Hints))
 
 	sb.WriteString("───────────────────────────────────────────────\n")
 	sb.WriteString("RESULTS\n")
 	sb.WriteString("───────────────────────────────────────────────\n")
 	for _, r := range report.Results {
-		status := "PASS"
-		if r.Status == "FAIL" {
-			status = "FAIL"
-		} else if r.Status == "SKIP" {
-			status = "SKIP"
+		status := r.Status
+		if r.Evidence != "" {
+			sb.WriteString(fmt.Sprintf("[%s] %s — %s (%dms) [evidence=%s]\n", status, r.ID, r.Name, r.DurationMs, r.Evidence))
+		} else {
+			sb.WriteString(fmt.Sprintf("[%s] %s — %s (%dms)\n", status, r.ID, r.Name, r.DurationMs))
 		}
-		sb.WriteString(fmt.Sprintf("[%s] %s — %s (%dms)\n", status, r.ID, r.Name, r.DurationMs))
 		if r.Message != "" {
 			sb.WriteString(fmt.Sprintf("       %s\n", r.Message))
 		}

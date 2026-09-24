@@ -1,0 +1,87 @@
+diff --git a/Makefile b/Makefile
+--- a/Makefile
++++ b/Makefile
+@@ -8,6 +8,7 @@
+ GO      ?= go
+ GOFLAGS ?= -trimpath
+ LDFLAGS ?= -s -w
++VERIFY_TEST_GATE = $(GO) run ./internal/verify/cmd/test-gate
+ 
+ # Build
+ build:
+@@ -15,18 +16,18 @@
+ 
+ # Run all tests
+ test:
+-	go test -race -count=1 ./...
++	$(VERIFY_TEST_GATE) -go-command $(GO) -go-arg=-race -go-arg=-count=1 -package=./...
+ 
+ # Run tests with coverage
+ test-cov:
+ 	@mkdir -p $(COVERAGE_DIR)
+-	go test -race -coverprofile=$(COVERAGE_DIR)/coverage.out -covermode=atomic ./...
++	$(VERIFY_TEST_GATE) -go-command $(GO) -go-arg=-race -go-arg=-coverprofile=$(COVERAGE_DIR)/coverage.out -go-arg=-covermode=atomic -package=./...
+ 	go tool cover -func=$(COVERAGE_DIR)/coverage.out
+ 
+ # Coverage threshold check
+ test-cov-check:
+ 	@mkdir -p $(COVERAGE_DIR)
+-	@go test -coverprofile=$(COVERAGE_DIR)/coverage.out ./... 2>/dev/null
++	@$(VERIFY_TEST_GATE) -go-command $(GO) -go-arg=-coverprofile=$(COVERAGE_DIR)/coverage.out -package=./...
+ 	@COVERAGE=$$(go tool cover -func=$(COVERAGE_DIR)/coverage.out | grep total | awk '{print $$3}' | sed 's/%//') && \
+ 		echo "Total coverage: $${COVERAGE}%" && \
+ 		if [ $$(echo "$$COVERAGE < $(COVERAGE_THRESHOLD)" | bc) -eq 1 ]; then \
+@@ -38,11 +39,11 @@
+ 
+ # Run log-based verification tests
+ test-log:
+-	go test -race -count=1 -run "TestLogCapturer" ./internal/verify/...
++	$(VERIFY_TEST_GATE) -go-command $(GO) -go-arg=-race -go-arg=-count=1 -go-arg=-run=TestLogCapturer -package=./internal/verify/...
+ 
+ # Run goroutine leak tests
+ test-leak:
+-	go test -race -count=1 -run "TestAssertNoGoroutineLeak|TestGoLeakChecker" ./internal/verify/...
++	$(VERIFY_TEST_GATE) -go-command $(GO) -go-arg=-race -go-arg=-count=1 '-go-arg=-run=TestAssertNoGoroutineLeak|TestGoLeakChecker' -package=./internal/verify/...
+ 
+ # AST scan for mock/hardcoded bypass detection
+ scan:
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -75,13 +75,13 @@
+ 
+       - run: go mod download
+ 
+-      - run: go test -race -count=1 -coverprofile=coverage.out ./...
++      - run: make test-cov
+ 
+       - uses: actions/upload-artifact@v4
+         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+         with:
+           name: coverage
+-          path: coverage.out
++          path: coverage/coverage.out
+ 
+   test-e2e:
+     name: E2E Tests
+@@ -96,7 +96,7 @@
+       - run: go mod download
+ 
+       - name: Run E2E tests
+-        run: go test -race -count=1 -tags e2e ./tests/...
++        run: go run ./internal/verify/cmd/test-gate -go-command go -go-arg=-race -go-arg=-count=1 -go-arg=-tags=e2e -package=./tests/...
+ 
+   docker:
+     name: Docker Build
+diff --git a/.github/workflows/pr-check.yml b/.github/workflows/pr-check.yml
+--- a/.github/workflows/pr-check.yml
++++ b/.github/workflows/pr-check.yml
+@@ -60,7 +60,7 @@
+           version: v2.12.2
+ 
+       - name: Run tests
+-        run: go test -race -count=1 ./...
++        run: make test
+ 
+       - name: Run AST scanner gate
+         run: make scan
