@@ -238,6 +238,44 @@ func (a *DeferredToolRegistryAdapter) Register(ctx context.Context, def ToolDefi
 	return a.underlying.Register(ctx, def)
 }
 
+// DispatchFence forwards the underlying registry's shared dispatch fence.
+func (a *DeferredToolRegistryAdapter) DispatchFence() *DispatchFence {
+	provider, ok := a.underlying.(DispatchFenceProvider)
+	if !ok {
+		return nil
+	}
+	return provider.DispatchFence()
+}
+
+func (a *DeferredToolRegistryAdapter) preparedToolPipeline() (*preparedToolPipelineState, *DispatchFence) {
+	provider, ok := a.underlying.(preparedToolPipelineProvider)
+	if !ok {
+		return nil, nil
+	}
+	return provider.preparedToolPipeline()
+}
+
+// RegisterTrustedControl forwards only the narrow first-party control
+// registration capability exposed by the underlying registry.
+func (a *DeferredToolRegistryAdapter) RegisterTrustedControl(ctx context.Context, def ToolDefinition) error {
+	registrar, ok := a.underlying.(TrustedControlRegistrar)
+	if !ok {
+		return ErrTrustedControlRegistrationUnavailable
+	}
+	return registrar.RegisterTrustedControl(ctx, def)
+}
+
+func (a *DeferredToolRegistryAdapter) toolRegistrationSnapshot(ctx context.Context, name string) (registeredToolSnapshot, error) {
+	if _, err := a.Get(ctx, name); err != nil {
+		return registeredToolSnapshot{}, err
+	}
+	provider, ok := a.underlying.(registrationSnapshotProvider)
+	if !ok {
+		return registeredToolSnapshot{}, ErrPreparedRegistrationUnavailable
+	}
+	return provider.toolRegistrationSnapshot(ctx, name)
+}
+
 // Get returns the tool with the given name. It first checks the underlying
 // registry; if not found, it attempts to Load the deferred tool (which
 // registers it into the underlying registry on success). If the name is

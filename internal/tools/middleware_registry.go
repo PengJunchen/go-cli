@@ -28,7 +28,9 @@ type MiddlewareToolRegistry struct {
 
 // Compile-time interface guarantees.
 var (
-	_ ToolRegistry = (*MiddlewareToolRegistry)(nil)
+	_ ToolRegistry            = (*MiddlewareToolRegistry)(nil)
+	_ DispatchFenceProvider   = (*MiddlewareToolRegistry)(nil)
+	_ TrustedControlRegistrar = (*MiddlewareToolRegistry)(nil)
 )
 
 // NewMiddlewareToolRegistry creates a decorator around inner that applies
@@ -45,6 +47,65 @@ func NewMiddlewareToolRegistry(inner ToolRegistry, wrappers ...ToolExecutorWrapp
 // Register delegates to the inner registry.
 func (r *MiddlewareToolRegistry) Register(ctx context.Context, def ToolDefinition) error {
 	return r.inner.Register(ctx, def)
+}
+
+// DispatchFence forwards the inner registry's shared dispatch fence.
+func (r *MiddlewareToolRegistry) DispatchFence() *DispatchFence {
+	provider, ok := r.inner.(DispatchFenceProvider)
+	if !ok {
+		return nil
+	}
+	return provider.DispatchFence()
+}
+
+func (r *MiddlewareToolRegistry) preparedToolPipeline() (*preparedToolPipelineState, *DispatchFence) {
+	provider, ok := r.inner.(preparedToolPipelineProvider)
+	if !ok {
+		return nil, nil
+	}
+	return provider.preparedToolPipeline()
+}
+
+// SetPreparedToolPolicy installs the callback used by prepared dispatch. A
+// replacement or clear advances the shared approval generation, so calls
+// already waiting on an older decision cannot commit afterward.
+func (r *MiddlewareToolRegistry) SetPreparedToolPolicy(policy PreparedToolPolicy) error {
+	state, fence := r.preparedToolPipeline()
+	if state == nil || fence == nil {
+		return ErrPreparedRegistrationUnavailable
+	}
+	_, err := fence.Publish(DispatchFenceApproval, nil, func() { state.setPolicy(policy) })
+	return err
+}
+
+// SetPreparedToolStages installs the explicit argument-normalization,
+// execution-decoration, and mutation-queue stages for prepared calls. Stage
+// replacement advances the shared registry generation and stales old calls.
+func (r *MiddlewareToolRegistry) SetPreparedToolStages(stages PreparedToolStages) error {
+	state, fence := r.preparedToolPipeline()
+	if state == nil || fence == nil {
+		return ErrPreparedRegistrationUnavailable
+	}
+	_, err := fence.Publish(DispatchFenceRegistry, nil, func() { state.setStages(stages) })
+	return err
+}
+
+// RegisterTrustedControl forwards the narrow first-party registration
+// capability when the wrapped registry supports it.
+func (r *MiddlewareToolRegistry) RegisterTrustedControl(ctx context.Context, def ToolDefinition) error {
+	registrar, ok := r.inner.(TrustedControlRegistrar)
+	if !ok {
+		return ErrTrustedControlRegistrationUnavailable
+	}
+	return registrar.RegisterTrustedControl(ctx, def)
+}
+
+func (r *MiddlewareToolRegistry) toolRegistrationSnapshot(ctx context.Context, name string) (registeredToolSnapshot, error) {
+	provider, ok := r.inner.(registrationSnapshotProvider)
+	if !ok {
+		return registeredToolSnapshot{}, ErrPreparedRegistrationUnavailable
+	}
+	return provider.toolRegistrationSnapshot(ctx, name)
 }
 
 // Get returns a wrapped ToolDefinition whose Execute method passes through
