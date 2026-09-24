@@ -4,6 +4,7 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 
@@ -37,6 +38,10 @@ var _ eventSource = (*AgentImpl)(nil)
 // ErrCanonicalTranscriptRequired is returned when a legacy AgentLoop exposes
 // tool execution or injected inputs that it cannot represent in typed history.
 var ErrCanonicalTranscriptRequired = errors.New("core: canonical transcript required for tool or injected input run")
+
+// ErrCanonicalTranscriptInvalid indicates a CanonicalLoop returned a delta
+// that does not begin with exactly the current user submission.
+var ErrCanonicalTranscriptInvalid = errors.New("core: invalid canonical transcript")
 
 // AgentImpl is a stateful wrapper around an AgentLoop. It maintains message
 // history across Run calls and records its name so the runtime can address it.
@@ -149,6 +154,7 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...Ev
 	var events []AgentEvent
 	var err error
 	var canonicalDelta []AgentMessage
+	var canonicalDeltaErr error
 	legacyRequiresCanonical := false
 	if hasCanonicalTranscript {
 		runResult, runErr := canonicalLoop.RunCanonical(spanCtx, submission, stream...)
@@ -157,6 +163,11 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...Ev
 		canonicalDelta = make([]AgentMessage, 0, len(runResult.Transcript))
 		for _, entry := range runResult.Transcript {
 			canonicalDelta = append(canonicalDelta, entry.Message)
+		}
+		canonicalDelta = cloneAgentMessages(canonicalDelta)
+		canonicalDeltaErr = validateCanonicalDelta(submission.Content, canonicalDelta)
+		if canonicalDeltaErr != nil {
+			err = errors.Join(err, canonicalDeltaErr)
 		}
 	} else {
 		events, err = a.loop.Run(spanCtx, submission, stream...)
@@ -176,8 +187,9 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...Ev
 	lastAssistant := lastAssistantMessage(evs)
 	finalMsg := ""
 	if hasCanonicalTranscript {
-		canonicalDelta = cloneAgentMessages(canonicalDelta)
-		finalMsg = lastAssistantTranscriptContent(canonicalDelta)
+		if canonicalDeltaErr == nil {
+			finalMsg = lastAssistantTranscriptContent(canonicalDelta)
+		}
 	} else if lastAssistant != nil {
 		finalMsg = lastAssistant.Content
 	}
@@ -185,7 +197,9 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...Ev
 	a.mu.Lock()
 	a.events = evs
 	if hasCanonicalTranscript {
-		a.history = append(a.history, canonicalDelta...)
+		if canonicalDeltaErr == nil {
+			a.history = append(a.history, canonicalDelta...)
+		}
 	} else if !legacyRequiresCanonical && lastAssistant != nil && len(lastAssistant.ToolCalls) == 0 {
 		a.history = append(a.history, AgentMessage{
 			Role:    "assistant",
@@ -318,6 +332,26 @@ func lastAssistantTranscriptContent(messages []AgentMessage) string {
 		}
 	}
 	return final
+}
+
+func validateCanonicalDelta(currentUserContent string, delta []AgentMessage) error {
+	if len(delta) == 0 {
+		return fmt.Errorf("%w: delta is empty", ErrCanonicalTranscriptInvalid)
+	}
+	first := delta[0]
+	if first.Role != "user" || first.InputKind != InputKindUser || first.Content != currentUserContent {
+		return fmt.Errorf("%w: first entry must be the current user submission", ErrCanonicalTranscriptInvalid)
+	}
+	userInputs := 0
+	for _, message := range delta {
+		if message.InputKind == InputKindUser {
+			userInputs++
+		}
+	}
+	if userInputs != 1 {
+		return fmt.Errorf("%w: expected exactly one current user submission, got %d", ErrCanonicalTranscriptInvalid, userInputs)
+	}
+	return nil
 }
 
 func requiresCanonicalTranscript(events []AgentEvent, history []AgentMessage) bool {
