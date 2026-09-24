@@ -42,10 +42,16 @@ func (s TurnStatus) String() string {
 type Turn struct {
 	// ID uniquely identifies the turn within its runner.
 	ID string
+	// RunID identifies the run claim owned by this turn.
+	RunID string
 	// Submission is the request that started the turn.
 	Submission Submission
 	// Status is the current lifecycle state of the turn.
 	Status TurnStatus
+	// Outcome records logical completion independently from resource cleanup.
+	Outcome RunOutcome
+	// ExecutionState reports whether owned execution resources have quiesced.
+	ExecutionState RunExecutionState
 	// StartTime records when the turn began running.
 	StartTime time.Time
 	// EndTime records when the turn finished (zero while running).
