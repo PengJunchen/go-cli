@@ -681,18 +681,19 @@ func ensureServerName(name string) string {
 	return name
 }
 
-// IsLoopbackAddr reports whether addr binds to a loopback interface. An addr
-// without a host:port suffix (e.g. ":9090") or with a loopback host
-// (127.0.0.1, localhost, ::1) is considered loopback. Binding to 0.0.0.0 or
-// a specific external IP is not.
+// IsLoopbackAddr reports whether addr binds to a loopback interface. An empty
+// host (e.g. ":9090") binds to all interfaces and is not loopback.
 func IsLoopbackAddr(addr string) bool {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		host = addr
 	}
-	switch host {
-	case "127.0.0.1", "localhost", "::1", "":
+	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
 		return true
 	}
-	return false
+	return net.ParseIP(host).IsLoopback()
 }
