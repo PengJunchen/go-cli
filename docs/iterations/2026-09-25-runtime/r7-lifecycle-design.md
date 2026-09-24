@@ -186,7 +186,8 @@ Resource close 由 assembly 记录 disposer 和调用 R1 owner；调用入口的
 **R7-BLD-02（trace runtime + 可见递送）**：
 
 - `cmd/cli/main.go`、`internal/cli/prompt.go`、`repl_session.go`、`serve_cmd.go`：root invocation 单 exporter/report 收口；将每个默认 caller 的 assembly/trace close errors 返回到命令结果，非零 exit 可观察。`internal/cli/assemble.go` 的 tracing hunk 只能在 BLD-01 先提交 assembly 生命周期后串行集成，不能并行覆盖该文件。
-- `internal/cli/assemble.go`、Assembly options/types：注入同一 tracer/exporter owner，删掉第二 builder/关闭者，清理资源失败可见。
+- `internal/cli/assemble.go`、Assembly options/types：仅允许 R7-BLD-02 修改 producer-label 与 trace-owner 对应 hunk，以 root 明确批准的串行顺序与 R2/R4/R6 builder 协调；不得并发覆盖这些任务拥有的其它函数。R7-BLD-01 的 extension/skill lifecycle hunk 先合入，再由 BLD-02 单独集成其 hunk。注入同一 tracer/exporter owner，删除第二 builder/关闭者，并让资源清理失败可见。
+- `internal/production/telemetry.go`、`telemetry_test.go`：R7-BLD-02 唯一拥有 metric-key 编码、label domain、series cap 与可观测 drop stats 的实现和测试。
 - `internal/tracing/span.go`、`async.go`、`exporter.go`、`exporter_otlp.go`、`exporter_kafka.go`、`load.go`：parent identity/status/delivery contracts；未达 conformance 的 exporter 不进入默认配置。
 - `internal/config/loader.go` / `validator.go`：enabled/exporter 单一支持表，none 真关闭，unknown 拒绝。
 - R0 对敏感字段序列化负责；R7 负责在已修复字段经过 unified runtime 的端到端导出链时仍有 redaction sentinel 回归。APR audit choice、MEM stats 等若与 R6/R0 同时改动，先复用其 canonical semantics；只修 R7 当前 owner 的真实 gap，不复制另一套状态源。
