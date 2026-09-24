@@ -43,8 +43,8 @@ func TestSessionEntryClone_DeepCopySlices(t *testing.T) {
 	assert.Equal(t, "read", orig.ToolCalls[0].Name, "original ToolCalls must be unchanged")
 }
 
-// TestClone_PreservesContentBlocks verifies that Clone deep-copies entries
-// including ContentBlocks and ToolCalls into the new branch.
+// TestClone_PreservesContentBlocks verifies that a shared canonical prefix
+// retains its ContentBlocks and ToolCalls.
 func TestClone_PreservesContentBlocks(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -71,20 +71,51 @@ func TestClone_PreservesContentBlocks(t *testing.T) {
 
 	branch, err := tree.GetBranch(ctx, "copy-e0")
 	require.NoError(t, err)
-	require.Len(t, branch, 1)
+	require.Len(t, branch, 2)
 
 	cloned := branch[0]
-	assert.Equal(t, "copy-e0", cloned.ID)
+	assert.Equal(t, "e0", cloned.ID)
 	require.Len(t, cloned.ContentBlocks, 1)
 	assert.Equal(t, "block-content", cloned.ContentBlocks[0].Text)
 	require.Len(t, cloned.ToolCalls, 1)
-	// Task 35-32: Clone remaps ToolCall IDs so cloned branches don't share
-	// IDs with the original. Verify the ID is remapped but still traceable
-	// back to the original "tc-1".
-	assert.NotEqual(t, "tc-1", cloned.ToolCalls[0].ID)
-	assert.Contains(t, cloned.ToolCalls[0].ID, "tc-1")
-	assert.Contains(t, cloned.ToolCalls[0].ID, "cloned")
+	assert.Equal(t, "tc-1", cloned.ToolCalls[0].ID)
 	assert.Equal(t, "write", cloned.ToolCalls[0].Name)
+	assert.Equal(t, "copy-e0", branch[1].ID)
+	assert.Equal(t, EntryTypeCheckpoint, branch[1].Type)
+}
+
+func TestApplyBranchCheckpointActivatesCanonicalSyncedEntry(t *testing.T) {
+	ctx := context.Background()
+	tree := newConcreteTree()
+	require.NoError(t, tree.Append(ctx, newR2UserEntry("root", "", 1, 0)))
+	require.NoError(t, tree.Append(ctx, newR2AssistantEntry("source", "root", 2, 1)))
+	require.NoError(t, tree.MoveTo(ctx, "source"))
+
+	checkpoint, err := tree.NewBranchCheckpoint(ctx, "source", "feature", "main", "physical-session")
+	require.NoError(t, err)
+	assert.Equal(t, "source", tree.CurrentLeaf(), "checkpoint construction must not activate the branch")
+	assert.Equal(t, EntryTypeCheckpoint, checkpoint.Type)
+	assert.Equal(t, CheckpointBranch, checkpoint.CheckpointKind)
+	assert.Equal(t, uint16(1), checkpoint.RecordVersion)
+	assert.Equal(t, "physical-session", checkpoint.SessionID)
+	assert.Equal(t, "main", checkpoint.ParentBranchID)
+	assert.Equal(t, "source", checkpoint.BaseLeafEntryID)
+	assert.Equal(t, checkpoint.ID, checkpoint.ActiveLeafEntryID)
+
+	// DurableSessionWriter supplies the canonical sequence only after sync.
+	checkpoint.Seq = 3
+	checkpoint.PayloadDigest = "sha256:canonical-checkpoint"
+	require.NoError(t, tree.ApplyBranchCheckpoint(ctx, checkpoint))
+	assert.Equal(t, checkpoint.ID, tree.CurrentLeaf())
+	branch, err := tree.GetBranch(ctx, checkpoint.ID)
+	require.NoError(t, err)
+	require.Len(t, branch, 3)
+	assert.Equal(t, "root", branch[0].ID)
+	assert.Equal(t, "source", branch[1].ID)
+	assert.Equal(t, checkpoint.ID, branch[2].ID)
+	meta, ok := tree.BranchMetaFor("feature")
+	require.True(t, ok)
+	assert.Equal(t, "source", meta.BaseLeafID)
 }
 
 // TestBranchMeta_PersistedToJSONL verifies that a Branch operation persists

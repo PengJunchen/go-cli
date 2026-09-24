@@ -74,6 +74,9 @@ func (t *DefaultSessionTree) Append(ctx context.Context, entry *SessionEntry) er
 	if err := validateVersion1EntryCoordinates(*entry); err != nil {
 		return fmt.Errorf("session: invalid entry %q: %w", entry.ID, err)
 	}
+	if err := validateTreeCheckpointCoordinates(*entry); err != nil {
+		return fmt.Errorf("session: invalid checkpoint entry %q: %w", entry.ID, err)
+	}
 	span.SetAttributes(
 		tracing.Attribute{Key: "entry_type", Value: string(entry.Type)},
 		tracing.Attribute{Key: "entry_id", Value: entry.ID},
@@ -121,6 +124,23 @@ func (t *DefaultSessionTree) Append(ctx context.Context, entry *SessionEntry) er
 
 	logger.Info("session_tree_append", "op", "session.tree.append", "entry_type", string(cp.Type), "entry_id", cp.ID)
 	span.SetStatus(tracing.SpanStatusOK, "")
+	return nil
+}
+
+func validateTreeCheckpointCoordinates(entry SessionEntry) error {
+	if entry.RecordVersion != 1 || entry.Type != EntryTypeCheckpoint {
+		return nil
+	}
+	switch entry.CheckpointKind {
+	case CheckpointActiveLeaf:
+		if entry.ActiveLeafEntryID == "" {
+			return errors.New("active-leaf checkpoint has no active leaf pointer")
+		}
+	case CheckpointBranch:
+		if entry.BranchID == "" || entry.BaseLeafEntryID == "" || entry.ParentID != entry.BaseLeafEntryID || entry.ActiveLeafEntryID != entry.ID {
+			return errors.New("branch checkpoint has incomplete branch or leaf coordinates")
+		}
+	}
 	return nil
 }
 

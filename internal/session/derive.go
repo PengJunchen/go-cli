@@ -30,6 +30,11 @@ func SessionViewFromEntries(sessionID, branchID, revision string, branchEntries 
 	if sessionID == "" || branchID == "" {
 		return SessionView{}, errors.New("session: view requires physical session and branch IDs")
 	}
+	for _, entry := range branchEntries {
+		if entry.RecordVersion == 1 && entry.SessionID != sessionID {
+			return SessionView{}, fmt.Errorf("session: entry %q belongs to physical session %q, not %q", entry.ID, entry.SessionID, sessionID)
+		}
+	}
 	entries, err := projectSessionEntries(branchEntries)
 	if err != nil {
 		return SessionView{}, err
@@ -72,6 +77,9 @@ func projectSessionEntries(entries []SessionEntry) ([]SessionEntry, error) {
 			if err := validateVersion1EntryCoordinates(entry); err != nil {
 				return nil, fmt.Errorf("session: invalid version 1 entry %q: %w", entry.ID, err)
 			}
+			if err := validateTreeCheckpointCoordinates(entry); err != nil {
+				return nil, fmt.Errorf("session: invalid version 1 entry %q: %w", entry.ID, err)
+			}
 		}
 	}
 
@@ -95,6 +103,7 @@ func projectSessionEntries(entries []SessionEntry) ([]SessionEntry, error) {
 	}
 
 	byID := make(map[string]int, len(entries))
+	var lastSequence uint64
 	for i, entry := range entries {
 		if entry.ID == "" {
 			return nil, fmt.Errorf("session: version 1 branch has an entry with no ID at index %d", i)
@@ -109,8 +118,17 @@ func projectSessionEntries(entries []SessionEntry) ([]SessionEntry, error) {
 		if entry.Seq == 0 && entry.RecordVersion == 1 {
 			return nil, fmt.Errorf("session: version 1 entry %q has no sequence", entry.ID)
 		}
-		if i > 0 && entry.Seq != 0 && entries[i-1].Seq != 0 && entry.Seq <= entries[i-1].Seq {
+		if entry.Seq != 0 && lastSequence != 0 && entry.Seq <= lastSequence {
 			return nil, fmt.Errorf("session: branch sequence does not increase at entry %q", entry.ID)
+		}
+		if entry.Seq != 0 {
+			lastSequence = entry.Seq
+		}
+		if entry.RecordVersion == 1 && entry.Type == EntryTypeCheckpoint && entry.ActiveLeafEntryID != "" && entry.ActiveLeafEntryID != entry.ID {
+			activeLeafIndex, exists := byID[entry.ActiveLeafEntryID]
+			if !exists || activeLeafIndex >= i {
+				return nil, fmt.Errorf("session: checkpoint entry %q has an unmappable active leaf %q", entry.ID, entry.ActiveLeafEntryID)
+			}
 		}
 	}
 
