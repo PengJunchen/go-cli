@@ -40,6 +40,7 @@ type stubStore struct {
 	mu       sync.Mutex
 	data     map[string]Classification
 	gets     int
+	sets     int
 	decision Classification
 	found    bool
 	err      error
@@ -63,6 +64,7 @@ func (s *stubStore) Get(_ context.Context, key string) (Classification, bool, er
 func (s *stubStore) Set(_ context.Context, key string, c Classification) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.sets++
 	s.data[key] = c
 	return nil
 }
@@ -76,6 +78,11 @@ func (s *stubStore) getCount() int {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.gets
+}
+func (s *stubStore) setCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.sets
 }
 
 func nextEcho() func(context.Context, tools.ToolCall) (*tools.ToolResult, error) {
@@ -183,6 +190,23 @@ func TestMiddlewareAskResolvesToAllowWithAutoApprove(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, res)
 	assert.Equal(t, "ran:read_file", res.Output)
+}
+
+func TestMiddlewareCallbackAllowOnlyAppliesToCurrentCall(t *testing.T) {
+	store := newStubStore()
+	cb := &MockApprovalCallback{result: ApprovalAllow}
+	mw := NewApprovalMiddleware(&countingClassifier{decision: Ask}, store, WithCallback(cb))
+	wrapped := mw.WrapToolCall(nextEcho())
+
+	for range 2 {
+		res, err := wrapped(context.Background(), call("bash"))
+		require.NoError(t, err)
+		require.NotNil(t, res)
+	}
+
+	assert.Equal(t, 2, cb.callCount(), "each callback Allow must authorize only its own identical call")
+	assert.Equal(t, 2, store.getCount(), "each invocation must consult the store because callback Allow is transient")
+	assert.Equal(t, 0, store.setCount(), "callback Allow must not enter the approval store")
 }
 
 func TestMiddlewareEmitsApprovalDecisionSpan(t *testing.T) {

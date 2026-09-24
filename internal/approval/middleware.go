@@ -183,8 +183,13 @@ func (m *ApprovalMiddleware) decide(ctx context.Context, key string, call tools.
 	// PermissionModeResolver is wired, the classifier is chosen from the mode.
 	classifier := m.effectiveClassifier()
 	c := classifier.Classify(ctx, call)
+	cacheDecision := true
 	if c == Ask {
-		c = m.resolveAsk(ctx, key, call)
+		c, cacheDecision = m.resolveAsk(ctx, key, call)
+	}
+
+	if !cacheDecision {
+		return m.record(span, call, c, false), false
 	}
 
 	m.sessionStore(key, c)
@@ -198,38 +203,40 @@ func (m *ApprovalMiddleware) decide(ctx context.Context, key string, call tools.
 	return m.record(span, call, c, false), false
 }
 
-// resolveAsk resolves an Ask classification. When a callback is wired it
-// consults the always-allow cache first (skipping the prompt on a hit), then
-// prompts interactively. When no callback is wired it falls back to the
-// auto-approve policy: autoApprove allows the call, otherwise it is denied.
-func (m *ApprovalMiddleware) resolveAsk(ctx context.Context, key string, call tools.ToolCall) Classification {
+// resolveAsk resolves an Ask classification and reports whether the decision
+// may be reused for later calls. A callback's Allow or Deny applies only to the
+// current call; AlwaysAllow and policy decisions retain their reusable scope.
+// When a callback is wired, the always-allow cache is checked before prompting.
+func (m *ApprovalMiddleware) resolveAsk(ctx context.Context, key string, call tools.ToolCall) (Classification, bool) {
 	if m.opts.callback == nil {
 		if m.opts.autoApprove {
-			return Allow
+			return Allow, true
 		}
-		return Deny
+		return Deny, true
 	}
 
 	if m.opts.cache != nil {
 		if allowed, ok := m.opts.cache.Get(key); ok && allowed {
-			return Allow
+			return Allow, true
 		}
 	}
 
 	result, err := m.opts.callback.RequestApproval(ctx, call.Name, call.Args)
 	if err != nil {
-		return Deny
+		return Deny, false
 	}
 	switch result {
 	case ApprovalAllow:
-		return Allow
+		// Allow is a one-call decision. It must not enter the session or
+		// store cache below, so an identical later call asks again.
+		return Allow, false
 	case ApprovalAlwaysAllow:
 		if m.opts.cache != nil {
 			m.opts.cache.Set(key)
 		}
-		return Allow
+		return Allow, true
 	default:
-		return Deny
+		return Deny, false
 	}
 }
 
