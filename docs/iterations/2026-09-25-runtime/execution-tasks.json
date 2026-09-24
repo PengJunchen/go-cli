@@ -899,7 +899,7 @@
       "commit_spec": "Commit shared factory separately from any native provider enablement; native support release requires protocol contract tests for each protocol.",
       "phase_id": "R3",
       "source_status": "proposed",
-      "execution_scope": "Narrow resolver-construction slice only, on r3-resolver and limited to internal/llm plus config. It may proceed from the reviewed R3 proposal without waiting for R2-REV-01; consumer injection, core/CLI retry and fallback integration, compaction, and full R3 acceptance remain gated by the complete R3 handoff and R2 restart-safety review."
+      "execution_scope": "The narrow resolver-construction slice on r3-resolver (internal/llm plus config) is accepted. A separate provider-owned identity-consumer slice is now in progress for primary/small/same-provider switch consumers using the same immutable resolver. Retry, cycler, subagent, compaction, broader core/CLI injection, and full ModelRequest/retry-fallback integration remain gated by R2-REV-01 and the complete R3 handoff."
     },
     {
       "id": "R3-BLD-02",
@@ -1425,10 +1425,11 @@
         "R6-DES-01",
         "R3-REV-01"
       ],
-      "status": "pending",
+      "status": "in_progress",
       "commit_spec": "Separate provider auth and trust store changes from CLI output cleanup; each path needs restart or error-injection coverage.",
       "phase_id": "R6",
-      "source_status": "proposed"
+      "source_status": "proposed",
+      "execution_scope": "Partial lane build_private_files, based at 62aa472 on codebase 1c285ac, is authorized under approved R6 design section 50 for atomic private auth/token/trust-file persistence and auth-reader error/permission behavior only. This isolated slice may proceed while full entrypoint/consumer prerequisites remain pending; complete provider-factory wiring, consumer trust lifecycle, remaining CLI behavior, entrypoint verification and R6 acceptance remain gated."
     },
     {
       "id": "R6-BLD-02",
