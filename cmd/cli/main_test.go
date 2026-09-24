@@ -301,6 +301,92 @@ func TestDefaultTraceContainsNoPrompt(t *testing.T) {
 	}
 }
 
+func TestDefaultTraceAndLogsRedactProviderErrorBody(t *testing.T) {
+	const canary = "PROVIDER-ERROR-PROMPT-RAW-CANARY-91"
+	requestCount := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requestCount++
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, "provider rejected request and echoed: "+canary) //nolint:errcheck // http test body write
+	}))
+	defer srv.Close()
+
+	traceDir := t.TempDir()
+	previousDir, err := os.Getwd()
+	require.NoError(t, err)
+	workDir := t.TempDir()
+	require.NoError(t, os.Chdir(workDir))
+	defer func() { _ = os.Chdir(previousDir) }()
+
+	previousLogger := slog.Default()
+	defer slog.SetDefault(previousLogger)
+	cfg := &config.Config{Provider: config.ProviderConfig{
+		Name:    "test",
+		BaseURL: srv.URL,
+		APIKey:  "test",
+		Model:   "test-model",
+	}}
+	cfg.Tracing = config.TracingConfig{
+		Enabled:  boolPtr(true),
+		Exporter: "jsonl",
+		FilePath: traceDir,
+	}
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"prompt", "-approve", "auto", canary}, &stdout, &stderr, func() (*config.Config, error) {
+		return cfg, nil
+	})
+	require.Equal(t, 1, code, "provider rejection must remain a failed CLI invocation")
+	require.Equal(t, 1, requestCount)
+
+	files, err := filepath.Glob(filepath.Join(traceDir, "*.jsonl"))
+	require.NoError(t, err)
+	require.GreaterOrEqual(t, len(files), 2, "main CLI and Assembly must both export spans")
+	logData, err := os.ReadFile(filepath.Join(workDir, ".go-cli", "logs", "go-cli.log"))
+	require.NoError(t, err)
+	var trace strings.Builder
+	var failedStatus bool
+	var providerCode bool
+	var providerErrorType bool
+	for _, path := range files {
+		data, readErr := os.ReadFile(path)
+		require.NoError(t, readErr)
+		trace.Write(data)
+		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+			if line == "" {
+				continue
+			}
+			var span tracing.SpanData
+			require.NoError(t, json.Unmarshal([]byte(line), &span))
+			failedStatus = failedStatus || span.Status == tracing.SpanStatusError
+			for _, attr := range span.Attributes {
+				if attr.Key == "http_status_code" {
+					providerCode = providerCode || attr.Value == float64(http.StatusBadRequest)
+				}
+				if attr.Key == "error_type" {
+					providerErrorType = providerErrorType || attr.Value == "server"
+				}
+			}
+		}
+	}
+	allRecords := trace.String() + string(logData) + stdout.String() + stderr.String()
+	if strings.Contains(allRecords, canary) {
+		t.Fatal("provider error response canary leaked to default trace or log output")
+	}
+	assert.True(t, failedStatus, "trace must preserve the provider failure status")
+	assert.True(t, providerCode, "trace must preserve the safe provider HTTP status code")
+	assert.True(t, providerErrorType, "trace must preserve the safe provider error category")
+	if !strings.Contains(allRecords, "loop.run") {
+		t.Fatal("trace must retain the failed loop identity")
+	}
+	if !strings.Contains(allRecords, "llm_stream_start") {
+		t.Fatal("log must retain provider operation identity")
+	}
+	if !strings.Contains(allRecords, "bytes=") {
+		t.Fatal("redaction must retain response length metadata")
+	}
+}
+
 func TestDefaultInteractiveTraceContainsNoPrompt(t *testing.T) {
 	const promptCanary = "INTERACTIVE-RAW-CANARY-58"
 

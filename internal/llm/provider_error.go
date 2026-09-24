@@ -5,8 +5,11 @@
 package llm
 
 import (
+	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
 // ErrorType classifies the kind of error returned by a model provider.
@@ -30,7 +33,9 @@ const (
 // ProviderError is a structured error returned by a model provider. It carries
 // the HTTP status code, a typed error category, the provider name and the
 // original error message so that middleware can classify errors without
-// fragile string matching.
+// fragile string matching. Message is retained for internal classification;
+// Error deliberately excludes it because providers may echo prompts or tool
+// input in response bodies.
 type ProviderError struct {
 	StatusCode int
 	ErrorType  ErrorType
@@ -40,7 +45,23 @@ type ProviderError struct {
 
 // Error implements the error interface.
 func (e *ProviderError) Error() string {
-	return fmt.Sprintf("%s error from %s (HTTP %d): %s", e.ErrorType, e.Provider, e.StatusCode, e.Message)
+	return fmt.Sprintf("%s error from %s (HTTP %d)", e.ErrorType, e.Provider, e.StatusCode)
+}
+
+// setProviderErrorSpanAttributes retains bounded provider diagnostics without
+// copying the response body's free-form error message into telemetry.
+func setProviderErrorSpanAttributes(span tracing.TraceSpan, err error) {
+	if span == nil || err == nil {
+		return
+	}
+	var providerErr *ProviderError
+	if !errors.As(err, &providerErr) || providerErr == nil {
+		return
+	}
+	span.SetAttributes(
+		tracing.Attribute{Key: "error_type", Value: string(providerErr.ErrorType)},
+		tracing.Attribute{Key: "http_status_code", Value: providerErr.StatusCode},
+	)
 }
 
 // Unwrap returns nil: ProviderError is a leaf node in the error chain.

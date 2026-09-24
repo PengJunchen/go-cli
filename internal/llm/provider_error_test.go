@@ -9,7 +9,8 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestProviderError_Error verifies the Error() method format.
+// TestProviderError_Error verifies the safe Error() summary omits provider
+// response text, which may contain prompts or tool input echoed by the API.
 func TestProviderError_Error(t *testing.T) {
 	e := &ProviderError{
 		StatusCode: 429,
@@ -17,7 +18,8 @@ func TestProviderError_Error(t *testing.T) {
 		Provider:   "openai",
 		Message:    "too many requests",
 	}
-	assert.Equal(t, "rate_limit error from openai (HTTP 429): too many requests", e.Error())
+	assert.Equal(t, "rate_limit error from openai (HTTP 429)", e.Error())
+	assert.NotContains(t, e.Error(), e.Message)
 }
 
 // TestProviderError_Unwrap verifies Unwrap returns nil (leaf node).
