@@ -459,7 +459,7 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 // claudeStreamEvent is a single SSE event in the Anthropic streaming protocol.
 type claudeStreamEvent struct {
 	Type         string               `json:"type"`
-	Index        int                  `json:"index"`
+	Index        *int                 `json:"index,omitempty"`
 	Message      *claudeStreamMessage `json:"message,omitempty"`
 	ContentBlock *claudeStreamBlock   `json:"content_block,omitempty"`
 	Delta        *claudeStreamDelta   `json:"delta,omitempty"`
@@ -496,8 +496,9 @@ type claudeToolAccum struct {
 
 // streamClaude sends a streaming Anthropic messages request and parses the SSE
 // response. The "stream": true flag is injected into the request body. Event
-// types handled: message_start (role), content_block_delta (text/tool args),
-// message_stop (final chunk with accumulated tool calls).
+// order is validated across message_start, content_block_start/delta/stop,
+// message_delta, and message_stop. Text deltas stream immediately; tool
+// arguments are accumulated for the final chunk.
 func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts []Option) (<-chan MessageChunk, error) {
 	ch := make(chan MessageChunk, 64)
 
@@ -537,7 +538,12 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 		var eventCount int
 		var toolPayloadBytes int
 		messageStarted := false
+		messageDeltaSeen := false
 		messageStopped := false
+		activeBlock := false
+		activeBlockIndex := -1
+		activeBlockType := ""
+		nextBlockIndex := 0
 
 		for event := range events {
 			if event.Error != nil {
@@ -591,8 +597,32 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 				}
 
 			case "content_block_start":
-				if ce.ContentBlock != nil && ce.ContentBlock.Type == "tool_use" {
-					idx := ce.Index
+				if !messageStarted || messageDeltaSeen {
+					sendStreamError(ctx, ch, errors.New("llm: Claude content block started outside the message content phase"))
+					return
+				}
+				if activeBlock {
+					sendStreamError(ctx, ch, errors.New("llm: Claude content block started before the previous block stopped"))
+					return
+				}
+				if ce.Index == nil {
+					sendStreamError(ctx, ch, errors.New("llm: Claude content_block_start has no index"))
+					return
+				}
+				idx := *ce.Index
+				if idx < 0 || idx != nextBlockIndex {
+					sendStreamError(ctx, ch, fmt.Errorf("llm: Claude content block index %d is out of order; expected %d", idx, nextBlockIndex))
+					return
+				}
+				if ce.ContentBlock == nil || (ce.ContentBlock.Type != "text" && ce.ContentBlock.Type != "tool_use") {
+					sendStreamError(ctx, ch, errors.New("llm: Claude content block has an unsupported or missing type"))
+					return
+				}
+				activeBlock = true
+				activeBlockIndex = idx
+				activeBlockType = ce.ContentBlock.Type
+				nextBlockIndex++
+				if ce.ContentBlock.Type == "tool_use" {
 					if idx < 0 || idx >= GuardedStreamMaxToolCalls || len(tools) >= GuardedStreamMaxToolCalls {
 						sendStreamError(ctx, ch, fmt.Errorf("llm: Claude tool block index %d is outside the supported range", idx))
 						return
@@ -619,12 +649,28 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 				}
 
 			case "content_block_delta":
+				if !messageStarted || messageDeltaSeen {
+					sendStreamError(ctx, ch, errors.New("llm: Claude content delta arrived outside the message content phase"))
+					return
+				}
+				if ce.Index == nil {
+					sendStreamError(ctx, ch, errors.New("llm: Claude content_block_delta has no index"))
+					return
+				}
+				if !activeBlock || *ce.Index != activeBlockIndex {
+					sendStreamError(ctx, ch, fmt.Errorf("llm: Claude content delta index %d does not match the active block", *ce.Index))
+					return
+				}
 				if ce.Delta == nil {
 					sendStreamError(ctx, ch, errors.New("llm: Claude content_block_delta has no delta"))
 					return
 				}
 				switch ce.Delta.Type {
 				case "text_delta":
+					if activeBlockType != "text" {
+						sendStreamError(ctx, ch, errors.New("llm: Claude text delta does not match the active block type"))
+						return
+					}
 					if ce.Delta.Text != "" {
 						select {
 						case ch <- MessageChunk{Role: RoleAssistant, Content: ce.Delta.Text}:
@@ -634,9 +680,13 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 						}
 					}
 				case "input_json_delta":
-					accum, ok := tools[ce.Index]
+					if activeBlockType != "tool_use" {
+						sendStreamError(ctx, ch, errors.New("llm: Claude input JSON delta does not match the active block type"))
+						return
+					}
+					accum, ok := tools[*ce.Index]
 					if !ok {
-						sendStreamError(ctx, ch, fmt.Errorf("llm: Claude arguments reference unknown tool block %d", ce.Index))
+						sendStreamError(ctx, ch, fmt.Errorf("llm: Claude arguments reference unknown tool block %d", *ce.Index))
 						return
 					}
 					nextBytes, ok := addBoundedStreamBytes(toolPayloadBytes, len(ce.Delta.PartialJSON))
@@ -651,25 +701,39 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 					return
 				}
 
-			case "message_delta":
-				if ce.Delta != nil {
-					if ce.Delta.StopReason != "" {
-						stopReason = ce.Delta.StopReason
-					}
-					if ce.Delta.Usage != nil {
-						outputTokens = ce.Delta.Usage.OutputTokens
-						hasUsage = true
-					}
+			case "content_block_stop":
+				if ce.Index == nil {
+					sendStreamError(ctx, ch, errors.New("llm: Claude content_block_stop has no index"))
+					return
 				}
+				if !messageStarted || messageDeltaSeen || !activeBlock || *ce.Index != activeBlockIndex {
+					sendStreamError(ctx, ch, fmt.Errorf("llm: Claude content_block_stop index %d does not match the active block", *ce.Index))
+					return
+				}
+				activeBlock = false
+				activeBlockIndex = -1
+				activeBlockType = ""
+
+			case "message_delta":
+				if !messageStarted || messageDeltaSeen || activeBlock || ce.Delta == nil || ce.Delta.StopReason == "" {
+					sendStreamError(ctx, ch, errors.New("llm: invalid Claude message_delta event"))
+					return
+				}
+				stopReason = ce.Delta.StopReason
+				if ce.Delta.Usage != nil {
+					outputTokens = ce.Delta.Usage.OutputTokens
+					hasUsage = true
+				}
+				messageDeltaSeen = true
 
 			case "message_stop":
-				if !messageStarted || stopReason == "" {
+				if !messageStarted || !messageDeltaSeen || activeBlock || stopReason == "" {
 					sendStreamError(ctx, ch, errors.New("llm: Claude message_stop arrived without a complete terminal reason"))
 					return
 				}
 				messageStopped = true
 
-			case "ping", "content_block_stop":
+			case "ping":
 				// These are valid non-terminal protocol events.
 			}
 		}
