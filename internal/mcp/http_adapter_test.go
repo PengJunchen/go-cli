@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -186,6 +187,182 @@ func TestHTTPAdapterConnectStreamableHTTP(t *testing.T) {
 	require.NoError(t, adapter.Connect(context.Background()))
 	assert.Equal(t, srv.URL, adapter.endpoint)
 	assert.True(t, adapter.connected)
+}
+
+func TestHTTPAdapterRejectsCrossOriginSSEEndpointBeforeCredentials(t *testing.T) {
+	t.Parallel()
+
+	foreignRequests := make(chan http.Header, 1)
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		foreignRequests <- r.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(foreign.Close)
+
+	configuredHeaders := make(chan http.Header, 1)
+	configured := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		select {
+		case configuredHeaders <- r.Header.Clone():
+		default:
+		}
+		_, _ = fmt.Fprintf(w, "event: endpoint\ndata: %s\n\n", foreign.URL)
+	}))
+	t.Cleanup(configured.Close)
+
+	adapter := NewHTTPClientAdapter(MCPServerConfig{
+		Name:        "srv",
+		Transport:   MCPTransportSSE,
+		URL:         configured.URL,
+		Headers:     map[string]string{"X-MCP-Canary": "header-secret"},
+		BearerToken: "bearer-secret",
+	})
+	err := adapter.Connect(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "origin")
+
+	select {
+	case got := <-configuredHeaders:
+		assert.Equal(t, "header-secret", got.Get("X-MCP-Canary"))
+		assert.Equal(t, "Bearer bearer-secret", got.Get("Authorization"))
+	default:
+		t.Fatal("configured MCP endpoint did not receive the handshake request")
+	}
+	select {
+	case got := <-foreignRequests:
+		t.Fatalf("foreign MCP endpoint received request with canary header %q and authorization %q", got.Get("X-MCP-Canary"), got.Get("Authorization"))
+	default:
+	}
+}
+
+func TestHTTPAdapterRejectsCrossOriginSSEEndpointWithOAuthToken(t *testing.T) {
+	t.Parallel()
+
+	var foreignRequests atomic.Int32
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		foreignRequests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(foreign.Close)
+
+	configured := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = fmt.Fprintf(w, "event: endpoint\ndata: %s\n\n", foreign.URL)
+	}))
+	t.Cleanup(configured.Close)
+
+	adapter := NewHTTPClientAdapter(MCPServerConfig{
+		Name:      "srv",
+		Transport: MCPTransportSSE,
+		URL:       configured.URL,
+		Headers:   map[string]string{"X-MCP-Canary": "header-secret"},
+		OAuthConfig: &OAuthConfig{
+			AuthorizationURL: "http://auth.example/authorize",
+			TokenURL:         "http://auth.example/token",
+		},
+	})
+	adapter.token = "oauth-access-token"
+
+	err := adapter.Connect(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "origin")
+	assert.Zero(t, foreignRequests.Load(), "foreign MCP endpoint must receive no OAuth or header credentials")
+}
+
+func TestHTTPAdapterRejectsCrossOriginRedirectBeforeCredentials(t *testing.T) {
+	t.Parallel()
+
+	var foreignRequests atomic.Int32
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		foreignRequests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(foreign.Close)
+
+	configured := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			http.Redirect(w, r, foreign.URL, http.StatusTemporaryRedirect)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	t.Cleanup(configured.Close)
+
+	adapter := NewHTTPClientAdapter(MCPServerConfig{
+		Name:        "srv",
+		Transport:   MCPTransportSSE,
+		URL:         configured.URL,
+		Headers:     map[string]string{"X-MCP-Canary": "header-secret"},
+		BearerToken: "bearer-secret",
+	})
+	err := adapter.Connect(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "redirect")
+	assert.Zero(t, foreignRequests.Load(), "foreign redirect target must receive no request")
+}
+
+func TestHTTPAdapterCallToolLostResponseHasUnknownOutcome(t *testing.T) {
+	t.Parallel()
+
+	var sideEffects atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		var req struct {
+			ID     int64  `json:"id"`
+			Method string `json:"method"`
+		}
+		if err := json.Unmarshal(body, &req); err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.Method == "tools/call" {
+			sideEffects.Add(1)
+			hijacker, ok := w.(http.Hijacker)
+			if !ok {
+				http.Error(w, "HTTP hijacking unavailable", http.StatusInternalServerError)
+				return
+			}
+			conn, _, err := hijacker.Hijack()
+			if err == nil {
+				_ = conn.Close()
+			}
+			return
+		}
+
+		result := map[string]any{}
+		if req.Method == "initialize" {
+			result["protocolVersion"] = LatestProtocolVersion
+			result["capabilities"] = map[string]any{}
+			result["serverInfo"] = map[string]any{"name": "test", "version": "1.0"}
+		}
+		frame := map[string]any{"jsonrpc": "2.0", "id": req.ID, "result": result}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(frame); err != nil {
+			t.Errorf("encode MCP response: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	adapter := NewHTTPClientAdapter(MCPServerConfig{
+		Name:      "srv",
+		Transport: MCPTransportStreamableHTTP,
+		URL:       srv.URL,
+	})
+	require.NoError(t, adapter.Connect(context.Background()))
+
+	result, err := adapter.CallTool(context.Background(), "write", map[string]any{"path": "file"})
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "outcome unknown")
+	assert.Contains(t, err.Error(), "may have executed")
+	assert.EqualValues(t, 1, sideEffects.Load(), "the remote side effect completed once before its response was lost")
 }
 
 func TestHTTPAdapterConnectGETReturns400(t *testing.T) {
