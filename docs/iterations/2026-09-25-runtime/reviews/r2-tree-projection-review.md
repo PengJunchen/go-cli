@@ -1,5 +1,15 @@
 # R2 BLD01 Tree / Projection 独立源码复审
 
+## 2026-09-25：57d5f58 修复提交的独立复审
+
+复审基于固定提交 `57d5f58ef7a9218289506b413bebd09ed9bd4428` 的干净 detached worktree `/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/r2-tree-review-57d5f58`；没有在 builder 的 dirty `r2-session` worktree 上跑测试。先以 `go test ./internal/session -list '<5 个精确测试名>'` 确认命中，再运行 `GOMAXPROCS=2 go test -p 2 -race -count=1 ./internal/session -run '<exact names>'`，通过（`ok ... 1.066s`）。5 个目标为 `TestGetBranchReturnsDefensiveCopiesForSharedPrefix`、`TestTreeBuildContextReturnsDefensiveCopyForNestedArgs`、`TestSessionTreeCloneDoesNotAliasNestedArgs`、`TestTreeBuilderRestoresBranchMetadataFromDurableCheckpoint`、`TestTreeBuilderRestoresActiveLeafCheckpointPointer`。其中 branch metadata 测试用 `DurableJSONLSessionPreparer` 写入并 sync user entries 与 branch checkpoint，关闭文件，再用 `JSONLSessionStore.Open` 从真实 JSONL 重开并调用 `DefaultSessionTreeBuilder.BuildFromStore`，验证 active leaf、shared-prefix 顺序和 `BranchMetaFor/ListBranches`。
+
+- **R2TREE-01：原公开读出口已修复。** `GetBranch` 在锁内用 `SessionEntry.clone` 返回深快照，`BuildContext` 也不再浅拷贝内部 entry；新测试改变嵌套参数、content block、ToolCallID 与 ActionID 后重读 source/fork 均保持 canonical 值。它们保留 Clone 的内部 shared prefix 指针语义，同时阻断普通调用方通过 accessor 写回 canonical history。
+- **R2TREE-02：checkpoint metadata reload 已修复。** V1 builder 现在从 durable `CheckpointBranch` 重建 `BranchMeta`，实际 JSONL close/reopen 回归覆盖只从 session 文件恢复、不依赖 branch metadata sidecar 的路径。对原来“恢复到 checkpoint leaf 但 `BranchMetaFor/ListBranches` 为空”的具体缺陷，可标为已关闭。
+- **R2TREE-01 residual — `MoveTo` 仍把内部嵌套 payload 交给外部 summarizer。** `DefaultSessionTree.MoveTo` 在 `internal/session/tree.go:194-200` 只对每个内部 entry 做浅 struct copy，随后把 `[]SessionEntry` 传给可注入的 `BranchSummary.Summarize`（`:231-232`）。一次性复现用合法 `SetBranchSummary` 实现修改 `entries[0].ToolCalls[0].Args`，随后从 `GetBranch` 读到 canonical args 已变；断言失败，临时复现测试已删除。因为该回调在锁外执行，修改也绕过 tree mutex。修复方法是在锁内对 `departEntries` 使用 `e.clone()`，并添加 mutation regression。该类外部回调可再次破坏 append-only/shared-prefix 不变量，所以 R2TREE-01 尚不能完全关闭；这不是 5 个通过测试覆盖的既有公开 accessor 行为。
+
+因此 57d5f58 关闭了原报告的两条具体树问题，但 tree slice 仍有上述一个 P1 别名出口。这个残项与 R2 storage 的 branch identity 检查分开：unknown/mismatched `ParentBranchID`、active-leaf branch 不匹配及重复 branch checkpoint 仍记录在 [r2-storage-review.md](r2-storage-review.md) 的 R2STO-03；没有把 storage blocker 混成 57d5f58 的树测试失败。
+
 状态：**固定快照 `6176be3` 未通过 BLD01 复审**。source-aware transcript projection、shared-prefix Clone、tool-call/action ID 保留、compaction source-boundary 处理和 V1 sequence/topology 基础整体方向正确；但两个可复现问题破坏 canonical immutable prefix 与 branch 重启恢复，修复并在新固定 hash 复验前不得把本 slice 标为通过。本报告不评估尚未完成的 durable JSONL/recovery-authority 接线。
 
 ## 固定快照与验证
