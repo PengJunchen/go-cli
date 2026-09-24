@@ -181,6 +181,19 @@ func (t *WriteTool) Description() string {
 	return "write: writes content to a file, creating parent directories. Args: path (string), content (string)."
 }
 
+// Parameters returns the JSON Schema describing the required write arguments.
+func (t *WriteTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"path":    map[string]any{"type": "string"},
+			"content": map[string]any{"type": "string"},
+			"append":  map[string]any{"type": "boolean"},
+		},
+		"required": []any{"path", "content"},
+	}
+}
+
 // Execute writes content to the file at the given path. Relative paths resolve
 // against the workdir, and parent directories are created as needed. Writing to
 // an existing file fails unless Overwrite is enabled (or append is requested).
@@ -197,9 +210,11 @@ func (t *WriteTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, er
 		return nil, errors.New("write: missing string argument 'path'")
 	}
 
-	var content string
-	if v, ok := call.Args["content"].(string); ok {
-		content = v
+	content, ok := call.Args["content"].(string)
+	if !ok {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		logger.Error("write.invalid_content", "tool", "write")
+		return nil, errors.New("write: missing or non-string argument 'content'")
 	}
 
 	abspath, err := resolveAndValidatePath("write", t.Workdir, path, t.whitelist)
