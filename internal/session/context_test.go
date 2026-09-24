@@ -421,3 +421,28 @@ func TestBuildContext_CacheConsistencyWithCompaction(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, sc2.EstimatedTokens, sc3.EstimatedTokens, "cache hit should match")
 }
+
+func TestContextManagerBuildContextOutputsDoNotAliasNestedArguments(t *testing.T) {
+	ctx := context.Background()
+	tree := newConcreteTree()
+	require.NoError(t, tree.Append(ctx, newTestEntry("root", "", EntryTypeUser)))
+	assistant := newToolCallEntry("assistant", "root", []llm.ToolCall{{
+		ID: "provider-call-id", Name: "inspect",
+		Args: map[string]any{"nested": map[string]any{"value": "canonical"}},
+	}})
+	assistant.ContentBlocks = []llm.ContentBlock{{Type: "text", Text: "canonical block"}}
+	require.NoError(t, tree.Append(ctx, assistant))
+
+	sc, err := NewDefaultContextManager(tree).BuildContext(ctx, "assistant")
+	require.NoError(t, err)
+	require.Len(t, sc.Messages, 2)
+	require.Len(t, sc.Traversed, 2)
+
+	sc.Messages[1].ToolCalls[0].Args.(map[string]any)["nested"].(map[string]any)["value"] = "message mutation"
+	sc.Messages[1].ContentBlocks[0].Text = "message mutation"
+	assert.Equal(t, "canonical", sc.Traversed[0].ToolCalls[0].Args.(map[string]any)["nested"].(map[string]any)["value"])
+	assert.Equal(t, "canonical block", sc.Traversed[0].ContentBlocks[0].Text)
+
+	sc.Traversed[0].ToolCalls[0].ID = "traversed mutation"
+	assert.Equal(t, "provider-call-id", sc.Messages[1].ToolCalls[0].ID)
+}
