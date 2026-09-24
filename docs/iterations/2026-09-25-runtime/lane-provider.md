@@ -29,3 +29,16 @@ The red run reached the old CLI factory and recorded the canary as `Authorizatio
 ## Commit
 
 Code: `fe0666f4aea1a7219314060add27cf9c50dc72ed` (`fix(cli): fail closed on unsupported provider protocols`).
+
+## R0 follow-up: small-model credential scope
+
+The small-model factory now receives both the effective primary provider identity and the effective small-provider identity. It inherits the primary endpoint and key only for the same identity. If the small model explicitly selects a different endpoint, it may reuse the primary key only when normalized scheme, host, and effective port match; URL paths do not change origin. A different provider must supply its own endpoint or key, and receives no primary fallback. An explicit small endpoint without a small key remains allowed as an unauthenticated OpenAI-compatible endpoint.
+
+| Check | Command | Exit | Evidence |
+|---|---|---:|---|
+| Baseline red | `rtk proxy env GOMAXPROCS=2 go test -p 2 ./internal/cli -run '^TestSmallModel' -count=1` | 1 (expected) | [provider-small-red.log](evidence/provider-small-red.log) |
+| Test inventory | `rtk proxy env GOMAXPROCS=2 go test -p 2 ./internal/cli -list '^TestSmallModel'` | 0 | [provider-small-test-list.log](evidence/provider-small-test-list.log) |
+| Targeted green | `rtk proxy env GOMAXPROCS=2 go test -p 2 ./internal/cli -run '^TestSmallModel' -count=1` | 0 | [provider-small-green.log](evidence/provider-small-green.log) |
+| Affected package race | `rtk proxy env GOMAXPROCS=2 go test -p 2 -race -count=1 ./internal/cli` | 0 | [provider-small-race.log](evidence/provider-small-race.log) |
+
+The baseline red log records both failures through real `buildSmallModel` → `Generate` → `httptest` requests: a changed provider received the primary credential at the primary URL, and a changed origin received the primary credential at the small URL. That red run covered the five request-path cases; the sixth, helper-level default-origin normalization case was added afterward and is covered by the green and race runs. The tests also cover default same-provider reuse, same-origin URL-path changes, and routing the small model's own credential only to its configured endpoint.
