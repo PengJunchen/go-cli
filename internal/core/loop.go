@@ -431,7 +431,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 	// version-based cache and is left untouched.
 	var toolDefs []tools.ToolDefinition
 	var toolOpts []llm.Option
-	var searchTool *tools.ToolSearchTool
+	var searchTool tools.TopToolsProvider
 	needToolFiltering := false
 	if l.tools != nil {
 		if defs, err := l.tools.List(spanCtx); err == nil {
@@ -450,7 +450,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 			// threshold, score and filter to reduce context bloat.
 			if toolSearchThreshold > 0 && len(llmTools) > toolSearchThreshold {
 				for _, d := range toolDefs {
-					if st, ok := d.(*tools.ToolSearchTool); ok {
+					if st, ok := d.(tools.TopToolsProvider); ok {
 						searchTool = st
 						needToolFiltering = true
 						break
