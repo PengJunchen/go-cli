@@ -54,3 +54,31 @@ Formatting and whitespace checks:
 Full package verification is deferred until the remaining R1 transcript and
 sub-agent regressions in this worktree are implemented; they are intentionally
 still RED at this point.
+
+Plan cancellation compatibility follow-up, after the first isolation seam was
+integrated: the test now runs two real Assemblies concurrently with the actual
+builtin `write` tool and checks both that A's write produces `tool_canceled`
+with no file side effect and that B's write executes. The prior per-Assembly
+wrapper-only behavior was RED because A's write reached the executor wrapper
+and became a `tool_result` error instead of a canceled-call event (executor
+side effects remained zero); B's write succeeded.
+
+  rtk proxy go test ./internal/cli -list '^TestAssemblyInterceptorsAreIsolated$'
+  exit=0; TestAssemblyInterceptorsAreIsolated
+
+  rtk env GOMAXPROCS=2 go test -p 2 -count=1 ./internal/cli -run '^TestAssemblyInterceptorsAreIsolated$'
+  exit=1: assembly A's builtin `write` was blocked only by the executor wrapper;
+  its event list contained no `tool_canceled` call ID, while assembly B wrote
+  `allowed.txt` successfully.
+
+After composing Plan Mode then optional shell-hook interceptors on the
+Assembly's LoopAgent (retaining the executor wrapper), the concurrent
+integration test passed under race detection:
+
+  rtk env GOMAXPROCS=2 go test -race -p 2 -count=1 ./internal/cli -run '^TestAssemblyInterceptorsAreIsolated$'
+  exit=0
+
+Follow-up diff whitespace check:
+
+  rtk git diff --check -- internal/cli/assemble.go internal/cli/assemble_interceptor_isolation_test.go docs/iterations/2026-09-25-runtime/evidence/interceptor-isolation.log
+  exit=0
