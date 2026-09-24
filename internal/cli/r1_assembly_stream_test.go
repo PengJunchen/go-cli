@@ -167,26 +167,33 @@ func assemblyIncrementalText(events []core.AgentEvent) string {
 	return text.String()
 }
 
+func assemblyPIIEmailCanary() string {
+	return strings.Join([]string{"assembly", "privacy"}, "@") + ".invalid"
+}
+
 func TestOutputGuardRunsBeforeVisibleDelta(t *testing.T) {
-	const secret = "john@example.com"
+	piiEmail := assemblyPIIEmailCanary()
+	parts := strings.SplitN(piiEmail, "@", 2)
 	fixture := newAssemblyStreamFixture(t, func(w http.ResponseWriter, _ *http.Request, _ int) {
-		writeAssemblyTextResponse(w, []string{"Contact john@", "example.com for help."}, "stop")
+		writeAssemblyTextResponse(w, []string{"Contact " + parts[0] + "@", parts[1] + " for help."}, "stop")
 	})
 	_, stream := fixture.assembleAndSubmit(t, "Say hello to me.")
 	events, message, err := collectAssemblyEvents(stream)
 	assert.Error(t, err, "the PII guard must reject a candidate containing a full email")
 	assert.Zero(t, len(assemblyIncrementalText(events)), "a guarded candidate must not emit incremental content")
-	assert.NotContains(t, assemblyIncrementalText(events), secret)
-	assert.NotContains(t, message.Content, secret)
+	assert.NotContains(t, assemblyIncrementalText(events), piiEmail)
+	assert.NotContains(t, message.Content, piiEmail)
 	for _, event := range events {
 		if event.Kind == "message" {
-			assert.NotContains(t, event.Content, secret)
+			assert.NotContains(t, event.Content, piiEmail)
 		}
 	}
 }
 
 func TestOutputGuardBuffersAcrossLengthContinuationsBeforeVisibleDelta(t *testing.T) {
-	const secret = "john@example.com"
+	piiEmail := assemblyPIIEmailCanary()
+	parts := strings.SplitN(piiEmail, "@", 2)
+	continuationSplit := 3
 	continuationStarted := make(chan struct{})
 	continuationRelease := make(chan struct{})
 	var releaseOnce sync.Once
@@ -194,16 +201,16 @@ func TestOutputGuardBuffersAcrossLengthContinuationsBeforeVisibleDelta(t *testin
 	t.Cleanup(release)
 	fixture := newAssemblyStreamFixture(t, func(w http.ResponseWriter, r *http.Request, n int) {
 		if n == 1 {
-			writeAssemblyTextResponse(w, []string{"Contact john@exa"}, "length")
+			writeAssemblyTextResponse(w, []string{"Contact " + parts[0] + "@" + parts[1][:continuationSplit]}, "length")
 			return
 		}
 		if n == 2 {
 			close(continuationStarted)
 			<-continuationRelease
 			if assemblyRequestStreams(r) {
-				writeAssemblyTextResponse(w, []string{"mple.com for help."}, "stop")
+				writeAssemblyTextResponse(w, []string{parts[1][continuationSplit:] + " for help."}, "stop")
 			} else {
-				writeAssemblyGenerateTextResponse(w, "mple.com for help.", "stop")
+				writeAssemblyGenerateTextResponse(w, parts[1][continuationSplit:]+" for help.", "stop")
 			}
 			return
 		}
@@ -223,8 +230,8 @@ func TestOutputGuardBuffersAcrossLengthContinuationsBeforeVisibleDelta(t *testin
 	events := append(beforeContinuation, afterContinuation...)
 	assert.Error(t, err, "the complete PII candidate must be rejected after the continuation is assembled")
 	assert.Empty(t, assemblyIncrementalText(beforeContinuation), "no delta may be visible while the length continuation is incomplete")
-	assert.NotContains(t, assemblyIncrementalText(events), secret)
-	assert.NotContains(t, message.Content, secret)
+	assert.NotContains(t, assemblyIncrementalText(events), piiEmail)
+	assert.NotContains(t, message.Content, piiEmail)
 	assert.Equal(t, 2, int(fixture.requests.Load()), "one initial request and one continuation only; modes=%v", fixture.requestModes())
 }
 
