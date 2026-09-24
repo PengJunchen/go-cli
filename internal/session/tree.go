@@ -71,41 +71,81 @@ func (t *DefaultSessionTree) Append(ctx context.Context, entry *SessionEntry) er
 	if entry.Type == "" {
 		return errors.New("session: entry type is required")
 	}
+	if err := validateVersion1EntryCoordinates(*entry); err != nil {
+		return fmt.Errorf("session: invalid entry %q: %w", entry.ID, err)
+	}
 	span.SetAttributes(
 		tracing.Attribute{Key: "entry_type", Value: string(entry.Type)},
 		tracing.Attribute{Key: "entry_id", Value: entry.ID},
 	)
 
 	cp := entry.clone()
-	// Assign a monotonically increasing sequence number when the caller did
-	// not provide one, so every stored entry has a Seq for log integrity.
-	if entry.Seq == 0 {
-		cp.Seq = t.seqCounter.Add(1)
-	}
 	t.mu.Lock()
+	defer t.mu.Unlock()
 	if _, exists := t.entries[cp.ID]; exists {
-		t.mu.Unlock()
 		span.SetStatus(tracing.SpanStatusError, "duplicate entry")
 		logger.Error("session_tree_append", "op", "session.tree.append", "error_type", "duplicate_entry", "entry_id", cp.ID)
 		return fmt.Errorf("session: entry %q already exists", cp.ID)
 	}
 	if cp.ParentID != "" {
 		if _, ok := t.entries[cp.ParentID]; !ok {
-			t.mu.Unlock()
 			span.SetStatus(tracing.SpanStatusError, "parent not found")
 			logger.Error("session_tree_append", "op", "session.tree.append", "error_type", "parent_not_found", "entry_id", cp.ID, "parent_id", cp.ParentID)
 			return ErrParentNotFound
 		}
 	}
+	if cp.RecordVersion == 1 && cp.Seq == 0 {
+		return fmt.Errorf("session: version 1 entry %q requires a canonical sequence", cp.ID)
+	}
+	currentSeq := t.seqCounter.Load()
+	if cp.Seq == 0 {
+		cp.Seq = currentSeq + 1
+	} else if cp.Seq <= currentSeq {
+		return fmt.Errorf("session: entry %q sequence %d does not increase beyond %d", cp.ID, cp.Seq, currentSeq)
+	}
+	if cp.RecordVersion == 1 && cp.Type == EntryTypeCompaction {
+		if cp.ParentID == "" || !t.isAncestorLocked(cp.CompactedThroughEntryID, cp.ParentID) {
+			return fmt.Errorf("session: compaction entry %q has an unmappable source boundary %q", cp.ID, cp.CompactedThroughEntryID)
+		}
+	}
+	if cp.RecordVersion == 1 && cp.Type == EntryTypeCheckpoint && cp.ActiveLeafEntryID != "" && cp.ActiveLeafEntryID != cp.ID {
+		if _, ok := t.entries[cp.ActiveLeafEntryID]; !ok {
+			return fmt.Errorf("session: checkpoint entry %q references unknown active leaf %q", cp.ID, cp.ActiveLeafEntryID)
+		}
+	}
 	t.entries[cp.ID] = cp
+	t.seqCounter.Store(cp.Seq)
 	if t.leafID == "" {
 		t.leafID = cp.ID
 	}
-	t.mu.Unlock()
 
 	logger.Info("session_tree_append", "op", "session.tree.append", "entry_type", string(cp.Type), "entry_id", cp.ID)
 	span.SetStatus(tracing.SpanStatusOK, "")
 	return nil
+}
+
+// isAncestorLocked reports whether ancestorID appears in the parent chain of
+// leafID. t.mu must be held by the caller.
+func (t *DefaultSessionTree) isAncestorLocked(ancestorID, leafID string) bool {
+	if ancestorID == "" {
+		return false
+	}
+	seen := make(map[string]struct{})
+	for current := leafID; current != ""; {
+		if current == ancestorID {
+			return true
+		}
+		if _, exists := seen[current]; exists {
+			return false
+		}
+		seen[current] = struct{}{}
+		entry := t.entries[current]
+		if entry == nil {
+			return false
+		}
+		current = entry.ParentID
+	}
+	return false
 }
 
 // MoveTo changes the current leaf pointer to leafID. It returns ErrLeafNotFound

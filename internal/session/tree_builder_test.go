@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -227,4 +228,66 @@ func TestTreeBuilder_MemoryStore(t *testing.T) {
 
 	// "b" has a later timestamp than "a".
 	assert.Equal(t, "b", tree.CurrentLeaf())
+}
+
+func TestTreeBuilderSelectsVersionOneLeafBySequenceNotTimestamp(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	root := newR2UserEntry("root", "", 1, 0)
+	root.Timestamp = time.Date(2030, 1, 1, 0, 0, 0, 0, time.UTC)
+	first := newR2UserEntry("first", "root", 2, 1)
+	first.Timestamp = time.Date(2030, 1, 1, 0, 0, 1, 0, time.UTC)
+	latest := newR2UserEntry("latest", "first", 3, 2)
+	latest.Timestamp = time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	for _, entry := range []*SessionEntry{root, first, latest} {
+		require.NoError(t, store.Append(ctx, entry))
+	}
+
+	tree, err := NewDefaultSessionTreeBuilder().BuildFromStore(ctx, store)
+	require.NoError(t, err)
+	assert.Equal(t, "latest", tree.CurrentLeaf())
+}
+
+func TestTreeBuilderRestoresActiveLeafCheckpointPointer(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	root := newR2UserEntry("root", "", 1, 0)
+	left := newR2UserEntry("left", "root", 2, 1)
+	right := newR2UserEntry("right", "root", 3, 2)
+	checkpoint := &SessionEntry{
+		ID:                "active-pointer",
+		ParentID:          "right",
+		Type:              EntryTypeCheckpoint,
+		RecordVersion:     1,
+		SessionID:         "physical-session",
+		BranchID:          "left-branch",
+		CheckpointKind:    CheckpointActiveLeaf,
+		ActiveLeafEntryID: "left",
+		Seq:               4,
+	}
+	for _, entry := range []*SessionEntry{root, left, right, checkpoint} {
+		require.NoError(t, store.Append(ctx, entry))
+	}
+
+	tree, err := NewDefaultSessionTreeBuilder().BuildFromStore(ctx, store)
+	require.NoError(t, err)
+	assert.Equal(t, "left", tree.CurrentLeaf())
+	branch, err := tree.GetBranch(ctx, tree.CurrentLeaf())
+	require.NoError(t, err)
+	require.Len(t, branch, 2)
+	assert.Equal(t, "root", branch[0].ID)
+	assert.Equal(t, "left", branch[1].ID)
+}
+
+func TestTreeBuilderRejectsCorruptVersionOneTree(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	root := newR2UserEntry("root", "", 1, 0)
+	orphan := newR2UserEntry("orphan", "missing", 2, 1)
+	require.NoError(t, store.Append(ctx, root))
+	require.NoError(t, store.Append(ctx, orphan))
+
+	_, err := NewDefaultSessionTreeBuilder().BuildFromStore(ctx, store)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "parent")
 }

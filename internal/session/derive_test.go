@@ -6,6 +6,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
 )
 
@@ -153,4 +154,70 @@ func TestDeriveAgentMessages(t *testing.T) {
 func TestDeriveAgentMessages_Empty(t *testing.T) {
 	msgs := DeriveAgentMessages(nil)
 	assert.Empty(t, msgs)
+}
+
+func TestSessionViewPreservesSourceEntryIDs(t *testing.T) {
+	ordinal := uint64(0)
+	assistantIndex := uint64(1)
+	receiptIndex := uint64(2)
+	entries := []SessionEntry{
+		*newR2UserEntry("covered", "", 1, 0),
+		{
+			ID:                         "assistant-call",
+			ParentID:                   "covered",
+			Type:                       EntryTypeAssistant,
+			Content:                    "running tool",
+			ToolCalls:                  []llm.ToolCall{{ID: "provider-call-id", Name: "bash", Args: map[string]any{"cmd": "pwd"}}},
+			Usage:                      &llm.Usage{InputTokens: 7, OutputTokens: 3, TotalTokens: 10},
+			RecordVersion:              1,
+			SessionID:                  "physical-session",
+			RunID:                      "run-2",
+			AssistantTranscriptOrdinal: &ordinal,
+			TranscriptIndex:            &assistantIndex,
+			Seq:                        2,
+		},
+		{
+			ID:                         "tool-receipt",
+			ParentID:                   "assistant-call",
+			Type:                       EntryTypeTool,
+			Content:                    "ok",
+			ToolCallID:                 "provider-call-id",
+			ToolName:                   "bash",
+			ReceiptOutcome:             core.ReceiptOutcomeSuccess,
+			DispatchState:              DispatchStateDispatched,
+			ActionID:                   "action-2",
+			RecordVersion:              1,
+			SessionID:                  "physical-session",
+			RunID:                      "run-2",
+			AssistantTranscriptOrdinal: &ordinal,
+			TranscriptIndex:            &receiptIndex,
+			Seq:                        3,
+		},
+		{
+			ID:                      "compaction-marker",
+			ParentID:                "tool-receipt",
+			Type:                    EntryTypeCompaction,
+			Summary:                 "prior tool interaction summary",
+			RecordVersion:           1,
+			SessionID:               "physical-session",
+			CompactedThroughEntryID: "covered",
+			Seq:                     4,
+		},
+	}
+
+	view, err := SessionViewFromEntries("physical-session", "main", "revision-4", entries)
+	require.NoError(t, err)
+	require.NoError(t, view.Validate())
+	require.Equal(t, []string{"compaction-marker", "assistant-call", "tool-receipt"}, view.SourceEntryIDs)
+	require.Len(t, view.Messages, 3)
+	assert.Equal(t, "user", view.Messages[0].Role)
+	assert.Empty(t, view.Messages[0].InputKind)
+	assert.Empty(t, view.Messages[0].ToolCalls)
+	assert.Empty(t, view.Messages[0].ToolCallID)
+	assert.Equal(t, "assistant", view.Messages[1].Role)
+	assert.Equal(t, 10, view.Messages[1].Usage.TotalTokens)
+	assert.Equal(t, "provider-call-id", view.Messages[1].ToolCalls[0].ID)
+	assert.Equal(t, "tool", view.Messages[2].Role)
+	assert.Equal(t, "provider-call-id", view.Messages[2].ToolCallID)
+	assert.Equal(t, "action-2", entries[2].ActionID, "projection must preserve, not rewrite, action identity")
 }

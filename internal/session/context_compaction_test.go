@@ -117,3 +117,69 @@ func TestBuildContextMultipleCompactionsUseLatest(t *testing.T) {
 	// RootID is the latest compaction entry.
 	assert.Equal(t, "comp2", sc.RootID)
 }
+
+func TestRestoreIncludesCompactionSummary(t *testing.T) {
+	ctx := context.Background()
+	tree := NewDefaultSessionTree()
+	boundary := newR2AssistantEntry("boundary", "", 1, 0)
+	boundary.Content = "covered source"
+	require.NoError(t, tree.Append(ctx, boundary))
+	marker := &SessionEntry{
+		ID:                      "summary-marker",
+		ParentID:                "boundary",
+		Type:                    EntryTypeCompaction,
+		Summary:                 "untrusted prior conversation summary",
+		RecordVersion:           1,
+		SessionID:               "physical-session",
+		CompactedThroughEntryID: "boundary",
+		Seq:                     2,
+	}
+	require.NoError(t, tree.Append(ctx, marker))
+	suffix := newR2UserEntry("suffix", "summary-marker", 3, 1)
+	suffix.Content = "uncovered suffix"
+	require.NoError(t, tree.Append(ctx, suffix))
+
+	view, err := SessionViewFromEntries("physical-session", "main", "revision-3", []SessionEntry{*boundary, *marker, *suffix})
+	require.NoError(t, err)
+	require.Len(t, view.Messages, 2)
+	assert.Equal(t, []string{"summary-marker", "suffix"}, view.SourceEntryIDs)
+	assert.Equal(t, "user", view.Messages[0].Role)
+	assert.Contains(t, view.Messages[0].Content, "Untrusted summary of prior conversation")
+	assert.Contains(t, view.Messages[0].Content, marker.Summary)
+	assert.Empty(t, view.Messages[0].InputKind)
+	assert.Empty(t, view.Messages[0].ToolCalls)
+	assert.Empty(t, view.Messages[0].ToolCallID)
+}
+
+func TestRestoreProjectionUsesSourceBoundaryAfterLeafSuffix(t *testing.T) {
+	ctx := context.Background()
+	tree := NewDefaultSessionTree()
+	root := newR2UserEntry("root", "", 1, 0)
+	boundary := newR2AssistantEntry("boundary", "root", 2, 1)
+	preMarkerSuffix := newR2UserEntry("pre-marker-suffix", "boundary", 3, 2)
+	preMarkerSuffix.Content = "must remain"
+	marker := &SessionEntry{
+		ID:                      "summary-marker",
+		ParentID:                "pre-marker-suffix",
+		Type:                    EntryTypeCompaction,
+		Summary:                 "summary through boundary",
+		RecordVersion:           1,
+		SessionID:               "physical-session",
+		CompactedThroughEntryID: "boundary",
+		Seq:                     4,
+	}
+	postMarkerSuffix := newR2AssistantEntry("post-marker-suffix", "summary-marker", 5, 3)
+	postMarkerSuffix.Content = "also remains"
+	for _, entry := range []*SessionEntry{root, boundary, preMarkerSuffix, marker, postMarkerSuffix} {
+		require.NoError(t, tree.Append(ctx, entry))
+	}
+
+	restored, err := NewDefaultContextManager(tree).BuildContext(ctx, "post-marker-suffix")
+	require.NoError(t, err)
+	require.Len(t, restored.Messages, 3)
+	assert.Equal(t, "summary-marker", restored.Messages[0].ID)
+	assert.Equal(t, "summary through boundary", restored.Messages[0].Content)
+	assert.Equal(t, "pre-marker-suffix", restored.Messages[1].ID)
+	assert.Equal(t, "post-marker-suffix", restored.Messages[2].ID)
+	assert.NotContains(t, []string{restored.Messages[0].ID, restored.Messages[1].ID, restored.Messages[2].ID}, "root")
+}

@@ -243,13 +243,13 @@ func TestTokenEstimateEmpty(t *testing.T) {
 func TestEntriesToAgentMessages(t *testing.T) {
 	entries := []SessionEntry{
 		{ID: "1", Type: EntryTypeUser, Content: "hello"},
-		{ID: "2", Type: EntryTypeAssistant, Content: "hi there", ToolCalls: []llm.ToolCall{{ID: "tc1", Name: "bash"}}, ToolCallID: "tc1", ToolName: "bash"},
+		{ID: "2", Type: EntryTypeAssistant, Content: "hi there", ToolCalls: []llm.ToolCall{{ID: "tc1", Name: "bash"}}, ToolCallID: "tc1", ToolName: "bash", Usage: &llm.Usage{InputTokens: 2, OutputTokens: 1, TotalTokens: 3}},
 		{ID: "3", Type: EntryTypeTool, Content: "tool result"},
 		{ID: "4", Type: EntryTypeCompaction, Summary: "compacted"},
 		{ID: "5", Type: EntryTypeSystem, Content: "system note"},
 	}
 	msgs := EntriesToAgentMessages(entries)
-	assert.Len(t, msgs, 3)
+	assert.Len(t, msgs, 4)
 	assert.Equal(t, "user", msgs[0].Role)
 	assert.Equal(t, "hello", msgs[0].Content)
 	assert.Equal(t, "assistant", msgs[1].Role)
@@ -257,8 +257,12 @@ func TestEntriesToAgentMessages(t *testing.T) {
 	assert.Len(t, msgs[1].ToolCalls, 1)
 	assert.Equal(t, "tc1", msgs[1].ToolCallID)
 	assert.Equal(t, "bash", msgs[1].ToolName)
-	assert.Equal(t, "system", msgs[2].Role)
-	assert.Equal(t, "system note", msgs[2].Content)
+	assert.Equal(t, 3, msgs[1].Usage.TotalTokens)
+	assert.Equal(t, "user", msgs[2].Role)
+	assert.Contains(t, msgs[2].Content, "compacted")
+	assert.Contains(t, msgs[2].Content, "Untrusted summary of prior conversation")
+	assert.Equal(t, "system", msgs[3].Role)
+	assert.Equal(t, "system note", msgs[3].Content)
 }
 
 func TestEntriesToAgentMessages_Empty(t *testing.T) {
