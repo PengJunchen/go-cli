@@ -479,6 +479,34 @@ func TestHTTPAdapterCallToolUntrustedResponsesHaveUnknownOutcome(t *testing.T) {
 			},
 		},
 		{
+			name:       "case alias response ID",
+			statusCode: http.StatusOK,
+			response: func(id int64) []byte {
+				return []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"ID":%d,"result":{"content":[]}}`, id+1, id))
+			},
+		},
+		{
+			name:       "case alias JSON-RPC version",
+			statusCode: http.StatusOK,
+			response: func(id int64) []byte {
+				return []byte(fmt.Sprintf(`{"jsonrpc":"1.0","JSONRPC":"2.0","id":%d,"result":{"content":[]}}`, id))
+			},
+		},
+		{
+			name:       "case alias result",
+			statusCode: http.StatusOK,
+			response: func(id int64) []byte {
+				return []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"result":null,"Result":{"content":[]}}`, id))
+			},
+		},
+		{
+			name:       "case alias error",
+			statusCode: http.StatusOK,
+			response: func(id int64) []byte {
+				return []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"error":null,"Error":{"code":-32000,"message":"failed"}}`, id))
+			},
+		},
+		{
 			name:       "duplicate result",
 			statusCode: http.StatusOK,
 			response: func(id int64) []byte {
@@ -490,6 +518,20 @@ func TestHTTPAdapterCallToolUntrustedResponsesHaveUnknownOutcome(t *testing.T) {
 			statusCode: http.StatusOK,
 			response: func(id int64) []byte {
 				return []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"error":{"code":-32000,"message":"failed"},"error":{"code":-32000,"message":"failed again"}}`, id))
+			},
+		},
+		{
+			name:       "duplicate error code",
+			statusCode: http.StatusOK,
+			response: func(id int64) []byte {
+				return []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"error":{"code":-32001,"code":-32000,"message":"failed"}}`, id))
+			},
+		},
+		{
+			name:       "duplicate error message",
+			statusCode: http.StatusOK,
+			response: func(id int64) []byte {
+				return []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"error":{"code":-32000,"message":"first","message":"failed"}}`, id))
 			},
 		},
 		{

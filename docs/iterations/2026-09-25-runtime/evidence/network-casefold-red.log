@@ -1,0 +1,72 @@
+2026/09/25 02:04:25 INFO mcp.http.connect server=srv endpoint=http://127.0.0.1:62213
+2026/09/25 02:04:25 INFO mcp.http.connect server=srv endpoint=http://127.0.0.1:62212
+2026/09/25 02:04:25 INFO mcp.http.initialized server=srv protocolVersion=2025-06-18
+2026/09/25 02:04:25 INFO mcp.http.initialized server=srv protocolVersion=2025-06-18
+2026/09/25 02:04:25 INFO mcp.http.connect server=srv endpoint=http://127.0.0.1:62218
+2026/09/25 02:04:25 INFO mcp.http.connect server=srv endpoint=http://127.0.0.1:62219
+2026/09/25 02:04:25 INFO mcp.http.initialized server=srv protocolVersion=2025-06-18
+2026/09/25 02:04:25 INFO mcp.http.initialized server=srv protocolVersion=2025-06-18
+2026/09/25 02:04:25 INFO mcp.http.connect server=srv endpoint=http://127.0.0.1:62224
+2026/09/25 02:04:25 INFO mcp.http.connect server=srv endpoint=http://127.0.0.1:62226
+2026/09/25 02:04:25 INFO mcp.http.initialized server=srv protocolVersion=2025-06-18
+2026/09/25 02:04:25 INFO mcp.http.initialized server=srv protocolVersion=2025-06-18
+2026/09/25 02:04:25 INFO mcp.http.connect server=srv endpoint=http://127.0.0.1:62230
+2026/09/25 02:04:25 INFO mcp.http.connect server=srv endpoint=http://127.0.0.1:62231
+2026/09/25 02:04:25 INFO mcp.http.initialized server=srv protocolVersion=2025-06-18
+2026/09/25 02:04:25 INFO mcp.http.initialized server=srv protocolVersion=2025-06-18
+2026/09/25 02:04:25 INFO mcp.http.connect server=srv endpoint=http://127.0.0.1:62236
+2026/09/25 02:04:25 INFO mcp.http.connect server=srv endpoint=http://127.0.0.1:62238
+2026/09/25 02:04:25 INFO mcp.http.initialized server=srv protocolVersion=2025-06-18
+2026/09/25 02:04:25 INFO mcp.http.initialized server=srv protocolVersion=2025-06-18
+2026/09/25 02:04:25 INFO mcp.http.connect server=srv endpoint=http://127.0.0.1:62243
+2026/09/25 02:04:25 INFO mcp.http.connect server=srv endpoint=http://127.0.0.1:62242
+2026/09/25 02:04:25 INFO mcp.http.initialized server=srv protocolVersion=2025-06-18
+2026/09/25 02:04:25 INFO mcp.http.initialized server=srv protocolVersion=2025-06-18
+--- FAIL: TestHTTPAdapterCallToolUntrustedResponsesHaveUnknownOutcome (0.00s)
+    --- FAIL: TestHTTPAdapterCallToolUntrustedResponsesHaveUnknownOutcome/case_alias_JSON-RPC_version (0.00s)
+        http_adapter_test.go:584:
+              Error Trace:  /Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/network/internal/mcp/http_adapter_test.go:584
+              Error:        An error is expected but got nil.
+              Test:         TestHTTPAdapterCallToolUntrustedResponsesHaveUnknownOutcome/case_alias_JSON-RPC_version
+    --- FAIL: TestHTTPAdapterCallToolUntrustedResponsesHaveUnknownOutcome/duplicate_error_message (0.00s)
+        http_adapter_test.go:586:
+              Error Trace:  /Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/network/internal/mcp/http_adapter_test.go:586
+              Error:        "mcp: call tool \"write\": mcp: rpc error: code -32000: failed" does not contain "outcome unknown"
+              Test:         TestHTTPAdapterCallToolUntrustedResponsesHaveUnknownOutcome/duplicate_error_message
+        http_adapter_test.go:587:
+              Error Trace:  /Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/network/internal/mcp/http_adapter_test.go:587
+              Error:        "mcp: call tool \"write\": mcp: rpc error: code -32000: failed" does not contain "may have executed"
+              Test:         TestHTTPAdapterCallToolUntrustedResponsesHaveUnknownOutcome/duplicate_error_message
+        http_adapter_test.go:588:
+              Error Trace:  /Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/network/internal/mcp/mcp_reconnect_test.go:385
+                                  /Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/network/internal/mcp/http_adapter_test.go:588
+              Error:        Should be in error chain:
+                            expected: mcp.OutcomeUnknown
+                            in chain: "mcp: call tool \"write\": mcp: rpc error: code -32000: failed" (*fmt.wrapError)
+                              "mcp: rpc error: code -32000: failed" (*mcp.rpcResponseError)
+              Test:         TestHTTPAdapterCallToolUntrustedResponsesHaveUnknownOutcome/duplicate_error_message
+    --- FAIL: TestHTTPAdapterCallToolUntrustedResponsesHaveUnknownOutcome/duplicate_error_code (0.00s)
+        http_adapter_test.go:586:
+              Error Trace:  /Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/network/internal/mcp/http_adapter_test.go:586
+              Error:        "mcp: call tool \"write\": mcp: rpc error: code -32000: failed" does not contain "outcome unknown"
+              Test:         TestHTTPAdapterCallToolUntrustedResponsesHaveUnknownOutcome/duplicate_error_code
+        http_adapter_test.go:587:
+              Error Trace:  /Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/network/internal/mcp/http_adapter_test.go:587
+              Error:        "mcp: call tool \"write\": mcp: rpc error: code -32000: failed" does not contain "may have executed"
+              Test:         TestHTTPAdapterCallToolUntrustedResponsesHaveUnknownOutcome/duplicate_error_code
+        http_adapter_test.go:588:
+              Error Trace:  /Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/network/internal/mcp/mcp_reconnect_test.go:385
+                                  /Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/network/internal/mcp/http_adapter_test.go:588
+              Error:        Should be in error chain:
+                            expected: mcp.OutcomeUnknown
+                            in chain: "mcp: call tool \"write\": mcp: rpc error: code -32000: failed" (*fmt.wrapError)
+                              "mcp: rpc error: code -32000: failed" (*mcp.rpcResponseError)
+              Test:         TestHTTPAdapterCallToolUntrustedResponsesHaveUnknownOutcome/duplicate_error_code
+    --- FAIL: TestHTTPAdapterCallToolUntrustedResponsesHaveUnknownOutcome/case_alias_response_ID (0.00s)
+        http_adapter_test.go:584:
+              Error Trace:  /Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/network/internal/mcp/http_adapter_test.go:584
+              Error:        An error is expected but got nil.
+              Test:         TestHTTPAdapterCallToolUntrustedResponsesHaveUnknownOutcome/case_alias_response_ID
+FAIL
+FAIL  github.com/pengjunchen/go-cli/internal/mcp  0.011s
+FAIL
