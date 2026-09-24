@@ -257,7 +257,7 @@ func TestTreeBuilderRestoresActiveLeafCheckpointPointer(t *testing.T) {
 		Type:              EntryTypeCheckpoint,
 		RecordVersion:     1,
 		SessionID:         "physical-session",
-		BranchID:          "left-branch",
+		BranchID:          "main",
 		CheckpointKind:    CheckpointActiveLeaf,
 		ActiveLeafEntryID: "left",
 		Seq:               4,
@@ -300,6 +300,78 @@ func TestTreeBuilderRejectsChildSequenceBeforeParent(t *testing.T) {
 	_, err := NewDefaultSessionTreeBuilder().BuildFromStore(ctx, store)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "parent")
+}
+
+func TestTreeBuilderRejectsBranchCheckpointOutsideParentBranch(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	entries := versionOneBranchBuilderFixture()
+	entries = append(entries, &SessionEntry{
+		ID:                "unrelated-fork",
+		ParentID:          "feature-tip",
+		Type:              EntryTypeCheckpoint,
+		RecordVersion:     1,
+		SessionID:         "physical-session",
+		BranchID:          "unrelated",
+		ParentBranchID:    "main",
+		BaseLeafEntryID:   "feature-tip",
+		ActiveLeafEntryID: "unrelated-fork",
+		CheckpointKind:    CheckpointBranch,
+		Seq:               4,
+	})
+	for _, entry := range entries {
+		require.NoError(t, store.Append(ctx, entry))
+	}
+
+	_, err := NewDefaultSessionTreeBuilder().BuildFromStore(ctx, store)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "base leaf is outside parent branch")
+}
+
+func TestTreeBuilderRejectsActiveLeafFromUnrelatedBranch(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	entries := versionOneBranchBuilderFixture()
+	entries = append(entries, &SessionEntry{
+		ID:                "active-mismatch",
+		ParentID:          "root",
+		Type:              EntryTypeCheckpoint,
+		RecordVersion:     1,
+		SessionID:         "physical-session",
+		BranchID:          "main",
+		ActiveLeafEntryID: "feature-tip",
+		CheckpointKind:    CheckpointActiveLeaf,
+		Seq:               4,
+	})
+	for _, entry := range entries {
+		require.NoError(t, store.Append(ctx, entry))
+	}
+
+	_, err := NewDefaultSessionTreeBuilder().BuildFromStore(ctx, store)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "active-leaf checkpoint")
+	assert.Contains(t, err.Error(), "outside known branch")
+}
+
+func versionOneBranchBuilderFixture() []*SessionEntry {
+	root := newR2UserEntry("root", "", 1, 0)
+	root.BranchID = "main"
+	branchCheckpoint := &SessionEntry{
+		ID:                "feature-root",
+		ParentID:          "root",
+		Type:              EntryTypeCheckpoint,
+		RecordVersion:     1,
+		SessionID:         "physical-session",
+		BranchID:          "feature",
+		ParentBranchID:    "main",
+		BaseLeafEntryID:   "root",
+		ActiveLeafEntryID: "feature-root",
+		CheckpointKind:    CheckpointBranch,
+		Seq:               2,
+	}
+	featureTip := newR2UserEntry("feature-tip", "feature-root", 3, 1)
+	featureTip.BranchID = "feature"
+	return []*SessionEntry{root, branchCheckpoint, featureTip}
 }
 
 func TestTreeBuilderRestoresBranchMetadataFromDurableCheckpoint(t *testing.T) {

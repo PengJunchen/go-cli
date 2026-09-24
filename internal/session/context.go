@@ -73,14 +73,14 @@ func (m *DefaultContextManager) BuildContext(ctx context.Context, leafID string)
 	// Traversed are the raw entries visited in walk order (leaf to root).
 	traversed := make([]SessionEntry, 0, len(branch))
 	for i := len(branch) - 1; i >= 0; i-- {
-		traversed = append(traversed, *branch[i])
+		traversed = append(traversed, *branch[i].clone())
 	}
 
 	// Project the raw branch. Version one compactions use the exact source
 	// boundary rather than the physical marker position.
 	branchVals := make([]SessionEntry, len(branch))
 	for i, e := range branch {
-		branchVals[i] = *e
+		branchVals[i] = *e.clone()
 	}
 	messages, err := projectSessionEntries(branchVals)
 	if err != nil {

@@ -177,6 +177,13 @@ func (b *DefaultSessionTreeBuilder) buildVersionOneTree(ctx context.Context, ent
 	if err != nil {
 		return nil, err
 	}
+	branchJournal := make([]SessionEntry, len(ordered))
+	for index, entry := range ordered {
+		branchJournal[index] = *entry
+	}
+	if err := validateDurableBranchJournal(branchJournal); err != nil {
+		return nil, fmt.Errorf("session: invalid recovered branch metadata: %w", err)
+	}
 	for _, entry := range ordered {
 		if err := tree.Append(ctx, entry); err != nil {
 			return nil, fmt.Errorf("session: append recovered entry %q: %w", entry.ID, err)

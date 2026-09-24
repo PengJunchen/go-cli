@@ -77,6 +77,29 @@ func TestDeriveMessages_EmptyEntries(t *testing.T) {
 	assert.Empty(t, result)
 }
 
+func TestDeriveMessagesReturnsDefensiveCopies(t *testing.T) {
+	input := []SessionEntry{{
+		ID:   "assistant",
+		Type: EntryTypeAssistant,
+		ToolCalls: []llm.ToolCall{{
+			ID: "provider-call-id", Name: "inspect",
+			Args: map[string]any{"nested": []any{map[string]any{"value": "canonical"}}},
+		}},
+		ContentBlocks: []llm.ContentBlock{{Type: "text", Text: "canonical block"}},
+		Usage:         &llm.Usage{InputTokens: 4, OutputTokens: 2, TotalTokens: 6},
+	}}
+
+	derived := DeriveMessages(input)
+	require.Len(t, derived, 1)
+	derived[0].ToolCalls[0].Args.(map[string]any)["nested"].([]any)[0].(map[string]any)["value"] = "derived mutation"
+	derived[0].ContentBlocks[0].Text = "derived mutation"
+	derived[0].Usage.InputTokens = 99
+
+	assert.Equal(t, "canonical", input[0].ToolCalls[0].Args.(map[string]any)["nested"].([]any)[0].(map[string]any)["value"])
+	assert.Equal(t, "canonical block", input[0].ContentBlocks[0].Text)
+	assert.Equal(t, 4, input[0].Usage.InputTokens)
+}
+
 // TestDeriveMessages_SeqPreserved verifies that Seq numbers are preserved on
 // entries in the derived output.
 func TestDeriveMessages_SeqPreserved(t *testing.T) {

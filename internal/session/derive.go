@@ -22,7 +22,11 @@ func DeriveMessages(entries []SessionEntry) []SessionEntry {
 	if err != nil {
 		return nil
 	}
-	return projected
+	cloned := make([]SessionEntry, len(projected))
+	for i, entry := range projected {
+		cloned[i] = *entry.clone()
+	}
+	return cloned
 }
 
 // SessionViewFromEntries builds a provenance-preserving model-history view for

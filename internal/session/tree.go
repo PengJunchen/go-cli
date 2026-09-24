@@ -196,7 +196,7 @@ func (t *DefaultSessionTree) MoveTo(ctx context.Context, leafID string) error {
 		if branch, ok := t.walkBranchLocked(departed); ok {
 			departEntries = make([]SessionEntry, 0, len(branch))
 			for _, e := range branch {
-				departEntries = append(departEntries, *e)
+				departEntries = append(departEntries, *e.clone())
 			}
 		}
 	}
