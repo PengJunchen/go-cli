@@ -1,0 +1,27 @@
+Base: `f00aa63057e64faea014e2af756a730462be5b07` (`codex/runtime-r1-integration`), before production changes.
+
+Test discovery command:
+
+```text
+rtk env GOMAXPROCS=2 go test -list '^Test(GrepSeparatesPatternAndIgnoresRipgrepConfig|FindSeparatesPatternFromFdOptions|GitStatusDisablesConfiguredFSMonitorAndOptionalIndexWrites|GitDiffDisablesConfiguredExternalDiff|GitDiffDisablesConfiguredTextconv|GitBlameTreatsLeadingDashFilenameAsPath|GitReadCommandsKeepHostSelectedRepositoryContext)$' ./internal/tools
+```
+
+Exit code: `0`. The exact listed tests were:
+
+```text
+TestGrepSeparatesPatternAndIgnoresRipgrepConfig
+TestFindSeparatesPatternFromFdOptions
+TestGitStatusDisablesConfiguredFSMonitorAndOptionalIndexWrites
+TestGitDiffDisablesConfiguredExternalDiff
+TestGitDiffDisablesConfiguredTextconv
+TestGitBlameTreatsLeadingDashFilenameAsPath
+TestGitReadCommandsKeepHostSelectedRepositoryContext
+```
+
+RED command:
+
+```text
+rtk env GOMAXPROCS=2 go test -p 2 ./internal/tools -run '^Test(GrepSeparatesPatternAndIgnoresRipgrepConfig|FindSeparatesPatternFromFdOptions|GitStatusDisablesConfiguredFSMonitorAndOptionalIndexWrites|GitDiffDisablesConfiguredExternalDiff|GitDiffDisablesConfiguredTextconv|GitBlameTreatsLeadingDashFilenameAsPath|GitReadCommandsKeepHostSelectedRepositoryContext)$' -count=1
+```
+
+Exit code: `1`, as expected before implementation. The fake `rg` received the pattern in option position and inherited `RIPGREP_CONFIG_PATH`; fake `fd` received the model pattern without `--`; configured fsmonitor, external diff, and textconv scripts created their marker files; `git status` refreshed `.git/index`; a leading-dash Blame filename was parsed as an option and returned usage; the fake Git log command lacked the safe invocation flags and inherited config override variables.
