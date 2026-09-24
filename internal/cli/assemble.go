@@ -1463,29 +1463,16 @@ func (s *assembleState) assembleSession() {
 }
 
 // buildModel resolves an llm.BaseChatModel from the loaded configuration.
-// When the configuration supplies a BaseURL or APIKey, a custom provider is
-// built with those settings; otherwise the default provider registry is used.
 // It also returns the ModelInfo for the resolved model so callers can inspect
 // the context window and other metadata.
 func buildModel(ctx context.Context, rc *config.Config, providerName, modelName string) (llm.BaseChatModel, llm.ModelInfo, func(), error) {
 	cfg := llm.ModelConfig{Model: modelName}
-
-	if rc != nil && (rc.Provider.BaseURL != "" || rc.Provider.APIKey != "") {
-		provider := llm.NewEinoProvider(
-			llm.WithProviderName(providerName),
-			llm.WithBaseURL(rc.Provider.BaseURL),
-			llm.WithAPIKey(rc.Provider.APIKey),
-			llm.WithDefaultModel(modelName),
-		)
-		m, cleanup, err := provider.Build(ctx, cfg)
-		if err != nil {
-			return nil, llm.ModelInfo{}, cleanup, err
-		}
-		return m, findModelInfo(provider.Models(), modelName), cleanup, nil
+	baseURL, apiKey := "", ""
+	if rc != nil {
+		baseURL = rc.Provider.BaseURL
+		apiKey = rc.Provider.APIKey
 	}
-
-	reg := llm.NewProviderRegistry()
-	provider, err := reg.Get(providerName)
+	provider, err := resolveCLIProvider(providerName, baseURL, apiKey)
 	if err != nil {
 		return nil, llm.ModelInfo{}, nil, err
 	}
@@ -1497,24 +1484,55 @@ func buildModel(ctx context.Context, rc *config.Config, providerName, modelName 
 }
 
 // listAvailableModels returns the models exposed by the provider identified by
-// providerName. It mirrors the provider-resolution logic in buildModel: when
-// the config supplies a BaseURL or APIKey, a custom EinoProvider is built;
-// otherwise the default provider registry is used.
+// providerName. It uses the same provider resolver as buildModel so listing
+// cannot advertise a protocol the CLI cannot safely construct.
 func listAvailableModels(rc *config.Config, providerName string) []llm.ModelInfo {
-	if rc != nil && (rc.Provider.BaseURL != "" || rc.Provider.APIKey != "") {
-		provider := llm.NewEinoProvider(
-			llm.WithProviderName(providerName),
-			llm.WithBaseURL(rc.Provider.BaseURL),
-			llm.WithAPIKey(rc.Provider.APIKey),
-		)
-		return provider.Models()
+	baseURL, apiKey := "", ""
+	if rc != nil {
+		baseURL = rc.Provider.BaseURL
+		apiKey = rc.Provider.APIKey
 	}
-	reg := llm.NewProviderRegistry()
-	provider, err := reg.Get(providerName)
+	provider, err := resolveCLIProvider(providerName, baseURL, apiKey)
 	if err != nil {
 		return nil
 	}
 	return provider.Models()
+}
+
+// resolveCLIProvider resolves only provider protocols that the CLI can route
+// without guessing. An explicit BaseURL declares an OpenAI-compatible custom
+// endpoint, while API-key-only routing is accepted only for the named Eino or
+// OpenAI-compatible defaults. Native Claude/Gemini identities are unavailable
+// in the CLI until their request and tool-call contracts are complete.
+func resolveCLIProvider(providerName, baseURL, apiKey string) (llm.ModelProvider, error) {
+	normalizedName := strings.ToLower(strings.TrimSpace(providerName))
+	switch normalizedName {
+	case "claude", "anthropic", "gemini":
+		return nil, fmt.Errorf("assemble: provider %q requires native protocol support, which is unavailable in the CLI; use a custom provider name only for an OpenAI-compatible BaseURL", providerName)
+	}
+
+	if baseURL != "" {
+		return llm.NewEinoProvider(
+			llm.WithProviderName(providerName),
+			llm.WithBaseURL(baseURL),
+			llm.WithAPIKey(apiKey),
+		), nil
+	}
+
+	if apiKey != "" {
+		switch normalizedName {
+		case "eino", "openai":
+			return llm.NewEinoProvider(
+				llm.WithProviderName(providerName),
+				llm.WithAPIKey(apiKey),
+			), nil
+		default:
+			return nil, fmt.Errorf("assemble: provider %q requires an explicit base_url for OpenAI-compatible credential routing", providerName)
+		}
+	}
+
+	reg := llm.NewProviderRegistry()
+	return reg.Get(providerName)
 }
 
 // buildSmallModel builds a lightweight model from the SmallModelConfig section.
@@ -1539,22 +1557,7 @@ func buildSmallModel(ctx context.Context, rc *config.Config, providerName, model
 		apiKey = rc.Provider.APIKey
 	}
 
-	if baseURL != "" || apiKey != "" {
-		provider := llm.NewEinoProvider(
-			llm.WithProviderName(providerName),
-			llm.WithBaseURL(baseURL),
-			llm.WithAPIKey(apiKey),
-			llm.WithDefaultModel(modelName),
-		)
-		m, cleanup, err := provider.Build(ctx, cfg)
-		if err != nil {
-			return nil, llm.ModelInfo{}, cleanup, err
-		}
-		return m, findModelInfo(provider.Models(), modelName), cleanup, nil
-	}
-
-	reg := llm.NewProviderRegistry()
-	provider, err := reg.Get(providerName)
+	provider, err := resolveCLIProvider(providerName, baseURL, apiKey)
 	if err != nil {
 		return nil, llm.ModelInfo{}, nil, err
 	}
