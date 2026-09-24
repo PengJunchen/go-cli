@@ -1,6 +1,6 @@
 # R4 Prepared Dispatch Seam
 
-Status: bounded interface proposal for `R4-EFFECT-01`, ready for independent joint review with the revised R2 contract. It closes the prepared-executor gap raised in `reviews/r2-contract-review.md`, but does not itself approve R2 or implement the seam. Source grounding uses the current `r2-contract.md`, `r1-contract.md`, `r4-policy-design.md`, and the tool/approval/loop path.
+Status: design approved at contract commit `4f8d1a0d72eebc25fcf06c1fcb897d64bf73d41c` after final targeted review with R2. `R4-EFFECT-01` implementation is in progress; implementation review and R2 restart-safety acceptance remain incomplete. This document defines the bounded prepared-dispatch seam only; it does not decide R4 D-01 or close full R4. Source grounding uses the current `r2-contract.md`, `r1-contract.md`, `r4-policy-design.md`, and the tool/approval/loop path.
 
 ## Problem this seam closes
 
@@ -114,7 +114,7 @@ R2 treats known prepare rejection as a `not_dispatched` receipt with no action r
 
 R1 consumer errors `ErrCanonicalTranscriptRequired` and `ErrCanonicalTranscriptInvalid` mean the run has no accepted canonical transcript commit. Lifecycle code must not release a claim as transcript-committed on either sentinel. A normal provider error with a validated and appended delta is different: the transcript is committed even though the run outcome is error. The owner tracks these facts separately from worker completion and `PendingExecutionError` resource state. The typed middleware chain's `FailureSynthesisMiddleware` preserves the first `CanonicalRunResult` and error and skips event-to-history reconstruction and an internal second run for recoverable typed errors; the legacy `Run` synthesis and Loop's existing provider retry remain unchanged. A single-use prepared tool permit never instructs that outer middleware to replay a dispatch, and an unknown receipt must not trigger another executor call.
 
-The revised R2 contract now defines `RecordReceipt` as distinct from `ResolveExecution`, separates `ActionID` reservation identity from the assistant-group key, and gives each transcript message its own `TranscriptIndex`. Those fields and per-run coordinates are authoritative in R2; this design does not introduce parallel IDs or receipt semantics. R2 remains unapproved until the independent reviewer rechecks the revised contract and this companion together.
+The revised R2 contract now defines `RecordReceipt` as distinct from `ResolveExecution`, separates `ActionID` reservation identity from the assistant-group key, and gives each transcript message its own `TranscriptIndex`. Those fields and per-run coordinates are authoritative in R2; this design does not introduce parallel IDs or receipt semantics. R2 design was approved at `4f8d1a0d72eebc25fcf06c1fcb897d64bf73d41c`; implementation and restart-safety review remain incomplete.
 
 ## Ownership and test boundary
 

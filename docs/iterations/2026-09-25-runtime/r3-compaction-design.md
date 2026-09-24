@@ -1,6 +1,6 @@
 # R3-BLD-03 设计：请求前预算检查与完整工具调用组压缩
 
-状态：builder 设计稿，待 R3-DES-01 与 R2-REV-01 放行后实现。本文只定义 R3 compaction 的最小改造边界，不修改 Runtime 架构、session writer 或产品源码。
+状态：R3-BLD-03 设计提案；R3-DES-01 review blocker 已在配套 proposal 中收敛，待独立设计复核及 R2-REV-01 restart-safety 验收后实施。R2 design 已在 `4f8d1a0d72eebc25fcf06c1fcb897d64bf73d41c` 获批；其实现/restart review 未完成。本文只定义 R3 compaction 的最小改造边界，不修改 Runtime 架构、session writer 或产品源码。
 
 ## 目标与边界
 
@@ -45,7 +45,7 @@ R1 `CanonicalRunResult.Transcript` 仍是当前 run 的唯一 transcript delta�
 
 ### 3. Summary strategy 与 summary payload
 
-`assembleCompactor` 当前 small-model 注入只允许空值、`unified` 与 `micro_first`（`internal/cli/assemble.go:1427-1433`），遗漏显式 `summary`。保留 factory 为唯一 compactor 构建入口，只把有效 `summary` 加入注入条件；有 small model 时工厂生成的 `SummaryCompactor` 必须实际调用 `llmModelSummarizer`。无 small model 时继续显式失败或让 `unified` 按既有 fallback 降级，不能静默输出空摘要。
+`assembleCompactor` 当前 small-model 注入只允许空值、`unified` 与 `micro_first`（`internal/cli/assemble.go:1427-1433`），遗漏显式 `summary`。保留 factory 为唯一 compactor 构建入口，只把有效 `summary` 加入注入条件；有 small model 时工厂生成的 `SummaryCompactor` 必须实际调用 `llmModelSummarizer`。该 summarizer 通过 assembly 注入的同一不可变 `ModelResolver`，传完整 provider/model、endpoint/origin、scoped `CredentialRef` 与 summary purpose；不得使用 compactor 私有 registry 或只传模型名。若 request 未指定小模型 scope，仅按 R0 明确允许的同 provider/protocol/origin 继承；disabled、unsupported、unresolved 或 credential scope 缺失都返回可诊断错误，不得静默回退到 primary。无 small model 时继续显式失败或让 `unified` 按既有 fallback 降级，不能静默输出空摘要。
 
 `buildSummaryPrompt` 当前只收录 read/write/edit/grep 结果；其它工具的 `ToolResult` 与 structured call metadata 丢失（`internal/compaction/summary.go:178-212`）。摘要 prompt 应按 chronological order 含用户/assistant 消息、已存在 compaction summary、每个工具组的工具名及 terminal outcome，并从文件、shell、搜索、web 与其它成功/失败工具结果中挑选有用文本。每条输出与总 prompt 都需用同一个 estimator 做确定性 token 上限；超长输出做明确的头尾截断并保留 `[truncated]` 标记，避免摘要模型请求被原始 tool logs 撑爆。不要把摘要输出变成工具调用，也不要把 raw tool arguments 当成摘要指令；若纳入 args，只允许经过已有 redaction/限长处理。
 
@@ -73,10 +73,12 @@ R1 `CanonicalRunResult.Transcript` 仍是当前 run 的唯一 transcript delta�
 
 - `TestContextBudgetCheckedBeforeFirstProviderCall`：用真实 CLI assembly、可记录 fake provider 和极小 budget，证明 compaction 在首个 provider call 之前运行；返回 request 估算不超上限、当前 user input 保留一次、没有 tool 执行。另构造仅因实际 tool-schema/output reserve 超限的 history，验证发出的 `CompactionProjection` 携带明确 source boundary/revision；mandatory prompt 超预算时 provider call 数为 0。R2 durable restore 集成需消费这同一 typed record，禁止从 events 重新推导。
 - `TestCompactionKeepsToolCallResultTogether`：构造一个 assistant 请求两个 ID、result 大小不等且顺序相反的 fixture；所有 compactor 的输出要么保留两个 calls 和对应两个 receipts，要么将完整组全部转为 summary，禁止半组。缺失/重复/错误 ID fixture 必须在 provider call 前失败；额外证明另一个已闭合 group 和另一个 run 可合法复用同一 ToolCallID，以及 legacy missing ToolName 被唯一匹配后补齐、冲突 name 被拒绝。
-- `TestSummaryUsesConfiguredModel`：通过 `AssembleAgent`/`assembleCompactor` 的实际 factory 装配，配置 `Compaction.Strategy: summary` 与 fake small model，证明确实调用该模型；无 small model 的降级行为也有独立断言。
+- `TestSummaryUsesConfiguredModel`：通过 `AssembleAgent`/`assembleCompactor` 的实际 factory 装配，配置 `Compaction.Strategy: summary` 与 fake small model，证明确实调用该模型且请求经 assembly 注入的共享 resolver 携带完整 scope/purpose；disabled 或缺 scoped credential 时 zero provider request、zero fallback-to-primary。无 small model 的降级行为也有独立断言。
 - `TestSummaryIncludesNonFileToolOutput`：summary 输入同时含 file、bash/search/web 与 error receipt；验证相关非文件结果出现且超长输出/总输入被限制、ToolCallID 不会以 runnable call 形式进入 summary item。
 - 在 R2 restore 集成测试中验证 compaction summary 与 `CompactedThroughEntryID` 边界重启后仍出现，边界后的 tool group 完整；R3 单元测试不伪造 SessionStore durability。
 - 验证 CJK、小文本与序列化 tool arguments 的预算 fixture；测未过滤与过滤工具 schemas，确认预算只计实际 request 中的 schemas；覆盖不同 provider/image detail/未知图像尺寸，未知时验证显式 reserve/unknown 状态，不得把固定 85-token 当硬界。Estimator 错误必须采用既有 fallback 并留 observability，不得让请求超过已算出的本地预算。
 - 对 `internal/compaction`、`internal/core`、`internal/cli` 运行精准测试与受影响包 race suite；保留旧 JSONL fixtures。任何测试需先确认 `go test -list` 有目标名，并先以编译成功且行为失败的红测证明缺陷。
 
-若实现 provider overflow fallback，仅识别协议层明确的 context-limit error；最多一次 `CompactTriggered` + retry，且必须满足本次 provider attempt 尚未发布 candidate、没有 tool dispatch、没有 partial-result durable acknowledgment。R2 已在 provider 请求前提交的 user input 与已提交 compaction projection 可以复用；不能以“没有 transcript ack”作为条件，因为 input 本身就是已提交 transcript。通用 provider/network error、已出现 partial visible output、tool intent/receipt/unknown 后都不 retry。若本实现未加此分支，preflight 不应被描述成能消除模型 tokenizer/serializer 偏差导致的所有 overflow。
+若实现 provider overflow fallback，仅识别协议层明确的 context-limit error；最多一次 `CompactTriggered` + retry，且必须由仍持有该 run 的 Loop 根据 typed attempt facts 证明本次 provider attempt 尚未发布 candidate、没有 tool dispatch、没有 partial-result durable acknowledgment，旧 stream/resource 已 quiescent。该 retry 与普通 retry、显式 fallback/candidate switch 共用同一逻辑 operation 的 `MaxAttempts` 总 dispatch 预算；overflow 层不得重置计数。长度 continuation 是新 operation，但仍受 run 既有固定 continuation 上限约束。R2 已在 provider 请求前提交的 user input 与已提交 compaction projection可以由同一仍存活的 Loop run 复用；不能以“没有 transcript ack”作为条件，因为 input 本身就是已提交 transcript。R2 crash recovery 恢复 incomplete run 后绝不自动重新派发 provider request。通用 provider/network error、已出现 partial visible output、tool intent/receipt/unknown 后都不 retry。若本实现未加此分支，preflight 不应被描述成能消除模型 tokenizer/serializer 偏差导致的所有 overflow。
+
+补充验收：`TestOverflowRetryUsesLoopOwnedAttemptFactsAndSharedBudget` 证明 overflow retry 消耗与 network retry/fallback 相同的 operation cap，且只能在 owner 证实安全的条件下执行；`TestRecoveryOfIncompleteRunNeverCallsProvider` 验证重启只恢复已持久输入/projection，不发起 provider replay；另验证 length continuation 使用独立 operation attempt 但不能重置 run continuation cap。
