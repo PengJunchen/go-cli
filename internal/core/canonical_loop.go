@@ -1,6 +1,15 @@
 package core
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrCanonicalMiddlewareUnsupported is returned before loop execution when an
+// AgentLoop supports canonical transcripts but a middleware in its chain
+// cannot preserve them. The rejection itself still commits the current user
+// input as a valid, side-effect-free per-run delta.
+var ErrCanonicalMiddlewareUnsupported = errors.New("core: canonical transcript unsupported by middleware chain")
 
 // InputKind values identify where an input recorded in a canonical transcript
 // came from. AgentMessage stores these as strings for JSON compatibility.

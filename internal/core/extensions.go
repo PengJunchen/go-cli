@@ -59,6 +59,15 @@ type Middleware interface {
 	Wrap(n AgentLoop) AgentLoop
 }
 
+// CanonicalMiddleware preserves a CanonicalLoop's typed per-run transcript
+// while applying middleware behavior. If a canonical loop is wrapped by a
+// middleware that does not implement this optional interface, the chain fails
+// closed before running the loop.
+type CanonicalMiddleware interface {
+	// WrapCanonical returns a canonical-preserving view of the next loop.
+	WrapCanonical(next CanonicalLoop) CanonicalLoop
+}
+
 // ExtensionRegistry is the registry an extension uses to register its
 // building blocks (tools, commands, providers, hooks, middleware). Duplicate
 // registrations overwrite the previous entry (last writer wins).
@@ -256,3 +265,9 @@ func (m *MiddlewareImpl) Wrap(n AgentLoop) AgentLoop {
 	slog.Info("core.middleware.wrap", "name", m.Name())
 	return n
 }
+
+// WrapCanonical preserves the typed loop because MiddlewareImpl is a
+// pass-through.
+func (m *MiddlewareImpl) WrapCanonical(n CanonicalLoop) CanonicalLoop { return n }
+
+var _ CanonicalMiddleware = (*MiddlewareImpl)(nil)

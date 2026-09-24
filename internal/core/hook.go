@@ -153,6 +153,7 @@ type HookMiddleware struct {
 }
 
 var _ Middleware = (*HookMiddleware)(nil)
+var _ CanonicalMiddleware = (*HookMiddleware)(nil)
 
 // NewHookMiddleware builds a middleware backed by the given HookChain.
 func NewHookMiddleware(chain *HookChain) *HookMiddleware {
@@ -171,6 +172,53 @@ func (m *HookMiddleware) Name() string {
 // wrapped loop.
 func (m *HookMiddleware) Wrap(next AgentLoop) AgentLoop {
 	return &hookLoop{chain: m.chain, next: next}
+}
+
+func (m *HookMiddleware) WrapCanonical(next CanonicalLoop) CanonicalLoop {
+	return &canonicalHookLoop{chain: m.chain, next: next}
+}
+
+type canonicalHookLoop struct {
+	chain *HookChain
+	next  CanonicalLoop
+}
+
+func (l *canonicalHookLoop) RunCanonical(ctx context.Context, submission Submission, stream ...EventStream) (CanonicalRunResult, error) {
+	span, spanCtx := tracing.SpanFromContext(ctx, "middleware.hook", tracing.SpanKindInternal)
+	defer span.End()
+	logger := tracing.NewTraceLogger(span, nil)
+
+	result, err := l.chain.Before(spanCtx, submission)
+	if err != nil {
+		logger.Info("hook.before.error", "err", err)
+		span.SetStatus(tracing.SpanStatusError, err.Error())
+		return CanonicalRunResult{
+			Events:     []AgentEvent{errEvent(err)},
+			Transcript: canonicalUserDelta(submission),
+		}, err
+	}
+	if result.Interrupted() {
+		logger.Info("hook.before.interrupt", "output", result.Output)
+		return CanonicalRunResult{
+			Events:     []AgentEvent{{Kind: "status", Content: result.Output}},
+			Transcript: canonicalUserDelta(submission),
+		}, nil
+	}
+
+	runResult, runErr := l.next.RunCanonical(spanCtx, submission, stream...)
+	if runErr != nil {
+		span.SetStatus(tracing.SpanStatusError, runErr.Error())
+	}
+	resultForHook := Result{Success: runErr == nil}
+	for _, entry := range runResult.Transcript {
+		if entry.Message.Role == "assistant" {
+			resultForHook.Message = entry.Message.Content
+		}
+	}
+	if afterErr := l.chain.After(spanCtx, submission, resultForHook, runErr); afterErr != nil {
+		slog.Warn("core.hook.after_error", "err", afterErr)
+	}
+	return runResult, runErr
 }
 
 // hookLoop is the concrete wrapped loop produced by HookMiddleware.
