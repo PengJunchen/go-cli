@@ -73,6 +73,94 @@ func TestTimeoutModelMiddleware_StreamNoTimeout(t *testing.T) {
 	assert.Equal(t, "ok", content)
 }
 
+func TestTimeoutModelMiddleware_StreamRejectsDataAfterFinal(t *testing.T) {
+	model := &mockModel{
+		streamFn: func(context.Context, []Message, ...Option) (<-chan MessageChunk, error) {
+			ch := make(chan MessageChunk, 2)
+			ch <- MessageChunk{Role: RoleAssistant, Content: "complete", Final: true}
+			ch <- MessageChunk{Role: RoleAssistant, Content: "late"}
+			close(ch)
+			return ch, nil
+		},
+	}
+	wrapped := NewTimeoutModelMiddleware(
+		WithTotalTimeout(time.Second),
+		WithStreamChunkTimeout(time.Second),
+	).WrapModel(model)
+
+	ch, err := wrapped.Stream(context.Background(), nil)
+	require.NoError(t, err)
+	chunks := make([]MessageChunk, 0, 2)
+	for chunk := range ch {
+		chunks = append(chunks, chunk)
+	}
+	require.Len(t, chunks, 2)
+	require.True(t, chunks[0].Final)
+	require.ErrorContains(t, chunks[1].Error, "emitted data after its final chunk")
+}
+
+func TestTimeoutModelMiddleware_StreamPreservesErrorAfterFinal(t *testing.T) {
+	lateErr := errors.New("late provider failure")
+	model := &mockModel{
+		streamFn: func(context.Context, []Message, ...Option) (<-chan MessageChunk, error) {
+			ch := make(chan MessageChunk, 2)
+			ch <- MessageChunk{Role: RoleAssistant, Content: "complete", Final: true}
+			ch <- MessageChunk{Error: lateErr}
+			close(ch)
+			return ch, nil
+		},
+	}
+	wrapped := NewTimeoutModelMiddleware(
+		WithTotalTimeout(time.Second),
+		WithStreamChunkTimeout(time.Second),
+	).WrapModel(model)
+
+	ch, err := wrapped.Stream(context.Background(), nil)
+	require.NoError(t, err)
+	chunks := make([]MessageChunk, 0, 2)
+	for chunk := range ch {
+		chunks = append(chunks, chunk)
+	}
+	require.Len(t, chunks, 2)
+	require.True(t, chunks[0].Final)
+	require.ErrorIs(t, chunks[1].Error, lateErr)
+}
+
+func TestTimeoutModelMiddleware_FinalMustBeFollowedByChannelClose(t *testing.T) {
+	innerStopped := make(chan struct{})
+	model := &mockModel{
+		streamFn: func(ctx context.Context, _ []Message, _ ...Option) (<-chan MessageChunk, error) {
+			ch := make(chan MessageChunk, 1)
+			ch <- MessageChunk{Role: RoleAssistant, Content: "terminal", Final: true}
+			go func() {
+				<-ctx.Done()
+				close(innerStopped)
+				close(ch)
+			}()
+			return ch, nil
+		},
+	}
+	wrapped := NewTimeoutModelMiddleware(
+		WithTotalTimeout(time.Second),
+		WithStreamChunkTimeout(25*time.Millisecond),
+	).WrapModel(model)
+
+	ch, err := wrapped.Stream(context.Background(), nil)
+	require.NoError(t, err)
+	chunks := make([]MessageChunk, 0, 2)
+	for chunk := range ch {
+		chunks = append(chunks, chunk)
+	}
+	require.Len(t, chunks, 2)
+	require.True(t, chunks[0].Final)
+	require.ErrorContains(t, chunks[1].Error, "idle exceeded")
+	select {
+	case <-innerStopped:
+	case <-time.After(time.Second):
+		t.Fatal("inner producer did not stop after timeout cancellation")
+	}
+}
+
 // TestTimeoutModelMiddleware_StreamChunkTimeout verifies that the chunk timeout
 // fires when chunks arrive too slowly.
 func TestTimeoutModelMiddleware_StreamChunkTimeout(t *testing.T) {
@@ -110,10 +198,11 @@ func TestTimeoutModelMiddleware_StreamChunkTimeout(t *testing.T) {
 	}
 	elapsed := time.Since(start)
 
-	// Should receive only the first chunk, then the channel closes due to
-	// the chunk timeout.
-	require.Len(t, chunks, 1, "should receive only the first chunk before timeout")
+	// The first chunk remains visible, followed by an explicit terminal error.
+	require.Len(t, chunks, 2, "timeout must follow the already delivered chunk")
 	assert.Equal(t, "first", chunks[0].Content)
+	require.Error(t, chunks[1].Error)
+	assert.False(t, chunks[1].Final)
 	assert.Less(t, elapsed, 1*time.Second, "should timeout well before the 2s delay")
 }
 

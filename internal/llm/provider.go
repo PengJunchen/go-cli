@@ -309,12 +309,18 @@ func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 		isJSON, jsonBody, err := detectJSONResponse(reader)
 		if err != nil {
 			slog.Error("llm_stream_peek_error", "err", err)
+			sendStreamError(ctx, ch, fmt.Errorf("llm: inspect provider stream: %w", err))
 			return
 		}
 		if isJSON {
 			var parsed openAIResponse
 			if err := json.Unmarshal(jsonBody, &parsed); err != nil {
 				slog.Error("llm_stream_json_parse_error", "err", err)
+				sendStreamError(ctx, ch, fmt.Errorf("llm: decode provider stream response: %w", err))
+				return
+			}
+			if len(parsed.Choices) == 0 {
+				sendStreamError(ctx, ch, fmt.Errorf("llm: provider stream response contains no choices"))
 				return
 			}
 			var content string
@@ -352,7 +358,11 @@ func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 		parser := NewDefaultSSEParser()
 		events, _ := parser.Parse(ctx, reader) //nolint:errcheck
 
-		toolCalls, finishReason, usage := accumulateOpenAIStreamToolCalls(ctx, events, ch)
+		toolCalls, finishReason, usage, streamErr := accumulateOpenAIStreamToolCalls(ctx, events, ch)
+		if streamErr != nil {
+			sendStreamError(ctx, ch, streamErr)
+			return
+		}
 		final := MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
 		if usage != nil {
 			final.Usage = usage
@@ -645,7 +655,14 @@ func convertAssistantToolCalls(tc []openAIToolCall) []ToolCall {
 		if call.Function.Arguments != "" {
 			var decoded any
 			if err := json.Unmarshal([]byte(call.Function.Arguments), &decoded); err == nil {
-				args = decoded
+				if object, ok := decoded.(map[string]any); ok {
+					args = object
+				} else {
+					// Preserve malformed or non-object wire arguments as a string
+					// marker so core validation rejects them before dispatch. A
+					// typed nil Args remains available to callers for no-arg tools.
+					args = call.Function.Arguments
+				}
 			} else {
 				args = call.Function.Arguments
 			}

@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -93,17 +94,16 @@ func (m *overflowRecoveryModel) Generate(ctx context.Context, msgs []Message, op
 			// Successful response: if the output was truncated by
 			// max_tokens (FinishReason == "length"), automatically
 			// request continuation(s) to retrieve the remaining content.
-			if result != nil && result.FinishReason == finishReasonLength {
+			if result != nil && result.FinishReason == finishReasonLength && !LoopOwnsContinuation(ctx) {
 				contResult, contErr := m.continueGeneration(ctx, currentMsgs, result, opts)
 				if contErr != nil {
 					m.mw.logger.Warn("middleware.overflow.continue_error",
 						"op", "middleware.overflow.continue_error",
 						"err", contErr,
 					)
+					return nil, contErr
 				}
-				if contResult != nil {
-					result = contResult
-				}
+				result = contResult
 			}
 			return result, nil
 		}
@@ -154,80 +154,174 @@ func (m *overflowRecoveryModel) Stream(ctx context.Context, msgs []Message, opts
 	currentMsgs := msgs
 
 	for attempt := 0; attempt <= m.mw.maxRetries; attempt++ {
-		ch, err := m.inner.Stream(ctx, currentMsgs, opts...)
+		streamCtx, cancel := context.WithCancel(ctx)
+		ch, err := m.inner.Stream(streamCtx, currentMsgs, opts...)
 		if err == nil {
-			// Success: forward chunks in real-time via a goroutine.
+			if ch == nil {
+				cancel()
+				return nil, errors.New("overflow: inner model returned a nil stream")
+			}
+			// Success: forward bounded chunks in real-time, but hold the final
+			// marker until any middleware-owned continuation has completed.
 			outCh := make(chan MessageChunk, 64)
 			go func() {
 				defer close(outCh)
+				defer cancel()
 				var contentBuf strings.Builder
-				var toolCalls []ToolCall
-				var finishReason string
-				gotChunk := false
+				completeContent := ""
+				var contentBytes int
+				var chunkCount int
+				var finalChunk *MessageChunk
+				fail := func(err error) { sendStreamError(streamCtx, outCh, err) }
 
-				for chunk := range ch {
-					gotChunk = true
+				for {
+					var chunk MessageChunk
+					var ok bool
 					select {
-					case outCh <- chunk:
-					case <-ctx.Done():
+					case <-streamCtx.Done():
+						fail(streamCtx.Err())
+						return
+					case chunk, ok = <-ch:
+						if !ok {
+							break
+						}
+					}
+					if !ok {
+						break
+					}
+					if chunk.Error != nil {
+						fail(chunk.Error)
 						return
 					}
+					if streamCtx.Err() != nil {
+						fail(streamCtx.Err())
+						return
+					}
+					if finalChunk != nil {
+						fail(errors.New("overflow: stream emitted data after its final chunk"))
+						return
+					}
+					chunkCount++
+					if chunkCount > GuardedStreamMaxChunks {
+						fail(fmt.Errorf("overflow: stream exceeds %d chunks", GuardedStreamMaxChunks))
+						return
+					}
+					textBytes := RetainedStreamChunkTextBytes(chunk)
+					if textBytes > GuardedStreamMaxBytes-contentBytes {
+						fail(fmt.Errorf("overflow: stream exceeds %d-byte candidate limit", GuardedStreamMaxBytes))
+						return
+					}
+					contentBytes += textBytes
 					if chunk.Content != "" {
 						contentBuf.WriteString(chunk.Content)
+						contentOnly := chunk
+						contentOnly.Final = false
+						contentOnly.ToolCalls = nil
+						contentOnly.FinishReason = ""
+						contentOnly.Usage = nil
+						select {
+						case outCh <- contentOnly:
+						case <-streamCtx.Done():
+							fail(streamCtx.Err())
+							return
+						}
 					}
 					if chunk.Final {
-						if len(chunk.ToolCalls) > 0 {
-							toolCalls = chunk.ToolCalls
-						}
-						if chunk.FinishReason != "" {
-							finishReason = chunk.FinishReason
-						}
+						final := chunk
+						final.Content = ""
+						finalChunk = &final
 					}
 				}
 
-				// Post-hoc continuation for length truncation.
-				if gotChunk && finishReason == finishReasonLength && ctx.Err() == nil {
+				if streamCtx.Err() != nil {
+					fail(streamCtx.Err())
+					return
+				}
+				if finalChunk == nil {
+					fail(errors.New("overflow: stream ended without a final chunk"))
+					return
+				}
+				completeContent = contentBuf.String()
+				// The core loop is the single continuation authority for guarded
+				// candidates. Other callers retain middleware-owned continuation.
+				if !LoopOwnsContinuation(streamCtx) && finalChunk.FinishReason == finishReasonLength {
 					result := &Message{
 						Role:         RoleAssistant,
 						Content:      contentBuf.String(),
-						ToolCalls:    toolCalls,
-						FinishReason: finishReason,
+						ToolCalls:    finalChunk.ToolCalls,
+						FinishReason: finalChunk.FinishReason,
+						Usage:        finalChunk.Usage,
 					}
 					origLen := len(result.Content)
-					contResult, contErr := m.continueGeneration(ctx, currentMsgs, result, opts)
+					contResult, contErr := m.continueGeneration(streamCtx, currentMsgs, result, opts)
 					if contErr != nil {
 						m.mw.logger.Warn("middleware.overflow.stream_continue_error",
 							"op", "middleware.overflow.stream_continue_error",
 							"err", contErr,
 						)
+						fail(contErr)
+						return
 					}
-					if contResult != nil && len(contResult.Content) > origLen {
+					if contResult == nil || len(contResult.Content) < origLen {
+						fail(errors.New("overflow: continuation returned an incomplete response"))
+						return
+					}
+					if len(contResult.Content) > origLen {
 						extra := contResult.Content[origLen:]
 						if extra != "" {
 							select {
 							case outCh <- MessageChunk{Role: RoleAssistant, Content: extra}:
-							case <-ctx.Done():
+							case <-streamCtx.Done():
 								return
 							}
 						}
-						select {
-						case outCh <- MessageChunk{
-							Role:         RoleAssistant,
-							Final:        true,
-							FinishReason: contResult.FinishReason,
-							ToolCalls:    contResult.ToolCalls,
-						}:
-						case <-ctx.Done():
-							return
-						}
 					}
+					finalChunk.FinishReason = contResult.FinishReason
+					finalChunk.ToolCalls = contResult.ToolCalls
+					finalChunk.Usage = contResult.Usage
+					completeContent = contResult.Content
+				}
+				retainedCalls := finalChunk.ToolCalls
+				if finalChunk.FinishReason == finishReasonLength {
+					// Partial arguments from a truncated response are not part of
+					// the retained logical candidate; the core drops them before
+					// issuing its next continuation request.
+					retainedCalls = nil
+				}
+				complete := &Message{
+					Role:         RoleAssistant,
+					Content:      completeContent,
+					ToolCalls:    retainedCalls,
+					FinishReason: finalChunk.FinishReason,
+					Usage:        finalChunk.Usage,
+				}
+				if !LoopOwnsContinuation(streamCtx) || finalChunk.FinishReason != finishReasonLength {
+					retainedBytes, sizeErr := RetainedMessagePayloadBytes(complete)
+					if sizeErr != nil {
+						fail(fmt.Errorf("overflow: encode complete stream response: %w", sizeErr))
+						return
+					}
+					if retainedBytes > GuardedStreamMaxBytes {
+						fail(fmt.Errorf("overflow: complete stream response exceeds %d-byte candidate limit", GuardedStreamMaxBytes))
+						return
+					}
+				}
+				select {
+				case outCh <- *finalChunk:
+				case <-streamCtx.Done():
+					fail(streamCtx.Err())
+					return
 				}
 			}()
 			return outCh, nil
 		}
+		cancel()
 
 		if !isOverflowError(err) {
 			return nil, err
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
 
 		m.mw.mu.Lock()
@@ -264,7 +358,15 @@ func (m *overflowRecoveryModel) Stream(ctx context.Context, msgs []Message, opts
 // Up to maxContinuations attempts are made. Results are merged into the
 // original response.
 func (m *overflowRecoveryModel) continueGeneration(ctx context.Context, msgs []Message, result *Message, opts []Option) (*Message, error) {
+	if result == nil {
+		return nil, errors.New("overflow: cannot continue a nil response")
+	}
 	for attempt := 0; attempt < maxContinuations && result.FinishReason == finishReasonLength; attempt++ {
+		if ctx.Err() != nil {
+			return nil, fmt.Errorf("overflow: continuation canceled: %w", ctx.Err())
+		}
+		// Partial tool-call arguments are never re-submitted or dispatched.
+		result.ToolCalls = nil
 		// Build continuation messages: original + partial assistant response.
 		contMsgs := make([]Message, len(msgs), len(msgs)+1)
 		copy(contMsgs, msgs)
@@ -281,20 +383,41 @@ func (m *overflowRecoveryModel) continueGeneration(ctx context.Context, msgs []M
 		)
 
 		contResp, err := m.inner.Generate(ctx, contMsgs, opts...)
-		if err != nil || contResp == nil {
+		if err != nil {
 			m.mw.logger.Warn("middleware.overflow.continue_failed",
 				"op", "middleware.overflow.continue_failed",
 				"attempt", attempt+1,
 				"err", err,
 			)
-			break
+			return nil, fmt.Errorf("overflow: continuation %d failed: %w", attempt+1, err)
+		}
+		if contResp == nil {
+			return nil, fmt.Errorf("overflow: continuation %d returned a nil response", attempt+1)
 		}
 
 		// Merge continuation content.
+		if len(contResp.Content) > GuardedStreamMaxBytes-len(result.Content) {
+			return nil, fmt.Errorf("overflow: continuation exceeds %d-byte content limit", GuardedStreamMaxBytes)
+		}
 		result.Content += contResp.Content
 		result.FinishReason = contResp.FinishReason
-		if len(contResp.ToolCalls) > 0 {
-			result.ToolCalls = append(result.ToolCalls, contResp.ToolCalls...)
+		result.ToolCalls = contResp.ToolCalls
+		if contResp.Usage != nil {
+			if result.Usage == nil {
+				usage := *contResp.Usage
+				result.Usage = &usage
+			} else {
+				result.Usage.InputTokens += contResp.Usage.InputTokens
+				result.Usage.OutputTokens += contResp.Usage.OutputTokens
+				result.Usage.TotalTokens += contResp.Usage.TotalTokens
+			}
+		}
+		encoded, marshalErr := json.Marshal(result)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("overflow: encode complete continuation: %w", marshalErr)
+		}
+		if len(encoded) > GuardedStreamMaxBytes {
+			return nil, fmt.Errorf("overflow: complete continuation exceeds %d-byte limit", GuardedStreamMaxBytes)
 		}
 	}
 
@@ -303,8 +426,8 @@ func (m *overflowRecoveryModel) continueGeneration(ctx context.Context, msgs []M
 			"op", "middleware.overflow.continue_exhausted",
 			"max_continuations", maxContinuations,
 		)
+		return nil, fmt.Errorf("overflow: response remains truncated after %d continuations", maxContinuations)
 	}
-
 	return result, nil
 }
 

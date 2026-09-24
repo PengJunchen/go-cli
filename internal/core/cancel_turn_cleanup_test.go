@@ -107,12 +107,14 @@ func TestLoop_CancelSynthesizesToolResults(t *testing.T) {
 	loop := NewLoopAgent(WithLLM(model), WithTools(toolSrv))
 
 	ctx, cancel := context.WithCancel(context.Background())
+	var result CanonicalRunResult
 	var events []AgentEvent
 	var runErr error
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		events, runErr = loop.Run(ctx, Submission{Content: "run"})
+		result, runErr = loop.RunCanonical(ctx, Submission{Content: "run"})
+		events = result.Events
 	}()
 
 	// Wait for the first tool to start executing, then cancel.
@@ -141,14 +143,29 @@ func TestLoop_CancelSynthesizesToolResults(t *testing.T) {
 	}
 	require.Len(t, toolCallIDs, 2, "expected 2 tool calls from the assistant")
 
+	// A dispatched tool that only reports context cancellation has an unknown
+	// side-effect outcome. The following call was never dispatched and is
+	// recorded as interrupted.
+	receiptOutcomes := make(map[string]string)
+	for _, entry := range result.Transcript {
+		if entry.Message.Role == "tool" {
+			receiptOutcomes[entry.Message.ToolCallID] = entry.Message.ReceiptOutcome
+		}
+	}
+	assert.Equal(t, ReceiptOutcomeUnknown, receiptOutcomes["tc-1"])
+	assert.Equal(t, ReceiptOutcomeInterrupted, receiptOutcomes["tc-2"])
+
 	// Every tool call ID must have a matching tool_result event.
 	for _, id := range toolCallIDs {
 		assert.True(t, hasToolResultEvent(events, id),
 			"no tool_result event for tool call %s", id)
 		for _, ev := range events {
 			if ev.Kind == "tool_result" && ev.ToolCallID == id {
-				assert.Contains(t, ev.Content, "canceled",
-					"tool_result for %s should mention canceled", id)
+				if id == "tc-1" {
+					assert.Contains(t, ev.Content, "outcome unknown")
+				} else {
+					assert.Contains(t, ev.Content, "prior tool outcome is unknown")
+				}
 				assert.True(t, ev.IsError, "tool_result for %s should be an error", id)
 				break
 			}
@@ -215,12 +232,14 @@ func TestLoop_CancelParallelModeSynthesizesToolResults(t *testing.T) {
 	)
 
 	ctx, cancel := context.WithCancel(context.Background())
+	var result CanonicalRunResult
 	var events []AgentEvent
 	var runErr error
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
-		events, runErr = loop.Run(ctx, Submission{Content: "run"})
+		result, runErr = loop.RunCanonical(ctx, Submission{Content: "run"})
+		events = result.Events
 	}()
 
 	// Wait for the slow tool to start, then cancel.
@@ -269,8 +288,16 @@ func TestLoop_CancelParallelModeSynthesizesToolResults(t *testing.T) {
 			"tool call %s should have exactly one tool_result event, got %d", id, count)
 	}
 
-	// The fast tool should have its real result; the slow tool should
-	// have a synthetic result containing "canceled".
+	// The fast tool should have its real result; the slow dispatched tool has
+	// an unknown side-effect outcome because it only returned ctx.Err().
+	receiptOutcomes := make(map[string]string)
+	for _, entry := range result.Transcript {
+		if entry.Message.Role == "tool" {
+			receiptOutcomes[entry.Message.ToolCallID] = entry.Message.ReceiptOutcome
+		}
+	}
+	assert.Equal(t, ReceiptOutcomeSuccess, receiptOutcomes["pc-1"])
+	assert.Equal(t, ReceiptOutcomeUnknown, receiptOutcomes["pc-2"])
 	for _, ev := range events {
 		if ev.Kind == "tool_result" && ev.ToolCallID == "pc-1" {
 			assert.Equal(t, "fast-ok", ev.Content,
@@ -278,8 +305,7 @@ func TestLoop_CancelParallelModeSynthesizesToolResults(t *testing.T) {
 			assert.False(t, ev.IsError)
 		}
 		if ev.Kind == "tool_result" && ev.ToolCallID == "pc-2" {
-			assert.Contains(t, ev.Content, "canceled",
-				"slow tool should have a synthetic canceled result")
+			assert.Contains(t, ev.Content, "context canceled")
 			assert.True(t, ev.IsError)
 		}
 	}

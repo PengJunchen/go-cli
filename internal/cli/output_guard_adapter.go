@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/core"
@@ -31,8 +32,8 @@ func (a *retryPolicyAdapter) Name() string { return a.inner.Name() }
 
 // outputGuardModel wraps an llm.BaseChatModel with an OutputGuard chain.
 // It applies the guard to the Content field of the Generate response,
-// replacing it with sanitized text when the guard flags a violation.
-// Stream calls pass through unchanged (guards operate on complete text only).
+// replacing it with sanitized text when the guard flags a violation. Stream
+// candidates are buffered until their complete text has passed the guard.
 type outputGuardModel struct {
 	inner llm.BaseChatModel
 	guard production.OutputGuard
@@ -45,30 +46,196 @@ func (m *outputGuardModel) Generate(ctx context.Context, msgs []llm.Message, opt
 	if err != nil {
 		return nil, err
 	}
-	if resp != nil && resp.Content != "" && m.guard != nil {
-		result, gErr := m.guard.Check(ctx, resp.Content)
-		if gErr == nil && result != nil {
-			if result.Sanitized != "" && result.Sanitized != resp.Content {
-				slog.InfoContext(ctx, "output_guard_sanitized",
-					"allowed", result.Allowed,
-					"severity", string(result.Severity),
-					"reason", result.Reason,
-				)
-				resp.Content = result.Sanitized
-			} else if !result.Allowed {
-				slog.WarnContext(ctx, "output_guard_blocked",
-					"severity", string(result.Severity),
-					"reason", result.Reason,
-				)
-				resp.Content = "[output blocked by safety guard]"
-			}
+	if resp == nil {
+		return nil, errors.New("output guard: model returned a nil response")
+	}
+	if m.guard != nil {
+		result, checkErr := m.checkCandidate(ctx, resp.Content)
+		if checkErr != nil {
+			return nil, checkErr
+		}
+		if result.Sanitized != "" {
+			resp.Content = result.Sanitized
+		} else if !result.Allowed {
+			return nil, errors.New("output guard: candidate denied")
 		}
 	}
 	return resp, nil
 }
 
 func (m *outputGuardModel) Stream(ctx context.Context, msgs []llm.Message, opts ...llm.Option) (<-chan llm.MessageChunk, error) {
-	return m.inner.Stream(ctx, msgs, opts...)
+	if m.guard == nil {
+		return m.inner.Stream(ctx, msgs, opts...)
+	}
+	if llm.LoopOwnsContinuation(ctx) {
+		return m.inner.Stream(llm.WithLoopOwnedContinuation(ctx), msgs, opts...)
+	}
+	return m.streamAndGuardCompleteResponse(ctx, msgs, opts...)
+}
+
+func (m *outputGuardModel) MaxCandidateBytes() int { return llm.GuardedStreamMaxBytes }
+
+func (m *outputGuardModel) CheckCandidate(ctx context.Context, text string) (*core.CandidateOutputResult, error) {
+	result, err := m.checkCandidate(ctx, text)
+	if err != nil {
+		return nil, err
+	}
+	return &core.CandidateOutputResult{Allowed: result.Allowed, Sanitized: result.Sanitized}, nil
+}
+
+func (m *outputGuardModel) checkCandidate(ctx context.Context, text string) (*production.GuardResult, error) {
+	if m.guard == nil {
+		return &production.GuardResult{Allowed: true}, nil
+	}
+	if len(text) > llm.GuardedStreamMaxBytes {
+		return nil, fmt.Errorf("output guard: candidate exceeds %d-byte limit", llm.GuardedStreamMaxBytes)
+	}
+	result, err := m.guard.Check(ctx, text)
+	if err != nil {
+		return nil, fmt.Errorf("output guard: check candidate: %w", err)
+	}
+	if result == nil {
+		return nil, errors.New("output guard: checker returned nil result")
+	}
+	if result.Sanitized != "" && result.Sanitized != text {
+		slog.InfoContext(ctx, "output_guard_sanitized",
+			"allowed", result.Allowed,
+			"severity", string(result.Severity),
+			"reason", result.Reason,
+		)
+	} else if !result.Allowed {
+		slog.WarnContext(ctx, "output_guard_blocked",
+			"severity", string(result.Severity),
+			"reason", result.Reason,
+		)
+	}
+	return result, nil
+}
+
+func (m *outputGuardModel) streamAndGuardCompleteResponse(ctx context.Context, msgs []llm.Message, opts ...llm.Option) (<-chan llm.MessageChunk, error) {
+	streamCtx, cancel := context.WithCancel(ctx)
+	inner, err := m.inner.Stream(streamCtx, msgs, opts...)
+	if err != nil {
+		cancel()
+		return nil, err
+	}
+	if inner == nil {
+		cancel()
+		return nil, errors.New("output guard: model returned a nil stream")
+	}
+	out := make(chan llm.MessageChunk, 2)
+	go func() {
+		defer close(out)
+		defer cancel()
+		var content strings.Builder
+		var contentBytes int
+		var chunkCount int
+		var final *llm.MessageChunk
+		fail := func(err error) {
+			select {
+			case out <- llm.MessageChunk{Error: err}:
+			default:
+			}
+		}
+		for {
+			var chunk llm.MessageChunk
+			var ok bool
+			select {
+			case <-streamCtx.Done():
+				fail(fmt.Errorf("output guard: stream canceled: %w", streamCtx.Err()))
+				return
+			case chunk, ok = <-inner:
+				if !ok {
+					break
+				}
+			}
+			if !ok {
+				break
+			}
+			if chunk.Error != nil {
+				fail(chunk.Error)
+				return
+			}
+			chunkCount++
+			if chunkCount > llm.GuardedStreamMaxChunks {
+				fail(fmt.Errorf("output guard: stream exceeds %d chunks", llm.GuardedStreamMaxChunks))
+				return
+			}
+			textBytes := llm.RetainedStreamChunkTextBytes(chunk)
+			if textBytes > llm.GuardedStreamMaxBytes-contentBytes {
+				fail(fmt.Errorf("output guard: stream exceeds %d-byte limit", llm.GuardedStreamMaxBytes))
+				return
+			}
+			contentBytes += textBytes
+			if final != nil {
+				fail(errors.New("output guard: stream emitted data after its final chunk"))
+				return
+			}
+			if chunk.Content != "" {
+				content.WriteString(chunk.Content)
+			}
+			if chunk.Final {
+				copy := chunk
+				final = &copy
+			}
+		}
+		if streamCtx.Err() != nil {
+			fail(fmt.Errorf("output guard: stream canceled: %w", streamCtx.Err()))
+			return
+		}
+		if final == nil {
+			fail(errors.New("output guard: stream ended without a final chunk"))
+			return
+		}
+		result, checkErr := m.checkCandidate(streamCtx, content.String())
+		if checkErr != nil {
+			fail(checkErr)
+			return
+		}
+		text := content.String()
+		if result.Sanitized != "" {
+			text = result.Sanitized
+		} else if !result.Allowed {
+			fail(errors.New("output guard: candidate denied"))
+			return
+		}
+		if len(text) > llm.GuardedStreamMaxBytes {
+			fail(fmt.Errorf("output guard: sanitized candidate exceeds %d-byte limit", llm.GuardedStreamMaxBytes))
+			return
+		}
+		complete := &llm.Message{
+			Role:         llm.RoleAssistant,
+			Content:      text,
+			ToolCalls:    final.ToolCalls,
+			FinishReason: final.FinishReason,
+			Usage:        final.Usage,
+		}
+		retainedBytes, sizeErr := llm.RetainedMessagePayloadBytes(complete)
+		if sizeErr != nil {
+			fail(fmt.Errorf("output guard: encode complete response: %w", sizeErr))
+			return
+		}
+		if retainedBytes > llm.GuardedStreamMaxBytes {
+			fail(fmt.Errorf("output guard: complete response exceeds %d-byte limit", llm.GuardedStreamMaxBytes))
+			return
+		}
+		if text != "" {
+			select {
+			case out <- llm.MessageChunk{Role: llm.RoleAssistant, Content: text}:
+			case <-streamCtx.Done():
+				fail(fmt.Errorf("output guard: stream canceled: %w", streamCtx.Err()))
+				return
+			}
+		}
+		final.Content = ""
+		select {
+		case out <- *final:
+		case <-streamCtx.Done():
+			fail(fmt.Errorf("output guard: stream canceled: %w", streamCtx.Err()))
+			return
+		}
+	}()
+	return out, nil
 }
 
 // circuitBreakerModel wraps an llm.BaseChatModel with CircuitBreaker protection.

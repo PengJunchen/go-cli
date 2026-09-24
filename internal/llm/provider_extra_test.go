@@ -135,6 +135,21 @@ func TestConvertAssistantToolCalls(t *testing.T) {
 	assert.Nil(t, empty[0].Args)
 }
 
+func TestConvertAssistantToolCalls_PreservesNonObjectWireArgumentsForRejection(t *testing.T) {
+	for _, rawArgs := range []string{"null", "[]", "true", "42", `"value"`, "not-json"} {
+		t.Run(rawArgs, func(t *testing.T) {
+			calls := convertAssistantToolCalls([]openAIToolCall{{
+				ID: "call_1", Type: "function",
+				Function: openAIFunction{Name: "read", Arguments: rawArgs},
+			}})
+			require.Len(t, calls, 1)
+			got, ok := calls[0].Args.(string)
+			require.True(t, ok, "wire arguments must remain distinguishable from typed nil no-arg tool calls")
+			assert.Equal(t, rawArgs, got)
+		})
+	}
+}
+
 // TestHTTPChatModelGenerate_BodyDrained verifies reading the response fully
 // even when the body lacks a closing decode (helper for coverage of the
 // io.ReadAll error branch is impractical; this asserts decode error), at least
