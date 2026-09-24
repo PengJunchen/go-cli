@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -702,7 +703,14 @@ func (g *DefaultGitTool) runReadOnly(ctx context.Context, args ...string) (strin
 	cmd.Env = gitReadOnlyEnvironment(os.Environ())
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return string(out), fmt.Errorf("%s", strings.TrimSpace(string(out)))
+		commandErr := err
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			commandErr = errors.Join(err, ctxErr)
+		}
+		if diagnostic := strings.TrimSpace(string(out)); diagnostic != "" {
+			return string(out), fmt.Errorf("git read-only command failed (%s): %w", diagnostic, commandErr)
+		}
+		return string(out), fmt.Errorf("git read-only command failed: %w", commandErr)
 	}
 	return string(out), nil
 }

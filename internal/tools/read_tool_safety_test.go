@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -205,4 +206,64 @@ func TestGitReadCommandsKeepHostSelectedRepositoryContext(t *testing.T) {
 	contextValues, err := os.ReadFile(contextPath)
 	require.NoError(t, err)
 	assert.Equal(t, "host-git-dir|host-work-tree|host-index|0|unset|unset", string(contextValues), "read hardening must preserve repository location while suppressing config overrides and optional writes")
+}
+
+func TestGitReadOnlyPreservesMissingExecutableError(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	git := NewDefaultGitTool(t.TempDir())
+
+	_, err := git.runReadOnly(context.Background(), "status")
+	require.Error(t, err)
+	assert.NotEmpty(t, err.Error())
+
+	var execErr *exec.Error
+	require.ErrorAs(t, err, &execErr)
+	assert.Equal(t, "git", execErr.Name)
+}
+
+func TestGitReadOnlyPreservesContextCancellation(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("context cancellation fixture requires a POSIX shell")
+	}
+	dir := t.TempDir()
+	startedPath := filepath.Join(dir, "started")
+	fakeGit := filepath.Join(dir, "git")
+	script := "#!/bin/sh\nprintf started > \"$TOOL_GIT_STARTED\"\nexec /bin/sleep 30\n"
+	require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0o700))
+	t.Setenv("PATH", dir)
+	t.Setenv("TOOL_GIT_STARTED", startedPath)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	errCh := make(chan error, 1)
+	go func() {
+		_, err := NewDefaultGitTool(dir).runReadOnly(ctx, "status")
+		errCh <- err
+	}()
+
+	require.Eventually(t, func() bool {
+		_, err := os.Stat(startedPath)
+		return err == nil
+	}, 3*time.Second, 10*time.Millisecond, "fake git should start before cancellation")
+	cancel()
+
+	select {
+	case err := <-errCh:
+		require.Error(t, err)
+		assert.ErrorIs(t, err, context.Canceled)
+	case <-time.After(3 * time.Second):
+		t.Fatal("read-only git command did not stop after context cancellation")
+	}
+}
+
+func TestGitReadOnlyErrorIncludesGitDiagnostic(t *testing.T) {
+	dir := t.TempDir()
+	fakeGit := filepath.Join(dir, "git")
+	script := "#!/bin/sh\nprintf 'fatal: configured read failure\\n' >&2\nexit 23\n"
+	require.NoError(t, os.WriteFile(fakeGit, []byte(script), 0o700))
+	t.Setenv("PATH", dir)
+
+	_, err := NewDefaultGitTool(dir).runReadOnly(context.Background(), "status")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "fatal: configured read failure")
 }
