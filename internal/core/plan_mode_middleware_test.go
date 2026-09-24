@@ -29,18 +29,17 @@ func TestPlanModeToolInterceptor_BlocksWriteToolsWhenActive(t *testing.T) {
 	assert.Contains(t, err.Error(), "write")
 }
 
-func TestPlanModeToolInterceptor_AllowsReadToolsWhenActive(t *testing.T) {
+func TestPlanModeToolInterceptor_AllowsControlToolsWhenActive(t *testing.T) {
 	ctrl := NewDefaultPlanModeController()
 	require.NoError(t, ctrl.Enter(context.Background(), "planning"))
 	interceptor := NewPlanModeToolInterceptor(ctrl)
 
 	for _, name := range []string{
-		"read", "git_status", "git_diff", "web_search", "web_fetch",
-		"lsp_query", "tool_search", "ask_user", "goal_get", "goal_list", "task_get", "task_list",
+		"tool_search", "ask_user", "goal_get", "goal_list", "task_get", "task_list",
 		"enter_plan_mode", "exit_plan_mode",
 	} {
 		err := interceptor(name, "call-1", nil)
-		require.NoError(t, err, "%s should remain available for read-only exploration", name)
+		require.NoError(t, err, "%s should remain available as an explicit Plan control", name)
 	}
 }
 
@@ -49,7 +48,10 @@ func TestPlanModeToolInterceptor_FailsClosedForUnknownAndExternalTools(t *testin
 	require.NoError(t, ctrl.Enter(context.Background(), "planning"))
 	interceptor := NewPlanModeToolInterceptor(ctrl)
 
-	for _, name := range []string{"git_commit", "git_pull", "dispatch_subagent", "mcp__server__write", "custom_side_effect", "extension_tool", "unknown_tool"} {
+	for _, name := range []string{
+		"read", "grep", "find", "ls", "lsp_query", "git_status", "git_diff", "web_fetch", "web_search",
+		"git_commit", "git_pull", "dispatch_subagent", "mcp__server__write", "custom_side_effect", "extension_tool", "unknown_tool",
+	} {
 		err := interceptor(name, "call-1", nil)
 		require.Error(t, err, "%s must be blocked in plan mode", name)
 		assert.Contains(t, err.Error(), "blocked")
@@ -74,7 +76,7 @@ func TestPlanModeToolWrapper_FailsClosedForUnknownAndExternalTools(t *testing.T)
 	assert.Zero(t, executions, "blocked tools must not reach the executor")
 }
 
-func TestPlanModeToolWrapperAllowsReadOnlyNetworkTools(t *testing.T) {
+func TestPlanModeToolWrapperBlocksNetworkTools(t *testing.T) {
 	ctrl := NewDefaultPlanModeController()
 	require.NoError(t, ctrl.Enter(context.Background(), "planning"))
 	executions := 0
@@ -85,11 +87,11 @@ func TestPlanModeToolWrapperAllowsReadOnlyNetworkTools(t *testing.T) {
 
 	for _, name := range []string{"web_fetch", "web_search"} {
 		result, err := wrapped(context.Background(), tools.ToolCall{Name: name})
-		require.NoError(t, err, "%s should remain available for read-only exploration", name)
+		require.ErrorIs(t, err, ErrPlanModeBlocked, "%s is a network effect, not a local read", name)
 		require.NotNil(t, result)
-		assert.Equal(t, name, result.Output)
+		assert.Equal(t, true, result.Metadata["plan_mode_blocked"])
 	}
-	assert.Equal(t, 2, executions)
+	assert.Zero(t, executions)
 }
 
 func TestPlanModeToolInterceptor_NilControllerAllowsAll(t *testing.T) {

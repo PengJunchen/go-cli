@@ -25,9 +25,9 @@ func TestUnifiedInterception_PlanModeViaToolInterceptor(t *testing.T) {
 	assert.True(t, ev.IsCancelled(), "write tool should be cancelled in plan mode")
 }
 
-// TestUnifiedInterception_ReadToolsNotBlocked verifies that read tools are
-// not blocked by the plan-mode interceptor even when plan mode is active.
-func TestUnifiedInterception_ReadToolsNotBlocked(t *testing.T) {
+// TestUnifiedInterception_UnverifiedReadToolsFailClosed verifies that a tool
+// name alone does not prove workspace-scoped read behavior in Plan Mode.
+func TestUnifiedInterception_UnverifiedReadToolsFailClosed(t *testing.T) {
 	defer ClearToolInterceptors()
 
 	ctrl := NewDefaultPlanModeController()
@@ -35,7 +35,7 @@ func TestUnifiedInterception_ReadToolsNotBlocked(t *testing.T) {
 	RegisterToolInterceptor(NewPlanModeToolInterceptor(ctrl))
 
 	ev := &PreToolCallEvent{ToolName: "read", ToolCallID: "call-1"}
-	assert.False(t, ev.IsCancelled(), "read tool should not be cancelled in plan mode")
+	assert.True(t, ev.IsCancelled(), "an unverified read tool should be cancelled in plan mode")
 }
 
 // TestUnifiedInterception_MultipleInterceptors verifies that multiple

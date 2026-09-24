@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/mock"
 	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tracing"
@@ -117,6 +118,51 @@ func TestMiddlewareDenyFirstDoesNotCallNext(t *testing.T) {
 	require.ErrorIs(t, err, ErrToolDenied)
 	assert.Nil(t, res)
 	assert.False(t, called, "denied tool must not be executed")
+}
+
+func TestMiddlewareRejectsUnknownClassification(t *testing.T) {
+	mw := NewApprovalMiddleware(&countingClassifier{decision: Classification(97)}, newStubStore())
+	called := false
+	wrapped := mw.WrapToolCall(func(context.Context, tools.ToolCall) (*tools.ToolResult, error) {
+		called = true
+		return &tools.ToolResult{}, nil
+	})
+
+	_, err := wrapped(context.Background(), call("read_file"))
+	require.ErrorIs(t, err, ErrToolDenied)
+	assert.False(t, called, "an unknown classification must not reach the executor")
+}
+
+func TestMiddlewareRejectsUnknownPermissionMode(t *testing.T) {
+	mw := NewApprovalMiddleware(&AllowAllClassifier{}, newStubStore(),
+		WithPermissionModeResolver(NewDefaultPermissionModeResolver()),
+	)
+	mw.SetPermissionMode(PermissionMode(97))
+	called := false
+	wrapped := mw.WrapToolCall(func(context.Context, tools.ToolCall) (*tools.ToolResult, error) {
+		called = true
+		return &tools.ToolResult{}, nil
+	})
+
+	_, err := wrapped(context.Background(), call("read_file"))
+	require.ErrorIs(t, err, ErrInvalidPermissionMode)
+	assert.False(t, called, "an unknown permission mode must not reach the executor")
+}
+
+func TestMiddlewareApprovalStateWritersPublishFence(t *testing.T) {
+	fence := tools.NewDispatchFence()
+	mw := NewApprovalMiddleware(&AllowAllClassifier{}, newStubStore(), WithDispatchFence(fence))
+	initial := fence.Snapshot()
+
+	mw.SetPermissionMode(PermissionAuto)
+	modeSnapshot := fence.Snapshot()
+	assert.Equal(t, initial.Approval+1, modeSnapshot.Approval)
+
+	mw.ClearSession()
+	clearSnapshot := fence.Snapshot()
+	assert.Equal(t, modeSnapshot.Approval+1, clearSnapshot.Approval)
+	assert.Equal(t, modeSnapshot.Registry, clearSnapshot.Registry)
+	assert.Equal(t, modeSnapshot.Plan, clearSnapshot.Plan)
 }
 
 // TestMiddlewareNilClassifierDefaultsToDenyAll verifies that when a nil
@@ -365,6 +411,50 @@ func TestMiddlewareClearSession(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, 2, store.getCount(), "ClearSession must force store consultation")
 	require.Equal(t, 1, counter.count(), "store hit should still skip classifier")
+}
+
+func TestPreparedPlanControllerReplacementRequiresSharedFence(t *testing.T) {
+	fence := tools.NewDispatchFence()
+	controller := core.NewDefaultPlanModeController(fence)
+	mw := NewApprovalMiddleware(&DenyAllClassifier{}, NewInMemoryApprovalStore(),
+		WithDispatchFence(fence),
+		WithPlanModeController(controller),
+	)
+
+	wrongFenceController := core.NewDefaultPlanModeController()
+	before := fence.Snapshot()
+	require.ErrorIs(t, mw.SetPlanModeController(wrongFenceController), tools.ErrDispatchFenceUnavailable)
+	assert.Equal(t, before, fence.Snapshot(), "rejecting another controller must not change the shared policy")
+
+	replacement := core.NewDefaultPlanModeController(fence)
+	require.NoError(t, mw.SetPlanModeController(replacement))
+	after := fence.Snapshot()
+	assert.Equal(t, before.Approval+1, after.Approval, "controller replacement invalidates pending approvals")
+	_, _, active := mw.preparedState()
+	assert.Same(t, replacement, active)
+}
+
+func TestApprovalModeAndSessionClearAdvancePreparedFence(t *testing.T) {
+	fence := tools.NewDispatchFence()
+	controller := core.NewDefaultPlanModeController(fence)
+	mw := NewApprovalMiddleware(&DenyAllClassifier{}, NewInMemoryApprovalStore(),
+		WithDispatchFence(fence),
+		WithPlanModeController(controller),
+		WithPermissionModeResolver(NewDefaultPermissionModeResolver()),
+	)
+
+	beforeMode := fence.Snapshot()
+	mw.SetPermissionMode(PermissionAuto)
+	afterMode := fence.Snapshot()
+	assert.Equal(t, beforeMode.Approval+1, afterMode.Approval)
+	assert.Equal(t, beforeMode.Registry, afterMode.Registry)
+	assert.Equal(t, beforeMode.Plan, afterMode.Plan)
+
+	mw.ClearSession()
+	afterClear := fence.Snapshot()
+	assert.Equal(t, afterMode.Approval+1, afterClear.Approval)
+	assert.Equal(t, afterMode.Registry, afterClear.Registry)
+	assert.Equal(t, afterMode.Plan, afterClear.Plan)
 }
 
 // AC-3: verify no data races between concurrent mode switches and tool calls.

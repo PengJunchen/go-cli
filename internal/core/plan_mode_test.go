@@ -53,7 +53,9 @@ func TestDefaultPlanModeController_ShouldBlockWrite_WhenActive(t *testing.T) {
 		"git_commit", "git_checkout", "git_push", "git_create_branch", "git_merge",
 		"git_stash", "git_stash_pop", "git_reset", "git_revert", "git_pull", "git_fetch",
 		"git_pr_create", "todo_write", "task_create", "task_update", "goal_create", "goal_update",
-		"dispatch_subagent", "mcp__filesystem__write_file",
+		"dispatch_subagent", "mcp__filesystem__write_file", "web_fetch", "web_search",
+		"read", "ls", "find", "grep", "lsp_query", "git_diff", "git_status",
+		"git_log", "git_branch", "git_blame", "git_remote",
 		"custom_side_effect", "extension_side_effect", "unknown_tool",
 	}
 	for _, name := range writeTools {
@@ -65,14 +67,13 @@ func TestDefaultPlanModeController_ShouldNotBlockReadTools_WhenActive(t *testing
 	c := NewDefaultPlanModeController()
 	require.NoError(t, c.Enter(context.Background(), "planning"))
 
-	readTools := []string{
-		"read", "ls", "find", "grep", "lsp_query", "tool_search",
-		"git_diff", "git_status", "git_log", "git_branch", "git_blame", "git_remote",
-		"web_fetch", "web_search", "goal_get", "goal_list", "task_get", "task_list", "ask_user",
+	controlTools := []string{
+		"tool_search",
+		"goal_get", "goal_list", "task_get", "task_list", "ask_user",
 		"enter_plan_mode", "exit_plan_mode",
 	}
-	for _, name := range readTools {
-		assert.False(t, c.ShouldBlockWrite(name), "should not block read tool %q when active", name)
+	for _, name := range controlTools {
+		assert.False(t, c.ShouldBlockWrite(name), "should not block trusted control tool %q when active", name)
 	}
 }
 

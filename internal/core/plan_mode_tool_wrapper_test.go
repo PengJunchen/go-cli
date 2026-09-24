@@ -68,7 +68,7 @@ func TestPlanModeToolWrapper_BlocksBashWhenActive(t *testing.T) {
 	assert.Equal(t, true, result.Metadata["plan_mode_blocked"])
 }
 
-func TestPlanModeToolWrapper_AllowsReadWhenActive(t *testing.T) {
+func TestPlanModeToolWrapper_BlocksUnverifiedReadWhenActive(t *testing.T) {
 	var callCount atomic.Int32
 	next := mockExecutor(&callCount)
 
@@ -77,13 +77,13 @@ func TestPlanModeToolWrapper_AllowsReadWhenActive(t *testing.T) {
 	wrapped := NewPlanModeToolWrapper(ctrl)(next)
 
 	result, err := wrapped(context.Background(), tools.ToolCall{Name: "read"})
-	require.NoError(t, err)
-	assert.Equal(t, int32(1), callCount.Load(), "next should be called for read tools")
+	require.ErrorIs(t, err, ErrPlanModeBlocked)
+	assert.Equal(t, int32(0), callCount.Load(), "unverified reads must not bypass prepared effect policy")
 	require.NotNil(t, result)
-	assert.Equal(t, "ok", result.Output)
+	assert.Equal(t, true, result.Metadata["plan_mode_blocked"])
 }
 
-func TestPlanModeToolWrapper_AllowsGrepWhenActive(t *testing.T) {
+func TestPlanModeToolWrapper_BlocksUnverifiedGrepWhenActive(t *testing.T) {
 	var callCount atomic.Int32
 	next := mockExecutor(&callCount)
 
@@ -92,10 +92,10 @@ func TestPlanModeToolWrapper_AllowsGrepWhenActive(t *testing.T) {
 	wrapped := NewPlanModeToolWrapper(ctrl)(next)
 
 	result, err := wrapped(context.Background(), tools.ToolCall{Name: "grep"})
-	require.NoError(t, err)
-	assert.Equal(t, int32(1), callCount.Load(), "next should be called for grep tools")
+	require.ErrorIs(t, err, ErrPlanModeBlocked)
+	assert.Equal(t, int32(0), callCount.Load(), "unverified search tools must not bypass prepared effect policy")
 	require.NotNil(t, result)
-	assert.Equal(t, "ok", result.Output)
+	assert.Equal(t, true, result.Metadata["plan_mode_blocked"])
 }
 
 func TestPlanModeToolWrapper_PassthroughWhenInactive(t *testing.T) {
@@ -161,10 +161,10 @@ func TestPlanModeToolWrapper_NilNext(t *testing.T) {
 	require.NotNil(t, result)
 	assert.Equal(t, true, result.Metadata["plan_mode_blocked"])
 
-	// A read tool with nil next returns nil, nil (no panic).
+	// An unverified read is blocked before a nil next executor could run.
 	result2, err2 := wrapped(context.Background(), tools.ToolCall{Name: "read"})
-	assert.NoError(t, err2)
-	assert.Nil(t, result2)
+	assert.ErrorIs(t, err2, ErrPlanModeBlocked)
+	assert.NotNil(t, result2)
 }
 
 // planModeStubToolDef is a minimal ToolDefinition for the integration test.

@@ -22,19 +22,18 @@ type PlanModeController interface {
 	IsActive() bool
 	// ShouldBlockWrite reports whether the named tool should be blocked given
 	// the current plan-mode state. In active Plan Mode, only explicitly
-	// allowlisted read-only tools pass.
+	// allowlisted controls pass this coarse name-based preflight.
 	ShouldBlockWrite(toolName string) bool
 }
 
-// planModeReadOnlyToolNames is the temporary Plan Mode allowlist. Unknown,
-// external, and mutating tools fail closed until tools declare effect metadata.
-// exit_plan_mode preserves its existing behavior while D-01 remains deferred.
+// planModeReadOnlyToolNames is the coarse preflight allowlist for explicit
+// control tools. Prepared approval still validates captured registration
+// provenance; a matching name alone does not authorize execution. Unverified
+// reads, external tools, and mutations fail closed until their effects and
+// scopes are proven. exit_plan_mode preserves its existing behavior while
+// D-01 remains deferred.
 var planModeReadOnlyToolNames = map[string]struct{}{
-	"read": {}, "grep": {}, "find": {}, "ls": {},
-	"lsp_query": {}, "tool_search": {}, "ask_user": {},
-	"git_diff": {}, "git_status": {}, "git_log": {}, "git_branch": {},
-	"git_blame": {}, "git_remote": {},
-	"web_fetch": {}, "web_search": {},
+	"tool_search": {}, "ask_user": {},
 	"goal_get": {}, "goal_list": {}, "task_get": {}, "task_list": {},
 	"enter_plan_mode": {}, "exit_plan_mode": {},
 }
@@ -45,32 +44,56 @@ type DefaultPlanModeController struct {
 	mu     sync.RWMutex
 	active bool
 	reason string
+	fence  *tools.DispatchFence
 }
 
 var _ PlanModeController = (*DefaultPlanModeController)(nil)
 
 // NewDefaultPlanModeController returns a DefaultPlanModeController with plan
-// mode initially inactive.
-func NewDefaultPlanModeController() *DefaultPlanModeController {
-	return &DefaultPlanModeController{}
+// mode initially inactive. Supplying a fence lets Plan transitions invalidate
+// prepared tool calls against the same state used by the registry and approval
+// policy. When omitted, the controller owns a fence for compatibility with
+// callers that do not use prepared dispatch.
+func NewDefaultPlanModeController(fences ...*tools.DispatchFence) *DefaultPlanModeController {
+	fence := tools.NewDispatchFence()
+	if len(fences) > 0 && fences[0] != nil {
+		fence = fences[0]
+	}
+	return &DefaultPlanModeController{fence: fence}
+}
+
+// DispatchFence returns the fence used to publish Plan Mode state transitions.
+func (c *DefaultPlanModeController) DispatchFence() *tools.DispatchFence {
+	if c == nil {
+		return nil
+	}
+	return c.fence
 }
 
 // Enter activates plan mode and logs the reason.
 func (c *DefaultPlanModeController) Enter(_ context.Context, reason string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.active = true
-	c.reason = reason
+	if _, err := c.fence.Publish(tools.DispatchFencePlan, nil, func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.active = true
+		c.reason = reason
+	}); err != nil {
+		return fmt.Errorf("publish Plan Mode entry: %w", err)
+	}
 	slog.Info("core.plan_mode.enter", "reason", reason)
 	return nil
 }
 
 // Exit deactivates plan mode and logs the summary.
 func (c *DefaultPlanModeController) Exit(_ context.Context, summary string) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.active = false
-	c.reason = ""
+	if _, err := c.fence.Publish(tools.DispatchFencePlan, nil, func() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.active = false
+		c.reason = ""
+	}); err != nil {
+		return fmt.Errorf("publish Plan Mode exit: %w", err)
+	}
 	slog.Info("core.plan_mode.exit", "summary", summary)
 	return nil
 }
@@ -83,8 +106,8 @@ func (c *DefaultPlanModeController) IsActive() bool {
 }
 
 // ShouldBlockWrite reports whether the named tool should be blocked. It returns
-// true when plan mode is active and the tool is not explicitly allowlisted as
-// read-only.
+// true when plan mode is active and the tool name is not in the coarse control
+// preflight set. Prepared policy separately verifies trusted identity/effects.
 func (c *DefaultPlanModeController) ShouldBlockWrite(toolName string) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
