@@ -54,3 +54,18 @@
 ## 最终判定
 
 在 `6176be3`，shared-prefix ID 保持、compaction source boundary 和 sequence/tree 基本校验符合合同；但公共读出口能突变 canonical prefix，且 V1 checkpoint branch metadata 不随 session tree 重建。两项都是行为缺陷而非测试文案问题，当前快照不能获 BLD01 tree/projection 通过。待 builder 提交最小修复后，应在新的固定快照复验这两条回归，再将结果附于本报告或单独增补明确的复审 section。
+
+## Follow-up：固定快照 `ece43a8` tree closure 复审
+
+**tree/projection delta：通过。** 固定提交 `ece43a862b48b97a6453814a02a4a16a1d87af77` 的 parent 正是 storage 修复快照 `c4a6534f2b0bd87efc414cdef3be0b78efce4a03`；独立 worktree `/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/r2-tree-review-ece43a8` 为干净 detached snapshot。先用 `go test ./internal/session -list` 确认以下 7 个精确测试命中，再用 `GOMAXPROCS=2 go test -p 2 -race ./internal/session -count=1 -run '<7 exact names>'` 复验并通过：`TestTree_MoveToBranchSummaryCannotMutateStoredEntries`、`TestContextManagerBuildContextOutputsDoNotAliasNestedArguments`、`TestDeriveMessagesReturnsDefensiveCopies`、`TestTreeBuilderRestoresActiveLeafCheckpointPointer`、`TestTreeBuilderRejectsBranchCheckpointOutsideParentBranch`、`TestTreeBuilderRejectsActiveLeafFromUnrelatedBranch`、`TestTreeBuilderRestoresBranchMetadataFromDurableCheckpoint`。没有重复全 session race。
+
+- **R2TREE-01 residual — `MoveTo` 外部 summarizer 可突变内部 canonical entries：已关闭。** `DefaultSessionTree.MoveTo` 现在在持有 tree mutex 时用 `e.clone()` 建立深快照，再于解锁后调用外部 `BranchSummary.Summarize`（`internal/session/tree.go:192-203,219-232`）。新回归让 summarizer 修改嵌套 tool args、provider ToolCallID 和 content block，随后从 tree 重读原分支，canonical 值不变（`branch_summary_test.go:130-160`）。
+- **ContextManager 输出别名：已关闭。** `BuildContext` 分别克隆逆序 `Traversed` 与投影输入 `branchVals`，因而返回的 `SessionContext.Messages` 和 `Traversed` 既不指回 tree 内部，也不共享彼此的嵌套参数、content blocks（`context.go:73-85`）。新测试分别改写 Messages 与 Traversed 后确认另一个投影保持原值（`context_test.go:425-448`）。
+- **`DeriveMessages` 输入别名：已关闭。** 函数现在对投影结果逐 entry 深克隆再返回（`derive.go:20-29`）；测试覆盖嵌套 map/slice、content block 和 Usage（`derive_test.go:80-101`）。
+- **V1 branch-journal restore validation：已接入并通过定向验证。** `buildVersionOneTree` 在 append 至树、恢复 metadata 前对排序后的完整记录调用 `validateDurableBranchJournal`（`tree_builder.go:176-189`），拒绝 branch checkpoint base leaf 脱离声明 parent branch、active-leaf 指向不相关 branch；有效 JSONL checkpoint round-trip 仍重建 branch metadata。测试夹具把此前无 checkpoint 的 `left-branch` 坐标修正为 `main`，与 validator 所要求的 durable branch authority 一致。
+
+ece43a8 关闭了本报告先前记录的 tree/projection 残项，tree delta 可批准。这个判断只覆盖 tree/projection：该提交以 c4 为 parent，因此也包含 R2STO-04 的 system-row穿插缺陷，不能据此把 JSONL storage 或整个 BLD-01 标为通过；该项仍跟踪在 [r2-storage-review.md](r2-storage-review.md)。完整 RecoveryAuthority 跨行 ActionID 配对仍是后续 R2 gate。
+
+## Combined follow-up：`599045d` + `deb13e9`
+
+后续 storage 修复提交 `599045d` 和 `deb13e9` 位于 ece43a8 之后。R2STO-04 的 system-row interleave 与 compaction/visibility 后 orphaned 或 unclosed tool group 现在在原始 journal 和 provider-ready projection 两侧分别失败关闭；其固定快照、精确 race 与 compaction 对抗证据记录在 [r2-storage-review.md](r2-storage-review.md)。因此截至 `deb13e9`，已复核的 BLD01 storage + tree/projection substrate 可作为 **partial slice** 接受。完整 RecoveryAuthority 对 ActionID/intent/receipt 跨行配对、恢复决策与 resource quarantine 仍未在该 partial 判定内通过。
