@@ -596,6 +596,7 @@ type preparedInvocationConfig struct {
 	schema      ToolSchemaSnapshot
 	call        FrozenToolCall
 	execute     func(context.Context, ToolCall) (*ToolResult, error)
+	schedule    func(context.Context, *preparedInvocation) (*ToolResult, error)
 }
 
 type preparedInvocation struct {
@@ -606,6 +607,7 @@ type preparedInvocation struct {
 	schema      ToolSchemaSnapshot
 	call        FrozenToolCall
 	execute     func(context.Context, ToolCall) (*ToolResult, error)
+	schedule    func(context.Context, *preparedInvocation) (*ToolResult, error)
 	consumed    atomic.Bool
 	committed   atomic.Bool
 }
@@ -623,6 +625,7 @@ func newPreparedInvocation(config preparedInvocationConfig) *preparedInvocation 
 		schema:      config.schema,
 		call:        config.call,
 		execute:     config.execute,
+		schedule:    config.schedule,
 	}
 }
 
@@ -663,11 +666,14 @@ func (p *preparedInvocation) Dispatch(ctx context.Context) (*ToolResult, error) 
 	if err := validatePreparedContext(ctx); err != nil {
 		return nil, err
 	}
+	if p.schedule != nil {
+		return p.schedule(ctx, p)
+	}
 	return p.commitAndInvoke(ctx)
 }
 
-// commitAndInvoke performs final generation validation and invokes the exact
-// captured executor after public admission has been consumed.
+// commitAndInvoke is also the only prepared execution entrypoint used by a
+// queued worker after dequeue-time generation validation.
 func (p *preparedInvocation) commitAndInvoke(ctx context.Context) (*ToolResult, error) {
 	if p == nil || p.execute == nil {
 		return nil, ErrPreparedInvocationUnavailable

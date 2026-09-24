@@ -33,8 +33,13 @@ func (r *MiddlewareToolRegistry) PrepareToolCall(ctx context.Context, call ToolC
 	if snapshot.definition == nil || snapshot.identity.ToolName() != call.Name {
 		return nil, ErrPreparedRegistrationUnavailable
 	}
+	var preparedQueue *DefaultFileMutationQueue
 	if mutationToolNames[call.Name] {
-		return nil, ErrPreparedMutationQueueUnavailable
+		var ok bool
+		preparedQueue, ok = snapshot.pipeline.stages.MutationQueue.(*DefaultFileMutationQueue)
+		if !ok {
+			return nil, ErrPreparedMutationQueueUnavailable
+		}
 	}
 
 	normalized := call
@@ -57,6 +62,14 @@ func (r *MiddlewareToolRegistry) PrepareToolCall(ctx context.Context, call ToolC
 		schema := snapshot.schema.Schema()
 		if err := validateCapturedSchema(normalized.Args, schema); err != nil {
 			return nil, fmt.Errorf("tools: validate prepared call %q: %w", call.Name, err)
+		}
+	}
+	if mutationToolNames[call.Name] {
+		if err := validateMutationPayload(normalized); err != nil {
+			return nil, fmt.Errorf("tools: invalid prepared mutation payload: %w", err)
+		}
+		if mutationPathFromCall(normalized) == "" {
+			return nil, errors.New("tools: prepared mutation has no file path")
 		}
 	}
 	frozenCall, err := freezeToolCall(normalized)
@@ -94,6 +107,9 @@ func (r *MiddlewareToolRegistry) PrepareToolCall(ctx context.Context, call ToolC
 		schema:      snapshot.schema,
 		call:        frozenCall,
 		execute:     executor,
+	}
+	if preparedQueue != nil {
+		config.schedule = preparedMutationScheduler(preparedQueue, frozenCall)
 	}
 	if streaming, ok := snapshot.definition.(StreamingBashTool); ok {
 		streamExecutor := preparedStreamingExecutor(streaming, snapshot.pipeline.stages.ExecutionWrappers, frozenCall)
@@ -173,4 +189,41 @@ func matchesFrozenCall(call ToolCall, frozen FrozenToolCall) bool {
 	}
 	candidate, err := freezeToolCall(call)
 	return err == nil && candidate.digest == frozen.digest
+}
+
+func preparedMutationScheduler(queue *DefaultFileMutationQueue, frozen FrozenToolCall) func(context.Context, *preparedInvocation) (*ToolResult, error) {
+	return func(ctx context.Context, invocation *preparedInvocation) (*ToolResult, error) {
+		call := frozen.ToolCall()
+		mutation := FileMutation{
+			FilePath:  mutationPathFromCall(call),
+			Operation: call.Name,
+			Content:   mutationContentFromCall(call),
+			ToolName:  call.Name,
+		}
+		resultCh, err := queue.enqueuePrepared(ctx, mutation, invocation)
+		if err != nil {
+			return nil, fmt.Errorf("tools: enqueue prepared %s: %w", call.Name, err)
+		}
+		select {
+		case result := <-resultCh:
+			if result.Error != nil {
+				return nil, result.Error
+			}
+			if result.ToolResult == nil {
+				return &ToolResult{
+					Output:   fmt.Sprintf("%s queued and applied for %s", call.Name, mutation.FilePath),
+					Metadata: map[string]any{"path": mutation.FilePath, "queued": true},
+				}, nil
+			}
+			copy := *result.ToolResult
+			copy.Metadata = make(map[string]any, len(result.ToolResult.Metadata)+1)
+			for key, value := range result.ToolResult.Metadata {
+				copy.Metadata[key] = value
+			}
+			copy.Metadata["queued"] = true
+			return &copy, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
 }
