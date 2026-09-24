@@ -647,7 +647,10 @@ func (s *REPLSession) executeTurn() {
 // event stream, and expands @-mentions in the user input.
 func (s *REPLSession) setupTurn() {
 	s.turnSpan, s.turnCtx = tracing.SpanFromContext(s.spanCtx, spanInteractiveTurn, tracing.SpanKindInternal)
-	s.turnSpan.SetAttributes(tracing.SensitiveAttribute("user_message", s.line))
+	s.turnSpan.SetAttributes(
+		tracing.SensitiveAttribute("user_message", s.line),
+		tracing.Attribute{Key: "user_message_length", Value: len(s.line)},
+	)
 
 	// Expand @-mentions before processing. The SensitiveAttribute above
 	// already captured the original user input; Expand modifies line so

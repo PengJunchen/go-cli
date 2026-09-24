@@ -1,0 +1,43 @@
+Verification on the privacy lane working tree.
+The baseline red canary run is recorded separately in privacy-red.log.
+
+CLI exact-list command: rtk proxy go test -list '^(TestNewTracingFileFailureDoesNotEmitRawPrompt|TestDefaultTraceContainsNoPrompt|TestDefaultInteractiveTraceContainsNoPrompt)$' ./cmd/cli
+TestNewTracingFileFailureDoesNotEmitRawPrompt
+TestDefaultTraceContainsNoPrompt
+TestDefaultInteractiveTraceContainsNoPrompt
+ok  	github.com/pengjunchen/go-cli/cmd/cli	0.016s
+
+CLI canary command: rtk proxy go test -v -run '^(TestNewTracingFileFailureDoesNotEmitRawPrompt|TestDefaultTraceContainsNoPrompt|TestDefaultInteractiveTraceContainsNoPrompt)$' ./cmd/cli -count=1
+=== RUN   TestNewTracingFileFailureDoesNotEmitRawPrompt
+--- PASS: TestNewTracingFileFailureDoesNotEmitRawPrompt (0.00s)
+=== RUN   TestDefaultTraceContainsNoPrompt
+--- PASS: TestDefaultTraceContainsNoPrompt (0.01s)
+=== RUN   TestDefaultInteractiveTraceContainsNoPrompt
+--- PASS: TestDefaultInteractiveTraceContainsNoPrompt (0.21s)
+PASS
+ok  	github.com/pengjunchen/go-cli/cmd/cli	0.235s
+
+Tracing exact-list command: rtk proxy go test -list '^(TestRedaction_DefaultSensitiveKeysPreserveMetadata|TestRedactingSlogHandlerMasksPromptAndToolArgs|TestRedactingSlogHandlerMasksSensitiveGroups|TestRedactingSlogHandlerDoesNotMutateOriginalRecord|TestRedactingSlogHandlerConcurrentGroupDoesNotMutateRecord)$' ./internal/tracing
+TestRedaction_DefaultSensitiveKeysPreserveMetadata
+TestRedactingSlogHandlerMasksPromptAndToolArgs
+TestRedactingSlogHandlerMasksSensitiveGroups
+TestRedactingSlogHandlerDoesNotMutateOriginalRecord
+TestRedactingSlogHandlerConcurrentGroupDoesNotMutateRecord
+ok  	github.com/pengjunchen/go-cli/internal/tracing	0.006s
+
+Tracing redaction command: rtk proxy go test -v -run '^(TestRedaction_DefaultSensitiveKeysPreserveMetadata|TestRedactingSlogHandlerMasksPromptAndToolArgs|TestRedactingSlogHandlerMasksSensitiveGroups|TestRedactingSlogHandlerDoesNotMutateOriginalRecord|TestRedactingSlogHandlerConcurrentGroupDoesNotMutateRecord)$' ./internal/tracing -count=1
+=== RUN   TestRedaction_DefaultSensitiveKeysPreserveMetadata
+--- PASS: TestRedaction_DefaultSensitiveKeysPreserveMetadata (0.00s)
+=== RUN   TestRedactingSlogHandlerMasksPromptAndToolArgs
+--- PASS: TestRedactingSlogHandlerMasksPromptAndToolArgs (0.00s)
+=== RUN   TestRedactingSlogHandlerMasksSensitiveGroups
+--- PASS: TestRedactingSlogHandlerMasksSensitiveGroups (0.00s)
+=== RUN   TestRedactingSlogHandlerDoesNotMutateOriginalRecord
+--- PASS: TestRedactingSlogHandlerDoesNotMutateOriginalRecord (0.00s)
+=== RUN   TestRedactingSlogHandlerConcurrentGroupDoesNotMutateRecord
+--- PASS: TestRedactingSlogHandlerConcurrentGroupDoesNotMutateRecord (0.00s)
+PASS
+ok  	github.com/pengjunchen/go-cli/internal/tracing	0.006s
+
+Tracing race: rtk env GOMAXPROCS=2 go test -race -p 2 ./internal/tracing -count=1
+ok  	github.com/pengjunchen/go-cli/internal/tracing	1.347s

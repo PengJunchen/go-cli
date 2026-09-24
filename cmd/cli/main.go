@@ -37,6 +37,11 @@ func main() {
 // argv are the arguments after the program name, stdout/stderr are the
 // output streams, and loadConfig is injectable for tests.
 func run(argv []string, stdout, stderr io.Writer, loadConfig func() (*config.Config, error)) int {
+	previousLogger := slog.Default()
+	defer slog.SetDefault(previousLogger)
+	logHandler := previousLogger.Handler()
+	var logFile *os.File
+
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -46,10 +51,17 @@ func run(argv []string, stdout, stderr io.Writer, loadConfig func() (*config.Con
 	// captured in the file.
 	logDir := filepath.Join(".go-cli", "logs")
 	if err := os.MkdirAll(logDir, 0o750); err == nil {
-		logFile, fErr := os.OpenFile(filepath.Join(logDir, "go-cli.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		var fErr error
+		logFile, fErr = os.OpenFile(filepath.Join(logDir, "go-cli.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if fErr == nil {
-			slog.SetDefault(slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelInfo})))
+			logHandler = slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelInfo})
+		} else {
+			logFile = nil
 		}
+	}
+	slog.SetDefault(slog.New(tracing.NewRedactingSlogHandler(logHandler)))
+	if logFile != nil {
+		defer func() { _ = logFile.Close() }()
 	}
 
 	cfg, err := loadConfig()
@@ -70,7 +82,7 @@ func run(argv []string, stdout, stderr io.Writer, loadConfig func() (*config.Con
 		root.SetAttributes(
 			tracing.Attribute{Key: "cli_version", Value: cli.Version},
 			tracing.Attribute{Key: "args_count", Value: len(argv)},
-			tracing.Attribute{Key: "command", Value: cmdName},
+			tracing.Attribute{Key: "command_name", Value: cmdName},
 		)
 	}
 
@@ -141,7 +153,11 @@ func newTracing(cfg *config.Config) (*tracing.Tracer, tracing.TraceExporter) {
 
 	// Wrap the destination in an AsyncExporter so Shutdown reliably drains all
 	// in-flight spans before the underlying file/writer is closed.
-	exporter = tracing.NewAsyncExporter(exporter, 1024, 16)
+	redactionLevel := tracing.RedactionLevelRedact
+	if cfg.Tracing.RedactionLevel != "" {
+		redactionLevel = tracing.RedactionLevel(cfg.Tracing.RedactionLevel)
+	}
+	exporter = tracing.NewRedactingExporter(tracing.NewAsyncExporter(exporter, 1024, 16), redactionLevel)
 
 	tracer := tracing.NewTracer("", exporter)
 	return tracer, exporter

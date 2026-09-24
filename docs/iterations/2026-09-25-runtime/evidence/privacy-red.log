@@ -1,0 +1,59 @@
+Baseline: 0014900 (pre-TRACE01 privacy patch)
+Command: rtk proxy go test -run ^(TestNewTracingFileFailureDoesNotEmitRawPrompt|TestDefaultTraceContainsNoPrompt|TestDefaultInteractiveTraceContainsNoPrompt)$ ./cmd/cli -count=1
+Result: expected red; the captured prompt, enter_plan_mode reason, and tool argument violate privacy assertions.
+--- FAIL: TestNewTracingFileFailureDoesNotEmitRawPrompt (0.00s)
+main_test.go:214:
+Error Trace:	/private/tmp/go-cli-privacy-baseline/cmd/cli/main_test.go:214
+Error:      	Should be false
+Test:       	TestNewTracingFileFailureDoesNotEmitRawPrompt
+Messages:   	prompt canary leaked to stdout fallback
+main_test.go:215:
+Error Trace:	/private/tmp/go-cli-privacy-baseline/cmd/cli/main_test.go:215
+Error:      	Should be true
+Test:       	TestNewTracingFileFailureDoesNotEmitRawPrompt
+Messages:   	stdout fallback must retain redaction markers
+--- FAIL: TestDefaultTraceContainsNoPrompt (0.01s)
+main_test.go:284:
+Error Trace:	/private/tmp/go-cli-privacy-baseline/cmd/cli/main_test.go:284
+Error:      	Should be false
+Test:       	TestDefaultTraceContainsNoPrompt
+Messages:   	prompt canary leaked to trace or log output
+main_test.go:285:
+Error Trace:	/private/tmp/go-cli-privacy-baseline/cmd/cli/main_test.go:285
+Error:      	Should be false
+Test:       	TestDefaultTraceContainsNoPrompt
+Messages:   	tool argument canary leaked to trace or log output
+main_test.go:288:
+Error Trace:	/private/tmp/go-cli-privacy-baseline/cmd/cli/main_test.go:288
+Error:      	Should be true
+Test:       	TestDefaultTraceContainsNoPrompt
+Messages:   	trace must retain command identity
+main_test.go:289:
+Error Trace:	/private/tmp/go-cli-privacy-baseline/cmd/cli/main_test.go:289
+Error:      	Should be true
+Test:       	TestDefaultTraceContainsNoPrompt
+Messages:   	trace must retain prompt length metadata
+main_test.go:291:
+Error Trace:	/private/tmp/go-cli-privacy-baseline/cmd/cli/main_test.go:291
+Error:      	Should be true
+Test:       	TestDefaultTraceContainsNoPrompt
+Messages:   	trace must retain redacted byte lengths
+--- FAIL: TestDefaultInteractiveTraceContainsNoPrompt (0.21s)
+main_test.go:371:
+Error Trace:	/private/tmp/go-cli-privacy-baseline/cmd/cli/main_test.go:371
+Error:      	Should be false
+Test:       	TestDefaultInteractiveTraceContainsNoPrompt
+Messages:   	interactive prompt canary leaked to trace or log output
+main_test.go:373:
+Error Trace:	/private/tmp/go-cli-privacy-baseline/cmd/cli/main_test.go:373
+Error:      	Should be true
+Test:       	TestDefaultInteractiveTraceContainsNoPrompt
+Messages:   	trace must retain prompt length metadata
+main_test.go:374:
+Error Trace:	/private/tmp/go-cli-privacy-baseline/cmd/cli/main_test.go:374
+Error:      	Should be true
+Test:       	TestDefaultInteractiveTraceContainsNoPrompt
+Messages:   	trace must retain redacted byte lengths
+FAIL
+FAIL	github.com/pengjunchen/go-cli/cmd/cli	0.235s
+FAIL
