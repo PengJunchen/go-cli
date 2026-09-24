@@ -205,22 +205,22 @@ func TestBoundary_LoopLLMErrorMidStream(t *testing.T) {
 // SUBAGENT STATE MACHINE TESTS
 // =============================================================================
 
-// TestBoundary_SubAgentSendBeforeRun verifies Send works before Run and
-// the message is recorded.
+// TestBoundary_SubAgentSendBeforeRun verifies Send is rejected while the
+// sub-agent is idle and the rejected message is not recorded.
 func TestBoundary_SubAgentSendBeforeRun(t *testing.T) {
 	sa := core.NewDefaultSubAgent(core.SubAgentConfig{
 		Name:     "send-before-run",
 		MaxTurns: 1,
 	})
 
-	// Send before Run - should succeed and record the message
+	// Send before Run is outside the live admission window.
 	err := sa.Send(context.Background(), "pre-run message")
-	require.NoError(t, err)
+	require.ErrorIs(t, err, core.ErrSubAgentNotRunning)
 
 	// Verify recorded via the concrete type
 	defaultSA, ok := sa.(*core.DefaultSubAgent)
 	require.True(t, ok, "should be *core.DefaultSubAgent")
-	assert.Equal(t, []string{"pre-run message"}, defaultSA.Received())
+	assert.Empty(t, defaultSA.Received(), "rejected pre-run input must not be queued")
 
 	// Now run and verify it completes
 	events, err := sa.Run(context.Background(), "test prompt")
@@ -239,6 +239,8 @@ func TestBoundary_SubAgentSendBeforeRun(t *testing.T) {
 	msg, waitErr := sa.Wait(context.Background())
 	require.NoError(t, waitErr)
 	assert.Equal(t, "assistant", msg.Role)
+	require.ErrorIs(t, sa.Send(context.Background(), "too late"), core.ErrSubAgentNotRunning)
+	assert.Empty(t, defaultSA.Received(), "neither idle nor terminal input is accepted")
 }
 
 // TestBoundary_SubAgentInterruptBeforeRun verifies interrupt before Run
