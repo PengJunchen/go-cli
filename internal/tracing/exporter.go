@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -99,9 +100,44 @@ const (
 // redactedValue is the placeholder used for masked sensitive attributes.
 const redactedValue = "***REDACTED***"
 
-// RedactingExporter wraps a TraceExporter and masks or strips sensitive
-// attributes before delegating to the inner exporter. It is non-destructive:
-// the original span is never modified.
+// isSensitiveAttributeKey identifies unbounded or user-controlled values that
+// should be hidden from default telemetry even when a producer forgot to mark
+// the attribute explicitly.
+func isSensitiveAttributeKey(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	key = strings.NewReplacer(".", "_", "-", "_", " ", "_").Replace(key)
+
+	switch key {
+	case "prompt", "user_message", "message", "msg", "content", "args", "arguments",
+		"tool_args", "tool_arguments", "tool_call", "tool_calls", "input", "params",
+		"parameters", "query", "payload", "body", "request_body", "response_body",
+		"cache_key", "reason", "summary", "output", "command", "title", "token",
+		"secret", "password", "api_key", "authorization", "cookie", "private_key", "credential":
+		return true
+	default:
+		return strings.HasSuffix(key, "_args") || strings.HasSuffix(key, "_arguments") ||
+			strings.HasSuffix(key, "_prompt") || strings.HasSuffix(key, "_message") ||
+			strings.HasSuffix(key, "_content") || strings.HasSuffix(key, "_payload") ||
+			strings.HasSuffix(key, "_token") || strings.HasSuffix(key, "_secret") ||
+			strings.HasSuffix(key, "_password") || strings.HasSuffix(key, "_api_key") ||
+			strings.HasSuffix(key, "_authorization") || strings.HasSuffix(key, "_credential")
+	}
+}
+
+func redactedValueWithLength(value any) string {
+	if text, ok := value.(string); ok {
+		return fmt.Sprintf("%s (bytes=%d)", redactedValue, len(text))
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return redactedValue
+	}
+	return fmt.Sprintf("%s (bytes=%d)", redactedValue, len(encoded))
+}
+
+// RedactingExporter wraps a TraceExporter and masks or strips explicitly
+// sensitive and known user-input attributes before delegating to the inner
+// exporter. It is non-destructive: the original span is never modified.
 type RedactingExporter struct {
 	inner TraceExporter
 	level RedactionLevel
@@ -110,7 +146,8 @@ type RedactingExporter struct {
 var _ TraceExporter = (*RedactingExporter)(nil)
 
 // NewRedactingExporter wraps inner with a redaction layer. When level is
-// empty, RedactionLevelRedact is used.
+// empty, RedactionLevelRedact is used. The redact policy masks attributes
+// marked sensitive and common prompt/tool-input fields by key.
 func NewRedactingExporter(inner TraceExporter, level RedactionLevel) *RedactingExporter {
 	return &RedactingExporter{inner: inner, level: level}
 }
@@ -134,14 +171,16 @@ func (e *RedactingExporter) ExportSpan(ctx context.Context, span TraceSpan) erro
 		// Export as-is, no modification.
 	default: // RedactionLevelRedact or empty
 		for i := range data.Attributes {
-			if data.Attributes[i].Sensitive {
-				data.Attributes[i].Value = redactedValue
+			if data.Attributes[i].Sensitive || isSensitiveAttributeKey(data.Attributes[i].Key) {
+				data.Attributes[i].Value = redactedValueWithLength(data.Attributes[i].Value)
+				data.Attributes[i].Sensitive = true
 			}
 		}
 		for i := range data.Events {
 			for j := range data.Events[i].Attributes {
-				if data.Events[i].Attributes[j].Sensitive {
-					data.Events[i].Attributes[j].Value = redactedValue
+				if data.Events[i].Attributes[j].Sensitive || isSensitiveAttributeKey(data.Events[i].Attributes[j].Key) {
+					data.Events[i].Attributes[j].Value = redactedValueWithLength(data.Events[i].Attributes[j].Value)
+					data.Events[i].Attributes[j].Sensitive = true
 				}
 			}
 		}

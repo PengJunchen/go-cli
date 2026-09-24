@@ -129,10 +129,13 @@ func (h *HarnessImpl) Submit(ctx context.Context, msg string) (EventStream, erro
 	}
 
 	span, spanCtx := tracing.SpanFromContext(ctx, h.startSpanName, tracing.SpanKindInternal)
-	span.SetAttributes(tracing.Attribute{Key: "user_message", Value: msg})
+	span.SetAttributes(
+		tracing.SensitiveAttribute("user_message", msg),
+		tracing.Attribute{Key: "user_message_length", Value: len(msg)},
+	)
 	defer span.End()
 	logger := tracing.NewTraceLogger(span, nil)
-	logger.Info("core.harness.start", "msg", msg)
+	logger.Info("core.harness.start", "msg_len", len(msg))
 
 	streamOpts := []EventStreamOption{WithEventDiscardPolicy(h.discard)}
 	if h.bus != nil {

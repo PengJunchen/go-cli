@@ -93,8 +93,10 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) error {
 
 	span, spanCtx := tracing.SpanFromContext(ctx, spanPromptRun, tracing.SpanKindInternal)
 	span.SetAttributes(
-		tracing.Attribute{Key: "command", Value: c.Name()},
-		tracing.Attribute{Key: "args", Value: args},
+		tracing.Attribute{Key: "command_name", Value: c.Name()},
+		tracing.SensitiveAttribute("args", args),
+		tracing.Attribute{Key: "args_count", Value: len(args)},
+		tracing.Attribute{Key: "prompt_length", Value: len(prompt)},
 		tracing.Attribute{Key: "version", Value: Version},
 	)
 	defer func() {

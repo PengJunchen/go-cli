@@ -4,9 +4,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -136,4 +139,117 @@ func TestTraceHandlerWithGroupPreservesTraceFields(t *testing.T) {
 
 	out := buf.String()
 	assert.True(t, strings.Contains(out, "trace-slog-group"), "trace_id must survive WithGroup: %s", out)
+}
+
+func TestRedactingSlogHandlerMasksPromptAndToolArgs(t *testing.T) {
+	const (
+		promptCanary  = "PROMPT-LOG-CANARY"
+		toolCanary    = "TOOL-ARGS-LOG-CANARY"
+		secretCanary  = "API-KEY-LOG-CANARY"
+		reasonCanary  = "PLAN-REASON-LOG-CANARY"
+		hookCanary    = "HOOK-OUTPUT-LOG-CANARY"
+		commandCanary = "HOOK-COMMAND-LOG-CANARY"
+		titleCanary   = "PR-TITLE-LOG-CANARY"
+	)
+	var buf bytes.Buffer
+	base := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	logger := slog.New(NewRedactingSlogHandler(base))
+	logger.Info("tool.completed",
+		"trace_id", "trace-123",
+		"tool_name", "todo_write",
+		"status", "ok",
+		"duration_ms", 17,
+		"prompt_length", len(promptCanary),
+		"query", promptCanary,
+		"cache_key", "todo_write:{\"content\":\""+toolCanary+"\"}",
+		"args", map[string]any{"content": toolCanary},
+		"api_key", secretCanary,
+		"reason", reasonCanary,
+		"output", hookCanary,
+		"command", commandCanary,
+		"title", titleCanary,
+	)
+
+	line := buf.String()
+	assert.False(t, strings.Contains(line, promptCanary), "slog leaked prompt content")
+	assert.False(t, strings.Contains(line, toolCanary), "slog leaked tool arguments")
+	assert.False(t, strings.Contains(line, secretCanary), "slog leaked API key")
+	assert.False(t, strings.Contains(line, reasonCanary), "slog leaked plan-mode reason")
+	assert.False(t, strings.Contains(line, hookCanary), "slog leaked hook output")
+	assert.False(t, strings.Contains(line, commandCanary), "slog leaked hook command")
+	assert.False(t, strings.Contains(line, titleCanary), "slog leaked PR title")
+	assert.True(t, strings.Contains(line, "***REDACTED***"), "slog must retain redaction markers")
+	assert.True(t, strings.Contains(line, "bytes="), "slog must retain redacted value lengths")
+	assert.True(t, strings.Contains(line, "tool.completed"), "slog must retain operation identity")
+	assert.True(t, strings.Contains(line, "trace-123"), "slog must retain trace identity")
+	assert.True(t, strings.Contains(line, "todo_write"), "slog must retain tool identity")
+	assert.True(t, strings.Contains(line, "duration_ms"), "slog must retain timing metadata")
+	assert.True(t, strings.Contains(line, "prompt_length"), "slog must retain prompt length metadata")
+}
+
+func TestRedactingSlogHandlerMasksSensitiveGroups(t *testing.T) {
+	const canary = "GROUPED-TOOL-ARGS-CANARY"
+	var buf bytes.Buffer
+	base := slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})
+	logger := slog.New(NewRedactingSlogHandler(base))
+
+	logger.Info("nested.args", slog.Group("args", slog.String("arbitrary", canary)))
+	logger.WithGroup("args").Info("scoped.args", "arbitrary_field", canary)
+
+	line := buf.String()
+	assert.False(t, strings.Contains(line, canary), "slog leaked nested or scoped group content")
+	assert.True(t, strings.Contains(line, "nested.args"), "slog must retain nested operation identity")
+	assert.True(t, strings.Contains(line, "scoped.args"), "slog must retain scoped operation identity")
+	assert.True(t, strings.Contains(line, "bytes="), "slog must retain redacted value lengths")
+}
+
+func TestRedactingSlogHandlerDoesNotMutateOriginalRecord(t *testing.T) {
+	const canary = "ORIGINAL-GROUP-CANARY"
+	children := []slog.Attr{slog.String("query", canary)}
+	record := slog.NewRecord(time.Now(), slog.LevelInfo, "nested", 0)
+	record.AddAttrs(slog.Attr{Key: "request", Value: slog.GroupValue(children...)})
+
+	var buf bytes.Buffer
+	handler := NewRedactingSlogHandler(slog.NewJSONHandler(&buf, nil))
+	require.NoError(t, handler.Handle(context.Background(), record))
+	assert.False(t, strings.Contains(buf.String(), canary), "slog leaked group content")
+	assert.True(t, children[0].Value.String() == canary, "redaction must not mutate the caller's group slice")
+
+	var retained string
+	record.Attrs(func(attr slog.Attr) bool {
+		if attr.Key == "request" {
+			retained = attr.Value.Group()[0].Value.String()
+		}
+		return true
+	})
+	assert.True(t, retained == canary, "redaction must not mutate the original slog.Record")
+}
+
+func TestRedactingSlogHandlerConcurrentGroupDoesNotMutateRecord(t *testing.T) {
+	const canary = "CONCURRENT-ORIGINAL-GROUP-CANARY"
+	record := slog.NewRecord(time.Now(), slog.LevelInfo, "nested", 0)
+	record.AddAttrs(slog.Attr{Key: "request", Value: slog.GroupValue(slog.String("query", canary))})
+	handler := NewRedactingSlogHandler(slog.NewJSONHandler(io.Discard, nil))
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < 25; j++ {
+				if err := handler.Handle(context.Background(), record); err != nil {
+					t.Errorf("Handle: %v", err)
+					return
+				}
+			}
+		}()
+	}
+	wg.Wait()
+
+	record.Attrs(func(attr slog.Attr) bool {
+		if attr.Key == "request" {
+			assert.True(t, attr.Value.Group()[0].Value.String() == canary, "concurrent redaction must not mutate the original slog.Record")
+		}
+		return true
+	})
 }
