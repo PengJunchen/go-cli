@@ -178,6 +178,123 @@ func TestPrepareToolCallRejectsInvalidSchemaBeforePolicy(t *testing.T) {
 	assert.Zero(t, calls)
 }
 
+func TestPreparedSchemaRejectsMalformedShapesBeforePolicy(t *testing.T) {
+	malformed := []struct {
+		name   string
+		schema any
+	}{
+		{name: "non object root", schema: "object"},
+		{name: "missing root type", schema: map[string]any{"properties": map[string]any{}}},
+		{name: "wrong properties type", schema: map[string]any{"type": "object", "properties": "path"}},
+		{name: "wrong required type", schema: map[string]any{"type": "object", "properties": map[string]any{}, "required": "path"}},
+		{name: "malformed property schema", schema: map[string]any{"type": "object", "properties": map[string]any{"path": "string"}}},
+		{name: "unsupported keyword", schema: map[string]any{"type": "object", "properties": map[string]any{}, "patternProperties": map[string]any{}}},
+		{name: "malformed nested items", schema: map[string]any{"type": "object", "properties": map[string]any{"items": map[string]any{"type": "array", "items": "string"}}}},
+	}
+	for _, test := range malformed {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+			require.NoError(t, base.Register(ctx, &preparedCaptureTool{name: "capture", schema: test.schema}))
+			registry := NewMiddlewareToolRegistry(base)
+			policyCalls := 0
+			configurePreparedRegistry(t, registry, func(_ context.Context, request PreparedPolicyRequest) (PreparedPolicyDecision, error) {
+				policyCalls++
+				return PreparedPolicyDecision{Allowed: true, Generations: request.Generations}, nil
+			}, PreparedToolStages{})
+
+			_, err := registry.PrepareToolCall(ctx, ToolCall{Name: "capture", Args: map[string]any{}})
+			require.ErrorIs(t, err, ErrPreparedSchemaInvalid)
+			assert.Zero(t, policyCalls, "malformed schemas must fail before the approval callback")
+		})
+	}
+}
+
+func TestPreparedSchemaEnforcesIntegerEnumNestedArraysAndNumericBounds(t *testing.T) {
+	ctx := context.Background()
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	tool := &preparedCaptureTool{name: "capture", schema: map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"start_line": map[string]any{"type": "integer", "minimum": 1, "maximum": 4},
+			"mode":       map[string]any{"type": "string", "enum": []string{"one", "two"}},
+			"tasks": map[string]any{
+				"type": "array",
+				"items": map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"prompt": map[string]any{"type": "string"},
+						"role":   map[string]any{"type": "string", "enum": []string{"worker", "reviewer"}},
+					},
+					"required": []string{"prompt", "role"},
+				},
+			},
+		},
+		"required":             []string{"start_line", "mode", "tasks"},
+		"additionalProperties": false,
+	}}
+	require.NoError(t, base.Register(ctx, tool))
+	registry := NewMiddlewareToolRegistry(base)
+	policyCalls := 0
+	configurePreparedRegistry(t, registry, func(_ context.Context, request PreparedPolicyRequest) (PreparedPolicyDecision, error) {
+		policyCalls++
+		return PreparedPolicyDecision{Allowed: true, Generations: request.Generations}, nil
+	}, PreparedToolStages{})
+
+	valid := map[string]any{
+		"start_line": 2.0,
+		"mode":       "one",
+		"tasks":      []any{map[string]any{"prompt": "inspect", "role": "worker"}},
+	}
+	invalidCalls := []map[string]any{
+		{"start_line": 1.5, "mode": "one", "tasks": []any{}},
+		{"start_line": 5, "mode": "one", "tasks": []any{}},
+		{"start_line": 2, "mode": "other", "tasks": []any{}},
+		{"start_line": 2, "mode": "one", "tasks": []any{map[string]any{"prompt": "inspect", "role": "unknown"}}},
+		{"start_line": 2, "mode": "one", "tasks": []any{map[string]any{"role": "worker"}}},
+	}
+	for _, args := range invalidCalls {
+		_, err := registry.PrepareToolCall(ctx, ToolCall{Name: "capture", Args: args})
+		require.Error(t, err)
+		assert.Zero(t, policyCalls, "invalid values must be rejected before approval")
+	}
+	_, err := registry.PrepareToolCall(ctx, ToolCall{Name: "capture", Args: valid})
+	require.NoError(t, err)
+	assert.Equal(t, 1, policyCalls)
+}
+
+func TestPreparedGitBlameRejectsFractionalLineNumbersBeforePolicy(t *testing.T) {
+	ctx := context.Background()
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	require.NoError(t, base.Register(ctx, NewGitBlameTool(nil)))
+	registry := NewMiddlewareToolRegistry(base)
+	policyCalls := 0
+	configurePreparedRegistry(t, registry, func(_ context.Context, request PreparedPolicyRequest) (PreparedPolicyDecision, error) {
+		policyCalls++
+		return PreparedPolicyDecision{Allowed: true, Generations: request.Generations}, nil
+	}, PreparedToolStages{})
+
+	_, err := registry.PrepareToolCall(ctx, ToolCall{Name: "git_blame", Args: map[string]any{"file": "main.go", "start_line": 1.5}})
+	require.Error(t, err)
+	assert.Zero(t, policyCalls)
+
+	_, err = registry.PrepareToolCall(ctx, ToolCall{Name: "git_blame", Args: map[string]any{"file": "main.go", "start_line": 2.0}})
+	require.NoError(t, err)
+	assert.Equal(t, 1, policyCalls)
+}
+
+func TestPreparedRegistryAcceptsRegisteredDefaultToolSchemas(t *testing.T) {
+	ctx := context.Background()
+	base := NewDefaultToolRegistry()
+	require.NoError(t, RegisterDefaults(ctx, base))
+	registry := NewMiddlewareToolRegistry(base)
+	configurePreparedRegistry(t, registry, allowPreparedCall, PreparedToolStages{})
+
+	definitions, err := registry.List(ctx)
+	require.NoError(t, err)
+	assert.NotEmpty(t, definitions)
+}
+
 func TestPreparedExecutionDecoratorCannotChangeApprovedArguments(t *testing.T) {
 	ctx := context.Background()
 	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
@@ -201,6 +318,55 @@ func TestPreparedExecutionDecoratorCannotChangeApprovedArguments(t *testing.T) {
 	assert.Zero(t, calls)
 }
 
+func TestPreparedExecutionDecoratorCannotInvokeNextTwice(t *testing.T) {
+	ctx := context.Background()
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	tool := &preparedCaptureTool{name: "capture"}
+	require.NoError(t, base.Register(ctx, tool))
+	registry := NewMiddlewareToolRegistry(base)
+	wrapper := ToolExecutorWrapper(func(next func(context.Context, ToolCall) (*ToolResult, error)) func(context.Context, ToolCall) (*ToolResult, error) {
+		return func(ctx context.Context, call ToolCall) (*ToolResult, error) {
+			if _, err := next(ctx, call); err != nil {
+				return nil, err
+			}
+			return next(ctx, call)
+		}
+	})
+	configurePreparedRegistry(t, registry, allowPreparedCall, PreparedToolStages{ExecutionWrappers: []ToolExecutorWrapper{wrapper}})
+
+	invocation, err := registry.PrepareToolCall(ctx, ToolCall{Name: "capture"})
+	require.NoError(t, err)
+	_, err = invocation.Dispatch(ctx)
+	require.ErrorIs(t, err, ErrPreparedInvocationConsumed)
+	assert.Equal(t, 1, tool.snapshotCalls(), "a wrapper's second next call must not invoke the executor")
+}
+
+func TestPreparedStreamingDecoratorCannotInvokeNextTwice(t *testing.T) {
+	ctx := context.Background()
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	tool := &preparedStreamingCaptureTool{preparedCaptureTool: preparedCaptureTool{name: "bash"}}
+	require.NoError(t, base.Register(ctx, tool))
+	registry := NewMiddlewareToolRegistry(base)
+	wrapper := ToolExecutorWrapper(func(next func(context.Context, ToolCall) (*ToolResult, error)) func(context.Context, ToolCall) (*ToolResult, error) {
+		return func(ctx context.Context, call ToolCall) (*ToolResult, error) {
+			if _, err := next(ctx, call); err != nil {
+				return nil, err
+			}
+			return next(ctx, call)
+		}
+	})
+	configurePreparedRegistry(t, registry, allowPreparedCall, PreparedToolStages{ExecutionWrappers: []ToolExecutorWrapper{wrapper}})
+
+	invocation, err := registry.PrepareToolCall(ctx, ToolCall{Name: "bash"})
+	require.NoError(t, err)
+	streaming, ok := invocation.(PreparedStreamingInvocation)
+	require.True(t, ok)
+	_, err = streaming.DispatchStreaming(ctx, &preparedCaptureSink{})
+	require.ErrorIs(t, err, ErrPreparedInvocationConsumed)
+	assert.Equal(t, 1, tool.snapshotCalls())
+	assert.Equal(t, 1, tool.streamCalls)
+}
+
 func TestPreparedPolicyReplacementStalesPriorInvocation(t *testing.T) {
 	ctx := context.Background()
 	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
@@ -219,6 +385,83 @@ func TestPreparedPolicyReplacementStalesPriorInvocation(t *testing.T) {
 	assert.Zero(t, calls)
 }
 
+func TestProtectedProxyRejectsSameNameRegistrationReplacement(t *testing.T) {
+	ctx := context.Background()
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	first := &preparedCaptureTool{name: "capture"}
+	replacement := &preparedCaptureTool{name: "capture"}
+	require.NoError(t, base.Register(ctx, first))
+	registry := NewMiddlewareToolRegistry(base)
+	configurePreparedRegistry(t, registry, allowPreparedCall, PreparedToolStages{})
+
+	proxy, err := registry.Get(ctx, "capture")
+	require.NoError(t, err)
+	require.NoError(t, base.Register(ctx, replacement))
+
+	_, err = proxy.Execute(ctx, ToolCall{Name: "capture"})
+	require.ErrorIs(t, err, ErrPreparedProxyRegistrationStale)
+	assert.Zero(t, first.snapshotCalls())
+	assert.Zero(t, replacement.snapshotCalls(), "a stale proxy must not silently resolve to the replacement")
+
+	current, err := registry.Get(ctx, "capture")
+	require.NoError(t, err)
+	_, err = current.Execute(ctx, ToolCall{Name: "capture"})
+	require.NoError(t, err)
+	assert.Zero(t, first.snapshotCalls())
+	assert.Equal(t, 1, replacement.snapshotCalls())
+}
+
+func TestProtectedProxyRejectsUnrelatedRegistryGenerationChange(t *testing.T) {
+	ctx := context.Background()
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	tool := &preparedCaptureTool{name: "capture"}
+	require.NoError(t, base.Register(ctx, tool))
+	registry := NewMiddlewareToolRegistry(base)
+	configurePreparedRegistry(t, registry, allowPreparedCall, PreparedToolStages{})
+
+	proxy, err := registry.Get(ctx, "capture")
+	require.NoError(t, err)
+	require.NoError(t, base.Register(ctx, &preparedCaptureTool{name: "unrelated"}))
+
+	_, err = proxy.Execute(ctx, ToolCall{Name: "capture"})
+	require.ErrorIs(t, err, ErrPreparedProxyRegistrationStale)
+	assert.Zero(t, tool.snapshotCalls(), "a registration epoch change must invalidate existing proxies")
+}
+
+func TestProtectedProxyUsesRegisteredDescriptorSnapshot(t *testing.T) {
+	ctx := context.Background()
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	schema := map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"label": map[string]any{"type": "string"},
+		},
+	}
+	tool := &preparedCaptureTool{name: "snapshot", schema: schema}
+	require.NoError(t, base.Register(ctx, tool))
+	registry := NewMiddlewareToolRegistry(base)
+	configurePreparedRegistry(t, registry, allowPreparedCall, PreparedToolStages{})
+
+	proxy, err := registry.Get(ctx, "snapshot")
+	require.NoError(t, err)
+	tool.name = "mutated-live-name"
+	schema["properties"].(map[string]any)["label"] = map[string]any{"type": "integer"}
+
+	assert.Equal(t, "snapshot", proxy.Name())
+	assert.Equal(t, "prepared capture snapshot", proxy.Description())
+	parameterized, ok := proxy.(Parameterized)
+	require.True(t, ok)
+	assert.Equal(t, map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"label": map[string]any{"type": "string"},
+		},
+	}, parameterized.Parameters())
+	result, err := proxy.Execute(ctx, ToolCall{Name: "snapshot"})
+	require.NoError(t, err)
+	assert.Equal(t, "snapshot", result.Output)
+}
+
 func TestPreparedExecutionFailsClosedWithoutPolicyAndForOpaqueWrappers(t *testing.T) {
 	ctx := context.Background()
 	tool := &preparedCaptureTool{name: "capture"}
@@ -228,15 +471,18 @@ func TestPreparedExecutionFailsClosedWithoutPolicyAndForOpaqueWrappers(t *testin
 	registry := NewMiddlewareToolRegistry(base)
 	require.NoError(t, registry.SetPreparedToolStages(PreparedToolStages{}))
 	def, err := registry.Get(ctx, "capture")
-	require.NoError(t, err)
-	_, err = def.Execute(ctx, ToolCall{Name: "capture"})
 	require.ErrorIs(t, err, ErrPreparedToolPolicyUnavailable)
+	assert.Nil(t, def)
+	_, err = registry.List(ctx)
+	assert.ErrorIs(t, err, ErrPreparedToolPolicyUnavailable)
 	assert.Zero(t, tool.snapshotCalls())
 
 	legacy := NewMiddlewareToolRegistry(base, func(next func(context.Context, ToolCall) (*ToolResult, error)) func(context.Context, ToolCall) (*ToolResult, error) {
 		return next
 	})
 	configurePreparedRegistry(t, legacy, allowPreparedCall, PreparedToolStages{})
+	_, err = legacy.Get(ctx, "capture")
+	require.ErrorIs(t, err, ErrPreparedOpaqueWrapperUnsupported)
 	_, err = legacy.PrepareToolCall(ctx, ToolCall{Name: "capture"})
 	require.ErrorIs(t, err, ErrPreparedOpaqueWrapperUnsupported)
 	assert.Zero(t, tool.snapshotCalls())
@@ -454,6 +700,10 @@ func TestProtectedRegistryGetListAndTopToolsPreserveCapabilities(t *testing.T) {
 	_, err = selected[0].Execute(ctx, ToolCall{Name: "alpha"})
 	require.NoError(t, err)
 	assert.Equal(t, 2, calls, "Get/List/Search execution all pass through the prepared policy")
+	require.NoError(t, base.Register(ctx, &preparedCaptureTool{name: "unrelated"}))
+	_, err = selected[0].Execute(ctx, ToolCall{Name: "alpha"})
+	require.ErrorIs(t, err, ErrPreparedProxyRegistrationStale, "TopTools results retain their captured registration epoch")
+	assert.Equal(t, 2, calls)
 }
 
 func TestProtectedStreamingToolDispatchesThroughPreparedPermit(t *testing.T) {

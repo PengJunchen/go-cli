@@ -37,11 +37,9 @@ func TestMutationWrapper_SerializesConcurrentWrites(t *testing.T) {
 
 	tr := tools.NewDefaultToolRegistry()
 	require.NoError(t, tr.Register(context.Background(), slowTool))
-
-	wrapped := tools.NewMiddlewareToolRegistry(tr, tools.NewMutationWrapper())
-
-	def, err := wrapped.Get(context.Background(), "write")
+	def, err := tr.Get(context.Background(), "write")
 	require.NoError(t, err)
+	execute := tools.NewMutationWrapper()(def.Execute)
 
 	// Launch 3 concurrent writes to the same file.
 	var wg sync.WaitGroup
@@ -49,7 +47,7 @@ func TestMutationWrapper_SerializesConcurrentWrites(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = def.Execute(context.Background(), tools.ToolCall{ //nolint:errcheck
+			_, _ = execute(context.Background(), tools.ToolCall{ //nolint:errcheck
 				ID:   "1",
 				Name: "write",
 				Args: map[string]any{"path": "/tmp/test-mutation-serial.txt", "content": "x"},
@@ -85,10 +83,9 @@ func TestMutationWrapper_DifferentFilesParallel(t *testing.T) {
 	tr := tools.NewDefaultToolRegistry()
 	require.NoError(t, tr.Register(context.Background(), slowTool))
 
-	wrapped := tools.NewMiddlewareToolRegistry(tr, tools.NewMutationWrapper())
-
-	def, err := wrapped.Get(context.Background(), "write")
+	def, err := tr.Get(context.Background(), "write")
 	require.NoError(t, err)
+	execute := tools.NewMutationWrapper()(def.Execute)
 
 	// Launch 3 concurrent writes to different files.
 	var wg sync.WaitGroup
@@ -96,7 +93,7 @@ func TestMutationWrapper_DifferentFilesParallel(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			_, _ = def.Execute(context.Background(), tools.ToolCall{ //nolint:errcheck
+			_, _ = execute(context.Background(), tools.ToolCall{ //nolint:errcheck
 				ID:   "1",
 				Name: "write",
 				Args: map[string]any{"path": "/tmp/test-mutation-diff-" + string(rune('a'+idx)) + ".txt", "content": "x"},
@@ -125,12 +122,11 @@ func TestMutationWrapper_NonMutationPassthrough(t *testing.T) {
 	tr := tools.NewDefaultToolRegistry()
 	require.NoError(t, tr.Register(context.Background(), readTool))
 
-	wrapped := tools.NewMiddlewareToolRegistry(tr, tools.NewMutationWrapper())
-
-	def, err := wrapped.Get(context.Background(), "read")
+	def, err := tr.Get(context.Background(), "read")
 	require.NoError(t, err)
+	execute := tools.NewMutationWrapper()(def.Execute)
 
-	res, err := def.Execute(context.Background(), tools.ToolCall{ID: "1", Name: "read"})
+	res, err := execute(context.Background(), tools.ToolCall{ID: "1", Name: "read"})
 	require.NoError(t, err)
 	assert.Equal(t, "content", res.Output)
 	assert.True(t, called, "non-mutation tool should execute normally")
@@ -158,17 +154,16 @@ func TestMutationWrapper_EditAlsoSerialized(t *testing.T) {
 	tr := tools.NewDefaultToolRegistry()
 	require.NoError(t, tr.Register(context.Background(), slowTool))
 
-	wrapped := tools.NewMiddlewareToolRegistry(tr, tools.NewMutationWrapper())
-
-	def, err := wrapped.Get(context.Background(), "edit")
+	def, err := tr.Get(context.Background(), "edit")
 	require.NoError(t, err)
+	execute := tools.NewMutationWrapper()(def.Execute)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 3; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = def.Execute(context.Background(), tools.ToolCall{ //nolint:errcheck
+			_, _ = execute(context.Background(), tools.ToolCall{ //nolint:errcheck
 				ID:   "1",
 				Name: "edit",
 				Args: map[string]any{"file_path": "/tmp/test-mutation-edit.txt", "old_string": "a", "new_string": "b"},
@@ -231,11 +226,11 @@ func TestMutationQueueRejectsMalformedPayloadWithoutChangingFile(t *testing.T) {
 			defer func() {
 				require.NoError(t, queue.(*tools.DefaultFileMutationQueue).Close())
 			}()
-			wrapped := tools.NewMiddlewareToolRegistry(registry, tools.NewMutationQueueWrapper(queue))
-			def, err := wrapped.Get(context.Background(), tc.tool)
+			def, err := registry.Get(context.Background(), tc.tool)
 			require.NoError(t, err)
+			execute := tools.NewMutationQueueWrapper(queue)(def.Execute)
 
-			_, err = def.Execute(context.Background(), tools.ToolCall{Name: tc.tool, Args: tc.args})
+			_, err = execute(context.Background(), tools.ToolCall{Name: tc.tool, Args: tc.args})
 			require.Error(t, err)
 
 			actual, readErr := os.ReadFile(path)
@@ -287,11 +282,11 @@ func TestMutationQueueAllowsExplicitEmptyStrings(t *testing.T) {
 			defer func() {
 				require.NoError(t, queue.(*tools.DefaultFileMutationQueue).Close())
 			}()
-			wrapped := tools.NewMiddlewareToolRegistry(registry, tools.NewMutationQueueWrapper(queue))
-			def, err := wrapped.Get(context.Background(), tc.tool)
+			def, err := registry.Get(context.Background(), tc.tool)
 			require.NoError(t, err)
+			execute := tools.NewMutationQueueWrapper(queue)(def.Execute)
 
-			_, err = def.Execute(context.Background(), tools.ToolCall{Name: tc.tool, Args: tc.args})
+			_, err = execute(context.Background(), tools.ToolCall{Name: tc.tool, Args: tc.args})
 			require.NoError(t, err)
 
 			actual, readErr := os.ReadFile(path)

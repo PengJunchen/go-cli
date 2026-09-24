@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"fmt"
 )
 
 // ToolExecutorWrapper wraps a tool execution function, intercepting the call
@@ -16,9 +17,9 @@ import (
 type ToolExecutorWrapper func(next func(ctx context.Context, call ToolCall) (*ToolResult, error)) func(ctx context.Context, call ToolCall) (*ToolResult, error)
 
 // MiddlewareToolRegistry is a ToolRegistry decorator that returns protected
-// proxies from Get and List. Legacy wrappers remain available for unprepared
-// execution; configured prepared dispatch pins the definition and runs only
-// explicitly configured execution stages.
+// proxies from Get and List. Proxies are available only when a complete
+// prepared policy and stage pipeline is configured; opaque legacy wrappers
+// and unconfigured registries fail closed.
 //
 // This enables approval gates, mutation queues, and other cross-cutting
 // concerns to be applied without modifying LoopAgent's core structure.
@@ -35,10 +36,11 @@ var (
 	_ TrustedNetworkReadRegistrar = (*MiddlewareToolRegistry)(nil)
 )
 
-// NewMiddlewareToolRegistry creates a decorator around inner that applies
-// the given wrappers to every ToolDefinition returned via Get. Wrappers are
-// applied in order, so the first wrapper is outermost (runs first on entry,
-// last on exit), forming an onion model.
+// NewMiddlewareToolRegistry creates a decorator around inner. The optional
+// wrappers are retained for compatibility with direct wrappedToolDef use, but
+// Get/List reject them for prepared dispatch; production decorators must be
+// installed through the audited PreparedToolStages API instead. Wrappers are
+// applied in order when used directly, so the first wrapper is outermost.
 func NewMiddlewareToolRegistry(inner ToolRegistry, wrappers ...ToolExecutorWrapper) *MiddlewareToolRegistry {
 	return &MiddlewareToolRegistry{
 		inner:    inner,
@@ -81,8 +83,10 @@ func (r *MiddlewareToolRegistry) SetPreparedToolPolicy(policy PreparedToolPolicy
 }
 
 // SetPreparedToolStages installs the explicit argument-normalization,
-// execution-decoration, and mutation-queue stages for prepared calls. Stage
-// replacement advances the shared registry generation and stales old calls.
+// execution-decoration, and mutation-queue stages for prepared calls. Execution
+// wrappers must be trusted, audited assembly decorators that do not add side
+// effects, escape asynchronously, or mutate the frozen call. Stage replacement
+// advances the shared registry generation and stales old calls.
 func (r *MiddlewareToolRegistry) SetPreparedToolStages(stages PreparedToolStages) error {
 	state, fence := r.preparedToolPipeline()
 	if state == nil || fence == nil {
@@ -128,19 +132,57 @@ func (r *MiddlewareToolRegistry) toolRegistrationSnapshot(ctx context.Context, n
 	return provider.toolRegistrationSnapshot(ctx, name)
 }
 
+func (r *MiddlewareToolRegistry) requirePreparedPipeline(snapshot preparedToolPipelineSnapshot) error {
+	if r == nil || r.DispatchFence() == nil {
+		return ErrDispatchFenceUnavailable
+	}
+	if registryHasOpaqueLegacyWrapper(r) {
+		return ErrPreparedOpaqueWrapperUnsupported
+	}
+	if !snapshot.pipelineConfigured() {
+		return ErrPreparedToolPolicyUnavailable
+	}
+	return nil
+}
+
 // Get returns a protected proxy whose Execute method uses prepared dispatch
 // when configured, or the legacy wrappers when it is not.
 func (r *MiddlewareToolRegistry) Get(ctx context.Context, name string) (ToolDefinition, error) {
-	def, err := r.inner.Get(ctx, name)
+	snapshot, err := r.toolRegistrationSnapshot(ctx, name)
 	if err != nil {
 		return nil, err
 	}
-	return newProtectedToolDefinition(r, def, r.wrappers)
+	if err := r.requirePreparedPipeline(snapshot.pipeline); err != nil {
+		return nil, err
+	}
+	if snapshot.definition == nil || snapshot.identity.ToolName() != name {
+		return nil, ErrPreparedRegistrationUnavailable
+	}
+	if snapshot.schema.Present() {
+		if err := validatePreparedSchemaNode(snapshot.schema.Schema(), true); err != nil {
+			return nil, fmt.Errorf("tools: validate registered schema for %q: %w", name, err)
+		}
+	}
+	return newProtectedToolDefinition(r, snapshot)
 }
 
 // List returns protected proxies for every eagerly registered definition and
 // each deferred placeholder. It never exposes raw executable definitions.
 func (r *MiddlewareToolRegistry) List(ctx context.Context) ([]ToolDefinition, error) {
+	if r == nil {
+		return nil, ErrPreparedRegistrationUnavailable
+	}
+	state, fence := r.preparedToolPipeline()
+	if state == nil || fence == nil {
+		return nil, ErrPreparedRegistrationUnavailable
+	}
+	var pipeline preparedToolPipelineSnapshot
+	if err := fence.read(func(DispatchFenceSnapshot) { pipeline = state.snapshot() }); err != nil {
+		return nil, err
+	}
+	if err := r.requirePreparedPipeline(pipeline); err != nil {
+		return nil, err
+	}
 	defs, err := r.inner.List(ctx)
 	if err != nil {
 		return nil, err
@@ -151,11 +193,9 @@ func (r *MiddlewareToolRegistry) List(ctx context.Context) ([]ToolDefinition, er
 			return nil, errors.New("tools: registry returned a nil definition")
 		}
 		if _, isDeferredPlaceholder := def.(*deferredStub); isDeferredPlaceholder {
-			wrapped, wrapErr := newProtectedToolDefinition(r, def, r.wrappers)
-			if wrapErr != nil {
-				return nil, wrapErr
-			}
-			protected = append(protected, wrapped)
+			// Deferred placeholders have no registered executor identity. They
+			// remain display-only; their Execute method always returns an error.
+			protected = append(protected, def)
 			continue
 		}
 		wrapped, getErr := r.Get(ctx, def.Name())

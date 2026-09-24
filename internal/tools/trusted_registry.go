@@ -68,22 +68,30 @@ func DispatchFenceFromRegistry(reg ToolRegistry) (*DispatchFence, error) {
 }
 
 type toolRegistrationMetadata struct {
-	identity      TrustedToolIdentity
-	effects       TrustedEffectSet
-	schema        ToolSchemaSnapshot
-	hasParameters bool
-	description   string
+	identity            TrustedToolIdentity
+	effects             TrustedEffectSet
+	schema              ToolSchemaSnapshot
+	hasParameters       bool
+	description         string
+	hasPromptGuidelines bool
+	promptGuidelines    []string
+	hasStreaming        bool
+	hasTopTools         bool
 }
 
 type registeredToolSnapshot struct {
-	definition    ToolDefinition
-	identity      TrustedToolIdentity
-	effects       TrustedEffectSet
-	schema        ToolSchemaSnapshot
-	hasParameters bool
-	description   string
-	generations   DispatchFenceSnapshot
-	pipeline      preparedToolPipelineSnapshot
+	definition          ToolDefinition
+	identity            TrustedToolIdentity
+	effects             TrustedEffectSet
+	schema              ToolSchemaSnapshot
+	hasParameters       bool
+	description         string
+	hasPromptGuidelines bool
+	promptGuidelines    []string
+	hasStreaming        bool
+	hasTopTools         bool
+	generations         DispatchFenceSnapshot
+	pipeline            preparedToolPipelineSnapshot
 }
 
 type registrationSnapshotProvider interface {
@@ -93,7 +101,8 @@ type registrationSnapshotProvider interface {
 // PreparedToolStages separates argument normalization from execution
 // decoration and mutation scheduling. Effects and identity are intentionally
 // absent: only registration provenance can mint those values. ExecutionWrappers
-// must be audited, effect-preserving runtime decorators; extension hooks and
+// are trusted, audited assembly decorators: they must not add side effects,
+// escape asynchronously, or mutate the frozen call. Extension hooks and
 // arbitrary side-effect wrappers must remain outside this stage.
 type PreparedToolStages struct {
 	ArgumentPreparers []ArgumentPreparer
@@ -106,6 +115,10 @@ type preparedToolPipelineSnapshot struct {
 	stages           PreparedToolStages
 	policyConfigured bool
 	stagesConfigured bool
+}
+
+func (p preparedToolPipelineSnapshot) pipelineConfigured() bool {
+	return p.policyConfigured && p.stagesConfigured && p.policy != nil
 }
 
 type preparedToolPipelineState struct {
@@ -220,6 +233,12 @@ func (r *DefaultToolRegistry) registerDefinition(def ToolDefinition, source stri
 		}
 		metadata.schema = schema
 	}
+	if guideliner, ok := def.(PromptGuideliner); ok {
+		metadata.hasPromptGuidelines = true
+		metadata.promptGuidelines = append([]string(nil), guideliner.PromptGuidelines()...)
+	}
+	_, metadata.hasStreaming = def.(StreamingBashTool)
+	_, metadata.hasTopTools = def.(TopToolsProvider)
 
 	var fingerprint [32]byte
 	var nonce [32]byte
@@ -274,14 +293,18 @@ func (r *DefaultToolRegistry) toolRegistrationSnapshot(_ context.Context, name s
 		}
 		found = true
 		snapshot = registeredToolSnapshot{
-			definition:    definition,
-			identity:      metadata.identity,
-			effects:       newTrustedEffectSet(metadata.effects.Values()...),
-			schema:        metadata.schema,
-			hasParameters: metadata.hasParameters,
-			description:   metadata.description,
-			generations:   generations,
-			pipeline:      r.prepared.snapshot(),
+			definition:          definition,
+			identity:            metadata.identity,
+			effects:             newTrustedEffectSet(metadata.effects.Values()...),
+			schema:              metadata.schema,
+			hasParameters:       metadata.hasParameters,
+			description:         metadata.description,
+			hasPromptGuidelines: metadata.hasPromptGuidelines,
+			promptGuidelines:    append([]string(nil), metadata.promptGuidelines...),
+			hasStreaming:        metadata.hasStreaming,
+			hasTopTools:         metadata.hasTopTools,
+			generations:         generations,
+			pipeline:            r.prepared.snapshot(),
 		}
 	})
 	if err != nil {
