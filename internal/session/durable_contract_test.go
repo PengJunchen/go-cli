@@ -12,6 +12,8 @@ import (
 )
 
 func TestSessionEntryV1JSONRoundTrip(t *testing.T) {
+	ordinal := uint64(2)
+	transcriptIndex := uint64(5)
 	entry := SessionEntry{
 		ID:                "entry-1",
 		ParentID:          "entry-0",
@@ -45,8 +47,8 @@ func TestSessionEntryV1JSONRoundTrip(t *testing.T) {
 			ProcessStartToken: "start-42",
 			ProcessGroupID:    42,
 		},
-		AssistantTranscriptOrdinal: 2,
-		TranscriptIndex:            5,
+		AssistantTranscriptOrdinal: &ordinal,
+		TranscriptIndex:            &transcriptIndex,
 		CompactedThroughEntryID:    "entry-3",
 		RunOutcome:                 core.RunOutcomeCancelled,
 		CheckpointKind:             CheckpointExecutionResolution,
@@ -98,6 +100,83 @@ func TestExecutionIdentityValidateRejectsIncompleteOrUnsupportedIdentity(t *test
 	}
 }
 
+func TestVersion1AssistantAndFirstReceiptRequirePresentZeroCoordinates(t *testing.T) {
+	zero := uint64(0)
+	assistant := SessionEntry{
+		ID:                         "assistant-entry",
+		Type:                       EntryTypeAssistant,
+		RecordVersion:              1,
+		RunID:                      "run-1",
+		AssistantTranscriptOrdinal: &zero,
+		TranscriptIndex:            &zero,
+		ToolCalls:                  []llm.ToolCall{{ID: "call-1", Name: "read"}},
+	}
+	encoded, err := json.Marshal(assistant)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &fields); err != nil {
+		t.Fatal(err)
+	}
+	for _, field := range []string{"assistant_transcript_ordinal", "transcript_index"} {
+		if _, exists := fields[field]; !exists {
+			t.Fatalf("explicit zero coordinate %q was omitted", field)
+		}
+	}
+	var decoded SessionEntry
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	if decoded.AssistantTranscriptOrdinal == nil || *decoded.AssistantTranscriptOrdinal != 0 || decoded.TranscriptIndex == nil || *decoded.TranscriptIndex != 0 {
+		t.Fatal("explicit zero coordinates did not survive JSON round trip")
+	}
+	if err := validateVersion1EntryCoordinates(decoded); err != nil {
+		t.Fatalf("valid first assistant coordinate was rejected: %v", err)
+	}
+
+	receiptIndex := uint64(1)
+	receipt := SessionEntry{
+		ID:                         "receipt-entry",
+		Type:                       EntryTypeTool,
+		RecordVersion:              1,
+		RunID:                      "run-1",
+		AssistantTranscriptOrdinal: &zero,
+		TranscriptIndex:            &receiptIndex,
+		ToolCallID:                 "call-1",
+		ToolName:                   "read",
+		ReceiptOutcome:             core.ReceiptOutcomeSuccess,
+		DispatchState:              DispatchStateDispatched,
+	}
+	if err := validateVersion1EntryCoordinates(receipt); err != nil {
+		t.Fatalf("valid first receipt coordinate was rejected: %v", err)
+	}
+
+	missingOrdinal := assistant
+	missingOrdinal.AssistantTranscriptOrdinal = nil
+	if err := validateVersion1EntryCoordinates(missingOrdinal); err == nil {
+		t.Fatal("version 1 assistant with missing ordinal must be rejected")
+	}
+	missingIndex := receipt
+	missingIndex.TranscriptIndex = nil
+	if err := validateVersion1EntryCoordinates(missingIndex); err == nil {
+		t.Fatal("version 1 receipt with missing transcript index must be rejected")
+	}
+
+	journalIntent := SessionEntry{
+		Type: EntryTypeTool, RecordVersion: 1, ActionState: ActionStateIntent,
+		RunID: "run-1", ActionBatchID: "batch-1", ActionID: "action-1",
+		ToolCallID: "call-1", ToolName: "read", AssistantTranscriptOrdinal: &zero,
+	}
+	if err := validateVersion1EntryCoordinates(journalIntent); err != nil {
+		t.Fatalf("journal-only intent with no transcript index was rejected: %v", err)
+	}
+	journalIntent.TranscriptIndex = &zero
+	if err := validateVersion1EntryCoordinates(journalIntent); err == nil {
+		t.Fatal("journal-only intent must not carry a transcript index")
+	}
+}
+
 func TestSessionViewValidateRequiresMessageSourceAlignment(t *testing.T) {
 	view := SessionView{
 		SessionID:      "physical-1",
@@ -113,6 +192,40 @@ func TestSessionViewValidateRequiresMessageSourceAlignment(t *testing.T) {
 	view.SourceEntryIDs = []string{"entry-1"}
 	if err := view.Validate(); err != nil {
 		t.Fatalf("valid aligned view was rejected: %v", err)
+	}
+}
+
+func TestSessionViewValidateRequiresBranchUniqueSourcesAndNonemptyRevision(t *testing.T) {
+	valid := SessionView{
+		SessionID:      "physical-1",
+		BranchID:       "branch-1",
+		Revision:       "revision-1",
+		Messages:       []core.AgentMessage{{Role: "user", Content: "first"}, {Role: "user", Content: "second"}},
+		SourceEntryIDs: []string{"entry-1", "entry-2"},
+	}
+	if err := valid.Validate(); err != nil {
+		t.Fatalf("valid view was rejected: %v", err)
+	}
+
+	tests := []struct {
+		name string
+		view SessionView
+	}{
+		{name: "missing branch", view: SessionView{SessionID: "physical-1", Messages: valid.Messages, SourceEntryIDs: valid.SourceEntryIDs, Revision: "revision-1"}},
+		{name: "missing revision on history", view: SessionView{SessionID: "physical-1", BranchID: "branch-1", Messages: valid.Messages, SourceEntryIDs: valid.SourceEntryIDs}},
+		{name: "duplicate source", view: SessionView{SessionID: "physical-1", BranchID: "branch-1", Revision: "revision-1", Messages: valid.Messages, SourceEntryIDs: []string{"entry-1", "entry-1"}}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.view.Validate(); err == nil {
+				t.Fatal("expected invalid view to be rejected")
+			}
+		})
+	}
+
+	empty := SessionView{SessionID: "physical-1", BranchID: "branch-1"}
+	if err := empty.Validate(); err != nil {
+		t.Fatalf("empty new-session view may have no revision yet: %v", err)
 	}
 }
 

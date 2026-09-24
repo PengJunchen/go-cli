@@ -129,9 +129,9 @@ type SessionEntry struct {
 	ExecutionIdentity *ExecutionIdentity `json:"execution_identity,omitempty"`
 	// AssistantTranscriptOrdinal identifies the assistant tool-call message
 	// occurrence within its run.
-	AssistantTranscriptOrdinal uint64 `json:"assistant_transcript_ordinal,omitempty"`
+	AssistantTranscriptOrdinal *uint64 `json:"assistant_transcript_ordinal,omitempty"`
 	// TranscriptIndex is the zero-based index of a canonical transcript item.
-	TranscriptIndex uint64 `json:"transcript_index,omitempty"`
+	TranscriptIndex *uint64 `json:"transcript_index,omitempty"`
 	// CompactedThroughEntryID is the exact source boundary covered by a summary.
 	CompactedThroughEntryID string `json:"compacted_through_entry_id,omitempty"`
 	// RunOutcome records the terminal logical result of a run.
@@ -170,6 +170,14 @@ func (e *SessionEntry) clone() *SessionEntry {
 	if e.ExecutionResolution != nil {
 		resolution := *e.ExecutionResolution
 		cp.ExecutionResolution = &resolution
+	}
+	if e.AssistantTranscriptOrdinal != nil {
+		ordinal := *e.AssistantTranscriptOrdinal
+		cp.AssistantTranscriptOrdinal = &ordinal
+	}
+	if e.TranscriptIndex != nil {
+		index := *e.TranscriptIndex
+		cp.TranscriptIndex = &index
 	}
 	return &cp
 }
