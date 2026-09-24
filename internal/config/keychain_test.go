@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -139,9 +140,31 @@ func TestKeychainSource_InAuthChain(t *testing.T) {
 	c := NewAuthChain().WithSources([]AuthSource{
 		{Name: authSourceKeychain, Lookup: kc.Lookup},
 	})
-	got, err := c.Resolve("openai")
+	_, found, err := c.ResolveCredential(context.Background(), "openai", "openai-compatible", "https://api.openai.com")
 	require.NoError(t, err)
-	assert.Equal(t, "sk-chain-key", got)
+	assert.False(t, found, "legacy provider-only keychain entry must not enter a scoped route")
+}
+
+func TestKeychainSource_ScopedCredentialInAuthChain(t *testing.T) {
+	skipNonDarwin(t)
+	scope := AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.openai.com"}
+	var account string
+	kc := newFakeKeychain(func(_ string, args ...string) ([]byte, error) {
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "-a" {
+				account = args[i+1]
+				break
+			}
+		}
+		return []byte("scoped-key"), nil
+	})
+	c := NewAuthChain().WithSources([]AuthSource{{Name: authSourceKeychain, LookupScoped: kc.LookupScoped}})
+
+	got, found, err := c.ResolveCredential(context.Background(), scope.ProviderID, scope.ProtocolID, scope.Origin)
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, "scoped-key", got)
+	assert.NotEqual(t, "api-key", account, "scoped lookup must not read the legacy unscoped keychain item")
 }
 
 func TestNewAuthChain_IncludesKeychainSource(t *testing.T) {

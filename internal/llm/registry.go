@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 )
 
@@ -27,13 +28,17 @@ type ProviderRegistry struct {
 	providers     map[string]ModelProvider
 	order         []string
 	modelRegistry ModelRegistry
+	providerSpecs map[string]ProviderSpec
+	credentials   ScopedCredentialResolver
+	resolver      *ModelResolver
 }
 
 // NewProviderRegistry creates a ProviderRegistry that already contains a
 // default EinoProvider registered under its name ("eino").
 func NewProviderRegistry() *ProviderRegistry {
 	reg := &ProviderRegistry{
-		providers: map[string]ModelProvider{},
+		providers:     map[string]ModelProvider{},
+		providerSpecs: map[string]ProviderSpec{},
 	}
 	// Pre-register a default provider so the registry is always usable.
 	def := NewEinoProvider()
@@ -56,16 +61,66 @@ func (r *ProviderRegistry) Register(p ModelProvider) error {
 		return fmt.Errorf("llm: provider has no name")
 	}
 
+	spec, _ := inferProviderSpec(p)
+	return r.register(p, spec)
+}
+
+func (r *ProviderRegistry) register(p ModelProvider, spec ProviderSpec) error {
+	name := p.Name()
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.providers == nil {
+		r.providers = make(map[string]ModelProvider)
+	}
+	if r.providerSpecs == nil {
+		r.providerSpecs = make(map[string]ProviderSpec)
+	}
 	if _, exists := r.providers[name]; exists {
 		return fmt.Errorf("%w: %s", errProviderAlreadyRegistered, name)
 	}
+	for _, alias := range spec.Aliases {
+		if _, exists := r.providers[alias]; exists {
+			return fmt.Errorf("llm: provider alias already registered: %s", alias)
+		}
+		for _, prior := range r.providerSpecs {
+			for _, priorAlias := range prior.Aliases {
+				if priorAlias == alias || priorAlias == strings.ToLower(name) {
+					return fmt.Errorf("llm: provider alias already registered: %s", alias)
+				}
+			}
+		}
+	}
 	r.providers[name] = p
 	r.order = append(r.order, name)
-
+	if spec.ProviderID != "" {
+		r.providerSpecs[strings.ToLower(name)] = cloneProviderSpec(spec)
+	}
+	r.publishResolverLocked()
 	slog.Info("llm_registry_register", "provider_name", name)
 	return nil
+}
+
+func (r *ProviderRegistry) publishResolverLocked() {
+	resolver := &ModelResolver{
+		providers:   make(map[string]providerDefinition, len(r.providers)),
+		aliases:     make(map[string]string),
+		credentials: r.credentials,
+	}
+	for _, name := range r.order {
+		provider := r.providers[name]
+		id := strings.ToLower(strings.TrimSpace(provider.Name()))
+		spec, hasSpec := r.providerSpecs[id]
+		if !hasSpec {
+			if inferred, ok := inferProviderSpec(provider); ok {
+				spec = inferred
+			}
+		}
+		resolver.providers[id] = providerDefinition{spec: cloneProviderSpec(spec), provider: provider}
+		for _, alias := range spec.Aliases {
+			resolver.aliases[strings.ToLower(alias)] = id
+		}
+	}
+	r.resolver = resolver
 }
 
 // Get returns the provider registered under name. It returns an error when no
@@ -83,11 +138,25 @@ func (r *ProviderRegistry) Get(name string) (ModelProvider, error) {
 // GetModel is a convenience that resolves a provider by name and builds a chat
 // model from cfg. The returned cleanup is nil-safe to call.
 func (r *ProviderRegistry) GetModel(ctx context.Context, name string, cfg ModelConfig) (BaseChatModel, func(), error) {
-	p, err := r.Get(name)
+	resolver := r.SnapshotResolver()
+	if resolver == nil {
+		if _, err := r.Get(name); err != nil {
+			return nil, nil, err
+		}
+		return nil, nil, fmt.Errorf("%w: %s", ErrMissingProviderSpec, name)
+	}
+	resolved, err := resolver.resolveModel(ctx, ModelRequest{
+		ProviderID:  name,
+		ModelID:     cfg.Model,
+		Endpoint:    cfg.BaseURL,
+		Credential:  cfg.Credential,
+		Temperature: cfg.Temperature,
+		MaxTokens:   cfg.MaxTokens,
+	}, cfg.APIKey)
 	if err != nil {
 		return nil, nil, err
 	}
-	return p.Build(ctx, cfg)
+	return resolved.Build(ctx)
 }
 
 // List returns the registered providers in registration order. The returned

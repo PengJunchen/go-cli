@@ -1,36 +1,55 @@
 package config
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 )
 
-// AuthChain resolves API keys through a priority chain:
-// CLI flag -> keychain -> auth.json -> environment variable -> models.json.
-// Each source is consulted in order; the first non-empty key wins.
+// AuthChain resolves API keys through an ordered priority chain, but only
+// sources that prove the full provider/protocol/origin scope are eligible.
 type AuthChain struct {
-	mu      sync.RWMutex
-	sources []AuthSource
-	cliKeys map[string]string
+	mu            sync.RWMutex
+	sources       []AuthSource
+	cliKeys       map[string]string
+	scopedCLIKeys map[AuthScope]string
 }
 
-// AuthSource is a single lookup step in the auth chain. Name identifies the
-// source for logging; Lookup returns the API key for the given provider key,
-// or an error (including a sentinel "not found" error) when unavailable.
+// AuthSource is a lookup step in the auth chain. Lookup is retained for legacy
+// callers; resolver paths use only LookupScoped.
 type AuthSource struct {
-	Name   string
-	Lookup func(key string) (string, error)
+	Name         string
+	Lookup       func(key string) (string, error)
+	LookupScoped func(scope AuthScope) (string, error)
+}
+
+// AuthScope binds a credential to one provider, wire protocol, and normalized
+// origin. Origin includes the effective port and excludes endpoint paths.
+type AuthScope struct {
+	ProviderID string
+	ProtocolID string
+	Origin     string
 }
 
 // ErrAuthNotFound is returned by AuthSource.Lookup implementations when the
 // provider has no key in that source.
 var ErrAuthNotFound = errors.New("auth: key not found in source")
+
+// ErrCredentialScopeRequired is returned when an API asks for a credential
+// using only a provider name. Provider identity alone is insufficient to bind
+// a secret to its protocol and destination origin.
+var ErrCredentialScopeRequired = errors.New("auth: provider, protocol, and origin scope required")
 
 // authSourceCLI, authSourceKeychain, authSourceAuthFile, authSourceEnv,
 // authSourceModels are the ordered names of the default auth sources.
@@ -46,14 +65,14 @@ const (
 // priority order: CLI flag -> keychain -> auth.json -> environment variable ->
 // models.json.
 func NewAuthChain() *AuthChain {
-	c := &AuthChain{cliKeys: make(map[string]string)}
+	c := &AuthChain{cliKeys: make(map[string]string), scopedCLIKeys: make(map[AuthScope]string)}
 	kc := NewKeychainSource()
 	c.sources = []AuthSource{
-		{Name: authSourceCLI, Lookup: c.lookupCLIFlag},
-		{Name: authSourceKeychain, Lookup: kc.Lookup},
-		{Name: authSourceAuthFile, Lookup: lookupAuthFile},
-		{Name: authSourceEnv, Lookup: lookupEnv},
-		{Name: authSourceModels, Lookup: lookupModelsJSON},
+		{Name: authSourceCLI, Lookup: c.lookupCLIFlag, LookupScoped: c.lookupScopedCLIFlag},
+		{Name: authSourceKeychain, Lookup: kc.Lookup, LookupScoped: kc.LookupScoped},
+		{Name: authSourceAuthFile, Lookup: lookupAuthFile, LookupScoped: lookupScopedAuthFile},
+		{Name: authSourceEnv, Lookup: lookupEnv, LookupScoped: lookupScopedEnv},
+		{Name: authSourceModels, Lookup: lookupModelsJSON, LookupScoped: lookupScopedModelsJSON},
 	}
 	slog.Info("config.auth.init", "op", "config.auth.init", "sources", len(c.sources))
 	return c
@@ -73,6 +92,24 @@ func (c *AuthChain) SetCLIFlag(provider, key string) {
 	c.cliKeys[strings.ToLower(provider)] = key
 }
 
+// WithScopedCLIFlag injects a CLI credential that is valid only for the exact
+// provider/protocol/origin scope.
+func (c *AuthChain) WithScopedCLIFlag(scope AuthScope, key string) *AuthChain {
+	c.SetScopedCLIFlag(scope, key)
+	return c
+}
+
+// SetScopedCLIFlag stores a CLI credential under its full scope.
+func (c *AuthChain) SetScopedCLIFlag(scope AuthScope, key string) {
+	normalized, err := normalizeAuthScope(scope)
+	if err != nil || key == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.scopedCLIKeys[normalized] = key
+}
+
 // WithSources replaces the source chain. Intended for testing.
 func (c *AuthChain) WithSources(sources []AuthSource) *AuthChain {
 	c.mu.Lock()
@@ -81,33 +118,41 @@ func (c *AuthChain) WithSources(sources []AuthSource) *AuthChain {
 	return c
 }
 
-// Resolve returns the first API key found for provider across the source
-// chain. It returns an error when every source fails.
+// Resolve rejects provider-only lookups. Call ResolveCredential when the
+// caller has a complete provider/protocol/origin scope.
 func (c *AuthChain) Resolve(provider string) (string, error) {
-	c.mu.RLock()
-	sources := c.sources
-	c.mu.RUnlock()
+	return "", fmt.Errorf("%w (provider %q is not enough)", ErrCredentialScopeRequired, provider)
+}
 
-	key := strings.ToLower(provider)
-	for _, src := range sources {
-		val, err := src.Lookup(key)
-		if err == nil && val != "" {
-			slog.Info("config.auth.resolve",
-				"op", "config.auth.resolve",
-				"provider", provider,
-				"source", src.Name,
-				"found", true,
-			)
-			return val, nil
-		}
-		slog.Debug("config.auth.resolve",
-			"op", "config.auth.resolve",
-			"provider", provider,
-			"source", src.Name,
-			"found", false,
-		)
+// ResolveCredential returns the first key from a source that can prove the
+// exact provider/protocol/origin scope. Legacy provider-only sources are
+// deliberately skipped, even if they contain a matching provider key.
+func (c *AuthChain) ResolveCredential(ctx context.Context, provider, protocol, origin string) (string, bool, error) {
+	if err := ctx.Err(); err != nil {
+		return "", false, err
 	}
-	return "", fmt.Errorf("auth: no API key found for provider %q", provider)
+	scope, err := normalizeAuthScope(AuthScope{ProviderID: provider, ProtocolID: protocol, Origin: origin})
+	if err != nil {
+		return "", false, err
+	}
+	c.mu.RLock()
+	sources := append([]AuthSource(nil), c.sources...)
+	c.mu.RUnlock()
+	for _, src := range sources {
+		if src.LookupScoped == nil {
+			continue
+		}
+		val, lookupErr := src.LookupScoped(scope)
+		if lookupErr == nil && val != "" {
+			slog.Info("config.auth.resolve_scoped", "provider", scope.ProviderID, "protocol", scope.ProtocolID, "source", src.Name, "found", true)
+			return val, true, nil
+		}
+		if lookupErr != nil && !errors.Is(lookupErr, ErrAuthNotFound) {
+			return "", false, fmt.Errorf("auth: scoped source %q failed: %w", src.Name, lookupErr)
+		}
+		slog.Debug("config.auth.resolve_scoped", "provider", scope.ProviderID, "protocol", scope.ProtocolID, "source", src.Name, "found", false)
+	}
+	return "", false, nil
 }
 
 // lookupCLIFlag reads the CLI-provided keys injected via SetCLIFlag.
@@ -116,6 +161,15 @@ func (c *AuthChain) lookupCLIFlag(provider string) (string, error) {
 	defer c.mu.RUnlock()
 	if v, ok := c.cliKeys[provider]; ok && v != "" {
 		return v, nil
+	}
+	return "", ErrAuthNotFound
+}
+
+func (c *AuthChain) lookupScopedCLIFlag(scope AuthScope) (string, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	if value := c.scopedCLIKeys[scope]; value != "" {
+		return value, nil
 	}
 	return "", ErrAuthNotFound
 }
@@ -200,6 +254,102 @@ func lookupModelsJSON(provider string) (string, error) {
 		}
 	}
 	return "", ErrAuthNotFound
+}
+
+type scopedCredentialRecord struct {
+	Provider string `json:"provider"`
+	Protocol string `json:"protocol"`
+	Origin   string `json:"origin"`
+	APIKey   string `json:"api_key"`
+}
+
+// lookupScopedAuthFile accepts only explicit tuple records under a
+// "credentials" array. Legacy single-key and provider-only formats remain
+// readable by old tooling but are never candidates for scoped resolution.
+func lookupScopedAuthFile(scope AuthScope) (string, error) {
+	return lookupScopedCredentialFile(authFilePath(), scope)
+}
+
+func lookupScopedModelsJSON(scope AuthScope) (string, error) {
+	return lookupScopedCredentialFile(modelsConfigPath(), scope)
+}
+
+func lookupScopedAuthFilePath(path string, scope AuthScope) (string, error) {
+	return lookupScopedCredentialFile(path, scope)
+}
+
+func lookupScopedCredentialFile(path string, scope AuthScope) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", ErrAuthNotFound
+	}
+	var document struct {
+		Credentials []scopedCredentialRecord `json:"credentials"`
+	}
+	if err := json.Unmarshal(data, &document); err != nil {
+		return "", ErrAuthNotFound
+	}
+	for _, entry := range document.Credentials {
+		entryScope, scopeErr := normalizeAuthScope(AuthScope{ProviderID: entry.Provider, ProtocolID: entry.Protocol, Origin: entry.Origin})
+		if scopeErr == nil && entryScope == scope && entry.APIKey != "" {
+			return entry.APIKey, nil
+		}
+	}
+	return "", ErrAuthNotFound
+}
+
+// ScopedCredentialEnvName returns the deterministic environment variable name
+// for an exact scope. The origin is represented by a short SHA-256 digest so
+// punctuation and endpoint details do not become environment variable syntax.
+func ScopedCredentialEnvName(scope AuthScope) (string, error) {
+	normalized, err := normalizeAuthScope(scope)
+	if err != nil {
+		return "", err
+	}
+	tuple := normalized.ProviderID + "\x00" + normalized.ProtocolID + "\x00" + normalized.Origin
+	digest := sha256.Sum256([]byte(tuple))
+	return "GO_CLI_CREDENTIAL_" + hex.EncodeToString(digest[:]) + "_API_KEY", nil
+}
+
+func lookupScopedEnv(scope AuthScope) (string, error) {
+	name, err := ScopedCredentialEnvName(scope)
+	if err != nil {
+		return "", ErrAuthNotFound
+	}
+	if value := os.Getenv(name); value != "" {
+		return value, nil
+	}
+	return "", ErrAuthNotFound
+}
+
+func normalizeAuthScope(scope AuthScope) (AuthScope, error) {
+	scope.ProviderID = strings.ToLower(strings.TrimSpace(scope.ProviderID))
+	scope.ProtocolID = strings.ToLower(strings.TrimSpace(scope.ProtocolID))
+	if scope.ProviderID == "" || scope.ProtocolID == "" {
+		return AuthScope{}, ErrCredentialScopeRequired
+	}
+	u, err := url.Parse(strings.TrimSpace(scope.Origin))
+	if err != nil || u.Scheme == "" || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || (u.Path != "" && u.Path != "/") {
+		return AuthScope{}, ErrCredentialScopeRequired
+	}
+	scheme := strings.ToLower(u.Scheme)
+	if scheme != "http" && scheme != "https" {
+		return AuthScope{}, ErrCredentialScopeRequired
+	}
+	port := u.Port()
+	if port == "" {
+		if scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	} else if value, err := strconv.Atoi(port); err != nil || value < 1 || value > 65535 {
+		return AuthScope{}, ErrCredentialScopeRequired
+	} else {
+		port = strconv.Itoa(value)
+	}
+	scope.Origin = scheme + "://" + net.JoinHostPort(strings.ToLower(u.Hostname()), port)
+	return scope, nil
 }
 
 // envVarNames returns candidate environment variable names for a provider,

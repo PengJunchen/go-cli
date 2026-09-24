@@ -995,12 +995,13 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 // The concrete OpenAIProvider/ClaudeProvider/GeminiProvider embed it and only
 // differ in their name, default base URL, model and wire format.
 type nativeProviderBase struct {
-	name           string
-	defaultBaseURL string
-	defaultModel   string
-	httpClient     *http.Client
-	defaultAPIKey  string
-	models         []ModelInfo
+	name              string
+	defaultBaseURL    string
+	baseURLConfigured bool
+	defaultModel      string
+	httpClient        *http.Client
+	defaultAPIKey     string
+	models            []ModelInfo
 }
 
 // buildCommon resolves the effective model name and returns a shared error,
@@ -1029,7 +1030,18 @@ func (b *nativeProviderBase) resolveAPIKey(cfg ModelConfig) string {
 	if cfg.APIKey != "" {
 		return cfg.APIKey
 	}
+	if cfg.credentialResolved {
+		return ""
+	}
 	return b.defaultAPIKey
+}
+
+func (b *nativeProviderBase) credentialForOrigin(origin string) (string, bool) {
+	defaultOrigin, err := normalizeProviderOrigin(b.defaultBaseURL)
+	if err != nil || defaultOrigin != origin {
+		return "", false
+	}
+	return b.defaultAPIKey, true
 }
 
 // newChatModel builds a nativeChatModel bound to this provider's shared
@@ -1056,7 +1068,10 @@ type NativeProviderOption func(*nativeProviderBase)
 
 // WithNativeBaseURL overrides the provider's default endpoint prefix.
 func WithNativeBaseURL(url string) NativeProviderOption {
-	return func(b *nativeProviderBase) { b.defaultBaseURL = url }
+	return func(b *nativeProviderBase) {
+		b.defaultBaseURL = url
+		b.baseURLConfigured = true
+	}
 }
 
 // WithNativeAPIKey sets the credential used when a ModelConfig does not supply
@@ -1130,6 +1145,10 @@ func (p *OpenAIProvider) Build(_ context.Context, cfg ModelConfig) (BaseChatMode
 	}
 	baseURL := p.resolveBaseURL(cfg)
 	apiKey := p.resolveAPIKey(cfg)
+	client, err := httpClientForResolvedScope(p.httpClient, cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("llm: build provider for resolved scope: %w", err)
+	}
 	endpoint := strings.TrimRight(baseURL, "/") + openaiChatPath
 
 	header := func() map[string]string {
@@ -1145,7 +1164,9 @@ func (p *OpenAIProvider) Build(_ context.Context, cfg ModelConfig) (BaseChatMode
 	decode := func(body []byte) (*Message, error) {
 		return decodeOpenAIResponse(body)
 	}
-	return p.newChatModel(cfg, model, baseURL, apiKey, endpoint, header, encode, decode), func() {}, nil
+	chatModel := p.newChatModel(cfg, model, baseURL, apiKey, endpoint, header, encode, decode)
+	chatModel.client = client
+	return chatModel, func() {}, nil
 }
 
 // encodeOpenAIRequest marshals the OpenAI request body, reusing the shared

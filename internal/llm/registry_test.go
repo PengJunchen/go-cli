@@ -76,7 +76,9 @@ func TestProviderRegistryListOrder(t *testing.T) {
 // TestProviderRegistryGetModel verifies the GetModel convenience builds a model.
 func TestProviderRegistryGetModel(t *testing.T) {
 	reg := NewProviderRegistry()
-	m, cleanup, err := reg.GetModel(context.Background(), "eino", ModelConfig{Model: "gpt-4o"})
+	ref, err := reg.SnapshotResolver().CredentialRefFor("eino", "")
+	require.NoError(t, err)
+	m, cleanup, err := reg.GetModel(context.Background(), "eino", ModelConfig{Model: "gpt-4o", APIKey: "test-key", Credential: ref})
 	require.NoError(t, err)
 	require.NotNil(t, m)
 	require.NotNil(t, cleanup)

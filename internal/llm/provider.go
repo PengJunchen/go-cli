@@ -33,7 +33,8 @@ type EinoProvider struct {
 
 	// defaultBaseURL is the endpoint prefix used when a ModelConfig does not
 	// provide its own BaseURL. The chat completions path is appended to it.
-	defaultBaseURL string
+	defaultBaseURL    string
+	baseURLConfigured bool
 
 	// defaultAPIKeySource lazily supplies the bearer token used when a
 	// ModelConfig does not carry an APIKey. It may return an empty string when
@@ -90,7 +91,10 @@ func WithHTTPClient(c *http.Client) ProviderOption {
 // WithBaseURL overrides the default OpenAI-compatible endpoint prefix. The
 // chat completions path is joined to this value per request.
 func WithBaseURL(url string) ProviderOption {
-	return func(p *EinoProvider) { p.defaultBaseURL = url }
+	return func(p *EinoProvider) {
+		p.defaultBaseURL = url
+		p.baseURLConfigured = true
+	}
 }
 
 // WithAPIKey sets the bearer token used when a ModelConfig does not supply one.
@@ -130,6 +134,14 @@ func (p *EinoProvider) Models() []ModelInfo {
 	return out
 }
 
+func (p *EinoProvider) credentialForOrigin(origin string) (string, bool) {
+	defaultOrigin, err := normalizeProviderOrigin(p.defaultBaseURL)
+	if err != nil || defaultOrigin != origin || p.defaultAPIKeySource == nil {
+		return "", false
+	}
+	return p.defaultAPIKeySource(), true
+}
+
 // Build constructs an HTTPChatModel bound to this provider. The returned
 // cleanup function is a no-op because the HTTP client owns no goroutines. It
 // returns an error only when cfg is clearly invalid (model name empty and no
@@ -142,10 +154,14 @@ func (p *EinoProvider) Build(_ context.Context, cfg ModelConfig) (BaseChatModel,
 	if model == "" {
 		return nil, nil, errors.New("llm: provider build requires a non-empty model name")
 	}
+	client, err := httpClientForResolvedScope(p.httpClient, cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("llm: build provider for resolved scope: %w", err)
+	}
 	m := &HTTPChatModel{
 		provider: p,
 		cfg:      cfg,
-		client:   p.httpClient,
+		client:   client,
 	}
 	// Override resolved model back onto the config so the model reports the
 	// effective name.
@@ -489,7 +505,7 @@ func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadClos
 	req.Header.Set("Content-Type", "application/json")
 
 	apiKey := m.cfg.APIKey
-	if apiKey == "" && m.provider.defaultAPIKeySource != nil {
+	if apiKey == "" && !m.cfg.credentialResolved && m.provider.defaultAPIKeySource != nil {
 		apiKey = m.provider.defaultAPIKeySource()
 	}
 	if apiKey != "" {
