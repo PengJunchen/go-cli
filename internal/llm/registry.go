@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"sync"
 )
 
@@ -16,6 +15,8 @@ var errProviderNotFound = errors.New("llm: provider not found")
 // errProviderAlreadyRegistered is returned by Register when a provider is
 // already registered under the same name.
 var errProviderAlreadyRegistered = errors.New("llm: provider already registered")
+
+var errProviderNameNotCanonical = errors.New("llm: provider name must use its canonical lowercase spelling")
 
 // ProviderRegistry manages ModelProvider instances by name. It is a concrete,
 // thread-safe container: providers keyed by name with deterministic
@@ -56,7 +57,7 @@ func (r *ProviderRegistry) Register(p ModelProvider) error {
 	if p == nil {
 		panic("llm: cannot register a nil ModelProvider")
 	}
-	name := p.Name()
+	name := canonicalProviderID(p.Name())
 	if name == "" {
 		return fmt.Errorf("llm: provider has no name")
 	}
@@ -66,7 +67,34 @@ func (r *ProviderRegistry) Register(p ModelProvider) error {
 }
 
 func (r *ProviderRegistry) register(p ModelProvider, spec ProviderSpec) error {
-	name := p.Name()
+	rawName := p.Name()
+	name := canonicalProviderID(rawName)
+	if name == "" {
+		return fmt.Errorf("llm: provider has no name")
+	}
+	if spec.ProviderID != "" {
+		spec.ProviderID = canonicalProviderID(spec.ProviderID)
+		if spec.ProviderID != name {
+			return fmt.Errorf("llm: provider spec identity %q does not match registered name %q", spec.ProviderID, name)
+		}
+	} else if len(spec.Aliases) != 0 {
+		return fmt.Errorf("llm: provider aliases require a canonical provider identity")
+	}
+	spec.ProtocolID = ProtocolID(canonicalProviderID(string(spec.ProtocolID)))
+	aliases := make([]string, 0, len(spec.Aliases))
+	seenAliases := make(map[string]struct{}, len(spec.Aliases))
+	for _, alias := range spec.Aliases {
+		alias = canonicalProviderID(alias)
+		if alias == "" || alias == name || isDisabledNativeIdentity(alias) {
+			return fmt.Errorf("llm: invalid provider alias %q for %q", alias, name)
+		}
+		if _, duplicate := seenAliases[alias]; duplicate {
+			return fmt.Errorf("llm: duplicate provider alias %q for %q", alias, name)
+		}
+		seenAliases[alias] = struct{}{}
+		aliases = append(aliases, alias)
+	}
+	spec.Aliases = aliases
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.providers == nil {
@@ -78,14 +106,28 @@ func (r *ProviderRegistry) register(p ModelProvider, spec ProviderSpec) error {
 	if _, exists := r.providers[name]; exists {
 		return fmt.Errorf("%w: %s", errProviderAlreadyRegistered, name)
 	}
+	if rawName != name {
+		return fmt.Errorf("%w: %s", errProviderNameNotCanonical, name)
+	}
+	for _, prior := range r.providerSpecs {
+		for _, priorAlias := range prior.Aliases {
+			if canonicalProviderID(priorAlias) == name {
+				return fmt.Errorf("llm: canonical provider name %q collides with an existing alias", name)
+			}
+		}
+	}
 	for _, alias := range spec.Aliases {
 		if _, exists := r.providers[alias]; exists {
-			return fmt.Errorf("llm: provider alias already registered: %s", alias)
+			return fmt.Errorf("llm: provider alias %q collides with canonical provider name", alias)
 		}
-		for _, prior := range r.providerSpecs {
+		for priorName, prior := range r.providerSpecs {
+			if priorName == alias {
+				return fmt.Errorf("llm: provider alias %q collides with canonical provider name", alias)
+			}
 			for _, priorAlias := range prior.Aliases {
-				if priorAlias == alias || priorAlias == strings.ToLower(name) {
-					return fmt.Errorf("llm: provider alias already registered: %s", alias)
+				priorAlias = canonicalProviderID(priorAlias)
+				if priorAlias == alias || priorAlias == name {
+					return fmt.Errorf("llm: provider alias %q collides with an existing provider identity", alias)
 				}
 			}
 		}
@@ -93,7 +135,7 @@ func (r *ProviderRegistry) register(p ModelProvider, spec ProviderSpec) error {
 	r.providers[name] = p
 	r.order = append(r.order, name)
 	if spec.ProviderID != "" {
-		r.providerSpecs[strings.ToLower(name)] = cloneProviderSpec(spec)
+		r.providerSpecs[canonicalProviderID(name)] = cloneProviderSpec(spec)
 	}
 	r.publishResolverLocked()
 	slog.Info("llm_registry_register", "provider_name", name)
@@ -108,16 +150,17 @@ func (r *ProviderRegistry) publishResolverLocked() {
 	}
 	for _, name := range r.order {
 		provider := r.providers[name]
-		id := strings.ToLower(strings.TrimSpace(provider.Name()))
+		id := canonicalProviderID(name)
 		spec, hasSpec := r.providerSpecs[id]
 		if !hasSpec {
 			if inferred, ok := inferProviderSpec(provider); ok {
 				spec = inferred
 			}
 		}
-		resolver.providers[id] = providerDefinition{spec: cloneProviderSpec(spec), provider: provider}
+		models := append([]ModelInfo(nil), provider.Models()...)
+		resolver.providers[id] = providerDefinition{spec: cloneProviderSpec(spec), provider: provider, models: models}
 		for _, alias := range spec.Aliases {
-			resolver.aliases[strings.ToLower(alias)] = id
+			resolver.aliases[canonicalProviderID(alias)] = id
 		}
 	}
 	r.resolver = resolver
@@ -128,11 +171,24 @@ func (r *ProviderRegistry) publishResolverLocked() {
 func (r *ProviderRegistry) Get(name string) (ModelProvider, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	p, ok := r.providers[name]
+	canonical := r.canonicalProviderNameLocked(name)
+	p, ok := r.providers[canonical]
 	if !ok {
 		return nil, fmt.Errorf("%w: %s", errProviderNotFound, name)
 	}
 	return p, nil
+}
+
+func (r *ProviderRegistry) canonicalProviderNameLocked(name string) string {
+	canonical := canonicalProviderID(name)
+	for providerID, spec := range r.providerSpecs {
+		for _, alias := range spec.Aliases {
+			if canonicalProviderID(alias) == canonical {
+				return providerID
+			}
+		}
+	}
+	return canonical
 }
 
 // GetModel is a convenience that resolves a provider by name and builds a chat
@@ -186,6 +242,7 @@ func (r *ProviderRegistry) Default() ModelProvider {
 // provider. It returns an empty ModelInfo when the provider or model is not
 // found.
 func (r *ProviderRegistry) GetModelInfo(ctx context.Context, provider, model string) ModelInfo {
+	provider = canonicalProviderID(provider)
 	p, err := r.Get(provider)
 	if err != nil {
 		// Provider not registered locally; try the external registry.

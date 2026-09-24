@@ -111,9 +111,9 @@ func WithProviderName(name string) ProviderOption {
 // default model name to the first entry when present.
 func WithModels(models []ModelInfo) ProviderOption {
 	return func(p *EinoProvider) {
-		p.models = models
-		if len(models) > 0 && models[0].Name != "" {
-			p.defaultModel = models[0].Name
+		p.models = append([]ModelInfo(nil), models...)
+		if len(p.models) > 0 && p.models[0].Name != "" {
+			p.defaultModel = p.models[0].Name
 		}
 	}
 }
