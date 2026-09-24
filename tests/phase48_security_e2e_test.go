@@ -712,7 +712,7 @@ func TestET_Phase48_Audit_StreamingAndTelemetryLabels(t *testing.T) {
 
 		tel := production.NewDefaultTelemetry()
 
-		// Record metrics with different labels — they should get separate keys.
+		// Different label tuples should have distinct canonical, length-framed keys.
 		require.NoError(t, tel.Record(ctx, production.TelemetryMetric{
 			Name: "tool.duration", Value: 1.5,
 			Labels: map[string]string{"tool": "bash", "status": "ok"},
@@ -729,12 +729,14 @@ func TestET_Phase48_Audit_StreamingAndTelemetryLabels(t *testing.T) {
 		dtel, ok := tel.(*production.DefaultTelemetry)
 		require.True(t, ok, "should be *DefaultTelemetry")
 		snap := dtel.Snapshot()
-		// bash+ok should be summed: 1.5 + 2.0 = 3.5
-		assert.Contains(t, snap, "tool.duration{status=ok,tool=bash}")
-		assert.InDelta(t, 3.5, snap["tool.duration{status=ok,tool=bash}"], 0.001)
-		// grep+ok should be 0.5
-		assert.Contains(t, snap, "tool.duration{status=ok,tool=grep}")
-		assert.InDelta(t, 0.5, snap["tool.duration{status=ok,tool=grep}"], 0.001)
+		bashKey := "metric-v1|13:tool.duration|2|6:status|2:ok|4:tool|4:bash|"
+		grepKey := "metric-v1|13:tool.duration|2|6:status|2:ok|4:tool|4:grep|"
+		// bash+ok should be summed: 1.5 + 2.0 = 3.5.
+		assert.Contains(t, snap, bashKey)
+		assert.InDelta(t, 3.5, snap[bashKey], 0.001)
+		// grep+ok should be 0.5.
+		assert.Contains(t, snap, grepKey)
+		assert.InDelta(t, 0.5, snap[grepKey], 0.001)
 	})
 }
 
