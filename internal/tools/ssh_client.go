@@ -1,10 +1,10 @@
 package tools
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -25,6 +25,21 @@ type SSHClient interface {
 	// Close releases any underlying resources. For stateless implementations
 	// this is a no-op.
 	Close() error
+}
+
+// SSHExecResult contains bounded output and a remote exit status. Truncated
+// reports whether the local client discarded bytes after reaching maxOutput.
+type SSHExecResult struct {
+	Stdout    string
+	Stderr    string
+	ExitCode  int
+	Truncated bool
+}
+
+// BoundedSSHClient is an optional extension for clients that can enforce an
+// output budget while reading from the local SSH transport.
+type BoundedSSHClient interface {
+	ExecBounded(ctx context.Context, command string, maxOutput int) (SSHExecResult, error)
 }
 
 // SSHConfig holds the connection parameters for an SSH client.
@@ -55,6 +70,9 @@ func NewDefaultSSHClient(config SSHConfig) *DefaultSSHClient {
 // a best-effort connection probe (key-based auth only). Password-based auth
 // cannot be tested non-interactively, so only config validation is performed.
 func (c *DefaultSSHClient) Connect(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if c.config.Host == "" {
 		return fmt.Errorf("ssh: host is required")
 	}
@@ -74,16 +92,35 @@ func (c *DefaultSSHClient) Connect(ctx context.Context) error {
 	if c.config.KeyPath != "" {
 		args := c.baseArgs()
 		args = append(args, "-o", "BatchMode=yes", "echo", "ok")
-		cmd := exec.CommandContext(ctx, "ssh", args...)
-		var probeOut, probeErr bytes.Buffer
-		cmd.Stdout = &probeOut
-		cmd.Stderr = &probeErr
-		if err := cmd.Run(); err != nil {
+		execCtx, cancel := context.WithCancel(ctx)
+		cmd := exec.Command("ssh", args...)
+		managed, err := startManagedLocalCommand(cancel, cmd)
+		if err == nil {
+			capture := newBoundedOutputCapture(16 * 1024)
+			lifecycle := managed.collect(execCtx, func(reader io.Reader, stream string) (bool, error) {
+				_, readErr := io.Copy(capture.writer(stream), reader)
+				return readErr == nil, readErr
+			})
+			_, probeErr, _, _ := capture.snapshot("")
+			if lifecycle.runErr != nil {
+				err = lifecycle.runErr
+			}
+			if lifecycle.cleanupErr != nil || !lifecycle.quiescent {
+				err = errors.Join(err, errors.Join(lifecycle.cleanupErr, errProcessCleanupUnconfirmed))
+			}
+			if err != nil {
+				slog.Warn("ssh.connect_probe_failed",
+					"host", c.config.Host,
+					"err", err,
+					"stderr", probeErr)
+			}
+		} else {
 			slog.Warn("ssh.connect_probe_failed",
 				"host", c.config.Host,
 				"err", err,
-				"stderr", probeErr.String())
+				"stderr", "")
 		}
+		cancel()
 	}
 
 	return nil
@@ -134,30 +171,84 @@ func (c *DefaultSSHClient) buildExecCommand(command string) sshCommandSpec {
 // exitCode with err == nil. Transport errors (context cancellation, ssh binary
 // not found, etc.) are returned via err with exitCode set to -1.
 func (c *DefaultSSHClient) Exec(ctx context.Context, command string) (string, string, int, error) {
+	result, err := c.ExecBounded(ctx, command, defaultBashMaxOutput)
+	return result.Stdout, result.Stderr, result.ExitCode, err
+}
+
+// ExecBounded runs ssh while draining both local transport pipes and retaining
+// only maxOutput bytes across stdout and stderr.
+func (c *DefaultSSHClient) ExecBounded(ctx context.Context, command string, maxOutput int) (SSHExecResult, error) {
+	if err := ctx.Err(); err != nil {
+		return SSHExecResult{ExitCode: -1}, newNotDispatchedExecutionError(fmt.Errorf("ssh exec canceled before start: %w", err))
+	}
 	spec := c.buildExecCommand(command)
-	cmd := exec.CommandContext(ctx, spec.name, spec.args...)
+	execCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	cmd := exec.Command(spec.name, spec.args...)
 	if spec.env != nil {
 		cmd.Env = spec.env
 	}
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	runErr := cmd.Run()
-
+	managed, err := startManagedLocalCommand(cancel, cmd)
+	if err != nil {
+		return SSHExecResult{ExitCode: -1}, newNotDispatchedExecutionError(fmt.Errorf("ssh exec: %w", err))
+	}
+	capture := newBoundedOutputCapture(maxOutput)
+	lifecycle := managed.collect(execCtx, func(reader io.Reader, stream string) (bool, error) {
+		_, readErr := io.Copy(capture.writer(stream), reader)
+		return readErr == nil, readErr
+	})
+	stdout, stderr, _, truncated := capture.snapshot("")
+	result := SSHExecResult{Stdout: stdout, Stderr: stderr, Truncated: truncated, ExitCode: -1}
+	if lifecycle.cleanupErr != nil || !lifecycle.quiescent {
+		cause := errors.Join(errProcessCleanupUnconfirmed, lifecycle.cleanupErr, lifecycle.readerErr)
+		if execCtx.Err() != nil {
+			cause = errors.Join(cause, execCtx.Err())
+		}
+		return result, pendingProcessError(fmt.Errorf("ssh exec: %w", cause), true)
+	}
+	if lifecycle.interrupted {
+		cause := execCtx.Err()
+		if cause == nil {
+			cause = context.Canceled
+		}
+		return result, pendingProcessError(fmt.Errorf("ssh exec: remote completion is unknown after local transport stopped: %w", cause), true)
+	}
+	if lifecycle.escalated {
+		return result, pendingProcessError(fmt.Errorf("ssh exec: remote completion is unknown after local transport cleanup: %w", errors.Join(errProcessGroupRemained, lifecycle.runErr)), true)
+	}
+	if lifecycle.readerErr != nil {
+		return result, pendingProcessError(fmt.Errorf("ssh exec: remote completion is unknown after output read failed: %w", lifecycle.readerErr), true)
+	}
 	// An *exec.ExitError means the remote command ran but exited non-zero.
 	// This is a successful transport-level execution; report via exitCode.
 	var ee *exec.ExitError
-	if errors.As(runErr, &ee) {
-		return stdout.String(), stderr.String(), ee.ExitCode(), nil
+	if errors.As(lifecycle.runErr, &ee) {
+		if ee.ExitCode() == 255 {
+			// OpenSSH uses 255 for transport/protocol failures, for which there
+			// is no terminal receipt proving whether the remote command ran.
+			cause := fmt.Errorf("ssh exec exited 255 without a remote completion receipt: %w", ee)
+			return result, pendingProcessError(cause, true)
+		}
+		if c.config.Password != "" && ee.ExitCode() >= 1 && ee.ExitCode() <= 7 {
+			// sshpass reserves statuses 1-7 for its own failures, while also
+			// forwarding a remote command's exit status. These values are
+			// ambiguous without a separate remote receipt. The local process and
+			// readers are joined, so report unknown outcome without a live-resource
+			// marker.
+			cause := fmt.Errorf("sshpass exited %d without an unambiguous remote completion receipt: %w", ee.ExitCode(), ee)
+			return result, newUnknownExecutionError(cause)
+		}
+		result.ExitCode = ee.ExitCode()
+		return result, nil
 	}
 
-	if runErr != nil {
+	if lifecycle.runErr != nil {
 		// Transport-level failure (context cancel, binary not found, etc.).
-		return stdout.String(), stderr.String(), -1, fmt.Errorf("ssh exec: %w", runErr)
+		return result, pendingProcessError(fmt.Errorf("ssh exec: remote completion is unknown after transport failure: %w", lifecycle.runErr), true)
 	}
 
-	return stdout.String(), stderr.String(), 0, nil
+	result.ExitCode = 0
+	return result, nil
 }
 
 // Close is a no-op for the stateless exec-based client.

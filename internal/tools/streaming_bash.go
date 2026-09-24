@@ -63,34 +63,33 @@ func newStreamingBashOutputCapture(maxOutput int) *streamingBashOutputCapture {
 	return &streamingBashOutputCapture{maxOutput: maxOutput}
 }
 
-func (c *streamingBashOutputCapture) addLine(stream, line string) (captured, newlyTruncated bool) {
+func (c *streamingBashOutputCapture) addSourceBytes(stream string, source []byte) (captured, newlyTruncated bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
 	if c.truncated {
 		return false, false
 	}
+	if len(source) == 0 {
+		return true, false
+	}
 
-	target, other := &c.stdout, &c.stderr
+	target := &c.stdout
 	if stream == "stderr" {
-		target, other = &c.stderr, &c.stdout
+		target = &c.stderr
 	}
 
 	retainedBytes := c.stdout.Len() + c.stderr.Len()
-	if c.stdout.Len() > 0 && c.stderr.Len() > 0 {
-		retainedBytes++ // The combined output inserts one separator between streams.
-	}
-	lineBytes := len(line) + 1
-	if target.Len() == 0 && other.Len() > 0 {
-		lineBytes++ // The combined output inserts one separator between streams.
-	}
-	if retainedBytes+lineBytes > c.maxOutput {
+	remaining := c.maxOutput - retainedBytes
+	if remaining < len(source) {
+		if remaining > 0 {
+			_, _ = target.Write(source[:remaining])
+		}
 		c.truncated = true
 		return false, true
 	}
 
-	target.WriteString(line)
-	target.WriteByte('\n')
+	_, _ = target.Write(source)
 	return true, false
 }
 
@@ -187,24 +186,19 @@ func (t *StreamingBashToolImpl) ExecuteStreaming(ctx context.Context, call ToolC
 
 	execCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	if err := execCtx.Err(); err != nil {
+		return nil, fmt.Errorf("bash: canceled before start: %w", err)
+	}
 
 	// Wrap the command with resource limits.
 	command = wrapCommandWithLimits(command, t.ResourceLimits)
 
-	cmd := exec.CommandContext(execCtx, "bash", "-lc", command)
+	cmd := exec.Command("bash", "-lc", command)
 	cmd.Dir = t.Workdir
 	cmd.Env = filteredEnv(t.Env)
 
-	stdoutPipe, err := cmd.StdoutPipe()
+	managed, err := startManagedLocalCommand(cancel, cmd)
 	if err != nil {
-		return nil, fmt.Errorf("bash: stdout pipe: %w", err)
-	}
-	stderrPipe, err := cmd.StderrPipe()
-	if err != nil {
-		return nil, fmt.Errorf("bash: stderr pipe: %w", err)
-	}
-
-	if err := cmd.Start(); err != nil {
 		return nil, fmt.Errorf("bash: start: %w", err)
 	}
 
@@ -214,49 +208,58 @@ func (t *StreamingBashToolImpl) ExecuteStreaming(ctx context.Context, call ToolC
 	}
 
 	capture := newStreamingBashOutputCapture(maxOutput)
-	var stdoutDrained, stderrDrained bool
-	var stdoutReadErr, stderrReadErr error
-
-	var wg sync.WaitGroup
-	wg.Add(2)
-	go func() {
-		defer wg.Done()
-		stdoutDrained, stdoutReadErr = readPipe(stdoutPipe, "stdout", sink, call.ID, capture)
-		if !stdoutDrained {
-			cancel()
-		}
-	}()
-	go func() {
-		defer wg.Done()
-		stderrDrained, stderrReadErr = readPipe(stderrPipe, "stderr", sink, call.ID, capture)
-		if !stderrDrained {
-			cancel()
-		}
-	}()
-	wg.Wait()
-
-	runErr := cmd.Wait()
+	lifecycle := managed.collect(execCtx, func(reader io.Reader, stream string) (bool, error) {
+		return readPipe(reader, stream, sink, call.ID, capture)
+	})
 	ms := time.Since(start).Milliseconds()
 	output, truncated := capture.output()
 	metadata := map[string]any{
-		"duration_ms": ms,
-		"truncated":   truncated,
+		"duration_ms":       ms,
+		"truncated":         truncated,
+		"containment_scope": processContainmentScope,
 	}
-	readerErr := errors.Join(stdoutReadErr, stderrReadErr)
+	if lifecycle.cleanupErr != nil {
+		metadata["cleanup_error"] = lifecycle.cleanupErr.Error()
+	}
+	readerErr := lifecycle.readerErr
 	if readerErr != nil {
 		metadata["read_error"] = readerErr.Error()
 	}
 	result := &ToolResult{Output: output, Metadata: metadata}
+	runErr := lifecycle.runErr
 
-	if ctx.Err() != nil || errors.Is(execCtx.Err(), context.DeadlineExceeded) {
+	if lifecycle.interrupted {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		metadata["exit_code"] = -1
-		metadata["error"] = "timed out"
-		logger.Error("streaming_bash.timeout",
+		message := "canceled"
+		cause := error(execCtx.Err())
+		if cause == nil {
+			cause = context.Canceled
+		}
+		if errors.Is(cause, context.DeadlineExceeded) {
+			message = "timed out"
+			cause = fmt.Errorf("bash: timed out after %s: %w", timeout.String(), cause)
+		}
+		metadata["error"] = message
+		logger.Error("streaming_bash.execution_interrupted",
 			"tool", "bash",
 			"duration_ms", ms,
+			"reason", message,
 			"timeout", timeout.String())
-		return result, fmt.Errorf("bash: timed out after %s: %w", timeout.String(), execCtx.Err())
+		return result, localLifecycleError(cause, lifecycle)
+	}
+
+	if !lifecycle.quiescent {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		metadata["exit_code"] = exitCode(runErr)
+		cause := errors.Join(errProcessCleanupUnconfirmed, lifecycle.cleanupErr, readerErr)
+		return result, pendingProcessErrorWithDone(cause, true, lifecycle.executionDone)
+	}
+
+	if lifecycle.escalated {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		metadata["exit_code"] = exitCode(runErr)
+		return result, newUnknownExecutionError(errors.Join(errProcessGroupRemained, runErr))
 	}
 
 	if readerErr != nil {
@@ -300,25 +303,33 @@ func (t *StreamingBashToolImpl) ExecuteStreaming(ctx context.Context, call ToolC
 	return result, nil
 }
 
-// readPipe reads lines from pipe and pushes each through the StreamSink.
+// readPipe reads source-framed lines from pipe and pushes each through the StreamSink.
 // Output is retained within the shared capture limit; after the limit or a
 // scanner error, the remaining bytes are drained so the child can finish.
 // The returned bool reports whether the pipe was drained to EOF.
 func readPipe(pipe io.Reader, stream string, sink StreamSink, toolCallID string, capture *streamingBashOutputCapture) (bool, error) {
 	scanner := bufio.NewScanner(pipe)
 	scanner.Buffer(make([]byte, 64*1024), streamingBashMaxLineBytes)
+	scanner.Split(scanStreamingBashSourceLines)
 	stopCapturing := false
 	for scanner.Scan() {
 		if stopCapturing {
 			continue
 		}
-		line := scanner.Text()
-		captured, newlyTruncated := capture.addLine(stream, line)
+		source := scanner.Bytes()
+		line := source
+		if len(line) > 0 && line[len(line)-1] == '\n' {
+			line = line[:len(line)-1]
+			if len(line) > 0 && line[len(line)-1] == '\r' {
+				line = line[:len(line)-1]
+			}
+		}
+		captured, newlyTruncated := capture.addSourceBytes(stream, source)
 		if !captured {
 			stopCapturing = true
 		}
 		if captured && sink != nil {
-			_ = sink.Send(line, toolCallID, stream) //nolint:errcheck // best-effort streaming
+			_ = sink.Send(string(line), toolCallID, stream) //nolint:errcheck // best-effort streaming
 		}
 		if newlyTruncated {
 			sendTruncationMarker(sink, toolCallID, stream)
@@ -339,6 +350,16 @@ func readPipe(pipe io.Reader, stream string, sink StreamSink, toolCallID string,
 	}
 
 	return true, nil
+}
+
+func scanStreamingBashSourceLines(data []byte, atEOF bool) (advance int, token []byte, err error) {
+	if lineEnding := bytes.IndexByte(data, '\n'); lineEnding >= 0 {
+		return lineEnding + 1, data[:lineEnding+1], nil
+	}
+	if atEOF && len(data) > 0 {
+		return len(data), data, nil
+	}
+	return 0, nil, nil
 }
 
 func sendTruncationMarker(sink StreamSink, toolCallID, stream string) {

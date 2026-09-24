@@ -13,6 +13,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+type dataThenErrorReader struct {
+	data     []byte
+	err      error
+	afterErr error
+	once     bool
+}
+
+func (r *dataThenErrorReader) Read(p []byte) (int, error) {
+	if !r.once {
+		r.once = true
+		return copy(p, r.data), r.err
+	}
+	if r.afterErr != nil {
+		return 0, r.afterErr
+	}
+	return 0, io.EOF
+}
+
 // streamEvent is a single recorded output line from a mockStreamSink.
 type streamEvent struct {
 	Content    string
@@ -262,9 +280,11 @@ func TestStreamingBashDrainsConcurrentStdoutStderr(t *testing.T) {
 	}, sink)
 	require.NoError(t, err)
 	require.NotNil(t, result)
-	assert.LessOrEqual(t, len(result.Output), maxOutput+len("\n[output truncated]"))
+	// Combined ToolResult output adds one presentation separator when both
+	// streams retain bytes; that separator is not a source byte.
+	assert.LessOrEqual(t, len(result.Output), maxOutput+1+len("\n[output truncated]"))
 	assert.Contains(t, result.Output, "[output truncated]")
-	assert.LessOrEqual(t, len(result.Output)-len("\n[output truncated]"), maxOutput)
+	assert.LessOrEqual(t, len(result.Output)-len("\n[output truncated]"), maxOutput+1)
 	assert.Equal(t, true, result.Metadata["truncated"])
 
 	var streamedBytes int
@@ -309,6 +329,64 @@ func TestStreamingBashLongLineReportsScannerErrorAndDrains(t *testing.T) {
 	assert.LessOrEqual(t, len(result.Output)-len("\n[output truncated]"), maxOutput)
 	assert.Equal(t, true, result.Metadata["truncated"])
 	assert.Contains(t, result.Metadata["read_error"], "token too long")
+}
+
+func TestReadPipeSurfacesNonEOFReadErrorAfterDraining(t *testing.T) {
+	readFailure := errors.New("injected pipe read failure")
+	capture := newStreamingBashOutputCapture(4)
+	reader := &dataThenErrorReader{data: []byte("abcdef\n"), err: readFailure, once: false}
+
+	drained, err := readPipe(reader, "stdout", nil, "call-read-error", capture)
+	output, truncated := capture.output()
+
+	require.ErrorIs(t, err, readFailure)
+	assert.True(t, drained, "the reader reaches EOF after the reported read error")
+	assert.True(t, truncated)
+	assert.Contains(t, output, "[output truncated]")
+	assert.LessOrEqual(t, len(output), 4+len(streamingBashTruncatedMarker))
+}
+
+func TestReadPipeReportsFailedDrain(t *testing.T) {
+	readFailure := errors.New("injected persistent pipe failure")
+	capture := newStreamingBashOutputCapture(2)
+	reader := &dataThenErrorReader{data: []byte("ok\n"), err: readFailure, afterErr: readFailure}
+
+	drained, err := readPipe(reader, "stderr", nil, "call-drain-error", capture)
+	output, truncated := capture.output()
+
+	require.ErrorIs(t, err, readFailure)
+	assert.False(t, drained, "an error during the post-scanner drain cannot claim EOF")
+	assert.True(t, truncated)
+	assert.Contains(t, output, "[output truncated]")
+	assert.LessOrEqual(t, len(output), 2+len(streamingBashTruncatedMarker))
+}
+
+func TestStreamingBashCaptureCountsCRLFAndEOFSourceBytes(t *testing.T) {
+	capture := newStreamingBashOutputCapture(6)
+	stdoutDrained, stdoutErr := readPipe(strings.NewReader("a\r\nb"), "stdout", nil, "call-source-budget", capture)
+	stderrDrained, stderrErr := readPipe(strings.NewReader("x\r\ny"), "stderr", nil, "call-source-budget", capture)
+
+	require.NoError(t, stdoutErr)
+	require.NoError(t, stderrErr)
+	assert.True(t, stdoutDrained)
+	assert.True(t, stderrDrained)
+	assert.Equal(t, "a\r\nb", capture.stdout.String(), "CRLF delimiters and EOF tails count as their original source bytes")
+	assert.Equal(t, "x\r", capture.stderr.String(), "the second stream may retain only the remaining source-byte budget")
+	assert.Equal(t, 6, capture.stdout.Len()+capture.stderr.Len())
+	_, truncated := capture.output()
+	assert.True(t, truncated)
+}
+
+func TestStreamingBashCaptureDoesNotInventEOFNewline(t *testing.T) {
+	capture := newStreamingBashOutputCapture(4)
+	drained, err := readPipe(strings.NewReader("tail"), "stdout", nil, "call-eof-tail", capture)
+
+	require.NoError(t, err)
+	assert.True(t, drained)
+	assert.Equal(t, "tail", capture.stdout.String())
+	output, truncated := capture.output()
+	assert.Equal(t, "tail", output)
+	assert.False(t, truncated)
 }
 
 func TestStreamingBashCancellationWaitsForReaders(t *testing.T) {
