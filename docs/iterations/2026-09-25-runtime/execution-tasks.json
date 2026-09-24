@@ -893,12 +893,13 @@
         "LLM-15"
       ],
       "depends_on": [
-        "R3-DES-01"
+        "R1-REV-01"
       ],
-      "status": "pending",
+      "status": "in_progress",
       "commit_spec": "Commit shared factory separately from any native provider enablement; native support release requires protocol contract tests for each protocol.",
       "phase_id": "R3",
-      "source_status": "proposed"
+      "source_status": "proposed",
+      "execution_scope": "Narrow resolver-construction slice only, on r3-resolver and limited to internal/llm plus config. It may proceed from the reviewed R3 proposal without waiting for R2-REV-01; consumer injection, core/CLI retry and fallback integration, compaction, and full R3 acceptance remain gated by the complete R3 handoff and R2 restart-safety review."
     },
     {
       "id": "R3-BLD-02",
@@ -1057,7 +1058,7 @@
       "depends_on": [
         "R1-REV-01"
       ],
-      "status": "pending",
+      "status": "done",
       "commit_spec": "Reviewed capability and permission contract; no filesystem sandbox claim unless an OS-enforced implementation is explicitly selected.",
       "phase_id": "R4",
       "source_status": "proposed"
@@ -1128,10 +1129,11 @@
         "R0-BLD-05",
         "R4-EFFECT-01"
       ],
-      "status": "pending",
+      "status": "in_progress",
       "commit_spec": "Commit effect metadata and enforcement as a bounded slice; do not preserve compatibility by silently classifying unknown tools as safe.",
       "phase_id": "R4",
-      "source_status": "proposed"
+      "source_status": "proposed",
+      "execution_scope": "Approval/Plan enforcement is active in the r4-approval lane against the independently reviewed policy and prepared-dispatch contract. This is partial progress: full trusted registry/effect integration remains required for task completion; D-01 retains current behavior."
     },
     {
       "id": "R4-BLD-02",
