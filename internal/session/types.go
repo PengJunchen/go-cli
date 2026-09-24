@@ -6,9 +6,12 @@ package session
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
 	"time"
 
+	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
 )
 
@@ -16,7 +19,7 @@ import (
 type EntryType string
 
 func init() {
-	slog.Debug("session types initialized", "entry_types", []string{"user", "assistant", "tool", "compaction", "system"})
+	slog.Debug("session types initialized", "entry_types", []string{"user", "assistant", "tool", "compaction", "system", "checkpoint"})
 }
 
 const (
@@ -30,6 +33,8 @@ const (
 	EntryTypeCompaction EntryType = "compaction"
 	// EntryTypeSystem is a system-level informational entry.
 	EntryTypeSystem EntryType = "system"
+	// EntryTypeCheckpoint stores durable run, branch, and recovery checkpoints.
+	EntryTypeCheckpoint EntryType = "checkpoint"
 )
 
 // SurfaceOp controls how an entry is projected into the model-visible message
@@ -77,6 +82,58 @@ type SessionEntry struct {
 	// Seq is a monotonically increasing sequence number assigned by the
 	// session tree when the entry is appended. It is zero when unset.
 	Seq uint64 `json:"seq"`
+
+	// RecordVersion identifies the additive on-disk record schema. Missing
+	// values are legacy version zero.
+	RecordVersion uint16 `json:"record_version,omitempty"`
+	// SessionID is the opaque physical identity of the session file.
+	SessionID string `json:"session_id,omitempty"`
+	// SessionLabel preserves a user-facing name without using it as a path.
+	SessionLabel string `json:"session_label,omitempty"`
+	// BranchID identifies the branch that owns this entry or checkpoint.
+	BranchID string `json:"branch_id,omitempty"`
+	// ParentBranchID identifies the source branch for a branch checkpoint.
+	ParentBranchID string `json:"parent_branch_id,omitempty"`
+	// BaseLeafEntryID identifies the shared prefix leaf when a branch is created.
+	BaseLeafEntryID string `json:"base_leaf_entry_id,omitempty"`
+	// ActiveLeafEntryID is the durable active leaf recorded by a checkpoint.
+	ActiveLeafEntryID string `json:"active_leaf_entry_id,omitempty"`
+	// RunID identifies the run that produced the journal or transcript entry.
+	RunID string `json:"run_id,omitempty"`
+	// ActionBatchID groups a sequential reservation or parallel dispatch batch.
+	ActionBatchID string `json:"action_batch_id,omitempty"`
+	// ActionID identifies one reserved executor invocation.
+	ActionID string `json:"action_id,omitempty"`
+	// OwnerGeneration identifies the runtime generation that launched an action.
+	OwnerGeneration string `json:"owner_generation,omitempty"`
+	// WorkspaceID is a stable digest of the canonical workspace root.
+	WorkspaceID string `json:"workspace_id,omitempty"`
+	// InputKind preserves whether a user message is an initial, steering, or
+	// follow-up input.
+	InputKind string `json:"input_kind,omitempty"`
+	// ActionState separates journal-only intent/execution rows from receipts.
+	ActionState ActionState `json:"action_state,omitempty"`
+	// DispatchState records whether a reserved action crossed its dispatch fence.
+	DispatchState DispatchState `json:"dispatch_state,omitempty"`
+	// ReceiptOutcome records the known or unknown terminal outcome of a tool call.
+	ReceiptOutcome string `json:"receipt_outcome,omitempty"`
+	// PayloadDigest stores the canonical digest used to detect conflicting retries.
+	PayloadDigest string `json:"payload_digest,omitempty"`
+	// ExecutionIdentity describes a verifiable local resource identity when one
+	// was captured. Its persisted values are diagnostics, not permission to signal
+	// a process after restart.
+	ExecutionIdentity *ExecutionIdentity `json:"execution_identity,omitempty"`
+	// AssistantTranscriptOrdinal identifies the assistant tool-call message
+	// occurrence within its run.
+	AssistantTranscriptOrdinal uint64 `json:"assistant_transcript_ordinal,omitempty"`
+	// TranscriptIndex is the zero-based index of a canonical transcript item.
+	TranscriptIndex uint64 `json:"transcript_index,omitempty"`
+	// CompactedThroughEntryID is the exact source boundary covered by a summary.
+	CompactedThroughEntryID string `json:"compacted_through_entry_id,omitempty"`
+	// RunOutcome records the terminal logical result of a run.
+	RunOutcome core.RunOutcome `json:"run_outcome,omitempty"`
+	// CheckpointKind identifies the durable checkpoint represented by this row.
+	CheckpointKind CheckpointKind `json:"checkpoint_kind,omitempty"`
 }
 
 // clone returns a defensive copy of the entry so callers cannot mutate the
@@ -86,23 +143,111 @@ func (e *SessionEntry) clone() *SessionEntry {
 		return nil
 	}
 	cp := *e
-	if e.ContentBlocks != nil {
-		cp.ContentBlocks = make([]llm.ContentBlock, len(e.ContentBlocks))
-		copy(cp.ContentBlocks, e.ContentBlocks)
-		for i := range cp.ContentBlocks {
-			if cp.ContentBlocks[i].ImageURL != nil {
-				cp.ContentBlocks[i].ImageURL = &llm.ImageURL{
-					URL:    cp.ContentBlocks[i].ImageURL.URL,
-					Detail: cp.ContentBlocks[i].ImageURL.Detail,
-				}
-			}
-		}
+	message := core.AgentMessage{
+		Role:           string(e.Type),
+		Content:        e.Content,
+		ContentBlocks:  e.ContentBlocks,
+		ToolCalls:      e.ToolCalls,
+		ToolCallID:     e.ToolCallID,
+		ToolName:       e.ToolName,
+		InputKind:      e.InputKind,
+		ReceiptOutcome: e.ReceiptOutcome,
 	}
-	if e.ToolCalls != nil {
-		cp.ToolCalls = make([]llm.ToolCall, len(e.ToolCalls))
-		copy(cp.ToolCalls, e.ToolCalls)
+	cloned := core.CloneAgentMessages([]core.AgentMessage{message})[0]
+	cp.ContentBlocks = cloned.ContentBlocks
+	cp.ToolCalls = cloned.ToolCalls
+	if e.ExecutionIdentity != nil {
+		identity := *e.ExecutionIdentity
+		cp.ExecutionIdentity = &identity
 	}
 	return &cp
+}
+
+// ActionState describes a durable row in the action journal.
+type ActionState string
+
+const (
+	// ActionStateIntent marks a journal-only reservation row.
+	ActionStateIntent ActionState = "intent"
+	// ActionStateExecution marks a journal-only executor lifecycle row.
+	ActionStateExecution ActionState = "execution"
+)
+
+// DispatchState records whether a reserved action crossed the final dispatch fence.
+type DispatchState string
+
+const (
+	// DispatchStateNotDispatched means the executor was positively not entered.
+	DispatchStateNotDispatched DispatchState = "not_dispatched"
+	// DispatchStateDispatched means the executor may have been entered.
+	DispatchStateDispatched DispatchState = "dispatched"
+)
+
+// CheckpointKind identifies the durable checkpoint represented by an entry.
+type CheckpointKind string
+
+const (
+	// CheckpointRunTerminal marks a terminal run checkpoint.
+	CheckpointRunTerminal CheckpointKind = "run_terminal"
+	// CheckpointExecutionResolution marks validated action-resource evidence.
+	CheckpointExecutionResolution CheckpointKind = "execution_resolution"
+	// CheckpointActiveLeaf marks a branch's durable active leaf.
+	CheckpointActiveLeaf CheckpointKind = "active_leaf"
+	// CheckpointBranch marks a branch fork over a shared immutable prefix.
+	CheckpointBranch CheckpointKind = "branch"
+	// CheckpointReconciliation marks explicit operator reconciliation.
+	CheckpointReconciliation CheckpointKind = "reconciliation"
+)
+
+// ExecutionIdentity records structured details for a locally owned process
+// group or Windows job. It does not prove that the resource is stopped and
+// must never be used to signal a restored process by PID alone.
+type ExecutionIdentity struct {
+	Kind              ExecutionIdentityKind `json:"kind"`
+	Platform          string                `json:"platform"`
+	HostGeneration    string                `json:"host_generation,omitempty"`
+	LeaderPID         int                   `json:"leader_pid,omitempty"`
+	ProcessStartToken string                `json:"process_start_token,omitempty"`
+	ProcessGroupID    int                   `json:"process_group_id,omitempty"`
+	JobID             string                `json:"job_id,omitempty"`
+}
+
+// ExecutionIdentityKind identifies the kind of local process containment.
+type ExecutionIdentityKind string
+
+const (
+	// ExecutionIdentityProcessGroup identifies a Unix process group.
+	ExecutionIdentityProcessGroup ExecutionIdentityKind = "process_group"
+	// ExecutionIdentityWindowsJob identifies a Windows job object.
+	ExecutionIdentityWindowsJob ExecutionIdentityKind = "windows_job"
+)
+
+// Validate checks that an execution identity has the fields required for its
+// declared platform and containment kind. A valid shape is not proof that the
+// resource has stopped or is safe to signal after restart.
+func (i ExecutionIdentity) Validate() error {
+	if i.HostGeneration == "" {
+		return errors.New("session: execution identity host generation is required")
+	}
+	switch i.Kind {
+	case ExecutionIdentityProcessGroup:
+		if i.Platform != "darwin" && i.Platform != "linux" {
+			return fmt.Errorf("session: process group identity is unsupported on %q", i.Platform)
+		}
+		if i.LeaderPID <= 0 || i.ProcessStartToken == "" || i.ProcessGroupID <= 0 {
+			return errors.New("session: process group identity is incomplete")
+		}
+	case ExecutionIdentityWindowsJob:
+		if i.Platform != "windows" {
+			return fmt.Errorf("session: Windows job identity has invalid platform %q", i.Platform)
+		}
+		if i.LeaderPID <= 0 || i.ProcessStartToken == "" || i.JobID == "" {
+			return errors.New("session: Windows job identity is incomplete")
+		}
+	default:
+		return fmt.Errorf("session: unsupported execution identity kind %q", i.Kind)
+	}
+	return nil
 }
 
 // SurfaceVisible reports whether the entry should be included in the
