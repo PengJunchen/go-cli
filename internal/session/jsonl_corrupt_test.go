@@ -1,9 +1,7 @@
 package session
 
 import (
-	"bytes"
 	"context"
-	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,16 +12,10 @@ import (
 	"github.com/pengjunchen/go-cli/internal/verify"
 )
 
-// TestJSONLLogsCorruptLines verifies that the JSONL reader logs corrupt lines
-// with their line numbers instead of silently skipping them.
-func TestJSONLLogsCorruptLines(t *testing.T) {
+// TestJSONLOpenRejectsCorruptCompleteRow verifies that malformed complete
+// rows fail closed instead of exposing a partial transcript.
+func TestJSONLOpenRejectsCorruptCompleteRow(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
-
-	// Capture slog output at Warn level.
-	var buf bytes.Buffer
-	orig := slog.Default()
-	defer slog.SetDefault(orig)
-	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelWarn})))
 
 	path := filepath.Join(t.TempDir(), "session.jsonl")
 	store := NewJSONLSessionStore(path)
@@ -37,16 +29,10 @@ func TestJSONLLogsCorruptLines(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
 
-	// Re-open to trigger load; the corrupt line is on line 2.
+	// Re-open to trigger strict loading; the corrupt line is complete.
 	reopened := NewJSONLSessionStore(path)
-	got, err := reopened.Get(context.Background(), "a")
-	require.NoError(t, err)
-	assert.Equal(t, "content-a", got.Content)
-
-	// The corrupt line was logged with the event name and line number.
-	logOutput := buf.String()
-	assert.Contains(t, logOutput, "session.jsonl.corrupt_line")
-	assert.Contains(t, logOutput, "line=2")
-
+	err = reopened.Open(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decode JSONL row")
 	require.NoError(t, reopened.Close())
 }
