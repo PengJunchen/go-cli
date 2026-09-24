@@ -316,6 +316,9 @@ func (t *DefaultSessionTree) GetBranch(ctx context.Context, leafID string) ([]*S
 
 	t.mu.RLock()
 	branch, ok := t.walkBranchLocked(leafID)
+	if ok {
+		branch = cloneBranchEntries(branch)
+	}
 	t.mu.RUnlock()
 	if !ok {
 		span.SetStatus(tracing.SpanStatusError, "leaf not found")
@@ -326,6 +329,14 @@ func (t *DefaultSessionTree) GetBranch(ctx context.Context, leafID string) ([]*S
 	logger.Info("session_tree_branch", "op", "session.tree.branch", "leaf_id", leafID, "branch_length", len(branch))
 	span.SetStatus(tracing.SpanStatusOK, "")
 	return branch, nil
+}
+
+func cloneBranchEntries(branch []*SessionEntry) []*SessionEntry {
+	cloned := make([]*SessionEntry, len(branch))
+	for i, entry := range branch {
+		cloned[i] = entry.clone()
+	}
+	return cloned
 }
 
 // BuildContext reconstructs the effective context for the branch ending at
@@ -347,7 +358,7 @@ func (t *DefaultSessionTree) BuildContext(ctx context.Context, leafID string) (*
 	msgs := make([]SessionEntry, 0, len(branch))
 	var last time.Time
 	for _, e := range branch {
-		msgs = append(msgs, *e)
+		msgs = append(msgs, *e.clone())
 		if e.Timestamp.After(last) {
 			last = e.Timestamp
 		}
