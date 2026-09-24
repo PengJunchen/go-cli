@@ -151,8 +151,17 @@ func TestCloneAppendsDivergeFromSharedLeaf(t *testing.T) {
 	assert.Equal(t, "main-child", original[2].ID)
 	assert.Equal(t, "copy-child", cloned[3].ID)
 	assert.Equal(t, checkpointID, cloned[2].ID)
-	assert.Same(t, original[0], cloned[0])
-	assert.Same(t, original[1], cloned[1])
+	assert.NotSame(t, original[0], cloned[0], "public reads return independent copies")
+	assert.NotSame(t, original[1], cloned[1], "public reads return independent copies")
+
+	tree.mu.RLock()
+	originalCanonical, originalOK := tree.walkBranchLocked("main-child")
+	clonedCanonical, clonedOK := tree.walkBranchLocked("copy-child")
+	tree.mu.RUnlock()
+	require.True(t, originalOK)
+	require.True(t, clonedOK)
+	assert.Same(t, originalCanonical[0], clonedCanonical[0], "the internal root remains shared")
+	assert.Same(t, originalCanonical[1], clonedCanonical[1], "the internal prefix remains shared")
 }
 
 func TestSessionTreeCloneDoesNotAliasNestedArgs(t *testing.T) {
@@ -175,6 +184,77 @@ func TestSessionTreeCloneDoesNotAliasNestedArgs(t *testing.T) {
 	require.Len(t, branch, 2)
 	args := branch[0].ToolCalls[0].Args.(map[string]any)
 	assert.Equal(t, "original", args["nested"].(map[string]any)["value"])
+}
+
+func TestGetBranchReturnsDefensiveCopiesForSharedPrefix(t *testing.T) {
+	ctx := context.Background()
+	tree := newConcreteTree()
+	entry := newToolCallEntry("assistant", "", []llm.ToolCall{{
+		ID:   "provider-call-id",
+		Name: "inspect",
+		Args: map[string]any{"nested": []any{map[string]any{"value": "canonical"}}},
+	}})
+	entry.ContentBlocks = []llm.ContentBlock{{Type: "text", Text: "canonical block"}}
+	entry.ActionID = "action-1"
+	require.NoError(t, tree.Append(ctx, entry))
+	require.NoError(t, tree.Clone(ctx, "assistant", "copy"))
+
+	original, err := tree.GetBranch(ctx, "assistant")
+	require.NoError(t, err)
+	cloned, err := tree.GetBranch(ctx, "copy-assistant")
+	require.NoError(t, err)
+	require.Len(t, original, 1)
+	require.Len(t, cloned, 2)
+	assert.NotSame(t, original[0], cloned[0], "the accessor must not expose the canonical entry")
+
+	tree.mu.RLock()
+	originalCanonical, originalOK := tree.walkBranchLocked("assistant")
+	clonedCanonical, clonedOK := tree.walkBranchLocked("copy-assistant")
+	tree.mu.RUnlock()
+	require.True(t, originalOK)
+	require.True(t, clonedOK)
+	assert.Same(t, originalCanonical[0], clonedCanonical[0], "cloning shares the internal immutable prefix")
+
+	originalArgs := original[0].ToolCalls[0].Args.(map[string]any)
+	originalArgs["nested"].([]any)[0].(map[string]any)["value"] = "mutated original view"
+	original[0].Content = "mutated original view"
+	clonedArgs := cloned[0].ToolCalls[0].Args.(map[string]any)
+	clonedArgs["nested"].([]any)[0].(map[string]any)["value"] = "mutated cloned view"
+	cloned[0].ContentBlocks[0].Text = "mutated cloned view"
+	cloned[0].ToolCalls[0].ID = "mutated provider ID"
+	cloned[0].ActionID = "mutated action ID"
+
+	originalAgain, err := tree.GetBranch(ctx, "assistant")
+	require.NoError(t, err)
+	clonedAgain, err := tree.GetBranch(ctx, "copy-assistant")
+	require.NoError(t, err)
+	for _, branch := range [][]*SessionEntry{originalAgain, clonedAgain} {
+		assert.Equal(t, "canonical", branch[0].ToolCalls[0].Args.(map[string]any)["nested"].([]any)[0].(map[string]any)["value"])
+		assert.Equal(t, "content-assistant", branch[0].Content)
+		assert.Equal(t, "provider-call-id", branch[0].ToolCalls[0].ID)
+		assert.Equal(t, "action-1", branch[0].ActionID)
+		assert.Equal(t, "canonical block", branch[0].ContentBlocks[0].Text)
+	}
+}
+
+func TestTreeBuildContextReturnsDefensiveCopyForNestedArgs(t *testing.T) {
+	ctx := context.Background()
+	tree := newConcreteTree()
+	entry := newToolCallEntry("assistant", "", []llm.ToolCall{{
+		ID:   "provider-call-id",
+		Name: "inspect",
+		Args: map[string]any{"nested": map[string]any{"value": "canonical"}},
+	}})
+	require.NoError(t, tree.Append(ctx, entry))
+
+	sc, err := tree.BuildContext(ctx, "assistant")
+	require.NoError(t, err)
+	require.Len(t, sc.Messages, 1)
+	sc.Messages[0].ToolCalls[0].Args.(map[string]any)["nested"].(map[string]any)["value"] = "mutated context"
+
+	branch, err := tree.GetBranch(ctx, "assistant")
+	require.NoError(t, err)
+	assert.Equal(t, "canonical", branch[0].ToolCalls[0].Args.(map[string]any)["nested"].(map[string]any)["value"])
 }
 
 // TestClone_UnknownSource verifies cloning a non-existent leaf errors.

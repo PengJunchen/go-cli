@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -299,4 +300,65 @@ func TestTreeBuilderRejectsChildSequenceBeforeParent(t *testing.T) {
 	_, err := NewDefaultSessionTreeBuilder().BuildFromStore(ctx, store)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "parent")
+}
+
+func TestTreeBuilderRestoresBranchMetadataFromDurableCheckpoint(t *testing.T) {
+	ctx := context.Background()
+	rootDir := t.TempDir()
+	preparer := NewDurableJSONLSessionPreparer(rootDir, nil)
+	prepared, err := preparer.PrepareNew(ctx, "branch metadata round trip")
+	if err != nil {
+		if errors.Is(err, ErrUnsupportedSessionLock) {
+			t.Skip("OS-backed flock is unavailable on this platform")
+		}
+		require.NoError(t, err)
+	}
+	sessionID := prepared.View().SessionID
+	t.Cleanup(func() { _ = prepared.Close() })
+
+	rootIndex := uint64(0)
+	sourceIndex := uint64(1)
+	root := SessionEntry{ID: "root", Type: EntryTypeUser, Content: "root", RunID: "run-1", TranscriptIndex: &rootIndex}
+	source := SessionEntry{ID: "source", ParentID: "root", Type: EntryTypeUser, Content: "source", RunID: "run-1", TranscriptIndex: &sourceIndex}
+	_, err = prepared.DurableWriter().AppendAndSync(ctx, root, source)
+	require.NoError(t, err)
+
+	checkpoint := SessionEntry{
+		ID:                "feature-source",
+		ParentID:          "source",
+		Type:              EntryTypeCheckpoint,
+		Timestamp:         time.Date(2026, 9, 25, 10, 0, 0, 0, time.UTC),
+		BranchID:          "feature",
+		ParentBranchID:    "main",
+		BaseLeafEntryID:   "source",
+		ActiveLeafEntryID: "feature-source",
+		CheckpointKind:    CheckpointBranch,
+	}
+	_, err = prepared.DurableWriter().AppendAndSync(ctx, checkpoint)
+	require.NoError(t, err)
+	require.NoError(t, prepared.Close())
+
+	filePath := filepath.Join(rootDir, "sessions", sessionID+".jsonl")
+	reopened := NewJSONLSessionStore(filePath)
+	require.NoError(t, reopened.Open(ctx))
+	t.Cleanup(func() { _ = reopened.Close() })
+
+	tree, err := NewDefaultSessionTreeBuilder().BuildFromStore(ctx, reopened)
+	require.NoError(t, err)
+	assert.Equal(t, "feature-source", tree.CurrentLeaf())
+	branch, err := tree.GetBranch(ctx, tree.CurrentLeaf())
+	require.NoError(t, err)
+	require.Len(t, branch, 3)
+	assert.Equal(t, "root", branch[0].ID)
+	assert.Equal(t, "source", branch[1].ID)
+	assert.Equal(t, "feature-source", branch[2].ID)
+
+	concrete, ok := tree.(*DefaultSessionTree)
+	require.True(t, ok)
+	meta, found := concrete.BranchMetaFor("feature")
+	require.True(t, found, "branch metadata must be reconstructed from its checkpoint")
+	assert.Equal(t, "source", meta.ParentID)
+	assert.Equal(t, "source", meta.BaseLeafID)
+	assert.Equal(t, checkpoint.Timestamp, meta.CreatedAt)
+	assert.Equal(t, []BranchMeta{meta}, concrete.ListBranches())
 }

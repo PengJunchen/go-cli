@@ -276,6 +276,30 @@ func (t *DefaultSessionTree) ListBranches() []BranchMeta {
 	return out
 }
 
+func branchMetaFromCheckpoint(checkpoint SessionEntry) BranchMeta {
+	createdAt := checkpoint.Timestamp
+	if createdAt.IsZero() {
+		createdAt = time.Now().UTC()
+	}
+	return BranchMeta{
+		BranchID:   checkpoint.BranchID,
+		ParentID:   checkpoint.BaseLeafEntryID,
+		CreatedAt:  createdAt,
+		BaseLeafID: checkpoint.BaseLeafEntryID,
+	}
+}
+
+func (t *DefaultSessionTree) restoreBranchMetadataFromCheckpoints(entries []*SessionEntry) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	for _, entry := range entries {
+		if entry == nil || entry.RecordVersion != 1 || entry.Type != EntryTypeCheckpoint || entry.CheckpointKind != CheckpointBranch {
+			continue
+		}
+		t.branches[entry.BranchID] = branchMetaFromCheckpoint(*entry)
+	}
+}
+
 // NewBranchCheckpoint constructs a branch checkpoint that shares the existing
 // immutable prefix through sourceLeafEntryID. Callers that persist branches
 // must append and sync this record before passing the canonical stored value to
@@ -354,15 +378,7 @@ func (t *DefaultSessionTree) ApplyBranchCheckpoint(ctx context.Context, checkpoi
 		return fmt.Errorf("session: append branch checkpoint %q: %w", checkpoint.ID, err)
 	}
 
-	meta := BranchMeta{
-		BranchID:   checkpoint.BranchID,
-		ParentID:   checkpoint.BaseLeafEntryID,
-		CreatedAt:  checkpoint.Timestamp,
-		BaseLeafID: checkpoint.BaseLeafEntryID,
-	}
-	if meta.CreatedAt.IsZero() {
-		meta.CreatedAt = time.Now().UTC()
-	}
+	meta := branchMetaFromCheckpoint(checkpoint)
 	t.mu.Lock()
 	t.leafID = checkpoint.ID
 	t.branches[checkpoint.BranchID] = meta

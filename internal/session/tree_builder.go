@@ -182,6 +182,11 @@ func (b *DefaultSessionTreeBuilder) buildVersionOneTree(ctx context.Context, ent
 			return nil, fmt.Errorf("session: append recovered entry %q: %w", entry.ID, err)
 		}
 	}
+	concreteTree, ok := tree.(*DefaultSessionTree)
+	if !ok {
+		return nil, fmt.Errorf("session: versioned recovery requires a DefaultSessionTree, got %T", tree)
+	}
+	concreteTree.restoreBranchMetadataFromCheckpoints(ordered)
 
 	activeLeafID := ""
 	var activeCheckpointSeq uint64
