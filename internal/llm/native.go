@@ -463,6 +463,7 @@ type claudeStreamEvent struct {
 	Message      *claudeStreamMessage `json:"message,omitempty"`
 	ContentBlock *claudeStreamBlock   `json:"content_block,omitempty"`
 	Delta        *claudeStreamDelta   `json:"delta,omitempty"`
+	Usage        *claudeStreamUsage   `json:"usage,omitempty"`
 }
 
 // claudeStreamMessage carries the top-level message metadata from message_start.
@@ -478,13 +479,40 @@ type claudeStreamBlock struct {
 	Name string `json:"name,omitempty"` // tool name
 }
 
-// claudeStreamDelta carries the incremental delta from content_block_delta.
+// claudeStreamDelta carries the nested delta from a content or message event.
 type claudeStreamDelta struct {
-	Type        string       `json:"type"`                   // "text_delta" or "input_json_delta"
-	Text        string       `json:"text,omitempty"`         // text_delta text
-	PartialJSON string       `json:"partial_json,omitempty"` // input_json_delta fragment
-	StopReason  string       `json:"stop_reason,omitempty"`  // message_delta stop_reason
-	Usage       *claudeUsage `json:"usage,omitempty"`        // message_delta output_tokens
+	Type        string          `json:"type"`                   // content-block delta type
+	Text        string          `json:"text,omitempty"`         // text_delta text
+	PartialJSON string          `json:"partial_json,omitempty"` // input_json_delta fragment
+	StopReason  json.RawMessage `json:"stop_reason"`            // message_delta stop_reason update
+}
+
+type claudeStreamUsage struct {
+	InputTokens  *int `json:"input_tokens,omitempty"`
+	OutputTokens *int `json:"output_tokens,omitempty"`
+}
+
+// claudeStreamBlockState tracks whether a started content block can still
+// receive indexed deltas.
+type claudeStreamBlockState struct {
+	blockType string
+	closed    bool
+}
+
+func updateClaudeStopReason(current *string, raw json.RawMessage) error {
+	if len(raw) == 0 {
+		return errors.New("llm: Claude message_delta is missing stop_reason")
+	}
+	if strings.TrimSpace(string(raw)) == "null" {
+		*current = ""
+		return nil
+	}
+	var reason string
+	if err := json.Unmarshal(raw, &reason); err != nil {
+		return fmt.Errorf("llm: decode Claude message_delta stop_reason: %w", err)
+	}
+	*current = reason
+	return nil
 }
 
 // claudeToolAccum accumulates a single tool call's fragments across chunks.
@@ -531,6 +559,7 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 		events, _ := parser.Parse(ctx, respBody) //nolint:errcheck
 
 		tools := map[int]*claudeToolAccum{}
+		blocks := map[int]*claudeStreamBlockState{}
 		var toolIndices []int
 		var stopReason string
 		var inputTokens, outputTokens int
@@ -540,9 +569,7 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 		messageStarted := false
 		messageDeltaSeen := false
 		messageStopped := false
-		activeBlock := false
-		activeBlockIndex := -1
-		activeBlockType := ""
+		openBlockCount := 0
 		nextBlockIndex := 0
 
 		for event := range events {
@@ -571,6 +598,10 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 				sendStreamError(ctx, ch, fmt.Errorf("llm: decode Claude stream event: %w", err))
 				return
 			}
+			if event.Type == "" || event.Type != ce.Type {
+				sendStreamError(ctx, ch, fmt.Errorf("llm: Claude SSE event name %q does not match data type %q", event.Type, ce.Type))
+				return
+			}
 			if ce.Type == "error" {
 				sendStreamError(ctx, ch, errors.New("llm: Claude provider returned an error event"))
 				return
@@ -592,6 +623,7 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 					}
 					if ce.Message.Usage != nil {
 						inputTokens = ce.Message.Usage.InputTokens
+						outputTokens = ce.Message.Usage.OutputTokens
 						hasUsage = true
 					}
 				}
@@ -599,10 +631,6 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 			case "content_block_start":
 				if !messageStarted || messageDeltaSeen {
 					sendStreamError(ctx, ch, errors.New("llm: Claude content block started outside the message content phase"))
-					return
-				}
-				if activeBlock {
-					sendStreamError(ctx, ch, errors.New("llm: Claude content block started before the previous block stopped"))
 					return
 				}
 				if ce.Index == nil {
@@ -618,9 +646,8 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 					sendStreamError(ctx, ch, errors.New("llm: Claude content block has an unsupported or missing type"))
 					return
 				}
-				activeBlock = true
-				activeBlockIndex = idx
-				activeBlockType = ce.ContentBlock.Type
+				blocks[idx] = &claudeStreamBlockState{blockType: ce.ContentBlock.Type}
+				openBlockCount++
 				nextBlockIndex++
 				if ce.ContentBlock.Type == "tool_use" {
 					if idx < 0 || idx >= GuardedStreamMaxToolCalls || len(tools) >= GuardedStreamMaxToolCalls {
@@ -657,8 +684,9 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 					sendStreamError(ctx, ch, errors.New("llm: Claude content_block_delta has no index"))
 					return
 				}
-				if !activeBlock || *ce.Index != activeBlockIndex {
-					sendStreamError(ctx, ch, fmt.Errorf("llm: Claude content delta index %d does not match the active block", *ce.Index))
+				block, ok := blocks[*ce.Index]
+				if !ok || block.closed {
+					sendStreamError(ctx, ch, fmt.Errorf("llm: Claude content delta index %d does not reference an open block", *ce.Index))
 					return
 				}
 				if ce.Delta == nil {
@@ -667,7 +695,7 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 				}
 				switch ce.Delta.Type {
 				case "text_delta":
-					if activeBlockType != "text" {
+					if block.blockType != "text" {
 						sendStreamError(ctx, ch, errors.New("llm: Claude text delta does not match the active block type"))
 						return
 					}
@@ -680,7 +708,7 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 						}
 					}
 				case "input_json_delta":
-					if activeBlockType != "tool_use" {
+					if block.blockType != "tool_use" {
 						sendStreamError(ctx, ch, errors.New("llm: Claude input JSON delta does not match the active block type"))
 						return
 					}
@@ -706,28 +734,36 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 					sendStreamError(ctx, ch, errors.New("llm: Claude content_block_stop has no index"))
 					return
 				}
-				if !messageStarted || messageDeltaSeen || !activeBlock || *ce.Index != activeBlockIndex {
-					sendStreamError(ctx, ch, fmt.Errorf("llm: Claude content_block_stop index %d does not match the active block", *ce.Index))
+				block, ok := blocks[*ce.Index]
+				if !messageStarted || messageDeltaSeen || !ok || block.closed {
+					sendStreamError(ctx, ch, fmt.Errorf("llm: Claude content_block_stop index %d does not reference an open block", *ce.Index))
 					return
 				}
-				activeBlock = false
-				activeBlockIndex = -1
-				activeBlockType = ""
+				block.closed = true
+				openBlockCount--
 
 			case "message_delta":
-				if !messageStarted || messageDeltaSeen || activeBlock || ce.Delta == nil || ce.Delta.StopReason == "" {
+				if !messageStarted || openBlockCount != 0 || ce.Delta == nil {
 					sendStreamError(ctx, ch, errors.New("llm: invalid Claude message_delta event"))
 					return
 				}
-				stopReason = ce.Delta.StopReason
-				if ce.Delta.Usage != nil {
-					outputTokens = ce.Delta.Usage.OutputTokens
+				if err := updateClaudeStopReason(&stopReason, ce.Delta.StopReason); err != nil {
+					sendStreamError(ctx, ch, err)
+					return
+				}
+				if ce.Usage != nil {
+					if ce.Usage.InputTokens != nil {
+						inputTokens = *ce.Usage.InputTokens
+					}
+					if ce.Usage.OutputTokens != nil {
+						outputTokens = *ce.Usage.OutputTokens
+					}
 					hasUsage = true
 				}
 				messageDeltaSeen = true
 
 			case "message_stop":
-				if !messageStarted || !messageDeltaSeen || activeBlock || stopReason == "" {
+				if !messageStarted || !messageDeltaSeen || openBlockCount != 0 || stopReason == "" {
 					sendStreamError(ctx, ch, errors.New("llm: Claude message_stop arrived without a complete terminal reason"))
 					return
 				}
