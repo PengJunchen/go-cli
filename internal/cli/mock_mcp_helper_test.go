@@ -61,6 +61,42 @@ func mockMCPHandshake(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
+// writeMockMCPResult responds to the current JSON-RPC request using its exact
+// ID. The adapter performs initialize before tools/list, so fixture responses
+// must not assume that tools/list has a fixed request ID.
+func writeMockMCPResult(w http.ResponseWriter, r *http.Request, result any) {
+	w.Header().Set("Content-Type", "application/json")
+	if r.Method != http.MethodPost {
+		w.WriteHeader(http.StatusOK)
+		_, _ = io.WriteString(w, `{}`)
+		return
+	}
+
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "read JSON-RPC request: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	_ = r.Body.Close()
+	r.Body = io.NopCloser(bytes.NewReader(body))
+
+	var request struct {
+		ID json.RawMessage `json:"id"`
+	}
+	if err := json.Unmarshal(body, &request); err != nil || len(request.ID) == 0 {
+		http.Error(w, "JSON-RPC request has no ID", http.StatusBadRequest)
+		return
+	}
+	response := map[string]any{
+		"jsonrpc": "2.0",
+		"id":      request.ID,
+		"result":  result,
+	}
+	if err := json.NewEncoder(w).Encode(response); err != nil {
+		http.Error(w, "encode JSON-RPC response: "+err.Error(), http.StatusInternalServerError)
+	}
+}
+
 // alwaysTrustManager is a TrustManager that trusts every project path.
 // It is used in tests to bypass trust checks for auto-discovery.
 type alwaysTrustManager struct{}

@@ -44,19 +44,12 @@ func TestE2E_RealConfigScenario_FullPipeline(t *testing.T) {
 
 	// --- Setup: mock MCP HTTP server ---
 	mcpSrv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		body, _ := json.Marshal(map[string]any{ //nolint:errcheck
-			"jsonrpc": "2.0",
-			"id":      0,
-			"result": map[string]any{
-				"tools": []map[string]any{
-					{"name": "webSearchPro", "description": "Professional web search"},
-					{"name": "webSearchStd", "description": "Standard web search"},
-				},
+		writeMockMCPResult(w, r, map[string]any{
+			"tools": []map[string]any{
+				{"name": "webSearchPro", "description": "Professional web search"},
+				{"name": "webSearchStd", "description": "Standard web search"},
 			},
 		})
-		//nolint:errcheck // test HTTP response
-		_, _ = w.Write(body) //nolint:errcheck
 	}))
 	defer mcpSrv.Close()
 
@@ -191,21 +184,12 @@ func TestE2E_RealConfigScenario_MCPDescriptionPropagated(t *testing.T) {
 
 	// Mock MCP server that returns a tool with a specific description.
 	mcpSrv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		body, _ := json.Marshal(map[string]any{ //nolint:errcheck
-			"jsonrpc": "2.0",
-			"id":      0,
-			"result": map[string]any{
-				"tools": []map[string]any{
-					{
-						"name":        "customSearch",
-						"description": "A custom search engine for testing",
-					},
-				},
-			},
+		writeMockMCPResult(w, r, map[string]any{
+			"tools": []map[string]any{{
+				"name":        "customSearch",
+				"description": "A custom search engine for testing",
+			}},
 		})
-		//nolint:errcheck // test HTTP response
-		_, _ = w.Write(body) //nolint:errcheck
 	}))
 	defer mcpSrv.Close()
 
@@ -272,18 +256,11 @@ Body.
 
 	// --- Setup: .go-cli/mcp.json (should be auto-discovered) ---
 	mcpSrv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		body, _ := json.Marshal(map[string]any{ //nolint:errcheck
-			"jsonrpc": "2.0",
-			"id":      0,
-			"result": map[string]any{
-				"tools": []map[string]any{
-					{"name": "autoTool", "description": "Auto-discovered MCP tool"},
-				},
+		writeMockMCPResult(w, r, map[string]any{
+			"tools": []map[string]any{
+				{"name": "autoTool", "description": "Auto-discovered MCP tool"},
 			},
 		})
-		//nolint:errcheck // test HTTP response
-		_, _ = w.Write(body) //nolint:errcheck
 	}))
 	defer mcpSrv.Close()
 
@@ -340,17 +317,17 @@ func TestE2E_RealConfigScenario_ConfigWinsOverAutoDiscovery(t *testing.T) {
 
 	// Config server.
 	configSrv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		//nolint:errcheck // test HTTP response
-		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"fromConfig","description":"From config"}]}}`)) //nolint:errcheck
+		writeMockMCPResult(w, r, map[string]any{
+			"tools": []map[string]any{{"name": "fromConfig", "description": "From config"}},
+		})
 	}))
 	defer configSrv.Close()
 
 	// Auto-discovery server (should NOT be used).
 	autoSrv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		//nolint:errcheck // test HTTP response
-		_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"fromAuto","description":"From auto"}]}}`)) //nolint:errcheck
+		writeMockMCPResult(w, r, map[string]any{
+			"tools": []map[string]any{{"name": "fromAuto", "description": "From auto"}},
+		})
 	}))
 	defer autoSrv.Close()
 

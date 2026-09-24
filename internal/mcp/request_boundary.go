@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 )
 
 // OutcomeUnknown marks a tool-call error where the request may have been
@@ -86,6 +87,10 @@ func parseIntegerJSON(raw json.RawMessage) (int64, bool) {
 // was sent. Responses that cannot be trusted as the result of that request
 // are marked as possibly dispatched, with no retry recommendation.
 func parseJSONRPCResponse(raw []byte, expectedID int64) (map[string]any, error) {
+	if err := rejectDuplicateJSONRPCEnvelopeFields(raw); err != nil {
+		return nil, newRequestBoundaryError(fmt.Errorf("mcp: invalid JSON-RPC response envelope: %w", err), true, false)
+	}
+
 	var frame struct {
 		JSONRPC string          `json:"jsonrpc"`
 		ID      json.RawMessage `json:"id"`
@@ -127,4 +132,55 @@ func parseJSONRPCResponse(raw []byte, expectedID int64) (map[string]any, error) 
 		return nil, newRequestBoundaryError(fmt.Errorf("mcp: invalid JSON-RPC result object"), true, false)
 	}
 	return result, nil
+}
+
+func rejectDuplicateJSONRPCEnvelopeFields(raw []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	start, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := start.(json.Delim)
+	if !ok || delim != '{' {
+		return fmt.Errorf("response envelope must be an object")
+	}
+
+	seen := make(map[string]struct{}, 4)
+	for decoder.More() {
+		token, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		key, ok := token.(string)
+		if !ok {
+			return fmt.Errorf("response envelope contains a non-string field name")
+		}
+		if _, exists := seen[key]; exists {
+			return fmt.Errorf("duplicate JSON-RPC envelope field %q", key)
+		}
+		seen[key] = struct{}{}
+
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return err
+		}
+	}
+
+	end, err := decoder.Token()
+	if err != nil {
+		return err
+	}
+	endDelim, ok := end.(json.Delim)
+	if !ok || endDelim != '}' {
+		return fmt.Errorf("response envelope object is not terminated")
+	}
+
+	var trailing json.RawMessage
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("response envelope has trailing JSON value")
+		}
+		return err
+	}
+	return nil
 }
