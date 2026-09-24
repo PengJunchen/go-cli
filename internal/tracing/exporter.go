@@ -103,26 +103,29 @@ const redactedValue = "***REDACTED***"
 // isSensitiveAttributeKey identifies unbounded or user-controlled values that
 // should be hidden from default telemetry even when a producer forgot to mark
 // the attribute explicitly.
+// This static set is classification data; it does not dispatch commands.
+var sensitiveAttributeKeys = map[string]struct{}{
+	"prompt": {}, "user_message": {}, "message": {}, "msg": {}, "content": {}, "args": {}, "arguments": {},
+	"tool_args": {}, "tool_arguments": {}, "tool_call": {}, "tool_calls": {}, "input": {}, "params": {},
+	"parameters": {}, "query": {}, "payload": {}, "body": {}, "request_body": {}, "response_body": {},
+	"cache_key": {}, "reason": {}, "summary": {}, "output": {}, "command": {}, "title": {}, "token": {},
+	"secret": {}, "password": {}, "api_key": {}, "authorization": {}, "cookie": {}, "private_key": {}, "credential": {},
+	"err": {}, "error": {}, "cause": {}, "original_error": {},
+}
+
 func isSensitiveAttributeKey(key string) bool {
 	key = strings.ToLower(strings.TrimSpace(key))
 	key = strings.NewReplacer(".", "_", "-", "_", " ", "_").Replace(key)
 
-	switch key {
-	case "prompt", "user_message", "message", "msg", "content", "args", "arguments",
-		"tool_args", "tool_arguments", "tool_call", "tool_calls", "input", "params",
-		"parameters", "query", "payload", "body", "request_body", "response_body",
-		"cache_key", "reason", "summary", "output", "command", "title", "token",
-		"secret", "password", "api_key", "authorization", "cookie", "private_key", "credential",
-		"err", "error", "cause", "original_error":
+	if _, ok := sensitiveAttributeKeys[key]; ok {
 		return true
-	default:
-		return strings.HasSuffix(key, "_args") || strings.HasSuffix(key, "_arguments") ||
-			strings.HasSuffix(key, "_prompt") || strings.HasSuffix(key, "_message") ||
-			strings.HasSuffix(key, "_content") || strings.HasSuffix(key, "_payload") ||
-			strings.HasSuffix(key, "_token") || strings.HasSuffix(key, "_secret") ||
-			strings.HasSuffix(key, "_password") || strings.HasSuffix(key, "_api_key") ||
-			strings.HasSuffix(key, "_authorization") || strings.HasSuffix(key, "_credential")
 	}
+	return strings.HasSuffix(key, "_args") || strings.HasSuffix(key, "_arguments") ||
+		strings.HasSuffix(key, "_prompt") || strings.HasSuffix(key, "_message") ||
+		strings.HasSuffix(key, "_content") || strings.HasSuffix(key, "_payload") ||
+		strings.HasSuffix(key, "_token") || strings.HasSuffix(key, "_secret") ||
+		strings.HasSuffix(key, "_password") || strings.HasSuffix(key, "_api_key") ||
+		strings.HasSuffix(key, "_authorization") || strings.HasSuffix(key, "_credential")
 }
 
 func redactedValueWithLength(value any) string {
