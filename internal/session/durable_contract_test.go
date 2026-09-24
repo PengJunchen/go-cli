@@ -52,6 +52,7 @@ func TestSessionEntryV1JSONRoundTrip(t *testing.T) {
 		CompactedThroughEntryID:    "entry-3",
 		RunOutcome:                 core.RunOutcomeCancelled,
 		CheckpointKind:             CheckpointExecutionResolution,
+		Usage:                      &llm.Usage{InputTokens: 7, OutputTokens: 3, TotalTokens: 10},
 		ExecutionResolution: &core.ExecutionResolution{
 			RunID:       "run-1",
 			ActionID:    "action-1",
@@ -78,6 +79,10 @@ func TestSessionEntryV1JSONRoundTrip(t *testing.T) {
 	cloned.ExecutionResolution.EvidenceRef = "changed"
 	if decoded.ExecutionResolution.EvidenceRef != "entry-proof" {
 		t.Fatal("SessionEntry.clone aliases the typed execution resolution")
+	}
+	cloned.Usage.InputTokens = 99
+	if decoded.Usage.InputTokens != 7 {
+		t.Fatal("SessionEntry.clone aliases token usage")
 	}
 }
 
