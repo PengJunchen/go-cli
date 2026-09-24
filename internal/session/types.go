@@ -119,6 +119,10 @@ type SessionEntry struct {
 	ReceiptOutcome string `json:"receipt_outcome,omitempty"`
 	// PayloadDigest stores the canonical digest used to detect conflicting retries.
 	PayloadDigest string `json:"payload_digest,omitempty"`
+	// ArgumentDigest is the SHA-256 digest of normalized arguments, in lowercase hex.
+	ArgumentDigest string `json:"argument_digest,omitempty"`
+	// SchemaDigest is the SHA-256 digest of the captured tool schema, in lowercase hex.
+	SchemaDigest string `json:"schema_digest,omitempty"`
 	// ExecutionIdentity describes a verifiable local resource identity when one
 	// was captured. Its persisted values are diagnostics, not permission to signal
 	// a process after restart.
@@ -134,6 +138,9 @@ type SessionEntry struct {
 	RunOutcome core.RunOutcome `json:"run_outcome,omitempty"`
 	// CheckpointKind identifies the durable checkpoint represented by this row.
 	CheckpointKind CheckpointKind `json:"checkpoint_kind,omitempty"`
+	// ExecutionResolution is the typed resource-quiescence proof carried by a
+	// checkpoint; a terminal receipt alone is never a resolution.
+	ExecutionResolution *core.ExecutionResolution `json:"execution_resolution,omitempty"`
 }
 
 // clone returns a defensive copy of the entry so callers cannot mutate the
@@ -159,6 +166,10 @@ func (e *SessionEntry) clone() *SessionEntry {
 	if e.ExecutionIdentity != nil {
 		identity := *e.ExecutionIdentity
 		cp.ExecutionIdentity = &identity
+	}
+	if e.ExecutionResolution != nil {
+		resolution := *e.ExecutionResolution
+		cp.ExecutionResolution = &resolution
 	}
 	return &cp
 }

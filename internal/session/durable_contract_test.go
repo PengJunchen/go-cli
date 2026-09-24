@@ -35,6 +35,8 @@ func TestSessionEntryV1JSONRoundTrip(t *testing.T) {
 		DispatchState:     DispatchStateDispatched,
 		ReceiptOutcome:    core.ReceiptOutcomeUnknown,
 		PayloadDigest:     "sha256:payload",
+		ArgumentDigest:    "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		SchemaDigest:      "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
 		ExecutionIdentity: &ExecutionIdentity{
 			Kind:              ExecutionIdentityProcessGroup,
 			Platform:          "linux",
@@ -48,6 +50,12 @@ func TestSessionEntryV1JSONRoundTrip(t *testing.T) {
 		CompactedThroughEntryID:    "entry-3",
 		RunOutcome:                 core.RunOutcomeCancelled,
 		CheckpointKind:             CheckpointExecutionResolution,
+		ExecutionResolution: &core.ExecutionResolution{
+			RunID:       "run-1",
+			ActionID:    "action-1",
+			Evidence:    core.ResolutionLocalResourcesStopped,
+			EvidenceRef: "entry-proof",
+		},
 	}
 
 	encoded, err := json.Marshal(entry)
@@ -63,6 +71,11 @@ func TestSessionEntryV1JSONRoundTrip(t *testing.T) {
 	}
 	if err := decoded.ExecutionIdentity.Validate(); err != nil {
 		t.Fatalf("valid process-group identity shape was rejected: %v", err)
+	}
+	cloned := decoded.clone()
+	cloned.ExecutionResolution.EvidenceRef = "changed"
+	if decoded.ExecutionResolution.EvidenceRef != "entry-proof" {
+		t.Fatal("SessionEntry.clone aliases the typed execution resolution")
 	}
 }
 
