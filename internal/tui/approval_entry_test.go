@@ -264,28 +264,103 @@ func TestTUIApprovalModalFitsSmallTerminalAndSanitizesUntrustedDetails(t *testin
 }
 
 func TestTUIApprovalVisibleDetailsSanitizeTerminalControls(t *testing.T) {
-	content := "before\x1b[2Jafter\x1b]52;c;Zm9v\a\rend"
-	diff := "+safe\x1b[2Jline"
+	content := "cmd:before\x1b[2Jafter\r\x1b]52;c;Zm9v\a"
+	styled := "red\x1b[31mplain"
+	diff := "+safe\x1b[2Jdanger"
 	m := &teaModel{accordion: NewAccordionModel(), msgCh: make(chan Msg, 1)}
 	m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
 	m.Update(approvalRequestMsg{req: ApprovalRequest{
-		RequestID:   "source-request-42",
-		ToolName:    "write",
-		Args:        map[string]any{"content": content},
+		RequestID:   "id\x1b[2J",
+		ToolName:    "tool\x1b[2J",
+		Args:        map[string]any{"command": content, "format": styled},
 		DiffPreview: diff,
 		ResponseCh:  make(chan ApprovalResponse, 1),
 	}})
 
 	view := m.View()
-	require.Contains(t, view, "source-request-42")
-	require.Contains(t, view, "beforeafterend")
-	require.Contains(t, view, "+safeline")
-	for _, control := range []string{"\x1b[2J", "\x1b]52;c;Zm9v", "\a", "\r"} {
+	require.Contains(t, view, "tool\\x1b[2J")
+	require.Contains(t, view, "request: id\\x1b[2J")
+	require.Contains(t, view, "cmd:before\\x1b[2Jafter\\r\\x1b]52;c;Zm9v\\a")
+	require.Contains(t, view, "format: red\\x1b[31mplain")
+	require.Contains(t, view, "+safe\\x1b[2Jdanger")
+	for _, control := range []string{"\x1b[2J", "\x1b]52;c;Zm9v", "\x1b[31m", "\a", "\r"} {
 		assert.NotContains(t, view, control)
 	}
-	assert.NotContains(t, view, "Zm9v")
-	assert.Equal(t, content, m.activeInteraction.approval.Args["content"], "display sanitizing must not mutate original arguments")
+	assert.Equal(t, content, m.activeInteraction.approval.Args["command"], "display sanitizing must not mutate original arguments")
+	assert.Equal(t, styled, m.activeInteraction.approval.Args["format"], "display sanitizing must not mutate original arguments")
 	assert.Equal(t, diff, m.activeInteraction.approval.DiffPreview, "display sanitizing must not mutate original diff")
+
+	clean := &teaModel{accordion: NewAccordionModel(), msgCh: make(chan Msg, 1)}
+	clean.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	clean.Update(approvalRequestMsg{req: ApprovalRequest{
+		RequestID:   "id",
+		ToolName:    "tool",
+		Args:        map[string]any{"command": "cmd:beforeafter", "format": "redplain"},
+		DiffPreview: "+safedanger",
+		ResponseCh:  make(chan ApprovalResponse, 1),
+	}})
+	assert.NotEqual(t, clean.View(), view, "control-bearing input must not render identically to cleaned input")
+}
+
+func TestSanitizeApprovalTextEscapesControlsAndInvalidUTF8WithoutLoss(t *testing.T) {
+	input := string([]byte{'A', 0x00, '\t', '\r', 0x85, 0xff, 'B'}) + "\n" + "C\u0085D"
+	assert.Equal(t, "A\\x00\\t\\r\\x85\\xffB\nC\\u0085D", sanitizeApprovalText(input))
+}
+
+func TestTUIApprovalEscapedLongDetailsMustBeReviewedAfterResizeAndDiffChange(t *testing.T) {
+	content := strings.Repeat("\x1b[2J", 100)
+	diff := strings.Repeat("+diff\x1b[2J", 50)
+	toolName := strings.Repeat("write-", 15) + "\x1b[2J"
+	requestID := strings.Repeat("req-", 20) + "\x1b[2J"
+	response := make(chan ApprovalResponse, 1)
+	m := &teaModel{accordion: NewAccordionModel(), msgCh: make(chan Msg, 1)}
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
+	m.Update(approvalRequestMsg{req: ApprovalRequest{
+		ToolName:    toolName,
+		RequestID:   requestID,
+		Args:        map[string]any{"command": content},
+		DiffPreview: diff,
+		ResponseCh:  response,
+	}})
+
+	view := m.View()
+	require.Contains(t, view, "view truncated")
+	require.Contains(t, view, `\x1b[2J`)
+	allDetails := make([]string, 0)
+	walkApprovalDetailLines(m.activeInteraction.approval, m.activeInteraction.showDiff, approvalDetailWidth(m.width), func(line string) {
+		allDetails = append(allDetails, line)
+	})
+	completeDetailText := strings.ReplaceAll(strings.Join(allDetails, "\n"), "\n", "")
+	require.Contains(t, completeDetailText, strings.Repeat("write-", 15)+`\x1b[2J`, "the clipped fixed header has a complete scrollable name row")
+	require.Contains(t, completeDetailText, strings.Repeat("req-", 20)+`\x1b[2J`, "the clipped identity has a complete scrollable request ID row")
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	assert.NotNil(t, m.activeInteraction, "escaped bytes must count toward the reviewable wrapped detail lines")
+	m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	assert.NotNil(t, m.activeInteraction, "scrolling without rendering the page must not count as review")
+	m.View()
+
+	for i := 0; i < 1000 && !strings.Contains(lastLine(m.View()), "[y] once"); i++ {
+		m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+		m.View()
+	}
+	require.Contains(t, lastLine(m.View()), "[y] once", "the complete escaped preview becomes approvable after every wrapped row was displayed")
+
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
+	require.Contains(t, lastLine(m.View()), "[y] review details", "toggling the diff resets review coverage")
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	assert.NotNil(t, m.activeInteraction, "toggling the diff resets review coverage")
+
+	m.Update(tea.WindowSizeMsg{Width: 20, Height: 4})
+	m.View()
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	assert.NotNil(t, m.activeInteraction, "resizing to a view that hides details resets review coverage")
+	assert.Equal(t, content, m.activeInteraction.approval.Args["command"])
+	select {
+	case got := <-response:
+		t.Fatalf("unreviewed escaped details unexpectedly produced a decision: %+v", got)
+	default:
+	}
 }
 
 func TestTUIConcurrentApprovalRequestsRemainResolvable(t *testing.T) {
