@@ -232,10 +232,11 @@ func (s *StdioAdapter) Disconnect(ctx context.Context) error {
 	s.receiveDisabled = true
 	s.mu.Unlock()
 
-	done := s.startCleanup(session, connected)
 	if err := ctx.Err(); err != nil {
+		done := s.startCleanup(session, false)
 		return s.pendingDisconnect(session, err, done)
 	}
+	done := s.startCleanup(session, connected)
 	waitCtx := ctx
 	var cancel context.CancelFunc
 	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
@@ -577,6 +578,7 @@ func (s *StdioAdapter) startCleanup(session *stdioSession, sendDisconnect bool) 
 				started:    make(chan struct{}),
 				ioReturned: make(chan struct{}),
 			}
+			session.activeWrite = disconnectWrite
 		default:
 		}
 	}
@@ -588,31 +590,7 @@ func (s *StdioAdapter) startCleanup(session *stdioSession, sendDisconnect bool) 
 
 	if disconnectWrite != nil {
 		msg := ACPMessage{Type: TypeDisconnect, SenderID: s.name, Timestamp: time.Now()}
-		go func(result *stdioWriteResult) {
-			frame, err := marshalFrame(msg)
-			if err == nil {
-				s.mu.Lock()
-				result.mu.Lock()
-				result.state = stdioWriteStarted
-				result.wasStarted = true
-				session.activeWrite = result
-				close(result.started)
-				result.mu.Unlock()
-				s.mu.Unlock()
-				result.err = writeFrameBytes(s.out, frame)
-				close(result.ioReturned)
-				s.mu.Lock()
-				if session.activeWrite == result {
-					session.activeWrite = nil
-				}
-				s.mu.Unlock()
-			} else {
-				result.err = err
-			}
-			<-session.gate
-			s.workerDone(session)
-			close(result.done)
-		}(disconnectWrite)
+		go s.runDisconnectWrite(session, disconnectWrite, msg)
 	}
 
 	go func() {
@@ -648,6 +626,51 @@ func (s *StdioAdapter) startCleanup(session *stdioSession, sendDisconnect bool) 
 		close(cleanupDone)
 	}()
 	return cleanupDone
+}
+
+func (s *StdioAdapter) runDisconnectWrite(session *stdioSession, result *stdioWriteResult, msg ACPMessage) {
+	defer func() {
+		<-session.gate
+		s.workerDone(session)
+		close(result.done)
+	}()
+
+	frame, err := marshalFrame(msg)
+	if err != nil {
+		s.mu.Lock()
+		result.mu.Lock()
+		result.err = err
+		if result.state == stdioWriteQueued {
+			result.state = stdioWriteCanceled
+		}
+		result.mu.Unlock()
+		if session.activeWrite == result {
+			session.activeWrite = nil
+		}
+		s.mu.Unlock()
+		return
+	}
+
+	s.mu.Lock()
+	result.mu.Lock()
+	started := result.state == stdioWriteQueued
+	if started {
+		result.state = stdioWriteStarted
+		result.wasStarted = true
+		close(result.started)
+	}
+	result.mu.Unlock()
+	s.mu.Unlock()
+
+	if started {
+		result.err = writeFrameBytes(s.out, frame)
+		close(result.ioReturned)
+	}
+	s.mu.Lock()
+	if session.activeWrite == result {
+		session.activeWrite = nil
+	}
+	s.mu.Unlock()
 }
 
 func (s *StdioAdapter) addWorkerLocked(session *stdioSession) {
@@ -688,29 +711,35 @@ func (s *StdioAdapter) pendingDisconnect(session *stdioSession, cause error, don
 		return cause
 	default:
 	}
-	unknown := s.writeInFlight(session)
+	unknown := s.cancelQueuedOrCheckWriteInFlight(session)
 	return s.pendingFromChannel("disconnect", cause, done, unknown)
 }
 
-func (s *StdioAdapter) writeInFlight(session *stdioSession) bool {
+// cancelQueuedOrCheckWriteInFlight arbitrates a pending Disconnect against the
+// writer worker. A queued frame is canceled before reporting known-not-sent;
+// once the worker commits the write, delivery is unknown until Write returns.
+func (s *StdioAdapter) cancelQueuedOrCheckWriteInFlight(session *stdioSession) bool {
 	s.mu.Lock()
 	active := session.activeWrite
-	s.mu.Unlock()
 	if active == nil {
+		s.mu.Unlock()
 		return false
 	}
 	active.mu.Lock()
-	started := active.state == stdioWriteStarted
+	unknown := false
+	switch active.state {
+	case stdioWriteQueued:
+		active.state = stdioWriteCanceled
+	case stdioWriteStarted:
+		select {
+		case <-active.ioReturned:
+		default:
+			unknown = true
+		}
+	}
 	active.mu.Unlock()
-	if !started {
-		return false
-	}
-	select {
-	case <-active.ioReturned:
-		return false
-	default:
-		return true
-	}
+	s.mu.Unlock()
+	return unknown
 }
 
 // marshalFrame encodes one complete outbound frame and applies the same
