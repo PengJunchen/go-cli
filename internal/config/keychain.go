@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
@@ -15,10 +16,17 @@ import (
 type KeychainSource struct {
 	service string
 	account string
+	// availableFunc can be set by package tests to exercise keychain behavior
+	// without depending on the host platform or touching its keychain.
+	availableFunc func() bool
 	// run executes a command and returns its stdout. It is a field so tests
 	// can inject a fake without touching the real keychain.
 	run func(name string, args ...string) ([]byte, error)
 }
+
+var errKeychainItemNotFound = errors.New("keychain: scoped item not found")
+
+const keychainItemNotFoundMessage = "The specified item could not be found in the keychain."
 
 // NewKeychainSource creates a KeychainSource with the default service
 // ("go-cli") and account ("api-key") names.
@@ -32,12 +40,30 @@ func NewKeychainSource() *KeychainSource {
 
 // keychainExec is the default command runner used by KeychainSource.
 func keychainExec(name string, args ...string) ([]byte, error) {
-	return exec.Command(name, args...).Output()
+	command := exec.Command(name, args...)
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		if name == "security" && isKeychainItemNotFoundError(err, stderr.Bytes()) {
+			return nil, errKeychainItemNotFound
+		}
+		return nil, fmt.Errorf("keychain: command failed: %w", err)
+	}
+	return stdout.Bytes(), nil
+}
+
+func isKeychainItemNotFoundError(err error, stderr []byte) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) && bytes.Contains(stderr, []byte(keychainItemNotFoundMessage))
 }
 
 // Available reports whether the OS keychain is usable. On non-macOS systems
 // it always returns false.
 func (k *KeychainSource) Available() bool {
+	if k.availableFunc != nil {
+		return k.availableFunc()
+	}
 	if runtime.GOOS != "darwin" {
 		return false
 	}
@@ -97,13 +123,20 @@ func (k *KeychainSource) GetScoped(scope AuthScope) (string, error) {
 	}
 	account, err := scopedCredentialAccount(scope)
 	if err != nil {
-		return "", ErrAuthNotFound
+		return "", fmt.Errorf("keychain: invalid scoped credential lookup: %w", err)
 	}
 	out, err := k.run("security", "find-generic-password", "-s", k.service, "-a", account, "-w")
 	if err != nil {
-		return "", ErrAuthNotFound
+		if errors.Is(err, errKeychainItemNotFound) {
+			return "", ErrAuthNotFound
+		}
+		return "", fmt.Errorf("keychain: find scoped credential: %w", err)
 	}
-	return strings.TrimSpace(string(out)), nil
+	key := strings.TrimSpace(string(out))
+	if key == "" {
+		return "", errors.New("keychain: find scoped credential returned empty output")
+	}
+	return key, nil
 }
 
 // DeleteScoped removes only the key bound to the exact scope tuple.
