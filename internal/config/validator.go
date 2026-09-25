@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -38,6 +39,10 @@ const (
 	maxTemperature = 2.0
 )
 
+func validTemperature(value float64) bool {
+	return !math.IsNaN(value) && !math.IsInf(value, 0) && value >= minTemperature && value <= maxTemperature
+}
+
 var (
 	validTracingLevels        = []string{"debug", "info", "warn", "error"}
 	validTracingExporter      = []string{"jsonl", "stdout", "none"}
@@ -52,21 +57,21 @@ var (
 func (v *DefaultValidator) Validate(cfg Config) error {
 	var errs []string
 
-	if cfg.Provider.Temperature < minTemperature || cfg.Provider.Temperature > maxTemperature {
+	if !validTemperature(cfg.Provider.Temperature) {
 		errs = append(errs, "provider temperature out of range")
 	}
 	if cfg.Provider.MaxTokens < 0 {
 		errs = append(errs, "provider max_tokens must be non-negative")
 	}
 
-	if cfg.Model.Temperature < minTemperature || cfg.Model.Temperature > maxTemperature {
+	if !validTemperature(cfg.Model.Temperature) {
 		errs = append(errs, "model temperature out of range")
 	}
 	if cfg.Model.MaxTokens < 0 {
 		errs = append(errs, "model max_tokens must be non-negative")
 	}
 
-	if cfg.SmallModel.Temperature < minTemperature || cfg.SmallModel.Temperature > maxTemperature {
+	if !validTemperature(cfg.SmallModel.Temperature) {
 		errs = append(errs, "small model temperature out of range")
 	}
 	if cfg.SmallModel.MaxTokens < 0 {
