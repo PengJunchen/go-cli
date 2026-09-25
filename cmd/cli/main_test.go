@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -460,6 +461,75 @@ func TestRunEmitsErrorSpanStatus(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "cli.invocation")
 	assert.Contains(t, string(data), "ERROR")
+}
+
+type finalizerGateExporter struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+	err     error
+}
+
+func (*finalizerGateExporter) ExportSpan(context.Context, tracing.TraceSpan) error { return nil }
+
+func (e *finalizerGateExporter) Shutdown(ctx context.Context) error {
+	e.once.Do(func() { close(e.started) })
+	select {
+	case <-e.release:
+		return e.err
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func TestTracingFinalizerWaitsDespiteCanceledSignalContext(t *testing.T) {
+	sourceCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	inner := &finalizerGateExporter{started: make(chan struct{}), release: make(chan struct{})}
+	exporter := tracing.NewAsyncExporter(inner, 8, 1)
+	var stderr bytes.Buffer
+	result := make(chan int, 1)
+	go func() { result <- finalizeTracingExporter(sourceCtx, exporter, &stderr, time.Second) }()
+
+	select {
+	case <-inner.started:
+	case <-time.After(time.Second):
+		close(inner.release)
+		t.Fatal("inner shutdown callback did not start")
+	}
+	select {
+	case code := <-result:
+		close(inner.release)
+		t.Fatalf("finalizer returned before the owner completed, code=%d", code)
+	case <-time.After(30 * time.Millisecond):
+	}
+
+	close(inner.release)
+	select {
+	case code := <-result:
+		assert.Zero(t, code)
+	case <-time.After(time.Second):
+		t.Fatal("finalizer did not observe the completed owner")
+	}
+	assert.Empty(t, stderr.String())
+}
+
+func TestTracingFinalizerDeadlineReturnsFailureWithoutCallbackText(t *testing.T) {
+	canary := "private exporter callback detail"
+	inner := &finalizerGateExporter{
+		started: make(chan struct{}), release: make(chan struct{}), err: errors.New(canary),
+	}
+	exporter := tracing.NewAsyncExporter(inner, 8, 1)
+	var stderr bytes.Buffer
+	startedAt := time.Now()
+	code := finalizeTracingExporter(context.Background(), exporter, &stderr, 30*time.Millisecond)
+	assert.Equal(t, 1, code, "pending shutdown must affect the process exit code")
+	assert.Less(t, time.Since(startedAt), time.Second, "finalizer must remain bounded")
+	assert.Contains(t, stderr.String(), "pending")
+	assert.NotContains(t, stderr.String(), canary, "stderr must not expose arbitrary callback text")
+
+	close(inner.release)
+	assert.Error(t, exporter.Shutdown(context.Background()), "the late callback error remains available to the waiter")
 }
 
 // TestNewTracingSpanNonNoop directly verifies that a tracer produced by

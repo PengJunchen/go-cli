@@ -107,7 +107,7 @@ func TestAsyncExporterDropsWhenFull(t *testing.T) {
 			dropped++
 		}
 	}
-	assert.Equal(t, 0, dropped, "ExportSpan should never return an error; drops are silent")
+	assert.Greater(t, dropped, 0, "queue-full drops must be returned to the caller")
 }
 
 func TestAsyncExporterBatchSizeMinimum(t *testing.T) {
@@ -130,10 +130,11 @@ func TestAsyncExporterBatchSizeMinimum(t *testing.T) {
 // gatedExporter blocks each ExportSpan until release() is called, and records
 // the spans in FIFO order. It is used to deterministically force a full queue.
 type gatedExporter struct {
-	mu    sync.Mutex
-	spans []TraceSpan
-	first chan struct{}
-	gate  chan struct{}
+	mu       sync.Mutex
+	spans    []TraceSpan
+	first    chan struct{}
+	gate     chan struct{}
+	gateOnce sync.Once
 }
 
 func newGatedExporter() *gatedExporter {
@@ -168,7 +169,7 @@ func (g *gatedExporter) waitStarted(t *testing.T) {
 	}
 }
 
-func (g *gatedExporter) release() { g.gate <- struct{}{} }
+func (g *gatedExporter) release() { g.gateOnce.Do(func() { close(g.gate) }) }
 
 func (g *gatedExporter) ids() []string {
 	g.mu.Lock()
@@ -189,6 +190,10 @@ func (g *gatedExporter) count() int {
 func TestAsyncExporterDropsWhenQueueFull(t *testing.T) {
 	g := newGatedExporter()
 	async := NewAsyncExporter(g, 1, 1) // queue holds 1, batch flushes immediately
+	t.Cleanup(func() {
+		g.release()
+		_ = async.Shutdown(context.Background()) //nolint:errcheck // cleanup joins the worker
+	})
 
 	tr := NewTracer("trace", nil)
 	spanA, _ := tr.Start(context.Background(), "a", SpanKindInternal)
@@ -201,7 +206,7 @@ func TestAsyncExporterDropsWhenQueueFull(t *testing.T) {
 	require.NoError(t, async.ExportSpan(context.Background(), spanB)) // fills the single slot
 
 	start := time.Now()
-	require.NoError(t, async.ExportSpan(context.Background(), spanC)) // queue full -> dropped
+	require.Error(t, async.ExportSpan(context.Background(), spanC), "queue full must be visible to the caller")
 	require.Less(t, time.Since(start), 200*time.Millisecond, "drop must not block the caller")
 
 	// Let A and B through; C must never be delivered.
@@ -216,6 +221,79 @@ func TestAsyncExporterDropsWhenQueueFull(t *testing.T) {
 	require.Contains(t, ids, spanA.SpanID())
 	require.Contains(t, ids, spanB.SpanID())
 	require.NotContains(t, ids, spanC.SpanID())
+}
+
+func TestAsyncExporterRejectsAfterClose(t *testing.T) {
+	async := NewAsyncExporter(&countingExporter{}, 4, 1)
+	require.NoError(t, async.Shutdown(context.Background()))
+
+	lateSpan := &localSpan{spanID: "late"}
+	require.Error(t, async.ExportSpan(context.Background(), lateSpan), "closed exporter must reject rather than orphan the span")
+}
+
+type shutdownCountingExporter struct {
+	shutdownCalls atomic.Int32
+}
+
+func (*shutdownCountingExporter) ExportSpan(context.Context, TraceSpan) error { return nil }
+
+func (e *shutdownCountingExporter) Shutdown(context.Context) error {
+	e.shutdownCalls.Add(1)
+	return nil
+}
+
+func TestAsyncExporterConcurrentShutdownCallsInnerOnce(t *testing.T) {
+	inner := &shutdownCountingExporter{}
+	async := NewAsyncExporter(inner, 8, 1)
+
+	const callers = 8
+	var wg sync.WaitGroup
+	errCh := make(chan error, callers)
+	for range callers {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errCh <- async.Shutdown(context.Background())
+		}()
+	}
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		require.NoError(t, err)
+	}
+	assert.Equal(t, int32(1), inner.shutdownCalls.Load(), "all callers must join one close owner")
+}
+
+func TestAsyncExporterWaiterTimeoutRetainsOwnerUntilCallbackReturns(t *testing.T) {
+	g := newGatedExporter()
+	async := NewAsyncExporter(g, 2, 1)
+	span := &localSpan{spanID: "inflight"}
+	require.NoError(t, async.ExportSpan(context.Background(), span))
+	g.waitStarted(t)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(g.release) }
+	t.Cleanup(func() {
+		release()
+		_ = async.Shutdown(context.Background()) //nolint:errcheck // cleanup joins the retained owner
+	})
+
+	waitCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	result := make(chan error, 1)
+	go func() { result <- async.Shutdown(waitCtx) }()
+
+	var waiterErr error
+	select {
+	case waiterErr = <-result:
+	case <-time.After(50 * time.Millisecond):
+		release()
+		waiterErr = <-result
+		t.Fatal("Shutdown ignored the waiter's canceled context while retaining the in-flight callback")
+	}
+	require.Error(t, waiterErr, "a timed-out waiter must receive a pending result")
+
+	release()
+	require.NoError(t, async.Shutdown(context.Background()), "a later waiter should observe completion after the callback returns")
 }
 
 func TestAsyncExporterShutdownFlushesBufferedSpans(t *testing.T) {
