@@ -126,6 +126,12 @@ func TestHTTPAdapterDisconnectWaitIsCancelableAndCloseIsJoined(t *testing.T) {
 		assert.Contains(t, firstErr.Error(), "pending")
 		assert.True(t, errors.Is(firstErr, context.DeadlineExceeded))
 	}
+	firstCloseDone := requireHTTPOperationDone(t, firstErr)
+	select {
+	case <-firstCloseDone:
+		t.Fatal("pending disconnect completion closed while tools/list still held the connection generation")
+	default:
+	}
 	select {
 	case <-activeListCtx.Done():
 		assert.ErrorIs(t, activeListCtx.Err(), context.Canceled)
@@ -161,6 +167,8 @@ func TestHTTPAdapterDisconnectWaitIsCancelableAndCloseIsJoined(t *testing.T) {
 	require.Error(t, secondErr)
 	assert.Contains(t, secondErr.Error(), "pending")
 	assert.True(t, errors.Is(secondErr, context.DeadlineExceeded))
+	secondCloseDone := requireHTTPOperationDone(t, secondErr)
+	assert.True(t, firstCloseDone == secondCloseDone, "all close waiters observe the same generation operation")
 	assert.Zero(t, deleteCalls.Load(), "joining a pending close must not start a second DELETE")
 
 	allowListReturn()
@@ -179,6 +187,11 @@ func TestHTTPAdapterDisconnectWaitIsCancelableAndCloseIsJoined(t *testing.T) {
 		}
 	}
 	require.NoError(t, adapter.Disconnect(context.Background()), "later waiters join and read the single close result")
+	select {
+	case <-firstCloseDone:
+	default:
+		t.Fatal("disconnect completion remained open after the generation finished closing")
+	}
 	assert.EqualValues(t, 1, deleteCalls.Load())
 	assert.EqualValues(t, 3, roundTrips.Load(), "initialize, initialized, and the original tools/list are the only POSTs")
 }
@@ -244,6 +257,12 @@ func TestHTTPAdapterCanceledConnectRemainsOwnedUntilActualReturn(t *testing.T) {
 		assert.Contains(t, connectErr.Error(), "pending")
 		assert.True(t, errors.Is(connectErr, context.Canceled))
 	}
+	connectOperationDone := requireHTTPOperationDone(t, connectErr)
+	select {
+	case <-connectOperationDone:
+		t.Fatal("connect completion closed while initialize remained blocked")
+	default:
+	}
 	assert.Empty(t, adapter.ProtocolVersion(), "an actual handshake still in progress cannot publish connection state")
 
 	firstWaitCtx, cancelFirstWait := context.WithTimeout(context.Background(), 30*time.Millisecond)
@@ -277,6 +296,11 @@ func TestHTTPAdapterCanceledConnectRemainsOwnedUntilActualReturn(t *testing.T) {
 
 	allowInitReturn()
 	require.NoError(t, adapter.Disconnect(context.Background()), "the close waiter joins the single owner")
+	select {
+	case <-connectOperationDone:
+	default:
+		t.Fatal("connect operation completion remained open after initialize returned")
+	}
 	assert.EqualValues(t, 1, deleteCalls.Load(), "the late session is deleted exactly once")
 	assert.Empty(t, adapter.ProtocolVersion(), "the late handshake response must never publish after the close fence")
 
@@ -284,6 +308,107 @@ func TestHTTPAdapterCanceledConnectRemainsOwnedUntilActualReturn(t *testing.T) {
 	assert.Equal(t, streamableHTTPProtocolVersion, adapter.ProtocolVersion())
 	require.NoError(t, adapter.Disconnect(context.Background()))
 	assert.EqualValues(t, 2, deleteCalls.Load())
+}
+
+func TestHTTPPendingConnectCompletionBelongsToItsGeneration(t *testing.T) {
+	firstStarted := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondStarted := make(chan struct{})
+	releaseSecond := make(chan struct{})
+	var releaseFirstOnce sync.Once
+	var releaseSecondOnce sync.Once
+	defer releaseFirstOnce.Do(func() { close(releaseFirst) })
+	defer releaseSecondOnce.Do(func() { close(releaseSecond) })
+	var initializeCalls atomic.Int32
+	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		if req.Method == http.MethodDelete {
+			return lifecycleResponse(req, http.StatusMethodNotAllowed, nil, ""), nil
+		}
+		method, _, _, err := decodeHTTPMCPRequest(req)
+		if err != nil {
+			return nil, err
+		}
+		switch method {
+		case "initialize":
+			call := initializeCalls.Add(1)
+			if call == 1 {
+				close(firstStarted)
+				<-releaseFirst
+			} else if call == 2 {
+				close(secondStarted)
+				<-releaseSecond
+			}
+			return lifecycleResponse(req, http.StatusOK, map[string]any{"protocolVersion": streamableHTTPProtocolVersion}, fmt.Sprintf("generation-%d", call)), nil
+		case "notifications/initialized":
+			return lifecycleResponse(req, http.StatusAccepted, nil, ""), nil
+		default:
+			return lifecycleResponse(req, http.StatusBadRequest, nil, ""), nil
+		}
+	})
+	adapter := NewHTTPClientAdapterWithClient(MCPServerConfig{
+		Name: "srv", Transport: MCPTransportStreamableHTTP, URL: "http://mcp.test/mcp",
+	}, &http.Client{Transport: transport})
+
+	firstCtx, cancelFirst := context.WithCancel(context.Background())
+	firstConnect := make(chan error, 1)
+	go func() { firstConnect <- adapter.Connect(firstCtx) }()
+	select {
+	case <-firstStarted:
+	case <-time.After(time.Second):
+		t.Fatal("first initialize did not start")
+	}
+	cancelFirst()
+	firstErr := <-firstConnect
+	firstDone := requireHTTPOperationDone(t, firstErr)
+	select {
+	case <-firstDone:
+		t.Fatal("first generation completed before its blocked initialize returned")
+	default:
+	}
+
+	closeCtx, cancelClose := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	closeErr := adapter.Disconnect(closeCtx)
+	cancelClose()
+	require.ErrorIs(t, closeErr, ErrHTTPOperationPending)
+	releaseFirstOnce.Do(func() { close(releaseFirst) })
+	select {
+	case <-firstDone:
+	case <-time.After(time.Second):
+		t.Fatal("first generation completion did not close after initialize returned")
+	}
+	require.NoError(t, adapter.Disconnect(context.Background()))
+
+	secondCtx, cancelSecond := context.WithCancel(context.Background())
+	secondConnect := make(chan error, 1)
+	go func() { secondConnect <- adapter.Connect(secondCtx) }()
+	select {
+	case <-secondStarted:
+	case <-time.After(time.Second):
+		t.Fatal("second initialize did not start")
+	}
+	cancelSecond()
+	secondErr := <-secondConnect
+	secondDone := requireHTTPOperationDone(t, secondErr)
+	assert.False(t, firstDone == secondDone, "each pending connect identifies only its own generation")
+	select {
+	case <-firstDone:
+	default:
+		t.Fatal("the completed first generation became incomplete after reconnect")
+	}
+	select {
+	case <-secondDone:
+		t.Fatal("the new generation's completion was incorrectly inherited from the old one")
+	default:
+	}
+
+	releaseSecondOnce.Do(func() { close(releaseSecond) })
+	select {
+	case <-secondDone:
+	case <-time.After(time.Second):
+		t.Fatal("second generation completion did not close after initialize returned")
+	}
+	require.Error(t, secondErr, "the canceled second connect cannot publish success")
+	require.NoError(t, adapter.Disconnect(context.Background()))
 }
 
 func TestHTTPAdapterFailedDeleteIsStoredAndBlocksReconnect(t *testing.T) {

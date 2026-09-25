@@ -90,6 +90,12 @@ func TestHTTPAdapterJoinsResponseBodyCloseAfterReadPanic(t *testing.T) {
 	}
 	require.ErrorIs(t, waitErr, context.DeadlineExceeded)
 	require.ErrorIs(t, waitErr, ErrHTTPOperationPending)
+	closeDone := requireHTTPOperationDone(t, waitErr)
+	select {
+	case <-closeDone:
+		t.Fatal("pending disconnect completion closed before the response body was joined")
+	default:
+	}
 	assert.Zero(t, deleteCalls.Load(), "DELETE must wait until response-body Close returns")
 	assert.EqualValues(t, 1, body.closeCalls.Load())
 
@@ -100,8 +106,22 @@ func TestHTTPAdapterJoinsResponseBodyCloseAfterReadPanic(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("request caller did not unwind after body Close was released")
 	}
+	select {
+	case <-closeDone:
+	case <-time.After(time.Second):
+		t.Fatal("disconnect completion did not close after the response body and session close joined")
+	}
 	require.NoError(t, adapter.Disconnect(context.Background()))
 	assert.EqualValues(t, 1, deleteCalls.Load(), "the single close owner deletes after body Close is joined")
 	assert.EqualValues(t, 1, body.closeCalls.Load(), "the response is closed once even though resume/cleanup paths share it")
 	assert.True(t, strings.Contains(waitErr.Error(), "pending"))
+}
+
+func requireHTTPOperationDone(t *testing.T, err error) <-chan struct{} {
+	t.Helper()
+	var pending interface{ Done() <-chan struct{} }
+	require.ErrorAs(t, err, &pending, "pending HTTP errors expose the exact operation completion")
+	done := pending.Done()
+	require.NotNil(t, done, "pending operation must have a positive completion channel")
+	return done
 }
