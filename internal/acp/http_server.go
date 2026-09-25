@@ -47,6 +47,9 @@ var (
 	// ErrHTTPServerCleanupPending means a caller's wait expired before the
 	// server generation's owned work was joined.
 	ErrHTTPServerCleanupPending = errors.New("acp: HTTP server cleanup is pending")
+	// ErrHTTPServerAdmissionClosed means a terminal owner has sealed this
+	// server against any future Start call.
+	ErrHTTPServerAdmissionClosed = errors.New("acp: HTTP server admission is closed")
 	// ErrHTTPServerWorkerPanic reports that a detached request worker panicked.
 	ErrHTTPServerWorkerPanic = errors.New("acp: HTTP server request worker panicked")
 )
@@ -154,6 +157,7 @@ type HTTPServer struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	running    bool
+	sealed     bool
 
 	// maxConcurrency limits the number of concurrent in-flight requests.
 	// Default: 64. Set before calling Start.
@@ -288,11 +292,16 @@ func (s *HTTPServer) bodyLimitMiddleware(next http.Handler) http.Handler {
 // caller rather than silently logged.
 func (s *HTTPServer) Start(ctx context.Context) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
+	if s.sealed {
+		s.mu.Unlock()
+		return ErrHTTPServerAdmissionClosed
+	}
 	if s.running {
+		s.mu.Unlock()
 		return nil
 	}
 	if previous := s.generation; previous != nil && !channelClosed(previous.closeDone) {
+		s.mu.Unlock()
 		return &httpServerCleanupPendingError{cause: ErrHTTPServerCleanupPending, done: previous.closeDone}
 	}
 	if ctx == nil {
@@ -300,6 +309,7 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 	}
 	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {
+		s.mu.Unlock()
 		return fmt.Errorf("acp: listen %s: %w", s.addr, err)
 	}
 
@@ -346,12 +356,17 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 	s.ln = ln
 	s.ctx = genCtx
 	s.cancel = cancel
+	serveTLS := s.tlsCertFile != "" && s.tlsKeyFile != ""
+	tlsCertFile := s.tlsCertFile
+	tlsKeyFile := s.tlsKeyFile
+	listenAddr := ln.Addr().String()
+	name := s.name
+	s.mu.Unlock()
 
-	slog.Info("acp.server.start", "name", s.name, "addr", ln.Addr().String(), "tls", s.tlsCertFile != "")
 	go func() {
 		defer close(generation.serveDone)
-		if s.tlsCertFile != "" && s.tlsKeyFile != "" {
-			if err := srv.ServeTLS(ln, s.tlsCertFile, s.tlsKeyFile); err != nil && err != http.ErrServerClosed {
+		if serveTLS {
+			if err := srv.ServeTLS(ln, tlsCertFile, tlsKeyFile); err != nil && err != http.ErrServerClosed {
 				generation.serveErr = err
 				slog.Error("acp.server.serve_tls_failed", "err", err)
 			}
@@ -365,6 +380,7 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 
 	// Start session cleanup goroutine for idle session reclamation.
 	go s.sessionCleanupLoop(generation)
+	slog.Info("acp.server.start", "name", name, "addr", listenAddr, "tls", serveTLS)
 
 	return nil
 }
@@ -373,11 +389,21 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 // operation without waiting for its handlers or dispatch workers. It is safe
 // to call before Stop; repeated calls share the same generation owner.
 func (s *HTTPServer) BeginStop() {
-	s.beginStop()
+	s.beginStop(false)
 }
 
-func (s *HTTPServer) beginStop() *httpServerGeneration {
+// SealAdmission permanently prevents future Start calls and closes admission
+// for the current generation. Assembly owners use this when the server is a
+// terminally owned resource rather than a reusable standalone server.
+func (s *HTTPServer) SealAdmission() {
+	s.beginStop(true)
+}
+
+func (s *HTTPServer) beginStop(seal bool) *httpServerGeneration {
 	s.mu.Lock()
+	if seal {
+		s.sealed = true
+	}
 	generation := s.generation
 	if generation == nil {
 		s.mu.Unlock()
@@ -412,7 +438,7 @@ func (s *HTTPServer) beginStop() *httpServerGeneration {
 // server-level context to abort any in-flight dispatch goroutines, then
 // gracefully shuts down the HTTP server.
 func (s *HTTPServer) Stop(ctx context.Context) error {
-	generation := s.beginStop()
+	generation := s.beginStop(false)
 	if generation == nil {
 		return nil
 	}
