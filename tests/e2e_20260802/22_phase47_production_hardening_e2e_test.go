@@ -29,6 +29,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/approval"
 	"github.com/pengjunchen/go-cli/internal/cli"
 	"github.com/pengjunchen/go-cli/internal/compaction"
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mcp"
 	"github.com/pengjunchen/go-cli/internal/production"
 	"github.com/pengjunchen/go-cli/internal/session"
@@ -564,16 +565,27 @@ func TestE2E_Phase47_CompactionPreservesContext(t *testing.T) {
 		})
 	}
 
-	// Add 2 tool results with large output.
+	// Add a real assistant tool-call group with 2 large tool results.
+	items = append(items, compaction.TurnItem{
+		ID:      "tool-calls",
+		Role:    compaction.RoleAssistant,
+		Content: "Reading and searching the requested files.",
+		ToolCalls: []llm.ToolCall{
+			{ID: "tool-1", Name: "read"},
+			{ID: "tool-2", Name: "grep"},
+		},
+	})
 	items = append(items, compaction.TurnItem{
 		ID:         "tool-1",
 		Role:       compaction.RoleTool,
+		ToolCallID: "tool-1",
 		ToolName:   "read",
 		ToolResult: fmt.Sprintf("File content: %s", strings.Repeat("This is a line of file content. ", 50)),
 	})
 	items = append(items, compaction.TurnItem{
 		ID:         "tool-2",
 		Role:       compaction.RoleTool,
+		ToolCallID: "tool-2",
 		ToolName:   "grep",
 		ToolResult: fmt.Sprintf("Search results: %s", strings.Repeat("match found at line N. ", 40)),
 	})

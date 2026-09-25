@@ -338,10 +338,15 @@ func TestE2EInteractive_AutoCompaction(t *testing.T) {
 			ID:      fmt.Sprintf("asst-%d", i),
 			Role:    compaction.RoleAssistant,
 			Content: "Here is the content of the file: " + strings.Repeat("y", 80),
+			ToolCalls: []llm.ToolCall{{
+				ID:   fmt.Sprintf("read-%d", i),
+				Name: "read",
+			}},
 		})
 		items = append(items, compaction.TurnItem{
 			ID:         fmt.Sprintf("tool-%d", i),
 			Role:       compaction.RoleTool,
+			ToolCallID: fmt.Sprintf("read-%d", i),
 			ToolName:   "read",
 			ToolResult: strings.Repeat("z", 120),
 		})
