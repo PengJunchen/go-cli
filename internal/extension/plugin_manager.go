@@ -201,86 +201,67 @@ func (pm *PluginManager) Shutdown(ctx context.Context) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
+
+	pm.mu.Lock()
+	pm.closing = true
+	if pm.shutdownComplete {
+		err := pm.shutdownResult
+		pm.mu.Unlock()
+		return err
+	}
+	op := pm.shutdownOp
+	if op == nil {
+		if pm.loadOp != nil && pm.loadOp.cancel != nil {
+			pm.loadOp.cancel()
+		}
+		if pm.initOp != nil && pm.initOp.cancel != nil {
+			pm.initOp.cancel()
+		}
+		op = &pluginManagerOperation{kind: "Shutdown", done: make(chan struct{})}
+		pm.shutdownOp = op
+		// Caller cancellation only ends this wait. The owned manager operation
+		// must finish reverse-order cleanup after pending extension callbacks settle.
+		go pm.runShutdownOwner(context.WithoutCancel(ctx), op)
+	}
+	pm.mu.Unlock()
+	return waitPluginManagerShutdown(ctx, op)
+}
+
+func (pm *PluginManager) runShutdownOwner(ctx context.Context, op *pluginManagerOperation) {
 	for {
-		pm.mu.Lock()
-		pm.closing = true
-		if active := pm.shutdownOp; active != nil {
-			pm.mu.Unlock()
-			return waitPluginManagerShutdown(ctx, active)
-		}
-		if pm.shutdownComplete {
-			err := pm.shutdownResult
-			pm.mu.Unlock()
-			return err
-		}
+		pm.mu.RLock()
 		loadOp := pm.loadOp
 		initOp := pm.initOp
-		if loadOp != nil && loadOp.cancel != nil {
-			loadOp.cancel()
+		pm.mu.RUnlock()
+		if loadOp == nil && initOp == nil {
+			break
 		}
-		if initOp != nil && initOp.cancel != nil {
-			initOp.cancel()
-		}
-		pm.mu.Unlock()
-
 		if loadOp != nil {
-			if err := waitPluginManagerCleanup(ctx, loadOp); err != nil {
-				return err
-			}
-			continue
+			<-loadOp.done
 		}
 		if initOp != nil {
-			if err := waitPluginManagerCleanup(ctx, initOp); err != nil {
-				return err
-			}
-			continue
+			<-initOp.done
 		}
-
-		pm.mu.Lock()
-		if active := pm.shutdownOp; active != nil {
-			pm.mu.Unlock()
-			return waitPluginManagerShutdown(ctx, active)
-		}
-		if pm.shutdownComplete {
-			err := pm.shutdownResult
-			pm.mu.Unlock()
-			return err
-		}
-		opCtx, cancel := context.WithCancel(ctx)
-		op := &pluginManagerOperation{kind: "Shutdown", done: make(chan struct{}), cancel: cancel}
-		pm.shutdownOp = op
-		extensions := append([]Extension(nil), pm.extensions...)
-		pm.mu.Unlock()
-
-		var errs []error
-		pending := false
-		for i := len(extensions) - 1; i >= 0; i-- {
-			ext := extensions[i]
-			err := pm.coordinator.shutdownExtension(opCtx, ext)
-			if err == nil {
-				continue
-			}
-			errs = append(errs, fmt.Errorf("extension %q Shutdown: %w", ext.Name(), err))
-			if errors.Is(err, ErrCleanupPending) {
-				pending = true
-				break
-			}
-		}
-		result := errors.Join(errs...)
-		cancel()
-		pm.mu.Lock()
-		op.err = result
-		if pm.shutdownOp == op {
-			pm.shutdownOp = nil
-		}
-		if !pending {
-			pm.shutdownComplete = true
-			pm.shutdownResult = result
-		}
-		close(op.done)
-		pm.mu.Unlock()
-		return result
 	}
+
+	pm.mu.RLock()
+	extensions := append([]Extension(nil), pm.extensions...)
+	pm.mu.RUnlock()
+	var errs []error
+	for i := len(extensions) - 1; i >= 0; i-- {
+		ext := extensions[i]
+		if err := pm.coordinator.shutdownExtension(ctx, ext); err != nil {
+			errs = append(errs, fmt.Errorf("extension %q Shutdown: %w", ext.Name(), err))
+		}
+	}
+
+	result := errors.Join(errs...)
+	pm.mu.Lock()
+	op.err = result
+	pm.shutdownComplete = true
+	pm.shutdownResult = result
+	close(op.done)
+	pm.mu.Unlock()
 }
 
 func waitPluginManagerOperationDone(ctx context.Context, op *pluginManagerOperation) error {
@@ -308,20 +289,6 @@ func waitPluginManagerOperation(ctx context.Context, op *pluginManagerOperation)
 		return op.err
 	default:
 		return ctx.Err()
-	}
-}
-
-func waitPluginManagerCleanup(ctx context.Context, op *pluginManagerOperation) error {
-	select {
-	case <-op.done:
-		return nil
-	case <-ctx.Done():
-	}
-	select {
-	case <-op.done:
-		return nil
-	default:
-		return cleanupPending("", op.kind, ctx.Err())
 	}
 }
 
