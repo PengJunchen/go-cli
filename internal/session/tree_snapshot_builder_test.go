@@ -1,7 +1,11 @@
 package session
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -69,6 +73,67 @@ func TestTreeBuilderBuildFromSnapshotUsesExactLegacyLeaf(t *testing.T) {
 	assert.Equal(t, "left", tree.CurrentLeaf(), "snapshot cursor is authoritative even when timestamps disagree")
 }
 
+func TestTreeBuilderBuildFromSnapshotPreservesPreparedLegacyBranch(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx := context.Background()
+	root := t.TempDir()
+	const physicalID = "legacy-feature-session"
+	entries := []SessionEntry{{
+		ID: "feature-root", Type: EntryTypeUser, BranchID: "feature", Content: "legacy branch",
+		Timestamp: time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC),
+	}}
+	writeLegacyPreparedEntries(t, root, physicalID, entries)
+
+	prepared, err := NewDurableJSONLSessionPreparer(root, nil).PrepareResume(ctx, physicalID)
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, prepared.Close()) })
+	snapshot, err := prepared.Snapshot()
+	require.NoError(t, err)
+	require.Equal(t, "feature", snapshot.ActiveBranchID)
+	require.Equal(t, "feature-root", snapshot.ActiveLeafEntryID)
+	require.Equal(t, "feature", snapshot.PublishedView.BranchID)
+
+	tree, err := NewDefaultSessionTreeBuilder().BuildFromSnapshot(ctx, snapshot)
+	require.NoError(t, err)
+	assert.Equal(t, "feature-root", tree.CurrentLeaf())
+	branch, err := tree.GetBranch(ctx, tree.CurrentLeaf())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"feature-root"}, entryIDs(branch))
+}
+
+func TestTreeBuilderBuildFromSnapshotKeepsLegacyParentOrderingAndOrphanTolerance(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx := context.Background()
+	rootTime := time.Date(2026, 9, 25, 12, 0, 0, 0, time.UTC)
+	rows := []SessionEntry{
+		{ID: "legacy-child", ParentID: "legacy-root", Type: EntryTypeAssistant, BranchID: "feature", Content: "child", Timestamp: rootTime.Add(time.Hour)},
+		{ID: "legacy-orphan", ParentID: "missing-parent", Type: EntryTypeUser, BranchID: "feature", Content: "orphan", Timestamp: rootTime.Add(2 * time.Hour)},
+		{ID: "legacy-root", Type: EntryTypeUser, BranchID: "feature", Content: "root", Timestamp: rootTime},
+	}
+	snapshot := PreparedSessionSnapshot{
+		SessionID: "legacy-physical", ActiveBranchID: "feature", ActiveLeafEntryID: "legacy-child",
+		DurableEntries: rows,
+		PublishedView: SessionView{
+			SessionID: "legacy-physical", BranchID: "feature", Revision: "legacy-revision",
+			Messages: []core.AgentMessage{{Role: "user", Content: "root"}}, SourceEntryIDs: []string{"legacy-root"},
+		},
+	}
+
+	builder := NewDefaultSessionTreeBuilder()
+	legacyTree, err := builder.BuildFromStore(ctx, orderedTreeBuilderStore{
+		SessionStore: NewMemoryStore(), entries: rows,
+	})
+	require.NoError(t, err)
+	tree, err := builder.BuildFromSnapshot(ctx, snapshot)
+	require.NoError(t, err)
+	assert.Equal(t, legacyTree.CurrentLeaf(), tree.CurrentLeaf())
+	branch, err := tree.GetBranch(ctx, tree.CurrentLeaf())
+	require.NoError(t, err)
+	assert.Equal(t, []string{"legacy-root", "legacy-child"}, entryIDs(branch))
+	_, err = tree.GetBranch(ctx, "legacy-orphan")
+	assert.ErrorIs(t, err, ErrLeafNotFound)
+}
+
 func TestTreeBuilderBuildFromSnapshotRestoresVersionOneBranchAndCheckpointCursor(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
@@ -123,6 +188,32 @@ func TestTreeBuilderBuildFromSnapshotRestoresVersionOneBranchAndCheckpointCursor
 	wrongBranch.PublishedView.BranchID = "main"
 	_, err = NewDefaultSessionTreeBuilder().BuildFromSnapshot(ctx, wrongBranch)
 	require.ErrorContains(t, err, "outside active branch")
+}
+
+func TestTreeBuilderBuildFromSnapshotKeepsVersionOneParentOrderStrict(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx := context.Background()
+	prepared, err := NewDurableJSONLSessionPreparer(t.TempDir(), nil).PrepareNew(ctx, "version one ordering")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, prepared.Close()) })
+	zero := uint64(0)
+	root, err := prepared.DurableWriter().AppendAndSync(ctx, SessionEntry{
+		ID: "version-one-root", Type: EntryTypeUser, RunID: "version-one-run", TranscriptIndex: &zero, Content: "root",
+	})
+	require.NoError(t, err)
+	one := uint64(1)
+	_, err = prepared.DurableWriter().AppendAndSync(ctx, SessionEntry{
+		ID: "version-one-child", ParentID: root[0].ID, Type: EntryTypeAssistant,
+		RunID: "version-one-run", TranscriptIndex: &one, Content: "child",
+	})
+	require.NoError(t, err)
+	snapshot, err := prepared.Snapshot()
+	require.NoError(t, err)
+	require.Len(t, snapshot.DurableEntries, 2)
+	snapshot.DurableEntries[0], snapshot.DurableEntries[1] = snapshot.DurableEntries[1], snapshot.DurableEntries[0]
+
+	_, err = NewDefaultSessionTreeBuilder().BuildFromSnapshot(ctx, snapshot)
+	require.ErrorContains(t, err, "missing or forward parent")
 }
 
 func TestTreeBuilderBuildFromSnapshotKeepsPublishedViewSeparateFromOpenJournal(t *testing.T) {
@@ -207,4 +298,30 @@ func entryIDs(entries []*SessionEntry) []string {
 		ids[index] = entry.ID
 	}
 	return ids
+}
+
+func writeLegacyPreparedEntries(t *testing.T, root, physicalID string, entries []SessionEntry) {
+	t.Helper()
+	sessionsDirectory := filepath.Join(root, "sessions")
+	require.NoError(t, os.MkdirAll(sessionsDirectory, 0o700))
+	var encoded bytes.Buffer
+	encoder := json.NewEncoder(&encoded)
+	for _, entry := range entries {
+		require.NoError(t, encoder.Encode(entry))
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(sessionsDirectory, physicalID+".jsonl"), encoded.Bytes(), 0o600))
+}
+
+type orderedTreeBuilderStore struct {
+	SessionStore
+	entries []SessionEntry
+}
+
+func (store orderedTreeBuilderStore) List(context.Context) ([]*SessionEntry, error) {
+	entries := make([]*SessionEntry, len(store.entries))
+	for index := range store.entries {
+		entry := store.entries[index].clone()
+		entries[index] = entry
+	}
+	return entries, nil
 }
