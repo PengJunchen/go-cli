@@ -208,20 +208,21 @@ func NewGRPCAdapter(endpoint string, opts ...Option) ACPClient {
 // generation's cleanup operation has completed. It does not indicate whether
 // a remote session deletion succeeded. Other ACPClient implementations cannot
 // assert this package-owned completion fact by implementing an interface.
+// The result is an instantaneous snapshot; callers must fence future Connect
+// calls while relying on it for downstream cleanup.
 func IsBuiltInHTTPClientLocallyJoined(client ACPClient) bool {
 	adapter, ok := client.(*gRPCAdapter)
-	if !ok {
+	if !ok || adapter == nil {
 		return false
 	}
 
 	adapter.mu.Lock()
+	defer adapter.mu.Unlock()
 	generation := adapter.current
 	if generation == nil {
-		adapter.mu.Unlock()
 		return true
 	}
 	cleanupDone := generation.cleanupDone
-	adapter.mu.Unlock()
 	if cleanupDone == nil {
 		return false
 	}
