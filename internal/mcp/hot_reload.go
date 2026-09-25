@@ -60,6 +60,10 @@ var ErrHotReloadCallbackPanic = errors.New("mcp: hot reload callback panicked")
 // ErrHotReloadWorkerPanic reports an unexpected panic in the reloader owner.
 var ErrHotReloadWorkerPanic = errors.New("mcp: hot reload worker panicked")
 
+// ErrHotReloadInvalidPollInterval rejects a poll interval that cannot create a
+// time.Ticker.
+var ErrHotReloadInvalidPollInterval = errors.New("mcp: hot reload poll interval must be positive")
+
 // HotReloadPendingError reports a waiter timeout while the reloader remains
 // owned and active.
 type HotReloadPendingError struct {
@@ -253,9 +257,13 @@ func NewDefaultHotReloader(client MCPClient, register RegisterToolsFunc, opts ..
 }
 
 // Watch starts the stdlib poller goroutine and records the baseline state of
-// the config file before returning. The poller exits cleanly when Stop is
-// called or ctx is canceled.
+// the config file before returning. Invalid polling intervals are rejected
+// before reading the file or publishing the poll owner. The poller exits
+// cleanly when Stop is called or ctx is canceled.
 func (h *DefaultHotReloader) Watch(ctx context.Context, configPath string) error {
+	if h.pollInterval <= 0 {
+		return ErrHotReloadInvalidPollInterval
+	}
 	if configPath == "" {
 		return errors.New("mcp: hot reload: empty config path")
 	}

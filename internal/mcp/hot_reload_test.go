@@ -620,6 +620,60 @@ func TestHotReloaderRequestStopRacingWatchHasNoLateOwner(t *testing.T) {
 	}
 }
 
+func TestHotReloaderInvalidPollIntervalIsRejectedWithoutOwnerOrPanic(t *testing.T) {
+	const childModeEnv = "GOCLI_TEST_HOT_RELOAD_INVALID_POLL_INTERVAL"
+	if childMode := os.Getenv(childModeEnv); childMode != "" {
+		interval := time.Duration(0)
+		if childMode == "negative" {
+			interval = -time.Second
+		}
+		t.Run(childMode, func(t *testing.T) {
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "mcp.json")
+			writeConfig(t, configPath, `{"version":"1"}`)
+
+			invalid := NewDefaultHotReloader(newRecordingMCPClient("invalid", nil), func(_ []MCPTool) {}, WithPollInterval(interval)).(*DefaultHotReloader)
+			lifecycle := HotReloadLifecycle(invalid)
+			err := invalid.Watch(context.Background(), configPath)
+			require.ErrorIs(t, err, ErrHotReloadInvalidPollInterval)
+			invalid.mu.Lock()
+			assert.False(t, invalid.pollStarted, "invalid Watch must not publish a poll owner")
+			assert.Nil(t, invalid.pollCancel, "invalid Watch must not consume watch state")
+			assert.Empty(t, invalid.path)
+			assert.False(t, invalid.baseline)
+			assert.False(t, invalid.stopped)
+			invalid.mu.Unlock()
+
+			lifecycle.RequestStop()
+			waitCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			require.NoError(t, lifecycle.Wait(waitCtx))
+			select {
+			case <-lifecycle.Done():
+			default:
+				t.Fatal("RequestStop after a rejected Watch must close Done without an owner")
+			}
+
+			reusable := NewDefaultHotReloader(newRecordingMCPClient("reusable", nil), func(_ []MCPTool) {}, WithPollInterval(interval)).(*DefaultHotReloader)
+			require.ErrorIs(t, reusable.Watch(context.Background(), configPath), ErrHotReloadInvalidPollInterval)
+			reusable.pollInterval = defaultPollInterval
+			require.NoError(t, reusable.Watch(context.Background(), configPath), "rejected Watch must leave state reusable")
+			reusableLife := HotReloadLifecycle(reusable)
+			reusableLife.RequestStop()
+			require.NoError(t, reusableLife.Wait(waitCtx))
+		})
+		return
+	}
+
+	defer verify.AssertNoGoroutineLeak(t)()
+	for _, childMode := range []string{"zero", "negative"} {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestHotReloaderInvalidPollIntervalIsRejectedWithoutOwnerOrPanic$")
+		cmd.Env = append(os.Environ(), childModeEnv+"="+childMode)
+		output, err := cmd.CombinedOutput()
+		require.NoError(t, err, "invalid interval child %s failed; output:\n%s", childMode, output)
+	}
+}
+
 func TestHotReloaderRegistrationPanicIsSanitizedAndJoined(t *testing.T) {
 	const helperEnv = "GO_CLI_HOT_RELOAD_PANIC_HELPER"
 	if os.Getenv(helperEnv) == "1" {
