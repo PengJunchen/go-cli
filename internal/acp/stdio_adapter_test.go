@@ -2,6 +2,7 @@ package acp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
@@ -161,15 +162,25 @@ func TestStdioAdapterTraceChainConsistent(t *testing.T) {
 }
 
 func TestStdioAdapterDisconnectWithCanceledContext(t *testing.T) {
-	client, _ := newStdioPeer(t)
-	ctx := context.Background()
-	require.NoError(t, client.Connect(ctx))
+	reader, peerWriter := io.Pipe()
+	var out bytes.Buffer
+	client := NewStdioAdapter(reader, &out)
+	t.Cleanup(func() {
+		closeIgnored(peerWriter)
+		closeIgnored(reader)
+	})
+	require.NoError(t, client.Connect(context.Background()))
 
-	canceled, cancel := context.WithCancel(ctx)
+	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	err := client.Disconnect(canceled)
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, context.Canceled)
+	done := requireStdioPending(t, err, false)
+	closeIgnored(peerWriter)
+	closeIgnored(reader)
+	assertChannelCloses(t, done)
+	assert.Equal(t, 1, bytes.Count(out.Bytes(), []byte("\n")), "a pre-canceled disconnect must not dispatch a frame")
 }
 
 // TestStdioAdapterDisconnectUnreadPipeReturns verifies that Disconnect returns

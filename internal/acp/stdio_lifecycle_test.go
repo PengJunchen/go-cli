@@ -456,6 +456,39 @@ func TestStdioDisconnectWithActiveSendReportsUnknownDelivery(t *testing.T) {
 	assertChannelCloses(t, done)
 }
 
+func TestStdioPendingDisconnectCancelsQueuedWrite(t *testing.T) {
+	var out bytes.Buffer
+	session := &stdioSession{
+		gate:   make(chan struct{}, 1),
+		joined: make(chan struct{}),
+	}
+	session.gate <- struct{}{}
+	result := &stdioWriteResult{
+		done:       make(chan struct{}),
+		started:    make(chan struct{}),
+		ioReturned: make(chan struct{}),
+		state:      stdioWriteQueued,
+	}
+	session.activeWrite = result
+	session.workers = 1
+	cleanupDone := result.done
+	client := &StdioAdapter{out: &out, closing: true}
+
+	err := client.pendingDisconnect(session, context.DeadlineExceeded, cleanupDone)
+	pendingDone := requireStdioPending(t, err, false)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assertChannelOpen(t, pendingDone, "the queued worker has not joined yet")
+
+	result.mu.Lock()
+	state := result.state
+	result.mu.Unlock()
+	assert.Equal(t, stdioWriteCanceled, state, "known-not-dispatched must cancel the queued write before returning")
+
+	client.runDisconnectWrite(session, result, ACPMessage{Type: TypeDisconnect})
+	assert.Empty(t, out.Bytes(), "the worker must honor cancellation and skip Write")
+	assertChannelCloses(t, pendingDone)
+}
+
 func TestStdioConcurrentFramesAreSerialized(t *testing.T) {
 	writer := newSerializationProbeWriter()
 	reader, peerWriter := io.Pipe()
