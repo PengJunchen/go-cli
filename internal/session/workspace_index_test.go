@@ -40,6 +40,145 @@ func TestWorkspaceIndexEnsureCreatesSecureFiles(t *testing.T) {
 	}
 }
 
+func TestWorkspaceIndexEnsureRetriesExistingDirectorySyncAfterFailure(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	appDir := filepath.Join(root, "go-cli")
+	indexDir := filepath.Join(appDir, "workspace-quarantine")
+	var fail atomic.Bool
+	fail.Store(true)
+	var mu sync.Mutex
+	syncCalls := make(map[string]int)
+	index := newWorkspaceQuarantineIndex(root, workspaceIndexIO{dirSync: func(path string) error {
+		mu.Lock()
+		syncCalls[path]++
+		mu.Unlock()
+		if fail.Load() && path == root {
+			return errors.New("injected parent directory sync failure")
+		}
+		return syncDirectory(path)
+	}})
+	if err := index.EnsureWorkspace(ctx, "workspace-dir-retry"); err == nil {
+		t.Fatal("EnsureWorkspace succeeded despite parent directory sync failure")
+	}
+	if info, err := os.Stat(appDir); err != nil || !info.IsDir() {
+		t.Fatalf("failed bootstrap should leave the visible directory for retry: info=%v err=%v", info, err)
+	}
+	if _, err := os.Stat(indexDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("EnsureWorkspace unexpectedly advanced past failed parent sync: stat error = %v", err)
+	}
+	batch := workspaceTestBatch("workspace-dir-retry", "session-a", "run-a", "batch-a", "action-a", 0, "call-a")
+	if result, err := index.BeginDispatchBatch(ctx, batch); err == nil || result == WorkspaceDispatchCommittedNow {
+		t.Fatalf("BeginDispatchBatch after failed bootstrap = (%v, %v), want no dispatch permit", result, err)
+	}
+
+	mu.Lock()
+	rootSyncsBeforeRetry := syncCalls[root]
+	mu.Unlock()
+	fail.Store(false)
+	if err := index.EnsureWorkspace(ctx, batch.WorkspaceID); err != nil {
+		t.Fatalf("EnsureWorkspace retry after parent became syncable: %v", err)
+	}
+	mu.Lock()
+	rootSyncsAfterRetry := syncCalls[root]
+	mu.Unlock()
+	if rootSyncsAfterRetry <= rootSyncsBeforeRetry {
+		t.Fatalf("retry did not re-sync the existing parent directory: before=%d after=%d", rootSyncsBeforeRetry, rootSyncsAfterRetry)
+	}
+}
+
+func TestWorkspaceIndexEnsureRetriesParentSyncAfterGenesisRenameFailure(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	appDir := filepath.Join(root, "go-cli")
+	indexDir := filepath.Join(appDir, "workspace-quarantine")
+	indexPath := filepath.Join(indexDir, "workspace-genesis-retry.jsonl")
+	var fail atomic.Bool
+	fail.Store(true)
+	var mu sync.Mutex
+	syncCalls := make(map[string]int)
+	index := newWorkspaceQuarantineIndex(root, workspaceIndexIO{dirSync: func(path string) error {
+		mu.Lock()
+		syncCalls[path]++
+		mu.Unlock()
+		if fail.Load() && path == appDir {
+			if _, err := os.Lstat(indexPath); err == nil {
+				return errors.New("injected parent sync failure after genesis rename")
+			}
+		}
+		return syncDirectory(path)
+	}})
+	if err := index.EnsureWorkspace(ctx, "workspace-genesis-retry"); err == nil {
+		t.Fatal("EnsureWorkspace succeeded despite parent sync failure after genesis rename")
+	}
+	if _, err := os.Stat(indexPath); err != nil {
+		t.Fatalf("test requires genesis JSONL to be visible after injected parent sync failure: %v", err)
+	}
+	batch := workspaceTestBatch("workspace-genesis-retry", "session-a", "run-a", "batch-a", "action-a", 0, "call-a")
+	if result, err := index.BeginDispatchBatch(ctx, batch); err == nil || result == WorkspaceDispatchCommittedNow {
+		t.Fatalf("BeginDispatchBatch before bootstrap durability retry = (%v, %v), want no dispatch permit", result, err)
+	}
+
+	mu.Lock()
+	indexDirSyncsBeforeRetry := syncCalls[indexDir]
+	appDirSyncsBeforeRetry := syncCalls[appDir]
+	mu.Unlock()
+	fail.Store(false)
+	if err := index.EnsureWorkspace(ctx, batch.WorkspaceID); err != nil {
+		t.Fatalf("EnsureWorkspace retry after parent became syncable: %v", err)
+	}
+	mu.Lock()
+	indexDirSyncsAfterRetry := syncCalls[indexDir]
+	appDirSyncsAfterRetry := syncCalls[appDir]
+	mu.Unlock()
+	if indexDirSyncsAfterRetry <= indexDirSyncsBeforeRetry || appDirSyncsAfterRetry <= appDirSyncsBeforeRetry {
+		t.Fatalf("retry did not sync existing index and parent directories: index %d→%d, parent %d→%d", indexDirSyncsBeforeRetry, indexDirSyncsAfterRetry, appDirSyncsBeforeRetry, appDirSyncsAfterRetry)
+	}
+	if got, err := index.BeginDispatchBatch(ctx, batch); err != nil || got != WorkspaceDispatchCommittedNow {
+		t.Fatalf("BeginDispatchBatch after successful durability retry = (%v, %v), want committed", got, err)
+	}
+}
+
+func TestMkdirDurablyRetriesExistingParentChainAfterFailure(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "created-parent", "created-target")
+	createdParent := filepath.Dir(path)
+	var fail atomic.Bool
+	fail.Store(true)
+	var mu sync.Mutex
+	syncCalls := make(map[string]int)
+	syncDir := func(directory string) error {
+		mu.Lock()
+		syncCalls[directory]++
+		mu.Unlock()
+		if fail.Load() && directory == createdParent {
+			return errors.New("injected created-parent sync failure")
+		}
+		return syncDirectory(directory)
+	}
+	if err := mkdirDurablyWithSync(path, 0o700, syncDir); err == nil {
+		t.Fatal("mkdirDurably succeeded despite created-parent sync failure")
+	}
+	if info, err := os.Stat(path); err != nil || !info.IsDir() {
+		t.Fatalf("failed mkdirDurably should leave both created levels visible: info=%v err=%v", info, err)
+	}
+	mu.Lock()
+	parentSyncsBeforeRetry := syncCalls[createdParent]
+	rootSyncsBeforeRetry := syncCalls[root]
+	mu.Unlock()
+	fail.Store(false)
+	if err := mkdirDurablyWithSync(path, 0o700, syncDir); err != nil {
+		t.Fatalf("mkdirDurably retry after parent became syncable: %v", err)
+	}
+	mu.Lock()
+	parentSyncsAfterRetry := syncCalls[createdParent]
+	rootSyncsAfterRetry := syncCalls[root]
+	mu.Unlock()
+	if parentSyncsAfterRetry <= parentSyncsBeforeRetry || rootSyncsAfterRetry <= rootSyncsBeforeRetry {
+		t.Fatalf("mkdirDurably retry did not sync the existing directory chain: parent %d→%d root %d→%d", parentSyncsBeforeRetry, parentSyncsAfterRetry, rootSyncsBeforeRetry, rootSyncsAfterRetry)
+	}
+}
+
 func TestWorkspaceIndexRejectsSymlinkAndRelaxedModeFiles(t *testing.T) {
 	t.Run("index symlink", func(t *testing.T) {
 		ctx := context.Background()

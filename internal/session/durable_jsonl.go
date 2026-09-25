@@ -576,12 +576,21 @@ func resolvePhysicalSessionFilename(sessionsDir, physicalSessionID string) (stri
 	return match, nil
 }
 
+// mkdirDurably creates the directory path and syncs it and every ancestor
+// directory before acknowledging success. Re-syncing existing ancestors lets
+// a retry close a prior visible-but-not-durable mkdir after a failed Sync.
 func mkdirDurably(path string, mode os.FileMode) error {
+	return mkdirDurablyWithSync(path, mode, syncDirectory)
+}
+
+func mkdirDurablyWithSync(path string, mode os.FileMode, syncDir func(string) error) error {
+	if syncDir == nil {
+		syncDir = syncDirectory
+	}
 	absolute, err := filepath.Abs(path)
 	if err != nil {
 		return err
 	}
-	var missing []string
 	current := absolute
 	for {
 		info, statErr := os.Stat(current)
@@ -594,7 +603,6 @@ func mkdirDurably(path string, mode os.FileMode) error {
 		if !errors.Is(statErr, os.ErrNotExist) {
 			return statErr
 		}
-		missing = append(missing, current)
 		parent := filepath.Dir(current)
 		if parent == current {
 			return fmt.Errorf("no existing parent directory for %q", path)
@@ -604,12 +612,29 @@ func mkdirDurably(path string, mode os.FileMode) error {
 	if err := os.MkdirAll(absolute, mode); err != nil {
 		return err
 	}
-	for i := len(missing) - 1; i >= 0; i-- {
-		if err := syncDirectory(filepath.Dir(missing[i])); err != nil {
-			return err
+	return syncDirectoryChain(absolute, syncDir)
+}
+
+// syncDirectoryChain confirms the directory's entry and every ancestor entry
+// back to the filesystem root. It intentionally repeats Sync for existing
+// paths because a prior call may have created them before a Sync error.
+func syncDirectoryChain(path string, syncDir func(string) error) error {
+	if syncDir == nil {
+		syncDir = syncDirectory
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	for current := absolute; ; current = filepath.Dir(current) {
+		if err := syncDir(current); err != nil {
+			return fmt.Errorf("sync directory %q: %w", current, err)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return nil
 		}
 	}
-	return nil
 }
 
 func validateLoadedDurableEntries(entries []SessionEntry, sessionID string) (map[string]*SessionEntry, uint64, string, string, string, error) {

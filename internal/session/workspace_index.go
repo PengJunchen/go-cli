@@ -73,8 +73,9 @@ const (
 )
 
 type workspaceIndexIO struct {
-	write func(*os.File, []byte) (int, error)
-	sync  func(*os.File) error
+	write   func(*os.File, []byte) (int, error)
+	sync    func(*os.File) error
+	dirSync func(string) error
 }
 
 // WorkspaceQuarantineIndex stores cross-session dispatch markers and recovery
@@ -176,7 +177,7 @@ func (i *WorkspaceQuarantineIndex) EnsureWorkspace(ctx context.Context, workspac
 	if !validWorkspaceID(workspaceID) {
 		return fmt.Errorf("session: invalid workspace ID %q", workspaceID)
 	}
-	if err := ensureWorkspaceIndexDirectory(i.root); err != nil {
+	if err := ensureWorkspaceIndexDirectory(i.root, i.syncDirectory); err != nil {
 		return fmt.Errorf("session: prepare workspace index directory: %w", err)
 	}
 	lockExists, err := regularFileExists(i.lockPath(workspaceID))
@@ -411,7 +412,7 @@ func (i *WorkspaceQuarantineIndex) openWorkspaceLock(ctx context.Context, direct
 				_ = file.Close()
 				return nil, false, err
 			}
-			if err := syncDirectory(directory); err != nil {
+			if err := i.syncDirectory(directory); err != nil {
 				_ = file.Close()
 				return nil, false, err
 			}
@@ -453,6 +454,9 @@ func (i *WorkspaceQuarantineIndex) withLockedIndex(ctx context.Context, workspac
 	}
 	if err := validatePrivateDirectory(filepath.Dir(directory)); err != nil {
 		return workspaceIndexUnavailable("workspace index parent is unavailable", err)
+	}
+	if err := syncDirectoryChain(directory, i.syncDirectory); err != nil {
+		return workspaceIndexUnavailable("confirm workspace directory durability", err)
 	}
 	lock, _, err := i.openWorkspaceLock(ctx, directory, workspaceID, false)
 	if err != nil {
@@ -534,23 +538,23 @@ func (i *WorkspaceQuarantineIndex) createInitialWorkspaceIndex(directory, worksp
 		}
 		closeErr := temp.Close()
 		if writeErr != nil || closeErr != nil {
-			removeErr := removeWorkspaceTemp(directory, tempName)
+			removeErr := i.removeWorkspaceTemp(directory, tempName)
 			return errors.Join(writeErr, closeErr, removeErr)
 		}
 		if err := os.Rename(filepath.Join(directory, tempName), indexPath); err != nil {
-			return errors.Join(err, removeWorkspaceTemp(directory, tempName))
+			return errors.Join(err, i.removeWorkspaceTemp(directory, tempName))
 		}
-		return syncDirectory(directory)
+		return syncDirectoryChain(directory, i.syncDirectory)
 	}
 	return errors.New("unable to allocate workspace index temp file")
 }
 
-func removeWorkspaceTemp(directory, filename string) error {
+func (i *WorkspaceQuarantineIndex) removeWorkspaceTemp(directory, filename string) error {
 	removeErr := os.Remove(filepath.Join(directory, filename))
 	if errors.Is(removeErr, os.ErrNotExist) {
 		removeErr = nil
 	}
-	return errors.Join(removeErr, syncDirectory(directory))
+	return errors.Join(removeErr, i.syncDirectory(directory))
 }
 
 func (h *workspaceIndexHandle) appendRecords(records ...workspaceIndexRecord) error {
@@ -708,6 +712,13 @@ func (i *WorkspaceQuarantineIndex) syncFile(file *os.File) error {
 		return i.io.sync(file)
 	}
 	return file.Sync()
+}
+
+func (i *WorkspaceQuarantineIndex) syncDirectory(path string) error {
+	if i.io.dirSync != nil {
+		return i.io.dirSync(path)
+	}
+	return syncDirectory(path)
 }
 
 func readWorkspaceIndexFile(path, sidecarDir, workspaceID string) ([]workspaceIndexRecord, error) {
@@ -1057,19 +1068,19 @@ func validateWorkspaceIndexDirectory(directory string) error {
 	return nil
 }
 
-func ensureWorkspaceIndexDirectory(configRoot string) error {
+func ensureWorkspaceIndexDirectory(configRoot string, syncDir func(string) error) error {
 	if configRoot == "" {
 		return errors.New("user config root is empty")
 	}
 	appDir := filepath.Join(configRoot, "go-cli")
 	indexDir := filepath.Join(appDir, "workspace-quarantine")
-	if err := mkdirDurably(appDir, 0o700); err != nil {
+	if err := mkdirDurablyWithSync(appDir, 0o700, syncDir); err != nil {
 		return err
 	}
 	if err := validatePrivateDirectory(appDir); err != nil {
 		return err
 	}
-	if err := mkdirDurably(indexDir, 0o700); err != nil {
+	if err := mkdirDurablyWithSync(indexDir, 0o700, syncDir); err != nil {
 		return err
 	}
 	return validateWorkspaceIndexDirectory(indexDir)
