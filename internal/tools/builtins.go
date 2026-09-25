@@ -204,6 +204,10 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDef
 
 func registerDefaultTool(ctx context.Context, reg ToolRegistry, def ToolDefinition) error {
 	switch def.(type) {
+	case *ReadTool, *LSTool:
+		if registrar, ok := reg.(trustedInlineLocalReaderRegistrar); ok {
+			return registrar.registerTrustedInlineLocalReader(ctx, def)
+		}
 	case *WriteTool, *EditFileTool:
 		if registrar, ok := reg.(trustedWorkspaceWriteRegistrar); ok {
 			return registrar.registerTrustedWorkspaceWrite(ctx, def)

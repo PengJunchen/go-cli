@@ -132,6 +132,14 @@ func (r *MiddlewareToolRegistry) registerTrustedLocalProcess(ctx context.Context
 	return registrar.registerTrustedLocalProcess(ctx, def)
 }
 
+func (r *MiddlewareToolRegistry) registerTrustedInlineLocalReader(ctx context.Context, def ToolDefinition) error {
+	registrar, ok := r.inner.(trustedInlineLocalReaderRegistrar)
+	if !ok {
+		return ErrPreparedRegistrationUnavailable
+	}
+	return registrar.registerTrustedInlineLocalReader(ctx, def)
+}
+
 func (r *MiddlewareToolRegistry) toolRegistrationSnapshot(ctx context.Context, name string) (registeredToolSnapshot, error) {
 	provider, ok := r.inner.(registrationSnapshotProvider)
 	if !ok {

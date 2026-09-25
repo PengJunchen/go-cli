@@ -54,6 +54,183 @@ func TestPreparedCompletionInvalidationRevokesPreviouslyCapturedProofSnapshot(t 
 	assert.Empty(t, state.signal().Proof())
 }
 
+func registerPreparedBuiltin(t *testing.T, ctx context.Context, toolName string) (*DefaultToolRegistry, *MiddlewareToolRegistry) {
+	t.Helper()
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	deferred := NewDeferredToolRegistryAdapter(base)
+	registry := NewMiddlewareToolRegistry(deferred)
+	require.NoError(t, RegisterDefaults(ctx, deferred, WithRegisteredBuiltinWhitelist([]string{toolName})))
+	return base, registry
+}
+
+func TestPreparedCompletionRegisteredReadAndLSProvideInlineProof(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	filePath := filepath.Join(root, "input.txt")
+	require.NoError(t, os.WriteFile(filePath, []byte("readable"), 0o600))
+	missingPath := filepath.Join(root, "missing")
+	cases := []struct {
+		name      string
+		toolName  string
+		path      string
+		wantError bool
+	}{
+		{name: "read success", toolName: "read", path: filePath},
+		{name: "read error", toolName: "read", path: missingPath, wantError: true},
+		{name: "ls success", toolName: "ls", path: root},
+		{name: "ls error", toolName: "ls", path: missingPath, wantError: true},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, registry := registerPreparedBuiltin(t, ctx, testCase.toolName)
+			configurePreparedRegistry(t, registry, allowPreparedCall, PreparedToolStages{})
+
+			invocation, err := registry.PrepareToolCall(ctx, ToolCall{Name: testCase.toolName, Args: map[string]any{"path": testCase.path}})
+			require.NoError(t, err)
+			assert.Equal(t, RegistrationSourceBuiltin, invocation.ToolIdentity().RegistrationSource())
+			assert.Equal(t, []TrustedToolEffect{EffectUnknown}, invocation.EffectSet().Values(), "completion must not grant an effect")
+
+			_, err = invocation.Dispatch(ctx)
+			if testCase.wantError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			signal := invocation.CompletionSignal()
+			require.NotNil(t, signal.Done(), "the exact first-party synchronous reader exposes its closed local execution")
+			select {
+			case <-signal.Done():
+			default:
+				t.Fatal("completion channel must close after the tool returns")
+			}
+			assert.Equal(t, CompletionInlinePipelineJoined, signal.Proof())
+		})
+	}
+}
+
+func TestPreparedCompletionRegisteredReadAndLSWaitForAttestedWrappers(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	filePath := filepath.Join(root, "input.txt")
+	require.NoError(t, os.WriteFile(filePath, []byte("readable"), 0o600))
+	for _, testCase := range []struct {
+		name     string
+		toolName string
+		path     string
+	}{
+		{name: "read", toolName: "read", path: filePath},
+		{name: "ls", toolName: "ls", path: root},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, registry := registerPreparedBuiltin(t, ctx, testCase.toolName)
+			insideWrapper := make(chan struct{})
+			releaseWrapper := make(chan struct{})
+			var releaseOnce sync.Once
+			t.Cleanup(func() { releaseOnce.Do(func() { close(releaseWrapper) }) })
+			wrapper := ToolExecutorWrapper(func(next func(context.Context, ToolCall) (*ToolResult, error)) func(context.Context, ToolCall) (*ToolResult, error) {
+				return func(ctx context.Context, call ToolCall) (*ToolResult, error) {
+					result, err := next(ctx, call)
+					close(insideWrapper)
+					<-releaseWrapper
+					return result, err
+				}
+			})
+			configurePreparedRegistry(t, registry, allowPreparedCall, PreparedToolStages{
+				ExecutionWrappers:            []ToolExecutorWrapper{wrapper},
+				SynchronousExecutionWrappers: true,
+			})
+
+			invocation, err := registry.PrepareToolCall(ctx, ToolCall{Name: testCase.toolName, Args: map[string]any{"path": testCase.path}})
+			require.NoError(t, err)
+			dispatchResult := make(chan error, 1)
+			go func() {
+				_, dispatchErr := invocation.Dispatch(ctx)
+				dispatchResult <- dispatchErr
+			}()
+			select {
+			case <-insideWrapper:
+			case <-time.After(5 * time.Second):
+				t.Fatal("attested wrapper did not finish its inner reader")
+			}
+
+			signal := invocation.CompletionSignal()
+			require.NotNil(t, signal.Done())
+			assert.Empty(t, signal.Proof(), "Done is open while an attested wrapper is still running")
+			select {
+			case <-signal.Done():
+				t.Fatal("completion must wait for the attested wrapper to return")
+			default:
+			}
+
+			releaseOnce.Do(func() { close(releaseWrapper) })
+			require.NoError(t, <-dispatchResult)
+			select {
+			case <-signal.Done():
+			case <-time.After(5 * time.Second):
+				t.Fatal("completion channel did not close after the attested wrapper returned")
+			}
+			assert.Equal(t, CompletionInlinePipelineJoined, signal.Proof())
+		})
+	}
+}
+
+func TestPreparedCompletionRegisteredReadAndLSSuppressUnattestedWrapperProof(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	filePath := filepath.Join(root, "input.txt")
+	require.NoError(t, os.WriteFile(filePath, []byte("readable"), 0o600))
+	for _, testCase := range []struct {
+		name     string
+		toolName string
+		path     string
+	}{
+		{name: "read", toolName: "read", path: filePath},
+		{name: "ls", toolName: "ls", path: root},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			_, registry := registerPreparedBuiltin(t, ctx, testCase.toolName)
+			wrapper := ToolExecutorWrapper(func(next func(context.Context, ToolCall) (*ToolResult, error)) func(context.Context, ToolCall) (*ToolResult, error) {
+				return func(ctx context.Context, call ToolCall) (*ToolResult, error) { return next(ctx, call) }
+			})
+			configurePreparedRegistry(t, registry, allowPreparedCall, PreparedToolStages{ExecutionWrappers: []ToolExecutorWrapper{wrapper}})
+
+			invocation, err := registry.PrepareToolCall(ctx, ToolCall{Name: testCase.toolName, Args: map[string]any{"path": testCase.path}})
+			require.NoError(t, err)
+			_, err = invocation.Dispatch(ctx)
+			require.NoError(t, err)
+			assert.Nil(t, invocation.CompletionSignal().Done(), "an unattested execution wrapper cannot inherit first-party completion")
+			assert.Empty(t, invocation.CompletionSignal().Proof())
+		})
+	}
+}
+
+func TestPreparedCompletionOrdinaryReadAndLSReplacementHaveNoProof(t *testing.T) {
+	ctx := context.Background()
+	for _, toolName := range []string{"read", "ls"} {
+		t.Run(toolName, func(t *testing.T) {
+			base, registry := registerPreparedBuiltin(t, ctx, toolName)
+			custom := &preparedCaptureTool{name: toolName, schema: map[string]any{
+				"type":     "object",
+				"required": []string{"path", "content"},
+				"properties": map[string]any{
+					"path": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"},
+				},
+			}}
+			require.NoError(t, base.Register(ctx, custom), "ordinary same-name replacement cannot inherit completion provenance")
+			configurePreparedRegistry(t, registry, allowPreparedCall, PreparedToolStages{})
+
+			invocation, err := registry.PrepareToolCall(ctx, ToolCall{Name: toolName, Args: map[string]any{"path": "custom", "content": "ordinary"}})
+			require.NoError(t, err)
+			assert.Equal(t, RegistrationSourceToolRegistry, invocation.ToolIdentity().RegistrationSource())
+			_, err = invocation.Dispatch(ctx)
+			require.NoError(t, err)
+			assert.Nil(t, invocation.CompletionSignal().Done())
+			assert.Empty(t, invocation.CompletionSignal().Proof())
+			assert.Equal(t, 1, custom.snapshotCalls())
+		})
+	}
+}
+
 func TestPreparedCompletionInlineSignalWaitsForExecutorReturn_HelperOnly(t *testing.T) {
 	// Prepared Write/Edit registration deliberately requires the mutation queue.
 	// This directly exercises the sealed invocation's internal inline signal
