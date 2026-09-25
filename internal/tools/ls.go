@@ -70,6 +70,20 @@ func (t *LSTool) Description() string {
 	return "ls: lists the entries of a directory. Args: path (string, optional), all (bool, optional: include dotfiles), long (bool, optional: ls -l style), sort (string, optional: name|time|size)."
 }
 
+// Parameters returns the JSON Schema for ls's optional listing controls.
+func (t *LSTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"path": map[string]any{"type": "string"},
+			"all":  map[string]any{"type": "boolean"},
+			"long": map[string]any{"type": "boolean"},
+			"sort": map[string]any{"type": "string", "enum": []string{"", "name", "time", "size"}},
+		},
+		"additionalProperties": false,
+	}
+}
+
 // lsEntry is a single listing line for sorting purposes.
 type lsEntry struct {
 	path  string

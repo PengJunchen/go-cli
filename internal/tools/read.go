@@ -86,6 +86,18 @@ func (t *ReadTool) Description() string {
 	return "read: reads a file's contents or lists a directory. Args: path (string)."
 }
 
+// Parameters returns the JSON Schema for the path this tool reads or lists.
+func (t *ReadTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"path": map[string]any{"type": "string"},
+		},
+		"required":             []any{"path"},
+		"additionalProperties": false,
+	}
+}
+
 // Execute reads the file at the given path (relative paths resolve against the
 // workdir). Directories are listed, not descended into. A file larger than the
 // configured maximum produces an error.

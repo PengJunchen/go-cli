@@ -142,6 +142,18 @@ func (t *BashTool) Description() string {
 	return "bash: runs a shell command and returns its combined output. Args: command (string)."
 }
 
+// Parameters returns the JSON Schema for the command this tool executes.
+func (t *BashTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"command": map[string]any{"type": "string"},
+		},
+		"required":             []any{"command"},
+		"additionalProperties": false,
+	}
+}
+
 // Execute runs the given shell command under the tool's timeout and captures
 // combined stdout+stderr. A command that exceeds the timeout is killed and an
 // error is returned.
