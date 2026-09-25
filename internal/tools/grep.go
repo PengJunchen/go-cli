@@ -153,7 +153,10 @@ func (t *GrepTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		return nil, err
 	}
 
-	ms, truncated, err := t.search(ctx, re, searchPath, glob)
+	ms, truncated, lifecycle, helperStarted, err := t.search(ctx, re, searchPath, glob)
+	if helperStarted {
+		reportPreparedLocalProcessCompletion(ctx, lifecycle)
+	}
 	if err != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("grep.search_failed", "tool", "grep", "path", searchPath, "err", err)
@@ -184,36 +187,50 @@ func (t *GrepTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 }
 
 // search runs ripgrep when available, otherwise the pure-Go walker. It returns
-// matched lines and whether the result was truncated by the output caps.
-func (t *GrepTool) search(ctx context.Context, re *regexp.Regexp, searchPath, glob string) ([]match, bool, error) {
+// matched lines, output truncation, and the last started helper lifecycle.
+func (t *GrepTool) search(ctx context.Context, re *regexp.Regexp, searchPath, glob string) ([]match, bool, managedLocalResult, bool, error) {
+	var lastLifecycle managedLocalResult
+	helperStarted := false
 	if !t.forcePureGo && hasRipgrep() {
-		ms, err := grepWithRipgrep(ctx, re, searchPath, glob)
+		ms, lifecycle, started, err := grepWithRipgrepManaged(ctx, re, searchPath, glob)
+		if started {
+			lastLifecycle = lifecycle
+			helperStarted = true
+		}
 		if err == nil {
 			tms, truncated := t.truncateMatches(ms)
-			return tms, truncated, nil
+			return tms, truncated, lastLifecycle, helperStarted, nil
+		}
+		if !shouldFallbackAfterManagedHelper(ctx, err) {
+			return nil, false, lastLifecycle, helperStarted, err
 		}
 		// rg was present but failed (bad path, permission, etc.): fall through
-		// to the pure-Go path.
+		// to the pure-Go path, but only after the managed helper has joined.
 	}
 	ms, err := grepPureGo(ctx, re, searchPath, glob, t.whitelist)
 	if err != nil {
-		return nil, false, err
+		return nil, false, lastLifecycle, helperStarted, err
 	}
 	tms, truncated := t.truncateMatches(ms)
-	return tms, truncated, nil
+	return tms, truncated, lastLifecycle, helperStarted, nil
 }
 
 // grepWithRipgrep runs `rg --no-config --line-number -n [-g <glob>] -e
 // <pattern> -- <path>` and parses its output. Pattern and glob values cannot
 // be parsed as options, and ripgrep cannot load ambient configuration.
 func grepWithRipgrep(ctx context.Context, re *regexp.Regexp, searchPath, glob string) ([]match, error) {
+	matches, _, _, err := grepWithRipgrepManaged(ctx, re, searchPath, glob)
+	return matches, err
+}
+
+func grepWithRipgrepManaged(ctx context.Context, re *regexp.Regexp, searchPath, glob string) ([]match, managedLocalResult, bool, error) {
 	args := []string{"--no-config", "--line-number", "-n"}
 	if glob != "" {
 		args = append(args, "--glob="+glob)
 	}
 	args = append(args, "-e", re.String(), "--", searchPath)
 
-	cmd := exec.CommandContext(ctx, "rg", args...)
+	cmd := exec.Command("rg", args...)
 	cmd.Env = make([]string, 0, len(os.Environ()))
 	for _, entry := range os.Environ() {
 		key, _, _ := strings.Cut(entry, "=")
@@ -222,18 +239,23 @@ func grepWithRipgrep(ctx context.Context, re *regexp.Regexp, searchPath, glob st
 		}
 		cmd.Env = append(cmd.Env, entry)
 	}
-	cmd.Stderr = &bytes.Buffer{}
-	out, err := cmd.Output()
+	out, lifecycle, err := runManagedSearchCommand(ctx, cmd)
 	if err != nil {
+		return nil, lifecycle, false, fmt.Errorf("grep: rg: %w", err)
+	}
+	if err := managedSearchLifecycleError(ctx, "grep: rg", lifecycle); err != nil {
+		return nil, lifecycle, true, fmt.Errorf("grep: rg: %w", err)
+	}
+	if lifecycle.runErr != nil {
 		var ee *exec.ExitError
-		if errors.As(err, &ee) && ee.ExitCode() == 1 {
+		if errors.As(lifecycle.runErr, &ee) && ee.ExitCode() == 1 {
 			// rg exits 1 when no matches were found: return empty result.
-			return nil, nil
+			return nil, lifecycle, true, nil
 		}
-		return nil, fmt.Errorf("grep: rg: %w", err)
+		return nil, lifecycle, true, fmt.Errorf("grep: rg: %w", lifecycle.runErr)
 	}
 
-	return parseRipgrepOutput(out, re.String()), nil
+	return parseRipgrepOutput(out, re.String()), lifecycle, true, nil
 }
 
 // parseRipgrepOutput splits rg "path:line:content" output into matches.
