@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -63,20 +64,33 @@ func TestRunSuccessHelp(t *testing.T) {
 func TestRunSuccessNoArgs(t *testing.T) {
 	// Skip first-run onboarding wizard so the test reaches interactive mode.
 	t.Setenv("GO_CLI_NO_ONBOARDING", "1")
+	t.Setenv("HOME", t.TempDir())
+	t.Chdir(t.TempDir())
+	var requests atomic.Int64
+	// A local scoped credential lets production assembly pass strict auth while
+	// keeping this bare-argv startup test independent of real user config/network.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	t.Cleanup(server.Close)
+	cfg := disabledCfg()
+	cfg.Provider = config.ProviderConfig{
+		Name:    "openai",
+		APIKey:  "test-local-key",
+		BaseURL: server.URL,
+		Model:   "test-model",
+	}
 	var stdout, stderr bytes.Buffer
 	code := run(nil, &stdout, &stderr, func() (*config.Config, error) {
-		return &config.Config{
-			Provider: config.ProviderConfig{
-				Name:    "openai",
-				BaseURL: "http://127.0.0.1:1",
-				APIKey:  "test-key",
-			},
-			Tracing: config.TracingConfig{Exporter: "none"},
-		}, nil
+		return cfg, nil
 	})
-	assert.Equal(t, 0, code, "stderr: %s", stderr.String())
+	assert.Equal(t, 0, code, "stdout=%q stderr=%q", stdout.String(), stderr.String())
 	// No subcommand defaults to interactive mode.
 	assert.Contains(t, stdout.String(), "Interactive session started")
+	assert.Empty(t, stderr.String())
+	assert.Zero(t, requests.Load(), "starting an empty interactive session must not call the model")
 }
 
 func TestRunUsageErrorExitCode2(t *testing.T) {
