@@ -16,7 +16,6 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/acp"
 	"github.com/pengjunchen/go-cli/internal/config"
-	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/privatefile"
 )
 
@@ -155,7 +154,6 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	// back to echo/ack mode with a nil dispatcher.
 	var handler *acp.CoreHandler
 	var cleanup func()
-	var eventBus core.EventBus
 
 	var rc *config.Config
 	if v, ok := cfg.(*config.Config); ok {
@@ -186,7 +184,6 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 			cleanup = assembly.Cleanup
 			handler = acp.NewCoreHandler(assembly.Dispatcher, nil)
 			handler.SetEventBus(assembly.EventBus)
-			eventBus = assembly.EventBus
 			slog.Info("serve: agent dispatch enabled",
 				"model", modelName,
 				"provider", providerName,
@@ -203,9 +200,6 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	}
 
 	server := acp.NewHTTPServer("acp-server", addr, handler)
-	if eventBus != nil {
-		server.SetEventBus(eventBus)
-	}
 	if authToken != "" {
 		server.SetAuth(authToken, authSubject)
 	}
