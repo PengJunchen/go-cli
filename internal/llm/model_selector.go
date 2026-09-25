@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 )
 
@@ -15,6 +16,12 @@ type ModelBuilder func(ctx context.Context, modelName string) (BaseChatModel, fu
 
 // ModelLister returns the list of models available from the current provider.
 type ModelLister func() []ModelInfo
+
+// ModelSpecBuilder builds a model from its provider-scoped identity.
+type ModelSpecBuilder func(ctx context.Context, model ModelSpec) (BaseChatModel, func(), error)
+
+// ModelSpecLister returns provider-scoped model entries from the active catalog.
+type ModelSpecLister func() []ModelSpec
 
 // DefaultModelSelector is a ModelSelector that holds a primary model for full
 // chat turns and an optional small model for lightweight tasks (summary, title,
@@ -52,6 +59,10 @@ type DefaultModelSelector struct {
 	// modelLister returns the list of models available from the current
 	// provider. When nil, AvailableModels returns nil.
 	modelLister ModelLister
+	// modelSpecBuilder and modelSpecLister preserve provider identity for
+	// catalog-based switching while the name-only API remains available.
+	modelSpecBuilder ModelSpecBuilder
+	modelSpecLister  ModelSpecLister
 	// onModelSwitched is called after a successful model switch so callers
 	// (e.g. the LoopAgent) can update their reference to the primary model.
 	onModelSwitched func(BaseChatModel)
@@ -110,6 +121,20 @@ func (s *DefaultModelSelector) WithModelLister(lister ModelLister) *DefaultModel
 	return s
 }
 
+// WithModelSpecBuilder sets the provider-scoped model builder used by
+// SwitchModel and SwitchModelSpec when available.
+func (s *DefaultModelSelector) WithModelSpecBuilder(builder ModelSpecBuilder) *DefaultModelSelector {
+	s.modelSpecBuilder = builder
+	return s
+}
+
+// WithModelSpecLister sets the provider-scoped model catalog used by
+// AvailableModelSpecs.
+func (s *DefaultModelSelector) WithModelSpecLister(lister ModelSpecLister) *DefaultModelSelector {
+	s.modelSpecLister = lister
+	return s
+}
+
 // WithModelSwitchCallback sets a callback invoked after a successful model
 // switch. The callback receives the new primary model so callers (e.g. the
 // LoopAgent) can update their reference.
@@ -123,6 +148,10 @@ func (s *DefaultModelSelector) WithModelSwitchCallback(cb func(BaseChatModel)) *
 // selector's primary model and name, and invokes the onModelSwitched callback
 // so downstream consumers (e.g. the LoopAgent) pick up the new model.
 func (s *DefaultModelSelector) SwitchModel(ctx context.Context, modelName string) error {
+	if s.modelSpecBuilder != nil {
+		current := s.CurrentModelSpec()
+		return s.SwitchModelSpec(ctx, ModelSpec{ProviderID: current.ProviderID, ModelID: modelName})
+	}
 	if s.modelBuilder == nil {
 		return fmt.Errorf("llm: model switching not configured")
 	}
@@ -130,14 +159,42 @@ func (s *DefaultModelSelector) SwitchModel(ctx context.Context, modelName string
 	if err != nil {
 		return fmt.Errorf("llm: build model %q: %w", modelName, err)
 	}
+	current := s.CurrentModelSpec()
+	s.replacePrimary(newModel, cleanup, current.ProviderID, modelName)
+	return nil
+}
 
+// SwitchModelSpec replaces the primary model using an explicit provider/model
+// pair. Metadata supplied by the caller is ignored; the assembly builder
+// resolves the identity against its provider and credential snapshot.
+func (s *DefaultModelSelector) SwitchModelSpec(ctx context.Context, model ModelSpec) error {
+	if s.modelSpecBuilder == nil {
+		return fmt.Errorf("llm: provider-scoped model switching not configured")
+	}
+	model.ProviderID = canonicalProviderID(model.ProviderID)
+	model.ModelID = strings.TrimSpace(model.ModelID)
+	model.Info = ModelInfo{}
+	model.Known = false
+	if model.ProviderID == "" || model.ModelID == "" {
+		return fmt.Errorf("llm: provider and model identities are required")
+	}
+	newModel, cleanup, err := s.modelSpecBuilder(ctx, model)
+	if err != nil {
+		return fmt.Errorf("llm: build model %q for provider %q: %w", model.ModelID, model.ProviderID, err)
+	}
+	s.replacePrimary(newModel, cleanup, model.ProviderID, model.ModelID)
+	return nil
+}
+
+func (s *DefaultModelSelector) replacePrimary(model BaseChatModel, cleanup func(), providerID, modelName string) {
 	s.switchMu.Lock()
 	oldCleanup := s.cleanups
 	s.cleanups = nil
 	if cleanup != nil {
 		s.cleanups = append(s.cleanups, cleanup)
 	}
-	s.primary = newModel
+	s.primary = model
+	s.primaryProvider = providerID
 	s.primaryName = modelName
 	cb := s.onModelSwitched
 	s.switchMu.Unlock()
@@ -149,19 +206,50 @@ func (s *DefaultModelSelector) SwitchModel(ctx context.Context, modelName string
 	}
 
 	if cb != nil {
-		cb(newModel)
+		cb(model)
 	}
-	slog.Info("llm_model_switched", "model", modelName)
-	return nil
+	slog.Info("llm_model_switched", "provider", providerID, "model", modelName)
 }
 
 // AvailableModels returns the list of models available from the current
 // provider. It returns nil when no ModelLister is configured.
 func (s *DefaultModelSelector) AvailableModels() []ModelInfo {
-	if s.modelLister == nil {
+	if s.modelLister != nil {
+		return s.modelLister()
+	}
+	models := s.AvailableModelSpecs()
+	if len(models) == 0 {
 		return nil
 	}
-	return s.modelLister()
+	result := make([]ModelInfo, 0, len(models))
+	for _, model := range models {
+		result = append(result, model.Info)
+	}
+	return result
+}
+
+// AvailableModelSpecs returns a copy of the provider-scoped model catalog.
+func (s *DefaultModelSelector) AvailableModelSpecs() []ModelSpec {
+	if s.modelSpecLister == nil {
+		return nil
+	}
+	models := s.modelSpecLister()
+	if models == nil {
+		return nil
+	}
+	result := make([]ModelSpec, len(models))
+	copy(result, models)
+	return result
+}
+
+// CurrentModelSpec returns the current provider/model identity.
+func (s *DefaultModelSelector) CurrentModelSpec() ModelSpec {
+	s.switchMu.Lock()
+	defer s.switchMu.Unlock()
+	return ModelSpec{
+		ProviderID: canonicalProviderID(s.primaryProvider),
+		ModelID:    strings.TrimSpace(s.primaryName),
+	}
 }
 
 // PrimaryModelName returns the name of the current primary model.
