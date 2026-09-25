@@ -1,0 +1,1083 @@
+package session
+
+import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"reflect"
+	"sync"
+	"time"
+
+	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/llm"
+	"github.com/pengjunchen/go-cli/internal/tools"
+)
+
+var errSessionRunCommitUnavailable = errors.New("session: run-commit operation is not available yet")
+
+// SessionRunCommitSink persists one run through an already locked prepared
+// session handle. It borrows that handle's writer and never closes the shared
+// session; release returns only this run's lease to its owner.
+type SessionRunCommitSink struct {
+	mu          sync.Mutex
+	prepared    PreparedSession
+	writer      DurableSessionWriter
+	index       *WorkspaceQuarantineIndex
+	sessionID   string
+	workspaceID string
+	branchID    string
+	leafID      string
+	maxSeq      uint64
+	baseView    SessionView
+	allRows     []SessionEntry
+	branchRows  []SessionEntry
+	runID       string
+	ownerGen    string
+	release     func()
+	releaseOnce sync.Once
+}
+
+var _ core.RunCommitSink = (*SessionRunCommitSink)(nil)
+
+// NewSessionRunCommitSink captures the active branch and run-start view from
+// prepared. workspaceID must already be canonical and initialized in index
+// before an intent can be committed. release is the idempotent per-run lease
+// return callback; it must not close the shared PreparedSession itself.
+func NewSessionRunCommitSink(
+	prepared PreparedSession,
+	index *WorkspaceQuarantineIndex,
+	workspaceID string,
+	release func(),
+) (*SessionRunCommitSink, error) {
+	if prepared == nil {
+		return nil, errors.New("session: run-commit sink requires a prepared session")
+	}
+	if index == nil {
+		return nil, errors.New("session: run-commit sink requires a workspace index")
+	}
+	if workspaceID == "" || !validWorkspaceID(workspaceID) {
+		return nil, errors.New("session: run-commit sink requires a valid canonical workspace ID")
+	}
+	snapshot, err := prepared.Snapshot()
+	if err != nil {
+		return nil, fmt.Errorf("session: snapshot prepared run-commit session: %w", err)
+	}
+	if err := snapshot.PublishedView.Validate(); err != nil {
+		return nil, fmt.Errorf("session: invalid prepared run-commit view: %w", err)
+	}
+	if snapshot.SessionID == "" || snapshot.PublishedView.SessionID != snapshot.SessionID || snapshot.ActiveBranchID == "" || snapshot.PublishedView.BranchID != snapshot.ActiveBranchID {
+		return nil, errors.New("session: prepared run-commit snapshot identity is inconsistent")
+	}
+	allRows, branchRows, err := validateRunCommitSnapshot(snapshot)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := analyzeDurableActionJournal(allRows, snapshot.SessionID); err != nil {
+		return nil, fmt.Errorf("session: prepared run-commit action journal is invalid: %w", err)
+	}
+	return &SessionRunCommitSink{
+		prepared: prepared, writer: prepared.DurableWriter(), index: index,
+		sessionID: snapshot.SessionID, workspaceID: workspaceID,
+		branchID: snapshot.ActiveBranchID, leafID: snapshot.ActiveLeafEntryID,
+		maxSeq: snapshot.MaxSeq, baseView: snapshot.PublishedView.Clone(),
+		allRows: allRows, branchRows: branchRows, release: release,
+	}, nil
+}
+
+// CloseRunCommit returns this sink's run lease once. The prepared handle stays
+// open until its session manager receives a close request and its final lease.
+func (s *SessionRunCommitSink) CloseRunCommit() {
+	if s == nil {
+		return
+	}
+	s.releaseOnce.Do(func() {
+		if s.release != nil {
+			s.release()
+		}
+	})
+}
+
+func (s *SessionRunCommitSink) CommitInput(ctx context.Context, input core.RunCommitInput) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.validateCallContextLocked(ctx, input.RunID); err != nil {
+		return err
+	}
+	if input.InputKind != core.InputKindUser && input.InputKind != core.InputKindSteering && input.InputKind != core.InputKindFollowUp {
+		return fmt.Errorf("session: unsupported run input kind %q", input.InputKind)
+	}
+	message := cloneRunCommitMessage(input.Message)
+	if message.Role != "user" {
+		return fmt.Errorf("session: run input transcript row has role %q, want user", message.Role)
+	}
+	if message.InputKind != "" && message.InputKind != input.InputKind {
+		return errors.New("session: run input kind conflicts with its canonical message")
+	}
+	message.InputKind = input.InputKind
+	rowsByIndex, err := transcriptRowsByIndex(s.branchRows, input.RunID)
+	if err != nil {
+		return err
+	}
+	if existing, exists := rowsByIndex[input.TranscriptIndex]; exists {
+		if existing.Type != EntryTypeUser || existing.InputKind != input.InputKind || !durableRowMatchesMessage(existing, message) {
+			return fmt.Errorf("session: run %q transcript index %d conflicts with its durable input", input.RunID, input.TranscriptIndex)
+		}
+		return nil
+	}
+	nextIndex, err := nextTranscriptIndex(rowsByIndex)
+	if err != nil {
+		return err
+	}
+	if input.TranscriptIndex != nextIndex {
+		return fmt.Errorf("session: run %q input transcript index %d is not the next index %d", input.RunID, input.TranscriptIndex, nextIndex)
+	}
+	entryID, err := stableRunCommitEntryID("input", struct {
+		RunID string
+		Index uint64
+	}{input.RunID, input.TranscriptIndex})
+	if err != nil {
+		return err
+	}
+	index := input.TranscriptIndex
+	row := sessionEntryFromRunCommitMessage(message, EntryTypeUser)
+	row.ID = entryID
+	row.RunID = input.RunID
+	row.WorkspaceID = s.workspaceID
+	row.InputKind = input.InputKind
+	row.TranscriptIndex = &index
+	row.Timestamp = time.Now().UTC()
+	return s.appendAndRefreshLocked(ctx, row)
+}
+
+func (s *SessionRunCommitSink) BeginIntentBatch(ctx context.Context, batch core.RunIntentBatch) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.validateCallContextLocked(ctx, batch.RunID); err != nil {
+		return err
+	}
+	if batch.AssistantMessage.Role != "assistant" || len(batch.AssistantMessage.ToolCalls) == 0 {
+		return errors.New("session: intent batch requires an assistant message with tool calls")
+	}
+	if batch.ActionBatchID == "" && len(batch.Intents) > 0 {
+		return errors.New("session: reserved intent batch requires an action batch ID")
+	}
+	if err := validateRunCommitToolCalls(batch.AssistantMessage.ToolCalls); err != nil {
+		return err
+	}
+	toolCalls := make(map[string]llm.ToolCall, len(batch.AssistantMessage.ToolCalls))
+	callPosition := make(map[string]int, len(batch.AssistantMessage.ToolCalls))
+	for index, call := range batch.AssistantMessage.ToolCalls {
+		toolCalls[call.ID] = call
+		callPosition[call.ID] = index
+	}
+	if err := validateKnownPreDispatchReceipts(batch, toolCalls); err != nil {
+		return err
+	}
+	assistant, exists, err := s.assistantOccurrenceLocked(batch.RunID, batch.AssistantTranscriptOrdinal)
+	if err != nil {
+		return err
+	}
+	message := cloneRunCommitMessage(batch.AssistantMessage)
+	if exists {
+		if assistant.WorkspaceID != s.workspaceID || !durableRowMatchesMessage(assistant, message) {
+			return fmt.Errorf("session: assistant occurrence %d conflicts with its durable row", batch.AssistantTranscriptOrdinal)
+		}
+	} else {
+		transcriptRows, err := transcriptRowsByIndex(s.branchRows, batch.RunID)
+		if err != nil {
+			return err
+		}
+		nextIndex, err := nextTranscriptIndex(transcriptRows)
+		if err != nil {
+			return err
+		}
+		entryID, err := stableRunCommitEntryID("assistant", struct {
+			RunID   string
+			Ordinal uint64
+		}{batch.RunID, batch.AssistantTranscriptOrdinal})
+		if err != nil {
+			return err
+		}
+		index, ordinal := nextIndex, batch.AssistantTranscriptOrdinal
+		assistant = sessionEntryFromRunCommitMessage(message, EntryTypeAssistant)
+		assistant.ID = entryID
+		assistant.RunID = batch.RunID
+		assistant.WorkspaceID = s.workspaceID
+		assistant.AssistantTranscriptOrdinal = &ordinal
+		assistant.TranscriptIndex = &index
+		assistant.Timestamp = time.Now().UTC()
+	}
+
+	intentRows := make([]SessionEntry, 0, len(batch.Intents))
+	dispatchActions := make([]WorkspaceDispatchAction, 0, len(batch.Intents))
+	seenCalls := make(map[string]struct{}, len(batch.Intents))
+	seenActionIDs := make(map[string]struct{}, len(batch.Intents))
+	lastCallPosition := -1
+	existingIntentCount := 0
+	for _, intent := range batch.Intents {
+		if intent.SessionID != s.sessionID || intent.WorkspaceID != s.workspaceID || intent.RunID != batch.RunID || intent.ActionBatchID != batch.ActionBatchID || intent.AssistantTranscriptOrdinal != batch.AssistantTranscriptOrdinal || intent.OwnerGeneration != s.ownerGen {
+			return errors.New("session: intent identity does not match its run, session, workspace, batch, occurrence, or owner")
+		}
+		if intent.ToolCallID == "" || intent.ActionID == "" {
+			return errors.New("session: reserved intent requires tool-call and action IDs")
+		}
+		call, ok := toolCalls[intent.ToolCallID]
+		if !ok || call.Name != intent.ToolIdentity.ToolName() {
+			return fmt.Errorf("session: intent %q does not match a tool call in its assistant message", intent.ToolCallID)
+		}
+		position := callPosition[intent.ToolCallID]
+		if position <= lastCallPosition {
+			return errors.New("session: reserved intents are not in canonical assistant tool-call order")
+		}
+		lastCallPosition = position
+		if _, exists := seenCalls[intent.ToolCallID]; exists {
+			return fmt.Errorf("session: intent batch repeats tool call %q", intent.ToolCallID)
+		}
+		if _, exists := seenActionIDs[intent.ActionID]; exists {
+			return fmt.Errorf("session: intent batch repeats action ID %q", intent.ActionID)
+		}
+		seenCalls[intent.ToolCallID] = struct{}{}
+		seenActionIDs[intent.ActionID] = struct{}{}
+		identity := intent.ToolIdentity.Snapshot()
+		if err := validateToolIdentitySnapshot(&identity, call.Name); err != nil {
+			return fmt.Errorf("session: invalid trusted identity for intent %q: %w", intent.ToolCallID, err)
+		}
+		argumentDigest := hex.EncodeToString(intent.ArgumentDigest[:])
+		schemaDigest := hex.EncodeToString(intent.SchemaDigest[:])
+		if !isHexDigest(argumentDigest) || !isHexDigest(schemaDigest) {
+			return errors.New("session: intent has malformed argument or schema digest")
+		}
+		effects, err := normalizeEffectFacts(intent.EffectSet.Values())
+		if err != nil {
+			return fmt.Errorf("session: invalid trusted effects for intent %q: %w", intent.ToolCallID, err)
+		}
+		entryID, err := stableRunCommitEntryID("intent", struct {
+			SessionID string
+			Workspace string
+			RunID     string
+			Ordinal   uint64
+			CallID    string
+			BatchID   string
+			ActionID  string
+			Owner     string
+		}{intent.SessionID, intent.WorkspaceID, intent.RunID, intent.AssistantTranscriptOrdinal, intent.ToolCallID, intent.ActionBatchID, intent.ActionID, intent.OwnerGeneration})
+		if err != nil {
+			return err
+		}
+		ordinal := intent.AssistantTranscriptOrdinal
+		row := SessionEntry{
+			ID: entryID, Type: EntryTypeTool, RunID: intent.RunID, WorkspaceID: intent.WorkspaceID,
+			ActionBatchID: intent.ActionBatchID, ActionID: intent.ActionID, OwnerGeneration: intent.OwnerGeneration,
+			ActionState: ActionStateIntent, AssistantTranscriptOrdinal: &ordinal,
+			ToolCallID: intent.ToolCallID, ToolName: call.Name, ArgumentDigest: argumentDigest,
+			SchemaDigest: schemaDigest, ToolIdentity: &identity, EffectSet: effects,
+			Timestamp: time.Now().UTC(),
+		}
+		existing, exists, err := s.actionRowLocked(row)
+		if err != nil {
+			return err
+		}
+		if exists {
+			if !sameIntentPayload(existing, row) {
+				return fmt.Errorf("session: intent %q conflicts with its durable row", intent.ActionID)
+			}
+			existingIntentCount++
+		} else {
+			intentRows = append(intentRows, row)
+		}
+		dispatchActions = append(dispatchActions, WorkspaceDispatchAction{
+			Action: PendingActionRef{
+				SessionID: intent.SessionID, WorkspaceID: intent.WorkspaceID, RunID: intent.RunID,
+				ActionBatchID: intent.ActionBatchID, AssistantTranscriptOrdinal: intent.AssistantTranscriptOrdinal,
+				ToolCallID: intent.ToolCallID, ActionID: intent.ActionID,
+			},
+			ToolIdentity: &identity, EffectSet: append([]tools.TrustedToolEffect(nil), effects...),
+		})
+	}
+	if existingIntentCount != 0 && existingIntentCount != len(batch.Intents) {
+		return errors.New("session: intent batch is partially present; refusing to publish a dispatch marker")
+	}
+	if !exists {
+		intentRows = append([]SessionEntry{assistant}, intentRows...)
+	}
+	if len(intentRows) > 0 {
+		if err := s.appendAndRefreshLocked(ctx, intentRows...); err != nil {
+			return err
+		}
+	}
+	if len(dispatchActions) == 0 {
+		return nil
+	}
+	dispatchBatch := WorkspaceDispatchBatch{
+		WorkspaceID: s.workspaceID, SessionID: s.sessionID, RunID: batch.RunID,
+		ActionBatchID: batch.ActionBatchID, Actions: dispatchActions,
+	}
+	result, err := s.index.BeginDispatchBatch(ctx, dispatchBatch)
+	if err != nil {
+		return fmt.Errorf("session: commit workspace dispatch marker: %w", err)
+	}
+	if result != WorkspaceDispatchCommittedNow {
+		return fmt.Errorf("session: workspace dispatch marker state %d does not grant a new dispatch permit", result)
+	}
+	return nil
+}
+
+func (s *SessionRunCommitSink) RecordExecution(ctx context.Context, execution core.ActionExecution) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.validateCallContextLocked(ctx, execution.RunID); err != nil {
+		return err
+	}
+	if execution.ToolCallID == "" || execution.ActionID == "" || execution.OwnerGeneration == "" {
+		return errors.New("session: execution observation requires a full reserved action identity")
+	}
+	if execution.OwnerGeneration != s.ownerGen {
+		return errors.New("session: execution observation owner generation differs from the run owner")
+	}
+	if execution.DispatchState != core.DispatchStateDispatched && execution.DispatchState != core.DispatchStateNotDispatched {
+		return fmt.Errorf("session: execution observation has invalid dispatch state %q", execution.DispatchState)
+	}
+	if !validRunExecutionState(execution.ResourceState) {
+		return fmt.Errorf("session: execution observation has invalid resource state %q", execution.ResourceState)
+	}
+	if !validCompletionProof(execution.CompletionProof) {
+		return fmt.Errorf("session: execution observation has invalid completion proof %q", execution.CompletionProof)
+	}
+	if execution.CompletionProof != "" && execution.DispatchState != core.DispatchStateDispatched {
+		return errors.New("session: positive completion proof requires a dispatched action")
+	}
+	var identity *core.ExecutionIdentity
+	if execution.ExecutionIdentity != nil {
+		if err := execution.ExecutionIdentity.Validate(); err != nil {
+			return fmt.Errorf("session: invalid execution identity: %w", err)
+		}
+		copy := *execution.ExecutionIdentity
+		identity = &copy
+	}
+	intent, err := s.findActionIntentLocked(execution.RunID, execution.AssistantTranscriptOrdinal, execution.ToolCallID, execution.ActionID, execution.OwnerGeneration)
+	if err != nil {
+		return err
+	}
+	row := SessionEntry{
+		Type: EntryTypeTool, RunID: execution.RunID, WorkspaceID: intent.WorkspaceID,
+		ActionBatchID: intent.ActionBatchID, ActionID: intent.ActionID,
+		OwnerGeneration: intent.OwnerGeneration, ActionState: ActionStateExecution,
+		AssistantTranscriptOrdinal: cloneUint64Pointer(intent.AssistantTranscriptOrdinal),
+		ToolCallID:                 intent.ToolCallID, ToolName: intent.ToolName,
+		DispatchState: execution.DispatchState, ResourceState: execution.ResourceState,
+		ExecutionIdentity: identity, CompletionProof: execution.CompletionProof,
+	}
+	row.ID, err = stableRunCommitEntryID("execution", struct {
+		ActionRef       PendingActionRef
+		DispatchState   core.DispatchState
+		ResourceState   core.RunExecutionState
+		Identity        *core.ExecutionIdentity
+		CompletionProof string
+	}{refFromEntry(row, s.sessionID), execution.DispatchState, execution.ResourceState, identity, string(execution.CompletionProof)})
+	if err != nil {
+		return err
+	}
+	for _, existing := range s.branchRows {
+		if existing.ID != row.ID {
+			continue
+		}
+		if !sameExecutionObservation(existing, row) {
+			return fmt.Errorf("session: execution row ID %q conflicts with its durable payload", row.ID)
+		}
+		return nil
+	}
+	_, err = s.appendAndRefreshRowsLocked(ctx, row)
+	return err
+}
+
+func (s *SessionRunCommitSink) RecordReceipt(ctx context.Context, receipt core.RunToolReceipt) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.validateCallContextLocked(ctx, receipt.RunID); err != nil {
+		return err
+	}
+	if receipt.ToolCallID == "" {
+		return errors.New("session: tool receipt requires a tool-call ID")
+	}
+	if receipt.DispatchState != core.DispatchStateDispatched && receipt.DispatchState != core.DispatchStateNotDispatched {
+		return fmt.Errorf("session: tool receipt has invalid dispatch state %q", receipt.DispatchState)
+	}
+	if !validRunReceiptOutcome(receipt.ReceiptOutcome) {
+		return fmt.Errorf("session: tool receipt has invalid outcome %q", receipt.ReceiptOutcome)
+	}
+	message := cloneRunCommitMessage(receipt.Message)
+	if message.Role != "tool" || message.ToolCallID != receipt.ToolCallID || message.ToolName == "" {
+		return errors.New("session: tool receipt message does not match its occurrence")
+	}
+	if message.ReceiptOutcome != "" && message.ReceiptOutcome != receipt.ReceiptOutcome {
+		return errors.New("session: tool receipt outcome conflicts with its message")
+	}
+	message.ReceiptOutcome = receipt.ReceiptOutcome
+	assistant, exists, err := s.assistantOccurrenceLocked(receipt.RunID, receipt.AssistantTranscriptOrdinal)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return fmt.Errorf("session: tool receipt occurrence %q has no durable assistant row", receipt.ToolCallID)
+	}
+	toolName, exists := assistantToolName(assistant, receipt.ToolCallID)
+	if !exists || toolName != message.ToolName {
+		return errors.New("session: tool receipt does not match the durable assistant tool call")
+	}
+	var intent SessionEntry
+	if receipt.ActionID == "" {
+		if receipt.DispatchState != core.DispatchStateNotDispatched {
+			return errors.New("session: unreserved tool receipt must prove it was not dispatched")
+		}
+		if receipt.ReceiptOutcome != core.ReceiptOutcomeError && receipt.ReceiptOutcome != core.ReceiptOutcomeInterrupted {
+			return errors.New("session: unreserved tool receipt must have a known denial outcome")
+		}
+		if _, found, findErr := s.findOccurrenceIntentLocked(receipt.RunID, receipt.AssistantTranscriptOrdinal, receipt.ToolCallID); findErr != nil {
+			return findErr
+		} else if found {
+			return errors.New("session: unreserved receipt conflicts with a durable reserved intent")
+		}
+	} else {
+		if receipt.DispatchState == core.DispatchStateNotDispatched && receipt.ReceiptOutcome != core.ReceiptOutcomeError && receipt.ReceiptOutcome != core.ReceiptOutcomeInterrupted {
+			return errors.New("session: not-dispatched tool receipt must have a known denial outcome")
+		}
+		intent, err = s.findActionIntentLocked(receipt.RunID, receipt.AssistantTranscriptOrdinal, receipt.ToolCallID, receipt.ActionID, s.ownerGen)
+		if err != nil {
+			return err
+		}
+	}
+	transcriptRows, err := transcriptRowsByIndex(s.branchRows, receipt.RunID)
+	if err != nil {
+		return err
+	}
+	if err := validateTranscriptRowsInPhysicalOrder(s.branchRows, receipt.RunID); err != nil {
+		return err
+	}
+	if existing, found := transcriptRows[receipt.TranscriptIndex]; found {
+		candidate := s.receiptEntry(receipt, message, intent)
+		candidate.ID, err = stableRunCommitEntryID("receipt", struct {
+			RunID string
+			Index uint64
+		}{receipt.RunID, receipt.TranscriptIndex})
+		if err != nil {
+			return err
+		}
+		if !sameReceiptRow(existing, candidate) {
+			return fmt.Errorf("session: run %q transcript index %d conflicts with its durable receipt", receipt.RunID, receipt.TranscriptIndex)
+		}
+		return nil
+	}
+	nextIndex, err := nextTranscriptIndex(transcriptRows)
+	if err != nil {
+		return err
+	}
+	if receipt.TranscriptIndex != nextIndex {
+		return fmt.Errorf("session: run %q receipt transcript index %d is not the next index %d", receipt.RunID, receipt.TranscriptIndex, nextIndex)
+	}
+	row := s.receiptEntry(receipt, message, intent)
+	row.ID, err = stableRunCommitEntryID("receipt", struct {
+		RunID string
+		Index uint64
+	}{receipt.RunID, receipt.TranscriptIndex})
+	if err != nil {
+		return err
+	}
+	index, ordinal := receipt.TranscriptIndex, receipt.AssistantTranscriptOrdinal
+	row.TranscriptIndex = &index
+	row.AssistantTranscriptOrdinal = &ordinal
+	_, err = s.appendAndRefreshRowsLocked(ctx, row)
+	return err
+}
+
+func (s *SessionRunCommitSink) ResolveExecution(ctx context.Context, resolution core.ExecutionResolution) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.validateCallContextLocked(ctx, resolution.RunID); err != nil {
+		return err
+	}
+	if resolution.ActionID == "" {
+		return errors.New("session: execution resolution requires an action ID")
+	}
+	intent, err := s.findIntentByActionIDLocked(resolution.RunID, resolution.ActionID, s.ownerGen)
+	if err != nil {
+		return err
+	}
+	ref := refFromEntry(intent, s.sessionID)
+	receipt, err := s.findReceiptForIntentLocked(ref)
+	if err != nil {
+		return err
+	}
+	if receipt.RecordVersion != 1 || receipt.Seq == 0 {
+		return errors.New("session: execution resolution requires a synced receipt on the active branch")
+	}
+	if resolution.Evidence == core.ResolutionRemoteTerminal {
+		return errors.New("session: remote terminal resolution requires unsupported typed protocol evidence")
+	}
+	resolvedEvidence, err := s.resolveEvidenceReferenceLocked(resolution, ref, intent, receipt)
+	if err != nil {
+		return err
+	}
+	resolvedEvidence.RunID = resolution.RunID
+	resolvedEvidence.ActionID = resolution.ActionID
+	resolution = resolvedEvidence
+	entryID, err := stableRunCommitEntryID("resolution", ref)
+	if err != nil {
+		return err
+	}
+	row := SessionEntry{
+		ID: entryID, Type: EntryTypeCheckpoint, RunID: ref.RunID, WorkspaceID: ref.WorkspaceID,
+		ActionBatchID: ref.ActionBatchID, ActionID: ref.ActionID, OwnerGeneration: intent.OwnerGeneration,
+		AssistantTranscriptOrdinal: cloneUint64Pointer(intent.AssistantTranscriptOrdinal),
+		ToolCallID:                 ref.ToolCallID, ToolName: intent.ToolName,
+		CheckpointKind: CheckpointExecutionResolution, ExecutionResolution: &resolution,
+	}
+	var durableResolution *SessionEntry
+	for index := range s.branchRows {
+		existing := &s.branchRows[index]
+		if existing.RecordVersion != 1 || existing.CheckpointKind != CheckpointExecutionResolution || !sameActionReference(ref, refFromEntry(*existing, s.sessionID)) {
+			continue
+		}
+		if durableResolution != nil {
+			return errors.New("session: action has multiple durable execution-resolution checkpoints")
+		}
+		durableResolution = existing
+	}
+	if durableResolution == nil {
+		canonical, appendErr := s.appendAndRefreshRowsLocked(ctx, row)
+		if appendErr != nil {
+			return appendErr
+		}
+		if len(canonical) != 1 || canonical[0].ID != row.ID || canonical[0].Seq == 0 {
+			return errors.New("session: durable writer returned an invalid resolution checkpoint identity")
+		}
+		durableResolution = &canonical[0]
+	} else {
+		if durableResolution.ID != row.ID || durableResolution.ExecutionResolution == nil || *durableResolution.ExecutionResolution != resolution {
+			return errors.New("session: execution resolution conflicts with the durable checkpoint")
+		}
+	}
+	validated := ValidatedExecutionResolution{
+		Action: ref, CheckpointEntryID: durableResolution.ID, CheckpointSeq: durableResolution.Seq,
+		Resolution: resolution,
+	}
+	if err := s.index.ApplyDurableResolutions(ctx, []ValidatedExecutionResolution{validated}); err != nil {
+		return fmt.Errorf("session: apply synced execution resolution to workspace index: %w", err)
+	}
+	return nil
+}
+
+func (s *SessionRunCommitSink) CommitCompaction(context.Context, core.CompactionProjection) error {
+	return errSessionRunCommitUnavailable
+}
+
+func (s *SessionRunCommitSink) CommitTerminal(context.Context, core.RunTerminal) error {
+	return errSessionRunCommitUnavailable
+}
+
+func (s *SessionRunCommitSink) validateCallContextLocked(ctx context.Context, payloadRunID string) error {
+	if err := contextErr(ctx); err != nil {
+		return err
+	}
+	boundSink, binding, ok := core.RunCommitFromContext(ctx)
+	if !ok || boundSink != s {
+		return errors.New("session: run-commit call context does not bind this sink")
+	}
+	if err := binding.Validate(); err != nil {
+		return err
+	}
+	if binding.SessionID != s.sessionID || binding.WorkspaceID != s.workspaceID {
+		return errors.New("session: run-commit call binding differs from the prepared session or workspace")
+	}
+	runID := core.RunIDFromContext(ctx)
+	if runID == "" || payloadRunID == "" || runID != payloadRunID {
+		return errors.New("session: run-commit payload does not match the owned run ID")
+	}
+	if s.runID == "" {
+		s.runID = runID
+		s.ownerGen = binding.OwnerGeneration
+	} else if s.runID != runID || s.ownerGen != binding.OwnerGeneration {
+		return errors.New("session: run-commit sink was reused by another run owner")
+	}
+	return nil
+}
+
+func (s *SessionRunCommitSink) assistantOccurrenceLocked(runID string, ordinal uint64) (SessionEntry, bool, error) {
+	var match SessionEntry
+	found := false
+	for _, row := range s.branchRows {
+		if row.RecordVersion != 1 || row.Type != EntryTypeAssistant || row.RunID != runID || row.AssistantTranscriptOrdinal == nil || *row.AssistantTranscriptOrdinal != ordinal || len(row.ToolCalls) == 0 {
+			continue
+		}
+		if found {
+			return SessionEntry{}, false, fmt.Errorf("session: run %q has multiple assistant rows at ordinal %d", runID, ordinal)
+		}
+		match = *row.clone()
+		found = true
+	}
+	return match, found, nil
+}
+
+func (s *SessionRunCommitSink) actionRowLocked(candidate SessionEntry) (SessionEntry, bool, error) {
+	candidateRef := refFromEntry(candidate, s.sessionID)
+	var match SessionEntry
+	found := false
+	for _, row := range s.branchRows {
+		if row.RecordVersion != 1 || row.ActionState != candidate.ActionState {
+			continue
+		}
+		if row.ID == candidate.ID && !sameActionReference(candidateRef, refFromEntry(row, s.sessionID)) {
+			return SessionEntry{}, false, fmt.Errorf("session: stable action row ID %q conflicts with its full action reference", candidate.ID)
+		}
+		if !sameActionReference(candidateRef, refFromEntry(row, s.sessionID)) || row.OwnerGeneration != candidate.OwnerGeneration {
+			continue
+		}
+		if row.ID != candidate.ID {
+			return SessionEntry{}, false, fmt.Errorf("session: action reference has conflicting stable row IDs %q and %q", row.ID, candidate.ID)
+		}
+		if found {
+			return SessionEntry{}, false, fmt.Errorf("session: action reference repeats journal row %q", candidate.ActionID)
+		}
+		match = *row.clone()
+		found = true
+	}
+	return match, found, nil
+}
+
+func (s *SessionRunCommitSink) findOccurrenceIntentLocked(runID string, ordinal uint64, toolCallID string) (SessionEntry, bool, error) {
+	var match SessionEntry
+	found := false
+	for _, row := range s.branchRows {
+		if row.RecordVersion != 1 || row.Type != EntryTypeTool || row.ActionState != ActionStateIntent || row.RunID != runID || row.AssistantTranscriptOrdinal == nil || *row.AssistantTranscriptOrdinal != ordinal || row.ToolCallID != toolCallID {
+			continue
+		}
+		if found {
+			return SessionEntry{}, false, fmt.Errorf("session: occurrence %q has multiple durable intents", toolCallID)
+		}
+		match = *row.clone()
+		found = true
+	}
+	return match, found, nil
+}
+
+func (s *SessionRunCommitSink) findActionIntentLocked(runID string, ordinal uint64, toolCallID, actionID, ownerGeneration string) (SessionEntry, error) {
+	intent, found, err := s.findOccurrenceIntentLocked(runID, ordinal, toolCallID)
+	if err != nil {
+		return SessionEntry{}, err
+	}
+	if !found {
+		return SessionEntry{}, fmt.Errorf("session: action %q has no durable intent", actionID)
+	}
+	if intent.ActionID != actionID || intent.OwnerGeneration != ownerGeneration || intent.WorkspaceID != s.workspaceID || intent.ActionBatchID == "" {
+		return SessionEntry{}, fmt.Errorf("session: action %q does not match the full durable intent reference", actionID)
+	}
+	return intent, nil
+}
+
+func (s *SessionRunCommitSink) findIntentByActionIDLocked(runID, actionID, ownerGeneration string) (SessionEntry, error) {
+	var match SessionEntry
+	found := false
+	for _, row := range s.branchRows {
+		if row.RecordVersion != 1 || row.Type != EntryTypeTool || row.ActionState != ActionStateIntent || row.ActionID != actionID {
+			continue
+		}
+		if row.RunID != runID || row.OwnerGeneration != ownerGeneration || row.WorkspaceID != s.workspaceID {
+			return SessionEntry{}, errors.New("session: action ID belongs to a different run owner or workspace")
+		}
+		if found {
+			return SessionEntry{}, fmt.Errorf("session: action ID %q has multiple durable intents", actionID)
+		}
+		match = *row.clone()
+		found = true
+	}
+	if !found {
+		return SessionEntry{}, fmt.Errorf("session: action %q has no durable intent", actionID)
+	}
+	return match, nil
+}
+
+func (s *SessionRunCommitSink) findReceiptForIntentLocked(ref PendingActionRef) (SessionEntry, error) {
+	var match SessionEntry
+	found := false
+	for _, row := range s.branchRows {
+		if row.RecordVersion != 1 || row.Type != EntryTypeTool || row.ActionState != "" || row.RunID != ref.RunID || row.AssistantTranscriptOrdinal == nil || *row.AssistantTranscriptOrdinal != ref.AssistantTranscriptOrdinal || row.ToolCallID != ref.ToolCallID {
+			continue
+		}
+		if !sameActionReference(ref, refFromEntry(row, s.sessionID)) {
+			return SessionEntry{}, errors.New("session: durable receipt does not match the full reserved action reference")
+		}
+		if found {
+			return SessionEntry{}, errors.New("session: action has multiple durable terminal receipts")
+		}
+		match = *row.clone()
+		found = true
+	}
+	if !found {
+		return SessionEntry{}, errors.New("session: execution resolution requires an earlier durable terminal receipt")
+	}
+	return match, nil
+}
+
+func (s *SessionRunCommitSink) resolveEvidenceReferenceLocked(
+	resolution core.ExecutionResolution,
+	ref PendingActionRef,
+	intent SessionEntry,
+	receipt SessionEntry,
+) (core.ExecutionResolution, error) {
+	selectExact := func(candidates []SessionEntry, expectedKind string) (string, error) {
+		if resolution.EvidenceRef != "" {
+			for _, candidate := range candidates {
+				if candidate.ID == resolution.EvidenceRef {
+					return candidate.ID, nil
+				}
+			}
+			return "", fmt.Errorf("session: evidence reference %q does not name a matching %s row", resolution.EvidenceRef, expectedKind)
+		}
+		if len(candidates) != 1 {
+			return "", fmt.Errorf("session: expected exactly one matching %s row, found %d", expectedKind, len(candidates))
+		}
+		return candidates[0].ID, nil
+	}
+	switch resolution.Evidence {
+	case core.ResolutionNeverDispatched:
+		if receipt.DispatchState != core.DispatchStateNotDispatched || (receipt.ReceiptOutcome != core.ReceiptOutcomeError && receipt.ReceiptOutcome != core.ReceiptOutcomeInterrupted) || receipt.ActionID != ref.ActionID {
+			return core.ExecutionResolution{}, errors.New("session: never-dispatched resolution lacks an exact not-dispatched denial receipt")
+		}
+		id, err := selectExact([]SessionEntry{receipt}, "not-dispatched receipt")
+		if err != nil {
+			return core.ExecutionResolution{}, err
+		}
+		resolution.EvidenceRef = id
+	case core.ResolutionLocalResourcesStopped:
+		if receipt.DispatchState != core.DispatchStateDispatched {
+			return core.ExecutionResolution{}, errors.New("session: local quiescence resolution requires a dispatched terminal receipt")
+		}
+		candidates := make([]SessionEntry, 0, 1)
+		for _, row := range s.branchRows {
+			if row.RecordVersion != 1 || row.ActionState != ActionStateExecution || row.CompletionProof == "" || row.DispatchState != core.DispatchStateDispatched || row.Seq <= intent.Seq || !sameActionReference(ref, refFromEntry(row, s.sessionID)) {
+				continue
+			}
+			candidates = append(candidates, *row.clone())
+		}
+		id, err := selectExact(candidates, "completion-bearing execution")
+		if err != nil {
+			return core.ExecutionResolution{}, err
+		}
+		resolution.EvidenceRef = id
+	case core.ResolutionOperatorReconciled:
+		candidates := make([]SessionEntry, 0, 1)
+		for _, row := range s.branchRows {
+			if row.RecordVersion != 1 || row.Type != EntryTypeCheckpoint || row.CheckpointKind != CheckpointReconciliation || row.Seq <= receipt.Seq || !sameActionReference(ref, refFromEntry(row, s.sessionID)) {
+				continue
+			}
+			candidates = append(candidates, *row.clone())
+		}
+		id, err := selectExact(candidates, "operator reconciliation checkpoint")
+		if err != nil {
+			return core.ExecutionResolution{}, err
+		}
+		resolution.EvidenceRef = id
+	case core.ResolutionRemoteTerminal:
+		return core.ExecutionResolution{}, errors.New("session: remote terminal resolution requires unsupported typed protocol evidence")
+	default:
+		return core.ExecutionResolution{}, fmt.Errorf("session: unsupported execution resolution evidence %q", resolution.Evidence)
+	}
+	return resolution, nil
+}
+
+func (s *SessionRunCommitSink) receiptEntry(receipt core.RunToolReceipt, message core.AgentMessage, intent SessionEntry) SessionEntry {
+	row := sessionEntryFromRunCommitMessage(message, EntryTypeTool)
+	row.RunID = receipt.RunID
+	row.WorkspaceID = s.workspaceID
+	row.ToolCallID = receipt.ToolCallID
+	row.ToolName = message.ToolName
+	row.ReceiptOutcome = receipt.ReceiptOutcome
+	row.DispatchState = receipt.DispatchState
+	ordinal, index := receipt.AssistantTranscriptOrdinal, receipt.TranscriptIndex
+	row.AssistantTranscriptOrdinal = &ordinal
+	row.TranscriptIndex = &index
+	if receipt.ActionID != "" {
+		row.ActionBatchID = intent.ActionBatchID
+		row.ActionID = intent.ActionID
+		row.OwnerGeneration = intent.OwnerGeneration
+	}
+	return row
+}
+
+func sameReceiptRow(existing, candidate SessionEntry) bool {
+	return existing.ID == candidate.ID && existing.Type == EntryTypeTool && existing.ActionState == "" &&
+		existing.RunID == candidate.RunID && existing.WorkspaceID == candidate.WorkspaceID &&
+		existing.ActionBatchID == candidate.ActionBatchID && existing.ActionID == candidate.ActionID &&
+		existing.OwnerGeneration == candidate.OwnerGeneration && existing.AssistantTranscriptOrdinal != nil &&
+		candidate.AssistantTranscriptOrdinal != nil && *existing.AssistantTranscriptOrdinal == *candidate.AssistantTranscriptOrdinal &&
+		existing.TranscriptIndex != nil && candidate.TranscriptIndex != nil && *existing.TranscriptIndex == *candidate.TranscriptIndex &&
+		existing.ToolCallID == candidate.ToolCallID && existing.ToolName == candidate.ToolName &&
+		existing.ReceiptOutcome == candidate.ReceiptOutcome && existing.DispatchState == candidate.DispatchState &&
+		durableRowMatchesMessage(existing, core.AgentMessage{
+			Role: "tool", Content: candidate.Content, ContentBlocks: candidate.ContentBlocks, Usage: candidate.Usage,
+			ToolCallID: candidate.ToolCallID, ToolName: candidate.ToolName, ReceiptOutcome: candidate.ReceiptOutcome,
+		})
+}
+
+func sameExecutionObservation(existing, candidate SessionEntry) bool {
+	return existing.ID == candidate.ID && existing.Type == EntryTypeTool && existing.ActionState == ActionStateExecution &&
+		existing.RunID == candidate.RunID && existing.WorkspaceID == candidate.WorkspaceID &&
+		existing.ActionBatchID == candidate.ActionBatchID && existing.ActionID == candidate.ActionID &&
+		existing.OwnerGeneration == candidate.OwnerGeneration &&
+		sameUint64Pointer(existing.AssistantTranscriptOrdinal, candidate.AssistantTranscriptOrdinal) &&
+		existing.ToolCallID == candidate.ToolCallID && existing.ToolName == candidate.ToolName &&
+		existing.DispatchState == candidate.DispatchState && existing.ResourceState == candidate.ResourceState &&
+		existing.CompletionProof == candidate.CompletionProof && reflect.DeepEqual(existing.ExecutionIdentity, candidate.ExecutionIdentity)
+}
+
+func assistantToolName(assistant SessionEntry, toolCallID string) (string, bool) {
+	for _, call := range assistant.ToolCalls {
+		if call.ID == toolCallID {
+			return call.Name, true
+		}
+	}
+	return "", false
+}
+
+func cloneUint64Pointer(value *uint64) *uint64 {
+	if value == nil {
+		return nil
+	}
+	copy := *value
+	return &copy
+}
+
+func validRunReceiptOutcome(outcome string) bool {
+	switch outcome {
+	case core.ReceiptOutcomeSuccess, core.ReceiptOutcomeError, core.ReceiptOutcomeInterrupted, core.ReceiptOutcomeUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func validateTranscriptRowsInPhysicalOrder(rows []SessionEntry, runID string) error {
+	var next uint64
+	for _, row := range rows {
+		if row.RecordVersion != 1 || row.RunID != runID || row.TranscriptIndex == nil || row.ActionState != "" || row.Type == EntryTypeCheckpoint || row.Type == EntryTypeCompaction {
+			continue
+		}
+		if *row.TranscriptIndex != next {
+			return fmt.Errorf("session: run %q durable transcript is not a physical canonical prefix at row %q: index %d, want %d", runID, row.ID, *row.TranscriptIndex, next)
+		}
+		if next == ^uint64(0) {
+			return fmt.Errorf("session: run %q transcript index is exhausted", runID)
+		}
+		next++
+	}
+	return nil
+}
+
+func sameIntentPayload(existing, candidate SessionEntry) bool {
+	return existing.ID == candidate.ID && existing.Type == candidate.Type && existing.RunID == candidate.RunID &&
+		existing.WorkspaceID == candidate.WorkspaceID && existing.ActionBatchID == candidate.ActionBatchID &&
+		existing.ActionID == candidate.ActionID && existing.OwnerGeneration == candidate.OwnerGeneration &&
+		existing.ActionState == candidate.ActionState && sameUint64Pointer(existing.AssistantTranscriptOrdinal, candidate.AssistantTranscriptOrdinal) &&
+		existing.ToolCallID == candidate.ToolCallID && existing.ToolName == candidate.ToolName &&
+		existing.ArgumentDigest == candidate.ArgumentDigest && existing.SchemaDigest == candidate.SchemaDigest &&
+		reflect.DeepEqual(existing.ToolIdentity, candidate.ToolIdentity) && reflect.DeepEqual(existing.EffectSet, candidate.EffectSet)
+}
+
+func sameUint64Pointer(left, right *uint64) bool {
+	if left == nil || right == nil {
+		return left == right
+	}
+	return *left == *right
+}
+
+func validateRunCommitToolCalls(calls []llm.ToolCall) error {
+	seen := make(map[string]struct{}, len(calls))
+	for index, call := range calls {
+		if call.ID == "" || call.Name == "" {
+			return fmt.Errorf("session: assistant tool call at index %d has incomplete identity", index)
+		}
+		if _, exists := seen[call.ID]; exists {
+			return fmt.Errorf("session: assistant message repeats tool call ID %q", call.ID)
+		}
+		seen[call.ID] = struct{}{}
+		if err := validateProtocolJSONArgument(call.Args); err != nil {
+			return fmt.Errorf("session: assistant tool call %q has non-JSON arguments: %w", call.ID, err)
+		}
+	}
+	return nil
+}
+
+func validateKnownPreDispatchReceipts(batch core.RunIntentBatch, calls map[string]llm.ToolCall) error {
+	seen := make(map[string]struct{}, len(batch.KnownReceipts))
+	for index, receipt := range batch.KnownReceipts {
+		if receipt.RunID != batch.RunID || receipt.AssistantTranscriptOrdinal != batch.AssistantTranscriptOrdinal || receipt.ActionID != "" || receipt.DispatchState != core.DispatchStateNotDispatched {
+			return fmt.Errorf("session: known pre-dispatch receipt at index %d has reserved or mismatched identity", index)
+		}
+		call, exists := calls[receipt.ToolCallID]
+		if !exists || receipt.Message.Role != "tool" || receipt.Message.ToolCallID != receipt.ToolCallID || receipt.Message.ToolName != call.Name {
+			return fmt.Errorf("session: known pre-dispatch receipt at index %d does not match an assistant tool call", index)
+		}
+		if receipt.ReceiptOutcome != core.ReceiptOutcomeError && receipt.ReceiptOutcome != core.ReceiptOutcomeInterrupted {
+			return fmt.Errorf("session: known pre-dispatch receipt at index %d has non-denial outcome %q", index, receipt.ReceiptOutcome)
+		}
+		if receipt.Message.ReceiptOutcome != "" && receipt.Message.ReceiptOutcome != receipt.ReceiptOutcome {
+			return fmt.Errorf("session: known pre-dispatch receipt at index %d conflicts with its message outcome", index)
+		}
+		if _, exists := seen[receipt.ToolCallID]; exists {
+			return fmt.Errorf("session: known pre-dispatch receipts repeat tool call %q", receipt.ToolCallID)
+		}
+		seen[receipt.ToolCallID] = struct{}{}
+	}
+	return nil
+}
+
+func (s *SessionRunCommitSink) appendAndRefreshLocked(ctx context.Context, rows ...SessionEntry) error {
+	_, err := s.appendAndRefreshRowsLocked(ctx, rows...)
+	return err
+}
+
+func (s *SessionRunCommitSink) appendAndRefreshRowsLocked(ctx context.Context, rows ...SessionEntry) ([]SessionEntry, error) {
+	if len(rows) == 0 {
+		return []SessionEntry{}, nil
+	}
+	parentID := s.leafID
+	for index := range rows {
+		row := &rows[index]
+		if row.ID == "" || row.Type == "" {
+			return nil, errors.New("session: run-commit row requires an ID and type")
+		}
+		row.RecordVersion = 1
+		row.SessionID = s.sessionID
+		row.BranchID = s.branchID
+		row.ParentID = parentID
+		if row.Timestamp.IsZero() {
+			row.Timestamp = time.Now().UTC()
+		}
+		parentID = row.ID
+	}
+	canonical, err := s.writer.AppendAndSync(ctx, rows...)
+	if err != nil {
+		return nil, fmt.Errorf("session: persist run-commit rows: %w", err)
+	}
+	if err := s.refreshLocked(); err != nil {
+		return nil, fmt.Errorf("session: refresh run-commit snapshot after sync: %w", err)
+	}
+	return canonical, nil
+}
+
+func (s *SessionRunCommitSink) refreshLocked() error {
+	snapshot, err := s.prepared.Snapshot()
+	if err != nil {
+		return err
+	}
+	if snapshot.SessionID != s.sessionID || snapshot.ActiveBranchID != s.branchID {
+		return errors.New("session: prepared run-commit session changed physical identity or branch")
+	}
+	allRows, branchRows, err := validateRunCommitSnapshot(snapshot)
+	if err != nil {
+		return err
+	}
+	if _, err := analyzeDurableActionJournal(allRows, s.sessionID); err != nil {
+		return fmt.Errorf("session: updated run-commit action journal is invalid: %w", err)
+	}
+	s.allRows = allRows
+	s.branchRows = branchRows
+	s.leafID = snapshot.ActiveLeafEntryID
+	s.maxSeq = snapshot.MaxSeq
+	return nil
+}
+
+func validateRunCommitSnapshot(snapshot PreparedSessionSnapshot) ([]SessionEntry, []SessionEntry, error) {
+	allRows := cloneSessionEntries(snapshot.DurableEntries)
+	entries := make(map[string]*SessionEntry, len(allRows))
+	var maxSeq uint64
+	for index := range allRows {
+		row := &allRows[index]
+		if row.ID == "" {
+			return nil, nil, fmt.Errorf("session: snapshot durable row %d has no ID", index)
+		}
+		if _, exists := entries[row.ID]; exists {
+			return nil, nil, fmt.Errorf("session: snapshot repeats durable row ID %q", row.ID)
+		}
+		if row.RecordVersion == 1 && row.Seq == 0 {
+			return nil, nil, fmt.Errorf("session: snapshot version 1 row %q has no sequence", row.ID)
+		}
+		if row.Seq > maxSeq {
+			maxSeq = row.Seq
+		}
+		entries[row.ID] = row
+	}
+	if maxSeq > snapshot.MaxSeq {
+		return nil, nil, errors.New("session: snapshot max sequence precedes a durable row")
+	}
+	if snapshot.ActiveLeafEntryID == "" {
+		if len(entries) != 0 {
+			return nil, nil, errors.New("session: non-empty snapshot has no active leaf")
+		}
+		return allRows, nil, nil
+	}
+	branchRows, err := orderedDurableBranch(snapshot.ActiveLeafEntryID, entries)
+	if err != nil {
+		return nil, nil, fmt.Errorf("session: select prepared active branch: %w", err)
+	}
+	if len(branchRows) == 0 {
+		return nil, nil, errors.New("session: active branch has no durable path")
+	}
+	return allRows, branchRows, nil
+}
+
+func transcriptRowsByIndex(rows []SessionEntry, runID string) (map[uint64]SessionEntry, error) {
+	indexed := make(map[uint64]SessionEntry)
+	for _, row := range rows {
+		if row.RecordVersion != 1 || row.RunID != runID || row.TranscriptIndex == nil || row.ActionState != "" || row.Type == EntryTypeCheckpoint || row.Type == EntryTypeCompaction {
+			continue
+		}
+		if previous, exists := indexed[*row.TranscriptIndex]; exists {
+			return nil, fmt.Errorf("session: run %q has duplicate transcript index %d in rows %q and %q", runID, *row.TranscriptIndex, previous.ID, row.ID)
+		}
+		indexed[*row.TranscriptIndex] = *row.clone()
+	}
+	return indexed, nil
+}
+
+func nextTranscriptIndex(rows map[uint64]SessionEntry) (uint64, error) {
+	for index := uint64(0); index < uint64(len(rows)); index++ {
+		if _, exists := rows[index]; !exists {
+			return 0, fmt.Errorf("session: canonical transcript has a hole at index %d", index)
+		}
+	}
+	if _, exists := rows[uint64(len(rows))]; exists {
+		return 0, errors.New("session: canonical transcript index range is not contiguous")
+	}
+	return uint64(len(rows)), nil
+}
+
+func durableRowMatchesMessage(row SessionEntry, expected core.AgentMessage) bool {
+	actual, ok := sessionEntryToAgentMessage(row)
+	return ok && reflect.DeepEqual(actual, expected)
+}
+
+func cloneRunCommitMessage(message core.AgentMessage) core.AgentMessage {
+	return core.CloneAgentMessages([]core.AgentMessage{message})[0]
+}
+
+func sessionEntryFromRunCommitMessage(message core.AgentMessage, entryType EntryType) SessionEntry {
+	message = cloneRunCommitMessage(message)
+	return SessionEntry{
+		Type: entryType, Content: message.Content, ContentBlocks: message.ContentBlocks,
+		Usage: message.Usage, ToolCalls: message.ToolCalls, ToolCallID: message.ToolCallID,
+		ToolName: message.ToolName, InputKind: message.InputKind, ReceiptOutcome: message.ReceiptOutcome,
+	}
+}
+
+func stableRunCommitEntryID(domain string, key any) (string, error) {
+	encoded, err := json.Marshal(key)
+	if err != nil {
+		return "", fmt.Errorf("session: encode stable run-commit entry identity: %w", err)
+	}
+	payload := append([]byte(domain+"\x00"), encoded...)
+	digest := sha256.Sum256(payload)
+	return "runcommit_" + hex.EncodeToString(digest[:]), nil
+}

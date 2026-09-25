@@ -117,6 +117,9 @@ type SessionEntry struct {
 	ActionState ActionState `json:"action_state,omitempty"`
 	// DispatchState records whether a reserved action crossed its dispatch fence.
 	DispatchState DispatchState `json:"dispatch_state,omitempty"`
+	// ResourceState is the run owner's local resource observation for an
+	// execution row. It is descriptive and never proves quiescence by itself.
+	ResourceState core.RunExecutionState `json:"resource_state,omitempty"`
 	// ReceiptOutcome records the known or unknown terminal outcome of a tool call.
 	ReceiptOutcome string `json:"receipt_outcome,omitempty"`
 	// PayloadDigest stores the canonical digest used to detect conflicting retries.

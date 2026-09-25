@@ -238,6 +238,9 @@ func validateVersion1EntryCoordinates(entry SessionEntry) error {
 	if entry.CompletionProof != "" && (entry.Type != EntryTypeTool || entry.ActionState != ActionStateExecution) {
 		return errors.New("session: completion proof is only valid on a version 1 execution row")
 	}
+	if entry.ResourceState != "" && (entry.Type != EntryTypeTool || entry.ActionState != ActionStateExecution) {
+		return errors.New("session: resource state is only valid on a version 1 execution row")
+	}
 
 	if entry.ActionState != "" {
 		if entry.Type != EntryTypeTool {
@@ -272,6 +275,9 @@ func validateVersion1EntryCoordinates(entry SessionEntry) error {
 		case ActionStateExecution:
 			if !validCompletionProof(entry.CompletionProof) {
 				return fmt.Errorf("session: execution row has unsupported completion proof %q", entry.CompletionProof)
+			}
+			if !validRunExecutionState(entry.ResourceState) {
+				return fmt.Errorf("session: execution row has unsupported resource state %q", entry.ResourceState)
 			}
 			if entry.CompletionProof != "" && entry.DispatchState != DispatchStateDispatched {
 				return errors.New("session: positive completion proof requires a dispatched execution row")
@@ -362,6 +368,16 @@ func isHexDigest(value string) bool {
 func validCompletionProof(proof tools.PreparedCompletionProof) bool {
 	switch proof {
 	case "", tools.CompletionInlinePipelineJoined, tools.CompletionQueuedJobJoined, tools.CompletionOwnedProcessGroupJoined:
+		return true
+	default:
+		return false
+	}
+}
+
+func validRunExecutionState(state core.RunExecutionState) bool {
+	switch state {
+	case "", core.RunExecutionRunning, core.RunExecutionCancelRequested, core.RunExecutionDraining,
+		core.RunExecutionCleanupPending, core.RunExecutionQuiescent, core.RunExecutionQuarantined:
 		return true
 	default:
 		return false
