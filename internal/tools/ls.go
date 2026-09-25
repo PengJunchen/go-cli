@@ -2,12 +2,11 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
 	"os"
-	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -86,9 +85,8 @@ func (t *LSTool) Parameters() any {
 
 // lsEntry is a single listing line for sorting purposes.
 type lsEntry struct {
-	path  string
-	info  fs.FileInfo
-	depth int
+	path string
+	info fs.FileInfo
 }
 
 // Execute lists the directory at path (default "."). With all=true dotfiles
@@ -137,96 +135,91 @@ func (t *LSTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, error
 		return nil, fmt.Errorf("ls: %q is not a directory", listPath)
 	}
 
-	var entries []lsEntry
-	err = filepath.WalkDir(listPath, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil // skip unreadable entries deterministically
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		if p == listPath {
-			return nil // skip the root dir itself
-		}
-		// Only list the immediate children (depth 1), not recursive files.
-		rel, rerr := filepath.Rel(listPath, p)
-		if rerr != nil {
-			rel = p
-		}
-		if strings.Contains(filepath.ToSlash(rel), "/") {
-			if d.IsDir() {
-				return filepath.SkipDir
+	less := func(a, b lsEntry) bool {
+		switch sortBy {
+		case "time":
+			if !a.info.ModTime().Equal(b.info.ModTime()) {
+				return a.info.ModTime().After(b.info.ModTime())
 			}
-			return nil
+		case "size":
+			if a.info.Size() != b.info.Size() {
+				return a.info.Size() < b.info.Size()
+			}
 		}
-		if !all && strings.HasPrefix(d.Name(), ".") {
-			return nil
-		}
-		fi, ferr := d.Info()
-		if ferr != nil {
-			return nil
-		}
-		entries = append(entries, lsEntry{path: rel, info: fi, depth: 1})
-		return nil
-	})
+		return a.path < b.path
+	}
+	entries := newBoundedTopK[lsEntry](directoryCaptureMaxEntries, directoryCaptureMaxEntryBytes,
+		func(entry lsEntry) string { return entry.path }, less)
+	directory, err := os.Open(listPath)
 	if err != nil {
 		span.SetAttributes(tracing.Attribute{Key: "path", Value: listPath}, tracing.Attribute{Key: "success", Value: false})
-		logger.Error("ls.walk_failed", "tool", "ls", "path", listPath, "err", err)
+		logger.Error("ls.open_failed", "tool", "ls", "path", listPath, "err", err)
+		return nil, fmt.Errorf("ls: %w", err)
+	}
+	truncated := false
+	err = scanDirectoryBatches(ctx, directory, directoryReadBatchSize, func(entry fs.DirEntry) error {
+		if !all && strings.HasPrefix(entry.Name(), ".") {
+			return nil
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			truncated = true
+			return nil
+		}
+		return entries.Add(lsEntry{path: entry.Name(), info: info})
+	})
+	if closeErr := directory.Close(); closeErr != nil {
+		err = errors.Join(err, closeErr)
+	}
+	if err != nil {
+		span.SetAttributes(tracing.Attribute{Key: "path", Value: listPath}, tracing.Attribute{Key: "success", Value: false})
+		logger.Error("ls.readdir_failed", "tool", "ls", "path", listPath, "err", err)
 		return nil, fmt.Errorf("ls: %w", err)
 	}
 
-	switch sortBy {
-	case "time":
-		sort.SliceStable(entries, func(i, j int) bool { return entries[i].info.ModTime().After(entries[j].info.ModTime()) })
-	case "size":
-		sort.SliceStable(entries, func(i, j int) bool { return entries[i].info.Size() < entries[j].info.Size() })
-	default:
-		sort.SliceStable(entries, func(i, j int) bool { return entries[i].path < entries[j].path })
-	}
-
-	var sb strings.Builder
-	for _, e := range entries {
+	output := newBoundedDirectoryOutput(directoryCaptureMaxOutputBytes)
+	for _, e := range entries.Sorted() {
+		var line strings.Builder
 		if long {
-			sb.WriteString(e.info.Mode().String())
-			sb.WriteString(" ")
-			sb.WriteString(fmt.Sprintf("%10d", e.info.Size()))
-			sb.WriteString(" ")
-			sb.WriteString(e.info.ModTime().Format("Jan _2 15:04"))
-			sb.WriteString(" ")
-			sb.WriteString(e.path)
+			line.WriteString(e.info.Mode().String())
+			line.WriteString(" ")
+			line.WriteString(fmt.Sprintf("%10d", e.info.Size()))
+			line.WriteString(" ")
+			line.WriteString(e.info.ModTime().Format("Jan _2 15:04"))
+			line.WriteString(" ")
+			line.WriteString(e.path)
 			if e.info.IsDir() {
-				sb.WriteString("/")
+				line.WriteString("/")
 			}
-			sb.WriteString("\n")
 		} else {
-			sb.WriteString(e.path)
+			line.WriteString(e.path)
 			if e.info.IsDir() {
-				sb.WriteString("/")
+				line.WriteString("/")
 			}
-			sb.WriteString("\n")
+		}
+		if !output.AppendLine(line.String()) {
+			break
 		}
 	}
-
-	output := strings.TrimSuffix(sb.String(), "\n")
+	truncated = truncated || entries.Truncated() || output.Truncated()
 
 	span.SetAttributes(
 		tracing.Attribute{Key: "path", Value: listPath},
-		tracing.Attribute{Key: "entries", Value: len(entries)},
+		tracing.Attribute{Key: "entries", Value: output.Records()},
+		tracing.Attribute{Key: "truncated", Value: truncated},
 		tracing.Attribute{Key: "success", Value: true},
 	)
 	logger.Info("ls.done",
 		"tool", "ls",
 		"path", listPath,
-		"entries", len(entries),
+		"entries", output.Records(),
 		"sort", sortBy,
+		"truncated", truncated,
 		"duration_ms", time.Since(start).Milliseconds())
 
 	return &ToolResult{
-		Output:   output,
-		Metadata: map[string]any{"path": listPath, "entries": len(entries), "sort": sortBy},
+		Output:   output.String(),
+		Metadata: map[string]any{"path": listPath, "entries": output.Records(), "sort": sortBy, "truncated": truncated},
 	}, nil
 }
 

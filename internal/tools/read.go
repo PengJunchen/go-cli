@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"log/slog"
 	"os"
 	"strings"
@@ -60,6 +61,11 @@ type ReadTool struct {
 }
 
 var _ ToolDefinition = (*ReadTool)(nil)
+
+type readDirectoryEntry struct {
+	name  string
+	isDir bool
+}
 
 // NewReadTool returns a ReadTool with sensible defaults (workdir ".", max
 // bytes 1 MiB). Options may override the defaults.
@@ -155,31 +161,55 @@ func (t *ReadTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 	}
 
 	if info.IsDir() {
-		entries, listErr := os.ReadDir(abspath)
+		directory, openErr := os.Open(abspath)
+		if openErr != nil {
+			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+			logger.Error("read.readdir_failed", "path", abspath, "err", openErr)
+			return nil, fmt.Errorf("read: %w", openErr)
+		}
+
+		entries := newBoundedTopK[readDirectoryEntry](directoryCaptureMaxEntries, directoryCaptureMaxEntryBytes,
+			func(entry readDirectoryEntry) string { return entry.name },
+			func(a, b readDirectoryEntry) bool { return a.name < b.name },
+		)
+		listErr := scanDirectoryBatches(ctx, directory, directoryReadBatchSize, func(entry fs.DirEntry) error {
+			item := readDirectoryEntry{name: entry.Name(), isDir: entry.IsDir()}
+			return entries.Add(item)
+		})
+		if closeErr := directory.Close(); closeErr != nil {
+			listErr = errors.Join(listErr, closeErr)
+		}
 		if listErr != nil {
 			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 			logger.Error("read.readdir_failed", "path", abspath, "err", listErr)
 			return nil, fmt.Errorf("read: %w", listErr)
 		}
 
-		var sb strings.Builder
-		for _, e := range entries {
-			sb.WriteString(e.Name())
-			if e.IsDir() {
-				sb.WriteString("/")
+		output := newBoundedDirectoryOutput(directoryCaptureMaxOutputBytes)
+		for _, entry := range entries.Sorted() {
+			name := entry.name
+			if entry.isDir {
+				name += "/"
 			}
-			sb.WriteString("\n")
+			if !output.AppendLine(name) {
+				break
+			}
 		}
-
-		span.SetAttributes(tracing.Attribute{Key: "success", Value: true})
+		truncated := entries.Truncated() || output.Truncated()
+		span.SetAttributes(
+			tracing.Attribute{Key: "entries", Value: output.Records()},
+			tracing.Attribute{Key: "truncated", Value: truncated},
+			tracing.Attribute{Key: "success", Value: true},
+		)
 		logger.Info("read.dir",
 			"path", abspath,
-			"entries", len(entries),
+			"entries", output.Records(),
+			"truncated", truncated,
 			"duration_ms", time.Since(start).Milliseconds())
 
 		return &ToolResult{
-			Output:   strings.TrimSuffix(sb.String(), "\n"),
-			Metadata: map[string]any{"path": abspath, "entries": len(entries)},
+			Output:   output.String(),
+			Metadata: map[string]any{"path": abspath, "entries": output.Records(), "truncated": truncated},
 		}, nil
 	}
 

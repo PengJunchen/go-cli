@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -69,6 +70,30 @@ func TestReadDirectoryListsEntries(t *testing.T) {
 	assert.Contains(t, res.Output, "b.txt")
 	assert.Contains(t, res.Output, "sub/")
 	assert.Equal(t, 3, res.Metadata["entries"])
+	assert.Equal(t, false, res.Metadata["truncated"])
+}
+
+func TestReadDirectoryReturnsSortedPrefixWithinEntryLimit(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	const total = directoryCaptureMaxEntries + 5
+	for i := total - 1; i >= 0; i-- {
+		name := fmt.Sprintf("entry-%04d", i)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), nil, 0o600))
+	}
+
+	result, err := NewReadTool(WithWorkdir(dir)).Execute(context.Background(), ToolCall{
+		Args: map[string]any{"path": "."},
+	})
+	require.NoError(t, err)
+	want := make([]string, directoryCaptureMaxEntries)
+	for i := range want {
+		want[i] = fmt.Sprintf("entry-%04d", i)
+	}
+	assert.Equal(t, strings.Join(want, "\n"), result.Output)
+	assert.Equal(t, directoryCaptureMaxEntries, result.Metadata["entries"])
+	assert.Equal(t, true, result.Metadata["truncated"])
 }
 
 func TestReadMaxBytesError(t *testing.T) {

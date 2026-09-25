@@ -4,12 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io/fs"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -25,8 +24,13 @@ const (
 	// findDefaultMaxDepth disables depth limiting (0 means unlimited).
 	findDefaultMaxDepth = 0
 	// findMaxResults caps the number of paths returned in one call.
-	findMaxResults = 1000
+	findMaxResults = directoryCaptureMaxEntries
 )
+
+type findCaptureResult struct {
+	paths     []string
+	truncated bool
+}
 
 // FindToolOption configures a FindTool.
 type FindToolOption func(*FindTool)
@@ -133,7 +137,7 @@ func (t *FindTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		maxDepth = v
 	}
 
-	matches, lifecycle, helperStarted, err := t.find(ctx, searchPath, pattern, kind, maxDepth)
+	captured, lifecycle, helperStarted, err := t.find(ctx, searchPath, pattern, kind, maxDepth)
 	if helperStarted {
 		reportPreparedLocalProcessCompletion(ctx, lifecycle)
 	}
@@ -143,63 +147,66 @@ func (t *FindTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		return &ToolResult{Output: ""}, err
 	}
 
-	sort.Strings(matches)
-	if len(matches) > findMaxResults {
-		matches = matches[:findMaxResults]
+	output := newBoundedDirectoryOutput(directoryCaptureMaxOutputBytes)
+	for _, match := range captured.paths {
+		if !output.AppendLine(match) {
+			break
+		}
 	}
-
-	output := strings.Join(matches, "\n")
+	truncated := captured.truncated || output.Truncated()
 
 	span.SetAttributes(
 		tracing.Attribute{Key: "path", Value: searchPath},
 		tracing.Attribute{Key: "pattern", Value: pattern},
-		tracing.Attribute{Key: "matches", Value: len(matches)},
+		tracing.Attribute{Key: "matches", Value: output.Records()},
+		tracing.Attribute{Key: "truncated", Value: truncated},
 		tracing.Attribute{Key: "success", Value: true},
 	)
 	logger.Info("find.done",
 		"tool", "find",
 		"path", searchPath,
 		"pattern", pattern,
-		"matches", len(matches),
+		"matches", output.Records(),
+		"truncated", truncated,
 		"duration_ms", time.Since(start).Milliseconds())
 
 	return &ToolResult{
-		Output:   output,
-		Metadata: map[string]any{"path": searchPath, "pattern": pattern, "matches": len(matches)},
+		Output:   output.String(),
+		Metadata: map[string]any{"path": searchPath, "pattern": pattern, "matches": output.Records(), "truncated": truncated},
 	}, nil
 }
 
 // find runs fd, then find, then falls back to the pure-Go walker.
-func (t *FindTool) find(ctx context.Context, searchPath, pattern, kind string, maxDepth int) ([]string, managedLocalResult, bool, error) {
+func (t *FindTool) find(ctx context.Context, searchPath, pattern, kind string, maxDepth int) (findCaptureResult, managedLocalResult, bool, error) {
 	var lastLifecycle managedLocalResult
 	helperStarted := false
 	if !t.forceNode {
-		paths, ok, lifecycle, started, err := findWithFdManaged(ctx, searchPath, pattern, kind, maxDepth)
+		captured, ok, lifecycle, started, err := findWithFdManaged(ctx, searchPath, pattern, kind, maxDepth)
 		if started {
 			lastLifecycle = lifecycle
 			helperStarted = true
 		}
 		if !shouldFallbackAfterManagedHelper(ctx, err) {
-			return nil, lastLifecycle, helperStarted, err
+			return findCaptureResult{}, lastLifecycle, helperStarted, err
 		}
 		if ok {
-			return paths, lastLifecycle, helperStarted, err
+			return captured, lastLifecycle, helperStarted, err
 		}
 
-		paths, ok, lifecycle, started, err = findWithFindManaged(ctx, searchPath, pattern, kind, maxDepth)
+		captured, ok, lifecycle, started, err = findWithFindManaged(ctx, searchPath, pattern, kind, maxDepth)
 		if started {
 			lastLifecycle = lifecycle
 			helperStarted = true
 		}
 		if !shouldFallbackAfterManagedHelper(ctx, err) {
-			return nil, lastLifecycle, helperStarted, err
+			return findCaptureResult{}, lastLifecycle, helperStarted, err
 		}
 		if ok {
-			return paths, lastLifecycle, helperStarted, err
+			return captured, lastLifecycle, helperStarted, err
 		}
 	}
-	paths, err := findPureGo(ctx, searchPath, pattern, kind, maxDepth)
-	return paths, lastLifecycle, helperStarted, err
+	captured, err := findPureGo(ctx, searchPath, pattern, kind, maxDepth)
+	return captured, lastLifecycle, helperStarted, err
 }
 
 // findWithFd runs `fd --type <kind> --max-depth <n> -- <pattern> <path>` when
@@ -207,13 +214,13 @@ func (t *FindTool) find(ctx context.Context, searchPath, pattern, kind string, m
 // from enabling fd execution options. ok is false when fd is not on PATH or
 // fails.
 func findWithFd(ctx context.Context, searchPath, pattern, kind string, maxDepth int) ([]string, bool, error) {
-	paths, ok, _, _, err := findWithFdManaged(ctx, searchPath, pattern, kind, maxDepth)
-	return paths, ok, err
+	captured, ok, _, _, err := findWithFdManaged(ctx, searchPath, pattern, kind, maxDepth)
+	return captured.paths, ok, err
 }
 
-func findWithFdManaged(ctx context.Context, searchPath, pattern, kind string, maxDepth int) ([]string, bool, managedLocalResult, bool, error) {
+func findWithFdManaged(ctx context.Context, searchPath, pattern, kind string, maxDepth int) (findCaptureResult, bool, managedLocalResult, bool, error) {
 	if _, err := exec.LookPath("fd"); err != nil {
-		return nil, false, managedLocalResult{}, false, nil
+		return findCaptureResult{}, false, managedLocalResult{}, false, nil
 	}
 	args := []string{}
 	if kind == "f" {
@@ -228,28 +235,36 @@ func findWithFdManaged(ctx context.Context, searchPath, pattern, kind string, ma
 	args = append(args, searchPath)
 
 	cmd := exec.Command("fd", args...)
-	out, lifecycle, err := runManagedSearchCommand(ctx, cmd)
+	capture := newFindPathCaptureWriter(findMaxResults, directoryCaptureMaxEntryBytes)
+	lifecycle, err := runManagedSearchCommandWithStdoutWriter(ctx, cmd, capture)
 	if err != nil {
-		return nil, false, lifecycle, false, err
+		return findCaptureResult{}, false, lifecycle, false, err
 	}
 	if err := managedSearchLifecycleError(ctx, "find: fd", lifecycle); err != nil {
-		return nil, false, lifecycle, true, fmt.Errorf("find: fd: %w", err)
+		if captureErr := capture.CaptureError(); captureErr != nil {
+			err = errors.Join(err, captureErr)
+		}
+		return findCaptureResult{}, false, lifecycle, true, fmt.Errorf("find: fd: %w", err)
+	}
+	captureErr := capture.Finish()
+	if captureErr != nil {
+		return findCaptureResult{}, false, lifecycle, true, errors.Join(captureErr, lifecycle.runErr)
 	}
 	if lifecycle.runErr != nil {
 		var ee *exec.ExitError
 		if errors.As(lifecycle.runErr, &ee) && ee.ExitCode() == 1 {
 			// fd exits 1 when no matches: empty result is valid.
-			return []string{}, true, lifecycle, true, nil
+			return findCaptureResult{}, true, lifecycle, true, nil
 		}
-		return nil, false, lifecycle, true, lifecycle.runErr
+		return findCaptureResult{}, false, lifecycle, true, lifecycle.runErr
 	}
-	return splitLines(string(out)), true, lifecycle, true, nil
+	return findCaptureResult{paths: capture.Results(), truncated: capture.Truncated()}, true, lifecycle, true, nil
 }
 
-func findWithFindManaged(ctx context.Context, searchPath, pattern, kind string, maxDepth int) ([]string, bool, managedLocalResult, bool, error) {
+func findWithFindManaged(ctx context.Context, searchPath, pattern, kind string, maxDepth int) (findCaptureResult, bool, managedLocalResult, bool, error) {
 	path, err := exec.LookPath("find")
 	if err != nil {
-		return nil, false, managedLocalResult{}, false, nil
+		return findCaptureResult{}, false, managedLocalResult{}, false, nil
 	}
 	args := []string{searchPath}
 	if maxDepth > 0 {
@@ -266,80 +281,166 @@ func findWithFindManaged(ctx context.Context, searchPath, pattern, kind string, 
 	}
 
 	cmd := exec.Command(path, args...)
-	out, lifecycle, err := runManagedSearchCommand(ctx, cmd)
+	capture := newFindPathCaptureWriter(findMaxResults, directoryCaptureMaxEntryBytes)
+	lifecycle, err := runManagedSearchCommandWithStdoutWriter(ctx, cmd, capture)
 	if err != nil {
-		return nil, false, lifecycle, false, err
+		return findCaptureResult{}, false, lifecycle, false, err
 	}
 	if err := managedSearchLifecycleError(ctx, "find: find", lifecycle); err != nil {
-		return nil, false, lifecycle, true, fmt.Errorf("find: find: %w", err)
+		if captureErr := capture.CaptureError(); captureErr != nil {
+			err = errors.Join(err, captureErr)
+		}
+		return findCaptureResult{}, false, lifecycle, true, fmt.Errorf("find: find: %w", err)
+	}
+	captureErr := capture.Finish()
+	if captureErr != nil {
+		return findCaptureResult{}, false, lifecycle, true, errors.Join(captureErr, lifecycle.runErr)
 	}
 	if lifecycle.runErr != nil {
-		return nil, false, lifecycle, true, lifecycle.runErr
+		return findCaptureResult{}, false, lifecycle, true, lifecycle.runErr
 	}
-	return splitLines(string(out)), true, lifecycle, true, nil
+	return findCaptureResult{paths: capture.Results(), truncated: capture.Truncated()}, true, lifecycle, true, nil
 }
 
-// findPureGo walks searchPath using filepath.WalkDir, matching entries by base
-// name against pattern. It returns matched paths relative to searchPath when
-// possible (mirroring fd/find output), otherwise absolute.
-func findPureGo(ctx context.Context, searchPath, pattern, kind string, maxDepth int) ([]string, error) {
-	var matches []string
+// findPureGo walks searchPath depth-first with one-entry ReadDir calls,
+// matching entries by base name against pattern. It returns matched paths
+// relative to searchPath when possible (mirroring fd/find output), otherwise
+// absolute. Open directory handles are bounded by traversal depth.
+func findPureGo(ctx context.Context, searchPath, pattern, kind string, maxDepth int) (result findCaptureResult, err error) {
+	if err := ctx.Err(); err != nil {
+		return findCaptureResult{}, err
+	}
 	info, err := os.Stat(searchPath)
 	if err != nil {
-		return nil, fmt.Errorf("find: %w", err)
+		return findCaptureResult{}, fmt.Errorf("find: %w", err)
 	}
 	if !info.IsDir() {
 		// A single file path: include it if its base name matches.
 		if findMatches(filepath.Base(searchPath), pattern) && findKindOK(kind, false) {
-			return []string{searchPath}, nil
-		}
-		return []string{}, nil
-	}
-
-	base, err := filepath.Abs(searchPath)
-	if err != nil {
-		base = searchPath
-	}
-	walkErr := filepath.WalkDir(searchPath, func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return nil // skip unreadable entries deterministically
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-		}
-
-		if p == searchPath {
-			return nil // skip the root dir itself
-		}
-		rel, rerr := filepath.Rel(base, p)
-		if rerr != nil {
-			rel = p
-		}
-		depth := len(strings.Split(filepath.ToSlash(rel), "/"))
-		if maxDepth > 0 && depth > maxDepth {
-			if d.IsDir() {
-				return filepath.SkipDir
+			paths := newBoundedTopK[string](findMaxResults, directoryCaptureMaxEntryBytes,
+				func(path string) string { return path }, func(a, b string) bool { return a < b })
+			if err := paths.Add(searchPath); err != nil {
+				return findCaptureResult{}, err
 			}
-			return nil
+			return findCaptureResult{paths: paths.Sorted(), truncated: paths.Truncated()}, nil
 		}
-		if !findKindOK(kind, d.IsDir()) {
-			return nil
-		}
-		name := d.Name()
-		if pattern != "" && !matchGlob(pattern, name) {
-			return nil
-		}
-		matches = append(matches, filepath.Clean(rel))
-		return nil
-	})
-	// The walk is best-effort: unreadable entries are skipped deterministically
-	// inside the callback, so a root-level error still returns partial results.
-	if walkErr != nil && ctx.Err() != nil {
-		return matches, ctx.Err()
+		return findCaptureResult{}, nil
 	}
-	return matches, nil
+	rootInfo, err := os.Lstat(searchPath)
+	if err != nil {
+		return findCaptureResult{}, fmt.Errorf("find: %w", err)
+	}
+	if rootInfo.Mode()&os.ModeSymlink != 0 {
+		// WalkDir does not descend through a symlink when the symlink itself is
+		// the search root, and its root callback is excluded from results.
+		return findCaptureResult{}, nil
+	}
+
+	root, err := os.Open(searchPath)
+	if err != nil {
+		return findCaptureResult{}, fmt.Errorf("find: open root: %w", err)
+	}
+	stack := []findDirectoryFrame{{file: root, fullPath: searchPath}}
+	defer func() {
+		for i := len(stack) - 1; i >= 0; i-- {
+			if closeErr := stack[i].file.Close(); closeErr != nil {
+				err = errors.Join(err, fmt.Errorf("find: close directory: %w", closeErr))
+			}
+		}
+	}()
+	paths := newBoundedTopK[string](findMaxResults, directoryCaptureMaxEntryBytes,
+		func(path string) string { return path }, func(a, b string) bool { return a < b })
+	truncated := false
+	popFrame := func() error {
+		index := len(stack) - 1
+		file := stack[index].file
+		stack = stack[:index]
+		return file.Close()
+	}
+
+	for len(stack) > 0 {
+		if err := ctx.Err(); err != nil {
+			return findCaptureResult{}, err
+		}
+		frame := &stack[len(stack)-1]
+		entries, readErr := frame.file.ReadDir(1)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return findCaptureResult{}, ctxErr
+		}
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			if frame.depth == 0 {
+				return findCaptureResult{}, fmt.Errorf("find: read root: %w", readErr)
+			}
+			truncated = true
+			if closeErr := popFrame(); closeErr != nil {
+				return findCaptureResult{}, errors.Join(fmt.Errorf("find: read child: %w", readErr), closeErr)
+			}
+			continue
+		}
+		if len(entries) == 0 {
+			if readErr == nil {
+				if frame.depth == 0 {
+					return findCaptureResult{}, io.ErrNoProgress
+				}
+				truncated = true
+			}
+			if closeErr := popFrame(); closeErr != nil {
+				return findCaptureResult{}, fmt.Errorf("find: close directory: %w", closeErr)
+			}
+			continue
+		}
+
+		entry := entries[0]
+		if maxDepth > 0 && frame.depth+1 > maxDepth {
+			continue
+		}
+		info, infoErr := entry.Info()
+		if infoErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return findCaptureResult{}, ctxErr
+			}
+			truncated = true
+			continue
+		}
+		name := entry.Name()
+		relativePath := filepath.Join(frame.relativePath, name)
+		fullPath := filepath.Join(frame.fullPath, name)
+		isDir := info.IsDir()
+		if findKindOK(kind, isDir) && findMatches(name, pattern) {
+			cleanPath := filepath.Clean(relativePath)
+			if err := paths.Add(cleanPath); err != nil {
+				return findCaptureResult{}, err
+			}
+		}
+		if !isDir || (maxDepth > 0 && frame.depth+1 >= maxDepth) {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return findCaptureResult{}, err
+		}
+		child, openErr := os.Open(fullPath)
+		if openErr != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return findCaptureResult{}, ctxErr
+			}
+			truncated = true
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			_ = child.Close()
+			return findCaptureResult{}, err
+		}
+		stack = append(stack, findDirectoryFrame{file: child, fullPath: fullPath, relativePath: relativePath, depth: frame.depth + 1})
+	}
+
+	return findCaptureResult{paths: paths.Sorted(), truncated: truncated || paths.Truncated()}, nil
+}
+
+type findDirectoryFrame struct {
+	file         *os.File
+	fullPath     string
+	relativePath string
+	depth        int
 }
 
 // findKindOK reports whether a DirEntry of the given isDir-ness should be
@@ -362,15 +463,4 @@ func findMatches(name, pattern string) bool {
 		return true
 	}
 	return matchGlob(pattern, name)
-}
-
-// splitLines splits output into non-empty trimmed lines.
-func splitLines(s string) []string {
-	var out []string
-	for _, line := range strings.Split(s, "\n") {
-		if strings.TrimSpace(line) != "" {
-			out = append(out, line)
-		}
-	}
-	return out
 }
