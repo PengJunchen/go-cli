@@ -3,6 +3,9 @@ package acp
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -158,5 +161,92 @@ func TestHTTPServerConcurrentStartIsIdempotent(t *testing.T) {
 	}
 	if err := server.Stop(context.Background()); err != nil {
 		t.Fatalf("Stop: %v", err)
+	}
+}
+
+func TestHTTPServerStopJoinsRegisteredRequestHandler(t *testing.T) {
+	server := NewHTTPServer("test", "127.0.0.1:0", nil)
+	if err := server.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = server.Stop(context.Background()) })
+
+	server.mu.Lock()
+	generation := server.generation
+	server.mu.Unlock()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	tracked := server.generationRequestMiddleware(generation, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		close(started)
+		<-release
+	}))
+	go tracked.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodGet, "/barrier", nil))
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("registered request handler did not start")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	err := server.Stop(ctx)
+	var pending interface{ Done() <-chan struct{} }
+	if !errors.As(err, &pending) || pending.Done() == nil {
+		t.Fatalf("Stop error %T %v does not report the blocked handler", err, err)
+	}
+	select {
+	case <-pending.Done():
+		t.Fatal("generation completed while its registered HTTP handler was blocked")
+	default:
+	}
+
+	close(release)
+	select {
+	case <-pending.Done():
+	case <-time.After(time.Second):
+		t.Fatal("generation did not join the released HTTP handler")
+	}
+	if err := server.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop after handler completion: %v", err)
+	}
+}
+
+type panickingHTTPServerDispatcher struct{ started chan struct{} }
+
+func (d *panickingHTTPServerDispatcher) Dispatch(context.Context, core.SubagentTask) (core.SubagentResult, error) {
+	close(d.started)
+	panic("private panic detail")
+}
+
+func (*panickingHTTPServerDispatcher) ParallelDispatch(context.Context, []core.SubagentTask) ([]core.SubagentResult, error) {
+	return nil, nil
+}
+
+func (*panickingHTTPServerDispatcher) ListRunning() []core.SubagentTask { return nil }
+
+func TestHTTPServerContainsDetachedWorkerPanicWithoutLeakingValue(t *testing.T) {
+	dispatcher := &panickingHTTPServerDispatcher{started: make(chan struct{})}
+	server := NewHTTPServer("test", "127.0.0.1:0", NewCoreHandler(dispatcher, nil))
+	if err := server.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = server.Stop(context.Background()) })
+	baseURL := "http://" + server.Addr()
+	response := postACP(t, baseURL, "/connect", ACPMessage{Type: TypeConnect, SenderID: "panic-client"})
+	response.Body.Close()
+	response = postACP(t, baseURL, "/send", ACPMessage{Type: TypeMessage, SenderID: "panic-client", Content: "panic"})
+	response.Body.Close()
+	select {
+	case <-dispatcher.started:
+	case <-time.After(time.Second):
+		t.Fatal("dispatcher did not start")
+	}
+
+	err := server.Stop(context.Background())
+	if !errors.Is(err, ErrHTTPServerWorkerPanic) {
+		t.Fatalf("Stop error = %v, want ErrHTTPServerWorkerPanic", err)
+	}
+	if strings.Contains(err.Error(), "private panic detail") {
+		t.Fatalf("Stop leaked panic value: %v", err)
 	}
 }
