@@ -82,10 +82,13 @@ type AccordionEntry struct {
 	// MaxResultLines caps the number of lines shown for a tool_result entry.
 	// 0 means use the default (maxResultLines). Set to -1 to disable truncation.
 	MaxResultLines int
-	// ToolCallID is the unique identifier from the model's tool call. Used to
-	// match tool_output and tool_result events to the originating tool_call
-	// entry, replacing position-based matching.
+	// ToolCallID is the source-provided identifier from the model's tool call.
+	// The live app associates it only when it is unique in the active group.
 	ToolCallID string
+	// Incomplete marks an unassociated late/legacy tool result or output.
+	Incomplete bool
+	// IsError preserves the structured error state of a tool result.
+	IsError bool
 }
 
 // AccordionModel holds the ordered list of entries and the index of the
@@ -128,6 +131,17 @@ func (m *AccordionModel) Add(entry *AccordionEntry) {
 				return
 			}
 		}
+	}
+	m.entries = append(m.entries, entry)
+	m.selected = len(m.entries) - 1
+}
+
+// AddStandalone appends an entry without applying the legacy result grouping
+// heuristics. The live TUI uses this for events that cannot be associated
+// uniquely within the current assistant tool-call group.
+func (m *AccordionModel) AddStandalone(entry *AccordionEntry) {
+	if entry == nil {
+		return
 	}
 	m.entries = append(m.entries, entry)
 	m.selected = len(m.entries) - 1
