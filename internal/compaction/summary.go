@@ -78,32 +78,40 @@ func NewSummaryCompactor(summarizer Summarizer, opts ...SummaryCompactorOption) 
 
 // findCutPoint returns the smallest cut index such that summarizing items[:cut]
 // into a single placeholder and keeping items[cut:] whole stays under maxTokens.
-// Cuts are only placed on message boundaries: the kept region never begins on a
-// dangling tool result. When no cut satisfies the budget, it returns len(items)
-// (i.e. summarize everything).
-func (c *SummaryCompactor) findCutPoint(items []TurnItem, maxTokens int, estimator TokenEstimator) int {
+// The cut is only placed between validated item groups, so it cannot split an
+// assistant tool-call group from its receipts.
+func (c *SummaryCompactor) findCutPoint(items []TurnItem, maxTokens int, estimator TokenEstimator) (int, error) {
+	normalized, groups, err := groupTurnItems(items)
+	if err != nil {
+		return 0, err
+	}
+	return c.findCutPointAtGroups(normalized, groups, maxTokens, estimator), nil
+}
+
+func (c *SummaryCompactor) findCutPointAtGroups(items []TurnItem, groups []itemGroup, maxTokens int, estimator TokenEstimator) int {
 	placeholder := estimateLength(summaryPlaceholder, estimator)
 
-	// Build a suffix sum array so range queries are O(1) instead of
-	// re-estimating the entire tail on every iteration. suffixSum[i] holds
-	// the total estimated tokens for items[i:]. estimateItemTokens caches
-	// each item's estimate, so the pre-computation is O(n) and subsequent
-	// callers (e.g. MicroCompactor) reuse the cached values.
-	n := len(items)
-	suffixSum := make([]int, n+1)
-	for i := n - 1; i >= 0; i-- {
-		suffixSum[i] = suffixSum[i+1] + estimateItemTokens(&items[i], estimator)
+	// Build a suffix sum by complete item group. estimateItemTokens caches each
+	// item's estimate, so evaluating group costs once keeps the search O(n).
+	suffixSum := make([]int, len(groups)+1)
+	for i := len(groups) - 1; i >= 0; i-- {
+		groupTokens := 0
+		for itemIndex := groups[i].start; itemIndex < groups[i].end; itemIndex++ {
+			groupTokens += estimateItemTokens(&items[itemIndex], estimator)
+		}
+		suffixSum[i] = suffixSum[i+1] + groupTokens
 	}
 
-	for cut := 0; cut <= n; cut++ {
-		if cut < n && items[cut].Role == RoleTool {
-			continue
+	for groupCut := 0; groupCut <= len(groups); groupCut++ {
+		cut := len(items)
+		if groupCut < len(groups) {
+			cut = groups[groupCut].start
 		}
-		if placeholder+suffixSum[cut] <= maxTokens {
+		if placeholder+suffixSum[groupCut] <= maxTokens {
 			return cut
 		}
 	}
-	return n
+	return len(items)
 }
 
 // Compact summarizes the oldest region and keeps the newest turns whole.
@@ -112,28 +120,32 @@ func (c *SummaryCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 	defer span.End()
 	logger := tracing.NewTraceLogger(span, slog.Default())
 
-	tokensBefore := estimateTokens(items, estimator)
+	normalized, groups, err := groupTurnItems(items)
+	if err != nil {
+		return items, err
+	}
+	tokensBefore := estimateTokens(normalized, estimator)
 	span.SetAttributes(
-		tracing.Attribute{Key: "items_in", Value: len(items)},
+		tracing.Attribute{Key: "items_in", Value: len(normalized)},
 		tracing.Attribute{Key: "tokens_before", Value: tokensBefore},
 	)
 
-	cut := c.findCutPoint(items, maxTokens, estimator)
+	cut := c.findCutPointAtGroups(normalized, groups, maxTokens, estimator)
 	if cut == 0 {
 		// Nothing can be summarized without exceeding budget; escalate to the
 		// truncating fallback. Returning the input unchanged primitives the
 		// unified router to escalate.
-		return items, ErrRequiresTruncating
+		return normalized, ErrRequiresTruncating
 	}
 
-	old := items[:cut]
-	keep := items[cut:]
+	old := normalized[:cut]
+	keep := normalized[cut:]
 
 	prompt := c.buildSummaryPrompt(old)
 	summary, err := c.summarizer.Summarize(ctx, prompt)
 	if err != nil {
 		logger.Warn("compaction.summary.failed", "err", err)
-		return items, err
+		return normalized, err
 	}
 	if summary == "" {
 		summary = summaryPlaceholder
@@ -166,7 +178,7 @@ func (c *SummaryCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 
 	logger.Info("compaction.summary.done",
 		"cut_point", cut,
-		"items_in", len(items),
+		"items_in", len(normalized),
 		"items_out", len(result),
 		"tokens_before", tokensBefore,
 		"tokens_after", tokensAfter)

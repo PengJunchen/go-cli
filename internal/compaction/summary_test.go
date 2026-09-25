@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/verify"
 )
 
@@ -48,17 +49,26 @@ func TestFindCutPointAtMessageBoundary(t *testing.T) {
 	items := []TurnItem{
 		{Role: RoleSystem, Content: "sys"},
 		{Role: RoleUser, Content: strings.Repeat("u", 200)},
-		{Role: RoleAssistant, Content: "reply"},
-		{Role: RoleTool, ToolName: "read", ToolResult: strings.Repeat("t", 400)},
+		{Role: RoleAssistant, Content: "reply", ToolCalls: []llm.ToolCall{{ID: "call-1", Name: "read"}}},
+		{Role: RoleTool, ToolCallID: "call-1", ToolName: "read", ToolResult: strings.Repeat("t", 400)},
 		{Role: RoleUser, Content: "keep me"},
 		{Role: RoleAssistant, Content: "ok"},
 	}
 
-	cut := compactor.findCutPoint(items, 60, est)
+	cut, err := compactor.findCutPoint(items, 60, est)
+	require.NoError(t, err)
 
-	// The cut must be a whole-message boundary (not before a tool result).
-	require.True(t, cut == len(items) || items[cut].Role != RoleTool,
-		"cut %d must not split before a tool result", cut)
+	// The cut must be a boundary between complete item groups.
+	_, groups, err := groupTurnItems(items)
+	require.NoError(t, err)
+	isBoundary := cut == len(items)
+	for _, group := range groups {
+		if cut == group.start {
+			isBoundary = true
+			break
+		}
+	}
+	require.True(t, isBoundary, "cut %d must be between complete item groups", cut)
 
 	// The kept suffix plus a placeholder must fit the budget.
 	placeholder := estimateTokens([]TurnItem{{Content: summaryPlaceholder}}, est)
@@ -76,8 +86,8 @@ func TestSummaryCompactorProducesPlaceholderWithinBudget(t *testing.T) {
 	items := []TurnItem{
 		{Role: RoleSystem, Content: "sys"},
 		{Role: RoleUser, Content: strings.Repeat("u", 300)},
-		{Role: RoleAssistant, Content: strings.Repeat("a", 300)},
-		{Role: RoleTool, ToolName: "read", ToolResult: strings.Repeat("t", 400)},
+		{Role: RoleAssistant, Content: strings.Repeat("a", 300), ToolCalls: []llm.ToolCall{{ID: "call-1", Name: "read"}}},
+		{Role: RoleTool, ToolCallID: "call-1", ToolName: "read", ToolResult: strings.Repeat("t", 400)},
 		{Role: RoleUser, Content: "recent question"},
 		{Role: RoleAssistant, Content: "recent answer"},
 	}
@@ -133,7 +143,8 @@ func TestSummaryCompactorIncrementalOnlySummarizesUncompactedRegion(t *testing.T
 	items := []TurnItem{
 		{Role: RoleSystem, Content: "[existing summary ...]", IsCompaction: true},
 		{Role: RoleUser, Content: strings.Repeat("u", 300)},
-		{Role: RoleTool, ToolName: "write", ToolResult: strings.Repeat("w", 400)},
+		{Role: RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "call-write", Name: "write"}}},
+		{Role: RoleTool, ToolCallID: "call-write", ToolName: "write", ToolResult: strings.Repeat("w", 400)},
 		{Role: RoleUser, Content: "latest turn"},
 	}
 
