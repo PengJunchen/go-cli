@@ -312,3 +312,68 @@ func TestHTTPAdapterCrossOriginErrorRedactsURLUserinfo(t *testing.T) {
 	assert.NotContains(t, err.Error(), password, "redirect diagnostics must not expose URL userinfo")
 	assert.Zero(t, foreignRequests.Load())
 }
+
+func TestHTTPAdapterRedirectCallbackErrorRedactsURLSecrets(t *testing.T) {
+	t.Parallel()
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost {
+			http.Redirect(w, r, r.URL.Path+"?redirect=1", http.StatusTemporaryRedirect)
+			return
+		}
+		w.WriteHeader(http.StatusMethodNotAllowed)
+	}))
+	t.Cleanup(origin.Close)
+
+	username := newHTTPTestCanary(t)
+	password := newHTTPTestCanary(t)
+	querySecret := newHTTPTestCanary(t)
+	callbackSecret := newHTTPTestCanary(t)
+	endpoint, err := url.Parse(origin.URL)
+	require.NoError(t, err)
+	endpoint.Path = "/mcp"
+	endpoint.User = url.UserPassword(username, password)
+	endpoint.RawQuery = "api_key=" + url.QueryEscape(querySecret)
+	callbackFailure := errors.New("redirect callback failure sentinel")
+	client := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error {
+		return fmt.Errorf("callback diagnostic %s: %w", callbackSecret, callbackFailure)
+	}}
+	adapter := NewHTTPClientAdapterWithClient(MCPServerConfig{
+		Name:      "srv",
+		Transport: MCPTransportStreamableHTTP,
+		URL:       endpoint.String(),
+	}, client)
+
+	err = adapter.Connect(context.Background())
+	require.ErrorIs(t, err, callbackFailure)
+	for _, secret := range []string{username, password, querySecret, callbackSecret} {
+		assert.NotContains(t, err.Error(), secret)
+	}
+}
+
+func TestHTTPAdapterRoundTripErrorRedactsURLSecrets(t *testing.T) {
+	t.Parallel()
+
+	username := newHTTPTestCanary(t)
+	password := newHTTPTestCanary(t)
+	querySecret := newHTTPTestCanary(t)
+	endpoint, err := url.Parse("http://mcp.test/mcp")
+	require.NoError(t, err)
+	endpoint.User = url.UserPassword(username, password)
+	endpoint.RawQuery = "api_key=" + url.QueryEscape(querySecret)
+	roundTripFailure := errors.New("round trip failure sentinel")
+	client := &http.Client{Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
+		return nil, roundTripFailure
+	})}
+	adapter := NewHTTPClientAdapterWithClient(MCPServerConfig{
+		Name:      "srv",
+		Transport: MCPTransportStreamableHTTP,
+		URL:       endpoint.String(),
+	}, client)
+
+	err = adapter.Connect(context.Background())
+	require.ErrorIs(t, err, roundTripFailure)
+	for _, secret := range []string{username, password, querySecret} {
+		assert.NotContains(t, err.Error(), secret)
+	}
+}

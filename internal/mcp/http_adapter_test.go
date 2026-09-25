@@ -613,8 +613,9 @@ func TestHTTPAdapterRejectsCrossOriginRedirectBeforeCredentials(t *testing.T) {
 		BearerToken: bearerCanary,
 	})
 	err := adapter.Connect(context.Background())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "redirect")
+	require.ErrorIs(t, err, errCrossOriginRedirect)
+	assert.NotContains(t, err.Error(), headerCanary)
+	assert.NotContains(t, err.Error(), bearerCanary)
 	assert.Zero(t, foreignRequests.Load(), "foreign redirect target must receive no request")
 }
 
