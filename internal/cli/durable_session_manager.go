@@ -85,7 +85,7 @@ func resolveWorkspaceID(getwd func() (string, error)) (string, error) {
 		return "", fmt.Errorf("%w: canonical workspace root is not absolute", ErrDurableWorkspaceIdentity)
 	}
 	digest := sha256.Sum256([]byte(workspaceIdentityDomain + canonical))
-	return "workspace-v1:" + hex.EncodeToString(digest[:]), nil
+	return "workspace-v1-" + hex.EncodeToString(digest[:]), nil
 }
 
 // durableSessionManager owns one prepared session handle and lends counted,

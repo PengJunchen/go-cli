@@ -36,7 +36,7 @@ func TestResolveWorkspaceIDUsesCanonicalSymlinkTarget(t *testing.T) {
 	canonical, err := filepath.EvalSymlinks(target)
 	require.NoError(t, err)
 	digest := sha256.Sum256([]byte(workspaceIdentityDomain + filepath.Clean(canonical)))
-	assert.Equal(t, "workspace-v1:"+hex.EncodeToString(digest[:]), workspaceID)
+	assert.Equal(t, "workspace-v1-"+hex.EncodeToString(digest[:]), workspaceID)
 
 	otherID, err := resolveWorkspaceID(func() (string, error) { return target, nil })
 	require.NoError(t, err)
@@ -62,6 +62,25 @@ func TestResolveWorkspaceIDFailsClosedOnGetwdAndCanonicalizationErrors(t *testin
 	assert.Error(t, err)
 }
 
+func TestResolveWorkspaceIDIsAcceptedByDurableIndexAndSessionPreparer(t *testing.T) {
+	configRoot := t.TempDir()
+	t.Setenv("HOME", configRoot)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(configRoot, ".config"))
+	ctx := context.Background()
+	workspaceID, err := resolveWorkspaceID(os.Getwd)
+	require.NoError(t, err)
+	index, err := session.NewWorkspaceQuarantineIndex()
+	require.NoError(t, err)
+	require.NoError(t, index.EnsureWorkspace(ctx, workspaceID))
+
+	prepared, err := session.NewDurableJSONLSessionPreparer(filepath.Join(t.TempDir(), "session-store"), index).PrepareNew(ctx, "workspace-index-check")
+	require.NoError(t, err)
+	t.Cleanup(func() { require.NoError(t, prepared.Close()) })
+	snapshot, err := prepared.Snapshot()
+	require.NoError(t, err)
+	require.NotEmpty(t, snapshot.SessionID)
+}
+
 func TestDurableSessionManagerSameIDSameBranchDoesNotPrepareResume(t *testing.T) {
 	prepared := newManagerTestPrepared("session-a", "branch-main")
 	preparer := newManagerTestPreparer(prepared)
@@ -77,7 +96,7 @@ func TestDurableSessionManagerSameIDSameBranchDoesNotPrepareResume(t *testing.T)
 	assert.Same(t, prepared, lease.PreparedSession())
 	assert.Equal(t, "session-a", lease.SessionID())
 	assert.Equal(t, "branch-main", lease.BranchID())
-	assert.Equal(t, "workspace-v1:test", lease.WorkspaceID())
+	assert.Equal(t, "workspace-v1-test", lease.WorkspaceID())
 	lease.CloseRunCommit()
 	lease.CloseRunCommit()
 	require.NoError(t, manager.requestClose(context.Background()))
@@ -510,7 +529,7 @@ func TestDurableSessionManagerPoisonRequiresExactReopenBeforeNextLease(t *testin
 
 func newManagerTestManager(t *testing.T, preparer session.SessionPreparer) *durableSessionManager {
 	t.Helper()
-	manager, err := newDurableSessionManager(preparer, "workspace-v1:test")
+	manager, err := newDurableSessionManager(preparer, "workspace-v1-test")
 	require.NoError(t, err)
 	return manager
 }
