@@ -116,6 +116,33 @@ func TestAssembledProviderFlagCanonicalAliasKeepsProviderConfig(t *testing.T) {
 	assert.Equal(t, "Bearer "+apiKey, authorization)
 }
 
+func TestSmallModelOverrideDoesNotInheritDifferentProviderConfig(t *testing.T) {
+	const configuredProvider = "config-provider"
+	const overrideProvider = "openai"
+	rc := &config.Config{
+		Provider: config.ProviderConfig{
+			Name:    configuredProvider,
+			BaseURL: "https://config-provider.example/v1",
+			APIKey:  newTestCredentialCanary(t),
+		},
+		SmallModel: config.SmallModelConfig{Model: "small-model"},
+	}
+
+	resolver, err := newCLIModelResolver(rc, overrideProvider, true)
+	require.NoError(t, err)
+	assert.Empty(t, resolver.primaryEndpoint, "the provider block endpoint is not owned by the CLI override")
+
+	endpoint, apiKey, err := resolveSmallModelProviderSettings(overrideProvider, overrideProvider, rc)
+	require.NoError(t, err)
+	assert.Empty(t, endpoint, "small model without its own endpoint must keep the override's descriptor")
+	assert.Empty(t, apiKey, "small model without its own credential must not inherit another provider's key")
+
+	ref, err := resolver.resolver.CredentialRefFor(overrideProvider, endpoint)
+	require.NoError(t, err)
+	assert.Equal(t, overrideProvider, ref.ProviderID)
+	assert.Equal(t, "https://api.openai.com:443", ref.Origin, "the canonical override retains its own default origin")
+}
+
 func TestAssembledSmallModelSharesCredentialOnlyWithinSameOrigin(t *testing.T) {
 	tests := []struct {
 		name              string
