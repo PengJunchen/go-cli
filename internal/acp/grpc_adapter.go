@@ -5,10 +5,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -19,29 +21,24 @@ import (
 // closeQuietly best-effort closes an io.Closer.
 func closeQuietly(c io.Closer) { _ = c.Close() } //nolint:errcheck // best-effort close
 
-// gRPCAdapter implements ACPClient over a "gRPC" transport.
-//
-// IMPORTANT: This is an stdlib JSON-over-HTTP interpretation of the ACP gRPC
-// contract. The project has zero external dependencies (stdlib only), so there
-// is no real gRPC stack. Instead the adapter dials an HTTP endpoint and
-// exchanges JSON messages over well-known routes that mirror the ACP
-// service/method naming convention:
+// gRPCAdapter implements ACPClient over go-cli's private JSON-over-HTTP profile.
+// The historical name is retained for source compatibility; this is not an
+// implementation of official ACP or gRPC. The adapter exchanges versioned
+// envelopes over these routes:
 //
 //   - POST {endpoint}/connect     -> establish a session
 //   - POST {endpoint}/send        -> deliver an ACP message
 //   - POST {endpoint}/disconnect  -> tear down a session
 //   - GET  {endpoint}/stream      -> poll for inbound ACP messages
-//
-// The service/route convention mirrors how an ACP gRPC service would expose
-// connect/send/disconnect/stream methods.
 type gRPCAdapter struct {
-	name      string
-	endpoint  string
-	transport ACPTransport
-	client    *http.Client
+	name        string
+	endpoint    string
+	bearerToken string
+	client      *http.Client
 
 	mu        sync.Mutex
 	connected bool
+	sessionID string
 	done      chan struct{}
 	inbound   chan ACPMessage
 
@@ -56,18 +53,55 @@ type gRPCAdapter struct {
 // reconnection before messages are dropped with a warning.
 const maxPendingMessages = 64
 
+const (
+	maxHTTPACPResponseBytes = 4 << 20
+	maxHTTPACPFrameBytes    = 1 << 20
+)
+
+var (
+	errInvalidHTTPACPConfig = errors.New("acp: invalid private HTTP adapter configuration")
+	errHTTPACPProtocol      = errors.New("acp: invalid private HTTP profile response")
+	errHTTPUnauthorized     = errors.New("acp: HTTP authentication rejected")
+	errHTTPForbidden        = errors.New("acp: HTTP request forbidden")
+	errHTTPNotFound         = errors.New("acp: HTTP route or session not found")
+)
+
+type httpRouteError struct {
+	route      string
+	statusCode int
+	statusErr  error
+}
+
+func (e *httpRouteError) Error() string {
+	return fmt.Sprintf("acp: route %s returned status %d", e.route, e.statusCode)
+}
+
+func (e *httpRouteError) Unwrap() error { return e.statusErr }
+
 // Compile-time assertion that gRPCAdapter satisfies ACPClient.
 var _ ACPClient = (*gRPCAdapter)(nil)
 
-// NewGRPCAdapter returns an ACPClient that exchanges JSON messages over HTTP
-// with an ACP peer at endpoint (e.g. "http://127.0.0.1:9000/acp"). This is the
-// stdlib JSON-over-HTTP interpretation of the ACP gRPC contract.
+// NewGRPCAdapter returns an ACPClient that exchanges the private
+// go-cli-acp-json/1 profile over HTTP with endpoint. The historical constructor
+// name is retained for compatibility; the wire protocol is neither official
+// ACP nor gRPC.
 func NewGRPCAdapter(endpoint string, opts ...Option) ACPClient {
+	options := adapterOptions{name: "grpc"}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&options)
+		}
+	}
 	a := &gRPCAdapter{
-		name:       resolveName("grpc", opts),
-		endpoint:   strings.TrimRight(endpoint, "/"),
-		transport:  ACPTransportGRPC,
-		client:     &http.Client{Timeout: 30 * time.Second},
+		name:        options.name,
+		endpoint:    strings.TrimRight(endpoint, "/"),
+		bearerToken: options.httpBearerToken,
+		client: &http.Client{
+			Timeout: 30 * time.Second,
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
 		done:       make(chan struct{}),
 		inbound:    make(chan ACPMessage, 16),
 		maxPending: maxPendingMessages,
@@ -82,8 +116,8 @@ func (a *gRPCAdapter) Connect(ctx context.Context) error {
 	span, spanCtx := tracing.SpanFromContext(ctx, "acp.connect", tracing.SpanKindInternal)
 	logger := tracing.NewTraceLogger(span, slog.Default())
 	span.SetAttributes(
-		tracing.Attribute{Key: "transport", Value: a.transport.String()},
-		tracing.Attribute{Key: "endpoint", Value: a.endpoint},
+		tracing.Attribute{Key: "transport", Value: ACPHTTPProfileV1},
+		tracing.Attribute{Key: "endpoint", Value: a.safeEndpointOrigin()},
 	)
 	defer span.End()
 
@@ -99,22 +133,27 @@ func (a *gRPCAdapter) Connect(ctx context.Context) error {
 	a.inbound = inbound
 	a.mu.Unlock()
 
-	connectMsg := ACPMessage{Type: TypeConnect, SenderID: a.name, Timestamp: time.Now()}
-	if err := a.post(spanCtx, "/connect", connectMsg); err != nil {
+	sessionID, err := a.connectSession(spanCtx)
+	if err != nil {
 		span.SetStatus(tracing.SpanStatusError, err.Error())
-		logger.Error("acp.connect.failed", "endpoint", a.endpoint, "err", err)
+		logger.Error("acp.connect.failed", "endpoint", a.safeEndpointOrigin(), "err", err)
 		return fmt.Errorf("acp: connect: %w", err)
 	}
 
 	a.mu.Lock()
 	if !a.connected {
+		a.sessionID = sessionID
 		a.connected = true
 		go a.readLoop(spanCtx, done, inbound)
+	} else {
+		a.mu.Unlock()
+		a.bestEffortDisconnect(spanCtx, sessionID)
+		a.mu.Lock()
 	}
 	a.mu.Unlock()
 
 	span.SetStatus(tracing.SpanStatusOK, "")
-	logger.Info("acp.connect", "transport", a.transport.String(), "endpoint", a.endpoint)
+	logger.Info("acp.connect", "transport", ACPHTTPProfileV1, "endpoint", a.safeEndpointOrigin())
 	return nil
 }
 
@@ -126,13 +165,16 @@ func (a *gRPCAdapter) Disconnect(ctx context.Context) error {
 		return nil
 	}
 	a.connected = false
+	sessionID := a.sessionID
+	a.sessionID = ""
 	close(a.done)
 	a.mu.Unlock()
 
 	disconnectMsg := ACPMessage{Type: TypeDisconnect, SenderID: a.name, Timestamp: time.Now()}
 	// Best-effort notification; the local session is already torn down.
-	if err := a.post(ctx, "/disconnect", disconnectMsg); err != nil {
+	if err := a.postMessage(ctx, "/disconnect", sessionID, disconnectMsg); err != nil {
 		slog.DebugContext(ctx, "acp.disconnect.notify", "name", a.name, "err", err)
+		return err
 	}
 	return nil
 }
@@ -150,6 +192,7 @@ func (a *gRPCAdapter) SendMessage(ctx context.Context, msg ACPMessage) error {
 
 	a.mu.Lock()
 	connected := a.connected
+	sessionID := a.sessionID
 	a.mu.Unlock()
 	if !connected {
 		err := fmt.Errorf("acp: %s adapter not connected", a.name)
@@ -160,6 +203,7 @@ func (a *gRPCAdapter) SendMessage(ctx context.Context, msg ACPMessage) error {
 	if msg.Timestamp.IsZero() {
 		msg.Timestamp = time.Now()
 	}
+	msg.SenderID = a.name
 
 	// During reconnection, queue messages instead of sending directly.
 	a.reconnectMu.Lock()
@@ -179,7 +223,7 @@ func (a *gRPCAdapter) SendMessage(ctx context.Context, msg ACPMessage) error {
 	}
 	a.reconnectMu.Unlock()
 
-	if err := a.post(spanCtx, "/send", msg); err != nil {
+	if err := a.postMessage(spanCtx, "/send", sessionID, msg); err != nil {
 		span.SetStatus(tracing.SpanStatusError, err.Error())
 		logger.Error("acp.send.failed", "message_type", msg.Type, "receiver_id", msg.ReceiverID, "err", err)
 		return fmt.Errorf("acp: send message: %w", err)
@@ -204,32 +248,144 @@ func (a *gRPCAdapter) ReceiveMessages() <-chan ACPMessage {
 // Name returns the logical client identity.
 func (a *gRPCAdapter) Name() string { return a.name }
 
-// post marshals msg and POSTs it to the route at the configured endpoint.
-func (a *gRPCAdapter) post(ctx context.Context, route string, msg ACPMessage) error {
-	data, err := json.Marshal(msg)
-	if err != nil {
-		return fmt.Errorf("acp: marshal payload: %w", err)
-	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, a.endpoint+route, bytes.NewReader(data))
-	if err != nil {
-		return fmt.Errorf("acp: build request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := a.client.Do(req)
+// postMessage sends one versioned envelope for the active opaque session.
+func (a *gRPCAdapter) postMessage(ctx context.Context, route, sessionID string, msg ACPMessage) error {
+	envelope := httpEnvelopeFromMessage(sessionID, msg)
+	resp, err := a.postEnvelope(ctx, route, envelope)
 	if err != nil {
 		return err
 	}
 	defer closeQuietly(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("acp: route %s returned status %d", route, resp.StatusCode)
-	}
-	return nil
+	return requireHTTP200(route, resp)
 }
 
-// readLoop polls {endpoint}/stream and forwards parsed ACP messages onto the
-// inbound channel until the session is torn down or the context is done.
-// The loop backs off briefly when no messages are available to avoid a busy
-// spin, which keeps it cheap for the long-poll style /stream route.
+func (a *gRPCAdapter) postEnvelope(ctx context.Context, route string, envelope httpACPEnvelope) (*http.Response, error) {
+	envelope.Version = ACPHTTPProfileV1
+	data, err := json.Marshal(envelope)
+	if err != nil {
+		return nil, fmt.Errorf("acp: marshal private HTTP envelope: %w", err)
+	}
+	request, err := a.newRequest(ctx, http.MethodPost, route, bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	return a.client.Do(request)
+}
+
+func (a *gRPCAdapter) connectSession(ctx context.Context) (string, error) {
+	response, err := a.postEnvelope(ctx, "/connect", httpEnvelopeFromMessage("", ACPMessage{
+		Type: TypeConnect, SenderID: a.name, Timestamp: time.Now(),
+	}))
+	if err != nil {
+		return "", fmt.Errorf("acp: connect request: %w", err)
+	}
+	defer closeQuietly(response.Body)
+	if err := requireHTTP200("/connect", response); err != nil {
+		return "", err
+	}
+	body, err := readHTTPResponseBody(response.Body, maxHTTPACPResponseBytes)
+	if err != nil {
+		return "", err
+	}
+	var result struct {
+		Version   string `json:"version"`
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(body, &result); err != nil || result.Version != ACPHTTPProfileV1 || !validOpaqueSessionID(result.SessionID, a.name) {
+		return "", errHTTPACPProtocol
+	}
+	return result.SessionID, nil
+}
+
+func (a *gRPCAdapter) bestEffortDisconnect(ctx context.Context, sessionID string) {
+	if sessionID == "" {
+		return
+	}
+	if err := a.postMessage(ctx, "/disconnect", sessionID, ACPMessage{
+		Type: TypeDisconnect, SenderID: a.name, Timestamp: time.Now(),
+	}); err != nil {
+		slog.DebugContext(ctx, "acp.disconnect.notify", "name", a.name, "err", err)
+	}
+}
+
+func (a *gRPCAdapter) newRequest(ctx context.Context, method, route string, body io.Reader) (*http.Request, error) {
+	baseURL, err := url.Parse(a.endpoint)
+	if err != nil || baseURL.Scheme != "http" && baseURL.Scheme != "https" || baseURL.Host == "" || baseURL.User != nil || baseURL.RawQuery != "" || baseURL.Fragment != "" || baseURL.ForceQuery || strings.Contains(a.endpoint, "#") {
+		return nil, errInvalidHTTPACPConfig
+	}
+	targetURL, err := url.Parse(strings.TrimRight(a.endpoint, "/") + route)
+	if err != nil || targetURL.Scheme != baseURL.Scheme || !strings.EqualFold(targetURL.Host, baseURL.Host) || targetURL.User != nil {
+		return nil, errInvalidHTTPACPConfig
+	}
+	request, err := http.NewRequestWithContext(ctx, method, targetURL.String(), body)
+	if err != nil {
+		return nil, fmt.Errorf("acp: build private HTTP request: %w", err)
+	}
+	request.Header.Set(ACPHTTPProfileHeader, ACPHTTPProfileV1)
+	if a.bearerToken != "" {
+		if !validBearerToken(a.bearerToken) {
+			return nil, errInvalidHTTPACPConfig
+		}
+		request.Header.Set("Authorization", "Bearer "+a.bearerToken)
+	}
+	return request, nil
+}
+
+func validBearerToken(token string) bool {
+	if token == "" {
+		return true
+	}
+	for _, r := range token {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("-._~+/=", r) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validOpaqueSessionID(sessionID, displayAlias string) bool {
+	return sessionID != "" && len(sessionID) <= 256 && strings.TrimSpace(sessionID) == sessionID && sessionID != displayAlias
+}
+
+func (a *gRPCAdapter) safeEndpointOrigin() string {
+	endpoint, err := url.Parse(a.endpoint)
+	if err != nil || endpoint.Scheme == "" || endpoint.Host == "" || endpoint.User != nil {
+		return "<invalid-endpoint>"
+	}
+	return strings.ToLower(endpoint.Scheme) + "://" + strings.ToLower(endpoint.Host)
+}
+
+func requireHTTP200(route string, response *http.Response) error {
+	if response.StatusCode == http.StatusOK {
+		return nil
+	}
+	var statusErr error
+	switch response.StatusCode {
+	case http.StatusUnauthorized:
+		statusErr = errHTTPUnauthorized
+	case http.StatusForbidden:
+		statusErr = errHTTPForbidden
+	case http.StatusNotFound:
+		statusErr = errHTTPNotFound
+	}
+	return &httpRouteError{route: route, statusCode: response.StatusCode, statusErr: statusErr}
+}
+
+func readHTTPResponseBody(body io.Reader, maxBytes int64) ([]byte, error) {
+	data, err := io.ReadAll(io.LimitReader(body, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("acp: read private HTTP response: %w", err)
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, errHTTPACPProtocol
+	}
+	return data, nil
+}
+
+// readLoop polls the active opaque session's /stream route and forwards only
+// exact-version envelopes for that session onto the inbound channel.
 func (a *gRPCAdapter) readLoop(ctx context.Context, done chan struct{}, inbound chan ACPMessage) {
 	for {
 		select {
@@ -240,15 +396,18 @@ func (a *gRPCAdapter) readLoop(ctx context.Context, done chan struct{}, inbound 
 		default:
 		}
 
-		streamURL := a.endpoint + "/stream"
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, streamURL, nil)
-		if err != nil {
-			if !a.doReconnect(ctx, done) {
-				return
-			}
-			continue
+		a.mu.Lock()
+		sessionID := a.sessionID
+		a.mu.Unlock()
+		if sessionID == "" {
+			return
 		}
-		resp, err := a.client.Do(req) //nolint:gosec // stream endpoint comes from trusted config
+		streamRoute := "/stream?session_id=" + url.QueryEscape(sessionID) + "&sender_id=" + url.QueryEscape(a.name)
+		req, err := a.newRequest(ctx, http.MethodGet, streamRoute, nil)
+		if err != nil {
+			return
+		}
+		resp, err := a.client.Do(req)
 		if err != nil {
 			if !a.doReconnect(ctx, done) {
 				return
@@ -263,14 +422,30 @@ func (a *gRPCAdapter) readLoop(ctx context.Context, done chan struct{}, inbound 
 			}
 			continue
 		}
+		if err := requireHTTP200("/stream", resp); err != nil {
+			closeQuietly(resp.Body)
+			slog.DebugContext(ctx, "acp.stream.failed", "err", err)
+			return
+		}
 
 		sc := bufio.NewScanner(resp.Body)
+		sc.Buffer(make([]byte, 32*1024), maxHTTPACPFrameBytes)
 		got := false
+		totalBytes := 0
 		for sc.Scan() {
-			var msg ACPMessage
-			if err := json.Unmarshal(sc.Bytes(), &msg); err != nil {
-				continue
+			totalBytes += len(sc.Bytes()) + 1
+			if totalBytes > maxHTTPACPResponseBytes {
+				closeQuietly(resp.Body)
+				slog.DebugContext(ctx, "acp.stream.failed", "err", errHTTPACPProtocol)
+				return
 			}
+			var envelope httpACPEnvelope
+			if err := json.Unmarshal(sc.Bytes(), &envelope); err != nil || envelope.Version != ACPHTTPProfileV1 || envelope.SessionID != sessionID {
+				closeQuietly(resp.Body)
+				slog.DebugContext(ctx, "acp.stream.failed", "err", errHTTPACPProtocol)
+				return
+			}
+			msg := envelope.message()
 			debugMessage(ctx, "acp.receive", msg)
 			select {
 			case inbound <- msg:
@@ -284,6 +459,10 @@ func (a *gRPCAdapter) readLoop(ctx context.Context, done chan struct{}, inbound 
 			}
 		}
 		closeQuietly(resp.Body)
+		if err := sc.Err(); err != nil {
+			slog.DebugContext(ctx, "acp.stream.failed", "err", errHTTPACPProtocol)
+			return
+		}
 
 		if !got {
 			select {
@@ -327,10 +506,9 @@ func (a *gRPCAdapter) Reconnect(ctx context.Context) error {
 	return nil
 }
 
-// doReconnect attempts to re-establish the session with exponential backoff.
-// It returns true if reconnection succeeded, or false if done/ctx was
-// canceled. If a reconnection is already in progress, it waits for the
-// existing one to complete.
+// doReconnect delays another poll using the current server-issued session ID.
+// It never creates a replacement session. If a reconnect delay is already in
+// progress, callers wait for it to finish.
 func (a *gRPCAdapter) doReconnect(ctx context.Context, done chan struct{}) bool {
 	a.reconnectMu.Lock()
 	if a.reconnecting {
@@ -357,7 +535,7 @@ func (a *gRPCAdapter) doReconnect(ctx context.Context, done chan struct{}) bool 
 
 	for attempt := 0; ; attempt++ {
 		backoff := grpcReconnectBackoff(attempt)
-		slog.Info("acp.reconnect.attempt", "attempt", attempt+1, "delay", backoff, "endpoint", a.endpoint)
+		slog.Info("acp.reconnect.attempt", "attempt", attempt+1, "delay", backoff, "endpoint", a.safeEndpointOrigin())
 
 		timer := time.NewTimer(backoff)
 		select {
@@ -372,14 +550,8 @@ func (a *gRPCAdapter) doReconnect(ctx context.Context, done chan struct{}) bool 
 			return false
 		}
 
-		connectMsg := ACPMessage{Type: TypeConnect, SenderID: a.name, Timestamp: time.Now()}
-		if err := a.post(ctx, "/connect", connectMsg); err != nil {
-			slog.Info("acp.reconnect.failed", "attempt", attempt+1, "err", err)
-			continue
-		}
-
 		a.flushPending(ctx)
-		slog.Info("acp.reconnect.success", "endpoint", a.endpoint, "attempts", attempt+1)
+		slog.Info("acp.reconnect.poll.resume", "endpoint", a.safeEndpointOrigin(), "attempts", attempt+1)
 		return true
 	}
 }
@@ -399,9 +571,12 @@ func (a *gRPCAdapter) flushPending(ctx context.Context) {
 	a.pendingMsgs = nil
 	a.reconnecting = false
 	a.reconnectMu.Unlock()
+	a.mu.Lock()
+	sessionID := a.sessionID
+	a.mu.Unlock()
 
 	for _, msg := range pending {
-		if err := a.post(ctx, "/send", msg); err != nil {
+		if err := a.postMessage(ctx, "/send", sessionID, msg); err != nil {
 			slog.Warn("acp.reconnect.flush.failed", "message_type", msg.Type, "err", err)
 		}
 	}
