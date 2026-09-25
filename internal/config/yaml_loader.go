@@ -69,7 +69,15 @@ func UnmarshalConfig(data []byte, format ConfigFormat, target any) error {
 	}
 	switch format {
 	case ConfigFormatJSON:
-		return json.Unmarshal(data, target)
+		if err := json.Unmarshal(data, target); err != nil {
+			return err
+		}
+		var values map[string]any
+		if err := json.Unmarshal(data, &values); err != nil {
+			return err
+		}
+		recordSamplingPresence(target, values)
+		return nil
 	case ConfigFormatYAML:
 		tree, err := parseYAMLTree(data)
 		if err != nil {
@@ -79,10 +87,78 @@ func UnmarshalConfig(data []byte, format ConfigFormat, target any) error {
 		if !ok {
 			return fmt.Errorf("yaml: top level must be a mapping")
 		}
-		return assignFromMap(target, m)
+		if err := assignFromMap(target, m); err != nil {
+			return err
+		}
+		recordSamplingPresence(target, m)
+		return nil
 	default:
 		return fmt.Errorf("config: unsupported format %s", format)
 	}
+}
+
+func recordSamplingPresence(target any, values map[string]any) {
+	switch cfg := target.(type) {
+	case *Config:
+		if cfg == nil {
+			return
+		}
+		cfg.samplingPresenceKnown = true
+		markProviderSamplingPresence(&cfg.Provider, mapValue(values, "provider"))
+		markModelSamplingPresence(&cfg.Model, mapValue(values, "model"))
+		markSmallModelSamplingPresence(&cfg.SmallModel, mapValue(values, "small_model"))
+	case *ProviderConfig:
+		markProviderSamplingPresence(cfg, values)
+	case *ModelConfig:
+		markModelSamplingPresence(cfg, values)
+	case *SmallModelConfig:
+		markSmallModelSamplingPresence(cfg, values)
+	}
+}
+
+func markProviderSamplingPresence(cfg *ProviderConfig, values map[string]any) {
+	if cfg == nil {
+		return
+	}
+	if _, ok := values["temperature"]; ok {
+		cfg.temperatureSet = true
+	}
+	if _, ok := values["max_tokens"]; ok {
+		cfg.maxTokensSet = true
+	}
+}
+
+func markModelSamplingPresence(cfg *ModelConfig, values map[string]any) {
+	if cfg == nil {
+		return
+	}
+	if _, ok := values["temperature"]; ok {
+		cfg.temperatureSet = true
+	}
+	if _, ok := values["max_tokens"]; ok {
+		cfg.maxTokensSet = true
+	}
+}
+
+func markSmallModelSamplingPresence(cfg *SmallModelConfig, values map[string]any) {
+	if cfg == nil {
+		return
+	}
+	if _, ok := values["temperature"]; ok {
+		cfg.temperatureSet = true
+	}
+	if _, ok := values["max_tokens"]; ok {
+		cfg.maxTokensSet = true
+	}
+}
+
+func mapValue(values map[string]any, key string) map[string]any {
+	value, ok := values[key]
+	if !ok || value == nil {
+		return nil
+	}
+	section, _ := value.(map[string]any)
+	return section
 }
 
 // YAMLConfigLoader loads a Config from a configuration file, using its

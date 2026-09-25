@@ -1762,8 +1762,14 @@ func (r *cliModelResolver) buildPrimary(ctx context.Context, rc *config.Config, 
 		request.Endpoint = r.primaryEndpoint
 	}
 	if rc != nil {
-		request.Temperature = rc.Model.Temperature
-		request.MaxTokens = rc.Model.MaxTokens
+		providerSampling := config.SamplingSettings{}
+		if providerIdentityMatches(resolveProviderName("", rc), providerName) {
+			providerSampling = rc.ProviderSampling()
+		}
+		applySamplingSettings(&request, rc.ModelSampling(), providerSampling)
+	} else {
+		request.MaxTokens = config.DefaultLLMMaxTokens
+		request.MaxTokensSet = true
 	}
 	return r.build(ctx, request)
 }
@@ -1787,13 +1793,37 @@ func (r *cliModelResolver) buildSmall(ctx context.Context, rc *config.Config, pr
 		return nil, llm.ModelInfo{}, nil, providerEndpointRequiredError(providerName)
 	}
 	request := llm.ModelRequest{
-		ProviderID:  providerName,
-		ModelID:     modelName,
-		Endpoint:    endpoint,
-		Temperature: rc.SmallModel.Temperature,
-		MaxTokens:   rc.SmallModel.MaxTokens,
+		ProviderID: providerName,
+		ModelID:    modelName,
+		Endpoint:   endpoint,
 	}
+	providerSampling := config.SamplingSettings{}
+	if providerIdentityMatches(resolveProviderName("", rc), providerName) {
+		providerSampling = rc.ProviderSampling()
+	}
+	applySamplingSettings(&request, rc.SmallModelSampling(), providerSampling)
 	return r.build(ctx, request)
+}
+
+func applySamplingSettings(request *llm.ModelRequest, model, provider config.SamplingSettings) {
+	if model.TemperatureSet {
+		request.Temperature = model.Temperature
+		request.TemperatureSet = true
+	} else if provider.TemperatureSet {
+		request.Temperature = provider.Temperature
+		request.TemperatureSet = true
+	}
+
+	if model.MaxTokensSet {
+		request.MaxTokens = model.MaxTokens
+		request.MaxTokensSet = true
+	} else if provider.MaxTokensSet {
+		request.MaxTokens = provider.MaxTokens
+		request.MaxTokensSet = true
+	} else {
+		request.MaxTokens = config.DefaultLLMMaxTokens
+		request.MaxTokensSet = true
+	}
 }
 
 func (r *cliModelResolver) build(ctx context.Context, request llm.ModelRequest) (llm.BaseChatModel, llm.ModelInfo, func(), error) {

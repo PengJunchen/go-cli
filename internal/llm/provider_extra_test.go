@@ -57,6 +57,68 @@ func TestEinoProviderBuildResolvesDefaultBaseURL(t *testing.T) {
 	assert.Equal(t, "", gotAuth, "no Authorization header without an API key")
 }
 
+func TestHTTPChatModelBuildBodyPreservesSamplingPresence(t *testing.T) {
+	tests := []struct {
+		name            string
+		config          ModelConfig
+		options         []Option
+		wantTemperature *float64
+		wantMaxTokens   *int
+	}{
+		{
+			name: "explicit zero config values",
+			config: ModelConfig{
+				TemperatureSet: true,
+				MaxTokensSet:   true,
+			},
+			wantTemperature: floatPointer(0),
+			wantMaxTokens:   intPointer(0),
+		},
+		{
+			name:            "unset config values",
+			config:          ModelConfig{},
+			wantTemperature: nil,
+			wantMaxTokens:   nil,
+		},
+		{
+			name: "per call explicit zero values",
+			config: ModelConfig{
+				Temperature:    0.8,
+				TemperatureSet: true,
+				MaxTokens:      512,
+				MaxTokensSet:   true,
+			},
+			options:         []Option{WithTemperature(0), WithMaxTokens(0)},
+			wantTemperature: floatPointer(0),
+			wantMaxTokens:   intPointer(0),
+		},
+		{
+			name: "legacy nonzero config values",
+			config: ModelConfig{
+				Temperature: 0.25,
+				MaxTokens:   128,
+			},
+			wantTemperature: floatPointer(0.25),
+			wantMaxTokens:   intPointer(128),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			model := &HTTPChatModel{provider: NewEinoProvider(), cfg: tt.config}
+			body, err := model.buildBody([]Message{{Role: RoleUser, Content: "x"}}, tt.options...)
+			require.NoError(t, err)
+			var request openAIRequest
+			require.NoError(t, json.Unmarshal(body, &request))
+			assert.Equal(t, tt.wantTemperature, request.Temperature)
+			assert.Equal(t, tt.wantMaxTokens, request.MaxTokens)
+		})
+	}
+}
+
+func floatPointer(value float64) *float64 { return &value }
+
+func intPointer(value int) *int { return &value }
+
 // TestHTTPChatModelStreamError verifies Stream closes the channel on error.
 func TestHTTPChatModelStreamError(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
@@ -106,8 +168,10 @@ func TestBuildBodyNoOptions(t *testing.T) {
 	require.NoError(t, err)
 	var req openAIRequest
 	require.NoError(t, json.Unmarshal(body, &req))
-	assert.Equal(t, 0.5, req.Temperature)
-	assert.Equal(t, 11, req.MaxTokens)
+	require.NotNil(t, req.Temperature)
+	assert.Equal(t, 0.5, *req.Temperature)
+	require.NotNil(t, req.MaxTokens)
+	assert.Equal(t, 11, *req.MaxTokens)
 	assert.Nil(t, req.Stop)
 }
 

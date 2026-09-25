@@ -74,7 +74,8 @@ func TestOpenAIProviderGenerateCannedCompletion(t *testing.T) {
 		var req openAIRequest
 		require.NoError(t, json.Unmarshal(body, &req))
 		assert.Equal(t, "gpt-4o", req.Model)
-		assert.Equal(t, 0.5, req.Temperature)
+		require.NotNil(t, req.Temperature)
+		assert.Equal(t, 0.5, *req.Temperature)
 		require.Len(t, req.Messages, 1)
 		assert.Equal(t, "user", req.Messages[0].Role)
 		assert.Equal(t, "hello", req.Messages[0].Content)

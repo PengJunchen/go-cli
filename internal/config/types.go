@@ -2,6 +2,10 @@ package config
 
 import "time"
 
+// DefaultLLMMaxTokens is the final model-token fallback when neither the
+// selected model nor its matching provider configuration sets a value.
+const DefaultLLMMaxTokens = 4096
+
 // Config is the root application configuration. It is deeply nested into
 // sections mirroring the go-cli configuration file / environment schema.
 type Config struct {
@@ -31,7 +35,8 @@ type Config struct {
 	History       HistoryConfig       `json:"history"`
 	TUI           TUIConfig           `json:"tui" yaml:"tui"`
 
-	verbose bool
+	verbose               bool
+	samplingPresenceKnown bool
 }
 
 // Verbose returns whether verbose output is enabled.
@@ -39,19 +44,23 @@ func (c *Config) Verbose() bool { return c.verbose }
 
 // ProviderConfig holds the LLM provider connection settings.
 type ProviderConfig struct {
-	Name        string  `json:"name"`
-	APIKey      string  `json:"api_key"`
-	BaseURL     string  `json:"base_url"`
-	Model       string  `json:"model"`
-	Temperature float64 `json:"temperature"`
-	MaxTokens   int     `json:"max_tokens"`
+	Name           string  `json:"name"`
+	APIKey         string  `json:"api_key"`
+	BaseURL        string  `json:"base_url"`
+	Model          string  `json:"model"`
+	Temperature    float64 `json:"temperature"`
+	MaxTokens      int     `json:"max_tokens"`
+	temperatureSet bool
+	maxTokensSet   bool
 }
 
 // ModelConfig holds the default model selection and generation parameters.
 type ModelConfig struct {
-	Name        string  `json:"name"`
-	Temperature float64 `json:"temperature"`
-	MaxTokens   int     `json:"max_tokens"`
+	Name           string  `json:"name"`
+	Temperature    float64 `json:"temperature"`
+	MaxTokens      int     `json:"max_tokens"`
+	temperatureSet bool
+	maxTokensSet   bool
 }
 
 // SmallModelConfig holds settings for a lightweight model used for background
@@ -59,12 +68,102 @@ type ModelConfig struct {
 // Model are empty, the small model is not built and all tasks fall back to the
 // primary model.
 type SmallModelConfig struct {
-	Provider    string  `json:"provider"`
-	APIKey      string  `json:"api_key"`
-	BaseURL     string  `json:"base_url"`
-	Model       string  `json:"model"`
-	Temperature float64 `json:"temperature"`
-	MaxTokens   int     `json:"max_tokens"`
+	Provider       string  `json:"provider"`
+	APIKey         string  `json:"api_key"`
+	BaseURL        string  `json:"base_url"`
+	Model          string  `json:"model"`
+	Temperature    float64 `json:"temperature"`
+	MaxTokens      int     `json:"max_tokens"`
+	temperatureSet bool
+	maxTokensSet   bool
+}
+
+// SamplingSettings carries one section's sampling values and their presence.
+// The Set fields distinguish an explicit zero from an omitted setting.
+type SamplingSettings struct {
+	Temperature    float64
+	TemperatureSet bool
+	MaxTokens      int
+	MaxTokensSet   bool
+}
+
+// SetTemperature sets an explicit provider temperature, including zero.
+func (p *ProviderConfig) SetTemperature(value float64) {
+	p.Temperature = value
+	p.temperatureSet = true
+}
+
+// SetMaxTokens sets an explicit provider token limit, including zero.
+func (p *ProviderConfig) SetMaxTokens(value int) {
+	p.MaxTokens = value
+	p.maxTokensSet = true
+}
+
+// SetTemperature sets an explicit model temperature, including zero.
+func (m *ModelConfig) SetTemperature(value float64) {
+	m.Temperature = value
+	m.temperatureSet = true
+}
+
+// SetMaxTokens sets an explicit model token limit, including zero.
+func (m *ModelConfig) SetMaxTokens(value int) {
+	m.MaxTokens = value
+	m.maxTokensSet = true
+}
+
+// SetTemperature sets an explicit small-model temperature, including zero.
+func (m *SmallModelConfig) SetTemperature(value float64) {
+	m.Temperature = value
+	m.temperatureSet = true
+}
+
+// SetMaxTokens sets an explicit small-model token limit, including zero.
+func (m *SmallModelConfig) SetMaxTokens(value int) {
+	m.MaxTokens = value
+	m.maxTokensSet = true
+}
+
+// ProviderSampling returns provider-level sampling settings. For a config
+// assembled by Loader or UnmarshalConfig, source presence is authoritative;
+// for older code-built Config values, non-zero scalars remain explicit.
+func (c *Config) ProviderSampling() SamplingSettings {
+	if c == nil {
+		return SamplingSettings{}
+	}
+	return samplingSettings(c.Provider.Temperature, c.Provider.temperatureSet, c.Provider.MaxTokens, c.Provider.maxTokensSet, c.samplingPresenceKnown)
+}
+
+// ModelSampling returns model-level sampling settings. Built-in fallback
+// values are returned with their Set bits clear.
+func (c *Config) ModelSampling() SamplingSettings {
+	if c == nil {
+		return SamplingSettings{}
+	}
+	return samplingSettings(c.Model.Temperature, c.Model.temperatureSet, c.Model.MaxTokens, c.Model.maxTokensSet, c.samplingPresenceKnown)
+}
+
+// SmallModelSampling returns small-model sampling settings. Built-in fallback
+// values are returned with their Set bits clear.
+func (c *Config) SmallModelSampling() SamplingSettings {
+	if c == nil {
+		return SamplingSettings{}
+	}
+	return samplingSettings(c.SmallModel.Temperature, c.SmallModel.temperatureSet, c.SmallModel.MaxTokens, c.SmallModel.maxTokensSet, c.samplingPresenceKnown)
+}
+
+func samplingSettings(temperature float64, temperatureSet bool, maxTokens int, maxTokensSet bool, presenceKnown bool) SamplingSettings {
+	if !temperatureSet && !presenceKnown && temperature != 0 {
+		temperatureSet = true
+	}
+	if !maxTokensSet && !presenceKnown && maxTokens != 0 {
+		maxTokensSet = true
+	}
+	return SamplingSettings{
+		Temperature:    temperature,
+		TemperatureSet: temperatureSet,
+		MaxTokens:      maxTokens,
+		MaxTokensSet:   maxTokensSet,
+	}
 }
 
 // AgentConfig holds agent loop behavior settings.

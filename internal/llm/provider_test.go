@@ -41,7 +41,8 @@ func TestHTTPChatModelGenerateCannedCompletion(t *testing.T) {
 		var req openAIRequest
 		require.NoError(t, json.Unmarshal(body, &req))
 		assert.Equal(t, "gpt-4o", req.Model)
-		assert.Equal(t, 0.7, req.Temperature)
+		require.NotNil(t, req.Temperature)
+		assert.Equal(t, 0.7, *req.Temperature)
 		require.Len(t, req.Messages, 1)
 		assert.Equal(t, "user", req.Messages[0].Role)
 		assert.Equal(t, "hello", req.Messages[0].Content)
@@ -240,8 +241,10 @@ func TestBuildBodyOptions(t *testing.T) {
 
 	var req openAIRequest
 	require.NoError(t, json.Unmarshal(body, &req))
-	assert.Equal(t, 0.9, req.Temperature)
-	assert.Equal(t, 42, req.MaxTokens)
+	require.NotNil(t, req.Temperature)
+	assert.Equal(t, 0.9, *req.Temperature)
+	require.NotNil(t, req.MaxTokens)
+	assert.Equal(t, 42, *req.MaxTokens)
 	assert.Equal(t, []string{"END"}, req.Stop)
 	assert.Len(t, req.Messages, 1)
 }

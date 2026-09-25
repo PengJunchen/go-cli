@@ -447,18 +447,11 @@ func (m *HTTPChatModel) buildBody(msgs []Message, opts ...Option) ([]byte, error
 	}
 
 	req := openAIRequest{
-		Model:     m.cfg.Model,
-		Messages:  reqMsgs,
-		MaxTokens: m.cfg.MaxTokens,
+		Model:    m.cfg.Model,
+		Messages: reqMsgs,
 	}
-	if genOpts.Temperature != nil {
-		req.Temperature = *genOpts.Temperature
-	} else {
-		req.Temperature = m.cfg.Temperature
-	}
-	if genOpts.MaxTokens != nil {
-		req.MaxTokens = *genOpts.MaxTokens
-	}
+	req.Temperature = samplingTemperature(m.cfg, genOpts.Temperature)
+	req.MaxTokens = samplingMaxTokens(m.cfg, genOpts.MaxTokens)
 	if len(genOpts.StopStrings) > 0 {
 		req.Stop = genOpts.StopStrings
 	}
@@ -542,11 +535,33 @@ func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadClos
 type openAIRequest struct {
 	Model       string          `json:"model"`
 	Messages    []openAIMessage `json:"messages"`
-	Temperature float64         `json:"temperature,omitempty"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`
+	Temperature *float64        `json:"temperature,omitempty"`
+	MaxTokens   *int            `json:"max_tokens,omitempty"`
 	Stop        []string        `json:"stop,omitempty"`
 	Tools       []openAIToolDef `json:"tools,omitempty"`
 	ToolChoice  any             `json:"tool_choice,omitempty"`
+}
+
+func samplingTemperature(cfg ModelConfig, override *float64) *float64 {
+	if override != nil {
+		return override
+	}
+	if cfg.TemperatureSet || cfg.Temperature != 0 {
+		value := cfg.Temperature
+		return &value
+	}
+	return nil
+}
+
+func samplingMaxTokens(cfg ModelConfig, override *int) *int {
+	if override != nil {
+		return override
+	}
+	if cfg.MaxTokensSet || cfg.MaxTokens != 0 {
+		value := cfg.MaxTokens
+		return &value
+	}
+	return nil
 }
 
 // openAIToolDef is the OpenAI tool definition format.

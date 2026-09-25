@@ -158,12 +158,14 @@ type ModelInfo struct {
 
 // ModelConfig configures how a provider should build a chat model.
 type ModelConfig struct {
-	Model       string        `json:"model"`
-	Temperature float64       `json:"temperature"`
-	MaxTokens   int           `json:"max_tokens"`
-	APIKey      string        `json:"api_key,omitempty"`
-	BaseURL     string        `json:"base_url,omitempty"`
-	Credential  CredentialRef `json:"-"`
+	Model          string        `json:"model"`
+	Temperature    float64       `json:"temperature"`
+	TemperatureSet bool          `json:"-"`
+	MaxTokens      int           `json:"max_tokens"`
+	MaxTokensSet   bool          `json:"-"`
+	APIKey         string        `json:"api_key,omitempty"`
+	BaseURL        string        `json:"base_url,omitempty"`
+	Credential     CredentialRef `json:"-"`
 	// credentialResolved marks a resolver-produced config. Adapter-level
 	// constructor defaults must not fill a missing key after scoped resolution.
 	credentialResolved bool
