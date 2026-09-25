@@ -4,7 +4,7 @@ Status: design-only follow-up for R4-EFFECT-01. This proposal grants no effect b
 
 ## Decision
 
-Mint `workspace_read` only for the four concrete first-party file readers `read`, `ls`, `grep`, and `find`, and only when each registered instance already contains a valid, non-empty `PathWhitelist`. The trusted scope must be derived from that instance's canonical roots—the exact roots its executor uses—not by resolving `Sandbox.AllowedPaths` a second time. A zero-root/unrestricted reader and an invalid whitelist remain ordinary unknown registrations. The existing invalid-whitelist behavior rejects every path, so retaining it as unknown does not broaden access or introduce a new assembly startup failure.
+Mint `workspace_read` only for the four concrete first-party file readers `read`, `ls`, `grep`, and `find`, and only when each registered instance already contains a valid, non-empty `PathWhitelist`. The trusted scope must be derived from that instance's canonical roots—the exact roots its executor uses—not by resolving `Sandbox.AllowedPaths` a second time.
 
 Keep effect identity separate from completion proof. Read and Ls may retain their existing inline completion proof; Grep and Find acquire a workspace-read effect only through this proposal and do not acquire completion proof from it. Their completion continues to depend on the independently reviewed actual helper/process join path. Bash, Write/Edit, Git tools, LSP, remote tools, custom tools, MCP, extensions, and SubAgent dispatch do not use this registrar.
 
@@ -24,18 +24,19 @@ If a registry in the `RegisterDefaults` chain does not implement the private cap
 
 For a supported reader, inspect its private `whitelist` value and branch as follows:
 
-| Reader whitelist | Registration result |
+| Reader and whitelist | Registration result |
 |---|---|
-| `invalid == false` and canonical `paths` is non-empty | `RegistrationSourceBuiltin`, exactly `EffectWorkspaceRead`, scope fingerprint from those roots |
-| `invalid == false` and `paths` is empty | ordinary registration (`tool_registry`, `unknown`, zero scope) |
-| `invalid == true` | ordinary registration (`tool_registry`, `unknown`, zero scope); preserve the executor's existing deny-all behavior |
+| `read` or `ls`; valid and canonical `paths` is non-empty | `RegistrationSourceBuiltin`, exactly `EffectWorkspaceRead`, scope fingerprint from those roots, and retain `CompletionInlinePipelineJoined` |
+| `read` or `ls`; empty or invalid whitelist | Preserve existing `RegistrationSourceBuiltin`, `unknown`, zero scope, and `CompletionInlinePipelineJoined`; invalid whitelist still denies every path |
+| `grep` or `find`; valid and canonical `paths` is non-empty | `RegistrationSourceBuiltin`, exactly `EffectWorkspaceRead`, scope fingerprint from those roots, and no completion proof from this effect registration |
+| `grep` or `find`; empty or invalid whitelist | ordinary registration (`tool_registry`, `unknown`, zero scope, no completion proof); invalid whitelist still denies every path |
 | Any other definition, including same-name custom/MCP/extension tools | ordinary registration (`tool_registry`, `unknown`, zero scope) |
 
 The capability must use the concrete instance's existing `whitelist.paths`. `NewPathWhitelist` has already cleaned, made roots absolute, and resolved symlinks when the reader was constructed. It stores a separate private slice; `ReadTool`, `LSTool`, `GrepTool`, and `FindTool` expose no setter for it. Copy that slice before canonical sorting/deduplication for identity. Do not re-resolve the original config strings, use `Workdir` as a substitute, or include a fingerprint cache that could hide later registration replacement. The executor keeps its original whitelist slice, so metadata describes the same configured roots without mutating execution behavior.
 
 Encode the root set deterministically with a version tag and length-delimited UTF-8 path bytes (for example, a fixed domain prefix followed by each sorted, deduplicated root's byte length and bytes), then pass the resulting non-empty token to the existing private `newTrustedToolScope`. Sorting and deduplication are for the identity encoding only; they do not rewrite the executor's whitelist. Length delimiting avoids ambiguous concatenation. The scope fingerprint remains an opaque SHA-256 identity fact, not a path authorization object or a deserializable capability.
 
-Use a narrow private registration helper or equivalent extension to `registerDefinitionWithCompletion` so source, effects, scope, and any already-reviewed completion proof are written together under the existing registry fence. Re-registering the same name must still increment the registration generation and replace all metadata atomically; an ordinary same-name replacement clears the trusted source/effect/scope. The existing inline-reader path currently grants Read/Ls completion proof but no effect; do not repurpose completion proof as authority. Prefer one combined private branch for the four readers so effect and completion are recorded from the same exact definition snapshot.
+Use a narrow private registration helper or equivalent extension to `registerDefinitionWithCompletion` so source, effects, scope, and any already-reviewed completion proof are written together under the existing registry fence. Re-registering the same name must still increment the registration generation and replace all metadata atomically; an ordinary same-name replacement clears the trusted source/effect/scope. The existing inline-reader path grants Read/Ls built-in provenance and inline completion proof even with no scope; preserve that behavior for empty or invalid whitelists. For valid scoped Read/Ls, add the workspace-read effect and scope without dropping the existing completion proof. Do not repurpose completion proof as authority. Prefer one combined private branch for the four readers so effect and completion are recorded from the same exact definition snapshot.
 
 ## Configuration and path boundary
 
@@ -59,10 +60,10 @@ Keep implementation ownership in `internal/tools/trusted_registry.go`, `builtins
 
 The minimum acceptance tests should prove:
 
-1. `RegisterDefaults` with two non-empty valid roots gives exactly `read`, `ls`, `grep`, and `find` built-in provenance, one `workspace_read` effect, and a non-zero scope; equivalent root order/duplicates encode identically, while a different root set has a different scope.
-2. Empty roots and invalid whitelists stay unknown with zero scope. A normal/custom registration with a reader's canonical name stays unknown. Replacing a scoped reader invalidates an old prepared invocation and does not retain old scope/effects.
+1. `RegisterDefaults` with two non-empty valid roots gives exactly `read`, `ls`, `grep`, and `find` built-in provenance, one `workspace_read` effect, and a non-zero scope; Read/Ls retain `CompletionInlinePipelineJoined`. Equivalent root order/duplicates encode identically, while a different root set has a different scope.
+2. With empty roots or invalid whitelists, Read/Ls preserve built-in provenance, unknown effect, zero scope, and inline completion; Grep/Find stay ordinary unknown with zero scope and no completion proof. Invalid whitelists still deny every path. A normal/custom registration with a reader's canonical name stays unknown. Replacing a scoped reader invalidates an old prepared invocation and does not retain old scope/effects.
 3. The four executors still allow targets inside their configured roots and reject outside absolute paths and tested symlink escapes. Empty configuration preserves existing unrestricted direct-reader behavior while leaving the effect unknown. `--no-sandbox` does not remove configured reader path checks.
 4. Through the real assembled registry and prepared approval path, active Plan permits in-scope Read/Ls/Grep/Find and existing reviewed network/control cases, while unknown/custom same-name tools, Bash, Write/Edit, Git, LSP, and other unreviewed registrations are stopped before their executor can produce a side effect. A scope-A decision cannot dispatch a scope-B replacement.
-5. Effect metadata and completion proof are asserted independently: Read/Ls may keep their currently accepted inline proof; Grep/Find do not receive inline proof from `workspace_read` and only receive any proof established by their actual joined helper lifecycle.
+5. Effect metadata and completion proof are asserted independently: Read/Ls keep their current inline proof regardless of whether their whitelist is empty, invalid, or scoped; Grep/Find do not receive inline proof from `workspace_read` and only receive any proof established by their actual joined helper lifecycle.
 
 This bounded slice does not satisfy R4-REV-01 by itself. The final phase gate still needs the generated real-Assembly registration/effect/schema/decision matrix, the complete Plan side-effect matrix, and the combined affected-package verification described in `r4-remaining-source-contract.md`.
