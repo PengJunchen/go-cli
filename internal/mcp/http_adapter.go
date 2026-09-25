@@ -76,6 +76,7 @@ var ErrHTTPOperationPending = errors.New("mcp: HTTP operation remains pending")
 type httpOperationPendingError struct {
 	operation string
 	cause     error
+	done      <-chan struct{}
 }
 
 func (e *httpOperationPendingError) Error() string {
@@ -83,6 +84,10 @@ func (e *httpOperationPendingError) Error() string {
 }
 
 func (e *httpOperationPendingError) Unwrap() error { return e.cause }
+
+// Done exposes completion of the exact operation this waiter stopped waiting
+// for. It does not claim that a remote tool side effect succeeded or failed.
+func (e *httpOperationPendingError) Done() <-chan struct{} { return e.done }
 
 func (e *httpOperationPendingError) Is(target error) bool {
 	return target == ErrHTTPOperationPending
@@ -549,7 +554,7 @@ func waitForHTTPOperation(ctx context.Context, done <-chan struct{}, operation s
 			return nil
 		default:
 		}
-		return &httpOperationPendingError{operation: operation, cause: contextCause(ctx)}
+		return &httpOperationPendingError{operation: operation, cause: contextCause(ctx), done: done}
 	}
 }
 
@@ -580,12 +585,12 @@ func waitForConnect(ctx context.Context, op *httpConnectOperation, policy httpCo
 		if err := waitForHTTPOperationDone(op.done); err == nil {
 			return op.result
 		}
-		return &httpOperationPendingError{operation: "connect", cause: contextCause(ctx)}
+		return &httpOperationPendingError{operation: "connect", cause: contextCause(ctx), done: op.done}
 	case <-lifecycleDone:
 		if err := waitForHTTPOperationDone(op.done); err == nil {
 			return op.result
 		}
-		return &httpOperationPendingError{operation: "connect", cause: contextCause(policy.lifecycleCtx)}
+		return &httpOperationPendingError{operation: "connect", cause: contextCause(policy.lifecycleCtx), done: op.done}
 	}
 }
 
