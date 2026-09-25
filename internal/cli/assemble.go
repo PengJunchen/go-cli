@@ -1232,19 +1232,40 @@ func (s *assembleState) assembleProductionResilience() error {
 		newProductionToolWrapper(nil, s.auditLog, s.telemetry, s.sessionID),
 		tools.NewResultMaskingWrapper(resultMasker),
 	}
+	// This attestation applies only to the exact wrappers constructed above.
+	// The production wrapper has no result cache, and its sidecars must be the
+	// synchronous built-in audit/telemetry implementations.
+	synchronousWrappers := defaultToolExecutionSidecarsAreSynchronous(s.auditLog, s.telemetry)
 	preparedRegistry, ok := s.tr.(*tools.MiddlewareToolRegistry)
 	if !ok {
 		return errors.New("assemble: prepared tool registry is unavailable")
 	}
 	if err := preparedRegistry.SetPreparedToolStages(tools.PreparedToolStages{
-		ArgumentPreparers: []tools.ArgumentPreparer{pathNormalizer},
-		ExecutionWrappers: wrappers,
-		MutationQueue:     s.mutationQueue,
+		ArgumentPreparers:            []tools.ArgumentPreparer{pathNormalizer},
+		ExecutionWrappers:            wrappers,
+		SynchronousExecutionWrappers: synchronousWrappers,
+		MutationQueue:                s.mutationQueue,
 	}); err != nil {
 		return fmt.Errorf("assemble: install prepared tool stages: %w", err)
 	}
 	s.reg.RegisterToolRegistry(s.tr)
 	return nil
+}
+
+// defaultToolExecutionSidecarsAreSynchronous only admits the sidecars used by
+// the fixed wrapper chain above: audit may be absent or the built-in sync log,
+// and telemetry must be the built-in in-memory collector. An injected
+// replacement keeps the wrappers installed but suppresses completion proof.
+func defaultToolExecutionSidecarsAreSynchronous(auditLog production.AuditLog, telemetry production.Telemetry) bool {
+	defaultTelemetry, ok := telemetry.(*production.DefaultTelemetry)
+	if !ok || defaultTelemetry == nil {
+		return false
+	}
+	if auditLog == nil {
+		return true
+	}
+	defaultAuditLog, ok := auditLog.(*production.DefaultAuditLog)
+	return ok && defaultAuditLog != nil
 }
 
 // assembleOutputGuards wires the output guard chain (PII + code injection +

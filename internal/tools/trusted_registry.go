@@ -103,15 +103,21 @@ type registrationSnapshotProvider interface {
 // PreparedToolStages separates argument normalization from execution
 // decoration and mutation scheduling. Effects and identity are intentionally
 // absent: only registration provenance can mint those values. ExecutionWrappers
-// are trusted, audited assembly decorators: they must not add side effects,
-// escape asynchronously, or mutate the frozen call. Extension hooks and
-// arbitrary side-effect wrappers must remain outside this stage.
+// are trusted, audited assembly decorators: they must not add tool-visible
+// file, process, or network effects, escape asynchronously, or mutate the
+// frozen call. The fixed CLI wrapper chain may also synchronously append its
+// already-configured audit record and update in-memory telemetry. This narrow
+// allowance does not attest arbitrary custom wrappers or extension hooks.
 type PreparedToolStages struct {
 	ArgumentPreparers []ArgumentPreparer
 	ExecutionWrappers []ToolExecutorWrapper
 	// SynchronousExecutionWrappers is an explicit trusted-assembly attestation
 	// that every configured execution wrapper returns only after all work it
-	// starts has stopped, preserves the frozen call, and adds no side effects.
+	// starts has stopped and preserves the frozen call. The current CLI caller
+	// sets it only for its fixed reviewed wrapper chain, with a nil result cache,
+	// optional DefaultAuditLog, and DefaultTelemetry. That chain may perform its
+	// configured synchronous audit append and in-memory telemetry update; this
+	// is not permission to attest arbitrary side-effect wrappers or hooks.
 	// Without it, non-empty wrappers suppress prepared completion proofs.
 	SynchronousExecutionWrappers bool
 	MutationQueue                FileMutationQueue
