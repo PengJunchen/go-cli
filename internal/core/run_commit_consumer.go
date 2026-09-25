@@ -80,7 +80,7 @@ func (err runCommitQuiescenceError) Unwrap() error {
 }
 func (runCommitQuiescenceError) OutcomeUnknown() bool { return true }
 
-func dispatchPreparedRunCommitCall(ctx context.Context, invocation tools.PreparedInvocation, taskID uint64) (result runCommitDispatchResult) {
+func dispatchPreparedRunCommitCall(ctx context.Context, invocation tools.PreparedInvocation, streamSink tools.SynchronousStreamSink, taskID uint64) (result runCommitDispatchResult) {
 	if invocation == nil {
 		return runCommitDispatchResult{output: "Error: prepared invocation is unavailable", isError: true, err: ErrRunCommitPreparedInvocationUnavailable}
 	}
@@ -99,7 +99,17 @@ func dispatchPreparedRunCommitCall(ctx context.Context, invocation tools.Prepare
 		handoffRunCompletionTask(ctx, taskID)
 	}()
 
-	toolResult, err := invocation.Dispatch(ctx)
+	var toolResult *tools.ToolResult
+	var err error
+	if streamSink != nil {
+		streaming, ok := invocation.(tools.PreparedStreamingInvocation)
+		if !ok {
+			return runCommitDispatchResult{output: "Error: " + ErrRunCommitStreamingUnsupported.Error(), isError: true, err: ErrRunCommitStreamingUnsupported}
+		}
+		toolResult, err = streaming.DispatchStreaming(ctx, streamSink)
+	} else {
+		toolResult, err = invocation.Dispatch(ctx)
+	}
 	result.returned = true
 	result.committed = invocation.DispatchCommitted()
 	if err != nil {
@@ -354,22 +364,54 @@ func (consumer *runCommitConsumer) recordActionReceipt(taskID uint64, ordinal ui
 	return consumer.recordTaskReceipt(taskID, receipt)
 }
 
-func (consumer *runCommitConsumer) prepareInvocation(ctx context.Context, registry tools.ToolRegistry, call llm.ToolCall) (tools.PreparedInvocation, error) {
+func (consumer *runCommitConsumer) prepareInvocation(ctx context.Context, registry tools.ToolRegistry, call llm.ToolCall, stream EventStream) (tools.PreparedInvocation, tools.SynchronousStreamSink, error) {
 	if call.Name == "dispatch_subagent" {
-		return nil, ErrRunCommitChildUnsupported
+		return nil, nil, ErrRunCommitChildUnsupported
+	}
+	if stream != nil {
+		// Get is used only to determine whether this call has a streaming
+		// capability. The streaming preparer still freezes the actual
+		// registration identity, authorization, schema, and execution stages.
+		if definition, err := registry.Get(ctx, call.Name); err == nil {
+			if _, streaming := definition.(tools.StreamingBashTool); streaming {
+				streamSink := attestedEventStreamSink(stream)
+				if streamSink == nil {
+					return nil, nil, ErrRunCommitStreamingUnsupported
+				}
+				preparer, ok := registry.(tools.StreamingToolCallPreparer)
+				if !ok {
+					return nil, nil, ErrRunCommitStreamingUnsupported
+				}
+				invocation, err := preparer.PrepareStreamingToolCall(ctx, toToolsCall(call), streamSink)
+				if err != nil {
+					return nil, nil, err
+				}
+				if invocation == nil {
+					return nil, nil, ErrRunCommitPreparedInvocationUnavailable
+				}
+				return invocation, streamSink, nil
+			}
+		}
 	}
 	preparer, ok := registry.(tools.ToolCallPreparer)
 	if !ok {
-		return nil, ErrRunCommitPreparedInvocationUnavailable
+		return nil, nil, ErrRunCommitPreparedInvocationUnavailable
 	}
 	invocation, err := preparer.PrepareToolCall(ctx, toToolsCall(call))
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if invocation == nil {
-		return nil, ErrRunCommitPreparedInvocationUnavailable
+		return nil, nil, ErrRunCommitPreparedInvocationUnavailable
 	}
-	return invocation, nil
+	if stream != nil {
+		if _, streaming := invocation.(tools.PreparedStreamingInvocation); streaming {
+			// A registry that did not expose its streaming capability through Get
+			// cannot receive an attested sink through its preparer. Fail closed.
+			return nil, nil, ErrRunCommitStreamingUnsupported
+		}
+	}
+	return invocation, nil, nil
 }
 
 func (consumer *runCommitConsumer) executeSequentialCall(
@@ -382,7 +424,7 @@ func (consumer *runCommitConsumer) executeSequentialCall(
 	transcript *[]TranscriptEntry,
 	messages *[]llm.Message,
 ) (runCommitToolResult, error) {
-	invocation, prepareErr := consumer.prepareInvocation(ctx, registry, call)
+	invocation, streamSink, prepareErr := consumer.prepareInvocation(ctx, registry, call, stream)
 	if prepareErr != nil {
 		output := "Error: " + prepareErr.Error()
 		outcome := ReceiptOutcomeError
@@ -392,17 +434,10 @@ func (consumer *runCommitConsumer) executeSequentialCall(
 		if err := consumer.commitKnownCall(ordinal, assistant, "batch-"+newClaimID(), call, uint64(len(*transcript)), output, outcome, transcript, messages); err != nil {
 			return runCommitToolResult{output: output, isError: true, outcome: outcome}, err
 		}
-		if errors.Is(prepareErr, ErrRunCommitPreparedInvocationUnavailable) || errors.Is(prepareErr, ErrRunCommitChildUnsupported) {
+		if errors.Is(prepareErr, ErrRunCommitPreparedInvocationUnavailable) || errors.Is(prepareErr, ErrRunCommitChildUnsupported) || errors.Is(prepareErr, ErrRunCommitStreamingUnsupported) {
 			return runCommitToolResult{output: output, isError: true, outcome: outcome}, prepareErr
 		}
 		return runCommitToolResult{output: output, isError: true, outcome: outcome}, nil
-	}
-	if _, streaming := invocation.(tools.PreparedStreamingInvocation); streaming && stream != nil {
-		output := "Error: " + ErrRunCommitStreamingUnsupported.Error()
-		if err := consumer.commitKnownCall(ordinal, assistant, "batch-"+newClaimID(), call, uint64(len(*transcript)), output, ReceiptOutcomeError, transcript, messages); err != nil {
-			return runCommitToolResult{output: output, isError: true, outcome: ReceiptOutcomeError}, err
-		}
-		return runCommitToolResult{output: output, isError: true, outcome: ReceiptOutcomeError}, ErrRunCommitStreamingUnsupported
 	}
 
 	batchID := "batch-" + newClaimID()
@@ -418,7 +453,7 @@ func (consumer *runCommitConsumer) executeSequentialCall(
 	taskID := registerRunCompletionTask(ctx, intent, invocation.CompletionSignal())
 	dispatch := runCommitDispatchResult{output: "Error: run owner cannot track prepared completion", isError: true, err: ErrRunCommitOwnerUnavailable}
 	if taskID > 0 {
-		dispatch = dispatchPreparedRunCommitCall(ctx, invocation, taskID)
+		dispatch = dispatchPreparedRunCommitCall(ctx, invocation, streamSink, taskID)
 	}
 	dispatchState := DispatchStateDispatched
 	resourceState := RunExecutionCleanupPending
@@ -536,6 +571,7 @@ func runCommitReceiptOutcome(_ context.Context, dispatch runCommitDispatchResult
 type runCommitParallelAction struct {
 	call       llm.ToolCall
 	invocation tools.PreparedInvocation
+	streamSink tools.SynchronousStreamSink
 	intent     ActionIntent
 	taskID     uint64
 	known      *runCommitToolResult
@@ -572,12 +608,7 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 			actions[index] = action
 			continue
 		}
-		invocation, err := consumer.prepareInvocation(ctx, registry, call)
-		if err == nil {
-			if _, streaming := invocation.(tools.PreparedStreamingInvocation); streaming && stream != nil {
-				err = ErrRunCommitStreamingUnsupported
-			}
-		}
+		invocation, streamSink, err := consumer.prepareInvocation(ctx, registry, call, stream)
 		if err != nil {
 			known := runCommitToolResult{output: "Error: " + err.Error(), isError: true, outcome: ReceiptOutcomeError}
 			if errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded) {
@@ -592,6 +623,7 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 			continue
 		}
 		action.invocation = invocation
+		action.streamSink = streamSink
 		action.intent = consumer.actionIntent(batchID, ordinal, call, invocation)
 		batch.Intents = append(batch.Intents, action.intent)
 		actions[index] = action
@@ -616,7 +648,7 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 				action.result = runCommitDispatchResult{output: "Error: run owner cannot track prepared completion", isError: true, err: ErrRunCommitOwnerUnavailable}
 				return
 			}
-			action.result = dispatchPreparedRunCommitCall(ctx, action.invocation, action.taskID)
+			action.result = dispatchPreparedRunCommitCall(ctx, action.invocation, action.streamSink, action.taskID)
 		}(action)
 	}
 	allDone := make(chan struct{})
