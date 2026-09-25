@@ -10,6 +10,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -267,10 +268,14 @@ func scanHardcodedDefaults(dir string, goFiles []string) []Finding {
 		if err != nil {
 			continue
 		}
+		errorMessages := standardErrorMessageLiteralPositions(node)
 
 		ast.Inspect(node, func(n ast.Node) bool {
 			lit, ok := n.(*ast.BasicLit)
 			if !ok || lit.Kind != token.STRING {
+				return true
+			}
+			if _, ok := errorMessages[lit.Pos()]; ok {
 				return true
 			}
 
@@ -294,6 +299,89 @@ func scanHardcodedDefaults(dir string, goFiles []string) []Finding {
 	}
 
 	return findings
+}
+
+// standardErrorMessageLiteralPositions returns the positions of direct string
+// arguments used as the error message in standard-library errors.New or
+// fmt.Errorf calls. Parser-resolved local selector roots are never treated as
+// package names, so a local variable or parameter shadowing an import cannot
+// make a prompt literal exempt.
+func standardErrorMessageLiteralPositions(file *ast.File) map[token.Pos]struct{} {
+	imports := standardErrorPackageAliases(file)
+	if len(imports) == 0 {
+		return nil
+	}
+
+	positions := make(map[token.Pos]struct{})
+	ast.Inspect(file, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		root, ok := selector.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		importPath, ok := imports[root.Name]
+		if !ok {
+			return true
+		}
+		if root.Obj != nil {
+			importSpec, ok := root.Obj.Decl.(*ast.ImportSpec)
+			if !ok {
+				return true
+			}
+			resolvedPath, err := strconv.Unquote(importSpec.Path.Value)
+			if err != nil || resolvedPath != importPath {
+				return true
+			}
+		}
+		if (importPath != "errors" || selector.Sel.Name != "New") &&
+			(importPath != "fmt" || selector.Sel.Name != "Errorf") {
+			return true
+		}
+		literal, ok := call.Args[0].(*ast.BasicLit)
+		if !ok || literal.Kind != token.STRING {
+			return true
+		}
+		positions[literal.Pos()] = struct{}{}
+		return true
+	})
+	return positions
+}
+
+// standardErrorPackageAliases maps unambiguous local import names to the two
+// standard-library packages whose first string arguments are error messages.
+func standardErrorPackageAliases(file *ast.File) map[string]string {
+	aliases := make(map[string]string)
+	ambiguous := make(map[string]struct{})
+	for _, spec := range file.Imports {
+		importPath, err := strconv.Unquote(spec.Path.Value)
+		if err != nil || (importPath != "errors" && importPath != "fmt") {
+			continue
+		}
+		name := importPath
+		if spec.Name != nil {
+			name = spec.Name.Name
+			if name == "." || name == "_" {
+				continue
+			}
+		}
+		if _, exists := aliases[name]; exists {
+			delete(aliases, name)
+			ambiguous[name] = struct{}{}
+			continue
+		}
+		if _, exists := ambiguous[name]; exists {
+			continue
+		}
+		aliases[name] = importPath
+	}
+	return aliases
 }
 
 // scanCommandRouting detects hardcoded command routing (SCAN-010).
