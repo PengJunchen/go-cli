@@ -43,6 +43,7 @@ var (
 	errHTTPSessionNotFound      = errors.New("acp: session not found")
 	errHTTPSessionAliasMismatch = errors.New("acp: sender alias does not match session")
 	errHTTPSessionIDRequired    = errors.New("acp: session_id is required")
+	ErrHTTPServerCleanupPending = errors.New("acp: HTTP server cleanup is pending")
 )
 
 // httpACPEnvelope is the HTTP-only envelope for the private ACP profile. The
@@ -88,6 +89,36 @@ type httpSessionBinding struct {
 	session     *Session
 }
 
+type httpServerGeneration struct {
+	server      *http.Server
+	ctx         context.Context
+	cancel      context.CancelFunc
+	serveDone   chan struct{}
+	cleanupDone chan struct{}
+	closeDone   chan struct{}
+	dispatches  sync.WaitGroup
+	requests    sync.WaitGroup
+	closing     bool
+	admitting   bool
+	serveErr    error
+	closeErr    error
+}
+
+type httpServerCleanupPendingError struct {
+	cause error
+	done  <-chan struct{}
+}
+
+func (e *httpServerCleanupPendingError) Error() string {
+	return ErrHTTPServerCleanupPending.Error() + ": " + e.cause.Error()
+}
+
+func (e *httpServerCleanupPendingError) Unwrap() error {
+	return errors.Join(ErrHTTPServerCleanupPending, e.cause)
+}
+
+func (e *httpServerCleanupPendingError) Done() <-chan struct{} { return e.done }
+
 // HTTPServer implements ACPServer over the private go-cli-acp-json/1 HTTP
 // profile. It exposes these routes:
 //
@@ -109,13 +140,14 @@ type HTTPServer struct {
 	tlsCertFile string
 	tlsKeyFile  string
 
-	mu       sync.Mutex
-	sessions map[string]httpSessionBinding
-	server   *http.Server
-	ln       net.Listener
-	ctx      context.Context
-	cancel   context.CancelFunc
-	running  bool
+	mu         sync.Mutex
+	sessions   map[string]httpSessionBinding
+	generation *httpServerGeneration
+	server     *http.Server
+	ln         net.Listener
+	ctx        context.Context
+	cancel     context.CancelFunc
+	running    bool
 
 	// maxConcurrency limits the number of concurrent in-flight requests.
 	// Default: 64. Set before calling Start.
@@ -250,24 +282,25 @@ func (s *HTTPServer) bodyLimitMiddleware(next http.Handler) http.Handler {
 // caller rather than silently logged.
 func (s *HTTPServer) Start(ctx context.Context) error {
 	s.mu.Lock()
+	defer s.mu.Unlock()
 	if s.running {
-		s.mu.Unlock()
 		return nil
 	}
-	s.running = true
+	if previous := s.generation; previous != nil && !channelClosed(previous.closeDone) {
+		return &httpServerCleanupPendingError{cause: ErrHTTPServerCleanupPending, done: previous.closeDone}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ln, err := net.Listen("tcp", s.addr)
+	if err != nil {
+		return fmt.Errorf("acp: listen %s: %w", s.addr, err)
+	}
+
 	if s.maxConcurrency <= 0 {
 		s.maxConcurrency = 64
 	}
 	s.sem = make(chan struct{}, s.maxConcurrency)
-	s.mu.Unlock()
-
-	ln, err := net.Listen("tcp", s.addr)
-	if err != nil {
-		s.mu.Lock()
-		s.running = false
-		s.mu.Unlock()
-		return fmt.Errorf("acp: listen %s: %w", s.addr, err)
-	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/connect", s.handleConnect)
@@ -284,32 +317,48 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 	}
 	handler = s.rateLimitMiddleware(handler)
 
+	genCtx, cancel := context.WithCancel(ctx)
+	generation := &httpServerGeneration{
+		ctx:         genCtx,
+		cancel:      cancel,
+		serveDone:   make(chan struct{}),
+		cleanupDone: make(chan struct{}),
+		closeDone:   make(chan struct{}),
+		admitting:   true,
+	}
+	handler = s.generationRequestMiddleware(generation, handler)
+
 	srv := &http.Server{
 		Addr:    s.addr,
 		Handler: handler,
 	}
+	generation.server = srv
 
-	s.mu.Lock()
+	s.generation = generation
+	s.running = true
 	s.server = srv
 	s.ln = ln
-	s.ctx, s.cancel = context.WithCancel(ctx)
-	s.mu.Unlock()
+	s.ctx = genCtx
+	s.cancel = cancel
 
 	slog.Info("acp.server.start", "name", s.name, "addr", ln.Addr().String(), "tls", s.tlsCertFile != "")
 	go func() {
+		defer close(generation.serveDone)
 		if s.tlsCertFile != "" && s.tlsKeyFile != "" {
 			if err := srv.ServeTLS(ln, s.tlsCertFile, s.tlsKeyFile); err != nil && err != http.ErrServerClosed {
+				generation.serveErr = err
 				slog.Error("acp.server.serve_tls_failed", "err", err)
 			}
 		} else {
 			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+				generation.serveErr = err
 				slog.Error("acp.server.serve_failed", "err", err)
 			}
 		}
 	}()
 
 	// Start session cleanup goroutine for idle session reclamation.
-	go s.sessionCleanupLoop()
+	go s.sessionCleanupLoop(generation)
 
 	return nil
 }
@@ -319,35 +368,88 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 // gracefully shuts down the HTTP server.
 func (s *HTTPServer) Stop(ctx context.Context) error {
 	s.mu.Lock()
-	if !s.running {
+	generation := s.generation
+	if generation == nil {
 		s.mu.Unlock()
 		return nil
 	}
-	s.running = false
-	server := s.server
-	s.server = nil
-	s.ln = nil
-	cancel := s.cancel
-	s.cancel = nil
-
-	// Close all sessions.
-	for id, binding := range s.sessions {
-		binding.session.Close()
-		delete(s.sessions, id)
+	startOwner := !generation.closing
+	if startOwner {
+		generation.closing = true
+		generation.admitting = false
+		s.running = false
+		s.server = nil
+		s.ln = nil
+		s.cancel = nil
+		// Close all sessions before HTTP shutdown so stream handlers can leave.
+		for id, binding := range s.sessions {
+			binding.session.Close()
+			delete(s.sessions, id)
+		}
+		s.lastActivity = make(map[string]time.Time)
 	}
-	s.lastActivity = make(map[string]time.Time)
 	s.mu.Unlock()
 
-	// Cancel server context to abort in-flight dispatch goroutines.
-	if cancel != nil {
-		cancel()
+	if startOwner {
+		// Cancel server context to ask handlers and detached dispatch workers to
+		// stop. The close owner still joins each worker before publishing Done.
+		generation.cancel()
+		slog.Info("acp.server.stop", "name", s.name)
+		go s.closeGeneration(generation)
 	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	select {
+	case <-generation.closeDone:
+		return generation.closeErr
+	case <-ctx.Done():
+		select {
+		case <-generation.closeDone:
+			return generation.closeErr
+		default:
+			return &httpServerCleanupPendingError{cause: ctx.Err(), done: generation.closeDone}
+		}
+	}
+}
 
-	slog.Info("acp.server.stop", "name", s.name)
-	if server != nil {
-		return server.Shutdown(ctx)
+func (s *HTTPServer) closeGeneration(generation *httpServerGeneration) {
+	if err := generation.server.Shutdown(context.Background()); err != nil {
+		generation.closeErr = errors.Join(generation.closeErr, err)
 	}
-	return nil
+	<-generation.serveDone
+	<-generation.cleanupDone
+	generation.requests.Wait()
+	generation.dispatches.Wait()
+	generation.closeErr = errors.Join(generation.closeErr, generation.serveErr)
+	close(generation.closeDone)
+}
+
+func (s *HTTPServer) generationRequestMiddleware(generation *httpServerGeneration, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		if s.generation != generation || !generation.admitting {
+			s.mu.Unlock()
+			http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
+			return
+		}
+		generation.requests.Add(1)
+		s.mu.Unlock()
+		defer generation.requests.Done()
+		next.ServeHTTP(w, r)
+	})
+}
+
+func channelClosed(ch <-chan struct{}) bool {
+	if ch == nil {
+		return false
+	}
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
 }
 
 // Name returns the server identity.
@@ -385,6 +487,9 @@ func requestPrincipal(r *http.Request) string {
 func (s *HTTPServer) createSession(principalID, senderAlias string) (*Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if !s.running || s.generation == nil || !s.generation.admitting {
+		return nil, ErrHTTPServerCleanupPending
+	}
 
 	reader := s.sessionIDReader
 	if reader == nil {
@@ -518,6 +623,10 @@ func (s *HTTPServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	}
 	sess, err := s.createSession(requestPrincipal(r), senderAlias)
 	if err != nil {
+		if errors.Is(err, ErrHTTPServerCleanupPending) {
+			http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
+			return
+		}
 		slog.Error("acp.server.connect_failed", "name", s.name, "reason", "session_id_unavailable")
 		http.Error(w, "unable to create session", http.StatusInternalServerError)
 		return
@@ -568,7 +677,14 @@ func (s *HTTPServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	// as this handler returns.
 	if s.handler != nil {
 		s.mu.Lock()
-		srvCtx := s.ctx
+		generation := s.generation
+		if generation == nil || !generation.admitting {
+			s.mu.Unlock()
+			http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
+			return
+		}
+		srvCtx := generation.ctx
+		generation.dispatches.Add(1)
 		s.mu.Unlock()
 		if srvCtx != nil {
 			dispatchCtx := context.WithValue(srvCtx, dispatchIdentityContextKey{}, dispatchIdentity{
@@ -576,7 +692,12 @@ func (s *HTTPServer) handleSend(w http.ResponseWriter, r *http.Request) {
 				sessionID:   sess.ID(),
 				session:     sess,
 			})
-			go s.handler.ProcessMessage(dispatchCtx, msg, sess)
+			go func() {
+				defer generation.dispatches.Done()
+				s.handler.ProcessMessage(dispatchCtx, msg, sess)
+			}()
+		} else {
+			generation.dispatches.Done()
 		}
 	} else {
 		// Echo mode: respond with an ack.
@@ -773,12 +894,13 @@ func (s *HTTPServer) ActiveSessions() int {
 
 // sessionCleanupLoop periodically removes sessions that have been idle longer
 // than sessionTTL. The loop exits when the server context is canceled.
-func (s *HTTPServer) sessionCleanupLoop() {
+func (s *HTTPServer) sessionCleanupLoop(generation *httpServerGeneration) {
+	defer close(generation.cleanupDone)
 	ticker := time.NewTicker(s.cleanupInterval)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-s.ctx.Done():
+		case <-generation.ctx.Done():
 			return
 		case <-ticker.C:
 			s.cleanupIdleSessions()
