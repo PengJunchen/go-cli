@@ -319,7 +319,12 @@ func preparedPlanCallAllowed(req tools.PreparedPolicyRequest, name string) bool 
 	}
 	switch effects[0] {
 	case tools.EffectWorkspaceRead:
-		return true
+		identity := req.Identity.Snapshot()
+		return identity.RegistrationSource == tools.RegistrationSourceBuiltin &&
+			req.Identity.Scope().Fingerprint() != ([32]byte{}) &&
+			identity.ToolName == name
+	case tools.EffectNetworkRead:
+		return preparedTrustedNetworkRead(req, name)
 	case tools.EffectControl:
 		if req.Identity.RegistrationSource() != tools.RegistrationSourceTrustedControl {
 			return false
@@ -343,12 +348,31 @@ func preparedClassifierAllowTrusted(req tools.PreparedPolicyRequest, mode Permis
 	switch effects[0] {
 	case tools.EffectWorkspaceRead:
 		return identity.RegistrationSource == tools.RegistrationSourceBuiltin && req.Identity.Scope().Fingerprint() != ([32]byte{})
+	case tools.EffectNetworkRead:
+		return preparedTrustedNetworkRead(req, identity.ToolName)
 	case tools.EffectControl:
 		if identity.RegistrationSource != tools.RegistrationSourceTrustedControl {
 			return false
 		}
 		_, allowed := planModeTrustedControlNames[identity.ToolName]
 		return allowed
+	default:
+		return false
+	}
+}
+
+func preparedTrustedNetworkRead(req tools.PreparedPolicyRequest, name string) bool {
+	identity := req.Identity.Snapshot()
+	if identity.RegistrationSource != tools.RegistrationSourceTrustedNetworkRead || identity.ToolName != name {
+		return false
+	}
+	effects := req.Effects.Values()
+	if len(effects) != 1 || effects[0] != tools.EffectNetworkRead {
+		return false
+	}
+	switch name {
+	case "web_fetch", "web_search":
+		return true
 	default:
 		return false
 	}

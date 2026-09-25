@@ -2,8 +2,10 @@ package approval
 
 import (
 	"context"
+	"runtime"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/tools"
@@ -29,6 +31,22 @@ type preparedConcurrentAlwaysCallback struct {
 	release <-chan struct{}
 }
 
+type preparedWaitingApprovalCallback struct {
+	entered chan<- struct{}
+	release <-chan struct{}
+}
+
+type preparedMutatingApprovalCallback struct {
+	start    <-chan struct{}
+	finished chan<- struct{}
+}
+
+type preparedArgumentCaptureTool struct {
+	mutationFinished <-chan struct{}
+	mu               sync.Mutex
+	args             map[string]any
+}
+
 func (c preparedConcurrentAlwaysCallback) RequestApproval(ctx context.Context, toolName string, _ map[string]any) (ApprovalResult, error) {
 	select {
 	case c.arrived <- toolName:
@@ -41,6 +59,70 @@ func (c preparedConcurrentAlwaysCallback) RequestApproval(ctx context.Context, t
 	case <-ctx.Done():
 		return ApprovalDeny, ctx.Err()
 	}
+}
+
+func (c preparedWaitingApprovalCallback) RequestApproval(ctx context.Context, _ string, _ map[string]any) (ApprovalResult, error) {
+	select {
+	case c.entered <- struct{}{}:
+	case <-ctx.Done():
+		return ApprovalDeny, ctx.Err()
+	}
+	select {
+	case <-c.release:
+		return ApprovalAllow, nil
+	case <-ctx.Done():
+		return ApprovalDeny, ctx.Err()
+	}
+}
+
+func (c preparedMutatingApprovalCallback) RequestApproval(_ context.Context, _ string, args map[string]any) (ApprovalResult, error) {
+	nested := args["nested"].(map[string]any)
+	tags := nested["tags"].([]any)
+	go func() {
+		<-c.start
+		for i := 0; i < 10000; i++ {
+			args["path"] = "callback-mutated"
+			nested["value"] = i
+			tags[0] = i
+			runtime.Gosched()
+		}
+		close(c.finished)
+	}()
+	return ApprovalAllow, nil
+}
+
+func (*preparedArgumentCaptureTool) Name() string { return "capture_args" }
+func (*preparedArgumentCaptureTool) Description() string {
+	return "prepared argument capture test tool"
+}
+func (t *preparedArgumentCaptureTool) Execute(_ context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
+	for i := 0; i < 10000; i++ {
+		_ = call.Args["path"]
+		if nested, ok := call.Args["nested"].(map[string]any); ok {
+			_ = nested["value"]
+			if tags, ok := nested["tags"].([]any); ok && len(tags) > 0 {
+				_ = tags[0]
+			}
+		}
+		runtime.Gosched()
+	}
+	<-t.mutationFinished
+	nested := call.Args["nested"].(map[string]any)
+	tags := nested["tags"].([]any)
+	t.mu.Lock()
+	t.args = map[string]any{
+		"path":  call.Args["path"],
+		"value": nested["value"],
+		"tag":   tags[0],
+	}
+	t.mu.Unlock()
+	return &tools.ToolResult{Output: "captured"}, nil
+}
+
+func (t *preparedArgumentCaptureTool) capturedArgs() map[string]any {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.args
 }
 
 func (c *preparedRuntimeCallback) RequestApproval(_ context.Context, toolName string, _ map[string]any) (ApprovalResult, error) {
@@ -166,6 +248,95 @@ func TestPreparedPermitStalesOnModePlanAndRegistryChange(t *testing.T) {
 			assert.Zero(t, toolByName["target"].callCount())
 		})
 	}
+}
+
+func TestPreparedWritersDuringApprovalWaitInvalidatePermit(t *testing.T) {
+	for _, writer := range []string{"mode", "plan", "registry"} {
+		t.Run(writer, func(t *testing.T) {
+			ctx := context.Background()
+			entered := make(chan struct{}, 1)
+			release := make(chan struct{})
+			callback := preparedWaitingApprovalCallback{entered: entered, release: release}
+			registry, middleware, controller, _, toolsByName := newPreparedRuntimeFixtureWithOptions(
+				t,
+				callback,
+				NewApprovalCache(""),
+				[]Option{WithPermissionModeResolver(NewDefaultPermissionModeResolver())},
+				"target",
+			)
+			type result struct {
+				invocation tools.PreparedInvocation
+				err        error
+			}
+			prepared := make(chan result, 1)
+			go func() {
+				invocation, err := registry.PrepareToolCall(ctx, tools.ToolCall{Name: "target", Args: map[string]any{"path": "original"}})
+				prepared <- result{invocation: invocation, err: err}
+			}()
+
+			select {
+			case <-entered:
+			case <-time.After(5 * time.Second):
+				t.Fatal("approval callback did not enter")
+			}
+			switch writer {
+			case "mode":
+				middleware.SetPermissionMode(PermissionAuto)
+			case "plan":
+				require.NoError(t, controller.Enter(ctx, "stale user approval"))
+			case "registry":
+				require.NoError(t, registry.Register(ctx, &preparedRuntimeTool{name: "target"}))
+			}
+			close(release)
+
+			var outcome result
+			select {
+			case outcome = <-prepared:
+			case <-time.After(5 * time.Second):
+				t.Fatal("prepared callback did not return")
+			}
+			require.ErrorIs(t, outcome.err, tools.ErrDispatchFenceChanged)
+			assert.Nil(t, outcome.invocation)
+			assert.Zero(t, toolsByName["target"].callCount(), "a state writer during user wait must prevent dispatch")
+		})
+	}
+}
+
+func TestPreparedCallbackArgumentMutationCannotChangeFrozenDispatch(t *testing.T) {
+	ctx := context.Background()
+	startMutation := make(chan struct{})
+	mutationFinished := make(chan struct{})
+	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck
+	target := &preparedArgumentCaptureTool{mutationFinished: mutationFinished}
+	require.NoError(t, base.Register(ctx, target))
+	fence := base.DispatchFence()
+	controller := core.NewDefaultPlanModeController(fence)
+	callback := preparedMutatingApprovalCallback{start: startMutation, finished: mutationFinished}
+	middleware := NewApprovalMiddleware(preparedRuntimeAskClassifier{}, NewInMemoryApprovalStore(),
+		WithCallback(callback), WithDispatchFence(fence), WithPlanModeController(controller))
+	registry := tools.NewMiddlewareToolRegistry(base)
+	require.NoError(t, registry.SetPreparedToolPolicy(middleware.PreparedPolicy))
+	require.NoError(t, registry.SetPreparedToolStages(tools.PreparedToolStages{}))
+
+	invocation, err := registry.PrepareToolCall(ctx, tools.ToolCall{
+		Name: "capture_args",
+		Args: map[string]any{
+			"path": "original-path",
+			"nested": map[string]any{
+				"value": "original-value",
+				"tags":  []any{"original-tag"},
+			},
+		},
+	})
+	require.NoError(t, err)
+	close(startMutation)
+	_, err = invocation.Dispatch(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, map[string]any{
+		"path":  "original-path",
+		"value": "original-value",
+		"tag":   "original-tag",
+	}, target.capturedArgs(), "callback argument edits must not affect the frozen tool call")
 }
 
 func TestPreparedApprovalPolicyReplacementDoesNotReusePriorGrant(t *testing.T) {
