@@ -50,3 +50,23 @@ The model mismatch was reproduced with a local binary and disposable HOME/CWD, b
 ## Limits
 
 This is a bounded implementation review, not a complete R6 release sign-off. In particular, the committed real-binary journey does not yet prove a second interactive startup skips onboarding from the persisted exact scope, nor a real `--provider=eino` override with an OpenAI inline key and production-derived canonical endpoint scope. The two findings above require a delta before accepting this snapshot.
+
+## Follow-up review at `0533451f5366897a98c41f9f118a44505f08aa81`
+
+Reviewed the follow-up commits `3436c3fdc28206c6d8ce8d61fc2abc77e992b5bd` and `0533451f5366897a98c41f9f118a44505f08aa81` (parent `ae89cd9`). Both findings above are **accepted as fixed** in this delta; the original verdict remains the historical result for `ae89cd9`.
+
+For R6-AUTH-1, the wizard now writes the selected choice to both model defaults, and the interactive startup recomputes the effective model after onboarding when no explicit model flag was supplied (`internal/cli/onboarding.go:314-355`, `internal/cli/repl_session.go:152-164`). When `--model` is explicit, the wizard reports the selected default separately and preserves the flag as the current-session override. The new real-binary `TestInteractiveWizardModelSelectionAndCLIOverride` sets `GO_CLI_PROVIDER_MODEL=gpt-4o-mini`, selects `gpt-4o`, and asserts the local HTTP server receives `gpt-4o`; its second case verifies `--model=gpt-4o-mini` still wins for the session while the selected default is saved.
+
+For R6-AUTH-2, `TestE2E_Phase49_OnboardingAutoTrigger` now sets a fresh HOME and a PATH containing no `security` executable, uses a random canary credential, checks that the prompted key is not returned in config or output, and verifies a new auth chain can resolve the exact-scope private-file credential (`tests/e2e_phase49_test.go:978-1048`). The real-binary model test uses a test-owned fake `security` executable and local `httptest` provider; its child PATH contains only that fake. I ran both target tests with `-race` under `env -i`, a disposable HOME/TMPDIR, and a PATH with an outer fake `security` blocker ahead of system tools. The blocker recorded no calls, so the host Keychain was not invoked. I also ran the Phase49 target with an external XDG config path confined to the disposable review directory; it still passed and kept its auth file under the temporary HOME.
+
+Validation at the fixed commit:
+
+```text
+rtk env -i [disposable HOME/TMPDIR, blocked-security PATH, isolated Go env] go test -race -p 2 -count=1 -run '^TestInteractiveWizardModelSelectionAndCLIOverride$' ./cmd/cli
+ok github.com/pengjunchen/go-cli/cmd/cli (33.720s)
+
+rtk env -i [disposable HOME/TMPDIR, blocked-security PATH, isolated Go env] go test -race -p 2 -count=1 -run '^TestE2E_Phase49_OnboardingAutoTrigger$' ./tests
+ok github.com/pengjunchen/go-cli/tests (1.090s)
+```
+
+The detached review worktree was clean at `0533451f`. This incremental review did not rerun full `cmd/cli` or the full affected-package suite; the known pre-existing `TestRunSuccessNoArgs` fixture issue remains outside this delta. No new blocker was found in the two requested fixes, and the original broader R6 coverage limits still apply.

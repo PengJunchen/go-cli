@@ -28,3 +28,13 @@ Recommended correction: record invalidation monotonically; allow a late queue at
 ## Scope limits
 
 The `internal/tools` race suite and the direct state probe cover this source slice. This review does not validate process sandboxing, OS-level containment, a run-owner timeout consumer, the default CLI Bash completion chain, or full R2/R5/R8 phase closure.
+
+## Follow-up review: proof invalidation fix
+
+Reviewed follow-up commit `5d6fcdd6e9ee9345180cd07fa089f6ff3fc010f6`, whose parent is the reviewed `1386d02`. The fix is accepted for the finding above. It changes only `internal/tools/prepared_completion.go` and `internal/tools/prepared_completion_test.go`.
+
+The invalidation bit is now sticky. Late queue attachment still stores the accepted job's `done` channel for owner waiting, but does not restore a proof after invalidation (`internal/tools/prepared_completion.go:203-206`). Failed inline/process completion and queue panic all mark invalidation before the corresponding owned completion signal can be observed as complete (`internal/tools/prepared_completion.go:144-161`, `223-230`). `completedProof` now delegates its initial snapshot to a helper that rechecks invalidation, channel identity, and the canonical proof while holding the read lock across the nonblocking close check (`internal/tools/prepared_completion.go:88-112`). This orders proof observation against invalidation and closes both reported races while preserving the done handle.
+
+The two new regression tests are meaningful RED tests. To account for the extracted `proofFromCompletedSnapshot` helper not existing on the old source, I temporarily restored the pre-fix snapshot/close-check behavior in that helper, unconditional proof assignment in late `attach`, and non-sticky `invalidateProof` in the review checkout. Both tests compiled and failed on assertions with `queued_job_joined`; this was a behavioral RED check, not a compile failure. I then restored the checkout to `5d6fcdd` and confirmed it was clean.
+
+At the fixed commit, `rtk env GOMAXPROCS=2 NO_COLOR=1 TERM=dumb go test -race -p 2 -count=1 ./internal/tools` passed (`41.440s`). No further blocker was found in this two-file follow-up scope. This acceptance covers the proof-state repair only; it does not change the original scope limits above.

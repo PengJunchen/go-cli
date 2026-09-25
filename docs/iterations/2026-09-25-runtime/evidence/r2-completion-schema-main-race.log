@@ -1,0 +1,8 @@
+snapshot: 84324fe7a55ea852583f5082fe5d76ac0dd0608a
+command: go test -race -p 2 -count=1 ./internal/tools ./internal/session ./internal/core
+ok  	github.com/pengjunchen/go-cli/internal/tools	47.116s
+ok  	github.com/pengjunchen/go-cli/internal/session	9.821s
+ok  	github.com/pengjunchen/go-cli/internal/core	3.777s
+
+exit: 0
+elapsed_seconds: 81.79

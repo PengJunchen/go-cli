@@ -1285,10 +1285,11 @@
       "depends_on": [
         "R5-DES-01"
       ],
-      "status": "pending",
+      "status": "in_progress",
       "commit_spec": "Split approval correlation and transcript projection if necessary; keep each slice reviewable with actual model update tests.",
       "phase_id": "R5",
-      "source_status": "proposed"
+      "source_status": "proposed",
+      "execution_scope": "Partial accepted slice only: source 6921b4bb→e2f8791, 9342cdef→4327ef2, 01404e63→b8bedcb, and fixed interaction follow-up d3ac6b29→ed72cd6. The review accepts approval-detail identity/escaping/review-coverage behavior. This task remains in progress for HITL and approval queue wiring, canonical transcript/session projection, and real end-to-end journeys; no PTY acceptance is recorded."
     },
     {
       "id": "R5-BLD-02",
@@ -1314,10 +1315,11 @@
         "R5-DES-01",
         "R1-REV-01"
       ],
-      "status": "pending",
+      "status": "in_progress",
       "commit_spec": "One focused commit per editor or keybinding behavior group; retain recorded PTY input/output for reviewer reproduction.",
       "phase_id": "R5",
-      "source_status": "proposed"
+      "source_status": "proposed",
+      "execution_scope": "Partial accepted slice only: the fixed R5 interaction source through d3ac6b29→ed72cd6 includes the reviewed UTF-8 caret and approval/editor interaction behavior. The main TUI/CLI/default-build package race evidence is recorded in execution-status.md. Input/cancel/help journeys and the required PTY verification remain incomplete; this task is not done."
     },
     {
       "id": "R5-REV-01",
@@ -1430,7 +1432,7 @@
       "commit_spec": "Separate provider auth and trust store changes from CLI output cleanup; each path needs restart or error-injection coverage.",
       "phase_id": "R6",
       "source_status": "proposed",
-      "execution_scope": "Partial lane build_private_files, based at 62aa472 on codebase 1c285ac, is authorized under approved R6 design section 50 for atomic private auth/token/trust-file persistence and auth-reader error/permission behavior only. This isolated slice may proceed while full entrypoint/consumer prerequisites remain pending; complete provider-factory wiring, consumer trust lifecycle, remaining CLI behavior, entrypoint verification and R6 acceptance remain gated."
+      "execution_scope": "Partial lane build_private_files, based at 62aa472 on codebase 1c285ac, is authorized under approved R6 design section 50 for atomic private auth/token/trust-file persistence and auth-reader error/permission behavior only. This isolated slice may proceed while full entrypoint/consumer prerequisites remain pending; complete provider-factory wiring, consumer trust lifecycle, remaining CLI behavior, entrypoint verification and R6 acceptance remain gated. Separately, scoped-auth onboarding/keychain fixes map 6c8021f→868a47e, ae89cd9→a50bc77, 3436c3f→70b387c, and 0533451f→d10e01c; the bounded findings are accepted and the six-package privatefile/config/llm/cli/cmd/cli/tests race passed on d10e01c. Full R6 trust, adapter, entrypoint and coverage gates remain open."
     },
     {
       "id": "R6-BLD-02",
