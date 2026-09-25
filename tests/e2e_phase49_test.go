@@ -44,6 +44,42 @@ import (
 // Security Tests (49-1 through 49-8, 49-24, 49-25, 49-26)
 // ---------------------------------------------------------------------------
 
+func acpHTTPConnectBody(t *testing.T, senderID string) string {
+	t.Helper()
+	body, err := json.Marshal(struct {
+		Version  string `json:"version"`
+		SenderID string `json:"sender_id"`
+		Type     string `json:"type"`
+	}{
+		Version:  acp.ACPHTTPProfileV1,
+		SenderID: senderID,
+		Type:     "connect",
+	})
+	require.NoError(t, err)
+	return string(body)
+}
+
+func newACPHTTPConnectRequest(t *testing.T, target, body string) *http.Request {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodPost, target, strings.NewReader(body))
+	require.NoError(t, err)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(acp.ACPHTTPProfileHeader, acp.ACPHTTPProfileV1)
+	return request
+}
+
+func decodeACPHTTPConnectSession(t *testing.T, response *http.Response) string {
+	t.Helper()
+	var result struct {
+		Version   string `json:"version"`
+		SessionID string `json:"session_id"`
+	}
+	require.NoError(t, json.NewDecoder(response.Body).Decode(&result))
+	assert.Equal(t, acp.ACPHTTPProfileV1, result.Version)
+	require.NotEmpty(t, result.SessionID, "connect must return its opaque transport session ID")
+	return result.SessionID
+}
+
 // TestE2E_Phase49_PathValidation verifies that the write tool rejects path
 // traversal attempts (49-1). Relative paths that escape the workdir must be
 // blocked by resolveWithinWorkdir.
@@ -101,17 +137,20 @@ func TestE2E_Phase49_ACPBodySizeLimit(t *testing.T) {
 	base := "http://" + srv.Addr()
 
 	// Body within limit — should succeed.
-	normalBody := `{"sender_id":"test","type":"connect"}`
-	resp, err := http.Post(base+"/connect", "application/json", strings.NewReader(normalBody))
+	normalBody := acpHTTPConnectBody(t, "test")
+	request := newACPHTTPConnectRequest(t, base+"/connect", normalBody)
+	resp, err := http.DefaultClient.Do(request)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	decodeACPHTTPConnectSession(t, resp)
 	_ = resp.Body.Close()
 
 	// Body exceeding 1 MB — should be rejected with 413. The body must be
 	// valid JSON so the decoder reads past the 1 MB MaxBytesReader limit
 	// (an invalid body would produce a 400 syntax error before the limit).
-	bigBody := `{"sender_id":"` + strings.Repeat("x", 2*1024*1024) + `","type":"connect"}`
-	resp, err = http.Post(base+"/connect", "application/json", strings.NewReader(bigBody))
+	bigBody := acpHTTPConnectBody(t, strings.Repeat("x", 2*1024*1024))
+	request = newACPHTTPConnectRequest(t, base+"/connect", bigBody)
+	resp, err = http.DefaultClient.Do(request)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusRequestEntityTooLarge, resp.StatusCode,
 		"body > 1MB should be rejected with 413")
@@ -292,27 +331,27 @@ func TestE2E_Phase49_ServeTokenAuth(t *testing.T) {
 	base := "http://" + srv.Addr()
 
 	// No auth header → 401.
-	resp, err := http.Post(base+"/connect", "application/json", strings.NewReader(`{}`))
+	req := newACPHTTPConnectRequest(t, base+"/connect", acpHTTPConnectBody(t, "client-49"))
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 	_ = resp.Body.Close()
 
 	// Wrong token → 401.
-	req, _ := http.NewRequest(http.MethodPost, base+"/connect", strings.NewReader(`{}`))
+	req = newACPHTTPConnectRequest(t, base+"/connect", acpHTTPConnectBody(t, "client-49"))
 	req.Header.Set("Authorization", "Bearer wrong-token")
-	req.Header.Set("Content-Type", "application/json")
 	resp, err = http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 	_ = resp.Body.Close()
 
 	// Correct token → 200.
-	req, _ = http.NewRequest(http.MethodPost, base+"/connect", strings.NewReader(`{}`))
+	req = newACPHTTPConnectRequest(t, base+"/connect", acpHTTPConnectBody(t, "client-49"))
 	req.Header.Set("Authorization", "Bearer secret-token-49")
-	req.Header.Set("Content-Type", "application/json")
 	resp, err = http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	decodeACPHTTPConnectSession(t, resp)
 	_ = resp.Body.Close()
 }
 
@@ -477,18 +516,19 @@ func TestE2E_Phase49_ACPTLSAndSecurityConfig(t *testing.T) {
 	base := "https://" + srv.Addr()
 
 	// Without auth → 401.
-	resp, err := httpsClient.Post(base+"/connect", "application/json", strings.NewReader(`{}`))
+	req := newACPHTTPConnectRequest(t, base+"/connect", acpHTTPConnectBody(t, "client-tls"))
+	resp, err := httpsClient.Do(req)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 	_ = resp.Body.Close()
 
 	// With auth → 200.
-	req, _ := http.NewRequest(http.MethodPost, base+"/connect", strings.NewReader(`{}`))
+	req = newACPHTTPConnectRequest(t, base+"/connect", acpHTTPConnectBody(t, "client-tls"))
 	req.Header.Set("Authorization", "Bearer tls-token")
-	req.Header.Set("Content-Type", "application/json")
 	resp, err = httpsClient.Do(req)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, resp.StatusCode, "TLS + auth should succeed")
+	decodeACPHTTPConnectSession(t, resp)
 	_ = resp.Body.Close()
 
 	// Verify IsLoopbackAddr helper.
