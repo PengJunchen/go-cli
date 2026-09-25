@@ -50,7 +50,6 @@ type HTTPServer struct {
 	name        string
 	addr        string
 	handler     *CoreHandler
-	eventBus    core.EventBus
 	authToken   string
 	authSubject string
 	tlsCertFile string
@@ -97,13 +96,13 @@ func NewHTTPServer(name, addr string, handler *CoreHandler) *HTTPServer {
 	}
 }
 
-// SetEventBus wires an EventBus for SSE fan-out. When set, the /events
-// endpoint subscribes to the bus for live event streaming (each SSE
-// connection gets its own independent channel). When nil (or not called),
-// the /events endpoint falls back to the per-session events channel.
-func (s *HTTPServer) SetEventBus(bus core.EventBus) {
-	s.eventBus = bus
-}
+// SetEventBus is retained for source compatibility. /events uses a
+// session-local atomic replay/live subscription; a process-wide bus cannot
+// preserve session isolation or replay cutover semantics.
+//
+// Deprecated: wire event forwarding on CoreHandler if another observer needs
+// the process-wide event bus.
+func (s *HTTPServer) SetEventBus(_ core.EventBus) {}
 
 // SetAuth enables bearer-token authentication. When set, all routes require
 // an Authorization: Bearer <token> header and /stream, /events bind sender_id
@@ -538,19 +537,10 @@ func (s *HTTPServer) writeMessages(w http.ResponseWriter, msgs []ACPMessage) {
 }
 
 // handleEvents processes GET /events requests. It opens an SSE long-lived
-// connection that streams core.AgentEvents. The connection stays open until
-// the client disconnects, the session is closed, or the server shuts down.
-// A keep-alive comment is sent every 15 seconds to prevent intermediary
-// proxies from closing idle connections.
-//
-// Last-Event-ID reconnection: when the client sends a Last-Event-ID request
-// header, the server replays missed events from the session's ring buffer
-// (entries whose ID exceeds the header value) before streaming live events.
-//
-// EventBus fan-out: when an EventBus is wired (via SetEventBus), live events
-// are read from a per-connection subscription channel. When no bus is
-// configured, live events are read from the per-session events channel
-// (backward compatible).
+// connection that streams the session's events. Replay and bounded live
+// delivery are registered atomically by Session.SubscribeAfter. A keep-alive
+// comment is sent every 15 seconds to prevent intermediary proxies from
+// closing idle connections.
 func (s *HTTPServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
@@ -575,40 +565,37 @@ func (s *HTTPServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Parse Last-Event-ID before registering so malformed cursors cannot
+	// silently restart replay from the beginning of the retained ring.
+	var afterID uint64
+	if idStr := r.Header.Get("Last-Event-ID"); idStr != "" {
+		id, err := strconv.ParseUint(idStr, 10, 64)
+		if err != nil {
+			http.Error(w, "invalid Last-Event-ID", http.StatusBadRequest)
+			return
+		}
+		afterID = id
+	}
+
+	// Snapshot and register live delivery under the same Session lock used by
+	// PublishEvent. An event racing this call is present in Replay or Events.
+	subscription := sess.SubscribeAfter(afterID)
+	defer subscription.Close()
+
 	sse, ok := NewSSEWriter(w)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
 		return
 	}
-
-	// --- Last-Event-ID reconnection ---
-	// Parse the Last-Event-ID header (if present) and replay missed events
-	// from the session's ring buffer. EventHistorySince returns the missed
-	// entries and the current last sequence ID atomically, so we can safely
-	// assign IDs to subsequent live-stream reads starting from lastSeq+1.
-	var afterID uint64
-	if idStr := r.Header.Get("Last-Event-ID"); idStr != "" {
-		if id, err := strconv.ParseUint(idStr, 10, 64); err == nil {
-			afterID = id
-		}
-	}
-	entries, lastSeq := sess.EventHistorySince(afterID)
-	nextID := lastSeq + 1
-	for _, e := range entries {
-		if err := sse.WriteEventWithID(e.ID, e.Event.Kind, e.Event); err != nil {
+	if gap := subscription.HistoryGap; gap != nil {
+		if err := sse.WriteEventWithID(gap.Cursor, "event_gap", gap); err != nil {
 			return
 		}
 	}
-
-	// --- Live event source ---
-	// When an EventBus is wired, subscribe for fan-out (each connection gets
-	// its own independent channel). Otherwise, fall back to the per-session
-	// events channel.
-	var eventCh <-chan core.AgentEvent
-	if s.eventBus != nil {
-		eventCh = s.eventBus.Subscribe(r.Context())
-	} else {
-		eventCh = sess.Events()
+	for _, e := range subscription.Replay {
+		if err := sse.WriteEventWithID(e.ID, e.Event.Kind, e.Event); err != nil {
+			return
+		}
 	}
 
 	ticker := time.NewTicker(15 * time.Second)
@@ -619,15 +606,26 @@ func (s *HTTPServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-ctx.Done():
 			return
-		case ev, ok := <-eventCh:
+		case entry, ok := <-subscription.Events():
 			if !ok {
-				// Channel closed (session closed or bus shut down).
 				return
 			}
-			if err := sse.WriteEventWithID(nextID, ev.Kind, ev); err != nil {
+			if err := sse.WriteEventWithID(entry.ID, entry.Event.Kind, entry.Event); err != nil {
 				return
 			}
-			nextID++
+		case <-subscription.Done():
+			// Freeze the overflow range, detach from publication, then drain the
+			// contiguous buffered prefix before reporting the explicit gap.
+			gap := subscription.Close()
+			for entry := range subscription.Events() {
+				if err := sse.WriteEventWithID(entry.ID, entry.Event.Kind, entry.Event); err != nil {
+					return
+				}
+			}
+			if gap != nil {
+				_ = sse.WriteEventWithID(gap.Cursor, "event_gap", gap)
+			}
+			return
 		case <-ticker.C:
 			sse.WriteComment("keep-alive")
 		}
