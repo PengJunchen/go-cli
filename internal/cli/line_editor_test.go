@@ -33,6 +33,12 @@ func TestDetectTTY_NoSttyDependency(t *testing.T) {
 	assert.False(t, le2.detectTTY(), "strings.Reader should not be a TTY")
 }
 
+func TestNewTTYByteReaderRejectsUncancelableInput(t *testing.T) {
+	reader, err := newTTYByteReader(strings.NewReader("input"))
+	require.Nil(t, reader)
+	require.ErrorIs(t, err, errTTYReaderCancellationUnsupported)
+}
+
 // TestTerminalWidth_FallbackNonTTY verifies that terminalWidth returns the
 // 80-column fallback for non-TTY inputs without spawning any external process
 // (the old stty-based implementation forked stty).
