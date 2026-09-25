@@ -15,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/core"
@@ -43,7 +44,11 @@ var (
 	errHTTPSessionNotFound      = errors.New("acp: session not found")
 	errHTTPSessionAliasMismatch = errors.New("acp: sender alias does not match session")
 	errHTTPSessionIDRequired    = errors.New("acp: session_id is required")
+	// ErrHTTPServerCleanupPending means a caller's wait expired before the
+	// server generation's owned work was joined.
 	ErrHTTPServerCleanupPending = errors.New("acp: HTTP server cleanup is pending")
+	// ErrHTTPServerWorkerPanic reports that a detached request worker panicked.
+	ErrHTTPServerWorkerPanic = errors.New("acp: HTTP server request worker panicked")
 )
 
 // httpACPEnvelope is the HTTP-only envelope for the private ACP profile. The
@@ -102,6 +107,7 @@ type httpServerGeneration struct {
 	admitting   bool
 	serveErr    error
 	closeErr    error
+	workerPanic atomic.Bool
 }
 
 type httpServerCleanupPendingError struct {
@@ -422,6 +428,9 @@ func (s *HTTPServer) closeGeneration(generation *httpServerGeneration) {
 	generation.requests.Wait()
 	generation.dispatches.Wait()
 	generation.closeErr = errors.Join(generation.closeErr, generation.serveErr)
+	if generation.workerPanic.Load() {
+		generation.closeErr = errors.Join(generation.closeErr, ErrHTTPServerWorkerPanic)
+	}
 	close(generation.closeDone)
 }
 
@@ -693,7 +702,13 @@ func (s *HTTPServer) handleSend(w http.ResponseWriter, r *http.Request) {
 				session:     sess,
 			})
 			go func() {
-				defer generation.dispatches.Done()
+				defer func() {
+					if recover() != nil {
+						generation.workerPanic.Store(true)
+						slog.Error("acp.server.process_message_panicked", "name", s.name, "reason", "panic")
+					}
+					generation.dispatches.Done()
+				}()
 				s.handler.ProcessMessage(dispatchCtx, msg, sess)
 			}()
 		} else {
