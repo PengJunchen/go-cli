@@ -15,6 +15,14 @@ import (
 	"github.com/pengjunchen/go-cli/internal/verify"
 )
 
+type leaseReleaseTestAgent struct{}
+
+func (leaseReleaseTestAgent) Name() string { return "lease-release-test-agent" }
+
+func (leaseReleaseTestAgent) Run(context.Context, core.Submission, ...core.EventStream) (core.Result, error) {
+	return core.Result{Message: "completed"}, nil
+}
+
 func TestDurableCLISessionCreatesPhysicalSessionAndBindsRunLease(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	configureDurableCLISessionTest(t)
@@ -68,6 +76,31 @@ func TestDurableCLISessionCreatesPhysicalSessionAndBindsRunLease(t *testing.T) {
 	prepared, err := probe.PrepareResume(ctx, snapshot.SessionID)
 	require.NoError(t, err, "the prepared handle closes after the run lease returns")
 	require.NoError(t, prepared.Close())
+}
+
+func TestCoreEntrypointReturnsRealDurableManagerLease(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	configureDurableCLISessionTest(t)
+	ctx := context.Background()
+	cliSession, err := newDurableCLISession(ctx, filepath.Join(t.TempDir(), "session-store"), "display-label", "", "")
+	require.NoError(t, err)
+	runCtx, sink, err := cliSession.bindRun(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, sink)
+
+	harness := core.NewHarnessImpl(leaseReleaseTestAgent{})
+	stream, err := harness.Submit(runCtx, "hello")
+	require.NoError(t, err)
+	for range stream.Events() {
+	}
+	_, runErr := stream.Result()
+	require.ErrorIs(t, runErr, core.ErrRunCommitTerminalNotSynced,
+		"this lease integration test does not claim that a plain Agent is a durable transcript consumer")
+
+	closeCtx, cancel := context.WithTimeout(ctx, time.Second)
+	defer cancel()
+	require.NoError(t, cliSession.requestClose(closeCtx),
+		"the core entrypoint must return the actual manager borrow after owner and wrapper cleanup")
 }
 
 func TestDurableCLISessionResumeUsesExactPhysicalIDAndBranch(t *testing.T) {

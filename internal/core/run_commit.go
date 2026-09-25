@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/pengjunchen/go-cli/internal/tools"
 )
@@ -138,6 +139,57 @@ type RunCommitSink interface {
 // resources have joined, including when durable commit failed.
 type RunCommitRunLease interface {
 	CloseRunCommit()
+}
+
+// runCommitLeaseGuard captures the optional borrowed-session release capability
+// before an entrypoint can reject a run. Ownership may move from that
+// entrypoint to runOwner, but the underlying capability is invoked at most once.
+type runCommitLeaseGuard struct {
+	lease    RunCommitRunLease
+	once     sync.Once
+	panicked bool
+}
+
+func newRunCommitLeaseGuard(ctx context.Context) *runCommitLeaseGuard {
+	sink, _, ok := RunCommitFromContext(ctx)
+	if !ok {
+		return nil
+	}
+	return newRunCommitLeaseGuardForSink(sink)
+}
+
+func newRunCommitLeaseGuardForSink(sink RunCommitSink) *runCommitLeaseGuard {
+	if sink == nil {
+		return nil
+	}
+	lease, ok := sink.(RunCommitRunLease)
+	if !ok {
+		return nil
+	}
+	return &runCommitLeaseGuard{lease: lease}
+}
+
+// captureRunCommitLeaseGuard defers a panic raised by a caller-supplied
+// context.Value until the entrypoint knows admission succeeded. Rejected
+// admission keeps precedence over context reads, while a successfully claimed
+// run replays the panic after ordinary wrapper cleanup has been installed.
+func captureRunCommitLeaseGuard(ctx context.Context) (guard *runCommitLeaseGuard, panicValue any) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			panicValue = recovered
+		}
+	}()
+	return newRunCommitLeaseGuard(ctx), nil
+}
+
+func (guard *runCommitLeaseGuard) close() bool {
+	if guard == nil || guard.lease == nil {
+		return false
+	}
+	guard.once.Do(func() {
+		guard.panicked = closeRunCommitLease(guard.lease)
+	})
+	return guard.panicked
 }
 
 // RunCommitInput is an input message at its canonical per-run transcript

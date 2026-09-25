@@ -82,7 +82,14 @@ func (r *EinoTurnRunner) newID() string {
 
 // RunTurn executes one turn from the submission and returns its result. It
 // creates a cancellable turn, drives the loop, and records the terminal state.
-func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Result, error) {
+func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (result Result, returnErr error) {
+	leaseGuard, leaseCapturePanic := captureRunCommitLeaseGuard(ctx)
+	leaseTransferred := false
+	defer func() {
+		if !leaseTransferred && leaseGuard.close() {
+			returnErr = errors.Join(returnErr, ErrRunCommitLeaseClosePanicked)
+		}
+	}()
 	if r.loop == nil {
 		return Result{}, errNilModel
 	}
@@ -166,6 +173,9 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Re
 	if wrapperErr != nil {
 		return Result{Outcome: RunOutcomeError, ExecutionState: RunExecutionQuiescent}, wrapperErr
 	}
+	if leaseCapturePanic != nil {
+		panic(leaseCapturePanic)
+	}
 
 	// Claim before borrowing tracing or invoking any hook/message provider so
 	// Assembly.Close cannot observe idle while accepted entrypoint work runs.
@@ -210,9 +220,11 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Re
 	r.owners[id] = owner
 	r.mu.Unlock()
 
-	var result Result
+	owner.adoptRunCommitLease(leaseGuard)
+	leaseTransferred = true
 	ownerStarted = true
-	result, runErr := owner.run(cleanupTimeout, func(runCtx context.Context) (Result, error) {
+	var runErr error
+	result, runErr = owner.run(cleanupTimeout, func(runCtx context.Context) (Result, error) {
 		if hookChain != nil {
 			if herr := hookChain.OnTurnStart(runCtx, id); herr != nil {
 				slog.Warn("core.turn.runner.hook.turn_start", "id", id, "err", herr)
