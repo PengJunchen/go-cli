@@ -357,8 +357,8 @@
       "depends_on": [
         "R0-BLD-04"
       ],
-      "status": "pending",
-      "commit_spec": "Protected files are governed by go-cli-infra/CLAUDE.md and require explicit user approval for the exact proposed patch before any edit. This execution split does not grant that approval.",
+      "status": "in_progress",
+      "commit_spec": "The user explicitly approved only the named protected-changes.patch, integrated as source 1fa9488→main b7ffe0b. The default make scan currently fails on two real scanner findings, so this task remains in progress pending repairs and independent release review. The supplemental protected-changes-test-gate.patch is outside the recorded approval and must not be applied without separate authorization.",
       "phase_id": "R0",
       "source_status": "execution_split"
     },
