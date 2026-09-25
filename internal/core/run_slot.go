@@ -67,7 +67,11 @@ type RunSlotWrapperRegistrar interface {
 	RegisterRunWrapper(claim RunClaim, status RunStatusHandle) (done func(), err error)
 	// SetRunWrapperStatus attaches its owner status after the wrapper is claimed.
 	SetRunWrapperStatus(claim RunClaim, status RunStatusHandle) error
-	// ActiveRunStatus returns the current claim's live status snapshot.
+	// ActiveRunStatus returns an owner status snapshot while a claim is active.
+	// The bool reports that an accepted claim still exists; the owner snapshot
+	// does not prove the entrypoint wrapper has finished. Teardown must wait on
+	// RunAdmissionCloser.CloseAdmission's idle channel, which includes wrapper
+	// completion.
 	ActiveRunStatus() (RunStatus, bool)
 }
 
