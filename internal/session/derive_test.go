@@ -1,6 +1,7 @@
 package session
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -8,6 +9,7 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
+	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 // TestDeriveMessages_NormalFlow verifies that when all entries are visible (or
@@ -183,6 +185,7 @@ func TestSessionViewPreservesSourceEntryIDs(t *testing.T) {
 	ordinal := uint64(0)
 	assistantIndex := uint64(1)
 	receiptIndex := uint64(2)
+	workspaceID := "workspace-2"
 	entries := []SessionEntry{
 		*newR2UserEntry("covered", "", 1, 0),
 		{
@@ -195,13 +198,37 @@ func TestSessionViewPreservesSourceEntryIDs(t *testing.T) {
 			RecordVersion:              1,
 			SessionID:                  "physical-session",
 			RunID:                      "run-2",
+			WorkspaceID:                workspaceID,
 			AssistantTranscriptOrdinal: &ordinal,
 			TranscriptIndex:            &assistantIndex,
 			Seq:                        2,
 		},
 		{
-			ID:                         "tool-receipt",
+			ID:                         "tool-intent",
 			ParentID:                   "assistant-call",
+			Type:                       EntryTypeTool,
+			ToolCallID:                 "provider-call-id",
+			ToolName:                   "bash",
+			ActionState:                ActionStateIntent,
+			ActionBatchID:              "batch-2",
+			ActionID:                   "action-2",
+			RecordVersion:              1,
+			SessionID:                  "physical-session",
+			RunID:                      "run-2",
+			WorkspaceID:                workspaceID,
+			AssistantTranscriptOrdinal: &ordinal,
+			ArgumentDigest:             strings.Repeat("a", 64),
+			SchemaDigest:               strings.Repeat("b", 64),
+			ToolIdentity: &tools.TrustedToolIdentitySnapshot{
+				RegistrationSource: "builtin", ToolName: "bash", RegistrationGeneration: 1,
+				ExecutorFingerprint: strings.Repeat("c", 64), ScopeFingerprint: strings.Repeat("d", 64),
+			},
+			EffectSet: []tools.TrustedToolEffect{tools.EffectUnknown},
+			Seq:       3,
+		},
+		{
+			ID:                         "tool-receipt",
+			ParentID:                   "tool-intent",
 			Type:                       EntryTypeTool,
 			Content:                    "ok",
 			ToolCallID:                 "provider-call-id",
@@ -209,12 +236,14 @@ func TestSessionViewPreservesSourceEntryIDs(t *testing.T) {
 			ReceiptOutcome:             core.ReceiptOutcomeSuccess,
 			DispatchState:              DispatchStateDispatched,
 			ActionID:                   "action-2",
+			ActionBatchID:              "batch-2",
 			RecordVersion:              1,
 			SessionID:                  "physical-session",
 			RunID:                      "run-2",
+			WorkspaceID:                workspaceID,
 			AssistantTranscriptOrdinal: &ordinal,
 			TranscriptIndex:            &receiptIndex,
-			Seq:                        3,
+			Seq:                        4,
 		},
 		{
 			ID:                      "compaction-marker",
@@ -224,7 +253,7 @@ func TestSessionViewPreservesSourceEntryIDs(t *testing.T) {
 			RecordVersion:           1,
 			SessionID:               "physical-session",
 			CompactedThroughEntryID: "covered",
-			Seq:                     4,
+			Seq:                     5,
 		},
 	}
 
