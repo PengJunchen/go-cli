@@ -80,6 +80,7 @@ const (
 type managedExtension struct {
 	ext             Extension
 	name            string
+	cleanupCtx      context.Context
 	state           extensionState
 	operation       extensionOperation
 	done            chan struct{}
@@ -93,9 +94,10 @@ type managedExtension struct {
 // recording tracing spans for every stage. It is package-internal; the Phase 4
 // lifecycle is exercised entirely by the package's own tests.
 type extensionCoordinator struct {
-	mu      sync.Mutex
-	reg     ExtensionRegistry
-	managed map[string]*managedExtension
+	mu                  sync.Mutex
+	reg                 ExtensionRegistry
+	managed             map[string]*managedExtension
+	shutdownCallbackCtx context.Context
 }
 
 // newExtensionCoordinator creates a coordinator over the given registry. When
@@ -112,6 +114,31 @@ func newExtensionCoordinator(registry ExtensionRegistry) *extensionCoordinator {
 
 // registry returns the underlying registry used by the coordinator.
 func (c *extensionCoordinator) registry() ExtensionRegistry { return c.reg }
+
+// requestShutdownCallbackContext records the first manager shutdown context
+// for in-flight Init callbacks before their owner context is canceled. It does
+// not invoke extension code while holding the coordinator lock.
+func (c *extensionCoordinator) requestShutdownCallbackContext(ctx context.Context) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	c.mu.Lock()
+	if c.shutdownCallbackCtx == nil {
+		c.shutdownCallbackCtx = ctx
+	}
+	for _, managed := range c.managed {
+		if managed.operation == extensionOperationInit {
+			managed.cleanupCtx = c.shutdownCallbackCtx
+		}
+	}
+	c.mu.Unlock()
+}
+
+func (c *extensionCoordinator) clearShutdownCallbackContext() {
+	c.mu.Lock()
+	c.shutdownCallbackCtx = nil
+	c.mu.Unlock()
+}
 
 // initExtension initializes an extension in a private registry and publishes
 // all of its registrations atomically only after Init succeeds.
@@ -170,12 +197,16 @@ func (c *extensionCoordinator) initExtension(ctx context.Context, ext Extension)
 		return ErrExtensionAtomicCommitUnsupported
 	}
 	managed := &managedExtension{
-		ext:       ext,
-		name:      name,
-		state:     extensionStateInitializing,
-		operation: extensionOperationInit,
-		done:      make(chan struct{}),
-		cancel:    cancel,
+		ext:        ext,
+		name:       name,
+		cleanupCtx: ownerCtx,
+		state:      extensionStateInitializing,
+		operation:  extensionOperationInit,
+		done:       make(chan struct{}),
+		cancel:     cancel,
+	}
+	if c.shutdownCallbackCtx != nil {
+		managed.cleanupCtx = c.shutdownCallbackCtx
 	}
 	c.managed[name] = managed
 	c.mu.Unlock()
@@ -210,12 +241,13 @@ func (c *extensionCoordinator) runInitOwner(ctx context.Context, managed *manage
 
 	c.mu.Lock()
 	aborted := managed.cancelRequested || ctx.Err() != nil
+	cleanupCtx := managed.cleanupCtx
 	if aborted {
 		managed.state = extensionStateCleanupPending
 		managed.operation = extensionOperationInitCleanup
 		c.mu.Unlock()
 		staging.seal()
-		cleanupErr := managed.ext.Shutdown(context.WithoutCancel(spanCtx))
+		cleanupErr := managed.ext.Shutdown(cleanupCtx)
 		resultErr := errors.Join(ErrExtensionInitCanceled, cleanupErr)
 		span.SetStatus(tracing.SpanStatusError, resultErr.Error())
 		state := extensionStateStopped
@@ -230,8 +262,9 @@ func (c *extensionCoordinator) runInitOwner(ctx context.Context, managed *manage
 	if commitErr != nil {
 		managed.state = extensionStateStopping
 		managed.operation = extensionOperationInitCleanup
+		cleanupCtx := managed.cleanupCtx
 		c.mu.Unlock()
-		cleanupErr := managed.ext.Shutdown(context.WithoutCancel(spanCtx))
+		cleanupErr := managed.ext.Shutdown(cleanupCtx)
 		resultErr := errors.Join(commitErr, cleanupErr)
 		span.SetStatus(tracing.SpanStatusError, resultErr.Error())
 		state := extensionStateStopped
@@ -245,6 +278,7 @@ func (c *extensionCoordinator) runInitOwner(ctx context.Context, managed *manage
 	managed.state = extensionStateRunning
 	managed.operation = ""
 	managed.initErr = nil
+	managed.cleanupCtx = nil
 	cancel := managed.cancel
 	managed.cancel = nil
 	close(managed.done)
@@ -261,6 +295,7 @@ func (c *extensionCoordinator) finishInit(managed *managedExtension, initErr, sh
 	managed.shutdownErr = shutdownErr
 	managed.state = state
 	managed.operation = ""
+	managed.cleanupCtx = nil
 	cancel := managed.cancel
 	managed.cancel = nil
 	close(managed.done)
@@ -315,6 +350,19 @@ func (c *extensionCoordinator) shutdownExtension(ctx context.Context, ext Extens
 	if ctx == nil {
 		ctx = context.Background()
 	}
+	return c.shutdownExtensionWithContexts(ctx, ctx, ext)
+}
+
+// shutdownExtensionWithContexts separates the callback context from the wait
+// context. Manager-owned teardown can let its caller stop waiting at a deadline
+// while preserving that original deadline for cooperative extension callbacks.
+func (c *extensionCoordinator) shutdownExtensionWithContexts(waitCtx, callbackCtx context.Context, ext Extension) error {
+	if waitCtx == nil {
+		waitCtx = context.Background()
+	}
+	if callbackCtx == nil {
+		callbackCtx = waitCtx
+	}
 	if ext == nil {
 		return nil
 	}
@@ -342,7 +390,7 @@ func (c *extensionCoordinator) shutdownExtension(ctx context.Context, ext Extens
 		c.mu.Unlock()
 		return err
 	case extensionStateRunning:
-		shutdownCtx, cancel := context.WithCancel(ctx)
+		shutdownCtx, cancel := context.WithCancel(callbackCtx)
 		managed.state = extensionStateStopping
 		managed.operation = extensionOperationShutdown
 		managed.done = make(chan struct{})
@@ -350,10 +398,11 @@ func (c *extensionCoordinator) shutdownExtension(ctx context.Context, ext Extens
 		done := managed.done
 		c.mu.Unlock()
 		go c.runShutdownOwner(shutdownCtx, managed)
-		return c.waitForShutdown(ctx, managed, done)
+		return c.waitForShutdown(waitCtx, managed, done)
 	case extensionStateInitializing, extensionStateCleanupPending, extensionStateStopping:
 		if managed.operation == extensionOperationInit {
 			managed.cancelRequested = true
+			managed.cleanupCtx = callbackCtx
 			managed.state = extensionStateCleanupPending
 			if managed.cancel != nil {
 				managed.cancel()
@@ -365,15 +414,15 @@ func (c *extensionCoordinator) shutdownExtension(ctx context.Context, ext Extens
 		case <-done:
 			state := c.state(name)
 			if state == extensionStateRunning {
-				return c.shutdownExtension(ctx, ext)
+				return c.shutdownExtensionWithContexts(waitCtx, callbackCtx, ext)
 			}
 			return c.shutdownResult(managed)
-		case <-ctx.Done():
+		case <-waitCtx.Done():
 			select {
 			case <-done:
 				return c.shutdownResult(managed)
 			default:
-				return cleanupPending(name, "Shutdown", ctx.Err())
+				return cleanupPending(name, "Shutdown", waitCtx.Err())
 			}
 		}
 	default:
@@ -398,6 +447,7 @@ func (c *extensionCoordinator) runShutdownOwner(ctx context.Context, managed *ma
 	cancel := managed.cancel
 	managed.cancel = nil
 	managed.operation = ""
+	managed.cleanupCtx = nil
 	managed.state = extensionStateStopped
 	if err != nil {
 		managed.state = extensionStateStoppedWithError
