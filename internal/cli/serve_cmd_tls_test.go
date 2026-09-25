@@ -78,7 +78,7 @@ func TestServeCmdNonLoopbackWarning(t *testing.T) {
 	c := newServeCmd(out)
 	c.errOut = errOut
 
-	tokenPath := filepath.Join(t.TempDir(), "serve-token")
+	tokenPath := privateServeTokenPath(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -134,7 +134,7 @@ func TestServeCmdNonLoopbackWithTLSNoWarning(t *testing.T) {
 	c := newServeCmd(out)
 	c.errOut = errOut
 
-	tokenPath := filepath.Join(t.TempDir(), "serve-token")
+	tokenPath := privateServeTokenPath(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

@@ -24,6 +24,7 @@ import (
 func setupOnboardingTest(t *testing.T, configExists bool) (string, func()) {
 	t.Helper()
 	tmpDir := t.TempDir()
+	require.NoError(t, os.Chmod(tmpDir, 0o700))
 	configPath := filepath.Join(tmpDir, "config.yaml")
 	authPath := filepath.Join(tmpDir, "auth.json")
 
@@ -144,12 +145,15 @@ func TestRunOnboarding_ConfigFileWritten(t *testing.T) {
 	authPath := filepath.Join(filepath.Dir(configPath), "auth.json")
 	authData, err := os.ReadFile(authPath)
 	require.NoError(t, err)
-	assert.Contains(t, string(authData), "sk-test-key")
+	var auth map[string]string
+	require.NoError(t, json.Unmarshal(authData, &auth))
+	assert.Equal(t, "sk-test-key", auth["api_key"])
 
 	// auth.json should have 0600 permissions.
 	info, err := os.Stat(authPath)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	assert.NotContains(t, out.String(), "sk-test-key")
 }
 
 // TestRunOnboarding_SkippedWhenConfigExistsAndAPIKeyPresent verifies the
@@ -371,12 +375,15 @@ func TestReadPasswordMasked_NonTTYFallback(t *testing.T) {
 // API key as JSON with 0600 permissions.
 func TestSaveAuthFile_ContentAndPermissions(t *testing.T) {
 	tmpDir := t.TempDir()
+	require.NoError(t, os.Chmod(tmpDir, 0o700))
 	authPath := filepath.Join(tmpDir, "auth.json")
 
 	oldPath := onboardingAuthPathFunc
 	onboardingAuthPathFunc = func() string { return authPath }
 	defer func() { onboardingAuthPathFunc = oldPath }()
 
+	require.NoError(t, os.WriteFile(authPath, []byte(`{"api_key":"old-secret"}`), 0o644))
+	require.NoError(t, os.Chmod(authPath, 0o644))
 	require.NoError(t, saveAuthFile("sk-my-secret"))
 
 	data, err := os.ReadFile(authPath)
@@ -389,6 +396,102 @@ func TestSaveAuthFile_ContentAndPermissions(t *testing.T) {
 	info, err := os.Stat(authPath)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+}
+
+func TestSaveAuthFileDefaultDirectoryIsPrivate(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".config", "go-cli")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.Chmod(dir, 0o755))
+
+	oldPath := onboardingAuthPathFunc
+	onboardingAuthPathFunc = defaultAuthFilePath
+	defer func() { onboardingAuthPathFunc = oldPath }()
+
+	require.NoError(t, saveAuthFile("sk-default-secret"))
+	info, err := os.Stat(dir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), info.Mode().Perm())
+
+	authData, err := os.ReadFile(filepath.Join(dir, "auth.json"))
+	require.NoError(t, err)
+	var auth map[string]string
+	require.NoError(t, json.Unmarshal(authData, &auth))
+	assert.Equal(t, "sk-default-secret", auth["api_key"])
+}
+
+func TestSaveAuthFileRejectsSymlinkedDefaultDirectory(t *testing.T) {
+	t.Run("config directory symlink", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		shared := filepath.Join(home, "shared")
+		require.NoError(t, os.Mkdir(shared, 0o755))
+		require.NoError(t, os.Chmod(shared, 0o755))
+		configDir := filepath.Join(home, ".config")
+		require.NoError(t, os.Symlink(shared, configDir))
+
+		oldPath := onboardingAuthPathFunc
+		onboardingAuthPathFunc = defaultAuthFilePath
+		t.Cleanup(func() { onboardingAuthPathFunc = oldPath })
+
+		err := saveAuthFile("sk-default-secret")
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), "sk-default-secret")
+		_, statErr := os.Lstat(filepath.Join(shared, "go-cli"))
+		assert.ErrorIs(t, statErr, os.ErrNotExist, "external directory must not be created through the link")
+	})
+
+	t.Run("app directory symlink", func(t *testing.T) {
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		configDir := filepath.Join(home, ".config")
+		require.NoError(t, os.Mkdir(configDir, 0o700))
+		shared := filepath.Join(home, "shared")
+		require.NoError(t, os.Mkdir(shared, 0o755))
+		require.NoError(t, os.Chmod(shared, 0o755))
+		appDir := filepath.Join(configDir, "go-cli")
+		require.NoError(t, os.Symlink(shared, appDir))
+
+		oldPath := onboardingAuthPathFunc
+		onboardingAuthPathFunc = defaultAuthFilePath
+		t.Cleanup(func() { onboardingAuthPathFunc = oldPath })
+
+		err := saveAuthFile("sk-default-secret")
+		require.Error(t, err)
+		assert.NotContains(t, err.Error(), "sk-default-secret")
+		info, statErr := os.Stat(shared)
+		require.NoError(t, statErr)
+		assert.Equal(t, os.FileMode(0o755), info.Mode().Perm(), "external directory permissions must not be changed")
+		_, statErr = os.Lstat(filepath.Join(appDir, "auth.json"))
+		assert.ErrorIs(t, statErr, os.ErrNotExist)
+	})
+}
+
+func TestSaveAuthFileRejectsAccessibleCustomDirectory(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "shared")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	require.NoError(t, os.Chmod(dir, 0o755))
+	authPath := filepath.Join(dir, "auth.json")
+	require.NoError(t, os.WriteFile(authPath, []byte(`{"api_key":"old-secret"}`), 0o644))
+	require.NoError(t, os.Chmod(authPath, 0o644))
+
+	oldPath := onboardingAuthPathFunc
+	onboardingAuthPathFunc = func() string { return authPath }
+	defer func() { onboardingAuthPathFunc = oldPath }()
+
+	err := saveAuthFile("sk-new-secret")
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "sk-new-secret")
+	data, readErr := os.ReadFile(authPath)
+	require.NoError(t, readErr)
+	assert.Equal(t, `{"api_key":"old-secret"}`, string(data))
+	info, statErr := os.Stat(authPath)
+	require.NoError(t, statErr)
+	assert.Equal(t, os.FileMode(0o644), info.Mode().Perm())
+	dirInfo, statErr := os.Stat(dir)
+	require.NoError(t, statErr)
+	assert.Equal(t, os.FileMode(0o755), dirInfo.Mode().Perm())
 }
 
 // TestRunOnboarding_APIKeyInAuthJSONNotYAML verifies end-to-end that the API

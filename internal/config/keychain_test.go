@@ -193,6 +193,7 @@ func TestLookupAuthFile_APIKeyFormat(t *testing.T) {
 
 	authDir := filepath.Join(tmpDir, ".config", "go-cli")
 	require.NoError(t, os.MkdirAll(authDir, 0o750))
+	require.NoError(t, os.Chmod(authDir, 0o700))
 	authPath := filepath.Join(authDir, "auth.json")
 	require.NoError(t, os.WriteFile(authPath, []byte(`{"api_key":"sk-from-file"}`), 0o600))
 
@@ -207,6 +208,7 @@ func TestLookupAuthFile_ProviderMapFormat(t *testing.T) {
 
 	authDir := filepath.Join(tmpDir, ".config", "go-cli")
 	require.NoError(t, os.MkdirAll(authDir, 0o750))
+	require.NoError(t, os.Chmod(authDir, 0o700))
 	authPath := filepath.Join(authDir, "auth.json")
 	require.NoError(t, os.WriteFile(authPath, []byte(`{"openai":"sk-map-key"}`), 0o600))
 
@@ -229,6 +231,7 @@ func TestLookupAuthFile_APIKeyTakesPrecedence(t *testing.T) {
 
 	authDir := filepath.Join(tmpDir, ".config", "go-cli")
 	require.NoError(t, os.MkdirAll(authDir, 0o750))
+	require.NoError(t, os.Chmod(authDir, 0o700))
 	authPath := filepath.Join(authDir, "auth.json")
 	// When both api_key and a provider entry exist, api_key wins.
 	require.NoError(t, os.WriteFile(authPath,

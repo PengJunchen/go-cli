@@ -129,6 +129,15 @@ func waitForServeStart(t *testing.T, out *safeBuffer, done <-chan error) {
 	}
 }
 
+func privateServeTokenPath(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(dir, "serve-token")
+}
+
 // TestServe_TokenNotInStdout verifies that when a token is auto-generated,
 // the token value does not appear in stdout (SEC-5, AC-1).
 func TestServe_TokenNotInStdout(t *testing.T) {
@@ -137,7 +146,7 @@ func TestServe_TokenNotInStdout(t *testing.T) {
 	c := newServeCmd(out)
 	c.errOut = errOut
 
-	tokenPath := filepath.Join(t.TempDir(), "serve-token")
+	tokenPath := privateServeTokenPath(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -212,7 +221,7 @@ func TestServe_TokenFileReadable(t *testing.T) {
 	out := &safeBuffer{}
 	c := newServeCmd(out)
 
-	tokenPath := filepath.Join(t.TempDir(), "serve-token")
+	tokenPath := privateServeTokenPath(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -404,7 +413,7 @@ func TestServeGeneratesAuthToken(t *testing.T) {
 	c := newServeCmd(out)
 	c.errOut = errOut
 
-	tokenPath := filepath.Join(t.TempDir(), "serve-token")
+	tokenPath := privateServeTokenPath(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -569,4 +578,74 @@ func TestServeFallbackWarnsEchoMode(t *testing.T) {
 
 	cancel()
 	<-done
+}
+
+func TestWriteTokenFileReplacesWideFilePrivately(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "serve-token")
+	if err := os.WriteFile(path, []byte("old-token"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := writeTokenFile(path, "new-token-secret"); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(data) != "new-token-secret" {
+		t.Fatalf("unexpected token file contents: %q", data)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o600 {
+		t.Errorf("expected token file permission 0600, got %o", info.Mode().Perm())
+	}
+}
+
+func TestServeTokenFileFailureDoesNotStartListener(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "shared")
+	if err := os.Mkdir(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	out := &safeBuffer{}
+	errOut := &safeBuffer{}
+	c := newServeCmd(out)
+	c.errOut = errOut
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- c.Run(ctx, NewDefaultConfig(false), []string{
+			"--addr", "127.0.0.1:0",
+			"--token-file", filepath.Join(dir, "serve-token"),
+		})
+	}()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected token file permission failure")
+		}
+		if strings.Contains(out.String(), "listening") {
+			t.Fatalf("listener started despite token file failure: %s", out.String())
+		}
+	case <-time.After(300 * time.Millisecond):
+		cancel()
+		<-done
+		t.Fatal("serve did not fail before listener startup")
+	}
 }

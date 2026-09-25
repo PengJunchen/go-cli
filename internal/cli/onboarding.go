@@ -16,6 +16,7 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/llm"
+	"github.com/pengjunchen/go-cli/internal/privatefile"
 )
 
 // modelChoice is a single model entry shown during the onboarding model
@@ -457,18 +458,52 @@ func saveAuthFile(apiKey string) error {
 	if path == "" {
 		return fmt.Errorf("onboarding: cannot determine auth file path")
 	}
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o750); err != nil {
-		return fmt.Errorf("onboarding: create auth dir: %w", err)
+	if err := secureDefaultAuthDirectory(path); err != nil {
+		return fmt.Errorf("onboarding: secure auth dir: %w", err)
 	}
 	data, err := json.Marshal(map[string]string{"api_key": apiKey})
 	if err != nil {
 		return fmt.Errorf("onboarding: marshal auth: %w", err)
 	}
-	if err := os.WriteFile(path, data, 0o600); err != nil {
+	if err := privatefile.WriteAtomic(path, data); err != nil {
 		return fmt.Errorf("onboarding: write auth: %w", err)
 	}
 	return nil
+}
+
+func secureDefaultAuthDirectory(path string) error {
+	defaultPath := defaultAuthFilePath()
+	if defaultPath == "" || filepath.Clean(path) != filepath.Clean(defaultPath) {
+		return nil
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return fmt.Errorf("cannot determine default auth directory")
+	}
+	configDir := filepath.Join(home, ".config")
+	dir := filepath.Dir(path)
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		return err
+	}
+	configInfo, err := os.Lstat(configDir)
+	if err != nil {
+		return err
+	}
+	if !configInfo.IsDir() {
+		return fmt.Errorf("auth config directory is not a directory")
+	}
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	dirInfo, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if !dirInfo.IsDir() {
+		return fmt.Errorf("auth directory is not a directory")
+	}
+	return os.Chmod(dir, 0o700)
 }
 
 // defaultSaveAPIKey persists the API key to the OS keychain when available

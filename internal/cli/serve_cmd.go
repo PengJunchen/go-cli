@@ -17,6 +17,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/acp"
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/privatefile"
 )
 
 // serveCmd implements Command and starts an ACP HTTP server.
@@ -279,11 +280,7 @@ func defaultServeTokenPath() string {
 // writeTokenFile writes the token to path with 0600 permissions, creating
 // the parent directory (0700) if necessary.
 func writeTokenFile(path, token string) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(path, []byte(token), 0o600)
+	return privatefile.WriteAtomic(path, []byte(token))
 }
 
 // generateServeToken generates a cryptographically random hex token for
