@@ -15,12 +15,12 @@ build:
 
 # Run all tests
 test:
-	go test -race -count=1 ./internal/... ./tests/...
+	go test -race -count=1 ./...
 
 # Run tests with coverage
 test-cov:
 	@mkdir -p $(COVERAGE_DIR)
-	go test -race -coverprofile=$(COVERAGE_DIR)/coverage.out -covermode=atomic ./internal/... ./tests/...
+	go test -race -coverprofile=$(COVERAGE_DIR)/coverage.out -covermode=atomic ./...
 	go tool cover -func=$(COVERAGE_DIR)/coverage.out
 
 # Coverage threshold check
@@ -46,7 +46,15 @@ test-leak:
 
 # AST scan for mock/hardcoded bypass detection
 scan:
-	go run ./internal/verify/cmd/scanner -dir ./internal -format text
+	$(GO) run ./internal/verify/cmd/scanner-gate \
+		-dir ./internal \
+		-scanner-command $(GO) \
+		-scanner-arg=run \
+		-scanner-arg=./internal/verify/cmd/scanner \
+		-scanner-arg=-dir \
+		-scanner-arg=./internal \
+		-scanner-arg=-format \
+		-scanner-arg=json
 
 # Run golangci-lint
 lint:
