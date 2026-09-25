@@ -50,17 +50,6 @@ func runSessionCommitAgent(t *testing.T, sink core.RunCommitSink, binding core.R
 	return runSessionCommitAgentWithContext(context.Background(), t, sink, binding, commit)
 }
 
-// requireSessionSinkCallbackDidNotAcknowledgeRun documents the boundary of
-// these isolated sink-protocol tests: their Harness callback does not execute
-// Loop's owner-only terminal ACK. A nil callback therefore surfaces the
-// sentinel, while each test separately checks the durable adapter state; this
-// is not evidence that a complete run succeeded.
-func requireSessionSinkCallbackDidNotAcknowledgeRun(t *testing.T, err error) {
-	t.Helper()
-	require.ErrorIs(t, err, core.ErrRunCommitTerminalNotSynced,
-		"direct sink tests do not exercise the Loop owner-only terminal ACK")
-}
-
 func runSessionCommitAgentWithContext(parent context.Context, t *testing.T, sink core.RunCommitSink, binding core.RunCommitBinding, commit func(context.Context, core.RunCommitSink, core.RunCommitBinding, string) error) error {
 	t.Helper()
 	if lease, ok := sink.(core.RunCommitRunLease); ok {
@@ -109,7 +98,7 @@ func TestSessionRunCommitSinkCommitInputPersistsBeforeReturning(t *testing.T) {
 		})
 		return nil
 	})
-	requireSessionSinkCallbackDidNotAcknowledgeRun(t, err)
+	require.NoError(t, err)
 	require.Error(t, closedWriteErr)
 
 	snapshot, err := prepared.Snapshot()
@@ -278,7 +267,7 @@ func TestSessionRunCommitSinkPersistsIntentBeforeGlobalMarker(t *testing.T) {
 		secondErr = actual.BeginIntentBatch(ctx, batch)
 		return nil
 	})
-	requireSessionSinkCallbackDidNotAcknowledgeRun(t, err)
+	require.NoError(t, err)
 	require.Error(t, secondErr)
 	require.True(t, markerObservedDurableIntent.Load(), "workspace marker write must observe already-synced intent rows")
 	snapshot, err := prepared.Snapshot()
@@ -388,7 +377,7 @@ func TestSessionRunCommitSinkRecordsReceiptBeforeResolvingExactProof(t *testing.
 		}
 		return actual.ResolveExecution(ctx, resolution)
 	})
-	requireSessionSinkCallbackDidNotAcknowledgeRun(t, err)
+	require.NoError(t, err)
 
 	snapshot, err := prepared.Snapshot()
 	require.NoError(t, err)
@@ -482,7 +471,7 @@ func TestSessionRunCommitSinkBuffersCanonicalReceiptOrderAcrossKnownDenial(t *te
 		}
 		return actual.RecordReceipt(ctx, denial)
 	})
-	requireSessionSinkCallbackDidNotAcknowledgeRun(t, err)
+	require.NoError(t, err)
 	snapshot, err := prepared.Snapshot()
 	require.NoError(t, err)
 	var receipts []SessionEntry
@@ -534,7 +523,7 @@ func TestSessionRunCommitSinkCommitTerminalAppendsOnlySuffixAndIsIdempotent(t *t
 		writeAfterTerminalErr = actual.CommitInput(ctx, core.RunCommitInput{RunID: runID, TranscriptIndex: 2, Message: user, InputKind: core.InputKindFollowUp})
 		return nil
 	})
-	requireSessionSinkCallbackDidNotAcknowledgeRun(t, err)
+	require.NoError(t, err)
 	require.NoError(t, terminalRetryErr, "same terminal ID and payload is an idempotent retry")
 	require.Error(t, writeAfterTerminalErr, "a run cannot append transcript after its terminal checkpoint")
 	snapshot, err := prepared.Snapshot()
@@ -687,7 +676,7 @@ func TestSessionRunCommitSinkAllowsBoundedLateProofAfterTerminalWithoutChangingR
 		closedResolutionErr = actual.ResolveExecution(cleanupCtx, resolution)
 		return nil
 	})
-	requireSessionSinkCallbackDidNotAcknowledgeRun(t, err)
+	require.NoError(t, err)
 	require.NoError(t, lateExecutionErr, "the original 250ms cleanup context permits the same owner's late proof")
 	require.NoError(t, repeatedExecutionErr, "an identical late proof is idempotent")
 	require.NoError(t, lateResolutionErr, "the proof's typed resolution clears only its exact marker")
@@ -811,7 +800,7 @@ func TestSessionRunCommitSinkTerminalRequiresCompleteOrderedDurableProjections(t
 		changedRetryErr = actual.CommitTerminal(ctx, changedRetry)
 		return nil
 	})
-	requireSessionSinkCallbackDidNotAcknowledgeRun(t, err)
+	require.NoError(t, err)
 	require.Error(t, missingProjectionErr, "the first terminal must include the complete durable projection set")
 	require.Equal(t, rowsBeforeMissingProjection, rowsAfterMissingProjection, "an incomplete first terminal must write no transcript or terminal bytes")
 	require.NoError(t, exactProjectionErr)
@@ -938,7 +927,7 @@ func TestSessionRunCommitSinkCompactionUsesRunStartRevisionAndCanonicalSource(t 
 		}
 		return actual.CommitCompaction(ctx, projection)
 	})
-	requireSessionSinkCallbackDidNotAcknowledgeRun(t, err)
+	require.NoError(t, err)
 	require.Error(t, staleErr)
 	snapshot, err := prepared.Snapshot()
 	require.NoError(t, err)
@@ -982,7 +971,7 @@ func TestSessionRunCommitSinkCompactionCannotCutAnOpenToolCallGroup(t *testing.T
 		})
 		return nil
 	})
-	requireSessionSinkCallbackDidNotAcknowledgeRun(t, err)
+	require.NoError(t, err)
 	require.Error(t, compactionErr)
 	snapshot, err := prepared.Snapshot()
 	require.NoError(t, err)
