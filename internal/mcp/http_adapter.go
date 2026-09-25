@@ -348,6 +348,10 @@ func (a *HTTPClientAdapter) Connect(ctx context.Context) error {
 			a.mu.Unlock()
 			return httpProtocolError("previous connection attempt failed; disconnect before reconnecting")
 		}
+		if err := ctx.Err(); err != nil {
+			a.mu.Unlock()
+			return contextCause(ctx)
+		}
 
 		lifeCtx, cancelLife := context.WithCancel(context.Background())
 		connectCtx, cancelConnect, stopLife := linkedCancellation(ctx, lifeCtx)

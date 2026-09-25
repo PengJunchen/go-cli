@@ -72,6 +72,47 @@ func TestMCP20250618ResumeEnforcesAggregateResponseBudget(t *testing.T) {
 	assert.EqualValues(t, 1, resumes.Load())
 }
 
+func TestHTTPConnectCanceledBeforeDispatchDoesNotPoisonNextConnect(t *testing.T) {
+	t.Parallel()
+
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		if r.Method != http.MethodPost {
+			t.Errorf("unexpected HTTP method %q", r.Method)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		method, id, _, err := decodeHTTPMCPRequest(r)
+		if err != nil {
+			t.Errorf("decode request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		switch method {
+		case "initialize":
+			writeHTTPMCPJSONRPCResponse(w, id, map[string]any{"protocolVersion": streamableHTTPProtocolVersion})
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		default:
+			t.Errorf("unexpected JSON-RPC method %q", method)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	adapter := newHTTPTestAdapter(srv)
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	firstErr := adapter.Connect(canceled)
+	require.ErrorIs(t, firstErr, context.Canceled)
+	assert.Zero(t, requests.Load(), "a canceled Connect must not dispatch an initialize request")
+
+	require.NoError(t, adapter.Connect(context.Background()), "a pre-dispatch cancellation must not publish a failed generation")
+	assert.EqualValues(t, 2, requests.Load(), "the healthy Connect must complete both handshake requests")
+	require.NoError(t, adapter.Disconnect(context.Background()))
+}
+
 func TestReadSSEResponseCountsRawCRLFBytes(t *testing.T) {
 	t.Parallel()
 
