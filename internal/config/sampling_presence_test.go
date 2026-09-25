@@ -96,6 +96,102 @@ func TestLoaderRejectsJSONNullInsteadOfOverridingSamplingFallback(t *testing.T) 
 	assert.Contains(t, err.Error(), "null")
 }
 
+func TestLoaderPreservesCaseFoldedJSONSamplingPresence(t *testing.T) {
+	for _, key := range []string{
+		"GO_CLI_CASE_FOLD_SAMPLING_PROVIDER_TEMPERATURE",
+		"GO_CLI_CASE_FOLD_SAMPLING_PROVIDER_MAX_TOKENS",
+		"GO_CLI_CASE_FOLD_SAMPLING_MODEL_TEMPERATURE",
+		"GO_CLI_CASE_FOLD_SAMPLING_MODEL_MAX_TOKENS",
+		"GO_CLI_CASE_FOLD_SAMPLING_SMALL_MODEL_TEMPERATURE",
+		"GO_CLI_CASE_FOLD_SAMPLING_SMALL_MODEL_MAX_TOKENS",
+	} {
+		t.Setenv(key, "")
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := `{"Provider":{"TEMPERATURE":0,"MAX_TOKENS":0},"MODEL":{"Temperature":0.7,"Max_Tokens":512},"SMALL_MODEL":{"temperature":0,"MAX_TOKENS":32}}`
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+
+	cfg, err := NewLoader().WithFile(path).WithEnvPrefix("GO_CLI_CASE_FOLD_SAMPLING").Load(context.Background())
+	require.NoError(t, err)
+	provider := cfg.ProviderSampling()
+	assert.True(t, provider.TemperatureSet)
+	assert.Zero(t, provider.Temperature)
+	assert.True(t, provider.MaxTokensSet)
+	assert.Zero(t, provider.MaxTokens)
+	model := cfg.ModelSampling()
+	assert.True(t, model.TemperatureSet)
+	assert.Equal(t, 0.7, model.Temperature)
+	assert.True(t, model.MaxTokensSet)
+	assert.Equal(t, 512, model.MaxTokens)
+	small := cfg.SmallModelSampling()
+	assert.True(t, small.TemperatureSet)
+	assert.Zero(t, small.Temperature)
+	assert.True(t, small.MaxTokensSet)
+	assert.Equal(t, 32, small.MaxTokens)
+}
+
+func TestLoaderDoesNotPromoteUnmatchedJSONSamplingFieldNames(t *testing.T) {
+	for _, key := range []string{
+		"GO_CLI_UNMATCHED_SAMPLING_PROVIDER_TEMPERATURE",
+		"GO_CLI_UNMATCHED_SAMPLING_PROVIDER_MAX_TOKENS",
+	} {
+		t.Setenv(key, "")
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"provider":{"MaxTokens":512}}`), 0o600))
+	cfg, err := NewLoader().WithFile(path).WithEnvPrefix("GO_CLI_UNMATCHED_SAMPLING").Load(context.Background())
+	require.NoError(t, err)
+	provider := cfg.ProviderSampling()
+	assert.False(t, provider.MaxTokensSet)
+	assert.Equal(t, DefaultLLMMaxTokens, provider.MaxTokens)
+}
+
+func TestLoaderRejectsCaseFoldedJSONNullSampling(t *testing.T) {
+	tests := []struct {
+		name    string
+		section string
+		field   string
+	}{
+		{name: "provider temperature", section: "PROVIDER", field: "TEMPERATURE"},
+		{name: "provider max_tokens", section: "Provider", field: "MAX_TOKENS"},
+		{name: "model temperature", section: "MODEL", field: "Temperature"},
+		{name: "model max_tokens", section: "Model", field: "Max_Tokens"},
+		{name: "small_model temperature", section: "SMALL_MODEL", field: "Temperature"},
+		{name: "small_model max_tokens", section: "Small_Model", field: "MAX_TOKENS"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			body := `{"` + tt.section + `":{"` + tt.field + `":null}}`
+			require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+			cfg, err := NewLoader().WithFile(path).Load(context.Background())
+			require.Error(t, err)
+			assert.Nil(t, cfg)
+			assert.Contains(t, err.Error(), "null")
+		})
+	}
+}
+
+func TestLoaderRejectsAmbiguousCaseFoldedJSONSamplingKeys(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		body string
+	}{
+		{name: "section", body: `{"provider":{"temperature":0.2},"Provider":{"temperature":0.8}}`},
+		{name: "field", body: `{"provider":{"temperature":0.2,"TEMPERATURE":0.8}}`},
+		{name: "max_tokens alias", body: `{"provider":{"max_tokens":512,"MAX_TOKENS":1024}}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			require.NoError(t, os.WriteFile(path, []byte(tt.body), 0o600))
+			cfg, err := NewLoader().WithFile(path).Load(context.Background())
+			require.Error(t, err)
+			assert.Nil(t, cfg)
+			assert.Contains(t, err.Error(), "ambiguous")
+		})
+	}
+}
+
 func TestLoaderValidatesSmallModelSamplingBounds(t *testing.T) {
 	tests := []struct {
 		name string
