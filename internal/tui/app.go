@@ -498,7 +498,6 @@ type teaModel struct {
 	approvalReaderDone  bool
 	activeInteraction   *pendingInteraction
 	queuedInteractions  []pendingInteraction
-	approvalSequence    uint64
 	interactionSequence uint64
 
 	// thinkingVisibility controls how thinking entries are rendered:
@@ -722,6 +721,9 @@ const splitWidthThreshold = 120
 // horizontally with a vertical separator. Below the threshold, or when no tool
 // entries exist, the classic single-column layout is used.
 func (m *teaModel) renderViewLocked() string {
+	if current := m.activeInteraction; current != nil && current.approval != nil {
+		return m.renderApprovalInteractionLocked(current)
+	}
 	// When the help overlay is open, render it instead of the normal view.
 	// Agent event flow is unaffected — only UI rendering is redirected.
 	if m.helpOverlay {
@@ -826,6 +828,39 @@ func (m *teaModel) renderViewLocked() string {
 		sb.WriteString("\n[quitting...]")
 	}
 	return sb.String()
+}
+
+func (m *teaModel) renderApprovalInteractionLocked(current *pendingInteraction) string {
+	width := m.width
+	if width <= 0 {
+		width = 80
+	}
+	rows := approvalDetailViewportRows(m.height)
+	view, offset := renderApprovalRequestPage(
+		current.approval,
+		current.showDiff,
+		current.token,
+		len(m.queuedInteractions),
+		width,
+		rows,
+		current.detailOffset,
+	)
+	current.detailOffset = offset
+	return view
+}
+
+func (m *teaModel) scrollApprovalDetailsLocked(delta int) {
+	current := m.activeInteraction
+	if current == nil || current.approval == nil {
+		return
+	}
+	width := m.width
+	if width <= 0 {
+		width = 80
+	}
+	rows := approvalDetailViewportRows(m.height)
+	_, offset := renderApprovalRequestPage(current.approval, current.showDiff, current.token, len(m.queuedInteractions), width, rows, current.detailOffset+delta)
+	current.detailOffset = offset
 }
 
 // statusBarLineStyle styles the first status bar line (model/turn/session/mode).
@@ -969,6 +1004,7 @@ type pendingInteraction struct {
 	answer         string
 	selectedOption int
 	showDiff       bool
+	detailOffset   int
 	finished       chan struct{}
 }
 
@@ -1547,6 +1583,30 @@ func (m *teaModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
+// moveInputCursorLeft moves a byte offset to the previous UTF-8 rune boundary.
+func moveInputCursorLeft(input string, cursor int) int {
+	if cursor <= 0 {
+		return 0
+	}
+	if cursor > len(input) {
+		cursor = len(input)
+	}
+	_, size := utf8.DecodeLastRuneInString(input[:cursor])
+	return cursor - size
+}
+
+// moveInputCursorRight moves a byte offset to the next UTF-8 rune boundary.
+func moveInputCursorRight(input string, cursor int) int {
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor >= len(input) {
+		return len(input)
+	}
+	_, size := utf8.DecodeRuneInString(input[cursor:])
+	return cursor + size
+}
+
 // handleSteerKeyLocked processes a key received while in steer input mode. The
 // caller must hold m.mu. It returns a tea.Cmd (tea.Quit on Esc, nil otherwise).
 func (m *teaModel) handleSteerKeyLocked(msg tea.KeyMsg) tea.Cmd {
@@ -1573,6 +1633,10 @@ func (m *teaModel) handleSteerKeyLocked(msg tea.KeyMsg) tea.Cmd {
 			m.steerInput = m.steerInput[:m.steerCursor-size] + m.steerInput[m.steerCursor:]
 			m.steerCursor -= size
 		}
+	case tea.KeyLeft:
+		m.steerCursor = moveInputCursorLeft(m.steerInput, m.steerCursor)
+	case tea.KeyRight:
+		m.steerCursor = moveInputCursorRight(m.steerInput, m.steerCursor)
 	case tea.KeyCtrlA:
 		m.steerCursor = 0
 	case tea.KeyCtrlE:
@@ -1620,6 +1684,10 @@ func (m *teaModel) handleFollowUpKeyLocked(msg tea.KeyMsg) tea.Cmd {
 			m.followUpInput = m.followUpInput[:m.followUpCursor-size] + m.followUpInput[m.followUpCursor:]
 			m.followUpCursor -= size
 		}
+	case tea.KeyLeft:
+		m.followUpCursor = moveInputCursorLeft(m.followUpInput, m.followUpCursor)
+	case tea.KeyRight:
+		m.followUpCursor = moveInputCursorRight(m.followUpInput, m.followUpCursor)
 	case tea.KeyCtrlA:
 		m.followUpCursor = 0
 	case tea.KeyCtrlE:
@@ -1710,9 +1778,9 @@ func (m *teaModel) handleInteractionKeyLocked(msg tea.KeyMsg) tea.Cmd {
 }
 
 // handleApprovalKeyLocked processes a key while an approval request is active.
-// y allows once, a always allows, n denies, and Esc denies the active request.
-// q or Ctrl+C resolves every queued waiter and cancels the turn. The caller
-// must hold m.mu.
+// y allows once, n denies, and Esc denies the active request. Reusable approval
+// remains unavailable until a trusted scope is supplied. q or Ctrl+C resolves
+// every queued waiter and cancels the turn. The caller must hold m.mu.
 func (m *teaModel) handleApprovalKeyLocked(msg tea.KeyMsg) tea.Cmd {
 	if current := m.activeInteraction; current != nil && current.approval != nil && current.approval.Context != nil {
 		if err := current.approval.Context.Err(); err != nil {
@@ -1720,28 +1788,42 @@ func (m *teaModel) handleApprovalKeyLocked(msg tea.KeyMsg) tea.Cmd {
 			return nil
 		}
 	}
-	switch {
-	case msg.Type == tea.KeyEsc:
-		m.resolveApprovalLocked(ApprovalDeny)
-	case msg.Type == tea.KeyCtrlC:
-		m.cancelInteractionsLocked()
-		return m.quitLocked()
-	case msg.Type == tea.KeyRunes && string(msg.Runes) == "q":
-		m.cancelInteractionsLocked()
-		return m.quitLocked()
-	case msg.Type != tea.KeyRunes:
+	switch msg.Type {
+	case tea.KeyUp:
+		m.scrollApprovalDetailsLocked(-1)
 		return nil
-	}
-	switch string(msg.Runes) {
-	case "y":
-		m.resolveApprovalLocked(ApprovalAllow)
-	case "a":
-		m.resolveApprovalLocked(ApprovalAlwaysAllow)
-	case "n":
+	case tea.KeyDown:
+		m.scrollApprovalDetailsLocked(1)
+		return nil
+	case tea.KeyPgUp:
+		m.scrollApprovalDetailsLocked(-max(1, approvalDetailViewportRows(m.height)-1))
+		return nil
+	case tea.KeyPgDown:
+		m.scrollApprovalDetailsLocked(max(1, approvalDetailViewportRows(m.height)-1))
+		return nil
+	case tea.KeyEsc:
 		m.resolveApprovalLocked(ApprovalDeny)
-	case "d":
-		if m.activeInteraction != nil && m.activeInteraction.approval != nil && m.activeInteraction.approval.DiffPreview != "" {
-			m.activeInteraction.showDiff = !m.activeInteraction.showDiff
+	case tea.KeyCtrlC:
+		m.cancelInteractionsLocked()
+		return m.quitLocked()
+	case tea.KeyRunes:
+		switch string(msg.Runes) {
+		case "y":
+			m.resolveApprovalLocked(ApprovalAllow)
+		case "n":
+			m.resolveApprovalLocked(ApprovalDeny)
+		case "d":
+			if m.activeInteraction != nil && m.activeInteraction.approval != nil && m.activeInteraction.approval.DiffPreview != "" {
+				m.activeInteraction.showDiff = !m.activeInteraction.showDiff
+				m.activeInteraction.detailOffset = 0
+			}
+		case "a":
+			// Reusable approval is unavailable until the caller supplies an
+			// authoritative scope that the TUI can display and the policy can
+			// enforce. Never infer that scope from the tool name or arguments.
+		case "q":
+			m.cancelInteractionsLocked()
+			return m.quitLocked()
 		}
 	}
 	return nil
@@ -1807,10 +1889,6 @@ func (m *teaModel) handleHITLKeyLocked(msg tea.KeyMsg) tea.Cmd {
 }
 
 func (m *teaModel) enqueueApprovalLocked(req ApprovalRequest) (uint64, <-chan struct{}) {
-	if req.RequestID == "" {
-		m.approvalSequence++
-		req.RequestID = fmt.Sprintf("approval-%d", m.approvalSequence)
-	}
 	if req.Context != nil && req.Context.Err() != nil {
 		respondApproval(req.ResponseCh, ApprovalDeny)
 		return 0, nil

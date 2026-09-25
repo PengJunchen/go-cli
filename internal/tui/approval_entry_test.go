@@ -2,6 +2,8 @@ package tui
 
 import (
 	"context"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,8 +13,8 @@ import (
 )
 
 // TestRenderApprovalRequest_NoDiff verifies the basic approval entry rendering
-// without a diff preview: it contains the [approval] header, tool name, args,
-// and the y/a/n option bar.
+// without a diff preview: it contains the request details, truthful scope
+// status, and the once/reject option bar.
 func TestRenderApprovalRequest_NoDiff(t *testing.T) {
 	req := &ApprovalRequest{
 		ToolName: "write",
@@ -24,8 +26,9 @@ func TestRenderApprovalRequest_NoDiff(t *testing.T) {
 	assert.Contains(t, out, "path:")
 	assert.Contains(t, out, "/tmp/test.txt")
 	assert.Contains(t, out, "[y] once")
-	assert.Contains(t, out, "[a] always")
 	assert.Contains(t, out, "[n] reject")
+	assert.Contains(t, out, "scope: unknown")
+	assert.NotContains(t, out, "[a] always")
 	// No diff section when DiffPreview is empty.
 	assert.NotContains(t, out, "diff:")
 }
@@ -43,7 +46,7 @@ func TestRenderApprovalRequest_WithDiff(t *testing.T) {
 	assert.Contains(t, out, "+added line")
 	assert.Contains(t, out, "-deleted line")
 	// When a diff is available, the [d] toggle option appears.
-	assert.Contains(t, out, "[d] hide diff")
+	assert.Contains(t, out, "[d] diff")
 }
 
 // TestRenderApprovalRequest_NilRequest returns empty string for nil.
@@ -132,8 +135,9 @@ func TestTeaModel_ApprovalKeyN(t *testing.T) {
 	}
 }
 
-// TestTeaModel_ApprovalKeyA verifies that pressing 'a' sends ApprovalAlwaysAllow.
-func TestTeaModel_ApprovalKeyA(t *testing.T) {
+// TestTeaModel_ApprovalKeyAIsIgnoredWithoutScope verifies that an unscoped
+// persistent-approval key cannot resolve a request.
+func TestTeaModel_ApprovalKeyAIsIgnoredWithoutScope(t *testing.T) {
 	respCh := make(chan ApprovalResponse, 1)
 	m := &teaModel{
 		accordion: NewAccordionModel(),
@@ -142,13 +146,14 @@ func TestTeaModel_ApprovalKeyA(t *testing.T) {
 	m.Update(approvalRequestMsg{req: ApprovalRequest{ToolName: "git", Args: map[string]any{"command": "status"}, ResponseCh: respCh}})
 	cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
 	assert.Nil(t, cmd)
-	assert.Nil(t, m.activeInteraction)
+	assert.NotNil(t, m.activeInteraction)
 	select {
 	case resp := <-respCh:
-		assert.Equal(t, ApprovalAlwaysAllow, resp.Decision)
-	case <-time.After(time.Second):
-		t.Fatal("did not receive approval response")
+		t.Fatalf("unscoped persistent approval unexpectedly responded: %+v", resp)
+	default:
 	}
+	m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	assert.Equal(t, ApprovalDeny, receiveApprovalResponse(t, respCh).Decision)
 }
 
 // TestTeaModel_ApprovalDiffPreview verifies the diff preview is rendered in the
@@ -172,7 +177,7 @@ func TestTeaModel_ApprovalDiffToggle(t *testing.T) {
 		ResponseCh:  make(chan ApprovalResponse, 1),
 	}})
 	assert.Contains(t, m.View(), "+ added line")
-	assert.Contains(t, m.View(), "[d] hide diff")
+	assert.Contains(t, m.View(), "[d] diff")
 
 	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'d'}})
 	assert.NotContains(t, m.View(), "+ added line")
@@ -231,7 +236,8 @@ func TestTUIConcurrentApprovalRequestsRemainResolvable(t *testing.T) {
 	m.Update(approvalRequestMsg{req: first})
 	require.Contains(t, m.View(), "second-tool", "the first-arriving approval must remain active")
 	assert.NotContains(t, m.View(), "first-tool", "later approvals must wait in arrival order")
-	require.Equal(t, "approval-1", m.activeInteraction.approval.RequestID)
+	require.Empty(t, m.activeInteraction.approval.RequestID, "the TUI must not invent an authoritative request ID")
+	assert.Contains(t, m.View(), "local interaction #1")
 
 	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	select {
@@ -241,12 +247,12 @@ func TestTUIConcurrentApprovalRequestsRemainResolvable(t *testing.T) {
 		t.Fatal("first-arriving approval did not receive its own response")
 	}
 	require.Contains(t, m.View(), "first-tool", "resolving the first approval must show the next one")
-	require.Equal(t, "approval-2", m.activeInteraction.approval.RequestID)
+	require.Empty(t, m.activeInteraction.approval.RequestID, "the TUI must not invent an authoritative request ID")
 
-	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	select {
 	case response := <-firstResponse:
-		assert.Equal(t, ApprovalAlwaysAllow, response.Decision)
+		assert.Equal(t, ApprovalAllow, response.Decision)
 	default:
 		t.Fatal("queued approval did not receive its own response")
 	}
@@ -347,8 +353,8 @@ func TestTUIApprovalAndHITLModalsFollowArrivalOrder(t *testing.T) {
 			m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
 			assert.Equal(t, "right", receiveHITLResponse(t, hitlResponse).Answer)
 			require.Contains(t, m.View(), "write")
-			m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
-			assert.Equal(t, ApprovalAlwaysAllow, receiveApprovalResponse(t, approvalResponse).Decision)
+			m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+			assert.Equal(t, ApprovalDeny, receiveApprovalResponse(t, approvalResponse).Decision)
 		})
 	}
 }
@@ -422,6 +428,121 @@ func TestTUIQueuedApprovalCancellationKeepsOtherRequestResolvable(t *testing.T) 
 	assert.Equal(t, ApprovalDeny, receiveApprovalResponse(t, queuedResponse).Decision)
 	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	assert.Equal(t, ApprovalAllow, receiveApprovalResponse(t, activeResponse).Decision)
+}
+
+func TestTUIApprovalDetailsScrollKeepsDecisionRowVisible(t *testing.T) {
+	lines := make([]string, 24)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("detail-line-%02d", i)
+	}
+	diffLines := make([]string, 16)
+	for i := range diffLines {
+		diffLines[i] = fmt.Sprintf("+diff-line-%02d", i)
+	}
+	content := strings.Join(lines, "\n")
+	response := make(chan ApprovalResponse, 1)
+	m := &teaModel{accordion: NewAccordionModel(), msgCh: make(chan Msg, 1)}
+	m.Update(tea.WindowSizeMsg{Width: 60, Height: 10})
+	m.Update(approvalRequestMsg{req: ApprovalRequest{
+		ToolName:    "write",
+		Args:        map[string]any{"content": content, "path": "/tmp/large.txt"},
+		DiffPreview: strings.Join(diffLines, "\n"),
+		ResponseCh:  response,
+	}})
+
+	view := m.View()
+	assert.Contains(t, view, "scope: unknown")
+	assert.Contains(t, view, "view truncated")
+	assert.Contains(t, view, "detail-line-00")
+	assert.NotContains(t, view, "detail-line-23")
+	assert.Contains(t, lastLine(view), "[y] once", "decision row stays fixed after the details viewport")
+	assert.LessOrEqual(t, strings.Count(view, "\n")+1, 10, "the modal stays within the configured height")
+
+	m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	assert.Contains(t, m.View(), "detail-line-03", "page down scrolls the bounded details area")
+
+	sawLastArg := false
+	sawLastDiff := false
+	for i := 0; i < 96 && !sawLastDiff; i++ {
+		m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		page := m.View()
+		sawLastArg = sawLastArg || strings.Contains(page, "detail-line-23")
+		sawLastDiff = strings.Contains(page, "+diff-line-15")
+	}
+	view = m.View()
+	assert.True(t, sawLastArg, "the complete request remains inspectable by scrolling")
+	assert.True(t, sawLastDiff, "the complete diff remains inspectable by scrolling")
+	assert.Contains(t, lastLine(view), "[y] once", "scrolling does not move the decision row")
+	assert.Equal(t, content, m.activeInteraction.approval.Args["content"], "rendering must not alter the captured arguments")
+	for i := 0; i < 12; i++ {
+		m.Update(tea.KeyMsg{Type: tea.KeyPgUp})
+	}
+	assert.Contains(t, m.View(), "detail-line-00", "page up can return to the beginning of the same details")
+
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	assert.Equal(t, ApprovalAllow, receiveApprovalResponse(t, response).Decision)
+}
+
+func TestTUIApprovalWithoutKnownReusableScopeHidesAlways(t *testing.T) {
+	response := make(chan ApprovalResponse, 1)
+	m := &teaModel{accordion: NewAccordionModel(), msgCh: make(chan Msg, 1)}
+	m.Update(approvalRequestMsg{req: ApprovalRequest{ToolName: "bash", ResponseCh: response}})
+
+	view := m.View()
+	assert.Contains(t, view, "scope: unknown")
+	assert.NotContains(t, view, "[a] always")
+	assert.Empty(t, m.activeInteraction.approval.RequestID, "the TUI must not invent an authoritative request ID")
+	assert.Contains(t, view, "local interaction #1")
+
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'a'}})
+	assert.NotNil(t, m.activeInteraction, "unscoped persistent approval must not resolve the request")
+	select {
+	case got := <-response:
+		t.Fatalf("unscoped always key unexpectedly responded: %+v", got)
+	default:
+	}
+
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	assert.Equal(t, ApprovalAllow, receiveApprovalResponse(t, response).Decision)
+}
+
+func TestTUIApprovalQueueCancellationKeepsRemainingFIFOOrder(t *testing.T) {
+	activeResponse := make(chan ApprovalResponse, 1)
+	canceledResponse := make(chan ApprovalResponse, 1)
+	lastResponse := make(chan ApprovalResponse, 1)
+	canceledCtx, cancelCanceled := context.WithCancel(context.Background())
+	defer cancelCanceled()
+	m := &teaModel{accordion: NewAccordionModel(), msgCh: make(chan Msg, 1)}
+	m.Update(approvalRequestMsg{req: ApprovalRequest{ToolName: "active", ResponseCh: activeResponse}})
+	m.Update(approvalRequestMsg{req: ApprovalRequest{ToolName: "canceled", ResponseCh: canceledResponse, Context: canceledCtx}})
+	m.Update(approvalRequestMsg{req: ApprovalRequest{ToolName: "last", ResponseCh: lastResponse}})
+
+	m.mu.Lock()
+	canceled := m.queuedInteractions[0]
+	m.mu.Unlock()
+	watcher := waitForInteractionCancel(canceled.token, canceledCtx, canceled.finished, nil)
+	cancelCanceled()
+	m.Update(watcher())
+
+	assert.Contains(t, m.View(), "active")
+	assert.NotContains(t, m.View(), "canceled")
+	assert.NotContains(t, m.View(), "last")
+	assert.Len(t, m.queuedInteractions, 1)
+	assert.Equal(t, ApprovalDeny, receiveApprovalResponse(t, canceledResponse).Decision)
+
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	assert.Equal(t, ApprovalAllow, receiveApprovalResponse(t, activeResponse).Decision)
+	assert.Contains(t, m.View(), "last", "the remaining request should become active after the first")
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'n'}})
+	assert.Equal(t, ApprovalDeny, receiveApprovalResponse(t, lastResponse).Decision)
+}
+
+func lastLine(view string) string {
+	lines := strings.Split(strings.TrimRight(view, "\n"), "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+	return lines[len(lines)-1]
 }
 
 func TestCanceledApprovalCannotBeApprovedBeforeCancelMessage(t *testing.T) {
