@@ -285,7 +285,10 @@ func TestSummaryCompactorCutsOnlyAtClosedToolGroupBoundaries(t *testing.T) {
 	out, err := NewSummaryCompactor(summarizer).Compact(ctx, items, 10, tracedEstimator())
 	require.NoError(t, err)
 	require.NotEmpty(t, out)
-	assert.Equal(t, RoleSystem, out[0].Role, "summary system-role semantics are unchanged in this slice")
+	assert.Equal(t, RoleUser, out[0].Role, "derived summary is projected as user-role context")
+	assert.True(t, out[0].IsCompaction)
+	assert.Empty(t, out[0].ToolCalls)
+	assert.Empty(t, out[0].ToolCallID)
 
 	keptCalls := 0
 	keptReceipts := 0

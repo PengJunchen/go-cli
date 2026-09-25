@@ -99,8 +99,10 @@ func TestSummaryCompactorProducesPlaceholderWithinBudget(t *testing.T) {
 	// The first (summary) entry is a compaction placeholder.
 	require.NotEmpty(t, out)
 	assert.True(t, out[0].IsCompaction)
-	assert.Equal(t, RoleSystem, out[0].Role)
+	assert.Equal(t, RoleUser, out[0].Role)
 	assert.Equal(t, "canned summary of older turns", out[0].Content)
+	assert.Empty(t, out[0].ToolCalls)
+	assert.Empty(t, out[0].ToolCallID)
 
 	// The recent turns are preserved after the summary entry.
 	assert.Equal(t, "recent question", out[len(out)-2].Content)
@@ -205,6 +207,111 @@ func TestNoopSummarizerFailsLoudly(t *testing.T) {
 	compactor := NewSummaryCompactor(nil) // fallback summarizer
 	_, err := compactor.Compact(ctx, items, 30, est)
 	require.ErrorIs(t, err, errNoSummarizer)
+}
+
+func TestSummaryPromptPreservesChronologyAndAllToolReceipts(t *testing.T) {
+	items := []TurnItem{
+		{Role: RoleUser, Content: "first question"},
+		{Role: RoleAssistant, Content: "I will inspect and search"},
+		{Role: RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "read-1", Name: "read", Args: map[string]any{"path": "/private/canary"}}}},
+		{Role: RoleTool, ToolCallID: "read-1", ToolName: "read", ReceiptOutcome: "success", ToolResult: "file output"},
+		{Role: RoleUser, Content: "follow-up after read"},
+		{Role: RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "search-1", Name: "web_search", Args: map[string]any{"query": "private canary"}}}},
+		{Role: RoleTool, ToolCallID: "search-1", ToolName: "web_search", ReceiptOutcome: "error", ToolResult: "search failed: unavailable"},
+		{Role: RoleAssistant, Content: "final old answer"},
+	}
+
+	prompt, err := NewSummaryCompactor(nil).buildSummaryPrompt(items, NewHeuristicTokenEstimator())
+	require.NoError(t, err)
+	positions := []int{
+		strings.Index(prompt, "first question"),
+		strings.Index(prompt, "I will inspect and search"),
+		strings.Index(prompt, "file output"),
+		strings.Index(prompt, "follow-up after read"),
+		strings.Index(prompt, "search failed: unavailable"),
+		strings.Index(prompt, "final old answer"),
+	}
+	for _, position := range positions {
+		require.GreaterOrEqual(t, position, 0)
+	}
+	for i := 1; i < len(positions); i++ {
+		assert.Less(t, positions[i-1], positions[i], "summary prompt must preserve transcript chronology")
+	}
+	assert.Contains(t, prompt, "web_search")
+	assert.Contains(t, prompt, "error")
+	assert.NotContains(t, prompt, "/private/canary", "raw tool arguments must not enter the summary prompt")
+	assert.NotContains(t, prompt, "private canary", "raw tool arguments must not enter the summary prompt")
+}
+
+func TestSummaryPromptBoundsItemsAndWholePrompt(t *testing.T) {
+	items := []TurnItem{{
+		Role:           RoleTool,
+		ToolName:       "shell",
+		ReceiptOutcome: "error",
+		ToolResult:     "HEAD-CANARY-" + strings.Repeat("x", 50000) + "-TAIL-CANARY",
+	}}
+	prompt, err := NewSummaryCompactor(nil).buildSummaryPrompt(items, runeCountEstimator{})
+	require.NoError(t, err)
+	tokens, err := (runeCountEstimator{}).Estimate(prompt)
+	require.NoError(t, err)
+	assert.LessOrEqual(t, tokens, 6000, "entire summary request including framing must fit its total budget")
+	assert.LessOrEqual(t, strings.Count(prompt, "x"), 2048, "one rendered receipt must fit its per-item budget")
+	assert.Contains(t, prompt, "[truncated]")
+	assert.Contains(t, prompt, "HEAD-CANARY")
+	assert.Contains(t, prompt, "TAIL-CANARY")
+}
+
+func TestSummaryPromptTotalBudgetTruncatesInHeadTailOrder(t *testing.T) {
+	items := make([]TurnItem, 8)
+	for i := range items {
+		items[i] = TurnItem{
+			Role:           RoleTool,
+			ToolName:       "tool",
+			ReceiptOutcome: "success",
+			ToolResult:     "BEGIN-" + string(rune('0'+i)) + strings.Repeat("x", 3000) + "-END-" + string(rune('0'+i)),
+		}
+	}
+	prompt, err := NewSummaryCompactor(nil).buildSummaryPrompt(items, NewHeuristicTokenEstimator())
+	require.NoError(t, err)
+	tokens, err := NewHeuristicTokenEstimator().Estimate(prompt)
+	require.NoError(t, err)
+	assert.LessOrEqual(t, tokens, 6000)
+	assert.Contains(t, prompt, "BEGIN-0")
+	assert.Contains(t, prompt, "-END-7")
+	assert.Contains(t, prompt, "[truncated]")
+}
+
+func TestSummaryPromptItemLimitUsesProvidedEstimator(t *testing.T) {
+	items := []TurnItem{{Role: RoleUser, Content: "HEAD-" + strings.Repeat("x", 200) + "-TAIL"}}
+	compactor := NewSummaryCompactor(nil, WithMaxSummaryItemTokens(32))
+	prompt, err := compactor.buildSummaryPrompt(items, runeCountEstimator{})
+	require.NoError(t, err)
+	itemText := strings.TrimPrefix(prompt, summaryPromptInstruction)
+	assert.LessOrEqual(t, utf8.RuneCountInString(itemText), 32)
+	assert.Contains(t, itemText, "HEAD")
+	assert.Contains(t, itemText, "-TAIL")
+	assert.Contains(t, itemText, "[truncated]")
+}
+
+func TestSummaryCompactorDoesNotCallSummarizerWhenPromptBudgetIsTooSmall(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx, _ := newTracedCtx(t)
+	summarizer := &fakeSummarizer{summary: "should not be returned"}
+	items := []TurnItem{
+		{Role: RoleUser, Content: strings.Repeat("old ", 100)},
+		{Role: RoleUser, Content: "keep"},
+	}
+	compactor := NewSummaryCompactor(summarizer, WithMaxSummaryPromptTokens(1))
+
+	_, err := compactor.Compact(ctx, items, 50, runeCountEstimator{})
+	require.ErrorIs(t, err, ErrSummaryPromptBudgetTooSmall)
+	assert.Empty(t, summarizer.conversations(), "an unusably small prompt budget must fail before dispatch")
+}
+
+func TestSummaryPromptNonPositiveLimitsUseBoundedDefaults(t *testing.T) {
+	compactor := NewSummaryCompactor(nil, WithMaxSummaryPromptTokens(0), WithMaxSummaryItemTokens(-1))
+	assert.Equal(t, defaultMaxSummaryPromptTokens, compactor.maxSummaryPromptTokens)
+	assert.Equal(t, defaultMaxSummaryItemTokens, compactor.maxSummaryItemTokens)
 }
 
 // runeCountEstimator returns the rune count as the token count, letting tests

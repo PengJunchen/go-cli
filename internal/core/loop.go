@@ -1088,6 +1088,17 @@ func messagesToTurnItems(msgs []llm.Message) []compaction.TurnItem {
 func turnItemsToMessages(items []compaction.TurnItem) []llm.Message {
 	canonical := make([]AgentMessage, len(items))
 	for i, it := range items {
+		if it.IsCompaction {
+			content := it.Content
+			if content == "" {
+				content = "[compacted]"
+			}
+			canonical[i] = AgentMessage{
+				Role:    compaction.RoleUser,
+				Content: compaction.UntrustedSummaryContext(content),
+			}
+			continue
+		}
 		canonical[i] = AgentMessage{
 			Role:          it.Role,
 			ContentBlocks: it.ContentBlocks,
