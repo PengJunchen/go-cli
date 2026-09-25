@@ -1,0 +1,5 @@
+source_head=bf073e8a55e663dea0197ad741e4a454db3c7e99
+command=go test -race -p 2 -count=1 ./internal/core
+ok  	github.com/pengjunchen/go-cli/internal/core	3.746s
+
+exit=0 elapsed_seconds=5.66
