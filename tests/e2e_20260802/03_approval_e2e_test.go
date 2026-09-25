@@ -8,6 +8,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"testing"
 	"time"
@@ -29,6 +30,16 @@ func toolCall(name string) tools.ToolCall {
 
 func toolCallWithArgs(name string, args map[string]any) tools.ToolCall {
 	return tools.ToolCall{ID: "id-" + name, Name: name, Args: args}
+}
+
+func privateTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	info, err := os.Stat(dir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), info.Mode().Perm())
+	return dir
 }
 
 func dummyExec(_ context.Context, _ tools.ToolCall) (*tools.ToolResult, error) {
@@ -468,7 +479,7 @@ type trustManagerAccessor interface {
 // =============================================================================
 
 func TestApproval_FileTrustStore(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateTempDir(t)
 	filePath := filepath.Join(dir, "trust.json")
 
 	t.Run("new store loads empty without error", func(t *testing.T) {
@@ -496,7 +507,7 @@ func TestApproval_FileTrustStore(t *testing.T) {
 	})
 
 	t.Run("remove entry", func(t *testing.T) {
-		dir := t.TempDir()
+		dir := privateTempDir(t)
 		removePath := filepath.Join(dir, "remove.json")
 		store := approval.NewFileTrustStore(removePath)
 
@@ -870,24 +881,28 @@ func TestApproval_EdgeCases(t *testing.T) {
 	})
 
 	t.Run("file trust store concurrent add", func(t *testing.T) {
-		dir := t.TempDir()
+		dir := privateTempDir(t)
 		store := approval.NewFileTrustStore(filepath.Join(dir, "concurrent.json"))
 
 		var wg sync.WaitGroup
 		n := 30
+		errs := make([]error, n)
 		for i := 0; i < n; i++ {
 			wg.Add(1)
 			go func(idx int) {
 				defer wg.Done()
-				path := "/p" + string(rune('a'+idx%26))
-				store.Add(path, approval.TrustEntry{Path: path}) //nolint:errcheck,gosec
+				path := "/p" + strconv.Itoa(idx)
+				errs[idx] = store.Add(path, approval.TrustEntry{Path: path})
 			}(i)
 		}
 		wg.Wait()
+		for _, err := range errs {
+			require.NoError(t, err)
+		}
 
 		entries, err := store.Load()
 		require.NoError(t, err)
-		assert.NotEmpty(t, entries)
+		assert.Len(t, entries, n)
 	})
 
 	t.Run("expired trust entry with unparsable time is untrusted", func(t *testing.T) {
