@@ -110,6 +110,20 @@ func (e privateHTTPError) Error() string { return e.message }
 
 func (e privateHTTPError) Unwrap() error { return e.cause }
 
+type httpCleanupPendingError struct {
+	cause error
+	done  <-chan struct{}
+}
+
+func (e *httpCleanupPendingError) Error() string {
+	return "acp: HTTP session cleanup is still pending"
+}
+
+func (e *httpCleanupPendingError) Unwrap() error { return e.cause }
+
+// Done returns the stable completion channel for the owned cleanup operation.
+func (e *httpCleanupPendingError) Done() <-chan struct{} { return e.done }
+
 func unknownSessionCreation(cause error) error {
 	message := ErrHTTPConnectOutcomeUnknown.Error()
 	var routeErr *httpRouteError
@@ -193,9 +207,6 @@ func NewGRPCAdapter(endpoint string, opts ...Option) ACPClient {
 // transport/endpoint attributes. It also starts the inbound poll loop if it is
 // not already running.
 func (a *gRPCAdapter) Connect(ctx context.Context) error {
-	if err := ctx.Err(); err != nil {
-		return err
-	}
 	span, spanCtx := tracing.SpanFromContext(ctx, "acp.connect", tracing.SpanKindInternal)
 	logger := tracing.NewTraceLogger(span, slog.Default())
 	span.SetAttributes(
@@ -242,6 +253,10 @@ func (a *gRPCAdapter) Connect(ctx context.Context) error {
 			}
 			return fmt.Errorf("acp: connect: %w", err)
 		}
+	}
+	if err := ctx.Err(); err != nil {
+		a.mu.Unlock()
+		return err
 	}
 
 	connectionCtx, cancel := context.WithCancel(context.WithoutCancel(spanCtx))
@@ -377,7 +392,15 @@ func (a *gRPCAdapter) Disconnect(ctx context.Context) error {
 		a.mu.Unlock()
 		return err
 	case <-ctx.Done():
-		return ctx.Err()
+		select {
+		case <-cleanupDone:
+			a.mu.Lock()
+			err := generation.cleanupErr
+			a.mu.Unlock()
+			return err
+		default:
+			return &httpCleanupPendingError{cause: ctx.Err(), done: cleanupDone}
+		}
 	}
 }
 
@@ -534,12 +557,25 @@ func (a *gRPCAdapter) newPostRequest(ctx context.Context, route string, envelope
 }
 
 func (a *gRPCAdapter) connectSession(ctx context.Context) (candidateID string, resultErr error) {
+	dispatched := false
+	defer func() {
+		if recover() != nil {
+			candidateID = ""
+			if dispatched {
+				resultErr = unknownSessionCreation(errACPWorkerPanic)
+			} else {
+				resultErr = errACPWorkerPanic
+			}
+		}
+	}()
+
 	request, err := a.newPostRequest(ctx, "/connect", httpEnvelopeFromMessage("", ACPMessage{
 		Type: TypeConnect, SenderID: a.name, Timestamp: time.Now(),
 	}))
 	if err != nil {
 		return "", err
 	}
+	dispatched = true
 	response, err := a.client.Do(request)
 	if err != nil {
 		return "", unknownSessionCreation(privateHTTPError{message: "acp: connect request failed", cause: err})
@@ -568,7 +604,7 @@ func (a *gRPCAdapter) connectSession(ctx context.Context) (candidateID string, r
 	}
 	decodeErr := json.Unmarshal(payload, &result)
 	candidateID = result.SessionID
-	if candidateID == "" || len(candidateID) > 256 || strings.TrimSpace(candidateID) != candidateID {
+	if !validOpaqueSessionID(candidateID, a.name) {
 		candidateID = ""
 	}
 	var protocolErr error

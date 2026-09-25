@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -45,6 +46,10 @@ func TestGRPCAdapterDisconnectWaitsForStreamBodyClose(t *testing.T) {
 		releaseClose: releaseClose,
 	}
 	client := NewGRPCAdapter("http://"+server.Addr(), WithName("reader-close-lifecycle"))
+	t.Cleanup(func() {
+		release()
+		_ = client.Disconnect(context.Background())
+	})
 	adapter := client.(*gRPCAdapter)
 	adapter.client.Transport = transport
 	require.NoError(t, client.Connect(context.Background()))
@@ -65,8 +70,24 @@ func TestGRPCAdapterDisconnectWaitsForStreamBodyClose(t *testing.T) {
 
 	waitCtx, cancelWait := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancelWait()
-	require.ErrorIs(t, client.Disconnect(waitCtx), context.DeadlineExceeded,
+	adapter.mu.Lock()
+	cleanupDone := adapter.current.cleanupDone
+	adapter.mu.Unlock()
+	err := client.Disconnect(waitCtx)
+	require.ErrorIs(t, err, context.DeadlineExceeded,
 		"Disconnect must wait until the reader's response body actually closes")
+	var pending interface{ Done() <-chan struct{} }
+	require.ErrorAs(t, err, &pending, "timed-out waiters need a join handle for the owned cleanup")
+	require.Equal(t, (<-chan struct{})(cleanupDone), pending.Done(), "the error must expose this generation's stable cleanup channel")
+	select {
+	case <-pending.Done():
+		t.Fatal("cleanup Done channel closed while response body close was still blocked")
+	default:
+	}
+	err = client.Disconnect(waitCtx)
+	var pendingAgain interface{ Done() <-chan struct{} }
+	require.ErrorAs(t, err, &pendingAgain, "repeated timed-out waits must keep exposing the same cleanup")
+	require.Equal(t, (<-chan struct{})(cleanupDone), pendingAgain.Done(), "repeated calls must not create another cleanup channel")
 	require.Zero(t, transport.disconnectCalls.Load(), "remote disconnect must wait for reader completion")
 
 	release()
@@ -78,6 +99,61 @@ func TestGRPCAdapterDisconnectWaitsForStreamBodyClose(t *testing.T) {
 		t.Fatal("receive channel was not closed after stream body cleanup")
 	}
 	require.EqualValues(t, 1, transport.disconnectCalls.Load())
+}
+
+func TestGRPCAdapterDisconnectOwnerDeadlineSkipsRemoteDeleteAndKeepsFence(t *testing.T) {
+	server := startHTTPProfilePeer(t)
+	closeStarted := make(chan struct{})
+	releaseClose := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseClose) }) }
+	t.Cleanup(release)
+	transport := &streamBodyCloseGateTransport{
+		base:         http.DefaultTransport,
+		closeStarted: closeStarted,
+		releaseClose: releaseClose,
+	}
+	client := NewGRPCAdapter("http://"+server.Addr(), WithName("cleanup-owner-deadline"))
+	t.Cleanup(func() {
+		release()
+		_ = client.Disconnect(context.Background())
+	})
+	adapter := client.(*gRPCAdapter)
+	adapter.client.Transport = transport
+	require.NoError(t, client.Connect(context.Background()))
+
+	select {
+	case <-closeStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("stream response body close did not block the reader")
+	}
+	adapter.mu.Lock()
+	generation := adapter.current
+	adapter.mu.Unlock()
+	ownerCtx, cancelOwner := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancelOwner()
+	err := client.Disconnect(ownerCtx)
+	require.ErrorIs(t, err, context.DeadlineExceeded,
+		"the first Disconnect caller owns the cleanup budget")
+	var pending interface{ Done() <-chan struct{} }
+	require.ErrorAs(t, err, &pending, "the cleanup owner timeout still needs an observable join")
+	require.Equal(t, (<-chan struct{})(generation.cleanupDone), pending.Done())
+	release()
+
+	select {
+	case <-generation.cleanupDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("cleanup owner did not publish its result after the stream body joined")
+	}
+	require.ErrorIs(t, client.Disconnect(context.Background()), context.DeadlineExceeded,
+		"later callers must observe the first cleanup owner's stored deadline result")
+	require.ErrorIs(t, client.Connect(context.Background()), context.DeadlineExceeded,
+		"an expired cleanup owner must keep the generation fenced")
+	require.Zero(t, transport.disconnectCalls.Load(), "an expired owner context skips the remote delete")
+	adapter.mu.Lock()
+	require.Same(t, generation, adapter.current)
+	require.Equal(t, generationFailed, generation.state)
+	adapter.mu.Unlock()
 }
 
 func TestGRPCAdapterReconnectIsExplicitlyUnsupported(t *testing.T) {
@@ -109,6 +185,68 @@ func TestGRPCAdapterCanceledConnectAdmissionDoesNotPublishGeneration(t *testing.
 	require.NoError(t, client.Connect(context.Background()), "a healthy Connect must be admitted after canceled entry")
 	require.Positive(t, transport.requests.Load())
 	require.NoError(t, client.Disconnect(context.Background()))
+}
+
+func TestGRPCAdapterConnectActiveGenerationWinsCanceledContext(t *testing.T) {
+	var connectRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/connect":
+			connectRequests.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"version":"go-cli-acp-json/1","session_id":"opaque-active-session"}`))
+		case "/stream":
+			<-r.Context().Done()
+		case "/disconnect":
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	client := NewGRPCAdapter(server.URL, WithName("active-context"))
+	t.Cleanup(func() { _ = client.Disconnect(context.Background()) })
+	require.NoError(t, client.Connect(context.Background()))
+	adapter := client.(*gRPCAdapter)
+	adapter.mu.Lock()
+	activeGeneration := adapter.current
+	activeState := activeGeneration.state
+	adapter.mu.Unlock()
+	require.Equal(t, generationActive, activeState)
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.NoError(t, client.Connect(canceledCtx), "idempotent Connect should preserve an already-active generation")
+	adapter.mu.Lock()
+	require.Same(t, activeGeneration, adapter.current)
+	adapter.mu.Unlock()
+	require.EqualValues(t, 1, connectRequests.Load(), "an active Connect must not dispatch a second create")
+	require.NoError(t, client.Disconnect(context.Background()))
+}
+
+func TestGRPCAdapterConnectPanicAfterDispatchIsUnknownAndFenced(t *testing.T) {
+	transport := &connectPanicAfterDispatchTransport{}
+	client := NewGRPCAdapter("http://panic-after-dispatch.invalid", WithName("panic-alias"))
+	adapter := client.(*gRPCAdapter)
+	adapter.client.Transport = transport
+
+	connectErr := client.Connect(context.Background())
+	require.ErrorIs(t, connectErr, ErrHTTPConnectOutcomeUnknown)
+	require.ErrorIs(t, connectErr, errACPWorkerPanic)
+	require.NotContains(t, connectErr.Error(), "private panic payload")
+	require.EqualValues(t, 1, transport.remoteCreates.Load(), "the peer may have created a session before the transport panicked")
+	require.EqualValues(t, 1, transport.connectRequests.Load())
+
+	cleanupErr := client.Disconnect(context.Background())
+	require.ErrorIs(t, cleanupErr, ErrHTTPConnectOutcomeUnknown)
+	require.ErrorIs(t, cleanupErr, errACPWorkerPanic)
+	require.ErrorIs(t, client.Connect(context.Background()), ErrHTTPConnectOutcomeUnknown,
+		"an ambiguous create must fence an explicit new Connect")
+	require.ErrorIs(t, client.Disconnect(context.Background()), ErrHTTPConnectOutcomeUnknown,
+		"later Disconnect calls must observe the stable unknown cleanup result")
+	require.EqualValues(t, 1, transport.connectRequests.Load(), "unknown creation must not be replayed")
+	require.Zero(t, transport.disconnectRequests.Load(), "the client cannot guess the session ID after a panic")
 }
 
 func TestGRPCAdapterDisconnectCleanupResultIsStable(t *testing.T) {
@@ -154,6 +292,11 @@ func TestGRPCAdapterDisconnectCleanupResultIsStable(t *testing.T) {
 	}
 	require.ErrorIs(t, client.Disconnect(context.Background()), closeFailure,
 		"completed cleanup result must remain stable")
+	completedCtx, cancelCompleted := context.WithCancel(context.Background())
+	cancelCompleted()
+	completedErr := client.Disconnect(completedCtx)
+	require.ErrorIs(t, completedErr, closeFailure, "an already-published cleanup result wins a canceled waiter")
+	require.NotErrorIs(t, completedErr, context.Canceled)
 	require.ErrorIs(t, client.Connect(context.Background()), closeFailure,
 		"a failed cleanup must fence creation of another session")
 	require.EqualValues(t, 1, gate.disconnectRequests.Load(), "later Disconnect must not resend cleanup")
@@ -385,6 +528,10 @@ func TestGRPCAdapterUncertainConnectResponsesStayFenced(t *testing.T) {
 		{name: "server failure", statusCode: http.StatusInternalServerError, body: `{"version":"go-cli-acp-json/1","session_id":"opaque-maybe-created"}`},
 		{name: "unexpected success status", statusCode: http.StatusCreated, body: `{"version":"go-cli-acp-json/1","session_id":"opaque-maybe-created"}`},
 		{name: "malformed response", statusCode: http.StatusOK, body: `{"version":`},
+		{name: "wrong profile display alias", statusCode: http.StatusOK, body: `{"version":"wrong-profile","session_id":"unknown-outcome"}`},
+		{name: "malformed display alias", statusCode: http.StatusOK, body: `{"version":"wrong-profile","session_id":"unknown-outcome",`},
+		{name: "wrong profile whitespace ID", statusCode: http.StatusOK, body: `{"version":"wrong-profile","session_id":" opaque-invalid"}`},
+		{name: "wrong profile oversized ID", statusCode: http.StatusOK, body: `{"version":"wrong-profile","session_id":"` + strings.Repeat("x", 257) + `"}`},
 		{name: "read failure", statusCode: http.StatusOK, body: `{"version":"go-cli-acp-json/1"}`, readErr: readFailure},
 	}
 	for _, tt := range tests {
@@ -410,6 +557,60 @@ func TestGRPCAdapterUncertainConnectResponsesStayFenced(t *testing.T) {
 			require.EqualValues(t, 1, transport.connectRequests.Load())
 			require.Zero(t, transport.disconnectRequests.Load(), "the unknown opaque ID cannot be guessed for cleanup")
 		})
+	}
+}
+
+func TestGRPCAdapterWrongProfileCleansOnlyValidatedOpaqueCandidate(t *testing.T) {
+	const candidateID = "opaque-server-issued-candidate"
+	var disconnectRequests atomic.Int32
+	disconnectedSession := make(chan string, 1)
+	client := NewGRPCAdapter("http://validated-candidate.invalid", WithName("display-alias"))
+	adapter := client.(*gRPCAdapter)
+	adapter.client.Transport = roundTripperFunc(func(request *http.Request) (*http.Response, error) {
+		switch request.URL.Path {
+		case "/connect":
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     http.Header{"Content-Type": []string{"application/json"}},
+				Body: io.NopCloser(strings.NewReader(
+					`{"version":"wrong-profile","session_id":"` + candidateID + `"}`,
+				)),
+				ContentLength: -1,
+				Request:       request,
+			}, nil
+		case "/disconnect":
+			disconnectRequests.Add(1)
+			data, err := io.ReadAll(request.Body)
+			if err != nil {
+				return nil, err
+			}
+			var envelope httpACPEnvelope
+			if err := json.Unmarshal(data, &envelope); err != nil {
+				return nil, err
+			}
+			disconnectedSession <- envelope.SessionID
+			return &http.Response{
+				StatusCode:    http.StatusOK,
+				Body:          io.NopCloser(strings.NewReader("")),
+				ContentLength: 0,
+				Request:       request,
+			}, nil
+		default:
+			return nil, fmt.Errorf("unexpected candidate test route %s", request.URL.Path)
+		}
+	})
+
+	connectErr := client.Connect(context.Background())
+	require.ErrorIs(t, connectErr, errHTTPACPProtocol)
+	require.NotErrorIs(t, connectErr, ErrHTTPConnectOutcomeUnknown,
+		"a structurally valid opaque server ID can be retained for cleanup even when the profile is wrong")
+	require.NoError(t, client.Disconnect(context.Background()))
+	require.EqualValues(t, 1, disconnectRequests.Load())
+	select {
+	case sessionID := <-disconnectedSession:
+		require.Equal(t, candidateID, sessionID)
+	case <-time.After(2 * time.Second):
+		t.Fatal("validated opaque candidate was not used for cleanup")
 	}
 }
 
@@ -444,6 +645,34 @@ type countingHTTPTransport struct {
 func (t *countingHTTPTransport) RoundTrip(request *http.Request) (*http.Response, error) {
 	t.requests.Add(1)
 	return t.base.RoundTrip(request)
+}
+
+type connectPanicAfterDispatchTransport struct {
+	connectRequests    atomic.Int32
+	remoteCreates      atomic.Int32
+	disconnectRequests atomic.Int32
+}
+
+func (t *connectPanicAfterDispatchTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	switch request.URL.Path {
+	case "/connect":
+		t.connectRequests.Add(1)
+		t.remoteCreates.Add(1)
+		panic("private panic payload")
+	case "/disconnect":
+		t.disconnectRequests.Add(1)
+		return &http.Response{
+			StatusCode:    http.StatusOK,
+			Body:          io.NopCloser(strings.NewReader("")),
+			ContentLength: 0,
+			Request:       request,
+		}, nil
+	case "/stream":
+		<-request.Context().Done()
+		return nil, request.Context().Err()
+	default:
+		return nil, fmt.Errorf("unexpected panic test route %s", request.URL.Path)
+	}
 }
 
 type connectOutcomeTransport struct {
