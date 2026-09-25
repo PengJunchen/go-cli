@@ -202,11 +202,14 @@ func (pm *PluginManager) Shutdown(ctx context.Context) error {
 		ctx = context.Background()
 	}
 
+	gate := pm.coordinator.gate
+	gate.mu.Lock()
 	pm.mu.Lock()
 	pm.closing = true
 	if pm.shutdownComplete {
 		err := pm.shutdownResult
 		pm.mu.Unlock()
+		gate.mu.Unlock()
 		return err
 	}
 	op := pm.shutdownOp
@@ -221,7 +224,13 @@ func (pm *PluginManager) Shutdown(ctx context.Context) error {
 	}
 	pm.mu.Unlock()
 	if startOwner {
+		// Publication takes the same gate before its final merge. Record the
+		// callback context while holding that gate, then close it atomically.
 		pm.coordinator.requestShutdownCallbackContext(ctx)
+	}
+	gate.closing = true
+	gate.mu.Unlock()
+	if startOwner {
 		if loadOp != nil && loadOp.cancel != nil {
 			loadOp.cancel()
 		}
