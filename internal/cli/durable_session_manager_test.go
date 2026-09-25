@@ -111,6 +111,8 @@ func TestDurableSessionManagerFailedDifferentSessionPreparationKeepsCurrent(t *t
 
 	err := manager.selectResume(context.Background(), "session-b", "")
 	assert.ErrorIs(t, err, errManagerTestPrepare)
+	var appliedErr *SelectionAppliedCleanupError
+	assert.False(t, errors.As(err, &appliedErr), "a failed target prepare must leave the old selection in place")
 	assert.Equal(t, 0, preparedA.closeCount())
 
 	lease, err := manager.acquireRunLease()
@@ -156,6 +158,10 @@ func TestDurableSessionManagerSwapDrainsOldLeaseOnRequesterPath(t *testing.T) {
 	preparer.setAfterResume(func(string) { cancel() })
 	err = manager.selectResume(ctx, "session-b", "")
 	assert.ErrorIs(t, err, ErrDurableSessionClosePending)
+	var appliedErr *SelectionAppliedCleanupError
+	require.ErrorAs(t, err, &appliedErr)
+	assert.Equal(t, "session-b", appliedErr.SelectedPhysicalSessionID)
+	assert.Equal(t, "branch-b", appliedErr.SelectedBranchID)
 	assert.Equal(t, 0, preparedA.closeCount(), "a live lease must keep the old prepared handle open")
 
 	newLease, err := manager.acquireRunLease()
@@ -169,6 +175,236 @@ func TestDurableSessionManagerSwapDrainsOldLeaseOnRequesterPath(t *testing.T) {
 	require.NoError(t, manager.requestClose(context.Background()))
 	assert.Equal(t, 1, preparedA.closeCount())
 	assert.Equal(t, 1, preparedB.closeCount())
+}
+
+func TestDurableSessionManagerSwapReportsAppliedSelectionOnCloseFailure(t *testing.T) {
+	preparedA := newManagerTestPrepared("session-a", "branch-a")
+	preparedA.closeErr = errManagerTestClose
+	preparedB := newManagerTestPrepared("session-b", "branch-b")
+	preparer := newManagerTestPreparer(preparedA)
+	preparer.setResume("session-b", preparedB)
+	manager := newManagerTestManager(t, preparer)
+	require.NoError(t, manager.prepareNew(context.Background(), "display label"))
+
+	err := manager.selectResume(context.Background(), "session-b", "")
+	var appliedErr *SelectionAppliedCleanupError
+	require.ErrorAs(t, err, &appliedErr)
+	assert.ErrorIs(t, err, errManagerTestClose)
+	assert.Equal(t, "session-b", appliedErr.SelectedPhysicalSessionID)
+	assert.Equal(t, "branch-b", appliedErr.SelectedBranchID)
+
+	lease, err := manager.acquireRunLease()
+	require.NoError(t, err)
+	assert.Equal(t, "session-b", lease.SessionID())
+	lease.CloseRunCommit()
+	assert.ErrorIs(t, manager.requestClose(context.Background()), errManagerTestClose)
+	assert.Equal(t, 1, preparedA.closeCount())
+	assert.Equal(t, 1, preparedB.closeCount())
+}
+
+func TestDurableSessionManagerRequestCloseDeadlineClosesAdmissionDuringSelectionDrain(t *testing.T) {
+	preparedA := newManagerTestPrepared("session-a", "branch-a")
+	preparedB := newManagerTestPrepared("session-b", "branch-b")
+	preparer := newManagerTestPreparer(preparedA)
+	preparer.setResume("session-b", preparedB)
+	manager := newManagerTestManager(t, preparer)
+	require.NoError(t, manager.prepareNew(context.Background(), "display label"))
+	oldLease, err := manager.acquireRunLease()
+	require.NoError(t, err)
+
+	selectionResult := make(chan error, 1)
+	go func() { selectionResult <- manager.selectResume(context.Background(), "session-b", "") }()
+	waitForManagerLeaseSession(t, manager, "session-b")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	closeResult := make(chan error, 1)
+	started := time.Now()
+	go func() { closeResult <- manager.requestClose(ctx) }()
+
+	var closeErr error
+	returnedBeforeRelease := false
+	select {
+	case closeErr = <-closeResult:
+		returnedBeforeRelease = true
+	case <-time.After(500 * time.Millisecond):
+	}
+	if returnedBeforeRelease {
+		assert.ErrorIs(t, closeErr, ErrDurableSessionClosePending)
+		assert.ErrorIs(t, closeErr, context.DeadlineExceeded)
+		assert.Less(t, time.Since(started), 500*time.Millisecond)
+		_, acquireErr := manager.acquireRunLease()
+		assert.ErrorIs(t, acquireErr, ErrDurableSessionManagerClosing)
+	}
+
+	oldLease.CloseRunCommit()
+	select {
+	case selectErr := <-selectionResult:
+		assert.NoError(t, selectErr)
+	case <-time.After(5 * time.Second):
+		t.Fatal("selection did not finish after the old run lease was returned")
+	}
+	if !returnedBeforeRelease {
+		select {
+		case closeErr = <-closeResult:
+		case <-time.After(5 * time.Second):
+			t.Fatal("close request remained blocked after selection completed")
+		}
+	}
+
+	require.True(t, returnedBeforeRelease, "requestClose ignored its deadline while waiting for selection")
+	require.ErrorIs(t, closeErr, ErrDurableSessionClosePending)
+	require.NoError(t, manager.requestClose(context.Background()))
+	assert.Equal(t, 1, preparedA.closeCount())
+	assert.Equal(t, 1, preparedB.closeCount())
+}
+
+func TestDurableSessionManagerRequestCloseDeadlineIsNotBlockedBySnapshot(t *testing.T) {
+	prepared := newManagerTestPrepared("session-a", "branch-a")
+	manager := newManagerTestManager(t, newManagerTestPreparer(prepared))
+	require.NoError(t, manager.prepareNew(context.Background(), "display label"))
+
+	snapshotEntered := make(chan struct{})
+	snapshotRelease := make(chan struct{})
+	prepared.setSnapshotGate(snapshotEntered, snapshotRelease)
+	type acquireResult struct {
+		lease *durableSessionRunLease
+		err   error
+	}
+	acquired := make(chan acquireResult, 1)
+	go func() {
+		lease, err := manager.acquireRunLease()
+		acquired <- acquireResult{lease: lease, err: err}
+	}()
+	select {
+	case <-snapshotEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("run lease snapshot did not reach its test gate")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	closed := make(chan error, 1)
+	started := time.Now()
+	go func() { closed <- manager.requestClose(ctx) }()
+
+	var closeErr error
+	returnedBeforeRelease := false
+	select {
+	case closeErr = <-closed:
+		returnedBeforeRelease = true
+	case <-time.After(500 * time.Millisecond):
+	}
+	if returnedBeforeRelease {
+		assert.ErrorIs(t, closeErr, ErrDurableSessionClosePending)
+		assert.ErrorIs(t, closeErr, context.DeadlineExceeded)
+		assert.Less(t, time.Since(started), 500*time.Millisecond)
+		assert.Equal(t, 0, prepared.closeCount(), "the temporary snapshot borrow must keep the handle open")
+		_, err := manager.acquireRunLease()
+		assert.ErrorIs(t, err, ErrDurableSessionManagerClosing)
+	}
+
+	close(snapshotRelease)
+	result := <-acquired
+	if result.lease != nil {
+		result.lease.CloseRunCommit()
+	}
+	if !returnedBeforeRelease {
+		select {
+		case closeErr = <-closed:
+		case <-time.After(5 * time.Second):
+			t.Fatal("close request remained blocked after Snapshot returned")
+		}
+	}
+	require.True(t, returnedBeforeRelease, "requestClose must honor its deadline while Snapshot is blocked")
+	assert.Nil(t, result.lease)
+	assert.ErrorIs(t, result.err, ErrDurableSessionManagerClosing)
+	assert.ErrorIs(t, closeErr, ErrDurableSessionClosePending)
+	assert.ErrorIs(t, closeErr, context.DeadlineExceeded)
+	require.NoError(t, manager.requestClose(context.Background()))
+	assert.Equal(t, 1, prepared.closeCount())
+}
+
+func TestDurableSessionManagerDiscardsLatePreparedSessionAfterCloseRequest(t *testing.T) {
+	preparedA := newManagerTestPrepared("session-a", "branch-a")
+	preparedB := newManagerTestPrepared("session-b", "branch-b")
+	preparedB.closeErr = errManagerTestClose
+	preparer := newManagerTestPreparer(preparedA)
+	preparer.setResume("session-b", preparedB)
+	resumeEntered := make(chan struct{})
+	resumeRelease := make(chan struct{})
+	preparer.setResumeGate("session-b", resumeEntered, resumeRelease)
+	manager := newManagerTestManager(t, preparer)
+	require.NoError(t, manager.prepareNew(context.Background(), "display label"))
+	oldLease, err := manager.acquireRunLease()
+	require.NoError(t, err)
+
+	selectionResult := make(chan error, 1)
+	go func() { selectionResult <- manager.selectResume(context.Background(), "session-b", "") }()
+	select {
+	case <-resumeEntered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("resume preparation did not reach its test gate")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- manager.requestClose(ctx) }()
+	var closeErr error
+	closeReturned := false
+	select {
+	case closeErr = <-closeResult:
+		closeReturned = true
+	case <-time.After(500 * time.Millisecond):
+	}
+	var probe *durableSessionRunLease
+	probe, acquireErr := manager.acquireRunLease()
+	if probe != nil {
+		probe.CloseRunCommit()
+	}
+	if closeReturned {
+		assert.ErrorIs(t, closeErr, ErrDurableSessionClosePending)
+		assert.ErrorIs(t, closeErr, context.DeadlineExceeded)
+		assert.ErrorIs(t, acquireErr, ErrDurableSessionManagerClosing)
+	}
+
+	close(resumeRelease)
+	oldLease.CloseRunCommit()
+	select {
+	case selectionErr := <-selectionResult:
+		if closeReturned {
+			assert.ErrorIs(t, selectionErr, ErrDurableSessionManagerClosing)
+			assert.ErrorIs(t, selectionErr, errManagerTestClose)
+		} else {
+			assert.NoError(t, selectionErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("selection did not release its uncommitted prepared handle")
+	}
+	if !closeReturned {
+		select {
+		case closeErr = <-closeResult:
+		case <-time.After(5 * time.Second):
+			t.Fatal("close request remained blocked after its transition completed")
+		}
+	}
+	manager.mu.Lock()
+	selectedID := ""
+	if manager.current != nil {
+		selectedID = manager.current.physical
+	}
+	manager.mu.Unlock()
+	if closeReturned {
+		assert.Equal(t, "session-a", selectedID, "a late prepared target must not replace the current session")
+		assert.Equal(t, 0, preparedA.closeCount())
+		assert.Equal(t, 1, preparedB.closeCount(), "the unpublished handle must be closed on the preparing caller path")
+		require.ErrorIs(t, manager.requestClose(context.Background()), errManagerTestClose)
+	} else {
+		assert.ErrorIs(t, closeErr, ErrDurableSessionClosePending)
+	}
+	assert.Equal(t, 1, preparedA.closeCount())
+	assert.Equal(t, 1, preparedB.closeCount(), "a failed close is retained and not retried")
 }
 
 func TestDurableSessionManagerCloseRequestRejectsNewLeasesAndReturnsCloseError(t *testing.T) {
@@ -287,11 +523,17 @@ func newManagerTestPrepared(sessionID, branchID string) *managerTestPrepared {
 }
 
 type managerTestPrepared struct {
-	mu          sync.Mutex
-	snapshot    session.PreparedSessionSnapshot
-	snapshotErr error
-	closeErr    error
-	closeCalls  int
+	mu           sync.Mutex
+	snapshot     session.PreparedSessionSnapshot
+	snapshotErr  error
+	snapshotGate *managerTestSnapshotGate
+	closeErr     error
+	closeCalls   int
+}
+
+type managerTestSnapshotGate struct {
+	entered chan struct{}
+	release <-chan struct{}
 }
 
 func (prepared *managerTestPrepared) View() session.SessionView {
@@ -302,11 +544,19 @@ func (prepared *managerTestPrepared) View() session.SessionView {
 
 func (prepared *managerTestPrepared) Snapshot() (session.PreparedSessionSnapshot, error) {
 	prepared.mu.Lock()
-	defer prepared.mu.Unlock()
-	if prepared.snapshotErr != nil {
-		return session.PreparedSessionSnapshot{}, prepared.snapshotErr
+	snapshot := prepared.snapshot.Clone()
+	err := prepared.snapshotErr
+	gate := prepared.snapshotGate
+	prepared.snapshotGate = nil
+	prepared.mu.Unlock()
+	if gate != nil {
+		close(gate.entered)
+		<-gate.release
 	}
-	return prepared.snapshot.Clone(), nil
+	if err != nil {
+		return session.PreparedSessionSnapshot{}, err
+	}
+	return snapshot, nil
 }
 
 func (*managerTestPrepared) DurableWriter() session.DurableSessionWriter { return nil }
@@ -324,6 +574,12 @@ func (prepared *managerTestPrepared) setSnapshotError(err error) {
 	prepared.snapshotErr = err
 }
 
+func (prepared *managerTestPrepared) setSnapshotGate(entered chan struct{}, release <-chan struct{}) {
+	prepared.mu.Lock()
+	defer prepared.mu.Unlock()
+	prepared.snapshotGate = &managerTestSnapshotGate{entered: entered, release: release}
+}
+
 func (prepared *managerTestPrepared) closeCount() int {
 	prepared.mu.Lock()
 	defer prepared.mu.Unlock()
@@ -338,6 +594,13 @@ type managerTestPreparer struct {
 	resumeErrors   map[string]error
 	resumeCallLog  []string
 	afterResume    func(string)
+	resumeGate     managerTestResumeGate
+}
+
+type managerTestResumeGate struct {
+	sessionID string
+	entered   chan struct{}
+	release   <-chan struct{}
 }
 
 func newManagerTestPreparer(newSession session.PreparedSession) *managerTestPreparer {
@@ -354,7 +617,7 @@ func (preparer *managerTestPreparer) PrepareNew(context.Context, string) (sessio
 	return preparer.newSession, preparer.newErr
 }
 
-func (preparer *managerTestPreparer) PrepareResume(_ context.Context, physicalSessionID string) (session.PreparedSession, error) {
+func (preparer *managerTestPreparer) PrepareResume(ctx context.Context, physicalSessionID string) (session.PreparedSession, error) {
 	preparer.mu.Lock()
 	preparer.resumeCallLog = append(preparer.resumeCallLog, physicalSessionID)
 	if err := preparer.resumeErrors[physicalSessionID]; err != nil {
@@ -363,12 +626,21 @@ func (preparer *managerTestPreparer) PrepareResume(_ context.Context, physicalSe
 	}
 	prepared := preparer.resumeSessions[physicalSessionID]
 	afterResume := preparer.afterResume
+	gate := preparer.resumeGate
 	preparer.mu.Unlock()
 	if prepared == nil {
 		return nil, errors.New("unexpected physical session ID")
 	}
 	if afterResume != nil {
 		afterResume(physicalSessionID)
+	}
+	if gate.sessionID == physicalSessionID {
+		close(gate.entered)
+		select {
+		case <-gate.release:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
 	}
 	return prepared, nil
 }
@@ -391,8 +663,39 @@ func (preparer *managerTestPreparer) setAfterResume(afterResume func(string)) {
 	preparer.afterResume = afterResume
 }
 
+func (preparer *managerTestPreparer) setResumeGate(sessionID string, entered chan struct{}, release <-chan struct{}) {
+	preparer.mu.Lock()
+	defer preparer.mu.Unlock()
+	preparer.resumeGate = managerTestResumeGate{sessionID: sessionID, entered: entered, release: release}
+}
+
 func (preparer *managerTestPreparer) resumeCalls() []string {
 	preparer.mu.Lock()
 	defer preparer.mu.Unlock()
 	return append([]string(nil), preparer.resumeCallLog...)
+}
+
+func waitForManagerLeaseSession(t *testing.T, manager *durableSessionManager, sessionID string) {
+	t.Helper()
+	deadline := time.NewTimer(5 * time.Second)
+	ticker := time.NewTicker(time.Millisecond)
+	defer deadline.Stop()
+	defer ticker.Stop()
+	for {
+		lease, err := manager.acquireRunLease()
+		if err == nil {
+			if lease.SessionID() == sessionID {
+				lease.CloseRunCommit()
+				return
+			}
+			lease.CloseRunCommit()
+		} else if !errors.Is(err, ErrNoDurableSessionSelected) {
+			t.Fatalf("failed to acquire lease while waiting for %q: %v", sessionID, err)
+		}
+		select {
+		case <-ticker.C:
+		case <-deadline.C:
+			t.Fatalf("session %q was not selected before the deadline", sessionID)
+		}
+	}
 }
