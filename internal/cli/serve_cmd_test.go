@@ -649,3 +649,43 @@ func TestServeTokenFileFailureDoesNotStartListener(t *testing.T) {
 		t.Fatal("serve did not fail before listener startup")
 	}
 }
+
+func TestServeConfiguredPostToolUseHookShowsSafeUnsupportedError(t *testing.T) {
+	workDir := t.TempDir()
+	hookDir := filepath.Join(workDir, ".go-cli")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	const commandCanary = "PRIVATE_HOOK_COMMAND_CANARY"
+	hooks := "hooks:\n  - event: post_tool_use\n    command: echo " + commandCanary + "\n    timeout: 1s\n"
+	configPath := filepath.Join(hookDir, "hooks.yaml")
+	if err := os.WriteFile(configPath, []byte(hooks), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := newAssembleTestConfig()
+	cfg.Git.WorkDir = workDir
+	out := &safeBuffer{}
+	c := newServeCmd(out)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- c.Run(ctx, cfg, []string{"--no-auth", "--addr", "127.0.0.1:0"})
+	}()
+	waitForServeStart(t, out, done)
+
+	output := out.String()
+	if !strings.Contains(strings.ToLower(output), "posttooluse") {
+		t.Errorf("expected output to identify unsupported PostToolUse hook, got: %s", output)
+	}
+	if !strings.Contains(output, configPath) || !strings.Contains(output, "hook 0") {
+		t.Errorf("expected output to identify the configured path and hook index, got: %s", output)
+	}
+	if strings.Contains(output, commandCanary) {
+		t.Errorf("serve output must not disclose hook command contents, got: %s", output)
+	}
+
+	cancel()
+	<-done
+}
