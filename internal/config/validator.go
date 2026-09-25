@@ -9,6 +9,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
 // Validator defines the contract for validating a merged Config.
@@ -45,7 +47,6 @@ func validTemperature(value float64) bool {
 
 var (
 	validTracingLevels        = []string{"debug", "info", "warn", "error"}
-	validTracingExporter      = []string{"jsonl", "stdout", "none"}
 	validCompactionStrategies = []string{"", "unified", "micro", "micro_first", "summary", "truncating"}
 	validGitPlatforms         = []string{"", "github", "gitlab", "bitbucket"}
 	validTUIThemes            = []string{"", "dark", "light", "monokai", "solarized", "auto"}
@@ -81,7 +82,7 @@ func (v *DefaultValidator) Validate(cfg Config) error {
 	if cfg.Tracing.Level != "" && !contains(validTracingLevels, cfg.Tracing.Level) {
 		errs = append(errs, "invalid tracing level")
 	}
-	if cfg.Tracing.Exporter != "" && !contains(validTracingExporter, cfg.Tracing.Exporter) {
+	if cfg.Tracing.Exporter != "" && !tracing.IsSupportedExporter(cfg.Tracing.Exporter) {
 		errs = append(errs, "invalid tracing exporter")
 	}
 

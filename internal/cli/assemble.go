@@ -597,8 +597,7 @@ type assembleState struct {
 	modelSelector *llm.DefaultModelSelector
 
 	// Tracing section
-	tracer        *tracing.Tracer
-	traceExporter tracing.TraceExporter
+	tracer *tracing.Tracer
 
 	// Tools section
 	tr               tools.ToolRegistry
@@ -687,7 +686,7 @@ func (s *assembleState) runCleanup() {
 }
 
 // appendFinalCleanup adds the terminal cleanup closure for ACP client,
-// session store, memory store, and trace exporter. These run first during
+// session store, and memory store. These run first during
 // LIFO cleanup because they are appended after all subsystem cleanups.
 func (s *assembleState) appendFinalCleanup() {
 	s.cleanupList = append(s.cleanupList, func() {
@@ -707,12 +706,6 @@ func (s *assembleState) appendFinalCleanup() {
 		if s.memStore != nil {
 			s.memWG.Wait()
 			_ = s.memStore.Close() //nolint:errcheck
-		}
-		if s.traceExporter != nil {
-			if s.tracer != nil {
-				s.tracer.Flush()
-			}
-			_ = s.traceExporter.Shutdown(context.Background()) //nolint:errcheck
 		}
 	})
 }
@@ -824,21 +817,9 @@ func (s *assembleState) assembleModel() error {
 	return nil
 }
 
-// assembleTracing wires the tracer and trace exporter from config.
+// assembleTracing reuses the tracer owned by the outer invocation context.
 func (s *assembleState) assembleTracing() {
-	if s.rc != nil && s.rc.Tracing.Enabled != nil && *s.rc.Tracing.Enabled {
-		s.traceExporter = buildTraceExporter(s.rc.Tracing, s.sessionID, s.logger)
-		if s.traceExporter != nil {
-			redactionLevel := tracing.RedactionLevelRedact
-			if s.rc.Tracing.RedactionLevel != "" {
-				redactionLevel = tracing.RedactionLevel(s.rc.Tracing.RedactionLevel)
-			}
-			s.traceExporter = tracing.NewRedactingExporter(s.traceExporter, redactionLevel)
-			s.tracer = tracing.NewTracer(s.sessionID, s.traceExporter)
-			s.reg.RegisterTraceExporter(s.traceExporter)
-			s.logger.Info("assemble_tracing_enabled", "exporter", s.rc.Tracing.Exporter, "level", s.rc.Tracing.Level)
-		}
-	}
+	s.tracer = tracing.TracerFromContext(s.ctx)
 }
 
 // assembleTools creates the tool registry, registers builtins, custom tools,
@@ -2643,36 +2624,6 @@ func recordToolTelemetry(ctx context.Context, telemetry production.Telemetry, to
 			"tool_class": toolClass,
 		},
 	})
-}
-
-// buildTraceExporter creates the appropriate TraceExporter from the tracing
-// config. Supported exporter types: "jsonl" (default), "stdout", "otlp".
-// When the exporter cannot be created (e.g. file open failure), nil is
-// returned and a warning is logged so assembly continues without tracing.
-func buildTraceExporter(tc config.TracingConfig, sessionID string, logger *slog.Logger) tracing.TraceExporter {
-	switch tc.Exporter {
-	case "stdout":
-		return tracing.NewStdoutTraceExporter(false)
-	case "otlp":
-		endpoint := tc.FilePath
-		if endpoint == "" {
-			endpoint = "http://localhost:4318/v1/traces"
-		}
-		return tracing.NewOTLPTraceExporter(tracing.OTLPTraceExporterConfig{
-			Endpoint: endpoint,
-		})
-	default: // "jsonl" or empty
-		dir := tc.FilePath
-		if dir == "" {
-			dir = ".go-cli/traces"
-		}
-		exp, err := tracing.NewJSONLTraceExporter(dir, sessionID)
-		if err != nil {
-			logger.Warn("assemble_tracing_jsonl_failed", "dir", dir, "err", err)
-			return nil
-		}
-		return exp
-	}
 }
 
 // buildRemoteBashTool constructs a RemoteBashTool from the remote config. It
