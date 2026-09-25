@@ -1,12 +1,14 @@
 package privatefile
 
 import (
+	"context"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -136,6 +138,98 @@ func TestWriteAtomicDirectorySyncFailureReportsCommittedReplace(t *testing.T) {
 	assert.Contains(t, err.Error(), "file replaced")
 	assert.NotContains(t, err.Error(), "new-secret")
 	assertExistingFile(t, path, "new-secret", 0o600)
+}
+
+func TestWithExclusiveLockKeepsPrivateSidecar(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	path := filepath.Join(dir, "auth.json")
+	called := false
+	require.NoError(t, WithExclusiveLock(context.Background(), path, func() error {
+		called = true
+		return nil
+	}))
+	assert.True(t, called)
+
+	lockInfo, err := os.Lstat(path + ".lock")
+	require.NoError(t, err)
+	assert.True(t, lockInfo.Mode().IsRegular())
+	assert.Equal(t, os.FileMode(0o600), lockInfo.Mode().Perm())
+}
+
+func TestWithExclusiveLockRejectsSymlinkOrInsecureSidecar(t *testing.T) {
+	t.Run("symlink", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.Chmod(dir, 0o700))
+		path := filepath.Join(dir, "auth.json")
+		target := filepath.Join(dir, "target")
+		require.NoError(t, os.WriteFile(target, nil, 0o600))
+		require.NoError(t, os.Symlink(target, path+".lock"))
+
+		called := false
+		err := WithExclusiveLock(context.Background(), path, func() error {
+			called = true
+			return nil
+		})
+		require.Error(t, err)
+		assert.False(t, called)
+		info, statErr := os.Stat(target)
+		require.NoError(t, statErr)
+		assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	})
+
+	t.Run("insecure mode", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.Chmod(dir, 0o700))
+		path := filepath.Join(dir, "auth.json")
+		require.NoError(t, os.WriteFile(path+".lock", nil, 0o644))
+		require.NoError(t, os.Chmod(path+".lock", 0o644))
+
+		called := false
+		err := WithExclusiveLock(context.Background(), path, func() error {
+			called = true
+			return nil
+		})
+		require.Error(t, err)
+		assert.False(t, called)
+		info, statErr := os.Stat(path + ".lock")
+		require.NoError(t, statErr)
+		assert.Equal(t, os.FileMode(0o644), info.Mode().Perm())
+	})
+}
+
+func TestWithExclusiveLockWaitIsCancellable(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	path := filepath.Join(dir, "auth.json")
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	firstDone := make(chan error, 1)
+	go func() {
+		firstDone <- WithExclusiveLock(context.Background(), path, func() error {
+			close(entered)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-entered:
+	case <-time.After(time.Second):
+		close(release)
+		t.Fatal("first lock holder did not start")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
+	defer cancel()
+	called := false
+	err := WithExclusiveLock(ctx, path, func() error {
+		called = true
+		return nil
+	})
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.False(t, called)
+	close(release)
+	require.NoError(t, <-firstDone)
 }
 
 func TestWriteFullHandlesShortWrites(t *testing.T) {

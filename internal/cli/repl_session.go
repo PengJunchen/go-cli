@@ -153,7 +153,7 @@ func (s *REPLSession) start(ctx context.Context) error {
 		if in == nil {
 			in = os.Stdin
 		}
-		if err := RunOnboarding(s.rc, in, s.out); err != nil {
+		if err := runOnboarding(ctx, s.rc, s.providerName, in, s.out); err != nil {
 			return err
 		}
 	}

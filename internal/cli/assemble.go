@@ -1575,6 +1575,7 @@ func (s *assembleState) assembleSession() {
 // configured small model, explicit /model switches, and model listing.
 type cliModelResolver struct {
 	resolver          *llm.ModelResolver
+	authChain         *config.AuthChain
 	primaryProviderID string
 	primaryEndpoint   string
 	smallProviderID   string
@@ -1712,6 +1713,7 @@ func newCLIModelResolver(rc *config.Config, primaryProviderName string, includeS
 	registry.SetCredentialResolver(authChain)
 	return &cliModelResolver{
 		resolver:          registry.SnapshotResolver(),
+		authChain:         authChain,
 		primaryProviderID: primaryProviderName,
 		primaryEndpoint:   primary.endpoint,
 		smallProviderID:   smallProviderName,
@@ -1732,6 +1734,32 @@ func appendConfiguredModel(modelsByProvider map[string][]llm.ModelInfo, provider
 		}
 	}
 	modelsByProvider[providerID] = append(modelsByProvider[providerID], llm.ModelInfo{Name: modelID})
+}
+
+func cliPrimaryCredentialScope(rc *config.Config, providerName string) (config.AuthScope, error) {
+	modelResolver, err := newCLIModelResolver(rc, providerName, false)
+	if err != nil {
+		return config.AuthScope{}, err
+	}
+	ref, err := modelResolver.resolver.CredentialRefFor(modelResolver.primaryProviderID, modelResolver.primaryEndpoint)
+	if err != nil {
+		return config.AuthScope{}, err
+	}
+	return config.AuthScope{ProviderID: ref.ProviderID, ProtocolID: string(ref.ProtocolID), Origin: ref.Origin}, nil
+}
+
+func resolveCLIPrimaryCredential(ctx context.Context, rc *config.Config, providerName string) (config.AuthScope, string, bool, error) {
+	modelResolver, err := newCLIModelResolver(rc, providerName, false)
+	if err != nil {
+		return config.AuthScope{}, "", false, err
+	}
+	ref, err := modelResolver.resolver.CredentialRefFor(modelResolver.primaryProviderID, modelResolver.primaryEndpoint)
+	if err != nil {
+		return config.AuthScope{}, "", false, err
+	}
+	scope := config.AuthScope{ProviderID: ref.ProviderID, ProtocolID: string(ref.ProtocolID), Origin: ref.Origin}
+	key, found, err := modelResolver.authChain.ResolveCredential(ctx, scope.ProviderID, scope.ProtocolID, scope.Origin)
+	return scope, key, found, err
 }
 
 func newCLICompatibleProvider(providerID, endpoint string, models ...llm.ModelInfo) (llm.ModelProvider, error) {

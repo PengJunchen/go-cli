@@ -169,7 +169,7 @@ func TestKeychainSource_ScopedCredentialInAuthChain(t *testing.T) {
 }
 
 func TestKeychainSource_GetScopedAccessFailureIsNotNotFound(t *testing.T) {
-	const secret = "keychain-secret-canary"
+	secret := authSecretCanary(t)
 	kc := newFakeKeychain(func(name string, args ...string) ([]byte, error) {
 		assert.Equal(t, "security", name)
 		assert.Contains(t, args, "find-generic-password")
@@ -210,6 +210,7 @@ func TestKeychainSource_GetScopedInvalidScopeIsErrorWhenBackendUnavailable(t *te
 
 func TestKeychainSource_GetScopedFailureStopsAuthChainFallback(t *testing.T) {
 	fallbackCalls := 0
+	fallbackKey := authSecretCanary(t)
 	kc := newFakeKeychain(func(string, ...string) ([]byte, error) {
 		return nil, errors.New("keychain access denied")
 	})
@@ -217,7 +218,7 @@ func TestKeychainSource_GetScopedFailureStopsAuthChainFallback(t *testing.T) {
 		{Name: authSourceKeychain, LookupScoped: kc.LookupScoped},
 		{Name: authSourceAuthFile, LookupScoped: func(AuthScope) (string, error) {
 			fallbackCalls++
-			return "lower-priority-key", nil
+			return fallbackKey, nil
 		}},
 	})
 
@@ -230,6 +231,7 @@ func TestKeychainSource_GetScopedFailureStopsAuthChainFallback(t *testing.T) {
 }
 
 func TestKeychainSource_GetScopedConfirmedMissingItemFallsThrough(t *testing.T) {
+	fallbackKey := authSecretCanary(t)
 	kc := newFakeKeychain(func(string, ...string) ([]byte, error) {
 		return nil, errKeychainItemNotFound
 	})
@@ -238,14 +240,14 @@ func TestKeychainSource_GetScopedConfirmedMissingItemFallsThrough(t *testing.T) 
 		{Name: authSourceKeychain, LookupScoped: kc.LookupScoped},
 		{Name: authSourceAuthFile, LookupScoped: func(AuthScope) (string, error) {
 			fallbackCalls++
-			return "lower-priority-key", nil
+			return fallbackKey, nil
 		}},
 	})
 
 	key, found, err := chain.ResolveCredential(context.Background(), "openai", "openai-compatible", "https://api.example.test")
 	require.NoError(t, err)
 	assert.True(t, found)
-	assert.Equal(t, "lower-priority-key", key)
+	assert.Equal(t, fallbackKey, key)
 	assert.Equal(t, 1, fallbackCalls)
 }
 
@@ -294,11 +296,12 @@ func TestKeychainExecClassifiesOnlyConfirmedMissingItem(t *testing.T) {
 	})
 	t.Run("access failure", func(t *testing.T) {
 		t.Setenv("FAKE_SECURITY_MODE", "denied")
-		t.Setenv("FAKE_SECRET", "never-print-this")
+		secret := authSecretCanary(t)
+		t.Setenv("FAKE_SECRET", secret)
 		_, err := keychainExec("security", "find-generic-password", "-s", "go-cli", "-a", "exact-scope", "-w")
 		require.Error(t, err)
 		assert.False(t, errors.Is(err, errKeychainItemNotFound))
-		assert.NotContains(t, err.Error(), "never-print-this")
+		assert.NotContains(t, err.Error(), secret)
 	})
 	t.Run("empty success output", func(t *testing.T) {
 		t.Setenv("FAKE_SECURITY_MODE", "empty")
