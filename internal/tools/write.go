@@ -126,7 +126,7 @@ func resolveAndValidatePath(toolName, workdir, path string, whitelist PathWhitel
 	// symlinks in intermediate directories that escape the whitelist. When
 	// no whitelist is configured this check is skipped, but the O_NOFOLLOW
 	// check above still applies.
-	if len(whitelist.paths) == 0 {
+	if whitelist.unrestricted() {
 		return abspath, nil
 	}
 

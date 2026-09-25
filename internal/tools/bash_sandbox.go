@@ -93,15 +93,27 @@ type PathWhitelist struct {
 // paths are rooted at the current working directory; each path is then cleaned
 // and resolved with resolveSymlinks so whitelist comparisons use real paths.
 func NewPathWhitelist(paths []string) PathWhitelist {
+	return newPathWhitelist(paths, filepath.Abs)
+}
+
+// newPathWhitelist keeps the path-resolution failure branch testable without
+// changing process-wide cwd state. Production callers use filepath.Abs above.
+func newPathWhitelist(paths []string, absPath func(string) (string, error)) PathWhitelist {
 	cleaned := make([]string, 0, len(paths))
 	for _, p := range paths {
-		absPath, err := filepath.Abs(filepath.Clean(p))
+		absolutePath, err := absPath(filepath.Clean(p))
 		if err != nil {
 			return PathWhitelist{invalid: true}
 		}
-		cleaned = append(cleaned, resolveSymlinks(absPath))
+		cleaned = append(cleaned, resolveSymlinks(absolutePath))
 	}
 	return PathWhitelist{paths: cleaned}
+}
+
+// unrestricted reports the deliberate nil/empty configuration state. An
+// invalid scope remains restrictive even though it has no usable path entries.
+func (wl PathWhitelist) unrestricted() bool {
+	return !wl.invalid && len(wl.paths) == 0
 }
 
 // IsAllowed reports whether workDir is either equal to or nested under one of
@@ -111,7 +123,7 @@ func (wl PathWhitelist) IsAllowed(workDir string) bool {
 	if wl.invalid {
 		return false
 	}
-	if len(wl.paths) == 0 {
+	if wl.unrestricted() {
 		return true
 	}
 	absPath, err := filepath.Abs(filepath.Clean(workDir))
@@ -120,10 +132,8 @@ func (wl PathWhitelist) IsAllowed(workDir string) bool {
 	}
 	cleaned := resolveSymlinks(absPath)
 	for _, base := range wl.paths {
-		if cleaned == base {
-			return true
-		}
-		if strings.HasPrefix(cleaned, base+string(filepath.Separator)) {
+		relative, err := filepath.Rel(base, cleaned)
+		if err == nil && (relative == "." || filepath.IsLocal(relative)) {
 			return true
 		}
 	}
