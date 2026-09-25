@@ -1960,6 +1960,8 @@ func (m *teaModel) handleHITLKeyLocked(msg tea.KeyMsg) tea.Cmd {
 		}
 	case tea.KeyRunes:
 		current.answer += string(msg.Runes)
+	case tea.KeySpace:
+		current.answer += " "
 	}
 	return nil
 }

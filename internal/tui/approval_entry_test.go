@@ -543,6 +543,23 @@ func TestTUIAskUserFreeTextReachesHandler(t *testing.T) {
 	assert.Nil(t, m.activeInteraction)
 }
 
+func TestTUIAskUserFreeTextPreservesSpaceKeys(t *testing.T) {
+	responseCh := make(chan HITLResponse, 1)
+	m := &teaModel{accordion: NewAccordionModel(), msgCh: make(chan Msg, 1)}
+	m.Update(HITLMessage{QuestionID: "q-space", Question: "How should this read?", ResponseCh: responseCh})
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("X保留队列：交互通过")})
+	m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("🙂")})
+	m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("✅")})
+	m.Update(tea.KeyMsg{Type: tea.KeySpace})
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("🙂")})
+	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
+
+	assert.Equal(t, "X保留队列：交互通过 ✅ 🙂", receiveHITLResponse(t, responseCh).Answer)
+	assert.Nil(t, m.activeInteraction)
+}
+
 func TestAskUserCancelUnblocksWait(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
