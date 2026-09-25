@@ -2,6 +2,8 @@ package core
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -23,16 +25,18 @@ func (compactor *runCommitCountingCompactor) Compact(_ context.Context, items []
 }
 
 type consumerTestSink struct {
-	mu               sync.Mutex
-	steps            []string
-	intents          []RunIntentBatch
-	executions       []ActionExecution
-	receipts         []RunToolReceipt
-	resolutions      []ExecutionResolution
-	terminal         *RunTerminal
-	beginErr         error
-	cancelAfterBegin context.CancelFunc
-	commitContexts   []consumerCommitContext
+	mu                sync.Mutex
+	steps             []string
+	intents           []RunIntentBatch
+	executions        []ActionExecution
+	receipts          []RunToolReceipt
+	resolutions       []ExecutionResolution
+	terminal          *RunTerminal
+	beginErr          error
+	cancelAfterBegin  context.CancelFunc
+	afterBegin        func()
+	recordReceiptHook func(RunToolReceipt)
+	commitContexts    []consumerCommitContext
 }
 
 type consumerCommitContext struct {
@@ -75,9 +79,14 @@ func (s *consumerTestSink) BeginIntentBatch(ctx context.Context, batch RunIntent
 	err := s.beginErr
 	cancel := s.cancelAfterBegin
 	s.cancelAfterBegin = nil
+	afterBegin := s.afterBegin
+	s.afterBegin = nil
 	s.mu.Unlock()
 	if cancel != nil {
 		cancel()
+	}
+	if afterBegin != nil {
+		afterBegin()
 	}
 	return err
 }
@@ -96,7 +105,11 @@ func (s *consumerTestSink) RecordReceipt(ctx context.Context, receipt RunToolRec
 	s.mu.Lock()
 	s.steps = append(s.steps, "receipt")
 	s.receipts = append(s.receipts, receipt)
+	hook := s.recordReceiptHook
 	s.mu.Unlock()
+	if hook != nil {
+		hook(receipt)
+	}
 	return nil
 }
 
@@ -188,6 +201,55 @@ func (registry *panicPreparedRegistry) PrepareToolCall(ctx context.Context, call
 }
 
 var _ tools.ToolCallPreparer = (*panicPreparedRegistry)(nil)
+
+type gatedPreparedInvocation struct {
+	tools.PreparedInvocation
+	dispatchStarted chan struct{}
+	releaseDispatch <-chan struct{}
+	commitRead      chan struct{}
+	allowCommitRead <-chan struct{}
+	commitReadOnce  sync.Once
+}
+
+func (invocation *gatedPreparedInvocation) Dispatch(context.Context) (*tools.ToolResult, error) {
+	close(invocation.dispatchStarted)
+	<-invocation.releaseDispatch // intentionally ignores the canceled dispatch context
+	return &tools.ToolResult{Output: "late result"}, nil
+}
+
+func (invocation *gatedPreparedInvocation) DispatchCommitted() bool {
+	invocation.commitReadOnce.Do(func() { close(invocation.commitRead) })
+	<-invocation.allowCommitRead
+	return true
+}
+
+type gatedPreparedRegistry struct {
+	tools.ToolRegistry
+	tools.ToolCallPreparer
+	dispatchStarted chan struct{}
+	releaseDispatch <-chan struct{}
+	commitRead      chan struct{}
+	allowCommitRead <-chan struct{}
+}
+
+func (registry *gatedPreparedRegistry) PrepareToolCall(ctx context.Context, call tools.ToolCall) (tools.PreparedInvocation, error) {
+	invocation, err := registry.ToolCallPreparer.PrepareToolCall(ctx, call)
+	if err != nil {
+		return nil, err
+	}
+	if call.ID != "read-gated" {
+		return invocation, nil
+	}
+	return &gatedPreparedInvocation{
+		PreparedInvocation: invocation,
+		dispatchStarted:    registry.dispatchStarted,
+		releaseDispatch:    registry.releaseDispatch,
+		commitRead:         registry.commitRead,
+		allowCommitRead:    registry.allowCommitRead,
+	}, nil
+}
+
+var _ tools.ToolCallPreparer = (*gatedPreparedRegistry)(nil)
 
 func TestRunCommitConsumerWritesSequentialFactsBeforeAcknowledging(t *testing.T) {
 	root := t.TempDir()
@@ -415,6 +477,82 @@ func TestRunCommitConsumerTreatsDispatchPanicAsPossiblyDispatched(t *testing.T) 
 	require.Equal(t, DispatchStateDispatched, executions[0].DispatchState, "only a normally returned committed=false result proves pre-dispatch rejection")
 	require.Equal(t, RunExecutionCleanupPending, executions[0].ResourceState)
 	require.Empty(t, sink.resolutionSnapshot(), "panic is not a not-dispatched proof or a local completion proof")
+	require.NotNil(t, terminal)
+	require.Equal(t, RunOutcomeUnknown, terminal.Outcome)
+}
+
+func TestRunCommitConsumerParallelCancellationDoesNotReadOrCopyLiveWorkerResult(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "input.txt")
+	require.NoError(t, os.WriteFile(path, []byte("durable read"), 0o600))
+	parentCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dispatchStarted := make(chan struct{})
+	releaseDispatch := make(chan struct{})
+	commitRead := make(chan struct{})
+	allowCommitRead := make(chan struct{})
+	var releaseDispatchOnce, allowCommitOnce sync.Once
+	defer func() { releaseDispatchOnce.Do(func() { close(releaseDispatch) }) }()
+	defer func() { allowCommitOnce.Do(func() { close(allowCommitRead) }) }()
+	lastKnownID := "known-127"
+	sink := &consumerTestSink{}
+	sink.afterBegin = func() {
+		go func() {
+			<-dispatchStarted
+			cancel()
+		}()
+	}
+	sink.recordReceiptHook = func(receipt RunToolReceipt) {
+		if receipt.ToolCallID != lastKnownID {
+			return
+		}
+		releaseDispatchOnce.Do(func() { close(releaseDispatch) })
+		<-commitRead
+		allowCommitOnce.Do(func() { close(allowCommitRead) })
+	}
+	base := newPreparedConsumerReadRegistry(t)
+	registry := &gatedPreparedRegistry{
+		ToolRegistry:     base,
+		ToolCallPreparer: base,
+		dispatchStarted:  dispatchStarted,
+		releaseDispatch:  releaseDispatch,
+		commitRead:       commitRead,
+		allowCommitRead:  allowCommitRead,
+	}
+	calls := make([]llm.ToolCall, 128)
+	calls[0] = llm.ToolCall{ID: "read-gated", Name: "read", Args: map[string]any{"path": path}}
+	canceled := make(map[string]bool, len(calls)-1)
+	for index := 1; index < len(calls); index++ {
+		calls[index] = llm.ToolCall{ID: fmt.Sprintf("known-%03d", index), Name: "read"}
+		canceled[calls[index].ID] = true
+	}
+	owner := newRunOwner(parentCtx, nil, RunClaim{ID: "run-consumer-parallel-cancel"}, nil)
+	owner.ctx = WithRunCommit(owner.ctx, sink, RunCommitBinding{SessionID: "session-1", WorkspaceID: "workspace-1"})
+	assistant := AgentMessage{Role: string(llm.RoleAssistant), ToolCalls: calls}
+
+	_, runErr := owner.run(time.Second, func(ctx context.Context) (Result, error) {
+		consumer, err := newRunCommitConsumer(ctx)
+		if err != nil {
+			return Result{}, err
+		}
+		user := AgentMessage{Role: string(llm.RoleUser), Content: "cancel gated parallel dispatch"}
+		if err := consumer.commitInput(0, user); err != nil {
+			return Result{}, err
+		}
+		transcript := []TranscriptEntry{{Message: user}, {Message: assistant}}
+		messages := []llm.Message{{Role: llm.RoleUser, Content: user.Content}, {Role: llm.RoleAssistant, ToolCalls: calls}}
+		groupErr := consumer.executeParallelGroup(ctx, registry, 1, assistant, calls, canceled, nil, &transcript, &messages)
+		terminalErr := consumer.commitTerminal(transcript, nil, RunOutcomeUnknown)
+		return Result{Outcome: RunOutcomeUnknown}, errors.Join(groupErr, terminalErr)
+	})
+	require.Error(t, runErr)
+	require.True(t, hasUnknownToolOutcome(runErr))
+	steps, _, receipts, terminal := sink.snapshot()
+	require.Len(t, receipts, len(calls))
+	require.Equal(t, []string{"input", "begin"}, steps[:2])
+	require.Equal(t, "read-gated", receipts[0].ToolCallID)
+	require.Equal(t, ReceiptOutcomeUnknown, receipts[0].ReceiptOutcome)
+	require.Equal(t, lastKnownID, receipts[len(receipts)-1].ToolCallID)
 	require.NotNil(t, terminal)
 	require.Equal(t, RunOutcomeUnknown, terminal.Outcome)
 }
