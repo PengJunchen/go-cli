@@ -129,6 +129,214 @@ func TestLookupAuthFileRejectsCorruptAndOverbroadFiles(t *testing.T) {
 	}
 }
 
+func TestLookupAuthFileRejectsDefaultConfigDirectorySymlink(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	external := t.TempDir()
+	authDir := filepath.Join(external, "go-cli")
+	require.NoError(t, os.Mkdir(authDir, 0o700))
+	const secret = "symlink-secret-canary"
+	require.NoError(t, os.WriteFile(filepath.Join(authDir, "auth.json"), []byte(`{"openai":"`+secret+`"}`), 0o600))
+	require.NoError(t, os.Symlink(external, filepath.Join(home, ".config")))
+
+	key, err := lookupAuthFile("openai")
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, ErrAuthNotFound))
+	assert.Empty(t, key)
+	assert.NotContains(t, err.Error(), secret)
+}
+
+func TestLookupScopedModelsJSONUsesNoProjectRelativePathWithoutHome(t *testing.T) {
+	workDir := t.TempDir()
+	t.Chdir(workDir)
+	t.Setenv("HOME", "")
+	modelsDir := filepath.Join(workDir, ".config", "go-cli")
+	require.NoError(t, os.MkdirAll(modelsDir, 0o700))
+	const secret = "project-relative-secret"
+	data := []byte(`{"credentials":[{"provider":"openai","protocol":"openai-compatible","origin":"https://api.example.test","api_key":"` + secret + `"}]}`)
+	require.NoError(t, os.WriteFile(filepath.Join(modelsDir, "models.json"), data, 0o644))
+
+	scope := AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test"}
+	var fallbackCalls int
+	c := NewAuthChain().WithSources([]AuthSource{
+		{Name: authSourceModels, LookupScoped: lookupScopedModelsJSON},
+		{
+			Name: "fallback",
+			LookupScoped: func(AuthScope) (string, error) {
+				fallbackCalls++
+				return "fallback-key", nil
+			},
+		},
+	})
+
+	key, found, err := c.ResolveCredential(context.Background(), scope.ProviderID, scope.ProtocolID, scope.Origin)
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, "fallback-key", key)
+	assert.NotEqual(t, secret, key)
+	assert.Equal(t, 1, fallbackCalls)
+}
+
+func TestLookupScopedModelsJSONReadAndParseFailuresAreSourceErrors(t *testing.T) {
+	scope := AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test"}
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, path string)
+	}{
+		{
+			name: "read error",
+			setup: func(t *testing.T, path string) {
+				parent := filepath.Dir(path)
+				require.NoError(t, os.Remove(parent))
+				require.NoError(t, os.WriteFile(parent, []byte("not a directory"), 0o600))
+			},
+		},
+		{
+			name: "non regular file",
+			setup: func(t *testing.T, path string) {
+				require.NoError(t, os.Mkdir(path, 0o755))
+			},
+		},
+		{
+			name: "dangling symlink",
+			setup: func(t *testing.T, path string) {
+				require.NoError(t, os.Symlink(filepath.Join(filepath.Dir(path), "missing-target"), path))
+			},
+		},
+		{
+			name: "invalid json",
+			setup: func(t *testing.T, path string) {
+				require.NoError(t, os.WriteFile(path, []byte("{"), 0o644))
+			},
+		},
+		{
+			name: "wrong credentials shape",
+			setup: func(t *testing.T, path string) {
+				require.NoError(t, os.WriteFile(path, []byte(`{"credentials":"not-an-array"}`), 0o644))
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			modelsDir := filepath.Join(home, ".config", "go-cli")
+			require.NoError(t, os.MkdirAll(modelsDir, 0o700))
+			tc.setup(t, filepath.Join(modelsDir, "models.json"))
+
+			key, err := lookupScopedModelsJSON(scope)
+			require.Error(t, err)
+			assert.False(t, errors.Is(err, ErrAuthNotFound), "a bad models credential source must stop fallback")
+			assert.Empty(t, key)
+		})
+	}
+}
+
+func TestLookupScopedModelsJSONDoesNotRequirePrivateMetadataMode(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	modelsDir := filepath.Join(home, ".config", "go-cli")
+	require.NoError(t, os.MkdirAll(modelsDir, 0o755))
+	scope, err := normalizeAuthScope(AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test"})
+	require.NoError(t, err)
+	data := []byte(`{"credentials":[{"provider":"openai","protocol":"openai-compatible","origin":"https://api.example.test","api_key":"models-secret"}]}`)
+	path := filepath.Join(modelsDir, "models.json")
+	require.NoError(t, os.WriteFile(path, data, 0o644))
+
+	key, err := lookupScopedModelsJSON(scope)
+	require.NoError(t, err)
+	assert.Equal(t, "models-secret", key)
+}
+
+func TestLookupScopedCredentialDataLeavesLegacyDocumentsUnmatched(t *testing.T) {
+	scope, err := normalizeAuthScope(AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test"})
+	require.NoError(t, err)
+	for _, data := range []string{
+		`{"openai":"legacy-key"}`,
+		`{"openai":{"api_key":"legacy-key","model":"gpt-example"}}`,
+		`{"api_key":"unscoped-key"}`,
+	} {
+		key, err := lookupScopedCredentialData([]byte(data), scope)
+		require.ErrorIs(t, err, ErrAuthNotFound)
+		assert.Empty(t, key)
+	}
+}
+
+func TestLookupScopedModelsJSONMissingFileIsNotFound(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	scope := AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test"}
+	_, err := lookupScopedModelsJSON(scope)
+	require.ErrorIs(t, err, ErrAuthNotFound)
+}
+
+func TestLookupScopedCredentialDataRejectsMalformedDocumentsAndRecords(t *testing.T) {
+	scope, err := normalizeAuthScope(AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test"})
+	require.NoError(t, err)
+	const secret = "credential-secret-canary"
+	cases := []struct {
+		name string
+		data string
+	}{
+		{name: "top level null", data: `null`},
+		{name: "credentials null", data: `{"credentials":null}`},
+		{name: "credentials wrong shape", data: `{"credentials":{}}`},
+		{name: "null record", data: `{"credentials":[null]}`},
+		{name: "missing scope fields", data: `{"credentials":[{"provider":"openai","api_key":"` + secret + `"}]}`},
+		{name: "invalid scope", data: `{"credentials":[{"provider":"openai","protocol":"openai-compatible","origin":"file:///tmp","api_key":"` + secret + `"}]}`},
+		{name: "missing key", data: `{"credentials":[{"provider":"openai","protocol":"openai-compatible","origin":"https://api.example.test"}]}`},
+		{name: "empty key", data: `{"credentials":[{"provider":"openai","protocol":"openai-compatible","origin":"https://api.example.test","api_key":""}]}`},
+		{name: "whitespace key", data: `{"credentials":[{"provider":"openai","protocol":"openai-compatible","origin":"https://api.example.test","api_key":"   "}]}`},
+		{name: "matched record followed by invalid record", data: `{"credentials":[{"provider":"openai","protocol":"openai-compatible","origin":"https://api.example.test","api_key":"` + secret + `"},null]}`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			key, err := lookupScopedCredentialData([]byte(tc.data), scope)
+			require.Error(t, err)
+			assert.False(t, errors.Is(err, ErrAuthNotFound))
+			assert.Empty(t, key)
+			assert.NotContains(t, err.Error(), secret)
+		})
+	}
+}
+
+func TestLookupScopedCredentialDataRejectsConflictingKeysForSameScope(t *testing.T) {
+	scope, err := normalizeAuthScope(AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test"})
+	require.NoError(t, err)
+	const firstSecret = "first-secret-canary"
+	const secondSecret = "second-secret-canary"
+	data := []byte(`{"credentials":[{"provider":"openai","protocol":"openai-compatible","origin":"https://api.example.test","api_key":"` + firstSecret + `"},{"provider":"OpenAI","protocol":"OPENAI-COMPATIBLE","origin":"https://API.EXAMPLE.TEST:443","api_key":"` + secondSecret + `"}]}`)
+
+	key, err := lookupScopedCredentialData(data, scope)
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, ErrAuthNotFound))
+	assert.Empty(t, key)
+	assert.NotContains(t, err.Error(), firstSecret)
+	assert.NotContains(t, err.Error(), secondSecret)
+}
+
+func TestLookupScopedCredentialDataAcceptsIdenticalDuplicateScope(t *testing.T) {
+	scope, err := normalizeAuthScope(AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test"})
+	require.NoError(t, err)
+	data := []byte(`{"credentials":[{"provider":"openai","protocol":"openai-compatible","origin":"https://api.example.test","api_key":"same-secret"},{"provider":"OpenAI","protocol":"OPENAI-COMPATIBLE","origin":"https://API.EXAMPLE.TEST:443","api_key":"same-secret"}]}`)
+
+	key, err := lookupScopedCredentialData(data, scope)
+	require.NoError(t, err)
+	assert.Equal(t, "same-secret", key)
+}
+
+func TestLookupScopedCredentialDataAcceptsCaseInsensitiveCredentialsField(t *testing.T) {
+	scope, err := normalizeAuthScope(AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test"})
+	require.NoError(t, err)
+	data := []byte(`{"Credentials":[{"provider":"openai","protocol":"openai-compatible","origin":"https://api.example.test","api_key":"scoped-secret"}]}`)
+
+	key, err := lookupScopedCredentialData(data, scope)
+	require.NoError(t, err)
+	assert.Equal(t, "scoped-secret", key)
+}
+
 func TestResolveCredentialStopsAfterCorruptAuthFile(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.Chmod(dir, 0o700))
