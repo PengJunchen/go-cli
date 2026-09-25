@@ -175,6 +175,39 @@ func TestRetryModelMiddlewareMaxAttemptsMeansTotalDispatches(t *testing.T) {
 	}
 }
 
+func TestRetryModelMiddlewareDoesNotRetryInvalidRequestProviderErrors(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{name: "ordinary 400", status: 400, body: "bad request"},
+		{name: "404", status: 404, body: "not found"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			providerErr := newProviderError(tc.status, "fixture", tc.body)
+			model := &mockModel{
+				generateFn: func(context.Context, []Message, ...Option) (*Message, error) {
+					return nil, providerErr
+				},
+				streamFn: func(context.Context, []Message, ...Option) (<-chan MessageChunk, error) {
+					return nil, providerErr
+				},
+			}
+			policy := newDefaultRetryPolicy(RetryConfig{MaxAttempts: 3, BaseDelay: time.Nanosecond})
+			wrapped := NewRetryModelMiddleware(WithRetryPolicy(policy)).WrapModel(model)
+
+			_, generateErr := wrapped.Generate(context.Background(), nil)
+			require.ErrorIs(t, generateErr, providerErr)
+			assert.Equal(t, int32(1), atomic.LoadInt32(&model.generateCalls))
+
+			_, streamErr := wrapped.Stream(context.Background(), nil)
+			require.ErrorIs(t, streamErr, providerErr)
+			assert.Equal(t, int32(1), atomic.LoadInt32(&model.streamCalls))
+		})
+	}
+}
+
 // TestRetryModelMiddleware_ExponentialBackoff verifies that the backoff duration
 // doubles between retries.
 func TestRetryModelMiddleware_ExponentialBackoff(t *testing.T) {

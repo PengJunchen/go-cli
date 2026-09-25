@@ -65,6 +65,8 @@ func TestClassifyWrappedProviderError(t *testing.T) {
 		{name: "network", typeOf: llm.ErrTypeNetwork, want: ErrorTransient},
 		{name: "auth", typeOf: llm.ErrTypeAuth, status: 401, want: ErrorFatal},
 		{name: "overflow", typeOf: llm.ErrTypeOverflow, status: 400, want: ErrorFatal},
+		{name: "invalid request", typeOf: llm.ErrTypeInvalidRequest, status: 400, want: ErrorFatal},
+		{name: "not found", typeOf: llm.ErrTypeInvalidRequest, status: 404, want: ErrorFatal},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -101,6 +103,8 @@ func TestClassifyNormalizedProviderErrorBeforeGenericHarnessCode(t *testing.T) {
 		wantRetry  bool
 	}{
 		{name: "auth", typeOf: llm.ErrTypeAuth, statusCode: 401, wrapText: "temporary connection reset", wantCode: core.ErrCodeModelError, want: ErrorFatal},
+		{name: "invalid request", typeOf: llm.ErrTypeInvalidRequest, statusCode: 400, wrapText: "temporary connection reset", wantCode: core.ErrCodeModelError, want: ErrorFatal},
+		{name: "not found", typeOf: llm.ErrTypeInvalidRequest, statusCode: 404, wrapText: "temporary connection reset", wantCode: core.ErrCodeModelError, want: ErrorFatal},
 		{name: "overflow", typeOf: llm.ErrTypeOverflow, statusCode: 400, wrapText: "temporary connection reset", wantCode: core.ErrCodeModelError, want: ErrorFatal},
 		{name: "rate limit", typeOf: llm.ErrTypeRateLimit, statusCode: 429, wrapText: "temporary connection reset", wantCode: core.ErrCodeModelError, want: ErrorRateLimit, wantRetry: true},
 		{name: "server", typeOf: llm.ErrTypeServer, statusCode: 503, wrapText: "temporary connection reset", wantCode: core.ErrCodeModelError, want: ErrorTransient, wantRetry: true},
@@ -150,10 +154,33 @@ func TestOversizedProviderResponsePreservesExplicitRetryPrecedence(t *testing.T)
 			wantRetry: true,
 		},
 		{
+			name: "categorized timeout before invalid request",
+			err: NewError(ErrorTimeout, &llm.ProviderError{
+				ErrorType:  llm.ErrTypeInvalidRequest,
+				StatusCode: 400,
+				Provider:   "fixture",
+			}),
+			want:      ErrorTimeout,
+			wantRetry: true,
+		},
+		{
 			name: "harness timeout",
 			err: &core.AgentHarnessError{
 				Code:  core.ErrCodeTimeout,
 				Cause: llm.ErrProviderResponseTooLarge,
+			},
+			want:      ErrorTimeout,
+			wantRetry: true,
+		},
+		{
+			name: "harness timeout before invalid request",
+			err: &core.AgentHarnessError{
+				Code: core.ErrCodeTimeout,
+				Cause: &llm.ProviderError{
+					ErrorType:  llm.ErrTypeInvalidRequest,
+					StatusCode: 400,
+					Provider:   "fixture",
+				},
 			},
 			want:      ErrorTimeout,
 			wantRetry: true,

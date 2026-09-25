@@ -60,11 +60,11 @@ func TestNewProviderError_StatusMapping(t *testing.T) {
 		{"403 forbidden", 403, "forbidden", ErrTypeAuth},
 		{"400 overflow", 400, "context_length_exceeded: too long", ErrTypeOverflow},
 		{"400 overflow variant", 400, "maximum context length exceeded", ErrTypeOverflow},
-		{"400 non-overflow defaults to server", 400, "bad request", ErrTypeServer},
+		{"400 invalid request", 400, "bad request", ErrTypeInvalidRequest},
 		{"500 server", 500, "internal error", ErrTypeServer},
 		{"502 server", 502, "bad gateway", ErrTypeServer},
 		{"503 server", 503, "service unavailable", ErrTypeServer},
-		{"404 defaults to server", 404, "not found", ErrTypeServer},
+		{"404 invalid request", 404, "not found", ErrTypeInvalidRequest},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -111,6 +111,16 @@ func TestClassifyError(t *testing.T) {
 		{
 			"overflow fatal",
 			&ProviderError{StatusCode: 400, ErrorType: ErrTypeOverflow, Provider: "p", Message: "too long"},
+			categoryFatal, true, false,
+		},
+		{
+			"invalid request fatal",
+			&ProviderError{StatusCode: 400, ErrorType: ErrTypeInvalidRequest, Provider: "p", Message: "bad request"},
+			categoryFatal, true, false,
+		},
+		{
+			"not found fatal",
+			&ProviderError{StatusCode: 404, ErrorType: ErrTypeInvalidRequest, Provider: "p", Message: "not found"},
 			categoryFatal, true, false,
 		},
 		{
