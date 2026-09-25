@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
@@ -29,23 +30,76 @@ const authSubjectKey contextKey = iota
 // memory by sending an arbitrarily large request body (DoS mitigation).
 const maxRequestBodySize = 1 * 1024 * 1024 // 1 MB
 
-// HTTPServer implements ACPServer, serving the ACP JSON-over-HTTP protocol.
-// It exposes four routes that mirror the gRPCAdapter client contract:
+const (
+	// ACPHTTPProfileHeader selects the private versioned HTTP profile.
+	ACPHTTPProfileHeader = "X-Go-CLI-ACP-Profile"
+	// ACPHTTPProfileV1 is the only HTTP ACP profile served by this adapter.
+	ACPHTTPProfileV1 = "go-cli-acp-json/1"
+
+	localLoopbackPrincipal = "local-loopback"
+)
+
+var (
+	errHTTPSessionNotFound      = errors.New("acp: session not found")
+	errHTTPSessionAliasMismatch = errors.New("acp: sender alias does not match session")
+	errHTTPSessionIDRequired    = errors.New("acp: session_id is required")
+)
+
+// httpACPEnvelope is the HTTP-only envelope for the private ACP profile. The
+// shared ACPMessage wire type remains transport-neutral for the stdio adapter.
+type httpACPEnvelope struct {
+	Version    string            `json:"version,omitempty"`
+	SessionID  string            `json:"session_id,omitempty"`
+	Type       string            `json:"type,omitempty"`
+	SenderID   string            `json:"sender_id,omitempty"`
+	ReceiverID string            `json:"receiver_id,omitempty"`
+	Content    string            `json:"content,omitempty"`
+	Metadata   map[string]string `json:"metadata,omitempty"`
+	Timestamp  time.Time         `json:"timestamp,omitempty"`
+}
+
+func (envelope httpACPEnvelope) message() ACPMessage {
+	return ACPMessage{
+		Type:       envelope.Type,
+		SenderID:   envelope.SenderID,
+		ReceiverID: envelope.ReceiverID,
+		Content:    envelope.Content,
+		Metadata:   envelope.Metadata,
+		Timestamp:  envelope.Timestamp,
+	}
+}
+
+func httpEnvelopeFromMessage(sessionID string, msg ACPMessage) httpACPEnvelope {
+	return httpACPEnvelope{
+		Version:    ACPHTTPProfileV1,
+		SessionID:  sessionID,
+		Type:       msg.Type,
+		SenderID:   msg.SenderID,
+		ReceiverID: msg.ReceiverID,
+		Content:    msg.Content,
+		Metadata:   msg.Metadata,
+		Timestamp:  msg.Timestamp,
+	}
+}
+
+type httpSessionBinding struct {
+	principalID string
+	senderAlias string
+	session     *Session
+}
+
+// HTTPServer implements ACPServer over the private go-cli-acp-json/1 HTTP
+// profile. It exposes these routes:
 //
 //   - POST /connect     — establish a session
 //   - POST /send        — deliver an ACP message for processing
 //   - POST /disconnect  — tear down a session
 //   - GET  /stream      — drain pending response messages (NDJSON)
 //
-// Sessions are tracked by SenderID (used as an internal routing key). The
-// /stream endpoint requires a ?sender_id= query parameter for per-session
-// streaming; global drain (all sessions without sender_id) is not allowed
-// to prevent cross-session data leakage.
-//
-// When auth is enabled via SetAuth, all routes require a Bearer token and
-// the /stream, /events endpoints bind sender_id to the authenticated subject
-// instead of an arbitrary query parameter. Session IDs are always generated
-// server-side using crypto/rand to prevent session fixation attacks.
+// Sessions are tracked by an opaque server-generated transport session ID
+// and bound to the authenticated principal. sender_id is a display alias only.
+// This HTTP server implements the private go-cli-acp-json/1 profile; it does
+// not claim a durable R2 session or official ACP interoperability.
 type HTTPServer struct {
 	name        string
 	addr        string
@@ -56,7 +110,7 @@ type HTTPServer struct {
 	tlsKeyFile  string
 
 	mu       sync.Mutex
-	sessions map[string]*Session
+	sessions map[string]httpSessionBinding
 	server   *http.Server
 	ln       net.Listener
 	ctx      context.Context
@@ -74,8 +128,9 @@ type HTTPServer struct {
 	// cleanupInterval is how often the cleanup goroutine checks for idle
 	// sessions. Default: 5 minutes.
 	cleanupInterval time.Duration
-	// lastActivity tracks the last activity time for each session (by senderID).
-	lastActivity map[string]time.Time
+	// lastActivity tracks the last activity time for each opaque session ID.
+	lastActivity    map[string]time.Time
+	sessionIDReader io.Reader
 }
 
 var _ ACPServer = (*HTTPServer)(nil)
@@ -88,11 +143,12 @@ func NewHTTPServer(name, addr string, handler *CoreHandler) *HTTPServer {
 		name:            name,
 		addr:            addr,
 		handler:         handler,
-		sessions:        make(map[string]*Session),
+		sessions:        make(map[string]httpSessionBinding),
 		maxConcurrency:  64,
 		sessionTTL:      30 * time.Minute,
 		cleanupInterval: 5 * time.Minute,
 		lastActivity:    make(map[string]time.Time),
+		sessionIDReader: rand.Reader,
 	}
 }
 
@@ -105,8 +161,8 @@ func NewHTTPServer(name, addr string, handler *CoreHandler) *HTTPServer {
 func (s *HTTPServer) SetEventBus(_ core.EventBus) {}
 
 // SetAuth enables bearer-token authentication. When set, all routes require
-// an Authorization: Bearer <token> header and /stream, /events bind sender_id
-// to the authenticated subject instead of an arbitrary query parameter.
+// an Authorization: Bearer <token> header and each transport session is bound
+// to the configured authenticated subject.
 func (s *HTTPServer) SetAuth(token, subject string) {
 	s.authToken = token
 	s.authSubject = subject
@@ -124,6 +180,10 @@ func (s *HTTPServer) SetTLS(certFile, keyFile string) {
 // without a valid Bearer token receive 401 with a WWW-Authenticate header.
 func (s *HTTPServer) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.authSubject == "" {
+			http.Error(w, "authenticated principal is not configured", http.StatusServiceUnavailable)
+			return
+		}
 		auth := r.Header.Get("Authorization")
 		if !strings.HasPrefix(auth, "Bearer ") {
 			w.Header().Set("WWW-Authenticate", "Bearer")
@@ -138,6 +198,16 @@ func (s *HTTPServer) authMiddleware(next http.Handler) http.Handler {
 		}
 		ctx := context.WithValue(r.Context(), authSubjectKey, s.authSubject)
 		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func (s *HTTPServer) profileMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(ACPHTTPProfileHeader) != ACPHTTPProfileV1 {
+			http.Error(w, "missing or unsupported ACP HTTP profile", http.StatusBadRequest)
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -207,6 +277,7 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 
 	handler := http.Handler(mux)
 	handler = s.bodyLimitMiddleware(handler)
+	handler = s.profileMiddleware(handler)
 	if s.authToken != "" {
 		handler = s.authMiddleware(handler)
 	}
@@ -259,8 +330,8 @@ func (s *HTTPServer) Stop(ctx context.Context) error {
 	s.cancel = nil
 
 	// Close all sessions.
-	for id, sess := range s.sessions {
-		sess.Close()
+	for id, binding := range s.sessions {
+		binding.session.Close()
 		delete(s.sessions, id)
 	}
 	s.lastActivity = make(map[string]time.Time)
@@ -300,90 +371,162 @@ func (s *HTTPServer) Running() bool {
 	return s.running
 }
 
-// generateSessionID generates a cryptographically random 32-byte session ID,
-// returned as a 64-character hex-encoded string. The ID is generated
-// server-side to prevent session fixation attacks — client-provided SenderIDs
-// are never used as session identifiers.
-func generateSessionID() string {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		panic(fmt.Sprintf("acp: crypto/rand failed: %v", err))
+// requestPrincipal returns the authenticated principal, or the fixed
+// loopback principal used when bearer authentication is disabled. The latter
+// is safe only because serve setup restricts unauthenticated HTTP to loopback.
+func requestPrincipal(r *http.Request) string {
+	if subject := authSubjectFromContext(r.Context()); subject != "" {
+		return subject
 	}
-	return hex.EncodeToString(b)
+	return localLoopbackPrincipal
 }
 
-// getOrCreateSession returns the session for senderID, creating one if it
-// does not exist. New sessions are assigned a server-generated random ID
-// (not the client-provided senderID) to prevent session fixation.
-func (s *HTTPServer) getOrCreateSession(senderID string) *Session {
+func (s *HTTPServer) createSession(principalID, senderAlias string) (*Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess, ok := s.sessions[senderID]
-	if !ok {
-		sess = NewSession(generateSessionID())
-		s.sessions[senderID] = sess
+
+	reader := s.sessionIDReader
+	if reader == nil {
+		reader = rand.Reader
 	}
-	s.lastActivity[senderID] = time.Now()
-	return sess
+	for range 4 {
+		var idBytes [32]byte
+		if _, err := io.ReadFull(reader, idBytes[:]); err != nil {
+			return nil, errors.New("acp: failed to generate session identifier")
+		}
+		sessionID := hex.EncodeToString(idBytes[:])
+		if _, exists := s.sessions[sessionID]; exists {
+			continue
+		}
+		session := NewSession(sessionID)
+		s.sessions[sessionID] = httpSessionBinding{
+			principalID: principalID,
+			senderAlias: senderAlias,
+			session:     session,
+		}
+		s.lastActivity[sessionID] = time.Now()
+		return session, nil
+	}
+	return nil, errors.New("acp: failed to allocate unique session identifier")
 }
 
-// getSession returns the session for senderID, or nil if not found.
-func (s *HTTPServer) getSession(senderID string) *Session {
+func (s *HTTPServer) getSessionBinding(sessionID, principalID, senderAlias string) (httpSessionBinding, error) {
+	if sessionID == "" {
+		return httpSessionBinding{}, errHTTPSessionIDRequired
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess := s.sessions[senderID]
-	if sess != nil {
-		s.lastActivity[senderID] = time.Now()
+	binding, ok := s.sessions[sessionID]
+	if !ok || binding.principalID != principalID {
+		return httpSessionBinding{}, errHTTPSessionNotFound
 	}
-	return sess
+	if senderAlias != "" && senderAlias != binding.senderAlias {
+		return httpSessionBinding{}, errHTTPSessionAliasMismatch
+	}
+	s.lastActivity[sessionID] = time.Now()
+	return binding, nil
 }
 
-// removeSession closes and removes the session for senderID.
-func (s *HTTPServer) removeSession(senderID string) *Session {
+func (s *HTTPServer) removeSession(sessionID, principalID, senderAlias string) (*Session, error) {
+	if sessionID == "" {
+		return nil, errHTTPSessionIDRequired
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess, ok := s.sessions[senderID]
-	if !ok {
-		return nil
+	binding, ok := s.sessions[sessionID]
+	if !ok || binding.principalID != principalID {
+		return nil, errHTTPSessionNotFound
 	}
-	delete(s.sessions, senderID)
-	delete(s.lastActivity, senderID)
-	return sess
+	if senderAlias != "" && senderAlias != binding.senderAlias {
+		return nil, errHTTPSessionAliasMismatch
+	}
+	delete(s.sessions, sessionID)
+	delete(s.lastActivity, sessionID)
+	return binding.session, nil
 }
 
-// handleConnect processes POST /connect requests. It creates a session for
-// the client's SenderID and returns the server-generated session ID in the
-// response body. The client-provided SenderID is used as an internal routing
-// key but is never exposed as the session ID, preventing session fixation.
+func decodeHTTPEnvelope(w http.ResponseWriter, r *http.Request, allowEmpty bool) (httpACPEnvelope, bool) {
+	var envelope httpACPEnvelope
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&envelope); err != nil {
+		if errors.Is(err, io.EOF) && allowEmpty {
+			return envelope, true
+		}
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return envelope, false
+		}
+		http.Error(w, "invalid JSON request body", http.StatusBadRequest)
+		return envelope, false
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return envelope, false
+		}
+		http.Error(w, "invalid JSON request body", http.StatusBadRequest)
+		return envelope, false
+	}
+	return envelope, true
+}
+
+func writeSessionLookupError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errHTTPSessionIDRequired):
+		http.Error(w, "session_id is required", http.StatusBadRequest)
+	case errors.Is(err, errHTTPSessionAliasMismatch):
+		http.Error(w, "sender_id does not match session alias", http.StatusBadRequest)
+	case errors.Is(err, errHTTPSessionNotFound):
+		http.Error(w, "session not found", http.StatusNotFound)
+	default:
+		http.Error(w, "session unavailable", http.StatusInternalServerError)
+	}
+}
+
+func validateOptionalEnvelopeVersion(w http.ResponseWriter, envelope httpACPEnvelope) bool {
+	if envelope.Version != "" && envelope.Version != ACPHTTPProfileV1 {
+		http.Error(w, "unsupported ACP HTTP envelope version", http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+// handleConnect creates an ephemeral session bound to the request principal.
+// sender_id is stored only as a display alias; the server generates the
+// opaque session_id used by all subsequent requests.
 func (s *HTTPServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	var msg ACPMessage
-	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
-			return
-		}
-		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+	envelope, ok := decodeHTTPEnvelope(w, r, false)
+	if !ok {
 		return
 	}
-
-	senderID := msg.SenderID
-	if senderID == "" {
-		senderID = "anonymous"
+	if envelope.Version != ACPHTTPProfileV1 {
+		http.Error(w, "missing or unsupported ACP HTTP envelope version", http.StatusBadRequest)
+		return
 	}
-
-	sess := s.getOrCreateSession(senderID)
-
-	slog.Info("acp.server.connect", "sender", senderID, "session_id", sess.ID())
+	senderAlias := envelope.SenderID
+	if senderAlias == "" {
+		senderAlias = "anonymous"
+	}
+	sess, err := s.createSession(requestPrincipal(r), senderAlias)
+	if err != nil {
+		slog.Error("acp.server.connect_failed", "name", s.name, "reason", "session_id_unavailable")
+		http.Error(w, "unable to create session", http.StatusInternalServerError)
+		return
+	}
+	slog.Info("acp.server.connect", "name", s.name, "status", "connected")
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
+		"version":    ACPHTTPProfileV1,
 		"session_id": sess.ID(),
 		"status":     "connected",
 	})
@@ -397,27 +540,25 @@ func (s *HTTPServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var msg ACPMessage
-	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
-			return
-		}
-		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+	envelope, ok := decodeHTTPEnvelope(w, r, false)
+	if !ok {
 		return
 	}
+	if !validateOptionalEnvelopeVersion(w, envelope) {
+		return
+	}
+	msg := envelope.message()
+	binding, err := s.getSessionBinding(envelope.SessionID, requestPrincipal(r), msg.SenderID)
+	if err != nil {
+		writeSessionLookupError(w, err)
+		return
+	}
+	sess := binding.session
+	msg.SenderID = binding.senderAlias
 
 	if msg.Timestamp.IsZero() {
 		msg.Timestamp = time.Now()
 	}
-
-	senderID := msg.SenderID
-	if senderID == "" {
-		senderID = "anonymous"
-	}
-
-	sess := s.getOrCreateSession(senderID)
 
 	// Process the message asynchronously to avoid blocking the HTTP
 	// response. The response (if any) is enqueued onto the session and
@@ -436,7 +577,7 @@ func (s *HTTPServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		sess.Enqueue(ACPMessage{
 			Type:       TypeAck,
 			SenderID:   s.name,
-			ReceiverID: senderID,
+			ReceiverID: msg.SenderID,
 			Content:    "message received",
 			Timestamp:  time.Now(),
 		})
@@ -445,80 +586,57 @@ func (s *HTTPServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// handleDisconnect processes POST /disconnect requests. It closes and
-// removes the session for the client's SenderID.
+// handleDisconnect removes only the session bound to this request principal.
 func (s *HTTPServer) handleDisconnect(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	var msg ACPMessage
-	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
-			return
-		}
-		// Allow empty body disconnect.
-		msg.SenderID = ""
+	envelope, ok := decodeHTTPEnvelope(w, r, true)
+	if !ok {
+		return
 	}
-
-	senderID := msg.SenderID
-	if senderID == "" {
-		// Try to get from query parameter.
-		senderID = r.URL.Query().Get("sender_id")
+	if !validateOptionalEnvelopeVersion(w, envelope) {
+		return
 	}
-
-	sess := s.removeSession(senderID)
-	if sess != nil {
-		sess.Close()
+	if envelope.SessionID == "" {
+		envelope.SessionID = r.URL.Query().Get("session_id")
 	}
+	sess, err := s.removeSession(envelope.SessionID, requestPrincipal(r), envelope.SenderID)
+	if err != nil {
+		writeSessionLookupError(w, err)
+		return
+	}
+	sess.Close()
 
-	slog.Info("acp.server.disconnect", "sender", senderID)
+	slog.Info("acp.server.disconnect", "name", s.name, "status", "disconnected")
 	w.WriteHeader(http.StatusOK)
 }
 
-// handleStream processes GET /stream requests. It drains pending messages
-// for the requested session (via ?sender_id= query parameter) and writes
-// them as newline-delimited JSON. A sender_id query parameter is always
-// required — draining all sessions (global drain) is not allowed, to
-// prevent unauthorized access to other clients' messages. When auth is
-// enabled, sender_id is bound to the authenticated subject.
+// handleStream drains only a session whose opaque ID is bound to the current
+// principal. sender_id is an optional display-alias consistency check.
 func (s *HTTPServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	senderID := r.URL.Query().Get("sender_id")
-
-	// When auth is enabled, bind sender_id to the authenticated subject.
-	if subject := authSubjectFromContext(r.Context()); subject != "" {
-		senderID = subject
-	}
-
-	// Require sender_id — global drain (all sessions) is not allowed
-	// to prevent cross-session data leakage.
-	if senderID == "" {
-		http.Error(w, "sender_id query parameter is required", http.StatusBadRequest)
+	sessionID := r.URL.Query().Get("session_id")
+	senderAlias := r.URL.Query().Get("sender_id")
+	binding, err := s.getSessionBinding(sessionID, requestPrincipal(r), senderAlias)
+	if err != nil {
+		writeSessionLookupError(w, err)
 		return
 	}
+	sess := binding.session
 
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.WriteHeader(http.StatusOK)
 
 	flusher, _ := w.(http.Flusher)
 
-	// Drain messages for a specific session.
-	sess := s.getSession(senderID)
-	if sess == nil {
-		if flusher != nil {
-			flusher.Flush()
-		}
-		return
-	}
-	s.writeMessages(w, sess.Drain())
+	s.writeMessages(w, sessionID, sess.Drain())
 
 	if flusher != nil {
 		flusher.Flush()
@@ -526,9 +644,9 @@ func (s *HTTPServer) handleStream(w http.ResponseWriter, r *http.Request) {
 }
 
 // writeMessages writes messages as newline-delimited JSON to w.
-func (s *HTTPServer) writeMessages(w http.ResponseWriter, msgs []ACPMessage) {
+func (s *HTTPServer) writeMessages(w http.ResponseWriter, sessionID string, msgs []ACPMessage) {
 	for _, msg := range msgs {
-		data, err := json.Marshal(msg)
+		data, err := json.Marshal(httpEnvelopeFromMessage(sessionID, msg))
 		if err != nil {
 			continue
 		}
@@ -547,23 +665,14 @@ func (s *HTTPServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	senderID := r.URL.Query().Get("sender_id")
-
-	// When auth is enabled, bind sender_id to the authenticated subject.
-	if subject := authSubjectFromContext(r.Context()); subject != "" {
-		senderID = subject
-	}
-
-	if senderID == "" {
-		http.Error(w, "sender_id query parameter is required", http.StatusBadRequest)
+	sessionID := r.URL.Query().Get("session_id")
+	senderAlias := r.URL.Query().Get("sender_id")
+	binding, err := s.getSessionBinding(sessionID, requestPrincipal(r), senderAlias)
+	if err != nil {
+		writeSessionLookupError(w, err)
 		return
 	}
-
-	sess := s.getSession(senderID)
-	if sess == nil {
-		http.Error(w, "session not found", http.StatusNotFound)
-		return
-	}
+	sess := binding.session
 
 	// Parse Last-Event-ID before registering so malformed cursors cannot
 	// silently restart replay from the beginning of the retained ring.
@@ -678,8 +787,8 @@ func (s *HTTPServer) cleanupIdleSessions() {
 	now := time.Now()
 	for id, last := range s.lastActivity {
 		if now.Sub(last) > s.sessionTTL {
-			if sess, ok := s.sessions[id]; ok {
-				sess.Close()
+			if binding, ok := s.sessions[id]; ok {
+				binding.session.Close()
 			}
 			delete(s.sessions, id)
 			delete(s.lastActivity, id)
