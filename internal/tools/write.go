@@ -255,17 +255,10 @@ func (t *WriteTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, er
 		return nil, fmt.Errorf("write: %w", err)
 	}
 
-	// When a file tracker is configured, create a backup checkpoint before
-	// writing. Errors are logged but never block the write.
-	if t.fileTracker != nil {
-		if _, berr := t.fileTracker.Backup(abspath); berr != nil {
-			logger.Warn("write.backup_failed", "path", abspath, "err", berr)
-		}
-	}
-
 	// When a diff generator is configured and the file already exists, produce
-	// a change preview that the approval flow can surface. This never blocks
-	// execution; a generation error is silently ignored.
+	// a change preview that the approval flow can surface. Ordinary preview
+	// errors remain best effort, but unresolved helper execution must stop the
+	// mutation before it changes the file.
 	var diffPreview string
 	if t.diffGenerator != nil && exists {
 		if oldBytes, rerr := os.ReadFile(abspath); rerr == nil {
@@ -275,7 +268,19 @@ func (t *WriteTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, er
 			}
 			if d, derr := t.diffGenerator.Generate(ctx, string(oldBytes), newFull, path); derr == nil {
 				diffPreview = d
+			} else if unresolvedExecutionError(derr) {
+				span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+				logger.Error("write.diff_unresolved", "path", abspath, "err", derr)
+				return nil, fmt.Errorf("write: diff execution unresolved: %w", derr)
 			}
+		}
+	}
+
+	// When a file tracker is configured, create a backup checkpoint before
+	// writing. Errors are logged but never block the write.
+	if t.fileTracker != nil {
+		if _, berr := t.fileTracker.Backup(abspath); berr != nil {
+			logger.Warn("write.backup_failed", "path", abspath, "err", berr)
 		}
 	}
 

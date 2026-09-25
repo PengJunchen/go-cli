@@ -163,21 +163,25 @@ func (t *EditFileTool) Execute(ctx context.Context, call ToolCall) (*ToolResult,
 
 	updated := strings.Replace(data, oldString, newString, 1)
 
+	// When a diff generator is configured, produce a change preview that the
+	// approval flow can surface. Ordinary preview errors remain best effort,
+	// but unresolved helper execution must stop the mutation.
+	var diffPreview string
+	if t.diffGenerator != nil {
+		if d, derr := t.diffGenerator.Generate(ctx, data, updated, path); derr == nil {
+			diffPreview = d
+		} else if unresolvedExecutionError(derr) {
+			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+			logger.Error("edit.diff_unresolved", "path", abspath, "err", derr)
+			return nil, fmt.Errorf("edit: diff execution unresolved: %w", derr)
+		}
+	}
+
 	// When a file tracker is configured, create a backup checkpoint before
 	// applying the edit. Errors are logged but never block the edit.
 	if t.fileTracker != nil {
 		if _, berr := t.fileTracker.Backup(abspath); berr != nil {
 			logger.Warn("edit.backup_failed", "path", abspath, "err", berr)
-		}
-	}
-
-	// When a diff generator is configured, produce a change preview that the
-	// approval flow can surface. This never blocks execution; a generation
-	// error is silently ignored.
-	var diffPreview string
-	if t.diffGenerator != nil {
-		if d, derr := t.diffGenerator.Generate(ctx, data, updated, path); derr == nil {
-			diffPreview = d
 		}
 	}
 

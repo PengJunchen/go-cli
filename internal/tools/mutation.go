@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"path/filepath"
@@ -269,6 +270,7 @@ func (q *DefaultFileMutationQueue) startWorker(input chan queuedMutation) {
 		for qm := range input {
 			var tr *ToolResult
 			var err error
+			var nestedExecutionDone <-chan struct{}
 			if qm.prepared != nil {
 				panicked := false
 				func() {
@@ -281,14 +283,22 @@ func (q *DefaultFileMutationQueue) startWorker(input chan queuedMutation) {
 					}()
 					tr, err = qm.prepared.commitAndInvoke(qm.ctx)
 				}()
-				if qm.done != nil {
-					if panicked {
-						qm.prepared.invalidateCompletionProof()
-					}
-					close(qm.done)
+				if panicked {
+					qm.prepared.invalidateCompletionProof()
 				}
 			} else {
 				tr, err = q.applySafe(qm.ctx, qm.mutation)
+			}
+			if err != nil {
+				var pending PendingExecutionError
+				if errors.As(err, &pending) {
+					nestedExecutionDone = pending.ExecutionDone()
+					if qm.prepared != nil && (nestedExecutionDone == nil || errors.Is(err, errProcessContainmentUnconfirmed)) {
+						qm.prepared.invalidateCompletionProof()
+					}
+				} else if qm.prepared != nil && errors.Is(err, errProcessContainmentUnconfirmed) {
+					qm.prepared.invalidateCompletionProof()
+				}
 			}
 			res := FileMutationResult{
 				Success:    err == nil,
@@ -297,6 +307,12 @@ func (q *DefaultFileMutationQueue) startWorker(input chan queuedMutation) {
 			}
 			qm.result <- res
 			close(qm.result)
+			if nestedExecutionDone != nil {
+				<-nestedExecutionDone
+			}
+			if qm.done != nil {
+				close(qm.done)
+			}
 		}
 	}()
 }
