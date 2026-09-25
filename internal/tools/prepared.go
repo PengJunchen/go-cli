@@ -366,10 +366,8 @@ func (c FrozenToolCall) ToolCall() ToolCall {
 func (c FrozenToolCall) Digest() [32]byte { return c.digest }
 
 func freezeToolCall(call ToolCall) (FrozenToolCall, error) {
-	args := make(map[string]any, len(call.Args))
-	if call.Args == nil {
-		args = nil
-	} else {
+	var args map[string]any
+	if call.Args != nil {
 		cloned, err := cloneProtocolJSON(call.Args)
 		if err != nil {
 			return FrozenToolCall{}, fmt.Errorf("tools: freeze tool arguments: %w", err)
@@ -454,7 +452,11 @@ func cloneFrozenMap(value map[string]any) map[string]any {
 	if err != nil {
 		return nil
 	}
-	return cloned.(map[string]any)
+	clonedMap, ok := cloned.(map[string]any)
+	if !ok {
+		return nil
+	}
+	return clonedMap
 }
 
 var jsonMarshalerType = reflect.TypeOf((*json.Marshaler)(nil)).Elem()
@@ -584,6 +586,10 @@ type PreparedInvocation interface {
 	// durable snapshot, and distinguishes a known pre-dispatch rejection from
 	// executor errors that may reuse public error values.
 	DispatchCommitted() bool
+	// CompletionSignal returns this action's trusted positive-completion
+	// signal, if its captured executor path can provide one. The proof enum is
+	// available only after the returned Done channel closes.
+	CompletionSignal() PreparedCompletionSignal
 	Dispatch(context.Context) (*ToolResult, error)
 }
 
@@ -595,27 +601,30 @@ type PreparedStreamingInvocation interface {
 }
 
 type preparedInvocationConfig struct {
-	fence       *DispatchFence
-	generations DispatchFenceSnapshot
-	identity    TrustedToolIdentity
-	effects     TrustedEffectSet
-	schema      ToolSchemaSnapshot
-	call        FrozenToolCall
-	execute     func(context.Context, ToolCall) (*ToolResult, error)
-	schedule    func(context.Context, *preparedInvocation) (*ToolResult, error)
+	fence           *DispatchFence
+	generations     DispatchFenceSnapshot
+	identity        TrustedToolIdentity
+	effects         TrustedEffectSet
+	schema          ToolSchemaSnapshot
+	call            FrozenToolCall
+	execute         func(context.Context, ToolCall) (*ToolResult, error)
+	schedule        func(context.Context, *preparedInvocation) (*ToolResult, error)
+	completionProof PreparedCompletionProof
 }
 
 type preparedInvocation struct {
-	fence       *DispatchFence
-	generations DispatchFenceSnapshot
-	identity    TrustedToolIdentity
-	effects     TrustedEffectSet
-	schema      ToolSchemaSnapshot
-	call        FrozenToolCall
-	execute     func(context.Context, ToolCall) (*ToolResult, error)
-	schedule    func(context.Context, *preparedInvocation) (*ToolResult, error)
-	consumed    atomic.Bool
-	committed   atomic.Bool
+	fence           *DispatchFence
+	generations     DispatchFenceSnapshot
+	identity        TrustedToolIdentity
+	effects         TrustedEffectSet
+	schema          ToolSchemaSnapshot
+	call            FrozenToolCall
+	execute         func(context.Context, ToolCall) (*ToolResult, error)
+	schedule        func(context.Context, *preparedInvocation) (*ToolResult, error)
+	completionProof PreparedCompletionProof
+	completion      *preparedCompletionState
+	consumed        atomic.Bool
+	committed       atomic.Bool
 }
 
 var _ PreparedInvocation = (*preparedInvocation)(nil)
@@ -624,14 +633,16 @@ func (*preparedInvocation) preparedInvocationCapability() {}
 
 func newPreparedInvocation(config preparedInvocationConfig) *preparedInvocation {
 	return &preparedInvocation{
-		fence:       config.fence,
-		generations: config.generations,
-		identity:    config.identity,
-		effects:     newTrustedEffectSet(config.effects.Values()...),
-		schema:      config.schema,
-		call:        config.call,
-		execute:     config.execute,
-		schedule:    config.schedule,
+		fence:           config.fence,
+		generations:     config.generations,
+		identity:        config.identity,
+		effects:         newTrustedEffectSet(config.effects.Values()...),
+		schema:          config.schema,
+		call:            config.call,
+		execute:         config.execute,
+		schedule:        config.schedule,
+		completionProof: config.completionProof,
+		completion:      newPreparedCompletionState(),
 	}
 }
 
@@ -655,6 +666,21 @@ func (p *preparedInvocation) ArgumentDigest() [32]byte { return p.call.Digest() 
 // DispatchCommitted reports whether the final shared-fence commit marker ran.
 func (p *preparedInvocation) DispatchCommitted() bool {
 	return p != nil && p.committed.Load()
+}
+
+// CompletionSignal returns the completion state owned by this sealed
+// invocation. Its channel may be attached during dispatch or queue acceptance.
+func (p *preparedInvocation) CompletionSignal() PreparedCompletionSignal {
+	if p == nil {
+		return PreparedCompletionSignal{}
+	}
+	return p.completion.signal()
+}
+
+func (p *preparedInvocation) invalidateCompletionProof() {
+	if p != nil {
+		p.completion.invalidateProof()
+	}
 }
 
 // Dispatch consumes the invocation and runs the captured executor outside the
@@ -693,7 +719,33 @@ func (p *preparedInvocation) commitAndInvoke(ctx context.Context) (*ToolResult, 
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return p.execute(ctx, p.call.ToolCall())
+	executeCtx := ctx
+	if p.completionProof == CompletionOwnedProcessGroupJoined {
+		executeCtx = withPreparedCompletionReporter(ctx, func(proof PreparedCompletionProof, done <-chan struct{}) {
+			p.completion.attach(proof, done)
+		})
+		done := p.completion.begin(CompletionOwnedProcessGroupJoined)
+		if done == nil {
+			return nil, ErrPreparedInvocationUnavailable
+		}
+		completed := false
+		defer func() { p.completion.finish(done, completed) }()
+		result, err := p.execute(executeCtx, p.call.ToolCall())
+		completed = true
+		return result, err
+	}
+	if p.completionProof == CompletionInlinePipelineJoined {
+		done := p.completion.begin(CompletionInlinePipelineJoined)
+		if done == nil {
+			return nil, ErrPreparedInvocationUnavailable
+		}
+		completed := false
+		defer func() { p.completion.finish(done, completed) }()
+		result, err := p.execute(executeCtx, p.call.ToolCall())
+		completed = true
+		return result, err
+	}
+	return p.execute(executeCtx, p.call.ToolCall())
 }
 
 func validatePreparedContext(ctx context.Context) error {
@@ -765,5 +817,31 @@ func (p *preparedStreamingInvocation) DispatchStreaming(ctx context.Context, sin
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	return p.executeStreaming(ctx, p.call.ToolCall(), sink)
+	executeCtx := ctx
+	if p.completionProof == CompletionOwnedProcessGroupJoined {
+		executeCtx = withPreparedCompletionReporter(ctx, func(proof PreparedCompletionProof, done <-chan struct{}) {
+			p.completion.attach(proof, done)
+		})
+		done := p.completion.begin(CompletionOwnedProcessGroupJoined)
+		if done == nil {
+			return nil, ErrPreparedInvocationUnavailable
+		}
+		completed := false
+		defer func() { p.completion.finish(done, completed) }()
+		result, err := p.executeStreaming(executeCtx, p.call.ToolCall(), sink)
+		completed = true
+		return result, err
+	}
+	if p.completionProof == CompletionInlinePipelineJoined {
+		done := p.completion.begin(CompletionInlinePipelineJoined)
+		if done == nil {
+			return nil, ErrPreparedInvocationUnavailable
+		}
+		completed := false
+		defer func() { p.completion.finish(done, completed) }()
+		result, err := p.executeStreaming(executeCtx, p.call.ToolCall(), sink)
+		completed = true
+		return result, err
+	}
+	return p.executeStreaming(executeCtx, p.call.ToolCall(), sink)
 }

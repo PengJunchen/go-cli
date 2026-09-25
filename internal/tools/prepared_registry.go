@@ -47,12 +47,19 @@ func (r *MiddlewareToolRegistry) prepareToolCall(ctx context.Context, call ToolC
 	if snapshot.definition == nil || snapshot.identity.ToolName() != call.Name {
 		return nil, ErrPreparedRegistrationUnavailable
 	}
+	completionProof := snapshot.completionProof
+	if len(snapshot.pipeline.stages.ExecutionWrappers) > 0 && !snapshot.pipeline.stages.SynchronousExecutionWrappers {
+		completionProof = ""
+	}
 	var preparedQueue *DefaultFileMutationQueue
 	if mutationToolNames[call.Name] {
 		var ok bool
 		preparedQueue, ok = snapshot.pipeline.stages.MutationQueue.(*DefaultFileMutationQueue)
 		if !ok {
 			return nil, ErrPreparedMutationQueueUnavailable
+		}
+		if completionProof == CompletionInlinePipelineJoined {
+			completionProof = CompletionQueuedJobJoined
 		}
 	}
 
@@ -114,13 +121,14 @@ func (r *MiddlewareToolRegistry) prepareToolCall(ctx context.Context, call ToolC
 
 	executor := preparedExecutor(snapshot.definition, snapshot.pipeline.stages.ExecutionWrappers, frozenCall)
 	config := preparedInvocationConfig{
-		fence:       fence,
-		generations: decision.Generations,
-		identity:    snapshot.identity,
-		effects:     snapshot.effects,
-		schema:      snapshot.schema,
-		call:        frozenCall,
-		execute:     executor,
+		fence:           fence,
+		generations:     decision.Generations,
+		identity:        snapshot.identity,
+		effects:         snapshot.effects,
+		schema:          snapshot.schema,
+		call:            frozenCall,
+		execute:         executor,
+		completionProof: completionProof,
 	}
 	if preparedQueue != nil {
 		config.schedule = preparedMutationScheduler(preparedQueue, frozenCall)
@@ -161,8 +169,14 @@ func validateCapturedSchema(args map[string]any, schema any) error {
 	if err := validatePreparedSchemaNode(schema, true); err != nil {
 		return err
 	}
-	root := schema.(map[string]any)
-	properties := root["properties"].(map[string]any)
+	root, ok := schema.(map[string]any)
+	if !ok {
+		return fmt.Errorf("%w: schema root is not an object", ErrPreparedSchemaInvalid)
+	}
+	properties, ok := root["properties"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("%w: schema properties are not an object", ErrPreparedSchemaInvalid)
+	}
 	if err := validatePreparedRequired(args, root); err != nil {
 		return err
 	}
@@ -174,7 +188,11 @@ func validateCapturedSchema(args map[string]any, schema any) error {
 			}
 			continue
 		}
-		if err := validatePreparedSchemaValue(name, value, property.(map[string]any)); err != nil {
+		propertySchema, ok := property.(map[string]any)
+		if !ok {
+			return fmt.Errorf("%w: property %q is not a schema object", ErrPreparedSchemaInvalid, name)
+		}
+		if err := validatePreparedSchemaValue(name, value, propertySchema); err != nil {
 			return err
 		}
 	}
@@ -338,12 +356,18 @@ func validatePreparedRequired(args map[string]any, schema map[string]any) error 
 }
 
 func validatePreparedSchemaValue(name string, value any, schema map[string]any) error {
-	typeValue := schema["type"].(string)
+	typeValue, ok := schema["type"].(string)
+	if !ok {
+		return fmt.Errorf("%w: schema type for parameter %q is not a string", ErrPreparedSchemaInvalid, name)
+	}
 	if !preparedSchemaValueMatchesType(value, typeValue) {
 		return fmt.Errorf("parameter %q must be a %s", name, typeValue)
 	}
 	if enum, exists := schema["enum"]; exists {
-		values, _ := preparedSchemaArray(enum)
+		values, ok := preparedSchemaArray(enum)
+		if !ok {
+			return fmt.Errorf("%w: enum for parameter %q is not an array", ErrPreparedSchemaInvalid, name)
+		}
 		matched := false
 		for _, candidate := range values {
 			if reflect.DeepEqual(value, candidate) {
@@ -363,11 +387,17 @@ func validatePreparedSchemaValue(name string, value any, schema map[string]any) 
 	}
 	switch typeValue {
 	case "object":
-		object := value.(map[string]any)
+		object, ok := value.(map[string]any)
+		if !ok {
+			return fmt.Errorf("parameter %q must be an object", name)
+		}
 		if err := validatePreparedRequired(object, schema); err != nil {
 			return err
 		}
-		properties := schema["properties"].(map[string]any)
+		properties, ok := schema["properties"].(map[string]any)
+		if !ok {
+			return fmt.Errorf("%w: properties for parameter %q are not an object", ErrPreparedSchemaInvalid, name)
+		}
 		for propertyName, propertyValue := range object {
 			property, exists := properties[propertyName]
 			if !exists {
@@ -376,25 +406,50 @@ func validatePreparedSchemaValue(name string, value any, schema map[string]any) 
 				}
 				continue
 			}
-			if err := validatePreparedSchemaValue(name+"."+propertyName, propertyValue, property.(map[string]any)); err != nil {
+			propertySchema, ok := property.(map[string]any)
+			if !ok {
+				return fmt.Errorf("%w: property %q.%s is not a schema object", ErrPreparedSchemaInvalid, name, propertyName)
+			}
+			if err := validatePreparedSchemaValue(name+"."+propertyName, propertyValue, propertySchema); err != nil {
 				return err
 			}
 		}
 	case "array":
-		items, _ := preparedSchemaArray(value)
-		itemSchema := schema["items"].(map[string]any)
+		items, ok := preparedSchemaArray(value)
+		if !ok {
+			return fmt.Errorf("parameter %q must be an array", name)
+		}
+		itemSchema, ok := schema["items"].(map[string]any)
+		if !ok {
+			return fmt.Errorf("%w: array items for parameter %q are not a schema object", ErrPreparedSchemaInvalid, name)
+		}
 		for index, item := range items {
 			if err := validatePreparedSchemaValue(fmt.Sprintf("%s[%d]", name, index), item, itemSchema); err != nil {
 				return err
 			}
 		}
 	case "number", "integer":
-		numeric, _ := schemaRational(value)
-		if minimum, exists := schemaRational(schema["minimum"]); exists && numeric.Cmp(minimum) < 0 {
-			return fmt.Errorf("parameter %q must be at least %s", name, minimum.RatString())
+		numeric, ok := schemaRational(value)
+		if !ok {
+			return fmt.Errorf("parameter %q must be a %s", name, typeValue)
 		}
-		if maximum, exists := schemaRational(schema["maximum"]); exists && numeric.Cmp(maximum) > 0 {
-			return fmt.Errorf("parameter %q must be at most %s", name, maximum.RatString())
+		if rawMinimum, exists := schema["minimum"]; exists {
+			minimum, ok := schemaRational(rawMinimum)
+			if !ok {
+				return fmt.Errorf("%w: minimum for parameter %q is not a number", ErrPreparedSchemaInvalid, name)
+			}
+			if numeric.Cmp(minimum) < 0 {
+				return fmt.Errorf("parameter %q must be at least %s", name, minimum.RatString())
+			}
+		}
+		if rawMaximum, exists := schema["maximum"]; exists {
+			maximum, ok := schemaRational(rawMaximum)
+			if !ok {
+				return fmt.Errorf("%w: maximum for parameter %q is not a number", ErrPreparedSchemaInvalid, name)
+			}
+			if numeric.Cmp(maximum) > 0 {
+				return fmt.Errorf("parameter %q must be at most %s", name, maximum.RatString())
+			}
 		}
 	}
 	return nil

@@ -55,7 +55,13 @@ func TestRegisterDefaultsMintsOnlyReviewedWriteEffects(t *testing.T) {
 		assert.Equal(t, [32]byte{}, snapshot.identity.Scope().Fingerprint(), "no path scope is asserted here")
 	}
 
-	for _, name := range []string{"read", "bash", "grep", "find", "ls"} {
+	bashSnapshot, err := reg.toolRegistrationSnapshot(ctx, "bash")
+	require.NoError(t, err)
+	assert.Equal(t, RegistrationSourceBuiltin, bashSnapshot.identity.RegistrationSource())
+	assert.Equal(t, []TrustedToolEffect{EffectUnknown}, bashSnapshot.effects.Values(), "local process provenance does not grant a Plan effect")
+	assert.Empty(t, bashSnapshot.completionProof, "default RegisterDefaults has no approved sandbox configured")
+
+	for _, name := range []string{"read", "grep", "find", "ls"} {
 		snapshot, err := reg.toolRegistrationSnapshot(ctx, name)
 		require.NoError(t, err)
 		assert.Equal(t, RegistrationSourceToolRegistry, snapshot.identity.RegistrationSource())

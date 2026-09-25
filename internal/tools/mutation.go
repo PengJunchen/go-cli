@@ -72,6 +72,7 @@ type MutationHandler func(ctx context.Context, m FileMutation) (*ToolResult, err
 type queuedMutation struct {
 	mutation FileMutation
 	result   chan FileMutationResult
+	done     chan struct{}
 	ctx      context.Context
 	prepared *preparedInvocation
 }
@@ -171,17 +172,25 @@ func resolveRealPath(p string) string {
 // per-file worker, and hands the mutation off for FIFO processing. It returns a
 // receive-only result channel that yields a single FileMutationResult.
 func (q *DefaultFileMutationQueue) Enqueue(ctx context.Context, mutation FileMutation) (<-chan FileMutationResult, error) {
-	return q.enqueue(ctx, mutation, nil)
+	result, _, err := q.enqueue(ctx, mutation, nil)
+	return result, err
 }
 
 func (q *DefaultFileMutationQueue) enqueuePrepared(ctx context.Context, mutation FileMutation, invocation *preparedInvocation) (<-chan FileMutationResult, error) {
 	if invocation == nil {
 		return nil, ErrPreparedInvocationUnavailable
 	}
-	return q.enqueue(ctx, mutation, invocation)
+	result, done, err := q.enqueue(ctx, mutation, invocation)
+	if err != nil {
+		return nil, err
+	}
+	if done != nil {
+		invocation.completion.attach(CompletionQueuedJobJoined, done)
+	}
+	return result, nil
 }
 
-func (q *DefaultFileMutationQueue) enqueue(ctx context.Context, mutation FileMutation, invocation *preparedInvocation) (<-chan FileMutationResult, error) {
+func (q *DefaultFileMutationQueue) enqueue(ctx context.Context, mutation FileMutation, invocation *preparedInvocation) (<-chan FileMutationResult, <-chan struct{}, error) {
 	span, _ := tracing.SpanFromContext(ctx, mutationSpanName, tracing.SpanKindClient)
 	defer span.End()
 
@@ -195,12 +204,16 @@ func (q *DefaultFileMutationQueue) enqueue(ctx context.Context, mutation FileMut
 	logger.Info("mutation.enqueue", "path", realPath, "operation", mutation.Operation)
 
 	resultCh := make(chan FileMutationResult, 1)
+	var doneCh chan struct{}
+	if invocation != nil && invocation.completionProof == CompletionQueuedJobJoined {
+		doneCh = make(chan struct{})
+	}
 
 	q.mu.Lock()
 	input, err := q.workerForLocked(realPath)
 	if err != nil {
 		q.mu.Unlock()
-		return nil, err
+		return nil, nil, err
 	}
 	// Track the in-flight send so Close can wait for it before closing
 	// the worker channel. Add must happen under the lock so that Close's
@@ -210,13 +223,13 @@ func (q *DefaultFileMutationQueue) enqueue(ctx context.Context, mutation FileMut
 	q.mu.Unlock()
 
 	select {
-	case input <- queuedMutation{mutation: mutation, result: resultCh, ctx: ctx, prepared: invocation}:
+	case input <- queuedMutation{mutation: mutation, result: resultCh, done: doneCh, ctx: ctx, prepared: invocation}:
 		q.sendWG.Done()
 	case <-ctx.Done():
 		q.sendWG.Done()
-		return nil, fmt.Errorf("mutation: enqueue %s: %w", realPath, ctx.Err())
+		return nil, nil, fmt.Errorf("mutation: enqueue %s: %w", realPath, ctx.Err())
 	}
-	return resultCh, nil
+	return resultCh, doneCh, nil
 }
 
 // workerForLocked returns the worker channel for realPath, creating it lazily
@@ -257,7 +270,23 @@ func (q *DefaultFileMutationQueue) startWorker(input chan queuedMutation) {
 			var tr *ToolResult
 			var err error
 			if qm.prepared != nil {
-				tr, err = qm.prepared.commitAndInvoke(qm.ctx)
+				panicked := false
+				func() {
+					defer func() {
+						if recover() != nil {
+							panicked = true
+							tr = nil
+							err = fmt.Errorf("mutation: prepared executor panicked")
+						}
+					}()
+					tr, err = qm.prepared.commitAndInvoke(qm.ctx)
+				}()
+				if qm.done != nil {
+					if panicked {
+						qm.prepared.invalidateCompletionProof()
+					}
+					close(qm.done)
+				}
 			} else {
 				tr, err = q.applySafe(qm.ctx, qm.mutation)
 			}
