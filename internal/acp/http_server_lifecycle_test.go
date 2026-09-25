@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -248,5 +249,68 @@ func TestHTTPServerContainsDetachedWorkerPanicWithoutLeakingValue(t *testing.T) 
 	}
 	if strings.Contains(err.Error(), "private panic detail") {
 		t.Fatalf("Stop leaked panic value: %v", err)
+	}
+}
+
+type blockedSlogHandler struct {
+	started chan struct{}
+	release <-chan struct{}
+}
+
+func (h *blockedSlogHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *blockedSlogHandler) Handle(context.Context, slog.Record) error {
+	select {
+	case h.started <- struct{}{}:
+	default:
+	}
+	<-h.release
+	return nil
+}
+
+func (h *blockedSlogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *blockedSlogHandler) WithGroup(string) slog.Handler      { return h }
+
+func TestHTTPServerStopWaitDeadlineIsNotBlockedByLogger(t *testing.T) {
+	server := NewHTTPServer("test", "127.0.0.1:0", nil)
+	if err := server.Start(context.Background()); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	oldLogger := slog.Default()
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseHandler := func() { releaseOnce.Do(func() { close(release) }) }
+	slog.SetDefault(slog.New(&blockedSlogHandler{started: started, release: release}))
+	t.Cleanup(func() {
+		releaseHandler()
+		slog.SetDefault(oldLogger)
+		_ = server.Stop(context.Background())
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	stopResult := make(chan error, 1)
+	go func() { stopResult <- server.Stop(ctx) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("close owner did not reach the server stop log")
+	}
+	select {
+	case err := <-stopResult:
+		var pending interface{ Done() <-chan struct{} }
+		if !errors.As(err, &pending) || pending.Done() == nil {
+			t.Fatalf("Stop error %T %v does not expose pending cleanup", err, err)
+		}
+		releaseHandler()
+		select {
+		case <-pending.Done():
+		case <-time.After(time.Second):
+			t.Fatal("server generation did not complete after logger returned")
+		}
+	case <-time.After(150 * time.Millisecond):
+		releaseHandler()
+		t.Fatal("Stop waiter remained blocked in the logger instead of honoring its context")
 	}
 }
