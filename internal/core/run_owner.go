@@ -31,6 +31,7 @@ type runOwner struct {
 	mu                 sync.Mutex
 	guard              RunSlotGuard
 	claim              RunClaim
+	ownerGeneration    string
 	ctx                context.Context
 	cancel             context.CancelFunc
 	done               chan struct{}
@@ -64,6 +65,7 @@ func newRunOwner(ctx context.Context, guard RunSlotGuard, claim RunClaim, timeou
 	return &runOwner{
 		guard:              guard,
 		claim:              claim,
+		ownerGeneration:    "owner-" + newClaimID(),
 		ctx:                ownerCtx,
 		cancel:             cancel,
 		done:               make(chan struct{}),
@@ -254,8 +256,18 @@ func (o *runOwner) run(timeout time.Duration, fn func(context.Context) (Result, 
 	o.cleanupTimeout = timeout
 	o.mu.Unlock()
 	callbackCtx := withRunID(withRunWorkerTracker(o.ctx, o), o.claim.ID)
+	var bindingErr error
+	if sink, binding, ok := RunCommitFromContext(callbackCtx); ok {
+		binding.OwnerGeneration = o.ownerGeneration
+		bindingErr = binding.Validate()
+		if bindingErr == nil {
+			callbackCtx = WithRunCommit(callbackCtx, sink, binding)
+		}
+	}
 	go o.supervise()
-	if ctxErr := callbackCtx.Err(); ctxErr != nil {
+	if bindingErr != nil {
+		o.finishUndispatched(bindingErr)
+	} else if ctxErr := callbackCtx.Err(); ctxErr != nil {
 		o.finishUndispatched(ctxErr)
 	} else {
 		go func() {
@@ -341,9 +353,13 @@ func (o *runOwner) finishUndispatched(err error) {
 	o.mu.Lock()
 	o.callbackFinished = true
 	o.transcriptCommitted = true
-	o.cancelRequested = true
 	o.runErr = err
-	o.status.Outcome = RunOutcomeCancelled
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		o.cancelRequested = true
+		o.status.Outcome = RunOutcomeCancelled
+	} else {
+		o.status.Outcome = RunOutcomeError
+	}
 	o.status.ExecutionState = RunExecutionDraining
 	o.signalLocked()
 	o.mu.Unlock()

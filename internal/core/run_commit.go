@@ -2,6 +2,9 @@ package core
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/pengjunchen/go-cli/internal/tools"
 )
@@ -26,33 +29,82 @@ func withRunID(ctx context.Context, runID string) context.Context {
 	return context.WithValue(ctx, runIDContextKey{}, runID)
 }
 
-type runCommitSinkContextKey struct{}
+type runCommitContextKey struct{}
 
-type runCommitSinkContextValue struct {
-	sink RunCommitSink
+// RunCommitBinding identifies the physical session and workspace bound to a
+// durable run. OwnerGeneration is overwritten by the run owner before the
+// callback begins; callers must not use a supplied value as authority.
+type RunCommitBinding struct {
+	SessionID       string
+	WorkspaceID     string
+	OwnerGeneration string
 }
 
-// WithRunCommitSink attaches the durable commit sink for one run. Passing nil
-// explicitly masks any sink inherited from a parent context.
-func WithRunCommitSink(ctx context.Context, sink RunCommitSink) context.Context {
+// ErrInvalidRunCommitBinding indicates that a durable run lacks a valid
+// physical session, workspace, or owner-generation identifier.
+var ErrInvalidRunCommitBinding = errors.New("core: invalid run commit binding")
+
+// Validate reports whether the binding contains the minimum valid durable
+// identifiers. The run owner supplies OwnerGeneration before invoking user
+// code.
+func (binding RunCommitBinding) Validate() error {
+	for _, field := range []struct{ name, value string }{
+		{name: "session_id", value: binding.SessionID},
+		{name: "workspace_id", value: binding.WorkspaceID},
+		{name: "owner_generation", value: binding.OwnerGeneration},
+	} {
+		name, value := field.name, field.value
+		if value == "" || strings.ContainsRune(value, '\x00') {
+			return fmt.Errorf("%w: %s must be non-empty and contain no NUL", ErrInvalidRunCommitBinding, name)
+		}
+	}
+	return nil
+}
+
+type runCommitContextValue struct {
+	sink    RunCommitSink
+	binding RunCommitBinding
+}
+
+// WithRunCommit atomically attaches a durable sink and its physical session
+// and workspace descriptor. The run owner replaces OwnerGeneration before
+// invoking the callback.
+func WithRunCommit(ctx context.Context, sink RunCommitSink, binding RunCommitBinding) context.Context {
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	return context.WithValue(ctx, runCommitSinkContextKey{}, runCommitSinkContextValue{sink: sink})
+	if sink == nil {
+		binding = RunCommitBinding{}
+	}
+	return context.WithValue(ctx, runCommitContextKey{}, runCommitContextValue{sink: sink, binding: binding})
+}
+
+// RunCommitFromContext returns the sink and binding attached to the current
+// run, if any. A caller-provided OwnerGeneration is not trusted; the run owner
+// replaces it for each callback.
+func RunCommitFromContext(ctx context.Context) (RunCommitSink, RunCommitBinding, bool) {
+	if ctx == nil {
+		return nil, RunCommitBinding{}, false
+	}
+	value, ok := ctx.Value(runCommitContextKey{}).(runCommitContextValue)
+	if !ok || value.sink == nil {
+		return nil, RunCommitBinding{}, false
+	}
+	return value.sink, value.binding, true
+}
+
+// WithRunCommitSink is the legacy sink-only helper. It always clears any
+// inherited physical binding, including when sink is nil.
+func WithRunCommitSink(ctx context.Context, sink RunCommitSink) context.Context {
+	return WithRunCommit(ctx, sink, RunCommitBinding{})
 }
 
 // RunCommitSinkFromContext returns the sink attached to the current run, if
 // any. The result is a capability for committing facts; it does not itself
 // authorize tool execution.
 func RunCommitSinkFromContext(ctx context.Context) (RunCommitSink, bool) {
-	if ctx == nil {
-		return nil, false
-	}
-	value, ok := ctx.Value(runCommitSinkContextKey{}).(runCommitSinkContextValue)
-	if !ok || value.sink == nil {
-		return nil, false
-	}
-	return value.sink, true
+	sink, _, ok := RunCommitFromContext(ctx)
+	return sink, ok
 }
 
 // RunCommitSink is the typed durable checkpoint boundary for one run. A sink
