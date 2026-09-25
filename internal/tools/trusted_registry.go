@@ -118,6 +118,9 @@ type PreparedToolStages struct {
 	// optional DefaultAuditLog, and DefaultTelemetry. That chain may perform its
 	// configured synchronous audit append and in-memory telemetry update; this
 	// is not permission to attest arbitrary side-effect wrappers or hooks.
+	// Completion covers those synchronous calls returning, but does not wait for
+	// tracing spans they emit to flush through the CLI-owned tracing exporter.
+	// Pending diagnostic export is not evidence of a tool mutation still running.
 	// Without it, non-empty wrappers suppress prepared completion proofs.
 	SynchronousExecutionWrappers bool
 	MutationQueue                FileMutationQueue
