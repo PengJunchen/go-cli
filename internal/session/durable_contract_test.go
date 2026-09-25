@@ -2,6 +2,8 @@ package session
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"reflect"
 	"strings"
@@ -13,9 +15,21 @@ import (
 	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
+func newSessionTestCanary(t *testing.T) string {
+	t.Helper()
+
+	var random [16]byte
+	_, err := rand.Read(random[:])
+	if err != nil {
+		t.Fatalf("generate session test canary: %v", err)
+	}
+	return "runtime-canary-" + hex.EncodeToString(random[:])
+}
+
 func TestSessionEntryV1JSONRoundTrip(t *testing.T) {
 	ordinal := uint64(2)
 	transcriptIndex := uint64(5)
+	processStartToken := newSessionTestCanary(t)
 	entry := SessionEntry{
 		ID:                "entry-1",
 		ParentID:          "entry-0",
@@ -54,7 +68,7 @@ func TestSessionEntryV1JSONRoundTrip(t *testing.T) {
 			Platform:          "linux",
 			HostGeneration:    "boot-1",
 			LeaderPID:         42,
-			ProcessStartToken: "start-42",
+			ProcessStartToken: processStartToken,
 			ProcessGroupID:    42,
 		},
 		AssistantTranscriptOrdinal: &ordinal,

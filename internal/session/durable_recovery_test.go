@@ -351,7 +351,7 @@ func TestPrepareResumeAppliesValidatedResolutionBeforeInspectingMarkers(t *testi
 	appended := appendFixtureRows(t, fixture, SessionEntry{
 		ID: "execution-1", ParentID: fixture.intent.ID, Type: EntryTypeTool, RunID: "run-1", WorkspaceID: "workspace-1",
 		ActionBatchID: "batch-1", ActionID: "action-1", ActionState: ActionStateExecution,
-		AssistantTranscriptOrdinal: &zero, ToolCallID: "call-1", ToolName: "read", ExecutionIdentity: testProcessGroupIdentity(), Timestamp: time.Unix(13, 0).UTC(),
+		AssistantTranscriptOrdinal: &zero, ToolCallID: "call-1", ToolName: "read", ExecutionIdentity: testProcessGroupIdentity(t), Timestamp: time.Unix(13, 0).UTC(),
 	}, SessionEntry{
 		ID: "receipt-1", ParentID: "execution-1", Type: EntryTypeTool, RunID: "run-1", WorkspaceID: "workspace-1",
 		ActionBatchID: "batch-1", ActionID: "action-1", AssistantTranscriptOrdinal: &zero,
@@ -470,13 +470,14 @@ func TestPrepareResumeRejectsLocalResolutionWithoutExecutionIdentity(t *testing.
 	}
 }
 
-func testProcessGroupIdentity() *ExecutionIdentity {
+func testProcessGroupIdentity(t *testing.T) *ExecutionIdentity {
+	t.Helper()
 	return &ExecutionIdentity{
 		Kind:              ExecutionIdentityProcessGroup,
 		Platform:          "linux",
 		HostGeneration:    "boot-test",
 		LeaderPID:         123,
-		ProcessStartToken: "start-token",
+		ProcessStartToken: newSessionTestCanary(t),
 		ProcessGroupID:    123,
 	}
 }
