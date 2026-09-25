@@ -6,13 +6,14 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mock"
 	"github.com/pengjunchen/go-cli/internal/production"
 	"github.com/pengjunchen/go-cli/internal/tools"
-	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 )
 
 type assemblyIsolationProbe struct {

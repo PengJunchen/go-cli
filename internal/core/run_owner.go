@@ -271,7 +271,7 @@ func (o *runOwner) run(timeout time.Duration, fn func(context.Context) (Result, 
 		o.finishUndispatched(ctxErr)
 	} else {
 		go func() {
-			result, err, panicked := invokeRunCallback(callbackCtx, fn)
+			result, panicked, err := invokeRunCallback(callbackCtx, fn)
 			o.mu.Lock()
 			o.callbackFinished = true
 			commitFailure := errors.Is(err, ErrCanonicalTranscriptInvalid) || errors.Is(err, ErrCanonicalTranscriptRequired)
@@ -371,7 +371,7 @@ func (o *runOwner) backpressureIsStillExpired() bool {
 	return o.expiredBackpressure > 0 && !o.released && !o.timedOut
 }
 
-func invokeRunCallback(ctx context.Context, fn func(context.Context) (Result, error)) (result Result, err error, panicked bool) {
+func invokeRunCallback(ctx context.Context, fn func(context.Context) (Result, error)) (result Result, panicked bool, err error) {
 	defer func() {
 		if recovered := recover(); recovered != nil {
 			_ = recovered
@@ -380,7 +380,7 @@ func invokeRunCallback(ctx context.Context, fn func(context.Context) (Result, er
 		}
 	}()
 	result, err = fn(ctx)
-	return result, err, false
+	return result, false, err
 }
 
 func (o *runOwner) supervise() {

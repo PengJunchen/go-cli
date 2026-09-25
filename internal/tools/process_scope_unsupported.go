@@ -2,7 +2,12 @@
 
 package tools
 
-import "os/exec"
+import (
+	"errors"
+	"os/exec"
+)
+
+var errProcessContainmentUnsupported = errors.New("process containment is unsupported on this operating system")
 
 func configureCommandProcessGroup(_ *exec.Cmd) error {
 	return errProcessContainmentUnsupported

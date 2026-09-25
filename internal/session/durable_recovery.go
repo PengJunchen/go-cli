@@ -47,7 +47,6 @@ func analyzeDurableActionJournal(entries []SessionEntry, sessionID string) (*dur
 	executionRows := make(map[string]*SessionEntry)
 	reconciliationRows := make(map[string]*SessionEntry)
 	entriesByID := make(map[string]*SessionEntry, len(entries))
-	var resolutions []*SessionEntry
 
 	for i := range entries {
 		entry := &entries[i]
@@ -118,9 +117,6 @@ func analyzeDurableActionJournal(entries []SessionEntry, sessionID string) (*dur
 		}
 		if entry.CheckpointKind == CheckpointReconciliation {
 			reconciliationRows[entry.ID] = entry
-		}
-		if entry.CheckpointKind == CheckpointExecutionResolution {
-			resolutions = append(resolutions, entry)
 		}
 	}
 

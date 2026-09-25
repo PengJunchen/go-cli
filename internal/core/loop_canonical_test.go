@@ -7,10 +7,11 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mock"
 	"github.com/pengjunchen/go-cli/internal/tools"
-	"github.com/stretchr/testify/require"
 )
 
 func TestMidTurnCompactionMappingPreservesAndClonesMessageFields(t *testing.T) {

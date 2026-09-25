@@ -1043,9 +1043,6 @@ func (l *LoopAgent) streamGenerateWithBudget(ctx context.Context, model llm.Base
 		case <-streamCtx.Done():
 			return nil, fmt.Errorf("core: stream canceled: %w", streamCtx.Err())
 		case chunk, ok = <-ch:
-			if !ok {
-				break
-			}
 		}
 		if !ok {
 			break

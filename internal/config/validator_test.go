@@ -5,9 +5,10 @@ import (
 	"log/slog"
 	"testing"
 
-	"github.com/pengjunchen/go-cli/internal/tracing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
 func TestDefaultValidatorInterfaceSatisdition(t *testing.T) {

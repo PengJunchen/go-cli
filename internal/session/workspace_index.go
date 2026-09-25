@@ -724,14 +724,14 @@ func (i *WorkspaceQuarantineIndex) syncDirectory(path string) error {
 	return syncDirectory(path)
 }
 
-func readWorkspaceIndexFile(path, sidecarDir, workspaceID string) ([]workspaceIndexRecord, error) {
+func readWorkspaceIndexFile(path, sidecarDir, workspaceID string) (records []workspaceIndexRecord, retErr error) {
 	directory := filepath.Dir(path)
 	name := filepath.Base(path)
 	file, err := openSessionFileNoFollow(directory, name, os.O_RDWR, 0)
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
+	defer func() { retErr = errors.Join(retErr, file.Close()) }()
 	return readWorkspaceIndex(file, sidecarDir, workspaceID)
 }
 

@@ -177,19 +177,6 @@ func (r *DefaultExtensionRegistry) seal() {
 	r.mu.Unlock()
 }
 
-// commitFrom seals staging and atomically publishes every registered category
-// after checking all conflicts. No entry becomes visible if any name conflicts.
-func (r *DefaultExtensionRegistry) commitFrom(staging *DefaultExtensionRegistry) error {
-	if staging == nil || staging == r {
-		return ErrExtensionAtomicCommitUnsupported
-	}
-	staging.mu.Lock()
-	defer staging.mu.Unlock()
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	return r.commitFromLocked(staging)
-}
-
 // commitFromLocked seals staging and publishes it atomically. The caller must
 // hold staging.mu and r.mu in that order.
 func (r *DefaultExtensionRegistry) commitFromLocked(staging *DefaultExtensionRegistry) error {

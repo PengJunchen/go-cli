@@ -167,9 +167,6 @@ func (m *loopDetectModel) Stream(ctx context.Context, msgs []Message, opts ...Op
 			case <-streamCtx.Done():
 				return
 			case chunk, ok = <-ch:
-				if !ok {
-					break
-				}
 			}
 			if !ok {
 				break

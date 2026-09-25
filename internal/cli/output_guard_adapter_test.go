@@ -108,6 +108,28 @@ func TestOutputGuardStreamFragmentationDoesNotConsumePayloadBudget(t *testing.T)
 	}
 }
 
+func TestOutputGuardStreamRejectsClosedStreamWithoutFinalChunk(t *testing.T) {
+	inner := &streamFuncModel{streamFn: func(context.Context, []llm.Message, ...llm.Option) (<-chan llm.MessageChunk, error) {
+		ch := make(chan llm.MessageChunk)
+		close(ch)
+		return ch, nil
+	}}
+	wrapped := &outputGuardModel{inner: inner, guard: production.NewLengthGuard(100)}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	ch, err := wrapped.Stream(ctx, nil)
+	require.NoError(t, err)
+	var streamErr error
+	for chunk := range ch {
+		if chunk.Error != nil {
+			streamErr = chunk.Error
+		}
+	}
+	require.NoError(t, ctx.Err(), "closed input stream must terminate without waiting for cancellation")
+	require.ErrorContains(t, streamErr, "ended without a final chunk")
+}
+
 func TestOutputGuardStreamCancelsInnerAfterChunkLimitFailure(t *testing.T) {
 	innerStopped := make(chan struct{})
 	inner := &streamFuncModel{streamFn: func(ctx context.Context, _ []llm.Message, _ ...llm.Option) (<-chan llm.MessageChunk, error) {

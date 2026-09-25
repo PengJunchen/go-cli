@@ -7,8 +7,9 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 func TestAssembleAgentConfiguredPathsConstrainDefaultFileTools(t *testing.T) {
