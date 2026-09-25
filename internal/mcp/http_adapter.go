@@ -88,6 +88,15 @@ func (e *httpOperationPendingError) Is(target error) bool {
 	return target == ErrHTTPOperationPending
 }
 
+type httpRequestError struct {
+	method string
+	cause  error
+}
+
+func (e *httpRequestError) Error() string { return "mcp: HTTP " + e.method + " request failed" }
+
+func (e *httpRequestError) Unwrap() error { return e.cause }
+
 // ErrUnsupportedOAuth reports that this HTTP adapter does not implement the
 // authorization flow configured for an MCP server. Callers may still provide
 // an already-issued BearerToken.
@@ -257,10 +266,13 @@ func (a *HTTPClientAdapter) doHTTP(req *http.Request) (*http.Response, error) {
 		return nil
 	}
 	resp, err := client.Do(req)
-	if errors.Is(err, errCrossOriginRedirect) {
-		return nil, errCrossOriginRedirect
+	if err != nil {
+		// *url.Error formats the request URL, which can include credentials and
+		// query parameters. Keep the cause chain for errors.Is while exposing
+		// only a method-level diagnostic.
+		return nil, &httpRequestError{method: req.Method, cause: err}
 	}
-	return resp, err
+	return resp, nil
 }
 
 // NewHTTPClientAdapter returns an HTTPClientAdapter for the given config. The
