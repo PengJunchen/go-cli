@@ -37,12 +37,12 @@ func newE2ETestConfig(t *testing.T, srvURL string) *config.Config {
 	}
 }
 
-// TestE2E_ToolExecutionViaInteractive drives a full tool-call cycle through
-// the interactive REPL. The mock LLM first returns a read tool call; after the
-// loop executes the safe read and feeds its result back, the LLM returns a
-// final text response. The test verifies both the tool result sent to the
-// model and the final content reaching stdout.
-func TestE2E_ToolExecutionViaInteractive(t *testing.T) {
+// TestE2E_NonTTYApprovalDenied drives a tool-call cycle through the
+// non-TTY interactive REPL. The mock LLM requests a workspace read, but the
+// interactive approval callback denies requests when stdin is not a terminal.
+// The test verifies that the denial result is returned to the model and the
+// file contents are not disclosed.
+func TestE2E_NonTTYApprovalDenied(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	fixtureDir, err := os.MkdirTemp(".", "interactive-e2e-read-")
@@ -58,7 +58,8 @@ func TestE2E_ToolExecutionViaInteractive(t *testing.T) {
 
 	var mu sync.Mutex
 	requestCount := 0
-	toolResultObserved := false
+	toolDenialObserved := false
+	fixtureContentObserved := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, readErr := io.ReadAll(r.Body)
 		if readErr != nil {
@@ -70,9 +71,8 @@ func TestE2E_ToolExecutionViaInteractive(t *testing.T) {
 		mu.Lock()
 		requestCount++
 		n := requestCount
-		if strings.Contains(string(body), fixtureContent) {
-			toolResultObserved = true
-		}
+		toolDenialObserved = toolDenialObserved || strings.Contains(string(body), "tool call denied by approval policy")
+		fixtureContentObserved = fixtureContentObserved || strings.Contains(string(body), fixtureContent)
 		mu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
@@ -124,7 +124,9 @@ func TestE2E_ToolExecutionViaInteractive(t *testing.T) {
 	assert.Contains(t, out.String(), "Session ended")
 	mu.Lock()
 	defer mu.Unlock()
-	assert.True(t, toolResultObserved, "the successful read result must be sent back to the model")
+	assert.Equal(t, 2, requestCount, "the model should receive one denial followup before returning its final response")
+	assert.True(t, toolDenialObserved, "the non-TTY approval denial must be sent back to the model")
+	assert.False(t, fixtureContentObserved, "unapproved file contents must not be sent to the model")
 }
 
 // TestE2E_SlashCommandsViaInteractive verifies that slash commands are

@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -331,11 +332,20 @@ func AssembleAgent(
 		return nil, err
 	}
 	s.assembleExtensions()
-	s.assembleApproval()
-	s.assembleProductionResilience()
+	if err := s.assembleApproval(); err != nil {
+		s.runCleanup()
+		return nil, err
+	}
+	if err := s.assembleProductionResilience(); err != nil {
+		s.runCleanup()
+		return nil, err
+	}
 	s.assembleOutputGuards()
 	s.assembleSubAgent()
-	s.assembleExtraTools()
+	if err := s.assembleExtraTools(); err != nil {
+		s.runCleanup()
+		return nil, err
+	}
 	s.assembleLoopAgent()
 	s.assembleMiddleware()
 	if err := s.assembleCompactor(); err != nil {
@@ -555,6 +565,7 @@ type assembleState struct {
 	underlyingReg    tools.ToolRegistry
 	fileTracker      *tools.FileTracker
 	diffGen          tools.DiffGenerator
+	mutationQueue    tools.FileMutationQueue
 	gitTool          tools.GitTool
 	gitCwd           string
 	worktreeMgr      *tools.WorktreeManager
@@ -1013,9 +1024,15 @@ func parseHookEvent(s string) (core.HookEvent, error) {
 	}
 }
 
-// assembleApproval wires the approval middleware and mutation queue, wrapping
-// the tool registry.
-func (s *assembleState) assembleApproval() {
+// assembleApproval installs the approval policy and mutation queue on the
+// registry's prepared-dispatch pipeline.
+func (s *assembleState) assembleApproval() error {
+	fence, err := tools.DispatchFenceFromRegistry(s.tr)
+	if err != nil {
+		return fmt.Errorf("assemble: get prepared-dispatch fence: %w", err)
+	}
+	s.planCtrl = core.NewDefaultPlanModeController(fence)
+
 	var classifier approval.ApprovalClassifier
 	var approvalCallback approval.ApprovalCallback
 	var autoApprove bool
@@ -1083,28 +1100,36 @@ func (s *assembleState) assembleApproval() {
 	if approvalCallback != nil {
 		mwOpts = append(mwOpts, approval.WithCallback(approvalCallback))
 	}
+	mwOpts = append(mwOpts,
+		approval.WithDispatchFence(fence),
+		approval.WithPlanModeController(s.planCtrl),
+	)
 	approvalMW := approval.NewApprovalMiddleware(classifier, approvalStore, mwOpts...)
 	s.reg.RegisterApprovalClassifier(&approvalClassifierAdapter{inner: classifier})
 	s.reg.RegisterApprovalStore(&approvalStoreAdapter{inner: approvalStore})
-	mutationQueue := tools.NewDefaultFileMutationQueue(
+	s.mutationQueue = tools.NewDefaultFileMutationQueue(
 		tools.WithMutationFileTracker(s.fileTracker),
 		tools.WithMutationDiffGenerator(s.diffGen),
 	)
-	s.tr = tools.NewMiddlewareToolRegistry(s.tr, approvalMW.WrapToolCall, tools.NewMutationQueueWrapper(mutationQueue))
-	s.reg.RegisterToolRegistry(s.tr)
-
-	mq := mutationQueue
+	mq := s.mutationQueue
 	s.cleanupList = append(s.cleanupList, func() {
 		if cq, ok := mq.(*tools.DefaultFileMutationQueue); ok {
 			_ = cq.Close() //nolint:errcheck
 		}
 	})
+	preparedRegistry := tools.NewMiddlewareToolRegistry(s.tr)
+	if err := preparedRegistry.SetPreparedToolPolicy(approvalMW.PreparedPolicy); err != nil {
+		return fmt.Errorf("assemble: install prepared approval policy: %w", err)
+	}
+	s.tr = preparedRegistry
+	s.reg.RegisterToolRegistry(s.tr)
+	return nil
 }
 
 // assembleProductionResilience wires retry, cost tracking, circuit breaker,
-// idempotent cache, audit log, telemetry, and the plan-mode controller. It
-// wraps the tool registry with production middleware.
-func (s *assembleState) assembleProductionResilience() {
+// idempotent cache, audit log, and telemetry. It installs only the explicit
+// prepared execution stages on the registry assembled by assembleApproval.
+func (s *assembleState) assembleProductionResilience() error {
 	retryPolicy := production.NewDefaultRetryPolicy(production.RetryConfig{
 		MaxAttempts: 3,
 		BaseDelay:   time.Second,
@@ -1161,23 +1186,33 @@ func (s *assembleState) assembleProductionResilience() {
 	}
 
 	// Wrap tool registry with production middleware.
-	s.planCtrl = core.NewDefaultPlanModeController()
+	if s.planCtrl == nil || s.mutationQueue == nil {
+		return errors.New("assemble: prepared approval stages are unavailable")
+	}
 	pathNormalizer := tools.NewPathNormalizer("")
-	schemaValidator := tools.NewSchemaValidator(s.underlyingReg)
 	resultMasker := tools.NewResultMasker(nil)
 	promptInjectionGuard := production.NewPromptInjectionGuard()
 	wrappers := []tools.ToolExecutorWrapper{
 		production.NewPromptInjectionToolWrapper(promptInjectionGuard),
-		core.NewPlanModeToolWrapper(s.planCtrl),
-		tools.WithArgumentPreparation(pathNormalizer, schemaValidator),
-		newProductionToolWrapper(s.idempotentCache, s.auditLog, s.telemetry, s.sessionID),
+		newProductionToolWrapper(nil, s.auditLog, s.telemetry, s.sessionID),
 		tools.NewResultMaskingWrapper(resultMasker),
 	}
-	if s.hookMgr != nil {
-		wrappers = append(wrappers, s.hookMgr.PostToolUseWrapper())
+	preparedRegistry, ok := s.tr.(*tools.MiddlewareToolRegistry)
+	if !ok {
+		return errors.New("assemble: prepared tool registry is unavailable")
 	}
-	s.tr = tools.NewMiddlewareToolRegistry(s.tr, wrappers...)
+	if err := preparedRegistry.SetPreparedToolStages(tools.PreparedToolStages{
+		ArgumentPreparers: []tools.ArgumentPreparer{pathNormalizer},
+		ExecutionWrappers: wrappers,
+		MutationQueue:     s.mutationQueue,
+	}); err != nil {
+		return fmt.Errorf("assemble: install prepared tool stages: %w", err)
+	}
+	if s.hookMgr != nil {
+		s.logger.Warn("assemble_post_tool_use_hooks_unavailable", "reason", "prepared dispatch cannot bind hook side effects to the Plan Mode snapshot")
+	}
 	s.reg.RegisterToolRegistry(s.tr)
+	return nil
 }
 
 // assembleOutputGuards wires the output guard chain (PII + code injection +
@@ -1233,7 +1268,7 @@ func (s *assembleState) assembleSubAgent() {
 }
 
 // assembleExtraTools registers remaining tools (todo, task, goal, web, plan_mode, etc.).
-func (s *assembleState) assembleExtraTools() {
+func (s *assembleState) assembleExtraTools() error {
 	todoStore := tools.NewTodoStore()
 	taskStore := tools.NewTaskStore()
 	goalStore, _ := tools.NewDefaultGoalStore("") //nolint:errcheck
@@ -1254,22 +1289,14 @@ func (s *assembleState) assembleExtraTools() {
 			))
 		}
 	}
+	webFetchTool := tools.NewWebFetchTool(tools.WithHTMLConverter(s.htmlConverter))
 
 	extraTools := []tools.ToolDefinition{
 		tools.NewTodoWriteTool(todoStore),
 		tools.NewTaskCreateTool(taskStore),
-		tools.NewTaskGetTool(taskStore),
-		tools.NewTaskListTool(taskStore),
 		tools.NewTaskUpdateTool(taskStore),
 		tools.NewGoalCreateTool(goalStore),
 		tools.NewGoalUpdateTool(goalStore),
-		tools.NewGoalListTool(goalStore, taskStore),
-		tools.NewGoalGetTool(goalStore, taskStore),
-		tools.NewWebFetchTool(tools.WithHTMLConverter(s.htmlConverter)),
-		webSearchTool,
-		core.NewAskUserQuestionTool(s.hitlEmitter, 30*time.Second),
-		tools.NewEnterPlanModeTool(s.planCtrl),
-		tools.NewExitPlanModeTool(s.planCtrl),
 		tools.NewGitPRCreateTool(s.gitCwd),
 	}
 	for _, t := range extraTools {
@@ -1277,9 +1304,36 @@ func (s *assembleState) assembleExtraTools() {
 			s.logger.Warn("assemble_tool_register_failed", "tool", t.Name(), "err", regErr)
 		}
 	}
-	if searchErr := s.tr.Register(s.ctx, tools.NewToolSearchTool(s.tr)); searchErr != nil {
-		s.logger.Warn("assemble_tool_register_failed", "tool", "tool_search", "err", searchErr)
+	trustedControls := []tools.ToolDefinition{
+		tools.NewTaskGetTool(taskStore),
+		tools.NewTaskListTool(taskStore),
+		tools.NewGoalListTool(goalStore, taskStore),
+		tools.NewGoalGetTool(goalStore, taskStore),
+		core.NewAskUserQuestionTool(s.hitlEmitter, 30*time.Second),
+		tools.NewEnterPlanModeTool(s.planCtrl),
+		tools.NewExitPlanModeTool(s.planCtrl),
+		tools.NewToolSearchTool(s.tr),
 	}
+	trustedNetworkReads := []tools.ToolDefinition{webFetchTool, webSearchTool}
+	registrar, ok := s.tr.(tools.TrustedControlRegistrar)
+	if !ok {
+		return errors.New("assemble: trusted control registrar unavailable")
+	}
+	for _, t := range trustedControls {
+		if regErr := registrar.RegisterTrustedControl(s.ctx, t); regErr != nil {
+			return fmt.Errorf("assemble: register trusted control tool %q: %w", t.Name(), regErr)
+		}
+	}
+	networkRegistrar, ok := s.tr.(tools.TrustedNetworkReadRegistrar)
+	if !ok {
+		return errors.New("assemble: trusted network read registrar unavailable")
+	}
+	for _, t := range trustedNetworkReads {
+		if regErr := networkRegistrar.RegisterTrustedNetworkRead(s.ctx, t); regErr != nil {
+			return fmt.Errorf("assemble: register trusted network read tool %q: %w", t.Name(), regErr)
+		}
+	}
+	return nil
 }
 
 // assembleLoopAgent builds the LoopAgent with model wrapper, memory store,

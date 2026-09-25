@@ -1,0 +1,52 @@
+go run ./internal/verify/cmd/scanner -dir ./internal -format text
+Scan Report: ./internal
+Files scanned: 334
+Findings: 1330 (ERROR: 0, WARN: 1330, INFO: 0)
+[WARN] SCAN-004 internal/acp/http_server.go:695 — hardcoded test URL/port: localhost
+[WARN] SCAN-004 internal/cli/assemble.go:2364 — hardcoded test URL/port: http://localhost:4318/v1/traces
+[WARN] SCAN-007 internal/cli/assemble.go:1 — //nolint count 22 exceeds threshold 3
+[WARN] SCAN-007 internal/cli/cli.go:1 — //nolint count 5 exceeds threshold 3
+[WARN] SCAN-007 internal/cli/doctor.go:1 — //nolint count 5 exceeds threshold 3
+[WARN] SCAN-007 internal/cli/interactive.go:1 — //nolint count 6 exceeds threshold 3
+[WARN] SCAN-007 internal/cli/line_editor.go:1 — //nolint count 38 exceeds threshold 3
+[WARN] SCAN-004 internal/cli/mention_resolver.go:160 — hardcoded test URL/port: localhost
+[WARN] SCAN-007 internal/cli/models_cmd.go:1 — //nolint count 4 exceeds threshold 3
+[WARN] SCAN-007 internal/cli/onboarding.go:1 — //nolint count 37 exceeds threshold 3
+[WARN] SCAN-007 internal/cli/prompt.go:1 — //nolint count 6 exceeds threshold 3
+[WARN] SCAN-007 internal/cli/repl_session.go:1 — //nolint count 12 exceeds threshold 3
+[WARN] SCAN-004 internal/cli/serve_cmd.go:71 — hardcoded test URL/port: 127.0.0.1:9090
+[WARN] SCAN-004 internal/cli/serve_cmd.go:101 — hardcoded test URL/port: serve: --no-auth is not allowed with a non-loopback address %q (use --addr 127.0.0.1:9090 or enable auth)
+[WARN] SCAN-007 internal/cli/serve_cmd.go:1 — //nolint count 21 exceeds threshold 3
+[WARN] SCAN-007 internal/cli/slash_context.go:1 — //nolint count 10 exceeds threshold 3
+[WARN] SCAN-007 internal/cli/slash_handlers.go:1 — //nolint count 93 exceeds threshold 3
+[WARN] SCAN-007 internal/cli/slash_mcp_reload.go:1 — //nolint count 4 exceeds threshold 3
+[WARN] SCAN-007 internal/cli/slash_memory.go:1 — //nolint count 23 exceeds threshold 3
+[WARN] SCAN-007 internal/cli/slash_revert.go:1 — //nolint count 8 exceeds threshold 3
+[WARN] SCAN-007 internal/cli/slash_worktree.go:1 — //nolint count 16 exceeds threshold 3
+[WARN] SCAN-004 internal/config/validator.go:212 — hardcoded test URL/port: localhost
+[WARN] SCAN-004 internal/config/validator.go:212 — hardcoded test URL/port: 127.0.0.1
+[WARN] SCAN-007 internal/core/loop.go:1 — //nolint count 4 exceeds threshold 3
+[WARN] SCAN-004 internal/extension/plugin.go:184 — hardcoded test URL/port: localhost
+[WARN] SCAN-004 internal/extension/plugin.go:184 — hardcoded test URL/port: 127.0.0.1
+[WARN] SCAN-004 internal/extension/plugin.go:205 — hardcoded test URL/port: extension: endpoint %q must use HTTPS (non-HTTPS is only allowed for localhost)
+[WARN] SCAN-007 internal/llm/native.go:1 — //nolint count 4 exceeds threshold 3
+[WARN] SCAN-007 internal/mcp/adapter.go:1 — //nolint count 7 exceeds threshold 3
+[WARN] SCAN-004 internal/mcp/http_adapter.go:538 — hardcoded test URL/port: 127.0.0.1:0
+[WARN] SCAN-004 internal/mcp/http_adapter.go:543 — hardcoded test URL/port: http://127.0.0.1:%d/callback
+[WARN] SCAN-007 internal/mcp/http_adapter.go:1 — //nolint count 10 exceeds threshold 3
+[WARN] SCAN-007 internal/session/jsonl.go:1 — //nolint count 4 exceeds threshold 3
+[WARN] SCAN-007 internal/tools/lsp.go:1 — //nolint count 9 exceeds threshold 3
+[WARN] SCAN-007 internal/tools/lsp_tool.go:1 — //nolint count 10 exceeds threshold 3
+[WARN] SCAN-007 internal/tools/subagent_tool.go:1 — //nolint count 6 exceeds threshold 3
+[WARN] SCAN-007 internal/tools/todo_write.go:1 — //nolint count 6 exceeds threshold 3
+[WARN] SCAN-004 internal/tools/url_validator.go:33 — hardcoded test URL/port: 10.0.0.0/8
+[WARN] SCAN-004 internal/tools/url_validator.go:37 — hardcoded test URL/port: 0.0.0.0/8
+[WARN] SCAN-007 internal/tracing/exporter_kafka.go:1 — //nolint count 5 exceeds threshold 3
+[WARN] SCAN-007 internal/tracing/exporter_otlp.go:1 — //nolint count 6 exceeds threshold 3
+[WARN] SCAN-007 internal/tui/hitl.go:1 — //nolint count 4 exceeds threshold 3
+[WARN] SCAN-007 internal/web/server.go:1 — //nolint count 4 exceeds threshold 3
+[WARN] SCAN-008 internal/approval/audit_trail.go:1 — no slog usage in production code
+[WARN] SCAN-008 internal/approval/permission.go:1 — no slog usage in production code
+[WARN] SCAN-008 internal/approval/trust_store.go:1 — no slog usage in production code
+... (1284 lines truncated)
+[+1284 hidden: rtk recall 5e9f641b19a5]
