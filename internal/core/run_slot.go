@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -33,51 +34,115 @@ type RunSlotGuard interface {
 	Release(claim RunClaim)
 }
 
-// DefaultRunSlotGuard is a thread-safe RunSlotGuard using a channel-based
-// semaphore of capacity 1 so that at most one run is active at a time.
+// ErrRunAdmissionClosed indicates that a run slot no longer accepts claims.
+var ErrRunAdmissionClosed = errors.New("run_slot: admission is closed")
+
+// RunAdmissionCloser is an optional capability for guards that can permanently
+// stop admitting claims and report when all accepted claims have been released.
+type RunAdmissionCloser interface {
+	// CloseAdmission rejects future claims and returns a stable idle signal.
+	// The signal closes when every claim accepted before the fence is released.
+	CloseAdmission() <-chan struct{}
+}
+
+// DefaultRunSlotGuard is a thread-safe RunSlotGuard that admits one active
+// claim at a time. Claim publication and release are linearized under mu.
 type DefaultRunSlotGuard struct {
-	sem     chan struct{}
-	mu      sync.Mutex
-	current *RunClaim
+	mu          sync.Mutex
+	current     *RunClaim
+	availableCh chan struct{}
+	closedCh    chan struct{}
+	idleCh      chan struct{}
+	closed      bool
 }
 
 var _ RunSlotGuard = (*DefaultRunSlotGuard)(nil)
+var _ RunAdmissionCloser = (*DefaultRunSlotGuard)(nil)
 
 // NewDefaultRunSlotGuard returns a DefaultRunSlotGuard ready to issue claims.
 func NewDefaultRunSlotGuard() *DefaultRunSlotGuard {
 	return &DefaultRunSlotGuard{
-		sem: make(chan struct{}, 1),
+		availableCh: make(chan struct{}),
+		closedCh:    make(chan struct{}),
+		idleCh:      make(chan struct{}),
+	}
+}
+
+// CloseAdmission permanently rejects new claims and returns the guard's stable
+// idle signal. The signal closes immediately if no claim is active, or when
+// the accepted claim is actually released.
+func (g *DefaultRunSlotGuard) CloseAdmission() <-chan struct{} {
+	g.mu.Lock()
+	g.ensureNotificationsLocked()
+	if !g.closed {
+		g.closed = true
+		close(g.closedCh)
+		if g.current == nil {
+			close(g.idleCh)
+		}
+	}
+	idle := g.idleCh
+	g.mu.Unlock()
+	return idle
+}
+
+func (g *DefaultRunSlotGuard) ensureNotificationsLocked() {
+	if g.availableCh == nil {
+		g.availableCh = make(chan struct{})
+	}
+	if g.closedCh == nil {
+		g.closedCh = make(chan struct{})
+	}
+	if g.idleCh == nil {
+		g.idleCh = make(chan struct{})
 	}
 }
 
 // ClaimRun acquires the single run slot. It blocks until the slot is available
-// or the context is canceled.
+// or the context is canceled. Closing admission wakes blocked claimants and
+// makes them fail without waiting for the current claim to be released.
 func (g *DefaultRunSlotGuard) ClaimRun(ctx context.Context) (RunClaim, error) {
 	if err := ctx.Err(); err != nil {
 		return RunClaim{}, fmt.Errorf("run_slot: claim canceled: %w", err)
 	}
-	select {
-	case g.sem <- struct{}{}:
-		// Slot acquired.
-	case <-ctx.Done():
-		slog.Debug("core.run_slot.claim_canceled", "err", ctx.Err())
-		return RunClaim{}, fmt.Errorf("run_slot: claim canceled: %w", ctx.Err())
-	}
-	if err := ctx.Err(); err != nil {
-		<-g.sem
-		return RunClaim{}, fmt.Errorf("run_slot: claim canceled: %w", err)
-	}
+	claimID := newClaimID()
+	for {
+		if err := ctx.Err(); err != nil {
+			slog.Debug("core.run_slot.claim_canceled", "err", err)
+			return RunClaim{}, fmt.Errorf("run_slot: claim canceled: %w", err)
+		}
 
-	claim := RunClaim{
-		ID:         newClaimID(),
-		AcquiredAt: time.Now(),
-	}
-	g.mu.Lock()
-	g.current = &claim
-	g.mu.Unlock()
+		g.mu.Lock()
+		g.ensureNotificationsLocked()
+		if g.closed {
+			g.mu.Unlock()
+			if err := ctx.Err(); err != nil {
+				slog.Debug("core.run_slot.claim_canceled", "err", err)
+				return RunClaim{}, fmt.Errorf("run_slot: claim canceled: %w", err)
+			}
+			return RunClaim{}, fmt.Errorf("run_slot: claim rejected: %w", ErrRunAdmissionClosed)
+		}
+		if g.current == nil {
+			claim := RunClaim{ID: claimID, AcquiredAt: time.Now()}
+			g.current = &claim
+			g.mu.Unlock()
 
-	slog.Info("core.run_slot.claimed", "id", claim.ID)
-	return claim, nil
+			slog.Info("core.run_slot.claimed", "id", claim.ID)
+			return claim, nil
+		}
+		availableCh := g.availableCh
+		closedCh := g.closedCh
+		g.mu.Unlock()
+
+		select {
+		case <-availableCh:
+		case <-closedCh:
+		case <-ctx.Done():
+			err := ctx.Err()
+			slog.Debug("core.run_slot.claim_canceled", "err", err)
+			return RunClaim{}, fmt.Errorf("run_slot: claim canceled: %w", err)
+		}
+	}
 }
 
 // ExecuteClaimedRun validates that the claim is the current holder, executes
@@ -106,13 +171,12 @@ func (g *DefaultRunSlotGuard) Release(claim RunClaim) {
 		return
 	}
 	g.current = nil
-	g.mu.Unlock()
-
-	// Drain the semaphore token to free the slot.
-	select {
-	case <-g.sem:
-	default:
+	close(g.availableCh)
+	g.availableCh = make(chan struct{})
+	if g.closed {
+		close(g.idleCh)
 	}
+	g.mu.Unlock()
 	slog.Info("core.run_slot.released", "id", claim.ID)
 }
 
