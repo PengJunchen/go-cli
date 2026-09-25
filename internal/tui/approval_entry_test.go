@@ -307,6 +307,111 @@ func TestSanitizeApprovalTextEscapesControlsAndInvalidUTF8WithoutLoss(t *testing
 	assert.Equal(t, "A\\x00\\t\\r\\x85\\xffB\nC\\u0085D", sanitizeApprovalText(input))
 }
 
+func TestTUIApprovalUntrustedTextEscapingIsInjectiveAndVisible(t *testing.T) {
+	tests := []struct {
+		name           string
+		raw            string
+		literal        string
+		visibleRaw     string
+		visibleLiteral string
+		set            func(*ApprovalRequest, string)
+	}{
+		{
+			name:           "arguments escape sequence versus literal escape spelling",
+			raw:            "cmd:\x1b[2Jafter",
+			literal:        `cmd:\x1b[2Jafter`,
+			visibleRaw:     `cmd:\x1b[2Jafter`,
+			visibleLiteral: `cmd:\\x1b[2Jafter`,
+			set:            func(req *ApprovalRequest, value string) { req.Args["command"] = value },
+		},
+		{
+			name:           "arguments tab versus literal tab escape spelling",
+			raw:            "before\t after",
+			literal:        `before\t after`,
+			visibleRaw:     `before\t after`,
+			visibleLiteral: `before\\t after`,
+			set:            func(req *ApprovalRequest, value string) { req.Args["command"] = value },
+		},
+		{
+			name:           "invalid byte versus literal byte escape spelling",
+			raw:            string([]byte{'x', 0xff, 'y'}),
+			literal:        `x\xffy`,
+			visibleRaw:     `x\xffy`,
+			visibleLiteral: `x\\xffy`,
+			set:            func(req *ApprovalRequest, value string) { req.Args["command"] = value },
+		},
+		{
+			name:           "tool name",
+			raw:            "tool\x1b[2J",
+			literal:        `tool\x1b[2J`,
+			visibleRaw:     `tool\x1b[2J`,
+			visibleLiteral: `tool\\x1b[2J`,
+			set:            func(req *ApprovalRequest, value string) { req.ToolName = value },
+		},
+		{
+			name:           "request id",
+			raw:            "request\x1b[2J",
+			literal:        `request\x1b[2J`,
+			visibleRaw:     `request\x1b[2J`,
+			visibleLiteral: `request\\x1b[2J`,
+			set:            func(req *ApprovalRequest, value string) { req.RequestID = value },
+		},
+		{
+			name:           "diff preview",
+			raw:            "+safe\x1b[2Jdanger",
+			literal:        `+safe\x1b[2Jdanger`,
+			visibleRaw:     `+safe\x1b[2Jdanger`,
+			visibleLiteral: `+safe\\x1b[2Jdanger`,
+			set:            func(req *ApprovalRequest, value string) { req.DiffPreview = value },
+		},
+		{
+			name:           "zero width format rune",
+			raw:            "before\u200bafter",
+			literal:        "beforeafter",
+			visibleRaw:     `before\u200bafter`,
+			visibleLiteral: "beforeafter",
+			set:            func(req *ApprovalRequest, value string) { req.Args["command"] = value },
+		},
+		{
+			name:           "right to left override format rune",
+			raw:            "safe\u202eexe.txt",
+			literal:        "safeexe.txt",
+			visibleRaw:     `safe\u202eexe.txt`,
+			visibleLiteral: "safeexe.txt",
+			set:            func(req *ApprovalRequest, value string) { req.Args["command"] = value },
+		},
+	}
+
+	render := func(value string, set func(*ApprovalRequest, string)) (string, chan ApprovalResponse) {
+		response := make(chan ApprovalResponse, 1)
+		req := ApprovalRequest{
+			ToolName:   "safe-tool",
+			RequestID:  "safe-request",
+			Args:       map[string]any{"command": "safe"},
+			ResponseCh: response,
+		}
+		set(&req, value)
+		model := &teaModel{accordion: NewAccordionModel(), msgCh: make(chan Msg, 1)}
+		model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+		model.Update(approvalRequestMsg{req: req})
+		view := model.View()
+		model.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+		return view, response
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rawView, rawResponse := render(test.raw, test.set)
+			literalView, literalResponse := render(test.literal, test.set)
+			require.Contains(t, rawView, test.visibleRaw, "the raw input must have a visible representation")
+			require.Contains(t, literalView, test.visibleLiteral, "literal escape spellings must remain distinguishable")
+			require.NotEqual(t, rawView, literalView, "distinct source strings must not collapse to one approval display")
+			assert.Equal(t, ApprovalAllow, receiveApprovalResponse(t, rawResponse).Decision)
+			assert.Equal(t, ApprovalAllow, receiveApprovalResponse(t, literalResponse).Decision)
+		})
+	}
+}
+
 func TestTUIApprovalEscapedLongDetailsMustBeReviewedAfterResizeAndDiffChange(t *testing.T) {
 	content := strings.Repeat("\x1b[2J", 100)
 	diff := strings.Repeat("+diff\x1b[2J", 50)

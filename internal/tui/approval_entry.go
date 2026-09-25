@@ -117,7 +117,11 @@ func sanitizeApprovalText(text string) string {
 		}
 		if r == '\n' {
 			escaped.WriteByte('\n')
-		} else if unicode.IsControl(r) {
+		} else if r == '\\' {
+			// Escape the escape marker itself so a literal sequence such as
+			// `\\x1b` cannot render like an actual ESC byte.
+			escaped.WriteString(`\\`)
+		} else if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) {
 			switch r {
 			case '\a':
 				escaped.WriteString(`\a`)
