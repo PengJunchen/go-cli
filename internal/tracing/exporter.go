@@ -18,8 +18,9 @@ import (
 // JSONLTraceExporter (file) and StdoutTraceExporter (debug output). Users may
 // implement this interface to export to OpenTelemetry/Kafka etc.
 type TraceExporter interface {
-	// ExportSpan exports a completed span. It should be non-blocking and
-	// should guarantee at-least-once delivery.
+	// ExportSpan submits a completed span. Delivery guarantees are implementation
+	// specific; a nil result does not imply delivery or durable storage. Async
+	// implementations may report downstream failures from Shutdown.
 	ExportSpan(ctx context.Context, span TraceSpan) error
 	// Shutdown closes the exporter and flushes all buffered data.
 	// No new spans should be accepted after Shutdown is called.

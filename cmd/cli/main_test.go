@@ -43,6 +43,23 @@ func enabledCfg(filePath string) *config.Config {
 
 func boolPtr(b bool) *bool { return &b }
 
+type synchronizedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *synchronizedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *synchronizedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
+
 func TestRunSuccessVersion(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	code := run([]string{"version"}, &stdout, &stderr, func() (*config.Config, error) {
@@ -191,7 +208,8 @@ func TestRunStdoutTracingUsesCLIStdoutWriter(t *testing.T) {
 	require.NoError(t, os.Chdir(workDir))
 	t.Cleanup(func() { _ = os.Chdir(previousDir) })
 
-	var stdout, stderr bytes.Buffer
+	var stdout synchronizedBuffer
+	var stderr bytes.Buffer
 	cfg := &config.Config{Tracing: config.TracingConfig{
 		Enabled:  boolPtr(true),
 		Exporter: "stdout",
@@ -236,7 +254,8 @@ func TestRunRejectsStdoutTracingForStructuredPromptOutputBeforeRuntime(t *testin
 				},
 				Tracing: config.TracingConfig{Enabled: boolPtr(true), Exporter: "stdout", FilePath: traceDir},
 			}
-			var stdout, stderr bytes.Buffer
+			var stdout synchronizedBuffer
+			var stderr bytes.Buffer
 			code := run(tt.args, &stdout, &stderr, func() (*config.Config, error) { return cfg, nil })
 
 			assert.Equal(t, 2, code)
@@ -299,7 +318,8 @@ func TestRunStdoutTracingStructuredOutputPreflightPreservesOtherModes(t *testing
 				},
 				Tracing: config.TracingConfig{Enabled: boolPtr(tt.enabled), Exporter: tt.exporter},
 			}
-			var stdout, stderr bytes.Buffer
+			var stdout synchronizedBuffer
+			var stderr bytes.Buffer
 			code := run(tt.args, &stdout, &stderr, func() (*config.Config, error) { return cfg, nil })
 
 			assert.Equal(t, 0, code, "stdout=%q stderr=%q", stdout.String(), stderr.String())
@@ -530,6 +550,20 @@ func TestTracingFinalizerDeadlineReturnsFailureWithoutCallbackText(t *testing.T)
 
 	close(inner.release)
 	assert.Error(t, exporter.Shutdown(context.Background()), "the late callback error remains available to the waiter")
+}
+
+func TestTracingFinalizerDoesNotPrintCallbackErrorText(t *testing.T) {
+	canary := "private callback error canary"
+	inner := &finalizerGateExporter{
+		started: make(chan struct{}), release: make(chan struct{}), err: errors.New(canary),
+	}
+	close(inner.release)
+	exporter := tracing.NewAsyncExporter(inner, 8, 1)
+	var stderr bytes.Buffer
+	code := finalizeTracingExporter(context.Background(), exporter, &stderr, time.Second)
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "shutdown failed")
+	assert.NotContains(t, stderr.String(), canary)
 }
 
 // TestNewTracingSpanNonNoop directly verifies that a tracer produced by
