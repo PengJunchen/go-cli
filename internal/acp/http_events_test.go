@@ -105,11 +105,11 @@ func parseSSETestFrames(t *testing.T, raw string) []sseTestFrame {
 func TestSSEStream_OverflowReportsGapAfterContiguousPrefix(t *testing.T) {
 	session := NewSession("slow-reader")
 	server := NewHTTPServer("test", "", nil)
-	server.sessions[session.ID()] = session
+	server.sessions[session.ID()] = httpSessionBinding{principalID: localLoopbackPrincipal, senderAlias: session.ID(), session: session}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	request := httptest.NewRequest(http.MethodGet, "/events?sender_id=slow-reader", nil).WithContext(ctx)
+	request := httptest.NewRequest(http.MethodGet, "/events?session_id=slow-reader", nil).WithContext(ctx)
 	writer := newSSEFlushGate()
 	handlerDone := make(chan struct{})
 	go func() {
@@ -179,11 +179,11 @@ func TestSSEStream_OverflowReportsGapAfterContiguousPrefix(t *testing.T) {
 func TestSSEStream_OverflowThenSessionCloseStillReportsGap(t *testing.T) {
 	session := NewSession("overflow-close")
 	server := NewHTTPServer("test", "", nil)
-	server.sessions[session.ID()] = session
+	server.sessions[session.ID()] = httpSessionBinding{principalID: localLoopbackPrincipal, senderAlias: session.ID(), session: session}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	request := httptest.NewRequest(http.MethodGet, "/events?sender_id=overflow-close", nil).WithContext(ctx)
+	request := httptest.NewRequest(http.MethodGet, "/events?session_id=overflow-close", nil).WithContext(ctx)
 	writer := newSSEFlushGate()
 	handlerDone := make(chan struct{})
 	go func() {
@@ -255,11 +255,11 @@ func TestSSEStream_FutureLastEventIDReturnsBadRequest(t *testing.T) {
 	session := NewSession("future-cursor")
 	session.PublishEvent(core.AgentEvent{Kind: "message", Content: "existing"})
 	server := NewHTTPServer("test", "", nil)
-	server.sessions[session.ID()] = session
+	server.sessions[session.ID()] = httpSessionBinding{principalID: localLoopbackPrincipal, senderAlias: session.ID(), session: session}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	request := httptest.NewRequest(http.MethodGet, "/events?sender_id=future-cursor", nil).WithContext(ctx)
+	request := httptest.NewRequest(http.MethodGet, "/events?session_id=future-cursor", nil).WithContext(ctx)
 	request.Header.Set("Last-Event-ID", "2")
 	writer := newSSEFlushGate()
 	handlerDone := make(chan struct{})
