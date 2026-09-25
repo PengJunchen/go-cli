@@ -3,12 +3,14 @@ package core
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pengjunchen/go-cli/internal/compaction"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mock"
 	"github.com/pengjunchen/go-cli/internal/tools"
@@ -214,6 +216,33 @@ func TestLoopToolNilResult(t *testing.T) {
 	assert.Contains(t, toolResults[0], "returned no receipt")
 	assert.NotEmpty(t, findEvents(events, "error"))
 	assert.Equal(t, 1, model.idx, "the model must not be called again after a missing receipt")
+}
+
+func TestLoopStopsAfterMidTurnMandatorySystemBudgetError(t *testing.T) {
+	model := &scriptedChatModel{seq: []*llm.Message{
+		{
+			Role:      llm.RoleAssistant,
+			ToolCalls: []llm.ToolCall{{ID: "call-1", Name: "ok", Args: map[string]any{}}},
+		},
+		{Role: llm.RoleAssistant, Content: "must not be dispatched"},
+	}}
+	loop := NewLoopAgent(
+		WithLLM(model),
+		WithTools(scriptedRegistry(scriptedTool{name: "ok", res: &tools.ToolResult{Output: "done"}})),
+		WithSystemPrompt(strings.Repeat("mandatory-system-", 10)),
+		WithMaxIterations(3),
+	)
+	loop.SetMidTurnCompaction(
+		compaction.NewMidTurnCompact(compaction.WithThresholdRatio(1)),
+		compaction.NewUnifiedCompactor(),
+		compaction.NewHeuristicTokenEstimator(),
+		10,
+	)
+
+	events, err := loop.Run(context.Background(), Submission{Content: "run tool"})
+	require.ErrorIs(t, err, compaction.ErrMandatorySystemPromptOverBudget)
+	assert.Equal(t, 1, model.idx, "mid-turn compaction runs after the first provider call and must stop the next dispatch")
+	assert.NotEmpty(t, findEvents(events, "error"))
 }
 
 func TestLoopToolArgsNonMapRejectedBeforeDispatch(t *testing.T) {

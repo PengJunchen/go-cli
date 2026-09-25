@@ -917,6 +917,9 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 					sendEvent(errEvent(compactionErr))
 					return CanonicalRunResult{Events: events, Transcript: transcript}, compactionErr
 				}
+				span.SetStatus(tracing.SpanStatusError, cerr.Error())
+				sendEvent(errEvent(cerr))
+				return CanonicalRunResult{Events: events, Transcript: transcript}, cerr
 			} else if result.Triggered {
 				messages = turnItemsToMessages(compacted)
 				logger.Info("core.loop.midturn_compact",

@@ -181,6 +181,18 @@ func (e *CompositeTokenEstimator) Estimate(text string) (int, error) {
 // cached on the item's EstimatedTokens field for future reuse. This satisfies
 // AC-3: each TurnItem is estimated once and the result is cached.
 func estimateItemTokens(item *TurnItem, estimator TokenEstimator) int {
+	if item.IsCompaction {
+		// Compaction summaries are projected to the model with a fixed untrusted
+		// context prefix. Their cached estimates may predate that framing, so
+		// always estimate the provider-visible content again.
+		content := item.Content
+		if content == "" {
+			content = "[compacted]"
+		}
+		total := estimateLength(UntrustedSummaryContext(content), estimator)
+		item.EstimatedTokens = total
+		return total
+	}
 	if item.EstimatedTokens > 0 {
 		return item.EstimatedTokens
 	}

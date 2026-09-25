@@ -19,6 +19,14 @@ type itemGroup struct {
 func groupTurnItems(items []TurnItem) ([]TurnItem, []itemGroup, error) {
 	normalized := append([]TurnItem(nil), items...)
 	groups := make([]itemGroup, 0, len(normalized))
+	for i := range normalized {
+		if normalized[i].Role == RoleSystem && normalized[i].IsCompaction {
+			// Older persisted summaries may still carry system role metadata.
+			// They are derived context, never mandatory instructions; normalize
+			// only the defensive copy returned by this helper.
+			normalized[i].Role = RoleUser
+		}
+	}
 
 	for i := 0; i < len(normalized); {
 		item := normalized[i]
@@ -27,7 +35,11 @@ func groupTurnItems(items []TurnItem) ([]TurnItem, []itemGroup, error) {
 		}
 
 		if item.Role != RoleAssistant || len(item.ToolCalls) == 0 {
-			groups = append(groups, itemGroup{start: i, end: i + 1, system: item.Role == RoleSystem})
+			groups = append(groups, itemGroup{
+				start:  i,
+				end:    i + 1,
+				system: item.Role == RoleSystem && !item.IsCompaction,
+			})
 			i++
 			continue
 		}

@@ -162,7 +162,7 @@ func BenchmarkFindCutPointFullScan(b *testing.B) {
 // findCutPointFullScan replicates the pre-fix findCutPoint algorithm that
 // calls estimateTokens on items[cut:] for every cut, producing O(n²) behaviour.
 func findCutPointFullScan(items []TurnItem, maxTokens int, estimator TokenEstimator) int {
-	placeholder := estimateTokens([]TurnItem{{Content: summaryPlaceholder}}, estimator)
+	placeholder := estimateTokens([]TurnItem{{Role: RoleUser, Content: summaryPlaceholder, IsCompaction: true}}, estimator)
 	for cut := 0; cut <= len(items); cut++ {
 		if cut < len(items) && items[cut].Role == RoleTool {
 			continue

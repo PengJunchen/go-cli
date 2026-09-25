@@ -114,9 +114,10 @@ func NewSummaryCompactor(summarizer Summarizer, opts ...SummaryCompactorOption) 
 }
 
 // findCutPoint returns the smallest cut index such that summarizing items[:cut]
-// into a single placeholder and keeping items[cut:] whole stays under maxTokens.
-// The cut is only placed between validated item groups, so it cannot split an
-// assistant tool-call group from its receipts.
+// into a single placeholder, preserving every mandatory system item, and
+// keeping items[cut:] whole stays under maxTokens. The cut is only placed
+// between validated item groups, so it cannot split an assistant tool-call
+// group from its receipts.
 func (c *SummaryCompactor) findCutPoint(items []TurnItem, maxTokens int, estimator TokenEstimator) (int, error) {
 	normalized, groups, err := groupTurnItems(items)
 	if err != nil {
@@ -126,15 +127,18 @@ func (c *SummaryCompactor) findCutPoint(items []TurnItem, maxTokens int, estimat
 }
 
 func (c *SummaryCompactor) findCutPointAtGroups(items []TurnItem, groups []itemGroup, maxTokens int, estimator TokenEstimator) int {
-	placeholder := estimateLength(summaryPlaceholder, estimator)
+	placeholder := estimateLength(UntrustedSummaryContext(summaryPlaceholder), estimator)
+	mandatorySystemTokens := mandatorySystemPromptTokens(items, estimator)
 
 	// Build a suffix sum by complete item group. estimateItemTokens caches each
 	// item's estimate, so evaluating group costs once keeps the search O(n).
 	suffixSum := make([]int, len(groups)+1)
 	for i := len(groups) - 1; i >= 0; i-- {
 		groupTokens := 0
-		for itemIndex := groups[i].start; itemIndex < groups[i].end; itemIndex++ {
-			groupTokens += estimateItemTokens(&items[itemIndex], estimator)
+		if !groups[i].system {
+			for itemIndex := groups[i].start; itemIndex < groups[i].end; itemIndex++ {
+				groupTokens += estimateItemTokens(&items[itemIndex], estimator)
+			}
 		}
 		suffixSum[i] = suffixSum[i+1] + groupTokens
 	}
@@ -144,7 +148,7 @@ func (c *SummaryCompactor) findCutPointAtGroups(items []TurnItem, groups []itemG
 		if groupCut < len(groups) {
 			cut = groups[groupCut].start
 		}
-		if placeholder+suffixSum[groupCut] <= maxTokens {
+		if placeholder+mandatorySystemTokens+suffixSum[groupCut] <= maxTokens {
 			return cut
 		}
 	}
@@ -159,6 +163,9 @@ func (c *SummaryCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 
 	normalized, groups, err := groupTurnItems(items)
 	if err != nil {
+		return items, err
+	}
+	if err := checkMandatorySystemPromptBudget(normalized, maxTokens, estimator); err != nil {
 		return items, err
 	}
 	tokensBefore := estimateTokens(normalized, estimator)
@@ -194,17 +201,28 @@ func (c *SummaryCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 		summary = summaryPlaceholder
 	}
 
-	// Build the compacted list: a single summary entry followed by the intact
-	// recent turns. The summary entry replaces the entire old region.
-	result := make([]TurnItem, 0, 1+len(keep))
+	// Keep mandatory system instructions on their original side of the cut. The
+	// summary replaces only the old conversational context, not system authority.
+	result := make([]TurnItem, 0, len(keep)+1+cut)
+	for i := 0; i < cut; i++ {
+		if items[i].Role == RoleSystem && !items[i].IsCompaction {
+			result = append(result, items[i])
+		}
+	}
 	result = append(result, TurnItem{
 		Role:         RoleUser,
 		Content:      summary,
 		IsCompaction: true,
 	})
-	result = append(result, keep...)
+	for i := cut; i < len(normalized); i++ {
+		if items[i].Role == RoleSystem && !items[i].IsCompaction {
+			result = append(result, items[i])
+			continue
+		}
+		result = append(result, normalized[i])
+	}
 
-	tokensAfter := estimateTokens(result, estimator)
+	tokensAfter := estimateTokensCopy(result, estimator)
 	span.SetAttributes(
 		tracing.Attribute{Key: "cut_point", Value: cut},
 		tracing.Attribute{Key: "items_out", Value: len(result)},

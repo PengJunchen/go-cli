@@ -52,6 +52,23 @@ func TestGroupTurnItemsFillsOnlyMissingReceiptNameOnCopy(t *testing.T) {
 	assert.Equal(t, "read", normalized[0].ToolCalls[0].Name)
 }
 
+func TestGroupTurnItemsDemotesLegacyCompactionSystemOnCopy(t *testing.T) {
+	items := []TurnItem{
+		{Role: RoleSystem, Content: "legacy summary", IsCompaction: true},
+		{Role: RoleSystem, Content: "mandatory instructions"},
+	}
+
+	normalized, groups, err := groupTurnItems(items)
+	require.NoError(t, err)
+	require.Len(t, groups, 2)
+	assert.Equal(t, RoleUser, normalized[0].Role)
+	assert.True(t, normalized[0].IsCompaction)
+	assert.False(t, groups[0].system)
+	assert.Equal(t, RoleSystem, normalized[1].Role)
+	assert.True(t, groups[1].system)
+	assert.Equal(t, RoleSystem, items[0].Role, "normalization must not mutate the caller's slice")
+}
+
 func TestGroupTurnItemsRejectsMalformedClosure(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -282,7 +299,7 @@ func TestSummaryCompactorCutsOnlyAtClosedToolGroupBoundaries(t *testing.T) {
 		{Role: RoleUser, Content: "recent"},
 	}
 
-	out, err := NewSummaryCompactor(summarizer).Compact(ctx, items, 10, tracedEstimator())
+	out, err := NewSummaryCompactor(summarizer).Compact(ctx, items, 120, tracedEstimator())
 	require.NoError(t, err)
 	require.NotEmpty(t, out)
 	assert.Equal(t, RoleUser, out[0].Role, "derived summary is projected as user-role context")
