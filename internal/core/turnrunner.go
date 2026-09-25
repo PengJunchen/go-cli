@@ -16,6 +16,7 @@ import (
 // errTurnUnknown reports that a turn id is not managed by the runner.
 var errTurnUnknown = errors.New("core: unknown or inactive turn")
 var errCanonicalTranscriptUnavailable = errors.New("core: loop cannot provide a canonical transcript for tool calls")
+var errMessageSnapshotPanic = errors.New("core: agent message snapshot panicked")
 
 // maxTurnsHistory bounds the number of completed turns retained in the turns
 // map. Once the count of completed turns exceeds this value, the oldest ones
@@ -43,6 +44,7 @@ type EinoTurnRunner struct {
 	loop           AgentLoop
 	agent          Agent
 	stream         EventStream
+	lifetimeCtx    context.Context
 	steerCh        chan string
 	followUpCh     chan string
 	hookChain      *HookChain
@@ -83,123 +85,154 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Re
 	if r.loop == nil {
 		return Result{}, errNilModel
 	}
-
-	turnCtx, cancel := context.WithCancel(ctx)
-	defer cancel() // release the turn's context resources when the turn ends
 	submission = cloneSubmission(submission)
 	id := r.newID()
 	turn := &Turn{
 		ID:         id,
 		Submission: cloneSubmission(submission),
 		Status:     TurnRunning,
-		StartTime:  time.Now(),
 	}
 
-	span, spanCtx := tracing.SpanFromContext(turnCtx, "turn.start", tracing.SpanKindInternal)
-	span.SetAttributes(tracing.Attribute{Key: "turn_id", Value: id}, tracing.Attribute{Key: "type", Value: submission.Type.String()})
-	defer span.End()
-	logger := tracing.NewTraceLogger(span, nil)
-	slog.Info("core.turn.runner.start", "id", id, "type", submission.Type)
-
 	r.mu.Lock()
-	r.turns[id] = turn
-	r.running[id] = cancel
 	hookChain := r.hookChain
 	runSlot := r.runSlot
 	cleanupTimeout := r.cleanupTimeout
 	agent := r.agent
 	stream := r.stream
+	lifetimeCtx := r.lifetimeCtx
 	r.mu.Unlock()
 
 	if runSlot == nil {
 		runSlot = defaultRunSlotGuard
 	}
-
-	// OnTurnStart lifecycle hook (invoked before the run begins).
-	if hookChain != nil {
-		if herr := hookChain.OnTurnStart(spanCtx, id); herr != nil {
-			slog.Warn("core.turn.runner.hook.turn_start", "id", id, "err", herr)
-		}
-	}
-
-	// Capture message count before the run for compaction detection.
-	var beforeMsgCount int
-	if ms, ok := agent.(messageSource); ok {
-		beforeMsgCount = len(ms.Messages())
-	}
-
-	var result Result
-	var runErr error
-
-	// Claim the run slot before executing the turn so concurrent turns
-	// fail fast when a run is already in progress.
-	claimCtx, claimCancel := context.WithTimeout(spanCtx, 200*time.Millisecond)
+	turnCtx, cancel, stopLifetime := linkRunLifetime(ctx, lifetimeCtx)
+	defer func() {
+		stopLifetime()
+		cancel()
+	}()
+	claimCtx, claimCancel := context.WithTimeout(turnCtx, 200*time.Millisecond)
 	claim, claimErr := runSlot.ClaimRun(claimCtx)
 	claimCancel()
 	if claimErr != nil {
-		runErr = claimErr
-		result = Result{Outcome: RunOutcomeError, ExecutionState: RunExecutionQuiescent}
-	} else {
-		timeoutClose := func(result Result, err error) {
-			if stream != nil {
-				if eventStream, ok := stream.(*EventStreamImpl); ok {
-					eventStream.SetResult(AgentMessage{Role: "assistant", Content: result.Message}, err)
-					if err != nil {
-						_ = eventStream.SendTerminal(errEvent(err))
-					} else {
-						_ = eventStream.SendTerminal(AgentEvent{Kind: "done", Content: result.Message, Timestamp: time.Now()})
-					}
-				}
-				stream.Close()
-			}
-		}
-		owner := newRunOwner(spanCtx, runSlot, claim, timeoutClose)
-		// Configure the cleanup budget before publishing the owner. Cancel may
-		// arrive in the publication-to-run window, where the first absolute
-		// cleanup deadline must already use this run's configured bound.
-		owner.setCleanupTimeout(cleanupTimeout)
-		if gapSource, ok := stream.(interface{ GapCount() uint64 }); ok {
-			owner.SetEventGapSource(gapSource)
-		}
-		if eventStream, ok := stream.(*EventStreamImpl); ok {
-			eventStream.SetRunStatusHandle(owner)
-		}
+		result := Result{Outcome: RunOutcomeError, ExecutionState: RunExecutionQuiescent}
+		turn.Result = result
+		turn.Err = claimErr
+		turn.EndTime = time.Now()
+		turn.Status = TurnFailed
 		r.mu.Lock()
-		r.owners[id] = owner
+		r.turns[id] = turn
+		r.pruneCompletedTurns()
 		r.mu.Unlock()
-		result, runErr = owner.run(cleanupTimeout, func(runCtx context.Context) (Result, error) {
-			if agent != nil {
-				if stream != nil {
-					return agent.Run(runCtx, submission, stream)
-				}
-				return agent.Run(runCtx, submission)
-			}
-			if canonical, ok := r.loop.(CanonicalLoop); ok {
-				var canonicalResult CanonicalRunResult
-				var err error
-				if stream != nil {
-					canonicalResult, err = canonical.RunCanonical(runCtx, submission, stream)
+		return result, claimErr
+	}
+	turn.StartTime = time.Now()
+	wrapperDone, wrapperErr := registerRunWrapper(runSlot, claim, nil)
+	if wrapperErr != nil {
+		runSlot.Release(claim)
+		stopLifetime()
+		cancel()
+		return Result{Outcome: RunOutcomeError, ExecutionState: RunExecutionQuiescent}, wrapperErr
+	}
+	ownerStarted := false
+	var span tracing.TraceSpan
+	defer func() {
+		defer func() {
+			wrapperDone()
+			stopLifetime()
+			cancel()
+		}()
+		if !ownerStarted {
+			runSlot.Release(claim)
+		}
+		if span != nil {
+			span.End()
+		}
+	}()
+
+	// Claim before borrowing tracing or invoking any hook/message provider so
+	// Assembly.Close cannot observe idle while accepted entrypoint work runs.
+	var spanCtx context.Context
+	span, spanCtx = tracing.SpanFromContext(turnCtx, "turn.start", tracing.SpanKindInternal)
+	span.SetAttributes(tracing.Attribute{Key: "turn_id", Value: id}, tracing.Attribute{Key: "type", Value: submission.Type.String()})
+	logger := tracing.NewTraceLogger(span, nil)
+	slog.Info("core.turn.runner.start", "id", id, "type", submission.Type)
+
+	var beforeMsgCount int
+	timeoutClose := func(result Result, err error) {
+		if stream != nil {
+			if eventStream, ok := stream.(*EventStreamImpl); ok {
+				eventStream.SetResult(AgentMessage{Role: "assistant", Content: result.Message}, err)
+				if err != nil {
+					_ = eventStream.SendTerminal(errEvent(err))
 				} else {
-					canonicalResult, err = canonical.RunCanonical(runCtx, submission)
+					_ = eventStream.SendTerminal(AgentEvent{Kind: "done", Content: result.Message, Timestamp: time.Now()})
 				}
-				return Result{Message: lastMessageEvent(canonicalResult.Events)}, err
 			}
-			var events []AgentEvent
+			stream.Close()
+		}
+	}
+	owner := newRunOwner(spanCtx, runSlot, claim, timeoutClose)
+	owner.setCleanupTimeout(cleanupTimeout)
+	if gapSource, ok := stream.(interface{ GapCount() uint64 }); ok {
+		owner.SetEventGapSource(gapSource)
+	}
+	if eventStream, ok := stream.(*EventStreamImpl); ok {
+		eventStream.SetRunStatusHandle(owner)
+	}
+	wrapperErr = setRunWrapperStatus(runSlot, claim, owner)
+	if wrapperErr != nil {
+		result := Result{Outcome: RunOutcomeError, ExecutionState: RunExecutionQuiescent}
+		return result, wrapperErr
+	}
+
+	r.mu.Lock()
+	r.turns[id] = turn
+	r.running[id] = cancel
+	r.owners[id] = owner
+	r.mu.Unlock()
+
+	var result Result
+	ownerStarted = true
+	result, runErr := owner.run(cleanupTimeout, func(runCtx context.Context) (Result, error) {
+		if hookChain != nil {
+			if herr := hookChain.OnTurnStart(runCtx, id); herr != nil {
+				slog.Warn("core.turn.runner.hook.turn_start", "id", id, "err", herr)
+			}
+		}
+		if ms, ok := agent.(messageSource); ok {
+			beforeMsgCount = len(ms.Messages())
+		}
+		if agent != nil {
+			if stream != nil {
+				return agent.Run(runCtx, submission, stream)
+			}
+			return agent.Run(runCtx, submission)
+		}
+		if canonical, ok := r.loop.(CanonicalLoop); ok {
+			var canonicalResult CanonicalRunResult
 			var err error
 			if stream != nil {
-				events, err = r.loop.Run(runCtx, submission, stream)
+				canonicalResult, err = canonical.RunCanonical(runCtx, submission, stream)
 			} else {
-				events, err = r.loop.Run(runCtx, submission)
+				canonicalResult, err = canonical.RunCanonical(runCtx, submission)
 			}
-			if hasToolCallEvent(events) {
-				markRunOutcomeUnknown(runCtx)
-				if err == nil {
-					err = errCanonicalTranscriptUnavailable
-				}
+			return Result{Message: lastMessageEvent(canonicalResult.Events)}, err
+		}
+		var events []AgentEvent
+		var err error
+		if stream != nil {
+			events, err = r.loop.Run(runCtx, submission, stream)
+		} else {
+			events, err = r.loop.Run(runCtx, submission)
+		}
+		if hasToolCallEvent(events) {
+			markRunOutcomeUnknown(runCtx)
+			if err == nil {
+				err = errCanonicalTranscriptUnavailable
 			}
-			return Result{Message: lastMessageEvent(events)}, err
-		})
-	}
+		}
+		return Result{Message: lastMessageEvent(events)}, err
+	})
 
 	r.mu.Lock()
 	delete(r.running, id)
@@ -234,8 +267,10 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Re
 			}
 		}
 		if ms, ok := agent.(messageSource); ok {
-			afterMsgCount := len(ms.Messages())
-			if afterMsgCount < beforeMsgCount {
+			afterMsgCount, snapshotErr := safeMessageCount(ms)
+			if snapshotErr != nil {
+				slog.Warn("core.turn.runner.message_snapshot", "id", id, "err", snapshotErr)
+			} else if afterMsgCount < beforeMsgCount {
 				if herr := hookChain.OnCompaction(spanCtx, beforeMsgCount, afterMsgCount); herr != nil {
 					slog.Warn("core.turn.runner.hook.compaction", "id", id, "err", herr)
 				}
@@ -258,6 +293,16 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Re
 	)
 	logger.Info("turn.end", "id", id, "status", turnSnapshot.Status.String())
 	return result, runErr
+}
+
+func safeMessageCount(source messageSource) (count int, err error) {
+	defer func() {
+		if recover() != nil {
+			count = 0
+			err = errMessageSnapshotPanic
+		}
+	}()
+	return len(source.Messages()), nil
 }
 
 // Cancel marks a running turn as canceled and cancels its underlying context.
@@ -368,6 +413,15 @@ func (r *EinoTurnRunner) SetRunSlotGuard(g RunSlotGuard) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.runSlot = g
+}
+
+// SetRunLifetimeContext links future turns to an Assembly-owned lifetime.
+// Canceling the lifetime stops run input; each run owner continues supervising
+// resources until they are actually quiescent.
+func (r *EinoTurnRunner) SetRunLifetimeContext(ctx context.Context) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.lifetimeCtx = ctx
 }
 
 // SetRunCleanupTimeout sets the bounded time RunTurn waits for owned workers
