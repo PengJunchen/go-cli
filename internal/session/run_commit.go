@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"sync"
 	"time"
 
@@ -15,8 +16,6 @@ import (
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/tools"
 )
-
-var errSessionRunCommitUnavailable = errors.New("session: run-commit operation is not available yet")
 
 // SessionRunCommitSink persists one run through an already locked prepared
 // session handle. It borrows that handle's writer and never closes the shared
@@ -30,14 +29,15 @@ type SessionRunCommitSink struct {
 	workspaceID string
 	branchID    string
 	leafID      string
-	maxSeq      uint64
 	baseView    SessionView
 	allRows     []SessionEntry
 	branchRows  []SessionEntry
 	runID       string
 	ownerGen    string
+	terminalID  string
 	release     func()
 	releaseOnce sync.Once
+	closed      bool
 }
 
 var _ core.RunCommitSink = (*SessionRunCommitSink)(nil)
@@ -75,15 +75,22 @@ func NewSessionRunCommitSink(
 	if err != nil {
 		return nil, err
 	}
+	if err := validateAllRunTranscriptPhysicalPrefixes(branchRows); err != nil {
+		return nil, fmt.Errorf("session: prepared run-commit transcript is invalid: %w", err)
+	}
 	if _, err := analyzeDurableActionJournal(allRows, snapshot.SessionID); err != nil {
 		return nil, fmt.Errorf("session: prepared run-commit action journal is invalid: %w", err)
 	}
+	writer := prepared.DurableWriter()
+	if writer == nil {
+		return nil, errors.New("session: prepared run-commit session has no durable writer")
+	}
 	return &SessionRunCommitSink{
-		prepared: prepared, writer: prepared.DurableWriter(), index: index,
+		prepared: prepared, writer: writer, index: index,
 		sessionID: snapshot.SessionID, workspaceID: workspaceID,
 		branchID: snapshot.ActiveBranchID, leafID: snapshot.ActiveLeafEntryID,
-		maxSeq: snapshot.MaxSeq, baseView: snapshot.PublishedView.Clone(),
-		allRows: allRows, branchRows: branchRows, release: release,
+		baseView: snapshot.PublishedView.Clone(),
+		allRows:  allRows, branchRows: branchRows, release: release,
 	}, nil
 }
 
@@ -93,7 +100,10 @@ func (s *SessionRunCommitSink) CloseRunCommit() {
 	if s == nil {
 		return
 	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	s.releaseOnce.Do(func() {
+		s.closed = true
 		if s.release != nil {
 			s.release()
 		}
@@ -106,12 +116,18 @@ func (s *SessionRunCommitSink) CommitInput(ctx context.Context, input core.RunCo
 	if err := s.validateCallContextLocked(ctx, input.RunID); err != nil {
 		return err
 	}
+	if err := s.rejectAfterTerminalLocked(); err != nil {
+		return err
+	}
 	if input.InputKind != core.InputKindUser && input.InputKind != core.InputKindSteering && input.InputKind != core.InputKindFollowUp {
 		return fmt.Errorf("session: unsupported run input kind %q", input.InputKind)
 	}
 	message := cloneRunCommitMessage(input.Message)
 	if message.Role != "user" {
 		return fmt.Errorf("session: run input transcript row has role %q, want user", message.Role)
+	}
+	if len(message.ToolCalls) != 0 || message.ToolCallID != "" || message.ToolName != "" || message.ReceiptOutcome != "" {
+		return errors.New("session: run input message contains assistant or tool receipt fields")
 	}
 	if message.InputKind != "" && message.InputKind != input.InputKind {
 		return errors.New("session: run input kind conflicts with its canonical message")
@@ -158,8 +174,14 @@ func (s *SessionRunCommitSink) BeginIntentBatch(ctx context.Context, batch core.
 	if err := s.validateCallContextLocked(ctx, batch.RunID); err != nil {
 		return err
 	}
+	if err := s.rejectAfterTerminalLocked(); err != nil {
+		return err
+	}
 	if batch.AssistantMessage.Role != "assistant" || len(batch.AssistantMessage.ToolCalls) == 0 {
 		return errors.New("session: intent batch requires an assistant message with tool calls")
+	}
+	if batch.AssistantMessage.InputKind != "" || batch.AssistantMessage.ToolCallID != "" || batch.AssistantMessage.ToolName != "" || batch.AssistantMessage.ReceiptOutcome != "" {
+		return errors.New("session: assistant intent message contains input or receipt fields")
 	}
 	if batch.ActionBatchID == "" && len(batch.Intents) > 0 {
 		return errors.New("session: reserved intent batch requires an action batch ID")
@@ -175,6 +197,13 @@ func (s *SessionRunCommitSink) BeginIntentBatch(ctx context.Context, batch core.
 	}
 	if err := validateKnownPreDispatchReceipts(batch, toolCalls); err != nil {
 		return err
+	}
+	for _, receipt := range batch.KnownReceipts {
+		for _, intent := range batch.Intents {
+			if intent.ToolCallID == receipt.ToolCallID {
+				return fmt.Errorf("session: tool call %q cannot be both reserved and a known pre-dispatch denial", receipt.ToolCallID)
+			}
+		}
 	}
 	assistant, exists, err := s.assistantOccurrenceLocked(batch.RunID, batch.AssistantTranscriptOrdinal)
 	if err != nil {
@@ -331,6 +360,9 @@ func (s *SessionRunCommitSink) RecordExecution(ctx context.Context, execution co
 	if err := s.validateCallContextLocked(ctx, execution.RunID); err != nil {
 		return err
 	}
+	if err := s.rejectAfterTerminalLocked(); err != nil {
+		return err
+	}
 	if execution.ToolCallID == "" || execution.ActionID == "" || execution.OwnerGeneration == "" {
 		return errors.New("session: execution observation requires a full reserved action identity")
 	}
@@ -399,6 +431,9 @@ func (s *SessionRunCommitSink) RecordReceipt(ctx context.Context, receipt core.R
 	if err := s.validateCallContextLocked(ctx, receipt.RunID); err != nil {
 		return err
 	}
+	if err := s.rejectAfterTerminalLocked(); err != nil {
+		return err
+	}
 	if receipt.ToolCallID == "" {
 		return errors.New("session: tool receipt requires a tool-call ID")
 	}
@@ -411,6 +446,9 @@ func (s *SessionRunCommitSink) RecordReceipt(ctx context.Context, receipt core.R
 	message := cloneRunCommitMessage(receipt.Message)
 	if message.Role != "tool" || message.ToolCallID != receipt.ToolCallID || message.ToolName == "" {
 		return errors.New("session: tool receipt message does not match its occurrence")
+	}
+	if len(message.ToolCalls) != 0 || message.InputKind != "" {
+		return errors.New("session: tool receipt message contains input or assistant call fields")
 	}
 	if message.ReceiptOutcome != "" && message.ReceiptOutcome != receipt.ReceiptOutcome {
 		return errors.New("session: tool receipt outcome conflicts with its message")
@@ -498,6 +536,9 @@ func (s *SessionRunCommitSink) ResolveExecution(ctx context.Context, resolution 
 	if err := s.validateCallContextLocked(ctx, resolution.RunID); err != nil {
 		return err
 	}
+	if err := s.rejectAfterTerminalLocked(); err != nil {
+		return err
+	}
 	if resolution.ActionID == "" {
 		return errors.New("session: execution resolution requires an action ID")
 	}
@@ -506,7 +547,7 @@ func (s *SessionRunCommitSink) ResolveExecution(ctx context.Context, resolution 
 		return err
 	}
 	ref := refFromEntry(intent, s.sessionID)
-	receipt, err := s.findReceiptForIntentLocked(ref)
+	receipt, err := s.findReceiptForIntentLocked(ref, intent)
 	if err != nil {
 		return err
 	}
@@ -523,7 +564,10 @@ func (s *SessionRunCommitSink) ResolveExecution(ctx context.Context, resolution 
 	resolvedEvidence.RunID = resolution.RunID
 	resolvedEvidence.ActionID = resolution.ActionID
 	resolution = resolvedEvidence
-	entryID, err := stableRunCommitEntryID("resolution", ref)
+	entryID, err := stableRunCommitEntryID("resolution", struct {
+		ActionRef       PendingActionRef
+		OwnerGeneration string
+	}{ref, intent.OwnerGeneration})
 	if err != nil {
 		return err
 	}
@@ -539,6 +583,9 @@ func (s *SessionRunCommitSink) ResolveExecution(ctx context.Context, resolution 
 		existing := &s.branchRows[index]
 		if existing.RecordVersion != 1 || existing.CheckpointKind != CheckpointExecutionResolution || !sameActionReference(ref, refFromEntry(*existing, s.sessionID)) {
 			continue
+		}
+		if existing.OwnerGeneration != intent.OwnerGeneration {
+			return errors.New("session: execution resolution owner generation differs from its durable intent")
 		}
 		if durableResolution != nil {
 			return errors.New("session: action has multiple durable execution-resolution checkpoints")
@@ -569,15 +616,180 @@ func (s *SessionRunCommitSink) ResolveExecution(ctx context.Context, resolution 
 	return nil
 }
 
-func (s *SessionRunCommitSink) CommitCompaction(context.Context, core.CompactionProjection) error {
-	return errSessionRunCommitUnavailable
+func (s *SessionRunCommitSink) CommitCompaction(ctx context.Context, projection core.CompactionProjection) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.validateCallContextLocked(ctx, core.RunIDFromContext(ctx)); err != nil {
+		return err
+	}
+	if err := s.rejectAfterTerminalLocked(); err != nil {
+		return err
+	}
+	return s.commitCompactionLocked(ctx, core.RunIDFromContext(ctx), projection)
 }
 
-func (s *SessionRunCommitSink) CommitTerminal(context.Context, core.RunTerminal) error {
-	return errSessionRunCommitUnavailable
+func (s *SessionRunCommitSink) CommitTerminal(ctx context.Context, terminal core.RunTerminal) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.validateCallContextLocked(ctx, terminal.RunID); err != nil {
+		return err
+	}
+	if terminal.RunID == "" || core.RunIDFromContext(ctx) != terminal.RunID {
+		return errors.New("session: terminal checkpoint does not match the owned run")
+	}
+	terminalID := string(terminal.TerminalCheckpointID)
+	if terminalID == "" || strings.ContainsRune(terminalID, '\x00') {
+		return errors.New("session: terminal checkpoint requires a non-empty NUL-free ID")
+	}
+	if !validRunOutcome(terminal.Outcome) {
+		return fmt.Errorf("session: terminal checkpoint has invalid run outcome %q", terminal.Outcome)
+	}
+	if len(terminal.Transcript) == 0 {
+		return errors.New("session: terminal checkpoint requires the canonical run transcript")
+	}
+	if s.terminalID != "" && s.terminalID != terminalID {
+		return errors.New("session: run already has a different terminal checkpoint")
+	}
+	rowsByIndex, err := transcriptRowsByIndex(s.branchRows, terminal.RunID)
+	if err != nil {
+		return err
+	}
+	if err := validateTranscriptRowsInPhysicalOrder(s.branchRows, terminal.RunID); err != nil {
+		return err
+	}
+	existingRows := make([]SessionEntry, len(rowsByIndex))
+	for index := uint64(0); index < uint64(len(rowsByIndex)); index++ {
+		row, exists := rowsByIndex[index]
+		if !exists {
+			return fmt.Errorf("session: terminal transcript has a durable hole at index %d", index)
+		}
+		existingRows[index] = row
+	}
+	if len(existingRows) > len(terminal.Transcript) {
+		return errors.New("session: durable run transcript is longer than the terminal transcript")
+	}
+	for index, row := range existingRows {
+		message := cloneRunCommitMessage(terminal.Transcript[index].Message)
+		if !durableRowMatchesMessage(row, message) {
+			return fmt.Errorf("session: terminal transcript conflicts with durable row at index %d", index)
+		}
+	}
+	terminalRow, hasTerminal, err := s.findTerminalCheckpointLocked(terminal.RunID)
+	if err != nil {
+		return err
+	}
+	if hasTerminal {
+		if terminalRow.ID != terminalID || terminalRow.RunOutcome != terminal.Outcome {
+			return errors.New("session: terminal checkpoint conflicts with its durable row")
+		}
+		if len(existingRows) != len(terminal.Transcript) {
+			return errors.New("session: terminal checkpoint exists before the complete transcript prefix")
+		}
+		if err := s.verifyTerminalProjectionsLocked(terminal.RunID, terminal.Projections); err != nil {
+			return err
+		}
+		s.terminalID = terminalID
+		return nil
+	}
+	rows := make([]SessionEntry, 0, len(terminal.Transcript)-len(existingRows)+1)
+	for index := len(existingRows); index < len(terminal.Transcript); index++ {
+		message := cloneRunCommitMessage(terminal.Transcript[index].Message)
+		if message.Role != "assistant" || len(message.ToolCalls) > 0 || message.ToolCallID != "" || message.ToolName != "" || message.InputKind != "" || message.ReceiptOutcome != "" {
+			return fmt.Errorf("session: terminal transcript suffix at index %d is not a plain assistant message already supported by durable input/tool commits", index)
+		}
+		transcriptIndex := uint64(index)
+		row := sessionEntryFromRunCommitMessage(message, EntryTypeAssistant)
+		row.RunID = terminal.RunID
+		row.WorkspaceID = s.workspaceID
+		row.TranscriptIndex = &transcriptIndex
+		row.ID, err = stableRunCommitEntryID("assistant-terminal", struct {
+			RunID string
+			Index uint64
+		}{terminal.RunID, transcriptIndex})
+		if err != nil {
+			return err
+		}
+		rows = append(rows, row)
+	}
+	for _, row := range s.allRows {
+		if row.ID == terminalID {
+			return fmt.Errorf("session: terminal checkpoint ID %q is already used by another durable row", terminalID)
+		}
+	}
+	for _, row := range rows {
+		if row.ID == terminalID {
+			return errors.New("session: terminal checkpoint ID conflicts with a terminal transcript row")
+		}
+	}
+	projectionRows := make([]SessionEntry, 0, len(terminal.Projections))
+	seenProjectionIDs := make(map[string]struct{}, len(terminal.Projections))
+	seenProjectionBoundaries := make(map[string]struct{}, len(terminal.Projections))
+	for _, projection := range terminal.Projections {
+		candidate, err := s.compactionEntryLocked(terminal.RunID, projection)
+		if err != nil {
+			return fmt.Errorf("session: validate terminal compaction projection: %w", err)
+		}
+		if _, duplicate := seenProjectionIDs[candidate.ID]; duplicate {
+			return errors.New("session: terminal repeats a compaction projection")
+		}
+		if _, duplicate := seenProjectionBoundaries[candidate.CompactedThroughEntryID]; duplicate {
+			return errors.New("session: terminal repeats a compaction source boundary")
+		}
+		seenProjectionIDs[candidate.ID] = struct{}{}
+		seenProjectionBoundaries[candidate.CompactedThroughEntryID] = struct{}{}
+		found := false
+		for _, existing := range s.branchRows {
+			if existing.ID == candidate.ID {
+				if !sameCompactionRow(existing, candidate) {
+					return errors.New("session: terminal compaction projection conflicts with its durable row")
+				}
+				found = true
+				break
+			}
+			if existing.RecordVersion == 1 && existing.Type == EntryTypeCompaction && existing.RunID == terminal.RunID && existing.CompactedThroughEntryID == candidate.CompactedThroughEntryID {
+				return errors.New("session: terminal conflicts with an existing compaction at this source boundary")
+			}
+		}
+		if !found {
+			projectionRows = append(projectionRows, candidate)
+		}
+	}
+	for _, projection := range projectionRows {
+		for _, row := range rows {
+			if projection.ID == row.ID {
+				return errors.New("session: terminal compaction ID conflicts with a transcript or terminal row")
+			}
+		}
+		if projection.ID == terminalID {
+			return errors.New("session: terminal checkpoint ID conflicts with a compaction row")
+		}
+	}
+	for _, projection := range projectionRows {
+		if _, err := s.appendAndRefreshRowsLocked(ctx, projection); err != nil {
+			return fmt.Errorf("session: persist terminal compaction projection: %w", err)
+		}
+	}
+	checkpoint := SessionEntry{
+		ID: terminalID, Type: EntryTypeCheckpoint, RunID: terminal.RunID,
+		WorkspaceID: s.workspaceID, CheckpointKind: CheckpointRunTerminal,
+		RunOutcome: terminal.Outcome,
+	}
+	rows = append(rows, checkpoint)
+	canonical, err := s.appendAndRefreshRowsLocked(ctx, rows...)
+	if err != nil {
+		return err
+	}
+	if len(canonical) != len(rows) || canonical[len(canonical)-1].ID != terminalID || canonical[len(canonical)-1].Seq == 0 {
+		return errors.New("session: durable writer returned an invalid terminal checkpoint identity")
+	}
+	s.terminalID = terminalID
+	return nil
 }
 
 func (s *SessionRunCommitSink) validateCallContextLocked(ctx context.Context, payloadRunID string) error {
+	if s.closed {
+		return errors.New("session: run-commit lease is closed")
+	}
 	if err := contextErr(ctx); err != nil {
 		return err
 	}
@@ -602,6 +814,199 @@ func (s *SessionRunCommitSink) validateCallContextLocked(ctx context.Context, pa
 		return errors.New("session: run-commit sink was reused by another run owner")
 	}
 	return nil
+}
+
+func (s *SessionRunCommitSink) rejectAfterTerminalLocked() error {
+	if s.terminalID != "" {
+		return errors.New("session: run already has a durable terminal checkpoint")
+	}
+	return nil
+}
+
+func (s *SessionRunCommitSink) commitCompactionLocked(ctx context.Context, runID string, projection core.CompactionProjection) error {
+	row, err := s.compactionEntryLocked(runID, projection)
+	if err != nil {
+		return err
+	}
+	for _, existing := range s.branchRows {
+		if existing.ID == row.ID {
+			if !sameCompactionRow(existing, row) {
+				return fmt.Errorf("session: compaction row ID %q conflicts with its durable payload", row.ID)
+			}
+			return nil
+		}
+		if existing.RecordVersion == 1 && existing.Type == EntryTypeCompaction && existing.RunID == runID && existing.CompactedThroughEntryID == row.CompactedThroughEntryID {
+			return errors.New("session: run already has a different compaction at this source boundary")
+		}
+	}
+	_, err = s.appendAndRefreshRowsLocked(ctx, row)
+	return err
+}
+
+func (s *SessionRunCommitSink) compactionEntryLocked(runID string, projection core.CompactionProjection) (SessionEntry, error) {
+	if runID == "" || projection.ExpectedHistoryRevision != s.baseView.Revision {
+		return SessionEntry{}, errors.New("session: compaction projection has a stale run-start history revision")
+	}
+	if strings.TrimSpace(projection.Summary) == "" {
+		return SessionEntry{}, errors.New("session: compaction projection requires a non-empty summary")
+	}
+	priorCount := projection.Through.PriorHistoryCount
+	transcriptCount := projection.Through.TranscriptCount
+	var boundaryID string
+	if transcriptCount == 0 {
+		if priorCount == 0 || priorCount > uint64(len(s.baseView.SourceEntryIDs)) {
+			return SessionEntry{}, errors.New("session: compaction cursor does not map to a run-start history source")
+		}
+		boundaryID = s.baseView.SourceEntryIDs[priorCount-1]
+	} else {
+		if priorCount != uint64(len(s.baseView.Messages)) {
+			return SessionEntry{}, errors.New("session: compaction cursor does not preserve the complete prior-history prefix")
+		}
+		transcriptRows, err := transcriptRowsByIndex(s.branchRows, runID)
+		if err != nil {
+			return SessionEntry{}, err
+		}
+		if err := validateTranscriptRowsInPhysicalOrder(s.branchRows, runID); err != nil {
+			return SessionEntry{}, err
+		}
+		if transcriptCount > uint64(len(transcriptRows)) {
+			return SessionEntry{}, errors.New("session: compaction cursor extends beyond the durable run transcript")
+		}
+		boundary, exists := transcriptRows[transcriptCount-1]
+		if !exists {
+			return SessionEntry{}, errors.New("session: compaction cursor has no exact durable transcript boundary")
+		}
+		boundaryID = boundary.ID
+	}
+	boundaryPosition := -1
+	for index, entry := range s.branchRows {
+		if entry.ID == boundaryID {
+			boundaryPosition = index
+			break
+		}
+	}
+	if boundaryPosition < 0 {
+		return SessionEntry{}, errors.New("session: compaction boundary is not on the selected active branch")
+	}
+	if err := s.validateCompactionBoundaryLocked(boundaryPosition); err != nil {
+		return SessionEntry{}, err
+	}
+	row := SessionEntry{
+		Type: EntryTypeCompaction, Content: projection.Summary, Summary: projection.Summary,
+		RunID: runID, WorkspaceID: s.workspaceID, CompactedThroughEntryID: boundaryID,
+	}
+	entryID, err := stableRunCommitEntryID("compaction", struct {
+		RunID       string
+		Revision    string
+		PriorCount  uint64
+		Transcript  uint64
+		BoundaryID  string
+		SummaryHash string
+	}{runID, projection.ExpectedHistoryRevision, priorCount, transcriptCount, boundaryID, hashText(projection.Summary)})
+	if err != nil {
+		return SessionEntry{}, err
+	}
+	row.ID = entryID
+	return row, nil
+}
+
+func (s *SessionRunCommitSink) validateCompactionBoundaryLocked(boundaryPosition int) error {
+	positions := make(map[string]int, len(s.branchRows))
+	for index, row := range s.branchRows {
+		positions[row.ID] = index
+	}
+	for _, assistant := range s.branchRows {
+		if assistant.RecordVersion != 1 || assistant.Type != EntryTypeAssistant || len(assistant.ToolCalls) == 0 {
+			continue
+		}
+		assistantPosition := positions[assistant.ID]
+		lastReceiptPosition := assistantPosition
+		closed := true
+		ordinal := *assistant.AssistantTranscriptOrdinal
+		for _, call := range assistant.ToolCalls {
+			found := false
+			for _, candidate := range s.branchRows {
+				if candidate.RecordVersion == 1 && candidate.Type == EntryTypeTool && candidate.ActionState == "" && candidate.RunID == assistant.RunID && candidate.AssistantTranscriptOrdinal != nil && *candidate.AssistantTranscriptOrdinal == ordinal && candidate.ToolCallID == call.ID {
+					if !found || positions[candidate.ID] > lastReceiptPosition {
+						lastReceiptPosition = positions[candidate.ID]
+					}
+					found = true
+				}
+			}
+			if !found {
+				closed = false
+			}
+		}
+		if boundaryPosition >= assistantPosition && (!closed || boundaryPosition < lastReceiptPosition) {
+			return fmt.Errorf("session: compaction boundary splits or includes an open assistant tool-call group at %q", assistant.ID)
+		}
+	}
+	return nil
+}
+
+func (s *SessionRunCommitSink) verifyTerminalProjectionsLocked(runID string, projections []core.CompactionProjection) error {
+	seen := make(map[string]struct{}, len(projections))
+	for _, projection := range projections {
+		candidate, err := s.compactionEntryLocked(runID, projection)
+		if err != nil {
+			return err
+		}
+		if _, duplicate := seen[candidate.ID]; duplicate {
+			return errors.New("session: terminal repeats a compaction projection")
+		}
+		seen[candidate.ID] = struct{}{}
+		found := false
+		for _, row := range s.branchRows {
+			if row.ID != candidate.ID {
+				continue
+			}
+			if !sameCompactionRow(row, candidate) {
+				return errors.New("session: terminal compaction projection conflicts with its durable row")
+			}
+			found = true
+			break
+		}
+		if !found {
+			return errors.New("session: terminal projection is missing its durable compaction row")
+		}
+	}
+	return nil
+}
+
+func (s *SessionRunCommitSink) findTerminalCheckpointLocked(runID string) (SessionEntry, bool, error) {
+	var match SessionEntry
+	found := false
+	for _, row := range s.branchRows {
+		if row.RecordVersion != 1 || row.Type != EntryTypeCheckpoint || row.CheckpointKind != CheckpointRunTerminal || row.RunID != runID {
+			continue
+		}
+		if found {
+			return SessionEntry{}, false, fmt.Errorf("session: run %q has multiple terminal checkpoints", runID)
+		}
+		match = *row.clone()
+		found = true
+	}
+	return match, found, nil
+}
+
+func sameCompactionRow(existing, candidate SessionEntry) bool {
+	return existing.ID == candidate.ID && existing.Type == EntryTypeCompaction && existing.RunID == candidate.RunID &&
+		existing.WorkspaceID == candidate.WorkspaceID && existing.Summary == candidate.Summary &&
+		existing.Content == candidate.Content && existing.CompactedThroughEntryID == candidate.CompactedThroughEntryID
+}
+
+func hashText(value string) string {
+	digest := sha256.Sum256([]byte(value))
+	return hex.EncodeToString(digest[:])
+}
+
+func validRunOutcome(outcome core.RunOutcome) bool {
+	switch outcome {
+	case core.RunOutcomeSuccess, core.RunOutcomeError, core.RunOutcomeCancelled, core.RunOutcomeUnknown:
+		return true
+	default:
+		return false
+	}
 }
 
 func (s *SessionRunCommitSink) assistantOccurrenceLocked(runID string, ordinal uint64) (SessionEntry, bool, error) {
@@ -698,7 +1103,7 @@ func (s *SessionRunCommitSink) findIntentByActionIDLocked(runID, actionID, owner
 	return match, nil
 }
 
-func (s *SessionRunCommitSink) findReceiptForIntentLocked(ref PendingActionRef) (SessionEntry, error) {
+func (s *SessionRunCommitSink) findReceiptForIntentLocked(ref PendingActionRef, intent SessionEntry) (SessionEntry, error) {
 	var match SessionEntry
 	found := false
 	for _, row := range s.branchRows {
@@ -707,6 +1112,9 @@ func (s *SessionRunCommitSink) findReceiptForIntentLocked(ref PendingActionRef) 
 		}
 		if !sameActionReference(ref, refFromEntry(row, s.sessionID)) {
 			return SessionEntry{}, errors.New("session: durable receipt does not match the full reserved action reference")
+		}
+		if row.OwnerGeneration != intent.OwnerGeneration {
+			return SessionEntry{}, errors.New("session: durable receipt owner generation differs from its intent")
 		}
 		if found {
 			return SessionEntry{}, errors.New("session: action has multiple durable terminal receipts")
@@ -756,7 +1164,7 @@ func (s *SessionRunCommitSink) resolveEvidenceReferenceLocked(
 		}
 		candidates := make([]SessionEntry, 0, 1)
 		for _, row := range s.branchRows {
-			if row.RecordVersion != 1 || row.ActionState != ActionStateExecution || row.CompletionProof == "" || row.DispatchState != core.DispatchStateDispatched || row.Seq <= intent.Seq || !sameActionReference(ref, refFromEntry(row, s.sessionID)) {
+			if row.RecordVersion != 1 || row.ActionState != ActionStateExecution || row.CompletionProof == "" || row.DispatchState != core.DispatchStateDispatched || row.Seq <= intent.Seq || row.OwnerGeneration != intent.OwnerGeneration || !sameActionReference(ref, refFromEntry(row, s.sessionID)) {
 				continue
 			}
 			candidates = append(candidates, *row.clone())
@@ -769,7 +1177,7 @@ func (s *SessionRunCommitSink) resolveEvidenceReferenceLocked(
 	case core.ResolutionOperatorReconciled:
 		candidates := make([]SessionEntry, 0, 1)
 		for _, row := range s.branchRows {
-			if row.RecordVersion != 1 || row.Type != EntryTypeCheckpoint || row.CheckpointKind != CheckpointReconciliation || row.Seq <= receipt.Seq || !sameActionReference(ref, refFromEntry(row, s.sessionID)) {
+			if row.RecordVersion != 1 || row.Type != EntryTypeCheckpoint || row.CheckpointKind != CheckpointReconciliation || row.Seq <= receipt.Seq || row.OwnerGeneration != intent.OwnerGeneration || !sameActionReference(ref, refFromEntry(row, s.sessionID)) {
 				continue
 			}
 			candidates = append(candidates, *row.clone())
@@ -864,6 +1272,9 @@ func validateTranscriptRowsInPhysicalOrder(rows []SessionEntry, runID string) er
 		if row.RecordVersion != 1 || row.RunID != runID || row.TranscriptIndex == nil || row.ActionState != "" || row.Type == EntryTypeCheckpoint || row.Type == EntryTypeCompaction {
 			continue
 		}
+		if row.Type != EntryTypeUser && row.Type != EntryTypeAssistant && row.Type != EntryTypeTool {
+			return fmt.Errorf("session: run %q row %q has a non-canonical transcript type %q", runID, row.ID, row.Type)
+		}
 		if *row.TranscriptIndex != next {
 			return fmt.Errorf("session: run %q durable transcript is not a physical canonical prefix at row %q: index %d, want %d", runID, row.ID, *row.TranscriptIndex, next)
 		}
@@ -871,6 +1282,21 @@ func validateTranscriptRowsInPhysicalOrder(rows []SessionEntry, runID string) er
 			return fmt.Errorf("session: run %q transcript index is exhausted", runID)
 		}
 		next++
+	}
+	return nil
+}
+
+func validateAllRunTranscriptPhysicalPrefixes(rows []SessionEntry) error {
+	runs := make(map[string]struct{})
+	for _, row := range rows {
+		if row.RecordVersion == 1 && row.RunID != "" && row.TranscriptIndex != nil && row.ActionState == "" && row.Type != EntryTypeCheckpoint && row.Type != EntryTypeCompaction {
+			runs[row.RunID] = struct{}{}
+		}
+	}
+	for runID := range runs {
+		if err := validateTranscriptRowsInPhysicalOrder(rows, runID); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -916,7 +1342,7 @@ func validateKnownPreDispatchReceipts(batch core.RunIntentBatch, calls map[strin
 			return fmt.Errorf("session: known pre-dispatch receipt at index %d has reserved or mismatched identity", index)
 		}
 		call, exists := calls[receipt.ToolCallID]
-		if !exists || receipt.Message.Role != "tool" || receipt.Message.ToolCallID != receipt.ToolCallID || receipt.Message.ToolName != call.Name {
+		if !exists || receipt.Message.Role != "tool" || receipt.Message.ToolCallID != receipt.ToolCallID || receipt.Message.ToolName != call.Name || len(receipt.Message.ToolCalls) != 0 || receipt.Message.InputKind != "" {
 			return fmt.Errorf("session: known pre-dispatch receipt at index %d does not match an assistant tool call", index)
 		}
 		if receipt.ReceiptOutcome != core.ReceiptOutcomeError && receipt.ReceiptOutcome != core.ReceiptOutcomeInterrupted {
@@ -985,7 +1411,6 @@ func (s *SessionRunCommitSink) refreshLocked() error {
 	s.allRows = allRows
 	s.branchRows = branchRows
 	s.leafID = snapshot.ActiveLeafEntryID
-	s.maxSeq = snapshot.MaxSeq
 	return nil
 }
 
@@ -1033,6 +1458,9 @@ func transcriptRowsByIndex(rows []SessionEntry, runID string) (map[uint64]Sessio
 	for _, row := range rows {
 		if row.RecordVersion != 1 || row.RunID != runID || row.TranscriptIndex == nil || row.ActionState != "" || row.Type == EntryTypeCheckpoint || row.Type == EntryTypeCompaction {
 			continue
+		}
+		if row.Type != EntryTypeUser && row.Type != EntryTypeAssistant && row.Type != EntryTypeTool {
+			return nil, fmt.Errorf("session: run %q row %q has a non-canonical transcript type %q", runID, row.ID, row.Type)
 		}
 		if previous, exists := indexed[*row.TranscriptIndex]; exists {
 			return nil, fmt.Errorf("session: run %q has duplicate transcript index %d in rows %q and %q", runID, *row.TranscriptIndex, previous.ID, row.ID)
