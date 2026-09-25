@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -264,6 +265,10 @@ func TestStdioAdapterDisconnectWritesFrame(t *testing.T) {
 	}()
 
 	require.NoError(t, client.Connect(context.Background()))
+
+	// The reader is caller-owned, so close the peer's input side before
+	// Disconnect to let the adapter prove that its reader worker has returned.
+	closeIgnored(serverW)
 	require.NoError(t, client.Disconnect(context.Background()))
 
 	// Collect frames until a disconnect is observed or we time out.
@@ -336,9 +341,9 @@ func TestGRPCAdapterUnreachableEndpoint(t *testing.T) {
 	require.Less(t, time.Since(start), 2*time.Second, "connect to a refused port must not hang")
 }
 
-// TestStdioAdapterMalformedInputSkipped verifies the receiver skips non-JSON
-// lines while still delivering well-formed messages.
-func TestStdioAdapterMalformedInputSkipped(t *testing.T) {
+// TestStdioAdapterMalformedInputTerminates verifies malformed frames terminate
+// the session instead of silently skipping untrusted input.
+func TestStdioAdapterMalformedInputTerminates(t *testing.T) {
 	clientR, serverW := io.Pipe()
 	serverR, clientW := io.Pipe()
 	t.Cleanup(func() {
@@ -362,22 +367,16 @@ func TestStdioAdapterMalformedInputSkipped(t *testing.T) {
 
 	require.NoError(t, client.Connect(context.Background()))
 
-	// Write a malformed line followed by a valid message to the adapter's input
-	// (peer writes serverW, which feeds clientR).
+	// A malformed line terminates the session before a subsequent frame can be
+	// delivered.
 	_, err := serverW.Write([]byte("this is not json\n"))
-	require.NoError(t, err)
-	valid := ACPMessage{Type: TypeMessage, SenderID: "peer", ReceiverID: "client", Content: "valid"}
-	payload, err := json.Marshal(valid)
-	require.NoError(t, err)
-	_, err = serverW.Write(append(payload, '\n'))
 	require.NoError(t, err)
 
 	select {
-	case got := <-client.ReceiveMessages():
-		assert.Equal(t, "valid", got.Content)
-		assert.Equal(t, "peer", got.SenderID)
+	case _, open := <-client.ReceiveMessages():
+		assert.False(t, open)
 	case <-time.After(2 * time.Second):
-		t.Fatal("expected the valid message to be delivered despite a prior malformed line")
+		t.Fatal("malformed frame did not close the receive session")
 	}
 	<-readDone
 	require.NotEmpty(t, connectLine, "expected a connect frame on startup")
@@ -404,7 +403,7 @@ func readLineLen(r io.Reader) ([]byte, error) {
 // TestStdioAdapterConnectWriteFailure verifies a failing writer surfaces the
 // connect error and leaves the adapter disconnected.
 func TestStdioAdapterConnectWriteFailure(t *testing.T) {
-	client := NewStdioAdapter(nil, errorWriter{})
+	client := NewStdioAdapter(strings.NewReader(""), errorWriter{})
 	err := client.Connect(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "write")
