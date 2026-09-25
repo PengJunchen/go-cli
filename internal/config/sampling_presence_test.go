@@ -72,6 +72,30 @@ func TestUnmarshalConfigSamplingAbsentFieldsStayUnset(t *testing.T) {
 	}
 }
 
+func TestUnmarshalConfigRejectsJSONNullSamplingValues(t *testing.T) {
+	for _, section := range []string{"provider", "model", "small_model"} {
+		for _, field := range []string{"temperature", "max_tokens"} {
+			t.Run(section+"/"+field, func(t *testing.T) {
+				body := []byte(`{"` + section + `":{"` + field + `":null}}`)
+				var cfg Config
+				err := UnmarshalConfig(body, ConfigFormatJSON, &cfg)
+				require.Error(t, err, "JSON null must not become an explicit zero sampling value")
+				assert.Contains(t, err.Error(), "null")
+			})
+		}
+	}
+}
+
+func TestLoaderRejectsJSONNullInsteadOfOverridingSamplingFallback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"provider":{"max_tokens":null}}`), 0o600))
+
+	cfg, err := NewLoader().WithFile(path).Load(context.Background())
+	require.Error(t, err, "invalid null must fail the whole load instead of replacing the 4096 fallback")
+	assert.Nil(t, cfg)
+	assert.Contains(t, err.Error(), "null")
+}
+
 func TestLoaderSamplingPresenceAndZeroAwarePriority(t *testing.T) {
 	for _, key := range []string{
 		"GO_CLI_TEST_SAMPLING_PROVIDER_TEMPERATURE",

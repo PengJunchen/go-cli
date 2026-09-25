@@ -69,11 +69,14 @@ func UnmarshalConfig(data []byte, format ConfigFormat, target any) error {
 	}
 	switch format {
 	case ConfigFormatJSON:
-		if err := json.Unmarshal(data, target); err != nil {
-			return err
-		}
 		var values map[string]any
 		if err := json.Unmarshal(data, &values); err != nil {
+			return err
+		}
+		if err := validateSamplingNulls(target, values); err != nil {
+			return err
+		}
+		if err := json.Unmarshal(data, target); err != nil {
 			return err
 		}
 		recordSamplingPresence(target, values)
@@ -95,6 +98,33 @@ func UnmarshalConfig(data []byte, format ConfigFormat, target any) error {
 	default:
 		return fmt.Errorf("config: unsupported format %s", format)
 	}
+}
+
+func validateSamplingNulls(target any, values map[string]any) error {
+	switch target.(type) {
+	case *Config:
+		for _, section := range []string{"provider", "model", "small_model"} {
+			if err := validateSamplingSectionNulls(section, mapValue(values, section)); err != nil {
+				return err
+			}
+		}
+	case *ProviderConfig:
+		return validateSamplingSectionNulls("provider", values)
+	case *ModelConfig:
+		return validateSamplingSectionNulls("model", values)
+	case *SmallModelConfig:
+		return validateSamplingSectionNulls("small_model", values)
+	}
+	return nil
+}
+
+func validateSamplingSectionNulls(section string, values map[string]any) error {
+	for _, field := range []string{"temperature", "max_tokens"} {
+		if value, exists := values[field]; exists && value == nil {
+			return fmt.Errorf("config: %s.%s cannot be null", section, field)
+		}
+	}
+	return nil
 }
 
 func recordSamplingPresence(target any, values map[string]any) {
