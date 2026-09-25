@@ -264,6 +264,99 @@ func TestScanHardcodedDefaults_CaseInsensitive(t *testing.T) {
 	assert.NotEmpty(t, findings, "case-insensitive match should detect 'DEFAULT TIMEOUT'")
 }
 
+func TestScanHardcodedDefaultsIgnoresStandardErrorMessageLiterals(t *testing.T) {
+	cases := []struct {
+		name string
+		code string
+	}{
+		{
+			name: "aliased errors New",
+			code: `package example
+import errorlib "errors"
+func reject() error { return errorlib.New("compaction: mandatory system prompt exceeds token budget") }
+`,
+		},
+		{
+			name: "standard errors New",
+			code: `package example
+import "errors"
+func reject() error { return errors.New("compaction: mandatory system prompt exceeds token budget") }
+`,
+		},
+		{
+			name: "aliased fmt Errorf",
+			code: `package example
+import formatter "fmt"
+func reject(err error) error { return formatter.Errorf("default timeout while waiting: %w", err) }
+`,
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			file := filepath.Join(dir, "errors.go")
+			require.NoError(t, os.WriteFile(file, []byte(testCase.code), 0o600))
+			assert.Empty(t, scanHardcodedDefaults(dir, []string{file}), "standard error messages are not embedded prompts")
+		})
+	}
+}
+
+func TestScanHardcodedDefaultsKeepsPromptLiteralsOutsideErrorMessages(t *testing.T) {
+	cases := []struct {
+		name string
+		code string
+	}{
+		{
+			name: "system instructions constant",
+			code: `package example
+const SystemInstructions = "You are a helpful assistant"
+`,
+		},
+		{
+			name: "fmt Errorf non-format argument",
+			code: `package example
+import formatter "fmt"
+func reject() error { return formatter.Errorf("%s", "You are a helpful assistant") }
+`,
+		},
+		{
+			name: "local variable shadows imported errors alias",
+			code: `package example
+import errorlib "errors"
+type fakeErrors struct{}
+func (fakeErrors) New(string) error { return nil }
+func prompt() error { errorlib := fakeErrors{}; return errorlib.New("You are a helpful assistant") }
+`,
+		},
+		{
+			name: "local variable shadows imported fmt",
+			code: `package example
+import "fmt"
+type fakeFormatter struct{}
+func (fakeFormatter) Errorf(string, ...any) error { return nil }
+func prompt() error { fmt := fakeFormatter{}; return fmt.Errorf("You are a helpful assistant") }
+`,
+		},
+		{
+			name: "non-standard errors package",
+			code: `package example
+import errors "example.com/not-standard/errors"
+func prompt() error { return errors.New("system prompt for the model") }
+`,
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			file := filepath.Join(dir, "prompt.go")
+			require.NoError(t, os.WriteFile(file, []byte(testCase.code), 0o600))
+			assert.NotEmpty(t, scanHardcodedDefaults(dir, []string{file}), "prompt literals must remain detectable")
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // SCAN-010: scanCommandRouting & isCommandStringLiteral
 // ---------------------------------------------------------------------------
