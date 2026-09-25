@@ -360,8 +360,11 @@ func (s *SessionRunCommitSink) RecordExecution(ctx context.Context, execution co
 	if err := s.validateCallContextLocked(ctx, execution.RunID); err != nil {
 		return err
 	}
-	if err := s.rejectAfterTerminalLocked(); err != nil {
-		return err
+	// A durable terminal fences ordinary writes. Only a positive proof for an
+	// already-receipted action may pass this gate for bounded owner cleanup.
+	lateAfterTerminal := s.terminalID != ""
+	if lateAfterTerminal && execution.CompletionProof == "" {
+		return s.rejectAfterTerminalLocked()
 	}
 	if execution.ToolCallID == "" || execution.ActionID == "" || execution.OwnerGeneration == "" {
 		return errors.New("session: execution observation requires a full reserved action identity")
@@ -393,6 +396,22 @@ func (s *SessionRunCommitSink) RecordExecution(ctx context.Context, execution co
 	if err != nil {
 		return err
 	}
+	if lateAfterTerminal {
+		if execution.DispatchState != core.DispatchStateDispatched || execution.ResourceState != core.RunExecutionQuiescent {
+			return errors.New("session: post-terminal execution requires a positive quiescent completion observation")
+		}
+		ref := refFromEntry(intent, s.sessionID)
+		receipt, err := s.findReceiptForIntentLocked(ref, intent)
+		if err != nil {
+			return fmt.Errorf("session: post-terminal completion requires its durable receipt: %w", err)
+		}
+		if receipt.DispatchState != core.DispatchStateDispatched || receipt.Seq == 0 {
+			return errors.New("session: post-terminal completion requires a synced dispatched receipt")
+		}
+		if err := s.validatePostTerminalActionLocked(execution.RunID, receipt); err != nil {
+			return err
+		}
+	}
 	row := SessionEntry{
 		Type: EntryTypeTool, RunID: execution.RunID, WorkspaceID: intent.WorkspaceID,
 		ActionBatchID: intent.ActionBatchID, ActionID: intent.ActionID,
@@ -411,6 +430,17 @@ func (s *SessionRunCommitSink) RecordExecution(ctx context.Context, execution co
 	}{refFromEntry(row, s.sessionID), execution.DispatchState, execution.ResourceState, identity, string(execution.CompletionProof)})
 	if err != nil {
 		return err
+	}
+	if lateAfterTerminal && row.CompletionProof != "" {
+		for _, existing := range s.branchRows {
+			if existing.RecordVersion != 1 || existing.ActionState != ActionStateExecution || existing.CompletionProof == "" || !sameActionReference(refFromEntry(intent, s.sessionID), refFromEntry(existing, s.sessionID)) {
+				continue
+			}
+			if sameExecutionObservation(existing, row) {
+				return nil
+			}
+			return errors.New("session: post-terminal completion conflicts with an existing positive proof")
+		}
 	}
 	for _, existing := range s.branchRows {
 		if existing.ID != row.ID {
@@ -536,8 +566,11 @@ func (s *SessionRunCommitSink) ResolveExecution(ctx context.Context, resolution 
 	if err := s.validateCallContextLocked(ctx, resolution.RunID); err != nil {
 		return err
 	}
-	if err := s.rejectAfterTerminalLocked(); err != nil {
-		return err
+	// Keep the terminal result immutable while allowing its exact local cleanup
+	// proof to finish the matching workspace marker.
+	lateAfterTerminal := s.terminalID != ""
+	if lateAfterTerminal && resolution.Evidence != core.ResolutionLocalResourcesStopped {
+		return s.rejectAfterTerminalLocked()
 	}
 	if resolution.ActionID == "" {
 		return errors.New("session: execution resolution requires an action ID")
@@ -553,6 +586,14 @@ func (s *SessionRunCommitSink) ResolveExecution(ctx context.Context, resolution 
 	}
 	if receipt.RecordVersion != 1 || receipt.Seq == 0 {
 		return errors.New("session: execution resolution requires a synced receipt on the active branch")
+	}
+	if lateAfterTerminal {
+		if receipt.DispatchState != core.DispatchStateDispatched {
+			return errors.New("session: post-terminal resolution requires a dispatched receipt")
+		}
+		if err := s.validatePostTerminalActionLocked(resolution.RunID, receipt); err != nil {
+			return err
+		}
 	}
 	if resolution.Evidence == core.ResolutionRemoteTerminal {
 		return errors.New("session: remote terminal resolution requires unsupported typed protocol evidence")
@@ -678,15 +719,15 @@ func (s *SessionRunCommitSink) CommitTerminal(ctx context.Context, terminal core
 	if err != nil {
 		return err
 	}
+	if err := s.verifyTerminalProjectionsLocked(terminal.RunID, terminal.Projections); err != nil {
+		return err
+	}
 	if hasTerminal {
 		if terminalRow.ID != terminalID || terminalRow.RunOutcome != terminal.Outcome {
 			return errors.New("session: terminal checkpoint conflicts with its durable row")
 		}
 		if len(existingRows) != len(terminal.Transcript) {
 			return errors.New("session: terminal checkpoint exists before the complete transcript prefix")
-		}
-		if err := s.verifyTerminalProjectionsLocked(terminal.RunID, terminal.Projections); err != nil {
-			return err
 		}
 		s.terminalID = terminalID
 		return nil
@@ -719,54 +760,6 @@ func (s *SessionRunCommitSink) CommitTerminal(ctx context.Context, terminal core
 	for _, row := range rows {
 		if row.ID == terminalID {
 			return errors.New("session: terminal checkpoint ID conflicts with a terminal transcript row")
-		}
-	}
-	projectionRows := make([]SessionEntry, 0, len(terminal.Projections))
-	seenProjectionIDs := make(map[string]struct{}, len(terminal.Projections))
-	seenProjectionBoundaries := make(map[string]struct{}, len(terminal.Projections))
-	for _, projection := range terminal.Projections {
-		candidate, err := s.compactionEntryLocked(terminal.RunID, projection)
-		if err != nil {
-			return fmt.Errorf("session: validate terminal compaction projection: %w", err)
-		}
-		if _, duplicate := seenProjectionIDs[candidate.ID]; duplicate {
-			return errors.New("session: terminal repeats a compaction projection")
-		}
-		if _, duplicate := seenProjectionBoundaries[candidate.CompactedThroughEntryID]; duplicate {
-			return errors.New("session: terminal repeats a compaction source boundary")
-		}
-		seenProjectionIDs[candidate.ID] = struct{}{}
-		seenProjectionBoundaries[candidate.CompactedThroughEntryID] = struct{}{}
-		found := false
-		for _, existing := range s.branchRows {
-			if existing.ID == candidate.ID {
-				if !sameCompactionRow(existing, candidate) {
-					return errors.New("session: terminal compaction projection conflicts with its durable row")
-				}
-				found = true
-				break
-			}
-			if existing.RecordVersion == 1 && existing.Type == EntryTypeCompaction && existing.RunID == terminal.RunID && existing.CompactedThroughEntryID == candidate.CompactedThroughEntryID {
-				return errors.New("session: terminal conflicts with an existing compaction at this source boundary")
-			}
-		}
-		if !found {
-			projectionRows = append(projectionRows, candidate)
-		}
-	}
-	for _, projection := range projectionRows {
-		for _, row := range rows {
-			if projection.ID == row.ID {
-				return errors.New("session: terminal compaction ID conflicts with a transcript or terminal row")
-			}
-		}
-		if projection.ID == terminalID {
-			return errors.New("session: terminal checkpoint ID conflicts with a compaction row")
-		}
-	}
-	for _, projection := range projectionRows {
-		if _, err := s.appendAndRefreshRowsLocked(ctx, projection); err != nil {
-			return fmt.Errorf("session: persist terminal compaction projection: %w", err)
 		}
 	}
 	checkpoint := SessionEntry{
@@ -819,6 +812,20 @@ func (s *SessionRunCommitSink) validateCallContextLocked(ctx context.Context, pa
 func (s *SessionRunCommitSink) rejectAfterTerminalLocked() error {
 	if s.terminalID != "" {
 		return errors.New("session: run already has a durable terminal checkpoint")
+	}
+	return nil
+}
+
+func (s *SessionRunCommitSink) validatePostTerminalActionLocked(runID string, receipt SessionEntry) error {
+	terminal, exists, err := s.findTerminalCheckpointLocked(runID)
+	if err != nil {
+		return err
+	}
+	if !exists || terminal.ID != s.terminalID || terminal.Seq == 0 {
+		return errors.New("session: post-terminal action proof requires this run's synced terminal checkpoint")
+	}
+	if receipt.RecordVersion != 1 || receipt.Type != EntryTypeTool || receipt.ActionState != "" || receipt.RunID != runID || receipt.Seq == 0 || receipt.Seq >= terminal.Seq {
+		return errors.New("session: post-terminal action proof requires an earlier synced receipt")
 	}
 	return nil
 }
@@ -945,29 +952,34 @@ func (s *SessionRunCommitSink) validateCompactionBoundaryLocked(boundaryPosition
 }
 
 func (s *SessionRunCommitSink) verifyTerminalProjectionsLocked(runID string, projections []core.CompactionProjection) error {
+	// The terminal payload is a complete snapshot, not a chance to append or
+	// silently omit the run's already-durable compaction projections.
+	durable := make([]SessionEntry, 0)
+	for _, row := range s.branchRows {
+		if row.RecordVersion == 1 && row.Type == EntryTypeCompaction && row.RunID == runID {
+			durable = append(durable, row)
+		}
+	}
+	if len(projections) != len(durable) {
+		return fmt.Errorf("session: terminal projection count %d differs from %d durable run projections", len(projections), len(durable))
+	}
 	seen := make(map[string]struct{}, len(projections))
-	for _, projection := range projections {
+	seenBoundaries := make(map[string]struct{}, len(projections))
+	for index, projection := range projections {
 		candidate, err := s.compactionEntryLocked(runID, projection)
 		if err != nil {
-			return err
+			return fmt.Errorf("session: validate terminal compaction projection: %w", err)
 		}
 		if _, duplicate := seen[candidate.ID]; duplicate {
 			return errors.New("session: terminal repeats a compaction projection")
 		}
-		seen[candidate.ID] = struct{}{}
-		found := false
-		for _, row := range s.branchRows {
-			if row.ID != candidate.ID {
-				continue
-			}
-			if !sameCompactionRow(row, candidate) {
-				return errors.New("session: terminal compaction projection conflicts with its durable row")
-			}
-			found = true
-			break
+		if _, duplicate := seenBoundaries[candidate.CompactedThroughEntryID]; duplicate {
+			return errors.New("session: terminal repeats a compaction source boundary")
 		}
-		if !found {
-			return errors.New("session: terminal projection is missing its durable compaction row")
+		seen[candidate.ID] = struct{}{}
+		seenBoundaries[candidate.CompactedThroughEntryID] = struct{}{}
+		if candidate.ID != durable[index].ID || !sameCompactionRow(durable[index], candidate) {
+			return fmt.Errorf("session: terminal projection at position %d does not match its durable ordered projection", index)
 		}
 	}
 	return nil

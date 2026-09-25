@@ -3,14 +3,17 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
 
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/tools"
-	"github.com/stretchr/testify/require"
 )
 
 var errTestRunCommitContextMissing = errors.New("test: run-commit context missing")
@@ -38,9 +41,13 @@ func (a *sessionCommitTestAgent) Run(ctx context.Context, _ core.Submission, _ .
 }
 
 func runSessionCommitAgent(t *testing.T, sink core.RunCommitSink, binding core.RunCommitBinding, commit func(context.Context, core.RunCommitSink, core.RunCommitBinding, string) error) error {
+	return runSessionCommitAgentWithContext(context.Background(), t, sink, binding, commit)
+}
+
+func runSessionCommitAgentWithContext(parent context.Context, t *testing.T, sink core.RunCommitSink, binding core.RunCommitBinding, commit func(context.Context, core.RunCommitSink, core.RunCommitBinding, string) error) error {
 	t.Helper()
 	harness := core.NewHarnessImpl(&sessionCommitTestAgent{commit: commit})
-	ctx := core.WithRunCommit(context.Background(), sink, binding)
+	ctx := core.WithRunCommit(parent, sink, binding)
 	stream, err := harness.Submit(ctx, "test input")
 	require.NoError(t, err)
 	for range stream.Events() {
@@ -524,6 +531,293 @@ func TestSessionRunCommitSinkCommitTerminalAppendsOnlySuffixAndIsIdempotent(t *t
 	require.Equal(t, core.RunOutcomeSuccess, checkpoint.RunOutcome)
 	require.Len(t, snapshot.PublishedView.Messages, 2)
 	require.Equal(t, "done", snapshot.PublishedView.Messages[1].Content)
+}
+
+func TestSessionRunCommitSinkAllowsBoundedLateProofAfterTerminalWithoutChangingResult(t *testing.T) {
+	parent := context.Background()
+	prepared, err := NewDurableJSONLSessionPreparer(t.TempDir(), nil).PrepareNew(parent, "late completion proof")
+	require.NoError(t, err)
+	defer prepared.Close()
+	workspaceID := "workspace-v1-adapter"
+	index := newWorkspaceQuarantineIndex(t.TempDir(), workspaceIndexIO{})
+	require.NoError(t, index.EnsureWorkspace(parent, workspaceID))
+	sink, err := NewSessionRunCommitSink(prepared, index, workspaceID, nil)
+	require.NoError(t, err)
+	binding := core.RunCommitBinding{SessionID: prepared.View().SessionID, WorkspaceID: workspaceID, OwnerGeneration: "parent-generation"}
+
+	var runID string
+	var intent core.ActionIntent
+	var proof core.ActionExecution
+	var terminal core.RunTerminal
+	var wrongExecutionErr, wrongResolutionErr error
+	var staleExecutionErr, staleResolutionErr error
+	var forbiddenInputErr, forbiddenIntentErr, forbiddenReceiptErr, forbiddenCompactionErr, changedTerminalErr error
+	var lateExecutionErr, repeatedExecutionErr, lateResolutionErr, repeatedResolutionErr error
+	var closedExecutionErr, closedResolutionErr error
+	err = runSessionCommitAgentWithContext(parent, t, sink, binding, func(ctx context.Context, actual core.RunCommitSink, runBinding core.RunCommitBinding, ownedRunID string) error {
+		runID = ownedRunID
+		var ok bool
+		actualSink, actualBinding, ok := core.RunCommitFromContext(ctx)
+		if !ok || actualSink != actual || actualBinding.SessionID != runBinding.SessionID || core.RunIDFromContext(ctx) != ownedRunID {
+			return errors.New("test: callback did not retain the bound sink, identity, and owned run")
+		}
+		user := core.AgentMessage{Role: "user", Content: "run the tool", InputKind: core.InputKindUser}
+		assistant := core.AgentMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: "call-1", Name: "read", Args: map[string]any{"path": "README.md"}}}}
+		intent = preparedSessionRunCommitIntent(t)
+		intent.RunID, intent.SessionID, intent.OwnerGeneration = ownedRunID, runBinding.SessionID, runBinding.OwnerGeneration
+		if err := actual.CommitInput(ctx, core.RunCommitInput{RunID: ownedRunID, TranscriptIndex: 0, Message: user, InputKind: core.InputKindUser}); err != nil {
+			return err
+		}
+		if err := actual.BeginIntentBatch(ctx, core.RunIntentBatch{
+			RunID: ownedRunID, ActionBatchID: intent.ActionBatchID, AssistantTranscriptOrdinal: intent.AssistantTranscriptOrdinal,
+			AssistantMessage: assistant, Intents: []core.ActionIntent{intent},
+		}); err != nil {
+			return err
+		}
+		if err := actual.RecordExecution(ctx, core.ActionExecution{
+			RunID: ownedRunID, AssistantTranscriptOrdinal: intent.AssistantTranscriptOrdinal, ToolCallID: intent.ToolCallID,
+			ActionID: intent.ActionID, OwnerGeneration: intent.OwnerGeneration,
+			DispatchState: core.DispatchStateDispatched, ResourceState: core.RunExecutionCleanupPending,
+		}); err != nil {
+			return err
+		}
+		receiptMessage := core.AgentMessage{Role: "tool", ToolCallID: intent.ToolCallID, ToolName: "read", Content: "ok", ReceiptOutcome: core.ReceiptOutcomeSuccess}
+		if err := actual.RecordReceipt(ctx, core.RunToolReceipt{
+			RunID: ownedRunID, AssistantTranscriptOrdinal: intent.AssistantTranscriptOrdinal, ToolCallID: intent.ToolCallID,
+			ActionID: intent.ActionID, TranscriptIndex: 2, DispatchState: core.DispatchStateDispatched,
+			ReceiptOutcome: core.ReceiptOutcomeSuccess, Message: receiptMessage,
+		}); err != nil {
+			return err
+		}
+		terminal = core.RunTerminal{
+			RunID:      ownedRunID,
+			Transcript: []core.TranscriptEntry{{Message: user}, {Message: assistant}, {Message: receiptMessage}},
+			Outcome:    core.RunOutcomeSuccess, TerminalCheckpointID: core.TerminalCheckpointID("terminal-late-proof-" + ownedRunID),
+		}
+		if err := actual.CommitTerminal(ctx, terminal); err != nil {
+			return err
+		}
+		proof = core.ActionExecution{
+			RunID: ownedRunID, AssistantTranscriptOrdinal: intent.AssistantTranscriptOrdinal, ToolCallID: intent.ToolCallID,
+			ActionID: intent.ActionID, OwnerGeneration: intent.OwnerGeneration,
+			DispatchState: core.DispatchStateDispatched, ResourceState: core.RunExecutionQuiescent,
+			CompletionProof: tools.CompletionInlinePipelineJoined,
+		}
+		wrongExecution := proof
+		wrongExecution.ActionID = "other-action"
+		wrongExecutionErr = actual.RecordExecution(ctx, wrongExecution)
+		wrongResolutionErr = actual.ResolveExecution(ctx, core.ExecutionResolution{
+			RunID: ownedRunID, ActionID: "other-action", Evidence: core.ResolutionLocalResourcesStopped,
+		})
+		staleCtx, staleCancel := context.WithCancel(ctx)
+		staleCancel()
+		staleExecutionErr = actual.RecordExecution(staleCtx, proof)
+		staleResolutionErr = actual.ResolveExecution(staleCtx, core.ExecutionResolution{
+			RunID: ownedRunID, ActionID: intent.ActionID, Evidence: core.ResolutionLocalResourcesStopped,
+		})
+		forbiddenInputErr = actual.CommitInput(ctx, core.RunCommitInput{
+			RunID: ownedRunID, TranscriptIndex: 3, Message: core.AgentMessage{Role: "user", Content: "must stay terminal"}, InputKind: core.InputKindFollowUp,
+		})
+		forbiddenIntentErr = actual.BeginIntentBatch(ctx, core.RunIntentBatch{RunID: ownedRunID})
+		forbiddenReceiptErr = actual.RecordReceipt(ctx, core.RunToolReceipt{RunID: ownedRunID})
+		forbiddenCompactionErr = actual.CommitCompaction(ctx, core.CompactionProjection{Summary: "must stay terminal"})
+		changedTerminal := terminal
+		changedTerminal.Outcome = core.RunOutcomeError
+		changedTerminalErr = actual.CommitTerminal(ctx, changedTerminal)
+		if wrongExecutionErr == nil || wrongResolutionErr == nil || staleExecutionErr == nil || staleResolutionErr == nil || forbiddenInputErr == nil || forbiddenIntentErr == nil || forbiddenReceiptErr == nil || forbiddenCompactionErr == nil || changedTerminalErr == nil {
+			return errors.New("test: post-terminal negative operation unexpectedly succeeded")
+		}
+		if indexMarkerStateForTest(t, index, PendingActionRef{
+			SessionID: runBinding.SessionID, WorkspaceID: workspaceID, RunID: ownedRunID,
+			ActionBatchID: intent.ActionBatchID, AssistantTranscriptOrdinal: intent.AssistantTranscriptOrdinal,
+			ToolCallID: intent.ToolCallID, ActionID: intent.ActionID,
+		}) != DispatchMarkerPresent {
+			return errors.New("test: rejected late proof or resolution changed the workspace marker")
+		}
+		cleanupCtx, cleanupCancel := context.WithTimeout(ctx, 250*time.Millisecond)
+		defer cleanupCancel()
+		cleanupDeadline, hasCleanupDeadline := cleanupCtx.Deadline()
+		if !hasCleanupDeadline {
+			return errors.New("test: late cleanup context has no 250ms deadline")
+		}
+		lateExecutionErr = actual.RecordExecution(cleanupCtx, proof)
+		if lateExecutionErr != nil {
+			return lateExecutionErr
+		}
+		repeatedExecutionErr = actual.RecordExecution(cleanupCtx, proof)
+		if repeatedExecutionErr != nil {
+			return repeatedExecutionErr
+		}
+		resolution := core.ExecutionResolution{RunID: ownedRunID, ActionID: intent.ActionID, Evidence: core.ResolutionLocalResourcesStopped}
+		lateResolutionErr = actual.ResolveExecution(cleanupCtx, resolution)
+		if lateResolutionErr != nil {
+			return lateResolutionErr
+		}
+		repeatedResolutionErr = actual.ResolveExecution(cleanupCtx, resolution)
+		if repeatedResolutionErr != nil {
+			return repeatedResolutionErr
+		}
+		if deadlineAfter, _ := cleanupCtx.Deadline(); !cleanupDeadline.Equal(deadlineAfter) {
+			return errors.New("test: late cleanup reused a different deadline")
+		}
+		if err := cleanupCtx.Err(); err != nil {
+			return fmt.Errorf("test: shared cleanup deadline expired before resolution sync: %w", err)
+		}
+		sink.CloseRunCommit()
+		closedExecutionErr = actual.RecordExecution(cleanupCtx, proof)
+		closedResolutionErr = actual.ResolveExecution(cleanupCtx, resolution)
+		return nil
+	})
+	require.NoError(t, err)
+	require.NoError(t, lateExecutionErr, "the original 250ms cleanup context permits the same owner's late proof")
+	require.NoError(t, repeatedExecutionErr, "an identical late proof is idempotent")
+	require.NoError(t, lateResolutionErr, "the proof's typed resolution clears only its exact marker")
+	require.NoError(t, repeatedResolutionErr, "an identical late resolution is idempotent")
+	require.Error(t, wrongExecutionErr)
+	require.Error(t, wrongResolutionErr)
+	require.Error(t, staleExecutionErr)
+	require.Error(t, staleResolutionErr)
+	require.Error(t, forbiddenInputErr)
+	require.Error(t, forbiddenIntentErr)
+	require.Error(t, forbiddenReceiptErr)
+	require.Error(t, forbiddenCompactionErr)
+	require.Error(t, changedTerminalErr)
+	require.Error(t, closedExecutionErr, "a returned run lease cannot be reused for late completion writes")
+	require.Error(t, closedResolutionErr, "a returned run lease cannot be reused for late resolution writes")
+	require.Equal(t, DispatchMarkerResolved, indexMarkerStateForTest(t, index, PendingActionRef{
+		SessionID: prepared.View().SessionID, WorkspaceID: workspaceID, RunID: runID,
+		ActionBatchID: intent.ActionBatchID, AssistantTranscriptOrdinal: intent.AssistantTranscriptOrdinal,
+		ToolCallID: intent.ToolCallID, ActionID: intent.ActionID,
+	}))
+	snapshot, err := prepared.Snapshot()
+	require.NoError(t, err)
+	require.Len(t, snapshot.DurableEntries, 8, "late proof and resolution append once without altering the terminal rows")
+	terminalCount := 0
+	var runTranscript []SessionEntry
+	for _, row := range snapshot.DurableEntries {
+		if row.ID == string(terminal.TerminalCheckpointID) {
+			terminalCount++
+			require.Equal(t, CheckpointRunTerminal, row.CheckpointKind)
+			require.Equal(t, core.RunOutcomeSuccess, row.RunOutcome)
+		}
+		if row.RunID == runID && row.TranscriptIndex != nil {
+			runTranscript = append(runTranscript, row)
+		}
+	}
+	require.Equal(t, 1, terminalCount, "late proof metadata must leave the saved terminal checkpoint unchanged")
+	require.Len(t, runTranscript, len(terminal.Transcript), "late metadata must not append transcript rows")
+	for index, row := range runTranscript {
+		require.Equal(t, uint64(index), *row.TranscriptIndex)
+		require.True(t, durableRowMatchesMessage(row, terminal.Transcript[index].Message), "terminal transcript row %d changed after late proof handling", index)
+	}
+}
+
+func TestSessionRunCommitSinkTerminalRequiresCompleteOrderedDurableProjections(t *testing.T) {
+	ctx := context.Background()
+	prepared, err := NewDurableJSONLSessionPreparer(t.TempDir(), nil).PrepareNew(ctx, "terminal projection set")
+	require.NoError(t, err)
+	defer prepared.Close()
+	writer := prepared.DurableWriter()
+	seedUser := sessionEntryFromRunCommitMessage(core.AgentMessage{Role: "user", Content: "prior user", InputKind: core.InputKindUser}, EntryTypeUser)
+	seedUser.ID = "terminal-projection-prior-user"
+	priorUserIndex := uint64(0)
+	seedUser.RunID = "terminal-projection-prior-run"
+	seedUser.TranscriptIndex = &priorUserIndex
+	seedAssistant := sessionEntryFromRunCommitMessage(core.AgentMessage{Role: "assistant", Content: "prior assistant"}, EntryTypeAssistant)
+	seedAssistant.ID = "terminal-projection-prior-assistant"
+	seedAssistant.ParentID = seedUser.ID
+	priorAssistantIndex := uint64(1)
+	seedAssistant.RunID = "terminal-projection-prior-run"
+	seedAssistant.TranscriptIndex = &priorAssistantIndex
+	_, err = writer.AppendAndSync(ctx, seedUser, seedAssistant)
+	require.NoError(t, err)
+	workspaceID := "workspace-v1-adapter"
+	index := newWorkspaceQuarantineIndex(t.TempDir(), workspaceIndexIO{})
+	require.NoError(t, index.EnsureWorkspace(ctx, workspaceID))
+	sink, err := NewSessionRunCommitSink(prepared, index, workspaceID, nil)
+	require.NoError(t, err)
+	binding := core.RunCommitBinding{SessionID: prepared.View().SessionID, WorkspaceID: workspaceID, OwnerGeneration: "parent-generation"}
+	var missingProjectionErr, exactProjectionErr, omittedRetryErr, reorderedRetryErr, changedRetryErr error
+	var rowsBeforeMissingProjection, rowsAfterMissingProjection int
+	var terminalID string
+	err = runSessionCommitAgent(t, sink, binding, func(ctx context.Context, actual core.RunCommitSink, _ core.RunCommitBinding, runID string) error {
+		user := core.AgentMessage{Role: "user", Content: "finish", InputKind: core.InputKindUser}
+		assistant := core.AgentMessage{Role: "assistant", Content: "done"}
+		if err := actual.CommitInput(ctx, core.RunCommitInput{RunID: runID, TranscriptIndex: 0, Message: user, InputKind: core.InputKindUser}); err != nil {
+			return err
+		}
+		projectionOne := core.CompactionProjection{
+			ExpectedHistoryRevision: sink.baseView.Revision,
+			Through:                 core.CompactionCursor{PriorHistoryCount: 1}, Summary: "first projection",
+		}
+		projectionTwo := core.CompactionProjection{
+			ExpectedHistoryRevision: sink.baseView.Revision,
+			Through:                 core.CompactionCursor{PriorHistoryCount: 2}, Summary: "second projection",
+		}
+		if err := actual.CommitCompaction(ctx, projectionOne); err != nil {
+			return err
+		}
+		if err := actual.CommitCompaction(ctx, projectionTwo); err != nil {
+			return err
+		}
+		terminal := core.RunTerminal{
+			RunID: runID, Transcript: []core.TranscriptEntry{{Message: user}, {Message: assistant}},
+			Outcome: core.RunOutcomeSuccess, TerminalCheckpointID: core.TerminalCheckpointID("terminal-projection-set-" + runID),
+		}
+		terminalID = string(terminal.TerminalCheckpointID)
+		before, err := prepared.Snapshot()
+		if err != nil {
+			return err
+		}
+		rowsBeforeMissingProjection = len(before.DurableEntries)
+		missingProjectionErr = actual.CommitTerminal(ctx, terminal)
+		afterMissing, err := prepared.Snapshot()
+		if err != nil {
+			return err
+		}
+		rowsAfterMissingProjection = len(afterMissing.DurableEntries)
+		terminal.Projections = []core.CompactionProjection{projectionOne, projectionTwo}
+		exactProjectionErr = actual.CommitTerminal(ctx, terminal)
+		if exactProjectionErr != nil {
+			return exactProjectionErr
+		}
+		omittedRetry := terminal
+		omittedRetry.Projections = nil
+		omittedRetryErr = actual.CommitTerminal(ctx, omittedRetry)
+		reorderedRetry := terminal
+		reorderedRetry.Projections = []core.CompactionProjection{projectionTwo, projectionOne}
+		reorderedRetryErr = actual.CommitTerminal(ctx, reorderedRetry)
+		changedRetry := terminal
+		changedRetry.Projections = []core.CompactionProjection{projectionOne, {ExpectedHistoryRevision: projectionTwo.ExpectedHistoryRevision, Through: projectionTwo.Through, Summary: "changed payload"}}
+		changedRetryErr = actual.CommitTerminal(ctx, changedRetry)
+		return nil
+	})
+	require.NoError(t, err)
+	require.Error(t, missingProjectionErr, "the first terminal must include the complete durable projection set")
+	require.Equal(t, rowsBeforeMissingProjection, rowsAfterMissingProjection, "an incomplete first terminal must write no transcript or terminal bytes")
+	require.NoError(t, exactProjectionErr)
+	require.Error(t, omittedRetryErr, "an idempotent retry cannot omit a durable projection")
+	require.Error(t, reorderedRetryErr, "an idempotent retry must preserve projection order")
+	require.Error(t, changedRetryErr, "an idempotent retry cannot change a projection payload")
+	snapshot, err := prepared.Snapshot()
+	require.NoError(t, err)
+	var compactions []SessionEntry
+	var terminalRows []SessionEntry
+	for _, row := range snapshot.DurableEntries {
+		if row.Type == EntryTypeCompaction && row.RunID != "" {
+			compactions = append(compactions, row)
+		}
+		if row.Type == EntryTypeCheckpoint && row.CheckpointKind == CheckpointRunTerminal {
+			terminalRows = append(terminalRows, row)
+		}
+	}
+	require.Len(t, compactions, 2)
+	require.Len(t, terminalRows, 1)
+	require.Equal(t, terminalID, terminalRows[0].ID)
+	require.Equal(t, "first projection", compactions[0].Summary)
+	require.Equal(t, "second projection", compactions[1].Summary)
+	require.Equal(t, core.RunOutcomeSuccess, terminalRows[0].RunOutcome, "rejected retries must leave the terminal payload unchanged")
+	require.Len(t, snapshot.DurableEntries, 7)
 }
 
 func TestSessionRunCommitSinkRejectsConflictingTerminalTranscriptWithoutWrite(t *testing.T) {
