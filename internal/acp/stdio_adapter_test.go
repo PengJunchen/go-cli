@@ -26,7 +26,12 @@ func newStdioPeer(t *testing.T) (ACPClient, *MockACPServer) {
 	mock.SetIO(serverR, serverW, nil)
 	require.NoError(t, mock.Start(context.Background()))
 
-	client := NewStdioAdapter(clientR, clientW, WithName("client"))
+	client := NewStdioAdapter(
+		clientR,
+		clientW,
+		WithName("client"),
+		WithStdioOwnedTransportCloser(closeAll{clientR, clientW}),
+	)
 
 	t.Cleanup(func() {
 		closeIgnored(serverR)
@@ -164,7 +169,7 @@ func TestStdioAdapterDisconnectWithCanceledContext(t *testing.T) {
 	cancel()
 	err := client.Disconnect(canceled)
 	assert.Error(t, err)
-	assert.Equal(t, context.Canceled, err)
+	assert.ErrorIs(t, err, context.Canceled)
 }
 
 // TestStdioAdapterDisconnectUnreadPipeReturns verifies that Disconnect returns
@@ -190,22 +195,32 @@ func TestStdioAdapterDisconnectUnreadPipeReturns(t *testing.T) {
 	// Close the client's input so readLoop's blocked reader unblocks.
 	closeIgnored(serverW)
 
-	// Disconnect must return promptly even though the disconnect write blocks.
+	// Disconnect must return pending promptly even though the disconnect write
+	// is caller-owned and the peer stopped reading.
 	done := make(chan error, 1)
+	var cleanupDone <-chan struct{}
 	go func() {
 		done <- client.Disconnect(ctx)
 	}()
 	select {
 	case err := <-done:
-		require.NoError(t, err)
+		require.Error(t, err)
+		var pending stdioPending
+		require.ErrorAs(t, err, &pending)
+		assert.False(t, pending.UnknownDelivery())
+		assertChannelOpen(t, pending.Done(), "blocked disconnect Write must remain tracked")
+		cleanupDone = pending.Done()
 	case <-time.After(5 * time.Second):
 		t.Fatal("Disconnect blocked when peer pipe was never read")
 	}
 
-	// Cleanup: closing serverR unblocks the leaked inner writeLine goroutine.
+	// Cleanup closes both caller-owned endpoints; only then may the actual read
+	// and write workers join and the pending cleanup complete.
 	closeIgnored(clientW)
 	closeIgnored(serverR)
+	closeIgnored(serverW)
 	closeIgnored(clientR)
+	assertChannelCloses(t, cleanupDone)
 }
 
 // TestStdioAdapterDisconnectDeliversFrame verifies that when the peer reads
