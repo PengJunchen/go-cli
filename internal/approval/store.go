@@ -103,35 +103,33 @@ func (s *InMemoryApprovalStore) bindFence(fence *tools.DispatchFence) error {
 }
 
 func (s *InMemoryApprovalStore) publishUpdate(event string, monotonicGrant bool, update func()) error {
-	for {
-		s.mu.Lock()
-		fence := s.fence
-		if fence == nil {
-			update()
-			s.mu.Unlock()
-			slog.Info(event)
-			return nil
-		}
+	s.mu.Lock()
+	fence := s.fence
+	if fence == nil {
+		update()
 		s.mu.Unlock()
+		slog.Info(event)
+		return nil
+	}
+	s.mu.Unlock()
 
-		if monotonicGrant {
-			if _, err := publishApprovalGrant(fence, fence.Snapshot(), func() {
-				s.mu.Lock()
-				defer s.mu.Unlock()
-				update()
-			}); err != nil {
-				return err
-			}
-		} else if _, err := fence.Publish(tools.DispatchFenceApproval, nil, func() {
+	if monotonicGrant {
+		if _, err := publishApprovalGrant(fence, fence.Snapshot(), func() {
 			s.mu.Lock()
 			defer s.mu.Unlock()
 			update()
 		}); err != nil {
 			return err
 		}
-		slog.Info(event)
-		return nil
+	} else if _, err := fence.Publish(tools.DispatchFenceApproval, nil, func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		update()
+	}); err != nil {
+		return err
 	}
+	slog.Info(event)
+	return nil
 }
 
 func (s *InMemoryApprovalStore) policyEpochValue() uint64 {

@@ -9,10 +9,11 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/pengjunchen/go-cli/internal/config"
-	"github.com/pengjunchen/go-cli/internal/tracing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/config"
+	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
 type assemblyTraceExporter struct {

@@ -9,8 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/llm"
 )
 
 type sequenceStreamModel struct {
@@ -220,4 +221,15 @@ func TestStreamGenerateCancellationDoesNotWaitForInnerChannelClose(t *testing.T)
 	case <-time.After(time.Second):
 		t.Fatal("inner stream did not observe cancellation")
 	}
+}
+
+func TestStreamGenerateRejectsClosedStreamWithoutFinalChunk(t *testing.T) {
+	model := &sequenceStreamModel{responses: [][]llm.MessageChunk{{}}}
+	loop := NewLoopAgent()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	_, err := loop.streamGenerateWithBudget(ctx, model, nil, nil, nil, &guardedStreamBudget{}, false)
+	require.NoError(t, ctx.Err(), "closed input stream must terminate without waiting for cancellation")
+	require.ErrorContains(t, err, "stream ended without a final chunk")
 }

@@ -228,7 +228,8 @@ func (s *JSONLSessionStore) ListSessions(ctx context.Context) ([]SessionMeta, er
 		}
 		return nil, fmt.Errorf("session: read sessions dir: %w", err)
 	}
-	defer directory.Close()
+	// This descriptor is used only to enumerate a read-only directory.
+	defer func() { _ = directory.Close() }()
 	dirEntries, err := directory.ReadDir(-1)
 	if err != nil {
 		return nil, fmt.Errorf("session: read sessions dir: %w", err)
@@ -538,7 +539,8 @@ func (s *JSONLSessionStore) findMostRecentSessionLocked() (string, error) {
 		}
 		return "", fmt.Errorf("session: read sessions dir: %w", err)
 	}
-	defer directory.Close()
+	// This descriptor is used only to enumerate a read-only directory.
+	defer func() { _ = directory.Close() }()
 	dirEntries, err := directory.ReadDir(-1)
 	if err != nil {
 		return "", fmt.Errorf("session: read sessions dir: %w", err)

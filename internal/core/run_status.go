@@ -7,7 +7,7 @@ type RunOutcome string
 const (
 	RunOutcomeSuccess   RunOutcome = "success"
 	RunOutcomeError     RunOutcome = "error"
-	RunOutcomeCancelled RunOutcome = "cancelled"
+	RunOutcomeCancelled RunOutcome = "cancelled" //nolint:misspell // Persisted/API wire spelling must remain stable.
 	RunOutcomeUnknown   RunOutcome = "unknown"
 )
 

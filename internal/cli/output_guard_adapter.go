@@ -145,9 +145,6 @@ func (m *outputGuardModel) streamAndGuardCompleteResponse(ctx context.Context, m
 				fail(fmt.Errorf("output guard: stream canceled: %w", streamCtx.Err()))
 				return
 			case chunk, ok = <-inner:
-				if !ok {
-					break
-				}
 			}
 			if !ok {
 				break

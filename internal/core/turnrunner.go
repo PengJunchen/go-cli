@@ -427,8 +427,6 @@ func (r *EinoTurnRunner) FollowUp(_ context.Context, id, content string) error {
 	return nil
 }
 
-// inject appends a submission of the given kind to a running turn's
-// corresponding slice.
 // Get returns a copy of the turn with the given id, or an error if unknown.
 func (r *EinoTurnRunner) Get(_ context.Context, id string) (Turn, error) {
 	r.mu.Lock()

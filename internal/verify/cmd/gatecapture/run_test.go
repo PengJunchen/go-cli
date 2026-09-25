@@ -54,7 +54,7 @@ func TestGateCaptureProcessFixture(t *testing.T) {
 func TestRunCapturesOutputWithinHardLimit(t *testing.T) {
 	for _, stream := range []string{"stdout", "stderr"} {
 		t.Run(stream, func(t *testing.T) {
-			result, err := runFixture(t, stream, Limits{StdoutBytes: 32, StderrBytes: 32, WaitDelay: 100 * time.Millisecond}, context.Background())
+			result, err := runFixture(context.Background(), t, stream, Limits{StdoutBytes: 32, StderrBytes: 32, WaitDelay: 100 * time.Millisecond})
 			if err == nil {
 				t.Fatal("Run() error = nil after fixture exceeded the capture limit")
 			}
@@ -76,7 +76,7 @@ func TestRunReturnsWithinWaitDelayWhenDescendantHoldsPipes(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	started := time.Now()
-	result, err := runFixtureWithEnv(t, "spawn-holder", "VERIFY_GATE_CAPTURE_PID_FILE="+pidFile, Limits{StdoutBytes: 1024, StderrBytes: 1024, WaitDelay: 150 * time.Millisecond}, ctx)
+	result, err := runFixtureWithEnv(ctx, t, "spawn-holder", "VERIFY_GATE_CAPTURE_PID_FILE="+pidFile, Limits{StdoutBytes: 1024, StderrBytes: 1024, WaitDelay: 150 * time.Millisecond})
 	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		t.Fatalf("fixture context error = %v, want deadline exceeded (result=%+v err=%v)", ctx.Err(), result, err)
 	}
@@ -90,7 +90,7 @@ func TestRunReturnsAfterContextTimeout(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
 	defer cancel()
 	started := time.Now()
-	_, err := runFixture(t, "sleep", Limits{StdoutBytes: 1024, StderrBytes: 1024, WaitDelay: 150 * time.Millisecond}, ctx)
+	_, err := runFixture(ctx, t, "sleep", Limits{StdoutBytes: 1024, StderrBytes: 1024, WaitDelay: 150 * time.Millisecond})
 	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		t.Fatalf("fixture context error = %v, want deadline exceeded (err=%v)", ctx.Err(), err)
 	}
@@ -99,12 +99,12 @@ func TestRunReturnsAfterContextTimeout(t *testing.T) {
 	}
 }
 
-func runFixture(t *testing.T, mode string, limits Limits, ctx context.Context) (Result, error) {
+func runFixture(ctx context.Context, t *testing.T, mode string, limits Limits) (Result, error) {
 	t.Helper()
-	return runFixtureWithEnv(t, mode, "", limits, ctx)
+	return runFixtureWithEnv(ctx, t, mode, "", limits)
 }
 
-func runFixtureWithEnv(t *testing.T, mode, extraEnv string, limits Limits, ctx context.Context) (Result, error) {
+func runFixtureWithEnv(ctx context.Context, t *testing.T, mode, extraEnv string, limits Limits) (Result, error) {
 	t.Helper()
 	cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=^TestGateCaptureProcessFixture$")
 	cmd.Env = append(os.Environ(), helperModeEnv+"="+mode)

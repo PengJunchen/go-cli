@@ -182,9 +182,6 @@ func (m *overflowRecoveryModel) Stream(ctx context.Context, msgs []Message, opts
 						fail(streamCtx.Err())
 						return
 					case chunk, ok = <-ch:
-						if !ok {
-							break
-						}
 					}
 					if !ok {
 						break

@@ -26,7 +26,8 @@ func openSessionFileNoFollow(directory, filename string, flags int, mode os.File
 	if err != nil {
 		return nil, err
 	}
-	defer directoryFile.Close()
+	// The descriptor is used only for openat; it carries no pending write.
+	defer func() { _ = directoryFile.Close() }()
 
 	openFlags := unix.O_CLOEXEC | unix.O_NOFOLLOW | unix.O_NONBLOCK
 	switch flags & (os.O_WRONLY | os.O_RDWR) {

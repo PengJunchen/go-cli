@@ -20,9 +20,8 @@ const (
 )
 
 var (
-	errProcessContainmentUnsupported = errors.New("process containment is unsupported on this operating system")
-	errProcessGroupRemained          = errors.New("child processes remained after the shell exited")
-	errProcessCleanupUnconfirmed     = errors.New("process cleanup could not be confirmed")
+	errProcessGroupRemained      = errors.New("child processes remained after the shell exited")
+	errProcessCleanupUnconfirmed = errors.New("process cleanup could not be confirmed")
 )
 
 // localProcessScope owns the OS process group started for one local command.

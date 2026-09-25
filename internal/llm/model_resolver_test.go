@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -12,16 +13,24 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func newModelResolverCanary(t *testing.T) string {
+	t.Helper()
+	tempDir := t.TempDir()
+	return "runtime-canary-" + filepath.Base(filepath.Dir(tempDir)) + "-" + filepath.Base(tempDir)
+}
+
 func TestProviderRegistryRejectsNativeIdentityBeforeBuild(t *testing.T) {
 	provider := &countingModelProvider{name: "claude"}
 	registry := NewProviderRegistry()
 	require.NoError(t, registry.Register(provider))
-	credentials := &countingCredentialResolver{key: "scoped-secret-canary"}
+	credentialCanary := newModelResolverCanary(t)
+	credentials := &countingCredentialResolver{key: credentialCanary}
 	registry.SetCredentialResolver(credentials)
+	inlineCanary := newModelResolverCanary(t)
 
 	_, cleanup, err := registry.GetModel(context.Background(), "claude", ModelConfig{
 		Model:   "claude-test",
-		APIKey:  "anthropic-secret-canary",
+		APIKey:  inlineCanary,
 		BaseURL: "https://example.invalid/v1",
 	})
 
@@ -29,14 +38,14 @@ func TestProviderRegistryRejectsNativeIdentityBeforeBuild(t *testing.T) {
 	assert.Nil(t, cleanup)
 	assert.Zero(t, provider.buildCalls, "native identity must be rejected before provider construction")
 	assert.Zero(t, credentials.lookupCalls, "native identity must be rejected before secret lookup")
-	assert.NotContains(t, err.Error(), "anthropic-secret-canary")
+	assert.NotContains(t, err.Error(), inlineCanary)
 	assert.True(t, strings.Contains(strings.ToLower(err.Error()), "unsupported"), "error should explain that the protocol is unsupported")
 }
 
 func TestModelResolverPreservesSamplingPresence(t *testing.T) {
 	registry := NewProviderRegistry()
 	require.NoError(t, registry.Register(NewEinoProvider(WithProviderName("sampling-provider"))))
-	registry.SetCredentialResolver(&countingCredentialResolver{key: "key-canary"})
+	registry.SetCredentialResolver(&countingCredentialResolver{key: newModelResolverCanary(t)})
 	resolver := registry.SnapshotResolver()
 	endpoint := "https://sampling.example.test/v1"
 	ref, err := resolver.CredentialRefFor("sampling-provider", endpoint)
@@ -72,7 +81,7 @@ func TestModelResolverPreservesSamplingPresence(t *testing.T) {
 }
 
 func TestProviderRegistryUsesMatchingScopedCredentialAtRealOrigin(t *testing.T) {
-	const secret = "scoped-origin-secret-canary"
+	secret := newModelResolverCanary(t)
 	var gotAuthorization string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuthorization = r.Header.Get("Authorization")
@@ -131,7 +140,7 @@ func TestProviderRegistryRequiresCredentialForOpenAIDefaultOrigin(t *testing.T) 
 }
 
 func TestProviderRegistryAllowsConstructorCredentialOnlyOnSameOrigin(t *testing.T) {
-	const secret = "same-origin-provider-key"
+	secret := newModelResolverCanary(t)
 	var gotAuthorization string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuthorization = r.Header.Get("Authorization")
@@ -159,7 +168,7 @@ func TestProviderRegistryAllowsConstructorCredentialOnlyOnSameOrigin(t *testing.
 }
 
 func TestProviderRegistryRejectsCrossOriginRedirectBeforeSecondDispatch(t *testing.T) {
-	const secret = "redirect-source-secret-canary"
+	secret := newModelResolverCanary(t)
 	secondRequests := 0
 	secondAuthorization := ""
 	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -197,7 +206,7 @@ func TestProviderRegistryRejectsCrossOriginRedirectBeforeSecondDispatch(t *testi
 }
 
 func TestProviderRegistryRejectsCustomRedirectCallbackOriginRewrite(t *testing.T) {
-	const secret = "callback-redirect-secret-canary"
+	secret := newModelResolverCanary(t)
 	secondRequests := 0
 	secondAuthorization := ""
 	second := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -218,7 +227,7 @@ func TestProviderRegistryRejectsCustomRedirectCallbackOriginRewrite(t *testing.T
 	secondEndpoint, err := url.Parse(second.URL + chatCompletionsPath)
 	require.NoError(t, err)
 	client := &http.Client{CheckRedirect: func(request *http.Request, _ []*http.Request) error {
-		request.Header.Set("Authorization", "Bearer "+secret)
+		request.Header.Set("Authorization", "Bearer "+secret) //nolint:gosec // Deliberately reinjects the canary to test redirect-origin enforcement.
 		request.URL = secondEndpoint
 		return nil
 	}}
@@ -255,7 +264,7 @@ func TestProviderRegistryRejectsCustomRedirectCallbackHostRewrite(t *testing.T) 
 	require.NoError(t, registry.Register(NewEinoProvider(
 		WithProviderName("local-compatible"),
 		WithBaseURL(server.URL),
-		WithAPIKey("host-rewrite-canary"),
+		WithAPIKey(newModelResolverCanary(t)),
 		WithHTTPClient(client),
 	)))
 	model, cleanup, err := registry.GetModel(context.Background(), "local-compatible", ModelConfig{Model: "m", BaseURL: server.URL})
@@ -444,18 +453,20 @@ func TestProviderSpecRequireCredentialAppliesToItsDefaultOrigin(t *testing.T) {
 }
 
 func TestProviderRegistryUnknownAliasNeedsExplicitEndpoint(t *testing.T) {
-	credentials := &countingCredentialResolver{key: "provider-only-secret-canary"}
+	credentials := &countingCredentialResolver{key: newModelResolverCanary(t)}
 	registry := NewProviderRegistry()
 	registry.SetCredentialResolver(credentials)
 	require.NoError(t, registry.Register(NewEinoProvider(WithProviderName("unknown-alias"))))
 
-	_, _, err := registry.GetModel(context.Background(), "unknown-alias", ModelConfig{Model: "m", APIKey: "request-secret-canary"})
+	requestCanary := newModelResolverCanary(t)
+	_, _, err := registry.GetModel(context.Background(), "unknown-alias", ModelConfig{Model: "m", APIKey: requestCanary})
 	require.ErrorIs(t, err, ErrProviderEndpointRequired)
 	assert.Zero(t, credentials.lookupCalls)
+	assert.NotContains(t, err.Error(), requestCanary)
 }
 
 func TestProviderRegistryPreservesExplicitOpenAICompatibleCustomEndpoint(t *testing.T) {
-	const secret = "custom-origin-secret-canary"
+	secret := newModelResolverCanary(t)
 	var gotAuthorization string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuthorization = r.Header.Get("Authorization")
@@ -505,18 +516,19 @@ func TestProviderRegistryAllowsExplicitCredentiallessCompatibleEndpoint(t *testi
 func TestProviderRegistryRejectsInlineCredentialWithMismatchedScope(t *testing.T) {
 	registry := NewProviderRegistry()
 	require.NoError(t, registry.Register(NewEinoProvider(WithProviderName("local-compatible"))))
+	inlineCanary := newModelResolverCanary(t)
 	_, _, err := registry.GetModel(context.Background(), "local-compatible", ModelConfig{
 		Model:      "m",
 		BaseURL:    "http://127.0.0.1:8080/v1",
-		APIKey:     "must-not-be-rebound",
+		APIKey:     inlineCanary,
 		Credential: CredentialRef{ProviderID: "eino", ProtocolID: ProtocolOpenAICompatible, Origin: "http://127.0.0.1:8080"},
 	})
 	require.ErrorIs(t, err, ErrCredentialScopeMismatch)
-	assert.NotContains(t, err.Error(), "must-not-be-rebound")
+	assert.NotContains(t, err.Error(), inlineCanary)
 }
 
 func TestProviderRegistryDoesNotSendProviderDefaultKeyToOverrideOrigin(t *testing.T) {
-	const secret = "default-origin-secret-canary"
+	secret := newModelResolverCanary(t)
 	var gotAuthorization string
 	override := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotAuthorization = r.Header.Get("Authorization")

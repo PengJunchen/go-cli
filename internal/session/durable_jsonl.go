@@ -1012,7 +1012,9 @@ func syncDirectory(path string) error {
 	if err != nil {
 		return fmt.Errorf("open directory for sync: %w", err)
 	}
-	defer directory.Close()
+	// Sync below is the durability check; closing this read-only directory
+	// descriptor is resource cleanup and has no pending write to acknowledge.
+	defer func() { _ = directory.Close() }()
 	if err := directory.Sync(); err != nil {
 		return fmt.Errorf("sync directory: %w", err)
 	}

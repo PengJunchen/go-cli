@@ -170,6 +170,32 @@ func TestLoopDetectNoLoopWorksNormally(t *testing.T) {
 	assert.Equal(t, int32(1), callCount.Load())
 }
 
+func TestLoopDetectStreamChecksContentAfterInputCloses(t *testing.T) {
+	inner := &mockModel{
+		streamFn: func(context.Context, []Message, ...Option) (<-chan MessageChunk, error) {
+			ch := make(chan MessageChunk, 1)
+			ch <- MessageChunk{Role: RoleAssistant, Content: "closed-stream-content"}
+			close(ch)
+			return ch, nil
+		},
+	}
+	wrapped := NewLoopDetectionModelMiddleware(WithLoopThreshold(2), WithLoopWindowSize(5)).WrapModel(inner)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	ch, err := wrapped.Stream(ctx, nil)
+	require.NoError(t, err)
+	var received []MessageChunk
+	for chunk := range ch {
+		received = append(received, chunk)
+	}
+	require.NoError(t, ctx.Err(), "closed input stream must terminate without waiting for cancellation")
+	require.Len(t, received, 1)
+	require.Equal(t, "closed-stream-content", received[0].Content)
+	require.False(t, received[0].Final)
+	require.NoError(t, received[0].Error)
+}
+
 // TestLoopDetectInitErrorReturnsError verifies that when the inner Stream
 // returns an initialization error, the middleware propagates it without
 // panic.

@@ -4,10 +4,11 @@ import (
 	"context"
 	"testing"
 
-	"github.com/pengjunchen/go-cli/internal/core"
-	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 type preparedUnfencedDenyStore struct{}
