@@ -206,6 +206,14 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	if tlsCert != "" && tlsKey != "" {
 		server.SetTLS(tlsCert, tlsKey)
 	}
+	if assembly != nil {
+		if err := assembly.setHTTPServer(server); err != nil {
+			return errors.Join(
+				newExecutionError("serve: register server owner", err),
+				closeAssemblyForCommand(context.Background(), assembly, "serve"),
+			)
+		}
+	}
 
 	if err := server.Start(ctx); err != nil {
 		return errors.Join(
@@ -247,18 +255,29 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	}
 	signal.Stop(sigCh)
 
-	// Shutdown uses a fresh context so all HTTP handlers actually leave before
-	// their Assembly-owned dependencies are closed, even after parent cancel.
-	stopErr := server.Stop(context.Background())
+	if assembly != nil {
+		closeErr := closeAssemblyForCommand(context.Background(), assembly, "serve")
+		if errors.Is(closeErr, ErrAssemblyClosePending) {
+			fmt.Fprintf(c.out, "ACP HTTP server shutdown is still pending.\n") //nolint:errcheck
+		} else if closeErr != nil {
+			slog.Warn("serve: shutdown error", "err", closeErr)
+		} else {
+			fmt.Fprintf(c.out, "ACP HTTP server stopped.\n") //nolint:errcheck
+		}
+		return closeErr
+	}
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), assemblyCloseBudget)
+	stopErr := server.Stop(stopCtx)
+	cancelStop()
 	if stopErr != nil {
 		slog.Warn("serve: server stop error", "err", stopErr)
 	}
-	closeErr := closeAssemblyForCommand(context.Background(), assembly, "serve")
-	fmt.Fprintf(c.out, "ACP HTTP server stopped.\n") //nolint:errcheck
-	return errors.Join(
-		wrapServeStopError(stopErr),
-		closeErr,
-	)
+	if errors.Is(stopErr, acp.ErrHTTPServerCleanupPending) {
+		fmt.Fprintf(c.out, "ACP HTTP server shutdown is still pending.\n") //nolint:errcheck
+	} else if stopErr == nil {
+		fmt.Fprintf(c.out, "ACP HTTP server stopped.\n") //nolint:errcheck
+	}
+	return wrapServeStopError(stopErr)
 }
 
 func wrapServeStopError(err error) error {

@@ -27,6 +27,7 @@ type assemblyCloseOwner struct {
 	done      chan struct{}
 
 	guard              func() core.RunSlotGuard
+	httpServer         *acp.HTTPServer
 	cancel             context.CancelFunc
 	requestStop        func()
 	closeResources     func(context.Context, <-chan struct{}) error
@@ -81,18 +82,38 @@ func (o *assemblyCloseOwner) Close(ctx context.Context) error {
 					startupErr = ErrAssemblyClosePanic
 				}
 			}()
-			if o.guard == nil {
-				return
+			if o.guard != nil {
+				guard := o.guard()
+				if guard != nil {
+					// The Assembly's default guard is known to have a short, local,
+					// non-callback fence. Publish it before returning from Close so a
+					// blocked stop callback cannot leave a new-run admission window.
+					if defaultGuard, ok := guard.(*core.DefaultRunSlotGuard); ok {
+						idle = defaultGuard.CloseAdmission()
+					}
+				}
 			}
-			guard := o.guard()
-			if guard == nil {
-				return
-			}
-			// The Assembly's default guard is known to have a short, local,
-			// non-callback fence. Publish it before returning from Close so a
-			// blocked stop callback cannot leave a new-run admission window.
-			if defaultGuard, ok := guard.(*core.DefaultRunSlotGuard); ok {
-				idle = defaultGuard.CloseAdmission()
+		}()
+		func() {
+			defer func() {
+				if recover() != nil {
+					startupErr = ErrAssemblyClosePanic
+				}
+			}()
+		}()
+		func() {
+			defer func() {
+				if recover() != nil {
+					startupErr = ErrAssemblyClosePanic
+				}
+			}()
+			o.mu.Lock()
+			httpServer := o.httpServer
+			o.mu.Unlock()
+			if httpServer != nil {
+				// BeginStop performs only the server's local admission fence and
+				// launches its own join owner; it never waits for callbacks.
+				httpServer.SealAdmission()
 			}
 		}()
 		go o.start(startedAt, idle, startupErr)
@@ -198,6 +219,57 @@ func (o *assemblyCloseOwner) setInteractiveCloseHooks(
 	o.beforeSessionClose = beforeSessionClose
 	o.afterMemoryJoin = afterMemoryJoin
 	return nil
+}
+
+func (o *assemblyCloseOwner) setHTTPServer(server *acp.HTTPServer) error {
+	if o == nil || server == nil {
+		return nil
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	if !o.deadline.IsZero() {
+		return ErrAssemblyClosePending
+	}
+	if o.httpServer != nil && o.httpServer != server {
+		return errors.New("cli: assembly already owns an ACP HTTP server")
+	}
+	o.httpServer = server
+	return nil
+}
+
+func (o *assemblyCloseOwner) stopHTTPServer(ctx context.Context) error {
+	if o == nil {
+		return nil
+	}
+	o.mu.Lock()
+	server := o.httpServer
+	o.mu.Unlock()
+	if server == nil {
+		return nil
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	err := server.Stop(ctx)
+	var pending interface{ Done() <-chan struct{} }
+	if errors.As(err, &pending) {
+		done := pending.Done()
+		if done == nil {
+			return errors.Join(err, ErrAssemblyResourceCompletionUnknown)
+		}
+		// The Assembly close context only bounds the first wait. Keep this
+		// owner and all dependent resources until the server proves it joined.
+		<-done
+		err = server.Stop(context.Background())
+		var stillPending interface{ Done() <-chan struct{} }
+		if errors.As(err, &stillPending) {
+			return errors.Join(err, ErrAssemblyResourceCompletionUnknown)
+		}
+	}
+	if errors.Is(err, acp.ErrHTTPServerCleanupPending) {
+		return errors.Join(err, ErrAssemblyResourceCompletionUnknown)
+	}
+	return err
 }
 
 func (o *assemblyCloseOwner) drainInteractiveSession(ctx context.Context) error {
@@ -428,11 +500,18 @@ func (s *assembleState) requestStopSources() {
 }
 
 func (s *assembleState) closeResources(ctx context.Context, idle <-chan struct{}) error {
+	var errs []error
+	if err := s.closeOwner.stopHTTPServer(ctx); err != nil {
+		if errors.Is(err, ErrAssemblyResourceCompletionUnknown) {
+			return err
+		}
+		errs = append(errs, fmt.Errorf("stop ACP HTTP server: %w", err))
+	}
+
 	if idle != nil {
 		<-idle
 	}
 
-	var errs []error
 	if s.modelSelector != nil {
 		disposer, err := s.modelSelector.SealAndDetach(ctx)
 		if err != nil && ctx.Err() != nil {
@@ -593,12 +672,21 @@ func waitACPConnect(client acp.ACPClient, err error) error {
 			return ErrAssemblyClientCompletionUnknown
 		}
 		<-done
-		return nil
+		if acp.IsBuiltInHTTPClientLocallyJoined(client) {
+			return nil
+		}
+		if _, ok := client.(*acp.StdioAdapter); ok {
+			return nil
+		}
+		return errors.Join(err, ErrAssemblyClientCompletionUnknown)
 	}
 	if _, ok := client.(*acp.StdioAdapter); ok {
 		// The stdio adapter returns ordinary errors only after its connect
 		// setup has unwound; any still-running cleanup is represented by the
 		// typed Done-bearing pending error above.
+		return nil
+	}
+	if acp.IsBuiltInHTTPClientLocallyJoined(client) {
 		return nil
 	}
 	return errors.Join(err, ErrAssemblyClientCompletionUnknown)
@@ -624,7 +712,7 @@ func disconnectACPClient(ctx context.Context, client acp.ACPClient) error {
 			callCtx = context.Background()
 			continue
 		}
-		if _, ok := client.(*acp.StdioAdapter); ok {
+		if _, ok := client.(*acp.StdioAdapter); ok || acp.IsBuiltInHTTPClientLocallyJoined(client) {
 			return err
 		}
 		return errors.Join(err, ErrAssemblyClientCompletionUnknown)

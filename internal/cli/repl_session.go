@@ -86,9 +86,12 @@ type REPLSession struct {
 	pendingWrites *session.PendingSessionWrites
 
 	// flushTicker periodically flushes pending writes as a safety net.
-	flushTicker *time.Ticker
-	flushDone   chan struct{}
-	flushStop   sync.Once
+	flushMu      sync.Mutex
+	flushTicker  *time.Ticker
+	flushDone    chan struct{}
+	flushExited  chan struct{}
+	flushStarted bool
+	flushStopped bool
 
 	// Editor/expander
 	lineEditor      LineEditor
@@ -486,14 +489,28 @@ const pendingWritesFlushInterval = 1 * time.Second
 func (s *REPLSession) startFlushTicker() {
 	ticker := time.NewTicker(pendingWritesFlushInterval)
 	done := make(chan struct{})
+	exited := make(chan struct{})
+	s.flushMu.Lock()
+	if s.flushStopped || s.flushStarted {
+		s.flushMu.Unlock()
+		ticker.Stop()
+		return
+	}
 	s.flushTicker = ticker
 	s.flushDone = done
+	s.flushExited = exited
+	s.flushStarted = true
 	// Snapshot fields to avoid concurrent access from the ticker goroutine.
 	pw := s.pendingWrites
-	store := s.assembly.SessionStore
+	var store session.SessionStore
+	if s.assembly != nil {
+		store = s.assembly.SessionStore
+	}
 	ctx := s.spanCtx
 	logger := s.logger
+	s.flushMu.Unlock()
 	go func() {
+		defer close(exited)
 		for {
 			select {
 			case <-ticker.C:
@@ -513,14 +530,22 @@ func (s *REPLSession) startFlushTicker() {
 // stopFlushTicker stops the background flush goroutine. It is safe to call
 // when the ticker was never started.
 func (s *REPLSession) stopFlushTicker() {
-	s.flushStop.Do(func() {
+	s.flushMu.Lock()
+	if !s.flushStopped {
+		s.flushStopped = true
 		if s.flushTicker != nil {
 			s.flushTicker.Stop()
 		}
 		if s.flushDone != nil {
 			close(s.flushDone)
 		}
-	})
+	}
+	started := s.flushStarted
+	exited := s.flushExited
+	s.flushMu.Unlock()
+	if started && exited != nil {
+		<-exited
+	}
 }
 
 // ctrlCAction represents the action to take when Ctrl+C is pressed.

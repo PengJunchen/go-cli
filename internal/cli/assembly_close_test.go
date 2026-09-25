@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -245,6 +246,99 @@ func TestAssemblyCloseConsumesRealACPPendingCleanupSignal(t *testing.T) {
 	require.Zero(t, disconnectRequests.Load(), "expired ACP cleanup owner must preserve the adapter fence")
 }
 
+type assemblyBlockingACPDispatcher struct {
+	started chan struct{}
+	release <-chan struct{}
+	calls   atomic.Int32
+}
+
+func (d *assemblyBlockingACPDispatcher) Dispatch(context.Context, core.SubagentTask) (core.SubagentResult, error) {
+	d.calls.Add(1)
+	select {
+	case d.started <- struct{}{}:
+	default:
+	}
+	<-d.release
+	return core.SubagentResult{Content: "joined"}, nil
+}
+
+func (d *assemblyBlockingACPDispatcher) ParallelDispatch(ctx context.Context, tasks []core.SubagentTask) ([]core.SubagentResult, error) {
+	results := make([]core.SubagentResult, len(tasks))
+	for i, task := range tasks {
+		result, err := d.Dispatch(ctx, task)
+		if err != nil {
+			return nil, err
+		}
+		results[i] = result
+	}
+	return results, nil
+}
+
+func (*assemblyBlockingACPDispatcher) ListRunning() []core.SubagentTask { return nil }
+
+func TestAssemblyCloseJoinsACPServerDispatchBeforeClosingEventBus(t *testing.T) {
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseDispatcher := func() { releaseOnce.Do(func() { close(release) }) }
+	dispatcher := &assemblyBlockingACPDispatcher{started: started, release: release}
+	server := acp.NewHTTPServer("assembly", "127.0.0.1:0", acp.NewCoreHandler(dispatcher, nil))
+	bus := core.NewMemoryEventBus()
+	events := bus.Subscribe(context.Background())
+	state := &assembleState{eventBus: bus}
+	owner := newAssemblyCloseOwner(
+		func() core.RunSlotGuard { return core.NewDefaultRunSlotGuard() },
+		nil,
+		state.requestStopSources,
+		state.closeResources,
+	)
+	state.closeOwner = owner
+	assembly := &AgentAssembly{CoreRuntime: CoreRuntime{EventBus: bus}, closeOwner: owner}
+	require.NoError(t, assembly.setHTTPServer(server))
+	require.NoError(t, server.Start(context.Background()))
+	client := acp.NewGRPCAdapter("http://"+server.Addr(), acp.WithName("assembly-dispatch"))
+	require.NoError(t, client.Connect(context.Background()))
+	require.NoError(t, client.SendMessage(context.Background(), acp.ACPMessage{
+		Type: acp.TypeMessage, Content: "wait for assembly close",
+	}))
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("ACP request did not enter the real dispatcher")
+	}
+	t.Cleanup(func() {
+		releaseDispatcher()
+		_ = assembly.Close(context.Background())
+		_ = client.Disconnect(context.Background())
+	})
+
+	waiterCtx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	closeErr := assembly.Close(waiterCtx)
+	cancel()
+	require.ErrorIs(t, closeErr, ErrAssemblyClosePending,
+		"the caller returns bounded while the server-owned dispatcher remains active")
+	require.Eventually(t, func() bool { return !server.Running() }, time.Second, time.Millisecond,
+		"Assembly close must fence HTTP admission")
+	select {
+	case _, ok := <-events:
+		require.True(t, ok, "the event bus remains open until the HTTP dispatch worker joins")
+	default:
+	}
+	if err := client.SendMessage(context.Background(), acp.ACPMessage{Type: acp.TypeMessage, Content: "after fence"}); err == nil {
+		t.Fatal("post-fence HTTP send unexpectedly succeeded")
+	}
+	require.EqualValues(t, 1, dispatcher.calls.Load(), "post-fence requests cannot dispatch another mutation")
+
+	releaseDispatcher()
+	require.NoError(t, assembly.Close(context.Background()))
+	select {
+	case _, ok := <-events:
+		require.False(t, ok, "the event bus closes after the HTTP dispatch worker is joined")
+	case <-time.After(time.Second):
+		t.Fatal("Assembly close did not finish after the HTTP worker returned")
+	}
+}
+
 func TestAssemblyCloseOwnerKeepsOneSequenceAcrossWaiters(t *testing.T) {
 	guard := core.NewDefaultRunSlotGuard()
 	blocked := make(chan struct{})
@@ -439,6 +533,63 @@ func TestAssemblyDoesNotTrustCustomClientNilDisconnectWithoutCompletion(t *testi
 
 	acpErr := disconnectACPClient(context.Background(), assemblyUnknownACPClient{})
 	require.ErrorIs(t, acpErr, ErrAssemblyClientCompletionUnknown)
+}
+
+func TestAssemblyCloseAcceptsJoinedBuiltInHTTPClient(t *testing.T) {
+	peer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/connect":
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"version":    acp.ACPHTTPProfileV1,
+				"session_id": "assembly-http-session",
+			})
+		case "/stream":
+			<-r.Context().Done()
+		case "/disconnect":
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer peer.Close()
+
+	client := acp.NewGRPCAdapter(peer.URL, acp.WithName("assembly-http-client"))
+	require.NoError(t, client.Connect(context.Background()))
+	bus := core.NewMemoryEventBus()
+	events := bus.Subscribe(context.Background())
+	state := &assembleState{acpClient: client, eventBus: bus}
+	owner := newAssemblyCloseOwner(
+		func() core.RunSlotGuard { return core.NewDefaultRunSlotGuard() },
+		nil,
+		state.requestStopSources,
+		state.closeResources,
+	)
+	state.closeOwner = owner
+
+	require.NoError(t, owner.Close(context.Background()))
+	select {
+	case _, ok := <-events:
+		require.False(t, ok, "joined built-in HTTP client permits dependent Assembly cleanup")
+	case <-time.After(time.Second):
+		t.Fatal("Assembly did not close its EventBus after the HTTP client joined")
+	}
+}
+
+func TestAssemblyCloseSealsRegisteredACPServerBeforeStart(t *testing.T) {
+	server := acp.NewHTTPServer("assembly", "127.0.0.1:0", nil)
+	state := &assembleState{}
+	owner := newAssemblyCloseOwner(
+		func() core.RunSlotGuard { return core.NewDefaultRunSlotGuard() },
+		nil,
+		state.requestStopSources,
+		state.closeResources,
+	)
+	state.closeOwner = owner
+	assembly := &AgentAssembly{closeOwner: owner}
+	require.NoError(t, assembly.setHTTPServer(server))
+	require.NoError(t, assembly.Close(context.Background()))
+	require.ErrorIs(t, server.Start(context.Background()), acp.ErrHTTPServerAdmissionClosed)
 }
 
 func TestCloseAssemblyForCommandPropagatesCloseError(t *testing.T) {
