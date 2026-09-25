@@ -136,18 +136,23 @@ func (p *DefaultRetryPolicy) Classify(err error) ErrorCategory {
 	// Recognize AgentHarnessError and map its Code to an ErrorCategory.
 	var ahe *core.AgentHarnessError
 	if errors.As(err, &ahe) {
-		return classifyHarnessError(ahe)
-	}
-	var providerErr *llm.ProviderError
-	if errors.As(err, &providerErr) && providerErr != nil {
-		switch providerErr.ErrorType {
-		case llm.ErrTypeRateLimit:
-			return ErrorRateLimit
-		case llm.ErrTypeServer, llm.ErrTypeNetwork:
-			return ErrorTransient
-		case llm.ErrTypeAuth, llm.ErrTypeOverflow:
+		// Busy and hook-rejected codes are explicit terminal decisions. A typed
+		// provider error nested as their cause must not turn them into retries.
+		if ahe.Code == core.ErrCodeBusy || ahe.Code == core.ErrCodeHookRejected {
 			return ErrorFatal
 		}
+		// NormalizeError uses generic model/tool codes for wrapped provider
+		// failures. Preserve the provider's structured classification before
+		// falling back to those broad harness categories.
+		if ahe.Code == core.ErrCodeModelError || ahe.Code == core.ErrCodeToolError {
+			if category, ok := classifyProviderError(err); ok {
+				return category
+			}
+		}
+		return classifyHarnessError(ahe)
+	}
+	if category, ok := classifyProviderError(err); ok {
+		return category
 	}
 	switch {
 	case isRateLimit(err):
@@ -158,6 +163,23 @@ func (p *DefaultRetryPolicy) Classify(err error) ErrorCategory {
 		return ErrorTransient
 	default:
 		return ErrorFatal
+	}
+}
+
+func classifyProviderError(err error) (ErrorCategory, bool) {
+	var providerErr *llm.ProviderError
+	if !errors.As(err, &providerErr) || providerErr == nil {
+		return "", false
+	}
+	switch providerErr.ErrorType {
+	case llm.ErrTypeRateLimit:
+		return ErrorRateLimit, true
+	case llm.ErrTypeServer, llm.ErrTypeNetwork:
+		return ErrorTransient, true
+	case llm.ErrTypeAuth, llm.ErrTypeOverflow:
+		return ErrorFatal, true
+	default:
+		return "", false
 	}
 }
 
