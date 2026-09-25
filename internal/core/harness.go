@@ -16,6 +16,7 @@ type harnessConfig struct {
 	tracer         *tracing.Tracer
 	runSlot        RunSlotGuard
 	cleanupTimeout time.Duration
+	lifetimeCtx    context.Context
 	bus            EventBus
 }
 
@@ -62,6 +63,13 @@ func WithRunSlotGuard(g RunSlotGuard) HarnessOption {
 	return func(c *harnessConfig) { c.runSlot = g }
 }
 
+// WithRunLifetimeContext links every submitted run to its Assembly-owned
+// lifetime. Canceling the lifetime stops run input; the run owner still
+// supervises and retains any resources that have not quiesced.
+func WithRunLifetimeContext(ctx context.Context) HarnessOption {
+	return func(c *harnessConfig) { c.lifetimeCtx = ctx }
+}
+
 // WithRunCleanupTimeout sets how long the harness waits for owned resources
 // after its top-level agent callback returns or cancellation is requested.
 func WithRunCleanupTimeout(timeout time.Duration) HarnessOption {
@@ -91,6 +99,7 @@ type HarnessImpl struct {
 	tracer         *tracing.Tracer
 	runSlot        RunSlotGuard
 	cleanupTimeout time.Duration
+	lifetimeCtx    context.Context
 	bus            EventBus
 }
 
@@ -121,6 +130,7 @@ func NewHarnessImpl(agent Agent, opts ...HarnessOption) *HarnessImpl {
 		tracer:         cfg.tracer,
 		runSlot:        cfg.runSlot,
 		cleanupTimeout: cfg.cleanupTimeout,
+		lifetimeCtx:    cfg.lifetimeCtx,
 		bus:            cfg.bus,
 	}
 	slog.Info("core.harness.new",
@@ -135,14 +145,57 @@ func NewHarnessImpl(agent Agent, opts ...HarnessOption) *HarnessImpl {
 // Submit runs the agent asynchronously and returns an EventStream immediately.
 // Non-blocking: the caller owns the stream and must drain it until it closes.
 func (h *HarnessImpl) Submit(ctx context.Context, msg string) (EventStream, error) {
-	// Inject the Tracer into the context so that all downstream
-	// SpanFromContext calls (middleware, loop, tools) create real spans
-	// sharing the same trace. When h.tracer is nil, spans are noop.
-	if h.tracer != nil {
-		ctx = h.tracer.ContextWithTracer(ctx)
-	}
+	runInputCtx, inputCancel, stopLifetime := linkRunLifetime(ctx, h.lifetimeCtx)
 
-	span, spanCtx := tracing.SpanFromContext(ctx, h.startSpanName, tracing.SpanKindInternal)
+	// Claim the run slot before launching the goroutine so concurrent
+	// Submits fail fast when a run is already in progress. The 200ms
+	// timeout bounds how long a caller waits for the slot.
+	claimCtx, claimCancel := context.WithTimeout(runInputCtx, 200*time.Millisecond)
+	claim, err := h.runSlot.ClaimRun(claimCtx)
+	claimCancel()
+	if err != nil {
+		slog.Warn("core.harness.claim_failed", "err", err)
+		stopLifetime()
+		inputCancel()
+		return nil, err
+	}
+	wrapperDone, err := registerRunWrapper(h.runSlot, claim, nil)
+	if err != nil {
+		h.runSlot.Release(claim)
+		stopLifetime()
+		inputCancel()
+		return nil, err
+	}
+	transferred := false
+	var span tracing.TraceSpan
+	var stream *EventStreamImpl
+	defer func() {
+		if transferred {
+			return
+		}
+		defer func() {
+			h.runSlot.Release(claim)
+			wrapperDone()
+			stopLifetime()
+			inputCancel()
+		}()
+		if stream != nil {
+			stream.Close()
+		}
+		if span != nil {
+			span.End()
+		}
+	}()
+
+	// Borrowed tracing and bus producers are touched only after the guard has
+	// accepted this run, so a closed Assembly cannot race its teardown with a
+	// late Submit.
+	ctxWithTracer := runInputCtx
+	if h.tracer != nil {
+		ctxWithTracer = h.tracer.ContextWithTracer(ctxWithTracer)
+	}
+	var spanCtx context.Context
+	span, spanCtx = tracing.SpanFromContext(ctxWithTracer, h.startSpanName, tracing.SpanKindInternal)
 	span.SetAttributes(
 		tracing.SensitiveAttribute("user_message", msg),
 		tracing.Attribute{Key: "user_message_length", Value: len(msg)},
@@ -154,23 +207,11 @@ func (h *HarnessImpl) Submit(ctx context.Context, msg string) (EventStream, erro
 	if h.bus != nil {
 		streamOpts = append(streamOpts, WithEventBus(h.bus))
 	}
-	stream := NewEventStream(h.bufferSize, streamOpts...)
+	stream = NewEventStream(h.bufferSize, streamOpts...)
 	if stream == nil {
-		span.End()
 		return nil, context.Canceled
 	}
 
-	// Claim the run slot before launching the goroutine so concurrent
-	// Submits fail fast when a run is already in progress. The 200ms
-	// timeout bounds how long a caller waits for the slot.
-	claimCtx, claimCancel := context.WithTimeout(ctx, 200*time.Millisecond)
-	claim, err := h.runSlot.ClaimRun(claimCtx)
-	claimCancel()
-	if err != nil {
-		slog.Warn("core.harness.claim_failed", "err", err)
-		span.End()
-		return nil, err
-	}
 	owner := newRunOwner(spanCtx, h.runSlot, claim, func(result Result, err error) {
 		stream.SetResult(AgentMessage{Role: "assistant", Content: result.Message}, err)
 		if err != nil {
@@ -181,19 +222,31 @@ func (h *HarnessImpl) Submit(ctx context.Context, msg string) (EventStream, erro
 	})
 	owner.SetEventGapSource(stream)
 	stream.SetRunStatusHandle(owner)
+	err = setRunWrapperStatus(h.runSlot, claim, owner)
+	if err != nil {
+		stream.SetResult(AgentMessage{Role: "assistant"}, err)
+		return nil, err
+	}
 
 	submission := Submission{Type: SubmissionUserMessage, Content: msg}
 
-	go h.run(spanCtx, span, stream, submission, owner)
+	transferred = true
+	go h.run(spanCtx, span, stream, submission, owner, wrapperDone, func() {
+		stopLifetime()
+		inputCancel()
+	})
 
 	return stream, nil
 }
 
 // run executes the agent and fans its events out to the stream. It always
 // records a terminal result, sends a closing event, and closes the stream so
-// consumers can observe completion without a goroutine leak. The claim is
-// released by ExecuteClaimedRun when the run finishes (or panics).
-func (h *HarnessImpl) run(ctx context.Context, span tracing.TraceSpan, stream *EventStreamImpl, submission Submission, owner *runOwner) {
+// consumers can observe completion without a goroutine leak. The run owner
+// releases its claim when callback resources finish; the wrapper lease keeps
+// admission fenced through span export and stream close.
+func (h *HarnessImpl) run(ctx context.Context, span tracing.TraceSpan, stream *EventStreamImpl, submission Submission, owner *runOwner, wrapperDone func(), cleanupInput func()) {
+	defer cleanupInput()
+	defer wrapperDone()
 	defer stream.Close()
 	defer span.End()
 	// Pass the EventStream to the agent so events are emitted in real time

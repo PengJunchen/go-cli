@@ -21,7 +21,8 @@ type RunClaim struct {
 }
 
 // RunSlotGuard ensures only one primary model run executes at a time. Callers
-// claim the slot before running and release it when done.
+// claim the slot before running; an optional wrapper lease can extend the
+// claim through post-owner entrypoint work.
 type RunSlotGuard interface {
 	// ClaimRun acquires the run slot, blocking until the slot is free or the
 	// context is canceled. It returns a RunClaim identifying the holder.
@@ -53,15 +54,82 @@ type RunSlotTryClaimer interface {
 // stop admitting claims and report when all accepted claims have been released.
 type RunAdmissionCloser interface {
 	// CloseAdmission rejects future claims and returns a stable idle signal.
-	// The signal closes when every claim accepted before the fence is released.
+	// The signal closes when every accepted claim and wrapper lease completes.
 	CloseAdmission() <-chan struct{}
+}
+
+// RunSlotWrapperRegistrar is an optional guard capability used by public run
+// entrypoints to keep a claim active until their post-owner work is complete.
+// The returned completion callback must be called after all tracing, terminal
+// events, and lifecycle hooks owned by that entrypoint have finished.
+type RunSlotWrapperRegistrar interface {
+	// RegisterRunWrapper attaches the single wrapper lease for a current claim.
+	RegisterRunWrapper(claim RunClaim, status RunStatusHandle) (done func(), err error)
+	// SetRunWrapperStatus attaches its owner status after the wrapper is claimed.
+	SetRunWrapperStatus(claim RunClaim, status RunStatusHandle) error
+	// ActiveRunStatus returns the current claim's live status snapshot.
+	ActiveRunStatus() (RunStatus, bool)
+}
+
+func registerRunWrapper(guard RunSlotGuard, claim RunClaim, status RunStatusHandle) (func(), error) {
+	registrar, ok := guard.(RunSlotWrapperRegistrar)
+	if !ok {
+		return func() {}, nil
+	}
+	return registrar.RegisterRunWrapper(claim, status)
+}
+
+func setRunWrapperStatus(guard RunSlotGuard, claim RunClaim, status RunStatusHandle) error {
+	registrar, ok := guard.(RunSlotWrapperRegistrar)
+	if !ok {
+		return nil
+	}
+	return registrar.SetRunWrapperStatus(claim, status)
+}
+
+// linkRunLifetime combines a caller context with an optional Assembly-owned
+// lifetime. Canceling either context stops run input, while the owner remains
+// responsible for draining any workers it already owns.
+func linkRunLifetime(caller, lifetime context.Context) (context.Context, context.CancelFunc, func()) {
+	if caller == nil {
+		caller = context.Background()
+	}
+	ctx, cancel := context.WithCancel(caller)
+	if lifetime == nil {
+		return ctx, cancel, func() {}
+	}
+	if lifetime.Err() != nil {
+		cancel()
+		return ctx, cancel, func() {}
+	}
+	stop := context.AfterFunc(lifetime, cancel)
+	return ctx, cancel, func() { stop() }
+}
+
+var (
+	// ErrRunSlotStaleClaim indicates that a wrapper registration does not match
+	// the guard's currently active claim.
+	ErrRunSlotStaleClaim = errors.New("run_slot: stale claim")
+	// ErrRunWrapperAlreadyRegistered indicates that a claim already has its
+	// single allowed public-entrypoint wrapper.
+	ErrRunWrapperAlreadyRegistered = errors.New("run_slot: wrapper already registered")
+	ErrRunWrapperStatusAlreadySet  = errors.New("run_slot: wrapper status already set")
+)
+
+type activeRunClaim struct {
+	claim             RunClaim
+	ownerReleased     bool
+	wrapperRegistered bool
+	wrapperFinished   bool
+	statusAttached    bool
+	status            RunStatusHandle
 }
 
 // DefaultRunSlotGuard is a thread-safe RunSlotGuard that admits one active
 // claim at a time. Claim publication and release are linearized under mu.
 type DefaultRunSlotGuard struct {
 	mu          sync.Mutex
-	current     *RunClaim
+	current     *activeRunClaim
 	availableCh chan struct{}
 	closedCh    chan struct{}
 	idleCh      chan struct{}
@@ -71,6 +139,7 @@ type DefaultRunSlotGuard struct {
 var _ RunSlotGuard = (*DefaultRunSlotGuard)(nil)
 var _ RunAdmissionCloser = (*DefaultRunSlotGuard)(nil)
 var _ RunSlotTryClaimer = (*DefaultRunSlotGuard)(nil)
+var _ RunSlotWrapperRegistrar = (*DefaultRunSlotGuard)(nil)
 
 // NewDefaultRunSlotGuard returns a DefaultRunSlotGuard ready to issue claims.
 func NewDefaultRunSlotGuard() *DefaultRunSlotGuard {
@@ -137,7 +206,7 @@ func (g *DefaultRunSlotGuard) ClaimRun(ctx context.Context) (RunClaim, error) {
 		}
 		if g.current == nil {
 			claim := RunClaim{ID: claimID, AcquiredAt: time.Now()}
-			g.current = &claim
+			g.current = &activeRunClaim{claim: claim}
 			g.mu.Unlock()
 
 			slog.Info("core.run_slot.claimed", "id", claim.ID)
@@ -174,7 +243,7 @@ func (g *DefaultRunSlotGuard) TryClaimRun() (RunClaim, error) {
 		return RunClaim{}, fmt.Errorf("run_slot: try claim unavailable: %w", ErrRunSlotBusy)
 	}
 	claim := RunClaim{ID: claimID, AcquiredAt: time.Now()}
-	g.current = &claim
+	g.current = &activeRunClaim{claim: claim}
 	g.mu.Unlock()
 
 	slog.Info("core.run_slot.claimed", "id", claim.ID)
@@ -186,7 +255,7 @@ func (g *DefaultRunSlotGuard) TryClaimRun() (RunClaim, error) {
 // in fn does not leak the slot.
 func (g *DefaultRunSlotGuard) ExecuteClaimedRun(claim RunClaim, fn func() error) error {
 	g.mu.Lock()
-	if g.current == nil || g.current.ID != claim.ID {
+	if g.current == nil || g.current.claim.ID != claim.ID {
 		g.mu.Unlock()
 		return fmt.Errorf("run_slot: invalid or stale claim %q", claim.ID)
 	}
@@ -201,10 +270,26 @@ func (g *DefaultRunSlotGuard) ExecuteClaimedRun(claim RunClaim, fn func() error)
 // current holder it is a no-op (logged at debug level).
 func (g *DefaultRunSlotGuard) Release(claim RunClaim) {
 	g.mu.Lock()
-	if g.current == nil || g.current.ID != claim.ID {
+	if g.current == nil || g.current.claim.ID != claim.ID {
 		g.mu.Unlock()
 		slog.Debug("core.run_slot.release_noop", "id", claim.ID)
 		return
+	}
+	g.current.ownerReleased = true
+	if g.current.wrapperRegistered && !g.current.wrapperFinished {
+		g.mu.Unlock()
+		return
+	}
+	finalized := g.finalizeReleaseLocked(claim.ID)
+	g.mu.Unlock()
+	if finalized {
+		slog.Info("core.run_slot.released", "id", claim.ID)
+	}
+}
+
+func (g *DefaultRunSlotGuard) finalizeReleaseLocked(claimID string) bool {
+	if g.current == nil || g.current.claim.ID != claimID || !g.current.ownerReleased {
+		return false
 	}
 	g.current = nil
 	close(g.availableCh)
@@ -212,8 +297,81 @@ func (g *DefaultRunSlotGuard) Release(claim RunClaim) {
 	if g.closed {
 		close(g.idleCh)
 	}
+	return true
+}
+
+// RegisterRunWrapper attaches the one public-entrypoint completion lease to
+// the current claim. The claim remains unavailable until both the run owner
+// releases it and the returned callback is invoked.
+func (g *DefaultRunSlotGuard) RegisterRunWrapper(claim RunClaim, status RunStatusHandle) (func(), error) {
+	g.mu.Lock()
+	if g.current == nil || g.current.claim.ID != claim.ID {
+		g.mu.Unlock()
+		return nil, fmt.Errorf("run_slot: register wrapper: %w", ErrRunSlotStaleClaim)
+	}
+	if g.current.wrapperRegistered {
+		g.mu.Unlock()
+		return nil, fmt.Errorf("run_slot: register wrapper: %w", ErrRunWrapperAlreadyRegistered)
+	}
+	g.current.wrapperRegistered = true
+	g.current.status = status
+	g.current.statusAttached = status != nil
 	g.mu.Unlock()
-	slog.Info("core.run_slot.released", "id", claim.ID)
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			g.mu.Lock()
+			if g.current == nil || g.current.claim.ID != claim.ID {
+				g.mu.Unlock()
+				slog.Debug("core.run_slot.wrapper_done_stale", "id", claim.ID)
+				return
+			}
+			g.current.wrapperFinished = true
+			finalized := g.current.ownerReleased && g.finalizeReleaseLocked(claim.ID)
+			g.mu.Unlock()
+			if finalized {
+				slog.Info("core.run_slot.released", "id", claim.ID)
+			}
+		})
+	}, nil
+}
+
+// SetRunWrapperStatus attaches the live owner handle after the entrypoint has
+// registered its wrapper lease and created the owner. This lets the lease be
+// established before borrowed tracing producers are started.
+func (g *DefaultRunSlotGuard) SetRunWrapperStatus(claim RunClaim, status RunStatusHandle) error {
+	if status == nil {
+		return fmt.Errorf("run_slot: set wrapper status: nil status handle")
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.current == nil || g.current.claim.ID != claim.ID || !g.current.wrapperRegistered || g.current.wrapperFinished {
+		return fmt.Errorf("run_slot: set wrapper status: %w", ErrRunSlotStaleClaim)
+	}
+	if g.current.statusAttached {
+		return fmt.Errorf("run_slot: set wrapper status: %w", ErrRunWrapperStatusAlreadySet)
+	}
+	g.current.status = status
+	g.current.statusAttached = true
+	return nil
+}
+
+// ActiveRunStatus returns a fresh snapshot from the active claim's status
+// handle. It never calls the handle while holding the guard mutex.
+func (g *DefaultRunSlotGuard) ActiveRunStatus() (RunStatus, bool) {
+	g.mu.Lock()
+	if g.current == nil {
+		g.mu.Unlock()
+		return RunStatus{}, false
+	}
+	handle := g.current.status
+	claimID := g.current.claim.ID
+	g.mu.Unlock()
+	if handle == nil {
+		return RunStatus{RunID: claimID, ExecutionState: RunExecutionRunning}, true
+	}
+	return handle.Snapshot(), true
 }
 
 // noopRunSlotGuard is a RunSlotGuard that performs no synchronization. It is
