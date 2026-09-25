@@ -289,6 +289,28 @@ func (h *blockedSlogHandler) Handle(context.Context, slog.Record) error {
 func (h *blockedSlogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
 func (h *blockedSlogHandler) WithGroup(string) slog.Handler      { return h }
 
+type startBlockingSlogHandler struct {
+	started chan struct{}
+	release <-chan struct{}
+}
+
+func (h *startBlockingSlogHandler) Enabled(context.Context, slog.Level) bool { return true }
+
+func (h *startBlockingSlogHandler) Handle(_ context.Context, record slog.Record) error {
+	if record.Message != "acp.server.start" {
+		return nil
+	}
+	select {
+	case h.started <- struct{}{}:
+	default:
+	}
+	<-h.release
+	return nil
+}
+
+func (h *startBlockingSlogHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *startBlockingSlogHandler) WithGroup(string) slog.Handler      { return h }
+
 func TestHTTPServerStopWaitDeadlineIsNotBlockedByLogger(t *testing.T) {
 	server := NewHTTPServer("test", "127.0.0.1:0", nil)
 	if err := server.Start(context.Background()); err != nil {
@@ -340,7 +362,7 @@ func TestHTTPServerStartLoggerDoesNotHoldAdmissionLock(t *testing.T) {
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	releaseHandler := func() { releaseOnce.Do(func() { close(release) }) }
-	slog.SetDefault(slog.New(&blockedSlogHandler{started: started, release: release}))
+	slog.SetDefault(slog.New(&startBlockingSlogHandler{started: started, release: release}))
 	t.Cleanup(func() {
 		releaseHandler()
 		slog.SetDefault(oldLogger)
@@ -364,6 +386,11 @@ func TestHTTPServerStartLoggerDoesNotHoldAdmissionLock(t *testing.T) {
 		var pending interface{ Done() <-chan struct{} }
 		if !errors.As(err, &pending) || pending.Done() == nil {
 			t.Fatalf("Stop error %T %v does not expose pending cleanup", err, err)
+		}
+		select {
+		case <-pending.Done():
+			t.Fatal("generation completion closed while Start logging remained blocked")
+		default:
 		}
 		releaseHandler()
 		if err := <-startResult; err != nil {

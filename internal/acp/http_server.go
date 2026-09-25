@@ -102,6 +102,7 @@ type httpServerGeneration struct {
 	ctx         context.Context
 	cancel      context.CancelFunc
 	serveDone   chan struct{}
+	startDone   chan struct{}
 	cleanupDone chan struct{}
 	closeDone   chan struct{}
 	dispatches  sync.WaitGroup
@@ -338,6 +339,7 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 		ctx:         genCtx,
 		cancel:      cancel,
 		serveDone:   make(chan struct{}),
+		startDone:   make(chan struct{}),
 		cleanupDone: make(chan struct{}),
 		closeDone:   make(chan struct{}),
 		admitting:   true,
@@ -380,6 +382,7 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 
 	// Start session cleanup goroutine for idle session reclamation.
 	go s.sessionCleanupLoop(generation)
+	defer close(generation.startDone)
 	slog.Info("acp.server.start", "name", name, "addr", listenAddr, "tls", serveTLS)
 
 	return nil
@@ -470,6 +473,7 @@ func (s *HTTPServer) closeGeneration(generation *httpServerGeneration) {
 	<-generation.cleanupDone
 	generation.requests.Wait()
 	generation.dispatches.Wait()
+	<-generation.startDone
 	generation.closeErr = errors.Join(generation.closeErr, generation.serveErr)
 	if generation.workerPanic.Load() {
 		generation.closeErr = errors.Join(generation.closeErr, ErrHTTPServerWorkerPanic)
