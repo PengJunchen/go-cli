@@ -59,6 +59,40 @@ func TestAssembledLoadedExplicitModelZeroOverridesProviderSampling(t *testing.T)
 	assertSamplingNumber(t, request, "max_tokens", "0")
 }
 
+func TestAssembledLoadedJSONExplicitZeroSamplingIsEncoded(t *testing.T) {
+	capture := &providerRequestCapture{}
+	srv := httptest.NewServer(http.HandlerFunc(capture.handler))
+	t.Cleanup(srv.Close)
+
+	const providerName = "json-zero-sampling-provider"
+	rawConfig, err := json.Marshal(config.Config{
+		Provider: config.ProviderConfig{
+			Name:        providerName,
+			BaseURL:     srv.URL,
+			APIKey:      newTestCredentialCanary(t),
+			Temperature: 0.8,
+			MaxTokens:   512,
+		},
+		Model: config.ModelConfig{
+			Name:        "json-zero-sampling-model",
+			Temperature: 0,
+			MaxTokens:   0,
+		},
+	})
+	require.NoError(t, err)
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	require.NoError(t, os.WriteFile(configPath, rawConfig, 0o600))
+	rc, err := config.NewLoader().WithFile(configPath).WithEnvPrefix("R3_SAMPLING_JSON_ZERO_UNUSED").Load(context.Background())
+	require.NoError(t, err)
+	assert.True(t, rc.ModelSampling().TemperatureSet)
+	assert.True(t, rc.ModelSampling().MaxTokensSet)
+
+	generateCapturedModelRequest(t, capture, rc, rc.Provider.Name, rc.Model.Name)
+	request := decodeSamplingRequestBody(t, capture)
+	assertSamplingNumber(t, request, "temperature", "0")
+	assertSamplingNumber(t, request, "max_tokens", "0")
+}
+
 func TestAssembledPerCallZeroSamplingIsEncoded(t *testing.T) {
 	capture := &providerRequestCapture{}
 	srv := httptest.NewServer(http.HandlerFunc(capture.handler))
