@@ -19,7 +19,7 @@ type ptyLineResult struct {
 	err  error
 }
 
-func startPTYReadLine(le *DefaultLineEditor, ctx context.Context) <-chan ptyLineResult {
+func startPTYReadLine(ctx context.Context, le *DefaultLineEditor) <-chan ptyLineResult {
 	result := make(chan ptyLineResult, 1)
 	go func() {
 		line, err := le.ReadLine(ctx, "> ")
@@ -64,7 +64,7 @@ func TestReadLineTTYReleasesFirstKeyForNextOwner(t *testing.T) {
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	result := startPTYReadLine(le, ctx)
+	result := startPTYReadLine(ctx, le)
 	awaitPTYState(t, slave, original, false)
 	_, err = master.Write([]byte("\r"))
 	require.NoError(t, err)
@@ -97,7 +97,7 @@ func TestReadLineTTYContextCancelReleasesReaderAndRestoresMode(t *testing.T) {
 	original, err := xterm.GetState(int(slave.Fd()))
 	require.NoError(t, err)
 	ctx, cancel := context.WithCancel(context.Background())
-	result := startPTYReadLine(le, ctx)
+	result := startPTYReadLine(ctx, le)
 	awaitPTYState(t, slave, original, false)
 	cancel()
 	got := receivePTYLine(t, result)
@@ -129,7 +129,7 @@ func TestReadLineTTYCookedToggleJoinsRawReaderBeforeScanner(t *testing.T) {
 	require.NoError(t, err)
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
-	result := startPTYReadLine(le, ctx)
+	result := startPTYReadLine(ctx, le)
 	awaitPTYState(t, slave, original, false)
 	_, err = master.Write([]byte{0x1c})
 	require.NoError(t, err)
