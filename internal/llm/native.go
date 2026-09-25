@@ -191,23 +191,26 @@ func (m *nativeChatModel) generate(ctx context.Context, msgs []Message, opts ...
 	if err != nil {
 		return nil, fmt.Errorf("llm: do request: %w", err)
 	}
-	defer func() {
-		if cerr := resp.Body.Close(); cerr != nil {
-			slog.Warn("llm_close_body", "err", cerr)
-		}
-	}()
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		payload, rerr := io.ReadAll(resp.Body)
-		if rerr != nil {
-			return nil, fmt.Errorf("llm: read error response: %w", rerr)
+		payload, truncated, readErr, closeErr := readBoundedProviderBody(resp.Body, maxProviderErrorBodyBytes)
+		if readErr != nil {
+			return nil, errors.Join(fmt.Errorf("llm: read error response: %w", readErr), closeErr)
 		}
-		return nil, newProviderError(resp.StatusCode, m.provider, string(payload))
+		providerErr := newProviderError(resp.StatusCode, m.provider, string(payload))
+		providerErr.BodyTruncated = truncated
+		return nil, errors.Join(providerErr, closeErr)
 	}
 
-	data, rerr := io.ReadAll(resp.Body)
-	if rerr != nil {
-		return nil, fmt.Errorf("llm: read response: %w", rerr)
+	data, truncated, readErr, closeErr := readBoundedProviderBody(resp.Body, maxProviderJSONBodyBytes)
+	if readErr != nil {
+		return nil, errors.Join(fmt.Errorf("llm: read response: %w", readErr), closeErr)
+	}
+	if truncated {
+		return nil, errors.Join(ErrProviderResponseTooLarge, closeErr)
+	}
+	if closeErr != nil {
+		return nil, closeErr
 	}
 	return m.decode(data)
 }
@@ -266,16 +269,13 @@ func (m *nativeChatModel) streamRoundTrip(ctx context.Context, body []byte, endp
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		defer func() {
-			if cerr := resp.Body.Close(); cerr != nil {
-				slog.Warn("llm_close_error_body", "err", cerr)
-			}
-		}()
-		payload, rerr := io.ReadAll(resp.Body)
-		if rerr != nil {
-			return nil, fmt.Errorf("llm: read error response: %w", rerr)
+		payload, truncated, readErr, closeErr := readBoundedProviderBody(resp.Body, maxProviderErrorBodyBytes)
+		if readErr != nil {
+			return nil, errors.Join(fmt.Errorf("llm: read error response: %w", readErr), closeErr)
 		}
-		return nil, newProviderError(resp.StatusCode, m.provider, string(payload))
+		providerErr := newProviderError(resp.StatusCode, m.provider, string(payload))
+		providerErr.BodyTruncated = truncated
+		return nil, errors.Join(providerErr, closeErr)
 	}
 	return resp.Body, nil
 }

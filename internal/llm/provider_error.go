@@ -31,16 +31,19 @@ const (
 )
 
 // ProviderError is a structured error returned by a model provider. It carries
-// the HTTP status code, a typed error category, the provider name and the
-// original error message so that middleware can classify errors without
-// fragile string matching. Message is retained for internal classification;
-// Error deliberately excludes it because providers may echo prompts or tool
-// input in response bodies.
+// the HTTP status code, a typed error category, the provider name and a bounded
+// response message so middleware can classify errors without fragile string
+// matching. Error deliberately excludes Message because providers may echo
+// prompts or tool input in response bodies.
 type ProviderError struct {
 	StatusCode int
 	ErrorType  ErrorType
 	Provider   string
 	Message    string
+
+	// BodyTruncated reports that the error response contained bytes beyond the
+	// bounded diagnostic prefix stored in Message.
+	BodyTruncated bool
 }
 
 // Error implements the error interface.
