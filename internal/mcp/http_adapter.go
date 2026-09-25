@@ -53,12 +53,19 @@ var ErrUnsupportedHTTPTransport = errors.New("mcp: only the Streamable HTTP tran
 // lifecycle transition without including remote response bodies.
 type HTTPProtocolError struct {
 	message string
+	cause   error
 }
 
 func (e *HTTPProtocolError) Error() string { return "mcp: " + e.message }
 
+func (e *HTTPProtocolError) Unwrap() error { return e.cause }
+
 func httpProtocolError(format string, args ...any) error {
 	return &HTTPProtocolError{message: fmt.Sprintf(format, args...)}
+}
+
+func httpProtocolErrorCause(message string, cause error) error {
+	return &HTTPProtocolError{message: message, cause: cause}
 }
 
 const streamableHTTPProtocolVersion = "2025-06-18"
@@ -75,17 +82,54 @@ const defaultHTTPTimeout = 60 * time.Second
 // by streaming an arbitrarily large response.
 const maxHTTPResponseSize = 10 * 1024 * 1024 // 10 MB
 
+var errHTTPResponseTooLarge = fmt.Errorf("mcp: response body exceeds %d byte limit", maxHTTPResponseSize)
+
+type responseByteBudget struct {
+	remaining int64
+}
+
+func newResponseByteBudget(limit int64) *responseByteBudget {
+	return &responseByteBudget{remaining: limit}
+}
+
+func (b *responseByteBudget) wrap(source io.Reader) io.Reader {
+	return responseBudgetReader{source: source, budget: b}
+}
+
+type responseBudgetReader struct {
+	source io.Reader
+	budget *responseByteBudget
+}
+
+func (r responseBudgetReader) Read(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	remaining := r.budget.remaining
+	maxProbe := remaining + 1
+	if int64(len(p)) > maxProbe {
+		p = p[:maxProbe]
+	}
+	n, err := r.source.Read(p)
+	if int64(n) > remaining {
+		r.budget.remaining = 0
+		return 0, errHTTPResponseTooLarge
+	}
+	r.budget.remaining -= int64(n)
+	return n, err
+}
+
 // readLimitedBody reads at most maxHTTPResponseSize bytes from r. If the body
 // exceeds the limit, an error is returned so the caller can abort instead of
 // allocating unbounded memory.
 func readLimitedBody(r io.Reader) ([]byte, error) {
-	limited := io.LimitReader(r, maxHTTPResponseSize+1)
-	raw, err := io.ReadAll(limited)
+	return readLimitedBodyWithBudget(r, newResponseByteBudget(maxHTTPResponseSize))
+}
+
+func readLimitedBodyWithBudget(r io.Reader, budget *responseByteBudget) ([]byte, error) {
+	raw, err := io.ReadAll(budget.wrap(r))
 	if err != nil {
 		return nil, err
-	}
-	if int64(len(raw)) > maxHTTPResponseSize {
-		return nil, fmt.Errorf("mcp: response body exceeds %d byte limit", maxHTTPResponseSize)
 	}
 	return raw, nil
 }
@@ -121,7 +165,7 @@ func effectiveHTTPPort(u *url.URL) string {
 func resolveSameOriginEndpoint(configuredURL, endpoint string) (string, error) {
 	base, err := url.Parse(configuredURL)
 	if err != nil {
-		return "", fmt.Errorf("mcp: parse configured endpoint: %w", err)
+		return "", httpProtocolError("configured HTTP endpoint is invalid")
 	}
 	baseScheme := strings.ToLower(base.Scheme)
 	if base.Host == "" || (baseScheme != "http" && baseScheme != "https") {
@@ -129,7 +173,7 @@ func resolveSameOriginEndpoint(configuredURL, endpoint string) (string, error) {
 	}
 	ref, err := url.Parse(endpoint)
 	if err != nil {
-		return "", fmt.Errorf("mcp: parse HTTP endpoint: %w", err)
+		return "", httpProtocolError("HTTP endpoint is invalid")
 	}
 	resolved := base.ResolveReference(ref)
 	if !sameHTTPOrigin(base, resolved) {
@@ -146,7 +190,7 @@ func (a *HTTPClientAdapter) doHTTP(req *http.Request) (*http.Response, error) {
 	initialURL := *req.URL
 	client.CheckRedirect = func(next *http.Request, via []*http.Request) error {
 		if !sameHTTPOrigin(&initialURL, next.URL) {
-			return fmt.Errorf("%w: %s -> %s", errCrossOriginRedirect, &initialURL, next.URL)
+			return errCrossOriginRedirect
 		}
 		if checkRedirect != nil {
 			if err := checkRedirect(next, via); err != nil {
@@ -159,11 +203,15 @@ func (a *HTTPClientAdapter) doHTTP(req *http.Request) (*http.Response, error) {
 		// first origin check, so validate the actual target immediately before
 		// net/http sends the redirected request.
 		if !sameHTTPOrigin(&initialURL, next.URL) {
-			return fmt.Errorf("%w: %s -> %s", errCrossOriginRedirect, &initialURL, next.URL)
+			return errCrossOriginRedirect
 		}
 		return nil
 	}
-	return client.Do(req)
+	resp, err := client.Do(req)
+	if errors.Is(err, errCrossOriginRedirect) {
+		return nil, errCrossOriginRedirect
+	}
+	return resp, err
 }
 
 // NewHTTPClientAdapter returns an HTTPClientAdapter for the given config. The
@@ -360,10 +408,11 @@ func (a *HTTPClientAdapter) request(ctx context.Context, method string, params m
 	if err != nil {
 		return nil, newRequestBoundaryError(fmt.Errorf("mcp: do request: %w", err), true, false)
 	}
-	result, cursor, resumable, responseErr := a.readRequestResponse(resp, id, sessionID)
+	responseBudget := newResponseByteBudget(maxHTTPResponseSize)
+	result, cursor, resumable, responseErr := a.readRequestResponse(resp, id, sessionID, responseBudget)
 	_ = resp.Body.Close()
 	if responseErr != nil && resumable && cursor != "" && ctx.Err() == nil {
-		result, responseErr = a.resumeRequestResponse(ctx, endpoint, version, sessionID, id, cursor)
+		result, responseErr = a.resumeRequestResponse(ctx, endpoint, version, sessionID, id, cursor, responseBudget)
 	}
 	if responseErr != nil {
 		return nil, markRequestDispatched(responseErr)
@@ -410,31 +459,34 @@ func (a *HTTPClientAdapter) newHTTPMessageRequest(ctx context.Context, method, e
 	return req, nil
 }
 
-func (a *HTTPClientAdapter) readRequestResponse(resp *http.Response, id int64, sessionID string) (map[string]any, string, bool, error) {
+func (a *HTTPClientAdapter) readRequestResponse(resp *http.Response, id int64, sessionID string, budget *responseByteBudget) (map[string]any, string, bool, error) {
 	if resp.StatusCode != http.StatusOK {
 		return nil, "", false, httpProtocolError("JSON-RPC POST returned HTTP status %d", resp.StatusCode)
 	}
 	if err := validateResponseSessionID(resp, sessionID); err != nil {
 		return nil, "", false, err
 	}
-	return a.readRPCResponse(resp, id)
+	return a.readRPCResponse(resp, id, budget)
 }
 
-func (a *HTTPClientAdapter) readRPCResponse(resp *http.Response, id int64) (map[string]any, string, bool, error) {
+func (a *HTTPClientAdapter) readRPCResponse(resp *http.Response, id int64, budget *responseByteBudget) (map[string]any, string, bool, error) {
 	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
 	if err != nil {
 		return nil, "", false, httpProtocolError("invalid response Content-Type")
 	}
 	switch strings.ToLower(mediaType) {
 	case "application/json":
-		raw, readErr := readLimitedBody(resp.Body)
+		raw, readErr := readLimitedBodyWithBudget(resp.Body, budget)
 		if readErr != nil {
-			return nil, "", false, httpProtocolError("read JSON-RPC response: %v", readErr)
+			if errors.Is(readErr, errHTTPResponseTooLarge) {
+				return nil, "", false, httpProtocolError("JSON-RPC response body exceeds size limit")
+			}
+			return nil, "", false, httpProtocolErrorCause("reading JSON-RPC response failed", readErr)
 		}
 		result, parseErr := parseJSONRPCResponse(raw, id)
 		return result, "", false, parseErr
 	case "text/event-stream":
-		result, cursor, streamErr := readSSEResponse(resp.Body, id)
+		result, cursor, streamErr := readSSEResponseWithBudget(resp.Body, id, budget)
 		if streamErr == nil {
 			return result, cursor, false, nil
 		}
@@ -496,9 +548,12 @@ func canResumeSSE(err error) bool {
 }
 
 func readSSEResponse(body io.Reader, expectedID int64) (map[string]any, string, error) {
-	scanner := bufio.NewScanner(body)
+	return readSSEResponseWithBudget(body, expectedID, newResponseByteBudget(maxHTTPResponseSize))
+}
+
+func readSSEResponseWithBudget(body io.Reader, expectedID int64, budget *responseByteBudget) (map[string]any, string, error) {
+	scanner := bufio.NewScanner(budget.wrap(body))
 	scanner.Buffer(make([]byte, 64*1024), maxHTTPResponseSize+1)
-	totalBytes := int64(0)
 	var dataLines []string
 	eventID := ""
 	eventIDSet := false
@@ -527,10 +582,6 @@ func readSSEResponse(body io.Reader, expectedID int64) (map[string]any, string, 
 
 	for scanner.Scan() {
 		line := scanner.Text()
-		totalBytes += int64(len(line) + 1)
-		if totalBytes > maxHTTPResponseSize {
-			return nil, cursor, httpProtocolError("SSE response exceeds %d byte limit", maxHTTPResponseSize)
-		}
 		if line == "" {
 			result, isResponse, err := dispatch()
 			if err != nil {
@@ -560,19 +611,13 @@ func readSSEResponse(body io.Reader, expectedID int64) (map[string]any, string, 
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		if err == bufio.ErrTooLong {
+		if errors.Is(err, errHTTPResponseTooLarge) {
+			return nil, cursor, httpProtocolErrorCause("SSE response body exceeds size limit", err)
+		}
+		if errors.Is(err, bufio.ErrTooLong) {
 			return nil, cursor, httpProtocolError("SSE event line exceeds response limit")
 		}
 		return nil, cursor, err
-	}
-	if len(dataLines) > 0 || eventIDSet {
-		result, isResponse, err := dispatch()
-		if err != nil {
-			return nil, cursor, err
-		}
-		if isResponse {
-			return result, cursor, nil
-		}
 	}
 	return nil, cursor, errSSEResponseMissing
 }
@@ -612,7 +657,7 @@ func parseSSEMessage(raw []byte, expectedID int64) (map[string]any, bool, error)
 	return result, true, nil
 }
 
-func (a *HTTPClientAdapter) resumeRequestResponse(ctx context.Context, endpoint, version, sessionID string, id int64, cursor string) (map[string]any, error) {
+func (a *HTTPClientAdapter) resumeRequestResponse(ctx context.Context, endpoint, version, sessionID string, id int64, cursor string, budget *responseByteBudget) (map[string]any, error) {
 	if !validLastEventID(cursor) {
 		return nil, httpProtocolError("cannot resume SSE stream with an invalid event ID")
 	}
@@ -635,7 +680,7 @@ func (a *HTTPClientAdapter) resumeRequestResponse(ctx context.Context, endpoint,
 	if err != nil || !strings.EqualFold(mediaType, "text/event-stream") {
 		return nil, httpProtocolError("SSE resume GET returned invalid Content-Type")
 	}
-	result, _, err := readSSEResponse(resp.Body, id)
+	result, _, err := readSSEResponseWithBudget(resp.Body, id, budget)
 	return result, err
 }
 
@@ -703,7 +748,7 @@ func (a *HTTPClientAdapter) doInitializeLocked(ctx context.Context) error {
 		}
 		return httpProtocolError("initialize POST returned HTTP status %d", resp.StatusCode)
 	}
-	result, _, _, err := a.readRPCResponse(resp, id)
+	result, _, _, err := a.readRPCResponse(resp, id, newResponseByteBudget(maxHTTPResponseSize))
 	if err != nil {
 		return fmt.Errorf("mcp: invalid initialize response: %w", err)
 	}
