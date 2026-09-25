@@ -13,6 +13,7 @@ import (
 	"sync/atomic"
 	"unicode/utf8"
 
+	"github.com/muesli/cancelreader"
 	xterm "golang.org/x/term"
 )
 
@@ -523,32 +524,169 @@ type byteResult struct {
 	err error
 }
 
+var errTTYReaderCancellationUnsupported = errors.New("TTY input reader does not support cancellation")
+
+type ttyByteReader struct {
+	input    cancelreader.CancelReader
+	requests chan struct{}
+	results  chan byteResult
+	stopCh   chan struct{}
+	done     chan struct{}
+	stopOnce sync.Once
+	stopErr  error
+}
+
+func newTTYByteReader(input io.Reader) (*ttyByteReader, error) {
+	probe, err := cancelreader.NewReader(input)
+	if err != nil {
+		return nil, fmt.Errorf("create TTY cancellation probe: %w", err)
+	}
+	canCancel := probe.Cancel()
+	if err := probe.Close(); err != nil {
+		return nil, fmt.Errorf("close TTY cancellation probe: %w", err)
+	}
+	if !canCancel {
+		return nil, fmt.Errorf("%w: %T", errTTYReaderCancellationUnsupported, input)
+	}
+
+	reader, err := cancelreader.NewReader(input)
+	if err != nil {
+		return nil, fmt.Errorf("create TTY input reader: %w", err)
+	}
+	byteReader := &ttyByteReader{
+		input:    reader,
+		requests: make(chan struct{}),
+		results:  make(chan byteResult),
+		stopCh:   make(chan struct{}),
+		done:     make(chan struct{}),
+	}
+	go byteReader.run()
+	return byteReader, nil
+}
+
+func (r *ttyByteReader) run() {
+	defer close(r.done)
+	var pendingErr error
+	for {
+		select {
+		case <-r.stopCh:
+			return
+		case <-r.requests:
+		}
+
+		if pendingErr != nil {
+			if !r.send(byteResult{err: pendingErr}) {
+				return
+			}
+			return
+		}
+
+		for {
+			var buf [1]byte
+			n, err := r.input.Read(buf[:])
+			if n > 0 {
+				if !r.send(byteResult{b: buf[0]}) {
+					return
+				}
+				pendingErr = err
+				break
+			}
+			if err != nil {
+				if errors.Is(err, cancelreader.ErrCanceled) {
+					return
+				}
+				if !r.send(byteResult{err: err}) {
+					return
+				}
+				return
+			}
+		}
+	}
+}
+
+func (r *ttyByteReader) send(result byteResult) bool {
+	select {
+	case r.results <- result:
+		return true
+	case <-r.stopCh:
+		return false
+	}
+}
+
+func (r *ttyByteReader) readByte(ctx context.Context) (byte, error) {
+	select {
+	case r.requests <- struct{}{}:
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-r.done:
+		return 0, io.ErrClosedPipe
+	}
+	select {
+	case result := <-r.results:
+		return result.b, result.err
+	case <-ctx.Done():
+		return 0, ctx.Err()
+	case <-r.done:
+		return 0, io.ErrClosedPipe
+	}
+}
+
+func (r *ttyByteReader) stop() error {
+	r.stopOnce.Do(func() {
+		canceled := r.input.Cancel()
+		close(r.stopCh)
+		<-r.done
+		if err := r.input.Close(); err != nil {
+			r.stopErr = errors.Join(r.stopErr, fmt.Errorf("close TTY input reader: %w", err))
+		}
+		if !canceled {
+			r.stopErr = errors.Join(r.stopErr, errTTYReaderCancellationUnsupported)
+		}
+	})
+	return r.stopErr
+}
+
 // readLineTTY reads input in raw terminal mode with line editing, history
 // navigation, tab completion, and multi-line support.
-func (le *DefaultLineEditor) readLineTTY(ctx context.Context, prompt string) (string, error) {
-	// Ensure the SIGWINCH monitor is running (lazy, started once) and
-	// invalidate the cached width so each ReadLine re-queries the actual
+func (le *DefaultLineEditor) readLineTTY(ctx context.Context, prompt string) (line string, retErr error) {
+	// Invalidate the cached width so each ReadLine re-queries the actual
 	// terminal size.
-	le.startResizeMonitor()
 	le.invalidateTermWidth()
 
 	// If cooked mode is active (set by a previous Ctrl+\ toggle), read
 	// directly via bufio.Scanner without entering raw mode. The terminal
 	// is already in cooked mode from the previous ReadLine call.
 	if le.cookedMode {
+		le.startResizeMonitor()
 		return le.readLineCookedMulti(ctx, prompt, nil)
+	}
+
+	byteReader, err := newTTYByteReader(le.in)
+	if err != nil {
+		return "", err
 	}
 
 	saved, err := setRawMode(le.in)
 	if err != nil {
+		if stopErr := byteReader.stop(); stopErr != nil {
+			return "", errors.Join(err, stopErr)
+		}
 		slog.Warn("cli_line_editor_raw_mode_failed", "err", err)
 		return le.readLineNonTTY(ctx, prompt)
 	}
+	le.startResizeMonitor()
+	rawModeRestored := false
 	defer func() {
+		if stopErr := byteReader.stop(); stopErr != nil {
+			retErr = errors.Join(retErr, fmt.Errorf("stop TTY input reader: %w", stopErr))
+		}
 		// Disable bracketed paste mode before restoring terminal state.
 		fmt.Fprint(le.out, "\x1b[?2004l") //nolint:errcheck
-		if rErr := restoreMode(le.in, saved); rErr != nil {
-			slog.Warn("cli_line_editor_restore_mode_failed", "err", rErr)
+		if !rawModeRestored {
+			if rErr := restoreMode(le.in, saved); rErr != nil {
+				slog.Warn("cli_line_editor_restore_mode_failed", "err", rErr)
+				retErr = errors.Join(retErr, fmt.Errorf("restore terminal mode: %w", rErr))
+			}
 		}
 	}()
 
@@ -556,43 +694,7 @@ func (le *DefaultLineEditor) readLineTTY(ctx context.Context, prompt string) (st
 	// ESC[200~...ESC[201~ and can be detected as a single unit.
 	fmt.Fprint(le.out, "\x1b[?2004h") //nolint:errcheck
 
-	// Single reader goroutine for the duration of this ReadLine call.
-	readCh := make(chan byteResult)
-	done := make(chan struct{})
-	var doneOnce sync.Once
-	closeDone := func() { doneOnce.Do(func() { close(done) }) }
-	go func() {
-		for {
-			buf := make([]byte, 1)
-			n, err := le.in.Read(buf)
-			if n > 0 {
-				select {
-				case readCh <- byteResult{b: buf[0]}:
-				case <-done:
-					return
-				}
-				continue
-			}
-			if err != nil {
-				select {
-				case readCh <- byteResult{err: err}:
-				case <-done:
-					return
-				}
-				return
-			}
-		}
-	}()
-	defer closeDone()
-
-	readByte := func() (byte, error) {
-		select {
-		case res := <-readCh:
-			return res.b, res.err
-		case <-ctx.Done():
-			return 0, ctx.Err()
-		}
-	}
+	readByte := func() (byte, error) { return byteReader.readByte(ctx) }
 
 	// Multi-line accumulation.
 	var lines []string
@@ -605,11 +707,15 @@ func (le *DefaultLineEditor) readLineTTY(ctx context.Context, prompt string) (st
 				// reader goroutine, restore the terminal to cooked mode,
 				// and continue reading via bufio.Scanner.
 				le.cookedMode = true
-				closeDone()
+				if stopErr := byteReader.stop(); stopErr != nil {
+					return strings.Join(lines, "\n"), fmt.Errorf("stop TTY input reader before cooked mode: %w", stopErr)
+				}
 				fmt.Fprint(le.out, "\x1b[?2004l") //nolint:errcheck
 				if rErr := restoreMode(le.in, saved); rErr != nil {
 					slog.Warn("cli_line_editor_restore_mode_failed", "err", rErr)
+					return strings.Join(lines, "\n"), fmt.Errorf("restore terminal mode for cooked input: %w", rErr)
 				}
+				rawModeRestored = true
 				return le.readLineCookedMulti(ctx, currentPrompt, lines)
 			}
 			joined := strings.Join(lines, "\n")
