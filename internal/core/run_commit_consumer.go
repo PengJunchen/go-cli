@@ -608,6 +608,7 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 	case <-allDone:
 	case <-ctx.Done():
 	}
+	completedResults := make([]runCommitDispatchResult, len(actions))
 	for index := range actions {
 		action := &actions[index]
 		if action.invocation == nil {
@@ -616,6 +617,9 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 		select {
 		case <-action.done:
 			action.complete = true
+			// Closing action.done synchronizes the worker's result assignment.
+			// Never inspect its result slot for an action that has not joined.
+			completedResults[index] = action.result
 		default:
 			action.complete = false
 		}
@@ -634,8 +638,9 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 			runErr = errors.Join(runErr, action.stopErr)
 			continue
 		}
-		committed := action.result.committed
-		output := action.result.output
+		dispatch := completedResults[index]
+		committed := dispatch.committed
+		output := dispatch.output
 		if action.taskID == 0 {
 			runErr = errors.Join(runErr, ErrRunCommitOwnerUnavailable)
 		}
@@ -645,9 +650,13 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 			// worker and observes the exact prepared completion signal.
 			committed = true
 			output = "Error: tool result is unknown because dispatch did not return before cancellation"
-			action.result.err = toolOutcomeUnknownError{cause: ctx.Err()}
-			action.result.committed = true
-			runErr = errors.Join(runErr, markUnknownToolOutcome(action.result.err))
+			dispatch = runCommitDispatchResult{
+				output:    output,
+				isError:   true,
+				err:       toolOutcomeUnknownError{cause: ctx.Err()},
+				committed: true,
+			}
+			runErr = errors.Join(runErr, markUnknownToolOutcome(dispatch.err))
 		}
 		dispatchState := DispatchStateDispatched
 		resourceState := RunExecutionCleanupPending
@@ -672,7 +681,7 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 		if err := consumer.recordTaskExecution(action.taskID, execution); err != nil {
 			return err
 		}
-		outcome := runCommitReceiptOutcome(ctx, action.result)
+		outcome := runCommitReceiptOutcome(ctx, dispatch)
 		if !action.complete {
 			outcome = ReceiptOutcomeUnknown
 		}
@@ -682,7 +691,7 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 			return err
 		}
 		if outcome == ReceiptOutcomeUnknown {
-			runErr = errors.Join(runErr, markUnknownToolOutcome(action.result.err))
+			runErr = errors.Join(runErr, markUnknownToolOutcome(dispatch.err))
 		}
 		if !committed {
 			if err := consumer.resolveTask(action.taskID, ExecutionResolution{RunID: action.intent.RunID, ActionID: action.intent.ActionID, Evidence: ResolutionNeverDispatched}); err != nil {
@@ -692,8 +701,9 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 	}
 
 	var waitIDs []uint64
-	for _, action := range actions {
-		if action.invocation == nil || action.taskID == 0 || !action.complete || !action.result.committed {
+	for index := range actions {
+		action := &actions[index]
+		if action.invocation == nil || action.taskID == 0 || !action.complete || !completedResults[index].committed {
 			continue
 		}
 		if details, ok := runCompletionDetails(ctx, action.taskID); ok && details.state == runCompletionTaskResourceOpen {
@@ -706,8 +716,9 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 			runErr = errors.Join(runErr, runCommitQuiescenceError{cause: waitErr})
 		}
 	}
-	for _, action := range actions {
-		if action.invocation == nil || action.taskID == 0 || !action.complete || !action.result.committed {
+	for index := range actions {
+		action := &actions[index]
+		if action.invocation == nil || action.taskID == 0 || !action.complete || !completedResults[index].committed {
 			continue
 		}
 		details, ok := runCompletionDetails(ctx, action.taskID)
