@@ -5,7 +5,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -33,12 +36,26 @@ func setupOnboardingTest(t *testing.T, configExists bool) (string, func()) {
 	oldAuthPath := onboardingAuthPathFunc
 	oldTTY := stdinIsTTYFunc
 	oldSaveAPIKey := saveAPIKeyFunc
+	oldLookup := onboardingCredentialLookupFunc
+	oldScope := onboardingCredentialScopeFunc
 	oldRegistryBuilder := onboardingRegistryBuilder
 	configExistsFunc = func() bool { return configExists }
 	onboardingConfigPathFunc = func() string { return configPath }
 	onboardingAuthPathFunc = func() string { return authPath }
 	stdinIsTTYFunc = func() bool { return false }
-	saveAPIKeyFunc = saveAuthFile // file fallback; skip the real keychain
+	saveAPIKeyFunc = func(ctx context.Context, scope config.AuthScope, key string) error {
+		return saveAuthFile(ctx, scope, key)
+	}
+	onboardingCredentialScopeFunc = func(_ *config.Config, providerName string) (config.AuthScope, error) {
+		return onboardingTestScope(providerName), nil
+	}
+	onboardingCredentialLookupFunc = func(_ context.Context, cfg *config.Config, providerName string) (config.AuthScope, string, bool, error) {
+		scope := onboardingTestScope(providerName)
+		if cfg != nil && cfg.Provider.APIKey != "" && providerIdentityMatches(resolveProviderName("", cfg), providerName) {
+			return scope, cfg.Provider.APIKey, true, nil
+		}
+		return scope, "", false, nil
+	}
 	onboardingRegistryBuilder = func() llm.ModelRegistry { return llm.NoopModelRegistry{} }
 
 	return configPath, func() {
@@ -47,8 +64,52 @@ func setupOnboardingTest(t *testing.T, configExists bool) (string, func()) {
 		onboardingAuthPathFunc = oldAuthPath
 		stdinIsTTYFunc = oldTTY
 		saveAPIKeyFunc = oldSaveAPIKey
+		onboardingCredentialLookupFunc = oldLookup
+		onboardingCredentialScopeFunc = oldScope
 		onboardingRegistryBuilder = oldRegistryBuilder
 	}
+}
+
+func onboardingTestScope(providerName string) config.AuthScope {
+	if providerName == "" {
+		providerName = "eino"
+	}
+	return config.AuthScope{ProviderID: providerName, ProtocolID: "openai-compatible", Origin: "https://api.example.test"}
+}
+
+type onboardingAuthDocument struct {
+	Credentials []struct {
+		Provider string `json:"provider"`
+		Protocol string `json:"protocol"`
+		Origin   string `json:"origin"`
+		APIKey   string `json:"api_key"`
+	} `json:"credentials"`
+}
+
+func readOnboardingAuth(t *testing.T, path string) onboardingAuthDocument {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var doc onboardingAuthDocument
+	require.NoError(t, json.Unmarshal(data, &doc))
+	return doc
+}
+
+func onboardingSecretCanary(t *testing.T) string {
+	t.Helper()
+	var value [16]byte
+	_, err := rand.Read(value[:])
+	require.NoError(t, err)
+	return "auth-test-" + hex.EncodeToString(value[:])
+}
+
+func useMissingSecurityShim(t *testing.T) {
+	t.Helper()
+	binDir := t.TempDir()
+	shim := filepath.Join(binDir, "security")
+	script := "#!/bin/sh\nprintf '%s\\n' 'security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.' >&2\nexit 44\n"
+	require.NoError(t, os.WriteFile(shim, []byte(script), 0o700))
+	t.Setenv("PATH", binDir)
 }
 
 // TestRunOnboarding_FirstRun_TriggersWizard verifies that a first run with no
@@ -58,7 +119,7 @@ func TestRunOnboarding_FirstRun_TriggersWizard(t *testing.T) {
 	defer cleanup()
 
 	cfg := &config.Config{}
-	input := "sk-test-key\n2\n3\n"
+	input := onboardingSecretCanary(t) + "\n2\n3\n"
 	var out bytes.Buffer
 
 	err := RunOnboarding(cfg, strings.NewReader(input), &out)
@@ -72,19 +133,40 @@ func TestRunOnboarding_FirstRun_TriggersWizard(t *testing.T) {
 }
 
 // TestRunOnboarding_APIKeySaved verifies the API key entered during onboarding
-// is stored in the config struct.
+// is persisted separately from provider config.
 func TestRunOnboarding_APIKeySaved(t *testing.T) {
-	_, cleanup := setupOnboardingTest(t, false)
+	configPath, cleanup := setupOnboardingTest(t, false)
 	defer cleanup()
 
 	cfg := &config.Config{}
-	input := "sk-my-secret-key\n1\n1\n"
+	apiKey := onboardingSecretCanary(t)
+	input := apiKey + "\n1\n1\n"
 	var out bytes.Buffer
 
 	err := RunOnboarding(cfg, strings.NewReader(input), &out)
 	require.NoError(t, err)
 
-	assert.Equal(t, "sk-my-secret-key", cfg.Provider.APIKey)
+	assert.Empty(t, cfg.Provider.APIKey)
+	assert.Contains(t, out.String(), "API key saved")
+	doc := readOnboardingAuth(t, filepath.Join(filepath.Dir(configPath), "auth.json"))
+	require.Len(t, doc.Credentials, 1)
+	assert.Equal(t, apiKey, doc.Credentials[0].APIKey)
+}
+
+func TestPromptAPIKeyPreservesExistingConfigKey(t *testing.T) {
+	configuredKey := onboardingSecretCanary(t)
+	promptedKey := onboardingSecretCanary(t)
+	cfg := &config.Config{Provider: config.ProviderConfig{APIKey: configuredKey}}
+	reader := bufio.NewReader(strings.NewReader(promptedKey + "\n"))
+	oldTTY := stdinIsTTYFunc
+	stdinIsTTYFunc = func() bool { return false }
+	t.Cleanup(func() { stdinIsTTYFunc = oldTTY })
+	var out bytes.Buffer
+
+	key, err := promptAPIKey(reader, &out)
+	require.NoError(t, err)
+	assert.Equal(t, promptedKey, key)
+	assert.Equal(t, configuredKey, cfg.Provider.APIKey, "prompted key must not rebind the configured provider credential")
 }
 
 // TestRunOnboarding_ModelSelection verifies the selected model is stored in
@@ -94,7 +176,7 @@ func TestRunOnboarding_ModelSelection(t *testing.T) {
 	defer cleanup()
 
 	cfg := &config.Config{}
-	input := "sk-test\n2\n1\n" // model index 2 = gpt-4o
+	input := onboardingSecretCanary(t) + "\n2\n1\n" // model index 2 = gpt-4o
 	var out bytes.Buffer
 
 	err := RunOnboarding(cfg, strings.NewReader(input), &out)
@@ -111,7 +193,7 @@ func TestRunOnboarding_ThemeSelection(t *testing.T) {
 	defer cleanup()
 
 	cfg := &config.Config{}
-	input := "sk-test\n1\n3\n" // theme index 3 = auto
+	input := onboardingSecretCanary(t) + "\n1\n3\n" // theme index 3 = auto
 	var out bytes.Buffer
 
 	err := RunOnboarding(cfg, strings.NewReader(input), &out)
@@ -128,7 +210,8 @@ func TestRunOnboarding_ConfigFileWritten(t *testing.T) {
 	defer cleanup()
 
 	cfg := &config.Config{}
-	input := "sk-test-key\n1\n1\n"
+	apiKey := onboardingSecretCanary(t)
+	input := apiKey + "\n1\n1\n"
 	var out bytes.Buffer
 
 	err := RunOnboarding(cfg, strings.NewReader(input), &out)
@@ -145,15 +228,22 @@ func TestRunOnboarding_ConfigFileWritten(t *testing.T) {
 	authPath := filepath.Join(filepath.Dir(configPath), "auth.json")
 	authData, err := os.ReadFile(authPath)
 	require.NoError(t, err)
-	var auth map[string]string
+	var auth struct {
+		Credentials []struct {
+			Provider string `json:"provider"`
+			APIKey   string `json:"api_key"`
+		} `json:"credentials"`
+	}
 	require.NoError(t, json.Unmarshal(authData, &auth))
-	assert.Equal(t, "sk-test-key", auth["api_key"])
+	require.Len(t, auth.Credentials, 1)
+	assert.Equal(t, apiKey, auth.Credentials[0].APIKey)
+	assert.Equal(t, onboardingTestScope("eino").ProviderID, auth.Credentials[0].Provider)
 
 	// auth.json should have 0600 permissions.
 	info, err := os.Stat(authPath)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
-	assert.NotContains(t, out.String(), "sk-test-key")
+	assert.NotContains(t, out.String(), apiKey)
 }
 
 // TestRunOnboarding_SkippedWhenConfigExistsAndAPIKeyPresent verifies the
@@ -164,7 +254,7 @@ func TestRunOnboarding_SkippedWhenConfigExistsAndAPIKeyPresent(t *testing.T) {
 
 	cfg := &config.Config{
 		Provider: config.ProviderConfig{
-			APIKey: "existing-key",
+			APIKey: onboardingSecretCanary(t),
 		},
 	}
 	var out bytes.Buffer
@@ -181,20 +271,178 @@ func TestRunOnboarding_SkippedWhenConfigExistsAndAPIKeyPresent(t *testing.T) {
 // config file exists but the API key is missing, only the API key prompt is
 // shown (not the full wizard).
 func TestRunOnboarding_ConfigExistsButNoAPIKey_PromptsForKey(t *testing.T) {
-	_, cleanup := setupOnboardingTest(t, true)
+	configPath, cleanup := setupOnboardingTest(t, true)
 	defer cleanup()
 
 	cfg := &config.Config{}
-	input := "sk-new-key\n"
+	apiKey := onboardingSecretCanary(t)
+	input := apiKey + "\n"
 	var out bytes.Buffer
 
 	err := RunOnboarding(cfg, strings.NewReader(input), &out)
 	require.NoError(t, err)
 
-	assert.Equal(t, "sk-new-key", cfg.Provider.APIKey)
+	assert.Empty(t, cfg.Provider.APIKey)
+	authData, err := os.ReadFile(filepath.Join(filepath.Dir(configPath), "auth.json"))
+	require.NoError(t, err)
+	assert.Contains(t, string(authData), apiKey)
 	// Should NOT run full wizard (no model/theme steps).
 	assert.NotContains(t, out.String(), "Step 2")
 	assert.NotContains(t, out.String(), "Step 3")
+}
+
+func TestRunOnboardingProviderOverrideKeepsInlineKeyOnConfiguredScope(t *testing.T) {
+	_, cleanup := setupOnboardingTest(t, true)
+	defer cleanup()
+
+	configuredKey := onboardingSecretCanary(t)
+	promptedKey := onboardingSecretCanary(t)
+	cfg := &config.Config{Provider: config.ProviderConfig{Name: "openai", APIKey: configuredKey}}
+	var out bytes.Buffer
+	require.NoError(t, runOnboarding(context.Background(), cfg, "eino", strings.NewReader(promptedKey+"\n"), &out))
+	assert.Equal(t, configuredKey, cfg.Provider.APIKey)
+	assert.NotContains(t, out.String(), configuredKey)
+	assert.NotContains(t, out.String(), promptedKey)
+
+	// setupOnboardingTest uses its own directory, captured by the current auth path.
+	authPath := onboardingAuthPathFunc()
+	doc := readOnboardingAuth(t, authPath)
+	require.Len(t, doc.Credentials, 1)
+	assert.Equal(t, "eino", doc.Credentials[0].Provider)
+	assert.Equal(t, promptedKey, doc.Credentials[0].APIKey)
+	configuredScope, err := cliPrimaryCredentialScope(cfg, "openai")
+	require.NoError(t, err)
+	configuredResolver, err := newCLIModelResolver(cfg, "openai", false)
+	require.NoError(t, err)
+	key, found, err := configuredResolver.authChain.ResolveCredential(context.Background(), configuredScope.ProviderID, configuredScope.ProtocolID, configuredScope.Origin)
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, configuredKey, key)
+
+	overrideScope, err := cliPrimaryCredentialScope(cfg, "eino")
+	require.NoError(t, err)
+	assert.NotEqual(t, configuredScope, overrideScope, "override credential must use a distinct provider scope")
+}
+
+type stubOnboardingKeychain struct {
+	available bool
+	setErr    error
+	scope     config.AuthScope
+	key       string
+}
+
+func (s *stubOnboardingKeychain) Available() bool { return s.available }
+func (s *stubOnboardingKeychain) SetScoped(scope config.AuthScope, key string) error {
+	s.scope = scope
+	if s.setErr == nil {
+		s.key = key
+	}
+	return s.setErr
+}
+
+func TestDefaultSaveAPIKeyDoesNotFallbackAfterAvailableKeychainFailure(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	authPath := filepath.Join(dir, "auth.json")
+	oldPath := onboardingAuthPathFunc
+	oldFactory := onboardingKeychainFactory
+	onboardingAuthPathFunc = func() string { return authPath }
+	oldKey := onboardingSecretCanary(t)
+	fake := &stubOnboardingKeychain{available: true, setErr: errors.New("keychain access denied"), key: oldKey}
+	onboardingKeychainFactory = func() onboardingKeychain { return fake }
+	t.Cleanup(func() {
+		onboardingAuthPathFunc = oldPath
+		onboardingKeychainFactory = oldFactory
+	})
+
+	scope := onboardingTestScope("openai")
+	newKey := onboardingSecretCanary(t)
+	err := defaultSaveAPIKey(context.Background(), scope, newKey)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), newKey)
+	assert.Equal(t, scope, fake.scope)
+	assert.Equal(t, oldKey, fake.key, "failed -U must leave the previously stored exact-scope item unchanged")
+	_, statErr := os.Lstat(authPath)
+	assert.ErrorIs(t, statErr, os.ErrNotExist, "available keychain failure must not be reported as a successful file fallback")
+}
+
+func TestDefaultSaveAPIKeyUsesScopedFileWhenKeychainUnavailable(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	authPath := filepath.Join(dir, "auth.json")
+	oldPath := onboardingAuthPathFunc
+	oldFactory := onboardingKeychainFactory
+	onboardingAuthPathFunc = func() string { return authPath }
+	onboardingKeychainFactory = func() onboardingKeychain { return &stubOnboardingKeychain{} }
+	t.Cleanup(func() {
+		onboardingAuthPathFunc = oldPath
+		onboardingKeychainFactory = oldFactory
+	})
+
+	scope := onboardingTestScope("openai")
+	fileKey := onboardingSecretCanary(t)
+	require.NoError(t, defaultSaveAPIKey(context.Background(), scope, fileKey))
+	doc := readOnboardingAuth(t, authPath)
+	require.Len(t, doc.Credentials, 1)
+	assert.Equal(t, scope.ProviderID, doc.Credentials[0].Provider)
+	assert.Equal(t, fileKey, doc.Credentials[0].APIKey)
+}
+
+func TestOnboardingWithoutHomeDoesNotReadProjectRelativeCredentialFile(t *testing.T) {
+	workDir := t.TempDir()
+	t.Chdir(workDir)
+	t.Setenv("HOME", "")
+	t.Setenv("XDG_CONFIG_HOME", "")
+	t.Setenv("GO_CLI_NO_ONBOARDING", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	useMissingSecurityShim(t)
+
+	projectAuthDir := filepath.Join(workDir, ".config", "go-cli")
+	require.NoError(t, os.MkdirAll(projectAuthDir, 0o700))
+	require.NoError(t, os.Chmod(projectAuthDir, 0o700))
+	projectAuthPath := filepath.Join(projectAuthDir, "auth.json")
+	cfg := &config.Config{Provider: config.ProviderConfig{Name: "openai"}}
+	scope, err := cliPrimaryCredentialScope(cfg, "openai")
+	require.NoError(t, err)
+	projectSecret := onboardingSecretCanary(t)
+	require.NoError(t, config.UpsertScopedCredentialFile(context.Background(), projectAuthPath, scope, projectSecret))
+	projectAuthBefore, err := os.ReadFile(projectAuthPath)
+	require.NoError(t, err)
+
+	oldExists := configExistsFunc
+	oldAuthPath := onboardingAuthPathFunc
+	oldTTY := stdinIsTTYFunc
+	oldLookup := onboardingCredentialLookupFunc
+	oldScope := onboardingCredentialScopeFunc
+	oldSave := saveAPIKeyFunc
+	configExistsFunc = func() bool { return true }
+	onboardingAuthPathFunc = defaultAuthFilePath
+	stdinIsTTYFunc = func() bool { return false }
+	onboardingCredentialLookupFunc = resolveCLIPrimaryCredential
+	onboardingCredentialScopeFunc = cliPrimaryCredentialScope
+	promptedSecret := onboardingSecretCanary(t)
+	saved := 0
+	saveAPIKeyFunc = func(context.Context, config.AuthScope, string) error { saved++; return nil }
+	t.Cleanup(func() {
+		configExistsFunc = oldExists
+		onboardingAuthPathFunc = oldAuthPath
+		stdinIsTTYFunc = oldTTY
+		onboardingCredentialLookupFunc = oldLookup
+		onboardingCredentialScopeFunc = oldScope
+		saveAPIKeyFunc = oldSave
+	})
+
+	var out bytes.Buffer
+	err = runOnboarding(context.Background(), cfg, "openai", strings.NewReader(promptedSecret+"\n"), &out)
+	require.NoError(t, err)
+	assert.Equal(t, 1, saved, "the bait file must not satisfy the default credential source")
+	assert.Contains(t, out.String(), "Step 1: API Key")
+	assert.NotContains(t, out.String(), projectSecret)
+	assert.NotContains(t, out.String(), promptedSecret)
+	assert.Empty(t, defaultAuthFilePath(), "an unset HOME must disable the default auth path")
+	projectAuthAfter, err := os.ReadFile(projectAuthPath)
+	require.NoError(t, err)
+	assert.Equal(t, projectAuthBefore, projectAuthAfter, "the project-relative bait remains untouched")
 }
 
 // TestRunOnboarding_DisabledViaEnv verifies the wizard is skipped when
@@ -224,13 +472,13 @@ func TestRunOnboarding_EmptyAPIKeyRetries(t *testing.T) {
 
 	cfg := &config.Config{}
 	// First attempt empty, second attempt provides a key.
-	input := "\nsk-real-key\n1\n1\n"
+	input := "\n" + onboardingSecretCanary(t) + "\n1\n1\n"
 	var out bytes.Buffer
 
 	err := RunOnboarding(cfg, strings.NewReader(input), &out)
 	require.NoError(t, err)
 
-	assert.Equal(t, "sk-real-key", cfg.Provider.APIKey)
+	assert.Empty(t, cfg.Provider.APIKey)
 	assert.Contains(t, out.String(), "cannot be empty")
 }
 
@@ -241,7 +489,7 @@ func TestRunOnboarding_DefaultModelWhenInvalidChoice(t *testing.T) {
 	defer cleanup()
 
 	cfg := &config.Config{}
-	input := "sk-test\n99\n1\n" // invalid model choice
+	input := onboardingSecretCanary(t) + "\n99\n1\n" // invalid model choice
 	var out bytes.Buffer
 
 	err := RunOnboarding(cfg, strings.NewReader(input), &out)
@@ -258,7 +506,7 @@ func TestRunOnboarding_DefaultThemeWhenInvalidChoice(t *testing.T) {
 	defer cleanup()
 
 	cfg := &config.Config{}
-	input := "sk-test\n1\n99\n" // invalid theme choice
+	input := onboardingSecretCanary(t) + "\n1\n99\n" // invalid theme choice
 	var out bytes.Buffer
 
 	err := RunOnboarding(cfg, strings.NewReader(input), &out)
@@ -274,7 +522,7 @@ func TestRunOnboarding_DefaultModelWhenEmptyChoice(t *testing.T) {
 	defer cleanup()
 
 	cfg := &config.Config{}
-	input := "sk-test\n\n\n" // empty model and theme choices
+	input := onboardingSecretCanary(t) + "\n\n\n" // empty model and theme choices
 	var out bytes.Buffer
 
 	err := RunOnboarding(cfg, strings.NewReader(input), &out)
@@ -296,10 +544,11 @@ func TestHasNoOnboardingFlag(t *testing.T) {
 // TestSerializeOnboardingYAML verifies the YAML output contains the expected
 // fields and excludes the API key.
 func TestSerializeOnboardingYAML(t *testing.T) {
+	apiKey := onboardingSecretCanary(t)
 	cfg := &config.Config{
 		Provider: config.ProviderConfig{
 			Name:      "openai",
-			APIKey:    "sk-test",
+			APIKey:    apiKey,
 			Model:     "gpt-4o-mini",
 			MaxTokens: 4096,
 		},
@@ -314,7 +563,7 @@ func TestSerializeOnboardingYAML(t *testing.T) {
 	assert.Contains(t, yaml, "provider:")
 	assert.Contains(t, yaml, "name: openai")
 	assert.NotContains(t, yaml, "api_key")
-	assert.NotContains(t, yaml, "sk-test")
+	assert.NotContains(t, yaml, apiKey)
 	assert.Contains(t, yaml, "model: gpt-4o-mini")
 	assert.Contains(t, yaml, "max_tokens: 4096")
 	assert.Contains(t, yaml, "tui:")
@@ -325,18 +574,19 @@ func TestSerializeOnboardingYAML(t *testing.T) {
 // special characters are never written to config.yaml regardless of their
 // content. The key is persisted to auth.json or the keychain instead.
 func TestSerializeOnboardingYAML_APIKeyNotLeaked(t *testing.T) {
+	base := onboardingSecretCanary(t)
 	cases := []struct {
 		name   string
 		apiKey string
 	}{
-		{"normal alphanumeric", "sk-test-key-123"},
-		{"contains colon", "sk-test:key"},
-		{"contains hash", "sk-test#key"},
-		{"contains braces", "sk-test{key}"},
-		{"contains brackets", "sk-test[key]"},
-		{"contains double quote", `sk-test"key`},
-		{"contains backslash", `sk-test\key`},
-		{"contains multiple special", `sk:test#"key{}\`},
+		{"normal alphanumeric", base},
+		{"contains colon", base + ":key"},
+		{"contains hash", base + "#key"},
+		{"contains braces", base + "{key}"},
+		{"contains brackets", base + "[key]"},
+		{"contains double quote", base + `"key`},
+		{"contains backslash", base + `\key`},
+		{"contains multiple special", base + `:#"key{}\`},
 	}
 
 	for _, tc := range cases {
@@ -364,11 +614,12 @@ func TestReadPasswordMasked_NonTTYFallback(t *testing.T) {
 	stdinIsTTYFunc = func() bool { return false }
 	defer func() { stdinIsTTYFunc = oldTTY }()
 
-	reader := bufio.NewReader(strings.NewReader("sk-secret-key\n"))
+	secret := onboardingSecretCanary(t)
+	reader := bufio.NewReader(strings.NewReader(secret + "\n"))
 	var out bytes.Buffer
 	line, err := readPasswordMasked(reader, &out)
 	require.NoError(t, err)
-	assert.Equal(t, "sk-secret-key\n", line)
+	assert.Equal(t, secret+"\n", line)
 }
 
 // TestSaveAuthFile_ContentAndPermissions verifies that saveAuthFile writes the
@@ -382,16 +633,21 @@ func TestSaveAuthFile_ContentAndPermissions(t *testing.T) {
 	onboardingAuthPathFunc = func() string { return authPath }
 	defer func() { onboardingAuthPathFunc = oldPath }()
 
-	require.NoError(t, os.WriteFile(authPath, []byte(`{"api_key":"old-secret"}`), 0o644))
+	oldSecret := onboardingSecretCanary(t)
+	oldData, err := json.Marshal(map[string]string{"api_key": oldSecret})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(authPath, oldData, 0o644))
 	require.NoError(t, os.Chmod(authPath, 0o644))
-	require.NoError(t, saveAuthFile("sk-my-secret"))
+	newSecret := onboardingSecretCanary(t)
+	require.NoError(t, saveAuthFile(context.Background(), onboardingTestScope("openai"), newSecret))
 
 	data, err := os.ReadFile(authPath)
 	require.NoError(t, err)
 
-	var m map[string]string
-	require.NoError(t, json.Unmarshal(data, &m))
-	assert.Equal(t, "sk-my-secret", m["api_key"])
+	var auth onboardingAuthDocument
+	require.NoError(t, json.Unmarshal(data, &auth))
+	require.Len(t, auth.Credentials, 1)
+	assert.Equal(t, newSecret, auth.Credentials[0].APIKey)
 
 	info, err := os.Stat(authPath)
 	require.NoError(t, err)
@@ -409,16 +665,18 @@ func TestSaveAuthFileDefaultDirectoryIsPrivate(t *testing.T) {
 	onboardingAuthPathFunc = defaultAuthFilePath
 	defer func() { onboardingAuthPathFunc = oldPath }()
 
-	require.NoError(t, saveAuthFile("sk-default-secret"))
+	secret := onboardingSecretCanary(t)
+	require.NoError(t, saveAuthFile(context.Background(), onboardingTestScope("openai"), secret))
 	info, err := os.Stat(dir)
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o700), info.Mode().Perm())
 
 	authData, err := os.ReadFile(filepath.Join(dir, "auth.json"))
 	require.NoError(t, err)
-	var auth map[string]string
+	var auth onboardingAuthDocument
 	require.NoError(t, json.Unmarshal(authData, &auth))
-	assert.Equal(t, "sk-default-secret", auth["api_key"])
+	require.Len(t, auth.Credentials, 1)
+	assert.Equal(t, secret, auth.Credentials[0].APIKey)
 }
 
 func TestSaveAuthFileRejectsSymlinkedDefaultDirectory(t *testing.T) {
@@ -435,9 +693,10 @@ func TestSaveAuthFileRejectsSymlinkedDefaultDirectory(t *testing.T) {
 		onboardingAuthPathFunc = defaultAuthFilePath
 		t.Cleanup(func() { onboardingAuthPathFunc = oldPath })
 
-		err := saveAuthFile("sk-default-secret")
+		secret := onboardingSecretCanary(t)
+		err := saveAuthFile(context.Background(), onboardingTestScope("openai"), secret)
 		require.Error(t, err)
-		assert.NotContains(t, err.Error(), "sk-default-secret")
+		assert.NotContains(t, err.Error(), secret)
 		_, statErr := os.Lstat(filepath.Join(shared, "go-cli"))
 		assert.ErrorIs(t, statErr, os.ErrNotExist, "external directory must not be created through the link")
 	})
@@ -457,9 +716,10 @@ func TestSaveAuthFileRejectsSymlinkedDefaultDirectory(t *testing.T) {
 		onboardingAuthPathFunc = defaultAuthFilePath
 		t.Cleanup(func() { onboardingAuthPathFunc = oldPath })
 
-		err := saveAuthFile("sk-default-secret")
+		secret := onboardingSecretCanary(t)
+		err := saveAuthFile(context.Background(), onboardingTestScope("openai"), secret)
 		require.Error(t, err)
-		assert.NotContains(t, err.Error(), "sk-default-secret")
+		assert.NotContains(t, err.Error(), secret)
 		info, statErr := os.Stat(shared)
 		require.NoError(t, statErr)
 		assert.Equal(t, os.FileMode(0o755), info.Mode().Perm(), "external directory permissions must not be changed")
@@ -473,19 +733,23 @@ func TestSaveAuthFileRejectsAccessibleCustomDirectory(t *testing.T) {
 	require.NoError(t, os.Mkdir(dir, 0o755))
 	require.NoError(t, os.Chmod(dir, 0o755))
 	authPath := filepath.Join(dir, "auth.json")
-	require.NoError(t, os.WriteFile(authPath, []byte(`{"api_key":"old-secret"}`), 0o644))
+	oldSecret := onboardingSecretCanary(t)
+	oldData, err := json.Marshal(map[string]string{"api_key": oldSecret})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(authPath, oldData, 0o644))
 	require.NoError(t, os.Chmod(authPath, 0o644))
 
 	oldPath := onboardingAuthPathFunc
 	onboardingAuthPathFunc = func() string { return authPath }
 	defer func() { onboardingAuthPathFunc = oldPath }()
 
-	err := saveAuthFile("sk-new-secret")
+	newSecret := onboardingSecretCanary(t)
+	err = saveAuthFile(context.Background(), onboardingTestScope("openai"), newSecret)
 	require.Error(t, err)
-	assert.NotContains(t, err.Error(), "sk-new-secret")
+	assert.NotContains(t, err.Error(), newSecret)
 	data, readErr := os.ReadFile(authPath)
 	require.NoError(t, readErr)
-	assert.Equal(t, `{"api_key":"old-secret"}`, string(data))
+	assert.Equal(t, oldData, data)
 	info, statErr := os.Stat(authPath)
 	require.NoError(t, statErr)
 	assert.Equal(t, os.FileMode(0o644), info.Mode().Perm())
@@ -501,7 +765,8 @@ func TestRunOnboarding_APIKeyInAuthJSONNotYAML(t *testing.T) {
 	defer cleanup()
 
 	cfg := &config.Config{}
-	input := "sk-onboarding-key\n1\n1\n"
+	apiKey := onboardingSecretCanary(t)
+	input := apiKey + "\n1\n1\n"
 	var out bytes.Buffer
 
 	require.NoError(t, RunOnboarding(cfg, strings.NewReader(input), &out))
@@ -509,7 +774,7 @@ func TestRunOnboarding_APIKeyInAuthJSONNotYAML(t *testing.T) {
 	// config.yaml must not contain the key.
 	yamlData, err := os.ReadFile(configPath)
 	require.NoError(t, err)
-	assert.NotContains(t, string(yamlData), "sk-onboarding-key")
+	assert.NotContains(t, string(yamlData), apiKey)
 	assert.NotContains(t, string(yamlData), "api_key")
 
 	// auth.json must contain the key as JSON.
@@ -517,9 +782,10 @@ func TestRunOnboarding_APIKeyInAuthJSONNotYAML(t *testing.T) {
 	authData, err := os.ReadFile(authPath)
 	require.NoError(t, err)
 
-	var m map[string]string
-	require.NoError(t, json.Unmarshal(authData, &m))
-	assert.Equal(t, "sk-onboarding-key", m["api_key"])
+	var auth onboardingAuthDocument
+	require.NoError(t, json.Unmarshal(authData, &auth))
+	require.Len(t, auth.Credentials, 1)
+	assert.Equal(t, apiKey, auth.Credentials[0].APIKey)
 }
 
 // mockModelRegistry is a test double for llm.ModelRegistry. It returns

@@ -3,7 +3,6 @@ package cli
 import (
 	"bufio"
 	"context"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
@@ -16,7 +15,6 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/llm"
-	"github.com/pengjunchen/go-cli/internal/privatefile"
 )
 
 // modelChoice is a single model entry shown during the onboarding model
@@ -143,30 +141,37 @@ var stdinIsTTYFunc = func() bool {
 	return xterm.IsTerminal(int(os.Stdin.Fd()))
 }
 
-// saveAPIKeyFunc persists the API key to the keychain (preferred) or auth.json
-// fallback. Overridable for tests to avoid touching the real keychain.
+// saveAPIKeyFunc persists the API key for one exact provider scope. Overridable
+// for tests to avoid touching the real keychain.
 var saveAPIKeyFunc = defaultSaveAPIKey
+
+var onboardingCredentialLookupFunc = resolveCLIPrimaryCredential
+
+var onboardingCredentialScopeFunc = cliPrimaryCredentialScope
 
 // RunOnboarding runs the first-run onboarding wizard. When no config file
 // exists it guides the user through API key input, model selection, and theme
-// selection, then saves the config. When a config file exists but the API key
-// is missing it prompts for the key only (in-memory, no file write).
+// selection, then saves the config. When a config file exists but the exact
+// current-scope API key is missing it prompts for and persists the key.
 //
 // The wizard is skipped when the GO_CLI_NO_ONBOARDING environment variable is
 // set to a truthy value (1, true, yes, on), or when the API key is already
-// configured (e.g. via environment variable or CLI flag).
+// available to the exact provider/protocol/origin scope.
 func RunOnboarding(cfg *config.Config, in io.Reader, out io.Writer) error {
+	return runOnboarding(context.Background(), cfg, resolveProviderName("", cfg), in, out)
+}
+
+func runOnboarding(ctx context.Context, cfg *config.Config, providerName string, in io.Reader, out io.Writer) error {
 	if isOnboardingDisabled() {
 		return nil
 	}
 
 	hasConfig := configExistsFunc()
-	hasAPIKey := cfg != nil && cfg.Provider.APIKey != ""
-
-	// Skip the wizard entirely when the API key is already set. The wizard's
-	// primary purpose is to collect an API key; model and theme can be
-	// configured via CLI flags or the config file.
-	if hasAPIKey {
+	scope, _, found, err := onboardingCredentialLookupFunc(ctx, cfg, providerName)
+	if err != nil {
+		return fmt.Errorf("onboarding: resolve credential: %w", err)
+	}
+	if found {
 		return nil
 	}
 
@@ -175,15 +180,16 @@ func RunOnboarding(cfg *config.Config, in io.Reader, out io.Writer) error {
 	if !hasConfig {
 		// Full first-run wizard.
 		printWelcome(out)
-		if err := promptAPIKey(cfg, reader, out); err != nil {
+		apiKey, err := promptAPIKey(reader, out)
+		if err != nil {
 			return err
 		}
 		registry := onboardingRegistryBuilder()
 		// Best-effort refresh with a short timeout. On failure the registry is
 		// replaced with a no-op so promptModel falls back to the hardcoded list
 		// without further network attempts.
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		if err := registry.Refresh(ctx); err != nil {
+		refreshCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		if err := registry.Refresh(refreshCtx); err != nil {
 			registry = llm.NoopModelRegistry{}
 		}
 		cancel()
@@ -193,11 +199,29 @@ func RunOnboarding(cfg *config.Config, in io.Reader, out io.Writer) error {
 		if err := promptTheme(cfg, reader, out); err != nil {
 			return err
 		}
-		return saveOnboardingConfig(cfg, out)
+		// Resolve after all wizard choices so persistence follows the provider
+		// identity that will be used by the resulting config.
+		scope, err = onboardingCredentialScopeFunc(cfg, providerName)
+		if err != nil {
+			return fmt.Errorf("onboarding: resolve credential scope: %w", err)
+		}
+		return saveOnboardingConfig(ctx, cfg, out, scope, apiKey)
 	}
 
-	// Config file exists but API key is missing — prompt for it only.
-	return promptAPIKey(cfg, reader, out)
+	// Config file exists but the exact current scope is missing.
+	apiKey, err := promptAPIKey(reader, out)
+	if err != nil {
+		return err
+	}
+	scope, err = onboardingCredentialScopeFunc(cfg, providerName)
+	if err != nil {
+		return fmt.Errorf("onboarding: resolve credential scope: %w", err)
+	}
+	if err := saveAPIKeyFunc(ctx, scope, apiKey); err != nil {
+		return fmt.Errorf("onboarding: save API key: %w", err)
+	}
+	fmt.Fprintln(out, "  ✓ API key saved for this provider.") //nolint:errcheck
+	return nil
 }
 
 // hasNoOnboardingFlag reports whether the --no-onboarding (or -no-onboarding)
@@ -232,11 +256,12 @@ func printWelcome(out io.Writer) {
 	fmt.Fprintln(out, "")                                               //nolint:errcheck
 }
 
-// promptAPIKey prompts the user for their API key and stores it in cfg. It
-// retries on empty input until a non-empty key is provided or input ends.
+// promptAPIKey prompts the user for an API key and returns it separately from
+// config so a provider override cannot rebind it to the configured provider.
+// It retries on empty input until a non-empty key is provided or input ends.
 // When stdin is a TTY the input is masked (no echo) via term.ReadPassword;
 // otherwise it falls back to a plain ReadString so piped/CI input still works.
-func promptAPIKey(cfg *config.Config, reader *bufio.Reader, out io.Writer) error {
+func promptAPIKey(reader *bufio.Reader, out io.Writer) (string, error) {
 	for {
 		fmt.Fprintln(out, "Step 1: API Key")                                  //nolint:errcheck
 		fmt.Fprintln(out, "  Enter your LLM provider API key (e.g. sk-...).") //nolint:errcheck
@@ -244,18 +269,15 @@ func promptAPIKey(cfg *config.Config, reader *bufio.Reader, out io.Writer) error
 		line, err := readPasswordMasked(reader, out)
 		key := strings.TrimSpace(line)
 		if key != "" {
-			if cfg != nil {
-				cfg.Provider.APIKey = key
-			}
-			fmt.Fprintln(out, "  ✓ API key saved.") //nolint:errcheck
-			fmt.Fprintln(out, "")                   //nolint:errcheck
-			return nil
+			fmt.Fprintln(out, "  ✓ API key entered.") //nolint:errcheck
+			fmt.Fprintln(out, "")                     //nolint:errcheck
+			return key, nil
 		}
 		if err == io.EOF {
-			return fmt.Errorf("onboarding: API key is required")
+			return "", fmt.Errorf("onboarding: API key is required")
 		}
 		if err != nil {
-			return fmt.Errorf("onboarding: read API key: %w", err)
+			return "", fmt.Errorf("onboarding: read API key: %w", err)
 		}
 		fmt.Fprintln(out, "  ✗ API key cannot be empty. Please try again.") //nolint:errcheck
 		fmt.Fprintln(out, "")                                               //nolint:errcheck
@@ -361,7 +383,7 @@ func promptTheme(cfg *config.Config, reader *bufio.Reader, out io.Writer) error 
 // onboardingConfigPathFunc, creating the parent directory if needed. The API
 // key is NOT stored in config.yaml; it is persisted separately to the OS
 // keychain (preferred) or auth.json fallback via saveAPIKeyFunc.
-func saveOnboardingConfig(cfg *config.Config, out io.Writer) error {
+func saveOnboardingConfig(ctx context.Context, cfg *config.Config, out io.Writer, scope config.AuthScope, apiKey string) error {
 	path := onboardingConfigPathFunc()
 	if path == "" {
 		return fmt.Errorf("onboarding: cannot determine config path")
@@ -378,10 +400,11 @@ func saveOnboardingConfig(cfg *config.Config, out io.Writer) error {
 	}
 
 	// Persist the API key to the keychain or auth.json — never config.yaml.
-	if cfg.Provider.APIKey != "" {
-		if err := saveAPIKeyFunc(cfg.Provider.APIKey); err != nil {
+	if apiKey != "" {
+		if err := saveAPIKeyFunc(ctx, scope, apiKey); err != nil {
 			return fmt.Errorf("onboarding: save API key: %w", err)
 		}
+		fmt.Fprintln(out, "✓ API key saved for this provider.") //nolint:errcheck
 	}
 
 	fmt.Fprintf(out, "✓ Configuration saved to %s\n", path)                   //nolint:errcheck
@@ -451,9 +474,9 @@ func defaultAuthFilePath() string {
 	return filepath.Join(home, ".config", "go-cli", "auth.json")
 }
 
-// saveAuthFile writes the API key to auth.json as {"api_key":"..."} with 0600
-// permissions, creating the parent directory if needed.
-func saveAuthFile(apiKey string) error {
+// saveAuthFile stores a key under an explicit provider/protocol/origin scope in
+// auth.json. It never migrates an unscoped legacy key.
+func saveAuthFile(ctx context.Context, scope config.AuthScope, apiKey string) error {
 	path := onboardingAuthPathFunc()
 	if path == "" {
 		return fmt.Errorf("onboarding: cannot determine auth file path")
@@ -461,11 +484,7 @@ func saveAuthFile(apiKey string) error {
 	if err := secureDefaultAuthDirectory(path); err != nil {
 		return fmt.Errorf("onboarding: secure auth dir: %w", err)
 	}
-	data, err := json.Marshal(map[string]string{"api_key": apiKey})
-	if err != nil {
-		return fmt.Errorf("onboarding: marshal auth: %w", err)
-	}
-	if err := privatefile.WriteAtomic(path, data); err != nil {
+	if err := config.UpsertScopedCredentialFile(ctx, path, scope, apiKey); err != nil {
 		return fmt.Errorf("onboarding: write auth: %w", err)
 	}
 	return nil
@@ -506,18 +525,25 @@ func secureDefaultAuthDirectory(path string) error {
 	return os.Chmod(dir, 0o700)
 }
 
-// defaultSaveAPIKey persists the API key to the OS keychain when available
-// (macOS), falling back to the auth.json file on other platforms or when the
-// keychain write fails.
-func defaultSaveAPIKey(key string) error {
-	kc := config.NewKeychainSource()
+type onboardingKeychain interface {
+	Available() bool
+	SetScoped(config.AuthScope, string) error
+}
+
+var onboardingKeychainFactory = func() onboardingKeychain { return config.NewKeychainSource() }
+
+// defaultSaveAPIKey writes to the OS keychain when it is available. A write
+// error is returned directly because an old exact-scope key could otherwise
+// continue to shadow a successful file fallback.
+func defaultSaveAPIKey(ctx context.Context, scope config.AuthScope, key string) error {
+	kc := onboardingKeychainFactory()
 	if kc.Available() {
-		if err := kc.Set(key); err == nil {
-			return nil
+		if err := kc.SetScoped(scope, key); err != nil {
+			return fmt.Errorf("onboarding: set scoped keychain credential: %w", err)
 		}
-		// Fall through to the file-based fallback on keychain errors.
+		return nil
 	}
-	return saveAuthFile(key)
+	return saveAuthFile(ctx, scope, key)
 }
 
 // configFilesExist checks whether any config file already exists in the

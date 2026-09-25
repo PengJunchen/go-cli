@@ -17,6 +17,8 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+
+	"github.com/pengjunchen/go-cli/internal/privatefile"
 )
 
 // AuthChain resolves API keys through an ordered priority chain, but only
@@ -327,6 +329,122 @@ func lookupScopedCredentialFile(path string, scope AuthScope) (string, error) {
 		}
 	}
 	return lookupScopedCredentialDocument(document, scope)
+}
+
+// UpsertScopedCredentialFile writes one explicitly scoped credential to an
+// auth file, preserving other valid scoped records. Legacy unscoped fields are
+// not assigned a scope or copied into the scoped document.
+func UpsertScopedCredentialFile(ctx context.Context, path string, scope AuthScope, apiKey string) error {
+	if path == "" {
+		return errors.New("auth: credential file path is empty")
+	}
+	if strings.TrimSpace(apiKey) == "" {
+		return errors.New("auth: scoped credential is empty")
+	}
+	normalizedScope, err := normalizeAuthScope(scope)
+	if err != nil {
+		return fmt.Errorf("auth: invalid scoped credential: %w", err)
+	}
+	return privatefile.WithExclusiveLock(ctx, path, func() error {
+		return upsertScopedCredentialFileLocked(path, normalizedScope, apiKey)
+	})
+}
+
+func upsertScopedCredentialFileLocked(path string, scope AuthScope, apiKey string) error {
+	var currentDocument scopedCredentialDocument
+	var currentRecords []json.RawMessage
+	data, err := readAuthFileForUpdate(path)
+	if err != nil {
+		if !errors.Is(err, ErrAuthNotFound) {
+			return err
+		}
+	} else {
+		currentDocument, err = parseScopedCredentialDocument(data)
+		if err != nil {
+			return errScopedCredentialSourceInvalid
+		}
+		if currentDocument.hasCredentials {
+			fields, err := decodeCredentialObject(data, "credentials")
+			if err != nil || json.Unmarshal(fields["credentials"], &currentRecords) != nil || len(currentRecords) != len(currentDocument.records) {
+				return errScopedCredentialSourceInvalid
+			}
+		}
+	}
+
+	newRecord, err := json.Marshal(struct {
+		Provider string `json:"provider"`
+		Protocol string `json:"protocol"`
+		Origin   string `json:"origin"`
+		APIKey   string `json:"api_key"`
+	}{
+		Provider: scope.ProviderID,
+		Protocol: scope.ProtocolID,
+		Origin:   scope.Origin,
+		APIKey:   apiKey,
+	})
+	if err != nil {
+		return fmt.Errorf("auth: encode scoped credential: %w", err)
+	}
+	updatedRecords := make([]json.RawMessage, 0, len(currentRecords)+1)
+	replaced := false
+	for i, existing := range currentDocument.records {
+		if existing.scope == scope {
+			if !replaced {
+				updatedRecords = append(updatedRecords, newRecord)
+				replaced = true
+			}
+			continue
+		}
+		updatedRecords = append(updatedRecords, currentRecords[i])
+	}
+	if !replaced {
+		updatedRecords = append(updatedRecords, newRecord)
+	}
+	data, err = json.Marshal(struct {
+		Credentials []json.RawMessage `json:"credentials"`
+	}{Credentials: updatedRecords})
+	if err != nil {
+		return fmt.Errorf("auth: encode credential file: %w", err)
+	}
+	if err := privatefile.WriteAtomic(path, data); err != nil {
+		return fmt.Errorf("auth: write credential file: %w", err)
+	}
+	return nil
+}
+
+// readAuthFileForUpdate permits a save to repair broad permissions on an
+// existing regular file. Credential lookup remains stricter and rejects such
+// a file; the caller holds the private sidecar lock and the replacement is
+// committed with WriteAtomic's 0600 temporary file and rename.
+func readAuthFileForUpdate(path string) ([]byte, error) {
+	pathInfo, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, ErrAuthNotFound
+	}
+	if err != nil {
+		return nil, fmt.Errorf("auth: inspect credential file for update: %w", err)
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() {
+		return nil, errAuthFileInvalid
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("auth: open credential file for update: %w", err)
+	}
+	defer file.Close() //nolint:errcheck
+	openedInfo, err := file.Stat()
+	if err != nil {
+		return nil, fmt.Errorf("auth: inspect open credential file: %w", err)
+	}
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(pathInfo, openedInfo) {
+		return nil, errAuthFileInvalid
+	}
+	data, err := io.ReadAll(file)
+	if err != nil {
+		return nil, fmt.Errorf("auth: read credential file for update: %w", err)
+	}
+	return data, nil
 }
 
 func lookupScopedCredentialData(data []byte, scope AuthScope) (string, error) {
@@ -668,13 +786,4 @@ func modelsConfigPath() string {
 		return ""
 	}
 	return filepath.Join(home, ".config", "go-cli", "models.json")
-}
-
-// configFilePath returns ~/.config/go-cli/<name>.
-func configFilePath(name string) string {
-	home, err := os.UserHomeDir()
-	if err != nil || home == "" {
-		return filepath.Join(".config", "go-cli", name)
-	}
-	return filepath.Join(home, ".config", "go-cli", name)
 }
