@@ -544,6 +544,104 @@ func TestPluginManagerCallbackCleanupPendingErrorIsCompleted(t *testing.T) {
 	assert.Equal(t, int32(1), ext.stopCalls.Load())
 }
 
+func TestPluginManagerWaitShutdownNotStartedDoesNotTrigger(t *testing.T) {
+	ext := &r7LifecycleExt{name: "not-started"}
+	loader := newMgrTestPluginLoader("test")
+	loader.SetResult("plugins", []Extension{ext})
+	manager := NewPluginManager(loader)
+	require.NoError(t, manager.Load(context.Background(), []string{"plugins"}))
+	require.NoError(t, manager.Init(context.Background()))
+
+	completed, err := manager.WaitShutdown(nil)
+	assert.False(t, completed)
+	require.ErrorIs(t, err, ErrPluginManagerShutdownNotStarted)
+	manager.mu.RLock()
+	closing := manager.closing
+	manager.mu.RUnlock()
+	assert.False(t, closing, "observing a missing operation must not start shutdown")
+	assert.Equal(t, int32(0), ext.stopCalls.Load())
+}
+
+func TestPluginManagerWaitShutdownCanceledWaiterCanRejoinSameOperation(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	releaseCallback := r7ReleaseOnce(release)
+	defer releaseCallback()
+	ext := &r7LifecycleExt{name: "uncooperative", shutdown: func(context.Context) error {
+		close(started)
+		<-release
+		return nil
+	}}
+	loader := newMgrTestPluginLoader("test")
+	loader.SetResult("plugins", []Extension{ext})
+	manager := NewPluginManager(loader)
+	require.NoError(t, manager.Load(context.Background(), []string{"plugins"}))
+	require.NoError(t, manager.Init(context.Background()))
+
+	shutdownResult := make(chan error, 1)
+	go func() { shutdownResult <- manager.Shutdown(context.Background()) }()
+	<-started
+
+	waitCtx, cancelWait := context.WithCancel(context.Background())
+	cancelWait()
+	completed, err := manager.WaitShutdown(waitCtx)
+	assert.False(t, completed, "canceling this waiter must not report the still-running callback complete")
+	require.ErrorIs(t, err, ErrCleanupPending)
+	assert.Equal(t, int32(1), ext.stopCalls.Load())
+
+	joined := make(chan struct {
+		completed bool
+		err       error
+	}, 1)
+	go func() {
+		completed, err := manager.WaitShutdown(context.Background())
+		joined <- struct {
+			completed bool
+			err       error
+		}{completed: completed, err: err}
+	}()
+	select {
+	case got := <-joined:
+		t.Fatalf("WaitShutdown returned before the callback owner finished: %+v", got)
+	default:
+	}
+
+	releaseCallback()
+	select {
+	case got := <-joined:
+		assert.True(t, got.completed)
+		assert.NoError(t, got.err)
+	case <-time.After(time.Second):
+		t.Fatal("WaitShutdown did not join the existing shutdown operation")
+	}
+	assert.NoError(t, <-shutdownResult)
+
+	completed, err = manager.WaitShutdown(context.Background())
+	assert.True(t, completed, "repeated waits observe the same completed operation")
+	assert.NoError(t, err)
+	assert.Equal(t, int32(1), ext.stopCalls.Load(), "waiting must never rerun the callback")
+}
+
+func TestPluginManagerWaitShutdownDistinguishesCompletedPendingSentinel(t *testing.T) {
+	callbackErr := cleanupPending("callback", "Shutdown", errors.New("callback returned pending sentinel"))
+	ext := &r7LifecycleExt{name: "completed-pending", shutdown: func(context.Context) error { return callbackErr }}
+	loader := newMgrTestPluginLoader("test")
+	loader.SetResult("plugins", []Extension{ext})
+	manager := NewPluginManager(loader)
+	require.NoError(t, manager.Load(context.Background(), []string{"plugins"}))
+	require.NoError(t, manager.Init(context.Background()))
+
+	shutdownErr := manager.Shutdown(context.Background())
+	require.ErrorIs(t, shutdownErr, ErrCleanupPending)
+
+	waitCtx, cancelWait := context.WithCancel(context.Background())
+	cancelWait()
+	completed, err := manager.WaitShutdown(waitCtx)
+	assert.True(t, completed, "the callback returned, so the operation is done despite its sentinel error and canceled waiter context")
+	require.ErrorIs(t, err, ErrCleanupPending)
+	assert.Equal(t, int32(1), ext.stopCalls.Load())
+}
+
 func TestPluginManagerShutdownClosesCommitGateBeforePublication(t *testing.T) {
 	loader := newMgrTestPluginLoader("test")
 	stagingReady := make(chan *DefaultExtensionRegistry, 1)

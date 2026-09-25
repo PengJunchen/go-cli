@@ -10,6 +10,10 @@ import (
 	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
+// ErrPluginManagerShutdownNotStarted is returned when WaitShutdown is called
+// before a shutdown operation has been published.
+var ErrPluginManagerShutdownNotStarted = errors.New("extension: plugin manager shutdown has not started")
+
 type pluginManagerOperation struct {
 	kind   string
 	done   chan struct{}
@@ -242,6 +246,41 @@ func (pm *PluginManager) Shutdown(ctx context.Context) error {
 		go pm.runShutdownOwner(context.WithoutCancel(ctx), ctx, op)
 	}
 	return waitPluginManagerShutdown(ctx, op)
+}
+
+// WaitShutdown observes the exact shutdown operation published by Shutdown.
+// It never starts an operation or retries an extension callback. The completed
+// result distinguishes an operation error returned by an extension callback
+// from a waiter that stopped before the operation finished.
+func (pm *PluginManager) WaitShutdown(ctx context.Context) (completed bool, err error) {
+	if pm == nil {
+		return false, ErrPluginManagerShutdownNotStarted
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	pm.mu.RLock()
+	op := pm.shutdownOp
+	pm.mu.RUnlock()
+	if op == nil {
+		return false, ErrPluginManagerShutdownNotStarted
+	}
+	select {
+	case <-op.done:
+		return true, op.err
+	default:
+	}
+	select {
+	case <-op.done:
+		return true, op.err
+	case <-ctx.Done():
+		select {
+		case <-op.done:
+			return true, op.err
+		default:
+			return false, cleanupPending("", "Shutdown", ctx.Err())
+		}
+	}
 }
 
 func (pm *PluginManager) runShutdownOwner(waitCtx, callbackCtx context.Context, op *pluginManagerOperation) {
