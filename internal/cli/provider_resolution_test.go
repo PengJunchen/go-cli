@@ -120,6 +120,7 @@ func TestProviderCustomOpenAICompatibleAliasUsesConfiguredOrigin(t *testing.T) {
 	t.Cleanup(srv.Close)
 
 	rc := &config.Config{Provider: config.ProviderConfig{
+		Name:    "custom-gateway",
 		BaseURL: srv.URL,
 		APIKey:  providerCredentialCanary,
 	}}
@@ -143,7 +144,7 @@ func TestProviderCustomOpenAICompatibleAliasUsesConfiguredOrigin(t *testing.T) {
 }
 
 func TestProviderOpenAIIdentityAllowsAPIKeyOnlyConfiguration(t *testing.T) {
-	rc := &config.Config{Provider: config.ProviderConfig{APIKey: providerCredentialCanary}}
+	rc := &config.Config{Provider: config.ProviderConfig{Name: "openai", APIKey: providerCredentialCanary}}
 	model, _, cleanup, err := buildModel(context.Background(), rc, "openai", "openai-test-model")
 	require.NoError(t, err)
 	require.NotNil(t, model)

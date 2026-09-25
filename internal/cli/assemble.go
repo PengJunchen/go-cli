@@ -1489,9 +1489,11 @@ func (s *assembleState) assembleSession() {
 // cliModelResolver owns one immutable provider snapshot for the primary model,
 // configured small model, explicit /model switches, and model listing.
 type cliModelResolver struct {
-	registry *llm.ProviderRegistry
-	resolver *llm.ModelResolver
-	smallErr error
+	registry          *llm.ProviderRegistry
+	resolver          *llm.ModelResolver
+	primaryProviderID string
+	primaryEndpoint   string
+	smallErr          error
 }
 
 type cliProviderCredential struct {
@@ -1515,8 +1517,11 @@ func newCLIModelResolver(rc *config.Config, primaryProviderName string, includeS
 
 	primary := cliProviderCredential{providerID: primaryProviderName}
 	if rc != nil {
-		primary.endpoint = rc.Provider.BaseURL
-		primary.apiKey = rc.Provider.APIKey
+		configuredProviderName := resolveProviderName("", rc)
+		if providerIdentityMatches(configuredProviderName, primaryProviderName) {
+			primary.endpoint = rc.Provider.BaseURL
+			primary.apiKey = rc.Provider.APIKey
+		}
 	}
 	bindings := []cliProviderCredential{primary}
 	var smallErr error
@@ -1599,7 +1604,13 @@ func newCLIModelResolver(rc *config.Config, primaryProviderName string, includeS
 		}, binding.apiKey)
 	}
 	registry.SetCredentialResolver(authChain)
-	return &cliModelResolver{registry: registry, resolver: registry.SnapshotResolver(), smallErr: smallErr}, nil
+	return &cliModelResolver{
+		registry:          registry,
+		resolver:          registry.SnapshotResolver(),
+		primaryProviderID: primaryProviderName,
+		primaryEndpoint:   primary.endpoint,
+		smallErr:          smallErr,
+	}, nil
 }
 
 func newCLICompatibleProvider(providerID, endpoint string) (llm.ModelProvider, error) {
@@ -1610,13 +1621,17 @@ func newCLICompatibleProvider(providerID, endpoint string) (llm.ModelProvider, e
 		return nil, fmt.Errorf("assemble: default provider %q is already registered", providerID)
 	}
 	if providerID != "openai" && strings.TrimSpace(endpoint) == "" {
-		return nil, fmt.Errorf("assemble: provider %q requires an explicit base_url for OpenAI-compatible routing", providerID)
+		return nil, providerEndpointRequiredError(providerID)
 	}
 	options := []llm.ProviderOption{llm.WithProviderName(providerID)}
 	if strings.TrimSpace(endpoint) != "" {
 		options = append(options, llm.WithBaseURL(endpoint))
 	}
 	return llm.NewEinoProvider(options...), nil
+}
+
+func providerEndpointRequiredError(providerID string) error {
+	return fmt.Errorf("assemble: %w: provider %q requires an explicit base_url for OpenAI-compatible routing", llm.ErrProviderEndpointRequired, providerID)
 }
 
 func isDisabledCLIProvider(providerID string) bool {
@@ -1644,8 +1659,10 @@ func buildModel(ctx context.Context, rc *config.Config, providerName, modelName 
 
 func (r *cliModelResolver) buildPrimary(ctx context.Context, rc *config.Config, providerName, modelName string) (llm.BaseChatModel, llm.ModelInfo, func(), error) {
 	request := llm.ModelRequest{ProviderID: providerName, ModelID: modelName}
+	if providerIdentityMatches(r.primaryProviderID, providerName) {
+		request.Endpoint = r.primaryEndpoint
+	}
 	if rc != nil {
-		request.Endpoint = rc.Provider.BaseURL
 		request.Temperature = rc.Model.Temperature
 		request.MaxTokens = rc.Model.MaxTokens
 	}
@@ -1668,7 +1685,7 @@ func (r *cliModelResolver) buildSmall(ctx context.Context, rc *config.Config, pr
 		return nil, llm.ModelInfo{}, nil, err
 	}
 	if providerName != "eino" && providerName != "openai" && strings.TrimSpace(endpoint) == "" {
-		return nil, llm.ModelInfo{}, nil, fmt.Errorf("assemble: provider %q requires an explicit base_url for OpenAI-compatible routing", providerName)
+		return nil, llm.ModelInfo{}, nil, providerEndpointRequiredError(providerName)
 	}
 	request := llm.ModelRequest{
 		ProviderID:  providerName,
@@ -1715,8 +1732,10 @@ func listAvailableModels(rc *config.Config, providerName string) []llm.ModelInfo
 
 func (r *cliModelResolver) listAvailableModels(ctx context.Context, rc *config.Config, providerName string) []llm.ModelInfo {
 	request := llm.ModelRequest{ProviderID: providerName}
+	if providerIdentityMatches(r.primaryProviderID, providerName) {
+		request.Endpoint = r.primaryEndpoint
+	}
 	if rc != nil {
-		request.Endpoint = rc.Provider.BaseURL
 		request.ModelID = rc.Model.Name
 		request.Temperature = rc.Model.Temperature
 		request.MaxTokens = rc.Model.MaxTokens
@@ -1776,15 +1795,22 @@ func resolveSmallModelProviderSettings(primaryProviderName, smallProviderName st
 	baseURL = rc.SmallModel.BaseURL
 	apiKey = rc.SmallModel.APIKey
 	if providerIdentityMatches(primaryProviderName, smallProviderName) {
+		// The provider block belongs to its declared provider name. A CLI
+		// override may use this endpoint/key only when it names the same
+		// canonical identity; otherwise the selected provider has its own
+		// endpoint and credential scope.
+		primaryConfigMatches := providerIdentityMatches(resolveProviderName("", rc), primaryProviderName)
 		if baseURL == "" {
-			baseURL = rc.Provider.BaseURL
-			if apiKey == "" {
-				apiKey = rc.Provider.APIKey
+			if primaryConfigMatches {
+				baseURL = rc.Provider.BaseURL
+				if apiKey == "" {
+					apiKey = rc.Provider.APIKey
+				}
 			}
 			return baseURL, apiKey, nil
 		}
 
-		if apiKey == "" && rc.Provider.APIKey != "" {
+		if primaryConfigMatches && apiKey == "" && rc.Provider.APIKey != "" {
 			primaryOrigin, primaryOK := effectiveCLIProviderOrigin(primaryProviderName, rc.Provider.BaseURL)
 			smallOrigin, smallOK := effectiveCLIProviderOrigin(smallProviderName, baseURL)
 			if primaryOK && smallOK && primaryOrigin == smallOrigin {
