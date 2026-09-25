@@ -1,0 +1,176 @@
+ok  	github.com/pengjunchen/go-cli/internal/core	4.131s
+ok  	github.com/pengjunchen/go-cli/internal/cli	19.616s
+2026/09/25 17:39:17 ERROR acp.connect.failed endpoint=http://127.0.0.1:59687 err="acp: route /connect returned status 503" trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.connect transport=gRPC endpoint=http://127.0.0.1:59689 trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.reconnect.attempt attempt=1 delay=1s endpoint=http://127.0.0.1:59689
+2026/09/25 17:39:17 INFO acp.connect transport=gRPC endpoint=http://127.0.0.1:59693 trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.connect transport=gRPC endpoint=http://127.0.0.1:59693 trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.connect transport=gRPC endpoint=http://127.0.0.1:59693 trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.connect transport=gRPC endpoint=http://127.0.0.1:59693 trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.connect transport=gRPC endpoint=http://127.0.0.1:59693 trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.connect transport=gRPC endpoint=http://127.0.0.1:59693 trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.connect transport=gRPC endpoint=http://127.0.0.1:59693 trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.connect transport=gRPC endpoint=http://127.0.0.1:59693 trace_id="" span_id=""
+2026/09/25 17:39:17 ERROR acp.connect.failed endpoint=http://127.0.0.1:59702 err="Post \"http://127.0.0.1:59702/connect\": context canceled" trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.connect transport=Stdio endpoint=stdio://stdin-stdout trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.connect transport=gRPC endpoint=http://127.0.0.1:59703 trace_id="" span_id=""
+2026/09/25 17:39:17 ERROR acp.send.failed message_type=message receiver_id=srv err="acp: route /send returned status 400" trace_id="" span_id=""
+2026/09/25 17:39:17 ERROR acp.connect.failed endpoint=http://127.0.0.1:59706 err="Post \"http://127.0.0.1:59706/connect\": dial tcp 127.0.0.1:59706: connect: connection refused" trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.connect transport=Stdio endpoint=stdio://stdin-stdout trace_id="" span_id=""
+2026/09/25 17:39:17 WARN acp.receive.decode name=client err="invalid character 'h' in literal true (expecting 'r')"
+2026/09/25 17:39:17 ERROR acp.connect.failed transport=Stdio err="acp: write message: write blocked" trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.connect transport=Stdio endpoint=stdio://stdin-stdout trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 WARN acp.receive.read name=client err="acp: read stdio frame: io: read/write on closed pipe"
+2026/09/25 17:39:17 INFO acp.reconnect.attempt attempt=1 delay=1s endpoint=http://127.0.0.1:59693
+2026/09/25 17:39:17 INFO acp.reconnect.attempt attempt=1 delay=1s endpoint=http://127.0.0.1:59703
+2026/09/25 17:39:17 INFO acp.server.start name=mysrv
+2026/09/25 17:39:17 INFO acp.server.stop name=mysrv
+2026/09/25 17:39:17 WARN acp.server.rpc_parse_failed err="invalid character 'o' in literal null (expecting 'u')"
+2026/09/25 17:39:17 INFO acp.connect transport=gRPC endpoint=http://127.0.0.1:59711 trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.connect transport=gRPC endpoint=http://127.0.0.1:59714 trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.reconnect.attempt attempt=1 delay=1s endpoint=http://127.0.0.1:59714
+2026/09/25 17:39:17 INFO acp.connect transport=gRPC endpoint=http://127.0.0.1:59720 trace_id=trace-grpc-connect span_id=3062f1e5233a36a4 parent_span_id=3062f1e5233a36a3
+2026/09/25 17:39:17 INFO acp.reconnect.attempt attempt=1 delay=1s endpoint=http://127.0.0.1:59720
+2026/09/25 17:39:17 INFO acp.connect transport=gRPC endpoint=http://127.0.0.1:59723 trace_id=trace-grpc-send span_id=3062f1e5233a36a6 parent_span_id=3062f1e5233a36a5
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id=trace-grpc-send span_id=3062f1e5233a36a7 parent_span_id=3062f1e5233a36a5
+2026/09/25 17:39:17 INFO acp.connect transport=gRPC endpoint=http://127.0.0.1:59726 trace_id=trace-grpc-chain span_id=3062f1e5233a36a9 parent_span_id=3062f1e5233a36a8
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id=trace-grpc-chain span_id=3062f1e5233a36aa parent_span_id=3062f1e5233a36a8
+2026/09/25 17:39:17 INFO acp.connect transport=gRPC endpoint=http://127.0.0.1:59729 trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:17 INFO acp.reconnect.attempt attempt=1 delay=1s endpoint=http://127.0.0.1:59726
+2026/09/25 17:39:17 INFO acp.reconnect.attempt attempt=1 delay=1s endpoint=http://127.0.0.1:59723
+2026/09/25 17:39:17 INFO acp.reconnect.attempt attempt=1 delay=1s endpoint=http://127.0.0.1:59729
+2026/09/25 17:39:18 INFO acp.reconnect.failed attempt=1 err="Post \"http://127.0.0.1:59703/connect\": dial tcp 127.0.0.1:59703: connect: connection refused"
+2026/09/25 17:39:18 INFO acp.reconnect.failed attempt=1 err="Post \"http://127.0.0.1:59693/connect\": dial tcp 127.0.0.1:59693: connect: connection refused"
+2026/09/25 17:39:18 INFO acp.reconnect.attempt attempt=2 delay=2s endpoint=http://127.0.0.1:59703
+2026/09/25 17:39:18 INFO acp.reconnect.attempt attempt=2 delay=2s endpoint=http://127.0.0.1:59693
+2026/09/25 17:39:18 INFO acp.reconnect.failed attempt=1 err="Post \"http://127.0.0.1:59714/connect\": dial tcp 127.0.0.1:59714: connect: connection refused"
+2026/09/25 17:39:18 INFO acp.reconnect.attempt attempt=2 delay=2s endpoint=http://127.0.0.1:59714
+2026/09/25 17:39:18 INFO acp.reconnect.failed attempt=1 err="Post \"http://127.0.0.1:59720/connect\": dial tcp 127.0.0.1:59720: connect: connection refused"
+2026/09/25 17:39:18 INFO acp.reconnect.attempt attempt=2 delay=2s endpoint=http://127.0.0.1:59720
+2026/09/25 17:39:18 INFO acp.reconnect.failed attempt=1 err="Post \"http://127.0.0.1:59723/connect\": dial tcp 127.0.0.1:59723: connect: connection refused"
+2026/09/25 17:39:18 INFO acp.reconnect.attempt attempt=2 delay=2s endpoint=http://127.0.0.1:59723
+2026/09/25 17:39:18 INFO acp.reconnect.failed attempt=1 err="Post \"http://127.0.0.1:59726/connect\": dial tcp 127.0.0.1:59726: connect: connection refused"
+2026/09/25 17:39:18 INFO acp.reconnect.attempt attempt=2 delay=2s endpoint=http://127.0.0.1:59726
+2026/09/25 17:39:18 INFO acp.reconnect.success endpoint=http://127.0.0.1:59729 attempts=1
+2026/09/25 17:39:18 INFO acp.send message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:18 INFO acp.connect transport=gRPC endpoint=http://127.0.0.1:59756 trace_id="" span_id=""
+2026/09/25 17:39:18 INFO acp.reconnect.attempt attempt=1 delay=1s endpoint=http://127.0.0.1:59756
+2026/09/25 17:39:18 INFO acp.reconnect.queued message_type=message receiver_id=srv trace_id="" span_id=""
+2026/09/25 17:39:19 INFO acp.reconnect.success endpoint=http://127.0.0.1:59756 attempts=1
+2026/09/25 17:39:19 INFO acp.connect transport=gRPC endpoint=http://127.0.0.1:59758 trace_id="" span_id=""
+2026/09/25 17:39:19 INFO acp.reconnect.attempt attempt=1 delay=1s endpoint=http://127.0.0.1:59758
+2026/09/25 17:39:19 INFO acp.server.start name=test addr=127.0.0.1:59760 tls=false
+2026/09/25 17:39:19 INFO acp.server.stop name=test
+2026/09/25 17:39:19 INFO acp.server.start name=test addr=127.0.0.1:59763 tls=false
+2026/09/25 17:39:19 INFO acp.server.stop name=test
+2026/09/25 17:39:19 INFO acp.server.start name=test addr=127.0.0.1:59768 tls=false
+2026/09/25 17:39:19 INFO acp.server.stop name=test
+2026/09/25 17:39:19 INFO acp.server.start name=test addr=127.0.0.1:59771 tls=false
+2026/09/25 17:39:19 INFO acp.server.connect name=test status=connected
+2026/09/25 17:39:19 INFO acp.server.stop name=test
+2026/09/25 17:39:19 INFO acp.server.start name=test addr=127.0.0.1:59774 tls=false
+2026/09/25 17:39:19 ERROR acp.server.connect_failed name=test reason=session_id_unavailable
+2026/09/25 17:39:19 INFO acp.server.stop name=test
+--- FAIL: TestStdioWriterPanicIsContainedAndFencesSession (0.01s)
+    stdio_panic_test.go:21: 
+        	Error Trace:	/Users/pengjunchen/Documents/github/go-cli/internal/acp/stdio_panic_test.go:168
+        	            				/Users/pengjunchen/Documents/github/go-cli/internal/acp/stdio_panic_test.go:21
+        	Error:      	Received unexpected error:
+        	            	exit status 1
+        	Test:       	TestStdioWriterPanicIsContainedAndFencesSession
+        	Messages:   	isolated panic scenario "writer" failed: 2026/09/25 17:39:22 INFO acp.connect transport=Stdio endpoint=stdio://stdin-stdout trace_id="" span_id=""
+        	            	2026/09/25 17:39:22 ERROR acp.send.failed message_type=message receiver_id="" err="acp: stdio write pending: acp: stdio adapter is closing\nacp: stdio writer panicked after dispatch; delivery unknown" trace_id="" span_id=""
+        	            	--- FAIL: TestStdioWriterPanicIsContainedAndFencesSession (0.00s)
+        	            	    stdio_panic_test.go:35: 
+        	            	        	Error Trace:	/Users/pengjunchen/Documents/github/go-cli/internal/acp/stdio_panic_test.go:35
+        	            	        	Error:      	Error message not equal:
+        	            	        	            	expected: "acp: stdio send: acp: stdio writer panicked after dispatch; delivery unknown"
+        	            	        	            	actual  : "acp: stdio send: acp: stdio write pending: acp: stdio adapter is closing\nacp: stdio writer panicked after dispatch; delivery unknown"
+        	            	        	Test:       	TestStdioWriterPanicIsContainedAndFencesSession
+        	            	2026/09/25 17:39:22 WARN acp.receive.read name=stdio err="acp: read stdio frame: io: read/write on closed pipe"
+        	            	FAIL
+FAIL
+FAIL	github.com/pengjunchen/go-cli/internal/acp	8.383s
+FAIL

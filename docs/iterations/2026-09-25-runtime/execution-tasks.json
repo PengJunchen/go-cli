@@ -939,7 +939,7 @@
         "R3-DES-01",
         "R1-REV-01"
       ],
-      "status": "pending",
+      "status": "in_progress",
       "commit_spec": "Separate retry/loop from accounting/privacy commits when possible; never retry after visible output or side-effect dispatch without idempotency evidence.",
       "phase_id": "R3",
       "source_status": "proposed"
@@ -973,7 +973,7 @@
         "R3-DES-01",
         "R2-REV-01"
       ],
-      "status": "pending",
+      "status": "in_progress",
       "commit_spec": "Commit protocol-group preservation before tuning summary quality; preserve fixtures for old JSONL records.",
       "phase_id": "R3",
       "source_status": "proposed"
