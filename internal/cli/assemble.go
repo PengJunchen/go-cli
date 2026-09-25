@@ -44,6 +44,10 @@ import (
 // explicit value is provided via AssembleOption.
 const defaultMaxTokens = 8000
 
+// ErrPreparedPostToolUseHookUnsupported identifies shell hooks that cannot
+// safely run in the prepared tool-dispatch pipeline yet.
+var ErrPreparedPostToolUseHookUnsupported = errors.New("cli: PostToolUse shell hooks are unsupported by prepared execution")
+
 // cliDefaultOpenAICompatibleBaseURL mirrors EinoProvider's default so small
 // model credential reuse can compare origins when provider.base_url is empty.
 const cliDefaultOpenAICompatibleBaseURL = "https://api.openai.com/v1"
@@ -320,6 +324,12 @@ func AssembleAgent(
 	opts ...AssembleOption,
 ) (*AgentAssembly, error) {
 	s, thinkingLevel := newAssembleState(ctx, rc, providerName, modelName, out, opts...)
+	s.loadConfiguredShellHooks()
+	if len(s.unsupportedPostToolUseHooks) > 0 {
+		hookPath := s.unsupportedPostToolUseHooks[0]
+		s.runCleanup()
+		return nil, fmt.Errorf("%w: %s", ErrPreparedPostToolUseHookUnsupported, hookPath)
+	}
 
 	// Assemble subsystems in dependency order.
 	if err := s.assembleModel(); err != nil {
@@ -509,6 +519,7 @@ func newAssembleState(
 
 	logger := slog.Default()
 	reg := core.NewRegistry().(*core.DefaultRegistry) //nolint:errcheck
+	gitCwd := resolveGitCwd(rc)
 
 	// Resolve session ID: config.Session.ID takes priority, fallback to agentName.
 	sessionID := ac.agentName
@@ -528,8 +539,20 @@ func newAssembleState(
 		out:           out,
 		thinkingLevel: thinkingLevel,
 		eventBus:      core.NewMemoryEventBus(),
+		gitCwd:        gitCwd,
 	}
 	return s, thinkingLevel
+}
+
+func resolveGitCwd(rc *config.Config) string {
+	gitCwd, err := os.Getwd()
+	if err != nil {
+		gitCwd = "."
+	}
+	if rc != nil && rc.Git.WorkDir != "" {
+		gitCwd = rc.Git.WorkDir
+	}
+	return gitCwd
 }
 
 // assembleState holds intermediate assembly state shared across assembleXXX
@@ -576,10 +599,13 @@ type assembleState struct {
 	skillInfos       []core.SkillInfo
 
 	// Extensions section
-	extHooks      []core.Hook
-	extMiddleware []core.Middleware
-	hookChain     *core.HookChain
-	hookMgr       *core.HookManager
+	extHooks                    []core.Hook
+	extMiddleware               []core.Middleware
+	hookChain                   *core.HookChain
+	hookMgr                     *core.HookManager
+	shellHooksLoaded            bool
+	shellHooks                  []core.HookSystem
+	unsupportedPostToolUseHooks []string
 
 	// Approval section
 	modeResolver approval.PermissionModeResolver
@@ -831,14 +857,11 @@ func (s *assembleState) assembleTools() error {
 	s.htmlConverter = tools.NewDefaultHTMLConverter()
 
 	// Resolve the working directory for git tools.
-	gitCwd, err := os.Getwd()
-	if err != nil {
-		gitCwd = "."
+	gitCwd := s.gitCwd
+	if gitCwd == "" {
+		gitCwd = resolveGitCwd(s.rc)
+		s.gitCwd = gitCwd
 	}
-	if s.rc != nil && s.rc.Git.WorkDir != "" {
-		gitCwd = s.rc.Git.WorkDir
-	}
-	s.gitCwd = gitCwd
 	s.gitTool = tools.NewDefaultGitTool(gitCwd)
 
 	// Create a SnapshotManager anchored at the git working directory. When the
@@ -966,17 +989,28 @@ func (s *assembleState) assembleExtensions() {
 		})
 	}
 
-	// Load user-configured shell hooks from .go-cli/hooks.yaml.
-	hooksPath := filepath.Join(s.gitCwd, ".go-cli", "hooks.yaml")
-	if _, statErr := os.Stat(hooksPath); statErr == nil {
-		s.loadShellHooks(hooksPath)
+	s.loadConfiguredShellHooks()
+	if len(s.shellHooks) > 0 {
+		s.hookMgr = core.NewHookManager(s.shellHooks...)
+		s.extHooks = append(s.extHooks, s.hookMgr)
 	}
 
 	s.hookChain = core.NewHookChain(s.extHooks...)
 }
 
+func (s *assembleState) loadConfiguredShellHooks() {
+	if s.shellHooksLoaded {
+		return
+	}
+	s.shellHooksLoaded = true
+	hooksPath := filepath.Join(s.gitCwd, ".go-cli", "hooks.yaml")
+	if _, statErr := os.Stat(hooksPath); statErr == nil {
+		s.loadShellHooks(hooksPath)
+	}
+}
+
 // loadShellHooks reads a hooks.yaml file, parses shell hook definitions, and
-// appends a HookManager to s.extHooks.
+// stores shell hooks for later assembly into the HookManager.
 func (s *assembleState) loadShellHooks(path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -988,12 +1022,14 @@ func (s *assembleState) loadShellHooks(path string) {
 		s.logger.Warn("assemble_hooks_parse_failed", "path", path, "err", err)
 		return
 	}
-	var shellHooks []core.HookSystem
 	for i, hc := range hooksCfg.Hooks {
 		event, eventErr := parseHookEvent(hc.Event)
 		if eventErr != nil {
 			s.logger.Warn("assemble_hook_event_unknown", "index", i, "event", hc.Event, "err", eventErr)
 			continue
+		}
+		if event == core.EventPostToolUse {
+			s.unsupportedPostToolUseHooks = append(s.unsupportedPostToolUseHooks, fmt.Sprintf("%s hook %d", path, i))
 		}
 		timeoutStr := hc.Timeout
 		if timeoutStr == "" {
@@ -1005,13 +1041,9 @@ func (s *assembleState) loadShellHooks(path string) {
 			timeout = 10 * time.Second
 		}
 		name := fmt.Sprintf("shell-hook-%d", i)
-		shellHooks = append(shellHooks, core.NewShellHook(name, event, hc.Command, timeout))
+		s.shellHooks = append(s.shellHooks, core.NewShellHook(name, event, hc.Command, timeout))
 	}
-	if len(shellHooks) > 0 {
-		s.hookMgr = core.NewHookManager(shellHooks...)
-		s.extHooks = append(s.extHooks, s.hookMgr)
-	}
-	s.logger.Info("assemble_hooks_ready", "path", path, "count", len(shellHooks))
+	s.logger.Info("assemble_hooks_ready", "path", path, "count", len(s.shellHooks))
 }
 
 // parseHookEvent converts a config event string to a core.HookEvent.
@@ -1207,9 +1239,6 @@ func (s *assembleState) assembleProductionResilience() error {
 		MutationQueue:     s.mutationQueue,
 	}); err != nil {
 		return fmt.Errorf("assemble: install prepared tool stages: %w", err)
-	}
-	if s.hookMgr != nil {
-		s.logger.Warn("assemble_post_tool_use_hooks_unavailable", "reason", "prepared dispatch cannot bind hook side effects to the Plan Mode snapshot")
 	}
 	s.reg.RegisterToolRegistry(s.tr)
 	return nil

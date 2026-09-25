@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/pengjunchen/go-cli/internal/approval"
@@ -14,7 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestAssemblePreparedPlanControlSkipsPostToolUseShellHook(t *testing.T) {
+func TestAssembleRejectsConfiguredPostToolUseShellHook(t *testing.T) {
 	ctx := context.Background()
 	workDir := t.TempDir()
 	hookDir := filepath.Join(workDir, ".go-cli")
@@ -26,22 +29,34 @@ func TestAssemblePreparedPlanControlSkipsPostToolUseShellHook(t *testing.T) {
 	cfg := newAssembleTestConfig()
 	cfg.Git.WorkDir = workDir
 	assembly, err := AssembleAgent(ctx, cfg, "openai", "test-model", io.Discard)
-	require.NoError(t, err)
-	t.Cleanup(assembly.Cleanup)
-
-	require.NoError(t, assembly.PlanCtrl.Enter(ctx, "exercise prepared Plan control"))
-	tool, err := assembly.ToolRegistry.Get(ctx, "tool_search")
-	require.NoError(t, err)
-	result, err := tool.Execute(ctx, tools.ToolCall{
-		Name: "tool_search",
-		Args: map[string]any{"query": "ask_user"},
-	})
-	require.NoError(t, err, "the concrete first-party control remains available in Plan Mode")
-	require.NotNil(t, result)
-	assert.Contains(t, result.Output, "ask_user")
+	require.Nil(t, assembly)
+	require.ErrorIs(t, err, ErrPreparedPostToolUseHookUnsupported)
+	assert.Contains(t, err.Error(), "hooks.yaml hook 0")
 
 	_, err = os.Stat(markerPath)
-	assert.ErrorIs(t, err, os.ErrNotExist, "arbitrary PostToolUse commands are not part of prepared execution")
+	assert.ErrorIs(t, err, os.ErrNotExist, "unsupported PostToolUse command must not execute during assembly")
+}
+
+func TestAssembleAcceptsPreAndSessionShellHooksWithoutUnavailableWarning(t *testing.T) {
+	ctx := context.Background()
+	workDir := t.TempDir()
+	hookDir := filepath.Join(workDir, ".go-cli")
+	require.NoError(t, os.MkdirAll(hookDir, 0o700))
+	hooks := "hooks:\n  - event: pre_tool_use\n    command: true\n    timeout: 1s\n  - event: session_start\n    command: true\n    timeout: 1s\n"
+	require.NoError(t, os.WriteFile(filepath.Join(hookDir, "hooks.yaml"), []byte(hooks), 0o600))
+
+	var logBuffer bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuffer, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	defer slog.SetDefault(previousLogger)
+
+	cfg := newAssembleTestConfig()
+	cfg.Git.WorkDir = workDir
+	assembly, err := AssembleAgent(ctx, cfg, "openai", "test-model", io.Discard)
+	require.NoError(t, err)
+	require.NotNil(t, assembly)
+	t.Cleanup(assembly.Cleanup)
+	assert.NotContains(t, strings.ToLower(logBuffer.String()), "post_tool_use_hooks_unavailable")
 }
 
 type preparedControlSpoofTool struct {
