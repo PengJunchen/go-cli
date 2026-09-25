@@ -9,17 +9,21 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/pengjunchen/go-cli/internal/tools"
+	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
 // fakeClient is a minimal in-process MCPClient used to exercise MCPToolAdapter
 // end-to-end. It mirrors the behavior of the mock server (server/tool names,
 // argument-aware results) without importing internal/mock.
 type fakeClient struct {
-	name    string
-	mu      sync.Mutex
-	last    string
-	errored bool
-	content string // if non-empty, overrides the default echo content
+	name      string
+	mu        sync.Mutex
+	last      string
+	errored   bool
+	content   string // if non-empty, overrides the default echo content
+	result    *MCPToolResult
+	nilResult bool
+	probeSpan bool
 }
 
 func (f *fakeClient) Connect(context.Context) error    { return nil }
@@ -28,15 +32,30 @@ func (f *fakeClient) ListTools(context.Context) ([]MCPTool, error) {
 	return []MCPTool{{Name: "echo", Description: "echoes a message"}}, nil
 }
 
-func (f *fakeClient) CallTool(_ context.Context, name string, args map[string]any) (*MCPToolResult, error) {
+func (f *fakeClient) CallTool(ctx context.Context, name string, args map[string]any) (*MCPToolResult, error) {
 	f.mu.Lock()
 	f.last = name
+	result := f.result
+	nilResult := f.nilResult
+	probeSpan := f.probeSpan
+	errored := f.errored
+	content := f.content
 	f.mu.Unlock()
-	if f.errored {
+	if probeSpan {
+		span, _ := tracing.SpanFromContext(ctx, "mcp.fake_client.call", tracing.SpanKindInternal)
+		span.End()
+	}
+	if errored {
 		return nil, assert.AnError
 	}
-	if f.content != "" {
-		return &MCPToolResult{Content: f.content}, nil
+	if nilResult {
+		return nil, nil
+	}
+	if result != nil {
+		return result, nil
+	}
+	if content != "" {
+		return &MCPToolResult{Content: content}, nil
 	}
 	return &MCPToolResult{Content: "echo:" + stringOf(args["msg"])}, nil
 }
@@ -80,6 +99,83 @@ func TestMCPToolAdapterExecutePropagatesError(t *testing.T) {
 		Args: map[string]any{"msg": "hi"},
 	})
 	require.Error(t, err)
+}
+
+func TestMCPIsErrorAndNilPropagate(t *testing.T) {
+	t.Run("server error flag", func(t *testing.T) {
+		client := &fakeClient{
+			name:   "srv",
+			result: &MCPToolResult{Content: "remote tool failed", IsError: true},
+		}
+		adapter := NewMCPToolAdapter(client, MCPTool{Name: "echo"})
+
+		result, err := adapter.Execute(context.Background(), tools.ToolCall{ID: "call-error", Name: adapter.Name()})
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Equal(t, "remote tool failed", result.Output)
+		assert.True(t, result.IsError)
+	})
+
+	t.Run("nil result is an error", func(t *testing.T) {
+		client := &fakeClient{name: "srv", nilResult: true}
+		adapter := NewMCPToolAdapter(client, MCPTool{Name: "echo"})
+
+		var result *tools.ToolResult
+		var err error
+		require.NotPanics(t, func() {
+			result, err = adapter.Execute(context.Background(), tools.ToolCall{ID: "call-nil", Name: adapter.Name()})
+		})
+		assert.Nil(t, result)
+		require.ErrorIs(t, err, ErrInvalidToolResult)
+	})
+}
+
+func TestMCPToolAdapterPassesSpanContext(t *testing.T) {
+	exporter := &recordingTraceExporter{}
+	tracer := tracing.NewTracer("mcp-tool-adapter-test", exporter)
+	parentSpan, ctx := tracer.Start(context.Background(), "parent", tracing.SpanKindInternal)
+	client := &fakeClient{name: "srv", probeSpan: true}
+	adapter := NewMCPToolAdapter(client, MCPTool{Name: "echo"})
+
+	_, err := adapter.Execute(ctx, tools.ToolCall{ID: "call-span", Name: adapter.Name()})
+	require.NoError(t, err)
+	parentSpan.End()
+
+	var adapterSpan, clientSpan *tracing.SpanData
+	for _, span := range exporter.snapshot() {
+		span := span
+		switch span.Name {
+		case "tool.call":
+			adapterSpan = &span
+		case "mcp.fake_client.call":
+			clientSpan = &span
+		}
+	}
+	require.NotNil(t, adapterSpan, "adapter span should be ended and exported")
+	require.NotNil(t, clientSpan, "fake client should observe the propagated span context")
+	assert.Equal(t, parentSpan.SpanID(), adapterSpan.ParentSpanID)
+	assert.Equal(t, adapterSpan.SpanID, clientSpan.ParentSpanID)
+	assert.Equal(t, adapterSpan.TraceID, clientSpan.TraceID)
+}
+
+type recordingTraceExporter struct {
+	mu    sync.Mutex
+	spans []tracing.SpanData
+}
+
+func (exporter *recordingTraceExporter) ExportSpan(_ context.Context, span tracing.TraceSpan) error {
+	exporter.mu.Lock()
+	defer exporter.mu.Unlock()
+	exporter.spans = append(exporter.spans, tracing.SpanToData(span))
+	return nil
+}
+
+func (exporter *recordingTraceExporter) Shutdown(context.Context) error { return nil }
+
+func (exporter *recordingTraceExporter) snapshot() []tracing.SpanData {
+	exporter.mu.Lock()
+	defer exporter.mu.Unlock()
+	return append([]tracing.SpanData(nil), exporter.spans...)
 }
 
 func TestMCPToolAdapterThroughRegistry(t *testing.T) {
