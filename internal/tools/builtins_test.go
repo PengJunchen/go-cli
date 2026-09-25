@@ -64,7 +64,13 @@ func TestRegisterDefaultsMintsOnlyReviewedWriteEffects(t *testing.T) {
 	for _, name := range []string{"read", "grep", "find", "ls"} {
 		snapshot, err := reg.toolRegistrationSnapshot(ctx, name)
 		require.NoError(t, err)
-		assert.Equal(t, RegistrationSourceToolRegistry, snapshot.identity.RegistrationSource())
+		if name == "read" || name == "ls" {
+			assert.Equal(t, RegistrationSourceBuiltin, snapshot.identity.RegistrationSource())
+			assert.Equal(t, CompletionInlinePipelineJoined, snapshot.completionProof)
+		} else {
+			assert.Equal(t, RegistrationSourceToolRegistry, snapshot.identity.RegistrationSource())
+			assert.Empty(t, snapshot.completionProof)
+		}
 		assert.Equal(t, []TrustedToolEffect{EffectUnknown}, snapshot.effects.Values())
 	}
 

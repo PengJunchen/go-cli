@@ -186,6 +186,10 @@ type trustedLocalProcessRegistrar interface {
 	registerTrustedLocalProcess(context.Context, ToolDefinition) error
 }
 
+type trustedInlineLocalReaderRegistrar interface {
+	registerTrustedInlineLocalReader(context.Context, ToolDefinition) error
+}
+
 func (r *DefaultToolRegistry) DispatchFence() *DispatchFence {
 	if r == nil {
 		return nil
@@ -245,6 +249,22 @@ func (r *DefaultToolRegistry) registerTrustedLocalProcess(ctx context.Context, d
 	default:
 		return errors.New("tools: local-process completion requires a reviewed local bash tool")
 	}
+}
+
+func (r *DefaultToolRegistry) registerTrustedInlineLocalReader(ctx context.Context, def ToolDefinition) error {
+	switch tool := def.(type) {
+	case *ReadTool:
+		if tool == nil {
+			return errors.New("tools: inline read registration requires a non-nil read tool")
+		}
+	case *LSTool:
+		if tool == nil {
+			return errors.New("tools: inline read registration requires a non-nil ls tool")
+		}
+	default:
+		return errors.New("tools: inline local read registration requires a reviewed built-in reader")
+	}
+	return r.registerDefinitionWithCompletion(def, RegistrationSourceBuiltin, newTrustedEffectSet(), CompletionInlinePipelineJoined)
 }
 
 func supportsLocalProcessCompletion(tool *BashTool) bool {
