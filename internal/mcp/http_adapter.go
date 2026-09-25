@@ -24,21 +24,68 @@ import (
 // HTTPClientAdapter is an MCPClient that communicates with an MCP server over
 // the MCP 2025-06-18 Streamable HTTP transport.
 type HTTPClientAdapter struct {
-	cfg       MCPServerConfig
-	client    *http.Client
-	endpoint  string // validated Streamable HTTP MCP endpoint
-	sessionID string
-	lifecycle sync.RWMutex
-	mu        sync.Mutex
-	connected bool
-	nextID    int64
+	cfg    MCPServerConfig
+	client *http.Client
+	mu     sync.Mutex
 
+	current *httpConnectionGeneration
+	nextID  int64
+}
+
+type httpConnectionGeneration struct {
+	endpoint        string
+	sessionID       string
 	protocolVersion string
+	connected       bool
+	closing         bool
+	lifeCtx         context.Context
+	cancelLife      context.CancelFunc
+	active          int
+	quiescent       chan struct{}
+	connectOp       *httpConnectOperation
+	closeOp         *httpCloseOperation
+}
+
+type httpConnectOperation struct {
+	done   chan struct{}
+	cancel context.CancelFunc
+	result error
+}
+
+type httpCloseOperation struct {
+	done     chan struct{}
+	deadline time.Time
+	ownerCtx context.Context
+	result   error
+}
+
+type httpConnectWaitPolicy struct {
+	operationCtx context.Context
+	owner        bool
 }
 
 var _ MCPClient = (*HTTPClientAdapter)(nil)
 
 var errCrossOriginRedirect = errors.New("mcp: cross-origin redirect rejected")
+
+// ErrHTTPOperationPending reports that an operation's waiter stopped waiting,
+// while the actual HTTP operation remains owned and may still be in flight.
+var ErrHTTPOperationPending = errors.New("mcp: HTTP operation remains pending")
+
+type httpOperationPendingError struct {
+	operation string
+	cause     error
+}
+
+func (e *httpOperationPendingError) Error() string {
+	return "mcp: " + e.operation + " remains pending while the HTTP operation is still in flight"
+}
+
+func (e *httpOperationPendingError) Unwrap() error { return e.cause }
+
+func (e *httpOperationPendingError) Is(target error) bool {
+	return target == ErrHTTPOperationPending
+}
 
 // ErrUnsupportedOAuth reports that this HTTP adapter does not implement the
 // authorization flow configured for an MCP server. Callers may still provide
@@ -240,80 +287,278 @@ func NewHTTPClientAdapterWithClient(cfg MCPServerConfig, client *http.Client) *H
 // configured Streamable HTTP endpoint. It never probes or falls back to the
 // deprecated HTTP+SSE transport.
 func (a *HTTPClientAdapter) Connect(ctx context.Context) error {
-	a.lifecycle.Lock()
-	defer a.lifecycle.Unlock()
-
-	a.mu.Lock()
-	defer a.mu.Unlock()
-
-	if a.connected {
-		return nil
-	}
-	a.clearConnectionLocked()
 	if a.cfg.OAuthConfig != nil {
 		return ErrUnsupportedOAuth
 	}
 	if a.cfg.Transport != MCPTransportStreamableHTTP {
 		return ErrUnsupportedHTTPTransport
 	}
-
 	endpoint, err := resolveSameOriginEndpoint(a.cfg.URL, a.cfg.URL)
 	if err != nil {
 		return err
 	}
-	a.endpoint = endpoint
-	if err := a.doInitializeLocked(ctx); err != nil {
-		a.clearConnectionLocked()
-		return fmt.Errorf("mcp: initialize handshake: %w", err)
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	a.connected = true
-	slog.Info("mcp.http.connect", "server", a.cfg.Name)
-	return nil
-}
 
-func (a *HTTPClientAdapter) clearConnectionLocked() {
-	a.connected = false
-	a.endpoint = ""
-	a.sessionID = ""
-	a.protocolVersion = ""
+	for {
+		a.mu.Lock()
+		gen := a.current
+		if gen != nil && gen.closeOp != nil {
+			closeOp := gen.closeOp
+			a.mu.Unlock()
+			if err := waitForHTTPOperation(ctx, closeOp.done, "connect"); err != nil {
+				return err
+			}
+			a.mu.Lock()
+			closeErr := closeOp.result
+			if a.current == gen && closeErr == nil {
+				a.current = nil
+			}
+			a.mu.Unlock()
+			if closeErr != nil {
+				return closeErr
+			}
+			continue
+		}
+		if gen != nil {
+			if gen.connected && !gen.closing {
+				a.mu.Unlock()
+				return nil
+			}
+			if gen.connectOp != nil {
+				op := gen.connectOp
+				a.mu.Unlock()
+				return waitForConnect(ctx, op, httpConnectWaitPolicy{})
+			}
+			a.mu.Unlock()
+			return httpProtocolError("previous connection attempt failed; disconnect before reconnecting")
+		}
+
+		lifeCtx, cancelLife := context.WithCancel(context.Background())
+		connectCtx, cancelConnect := context.WithCancel(ctx)
+		stopLife := context.AfterFunc(lifeCtx, cancelConnect)
+		gen = &httpConnectionGeneration{
+			endpoint:   endpoint,
+			lifeCtx:    lifeCtx,
+			cancelLife: cancelLife,
+			active:     1,
+			quiescent:  make(chan struct{}),
+		}
+		op := &httpConnectOperation{done: make(chan struct{}), cancel: cancelConnect}
+		gen.connectOp = op
+		id := a.nextID
+		a.nextID++
+		a.current = gen
+		a.mu.Unlock()
+
+		go a.runConnect(connectCtx, gen, op, stopLife, id)
+		return waitForConnect(ctx, op, httpConnectWaitPolicy{operationCtx: connectCtx, owner: true})
+	}
 }
 
 // Disconnect closes the local connection and asks a session-aware server to
 // delete the remote session. A 405 response is permitted by the transport and
 // does not prove that any in-flight remote action stopped.
 func (a *HTTPClientAdapter) Disconnect(ctx context.Context) error {
-	a.lifecycle.Lock()
-	defer a.lifecycle.Unlock()
-
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	a.mu.Lock()
-	if !a.connected {
-		a.clearConnectionLocked()
+	gen := a.current
+	if gen == nil {
 		a.mu.Unlock()
 		return nil
 	}
-	endpoint, version, sessionID := a.endpoint, a.protocolVersion, a.sessionID
-	a.clearConnectionLocked()
+	if gen.closeOp != nil {
+		op := gen.closeOp
+		a.mu.Unlock()
+		return waitForClose(ctx, op)
+	}
+	op := &httpCloseOperation{
+		done:     make(chan struct{}),
+		deadline: time.Now().Add(defaultHTTPTimeout),
+		ownerCtx: context.WithoutCancel(ctx),
+	}
+	gen.closeOp = op
+	gen.closing = true
+	gen.connected = false
+	gen.cancelLife()
+	if gen.connectOp != nil {
+		gen.connectOp.cancel()
+	}
+	quiescent := gen.quiescent
 	a.mu.Unlock()
-	if sessionID == "" {
-		return nil
-	}
+	go a.runClose(gen, op, quiescent)
+	return waitForClose(ctx, op)
+}
 
-	req, err := a.newHTTPMessageRequest(ctx, http.MethodDelete, endpoint, nil, version, sessionID, "", "")
+func (a *HTTPClientAdapter) runConnect(ctx context.Context, gen *httpConnectionGeneration, op *httpConnectOperation, stopLife func() bool, id int64) {
+	defer stopLife()
+	defer op.cancel()
+	sessionID, version, err := a.doInitialize(ctx, gen.endpoint, id)
 	if err != nil {
-		return fmt.Errorf("mcp: build session DELETE: %w", err)
+		err = fmt.Errorf("mcp: initialize handshake: %w", err)
 	}
-	resp, err := a.doHTTP(req)
-	if err != nil {
-		return fmt.Errorf("mcp: delete session: %w", err)
+	if err == nil && ctx.Err() != nil {
+		err = contextCause(ctx)
 	}
-	defer func() { _ = resp.Body.Close() }() //nolint:errcheck
-	if resp.StatusCode == http.StatusMethodNotAllowed {
+	a.mu.Lock()
+	gen.sessionID = sessionID
+	gen.protocolVersion = version
+	if err == nil && (a.current != gen || gen.closing) {
+		err = context.Canceled
+	}
+	if err == nil {
+		gen.connected = true
+	}
+	op.result = err
+	endHTTPActivityLocked(gen)
+	close(op.done)
+	connected := err == nil
+	a.mu.Unlock()
+	if connected {
+		slog.Info("mcp.http.connect", "server", a.cfg.Name)
+	}
+}
+
+func (a *HTTPClientAdapter) runClose(gen *httpConnectionGeneration, op *httpCloseOperation, quiescent <-chan struct{}) {
+	<-quiescent
+	a.mu.Lock()
+	endpoint, version, sessionID := gen.endpoint, gen.protocolVersion, gen.sessionID
+	connectErr := error(nil)
+	if gen.connectOp != nil {
+		connectErr = gen.connectOp.result
+	}
+	a.mu.Unlock()
+
+	var closeErr error
+	if sessionID == "" {
+		if connectErr != nil {
+			closeErr = httpProtocolErrorCause("initialization failed before a deletable session was known; remote state may be unknown", connectErr)
+		}
+	} else {
+		deleteCtx, cancel := context.WithDeadline(op.ownerCtx, op.deadline)
+		req, err := a.newHTTPMessageRequest(deleteCtx, http.MethodDelete, endpoint, nil, version, sessionID, "", "")
+		if err != nil {
+			closeErr = fmt.Errorf("mcp: build session DELETE: %w", err)
+		} else {
+			resp, err := a.doHTTP(req)
+			if err != nil {
+				closeErr = fmt.Errorf("mcp: delete session: %w", err)
+			} else {
+				_ = resp.Body.Close()
+				if resp.StatusCode != http.StatusMethodNotAllowed && (resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices) {
+					closeErr = httpProtocolError("session DELETE returned HTTP status %d", resp.StatusCode)
+				}
+			}
+		}
+		cancel()
+	}
+	a.mu.Lock()
+	op.result = closeErr
+	close(op.done)
+	a.mu.Unlock()
+}
+
+func beginHTTPActivityLocked(gen *httpConnectionGeneration) {
+	if gen.active == 0 {
+		gen.quiescent = make(chan struct{})
+	}
+	gen.active++
+}
+
+func endHTTPActivityLocked(gen *httpConnectionGeneration) {
+	gen.active--
+	if gen.active == 0 {
+		close(gen.quiescent)
+	}
+}
+
+func waitForHTTPOperation(ctx context.Context, done <-chan struct{}, operation string) error {
+	select {
+	case <-done:
 		return nil
+	default:
 	}
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return httpProtocolError("session DELETE returned HTTP status %d", resp.StatusCode)
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		select {
+		case <-done:
+			return nil
+		default:
+		}
+		return &httpOperationPendingError{operation: operation, cause: contextCause(ctx)}
 	}
-	return nil
+}
+
+func waitForClose(ctx context.Context, op *httpCloseOperation) error {
+	if err := waitForHTTPOperation(ctx, op.done, "disconnect"); err != nil {
+		return err
+	}
+	return op.result
+}
+
+func waitForConnect(ctx context.Context, op *httpConnectOperation, policy httpConnectWaitPolicy) error {
+	select {
+	case <-op.done:
+		return op.result
+	default:
+	}
+	if policy.owner {
+		select {
+		case <-op.done:
+			return op.result
+		case <-ctx.Done():
+			op.cancel()
+			if err := waitForHTTPOperationDone(op.done); err == nil {
+				return op.result
+			}
+			return &httpOperationPendingError{operation: "connect", cause: contextCause(ctx)}
+		case <-policy.operationCtx.Done():
+			if err := waitForHTTPOperationDone(op.done); err == nil {
+				return op.result
+			}
+			return &httpOperationPendingError{operation: "connect", cause: contextCause(policy.operationCtx)}
+		}
+	}
+	if err := waitForHTTPOperation(ctx, op.done, "connect"); err != nil {
+		return err
+	}
+	return op.result
+}
+
+func waitForHTTPOperationDone(done <-chan struct{}) error {
+	select {
+	case <-done:
+		return nil
+	default:
+		return ErrHTTPOperationPending
+	}
+}
+
+func contextCause(ctx context.Context) error {
+	if ctx == nil {
+		return context.Canceled
+	}
+	err := ctx.Err()
+	cause := context.Cause(ctx)
+	if err == nil {
+		return cause
+	}
+	if cause == nil || errors.Is(cause, err) {
+		return causeOrErr(cause, err)
+	}
+	return errors.Join(err, cause)
+}
+
+func causeOrErr(cause, fallback error) error {
+	if cause != nil {
+		return cause
+	}
+	return fallback
 }
 
 // Name returns the logical server name.
@@ -374,18 +619,32 @@ func (a *HTTPClientAdapter) CallTool(ctx context.Context, name string, args map[
 
 // request sends a JSON-RPC request via HTTP POST and returns the result.
 func (a *HTTPClientAdapter) request(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
-	a.lifecycle.RLock()
-	defer a.lifecycle.RUnlock()
-
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	a.mu.Lock()
-	if !a.connected {
+	gen := a.current
+	if gen == nil || !gen.connected || gen.closing {
 		a.mu.Unlock()
 		return nil, httpProtocolError("request %q requires an initialized connection", method)
 	}
 	id := a.nextID
 	a.nextID++
-	endpoint, version, sessionID := a.endpoint, a.protocolVersion, a.sessionID
+	endpoint, version, sessionID := gen.endpoint, gen.protocolVersion, gen.sessionID
+	beginHTTPActivityLocked(gen)
 	a.mu.Unlock()
+	defer func() {
+		a.mu.Lock()
+		endHTTPActivityLocked(gen)
+		a.mu.Unlock()
+	}()
+
+	requestCtx, cancel := context.WithCancel(ctx)
+	stopLife := context.AfterFunc(gen.lifeCtx, cancel)
+	defer func() {
+		stopLife()
+		cancel()
+	}()
 
 	body, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
@@ -396,11 +655,11 @@ func (a *HTTPClientAdapter) request(ctx context.Context, method string, params m
 	if err != nil {
 		return nil, fmt.Errorf("mcp: marshal request: %w", err)
 	}
-	if err := ctx.Err(); err != nil {
+	if err := requestCtx.Err(); err != nil {
 		return nil, err
 	}
 
-	req, err := a.newHTTPMessageRequest(ctx, http.MethodPost, endpoint, body, version, sessionID, "application/json, text/event-stream", "")
+	req, err := a.newHTTPMessageRequest(requestCtx, http.MethodPost, endpoint, body, version, sessionID, "application/json, text/event-stream", "")
 	if err != nil {
 		return nil, fmt.Errorf("mcp: build request: %w", err)
 	}
@@ -411,8 +670,8 @@ func (a *HTTPClientAdapter) request(ctx context.Context, method string, params m
 	responseBudget := newResponseByteBudget(maxHTTPResponseSize)
 	result, cursor, resumable, responseErr := a.readRequestResponse(resp, id, sessionID, responseBudget)
 	_ = resp.Body.Close()
-	if responseErr != nil && resumable && cursor != "" && ctx.Err() == nil {
-		result, responseErr = a.resumeRequestResponse(ctx, endpoint, version, sessionID, id, cursor, responseBudget)
+	if responseErr != nil && resumable && cursor != "" && requestCtx.Err() == nil {
+		result, responseErr = a.resumeRequestResponse(requestCtx, endpoint, version, sessionID, id, cursor, responseBudget)
 	}
 	if responseErr != nil {
 		return nil, markRequestDispatched(responseErr)
@@ -700,7 +959,10 @@ func markRequestDispatched(err error) error {
 func (a *HTTPClientAdapter) ProtocolVersion() string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.protocolVersion
+	if a.current == nil || !a.current.connected || a.current.closing {
+		return ""
+	}
+	return a.current.protocolVersion
 }
 
 // applyAuthHeaders applies only caller-provided headers and a preconfigured
@@ -714,16 +976,14 @@ func (a *HTTPClientAdapter) applyAuthHeaders(req *http.Request) {
 	}
 }
 
-// doInitializeLocked performs the 2025-06-18 initialize/initialized exchange.
-// The caller must hold a.mu.
-func (a *HTTPClientAdapter) doInitializeLocked(ctx context.Context) error {
+// doInitialize performs the 2025-06-18 initialize/initialized exchange and
+// returns any session identity learned before a later handshake error.
+func (a *HTTPClientAdapter) doInitialize(ctx context.Context, endpoint string, id int64) (sessionID, version string, retErr error) {
 	initParams := map[string]any{
 		"protocolVersion": streamableHTTPProtocolVersion,
 		"capabilities":    map[string]any{},
 		"clientInfo":      map[string]any{"name": "go-cli", "version": "1.0.0"},
 	}
-	id := a.nextID
-	a.nextID++
 	body, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"id":      id,
@@ -731,70 +991,68 @@ func (a *HTTPClientAdapter) doInitializeLocked(ctx context.Context) error {
 		"params":  initParams,
 	})
 	if err != nil {
-		return fmt.Errorf("mcp: marshal initialize request: %w", err)
+		return "", "", fmt.Errorf("mcp: marshal initialize request: %w", err)
 	}
-	req, err := a.newHTTPMessageRequest(ctx, http.MethodPost, a.endpoint, body, "", "", "application/json, text/event-stream", "")
+	req, err := a.newHTTPMessageRequest(ctx, http.MethodPost, endpoint, body, "", "", "application/json, text/event-stream", "")
 	if err != nil {
-		return fmt.Errorf("mcp: build initialize request: %w", err)
+		return "", "", fmt.Errorf("mcp: build initialize request: %w", err)
 	}
 	resp, err := a.doHTTP(req)
 	if err != nil {
-		return fmt.Errorf("mcp: initialize request: %w", err)
+		return "", "", fmt.Errorf("mcp: initialize request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode != http.StatusOK {
 		if resp.StatusCode == http.StatusUnauthorized {
-			return httpProtocolError("authentication required (HTTP 401)")
+			return "", "", httpProtocolError("authentication required (HTTP 401)")
 		}
-		return httpProtocolError("initialize POST returned HTTP status %d", resp.StatusCode)
+		return "", "", httpProtocolError("initialize POST returned HTTP status %d", resp.StatusCode)
+	}
+	sessionID, err = initializeSessionID(resp)
+	if err != nil {
+		return sessionID, "", err
 	}
 	result, _, _, err := a.readRPCResponse(resp, id, newResponseByteBudget(maxHTTPResponseSize))
 	if err != nil {
-		return fmt.Errorf("mcp: invalid initialize response: %w", err)
+		return sessionID, "", fmt.Errorf("mcp: invalid initialize response: %w", err)
 	}
-	sessionID, err := initializeSessionID(resp)
-	if err != nil {
-		return err
-	}
-	version, _ := result["protocolVersion"].(string)
+	version, _ = result["protocolVersion"].(string)
 	if version != streamableHTTPProtocolVersion {
-		return httpProtocolError("server negotiated unsupported protocol version %q", version)
+		return sessionID, version, httpProtocolError("server negotiated unsupported protocol version %q", version)
 	}
-	a.protocolVersion = version
-	a.sessionID = sessionID
 
 	notification, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
 		"method":  "notifications/initialized",
 	})
 	if err != nil {
-		return fmt.Errorf("mcp: marshal initialized notification: %w", err)
+		return sessionID, version, fmt.Errorf("mcp: marshal initialized notification: %w", err)
 	}
-	notifReq, err := a.newHTTPMessageRequest(ctx, http.MethodPost, a.endpoint, notification, version, sessionID, "application/json, text/event-stream", "")
+	notifReq, err := a.newHTTPMessageRequest(ctx, http.MethodPost, endpoint, notification, version, sessionID, "application/json, text/event-stream", "")
 	if err != nil {
-		return fmt.Errorf("mcp: build initialized notification: %w", err)
+		return sessionID, version, fmt.Errorf("mcp: build initialized notification: %w", err)
 	}
 	notifResp, err := a.doHTTP(notifReq)
 	if err != nil {
-		return fmt.Errorf("mcp: send initialized notification: %w", err)
+		return sessionID, version, fmt.Errorf("mcp: send initialized notification: %w", err)
 	}
 	defer func() { _ = notifResp.Body.Close() }()
 	if notifResp.StatusCode != http.StatusAccepted {
-		return httpProtocolError("initialized notification returned HTTP status %d, want 202", notifResp.StatusCode)
+		return sessionID, version, httpProtocolError("initialized notification returned HTTP status %d, want 202", notifResp.StatusCode)
 	}
 	if err := validateResponseSessionID(notifResp, sessionID); err != nil {
-		return err
+		return sessionID, version, err
 	}
 	bodyBytes, err := readLimitedBody(notifResp.Body)
 	if err != nil {
-		return fmt.Errorf("mcp: read initialized notification acknowledgement: %w", err)
+		return sessionID, version, fmt.Errorf("mcp: read initialized notification acknowledgement: %w", err)
 	}
 	if len(bodyBytes) != 0 {
-		return httpProtocolError("initialized notification acknowledgement must have an empty body")
+		return sessionID, version, httpProtocolError("initialized notification acknowledgement must have an empty body")
 	}
 
 	slog.Info("mcp.http.initialized", "server", a.cfg.Name, "protocolVersion", version)
-	return nil
+	return sessionID, version, nil
 }
 
 func initializeSessionID(resp *http.Response) (string, error) {

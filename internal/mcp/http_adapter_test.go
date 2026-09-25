@@ -562,8 +562,8 @@ func TestHTTPAdapterConnectStreamableHTTP(t *testing.T) {
 	adapter := newHTTPTestAdapter(srv)
 
 	require.NoError(t, adapter.Connect(context.Background()))
-	assert.Equal(t, srv.URL, adapter.endpoint)
-	assert.True(t, adapter.connected)
+	assert.Equal(t, srv.URL, adapter.current.endpoint)
+	assert.True(t, adapter.current.connected)
 }
 
 func TestHTTPAdapterRejectsLegacySSETransportBeforeNetwork(t *testing.T) {
@@ -1070,7 +1070,7 @@ func TestHTTPAdapterConnectAndListToolsDoNotRequireGET(t *testing.T) {
 
 	ctx := context.Background()
 	require.NoError(t, adapter.Connect(ctx))
-	assert.Equal(t, srv.URL, adapter.endpoint)
+	assert.Equal(t, srv.URL, adapter.current.endpoint)
 
 	// Normal request/response traffic uses the same MCP endpoint directly.
 	tools, err := adapter.ListTools(ctx)
