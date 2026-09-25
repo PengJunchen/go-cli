@@ -5,6 +5,7 @@ package tools
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -13,12 +14,109 @@ import (
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
 type searchCompletionReport struct {
 	proof PreparedCompletionProof
 	done  <-chan struct{}
+}
+
+func TestSearchHelperEscapedPipeWriter(t *testing.T) {
+	pidPath := os.Getenv("SEARCH_HELPER_ESCAPED_PIPE_PID")
+	if pidPath == "" {
+		return
+	}
+	if _, err := syscall.Setsid(); err != nil {
+		t.Fatalf("escape helper process group: %v", err)
+	}
+	if err := os.WriteFile(pidPath, []byte(strconv.Itoa(os.Getpid())), 0o600); err != nil {
+		t.Fatalf("write escaped helper PID: %v", err)
+	}
+	time.Sleep(time.Hour)
+}
+
+func TestGrepForcedPipeCloseStopsFallbackAndWithholdsProof(t *testing.T) {
+	workdir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(workdir, "match.txt"), []byte("needle\n"), 0o600))
+	helperDir := t.TempDir()
+	pidPath := filepath.Join(t.TempDir(), "rg-escaped.pid")
+	writeFailingHelperWithEscapedPipeWriter(t, helperDir, "rg", pidPath)
+	t.Setenv("PATH", helperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SEARCH_HELPER_ESCAPED_PIPE_PID", pidPath)
+
+	reported := make(chan searchCompletionReport, 2)
+	ctx := withPreparedCompletionReporter(context.Background(), func(proof PreparedCompletionProof, done <-chan struct{}) {
+		reported <- searchCompletionReport{proof: proof, done: done}
+	})
+	tool := NewGrepTool(WithGrepWorkdir(workdir))
+	result, err := tool.Execute(ctx, ToolCall{Args: map[string]any{"pattern": "needle"}})
+	pid := waitForChildPIDFile(t, pidPath)
+	assert.NoError(t, syscall.Kill(pid, 0), "escaped helper must still be observable when Grep returns")
+	require.Error(t, err)
+	assert.Empty(t, result.Output, "an uncontained helper failure must not return pure-Go fallback output")
+	assertUnknownWithoutPendingResource(t, err)
+	assertNoProcessCompletionReport(t, reported)
+	killProcessFromFile(t, pidPath)
+	assertProcessFromFileStopped(t, pidPath)
+}
+
+func TestFindForcedPipeCloseStopsFallbackAndWithholdsProof(t *testing.T) {
+	workdir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(workdir, "target.go"), []byte("package main\n"), 0o600))
+	helperDir := t.TempDir()
+	pidPath := filepath.Join(t.TempDir(), "fd-escaped.pid")
+	writeFailingHelperWithEscapedPipeWriter(t, helperDir, "fd", pidPath)
+	t.Setenv("PATH", helperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SEARCH_HELPER_ESCAPED_PIPE_PID", pidPath)
+
+	reported := make(chan searchCompletionReport, 2)
+	ctx := withPreparedCompletionReporter(context.Background(), func(proof PreparedCompletionProof, done <-chan struct{}) {
+		reported <- searchCompletionReport{proof: proof, done: done}
+	})
+	tool := NewFindTool(WithFindWorkdir(workdir))
+	result, err := tool.Execute(ctx, ToolCall{Args: map[string]any{"pattern": "target.go", "type": "f"}})
+	pid := waitForChildPIDFile(t, pidPath)
+	assert.NoError(t, syscall.Kill(pid, 0), "escaped helper must still be observable when Find returns")
+	require.Error(t, err)
+	assert.Empty(t, result.Output, "an uncontained fd failure must not continue to system find or pure-Go fallback")
+	assertUnknownWithoutPendingResource(t, err)
+	assertNoProcessCompletionReport(t, reported)
+	killProcessFromFile(t, pidPath)
+	assertProcessFromFileStopped(t, pidPath)
+}
+
+func writeFailingHelperWithEscapedPipeWriter(t *testing.T, dir, name, pidPath string) {
+	t.Helper()
+	testBinary, err := os.Executable()
+	require.NoError(t, err)
+	script := fmt.Sprintf("#!/bin/sh\n%s -test.run=%s &\nchild=$!\nwhile [ ! -s %s ]; do sleep 0.01; done\nexit 2\n",
+		shellQuoteTestArgument(testBinary),
+		shellQuoteTestArgument("^TestSearchHelperEscapedPipeWriter$"),
+		shellQuoteTestArgument(pidPath))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, name), []byte(script), 0o700))
+	t.Cleanup(func() {
+		killProcessFromFile(t, pidPath)
+	})
+}
+
+func assertUnknownWithoutPendingResource(t *testing.T, err error) {
+	t.Helper()
+	var unknown interface{ OutcomeUnknown() bool }
+	require.ErrorAs(t, err, &unknown)
+	assert.True(t, unknown.OutcomeUnknown())
+	var pending PendingExecutionError
+	assert.False(t, errors.As(err, &pending), "the local reader joined; no truthful handle can track an escaped writer")
+}
+
+func assertNoProcessCompletionReport(t *testing.T, reported <-chan searchCompletionReport) {
+	t.Helper()
+	select {
+	case got := <-reported:
+		t.Fatalf("uncontained helper emitted positive completion proof %q", got.proof)
+	default:
+	}
 }
 
 func TestGrepJoinsFailedHelperDescendantBeforeFallback(t *testing.T) {

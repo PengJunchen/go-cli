@@ -232,13 +232,6 @@ func findWithFdManaged(ctx context.Context, searchPath, pattern, kind string, ma
 	return splitLines(string(out)), true, lifecycle, true, nil
 }
 
-// findWithFind runs `find <path> -maxdepth <n> -type <kind> -name <pattern>`.
-// ok is false when the find binary is unavailable or fails.
-func findWithFind(ctx context.Context, searchPath, pattern, kind string, maxDepth int) ([]string, bool, error) {
-	paths, ok, _, _, err := findWithFindManaged(ctx, searchPath, pattern, kind, maxDepth)
-	return paths, ok, err
-}
-
 func findWithFindManaged(ctx context.Context, searchPath, pattern, kind string, maxDepth int) ([]string, bool, managedLocalResult, bool, error) {
 	path, err := exec.LookPath("find")
 	if err != nil {

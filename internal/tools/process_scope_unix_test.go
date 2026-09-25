@@ -252,8 +252,21 @@ func TestManagedLocalCommandTracksDelayedReaderJoin(t *testing.T) {
 		t.Fatal("collect did not return after its bounded reader join")
 	}
 	assert.False(t, result.readersJoined)
+	assert.True(t, result.forcedPipeClose)
+	assert.False(t, result.containmentProven)
+	require.NotNil(t, result.executionDone, "the still-running local reader has an observable completion channel")
 	var pending PendingExecutionError
-	require.ErrorAs(t, pendingProcessErrorWithDone(errProcessCleanupUnconfirmed, true, result.executionDone), &pending)
+	require.ErrorAs(t, localLifecycleError(errProcessCleanupUnconfirmed, result), &pending)
+	assert.True(t, pending.OutcomeUnknown())
+	reported := make(chan searchCompletionReport, 1)
+	reportPreparedLocalProcessCompletion(withPreparedCompletionReporter(context.Background(), func(proof PreparedCompletionProof, done <-chan struct{}) {
+		reported <- searchCompletionReport{proof: proof, done: done}
+	}), result)
+	select {
+	case got := <-reported:
+		t.Fatalf("forced pipe close published positive completion proof %q", got.proof)
+	default:
+	}
 	select {
 	case <-pending.ExecutionDone():
 		t.Fatal("the pending resource was released before the reader joined")
@@ -268,7 +281,7 @@ func TestManagedLocalCommandTracksDelayedReaderJoin(t *testing.T) {
 	}
 }
 
-func TestManagedLocalCommandForcedCloseReaderErrorIsQuiescent(t *testing.T) {
+func TestManagedLocalCommandForcedCloseJoinsReaderWithoutProvingContainment(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	managed, err := startManagedLocalCommand(cancel, exec.Command("true"))
@@ -315,5 +328,24 @@ func TestManagedLocalCommandForcedCloseReaderErrorIsQuiescent(t *testing.T) {
 	assert.True(t, result.forcedPipeClose)
 	assert.True(t, result.readersJoined)
 	assert.ErrorIs(t, result.readerErr, os.ErrClosed)
-	assert.True(t, result.quiescent, "read errors do not mean local resources are still active")
+	assert.True(t, result.quiescent, "the owned process group, leader, and local readers have joined")
+	assert.False(t, result.containmentProven, "forced reader closure cannot prove escaped pipe writers stopped")
+	assert.Nil(t, result.executionDone, "an escaped writer cannot be represented by a false group-only completion watcher")
+
+	err = managedSearchLifecycleError(context.Background(), "test helper", result)
+	var unknown interface{ OutcomeUnknown() bool }
+	require.ErrorAs(t, err, &unknown)
+	assert.True(t, unknown.OutcomeUnknown())
+	assert.False(t, isPendingExecution(err), "joined local readers must not be misreported as an observable live resource")
+	assert.False(t, shouldFallbackAfterManagedHelper(context.Background(), err))
+
+	reported := make(chan searchCompletionReport, 1)
+	reportPreparedLocalProcessCompletion(withPreparedCompletionReporter(context.Background(), func(proof PreparedCompletionProof, done <-chan struct{}) {
+		reported <- searchCompletionReport{proof: proof, done: done}
+	}), result)
+	select {
+	case got := <-reported:
+		t.Fatalf("forced reader close published positive completion proof %q", got.proof)
+	default:
+	}
 }
