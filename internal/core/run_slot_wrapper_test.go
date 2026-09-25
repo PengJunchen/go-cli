@@ -7,9 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pengjunchen/go-cli/internal/tracing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
 type wrapperBoundaryAgent struct{}
