@@ -5,9 +5,10 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/x/ansi"
 )
 
 // ApprovalDecision is the user's verdict on a pending tool-call approval.
@@ -105,11 +106,50 @@ func approvalDetailWidth(width int) int {
 }
 
 func sanitizeApprovalText(text string) string {
-	return ansi.Strip(safeTerminalText(text))
+	var escaped strings.Builder
+	escaped.Grow(len(text))
+	for len(text) > 0 {
+		r, size := utf8.DecodeRuneInString(text)
+		if r == utf8.RuneError && size == 1 {
+			fmt.Fprintf(&escaped, "\\x%02x", text[0]) //nolint:errcheck
+			text = text[1:]
+			continue
+		}
+		if r == '\n' {
+			escaped.WriteByte('\n')
+		} else if unicode.IsControl(r) {
+			switch r {
+			case '\a':
+				escaped.WriteString(`\a`)
+			case '\b':
+				escaped.WriteString(`\b`)
+			case '\f':
+				escaped.WriteString(`\f`)
+			case '\r':
+				escaped.WriteString(`\r`)
+			case '\t':
+				escaped.WriteString(`\t`)
+			case '\v':
+				escaped.WriteString(`\v`)
+			default:
+				if r <= 0x7f {
+					fmt.Fprintf(&escaped, "\\x%02x", r) //nolint:errcheck
+				} else if r <= 0xffff {
+					fmt.Fprintf(&escaped, "\\u%04x", r) //nolint:errcheck
+				} else {
+					fmt.Fprintf(&escaped, "\\U%08x", r) //nolint:errcheck
+				}
+			}
+		} else {
+			escaped.WriteString(text[:size])
+		}
+		text = text[size:]
+	}
+	return escaped.String()
 }
 
 func approvalSingleLine(text string) string {
-	return strings.ReplaceAll(sanitizeApprovalText(text), "\n", " ")
+	return strings.ReplaceAll(sanitizeApprovalText(text), "\n", `\n`)
 }
 
 func walkApprovalDetailLines(req *ApprovalRequest, showDiff bool, width int, visit func(string)) int {
@@ -124,6 +164,14 @@ func walkApprovalDetailLines(req *ApprovalRequest, showDiff bool, width int, vis
 			}
 			lineCount++
 		}
+	}
+	toolName := approvalSingleLine(req.ToolName)
+	if cellWidth("[approval] "+toolName) > width {
+		addLine("  tool name: " + toolName)
+	}
+	requestID := approvalSingleLine(req.RequestID)
+	if requestID != "" && cellWidth("  request: "+requestID) > width {
+		addLine("  request: " + requestID)
 	}
 	if len(req.Args) == 0 {
 		addLine("  (no arguments)")
