@@ -35,6 +35,7 @@ type GoalCreateTool struct {
 }
 
 var _ ToolDefinition = (*GoalCreateTool)(nil)
+var _ Parameterized = (*GoalCreateTool)(nil)
 
 // NewGoalCreateTool returns a GoalCreateTool backed by the given GoalStore.
 func NewGoalCreateTool(store GoalStore) *GoalCreateTool {
@@ -47,6 +48,20 @@ func (t *GoalCreateTool) Name() string { return "goal_create" }
 // Description returns a brief description of the tool.
 func (t *GoalCreateTool) Description() string {
 	return "goal_create: creates a new goal. Args: title (string), description (string), success_criteria (string)."
+}
+
+// Parameters returns the JSON Schema for goal creation.
+func (*GoalCreateTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"title":            map[string]any{"type": "string"},
+			"description":      map[string]any{"type": "string"},
+			"success_criteria": map[string]any{"type": "string"},
+		},
+		"required":             []string{"title"},
+		"additionalProperties": false,
+	}
 }
 
 // Execute creates a goal using args["title"], args["description"], and
@@ -89,6 +104,7 @@ type GoalUpdateTool struct {
 }
 
 var _ ToolDefinition = (*GoalUpdateTool)(nil)
+var _ Parameterized = (*GoalUpdateTool)(nil)
 
 // NewGoalUpdateTool returns a GoalUpdateTool backed by the given GoalStore.
 func NewGoalUpdateTool(store GoalStore) *GoalUpdateTool {
@@ -101,6 +117,24 @@ func (t *GoalUpdateTool) Name() string { return "goal_update" }
 // Description returns a brief description of the tool.
 func (t *GoalUpdateTool) Description() string {
 	return "goal_update: updates a goal. Args: id (string), status (string), title (string), description (string), priority (string), success_criteria (string)."
+}
+
+// Parameters returns the JSON Schema for goal updates. The status enum lists
+// the canonical spellings accepted by the executor.
+func (*GoalUpdateTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"id":               map[string]any{"type": "string"},
+			"status":           map[string]any{"type": "string", "enum": []string{"draft", "active", "in_progress", "completed", "blocked", "abandoned"}},
+			"title":            map[string]any{"type": "string"},
+			"description":      map[string]any{"type": "string"},
+			"priority":         map[string]any{"type": "string"},
+			"success_criteria": map[string]any{"type": "string"},
+		},
+		"required":             []string{"id"},
+		"additionalProperties": false,
+	}
 }
 
 // Execute updates the goal identified by args["id"] with any provided fields.
@@ -163,6 +197,7 @@ type GoalListTool struct {
 }
 
 var _ ToolDefinition = (*GoalListTool)(nil)
+var _ Parameterized = (*GoalListTool)(nil)
 
 // NewGoalListTool returns a GoalListTool backed by the given GoalStore and
 // TaskStore. The TaskStore is used to compute progress percentages.
@@ -176,6 +211,16 @@ func (t *GoalListTool) Name() string { return "goal_list" }
 // Description returns a brief description of the tool.
 func (t *GoalListTool) Description() string {
 	return "goal_list: lists all goals with their ID, title, status, and progress percentage."
+}
+
+// Parameters returns the closed empty-object schema for listing goals.
+func (*GoalListTool) Parameters() any {
+	return map[string]any{
+		"type":                 "object",
+		"properties":           map[string]any{},
+		"required":             []string{},
+		"additionalProperties": false,
+	}
 }
 
 // Execute returns a formatted list of all goals.
@@ -228,6 +273,7 @@ type GoalGetTool struct {
 }
 
 var _ ToolDefinition = (*GoalGetTool)(nil)
+var _ Parameterized = (*GoalGetTool)(nil)
 
 // NewGoalGetTool returns a GoalGetTool backed by the given GoalStore and
 // TaskStore.
@@ -241,6 +287,18 @@ func (t *GoalGetTool) Name() string { return "goal_get" }
 // Description returns a brief description of the tool.
 func (t *GoalGetTool) Description() string {
 	return "goal_get: retrieves a goal by ID with its associated tasks. Args: id (string)."
+}
+
+// Parameters returns the JSON Schema for retrieving a goal.
+func (*GoalGetTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"id": map[string]any{"type": "string"},
+		},
+		"required":             []string{"id"},
+		"additionalProperties": false,
+	}
 }
 
 // Execute fetches the goal identified by args["id"] and its tasks.
@@ -302,6 +360,7 @@ type TaskUpdateTool struct {
 }
 
 var _ ToolDefinition = (*TaskUpdateTool)(nil)
+var _ Parameterized = (*TaskUpdateTool)(nil)
 
 // NewTaskUpdateTool returns a TaskUpdateTool backed by the given TaskStore.
 func NewTaskUpdateTool(store *TaskStore) *TaskUpdateTool {
@@ -314,6 +373,21 @@ func (t *TaskUpdateTool) Name() string { return "task_update" }
 // Description returns a brief description of the tool.
 func (t *TaskUpdateTool) Description() string {
 	return "task_update: updates a task. Args: id (string), status (string), title (string), description (string)."
+}
+
+// Parameters returns the JSON Schema for task updates.
+func (*TaskUpdateTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"id":          map[string]any{"type": "string"},
+			"status":      map[string]any{"type": "string"},
+			"title":       map[string]any{"type": "string"},
+			"description": map[string]any{"type": "string"},
+		},
+		"required":             []string{"id"},
+		"additionalProperties": false,
+	}
 }
 
 // Execute updates the task identified by args["id"] with any provided fields.

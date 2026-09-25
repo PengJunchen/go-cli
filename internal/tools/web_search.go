@@ -30,6 +30,7 @@ type WebSearchTool struct {
 }
 
 var _ ToolDefinition = (*WebSearchTool)(nil)
+var _ Parameterized = (*WebSearchTool)(nil)
 
 // NewWebSearchTool returns a WebSearchTool configured with the given options.
 // When no provider option is supplied, searches fail with
@@ -57,6 +58,18 @@ func (t *WebSearchTool) ProviderName() string {
 // Description returns a brief description of the tool.
 func (t *WebSearchTool) Description() string {
 	return "web_search: searches the web for a query and returns results. Args: query (string)."
+}
+
+// Parameters returns the JSON Schema for a web search request.
+func (*WebSearchTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"query": map[string]any{"type": "string"},
+		},
+		"required":             []string{"query"},
+		"additionalProperties": false,
+	}
 }
 
 // Execute takes args["query"] and returns formatted search results from the

@@ -60,6 +60,7 @@ type AskUserQuestionTool struct {
 }
 
 var _ ToolDefinition = (*AskUserQuestionTool)(nil)
+var _ Parameterized = (*AskUserQuestionTool)(nil)
 
 // NewAskUserQuestionTool builds an AskUserQuestionTool backed by emitter. A
 // zero timeout falls back to defaultAskTimeout at execution time.
@@ -73,6 +74,19 @@ func (t *AskUserQuestionTool) Name() string { return "ask_user" }
 // Description returns a brief description of the tool.
 func (t *AskUserQuestionTool) Description() string {
 	return "ask_user: asks the user a question and waits for the answer. Args: question (string, required), options ([]string, optional for multiple-choice)."
+}
+
+// Parameters returns the JSON Schema for asking the user a question.
+func (*AskUserQuestionTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"question": map[string]any{"type": "string"},
+			"options":  map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+		},
+		"required":             []string{"question"},
+		"additionalProperties": false,
+	}
 }
 
 // Execute extracts the question and options from call.Args, emits a
