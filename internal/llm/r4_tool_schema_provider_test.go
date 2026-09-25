@@ -107,10 +107,10 @@ func TestExtraToolSchemaMixedProviderDecodersReachPreparedExecutor(t *testing.T)
 	// Both decoders preserve malformed-for-schema array members as JSON values;
 	// validation rejects these before asking policy or emitting an HITL event.
 	openAIBad := decodeOpenAIAskUserCall(t, map[string]any{"question": "Choose", "options": []any{"red", 7}})
-	assertPreparedRejectsBeforePolicy(t, ctx, proxy, openAIBad, &policyCalls)
+	assertPreparedRejectsBeforePolicy(ctx, t, proxy, openAIBad, &policyCalls)
 	claudeBody.Store(claudeToolUseSSE(t, map[string]any{"question": "Choose", "options": []any{"red", 7}}))
 	claudeBad := decodeClaudeAskUserCall(t, claudeModel)
-	assertPreparedRejectsBeforePolicy(t, ctx, proxy, claudeBad, &policyCalls)
+	assertPreparedRejectsBeforePolicy(ctx, t, proxy, claudeBad, &policyCalls)
 	assert.Equal(t, int32(2), policyCalls.Load())
 	assert.Len(t, emitter.questions, 2, "rejected calls must not reach the executor")
 }
@@ -182,7 +182,7 @@ func claudeToolUseSSE(t *testing.T, args map[string]any) string {
 	})
 }
 
-func assertPreparedRejectsBeforePolicy(t *testing.T, ctx context.Context, proxy tools.ToolDefinition, call ToolCall, policyCalls *atomic.Int32) {
+func assertPreparedRejectsBeforePolicy(ctx context.Context, t *testing.T, proxy tools.ToolDefinition, call ToolCall, policyCalls *atomic.Int32) {
 	t.Helper()
 	args, ok := call.Args.(map[string]any)
 	require.True(t, ok)

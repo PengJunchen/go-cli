@@ -3,9 +3,10 @@ package tui
 import (
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
-	"github.com/stretchr/testify/require"
 )
 
 func TestCanonicalTranscriptSnapshotCloneIsDeepAndIndependent(t *testing.T) {

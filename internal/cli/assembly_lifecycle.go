@@ -589,7 +589,7 @@ func (s *assembleState) closeResources(ctx context.Context, idle <-chan struct{}
 	}
 
 	for i := len(s.cleanupList) - 1; i >= 0; i-- {
-		if err := safeAssemblyCleanup(s.cleanupList[i], ctx); err != nil {
+		if err := safeAssemblyCleanup(ctx, s.cleanupList[i]); err != nil {
 			if errors.Is(err, ErrAssemblyClosePanic) {
 				return errors.Join(errors.Join(errs...), err)
 			}
@@ -626,10 +626,10 @@ func (s *assembleState) closeResources(ctx context.Context, idle <-chan struct{}
 		s.modelDisposer = nil
 	}
 	if s.smallModelCleanup != nil {
-		if err := safeAssemblyCleanup(func(context.Context) error {
+		if err := safeAssemblyCleanup(ctx, func(context.Context) error {
 			s.smallModelCleanup()
 			return nil
-		}, ctx); err != nil {
+		}); err != nil {
 			if errors.Is(err, ErrAssemblyClosePanic) {
 				return errors.Join(errors.Join(errs...), err)
 			}
@@ -643,7 +643,7 @@ func assemblyCompletionUnknown(err error) bool {
 	return errors.Is(err, ErrAssemblyClientCompletionUnknown) || errors.Is(err, ErrAssemblyResourceCompletionUnknown)
 }
 
-func safeAssemblyCleanup(cleanup func(context.Context) error, ctx context.Context) (err error) {
+func safeAssemblyCleanup(ctx context.Context, cleanup func(context.Context) error) (err error) {
 	defer func() {
 		if recover() != nil {
 			err = ErrAssemblyClosePanic
