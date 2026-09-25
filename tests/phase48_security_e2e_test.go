@@ -2,7 +2,6 @@ package tests
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -629,27 +628,27 @@ func TestET_Phase48_ACPHTTP_ConstantTimeAuth(t *testing.T) {
 	base := "http://" + srv.Addr()
 
 	// 1. No auth header → 401
-	resp, err := http.Post(base+"/connect", "application/json", strings.NewReader(`{}`))
+	req := newACPHTTPConnectRequest(t, base+"/connect", acpHTTPConnectBody(t, "client-48"))
+	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 	_ = resp.Body.Close()
 
 	// 2. Wrong token → 401
-	req, _ := http.NewRequest(http.MethodPost, base+"/connect", strings.NewReader(`{}`))
+	req = newACPHTTPConnectRequest(t, base+"/connect", acpHTTPConnectBody(t, "client-48"))
 	req.Header.Set("Authorization", "Bearer wrong-token")
-	req.Header.Set("Content-Type", "application/json")
 	resp, err = http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 	_ = resp.Body.Close()
 
 	// 3. Correct token → 200
-	req, _ = http.NewRequest(http.MethodPost, base+"/connect", strings.NewReader(`{}`))
+	req = newACPHTTPConnectRequest(t, base+"/connect", acpHTTPConnectBody(t, "client-48"))
 	req.Header.Set("Authorization", "Bearer secret-token-xyz")
-	req.Header.Set("Content-Type", "application/json")
 	resp, err = http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	decodeACPHTTPConnectSession(t, resp)
 	_ = resp.Body.Close()
 }
 
@@ -669,19 +668,21 @@ func TestET_Phase48_ACPHTTP_SessionFixation(t *testing.T) {
 	base := "http://" + srv.Addr()
 
 	// Client tries to fix the session ID to "attacker-fixed-id".
-	body, _ := json.Marshal(map[string]string{
-		"sender_id": "attacker-fixed-id",
-		"type":      "connect",
-	})
-	resp, err := http.Post(base+"/connect", "application/json", bytes.NewReader(body))
+	body := acpHTTPConnectBody(t, "attacker-fixed-id")
+	request := newACPHTTPConnectRequest(t, base+"/connect", body)
+	resp, err := http.DefaultClient.Do(request)
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 
-	var result map[string]string
+	var result struct {
+		Version   string `json:"version"`
+		SessionID string `json:"session_id"`
+	}
 	require.NoError(t, json.NewDecoder(resp.Body).Decode(&result))
 
-	sessionID := result["session_id"]
+	assert.Equal(t, acp.ACPHTTPProfileV1, result.Version)
+	sessionID := result.SessionID
 	require.NotEmpty(t, sessionID, "server must return a session_id")
 	assert.NotEqual(t, "attacker-fixed-id", sessionID,
 		"server must not use client-provided sender ID as session ID")
