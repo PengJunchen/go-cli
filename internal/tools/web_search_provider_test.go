@@ -225,6 +225,102 @@ func TestBraveSearchProviderAllowsSameOriginRedirectWithNormalizedOrigin(t *test
 	assert.Nil(t, client.CheckRedirect, "the injected client must remain unchanged")
 }
 
+func TestBraveSearchProviderRedirectPolicyRejectsCallerCrossOriginMutation(t *testing.T) {
+	var dispatches int
+	redirectBody := &closeTrackingBody{reader: strings.NewReader("redirect body")}
+	transport := &braveRoundTripper{roundTrip: func(req *http.Request) (*http.Response, error) {
+		dispatches++
+		if dispatches == 1 {
+			return &http.Response{
+				StatusCode: http.StatusFound,
+				Header:     http.Header{"Location": []string{"/same-origin-hop"}},
+				Body:       redirectBody,
+				Request:    req,
+			}, nil
+		}
+		return braveJSONResponse(req), nil
+	}}
+	client := &http.Client{
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+			req.URL.Host = "attacker.example"
+			return nil
+		},
+	}
+
+	p := NewBraveSearchProvider("synthetic-review-key",
+		WithBraveSearchURL("https://search.example/search"),
+		WithBraveSearchClient(client),
+	)
+	results, err := p.Search(context.Background(), "test", SearchOptions{})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errBraveCrossOriginRedirect)
+	require.Nil(t, results)
+	assert.Equal(t, 1, dispatches, "the callback-mutated URL must be rejected before transport dispatch")
+	assert.True(t, redirectBody.closed)
+	assert.NotContains(t, err.Error(), "synthetic-review-key")
+	assert.Same(t, transport, client.Transport)
+}
+
+func TestBraveSearchProviderRedirectPolicyUsesImmutableInitialOrigin(t *testing.T) {
+	var dispatches int
+	var policyCalls int
+	firstBody := &closeTrackingBody{reader: strings.NewReader("first redirect")}
+	secondBody := &closeTrackingBody{reader: strings.NewReader("second redirect")}
+	transport := &braveRoundTripper{roundTrip: func(req *http.Request) (*http.Response, error) {
+		dispatches++
+		switch dispatches {
+		case 1:
+			return &http.Response{
+				StatusCode: http.StatusFound,
+				Header:     http.Header{"Location": []string{"/same-origin-hop"}},
+				Body:       firstBody,
+				Request:    req,
+			}, nil
+		case 2:
+			return &http.Response{
+				StatusCode: http.StatusFound,
+				Header:     http.Header{"Location": []string{"https://attacker.example/steal"}},
+				Body:       secondBody,
+				Request:    req,
+			}, nil
+		default:
+			return braveJSONResponse(req), nil
+		}
+	}}
+	client := &http.Client{
+		Transport: transport,
+		CheckRedirect: func(_ *http.Request, via []*http.Request) error {
+			policyCalls++
+			if policyCalls == 1 {
+				// A redirect callback can mutate the request history. A later
+				// hop must not use this mutable URL as the credential origin.
+				via[0].URL.Host = "attacker.example"
+			}
+			return nil
+		},
+	}
+	originalPolicy := reflect.ValueOf(client.CheckRedirect).Pointer()
+
+	p := NewBraveSearchProvider("synthetic-review-key",
+		WithBraveSearchURL("https://search.example/search"),
+		WithBraveSearchClient(client),
+	)
+	results, err := p.Search(context.Background(), "test", SearchOptions{})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errBraveCrossOriginRedirect)
+	require.Nil(t, results)
+	assert.Equal(t, 2, dispatches, "the cross-origin redirect must be rejected before transport dispatch")
+	assert.Equal(t, 1, policyCalls, "the policy must not get a chance to bless the cross-origin hop")
+	assert.True(t, firstBody.closed)
+	assert.True(t, secondBody.closed)
+	assert.NotContains(t, err.Error(), "synthetic-review-key")
+	assert.Equal(t, originalPolicy, reflect.ValueOf(client.CheckRedirect).Pointer())
+	assert.Same(t, transport, client.Transport)
+}
+
 func TestBraveSearchProviderPreservesDefaultRedirectLimit(t *testing.T) {
 	var dispatches int
 	client := &http.Client{Transport: braveRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
