@@ -184,7 +184,7 @@ func (v *transcriptViewport) SetRows(rows []transcriptViewportRow, loadedScope s
 			v.restoreAnchor(index, oldAnchor.sourceOffset)
 		} else {
 			nearest := 0
-			if hadOldAnchor && oldAnchorIndex < len(v.rows) {
+			if hadOldAnchor {
 				nearest = oldAnchorIndex
 			}
 			if nearest >= len(v.rows) {
@@ -213,10 +213,7 @@ func (v *transcriptViewport) sameRows(rows []transcriptViewportRow) bool {
 
 func (v *transcriptViewport) newTranscriptViewportRowMetadata(row transcriptViewportRow, width int) *transcriptViewportRowMetadata {
 	v.nextContentVersion++
-	count := 1
-	if width > 0 {
-		count = len(transcriptViewportSourceLineOffsets(row.text, width))
-	}
+	count := len(transcriptViewportSourceLineOffsets(row.text, width))
 	return &transcriptViewportRowMetadata{
 		key:            row.key,
 		text:           row.text,
@@ -319,6 +316,7 @@ func (v *transcriptViewport) Select(key string) bool {
 		return false
 	}
 	v.selectedKey = key
+	v.followTail = false
 	v.ensureRowVisible(index)
 	return true
 }
@@ -346,6 +344,7 @@ func (v *transcriptViewport) Search(query, afterKey string) (string, bool) {
 		safeRow, _ := transcriptViewportSafeText(v.rows[index].text)
 		if strings.Contains(strings.ToLower(safeRow), needle) {
 			v.searchHitKey = v.rows[index].key
+			v.followTail = false
 			v.ensureRowVisible(index)
 			return v.searchHitKey, true
 		}
@@ -483,8 +482,8 @@ func (v *transcriptViewport) renderRange(start, end int) {
 				continue
 			}
 		}
-		wrapped := strings.Split(transcriptViewportWrap(row.text, v.width), "\n")
-		offsets := transcriptViewportSourceLineOffsets(row.text, v.width)
+		wrappedText, offsets := transcriptViewportWrapWithOffsets(row.text, v.width)
+		wrapped := strings.Split(wrappedText, "\n")
 		for local := localStart; local < localEnd; local++ {
 			if local >= len(wrapped) {
 				break
@@ -607,37 +606,34 @@ func (v *transcriptViewport) SelectedKey() string              { return v.select
 func (v *transcriptViewport) SearchHitKey() string             { return v.searchHitKey }
 
 func transcriptViewportSourceLineOffsets(text string, width int) []int {
+	_, offsets := transcriptViewportWrapWithOffsets(text, width)
+	return offsets
+}
+
+// transcriptViewportWrapWithOffsets derives source offsets from the exact
+// wrapped string used for rendering. Hardwrap preserves every input byte and
+// only inserts line-feed bytes, so each output newline either consumes the
+// matching source newline or marks a wrap boundary at the current source byte.
+func transcriptViewportWrapWithOffsets(text string, width int) (string, []int) {
 	safe, _ := transcriptViewportSafeText(text)
-	starts := []int{0}
-	if width <= 0 || safe == "" {
-		return starts
+	wrapped := safe
+	if width > 0 {
+		wrapped = ansi.GraphemeWidth.Hardwrap(safe, width, true)
 	}
 
-	state := ansi.NormalState
-	column := 0
-	consumed := 0
-	for len(safe) > 0 {
-		seq, seqWidth, n, nextState := ansi.GraphemeWidth.DecodeSequenceInString(safe, state, nil)
-		if n <= 0 {
-			n = 1
-			seqWidth = 0
-			nextState = ansi.NormalState
-		}
-		if seq == "\n" {
-			starts = append(starts, consumed+n)
-			column = 0
-		} else if nextState == ansi.NormalState && !isTerminalSequence(seq) && seqWidth > 0 {
-			if column > 0 && column+seqWidth > width {
-				starts = append(starts, consumed)
-				column = 0
+	starts := []int{0}
+	sourceOffset := 0
+	for i := 0; i < len(wrapped); i++ {
+		if wrapped[i] == '\n' {
+			if sourceOffset < len(safe) && safe[sourceOffset] == '\n' {
+				sourceOffset++
 			}
-			column += seqWidth
+			starts = append(starts, sourceOffset)
+			continue
 		}
-		consumed += n
-		safe = safe[n:]
-		state = nextState
+		sourceOffset++
 	}
-	return starts
+	return wrapped, starts
 }
 
 func transcriptViewportSafeOffset(text string, offset int) int {
@@ -678,18 +674,12 @@ func transcriptViewportSafeText(text string) (string, bool) {
 	return safeTerminalText(text), false
 }
 
-// transcriptViewportWrap uses the same grapheme-aware ANSI hard wrapper as
-// wrapCellText after the input has been proven safe. Rich/control text is sent
-// through wrapCellText so the established sanitizer remains authoritative.
+// transcriptViewportWrap exposes the sanitized hard-wrap string used by the
+// viewport. transcriptViewportWrapWithOffsets derives layout metadata from
+// that same string so rendering and source positions cannot diverge.
 func transcriptViewportWrap(text string, width int) string {
-	if width <= 0 {
-		safe, _ := transcriptViewportSafeText(text)
-		return safe
-	}
-	if transcriptViewportIsSafePlainText(text) {
-		return ansi.GraphemeWidth.Hardwrap(text, width, true)
-	}
-	return wrapCellText(text, width)
+	wrapped, _ := transcriptViewportWrapWithOffsets(text, width)
+	return wrapped
 }
 
 func transcriptViewportIsSafePlainText(text string) bool {
