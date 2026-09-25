@@ -1,9 +1,11 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -97,10 +99,12 @@ func TestReadBoundedProviderBodySanitizesAndPreservesReadCloseCauses(t *testing.
 		closeErr: closeCause,
 	}
 
-	_, _, readErr, closeErr := readBoundedProviderBody(body, 16)
+	data, truncated, readErr, closeErr := readBoundedProviderBody(body, 16)
 
 	require.Error(t, readErr)
 	require.Error(t, closeErr)
+	assert.Equal(t, "partial", string(data))
+	assert.False(t, truncated)
 	assert.ErrorIs(t, readErr, readCause)
 	assert.ErrorIs(t, closeErr, closeCause)
 	assert.NotContains(t, readErr.Error(), canary)
@@ -132,6 +136,88 @@ func TestHTTPChatModelJoinsSanitizedReadAndCloseFailures(t *testing.T) {
 	assert.ErrorIs(t, err, closeCause)
 	assert.NotContains(t, err.Error(), canary)
 	assert.Equal(t, 1, body.closeCount)
+}
+
+func TestHTTPStatusSurvivesErrorBodyReadFailure(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	canary := newLLMTestCredentialCanary(t)
+	var logs bytes.Buffer
+	originalLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(originalLogger) })
+
+	for _, tc := range []struct {
+		name        string
+		status      int
+		prefix      string
+		wantMessage string
+		wantType    ErrorType
+		modelKind   string
+	}{
+		{name: "401 compatible generate", status: http.StatusUnauthorized, prefix: canary + " partial auth diagnostic", wantMessage: canary + " partial auth diagnostic", wantType: ErrTypeAuth, modelKind: "compatible-generate"},
+		{name: "401 native generate", status: http.StatusUnauthorized, prefix: canary + " partial auth diagnostic", wantMessage: canary + " partial auth diagnostic", wantType: ErrTypeAuth, modelKind: "native-generate"},
+		{name: "401 native stream", status: http.StatusUnauthorized, prefix: canary + " partial auth diagnostic", wantMessage: canary + " partial auth diagnostic", wantType: ErrTypeAuth, modelKind: "native-stream"},
+		{name: "400 compatible generate", status: http.StatusBadRequest, prefix: "context_length_exceeded " + canary + " partial overflow diagnostic", wantMessage: "context_length_exceeded " + canary + " partial overflow diagnostic", wantType: ErrTypeOverflow, modelKind: "compatible-generate"},
+		{name: "400 native generate", status: http.StatusBadRequest, prefix: "context_length_exceeded " + canary + " partial overflow diagnostic", wantMessage: "context_length_exceeded " + canary + " partial overflow diagnostic", wantType: ErrTypeOverflow, modelKind: "native-generate"},
+		{name: "400 native stream", status: http.StatusBadRequest, prefix: "context_length_exceeded " + canary + " partial overflow diagnostic", wantMessage: "context_length_exceeded " + canary + " partial overflow diagnostic", wantType: ErrTypeOverflow, modelKind: "native-stream"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			readCause := errors.New("provider diagnostic read failed: " + canary)
+			closeCause := errors.New("provider diagnostic close failed: " + canary)
+			body := &trackedProviderBody{
+				reader:   &providerBodyErrorReader{data: []byte(tc.prefix), err: readCause},
+				closeErr: closeCause,
+			}
+			client := &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{
+					StatusCode:    tc.status,
+					Header:        make(http.Header),
+					Body:          body,
+					Request:       req,
+					ContentLength: -1,
+				}, nil
+			})}
+
+			var model BaseChatModel
+			switch tc.modelKind {
+			case "compatible-generate":
+				var err error
+				model, _, err = NewEinoProvider(WithHTTPClient(client)).Build(context.Background(), ModelConfig{Model: "m"})
+				require.NoError(t, err)
+			case "native-generate", "native-stream":
+				var err error
+				model, _, err = NewOpenAIProvider(WithNativeHTTPClient(client)).Build(context.Background(), ModelConfig{Model: "m"})
+				require.NoError(t, err)
+			default:
+				t.Fatalf("unknown model kind %q", tc.modelKind)
+			}
+
+			var err error
+			if tc.modelKind == "native-stream" {
+				chunks, streamErr := model.Stream(context.Background(), nil)
+				err = streamErr
+				require.NotNil(t, chunks)
+				_, open := <-chunks
+				assert.False(t, open)
+			} else {
+				_, err = model.Generate(context.Background(), nil)
+			}
+
+			require.Error(t, err)
+			var providerErr *ProviderError
+			require.ErrorAs(t, err, &providerErr)
+			assert.Equal(t, tc.status, providerErr.StatusCode)
+			assert.Equal(t, tc.wantType, providerErr.ErrorType)
+			assert.Equal(t, tc.wantMessage, providerErr.Message)
+			assert.LessOrEqual(t, len(providerErr.Message), maxProviderErrorBodyBytes)
+			assert.ErrorIs(t, err, readCause)
+			assert.ErrorIs(t, err, closeCause)
+			assert.Equal(t, categoryFatal, classifyError(err))
+			assert.NotContains(t, err.Error(), canary)
+			assert.Equal(t, 1, body.closeCount)
+		})
+	}
+	assert.NotContains(t, logs.String(), canary)
 }
 
 func TestHTTPChatModelSanitizesReadAndClosePanics(t *testing.T) {

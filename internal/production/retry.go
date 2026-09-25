@@ -129,6 +129,9 @@ func (p *DefaultRetryPolicy) Classify(err error) ErrorCategory {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return ErrorFatal
 	}
+	if errors.Is(err, llm.ErrProviderResponseTooLarge) {
+		return ErrorFatal
+	}
 	var c categorized
 	if errors.As(err, &c) {
 		return c.ErrorCategory()

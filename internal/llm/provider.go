@@ -518,7 +518,9 @@ func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadClos
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		payload, truncated, readErr, closeErr := readBoundedProviderBody(resp.Body, maxProviderErrorBodyBytes)
 		if readErr != nil {
-			return nil, errors.Join(fmt.Errorf("llm: read error response: %w", readErr), closeErr)
+			providerErr := newProviderError(resp.StatusCode, m.provider.name, string(payload))
+			providerErr.BodyTruncated = truncated
+			return nil, errors.Join(providerErr, fmt.Errorf("llm: read error response: %w", readErr), closeErr)
 		}
 		providerErr := newProviderError(resp.StatusCode, m.provider.name, string(payload))
 		providerErr.BodyTruncated = truncated
