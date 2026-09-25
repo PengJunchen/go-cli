@@ -1,8 +1,8 @@
 package mcp
 
 import (
-	"bufio"
 	"context"
+	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,8 +12,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,54 +25,32 @@ import (
 )
 
 // ---------------------------------------------------------------------------
-// extractSSEData unit tests
+// Streamable HTTP SSE envelope tests
 // ---------------------------------------------------------------------------
 
-func TestExtractSSEData(t *testing.T) {
+func TestReadSSEResponseParsesEachEvent(t *testing.T) {
 	t.Parallel()
-
-	tests := []struct {
-		name  string
-		input string
-		want  string
-	}{
-		{
-			name:  "single data line",
-			input: "id:1\nevent:message\ndata:{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}\n\n",
-			want:  "{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"ok\":true}}",
-		},
-		{
-			name:  "multiple data lines concatenated",
-			input: "data:{\"a\":1,\ndata:\"b\":2}\n\n",
-			want:  "{\"a\":1,\"b\":2}",
-		},
-		{
-			name:  "empty data lines skipped",
-			input: "data:\ndata:{\"ok\":true}\ndata:\n\n",
-			want:  "{\"ok\":true}",
-		},
-		{
-			name:  "CRLF line endings",
-			input: "id:1\r\nevent:message\r\ndata:{\"jsonrpc\":\"2.0\"}\r\n\r\n",
-			want:  "{\"jsonrpc\":\"2.0\"}",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			assert.Equal(t, tc.want, string(extractSSEData([]byte(tc.input))))
-		})
-	}
+	input := "id:progress-1\nevent:message\ndata:{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{}}\n\n" +
+		"id:response-2\nevent:message\ndata:{\"jsonrpc\":\"2.0\",\ndata:\"id\":7,\"result\":{\"ok\":true}}\n\n"
+	result, cursor, err := readSSEResponse(strings.NewReader(input), 7)
+	require.NoError(t, err)
+	assert.Equal(t, "response-2", cursor)
+	assert.Equal(t, true, result["ok"])
 }
 
-func TestExtractSSEDataPlainJSONPassedThrough(t *testing.T) {
+func TestSameHTTPOriginNormalizesHostAndEffectivePort(t *testing.T) {
 	t.Parallel()
-	// Plain JSON contains no "data:" lines, so the fallback returns the raw
-	// input unchanged. In production request() never calls extractSSEData for
-	// this case (it short-circuits when raw[0] == '{').
-	in := []byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"echo"}]}}`)
-	assert.Equal(t, string(in), string(extractSSEData(in)))
+	parse := func(raw string) *url.URL {
+		t.Helper()
+		parsed, err := url.Parse(raw)
+		require.NoError(t, err)
+		return parsed
+	}
+
+	assert.True(t, sameHTTPOrigin(parse("http://example.test"), parse("HTTP://EXAMPLE.TEST:080/path")))
+	assert.True(t, sameHTTPOrigin(parse("https://example.test"), parse("https://example.test:443/path")))
+	assert.False(t, sameHTTPOrigin(parse("http://example.test"), parse("https://example.test")))
+	assert.False(t, sameHTTPOrigin(parse("http://example.test"), parse("http://example.test:81")))
 }
 
 // ---------------------------------------------------------------------------
@@ -91,20 +69,19 @@ func TestTruncate(t *testing.T) {
 // httptest helpers for HTTPClientAdapter integration tests
 // ---------------------------------------------------------------------------
 
-// newHTTPMCPServer starts an httptest server speaking JSON-RPC over HTTP.
-// GET (the Connect handshake) always returns getStatus with an empty body;
-// POST responds to tools/list and tools/call, either as plain JSON or wrapped
-// in an SSE frame depending on sse.
-func newHTTPMCPServer(t *testing.T, getStatus int, sse bool) *httptest.Server {
+// newHTTPMCPServer starts an httptest peer speaking the 2025-06-18 Streamable
+// HTTP lifecycle. GET is offered only for explicit resume requests.
+func newHTTPMCPServer(t *testing.T, sse bool) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.Method {
 		case http.MethodGet:
-			w.WriteHeader(getStatus)
+			w.Header().Set("Content-Type", "text/event-stream")
+			w.WriteHeader(http.StatusMethodNotAllowed)
 		case http.MethodPost:
 			var req struct {
-				ID     int64  `json:"id"`
-				Method string `json:"method"`
+				ID     json.RawMessage `json:"id"`
+				Method string          `json:"method"`
 			}
 			body, err := io.ReadAll(r.Body)
 			if err != nil {
@@ -113,6 +90,13 @@ func newHTTPMCPServer(t *testing.T, getStatus int, sse bool) *httptest.Server {
 			}
 			if unmarshalErr := json.Unmarshal(body, &req); unmarshalErr != nil {
 				http.Error(w, unmarshalErr.Error(), http.StatusBadRequest)
+				return
+			}
+			if req.Method == "notifications/initialized" {
+				if len(req.ID) != 0 {
+					t.Errorf("initialized notification unexpectedly has id %s", req.ID)
+				}
+				w.WriteHeader(http.StatusAccepted)
 				return
 			}
 
@@ -124,8 +108,6 @@ func newHTTPMCPServer(t *testing.T, getStatus int, sse bool) *httptest.Server {
 					"capabilities":    map[string]any{},
 					"serverInfo":      map[string]any{"name": "test", "version": "1.0"},
 				}
-			case "notifications/initialized":
-				result = map[string]any{}
 			case "tools/list":
 				result = map[string]any{
 					"tools": []map[string]any{
@@ -165,12 +147,402 @@ func newHTTPMCPServer(t *testing.T, getStatus int, sse bool) *httptest.Server {
 	return srv
 }
 
+func newHTTPTestCanary(t *testing.T) string {
+	t.Helper()
+	value := make([]byte, 32)
+	_, err := rand.Read(value)
+	require.NoError(t, err)
+	return hex.EncodeToString(value)
+}
+
 func newHTTPTestAdapter(srv *httptest.Server) *HTTPClientAdapter {
 	return NewHTTPClientAdapter(MCPServerConfig{
 		Name:      "srv",
 		Transport: MCPTransportStreamableHTTP,
 		URL:       srv.URL,
 	})
+}
+
+func writeHTTPMCPJSONRPCResponse(w http.ResponseWriter, id json.RawMessage, result any) {
+	w.Header().Set("Content-Type", "application/json")
+	frame := map[string]any{"jsonrpc": "2.0", "id": id, "result": result}
+	_ = json.NewEncoder(w).Encode(frame)
+}
+
+func decodeHTTPMCPRequest(r *http.Request) (string, json.RawMessage, json.RawMessage, error) {
+	var envelope map[string]json.RawMessage
+	if err := json.NewDecoder(r.Body).Decode(&envelope); err != nil {
+		return "", nil, nil, err
+	}
+	var method string
+	if err := json.Unmarshal(envelope["method"], &method); err != nil {
+		return "", nil, nil, err
+	}
+	return method, envelope["id"], envelope["params"], nil
+}
+
+func TestMCP20250618StreamableHTTPHeaders(t *testing.T) {
+	t.Parallel()
+
+	const sessionID = "session-test-20250618"
+	var seenMu sync.Mutex
+	var seen []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			t.Errorf("unexpected unsolicited GET %s", r.URL.Path)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		if r.Method == http.MethodDelete {
+			seenMu.Lock()
+			seen = append(seen, "DELETE")
+			seenMu.Unlock()
+			assert.Equal(t, LatestProtocolVersion, r.Header.Get("MCP-Protocol-Version"))
+			assert.Equal(t, sessionID, r.Header.Get("Mcp-Session-Id"))
+			w.WriteHeader(http.StatusMethodNotAllowed) // A server may decline remote teardown.
+			return
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("unexpected method %q", r.Method)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
+		assert.Contains(t, r.Header.Get("Accept"), "application/json")
+		assert.Contains(t, r.Header.Get("Accept"), "text/event-stream")
+		method, id, paramsRaw, err := decodeHTTPMCPRequest(r)
+		if err != nil {
+			t.Errorf("decode POST request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		seenMu.Lock()
+		seen = append(seen, method)
+		seenMu.Unlock()
+		switch method {
+		case "initialize":
+			assert.Empty(t, r.Header.Get("MCP-Protocol-Version"), "initialize has no negotiated protocol header yet")
+			assert.Empty(t, r.Header.Get("Mcp-Session-Id"), "initialize has no session header yet")
+			var params map[string]json.RawMessage
+			_ = json.Unmarshal(paramsRaw, &params)
+			var requestedVersion string
+			_ = json.Unmarshal(params["protocolVersion"], &requestedVersion)
+			assert.Equal(t, "2025-06-18", requestedVersion)
+			w.Header().Set("Mcp-Session-Id", sessionID)
+			writeHTTPMCPJSONRPCResponse(w, id, map[string]any{
+				"protocolVersion": LatestProtocolVersion,
+				"capabilities":    map[string]any{},
+				"serverInfo":      map[string]any{"name": "wire-test", "version": "1"},
+			})
+		case "notifications/initialized":
+			assert.Empty(t, id, "initialized must be a JSON-RPC notification without id")
+			assert.Equal(t, LatestProtocolVersion, r.Header.Get("MCP-Protocol-Version"))
+			assert.Equal(t, sessionID, r.Header.Get("Mcp-Session-Id"))
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/list":
+			assert.NotEmpty(t, id)
+			assert.Equal(t, LatestProtocolVersion, r.Header.Get("MCP-Protocol-Version"))
+			assert.Equal(t, sessionID, r.Header.Get("Mcp-Session-Id"))
+			writeHTTPMCPJSONRPCResponse(w, id, map[string]any{"tools": []any{}})
+		default:
+			t.Errorf("unexpected JSON-RPC method %q", method)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	adapter := newHTTPTestAdapter(srv)
+	// Stale config values must not override negotiation-owned protocol headers.
+	adapter.cfg.Headers = map[string]string{
+		"MCP-Protocol-Version": "old-version",
+		"Mcp-Session-Id":       "old-session",
+	}
+	require.NoError(t, adapter.Connect(context.Background()))
+	assert.Equal(t, LatestProtocolVersion, adapter.ProtocolVersion())
+	_, err := adapter.ListTools(context.Background())
+	require.NoError(t, err)
+	require.NoError(t, adapter.Disconnect(context.Background()))
+	seenMu.Lock()
+	defer seenMu.Unlock()
+	assert.Equal(t, []string{"initialize", "notifications/initialized", "tools/list", "DELETE"}, seen)
+}
+
+func TestMCP20250618SSEFramesAndResume(t *testing.T) {
+	t.Parallel()
+
+	const sessionID = "session-sse-resume"
+	var toolCalls atomic.Int32
+	var resumeRequests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			resumeRequests.Add(1)
+			assert.Equal(t, "text/event-stream", r.Header.Get("Accept"))
+			assert.Equal(t, "cursor-call-2", r.Header.Get("Last-Event-ID"))
+			assert.Equal(t, LatestProtocolVersion, r.Header.Get("MCP-Protocol-Version"))
+			assert.Equal(t, sessionID, r.Header.Get("Mcp-Session-Id"))
+			var id json.RawMessage
+			id = json.RawMessage("2")
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprintf(w, "id: replayed\nevent: message\ndata:{\"jsonrpc\":\"2.0\",\"id\":%s,\"result\":{\"content\":\"resumed\"}}\n\n", id)
+			return
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("unexpected method %q", r.Method)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		method, id, _, err := decodeHTTPMCPRequest(r)
+		if err != nil {
+			t.Errorf("decode POST request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		switch method {
+		case "initialize":
+			w.Header().Set("Mcp-Session-Id", sessionID)
+			writeHTTPMCPJSONRPCResponse(w, id, map[string]any{
+				"protocolVersion": LatestProtocolVersion,
+				"capabilities":    map[string]any{},
+				"serverInfo":      map[string]any{"name": "wire-test", "version": "1"},
+			})
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/list":
+			assert.Equal(t, LatestProtocolVersion, r.Header.Get("MCP-Protocol-Version"))
+			assert.Equal(t, sessionID, r.Header.Get("Mcp-Session-Id"))
+			w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
+			_, _ = io.WriteString(w, "id: progress-1\nevent: message\ndata:{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progress\":1}}\n\n")
+			response := fmt.Sprintf("{\"jsonrpc\":\"2.0\",\n\"id\":%s,\"result\":{\"tools\":[{\"name\":\"echo\"}]}}", id)
+			lines := strings.Split(response, "\n")
+			_, _ = fmt.Fprintf(w, "id: list-response\nevent: message\ndata:%s\ndata:%s\n\n", lines[0], lines[1])
+		case "tools/call":
+			toolCalls.Add(1)
+			payload := "id: cursor-call-1\nevent: message\ndata:{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progress\":2}}\n\n" +
+				"id: cursor-call-2\nevent: message\ndata:{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{\"progress\":3}}\n\n"
+			hijacker, ok := w.(http.Hijacker)
+			if !ok {
+				t.Errorf("HTTP hijacking unavailable for interruption fixture")
+				return
+			}
+			conn, _, err := hijacker.Hijack()
+			if err != nil {
+				t.Errorf("hijack response stream: %v", err)
+				return
+			}
+			_, _ = fmt.Fprintf(conn, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n%x\r\n%s\r\n", len(payload), payload)
+			_ = conn.Close() // Deliberately omit the terminal zero chunk.
+			// The POST stream is interrupted after ID-bearing events but before
+			// its response. The client may resume, but must not replay POST.
+		default:
+			t.Errorf("unexpected JSON-RPC method %q", method)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	adapter := newHTTPTestAdapter(srv)
+	require.NoError(t, adapter.Connect(context.Background()))
+	tools, err := adapter.ListTools(context.Background())
+	require.NoError(t, err)
+	require.Len(t, tools, 1)
+	assert.Equal(t, "echo", tools[0].Name)
+
+	result, err := adapter.CallTool(context.Background(), "echo", map[string]any{})
+	require.NoError(t, err)
+	assert.Equal(t, "resumed", result.Content)
+	assert.EqualValues(t, 1, toolCalls.Load(), "resumption must not replay tools/call")
+	assert.EqualValues(t, 1, resumeRequests.Load())
+}
+
+func TestMCP20250618RejectsOAuthBeforeNetwork(t *testing.T) {
+	t.Parallel()
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusUnauthorized)
+	}))
+	t.Cleanup(srv.Close)
+	adapter := NewHTTPClientAdapter(MCPServerConfig{
+		Name:      "srv",
+		Transport: MCPTransportStreamableHTTP,
+		URL:       srv.URL,
+		OAuthConfig: &OAuthConfig{
+			AuthorizationURL: "https://auth.invalid/authorize",
+			TokenURL:         "https://auth.invalid/token",
+		},
+	})
+	err := adapter.Connect(context.Background())
+	require.Error(t, err)
+	assert.Zero(t, requests.Load(), "unsupported OAuth must be rejected before network access")
+}
+
+func TestMCP20250618RejectsVersionContentTypeAndInvalidSession(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name           string
+		protocol       string
+		contentType    string
+		sessionID      string
+		wantContentErr bool
+	}{
+		{name: "version mismatch", protocol: "2025-03-26", contentType: "application/json"},
+		{name: "unsupported content type", protocol: streamableHTTPProtocolVersion, contentType: "text/plain", wantContentErr: true},
+		{name: "invalid session id", protocol: streamableHTTPProtocolVersion, contentType: "application/json", sessionID: "bad session"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			var initialized atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost {
+					t.Errorf("unexpected method %q", r.Method)
+					w.WriteHeader(http.StatusMethodNotAllowed)
+					return
+				}
+				method, id, _, err := decodeHTTPMCPRequest(r)
+				if err != nil {
+					t.Errorf("decode MCP request: %v", err)
+					w.WriteHeader(http.StatusBadRequest)
+					return
+				}
+				if method == "notifications/initialized" {
+					initialized.Add(1)
+					w.WriteHeader(http.StatusAccepted)
+					return
+				}
+				if tt.sessionID != "" {
+					w.Header().Set("Mcp-Session-Id", tt.sessionID)
+				}
+				w.Header().Set("Content-Type", tt.contentType)
+				frame := map[string]any{"jsonrpc": "2.0", "id": id, "result": map[string]any{
+					"protocolVersion": tt.protocol,
+					"capabilities":    map[string]any{},
+				}}
+				_ = json.NewEncoder(w).Encode(frame)
+			}))
+			t.Cleanup(srv.Close)
+
+			adapter := newHTTPTestAdapter(srv)
+			err := adapter.Connect(context.Background())
+			require.Error(t, err)
+			var protocolErr *HTTPProtocolError
+			assert.ErrorAs(t, err, &protocolErr)
+			if tt.wantContentErr {
+				assert.Contains(t, err.Error(), "Content-Type")
+			}
+			assert.Zero(t, initialized.Load(), "failed initialization must not send notifications/initialized")
+			assert.Empty(t, adapter.ProtocolVersion())
+		})
+	}
+}
+
+func TestMCP20250618RejectsSessionChangeAndMalformedSSEWithoutResume(t *testing.T) {
+	t.Run("session ID cannot change after initialize", func(t *testing.T) {
+		const firstSession = "session-initial"
+		const changedSession = "session-changed"
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method != http.MethodPost {
+				t.Errorf("unexpected method %q", r.Method)
+				w.WriteHeader(http.StatusMethodNotAllowed)
+				return
+			}
+			method, id, _, err := decodeHTTPMCPRequest(r)
+			if err != nil {
+				t.Errorf("decode MCP request: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			switch method {
+			case "initialize":
+				w.Header().Set("Mcp-Session-Id", firstSession)
+				writeHTTPMCPJSONRPCResponse(w, id, map[string]any{"protocolVersion": streamableHTTPProtocolVersion})
+			case "notifications/initialized":
+				w.WriteHeader(http.StatusAccepted)
+			case "tools/list":
+				assert.Equal(t, firstSession, r.Header.Get("Mcp-Session-Id"))
+				w.Header().Set("Mcp-Session-Id", changedSession)
+				writeHTTPMCPJSONRPCResponse(w, id, map[string]any{"tools": []any{}})
+			default:
+				t.Errorf("unexpected method %q", method)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		adapter := newHTTPTestAdapter(srv)
+		require.NoError(t, adapter.Connect(context.Background()))
+		_, err := adapter.ListTools(context.Background())
+		require.Error(t, err)
+		var protocolErr *HTTPProtocolError
+		assert.ErrorAs(t, err, &protocolErr)
+	})
+
+	t.Run("malformed SSE with cursor does not resume", func(t *testing.T) {
+		var resumes atomic.Int32
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodGet {
+				resumes.Add(1)
+				w.Header().Set("Content-Type", "text/event-stream")
+				return
+			}
+			method, id, _, err := decodeHTTPMCPRequest(r)
+			if err != nil {
+				t.Errorf("decode MCP request: %v", err)
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			switch method {
+			case "initialize":
+				writeHTTPMCPJSONRPCResponse(w, id, map[string]any{"protocolVersion": streamableHTTPProtocolVersion})
+			case "notifications/initialized":
+				w.WriteHeader(http.StatusAccepted)
+			case "tools/list":
+				w.Header().Set("Content-Type", "text/event-stream")
+				_, _ = io.WriteString(w, "id: valid-cursor\ndata:{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{}}\n\n")
+				_, _ = io.WriteString(w, "id: malformed-event\ndata:not-json\n\n")
+			default:
+				t.Errorf("unexpected method %q", method)
+			}
+		}))
+		t.Cleanup(srv.Close)
+		adapter := newHTTPTestAdapter(srv)
+		require.NoError(t, adapter.Connect(context.Background()))
+		_, err := adapter.ListTools(context.Background())
+		require.Error(t, err)
+		assert.Zero(t, resumes.Load(), "protocol failure must not resume a stream")
+	})
+}
+
+func TestMCP20250618RedirectCallbackCannotChangeOrigin(t *testing.T) {
+	t.Parallel()
+	var foreignRequests atomic.Int32
+	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		foreignRequests.Add(1)
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	t.Cleanup(foreign.Close)
+	foreignURL, err := url.Parse(foreign.URL)
+	require.NoError(t, err)
+
+	configured := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			http.Redirect(w, r, "/redirect-target", http.StatusTemporaryRedirect)
+			return
+		}
+		w.WriteHeader(http.StatusBadRequest)
+	}))
+	t.Cleanup(configured.Close)
+	client := &http.Client{CheckRedirect: func(next *http.Request, _ []*http.Request) error {
+		*next.URL = *foreignURL
+		return nil
+	}}
+	adapter := NewHTTPClientAdapterWithClient(MCPServerConfig{
+		Name:      "srv",
+		Transport: MCPTransportStreamableHTTP,
+		URL:       configured.URL + "/start",
+	}, client)
+	err = adapter.Connect(context.Background())
+	require.Error(t, err)
+	assert.Zero(t, foreignRequests.Load(), "post-callback origin validation must run before sending redirected credentials/request")
 }
 
 type roundTripperFunc func(*http.Request) (*http.Response, error)
@@ -185,10 +557,8 @@ func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func TestHTTPAdapterConnectStreamableHTTP(t *testing.T) {
 	t.Parallel()
-	// A streamable HTTP server never emits the SSE "event: endpoint" frame on
-	// the initial GET; Connect must still succeed and fall back to the URL as
-	// the direct POST endpoint.
-	srv := newHTTPMCPServer(t, http.StatusOK, false)
+	// Initialization starts with a direct POST to the configured endpoint.
+	srv := newHTTPMCPServer(t, false)
 	adapter := newHTTPTestAdapter(srv)
 
 	require.NoError(t, adapter.Connect(context.Background()))
@@ -196,98 +566,28 @@ func TestHTTPAdapterConnectStreamableHTTP(t *testing.T) {
 	assert.True(t, adapter.connected)
 }
 
-func TestHTTPAdapterRejectsCrossOriginSSEEndpointBeforeCredentials(t *testing.T) {
+func TestHTTPAdapterRejectsLegacySSETransportBeforeNetwork(t *testing.T) {
 	t.Parallel()
-	headerCanary, err := generateOAuthState()
-	require.NoError(t, err)
-	bearerCanary, err := generateOAuthState()
-	require.NoError(t, err)
-
-	foreignRequests := make(chan http.Header, 1)
-	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		foreignRequests <- r.Header.Clone()
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
 		w.WriteHeader(http.StatusOK)
 	}))
-	t.Cleanup(foreign.Close)
-
-	configuredHeaders := make(chan http.Header, 1)
-	configured := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		select {
-		case configuredHeaders <- r.Header.Clone():
-		default:
-		}
-		_, _ = fmt.Fprintf(w, "event: endpoint\ndata: %s\n\n", foreign.URL)
-	}))
-	t.Cleanup(configured.Close)
-
-	adapter := NewHTTPClientAdapter(MCPServerConfig{
-		Name:        "srv",
-		Transport:   MCPTransportSSE,
-		URL:         configured.URL,
-		Headers:     map[string]string{"X-MCP-Canary": headerCanary},
-		BearerToken: bearerCanary,
-	})
-	err = adapter.Connect(context.Background())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "origin")
-
-	select {
-	case got := <-configuredHeaders:
-		assert.Equal(t, headerCanary, got.Get("X-MCP-Canary"))
-		assert.Equal(t, "Bearer "+bearerCanary, got.Get("Authorization"))
-	default:
-		t.Fatal("configured MCP endpoint did not receive the handshake request")
-	}
-	select {
-	case got := <-foreignRequests:
-		t.Fatalf("foreign MCP endpoint received request with canary header %q and authorization %q", got.Get("X-MCP-Canary"), got.Get("Authorization"))
-	default:
-	}
-}
-
-func TestHTTPAdapterRejectsCrossOriginSSEEndpointWithOAuthToken(t *testing.T) {
-	t.Parallel()
-	headerCanary, err := generateOAuthState()
-	require.NoError(t, err)
-	oauthCanary, err := generateOAuthState()
-	require.NoError(t, err)
-
-	var foreignRequests atomic.Int32
-	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		foreignRequests.Add(1)
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(foreign.Close)
-
-	configured := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = fmt.Fprintf(w, "event: endpoint\ndata: %s\n\n", foreign.URL)
-	}))
-	t.Cleanup(configured.Close)
-
+	t.Cleanup(srv.Close)
 	adapter := NewHTTPClientAdapter(MCPServerConfig{
 		Name:      "srv",
 		Transport: MCPTransportSSE,
-		URL:       configured.URL,
-		Headers:   map[string]string{"X-MCP-Canary": headerCanary},
-		OAuthConfig: &OAuthConfig{
-			AuthorizationURL: "http://auth.example/authorize",
-			TokenURL:         "http://auth.example/token",
-		},
+		URL:       srv.URL,
 	})
-	adapter.token = oauthCanary
-
-	err = adapter.Connect(context.Background())
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "origin")
-	assert.Zero(t, foreignRequests.Load(), "foreign MCP endpoint must receive no OAuth or header credentials")
+	err := adapter.Connect(context.Background())
+	require.ErrorIs(t, err, ErrUnsupportedHTTPTransport)
+	assert.Zero(t, requests.Load(), "legacy endpoint probing is not part of this transport")
 }
 
 func TestHTTPAdapterRejectsCrossOriginRedirectBeforeCredentials(t *testing.T) {
 	t.Parallel()
-	headerCanary, err := generateOAuthState()
-	require.NoError(t, err)
-	bearerCanary, err := generateOAuthState()
-	require.NoError(t, err)
+	headerCanary := newHTTPTestCanary(t)
+	bearerCanary := newHTTPTestCanary(t)
 
 	var foreignRequests atomic.Int32
 	foreign := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -297,7 +597,7 @@ func TestHTTPAdapterRejectsCrossOriginRedirectBeforeCredentials(t *testing.T) {
 	t.Cleanup(foreign.Close)
 
 	configured := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
+		if r.Method == http.MethodPost {
 			http.Redirect(w, r, foreign.URL, http.StatusTemporaryRedirect)
 			return
 		}
@@ -307,12 +607,12 @@ func TestHTTPAdapterRejectsCrossOriginRedirectBeforeCredentials(t *testing.T) {
 
 	adapter := NewHTTPClientAdapter(MCPServerConfig{
 		Name:        "srv",
-		Transport:   MCPTransportSSE,
+		Transport:   MCPTransportStreamableHTTP,
 		URL:         configured.URL,
 		Headers:     map[string]string{"X-MCP-Canary": headerCanary},
 		BearerToken: bearerCanary,
 	})
-	err = adapter.Connect(context.Background())
+	err := adapter.Connect(context.Background())
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "redirect")
 	assert.Zero(t, foreignRequests.Load(), "foreign redirect target must receive no request")
@@ -320,10 +620,8 @@ func TestHTTPAdapterRejectsCrossOriginRedirectBeforeCredentials(t *testing.T) {
 
 func TestHTTPAdapterAllowsSameOriginRedirectWithCredentials(t *testing.T) {
 	t.Parallel()
-	headerCanary, err := generateOAuthState()
-	require.NoError(t, err)
-	bearerCanary, err := generateOAuthState()
-	require.NoError(t, err)
+	headerCanary := newHTTPTestCanary(t)
+	bearerCanary := newHTTPTestCanary(t)
 
 	var redirectedRequests atomic.Int32
 	var missingCredentials atomic.Int32
@@ -340,11 +638,6 @@ func TestHTTPAdapterAllowsSameOriginRedirectWithCredentials(t *testing.T) {
 		if r.Header.Get("X-MCP-Canary") != headerCanary || r.Header.Get("Authorization") != "Bearer "+bearerCanary {
 			missingCredentials.Add(1)
 		}
-		if r.Method == http.MethodGet {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-
 		var request struct {
 			ID     json.RawMessage `json:"id"`
 			Method string          `json:"method"`
@@ -366,6 +659,7 @@ func TestHTTPAdapterAllowsSameOriginRedirectWithCredentials(t *testing.T) {
 				"serverInfo":      map[string]any{"name": "redirect-test", "version": "1.0"},
 			},
 		}
+		w.Header().Set("Content-Type", "application/json")
 		if err := json.NewEncoder(w).Encode(response); err != nil {
 			t.Errorf("encode redirected MCP response: %v", err)
 		}
@@ -374,23 +668,24 @@ func TestHTTPAdapterAllowsSameOriginRedirectWithCredentials(t *testing.T) {
 
 	adapter := NewHTTPClientAdapter(MCPServerConfig{
 		Name:        "srv",
-		Transport:   MCPTransportSSE,
+		Transport:   MCPTransportStreamableHTTP,
 		URL:         srv.URL + "/start",
 		Headers:     map[string]string{"X-MCP-Canary": headerCanary},
 		BearerToken: bearerCanary,
 	})
 	require.NoError(t, adapter.Connect(context.Background()))
-	assert.GreaterOrEqual(t, redirectedRequests.Load(), int32(3), "GET, initialize, and initialized notification should reach the same-origin redirect target")
+	assert.GreaterOrEqual(t, redirectedRequests.Load(), int32(2), "initialize and initialized notification should reach the same-origin redirect target")
 	assert.Zero(t, missingCredentials.Load(), "same-origin redirects must preserve configured credentials")
 }
 
-func TestHTTPAdapterCallToolLostResponseHasUnknownOutcome(t *testing.T) {
+func TestMCPToolCallLostResponseIsUnknownAndNotRetried(t *testing.T) {
 	t.Parallel()
 
 	var sideEffects atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			w.WriteHeader(http.StatusOK)
+		if r.Method != http.MethodPost {
+			t.Errorf("unexpected HTTP method %q", r.Method)
+			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
 
@@ -405,6 +700,10 @@ func TestHTTPAdapterCallToolLostResponseHasUnknownOutcome(t *testing.T) {
 		}
 		if err := json.Unmarshal(body, &req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.Method == "notifications/initialized" {
+			w.WriteHeader(http.StatusAccepted)
 			return
 		}
 		if req.Method == "tools/call" {
@@ -564,8 +863,9 @@ func TestHTTPAdapterCallToolUntrustedResponsesHaveUnknownOutcome(t *testing.T) {
 			t.Parallel()
 			var sideEffects atomic.Int32
 			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				if r.Method == http.MethodGet {
-					w.WriteHeader(http.StatusOK)
+				if r.Method != http.MethodPost {
+					t.Errorf("unexpected HTTP method %q", r.Method)
+					w.WriteHeader(http.StatusMethodNotAllowed)
 					return
 				}
 				body, err := io.ReadAll(r.Body)
@@ -579,6 +879,10 @@ func TestHTTPAdapterCallToolUntrustedResponsesHaveUnknownOutcome(t *testing.T) {
 				}
 				if err := json.Unmarshal(body, &req); err != nil {
 					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				if req.Method == "notifications/initialized" {
+					w.WriteHeader(http.StatusAccepted)
 					return
 				}
 				if req.Method == "tools/call" {
@@ -625,8 +929,9 @@ func TestHTTPAdapterCallToolMatchingRPCErrorIsDefinite(t *testing.T) {
 	t.Parallel()
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			w.WriteHeader(http.StatusOK)
+		if r.Method != http.MethodPost {
+			t.Errorf("unexpected HTTP method %q", r.Method)
+			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
 		body, err := io.ReadAll(r.Body)
@@ -640,6 +945,10 @@ func TestHTTPAdapterCallToolMatchingRPCErrorIsDefinite(t *testing.T) {
 		}
 		if err := json.Unmarshal(body, &req); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if req.Method == "notifications/initialized" {
+			w.WriteHeader(http.StatusAccepted)
 			return
 		}
 		frame := map[string]any{"jsonrpc": "2.0", "id": req.ID}
@@ -678,8 +987,9 @@ func TestHTTPAdapterCallToolCustomRoundTripperFailureIsUnknownAfterDispatch(t *t
 
 	var sideEffects atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			w.WriteHeader(http.StatusOK)
+		if r.Method != http.MethodPost {
+			t.Errorf("unexpected HTTP method %q", r.Method)
+			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
 		body, err := io.ReadAll(r.Body)
@@ -695,13 +1005,16 @@ func TestHTTPAdapterCallToolCustomRoundTripperFailureIsUnknownAfterDispatch(t *t
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
 		}
+		if req.Method == "notifications/initialized" {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 		result := map[string]any{}
 		switch req.Method {
 		case "initialize":
 			result["protocolVersion"] = LatestProtocolVersion
 			result["capabilities"] = map[string]any{}
 			result["serverInfo"] = map[string]any{"name": "test", "version": "1.0"}
-		case "notifications/initialized":
 		case "tools/call":
 			sideEffects.Add(1)
 			result["content"] = "completed"
@@ -748,18 +1061,18 @@ func TestHTTPAdapterCallToolCustomRoundTripperFailureIsUnknownAfterDispatch(t *t
 	assert.EqualValues(t, 1, sideEffects.Load(), "the server executed the request before the RoundTripper failed")
 }
 
-func TestHTTPAdapterConnectGETReturns400(t *testing.T) {
+func TestHTTPAdapterConnectAndListToolsDoNotRequireGET(t *testing.T) {
 	t.Parallel()
-	// Streamable HTTP servers may reject the GET handshake outright; Connect
-	// must still succeed and use the URL for direct POST.
-	srv := newHTTPMCPServer(t, http.StatusBadRequest, false)
+	// Streamable HTTP initialization begins with POST. GET is optional and is
+	// reserved here for resuming an ID-bearing interrupted POST stream.
+	srv := newHTTPMCPServer(t, false)
 	adapter := newHTTPTestAdapter(srv)
 
 	ctx := context.Background()
 	require.NoError(t, adapter.Connect(ctx))
 	assert.Equal(t, srv.URL, adapter.endpoint)
 
-	// The direct-POST fallback must be fully functional.
+	// Normal request/response traffic uses the same MCP endpoint directly.
 	tools, err := adapter.ListTools(ctx)
 	require.NoError(t, err)
 	require.Len(t, tools, 1)
@@ -768,7 +1081,7 @@ func TestHTTPAdapterConnectGETReturns400(t *testing.T) {
 
 func TestHTTPAdapterListTools(t *testing.T) {
 	t.Parallel()
-	srv := newHTTPMCPServer(t, http.StatusOK, false)
+	srv := newHTTPMCPServer(t, false)
 	adapter := newHTTPTestAdapter(srv)
 
 	ctx := context.Background()
@@ -785,7 +1098,7 @@ func TestHTTPAdapterListToolsSSE(t *testing.T) {
 	t.Parallel()
 	// The server wraps the JSON-RPC payload in an SSE frame:
 	//   id:1 / event:message / data:{...}
-	srv := newHTTPMCPServer(t, http.StatusOK, true)
+	srv := newHTTPMCPServer(t, true)
 	adapter := newHTTPTestAdapter(srv)
 
 	ctx := context.Background()
@@ -800,7 +1113,7 @@ func TestHTTPAdapterListToolsSSE(t *testing.T) {
 
 func TestHTTPAdapterCallTool(t *testing.T) {
 	t.Parallel()
-	srv := newHTTPMCPServer(t, http.StatusOK, false)
+	srv := newHTTPMCPServer(t, false)
 	adapter := newHTTPTestAdapter(srv)
 
 	ctx := context.Background()
@@ -814,7 +1127,7 @@ func TestHTTPAdapterCallTool(t *testing.T) {
 
 func TestHTTPAdapterCallToolSSE(t *testing.T) {
 	t.Parallel()
-	srv := newHTTPMCPServer(t, http.StatusOK, true)
+	srv := newHTTPMCPServer(t, true)
 	adapter := newHTTPTestAdapter(srv)
 
 	ctx := context.Background()
@@ -824,130 +1137,6 @@ func TestHTTPAdapterCallToolSSE(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "hello", result.Content)
 	assert.False(t, result.IsError)
-}
-
-// ---------------------------------------------------------------------------
-// OAuth CSRF state parameter tests
-// ---------------------------------------------------------------------------
-
-// TestGenerateOAuthState verifies that generateOAuthState returns a
-// 64-character hex-encoded string (32 bytes of cryptographic randomness).
-func TestGenerateOAuthState(t *testing.T) {
-	t.Parallel()
-	state, err := generateOAuthState()
-	require.NoError(t, err)
-	assert.Len(t, state, 64, "state should be 32 bytes hex-encoded (64 chars)")
-	decoded, err := hex.DecodeString(state)
-	require.NoError(t, err, "state should be valid hex")
-	assert.Len(t, decoded, 32, "decoded state should be 32 bytes")
-}
-
-// TestGenerateOAuthStateUniqueness verifies that successive calls to
-// generateOAuthState produce different values.
-func TestGenerateOAuthStateUniqueness(t *testing.T) {
-	t.Parallel()
-	seen := make(map[string]bool, 100)
-	for i := 0; i < 100; i++ {
-		s, err := generateOAuthState()
-		require.NoError(t, err)
-		assert.False(t, seen[s], "state %q already generated", s)
-		seen[s] = true
-	}
-}
-
-// TestOAuthFlowStateParameter verifies that:
-//  1. The state parameter is present in the authorization URL and matches the
-//     value stored on the adapter.
-//  2. A callback with a missing state parameter is rejected (HTTP 400).
-//  3. A callback with a mismatched state parameter is rejected (HTTP 400).
-//  4. A callback with the correct state parameter succeeds (HTTP 200) and the
-//     OAuth flow completes with a valid access token.
-//
-// This test does NOT run in parallel because it temporarily replaces
-// os.Stderr to capture the printed authorization URL.
-func TestOAuthFlowStateParameter(t *testing.T) {
-	// Token endpoint that returns a valid access token.
-	tokenSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]string{
-			"access_token": "token-xyz",
-			"token_type":   "Bearer",
-		})
-	}))
-	t.Cleanup(tokenSrv.Close)
-
-	adapter := NewHTTPClientAdapter(MCPServerConfig{
-		Name: "oauth-srv",
-		OAuthConfig: &OAuthConfig{
-			AuthorizationURL: "https://auth.example.com/authorize",
-			TokenURL:         tokenSrv.URL,
-			ClientID:         "test-client",
-		},
-	})
-
-	// Capture stderr to extract the printed authorization URL.
-	oldStderr := os.Stderr
-	r, w, err := os.Pipe()
-	require.NoError(t, err)
-	os.Stderr = w
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	errCh := make(chan error, 1)
-	go func() {
-		errCh <- adapter.doOAuthFlow(ctx, "")
-	}()
-
-	// Read the authorization URL from the captured stderr.
-	scanner := bufio.NewScanner(r)
-	var authURLStr string
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if strings.HasPrefix(line, "http") {
-			authURLStr = line
-			break
-		}
-	}
-	os.Stderr = oldStderr
-	_ = w.Close()
-
-	require.NotEmpty(t, authURLStr, "authorization URL should have been printed to stderr")
-
-	authURL, err := url.Parse(authURLStr)
-	require.NoError(t, err)
-
-	// Verify the state parameter is present in the authorization URL.
-	state := authURL.Query().Get("state")
-	require.NotEmpty(t, state, "state parameter must be present in the authorization URL")
-	assert.Equal(t, adapter.oauthState, state, "stored state should match URL state")
-
-	// Verify the redirect_uri (callback URL) is present.
-	redirectURI := authURL.Query().Get("redirect_uri")
-	require.NotEmpty(t, redirectURI, "redirect_uri must be present in the authorization URL")
-
-	// Callback with missing state parameter must be rejected.
-	resp, err := http.Get(redirectURI + "?code=test-code")
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	_ = resp.Body.Close()
-
-	// Callback with mismatched state parameter must be rejected.
-	resp, err = http.Get(redirectURI + "?code=test-code&state=wrong-state")
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
-	_ = resp.Body.Close()
-
-	// Callback with the correct state parameter must succeed.
-	resp, err = http.Get(redirectURI + "?code=test-code&state=" + url.QueryEscape(state))
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusOK, resp.StatusCode)
-	_ = resp.Body.Close()
-
-	// The OAuth flow should complete successfully with the token.
-	err = <-errCh
-	require.NoError(t, err)
-	assert.Equal(t, "token-xyz", adapter.token)
 }
 
 // ---------------------------------------------------------------------------
@@ -965,6 +1154,10 @@ func TestHTTPAdapterResponseSizeLimit(t *testing.T) {
 		}
 		body, _ := io.ReadAll(r.Body)
 		_ = json.Unmarshal(body, &req)
+		if req.Method == "notifications/initialized" {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
 
 		var result map[string]any
 		switch req.Method {
@@ -974,8 +1167,6 @@ func TestHTTPAdapterResponseSizeLimit(t *testing.T) {
 				"capabilities":    map[string]any{},
 				"serverInfo":      map[string]any{"name": "test", "version": "1.0"},
 			}
-		case "notifications/initialized":
-			result = map[string]any{}
 		case "tools/call":
 			// Return a response larger than 10MB to trigger the size limit.
 			big := strings.Repeat("x", 11*1024*1024)
@@ -1041,8 +1232,7 @@ func TestMCPAdapter_SSRSafeClient(t *testing.T) {
 	t.Parallel()
 
 	// --- Internal IP ranges are blocked ---
-	// Connect swallows GET failures (it falls back to direct POST), so the
-	// SSRF block surfaces on the first POST (ListTools).
+	// Initialize is the first POST and is rejected by the SSRF-safe dialer.
 	for _, endpoint := range []string{
 		"http://10.0.0.1/mcp",        // RFC 1918
 		"http://169.254.169.254/mcp", // cloud metadata / link-local
@@ -1054,8 +1244,7 @@ func TestMCPAdapter_SSRSafeClient(t *testing.T) {
 			Transport: MCPTransportStreamableHTTP,
 			URL:       endpoint,
 		})
-		_ = adapter.Connect(context.Background())
-		_, err := adapter.ListTools(context.Background())
+		err := adapter.Connect(context.Background())
 		require.Error(t, err, "endpoint %q should be blocked", endpoint)
 		assert.ErrorIs(t, err, tools.ErrPrivateIP, "endpoint %q", endpoint)
 	}
@@ -1076,36 +1265,11 @@ func TestMCPAdapter_SSRSafeClient(t *testing.T) {
 
 	addr := ln.Addr().String()
 	adapter := NewHTTPClientAdapterWithClient(MCPServerConfig{
-		Name: "rebinding",
-		URL:  "http://" + addr + "/mcp",
+		Name:      "rebinding",
+		Transport: MCPTransportStreamableHTTP,
+		URL:       "http://" + addr + "/mcp",
 	}, tools.NewSSRFSafeHTTPClient(2*time.Second))
-	_ = adapter.Connect(context.Background())
-	_, err = adapter.ListTools(context.Background())
-	require.Error(t, err)
-	assert.ErrorIs(t, err, tools.ErrPrivateIP)
-}
-
-// TestMCPOAuth_TokenEndpointSSRF verifies that the OAuth token exchange uses
-// the SSRF-safe client: when TokenURL points to an internal IP, the request is
-// blocked at dial time and the error wraps tools.ErrPrivateIP.
-func TestMCPOAuth_TokenEndpointSSRF(t *testing.T) {
-	t.Parallel()
-
-	adapter := NewHTTPClientAdapter(MCPServerConfig{
-		Name: "oauth-ssrf",
-		OAuthConfig: &OAuthConfig{
-			AuthorizationURL: "https://auth.example.com/authorize",
-			TokenURL:         "http://10.0.0.1/token", // internal IP
-			ClientID:         "test-client",
-		},
-	})
-
-	err := adapter.exchangeCodeForToken(
-		context.Background(),
-		adapter.cfg.OAuthConfig,
-		"fake-code",
-		"http://127.0.0.1/callback",
-	)
+	err = adapter.Connect(context.Background())
 	require.Error(t, err)
 	assert.ErrorIs(t, err, tools.ErrPrivateIP)
 }

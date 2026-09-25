@@ -2,18 +2,17 @@ package mcp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log/slog"
-	"net"
+	"mime"
 	"net/http"
 	"net/url"
-	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,26 +22,48 @@ import (
 )
 
 // HTTPClientAdapter is an MCPClient that communicates with an MCP server over
-// HTTP/SSE. It implements the standard MCP SSE handshake: connect to the
-// server URL via GET, receive an "endpoint" event with the POST-back URL,
-// then send JSON-RPC requests via HTTP POST and read responses from the SSE
-// stream.
+// the MCP 2025-06-18 Streamable HTTP transport.
 type HTTPClientAdapter struct {
 	cfg       MCPServerConfig
 	client    *http.Client
-	endpoint  string // resolved POST endpoint (may be relative to base URL)
+	endpoint  string // validated Streamable HTTP MCP endpoint
+	sessionID string
+	lifecycle sync.RWMutex
 	mu        sync.Mutex
 	connected bool
 	nextID    int64
 
 	protocolVersion string
-	token           string // OAuth/bearer token obtained after authentication
-	oauthState      string // CSRF state parameter for the current OAuth flow
 }
 
 var _ MCPClient = (*HTTPClientAdapter)(nil)
 
 var errCrossOriginRedirect = errors.New("mcp: cross-origin redirect rejected")
+
+// ErrUnsupportedOAuth reports that this HTTP adapter does not implement the
+// authorization flow configured for an MCP server. Callers may still provide
+// an already-issued BearerToken.
+var ErrUnsupportedOAuth = errors.New("mcp: OAuth configuration is unsupported by the Streamable HTTP adapter")
+
+// ErrUnsupportedHTTPTransport reports that the configured HTTP transport is
+// the deprecated HTTP+SSE profile rather than Streamable HTTP.
+var ErrUnsupportedHTTPTransport = errors.New("mcp: only the Streamable HTTP transport is supported")
+
+// HTTPProtocolError describes an invalid Streamable HTTP response or
+// lifecycle transition without including remote response bodies.
+type HTTPProtocolError struct {
+	message string
+}
+
+func (e *HTTPProtocolError) Error() string { return "mcp: " + e.message }
+
+func httpProtocolError(format string, args ...any) error {
+	return &HTTPProtocolError{message: fmt.Sprintf(format, args...)}
+}
+
+const streamableHTTPProtocolVersion = "2025-06-18"
+
+var errSSEResponseMissing = errors.New("mcp: SSE stream ended without the matching JSON-RPC response")
 
 // defaultHTTPTimeout bounds individual HTTP requests. Network fetch
 // operations (e.g. web search) can legitimately take several seconds, but
@@ -86,6 +107,9 @@ func sameHTTPOrigin(left, right *url.URL) bool {
 
 func effectiveHTTPPort(u *url.URL) string {
 	if port := u.Port(); port != "" {
+		if value, err := strconv.Atoi(port); err == nil {
+			return strconv.Itoa(value)
+		}
 		return port
 	}
 	if strings.EqualFold(u.Scheme, "https") {
@@ -105,11 +129,11 @@ func resolveSameOriginEndpoint(configuredURL, endpoint string) (string, error) {
 	}
 	ref, err := url.Parse(endpoint)
 	if err != nil {
-		return "", fmt.Errorf("mcp: parse SSE endpoint: %w", err)
+		return "", fmt.Errorf("mcp: parse HTTP endpoint: %w", err)
 	}
 	resolved := base.ResolveReference(ref)
 	if !sameHTTPOrigin(base, resolved) {
-		return "", fmt.Errorf("mcp: SSE endpoint must remain on the configured origin %q", base.Host)
+		return "", fmt.Errorf("mcp: endpoint must remain on the configured origin %q", base.Host)
 	}
 	return resolved.String(), nil
 }
@@ -119,15 +143,23 @@ func resolveSameOriginEndpoint(configuredURL, endpoint string) (string, error) {
 func (a *HTTPClientAdapter) doHTTP(req *http.Request) (*http.Response, error) {
 	client := *a.client
 	checkRedirect := client.CheckRedirect
+	initialURL := *req.URL
 	client.CheckRedirect = func(next *http.Request, via []*http.Request) error {
-		if len(via) > 0 && !sameHTTPOrigin(via[0].URL, next.URL) {
-			return fmt.Errorf("%w: %s -> %s", errCrossOriginRedirect, via[0].URL, next.URL)
+		if !sameHTTPOrigin(&initialURL, next.URL) {
+			return fmt.Errorf("%w: %s -> %s", errCrossOriginRedirect, &initialURL, next.URL)
 		}
 		if checkRedirect != nil {
-			return checkRedirect(next, via)
-		}
-		if len(via) >= 10 {
+			if err := checkRedirect(next, via); err != nil {
+				return err
+			}
+		} else if len(via) >= 10 {
 			return fmt.Errorf("stopped after 10 redirects")
+		}
+		// The caller's CheckRedirect callback can mutate next.URL after the
+		// first origin check, so validate the actual target immediately before
+		// net/http sends the redirected request.
+		if !sameHTTPOrigin(&initialURL, next.URL) {
+			return fmt.Errorf("%w: %s -> %s", errCrossOriginRedirect, &initialURL, next.URL)
 		}
 		return nil
 	}
@@ -147,8 +179,8 @@ func NewHTTPClientAdapter(cfg MCPServerConfig) *HTTPClientAdapter {
 
 // NewHTTPClientAdapterWithClient returns an HTTPClientAdapter using the given
 // *http.Client, allowing callers to override transport or timeouts. When client
-// is nil, a loopback-allowing SSRF-safe client is used so that OAuth token
-// exchange and all other requests are protected against internal-IP targeting.
+// is nil, a loopback-allowing SSRF-safe client protects all requests against
+// internal-IP targeting.
 func NewHTTPClientAdapterWithClient(cfg MCPServerConfig, client *http.Client) *HTTPClientAdapter {
 	if client == nil {
 		client = tools.NewSSRFSafeHTTPClientAllowLoopback(defaultHTTPTimeout)
@@ -156,87 +188,83 @@ func NewHTTPClientAdapterWithClient(cfg MCPServerConfig, client *http.Client) *H
 	return &HTTPClientAdapter{cfg: cfg, client: client}
 }
 
-// Connect verifies the server is reachable and prepares the POST endpoint.
-// Streamable HTTP MCP servers respond to JSON-RPC via POST directly; some
-// servers (SSE-style) send an "endpoint" event on the initial GET. We attempt
-// the GET handshake first, then fall back to using the configured URL as the
-// direct POST endpoint.
+// Connect performs the 2025-06-18 initialize/initialized lifecycle over the
+// configured Streamable HTTP endpoint. It never probes or falls back to the
+// deprecated HTTP+SSE transport.
 func (a *HTTPClientAdapter) Connect(ctx context.Context) error {
+	a.lifecycle.Lock()
+	defer a.lifecycle.Unlock()
+
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
 	if a.connected {
 		return nil
 	}
+	a.clearConnectionLocked()
+	if a.cfg.OAuthConfig != nil {
+		return ErrUnsupportedOAuth
+	}
+	if a.cfg.Transport != MCPTransportStreamableHTTP {
+		return ErrUnsupportedHTTPTransport
+	}
 
-	// Determine the POST endpoint. Most modern MCP servers (streamable HTTP)
-	// use the configured URL directly; SSE-style servers send a POST-back
-	// endpoint on the initial GET stream. Validate before attaching credentials.
 	endpoint, err := resolveSameOriginEndpoint(a.cfg.URL, a.cfg.URL)
 	if err != nil {
 		return err
 	}
 	a.endpoint = endpoint
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, a.cfg.URL, nil)
-	if err != nil {
-		return fmt.Errorf("mcp: build SSE request: %w", err)
-	}
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	a.applyAuthHeaders(req)
-
-	resp, err := a.doHTTP(req)
-	if err != nil {
-		if errors.Is(err, errCrossOriginRedirect) {
-			return fmt.Errorf("mcp: GET handshake: %w", err)
-		}
-		// Server unreachable via GET; still try direct POST on the URL.
-		slog.Warn("mcp.sse.connect_get_failed", "server", a.cfg.Name, "err", err)
-		a.connected = true
-		return nil
-	}
-
-	// Read the first event from the SSE stream to find the endpoint.
-	scanner := bufio.NewScanner(resp.Body)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	var endpointErr error
-	for scanner.Scan() {
-		line := scanner.Text()
-		if strings.HasPrefix(line, "event: endpoint") {
-			// Next data: line has the endpoint URL
-			if scanner.Scan() {
-				dataLine := scanner.Text()
-				if strings.HasPrefix(dataLine, "data: ") {
-					a.endpoint, endpointErr = resolveSameOriginEndpoint(a.cfg.URL, strings.TrimPrefix(dataLine, "data: "))
-					break
-				}
-			}
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		slog.Warn("mcp.sse.scan", "server", a.cfg.Name, "err", err)
-	}
-	resp.Body.Close() //nolint:errcheck,gosec
-	if endpointErr != nil {
-		return fmt.Errorf("mcp: reject SSE endpoint: %w", endpointErr)
-	}
-
-	a.connected = true
-	slog.Info("mcp.http.connect", "server", a.cfg.Name, "endpoint", a.endpoint)
-
 	if err := a.doInitializeLocked(ctx); err != nil {
-		a.connected = false
+		a.clearConnectionLocked()
 		return fmt.Errorf("mcp: initialize handshake: %w", err)
 	}
-
+	a.connected = true
+	slog.Info("mcp.http.connect", "server", a.cfg.Name)
 	return nil
 }
 
-// Disconnect tears down the connection.
-func (a *HTTPClientAdapter) Disconnect(_ context.Context) error {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+func (a *HTTPClientAdapter) clearConnectionLocked() {
 	a.connected = false
+	a.endpoint = ""
+	a.sessionID = ""
+	a.protocolVersion = ""
+}
+
+// Disconnect closes the local connection and asks a session-aware server to
+// delete the remote session. A 405 response is permitted by the transport and
+// does not prove that any in-flight remote action stopped.
+func (a *HTTPClientAdapter) Disconnect(ctx context.Context) error {
+	a.lifecycle.Lock()
+	defer a.lifecycle.Unlock()
+
+	a.mu.Lock()
+	if !a.connected {
+		a.clearConnectionLocked()
+		a.mu.Unlock()
+		return nil
+	}
+	endpoint, version, sessionID := a.endpoint, a.protocolVersion, a.sessionID
+	a.clearConnectionLocked()
+	a.mu.Unlock()
+	if sessionID == "" {
+		return nil
+	}
+
+	req, err := a.newHTTPMessageRequest(ctx, http.MethodDelete, endpoint, nil, version, sessionID, "", "")
+	if err != nil {
+		return fmt.Errorf("mcp: build session DELETE: %w", err)
+	}
+	resp, err := a.doHTTP(req)
+	if err != nil {
+		return fmt.Errorf("mcp: delete session: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }() //nolint:errcheck
+	if resp.StatusCode == http.StatusMethodNotAllowed {
+		return nil
+	}
+	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
+		return httpProtocolError("session DELETE returned HTTP status %d", resp.StatusCode)
+	}
 	return nil
 }
 
@@ -274,7 +302,7 @@ func (a *HTTPClientAdapter) CallTool(ctx context.Context, name string, args map[
 	span.SetAttributes(
 		tracing.Attribute{Key: "tool_name", Value: name},
 		tracing.Attribute{Key: "server", Value: a.cfg.Name},
-		tracing.Attribute{Key: "transport", Value: "sse"},
+		tracing.Attribute{Key: "transport", Value: "streamable-http"},
 	)
 	defer span.End()
 
@@ -298,15 +326,18 @@ func (a *HTTPClientAdapter) CallTool(ctx context.Context, name string, args map[
 
 // request sends a JSON-RPC request via HTTP POST and returns the result.
 func (a *HTTPClientAdapter) request(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
+	a.lifecycle.RLock()
+	defer a.lifecycle.RUnlock()
+
 	a.mu.Lock()
+	if !a.connected {
+		a.mu.Unlock()
+		return nil, httpProtocolError("request %q requires an initialized connection", method)
+	}
 	id := a.nextID
 	a.nextID++
-	endpoint := a.endpoint
+	endpoint, version, sessionID := a.endpoint, a.protocolVersion, a.sessionID
 	a.mu.Unlock()
-	endpoint, err := resolveSameOriginEndpoint(a.cfg.URL, endpoint)
-	if err != nil {
-		return nil, err
-	}
 
 	body, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
@@ -317,51 +348,27 @@ func (a *HTTPClientAdapter) request(ctx context.Context, method string, params m
 	if err != nil {
 		return nil, fmt.Errorf("mcp: marshal request: %w", err)
 	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
-	if err != nil {
-		return nil, fmt.Errorf("mcp: build request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	a.applyAuthHeaders(req)
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
 
+	req, err := a.newHTTPMessageRequest(ctx, http.MethodPost, endpoint, body, version, sessionID, "application/json, text/event-stream", "")
+	if err != nil {
+		return nil, fmt.Errorf("mcp: build request: %w", err)
+	}
 	resp, err := a.doHTTP(req)
 	if err != nil {
 		return nil, newRequestBoundaryError(fmt.Errorf("mcp: do request: %w", err), true, false)
 	}
-	defer func() { _ = resp.Body.Close() }() //nolint:errcheck
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return nil, newRequestBoundaryError(fmt.Errorf("mcp: unexpected HTTP status %d", resp.StatusCode), true, false)
+	result, cursor, resumable, responseErr := a.readRequestResponse(resp, id, sessionID)
+	_ = resp.Body.Close()
+	if responseErr != nil && resumable && cursor != "" && ctx.Err() == nil {
+		result, responseErr = a.resumeRequestResponse(ctx, endpoint, version, sessionID, id, cursor)
 	}
-
-	raw, err := readLimitedBody(resp.Body)
-	if err != nil {
-		return nil, newRequestBoundaryError(fmt.Errorf("mcp: read response: %w", err), true, false)
+	if responseErr != nil {
+		return nil, markRequestDispatched(responseErr)
 	}
-	return parseHTTPResponse(raw, id)
-}
-
-// extractSSEData scans SSE-formatted text and concatenates all data: line
-// payloads into a single JSON byte slice.
-func extractSSEData(raw []byte) []byte {
-	var buf strings.Builder
-	for _, line := range strings.Split(string(raw), "\n") {
-		line = strings.TrimRight(line, "\r")
-		if strings.HasPrefix(line, "data:") {
-			data := strings.TrimPrefix(line, "data:")
-			data = strings.TrimPrefix(data, " ")
-			buf.WriteString(data)
-		}
-	}
-	out := strings.TrimSpace(buf.String())
-	if out == "" {
-		return raw
-	}
-	return []byte(out)
+	return result, nil
 }
 
 // truncate returns s trimmed to at most n characters with an ellipsis.
@@ -372,15 +379,275 @@ func truncate(s string, n int) string {
 	return s[:n] + "..."
 }
 
-// parseHTTPResponse parses the raw HTTP response body into a JSON-RPC result
-// map. It handles both plain JSON and SSE-formatted responses (where the
-// JSON-RPC payload is wrapped in data: lines).
-func parseHTTPResponse(raw []byte, expectedID int64) (map[string]any, error) {
-	jsonBytes := []byte(strings.TrimSpace(string(raw)))
-	if len(jsonBytes) > 0 && jsonBytes[0] != '{' {
-		jsonBytes = extractSSEData(raw)
+func (a *HTTPClientAdapter) newHTTPMessageRequest(ctx context.Context, method, endpoint string, body []byte, version, sessionID, accept, lastEventID string) (*http.Request, error) {
+	endpoint, err := resolveSameOriginEndpoint(a.cfg.URL, endpoint)
+	if err != nil {
+		return nil, err
 	}
-	return parseJSONRPCResponse(jsonBytes, expectedID)
+	req, err := http.NewRequestWithContext(ctx, method, endpoint, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	a.applyAuthHeaders(req)
+	if method == http.MethodPost {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	if accept != "" {
+		req.Header.Set("Accept", accept)
+	}
+	req.Header.Del("MCP-Protocol-Version")
+	if version != "" {
+		req.Header.Set("MCP-Protocol-Version", version)
+	}
+	req.Header.Del("Mcp-Session-Id")
+	if sessionID != "" {
+		req.Header.Set("Mcp-Session-Id", sessionID)
+	}
+	req.Header.Del("Last-Event-ID")
+	if lastEventID != "" {
+		req.Header.Set("Last-Event-ID", lastEventID)
+	}
+	return req, nil
+}
+
+func (a *HTTPClientAdapter) readRequestResponse(resp *http.Response, id int64, sessionID string) (map[string]any, string, bool, error) {
+	if resp.StatusCode != http.StatusOK {
+		return nil, "", false, httpProtocolError("JSON-RPC POST returned HTTP status %d", resp.StatusCode)
+	}
+	if err := validateResponseSessionID(resp, sessionID); err != nil {
+		return nil, "", false, err
+	}
+	return a.readRPCResponse(resp, id)
+}
+
+func (a *HTTPClientAdapter) readRPCResponse(resp *http.Response, id int64) (map[string]any, string, bool, error) {
+	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil {
+		return nil, "", false, httpProtocolError("invalid response Content-Type")
+	}
+	switch strings.ToLower(mediaType) {
+	case "application/json":
+		raw, readErr := readLimitedBody(resp.Body)
+		if readErr != nil {
+			return nil, "", false, httpProtocolError("read JSON-RPC response: %v", readErr)
+		}
+		result, parseErr := parseJSONRPCResponse(raw, id)
+		return result, "", false, parseErr
+	case "text/event-stream":
+		result, cursor, streamErr := readSSEResponse(resp.Body, id)
+		if streamErr == nil {
+			return result, cursor, false, nil
+		}
+		return nil, cursor, canResumeSSE(streamErr) && cursor != "", streamErr
+	default:
+		return nil, "", false, httpProtocolError("unsupported response Content-Type %q", mediaType)
+	}
+}
+
+func validateResponseSessionID(resp *http.Response, current string) error {
+	values, present := resp.Header[http.CanonicalHeaderKey("Mcp-Session-Id")]
+	if !present {
+		return nil
+	}
+	if len(values) != 1 || !validSessionID(values[0]) || values[0] != current {
+		return httpProtocolError("server changed or returned an invalid MCP session ID")
+	}
+	return nil
+}
+
+func validSessionID(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < 0x21 || value[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+func validLastEventID(value string) bool {
+	if value == "" {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		if value[i] < 0x20 || value[i] > 0x7e {
+			return false
+		}
+	}
+	return true
+}
+
+func canResumeSSE(err error) bool {
+	if errors.Is(err, errSSEResponseMissing) {
+		return true
+	}
+	var boundaryErr *requestBoundaryError
+	if errors.As(err, &boundaryErr) {
+		return false
+	}
+	var protocolErr *HTTPProtocolError
+	if errors.As(err, &protocolErr) {
+		return false
+	}
+	var rpcErr *rpcResponseError
+	return !errors.As(err, &rpcErr)
+}
+
+func readSSEResponse(body io.Reader, expectedID int64) (map[string]any, string, error) {
+	scanner := bufio.NewScanner(body)
+	scanner.Buffer(make([]byte, 64*1024), maxHTTPResponseSize+1)
+	totalBytes := int64(0)
+	var dataLines []string
+	eventID := ""
+	eventIDSet := false
+	cursor := ""
+
+	dispatch := func() (map[string]any, bool, error) {
+		if eventIDSet {
+			cursor = ""
+			if validLastEventID(eventID) {
+				cursor = eventID
+			}
+		}
+		if len(dataLines) == 0 {
+			dataLines = nil
+			eventID = ""
+			eventIDSet = false
+			return nil, false, nil
+		}
+		data := []byte(strings.Join(dataLines, "\n"))
+		dataLines = nil
+		eventID = ""
+		eventIDSet = false
+		result, isResponse, err := parseSSEMessage(data, expectedID)
+		return result, isResponse, err
+	}
+
+	for scanner.Scan() {
+		line := scanner.Text()
+		totalBytes += int64(len(line) + 1)
+		if totalBytes > maxHTTPResponseSize {
+			return nil, cursor, httpProtocolError("SSE response exceeds %d byte limit", maxHTTPResponseSize)
+		}
+		if line == "" {
+			result, isResponse, err := dispatch()
+			if err != nil {
+				return nil, cursor, err
+			}
+			if isResponse {
+				return result, cursor, nil
+			}
+			continue
+		}
+		if strings.HasPrefix(line, ":") {
+			continue
+		}
+		field, value, hasColon := strings.Cut(line, ":")
+		if !hasColon {
+			value = ""
+		}
+		value = strings.TrimPrefix(value, " ")
+		switch field {
+		case "data":
+			dataLines = append(dataLines, value)
+		case "id":
+			if !strings.ContainsRune(value, '\x00') {
+				eventID = value
+				eventIDSet = true
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		if err == bufio.ErrTooLong {
+			return nil, cursor, httpProtocolError("SSE event line exceeds response limit")
+		}
+		return nil, cursor, err
+	}
+	if len(dataLines) > 0 || eventIDSet {
+		result, isResponse, err := dispatch()
+		if err != nil {
+			return nil, cursor, err
+		}
+		if isResponse {
+			return result, cursor, nil
+		}
+	}
+	return nil, cursor, errSSEResponseMissing
+}
+
+func parseSSEMessage(raw []byte, expectedID int64) (map[string]any, bool, error) {
+	if err := validateJSONRPCObjectFields(raw, "SSE JSON-RPC message", "jsonrpc", "id", "method", "params", "result", "error"); err != nil {
+		return nil, false, newRequestBoundaryError(fmt.Errorf("mcp: invalid SSE JSON-RPC message: %w", err), true, false)
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &envelope); err != nil || envelope == nil {
+		return nil, false, newRequestBoundaryError(fmt.Errorf("mcp: invalid SSE JSON-RPC message"), true, false)
+	}
+	var jsonrpc string
+	if err := json.Unmarshal(envelope["jsonrpc"], &jsonrpc); err != nil || jsonrpc != "2.0" {
+		return nil, false, newRequestBoundaryError(fmt.Errorf("mcp: invalid SSE JSON-RPC version"), true, false)
+	}
+	if methodRaw, hasMethod := envelope["method"]; hasMethod {
+		if _, hasResult := envelope["result"]; hasResult {
+			return nil, false, httpProtocolError("SSE JSON-RPC message has both method and result")
+		}
+		if _, hasError := envelope["error"]; hasError {
+			return nil, false, httpProtocolError("SSE JSON-RPC message has both method and error")
+		}
+		var method string
+		if err := json.Unmarshal(methodRaw, &method); err != nil || method == "" {
+			return nil, false, httpProtocolError("SSE JSON-RPC method is invalid")
+		}
+		if _, hasID := envelope["id"]; hasID {
+			return nil, false, httpProtocolError("server request in SSE stream is unsupported")
+		}
+		return nil, false, nil // A valid server notification precedes the response.
+	}
+	result, err := parseJSONRPCResponse(raw, expectedID)
+	if err != nil {
+		return nil, false, err
+	}
+	return result, true, nil
+}
+
+func (a *HTTPClientAdapter) resumeRequestResponse(ctx context.Context, endpoint, version, sessionID string, id int64, cursor string) (map[string]any, error) {
+	if !validLastEventID(cursor) {
+		return nil, httpProtocolError("cannot resume SSE stream with an invalid event ID")
+	}
+	req, err := a.newHTTPMessageRequest(ctx, http.MethodGet, endpoint, nil, version, sessionID, "text/event-stream", cursor)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := a.doHTTP(req)
+	if err != nil {
+		return nil, fmt.Errorf("mcp: resume SSE stream: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }() //nolint:errcheck
+	if resp.StatusCode != http.StatusOK {
+		return nil, httpProtocolError("SSE resume GET returned HTTP status %d", resp.StatusCode)
+	}
+	if err := validateResponseSessionID(resp, sessionID); err != nil {
+		return nil, err
+	}
+	mediaType, _, err := mime.ParseMediaType(resp.Header.Get("Content-Type"))
+	if err != nil || !strings.EqualFold(mediaType, "text/event-stream") {
+		return nil, httpProtocolError("SSE resume GET returned invalid Content-Type")
+	}
+	result, _, err := readSSEResponse(resp.Body, id)
+	return result, err
+}
+
+func markRequestDispatched(err error) error {
+	if err == nil || requestMayHaveBeenDispatched(err) {
+		return err
+	}
+	var rpcErr *rpcResponseError
+	if errors.As(err, &rpcErr) {
+		return err
+	}
+	return newRequestBoundaryError(err, true, false)
 }
 
 // ProtocolVersion returns the protocol version negotiated during the
@@ -391,253 +658,107 @@ func (a *HTTPClientAdapter) ProtocolVersion() string {
 	return a.protocolVersion
 }
 
-// applyAuthHeaders sets custom headers and the Bearer token Authorization
-// header on the given request. The Bearer token from config takes precedence
-// over any OAuth-obtained token.
+// applyAuthHeaders applies only caller-provided headers and a preconfigured
+// bearer token. OAuth negotiation is rejected before the adapter connects.
 func (a *HTTPClientAdapter) applyAuthHeaders(req *http.Request) {
 	for k, v := range a.cfg.Headers {
 		req.Header.Set(k, v)
 	}
-	token := a.cfg.BearerToken
-	if token == "" && a.token != "" {
-		token = a.token
-	}
-	if token != "" {
-		req.Header.Set("Authorization", "Bearer "+token)
+	if a.cfg.BearerToken != "" {
+		req.Header.Set("Authorization", "Bearer "+a.cfg.BearerToken)
 	}
 }
 
-// doPost sends a JSON-RPC POST request and returns the raw HTTP response. The
-// caller is responsible for closing the response body. The caller must hold
-// a.mu (this method is called from doInitializeLocked which runs under the
-// Connect lock).
-func (a *HTTPClientAdapter) doPost(ctx context.Context, method string, params map[string]any) (*http.Response, int64, error) {
-	id := a.nextID
-	a.nextID++
-	endpoint := a.endpoint
-	var err error
-	endpoint, err = resolveSameOriginEndpoint(a.cfg.URL, endpoint)
-	if err != nil {
-		return nil, 0, err
-	}
-
-	body, err := json.Marshal(map[string]any{
-		"jsonrpc": "2.0",
-		"id":      id,
-		"method":  method,
-		"params":  params,
-	})
-	if err != nil {
-		return nil, 0, fmt.Errorf("mcp: marshal request: %w", err)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, strings.NewReader(string(body)))
-	if err != nil {
-		return nil, 0, fmt.Errorf("mcp: build request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Accept", "application/json, text/event-stream")
-	a.applyAuthHeaders(req)
-
-	resp, err := a.doHTTP(req)
-	return resp, id, err
-}
-
-// doInitializeLocked performs the MCP initialize/initialized handshake over
-// HTTP. The caller must hold a.mu. If the server responds with 401 and an
-// OAuthConfig is set, it triggers the OAuth 2.1 authorization code flow and
-// retries the initialize request with the obtained token.
+// doInitializeLocked performs the 2025-06-18 initialize/initialized exchange.
+// The caller must hold a.mu.
 func (a *HTTPClientAdapter) doInitializeLocked(ctx context.Context) error {
 	initParams := map[string]any{
-		"protocolVersion": LatestProtocolVersion,
+		"protocolVersion": streamableHTTPProtocolVersion,
 		"capabilities":    map[string]any{},
 		"clientInfo":      map[string]any{"name": "go-cli", "version": "1.0.0"},
 	}
-
-	resp, id, err := a.doPost(ctx, "initialize", initParams)
+	id := a.nextID
+	a.nextID++
+	body, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"id":      id,
+		"method":  "initialize",
+		"params":  initParams,
+	})
+	if err != nil {
+		return fmt.Errorf("mcp: marshal initialize request: %w", err)
+	}
+	req, err := a.newHTTPMessageRequest(ctx, http.MethodPost, a.endpoint, body, "", "", "application/json, text/event-stream", "")
+	if err != nil {
+		return fmt.Errorf("mcp: build initialize request: %w", err)
+	}
+	resp, err := a.doHTTP(req)
 	if err != nil {
 		return fmt.Errorf("mcp: initialize request: %w", err)
 	}
-
-	if resp.StatusCode == http.StatusUnauthorized {
-		wwwAuth := resp.Header.Get("WWW-Authenticate")
-		_ = resp.Body.Close()
-
-		if a.cfg.OAuthConfig != nil {
-			if err := a.doOAuthFlow(ctx, wwwAuth); err != nil {
-				return fmt.Errorf("mcp: oauth flow: %w", err)
-			}
-			resp, id, err = a.doPost(ctx, "initialize", initParams)
-			if err != nil {
-				return fmt.Errorf("mcp: initialize retry: %w", err)
-			}
-		} else {
-			return fmt.Errorf("mcp: authentication required (401 Unauthorized)")
-		}
-	}
 	defer func() { _ = resp.Body.Close() }()
-	if resp.StatusCode < http.StatusOK || resp.StatusCode >= http.StatusMultipleChoices {
-		return newRequestBoundaryError(fmt.Errorf("mcp: unexpected HTTP status %d during initialize", resp.StatusCode), true, false)
+	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusUnauthorized {
+			return httpProtocolError("authentication required (HTTP 401)")
+		}
+		return httpProtocolError("initialize POST returned HTTP status %d", resp.StatusCode)
 	}
-
-	raw, err := readLimitedBody(resp.Body)
+	result, _, _, err := a.readRPCResponse(resp, id)
 	if err != nil {
-		return newRequestBoundaryError(fmt.Errorf("mcp: read response: %w", err), true, false)
+		return fmt.Errorf("mcp: invalid initialize response: %w", err)
 	}
-	result, err := parseHTTPResponse(raw, id)
+	sessionID, err := initializeSessionID(resp)
 	if err != nil {
 		return err
 	}
-
 	version, _ := result["protocolVersion"].(string)
-	if !IsSupportedProtocolVersion(version) {
-		return fmt.Errorf("unsupported protocol version: %s", version)
+	if version != streamableHTTPProtocolVersion {
+		return httpProtocolError("server negotiated unsupported protocol version %q", version)
 	}
 	a.protocolVersion = version
+	a.sessionID = sessionID
 
-	// Send notifications/initialized (best-effort).
-	if notifResp, _, nErr := a.doPost(ctx, "notifications/initialized", map[string]any{}); nErr == nil {
-		_ = notifResp.Body.Close()
+	notification, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "notifications/initialized",
+	})
+	if err != nil {
+		return fmt.Errorf("mcp: marshal initialized notification: %w", err)
+	}
+	notifReq, err := a.newHTTPMessageRequest(ctx, http.MethodPost, a.endpoint, notification, version, sessionID, "application/json, text/event-stream", "")
+	if err != nil {
+		return fmt.Errorf("mcp: build initialized notification: %w", err)
+	}
+	notifResp, err := a.doHTTP(notifReq)
+	if err != nil {
+		return fmt.Errorf("mcp: send initialized notification: %w", err)
+	}
+	defer func() { _ = notifResp.Body.Close() }()
+	if notifResp.StatusCode != http.StatusAccepted {
+		return httpProtocolError("initialized notification returned HTTP status %d, want 202", notifResp.StatusCode)
+	}
+	if err := validateResponseSessionID(notifResp, sessionID); err != nil {
+		return err
+	}
+	bodyBytes, err := readLimitedBody(notifResp.Body)
+	if err != nil {
+		return fmt.Errorf("mcp: read initialized notification acknowledgement: %w", err)
+	}
+	if len(bodyBytes) != 0 {
+		return httpProtocolError("initialized notification acknowledgement must have an empty body")
 	}
 
 	slog.Info("mcp.http.initialized", "server", a.cfg.Name, "protocolVersion", version)
 	return nil
 }
 
-// generateOAuthState generates a cryptographically random 32-byte hex-encoded
-// string used as the OAuth state parameter to prevent CSRF attacks on the
-// authorization code flow.
-func generateOAuthState() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
+func initializeSessionID(resp *http.Response) (string, error) {
+	values, present := resp.Header[http.CanonicalHeaderKey("Mcp-Session-Id")]
+	if !present {
+		return "", nil
 	}
-	return hex.EncodeToString(b), nil
-}
-
-// doOAuthFlow performs the OAuth 2.1 authorization code flow: starts a local
-// callback server, opens the user's browser to the authorization URL, receives
-// the authorization code, and exchanges it for an access token. The token is
-// stored in a.token and used for subsequent requests. A random state parameter
-// is included in the authorization URL and verified on callback to prevent
-// CSRF attacks.
-func (a *HTTPClientAdapter) doOAuthFlow(ctx context.Context, _ string) error {
-	oauth := a.cfg.OAuthConfig
-	if oauth == nil {
-		return fmt.Errorf("mcp: no OAuth config")
+	if len(values) != 1 || !validSessionID(values[0]) {
+		return "", httpProtocolError("initialize response contained an invalid MCP session ID")
 	}
-
-	// Generate and store the CSRF state parameter.
-	state, err := generateOAuthState()
-	if err != nil {
-		return fmt.Errorf("mcp: generate oauth state: %w", err)
-	}
-	a.oauthState = state
-
-	// Start a local callback server to receive the authorization code.
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		return fmt.Errorf("mcp: start callback listener: %w", err)
-	}
-	port := listener.Addr().(*net.TCPAddr).Port //nolint:errcheck // listener is always *net.TCPAddr
-	redirectURL := fmt.Sprintf("http://127.0.0.1:%d/callback", port)
-
-	codeCh := make(chan string, 1)
-	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		code := r.URL.Query().Get("code")
-		callbackState := r.URL.Query().Get("state")
-		if code == "" {
-			w.WriteHeader(http.StatusBadRequest)                  //nolint:errcheck
-			_, _ = w.Write([]byte("Missing authorization code.")) //nolint:errcheck
-			return
-		}
-		// Verify the CSRF state parameter to prevent cross-site request
-		// forgery attacks on the authorization code flow.
-		if callbackState == "" || callbackState != state {
-			w.WriteHeader(http.StatusBadRequest)               //nolint:errcheck
-			_, _ = w.Write([]byte("Invalid state parameter.")) //nolint:errcheck
-			return
-		}
-		w.WriteHeader(http.StatusOK)                                                 //nolint:errcheck
-		_, _ = w.Write([]byte("Authorization complete. You may close this window.")) //nolint:errcheck
-		select {
-		case codeCh <- code:
-		default:
-		}
-	})}
-	go func() { _ = srv.Serve(listener) }()
-	defer func() { _ = srv.Shutdown(ctx) }()
-
-	// Build the authorization URL.
-	authURL, err := url.Parse(oauth.AuthorizationURL)
-	if err != nil {
-		return fmt.Errorf("mcp: parse authorization URL: %w", err)
-	}
-	q := authURL.Query()
-	q.Set("response_type", "code")
-	q.Set("client_id", oauth.ClientID)
-	q.Set("redirect_uri", redirectURL)
-	q.Set("state", state)
-	if len(oauth.Scopes) > 0 {
-		q.Set("scope", strings.Join(oauth.Scopes, " "))
-	}
-	authURL.RawQuery = q.Encode()
-
-	slog.Info("mcp.oauth.authorize", "url", authURL.String(), "server", a.cfg.Name)
-	fmt.Fprintf(os.Stderr, "\nMCP server requires authentication. Open this URL to authorize:\n  %s\n\n", authURL.String()) //nolint:errcheck
-
-	// Wait for the callback.
-	select {
-	case code := <-codeCh:
-		return a.exchangeCodeForToken(ctx, oauth, code, redirectURL)
-	case <-time.After(5 * time.Minute):
-		return fmt.Errorf("mcp: oauth flow timed out waiting for authorization")
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-// exchangeCodeForToken exchanges the authorization code for an access token
-// via the token endpoint.
-func (a *HTTPClientAdapter) exchangeCodeForToken(ctx context.Context, oauth *OAuthConfig, code, redirectURL string) error {
-	form := url.Values{}
-	form.Set("grant_type", "authorization_code")
-	form.Set("code", code)
-	form.Set("redirect_uri", redirectURL)
-	form.Set("client_id", oauth.ClientID)
-	if oauth.ClientSecret != "" {
-		form.Set("client_secret", oauth.ClientSecret)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, oauth.TokenURL, strings.NewReader(form.Encode()))
-	if err != nil {
-		return fmt.Errorf("mcp: build token request: %w", err)
-	}
-	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Set("Accept", "application/json")
-
-	resp, err := a.doHTTP(req)
-	if err != nil {
-		return fmt.Errorf("mcp: token request: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	if resp.StatusCode != http.StatusOK {
-		raw, _ := readLimitedBody(resp.Body)
-		return fmt.Errorf("mcp: token exchange failed (status %d): %s", resp.StatusCode, truncate(string(raw), 200))
-	}
-
-	var tokenResp struct {
-		AccessToken string `json:"access_token"`
-		TokenType   string `json:"token_type"`
-	}
-	if err := json.NewDecoder(io.LimitReader(resp.Body, maxHTTPResponseSize)).Decode(&tokenResp); err != nil {
-		return fmt.Errorf("mcp: decode token response: %w", err)
-	}
-	if tokenResp.AccessToken == "" {
-		return fmt.Errorf("mcp: token response missing access_token")
-	}
-	a.token = tokenResp.AccessToken
-	slog.Info("mcp.oauth.token_obtained", "server", a.cfg.Name)
-	return nil
+	return values[0], nil
 }
