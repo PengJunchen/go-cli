@@ -122,6 +122,18 @@ func TestClassifyNormalizedProviderErrorBeforeGenericHarnessCode(t *testing.T) {
 	}
 }
 
+func TestClassifyNormalizedOversizedProviderResponseIsFatal(t *testing.T) {
+	ctx, _ := newRetryTestCtx(t)
+	p := NewDefaultRetryPolicy(RetryConfig{MaxAttempts: 3}).(*DefaultRetryPolicy) //nolint:errcheck
+
+	normalized := core.NormalizeError(fmt.Errorf("provider decode: %w", llm.ErrProviderResponseTooLarge))
+
+	require.NotNil(t, normalized)
+	require.ErrorIs(t, normalized, llm.ErrProviderResponseTooLarge)
+	require.Equal(t, ErrorFatal, p.Classify(normalized))
+	require.False(t, p.ShouldRetry(ctx, normalized, 0))
+}
+
 func TestClassifyNormalizedHarnessTerminalCodeOverridesProviderCause(t *testing.T) {
 	ctx, _ := newRetryTestCtx(t)
 	p := NewDefaultRetryPolicy(RetryConfig{MaxAttempts: 3}).(*DefaultRetryPolicy) //nolint:errcheck

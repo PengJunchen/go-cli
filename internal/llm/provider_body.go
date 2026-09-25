@@ -52,14 +52,11 @@ func readBoundedProviderBody(body io.ReadCloser, limit int) (payload []byte, tru
 
 	payload, readErr = readProviderBodyBytes(body, int64(limit)+1)
 	closeErr = closeProviderBody(body)
-	if readErr != nil {
-		return nil, false, readErr, closeErr
-	}
 	if len(payload) > limit {
 		payload = payload[:limit]
 		truncated = true
 	}
-	return payload, truncated, nil, closeErr
+	return payload, truncated, readErr, closeErr
 }
 
 func readProviderBodyBytes(body io.Reader, readLimit int64) (payload []byte, err error) {
@@ -71,7 +68,6 @@ func readProviderBodyBytes(body io.Reader, readLimit int64) (payload []byte, err
 	}()
 	payload, err = io.ReadAll(io.LimitReader(body, readLimit))
 	if err != nil {
-		payload = nil
 		err = &providerBodyIOError{operation: "read", cause: err}
 	}
 	return payload, err
