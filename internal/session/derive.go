@@ -41,7 +41,7 @@ func SessionViewFromEntries(sessionID, branchID, revision string, branchEntries 
 			return SessionView{}, fmt.Errorf("session: entry %q belongs to physical session %q, not %q", entry.ID, entry.SessionID, sessionID)
 		}
 	}
-	if err := validateToolCallJournalTail(branchEntries); err != nil {
+	if err := validateToolCallJournalTail(sessionID, branchEntries); err != nil {
 		return SessionView{}, err
 	}
 	entries, err := projectSessionEntries(branchEntries)
@@ -71,18 +71,18 @@ func SessionViewFromEntries(sessionID, branchID, revision string, branchEntries 
 	return view, nil
 }
 
-// validateToolCallJournalTail ensures that an unfinished version-one assistant
-// tool-call group remains the actual journal tail. Only action journal rows
-// and matching receipts for that group may occur before it closes; otherwise a
-// deferred view update could later publish unrelated transcript rows between
-// the assistant call and its receipt.
-func validateToolCallJournalTail(entries []SessionEntry) error {
-	type occurrence struct {
-		runID   string
-		ordinal uint64
-		callID  string
+// validateToolCallJournalTail ensures an unfinished version-one assistant
+// tool-call group remains the actual journal tail. It first validates the
+// complete action/evidence relationships, then permits only exact execution
+// observations and resolution checkpoints for that group while sibling calls
+// remain open. Other rows cannot cross the receipt boundary.
+func validateToolCallJournalTail(sessionID string, entries []SessionEntry) error {
+	if _, err := analyzeDurableActionJournal(entries, sessionID); err != nil {
+		return fmt.Errorf("session: invalid action journal before view projection: %w", err)
 	}
-	open := make(map[occurrence]string)
+	open := make(map[actionOccurrenceKey]string)
+	currentGroup := make(map[actionOccurrenceKey]string)
+	receipted := make(map[actionOccurrenceKey]struct{})
 	for _, entry := range entries {
 		if entry.RecordVersion == 1 {
 			if err := validateVersion1EntryCoordinates(entry); err != nil {
@@ -92,29 +92,50 @@ func validateToolCallJournalTail(entries []SessionEntry) error {
 		if len(open) == 0 {
 			if entry.RecordVersion == 1 && entry.Type == EntryTypeAssistant && len(entry.ToolCalls) > 0 {
 				ordinal := *entry.AssistantTranscriptOrdinal
+				currentGroup = make(map[actionOccurrenceKey]string, len(entry.ToolCalls))
+				receipted = make(map[actionOccurrenceKey]struct{}, len(entry.ToolCalls))
 				for _, call := range entry.ToolCalls {
-					open[occurrence{runID: entry.RunID, ordinal: ordinal, callID: call.ID}] = call.Name
+					key := actionOccurrenceKey{sessionID: sessionID, runID: entry.RunID, ordinal: ordinal, toolCall: call.ID}
+					open[key] = call.Name
+					currentGroup[key] = call.Name
 				}
 			}
 			continue
 		}
 
-		key := occurrence{runID: entry.RunID, callID: entry.ToolCallID}
+		key := actionOccurrenceKey{sessionID: sessionID, runID: entry.RunID, toolCall: entry.ToolCallID}
 		if entry.AssistantTranscriptOrdinal != nil {
 			key.ordinal = *entry.AssistantTranscriptOrdinal
 		}
-		name, matches := open[key]
-		if entry.RecordVersion == 1 && entry.Type == EntryTypeTool && (entry.ActionState == ActionStateIntent || entry.ActionState == ActionStateExecution) {
-			if !matches || entry.AssistantTranscriptOrdinal == nil || name != entry.ToolName {
+		name, belongsToCurrentGroup := currentGroup[key]
+		openName, occurrenceOpen := open[key]
+		if entry.RecordVersion == 1 && entry.Type == EntryTypeTool && entry.ActionState == ActionStateIntent {
+			if !belongsToCurrentGroup || !occurrenceOpen || name != openName || entry.AssistantTranscriptOrdinal == nil || name != entry.ToolName {
 				return fmt.Errorf("session: action row %q does not belong to the open assistant tool-call group", entry.ID)
 			}
 			continue
 		}
+		if entry.RecordVersion == 1 && entry.Type == EntryTypeTool && entry.ActionState == ActionStateExecution {
+			if !belongsToCurrentGroup || entry.AssistantTranscriptOrdinal == nil || name != entry.ToolName {
+				return fmt.Errorf("session: execution row %q does not belong to the current assistant tool-call group", entry.ID)
+			}
+			continue
+		}
 		if entry.RecordVersion == 1 && entry.Type == EntryTypeTool && entry.ActionState == "" {
-			if !matches || entry.AssistantTranscriptOrdinal == nil || name != entry.ToolName {
+			if !belongsToCurrentGroup || !occurrenceOpen || entry.AssistantTranscriptOrdinal == nil || name != entry.ToolName {
 				return fmt.Errorf("session: receipt %q does not belong to the open assistant tool-call group", entry.ID)
 			}
 			delete(open, key)
+			receipted[key] = struct{}{}
+			continue
+		}
+		if entry.RecordVersion == 1 && entry.Type == EntryTypeCheckpoint && entry.CheckpointKind == CheckpointExecutionResolution {
+			if !belongsToCurrentGroup || entry.AssistantTranscriptOrdinal == nil {
+				return fmt.Errorf("session: execution resolution %q does not belong to the current assistant tool-call group", entry.ID)
+			}
+			if _, hasReceipt := receipted[key]; !hasReceipt {
+				return fmt.Errorf("session: execution resolution %q precedes its current-group receipt", entry.ID)
+			}
 			continue
 		}
 		return fmt.Errorf("session: entry %q interleaves an open assistant tool-call group", entry.ID)

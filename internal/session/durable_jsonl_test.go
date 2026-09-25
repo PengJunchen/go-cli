@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/tools"
 )
@@ -624,6 +625,225 @@ func TestDurableWriterPersistsOpenToolCallWithoutPublishingPartialView(t *testin
 	}
 }
 
+func TestDurableWriterAllowsLateCompletionResolutionWhileSiblingCallOpen(t *testing.T) {
+	_, prepared, writer := prepareTwoCallCompletionFixture(t, false)
+	defer prepared.Close()
+
+	snapshot, err := prepared.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.PublishedView.Messages) != 1 || snapshot.PublishedView.Messages[0].Role != "user" {
+		t.Fatalf("open assistant group published an incomplete view: %#v", snapshot.PublishedView)
+	}
+	if _, err := SessionViewFromEntries(snapshot.SessionID, snapshot.ActiveBranchID, "test-revision", snapshot.DurableEntries); !errors.Is(err, errUnclosedToolCallGroup) {
+		t.Fatalf("direct view validation error = %v, want withheld unclosed group", err)
+	}
+	corrupt := cloneSessionEntries(snapshot.DurableEntries)
+	for i := range corrupt {
+		if corrupt[i].ID == "resolution-1" {
+			corrupt[i].ActionID = "other-action"
+		}
+	}
+	if _, err := SessionViewFromEntries(snapshot.SessionID, snapshot.ActiveBranchID, "test-revision", corrupt); err == nil || errors.Is(err, errUnclosedToolCallGroup) {
+		t.Fatalf("direct view accepted a mismatched resolution reference or hid it as merely open: %v", err)
+	}
+	futureProof := cloneSessionEntries(snapshot.DurableEntries)
+	var resolution *core.ExecutionResolution
+	for i := range futureProof {
+		if futureProof[i].ID == "resolution-1" {
+			futureProof[i].ExecutionResolution.EvidenceRef = "execution-future"
+			resolution = futureProof[i].ExecutionResolution
+		}
+	}
+	if resolution == nil {
+		t.Fatal("resolution fixture row was not found")
+	}
+	futureProof = append(futureProof, SessionEntry{
+		ID: "execution-future", ParentID: "resolution-1", Type: EntryTypeTool, RunID: "run-late-proof",
+		WorkspaceID: "workspace-late-proof", ActionBatchID: "batch-1", ActionID: "action-1",
+		ActionState: ActionStateExecution, AssistantTranscriptOrdinal: ptrUint64(0), ToolCallID: "call-1", ToolName: "read",
+		CompletionProof: tools.CompletionOwnedProcessGroupJoined, RecordVersion: 1, SessionID: snapshot.SessionID, BranchID: snapshot.ActiveBranchID,
+		Seq: snapshot.MaxSeq + 1,
+	})
+	if _, err := SessionViewFromEntries(snapshot.SessionID, snapshot.ActiveBranchID, "test-revision", futureProof); err == nil || errors.Is(err, errUnclosedToolCallGroup) {
+		t.Fatalf("direct view accepted a future completion proof or hid it as merely open: %v", err)
+	}
+
+	ordinal := uint64(0)
+	secondIntent, err := writer.AppendAndSync(context.Background(), SessionEntry{
+		ID: "intent-2", ParentID: "resolution-1", Type: EntryTypeTool, RunID: "run-late-proof",
+		WorkspaceID: "workspace-late-proof", ActionBatchID: "batch-2", ActionID: "action-2",
+		ActionState: ActionStateIntent, AssistantTranscriptOrdinal: &ordinal, ToolCallID: "call-2", ToolName: "read",
+		ArgumentDigest: strings.Repeat("d", 64), SchemaDigest: strings.Repeat("e", 64),
+		ToolIdentity: &tools.TrustedToolIdentitySnapshot{
+			RegistrationSource: "builtin", ToolName: "read", RegistrationGeneration: 1,
+			ExecutorFingerprint: strings.Repeat("f", 64), ScopeFingerprint: strings.Repeat("1", 64),
+		},
+		EffectSet: []tools.TrustedToolEffect{tools.EffectWorkspaceRead},
+	})
+	if err != nil {
+		t.Fatalf("append next sequential intent after resolution: %v", err)
+	}
+	secondReceiptIndex := uint64(3)
+	if _, err := writer.AppendAndSync(context.Background(), SessionEntry{
+		ID: "receipt-2", ParentID: secondIntent[0].ID, Type: EntryTypeTool, RunID: "run-late-proof",
+		WorkspaceID: "workspace-late-proof", ActionBatchID: "batch-2", ActionID: "action-2",
+		AssistantTranscriptOrdinal: &ordinal, TranscriptIndex: &secondReceiptIndex,
+		ToolCallID: "call-2", ToolName: "read", ReceiptOutcome: core.ReceiptOutcomeSuccess,
+		DispatchState: DispatchStateDispatched, Content: "done too",
+	}); err != nil {
+		t.Fatalf("close assistant group with second receipt: %v", err)
+	}
+	view := prepared.View()
+	if len(view.Messages) != 4 || view.Messages[2].ToolCallID != "call-1" || view.Messages[3].ToolCallID != "call-2" {
+		t.Fatalf("closed view did not publish canonical receipt order while hiding metadata: %#v", view.Messages)
+	}
+}
+
+func TestDurableWriterAllowsEarlyCompletionProofWhileSiblingCallOpen(t *testing.T) {
+	_, prepared, _ := prepareTwoCallCompletionFixture(t, true)
+	defer prepared.Close()
+	snapshot, err := prepared.Snapshot()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := SessionViewFromEntries(snapshot.SessionID, snapshot.ActiveBranchID, "test-revision", snapshot.DurableEntries); !errors.Is(err, errUnclosedToolCallGroup) {
+		t.Fatalf("direct view validation error = %v, want withheld group after early proof and receipt", err)
+	}
+}
+
+func TestPrepareResumeAcceptsLateResolutionWithOpenSibling(t *testing.T) {
+	preparer, prepared, _ := prepareTwoCallCompletionFixture(t, false)
+	sessionID := prepared.View().SessionID
+	if err := prepared.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var events []string
+	authority := recoveryAuthorityFunc{
+		apply: func(_ context.Context, resolutions []ValidatedExecutionResolution) error {
+			events = append(events, "apply")
+			if len(resolutions) != 1 || resolutions[0].CheckpointEntryID != "resolution-1" || resolutions[0].Resolution.EvidenceRef != "execution-1" {
+				t.Fatalf("recovery did not validate the late local proof: %#v", resolutions)
+			}
+			return nil
+		},
+		inspect: func(_ context.Context, refs []PendingActionRef) ([]PendingActionDecision, error) {
+			events = append(events, "inspect")
+			if len(refs) != 1 || refs[0].ToolCallID != "call-2" || refs[0].ActionID != "" {
+				t.Fatalf("unexpected unreserved sibling refs: %#v", refs)
+			}
+			return []PendingActionDecision{{Action: refs[0], MarkerState: DispatchMarkerAbsent}}, nil
+		},
+	}
+	resumed, err := NewDurableJSONLSessionPreparer(preparer.directory, authority).PrepareResume(context.Background(), sessionID)
+	if err != nil {
+		t.Fatalf("resume open group with a validated late resolution: %v", err)
+	}
+	defer resumed.Close()
+	if len(events) != 2 || events[0] != "apply" || events[1] != "inspect" {
+		t.Fatalf("recovery order = %#v, want apply then inspect", events)
+	}
+	view := resumed.View()
+	if len(view.Messages) != 4 || view.Messages[2].ToolCallID != "call-1" || view.Messages[3].ReceiptOutcome != core.ReceiptOutcomeInterrupted {
+		t.Fatalf("recovery did not close the sibling occurrence in canonical order: %#v", view.Messages)
+	}
+}
+
+func prepareTwoCallCompletionFixture(t *testing.T, proofBeforeReceipt bool) (*DurableJSONLSessionPreparer, PreparedSession, DurableSessionWriter) {
+	t.Helper()
+	preparer := NewDurableJSONLSessionPreparer(t.TempDir(), nil)
+	prepared, err := preparer.PrepareNew(context.Background(), "late completion proof")
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := prepared.DurableWriter()
+	userIndex, assistantIndex := uint64(0), uint64(1)
+	root, err := writer.AppendAndSync(context.Background(), SessionEntry{
+		ID: "root-user", Type: EntryTypeUser, RunID: "run-late-proof", TranscriptIndex: &userIndex,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ordinal := uint64(0)
+	assistant, err := writer.AppendAndSync(context.Background(), SessionEntry{
+		ID: "assistant", ParentID: root[0].ID, Type: EntryTypeAssistant, RunID: "run-late-proof",
+		WorkspaceID: "workspace-late-proof", AssistantTranscriptOrdinal: &ordinal,
+		TranscriptIndex: &assistantIndex,
+		ToolCalls:       []llm.ToolCall{{ID: "call-1", Name: "read"}, {ID: "call-2", Name: "read"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent, err := writer.AppendAndSync(context.Background(), SessionEntry{
+		ID: "intent-1", ParentID: assistant[0].ID, Type: EntryTypeTool, RunID: "run-late-proof",
+		WorkspaceID: "workspace-late-proof", ActionBatchID: "batch-1", ActionID: "action-1",
+		ActionState: ActionStateIntent, AssistantTranscriptOrdinal: &ordinal, ToolCallID: "call-1", ToolName: "read",
+		ArgumentDigest: strings.Repeat("a", 64), SchemaDigest: strings.Repeat("b", 64),
+		ToolIdentity: &tools.TrustedToolIdentitySnapshot{
+			RegistrationSource: "builtin", ToolName: "read", RegistrationGeneration: 1,
+			ExecutorFingerprint: strings.Repeat("c", 64), ScopeFingerprint: strings.Repeat("d", 64),
+		},
+		EffectSet: []tools.TrustedToolEffect{tools.EffectWorkspaceRead},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parentID := intent[0].ID
+	if proofBeforeReceipt {
+		proof, err := writer.AppendAndSync(context.Background(), SessionEntry{
+			ID: "execution-1", ParentID: parentID, Type: EntryTypeTool, RunID: "run-late-proof",
+			WorkspaceID: "workspace-late-proof", ActionBatchID: "batch-1", ActionID: "action-1",
+			ActionState: ActionStateExecution, AssistantTranscriptOrdinal: &ordinal, ToolCallID: "call-1", ToolName: "read",
+			CompletionProof: tools.CompletionOwnedProcessGroupJoined,
+		})
+		if err != nil {
+			_ = prepared.Close()
+			t.Fatalf("append completion proof before receipt while sibling call is open: %v", err)
+		}
+		parentID = proof[0].ID
+	}
+	receiptIndex := uint64(2)
+	receipt, err := writer.AppendAndSync(context.Background(), SessionEntry{
+		ID: "receipt-1", ParentID: parentID, Type: EntryTypeTool, RunID: "run-late-proof",
+		WorkspaceID: "workspace-late-proof", ActionBatchID: "batch-1", ActionID: "action-1",
+		AssistantTranscriptOrdinal: &ordinal, TranscriptIndex: &receiptIndex,
+		ToolCallID: "call-1", ToolName: "read", ReceiptOutcome: core.ReceiptOutcomeSuccess,
+		DispatchState: DispatchStateDispatched, Content: "done",
+	})
+	if err != nil {
+		_ = prepared.Close()
+		t.Fatal(err)
+	}
+	if !proofBeforeReceipt {
+		proof, err := writer.AppendAndSync(context.Background(), SessionEntry{
+			ID: "execution-1", ParentID: receipt[0].ID, Type: EntryTypeTool, RunID: "run-late-proof",
+			WorkspaceID: "workspace-late-proof", ActionBatchID: "batch-1", ActionID: "action-1",
+			ActionState: ActionStateExecution, AssistantTranscriptOrdinal: &ordinal, ToolCallID: "call-1", ToolName: "read",
+			CompletionProof: tools.CompletionOwnedProcessGroupJoined,
+		})
+		if err != nil {
+			_ = prepared.Close()
+			t.Fatalf("append late completion proof while sibling call is open: %v", err)
+		}
+		parentID = proof[0].ID
+	} else {
+		parentID = receipt[0].ID
+	}
+	if _, err := writer.AppendAndSync(context.Background(), SessionEntry{
+		ID: "resolution-1", ParentID: parentID, Type: EntryTypeCheckpoint, RunID: "run-late-proof",
+		WorkspaceID: "workspace-late-proof", ActionBatchID: "batch-1", ActionID: "action-1",
+		AssistantTranscriptOrdinal: &ordinal, ToolCallID: "call-1", CheckpointKind: CheckpointExecutionResolution,
+		ExecutionResolution: &core.ExecutionResolution{
+			RunID: "run-late-proof", ActionID: "action-1", Evidence: core.ResolutionLocalResourcesStopped, EvidenceRef: "execution-1",
+		},
+	}); err != nil {
+		_ = prepared.Close()
+		t.Fatalf("append resolution while sibling call is open: %v", err)
+	}
+	return preparer, prepared, writer
+}
+
 func TestDurableWriterRejectsSystemRowInsideOpenToolCallGroup(t *testing.T) {
 	preparer := NewDurableJSONLSessionPreparer(t.TempDir(), nil)
 	prepared, err := preparer.PrepareNew(context.Background(), "open group boundary")
@@ -658,6 +878,12 @@ func TestDurableWriterRejectsSystemRowInsideOpenToolCallGroup(t *testing.T) {
 		RunID: "run-boundary", TranscriptIndex: &two, Content: "must not cross the receipt boundary",
 	}); err == nil {
 		t.Fatal("system row inside an open tool-call group must be rejected")
+	}
+	if _, err := writer.AppendAndSync(context.Background(), SessionEntry{
+		ID: "interleaved-terminal", ParentID: assistant[0].ID, Type: EntryTypeCheckpoint,
+		RunID: "run-boundary", CheckpointKind: CheckpointRunTerminal, RunOutcome: core.RunOutcomeSuccess,
+	}); err == nil {
+		t.Fatal("non-resolution checkpoint inside an open tool-call group must be rejected")
 	}
 	after, err := os.ReadFile(path)
 	if err != nil {
