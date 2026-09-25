@@ -4,6 +4,7 @@
 package e2e_20260802 //nolint:staticcheck
 
 import (
+	"bufio"
 	"context"
 	"fmt"
 	"io"
@@ -827,20 +828,42 @@ func TestACP_StdioAdapterReceiveBeforeConnect(t *testing.T) {
 }
 
 func TestACP_StdioAdapterConnectDisconnect(t *testing.T) {
-	r, w := io.Pipe()
+	adapterIn, peerIn := io.Pipe()
+	peerOut, adapterOut := io.Pipe()
+	t.Cleanup(func() {
+		_ = adapterIn.Close()
+		_ = peerIn.Close()
+		_ = peerOut.Close()
+		_ = adapterOut.Close()
+	})
 
-	// Start a goroutine that reads connect message from the pipe.
-	var wg sync.WaitGroup
-	wg.Add(1)
+	// The peer reads both frames and closes its owned input after observing the
+	// disconnect frame. That real EOF lets the adapter join its reader worker.
+	peerErrCh := make(chan error, 1)
 	go func() {
-		defer wg.Done()
-		buf := make([]byte, 1024)
-		n, _ := r.Read(buf) //nolint:errcheck,gosec
-		// Should contain the connect message as JSON.
-		assert.Contains(t, string(buf[:n]), "connect")
+		defer peerOut.Close() //nolint:errcheck,gosec
+		reader := bufio.NewReader(peerOut)
+		for _, expected := range []string{"connect", "disconnect"} {
+			frame, err := reader.ReadString('\n')
+			if err != nil {
+				peerErrCh <- err
+				return
+			}
+			if !strings.Contains(frame, expected) {
+				peerErrCh <- fmt.Errorf("expected %s frame, got %q", expected, frame)
+				return
+			}
+			if expected == "disconnect" {
+				if err := peerIn.Close(); err != nil {
+					peerErrCh <- err
+					return
+				}
+			}
+		}
+		peerErrCh <- nil
 	}()
 
-	adapter := acp.NewStdioAdapter(r, w)
+	adapter := acp.NewStdioAdapter(adapterIn, adapterOut)
 	ctx := context.Background()
 
 	err := adapter.Connect(ctx)
@@ -848,8 +871,7 @@ func TestACP_StdioAdapterConnectDisconnect(t *testing.T) {
 
 	err = adapter.Disconnect(ctx)
 	assert.NoError(t, err)
-
-	wg.Wait()
+	require.NoError(t, <-peerErrCh)
 }
 
 // =============================================================================

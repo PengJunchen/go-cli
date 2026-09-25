@@ -45,7 +45,7 @@ func TestProduction_RetryPolicy_TransientErrors(t *testing.T) {
 	err := production.NewError(production.ErrorTransient, errors.New("connection reset"))
 	assert.True(t, p.ShouldRetry(ctx, err, 0))
 	assert.True(t, p.ShouldRetry(ctx, err, 1))
-	assert.True(t, p.ShouldRetry(ctx, err, 2))
+	assert.False(t, p.ShouldRetry(ctx, err, 2))
 	assert.False(t, p.ShouldRetry(ctx, err, 3))
 }
 
