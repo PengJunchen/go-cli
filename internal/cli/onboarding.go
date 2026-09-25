@@ -162,6 +162,10 @@ func RunOnboarding(cfg *config.Config, in io.Reader, out io.Writer) error {
 }
 
 func runOnboarding(ctx context.Context, cfg *config.Config, providerName string, in io.Reader, out io.Writer) error {
+	return runOnboardingWithModelOverride(ctx, cfg, providerName, "", in, out)
+}
+
+func runOnboardingWithModelOverride(ctx context.Context, cfg *config.Config, providerName, modelOverride string, in io.Reader, out io.Writer) error {
 	if isOnboardingDisabled() {
 		return nil
 	}
@@ -193,7 +197,7 @@ func runOnboarding(ctx context.Context, cfg *config.Config, providerName string,
 			registry = llm.NoopModelRegistry{}
 		}
 		cancel()
-		if err := promptModel(cfg, reader, out, registry); err != nil {
+		if err := promptModelWithOverride(cfg, reader, out, registry, modelOverride); err != nil {
 			return err
 		}
 		if err := promptTheme(cfg, reader, out); err != nil {
@@ -300,9 +304,14 @@ func readPasswordMasked(reader *bufio.Reader, out io.Writer) (string, error) {
 // promptModel lists available models and lets the user pick one. It fetches
 // the model list dynamically from the registry via onboardingModelProvider;
 // when the registry returns no models (network error, empty data) it falls
-// back to the hardcoded onboardingModelChoices. An invalid or empty choice
-// falls back to the first model in the list.
+// back to the hardcoded onboardingModelChoices. The choice updates both
+// persisted model defaults even when environment values were preloaded. An
+// explicit CLI model remains a session-only override.
 func promptModel(cfg *config.Config, reader *bufio.Reader, out io.Writer, registry llm.ModelRegistry) error {
+	return promptModelWithOverride(cfg, reader, out, registry, "")
+}
+
+func promptModelWithOverride(cfg *config.Config, reader *bufio.Reader, out io.Writer, registry llm.ModelRegistry, modelOverride string) error {
 	fmt.Fprintln(out, "Step 2: Model Selection") //nolint:errcheck
 
 	choices := onboardingModelProvider(registry)
@@ -333,15 +342,16 @@ func promptModel(cfg *config.Config, reader *bufio.Reader, out io.Writer, regist
 
 	chosen := choices[idx].Name
 	if cfg != nil {
-		if cfg.Provider.Model == "" {
-			cfg.Provider.Model = chosen
-		}
-		if cfg.Model.Name == "" {
-			cfg.Model.Name = chosen
-		}
+		cfg.Provider.Model = chosen
+		cfg.Model.Name = chosen
 	}
-	fmt.Fprintf(out, "  ✓ Model set to: %s\n", chosen) //nolint:errcheck
-	fmt.Fprintln(out, "")                              //nolint:errcheck
+	if modelOverride != "" {
+		fmt.Fprintf(out, "  ✓ Default model selected: %s.\n", chosen)           //nolint:errcheck
+		fmt.Fprintf(out, "  Current session uses --model %s.\n", modelOverride) //nolint:errcheck
+	} else {
+		fmt.Fprintf(out, "  ✓ Default model selected for this session: %s\n", chosen) //nolint:errcheck
+	}
+	fmt.Fprintln(out, "") //nolint:errcheck
 	return nil
 }
 
