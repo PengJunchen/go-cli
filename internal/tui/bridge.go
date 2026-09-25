@@ -2,11 +2,14 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
 
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/llm"
 )
 
 // ContentTypeSubagent is the content type for events forwarded from a
@@ -44,9 +47,9 @@ func KindToContentType(kind string) string {
 }
 
 // CoreEventToAgentEvent converts a core.AgentEvent into a tui.AgentEvent
-// suitable for consumption by the TUI render loop. The mapping is lossless:
-// every core field is preserved, the ContentType is derived from Kind, and
-// token usage data is forwarded when present.
+// suitable for consumption by the TUI render loop. It preserves the event
+// fields consumed by the TUI, derives ContentType from Kind, and forwards
+// token usage plus safe tool-call details when present.
 func CoreEventToAgentEvent(ev core.AgentEvent) AgentEvent {
 	ae := AgentEvent{
 		Type:        ev.Kind,
@@ -56,6 +59,7 @@ func CoreEventToAgentEvent(ev core.AgentEvent) AgentEvent {
 		ToolCallID:  ev.ToolCallID,
 		Stream:      ev.Stream,
 		IsError:     ev.IsError,
+		ToolCalls:   copyToolCalls(ev.ToolCalls),
 	}
 	if ev.TokenUsage != nil {
 		ae.TokenUsage = &TokenUsageData{
@@ -66,6 +70,84 @@ func CoreEventToAgentEvent(ev core.AgentEvent) AgentEvent {
 		}
 	}
 	return ae
+}
+
+// copyToolCalls validates assistant tool-call arguments as JSON payloads and
+// then uses core's canonical history clone to prevent aliases to nested
+// maps/slices from crossing the core-to-TUI boundary. Invalid or unsupported
+// values remain visible as calls, with their details explicitly unavailable.
+func copyToolCalls(calls []llm.ToolCall) []ToolCallData {
+	if calls == nil {
+		return nil
+	}
+
+	copied := make([]ToolCallData, len(calls))
+	for i, call := range calls {
+		copied[i] = ToolCallData{ID: call.ID, Name: call.Name}
+		if call.Args == nil {
+			continue
+		}
+
+		if _, err := json.Marshal(call.Args); err != nil || !isToolArgsJSONValue(reflect.ValueOf(call.Args)) {
+			copied[i].ArgsUnavailable = true
+			continue
+		}
+		messages := core.CloneAgentMessages([]core.AgentMessage{{ToolCalls: []llm.ToolCall{call}}})
+		copied[i].Args = messages[0].ToolCalls[0].Args
+	}
+	return copied
+}
+
+// isToolArgsJSONValue restricts cloning to the map/slice/scalar graphs used by
+// decoded JSON payloads. Structs and pointers may hide mutable aliases behind
+// custom encoders, so they are reported unavailable rather than shallow-copied.
+// json.Marshal is run first to reject cycles and unsupported values.
+func isToolArgsJSONValue(value reflect.Value) bool {
+	if !value.IsValid() {
+		return true
+	}
+	typeOfValue := value.Type()
+	marshalerType := reflect.TypeOf((*json.Marshaler)(nil)).Elem()
+	if typeOfValue.Implements(marshalerType) ||
+		(typeOfValue.Kind() != reflect.Pointer && reflect.PointerTo(typeOfValue).Implements(marshalerType)) {
+		return false
+	}
+
+	switch value.Kind() {
+	case reflect.Interface:
+		return value.IsNil() || isToolArgsJSONValue(value.Elem())
+	case reflect.Map:
+		if value.IsNil() {
+			return true
+		}
+		if value.Type().Key().Kind() != reflect.String {
+			return false
+		}
+		iter := value.MapRange()
+		for iter.Next() {
+			if !isToolArgsJSONValue(iter.Value()) {
+				return false
+			}
+		}
+		return true
+	case reflect.Slice, reflect.Array:
+		if value.Kind() == reflect.Slice && value.IsNil() {
+			return true
+		}
+		for i := 0; i < value.Len(); i++ {
+			if !isToolArgsJSONValue(value.Index(i)) {
+				return false
+			}
+		}
+		return true
+	case reflect.Bool, reflect.String,
+		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
+		reflect.Float32, reflect.Float64:
+		return true
+	default:
+		return false
+	}
 }
 
 // SubagentEventToAgentEvent converts a core.AgentEvent emitted by a sub-agent

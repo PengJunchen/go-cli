@@ -219,16 +219,20 @@ func TestIsToolError(t *testing.T) {
 	}
 
 	// Add a running tool_call entry.
-	m.accordion.Add(&AccordionEntry{
+	entry := &AccordionEntry{
 		ContentType:   ContentTypeToolCall,
+		ToolCallID:    "tc-error",
 		Summary:       "bash(test)",
 		Full:          "bash(test)",
 		ToolStatus:    ToolStatusRunning,
 		ToolStartTime: time.Now(),
-	})
+	}
+	m.accordion.Add(entry)
+	m.toolCallGroup = newActiveToolCallGroup()
+	m.toolCallGroup.add("tc-error", entry)
 
 	// isError=true marks the result as an error.
-	m.updateToolResultStatusLocked("", true)
+	m.updateToolResultStatusLocked("tc-error", true)
 	entries := m.accordion.Entries()
 	assert.Equal(t, ToolStatusError, entries[0].ToolStatus)
 
@@ -236,7 +240,7 @@ func TestIsToolError(t *testing.T) {
 	entries[0].ToolStatus = ToolStatusRunning
 
 	// isError=false marks the result as completed.
-	m.updateToolResultStatusLocked("", false)
+	m.updateToolResultStatusLocked("tc-error", false)
 	assert.Equal(t, ToolStatusCompleted, entries[0].ToolStatus)
 }
 
@@ -309,6 +313,7 @@ func TestUpdateToolResultStatusByToolCallID(t *testing.T) {
 		ToolStatus:    ToolStatusRunning,
 		ToolStartTime: time.Now(),
 	})
+	entryA := m.accordion.entries[0]
 	m.accordion.Add(&AccordionEntry{
 		ContentType:   ContentTypeToolCall,
 		ToolCallID:    "tc-B",
@@ -316,12 +321,16 @@ func TestUpdateToolResultStatusByToolCallID(t *testing.T) {
 		ToolStatus:    ToolStatusRunning,
 		ToolStartTime: time.Now(),
 	})
+	entryB := m.accordion.entries[1]
+	m.toolCallGroup = newActiveToolCallGroup()
+	m.toolCallGroup.add("tc-A", entryA)
+	m.toolCallGroup.add("tc-B", entryB)
 
 	// Mark tc-A as completed while tc-B is still running.
 	m.updateToolResultStatusLocked("tc-A", false)
 
-	entryA := m.accordion.FindByToolCallID("tc-A")
-	entryB := m.accordion.FindByToolCallID("tc-B")
+	entryA = m.accordion.FindByToolCallID("tc-A")
+	entryB = m.accordion.FindByToolCallID("tc-B")
 	assert.Equal(t, ToolStatusCompleted, entryA.ToolStatus)
 	assert.Equal(t, ToolStatusRunning, entryB.ToolStatus, "tc-B should still be running")
 
