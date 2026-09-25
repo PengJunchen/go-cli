@@ -203,6 +203,36 @@ func NewGRPCAdapter(endpoint string, opts ...Option) ACPClient {
 	return a
 }
 
+// IsBuiltInHTTPClientLocallyJoined reports whether the exact HTTP adapter
+// created by NewGRPCAdapter has no local worker left, or its current
+// generation's cleanup operation has completed. It does not indicate whether
+// a remote session deletion succeeded. Other ACPClient implementations cannot
+// assert this package-owned completion fact by implementing an interface.
+func IsBuiltInHTTPClientLocallyJoined(client ACPClient) bool {
+	adapter, ok := client.(*gRPCAdapter)
+	if !ok {
+		return false
+	}
+
+	adapter.mu.Lock()
+	generation := adapter.current
+	if generation == nil {
+		adapter.mu.Unlock()
+		return true
+	}
+	cleanupDone := generation.cleanupDone
+	adapter.mu.Unlock()
+	if cleanupDone == nil {
+		return false
+	}
+	select {
+	case <-cleanupDone:
+		return true
+	default:
+		return false
+	}
+}
+
 // Connect establishes the ACP session, emitting an acp.connect span with
 // transport/endpoint attributes. It also starts the inbound poll loop if it is
 // not already running.
