@@ -171,6 +171,13 @@ func validatePreparedSnapshotForTree(snapshot PreparedSessionSnapshot) (map[stri
 	seqs := make(map[uint64]string, len(snapshot.DurableEntries))
 	var maxSeq uint64
 	seqsStarted := false
+	hasVersionOne := false
+	for _, entry := range snapshot.DurableEntries {
+		if entry.RecordVersion == 1 {
+			hasVersionOne = true
+			break
+		}
+	}
 	rows := make([]SessionEntry, len(snapshot.DurableEntries))
 	for index := range snapshot.DurableEntries {
 		entry := snapshot.DurableEntries[index]
@@ -189,11 +196,11 @@ func validatePreparedSnapshotForTree(snapshot PreparedSessionSnapshot) (map[stri
 		if entry.RecordVersion == 1 && entry.SessionID != snapshot.SessionID {
 			return nil, fmt.Errorf("session: version 1 snapshot entry %q has no matching physical session ID", entry.ID)
 		}
-		if entry.ParentID != "" {
+		if hasVersionOne && entry.ParentID != "" {
 			if _, exists := entriesByID[entry.ParentID]; !exists {
 				return nil, fmt.Errorf("session: snapshot entry %q has missing or forward parent %q", entry.ID, entry.ParentID)
 			}
-		} else if index > 0 && entry.RecordVersion == 1 {
+		} else if hasVersionOne && entry.ParentID == "" && index > 0 && entry.RecordVersion == 1 {
 			return nil, fmt.Errorf("session: version 1 snapshot entry %q introduces a second root", entry.ID)
 		}
 		if err := validateVersion1EntryCoordinates(entry); err != nil {
@@ -203,18 +210,22 @@ func validatePreparedSnapshotForTree(snapshot PreparedSessionSnapshot) (map[stri
 			return nil, fmt.Errorf("session: invalid snapshot checkpoint %q: %w", entry.ID, err)
 		}
 		if entry.Seq == 0 {
-			if seqsStarted {
+			if hasVersionOne && seqsStarted {
 				return nil, fmt.Errorf("session: snapshot entry %q has no sequence after sequenced data", entry.ID)
 			}
 		} else {
-			if previous, exists := seqs[entry.Seq]; exists {
-				return nil, fmt.Errorf("session: snapshot entries %q and %q repeat sequence %d", previous, entry.ID, entry.Seq)
-			}
-			if entry.Seq <= maxSeq {
-				return nil, fmt.Errorf("session: snapshot sequence %d does not increase at entry %q", entry.Seq, entry.ID)
+			if hasVersionOne {
+				if previous, exists := seqs[entry.Seq]; exists {
+					return nil, fmt.Errorf("session: snapshot entries %q and %q repeat sequence %d", previous, entry.ID, entry.Seq)
+				}
+				if entry.Seq <= maxSeq {
+					return nil, fmt.Errorf("session: snapshot sequence %d does not increase at entry %q", entry.Seq, entry.ID)
+				}
 			}
 			seqs[entry.Seq] = entry.ID
-			maxSeq = entry.Seq
+			if entry.Seq > maxSeq {
+				maxSeq = entry.Seq
+			}
 			seqsStarted = true
 		}
 		branchID := entry.BranchID
@@ -237,8 +248,10 @@ func validatePreparedSnapshotForTree(snapshot PreparedSessionSnapshot) (map[stri
 	if err := validateDurableTranscriptCoordinates(rows); err != nil {
 		return nil, fmt.Errorf("session: invalid snapshot transcript coordinates: %w", err)
 	}
-	if _, exists := branchParents[snapshot.ActiveBranchID]; !exists {
-		return nil, fmt.Errorf("session: snapshot active branch %q is not in durable branch metadata", snapshot.ActiveBranchID)
+	if hasVersionOne {
+		if _, exists := branchParents[snapshot.ActiveBranchID]; !exists {
+			return nil, fmt.Errorf("session: snapshot active branch %q is not in durable branch metadata", snapshot.ActiveBranchID)
+		}
 	}
 	if snapshot.ActiveLeafEntryID == "" {
 		if len(entriesByID) != 0 {
@@ -253,7 +266,7 @@ func validatePreparedSnapshotForTree(snapshot PreparedSessionSnapshot) (map[stri
 	if !exists {
 		return nil, fmt.Errorf("session: snapshot active leaf %q is not in durable entries", snapshot.ActiveLeafEntryID)
 	}
-	if !durableBranchContains(branchParents, snapshot.ActiveBranchID, leafBranch) {
+	if hasVersionOne && !durableBranchContains(branchParents, snapshot.ActiveBranchID, leafBranch) {
 		return nil, fmt.Errorf("session: snapshot active leaf %q is outside active branch %q", snapshot.ActiveLeafEntryID, snapshot.ActiveBranchID)
 	}
 	for _, sourceID := range snapshot.PublishedView.SourceEntryIDs {
