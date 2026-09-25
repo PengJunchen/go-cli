@@ -18,7 +18,16 @@ var (
 	ErrRunCommitStreamingUnsupported            = errors.New("core: durable streaming dispatch requires an attested synchronous stream sink")
 	ErrRunCommitQuiescenceUnproven              = errors.New("core: tool completion did not prove local resource quiescence")
 	ErrRunCommitCompactionProjectionUnavailable = errors.New("core: durable compaction requires a typed history projection")
+	ErrRunCommitSinkPanicked                    = errors.New("core: run commit sink panicked")
 )
+
+type runCommitSinkPanicError struct{ operation string }
+
+func (err runCommitSinkPanicError) Error() string {
+	return fmt.Sprintf("%s during %s", ErrRunCommitSinkPanicked, err.operation)
+}
+
+func (runCommitSinkPanicError) Unwrap() error { return ErrRunCommitSinkPanicked }
 
 type runCommitLoopScopeKey struct{}
 
@@ -99,7 +108,12 @@ func dispatchPreparedRunCommitCall(ctx context.Context, invocation tools.Prepare
 		result.err = err
 		var pending tools.PendingExecutionError
 		if errors.As(err, &pending) {
-			registerRunPendingResource(ctx, invocation.NormalizedCall().ID, invocation.NormalizedCall().Name, pending.ExecutionDone())
+			pendingDone := pending.ExecutionDone()
+			if !attachRunCompletionPendingExecution(ctx, taskID, pendingDone) {
+				// Non-R2/legacy callers have no prepared completion placeholder.
+				// Preserve their independent pending-resource ownership path.
+				registerRunPendingResource(ctx, invocation.NormalizedCall().ID, invocation.NormalizedCall().Name, pendingDone)
+			}
 			if pending.OutcomeUnknown() {
 				markRunOutcomeUnknown(ctx)
 			}
@@ -413,7 +427,7 @@ func (consumer *runCommitConsumer) executeSequentialCall(
 	if !dispatch.committed {
 		dispatchState = DispatchStateNotDispatched
 		resourceState = RunExecutionQuiescent
-	} else if hasDetails && details.state == runCompletionTaskReady && validRunCompletionProof(details.proof) {
+	} else if hasDetails && details.state == runCompletionTaskReady && !details.pendingResourceUnproven && validRunCompletionProof(details.proof) {
 		resourceState = RunExecutionQuiescent
 		proof = details.proof
 	}
@@ -463,7 +477,7 @@ func (consumer *runCommitConsumer) resolvePreparedTask(ctx context.Context, task
 	if !ok {
 		return false, nil
 	}
-	if details.state != runCompletionTaskReady || !validRunCompletionProof(details.proof) {
+	if details.state != runCompletionTaskReady || details.pendingResourceUnproven || !validRunCompletionProof(details.proof) {
 		if details.state != runCompletionTaskResourceOpen {
 			return false, nil
 		}
@@ -472,7 +486,7 @@ func (consumer *runCommitConsumer) resolvePreparedTask(ctx context.Context, task
 			return false, err
 		}
 		details, ok = runCompletionDetails(ctx, taskID)
-		if !ok || details.state != runCompletionTaskReady || !validRunCompletionProof(details.proof) {
+		if !ok || details.state != runCompletionTaskReady || details.pendingResourceUnproven || !validRunCompletionProof(details.proof) {
 			return false, nil
 		}
 		if firstExecution.CompletionProof == "" {
@@ -664,7 +678,7 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 		if !committed {
 			dispatchState = DispatchStateNotDispatched
 			resourceState = RunExecutionQuiescent
-		} else if details, ok := runCompletionDetails(ctx, action.taskID); ok && details.state == runCompletionTaskReady && validRunCompletionProof(details.proof) {
+		} else if details, ok := runCompletionDetails(ctx, action.taskID); ok && details.state == runCompletionTaskReady && !details.pendingResourceUnproven && validRunCompletionProof(details.proof) {
 			resourceState = RunExecutionQuiescent
 			proof = details.proof
 		}
@@ -722,7 +736,7 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 			continue
 		}
 		details, ok := runCompletionDetails(ctx, action.taskID)
-		if !ok || details.state != runCompletionTaskReady || !validRunCompletionProof(details.proof) {
+		if !ok || details.state != runCompletionTaskReady || details.pendingResourceUnproven || !validRunCompletionProof(details.proof) {
 			runErr = errors.Join(runErr, runCommitQuiescenceError{cause: ErrRunCommitQuiescenceUnproven})
 			continue
 		}

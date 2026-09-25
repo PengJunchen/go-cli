@@ -17,6 +17,7 @@ import (
 
 type runOwnerCompletionTestAPI interface {
 	RegisterCompletionTask(ActionIntent, tools.PreparedCompletionSignal) uint64
+	AttachPendingExecution(uint64, <-chan struct{}) bool
 	HandoffCompletionTask(uint64)
 	finishCompletionTaskHandoff(uint64, <-chan struct{}, bool, tools.PreparedCompletionProof)
 	completionTaskSnapshot(uint64) (runCompletionTaskState, tools.PreparedCompletionProof, bool)
@@ -24,6 +25,8 @@ type runOwnerCompletionTestAPI interface {
 	CleanupCommitContext(context.Context) context.Context
 	markRunCommitTerminalSynced()
 	runCommitTerminalSynced() bool
+	markCompletionReceiptDurable(uint64)
+	markCompletionProofExecutionDurable(uint64)
 }
 
 type runCommitLeaseTestSink struct {
@@ -32,6 +35,25 @@ type runCommitLeaseTestSink struct {
 	closeStarted chan struct{}
 	closeRelease <-chan struct{}
 	startOnce    sync.Once
+}
+
+type runCommitLatePanicTestSink struct {
+	*runCommitLeaseTestSink
+	panicOperation string
+}
+
+func (sink *runCommitLatePanicTestSink) RecordExecution(context.Context, ActionExecution) error {
+	if sink.panicOperation == "record_execution" {
+		panic("untrusted sink panic payload")
+	}
+	return nil
+}
+
+func (sink *runCommitLatePanicTestSink) ResolveExecution(context.Context, ExecutionResolution) error {
+	if sink.panicOperation == "resolve_execution" {
+		panic("untrusted sink panic payload")
+	}
+	return nil
 }
 
 func (sink *runCommitLeaseTestSink) CommitInput(context.Context, RunCommitInput) error { return nil }
@@ -80,6 +102,17 @@ func completionTestIntent(ctx context.Context, owner *runOwner, suffix string) A
 		ToolCallID:                 "call-" + suffix,
 		ActionID:                   "action-" + suffix,
 	}
+}
+
+func completionTestDone(mode string) (<-chan struct{}, chan struct{}) {
+	if mode == "nil" {
+		return nil, nil
+	}
+	done := make(chan struct{})
+	if mode == "closed" {
+		close(done)
+	}
+	return done, done
 }
 
 func bindTestRunCommitSink(owner *runOwner, sink RunCommitSink) {
@@ -158,6 +191,218 @@ func TestRunOwnerCompletionTaskDistinguishesNoProofFromEmptyProof(t *testing.T) 
 	require.NoError(t, err)
 	assert.Equal(t, RunOutcomeSuccess, result.Outcome)
 	assert.Equal(t, 1, guard.releaseCount())
+}
+
+func TestRunOwnerCompletionTaskJoinsPreparedAndPendingResourcesAsOneGroup(t *testing.T) {
+	for _, testCase := range []struct {
+		name         string
+		signalMode   string
+		pendingSeen  bool
+		pendingMode  string
+		wantUnproven bool
+	}{
+		{name: "wrapped distinct channels", signalMode: "open", pendingSeen: true, pendingMode: "open"},
+		{name: "closed signal waits for open pending resource", signalMode: "closed", pendingSeen: true, pendingMode: "open"},
+		{name: "open signal waits for closed pending resource", signalMode: "open", pendingSeen: true, pendingMode: "closed"},
+		{name: "same channel is counted once", signalMode: "open", pendingSeen: true, pendingMode: "same"},
+		{name: "nil signal tracks pending resource", signalMode: "nil", pendingSeen: true, pendingMode: "open"},
+		{name: "nil pending marks signal unproven", signalMode: "open", pendingSeen: true, pendingMode: "nil", wantUnproven: true},
+		{name: "closed signal plus nil pending keeps marker unproven", signalMode: "closed", pendingSeen: true, pendingMode: "nil", wantUnproven: true},
+		{name: "nil signal and nil pending has no fake resource", signalMode: "nil", pendingSeen: true, pendingMode: "nil", wantUnproven: true},
+		{name: "nil signal without pending error has no fake resource", signalMode: "nil"},
+		{name: "both distinct channels already closed", signalMode: "closed", pendingSeen: true, pendingMode: "closed"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			guard := newCountingRunSlotGuard()
+			owner := newRunOwner(context.Background(), guard, guard.claim, nil)
+			ctx := withRunID(owner.ctx, owner.claim.ID)
+			api := completionTestAPI(t, owner)
+			signalDone, signalChannel := completionTestDone(testCase.signalMode)
+			pendingDone, pendingChannel := completionTestDone(testCase.pendingMode)
+			if testCase.pendingMode == "same" {
+				pendingDone = signalDone
+				pendingChannel = signalChannel
+			}
+			taskID := api.RegisterCompletionTask(completionTestIntent(ctx, owner, "group"), tools.PreparedCompletionSignal{})
+			require.NotZero(t, taskID)
+			if testCase.pendingSeen {
+				require.True(t, api.AttachPendingExecution(taskID, pendingDone))
+			}
+			api.finishCompletionTaskHandoff(taskID, signalDone, true, tools.CompletionInlinePipelineJoined)
+
+			openChannels := make([]chan struct{}, 0, 2)
+			if signalChannel != nil && testCase.signalMode == "open" {
+				openChannels = append(openChannels, signalChannel)
+			}
+			if pendingChannel != nil && testCase.pendingMode == "open" && pendingChannel != signalChannel {
+				openChannels = append(openChannels, pendingChannel)
+			}
+			if len(openChannels) > 0 {
+				state, _, ok := api.completionTaskSnapshot(taskID)
+				require.True(t, ok)
+				assert.Equal(t, runCompletionTaskResourceOpen, state, "worker ownership is transferred to one combined resource group")
+				assert.Equal(t, 1, owner.Snapshot().PendingWorkers, "two underlying channels still count as one action resource")
+				close(openChannels[0])
+				if len(openChannels) > 1 {
+					time.Sleep(2 * time.Millisecond)
+					state, _, _ = api.completionTaskSnapshot(taskID)
+					assert.Equal(t, runCompletionTaskResourceOpen, state, "one channel cannot claim the whole group joined")
+					assert.Equal(t, 1, owner.Snapshot().PendingWorkers)
+					close(openChannels[1])
+				}
+				require.Eventually(t, func() bool {
+					state, _, ok := api.completionTaskSnapshot(taskID)
+					return ok && state == runCompletionTaskReady
+				}, time.Second, time.Millisecond)
+			} else {
+				state, _, ok := api.completionTaskSnapshot(taskID)
+				require.True(t, ok)
+				if testCase.signalMode == "nil" && (!testCase.pendingSeen || testCase.pendingMode == "nil") {
+					assert.Equal(t, runCompletionTaskNoProof, state)
+				} else {
+					assert.Equal(t, runCompletionTaskReady, state)
+				}
+			}
+
+			details, ok := owner.completionDetails(taskID)
+			require.True(t, ok)
+			assert.Equal(t, testCase.wantUnproven, details.pendingResourceUnproven)
+			if testCase.signalMode == "nil" {
+				assert.Empty(t, details.proof, "joining the underlying resource does not manufacture prepared-signal proof")
+			} else if details.state == runCompletionTaskReady {
+				assert.Equal(t, tools.CompletionInlinePipelineJoined, details.proof)
+			}
+			wantPending := 0
+			if details.state == runCompletionTaskResourceOpen {
+				wantPending = 1
+			}
+			assert.Equal(t, wantPending, owner.Snapshot().PendingWorkers)
+		})
+	}
+}
+
+func TestRunOwnerCompletionTaskCancellationKeepsCombinedGroupOwned(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	guard := newCountingRunSlotGuard()
+	owner := newRunOwner(parent, guard, guard.claim, nil)
+	owner.setCleanupTimeout(35 * time.Millisecond)
+	signalDone := make(chan struct{})
+	pendingDone := make(chan struct{})
+	registered := make(chan struct{})
+	cancelObserved := make(chan struct{})
+	allowHandoff := make(chan struct{})
+	handedOff := make(chan struct{})
+	runDone := make(chan struct{})
+	var result Result
+	var runErr error
+	go func() {
+		defer close(runDone)
+		result, runErr = owner.run(35*time.Millisecond, func(ctx context.Context) (Result, error) {
+			api := completionTestAPI(t, owner)
+			taskID := api.RegisterCompletionTask(completionTestIntent(ctx, owner, "cancel-group"), tools.PreparedCompletionSignal{})
+			require.NotZero(t, taskID)
+			require.True(t, api.AttachPendingExecution(taskID, pendingDone))
+			close(registered)
+			<-ctx.Done()
+			close(cancelObserved)
+			<-allowHandoff
+			assert.Equal(t, 1, owner.Snapshot().PendingWorkers, "the placeholder remains owned while Dispatch worker has not handed off")
+			api.finishCompletionTaskHandoff(taskID, signalDone, true, tools.CompletionInlinePipelineJoined)
+			assert.Equal(t, 1, owner.Snapshot().PendingWorkers, "worker-to-resource transfer has no quiescent gap")
+			close(handedOff)
+			return Result{Outcome: RunOutcomeUnknown}, ctx.Err()
+		})
+	}()
+	<-registered
+	cancel()
+	<-cancelObserved
+	assert.Equal(t, 1, owner.Snapshot().PendingWorkers, "cancellation cannot release the in-flight completion placeholder")
+	close(allowHandoff)
+	<-handedOff
+	select {
+	case <-runDone:
+	case <-time.After(time.Second):
+		t.Fatal("bounded owner cleanup did not return while both underlying channels remained open")
+	}
+	require.ErrorIs(t, runErr, context.Canceled)
+	assert.Equal(t, RunExecutionCleanupPending, result.ExecutionState)
+	assert.Equal(t, 1, result.StatusHandle.Snapshot().PendingWorkers)
+	assert.Zero(t, guard.releaseCount(), "the combined group still has live resources")
+
+	close(signalDone)
+	time.Sleep(2 * time.Millisecond)
+	assert.Equal(t, 1, result.StatusHandle.Snapshot().PendingWorkers, "closing the prepared wrapper alone cannot release the underlying execution")
+	close(pendingDone)
+	select {
+	case <-owner.done:
+	case <-time.After(time.Second):
+		t.Fatal("owner did not release the group after both local resources joined")
+	}
+	assert.Zero(t, result.StatusHandle.Snapshot().PendingWorkers)
+	assert.Equal(t, 1, guard.releaseCount())
+}
+
+func TestRunOwnerCompletionWaitRechecksWholeResourceGroup(t *testing.T) {
+	guard := newCountingRunSlotGuard()
+	owner := newRunOwner(context.Background(), guard, guard.claim, nil)
+	ctx, cancel := context.WithCancel(withRunID(owner.ctx, owner.claim.ID))
+	defer cancel()
+	api := completionTestAPI(t, owner)
+	signalDone := make(chan struct{})
+	pendingDone := make(chan struct{})
+	taskID := api.RegisterCompletionTask(completionTestIntent(ctx, owner, "wait-group"), tools.PreparedCompletionSignal{})
+	require.NotZero(t, taskID)
+	require.True(t, api.AttachPendingExecution(taskID, pendingDone))
+	api.finishCompletionTaskHandoff(taskID, signalDone, true, tools.CompletionInlinePipelineJoined)
+
+	close(signalDone)
+	assert.Equal(t, runCompletionTaskResourceOpen, func() runCompletionTaskState {
+		state, _, _ := api.completionTaskSnapshot(taskID)
+		return state
+	}())
+	assert.Equal(t, 1, owner.Snapshot().PendingWorkers)
+
+	cancel()
+	ready, err := api.waitForCompletionTasks(ctx, []uint64{taskID})
+	assert.False(t, ready, "cancellation recheck still evaluates the complete channel group")
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Equal(t, 1, owner.Snapshot().PendingWorkers)
+
+	close(pendingDone)
+	ready, err = api.waitForCompletionTasks(context.Background(), []uint64{taskID})
+	assert.NoError(t, err)
+	assert.True(t, ready, "proof is exposed only after both local resources have joined")
+	state, proof, ok := api.completionTaskSnapshot(taskID)
+	require.True(t, ok)
+	assert.Equal(t, runCompletionTaskReady, state)
+	assert.Equal(t, tools.CompletionInlinePipelineJoined, proof)
+	assert.Zero(t, owner.Snapshot().PendingWorkers)
+}
+
+func TestRunOwnerCompletionWaitDoesNotTurnNilPendingHandleIntoProof(t *testing.T) {
+	guard := newCountingRunSlotGuard()
+	owner := newRunOwner(context.Background(), guard, guard.claim, nil)
+	ctx := withRunID(owner.ctx, owner.claim.ID)
+	api := completionTestAPI(t, owner)
+	done := make(chan struct{})
+	close(done)
+	taskID := api.RegisterCompletionTask(completionTestIntent(ctx, owner, "nil-pending-wait"), tools.PreparedCompletionSignal{})
+	require.NotZero(t, taskID)
+	require.True(t, api.AttachPendingExecution(taskID, nil))
+	api.finishCompletionTaskHandoff(taskID, done, true, tools.CompletionInlinePipelineJoined)
+
+	ready, err := api.waitForCompletionTasks(context.Background(), []uint64{taskID})
+	assert.NoError(t, err)
+	assert.False(t, ready, "local signal proof cannot override an explicitly nil pending-resource handle")
+	state, proof, ok := api.completionTaskSnapshot(taskID)
+	require.True(t, ok)
+	assert.Equal(t, runCompletionTaskReady, state, "the local channel joined, but its group remains proof-gated")
+	assert.Equal(t, tools.CompletionInlinePipelineJoined, proof, "the original signal proof remains inspectable")
+	details, ok := owner.completionDetails(taskID)
+	require.True(t, ok)
+	assert.True(t, details.pendingResourceUnproven)
+	assert.Zero(t, owner.Snapshot().PendingWorkers, "nil pending handles do not create fake never-ending resource ownership")
 }
 
 func TestRunOwnerPreparedSignalCanBeRegisteredBeforeDoneIsAttached(t *testing.T) {
@@ -411,6 +656,100 @@ func TestRunOwnerQuarantinesPanickedLeaseReleaseWithoutRetrying(t *testing.T) {
 	assert.Equal(t, RunExecutionQuarantined, result.ExecutionState)
 	assert.EqualValues(t, 1, sink.closeCalls.Load(), "an uncertain panic is not retried")
 	assert.Equal(t, 1, guard.releaseCount(), "lease panic cannot crash the supervisor or leak the local claim")
+}
+
+func TestRunOwnerLateCompletionSinkPanicsAreContained(t *testing.T) {
+	for _, operation := range []string{"record_execution", "resolve_execution"} {
+		t.Run(operation, func(t *testing.T) {
+			guard := newCountingRunSlotGuard()
+			owner := newRunOwner(context.Background(), guard, guard.claim, nil)
+			sink := &runCommitLatePanicTestSink{
+				runCommitLeaseTestSink: &runCommitLeaseTestSink{},
+				panicOperation:         operation,
+			}
+			ctx := withRunID(WithRunCommit(context.Background(), sink, RunCommitBinding{
+				SessionID:   "session-test",
+				WorkspaceID: "workspace-test",
+			}), owner.claim.ID)
+			intent := completionTestIntent(ctx, owner, operation)
+			taskID := completionTestAPI(t, owner).RegisterCompletionTask(intent, tools.PreparedCompletionSignal{})
+			require.NotZero(t, taskID)
+			done := make(chan struct{})
+			close(done)
+			api := completionTestAPI(t, owner)
+			api.finishCompletionTaskHandoff(taskID, done, true, tools.CompletionInlinePipelineJoined)
+			api.markRunCommitTerminalSynced()
+			api.markCompletionReceiptDurable(taskID)
+			if operation == "resolve_execution" {
+				api.markCompletionProofExecutionDurable(taskID)
+			}
+			owner.mu.Lock()
+			owner.callbackCtx = ctx
+			owner.mu.Unlock()
+
+			var drainErr error
+			panicked := false
+			func() {
+				defer func() {
+					if recover() != nil {
+						panicked = true
+					}
+				}()
+				drainErr = owner.drainLateCompletionTasks()
+			}()
+			assert.False(t, panicked, "late sink panic must be contained so cleanup can finish")
+			require.ErrorIs(t, drainErr, ErrRunCommitSinkPanicked)
+			assert.NotContains(t, drainErr.Error(), "untrusted sink panic payload")
+		})
+	}
+}
+
+func TestRunOwnerQuarantinesLateCompletionSinkPanicsAndReleasesAfterJoin(t *testing.T) {
+	for _, operation := range []string{"record_execution", "resolve_execution"} {
+		t.Run(operation, func(t *testing.T) {
+			guard := newCountingRunSlotGuard()
+			owner := newRunOwner(context.Background(), guard, guard.claim, nil)
+			sink := &runCommitLatePanicTestSink{
+				runCommitLeaseTestSink: &runCommitLeaseTestSink{},
+				panicOperation:         operation,
+			}
+			bindTestRunCommitSink(owner, sink)
+
+			result, runErr := owner.run(time.Second, func(ctx context.Context) (Result, error) {
+				api := completionTestAPI(t, owner)
+				taskID := api.RegisterCompletionTask(completionTestIntent(ctx, owner, operation), tools.PreparedCompletionSignal{})
+				require.NotZero(t, taskID)
+				done := make(chan struct{})
+				close(done)
+				api.finishCompletionTaskHandoff(taskID, done, true, tools.CompletionInlinePipelineJoined)
+				api.markCompletionReceiptDurable(taskID)
+				if operation == "resolve_execution" {
+					api.markCompletionProofExecutionDurable(taskID)
+				}
+				api.markRunCommitTerminalSynced()
+				return Result{Outcome: RunOutcomeSuccess, Message: "terminal persisted"}, nil
+			})
+
+			require.ErrorIs(t, runErr, ErrRunCommitSinkPanicked)
+			assert.NotContains(t, runErr.Error(), "untrusted sink panic payload")
+			assert.Equal(t, RunOutcomeUnknown, result.Outcome)
+			assert.False(t, result.Success, "a failed late sink write cannot produce a success ACK")
+			assert.Equal(t, RunExecutionQuarantined, result.ExecutionState)
+			assert.Equal(t, RunExecutionQuarantined, owner.Snapshot().ExecutionState)
+			assert.Zero(t, owner.Snapshot().PendingWorkers, "joined completion resources are still released")
+			assert.Equal(t, 1, guard.releaseCount(), "the run slot is released once after the completion task joined")
+			assert.EqualValues(t, 1, sink.closeCalls.Load(), "the sink lease is released once after the completion task joined")
+
+			details, ok := owner.completionDetails(1)
+			require.True(t, ok)
+			assert.False(t, details.resolutionDurable, "a panicked resolution cannot clear the unresolved marker")
+			if operation == "record_execution" {
+				assert.False(t, details.proofExecutionDurable, "a panicked execution append is not acknowledged")
+			} else {
+				assert.True(t, details.proofExecutionDurable, "the prior proof row remains acknowledged")
+			}
+		})
+	}
 }
 
 func TestRunOwnerWithBoundSinkCannotAcknowledgeUnsyncedTerminal(t *testing.T) {

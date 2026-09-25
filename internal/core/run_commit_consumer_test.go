@@ -46,6 +46,60 @@ type consumerCommitContext struct {
 	deadline    time.Time
 }
 
+type runCommitPendingTestTracker struct {
+	pendingResources   int
+	pendingAttachments int
+	attachedDone       []<-chan struct{}
+	handoffs           int
+}
+
+func (*runCommitPendingTestTracker) RegisterWorker(string, string) func() { return func() {} }
+func (tracker *runCommitPendingTestTracker) RegisterPendingResource(string, string, <-chan struct{}) {
+	tracker.pendingResources++
+}
+func (*runCommitPendingTestTracker) RegisterCompletionTask(ActionIntent, tools.PreparedCompletionSignal) uint64 {
+	return 1
+}
+func (tracker *runCommitPendingTestTracker) AttachPendingExecution(_ uint64, done <-chan struct{}) bool {
+	tracker.pendingAttachments++
+	tracker.attachedDone = append(tracker.attachedDone, done)
+	return true
+}
+func (tracker *runCommitPendingTestTracker) HandoffCompletionTask(uint64) { tracker.handoffs++ }
+
+type runCommitPendingPreparedInvocation struct {
+	tools.PreparedInvocation
+	completionSignal    *tools.PreparedCompletionSignal
+	pendingDoneOverride <-chan struct{}
+	overridePendingDone bool
+}
+
+func (invocation runCommitPendingPreparedInvocation) CompletionSignal() tools.PreparedCompletionSignal {
+	if invocation.completionSignal != nil {
+		return *invocation.completionSignal
+	}
+	return invocation.PreparedInvocation.CompletionSignal()
+}
+
+func (invocation runCommitPendingPreparedInvocation) Dispatch(ctx context.Context) (*tools.ToolResult, error) {
+	_, err := invocation.PreparedInvocation.Dispatch(ctx)
+	if err != nil {
+		return nil, err
+	}
+	done := invocation.PreparedInvocation.CompletionSignal().Done()
+	if invocation.overridePendingDone {
+		done = invocation.pendingDoneOverride
+	}
+	return nil, runCommitPreparedPendingError{done: done}
+}
+
+type runCommitPreparedPendingError struct{ done <-chan struct{} }
+
+func (runCommitPreparedPendingError) Error() string                      { return "prepared action outcome is pending" }
+func (runCommitPreparedPendingError) OutcomeUnknown() bool               { return true }
+func (err runCommitPreparedPendingError) ExecutionDone() <-chan struct{} { return err.done }
+func (runCommitPreparedPendingError) Unwrap() error                      { return errors.New("prepared action interrupted") }
+
 func (s *consumerTestSink) recordContext(ctx context.Context) {
 	deadline, hasDeadline := ctx.Deadline()
 	_, _, bound := RunCommitFromContext(ctx)
@@ -555,4 +609,61 @@ func TestRunCommitConsumerParallelCancellationDoesNotReadOrCopyLiveWorkerResult(
 	require.Equal(t, lastKnownID, receipts[len(receipts)-1].ToolCallID)
 	require.NotNil(t, terminal)
 	require.Equal(t, RunOutcomeUnknown, terminal.Outcome)
+}
+
+func TestDispatchPendingExecutionErrorDoesNotDoubleTrackPreparedSignal(t *testing.T) {
+	for _, testCase := range []struct {
+		name                   string
+		completionSignal       bool
+		pendingDoneDistinct    bool
+		pendingDoneNil         bool
+		registerPreparedTask   bool
+		wantPendingAttachments int
+		wantPendingResources   int
+		wantHandoffs           int
+	}{
+		{name: "same prepared signal", completionSignal: true, registerPreparedTask: true, wantPendingAttachments: 1, wantHandoffs: 1},
+		{name: "pending error with nil resource channel", completionSignal: false, pendingDoneNil: true, registerPreparedTask: true, wantPendingAttachments: 1, wantHandoffs: 1},
+		{name: "wrapped distinct resource channel", completionSignal: true, pendingDoneDistinct: true, registerPreparedTask: true, wantPendingAttachments: 1, wantHandoffs: 1},
+		{name: "legacy caller without prepared task", wantPendingResources: 1},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			base, closeQueue := prepareCompletionTestWrite(context.Background(), t)
+			defer closeQueue()
+			tracker := &runCommitPendingTestTracker{}
+			ctx := context.WithValue(context.Background(), runOwnerContextKey{}, tracker)
+			signal := base.CompletionSignal()
+			if !testCase.completionSignal {
+				empty := tools.PreparedCompletionSignal{}
+				signal = empty
+			}
+			call := runCommitPendingPreparedInvocation{PreparedInvocation: base}
+			if !testCase.completionSignal {
+				empty := tools.PreparedCompletionSignal{}
+				call.completionSignal = &empty
+			}
+			if testCase.pendingDoneDistinct || testCase.pendingDoneNil {
+				call.overridePendingDone = true
+				if testCase.pendingDoneDistinct {
+					call.pendingDoneOverride = make(chan struct{})
+				}
+			}
+			var taskID uint64
+			if testCase.registerPreparedTask {
+				taskID = registerRunCompletionTask(ctx, ActionIntent{}, signal)
+			}
+			dispatch := dispatchPreparedRunCommitCall(ctx, call, taskID)
+
+			require.True(t, dispatch.returned)
+			require.True(t, dispatch.committed)
+			require.Error(t, dispatch.err)
+			require.Equal(t, testCase.wantHandoffs, tracker.handoffs, "prepared placeholder is handed off once after Dispatch returns")
+			require.Equal(t, testCase.wantPendingAttachments, tracker.pendingAttachments)
+			if testCase.pendingDoneNil {
+				require.Len(t, tracker.attachedDone, 1)
+				require.Nil(t, tracker.attachedDone[0], "nil PEE handle is attached as unproven state, not replaced with a fake channel")
+			}
+			require.Equal(t, testCase.wantPendingResources, tracker.pendingResources, "only callers without a prepared task use the legacy resource hook")
+		})
+	}
 }
