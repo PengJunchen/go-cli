@@ -150,6 +150,24 @@ func TestClassifyDefault(t *testing.T) {
 	}
 }
 
+func TestClassifyUnsupportedPostToolUseHook(t *testing.T) {
+	path := "/workspace/project/.go-cli/hooks.yaml"
+	err := &UnsupportedPostToolUseHookError{Path: path, Index: 2}
+	ufe := classifyError(err)
+	if ufe == nil {
+		t.Fatal("expected non-nil UserFriendlyError")
+	}
+	if !strings.Contains(strings.ToLower(ufe.Action), "posttooluse") {
+		t.Errorf("expected action to identify PostToolUse, got %q", ufe.Action)
+	}
+	if !strings.Contains(ufe.Hint, path) || !strings.Contains(ufe.Hint, "hook 2") {
+		t.Errorf("expected hint to identify config path and hook index, got %q", ufe.Hint)
+	}
+	if !errors.Is(ufe, ErrPreparedPostToolUseHookUnsupported) {
+		t.Error("classification should preserve errors.Is for unsupported PostToolUse hooks")
+	}
+}
+
 // TestClassifyNil verifies that nil input returns nil.
 func TestClassifyNil(t *testing.T) {
 	if ufe := classifyError(nil); ufe != nil {

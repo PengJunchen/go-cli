@@ -48,6 +48,23 @@ const defaultMaxTokens = 8000
 // safely run in the prepared tool-dispatch pipeline yet.
 var ErrPreparedPostToolUseHookUnsupported = errors.New("cli: PostToolUse shell hooks are unsupported by prepared execution")
 
+// UnsupportedPostToolUseHookError identifies the configured hook that cannot
+// run in the prepared execution pipeline. It deliberately omits the command
+// contents so user-facing errors can identify the configuration location
+// without disclosing executable text.
+type UnsupportedPostToolUseHookError struct {
+	Path  string
+	Index int
+}
+
+func (e *UnsupportedPostToolUseHookError) Error() string {
+	return fmt.Sprintf("%v: %s hook %d", ErrPreparedPostToolUseHookUnsupported, e.Path, e.Index)
+}
+
+func (e *UnsupportedPostToolUseHookError) Unwrap() error {
+	return ErrPreparedPostToolUseHookUnsupported
+}
+
 // cliDefaultOpenAICompatibleBaseURL mirrors EinoProvider's default so small
 // model credential reuse can compare origins when provider.base_url is empty.
 const cliDefaultOpenAICompatibleBaseURL = "https://api.openai.com/v1"
@@ -326,9 +343,9 @@ func AssembleAgent(
 	s, thinkingLevel := newAssembleState(ctx, rc, providerName, modelName, out, opts...)
 	s.loadConfiguredShellHooks()
 	if len(s.unsupportedPostToolUseHooks) > 0 {
-		hookPath := s.unsupportedPostToolUseHooks[0]
+		hook := s.unsupportedPostToolUseHooks[0]
 		s.runCleanup()
-		return nil, fmt.Errorf("%w: %s", ErrPreparedPostToolUseHookUnsupported, hookPath)
+		return nil, &UnsupportedPostToolUseHookError{Path: hook.Path, Index: hook.Index}
 	}
 
 	// Assemble subsystems in dependency order.
@@ -605,7 +622,7 @@ type assembleState struct {
 	hookMgr                     *core.HookManager
 	shellHooksLoaded            bool
 	shellHooks                  []core.HookSystem
-	unsupportedPostToolUseHooks []string
+	unsupportedPostToolUseHooks []UnsupportedPostToolUseHookError
 
 	// Approval section
 	modeResolver approval.PermissionModeResolver
@@ -1029,7 +1046,7 @@ func (s *assembleState) loadShellHooks(path string) {
 			continue
 		}
 		if event == core.EventPostToolUse {
-			s.unsupportedPostToolUseHooks = append(s.unsupportedPostToolUseHooks, fmt.Sprintf("%s hook %d", path, i))
+			s.unsupportedPostToolUseHooks = append(s.unsupportedPostToolUseHooks, UnsupportedPostToolUseHookError{Path: path, Index: i})
 		}
 		timeoutStr := hc.Timeout
 		if timeoutStr == "" {
