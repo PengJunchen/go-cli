@@ -216,28 +216,23 @@ func TestCanonicalLoopClosesParallelReceiptsOnUnknownToolOutcome(t *testing.T) {
 }
 
 func TestCanonicalLoopMarksParallelCancellationSnapshotUnknown(t *testing.T) {
-	started := make(chan struct{}, 1)
-	completed := make(chan struct{}, 1)
+	started := make(chan struct{}, 2)
 	registry := mock.NewMockToolServer()
-	require.NoError(t, registry.Register(context.Background(), &testToolDef{
-		name: "wait",
-		handler: func(ctx context.Context, _ tools.ToolCall) (*tools.ToolResult, error) {
-			started <- struct{}{}
-			<-ctx.Done()
-			return nil, ctx.Err()
-		},
-	}))
-	require.NoError(t, registry.Register(context.Background(), &testToolDef{
-		name: "complete",
-		handler: func(context.Context, tools.ToolCall) (*tools.ToolResult, error) {
-			completed <- struct{}{}
-			return &tools.ToolResult{Output: "completed"}, nil
-		},
-	}))
+	for _, name := range []string{"wait-a", "wait-b"} {
+		name := name
+		require.NoError(t, registry.Register(context.Background(), &testToolDef{
+			name: name,
+			handler: func(ctx context.Context, _ tools.ToolCall) (*tools.ToolResult, error) {
+				started <- struct{}{}
+				<-ctx.Done()
+				return nil, ctx.Err()
+			},
+		}))
+	}
 	model := &scriptedChatModel{seq: []*llm.Message{
 		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{
-			{ID: "wait-call", Name: "wait", Args: map[string]any{}},
-			{ID: "complete-call", Name: "complete", Args: map[string]any{}},
+			{ID: "wait-a-call", Name: "wait-a", Args: map[string]any{}},
+			{ID: "wait-b-call", Name: "wait-b", Args: map[string]any{}},
 		}},
 		{Role: llm.RoleAssistant, Content: "must not be requested"},
 	}}
@@ -254,7 +249,7 @@ func TestCanonicalLoopMarksParallelCancellationSnapshotUnknown(t *testing.T) {
 		runDone <- runResult{result: result, err: err}
 	}()
 	<-started
-	<-completed
+	<-started
 	cancel()
 	run := <-runDone
 	require.ErrorIs(t, run.err, context.Canceled)
@@ -268,6 +263,38 @@ func TestCanonicalLoopMarksParallelCancellationSnapshotUnknown(t *testing.T) {
 			outcomes[entry.Message.ToolCallID] = entry.Message.ReceiptOutcome
 		}
 	}
-	require.Equal(t, ReceiptOutcomeUnknown, outcomes["wait-call"])
-	require.Equal(t, ReceiptOutcomeSuccess, outcomes["complete-call"])
+	require.Equal(t, ReceiptOutcomeUnknown, outcomes["wait-a-call"])
+	require.Equal(t, ReceiptOutcomeUnknown, outcomes["wait-b-call"])
+}
+
+func TestCanonicalLoopPublishesReturnedParallelResults(t *testing.T) {
+	registry := mock.NewMockToolServer()
+	for _, name := range []string{"complete-a", "complete-b"} {
+		name := name
+		require.NoError(t, registry.Register(context.Background(), &testToolDef{
+			name: name,
+			handler: func(context.Context, tools.ToolCall) (*tools.ToolResult, error) {
+				return &tools.ToolResult{Output: name + " result"}, nil
+			},
+		}))
+	}
+	model := &scriptedChatModel{seq: []*llm.Message{
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{
+			{ID: "complete-a-call", Name: "complete-a", Args: map[string]any{}},
+			{ID: "complete-b-call", Name: "complete-b", Args: map[string]any{}},
+		}},
+		{Role: llm.RoleAssistant, Content: "parallel work complete"},
+	}}
+	loop := NewLoopAgent(WithLLM(model), WithTools(registry), WithExecutionMode(ExecutionModeParallel))
+	run, err := loop.RunCanonical(context.Background(), Submission{Content: "run tools"})
+	require.NoError(t, err)
+	require.Equal(t, 2, model.idx)
+	outcomes := map[string]string{}
+	for _, entry := range run.Transcript {
+		if entry.Message.Role == string(llm.RoleTool) {
+			outcomes[entry.Message.ToolCallID] = entry.Message.ReceiptOutcome
+		}
+	}
+	require.Equal(t, ReceiptOutcomeSuccess, outcomes["complete-a-call"])
+	require.Equal(t, ReceiptOutcomeSuccess, outcomes["complete-b-call"])
 }
