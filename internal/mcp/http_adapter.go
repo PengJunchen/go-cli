@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tracing"
@@ -118,6 +119,7 @@ func httpProtocolErrorCause(message string, cause error) error {
 const streamableHTTPProtocolVersion = "2025-06-18"
 
 var errSSEResponseMissing = errors.New("mcp: SSE stream ended without the matching JSON-RPC response")
+var errSSELineTooLong = errors.New("mcp: SSE line exceeds response limit")
 
 // defaultHTTPTimeout bounds individual HTTP requests. Network fetch
 // operations (e.g. web search) can legitimately take several seconds, but
@@ -779,11 +781,18 @@ func validSessionID(value string) bool {
 }
 
 func validLastEventID(value string) bool {
-	if value == "" {
+	if value == "" || !utf8.ValidString(value) {
+		return false
+	}
+	if value[0] == ' ' || value[0] == '\t' || value[len(value)-1] == ' ' || value[len(value)-1] == '\t' {
 		return false
 	}
 	for i := 0; i < len(value); i++ {
-		if value[i] < 0x20 || value[i] > 0x7e {
+		// WHATWG SSE permits UTF-8 event IDs except NUL, CR, and LF. A
+		// Last-Event-ID request header must also follow HTTP field-value syntax:
+		// internal SP/HTAB and obs-text are allowed, but other controls, DEL,
+		// and leading/trailing whitespace are not.
+		if (value[i] < 0x20 && value[i] != '\t') || value[i] == 0x7f {
 			return false
 		}
 	}
@@ -811,8 +820,12 @@ func readSSEResponse(body io.Reader, expectedID int64) (map[string]any, string, 
 }
 
 func readSSEResponseWithBudget(body io.Reader, expectedID int64, budget *responseByteBudget) (map[string]any, string, error) {
-	scanner := bufio.NewScanner(budget.wrap(body))
-	scanner.Buffer(make([]byte, 64*1024), maxHTTPResponseSize+1)
+	reader := bufio.NewReaderSize(budget.wrap(body), 64*1024)
+	if prefix, _ := reader.Peek(3); len(prefix) == 3 && bytes.Equal(prefix, []byte{0xef, 0xbb, 0xbf}) {
+		if _, err := reader.Discard(3); err != nil {
+			return nil, "", err
+		}
+	}
 	var dataLines []string
 	eventID := ""
 	eventIDSet := false
@@ -839,8 +852,26 @@ func readSSEResponseWithBudget(body io.Reader, expectedID int64, budget *respons
 		return result, isResponse, err
 	}
 
-	for scanner.Scan() {
-		line := scanner.Text()
+	for {
+		lineBytes, terminated, err := readSSELine(reader)
+		if err != nil {
+			if errors.Is(err, errHTTPResponseTooLarge) {
+				return nil, cursor, httpProtocolErrorCause("SSE response body exceeds size limit", err)
+			}
+			if errors.Is(err, errSSELineTooLong) {
+				return nil, cursor, httpProtocolError("SSE event line exceeds response limit")
+			}
+			if errors.Is(err, io.EOF) {
+				return nil, cursor, errSSEResponseMissing
+			}
+			return nil, cursor, err
+		}
+		if !terminated {
+			// An event whose final line lacks an end-of-line is incomplete and
+			// must be discarded at EOF.
+			return nil, cursor, errSSEResponseMissing
+		}
+		line := string(lineBytes)
 		if line == "" {
 			result, isResponse, err := dispatch()
 			if err != nil {
@@ -869,16 +900,41 @@ func readSSEResponseWithBudget(body io.Reader, expectedID int64, budget *respons
 			}
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		if errors.Is(err, errHTTPResponseTooLarge) {
-			return nil, cursor, httpProtocolErrorCause("SSE response body exceeds size limit", err)
+}
+
+func readSSELine(reader *bufio.Reader) ([]byte, bool, error) {
+	line := make([]byte, 0, 128)
+	for {
+		value, err := reader.ReadByte()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				if len(line) == 0 {
+					return nil, false, io.EOF
+				}
+				return nil, false, nil
+			}
+			return nil, false, err
 		}
-		if errors.Is(err, bufio.ErrTooLong) {
-			return nil, cursor, httpProtocolError("SSE event line exceeds response limit")
+		switch value {
+		case '\n':
+			return line, true, nil
+		case '\r':
+			next, peekErr := reader.Peek(1)
+			if len(next) > 0 && next[0] == '\n' {
+				if _, err := reader.ReadByte(); err != nil {
+					return nil, false, err
+				}
+			} else if peekErr != nil && !errors.Is(peekErr, io.EOF) {
+				return nil, false, peekErr
+			}
+			return line, true, nil
+		default:
+			line = append(line, value)
+			if len(line) > maxHTTPResponseSize {
+				return nil, false, errSSELineTooLong
+			}
 		}
-		return nil, cursor, err
 	}
-	return nil, cursor, errSSEResponseMissing
 }
 
 func parseSSEMessage(raw []byte, expectedID int64) (map[string]any, bool, error) {

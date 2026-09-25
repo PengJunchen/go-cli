@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -91,6 +92,110 @@ func TestReadSSEResponseDiscardsUnterminatedFinalEvent(t *testing.T) {
 	input := "id:response\ndata:{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{}}"
 	_, _, err := readSSEResponse(strings.NewReader(input), 7)
 	require.ErrorIs(t, err, errSSEResponseMissing, "an event without its terminating blank line is not dispatched at EOF")
+}
+
+func TestReadSSEResponseSupportsCRAndLeadingBOM(t *testing.T) {
+	t.Parallel()
+
+	input := "\uFEFFid:cursor\rdata:{\"jsonrpc\":\"2.0\",\"id\":7,\"result\":{\"ok\":true}}\r\r"
+	result, cursor, err := readSSEResponse(strings.NewReader(input), 7)
+	require.NoError(t, err)
+	assert.Equal(t, "cursor", cursor)
+	assert.Equal(t, true, result["ok"])
+}
+
+func TestValidLastEventIDRespectsHTTPFieldValueSafety(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name  string
+		value string
+		valid bool
+	}{
+		{name: "UTF-8 obs-text", value: "cursor-雪", valid: true},
+		{name: "internal whitespace", value: "cursor with space", valid: true},
+		{name: "empty", value: "", valid: false},
+		{name: "control", value: "cursor\x01", valid: false},
+		{name: "NUL", value: "cursor\x00", valid: false},
+		{name: "leading whitespace", value: " cursor", valid: false},
+		{name: "trailing whitespace", value: "cursor ", valid: false},
+		{name: "invalid UTF-8", value: string([]byte{'c', 0xff}), valid: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			assert.Equal(t, test.valid, validLastEventID(test.value))
+		})
+	}
+}
+
+func TestMCP20250618ResumeAcceptsUTF8EventID(t *testing.T) {
+	t.Parallel()
+
+	const cursor = "resume-雪"
+	lastEventID := make(chan string, 1)
+	var toolsListIDMu sync.Mutex
+	var toolsListID string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			lastEventID <- r.Header.Get("Last-Event-ID")
+			w.Header().Set("Content-Type", "text/event-stream")
+			toolsListIDMu.Lock()
+			id := toolsListID
+			toolsListIDMu.Unlock()
+			frame, err := json.Marshal(map[string]any{
+				"jsonrpc": "2.0",
+				"id":      json.RawMessage(id),
+				"result":  map[string]any{"tools": []any{}},
+			})
+			if err != nil {
+				t.Errorf("marshal resumed response: %v", err)
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			_, _ = fmt.Fprintf(w, "data:%s\n\n", frame)
+			return
+		}
+		if r.Method != http.MethodPost {
+			t.Errorf("unexpected HTTP method %q", r.Method)
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		method, id, _, err := decodeHTTPMCPRequest(r)
+		if err != nil {
+			t.Errorf("decode request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		switch method {
+		case "initialize":
+			writeHTTPMCPJSONRPCResponse(w, id, map[string]any{"protocolVersion": streamableHTTPProtocolVersion})
+		case "notifications/initialized":
+			w.WriteHeader(http.StatusAccepted)
+		case "tools/list":
+			toolsListIDMu.Lock()
+			toolsListID = string(id)
+			toolsListIDMu.Unlock()
+			w.Header().Set("Content-Type", "text/event-stream")
+			_, _ = fmt.Fprintf(w, "\uFEFFid:%s\rdata:{\"jsonrpc\":\"2.0\",\"method\":\"notifications/progress\",\"params\":{}}\r\r", cursor)
+		default:
+			t.Errorf("unexpected JSON-RPC method %q", method)
+			w.WriteHeader(http.StatusBadRequest)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	adapter := newHTTPTestAdapter(srv)
+	require.NoError(t, adapter.Connect(context.Background()))
+	tools, err := adapter.ListTools(context.Background())
+	require.NoError(t, err)
+	assert.Empty(t, tools)
+	select {
+	case actual := <-lastEventID:
+		assert.Equal(t, cursor, actual)
+	case <-time.After(time.Second):
+		t.Fatal("server did not receive the UTF-8 Last-Event-ID resume header")
+	}
 }
 
 func TestMCPJSONBodyCancellationPreservesCause(t *testing.T) {
