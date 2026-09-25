@@ -314,12 +314,12 @@ func TestCategorizedErrorStringForm(t *testing.T) {
 	require.Equal(t, "fatal", ErrorFatal.String())
 }
 
-// TestRetryShouldRetryEmitNegativeAttempt verifies ShouldRetry treats a negative
-// attempt as below MaxAttempts but still classifies the error.
-func TestRetryShouldRetryEmitNegativeAttempt(t *testing.T) {
+// TestRetryShouldRetryRejectsNegativeAttempt verifies invalid negative attempt
+// indices are conservatively rejected before classification.
+func TestRetryShouldRetryRejectsNegativeAttempt(t *testing.T) {
 	ctx, _ := newRetryTestCtx(t)
 	p := NewDefaultRetryPolicy(RetryConfig{MaxAttempts: 2})
 	err := NewError(ErrorTransient, errors.New("boom"))
-	assert.True(t, p.ShouldRetry(ctx, err, -1))
+	assert.False(t, p.ShouldRetry(ctx, err, -1))
 	assert.False(t, p.ShouldRetry(ctx, err, 2))
 }

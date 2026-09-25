@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -127,6 +128,31 @@ func TestRetryModelMiddleware_MaxAttemptsReached(t *testing.T) {
 	assert.Equal(t, int32(3), atomic.LoadInt32(&model.generateCalls))
 }
 
+func TestRetryModelMiddlewareMaxAttemptsMeansTotalDispatches(t *testing.T) {
+	for _, maxAttempts := range []int{1, 3} {
+		t.Run(fmt.Sprintf("max_attempts_%d", maxAttempts), func(t *testing.T) {
+			model := &mockModel{
+				generateFn: func(context.Context, []Message, ...Option) (*Message, error) {
+					return nil, errors.New("connection reset")
+				},
+				streamFn: func(context.Context, []Message, ...Option) (<-chan MessageChunk, error) {
+					return nil, errors.New("connection reset")
+				},
+			}
+			policy := newDefaultRetryPolicy(RetryConfig{MaxAttempts: maxAttempts, BaseDelay: time.Nanosecond})
+			wrapped := NewRetryModelMiddleware(WithRetryPolicy(policy)).WrapModel(model)
+
+			_, generateErr := wrapped.Generate(context.Background(), nil)
+			require.Error(t, generateErr)
+			assert.Equal(t, int32(maxAttempts), atomic.LoadInt32(&model.generateCalls))
+
+			_, streamErr := wrapped.Stream(context.Background(), nil)
+			require.Error(t, streamErr)
+			assert.Equal(t, int32(maxAttempts), atomic.LoadInt32(&model.streamCalls))
+		})
+	}
+}
+
 // TestRetryModelMiddleware_ExponentialBackoff verifies that the backoff duration
 // doubles between retries.
 func TestRetryModelMiddleware_ExponentialBackoff(t *testing.T) {
@@ -235,8 +261,9 @@ func TestRetryModelMiddleware_DefaultPolicy(t *testing.T) {
 	transient := errors.New("connection reset")
 	assert.True(t, p.ShouldRetry(context.Background(), transient, 0))
 	assert.True(t, p.ShouldRetry(context.Background(), transient, 1))
-	assert.True(t, p.ShouldRetry(context.Background(), transient, 2))
+	assert.False(t, p.ShouldRetry(context.Background(), transient, 2))
 	assert.False(t, p.ShouldRetry(context.Background(), transient, 3))
+	assert.False(t, p.ShouldRetry(context.Background(), transient, -1))
 	assert.False(t, p.ShouldRetry(context.Background(), nil, 0))
 
 	// Without jitter, backoff is pure exponential.
@@ -247,6 +274,16 @@ func TestRetryModelMiddleware_DefaultPolicy(t *testing.T) {
 	assert.Equal(t, 100*time.Millisecond, p2.NextBackoff(context.Background(), 0))
 	assert.Equal(t, 200*time.Millisecond, p2.NextBackoff(context.Background(), 1))
 	assert.Equal(t, 400*time.Millisecond, p2.NextBackoff(context.Background(), 2))
+}
+
+func TestDefaultRetryPolicyRefusesCanceledContextAndErrors(t *testing.T) {
+	p := newDefaultRetryPolicy(RetryConfig{MaxAttempts: 3})
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.False(t, p.ShouldRetry(canceledCtx, errors.New("connection reset"), 0))
+	require.False(t, p.ShouldRetry(context.Background(), fmt.Errorf("wrapped: %w", context.Canceled), 0))
+	require.False(t, p.ShouldRetry(context.Background(), fmt.Errorf("wrapped: %w", context.DeadlineExceeded), 0))
 }
 
 func TestDefaultPolicyClassifyBusy(t *testing.T) {

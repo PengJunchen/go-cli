@@ -3,6 +3,7 @@ package production
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mock"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 	"github.com/pengjunchen/go-cli/internal/verify"
@@ -50,6 +52,42 @@ func TestClassifyStringMatching(t *testing.T) {
 	require.Equal(t, ErrorFatal, p.Classify(errors.New("permission denied")))
 }
 
+func TestClassifyWrappedProviderError(t *testing.T) {
+	p := NewDefaultRetryPolicy(RetryConfig{}).(*DefaultRetryPolicy) //nolint:errcheck
+	tests := []struct {
+		name   string
+		typeOf llm.ErrorType
+		status int
+		want   ErrorCategory
+	}{
+		{name: "rate limit", typeOf: llm.ErrTypeRateLimit, status: 429, want: ErrorRateLimit},
+		{name: "server", typeOf: llm.ErrTypeServer, status: 503, want: ErrorTransient},
+		{name: "network", typeOf: llm.ErrTypeNetwork, want: ErrorTransient},
+		{name: "auth", typeOf: llm.ErrTypeAuth, status: 401, want: ErrorFatal},
+		{name: "overflow", typeOf: llm.ErrTypeOverflow, status: 400, want: ErrorFatal},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := &llm.ProviderError{ErrorType: tt.typeOf, StatusCode: tt.status, Provider: "fixture"}
+			require.Equal(t, tt.want, p.Classify(fmt.Errorf("provider wrapper: %w", err)))
+		})
+	}
+}
+
+func TestClassifyWrappedTypedFatalBeforeTransientText(t *testing.T) {
+	p := NewDefaultRetryPolicy(RetryConfig{}).(*DefaultRetryPolicy) //nolint:errcheck
+
+	providerErr := fmt.Errorf("connection reset while wrapping: %w", &llm.ProviderError{
+		ErrorType:  llm.ErrTypeAuth,
+		Provider:   "fixture",
+		StatusCode: 401,
+	})
+	categorizedErr := fmt.Errorf("temporary wrapper: %w", NewError(ErrorFatal, errors.New("denied")))
+
+	require.Equal(t, ErrorFatal, p.Classify(providerErr))
+	require.Equal(t, ErrorFatal, p.Classify(categorizedErr))
+}
+
 func TestErrorCategoryString(t *testing.T) {
 	require.Equal(t, "transient", ErrorTransient.String())
 	require.Equal(t, "rate_limit", ErrorRateLimit.String())
@@ -64,9 +102,20 @@ func TestShouldRetryRespectsMaxAttempts(t *testing.T) {
 	err := NewError(ErrorTransient, errors.New("boom"))
 	require.True(t, p.ShouldRetry(ctx, err, 0))
 	require.True(t, p.ShouldRetry(ctx, err, 1))
-	require.True(t, p.ShouldRetry(ctx, err, 2))
+	require.False(t, p.ShouldRetry(ctx, err, 2))
 	require.False(t, p.ShouldRetry(ctx, err, 3))
 	require.False(t, p.ShouldRetry(ctx, err, 10))
+	require.False(t, p.ShouldRetry(ctx, err, -1))
+}
+
+func TestShouldRetryRefusesCanceledContextAndErrors(t *testing.T) {
+	p := NewDefaultRetryPolicy(RetryConfig{MaxAttempts: 3})
+
+	canceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.False(t, p.ShouldRetry(canceledCtx, NewError(ErrorTransient, errors.New("temporary")), 0))
+	require.False(t, p.ShouldRetry(context.Background(), fmt.Errorf("wrapped: %w", context.Canceled), 0))
+	require.False(t, p.ShouldRetry(context.Background(), fmt.Errorf("wrapped: %w", context.DeadlineExceeded), 0))
 }
 
 func TestShouldRetryFatalNeverRetries(t *testing.T) {
