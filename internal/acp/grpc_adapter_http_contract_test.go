@@ -2,8 +2,10 @@ package acp
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -115,6 +117,81 @@ func TestGRPCAdapterRejectsWrongHTTPBearerTokenWithoutLeaking(t *testing.T) {
 	remaining := len(server.sessions)
 	server.mu.Unlock()
 	require.Zero(t, remaining)
+}
+
+func TestGRPCAdapterUnknownHTTPConnectOutcomeFencesWithoutReplay(t *testing.T) {
+	var connectRequests atomic.Int32
+	var disconnectRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/connect":
+			connectRequests.Add(1)
+			profiles := r.Header.Values(ACPHTTPProfileHeader)
+			if len(profiles) != 1 || profiles[0] != ACPHTTPProfileV1 {
+				http.Error(w, "profile mismatch", http.StatusBadRequest)
+				return
+			}
+			var envelope httpACPEnvelope
+			if err := json.NewDecoder(r.Body).Decode(&envelope); err != nil || envelope.Version != ACPHTTPProfileV1 {
+				http.Error(w, "version mismatch", http.StatusBadRequest)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"version":"go-cli-acp-json/1"}`))
+		case "/disconnect":
+			disconnectRequests.Add(1)
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	client := NewGRPCAdapter(server.URL, WithName("unknown-create"))
+	err := client.Connect(context.Background())
+	require.ErrorIs(t, err, ErrHTTPConnectOutcomeUnknown)
+	require.ErrorIs(t, err, errHTTPACPProtocol)
+	cleanupErr := client.Disconnect(context.Background())
+	require.ErrorIs(t, cleanupErr, ErrHTTPConnectOutcomeUnknown)
+	require.ErrorIs(t, client.Connect(context.Background()), ErrHTTPConnectOutcomeUnknown)
+	require.ErrorIs(t, client.Disconnect(context.Background()), ErrHTTPConnectOutcomeUnknown)
+	require.EqualValues(t, 1, connectRequests.Load(), "an unknowable create must not be replayed")
+	require.Zero(t, disconnectRequests.Load(), "the client cannot invent an opaque session ID to disconnect")
+}
+
+func TestGRPCAdapterKnownHTTPConnectDenialAllowsExplicitRetry(t *testing.T) {
+	var connectRequests atomic.Int32
+	var disconnectRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/connect":
+			if connectRequests.Add(1) == 1 {
+				w.WriteHeader(http.StatusForbidden)
+				return
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"version":"go-cli-acp-json/1","session_id":"opaque-after-denial"}`))
+		case "/stream":
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			w.WriteHeader(http.StatusOK)
+		case "/disconnect":
+			disconnectRequests.Add(1)
+			w.WriteHeader(http.StatusOK)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	client := NewGRPCAdapter(server.URL, WithName("known-denial"))
+	err := client.Connect(context.Background())
+	require.ErrorIs(t, err, errHTTPForbidden)
+	require.NotErrorIs(t, err, ErrHTTPConnectOutcomeUnknown)
+	require.NoError(t, client.Disconnect(context.Background()), "a known denial created no session to clean up")
+	require.NoError(t, client.Connect(context.Background()), "the caller may explicitly retry after known denial cleanup")
+	require.EqualValues(t, 2, connectRequests.Load())
+	require.NoError(t, client.Disconnect(context.Background()))
+	require.EqualValues(t, 1, disconnectRequests.Load())
 }
 
 func TestGRPCAdapterHTTPBearerTokenIsNotForwardedAcrossRedirect(t *testing.T) {
