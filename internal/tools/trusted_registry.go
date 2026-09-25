@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"runtime"
 	"sync"
 )
 
@@ -232,6 +233,8 @@ func (r *DefaultToolRegistry) registerTrustedWorkspaceWrite(ctx context.Context,
 		proof := PreparedCompletionProof("")
 		if supportsInlineWorkspaceCompletion(def) {
 			proof = CompletionInlinePipelineJoined
+		} else if supportsQueuedWorkspaceCompletion(def) {
+			proof = CompletionQueuedJobJoined
 		}
 		return r.registerDefinitionWithCompletion(def, RegistrationSourceBuiltin, newTrustedEffectSet(EffectWorkspaceWrite), proof)
 	default:
@@ -305,6 +308,32 @@ func supportsInlineWorkspaceCompletion(def ToolDefinition) bool {
 		return synchronousDiff(tool.diffGenerator)
 	case *EditFileTool:
 		return synchronousDiff(tool.diffGenerator)
+	default:
+		return false
+	}
+}
+
+func supportsQueuedWorkspaceCompletion(def ToolDefinition) bool {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		return false
+	}
+	managedGitDiff := func(generator DiffGenerator) bool {
+		gitGenerator, ok := generator.(*GitDiffGenerator)
+		if !ok || gitGenerator == nil {
+			return false
+		}
+		gitTool, ok := gitGenerator.git.(*DefaultGitTool)
+		if !ok || gitTool == nil {
+			return false
+		}
+		fallback, ok := gitGenerator.fallback.(*UnifiedDiffGenerator)
+		return ok && fallback != nil
+	}
+	switch tool := def.(type) {
+	case *WriteTool:
+		return tool != nil && managedGitDiff(tool.diffGenerator)
+	case *EditFileTool:
+		return tool != nil && managedGitDiff(tool.diffGenerator)
 	default:
 		return false
 	}

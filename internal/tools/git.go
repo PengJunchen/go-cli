@@ -1,14 +1,18 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
+	"runtime"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -190,7 +194,7 @@ func (g *DefaultGitTool) ensureRepo(ctx context.Context) error {
 // Diff runs `git diff` (or `git diff --staged`) with an optional path filter
 // and returns the unified diff text.
 func (g *DefaultGitTool) Diff(ctx context.Context, opts GitDiffOptions) (string, error) {
-	if err := g.ensureRepo(ctx); err != nil {
+	if err := g.ensureRepoForDiff(ctx); err != nil {
 		return "", err
 	}
 
@@ -203,12 +207,19 @@ func (g *DefaultGitTool) Diff(ctx context.Context, opts GitDiffOptions) (string,
 	}
 
 	readArgs := append([]string{"diff", "--no-ext-diff", "--no-textconv"}, args[1:]...)
-	out, err := g.runReadOnly(ctx, readArgs...)
+	out, err := g.runReadOnlyManaged(ctx, readArgs...)
 	if err != nil {
 		return "", err
 	}
 	slog.Debug("git.diff", "staged", opts.Staged, "path", opts.Path, "bytes", len(out))
 	return out, nil
+}
+
+func (g *DefaultGitTool) ensureRepoForDiff(ctx context.Context) error {
+	if _, err := g.runReadOnlyManaged(ctx, "rev-parse", "--is-inside-work-tree"); err != nil {
+		return fmt.Errorf("git: not inside a work tree (run from within a git repository): %w", err)
+	}
+	return nil
 }
 
 // Status runs `git status --porcelain` and parses the result into a list of
@@ -689,14 +700,7 @@ func (g *DefaultGitTool) run(ctx context.Context, args ...string) (string, error
 // filters can still execute during status/diff; callers must not infer a
 // trusted read effect from this runner alone.
 func (g *DefaultGitTool) runReadOnly(ctx context.Context, args ...string) (string, error) {
-	readArgs := []string{
-		"--no-optional-locks",
-		"-c", "core.fsmonitor=false",
-		"-c", "core.untrackedCache=false",
-		"-c", "diff.external=",
-		"-c", "log.showSignature=false",
-	}
-	readArgs = append(readArgs, args...)
+	readArgs := gitReadOnlyArgs(args)
 
 	cmd := exec.CommandContext(ctx, "git", readArgs...)
 	cmd.Dir = g.cwd
@@ -713,6 +717,92 @@ func (g *DefaultGitTool) runReadOnly(ctx context.Context, args ...string) (strin
 		return string(out), fmt.Errorf("git read-only command failed: %w", commandErr)
 	}
 	return string(out), nil
+}
+
+// runReadOnlyManaged runs the Git helper used by diff previews under the
+// existing process-group owner. It deliberately uses exec.Command rather than
+// CommandContext: collect owns cancellation, process-group cleanup, and pipe
+// reader joining as one lifecycle.
+func (g *DefaultGitTool) runReadOnlyManaged(ctx context.Context, args ...string) (string, error) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		return "", newUnknownExecutionError(errors.Join(
+			errProcessContainmentUnconfirmed,
+			errors.New("managed Git diff process groups are unsupported on this operating system"),
+		))
+	}
+	if err := ctx.Err(); err != nil {
+		return "", fmt.Errorf("git read-only command failed: %w", err)
+	}
+
+	execCtx, cancel := context.WithCancel(ctx)
+	cmd := exec.Command("git", gitReadOnlyArgs(args)...)
+	cmd.Dir = g.cwd
+	cmd.Env = gitReadOnlyEnvironment(os.Environ())
+	managed, err := startManagedLocalCommand(cancel, cmd)
+	if err != nil {
+		cancel()
+		return "", gitReadOnlyCommandFailure("", err)
+	}
+
+	var output gitDiffCombinedOutput
+	lifecycle := managed.collect(execCtx, func(reader io.Reader, _ string) (bool, error) {
+		_, readErr := io.Copy(&output, reader)
+		return readErr == nil, readErr
+	})
+	cancel()
+
+	combined := output.String()
+	commandErr := errors.Join(lifecycle.runErr, lifecycle.readerErr, lifecycle.cleanupErr)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		commandErr = errors.Join(commandErr, ctxErr)
+	}
+	if !lifecycle.containmentProven {
+		cause := errors.Join(commandErr, errProcessContainmentUnconfirmed)
+		failure := gitReadOnlyCommandFailure(combined, cause)
+		if lifecycle.executionDone != nil {
+			return combined, pendingProcessErrorWithDone(failure, true, lifecycle.executionDone)
+		}
+		return combined, newUnknownExecutionError(failure)
+	}
+	if commandErr != nil {
+		return combined, gitReadOnlyCommandFailure(combined, commandErr)
+	}
+	return combined, nil
+}
+
+func gitReadOnlyArgs(args []string) []string {
+	readArgs := []string{
+		"--no-optional-locks",
+		"-c", "core.fsmonitor=false",
+		"-c", "core.untrackedCache=false",
+		"-c", "diff.external=",
+		"-c", "log.showSignature=false",
+	}
+	return append(readArgs, args...)
+}
+
+func gitReadOnlyCommandFailure(output string, cause error) error {
+	if diagnostic := strings.TrimSpace(output); diagnostic != "" {
+		return fmt.Errorf("git read-only command failed (%s): %w", diagnostic, cause)
+	}
+	return fmt.Errorf("git read-only command failed: %w", cause)
+}
+
+type gitDiffCombinedOutput struct {
+	mu     sync.Mutex
+	buffer bytes.Buffer
+}
+
+func (w *gitDiffCombinedOutput) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buffer.Write(p)
+}
+
+func (w *gitDiffCombinedOutput) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.buffer.String()
 }
 
 func gitReadOnlyEnvironment(environment []string) []string {

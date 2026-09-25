@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"strings"
 )
 
@@ -259,13 +260,23 @@ func NewGitDiffGenerator(git GitTool, fallback DiffGenerator) *GitDiffGenerator 
 }
 
 // Generate tries `git diff -- <path>` first. When the git diff succeeds and
-// returns non-empty output, it is returned directly. Otherwise (not in a git
-// repo, no changes, or error), the fallback DiffGenerator is used.
+// returns non-empty output, it is returned directly. Ordinary failures and
+// empty output use the fallback; unresolved execution and cancellation stop
+// the chain so they cannot start another helper without the original receipt.
 func (g *GitDiffGenerator) Generate(ctx context.Context, oldContent, newContent, path string) (string, error) {
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	if g.git != nil && strings.TrimSpace(path) != "" {
 		out, err := g.git.Diff(ctx, GitDiffOptions{Path: path})
 		if err == nil && strings.TrimSpace(out) != "" {
 			return out, nil
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return out, errors.Join(err, ctxErr)
+		}
+		if unresolvedExecutionError(err) {
+			return out, err
 		}
 	}
 	return g.fallback.Generate(ctx, oldContent, newContent, path)
