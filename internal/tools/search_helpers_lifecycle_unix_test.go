@@ -126,6 +126,45 @@ func TestFindForcedPipeCloseStopsFallbackAndWithholdsProof(t *testing.T) {
 	assertProcessFromFileStopped(t, pidPath)
 }
 
+func TestFindCaptureLimitJoinsContainmentFailure(t *testing.T) {
+	workdir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(workdir, "target.go"), []byte("package main\n"), 0o600))
+	helperDir := t.TempDir()
+	markerDir := t.TempDir()
+	pidPath := filepath.Join(t.TempDir(), "fd-capture-escaped.pid")
+	fallbackMarker := filepath.Join(markerDir, "find-fallback")
+	testBinary, err := os.Executable()
+	require.NoError(t, err)
+	fdScript := fmt.Sprintf(`#!/bin/sh
+printf '%%04097d\n' 0
+%s -test.run=%s &
+while [ ! -s %s ]; do sleep 0.01; done
+exit 2
+`,
+		shellQuoteTestArgument(testBinary),
+		shellQuoteTestArgument("^TestSearchHelperEscapedPipeWriter$"),
+		shellQuoteTestArgument(pidPath))
+	findScript := "#!/bin/sh\nprintf called > " + shellQuoteTestArgument(fallbackMarker) + "\nprintf 'fallback.txt\\n'\n"
+	require.NoError(t, os.WriteFile(filepath.Join(helperDir, "fd"), []byte(fdScript), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(helperDir, "find"), []byte(findScript), 0o700))
+	originalPath := os.Getenv("PATH")
+	t.Setenv("PATH", helperDir+string(os.PathListSeparator)+originalPath)
+	t.Setenv("SEARCH_HELPER_ESCAPED_PIPE_PID", pidPath)
+	t.Cleanup(func() { killProcessFromFile(t, pidPath) })
+
+	result, err := NewFindTool(WithFindWorkdir(workdir)).Execute(context.Background(), ToolCall{Args: map[string]any{"pattern": "target.go", "type": "f"}})
+	require.ErrorIs(t, err, errDirectoryCaptureLimit)
+	require.ErrorIs(t, err, errProcessContainmentUnconfirmed)
+	require.NotNil(t, result)
+	assert.Empty(t, result.Output, "an uncontained helper failure must not return captured or fallback output")
+	assert.NoFileExists(t, fallbackMarker, "capture saturation joined with unknown cleanup must stop fallback")
+	assertUnknownWithoutPendingResource(t, err)
+	pid := waitForChildPIDFile(t, pidPath)
+	assert.NoError(t, syscall.Kill(pid, 0), "escaped helper must still be observable when Find returns")
+	killProcessFromFile(t, pidPath)
+	assertProcessFromFileStopped(t, pidPath)
+}
+
 func writeFailingHelperWithEscapedPipeWriter(t *testing.T, dir, name, pidPath string) {
 	t.Helper()
 	testBinary, err := os.Executable()

@@ -12,31 +12,45 @@ import (
 // runManagedSearchCommand drains stdout and stderr while the existing local
 // process-scope runner owns the helper group and both pipe readers.
 func runManagedSearchCommand(ctx context.Context, cmd *exec.Cmd) ([]byte, managedLocalResult, error) {
+	var stdout bytes.Buffer
+	lifecycle, err := runManagedSearchCommandWithStdoutWriter(ctx, cmd, &stdout)
+	if err != nil {
+		return nil, lifecycle, err
+	}
+	return append([]byte(nil), stdout.Bytes()...), lifecycle, nil
+}
+
+// runManagedSearchCommandWithStdoutWriter keeps the existing process-group,
+// pipe-drain, and reader-join owner while sending stdout to a bounded capture
+// writer. The writer is invoked synchronously by the owned stdout reader.
+func runManagedSearchCommandWithStdoutWriter(ctx context.Context, cmd *exec.Cmd, stdout io.Writer) (managedLocalResult, error) {
 	var lifecycle managedLocalResult
 	if ctx == nil {
-		return nil, lifecycle, errors.New("tools: nil search command context")
+		return lifecycle, errors.New("tools: nil search command context")
+	}
+	if stdout == nil {
+		return lifecycle, errors.New("tools: nil search command stdout writer")
 	}
 	if err := ctx.Err(); err != nil {
-		return nil, lifecycle, newNotDispatchedExecutionError(err)
+		return lifecycle, newNotDispatchedExecutionError(err)
 	}
 
 	execCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	managed, err := startManagedLocalCommand(cancel, cmd)
 	if err != nil {
-		return nil, lifecycle, err
+		return lifecycle, err
 	}
 
-	var stdout bytes.Buffer
 	lifecycle = managed.collect(execCtx, func(reader io.Reader, stream string) (bool, error) {
 		if stream == "stderr" {
 			_, readErr := io.Copy(io.Discard, reader)
 			return readErr == nil, readErr
 		}
-		_, readErr := io.Copy(&stdout, reader)
+		_, readErr := io.Copy(stdout, reader)
 		return readErr == nil, readErr
 	})
-	return append([]byte(nil), stdout.Bytes()...), lifecycle, nil
+	return lifecycle, nil
 }
 
 // managedSearchLifecycleError reports interruption or unconfirmed process
@@ -87,6 +101,9 @@ func shouldFallbackAfterManagedHelper(ctx context.Context, err error) bool {
 		return false
 	}
 	if errors.Is(err, errProcessContainmentUnconfirmed) {
+		return false
+	}
+	if errors.Is(err, errDirectoryCaptureLimit) {
 		return false
 	}
 	if isPendingExecution(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
