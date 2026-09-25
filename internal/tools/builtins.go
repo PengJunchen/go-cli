@@ -208,6 +208,10 @@ func registerDefaultTool(ctx context.Context, reg ToolRegistry, def ToolDefiniti
 		if registrar, ok := reg.(trustedWorkspaceWriteRegistrar); ok {
 			return registrar.registerTrustedWorkspaceWrite(ctx, def)
 		}
+	case *BashTool, *StreamingBashToolImpl:
+		if registrar, ok := reg.(trustedLocalProcessRegistrar); ok {
+			return registrar.registerTrustedLocalProcess(ctx, def)
+		}
 	}
 	return reg.Register(ctx, def)
 }

@@ -208,6 +208,7 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		_, readErr := io.Copy(capture.writer(stream), reader)
 		return readErr == nil, readErr
 	})
+	reportPreparedLocalProcessCompletion(ctx, lifecycle)
 	ms := time.Since(start).Milliseconds()
 	_, _, output, truncated := capture.snapshot("\n[output truncated]")
 	metadata := map[string]any{

@@ -124,6 +124,14 @@ func (r *MiddlewareToolRegistry) registerTrustedWorkspaceWrite(ctx context.Conte
 	return registrar.registerTrustedWorkspaceWrite(ctx, def)
 }
 
+func (r *MiddlewareToolRegistry) registerTrustedLocalProcess(ctx context.Context, def ToolDefinition) error {
+	registrar, ok := r.inner.(trustedLocalProcessRegistrar)
+	if !ok {
+		return ErrPreparedRegistrationUnavailable
+	}
+	return registrar.registerTrustedLocalProcess(ctx, def)
+}
+
 func (r *MiddlewareToolRegistry) toolRegistrationSnapshot(ctx context.Context, name string) (registeredToolSnapshot, error) {
 	provider, ok := r.inner.(registrationSnapshotProvider)
 	if !ok {

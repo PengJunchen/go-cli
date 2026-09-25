@@ -70,6 +70,7 @@ func DispatchFenceFromRegistry(reg ToolRegistry) (*DispatchFence, error) {
 type toolRegistrationMetadata struct {
 	identity            TrustedToolIdentity
 	effects             TrustedEffectSet
+	completionProof     PreparedCompletionProof
 	schema              ToolSchemaSnapshot
 	hasParameters       bool
 	description         string
@@ -83,6 +84,7 @@ type registeredToolSnapshot struct {
 	definition          ToolDefinition
 	identity            TrustedToolIdentity
 	effects             TrustedEffectSet
+	completionProof     PreparedCompletionProof
 	schema              ToolSchemaSnapshot
 	hasParameters       bool
 	description         string
@@ -107,7 +109,12 @@ type registrationSnapshotProvider interface {
 type PreparedToolStages struct {
 	ArgumentPreparers []ArgumentPreparer
 	ExecutionWrappers []ToolExecutorWrapper
-	MutationQueue     FileMutationQueue
+	// SynchronousExecutionWrappers is an explicit trusted-assembly attestation
+	// that every configured execution wrapper returns only after all work it
+	// starts has stopped, preserves the frozen call, and adds no side effects.
+	// Without it, non-empty wrappers suppress prepared completion proofs.
+	SynchronousExecutionWrappers bool
+	MutationQueue                FileMutationQueue
 }
 
 type preparedToolPipelineSnapshot struct {
@@ -138,9 +145,10 @@ func (p *preparedToolPipelineState) snapshot() preparedToolPipelineSnapshot {
 	return preparedToolPipelineSnapshot{
 		policy: p.policy,
 		stages: PreparedToolStages{
-			ArgumentPreparers: append([]ArgumentPreparer(nil), p.stages.ArgumentPreparers...),
-			ExecutionWrappers: append([]ToolExecutorWrapper(nil), p.stages.ExecutionWrappers...),
-			MutationQueue:     p.stages.MutationQueue,
+			ArgumentPreparers:            append([]ArgumentPreparer(nil), p.stages.ArgumentPreparers...),
+			ExecutionWrappers:            append([]ToolExecutorWrapper(nil), p.stages.ExecutionWrappers...),
+			SynchronousExecutionWrappers: p.stages.SynchronousExecutionWrappers,
+			MutationQueue:                p.stages.MutationQueue,
 		},
 		policyConfigured: p.policyConfigured,
 		stagesConfigured: p.stagesConfigured,
@@ -158,9 +166,10 @@ func (p *preparedToolPipelineState) setStages(stages PreparedToolStages) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.stages = PreparedToolStages{
-		ArgumentPreparers: append([]ArgumentPreparer(nil), stages.ArgumentPreparers...),
-		ExecutionWrappers: append([]ToolExecutorWrapper(nil), stages.ExecutionWrappers...),
-		MutationQueue:     stages.MutationQueue,
+		ArgumentPreparers:            append([]ArgumentPreparer(nil), stages.ArgumentPreparers...),
+		ExecutionWrappers:            append([]ToolExecutorWrapper(nil), stages.ExecutionWrappers...),
+		SynchronousExecutionWrappers: stages.SynchronousExecutionWrappers,
+		MutationQueue:                stages.MutationQueue,
 	}
 	p.stagesConfigured = true
 }
@@ -171,6 +180,10 @@ type preparedToolPipelineProvider interface {
 
 type trustedWorkspaceWriteRegistrar interface {
 	registerTrustedWorkspaceWrite(context.Context, ToolDefinition) error
+}
+
+type trustedLocalProcessRegistrar interface {
+	registerTrustedLocalProcess(context.Context, ToolDefinition) error
 }
 
 func (r *DefaultToolRegistry) DispatchFence() *DispatchFence {
@@ -203,13 +216,76 @@ func (r *DefaultToolRegistry) RegisterTrustedNetworkRead(ctx context.Context, de
 func (r *DefaultToolRegistry) registerTrustedWorkspaceWrite(ctx context.Context, def ToolDefinition) error {
 	switch def.(type) {
 	case *WriteTool, *EditFileTool:
-		return r.registerDefinition(def, RegistrationSourceBuiltin, newTrustedEffectSet(EffectWorkspaceWrite))
+		proof := PreparedCompletionProof("")
+		if supportsInlineWorkspaceCompletion(def) {
+			proof = CompletionInlinePipelineJoined
+		}
+		return r.registerDefinitionWithCompletion(def, RegistrationSourceBuiltin, newTrustedEffectSet(EffectWorkspaceWrite), proof)
 	default:
 		return errors.New("tools: workspace-write registration requires a reviewed concrete tool")
 	}
 }
 
+func (r *DefaultToolRegistry) registerTrustedLocalProcess(ctx context.Context, def ToolDefinition) error {
+	switch tool := def.(type) {
+	case *BashTool:
+		if tool == nil {
+			return errors.New("tools: local-process registration requires a non-nil bash tool")
+		}
+		proof := PreparedCompletionProof("")
+		if supportsLocalProcessCompletion(tool) {
+			proof = CompletionOwnedProcessGroupJoined
+		}
+		return r.registerDefinitionWithCompletion(def, RegistrationSourceBuiltin, newTrustedEffectSet(), proof)
+	case *StreamingBashToolImpl:
+		if tool == nil || tool.BashTool == nil {
+			return errors.New("tools: streaming bash registration requires a non-nil base tool")
+		}
+		return r.registerDefinitionWithCompletion(def, RegistrationSourceBuiltin, newTrustedEffectSet(), "")
+	default:
+		return errors.New("tools: local-process completion requires a reviewed local bash tool")
+	}
+}
+
+func supportsLocalProcessCompletion(tool *BashTool) bool {
+	if tool == nil {
+		return false
+	}
+	switch typed := tool.Sandbox.(type) {
+	case AllowAllSandbox:
+		return true
+	case *AllowAllSandbox:
+		return typed != nil
+	case *DefaultBashSandbox:
+		return typed != nil
+	default:
+		return false
+	}
+}
+
+func supportsInlineWorkspaceCompletion(def ToolDefinition) bool {
+	synchronousDiff := func(generator DiffGenerator) bool {
+		if generator == nil {
+			return true
+		}
+		_, ok := generator.(*UnifiedDiffGenerator)
+		return ok
+	}
+	switch tool := def.(type) {
+	case *WriteTool:
+		return synchronousDiff(tool.diffGenerator)
+	case *EditFileTool:
+		return synchronousDiff(tool.diffGenerator)
+	default:
+		return false
+	}
+}
+
 func (r *DefaultToolRegistry) registerDefinition(def ToolDefinition, source string, effects TrustedEffectSet) error {
+	return r.registerDefinitionWithCompletion(def, source, effects, "")
+}
+
+func (r *DefaultToolRegistry) registerDefinitionWithCompletion(def ToolDefinition, source string, effects TrustedEffectSet, completionProof PreparedCompletionProof) error {
 	if def == nil {
 		return errors.New("tools: cannot register a nil tool definition")
 	}
@@ -222,8 +298,9 @@ func (r *DefaultToolRegistry) registerDefinition(def ToolDefinition, source stri
 	}
 
 	metadata := toolRegistrationMetadata{
-		description: def.Description(),
-		effects:     newTrustedEffectSet(effects.Values()...),
+		description:     def.Description(),
+		effects:         newTrustedEffectSet(effects.Values()...),
+		completionProof: completionProof,
 	}
 	if parameterized, ok := def.(Parameterized); ok {
 		metadata.hasParameters = true
@@ -296,6 +373,7 @@ func (r *DefaultToolRegistry) toolRegistrationSnapshot(_ context.Context, name s
 			definition:          definition,
 			identity:            metadata.identity,
 			effects:             newTrustedEffectSet(metadata.effects.Values()...),
+			completionProof:     metadata.completionProof,
 			schema:              metadata.schema,
 			hasParameters:       metadata.hasParameters,
 			description:         metadata.description,

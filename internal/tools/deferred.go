@@ -283,6 +283,14 @@ func (a *DeferredToolRegistryAdapter) registerTrustedWorkspaceWrite(ctx context.
 	return registrar.registerTrustedWorkspaceWrite(ctx, def)
 }
 
+func (a *DeferredToolRegistryAdapter) registerTrustedLocalProcess(ctx context.Context, def ToolDefinition) error {
+	registrar, ok := a.underlying.(trustedLocalProcessRegistrar)
+	if !ok {
+		return ErrPreparedRegistrationUnavailable
+	}
+	return registrar.registerTrustedLocalProcess(ctx, def)
+}
+
 func (a *DeferredToolRegistryAdapter) toolRegistrationSnapshot(ctx context.Context, name string) (registeredToolSnapshot, error) {
 	if _, err := a.Get(ctx, name); err != nil {
 		return registeredToolSnapshot{}, err
