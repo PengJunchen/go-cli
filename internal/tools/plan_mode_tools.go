@@ -25,6 +25,7 @@ type EnterPlanModeTool struct {
 }
 
 var _ ToolDefinition = (*EnterPlanModeTool)(nil)
+var _ Parameterized = (*EnterPlanModeTool)(nil)
 
 // NewEnterPlanModeTool returns an EnterPlanModeTool backed by the given
 // controller.
@@ -38,6 +39,18 @@ func (t *EnterPlanModeTool) Name() string { return "enter_plan_mode" }
 // Description returns a brief description of the tool.
 func (t *EnterPlanModeTool) Description() string {
 	return "enter_plan_mode: activates plan mode so the agent researches and proposes a plan without executing write tools. Args: reason (string)."
+}
+
+// Parameters returns the JSON Schema for entering plan mode.
+func (*EnterPlanModeTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"reason": map[string]any{"type": "string"},
+		},
+		"required":             []string{},
+		"additionalProperties": false,
+	}
 }
 
 // Execute activates plan mode. An optional "reason" argument is read from the
@@ -65,6 +78,7 @@ type ExitPlanModeTool struct {
 }
 
 var _ ToolDefinition = (*ExitPlanModeTool)(nil)
+var _ Parameterized = (*ExitPlanModeTool)(nil)
 
 // NewExitPlanModeTool returns an ExitPlanModeTool backed by the given
 // controller.
@@ -78,6 +92,18 @@ func (t *ExitPlanModeTool) Name() string { return "exit_plan_mode" }
 // Description returns a brief description of the tool.
 func (t *ExitPlanModeTool) Description() string {
 	return "exit_plan_mode: deactivates plan mode so write tools may execute again. Args: summary (string)."
+}
+
+// Parameters returns the JSON Schema for exiting plan mode.
+func (*ExitPlanModeTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"summary": map[string]any{"type": "string"},
+		},
+		"required":             []string{},
+		"additionalProperties": false,
+	}
 }
 
 // Execute deactivates plan mode. An optional "summary" argument is read from

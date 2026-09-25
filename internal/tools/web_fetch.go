@@ -60,6 +60,7 @@ type WebFetchTool struct {
 }
 
 var _ ToolDefinition = (*WebFetchTool)(nil)
+var _ Parameterized = (*WebFetchTool)(nil)
 
 // NewWebFetchTool returns a WebFetchTool with a default 30s timeout and 1 MiB
 // body limit. Options may override the defaults.
@@ -80,6 +81,18 @@ func (t *WebFetchTool) Name() string { return "web_fetch" }
 // Description returns a brief description of the tool.
 func (t *WebFetchTool) Description() string {
 	return "web_fetch: fetches a URL and returns its body as text. Args: url (string)."
+}
+
+// Parameters returns the JSON Schema for a web fetch request.
+func (*WebFetchTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"url": map[string]any{"type": "string"},
+		},
+		"required":             []string{"url"},
+		"additionalProperties": false,
+	}
 }
 
 // Execute performs an HTTP GET against the URL provided in args["url"] and
