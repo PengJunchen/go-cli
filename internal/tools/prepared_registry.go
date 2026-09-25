@@ -14,6 +14,7 @@ import (
 )
 
 var _ ToolCallPreparer = (*MiddlewareToolRegistry)(nil)
+var _ StreamingToolCallPreparer = (*MiddlewareToolRegistry)(nil)
 
 func (*MiddlewareToolRegistry) toolCallPreparerCapability() {}
 
@@ -23,7 +24,30 @@ func (r *MiddlewareToolRegistry) PrepareToolCall(ctx context.Context, call ToolC
 	return r.prepareToolCall(ctx, call, nil)
 }
 
+// PrepareStreamingToolCall binds one exact host-attested synchronous sink to a
+// prepared streaming registration. It does not upgrade the registered tool's
+// trusted provenance or effects.
+func (r *MiddlewareToolRegistry) PrepareStreamingToolCall(ctx context.Context, call ToolCall, sink SynchronousStreamSink) (PreparedStreamingInvocation, error) {
+	sealedSink, ok := sink.(*synchronousStreamSink)
+	if !ok || sealedSink == nil || isNilStreamSink(sealedSink.sink) {
+		return nil, ErrPreparedStreamSinkUnavailable
+	}
+	prepared, err := r.prepareToolCallWithStreamSink(ctx, call, nil, sealedSink)
+	if err != nil {
+		return nil, err
+	}
+	streaming, ok := prepared.(PreparedStreamingInvocation)
+	if !ok {
+		return nil, ErrPreparedInvocationUnavailable
+	}
+	return streaming, nil
+}
+
 func (r *MiddlewareToolRegistry) prepareToolCall(ctx context.Context, call ToolCall, proxyPin *protectedRegistrationPin) (PreparedInvocation, error) {
+	return r.prepareToolCallWithStreamSink(ctx, call, proxyPin, nil)
+}
+
+func (r *MiddlewareToolRegistry) prepareToolCallWithStreamSink(ctx context.Context, call ToolCall, proxyPin *protectedRegistrationPin, attestedSink *synchronousStreamSink) (PreparedInvocation, error) {
 	if err := validatePreparedContext(ctx); err != nil {
 		return nil, err
 	}
@@ -37,6 +61,11 @@ func (r *MiddlewareToolRegistry) prepareToolCall(ctx context.Context, call ToolC
 	}
 	if proxyPin != nil && (snapshot.identity != proxyPin.identity || snapshot.generations.Registry != proxyPin.registryGeneration) {
 		return nil, ErrPreparedProxyRegistrationStale
+	}
+	if attestedSink != nil {
+		if _, ok := snapshot.definition.(StreamingBashTool); !ok {
+			return nil, ErrPreparedInvocationUnavailable
+		}
 	}
 	if !snapshot.pipeline.policyConfigured || !snapshot.pipeline.stagesConfigured || snapshot.pipeline.policy == nil {
 		return nil, ErrPreparedToolPolicyUnavailable
@@ -129,6 +158,7 @@ func (r *MiddlewareToolRegistry) prepareToolCall(ctx context.Context, call ToolC
 		call:            frozenCall,
 		execute:         executor,
 		completionProof: completionProof,
+		streamingSink:   attestedSink,
 	}
 	if preparedQueue != nil {
 		config.schedule = preparedMutationScheduler(preparedQueue, frozenCall)

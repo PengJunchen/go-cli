@@ -149,6 +149,53 @@ func TestStreamingBashStreamSink(t *testing.T) {
 	assert.Equal(t, "stdout", events[1].Stream)
 }
 
+func TestStreamingBashReportsPreparedProcessCompletionAfterNormalAndError(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		command   string
+		wantError bool
+	}{
+		{name: "normal", command: "printf joined"},
+		{name: "nonzero exit", command: "printf failed; exit 7", wantError: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			reported := make(chan struct{})
+			var proof PreparedCompletionProof
+			var processDone <-chan struct{}
+			ctx := withPreparedCompletionReporter(context.Background(), func(got PreparedCompletionProof, done <-chan struct{}) {
+				proof = got
+				processDone = done
+				close(reported)
+			})
+
+			tool := NewStreamingBashTool(WithNoSandbox())
+			_, err := tool.ExecuteStreaming(ctx, ToolCall{
+				ID:   "call-completion",
+				Name: "bash",
+				Args: map[string]any{"command": testCase.command},
+			}, &mockStreamSink{})
+			if testCase.wantError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+
+			select {
+			case <-reported:
+			case <-time.After(5 * time.Second):
+				t.Fatal("streaming bash did not report its completed local process group")
+			}
+			assert.Equal(t, CompletionOwnedProcessGroupJoined, proof)
+			require.NotNil(t, processDone)
+			select {
+			case <-processDone:
+			default:
+				t.Fatal("streaming bash reported before the process group and readers joined")
+			}
+		})
+	}
+}
+
 // TestStreamingBashTimeout verifies that a command exceeding the timeout is
 // killed and returns an error.
 func TestStreamingBashTimeout(t *testing.T) {

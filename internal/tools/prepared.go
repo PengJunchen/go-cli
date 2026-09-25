@@ -572,6 +572,13 @@ type ToolCallPreparer interface {
 	PrepareToolCall(context.Context, ToolCall) (PreparedInvocation, error)
 }
 
+// StreamingToolCallPreparer is an optional capability for preparing a streamed
+// call with one exact host-attested synchronous sink. Existing ToolCallPreparer
+// implementations remain valid and do not gain proof for arbitrary sinks.
+type StreamingToolCallPreparer interface {
+	PrepareStreamingToolCall(context.Context, ToolCall, SynchronousStreamSink) (PreparedStreamingInvocation, error)
+}
+
 // PreparedInvocation is the one-use dispatch capability returned after schema
 // validation and policy approval.
 type PreparedInvocation interface {
@@ -586,9 +593,9 @@ type PreparedInvocation interface {
 	// durable snapshot, and distinguishes a known pre-dispatch rejection from
 	// executor errors that may reuse public error values.
 	DispatchCommitted() bool
-	// CompletionSignal returns this action's trusted positive-completion
-	// signal, if its captured executor path can provide one. The proof enum is
-	// available only after the returned Done channel closes.
+	// CompletionSignal returns this action's captured local completion/join
+	// signal, if available. A closed Done channel alone is not positive proof;
+	// callers must check Proof for the same invocation before clearing a marker.
 	CompletionSignal() PreparedCompletionSignal
 	Dispatch(context.Context) (*ToolResult, error)
 }
@@ -610,6 +617,7 @@ type preparedInvocationConfig struct {
 	execute         func(context.Context, ToolCall) (*ToolResult, error)
 	schedule        func(context.Context, *preparedInvocation) (*ToolResult, error)
 	completionProof PreparedCompletionProof
+	streamingSink   *synchronousStreamSink
 }
 
 type preparedInvocation struct {
@@ -785,6 +793,7 @@ func (p *preparedInvocation) commit(ctx context.Context) error {
 type preparedStreamingInvocation struct {
 	*preparedInvocation
 	executeStreaming func(context.Context, ToolCall, StreamSink) (*ToolResult, error)
+	streamingSink    *synchronousStreamSink
 }
 
 var _ PreparedStreamingInvocation = (*preparedStreamingInvocation)(nil)
@@ -793,6 +802,7 @@ func newPreparedStreamingInvocation(config preparedInvocationConfig, executeStre
 	return &preparedStreamingInvocation{
 		preparedInvocation: newPreparedInvocation(config),
 		executeStreaming:   executeStreaming,
+		streamingSink:      config.streamingSink,
 	}
 }
 
@@ -808,6 +818,12 @@ func (p *preparedStreamingInvocation) DispatchStreaming(ctx context.Context, sin
 	if p.executeStreaming == nil {
 		return nil, ErrPreparedInvocationUnavailable
 	}
+	if p.streamingSink != nil {
+		if !isCapturedSynchronousStreamSink(p.streamingSink, sink) {
+			return nil, ErrPreparedStreamSinkMismatch
+		}
+		sink = p.streamingSink
+	}
 	if err := validatePreparedContext(ctx); err != nil {
 		return nil, err
 	}
@@ -818,7 +834,11 @@ func (p *preparedStreamingInvocation) DispatchStreaming(ctx context.Context, sin
 		return nil, err
 	}
 	executeCtx := ctx
-	if p.completionProof == CompletionOwnedProcessGroupJoined {
+	completionProof := p.completionProof
+	if p.streamingSink == nil {
+		completionProof = ""
+	}
+	if completionProof == CompletionOwnedProcessGroupJoined {
 		executeCtx = withPreparedCompletionReporter(ctx, func(proof PreparedCompletionProof, done <-chan struct{}) {
 			p.completion.attach(proof, done)
 		})
@@ -832,7 +852,7 @@ func (p *preparedStreamingInvocation) DispatchStreaming(ctx context.Context, sin
 		completed = true
 		return result, err
 	}
-	if p.completionProof == CompletionInlinePipelineJoined {
+	if completionProof == CompletionInlinePipelineJoined {
 		done := p.completion.begin(CompletionInlinePipelineJoined)
 		if done == nil {
 			return nil, ErrPreparedInvocationUnavailable

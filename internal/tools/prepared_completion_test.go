@@ -20,6 +20,29 @@ func TestPreparedCompletionProofValuesAreStable(t *testing.T) {
 	assert.Equal(t, "owned_process_group_joined", string(CompletionOwnedProcessGroupJoined))
 }
 
+func TestPreparedCompletionForcedPipeCloseClosesLocalSignalWithoutProof(t *testing.T) {
+	state := newPreparedCompletionState()
+	done := state.begin(CompletionOwnedProcessGroupJoined)
+	require.NotNil(t, done)
+	closedExecution := make(chan struct{})
+	close(closedExecution)
+	ctx := withPreparedCompletionReporter(context.Background(), func(proof PreparedCompletionProof, processDone <-chan struct{}) {
+		require.True(t, state.attach(proof, processDone))
+	})
+
+	reportPreparedLocalProcessCompletion(ctx, managedLocalResult{
+		forcedPipeClose: true,
+		executionDone:   closedExecution,
+	})
+	state.finish(done, true)
+	assert.Empty(t, state.signal().Proof(), "forced pipe closure cannot mint containment evidence")
+	select {
+	case <-state.signal().Done():
+	default:
+		t.Fatal("the local execution pipeline has returned and must close its completion signal")
+	}
+}
+
 func TestPreparedCompletionInvalidationStaysStickyAfterLateQueueAttachment(t *testing.T) {
 	state := newPreparedCompletionState()
 	jobDone := make(chan struct{})
@@ -61,6 +84,18 @@ func registerPreparedBuiltin(ctx context.Context, t *testing.T, toolName string)
 	registry := NewMiddlewareToolRegistry(deferred)
 	require.NoError(t, RegisterDefaults(ctx, deferred, WithRegisteredBuiltinWhitelist([]string{toolName})))
 	return base, registry
+}
+
+func registerPreparedStreamingBash(ctx context.Context, t *testing.T, sandbox BashSandbox, stages PreparedToolStages) *MiddlewareToolRegistry {
+	t.Helper()
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	require.NoError(t, RegisterDefaults(ctx, base,
+		WithRegisteredBuiltinWhitelist([]string{"bash"}),
+		WithRegisteredBashSandbox(sandbox),
+	))
+	registry := NewMiddlewareToolRegistry(base)
+	configurePreparedRegistry(t, registry, allowPreparedCall, stages)
+	return registry
 }
 
 func TestPreparedCompletionRegisteredReadAndLSProvideInlineProof(t *testing.T) {
@@ -521,6 +556,314 @@ func TestPreparedCompletionLocalBashWaitsForProcessAndWrapperJoin(t *testing.T) 
 		t.Fatal("local process completion channel did not close after the owned group joined")
 	}
 	assert.Equal(t, CompletionOwnedProcessGroupJoined, signal.Proof())
+}
+
+type preparedBlockingCompletionSink struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *preparedBlockingCompletionSink) Send(string, string, string) error {
+	s.once.Do(func() { close(s.started) })
+	<-s.release
+	return nil
+}
+
+func TestPreparedCompletionRegisteredStreamingBashDirectDispatchJoinsProcessGroup(t *testing.T) {
+	ctx := context.Background()
+	registry := registerPreparedStreamingBash(ctx, t, AllowAllSandbox{}, PreparedToolStages{})
+	invocation, err := registry.PrepareToolCall(ctx, ToolCall{Name: "bash", Args: map[string]any{"command": "printf direct"}})
+	require.NoError(t, err)
+	assert.Equal(t, []TrustedToolEffect{EffectUnknown}, invocation.EffectSet().Values(), "completion must not grant a workspace-read effect")
+
+	_, err = invocation.Dispatch(ctx)
+	require.NoError(t, err)
+	signal := invocation.CompletionSignal()
+	require.NotNil(t, signal.Done(), "the non-streaming Execute branch has a nil sink and can prove its local process group")
+	select {
+	case <-signal.Done():
+	default:
+		t.Fatal("direct dispatch returned before the local process group joined")
+	}
+	assert.Equal(t, CompletionOwnedProcessGroupJoined, signal.Proof())
+}
+
+func TestPreparedStreamingBashAttestedSinkProvesNormalAndErrorCompletion(t *testing.T) {
+	for _, testCase := range []struct {
+		name      string
+		command   string
+		wantError bool
+	}{
+		{name: "normal", command: "printf streamed"},
+		{name: "nonzero exit", command: "printf failed; exit 7", wantError: true},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			ctx := context.Background()
+			registry := registerPreparedStreamingBash(ctx, t, AllowAllSandbox{}, PreparedToolStages{})
+			preparer, ok := any(registry).(StreamingToolCallPreparer)
+			require.True(t, ok, "the middleware registry exposes the optional streaming preparer")
+			attestedSink, err := AttestSynchronousStreamSink(&mockStreamSink{})
+			require.NoError(t, err)
+			invocation, err := preparer.PrepareStreamingToolCall(ctx, ToolCall{Name: "bash", Args: map[string]any{"command": testCase.command}}, attestedSink)
+			require.NoError(t, err)
+
+			_, err = invocation.DispatchStreaming(ctx, attestedSink)
+			if testCase.wantError {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			signal := invocation.CompletionSignal()
+			require.NotNil(t, signal.Done())
+			select {
+			case <-signal.Done():
+			default:
+				t.Fatal("streaming dispatch returned before its local process group and readers joined")
+			}
+			assert.Equal(t, CompletionOwnedProcessGroupJoined, signal.Proof())
+		})
+	}
+}
+
+func TestPreparedStreamingBashCompletionWaitsForSinkAndDescendantJoin(t *testing.T) {
+	ctx := context.Background()
+	registry := registerPreparedStreamingBash(ctx, t, AllowAllSandbox{}, PreparedToolStages{})
+	preparer, ok := any(registry).(StreamingToolCallPreparer)
+	require.True(t, ok, "the middleware registry exposes the optional streaming preparer")
+	sink := &preparedBlockingCompletionSink{started: make(chan struct{}), release: make(chan struct{})}
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(sink.release) }) })
+	attestedSink, err := AttestSynchronousStreamSink(sink)
+	require.NoError(t, err)
+	invocation, err := preparer.PrepareStreamingToolCall(ctx, ToolCall{
+		Name: "bash",
+		Args: map[string]any{"command": "sleep 1 & printf 'ready\\n'; wait"},
+	}, attestedSink)
+	require.NoError(t, err)
+
+	dispatchResult := make(chan error, 1)
+	go func() {
+		_, dispatchErr := invocation.DispatchStreaming(ctx, attestedSink)
+		dispatchResult <- dispatchErr
+	}()
+	select {
+	case <-sink.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("streaming executor did not reach the attested sink")
+	}
+	signal := invocation.CompletionSignal()
+	require.NotNil(t, signal.Done())
+	select {
+	case <-signal.Done():
+		t.Fatal("completion closed while the synchronous sink callback was still blocked")
+	default:
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	releaseOnce.Do(func() { close(sink.release) })
+	select {
+	case <-signal.Done():
+		t.Fatal("completion closed while the shell's descendant process was still running")
+	case <-time.After(100 * time.Millisecond):
+	}
+	select {
+	case err := <-dispatchResult:
+		require.NoError(t, err)
+	case <-time.After(5 * time.Second):
+		t.Fatal("streaming dispatch did not return after its descendant exited")
+	}
+	select {
+	case <-signal.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("completion did not close after the descendant and readers joined")
+	}
+	assert.Equal(t, CompletionOwnedProcessGroupJoined, signal.Proof())
+}
+
+func TestPreparedStreamingBashRejectsSinkReplacementBeforeCommit(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		replacement func(t *testing.T) StreamSink
+	}{
+		{name: "different attested sink", replacement: func(t *testing.T) StreamSink {
+			sink, err := AttestSynchronousStreamSink(&mockStreamSink{})
+			require.NoError(t, err)
+			return sink
+		}},
+		{name: "non-comparable raw sink", replacement: func(*testing.T) StreamSink {
+			return nonComparablePreparedStreamSink{values: []string{"not-comparable"}}
+		}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			ctx := context.Background()
+			registry := registerPreparedStreamingBash(ctx, t, AllowAllSandbox{}, PreparedToolStages{})
+			preparer, ok := any(registry).(StreamingToolCallPreparer)
+			require.True(t, ok, "the middleware registry exposes the optional streaming preparer")
+			path := filepath.Join(t.TempDir(), "must-not-run")
+			captured, err := AttestSynchronousStreamSink(&mockStreamSink{})
+			require.NoError(t, err)
+			invocation, err := preparer.PrepareStreamingToolCall(ctx, ToolCall{
+				Name: "bash",
+				Args: map[string]any{"command": "printf executed > " + path},
+			}, captured)
+			require.NoError(t, err)
+
+			_, err = invocation.DispatchStreaming(ctx, testCase.replacement(t))
+			require.ErrorIs(t, err, ErrPreparedStreamSinkMismatch)
+			assert.False(t, invocation.DispatchCommitted(), "sink replacement must fail before the final dispatch fence")
+			assert.Nil(t, invocation.CompletionSignal().Done())
+			assert.Empty(t, invocation.CompletionSignal().Proof())
+
+			_, err = invocation.DispatchStreaming(ctx, captured)
+			require.ErrorIs(t, err, ErrPreparedInvocationConsumed, "the rejected first attempt still consumes shared one-use admission")
+			_, statErr := os.Stat(path)
+			assert.ErrorIs(t, statErr, os.ErrNotExist, "neither sink mismatch nor a second dispatch may start the command")
+		})
+	}
+}
+
+func TestPreparedStreamingBashDispatchAndDispatchStreamingShareAdmission(t *testing.T) {
+	ctx := context.Background()
+	registry := registerPreparedStreamingBash(ctx, t, AllowAllSandbox{}, PreparedToolStages{})
+	preparer, ok := any(registry).(StreamingToolCallPreparer)
+	require.True(t, ok, "the middleware registry exposes the optional streaming preparer")
+	attestedSink, err := AttestSynchronousStreamSink(&mockStreamSink{})
+	require.NoError(t, err)
+	invocation, err := preparer.PrepareStreamingToolCall(ctx, ToolCall{Name: "bash", Args: map[string]any{"command": "printf direct"}}, attestedSink)
+	require.NoError(t, err)
+
+	_, err = invocation.Dispatch(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, CompletionOwnedProcessGroupJoined, invocation.CompletionSignal().Proof(), "the direct Execute branch has an independently joined process-group proof")
+	_, err = invocation.DispatchStreaming(ctx, attestedSink)
+	require.ErrorIs(t, err, ErrPreparedInvocationConsumed)
+}
+
+func TestPreparedStreamingBashCompletionWaitsForAttestedWrapperUnwind(t *testing.T) {
+	ctx := context.Background()
+	registry := registerPreparedStreamingBash(ctx, t, AllowAllSandbox{}, PreparedToolStages{})
+	innerReturned := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	t.Cleanup(func() { releaseOnce.Do(func() { close(release) }) })
+	wrapper := ToolExecutorWrapper(func(next func(context.Context, ToolCall) (*ToolResult, error)) func(context.Context, ToolCall) (*ToolResult, error) {
+		return func(ctx context.Context, call ToolCall) (*ToolResult, error) {
+			result, err := next(ctx, call)
+			close(innerReturned)
+			<-release
+			return result, err
+		}
+	})
+	require.NoError(t, registry.SetPreparedToolStages(PreparedToolStages{
+		ExecutionWrappers:            []ToolExecutorWrapper{wrapper},
+		SynchronousExecutionWrappers: true,
+	}))
+	preparer, ok := any(registry).(StreamingToolCallPreparer)
+	require.True(t, ok)
+	attestedSink, err := AttestSynchronousStreamSink(&mockStreamSink{})
+	require.NoError(t, err)
+	invocation, err := preparer.PrepareStreamingToolCall(ctx, ToolCall{Name: "bash", Args: map[string]any{"command": "printf wrapped"}}, attestedSink)
+	require.NoError(t, err)
+
+	dispatchResult := make(chan error, 1)
+	go func() {
+		_, dispatchErr := invocation.DispatchStreaming(ctx, attestedSink)
+		dispatchResult <- dispatchErr
+	}()
+	select {
+	case <-innerReturned:
+	case <-time.After(5 * time.Second):
+		t.Fatal("streaming executor did not finish its local process group")
+	}
+	signal := invocation.CompletionSignal()
+	require.NotNil(t, signal.Done())
+	assert.Empty(t, signal.Proof())
+	select {
+	case <-signal.Done():
+		t.Fatal("completion closed before the attested execution wrapper returned")
+	default:
+	}
+	releaseOnce.Do(func() { close(release) })
+	require.NoError(t, <-dispatchResult)
+	select {
+	case <-signal.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("completion did not close after the attested wrapper returned")
+	}
+	assert.Equal(t, CompletionOwnedProcessGroupJoined, signal.Proof())
+}
+
+func TestPreparedStreamingBashDoesNotAttestUnsupportedPipeline(t *testing.T) {
+	ctx := context.Background()
+	wrapper := ToolExecutorWrapper(func(next func(context.Context, ToolCall) (*ToolResult, error)) func(context.Context, ToolCall) (*ToolResult, error) {
+		return func(ctx context.Context, call ToolCall) (*ToolResult, error) { return next(ctx, call) }
+	})
+	stages := PreparedToolStages{ExecutionWrappers: []ToolExecutorWrapper{wrapper}}
+	registry := registerPreparedStreamingBash(ctx, t, AllowAllSandbox{}, stages)
+	preparer, ok := any(registry).(StreamingToolCallPreparer)
+	require.True(t, ok, "the middleware registry exposes the optional streaming preparer")
+	attestedSink, err := AttestSynchronousStreamSink(&mockStreamSink{})
+	require.NoError(t, err)
+	invocation, err := preparer.PrepareStreamingToolCall(ctx, ToolCall{Name: "bash", Args: map[string]any{"command": "printf wrapper"}}, attestedSink)
+	require.NoError(t, err)
+
+	_, err = invocation.DispatchStreaming(ctx, attestedSink)
+	require.NoError(t, err)
+	assert.Nil(t, invocation.CompletionSignal().Done(), "an unreviewed wrapper cannot inherit a local process proof")
+	assert.Empty(t, invocation.CompletionSignal().Proof())
+}
+
+func TestPreparedStreamingBashCustomSandboxDoesNotProvideProcessProof(t *testing.T) {
+	ctx := context.Background()
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	sandbox := &preparedDetachedSandbox{started: make(chan struct{}), release: make(chan struct{})}
+	defer close(sandbox.release)
+	require.NoError(t, base.registerTrustedLocalProcess(ctx, NewStreamingBashTool(WithBashSandbox(sandbox))))
+	registry := NewMiddlewareToolRegistry(base)
+	configurePreparedRegistry(t, registry, allowPreparedCall, PreparedToolStages{})
+	preparer, ok := any(registry).(StreamingToolCallPreparer)
+	require.True(t, ok)
+	attestedSink, err := AttestSynchronousStreamSink(&mockStreamSink{})
+	require.NoError(t, err)
+	invocation, err := preparer.PrepareStreamingToolCall(ctx, ToolCall{Name: "bash", Args: map[string]any{"command": "printf custom-sandbox"}}, attestedSink)
+	require.NoError(t, err)
+
+	_, err = invocation.DispatchStreaming(ctx, attestedSink)
+	require.NoError(t, err)
+	select {
+	case <-sandbox.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("custom sandbox did not start its detached work")
+	}
+	assert.Nil(t, invocation.CompletionSignal().Done(), "an attested output sink cannot upgrade an unsupported sandbox")
+	assert.Empty(t, invocation.CompletionSignal().Proof())
+}
+
+func TestPreparedStreamingCustomExecutorDoesNotInheritCompletionProof(t *testing.T) {
+	ctx := context.Background()
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	tool := &preparedDetachedStreamingTool{started: make(chan struct{}), release: make(chan struct{})}
+	defer close(tool.release)
+	require.NoError(t, base.Register(ctx, tool))
+	registry := NewMiddlewareToolRegistry(base)
+	configurePreparedRegistry(t, registry, allowPreparedCall, PreparedToolStages{})
+	preparer, ok := any(registry).(StreamingToolCallPreparer)
+	require.True(t, ok)
+	attestedSink, err := AttestSynchronousStreamSink(&mockStreamSink{})
+	require.NoError(t, err)
+	invocation, err := preparer.PrepareStreamingToolCall(ctx, ToolCall{Name: "bash", Args: map[string]any{"command": "custom"}}, attestedSink)
+	require.NoError(t, err)
+
+	_, err = invocation.DispatchStreaming(ctx, attestedSink)
+	require.NoError(t, err)
+	select {
+	case <-tool.started:
+	case <-time.After(5 * time.Second):
+		t.Fatal("custom streaming executor did not start its detached work")
+	}
+	assert.Nil(t, invocation.CompletionSignal().Done(), "sink attestation does not mint executor provenance")
+	assert.Empty(t, invocation.CompletionSignal().Proof())
 }
 
 func TestPreparedCompletionStreamingBashHasNoProofWithoutTrustedSink(t *testing.T) {

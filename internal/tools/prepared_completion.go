@@ -22,17 +22,19 @@ const (
 	CompletionOwnedProcessGroupJoined PreparedCompletionProof = "owned_process_group_joined"
 )
 
-// PreparedCompletionSignal exposes the action-scoped completion channel for
-// one sealed PreparedInvocation. The fields stay private so callers cannot
-// manufacture completion authority. Proof returns an enum only after Done
-// closes; an empty proof means the operation has no trusted completion proof.
+// PreparedCompletionSignal exposes one sealed PreparedInvocation's
+// action-scoped local pipeline/resource-join signal. Its fields stay private
+// so callers cannot manufacture completion authority. Done may close after
+// the observed local work returns even when containment remains unproved;
+// callers must check this same signal's non-empty Proof before clearing a
+// marker that requires the corresponding positive proof.
 type PreparedCompletionSignal struct {
 	state *preparedCompletionState
 }
 
-// Done returns the positive-completion channel when the captured prepared
-// path has one. Nil means that this invocation cannot currently provide a
-// trusted completion signal.
+// Done returns the local completion/join channel when the captured prepared
+// path has one. Closure alone does not prove containment or a broader resource
+// boundary. Nil means that this invocation has no trusted completion path.
 func (s PreparedCompletionSignal) Done() <-chan struct{} {
 	if s.state == nil {
 		return nil
@@ -40,9 +42,10 @@ func (s PreparedCompletionSignal) Done() <-chan struct{} {
 	return s.state.doneChannel()
 }
 
-// Proof returns the completion enum only after its positive Done channel has
-// closed. Before then, and for unknown or failed-to-prove execution paths, it
-// returns the empty value.
+// Proof returns the positive completion enum only after this signal's Done
+// channel has closed. Before then, and for unknown or failed-to-prove paths,
+// it returns the empty value; callers must require the proof matching their
+// resource boundary rather than relying on Done alone.
 func (s PreparedCompletionSignal) Proof() PreparedCompletionProof {
 	if s.state == nil {
 		return ""

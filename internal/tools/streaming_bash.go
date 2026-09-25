@@ -211,6 +211,7 @@ func (t *StreamingBashToolImpl) ExecuteStreaming(ctx context.Context, call ToolC
 	lifecycle := managed.collect(execCtx, func(reader io.Reader, stream string) (bool, error) {
 		return readPipe(reader, stream, sink, call.ID, capture)
 	})
+	reportPreparedLocalProcessCompletion(ctx, lifecycle)
 	ms := time.Since(start).Milliseconds()
 	output, truncated := capture.output()
 	metadata := map[string]any{
