@@ -725,9 +725,14 @@ func (a *HTTPClientAdapter) request(ctx context.Context, method string, params m
 	if err != nil {
 		return nil, newRequestBoundaryError(fmt.Errorf("mcp: do request: %w", err), true, false)
 	}
+	var responseBodyClose sync.Once
+	closeResponseBody := func() {
+		responseBodyClose.Do(func() { _ = resp.Body.Close() })
+	}
+	defer closeResponseBody()
 	responseBudget := newResponseByteBudget(maxHTTPResponseSize)
 	result, cursor, resumable, responseErr := a.readRequestResponse(resp, id, sessionID, responseBudget)
-	_ = resp.Body.Close()
+	closeResponseBody()
 	if responseErr != nil && resumable && cursor != "" && requestCtx.Err() == nil {
 		result, responseErr = a.resumeRequestResponse(requestCtx, endpoint, version, sessionID, id, cursor, responseBudget)
 	}
