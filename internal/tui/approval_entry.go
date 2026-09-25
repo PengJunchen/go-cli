@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+	"github.com/charmbracelet/x/ansi"
 )
 
 // ApprovalDecision is the user's verdict on a pending tool-call approval.
@@ -69,7 +70,7 @@ func renderApprovalRequest(req *ApprovalRequest) string {
 }
 
 func renderApprovalRequestDisplay(req *ApprovalRequest, showDiff bool) string {
-	view, _ := renderApprovalRequestPage(req, showDiff, 0, 0, 80, defaultApprovalDetailRows, 0)
+	view, _ := renderApprovalRequestPage(req, showDiff, 0, 0, 80, defaultApprovalDetailRows+approvalModalFixedRows, defaultApprovalDetailRows, 0, true)
 	return view
 }
 
@@ -84,8 +85,8 @@ func approvalDetailViewportRows(height int) int {
 		return defaultApprovalDetailRows
 	}
 	rows := height - approvalModalFixedRows
-	if rows < 1 {
-		return 1
+	if rows < 0 {
+		return 0
 	}
 	if rows > maxApprovalDetailRows {
 		return maxApprovalDetailRows
@@ -95,12 +96,20 @@ func approvalDetailViewportRows(height int) int {
 
 func approvalDetailWidth(width int) int {
 	if width <= 0 {
-		return 76
+		return 80
 	}
-	if width <= 4 {
+	if width <= 2 {
 		return 1
 	}
-	return width - 4
+	return width - 2
+}
+
+func sanitizeApprovalText(text string) string {
+	return ansi.Strip(safeTerminalText(text))
+}
+
+func approvalSingleLine(text string) string {
+	return strings.ReplaceAll(sanitizeApprovalText(text), "\n", " ")
 }
 
 func walkApprovalDetailLines(req *ApprovalRequest, showDiff bool, width int, visit func(string)) int {
@@ -130,6 +139,8 @@ func walkApprovalDetailLines(req *ApprovalRequest, showDiff bool, width int, vis
 			if !ok {
 				value = fmt.Sprint(req.Args[key])
 			}
+			key = approvalSingleLine(key)
+			value = sanitizeApprovalText(value)
 			first := true
 			walkApprovalTextLines(value, func(valueLine string) {
 				prefix := "      "
@@ -144,7 +155,7 @@ func walkApprovalDetailLines(req *ApprovalRequest, showDiff bool, width int, vis
 
 	if req.DiffPreview != "" && showDiff {
 		addLine("  diff:")
-		walkApprovalTextLines(req.DiffPreview, func(line string) {
+		walkApprovalTextLines(sanitizeApprovalText(req.DiffPreview), func(line string) {
 			wrapped := wrapApprovalLine("    "+line, width)
 			for _, visibleLine := range wrapped {
 				switch {
@@ -179,22 +190,27 @@ func walkApprovalTextLines(text string, visit func(string)) {
 
 func wrapApprovalLine(line string, width int) []string {
 	if width <= 0 {
-		return []string{line}
+		return []string{sanitizeApprovalText(line)}
 	}
-	wrapped := lipgloss.NewStyle().Width(width).Render(line)
-	parts := strings.Split(wrapped, "\n")
+	parts := strings.Split(wrapCellText(line, width), "\n")
 	for i := range parts {
 		parts[i] = strings.TrimRight(parts[i], " ")
 	}
 	return parts
 }
 
-func renderApprovalRequestPage(req *ApprovalRequest, showDiff bool, localToken uint64, queued int, width, detailRows, offset int) (string, int) {
+func renderApprovalRequestPage(req *ApprovalRequest, showDiff bool, localToken uint64, queued int, width, height, detailRows, offset int, reviewed bool) (string, int) {
 	if req == nil {
 		return "", 0
 	}
-	if detailRows < 1 {
-		detailRows = 1
+	if width <= 0 {
+		width = 80
+	}
+	if height > 0 && height < approvalModalFixedRows {
+		return renderCompactApprovalRequestPage(req, localToken, queued, width, height), 0
+	}
+	if detailRows < 0 {
+		detailRows = 0
 	}
 	detailWidth := approvalDetailWidth(width)
 	contentLines := walkApprovalDetailLines(req, showDiff, detailWidth, nil)
@@ -216,7 +232,7 @@ func renderApprovalRequestPage(req *ApprovalRequest, showDiff bool, localToken u
 	if end > total {
 		end = total
 	}
-	visibleLines := make([]string, 0, end-offset)
+	visibleLines := make([]string, 0, max(0, end-offset))
 	if contentLines == 0 {
 		visibleLines = append(visibleLines, "  (no details)")
 	} else {
@@ -231,28 +247,27 @@ func renderApprovalRequestPage(req *ApprovalRequest, showDiff bool, localToken u
 	var sb strings.Builder
 
 	// Header and provenance stay visible while only the bounded details region scrolls.
-	sb.WriteString(approvalHeaderStyle.Render("[approval]"))
-	sb.WriteString(" ")
-	sb.WriteString(approvalToolStyle.Render(req.ToolName))
+	header := approvalHeaderStyle.Render("[approval]") + " " + approvalToolStyle.Render(approvalSingleLine(req.ToolName))
+	sb.WriteString(clipCells(header, width))
 	sb.WriteString("\n")
-	if localToken == 0 {
-		sb.WriteString("  TUI local interaction (sequence unavailable)")
-	} else {
-		fmt.Fprintf(&sb, "  TUI local interaction #%d", localToken) //nolint:errcheck
-	}
+	identity := approvalIdentityLine(req, localToken)
 	if queued > 0 {
-		fmt.Fprintf(&sb, " · %d waiting", queued) //nolint:errcheck
+		identity += fmt.Sprintf(" · %d waiting", queued)
 	}
+	sb.WriteString(clipCells(identity, width))
 	sb.WriteString("\n")
-	sb.WriteString("  scope: unknown; y is once only; reuse unavailable\n")
-	if total > detailRows {
-		fmt.Fprintf(&sb, "  view truncated · details %d-%d/%d", offset+1, end, total) //nolint:errcheck
+	sb.WriteString(clipCells("  scope: unknown; once only; reuse unavailable", width))
+	sb.WriteString("\n")
+	var status strings.Builder
+	if detailRows == 0 {
+		status.WriteString("  details hidden · resize to review")
+	} else if total > detailRows {
+		fmt.Fprintf(&status, "  view truncated · details %d-%d/%d", offset+1, end, total) //nolint:errcheck
+		status.WriteString(" · ↑/↓ PgUp/PgDn")
 	} else {
-		fmt.Fprintf(&sb, "  details %d-%d/%d", offset+1, end, total) //nolint:errcheck
+		fmt.Fprintf(&status, "  details %d-%d/%d", offset+1, end, total) //nolint:errcheck
 	}
-	if total > detailRows {
-		sb.WriteString(" · ↑/↓ PgUp/PgDn")
-	}
+	sb.WriteString(clipCells(status.String(), width))
 	sb.WriteString("\n")
 
 	for _, line := range visibleLines {
@@ -260,20 +275,69 @@ func renderApprovalRequestPage(req *ApprovalRequest, showDiff bool, localToken u
 		sb.WriteString("\n")
 	}
 
-	// Unknown scope intentionally hides the persistent-allow key.
-	opts := "  [y] once [n] reject"
-	if total > detailRows {
-		opts += " [↑/↓] view"
-	}
-	if req.DiffPreview != "" {
+	// Unknown scope intentionally hides the persistent-allow key. A clipped
+	// request cannot be approved until every details row has appeared in a view.
+	decision := approvalDecisionLine(reviewed, width)
+	if width >= 32 && req.DiffPreview != "" {
 		if showDiff {
-			opts += " [d] diff"
+			decision += " [d] diff"
 		} else {
-			opts += " [d] show diff"
+			decision += " [d] show diff"
 		}
 	}
-	opts += " [Esc] cancel"
-	fmt.Fprintf(&sb, "%s\n", opts) //nolint:errcheck
+	sb.WriteString(clipCells(decision, width))
 
 	return strings.TrimRight(sb.String(), "\n"), offset
+}
+
+func approvalIdentityLine(req *ApprovalRequest, localToken uint64) string {
+	if id := approvalSingleLine(req.RequestID); id != "" {
+		return "  request: " + id
+	}
+	if localToken == 0 {
+		return "  local interaction (sequence unavailable)"
+	}
+	return fmt.Sprintf("  local interaction #%d", localToken)
+}
+
+func approvalDecisionLine(reviewed bool, width int) string {
+	if !reviewed {
+		if width < 16 {
+			return "y:next n:no"
+		}
+		if width < 30 {
+			return "[y] locked [n] no"
+		}
+		return "  [y] review details [n] reject"
+	}
+	if width < 16 {
+		return "y:once n:no"
+	}
+	if width < 22 {
+		return "[y] once [n] no"
+	}
+	return "  [y] once [n] reject [Esc] cancel"
+}
+
+func renderCompactApprovalRequestPage(req *ApprovalRequest, localToken uint64, queued, width, height int) string {
+	lines := []string{
+		clipCells(approvalHeaderStyle.Render("[approval]")+" "+approvalToolStyle.Render(approvalSingleLine(req.ToolName)), width),
+		clipCells(approvalIdentityLine(req, localToken), width),
+		clipCells("scope unknown · resize to review details", width),
+		clipCells(approvalDecisionLine(false, width), width),
+	}
+	if queued > 0 && height > 4 {
+		lines = append(lines, clipCells(fmt.Sprintf("%d waiting", queued), width))
+	}
+	if height < len(lines) {
+		switch height {
+		case 1:
+			return lines[0]
+		case 2:
+			return strings.Join([]string{lines[0], lines[3]}, "\n")
+		default:
+			return strings.Join([]string{lines[0], lines[2], lines[3]}, "\n")
+		}
+	}
+	return strings.Join(lines[:height], "\n")
 }

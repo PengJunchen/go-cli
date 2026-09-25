@@ -105,6 +105,7 @@ func TestTeaModel_ApprovalKeyY(t *testing.T) {
 		msgCh:     make(chan Msg, 1),
 	}
 	m.Update(approvalRequestMsg{req: ApprovalRequest{ToolName: "bash", Args: map[string]any{"command": "ls"}, ResponseCh: respCh}})
+	m.View() // The initial details page has been displayed to the user.
 	cmd := m.handleKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
 	assert.Nil(t, cmd)
 	assert.Nil(t, m.activeInteraction)
@@ -217,6 +218,74 @@ func TestApprovalRequestMsg_UpdateFlow(t *testing.T) {
 	require.NotNil(t, m.activeInteraction)
 	assert.NotNil(t, m.activeInteraction.approval)
 	assert.NotNil(t, cmd, "waitForApproval should be re-armed")
+}
+
+func TestTUIApprovalDisplaysAuthoritativeRequestID(t *testing.T) {
+	m := &teaModel{accordion: NewAccordionModel(), msgCh: make(chan Msg, 1)}
+	m.Update(approvalRequestMsg{req: ApprovalRequest{
+		RequestID:  "source-request-42",
+		ToolName:   "write",
+		ResponseCh: make(chan ApprovalResponse, 1),
+	}})
+
+	view := m.View()
+	assert.Contains(t, view, "source-request-42")
+	assert.NotContains(t, view, "local interaction #")
+}
+
+func TestTUIApprovalModalFitsSmallTerminalAndSanitizesUntrustedDetails(t *testing.T) {
+	content := "before\x1b[2Jafter\x1b]52;c;Zm9v\a\rend"
+	m := &teaModel{accordion: NewAccordionModel(), msgCh: make(chan Msg, 1)}
+	m.Update(tea.WindowSizeMsg{Width: 20, Height: 4})
+	m.Update(approvalRequestMsg{req: ApprovalRequest{
+		RequestID:  "r42",
+		ToolName:   "write",
+		Args:       map[string]any{"content": content},
+		ResponseCh: make(chan ApprovalResponse, 1),
+	}})
+
+	view := m.View()
+	lines := strings.Split(view, "\n")
+	require.LessOrEqual(t, len(lines), 4, "approval modal must fit terminal height")
+	for _, line := range lines {
+		require.LessOrEqual(t, cellWidth(line), 20, "approval row must fit terminal width: %q", line)
+	}
+	require.Contains(t, view, "r42")
+	require.Contains(t, view, "scope")
+	require.Contains(t, lastLine(view), "[n]", "the bounded decision row keeps rejection visible")
+	require.NotContains(t, view, "\x1b[2J")
+	require.NotContains(t, view, "\x1b]52;c;Zm9v")
+	require.NotContains(t, view, "\a")
+	require.NotContains(t, view, "\r")
+	assert.Equal(t, content, m.activeInteraction.approval.Args["content"], "rendering must preserve source arguments")
+
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	assert.NotNil(t, m.activeInteraction, "details that cannot fit must not be approvable until reviewed")
+}
+
+func TestTUIApprovalVisibleDetailsSanitizeTerminalControls(t *testing.T) {
+	content := "before\x1b[2Jafter\x1b]52;c;Zm9v\a\rend"
+	diff := "+safe\x1b[2Jline"
+	m := &teaModel{accordion: NewAccordionModel(), msgCh: make(chan Msg, 1)}
+	m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+	m.Update(approvalRequestMsg{req: ApprovalRequest{
+		RequestID:   "source-request-42",
+		ToolName:    "write",
+		Args:        map[string]any{"content": content},
+		DiffPreview: diff,
+		ResponseCh:  make(chan ApprovalResponse, 1),
+	}})
+
+	view := m.View()
+	require.Contains(t, view, "source-request-42")
+	require.Contains(t, view, "beforeafterend")
+	require.Contains(t, view, "+safeline")
+	for _, control := range []string{"\x1b[2J", "\x1b]52;c;Zm9v", "\a", "\r"} {
+		assert.NotContains(t, view, control)
+	}
+	assert.NotContains(t, view, "Zm9v")
+	assert.Equal(t, content, m.activeInteraction.approval.Args["content"], "display sanitizing must not mutate original arguments")
+	assert.Equal(t, diff, m.activeInteraction.approval.DiffPreview, "display sanitizing must not mutate original diff")
 }
 
 func TestTUIConcurrentApprovalRequestsRemainResolvable(t *testing.T) {
@@ -417,7 +486,7 @@ func TestTUIQueuedApprovalCancellationKeepsOtherRequestResolvable(t *testing.T) 
 	m.mu.Lock()
 	queued := m.queuedInteractions[0]
 	m.mu.Unlock()
-	watcher := waitForInteractionCancel(queued.token, queuedCtx, queued.finished, nil)
+	watcher := waitForInteractionCancel(queuedCtx, queued.token, queued.finished, nil)
 	cancelQueued()
 	canceledMsg := watcher()
 	m.Update(canceledMsg)
@@ -455,8 +524,16 @@ func TestTUIApprovalDetailsScrollKeepsDecisionRowVisible(t *testing.T) {
 	assert.Contains(t, view, "view truncated")
 	assert.Contains(t, view, "detail-line-00")
 	assert.NotContains(t, view, "detail-line-23")
-	assert.Contains(t, lastLine(view), "[y] once", "decision row stays fixed after the details viewport")
+	assert.Contains(t, lastLine(view), "[y] review details", "decision row stays fixed and locked until details are reviewed")
 	assert.LessOrEqual(t, strings.Count(view, "\n")+1, 10, "the modal stays within the configured height")
+
+	m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'y'}})
+	assert.NotNil(t, m.activeInteraction, "approval must wait until every detail row has been displayed")
+	select {
+	case got := <-response:
+		t.Fatalf("unreviewed details unexpectedly produced a decision: %+v", got)
+	default:
+	}
 
 	m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
 	assert.Contains(t, m.View(), "detail-line-03", "page down scrolls the bounded details area")
@@ -520,7 +597,7 @@ func TestTUIApprovalQueueCancellationKeepsRemainingFIFOOrder(t *testing.T) {
 	m.mu.Lock()
 	canceled := m.queuedInteractions[0]
 	m.mu.Unlock()
-	watcher := waitForInteractionCancel(canceled.token, canceledCtx, canceled.finished, nil)
+	watcher := waitForInteractionCancel(canceledCtx, canceled.token, canceled.finished, nil)
 	cancelCanceled()
 	m.Update(watcher())
 
@@ -571,11 +648,12 @@ func TestAnsweredInteractionsStopContextWatchers(t *testing.T) {
 		m := &teaModel{accordion: NewAccordionModel(), msgCh: make(chan Msg, 1)}
 		response := make(chan ApprovalResponse, 1)
 		m.Update(approvalRequestMsg{req: ApprovalRequest{ToolName: "bash", ResponseCh: response, Context: ctx}})
+		m.View() // The initial approval page has been displayed before input.
 
 		m.mu.Lock()
 		interaction := *m.activeInteraction
 		m.mu.Unlock()
-		watcher := waitForInteractionCancel(interaction.token, ctx, interaction.finished, nil)
+		watcher := waitForInteractionCancel(ctx, interaction.token, interaction.finished, nil)
 		watcherReturned := make(chan tea.Msg, 1)
 		go func() { watcherReturned <- watcher() }()
 

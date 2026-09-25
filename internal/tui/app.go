@@ -632,7 +632,7 @@ func (m *teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.notify(view)
 		var cancelWait tea.Cmd
 		if finished != nil {
-			cancelWait = waitForInteractionCancel(token, msg.req.Context, finished, m.runDone)
+			cancelWait = waitForInteractionCancel(msg.req.Context, token, finished, m.runDone)
 		}
 		return m, tea.Batch(next, cancelWait)
 	case HITLMessage:
@@ -653,6 +653,11 @@ func (m *teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mu.Lock()
 		m.width = msg.Width
 		m.height = msg.Height
+		if current := m.activeInteraction; current != nil && current.approval != nil {
+			current.detailOffset = 0
+			current.reviewedDetailLines = nil
+			current.reviewedDetailCount = 0
+		}
 		// Panel dimensions (leftWidth, rightWidth, panelHeight) are derived
 		// on the fly in renderViewLocked() from m.width/m.height, so no
 		// separate fields are needed. When width >= splitWidthThreshold,
@@ -720,6 +725,19 @@ const splitWidthThreshold = 120
 // and a right panel (tool_call entries with their children), joined
 // horizontally with a vertical separator. Below the threshold, or when no tool
 // entries exist, the classic single-column layout is used.
+func renderInputWithCaret(input string, cursor int) string {
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(input) {
+		cursor = len(input)
+	}
+	for cursor > 0 && cursor < len(input) && !utf8.RuneStart(input[cursor]) {
+		cursor--
+	}
+	return safeTerminalText(input[:cursor]) + "█" + safeTerminalText(input[cursor:])
+}
+
 func (m *teaModel) renderViewLocked() string {
 	if current := m.activeInteraction; current != nil && current.approval != nil {
 		return m.renderApprovalInteractionLocked(current)
@@ -797,16 +815,12 @@ func (m *teaModel) renderViewLocked() string {
 	// Steer input prompt.
 	if m.steerInputMode {
 		sb.WriteString("\n> steer> ")
-		sb.WriteString(m.steerInput)
-		// Render a block cursor.
-		sb.WriteString("\u2588")
+		sb.WriteString(renderInputWithCaret(m.steerInput, m.steerCursor))
 	}
 	// Follow-up input prompt.
 	if m.followUpInputMode {
 		sb.WriteString("\n> followup> ")
-		sb.WriteString(m.followUpInput)
-		// Render a block cursor.
-		sb.WriteString("\u2588")
+		sb.WriteString(renderInputWithCaret(m.followUpInput, m.followUpCursor))
 	}
 	// Todo progress panel (persistent, above the status bar).
 	if todoPanel := m.renderTodoPanelLocked(); todoPanel != "" {
@@ -836,16 +850,34 @@ func (m *teaModel) renderApprovalInteractionLocked(current *pendingInteraction) 
 		width = 80
 	}
 	rows := approvalDetailViewportRows(m.height)
-	view, offset := renderApprovalRequestPage(
+	total := walkApprovalDetailLines(current.approval, current.showDiff, approvalDetailWidth(width), nil)
+	if current.reviewedDetailCount != total {
+		current.reviewedDetailCount = total
+		current.reviewedDetailLines = nil
+	}
+	offset := normalizeApprovalDetailOffset(total, rows, current.detailOffset)
+	current.detailOffset = offset
+	if rows > 0 {
+		if current.reviewedDetailLines == nil {
+			current.reviewedDetailLines = make(map[int]struct{}, total)
+		}
+		end := min(total, offset+rows)
+		for line := offset; line < end; line++ {
+			current.reviewedDetailLines[line] = struct{}{}
+		}
+	}
+	reviewed := len(current.reviewedDetailLines) >= total && total > 0
+	view, _ := renderApprovalRequestPage(
 		current.approval,
 		current.showDiff,
 		current.token,
 		len(m.queuedInteractions),
 		width,
+		m.height,
 		rows,
-		current.detailOffset,
+		offset,
+		reviewed,
 	)
-	current.detailOffset = offset
 	return view
 }
 
@@ -859,8 +891,28 @@ func (m *teaModel) scrollApprovalDetailsLocked(delta int) {
 		width = 80
 	}
 	rows := approvalDetailViewportRows(m.height)
-	_, offset := renderApprovalRequestPage(current.approval, current.showDiff, current.token, len(m.queuedInteractions), width, rows, current.detailOffset+delta)
-	current.detailOffset = offset
+	total := walkApprovalDetailLines(current.approval, current.showDiff, approvalDetailWidth(width), nil)
+	current.detailOffset = normalizeApprovalDetailOffset(total, rows, current.detailOffset+delta)
+}
+
+func normalizeApprovalDetailOffset(total, rows, offset int) int {
+	if rows <= 0 {
+		return 0
+	}
+	maxOffset := max(0, total-rows)
+	return min(max(offset, 0), maxOffset)
+}
+
+func approvalDetailsReviewed(current *pendingInteraction, total int) bool {
+	if current == nil || total <= 0 || len(current.reviewedDetailLines) < total {
+		return false
+	}
+	for line := 0; line < total; line++ {
+		if _, ok := current.reviewedDetailLines[line]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // statusBarLineStyle styles the first status bar line (model/turn/session/mode).
@@ -998,14 +1050,16 @@ type approvalRequestMsg struct {
 }
 
 type pendingInteraction struct {
-	token          uint64
-	approval       *ApprovalRequest
-	hitl           *HITLMessage
-	answer         string
-	selectedOption int
-	showDiff       bool
-	detailOffset   int
-	finished       chan struct{}
+	token               uint64
+	approval            *ApprovalRequest
+	hitl                *HITLMessage
+	answer              string
+	selectedOption      int
+	showDiff            bool
+	detailOffset        int
+	reviewedDetailCount int
+	reviewedDetailLines map[int]struct{}
+	finished            chan struct{}
 }
 
 type interactionCanceledMsg struct {
@@ -1777,6 +1831,19 @@ func (m *teaModel) handleInteractionKeyLocked(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
+func (m *teaModel) approvalDetailsReviewedLocked() bool {
+	current := m.activeInteraction
+	if current == nil || current.approval == nil {
+		return false
+	}
+	width := m.width
+	if width <= 0 {
+		width = 80
+	}
+	total := walkApprovalDetailLines(current.approval, current.showDiff, approvalDetailWidth(width), nil)
+	return approvalDetailsReviewed(current, total)
+}
+
 // handleApprovalKeyLocked processes a key while an approval request is active.
 // y allows once, n denies, and Esc denies the active request. Reusable approval
 // remains unavailable until a trusted scope is supplied. q or Ctrl+C resolves
@@ -1796,10 +1863,14 @@ func (m *teaModel) handleApprovalKeyLocked(msg tea.KeyMsg) tea.Cmd {
 		m.scrollApprovalDetailsLocked(1)
 		return nil
 	case tea.KeyPgUp:
-		m.scrollApprovalDetailsLocked(-max(1, approvalDetailViewportRows(m.height)-1))
+		if rows := approvalDetailViewportRows(m.height); rows > 0 {
+			m.scrollApprovalDetailsLocked(-max(1, rows-1))
+		}
 		return nil
 	case tea.KeyPgDown:
-		m.scrollApprovalDetailsLocked(max(1, approvalDetailViewportRows(m.height)-1))
+		if rows := approvalDetailViewportRows(m.height); rows > 0 {
+			m.scrollApprovalDetailsLocked(max(1, rows-1))
+		}
 		return nil
 	case tea.KeyEsc:
 		m.resolveApprovalLocked(ApprovalDeny)
@@ -1809,6 +1880,9 @@ func (m *teaModel) handleApprovalKeyLocked(msg tea.KeyMsg) tea.Cmd {
 	case tea.KeyRunes:
 		switch string(msg.Runes) {
 		case "y":
+			if !m.approvalDetailsReviewedLocked() {
+				return nil
+			}
 			m.resolveApprovalLocked(ApprovalAllow)
 		case "n":
 			m.resolveApprovalLocked(ApprovalDeny)
@@ -1816,6 +1890,8 @@ func (m *teaModel) handleApprovalKeyLocked(msg tea.KeyMsg) tea.Cmd {
 			if m.activeInteraction != nil && m.activeInteraction.approval != nil && m.activeInteraction.approval.DiffPreview != "" {
 				m.activeInteraction.showDiff = !m.activeInteraction.showDiff
 				m.activeInteraction.detailOffset = 0
+				m.activeInteraction.reviewedDetailLines = nil
+				m.activeInteraction.reviewedDetailCount = 0
 			}
 		case "a":
 			// Reusable approval is unavailable until the caller supplies an
@@ -2056,10 +2132,10 @@ func (m *teaModel) handleHITLMessage(msg HITLMessage) (tea.Model, tea.Cmd) {
 	}
 	m.mu.Unlock()
 	m.notify(view)
-	return m, waitForInteractionCancel(token, msg.Context, finished, m.runDone)
+	return m, waitForInteractionCancel(msg.Context, token, finished, m.runDone)
 }
 
-func waitForInteractionCancel(token uint64, ctx context.Context, finished, runDone <-chan struct{}) tea.Cmd {
+func waitForInteractionCancel(ctx context.Context, token uint64, finished, runDone <-chan struct{}) tea.Cmd {
 	if ctx == nil {
 		return nil
 	}
