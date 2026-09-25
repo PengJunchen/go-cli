@@ -119,7 +119,8 @@ func TestCoordinatorNilRegistryDefault(t *testing.T) {
 	ctx := context.Background()
 	ext := newStubExt("def")
 	require.NoError(t, coord.initExtension(ctx, ext))
-	assert.Same(t, coord.registry(), ext.Registry())
+	assert.NotSame(t, coord.registry(), ext.Registry(), "Init receives a private staging registry")
+	assert.IsType(t, &DefaultExtensionRegistry{}, ext.Registry())
 }
 
 // TestCoordinatorStateForUnknown verifies state returns Pending for extensions
@@ -138,7 +139,7 @@ func TestCoordinatorInitFailureNotMarkedRunning(t *testing.T) {
 	ext.SetInitError(errors.New("init error"))
 	err := coord.initExtension(ctx, ext)
 	require.Error(t, err)
-	assert.Equal(t, extensionStatePending, coord.state("bad"))
+	assert.Equal(t, extensionStateFailed, coord.state("bad"))
 }
 
 // TestCoordinatorShutdownUnknown no-ops gracefully for extensions that were
@@ -150,8 +151,8 @@ func TestCoordinatorShutdownUnknown(t *testing.T) {
 	assert.Equal(t, extensionStatePending, coord.state("ghost"))
 }
 
-// TestCoordinatorReinitSameName verifies re-initializing an extension with the
-// same name overwrites the tracked entry and returns to Running.
+// TestCoordinatorReinitSameName rejects replacing an extension instance under a
+// name that already owns lifecycle state and registrations.
 func TestCoordinatorReinitSameName(t *testing.T) {
 	coord := newExtensionCoordinator(nil)
 	ctx := context.Background()
@@ -161,9 +162,8 @@ func TestCoordinatorReinitSameName(t *testing.T) {
 	assert.Equal(t, extensionStateStopped, coord.state("s"))
 
 	e2 := newStubExt("s")
-	require.NoError(t, coord.initExtension(ctx, e2))
-	assert.Equal(t, extensionStateRunning, coord.state("s"))
-	require.NoError(t, coord.shutdownExtension(ctx, e2))
+	require.ErrorIs(t, coord.initExtension(ctx, e2), ErrExtensionNameConflict)
+	assert.False(t, e2.InitCalled())
 	assert.Equal(t, extensionStateStopped, coord.state("s"))
 }
 
