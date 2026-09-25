@@ -106,6 +106,65 @@ func TestTranscriptViewportSelectDoesNotMovePartiallyVisibleRow(t *testing.T) {
 	assert.Equal(t, initial, v.Anchor(), "a row already intersecting the viewport does not jump to its top")
 }
 
+func TestTranscriptViewportSelectingVisibleRowPausesFollowTail(t *testing.T) {
+	rows := makeTranscriptViewportRows(5)
+	v := newTranscriptViewport(40, 3)
+	require.NoError(t, v.SetRows(rows, "loaded projection"))
+	assert.Equal(t, "entry-00002", v.Window().lines[0].rowKey)
+
+	anchor := v.Anchor()
+	require.True(t, v.Select("entry-00003"), "a visible non-tail row can be selected")
+	assert.False(t, v.FollowTail(), "explicit selection pauses follow-tail even when the row is visible")
+	assert.Equal(t, anchor, v.Anchor(), "selecting a visible row does not move the viewport")
+
+	rows = append(rows,
+		transcriptViewportRow{key: "entry-00005", text: "row 5", revision: 1},
+		transcriptViewportRow{key: "entry-00006", text: "row 6", revision: 1},
+	)
+	require.NoError(t, v.SetRows(rows, "loaded projection"))
+	assert.Equal(t, anchor, v.Anchor(), "appends preserve the selection-time viewport")
+	assert.Equal(t, "entry-00003", v.Window().lines[1].rowKey)
+	assert.False(t, v.FollowTail())
+}
+
+func TestTranscriptViewportVisibleSearchHitPausesFollowTail(t *testing.T) {
+	rows := makeTranscriptViewportRows(5)
+	rows[3].text = "find this visible result"
+	v := newTranscriptViewport(40, 3)
+	require.NoError(t, v.SetRows(rows, "loaded projection"))
+	assert.Equal(t, "entry-00002", v.Window().lines[0].rowKey)
+
+	anchor := v.Anchor()
+	hit, ok := v.Search("visible result", "")
+	require.True(t, ok)
+	assert.Equal(t, "entry-00003", hit)
+	assert.False(t, v.FollowTail(), "a successful search pauses follow-tail even when its hit is visible")
+	assert.Equal(t, anchor, v.Anchor(), "finding a visible hit does not move the viewport")
+
+	rows = append(rows,
+		transcriptViewportRow{key: "entry-00005", text: "row 5", revision: 1},
+		transcriptViewportRow{key: "entry-00006", text: "row 6", revision: 1},
+	)
+	require.NoError(t, v.SetRows(rows, "loaded projection"))
+	assert.Equal(t, anchor, v.Anchor(), "appends preserve the search-time viewport")
+	assert.Contains(t, windowLineTexts(v.Window()), "find this visible result")
+	assert.False(t, v.FollowTail())
+}
+
+func TestTranscriptViewportRemovedTailAnchorClampsToLastSurvivor(t *testing.T) {
+	rows := makeTranscriptViewportRows(10)
+	v := newTranscriptViewport(40, 2)
+	require.NoError(t, v.SetRows(rows, "loaded projection"))
+	v.ScrollLines(-1)
+	assert.Equal(t, "entry-00007", v.Anchor().rowKey)
+
+	rows = rows[:5]
+	require.NoError(t, v.SetRows(rows, "loaded projection"))
+	assert.Equal(t, "entry-00004", v.Anchor().rowKey, "a removed anchor clamps to the nearest surviving ordinal")
+	assert.Equal(t, 4, v.Window().startLine)
+	assert.Equal(t, "entry-00004", v.Window().lines[0].rowKey)
+}
+
 func TestTranscriptViewportResizeKeepsLogicalAnchor(t *testing.T) {
 	text := "\x1b[31mA世界👩🏽‍💻B\x1b[0m\nnext\tline\x1b]52;c;payload\a"
 	v := newTranscriptViewport(4, 2)
@@ -283,6 +342,40 @@ func TestTranscriptViewportWrapMatchesCellHelper(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			assert.Equal(t, wrapCellText(tc.text, tc.width), transcriptViewportWrap(tc.text, tc.width))
+		})
+	}
+}
+
+func TestTranscriptViewportNarrowWidthOffsetsMatchActualWrappedGraphemes(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+	}{
+		{name: "variation selector", text: "✈️x"},
+		{name: "regional indicator flag", text: "🇨🇳x"},
+		{name: "skin tone and ZWJ", text: "👩🏽‍💻x"},
+		{name: "ANSI-styled wide grapheme", text: "\x1b[31m世\x1b[0mx"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			const width = 1
+			wrapped := transcriptViewportWrap(tc.text, width)
+			assert.Equal(t, wrapCellText(tc.text, width), wrapped)
+			lines := strings.Split(wrapped, "\n")
+			offsets := transcriptViewportSourceLineOffsets(tc.text, width)
+			assert.Len(t, offsets, len(lines), "source-offset metadata must describe the actual wrap output")
+
+			v := newTranscriptViewport(width, len(lines))
+			require.NoError(t, v.SetRows([]transcriptViewportRow{{key: "narrow", text: tc.text, revision: 1}}, "loaded projection"))
+			assert.Equal(t, len(lines), v.rowMetadata[0].lineCount)
+			window := v.Window()
+			require.Len(t, window.lines, len(lines))
+			for i, line := range window.lines {
+				assert.Equal(t, lines[i], line.text, "the visible row must retain every line returned by the wrapper")
+				assert.Equal(t, offsets[i], line.sourceOffset)
+				assertViewportOffsetAtGraphemeBoundary(t, tc.text, line.sourceOffset)
+			}
+			assert.Contains(t, strings.Join(windowLineTexts(window), "\n"), "x", "trailing source text must not be hidden by stale line counts")
 		})
 	}
 }
