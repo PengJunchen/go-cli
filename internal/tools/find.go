@@ -86,6 +86,20 @@ func (t *FindTool) Description() string {
 	return "find: searches for files/directories under a path by name pattern. Args: path (string, optional), pattern (string, optional glob), type (string, optional: f|d), max_depth (int, optional)."
 }
 
+// Parameters returns the JSON Schema for find's optional search filters.
+func (t *FindTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"path":      map[string]any{"type": "string"},
+			"pattern":   map[string]any{"type": "string"},
+			"type":      map[string]any{"type": "string", "enum": []string{"", "f", "d"}},
+			"max_depth": map[string]any{"type": "integer"},
+		},
+		"additionalProperties": false,
+	}
+}
+
 // Execute searches under path (default ".") for entries whose base name
 // matches pattern (default matches everything). type filters to files ("f") or
 // directories ("d"); max_depth limits traversal depth. Results are returned as

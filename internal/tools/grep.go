@@ -113,6 +113,20 @@ func (t *GrepTool) Description() string {
 	return "grep: searches files under a directory for a regexp pattern. Args: pattern (string), glob (string, optional include filter), path (string, optional)."
 }
 
+// Parameters returns the JSON Schema for grep's model-supplied arguments.
+func (t *GrepTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"pattern": map[string]any{"type": "string"},
+			"glob":    map[string]any{"type": "string"},
+			"path":    map[string]any{"type": "string"},
+		},
+		"required":             []any{"pattern"},
+		"additionalProperties": false,
+	}
+}
+
 // Execute searches for pattern under path (default ".") and returns matching
 // lines as "file:line:content". Needs to accept an empty-path default resolved
 // against the workdir.
