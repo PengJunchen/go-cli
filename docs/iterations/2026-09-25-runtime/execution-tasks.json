@@ -942,7 +942,8 @@
       "status": "in_progress",
       "commit_spec": "Separate retry/loop from accounting/privacy commits when possible; never retry after visible output or side-effect dispatch without idempotency evidence.",
       "phase_id": "R3",
-      "source_status": "proposed"
+      "source_status": "proposed",
+      "execution_scope": "Accepted partial body-bounds/error-classification chain: source `e8→d0ecb1e`, `062→f4c52c0`, and final follow-up `755→da853ff`; the final independent review accepts preservation of bounded response status/prefix and oversize fatality after normalization while retaining explicit timeout precedence. The earlier rejected findings remain documented in the review. Accepted continuation no-replay source `1023→ebb73e1` prevents retry/failover/overflow from replaying a failed continuation. The root-run fixed `ebb73e1` race selection passed `./internal/llm ./internal/production ./internal/core ./internal/cli` (2.794s/1.683s/4.795s/21.281s); the separate CLI fixture delta remains pending independent review. This evidence does not establish an operation-wide retry budget, full attempt/cost accounting, crash-time provider replay, all consumer/cycler/subagent injection, compaction wiring, or full R3 closure."
     },
     {
       "id": "R3-BLD-03",

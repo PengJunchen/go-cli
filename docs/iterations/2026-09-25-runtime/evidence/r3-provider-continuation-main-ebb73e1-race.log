@@ -1,0 +1,4 @@
+ok  	github.com/pengjunchen/go-cli/internal/llm	2.794s
+ok  	github.com/pengjunchen/go-cli/internal/production	1.683s
+ok  	github.com/pengjunchen/go-cli/internal/core	4.795s
+ok  	github.com/pengjunchen/go-cli/internal/cli	21.281s
