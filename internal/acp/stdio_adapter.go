@@ -755,15 +755,6 @@ func marshalFrame(msg ACPMessage) ([]byte, error) {
 	return append(data, '\n'), nil
 }
 
-// writeLine marshals and writes one complete frame with a single Write call.
-func writeLine(w io.Writer, msg ACPMessage) error {
-	frame, err := marshalFrame(msg)
-	if err != nil {
-		return err
-	}
-	return writeFrameBytes(w, frame)
-}
-
 func writeFrameBytes(w io.Writer, frame []byte) error {
 	n, err := w.Write(frame)
 	if err != nil {
