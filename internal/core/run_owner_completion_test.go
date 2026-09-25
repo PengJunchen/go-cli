@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -26,8 +27,11 @@ type runOwnerCompletionTestAPI interface {
 }
 
 type runCommitLeaseTestSink struct {
-	closeCalls atomic.Int32
-	panicClose bool
+	closeCalls   atomic.Int32
+	panicClose   bool
+	closeStarted chan struct{}
+	closeRelease <-chan struct{}
+	startOnce    sync.Once
 }
 
 func (sink *runCommitLeaseTestSink) CommitInput(context.Context, RunCommitInput) error { return nil }
@@ -47,6 +51,12 @@ func (sink *runCommitLeaseTestSink) CommitCompaction(context.Context, Compaction
 func (sink *runCommitLeaseTestSink) CommitTerminal(context.Context, RunTerminal) error { return nil }
 func (sink *runCommitLeaseTestSink) CloseRunCommit() {
 	sink.closeCalls.Add(1)
+	if sink.closeStarted != nil {
+		sink.startOnce.Do(func() { close(sink.closeStarted) })
+	}
+	if sink.closeRelease != nil {
+		<-sink.closeRelease
+	}
 	if sink.panicClose {
 		panic("private close failure")
 	}
@@ -291,6 +301,61 @@ func TestRunOwnerCleanupCommitContextSharesDeadlineAndBinding(t *testing.T) {
 	assert.ErrorIs(t, cleanupContext.Err(), context.Canceled, "the owner cancels the cleanup context after local join")
 }
 
+func TestRunOwnerEarlyCancelRebindsCleanupContextWithoutExtendingDeadline(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	guard := newCountingRunSlotGuard()
+	owner := newRunOwner(parent, guard, guard.claim, nil)
+	owner.setCleanupTimeout(120 * time.Millisecond)
+	sink := &runCommitLeaseTestSink{}
+	bindTestRunCommitSink(owner, sink)
+	cancelAt := time.Now()
+	owner.MarkCancelRequested()
+	cancel()
+	time.Sleep(15 * time.Millisecond)
+
+	result, err := owner.run(time.Second, func(context.Context) (Result, error) {
+		t.Fatal("a canceled owner must not enter the callback")
+		return Result{}, nil
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	api := completionTestAPI(t, owner)
+	cleanupCtx := api.CleanupCommitContext(owner.callbackCtx)
+	require.NotNil(t, cleanupCtx)
+	assert.Equal(t, owner.claim.ID, RunIDFromContext(cleanupCtx), "delayed rebinding restores the run identity")
+	gotSink, binding, ok := RunCommitFromContext(cleanupCtx)
+	require.True(t, ok, "delayed rebinding restores only the validated atomic sink binding")
+	assert.Same(t, sink, gotSink)
+	assert.Equal(t, "session-test", binding.SessionID)
+	assert.Equal(t, "workspace-test", binding.WorkspaceID)
+	assert.Equal(t, owner.ownerGeneration, binding.OwnerGeneration)
+	deadline, ok := cleanupCtx.Deadline()
+	require.True(t, ok)
+	assert.Less(t, deadline, cancelAt.Add(owner.cleanupTimeout+10*time.Millisecond), "late callback-context installation must not restart the first cleanup budget")
+	assert.Equal(t, RunOutcomeCancelled, result.Outcome)
+}
+
+func TestRunOwnerEarlyCancelDoesNotInventInvalidBinding(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	guard := newCountingRunSlotGuard()
+	owner := newRunOwner(parent, guard, guard.claim, nil)
+	sink := &runCommitLeaseTestSink{}
+	owner.ctx = WithRunCommit(owner.ctx, sink, RunCommitBinding{SessionID: "missing-workspace"})
+	owner.setCleanupTimeout(100 * time.Millisecond)
+	owner.MarkCancelRequested()
+	cancel()
+	_, err := owner.run(time.Second, func(context.Context) (Result, error) {
+		t.Fatal("an invalid bound run must fail before the callback")
+		return Result{}, nil
+	})
+	require.ErrorIs(t, err, ErrInvalidRunCommitBinding)
+	cleanupCtx := completionTestAPI(t, owner).CleanupCommitContext(owner.callbackCtx)
+	assert.Equal(t, owner.claim.ID, RunIDFromContext(cleanupCtx), "the owner still retains its local run identity")
+	gotSink, binding, ok := RunCommitFromContext(cleanupCtx)
+	assert.False(t, ok, "an invalid descriptor is cleared instead of becoming a fabricated cleanup binding")
+	assert.Nil(t, gotSink)
+	assert.Equal(t, RunCommitBinding{}, binding)
+}
+
 func TestRunOwnerReturnsPoisonedSinkLeaseOnlyAfterResourceJoin(t *testing.T) {
 	guard := newCountingRunSlotGuard()
 	owner := newRunOwner(context.Background(), guard, guard.claim, nil)
@@ -363,6 +428,65 @@ func TestRunOwnerWithBoundSinkCannotAcknowledgeUnsyncedTerminal(t *testing.T) {
 	assert.Equal(t, RunExecutionQuarantined, result.ExecutionState)
 	assert.EqualValues(t, 1, sink.closeCalls.Load(), "durable failure still returns the joined run lease")
 	assert.Equal(t, 1, guard.releaseCount())
+}
+
+func TestRunOwnerBlockedLeaseCloseRemainsPendingUntilReleaseCompletes(t *testing.T) {
+	guard := newCountingRunSlotGuard()
+	owner := newRunOwner(context.Background(), guard, guard.claim, nil)
+	resourceDone := make(chan struct{})
+	closeStarted := make(chan struct{})
+	closeRelease := make(chan struct{})
+	sink := &runCommitLeaseTestSink{closeStarted: closeStarted, closeRelease: closeRelease}
+	bindTestRunCommitSink(owner, sink)
+	runDone := make(chan struct{})
+	var result Result
+	var runErr error
+	go func() {
+		defer close(runDone)
+		result, runErr = owner.run(40*time.Millisecond, func(ctx context.Context) (Result, error) {
+			completionTestAPI(t, owner).markRunCommitTerminalSynced()
+			owner.RegisterPendingResource("call-lease", "blocked", resourceDone)
+			return Result{Outcome: RunOutcomeSuccess, Message: "terminal synced"}, nil
+		})
+	}()
+	for {
+		owner.mu.Lock()
+		callbackFinished := owner.callbackFinished
+		owner.mu.Unlock()
+		if callbackFinished {
+			break
+		}
+		select {
+		case <-runDone:
+			t.Fatal("run returned before the resource joined")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	close(resourceDone)
+	select {
+	case <-closeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("supervisor did not begin the one-shot lease release")
+	}
+	select {
+	case <-runDone:
+	case <-time.After(time.Second):
+		t.Fatal("bounded caller did not return while lease close remained blocked")
+	}
+	require.Error(t, runErr, "a blocked release cannot be returned as a successful terminal snapshot")
+	assert.Equal(t, RunOutcomeUnknown, result.Outcome)
+	assert.False(t, result.Success)
+	assert.Equal(t, RunExecutionCleanupPending, result.ExecutionState)
+	assert.Zero(t, guard.releaseCount(), "the claim stays owned until the lease release completes")
+	assert.EqualValues(t, 1, sink.closeCalls.Load())
+	close(closeRelease)
+	select {
+	case <-owner.done:
+	case <-time.After(time.Second):
+		t.Fatal("owner did not finish its one-shot release after the lease unblocked")
+	}
+	assert.Equal(t, 1, guard.releaseCount())
+	assert.EqualValues(t, 1, sink.closeCalls.Load(), "the release is never retried")
 }
 
 func TestRunOwnerPanicStillHandsOffTaskAndReleasesAfterJoin(t *testing.T) {
