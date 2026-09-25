@@ -207,7 +207,6 @@ func (m *ApprovalMiddleware) resolvePreparedAsk(
 		recordPreparedDecision(span, req, mode, "invalid_approval_result", false, false, false)
 		return decision, ErrToolDenied
 	}
-	return decision, ErrToolDenied
 }
 
 func (m *ApprovalMiddleware) publishPreparedAllow(

@@ -271,7 +271,7 @@ func TestReadEmptyPathWhitelistPreservesUnrestrictedBehavior(t *testing.T) {
 	path := filepath.Join(dir, "abs.txt")
 	require.NoError(t, os.WriteFile(path, []byte("unrestricted"), 0o600))
 
-	for _, paths := range [][]string{nil, []string{}} {
+	for _, paths := range [][]string{nil, {}} {
 		tool := NewReadTool(WithReadPathWhitelist(paths))
 		result, err := tool.Execute(context.Background(), ToolCall{
 			Args: map[string]any{"path": path},
