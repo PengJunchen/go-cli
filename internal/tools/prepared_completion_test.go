@@ -20,6 +20,40 @@ func TestPreparedCompletionProofValuesAreStable(t *testing.T) {
 	assert.Equal(t, "owned_process_group_joined", string(CompletionOwnedProcessGroupJoined))
 }
 
+func TestPreparedCompletionInvalidationStaysStickyAfterLateQueueAttachment(t *testing.T) {
+	state := newPreparedCompletionState()
+	jobDone := make(chan struct{})
+
+	state.invalidateProof()
+	close(jobDone)
+	require.True(t, state.attach(CompletionQueuedJobJoined, jobDone))
+
+	signal := state.signal()
+	require.NotNil(t, signal.Done(), "late attachment must preserve the accepted job join handle")
+	select {
+	case <-signal.Done():
+	default:
+		t.Fatal("accepted queue job completion must remain observable")
+	}
+	assert.Empty(t, signal.Proof(), "a late attachment must not restore invalidated proof")
+}
+
+func TestPreparedCompletionInvalidationRevokesPreviouslyCapturedProofSnapshot(t *testing.T) {
+	state := newPreparedCompletionState()
+	jobDone := make(chan struct{})
+	require.True(t, state.attach(CompletionQueuedJobJoined, jobDone))
+
+	state.mu.RLock()
+	capturedDone, capturedProof := state.done, state.proof
+	state.mu.RUnlock()
+	require.Equal(t, CompletionQueuedJobJoined, capturedProof)
+
+	state.invalidateProof()
+	close(jobDone)
+	assert.Empty(t, state.proofFromCompletedSnapshot(capturedDone, capturedProof), "invalidation after the initial snapshot must be ordered before proof observation")
+	assert.Empty(t, state.signal().Proof())
+}
+
 func TestPreparedCompletionInlineSignalWaitsForExecutorReturn_HelperOnly(t *testing.T) {
 	// Prepared Write/Edit registration deliberately requires the mutation queue.
 	// This directly exercises the sealed invocation's internal inline signal

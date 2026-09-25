@@ -54,6 +54,7 @@ type preparedCompletionState struct {
 	mu                 sync.RWMutex
 	proof              PreparedCompletionProof
 	done               <-chan struct{}
+	proofInvalidated   bool
 	ownedDone          chan struct{}
 	processMode        bool
 	processDone        <-chan struct{}
@@ -91,12 +92,21 @@ func (s *preparedCompletionState) completedProof() PreparedCompletionProof {
 	s.mu.RLock()
 	done, proof := s.done, s.proof
 	s.mu.RUnlock()
+	return s.proofFromCompletedSnapshot(done, proof)
+}
+
+func (s *preparedCompletionState) proofFromCompletedSnapshot(done <-chan struct{}, proof PreparedCompletionProof) PreparedCompletionProof {
 	if done == nil || !validPreparedCompletionProof(proof) {
+		return ""
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.proofInvalidated || s.done != done || s.proof != proof {
 		return ""
 	}
 	select {
 	case <-done:
-		return proof
+		return s.proof
 	default:
 		return ""
 	}
@@ -134,6 +144,10 @@ func (s *preparedCompletionState) finish(done chan struct{}, completed bool) {
 	if s.processMode {
 		s.pipelineReturned = true
 		s.pipelineSuccessful = completed
+		if !completed {
+			s.proofInvalidated = true
+			s.proof = ""
+		}
 		if !s.processObserved || s.processClosed {
 			s.finishProcessLocked()
 		}
@@ -141,6 +155,7 @@ func (s *preparedCompletionState) finish(done chan struct{}, completed bool) {
 	}
 	if !completed {
 		s.proof = ""
+		s.proofInvalidated = true
 	}
 	s.finalized = true
 	close(done)
@@ -185,8 +200,10 @@ func (s *preparedCompletionState) attach(proof PreparedCompletionProof, done <-c
 	if s.done != nil {
 		return false
 	}
-	s.proof = proof
 	s.done = done
+	if !s.proofInvalidated {
+		s.proof = proof
+	}
 	return true
 }
 
@@ -194,7 +211,7 @@ func (s *preparedCompletionState) finishProcessLocked() {
 	if s.ownedDone == nil || !s.processMode || s.finalized {
 		return
 	}
-	if s.pipelineSuccessful && s.processObserved && s.processClosed {
+	if !s.proofInvalidated && s.pipelineSuccessful && s.processObserved && s.processClosed {
 		s.proof = CompletionOwnedProcessGroupJoined
 	} else {
 		s.proof = ""
@@ -208,6 +225,7 @@ func (s *preparedCompletionState) invalidateProof() {
 		return
 	}
 	s.mu.Lock()
+	s.proofInvalidated = true
 	s.proof = ""
 	s.mu.Unlock()
 }
