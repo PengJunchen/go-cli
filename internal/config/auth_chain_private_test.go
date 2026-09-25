@@ -365,6 +365,50 @@ func TestLookupScopedModelsJSONMissingFileIsNotFound(t *testing.T) {
 	require.ErrorIs(t, err, ErrAuthNotFound)
 }
 
+func TestLookupScopedModelsJSONRejectsDanglingSymlinkPathComponents(t *testing.T) {
+	scope := AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test"}
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, home, path string)
+	}{
+		{
+			name: "final file",
+			setup: func(t *testing.T, home, path string) {
+				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+				require.NoError(t, os.Symlink(filepath.Join(home, "missing-file-target"), path))
+			},
+		},
+		{
+			name: "immediate parent",
+			setup: func(t *testing.T, home, path string) {
+				configDir := filepath.Join(home, ".config")
+				require.NoError(t, os.Mkdir(configDir, 0o700))
+				require.NoError(t, os.Symlink(filepath.Join(home, "missing-parent-target"), filepath.Join(configDir, "go-cli")))
+			},
+		},
+		{
+			name: "config ancestor",
+			setup: func(t *testing.T, home, path string) {
+				require.NoError(t, os.Symlink(filepath.Join(home, "missing-config-target"), filepath.Join(home, ".config")))
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			path := filepath.Join(home, ".config", "go-cli", "models.json")
+			tc.setup(t, home, path)
+
+			key, err := lookupScopedModelsJSON(scope)
+			require.Error(t, err)
+			assert.False(t, errors.Is(err, ErrAuthNotFound))
+			assert.Empty(t, key)
+		})
+	}
+}
+
 func TestLookupScopedCredentialDataRejectsMalformedDocumentsAndRecords(t *testing.T) {
 	scope, err := normalizeAuthScope(AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test"})
 	require.NoError(t, err)
