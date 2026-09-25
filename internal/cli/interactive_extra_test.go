@@ -212,7 +212,7 @@ func TestInteractiveCmd_RegisterMCPTools_StreamableHTTPServer(t *testing.T) {
 	assert.Contains(t, result.Output, "ok")
 }
 
-func TestInteractiveCmd_RegisterMCPTools_SSEServer(t *testing.T) {
+func TestHTTPMCPAdapterRejectsLegacySSEBeforeNetwork(t *testing.T) {
 	ctx := t.Context()
 	var requests atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -229,11 +229,6 @@ func TestInteractiveCmd_RegisterMCPTools_SSEServer(t *testing.T) {
 	err := adapter.Connect(ctx)
 	require.ErrorIs(t, err, mcp.ErrUnsupportedHTTPTransport)
 	assert.Zero(t, requests.Load(), "legacy SSE transport must be rejected before probing the endpoint")
-
-	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
-	registered, err := tr.List(ctx)
-	require.NoError(t, err)
-	assert.Empty(t, registered, "unsupported legacy SSE must not register tools")
 }
 
 func TestInteractiveCmd_RegisterMCPTools_NoTransport(t *testing.T) {

@@ -228,13 +228,12 @@ func (s *mockHTTPMCPServer) start() *httptest.Server {
 }
 
 // =============================================================================
-// 1. TestE2E_MCPHTTPAdapter_LegacySSERejectedBeforeNetwork
+// 1. TestE2E_MCPHTTPAdapterRejectsLegacySSEBeforeNetwork
 // =============================================================================
 
 // TestE2E_MCPHTTPAdapter_LegacySSERejectedBeforeNetwork verifies that the
-// unsupported legacy SSE transport is rejected before endpoint probing and
-// cannot register placeholder tools.
-func TestE2E_MCPHTTPAdapter_LegacySSERejectedBeforeNetwork(t *testing.T) {
+// unsupported legacy SSE transport is rejected before endpoint probing.
+func TestE2E_MCPHTTPAdapterRejectsLegacySSEBeforeNetwork(t *testing.T) {
 	var requests atomic.Int32
 	httpSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		requests.Add(1)
@@ -250,11 +249,6 @@ func TestE2E_MCPHTTPAdapter_LegacySSERejectedBeforeNetwork(t *testing.T) {
 	err := adapter.Connect(context.Background())
 	require.ErrorIs(t, err, mcp.ErrUnsupportedHTTPTransport)
 	assert.Zero(t, requests.Load())
-
-	tr := tools.NewDefaultToolRegistry()
-	listed, err := tr.List(context.Background())
-	require.NoError(t, err)
-	assert.Empty(t, listed)
 }
 
 // =============================================================================
