@@ -1291,8 +1291,8 @@
       "source_status": "proposed",
       "execution_scope": "Partial accepted slice only: source 6921b4bb→e2f8791, 9342cdef→4327ef2, 01404e63→b8bedcb, and fixed interaction follow-up d3ac6b29→ed72cd6. The review accepts approval-detail identity/escaping/review-coverage behavior. This task remains in progress for HITL and approval queue wiring, canonical transcript/session projection, and real end-to-end journeys; no PTY acceptance is recorded."
     },
-    {
-      "id": "R5-BLD-02",
+  {
+    "id": "R5-BLD-02",
       "role": "builder",
       "title": "Complete TUI input, cancel and discoverability journeys",
       "user_story": "As a user, I can edit a queued message, steer or cancel predictably, and understand the keys shown by help and dialogs.",
@@ -1319,7 +1319,7 @@
       "commit_spec": "One focused commit per editor or keybinding behavior group; retain recorded PTY input/output for reviewer reproduction.",
       "phase_id": "R5",
       "source_status": "proposed",
-      "execution_scope": "Partial accepted slice only: the fixed R5 interaction source through d3ac6b29→ed72cd6 includes the reviewed UTF-8 caret and approval/editor interaction behavior. The main TUI/CLI/default-build package race evidence is recorded in execution-status.md. Input/cancel/help journeys and the required PTY verification remain incomplete; this task is not done."
+    "execution_scope": "Partial accepted slice only: the fixed R5 interaction source through d3ac6b29→ed72cd6 includes the reviewed UTF-8 caret and approval/editor interaction behavior. A real PTY run at fixed 84324fe failed because the first key after REPL submission was lost and ASCII spaces disappeared from free-text ask_user input; preserve that pre-fix evidence. The follow-up UI fix is still under review, so input/cancel/help journeys and PTY verification remain incomplete; this task is not done."
     },
     {
       "id": "R5-REV-01",
@@ -1434,8 +1434,8 @@
       "source_status": "proposed",
       "execution_scope": "Partial lane build_private_files, based at 62aa472 on codebase 1c285ac, is authorized under approved R6 design section 50 for atomic private auth/token/trust-file persistence and auth-reader error/permission behavior only. This isolated slice may proceed while full entrypoint/consumer prerequisites remain pending; complete provider-factory wiring, consumer trust lifecycle, remaining CLI behavior, entrypoint verification and R6 acceptance remain gated. Separately, scoped-auth onboarding/keychain fixes map 6c8021f→868a47e, ae89cd9→a50bc77, 3436c3f→70b387c, and 0533451f→d10e01c; the bounded findings are accepted and the six-package privatefile/config/llm/cli/cmd/cli/tests race passed on d10e01c. Full R6 trust, adapter, entrypoint and coverage gates remain open."
     },
-    {
-      "id": "R6-BLD-02",
+  {
+    "id": "R6-BLD-02",
       "role": "builder",
       "title": "Make ACP, MCP and Web adapter lifecycles conform to declared contracts",
       "user_story": "As an automation or remote-client user, sessions, auth, approval, events and tool calls must stay inside the correct request and transport lifetime.",
@@ -1474,10 +1474,11 @@
         "R4-REV-01",
         "R2-REV-01"
       ],
-      "status": "pending",
-      "commit_spec": "Keep ACP/MCP/Web adapter changes separate; each declared protocol version must have reproducible wire fixtures before support is advertised.",
-      "phase_id": "R6",
-      "source_status": "proposed"
+  "status": "in_progress",
+  "commit_spec": "Keep ACP/MCP/Web adapter changes separate; each declared protocol version must have reproducible wire fixtures before support is advertised.",
+  "phase_id": "R6",
+  "source_status": "proposed",
+  "execution_scope": "Partial accepted slices only: ACP replay/cutover source 658→0f6272e and 3c→01c61d7, plus Web availability source e7→55d62ef and ee→fe920cb. The ACP review accepted its bounded 20-test selection and overlay-cap race evidence; the Web slice makes unsupported paths explicitly unavailable. Full ACP request/session/approval lifecycle, MCP wire conformance/reload, authenticated Web agent journey, entrypoint wiring and R6 gates remain open; this partial work does not close R6-BLD-02 or R6."
     },
     {
       "id": "R6-REV-01",
@@ -1624,8 +1625,8 @@
       "source_status": "proposed",
       "execution_scope": "Partial extension registry/lifecycle-core lane only, owned by build_permissions: internal/extension/registry.go, manager.go, plugin_manager.go and matching package tests. Cover deterministic ordered snapshots, staging conflict atomicity, init owner/waiter cancellation semantics, late-success cleanup and exactly-once shutdown; conflict cleanup errors must remain discoverable with errors.Is/errors.Join. Planned new regressions are TestExtensionWaiterCancellationDoesNotCancelInit, TestExtensionOwnerCancellationKeepsCleanupPendingUntilCallbackReturns, TestExtensionOwnerCancellationDropsStageAndShutsDownOnce, and TestExtensionStagingConflictJoinsCleanupErrorAndShutsDownOnce. Do not touch internal/cli/assemble.go, skill files, Hook/EventBridge bridge files, or internal/core/run_slot.go. This is not full R7-BLD-01 or R7 acceptance; skills, default-assembly wiring and R7 gates remain pending."
     },
-    {
-      "id": "R7-BLD-02",
+  {
+    "id": "R7-BLD-02",
       "role": "builder",
       "title": "Make tracing, metrics and approval audit privacy-safe and truthful",
       "user_story": "As an operator, trace output must be correctly correlated and bounded, and approval audits must show the user's actual decision without recording secrets.",
@@ -1664,7 +1665,7 @@
       "commit_spec": "Split high-risk privacy from exporter conformance where possible; trace snapshots must be reviewed for secrets before acceptance.",
       "phase_id": "R7",
       "source_status": "proposed",
-      "execution_scope": "Parent-authorized partial telemetry slice only: internal/production/telemetry.go and telemetry_test.go for injective metric keys, bounded label domains/series and observable drop stats, with only narrowly coordinated producer-label changes allowed by r7-lifecycle-design.md lines 145-151. This does not include trace lifecycle/exporter wiring, CLI close/error propagation, or full R7 acceptance/review; the declared phase dependencies and R7-REV-01 remain open."
+    "execution_scope": "Accepted partial slices: telemetry source 78b694c→948c27f plus test-only fixtures e3e1c6→78b1bb3; and bounded async-exporter ownership/CLI-finalizer source 0e→c484c66. The latter does not cover Assembly/REPL/serve producer lifecycles, stdout/structured-output preflight, or full CLI shutdown error propagation. R7 tracing lifecycle integration, remaining audit/privacy work, declared dependencies and R7-REV-01 remain open; this is not full R7 acceptance."
     },
     {
       "id": "R7-REV-01",

@@ -9,7 +9,7 @@ diff --git a/Makefile b/Makefile
  
  # Build
  build:
-@@ -15,18 +16,18 @@
+@@ -15,18 +16,19 @@
  
  # Run all tests
  test:
@@ -24,6 +24,7 @@ diff --git a/Makefile b/Makefile
  	go tool cover -func=$(COVERAGE_DIR)/coverage.out
  
  # Coverage threshold check
++.PHONY: test-cov-check
  test-cov-check:
  	@mkdir -p $(COVERAGE_DIR)
 -	@go test -coverprofile=$(COVERAGE_DIR)/coverage.out ./... 2>/dev/null
@@ -31,7 +32,7 @@ diff --git a/Makefile b/Makefile
  	@COVERAGE=$$(go tool cover -func=$(COVERAGE_DIR)/coverage.out | grep total | awk '{print $$3}' | sed 's/%//') && \
  		echo "Total coverage: $${COVERAGE}%" && \
  		if [ $$(echo "$$COVERAGE < $(COVERAGE_THRESHOLD)" | bc) -eq 1 ]; then \
-@@ -38,11 +39,11 @@
+@@ -38,11 +41,11 @@
  
  # Run log-based verification tests
  test-log:

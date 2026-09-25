@@ -1,0 +1,16 @@
+snapshot=d5e27d3f17934ebbee23fc7a4a6b3eccaa621107
+Temporary overlay test asserts desired behavior; failure reproduces defect.
+=== RUN   TestReviewOverflowMustNotWaitForCommandDeadline
+    review_probe_test.go:7: elapsed=2.21914875s limit=true err=signal: killed
+        gatecapture: command left descendants in its owned process group
+        gatecapture: output exceeded configured limit ctx=context deadline exceeded
+    review_probe_test.go:8: output overflow waited until the independent command deadline
+--- FAIL: TestReviewOverflowMustNotWaitForCommandDeadline (2.22s)
+=== RUN   TestReviewRunSupportsPlainCommand
+    review_probe_test.go:11: exec: command with a non-nil Cancel was not created with CommandContext
+--- FAIL: TestReviewRunSupportsPlainCommand (0.00s)
+FAIL
+FAIL	github.com/pengjunchen/go-cli/internal/verify/cmd/gatecapture	2.228s
+FAIL
+
+exit=1

@@ -1,0 +1,415 @@
+startup_prompt=observed
+approval_termios_lflag=67 canon=False echo=False isig=False
+queued_approval=visible_1_waiting_at_60x6
+> P> PT> PTY> PTY > PTY c> PTY ca> PTY can> PTY canc> PTY cance> PTY cancel> PTY cancel > PTY cancel q> PTY cancel qu> PTY cancel que> PTY cancel queu> PTY cancel queue> PTY cancel queued
+  
+  ⠹ [tool] write
+  
+▶ ⠙ [tool] write
+⠹ working...
+pty-review-model | turn #1 | interact | chat[approval] write
+  local interaction #1 · 1 waiting
+  scope: unknown; once only; reuse unavailable
+  view truncated · details 1-1/7 · ↑/↓ PgUp/PgDn
+  args:
+  [y] review details [n] reject [d] diff
+first_post_submit_key=q had no visible effect
+second_post_submit_key=q canceled active and queued approvals
+queued_approval_cancel=interrupted; both files absent
+deny_modal_resize=60x6_to_20x4; compact scope row visible
+> P> PT> PTY> PTY > PTY d> PTY de> PTY den> PTY deny
+  AI: 
+  
+▶ ⠙ [tool] write
+⠙ working...
+pty-review-model | turn #2 | interact | chat[approval] write
+  local interaction #1
+  scope: unknown; once only; reuse unavailable
+  view truncated · details 1-1/7 · ↑/↓ PgUp/PgDn
+  args:
+  [y] review details [n] reject [d] diff[approval] write
+  local interaction 
+scope unknown · resi
+[y] locked [n] no
+deny_first_key=n was swallowed; retrying only to inspect subsequent flow
+approval_deny=n; denied file absent
+> P> PT> PTY> PTY > PTY o> PTY on> PTY onc> PTY once
+  AI: 
+  
+▶ ⠙ [tool] write
+⠙ working...
+pty-review-model | turn #3 | interact | chat[approval] write
+  local interaction #1
+  scope: unknown; once only; reuse unavailable
+  view truncated · details 1-1/29 · ↑/↓ PgUp/PgDn
+  args:
+  [y] review details [n] reject [d] diff[approval] write
+  local interaction 
+scope unknown · resi
+[y] locked [n] no
+once_first_key=y sent while details were not reviewed
+one_or_two_early_y_attempts=still_locked; no once.txt and no follow-up provider request
+resize=20x4_to_60x12; approval remains active
+[approval] write
+  local interaction #1
+  scope: unknown; once only; reuse unavailable
+  view truncated · details 1-7/29 · ↑/↓ PgUp/PgDn
+  args:
+    content: PTY_ONCE_BEGIN safe-review-row-0123456789-saf
+e-review-row-0123456789-safe-review-row-0123456789-safe-re
+view-row-0123456789-safe-review-row-0123456789-safe-review
+-row-0123456789-safe-review-row-0123456789-safe-review-row
+-0123456789-safe-review-row-0123456789-safe-review-row-012
+3456789-safe-review-row-0123456789-safe-review-row-0123456
+  [y] review details [n] reject [d] diff
+approval_scroll=last visible row 29/29
+approval_once=y after scrolling; once.txt exactly matches synthetic payload
+  AI: 
+  
+▶ ⠏ [tool] write
+⠏ working...
+pty-review-model | turn #3 | interact | chat
+
+  ✓ [tool] write
+  AI: PTY fixture completed the requested interaction.
+▼ PTY fixture completed the requested interaction.
+pty-review-model | turn #3 | interact | chat
+Tokens: 107/8000 (1%) | Cost: $0.0000> 
+ask_user_tool_approval=first y swallowed; second key sent to reach HITL
+> P> PT> PTY> PTY > PTY a> PTY as> PTY ask
+[approval] ask_user
+  local interaction #1
+  scope: unknown; once only; reuse unavailable
+  details 1-2/2
+  args:
+    question: 请用中文确认临时测试方案。
+  [y] once [n] reject [Esc] cancel  AI: 
+  
+▶ ⠸ [tool] ask_user
+⠸ working...
+[ask_user] 请用中文确认临时测试方案。
+  answer: █
+  [Enter] submit  [Esc] cancel
+pty-review-model | turn #4 | interact | chat
+
+▶ ⠼ [tool] ask_user
+⠼ working...
+
+
+
+
+ask_user_answer_mismatch=["X保留队列：交互通过✅🙂"]; expected 'X保留队列：交互通过 ✅ 🙂'
+utf8_caret=left/insert/left/backspace submitted exact '测试XB'
+
+⚠ IME (input method editor) detected. CJK input may not work correctly in raw mode.
+Press Ctrl+\ to switch to cooked mode for better IME support.
+> 测> 测试> 测试🙂> 测试🙂B> 测试🙂XB> 测试XB
+  AI: PTY fixture received the input.
+▼ PTY fixture received the input.
+pty-review-model | turn #5 | interact | chat
+Tokens: 156/8000 (1%) | Cost: $0.0000> 
+exit=/exit returned status 0
+tty_lflag_samples_after_exit=[('pump-data', 'slave', 1483), ('pump-data', 'master', 1483)]; before=392 after=392
+tty_restore=true
+tty_restore=ICANON/ECHO/ISIG match original PTY state
+fake_provider_requests=8; all local; all canary-authenticated
+provider_requests=[
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "PTY cancel queued",
+    "tool_results": [],
+    "response_tools": [
+      "write",
+      "write"
+    ]
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "PTY deny",
+    "tool_results": [],
+    "response_tools": [
+      "write"
+    ]
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "PTY deny",
+    "tool_results": [
+      "Error: tool call denied by approval policy"
+    ],
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "PTY once",
+    "tool_results": [],
+    "response_tools": [
+      "write"
+    ]
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "PTY once",
+    "tool_results": [
+      "wrote 676 bytes to /var/folders/md/b0sr21q97jsg2gfn9lymdw3h0000gn/T/go-cli-r5-pty-o_3_c6ff/workspace/once.txt"
+    ],
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "PTY ask",
+    "tool_results": [],
+    "response_tools": [
+      "ask_user"
+    ]
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "PTY ask",
+    "tool_results": [
+      "X保留队列：交互通过✅🙂"
+    ],
+    "response_tools": []
+  },
+  {
+    "path": "/v1/chat/completions",
+    "auth_ok": true,
+    "stream": true,
+    "last_user": "测试XB",
+    "tool_results": [],
+    "response_tools": []
+  }
+]
+source_commit=84324fe7a55ea852583f5082fe5d76ac0dd0608a
+execution_limits=HOME/XDG/CWD/PATH isolated; only writes under temporary workspace
+limitation=single Darwin PTY; no R2 durable crash/restart or cross-platform claim
+--- queued-approval-60x6 ---
+> P> PT> PTY> PTY > PTY c> PTY ca> PTY can> PTY canc> PTY cance> PTY cancel> PTY cancel > PTY cancel q> PTY cancel qu> PTY cancel que> PTY cancel queu> PTY cancel queue> PTY cancel queued
+  
+  ⠹ [tool] write
+  
+▶ ⠙ [tool] write
+⠹ working...
+pty-review-model | turn #1 | interact | chat[approval] write
+  local interaction #1 · 1 waiting
+  scope: unknown; once only; reuse unavailable
+  view truncated · details 1-1/7 · ↑/↓ PgUp/PgDn
+  args:
+  [y] review details [n] reject [d] diff
+
+--- deny-modal-20x4 ---
+> P> PT> PTY> PTY > PTY d> PTY de> PTY den> PTY deny
+  AI: 
+  
+▶ ⠙ [tool] write
+⠙ working...
+pty-review-model | turn #2 | interact | chat[approval] write
+  local interaction #1
+  scope: unknown; once only; reuse unavailable
+  view truncated · details 1-1/7 · ↑/↓ PgUp/PgDn
+  args:
+  [y] review details [n] reject [d] diff[approval] write
+  local interaction 
+scope unknown · resi
+[y] locked [n] no
+
+--- once-modal-20x4 ---
+> P> PT> PTY> PTY > PTY o> PTY on> PTY onc> PTY once
+  AI: 
+  
+▶ ⠙ [tool] write
+⠙ working...
+pty-review-model | turn #3 | interact | chat[approval] write
+  local interaction #1
+  scope: unknown; once only; reuse unavailable
+  view truncated · details 1-1/29 · ↑/↓ PgUp/PgDn
+  args:
+  [y] review details [n] reject [d] diff[approval] write
+  local interaction 
+scope unknown · resi
+[y] locked [n] no
+
+--- once-modal-resized-60x12 ---
+[approval] write
+  local interaction #1
+  scope: unknown; once only; reuse unavailable
+  view truncated · details 1-7/29 · ↑/↓ PgUp/PgDn
+  args:
+    content: PTY_ONCE_BEGIN safe-review-row-0123456789-saf
+e-review-row-0123456789-safe-review-row-0123456789-safe-re
+view-row-0123456789-safe-review-row-0123456789-safe-review
+-row-0123456789-safe-review-row-0123456789-safe-review-row
+-0123456789-safe-review-row-0123456789-safe-review-row-012
+3456789-safe-review-row-0123456789-safe-review-row-0123456
+  [y] review details [n] reject [d] diff
+
+--- once-approved-and-completed ---
+  AI: 
+  
+▶ ⠏ [tool] write
+⠏ working...
+pty-review-model | turn #3 | interact | chat
+
+  ✓ [tool] write
+  AI: PTY fixture completed the requested interaction.
+▼ PTY fixture completed the requested interaction.
+pty-review-model | turn #3 | interact | chat
+Tokens: 107/8000 (1%) | Cost: $0.0000> 
+
+--- ask-user-before-answer ---
+> P> PT> PTY> PTY > PTY a> PTY as> PTY ask
+[approval] ask_user
+  local interaction #1
+  scope: unknown; once only; reuse unavailable
+  details 1-2/2
+  args:
+    question: 请用中文确认临时测试方案。
+  [y] once [n] reject [Esc] cancel  AI: 
+  
+▶ ⠸ [tool] ask_user
+⠸ working...
+[ask_user] 请用中文确认临时测试方案。
+  answer: █
+  [Enter] submit  [Esc] cancel
+pty-review-model | turn #4 | interact | chat
+
+▶ ⠼ [tool] ask_user
+⠼ working...
+
+
+
+
+
+--- utf8-caret-input ---
+
+⚠ IME (input method editor) detected. CJK input may not work correctly in raw mode.
+Press Ctrl+\ to switch to cooked mode for better IME support.
+> 测> 测试> 测试🙂> 测试🙂B> 测试🙂XB> 测试XB
+  AI: PTY fixture received the input.
+▼ PTY fixture received the input.
+pty-review-model | turn #5 | interact | chat
+Tokens: 156/8000 (1%) | Cost: $0.0000> 
+
+result=FAIL
+confirmed_findings=["first_post_submit_key=q had no visible effect", "deny_first_key=n was swallowed; retrying only to inspect subsequent flow", "ask_user_answer_mismatch=[\"X保留队列：交互通过✅🙂\"]; expected 'X保留队列：交互通过 ✅ 🙂'"]
+--- queued-approval-60x6 ---
+> P> PT> PTY> PTY > PTY c> PTY ca> PTY can> PTY canc> PTY cance> PTY cancel> PTY cancel > PTY cancel q> PTY cancel qu> PTY cancel que> PTY cancel queu> PTY cancel queue> PTY cancel queued
+  
+  ⠹ [tool] write
+  
+▶ ⠙ [tool] write
+⠹ working...
+pty-review-model | turn #1 | interact | chat[approval] write
+  local interaction #1 · 1 waiting
+  scope: unknown; once only; reuse unavailable
+  view truncated · details 1-1/7 · ↑/↓ PgUp/PgDn
+  args:
+  [y] review details [n] reject [d] diff
+
+--- deny-modal-20x4 ---
+> P> PT> PTY> PTY > PTY d> PTY de> PTY den> PTY deny
+  AI: 
+  
+▶ ⠙ [tool] write
+⠙ working...
+pty-review-model | turn #2 | interact | chat[approval] write
+  local interaction #1
+  scope: unknown; once only; reuse unavailable
+  view truncated · details 1-1/7 · ↑/↓ PgUp/PgDn
+  args:
+  [y] review details [n] reject [d] diff[approval] write
+  local interaction 
+scope unknown · resi
+[y] locked [n] no
+
+--- once-modal-20x4 ---
+> P> PT> PTY> PTY > PTY o> PTY on> PTY onc> PTY once
+  AI: 
+  
+▶ ⠙ [tool] write
+⠙ working...
+pty-review-model | turn #3 | interact | chat[approval] write
+  local interaction #1
+  scope: unknown; once only; reuse unavailable
+  view truncated · details 1-1/29 · ↑/↓ PgUp/PgDn
+  args:
+  [y] review details [n] reject [d] diff[approval] write
+  local interaction 
+scope unknown · resi
+[y] locked [n] no
+
+--- once-modal-resized-60x12 ---
+[approval] write
+  local interaction #1
+  scope: unknown; once only; reuse unavailable
+  view truncated · details 1-7/29 · ↑/↓ PgUp/PgDn
+  args:
+    content: PTY_ONCE_BEGIN safe-review-row-0123456789-saf
+e-review-row-0123456789-safe-review-row-0123456789-safe-re
+view-row-0123456789-safe-review-row-0123456789-safe-review
+-row-0123456789-safe-review-row-0123456789-safe-review-row
+-0123456789-safe-review-row-0123456789-safe-review-row-012
+3456789-safe-review-row-0123456789-safe-review-row-0123456
+  [y] review details [n] reject [d] diff
+
+--- once-approved-and-completed ---
+  AI: 
+  
+▶ ⠏ [tool] write
+⠏ working...
+pty-review-model | turn #3 | interact | chat
+
+  ✓ [tool] write
+  AI: PTY fixture completed the requested interaction.
+▼ PTY fixture completed the requested interaction.
+pty-review-model | turn #3 | interact | chat
+Tokens: 107/8000 (1%) | Cost: $0.0000> 
+
+--- ask-user-before-answer ---
+> P> PT> PTY> PTY > PTY a> PTY as> PTY ask
+[approval] ask_user
+  local interaction #1
+  scope: unknown; once only; reuse unavailable
+  details 1-2/2
+  args:
+    question: 请用中文确认临时测试方案。
+  [y] once [n] reject [Esc] cancel  AI: 
+  
+▶ ⠸ [tool] ask_user
+⠸ working...
+[ask_user] 请用中文确认临时测试方案。
+  answer: █
+  [Enter] submit  [Esc] cancel
+pty-review-model | turn #4 | interact | chat
+
+▶ ⠼ [tool] ask_user
+⠼ working...
+
+
+
+
+
+--- utf8-caret-input ---
+
+⚠ IME (input method editor) detected. CJK input may not work correctly in raw mode.
+Press Ctrl+\ to switch to cooked mode for better IME support.
+> 测> 测试> 测试🙂> 测试🙂B> 测试🙂XB> 测试XB
+  AI: PTY fixture received the input.
+▼ PTY fixture received the input.
+pty-review-model | turn #5 | interact | chat
+Tokens: 156/8000 (1%) | Cost: $0.0000> 
+
