@@ -85,8 +85,10 @@ func TestEncodeOpenAIRequest_Options(t *testing.T) {
 	var req openAIRequest
 	require.NoError(t, json.Unmarshal(body, &req))
 	assert.Equal(t, "resolved", req.Model)
-	assert.Equal(t, 0.9, req.Temperature)
-	assert.Equal(t, 9, req.MaxTokens)
+	require.NotNil(t, req.Temperature)
+	assert.Equal(t, 0.9, *req.Temperature)
+	require.NotNil(t, req.MaxTokens)
+	assert.Equal(t, 9, *req.MaxTokens)
 	require.Len(t, req.Messages, 2)
 	assert.Equal(t, "tool", req.Messages[1].Role)
 	assert.Equal(t, "call_1", req.Messages[1].ToolCallID)

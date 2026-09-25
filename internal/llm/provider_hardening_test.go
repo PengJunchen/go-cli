@@ -170,8 +170,10 @@ func TestHTTPChatModel_UsageOverrides(t *testing.T) {
 	require.NoError(t, err)
 	var req openAIRequest
 	require.NoError(t, json.Unmarshal(body, &req))
-	assert.Equal(t, 0.9, req.Temperature)
-	assert.Equal(t, 42, req.MaxTokens)
+	require.NotNil(t, req.Temperature)
+	assert.Equal(t, 0.9, *req.Temperature)
+	require.NotNil(t, req.MaxTokens)
+	assert.Equal(t, 42, *req.MaxTokens)
 }
 
 // TestHTTPChatModel_StreamSuccess verifies Stream delivers the full content as

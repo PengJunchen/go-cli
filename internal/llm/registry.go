@@ -202,12 +202,14 @@ func (r *ProviderRegistry) GetModel(ctx context.Context, name string, cfg ModelC
 		return nil, nil, fmt.Errorf("%w: %s", ErrMissingProviderSpec, name)
 	}
 	resolved, err := resolver.resolveModel(ctx, ModelRequest{
-		ProviderID:  name,
-		ModelID:     cfg.Model,
-		Endpoint:    cfg.BaseURL,
-		Credential:  cfg.Credential,
-		Temperature: cfg.Temperature,
-		MaxTokens:   cfg.MaxTokens,
+		ProviderID:     name,
+		ModelID:        cfg.Model,
+		Endpoint:       cfg.BaseURL,
+		Credential:     cfg.Credential,
+		Temperature:    cfg.Temperature,
+		TemperatureSet: cfg.TemperatureSet,
+		MaxTokens:      cfg.MaxTokens,
+		MaxTokensSet:   cfg.MaxTokensSet,
 	}, cfg.APIKey)
 	if err != nil {
 		return nil, nil, err

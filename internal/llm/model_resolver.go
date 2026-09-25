@@ -73,12 +73,14 @@ type CredentialRef struct {
 // API keys are deliberately absent; callers may provide one through the
 // legacy registry boundary, where it is immediately bound to this scope.
 type ModelRequest struct {
-	ProviderID  string
-	ModelID     string
-	Endpoint    string
-	Credential  CredentialRef
-	Temperature float64
-	MaxTokens   int
+	ProviderID     string
+	ModelID        string
+	Endpoint       string
+	Credential     CredentialRef
+	Temperature    float64
+	TemperatureSet bool
+	MaxTokens      int
+	MaxTokensSet   bool
 }
 
 // ScopedCredentialResolver must prove an exact provider/protocol/origin
@@ -243,10 +245,14 @@ func (r *ModelResolver) resolveModel(ctx context.Context, request ModelRequest, 
 		return ResolvedModel{}, fmt.Errorf("llm: model identity is required for provider %s", spec.ProviderID)
 	}
 	modelSpec := resolveModelSpec(definition.models, spec.ProviderID, modelID)
+	temperatureSet := request.TemperatureSet || request.Temperature != 0
+	maxTokensSet := request.MaxTokensSet || request.MaxTokens != 0
 	cfg := ModelConfig{
 		Model:              modelID,
 		Temperature:        request.Temperature,
+		TemperatureSet:     temperatureSet,
 		MaxTokens:          request.MaxTokens,
+		MaxTokensSet:       maxTokensSet,
 		APIKey:             apiKey,
 		BaseURL:            baseURL,
 		Credential:         scope,

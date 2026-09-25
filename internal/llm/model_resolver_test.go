@@ -33,6 +33,44 @@ func TestProviderRegistryRejectsNativeIdentityBeforeBuild(t *testing.T) {
 	assert.True(t, strings.Contains(strings.ToLower(err.Error()), "unsupported"), "error should explain that the protocol is unsupported")
 }
 
+func TestModelResolverPreservesSamplingPresence(t *testing.T) {
+	registry := NewProviderRegistry()
+	require.NoError(t, registry.Register(NewEinoProvider(WithProviderName("sampling-provider"))))
+	registry.SetCredentialResolver(&countingCredentialResolver{key: "key-canary"})
+	resolver := registry.SnapshotResolver()
+	endpoint := "https://sampling.example.test/v1"
+	ref, err := resolver.CredentialRefFor("sampling-provider", endpoint)
+	require.NoError(t, err)
+
+	resolved, err := resolver.ResolveModel(context.Background(), ModelRequest{
+		ProviderID:     "sampling-provider",
+		ModelID:        "sampling-model",
+		Endpoint:       endpoint,
+		Credential:     ref,
+		Temperature:    0,
+		TemperatureSet: true,
+		MaxTokens:      0,
+		MaxTokensSet:   true,
+	})
+	require.NoError(t, err)
+	assert.True(t, resolved.cfg.TemperatureSet)
+	assert.Zero(t, resolved.cfg.Temperature)
+	assert.True(t, resolved.cfg.MaxTokensSet)
+	assert.Zero(t, resolved.cfg.MaxTokens)
+
+	legacy, err := resolver.ResolveModel(context.Background(), ModelRequest{
+		ProviderID:  "sampling-provider",
+		ModelID:     "legacy-sampling-model",
+		Endpoint:    endpoint,
+		Credential:  ref,
+		Temperature: 0.25,
+		MaxTokens:   128,
+	})
+	require.NoError(t, err)
+	assert.True(t, legacy.cfg.TemperatureSet, "legacy non-zero scalar values remain explicit")
+	assert.True(t, legacy.cfg.MaxTokensSet, "legacy non-zero scalar values remain explicit")
+}
+
 func TestProviderRegistryUsesMatchingScopedCredentialAtRealOrigin(t *testing.T) {
 	const secret = "scoped-origin-secret-canary"
 	var gotAuthorization string

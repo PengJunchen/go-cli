@@ -1203,18 +1203,11 @@ func encodeOpenAIRequest(cfg ModelConfig, model string, msgs []Message, opts []O
 		reqMsgs = append(reqMsgs, om)
 	}
 	req := openAIRequest{
-		Model:     model,
-		Messages:  reqMsgs,
-		MaxTokens: cfg.MaxTokens,
+		Model:    model,
+		Messages: reqMsgs,
 	}
-	if genOpts.Temperature != nil {
-		req.Temperature = *genOpts.Temperature
-	} else {
-		req.Temperature = cfg.Temperature
-	}
-	if genOpts.MaxTokens != nil {
-		req.MaxTokens = *genOpts.MaxTokens
-	}
+	req.Temperature = samplingTemperature(cfg, genOpts.Temperature)
+	req.MaxTokens = samplingMaxTokens(cfg, genOpts.MaxTokens)
 	if len(genOpts.StopStrings) > 0 {
 		req.Stop = genOpts.StopStrings
 	}

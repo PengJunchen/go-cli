@@ -347,7 +347,7 @@ func TestAssembledNativeProviderRejectsBeforeConfiguredEndpoint(t *testing.T) {
 	assert.Zero(t, count, "native identity must fail before dispatch to an OpenAI-compatible endpoint")
 }
 
-func TestAssembledModelConfigZeroSamplingDoesNotFallBackToProviderDefaults(t *testing.T) {
+func TestAssembledModelConfigExplicitZeroSamplingOverridesProviderDefaults(t *testing.T) {
 	capture := &providerRequestCapture{}
 	srv := httptest.NewServer(http.HandlerFunc(capture.handler))
 	t.Cleanup(srv.Close)
@@ -361,8 +361,9 @@ func TestAssembledModelConfigZeroSamplingDoesNotFallBackToProviderDefaults(t *te
 			Temperature: 0.8,
 			MaxTokens:   512,
 		},
-		Model: config.ModelConfig{Temperature: 0, MaxTokens: 0},
 	}
+	rc.Model.SetTemperature(0)
+	rc.Model.SetMaxTokens(0)
 	assembly, err := AssembleAgent(context.Background(), rc, providerName, "zero-model", io.Discard)
 	require.NoError(t, err)
 	t.Cleanup(assembly.Cleanup)
@@ -370,8 +371,8 @@ func TestAssembledModelConfigZeroSamplingDoesNotFallBackToProviderDefaults(t *te
 	_, err = assembly.ModelConfig.Model.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "hello"}})
 	require.NoError(t, err)
 	_, _, _, body := capture.snapshot()
-	assert.NotContains(t, body, `"temperature":0.8`)
-	assert.NotContains(t, body, `"max_tokens":512`)
+	assert.Contains(t, body, `"temperature":0`)
+	assert.Contains(t, body, `"max_tokens":0`)
 }
 
 func TestAssembledResolverDoesNotUseUnscopedOpenAIEnvironmentCredential(t *testing.T) {
