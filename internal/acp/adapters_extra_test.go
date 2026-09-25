@@ -312,7 +312,10 @@ func TestACPMessageMetadataOmitted(t *testing.T) {
 func TestGRPCAdapterSendRouteReturnsError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/connect" {
-			w.WriteHeader(http.StatusOK)
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]string{
+				"version": ACPHTTPProfileV1, "session_id": "send-route-test-session",
+			})
 			return
 		}
 		w.WriteHeader(http.StatusBadRequest)

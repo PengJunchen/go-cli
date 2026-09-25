@@ -90,7 +90,7 @@ func TestGRPCAdapterConnectEmitsSpan(t *testing.T) {
 	require.NoError(t, client.Connect(ctx))
 
 	span := waitForSpan(t, exporter, "acp.connect")
-	assert.Equal(t, "gRPC", spanAttr(span, "transport"))
+	assert.Equal(t, ACPHTTPProfileV1, spanAttr(span, "transport"))
 	assert.Equal(t, "trace-grpc-connect", span.TraceID)
 }
 
@@ -159,8 +159,9 @@ func TestGRPCReconnectBackoff(t *testing.T) {
 type controllableGRPCServer struct {
 	mu        sync.Mutex
 	available bool
-	pending   []ACPMessage
+	pending   []httpACPEnvelope
 	received  []ACPMessage
+	sessions  map[string]string
 }
 
 func (s *controllableGRPCServer) handler(w http.ResponseWriter, r *http.Request) {
@@ -170,33 +171,77 @@ func (s *controllableGRPCServer) handler(w http.ResponseWriter, r *http.Request)
 		w.WriteHeader(http.StatusServiceUnavailable)
 		return
 	}
+	profiles := r.Header.Values(ACPHTTPProfileHeader)
+	if len(profiles) != 1 || profiles[0] != ACPHTTPProfileV1 {
+		s.mu.Unlock()
+		http.Error(w, "unsupported profile", http.StatusBadRequest)
+		return
+	}
 	switch r.URL.Path {
-	case "/connect", "/disconnect":
+	case "/connect":
+		var envelope httpACPEnvelope
+		if err := json.NewDecoder(r.Body).Decode(&envelope); err != nil || envelope.Version != ACPHTTPProfileV1 {
+			s.mu.Unlock()
+			http.Error(w, "unsupported envelope", http.StatusBadRequest)
+			return
+		}
+		if s.sessions == nil {
+			s.sessions = make(map[string]string)
+		}
+		s.sessions["controlled-session"] = envelope.SenderID
+		s.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]string{
+			"version": ACPHTTPProfileV1, "session_id": "controlled-session",
+		})
+	case "/disconnect":
+		var envelope httpACPEnvelope
+		if err := json.NewDecoder(r.Body).Decode(&envelope); err == nil {
+			delete(s.sessions, envelope.SessionID)
+		}
 		s.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	case "/send":
-		var msg ACPMessage
-		if err := json.NewDecoder(r.Body).Decode(&msg); err == nil {
-			s.received = append(s.received, msg)
-			if msg.Type == TypeMessage {
-				s.pending = append(s.pending, ACPMessage{
-					Type:       TypeResponse,
-					SenderID:   "srv",
-					ReceiverID: msg.SenderID,
-					Content:    "echo:" + msg.Content,
-					Timestamp:  msg.Timestamp,
-				})
-			}
+		var envelope httpACPEnvelope
+		if err := json.NewDecoder(r.Body).Decode(&envelope); err != nil || envelope.Version != ACPHTTPProfileV1 || s.sessions[envelope.SessionID] != envelope.SenderID {
+			s.mu.Unlock()
+			http.Error(w, "unknown session", http.StatusNotFound)
+			return
+		}
+		msg := envelope.message()
+		s.received = append(s.received, msg)
+		if msg.Type == TypeMessage {
+			s.pending = append(s.pending, httpEnvelopeFromMessage(envelope.SessionID, ACPMessage{
+				Type:       TypeResponse,
+				SenderID:   "srv",
+				ReceiverID: msg.SenderID,
+				Content:    "echo:" + msg.Content,
+				Timestamp:  msg.Timestamp,
+			}))
 		}
 		s.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
 	case "/stream":
-		out := s.pending
-		s.pending = nil
+		sessionID := r.URL.Query().Get("session_id")
+		if _, ok := s.sessions[sessionID]; !ok {
+			s.mu.Unlock()
+			http.Error(w, "unknown session", http.StatusNotFound)
+			return
+		}
+		out := make([]httpACPEnvelope, 0, len(s.pending))
+		remaining := s.pending[:0]
+		for _, envelope := range s.pending {
+			if envelope.SessionID == sessionID {
+				out = append(out, envelope)
+			} else {
+				remaining = append(remaining, envelope)
+			}
+		}
+		s.pending = remaining
 		s.mu.Unlock()
 		w.WriteHeader(http.StatusOK)
-		for _, msg := range out {
-			data, _ := json.Marshal(msg)
+		for _, envelope := range out {
+			data, _ := json.Marshal(envelope)
 			fmt.Fprintf(w, "%s\n", data) //nolint:errcheck // best-effort stream write
 		}
 	default:
