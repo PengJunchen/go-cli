@@ -23,17 +23,21 @@ const (
 )
 
 var (
-	errStdioNotConnected  = errors.New("acp: stdio adapter not connected")
-	errStdioClosing       = errors.New("acp: stdio adapter is closing")
-	errStdioClosed        = errors.New("acp: stdio adapter is closed")
-	errStdioMissingInput  = errors.New("acp: stdio reader is required")
-	errStdioMissingOutput = errors.New("acp: stdio writer is required")
-	errStdioMalformed     = errors.New("acp: malformed stdio frame")
-	errStdioTooLarge      = errors.New("acp: stdio frame exceeds size limit")
+	errStdioNotConnected        = errors.New("acp: stdio adapter not connected")
+	errStdioClosing             = errors.New("acp: stdio adapter is closing")
+	errStdioClosed              = errors.New("acp: stdio adapter is closed")
+	errStdioMissingInput        = errors.New("acp: stdio reader is required")
+	errStdioMissingOutput       = errors.New("acp: stdio writer is required")
+	errStdioMalformed           = errors.New("acp: malformed stdio frame")
+	errStdioTooLarge            = errors.New("acp: stdio frame exceeds size limit")
+	errStdioReaderPanic   error = StdioReaderPanicError{}
+	errStdioCloserPanic   error = StdioCloserPanicError{}
+	errStdioWriterPanic   error = StdioWritePanicError{}
 )
 
-// StdioPendingError reports that an I/O operation has not actually returned.
-// Done closes only after the underlying operation and its tracked worker exit.
+// StdioPendingError reports that a stdio operation has not completed its
+// tracked cleanup by the time the caller stopped waiting. Done closes only
+// after the underlying callback and its tracked worker have unwound.
 // UnknownDelivery is true only when a write had started before it became
 // pending, since the peer may have received some or all of that frame.
 type StdioPendingError struct {
@@ -52,12 +56,39 @@ func (e *StdioPendingError) Error() string {
 
 func (e *StdioPendingError) Unwrap() error { return e.cause }
 
-// Done is closed when the actual blocked operation has returned and its
-// worker has completed cleanup.
+// Done is closed when the actual blocked operation or close callback has
+// returned or panicked and its tracked worker has unwound. It does not prove
+// that a panicking closer released the underlying resource; Disconnect returns
+// the recorded terminal error after join.
 func (e *StdioPendingError) Done() <-chan struct{} { return e.done }
 
 // UnknownDelivery reports whether a started write may have reached the peer.
 func (e *StdioPendingError) UnknownDelivery() bool { return e.unknown }
+
+// StdioReaderPanicError reports that a recovered reader panic terminated the
+// receive stream.
+type StdioReaderPanicError struct{}
+
+func (StdioReaderPanicError) Error() string { return "acp: stdio reader panicked" }
+
+// StdioCloserPanicError reports that the owned transport closer panicked. The
+// callback unwound, but the error does not establish that its resource closed.
+type StdioCloserPanicError struct{}
+
+func (StdioCloserPanicError) Error() string { return "acp: stdio transport closer panicked" }
+
+// StdioWritePanicError reports a recovered Writer panic after dispatch began.
+// The writer callback has unwound, but the peer may have received some or all
+// of the frame, so delivery remains unknown.
+type StdioWritePanicError struct{}
+
+func (StdioWritePanicError) Error() string {
+	return "acp: stdio writer panicked after dispatch; delivery unknown"
+}
+
+// UnknownDelivery reports that a panicking writer may have partially delivered
+// the frame before it unwound.
+func (StdioWritePanicError) UnknownDelivery() bool { return true }
 
 type stdioSession struct {
 	stop         chan struct{}
@@ -105,6 +136,7 @@ type StdioAdapter struct {
 	closing         bool
 	closed          bool
 	ownedCloseErr   error
+	terminalErr     error
 	cleanupDone     chan struct{}
 }
 
@@ -221,6 +253,8 @@ func (s *StdioAdapter) Connect(ctx context.Context) error {
 
 // Disconnect fences future sends, performs a best-effort serialized disconnect
 // frame when no write is active, and waits only for real cleanup completion.
+// Terminal reader/writer panics and owned closer errors are returned after the
+// corresponding callback has unwound and tracked workers have joined.
 func (s *StdioAdapter) Disconnect(ctx context.Context) error {
 	s.mu.Lock()
 	session := s.session
@@ -247,8 +281,9 @@ func (s *StdioAdapter) Disconnect(ctx context.Context) error {
 	case <-done:
 		s.mu.Lock()
 		closeErr := s.ownedCloseErr
+		terminalErr := s.terminalErr
 		s.mu.Unlock()
-		return closeErr
+		return errors.Join(terminalErr, closeErr)
 	case <-waitCtx.Done():
 		return s.pendingDisconnect(session, waitCtx.Err(), done)
 	}
@@ -370,6 +405,9 @@ func (s *StdioAdapter) writeFrame(ctx context.Context, session *stdioSession, ms
 		s.mu.Unlock()
 		if started {
 			result.err = writeFrameBytes(s.out, frame)
+			if stdioUnknownDelivery(result.err) {
+				s.rememberTerminalError(result.err)
+			}
 			close(result.ioReturned)
 			s.mu.Lock()
 			if session.activeWrite == result {
@@ -482,6 +520,12 @@ func (s *StdioAdapter) readLoop(ctx context.Context, session *stdioSession) {
 	for {
 		frame, err := readBoundedFrame(s.in)
 		if err != nil {
+			if errors.Is(err, errStdioReaderPanic) {
+				s.startCleanup(session, false)
+				s.rememberTerminalError(err)
+				slog.Warn("acp.receive.read", "name", s.name, "err", err)
+				return
+			}
 			if errors.Is(err, io.EOF) {
 				// EOF is a terminal transport event. Close the receive channel
 				// and fence sends so the adapter cannot write into a dead session.
@@ -520,8 +564,14 @@ func (s *StdioAdapter) readLoop(ctx context.Context, session *stdioSession) {
 
 // readBoundedFrame reads one LF-terminated frame. The configured limit counts
 // payload bytes only, excluding LF and an optional CR immediately before it.
-func readBoundedFrame(reader *bufio.Reader) ([]byte, error) {
-	var frame []byte
+func readBoundedFrame(reader *bufio.Reader) (frame []byte, err error) {
+	defer func() {
+		if recover() != nil {
+			frame = nil
+			err = errStdioReaderPanic
+		}
+	}()
+
 	for {
 		fragment, err := reader.ReadSlice('\n')
 		if len(frame)+len(fragment) > stdioMaxFrameBytes+2 {
@@ -611,7 +661,7 @@ func (s *StdioAdapter) startCleanup(session *stdioSession, sendDisconnect bool) 
 			close(closerDone)
 		} else {
 			go func() {
-				err := owned.Close()
+				err := closeOwnedTransport(owned)
 				s.mu.Lock()
 				s.ownedCloseErr = err
 				s.mu.Unlock()
@@ -664,6 +714,9 @@ func (s *StdioAdapter) runDisconnectWrite(session *stdioSession, result *stdioWr
 
 	if started {
 		result.err = writeFrameBytes(s.out, frame)
+		if stdioUnknownDelivery(result.err) {
+			s.rememberTerminalError(result.err)
+		}
 		close(result.ioReturned)
 	}
 	s.mu.Lock()
@@ -715,26 +768,42 @@ func (s *StdioAdapter) pendingDisconnect(session *stdioSession, cause error, don
 	return s.pendingFromChannel("disconnect", cause, done, unknown)
 }
 
+func (s *StdioAdapter) rememberTerminalError(err error) {
+	if err == nil {
+		return
+	}
+	s.mu.Lock()
+	s.terminalErr = errors.Join(s.terminalErr, err)
+	s.mu.Unlock()
+}
+
+func stdioUnknownDelivery(err error) bool {
+	var unknown interface{ UnknownDelivery() bool }
+	return errors.As(err, &unknown) && unknown.UnknownDelivery()
+}
+
 // cancelQueuedOrCheckWriteInFlight arbitrates a pending Disconnect against the
 // writer worker. A queued frame is canceled before reporting known-not-sent;
 // once the worker commits the write, delivery is unknown until Write returns.
 func (s *StdioAdapter) cancelQueuedOrCheckWriteInFlight(session *stdioSession) bool {
 	s.mu.Lock()
 	active := session.activeWrite
+	unknown := stdioUnknownDelivery(s.terminalErr)
 	if active == nil {
 		s.mu.Unlock()
-		return false
+		return unknown
 	}
 	active.mu.Lock()
-	unknown := false
 	switch active.state {
 	case stdioWriteQueued:
 		active.state = stdioWriteCanceled
 	case stdioWriteStarted:
-		select {
-		case <-active.ioReturned:
-		default:
-			unknown = true
+		if !unknown {
+			select {
+			case <-active.ioReturned:
+			default:
+				unknown = true
+			}
 		}
 	}
 	active.mu.Unlock()
@@ -755,7 +824,21 @@ func marshalFrame(msg ACPMessage) ([]byte, error) {
 	return append(data, '\n'), nil
 }
 
-func writeFrameBytes(w io.Writer, frame []byte) error {
+func closeOwnedTransport(closer io.Closer) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errStdioCloserPanic
+		}
+	}()
+	return closer.Close()
+}
+
+func writeFrameBytes(w io.Writer, frame []byte) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = errStdioWriterPanic
+		}
+	}()
 	n, err := w.Write(frame)
 	if err != nil {
 		return fmt.Errorf("acp: write message: %w", err)
