@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/core"
@@ -355,9 +356,26 @@ type CoreHandler struct {
 
 	// bridgeOnce ensures the event forwarder is installed at most once.
 	bridgeOnce sync.Once
-	// sessions maps taskID -> *Session for event routing during dispatch.
+	// sessions maps taskID -> dispatch route for event routing during dispatch.
 	sessions sync.Map
 }
+
+type dispatchIdentityContextKey struct{}
+
+type dispatchIdentity struct {
+	principalID string
+	sessionID   string
+	session     *Session
+}
+
+type dispatchSessionRoute struct {
+	taskID      string
+	principalID string
+	sessionID   string
+	session     *Session
+}
+
+var nextACPDispatchID atomic.Uint64
 
 // NewCoreHandler creates a CoreHandler with the given dispatchers. Either
 // or both may be nil; nil dispatchers cause the corresponding message types
@@ -390,7 +408,9 @@ func (h *CoreHandler) ensureBridge() {
 		}
 		d.SetEventForwarder(func(taskID string, ev core.AgentEvent) {
 			if val, ok := h.sessions.Load(taskID); ok {
-				val.(*Session).PublishEvent(ev) //nolint:errcheck // best-effort event forwarding
+				if route, ok := val.(*dispatchSessionRoute); ok && route.taskID == taskID && route.session != nil && route.session.ID() == route.sessionID {
+					route.session.PublishEvent(ev) //nolint:errcheck // best-effort event forwarding
+				}
 			}
 			if h.eventBus != nil {
 				h.eventBus.Publish(ev)
@@ -433,18 +453,29 @@ func (h *CoreHandler) handleMessage(ctx context.Context, msg ACPMessage, session
 	}
 
 	task := core.SubagentTask{
-		ID:     fmt.Sprintf("acp-%s", msg.SenderID),
+		ID:     fmt.Sprintf("acp-dispatch-%d", nextACPDispatchID.Add(1)),
 		Prompt: msg.Content,
 	}
 	if role, ok := msg.Metadata["role"]; ok {
 		task.Role = role
 	}
 
-	// Register the session so the event forwarder can route events by
-	// taskID, then ensure the forwarder is installed. The bridge is
-	// idempotent (sync.Once) and nil-safe.
-	h.sessions.Store(task.ID, session)
-	defer h.sessions.Delete(task.ID)
+	identity := dispatchIdentity{sessionID: session.ID(), session: session}
+	if value, ok := ctx.Value(dispatchIdentityContextKey{}).(dispatchIdentity); ok && value.session == session && value.sessionID == session.ID() {
+		identity = value
+	}
+	route := &dispatchSessionRoute{
+		taskID:      task.ID,
+		principalID: identity.principalID,
+		sessionID:   identity.sessionID,
+		session:     identity.session,
+	}
+
+	// Register the exact session/principal binding for this dispatch, then
+	// ensure the forwarder is installed. CompareAndDelete ensures completion
+	// removes only the route installed for this task ID.
+	h.sessions.Store(task.ID, route)
+	defer h.sessions.CompareAndDelete(task.ID, route)
 	h.ensureBridge()
 
 	result, err := h.dispatcher.Dispatch(ctx, task)

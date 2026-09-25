@@ -203,7 +203,8 @@ func (s *HTTPServer) authMiddleware(next http.Handler) http.Handler {
 
 func (s *HTTPServer) profileMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get(ACPHTTPProfileHeader) != ACPHTTPProfileV1 {
+		profiles := r.Header.Values(ACPHTTPProfileHeader)
+		if len(profiles) != 1 || profiles[0] != ACPHTTPProfileV1 {
 			http.Error(w, "missing or unsupported ACP HTTP profile", http.StatusBadRequest)
 			return
 		}
@@ -570,7 +571,12 @@ func (s *HTTPServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		srvCtx := s.ctx
 		s.mu.Unlock()
 		if srvCtx != nil {
-			go s.handler.ProcessMessage(srvCtx, msg, sess)
+			dispatchCtx := context.WithValue(srvCtx, dispatchIdentityContextKey{}, dispatchIdentity{
+				principalID: binding.principalID,
+				sessionID:   sess.ID(),
+				session:     sess,
+			})
+			go s.handler.ProcessMessage(dispatchCtx, msg, sess)
 		}
 	} else {
 		// Echo mode: respond with an ack.
