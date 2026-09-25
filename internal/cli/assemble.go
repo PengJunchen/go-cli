@@ -713,7 +713,7 @@ func (s *assembleState) appendFinalCleanup() {
 // assembleModel builds the primary model, ModelCycler, ModelRegistry, and small
 // model. It registers the model provider and appends model cleanups.
 func (s *assembleState) assembleModel() error {
-	modelResolver, err := newCLIModelResolver(s.rc, s.providerName, true)
+	modelResolver, err := newCLIModelResolver(s.rc, s.providerName, true, s.modelName)
 	if err != nil {
 		return fmt.Errorf("assemble: resolve model providers: %w", err)
 	}
@@ -805,9 +805,14 @@ func (s *assembleState) assembleModel() error {
 			m, _, cleanup, err := modelResolver.buildPrimary(ctx, s.rc, s.providerName, name)
 			return m, cleanup, err
 		}).
+		WithModelSpecBuilder(func(ctx context.Context, candidate llm.ModelSpec) (llm.BaseChatModel, func(), error) {
+			m, _, cleanup, err := modelResolver.buildInteractive(ctx, s.rc, candidate)
+			return m, cleanup, err
+		}).
 		WithModelLister(func() []llm.ModelInfo {
 			return modelResolver.listAvailableModels(context.Background(), s.rc, s.providerName)
 		}).
+		WithModelSpecLister(modelResolver.listModelSpecs).
 		WithModelSwitchCallback(func(m llm.BaseChatModel) {
 			if s.loopAgent != nil {
 				s.loopAgent.SetModel(m)
@@ -1569,10 +1574,11 @@ func (s *assembleState) assembleSession() {
 // cliModelResolver owns one immutable provider snapshot for the primary model,
 // configured small model, explicit /model switches, and model listing.
 type cliModelResolver struct {
-	registry          *llm.ProviderRegistry
 	resolver          *llm.ModelResolver
 	primaryProviderID string
 	primaryEndpoint   string
+	smallProviderID   string
+	smallEndpoint     string
 	smallErr          error
 }
 
@@ -1586,7 +1592,7 @@ type cliProviderCredential struct {
 // newCLIModelResolver builds the CLI's provider definitions before publishing
 // one resolver snapshot. Credentials remain in the scoped AuthChain and are
 // never stored in provider metadata or provider constructors.
-func newCLIModelResolver(rc *config.Config, primaryProviderName string, includeSmall bool) (*cliModelResolver, error) {
+func newCLIModelResolver(rc *config.Config, primaryProviderName string, includeSmall bool, primaryModelName ...string) (*cliModelResolver, error) {
 	primaryProviderName = normalizeProviderName(primaryProviderName)
 	if primaryProviderName == "" {
 		return nil, fmt.Errorf("assemble: provider identity is required")
@@ -1604,9 +1610,20 @@ func newCLIModelResolver(rc *config.Config, primaryProviderName string, includeS
 		}
 	}
 	bindings := []cliProviderCredential{primary}
+	modelNamesByProvider := make(map[string][]llm.ModelInfo)
+	configuredPrimaryModel := ""
+	if len(primaryModelName) != 0 {
+		configuredPrimaryModel = strings.TrimSpace(primaryModelName[0])
+	}
+	if configuredPrimaryModel == "" && rc != nil {
+		configuredPrimaryModel = resolveModelName("", rc)
+	}
+	appendConfiguredModel(modelNamesByProvider, primaryProviderName, configuredPrimaryModel)
+	smallProviderName := ""
+	smallEndpoint := ""
 	var smallErr error
 	if includeSmall && rc != nil {
-		smallProviderName := normalizeProviderName(rc.SmallModel.Provider)
+		smallProviderName = normalizeProviderName(rc.SmallModel.Provider)
 		if smallProviderName == "" {
 			smallProviderName = primaryProviderName
 		}
@@ -1616,11 +1633,20 @@ func newCLIModelResolver(rc *config.Config, primaryProviderName string, includeS
 		} else if isDisabledCLIProvider(smallProviderName) {
 			smallErr = unsupportedCLIProviderError(smallProviderName)
 		} else {
+			smallEndpoint = endpoint
+			appendConfiguredModel(modelNamesByProvider, smallProviderName, rc.SmallModel.Model)
 			bindings = append(bindings, cliProviderCredential{providerID: smallProviderName, endpoint: endpoint, apiKey: apiKey, optional: true})
 		}
 	}
 
-	registry := llm.NewProviderRegistry()
+	defaultProviderOptions := make([]llm.ProviderOption, 0, 2)
+	if models := modelNamesByProvider["eino"]; len(models) != 0 {
+		defaultProviderOptions = append(defaultProviderOptions,
+			llm.WithModels(models),
+			llm.WithDefaultModel(promptDefaultModel),
+		)
+	}
+	registry := llm.NewProviderRegistryWithDefaultProviderOptions(defaultProviderOptions...)
 	registered := map[string]struct{}{"eino": {}}
 	for _, binding := range bindings {
 		providerID := normalizeProviderName(binding.providerID)
@@ -1630,7 +1656,7 @@ func newCLIModelResolver(rc *config.Config, primaryProviderName string, includeS
 		if _, exists := registered[providerID]; exists {
 			continue
 		}
-		provider, err := newCLICompatibleProvider(providerID, binding.endpoint)
+		provider, err := newCLICompatibleProvider(providerID, binding.endpoint, modelNamesByProvider[providerID]...)
 		if err != nil {
 			if binding.optional {
 				smallErr = err
@@ -1685,15 +1711,30 @@ func newCLIModelResolver(rc *config.Config, primaryProviderName string, includeS
 	}
 	registry.SetCredentialResolver(authChain)
 	return &cliModelResolver{
-		registry:          registry,
 		resolver:          registry.SnapshotResolver(),
 		primaryProviderID: primaryProviderName,
 		primaryEndpoint:   primary.endpoint,
+		smallProviderID:   smallProviderName,
+		smallEndpoint:     smallEndpoint,
 		smallErr:          smallErr,
 	}, nil
 }
 
-func newCLICompatibleProvider(providerID, endpoint string) (llm.ModelProvider, error) {
+func appendConfiguredModel(modelsByProvider map[string][]llm.ModelInfo, providerID, modelID string) {
+	providerID = normalizeProviderName(providerID)
+	modelID = strings.TrimSpace(modelID)
+	if providerID == "" || modelID == "" || isDisabledCLIProvider(providerID) {
+		return
+	}
+	for _, existing := range modelsByProvider[providerID] {
+		if existing.Name == modelID {
+			return
+		}
+	}
+	modelsByProvider[providerID] = append(modelsByProvider[providerID], llm.ModelInfo{Name: modelID})
+}
+
+func newCLICompatibleProvider(providerID, endpoint string, models ...llm.ModelInfo) (llm.ModelProvider, error) {
 	if isDisabledCLIProvider(providerID) {
 		return nil, unsupportedCLIProviderError(providerID)
 	}
@@ -1704,6 +1745,9 @@ func newCLICompatibleProvider(providerID, endpoint string) (llm.ModelProvider, e
 		return nil, providerEndpointRequiredError(providerID)
 	}
 	options := []llm.ProviderOption{llm.WithProviderName(providerID)}
+	if len(models) != 0 {
+		options = append(options, llm.WithModels(models))
+	}
 	if strings.TrimSpace(endpoint) != "" {
 		options = append(options, llm.WithBaseURL(endpoint))
 	}
@@ -1730,7 +1774,7 @@ func unsupportedCLIProviderError(providerID string) error {
 // buildModel resolves an llm.BaseChatModel from a fresh immutable snapshot for
 // direct callers. Assembly paths share one snapshot through cliModelResolver.
 func buildModel(ctx context.Context, rc *config.Config, providerName, modelName string) (llm.BaseChatModel, llm.ModelInfo, func(), error) {
-	modelResolver, err := newCLIModelResolver(rc, providerName, false)
+	modelResolver, err := newCLIModelResolver(rc, providerName, false, modelName)
 	if err != nil {
 		return nil, llm.ModelInfo{}, nil, err
 	}
@@ -1830,10 +1874,36 @@ func (r *cliModelResolver) build(ctx context.Context, request llm.ModelRequest) 
 	return model, llm.ModelInfo{}, cleanup, nil
 }
 
+func (r *cliModelResolver) buildInteractive(ctx context.Context, rc *config.Config, candidate llm.ModelSpec) (llm.BaseChatModel, llm.ModelInfo, func(), error) {
+	providerName := normalizeProviderName(candidate.ProviderID)
+	modelName := strings.TrimSpace(candidate.ModelID)
+	if providerIdentityMatches(r.primaryProviderID, providerName) {
+		return r.buildPrimary(ctx, rc, providerName, modelName)
+	}
+
+	request := llm.ModelRequest{ProviderID: providerName, ModelID: modelName}
+	if providerIdentityMatches(r.smallProviderID, providerName) {
+		request.Endpoint = r.smallEndpoint
+	}
+	providerSampling := config.SamplingSettings{}
+	if rc != nil && providerIdentityMatches(resolveProviderName("", rc), providerName) {
+		providerSampling = rc.ProviderSampling()
+	}
+	applySamplingSettings(&request, config.SamplingSettings{}, providerSampling)
+	return r.build(ctx, request)
+}
+
+func (r *cliModelResolver) listModelSpecs() []llm.ModelSpec {
+	if r == nil || r.resolver == nil {
+		return nil
+	}
+	return r.resolver.ListModels()
+}
+
 // listAvailableModels returns only models for a provider request accepted by
 // the same immutable resolver and exact-scope credential chain as generation.
 func listAvailableModels(rc *config.Config, providerName string) []llm.ModelInfo {
-	modelResolver, err := newCLIModelResolver(rc, providerName, false)
+	modelResolver, err := newCLIModelResolver(rc, providerName, true)
 	if err != nil {
 		return nil
 	}
@@ -1846,18 +1916,21 @@ func (r *cliModelResolver) listAvailableModels(ctx context.Context, rc *config.C
 		request.Endpoint = r.primaryEndpoint
 	}
 	if rc != nil {
-		request.ModelID = rc.Model.Name
-		request.Temperature = rc.Model.Temperature
-		request.MaxTokens = rc.Model.MaxTokens
+		request.ModelID = resolveModelName("", rc)
+		applySamplingSettings(&request, rc.ModelSampling(), config.SamplingSettings{})
 	}
-	if _, err := r.resolve(ctx, request); err != nil {
-		return nil
-	}
-	provider, err := r.registry.Get(providerName)
+	resolved, err := r.resolve(ctx, request)
 	if err != nil {
 		return nil
 	}
-	return provider.Models()
+	models := r.listModelSpecs()
+	result := make([]llm.ModelInfo, 0, len(models))
+	for _, model := range models {
+		if model.ProviderID == resolved.ProviderID {
+			result = append(result, model.Info)
+		}
+	}
+	return result
 }
 
 func (r *cliModelResolver) resolve(ctx context.Context, request llm.ModelRequest) (llm.ResolvedModel, error) {

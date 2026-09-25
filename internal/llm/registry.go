@@ -37,12 +37,18 @@ type ProviderRegistry struct {
 // NewProviderRegistry creates a ProviderRegistry that already contains a
 // default EinoProvider registered under its name ("eino").
 func NewProviderRegistry() *ProviderRegistry {
+	return NewProviderRegistryWithDefaultProviderOptions()
+}
+
+// NewProviderRegistryWithDefaultProviderOptions creates a ProviderRegistry
+// whose pre-registered default Eino provider receives the given options.
+func NewProviderRegistryWithDefaultProviderOptions(options ...ProviderOption) *ProviderRegistry {
 	reg := &ProviderRegistry{
 		providers:     map[string]ModelProvider{},
 		providerSpecs: map[string]ProviderSpec{},
 	}
 	// Pre-register a default provider so the registry is always usable.
-	def := NewEinoProvider()
+	def := NewEinoProvider(options...)
 	if err := reg.Register(def); err != nil {
 		// Cannot happen: name "eino" is unoccupied in a fresh registry.
 		slog.Error("llm_registry_register_default_failed", "err", err)

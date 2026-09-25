@@ -8,6 +8,7 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/session"
 )
 
@@ -173,7 +174,7 @@ var _ SlashCommandHandler = (*ModelHandler)(nil)
 
 func (h *ModelHandler) Name() string { return "model" }
 func (h *ModelHandler) Description() string {
-	return "Show or switch the current model (/model [name])"
+	return "Show or switch the current model (/model [name] or /model --provider <id> -- <name>)"
 }
 
 func (h *ModelHandler) Handle(ctx context.Context, args []string, deps Dependencies) (string, error) {
@@ -185,6 +186,25 @@ func (h *ModelHandler) Handle(ctx context.Context, args []string, deps Dependenc
 			fmt.Fprintf(deps.Out(), "Current model: %s\n", deps.ModelName()) //nolint:errcheck
 			return "", nil
 		}
+		currentSpec := sel.CurrentModelSpec()
+		modelSpecs := sel.AvailableModelSpecs()
+		if len(modelSpecs) != 0 {
+			fmt.Fprintln(deps.Out(), "Available models:") //nolint:errcheck
+			for _, model := range modelSpecs {
+				marker := "  "
+				if model.ProviderID == currentSpec.ProviderID && model.ModelID == currentSpec.ModelID {
+					marker = "* "
+				}
+				fmt.Fprintf(deps.Out(), "%s[%s] %s", marker, model.ProviderID, model.ModelID) //nolint:errcheck
+				if model.Info.Description != "" {
+					fmt.Fprintf(deps.Out(), " - %s", model.Info.Description) //nolint:errcheck
+				}
+				fmt.Fprintln(deps.Out()) //nolint:errcheck
+			}
+			fmt.Fprintf(deps.Out(), "\nCurrent: [%s] %s\n", currentSpec.ProviderID, currentSpec.ModelID) //nolint:errcheck
+			return "", nil
+		}
+
 		current := sel.PrimaryModelName()
 		models := sel.AvailableModels()
 		if len(models) == 0 {
@@ -207,11 +227,31 @@ func (h *ModelHandler) Handle(ctx context.Context, args []string, deps Dependenc
 		return "", nil
 	}
 
-	// Switch model.
-	modelName := args[0]
 	if sel == nil {
 		return "", fmt.Errorf("model switching not available")
 	}
+
+	if args[0] == "--provider" {
+		if len(args) < 4 || args[2] != "--" {
+			return "", fmt.Errorf("usage: /model --provider <id> -- <model-id>")
+		}
+		candidate := llm.ModelSpec{
+			ProviderID: args[1],
+			ModelID:    strings.Join(args[3:], " "),
+		}
+		if strings.TrimSpace(candidate.ModelID) == "" {
+			return "", fmt.Errorf("usage: /model --provider <id> -- <model-id>")
+		}
+		if err := sel.SwitchModelSpec(ctx, candidate); err != nil {
+			return "", fmt.Errorf("switch model: %w", err)
+		}
+		current := sel.CurrentModelSpec()
+		fmt.Fprintf(deps.Out(), "Switched to model: [%s] %s\n", current.ProviderID, current.ModelID) //nolint:errcheck
+		return "", nil
+	}
+
+	// A bare model identifier always remains scoped to the current provider.
+	modelName := args[0]
 	if err := sel.SwitchModel(ctx, modelName); err != nil {
 		return "", fmt.Errorf("switch model: %w", err)
 	}
