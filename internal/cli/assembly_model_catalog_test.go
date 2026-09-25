@@ -18,7 +18,7 @@ func TestCLIModelResolverRegistersConfiguredModelCatalog(t *testing.T) {
 	rc := &config.Config{
 		Provider: config.ProviderConfig{
 			Name:    "openai",
-			APIKey:  "catalog-primary-canary",
+			APIKey:  newTestCredentialCanary(t),
 			Model:   "provider-model",
 			BaseURL: "",
 		},
@@ -52,13 +52,13 @@ func TestCLIModelResolverCatalogKeepsSameModelIDProviderScoped(t *testing.T) {
 	rc := &config.Config{
 		Provider: config.ProviderConfig{
 			Name:   "openai",
-			APIKey: "primary-canary-key",
+			APIKey: newTestCredentialCanary(t),
 			Model:  sharedModel,
 		},
 		SmallModel: config.SmallModelConfig{
 			Provider: "custom-compatible",
 			BaseURL:  "http://127.0.0.1:8127/v1",
-			APIKey:   "small-canary-key",
+			APIKey:   newTestCredentialCanary(t),
 			Model:    sharedModel,
 		},
 	}
@@ -87,7 +87,7 @@ func TestCLIModelResolverCatalogUsesFinalModelOverrideWithoutSplittingModelID(t 
 	rc := &config.Config{
 		Provider: config.ProviderConfig{
 			Name:   "openai",
-			APIKey: "catalog-override-canary",
+			APIKey: newTestCredentialCanary(t),
 			Model:  "configured-model",
 		},
 		Model: config.ModelConfig{Name: "legacy-model"},
@@ -115,8 +115,8 @@ func TestCLIModelResolverScopedSwitchKeepsCredentialAndSamplingWithTargetProvide
 	const primaryProvider = "primary-compatible"
 	const smallProvider = "small-compatible"
 	const sharedModel = "shared-model"
-	const primaryKey = "primary-scope-canary-key"
-	const smallKey = "small-scope-canary-key"
+	primaryKey := newTestCredentialCanary(t)
+	smallKey := newTestCredentialCanary(t)
 	rc := &config.Config{
 		Provider: config.ProviderConfig{
 			Name:        primaryProvider,
@@ -188,7 +188,7 @@ func TestCLIModelResolverSamePrimaryAndSmallIdentityUsesPrimarySampling(t *testi
 
 	const providerName = "role-compatible"
 	const sharedModel = "same-role-model"
-	const apiKey = "same-origin-scope-canary"
+	apiKey := newTestCredentialCanary(t)
 	rc := &config.Config{
 		Provider: config.ProviderConfig{
 			Name:    providerName,
