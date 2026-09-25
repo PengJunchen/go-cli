@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"regexp"
@@ -10,6 +11,10 @@ import (
 	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
+
+// ErrInvalidToolResult indicates that an MCP client returned no result and no
+// call error for a tool invocation.
+var ErrInvalidToolResult = errors.New("mcp: invalid tool result")
 
 // promptInjectionWarning is prepended to content flagged as potentially
 // containing prompt-injection instructions. It alerts the model that the
@@ -126,17 +131,24 @@ func (a *MCPToolAdapter) Parameters() any {
 // a tools.ToolResult. ToolCallID is set so the result can be matched back to
 // the originating call.
 func (a *MCPToolAdapter) Execute(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
-	span, _ := tracing.SpanFromContext(ctx, "tool.call", tracing.SpanKindClient)
+	span, spanCtx := tracing.SpanFromContext(ctx, "tool.call", tracing.SpanKindClient)
+	defer span.End()
 	span.SetAttributes(tracing.Attribute{Key: "tool_name", Value: call.Name})
 
-	result, err := a.client.CallTool(ctx, a.tool.Name, call.Args)
+	result, err := a.client.CallTool(spanCtx, a.tool.Name, call.Args)
 	if err != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		slog.Error("mcp.tool_adapter.failed", "tool", a.tool.Name, "err", err)
 		return nil, err
 	}
+	if result == nil {
+		err := fmt.Errorf("%w: client returned nil result for tool %q", ErrInvalidToolResult, a.tool.Name)
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		slog.Error("mcp.tool_adapter.failed", "tool", a.tool.Name, "err", err)
+		return nil, err
+	}
 
-	span.SetAttributes(tracing.Attribute{Key: "success", Value: result != nil && !result.IsError})
+	span.SetAttributes(tracing.Attribute{Key: "success", Value: !result.IsError})
 
 	output, ok := result.Content.(string)
 	if !ok {
@@ -155,5 +167,6 @@ func (a *MCPToolAdapter) Execute(ctx context.Context, call tools.ToolCall) (*too
 	return &tools.ToolResult{
 		Output:     output,
 		ToolCallID: call.ID,
+		IsError:    result.IsError,
 	}, nil
 }

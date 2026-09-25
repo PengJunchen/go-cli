@@ -98,13 +98,15 @@ func TestVQVGResult(t *testing.T) {
 		r := vqvgResult("VQ-001", "test rule", true, "pass msg", "fail msg")
 		assert.Equal(t, "VQ-001", r.ID)
 		assert.Equal(t, "test rule", r.Name)
-		assert.Equal(t, "PASS", r.Status)
-		assert.Equal(t, "pass msg", r.Message)
+		assert.Equal(t, "HINT", r.Status)
+		assert.Equal(t, EvidenceStaticHeuristic, r.Evidence)
+		assert.Contains(t, r.Message, "pass msg")
 	})
 	t.Run("fail", func(t *testing.T) {
 		r := vqvgResult("VG-001", "another rule", false, "pass msg", "fail msg")
-		assert.Equal(t, "FAIL", r.Status)
-		assert.Equal(t, "fail msg", r.Message)
+		assert.Equal(t, "HINT", r.Status)
+		assert.Equal(t, EvidenceStaticHeuristic, r.Evidence)
+		assert.Contains(t, r.Message, "fail msg")
 	})
 }
 
@@ -386,10 +388,10 @@ func main() {
 	for _, r := range results {
 		resultMap[r.ID] = r
 	}
-	assert.Equal(t, "PASS", resultMap["VQ-001"].Status)
-	assert.Equal(t, "PASS", resultMap["VQ-002"].Status)
-	assert.Equal(t, "PASS", resultMap["VQ-003"].Status)
-	assert.Equal(t, "PASS", resultMap["VQ-004"].Status)
+	assert.Equal(t, "HINT", resultMap["VQ-001"].Status)
+	assert.Equal(t, "HINT", resultMap["VQ-002"].Status)
+	assert.Equal(t, "HINT", resultMap["VQ-003"].Status)
+	assert.Equal(t, "HINT", resultMap["VQ-004"].Status)
 }
 
 func TestCheckVQVG_AllFail(t *testing.T) {
@@ -400,11 +402,11 @@ func TestCheckVQVG_AllFail(t *testing.T) {
 	for _, r := range results {
 		resultMap[r.ID] = r
 	}
-	assert.Equal(t, "FAIL", resultMap["VQ-001"].Status)
-	assert.Equal(t, "FAIL", resultMap["VQ-002"].Status)
-	assert.Equal(t, "FAIL", resultMap["VQ-003"].Status)
-	assert.Equal(t, "FAIL", resultMap["VQ-004"].Status)
-	assert.Equal(t, "FAIL", resultMap["VG-002"].Status, "goroutine without leak guard should fail VG-002")
+	assert.Equal(t, "HINT", resultMap["VQ-001"].Status)
+	assert.Equal(t, "HINT", resultMap["VQ-002"].Status)
+	assert.Equal(t, "HINT", resultMap["VQ-003"].Status)
+	assert.Equal(t, "HINT", resultMap["VQ-004"].Status)
+	assert.Equal(t, "HINT", resultMap["VG-002"].Status, "source marker absence is a hint, not behavioral failure proof")
 }
 
 func TestScanVQVGMarkers_ContextWithTimeout(t *testing.T) {
@@ -564,9 +566,9 @@ func work(ctx context.Context) {
 	for _, r := range results {
 		resultMap[r.ID] = r
 	}
-	assert.Equal(t, "PASS", resultMap["VG-001"].Status, "context creation + observation should pass VG-001")
+	assert.Equal(t, "HINT", resultMap["VG-001"].Status, "context markers remain static hints")
 	// VG-002 should pass since no goroutines
-	assert.Equal(t, "PASS", resultMap["VG-002"].Status, "no goroutines should pass VG-002")
+	assert.Equal(t, "HINT", resultMap["VG-002"].Status, "absence of a goroutine marker remains a static hint")
 }
 
 func TestCheckVQVG_VG001Fail(t *testing.T) {
@@ -582,7 +584,7 @@ func work() {
 	for _, r := range results {
 		resultMap[r.ID] = r
 	}
-	assert.Equal(t, "FAIL", resultMap["VG-001"].Status, "context creation without observation should fail VG-001")
+	assert.Equal(t, "HINT", resultMap["VG-001"].Status, "missing context marker remains a static hint")
 }
 
 func TestCheckVQVG_VG002Pass_WithGuard(t *testing.T) {
@@ -601,7 +603,7 @@ func f() {
 	for _, r := range results {
 		resultMap[r.ID] = r
 	}
-	assert.Equal(t, "PASS", resultMap["VG-002"].Status, "goroutine with WaitGroup should pass VG-002")
+	assert.Equal(t, "HINT", resultMap["VG-002"].Status, "goroutine marker remains a static hint")
 }
 
 func TestCheckVQVG_VG002Fail_NoGuard(t *testing.T) {
@@ -614,7 +616,7 @@ func f() { go func(){}() }
 	for _, r := range results {
 		resultMap[r.ID] = r
 	}
-	assert.Equal(t, "FAIL", resultMap["VG-002"].Status, "goroutine without leak guard should fail VG-002")
+	assert.Equal(t, "HINT", resultMap["VG-002"].Status, "missing leak marker remains a static hint")
 }
 
 func TestCheckVQVG_VQ002Fail(t *testing.T) {
@@ -627,7 +629,7 @@ func main() {}
 	for _, r := range results {
 		resultMap[r.ID] = r
 	}
-	assert.Equal(t, "FAIL", resultMap["VQ-002"].Status, "no unknown command error should fail VQ-002")
+	assert.Equal(t, "HINT", resultMap["VQ-002"].Status, "missing unknown-command marker remains a static hint")
 }
 
 func TestCheckVQVG_VQ003Fail(t *testing.T) {
@@ -640,7 +642,7 @@ func main() {}
 	for _, r := range results {
 		resultMap[r.ID] = r
 	}
-	assert.Equal(t, "FAIL", resultMap["VQ-003"].Status, "no version handling should fail VQ-003")
+	assert.Equal(t, "HINT", resultMap["VQ-003"].Status, "missing version marker remains a static hint")
 }
 
 func TestCheckVQVG_VQ004Fail(t *testing.T) {
@@ -653,7 +655,7 @@ func main() {}
 	for _, r := range results {
 		resultMap[r.ID] = r
 	}
-	assert.Equal(t, "FAIL", resultMap["VQ-004"].Status, "no help handling should fail VQ-004")
+	assert.Equal(t, "HINT", resultMap["VQ-004"].Status, "missing help marker remains a static hint")
 }
 
 func TestCheckVQVG_AllPass(t *testing.T) {
@@ -683,12 +685,14 @@ func main() {
 	for _, r := range results {
 		resultMap[r.ID] = r
 	}
-	assert.Equal(t, "PASS", resultMap["VQ-001"].Status)
-	assert.Equal(t, "PASS", resultMap["VQ-002"].Status)
-	assert.Equal(t, "PASS", resultMap["VQ-003"].Status)
-	assert.Equal(t, "PASS", resultMap["VQ-004"].Status)
-	assert.Equal(t, "PASS", resultMap["VG-001"].Status)
-	assert.Equal(t, "PASS", resultMap["VG-002"].Status)
+	assert.Equal(t, "HINT", resultMap["VQ-001"].Status)
+	assert.Equal(t, "HINT", resultMap["VQ-002"].Status)
+	assert.Equal(t, "HINT", resultMap["VQ-003"].Status)
+	assert.Equal(t, "HINT", resultMap["VQ-004"].Status)
+	assert.Equal(t, "HINT", resultMap["VG-001"].Status)
+	assert.Equal(t, EvidenceStaticHeuristic, resultMap["VG-001"].Evidence)
+	assert.Equal(t, "HINT", resultMap["VG-002"].Status)
+	assert.Equal(t, EvidenceStaticHeuristic, resultMap["VG-002"].Evidence)
 }
 
 func TestScanVQVGMarkers_EmptyDir(t *testing.T) {

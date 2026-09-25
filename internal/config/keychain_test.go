@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"errors"
 	"os"
 	"path/filepath"
@@ -24,9 +25,10 @@ func skipNonDarwin(t *testing.T) {
 // provided handler. This avoids touching the real OS keychain during tests.
 func newFakeKeychain(run func(name string, args ...string) ([]byte, error)) *KeychainSource {
 	return &KeychainSource{
-		service: "go-cli",
-		account: "api-key",
-		run:     run,
+		service:       "go-cli",
+		account:       "api-key",
+		availableFunc: func() bool { return true },
+		run:           run,
 	}
 }
 
@@ -139,9 +141,177 @@ func TestKeychainSource_InAuthChain(t *testing.T) {
 	c := NewAuthChain().WithSources([]AuthSource{
 		{Name: authSourceKeychain, Lookup: kc.Lookup},
 	})
-	got, err := c.Resolve("openai")
+	_, found, err := c.ResolveCredential(context.Background(), "openai", "openai-compatible", "https://api.openai.com")
 	require.NoError(t, err)
-	assert.Equal(t, "sk-chain-key", got)
+	assert.False(t, found, "legacy provider-only keychain entry must not enter a scoped route")
+}
+
+func TestKeychainSource_ScopedCredentialInAuthChain(t *testing.T) {
+	skipNonDarwin(t)
+	scope := AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.openai.com"}
+	var account string
+	kc := newFakeKeychain(func(_ string, args ...string) ([]byte, error) {
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "-a" {
+				account = args[i+1]
+				break
+			}
+		}
+		return []byte("scoped-key"), nil
+	})
+	c := NewAuthChain().WithSources([]AuthSource{{Name: authSourceKeychain, LookupScoped: kc.LookupScoped}})
+
+	got, found, err := c.ResolveCredential(context.Background(), scope.ProviderID, scope.ProtocolID, scope.Origin)
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, "scoped-key", got)
+	assert.NotEqual(t, "api-key", account, "scoped lookup must not read the legacy unscoped keychain item")
+}
+
+func TestKeychainSource_GetScopedAccessFailureIsNotNotFound(t *testing.T) {
+	secret := authSecretCanary(t)
+	kc := newFakeKeychain(func(name string, args ...string) ([]byte, error) {
+		assert.Equal(t, "security", name)
+		assert.Contains(t, args, "find-generic-password")
+		return nil, errors.New("keychain access denied")
+	})
+
+	got, err := kc.GetScoped(AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test"})
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, ErrAuthNotFound), "access failures must stop the auth chain")
+	assert.Empty(t, got)
+	assert.NotContains(t, err.Error(), secret)
+}
+
+func TestKeychainSource_GetScopedInvalidScopeIsSourceError(t *testing.T) {
+	kc := newFakeKeychain(func(string, ...string) ([]byte, error) {
+		t.Fatal("invalid scope must be rejected before invoking security")
+		return nil, nil
+	})
+
+	got, err := kc.GetScoped(AuthScope{})
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, ErrAuthNotFound))
+	assert.Empty(t, got)
+}
+
+func TestKeychainSource_GetScopedInvalidScopeIsErrorWhenBackendUnavailable(t *testing.T) {
+	kc := newFakeKeychain(func(string, ...string) ([]byte, error) {
+		t.Fatal("invalid scope must be rejected without invoking security")
+		return nil, nil
+	})
+	kc.availableFunc = func() bool { return false }
+
+	key, err := kc.GetScoped(AuthScope{})
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, ErrAuthNotFound))
+	assert.Empty(t, key)
+}
+
+func TestKeychainSource_GetScopedFailureStopsAuthChainFallback(t *testing.T) {
+	fallbackCalls := 0
+	fallbackKey := authSecretCanary(t)
+	kc := newFakeKeychain(func(string, ...string) ([]byte, error) {
+		return nil, errors.New("keychain access denied")
+	})
+	chain := NewAuthChain().WithSources([]AuthSource{
+		{Name: authSourceKeychain, LookupScoped: kc.LookupScoped},
+		{Name: authSourceAuthFile, LookupScoped: func(AuthScope) (string, error) {
+			fallbackCalls++
+			return fallbackKey, nil
+		}},
+	})
+
+	key, found, err := chain.ResolveCredential(context.Background(), "openai", "openai-compatible", "https://api.example.test")
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, ErrAuthNotFound))
+	assert.Empty(t, key)
+	assert.False(t, found)
+	assert.Zero(t, fallbackCalls, "a keychain source failure must stop before lower-priority sources")
+}
+
+func TestKeychainSource_GetScopedConfirmedMissingItemFallsThrough(t *testing.T) {
+	fallbackKey := authSecretCanary(t)
+	kc := newFakeKeychain(func(string, ...string) ([]byte, error) {
+		return nil, errKeychainItemNotFound
+	})
+	fallbackCalls := 0
+	chain := NewAuthChain().WithSources([]AuthSource{
+		{Name: authSourceKeychain, LookupScoped: kc.LookupScoped},
+		{Name: authSourceAuthFile, LookupScoped: func(AuthScope) (string, error) {
+			fallbackCalls++
+			return fallbackKey, nil
+		}},
+	})
+
+	key, found, err := chain.ResolveCredential(context.Background(), "openai", "openai-compatible", "https://api.example.test")
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, fallbackKey, key)
+	assert.Equal(t, 1, fallbackCalls)
+}
+
+func TestKeychainSource_GetScopedUnavailableBackendFallsThrough(t *testing.T) {
+	kc := newFakeKeychain(func(string, ...string) ([]byte, error) {
+		t.Fatal("unavailable keychain must be skipped")
+		return nil, nil
+	})
+	kc.availableFunc = func() bool { return false }
+
+	fallbackCalls := 0
+	chain := NewAuthChain().WithSources([]AuthSource{
+		{Name: authSourceKeychain, LookupScoped: kc.LookupScoped},
+		{Name: authSourceAuthFile, LookupScoped: func(AuthScope) (string, error) {
+			fallbackCalls++
+			return "lower-priority-key", nil
+		}},
+	})
+
+	key, found, err := chain.ResolveCredential(context.Background(), "openai", "openai-compatible", "https://api.example.test")
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, "lower-priority-key", key)
+	assert.Equal(t, 1, fallbackCalls)
+}
+
+func TestKeychainExecClassifiesOnlyConfirmedMissingItem(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("the fake security executable uses a POSIX shell")
+	}
+	binDir := t.TempDir()
+	shim := filepath.Join(binDir, "security")
+	script := "#!/bin/sh\n" +
+		"case \"$FAKE_SECURITY_MODE\" in\n" +
+		"  missing) printf '%s\\n' 'security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.' >&2; exit 44 ;;\n" +
+		"  denied) printf 'access denied canary=%s\\n' \"$FAKE_SECRET\" >&2; exit 36 ;;\n" +
+		"  empty) exit 0 ;;\n" +
+		"esac\n"
+	require.NoError(t, os.WriteFile(shim, []byte(script), 0o700))
+	t.Setenv("PATH", binDir)
+
+	t.Run("confirmed missing", func(t *testing.T) {
+		t.Setenv("FAKE_SECURITY_MODE", "missing")
+		_, err := keychainExec("security", "find-generic-password", "-s", "go-cli", "-a", "exact-scope", "-w")
+		require.ErrorIs(t, err, errKeychainItemNotFound)
+	})
+	t.Run("access failure", func(t *testing.T) {
+		t.Setenv("FAKE_SECURITY_MODE", "denied")
+		secret := authSecretCanary(t)
+		t.Setenv("FAKE_SECRET", secret)
+		_, err := keychainExec("security", "find-generic-password", "-s", "go-cli", "-a", "exact-scope", "-w")
+		require.Error(t, err)
+		assert.False(t, errors.Is(err, errKeychainItemNotFound))
+		assert.NotContains(t, err.Error(), secret)
+	})
+	t.Run("empty success output", func(t *testing.T) {
+		t.Setenv("FAKE_SECURITY_MODE", "empty")
+		kc := NewKeychainSource()
+		kc.availableFunc = func() bool { return true }
+		key, err := kc.GetScoped(AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test"})
+		require.Error(t, err)
+		assert.False(t, errors.Is(err, ErrAuthNotFound))
+		assert.Empty(t, key)
+	})
 }
 
 func TestNewAuthChain_IncludesKeychainSource(t *testing.T) {
@@ -170,6 +340,7 @@ func TestLookupAuthFile_APIKeyFormat(t *testing.T) {
 
 	authDir := filepath.Join(tmpDir, ".config", "go-cli")
 	require.NoError(t, os.MkdirAll(authDir, 0o750))
+	require.NoError(t, os.Chmod(authDir, 0o700))
 	authPath := filepath.Join(authDir, "auth.json")
 	require.NoError(t, os.WriteFile(authPath, []byte(`{"api_key":"sk-from-file"}`), 0o600))
 
@@ -184,6 +355,7 @@ func TestLookupAuthFile_ProviderMapFormat(t *testing.T) {
 
 	authDir := filepath.Join(tmpDir, ".config", "go-cli")
 	require.NoError(t, os.MkdirAll(authDir, 0o750))
+	require.NoError(t, os.Chmod(authDir, 0o700))
 	authPath := filepath.Join(authDir, "auth.json")
 	require.NoError(t, os.WriteFile(authPath, []byte(`{"openai":"sk-map-key"}`), 0o600))
 
@@ -206,6 +378,7 @@ func TestLookupAuthFile_APIKeyTakesPrecedence(t *testing.T) {
 
 	authDir := filepath.Join(tmpDir, ".config", "go-cli")
 	require.NoError(t, os.MkdirAll(authDir, 0o750))
+	require.NoError(t, os.Chmod(authDir, 0o700))
 	authPath := filepath.Join(authDir, "auth.json")
 	// When both api_key and a provider entry exist, api_key wins.
 	require.NoError(t, os.WriteFile(authPath,

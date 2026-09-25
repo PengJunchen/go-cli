@@ -17,7 +17,7 @@ const (
 	// names, e.g. GO_CLI_VERBOSE, GO_CLI_MODEL_NAME.
 	defaultEnvPrefix = "GO_CLI"
 
-	defaultMaxTokens = 4096
+	defaultMaxTokens = DefaultLLMMaxTokens
 
 	defaultCompactionMaxTokens = 128000
 
@@ -216,7 +216,7 @@ func envKey(prefix, key string) string { return prefix + "_" + key }
 
 // loadFromEnv builds a partial Config from GO_CLI_* environment variables.
 func loadFromEnv(prefix string) *Config {
-	cfg := &Config{}
+	cfg := &Config{samplingPresenceKnown: true}
 	if v, ok := parseBoolEnv(envKey(prefix, "VERBOSE")); ok && v {
 		cfg.verbose = true
 	}
@@ -224,12 +224,12 @@ func loadFromEnv(prefix string) *Config {
 	cfg.Provider.APIKey = os.Getenv(envKey(prefix, "PROVIDER_API_KEY"))
 	cfg.Provider.BaseURL = os.Getenv(envKey(prefix, "PROVIDER_BASE_URL"))
 	cfg.Provider.Model = os.Getenv(envKey(prefix, "PROVIDER_MODEL"))
-	cfg.Provider.Temperature = parseFloatEnv(envKey(prefix, "PROVIDER_TEMPERATURE"))
-	cfg.Provider.MaxTokens = parseIntEnv(envKey(prefix, "PROVIDER_MAX_TOKENS"))
+	cfg.Provider.Temperature, cfg.Provider.temperatureSet = parseFloatEnvSet(envKey(prefix, "PROVIDER_TEMPERATURE"))
+	cfg.Provider.MaxTokens, cfg.Provider.maxTokensSet = parseIntEnvSet(envKey(prefix, "PROVIDER_MAX_TOKENS"))
 
 	cfg.Model.Name = os.Getenv(envKey(prefix, "MODEL_NAME"))
-	cfg.Model.Temperature = parseFloatEnv(envKey(prefix, "MODEL_TEMPERATURE"))
-	cfg.Model.MaxTokens = parseIntEnv(envKey(prefix, "MODEL_MAX_TOKENS"))
+	cfg.Model.Temperature, cfg.Model.temperatureSet = parseFloatEnvSet(envKey(prefix, "MODEL_TEMPERATURE"))
+	cfg.Model.MaxTokens, cfg.Model.maxTokensSet = parseIntEnvSet(envKey(prefix, "MODEL_MAX_TOKENS"))
 
 	cfg.Tracing.Exporter = os.Getenv(envKey(prefix, "TRACING_EXPORTER"))
 	cfg.Tracing.Level = os.Getenv(envKey(prefix, "TRACING_LEVEL"))
@@ -283,8 +283,9 @@ func defaultConfig() *Config {
 	enabled := true
 	auditEnabled := true
 	return &Config{
-		Provider: ProviderConfig{MaxTokens: defaultMaxTokens},
-		Model:    ModelConfig{MaxTokens: defaultMaxTokens},
+		Provider:              ProviderConfig{MaxTokens: defaultMaxTokens},
+		Model:                 ModelConfig{MaxTokens: defaultMaxTokens},
+		samplingPresenceKnown: true,
 		Tracing: TracingConfig{
 			Enabled:  &enabled,
 			Exporter: defaultTracingExporter,
@@ -303,10 +304,64 @@ func defaultConfig() *Config {
 // mergeConfigs returns a new Config overlaying non-zero values of over onto
 // base, giving over higher priority on a per-field basis.
 func mergeConfigs(base, over *Config) *Config {
+	if base == nil {
+		base = &Config{}
+	}
 	out := new(Config)
 	*out = *base
-	overlayValue(reflect.ValueOf(out).Elem(), reflect.ValueOf(over).Elem())
+	if over != nil {
+		overlayValue(reflect.ValueOf(out).Elem(), reflect.ValueOf(over).Elem())
+	}
+	mergeSampling(out, base, over)
 	return out
+}
+
+func mergeSampling(out, base, over *Config) {
+	baseKnown := base.samplingPresenceKnown
+	if over == nil {
+		over = &Config{samplingPresenceKnown: true}
+	}
+	overKnown := over.samplingPresenceKnown
+
+	out.Provider.Temperature, out.Provider.temperatureSet = mergeSamplingFloat(
+		base.Provider.Temperature, base.Provider.temperatureSet, baseKnown,
+		over.Provider.Temperature, over.Provider.temperatureSet, overKnown,
+	)
+	out.Provider.MaxTokens, out.Provider.maxTokensSet = mergeSamplingInt(
+		base.Provider.MaxTokens, base.Provider.maxTokensSet, baseKnown,
+		over.Provider.MaxTokens, over.Provider.maxTokensSet, overKnown,
+	)
+	out.Model.Temperature, out.Model.temperatureSet = mergeSamplingFloat(
+		base.Model.Temperature, base.Model.temperatureSet, baseKnown,
+		over.Model.Temperature, over.Model.temperatureSet, overKnown,
+	)
+	out.Model.MaxTokens, out.Model.maxTokensSet = mergeSamplingInt(
+		base.Model.MaxTokens, base.Model.maxTokensSet, baseKnown,
+		over.Model.MaxTokens, over.Model.maxTokensSet, overKnown,
+	)
+	out.SmallModel.Temperature, out.SmallModel.temperatureSet = mergeSamplingFloat(
+		base.SmallModel.Temperature, base.SmallModel.temperatureSet, baseKnown,
+		over.SmallModel.Temperature, over.SmallModel.temperatureSet, overKnown,
+	)
+	out.SmallModel.MaxTokens, out.SmallModel.maxTokensSet = mergeSamplingInt(
+		base.SmallModel.MaxTokens, base.SmallModel.maxTokensSet, baseKnown,
+		over.SmallModel.MaxTokens, over.SmallModel.maxTokensSet, overKnown,
+	)
+	out.samplingPresenceKnown = true
+}
+
+func mergeSamplingFloat(baseValue float64, baseSet, baseKnown bool, overValue float64, overSet, overKnown bool) (float64, bool) {
+	if overSet || (!overKnown && overValue != 0) {
+		return overValue, true
+	}
+	return baseValue, baseSet || (!baseKnown && baseValue != 0)
+}
+
+func mergeSamplingInt(baseValue int, baseSet, baseKnown bool, overValue int, overSet, overKnown bool) (int, bool) {
+	if overSet || (!overKnown && overValue != 0) {
+		return overValue, true
+	}
+	return baseValue, baseSet || (!baseKnown && baseValue != 0)
 }
 
 // overlayValue copies non-zero exported fields from src onto dst recursively.
@@ -434,6 +489,18 @@ func parseFloatEnv(key string) float64 {
 	return f
 }
 
+func parseFloatEnvSet(key string) (float64, bool) {
+	v := os.Getenv(key)
+	if v == "" {
+		return 0, false
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil {
+		return 0, false
+	}
+	return f, true
+}
+
 func parseIntEnv(key string) int {
 	v := os.Getenv(key)
 	if v == "" {
@@ -444,6 +511,18 @@ func parseIntEnv(key string) int {
 		return 0
 	}
 	return i
+}
+
+func parseIntEnvSet(key string) (int, bool) {
+	v := os.Getenv(key)
+	if v == "" {
+		return 0, false
+	}
+	i, err := strconv.Atoi(v)
+	if err != nil {
+		return 0, false
+	}
+	return i, true
 }
 
 func parseBoolEnv(key string) (bool, bool) {

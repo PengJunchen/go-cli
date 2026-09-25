@@ -2,6 +2,8 @@ package tools_test
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -35,11 +37,9 @@ func TestMutationWrapper_SerializesConcurrentWrites(t *testing.T) {
 
 	tr := tools.NewDefaultToolRegistry()
 	require.NoError(t, tr.Register(context.Background(), slowTool))
-
-	wrapped := tools.NewMiddlewareToolRegistry(tr, tools.NewMutationWrapper())
-
-	def, err := wrapped.Get(context.Background(), "write")
+	def, err := tr.Get(context.Background(), "write")
 	require.NoError(t, err)
+	execute := tools.NewMutationWrapper()(def.Execute)
 
 	// Launch 3 concurrent writes to the same file.
 	var wg sync.WaitGroup
@@ -47,7 +47,7 @@ func TestMutationWrapper_SerializesConcurrentWrites(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = def.Execute(context.Background(), tools.ToolCall{ //nolint:errcheck
+			_, _ = execute(context.Background(), tools.ToolCall{ //nolint:errcheck
 				ID:   "1",
 				Name: "write",
 				Args: map[string]any{"path": "/tmp/test-mutation-serial.txt", "content": "x"},
@@ -83,10 +83,9 @@ func TestMutationWrapper_DifferentFilesParallel(t *testing.T) {
 	tr := tools.NewDefaultToolRegistry()
 	require.NoError(t, tr.Register(context.Background(), slowTool))
 
-	wrapped := tools.NewMiddlewareToolRegistry(tr, tools.NewMutationWrapper())
-
-	def, err := wrapped.Get(context.Background(), "write")
+	def, err := tr.Get(context.Background(), "write")
 	require.NoError(t, err)
+	execute := tools.NewMutationWrapper()(def.Execute)
 
 	// Launch 3 concurrent writes to different files.
 	var wg sync.WaitGroup
@@ -94,7 +93,7 @@ func TestMutationWrapper_DifferentFilesParallel(t *testing.T) {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
-			_, _ = def.Execute(context.Background(), tools.ToolCall{ //nolint:errcheck
+			_, _ = execute(context.Background(), tools.ToolCall{ //nolint:errcheck
 				ID:   "1",
 				Name: "write",
 				Args: map[string]any{"path": "/tmp/test-mutation-diff-" + string(rune('a'+idx)) + ".txt", "content": "x"},
@@ -123,12 +122,11 @@ func TestMutationWrapper_NonMutationPassthrough(t *testing.T) {
 	tr := tools.NewDefaultToolRegistry()
 	require.NoError(t, tr.Register(context.Background(), readTool))
 
-	wrapped := tools.NewMiddlewareToolRegistry(tr, tools.NewMutationWrapper())
-
-	def, err := wrapped.Get(context.Background(), "read")
+	def, err := tr.Get(context.Background(), "read")
 	require.NoError(t, err)
+	execute := tools.NewMutationWrapper()(def.Execute)
 
-	res, err := def.Execute(context.Background(), tools.ToolCall{ID: "1", Name: "read"})
+	res, err := execute(context.Background(), tools.ToolCall{ID: "1", Name: "read"})
 	require.NoError(t, err)
 	assert.Equal(t, "content", res.Output)
 	assert.True(t, called, "non-mutation tool should execute normally")
@@ -156,17 +154,16 @@ func TestMutationWrapper_EditAlsoSerialized(t *testing.T) {
 	tr := tools.NewDefaultToolRegistry()
 	require.NoError(t, tr.Register(context.Background(), slowTool))
 
-	wrapped := tools.NewMiddlewareToolRegistry(tr, tools.NewMutationWrapper())
-
-	def, err := wrapped.Get(context.Background(), "edit")
+	def, err := tr.Get(context.Background(), "edit")
 	require.NoError(t, err)
+	execute := tools.NewMutationWrapper()(def.Execute)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 3; i++ {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			_, _ = def.Execute(context.Background(), tools.ToolCall{ //nolint:errcheck
+			_, _ = execute(context.Background(), tools.ToolCall{ //nolint:errcheck
 				ID:   "1",
 				Name: "edit",
 				Args: map[string]any{"file_path": "/tmp/test-mutation-edit.txt", "old_string": "a", "new_string": "b"},
@@ -177,6 +174,126 @@ func TestMutationWrapper_EditAlsoSerialized(t *testing.T) {
 
 	assert.Equal(t, int32(1), atomic.LoadInt32(&maxConcurrent),
 		"concurrent edits to the same file must be serialized")
+}
+
+func TestMutationQueueRejectsMalformedPayloadWithoutChangingFile(t *testing.T) {
+	cases := []struct {
+		name string
+		tool string
+		args map[string]any
+	}{
+		{
+			name: "write missing content",
+			tool: "write",
+			args: map[string]any{"path": "existing.txt"},
+		},
+		{
+			name: "write wrong content type",
+			tool: "write",
+			args: map[string]any{"path": "existing.txt", "content": true},
+		},
+		{
+			name: "edit missing new_string",
+			tool: "edit",
+			args: map[string]any{"file_path": "existing.txt", "old_string": "target"},
+		},
+		{
+			name: "edit wrong new_string type",
+			tool: "edit",
+			args: map[string]any{"file_path": "existing.txt", "old_string": "target", "new_string": false},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "existing.txt")
+			original := []byte("before target after")
+			require.NoError(t, os.WriteFile(path, original, 0o600))
+			if tc.tool == "write" {
+				tc.args["path"] = path
+			} else {
+				tc.args["file_path"] = path
+			}
+
+			registry := tools.NewDefaultToolRegistry()
+			if tc.tool == "write" {
+				require.NoError(t, registry.Register(context.Background(), tools.NewWriteTool(tools.WithOverwrite(true))))
+			} else {
+				require.NoError(t, registry.Register(context.Background(), tools.NewEditFileTool()))
+			}
+			queue := tools.NewDefaultFileMutationQueue()
+			defer func() {
+				require.NoError(t, queue.(*tools.DefaultFileMutationQueue).Close())
+			}()
+			def, err := registry.Get(context.Background(), tc.tool)
+			require.NoError(t, err)
+			execute := tools.NewMutationQueueWrapper(queue)(def.Execute)
+
+			_, err = execute(context.Background(), tools.ToolCall{Name: tc.tool, Args: tc.args})
+			require.Error(t, err)
+
+			actual, readErr := os.ReadFile(path)
+			require.NoError(t, readErr)
+			assert.Equal(t, original, actual)
+		})
+	}
+}
+
+func TestMutationQueueAllowsExplicitEmptyStrings(t *testing.T) {
+	cases := []struct {
+		name     string
+		tool     string
+		args     map[string]any
+		expected []byte
+	}{
+		{
+			name:     "write empty content",
+			tool:     "write",
+			args:     map[string]any{"path": "existing.txt", "content": ""},
+			expected: []byte{},
+		},
+		{
+			name:     "edit empty new_string",
+			tool:     "edit",
+			args:     map[string]any{"file_path": "existing.txt", "old_string": "target", "new_string": ""},
+			expected: []byte("before  after"),
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, "existing.txt")
+			require.NoError(t, os.WriteFile(path, []byte("before target after"), 0o600))
+			if tc.tool == "write" {
+				tc.args["path"] = path
+			} else {
+				tc.args["file_path"] = path
+			}
+
+			registry := tools.NewDefaultToolRegistry()
+			if tc.tool == "write" {
+				require.NoError(t, registry.Register(context.Background(), tools.NewWriteTool(tools.WithOverwrite(true))))
+			} else {
+				require.NoError(t, registry.Register(context.Background(), tools.NewEditFileTool()))
+			}
+			queue := tools.NewDefaultFileMutationQueue()
+			defer func() {
+				require.NoError(t, queue.(*tools.DefaultFileMutationQueue).Close())
+			}()
+			def, err := registry.Get(context.Background(), tc.tool)
+			require.NoError(t, err)
+			execute := tools.NewMutationQueueWrapper(queue)(def.Execute)
+
+			_, err = execute(context.Background(), tools.ToolCall{Name: tc.tool, Args: tc.args})
+			require.NoError(t, err)
+
+			actual, readErr := os.ReadFile(path)
+			require.NoError(t, readErr)
+			assert.Equal(t, tc.expected, actual)
+		})
+	}
 }
 
 // mockMutationTool is a test ToolDefinition with a configurable Execute function.

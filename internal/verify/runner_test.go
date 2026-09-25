@@ -79,7 +79,10 @@ func TestCheckGoFiles_CompleteProject(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example\n"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, ".golangci.yml"), []byte("linters:\n"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte("package example\n"), 0o600))
-	require.NoError(t, os.WriteFile(filepath.Join(dir, "main_test.go"), []byte("package example\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main_test.go"), []byte(`package example
+import "testing"
+func TestExample(t *testing.T) {}
+`), 0o600))
 
 	results := checkGoFiles(dir)
 	require.Len(t, results, 4, "expected 4 results from checkGoFiles")
@@ -94,7 +97,9 @@ func TestCheckGoFiles_CompleteProject(t *testing.T) {
 	assert.Equal(t, "PASS", resultMap["GOFILES"].Status, "Go files should be found")
 	assert.Contains(t, resultMap["GOFILES"].Message, "1 source files, 1 test files")
 	assert.Equal(t, "PASS", resultMap["TESTCOV"].Status, "test files should be found")
-	assert.Contains(t, resultMap["TESTCOV"].Message, "1 test files")
+	assert.Equal(t, EvidenceStatic, resultMap["TESTCOV"].Evidence)
+	assert.Contains(t, resultMap["TESTCOV"].Message, "1 behavioral test functions")
+	assert.Contains(t, resultMap["TESTCOV"].Message, "not executed by RunVerify")
 }
 
 func TestCheckGoFiles_MissingGoModAndLintConfig(t *testing.T) {
@@ -124,7 +129,95 @@ func TestCheckGoFiles_NoTestFiles(t *testing.T) {
 	}
 
 	assert.Equal(t, "FAIL", resultMap["TESTCOV"].Status, "no test files should fail TESTCOV")
+	assert.Equal(t, EvidenceStatic, resultMap["TESTCOV"].Evidence)
 	assert.Equal(t, "no test files found", resultMap["TESTCOV"].Message)
+}
+
+func TestVerifyDoesNotPassOnZeroBehaviorTests(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".golangci.yml"), []byte("linters:\n"), 0o600))
+	mainCode := `package example
+import "context"
+type CommandRegistry struct{}
+func Register() {}
+func Route() {}
+func version() string { return "version" }
+func help() string { return "help" }
+func unknown() string { return "unknown command" }
+func cancellation(ctx context.Context) { ctx.Done(); context.WithCancel(ctx) }
+func worker() { go func() {}(); AssertNoGoroutineLeak() }
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte(mainCode), 0o600))
+	// A test file with no TestX(*testing.T) function must not count as behavior evidence.
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main_test.go"), []byte("package example\n"), 0o600))
+
+	report := RunVerify(dir)
+	require.NotNil(t, report)
+
+	for _, id := range []string{"VQ-001", "VQ-002", "VQ-003", "VQ-004", "VG-001", "VG-002"} {
+		result := findResultByID(report, id)
+		require.NotNil(t, result, "rule %s should be in results", id)
+		assert.Equal(t, "HINT", result.Status, "static source markers must not count as behavioral test proof for %s", id)
+	}
+
+	testResult := findResultByID(report, "TESTCOV")
+	require.NotNil(t, testResult)
+	assert.Equal(t, "FAIL", testResult.Status, "zero matched behavioral tests must fail even when a _test.go file exists")
+	assert.Equal(t, EvidenceStatic, testResult.Evidence, "declaration checks are static inventory evidence, not executed test evidence")
+}
+
+func TestRunVerifyTreatsEmbeddedInterfacePromotionAsStaticEvidence(t *testing.T) {
+	dir := t.TempDir()
+	writeGoFile(t, dir, "go.mod", "module runtime-fixture\n\ngo 1.24.2\n")
+	writeGoFile(t, dir, ".golangci.yml", "linters:\n")
+	coreDir := filepath.Join(dir, "internal", "core")
+	require.NoError(t, os.MkdirAll(coreDir, 0o750))
+	writeGoFile(t, coreDir, "runtime.go", `package core
+type RuntimeLoop interface { Run() error }
+type LoopWrapper struct { RuntimeLoop }
+`)
+	writeGoFile(t, coreDir, "runtime_test.go", `package core
+import "testing"
+func TestLoopWrapper(t *testing.T) {}
+`)
+
+	// A promoted method establishes only the Go method-set relationship. This
+	// fixture says nothing about constructing or safely invoking a zero wrapper.
+	report := RunVerify(dir)
+	require.NotNil(t, report.Scan)
+	for _, finding := range report.Scan.Findings {
+		assert.NotEqual(t, "SCAN-012", finding.RuleID, "embedded interface method promotion is structural implementation evidence")
+	}
+	scanResult := findResultByID(report, "SCAN")
+	require.NotNil(t, scanResult)
+	assert.Equal(t, "PASS", scanResult.Status)
+	assert.Equal(t, EvidenceStatic, scanResult.Evidence)
+
+	testResult := findResultByID(report, "TESTCOV")
+	require.NotNil(t, testResult)
+	assert.Equal(t, "PASS", testResult.Status)
+	assert.Equal(t, EvidenceStatic, testResult.Evidence)
+	assert.Contains(t, testResult.Message, "not executed by RunVerify")
+}
+
+func TestCheckGoFilesDoesNotCountAnotherPackageNamedTesting(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte("package example\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "main_test.go"), []byte(`package example
+import testing "fmt"
+func TestFake(t *testing.T) {}
+`), 0o600))
+
+	results := checkGoFiles(dir)
+	resultMap := make(map[string]VerifyResult)
+	for _, result := range results {
+		resultMap[result.ID] = result
+	}
+
+	assert.Equal(t, "FAIL", resultMap["TESTCOV"].Status)
+	assert.Contains(t, resultMap["TESTCOV"].Message, "no behavioral test functions")
 }
 
 func TestCheckGoFiles_EmptyDir(t *testing.T) {
@@ -138,10 +231,9 @@ func TestCheckGoFiles_EmptyDir(t *testing.T) {
 
 	assert.Equal(t, "FAIL", resultMap["GOMOD"].Status)
 	assert.Equal(t, "FAIL", resultMap["LINT"].Status)
-	assert.Equal(t, "PASS", resultMap["GOFILES"].Status)
-	assert.Contains(t, resultMap["GOFILES"].Message, "0 source files, 0 test files")
-	// goFileCount == 0 so the "no test files" condition (testFileCount == 0 && goFileCount > 0) is false.
-	assert.Equal(t, "PASS", resultMap["TESTCOV"].Status)
+	assert.Equal(t, "FAIL", resultMap["GOFILES"].Status)
+	assert.Equal(t, "no source files found", resultMap["GOFILES"].Message)
+	assert.Equal(t, "FAIL", resultMap["TESTCOV"].Status)
 }
 
 func TestCheckGoFiles_Subdirectories(t *testing.T) {
@@ -152,7 +244,10 @@ func TestCheckGoFiles_Subdirectories(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "go.mod"), []byte("module example\n"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "main.go"), []byte("package example\n"), 0o600))
 	require.NoError(t, os.WriteFile(filepath.Join(subDir, "handler.go"), []byte("package pkg\n"), 0o600))
-	require.NoError(t, os.WriteFile(filepath.Join(subDir, "handler_test.go"), []byte("package pkg\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(subDir, "handler_test.go"), []byte(`package pkg
+import "testing"
+func TestHandler(t *testing.T) {}
+`), 0o600))
 
 	results := checkGoFiles(dir)
 	resultMap := make(map[string]VerifyResult)
@@ -162,6 +257,7 @@ func TestCheckGoFiles_Subdirectories(t *testing.T) {
 
 	assert.Equal(t, "PASS", resultMap["GOFILES"].Status)
 	assert.Contains(t, resultMap["GOFILES"].Message, "2 source files, 1 test files")
+	assert.Contains(t, resultMap["TESTCOV"].Message, "1 behavioral test functions")
 }
 
 func TestRunVerify(t *testing.T) {
@@ -189,10 +285,10 @@ func Hello() { fmt.Println("hello") }
 	_, err := time.Parse(time.RFC3339, report.Timestamp)
 	assert.NoError(t, err, "timestamp should be valid RFC3339")
 
-	// Verify summary adds up.
+	// Verify summary adds up, keeping heuristic hints separate from pass/fail.
 	assert.Equal(t, report.Summary.Total,
-		report.Summary.Passed+report.Summary.Failed+report.Summary.Skipped,
-		"summary total should equal passed+failed+skipped")
+		report.Summary.Passed+report.Summary.Failed+report.Summary.Skipped+report.Summary.Hints,
+		"summary total should equal passed+failed+skipped+hints")
 
 	// Verify SCAN result is present.
 	scanResult := findResultByID(report, "SCAN")
@@ -203,15 +299,15 @@ func Hello() { fmt.Println("hello") }
 	require.NotNil(t, goModResult, "GOMOD result should be present")
 	assert.Equal(t, "PASS", goModResult.Status, "go.mod should be found")
 
-	// Verify all V* rules: VQ-001..004 and VG-001..002 are executed against
-	// the minimal temp source (so they must be PASS or FAIL, not SKIP), while
-	// every other rule stays SKIP pending package-level tests.
+	// Verify all V* rules: VQ-001..004 and VG-001..002 produce static hints
+	// against the minimal source; every other rule stays SKIP pending behavioral checks.
 	vqvgIDs := map[string]bool{"VQ-001": true, "VQ-002": true, "VQ-003": true, "VQ-004": true, "VG-001": true, "VG-002": true}
 	for _, rule := range AllRules() {
 		r := findResultByID(report, rule.ID)
 		require.NotNil(t, r, "rule %s should be in results", rule.ID)
 		if vqvgIDs[rule.ID] {
-			assert.NotEqual(t, "SKIP", r.Status, "rule %s should be PASS or FAIL", rule.ID)
+			assert.Equal(t, "HINT", r.Status, "rule %s must not claim behavioral verification", rule.ID)
+			assert.Equal(t, EvidenceStaticHeuristic, r.Evidence)
 		} else {
 			assert.Equal(t, "SKIP", r.Status, "rule %s should be SKIP", rule.ID)
 		}
@@ -219,10 +315,7 @@ func Hello() { fmt.Println("hello") }
 }
 
 // TestRunVerify_VQVG_PassesOnRealProject runs RunVerify against the go-cli
-// reference project and asserts that all six VQ-*/VG-* rules report PASS. The
-// go-cli repo provides command registration/routing, an unknown-command error,
-// version/help handling, context cancellation, and goroutine leak detection, so
-// this guards the most important acceptVQVG-backed assertions end-to-end.
+// project and asserts that all six VQ-*/VG-* rules stay labeled as static hints.
 func TestRunVerify_VQVG_PassesOnRealProject(t *testing.T) {
 	report := RunVerify(repoRoot())
 
@@ -230,7 +323,7 @@ func TestRunVerify_VQVG_PassesOnRealProject(t *testing.T) {
 	for _, id := range vqvgIDs {
 		r := findResultByID(report, id)
 		require.NotNil(t, r, "rule %s should be in results", id)
-		assert.Equal(t, "PASS", r.Status, "rule %s should PASS on the go-cli project: %s", id, r.Message)
+		assert.Equal(t, "HINT", r.Status, "source markers must remain static hints for %s: %s", id, r.Message)
 	}
 }
 
@@ -362,6 +455,23 @@ func TestFormatReportText(t *testing.T) {
 	assert.Contains(t, text, "broken")
 	assert.Contains(t, text, "detail1")
 	assert.Contains(t, text, "detail2")
+}
+
+func TestFormatReportText_ShowsEvidenceKind(t *testing.T) {
+	report := &VerifyReport{
+		Summary: VerifySummary{Total: 1, Hints: 1},
+		Results: []VerifyResult{{
+			ID:       "VQ-001",
+			Name:     "route command",
+			Status:   "HINT",
+			Evidence: EvidenceStaticHeuristic,
+		}},
+	}
+
+	text := FormatReportText(report)
+	assert.Contains(t, text, "1 total, 0 passed, 0 failed, 0 skipped, 1 hints")
+	assert.Contains(t, text, "[HINT] VQ-001")
+	assert.Contains(t, text, "evidence=static_heuristic")
 }
 
 func TestFormatReportText_WithScanFindings(t *testing.T) {

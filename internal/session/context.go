@@ -34,11 +34,10 @@ type DefaultContextManager struct {
 	// Cache for incremental token estimation. When the same leaf is queried
 	// again and the branch has only grown, only the delta (new entries) is
 	// estimated; the cached total is reused for the already-seen entries.
-	cacheMu         sync.Mutex
-	cachedLeafID    string
-	cachedStartIdx  int
-	cachedTokens    int
-	cachedBranchLen int // total branch length when the cache was built
+	cacheMu        sync.Mutex
+	cachedLeafID   string
+	cachedTokens   int
+	cachedEntryIDs []string
 }
 
 var _ ContextManager = (*DefaultContextManager)(nil)
@@ -74,33 +73,41 @@ func (m *DefaultContextManager) BuildContext(ctx context.Context, leafID string)
 	// Traversed are the raw entries visited in walk order (leaf to root).
 	traversed := make([]SessionEntry, 0, len(branch))
 	for i := len(branch) - 1; i >= 0; i-- {
-		traversed = append(traversed, *branch[i])
+		traversed = append(traversed, *branch[i].clone())
 	}
 
-	// Find the last compaction point; entries before it are replaced by the
-	// compaction summary. findLastCompactionPoint operates on []SessionEntry,
-	// so dereference the pointer slice once.
+	// Project the raw branch. Version one compactions use the exact source
+	// boundary rather than the physical marker position.
 	branchVals := make([]SessionEntry, len(branch))
 	for i, e := range branch {
-		branchVals[i] = *e
+		branchVals[i] = *e.clone()
 	}
-	startIdx := findLastCompactionPoint(branchVals)
-	slog.Debug("context_rebuild.compaction_point", "start_idx", startIdx, "compaction", startIdx > 0)
+	messages, err := projectSessionEntries(branchVals)
+	if err != nil {
+		span.SetStatus(tracing.SpanStatusError, err.Error())
+		logger.Error("context_rebuild", "op", "context.rebuild", "error_type", "projection_failed", "leaf_id", leafID, "err", err)
+		return nil, err
+	}
+	slog.Debug("context_rebuild.compaction_point", "message_count", len(messages), "compaction", len(messages) > 0 && messages[0].Type == EntryTypeCompaction)
 
-	// Messages are ordered root to leaf, with Compaction entries folded into a
-	// single summary message.
-	messages := make([]SessionEntry, 0, len(branch)-startIdx)
-
-	// Check the incremental token-estimation cache. When the same leaf is
-	// queried again with the same compaction point and the branch has only
-	// grown, we reuse the cached token total for already-seen entries and
-	// only estimate the delta (new entries beyond cachedBranchLen).
+	messageIDs := make([]string, len(messages))
+	for i, entry := range messages {
+		messageIDs[i] = entry.ID
+	}
+	// A changed source boundary changes the projected ID prefix and invalidates
+	// the cached token estimate.
 	m.cacheMu.Lock()
-	cacheValid := m.cachedLeafID == leafID &&
-		m.cachedStartIdx == startIdx &&
-		len(branch) >= m.cachedBranchLen
+	cacheValid := m.cachedLeafID == leafID && len(messageIDs) >= len(m.cachedEntryIDs)
+	if cacheValid {
+		for i := range m.cachedEntryIDs {
+			if messageIDs[i] != m.cachedEntryIDs[i] {
+				cacheValid = false
+				break
+			}
+		}
+	}
 	cachedTokens := m.cachedTokens
-	cachedBranchLen := m.cachedBranchLen
+	cachedMessageCount := len(m.cachedEntryIDs)
 	m.cacheMu.Unlock()
 
 	var estimatedTokens int
@@ -108,47 +115,30 @@ func (m *DefaultContextManager) BuildContext(ctx context.Context, leafID string)
 		estimatedTokens = cachedTokens
 	}
 	var last time.Time
-	for i := startIdx; i < len(branch); i++ {
-		e := branch[i]
-		if e.Timestamp.After(last) {
-			last = e.Timestamp
+	for i, entry := range messages {
+		if entry.Timestamp.After(last) {
+			last = entry.Timestamp
 		}
-		// Skip token estimation for entries already accounted for in the
-		// cached total; only estimate the delta (new entries).
-		estimateEntry := !cacheValid || i >= cachedBranchLen
-		if e.Type == EntryTypeCompaction {
-			messages = append(messages, SessionEntry{
-				ID:        e.ID,
-				ParentID:  e.ParentID,
-				Type:      EntryTypeCompaction,
-				Content:   e.Summary,
-				Timestamp: e.Timestamp,
-			})
-			if estimateEntry {
-				estimatedTokens += estimateTokens(e.Summary)
-			}
+		if cacheValid && i < cachedMessageCount {
 			continue
 		}
-		if !e.SurfaceVisible() {
-			continue
-		}
-		messages = append(messages, *e)
-		if estimateEntry {
-			estimatedTokens += estimateTokensForEntry(*e)
-		}
+		estimatedTokens += estimateTokensForEntry(entry)
 	}
 
 	// Update the cache for the next call.
 	m.cacheMu.Lock()
 	m.cachedLeafID = leafID
-	m.cachedStartIdx = startIdx
 	m.cachedTokens = estimatedTokens
-	m.cachedBranchLen = len(branch)
+	m.cachedEntryIDs = append(m.cachedEntryIDs[:0], messageIDs...)
 	m.cacheMu.Unlock()
+	rootID := ""
+	if len(messages) > 0 {
+		rootID = messages[0].ID
+	}
 
 	sc := &SessionContext{
 		LeafID:          leafID,
-		RootID:          branch[startIdx].ID,
+		RootID:          rootID,
 		Messages:        messages,
 		Traversed:       traversed,
 		EntryCount:      len(messages),
@@ -189,32 +179,16 @@ func estimateTokensForEntry(e SessionEntry) int {
 	return tokens
 }
 
-// EntriesToAgentMessages converts a slice of SessionEntry values into
-// core.AgentMessage values suitable for restoring agent history. Tool and
-// compaction entries are skipped because they are not part of the replayable
-// conversation history.
+// EntriesToAgentMessages converts projected SessionEntry values into agent
+// history messages. Version one terminal tool receipts are preserved;
+// journal-only intent/execution rows and internal checkpoints are excluded.
 func EntriesToAgentMessages(entries []SessionEntry) []core.AgentMessage {
 	msgs := make([]core.AgentMessage, 0, len(entries))
 	for _, e := range entries {
-		var role string
-		switch e.Type {
-		case EntryTypeUser:
-			role = "user"
-		case EntryTypeAssistant:
-			role = "assistant"
-		case EntryTypeSystem:
-			role = "system"
-		default:
-			continue // skip tool/compaction entries
+		message, ok := sessionEntryToAgentMessage(e)
+		if ok {
+			msgs = append(msgs, message)
 		}
-		msgs = append(msgs, core.AgentMessage{
-			Role:          role,
-			Content:       e.Content,
-			ContentBlocks: e.ContentBlocks,
-			ToolCalls:     e.ToolCalls,
-			ToolCallID:    e.ToolCallID,
-			ToolName:      e.ToolName,
-		})
 	}
-	return msgs
+	return core.CloneAgentMessages(msgs)
 }

@@ -15,6 +15,7 @@ type TaskCreateTool struct {
 }
 
 var _ ToolDefinition = (*TaskCreateTool)(nil)
+var _ Parameterized = (*TaskCreateTool)(nil)
 
 // NewTaskCreateTool returns a TaskCreateTool backed by the given TaskStore.
 func NewTaskCreateTool(store *TaskStore) *TaskCreateTool {
@@ -27,6 +28,19 @@ func (t *TaskCreateTool) Name() string { return "task_create" }
 // Description returns a brief description of the tool.
 func (t *TaskCreateTool) Description() string {
 	return "task_create: creates a new task. Args: title (string), description (string)."
+}
+
+// Parameters returns the JSON Schema for task creation.
+func (*TaskCreateTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"title":       map[string]any{"type": "string"},
+			"description": map[string]any{"type": "string"},
+		},
+		"required":             []string{"title"},
+		"additionalProperties": false,
+	}
 }
 
 // Execute creates a task using args["title"] and args["description"].
@@ -65,6 +79,7 @@ type TaskGetTool struct {
 }
 
 var _ ToolDefinition = (*TaskGetTool)(nil)
+var _ Parameterized = (*TaskGetTool)(nil)
 
 // NewTaskGetTool returns a TaskGetTool backed by the given TaskStore.
 func NewTaskGetTool(store *TaskStore) *TaskGetTool {
@@ -77,6 +92,18 @@ func (t *TaskGetTool) Name() string { return "task_get" }
 // Description returns a brief description of the tool.
 func (t *TaskGetTool) Description() string {
 	return "task_get: retrieves a task by ID. Args: id (string)."
+}
+
+// Parameters returns the JSON Schema for retrieving a task.
+func (*TaskGetTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"id": map[string]any{"type": "string"},
+		},
+		"required":             []string{"id"},
+		"additionalProperties": false,
+	}
 }
 
 // Execute fetches the task identified by args["id"].
@@ -123,6 +150,7 @@ type TaskListTool struct {
 }
 
 var _ ToolDefinition = (*TaskListTool)(nil)
+var _ Parameterized = (*TaskListTool)(nil)
 
 // NewTaskListTool returns a TaskListTool backed by the given TaskStore.
 func NewTaskListTool(store *TaskStore) *TaskListTool {
@@ -135,6 +163,16 @@ func (t *TaskListTool) Name() string { return "task_list" }
 // Description returns a brief description of the tool.
 func (t *TaskListTool) Description() string {
 	return "task_list: lists all tasks with their ID, title, and status."
+}
+
+// Parameters returns the closed empty-object schema for listing tasks.
+func (*TaskListTool) Parameters() any {
+	return map[string]any{
+		"type":                 "object",
+		"properties":           map[string]any{},
+		"required":             []string{},
+		"additionalProperties": false,
+	}
 }
 
 // Execute returns a formatted list of all tasks.

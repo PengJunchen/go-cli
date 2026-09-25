@@ -2,8 +2,10 @@ package production
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -98,6 +100,83 @@ func TestProductionModelWrapperRetryExhausted(t *testing.T) {
 
 	_, err := wrapped.Generate(context.Background(), nil)
 	assert.Error(t, err)
+}
+
+func TestProductionModelWrapperMaxAttemptsBoundsTotalDispatches(t *testing.T) {
+	for _, maxAttempts := range []int{1, 3} {
+		t.Run(fmt.Sprintf("max_attempts_%d", maxAttempts), func(t *testing.T) {
+			model := &flakyModel{maxFails: 100}
+			policy := NewDefaultRetryPolicy(RetryConfig{
+				MaxAttempts: maxAttempts,
+				BaseDelay:   time.Nanosecond,
+			})
+			wrapped := NewProductionModelWrapper(WithWrapperRetryPolicy(policy)).WrapModel(model)
+
+			_, err := wrapped.Generate(context.Background(), nil)
+			require.Error(t, err)
+			model.mu.Lock()
+			assert.Equal(t, maxAttempts, model.failCount, "MaxAttempts is the total provider dispatch count")
+			model.mu.Unlock()
+		})
+	}
+}
+
+type cancelDuringBackoffPolicy struct {
+	cancel context.CancelFunc
+}
+
+func (p *cancelDuringBackoffPolicy) ShouldRetry(context.Context, error, int) bool { return true }
+
+func (p *cancelDuringBackoffPolicy) NextBackoff(context.Context, int) time.Duration {
+	p.cancel()
+	return -time.Nanosecond
+}
+
+func (p *cancelDuringBackoffPolicy) Name() string { return "cancel-during-backoff" }
+
+type retryBoundaryModel struct {
+	generateCalls atomic.Int32
+	streamCalls   atomic.Int32
+}
+
+func (m *retryBoundaryModel) Generate(context.Context, []llm.Message, ...llm.Option) (*llm.Message, error) {
+	m.generateCalls.Add(1)
+	return nil, errors.New("provider generate failure")
+}
+
+func (m *retryBoundaryModel) Stream(context.Context, []llm.Message, ...llm.Option) (<-chan llm.MessageChunk, error) {
+	m.streamCalls.Add(1)
+	return nil, errors.New("provider stream initialization failure")
+}
+
+var _ llm.BaseChatModel = (*retryBoundaryModel)(nil)
+
+func TestProductionModelWrapperDoesNotRedispatchAfterCanceledGenerateBackoff(t *testing.T) {
+	for i := 0; i < 32; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		model := &retryBoundaryModel{}
+		policy := &cancelDuringBackoffPolicy{cancel: cancel}
+		wrapped := NewProductionModelWrapper(WithWrapperRetryPolicy(policy)).WrapModel(model)
+
+		_, err := wrapped.Generate(ctx, nil)
+		require.Error(t, err)
+		assert.Equal(t, int32(1), model.generateCalls.Load(), "cancellation must fence the next provider dispatch")
+		cancel()
+	}
+}
+
+func TestProductionModelWrapperDoesNotRedispatchAfterCanceledStreamInitBackoff(t *testing.T) {
+	for i := 0; i < 32; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		model := &retryBoundaryModel{}
+		policy := &cancelDuringBackoffPolicy{cancel: cancel}
+		wrapped := NewProductionModelWrapper(WithWrapperRetryPolicy(policy)).WrapModel(model)
+
+		_, err := wrapped.Stream(ctx, nil)
+		require.Error(t, err)
+		assert.Equal(t, int32(1), model.streamCalls.Load(), "cancellation must fence the next stream dispatch")
+		cancel()
+	}
 }
 
 func TestProductionModelWrapperCostTracking(t *testing.T) {

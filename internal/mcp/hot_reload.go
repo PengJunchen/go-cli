@@ -23,13 +23,89 @@ type HotReloader interface {
 	// reconnect-on-change loop. It returns an error when the reloader is
 	// already watching, already stopped, or given an empty path.
 	Watch(ctx context.Context, configPath string) error
-	// Stop stops the watcher, cancels the poller goroutine and blocks until it
-	// has exited. Stop is idempotent.
+	// Stop closes admission, cancels the watcher, and blocks until poller,
+	// reconnect, and registration work have actually returned. Stop is
+	// idempotent and can wait indefinitely for a callback that ignores context.
 	Stop() error
 	// Reload manually triggers one reconnect cycle without a file change.
 	Reload(ctx context.Context) error
 	// Name returns the logical name of the reloader.
 	Name() string
+}
+
+// HotReloadLifecycle exposes the stop request and actual completion signal for
+// lifecycle owners that must retain dependencies until all callbacks return.
+// It is an optional capability so existing HotReloader implementations remain
+// source-compatible.
+type HotReloadLifecycle interface {
+	// RequestStop closes admission and cancels the reloader's source without
+	// waiting for in-flight client or registration callbacks.
+	RequestStop()
+	// Done is stable for the lifetime of the reloader and closes after all
+	// poller, reconnect, and registration work has actually returned.
+	Done() <-chan struct{}
+	// Wait observes actual completion, bounded only by the caller's context.
+	// It does not request a stop.
+	Wait(ctx context.Context) error
+}
+
+// ErrHotReloadPending means the caller stopped waiting before the hot reload
+// owner and its callbacks had actually returned.
+var ErrHotReloadPending = errors.New("mcp: hot reload cleanup pending")
+
+// ErrHotReloadCallbackPanic reports that a reconnect callback panicked. The
+// panic value is deliberately omitted because it may contain sensitive data.
+var ErrHotReloadCallbackPanic = errors.New("mcp: hot reload callback panicked")
+
+// ErrHotReloadWorkerPanic reports an unexpected panic in the reloader owner.
+var ErrHotReloadWorkerPanic = errors.New("mcp: hot reload worker panicked")
+
+// ErrHotReloadInvalidPollInterval rejects a poll interval that cannot create a
+// time.Ticker.
+var ErrHotReloadInvalidPollInterval = errors.New("mcp: hot reload poll interval must be positive")
+
+// HotReloadPendingError reports a waiter timeout while the reloader remains
+// owned and active.
+type HotReloadPendingError struct {
+	Cause error
+}
+
+func (e *HotReloadPendingError) Error() string {
+	if e == nil || e.Cause == nil {
+		return ErrHotReloadPending.Error()
+	}
+	return ErrHotReloadPending.Error() + ": " + e.Cause.Error()
+}
+
+func (e *HotReloadPendingError) Unwrap() error {
+	if e == nil {
+		return ErrHotReloadPending
+	}
+	return e.Cause
+}
+
+func (e *HotReloadPendingError) Is(target error) bool {
+	return target == ErrHotReloadPending
+}
+
+// HotReloadCallbackPanicError is a sanitized terminal error for a panic from
+// the tool registration callback.
+type HotReloadCallbackPanicError struct{}
+
+func (*HotReloadCallbackPanicError) Error() string { return ErrHotReloadCallbackPanic.Error() }
+
+func (*HotReloadCallbackPanicError) Is(target error) bool {
+	return target == ErrHotReloadCallbackPanic
+}
+
+// HotReloadWorkerPanicError is a sanitized terminal error for an unexpected
+// panic while reconnect work is running.
+type HotReloadWorkerPanicError struct{}
+
+func (*HotReloadWorkerPanicError) Error() string { return ErrHotReloadWorkerPanic.Error() }
+
+func (*HotReloadWorkerPanicError) Is(target error) bool {
+	return target == ErrHotReloadWorkerPanic
 }
 
 // RegisterToolsFunc re-registers the currently advertised MCP tools after a
@@ -133,9 +209,13 @@ type DefaultHotReloader struct {
 	mu             sync.Mutex
 	pollCtx        context.Context
 	pollCancel     context.CancelFunc
-	pollDone       chan struct{}
 	stopCh         chan struct{}
+	done           chan struct{}
 	stopped        bool
+	pollStarted    bool
+	pollExited     bool
+	doneClosed     bool
+	stopErr        error
 	connecting     bool
 	pending        bool
 	reconnectCount int
@@ -145,6 +225,7 @@ type DefaultHotReloader struct {
 }
 
 var _ HotReloader = (*DefaultHotReloader)(nil)
+var _ HotReloadLifecycle = (*DefaultHotReloader)(nil)
 
 // NewDefaultHotReloader returns a DefaultHotReloader that reconnects client and
 // calls register with the freshly advertised tools after every reload. opts may
@@ -170,16 +251,23 @@ func NewDefaultHotReloader(client MCPClient, register RegisterToolsFunc, opts ..
 		maxBackoff:    o.maxBackoff,
 		maxRetries:    o.maxRetries,
 		transport:     o.transport,
+		stopCh:        make(chan struct{}),
+		done:          make(chan struct{}),
 	}
 }
 
 // Watch starts the stdlib poller goroutine and records the baseline state of
-// the config file before returning. The poller exits cleanly when Stop is
-// called or ctx is canceled.
+// the config file before returning. Invalid polling intervals are rejected
+// before reading the file or publishing the poll owner. The poller exits
+// cleanly when Stop is called or ctx is canceled.
 func (h *DefaultHotReloader) Watch(ctx context.Context, configPath string) error {
+	if h.pollInterval <= 0 {
+		return ErrHotReloadInvalidPollInterval
+	}
 	if configPath == "" {
 		return errors.New("mcp: hot reload: empty config path")
 	}
+	snap, present := readSnapshot(configPath)
 
 	h.mu.Lock()
 
@@ -193,46 +281,100 @@ func (h *DefaultHotReloader) Watch(ctx context.Context, configPath string) error
 	}
 
 	h.path = configPath
+	h.baseline = true
+	h.snapshot = snap
+	h.lastMissing = !present
 	pollCtx, cancel := context.WithCancel(ctx)
 	h.pollCtx = pollCtx
 	h.pollCancel = cancel
-	h.pollDone = make(chan struct{})
-	h.stopCh = make(chan struct{})
-	h.mu.Unlock()
-
-	// Establish the baseline snapshot synchronously so that Watch only returns
-	// after the config state is captured. Otherwise a caller that writes to the
-	// config immediately after Watch returns could race the poller goroutine's
-	// very first detectChange() (which sets the baseline), and the change would
-	// be silently absorbed into the baseline and never detected.
-	h.detectChange()
-
+	h.pollStarted = true
+	// Publish and start the poll owner under the same lock as RequestStop. A
+	// stop request can therefore either win before Watch publishes, or observe
+	// the fully published poll owner and wait for it; it cannot miss a late
+	// goroutine launch.
 	go h.poll(pollCtx)
+	h.mu.Unlock()
 	return nil
 }
 
-// Stop cancels the poller goroutine and waits for it to exit. It also signals
-// any in-flight reconnect retry loop to abort. Stop is idempotent.
+// Stop requests stop and joins the actual poller/reconnect owner. It is
+// idempotent and may wait without a bound when a client or registration
+// callback ignores cancellation; use RequestStop followed by Wait(ctx) when a
+// bounded caller wait is required. A reloader-owned callback that initiates
+// shutdown must use RequestStop rather than waiting on its own completion.
 func (h *DefaultHotReloader) Stop() error {
+	h.RequestStop()
+	<-h.done
+	return h.completionError()
+}
+
+// RequestStop closes reload admission and cancels the poll/reconnect context.
+// It never waits for an in-flight client or registration callback.
+func (h *DefaultHotReloader) RequestStop() {
 	h.mu.Lock()
+	h.requestStopLocked()
+	h.maybeCloseDoneLocked()
+	h.mu.Unlock()
+}
+
+// Done returns the stable actual-completion channel.
+func (h *DefaultHotReloader) Done() <-chan struct{} { return h.done }
+
+// Wait bounds only this caller's wait; a timeout does not stop the owner.
+func (h *DefaultHotReloader) Wait(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("mcp: hot reload: nil wait context")
+	}
+	select {
+	case <-h.done:
+		return h.completionError()
+	default:
+	}
+	select {
+	case <-h.done:
+		return h.completionError()
+	case <-ctx.Done():
+		select {
+		case <-h.done:
+			return h.completionError()
+		default:
+			return &HotReloadPendingError{Cause: ctx.Err()}
+		}
+	}
+}
+
+func (h *DefaultHotReloader) requestStopLocked() {
 	if h.stopped {
-		h.mu.Unlock()
-		return nil
+		return
 	}
 	h.stopped = true
+	h.pending = false
 	if h.pollCancel != nil {
 		h.pollCancel()
 	}
-	if h.stopCh != nil {
-		close(h.stopCh)
-	}
-	done := h.pollDone
-	h.mu.Unlock()
+	close(h.stopCh)
+}
 
-	if done != nil {
-		<-done
+func (h *DefaultHotReloader) recordStopErrorLocked(err error) {
+	// The first actual terminal owner error is stable. Caller Wait deadlines
+	// are returned directly and are never recorded as operation errors.
+	if h.stopErr == nil && err != nil {
+		h.stopErr = err
 	}
-	return nil
+}
+
+func (h *DefaultHotReloader) maybeCloseDoneLocked() {
+	if h.doneClosed || !h.stopped || h.connecting || (h.pollStarted && !h.pollExited) {
+		return
+	}
+	h.doneClosed = true
+	close(h.done)
+}
+
+func (h *DefaultHotReloader) completionError() error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.stopErr
 }
 
 // Reload manually triggers one reconnect cycle without waiting for a config
@@ -259,10 +401,14 @@ func (h *DefaultHotReloader) Name() string { return "mcp-hot-reloader" }
 // poll is the stdlib watcher loop. It establishes a baseline on the first tick
 // and then calls scheduleReconnect whenever a config change is detected.
 func (h *DefaultHotReloader) poll(ctx context.Context) {
-	defer close(h.pollDone)
-
 	ticker := time.NewTicker(h.pollInterval)
-	defer ticker.Stop()
+	defer func() {
+		ticker.Stop()
+		h.mu.Lock()
+		h.pollExited = true
+		h.maybeCloseDoneLocked()
+		h.mu.Unlock()
+	}()
 
 	h.detectAndMaybeReconnect(ctx)
 	for {
@@ -336,31 +482,65 @@ func (h *DefaultHotReloader) scheduleReconnect(_ context.Context) {
 // recover it.
 func (h *DefaultHotReloader) reconnectLoop(ctx context.Context) {
 	defer func() {
-		h.mu.Lock()
-		h.connecting = false
-		hadPending := h.pending
-		h.pending = false
-		stopped := h.stopped
-		h.mu.Unlock()
-		if hadPending && !stopped {
-			h.scheduleReconnect(ctx)
+		if recover() != nil {
+			h.mu.Lock()
+			h.recordStopErrorLocked(&HotReloadWorkerPanicError{})
+			h.requestStopLocked()
+			h.connecting = false
+			h.maybeCloseDoneLocked()
+			h.mu.Unlock()
 		}
 	}()
 
-	for attempt := 0; ; attempt++ {
-		if h.runCycle(ctx) {
-			return
+	for {
+		for attempt := 0; ; attempt++ {
+			if ctx.Err() != nil {
+				break
+			}
+			succeeded, terminalErr := h.runCycle(ctx)
+			if terminalErr != nil {
+				h.mu.Lock()
+				h.recordStopErrorLocked(terminalErr)
+				h.requestStopLocked()
+				h.connecting = false
+				h.maybeCloseDoneLocked()
+				h.mu.Unlock()
+				return
+			}
+			if succeeded || attempt >= h.maxRetries {
+				break
+			}
+			delay := h.backoffDelay(attempt)
+			timer := time.NewTimer(delay)
+			select {
+			case <-h.stopCh:
+				timer.Stop()
+				attempt = h.maxRetries
+			case <-timer.C:
+			}
+			if h.isStopped() {
+				break
+			}
 		}
-		if attempt >= h.maxRetries {
-			return
+
+		h.mu.Lock()
+		if h.pending && !h.stopped {
+			h.pending = false
+			h.mu.Unlock()
+			continue
 		}
-		delay := h.backoffDelay(attempt)
-		select {
-		case <-h.stopCh:
-			return
-		case <-time.After(delay):
-		}
+		h.pending = false
+		h.connecting = false
+		h.maybeCloseDoneLocked()
+		h.mu.Unlock()
+		return
 	}
+}
+
+func (h *DefaultHotReloader) isStopped() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.stopped
 }
 
 // backoffDelay computes the exponential backoff delay for the given (zero-based)
@@ -382,7 +562,7 @@ func (h *DefaultHotReloader) backoffDelay(attempt int) time.Duration {
 // runCycle performs one Disconnect -> Connect -> ListTools -> Re-register pass
 // and emits an mcp.hot_reload span. It returns true when the cycle completed
 // and the tools were re-registered.
-func (h *DefaultHotReloader) runCycle(ctx context.Context) bool {
+func (h *DefaultHotReloader) runCycle(ctx context.Context) (bool, error) {
 	span, spanCtx := tracing.SpanFromContext(ctx, "mcp.hot_reload", tracing.SpanKindInternal)
 	logger := tracing.NewTraceLogger(span, slog.Default())
 	defer span.End()
@@ -399,28 +579,72 @@ func (h *DefaultHotReloader) runCycle(ctx context.Context) bool {
 		tracing.Attribute{Key: "transport", Value: transport.String()},
 		tracing.Attribute{Key: "reconnect_count", Value: count},
 	)
+	if !h.mayStartWork(ctx) {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		return false, nil
+	}
 
 	if err := h.client.Disconnect(spanCtx); err != nil {
 		logger.Warn("mcp.hot_reload.disconnect", "server", h.client.Name(), "err", err)
 	}
+	if !h.mayStartWork(ctx) {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		return false, nil
+	}
 	if err := h.client.Connect(spanCtx); err != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("mcp.hot_reload.connect_failed", "server", h.client.Name(), "err", err)
-		return false
+		return false, nil
+	}
+	if !h.mayStartWork(ctx) {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		return false, nil
 	}
 	tools, err := h.client.ListTools(spanCtx)
 	if err != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("mcp.hot_reload.list_tools_failed", "server", h.client.Name(), "err", err)
-		return false
+		return false, nil
+	}
+	if !h.mayStartWork(ctx) {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		return false, nil
 	}
 	if h.register != nil {
-		h.register(tools)
+		if !h.mayStartWork(ctx) {
+			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+			return false, nil
+		}
+		if err := h.callRegister(tools); err != nil {
+			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+			logger.Error("mcp.hot_reload.register_failed", "server", h.client.Name(), "err", err)
+			return false, err
+		}
+	}
+	if !h.mayStartWork(ctx) {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		return false, nil
 	}
 
 	span.SetAttributes(tracing.Attribute{Key: "success", Value: true})
 	logger.Info("mcp.hot_reload", "server", h.client.Name(), "tools", len(tools))
-	return true
+	return true, nil
+}
+
+func (h *DefaultHotReloader) mayStartWork(ctx context.Context) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return !h.stopped && ctx.Err() == nil
+}
+
+func (h *DefaultHotReloader) callRegister(tools []MCPTool) (panicErr error) {
+	defer func() {
+		if recover() != nil {
+			panicErr = &HotReloadCallbackPanicError{}
+		}
+	}()
+	h.register(tools)
+	return nil
 }
 
 // readSnapshot returns the current identity of the config file along with

@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -50,38 +51,63 @@ func (c *promptCmd) Name() string { return "prompt" }
 // Synopsis implements Command.
 func (c *promptCmd) Synopsis() string { return "Run an agent with a natural-language prompt" }
 
+type parsedPromptArgs struct {
+	modelFlag    string
+	providerFlag string
+	verboseFlag  bool
+	outputMode   OutputMode
+	approveMode  ApproveMode
+	forkFlag     string
+	noSandbox    bool
+	remaining    []string
+}
+
+func parsePromptArgs(args []string, out io.Writer) (parsedPromptArgs, error) {
+	fs := flag.NewFlagSet("prompt", flag.ContinueOnError)
+	fs.SetOutput(out)
+
+	var parsed parsedPromptArgs
+	fs.StringVar(&parsed.modelFlag, "model", "", "model name to use")
+	fs.StringVar(&parsed.providerFlag, "provider", "", "provider name to use")
+	fs.BoolVar(&parsed.verboseFlag, "verbose", false, "enable verbose output")
+	fs.Var(&parsed.outputMode, "output", "output format: json|stream|text (default text)")
+	fs.Var(&parsed.approveMode, "approve", "approval mode: auto|deny|ask (default ask)")
+	fs.StringVar(&parsed.forkFlag, "fork", "", "fork from an existing session id")
+	fs.BoolVar(&parsed.noSandbox, "no-sandbox", false, "disable bash sandbox enforcement")
+	if err := fs.Parse(args); err != nil {
+		return parsed, newUsageError("prompt: %v", err)
+	}
+	parsed.remaining = fs.Args()
+	if len(parsed.remaining) == 0 {
+		return parsed, newUsageError("prompt: missing message argument")
+	}
+	return parsed, nil
+}
+
+// ParsePromptOutputMode parses prompt flags using the same flag definitions
+// and positional stopping rules as the prompt command. remaining contains the
+// message and any later positional arguments.
+func ParsePromptOutputMode(args []string) (OutputMode, []string, error) {
+	parsed, err := parsePromptArgs(args, io.Discard)
+	return parsed.outputMode, parsed.remaining, err
+}
+
 // Run implements Command. It parses the -model, -provider and -verbose flags,
 // resolves the chat model from the loaded *config.Config, wires it through the
 // core agent harness, and streams the result to the output writer.
-func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) error {
-	fs := flag.NewFlagSet("prompt", flag.ContinueOnError)
-	fs.SetOutput(c.out)
-
-	var (
-		modelFlag    string
-		providerFlag string
-		verboseFlag  bool
-		outputMode   OutputMode
-		approveMode  ApproveMode
-		forkFlag     string
-		noSandbox    bool
-	)
-	fs.StringVar(&modelFlag, "model", "", "model name to use")
-	fs.StringVar(&providerFlag, "provider", "", "provider name to use")
-	fs.BoolVar(&verboseFlag, "verbose", false, "enable verbose output")
-	fs.Var(&outputMode, "output", "output format: json|stream|text (default text)")
-	fs.Var(&approveMode, "approve", "approval mode: auto|deny|ask (default ask)")
-	fs.StringVar(&forkFlag, "fork", "", "fork from an existing session id")
-	fs.BoolVar(&noSandbox, "no-sandbox", false, "disable bash sandbox enforcement")
-	if err := fs.Parse(args); err != nil {
-		return newUsageError("prompt: %v", err)
+func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) (runErr error) {
+	parsed, err := parsePromptArgs(args, c.out)
+	if err != nil {
+		return err
 	}
-
-	remaining := fs.Args()
-	if len(remaining) == 0 {
-		return newUsageError("prompt: missing message argument")
-	}
-	prompt := remaining[0]
+	modelFlag := parsed.modelFlag
+	providerFlag := parsed.providerFlag
+	verboseFlag := parsed.verboseFlag
+	outputMode := parsed.outputMode
+	approveMode := parsed.approveMode
+	forkFlag := parsed.forkFlag
+	noSandbox := parsed.noSandbox
+	prompt := parsed.remaining[0]
 
 	var rc *config.Config
 	if v, ok := cfg.(*config.Config); ok {
@@ -93,12 +119,18 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) error {
 
 	span, spanCtx := tracing.SpanFromContext(ctx, spanPromptRun, tracing.SpanKindInternal)
 	span.SetAttributes(
-		tracing.Attribute{Key: "command", Value: c.Name()},
-		tracing.Attribute{Key: "args", Value: args},
+		tracing.Attribute{Key: "command_name", Value: c.Name()},
+		tracing.SensitiveAttribute("args", args),
+		tracing.Attribute{Key: "args_count", Value: len(args)},
+		tracing.Attribute{Key: "prompt_length", Value: len(prompt)},
 		tracing.Attribute{Key: "version", Value: Version},
 	)
 	defer func() {
-		span.SetStatus(tracing.SpanStatusOK, "")
+		if runErr != nil {
+			span.SetStatus(tracing.SpanStatusError, runErr.Error())
+		} else {
+			span.SetStatus(tracing.SpanStatusOK, "")
+		}
 		span.End()
 	}()
 
@@ -135,7 +167,9 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) error {
 		dispatchSpan.End()
 		return newExecutionError("prompt: assemble agent", err)
 	}
-	defer assembly.Cleanup()
+	defer func() {
+		runErr = errors.Join(runErr, closeAssemblyForCommand(context.Background(), assembly, "prompt"))
+	}()
 
 	// Fork from an existing session: build a SessionTree from the store,
 	// zero-copy branch at the requested entry, rebuild context, and inject

@@ -243,13 +243,13 @@ func TestTokenEstimateEmpty(t *testing.T) {
 func TestEntriesToAgentMessages(t *testing.T) {
 	entries := []SessionEntry{
 		{ID: "1", Type: EntryTypeUser, Content: "hello"},
-		{ID: "2", Type: EntryTypeAssistant, Content: "hi there", ToolCalls: []llm.ToolCall{{ID: "tc1", Name: "bash"}}, ToolCallID: "tc1", ToolName: "bash"},
+		{ID: "2", Type: EntryTypeAssistant, Content: "hi there", ToolCalls: []llm.ToolCall{{ID: "tc1", Name: "bash"}}, ToolCallID: "tc1", ToolName: "bash", Usage: &llm.Usage{InputTokens: 2, OutputTokens: 1, TotalTokens: 3}},
 		{ID: "3", Type: EntryTypeTool, Content: "tool result"},
 		{ID: "4", Type: EntryTypeCompaction, Summary: "compacted"},
 		{ID: "5", Type: EntryTypeSystem, Content: "system note"},
 	}
 	msgs := EntriesToAgentMessages(entries)
-	assert.Len(t, msgs, 3)
+	assert.Len(t, msgs, 4)
 	assert.Equal(t, "user", msgs[0].Role)
 	assert.Equal(t, "hello", msgs[0].Content)
 	assert.Equal(t, "assistant", msgs[1].Role)
@@ -257,8 +257,12 @@ func TestEntriesToAgentMessages(t *testing.T) {
 	assert.Len(t, msgs[1].ToolCalls, 1)
 	assert.Equal(t, "tc1", msgs[1].ToolCallID)
 	assert.Equal(t, "bash", msgs[1].ToolName)
-	assert.Equal(t, "system", msgs[2].Role)
-	assert.Equal(t, "system note", msgs[2].Content)
+	assert.Equal(t, 3, msgs[1].Usage.TotalTokens)
+	assert.Equal(t, "user", msgs[2].Role)
+	assert.Contains(t, msgs[2].Content, "compacted")
+	assert.Contains(t, msgs[2].Content, "Untrusted summary of prior conversation")
+	assert.Equal(t, "system", msgs[3].Role)
+	assert.Equal(t, "system note", msgs[3].Content)
 }
 
 func TestEntriesToAgentMessages_Empty(t *testing.T) {
@@ -416,4 +420,29 @@ func TestBuildContext_CacheConsistencyWithCompaction(t *testing.T) {
 	sc3, err := mg.BuildContext(context.Background(), "c")
 	require.NoError(t, err)
 	assert.Equal(t, sc2.EstimatedTokens, sc3.EstimatedTokens, "cache hit should match")
+}
+
+func TestContextManagerBuildContextOutputsDoNotAliasNestedArguments(t *testing.T) {
+	ctx := context.Background()
+	tree := newConcreteTree()
+	require.NoError(t, tree.Append(ctx, newTestEntry("root", "", EntryTypeUser)))
+	assistant := newToolCallEntry("assistant", "root", []llm.ToolCall{{
+		ID: "provider-call-id", Name: "inspect",
+		Args: map[string]any{"nested": map[string]any{"value": "canonical"}},
+	}})
+	assistant.ContentBlocks = []llm.ContentBlock{{Type: "text", Text: "canonical block"}}
+	require.NoError(t, tree.Append(ctx, assistant))
+
+	sc, err := NewDefaultContextManager(tree).BuildContext(ctx, "assistant")
+	require.NoError(t, err)
+	require.Len(t, sc.Messages, 2)
+	require.Len(t, sc.Traversed, 2)
+
+	sc.Messages[1].ToolCalls[0].Args.(map[string]any)["nested"].(map[string]any)["value"] = "message mutation"
+	sc.Messages[1].ContentBlocks[0].Text = "message mutation"
+	assert.Equal(t, "canonical", sc.Traversed[0].ToolCalls[0].Args.(map[string]any)["nested"].(map[string]any)["value"])
+	assert.Equal(t, "canonical block", sc.Traversed[0].ContentBlocks[0].Text)
+
+	sc.Traversed[0].ToolCalls[0].ID = "traversed mutation"
+	assert.Equal(t, "provider-call-id", sc.Messages[1].ToolCalls[0].ID)
 }

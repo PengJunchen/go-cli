@@ -2,8 +2,12 @@ package tools
 
 import (
 	"context"
+	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -132,7 +136,7 @@ func TestFetchSearchProviderMaxResults(t *testing.T) {
 
 func TestBraveSearchProviderParsesJSON(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "Bearer test-key", r.Header.Get("X-Subscription-Token"))
+		assert.Equal(t, "test-key", r.Header.Get("X-Subscription-Token"))
 		w.WriteHeader(http.StatusOK)
 		body := []byte(`{"web":{"results":[
 			{"title":"Brave Result","url":"https://brave.com/r1","description":"Brave snippet"},
@@ -154,6 +158,225 @@ func TestBraveSearchProviderParsesJSON(t *testing.T) {
 	assert.Equal(t, "Brave snippet", results[0].Snippet)
 }
 
+func TestBraveSearchProviderBlocksCrossOriginRedirectBeforeDispatch(t *testing.T) {
+	for _, testCase := range []struct {
+		name   string
+		target string
+	}{
+		{name: "host", target: "https://other.example:8443/redirected"},
+		{name: "port", target: "https://search.example:8444/redirected"},
+		{name: "scheme", target: "http://search.example:8443/redirected"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			var dispatches int
+			redirectBody := &closeTrackingBody{reader: strings.NewReader("redirect body")}
+			client := &http.Client{Transport: braveRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+				dispatches++
+				if dispatches > 1 {
+					return braveJSONResponse(req), nil
+				}
+				return &http.Response{
+					StatusCode: http.StatusFound,
+					Header:     http.Header{"Location": []string{testCase.target}},
+					Body:       redirectBody,
+					Request:    req,
+				}, nil
+			})}
+
+			p := NewBraveSearchProvider("synthetic-review-key",
+				WithBraveSearchURL("https://search.example:8443/search"),
+				WithBraveSearchClient(client),
+			)
+			results, err := p.Search(context.Background(), "test", SearchOptions{})
+
+			require.Error(t, err)
+			require.Nil(t, results)
+			assert.Equal(t, 1, dispatches, "the redirected request must not be dispatched")
+			assert.True(t, redirectBody.closed, "net/http must close the redirect response body")
+			assert.NotContains(t, err.Error(), "synthetic-review-key", "redirect errors must not disclose credentials")
+			assert.Nil(t, client.CheckRedirect, "the injected client must remain unchanged")
+		})
+	}
+}
+
+func TestBraveSearchProviderAllowsSameOriginRedirectWithNormalizedOrigin(t *testing.T) {
+	var dispatches int
+	client := &http.Client{Transport: braveRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		dispatches++
+		if dispatches == 1 {
+			return &http.Response{
+				StatusCode: http.StatusFound,
+				Header:     http.Header{"Location": []string{"HTTPS://SEARCH.EXAMPLE:0443/redirected"}},
+				Body:       io.NopCloser(strings.NewReader("")),
+				Request:    req,
+			}, nil
+		}
+		return braveJSONResponse(req), nil
+	})}
+
+	p := NewBraveSearchProvider("synthetic-review-key",
+		WithBraveSearchURL("https://search.example/search"),
+		WithBraveSearchClient(client),
+	)
+	results, err := p.Search(context.Background(), "test", SearchOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, results)
+	assert.Equal(t, 2, dispatches)
+	assert.Nil(t, client.CheckRedirect, "the injected client must remain unchanged")
+}
+
+func TestBraveSearchProviderRedirectPolicyRejectsCallerCrossOriginMutation(t *testing.T) {
+	var dispatches int
+	redirectBody := &closeTrackingBody{reader: strings.NewReader("redirect body")}
+	transport := &braveRoundTripper{roundTrip: func(req *http.Request) (*http.Response, error) {
+		dispatches++
+		if dispatches == 1 {
+			return &http.Response{
+				StatusCode: http.StatusFound,
+				Header:     http.Header{"Location": []string{"/same-origin-hop"}},
+				Body:       redirectBody,
+				Request:    req,
+			}, nil
+		}
+		return braveJSONResponse(req), nil
+	}}
+	client := &http.Client{
+		Transport: transport,
+		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+			req.URL.Host = "attacker.example"
+			return nil
+		},
+	}
+
+	p := NewBraveSearchProvider("synthetic-review-key",
+		WithBraveSearchURL("https://search.example/search"),
+		WithBraveSearchClient(client),
+	)
+	results, err := p.Search(context.Background(), "test", SearchOptions{})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errBraveCrossOriginRedirect)
+	require.Nil(t, results)
+	assert.Equal(t, 1, dispatches, "the callback-mutated URL must be rejected before transport dispatch")
+	assert.True(t, redirectBody.closed)
+	assert.NotContains(t, err.Error(), "synthetic-review-key")
+	assert.Same(t, transport, client.Transport)
+}
+
+func TestBraveSearchProviderRedirectPolicyUsesImmutableInitialOrigin(t *testing.T) {
+	var dispatches int
+	var policyCalls int
+	firstBody := &closeTrackingBody{reader: strings.NewReader("first redirect")}
+	secondBody := &closeTrackingBody{reader: strings.NewReader("second redirect")}
+	transport := &braveRoundTripper{roundTrip: func(req *http.Request) (*http.Response, error) {
+		dispatches++
+		switch dispatches {
+		case 1:
+			return &http.Response{
+				StatusCode: http.StatusFound,
+				Header:     http.Header{"Location": []string{"/same-origin-hop"}},
+				Body:       firstBody,
+				Request:    req,
+			}, nil
+		case 2:
+			return &http.Response{
+				StatusCode: http.StatusFound,
+				Header:     http.Header{"Location": []string{"https://attacker.example/steal"}},
+				Body:       secondBody,
+				Request:    req,
+			}, nil
+		default:
+			return braveJSONResponse(req), nil
+		}
+	}}
+	client := &http.Client{
+		Transport: transport,
+		CheckRedirect: func(_ *http.Request, via []*http.Request) error {
+			policyCalls++
+			if policyCalls == 1 {
+				// A redirect callback can mutate the request history. A later
+				// hop must not use this mutable URL as the credential origin.
+				via[0].URL.Host = "attacker.example"
+			}
+			return nil
+		},
+	}
+	originalPolicy := reflect.ValueOf(client.CheckRedirect).Pointer()
+
+	p := NewBraveSearchProvider("synthetic-review-key",
+		WithBraveSearchURL("https://search.example/search"),
+		WithBraveSearchClient(client),
+	)
+	results, err := p.Search(context.Background(), "test", SearchOptions{})
+
+	require.Error(t, err)
+	assert.ErrorIs(t, err, errBraveCrossOriginRedirect)
+	require.Nil(t, results)
+	assert.Equal(t, 2, dispatches, "the cross-origin redirect must be rejected before transport dispatch")
+	assert.Equal(t, 1, policyCalls, "the policy must not get a chance to bless the cross-origin hop")
+	assert.True(t, firstBody.closed)
+	assert.True(t, secondBody.closed)
+	assert.NotContains(t, err.Error(), "synthetic-review-key")
+	assert.Equal(t, originalPolicy, reflect.ValueOf(client.CheckRedirect).Pointer())
+	assert.Same(t, transport, client.Transport)
+}
+
+func TestBraveSearchProviderPreservesDefaultRedirectLimit(t *testing.T) {
+	var dispatches int
+	client := &http.Client{Transport: braveRoundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		dispatches++
+		return &http.Response{
+			StatusCode: http.StatusFound,
+			Header:     http.Header{"Location": []string{"/redirected"}},
+			Body:       io.NopCloser(strings.NewReader("")),
+			Request:    req,
+		}, nil
+	})}
+
+	p := NewBraveSearchProvider("synthetic-review-key",
+		WithBraveSearchURL("https://search.example/search"),
+		WithBraveSearchClient(client),
+	)
+	_, err := p.Search(context.Background(), "test", SearchOptions{})
+	require.Error(t, err)
+	assert.Equal(t, 10, dispatches, "the cloned client must retain net/http's ten-request redirect limit")
+}
+
+func TestBraveSearchProviderPreservesCallerRedirectPolicyWithoutMutatingClient(t *testing.T) {
+	callerRedirectErr := errors.New("caller redirect policy rejected request")
+	var policyCalls int
+	transport := &braveRoundTripper{roundTrip: func(req *http.Request) (*http.Response, error) {
+		return &http.Response{
+			StatusCode: http.StatusFound,
+			Header:     http.Header{"Location": []string{"/redirected"}},
+			Body:       io.NopCloser(strings.NewReader("")),
+			Request:    req,
+		}, nil
+	}}
+	client := &http.Client{
+		Timeout:   3 * time.Second,
+		Transport: transport,
+		CheckRedirect: func(*http.Request, []*http.Request) error {
+			policyCalls++
+			return callerRedirectErr
+		},
+	}
+	originalCheckRedirect := reflect.ValueOf(client.CheckRedirect).Pointer()
+	originalTimeout := client.Timeout
+
+	p := NewBraveSearchProvider("synthetic-review-key",
+		WithBraveSearchURL("https://search.example:8443/search"),
+		WithBraveSearchClient(client),
+	)
+	results, err := p.Search(context.Background(), "test", SearchOptions{})
+	require.ErrorIs(t, err, callerRedirectErr)
+	assert.Nil(t, results)
+	assert.Equal(t, 1, policyCalls)
+	assert.Same(t, transport, client.Transport)
+	assert.Equal(t, originalCheckRedirect, reflect.ValueOf(client.CheckRedirect).Pointer())
+	assert.Equal(t, originalTimeout, client.Timeout)
+}
+
 func TestBraveSearchProviderName(t *testing.T) {
 	p := NewBraveSearchProvider("key")
 	assert.Equal(t, "brave", p.Name())
@@ -162,7 +385,7 @@ func TestBraveSearchProviderName(t *testing.T) {
 func TestBraveSearchProviderMissingKey(t *testing.T) {
 	p := NewBraveSearchProvider("")
 	results, err := p.Search(context.Background(), "test", SearchOptions{})
-	require.Error(t, err)
+	require.ErrorIs(t, err, ErrWebSearchProviderUnavailable)
 	assert.Empty(t, results)
 	assert.Contains(t, err.Error(), "api key")
 }
@@ -187,7 +410,7 @@ func TestBraveSearchProviderServerError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestWebSearchToolWithMockProviderNoPanic(t *testing.T) {
-	tool := NewWebSearchTool()
+	tool := NewWebSearchTool(WithSearchProvider(NewMockSearchProvider()))
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"query": "golang"},
 	})
@@ -239,6 +462,41 @@ func TestWebSearchToolWithBraveProviderNoPanic(t *testing.T) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+type braveRoundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f braveRoundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
+
+type braveRoundTripper struct {
+	roundTrip func(*http.Request) (*http.Response, error)
+}
+
+func (r *braveRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return r.roundTrip(req)
+}
+
+type closeTrackingBody struct {
+	reader io.Reader
+	closed bool
+}
+
+func (b *closeTrackingBody) Read(p []byte) (int, error) { return b.reader.Read(p) }
+
+func (b *closeTrackingBody) Close() error {
+	b.closed = true
+	return nil
+}
+
+func braveJSONResponse(req *http.Request) *http.Response {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(`{"web":{"results":[]}}`)),
+		Request:    req,
+	}
+}
 
 // itoa is a dependency-free int-to-string for test assertions.
 func itoa(n int) string {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -12,11 +13,10 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
-	"time"
 
 	"github.com/pengjunchen/go-cli/internal/acp"
 	"github.com/pengjunchen/go-cli/internal/config"
-	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/privatefile"
 )
 
 // serveCmd implements Command and starts an ACP HTTP server.
@@ -153,8 +153,7 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	// via SSE. When assembly fails (e.g. no config), the server falls
 	// back to echo/ack mode with a nil dispatcher.
 	var handler *acp.CoreHandler
-	var cleanup func()
-	var eventBus core.EventBus
+	var assembly *AgentAssembly
 
 	var rc *config.Config
 	if v, ok := cfg.(*config.Config); ok {
@@ -169,23 +168,22 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 		if noSandbox {
 			assembleOpts = append(assembleOpts, WithNoSandbox())
 		}
-		assembly, err := AssembleAgent(ctx, rc, providerName, modelName, c.out,
+		var assembleErr error
+		assembly, assembleErr = AssembleAgent(ctx, rc, providerName, modelName, c.out,
 			assembleOpts...,
 		)
-		if err != nil {
-			slog.Warn("serve: agent assembly failed, falling back to echo mode", "err", err)
+		if assembleErr != nil {
+			slog.Warn("serve: agent assembly failed, falling back to echo mode", "err", assembleErr)
 			fmt.Fprintf(c.out, "WARNING: Agent assembly failed — falling back to echo mode (no agent dispatch).\n") //nolint:errcheck
-			if ufe := classifyError(err); ufe != nil {
+			if ufe := classifyError(assembleErr); ufe != nil {
 				fmt.Fprintf(c.out, "  Error: %s\n", ufe.Action) //nolint:errcheck
 				fmt.Fprintf(c.out, "  Hint: %s\n", ufe.Hint)    //nolint:errcheck
 			} else {
-				fmt.Fprintf(c.out, "  Error: %v\n", err) //nolint:errcheck
+				fmt.Fprintf(c.out, "  Error: %v\n", assembleErr) //nolint:errcheck
 			}
 		} else {
-			cleanup = assembly.Cleanup
 			handler = acp.NewCoreHandler(assembly.Dispatcher, nil)
 			handler.SetEventBus(assembly.EventBus)
-			eventBus = assembly.EventBus
 			slog.Info("serve: agent dispatch enabled",
 				"model", modelName,
 				"provider", providerName,
@@ -202,21 +200,26 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	}
 
 	server := acp.NewHTTPServer("acp-server", addr, handler)
-	if eventBus != nil {
-		server.SetEventBus(eventBus)
-	}
 	if authToken != "" {
 		server.SetAuth(authToken, authSubject)
 	}
 	if tlsCert != "" && tlsKey != "" {
 		server.SetTLS(tlsCert, tlsKey)
 	}
+	if assembly != nil {
+		if err := assembly.setHTTPServer(server); err != nil {
+			return errors.Join(
+				newExecutionError("serve: register server owner", err),
+				closeAssemblyForCommand(context.Background(), assembly, "serve"),
+			)
+		}
+	}
 
 	if err := server.Start(ctx); err != nil {
-		if cleanup != nil {
-			cleanup()
-		}
-		return newExecutionError("serve: start server", err)
+		return errors.Join(
+			newExecutionError("serve: start server", err),
+			closeAssemblyForCommand(context.Background(), assembly, "serve"),
+		)
 	}
 
 	fmt.Fprintf(c.out, "ACP HTTP server listening on %s\n", addr) //nolint:errcheck
@@ -252,18 +255,36 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	}
 	signal.Stop(sigCh)
 
-	// Use a fresh context for shutdown so in-flight requests can complete
-	// even if the parent context was canceled.
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	if err := server.Stop(shutdownCtx); err != nil {
-		slog.Warn("serve: server stop error", "err", err)
+	if assembly != nil {
+		closeErr := closeAssemblyForCommand(context.Background(), assembly, "serve")
+		if errors.Is(closeErr, ErrAssemblyClosePending) {
+			fmt.Fprintf(c.out, "ACP HTTP server shutdown is still pending.\n") //nolint:errcheck
+		} else if closeErr != nil {
+			slog.Warn("serve: shutdown error", "err", closeErr)
+		} else {
+			fmt.Fprintf(c.out, "ACP HTTP server stopped.\n") //nolint:errcheck
+		}
+		return closeErr
 	}
-	if cleanup != nil {
-		cleanup()
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), assemblyCloseBudget)
+	stopErr := server.Stop(stopCtx)
+	cancelStop()
+	if stopErr != nil {
+		slog.Warn("serve: server stop error", "err", stopErr)
 	}
-	fmt.Fprintf(c.out, "ACP HTTP server stopped.\n") //nolint:errcheck
-	return nil
+	if errors.Is(stopErr, acp.ErrHTTPServerCleanupPending) {
+		fmt.Fprintf(c.out, "ACP HTTP server shutdown is still pending.\n") //nolint:errcheck
+	} else if stopErr == nil {
+		fmt.Fprintf(c.out, "ACP HTTP server stopped.\n") //nolint:errcheck
+	}
+	return wrapServeStopError(stopErr)
+}
+
+func wrapServeStopError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return newExecutionError("serve: stop server", err)
 }
 
 // defaultServeTokenPath returns the default path for the serve token file,
@@ -279,11 +300,7 @@ func defaultServeTokenPath() string {
 // writeTokenFile writes the token to path with 0600 permissions, creating
 // the parent directory (0700) if necessary.
 func writeTokenFile(path, token string) error {
-	dir := filepath.Dir(path)
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return err
-	}
-	return os.WriteFile(path, []byte(token), 0o600)
+	return privatefile.WriteAtomic(path, []byte(token))
 }
 
 // generateServeToken generates a cryptographically random hex token for

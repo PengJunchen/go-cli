@@ -25,7 +25,7 @@ func TestWithThinkingLevel_SetsConfig(t *testing.T) {
 // AgentAssembly.
 func TestAssembleAgent_ThinkingLevel_ViaOption(t *testing.T) {
 	ctx := context.Background()
-	assembly, err := AssembleAgent(ctx, nil, "eino", "gpt-4o", io.Discard,
+	assembly, err := AssembleAgent(ctx, newAssembleTestConfig(), "openai", "gpt-4o", io.Discard,
 		WithThinkingLevel(llm.ThinkingHigh),
 	)
 	require.NoError(t, err)
@@ -37,7 +37,7 @@ func TestAssembleAgent_ThinkingLevel_ViaOption(t *testing.T) {
 // option, the thinking level defaults to ThinkingMedium.
 func TestAssembleAgent_ThinkingLevel_Default(t *testing.T) {
 	ctx := context.Background()
-	assembly, err := AssembleAgent(ctx, nil, "eino", "gpt-4o", io.Discard)
+	assembly, err := AssembleAgent(ctx, newAssembleTestConfig(), "openai", "gpt-4o", io.Discard)
 	require.NoError(t, err)
 	defer assembly.Cleanup()
 	assert.Equal(t, llm.ThinkingMedium, assembly.ThinkingLevel)
@@ -47,7 +47,7 @@ func TestAssembleAgent_ThinkingLevel_Default(t *testing.T) {
 // propagated (not confused with the zero value / "not set" sentinel).
 func TestAssembleAgent_ThinkingLevel_None(t *testing.T) {
 	ctx := context.Background()
-	assembly, err := AssembleAgent(ctx, nil, "eino", "gpt-4o", io.Discard,
+	assembly, err := AssembleAgent(ctx, newAssembleTestConfig(), "openai", "gpt-4o", io.Discard,
 		WithThinkingLevel(llm.ThinkingNone),
 	)
 	require.NoError(t, err)
@@ -59,7 +59,7 @@ func TestAssembleAgent_ThinkingLevel_None(t *testing.T) {
 // when model cycling is not configured.
 func TestAssembleAgent_ModelCycler_NotConfigured(t *testing.T) {
 	ctx := context.Background()
-	assembly, err := AssembleAgent(ctx, nil, "eino", "gpt-4o", io.Discard)
+	assembly, err := AssembleAgent(ctx, newAssembleTestConfig(), "openai", "gpt-4o", io.Discard)
 	require.NoError(t, err)
 	defer assembly.Cleanup()
 	assert.Nil(t, assembly.ModelCycler)

@@ -19,6 +19,16 @@ import (
 // the deny-first approval policy. The wrapped tool executor is never invoked.
 var ErrToolDenied = errors.New("tool call denied by approval policy")
 
+// ErrInvalidPermissionMode indicates that the active policy contains an
+// unknown mode value. Unknown modes are never interpreted as a permissive
+// fallback.
+var ErrInvalidPermissionMode = errors.New("approval: invalid permission mode")
+
+// ErrPreparedApprovalStoreUnsupported indicates that a custom ApprovalStore
+// has no adapter for the prepared dispatch fence and therefore cannot safely
+// participate in prepared tool decisions.
+var ErrPreparedApprovalStoreUnsupported = errors.New("approval: prepared policy requires a fenced approval store adapter")
+
 // approvalOptions configures how Ask classifications are resolved.
 type approvalOptions struct {
 	autoApprove            bool
@@ -27,6 +37,8 @@ type approvalOptions struct {
 	permissionModeSet      bool
 	callback               ApprovalCallback
 	cache                  *ApprovalCache
+	dispatchFence          *tools.DispatchFence
+	planModeController     core.PlanModeController
 }
 
 // Option configures an ApprovalMiddleware.
@@ -73,6 +85,20 @@ func WithCache(cache *ApprovalCache) Option {
 	return func(o *approvalOptions) { o.cache = cache }
 }
 
+// WithDispatchFence binds approval policy publication to the registry's
+// prepared-dispatch fence. The same fence must be passed to the Plan Mode
+// controller and the middleware registry.
+func WithDispatchFence(fence *tools.DispatchFence) Option {
+	return func(o *approvalOptions) { o.dispatchFence = fence }
+}
+
+// WithPlanModeController provides the controller whose state participates in
+// prepared approval decisions. Prepared policy rejects a controller that does
+// not expose the exact same dispatch fence.
+func WithPlanModeController(controller core.PlanModeController) Option {
+	return func(o *approvalOptions) { o.planModeController = controller }
+}
+
 // ApprovalMiddleware is a deny-first core.ToolMiddleware. For each call it
 // consults the in-session cache, then the cross-session ApprovalStore, then the
 // effective classifier. The effective classifier is either the statically bound
@@ -81,18 +107,24 @@ func WithCache(cache *ApprovalCache) Option {
 // wrapped executor. It emits an approval.decision span recording the outcome so
 // telemetry is reproducible.
 type ApprovalMiddleware struct {
-	classifier ApprovalClassifier
-	resolver   PermissionModeResolver
-	store      ApprovalStore
-	opts       approvalOptions
+	classifier          ApprovalClassifier
+	resolver            PermissionModeResolver
+	store               ApprovalStore
+	opts                approvalOptions
+	fence               *tools.DispatchFence
+	planMode            core.PlanModeController
+	preparedStore       *InMemoryApprovalStore
+	preparedClassifiers map[PermissionMode]ApprovalClassifier
+	initErr             error
 
 	// session is the per-middleware cache keyed by "mode:tool_name:args_hash".
 	// Values shared across calls within the same process are the "session"
 	// cache. sessionMu guards both session and mode (mode may be switched at
 	// runtime via SetPermissionMode).
-	sessionMu sync.RWMutex
-	session   map[string]Classification
-	mode      PermissionMode
+	sessionMu   sync.RWMutex
+	session     map[string]Classification
+	mode        PermissionMode
+	policyEpoch uint64
 }
 
 var _ core.ToolMiddleware = (*ApprovalMiddleware)(nil)
@@ -114,14 +146,37 @@ func NewApprovalMiddleware(classifier ApprovalClassifier, store ApprovalStore, o
 	if !options.permissionModeSet {
 		mode = PermissionDefault
 	}
-	return &ApprovalMiddleware{
-		classifier: classifier,
-		resolver:   options.permissionModeResolver,
-		mode:       mode,
-		store:      store,
-		opts:       options,
-		session:    make(map[string]Classification),
+	preparedClassifiers := make(map[PermissionMode]ApprovalClassifier, 4)
+	if options.permissionModeResolver != nil {
+		for _, candidate := range []PermissionMode{PermissionDefault, PermissionPlan, PermissionAuto, PermissionAutoFull} {
+			preparedClassifiers[candidate] = options.permissionModeResolver.Resolve(candidate)
+		}
+	} else {
+		preparedClassifiers[PermissionDefault] = classifier
 	}
+	middleware := &ApprovalMiddleware{
+		classifier:          classifier,
+		resolver:            options.permissionModeResolver,
+		mode:                mode,
+		store:               store,
+		opts:                options,
+		session:             make(map[string]Classification),
+		fence:               options.dispatchFence,
+		planMode:            options.planModeController,
+		preparedClassifiers: preparedClassifiers,
+	}
+	if options.cache != nil && options.dispatchFence != nil {
+		middleware.initErr = options.cache.bindFence(options.dispatchFence)
+	}
+	if preparedStore, ok := store.(*InMemoryApprovalStore); ok && preparedStore != nil {
+		middleware.preparedStore = preparedStore
+		if options.dispatchFence != nil && middleware.initErr == nil {
+			middleware.initErr = preparedStore.bindFence(options.dispatchFence)
+		}
+	} else {
+		middleware.initErr = errors.Join(middleware.initErr, fmt.Errorf("%w: %T", ErrPreparedApprovalStoreUnsupported, store))
+	}
+	return middleware
 }
 
 // Name returns the middleware identifier.
@@ -140,10 +195,23 @@ func sessionKey(call tools.ToolCall, mode PermissionMode) (string, error) {
 	return mode.String() + ":" + call.Name + ":" + hex.EncodeToString(sum[:]), nil
 }
 
+func validPermissionMode(mode PermissionMode) bool {
+	switch mode {
+	case PermissionDefault, PermissionPlan, PermissionAuto, PermissionAutoFull:
+		return true
+	default:
+		return false
+	}
+}
+
 // WrapToolCall returns an approval gate around the next tool executor.
 func (m *ApprovalMiddleware) WrapToolCall(next func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error)) func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
 	return func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
-		key, err := sessionKey(call, m.currentMode())
+		mode := m.currentMode()
+		if !validPermissionMode(mode) {
+			return nil, fmt.Errorf("%w: %d", ErrInvalidPermissionMode, mode)
+		}
+		key, err := sessionKey(call, mode)
 		if err != nil {
 			slog.Warn("approval.session_key", "tool", call.Name, "error", err)
 			return nil, err
@@ -151,7 +219,7 @@ func (m *ApprovalMiddleware) WrapToolCall(next func(ctx context.Context, call to
 
 		classification, cached := m.decide(ctx, key, call)
 
-		if classification == Deny {
+		if classification != Allow {
 			slog.Info("approval.deny", "tool", call.Name, "cached", cached)
 			return nil, ErrToolDenied
 		}
@@ -183,8 +251,13 @@ func (m *ApprovalMiddleware) decide(ctx context.Context, key string, call tools.
 	// PermissionModeResolver is wired, the classifier is chosen from the mode.
 	classifier := m.effectiveClassifier()
 	c := classifier.Classify(ctx, call)
+	cacheDecision := true
 	if c == Ask {
-		c = m.resolveAsk(ctx, key, call)
+		c, cacheDecision = m.resolveAsk(ctx, key, call)
+	}
+
+	if !cacheDecision {
+		return m.record(span, call, c, false), false
 	}
 
 	m.sessionStore(key, c)
@@ -198,38 +271,40 @@ func (m *ApprovalMiddleware) decide(ctx context.Context, key string, call tools.
 	return m.record(span, call, c, false), false
 }
 
-// resolveAsk resolves an Ask classification. When a callback is wired it
-// consults the always-allow cache first (skipping the prompt on a hit), then
-// prompts interactively. When no callback is wired it falls back to the
-// auto-approve policy: autoApprove allows the call, otherwise it is denied.
-func (m *ApprovalMiddleware) resolveAsk(ctx context.Context, key string, call tools.ToolCall) Classification {
+// resolveAsk resolves an Ask classification and reports whether the decision
+// may be reused for later calls. A callback's Allow or Deny applies only to the
+// current call; AlwaysAllow and policy decisions retain their reusable scope.
+// When a callback is wired, the always-allow cache is checked before prompting.
+func (m *ApprovalMiddleware) resolveAsk(ctx context.Context, key string, call tools.ToolCall) (Classification, bool) {
 	if m.opts.callback == nil {
 		if m.opts.autoApprove {
-			return Allow
+			return Allow, true
 		}
-		return Deny
+		return Deny, true
 	}
 
 	if m.opts.cache != nil {
 		if allowed, ok := m.opts.cache.Get(key); ok && allowed {
-			return Allow
+			return Allow, true
 		}
 	}
 
 	result, err := m.opts.callback.RequestApproval(ctx, call.Name, call.Args)
 	if err != nil {
-		return Deny
+		return Deny, false
 	}
 	switch result {
 	case ApprovalAllow:
-		return Allow
+		// Allow is a one-call decision. It must not enter the session or
+		// store cache below, so an identical later call asks again.
+		return Allow, false
 	case ApprovalAlwaysAllow:
 		if m.opts.cache != nil {
 			m.opts.cache.Set(key)
 		}
-		return Allow
+		return Allow, true
 	default:
-		return Deny
+		return Deny, false
 	}
 }
 
@@ -261,19 +336,61 @@ func (m *ApprovalMiddleware) currentMode() PermissionMode {
 // This prevents an Allow cached in AutoFull mode from being applied in Default
 // mode after a switch.
 func (m *ApprovalMiddleware) SetPermissionMode(mode PermissionMode) {
-	m.sessionMu.Lock()
-	defer m.sessionMu.Unlock()
-	m.mode = mode
-	m.session = make(map[string]Classification)
+	update := func() {
+		m.sessionMu.Lock()
+		defer m.sessionMu.Unlock()
+		m.mode = mode
+		m.policyEpoch++
+		m.session = make(map[string]Classification)
+	}
+	if m.fence != nil {
+		if _, err := m.fence.Publish(tools.DispatchFenceApproval, nil, update); err != nil {
+			slog.Error("approval.mode_publish_failed", "error", err)
+			return
+		}
+	} else {
+		update()
+	}
 	slog.Info("approval.mode_switch", "mode", mode.String())
 }
 
 // ClearSession empties the in-session decision cache so subsequent calls
 // re-classify instead of trusting cached decisions.
 func (m *ApprovalMiddleware) ClearSession() {
-	m.sessionMu.Lock()
-	defer m.sessionMu.Unlock()
-	m.session = make(map[string]Classification)
+	update := func() {
+		m.sessionMu.Lock()
+		defer m.sessionMu.Unlock()
+		m.policyEpoch++
+		m.session = make(map[string]Classification)
+	}
+	if m.fence != nil {
+		if _, err := m.fence.Publish(tools.DispatchFenceApproval, nil, update); err != nil {
+			slog.Error("approval.clear_session_publish_failed", "error", err)
+			return
+		}
+	} else {
+		update()
+	}
+}
+
+// SetPlanModeController binds the Plan state observed by prepared approval
+// decisions. The controller must publish transitions through the same fence.
+func (m *ApprovalMiddleware) SetPlanModeController(controller core.PlanModeController) error {
+	provider, ok := controller.(interface{ DispatchFence() *tools.DispatchFence })
+	if !ok || controller == nil || provider.DispatchFence() != m.fence || m.fence == nil {
+		return tools.ErrDispatchFenceUnavailable
+	}
+	_, err := m.fence.Publish(tools.DispatchFenceApproval, nil, func() {
+		m.sessionMu.Lock()
+		defer m.sessionMu.Unlock()
+		m.planMode = controller
+		m.policyEpoch++
+		m.session = make(map[string]Classification)
+	})
+	if err != nil {
+		return fmt.Errorf("publish Plan Mode controller: %w", err)
+	}
+	return nil
 }
 
 // record attaches the decision attributes to the span and returns the decision.

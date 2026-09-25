@@ -44,17 +44,21 @@ type EventStreamImpl struct {
 	events       chan AgentEvent
 	closed       atomic.Bool
 	closeOnce    sync.Once
+	terminalOnce sync.Once
 	done         chan struct{}
 	result       AgentMessage
 	hasRes       bool
 	err          error
 	sentCount    atomic.Int64
+	gapCount     atomic.Uint64
 	discard      DiscardPolicy
 	blockTimeout time.Duration
 	bus          EventBus
+	statusHandle RunStatusHandle
 }
 
 var _ EventStream = (*EventStreamImpl)(nil)
+var _ RunStatusSource = (*EventStreamImpl)(nil)
 
 // EventStreamOption configures an EventStreamImpl at construction time.
 type EventStreamOption func(*EventStreamImpl)
@@ -108,11 +112,13 @@ func NewEventStream(capacity int, opts ...EventStreamOption) *EventStreamImpl {
 //   - BlockUntilConsumed (default): block the sender until a consumer reads.
 func (s *EventStreamImpl) Send(event AgentEvent) error {
 	if s.closed.Load() {
+		s.gapCount.Add(1)
 		return nil
 	}
 	s.sendMu.RLock()
 	defer s.sendMu.RUnlock()
 	if s.closed.Load() {
+		s.gapCount.Add(1)
 		return nil
 	}
 
@@ -121,6 +127,7 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 		// Non-blocking: drop the new event if the buffer is full.
 		select {
 		case <-s.done:
+			s.gapCount.Add(1)
 			return nil
 		case s.events <- event:
 			s.sentCount.Add(1)
@@ -128,6 +135,7 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 			slog.Debug("core.eventstream.send", "kind", event.Kind, "policy", "discard_newest")
 			return nil
 		default:
+			s.gapCount.Add(1)
 			slog.Warn("core.eventstream.discard", "kind", event.Kind, "policy", "discard_newest")
 			return nil
 		}
@@ -136,6 +144,7 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 		// Non-blocking: pop the oldest event to make room for the new one.
 		select {
 		case <-s.done:
+			s.gapCount.Add(1)
 			return nil
 		case s.events <- event:
 			s.sentCount.Add(1)
@@ -146,11 +155,13 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 			// Buffer full: evict the oldest event.
 			select {
 			case <-s.events:
+				s.gapCount.Add(1)
 				slog.Warn("core.eventstream.discard", "action", "evict_oldest", "policy", "discard_oldest")
 			default:
 			}
 			select {
 			case <-s.done:
+				s.gapCount.Add(1)
 				return nil
 			case s.events <- event:
 				s.sentCount.Add(1)
@@ -159,14 +170,28 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 				return nil
 			default:
 				// Still full after eviction (concurrent sender); drop new event.
+				s.gapCount.Add(1)
 				return nil
 			}
 		}
 
 	default: // BlockUntilConsumed
+		select {
+		case <-s.done:
+			s.gapCount.Add(1)
+			return nil
+		case s.events <- event:
+			s.sentCount.Add(1)
+			s.publishToBus(event)
+			return nil
+		default:
+			resumeBackpressure := s.notifyBackpressure()
+			defer resumeBackpressure()
+		}
 		if s.blockTimeout > 0 {
 			select {
 			case <-s.done:
+				s.gapCount.Add(1)
 				return nil
 			case s.events <- event:
 				s.sentCount.Add(1)
@@ -174,11 +199,13 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 				slog.Debug("core.eventstream.send", "kind", event.Kind, "policy", "block")
 				return nil
 			case <-time.After(s.blockTimeout):
+				s.gapCount.Add(1)
 				return ErrSendTimeout
 			}
 		}
 		select {
 		case <-s.done:
+			s.gapCount.Add(1)
 			return nil
 		case s.events <- event:
 			s.sentCount.Add(1)
@@ -189,11 +216,70 @@ func (s *EventStreamImpl) Send(event AgentEvent) error {
 	}
 }
 
+func (s *EventStreamImpl) notifyBackpressure() func() {
+	s.mu.Lock()
+	handle := s.statusHandle
+	s.mu.Unlock()
+	if owner, ok := handle.(interface{ BeginBackpressure() func() }); ok {
+		if resume := owner.BeginBackpressure(); resume != nil {
+			return resume
+		}
+	}
+	return func() {}
+}
+
+// SendTerminal makes one non-blocking attempt to enqueue the terminal event.
+// A full or closed stream records a visible gap instead of delaying cleanup.
+func (s *EventStreamImpl) SendTerminal(event AgentEvent) error {
+	s.terminalOnce.Do(func() { s.sendTerminal(event) })
+	return nil
+}
+
+func (s *EventStreamImpl) sendTerminal(event AgentEvent) {
+	if s.closed.Load() {
+		s.gapCount.Add(1)
+		return
+	}
+	s.sendMu.RLock()
+	defer s.sendMu.RUnlock()
+	if s.closed.Load() {
+		s.gapCount.Add(1)
+		return
+	}
+	select {
+	case <-s.done:
+		s.gapCount.Add(1)
+	case s.events <- event:
+		s.sentCount.Add(1)
+		s.publishToBus(event)
+	default:
+		s.gapCount.Add(1)
+	}
+}
+
 // SentCount returns the number of events that were successfully sent to the
 // stream. It is used by the harness to decide whether to fall back to fanning
 // out the agent's stored events.
 func (s *EventStreamImpl) SentCount() int {
 	return int(s.sentCount.Load())
+}
+
+// GapCount reports attempted events that were discarded, timed out, or
+// aborted while the stream was closing.
+func (s *EventStreamImpl) GapCount() uint64 { return s.gapCount.Load() }
+
+// SetRunStatusHandle associates the run's live status snapshot source.
+func (s *EventStreamImpl) SetRunStatusHandle(handle RunStatusHandle) {
+	s.mu.Lock()
+	s.statusHandle = handle
+	s.mu.Unlock()
+}
+
+// RunStatusHandle implements the optional RunStatusSource interface.
+func (s *EventStreamImpl) RunStatusHandle() RunStatusHandle {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.statusHandle
 }
 
 // publishToBus forwards a copy of the event to the wired EventBus (if any).
@@ -229,7 +315,7 @@ func (s *EventStreamImpl) Result() (AgentMessage, error) {
 	if !s.hasRes {
 		return AgentMessage{}, errNoResult
 	}
-	return s.result, s.err
+	return cloneAgentMessage(s.result), s.err
 }
 
 // Err returns the fatal stream error, if any.

@@ -228,3 +228,28 @@ func TestFailoverModelMiddleware_TransientErrorTriggersFallback(t *testing.T) {
 	assert.Equal(t, 1, primary.genCalls)
 	assert.Equal(t, 1, fb1.genCalls, "fallback must be called on transient server error")
 }
+
+func TestFailoverModelMiddlewareDoesNotFallbackForContinuationRequest(t *testing.T) {
+	failure := errors.New("continuation dispatch failed")
+	t.Run("generate", func(t *testing.T) {
+		primary := &fbMockModel{genErr: failure}
+		fallback := &fbMockModel{genContent: "must not be used"}
+		wrapped := NewFailoverModelMiddleware(WithFallbackModels(fallback)).WrapModel(primary)
+
+		_, err := wrapped.Generate(WithContinuationNoReplay(context.Background()), nil)
+		require.ErrorIs(t, err, failure)
+		assert.Equal(t, 1, primary.genCalls)
+		assert.Zero(t, fallback.genCalls, "an incomplete candidate continuation must not switch models")
+	})
+
+	t.Run("stream", func(t *testing.T) {
+		primary := &fbMockModel{streamErr: failure}
+		fallback := &fbMockModel{streamText: "must not be used"}
+		wrapped := NewFailoverModelMiddleware(WithFallbackModels(fallback)).WrapModel(primary)
+
+		_, err := wrapped.Stream(WithContinuationNoReplay(context.Background()), nil)
+		require.ErrorIs(t, err, failure)
+		assert.Equal(t, 1, primary.streamCalls)
+		assert.Zero(t, fallback.streamCalls, "an incomplete candidate continuation must not switch models")
+	})
+}

@@ -59,7 +59,10 @@ type ToolSearchTool struct {
 	reg ToolRegistry // dependency held by interface.
 }
 
+var _ TopToolsProvider = (*ToolSearchTool)(nil)
+
 var _ ToolDefinition = (*ToolSearchTool)(nil)
+var _ Parameterized = (*ToolSearchTool)(nil)
 
 // NewToolSearchTool returns a ToolSearchTool backed by the given registry,
 // which must be non-nil.
@@ -73,6 +76,19 @@ func (t *ToolSearchTool) Name() string { return "tool_search" }
 // Description returns a brief description of the tool.
 func (t *ToolSearchTool) Description() string {
 	return "tool_search: lists available tools matching a keyword query, optionally filtered by category. Args: query (string, optional), category (string, optional: file|network|shell|other)."
+}
+
+// Parameters returns the JSON Schema for searching the tool registry.
+func (*ToolSearchTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"query":    map[string]any{"type": "string"},
+			"category": map[string]any{"type": "string", "enum": []string{"", "file", "network", "shell", "other"}},
+		},
+		"required":             []string{},
+		"additionalProperties": false,
+	}
 }
 
 // searchResult is a single matched tool rendered deterministically.

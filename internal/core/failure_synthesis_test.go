@@ -67,6 +67,28 @@ func TestFailureTurnSynthesizer_IsRecoverable_TemporaryMessage(t *testing.T) {
 	assert.True(t, s.IsRecoverable(err))
 }
 
+func TestFailureTurnSynthesizer_ProviderErrorBodyKeywordsAreNotRecoverySignals(t *testing.T) {
+	s := NewDefaultFailureTurnSynthesizer()
+	const responseBody = "temporary timeout; provider echoed private input"
+	err := &llm.ProviderError{
+		StatusCode: 503,
+		ErrorType:  llm.ErrTypeServer,
+		Provider:   "test-provider",
+		Message:    responseBody,
+	}
+
+	assert.Contains(t, err.Error(), "server")
+	assert.Contains(t, err.Error(), "HTTP 503")
+	assert.NotContains(t, err.Error(), responseBody)
+	assert.False(t, s.IsRecoverable(err), "raw response-body keywords must not trigger automatic synthesis retry")
+
+	synthesized, synthErr := s.Synthesize(context.Background(), err)
+	require.NoError(t, synthErr)
+	assert.NotContains(t, synthesized.OriginalError, responseBody)
+	assert.NotContains(t, synthesized.Content, responseBody)
+	assert.Contains(t, synthesized.OriginalError, "HTTP 503")
+}
+
 func TestFailureTurnSynthesizer_IsRecoverable_NonRecoverable(t *testing.T) {
 	s := NewDefaultFailureTurnSynthesizer()
 	tests := []error{

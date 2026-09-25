@@ -102,6 +102,27 @@ type MessageChunk struct {
 	Error error `json:"-"`
 }
 
+func sendStreamError(_ context.Context, ch chan MessageChunk, err error) {
+	if err == nil {
+		return
+	}
+	select {
+	case ch <- MessageChunk{Error: err}:
+	default:
+		// On terminal failure, prefer preserving the error signal over queued
+		// candidate deltas. The consumer must never mistake a truncated channel
+		// close for a successful stream.
+		select {
+		case <-ch:
+		default:
+		}
+		select {
+		case ch <- MessageChunk{Error: err}:
+		default:
+		}
+	}
+}
+
 // ModelInfo describes a model exposed by a provider.
 type ModelInfo struct {
 	Name            string  `json:"name"`
@@ -137,11 +158,17 @@ type ModelInfo struct {
 
 // ModelConfig configures how a provider should build a chat model.
 type ModelConfig struct {
-	Model       string  `json:"model"`
-	Temperature float64 `json:"temperature"`
-	MaxTokens   int     `json:"max_tokens"`
-	APIKey      string  `json:"api_key,omitempty"`
-	BaseURL     string  `json:"base_url,omitempty"`
+	Model          string        `json:"model"`
+	Temperature    float64       `json:"temperature"`
+	TemperatureSet bool          `json:"-"`
+	MaxTokens      int           `json:"max_tokens"`
+	MaxTokensSet   bool          `json:"-"`
+	APIKey         string        `json:"api_key,omitempty"`
+	BaseURL        string        `json:"base_url,omitempty"`
+	Credential     CredentialRef `json:"-"`
+	// credentialResolved marks a resolver-produced config. Adapter-level
+	// constructor defaults must not fill a missing key after scoped resolution.
+	credentialResolved bool
 }
 
 // ToolDefinition describes a tool that the model may invoke. It is the

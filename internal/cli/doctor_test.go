@@ -17,6 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/pengjunchen/go-cli/internal/config"
+	"github.com/pengjunchen/go-cli/internal/mcp"
 )
 
 func TestDoctorFormat(t *testing.T) {
@@ -29,6 +30,22 @@ func TestDoctorFormat(t *testing.T) {
 	assert.Contains(t, out, "[PASS]")
 	assert.Contains(t, out, "[WARN]")
 	assert.Contains(t, out, "offline")
+}
+
+func TestToMCPConfigSelectsStreamableHTTPForURL(t *testing.T) {
+	cfg := toMCPConfig(config.MCPServerConfig{Name: "http-server", URL: "http://127.0.0.1/mcp"})
+	assert.Equal(t, mcp.MCPTransportStreamableHTTP, cfg.Transport)
+	assert.Equal(t, "http://127.0.0.1/mcp", cfg.URL)
+}
+
+func TestNewMCPClientForDoctorSelectsStreamableHTTPAdapter(t *testing.T) {
+	cfg := mcp.MCPServerConfig{
+		Name:      "http-server",
+		URL:       "http://127.0.0.1/mcp",
+		Transport: mcp.MCPTransportStreamableHTTP,
+	}
+	client := newMCPClientForDoctor(cfg)
+	require.IsType(t, (*mcp.HTTPClientAdapter)(nil), client)
 }
 
 func TestDoctorRunnerRun(t *testing.T) {

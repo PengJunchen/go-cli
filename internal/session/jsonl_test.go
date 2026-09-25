@@ -105,6 +105,75 @@ func TestJSONL_OpenCreatesFile(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestJSONL_OpenLocksBeforeLoadingAndHonorsContext(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "locked-session.jsonl")
+	first := NewJSONLSessionStore(path)
+	require.NoError(t, first.Append(context.Background(), newTestEntry("a", "", EntryTypeUser)))
+	require.NoError(t, first.Save(context.Background()))
+
+	file, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	require.NoError(t, err)
+	_, err = file.WriteString("not-json\n")
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+
+	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
+	defer cancel()
+	second := NewJSONLSessionStore(path)
+	started := time.Now()
+	err = second.Open(ctx)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.GreaterOrEqual(t, time.Since(started), 60*time.Millisecond, "loader must wait for the existing file lock before inspecting rows")
+	require.NoError(t, first.Close())
+
+	third := NewJSONLSessionStore(path)
+	err = third.Open(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "decode JSONL row")
+	require.NoError(t, third.Close())
+}
+
+func TestJSONL_OpenRejectsSymlinkedSessionFile(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "outside.jsonl")
+	targetContent := []byte(`{"id":"external","type":"user","content":"untouched"}` + "\n")
+	require.NoError(t, os.WriteFile(target, targetContent, 0o600))
+	path := filepath.Join(dir, "session.jsonl")
+	if err := os.Symlink(target, path); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	store := NewJSONLSessionStore(path)
+	err := store.Open(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "open store file")
+	require.NoError(t, store.Close())
+	after, err := os.ReadFile(target)
+	require.NoError(t, err)
+	assert.Equal(t, targetContent, after, "no-follow open must not read, repair, or overwrite the external target")
+}
+
+func TestJSONLWriterRejectsOversizedRowWithoutPoisoningHandle(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "bounded-session.jsonl")
+	store := NewJSONLSessionStore(path)
+	oversized := newTestEntry("too-large", "", EntryTypeUser)
+	oversized.Content = strings.Repeat("x", maxDurableJSONLineBytes)
+	err := store.Append(context.Background(), oversized)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "exceeds")
+
+	require.NoError(t, store.Append(context.Background(), newTestEntry("small", "", EntryTypeUser)))
+	require.NoError(t, store.Save(context.Background()))
+	require.NoError(t, store.Close())
+
+	reopened := NewJSONLSessionStore(path)
+	require.NoError(t, reopened.Open(context.Background()))
+	got, err := reopened.Get(context.Background(), "small")
+	require.NoError(t, err)
+	assert.Equal(t, "content-small", got.Content)
+	require.NoError(t, reopened.Close())
+}
+
 func TestJSONL_PersistsContentsOnDisk(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 

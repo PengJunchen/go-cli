@@ -122,7 +122,9 @@ func TestHTTPServerTLS(t *testing.T) {
 	// Poll until the server accepts connections.
 	ready := false
 	for i := 0; i < 50; i++ {
-		resp, err := client.Get(baseURL + "/stream?sender_id=test")
+		request, _ := http.NewRequest(http.MethodGet, baseURL+"/stream?session_id=test", nil)
+		request.Header.Set(ACPHTTPProfileHeader, ACPHTTPProfileV1)
+		resp, err := client.Do(request)
 		if err == nil {
 			resp.Body.Close()
 			ready = true
@@ -151,11 +153,15 @@ func TestHTTPServerTLS(t *testing.T) {
 	}
 
 	// Verify we can connect and send messages over HTTPS.
-	connectBody, _ := json.Marshal(ACPMessage{
+	connectBody, _ := json.Marshal(httpACPEnvelope{
+		Version:  ACPHTTPProfileV1,
 		Type:     TypeConnect,
 		SenderID: "tls-client",
 	})
-	resp, err = client.Post(baseURL+"/connect", "application/json", strings.NewReader(string(connectBody)))
+	connectRequest, _ := http.NewRequest(http.MethodPost, baseURL+"/connect", strings.NewReader(string(connectBody)))
+	connectRequest.Header.Set("Content-Type", "application/json")
+	connectRequest.Header.Set(ACPHTTPProfileHeader, ACPHTTPProfileV1)
+	resp, err = client.Do(connectRequest)
 	if err != nil {
 		t.Fatalf("HTTPS connect failed: %v", err)
 	}
@@ -183,7 +189,9 @@ func TestHTTPServerNoTLSFallback(t *testing.T) {
 	// Poll until ready.
 	ready := false
 	for i := 0; i < 50; i++ {
-		resp, err := http.Get(baseURL + "/stream?sender_id=test")
+		request, _ := http.NewRequest(http.MethodGet, baseURL+"/stream?session_id=test", nil)
+		request.Header.Set(ACPHTTPProfileHeader, ACPHTTPProfileV1)
+		resp, err := http.DefaultClient.Do(request)
 		if err == nil {
 			resp.Body.Close()
 			ready = true
@@ -196,7 +204,31 @@ func TestHTTPServerNoTLSFallback(t *testing.T) {
 	}
 
 	// Plain HTTP should work.
-	resp, err := http.Get(baseURL + "/stream?sender_id=test")
+	connectBody, err := json.Marshal(httpACPEnvelope{Version: ACPHTTPProfileV1, Type: TypeConnect, SenderID: "plain-client"})
+	if err != nil {
+		t.Fatalf("marshal connect request: %v", err)
+	}
+	connectRequest, err := http.NewRequest(http.MethodPost, baseURL+"/connect", strings.NewReader(string(connectBody)))
+	if err != nil {
+		t.Fatalf("create connect request: %v", err)
+	}
+	connectRequest.Header.Set("Content-Type", "application/json")
+	connectRequest.Header.Set(ACPHTTPProfileHeader, ACPHTTPProfileV1)
+	connectResponse, err := http.DefaultClient.Do(connectRequest)
+	if err != nil {
+		t.Fatalf("HTTP connect failed: %v", err)
+	}
+	var connected struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.NewDecoder(connectResponse.Body).Decode(&connected); err != nil {
+		connectResponse.Body.Close()
+		t.Fatalf("decode connect response: %v", err)
+	}
+	connectResponse.Body.Close()
+	request, _ := http.NewRequest(http.MethodGet, baseURL+"/stream?session_id="+connected.SessionID, nil)
+	request.Header.Set(ACPHTTPProfileHeader, ACPHTTPProfileV1)
+	resp, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatalf("HTTP request failed: %v", err)
 	}
@@ -214,10 +246,13 @@ func TestIsLoopbackAddr(t *testing.T) {
 		loopback bool
 	}{
 		{"127.0.0.1:9090", true},
+		{"127.0.0.2:9090", true},
 		{"localhost:9090", true},
+		{"LOCALHOST:9090", true},
 		{"[::1]:9090", true},
-		{":9090", true}, // empty host = all interfaces, treated as loopback for safety
+		{":9090", false},
 		{"0.0.0.0:9090", false},
+		{"[::]:9090", false},
 		{"192.168.1.100:9090", false},
 		{"10.0.0.1:9090", false},
 		{"example.com:9090", false},

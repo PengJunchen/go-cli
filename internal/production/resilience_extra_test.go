@@ -146,8 +146,9 @@ func TestTelemetryTracksLastSeen(t *testing.T) {
 	require.NoError(t, tm.Record(ctx, TelemetryMetric{Name: "gauge", Value: 1, Timestamp: t1}))
 	require.NoError(t, tm.Record(ctx, TelemetryMetric{Name: "gauge", Value: 2, Timestamp: t2}))
 
-	assert.Equal(t, 3.0, tm.Snapshot()["gauge"])
-	assert.WithinDuration(t, t2, tm.lastSeen["gauge"], time.Millisecond*10)
+	key := metricKey("gauge", nil)
+	assert.Equal(t, 3.0, tm.Snapshot()[key])
+	assert.WithinDuration(t, t2, tm.lastSeen[key], time.Millisecond*10)
 }
 
 // CircuitBreaker: RecoveryTimeout<=0 keeps the breaker Open indefinitely.

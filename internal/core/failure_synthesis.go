@@ -128,6 +128,7 @@ type FailureSynthesisMiddleware struct {
 }
 
 var _ Middleware = (*FailureSynthesisMiddleware)(nil)
+var _ CanonicalMiddleware = (*FailureSynthesisMiddleware)(nil)
 
 // NewFailureSynthesisMiddleware builds a middleware backed by the given
 // synthesizer.
@@ -147,6 +148,33 @@ func (m *FailureSynthesisMiddleware) Name() string {
 // synthesized recovery message.
 func (m *FailureSynthesisMiddleware) Wrap(next AgentLoop) AgentLoop {
 	return &failureSynthesisLoop{synthesizer: m.synthesizer, next: next}
+}
+
+func (m *FailureSynthesisMiddleware) WrapCanonical(next CanonicalLoop) CanonicalLoop {
+	return &canonicalFailureSynthesisLoop{synthesizer: m.synthesizer, next: next}
+}
+
+type canonicalFailureSynthesisLoop struct {
+	synthesizer FailureTurnSynthesizer
+	next        CanonicalLoop
+}
+
+func (l *canonicalFailureSynthesisLoop) RunCanonical(ctx context.Context, submission Submission, stream ...EventStream) (CanonicalRunResult, error) {
+	span, spanCtx := tracing.SpanFromContext(ctx, "middleware.failure-synthesis", tracing.SpanKindInternal)
+	defer span.End()
+	logger := tracing.NewTraceLogger(span, nil)
+
+	result, err := l.next.RunCanonical(spanCtx, submission, stream...)
+	if err != nil && l.synthesizer != nil && l.synthesizer.IsRecoverable(err) {
+		// The legacy event projection cannot prove the exact typed inputs and
+		// receipt boundaries needed to construct a second canonical invocation.
+		// Preserve the first attempt's authoritative delta and leave retry to
+		// lower-level provider retry middleware, which runs inside the loop.
+		errAttrs := canonicalErrorLogAttrs(err)
+		logger.Info("failure_synthesis.skip", append([]any{"recoverable", true, "canonical_transcript", true}, errAttrs...)...)
+		slog.Info("core.failure_synthesis.canonical_retry_skipped", append([]any{"recoverable", true}, errAttrs...)...)
+	}
+	return result, err
 }
 
 // failureSynthesisLoop is the concrete wrapped loop produced by

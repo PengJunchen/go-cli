@@ -61,3 +61,6 @@ jobs:
 
       - name: Run tests
         run: go test -race -count=1 ./...
+
+      - name: Run AST scanner gate
+        run: make scan

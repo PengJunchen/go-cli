@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -17,9 +18,8 @@ func TestAuthChainResolveCLIFlagWins(t *testing.T) {
 		{Name: authSourceCLI, Lookup: c.lookupCLIFlag},
 		{Name: authSourceEnv, Lookup: func(string) (string, error) { return "env-key", nil }},
 	})
-	got, err := c.Resolve("openai")
-	require.NoError(t, err)
-	assert.Equal(t, "flag-key", got)
+	_, err := c.Resolve("openai")
+	require.ErrorIs(t, err, ErrCredentialScopeRequired)
 }
 
 func TestAuthChainResolveEnvFallback(t *testing.T) {
@@ -29,9 +29,8 @@ func TestAuthChainResolveEnvFallback(t *testing.T) {
 		{Name: authSourceCLI, Lookup: c.lookupCLIFlag},
 		{Name: authSourceEnv, Lookup: lookupEnv},
 	})
-	got, err := c.Resolve("openai")
-	require.NoError(t, err)
-	assert.Equal(t, "env-key", got)
+	_, err := c.Resolve("openai")
+	require.ErrorIs(t, err, ErrCredentialScopeRequired)
 }
 
 func TestAuthChainResolveNotFound(t *testing.T) {
@@ -41,8 +40,7 @@ func TestAuthChainResolveNotFound(t *testing.T) {
 		{Name: authSourceEnv, Lookup: func(string) (string, error) { return "", ErrAuthNotFound }},
 	})
 	_, err := c.Resolve("nobody")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "nobody")
+	require.ErrorIs(t, err, ErrCredentialScopeRequired)
 }
 
 func TestAuthChainResolveAuthFile(t *testing.T) {
@@ -55,9 +53,8 @@ func TestAuthChainResolveAuthFile(t *testing.T) {
 			return readJSONKeyFile(authPath, provider)
 		}},
 	})
-	got, err := c.Resolve("openai")
-	require.NoError(t, err)
-	assert.Equal(t, "file-key", got)
+	_, err := c.Resolve("openai")
+	require.ErrorIs(t, err, ErrCredentialScopeRequired)
 }
 
 func TestAuthChainResolveModelsJSONFlat(t *testing.T) {
@@ -70,9 +67,8 @@ func TestAuthChainResolveModelsJSONFlat(t *testing.T) {
 			return readJSONKeyFile(modelsPath, provider)
 		}},
 	})
-	got, err := c.Resolve("anthropic")
-	require.NoError(t, err)
-	assert.Equal(t, "models-key", got)
+	_, err := c.Resolve("anthropic")
+	require.ErrorIs(t, err, ErrCredentialScopeRequired)
 }
 
 func TestAuthChainResolveModelsJSONNested(t *testing.T) {
@@ -101,9 +97,8 @@ func TestAuthChainResolveModelsJSONNested(t *testing.T) {
 			return "", ErrAuthNotFound
 		}},
 	})
-	got, err := c.Resolve("google")
-	require.NoError(t, err)
-	assert.Equal(t, "gmodels-key", got)
+	_, err := c.Resolve("google")
+	require.ErrorIs(t, err, ErrCredentialScopeRequired)
 }
 
 func TestEnvVarNames(t *testing.T) {
@@ -119,9 +114,132 @@ func TestAuthChainSetCLIFlagCaseInsensitive(t *testing.T) {
 	c.WithSources([]AuthSource{
 		{Name: authSourceCLI, Lookup: c.lookupCLIFlag},
 	})
-	got, err := c.Resolve("openai")
+	_, err := c.Resolve("openai")
+	require.ErrorIs(t, err, ErrCredentialScopeRequired)
+}
+
+func TestAuthChainProviderOnlyResolveFailsClosed(t *testing.T) {
+	lookups := 0
+	c := NewAuthChain().WithSources([]AuthSource{{
+		Name: "legacy-provider-only",
+		Lookup: func(string) (string, error) {
+			lookups++
+			return "unscoped-canary", nil
+		},
+	}})
+
+	_, err := c.Resolve("openai")
+	require.ErrorIs(t, err, ErrCredentialScopeRequired)
+	assert.Zero(t, lookups, "provider-only lookup cannot bind an unscoped credential")
+	assert.NotContains(t, err.Error(), "unscoped-canary")
+}
+
+func TestAuthChainResolveCredentialUsesExactScope(t *testing.T) {
+	want := AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test:443"}
+	lookups := 0
+	c := NewAuthChain().WithSources([]AuthSource{{
+		Name: "scoped",
+		LookupScoped: func(scope AuthScope) (string, error) {
+			lookups++
+			if scope == want {
+				return "scoped-canary", nil
+			}
+			return "", ErrAuthNotFound
+		},
+	}})
+
+	got, found, err := c.ResolveCredential(context.Background(), want.ProviderID, want.ProtocolID, want.Origin)
 	require.NoError(t, err)
-	assert.Equal(t, "flag-key", got)
+	assert.True(t, found)
+	assert.Equal(t, "scoped-canary", got)
+	assert.Equal(t, 1, lookups)
+
+	got, found, err = c.ResolveCredential(context.Background(), want.ProviderID, want.ProtocolID, "https://other.example.test:443")
+	require.NoError(t, err)
+	assert.False(t, found)
+	assert.Empty(t, got)
+	assert.Equal(t, 2, lookups)
+}
+
+func TestAuthScopeNormalizesEffectivePort(t *testing.T) {
+	scope, err := normalizeAuthScope(AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test:0443"})
+	require.NoError(t, err)
+	assert.Equal(t, "https://api.example.test:443", scope.Origin)
+}
+
+func TestAuthChainScopedCLIFlagDoesNotCrossProviderOrOrigin(t *testing.T) {
+	scope := AuthScope{ProviderID: "local", ProtocolID: "openai-compatible", Origin: "http://127.0.0.1:8080"}
+	c := NewAuthChain().WithScopedCLIFlag(scope, "local-canary")
+	c.WithSources([]AuthSource{{Name: authSourceCLI, LookupScoped: c.lookupScopedCLIFlag}})
+
+	got, found, err := c.ResolveCredential(context.Background(), scope.ProviderID, scope.ProtocolID, scope.Origin)
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, "local-canary", got)
+
+	got, found, err = c.ResolveCredential(context.Background(), "openai", scope.ProtocolID, scope.Origin)
+	require.NoError(t, err)
+	assert.False(t, found)
+	assert.Empty(t, got)
+	got, found, err = c.ResolveCredential(context.Background(), scope.ProviderID, scope.ProtocolID, "http://127.0.0.1:8081")
+	require.NoError(t, err)
+	assert.False(t, found)
+	assert.Empty(t, got)
+}
+
+func TestAuthChainScopedAuthFile(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	authPath := filepath.Join(dir, "auth.json")
+	scope := AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test:443"}
+	data := map[string]any{"credentials": []map[string]string{{
+		"provider": scope.ProviderID,
+		"protocol": scope.ProtocolID,
+		"origin":   scope.Origin,
+		"api_key":  "scoped-file-canary",
+	}}}
+	require.NoError(t, os.WriteFile(authPath, mustJSON(t, data), 0o600))
+
+	c := NewAuthChain().WithSources([]AuthSource{{
+		Name: authSourceAuthFile,
+		LookupScoped: func(scope AuthScope) (string, error) {
+			return lookupScopedAuthFilePath(authPath, scope)
+		},
+	}})
+	got, found, err := c.ResolveCredential(context.Background(), scope.ProviderID, scope.ProtocolID, scope.Origin)
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, "scoped-file-canary", got)
+	got, found, err = c.ResolveCredential(context.Background(), scope.ProviderID, scope.ProtocolID, "https://different.example.test:443")
+	require.NoError(t, err)
+	assert.False(t, found)
+	assert.Empty(t, got)
+}
+
+func TestAuthChainScopedEnvironmentAndLegacyFallbackIsolation(t *testing.T) {
+	scope := AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test"}
+	name, err := ScopedCredentialEnvName(scope)
+	require.NoError(t, err)
+	t.Setenv("OPENAI_API_KEY", "legacy-environment-canary")
+	t.Setenv(name, "scoped-environment-canary")
+	c := NewAuthChain().WithSources([]AuthSource{{
+		Name:   authSourceEnv,
+		Lookup: lookupEnv,
+		LookupScoped: func(scope AuthScope) (string, error) {
+			return lookupScopedEnv(scope)
+		},
+	}})
+
+	got, found, err := c.ResolveCredential(context.Background(), scope.ProviderID, scope.ProtocolID, scope.Origin)
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, "scoped-environment-canary", got)
+
+	t.Setenv(name, "")
+	got, found, err = c.ResolveCredential(context.Background(), scope.ProviderID, scope.ProtocolID, scope.Origin)
+	require.NoError(t, err)
+	assert.False(t, found)
+	assert.Empty(t, got)
 }
 
 // readJSONKeyFile is a small helper used by the file-based source tests to

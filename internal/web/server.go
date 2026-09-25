@@ -12,25 +12,13 @@ import (
 	"net"
 	"net/http"
 	"sync"
-	"time"
 )
 
 //go:embed index.html
 var indexHTML embed.FS
 
-// maxChatBodySize limits the JSON request body for /api/chat to 1 MiB.
-const maxChatBodySize = 1 << 20
-
-// maxSSEConnections limits the number of concurrent SSE connections to
-// prevent resource exhaustion.
-const maxSSEConnections = 64
-
-// WebServer is a self-contained HTTP server that provides a browser-based
-// Web UI for interacting with the go-cli. It exposes a simple chat interface
-// backed by JSON HTTP endpoints and an SSE streaming placeholder.
-//
-// The server has no dependency on the CLI assembly; chat responses are
-// placeholder echoes. Real CLI integration will be wired later.
+// WebServer serves the dashboard assets and health endpoint. Its chat and
+// stream routes remain unavailable until they are connected to a real run.
 type WebServer struct {
 	addr      string
 	authToken string
@@ -39,7 +27,6 @@ type WebServer struct {
 	mu     sync.Mutex
 	server *http.Server
 	ln     net.Listener
-	sseSem chan struct{} // concurrency limiter for SSE
 }
 
 // WebServerOption configures a WebServer.
@@ -56,8 +43,7 @@ func WithAuthToken(token string) WebServerOption {
 // NewWebServer creates a WebServer listening on addr.
 func NewWebServer(addr string, opts ...WebServerOption) *WebServer {
 	s := &WebServer{
-		addr:   addr,
-		sseSem: make(chan struct{}, maxSSEConnections),
+		addr: addr,
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -110,7 +96,8 @@ func (s *WebServer) checkAuth(r *http.Request) bool {
 }
 
 // Start binds the listener synchronously so that bind errors (e.g. port in
-// use) are returned to the caller, then begins serving HTTP requests.
+// use) are returned to the caller, then begins serving HTTP requests. Without
+// authentication, it accepts only explicit loopback IP bind addresses.
 func (s *WebServer) Start() error {
 	s.mu.Lock()
 	if s.server != nil {
@@ -118,6 +105,9 @@ func (s *WebServer) Start() error {
 		return nil
 	}
 	s.mu.Unlock()
+	if s.authToken == "" && !isExplicitLoopbackAddress(s.addr) {
+		return fmt.Errorf("web: bind %q requires configured authentication unless its host is an explicit loopback IP address", s.addr)
+	}
 
 	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {
@@ -141,6 +131,18 @@ func (s *WebServer) Start() error {
 		}
 	}()
 	return nil
+}
+
+// isExplicitLoopbackAddress accepts only literal loopback IP bind addresses.
+// Hostnames are intentionally not resolved here, avoiding a DNS check/use
+// mismatch between validation and net.Listen.
+func isExplicitLoopbackAddress(address string) bool {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil || host == "" {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // Stop gracefully shuts down the HTTP server.
@@ -200,87 +202,14 @@ func (s *WebServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"}) //nolint:errcheck
 }
 
-// chatRequest is the JSON body for POST /api/chat.
-type chatRequest struct {
-	Message string `json:"message"`
+// handleChat rejects the placeholder chat route until a real run owner is
+// connected.
+func (*WebServer) handleChat(w http.ResponseWriter, _ *http.Request) {
+	http.Error(w, "web chat is unavailable", http.StatusServiceUnavailable)
 }
 
-// chatResponse is the JSON body returned by POST /api/chat.
-type chatResponse struct {
-	Response string `json:"response"`
-}
-
-// handleChat accepts a chat message and returns a placeholder response.
-// The actual CLI integration will be wired later.
-func (s *WebServer) handleChat(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodPost {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Limit request body size to prevent memory exhaustion.
-	r.Body = http.MaxBytesReader(w, r.Body, maxChatBodySize)
-
-	var req chatRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "invalid JSON body", http.StatusBadRequest)
-		return
-	}
-
-	resp := chatResponse{
-		Response: fmt.Sprintf("Echo: %s", req.Message),
-	}
-
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
-	json.NewEncoder(w).Encode(resp) //nolint:errcheck
-}
-
-// handleWS is an SSE streaming placeholder. It echoes back a welcome event
-// and keeps the connection alive with periodic comments. Real streaming
-// integration will be wired later. Concurrent connections are limited by
-// maxSSEConnections to prevent resource exhaustion.
-func (s *WebServer) handleWS(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet {
-		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
-		return
-	}
-
-	// Acquire a semaphore slot; reject when at capacity.
-	select {
-	case s.sseSem <- struct{}{}:
-		defer func() { <-s.sseSem }()
-	default:
-		http.Error(w, "too many concurrent connections", http.StatusServiceUnavailable)
-		return
-	}
-
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming not supported", http.StatusInternalServerError)
-		return
-	}
-
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-cache")
-	w.Header().Set("Connection", "keep-alive")
-	w.WriteHeader(http.StatusOK)
-
-	// Send a welcome event so the client knows the stream is live.
-	fmt.Fprintf(w, "event: connected\ndata: {\"status\":\"connected\"}\n\n") //nolint:errcheck
-	flusher.Flush()
-
-	ticker := time.NewTicker(15 * time.Second)
-	defer ticker.Stop()
-
-	ctx := r.Context()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			fmt.Fprintf(w, ": keep-alive\n\n") //nolint:errcheck
-			flusher.Flush()
-		}
-	}
+// handleWS rejects the placeholder stream route before it can begin an SSE
+// response or claim that a client is connected.
+func (*WebServer) handleWS(w http.ResponseWriter, _ *http.Request) {
+	http.Error(w, "web stream is unavailable", http.StatusServiceUnavailable)
 }

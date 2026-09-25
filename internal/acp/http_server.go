@@ -8,12 +8,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/core"
@@ -29,40 +31,134 @@ const authSubjectKey contextKey = iota
 // memory by sending an arbitrarily large request body (DoS mitigation).
 const maxRequestBodySize = 1 * 1024 * 1024 // 1 MB
 
-// HTTPServer implements ACPServer, serving the ACP JSON-over-HTTP protocol.
-// It exposes four routes that mirror the gRPCAdapter client contract:
+const (
+	// ACPHTTPProfileHeader selects the private versioned HTTP profile.
+	ACPHTTPProfileHeader = "X-Go-CLI-ACP-Profile"
+	// ACPHTTPProfileV1 is the only HTTP ACP profile served by this adapter.
+	ACPHTTPProfileV1 = "go-cli-acp-json/1"
+
+	localLoopbackPrincipal = "local-loopback"
+)
+
+var (
+	errHTTPSessionNotFound      = errors.New("acp: session not found")
+	errHTTPSessionAliasMismatch = errors.New("acp: sender alias does not match session")
+	errHTTPSessionIDRequired    = errors.New("acp: session_id is required")
+	// ErrHTTPServerCleanupPending means a caller's wait expired before the
+	// server generation's owned work was joined.
+	ErrHTTPServerCleanupPending = errors.New("acp: HTTP server cleanup is pending")
+	// ErrHTTPServerAdmissionClosed means a terminal owner has sealed this
+	// server against any future Start call.
+	ErrHTTPServerAdmissionClosed = errors.New("acp: HTTP server admission is closed")
+	// ErrHTTPServerWorkerPanic reports that a detached request worker panicked.
+	ErrHTTPServerWorkerPanic = errors.New("acp: HTTP server request worker panicked")
+)
+
+// httpACPEnvelope is the HTTP-only envelope for the private ACP profile. The
+// shared ACPMessage wire type remains transport-neutral for the stdio adapter.
+type httpACPEnvelope struct {
+	Version    string            `json:"version,omitempty"`
+	SessionID  string            `json:"session_id,omitempty"`
+	Type       string            `json:"type,omitempty"`
+	SenderID   string            `json:"sender_id,omitempty"`
+	ReceiverID string            `json:"receiver_id,omitempty"`
+	Content    string            `json:"content,omitempty"`
+	Metadata   map[string]string `json:"metadata,omitempty"`
+	Timestamp  time.Time         `json:"timestamp,omitempty"`
+}
+
+func (envelope httpACPEnvelope) message() ACPMessage {
+	return ACPMessage{
+		Type:       envelope.Type,
+		SenderID:   envelope.SenderID,
+		ReceiverID: envelope.ReceiverID,
+		Content:    envelope.Content,
+		Metadata:   envelope.Metadata,
+		Timestamp:  envelope.Timestamp,
+	}
+}
+
+func httpEnvelopeFromMessage(sessionID string, msg ACPMessage) httpACPEnvelope {
+	return httpACPEnvelope{
+		Version:    ACPHTTPProfileV1,
+		SessionID:  sessionID,
+		Type:       msg.Type,
+		SenderID:   msg.SenderID,
+		ReceiverID: msg.ReceiverID,
+		Content:    msg.Content,
+		Metadata:   msg.Metadata,
+		Timestamp:  msg.Timestamp,
+	}
+}
+
+type httpSessionBinding struct {
+	principalID string
+	senderAlias string
+	session     *Session
+}
+
+type httpServerGeneration struct {
+	server      *http.Server
+	ctx         context.Context
+	cancel      context.CancelFunc
+	serveDone   chan struct{}
+	startDone   chan struct{}
+	cleanupDone chan struct{}
+	closeDone   chan struct{}
+	dispatches  sync.WaitGroup
+	requests    sync.WaitGroup
+	closing     bool
+	admitting   bool
+	serveErr    error
+	closeErr    error
+	workerPanic atomic.Bool
+}
+
+type httpServerCleanupPendingError struct {
+	cause error
+	done  <-chan struct{}
+}
+
+func (e *httpServerCleanupPendingError) Error() string {
+	return ErrHTTPServerCleanupPending.Error() + ": " + e.cause.Error()
+}
+
+func (e *httpServerCleanupPendingError) Unwrap() error {
+	return errors.Join(ErrHTTPServerCleanupPending, e.cause)
+}
+
+func (e *httpServerCleanupPendingError) Done() <-chan struct{} { return e.done }
+
+// HTTPServer implements ACPServer over the private go-cli-acp-json/1 HTTP
+// profile. It exposes these routes:
 //
 //   - POST /connect     — establish a session
 //   - POST /send        — deliver an ACP message for processing
 //   - POST /disconnect  — tear down a session
 //   - GET  /stream      — drain pending response messages (NDJSON)
 //
-// Sessions are tracked by SenderID (used as an internal routing key). The
-// /stream endpoint requires a ?sender_id= query parameter for per-session
-// streaming; global drain (all sessions without sender_id) is not allowed
-// to prevent cross-session data leakage.
-//
-// When auth is enabled via SetAuth, all routes require a Bearer token and
-// the /stream, /events endpoints bind sender_id to the authenticated subject
-// instead of an arbitrary query parameter. Session IDs are always generated
-// server-side using crypto/rand to prevent session fixation attacks.
+// Sessions are tracked by an opaque server-generated transport session ID
+// and bound to the authenticated principal. sender_id is a display alias only.
+// This HTTP server implements the private go-cli-acp-json/1 profile; it does
+// not claim a durable R2 session or official ACP interoperability.
 type HTTPServer struct {
 	name        string
 	addr        string
 	handler     *CoreHandler
-	eventBus    core.EventBus
 	authToken   string
 	authSubject string
 	tlsCertFile string
 	tlsKeyFile  string
 
-	mu       sync.Mutex
-	sessions map[string]*Session
-	server   *http.Server
-	ln       net.Listener
-	ctx      context.Context
-	cancel   context.CancelFunc
-	running  bool
+	mu         sync.Mutex
+	sessions   map[string]httpSessionBinding
+	generation *httpServerGeneration
+	server     *http.Server
+	ln         net.Listener
+	ctx        context.Context
+	cancel     context.CancelFunc
+	running    bool
+	sealed     bool
 
 	// maxConcurrency limits the number of concurrent in-flight requests.
 	// Default: 64. Set before calling Start.
@@ -75,8 +171,9 @@ type HTTPServer struct {
 	// cleanupInterval is how often the cleanup goroutine checks for idle
 	// sessions. Default: 5 minutes.
 	cleanupInterval time.Duration
-	// lastActivity tracks the last activity time for each session (by senderID).
-	lastActivity map[string]time.Time
+	// lastActivity tracks the last activity time for each opaque session ID.
+	lastActivity    map[string]time.Time
+	sessionIDReader io.Reader
 }
 
 var _ ACPServer = (*HTTPServer)(nil)
@@ -89,25 +186,26 @@ func NewHTTPServer(name, addr string, handler *CoreHandler) *HTTPServer {
 		name:            name,
 		addr:            addr,
 		handler:         handler,
-		sessions:        make(map[string]*Session),
+		sessions:        make(map[string]httpSessionBinding),
 		maxConcurrency:  64,
 		sessionTTL:      30 * time.Minute,
 		cleanupInterval: 5 * time.Minute,
 		lastActivity:    make(map[string]time.Time),
+		sessionIDReader: rand.Reader,
 	}
 }
 
-// SetEventBus wires an EventBus for SSE fan-out. When set, the /events
-// endpoint subscribes to the bus for live event streaming (each SSE
-// connection gets its own independent channel). When nil (or not called),
-// the /events endpoint falls back to the per-session events channel.
-func (s *HTTPServer) SetEventBus(bus core.EventBus) {
-	s.eventBus = bus
-}
+// SetEventBus is retained for source compatibility. /events uses a
+// session-local atomic replay/live subscription; a process-wide bus cannot
+// preserve session isolation or replay cutover semantics.
+//
+// Deprecated: wire event forwarding on CoreHandler if another observer needs
+// the process-wide event bus.
+func (s *HTTPServer) SetEventBus(_ core.EventBus) {}
 
 // SetAuth enables bearer-token authentication. When set, all routes require
-// an Authorization: Bearer <token> header and /stream, /events bind sender_id
-// to the authenticated subject instead of an arbitrary query parameter.
+// an Authorization: Bearer <token> header and each transport session is bound
+// to the configured authenticated subject.
 func (s *HTTPServer) SetAuth(token, subject string) {
 	s.authToken = token
 	s.authSubject = subject
@@ -125,6 +223,10 @@ func (s *HTTPServer) SetTLS(certFile, keyFile string) {
 // without a valid Bearer token receive 401 with a WWW-Authenticate header.
 func (s *HTTPServer) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if s.authSubject == "" {
+			http.Error(w, "authenticated principal is not configured", http.StatusServiceUnavailable)
+			return
+		}
 		auth := r.Header.Get("Authorization")
 		if !strings.HasPrefix(auth, "Bearer ") {
 			w.Header().Set("WWW-Authenticate", "Bearer")
@@ -139,6 +241,17 @@ func (s *HTTPServer) authMiddleware(next http.Handler) http.Handler {
 		}
 		ctx := context.WithValue(r.Context(), authSubjectKey, s.authSubject)
 		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
+
+func (s *HTTPServer) profileMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		profiles := r.Header.Values(ACPHTTPProfileHeader)
+		if len(profiles) != 1 || profiles[0] != ACPHTTPProfileV1 {
+			http.Error(w, "missing or unsupported ACP HTTP profile", http.StatusBadRequest)
+			return
+		}
+		next.ServeHTTP(w, r)
 	})
 }
 
@@ -180,24 +293,31 @@ func (s *HTTPServer) bodyLimitMiddleware(next http.Handler) http.Handler {
 // caller rather than silently logged.
 func (s *HTTPServer) Start(ctx context.Context) error {
 	s.mu.Lock()
+	if s.sealed {
+		s.mu.Unlock()
+		return ErrHTTPServerAdmissionClosed
+	}
 	if s.running {
 		s.mu.Unlock()
 		return nil
 	}
-	s.running = true
+	if previous := s.generation; previous != nil && !channelClosed(previous.closeDone) {
+		s.mu.Unlock()
+		return &httpServerCleanupPendingError{cause: ErrHTTPServerCleanupPending, done: previous.closeDone}
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	ln, err := net.Listen("tcp", s.addr)
+	if err != nil {
+		s.mu.Unlock()
+		return fmt.Errorf("acp: listen %s: %w", s.addr, err)
+	}
+
 	if s.maxConcurrency <= 0 {
 		s.maxConcurrency = 64
 	}
 	s.sem = make(chan struct{}, s.maxConcurrency)
-	s.mu.Unlock()
-
-	ln, err := net.Listen("tcp", s.addr)
-	if err != nil {
-		s.mu.Lock()
-		s.running = false
-		s.mu.Unlock()
-		return fmt.Errorf("acp: listen %s: %w", s.addr, err)
-	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/connect", s.handleConnect)
@@ -208,75 +328,184 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 
 	handler := http.Handler(mux)
 	handler = s.bodyLimitMiddleware(handler)
+	handler = s.profileMiddleware(handler)
 	if s.authToken != "" {
 		handler = s.authMiddleware(handler)
 	}
 	handler = s.rateLimitMiddleware(handler)
 
+	genCtx, cancel := context.WithCancel(ctx)
+	generation := &httpServerGeneration{
+		ctx:         genCtx,
+		cancel:      cancel,
+		serveDone:   make(chan struct{}),
+		startDone:   make(chan struct{}),
+		cleanupDone: make(chan struct{}),
+		closeDone:   make(chan struct{}),
+		admitting:   true,
+	}
+	handler = s.generationRequestMiddleware(generation, handler)
+
 	srv := &http.Server{
 		Addr:    s.addr,
 		Handler: handler,
 	}
+	generation.server = srv
 
-	s.mu.Lock()
+	s.generation = generation
+	s.running = true
 	s.server = srv
 	s.ln = ln
-	s.ctx, s.cancel = context.WithCancel(ctx)
+	s.ctx = genCtx
+	s.cancel = cancel
+	serveTLS := s.tlsCertFile != "" && s.tlsKeyFile != ""
+	tlsCertFile := s.tlsCertFile
+	tlsKeyFile := s.tlsKeyFile
+	listenAddr := ln.Addr().String()
+	name := s.name
 	s.mu.Unlock()
 
-	slog.Info("acp.server.start", "name", s.name, "addr", ln.Addr().String(), "tls", s.tlsCertFile != "")
 	go func() {
-		if s.tlsCertFile != "" && s.tlsKeyFile != "" {
-			if err := srv.ServeTLS(ln, s.tlsCertFile, s.tlsKeyFile); err != nil && err != http.ErrServerClosed {
+		defer close(generation.serveDone)
+		if serveTLS {
+			if err := srv.ServeTLS(ln, tlsCertFile, tlsKeyFile); err != nil && err != http.ErrServerClosed {
+				generation.serveErr = err
 				slog.Error("acp.server.serve_tls_failed", "err", err)
 			}
 		} else {
 			if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+				generation.serveErr = err
 				slog.Error("acp.server.serve_failed", "err", err)
 			}
 		}
 	}()
 
 	// Start session cleanup goroutine for idle session reclamation.
-	go s.sessionCleanupLoop()
+	go s.sessionCleanupLoop(generation)
+	defer close(generation.startDone)
+	slog.Info("acp.server.start", "name", name, "addr", listenAddr, "tls", serveTLS)
 
 	return nil
+}
+
+// BeginStop closes request admission and starts the server-owned close
+// operation without waiting for its handlers or dispatch workers. It is safe
+// to call before Stop; repeated calls share the same generation owner.
+func (s *HTTPServer) BeginStop() {
+	s.beginStop(false)
+}
+
+// SealAdmission permanently prevents future Start calls and closes admission
+// for the current generation. Assembly owners use this when the server is a
+// terminally owned resource rather than a reusable standalone server.
+func (s *HTTPServer) SealAdmission() {
+	s.beginStop(true)
+}
+
+func (s *HTTPServer) beginStop(seal bool) *httpServerGeneration {
+	s.mu.Lock()
+	if seal {
+		s.sealed = true
+	}
+	generation := s.generation
+	if generation == nil {
+		s.mu.Unlock()
+		return nil
+	}
+	startOwner := !generation.closing
+	if startOwner {
+		generation.closing = true
+		generation.admitting = false
+		s.running = false
+		s.server = nil
+		s.ln = nil
+		s.cancel = nil
+		// Close all sessions before HTTP shutdown so stream handlers can leave.
+		for id, binding := range s.sessions {
+			binding.session.Close()
+			delete(s.sessions, id)
+		}
+		s.lastActivity = make(map[string]time.Time)
+	}
+	s.mu.Unlock()
+
+	if startOwner {
+		// Launch before any potentially blocking cancellation or logging
+		// callback so the caller remains bounded even with a custom slog handler.
+		go s.closeGeneration(generation)
+	}
+	return generation
 }
 
 // Stop shuts the server down and releases all sessions. It cancels the
 // server-level context to abort any in-flight dispatch goroutines, then
 // gracefully shuts down the HTTP server.
 func (s *HTTPServer) Stop(ctx context.Context) error {
-	s.mu.Lock()
-	if !s.running {
-		s.mu.Unlock()
+	generation := s.beginStop(false)
+	if generation == nil {
 		return nil
 	}
-	s.running = false
-	server := s.server
-	s.server = nil
-	s.ln = nil
-	cancel := s.cancel
-	s.cancel = nil
-
-	// Close all sessions.
-	for id, sess := range s.sessions {
-		sess.Close()
-		delete(s.sessions, id)
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	s.lastActivity = make(map[string]time.Time)
-	s.mu.Unlock()
-
-	// Cancel server context to abort in-flight dispatch goroutines.
-	if cancel != nil {
-		cancel()
+	select {
+	case <-generation.closeDone:
+		return generation.closeErr
+	case <-ctx.Done():
+		select {
+		case <-generation.closeDone:
+			return generation.closeErr
+		default:
+			return &httpServerCleanupPendingError{cause: ctx.Err(), done: generation.closeDone}
+		}
 	}
+}
 
+func (s *HTTPServer) closeGeneration(generation *httpServerGeneration) {
+	// Cancel server context to ask handlers and detached dispatch workers to
+	// stop. The close owner still joins each worker before publishing Done.
+	generation.cancel()
 	slog.Info("acp.server.stop", "name", s.name)
-	if server != nil {
-		return server.Shutdown(ctx)
+	if err := generation.server.Shutdown(context.Background()); err != nil {
+		generation.closeErr = errors.Join(generation.closeErr, err)
 	}
-	return nil
+	<-generation.serveDone
+	<-generation.cleanupDone
+	generation.requests.Wait()
+	generation.dispatches.Wait()
+	<-generation.startDone
+	generation.closeErr = errors.Join(generation.closeErr, generation.serveErr)
+	if generation.workerPanic.Load() {
+		generation.closeErr = errors.Join(generation.closeErr, ErrHTTPServerWorkerPanic)
+	}
+	close(generation.closeDone)
+}
+
+func (s *HTTPServer) generationRequestMiddleware(generation *httpServerGeneration, next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		if s.generation != generation || !generation.admitting {
+			s.mu.Unlock()
+			http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
+			return
+		}
+		generation.requests.Add(1)
+		s.mu.Unlock()
+		defer generation.requests.Done()
+		next.ServeHTTP(w, r)
+	})
+}
+
+func channelClosed(ch <-chan struct{}) bool {
+	if ch == nil {
+		return false
+	}
+	select {
+	case <-ch:
+		return true
+	default:
+		return false
+	}
 }
 
 // Name returns the server identity.
@@ -301,90 +530,169 @@ func (s *HTTPServer) Running() bool {
 	return s.running
 }
 
-// generateSessionID generates a cryptographically random 32-byte session ID,
-// returned as a 64-character hex-encoded string. The ID is generated
-// server-side to prevent session fixation attacks — client-provided SenderIDs
-// are never used as session identifiers.
-func generateSessionID() string {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		panic(fmt.Sprintf("acp: crypto/rand failed: %v", err))
+// requestPrincipal returns the authenticated principal, or the fixed
+// loopback principal used when bearer authentication is disabled. The latter
+// is safe only because serve setup restricts unauthenticated HTTP to loopback.
+func requestPrincipal(r *http.Request) string {
+	if subject := authSubjectFromContext(r.Context()); subject != "" {
+		return subject
 	}
-	return hex.EncodeToString(b)
+	return localLoopbackPrincipal
 }
 
-// getOrCreateSession returns the session for senderID, creating one if it
-// does not exist. New sessions are assigned a server-generated random ID
-// (not the client-provided senderID) to prevent session fixation.
-func (s *HTTPServer) getOrCreateSession(senderID string) *Session {
+func (s *HTTPServer) createSession(principalID, senderAlias string) (*Session, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess, ok := s.sessions[senderID]
-	if !ok {
-		sess = NewSession(generateSessionID())
-		s.sessions[senderID] = sess
+	if !s.running || s.generation == nil || !s.generation.admitting {
+		return nil, ErrHTTPServerCleanupPending
 	}
-	s.lastActivity[senderID] = time.Now()
-	return sess
+
+	reader := s.sessionIDReader
+	if reader == nil {
+		reader = rand.Reader
+	}
+	for range 4 {
+		var idBytes [32]byte
+		if _, err := io.ReadFull(reader, idBytes[:]); err != nil {
+			return nil, errors.New("acp: failed to generate session identifier")
+		}
+		sessionID := hex.EncodeToString(idBytes[:])
+		if _, exists := s.sessions[sessionID]; exists {
+			continue
+		}
+		session := NewSession(sessionID)
+		s.sessions[sessionID] = httpSessionBinding{
+			principalID: principalID,
+			senderAlias: senderAlias,
+			session:     session,
+		}
+		s.lastActivity[sessionID] = time.Now()
+		return session, nil
+	}
+	return nil, errors.New("acp: failed to allocate unique session identifier")
 }
 
-// getSession returns the session for senderID, or nil if not found.
-func (s *HTTPServer) getSession(senderID string) *Session {
+func (s *HTTPServer) getSessionBinding(sessionID, principalID, senderAlias string) (httpSessionBinding, error) {
+	if sessionID == "" {
+		return httpSessionBinding{}, errHTTPSessionIDRequired
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess := s.sessions[senderID]
-	if sess != nil {
-		s.lastActivity[senderID] = time.Now()
+	binding, ok := s.sessions[sessionID]
+	if !ok || binding.principalID != principalID {
+		return httpSessionBinding{}, errHTTPSessionNotFound
 	}
-	return sess
+	if senderAlias != "" && senderAlias != binding.senderAlias {
+		return httpSessionBinding{}, errHTTPSessionAliasMismatch
+	}
+	s.lastActivity[sessionID] = time.Now()
+	return binding, nil
 }
 
-// removeSession closes and removes the session for senderID.
-func (s *HTTPServer) removeSession(senderID string) *Session {
+func (s *HTTPServer) removeSession(sessionID, principalID, senderAlias string) (*Session, error) {
+	if sessionID == "" {
+		return nil, errHTTPSessionIDRequired
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	sess, ok := s.sessions[senderID]
-	if !ok {
-		return nil
+	binding, ok := s.sessions[sessionID]
+	if !ok || binding.principalID != principalID {
+		return nil, errHTTPSessionNotFound
 	}
-	delete(s.sessions, senderID)
-	delete(s.lastActivity, senderID)
-	return sess
+	if senderAlias != "" && senderAlias != binding.senderAlias {
+		return nil, errHTTPSessionAliasMismatch
+	}
+	delete(s.sessions, sessionID)
+	delete(s.lastActivity, sessionID)
+	return binding.session, nil
 }
 
-// handleConnect processes POST /connect requests. It creates a session for
-// the client's SenderID and returns the server-generated session ID in the
-// response body. The client-provided SenderID is used as an internal routing
-// key but is never exposed as the session ID, preventing session fixation.
+func decodeHTTPEnvelope(w http.ResponseWriter, r *http.Request, allowEmpty bool) (httpACPEnvelope, bool) {
+	var envelope httpACPEnvelope
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(&envelope); err != nil {
+		if errors.Is(err, io.EOF) && allowEmpty {
+			return envelope, true
+		}
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return envelope, false
+		}
+		http.Error(w, "invalid JSON request body", http.StatusBadRequest)
+		return envelope, false
+	}
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return envelope, false
+		}
+		http.Error(w, "invalid JSON request body", http.StatusBadRequest)
+		return envelope, false
+	}
+	return envelope, true
+}
+
+func writeSessionLookupError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, errHTTPSessionIDRequired):
+		http.Error(w, "session_id is required", http.StatusBadRequest)
+	case errors.Is(err, errHTTPSessionAliasMismatch):
+		http.Error(w, "sender_id does not match session alias", http.StatusBadRequest)
+	case errors.Is(err, errHTTPSessionNotFound):
+		http.Error(w, "session not found", http.StatusNotFound)
+	default:
+		http.Error(w, "session unavailable", http.StatusInternalServerError)
+	}
+}
+
+func validateOptionalEnvelopeVersion(w http.ResponseWriter, envelope httpACPEnvelope) bool {
+	if envelope.Version != "" && envelope.Version != ACPHTTPProfileV1 {
+		http.Error(w, "unsupported ACP HTTP envelope version", http.StatusBadRequest)
+		return false
+	}
+	return true
+}
+
+// handleConnect creates an ephemeral session bound to the request principal.
+// sender_id is stored only as a display alias; the server generates the
+// opaque session_id used by all subsequent requests.
 func (s *HTTPServer) handleConnect(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	var msg ACPMessage
-	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
-			return
-		}
-		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+	envelope, ok := decodeHTTPEnvelope(w, r, false)
+	if !ok {
 		return
 	}
-
-	senderID := msg.SenderID
-	if senderID == "" {
-		senderID = "anonymous"
+	if envelope.Version != ACPHTTPProfileV1 {
+		http.Error(w, "missing or unsupported ACP HTTP envelope version", http.StatusBadRequest)
+		return
 	}
-
-	sess := s.getOrCreateSession(senderID)
-
-	slog.Info("acp.server.connect", "sender", senderID, "session_id", sess.ID())
+	senderAlias := envelope.SenderID
+	if senderAlias == "" {
+		senderAlias = "anonymous"
+	}
+	sess, err := s.createSession(requestPrincipal(r), senderAlias)
+	if err != nil {
+		if errors.Is(err, ErrHTTPServerCleanupPending) {
+			http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
+			return
+		}
+		slog.Error("acp.server.connect_failed", "name", s.name, "reason", "session_id_unavailable")
+		http.Error(w, "unable to create session", http.StatusInternalServerError)
+		return
+	}
+	slog.Info("acp.server.connect", "name", s.name, "status", "connected")
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{ //nolint:errcheck
+		"version":    ACPHTTPProfileV1,
 		"session_id": sess.ID(),
 		"status":     "connected",
 	})
@@ -398,27 +706,25 @@ func (s *HTTPServer) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var msg ACPMessage
-	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
-			return
-		}
-		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+	envelope, ok := decodeHTTPEnvelope(w, r, false)
+	if !ok {
 		return
 	}
+	if !validateOptionalEnvelopeVersion(w, envelope) {
+		return
+	}
+	msg := envelope.message()
+	binding, err := s.getSessionBinding(envelope.SessionID, requestPrincipal(r), msg.SenderID)
+	if err != nil {
+		writeSessionLookupError(w, err)
+		return
+	}
+	sess := binding.session
+	msg.SenderID = binding.senderAlias
 
 	if msg.Timestamp.IsZero() {
 		msg.Timestamp = time.Now()
 	}
-
-	senderID := msg.SenderID
-	if senderID == "" {
-		senderID = "anonymous"
-	}
-
-	sess := s.getOrCreateSession(senderID)
 
 	// Process the message asynchronously to avoid blocking the HTTP
 	// response. The response (if any) is enqueued onto the session and
@@ -427,17 +733,40 @@ func (s *HTTPServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	// as this handler returns.
 	if s.handler != nil {
 		s.mu.Lock()
-		srvCtx := s.ctx
+		generation := s.generation
+		if generation == nil || !generation.admitting {
+			s.mu.Unlock()
+			http.Error(w, "server is shutting down", http.StatusServiceUnavailable)
+			return
+		}
+		srvCtx := generation.ctx
+		generation.dispatches.Add(1)
 		s.mu.Unlock()
 		if srvCtx != nil {
-			go s.handler.ProcessMessage(srvCtx, msg, sess)
+			dispatchCtx := context.WithValue(srvCtx, dispatchIdentityContextKey{}, dispatchIdentity{
+				principalID: binding.principalID,
+				sessionID:   sess.ID(),
+				session:     sess,
+			})
+			go func() {
+				defer func() {
+					if recover() != nil {
+						generation.workerPanic.Store(true)
+						slog.Error("acp.server.process_message_panicked", "name", s.name, "reason", "panic")
+					}
+					generation.dispatches.Done()
+				}()
+				s.handler.ProcessMessage(dispatchCtx, msg, sess)
+			}()
+		} else {
+			generation.dispatches.Done()
 		}
 	} else {
 		// Echo mode: respond with an ack.
 		sess.Enqueue(ACPMessage{
 			Type:       TypeAck,
 			SenderID:   s.name,
-			ReceiverID: senderID,
+			ReceiverID: msg.SenderID,
 			Content:    "message received",
 			Timestamp:  time.Now(),
 		})
@@ -446,80 +775,57 @@ func (s *HTTPServer) handleSend(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
-// handleDisconnect processes POST /disconnect requests. It closes and
-// removes the session for the client's SenderID.
+// handleDisconnect removes only the session bound to this request principal.
 func (s *HTTPServer) handleDisconnect(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	var msg ACPMessage
-	if err := json.NewDecoder(r.Body).Decode(&msg); err != nil {
-		var maxErr *http.MaxBytesError
-		if errors.As(err, &maxErr) {
-			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
-			return
-		}
-		// Allow empty body disconnect.
-		msg.SenderID = ""
+	envelope, ok := decodeHTTPEnvelope(w, r, true)
+	if !ok {
+		return
 	}
-
-	senderID := msg.SenderID
-	if senderID == "" {
-		// Try to get from query parameter.
-		senderID = r.URL.Query().Get("sender_id")
+	if !validateOptionalEnvelopeVersion(w, envelope) {
+		return
 	}
-
-	sess := s.removeSession(senderID)
-	if sess != nil {
-		sess.Close()
+	if envelope.SessionID == "" {
+		envelope.SessionID = r.URL.Query().Get("session_id")
 	}
+	sess, err := s.removeSession(envelope.SessionID, requestPrincipal(r), envelope.SenderID)
+	if err != nil {
+		writeSessionLookupError(w, err)
+		return
+	}
+	sess.Close()
 
-	slog.Info("acp.server.disconnect", "sender", senderID)
+	slog.Info("acp.server.disconnect", "name", s.name, "status", "disconnected")
 	w.WriteHeader(http.StatusOK)
 }
 
-// handleStream processes GET /stream requests. It drains pending messages
-// for the requested session (via ?sender_id= query parameter) and writes
-// them as newline-delimited JSON. A sender_id query parameter is always
-// required — draining all sessions (global drain) is not allowed, to
-// prevent unauthorized access to other clients' messages. When auth is
-// enabled, sender_id is bound to the authenticated subject.
+// handleStream drains only a session whose opaque ID is bound to the current
+// principal. sender_id is an optional display-alias consistency check.
 func (s *HTTPServer) handleStream(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	senderID := r.URL.Query().Get("sender_id")
-
-	// When auth is enabled, bind sender_id to the authenticated subject.
-	if subject := authSubjectFromContext(r.Context()); subject != "" {
-		senderID = subject
-	}
-
-	// Require sender_id — global drain (all sessions) is not allowed
-	// to prevent cross-session data leakage.
-	if senderID == "" {
-		http.Error(w, "sender_id query parameter is required", http.StatusBadRequest)
+	sessionID := r.URL.Query().Get("session_id")
+	senderAlias := r.URL.Query().Get("sender_id")
+	binding, err := s.getSessionBinding(sessionID, requestPrincipal(r), senderAlias)
+	if err != nil {
+		writeSessionLookupError(w, err)
 		return
 	}
+	sess := binding.session
 
 	w.Header().Set("Content-Type", "application/x-ndjson")
 	w.WriteHeader(http.StatusOK)
 
 	flusher, _ := w.(http.Flusher)
 
-	// Drain messages for a specific session.
-	sess := s.getSession(senderID)
-	if sess == nil {
-		if flusher != nil {
-			flusher.Flush()
-		}
-		return
-	}
-	s.writeMessages(w, sess.Drain())
+	s.writeMessages(w, sessionID, sess.Drain())
 
 	if flusher != nil {
 		flusher.Flush()
@@ -527,9 +833,9 @@ func (s *HTTPServer) handleStream(w http.ResponseWriter, r *http.Request) {
 }
 
 // writeMessages writes messages as newline-delimited JSON to w.
-func (s *HTTPServer) writeMessages(w http.ResponseWriter, msgs []ACPMessage) {
+func (s *HTTPServer) writeMessages(w http.ResponseWriter, sessionID string, msgs []ACPMessage) {
 	for _, msg := range msgs {
-		data, err := json.Marshal(msg)
+		data, err := json.Marshal(httpEnvelopeFromMessage(sessionID, msg))
 		if err != nil {
 			continue
 		}
@@ -538,77 +844,64 @@ func (s *HTTPServer) writeMessages(w http.ResponseWriter, msgs []ACPMessage) {
 }
 
 // handleEvents processes GET /events requests. It opens an SSE long-lived
-// connection that streams core.AgentEvents. The connection stays open until
-// the client disconnects, the session is closed, or the server shuts down.
-// A keep-alive comment is sent every 15 seconds to prevent intermediary
-// proxies from closing idle connections.
-//
-// Last-Event-ID reconnection: when the client sends a Last-Event-ID request
-// header, the server replays missed events from the session's ring buffer
-// (entries whose ID exceeds the header value) before streaming live events.
-//
-// EventBus fan-out: when an EventBus is wired (via SetEventBus), live events
-// are read from a per-connection subscription channel. When no bus is
-// configured, live events are read from the per-session events channel
-// (backward compatible).
+// connection that streams the session's events. Replay and bounded live
+// delivery are registered atomically by Session.SubscribeAfter. A keep-alive
+// comment is sent every 15 seconds to prevent intermediary proxies from
+// closing idle connections.
 func (s *HTTPServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
 
-	senderID := r.URL.Query().Get("sender_id")
-
-	// When auth is enabled, bind sender_id to the authenticated subject.
-	if subject := authSubjectFromContext(r.Context()); subject != "" {
-		senderID = subject
-	}
-
-	if senderID == "" {
-		http.Error(w, "sender_id query parameter is required", http.StatusBadRequest)
+	sessionID := r.URL.Query().Get("session_id")
+	senderAlias := r.URL.Query().Get("sender_id")
+	binding, err := s.getSessionBinding(sessionID, requestPrincipal(r), senderAlias)
+	if err != nil {
+		writeSessionLookupError(w, err)
 		return
 	}
+	sess := binding.session
 
-	sess := s.getSession(senderID)
-	if sess == nil {
-		http.Error(w, "session not found", http.StatusNotFound)
+	// Parse Last-Event-ID before registering so malformed cursors cannot
+	// silently restart replay from the beginning of the retained ring.
+	var afterID uint64
+	if idStr := r.Header.Get("Last-Event-ID"); idStr != "" {
+		id, err := strconv.ParseUint(idStr, 10, 64)
+		if err != nil {
+			http.Error(w, "invalid Last-Event-ID", http.StatusBadRequest)
+			return
+		}
+		afterID = id
+	}
+
+	// Snapshot and register live delivery under the same Session lock used by
+	// PublishEvent. An event racing this call is present in Replay or Events.
+	subscription, err := sess.SubscribeAfter(afterID)
+	if err != nil {
+		if errors.Is(err, ErrEventCursorAhead) {
+			http.Error(w, "Last-Event-ID is ahead of the current session event", http.StatusBadRequest)
+			return
+		}
+		http.Error(w, "failed to subscribe to session events", http.StatusInternalServerError)
 		return
 	}
+	defer subscription.Close()
 
 	sse, ok := NewSSEWriter(w)
 	if !ok {
 		http.Error(w, "streaming not supported", http.StatusInternalServerError)
 		return
 	}
-
-	// --- Last-Event-ID reconnection ---
-	// Parse the Last-Event-ID header (if present) and replay missed events
-	// from the session's ring buffer. EventHistorySince returns the missed
-	// entries and the current last sequence ID atomically, so we can safely
-	// assign IDs to subsequent live-stream reads starting from lastSeq+1.
-	var afterID uint64
-	if idStr := r.Header.Get("Last-Event-ID"); idStr != "" {
-		if id, err := strconv.ParseUint(idStr, 10, 64); err == nil {
-			afterID = id
-		}
-	}
-	entries, lastSeq := sess.EventHistorySince(afterID)
-	nextID := lastSeq + 1
-	for _, e := range entries {
-		if err := sse.WriteEventWithID(e.ID, e.Event.Kind, e.Event); err != nil {
+	if gap := subscription.HistoryGap; gap != nil {
+		if err := sse.WriteEventWithID(gap.Cursor, "event_gap", gap); err != nil {
 			return
 		}
 	}
-
-	// --- Live event source ---
-	// When an EventBus is wired, subscribe for fan-out (each connection gets
-	// its own independent channel). Otherwise, fall back to the per-session
-	// events channel.
-	var eventCh <-chan core.AgentEvent
-	if s.eventBus != nil {
-		eventCh = s.eventBus.Subscribe(r.Context())
-	} else {
-		eventCh = sess.Events()
+	for _, e := range subscription.Replay {
+		if err := sse.WriteEventWithID(e.ID, e.Event.Kind, e.Event); err != nil {
+			return
+		}
 	}
 
 	ticker := time.NewTicker(15 * time.Second)
@@ -619,19 +912,38 @@ func (s *HTTPServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 		select {
 		case <-ctx.Done():
 			return
-		case ev, ok := <-eventCh:
+		case entry, ok := <-subscription.Events():
 			if !ok {
-				// Channel closed (session closed or bus shut down).
+				_ = finishClosedEventSubscription(sse, subscription)
 				return
 			}
-			if err := sse.WriteEventWithID(nextID, ev.Kind, ev); err != nil {
+			if err := sse.WriteEventWithID(entry.ID, entry.Event.Kind, entry.Event); err != nil {
 				return
 			}
-			nextID++
+		case <-subscription.Done():
+			_ = finishClosedEventSubscription(sse, subscription)
+			return
 		case <-ticker.C:
 			sse.WriteComment("keep-alive")
 		}
 	}
+}
+
+// finishClosedEventSubscription detaches the subscriber, drains the complete
+// buffered prefix, and reports its frozen gap when one exists. Both closed
+// channel cases use this path because Session.Close closes Events and Done
+// together, making select case choice nondeterministic.
+func finishClosedEventSubscription(sse *SSEWriter, subscription *EventSubscription) error {
+	gap := subscription.Close()
+	for entry := range subscription.Events() {
+		if err := sse.WriteEventWithID(entry.ID, entry.Event.Kind, entry.Event); err != nil {
+			return err
+		}
+	}
+	if gap != nil {
+		return sse.WriteEventWithID(gap.Cursor, "event_gap", gap)
+	}
+	return nil
 }
 
 // ActiveSessions returns the number of currently active sessions. This is
@@ -644,12 +956,13 @@ func (s *HTTPServer) ActiveSessions() int {
 
 // sessionCleanupLoop periodically removes sessions that have been idle longer
 // than sessionTTL. The loop exits when the server context is canceled.
-func (s *HTTPServer) sessionCleanupLoop() {
+func (s *HTTPServer) sessionCleanupLoop(generation *httpServerGeneration) {
+	defer close(generation.cleanupDone)
 	ticker := time.NewTicker(s.cleanupInterval)
 	defer ticker.Stop()
 	for {
 		select {
-		case <-s.ctx.Done():
+		case <-generation.ctx.Done():
 			return
 		case <-ticker.C:
 			s.cleanupIdleSessions()
@@ -664,8 +977,8 @@ func (s *HTTPServer) cleanupIdleSessions() {
 	now := time.Now()
 	for id, last := range s.lastActivity {
 		if now.Sub(last) > s.sessionTTL {
-			if sess, ok := s.sessions[id]; ok {
-				sess.Close()
+			if binding, ok := s.sessions[id]; ok {
+				binding.session.Close()
 			}
 			delete(s.sessions, id)
 			delete(s.lastActivity, id)
@@ -681,18 +994,19 @@ func ensureServerName(name string) string {
 	return name
 }
 
-// IsLoopbackAddr reports whether addr binds to a loopback interface. An addr
-// without a host:port suffix (e.g. ":9090") or with a loopback host
-// (127.0.0.1, localhost, ::1) is considered loopback. Binding to 0.0.0.0 or
-// a specific external IP is not.
+// IsLoopbackAddr reports whether addr binds to a loopback interface. An empty
+// host (e.g. ":9090") binds to all interfaces and is not loopback.
 func IsLoopbackAddr(addr string) bool {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		host = addr
 	}
-	switch host {
-	case "127.0.0.1", "localhost", "::1", "":
+	host = strings.TrimPrefix(strings.TrimSuffix(host, "]"), "[")
+	if host == "" {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
 		return true
 	}
-	return false
+	return net.ParseIP(host).IsLoopback()
 }

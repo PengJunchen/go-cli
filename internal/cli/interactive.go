@@ -15,6 +15,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/session"
+	"github.com/pengjunchen/go-cli/internal/tui"
 
 	tea "github.com/charmbracelet/bubbletea"
 )
@@ -76,15 +77,19 @@ func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) err
 // messagesToTurnItems converts core.AgentMessage slice to compaction.TurnItem
 // slice for the compaction pipeline.
 func messagesToTurnItems(msgs []core.AgentMessage) []compaction.TurnItem {
-	items := make([]compaction.TurnItem, len(msgs))
-	for i, m := range msgs {
+	cloned := core.CloneAgentMessages(msgs)
+	items := make([]compaction.TurnItem, len(cloned))
+	for i, m := range cloned {
 		item := compaction.TurnItem{
-			ID:            fmt.Sprintf("msg-%d", i),
-			Role:          m.Role,
-			ContentBlocks: m.ContentBlocks,
-			ToolCalls:     m.ToolCalls,
-			ToolCallID:    m.ToolCallID,
-			ToolName:      m.ToolName,
+			ID:             fmt.Sprintf("msg-%d", i),
+			Role:           m.Role,
+			Usage:          m.Usage,
+			ContentBlocks:  m.ContentBlocks,
+			ToolCalls:      m.ToolCalls,
+			ToolCallID:     m.ToolCallID,
+			ToolName:       m.ToolName,
+			InputKind:      m.InputKind,
+			ReceiptOutcome: m.ReceiptOutcome,
 		}
 		if m.Role == compaction.RoleTool {
 			item.ToolResult = m.Content
@@ -102,11 +107,14 @@ func turnItemsToMessages(items []compaction.TurnItem) []core.AgentMessage {
 	msgs := make([]core.AgentMessage, len(items))
 	for i, it := range items {
 		msg := core.AgentMessage{
-			Role:          it.Role,
-			ContentBlocks: it.ContentBlocks,
-			ToolCalls:     it.ToolCalls,
-			ToolCallID:    it.ToolCallID,
-			ToolName:      it.ToolName,
+			Role:           it.Role,
+			Usage:          it.Usage,
+			ContentBlocks:  it.ContentBlocks,
+			ToolCalls:      it.ToolCalls,
+			ToolCallID:     it.ToolCallID,
+			ToolName:       it.ToolName,
+			InputKind:      it.InputKind,
+			ReceiptOutcome: it.ReceiptOutcome,
 		}
 		if it.Role == compaction.RoleTool {
 			msg.Content = it.ToolResult
@@ -118,7 +126,7 @@ func turnItemsToMessages(items []compaction.TurnItem) []core.AgentMessage {
 		}
 		msgs[i] = msg
 	}
-	return msgs
+	return core.CloneAgentMessages(msgs)
 }
 
 // loadSessionHistory reads a JSONL session file and reconstructs the message
@@ -243,21 +251,11 @@ func (e *cliHITLEmitter) SetProgram(p *tea.Program) {
 	e.program = p
 }
 
-// HITLMessage is a bubbletea message carrying a HITL question to the TUI. The
-// TUI renders the question, collects the user's answer, and sends a single
-// HITLResponse on ResponseCh so the emitter can deliver it to the agent.
-type HITLMessage struct {
-	QuestionID string
-	Question   string
-	Options    []string
-	ResponseCh chan HITLResponse
-}
+// HITLMessage is retained as an alias for compatibility with cli callers.
+type HITLMessage = tui.HITLMessage
 
-// HITLResponse is the user's answer to a HITLMessage, sent back by the TUI.
-type HITLResponse struct {
-	Answer string
-	Err    error
-}
+// HITLResponse is retained as an alias for compatibility with cli callers.
+type HITLResponse = tui.HITLResponse
 
 func (e *cliHITLEmitter) Emit(ctx context.Context, event core.HITLQuestionEvent) error {
 	// TUI mode: route the question through the bubbletea program so it renders
@@ -272,6 +270,7 @@ func (e *cliHITLEmitter) Emit(ctx context.Context, event core.HITLQuestionEvent)
 			Question:   event.Question,
 			Options:    event.Options,
 			ResponseCh: respCh,
+			Context:    ctx,
 		})
 		select {
 		case resp := <-respCh:

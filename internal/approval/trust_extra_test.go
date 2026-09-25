@@ -127,7 +127,7 @@ func TestContentFingerprint_BasedOnContent(t *testing.T) {
 }
 
 func TestFileTrustStore_SaveRoundTrip(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "trust.json")
+	path := privateTrustStorePath(t)
 	store := NewFileTrustStore(path)
 
 	entries := map[string]TrustEntry{
@@ -159,6 +159,43 @@ func TestFileTrustStore_CorruptJSON(t *testing.T) {
 	store := NewFileTrustStore(path)
 	_, err := store.Load()
 	require.Error(t, err, "corrupt JSON must return an error")
+}
+
+func TestFileTrustStoreSaveReplacesWideFilePrivately(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	path := filepath.Join(dir, "trust.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"old":{}}`), 0o644))
+	require.NoError(t, os.Chmod(path, 0o644))
+
+	entries := map[string]TrustEntry{"/workspace": {Path: "/workspace", TrustedAt: "2026-09-25T00:00:00Z"}}
+	require.NoError(t, NewFileTrustStore(path).Save(entries))
+
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	got, err := NewFileTrustStore(path).Load()
+	require.NoError(t, err)
+	assert.Equal(t, entries, got)
+}
+
+func TestFileTrustStoreSaveRejectsAccessibleParentAndPreservesOldFile(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "shared")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	require.NoError(t, os.Chmod(dir, 0o755))
+	path := filepath.Join(dir, "trust.json")
+	old := []byte(`{"old":{"path":"/old"}}`)
+	require.NoError(t, os.WriteFile(path, old, 0o600))
+
+	err := NewFileTrustStore(path).Save(map[string]TrustEntry{"/new": {Path: "/new"}})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "private")
+	got, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	assert.Equal(t, old, got)
+	dirInfo, statErr := os.Stat(dir)
+	require.NoError(t, statErr)
+	assert.Equal(t, os.FileMode(0o755), dirInfo.Mode().Perm())
 }
 
 func TestInMemoryTrustStore_Save(t *testing.T) {

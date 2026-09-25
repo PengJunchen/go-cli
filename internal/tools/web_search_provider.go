@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -59,7 +60,8 @@ type WebSearchProvider interface {
 // MockSearchProvider
 // ---------------------------------------------------------------------------
 
-// MockSearchProvider returns deterministic preset data (backward compatible).
+// MockSearchProvider returns deterministic preset data for explicit injection,
+// such as in tests. Production assembly does not select it automatically.
 type MockSearchProvider struct{}
 
 var _ WebSearchProvider = (*MockSearchProvider)(nil)
@@ -191,6 +193,8 @@ type BraveSearchProvider struct {
 
 var _ WebSearchProvider = (*BraveSearchProvider)(nil)
 
+var errBraveCrossOriginRedirect = errors.New("cross-origin redirect blocked")
+
 // BraveSearchProviderOption configures a BraveSearchProvider.
 type BraveSearchProviderOption func(*BraveSearchProvider)
 
@@ -223,7 +227,7 @@ func (p *BraveSearchProvider) Name() string { return "brave" }
 // Search queries the Brave Search API and returns parsed results.
 func (p *BraveSearchProvider) Search(ctx context.Context, query string, opts SearchOptions) ([]SearchResult, error) {
 	if strings.TrimSpace(p.apiKey) == "" {
-		return nil, errors.New("brave_search: api key is required")
+		return nil, fmt.Errorf("%w: Brave api key is required", ErrWebSearchProviderUnavailable)
 	}
 
 	timeout := opts.Timeout
@@ -251,12 +255,14 @@ func (p *BraveSearchProvider) Search(ctx context.Context, query string, opts Sea
 		return nil, fmt.Errorf("brave_search: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
-	req.Header.Set("X-Subscription-Token", "Bearer "+p.apiKey)
+	req.Header.Set("X-Subscription-Token", p.apiKey)
 
 	client := p.httpClient
 	if client == nil {
 		client = http.DefaultClient
 	}
+	initialOrigin := braveOriginFor(req.URL)
+	client = braveSearchClientWithRedirectPolicy(client, initialOrigin)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -274,6 +280,81 @@ func (p *BraveSearchProvider) Search(ctx context.Context, query string, opts Sea
 	}
 
 	return parseBraveJSON(body, maxResults)
+}
+
+type braveOrigin struct {
+	scheme string
+	host   string
+	port   string
+	valid  bool
+}
+
+func braveOriginFor(u *url.URL) braveOrigin {
+	if u == nil {
+		return braveOrigin{}
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return braveOrigin{}
+	}
+	return braveOrigin{
+		scheme: strings.ToLower(u.Scheme),
+		host:   host,
+		port:   effectiveBravePort(u),
+		valid:  true,
+	}
+}
+
+func (origin braveOrigin) matches(u *url.URL) bool {
+	if !origin.valid || u == nil || !strings.EqualFold(origin.scheme, u.Scheme) {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return host != "" && origin.host == host && origin.port == effectiveBravePort(u)
+}
+
+func braveSearchClientWithRedirectPolicy(client *http.Client, initialOrigin braveOrigin) *http.Client {
+	clientCopy := *client
+	callerCheckRedirect := client.CheckRedirect
+	clientCopy.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) == 0 || !initialOrigin.matches(req.URL) {
+			return errBraveCrossOriginRedirect
+		}
+		if callerCheckRedirect != nil {
+			if err := callerCheckRedirect(req, via); err != nil {
+				return err
+			}
+		}
+		// Check again after caller policy: callbacks may mutate req.URL. Always
+		// compare with the immutable origin captured before Client.Do, never a
+		// request in the mutable via history.
+		if !initialOrigin.matches(req.URL) {
+			return errBraveCrossOriginRedirect
+		}
+		if callerCheckRedirect == nil && len(via) >= 10 {
+			return errors.New("stopped after 10 redirects")
+		}
+		return nil
+	}
+	return &clientCopy
+}
+
+func effectiveBravePort(u *url.URL) string {
+	if port := u.Port(); port != "" {
+		value, err := strconv.ParseUint(port, 10, 16)
+		if err != nil {
+			return "invalid:" + port
+		}
+		return strconv.FormatUint(value, 10)
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "http":
+		return "80"
+	case "https":
+		return "443"
+	default:
+		return ""
+	}
 }
 
 // braveResponse models the relevant portion of the Brave Search API response.

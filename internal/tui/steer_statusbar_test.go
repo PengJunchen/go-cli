@@ -93,6 +93,27 @@ func TestSteerInputCursorMovement(t *testing.T) {
 	assert.Equal(t, 6, m.steerCursor)
 }
 
+func TestSteerEditorCaretTracksInsertion(t *testing.T) {
+	m := NewBubbleteaApp(make(chan AgentEvent, 1)).model
+	m.interactive = false
+
+	updateKey(m, keyMsg(tea.KeyTab))
+	for _, ch := range "你好" {
+		updateKey(m, runeKey(ch))
+	}
+	assert.Equal(t, "你好", m.steerInput)
+
+	updateKey(m, keyMsg(tea.KeyLeft))
+	assert.Equal(t, 3, m.steerCursor, "left should move by one UTF-8 rune")
+	assert.Contains(t, m.View(), "> steer> 你█好", "caret should render at the UTF-8 insertion point")
+	updateKey(m, runeKey('X'))
+	assert.Equal(t, "你X好", m.steerInput, "typing inserts at the caret, preserving the suffix")
+	assert.Equal(t, 4, m.steerCursor)
+
+	updateKey(m, keyMsg(tea.KeyRight))
+	assert.Equal(t, 7, m.steerCursor, "right should move by one UTF-8 rune")
+}
+
 // TestSteerInputDeleteWord verifies Ctrl+W deletes the word before the cursor.
 func TestSteerInputDeleteWord(t *testing.T) {
 	m := NewBubbleteaApp(make(chan AgentEvent, 1)).model
@@ -452,12 +473,16 @@ func TestFollowUpInputChineseBackspace(t *testing.T) {
 	}
 	assert.Equal(t, "你好", m.followUpInput)
 	assert.Equal(t, 6, m.followUpCursor)
+	updateKey(m, keyMsg(tea.KeyLeft))
+	assert.Contains(t, m.View(), "> followup> 你█好", "follow-up caret should render at the insertion point")
+	updateKey(m, keyMsg(tea.KeyRight))
 
 	// Backspace deletes "好".
 	updateKey(m, keyMsg(tea.KeyBackspace))
 	assert.True(t, utf8.ValidString(m.followUpInput))
 	assert.Equal(t, "你", m.followUpInput)
 	assert.Equal(t, 3, m.followUpCursor)
+	assert.Contains(t, m.View(), "> followup> 你█", "follow-up caret should render after the remaining rune")
 }
 
 // TestFollowUpInputChineseCtrlW verifies Ctrl+W in follow-up mode traverses

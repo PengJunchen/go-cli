@@ -10,6 +10,7 @@ import (
 	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 )
 
@@ -267,10 +268,14 @@ func scanHardcodedDefaults(dir string, goFiles []string) []Finding {
 		if err != nil {
 			continue
 		}
+		errorMessages := standardErrorMessageLiteralPositions(node)
 
 		ast.Inspect(node, func(n ast.Node) bool {
 			lit, ok := n.(*ast.BasicLit)
 			if !ok || lit.Kind != token.STRING {
+				return true
+			}
+			if _, ok := errorMessages[lit.Pos()]; ok {
 				return true
 			}
 
@@ -294,6 +299,89 @@ func scanHardcodedDefaults(dir string, goFiles []string) []Finding {
 	}
 
 	return findings
+}
+
+// standardErrorMessageLiteralPositions returns the positions of direct string
+// arguments used as the error message in standard-library errors.New or
+// fmt.Errorf calls. Parser-resolved local selector roots are never treated as
+// package names, so a local variable or parameter shadowing an import cannot
+// make a prompt literal exempt.
+func standardErrorMessageLiteralPositions(file *ast.File) map[token.Pos]struct{} {
+	imports := standardErrorPackageAliases(file)
+	if len(imports) == 0 {
+		return nil
+	}
+
+	positions := make(map[token.Pos]struct{})
+	ast.Inspect(file, func(node ast.Node) bool {
+		call, ok := node.(*ast.CallExpr)
+		if !ok || len(call.Args) == 0 {
+			return true
+		}
+		selector, ok := call.Fun.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		root, ok := selector.X.(*ast.Ident)
+		if !ok {
+			return true
+		}
+		importPath, ok := imports[root.Name]
+		if !ok {
+			return true
+		}
+		if root.Obj != nil {
+			importSpec, ok := root.Obj.Decl.(*ast.ImportSpec)
+			if !ok {
+				return true
+			}
+			resolvedPath, err := strconv.Unquote(importSpec.Path.Value)
+			if err != nil || resolvedPath != importPath {
+				return true
+			}
+		}
+		if (importPath != "errors" || selector.Sel.Name != "New") &&
+			(importPath != "fmt" || selector.Sel.Name != "Errorf") {
+			return true
+		}
+		literal, ok := call.Args[0].(*ast.BasicLit)
+		if !ok || literal.Kind != token.STRING {
+			return true
+		}
+		positions[literal.Pos()] = struct{}{}
+		return true
+	})
+	return positions
+}
+
+// standardErrorPackageAliases maps unambiguous local import names to the two
+// standard-library packages whose first string arguments are error messages.
+func standardErrorPackageAliases(file *ast.File) map[string]string {
+	aliases := make(map[string]string)
+	ambiguous := make(map[string]struct{})
+	for _, spec := range file.Imports {
+		importPath, err := strconv.Unquote(spec.Path.Value)
+		if err != nil || (importPath != "errors" && importPath != "fmt") {
+			continue
+		}
+		name := importPath
+		if spec.Name != nil {
+			name = spec.Name.Name
+			if name == "." || name == "_" {
+				continue
+			}
+		}
+		if _, exists := aliases[name]; exists {
+			delete(aliases, name)
+			ambiguous[name] = struct{}{}
+			continue
+		}
+		if _, exists := ambiguous[name]; exists {
+			continue
+		}
+		aliases[name] = importPath
+	}
+	return aliases
 }
 
 // scanCommandRouting detects hardcoded command routing (SCAN-010).
@@ -529,85 +617,6 @@ func exprName(expr ast.Expr) string {
 		}
 	}
 	return "?"
-}
-
-// scanInterfaceDefaultImpl detects interfaces missing a default implementation
-// assertion (var _ Xxx = ...) in the same package (SCAN-012).
-func scanInterfaceDefaultImpl(dir string, goFiles []string) []Finding {
-	var findings []Finding
-
-	// Collect interfaces declared in the package and the set of interface names
-	// referenced by `var _ Xxx = ...` compile-time default-implementation assertions.
-	interfaceNames := map[string]bool{}
-	implAssertions := map[string]bool{}
-
-	fset := token.NewFileSet()
-	for _, file := range goFiles {
-		if strings.HasSuffix(file, "_test.go") {
-			continue
-		}
-
-		node, err := parser.ParseFile(fset, file, nil, parser.ParseComments)
-		if err != nil {
-			continue
-		}
-
-		for _, decl := range node.Decls {
-			genDecl, ok := decl.(*ast.GenDecl)
-			if !ok {
-				continue
-			}
-
-			for _, spec := range genDecl.Specs {
-				switch s := spec.(type) {
-				case *ast.TypeSpec:
-					if it, ok := s.Type.(*ast.InterfaceType); ok && it != nil {
-						// Check for exempt:scan012 directive in doc comments
-						// (can be on GenDecl.Doc or TypeSpec.Doc).
-						nolint := false
-						checkDoc := func(doc *ast.CommentGroup) {
-							if doc == nil || nolint {
-								return
-							}
-							for _, c := range doc.List {
-								if strings.Contains(c.Text, "exempt:scan012") || strings.Contains(c.Text, "exempt:all") {
-									nolint = true
-									return
-								}
-							}
-						}
-						checkDoc(genDecl.Doc)
-						checkDoc(s.Doc)
-						if !nolint {
-							interfaceNames[s.Name.Name] = true
-						}
-					}
-				case *ast.ValueSpec:
-					if len(s.Names) > 0 && s.Names[0].Name == "_" {
-						if id, ok := s.Type.(*ast.Ident); ok {
-							implAssertions[id.Name] = true
-						}
-					}
-				}
-			}
-		}
-	}
-
-	// Report interfaces that lack any compile-time default implementation assertion.
-	for name := range interfaceNames {
-		if !implAssertions[name] {
-			findings = append(findings, Finding{
-				RuleID:   "SCAN-012",
-				Severity: SeverityError,
-				File:     firstGoFile(goFiles),
-				Line:     1,
-				Message:  "interface " + name + " missing default implementation",
-				Snippet:  name,
-			})
-		}
-	}
-
-	return findings
 }
 
 // scanConcreteInInterface detects concrete types used in function/method

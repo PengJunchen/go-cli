@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -20,6 +21,18 @@ type stubModel struct {
 	err  error
 }
 
+type streamFuncModel struct {
+	streamFn func(context.Context, []llm.Message, ...llm.Option) (<-chan llm.MessageChunk, error)
+}
+
+func (m *streamFuncModel) Generate(context.Context, []llm.Message, ...llm.Option) (*llm.Message, error) {
+	return nil, errors.New("unexpected Generate call")
+}
+
+func (m *streamFuncModel) Stream(ctx context.Context, msgs []llm.Message, opts ...llm.Option) (<-chan llm.MessageChunk, error) {
+	return m.streamFn(ctx, msgs, opts...)
+}
+
 func (m *stubModel) Generate(_ context.Context, _ []llm.Message, _ ...llm.Option) (*llm.Message, error) {
 	if m.err != nil {
 		return nil, m.err
@@ -31,15 +44,15 @@ func (m *stubModel) Stream(_ context.Context, _ []llm.Message, _ ...llm.Option) 
 	return nil, nil
 }
 
-func TestOutputGuardModel_SanitizesPII(t *testing.T) {
+func TestOutputGuardModel_DeniesPIIWithoutSanitizedCandidate(t *testing.T) {
 	inner := &stubModel{
 		resp: &llm.Message{Role: llm.RoleAssistant, Content: "Contact me at john@example.com"},
 	}
 	m := &outputGuardModel{inner: inner, guard: production.NewPIIOutputGuard()}
 
 	resp, err := m.Generate(context.Background(), nil)
-	require.NoError(t, err)
-	assert.NotContains(t, resp.Content, "john@example.com")
+	require.ErrorContains(t, err, "candidate denied")
+	assert.Nil(t, resp)
 }
 
 func TestOutputGuardModel_PassthroughSafe(t *testing.T) {
@@ -51,6 +64,105 @@ func TestOutputGuardModel_PassthroughSafe(t *testing.T) {
 	resp, err := m.Generate(context.Background(), nil)
 	require.NoError(t, err)
 	assert.Equal(t, "Hello, world!", resp.Content)
+}
+
+func TestOutputGuardStreamFragmentationDoesNotConsumePayloadBudget(t *testing.T) {
+	logicalText := strings.Repeat("x", 10_000)
+	for _, chunked := range []bool{false, true} {
+		t.Run(map[bool]string{false: "one_chunk", true: "many_chunks"}[chunked], func(t *testing.T) {
+			streamFn := func(context.Context, []llm.Message, ...llm.Option) (<-chan llm.MessageChunk, error) {
+				count := 1
+				if chunked {
+					count = len(logicalText)
+				}
+				ch := make(chan llm.MessageChunk, count+1)
+				for i := 0; i < count; i++ {
+					part := logicalText
+					if chunked {
+						part = logicalText[i : i+1]
+					}
+					ch <- llm.MessageChunk{Role: llm.RoleAssistant, Content: part}
+				}
+				ch <- llm.MessageChunk{Role: llm.RoleAssistant, Final: true, FinishReason: "stop"}
+				close(ch)
+				return ch, nil
+			}
+			wrapped := &outputGuardModel{inner: &streamFuncModel{streamFn: streamFn}, guard: production.NewLengthGuard(20_000)}
+			ch, err := wrapped.Stream(context.Background(), nil)
+			require.NoError(t, err)
+			var content strings.Builder
+			var gotErr error
+			finalSeen := false
+			for chunk := range ch {
+				if chunk.Error != nil {
+					gotErr = chunk.Error
+					continue
+				}
+				content.WriteString(chunk.Content)
+				finalSeen = finalSeen || chunk.Final
+			}
+			require.NoError(t, gotErr)
+			require.True(t, finalSeen)
+			require.Equal(t, logicalText, content.String())
+		})
+	}
+}
+
+func TestOutputGuardStreamRejectsClosedStreamWithoutFinalChunk(t *testing.T) {
+	inner := &streamFuncModel{streamFn: func(context.Context, []llm.Message, ...llm.Option) (<-chan llm.MessageChunk, error) {
+		ch := make(chan llm.MessageChunk)
+		close(ch)
+		return ch, nil
+	}}
+	wrapped := &outputGuardModel{inner: inner, guard: production.NewLengthGuard(100)}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	ch, err := wrapped.Stream(ctx, nil)
+	require.NoError(t, err)
+	var streamErr error
+	for chunk := range ch {
+		if chunk.Error != nil {
+			streamErr = chunk.Error
+		}
+	}
+	require.NoError(t, ctx.Err(), "closed input stream must terminate without waiting for cancellation")
+	require.ErrorContains(t, streamErr, "ended without a final chunk")
+}
+
+func TestOutputGuardStreamCancelsInnerAfterChunkLimitFailure(t *testing.T) {
+	innerStopped := make(chan struct{})
+	inner := &streamFuncModel{streamFn: func(ctx context.Context, _ []llm.Message, _ ...llm.Option) (<-chan llm.MessageChunk, error) {
+		ch := make(chan llm.MessageChunk)
+		go func() {
+			defer close(innerStopped)
+			defer close(ch)
+			for {
+				select {
+				case ch <- llm.MessageChunk{}:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}()
+		return ch, nil
+	}}
+	wrapped := &outputGuardModel{inner: inner, guard: production.NewPIIOutputGuard()}
+
+	ch, err := wrapped.Stream(context.Background(), nil)
+	require.NoError(t, err)
+	var streamErr error
+	for chunk := range ch {
+		if chunk.Error != nil {
+			streamErr = chunk.Error
+		}
+	}
+	require.ErrorContains(t, streamErr, "chunks")
+	select {
+	case <-innerStopped:
+	case <-time.After(time.Second):
+		t.Fatal("inner stream did not stop after output guard failure")
+	}
 }
 
 func TestOutputGuardModel_LengthTruncation(t *testing.T) {
@@ -91,8 +203,8 @@ func TestNewModelWrapper_AppliesBothWrappers(t *testing.T) {
 	require.True(t, ok)
 
 	resp, err := baseModel.Generate(context.Background(), nil)
-	require.NoError(t, err)
-	assert.NotContains(t, resp.Content, "john@example.com")
+	require.ErrorContains(t, err, "candidate denied")
+	assert.Nil(t, resp)
 }
 
 func TestNewModelWrapper_NilGuardReturnsProductionWrapped(t *testing.T) {
@@ -164,8 +276,8 @@ func TestNewModelWrapperWithChain_AppliesGuard(t *testing.T) {
 	require.True(t, ok)
 
 	resp, err := baseModel.Generate(context.Background(), nil)
-	require.NoError(t, err)
-	assert.NotContains(t, resp.Content, "john@example.com")
+	require.ErrorContains(t, err, "candidate denied")
+	assert.Nil(t, resp)
 }
 
 // TestNewModelWrapperWithChain_NilGuardReturnsChainWrapped verifies that with a

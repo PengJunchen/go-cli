@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -47,16 +48,89 @@ type AgentEvent struct {
 	// TokenUsage carries token consumption data for "token_usage" events.
 	// It is nil for all other event types.
 	TokenUsage *TokenUsageData
-	// ToolCallID associates streaming output with the originating tool
-	// call. Populated for tool_output events; empty for other types.
+	// ToolCallID is the source-provided tool identifier on tool lifecycle and
+	// output events. The live view associates it only within the active group.
 	ToolCallID string
 	// Stream identifies the output source for tool_output events: "stdout"
 	// or "stderr".
 	Stream string
-	// IsError marks a tool_result event as an error for structured
-	// detection. When true, the TUI sets the tool_call entry status to
-	// Error instead of Completed, without relying on string matching.
+	// IsError preserves the structured error marker from tool events. On a
+	// uniquely associated tool_result, it sets the call status to Error.
 	IsError bool
+	// ToolCalls carries the assistant-proposed tool calls attached to a
+	// message event. These are provisional until a matching tool_call event
+	// confirms execution has started.
+	ToolCalls []ToolCallData
+}
+
+// ToolCallData is the presentation-safe subset of an assistant tool call.
+// ArgsUnavailable is set when the source arguments are not a valid JSON value
+// or cannot be copied safely; callers should render that state explicitly.
+type ToolCallData struct {
+	ID              string
+	Name            string
+	Args            any
+	ArgsUnavailable bool
+}
+
+// activeToolCallGroup contains only presentation-time associations for the
+// current assistant tool-call message. It is reset at the next assistant
+// message boundary and does not create durable session identifiers.
+type activeToolCallGroup struct {
+	byID      map[string]*AccordionEntry
+	ambiguous map[string]struct{}
+	consumed  map[string]struct{}
+}
+
+func newActiveToolCallGroup() *activeToolCallGroup {
+	return &activeToolCallGroup{
+		byID:      make(map[string]*AccordionEntry),
+		ambiguous: make(map[string]struct{}),
+		consumed:  make(map[string]struct{}),
+	}
+}
+
+func (g *activeToolCallGroup) lookup(id string) (*AccordionEntry, bool) {
+	if g == nil || id == "" {
+		return nil, false
+	}
+	if _, ambiguous := g.ambiguous[id]; ambiguous {
+		return nil, false
+	}
+	if _, consumed := g.consumed[id]; consumed {
+		return nil, false
+	}
+	entry, ok := g.byID[id]
+	return entry, ok
+}
+
+func (g *activeToolCallGroup) add(id string, entry *AccordionEntry) bool {
+	if g == nil || id == "" || entry == nil {
+		return false
+	}
+	if _, ambiguous := g.ambiguous[id]; ambiguous {
+		return false
+	}
+	if _, consumed := g.consumed[id]; consumed {
+		return false
+	}
+	if _, exists := g.byID[id]; exists {
+		delete(g.byID, id)
+		g.ambiguous[id] = struct{}{}
+		return false
+	}
+	g.byID[id] = entry
+	return true
+}
+
+// consume retires an ID after its single terminal result receipt. Later events
+// with the same ID remain visible but cannot be attached to the old call.
+func (g *activeToolCallGroup) consume(id string) {
+	if g == nil || id == "" {
+		return
+	}
+	delete(g.byID, id)
+	g.consumed[id] = struct{}{}
 }
 
 // TokenUsageData mirrors core.TokenUsage for the TUI layer.
@@ -469,6 +543,7 @@ type teaModel struct {
 	streamBuf      map[string]*strings.Builder
 	streamingEntry *AccordionEntry
 	streamingBuf   strings.Builder
+	toolCallGroup  *activeToolCallGroup
 	// streamingMD caches rendered markdown lines during incremental streaming
 	// so each token chunk does not trigger an O(n²) full re-render. It is
 	// lazily created and Reset when a new streaming message begins.
@@ -493,10 +568,12 @@ type teaModel struct {
 	resumeCallback func()
 	paused         bool
 
-	// approval flow: approvalCh delivers requests from the middleware;
-	// pendingApproval is the request currently awaiting a user decision.
-	approvalCh      <-chan ApprovalRequest
-	pendingApproval *ApprovalRequest
+	// interaction flow serializes approval and ask_user modals in arrival order.
+	approvalCh          <-chan ApprovalRequest
+	approvalReaderDone  bool
+	activeInteraction   *pendingInteraction
+	queuedInteractions  []pendingInteraction
+	interactionSequence uint64
 
 	// thinkingVisibility controls how thinking entries are rendered:
 	// "show" (default), "collapse", or "hide".
@@ -599,22 +676,63 @@ func (m *teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.eventsSeen.Add(1)
 		cmd := m.handleEvent(msg.event)
 		return m, tea.Batch(waitForEvent(m.events, m.runDone), cmd)
-	case approvalRequestMsg:
+	case agentEventStreamClosedMsg, quitRequestedMsg:
 		m.mu.Lock()
-		m.pendingApproval = &msg.req
+		m.cancelInteractionsLocked()
+		m.mu.Unlock()
+		return m, tea.Quit
+	case approvalChannelClosedMsg:
+		m.mu.Lock()
+		m.approvalReaderDone = true
+		m.cancelApprovalInteractionsLocked()
 		view := ""
 		if m.shouldNotify() {
 			view = m.renderViewLocked()
 		}
 		m.mu.Unlock()
 		m.notify(view)
-		return m, waitForApproval(m.approvalCh, m.runDone)
+		return m, nil
+	case approvalRequestMsg:
+		m.mu.Lock()
+		token, finished := m.enqueueApprovalLocked(msg.req)
+		view := ""
+		if m.shouldNotify() {
+			view = m.renderViewLocked()
+		}
+		var next tea.Cmd
+		if !m.approvalReaderDone && m.approvalCh != nil {
+			next = waitForApproval(m.approvalCh, m.runDone)
+		}
+		m.mu.Unlock()
+		m.notify(view)
+		var cancelWait tea.Cmd
+		if finished != nil {
+			cancelWait = waitForInteractionCancel(msg.req.Context, token, finished, m.runDone)
+		}
+		return m, tea.Batch(next, cancelWait)
+	case HITLMessage:
+		return m.handleHITLMessage(msg)
+	case interactionCanceledMsg:
+		m.mu.Lock()
+		m.cancelInteractionLocked(msg.token, msg.err)
+		view := ""
+		if m.shouldNotify() {
+			view = m.renderViewLocked()
+		}
+		m.mu.Unlock()
+		m.notify(view)
+		return m, nil
 	case tea.KeyMsg:
 		return m, m.handleKey(msg)
 	case tea.WindowSizeMsg:
 		m.mu.Lock()
 		m.width = msg.Width
 		m.height = msg.Height
+		if current := m.activeInteraction; current != nil && current.approval != nil {
+			current.detailOffset = 0
+			current.reviewedDetailLines = nil
+			current.reviewedDetailCount = 0
+		}
 		// Panel dimensions (leftWidth, rightWidth, panelHeight) are derived
 		// on the fly in renderViewLocked() from m.width/m.height, so no
 		// separate fields are needed. When width >= splitWidthThreshold,
@@ -682,7 +800,23 @@ const splitWidthThreshold = 120
 // and a right panel (tool_call entries with their children), joined
 // horizontally with a vertical separator. Below the threshold, or when no tool
 // entries exist, the classic single-column layout is used.
+func renderInputWithCaret(input string, cursor int) string {
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor > len(input) {
+		cursor = len(input)
+	}
+	for cursor > 0 && cursor < len(input) && !utf8.RuneStart(input[cursor]) {
+		cursor--
+	}
+	return safeTerminalText(input[:cursor]) + "█" + safeTerminalText(input[cursor:])
+}
+
 func (m *teaModel) renderViewLocked() string {
+	if current := m.activeInteraction; current != nil && current.approval != nil {
+		return m.renderApprovalInteractionLocked(current)
+	}
 	// When the help overlay is open, render it instead of the normal view.
 	// Agent event flow is unaffected — only UI rendering is redirected.
 	if m.helpOverlay {
@@ -744,24 +878,24 @@ func (m *teaModel) renderViewLocked() string {
 		sb.WriteString(m.spinner.View())
 		sb.WriteString(" working...")
 	}
-	// Pending approval entry (interactive approval flow).
-	if m.pendingApproval != nil {
+	// The active interaction is rendered as a modal above the status bar.
+	if current := m.activeInteraction; current != nil {
 		sb.WriteString("\n")
-		sb.WriteString(renderApprovalRequest(m.pendingApproval))
+		if current.approval != nil {
+			sb.WriteString(renderApprovalRequestDisplay(current.approval, current.showDiff))
+		} else if current.hitl != nil {
+			sb.WriteString(renderHITLQuestion(current.hitl, current.answer, current.selectedOption))
+		}
 	}
 	// Steer input prompt.
 	if m.steerInputMode {
 		sb.WriteString("\n> steer> ")
-		sb.WriteString(m.steerInput)
-		// Render a block cursor.
-		sb.WriteString("\u2588")
+		sb.WriteString(renderInputWithCaret(m.steerInput, m.steerCursor))
 	}
 	// Follow-up input prompt.
 	if m.followUpInputMode {
 		sb.WriteString("\n> followup> ")
-		sb.WriteString(m.followUpInput)
-		// Render a block cursor.
-		sb.WriteString("\u2588")
+		sb.WriteString(renderInputWithCaret(m.followUpInput, m.followUpCursor))
 	}
 	// Todo progress panel (persistent, above the status bar).
 	if todoPanel := m.renderTodoPanelLocked(); todoPanel != "" {
@@ -783,6 +917,77 @@ func (m *teaModel) renderViewLocked() string {
 		sb.WriteString("\n[quitting...]")
 	}
 	return sb.String()
+}
+
+func (m *teaModel) renderApprovalInteractionLocked(current *pendingInteraction) string {
+	width := m.width
+	if width <= 0 {
+		width = 80
+	}
+	rows := approvalDetailViewportRows(m.height)
+	total := walkApprovalDetailLines(current.approval, current.showDiff, approvalDetailWidth(width), nil)
+	if current.reviewedDetailCount != total {
+		current.reviewedDetailCount = total
+		current.reviewedDetailLines = nil
+	}
+	offset := normalizeApprovalDetailOffset(total, rows, current.detailOffset)
+	current.detailOffset = offset
+	if rows > 0 {
+		if current.reviewedDetailLines == nil {
+			current.reviewedDetailLines = make(map[int]struct{}, total)
+		}
+		end := min(total, offset+rows)
+		for line := offset; line < end; line++ {
+			current.reviewedDetailLines[line] = struct{}{}
+		}
+	}
+	reviewed := len(current.reviewedDetailLines) >= total && total > 0
+	view, _ := renderApprovalRequestPage(
+		current.approval,
+		current.showDiff,
+		current.token,
+		len(m.queuedInteractions),
+		width,
+		m.height,
+		rows,
+		offset,
+		reviewed,
+	)
+	return view
+}
+
+func (m *teaModel) scrollApprovalDetailsLocked(delta int) {
+	current := m.activeInteraction
+	if current == nil || current.approval == nil {
+		return
+	}
+	width := m.width
+	if width <= 0 {
+		width = 80
+	}
+	rows := approvalDetailViewportRows(m.height)
+	total := walkApprovalDetailLines(current.approval, current.showDiff, approvalDetailWidth(width), nil)
+	current.detailOffset = normalizeApprovalDetailOffset(total, rows, current.detailOffset+delta)
+}
+
+func normalizeApprovalDetailOffset(total, rows, offset int) int {
+	if rows <= 0 {
+		return 0
+	}
+	maxOffset := max(0, total-rows)
+	return min(max(offset, 0), maxOffset)
+}
+
+func approvalDetailsReviewed(current *pendingInteraction, total int) bool {
+	if current == nil || total <= 0 || len(current.reviewedDetailLines) < total {
+		return false
+	}
+	for line := 0; line < total; line++ {
+		if _, ok := current.reviewedDetailLines[line]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // statusBarLineStyle styles the first status bar line (model/turn/session/mode).
@@ -907,10 +1112,34 @@ type agentEventMsg struct {
 	event AgentEvent
 }
 
+type agentEventStreamClosedMsg struct{}
+
+type quitRequestedMsg struct{}
+
+type approvalChannelClosedMsg struct{}
+
 // approvalRequestMsg wraps an ApprovalRequest delivered from the approval
 // channel so the model can render it as an interactive approval entry.
 type approvalRequestMsg struct {
 	req ApprovalRequest
+}
+
+type pendingInteraction struct {
+	token               uint64
+	approval            *ApprovalRequest
+	hitl                *HITLMessage
+	answer              string
+	selectedOption      int
+	showDiff            bool
+	detailOffset        int
+	reviewedDetailCount int
+	reviewedDetailLines map[int]struct{}
+	finished            chan struct{}
+}
+
+type interactionCanceledMsg struct {
+	token uint64
+	err   error
 }
 
 // waitForApproval returns a tea.Cmd that blocks until an ApprovalRequest
@@ -921,7 +1150,7 @@ func waitForApproval(ch <-chan ApprovalRequest, done <-chan struct{}) tea.Cmd {
 		select {
 		case req, ok := <-ch:
 			if !ok {
-				return nil
+				return approvalChannelClosedMsg{}
 			}
 			return approvalRequestMsg{req: req}
 		case <-done:
@@ -940,7 +1169,7 @@ func waitForEvent(events <-chan AgentEvent, done <-chan struct{}) tea.Cmd {
 		select {
 		case ev, ok := <-events:
 			if !ok {
-				return tea.Quit()
+				return agentEventStreamClosedMsg{}
 			}
 			return agentEventMsg{event: ev}
 		case <-done:
@@ -975,7 +1204,7 @@ func waitForQuit(ch <-chan struct{}, done <-chan struct{}) tea.Cmd {
 	return func() tea.Msg {
 		select {
 		case <-ch:
-			return tea.Quit()
+			return quitRequestedMsg{}
 		case <-done:
 			return nil
 		}
@@ -1039,9 +1268,25 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 		return nil
 	}
 
+	// A done event is a lifecycle marker. Its content can repeat the final
+	// answer, so it is never rendered as user-visible text.
+	if ev.Type == "done" {
+		m.mu.Lock()
+		m.streamingEntry = nil
+		m.streamingBuf.Reset()
+		m.toolCallGroup = nil
+		m.mu.Unlock()
+		return nil
+	}
+
 	if ev.Incremental {
 		m.handleIncremental(ctx, ev)
 		return nil
+	}
+
+	isAssistantMessage := ev.Type == "message" || ev.ContentType == ContentTypeAssistant
+	if isAssistantMessage {
+		m.closeToolCallGroup()
 	}
 
 	// Finalize any active streaming entry so the next incremental event
@@ -1056,7 +1301,8 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 	// event carrying the complete content for downstream consumers (harness
 	// result, lastMessageEvent). The TUI has already rendered the content
 	// incrementally, so skip this duplicate.
-	if hadStreaming && ev.Type == "message" {
+	if hadStreaming && isAssistantMessage {
+		m.startToolCallGroup(ev.ToolCalls)
 		return nil
 	}
 
@@ -1065,25 +1311,6 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 	// entry is auto-collapsed with a "thought for Xs" duration summary.
 	if ev.ContentType != ContentTypeThinking && ev.ContentType != ContentTypeStreamingThink {
 		m.finalizeThinking()
-	}
-
-	// Track tool lifecycle: tool_call sets the entry to Running; tool_result
-	// updates the matching tool_call entry (by ToolCallID, fallback to last)
-	// to Completed or Error. The global spinner is activated when any tool is
-	// running and deactivated when all tools have completed.
-	activateSpinner := false
-	if ev.ContentType == ContentTypeToolCall {
-		m.mu.Lock()
-		m.spinnerActive = true
-		activateSpinner = true
-		m.mu.Unlock()
-	} else if ev.ContentType == ContentTypeToolResult {
-		m.mu.Lock()
-		m.updateToolResultStatusLocked(ev.ToolCallID, ev.IsError)
-		// Deactivate the global spinner only if no tool_call entries are still
-		// running.
-		m.spinnerActive = m.hasRunningToolLocked()
-		m.mu.Unlock()
 	}
 
 	start := time.Now()
@@ -1107,49 +1334,40 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 		})
 	}
 
-	// tool_output events append to the originating tool_call entry (matched
-	// by ToolCallID) instead of creating a new top-level entry, keeping
-	// streaming output grouped with its tool call. Falls back to the last
-	// tool_call entry when ToolCallID is not populated.
+	if ct == ContentTypeToolCall {
+		m.handleToolCallEvent(ev, out)
+		slog.DebugContext(ctx, "tui.app.render",
+			"content_type", ct,
+			"trace_id", ev.TraceID,
+			"span_id", ev.SpanID,
+			"latency_us", time.Since(start).Microseconds(),
+		)
+		return func() tea.Msg { return m.spinner.Tick() }
+	}
+
+	if ct == ContentTypeToolResult {
+		m.handleToolResultEvent(ev, out)
+		slog.DebugContext(ctx, "tui.app.render",
+			"content_type", ct,
+			"trace_id", ev.TraceID,
+			"span_id", ev.SpanID,
+			"latency_us", time.Since(start).Microseconds(),
+		)
+		return nil
+	}
+
+	// Tool output joins only a uniquely associated call in the active
+	// assistant group. Missing, duplicate, and late IDs stay visible as
+	// standalone incomplete entries.
 	if ct == ContentTypeToolOutput {
-		var view string
-		notify := m.shouldNotify()
-		appended := false
-		m.mu.Lock()
-		target := m.accordion.FindByToolCallID(ev.ToolCallID)
-		if target == nil {
-			for i := len(m.accordion.entries) - 1; i >= 0; i-- {
-				e := m.accordion.entries[i]
-				if e.ContentType == ContentTypeToolCall {
-					target = e
-					break
-				}
-			}
-		}
-		if target != nil {
-			if target.Full != "" {
-				target.Full += "\n" + out
-			} else {
-				target.Full = out
-			}
-			target.Summary = summarizeFirstLine(target.Full, 80)
-			appended = true
-			if notify {
-				view = m.renderViewLocked()
-			}
-		}
-		m.mu.Unlock()
-		if appended {
-			m.notify(view)
-			slog.DebugContext(ctx, "tui.app.render",
-				"content_type", ct,
-				"trace_id", ev.TraceID,
-				"span_id", ev.SpanID,
-				"latency_us", time.Since(start).Microseconds(),
-			)
-			return nil
-		}
-		// Fall through to addEntry if no tool_call entry to append to.
+		m.handleToolOutputEvent(ev, out)
+		slog.DebugContext(ctx, "tui.app.render",
+			"content_type", ct,
+			"trace_id", ev.TraceID,
+			"span_id", ev.SpanID,
+			"latency_us", time.Since(start).Microseconds(),
+		)
+		return nil
 	}
 
 	// Respect the thinking visibility setting: "hide" skips the entry entirely,
@@ -1167,7 +1385,12 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 		}
 	}
 
-	m.addEntry(ct, out, ev.ToolCallID)
+	if !isAssistantMessage || ev.Content != "" || len(ev.ToolCalls) == 0 {
+		m.addEntry(ct, out, ev.ToolCallID)
+	}
+	if isAssistantMessage {
+		m.startToolCallGroup(ev.ToolCalls)
+	}
 
 	// Apply thinking visibility: "collapse" forces the entry collapsed.
 	if ct == ContentTypeThinking && m.thinkingVisibility == "collapse" {
@@ -1181,19 +1404,6 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 		m.mu.Unlock()
 	}
 
-	// Set tool_call entry status to Running and record the start time so the
-	// status icon (spinner) and duration display work correctly.
-	if ct == ContentTypeToolCall {
-		m.mu.Lock()
-		if len(m.accordion.entries) > 0 {
-			last := m.accordion.entries[len(m.accordion.entries)-1]
-			if last.ContentType == ContentTypeToolCall {
-				last.ToolStatus = ToolStatusRunning
-				last.ToolStartTime = time.Now()
-			}
-		}
-		m.mu.Unlock()
-	}
 	// Record thinking start time for duration display when auto-collapsed.
 	if ct == ContentTypeThinking {
 		m.mu.Lock()
@@ -1213,10 +1423,184 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 		"latency_us", time.Since(start).Microseconds(),
 	)
 
-	if activateSpinner {
-		return func() tea.Msg { return m.spinner.Tick() }
-	}
 	return nil
+}
+
+func (m *teaModel) closeToolCallGroup() {
+	m.mu.Lock()
+	m.toolCallGroup = nil
+	m.mu.Unlock()
+}
+
+// startToolCallGroup renders assistant-proposed calls as pending entries and
+// builds an ephemeral, group-local ID index. Duplicate and empty IDs remain
+// visible but cannot be used to associate later events.
+func (m *teaModel) startToolCallGroup(calls []ToolCallData) {
+	if len(calls) == 0 {
+		return
+	}
+
+	group := newActiveToolCallGroup()
+	counts := make(map[string]int, len(calls))
+	for _, call := range calls {
+		if call.ID != "" {
+			counts[call.ID]++
+		}
+	}
+	for id, count := range counts {
+		if count > 1 {
+			group.ambiguous[id] = struct{}{}
+		}
+	}
+
+	var view string
+	notify := m.shouldNotify()
+	m.mu.Lock()
+	m.toolCallGroup = group
+	for _, call := range calls {
+		entry := entryFor(ContentTypeToolCall, renderToolCallDetails(call), m.interactive, call.ID)
+		entry.ToolStatus = ToolStatusPending
+		m.accordion.AddStandalone(entry)
+		if call.ID != "" && counts[call.ID] == 1 {
+			group.byID[call.ID] = entry
+		}
+	}
+	if notify {
+		view = m.renderViewLocked()
+	}
+	m.mu.Unlock()
+	m.notify(view)
+}
+
+func renderToolCallDetails(call ToolCallData) string {
+	name := call.Name
+	if name == "" {
+		name = "(unnamed)"
+	}
+	if call.ArgsUnavailable {
+		return safeTerminalText("[tool] " + name + " (detail unavailable)")
+	}
+
+	args := call.Args
+	if args == nil {
+		return safeTerminalText((&ToolCallRenderer{}).RenderCollapsed(name, nil))
+	}
+	payload, err := json.Marshal(args)
+	if err != nil {
+		return safeTerminalText("[tool] " + name + " (detail unavailable)")
+	}
+	if object, ok := args.(map[string]any); ok {
+		displayArgs := make(map[string]any, len(object))
+		for key, value := range object {
+			switch value.(type) {
+			case nil, bool, string,
+				int, int8, int16, int32, int64,
+				uint, uint8, uint16, uint32, uint64,
+				float32, float64:
+				displayArgs[key] = value
+			default:
+				raw, marshalErr := json.Marshal(value)
+				if marshalErr != nil {
+					return safeTerminalText("[tool] " + name + " (detail unavailable)")
+				}
+				displayArgs[key] = string(raw)
+			}
+		}
+		return safeTerminalText((&ToolCallRenderer{}).RenderCollapsed(name, displayArgs))
+	}
+	return safeTerminalText("[tool] " + name + "(" + string(payload) + ")")
+}
+
+// handleToolCallEvent confirms execution only when an actual tool_call event
+// arrives. When the active assistant group cannot identify the event uniquely,
+// the call remains visible as an independent running entry without creating a
+// guessed association.
+func (m *teaModel) handleToolCallEvent(ev AgentEvent, rendered string) {
+	var view string
+	notify := m.shouldNotify()
+	m.mu.Lock()
+	if m.toolCallGroup == nil {
+		m.toolCallGroup = newActiveToolCallGroup()
+	}
+	group := m.toolCallGroup
+	target, matched := group.lookup(ev.ToolCallID)
+	if matched && target.ToolStatus == ToolStatusPending {
+		target.ToolStatus = ToolStatusRunning
+		target.ToolStartTime = time.Now()
+	} else if matched {
+		// A second start with the same ID inside one group is ambiguous. Keep
+		// the original entry intact and show the observed call independently.
+		delete(group.byID, ev.ToolCallID)
+		group.ambiguous[ev.ToolCallID] = struct{}{}
+		matched = false
+	}
+	if !matched {
+		target = entryFor(ContentTypeToolCall, safeTerminalText(rendered), m.interactive, ev.ToolCallID)
+		target.ToolStatus = ToolStatusRunning
+		target.ToolStartTime = time.Now()
+		m.accordion.AddStandalone(target)
+		group.add(ev.ToolCallID, target)
+	}
+	m.spinnerActive = true
+	if notify {
+		view = m.renderViewLocked()
+	}
+	m.mu.Unlock()
+	m.notify(view)
+}
+
+func (m *teaModel) handleToolOutputEvent(ev AgentEvent, rendered string) {
+	var view string
+	notify := m.shouldNotify()
+	m.mu.Lock()
+	target, matched := m.toolCallGroup.lookup(ev.ToolCallID)
+	if matched {
+		if target.Full != "" {
+			target.Full += "\n" + rendered
+		} else {
+			target.Full = rendered
+		}
+	} else {
+		m.addIncompleteToolEventLocked(ContentTypeToolOutput, rendered, ev.ToolCallID, ev.IsError)
+	}
+	if notify {
+		view = m.renderViewLocked()
+	}
+	m.mu.Unlock()
+	m.notify(view)
+}
+
+func (m *teaModel) handleToolResultEvent(ev AgentEvent, rendered string) {
+	var view string
+	notify := m.shouldNotify()
+	m.mu.Lock()
+	target, matched := m.toolCallGroup.lookup(ev.ToolCallID)
+	if matched {
+		m.updateToolResultStatusLocked(ev.ToolCallID, ev.IsError)
+		child := entryFor(ContentTypeToolResult, rendered, m.interactive, ev.ToolCallID)
+		child.IsError = ev.IsError
+		target.Children = append(target.Children, child)
+		m.toolCallGroup.consume(ev.ToolCallID)
+	} else {
+		m.addIncompleteToolEventLocked(ContentTypeToolResult, rendered, ev.ToolCallID, ev.IsError)
+	}
+	m.spinnerActive = m.hasRunningToolLocked()
+	if notify {
+		view = m.renderViewLocked()
+	}
+	m.mu.Unlock()
+	m.notify(view)
+}
+
+func (m *teaModel) addIncompleteToolEventLocked(contentType, rendered, toolCallID string, isError bool) {
+	out := "[incomplete]"
+	if rendered != "" {
+		out += "\n" + rendered
+	}
+	entry := entryFor(contentType, out, m.interactive, toolCallID)
+	entry.Incomplete = true
+	entry.IsError = isError
+	m.accordion.AddStandalone(entry)
 }
 
 // handleIncremental processes a streaming token chunk. On the first chunk it
@@ -1428,16 +1812,14 @@ func stripANSIPlain(s string) string {
 func (m *teaModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if m.activeInteraction != nil {
+		return m.handleInteractionKeyLocked(msg)
+	}
 	if m.steerInputMode {
 		return m.handleSteerKeyLocked(msg)
 	}
 	if m.followUpInputMode {
 		return m.handleFollowUpKeyLocked(msg)
-	}
-	// When an approval request is pending, intercept y/a/n/d keys to resolve
-	// it before any other key processing.
-	if m.pendingApproval != nil {
-		return m.handleApprovalKeyLocked(msg)
 	}
 	// The help overlay is modal: while open only Esc or '?' close it and
 	// all other keys are ignored. It does not affect agent event flow.
@@ -1485,6 +1867,30 @@ func (m *teaModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	return nil
 }
 
+// moveInputCursorLeft moves a byte offset to the previous UTF-8 rune boundary.
+func moveInputCursorLeft(input string, cursor int) int {
+	if cursor <= 0 {
+		return 0
+	}
+	if cursor > len(input) {
+		cursor = len(input)
+	}
+	_, size := utf8.DecodeLastRuneInString(input[:cursor])
+	return cursor - size
+}
+
+// moveInputCursorRight moves a byte offset to the next UTF-8 rune boundary.
+func moveInputCursorRight(input string, cursor int) int {
+	if cursor < 0 {
+		cursor = 0
+	}
+	if cursor >= len(input) {
+		return len(input)
+	}
+	_, size := utf8.DecodeRuneInString(input[cursor:])
+	return cursor + size
+}
+
 // handleSteerKeyLocked processes a key received while in steer input mode. The
 // caller must hold m.mu. It returns a tea.Cmd (tea.Quit on Esc, nil otherwise).
 func (m *teaModel) handleSteerKeyLocked(msg tea.KeyMsg) tea.Cmd {
@@ -1511,6 +1917,10 @@ func (m *teaModel) handleSteerKeyLocked(msg tea.KeyMsg) tea.Cmd {
 			m.steerInput = m.steerInput[:m.steerCursor-size] + m.steerInput[m.steerCursor:]
 			m.steerCursor -= size
 		}
+	case tea.KeyLeft:
+		m.steerCursor = moveInputCursorLeft(m.steerInput, m.steerCursor)
+	case tea.KeyRight:
+		m.steerCursor = moveInputCursorRight(m.steerInput, m.steerCursor)
 	case tea.KeyCtrlA:
 		m.steerCursor = 0
 	case tea.KeyCtrlE:
@@ -1558,6 +1968,10 @@ func (m *teaModel) handleFollowUpKeyLocked(msg tea.KeyMsg) tea.Cmd {
 			m.followUpInput = m.followUpInput[:m.followUpCursor-size] + m.followUpInput[m.followUpCursor:]
 			m.followUpCursor -= size
 		}
+	case tea.KeyLeft:
+		m.followUpCursor = moveInputCursorLeft(m.followUpInput, m.followUpCursor)
+	case tea.KeyRight:
+		m.followUpCursor = moveInputCursorRight(m.followUpInput, m.followUpCursor)
 	case tea.KeyCtrlA:
 		m.followUpCursor = 0
 	case tea.KeyCtrlE:
@@ -1594,25 +2008,17 @@ func (m *teaModel) finalizeThinking() {
 	}
 }
 
-// updateToolResultStatusLocked finds the tool_call entry matching toolCallID
-// (or the last tool_call entry as fallback) and updates its status to
-// Completed (or Error if isError is true). The caller must hold m.mu.
+// updateToolResultStatusLocked updates only a uniquely associated entry in the
+// active assistant group. The caller must hold m.mu.
 func (m *teaModel) updateToolResultStatusLocked(toolCallID string, isError bool) {
-	target := m.accordion.FindByToolCallID(toolCallID)
-	if target == nil {
-		for i := len(m.accordion.entries) - 1; i >= 0; i-- {
-			e := m.accordion.entries[i]
-			if e.ContentType == ContentTypeToolCall {
-				target = e
-				break
-			}
-		}
-	}
-	if target == nil {
+	target, matched := m.toolCallGroup.lookup(toolCallID)
+	if !matched {
 		return
 	}
 	if target.ToolStatus == ToolStatusRunning || target.ToolStatus == ToolStatusPending {
-		target.ToolDuration = time.Since(target.ToolStartTime)
+		if !target.ToolStartTime.IsZero() {
+			target.ToolDuration = time.Since(target.ToolStartTime)
+		}
 		if isError {
 			target.ToolStatus = ToolStatusError
 		} else {
@@ -1632,29 +2038,341 @@ func (m *teaModel) hasRunningToolLocked() bool {
 	return false
 }
 
-// handleApprovalKeyLocked processes a key while an approval request is pending.
-// y allows once, a always allows, n denies, and d toggles the diff preview
-// (currently informational only). Any other key is ignored. The caller must
-// hold m.mu.
-func (m *teaModel) handleApprovalKeyLocked(msg tea.KeyMsg) tea.Cmd {
-	if msg.Type != tea.KeyRunes {
+// handleInteractionKeyLocked gives the active modal exclusive keyboard focus.
+// The caller must hold m.mu.
+func (m *teaModel) handleInteractionKeyLocked(msg tea.KeyMsg) tea.Cmd {
+	if m.activeInteraction == nil {
 		return nil
 	}
-	switch string(msg.Runes) {
-	case "y":
-		m.pendingApproval.ResponseCh <- ApprovalResponse{Decision: ApprovalAllow}
-		m.pendingApproval = nil
-	case "a":
-		m.pendingApproval.ResponseCh <- ApprovalResponse{Decision: ApprovalAlwaysAllow}
-		m.pendingApproval = nil
-	case "n":
-		m.pendingApproval.ResponseCh <- ApprovalResponse{Decision: ApprovalDeny}
-		m.pendingApproval = nil
-	case "d":
-		// Diff preview is always shown when available; 'd' is a no-op
-		// placeholder for future toggle behavior.
+	if m.activeInteraction.approval != nil {
+		return m.handleApprovalKeyLocked(msg)
+	}
+	if m.activeInteraction.hitl != nil {
+		return m.handleHITLKeyLocked(msg)
 	}
 	return nil
+}
+
+func (m *teaModel) approvalDetailsReviewedLocked() bool {
+	current := m.activeInteraction
+	if current == nil || current.approval == nil {
+		return false
+	}
+	width := m.width
+	if width <= 0 {
+		width = 80
+	}
+	total := walkApprovalDetailLines(current.approval, current.showDiff, approvalDetailWidth(width), nil)
+	return approvalDetailsReviewed(current, total)
+}
+
+// handleApprovalKeyLocked processes a key while an approval request is active.
+// y allows once, n denies, and Esc denies the active request. Reusable approval
+// remains unavailable until a trusted scope is supplied. q or Ctrl+C resolves
+// every queued waiter and cancels the turn. The caller must hold m.mu.
+func (m *teaModel) handleApprovalKeyLocked(msg tea.KeyMsg) tea.Cmd {
+	if current := m.activeInteraction; current != nil && current.approval != nil && current.approval.Context != nil {
+		if err := current.approval.Context.Err(); err != nil {
+			m.cancelInteractionLocked(current.token, err)
+			return nil
+		}
+	}
+	switch msg.Type {
+	case tea.KeyUp:
+		m.scrollApprovalDetailsLocked(-1)
+		return nil
+	case tea.KeyDown:
+		m.scrollApprovalDetailsLocked(1)
+		return nil
+	case tea.KeyPgUp:
+		if rows := approvalDetailViewportRows(m.height); rows > 0 {
+			m.scrollApprovalDetailsLocked(-max(1, rows-1))
+		}
+		return nil
+	case tea.KeyPgDown:
+		if rows := approvalDetailViewportRows(m.height); rows > 0 {
+			m.scrollApprovalDetailsLocked(max(1, rows-1))
+		}
+		return nil
+	case tea.KeyEsc:
+		m.resolveApprovalLocked(ApprovalDeny)
+	case tea.KeyCtrlC:
+		m.cancelInteractionsLocked()
+		return m.quitLocked()
+	case tea.KeyRunes:
+		switch string(msg.Runes) {
+		case "y":
+			if !m.approvalDetailsReviewedLocked() {
+				return nil
+			}
+			m.resolveApprovalLocked(ApprovalAllow)
+		case "n":
+			m.resolveApprovalLocked(ApprovalDeny)
+		case "d":
+			if m.activeInteraction != nil && m.activeInteraction.approval != nil && m.activeInteraction.approval.DiffPreview != "" {
+				m.activeInteraction.showDiff = !m.activeInteraction.showDiff
+				m.activeInteraction.detailOffset = 0
+				m.activeInteraction.reviewedDetailLines = nil
+				m.activeInteraction.reviewedDetailCount = 0
+			}
+		case "a":
+			// Reusable approval is unavailable until the caller supplies an
+			// authoritative scope that the TUI can display and the policy can
+			// enforce. Never infer that scope from the tool name or arguments.
+		case "q":
+			m.cancelInteractionsLocked()
+			return m.quitLocked()
+		}
+	}
+	return nil
+}
+
+func (m *teaModel) handleHITLKeyLocked(msg tea.KeyMsg) tea.Cmd {
+	current := m.activeInteraction
+	if current == nil || current.hitl == nil {
+		return nil
+	}
+	if current.hitl.Context != nil && current.hitl.Context.Err() != nil {
+		m.cancelInteractionLocked(current.token, current.hitl.Context.Err())
+		return nil
+	}
+	if msg.Type == tea.KeyEsc {
+		m.respondHITLLocked(HITLResponse{Err: context.Canceled})
+		m.finishActiveInteractionLocked()
+		return nil
+	}
+	if msg.Type == tea.KeyCtrlC {
+		m.cancelInteractionsLocked()
+		return m.quitLocked()
+	}
+
+	if len(current.hitl.Options) > 0 {
+		switch msg.Type {
+		case tea.KeyUp:
+			if current.selectedOption > 0 {
+				current.selectedOption--
+			}
+		case tea.KeyDown:
+			if current.selectedOption+1 < len(current.hitl.Options) {
+				current.selectedOption++
+			}
+		case tea.KeyEnter:
+			m.respondHITLLocked(HITLResponse{Answer: current.hitl.Options[current.selectedOption]})
+			m.finishActiveInteractionLocked()
+		case tea.KeyRunes:
+			if len(msg.Runes) == 1 && msg.Runes[0] >= '1' && msg.Runes[0] <= '9' {
+				option := int(msg.Runes[0] - '1')
+				if option < len(current.hitl.Options) {
+					m.respondHITLLocked(HITLResponse{Answer: current.hitl.Options[option]})
+					m.finishActiveInteractionLocked()
+				}
+			}
+		}
+		return nil
+	}
+
+	switch msg.Type {
+	case tea.KeyEnter:
+		m.respondHITLLocked(HITLResponse{Answer: current.answer})
+		m.finishActiveInteractionLocked()
+	case tea.KeyBackspace:
+		if current.answer != "" {
+			_, size := utf8.DecodeLastRuneInString(current.answer)
+			current.answer = current.answer[:len(current.answer)-size]
+		}
+	case tea.KeyRunes:
+		current.answer += string(msg.Runes)
+	case tea.KeySpace:
+		current.answer += " "
+	}
+	return nil
+}
+
+func (m *teaModel) enqueueApprovalLocked(req ApprovalRequest) (uint64, <-chan struct{}) {
+	if req.Context != nil && req.Context.Err() != nil {
+		respondApproval(req.ResponseCh, ApprovalDeny)
+		return 0, nil
+	}
+	interaction := pendingInteraction{approval: &req, showDiff: true, finished: make(chan struct{})}
+	token := m.enqueueInteractionLocked(interaction)
+	return token, interaction.finished
+}
+
+func (m *teaModel) enqueueHITLLocked(req HITLMessage) (uint64, <-chan struct{}) {
+	req.Options = append([]string(nil), req.Options...)
+	finished := make(chan struct{})
+	interaction := pendingInteraction{hitl: &req, finished: finished}
+	token := m.enqueueInteractionLocked(interaction)
+	return token, finished
+}
+
+func (m *teaModel) enqueueInteractionLocked(interaction pendingInteraction) uint64 {
+	m.interactionSequence++
+	interaction.token = m.interactionSequence
+	if m.activeInteraction == nil {
+		m.activeInteraction = &interaction
+		return interaction.token
+	}
+	m.queuedInteractions = append(m.queuedInteractions, interaction)
+	return interaction.token
+}
+
+func (m *teaModel) finishActiveInteractionLocked() {
+	if m.activeInteraction != nil && m.activeInteraction.finished != nil {
+		close(m.activeInteraction.finished)
+	}
+	m.activeInteraction = nil
+	if len(m.queuedInteractions) == 0 {
+		return
+	}
+	next := m.queuedInteractions[0]
+	m.queuedInteractions = m.queuedInteractions[1:]
+	m.activeInteraction = &next
+}
+
+func (m *teaModel) resolveApprovalLocked(decision ApprovalDecision) {
+	if m.activeInteraction == nil || m.activeInteraction.approval == nil {
+		return
+	}
+	if ctx := m.activeInteraction.approval.Context; ctx != nil && ctx.Err() != nil {
+		m.cancelInteractionLocked(m.activeInteraction.token, ctx.Err())
+		return
+	}
+	responseCh := m.activeInteraction.approval.ResponseCh
+	respondApproval(responseCh, decision)
+	m.finishActiveInteractionLocked()
+}
+
+func (m *teaModel) respondHITLLocked(response HITLResponse) {
+	if m.activeInteraction == nil || m.activeInteraction.hitl == nil {
+		return
+	}
+	sendHITLResponse(m.activeInteraction.hitl.ResponseCh, response)
+}
+
+func sendHITLResponse(responseCh chan HITLResponse, response HITLResponse) {
+	if responseCh == nil {
+		return
+	}
+	select {
+	case responseCh <- response:
+	default:
+	}
+}
+
+func (m *teaModel) cancelInteractionLocked(token uint64, err error) {
+	if err == nil {
+		err = context.Canceled
+	}
+	if current := m.activeInteraction; current != nil && current.token == token {
+		m.cancelPendingInteractionLocked(current, err)
+		m.finishActiveInteractionLocked()
+		return
+	}
+	for i := range m.queuedInteractions {
+		queued := &m.queuedInteractions[i]
+		if queued.token != token {
+			continue
+		}
+		m.cancelPendingInteractionLocked(queued, err)
+		m.queuedInteractions = append(m.queuedInteractions[:i], m.queuedInteractions[i+1:]...)
+		return
+	}
+}
+
+func (m *teaModel) cancelPendingInteractionLocked(interaction *pendingInteraction, err error) {
+	if interaction.approval != nil {
+		respondApproval(interaction.approval.ResponseCh, ApprovalDeny)
+	}
+	if interaction.hitl != nil {
+		sendHITLResponse(interaction.hitl.ResponseCh, HITLResponse{Err: err})
+	}
+	if interaction.finished != nil {
+		close(interaction.finished)
+		interaction.finished = nil
+	}
+}
+
+func (m *teaModel) cancelApprovalInteractionsLocked() {
+	remaining := make([]pendingInteraction, 0, len(m.queuedInteractions)+1)
+	if m.activeInteraction != nil {
+		if m.activeInteraction.approval != nil {
+			m.cancelPendingInteractionLocked(m.activeInteraction, context.Canceled)
+		} else {
+			remaining = append(remaining, *m.activeInteraction)
+		}
+		m.activeInteraction = nil
+	}
+	for i := range m.queuedInteractions {
+		interaction := &m.queuedInteractions[i]
+		if interaction.approval != nil {
+			m.cancelPendingInteractionLocked(interaction, context.Canceled)
+			continue
+		}
+		remaining = append(remaining, *interaction)
+	}
+	m.queuedInteractions = nil
+	if len(remaining) == 0 {
+		return
+	}
+	m.activeInteraction = &remaining[0]
+	if len(remaining) > 1 {
+		m.queuedInteractions = append(m.queuedInteractions, remaining[1:]...)
+	}
+}
+
+func respondApproval(responseCh chan ApprovalResponse, decision ApprovalDecision) {
+	if responseCh == nil {
+		return
+	}
+	select {
+	case responseCh <- ApprovalResponse{Decision: decision}:
+	default:
+	}
+}
+
+func (m *teaModel) cancelInteractionsLocked() {
+	if current := m.activeInteraction; current != nil {
+		m.cancelPendingInteractionLocked(current, context.Canceled)
+	}
+	for i := range m.queuedInteractions {
+		queued := &m.queuedInteractions[i]
+		m.cancelPendingInteractionLocked(queued, context.Canceled)
+	}
+	m.activeInteraction = nil
+	m.queuedInteractions = nil
+}
+
+func (m *teaModel) handleHITLMessage(msg HITLMessage) (tea.Model, tea.Cmd) {
+	if msg.Context != nil && msg.Context.Err() != nil {
+		sendHITLResponse(msg.ResponseCh, HITLResponse{Err: msg.Context.Err()})
+		return m, nil
+	}
+	m.mu.Lock()
+	token, finished := m.enqueueHITLLocked(msg)
+	view := ""
+	if m.shouldNotify() {
+		view = m.renderViewLocked()
+	}
+	m.mu.Unlock()
+	m.notify(view)
+	return m, waitForInteractionCancel(msg.Context, token, finished, m.runDone)
+}
+
+func waitForInteractionCancel(ctx context.Context, token uint64, finished, runDone <-chan struct{}) tea.Cmd {
+	if ctx == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		select {
+		case <-finished:
+			return nil
+		case <-ctx.Done():
+			return interactionCanceledMsg{token: token, err: ctx.Err()}
+		case <-runDone:
+			return nil
+		}
+	}
 }
 
 // togglePauseLocked flips the paused state and invokes the matching callback.

@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os/exec"
@@ -14,10 +16,17 @@ import (
 type KeychainSource struct {
 	service string
 	account string
+	// availableFunc can be set by package tests to exercise keychain behavior
+	// without depending on the host platform or touching its keychain.
+	availableFunc func() bool
 	// run executes a command and returns its stdout. It is a field so tests
 	// can inject a fake without touching the real keychain.
 	run func(name string, args ...string) ([]byte, error)
 }
+
+var errKeychainItemNotFound = errors.New("keychain: scoped item not found")
+
+const keychainItemNotFoundMessage = "The specified item could not be found in the keychain."
 
 // NewKeychainSource creates a KeychainSource with the default service
 // ("go-cli") and account ("api-key") names.
@@ -31,12 +40,30 @@ func NewKeychainSource() *KeychainSource {
 
 // keychainExec is the default command runner used by KeychainSource.
 func keychainExec(name string, args ...string) ([]byte, error) {
-	return exec.Command(name, args...).Output()
+	command := exec.Command(name, args...)
+	var stdout, stderr bytes.Buffer
+	command.Stdout = &stdout
+	command.Stderr = &stderr
+	if err := command.Run(); err != nil {
+		if name == "security" && isKeychainItemNotFoundError(err, stderr.Bytes()) {
+			return nil, errKeychainItemNotFound
+		}
+		return nil, fmt.Errorf("keychain: command failed: %w", err)
+	}
+	return stdout.Bytes(), nil
+}
+
+func isKeychainItemNotFoundError(err error, stderr []byte) bool {
+	var exitErr *exec.ExitError
+	return errors.As(err, &exitErr) && bytes.Contains(stderr, []byte(keychainItemNotFoundMessage))
 }
 
 // Available reports whether the OS keychain is usable. On non-macOS systems
 // it always returns false.
 func (k *KeychainSource) Available() bool {
+	if k.availableFunc != nil {
+		return k.availableFunc()
+	}
 	if runtime.GOOS != "darwin" {
 		return false
 	}
@@ -73,6 +100,60 @@ func (k *KeychainSource) Get() (string, error) {
 	return strings.TrimSpace(string(out)), nil
 }
 
+// SetScoped stores an API key under a base64-encoded full provider/protocol/
+// origin tuple. It never overwrites the legacy unscoped api-key item.
+func (k *KeychainSource) SetScoped(scope AuthScope, key string) error {
+	if !k.Available() {
+		return errors.New("keychain: not available on this platform")
+	}
+	account, err := scopedCredentialAccount(scope)
+	if err != nil {
+		return err
+	}
+	if _, err := k.run("security", "add-generic-password", "-s", k.service, "-a", account, "-w", key, "-U"); err != nil {
+		return fmt.Errorf("keychain: set scoped credential: %w", err)
+	}
+	return nil
+}
+
+// GetScoped retrieves a key that was stored for the exact scope tuple.
+func (k *KeychainSource) GetScoped(scope AuthScope) (string, error) {
+	account, err := scopedCredentialAccount(scope)
+	if err != nil {
+		return "", fmt.Errorf("keychain: invalid scoped credential lookup: %w", err)
+	}
+	if !k.Available() {
+		return "", ErrAuthNotFound
+	}
+	out, err := k.run("security", "find-generic-password", "-s", k.service, "-a", account, "-w")
+	if err != nil {
+		if errors.Is(err, errKeychainItemNotFound) {
+			return "", ErrAuthNotFound
+		}
+		return "", fmt.Errorf("keychain: find scoped credential: %w", err)
+	}
+	key := strings.TrimSpace(string(out))
+	if key == "" {
+		return "", errors.New("keychain: find scoped credential returned empty output")
+	}
+	return key, nil
+}
+
+// DeleteScoped removes only the key bound to the exact scope tuple.
+func (k *KeychainSource) DeleteScoped(scope AuthScope) error {
+	if !k.Available() {
+		return errors.New("keychain: not available on this platform")
+	}
+	account, err := scopedCredentialAccount(scope)
+	if err != nil {
+		return err
+	}
+	if _, err := k.run("security", "delete-generic-password", "-s", k.service, "-a", account); err != nil {
+		return fmt.Errorf("keychain: delete scoped credential: %w", err)
+	}
+	return nil
+}
+
 // Delete removes the API key entry from the keychain.
 func (k *KeychainSource) Delete() error {
 	if !k.Available() {
@@ -90,4 +171,18 @@ func (k *KeychainSource) Delete() error {
 // keychain stores a single API key shared across providers.
 func (k *KeychainSource) Lookup(_ string) (string, error) {
 	return k.Get()
+}
+
+// LookupScoped adapts KeychainSource to AuthChain using an exact scope.
+func (k *KeychainSource) LookupScoped(scope AuthScope) (string, error) {
+	return k.GetScoped(scope)
+}
+
+func scopedCredentialAccount(scope AuthScope) (string, error) {
+	normalized, err := normalizeAuthScope(scope)
+	if err != nil {
+		return "", err
+	}
+	serialized := normalized.ProviderID + "\x00" + normalized.ProtocolID + "\x00" + normalized.Origin
+	return "credential:" + base64.RawURLEncoding.EncodeToString([]byte(serialized)), nil
 }

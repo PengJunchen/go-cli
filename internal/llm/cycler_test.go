@@ -12,8 +12,8 @@ import (
 // threeModels is a reusable pool of three ModelEntry values for tests.
 var threeModels = []ModelEntry{
 	{Provider: "openai", Model: "gpt-4o", Weight: 1},
-	{Provider: "claude", Model: "claude-3", Weight: 1},
-	{Provider: "gemini", Model: "gemini-pro", Weight: 1},
+	{Provider: "compatible-claude", Model: "claude-3", Weight: 1},
+	{Provider: "compatible-gemini", Model: "gemini-pro", Weight: 1},
 }
 
 // TestModelCycler_Name verifies the middleware identifier.
@@ -244,6 +244,15 @@ type cyclerTestProvider struct {
 
 func (p *cyclerTestProvider) Name() string        { return p.name }
 func (p *cyclerTestProvider) Models() []ModelInfo { return nil }
+func (p *cyclerTestProvider) resolverSpec() ProviderSpec {
+	return ProviderSpec{
+		ProviderID:              p.name,
+		ProtocolID:              ProtocolOpenAICompatible,
+		DefaultBaseURL:          "https://fixture.invalid",
+		DefaultEndpointExplicit: true,
+		Enabled:                 true,
+	}
+}
 func (p *cyclerTestProvider) Build(_ context.Context, cfg ModelConfig) (BaseChatModel, func(), error) {
 	return &fbMockModel{
 		genContent: cfg.Model,
@@ -254,12 +263,12 @@ func (p *cyclerTestProvider) Build(_ context.Context, cfg ModelConfig) (BaseChat
 }
 
 // newCyclerTestRegistry creates a ProviderRegistry with cyclerTestProvider
-// instances registered under the names used by threeModels. When genErr is
+// instances registered under the compatible identities used by threeModels. When genErr is
 // non-nil, every built model will fail.
 func newCyclerTestRegistry(t *testing.T, genErr error) *ProviderRegistry {
 	t.Helper()
 	reg := NewProviderRegistry()
-	for _, name := range []string{"openai", "claude", "gemini"} {
+	for _, name := range []string{"openai", "compatible-claude", "compatible-gemini"} {
 		require.NoError(t, reg.Register(&cyclerTestProvider{name: name, genErr: genErr}))
 	}
 	return reg

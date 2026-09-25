@@ -205,22 +205,22 @@ func TestBoundary_LoopLLMErrorMidStream(t *testing.T) {
 // SUBAGENT STATE MACHINE TESTS
 // =============================================================================
 
-// TestBoundary_SubAgentSendBeforeRun verifies Send works before Run and
-// the message is recorded.
+// TestBoundary_SubAgentSendBeforeRun verifies Send is rejected while the
+// sub-agent is idle and the rejected message is not recorded.
 func TestBoundary_SubAgentSendBeforeRun(t *testing.T) {
 	sa := core.NewDefaultSubAgent(core.SubAgentConfig{
 		Name:     "send-before-run",
 		MaxTurns: 1,
 	})
 
-	// Send before Run - should succeed and record the message
+	// Send before Run is outside the live admission window.
 	err := sa.Send(context.Background(), "pre-run message")
-	require.NoError(t, err)
+	require.ErrorIs(t, err, core.ErrSubAgentNotRunning)
 
 	// Verify recorded via the concrete type
 	defaultSA, ok := sa.(*core.DefaultSubAgent)
 	require.True(t, ok, "should be *core.DefaultSubAgent")
-	assert.Equal(t, []string{"pre-run message"}, defaultSA.Received())
+	assert.Empty(t, defaultSA.Received(), "rejected pre-run input must not be queued")
 
 	// Now run and verify it completes
 	events, err := sa.Run(context.Background(), "test prompt")
@@ -239,6 +239,8 @@ func TestBoundary_SubAgentSendBeforeRun(t *testing.T) {
 	msg, waitErr := sa.Wait(context.Background())
 	require.NoError(t, waitErr)
 	assert.Equal(t, "assistant", msg.Role)
+	require.ErrorIs(t, sa.Send(context.Background(), "too late"), core.ErrSubAgentNotRunning)
+	assert.Empty(t, defaultSA.Received(), "neither idle nor terminal input is accepted")
 }
 
 // TestBoundary_SubAgentInterruptBeforeRun verifies interrupt before Run
@@ -404,8 +406,8 @@ func TestBoundary_CircuitConcurrentLowThreshold(t *testing.T) {
 // RETRY BOUNDARY TESTS
 // =============================================================================
 
-// TestBoundary_RetryMaxAttemptsBoundary verifies ShouldRetry returns true
-// for attempt MaxAttempts-1 and false for attempt MaxAttempts.
+// TestBoundary_RetryMaxAttemptsBoundary verifies MaxAttempts is the total
+// number of dispatches, so only earlier failures can schedule another call.
 func TestBoundary_RetryMaxAttemptsBoundary(t *testing.T) {
 	ctx := context.Background()
 	p := production.NewDefaultRetryPolicy(production.RetryConfig{
@@ -420,8 +422,8 @@ func TestBoundary_RetryMaxAttemptsBoundary(t *testing.T) {
 	assert.True(t, p.ShouldRetry(ctx, transientErr, 0), "attempt 0 should retry")
 	assert.True(t, p.ShouldRetry(ctx, transientErr, 1), "attempt 1 should retry")
 
-	// attempt 2 is MaxAttempts-1 (last retry)
-	assert.True(t, p.ShouldRetry(ctx, transientErr, 2), "attempt 2 (last) should retry")
+	// attempt 2 is the third and final dispatch, so it must not retry.
+	assert.False(t, p.ShouldRetry(ctx, transientErr, 2), "attempt 2 (final) should NOT retry")
 
 	// attempt 3 == MaxAttempts - should NOT retry
 	assert.False(t, p.ShouldRetry(ctx, transientErr, 3), "attempt 3 should NOT retry")

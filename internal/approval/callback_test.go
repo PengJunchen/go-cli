@@ -111,6 +111,89 @@ func TestApprovalCacheSetGet(t *testing.T) {
 	assert.False(t, ok, "missing key should not be found")
 }
 
+func TestApprovalCachePositiveGrantDoesNotAdvanceApprovalGeneration(t *testing.T) {
+	fence := tools.NewDispatchFence()
+	cache := NewApprovalCache("")
+	require.NoError(t, cache.bindFence(fence))
+	expected := fence.Snapshot()
+
+	cache.Set("prepared:a")
+
+	assert.Equal(t, expected, fence.Snapshot(), "adding a positive grant must not revoke sibling prepared calls")
+	allowed, ok := cache.Get("prepared:a")
+	assert.True(t, ok)
+	assert.True(t, allowed)
+}
+
+func TestApprovalCacheParallelPositiveGrantsShareSnapshot(t *testing.T) {
+	fence := tools.NewDispatchFence()
+	cache := NewApprovalCache("")
+	require.NoError(t, cache.bindFence(fence))
+	expected := fence.Snapshot()
+
+	type grantResult struct {
+		key      string
+		snapshot tools.DispatchFenceSnapshot
+		err      error
+	}
+	start := make(chan struct{})
+	results := make(chan grantResult, 2)
+	for _, key := range []string{"prepared:a", "prepared:b"} {
+		key := key
+		go func() {
+			<-start
+			snapshot, err := cache.publishPreparedGrant(fence, expected, key, nil)
+			results <- grantResult{key: key, snapshot: snapshot, err: err}
+		}()
+	}
+	close(start)
+
+	for range 2 {
+		result := <-results
+		require.NoError(t, result.err, "%s positive grant must publish from the shared snapshot", result.key)
+		assert.Equal(t, expected, result.snapshot)
+	}
+	assert.Equal(t, expected, fence.Snapshot())
+	for _, key := range []string{"prepared:a", "prepared:b"} {
+		allowed, ok := cache.Get(key)
+		assert.True(t, ok, "%s grant should exist", key)
+		assert.True(t, allowed, "%s grant should allow", key)
+	}
+}
+
+func TestApprovalCacheLoadReplacementAdvancesApprovalGeneration(t *testing.T) {
+	fence := tools.NewDispatchFence()
+	cache := NewApprovalCache("")
+	require.NoError(t, cache.bindFence(fence))
+	cache.Set("prepared:old")
+	before := fence.Snapshot()
+
+	path := filepath.Join(t.TempDir(), "cache.json")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
+	require.NoError(t, err)
+	_, err = file.WriteString(`{"prepared:new":true}`)
+	require.NoError(t, err)
+	require.NoError(t, file.Close())
+
+	require.NoError(t, cache.LoadFromFile(path))
+	after := fence.Snapshot()
+	assert.Equal(t, before.Approval+1, after.Approval, "whole-cache replacement must invalidate old approval snapshots")
+	assert.Equal(t, before.Registry, after.Registry)
+	assert.Equal(t, before.Plan, after.Plan)
+	_, oldFound := cache.Get("prepared:old")
+	newAllowed, newFound := cache.Get("prepared:new")
+	assert.False(t, oldFound)
+	assert.True(t, newFound)
+	assert.True(t, newAllowed)
+}
+
+func TestApprovalCacheRejectsDifferentDispatchFence(t *testing.T) {
+	cache := NewApprovalCache("")
+	require.NoError(t, cache.bindFence(tools.NewDispatchFence()))
+	err := cache.bindFence(tools.NewDispatchFence())
+	require.ErrorIs(t, err, errApprovalCacheBoundToDifferentFence)
+}
+
 func TestApprovalCacheRoundtrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "cache.json")
 
