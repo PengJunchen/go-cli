@@ -74,6 +74,12 @@ func TestCustomNilDisconnectHasNoBuiltInCompletionAttestation(t *testing.T) {
 	require.False(t, IsBuiltInHTTPClientLocallyJoined(client), "third-party nil is not a trusted join proof")
 }
 
+func TestTypedNilBuiltInHTTPClientHasNoLocalJoinAttestation(t *testing.T) {
+	var adapter *gRPCAdapter
+	var client ACPClient = adapter
+	require.False(t, IsBuiltInHTTPClientLocallyJoined(client))
+}
+
 func TestBuiltInHTTPClientPendingDisconnectAttestsOnlyAfterDone(t *testing.T) {
 	peer := startHTTPProfilePeer(t)
 	closeStarted := make(chan struct{})
