@@ -49,14 +49,6 @@ func (group *unixProcessGroup) processGroupID() int {
 	return group.cmd.Process.Pid
 }
 
-func (group *unixProcessGroup) terminate() error {
-	pgid := group.processGroupID()
-	if pgid <= 0 {
-		return os.ErrProcessDone
-	}
-	return signalOwnedProcessGroup(pgid, syscall.SIGTERM)
-}
-
 func (group *unixProcessGroup) cleanup() (bool, error) {
 	pgid := group.processGroupID()
 	if pgid <= 0 {

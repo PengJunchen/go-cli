@@ -22,8 +22,60 @@ var (
 )
 
 type processGroup interface {
-	terminate() error
 	cleanup() (residual bool, err error)
+}
+
+type processGroupCleanupOwner struct {
+	group    processGroup
+	mu       sync.Mutex
+	done     chan struct{}
+	residual bool
+	err      error
+}
+
+func (owner *processGroupCleanupOwner) startLocked() {
+	if owner.done != nil {
+		return
+	}
+	done := make(chan struct{})
+	owner.done = done
+	go func() {
+		residual, err := owner.group.cleanup()
+		owner.mu.Lock()
+		owner.residual = residual
+		owner.err = err
+		close(done)
+		owner.mu.Unlock()
+	}()
+}
+
+func (owner *processGroupCleanupOwner) request() {
+	owner.mu.Lock()
+	owner.startLocked()
+	owner.mu.Unlock()
+}
+
+func (owner *processGroupCleanupOwner) wait() error {
+	owner.request()
+	owner.mu.Lock()
+	done := owner.done
+	owner.mu.Unlock()
+	<-done
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	return owner.err
+}
+
+func (owner *processGroupCleanupOwner) finish() (startedBeforeFinish bool, residual bool, err error) {
+	owner.mu.Lock()
+	startedBeforeFinish = owner.done != nil
+	owner.startLocked()
+	done := owner.done
+	owner.mu.Unlock()
+	<-done
+	owner.mu.Lock()
+	defer owner.mu.Unlock()
+	return startedBeforeFinish, owner.residual, owner.err
 }
 
 type Limits struct {
@@ -56,28 +108,23 @@ func Run(cmd *exec.Cmd, limits Limits) (Result, error) {
 	if err != nil {
 		return Result{}, err
 	}
-
-	var terminateOnce sync.Once
-	var terminateErr error
-	terminateGroup := func() error {
-		terminateOnce.Do(func() {
-			terminateErr = group.terminate()
-		})
-		return terminateErr
-	}
-	stdout := newBoundedBuffer(limits.StdoutBytes, func() { _ = terminateGroup() })
-	stderr := newBoundedBuffer(limits.StderrBytes, func() { _ = terminateGroup() })
+	cleanupOwner := &processGroupCleanupOwner{group: group}
+	stdout := newBoundedBuffer(limits.StdoutBytes, cleanupOwner.request)
+	stderr := newBoundedBuffer(limits.StderrBytes, cleanupOwner.request)
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.WaitDelay = limits.WaitDelay
-	// CommandContext's default callback kills only the command process. This
-	// command is now in a fresh group owned by this invocation, so cancellation
-	// must target that group instead.
-	cmd.Cancel = terminateGroup
+	// CommandContext's default callback kills only the command process. Replace
+	// it when present so context cancellation shares the same bounded owner as
+	// output overflow and post-command cleanup. Plain exec.Command values must
+	// retain a nil Cancel callback for os/exec compatibility.
+	if cmd.Cancel != nil {
+		cmd.Cancel = cleanupOwner.wait
+	}
 
 	err = cmd.Run()
-	residual, cleanupErr := group.cleanup()
-	if residual {
+	cleanupStartedBeforeFinish, residual, cleanupErr := cleanupOwner.finish()
+	if residual && !cleanupStartedBeforeFinish {
 		err = errors.Join(err, ErrResidualDescendants)
 	}
 	if cleanupErr != nil {
