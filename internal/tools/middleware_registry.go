@@ -30,10 +30,11 @@ type MiddlewareToolRegistry struct {
 
 // Compile-time interface guarantees.
 var (
-	_ ToolRegistry                = (*MiddlewareToolRegistry)(nil)
-	_ DispatchFenceProvider       = (*MiddlewareToolRegistry)(nil)
-	_ TrustedControlRegistrar     = (*MiddlewareToolRegistry)(nil)
-	_ TrustedNetworkReadRegistrar = (*MiddlewareToolRegistry)(nil)
+	_ ToolRegistry                        = (*MiddlewareToolRegistry)(nil)
+	_ DispatchFenceProvider               = (*MiddlewareToolRegistry)(nil)
+	_ TrustedControlRegistrar             = (*MiddlewareToolRegistry)(nil)
+	_ TrustedNetworkReadRegistrar         = (*MiddlewareToolRegistry)(nil)
+	_ trustedScopedWorkspaceReadRegistrar = (*MiddlewareToolRegistry)(nil)
 )
 
 // NewMiddlewareToolRegistry creates a decorator around inner. The optional
@@ -138,6 +139,14 @@ func (r *MiddlewareToolRegistry) registerTrustedInlineLocalReader(ctx context.Co
 		return ErrPreparedRegistrationUnavailable
 	}
 	return registrar.registerTrustedInlineLocalReader(ctx, def)
+}
+
+func (r *MiddlewareToolRegistry) registerTrustedScopedWorkspaceRead(ctx context.Context, def ToolDefinition) error {
+	registrar, ok := r.inner.(trustedScopedWorkspaceReadRegistrar)
+	if !ok {
+		return ErrPreparedRegistrationUnavailable
+	}
+	return registrar.registerTrustedScopedWorkspaceRead(ctx, def)
 }
 
 func (r *MiddlewareToolRegistry) toolRegistrationSnapshot(ctx context.Context, name string) (registeredToolSnapshot, error) {

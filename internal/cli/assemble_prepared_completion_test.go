@@ -51,7 +51,8 @@ func TestAssembledReadAndLSCompletionCoversDefaultWrappers(t *testing.T) {
 				Args: map[string]any{"path": testCase.path},
 			})
 			require.NoError(t, prepareErr)
-			assert.Equal(t, []tools.TrustedToolEffect{tools.EffectUnknown}, invocation.EffectSet().Values(), "completion proof does not grant workspace-read authorization")
+			assert.Equal(t, []tools.TrustedToolEffect{tools.EffectWorkspaceRead}, invocation.EffectSet().Values(), "the configured reader is scoped independently from its completion proof")
+			assert.NotEqual(t, [32]byte{}, invocation.ToolIdentity().Scope().Fingerprint())
 
 			_, dispatchErr := invocation.Dispatch(ctx)
 			if testCase.wantError {
