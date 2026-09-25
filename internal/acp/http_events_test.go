@@ -175,3 +175,114 @@ func TestSSEStream_OverflowReportsGapAfterContiguousPrefix(t *testing.T) {
 	require.Equal(t, uint64(5), gap.MissingCount)
 	require.Equal(t, lastID, gap.LastEventID)
 }
+
+func TestSSEStream_OverflowThenSessionCloseStillReportsGap(t *testing.T) {
+	session := NewSession("overflow-close")
+	server := NewHTTPServer("test", "", nil)
+	server.sessions[session.ID()] = session
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request := httptest.NewRequest(http.MethodGet, "/events?sender_id=overflow-close", nil).WithContext(ctx)
+	writer := newSSEFlushGate()
+	handlerDone := make(chan struct{})
+	go func() {
+		defer close(handlerDone)
+		server.handleEvents(writer, request)
+	}()
+	defer func() {
+		writer.release()
+		cancel()
+		select {
+		case <-handlerDone:
+		case <-time.After(time.Second):
+			t.Error("SSE handler did not stop during test cleanup")
+		}
+	}()
+	select {
+	case <-writer.initialSent:
+	case <-time.After(time.Second):
+		t.Fatal("SSE handler did not establish its stream")
+	}
+
+	session.PublishEvent(core.AgentEvent{Kind: "message", Content: "first"})
+	select {
+	case <-writer.liveBlocked:
+	case <-time.After(time.Second):
+		t.Fatal("SSE handler did not block at the controlled slow-consumer boundary")
+	}
+
+	const lastID = uint64(1 + eventSubscriberBufferSize + 5)
+	publishDone := make(chan struct{})
+	go func() {
+		defer close(publishDone)
+		for id := uint64(2); id <= lastID; id++ {
+			session.PublishEvent(core.AgentEvent{Kind: "message", Content: fmt.Sprint(id)})
+		}
+	}()
+	select {
+	case <-publishDone:
+	case <-time.After(time.Second):
+		t.Fatal("slow SSE consumer blocked event publication")
+	}
+	session.Close()
+	writer.release()
+	select {
+	case <-handlerDone:
+	case <-time.After(time.Second):
+		t.Fatal("SSE handler did not finish after session close")
+	}
+
+	frames := parseSSETestFrames(t, writer.bodyString())
+	require.Len(t, frames, eventSubscriberBufferSize+2)
+	for index := 0; index <= eventSubscriberBufferSize; index++ {
+		require.Equal(t, "message", frames[index].event)
+		require.Equal(t, uint64(index+1), frames[index].id)
+	}
+	gapFrame := frames[len(frames)-1]
+	require.Equal(t, "event_gap", gapFrame.event)
+	require.Equal(t, uint64(eventSubscriberBufferSize+1), gapFrame.id)
+	var gap EventGap
+	require.NoError(t, json.Unmarshal([]byte(gapFrame.data), &gap))
+	require.Equal(t, "subscriber_overflow", gap.Reason)
+	require.Equal(t, uint64(eventSubscriberBufferSize+2), gap.MissingFrom)
+	require.Equal(t, lastID, gap.MissingThrough)
+	require.Equal(t, uint64(5), gap.MissingCount)
+	require.Equal(t, lastID, gap.LastEventID)
+}
+
+func TestSSEStream_FutureLastEventIDReturnsBadRequest(t *testing.T) {
+	session := NewSession("future-cursor")
+	session.PublishEvent(core.AgentEvent{Kind: "message", Content: "existing"})
+	server := NewHTTPServer("test", "", nil)
+	server.sessions[session.ID()] = session
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	request := httptest.NewRequest(http.MethodGet, "/events?sender_id=future-cursor", nil).WithContext(ctx)
+	request.Header.Set("Last-Event-ID", "2")
+	writer := newSSEFlushGate()
+	handlerDone := make(chan struct{})
+	go func() {
+		defer close(handlerDone)
+		server.handleEvents(writer, request)
+	}()
+	select {
+	case <-handlerDone:
+	case <-writer.initialSent:
+		cancel()
+		select {
+		case <-handlerDone:
+		case <-time.After(time.Second):
+			t.Fatal("SSE handler did not stop after the test canceled the response")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("SSE handler neither rejected the cursor nor started the stream")
+	}
+
+	require.Equal(t, http.StatusBadRequest, writer.status)
+	session.mu.Lock()
+	subscriberCount := len(session.subscribers)
+	session.mu.Unlock()
+	require.Zero(t, subscriberCount, "a rejected future cursor must not register a live subscriber")
+}

@@ -24,7 +24,12 @@ func TestSessionSubscribeAfterAtomicReplayLiveCutover(t *testing.T) {
 		go func(index int) {
 			defer workers.Done()
 			<-start
-			subscriptions[index] = session.SubscribeAfter(0)
+			subscription, err := session.SubscribeAfter(0)
+			if err != nil {
+				t.Errorf("SubscribeAfter failed: %v", err)
+				return
+			}
+			subscriptions[index] = subscription
 		}(i)
 	}
 	go func() {
@@ -63,7 +68,7 @@ func TestSessionSubscribeAfterCutoverPublishesNextEntryOnlyLive(t *testing.T) {
 	session := NewSession("cutover-boundary")
 	session.PublishEvent(core.AgentEvent{Kind: "message", Content: "before"})
 
-	subscription := session.SubscribeAfter(0)
+	subscription := mustSubscribeAfter(t, session, 0)
 	defer subscription.Close()
 	require.Equal(t, uint64(1), subscription.LastSeq)
 	require.Len(t, subscription.Replay, 1)
@@ -84,6 +89,46 @@ func TestSessionSubscribeAfterCutoverPublishesNextEntryOnlyLive(t *testing.T) {
 	}
 }
 
+func TestSessionSubscribeAfterRejectsFutureCursorWithoutRegistering(t *testing.T) {
+	session := NewSession("future-cursor")
+	session.PublishEvent(core.AgentEvent{Kind: "message", Content: "current"})
+
+	subscription, err := session.SubscribeAfter(2)
+	require.Nil(t, subscription)
+	require.ErrorIs(t, err, ErrEventCursorAhead)
+	session.mu.Lock()
+	subscriberCount := len(session.subscribers)
+	session.mu.Unlock()
+	require.Zero(t, subscriberCount, "rejected cursor must not register a subscriber")
+}
+
+func TestSessionSubscribeAfterFutureCursorCheckSharesPublishLock(t *testing.T) {
+	for range 100 {
+		session := NewSession("future-cursor-race")
+		start := make(chan struct{})
+		publishDone := make(chan struct{})
+		go func() {
+			defer close(publishDone)
+			<-start
+			session.PublishEvent(core.AgentEvent{Kind: "message", Content: "new"})
+		}()
+
+		close(start)
+		subscription, err := session.SubscribeAfter(1)
+		<-publishDone
+		if err != nil {
+			require.ErrorIs(t, err, ErrEventCursorAhead)
+			require.Nil(t, subscription)
+			continue
+		}
+		require.NotNil(t, subscription)
+		require.GreaterOrEqual(t, subscription.LastSeq, uint64(1))
+		require.Nil(t, subscription.HistoryGap)
+		require.Empty(t, subscription.Replay, "cursor at the concurrently published event is already current")
+		require.Nil(t, subscription.Close())
+	}
+}
+
 func TestSessionSubscribeAfterReportsRetentionGapAndPreservesIDs(t *testing.T) {
 	session := NewSession("retention")
 	const priorEvents = eventHistorySize + 7
@@ -91,7 +136,7 @@ func TestSessionSubscribeAfterReportsRetentionGapAndPreservesIDs(t *testing.T) {
 		session.PublishEvent(core.AgentEvent{Kind: "message", Content: fmt.Sprint(i)})
 	}
 
-	subscription := session.SubscribeAfter(0)
+	subscription := mustSubscribeAfter(t, session, 0)
 	defer subscription.Close()
 	require.NotNil(t, subscription.HistoryGap)
 	require.Equal(t, "acp_session_transport", subscription.HistoryGap.Layer)
@@ -118,8 +163,8 @@ func TestSessionSubscribeAfterReportsRetentionGapAndPreservesIDs(t *testing.T) {
 
 func TestSessionSubscribersAreIsolatedAndSlowOverflowDoesNotBlockPublish(t *testing.T) {
 	session := NewSession("subscribers")
-	fast := session.SubscribeAfter(0)
-	slow := session.SubscribeAfter(0)
+	fast := mustSubscribeAfter(t, session, 0)
+	slow := mustSubscribeAfter(t, session, 0)
 
 	fastAck := make(chan struct{}, 1)
 	publishDone := make(chan struct{})
@@ -184,8 +229,8 @@ func TestSessionSubscribersAreIsolatedAndSlowOverflowDoesNotBlockPublish(t *test
 func TestSessionSubscriptionsDoNotCrossSessions(t *testing.T) {
 	left := NewSession("left")
 	right := NewSession("right")
-	leftSub := left.SubscribeAfter(0)
-	rightSub := right.SubscribeAfter(0)
+	leftSub := mustSubscribeAfter(t, left, 0)
+	rightSub := mustSubscribeAfter(t, right, 0)
 	defer leftSub.Close()
 	defer rightSub.Close()
 
@@ -214,7 +259,7 @@ func TestSessionSubscriptionsDoNotCrossSessions(t *testing.T) {
 func TestSessionSubscriptionCloseRacesWithPublish(t *testing.T) {
 	for iteration := 0; iteration < 8; iteration++ {
 		session := NewSession("cancel-race")
-		subscription := session.SubscribeAfter(0)
+		subscription := mustSubscribeAfter(t, session, 0)
 		publishDone := make(chan struct{})
 		go func() {
 			defer close(publishDone)
@@ -242,4 +287,11 @@ func TestSessionSubscriptionCloseRacesWithPublish(t *testing.T) {
 		}
 		require.Equal(t, gap, subscription.Close(), "closing a removed subscriber is idempotent")
 	}
+}
+
+func mustSubscribeAfter(t *testing.T, session *Session, afterID uint64) *EventSubscription {
+	t.Helper()
+	subscription, err := session.SubscribeAfter(afterID)
+	require.NoError(t, err)
+	return subscription
 }
