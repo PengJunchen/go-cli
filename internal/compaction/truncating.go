@@ -9,9 +9,9 @@ import (
 
 // TruncatingCompactor is the last-resort compaction strategy. It preserves every
 // system entry, then keeps the newest non-system entries until the remaining
-// budget is exhausted, dropping the oldest entries. It always returns a list
-// that or fits the budget (or the best achievable subset when the system prompt
-// itself exceeds it), and it never panics on empty input.
+// budget is exhausted, dropping the oldest entries. It rejects input when the
+// mandatory system prompt itself exceeds the budget and never panics on empty
+// input.
 type TruncatingCompactor struct{}
 
 // Compile-time assertion that TruncatingCompactor satisfies Compactor.
@@ -32,6 +32,9 @@ func (c *TruncatingCompactor) Compact(ctx context.Context, items []TurnItem, max
 	if err != nil {
 		return nil, err
 	}
+	if err := checkMandatorySystemPromptBudget(normalized, maxTokens, estimator); err != nil {
+		return items, err
+	}
 
 	tokensBefore := estimateTokens(normalized, estimator)
 	span.SetAttributes(
@@ -45,14 +48,14 @@ func (c *TruncatingCompactor) Compact(ctx context.Context, items []TurnItem, max
 
 	for _, group := range groups {
 		if group.system {
-			system = append(system, normalized[group.start:group.end]...)
+			system = append(system, items[group.start:group.end]...)
 		} else {
 			nonSystem = append(nonSystem, group)
 		}
 	}
 
 	result = append(result, system...)
-	budget := maxTokens - estimateTokens(result, estimator)
+	budget := maxTokens - mandatorySystemPromptTokens(normalized, estimator)
 
 	// Keep the newest non-system entries that fit the budget, dropping the
 	// oldest. We iterate newest-first so the most recent entries win the
@@ -74,7 +77,7 @@ func (c *TruncatingCompactor) Compact(ctx context.Context, items []TurnItem, max
 		result = append(result, normalized[group.start:group.end]...)
 	}
 
-	tokensAfter := estimateTokens(result, estimator)
+	tokensAfter := estimateTokensCopy(result, estimator)
 	span.SetAttributes(
 		tracing.Attribute{Key: "items_out", Value: len(result)},
 		tracing.Attribute{Key: "tokens_after", Value: tokensAfter},

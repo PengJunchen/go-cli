@@ -17,9 +17,9 @@ const defaultTriggerReason = "unknown"
 // UnifiedCompactor is the routing layer of the compaction package. It tries the
 // strategies in order of increasing cost — micro, then summary, then truncating
 // — and falls through to the next strategy whenever the current one cannot
-// satisfy the token budget. Because TruncatingCompactor always returns a result
-// within budget, the router guarantees a valid outcome unless truncating itself
-// is unavailable.
+// satisfy the token budget. Truncating keeps the mandatory system instructions;
+// if those instructions alone exceed the budget, the router returns an explicit
+// error instead of producing an over-budget result.
 //
 // Each strategy is held by the Compactor interface (never a concrete type) so
 // the router stays decoupled and injectable, and so callers can substitute
@@ -114,12 +114,28 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 	span, sctx := tracing.SpanFromContext(ctx, "compaction", tracing.SpanKindInternal)
 	defer span.End()
 	logger := tracing.NewTraceLogger(span, slog.Default())
+	originalItems := items
+
+	// Validate tool-call closure and normalize legacy derived summaries on a
+	// defensive copy before trying any strategy.
+	normalized, _, err := groupTurnItems(items)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkMandatorySystemPromptBudget(normalized, maxTokens, estimator); err != nil {
+		return items, err
+	}
+	items = normalized
 
 	// Pre-compute token counts per item, caching results in EstimatedTokens so
 	// sub-compactors (micro, summary) reuse the cached values instead of
 	// re-estimating from scratch.
 	current := 0
 	for i := range items {
+		if items[i].Role == RoleSystem && !items[i].IsCompaction {
+			current += mandatorySystemPromptItemTokens(items[i], estimator)
+			continue
+		}
 		current += estimateItemTokens(&items[i], estimator)
 	}
 	span.SetAttributes(
@@ -135,7 +151,7 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 		span.AddEvent("trying_micro")
 		result, err := u.micro.Compact(sctx, items, maxTokens, estimator)
 		if err == nil {
-			return u.finish(sctx, logger, span, items, current, maxTokens, estimator, result, StrategyMicro), nil
+			return u.finish(sctx, logger, span, originalItems, current, maxTokens, estimator, result, StrategyMicro), nil
 		}
 		if errors.Is(err, errMalformedToolGroup) {
 			return nil, err
@@ -149,7 +165,7 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 		span.AddEvent("trying_summary")
 		result, err := u.summary.Compact(sctx, items, maxTokens, estimator)
 		if err == nil {
-			return u.finish(sctx, logger, span, items, current, maxTokens, estimator, result, StrategySummary), nil
+			return u.finish(sctx, logger, span, originalItems, current, maxTokens, estimator, result, StrategySummary), nil
 		}
 		if errors.Is(err, errMalformedToolGroup) {
 			return nil, err
@@ -157,12 +173,13 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 		logger.Debug("compaction.unified.escalate", "from", "summary", "err", err)
 	}
 
-	// Truncating: guaranteed within budget (or the best achievable subset).
+	// Truncating: keep mandatory system instructions and the newest context that
+	// fits, or return a typed error if the system instructions alone do not fit.
 	if u.truncating != nil {
 		span.AddEvent("trying_truncating")
 		result, err := u.truncating.Compact(sctx, items, maxTokens, estimator)
 		if err == nil {
-			return u.finish(sctx, logger, span, items, current, maxTokens, estimator, result, StrategyTruncating), nil
+			return u.finish(sctx, logger, span, originalItems, current, maxTokens, estimator, result, StrategyTruncating), nil
 		}
 		return nil, err
 	}
@@ -179,7 +196,7 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 func (u *UnifiedCompactor) finish(ctx context.Context, logger *slog.Logger, span tracing.TraceSpan, items []TurnItem, tokensIn, maxTokens int, estimator TokenEstimator, result []TurnItem, strategy Strategy) []TurnItem {
 	u.setLastStrategy(strategy)
 
-	after := estimateTokens(result, estimator)
+	after := estimateTokensCopy(result, estimator)
 	span.SetAttributes(
 		tracing.Attribute{Key: "strategy_used", Value: strategy.String()},
 		tracing.Attribute{Key: "compacted_items", Value: len(result)},
@@ -197,7 +214,11 @@ func (u *UnifiedCompactor) finish(ctx context.Context, logger *slog.Logger, span
 	// "compaction.quality" child span recording coverage/info_loss/
 	// compression_ratio, so here we only invoke it and log the result.
 	if u.evaluator != nil {
-		metrics, err := u.evaluator.Evaluate(ctx, items, result)
+		metrics, err := u.evaluator.Evaluate(
+			ctx,
+			append([]TurnItem(nil), items...),
+			append([]TurnItem(nil), result...),
+		)
 		if err != nil {
 			logger.Warn("compaction.quality.failed", "strategy", strategy.String(), "err", err)
 		} else if metrics != nil {

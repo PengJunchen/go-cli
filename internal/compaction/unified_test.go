@@ -158,6 +158,29 @@ func TestUnifiedCompactorPropagatesMalformedToolGroupWithoutFallback(t *testing.
 	assert.Empty(t, truncating.Called(), "malformed transcript is not a strategy escalation reason")
 }
 
+func TestUnifiedCompactorRejectsMandatorySystemOverBudgetBeforeStrategies(t *testing.T) {
+	ctx, _ := newTracedCtx(t)
+	est := runeCountEstimator{}
+	micro := NewRecordingCompactor("micro").WithResult([]TurnItem{{Role: RoleUser, Content: "unsafe"}})
+	summary := NewRecordingCompactor("summary").WithResult([]TurnItem{{Role: RoleUser, Content: "unsafe"}})
+	truncating := NewRecordingCompactor("truncating").WithResult([]TurnItem{{Role: RoleUser, Content: "unsafe"}})
+	uni := NewUnifiedCompactor(
+		WithMicro(micro),
+		WithSummary(summary),
+		WithTruncating(truncating),
+	)
+	items := []TurnItem{
+		{Role: RoleSystem, Content: "mandatory-system"},
+		{Role: RoleUser, Content: "question"},
+	}
+
+	_, err := uni.Compact(ctx, items, 5, est)
+	require.ErrorIs(t, err, ErrMandatorySystemPromptOverBudget)
+	assert.Empty(t, micro.Called())
+	assert.Empty(t, summary.Called())
+	assert.Empty(t, truncating.Called())
+}
+
 func TestUnifiedCompactorEmptyInput(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 

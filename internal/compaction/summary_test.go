@@ -2,6 +2,7 @@ package compaction
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"testing"
@@ -19,6 +20,7 @@ import (
 type fakeSummarizer struct {
 	mu      sync.Mutex
 	summary string
+	err     error
 	got     []string
 }
 
@@ -29,7 +31,7 @@ func (f *fakeSummarizer) Summarize(_ context.Context, conversation string) (stri
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.got = append(f.got, conversation)
-	return f.summary, nil
+	return f.summary, f.err
 }
 
 func (f *fakeSummarizer) conversations() []string {
@@ -71,7 +73,7 @@ func TestFindCutPointAtMessageBoundary(t *testing.T) {
 	require.True(t, isBoundary, "cut %d must be between complete item groups", cut)
 
 	// The kept suffix plus a placeholder must fit the budget.
-	placeholder := estimateTokens([]TurnItem{{Content: summaryPlaceholder}}, est)
+	placeholder := estimateTokens([]TurnItem{{Role: RoleUser, Content: summaryPlaceholder, IsCompaction: true}}, est)
 	keepTokens := estimateTokens(items[cut:], est)
 	assert.LessOrEqual(t, placeholder+keepTokens, 60)
 }
@@ -93,25 +95,118 @@ func TestSummaryCompactorProducesPlaceholderWithinBudget(t *testing.T) {
 	}
 
 	compactor := NewSummaryCompactor(sum)
-	out, err := compactor.Compact(ctx, items, 30, est)
+	out, err := compactor.Compact(ctx, items, 50, est)
 	require.NoError(t, err)
 
-	// The first (summary) entry is a compaction placeholder.
+	// The mandatory system prompt precedes the derived summary.
 	require.NotEmpty(t, out)
-	assert.True(t, out[0].IsCompaction)
-	assert.Equal(t, RoleUser, out[0].Role)
-	assert.Equal(t, "canned summary of older turns", out[0].Content)
-	assert.Empty(t, out[0].ToolCalls)
-	assert.Empty(t, out[0].ToolCallID)
+	require.GreaterOrEqual(t, len(out), 4)
+	assert.Equal(t, RoleSystem, out[0].Role)
+	assert.True(t, out[1].IsCompaction)
+	assert.Equal(t, RoleUser, out[1].Role)
+	assert.Equal(t, "canned summary of older turns", out[1].Content)
+	assert.Empty(t, out[1].ToolCalls)
+	assert.Empty(t, out[1].ToolCallID)
 
 	// The recent turns are preserved after the summary entry.
 	assert.Equal(t, "recent question", out[len(out)-2].Content)
 	assert.Equal(t, "recent answer", out[len(out)-1].Content)
 
 	// Total must fit budget.
-	assert.LessOrEqual(t, estimateTokens(out, est), 30)
+	assert.LessOrEqual(t, estimateTokens(out, est), 50)
 
 	assertSpanEventually(t, exp, "compaction.summary")
+}
+
+func TestSummaryCompactorPreservesMandatorySystemEntriesAtTheirCutPositions(t *testing.T) {
+	ctx, _ := newTracedCtx(t)
+	est := runeCountEstimator{}
+	summarizer := &fakeSummarizer{summary: "derived summary"}
+
+	systemBefore := TurnItem{
+		ID: "system-before", ParentID: "root", Role: RoleSystem,
+		Content: "system-one", EstimatedTokens: len("system-one"),
+		FinishReason: "configured", InputKind: "policy",
+		Usage: &llm.Usage{InputTokens: 10, OutputTokens: 2, TotalTokens: 12},
+	}
+	systemAfter := TurnItem{
+		ID: "system-after", ParentID: "root", Role: RoleSystem,
+		Content:      "system-two",
+		FinishReason: "configured", InputKind: "policy",
+		Usage: &llm.Usage{InputTokens: 8, OutputTokens: 1, TotalTokens: 9},
+	}
+	items := []TurnItem{
+		systemBefore,
+		{Role: RoleUser, Content: strings.Repeat("old ", 100)},
+		systemAfter,
+		{Role: RoleUser, Content: "recent"},
+	}
+	original := append([]TurnItem(nil), items...)
+
+	out, err := NewSummaryCompactor(summarizer).Compact(ctx, items, 140, est)
+	require.NoError(t, err)
+	require.Len(t, out, 4)
+	assert.Equal(t, systemBefore, out[0], "the original system item and metadata must survive unchanged")
+	assert.True(t, out[1].IsCompaction)
+	assert.Equal(t, RoleUser, out[1].Role, "derived summaries remain untrusted user context")
+	assert.Equal(t, "derived summary", out[1].Content)
+	assert.Equal(t, systemAfter, out[2], "system items after the cut retain their original position and metadata")
+	assert.Equal(t, "recent", out[3].Content)
+	assert.LessOrEqual(t, estimateTokens(out, est), 140)
+	assert.Equal(t, original, items, "compaction must not normalize the caller's input in place")
+
+	prompts := summarizer.conversations()
+	require.Len(t, prompts, 1)
+	assert.NotContains(t, prompts[0], "system-one")
+	assert.NotContains(t, prompts[0], "system-two")
+}
+
+func TestSummaryCompactorRejectsMandatorySystemOverBudgetBeforeSummarizing(t *testing.T) {
+	ctx, _ := newTracedCtx(t)
+	summarizer := &fakeSummarizer{summary: "must not run"}
+	items := []TurnItem{
+		{Role: RoleSystem, Content: "mandatory-system-prompt", EstimatedTokens: 1},
+		{Role: RoleUser, Content: strings.Repeat("old ", 100)},
+	}
+
+	_, err := NewSummaryCompactor(summarizer).Compact(ctx, items, 10, runeCountEstimator{})
+	require.ErrorIs(t, err, ErrMandatorySystemPromptOverBudget)
+	assert.Empty(t, summarizer.conversations(), "over-budget mandatory instructions must fail before summary dispatch")
+}
+
+func TestSummaryCompactorBudgetIncludesProjectedSummaryWrapper(t *testing.T) {
+	ctx, _ := newTracedCtx(t)
+	summarizer := &fakeSummarizer{summary: "summary"}
+	items := []TurnItem{
+		{Role: RoleUser, Content: strings.Repeat("old ", 100)},
+		{Role: RoleUser, Content: "keep"},
+	}
+
+	_, err := NewSummaryCompactor(summarizer).Compact(ctx, items, 20, runeCountEstimator{})
+	require.ErrorIs(t, err, ErrRequiresTruncating,
+		"the provider-visible untrusted-summary framing must count against the conversation budget")
+	assert.NotEmpty(t, summarizer.conversations())
+}
+
+func TestUnifiedCompactorFallsBackAfterTransientSummaryError(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx, _ := newTracedCtx(t)
+	est := tracedEstimator()
+	summarizer := &fakeSummarizer{err: errors.New("temporary summary failure")}
+	items := []TurnItem{
+		{Role: RoleSystem, Content: "sys"},
+		{Role: RoleUser, Content: strings.Repeat("old ", 300)},
+		{Role: RoleUser, Content: "keep"},
+	}
+	uni := NewUnifiedCompactor(WithSummary(NewSummaryCompactor(summarizer)))
+
+	out, err := uni.Compact(ctx, items, 20, est)
+	require.NoError(t, err)
+	assert.Equal(t, StrategyTruncating, uni.LastStrategy())
+	assert.LessOrEqual(t, estimateTokens(out, est), 20)
+	require.NotEmpty(t, out)
+	assert.Equal(t, RoleSystem, out[0].Role)
+	assert.Contains(t, summarizer.conversations()[0], "old")
 }
 
 func TestSummaryCompactorUsesPlaceholderOnEmptySummary(t *testing.T) {
@@ -128,10 +223,12 @@ func TestSummaryCompactorUsesPlaceholderOnEmptySummary(t *testing.T) {
 	}
 
 	compactor := NewSummaryCompactor(sum)
-	out, err := compactor.Compact(ctx, items, 20, est)
+	out, err := compactor.Compact(ctx, items, 35, est)
 	require.NoError(t, err)
-	assert.Equal(t, summaryPlaceholder, out[0].Content)
-	assert.True(t, out[0].IsCompaction)
+	require.Len(t, out, 3)
+	assert.Equal(t, RoleSystem, out[0].Role)
+	assert.Equal(t, summaryPlaceholder, out[1].Content)
+	assert.True(t, out[1].IsCompaction)
 }
 
 func TestSummaryCompactorIncrementalOnlySummarizesUncompactedRegion(t *testing.T) {
@@ -151,7 +248,7 @@ func TestSummaryCompactorIncrementalOnlySummarizesUncompactedRegion(t *testing.T
 	}
 
 	compactor := NewSummaryCompactor(sum)
-	out, err := compactor.Compact(ctx, items, 25, est)
+	out, err := compactor.Compact(ctx, items, 80, est)
 	require.NoError(t, err)
 
 	// Exactly one compaction entry remains: the freshly produced one.

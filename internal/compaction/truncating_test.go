@@ -17,8 +17,12 @@ func TestTruncatingCompactorKeepsSystem(t *testing.T) {
 	ctx, exp := newTracedCtx(t)
 	est := tracedEstimator()
 
+	system := TurnItem{
+		ID: "system", ParentID: "root", Role: RoleSystem,
+		Content: "sys-prompt", FinishReason: "configured", InputKind: "policy",
+	}
 	items := []TurnItem{
-		{Role: RoleSystem, Content: "sys-prompt"},
+		system,
 		{Role: RoleUser, Content: strings.Repeat("u", 200)},
 		{Role: RoleAssistant, Content: strings.Repeat("a", 200)},
 		{Role: RoleUser, Content: strings.Repeat("v", 200)},
@@ -32,6 +36,7 @@ func TestTruncatingCompactorKeepsSystem(t *testing.T) {
 	require.NotEmpty(t, out)
 	assert.Equal(t, "sys-prompt", out[0].Content)
 	assert.Equal(t, RoleSystem, out[0].Role)
+	assert.Equal(t, system, out[0], "truncation must preserve the original system item metadata")
 
 	// No user/assistant entries should be retained beyond budget.
 	assert.LessOrEqual(t, estimateTokens(out, est), 40)
@@ -98,7 +103,7 @@ func TestTruncatingCompactorEmptyInputNoPanic(t *testing.T) {
 	assert.Empty(t, out)
 }
 
-func TestTruncatingCompactorGracefulWhenSystemOverBudget(t *testing.T) {
+func TestTruncatingCompactorRejectsMandatorySystemOverBudget(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	ctx, _ := newTracedCtx(t)
@@ -110,11 +115,8 @@ func TestTruncatingCompactorGracefulWhenSystemOverBudget(t *testing.T) {
 	}
 
 	compactor := NewTruncatingCompactor()
-	out, err := compactor.Compact(ctx, items, 20, est)
-	require.NoError(t, err)
-	// Degrades gracefully: system entries are all we can keep.
-	assert.Equal(t, 1, len(out))
-	assert.Equal(t, RoleSystem, out[0].Role)
+	_, err := compactor.Compact(ctx, items, 20, est)
+	require.ErrorIs(t, err, ErrMandatorySystemPromptOverBudget)
 }
 
 func TestTruncatingCompactorPreservesChronologicalOrder(t *testing.T) {
