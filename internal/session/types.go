@@ -135,6 +135,11 @@ type SessionEntry struct {
 	// was captured. Its persisted values are diagnostics, not permission to signal
 	// a process after restart.
 	ExecutionIdentity *ExecutionIdentity `json:"execution_identity,omitempty"`
+	// CompletionProof is a closed, action-scoped proof captured only after the
+	// prepared invocation's owned resources have signaled completion. It is
+	// validated against the complete action reference during recovery; identity
+	// fields remain diagnostic and are not themselves quiescence proof.
+	CompletionProof tools.PreparedCompletionProof `json:"completion_proof,omitempty"`
 	// AssistantTranscriptOrdinal identifies the assistant tool-call message
 	// occurrence within its run.
 	AssistantTranscriptOrdinal *uint64 `json:"assistant_transcript_ordinal,omitempty"`

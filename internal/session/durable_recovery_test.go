@@ -351,7 +351,7 @@ func TestPrepareResumeAppliesValidatedResolutionBeforeInspectingMarkers(t *testi
 	appended := appendFixtureRows(t, fixture, SessionEntry{
 		ID: "execution-1", ParentID: fixture.intent.ID, Type: EntryTypeTool, RunID: "run-1", WorkspaceID: "workspace-1",
 		ActionBatchID: "batch-1", ActionID: "action-1", ActionState: ActionStateExecution,
-		AssistantTranscriptOrdinal: &zero, ToolCallID: "call-1", ToolName: "read", ExecutionIdentity: testProcessGroupIdentity(t), Timestamp: time.Unix(13, 0).UTC(),
+		AssistantTranscriptOrdinal: &zero, ToolCallID: "call-1", ToolName: "read", CompletionProof: tools.CompletionOwnedProcessGroupJoined, Timestamp: time.Unix(13, 0).UTC(),
 	}, SessionEntry{
 		ID: "receipt-1", ParentID: "execution-1", Type: EntryTypeTool, RunID: "run-1", WorkspaceID: "workspace-1",
 		ActionBatchID: "batch-1", ActionID: "action-1", AssistantTranscriptOrdinal: &zero,
@@ -520,14 +520,14 @@ func TestPrepareResumeRejectsInvalidLocalResolutionBeforeAuthority(t *testing.T)
 	}
 }
 
-func TestPrepareResumeRejectsLocalResolutionWithoutExecutionIdentity(t *testing.T) {
+func TestPrepareResumeRejectsLocalResolutionWithoutCompletionProof(t *testing.T) {
 	fixture := createRecoveryFixture(t, true)
 	zero := uint64(0)
 	appendRawFixtureRow(t, fixture,
 		SessionEntry{
 			ID: "execution-1", ParentID: fixture.intent.ID, Type: EntryTypeTool, RunID: "run-1", WorkspaceID: "workspace-1",
 			ActionBatchID: "batch-1", ActionID: "action-1", ActionState: ActionStateExecution,
-			AssistantTranscriptOrdinal: &zero, ToolCallID: "call-1", ToolName: "read",
+			AssistantTranscriptOrdinal: &zero, ToolCallID: "call-1", ToolName: "read", ExecutionIdentity: testProcessGroupIdentity(t),
 		},
 	)
 	appendRawFixtureRow(t, fixture, SessionEntry{
@@ -549,10 +549,37 @@ func TestPrepareResumeRejectsLocalResolutionWithoutExecutionIdentity(t *testing.
 	}}
 	if prepared, err := NewDurableJSONLSessionPreparer(fixture.directory, authority).PrepareResume(context.Background(), fixture.sessionID); err == nil {
 		_ = prepared.Close()
-		t.Fatal("local-resource resolution requires an execution row with verifiable identity")
+		t.Fatal("local-resource resolution must reject identity-only historical evidence without a completion proof")
 	}
 	if applyCalls != 0 {
 		t.Fatalf("global authority was called %d times for unprovable local identity", applyCalls)
+	}
+}
+
+func TestPrepareResumeRejectsUnsupportedCompletionProofBeforeAuthority(t *testing.T) {
+	fixture := createRecoveryFixture(t, true)
+	appendRawFixtureRow(t, fixture, SessionEntry{
+		ID: "execution-1", ParentID: fixture.intent.ID, Type: EntryTypeTool, RunID: "run-1", WorkspaceID: "workspace-1",
+		ActionBatchID: "batch-1", ActionID: "action-1", ActionState: ActionStateExecution,
+		AssistantTranscriptOrdinal: ptrUint64(0), ToolCallID: "call-1", ToolName: "read", CompletionProof: "looks-good",
+	})
+	var applyCalls, inspectCalls int
+	authority := recoveryAuthorityFunc{
+		apply: func(context.Context, []ValidatedExecutionResolution) error {
+			applyCalls++
+			return nil
+		},
+		inspect: func(context.Context, []PendingActionRef) ([]PendingActionDecision, error) {
+			inspectCalls++
+			return nil, nil
+		},
+	}
+	if prepared, err := NewDurableJSONLSessionPreparer(fixture.directory, authority).PrepareResume(context.Background(), fixture.sessionID); err == nil {
+		_ = prepared.Close()
+		t.Fatal("unsupported completion proof must fail closed")
+	}
+	if applyCalls != 0 || inspectCalls != 0 {
+		t.Fatalf("authority calls for unsupported completion proof = apply:%d inspect:%d, want 0/0", applyCalls, inspectCalls)
 	}
 }
 
