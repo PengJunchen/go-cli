@@ -195,7 +195,11 @@ func (t *GrepTool) search(ctx context.Context, re *regexp.Regexp, searchPath, gl
 		// rg was present but failed (bad path, permission, etc.): fall through
 		// to the pure-Go path.
 	}
-	tms, truncated := t.truncateMatches(grepPureGo(ctx, re, searchPath, glob))
+	ms, err := grepPureGo(ctx, re, searchPath, glob, t.whitelist)
+	if err != nil {
+		return nil, false, err
+	}
+	tms, truncated := t.truncateMatches(ms)
 	return tms, truncated, nil
 }
 
@@ -266,20 +270,22 @@ func splitMatchLine(line string) (file string, lineNo int, content string, ok bo
 	return line[:first], n, line[first+1+second+1:], true
 }
 
-// grepPureGo walks searchPath and matches each line against re using
-// regexp.MatchString, respecting the glob include filter via path.Match.
-func grepPureGo(ctx context.Context, re *regexp.Regexp, searchPath, glob string) []match {
+// grepPureGo walks searchPath and matches each line against re using Go's
+// regexp engine, respecting the glob include filter via path.Match. It skips
+// symlinks and non-regular files rather than following paths outside the
+// validated search root or blocking on special files.
+func grepPureGo(ctx context.Context, re *regexp.Regexp, searchPath, glob string, whitelist PathWhitelist) ([]match, error) {
 	var ms []match
-	// Recursive walk is best-effort: unreadable or missing entries are skipped
-	// deterministically, so any returned walk error is intentionally ignored.
-	if walkErr := filepath.WalkDir(searchPath, func(p string, d fs.DirEntry, err error) error {
+	var scanErr error
+	walkErr := filepath.WalkDir(searchPath, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
 			return nil // skip unreadable entries deterministically
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
 		}
 		if d.IsDir() {
 			return nil
@@ -296,12 +302,25 @@ func grepPureGo(ctx context.Context, re *regexp.Regexp, searchPath, glob string)
 				return nil
 			}
 		}
-		scanFile(p, re, &ms)
+		if err := scanFile(ctx, p, re, &ms, whitelist); err != nil {
+			scanErr = err
+			return err
+		}
 		return nil
-	}); walkErr != nil {
-		return ms
+	})
+	if scanErr != nil {
+		return nil, scanErr
 	}
-	return ms
+	if walkErr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, walkErr
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+	return ms, nil
 }
 
 // matchGlob reports whether name matches glob, via path.Match (slash-based).
@@ -310,24 +329,51 @@ func matchGlob(glob, name string) bool {
 	return err == nil && ok
 }
 
-// scanFile reads and matches a single file's lines against re.
-func scanFile(filePath string, re *regexp.Regexp, ms *[]match) {
+// scanFile reads and matches one regular, in-scope file. A context error is
+// returned to the walk so cancellation cannot be reported as partial success.
+func scanFile(ctx context.Context, filePath string, re *regexp.Regexp, ms *[]match, whitelist PathWhitelist) error {
+	info, err := os.Lstat(filePath)
+	if err != nil {
+		return nil // preserve best-effort behavior for entries that disappeared.
+	}
+	if !info.Mode().IsRegular() {
+		return nil
+	}
+	if !whitelist.unrestricted() && !whitelist.IsAllowed(resolveSymlinks(filePath)) {
+		return nil
+	}
 	f, err := os.Open(filePath)
 	if err != nil {
-		return
+		return nil // preserve best-effort behavior for unreadable files.
 	}
 	defer func() { _ = f.Close() }() //nolint:errcheck // best-effort close during scan.
 
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	lineNo := 0
-	for sc.Scan() {
+	for {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		if !sc.Scan() {
+			break
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		lineNo++
 		content := sc.Text()
 		if re.MatchString(content) {
 			*ms = append(*ms, match{File: filePath, Line: lineNo, Content: content})
 		}
 	}
+	if scanErr := sc.Err(); scanErr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return scanErr
+	}
+	return ctx.Err()
 }
 
 // match is a single grep result line.
