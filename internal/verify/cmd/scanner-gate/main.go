@@ -73,6 +73,7 @@ func runWithCaptureLimits(args []string, stdout, stderr io.Writer, limits gateca
 
 	cmd := exec.CommandContext(ctx, *command, scannerArgs...)
 	capture, err := gatecapture.Run(cmd, limits)
+	writeProcessCleanupDiagnostic(stderr, err)
 	if capture.StdoutExceeded {
 		_, _ = fmt.Fprintf(stderr, "scanner stdout exceeded capture limit of %d bytes; report is incomplete\n", limits.StdoutBytes) //nolint:errcheck // CLI diagnostic is best-effort
 	}
@@ -111,6 +112,19 @@ func runWithCaptureLimits(args []string, stdout, stderr io.Writer, limits gateca
 
 	_, _ = fmt.Fprintf(stdout, "%s\n", report.FormatText()) //nolint:errcheck // CLI output is best-effort
 	return 0
+}
+
+func writeProcessCleanupDiagnostic(writer io.Writer, err error) {
+	switch {
+	case errors.Is(err, gatecapture.ErrProcessCleanupUnconfirmed):
+		_, _ = fmt.Fprintln(writer, "scanner process cleanup could not be confirmed; gate result is failed") //nolint:errcheck // CLI diagnostic is best-effort
+	case errors.Is(err, gatecapture.ErrResidualDescendants):
+		_, _ = fmt.Fprintln(writer, "scanner left descendants in its owned process group; gate result is failed") //nolint:errcheck // CLI diagnostic is best-effort
+	case errors.Is(err, gatecapture.ErrProcessGroupUnsupported):
+		_, _ = fmt.Fprintln(writer, "scanner cannot run safely because owned process groups are unsupported on this operating system") //nolint:errcheck // CLI diagnostic is best-effort
+	case errors.Is(err, gatecapture.ErrForeignProcessGroup), errors.Is(err, gatecapture.ErrProcessGroupConfiguration), errors.Is(err, gatecapture.ErrProcessAlreadyStarted):
+		_, _ = fmt.Fprintln(writer, "scanner command has incompatible process-group ownership settings") //nolint:errcheck // CLI diagnostic is best-effort
+	}
 }
 
 func decodeReport(data []byte) (*verify.ScanReport, error) {

@@ -300,9 +300,13 @@ func TestRunRejectsOutputBeyondCaptureLimit(t *testing.T) {
 }
 
 func TestRunTimeoutReturnsWhenDescendantHoldsPipes(t *testing.T) {
+	if !processGroupsSupported() {
+		t.Skip("owned process-group cleanup is supported only on Darwin and Linux")
+	}
 	module := t.TempDir()
 	goCommand := mustGoCommand(t)
 	pidFile := filepath.Join(t.TempDir(), "holder.pid")
+	t.Cleanup(func() { cleanupDescendantFromFile(pidFile) })
 	t.Setenv("VERIFY_TEST_GATE_PID_FILE", pidFile)
 	fakeSource := `package main
 import (
@@ -333,7 +337,7 @@ func main() {
 	if code != 124 || !strings.Contains(stderr.String(), "timed out after 100ms") {
 		t.Fatalf("runWithCaptureLimits() = %d, want bounded timeout 124; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	killProcessFromFile(t, pidFile)
+	assertDescendantStoppedFromFile(t, pidFile)
 }
 
 func writeTestModule(t *testing.T, testSource string) string {
@@ -386,21 +390,4 @@ func fakeGoEventSource(events []string, tail string) string {
 	}
 	source.WriteString("}\n")
 	return source.String()
-}
-
-func killProcessFromFile(t *testing.T, path string) {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read pipe holder pid: %v", err)
-	}
-	pid, err := strconv.Atoi(string(data))
-	if err != nil {
-		t.Fatalf("parse pipe holder pid %q: %v", data, err)
-	}
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		t.Fatalf("find pipe holder process %d: %v", pid, err)
-	}
-	_ = process.Kill()
 }

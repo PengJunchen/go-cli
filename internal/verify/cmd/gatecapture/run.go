@@ -11,7 +11,20 @@ import (
 
 const DefaultWaitDelay = 500 * time.Millisecond
 
-var ErrOutputLimitExceeded = errors.New("gatecapture: output exceeded configured limit")
+var (
+	ErrOutputLimitExceeded       = errors.New("gatecapture: output exceeded configured limit")
+	ErrProcessGroupUnsupported   = errors.New("gatecapture: owned process groups are unsupported on this operating system")
+	ErrProcessAlreadyStarted     = errors.New("gatecapture: command was already started")
+	ErrForeignProcessGroup       = errors.New("gatecapture: command requests a process group not owned by this run")
+	ErrProcessGroupConfiguration = errors.New("gatecapture: command process-group settings conflict with owned group")
+	ErrResidualDescendants       = errors.New("gatecapture: command left descendants in its owned process group")
+	ErrProcessCleanupUnconfirmed = errors.New("gatecapture: cleanup of the owned process group could not be confirmed")
+)
+
+type processGroup interface {
+	terminate() error
+	cleanup() (residual bool, err error)
+}
 
 type Limits struct {
 	StdoutBytes int
@@ -39,26 +52,37 @@ func Run(cmd *exec.Cmd, limits Limits) (Result, error) {
 	if limits.WaitDelay <= 0 {
 		limits.WaitDelay = DefaultWaitDelay
 	}
-
-	var killOnce sync.Once
-	killChild := func() {
-		killOnce.Do(func() {
-			if cmd.Cancel != nil {
-				_ = cmd.Cancel()
-				return
-			}
-			if cmd.Process != nil {
-				_ = cmd.Process.Kill()
-			}
-		})
+	group, err := newOwnedProcessGroup(cmd)
+	if err != nil {
+		return Result{}, err
 	}
-	stdout := newBoundedBuffer(limits.StdoutBytes, killChild)
-	stderr := newBoundedBuffer(limits.StderrBytes, killChild)
+
+	var terminateOnce sync.Once
+	var terminateErr error
+	terminateGroup := func() error {
+		terminateOnce.Do(func() {
+			terminateErr = group.terminate()
+		})
+		return terminateErr
+	}
+	stdout := newBoundedBuffer(limits.StdoutBytes, func() { _ = terminateGroup() })
+	stderr := newBoundedBuffer(limits.StderrBytes, func() { _ = terminateGroup() })
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.WaitDelay = limits.WaitDelay
+	// CommandContext's default callback kills only the command process. This
+	// command is now in a fresh group owned by this invocation, so cancellation
+	// must target that group instead.
+	cmd.Cancel = terminateGroup
 
-	err := cmd.Run()
+	err = cmd.Run()
+	residual, cleanupErr := group.cleanup()
+	if residual {
+		err = errors.Join(err, ErrResidualDescendants)
+	}
+	if cleanupErr != nil {
+		err = errors.Join(err, cleanupErr)
+	}
 	result := Result{}
 	result.Stdout, result.StdoutExceeded = stdout.snapshot()
 	result.Stderr, result.StderrExceeded = stderr.snapshot()

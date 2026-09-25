@@ -115,6 +115,7 @@ func runWithCaptureLimits(args []string, stdout, stderr io.Writer, limits gateca
 	cmd := exec.CommandContext(ctx, *goCommand, commandArgs...)
 	cmd.Dir = *dir
 	capture, err := gatecapture.Run(cmd, limits)
+	writeProcessCleanupDiagnostic(stderr, "go test", err)
 
 	events, counts, decodeErr := parseTestEvents(capture.Stdout)
 	if decodeErr == nil {
@@ -148,6 +149,9 @@ func runWithCaptureLimits(args []string, stdout, stderr io.Writer, limits gateca
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
 			_, _ = fmt.Fprintf(stderr, "go test timed out after %s\n", *timeout) //nolint:errcheck // CLI diagnostic is best-effort
 			return 124
+		}
+		if isProcessLifecycleError(err) {
+			return 1
 		}
 		var exitErr *exec.ExitError
 		if errors.As(err, &exitErr) {
@@ -186,6 +190,28 @@ func runWithCaptureLimits(args []string, stdout, stderr io.Writer, limits gateca
 	}
 	_, _ = fmt.Fprintf(stdout, "go test gate passed: %d test function(s) started, %d passed, %d benchmarked, %d failed, %d skipped across %d package(s)\n", counts.Started, counts.Passed, counts.Benchmarked, counts.Failed, counts.Skipped, counts.Packages) //nolint:errcheck // CLI output is best-effort
 	return 0
+}
+
+func writeProcessCleanupDiagnostic(writer io.Writer, command string, err error) {
+	switch {
+	case errors.Is(err, gatecapture.ErrProcessCleanupUnconfirmed):
+		_, _ = fmt.Fprintf(writer, "%s process cleanup could not be confirmed; gate result is failed\n", command) //nolint:errcheck // CLI diagnostic is best-effort
+	case errors.Is(err, gatecapture.ErrResidualDescendants):
+		_, _ = fmt.Fprintf(writer, "%s left descendants in its owned process group; gate result is failed\n", command) //nolint:errcheck // CLI diagnostic is best-effort
+	case errors.Is(err, gatecapture.ErrProcessGroupUnsupported):
+		_, _ = fmt.Fprintf(writer, "%s cannot run safely because owned process groups are unsupported on this operating system\n", command) //nolint:errcheck // CLI diagnostic is best-effort
+	case errors.Is(err, gatecapture.ErrForeignProcessGroup), errors.Is(err, gatecapture.ErrProcessGroupConfiguration), errors.Is(err, gatecapture.ErrProcessAlreadyStarted):
+		_, _ = fmt.Fprintf(writer, "%s command has incompatible process-group ownership settings\n", command) //nolint:errcheck // CLI diagnostic is best-effort
+	}
+}
+
+func isProcessLifecycleError(err error) bool {
+	return errors.Is(err, gatecapture.ErrProcessCleanupUnconfirmed) ||
+		errors.Is(err, gatecapture.ErrResidualDescendants) ||
+		errors.Is(err, gatecapture.ErrProcessGroupUnsupported) ||
+		errors.Is(err, gatecapture.ErrForeignProcessGroup) ||
+		errors.Is(err, gatecapture.ErrProcessGroupConfiguration) ||
+		errors.Is(err, gatecapture.ErrProcessAlreadyStarted)
 }
 
 func parseTestEvents(data []byte) ([]testEvent, testCounts, error) {

@@ -125,7 +125,11 @@ func TestRunRejectsOutputBeyondCaptureLimit(t *testing.T) {
 }
 
 func TestRunTimeoutReturnsWhenScannerDescendantHoldsPipes(t *testing.T) {
+	if !processGroupsSupported() {
+		t.Skip("owned process-group cleanup is supported only on Darwin and Linux")
+	}
 	pidFile := filepath.Join(t.TempDir(), "holder.pid")
+	t.Cleanup(func() { cleanupDescendantFromFile(pidFile) })
 	t.Setenv(scannerFixtureModeEnv, "spawn-holder")
 	t.Setenv("VERIFY_SCANNER_GATE_PID_FILE", pidFile)
 	var stdout, stderr strings.Builder
@@ -137,7 +141,10 @@ func TestRunTimeoutReturnsWhenScannerDescendantHoldsPipes(t *testing.T) {
 	if code == 0 || !strings.Contains(stderr.String(), "scanner command failed") {
 		t.Fatalf("runWithCaptureLimits() = %d, want incomplete pipe failure; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
-	killProcessFromFile(t, pidFile)
+	if !strings.Contains(stderr.String(), "left descendants in its owned process group") {
+		t.Fatalf("missing owned-descendant cleanup diagnostic: %q", stderr.String())
+	}
+	assertDescendantStoppedFromFile(t, pidFile)
 }
 
 func TestRunReturnsAfterScannerTimeout(t *testing.T) {
@@ -160,23 +167,6 @@ func scannerFixtureArgs(timeout string) []string {
 		"-timeout", timeout,
 		"-scanner-arg=-test.run=^TestScannerGateProcessFixture$",
 	}
-}
-
-func killProcessFromFile(t *testing.T, path string) {
-	t.Helper()
-	data, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatalf("read pipe holder pid: %v", err)
-	}
-	pid, err := strconv.Atoi(string(data))
-	if err != nil {
-		t.Fatalf("parse pipe holder pid %q: %v", data, err)
-	}
-	process, err := os.FindProcess(pid)
-	if err != nil {
-		t.Fatalf("find pipe holder process %d: %v", pid, err)
-	}
-	_ = process.Kill()
 }
 
 func envWith(name, value string) []string {
