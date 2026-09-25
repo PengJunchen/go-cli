@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"testing"
@@ -59,6 +60,82 @@ func TestWebServer_Health(t *testing.T) {
 	}
 }
 
+func TestWebUnavailable(t *testing.T) {
+	baseURL := startTestWebServer(t)
+
+	healthResp, err := http.Get(baseURL + "/api/health")
+	if err != nil {
+		t.Fatalf("GET /api/health failed: %v", err)
+	}
+	healthResp.Body.Close()
+	if healthResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected health status 200, got %d", healthResp.StatusCode)
+	}
+
+	requestBody, err := json.Marshal(map[string]string{"message": "hello"})
+	if err != nil {
+		t.Fatalf("encode chat request: %v", err)
+	}
+	chatResp, err := http.Post(baseURL+"/api/chat", "application/json", bytes.NewReader(requestBody))
+	if err != nil {
+		t.Fatalf("POST /api/chat failed: %v", err)
+	}
+	chatBody, readErr := io.ReadAll(chatResp.Body)
+	chatResp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read chat response: %v", readErr)
+	}
+	if chatResp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected unavailable chat status 503, got %d: %s", chatResp.StatusCode, chatBody)
+	}
+	if !strings.Contains(strings.ToLower(string(chatBody)), "unavailable") {
+		t.Fatalf("expected unavailable chat message, got %q", chatBody)
+	}
+
+	streamResp, err := http.Get(baseURL + "/ws")
+	if err != nil {
+		t.Fatalf("GET /ws failed: %v", err)
+	}
+	if streamResp.StatusCode != http.StatusServiceUnavailable {
+		streamResp.Body.Close()
+		t.Fatalf("expected unavailable stream status 503, got %d", streamResp.StatusCode)
+	}
+	streamBody, readErr := io.ReadAll(streamResp.Body)
+	streamResp.Body.Close()
+	if readErr != nil {
+		t.Fatalf("read stream response: %v", readErr)
+	}
+	if !strings.Contains(strings.ToLower(string(streamBody)), "unavailable") {
+		t.Fatalf("expected unavailable stream message, got %q", streamBody)
+	}
+}
+
+func TestWebNonLoopbackUnauthenticatedRejected(t *testing.T) {
+	addresses := map[string]string{
+		"empty host wildcard": ":0",
+		"ipv4 wildcard":       net.JoinHostPort("0.0.0.0", "0"),
+		"ipv6 wildcard":       net.JoinHostPort("::", "0"),
+		"hostname":            net.JoinHostPort("localhost", "0"),
+		"non-loopback IP":     net.JoinHostPort("192.0.2.1", "0"),
+	}
+	for name, address := range addresses {
+		t.Run(name, func(t *testing.T) {
+			server := NewWebServer(address)
+			err := server.Start()
+			if err == nil {
+				_ = server.Stop(context.Background())
+				t.Fatal("expected bind without an explicit loopback IP to require authentication")
+			}
+			if !strings.Contains(strings.ToLower(err.Error()), "authentication") {
+				t.Fatalf("expected authentication requirement error, got %v", err)
+			}
+			if server.Addr() != "" {
+				t.Fatalf("rejected server unexpectedly has address %q", server.Addr())
+			}
+		})
+	}
+}
+
 func TestWebServer_Index(t *testing.T) {
 	baseURL := startTestWebServer(t)
 
@@ -92,17 +169,15 @@ func TestWebServer_Chat(t *testing.T) {
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected status 200, got %d", resp.StatusCode)
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("expected unavailable status 503, got %d", resp.StatusCode)
 	}
-
-	var result map[string]string
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		t.Fatalf("failed to decode response: %v", err)
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("failed to read unavailable response: %v", err)
 	}
-
-	if _, ok := result["response"]; !ok {
-		t.Fatalf("response does not contain \"response\" field, got %v", result)
+	if !strings.Contains(strings.ToLower(string(body)), "unavailable") {
+		t.Fatalf("expected unavailable response, got %q", body)
 	}
 }
 
@@ -196,7 +271,7 @@ func TestWebServer_UnauthorizedAccess(t *testing.T) {
 		t.Fatalf("expected 401 without token, got %d", resp.StatusCode)
 	}
 
-	// POST /api/chat with correct token → 200.
+	// POST /api/chat with correct token → unavailable until a real run owner is wired.
 	req, _ := http.NewRequest(http.MethodPost, baseURL+"/api/chat", bytes.NewReader(reqBody))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer secret-token")
@@ -205,54 +280,7 @@ func TestWebServer_UnauthorizedAccess(t *testing.T) {
 		t.Fatalf("POST /api/chat with token failed: %v", err)
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 with correct token, got %d", resp.StatusCode)
-	}
-}
-
-func TestWebServer_SSEConcurrencyLimit(t *testing.T) {
-	srv := NewWebServer("127.0.0.1:0")
-	if err := srv.Start(); err != nil {
-		t.Fatalf("Start failed: %v", err)
-	}
-	t.Cleanup(func() { _ = srv.Stop(context.Background()) })
-
-	baseURL := "http://" + srv.Addr()
-
-	// Verify the semaphore has the expected capacity.
-	if cap(srv.sseSem) != maxSSEConnections {
-		t.Fatalf("expected sseSem capacity %d, got %d", maxSSEConnections, cap(srv.sseSem))
-	}
-
-	// Fill the semaphore to simulate all slots being in use.
-	for i := 0; i < maxSSEConnections; i++ {
-		srv.sseSem <- struct{}{}
-	}
-
-	// A new SSE connection should be rejected with 503.
-	resp, err := http.Get(baseURL + "/ws")
-	if err != nil {
-		t.Fatalf("GET /ws failed: %v", err)
-	}
-	resp.Body.Close()
 	if resp.StatusCode != http.StatusServiceUnavailable {
-		t.Fatalf("expected 503 when SSE slots exhausted, got %d", resp.StatusCode)
-	}
-
-	// Release one slot so the next connection can succeed.
-	<-srv.sseSem
-
-	// A new SSE connection should now succeed. Use a short-lived context so
-	// the streaming handler exits promptly.
-	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
-	defer cancel()
-	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/ws", nil)
-	resp2, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatalf("GET /ws failed: %v", err)
-	}
-	defer resp2.Body.Close()
-	if resp2.StatusCode != http.StatusOK {
-		t.Fatalf("expected 200 after releasing a slot, got %d", resp2.StatusCode)
+		t.Fatalf("expected 503 with correct token, got %d", resp.StatusCode)
 	}
 }
