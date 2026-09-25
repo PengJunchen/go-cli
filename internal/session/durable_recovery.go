@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 type durableActionOccurrence struct {
@@ -112,6 +113,9 @@ func analyzeDurableActionJournal(entries []SessionEntry, sessionID string) (*dur
 				if err := entry.ExecutionIdentity.Validate(); err != nil {
 					return nil, fmt.Errorf("session: execution row %q has invalid identity: %w", entry.ID, err)
 				}
+			}
+			if !validCompletionProof(entry.CompletionProof) {
+				return nil, fmt.Errorf("session: execution row %q has unsupported completion proof %q", entry.ID, entry.CompletionProof)
 			}
 			executionRows[entry.ID] = entry
 		}
@@ -509,8 +513,8 @@ func validateExecutionResolutionEvidence(
 		}
 	case core.ResolutionLocalResourcesStopped:
 		proof, exists := executionRows[resolution.EvidenceRef]
-		if !exists || proof.ExecutionIdentity == nil || proof.Seq >= resolutionSeq || !sameActionReference(occurrence.ref, refFromEntry(*proof, sessionID)) {
-			return errors.New("local quiescence proof does not reference a matching execution row with an identity")
+		if !exists || proof.CompletionProof == "" || proof.Seq >= resolutionSeq || !sameActionReference(occurrence.ref, refFromEntry(*proof, sessionID)) {
+			return errors.New("local quiescence proof does not reference a matching execution row with a positive completion proof")
 		}
 	case core.ResolutionRemoteTerminal:
 		return errors.New("remote-terminal resolution requires typed protocol-terminal evidence; generic receipt outcomes are insufficient")
@@ -523,4 +527,13 @@ func validateExecutionResolutionEvidence(
 		return fmt.Errorf("unsupported execution-resolution evidence %q", resolution.Evidence)
 	}
 	return nil
+}
+
+func validCompletionProof(proof tools.PreparedCompletionProof) bool {
+	switch proof {
+	case "", tools.CompletionInlinePipelineJoined, tools.CompletionQueuedJobJoined, tools.CompletionOwnedProcessGroupJoined:
+		return true
+	default:
+		return false
+	}
 }

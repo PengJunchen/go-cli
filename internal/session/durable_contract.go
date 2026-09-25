@@ -235,6 +235,9 @@ func validateVersion1EntryCoordinates(entry SessionEntry) error {
 	if entry.RecordVersion != 1 {
 		return fmt.Errorf("session: unsupported record version %d", entry.RecordVersion)
 	}
+	if entry.CompletionProof != "" && (entry.Type != EntryTypeTool || entry.ActionState != ActionStateExecution) {
+		return errors.New("session: completion proof is only valid on a version 1 execution row")
+	}
 
 	if entry.ActionState != "" {
 		if entry.Type != EntryTypeTool {
@@ -267,6 +270,11 @@ func validateVersion1EntryCoordinates(entry SessionEntry) error {
 			}
 			return nil
 		case ActionStateExecution:
+			switch entry.CompletionProof {
+			case "", tools.CompletionInlinePipelineJoined, tools.CompletionQueuedJobJoined, tools.CompletionOwnedProcessGroupJoined:
+			default:
+				return fmt.Errorf("session: execution row has unsupported completion proof %q", entry.CompletionProof)
+			}
 			return nil
 		default:
 			return fmt.Errorf("session: unsupported action state %q", entry.ActionState)

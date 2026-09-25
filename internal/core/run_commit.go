@@ -164,18 +164,20 @@ type ActionIntent struct {
 }
 
 // ActionExecution records the dispatch fence and local resource observation
-// for one reserved invocation. ResourceState is an observation only; it is
-// not durable proof that clears a workspace marker. Only ExecutionResolution
-// carries that evidence.
+// for one reserved invocation. ResourceState and ExecutionIdentity are
+// observations only. CompletionProof is a closed positive signal that may be
+// referenced by a later ExecutionResolution; it does not itself clear a
+// workspace marker.
 type ActionExecution struct {
-	RunID                      string             `json:"run_id"`
-	AssistantTranscriptOrdinal uint64             `json:"assistant_transcript_ordinal"`
-	ToolCallID                 string             `json:"tool_call_id"`
-	ActionID                   string             `json:"action_id"`
-	OwnerGeneration            string             `json:"owner_generation"`
-	DispatchState              DispatchState      `json:"dispatch_state"`
-	ResourceState              RunExecutionState  `json:"resource_state"`
-	ExecutionIdentity          *ExecutionIdentity `json:"execution_identity,omitempty"`
+	RunID                      string                        `json:"run_id"`
+	AssistantTranscriptOrdinal uint64                        `json:"assistant_transcript_ordinal"`
+	ToolCallID                 string                        `json:"tool_call_id"`
+	ActionID                   string                        `json:"action_id"`
+	OwnerGeneration            string                        `json:"owner_generation"`
+	DispatchState              DispatchState                 `json:"dispatch_state"`
+	ResourceState              RunExecutionState             `json:"resource_state"`
+	ExecutionIdentity          *ExecutionIdentity            `json:"execution_identity,omitempty"`
+	CompletionProof            tools.PreparedCompletionProof `json:"completion_proof,omitempty"`
 }
 
 // RunToolReceipt is the canonical terminal result for one tool-call
