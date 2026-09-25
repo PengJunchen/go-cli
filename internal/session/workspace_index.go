@@ -342,6 +342,9 @@ func (i *WorkspaceQuarantineIndex) InspectDispatchMarkers(ctx context.Context, r
 		if err := ref.Validate(); err != nil {
 			return nil, fmt.Errorf("session: invalid recovery action at index %d: %w", position, err)
 		}
+		if err := validateWorkspaceRecordIdentityParts(ref.WorkspaceID, ref.SessionID, ref.RunID, ref.ActionBatchID, ref.ActionID); err != nil {
+			return nil, fmt.Errorf("session: invalid recovery action at index %d: %w", position, err)
+		}
 		if !validWorkspaceID(ref.WorkspaceID) {
 			return nil, fmt.Errorf("session: invalid workspace ID in recovery action at index %d", position)
 		}
@@ -846,6 +849,9 @@ func validateWorkspaceIndexRecords(records []workspaceIndexRecord, workspaceID s
 	seenRecordIDs := make(map[string]struct{}, len(records))
 	for position := range state.records {
 		record := &state.records[position]
+		if err := validateWorkspaceRecordIdentityParts(workspaceID, record.WorkspaceID, record.RecordID); err != nil {
+			return nil, fmt.Errorf("workspace row %d has invalid identity: %w", position, err)
+		}
 		if record.Version != 1 || record.WorkspaceID != workspaceID || record.Seq != uint64(position+1) || record.RecordID == "" {
 			return nil, fmt.Errorf("workspace row %d has invalid version, workspace, sequence, or ID", position)
 		}
@@ -879,6 +885,9 @@ func validateWorkspaceIndexRecords(records []workspaceIndexRecord, workspaceID s
 }
 
 func (s *workspaceIndexState) addDispatchRecord(record *workspaceIndexRecord) error {
+	if err := validateWorkspaceRecordIdentityParts(record.WorkspaceID, record.SessionID, record.RunID, record.ActionBatchID); err != nil {
+		return err
+	}
 	if record.SessionID == "" || record.RunID == "" || record.ActionBatchID == "" || record.RecordID != workspaceDispatchRecordID(WorkspaceDispatchBatch{WorkspaceID: record.WorkspaceID, SessionID: record.SessionID, RunID: record.RunID, ActionBatchID: record.ActionBatchID}) || len(record.Actions) == 0 || len(record.Actions) > maxWorkspaceIndexActions || record.Action != nil || record.Resolution != nil || record.CheckpointID != "" || record.CheckpointSeq != 0 {
 		return errors.New("incomplete or invalid dispatch-ready batch envelope")
 	}
@@ -929,6 +938,9 @@ func (s *workspaceIndexState) addResolutionRecord(record *workspaceIndexRecord) 
 }
 
 func normalizeWorkspaceDispatchBatch(batch WorkspaceDispatchBatch) (WorkspaceDispatchBatch, error) {
+	if err := validateWorkspaceRecordIdentityParts(batch.WorkspaceID, batch.SessionID, batch.RunID, batch.ActionBatchID); err != nil {
+		return WorkspaceDispatchBatch{}, err
+	}
 	if !validWorkspaceID(batch.WorkspaceID) || batch.SessionID == "" || batch.RunID == "" || batch.ActionBatchID == "" {
 		return WorkspaceDispatchBatch{}, errors.New("session: workspace dispatch batch has incomplete identity")
 	}
@@ -965,6 +977,9 @@ func normalizeWorkspaceDispatchBatch(batch WorkspaceDispatchBatch) (WorkspaceDis
 
 func validateWorkspaceDispatchAction(action WorkspaceDispatchAction, workspaceID, sessionID, runID, batchID string) error {
 	ref := action.Action
+	if err := validateWorkspaceRecordIdentityParts(workspaceID, sessionID, runID, batchID, ref.WorkspaceID, ref.SessionID, ref.RunID, ref.ActionBatchID, ref.ActionID); err != nil {
+		return err
+	}
 	if err := ref.Validate(); err != nil {
 		return err
 	}
@@ -1008,6 +1023,9 @@ func normalizeEffectFacts(effects []tools.TrustedToolEffect) ([]tools.TrustedToo
 }
 
 func validateWorkspaceResolution(ref PendingActionRef, checkpointID string, checkpointSeq uint64, resolution core.ExecutionResolution) error {
+	if err := validateWorkspaceRecordIdentityParts(ref.WorkspaceID, ref.SessionID, ref.RunID, ref.ActionBatchID, ref.ActionID); err != nil {
+		return err
+	}
 	if err := ref.Validate(); err != nil {
 		return err
 	}
@@ -1170,6 +1188,15 @@ func workspaceDispatchRecordID(batch WorkspaceDispatchBatch) string {
 
 func workspaceResolutionRecordID(ref PendingActionRef) string {
 	return stableWorkspaceRecordID("resolution", ref.WorkspaceID, ref.SessionID, ref.RunID, ref.ActionBatchID, ref.ActionID)
+}
+
+func validateWorkspaceRecordIdentityParts(parts ...string) error {
+	for _, part := range parts {
+		if strings.IndexByte(part, 0) >= 0 {
+			return errors.New("workspace record identity contains NUL")
+		}
+	}
+	return nil
 }
 
 func stableWorkspaceRecordID(kind string, parts ...string) string {
