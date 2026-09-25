@@ -32,14 +32,23 @@ func TestStdioWriterPanicIsContainedAndFencesSession(t *testing.T) {
 	require.NoError(t, client.Connect(context.Background()))
 
 	err := client.SendMessage(context.Background(), ACPMessage{Type: TypeMessage, Content: "private-payload"})
-	require.EqualError(t, err, "acp: stdio send: acp: stdio writer panicked after dispatch; delivery unknown")
+	// The recovered panic fences the session before the writer worker closes
+	// its join channel, so the caller may observe either the terminal writer
+	// error or a pending wrapper that already contains that terminal error.
 	var panicErr StdioWritePanicError
 	require.ErrorAs(t, err, &panicErr)
 	var unknownDelivery interface{ UnknownDelivery() bool }
 	require.ErrorAs(t, err, &unknownDelivery)
 	assert.True(t, unknownDelivery.UnknownDelivery())
-	var pending *StdioPendingError
-	assert.False(t, errors.As(err, &pending), "the panic has unwound; report an unknown outcome, not pending I/O")
+	var pending stdioPending
+	var pendingDone <-chan struct{}
+	if errors.As(err, &pending) {
+		assert.True(t, pending.UnknownDelivery(), "a pending write must preserve unknown delivery")
+		pendingDone = pending.Done()
+		require.NotNil(t, pendingDone, "pending send must expose its writer worker join")
+	} else {
+		require.EqualError(t, err, "acp: stdio send: acp: stdio writer panicked after dispatch; delivery unknown")
+	}
 	assert.NotContains(t, err.Error(), "private-payload")
 	assert.Equal(t, 2, writer.callCount())
 
@@ -54,8 +63,14 @@ func TestStdioWriterPanicIsContainedAndFencesSession(t *testing.T) {
 	closeIgnored(peerWriter)
 	closeIgnored(reader)
 	assertChannelCloses(t, done)
+	if pendingDone != nil {
+		assertChannelCloses(t, pendingDone)
+	}
 	terminalErr := client.Disconnect(context.Background())
-	require.EqualError(t, terminalErr, "acp: stdio writer panicked after dispatch; delivery unknown")
+	var terminalPanic StdioWritePanicError
+	require.ErrorAs(t, terminalErr, &terminalPanic, "joined Disconnect must retain the terminal writer panic")
+	assert.True(t, terminalPanic.UnknownDelivery())
+	assert.NotContains(t, terminalErr.Error(), "private-payload")
 }
 
 func TestStdioReaderPanicIsContainedAndTerminal(t *testing.T) {
