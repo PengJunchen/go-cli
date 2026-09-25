@@ -397,10 +397,8 @@ func (s *HTTPServer) Stop(ctx context.Context) error {
 	s.mu.Unlock()
 
 	if startOwner {
-		// Cancel server context to ask handlers and detached dispatch workers to
-		// stop. The close owner still joins each worker before publishing Done.
-		generation.cancel()
-		slog.Info("acp.server.stop", "name", s.name)
+		// The owner launches before any potentially blocking cancellation or
+		// logging callbacks, so this caller can honor its own wait context.
 		go s.closeGeneration(generation)
 	}
 	if ctx == nil {
@@ -420,6 +418,10 @@ func (s *HTTPServer) Stop(ctx context.Context) error {
 }
 
 func (s *HTTPServer) closeGeneration(generation *httpServerGeneration) {
+	// Cancel server context to ask handlers and detached dispatch workers to
+	// stop. The close owner still joins each worker before publishing Done.
+	generation.cancel()
+	slog.Info("acp.server.stop", "name", s.name)
 	if err := generation.server.Shutdown(context.Background()); err != nil {
 		generation.closeErr = errors.Join(generation.closeErr, err)
 	}
