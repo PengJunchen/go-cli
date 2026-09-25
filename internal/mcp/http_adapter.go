@@ -350,8 +350,7 @@ func (a *HTTPClientAdapter) Connect(ctx context.Context) error {
 		}
 
 		lifeCtx, cancelLife := context.WithCancel(context.Background())
-		connectCtx, cancelConnect := context.WithCancel(ctx)
-		stopLife := context.AfterFunc(lifeCtx, cancelConnect)
+		connectCtx, cancelConnect, stopLife := linkedCancellation(ctx, lifeCtx)
 		gen = &httpConnectionGeneration{
 			endpoint:   endpoint,
 			lifeCtx:    lifeCtx,
@@ -408,16 +407,13 @@ func (a *HTTPClientAdapter) Disconnect(ctx context.Context) error {
 }
 
 func (a *HTTPClientAdapter) runConnect(ctx context.Context, gen *httpConnectionGeneration, op *httpConnectOperation, stopLife func() bool, id int64) {
-	defer stopLife()
-	defer op.cancel()
-	sessionID, version, err := a.doInitialize(ctx, gen.endpoint, id)
-	if err != nil {
-		err = fmt.Errorf("mcp: initialize handshake: %w", err)
-	}
+	sessionID, version, err := a.performConnect(ctx, gen.endpoint, id)
+	stopLife()
+	a.mu.Lock()
 	if err == nil && ctx.Err() != nil {
 		err = contextCause(ctx)
 	}
-	a.mu.Lock()
+	op.cancel()
 	gen.sessionID = sessionID
 	gen.protocolVersion = version
 	if err == nil && (a.current != gen || gen.closing) {
@@ -429,14 +425,42 @@ func (a *HTTPClientAdapter) runConnect(ctx context.Context, gen *httpConnectionG
 	op.result = err
 	endHTTPActivityLocked(gen)
 	close(op.done)
-	connected := err == nil
 	a.mu.Unlock()
-	if connected {
-		slog.Info("mcp.http.connect", "server", a.cfg.Name)
-	}
 }
 
 func (a *HTTPClientAdapter) runClose(gen *httpConnectionGeneration, op *httpCloseOperation, quiescent <-chan struct{}) {
+	closeErr := a.performClose(gen, op, quiescent)
+	a.mu.Lock()
+	op.result = closeErr
+	close(op.done)
+	a.mu.Unlock()
+}
+
+func (a *HTTPClientAdapter) performConnect(ctx context.Context, endpoint string, id int64) (sessionID, version string, retErr error) {
+	defer func() {
+		if recover() != nil {
+			retErr = httpProtocolError("initialize handshake operation panicked; remote session state may be unknown")
+		}
+	}()
+	sessionID, version, retErr = a.doInitialize(ctx, endpoint, id)
+	if retErr != nil {
+		retErr = fmt.Errorf("mcp: initialize handshake: %w", retErr)
+		return sessionID, version, retErr
+	}
+	if err := ctx.Err(); err != nil {
+		return sessionID, version, contextCause(ctx)
+	}
+	slog.Info("mcp.http.initialized", "server", a.cfg.Name, "protocolVersion", version)
+	slog.Info("mcp.http.connect", "server", a.cfg.Name)
+	return sessionID, version, nil
+}
+
+func (a *HTTPClientAdapter) performClose(gen *httpConnectionGeneration, op *httpCloseOperation, quiescent <-chan struct{}) (closeErr error) {
+	defer func() {
+		if recover() != nil {
+			closeErr = httpProtocolError("session teardown operation panicked; remote state may be unknown")
+		}
+	}()
 	<-quiescent
 	a.mu.Lock()
 	endpoint, version, sessionID := gen.endpoint, gen.protocolVersion, gen.sessionID
@@ -446,13 +470,13 @@ func (a *HTTPClientAdapter) runClose(gen *httpConnectionGeneration, op *httpClos
 	}
 	a.mu.Unlock()
 
-	var closeErr error
 	if sessionID == "" {
 		if connectErr != nil {
 			closeErr = httpProtocolErrorCause("initialization failed before a deletable session was known; remote state may be unknown", connectErr)
 		}
 	} else {
 		deleteCtx, cancel := context.WithDeadline(op.ownerCtx, op.deadline)
+		defer cancel()
 		req, err := a.newHTTPMessageRequest(deleteCtx, http.MethodDelete, endpoint, nil, version, sessionID, "", "")
 		if err != nil {
 			closeErr = fmt.Errorf("mcp: build session DELETE: %w", err)
@@ -467,12 +491,28 @@ func (a *HTTPClientAdapter) runClose(gen *httpConnectionGeneration, op *httpClos
 				}
 			}
 		}
-		cancel()
 	}
-	a.mu.Lock()
-	op.result = closeErr
-	close(op.done)
-	a.mu.Unlock()
+	return closeErr
+}
+
+func linkedCancellation(parent, cancelOn context.Context) (context.Context, context.CancelFunc, func() bool) {
+	ctx, cancel := context.WithCancel(parent)
+	callbackDone := make(chan struct{})
+	var callbackOnce sync.Once
+	finishCallback := func() { callbackOnce.Do(func() { close(callbackDone) }) }
+	stopCallback := context.AfterFunc(cancelOn, func() {
+		defer finishCallback()
+		cancel()
+	})
+	stop := func() bool {
+		stopped := stopCallback()
+		if stopped {
+			finishCallback()
+		}
+		<-callbackDone
+		return stopped
+	}
+	return ctx, cancel, stop
 }
 
 func beginHTTPActivityLocked(gen *httpConnectionGeneration) {
@@ -653,8 +693,7 @@ func (a *HTTPClientAdapter) request(ctx context.Context, method string, params m
 		a.mu.Unlock()
 	}()
 
-	requestCtx, cancel := context.WithCancel(ctx)
-	stopLife := context.AfterFunc(gen.lifeCtx, cancel)
+	requestCtx, cancel, stopLife := linkedCancellation(ctx, gen.lifeCtx)
 	defer func() {
 		stopLife()
 		cancel()
@@ -1047,6 +1086,11 @@ func (a *HTTPClientAdapter) applyAuthHeaders(req *http.Request) {
 // doInitialize performs the 2025-06-18 initialize/initialized exchange and
 // returns any session identity learned before a later handshake error.
 func (a *HTTPClientAdapter) doInitialize(ctx context.Context, endpoint string, id int64) (sessionID, version string, retErr error) {
+	defer func() {
+		if recover() != nil {
+			retErr = httpProtocolError("initialize handshake operation panicked; remote session state may be unknown")
+		}
+	}()
 	initParams := map[string]any{
 		"protocolVersion": streamableHTTPProtocolVersion,
 		"capabilities":    map[string]any{},
@@ -1119,7 +1163,6 @@ func (a *HTTPClientAdapter) doInitialize(ctx context.Context, endpoint string, i
 		return sessionID, version, httpProtocolError("initialized notification acknowledgement must have an empty body")
 	}
 
-	slog.Info("mcp.http.initialized", "server", a.cfg.Name, "protocolVersion", version)
 	return sessionID, version, nil
 }
 
