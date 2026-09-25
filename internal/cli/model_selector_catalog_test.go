@@ -7,6 +7,7 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/session"
+
 	"github.com/stretchr/testify/assert"
 )
 
