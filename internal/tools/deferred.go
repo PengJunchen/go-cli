@@ -299,6 +299,14 @@ func (a *DeferredToolRegistryAdapter) registerTrustedInlineLocalReader(ctx conte
 	return registrar.registerTrustedInlineLocalReader(ctx, def)
 }
 
+func (a *DeferredToolRegistryAdapter) registerTrustedScopedWorkspaceRead(ctx context.Context, def ToolDefinition) error {
+	registrar, ok := a.underlying.(trustedScopedWorkspaceReadRegistrar)
+	if !ok {
+		return ErrPreparedRegistrationUnavailable
+	}
+	return registrar.registerTrustedScopedWorkspaceRead(ctx, def)
+}
+
 func (a *DeferredToolRegistryAdapter) toolRegistrationSnapshot(ctx context.Context, name string) (registeredToolSnapshot, error) {
 	if _, err := a.Get(ctx, name); err != nil {
 		return registeredToolSnapshot{}, err

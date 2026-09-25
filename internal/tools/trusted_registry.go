@@ -1,12 +1,15 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"runtime"
+	"sort"
 	"sync"
 )
 
@@ -17,7 +20,7 @@ const (
 	// RegistrationSourceTrustedControl identifies the narrow, explicit
 	// first-party control registration path.
 	RegistrationSourceTrustedControl = "builtin_control"
-	// RegistrationSourceBuiltin identifies reviewed first-party mutation tools.
+	// RegistrationSourceBuiltin identifies reviewed first-party tools.
 	RegistrationSourceBuiltin = "builtin_tool"
 	// RegistrationSourceTrustedNetworkRead identifies concrete first-party
 	// network readers registered through the narrow reviewed path.
@@ -200,6 +203,10 @@ type trustedInlineLocalReaderRegistrar interface {
 	registerTrustedInlineLocalReader(context.Context, ToolDefinition) error
 }
 
+type trustedScopedWorkspaceReadRegistrar interface {
+	registerTrustedScopedWorkspaceRead(context.Context, ToolDefinition) error
+}
+
 func (r *DefaultToolRegistry) DispatchFence() *DispatchFence {
 	if r == nil {
 		return nil
@@ -283,6 +290,75 @@ func (r *DefaultToolRegistry) registerTrustedInlineLocalReader(ctx context.Conte
 	return r.registerDefinitionWithCompletion(def, RegistrationSourceBuiltin, newTrustedEffectSet(), CompletionInlinePipelineJoined)
 }
 
+func (r *DefaultToolRegistry) registerTrustedScopedWorkspaceRead(ctx context.Context, def ToolDefinition) error {
+	var whitelist PathWhitelist
+	completionProof := PreparedCompletionProof("")
+	switch tool := def.(type) {
+	case *ReadTool:
+		if tool == nil {
+			return errors.New("tools: scoped workspace-read registration requires a non-nil read tool")
+		}
+		whitelist = tool.whitelist
+		completionProof = CompletionInlinePipelineJoined
+	case *LSTool:
+		if tool == nil {
+			return errors.New("tools: scoped workspace-read registration requires a non-nil ls tool")
+		}
+		whitelist = tool.whitelist
+		completionProof = CompletionInlinePipelineJoined
+	case *GrepTool:
+		if tool == nil {
+			return errors.New("tools: scoped workspace-read registration requires a non-nil grep tool")
+		}
+		whitelist = tool.whitelist
+	case *FindTool:
+		if tool == nil {
+			return errors.New("tools: scoped workspace-read registration requires a non-nil find tool")
+		}
+		whitelist = tool.whitelist
+	default:
+		return errors.New("tools: scoped workspace-read registration requires a reviewed concrete reader")
+	}
+
+	if whitelist.invalid || len(whitelist.paths) == 0 {
+		if completionProof != "" {
+			return r.registerDefinitionWithScopeAndCompletion(def, RegistrationSourceBuiltin, newTrustedEffectSet(), TrustedToolScope{}, completionProof)
+		}
+		return r.Register(ctx, def)
+	}
+
+	scope := trustedWorkspaceReadScope(whitelist.paths)
+	if scope.Fingerprint() == ([32]byte{}) {
+		return errors.New("tools: scoped workspace-read registration requires a non-empty canonical scope")
+	}
+	return r.registerDefinitionWithScopeAndCompletion(def, RegistrationSourceBuiltin, newTrustedEffectSet(EffectWorkspaceRead), scope, completionProof)
+}
+
+func trustedWorkspaceReadScope(paths []string) TrustedToolScope {
+	if len(paths) == 0 {
+		return TrustedToolScope{}
+	}
+
+	canonical := append([]string(nil), paths...)
+	sort.Strings(canonical)
+	unique := canonical[:0]
+	for _, root := range canonical {
+		if len(unique) == 0 || unique[len(unique)-1] != root {
+			unique = append(unique, root)
+		}
+	}
+
+	var encoded bytes.Buffer
+	encoded.WriteString("go-cli/workspace-read-scope/v1\x00")
+	var length [8]byte
+	for _, root := range unique {
+		binary.BigEndian.PutUint64(length[:], uint64(len(root)))
+		_, _ = encoded.Write(length[:])
+		_, _ = encoded.WriteString(root)
+	}
+	return newTrustedToolScope(encoded.String())
+}
+
 func supportsLocalProcessCompletion(tool *BashTool) bool {
 	if tool == nil {
 		return false
@@ -348,6 +424,10 @@ func (r *DefaultToolRegistry) registerDefinition(def ToolDefinition, source stri
 }
 
 func (r *DefaultToolRegistry) registerDefinitionWithCompletion(def ToolDefinition, source string, effects TrustedEffectSet, completionProof PreparedCompletionProof) error {
+	return r.registerDefinitionWithScopeAndCompletion(def, source, effects, TrustedToolScope{}, completionProof)
+}
+
+func (r *DefaultToolRegistry) registerDefinitionWithScopeAndCompletion(def ToolDefinition, source string, effects TrustedEffectSet, scope TrustedToolScope, completionProof PreparedCompletionProof) error {
 	if def == nil {
 		return errors.New("tools: cannot register a nil tool definition")
 	}
@@ -404,7 +484,7 @@ func (r *DefaultToolRegistry) registerDefinitionWithCompletion(def ToolDefinitio
 		if previous, exists := r.metadata[name]; exists {
 			generation = previous.identity.registrationGeneration + 1
 		}
-		metadata.identity = newTrustedToolIdentity(source, name, generation, fingerprint, TrustedToolScope{})
+		metadata.identity = newTrustedToolIdentity(source, name, generation, fingerprint, scope)
 		r.tools[name] = def
 		r.metadata[name] = metadata
 		r.version++

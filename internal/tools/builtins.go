@@ -204,9 +204,17 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDef
 
 func registerDefaultTool(ctx context.Context, reg ToolRegistry, def ToolDefinition) error {
 	switch def.(type) {
-	case *ReadTool, *LSTool:
-		if registrar, ok := reg.(trustedInlineLocalReaderRegistrar); ok {
-			return registrar.registerTrustedInlineLocalReader(ctx, def)
+	case *ReadTool, *LSTool, *GrepTool, *FindTool:
+		if registrar, ok := reg.(trustedScopedWorkspaceReadRegistrar); ok {
+			return registrar.registerTrustedScopedWorkspaceRead(ctx, def)
+		}
+		// Keep the existing completion-only registration for registries that
+		// predate the scoped-reader capability. It never mints read effects.
+		switch def.(type) {
+		case *ReadTool, *LSTool:
+			if registrar, ok := reg.(trustedInlineLocalReaderRegistrar); ok {
+				return registrar.registerTrustedInlineLocalReader(ctx, def)
+			}
 		}
 	case *WriteTool, *EditFileTool:
 		if registrar, ok := reg.(trustedWorkspaceWriteRegistrar); ok {
