@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
 	"sync"
 )
@@ -63,29 +64,41 @@ func (d *modelGenerationDisposer) run() error {
 	d.finished = make(chan struct{})
 	finished := d.finished
 	generations := d.generations
-	d.generations = nil
 	d.mu.Unlock()
 
 	disposeErr := d.initialErr
+	retained := make([]*modelGeneration, 0, len(generations))
 	for _, generation := range generations {
 		if generation == nil {
 			continue
 		}
 		if generation.cleanupAttempted {
 			disposeErr = errors.Join(disposeErr, generation.cleanupErr)
+			if generation.cleanupErr != nil {
+				retained = append(retained, generation)
+			} else {
+				generation.model = nil
+				generation.cleanup = nil
+			}
 			continue
 		}
 		if generation.cleanup == nil {
+			generation.model = nil
 			continue
 		}
 		generation.cleanupAttempted = true
 		if invokeCleanup(generation.cleanup) {
 			generation.cleanupErr = ErrModelCleanupPanicked
 			disposeErr = errors.Join(disposeErr, generation.cleanupErr)
+			retained = append(retained, generation)
+		} else {
+			generation.model = nil
+			generation.cleanup = nil
 		}
 	}
 
 	d.mu.Lock()
+	d.generations = retained
 	d.err = disposeErr
 	close(finished)
 	d.mu.Unlock()
@@ -95,7 +108,9 @@ func (d *modelGenerationDisposer) run() error {
 var ErrModelSwitchBusy = errors.New("llm: model switch is busy")
 var ErrModelSelectorClosed = errors.New("llm: model selector is closed")
 var ErrModelSwitchAdmissionClosed = errors.New("llm: model switch admission is closed")
+var ErrModelSwitchAdmissionMissingRelease = errors.New("llm: model switch admission returned no release handle")
 var ErrModelSelectorFailed = errors.New("llm: model selector failed closed")
+var ErrModelBuilderReturnedNil = errors.New("llm: model builder returned nil model")
 var ErrModelSwitchCallbackPanicked = errors.New("llm: model switch callback panicked")
 var ErrModelCleanupPanicked = errors.New("llm: model cleanup panicked")
 var ErrModelSelectorFailureHandlerPanicked = errors.New("llm: selector failure handler panicked")
@@ -454,6 +469,9 @@ func (s *DefaultModelSelector) switchPrimary(ctx context.Context, prepare func()
 		}
 		return errors.Join(wrapped, s.disposeUnpublished(candidate))
 	}
+	if isNilChatModel(model) {
+		return errors.Join(ErrModelBuilderReturnedNil, s.disposeUnpublished(candidate))
+	}
 	if err := ctx.Err(); err != nil {
 		return errors.Join(err, s.disposeUnpublished(candidate))
 	}
@@ -464,11 +482,16 @@ func (s *DefaultModelSelector) switchPrimary(ctx context.Context, prepare func()
 	if s.switchAdmission != nil {
 		release, admissionPanicked, admissionErr := invokeAdmission(ctx, s.switchAdmission)
 		if admissionPanicked {
+			disposeErr := s.disposeUnpublished(candidate)
 			failure := s.recordFailure(ErrModelSwitchAdmissionPanicked)
-			return errors.Join(failure, s.disposeUnpublished(candidate))
+			return errors.Join(failure, disposeErr)
 		}
 		if admissionErr != nil {
+			admissionRelease = release
 			return errors.Join(admissionErr, s.disposeUnpublished(candidate))
+		}
+		if release == nil {
+			return errors.Join(ErrModelSwitchAdmissionMissingRelease, s.disposeUnpublished(candidate))
 		}
 		admissionRelease = release
 	}
@@ -643,6 +666,19 @@ func invokeModelBuilder(ctx context.Context, build func(context.Context) (BaseCh
 	}()
 	model, cleanup, err = build(ctx)
 	return
+}
+
+func isNilChatModel(model BaseChatModel) bool {
+	if model == nil {
+		return true
+	}
+	value := reflect.ValueOf(model)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 func invokeAdmission(ctx context.Context, admission ModelSwitchAdmission) (release func(), panicked bool, err error) {
