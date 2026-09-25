@@ -66,6 +66,13 @@ func (v *DefaultValidator) Validate(cfg Config) error {
 		errs = append(errs, "model max_tokens must be non-negative")
 	}
 
+	if cfg.SmallModel.Temperature < minTemperature || cfg.SmallModel.Temperature > maxTemperature {
+		errs = append(errs, "small model temperature out of range")
+	}
+	if cfg.SmallModel.MaxTokens < 0 {
+		errs = append(errs, "small model max_tokens must be non-negative")
+	}
+
 	if cfg.Tracing.Level != "" && !contains(validTracingLevels, cfg.Tracing.Level) {
 		errs = append(errs, "invalid tracing level")
 	}
