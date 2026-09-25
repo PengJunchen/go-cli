@@ -2,6 +2,8 @@ package acp
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -11,6 +13,14 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+func newRandomTestSecret(t *testing.T) string {
+	t.Helper()
+	var secret [32]byte
+	_, err := rand.Read(secret[:])
+	require.NoError(t, err)
+	return hex.EncodeToString(secret[:])
+}
 
 func startHTTPProfilePeer(t *testing.T) *HTTPServer {
 	t.Helper()
@@ -63,7 +73,7 @@ func TestGRPCAdapterPrivateHTTPProfileLoopback(t *testing.T) {
 }
 
 func TestGRPCAdapterAuthenticatedHTTPProfileLoopback(t *testing.T) {
-	const token = "loopback-test-bearer-token"
+	token := newRandomTestSecret(t)
 	server := NewHTTPServer("loopback-auth", "127.0.0.1:0", nil)
 	server.SetAuth(token, "principal-a")
 	require.NoError(t, server.Start(context.Background()))
@@ -107,7 +117,7 @@ func TestGRPCAdapterRejectsWrongHTTPBearerTokenWithoutLeaking(t *testing.T) {
 	require.NoError(t, server.Start(context.Background()))
 	t.Cleanup(func() { _ = server.Stop(context.Background()) }) //nolint:errcheck // test cleanup
 
-	const wrongToken = "wrong-test-token"
+	wrongToken := newRandomTestSecret(t)
 	client := NewGRPCAdapter("http://"+server.Addr(), WithHTTPBearerToken(wrongToken))
 	err := client.Connect(context.Background())
 	require.Error(t, err)
@@ -195,7 +205,7 @@ func TestGRPCAdapterKnownHTTPConnectDenialAllowsExplicitRetry(t *testing.T) {
 }
 
 func TestGRPCAdapterHTTPBearerTokenIsNotForwardedAcrossRedirect(t *testing.T) {
-	const token = "must-not-leak-token"
+	token := newRandomTestSecret(t)
 	forwarded := make(chan string, 1)
 	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		forwarded <- r.Header.Get("Authorization")

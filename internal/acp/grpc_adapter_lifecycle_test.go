@@ -449,8 +449,8 @@ func TestGRPCAdapterDisconnectWaitsForActiveSend(t *testing.T) {
 }
 
 func TestGRPCAdapterConnectErrorPreservesCauseWithoutLeakingEndpointOrToken(t *testing.T) {
-	const token = "private-bearer-value"
-	const endpointSecret = "private-query-value"
+	token := newRandomTestSecret(t)
+	endpointSecret := newRandomTestSecret(t)
 	transportErr := errors.New("transport cause")
 	var requestCount atomic.Int32
 	client := NewGRPCAdapter("http://127.0.0.1:8123", WithHTTPBearerToken(token))
