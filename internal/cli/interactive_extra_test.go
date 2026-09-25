@@ -3,13 +3,16 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -151,12 +154,34 @@ func TestInteractiveCmd_RegisterMCPTools_StdioServer(t *testing.T) {
 	assert.Empty(t, registered)
 }
 
-func TestInteractiveCmd_RegisterMCPTools_SSEServer(t *testing.T) {
+func TestInteractiveCmd_RegisterMCPTools_StreamableHTTPServer(t *testing.T) {
 	ctx := t.Context()
 	srv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
-		writeMockMCPResult(w, r, map[string]any{
-			"tools": []map[string]any{{"name": "sse-tool", "description": "An SSE tool"}},
-		})
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read JSON-RPC request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		r.Body = io.NopCloser(bytes.NewReader(body))
+		var request struct {
+			Method string `json:"method"`
+		}
+		if err := json.Unmarshal(body, &request); err != nil {
+			http.Error(w, "decode JSON-RPC request: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		switch request.Method {
+		case "tools/list":
+			writeMockMCPResult(w, r, map[string]any{
+				"tools": []map[string]any{{"name": "http-tool", "description": "A Streamable HTTP tool"}},
+			})
+		case "tools/call":
+			writeMockMCPResult(w, r, map[string]any{
+				"content": []map[string]any{{"type": "text", "text": "ok"}},
+			})
+		default:
+			http.Error(w, "unexpected JSON-RPC method: "+request.Method, http.StatusBadRequest)
+		}
 	}))
 	defer srv.Close()
 
@@ -164,7 +189,7 @@ func TestInteractiveCmd_RegisterMCPTools_SSEServer(t *testing.T) {
 	rc := &config.Config{
 		MCP: config.MCPConfig{
 			Servers: []config.MCPServerConfig{
-				{Name: "sse-server", URL: srv.URL},
+				{Name: "http-server", URL: srv.URL},
 			},
 		},
 	}
@@ -172,10 +197,43 @@ func TestInteractiveCmd_RegisterMCPTools_SSEServer(t *testing.T) {
 	err := registerMCPTools(ctx, rc, tr)
 	require.NoError(t, err)
 
-	tool, err := tr.Get(ctx, mcp.NormalizeToolName("sse-server", "sse-tool"))
+	tool, err := tr.Get(ctx, mcp.NormalizeToolName("http-server", "http-tool"))
 	require.NoError(t, err)
 	assert.NotNil(t, tool)
-	assert.Equal(t, "mcp__sse-server__sse-tool", tool.Name())
+	assert.Equal(t, "mcp__http-server__http-tool", tool.Name())
+
+	result, err := tool.Execute(ctx, tools.ToolCall{
+		ID:   "call-http-tool",
+		Name: tool.Name(),
+		Args: map[string]any{},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Contains(t, result.Output, "ok")
+}
+
+func TestInteractiveCmd_RegisterMCPTools_SSEServer(t *testing.T) {
+	ctx := t.Context()
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	adapter := mcp.NewHTTPClientAdapter(mcp.MCPServerConfig{
+		Name:      "legacy-sse-server",
+		URL:       srv.URL,
+		Transport: mcp.MCPTransportSSE,
+	})
+	err := adapter.Connect(ctx)
+	require.ErrorIs(t, err, mcp.ErrUnsupportedHTTPTransport)
+	assert.Zero(t, requests.Load(), "legacy SSE transport must be rejected before probing the endpoint")
+
+	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
+	registered, err := tr.List(ctx)
+	require.NoError(t, err)
+	assert.Empty(t, registered, "unsupported legacy SSE must not register tools")
 }
 
 func TestInteractiveCmd_RegisterMCPTools_NoTransport(t *testing.T) {

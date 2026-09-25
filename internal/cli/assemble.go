@@ -2216,13 +2216,13 @@ func registerMCPTools(ctx context.Context, rc *config.Config, tr tools.DeferredR
 					cfg.Env = append(cfg.Env, k+"="+v)
 				}
 			} else if srv.URL != "" {
-				cfg.Transport = mcp.MCPTransportSSE
+				cfg.Transport = mcp.MCPTransportStreamableHTTP
 			} else {
 				return nil
 			}
 
 			var client mcp.MCPClient
-			if cfg.Transport == mcp.MCPTransportSSE {
+			if cfg.Transport == mcp.MCPTransportStreamableHTTP {
 				client = mcp.NewHTTPClientAdapter(cfg)
 			} else {
 				client = mcp.NewOfficialSDKAdapter(cfg)

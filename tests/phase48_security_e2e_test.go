@@ -1,7 +1,6 @@
 package tests
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -9,11 +8,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -481,27 +480,23 @@ func TestET_Phase48_BashEnvFilter_AndLLMTimeout(t *testing.T) {
 // P1 Security Tests (48-18)
 // ---------------------------------------------------------------------------
 
-// TestET_Phase48_MCP_OAuthCSRF verifies that the MCP OAuth flow generates a
-// random CSRF state and the callback handler rejects requests with missing
-// or mismatched state parameters.
-func TestET_Phase48_MCP_OAuthCSRF(t *testing.T) {
+// TestET_Phase48_MCP_OAuthUnsupportedBeforeNetwork verifies that the current
+// Streamable HTTP adapter rejects OAuth before making a network request or
+// starting a browser authorization flow.
+func TestET_Phase48_MCP_OAuthUnsupportedBeforeNetwork(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	// MCP test server: returns 200 for GET (SSE connect), 401 for POST (initialize).
+	var requests atomic.Int32
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet {
-			w.WriteHeader(http.StatusOK)
-			return
-		}
-		w.Header().Set("WWW-Authenticate", `Bearer realm="mcp"`)
-		w.WriteHeader(http.StatusUnauthorized)
+		requests.Add(1)
+		w.WriteHeader(http.StatusOK)
 	}))
 	defer ts.Close()
 
 	cfg := mcp.MCPServerConfig{
 		Name:      "test-oauth",
 		URL:       ts.URL,
-		Transport: "sse",
+		Transport: mcp.MCPTransportStreamableHTTP,
 		OAuthConfig: &mcp.OAuthConfig{
 			AuthorizationURL: "https://auth.example.com/authorize",
 			TokenURL:         ts.URL + "/token",
@@ -511,70 +506,9 @@ func TestET_Phase48_MCP_OAuthCSRF(t *testing.T) {
 	}
 	adapter := mcp.NewHTTPClientAdapter(cfg)
 
-	// Capture stderr to extract the authorization URL printed by doOAuthFlow.
-	oldStderr := os.Stderr
-	rPipe, wPipe, err := os.Pipe()
-	require.NoError(t, err)
-	os.Stderr = wPipe
-
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	errCh := make(chan error, 1)
-	go func() { errCh <- adapter.Connect(ctx) }()
-
-	// Read the authorization URL from captured stderr (synchronous scan).
-	scanner := bufio.NewScanner(rPipe)
-	var authURLStr string
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
-		if strings.HasPrefix(line, "http") {
-			authURLStr = line
-			break
-		}
-	}
-	os.Stderr = oldStderr
-	_ = wPipe.Close()
-
-	require.NotEmpty(t, authURLStr, "authorization URL should have been printed to stderr")
-
-	// Parse the URL to get the state and redirect_uri.
-	parsed, err := url.Parse(authURLStr)
-	require.NoError(t, err)
-
-	state := parsed.Query().Get("state")
-	require.NotEmpty(t, state, "state parameter must be present")
-
-	redirectURI := parsed.Query().Get("redirect_uri")
-	require.NotEmpty(t, redirectURI, "redirect_uri must be present")
-
-	// 1. Callback with no state → 400
-	resp, err := http.Get(redirectURI + "?code=test-code")
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode,
-		"callback without state should be rejected")
-	_ = resp.Body.Close()
-
-	// 2. Callback with wrong state → 400
-	resp, err = http.Get(redirectURI + "?code=test-code&state=wrong")
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusBadRequest, resp.StatusCode,
-		"callback with wrong state should be rejected")
-	_ = resp.Body.Close()
-
-	// 3. Callback with correct state → 200
-	resp, err = http.Get(redirectURI + "?code=test-code&state=" + url.QueryEscape(state))
-	require.NoError(t, err)
-	assert.Equal(t, http.StatusOK, resp.StatusCode,
-		"callback with correct state should be accepted")
-	_ = resp.Body.Close()
-
-	// Wait for Connect to finish (token exchange will fail — that's OK).
-	select {
-	case <-errCh:
-	case <-time.After(5 * time.Second):
-		t.Log("Connect did not return (token exchange may be hanging)")
-	}
+	err := adapter.Connect(t.Context())
+	require.ErrorIs(t, err, mcp.ErrUnsupportedOAuth)
+	assert.Zero(t, requests.Load(), "unsupported OAuth must fail before HTTP or browser authorization")
 }
 
 // TestET_Phase48_MCP_ResponseSizeLimit verifies that the MCP HTTP adapter
@@ -599,7 +533,7 @@ func TestET_Phase48_MCP_ResponseSizeLimit(t *testing.T) {
 	cfg := mcp.MCPServerConfig{
 		Name:      "test-size-limit",
 		URL:       ts.URL,
-		Transport: "sse",
+		Transport: mcp.MCPTransportStreamableHTTP,
 	}
 	adapter := mcp.NewHTTPClientAdapter(cfg)
 
