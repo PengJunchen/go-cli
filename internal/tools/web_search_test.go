@@ -19,8 +19,20 @@ func TestWebSearchDescription(t *testing.T) {
 	assert.Contains(t, tool.Description(), "query")
 }
 
-func TestWebSearchReturnsResults(t *testing.T) {
+func TestWebSearchMissingProviderFailsClosed(t *testing.T) {
 	tool := NewWebSearchTool()
+	result, err := tool.Execute(context.Background(), ToolCall{
+		ID:   "call-no-provider",
+		Name: "web_search",
+		Args: map[string]any{"query": "anything"},
+	})
+	require.Nil(t, result, "an unavailable provider must not produce fabricated results")
+	require.ErrorIs(t, err, ErrWebSearchProviderUnavailable)
+	assert.Equal(t, "unavailable", tool.ProviderName())
+}
+
+func TestWebSearchReturnsResults(t *testing.T) {
+	tool := NewWebSearchTool(WithSearchProvider(NewMockSearchProvider()))
 	res, err := tool.Execute(context.Background(), ToolCall{
 		ID:   "call-1",
 		Name: "web_search",
@@ -50,7 +62,7 @@ func TestWebSearchEmptyQuery(t *testing.T) {
 }
 
 func TestWebSearchContainsURLs(t *testing.T) {
-	tool := NewWebSearchTool()
+	tool := NewWebSearchTool(WithSearchProvider(NewMockSearchProvider()))
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"query": "test"},
 	})
@@ -61,7 +73,7 @@ func TestWebSearchContainsURLs(t *testing.T) {
 }
 
 func TestWebSearchDeterministic(t *testing.T) {
-	tool := NewWebSearchTool()
+	tool := NewWebSearchTool(WithSearchProvider(NewMockSearchProvider()))
 	res1, err1 := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"query": "deterministic"},
 	})
