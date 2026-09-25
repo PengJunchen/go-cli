@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net"
 	"net/url"
@@ -45,6 +46,8 @@ type AuthScope struct {
 // ErrAuthNotFound is returned by AuthSource.Lookup implementations when the
 // provider has no key in that source.
 var ErrAuthNotFound = errors.New("auth: key not found in source")
+
+var errAuthFileInvalid = errors.New("auth: credential file is invalid or insecure")
 
 // ErrCredentialScopeRequired is returned when an API asks for a credential
 // using only a provider name. Provider identity alone is insufficient to bind
@@ -181,12 +184,16 @@ func (c *AuthChain) lookupScopedCLIFlag(scope AuthScope) (string, error) {
 // backward compatibility.
 func lookupAuthFile(provider string) (string, error) {
 	path := authFilePath()
-	data, err := os.ReadFile(path)
+	return lookupAuthFileAt(path, provider)
+}
+
+func lookupAuthFileAt(path, provider string) (string, error) {
+	data, err := readPrivateAuthFile(path)
 	if err != nil {
-		if !errors.Is(err, os.ErrNotExist) {
-			slog.Warn("config.auth.file_read_error", "path", path, "err", err)
+		if !errors.Is(err, ErrAuthNotFound) {
+			slog.Warn("config.auth.file_read_error", "source", authSourceAuthFile, "err", err)
 		}
-		return "", ErrAuthNotFound
+		return "", err
 	}
 	// Try the single-key {"api_key": "..."} format first.
 	var single struct {
@@ -198,14 +205,18 @@ func lookupAuthFile(provider string) (string, error) {
 	// Fall back to a provider -> key map.
 	var m map[string]string
 	if err := json.Unmarshal(data, &m); err == nil {
+		if m == nil {
+			return "", errAuthFileInvalid
+		}
 		// Case-insensitive lookup to match provider names regardless of casing.
 		for k, v := range m {
 			if strings.EqualFold(k, provider) && v != "" {
 				return v, nil
 			}
 		}
+		return "", ErrAuthNotFound
 	}
-	return "", ErrAuthNotFound
+	return "", errAuthFileInvalid
 }
 
 // lookupEnv maps the provider to candidate environment variable names and
@@ -267,7 +278,7 @@ type scopedCredentialRecord struct {
 // "credentials" array. Legacy single-key and provider-only formats remain
 // readable by old tooling but are never candidates for scoped resolution.
 func lookupScopedAuthFile(scope AuthScope) (string, error) {
-	return lookupScopedCredentialFile(authFilePath(), scope)
+	return lookupScopedAuthFilePath(authFilePath(), scope)
 }
 
 func lookupScopedModelsJSON(scope AuthScope) (string, error) {
@@ -275,7 +286,11 @@ func lookupScopedModelsJSON(scope AuthScope) (string, error) {
 }
 
 func lookupScopedAuthFilePath(path string, scope AuthScope) (string, error) {
-	return lookupScopedCredentialFile(path, scope)
+	data, err := readPrivateAuthFile(path)
+	if err != nil {
+		return "", err
+	}
+	return lookupScopedCredentialData(data, scope, true)
 }
 
 func lookupScopedCredentialFile(path string, scope AuthScope) (string, error) {
@@ -283,10 +298,17 @@ func lookupScopedCredentialFile(path string, scope AuthScope) (string, error) {
 	if err != nil {
 		return "", ErrAuthNotFound
 	}
+	return lookupScopedCredentialData(data, scope, false)
+}
+
+func lookupScopedCredentialData(data []byte, scope AuthScope, authFile bool) (string, error) {
 	var document struct {
 		Credentials []scopedCredentialRecord `json:"credentials"`
 	}
 	if err := json.Unmarshal(data, &document); err != nil {
+		if authFile {
+			return "", errAuthFileInvalid
+		}
 		return "", ErrAuthNotFound
 	}
 	for _, entry := range document.Credentials {
@@ -376,7 +398,76 @@ func envVarNames(provider string) []string {
 
 // authFilePath returns the location of auth.json under the user config dir.
 func authFilePath() string {
-	return configFilePath("auth.json")
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return ""
+	}
+	return filepath.Join(home, ".config", "go-cli", "auth.json")
+}
+
+func readPrivateAuthFile(path string) ([]byte, error) {
+	if path == "" {
+		return nil, ErrAuthNotFound
+	}
+	pathInfo, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, ErrAuthNotFound
+	}
+	if err != nil {
+		return nil, authFileError("inspect file", err)
+	}
+	if !pathInfo.Mode().IsRegular() {
+		return nil, authFileError("file must be regular", nil)
+	}
+	if pathInfo.Mode().Perm()&0o077 != 0 {
+		return nil, authFileError("file permissions allow group or other access", nil)
+	}
+
+	dirInfo, err := os.Lstat(filepath.Dir(path))
+	if err != nil {
+		return nil, authFileError("inspect parent directory", err)
+	}
+	if !dirInfo.IsDir() || dirInfo.Mode().Perm()&0o077 != 0 {
+		return nil, authFileError("parent directory allows group or other access", nil)
+	}
+
+	f, err := os.Open(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, ErrAuthNotFound
+	}
+	if err != nil {
+		return nil, authFileError("read file", err)
+	}
+	openedInfo, err := f.Stat()
+	if err != nil {
+		_ = f.Close() //nolint:errcheck // the inspection error is primary.
+		return nil, authFileError("inspect opened file", err)
+	}
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(pathInfo, openedInfo) {
+		_ = f.Close() //nolint:errcheck // the policy error is primary.
+		return nil, authFileError("file changed while opening", nil)
+	}
+	if openedInfo.Mode().Perm()&0o077 != 0 {
+		_ = f.Close() //nolint:errcheck // the policy error is primary.
+		return nil, authFileError("file permissions allow group or other access", nil)
+	}
+
+	data, readErr := io.ReadAll(f)
+	closeErr := f.Close()
+	if readErr != nil {
+		return nil, authFileError("read file", readErr)
+	}
+	if closeErr != nil {
+		return nil, authFileError("close file", closeErr)
+	}
+	return data, nil
+}
+
+func authFileError(reason string, cause error) error {
+	if cause == nil {
+		return fmt.Errorf("%w: %s", errAuthFileInvalid, reason)
+	}
+	return fmt.Errorf("%w: %s: %w", errAuthFileInvalid, reason, cause)
 }
 
 // modelsConfigPath returns the location of models.json under the user config

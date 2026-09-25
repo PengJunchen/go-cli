@@ -189,6 +189,7 @@ func TestAuthChainScopedCLIFlagDoesNotCrossProviderOrOrigin(t *testing.T) {
 
 func TestAuthChainScopedAuthFile(t *testing.T) {
 	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
 	authPath := filepath.Join(dir, "auth.json")
 	scope := AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test:443"}
 	data := map[string]any{"credentials": []map[string]string{{

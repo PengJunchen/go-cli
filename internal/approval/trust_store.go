@@ -2,10 +2,10 @@ package approval
 
 import (
 	"encoding/json"
-	"io"
 	"os"
-	"path/filepath"
 	"sync"
+
+	"github.com/pengjunchen/go-cli/internal/privatefile"
 )
 
 // TrustEntry records the trust relationship for a single project path. It is
@@ -38,9 +38,9 @@ type TrustStore interface {
 	Remove(path string) error
 }
 
-// FileTrustStore is a JSON-file-backed TrustStore. Writes are atomic: it writes
-// to a temporary file in the same directory and renames it into place, so a
-// crash never leaves a half-written trust file. It is safe for concurrent use.
+// FileTrustStore is a JSON-file-backed TrustStore. Writes use a private sibling
+// file and atomic replace, so a crash never leaves a half-written trust file.
+// It is safe for concurrent use.
 type FileTrustStore struct {
 	mu   sync.RWMutex
 	path string
@@ -61,8 +61,7 @@ func (s *FileTrustStore) Load() (map[string]TrustEntry, error) {
 	return s.loadLocked()
 }
 
-// Save writes the entries atomically: it creates a temp file sibling to the
-// destination and renames it over the destination.
+// Save writes the entries atomically through a private sibling file.
 func (s *FileTrustStore) Save(entries map[string]TrustEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -127,27 +126,7 @@ func (s *FileTrustStore) writeLocked(entries map[string]TrustEntry) error {
 	if err != nil {
 		return err
 	}
-
-	dir := filepath.Dir(s.path)
-	tmp, err := os.CreateTemp(dir, "trust-*.json")
-	if err != nil {
-		return err
-	}
-	tmpName := tmp.Name()
-	defer func() { _ = os.Remove(tmpName) }() //nolint:errcheck // cleanup no-op after a successful rename.
-
-	written, err := tmp.Write(data)
-	if err == nil && written != len(data) {
-		err = io.ErrShortWrite
-	}
-	if err != nil {
-		_ = tmp.Close() //nolint:errcheck // write already failed; close is best-effort.
-		return err
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	return os.Rename(tmpName, s.path)
+	return privatefile.WriteAtomic(s.path, data)
 }
 
 // InMemoryTrustStore is an in-memory, concurrency-safe TrustStore. It is used
