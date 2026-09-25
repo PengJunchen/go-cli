@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 
@@ -144,7 +145,14 @@ func NewHarnessImpl(agent Agent, opts ...HarnessOption) *HarnessImpl {
 
 // Submit runs the agent asynchronously and returns an EventStream immediately.
 // Non-blocking: the caller owns the stream and must drain it until it closes.
-func (h *HarnessImpl) Submit(ctx context.Context, msg string) (EventStream, error) {
+func (h *HarnessImpl) Submit(ctx context.Context, msg string) (returnStream EventStream, returnErr error) {
+	leaseGuard, leaseCapturePanic := captureRunCommitLeaseGuard(ctx)
+	leaseTransferred := false
+	defer func() {
+		if !leaseTransferred && leaseGuard.close() {
+			returnErr = errors.Join(returnErr, ErrRunCommitLeaseClosePanicked)
+		}
+	}()
 	runInputCtx, inputCancel, stopLifetime := linkRunLifetime(ctx, h.lifetimeCtx)
 
 	// Claim the run slot before launching the goroutine so concurrent
@@ -185,6 +193,9 @@ func (h *HarnessImpl) Submit(ctx context.Context, msg string) (EventStream, erro
 	wrapperDone, err = registerRunWrapper(h.runSlot, claim, nil)
 	if err != nil {
 		return nil, err
+	}
+	if leaseCapturePanic != nil {
+		panic(leaseCapturePanic)
 	}
 
 	// Borrowed tracing and bus producers are touched only after the guard has
@@ -230,13 +241,16 @@ func (h *HarnessImpl) Submit(ctx context.Context, msg string) (EventStream, erro
 
 	submission := Submission{Type: SubmissionUserMessage, Content: msg}
 
+	owner.adoptRunCommitLease(leaseGuard)
+	leaseTransferred = true
 	transferred = true
 	go h.run(spanCtx, span, stream, submission, owner, wrapperDone, func() {
 		stopLifetime()
 		inputCancel()
 	})
 
-	return stream, nil
+	returnStream = stream
+	return returnStream, nil
 }
 
 // run executes the agent and fans its events out to the stream. It always

@@ -105,7 +105,7 @@ type runOwner struct {
 	runCommitBinding     RunCommitBinding
 	terminalSyncRequired bool
 	terminalSyncSuccess  bool
-	runCommitLease       RunCommitRunLease
+	runCommitLeaseGuard  *runCommitLeaseGuard
 	leaseCloseAttempted  bool
 	workers              int
 	resources            int
@@ -797,11 +797,7 @@ func (o *runOwner) run(timeout time.Duration, fn func(context.Context) (Result, 
 	callbackCtx := withRunID(withRunWorkerTracker(o.ctx, o), o.claim.ID)
 	var bindingErr error
 	if sink, binding, ok := RunCommitFromContext(callbackCtx); ok {
-		if lease, ok := sink.(RunCommitRunLease); ok {
-			o.mu.Lock()
-			o.runCommitLease = lease
-			o.mu.Unlock()
-		}
+		o.adoptRunCommitLeaseFromSink(sink)
 		binding.OwnerGeneration = o.ownerGeneration
 		bindingErr = binding.Validate()
 		if bindingErr == nil {
@@ -913,6 +909,31 @@ func (o *runOwner) run(timeout time.Duration, fn func(context.Context) (Result, 
 	}
 }
 
+// adoptRunCommitLease transfers the entrypoint's already-captured guard to
+// this owner. The owner must receive it synchronously before run() starts any
+// goroutine. A direct owner.run caller still gets the context-capture fallback
+// above; it never replaces a guard attached by a public entrypoint.
+func (o *runOwner) adoptRunCommitLease(guard *runCommitLeaseGuard) {
+	if o == nil || guard == nil {
+		return
+	}
+	o.mu.Lock()
+	if o.runCommitLeaseGuard == nil {
+		o.runCommitLeaseGuard = guard
+	}
+	o.mu.Unlock()
+}
+
+func (o *runOwner) adoptRunCommitLeaseFromSink(sink RunCommitSink) {
+	o.mu.Lock()
+	alreadyAdopted := o.runCommitLeaseGuard != nil
+	o.mu.Unlock()
+	if alreadyAdopted {
+		return
+	}
+	o.adoptRunCommitLease(newRunCommitLeaseGuardForSink(sink))
+}
+
 func (o *runOwner) finishUndispatched(err error) {
 	o.mu.Lock()
 	o.callbackFinished = true
@@ -977,8 +998,8 @@ func (o *runOwner) supervise() {
 		// bounded cleanup wait before leaving the lock so it cannot look like a
 		// successful run while release is still in flight.
 		o.startCleanupLocked()
-		lease := o.runCommitLease
-		closeLease := lease != nil && !o.leaseCloseAttempted
+		leaseGuard := o.runCommitLeaseGuard
+		closeLease := leaseGuard != nil && !o.leaseCloseAttempted
 		if closeLease {
 			o.leaseCloseAttempted = true
 		}
@@ -993,7 +1014,7 @@ func (o *runOwner) supervise() {
 		}
 		leasePanicked := false
 		if closeLease {
-			leasePanicked = closeRunCommitLease(lease)
+			leasePanicked = leaseGuard.close()
 		}
 		guard.Release(claim)
 
