@@ -257,7 +257,11 @@ func (r *DefaultToolRegistry) registerTrustedLocalProcess(ctx context.Context, d
 		if tool == nil || tool.BashTool == nil {
 			return errors.New("tools: streaming bash registration requires a non-nil base tool")
 		}
-		return r.registerDefinitionWithCompletion(def, RegistrationSourceBuiltin, newTrustedEffectSet(), "")
+		proof := PreparedCompletionProof("")
+		if supportsLocalProcessCompletion(tool.BashTool) {
+			proof = CompletionOwnedProcessGroupJoined
+		}
+		return r.registerDefinitionWithCompletion(def, RegistrationSourceBuiltin, newTrustedEffectSet(), proof)
 	default:
 		return errors.New("tools: local-process completion requires a reviewed local bash tool")
 	}
