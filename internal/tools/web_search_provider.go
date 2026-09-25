@@ -261,7 +261,8 @@ func (p *BraveSearchProvider) Search(ctx context.Context, query string, opts Sea
 	if client == nil {
 		client = http.DefaultClient
 	}
-	client = braveSearchClientWithRedirectPolicy(client)
+	initialOrigin := braveOriginFor(req.URL)
+	client = braveSearchClientWithRedirectPolicy(client, initialOrigin)
 
 	resp, err := client.Do(req)
 	if err != nil {
@@ -281,34 +282,61 @@ func (p *BraveSearchProvider) Search(ctx context.Context, query string, opts Sea
 	return parseBraveJSON(body, maxResults)
 }
 
-func braveSearchClientWithRedirectPolicy(client *http.Client) *http.Client {
+type braveOrigin struct {
+	scheme string
+	host   string
+	port   string
+	valid  bool
+}
+
+func braveOriginFor(u *url.URL) braveOrigin {
+	if u == nil {
+		return braveOrigin{}
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return braveOrigin{}
+	}
+	return braveOrigin{
+		scheme: strings.ToLower(u.Scheme),
+		host:   host,
+		port:   effectiveBravePort(u),
+		valid:  true,
+	}
+}
+
+func (origin braveOrigin) matches(u *url.URL) bool {
+	if !origin.valid || u == nil || !strings.EqualFold(origin.scheme, u.Scheme) {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	return host != "" && origin.host == host && origin.port == effectiveBravePort(u)
+}
+
+func braveSearchClientWithRedirectPolicy(client *http.Client, initialOrigin braveOrigin) *http.Client {
 	clientCopy := *client
 	callerCheckRedirect := client.CheckRedirect
 	clientCopy.CheckRedirect = func(req *http.Request, via []*http.Request) error {
-		if len(via) == 0 || !sameBraveOrigin(via[0].URL, req.URL) {
+		if len(via) == 0 || !initialOrigin.matches(req.URL) {
 			return errBraveCrossOriginRedirect
 		}
 		if callerCheckRedirect != nil {
-			return callerCheckRedirect(req, via)
+			if err := callerCheckRedirect(req, via); err != nil {
+				return err
+			}
 		}
-		if len(via) >= 10 {
+		// Check again after caller policy: callbacks may mutate req.URL. Always
+		// compare with the immutable origin captured before Client.Do, never a
+		// request in the mutable via history.
+		if !initialOrigin.matches(req.URL) {
+			return errBraveCrossOriginRedirect
+		}
+		if callerCheckRedirect == nil && len(via) >= 10 {
 			return errors.New("stopped after 10 redirects")
 		}
 		return nil
 	}
 	return &clientCopy
-}
-
-func sameBraveOrigin(a, b *url.URL) bool {
-	if a == nil || b == nil || !strings.EqualFold(a.Scheme, b.Scheme) {
-		return false
-	}
-	aHost := strings.ToLower(a.Hostname())
-	bHost := strings.ToLower(b.Hostname())
-	if aHost == "" || aHost != bHost {
-		return false
-	}
-	return effectiveBravePort(a) == effectiveBravePort(b)
 }
 
 func effectiveBravePort(u *url.URL) string {
