@@ -179,7 +179,7 @@ func classifyProviderError(err error) (ErrorCategory, bool) {
 		return ErrorRateLimit, true
 	case llm.ErrTypeServer, llm.ErrTypeNetwork:
 		return ErrorTransient, true
-	case llm.ErrTypeAuth, llm.ErrTypeOverflow:
+	case llm.ErrTypeAuth, llm.ErrTypeOverflow, llm.ErrTypeInvalidRequest:
 		return ErrorFatal, true
 	default:
 		return "", false

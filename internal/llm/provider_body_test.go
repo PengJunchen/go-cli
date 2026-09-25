@@ -390,7 +390,7 @@ func TestProviderErrorOverflowClassificationUsesBoundedPrefix(t *testing.T) {
 		wantType  ErrorType
 	}{
 		{name: "indicator within bounded prefix", indicator: "prefix", wantType: ErrTypeOverflow},
-		{name: "indicator beyond bounded prefix", indicator: "suffix", wantType: ErrTypeServer},
+		{name: "indicator beyond bounded prefix", indicator: "suffix", wantType: ErrTypeInvalidRequest},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {

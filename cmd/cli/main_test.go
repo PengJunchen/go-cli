@@ -759,7 +759,7 @@ func TestDefaultTraceAndLogsRedactProviderErrorBody(t *testing.T) {
 					providerCode = providerCode || attr.Value == float64(http.StatusBadRequest)
 				}
 				if attr.Key == "error_type" {
-					providerErrorType = providerErrorType || attr.Value == "server"
+					providerErrorType = providerErrorType || attr.Value == "invalid_request"
 				}
 			}
 		}

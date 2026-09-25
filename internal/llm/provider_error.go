@@ -23,6 +23,9 @@ const (
 	// ErrTypeOverflow indicates a 400 response whose body contains a
 	// context-length-overflow indicator.
 	ErrTypeOverflow ErrorType = "overflow"
+	// ErrTypeInvalidRequest indicates a recognized non-retryable request error:
+	// an ordinary 400 response or a 404 response.
+	ErrTypeInvalidRequest ErrorType = "invalid_request"
 	// ErrTypeServer indicates a 5xx server error (or any other retryable HTTP
 	// error that does not fit the categories above).
 	ErrTypeServer ErrorType = "server"
@@ -101,6 +104,7 @@ func containsOverflowIndicator(msg string) bool {
 //   - 429 → ErrTypeRateLimit
 //   - 401/403 → ErrTypeAuth
 //   - 400 with overflow indicators in the body → ErrTypeOverflow
+//   - ordinary 400 and 404 → ErrTypeInvalidRequest
 //   - 5xx → ErrTypeServer
 //   - other → ErrTypeServer (default, retryable)
 func newProviderError(statusCode int, provider, payload string) *ProviderError {
@@ -113,6 +117,8 @@ func newProviderError(statusCode int, provider, payload string) *ProviderError {
 		errType = ErrTypeAuth
 	case statusCode == 400 && containsOverflowIndicator(msg):
 		errType = ErrTypeOverflow
+	case statusCode == 400 || statusCode == 404:
+		errType = ErrTypeInvalidRequest
 	case statusCode >= 500:
 		errType = ErrTypeServer
 	default:

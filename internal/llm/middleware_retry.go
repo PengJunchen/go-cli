@@ -97,7 +97,7 @@ func classifyError(err error) errorCategory {
 		switch pe.ErrorType {
 		case ErrTypeRateLimit:
 			return categoryRateLimit
-		case ErrTypeAuth, ErrTypeOverflow:
+		case ErrTypeAuth, ErrTypeOverflow, ErrTypeInvalidRequest:
 			return categoryFatal
 		case ErrTypeServer, ErrTypeNetwork:
 			return categoryTransient
