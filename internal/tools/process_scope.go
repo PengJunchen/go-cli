@@ -20,8 +20,9 @@ const (
 )
 
 var (
-	errProcessGroupRemained      = errors.New("child processes remained after the shell exited")
-	errProcessCleanupUnconfirmed = errors.New("process cleanup could not be confirmed")
+	errProcessGroupRemained          = errors.New("child processes remained after the shell exited")
+	errProcessCleanupUnconfirmed     = errors.New("process cleanup could not be confirmed")
+	errProcessContainmentUnconfirmed = errors.New("process containment could not be confirmed after forced output pipe close")
 )
 
 // localProcessScope owns the OS process group started for one local command.
@@ -41,15 +42,16 @@ type managedLocalCommand struct {
 }
 
 type managedLocalResult struct {
-	runErr          error
-	readerErr       error
-	readersJoined   bool
-	forcedPipeClose bool
-	interrupted     bool
-	quiescent       bool
-	escalated       bool
-	cleanupErr      error
-	executionDone   <-chan struct{}
+	runErr            error
+	readerErr         error
+	readersJoined     bool
+	forcedPipeClose   bool
+	interrupted       bool
+	quiescent         bool // owned group, leader, and local readers have joined
+	containmentProven bool
+	escalated         bool
+	cleanupErr        error
+	executionDone     <-chan struct{}
 }
 
 // startManagedLocalCommand starts a command in a fresh process group and owns
@@ -142,12 +144,13 @@ func (m *managedLocalCommand) collect(ctx context.Context, read func(io.Reader, 
 		interrupted:     scopeOutcome.interrupted,
 		readerErr:       readerErr,
 		runErr:          runErr,
-		// Reader success is an output-integrity result, not a resource-lifecycle
-		// result. A closed pipe or read error is safe to report once the reader
-		// goroutine has joined and the owned process group is gone.
-		quiescent:  scopeOutcome.quiescent && leaderJoined && joined,
-		escalated:  scopeOutcome.escalated,
-		cleanupErr: scopeOutcome.cleanupErr,
+		// A forced read-pipe close may let us join our local reader but cannot
+		// establish that every writer stopped: a descendant may have escaped the
+		// group. Keep local join and containment proof as separate facts.
+		quiescent:         scopeOutcome.quiescent && leaderJoined && joined,
+		containmentProven: scopeOutcome.quiescent && leaderJoined && joined && !scopeOutcome.forcedPipeClose,
+		escalated:         scopeOutcome.escalated,
+		cleanupErr:        scopeOutcome.cleanupErr,
 	}
 	if !leaderJoined {
 		result.cleanupErr = errors.Join(result.cleanupErr, errProcessCleanupUnconfirmed)
@@ -391,6 +394,13 @@ func pendingProcessErrorWithDone(cause error, unknown bool, done <-chan struct{}
 }
 
 func localLifecycleError(cause error, result managedLocalResult) error {
+	if result.forcedPipeClose {
+		cause = errors.Join(cause, errProcessContainmentUnconfirmed, result.cleanupErr, result.readerErr)
+		if result.executionDone != nil {
+			return pendingProcessErrorWithDone(cause, true, result.executionDone)
+		}
+		return newUnknownExecutionError(cause)
+	}
 	if !result.quiescent || !result.readersJoined || result.cleanupErr != nil {
 		return pendingProcessErrorWithDone(errors.Join(cause, result.cleanupErr, result.readerErr), true, result.executionDone)
 	}

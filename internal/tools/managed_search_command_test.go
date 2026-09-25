@@ -13,6 +13,8 @@ func TestManagedSearchFallbackStopsForPendingOrCanceledHelper(t *testing.T) {
 	ctx := context.Background()
 	pending := fmt.Errorf("find helper: %w", pendingProcessError(errors.New("cleanup unconfirmed"), true))
 	assert.False(t, shouldFallbackAfterManagedHelper(ctx, pending))
+	assert.False(t, shouldFallbackAfterManagedHelper(ctx, newUnknownExecutionError(errProcessContainmentUnconfirmed)))
+	assert.True(t, shouldFallbackAfterManagedHelper(ctx, newUnknownExecutionError(errors.New("recoverable helper output error"))))
 	assert.True(t, shouldFallbackAfterManagedHelper(ctx, errors.New("completed helper exited unsuccessfully")))
 
 	canceled, cancel := context.WithCancel(context.Background())

@@ -29,13 +29,11 @@ func runManagedSearchCommand(ctx context.Context, cmd *exec.Cmd) ([]byte, manage
 
 	var stdout bytes.Buffer
 	lifecycle = managed.collect(execCtx, func(reader io.Reader, stream string) (bool, error) {
-		var destination io.Writer = io.Discard
 		if stream == "stderr" {
 			_, readErr := io.Copy(io.Discard, reader)
 			return readErr == nil, readErr
 		}
-		destination = &stdout
-		_, readErr := io.Copy(destination, reader)
+		_, readErr := io.Copy(&stdout, reader)
 		return readErr == nil, readErr
 	})
 	return append([]byte(nil), stdout.Bytes()...), lifecycle, nil
@@ -44,8 +42,15 @@ func runManagedSearchCommand(ctx context.Context, cmd *exec.Cmd) ([]byte, manage
 // managedSearchLifecycleError reports interruption or unconfirmed process
 // cleanup without classifying an ordinary helper exit status as a lifecycle
 // failure. Callers may use a completed ordinary helper error for the existing
-// fallback, but must stop when this returns a PendingExecutionError.
+// fallback, but must stop for a pending local resource or unproved containment.
 func managedSearchLifecycleError(ctx context.Context, label string, lifecycle managedLocalResult) error {
+	if lifecycle.forcedPipeClose {
+		cause := errors.Join(fmt.Errorf("%s: %w", label, errProcessContainmentUnconfirmed), lifecycle.runErr, lifecycle.cleanupErr, lifecycle.readerErr)
+		if lifecycle.executionDone != nil {
+			return pendingProcessErrorWithDone(cause, true, lifecycle.executionDone)
+		}
+		return newUnknownExecutionError(cause)
+	}
 	if lifecycle.interrupted {
 		cause := error(context.Canceled)
 		if ctx != nil && ctx.Err() != nil {
@@ -76,6 +81,9 @@ func shouldFallbackAfterManagedHelper(ctx context.Context, err error) bool {
 		return true
 	}
 	if ctx == nil {
+		return false
+	}
+	if errors.Is(err, errProcessContainmentUnconfirmed) {
 		return false
 	}
 	if isPendingExecution(err) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {

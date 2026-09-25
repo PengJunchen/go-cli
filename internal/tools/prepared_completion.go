@@ -263,11 +263,11 @@ func reportPreparedCompletion(ctx context.Context, proof PreparedCompletionProof
 func reportPreparedLocalProcessCompletion(ctx context.Context, lifecycle managedLocalResult) {
 	var done <-chan struct{}
 	switch {
-	case lifecycle.quiescent:
+	case lifecycle.containmentProven:
 		completed := make(chan struct{})
 		close(completed)
 		done = completed
-	case lifecycle.executionDone != nil:
+	case lifecycle.executionDone != nil && !lifecycle.forcedPipeClose:
 		done = lifecycle.executionDone
 	default:
 		return
