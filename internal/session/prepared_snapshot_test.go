@@ -17,6 +17,7 @@ import (
 
 func TestPreparedSessionSnapshotRetainsDurableOpenGroupAndPublishedView(t *testing.T) {
 	ctx := context.Background()
+	processStartToken := newSessionTestCanary(t)
 	prepared, err := NewDurableJSONLSessionPreparer(t.TempDir(), nil).PrepareNew(ctx, "snapshot open tool group")
 	if err != nil {
 		t.Fatal(err)
@@ -58,7 +59,7 @@ func TestPreparedSessionSnapshotRetainsDurableOpenGroupAndPublishedView(t *testi
 			ToolCallID: "call-snapshot", ToolName: "read",
 			ExecutionIdentity: &ExecutionIdentity{
 				Kind: ExecutionIdentityProcessGroup, Platform: "linux", HostGeneration: "boot-1",
-				LeaderPID: 42, ProcessStartToken: "start-42", ProcessGroupID: 42,
+				LeaderPID: 42, ProcessStartToken: processStartToken, ProcessGroupID: 42,
 			},
 		},
 	)

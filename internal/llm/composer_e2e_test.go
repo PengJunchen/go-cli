@@ -2,6 +2,8 @@ package llm
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"testing"
 	"time"
 
@@ -11,6 +13,15 @@ import (
 	"github.com/pengjunchen/go-cli/internal/tracing"
 	"github.com/pengjunchen/go-cli/internal/verify"
 )
+
+func newLLMTestCredentialCanary(t *testing.T) string {
+	t.Helper()
+
+	var random [16]byte
+	_, err := rand.Read(random[:])
+	require.NoError(t, err)
+	return "runtime-canary-" + hex.EncodeToString(random[:])
+}
 
 // TestSelectWinningProviders_SortedDescendingSource verifies the winners slice
 // is ordered by descending source so higher-priority providers appear first in
@@ -166,7 +177,8 @@ func TestProviderRegistry_GetModelReturnsNonNilCleanup(t *testing.T) {
 	reg := NewProviderRegistry()
 	ref, err := reg.SnapshotResolver().CredentialRefFor("eino", "")
 	require.NoError(t, err)
-	m, cleanup, err := reg.GetModel(context.Background(), "eino", ModelConfig{Model: "gpt-4o", APIKey: "test-key", Credential: ref})
+	apiKey := newLLMTestCredentialCanary(t)
+	m, cleanup, err := reg.GetModel(context.Background(), "eino", ModelConfig{Model: "gpt-4o", APIKey: apiKey, Credential: ref})
 	require.NoError(t, err)
 	require.NotNil(t, m)
 	require.NotNil(t, cleanup)

@@ -2,6 +2,8 @@ package config
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,9 +13,18 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
+func newAuthTestCanary(t *testing.T) string {
+	t.Helper()
+
+	var random [16]byte
+	_, err := rand.Read(random[:])
+	require.NoError(t, err)
+	return "runtime-canary-" + hex.EncodeToString(random[:])
+}
+
 func TestLookupScopedAuthFileRejectsInsecureOrCorruptFiles(t *testing.T) {
 	scope := AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test"}
-	const secret = "credential-secret-canary"
+	secret := newAuthTestCanary(t)
 	cases := []struct {
 		name  string
 		setup func(t *testing.T, path string)
@@ -78,7 +89,7 @@ func TestLookupScopedAuthFileRejectsSymlinks(t *testing.T) {
 	targetDir := filepath.Join(root, "target")
 	require.NoError(t, os.Mkdir(targetDir, 0o700))
 	targetFile := filepath.Join(targetDir, "auth.json")
-	const secret = "symlink-secret-canary"
+	secret := newAuthTestCanary(t)
 	require.NoError(t, os.WriteFile(targetFile, []byte(`{"credentials":[{"provider":"openai","protocol":"openai-compatible","origin":"https://api.example.test","api_key":"`+secret+`"}]}`), 0o600))
 
 	t.Run("final auth file symlink", func(t *testing.T) {
@@ -103,7 +114,7 @@ func TestLookupScopedAuthFileRejectsSymlinks(t *testing.T) {
 }
 
 func TestLookupAuthFileRejectsCorruptAndOverbroadFiles(t *testing.T) {
-	const secret = "legacy-secret-canary"
+	secret := newAuthTestCanary(t)
 	cases := []struct {
 		name string
 		data []byte
@@ -135,7 +146,7 @@ func TestLookupAuthFileRejectsDefaultConfigDirectorySymlink(t *testing.T) {
 	external := t.TempDir()
 	authDir := filepath.Join(external, "go-cli")
 	require.NoError(t, os.Mkdir(authDir, 0o700))
-	const secret = "symlink-secret-canary"
+	secret := newAuthTestCanary(t)
 	require.NoError(t, os.WriteFile(filepath.Join(authDir, "auth.json"), []byte(`{"openai":"`+secret+`"}`), 0o600))
 	require.NoError(t, os.Symlink(external, filepath.Join(home, ".config")))
 
@@ -152,7 +163,7 @@ func TestLookupScopedModelsJSONUsesNoProjectRelativePathWithoutHome(t *testing.T
 	t.Setenv("HOME", "")
 	modelsDir := filepath.Join(workDir, ".config", "go-cli")
 	require.NoError(t, os.MkdirAll(modelsDir, 0o700))
-	const secret = "project-relative-secret"
+	secret := newAuthTestCanary(t)
 	data := []byte(`{"credentials":[{"provider":"openai","protocol":"openai-compatible","origin":"https://api.example.test","api_key":"` + secret + `"}]}`)
 	require.NoError(t, os.WriteFile(filepath.Join(modelsDir, "models.json"), data, 0o644))
 
@@ -257,7 +268,7 @@ func TestLookupScopedModelsJSONMetadataDoesNotRequirePrivatePermissions(t *testi
 }
 
 func TestLookupScopedModelsJSONCredentialRequiresPrivateFileAndPath(t *testing.T) {
-	const secret = "models-secret-canary"
+	secret := newAuthTestCanary(t)
 	data := []byte(`{"credentials":[{"provider":"openai","protocol":"openai-compatible","origin":"https://api.example.test","api_key":"` + secret + `"}]}`)
 	scope := AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test"}
 	cases := []struct {
@@ -412,7 +423,7 @@ func TestLookupScopedModelsJSONRejectsDanglingSymlinkPathComponents(t *testing.T
 func TestLookupScopedCredentialDataRejectsMalformedDocumentsAndRecords(t *testing.T) {
 	scope, err := normalizeAuthScope(AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test"})
 	require.NoError(t, err)
-	const secret = "credential-secret-canary"
+	secret := newAuthTestCanary(t)
 	cases := []struct {
 		name string
 		data string
@@ -443,7 +454,7 @@ func TestLookupScopedCredentialDataRejectsMalformedDocumentsAndRecords(t *testin
 func TestLookupScopedCredentialDataRejectsDuplicateMembers(t *testing.T) {
 	scope, err := normalizeAuthScope(AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test"})
 	require.NoError(t, err)
-	const secret = "duplicate-member-secret"
+	secret := newAuthTestCanary(t)
 	validRecord := `{"provider":"openai","protocol":"openai-compatible","origin":"https://api.example.test","api_key":"` + secret + `"}`
 	cases := []struct {
 		name string
@@ -471,8 +482,8 @@ func TestLookupScopedCredentialDataRejectsDuplicateMembers(t *testing.T) {
 func TestLookupScopedCredentialDataRejectsConflictingKeysForSameScope(t *testing.T) {
 	scope, err := normalizeAuthScope(AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test"})
 	require.NoError(t, err)
-	const firstSecret = "first-secret-canary"
-	const secondSecret = "second-secret-canary"
+	firstSecret := newAuthTestCanary(t)
+	secondSecret := newAuthTestCanary(t)
 	data := []byte(`{"credentials":[{"provider":"openai","protocol":"openai-compatible","origin":"https://api.example.test","api_key":"` + firstSecret + `"},{"provider":"OpenAI","protocol":"OPENAI-COMPATIBLE","origin":"https://API.EXAMPLE.TEST:443","api_key":"` + secondSecret + `"}]}`)
 
 	key, err := lookupScopedCredentialData(data, scope)
@@ -507,7 +518,7 @@ func TestResolveCredentialStopsAfterCorruptAuthFile(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.Chmod(dir, 0o700))
 	path := filepath.Join(dir, "auth.json")
-	const secret = "credential-secret-canary"
+	secret := newAuthTestCanary(t)
 	require.NoError(t, os.WriteFile(path, []byte(`{"credentials":[{"api_key":"`+secret+`"`), 0o600))
 	var fallbackCalls int
 	scope := AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test"}
