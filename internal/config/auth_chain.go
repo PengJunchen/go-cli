@@ -371,7 +371,7 @@ func upsertScopedCredentialFileLocked(path string, scope AuthScope, apiKey strin
 		}
 	}
 
-	newRecord, err := json.Marshal(struct {
+	newRecord, err := json.Marshal(struct { //nolint:gosec // G117: this intentionally writes scope-bound secrets through privatefile to 0600 auth.json.
 		Provider string `json:"provider"`
 		Protocol string `json:"protocol"`
 		Origin   string `json:"origin"`

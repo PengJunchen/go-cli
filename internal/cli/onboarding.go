@@ -171,7 +171,7 @@ func runOnboardingWithModelOverride(ctx context.Context, cfg *config.Config, pro
 	}
 
 	hasConfig := configExistsFunc()
-	scope, _, found, err := onboardingCredentialLookupFunc(ctx, cfg, providerName)
+	_, _, found, err := onboardingCredentialLookupFunc(ctx, cfg, providerName)
 	if err != nil {
 		return fmt.Errorf("onboarding: resolve credential: %w", err)
 	}
@@ -205,7 +205,7 @@ func runOnboardingWithModelOverride(ctx context.Context, cfg *config.Config, pro
 		}
 		// Resolve after all wizard choices so persistence follows the provider
 		// identity that will be used by the resulting config.
-		scope, err = onboardingCredentialScopeFunc(cfg, providerName)
+		scope, err := onboardingCredentialScopeFunc(cfg, providerName)
 		if err != nil {
 			return fmt.Errorf("onboarding: resolve credential scope: %w", err)
 		}
@@ -217,7 +217,7 @@ func runOnboardingWithModelOverride(ctx context.Context, cfg *config.Config, pro
 	if err != nil {
 		return err
 	}
-	scope, err = onboardingCredentialScopeFunc(cfg, providerName)
+	scope, err := onboardingCredentialScopeFunc(cfg, providerName)
 	if err != nil {
 		return fmt.Errorf("onboarding: resolve credential scope: %w", err)
 	}

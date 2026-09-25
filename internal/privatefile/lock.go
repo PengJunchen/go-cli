@@ -8,8 +8,6 @@ import (
 	"path/filepath"
 )
 
-var errUnsupportedLock = errors.New("privatefile: advisory file locks are unsupported on this platform")
-
 // WithExclusiveLock runs update while holding an OS-backed exclusive lock for
 // path. The stable 0600 sidecar is kept after release so concurrent processes
 // always lock the same inode while path itself is atomically replaced.
