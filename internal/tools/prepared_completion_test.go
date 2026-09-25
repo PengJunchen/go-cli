@@ -54,7 +54,7 @@ func TestPreparedCompletionInvalidationRevokesPreviouslyCapturedProofSnapshot(t 
 	assert.Empty(t, state.signal().Proof())
 }
 
-func registerPreparedBuiltin(t *testing.T, ctx context.Context, toolName string) (*DefaultToolRegistry, *MiddlewareToolRegistry) {
+func registerPreparedBuiltin(ctx context.Context, t *testing.T, toolName string) (*DefaultToolRegistry, *MiddlewareToolRegistry) {
 	t.Helper()
 	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
 	deferred := NewDeferredToolRegistryAdapter(base)
@@ -82,7 +82,7 @@ func TestPreparedCompletionRegisteredReadAndLSProvideInlineProof(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			_, registry := registerPreparedBuiltin(t, ctx, testCase.toolName)
+			_, registry := registerPreparedBuiltin(ctx, t, testCase.toolName)
 			configurePreparedRegistry(t, registry, allowPreparedCall, PreparedToolStages{})
 
 			invocation, err := registry.PrepareToolCall(ctx, ToolCall{Name: testCase.toolName, Args: map[string]any{"path": testCase.path}})
@@ -122,7 +122,7 @@ func TestPreparedCompletionRegisteredReadAndLSWaitForAttestedWrappers(t *testing
 		{name: "ls", toolName: "ls", path: root},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			_, registry := registerPreparedBuiltin(t, ctx, testCase.toolName)
+			_, registry := registerPreparedBuiltin(ctx, t, testCase.toolName)
 			insideWrapper := make(chan struct{})
 			releaseWrapper := make(chan struct{})
 			var releaseOnce sync.Once
@@ -188,7 +188,7 @@ func TestPreparedCompletionRegisteredReadAndLSSuppressUnattestedWrapperProof(t *
 		{name: "ls", toolName: "ls", path: root},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			_, registry := registerPreparedBuiltin(t, ctx, testCase.toolName)
+			_, registry := registerPreparedBuiltin(ctx, t, testCase.toolName)
 			wrapper := ToolExecutorWrapper(func(next func(context.Context, ToolCall) (*ToolResult, error)) func(context.Context, ToolCall) (*ToolResult, error) {
 				return func(ctx context.Context, call ToolCall) (*ToolResult, error) { return next(ctx, call) }
 			})
@@ -208,7 +208,7 @@ func TestPreparedCompletionOrdinaryReadAndLSReplacementHaveNoProof(t *testing.T)
 	ctx := context.Background()
 	for _, toolName := range []string{"read", "ls"} {
 		t.Run(toolName, func(t *testing.T) {
-			base, registry := registerPreparedBuiltin(t, ctx, toolName)
+			base, registry := registerPreparedBuiltin(ctx, t, toolName)
 			custom := &preparedCaptureTool{name: toolName, schema: map[string]any{
 				"type":     "object",
 				"required": []string{"path", "content"},
