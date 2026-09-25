@@ -6,8 +6,6 @@ package session
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"log/slog"
 	"time"
 
@@ -211,14 +209,12 @@ const (
 	ActionStateExecution ActionState = "execution"
 )
 
-// DispatchState records whether a reserved action crossed the final dispatch fence.
-type DispatchState string
+// DispatchState aliases the core action dispatch state for durable rows.
+type DispatchState = core.DispatchState
 
 const (
-	// DispatchStateNotDispatched means the executor was positively not entered.
-	DispatchStateNotDispatched DispatchState = "not_dispatched"
-	// DispatchStateDispatched means the executor may have been entered.
-	DispatchStateDispatched DispatchState = "dispatched"
+	DispatchStateNotDispatched = core.DispatchStateNotDispatched
+	DispatchStateDispatched    = core.DispatchStateDispatched
 )
 
 // CheckpointKind identifies the durable checkpoint represented by an entry.
@@ -237,56 +233,17 @@ const (
 	CheckpointReconciliation CheckpointKind = "reconciliation"
 )
 
-// ExecutionIdentity records structured details for a locally owned process
-// group or Windows job. It does not prove that the resource is stopped and
-// must never be used to signal a restored process by PID alone.
-type ExecutionIdentity struct {
-	Kind              ExecutionIdentityKind `json:"kind"`
-	Platform          string                `json:"platform"`
-	HostGeneration    string                `json:"host_generation,omitempty"`
-	LeaderPID         int                   `json:"leader_pid,omitempty"`
-	ProcessStartToken string                `json:"process_start_token,omitempty"`
-	ProcessGroupID    int                   `json:"process_group_id,omitempty"`
-	JobID             string                `json:"job_id,omitempty"`
-}
+// ExecutionIdentity remains an alias so the JSON storage API stays compatible
+// while core owns the typed action commit contract.
+type ExecutionIdentity = core.ExecutionIdentity
 
-// ExecutionIdentityKind identifies the kind of local process containment.
-type ExecutionIdentityKind string
+// ExecutionIdentityKind remains an alias for source compatibility.
+type ExecutionIdentityKind = core.ExecutionIdentityKind
 
 const (
-	// ExecutionIdentityProcessGroup identifies a Unix process group.
-	ExecutionIdentityProcessGroup ExecutionIdentityKind = "process_group"
-	// ExecutionIdentityWindowsJob identifies a Windows job object.
-	ExecutionIdentityWindowsJob ExecutionIdentityKind = "windows_job"
+	ExecutionIdentityProcessGroup = core.ExecutionIdentityProcessGroup
+	ExecutionIdentityWindowsJob   = core.ExecutionIdentityWindowsJob
 )
-
-// Validate checks that an execution identity has the fields required for its
-// declared platform and containment kind. A valid shape is not proof that the
-// resource has stopped or is safe to signal after restart.
-func (i ExecutionIdentity) Validate() error {
-	if i.HostGeneration == "" {
-		return errors.New("session: execution identity host generation is required")
-	}
-	switch i.Kind {
-	case ExecutionIdentityProcessGroup:
-		if i.Platform != "darwin" && i.Platform != "linux" {
-			return fmt.Errorf("session: process group identity is unsupported on %q", i.Platform)
-		}
-		if i.LeaderPID <= 0 || i.ProcessStartToken == "" || i.ProcessGroupID <= 0 {
-			return errors.New("session: process group identity is incomplete")
-		}
-	case ExecutionIdentityWindowsJob:
-		if i.Platform != "windows" {
-			return fmt.Errorf("session: Windows job identity has invalid platform %q", i.Platform)
-		}
-		if i.LeaderPID <= 0 || i.ProcessStartToken == "" || i.JobID == "" {
-			return errors.New("session: Windows job identity is incomplete")
-		}
-	default:
-		return fmt.Errorf("session: unsupported execution identity kind %q", i.Kind)
-	}
-	return nil
-}
 
 // SurfaceVisible reports whether the entry should be included in the
 // model-visible message stream. It returns true when SurfaceOp is empty
