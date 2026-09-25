@@ -2,8 +2,10 @@ package extension
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 
 	"github.com/pengjunchen/go-cli/internal/llm"
@@ -13,6 +15,11 @@ import (
 // This file defines the ExtensionRegistry contract a Phase 4 extension uses to
 // register its building blocks, plus a concurrency-safe default implementation
 // with getters.
+
+var (
+	ErrExtensionRegistrySealed          = errors.New("extension: registry staging is sealed")
+	ErrExtensionAtomicCommitUnsupported = errors.New("extension: registry does not support atomic staging commit")
+)
 
 // ExtensionRegistry is the registry an extension uses to register its building
 // blocks (tools, commands, providers, hooks, middleware). Duplicate
@@ -30,14 +37,22 @@ type ExtensionRegistry interface {
 	RegisterMiddleware(ctx context.Context, m Middleware) error
 }
 
-// DefaultExtensionRegistry is the default in-memory ExtensionRegistry.
+// DefaultExtensionRegistry is the default in-memory ExtensionRegistry. Its
+// enumeration methods preserve successful registration order. A staging
+// registry is sealed before it is atomically committed or discarded.
 type DefaultExtensionRegistry struct {
-	mu          sync.Mutex
-	tools       map[string]tools.ToolDefinition
-	commands    map[string]func(args []string) error
-	providers   map[string]llm.ModelProvider
-	hooks       map[string]Hook
-	middlewares map[string]Middleware
+	mu              sync.Mutex
+	tools           map[string]tools.ToolDefinition
+	toolOrder       []string
+	commands        map[string]func(args []string) error
+	commandOrder    []string
+	providers       map[string]llm.ModelProvider
+	providerOrder   []string
+	hooks           map[string]Hook
+	hookOrder       []string
+	middlewares     map[string]Middleware
+	middlewareOrder []string
+	sealed          bool
 }
 
 var _ ExtensionRegistry = (*DefaultExtensionRegistry)(nil)
@@ -56,13 +71,21 @@ func NewExtensionRegistry() ExtensionRegistry {
 // RegisterTool stores a tool by name. It returns an error if a tool with the
 // same name is already registered.
 func (r *DefaultExtensionRegistry) RegisterTool(_ context.Context, t tools.ToolDefinition) error {
-	slog.Info("extension.register.tool", "tool", t.Name())
+	if t == nil {
+		return errors.New("extension: tool is nil")
+	}
+	name := t.Name()
+	slog.Info("extension.register.tool", "tool", name)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, exists := r.tools[t.Name()]; exists {
-		return fmt.Errorf("extension already registered: %s", t.Name())
+	if r.sealed {
+		return ErrExtensionRegistrySealed
 	}
-	r.tools[t.Name()] = t
+	if _, exists := r.tools[name]; exists {
+		return fmt.Errorf("extension already registered: %s", name)
+	}
+	r.tools[name] = t
+	r.toolOrder = append(r.toolOrder, name)
 	return nil
 }
 
@@ -72,49 +95,152 @@ func (r *DefaultExtensionRegistry) RegisterCommand(name string, fn func(args []s
 	slog.Info("extension.register.command", "name", name)
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if r.sealed {
+		return ErrExtensionRegistrySealed
+	}
 	if _, exists := r.commands[name]; exists {
 		return fmt.Errorf("extension already registered: %s", name)
 	}
 	r.commands[name] = fn
+	r.commandOrder = append(r.commandOrder, name)
 	return nil
 }
 
 // RegisterProvider stores a provider by name. It returns an error if a provider
 // with the same name is already registered.
 func (r *DefaultExtensionRegistry) RegisterProvider(p llm.ModelProvider) error {
-	slog.Info("extension.register.provider", "name", p.Name())
+	if p == nil {
+		return errors.New("extension: provider is nil")
+	}
+	name := p.Name()
+	slog.Info("extension.register.provider", "name", name)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, exists := r.providers[p.Name()]; exists {
-		return fmt.Errorf("extension already registered: %s", p.Name())
+	if r.sealed {
+		return ErrExtensionRegistrySealed
 	}
-	r.providers[p.Name()] = p
+	if _, exists := r.providers[name]; exists {
+		return fmt.Errorf("extension already registered: %s", name)
+	}
+	r.providers[name] = p
+	r.providerOrder = append(r.providerOrder, name)
 	return nil
 }
 
 // RegisterHook stores a hook by name. It returns an error if a hook with the
 // same name is already registered.
 func (r *DefaultExtensionRegistry) RegisterHook(_ context.Context, h Hook) error {
-	slog.Info("extension.register.hook", "name", h.Name())
+	if h == nil {
+		return errors.New("extension: hook is nil")
+	}
+	name := h.Name()
+	slog.Info("extension.register.hook", "name", name)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, exists := r.hooks[h.Name()]; exists {
-		return fmt.Errorf("extension already registered: %s", h.Name())
+	if r.sealed {
+		return ErrExtensionRegistrySealed
 	}
-	r.hooks[h.Name()] = h
+	if _, exists := r.hooks[name]; exists {
+		return fmt.Errorf("extension already registered: %s", name)
+	}
+	r.hooks[name] = h
+	r.hookOrder = append(r.hookOrder, name)
 	return nil
 }
 
 // RegisterMiddleware stores a middleware by name. It returns an error if a
 // middleware with the same name is already registered.
 func (r *DefaultExtensionRegistry) RegisterMiddleware(_ context.Context, m Middleware) error {
-	slog.Info("extension.register.middleware", "name", m.Name())
+	if m == nil {
+		return errors.New("extension: middleware is nil")
+	}
+	name := m.Name()
+	slog.Info("extension.register.middleware", "name", name)
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if _, exists := r.middlewares[m.Name()]; exists {
-		return fmt.Errorf("extension already registered: %s", m.Name())
+	if r.sealed {
+		return ErrExtensionRegistrySealed
 	}
-	r.middlewares[m.Name()] = m
+	if _, exists := r.middlewares[name]; exists {
+		return fmt.Errorf("extension already registered: %s", name)
+	}
+	r.middlewares[name] = m
+	r.middlewareOrder = append(r.middlewareOrder, name)
+	return nil
+}
+
+// seal prevents an extension from mutating its staging registry after Init
+// returns. It is safe to call more than once.
+func (r *DefaultExtensionRegistry) seal() {
+	r.mu.Lock()
+	r.sealed = true
+	r.mu.Unlock()
+}
+
+// commitFrom seals staging and atomically publishes every registered category
+// after checking all conflicts. No entry becomes visible if any name conflicts.
+func (r *DefaultExtensionRegistry) commitFrom(staging *DefaultExtensionRegistry) error {
+	if staging == nil || staging == r {
+		return ErrExtensionAtomicCommitUnsupported
+	}
+	staging.mu.Lock()
+	defer staging.mu.Unlock()
+	staging.sealed = true
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.sealed {
+		return ErrExtensionRegistrySealed
+	}
+	var conflicts []string
+	for _, name := range staging.toolOrder {
+		if _, exists := r.tools[name]; exists {
+			conflicts = append(conflicts, "tool "+name)
+		}
+	}
+	for _, name := range staging.commandOrder {
+		if _, exists := r.commands[name]; exists {
+			conflicts = append(conflicts, "command "+name)
+		}
+	}
+	for _, name := range staging.providerOrder {
+		if _, exists := r.providers[name]; exists {
+			conflicts = append(conflicts, "provider "+name)
+		}
+	}
+	for _, name := range staging.hookOrder {
+		if _, exists := r.hooks[name]; exists {
+			conflicts = append(conflicts, "hook "+name)
+		}
+	}
+	for _, name := range staging.middlewareOrder {
+		if _, exists := r.middlewares[name]; exists {
+			conflicts = append(conflicts, "middleware "+name)
+		}
+	}
+	if len(conflicts) > 0 {
+		return fmt.Errorf("extension already registered: %s", strings.Join(conflicts, ", "))
+	}
+	for _, name := range staging.toolOrder {
+		r.tools[name] = staging.tools[name]
+	}
+	r.toolOrder = append(r.toolOrder, staging.toolOrder...)
+	for _, name := range staging.commandOrder {
+		r.commands[name] = staging.commands[name]
+	}
+	r.commandOrder = append(r.commandOrder, staging.commandOrder...)
+	for _, name := range staging.providerOrder {
+		r.providers[name] = staging.providers[name]
+	}
+	r.providerOrder = append(r.providerOrder, staging.providerOrder...)
+	for _, name := range staging.hookOrder {
+		r.hooks[name] = staging.hooks[name]
+	}
+	r.hookOrder = append(r.hookOrder, staging.hookOrder...)
+	for _, name := range staging.middlewareOrder {
+		r.middlewares[name] = staging.middlewares[name]
+	}
+	r.middlewareOrder = append(r.middlewareOrder, staging.middlewareOrder...)
 	return nil
 }
 
@@ -153,35 +279,57 @@ func (r *DefaultExtensionRegistry) Middleware(name string) Middleware {
 	return r.middlewares[name]
 }
 
-// AllTools returns a slice of all registered tools.
+// AllTools returns tools in successful registration order.
 func (r *DefaultExtensionRegistry) AllTools() []tools.ToolDefinition {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	result := make([]tools.ToolDefinition, 0, len(r.tools))
-	for _, t := range r.tools {
-		result = append(result, t)
+	result := make([]tools.ToolDefinition, 0, len(r.toolOrder))
+	for _, name := range r.toolOrder {
+		result = append(result, r.tools[name])
 	}
 	return result
 }
 
-// AllHooks returns a slice of all registered hooks.
+// AllCommands returns commands in successful registration order.
+func (r *DefaultExtensionRegistry) AllCommands() []func(args []string) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := make([]func(args []string) error, 0, len(r.commandOrder))
+	for _, name := range r.commandOrder {
+		result = append(result, r.commands[name])
+	}
+	return result
+}
+
+// AllProviders returns providers in successful registration order.
+func (r *DefaultExtensionRegistry) AllProviders() []llm.ModelProvider {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := make([]llm.ModelProvider, 0, len(r.providerOrder))
+	for _, name := range r.providerOrder {
+		result = append(result, r.providers[name])
+	}
+	return result
+}
+
+// AllHooks returns hooks in successful registration order.
 func (r *DefaultExtensionRegistry) AllHooks() []Hook {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	result := make([]Hook, 0, len(r.hooks))
-	for _, h := range r.hooks {
-		result = append(result, h)
+	result := make([]Hook, 0, len(r.hookOrder))
+	for _, name := range r.hookOrder {
+		result = append(result, r.hooks[name])
 	}
 	return result
 }
 
-// AllMiddleware returns a slice of all registered middleware.
+// AllMiddleware returns middleware in successful registration order.
 func (r *DefaultExtensionRegistry) AllMiddleware() []Middleware {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	result := make([]Middleware, 0, len(r.middlewares))
-	for _, m := range r.middlewares {
-		result = append(result, m)
+	result := make([]Middleware, 0, len(r.middlewareOrder))
+	for _, name := range r.middlewareOrder {
+		result = append(result, r.middlewares[name])
 	}
 	return result
 }
