@@ -6,8 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"math/big"
 	"reflect"
 	"strconv"
+	"strings"
 	"sync/atomic"
 )
 
@@ -219,6 +221,41 @@ func validatePreparedSchemaNode(value any, root bool) error {
 			}
 		}
 	}
+	if typeValue != "object" {
+		if _, exists := schema["properties"]; exists {
+			return fmt.Errorf("%w: properties are only supported on object schemas", ErrPreparedSchemaInvalid)
+		}
+		if _, exists := schema["required"]; exists {
+			return fmt.Errorf("%w: required is only supported on object schemas", ErrPreparedSchemaInvalid)
+		}
+		if _, exists := schema["additionalProperties"]; exists {
+			return fmt.Errorf("%w: additionalProperties is only supported on object schemas", ErrPreparedSchemaInvalid)
+		}
+	}
+	if typeValue != "array" {
+		if _, exists := schema["items"]; exists {
+			return fmt.Errorf("%w: items are only supported on array schemas", ErrPreparedSchemaInvalid)
+		}
+	}
+	if typeValue != "number" && typeValue != "integer" {
+		if _, exists := schema["minimum"]; exists {
+			return fmt.Errorf("%w: minimum is only supported on numeric schemas", ErrPreparedSchemaInvalid)
+		}
+		if _, exists := schema["maximum"]; exists {
+			return fmt.Errorf("%w: maximum is only supported on numeric schemas", ErrPreparedSchemaInvalid)
+		}
+	}
+	minimum, hasMinimum := schemaRational(schema["minimum"])
+	if _, exists := schema["minimum"]; exists && !hasMinimum {
+		return fmt.Errorf("%w: minimum must be a finite number", ErrPreparedSchemaInvalid)
+	}
+	maximum, hasMaximum := schemaRational(schema["maximum"])
+	if _, exists := schema["maximum"]; exists && !hasMaximum {
+		return fmt.Errorf("%w: maximum must be a finite number", ErrPreparedSchemaInvalid)
+	}
+	if hasMinimum && hasMaximum && minimum.Cmp(maximum) > 0 {
+		return fmt.Errorf("%w: minimum exceeds maximum", ErrPreparedSchemaInvalid)
+	}
 	if typeValue == "object" {
 		propertiesValue, exists := schema["properties"]
 		if !exists {
@@ -246,15 +283,6 @@ func validatePreparedSchemaNode(value any, root bool) error {
 		}
 		return nil
 	}
-	if _, hasProperties := schema["properties"]; hasProperties {
-		return fmt.Errorf("%w: properties are only supported on object schemas", ErrPreparedSchemaInvalid)
-	}
-	if _, hasRequired := schema["required"]; hasRequired {
-		return fmt.Errorf("%w: required is only supported on object schemas", ErrPreparedSchemaInvalid)
-	}
-	if _, hasAdditional := schema["additionalProperties"]; hasAdditional {
-		return fmt.Errorf("%w: additionalProperties is only supported on object schemas", ErrPreparedSchemaInvalid)
-	}
 	if typeValue == "array" {
 		itemSchema, exists := schema["items"]
 		if !exists {
@@ -263,25 +291,6 @@ func validatePreparedSchemaNode(value any, root bool) error {
 		if err := validatePreparedSchemaNode(itemSchema, false); err != nil {
 			return fmt.Errorf("%w: array items: %v", ErrPreparedSchemaInvalid, err)
 		}
-	} else if _, hasItems := schema["items"]; hasItems {
-		return fmt.Errorf("%w: items are only supported on array schemas", ErrPreparedSchemaInvalid)
-	}
-	if _, hasMinimum := schema["minimum"]; hasMinimum && typeValue != "number" && typeValue != "integer" {
-		return fmt.Errorf("%w: minimum is only supported on numeric schemas", ErrPreparedSchemaInvalid)
-	}
-	if _, hasMaximum := schema["maximum"]; hasMaximum && typeValue != "number" && typeValue != "integer" {
-		return fmt.Errorf("%w: maximum is only supported on numeric schemas", ErrPreparedSchemaInvalid)
-	}
-	minimum, hasMinimum := schemaNumber(schema["minimum"])
-	if _, exists := schema["minimum"]; exists && !hasMinimum {
-		return fmt.Errorf("%w: minimum must be a finite number", ErrPreparedSchemaInvalid)
-	}
-	maximum, hasMaximum := schemaNumber(schema["maximum"])
-	if _, exists := schema["maximum"]; exists && !hasMaximum {
-		return fmt.Errorf("%w: maximum must be a finite number", ErrPreparedSchemaInvalid)
-	}
-	if hasMinimum && hasMaximum && minimum > maximum {
-		return fmt.Errorf("%w: minimum exceeds maximum", ErrPreparedSchemaInvalid)
 	}
 	return nil
 }
@@ -341,9 +350,9 @@ func validatePreparedSchemaValue(name string, value any, schema map[string]any) 
 				matched = true
 				break
 			}
-			left, leftOK := schemaNumber(value)
-			right, rightOK := schemaNumber(candidate)
-			if leftOK && rightOK && left == right {
+			left, leftOK := schemaRational(value)
+			right, rightOK := schemaRational(candidate)
+			if leftOK && rightOK && left.Cmp(right) == 0 {
 				matched = true
 				break
 			}
@@ -380,12 +389,12 @@ func validatePreparedSchemaValue(name string, value any, schema map[string]any) 
 			}
 		}
 	case "number", "integer":
-		numeric, _ := schemaNumber(value)
-		if minimum, exists := schemaNumber(schema["minimum"]); exists && numeric < minimum {
-			return fmt.Errorf("parameter %q must be at least %v", name, minimum)
+		numeric, _ := schemaRational(value)
+		if minimum, exists := schemaRational(schema["minimum"]); exists && numeric.Cmp(minimum) < 0 {
+			return fmt.Errorf("parameter %q must be at least %s", name, minimum.RatString())
 		}
-		if maximum, exists := schemaNumber(schema["maximum"]); exists && numeric > maximum {
-			return fmt.Errorf("parameter %q must be at most %v", name, maximum)
+		if maximum, exists := schemaRational(schema["maximum"]); exists && numeric.Cmp(maximum) > 0 {
+			return fmt.Errorf("parameter %q must be at most %s", name, maximum.RatString())
 		}
 	}
 	return nil
@@ -397,11 +406,11 @@ func preparedSchemaValueMatchesType(value any, typeValue string) bool {
 		_, ok := value.(string)
 		return ok
 	case "number":
-		_, ok := schemaNumber(value)
+		_, ok := schemaRational(value)
 		return ok
 	case "integer":
-		number, ok := schemaNumber(value)
-		return ok && math.Trunc(number) == number
+		number, ok := schemaRational(value)
+		return ok && number.IsInt()
 	case "boolean":
 		_, ok := value.(bool)
 		return ok
@@ -438,43 +447,67 @@ func preparedSchemaArray(value any) ([]any, bool) {
 	return result, true
 }
 
-func schemaNumber(value any) (float64, bool) {
-	var number float64
+const (
+	maxPreparedNumberText     = 256
+	maxPreparedNumberExponent = 1024
+)
+
+func schemaRational(value any) (*big.Rat, bool) {
+	var text string
 	switch v := value.(type) {
 	case json.Number:
-		parsed, err := strconv.ParseFloat(string(v), 64)
-		if err != nil {
-			return 0, false
-		}
-		number = parsed
+		text = v.String()
 	case float64:
-		number = v
+		if math.IsNaN(v) || math.IsInf(v, 0) {
+			return nil, false
+		}
+		text = strconv.FormatFloat(v, 'g', -1, 64)
 	case float32:
-		number = float64(v)
+		if math.IsNaN(float64(v)) || math.IsInf(float64(v), 0) {
+			return nil, false
+		}
+		text = strconv.FormatFloat(float64(v), 'g', -1, 32)
 	case int:
-		number = float64(v)
+		text = strconv.FormatInt(int64(v), 10)
 	case int8:
-		number = float64(v)
+		text = strconv.FormatInt(int64(v), 10)
 	case int16:
-		number = float64(v)
+		text = strconv.FormatInt(int64(v), 10)
 	case int32:
-		number = float64(v)
+		text = strconv.FormatInt(int64(v), 10)
 	case int64:
-		number = float64(v)
+		text = strconv.FormatInt(v, 10)
 	case uint:
-		number = float64(v)
+		text = strconv.FormatUint(uint64(v), 10)
 	case uint8:
-		number = float64(v)
+		text = strconv.FormatUint(uint64(v), 10)
 	case uint16:
-		number = float64(v)
+		text = strconv.FormatUint(uint64(v), 10)
 	case uint32:
-		number = float64(v)
+		text = strconv.FormatUint(uint64(v), 10)
 	case uint64:
-		number = float64(v)
+		text = strconv.FormatUint(v, 10)
 	default:
-		return 0, false
+		return nil, false
 	}
-	return number, !math.IsNaN(number) && !math.IsInf(number, 0)
+	if len(text) == 0 || len(text) > maxPreparedNumberText {
+		return nil, false
+	}
+	if exponentAt := strings.IndexAny(text, "eE"); exponentAt >= 0 {
+		exponent, err := strconv.ParseInt(text[exponentAt+1:], 10, 32)
+		if err != nil || exponent < -maxPreparedNumberExponent || exponent > maxPreparedNumberExponent {
+			return nil, false
+		}
+	}
+	if !json.Valid([]byte(text)) {
+		return nil, false
+	}
+	var normalized json.Number
+	if err := json.Unmarshal([]byte(text), &normalized); err != nil {
+		return nil, false
+	}
+	rational, ok := new(big.Rat).SetString(normalized.String())
+	return rational, ok
 }
 
 func preparedExecutor(def ToolDefinition, wrappers []ToolExecutorWrapper, frozen FrozenToolCall) func(context.Context, ToolCall) (*ToolResult, error) {
