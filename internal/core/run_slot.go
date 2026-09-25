@@ -37,6 +37,18 @@ type RunSlotGuard interface {
 // ErrRunAdmissionClosed indicates that a run slot no longer accepts claims.
 var ErrRunAdmissionClosed = errors.New("run_slot: admission is closed")
 
+// ErrRunSlotBusy indicates that a non-blocking claim could not acquire the
+// active run slot.
+var ErrRunSlotBusy = errors.New("run_slot: slot is busy")
+
+// RunSlotTryClaimer is an optional capability for guards that support an
+// atomic, non-blocking attempt to claim the run slot.
+type RunSlotTryClaimer interface {
+	// TryClaimRun returns ErrRunAdmissionClosed after admission has been closed,
+	// or ErrRunSlotBusy when another claim currently owns the slot.
+	TryClaimRun() (RunClaim, error)
+}
+
 // RunAdmissionCloser is an optional capability for guards that can permanently
 // stop admitting claims and report when all accepted claims have been released.
 type RunAdmissionCloser interface {
@@ -58,6 +70,7 @@ type DefaultRunSlotGuard struct {
 
 var _ RunSlotGuard = (*DefaultRunSlotGuard)(nil)
 var _ RunAdmissionCloser = (*DefaultRunSlotGuard)(nil)
+var _ RunSlotTryClaimer = (*DefaultRunSlotGuard)(nil)
 
 // NewDefaultRunSlotGuard returns a DefaultRunSlotGuard ready to issue claims.
 func NewDefaultRunSlotGuard() *DefaultRunSlotGuard {
@@ -143,6 +156,29 @@ func (g *DefaultRunSlotGuard) ClaimRun(ctx context.Context) (RunClaim, error) {
 			return RunClaim{}, fmt.Errorf("run_slot: claim canceled: %w", err)
 		}
 	}
+}
+
+// TryClaimRun atomically claims an idle run slot without waiting. Closed
+// admission takes precedence over the busy result so callers can distinguish
+// shutdown from an active run.
+func (g *DefaultRunSlotGuard) TryClaimRun() (RunClaim, error) {
+	claimID := newClaimID()
+	g.mu.Lock()
+	g.ensureNotificationsLocked()
+	if g.closed {
+		g.mu.Unlock()
+		return RunClaim{}, fmt.Errorf("run_slot: try claim rejected: %w", ErrRunAdmissionClosed)
+	}
+	if g.current != nil {
+		g.mu.Unlock()
+		return RunClaim{}, fmt.Errorf("run_slot: try claim unavailable: %w", ErrRunSlotBusy)
+	}
+	claim := RunClaim{ID: claimID, AcquiredAt: time.Now()}
+	g.current = &claim
+	g.mu.Unlock()
+
+	slog.Info("core.run_slot.claimed", "id", claim.ID)
+	return claim, nil
 }
 
 // ExecuteClaimedRun validates that the claim is the current holder, executes

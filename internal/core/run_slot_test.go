@@ -348,3 +348,134 @@ func TestDefaultRunSlotGuardCloseRacesClaimAndRelease(t *testing.T) {
 		require.ErrorIs(t, err, ErrRunAdmissionClosed, "release/close attempt %d: claim succeeded after close", attempt)
 	}
 }
+
+func TestDefaultRunSlotGuardTryClaimRunSucceedsAndReportsBusyWithoutClaim(t *testing.T) {
+	guard := NewDefaultRunSlotGuard()
+	active, err := guard.ClaimRun(context.Background())
+	require.NoError(t, err)
+
+	busyClaim, err := guard.TryClaimRun()
+	require.ErrorIs(t, err, ErrRunSlotBusy)
+	assert.Empty(t, busyClaim.ID)
+	assert.True(t, busyClaim.AcquiredAt.IsZero())
+
+	guard.Release(active)
+	claim, err := guard.TryClaimRun()
+	require.NoError(t, err)
+	assert.NotEmpty(t, claim.ID)
+	assert.False(t, claim.AcquiredAt.IsZero())
+	guard.Release(claim)
+}
+
+func TestDefaultRunSlotGuardTryClaimRunClosedTakesPrecedenceOverBusy(t *testing.T) {
+	guard := NewDefaultRunSlotGuard()
+	active, err := guard.ClaimRun(context.Background())
+	require.NoError(t, err)
+	idle := guard.CloseAdmission()
+
+	claim, err := guard.TryClaimRun()
+	require.ErrorIs(t, err, ErrRunAdmissionClosed)
+	assert.NotErrorIs(t, err, ErrRunSlotBusy)
+	assert.Empty(t, claim.ID)
+	select {
+	case <-idle:
+		t.Fatal("accepted claim must remain active until its real release")
+	default:
+	}
+
+	guard.Release(active)
+	select {
+	case <-idle:
+	case <-time.After(time.Second):
+		t.Fatal("guard did not become idle after releasing the accepted claim")
+	}
+}
+
+func TestDefaultRunSlotGuardTryClaimRunRacesClose(t *testing.T) {
+	for attempt := 0; attempt < 200; attempt++ {
+		guard := NewDefaultRunSlotGuard()
+		start := make(chan struct{})
+		type tryResult struct {
+			claim RunClaim
+			err   error
+		}
+		tryDone := make(chan tryResult, 1)
+		idleDone := make(chan (<-chan struct{}), 1)
+		go func() {
+			<-start
+			claim, err := guard.TryClaimRun()
+			tryDone <- tryResult{claim: claim, err: err}
+		}()
+		go func() {
+			<-start
+			idleDone <- guard.CloseAdmission()
+		}()
+		close(start)
+
+		result := <-tryDone
+		idle := <-idleDone
+		if result.err == nil {
+			assert.NotEmpty(t, result.claim.ID, "attempt %d: successful try must publish a claim", attempt)
+			select {
+			case <-idle:
+				t.Fatalf("attempt %d: close marked idle before accepted claim release", attempt)
+			default:
+			}
+			guard.Release(result.claim)
+		} else {
+			require.ErrorIs(t, result.err, ErrRunAdmissionClosed, "attempt %d", attempt)
+			assert.Empty(t, result.claim.ID)
+		}
+
+		select {
+		case <-idle:
+		case <-time.After(time.Second):
+			t.Fatalf("attempt %d: guard never became idle", attempt)
+		}
+		_, err := guard.TryClaimRun()
+		require.ErrorIs(t, err, ErrRunAdmissionClosed, "attempt %d: try claim succeeded after close", attempt)
+	}
+}
+
+func TestDefaultRunSlotGuardConcurrentTryClaimsAdmitExactlyOne(t *testing.T) {
+	for attempt := 0; attempt < 50; attempt++ {
+		guard := NewDefaultRunSlotGuard()
+		const claimants = 16
+		start := make(chan struct{})
+		results := make(chan error, claimants)
+		claims := make(chan RunClaim, claimants)
+		var wait sync.WaitGroup
+		for i := 0; i < claimants; i++ {
+			wait.Add(1)
+			go func() {
+				defer wait.Done()
+				<-start
+				claim, err := guard.TryClaimRun()
+				if err == nil {
+					claims <- claim
+				}
+				results <- err
+			}()
+		}
+		close(start)
+		wait.Wait()
+		close(results)
+		close(claims)
+
+		successes := 0
+		for err := range results {
+			if err == nil {
+				successes++
+				continue
+			}
+			require.ErrorIs(t, err, ErrRunSlotBusy, "attempt %d", attempt)
+		}
+		require.Equal(t, 1, successes, "attempt %d", attempt)
+		for claim := range claims {
+			guard.Release(claim)
+		}
+		claim, err := guard.TryClaimRun()
+		require.NoError(t, err, "attempt %d: busy tries must not reserve the slot", attempt)
+		guard.Release(claim)
+	}
+}
