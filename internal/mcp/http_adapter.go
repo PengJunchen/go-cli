@@ -61,7 +61,7 @@ type httpCloseOperation struct {
 }
 
 type httpConnectWaitPolicy struct {
-	operationCtx context.Context
+	lifecycleCtx context.Context
 	owner        bool
 }
 
@@ -342,8 +342,9 @@ func (a *HTTPClientAdapter) Connect(ctx context.Context) error {
 			}
 			if gen.connectOp != nil {
 				op := gen.connectOp
+				lifecycleCtx := gen.lifeCtx
 				a.mu.Unlock()
-				return waitForConnect(ctx, op, httpConnectWaitPolicy{})
+				return waitForConnect(ctx, op, httpConnectWaitPolicy{lifecycleCtx: lifecycleCtx})
 			}
 			a.mu.Unlock()
 			return httpProtocolError("previous connection attempt failed; disconnect before reconnecting")
@@ -370,7 +371,7 @@ func (a *HTTPClientAdapter) Connect(ctx context.Context) error {
 		a.mu.Unlock()
 
 		go a.runConnect(connectCtx, gen, op, stopLife, id)
-		return waitForConnect(ctx, op, httpConnectWaitPolicy{operationCtx: connectCtx, owner: true})
+		return waitForConnect(ctx, op, httpConnectWaitPolicy{lifecycleCtx: lifeCtx, owner: true})
 	}
 }
 
@@ -565,27 +566,27 @@ func waitForConnect(ctx context.Context, op *httpConnectOperation, policy httpCo
 		return op.result
 	default:
 	}
-	if policy.owner {
-		select {
-		case <-op.done:
-			return op.result
-		case <-ctx.Done():
+	var lifecycleDone <-chan struct{}
+	if policy.lifecycleCtx != nil {
+		lifecycleDone = policy.lifecycleCtx.Done()
+	}
+	select {
+	case <-op.done:
+		return op.result
+	case <-ctx.Done():
+		if policy.owner {
 			op.cancel()
-			if err := waitForHTTPOperationDone(op.done); err == nil {
-				return op.result
-			}
-			return &httpOperationPendingError{operation: "connect", cause: contextCause(ctx)}
-		case <-policy.operationCtx.Done():
-			if err := waitForHTTPOperationDone(op.done); err == nil {
-				return op.result
-			}
-			return &httpOperationPendingError{operation: "connect", cause: contextCause(policy.operationCtx)}
 		}
+		if err := waitForHTTPOperationDone(op.done); err == nil {
+			return op.result
+		}
+		return &httpOperationPendingError{operation: "connect", cause: contextCause(ctx)}
+	case <-lifecycleDone:
+		if err := waitForHTTPOperationDone(op.done); err == nil {
+			return op.result
+		}
+		return &httpOperationPendingError{operation: "connect", cause: contextCause(policy.lifecycleCtx)}
 	}
-	if err := waitForHTTPOperation(ctx, op.done, "connect"); err != nil {
-		return err
-	}
-	return op.result
 }
 
 func waitForHTTPOperationDone(done <-chan struct{}) error {
