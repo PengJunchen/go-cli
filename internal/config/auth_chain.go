@@ -474,9 +474,9 @@ func isMissingScopedCredentialFile(path string, readErr error) bool {
 		return false
 	}
 	for dir := filepath.Dir(path); ; {
-		parentInfo, parentErr := os.Stat(dir)
+		parentInfo, parentErr := os.Lstat(dir)
 		if parentErr == nil {
-			return parentInfo.IsDir()
+			return parentInfo.Mode()&os.ModeSymlink == 0 && parentInfo.IsDir()
 		}
 		if !errors.Is(parentErr, os.ErrNotExist) {
 			return false
