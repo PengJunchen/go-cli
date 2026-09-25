@@ -68,6 +68,8 @@ type runOwner struct {
 	cleanupBaseCtx     context.Context
 	cleanupCommitCtx   context.Context
 	cleanupCommitStop  context.CancelFunc
+	cleanupDeadline    time.Time
+	cleanupDeadlineSet bool
 	cancel             context.CancelFunc
 	done               chan struct{}
 	changed            chan struct{}
@@ -96,6 +98,7 @@ type runOwner struct {
 	unknown              bool
 	cancelRequested      bool
 	timedOut             bool
+	releaseStarted       bool
 	released             bool
 	onTimeout            func(Result, error)
 	eventGapSource       interface{ GapCount() uint64 }
@@ -122,9 +125,21 @@ func newRunOwner(ctx context.Context, guard RunSlotGuard, claim RunClaim, timeou
 			ExecutionState: RunExecutionRunning,
 		},
 		onTimeout:           timeout,
+		cleanupTimeout:      defaultRunCleanupTimeout,
 		terminalSyncSuccess: true,
 		completionTasks:     make(map[uint64]*runCompletionTask),
 	}
+}
+
+func (o *runOwner) setCleanupTimeout(timeout time.Duration) {
+	if timeout <= 0 {
+		timeout = defaultRunCleanupTimeout
+	}
+	o.mu.Lock()
+	if !o.cleanupDeadlineSet {
+		o.cleanupTimeout = timeout
+	}
+	o.mu.Unlock()
 }
 
 func withRunWorkerTracker(ctx context.Context, tracker runWorkerTracker) context.Context {
@@ -197,7 +212,7 @@ func markRunCommitTerminalSynced(ctx context.Context) {
 
 func (o *runOwner) RegisterWorker(_, _ string) func() {
 	o.mu.Lock()
-	if o.released {
+	if o.releaseStarted || o.released {
 		o.mu.Unlock()
 		return func() {}
 	}
@@ -222,7 +237,7 @@ func (o *runOwner) RegisterWorker(_, _ string) func() {
 
 func (o *runOwner) RegisterPendingResource(_, _ string, executionDone <-chan struct{}) {
 	o.mu.Lock()
-	if o.released {
+	if o.releaseStarted || o.released {
 		o.mu.Unlock()
 		return
 	}
@@ -251,7 +266,7 @@ func (o *runOwner) RegisterPendingResource(_, _ string, executionDone <-chan str
 func (o *runOwner) RegisterCompletionTask(intent ActionIntent, signal tools.PreparedCompletionSignal) uint64 {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	if o.released || o.callbackFinished || intent.RunID != o.claim.ID || intent.OwnerGeneration != o.ownerGeneration {
+	if o.releaseStarted || o.released || o.callbackFinished || intent.RunID != o.claim.ID || intent.OwnerGeneration != o.ownerGeneration {
 		return 0
 	}
 	if o.runCommitBound && (intent.SessionID != o.runCommitBinding.SessionID || intent.WorkspaceID != o.runCommitBinding.WorkspaceID) {
@@ -521,28 +536,34 @@ func (o *runOwner) CleanupCommitContext(ctx context.Context) context.Context {
 		o.mu.Unlock()
 		return ctx
 	}
-	cleanupCtx := o.startCleanupCommitContextLocked(ctx)
+	cleanupCtx := o.startCleanupCommitContextLocked()
 	o.mu.Unlock()
+	if cleanupCtx == nil {
+		return ctx
+	}
 	return cleanupCtx
 }
 
-func (o *runOwner) startCleanupCommitContextLocked(ctx context.Context) context.Context {
+func (o *runOwner) startCleanupCommitContextLocked() context.Context {
 	if o.cleanupCommitCtx != nil {
 		return o.cleanupCommitCtx
 	}
+	if !o.cleanupDeadlineSet {
+		timeout := o.cleanupTimeout
+		if timeout <= 0 {
+			timeout = defaultRunCleanupTimeout
+		}
+		o.cleanupDeadline = time.Now().Add(timeout)
+		o.cleanupDeadlineSet = true
+	}
 	base := o.cleanupBaseCtx
 	if base == nil {
-		if ctx == nil {
-			ctx = context.Background()
-		}
-		base = context.WithoutCancel(ctx)
-		o.cleanupBaseCtx = base
+		// Cancel can arrive after the owner is published but before run has
+		// attached its RunID and validated sink binding. Keep only the first
+		// absolute deadline until those legitimate callback values are ready.
+		return nil
 	}
-	timeout := o.cleanupTimeout
-	if timeout <= 0 {
-		timeout = defaultRunCleanupTimeout
-	}
-	o.cleanupCommitCtx, o.cleanupCommitStop = context.WithTimeout(base, timeout)
+	o.cleanupCommitCtx, o.cleanupCommitStop = context.WithDeadline(base, o.cleanupDeadline)
 	return o.cleanupCommitCtx
 }
 
@@ -564,7 +585,7 @@ func (o *runOwner) MarkCancelRequested() {
 	if !o.released && !o.timedOut && o.status.ExecutionState != RunExecutionQuiescent && o.status.ExecutionState != RunExecutionQuarantined {
 		o.cancelRequested = true
 		o.status.ExecutionState = RunExecutionCancelRequested
-		o.startCleanupCommitContextLocked(o.callbackCtx)
+		o.startCleanupCommitContextLocked()
 		o.startCleanupLocked()
 		o.signalLocked()
 	}
@@ -587,7 +608,7 @@ func (o *runOwner) SetEventGapSource(source interface{ GapCount() uint64 }) {
 
 func (o *runOwner) BeginBackpressure() func() {
 	o.mu.Lock()
-	if o.released || o.timedOut || o.callbackFinished {
+	if o.releaseStarted || o.released || o.timedOut || o.callbackFinished {
 		o.mu.Unlock()
 		return func() {}
 	}
@@ -598,7 +619,7 @@ func (o *runOwner) BeginBackpressure() func() {
 	lease := &runBackpressureLease{active: true}
 	lease.timer = time.AfterFunc(timeout, func() {
 		o.mu.Lock()
-		if lease.active && !o.released && !o.timedOut && !o.callbackFinished {
+		if lease.active && !o.releaseStarted && !o.released && !o.timedOut && !o.callbackFinished {
 			lease.expired = true
 			o.expiredBackpressure++
 			select {
@@ -636,33 +657,35 @@ func (o *runOwner) run(timeout time.Duration, fn func(context.Context) (Result, 
 	if timeout <= 0 {
 		timeout = defaultRunCleanupTimeout
 	}
-	o.mu.Lock()
-	o.cleanupTimeout = timeout
-	o.mu.Unlock()
+	o.setCleanupTimeout(timeout)
 	callbackCtx := withRunID(withRunWorkerTracker(o.ctx, o), o.claim.ID)
 	var bindingErr error
 	if sink, binding, ok := RunCommitFromContext(callbackCtx); ok {
-		o.mu.Lock()
-		o.runCommitBound = true
-		o.terminalSyncSuccess = false
 		if lease, ok := sink.(RunCommitRunLease); ok {
+			o.mu.Lock()
 			o.runCommitLease = lease
+			o.mu.Unlock()
 		}
-		o.mu.Unlock()
 		binding.OwnerGeneration = o.ownerGeneration
 		bindingErr = binding.Validate()
 		if bindingErr == nil {
 			callbackCtx = WithRunCommit(callbackCtx, sink, binding)
 			o.mu.Lock()
+			o.runCommitBound = true
+			o.terminalSyncSuccess = false
 			o.runCommitBinding = binding
 			o.mu.Unlock()
+		} else {
+			// Invalid descriptors must fail before provider work and must not
+			// leak a partial sink identity into cancellation bookkeeping.
+			callbackCtx = WithRunCommit(callbackCtx, nil, RunCommitBinding{})
 		}
 	}
 	o.mu.Lock()
 	o.callbackCtx = callbackCtx
 	o.cleanupBaseCtx = context.WithoutCancel(callbackCtx)
 	if o.cancelRequested || o.timedOut {
-		o.startCleanupCommitContextLocked(callbackCtx)
+		o.startCleanupCommitContextLocked()
 	}
 	o.mu.Unlock()
 	go o.supervise()
@@ -779,7 +802,7 @@ func (o *runOwner) finishUndispatched(err error) {
 func (o *runOwner) backpressureIsStillExpired() bool {
 	o.mu.Lock()
 	defer o.mu.Unlock()
-	return o.expiredBackpressure > 0 && !o.released && !o.timedOut
+	return o.expiredBackpressure > 0 && !o.releaseStarted && !o.released && !o.timedOut
 }
 
 func invokeRunCallback(ctx context.Context, fn func(context.Context) (Result, error)) (result Result, panicked bool, err error) {
@@ -809,7 +832,15 @@ func (o *runOwner) supervise() {
 			o.mu.Unlock()
 			return
 		}
-		o.released = true
+		if o.releaseStarted {
+			o.mu.Unlock()
+			return
+		}
+		o.releaseStarted = true
+		// Release may call user-provided lease code. Start the caller's existing
+		// bounded cleanup wait before leaving the lock so it cannot look like a
+		// successful run while release is still in flight.
+		o.startCleanupLocked()
 		lease := o.runCommitLease
 		closeLease := lease != nil && !o.leaseCloseAttempted
 		if closeLease {
@@ -826,6 +857,7 @@ func (o *runOwner) supervise() {
 		guard.Release(claim)
 
 		o.mu.Lock()
+		o.released = true
 		if leasePanicked {
 			o.runErr = errors.Join(o.runErr, ErrRunCommitLeaseClosePanicked)
 			o.unknown = true
@@ -869,20 +901,20 @@ func (o *runOwner) durableCommitSucceededLocked() bool {
 
 func (o *runOwner) cleanupPending() (Result, error) {
 	o.mu.Lock()
-	if o.released || o.localResourcesJoinedLocked() {
+	if o.released {
 		result := o.resultSnapshotLocked()
 		runErr := o.runErr
 		o.mu.Unlock()
 		return result, runErr
 	}
 	o.timedOut = true
-	o.startCleanupCommitContextLocked(o.callbackCtx)
+	o.startCleanupCommitContextLocked()
 	// Return the caller's bounded-wait observation consistently. The supervisor
 	// may move the live status to Quarantined when the callback has not yet
 	// committed a transcript, but this immutable return snapshot records that
 	// cleanup remains pending at the point the caller stopped waiting.
 	o.status.ExecutionState = RunExecutionCleanupPending
-	if o.workers > 0 || !o.callbackFinished {
+	if o.workers > 0 || !o.callbackFinished || (o.releaseStarted && (o.status.Outcome == RunOutcomeSuccess || o.status.Outcome == "")) {
 		o.unknown = true
 		o.status.Outcome = RunOutcomeUnknown
 	} else if o.status.Outcome == "" && o.cancelRequested {

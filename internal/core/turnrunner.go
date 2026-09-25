@@ -154,6 +154,10 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Re
 			}
 		}
 		owner := newRunOwner(spanCtx, runSlot, claim, timeoutClose)
+		// Configure the cleanup budget before publishing the owner. Cancel may
+		// arrive in the publication-to-run window, where the first absolute
+		// cleanup deadline must already use this run's configured bound.
+		owner.setCleanupTimeout(cleanupTimeout)
 		if gapSource, ok := stream.(interface{ GapCount() uint64 }); ok {
 			owner.SetEventGapSource(gapSource)
 		}

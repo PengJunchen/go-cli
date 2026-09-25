@@ -253,7 +253,7 @@ func (g *releaseBarrierGuard) Release(claim RunClaim) {
 	g.countingRunSlotGuard.Release(claim)
 }
 
-func TestCleanupPendingRaceWithFinalReleaseDoesNotPublishPending(t *testing.T) {
+func TestCleanupPendingDuringBlockedFinalReleaseRemainsPending(t *testing.T) {
 	parent, cancel := context.WithCancel(context.Background())
 	cancel()
 	baseGuard := newCountingRunSlotGuard()
@@ -290,7 +290,9 @@ func TestCleanupPendingRaceWithFinalReleaseDoesNotPublishPending(t *testing.T) {
 
 	require.ErrorIs(t, runErr, context.Canceled)
 	assert.Equal(t, RunOutcomeCancelled, result.Outcome)
-	assert.False(t, timeoutCalled, "the owner already proved quiescence before the timeout handler ran")
+	assert.Equal(t, RunExecutionCleanupPending, result.ExecutionState, "a blocked final release is still pending when the caller's bounded wait expires")
+	assert.True(t, timeoutCalled, "a blocked final release must publish its pending state")
+	assert.Equal(t, RunExecutionQuiescent, owner.Snapshot().ExecutionState, "the live owner becomes quiescent only after the guard release completes")
 	assert.Equal(t, 1, baseGuard.releaseCount())
 }
 
