@@ -68,6 +68,123 @@ func TestOverflowRecoveryMiddleware_Overflow_RetrySuccess(t *testing.T) {
 	// With trimRatio 0.5 and 3 non-system msgs, trimCount=1.
 }
 
+func TestOverflowRecoveryMiddlewareDoesNotRetryContinuationRequest(t *testing.T) {
+	for _, mode := range []string{"generate", "stream"} {
+		t.Run(mode, func(t *testing.T) {
+			model := &mockModel{
+				generateFn: func(context.Context, []Message, ...Option) (*Message, error) {
+					return nil, errors.New("context_length_exceeded")
+				},
+				streamFn: func(context.Context, []Message, ...Option) (<-chan MessageChunk, error) {
+					return nil, errors.New("context_length_exceeded")
+				},
+			}
+			wrapped := NewOverflowRecoveryMiddleware(WithOverflowMaxRetries(3)).WrapModel(model)
+			ctx := WithContinuationNoReplay(context.Background())
+
+			if mode == "generate" {
+				_, err := wrapped.Generate(ctx, []Message{{Role: RoleUser, Content: "partial candidate"}})
+				require.Error(t, err)
+				assert.Equal(t, int32(1), atomic.LoadInt32(&model.generateCalls))
+				return
+			}
+
+			_, err := wrapped.Stream(ctx, []Message{{Role: RoleUser, Content: "partial candidate"}})
+			require.Error(t, err)
+			assert.Equal(t, int32(1), atomic.LoadInt32(&model.streamCalls))
+		})
+	}
+}
+
+func TestOverflowRecoveryMiddlewareDoesNotContinueMarkedCandidate(t *testing.T) {
+	model := &mockModel{
+		generateFn: func(context.Context, []Message, ...Option) (*Message, error) {
+			return &Message{Role: RoleAssistant, Content: "partial", FinishReason: finishReasonLength}, nil
+		},
+		streamFn: func(context.Context, []Message, ...Option) (<-chan MessageChunk, error) {
+			ch := make(chan MessageChunk, 1)
+			ch <- MessageChunk{Role: RoleAssistant, Content: "partial", Final: true, FinishReason: finishReasonLength}
+			close(ch)
+			return ch, nil
+		},
+	}
+	wrapped := NewOverflowRecoveryMiddleware().WrapModel(model)
+	ctx := WithContinuationNoReplay(context.Background())
+
+	generated, err := wrapped.Generate(ctx, nil)
+	require.NoError(t, err)
+	assert.Equal(t, finishReasonLength, generated.FinishReason)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&model.generateCalls))
+
+	stream, err := wrapped.Stream(ctx, nil)
+	require.NoError(t, err)
+	var finalFinishReason string
+	for chunk := range stream {
+		if chunk.Final {
+			finalFinishReason = chunk.FinishReason
+		}
+	}
+	assert.Equal(t, finishReasonLength, finalFinishReason)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&model.streamCalls))
+	assert.Equal(t, int32(1), atomic.LoadInt32(&model.generateCalls), "stream overflow middleware must not start a nested continuation")
+}
+
+func TestOverflowRecoveryMiddlewareMarksItsOwnContinuationNoReplay(t *testing.T) {
+	t.Run("generate", func(t *testing.T) {
+		var calls atomic.Int32
+		var continuationMarked atomic.Bool
+		model := &mockModel{
+			generateFn: func(ctx context.Context, _ []Message, _ ...Option) (*Message, error) {
+				if calls.Add(1) == 1 {
+					return &Message{Role: RoleAssistant, Content: "partial", FinishReason: finishReasonLength}, nil
+				}
+				continuationMarked.Store(ContinuationNoReplay(ctx))
+				return &Message{Role: RoleAssistant, Content: "complete", FinishReason: "stop"}, nil
+			},
+		}
+		wrapped := NewOverflowRecoveryMiddleware().WrapModel(model)
+
+		result, err := wrapped.Generate(context.Background(), nil)
+		require.NoError(t, err)
+		assert.Equal(t, "partialcomplete", result.Content)
+		assert.EqualValues(t, 2, calls.Load())
+		assert.True(t, continuationMarked.Load(), "middleware-owned continuation dispatches carry the no-replay marker")
+	})
+
+	t.Run("stream", func(t *testing.T) {
+		var streamCalls atomic.Int32
+		var generateCalls atomic.Int32
+		var continuationMarked atomic.Bool
+		model := &mockModel{
+			generateFn: func(ctx context.Context, _ []Message, _ ...Option) (*Message, error) {
+				generateCalls.Add(1)
+				continuationMarked.Store(ContinuationNoReplay(ctx))
+				return &Message{Role: RoleAssistant, Content: "complete", FinishReason: "stop"}, nil
+			},
+			streamFn: func(context.Context, []Message, ...Option) (<-chan MessageChunk, error) {
+				streamCalls.Add(1)
+				ch := make(chan MessageChunk, 2)
+				ch <- MessageChunk{Role: RoleAssistant, Content: "partial"}
+				ch <- MessageChunk{Role: RoleAssistant, Final: true, FinishReason: finishReasonLength}
+				close(ch)
+				return ch, nil
+			},
+		}
+		wrapped := NewOverflowRecoveryMiddleware().WrapModel(model)
+
+		stream, err := wrapped.Stream(context.Background(), nil)
+		require.NoError(t, err)
+		var content strings.Builder
+		for chunk := range stream {
+			content.WriteString(chunk.Content)
+		}
+		assert.Equal(t, "partialcomplete", content.String())
+		assert.EqualValues(t, 1, streamCalls.Load())
+		assert.EqualValues(t, 1, generateCalls.Load())
+		assert.True(t, continuationMarked.Load(), "middleware-owned stream continuation carries the no-replay marker")
+	})
+}
+
 func TestOverflowRecoveryMiddleware_Overflow_AllRetriesFail(t *testing.T) {
 	model := &mockModel{
 		generateFn: func(_ context.Context, _ []Message, _ ...Option) (*Message, error) {

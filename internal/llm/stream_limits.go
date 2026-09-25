@@ -14,6 +14,7 @@ const (
 )
 
 type streamContinuationOwnerKey struct{}
+type noReplayContinuationKey struct{}
 
 // WithLoopOwnedContinuation marks a stream whose continuation chain is owned
 // by the core loop. Middleware must not start a second continuation chain.
@@ -25,6 +26,20 @@ func WithLoopOwnedContinuation(ctx context.Context) context.Context {
 func LoopOwnsContinuation(ctx context.Context) bool {
 	owned, _ := ctx.Value(streamContinuationOwnerKey{}).(bool)
 	return owned
+}
+
+// WithContinuationNoReplay marks a provider request that continues an
+// incomplete candidate. Retrying, falling back, or starting another
+// middleware-owned continuation would replay that candidate request.
+func WithContinuationNoReplay(ctx context.Context) context.Context {
+	return context.WithValue(ctx, noReplayContinuationKey{}, true)
+}
+
+// ContinuationNoReplay reports whether ctx is for one continuation request
+// that must not be replayed by nested model middleware.
+func ContinuationNoReplay(ctx context.Context) bool {
+	noReplay, _ := ctx.Value(noReplayContinuationKey{}).(bool)
+	return noReplay
 }
 
 func addBoundedStreamBytes(current, additional int) (int, bool) {

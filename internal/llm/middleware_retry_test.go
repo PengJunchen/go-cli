@@ -109,6 +109,28 @@ func TestRetryModelMiddleware_RetryOnError(t *testing.T) {
 	assert.Equal(t, int32(3), atomic.LoadInt32(&calls))
 }
 
+func TestRetryModelMiddlewareDoesNotReplayContinuationRequest(t *testing.T) {
+	failure := errors.New("continuation dispatch failed")
+	model := &mockModel{
+		generateFn: func(context.Context, []Message, ...Option) (*Message, error) {
+			return nil, failure
+		},
+		streamFn: func(context.Context, []Message, ...Option) (<-chan MessageChunk, error) {
+			return nil, failure
+		},
+	}
+	wrapped := NewRetryModelMiddleware(WithRetryPolicy(&testRetryPolicy{maxRetries: 3, baseDelay: time.Millisecond})).WrapModel(model)
+	ctx := WithContinuationNoReplay(context.Background())
+
+	_, generateErr := wrapped.Generate(ctx, nil)
+	require.ErrorIs(t, generateErr, failure)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&model.generateCalls), "a continuation error must not trigger a nested Generate retry")
+
+	_, streamErr := wrapped.Stream(ctx, nil)
+	require.ErrorIs(t, streamErr, failure)
+	assert.Equal(t, int32(1), atomic.LoadInt32(&model.streamCalls), "a continuation error must not trigger a nested Stream retry")
+}
+
 // TestRetryModelMiddleware_MaxAttemptsReached verifies that the middleware gives
 // up after maxRetries retries and returns the last error.
 func TestRetryModelMiddleware_MaxAttemptsReached(t *testing.T) {

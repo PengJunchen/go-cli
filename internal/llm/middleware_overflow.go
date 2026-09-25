@@ -94,7 +94,7 @@ func (m *overflowRecoveryModel) Generate(ctx context.Context, msgs []Message, op
 			// Successful response: if the output was truncated by
 			// max_tokens (FinishReason == "length"), automatically
 			// request continuation(s) to retrieve the remaining content.
-			if result != nil && result.FinishReason == finishReasonLength && !LoopOwnsContinuation(ctx) {
+			if result != nil && result.FinishReason == finishReasonLength && !LoopOwnsContinuation(ctx) && !ContinuationNoReplay(ctx) {
 				contResult, contErr := m.continueGeneration(ctx, currentMsgs, result, opts)
 				if contErr != nil {
 					m.mw.logger.Warn("middleware.overflow.continue_error",
@@ -109,6 +109,9 @@ func (m *overflowRecoveryModel) Generate(ctx context.Context, msgs []Message, op
 		}
 
 		if !isOverflowError(err) {
+			return nil, err
+		}
+		if ContinuationNoReplay(ctx) {
 			return nil, err
 		}
 
@@ -241,7 +244,7 @@ func (m *overflowRecoveryModel) Stream(ctx context.Context, msgs []Message, opts
 				completeContent = contentBuf.String()
 				// The core loop is the single continuation authority for guarded
 				// candidates. Other callers retain middleware-owned continuation.
-				if !LoopOwnsContinuation(streamCtx) && finalChunk.FinishReason == finishReasonLength {
+				if !LoopOwnsContinuation(streamCtx) && !ContinuationNoReplay(streamCtx) && finalChunk.FinishReason == finishReasonLength {
 					result := &Message{
 						Role:         RoleAssistant,
 						Content:      contentBuf.String(),
@@ -317,6 +320,9 @@ func (m *overflowRecoveryModel) Stream(ctx context.Context, msgs []Message, opts
 		if !isOverflowError(err) {
 			return nil, err
 		}
+		if ContinuationNoReplay(ctx) {
+			return nil, err
+		}
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
@@ -379,7 +385,8 @@ func (m *overflowRecoveryModel) continueGeneration(ctx context.Context, msgs []M
 			"attempt", attempt+1,
 		)
 
-		contResp, err := m.inner.Generate(ctx, contMsgs, opts...)
+		contCtx := WithContinuationNoReplay(ctx)
+		contResp, err := m.inner.Generate(contCtx, contMsgs, opts...)
 		if err != nil {
 			m.mw.logger.Warn("middleware.overflow.continue_failed",
 				"op", "middleware.overflow.continue_failed",
