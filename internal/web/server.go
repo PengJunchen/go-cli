@@ -17,7 +17,6 @@ import (
 //go:embed index.html
 var indexHTML embed.FS
 
-// WebServer is a self-contained HTTP server that provides a browser-based
 // WebServer serves the dashboard assets and health endpoint. Its chat and
 // stream routes remain unavailable until they are connected to a real run.
 type WebServer struct {
