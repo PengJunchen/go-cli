@@ -2,6 +2,7 @@ package tools
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sync"
@@ -260,6 +261,80 @@ func TestPreparedSchemaEnforcesIntegerEnumNestedArraysAndNumericBounds(t *testin
 	}
 	_, err := registry.PrepareToolCall(ctx, ToolCall{Name: "capture", Args: valid})
 	require.NoError(t, err)
+	assert.Equal(t, 1, policyCalls)
+}
+
+func TestPreparedSchemaRejectsObjectMisappliedKeywordsBeforePolicy(t *testing.T) {
+	malformed := []struct {
+		name   string
+		schema map[string]any
+	}{
+		{
+			name: "items must be array only",
+			schema: map[string]any{
+				"type": "object", "properties": map[string]any{}, "items": "malformed",
+			},
+		},
+		{
+			name: "minimum must be numeric only",
+			schema: map[string]any{
+				"type": "object", "properties": map[string]any{}, "minimum": 1,
+			},
+		},
+		{
+			name: "maximum must be numeric only",
+			schema: map[string]any{
+				"type": "object", "properties": map[string]any{}, "maximum": "malformed",
+			},
+		},
+	}
+	for _, test := range malformed {
+		t.Run(test.name, func(t *testing.T) {
+			ctx := context.Background()
+			base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+			tool := &preparedCaptureTool{name: "capture", schema: test.schema}
+			require.NoError(t, base.Register(ctx, tool))
+			registry := NewMiddlewareToolRegistry(base)
+			var policyCalls int
+			configurePreparedRegistry(t, registry, func(_ context.Context, request PreparedPolicyRequest) (PreparedPolicyDecision, error) {
+				policyCalls++
+				return PreparedPolicyDecision{Allowed: true, Generations: request.Generations}, nil
+			}, PreparedToolStages{})
+
+			_, err := registry.PrepareToolCall(ctx, ToolCall{Name: "capture", Args: map[string]any{}})
+			require.ErrorIs(t, err, ErrPreparedSchemaInvalid)
+			assert.Zero(t, policyCalls, "invalid schema must fail before approval")
+			calls, _ := tool.snapshot()
+			assert.Zero(t, calls, "invalid schema must not dispatch")
+		})
+	}
+}
+
+func TestPreparedSchemaNumericBoundsDoNotRoundLargeJSONIntegers(t *testing.T) {
+	ctx := context.Background()
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	tool := &preparedCaptureTool{name: "capture", schema: map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"n": map[string]any{"type": "integer", "maximum": json.Number("9007199254740992")},
+		},
+	}}
+	require.NoError(t, base.Register(ctx, tool))
+	registry := NewMiddlewareToolRegistry(base)
+	var policyCalls int
+	configurePreparedRegistry(t, registry, func(_ context.Context, request PreparedPolicyRequest) (PreparedPolicyDecision, error) {
+		policyCalls++
+		return PreparedPolicyDecision{Allowed: true, Generations: request.Generations}, nil
+	}, PreparedToolStages{})
+
+	_, err := registry.PrepareToolCall(ctx, ToolCall{Name: "capture", Args: map[string]any{"n": json.Number("9007199254740993")}})
+	require.Error(t, err, "a value above the bound must not round down during validation")
+	assert.Zero(t, policyCalls, "out-of-range arguments must fail before approval")
+	calls, _ := tool.snapshot()
+	assert.Zero(t, calls, "out-of-range arguments must not dispatch")
+
+	_, err = registry.PrepareToolCall(ctx, ToolCall{Name: "capture", Args: map[string]any{"n": json.Number("9007199254740992")}})
+	require.NoError(t, err, "the exact inclusive bound should remain valid")
 	assert.Equal(t, 1, policyCalls)
 }
 
