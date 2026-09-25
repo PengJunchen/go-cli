@@ -3,7 +3,6 @@ package tools
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"html"
 	"io"
@@ -59,7 +58,8 @@ type WebSearchProvider interface {
 // MockSearchProvider
 // ---------------------------------------------------------------------------
 
-// MockSearchProvider returns deterministic preset data (backward compatible).
+// MockSearchProvider returns deterministic preset data for explicit injection,
+// such as in tests. Production assembly does not select it automatically.
 type MockSearchProvider struct{}
 
 var _ WebSearchProvider = (*MockSearchProvider)(nil)
@@ -223,7 +223,7 @@ func (p *BraveSearchProvider) Name() string { return "brave" }
 // Search queries the Brave Search API and returns parsed results.
 func (p *BraveSearchProvider) Search(ctx context.Context, query string, opts SearchOptions) ([]SearchResult, error) {
 	if strings.TrimSpace(p.apiKey) == "" {
-		return nil, errors.New("brave_search: api key is required")
+		return nil, fmt.Errorf("%w: Brave api key is required", ErrWebSearchProviderUnavailable)
 	}
 
 	timeout := opts.Timeout

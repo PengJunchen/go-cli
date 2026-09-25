@@ -1329,16 +1329,20 @@ func (s *assembleState) assembleExtraTools() error {
 	webSearchTool := tools.NewWebSearchTool()
 	if s.rc != nil {
 		switch s.rc.WebSearch.Provider {
+		case "":
+			// An unconfigured provider stays unavailable; never substitute sample results.
+		case "mock":
+			s.logger.Warn("assemble_web_search_mock_provider_disabled")
 		case "brave":
-			if s.rc.WebSearch.APIKey != "" {
-				webSearchTool = tools.NewWebSearchTool(tools.WithSearchProvider(
-					tools.NewBraveSearchProvider(s.rc.WebSearch.APIKey),
-				))
-			}
+			webSearchTool = tools.NewWebSearchTool(tools.WithSearchProvider(
+				tools.NewBraveSearchProvider(s.rc.WebSearch.APIKey),
+			))
 		case "fetch":
 			webSearchTool = tools.NewWebSearchTool(tools.WithSearchProvider(
 				tools.NewFetchSearchProvider(),
 			))
+		default:
+			s.logger.Warn("assemble_web_search_provider_unknown", "provider", s.rc.WebSearch.Provider)
 		}
 	}
 	webFetchTool := tools.NewWebFetchTool(tools.WithHTMLConverter(s.htmlConverter))

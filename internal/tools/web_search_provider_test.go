@@ -162,7 +162,7 @@ func TestBraveSearchProviderName(t *testing.T) {
 func TestBraveSearchProviderMissingKey(t *testing.T) {
 	p := NewBraveSearchProvider("")
 	results, err := p.Search(context.Background(), "test", SearchOptions{})
-	require.Error(t, err)
+	require.ErrorIs(t, err, ErrWebSearchProviderUnavailable)
 	assert.Empty(t, results)
 	assert.Contains(t, err.Error(), "api key")
 }
@@ -187,7 +187,7 @@ func TestBraveSearchProviderServerError(t *testing.T) {
 // ---------------------------------------------------------------------------
 
 func TestWebSearchToolWithMockProviderNoPanic(t *testing.T) {
-	tool := NewWebSearchTool()
+	tool := NewWebSearchTool(WithSearchProvider(NewMockSearchProvider()))
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"query": "golang"},
 	})

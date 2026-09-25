@@ -295,12 +295,13 @@ type CommandsConfig struct {
 	Dir string `json:"dir"`
 }
 
-// WebSearchConfig controls the web search provider selection. When Provider
-// is empty or "mock", the MockSearchProvider is used (default). "fetch" selects
-// the DuckDuckGo HTML scraping provider, and "brave" selects the Brave Search
-// API provider (requires APIKey).
+// WebSearchConfig controls production web search provider selection. An empty
+// or "mock" provider leaves web_search unavailable; the MockSearchProvider is
+// intended for explicit Go test injection. "fetch" selects the DuckDuckGo HTML
+// scraping provider, and "brave" selects the Brave Search API provider
+// (requires APIKey).
 type WebSearchConfig struct {
-	Provider string `json:"provider"` // "mock" (default), "fetch", "brave"
+	Provider string `json:"provider"` // "fetch" or "brave"; empty and "mock" are unavailable
 	APIKey   string `json:"api_key"`  // for brave provider
 	Timeout  string `json:"timeout"`  // duration string, default "10s"
 }

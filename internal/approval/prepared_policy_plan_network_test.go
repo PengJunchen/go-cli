@@ -54,7 +54,7 @@ func TestPreparedPlanAllowsOnlyTrustedConcreteNetworkRead(t *testing.T) {
 		args map[string]any
 		want string
 	}{
-		{name: "web_search", def: tools.NewWebSearchTool(), args: map[string]any{"query": "local mock"}, want: "Search results for: \"local mock\""},
+		{name: "web_search", def: tools.NewWebSearchTool(tools.WithSearchProvider(tools.NewMockSearchProvider())), args: map[string]any{"query": "local mock"}, want: "Search results for: \"local mock\""},
 		{name: "web_fetch", def: tools.NewWebFetchTool(tools.WithWebFetchClient(&http.Client{Transport: preparedNetworkRoundTripper{}})), args: map[string]any{"url": "https://example.test/document"}, want: "local network response"},
 	} {
 		t.Run("trusted/"+testCase.name, func(t *testing.T) {
@@ -79,7 +79,7 @@ func TestPreparedPlanAllowsOnlyTrustedConcreteNetworkRead(t *testing.T) {
 
 func TestPreparedTrustedNetworkClassifierAllowIsPreserved(t *testing.T) {
 	ctx := context.Background()
-	registry, _ := newPreparedNetworkRuntime(t, &AllowAllClassifier{}, tools.NewWebSearchTool(), true)
+	registry, _ := newPreparedNetworkRuntime(t, &AllowAllClassifier{}, tools.NewWebSearchTool(tools.WithSearchProvider(tools.NewMockSearchProvider())), true)
 	invocation, err := registry.PrepareToolCall(ctx, tools.ToolCall{Name: "web_search", Args: map[string]any{"query": "local mock"}})
 	require.NoError(t, err, "trusted concrete network reads must honor an explicit classifier Allow")
 	result, err := invocation.Dispatch(ctx)

@@ -198,31 +198,39 @@ func getWebSearchTool(t *testing.T, assembly *AgentAssembly) tools.ToolDefinitio
 	return tool
 }
 
-func executeAssembledWebSearch(t *testing.T, cfg *config.Config) *tools.ToolResult {
+func executeAssembledWebSearch(t *testing.T, cfg *config.Config) (*tools.ToolResult, error) {
 	t.Helper()
 	ctx := context.Background()
 	assembly, err := AssembleAgent(ctx, cfg, "openai", "test-model", io.Discard, WithApproveMode(ApproveAuto))
 	require.NoError(t, err)
 	t.Cleanup(assembly.Cleanup)
 	tool := getWebSearchTool(t, assembly)
-	result, err := tool.Execute(ctx, tools.ToolCall{Name: "web_search", Args: map[string]any{"query": "provider test"}})
-	require.NoError(t, err)
-	require.NotNil(t, result)
-	return result
+	return tool.Execute(ctx, tools.ToolCall{Name: "web_search", Args: map[string]any{"query": "provider test"}})
 }
 
-// TestAssembleAgent_WebSearchDefaultUsesMockProvider verifies that when no
-// web_search config is provided, the WebSearchTool defaults to the
-// MockSearchProvider (task 19-7).
-func TestAssembleAgent_WebSearchDefaultUsesMockProvider(t *testing.T) {
-	var requests int
-	withAssembleDefaultTransport(t, assembleRoundTripFunc(func(*http.Request) (*http.Response, error) {
-		requests++
-		return nil, assert.AnError
-	}))
-	result := executeAssembledWebSearch(t, newAssembleTestConfig())
-	assert.Equal(t, true, result.Metadata["mock"], "default config should use MockSearchProvider")
-	assert.Zero(t, requests, "the mock provider must not send a network request")
+func TestAssembleAgent_WebSearchWithoutRealProviderFailsClosed(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		provider string
+	}{
+		{name: "default"},
+		{name: "explicit_mock", provider: "mock"},
+		{name: "unknown", provider: "not-a-provider"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			cfg := newAssembleTestConfig()
+			cfg.WebSearch.Provider = testCase.provider
+			var requests int
+			withAssembleDefaultTransport(t, assembleRoundTripFunc(func(*http.Request) (*http.Response, error) {
+				requests++
+				return nil, assert.AnError
+			}))
+			result, err := executeAssembledWebSearch(t, cfg)
+			require.Nil(t, result, "unconfigured search must not return fabricated results")
+			require.ErrorIs(t, err, tools.ErrWebSearchProviderUnavailable)
+			assert.Zero(t, requests)
+		})
+	}
 }
 
 // TestAssembleAgent_WebSearchFetchProvider verifies that when
@@ -236,7 +244,8 @@ func TestAssembleAgent_WebSearchFetchProvider(t *testing.T) {
 		request = req
 		return searchResponse(req, `<div class="result"><a class="result__a" href="https://example.org">Result</a><a class="result__snippet">Snippet</a></div>`), nil
 	}))
-	result := executeAssembledWebSearch(t, cfg)
+	result, err := executeAssembledWebSearch(t, cfg)
+	require.NoError(t, err)
 	assert.Equal(t, false, result.Metadata["mock"], "provider=fetch should use FetchSearchProvider")
 	require.NotNil(t, request, "fetch provider should perform one localmocked request")
 	assert.Equal(t, "html.duckduckgo.com", request.URL.Host)
@@ -255,26 +264,27 @@ func TestAssembleAgent_WebSearchBraveProvider(t *testing.T) {
 		request = req
 		return searchResponse(req, `{"web":{"results":[]}}`), nil
 	}))
-	result := executeAssembledWebSearch(t, cfg)
+	result, err := executeAssembledWebSearch(t, cfg)
+	require.NoError(t, err)
 	assert.Equal(t, false, result.Metadata["mock"], "provider=brave with API key should use BraveSearchProvider")
 	require.NotNil(t, request, "Brave provider should perform one localmocked request")
 	assert.Equal(t, "api.search.brave.com", request.URL.Host)
 	assert.Equal(t, "Bearer "+apiKey, request.Header.Get("X-Subscription-Token"))
 }
 
-// TestAssembleAgent_WebSearchBraveWithoutAPIKeyFallsBackToMock verifies that
-// when web_search.provider = "brave" but no API key is supplied, the tool
-// falls back to the MockSearchProvider rather than a broken Brave provider.
-func TestAssembleAgent_WebSearchBraveWithoutAPIKeyFallsBackToMock(t *testing.T) {
+// TestAssembleAgent_WebSearchBraveWithoutAPIKeyFailsClosed verifies that
+// missing Brave credentials never select fabricated mock results.
+func TestAssembleAgent_WebSearchBraveWithoutAPIKeyFailsClosed(t *testing.T) {
 	cfg := newAssembleTestConfig()
 	cfg.WebSearch.Provider = "brave"
-	// No API key set.
 	var requests int
 	withAssembleDefaultTransport(t, assembleRoundTripFunc(func(*http.Request) (*http.Response, error) {
 		requests++
 		return nil, assert.AnError
 	}))
-	result := executeAssembledWebSearch(t, cfg)
-	assert.Equal(t, true, result.Metadata["mock"], "brave without API key should fall back to MockSearchProvider")
+	result, err := executeAssembledWebSearch(t, cfg)
+	require.Nil(t, result, "missing Brave credentials must not return fabricated results")
+	require.ErrorIs(t, err, tools.ErrWebSearchProviderUnavailable)
+	assert.Contains(t, err.Error(), "Brave api key is required")
 	assert.Zero(t, requests, "missing Brave credentials must not issue a network request")
 }
