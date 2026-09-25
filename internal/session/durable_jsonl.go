@@ -164,6 +164,9 @@ func (p *DurableJSONLSessionPreparer) PrepareResume(ctx context.Context, physica
 	if err != nil {
 		return nil, fmt.Errorf("session: validate durable action journal: %w", err)
 	}
+	if err := syncDurableFile(file, p.io); err != nil {
+		return nil, fmt.Errorf("session: confirm validated session file durability: %w", err)
+	}
 	needsAuthority := len(plan.pending) > 0 || len(plan.resolutions) > 0
 	var decisions []PendingActionDecision
 	if needsAuthority {
@@ -499,10 +502,14 @@ func (s *durableJSONLStore) AppendAndSync(ctx context.Context, entries ...Sessio
 }
 
 func (s *durableJSONLStore) syncFile() error {
-	if s.io.sync != nil {
-		return s.io.sync(s.file)
+	return syncDurableFile(s.file, s.io)
+}
+
+func syncDurableFile(file *os.File, ioOps durableJSONLIO) error {
+	if ioOps.sync != nil {
+		return ioOps.sync(file)
 	}
-	return s.file.Sync()
+	return file.Sync()
 }
 
 func (s *durableJSONLStore) close() error {

@@ -96,6 +96,55 @@ func createRecoveryFixture(t *testing.T, withIntent bool) recoveryFixture {
 	return fixture
 }
 
+func TestPrepareResumeSyncFailureStopsBeforeAuthorityAndReceiptRecovery(t *testing.T) {
+	fixture := createRecoveryFixture(t, true)
+	var applyCalls, inspectCalls, syncCalls int
+	authority := recoveryAuthorityFunc{
+		apply: func(context.Context, []ValidatedExecutionResolution) error {
+			applyCalls++
+			return nil
+		},
+		inspect: func(_ context.Context, refs []PendingActionRef) ([]PendingActionDecision, error) {
+			inspectCalls++
+			decisions := make([]PendingActionDecision, len(refs))
+			for i, ref := range refs {
+				decisions[i] = PendingActionDecision{Action: ref, MarkerState: DispatchMarkerAbsent}
+			}
+			return decisions, nil
+		},
+	}
+	syncFailure := errors.New("injected resume file sync failure")
+	prepared, err := newDurableJSONLSessionPreparer(fixture.directory, authority, durableJSONLIO{
+		sync: func(*os.File) error {
+			syncCalls++
+			return syncFailure
+		},
+	}).PrepareResume(context.Background(), fixture.sessionID)
+	if err == nil {
+		if prepared != nil {
+			_ = prepared.Close()
+		}
+		t.Fatal("resume succeeded after the validated session file Sync failed")
+	}
+	if !errors.Is(err, syncFailure) {
+		t.Fatalf("resume error = %v, want injected Sync error", err)
+	}
+	if prepared != nil {
+		_ = prepared.Close()
+		t.Fatal("failed resume returned a usable prepared session")
+	}
+	if applyCalls != 0 || inspectCalls != 0 {
+		t.Fatalf("authority calls before failed Sync returned: apply=%d inspect=%d, want 0/0", applyCalls, inspectCalls)
+	}
+	if syncCalls != 1 {
+		t.Fatalf("resume file Sync calls = %d, want exactly one failed pre-authority Sync", syncCalls)
+	}
+	rows := readFixtureRows(t, fixture.directory, fixture.sessionID)
+	if got := countReceipts(rows, "call-1"); got != 0 {
+		t.Fatalf("failed resume wrote %d synthesized receipts before file Sync succeeded", got)
+	}
+}
+
 func TestPrepareResumeReconcilesAbsentReservedMarkerAsInterrupted(t *testing.T) {
 	fixture := createRecoveryFixture(t, true)
 	var applyCalls, inspectCalls int
