@@ -610,7 +610,7 @@ func (c *MCPServersChecker) Check(ctx context.Context) DoctorCheck {
 
 // toMCPConfig converts a config.MCPServerConfig into the mcp.MCPServerConfig
 // expected by the MCP client adapters. The transport is inferred from whether
-// Command (stdio) or URL (SSE/HTTP) is set.
+// Command (stdio) or URL (Streamable HTTP) is set.
 func toMCPConfig(srv config.MCPServerConfig) mcp.MCPServerConfig {
 	cfg := mcp.MCPServerConfig{
 		Name: srv.Name,
@@ -624,7 +624,7 @@ func toMCPConfig(srv config.MCPServerConfig) mcp.MCPServerConfig {
 			cfg.Env = append(cfg.Env, k+"="+v)
 		}
 	} else if srv.URL != "" {
-		cfg.Transport = mcp.MCPTransportSSE
+		cfg.Transport = mcp.MCPTransportStreamableHTTP
 	}
 	return cfg
 }
@@ -632,7 +632,7 @@ func toMCPConfig(srv config.MCPServerConfig) mcp.MCPServerConfig {
 // newMCPClientForDoctor creates an MCPClient appropriate for the transport
 // mode in cfg.
 func newMCPClientForDoctor(cfg mcp.MCPServerConfig) mcp.MCPClient {
-	if cfg.Transport == mcp.MCPTransportSSE {
+	if cfg.Transport == mcp.MCPTransportStreamableHTTP {
 		return mcp.NewHTTPClientAdapter(cfg)
 	}
 	return mcp.NewOfficialSDKAdapter(cfg)
