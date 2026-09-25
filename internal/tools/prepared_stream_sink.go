@@ -3,6 +3,7 @@ package tools
 import (
 	"errors"
 	"reflect"
+	"sync"
 )
 
 // ErrPreparedStreamSinkUnavailable indicates that a synchronous stream-sink
@@ -16,13 +17,15 @@ var ErrPreparedStreamSinkMismatch = errors.New("tools: prepared streaming sink d
 // SynchronousStreamSink is a host-attested sink whose Send calls complete all
 // invocation-owned output work before returning. Its unexported method seals
 // implementations to this package; trusted host code obtains one through
-// AttestSynchronousStreamSink.
+// AttestSynchronousStreamSink. Calls through the wrapper are serialized, and
+// the underlying Send callback must not recursively call Send on that wrapper.
 type SynchronousStreamSink interface {
 	StreamSink
 	synchronousStreamSinkCapability()
 }
 
 type synchronousStreamSink struct {
+	mu   sync.Mutex
 	sink StreamSink
 }
 
@@ -34,6 +37,11 @@ func (s *synchronousStreamSink) Send(content, toolCallID, stream string) error {
 	if s == nil || isNilStreamSink(s.sink) {
 		return ErrPreparedStreamSinkUnavailable
 	}
+	// Streaming executors may call Send concurrently for stdout and stderr.
+	// Serialize the underlying callback so a host's synchronous assertion
+	// doesn't also assume that arbitrary sink implementations are concurrency-safe.
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	return s.sink.Send(content, toolCallID, stream)
 }
 
