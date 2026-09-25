@@ -15,6 +15,10 @@ import (
 
 var errTestRunCommitContextMissing = errors.New("test: run-commit context missing")
 
+type preparedSessionWithoutWriter struct{ PreparedSession }
+
+func (preparedSessionWithoutWriter) DurableWriter() DurableSessionWriter { return nil }
+
 type sessionCommitTestAgent struct {
 	commit func(context.Context, core.RunCommitSink, core.RunCommitBinding, string) error
 }
@@ -58,18 +62,29 @@ func TestSessionRunCommitSinkCommitInputPersistsBeforeReturning(t *testing.T) {
 	sink, err := NewSessionRunCommitSink(prepared, index, workspaceID, func() { released++ })
 	require.NoError(t, err)
 	binding := core.RunCommitBinding{SessionID: prepared.View().SessionID, WorkspaceID: workspaceID, OwnerGeneration: "parent-generation"}
+	var closedWriteErr error
 
 	err = runSessionCommitAgent(t, sink, binding, func(ctx context.Context, actual core.RunCommitSink, _ core.RunCommitBinding, runID string) error {
 		if actual != sink {
 			return errors.New("callback received a different run-commit sink")
 		}
-		return actual.CommitInput(ctx, core.RunCommitInput{
+		if err := actual.CommitInput(ctx, core.RunCommitInput{
 			RunID: runID, TranscriptIndex: 0,
 			Message:   core.AgentMessage{Role: "user", Content: "same text is still a distinct input"},
 			InputKind: core.InputKindUser,
+		}); err != nil {
+			return err
+		}
+		sink.CloseRunCommit()
+		closedWriteErr = actual.CommitInput(ctx, core.RunCommitInput{
+			RunID: runID, TranscriptIndex: 1,
+			Message:   core.AgentMessage{Role: "user", Content: "must not write after lease release"},
+			InputKind: core.InputKindFollowUp,
 		})
+		return nil
 	})
 	require.NoError(t, err)
+	require.Error(t, closedWriteErr)
 
 	snapshot, err := prepared.Snapshot()
 	require.NoError(t, err)
@@ -114,6 +129,18 @@ func TestSessionRunCommitSinkRejectsMismatchedBindingWithoutWriting(t *testing.T
 	snapshot, err := prepared.Snapshot()
 	require.NoError(t, err)
 	require.Empty(t, snapshot.DurableEntries, "binding mismatch must fail before a session write")
+}
+
+func TestSessionRunCommitSinkRejectsPreparedSessionWithoutWriter(t *testing.T) {
+	ctx := context.Background()
+	prepared, err := NewDurableJSONLSessionPreparer(t.TempDir(), nil).PrepareNew(ctx, "missing writer")
+	require.NoError(t, err)
+	defer prepared.Close()
+	index := newWorkspaceQuarantineIndex(t.TempDir(), workspaceIndexIO{})
+	require.NoError(t, index.EnsureWorkspace(ctx, "workspace-v1-adapter"))
+	_, err = NewSessionRunCommitSink(preparedSessionWithoutWriter{PreparedSession: prepared}, index, "workspace-v1-adapter", nil)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "no durable writer")
 }
 
 func TestSessionRunCommitSinkRejectsTranscriptGapWithoutWriting(t *testing.T) {
@@ -250,7 +277,13 @@ func TestSessionRunCommitSinkRecordsReceiptBeforeResolvingExactProof(t *testing.
 	require.NoError(t, err)
 	defer prepared.Close()
 	workspaceID := "workspace-v1-adapter"
-	index := newWorkspaceQuarantineIndex(t.TempDir(), workspaceIndexIO{})
+	var failIndexSync atomic.Bool
+	index := newWorkspaceQuarantineIndex(t.TempDir(), workspaceIndexIO{sync: func(file *os.File) error {
+		if failIndexSync.Load() {
+			return errors.New("injected workspace resolution sync failure")
+		}
+		return file.Sync()
+	}})
 	require.NoError(t, index.EnsureWorkspace(ctx, workspaceID))
 	sink, err := NewSessionRunCommitSink(prepared, index, workspaceID, nil)
 	require.NoError(t, err)
@@ -279,6 +312,11 @@ func TestSessionRunCommitSinkRecordsReceiptBeforeResolvingExactProof(t *testing.
 			DispatchState: core.DispatchStateDispatched, ResourceState: core.RunExecutionQuiescent,
 			CompletionProof: tools.CompletionInlinePipelineJoined,
 		}
+		invalidExecution := execution
+		invalidExecution.ResourceState = core.RunExecutionState("unknown-state")
+		if err := actual.RecordExecution(ctx, invalidExecution); err == nil {
+			return errors.New("unsupported resource state was accepted")
+		}
 		if err := actual.RecordExecution(ctx, execution); err != nil {
 			return err
 		}
@@ -297,9 +335,28 @@ func TestSessionRunCommitSinkRecordsReceiptBeforeResolvingExactProof(t *testing.
 		if err := actual.RecordReceipt(ctx, receipt); err != nil {
 			return err
 		}
+		if err := actual.ResolveExecution(ctx, core.ExecutionResolution{
+			RunID: ownedRunID, ActionID: intent.ActionID, Evidence: core.ResolutionRemoteTerminal,
+		}); err == nil {
+			return errors.New("generic receipt unexpectedly authorized remote terminal resolution")
+		}
+		decisions, err := index.InspectDispatchMarkers(ctx, []PendingActionRef{{
+			SessionID: runBinding.SessionID, WorkspaceID: workspaceID, RunID: ownedRunID,
+			ActionBatchID: intent.ActionBatchID, AssistantTranscriptOrdinal: 0,
+			ToolCallID: intent.ToolCallID, ActionID: intent.ActionID,
+		}})
+		if err != nil || len(decisions) != 1 || decisions[0].MarkerState != DispatchMarkerPresent {
+			return errors.New("remote terminal rejection changed marker state")
+		}
 		resolution := core.ExecutionResolution{
 			RunID: ownedRunID, ActionID: intent.ActionID, Evidence: core.ResolutionLocalResourcesStopped,
 		}
+		failIndexSync.Store(true)
+		resolutionApplyErr := actual.ResolveExecution(ctx, resolution)
+		if resolutionApplyErr == nil {
+			return errors.New("workspace resolution sync failure was not returned")
+		}
+		failIndexSync.Store(false)
 		if err := actual.ResolveExecution(ctx, resolution); err != nil {
 			return err
 		}
@@ -419,6 +476,207 @@ func TestSessionRunCommitSinkBuffersCanonicalReceiptOrderAcrossKnownDenial(t *te
 		ActionBatchID: intent.ActionBatchID, AssistantTranscriptOrdinal: 0,
 		ToolCallID: intent.ToolCallID, ActionID: intent.ActionID,
 	}), "the receipt itself must not resolve a dispatch marker")
+}
+
+func TestSessionRunCommitSinkCommitTerminalAppendsOnlySuffixAndIsIdempotent(t *testing.T) {
+	ctx := context.Background()
+	prepared, err := NewDurableJSONLSessionPreparer(t.TempDir(), nil).PrepareNew(ctx, "terminal suffix")
+	require.NoError(t, err)
+	defer prepared.Close()
+	workspaceID := "workspace-v1-adapter"
+	index := newWorkspaceQuarantineIndex(t.TempDir(), workspaceIndexIO{})
+	require.NoError(t, index.EnsureWorkspace(ctx, workspaceID))
+	sink, err := NewSessionRunCommitSink(prepared, index, workspaceID, nil)
+	require.NoError(t, err)
+	binding := core.RunCommitBinding{SessionID: prepared.View().SessionID, WorkspaceID: workspaceID, OwnerGeneration: "parent-generation"}
+	user := core.AgentMessage{Role: "user", Content: "finish", InputKind: core.InputKindUser}
+	assistant := core.AgentMessage{Role: "assistant", Content: "done"}
+	terminal := core.RunTerminal{
+		Transcript: []core.TranscriptEntry{{Message: user}, {Message: assistant}},
+		Outcome:    core.RunOutcomeSuccess, TerminalCheckpointID: "terminal-run-1",
+	}
+	var terminalRetryErr, writeAfterTerminalErr error
+	err = runSessionCommitAgent(t, sink, binding, func(ctx context.Context, actual core.RunCommitSink, _ core.RunCommitBinding, runID string) error {
+		terminal.RunID = runID
+		if err := actual.CommitInput(ctx, core.RunCommitInput{RunID: runID, TranscriptIndex: 0, Message: user, InputKind: core.InputKindUser}); err != nil {
+			return err
+		}
+		if err := actual.CommitTerminal(ctx, terminal); err != nil {
+			return err
+		}
+		terminalRetryErr = actual.CommitTerminal(ctx, terminal)
+		writeAfterTerminalErr = actual.CommitInput(ctx, core.RunCommitInput{RunID: runID, TranscriptIndex: 2, Message: user, InputKind: core.InputKindFollowUp})
+		return nil
+	})
+	require.NoError(t, err)
+	require.NoError(t, terminalRetryErr, "same terminal ID and payload is an idempotent retry")
+	require.Error(t, writeAfterTerminalErr, "a run cannot append transcript after its terminal checkpoint")
+	snapshot, err := prepared.Snapshot()
+	require.NoError(t, err)
+	require.Len(t, snapshot.DurableEntries, 3)
+	require.Equal(t, EntryTypeUser, snapshot.DurableEntries[0].Type)
+	require.Equal(t, EntryTypeAssistant, snapshot.DurableEntries[1].Type)
+	require.Equal(t, uint64(1), *snapshot.DurableEntries[1].TranscriptIndex)
+	checkpoint := snapshot.DurableEntries[2]
+	require.Equal(t, EntryTypeCheckpoint, checkpoint.Type)
+	require.Equal(t, CheckpointRunTerminal, checkpoint.CheckpointKind)
+	require.Equal(t, "terminal-run-1", checkpoint.ID)
+	require.Equal(t, core.RunOutcomeSuccess, checkpoint.RunOutcome)
+	require.Len(t, snapshot.PublishedView.Messages, 2)
+	require.Equal(t, "done", snapshot.PublishedView.Messages[1].Content)
+}
+
+func TestSessionRunCommitSinkRejectsConflictingTerminalTranscriptWithoutWrite(t *testing.T) {
+	ctx := context.Background()
+	prepared, err := NewDurableJSONLSessionPreparer(t.TempDir(), nil).PrepareNew(ctx, "terminal conflict")
+	require.NoError(t, err)
+	defer prepared.Close()
+	workspaceID := "workspace-v1-adapter"
+	index := newWorkspaceQuarantineIndex(t.TempDir(), workspaceIndexIO{})
+	require.NoError(t, index.EnsureWorkspace(ctx, workspaceID))
+	sink, err := NewSessionRunCommitSink(prepared, index, workspaceID, nil)
+	require.NoError(t, err)
+	binding := core.RunCommitBinding{SessionID: prepared.View().SessionID, WorkspaceID: workspaceID, OwnerGeneration: "parent-generation"}
+	terminal := core.RunTerminal{
+		Transcript: []core.TranscriptEntry{
+			{Message: core.AgentMessage{Role: "user", Content: "different", InputKind: core.InputKindUser}},
+			{Message: core.AgentMessage{Role: "assistant", Content: "done"}},
+		},
+		Outcome: core.RunOutcomeSuccess, TerminalCheckpointID: "terminal-conflict",
+	}
+	err = runSessionCommitAgent(t, sink, binding, func(ctx context.Context, actual core.RunCommitSink, _ core.RunCommitBinding, runID string) error {
+		terminal.RunID = runID
+		if err := actual.CommitInput(ctx, core.RunCommitInput{RunID: runID, TranscriptIndex: 0, Message: core.AgentMessage{Role: "user", Content: "actual", InputKind: core.InputKindUser}, InputKind: core.InputKindUser}); err != nil {
+			return err
+		}
+		return actual.CommitTerminal(ctx, terminal)
+	})
+	require.Error(t, err)
+	snapshot, err := prepared.Snapshot()
+	require.NoError(t, err)
+	require.Len(t, snapshot.DurableEntries, 1, "terminal conflict must fail before suffix or checkpoint writes")
+	require.Equal(t, EntryTypeUser, snapshot.DurableEntries[0].Type)
+}
+
+func TestSessionRunCommitSinkTerminalSyncFailureWithholdsAcknowledgment(t *testing.T) {
+	ctx := context.Background()
+	var failSync atomic.Bool
+	preparer := newDurableJSONLSessionPreparer(t.TempDir(), nil, durableJSONLIO{sync: func(file *os.File) error {
+		if failSync.Load() {
+			return errors.New("injected terminal sync failure")
+		}
+		return file.Sync()
+	}})
+	prepared, err := preparer.PrepareNew(ctx, "terminal sync failure")
+	require.NoError(t, err)
+	defer prepared.Close()
+	workspaceID := "workspace-v1-adapter"
+	index := newWorkspaceQuarantineIndex(t.TempDir(), workspaceIndexIO{})
+	require.NoError(t, index.EnsureWorkspace(ctx, workspaceID))
+	sink, err := NewSessionRunCommitSink(prepared, index, workspaceID, nil)
+	require.NoError(t, err)
+	binding := core.RunCommitBinding{SessionID: prepared.View().SessionID, WorkspaceID: workspaceID, OwnerGeneration: "parent-generation"}
+	terminal := core.RunTerminal{
+		Transcript: []core.TranscriptEntry{
+			{Message: core.AgentMessage{Role: "user", Content: "finish", InputKind: core.InputKindUser}},
+			{Message: core.AgentMessage{Role: "assistant", Content: "done"}},
+		},
+		Outcome: core.RunOutcomeSuccess, TerminalCheckpointID: "terminal-sync-failure",
+	}
+	failSync.Store(false)
+	err = runSessionCommitAgent(t, sink, binding, func(ctx context.Context, actual core.RunCommitSink, _ core.RunCommitBinding, runID string) error {
+		terminal.RunID = runID
+		if err := actual.CommitInput(ctx, core.RunCommitInput{RunID: runID, TranscriptIndex: 0, Message: terminal.Transcript[0].Message, InputKind: core.InputKindUser}); err != nil {
+			return err
+		}
+		failSync.Store(true)
+		return actual.CommitTerminal(ctx, terminal)
+	})
+	require.Error(t, err, "terminal append/sync failure must not acknowledge the run")
+	_, snapshotErr := prepared.Snapshot()
+	require.ErrorIs(t, snapshotErr, ErrDurableWriterPoisoned, "a failed terminal sync poisons the handle until reopen")
+}
+
+func TestSessionRunCommitSinkCompactionUsesRunStartRevisionAndCanonicalSource(t *testing.T) {
+	ctx := context.Background()
+	prepared, err := NewDurableJSONLSessionPreparer(t.TempDir(), nil).PrepareNew(ctx, "compaction source")
+	require.NoError(t, err)
+	defer prepared.Close()
+	workspaceID := "workspace-v1-adapter"
+	index := newWorkspaceQuarantineIndex(t.TempDir(), workspaceIndexIO{})
+	require.NoError(t, index.EnsureWorkspace(ctx, workspaceID))
+	sink, err := NewSessionRunCommitSink(prepared, index, workspaceID, nil)
+	require.NoError(t, err)
+	binding := core.RunCommitBinding{SessionID: prepared.View().SessionID, WorkspaceID: workspaceID, OwnerGeneration: "parent-generation"}
+	projection := core.CompactionProjection{ExpectedHistoryRevision: sink.baseView.Revision, Through: core.CompactionCursor{TranscriptCount: 1}, Summary: "summary of request"}
+	var staleErr error
+	err = runSessionCommitAgent(t, sink, binding, func(ctx context.Context, actual core.RunCommitSink, _ core.RunCommitBinding, runID string) error {
+		if err := actual.CommitInput(ctx, core.RunCommitInput{RunID: runID, TranscriptIndex: 0, Message: core.AgentMessage{Role: "user", Content: "summarize", InputKind: core.InputKindUser}, InputKind: core.InputKindUser}); err != nil {
+			return err
+		}
+		stale := projection
+		stale.ExpectedHistoryRevision = "stale-revision"
+		staleErr = actual.CommitCompaction(ctx, stale)
+		if staleErr == nil {
+			return errors.New("stale compaction revision was accepted")
+		}
+		if err := actual.CommitCompaction(ctx, projection); err != nil {
+			return err
+		}
+		return actual.CommitCompaction(ctx, projection)
+	})
+	require.NoError(t, err)
+	require.Error(t, staleErr)
+	snapshot, err := prepared.Snapshot()
+	require.NoError(t, err)
+	require.Len(t, snapshot.DurableEntries, 2, "stale and identical retry paths must not duplicate compaction rows")
+	require.Equal(t, EntryTypeCompaction, snapshot.DurableEntries[1].Type)
+	require.Equal(t, snapshot.DurableEntries[0].ID, snapshot.DurableEntries[1].CompactedThroughEntryID)
+	require.Equal(t, "summary of request", snapshot.DurableEntries[1].Summary)
+	require.Len(t, snapshot.PublishedView.Messages, 1)
+	require.Contains(t, snapshot.PublishedView.Messages[0].Content, "summary of request")
+}
+
+func TestSessionRunCommitSinkCompactionCannotCutAnOpenToolCallGroup(t *testing.T) {
+	ctx := context.Background()
+	prepared, err := NewDurableJSONLSessionPreparer(t.TempDir(), nil).PrepareNew(ctx, "open compaction group")
+	require.NoError(t, err)
+	defer prepared.Close()
+	workspaceID := "workspace-v1-adapter"
+	index := newWorkspaceQuarantineIndex(t.TempDir(), workspaceIndexIO{})
+	require.NoError(t, index.EnsureWorkspace(ctx, workspaceID))
+	sink, err := NewSessionRunCommitSink(prepared, index, workspaceID, nil)
+	require.NoError(t, err)
+	binding := core.RunCommitBinding{SessionID: prepared.View().SessionID, WorkspaceID: workspaceID, OwnerGeneration: "parent-generation"}
+	intent := preparedSessionRunCommitIntent(t)
+	var compactionErr error
+	err = runSessionCommitAgent(t, sink, binding, func(ctx context.Context, actual core.RunCommitSink, runBinding core.RunCommitBinding, runID string) error {
+		intent.RunID, intent.SessionID, intent.OwnerGeneration = runID, runBinding.SessionID, runBinding.OwnerGeneration
+		if err := actual.CommitInput(ctx, core.RunCommitInput{RunID: runID, TranscriptIndex: 0, Message: core.AgentMessage{Role: "user", Content: "read", InputKind: core.InputKindUser}, InputKind: core.InputKindUser}); err != nil {
+			return err
+		}
+		if err := actual.BeginIntentBatch(ctx, core.RunIntentBatch{
+			RunID: runID, ActionBatchID: intent.ActionBatchID, AssistantTranscriptOrdinal: 0,
+			AssistantMessage: core.AgentMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: intent.ToolCallID, Name: "read", Args: map[string]any{"path": "README.md"}}}},
+			Intents:          []core.ActionIntent{intent},
+		}); err != nil {
+			return err
+		}
+		compactionErr = actual.CommitCompaction(ctx, core.CompactionProjection{
+			ExpectedHistoryRevision: sink.baseView.Revision,
+			Through:                 core.CompactionCursor{TranscriptCount: 2},
+			Summary:                 "must wait for receipt closure",
+		})
+		return nil
+	})
+	require.NoError(t, err)
+	require.Error(t, compactionErr)
+	snapshot, err := prepared.Snapshot()
+	require.NoError(t, err)
+	require.Len(t, snapshot.DurableEntries, 3, "open-group compaction must fail before writing a row")
+	for _, row := range snapshot.DurableEntries {
+		require.NotEqual(t, EntryTypeCompaction, row.Type)
+	}
 }
 
 func indexMarkerStateForTest(t *testing.T, index *WorkspaceQuarantineIndex, ref PendingActionRef) DispatchMarkerState {
