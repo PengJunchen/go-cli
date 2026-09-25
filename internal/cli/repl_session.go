@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/config"
@@ -87,6 +88,7 @@ type REPLSession struct {
 	// flushTicker periodically flushes pending writes as a safety net.
 	flushTicker *time.Ticker
 	flushDone   chan struct{}
+	flushStop   sync.Once
 
 	// Editor/expander
 	lineEditor      LineEditor
@@ -123,20 +125,33 @@ type REPLSession struct {
 
 // Run starts the session: it parses flags, assembles the agent, enters the
 // REPL loop, and cleans up on exit.
-func (s *REPLSession) Run(ctx context.Context, cfg Config, args []string) error {
+func (s *REPLSession) Run(ctx context.Context, cfg Config, args []string) (runErr error) {
 	s.cfg = cfg
 	s.args = args
+	sessionStarted := false
+	defer func() {
+		closeErr := closeAssemblyForCommand(context.Background(), s.assembly, "interactive")
+		if sessionStarted {
+			s.cleanup()
+		} else {
+			s.stopFlushTicker()
+		}
+		runErr = errors.Join(runErr, closeErr)
+		if s.span == nil {
+			return
+		}
+		if runErr != nil {
+			s.span.SetStatus(tracing.SpanStatusError, runErr.Error())
+		} else {
+			s.span.SetStatus(tracing.SpanStatusOK, "")
+		}
+		s.span.End()
+	}()
 	if err := s.start(ctx); err != nil {
 		return err
 	}
-	defer func() {
-		s.span.SetStatus(tracing.SpanStatusOK, "")
-		s.span.End()
-	}()
-	defer s.assembly.Cleanup()
-	readErr := s.readInput()
-	s.cleanup()
-	return readErr
+	sessionStarted = true
+	return s.readInput()
 }
 
 // start performs all one-time session setup: flag parsing, onboarding, agent
@@ -278,11 +293,25 @@ func (s *REPLSession) setupAgent(ctx context.Context) error {
 	assembly, err := AssembleAgent(s.spanCtx, s.rc, s.providerName, s.modelName, s.out,
 		assembleOpts...)
 	if err != nil {
-		s.span.SetStatus(tracing.SpanStatusError, err.Error())
-		s.span.End()
 		return newExecutionError("interactive: assemble agent", err)
 	}
 	s.assembly = assembly
+	if err := assembly.setInteractiveCloseHooks(func() {
+		s.stopFlushTicker()
+	}, func(ctx context.Context) error {
+		if assembly.SessionStore == nil || s.pendingWrites == nil {
+			return nil
+		}
+		flushErr := s.pendingWrites.Flush(ctx, assembly.SessionStore)
+		saveErr := assembly.SessionStore.Save(ctx)
+		return errors.Join(flushErr, saveErr)
+	}, func() {
+		if s.memoryCtxCancel != nil {
+			s.memoryCtxCancel()
+		}
+	}); err != nil {
+		return err
+	}
 	s.approvalCh = approvalCh
 	return nil
 }
@@ -341,6 +370,7 @@ func (s *REPLSession) setupSlashContext() {
 		estimator:       s.assembly.Estimator,
 		promptBuilder:   s.assembly.PromptBuilder,
 		contextLoader:   s.assembly.ContextLoader,
+		mcpResources:    s.assembly.mcpResources,
 	}
 
 	// Create a shared ThemeManager so /theme can switch themes at runtime
@@ -483,12 +513,14 @@ func (s *REPLSession) startFlushTicker() {
 // stopFlushTicker stops the background flush goroutine. It is safe to call
 // when the ticker was never started.
 func (s *REPLSession) stopFlushTicker() {
-	if s.flushTicker != nil {
-		s.flushTicker.Stop()
-	}
-	if s.flushDone != nil {
-		close(s.flushDone)
-	}
+	s.flushStop.Do(func() {
+		if s.flushTicker != nil {
+			s.flushTicker.Stop()
+		}
+		if s.flushDone != nil {
+			close(s.flushDone)
+		}
+	})
 }
 
 // ctrlCAction represents the action to take when Ctrl+C is pressed.
@@ -1016,27 +1048,6 @@ func (s *REPLSession) cleanup() {
 	// Stop the background flush goroutine first to prevent concurrent
 	// flushes during the final drain.
 	s.stopFlushTicker()
-
-	// Flush any remaining buffered session entries and sync the store
-	// before tearing down shared resources.
-	if s.assembly != nil && s.assembly.SessionStore != nil && s.pendingWrites != nil {
-		if flushErr := s.pendingWrites.Flush(s.spanCtx, s.assembly.SessionStore); flushErr != nil {
-			s.logger.Warn("cli_interactive_session_flush_final", "err", flushErr)
-		}
-		_ = s.assembly.SessionStore.Save(s.spanCtx) //nolint:errcheck
-	}
-
-	// Wait for in-flight memory extraction goroutines to finish before
-	// closing shared resources (MemoryStore, etc.). This ensures the
-	// extraction completes and writes memories before the store is closed.
-	// After the wait, cancel the memory context to release any remaining
-	// resources held by the context (no-op if extraction already finished).
-	if s.assembly != nil && s.assembly.MemoryWG != nil {
-		s.assembly.MemoryWG.Wait()
-	}
-	if s.memoryCtxCancel != nil {
-		s.memoryCtxCancel()
-	}
 
 	// Save history on exit (covers EOF, /exit, and exit text paths).
 	if dle, ok := s.lineEditor.(*DefaultLineEditor); ok {

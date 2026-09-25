@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -94,7 +95,7 @@ func ParsePromptOutputMode(args []string) (OutputMode, []string, error) {
 // Run implements Command. It parses the -model, -provider and -verbose flags,
 // resolves the chat model from the loaded *config.Config, wires it through the
 // core agent harness, and streams the result to the output writer.
-func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) error {
+func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) (runErr error) {
 	parsed, err := parsePromptArgs(args, c.out)
 	if err != nil {
 		return err
@@ -125,7 +126,11 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) error {
 		tracing.Attribute{Key: "version", Value: Version},
 	)
 	defer func() {
-		span.SetStatus(tracing.SpanStatusOK, "")
+		if runErr != nil {
+			span.SetStatus(tracing.SpanStatusError, runErr.Error())
+		} else {
+			span.SetStatus(tracing.SpanStatusOK, "")
+		}
 		span.End()
 	}()
 
@@ -162,7 +167,9 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) error {
 		dispatchSpan.End()
 		return newExecutionError("prompt: assemble agent", err)
 	}
-	defer assembly.Cleanup()
+	defer func() {
+		runErr = errors.Join(runErr, closeAssemblyForCommand(context.Background(), assembly, "prompt"))
+	}()
 
 	// Fork from an existing session: build a SessionTree from the store,
 	// zero-copy branch at the requested entry, rebuild context, and inject
