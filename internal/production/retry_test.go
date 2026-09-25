@@ -134,6 +134,78 @@ func TestClassifyNormalizedOversizedProviderResponseIsFatal(t *testing.T) {
 	require.False(t, p.ShouldRetry(ctx, normalized, 0))
 }
 
+func TestOversizedProviderResponsePreservesExplicitRetryPrecedence(t *testing.T) {
+	ctx, _ := newRetryTestCtx(t)
+	p := NewDefaultRetryPolicy(RetryConfig{MaxAttempts: 3}).(*DefaultRetryPolicy) //nolint:errcheck
+	tests := []struct {
+		name      string
+		err       error
+		want      ErrorCategory
+		wantRetry bool
+	}{
+		{
+			name:      "categorized timeout",
+			err:       NewError(ErrorTimeout, llm.ErrProviderResponseTooLarge),
+			want:      ErrorTimeout,
+			wantRetry: true,
+		},
+		{
+			name: "harness timeout",
+			err: &core.AgentHarnessError{
+				Code:  core.ErrCodeTimeout,
+				Cause: llm.ErrProviderResponseTooLarge,
+			},
+			want:      ErrorTimeout,
+			wantRetry: true,
+		},
+		{
+			name: "bare oversized response",
+			err:  llm.ErrProviderResponseTooLarge,
+			want: ErrorFatal,
+		},
+		{
+			name: "generic normalized model error",
+			err:  core.NormalizeError(fmt.Errorf("provider decode: %w", llm.ErrProviderResponseTooLarge)),
+			want: ErrorFatal,
+		},
+		{
+			name: "generic tool error",
+			err: &core.AgentHarnessError{
+				Code:  core.ErrCodeToolError,
+				Cause: llm.ErrProviderResponseTooLarge,
+			},
+			want: ErrorFatal,
+		},
+		{
+			name: "busy harness error",
+			err: &core.AgentHarnessError{
+				Code:  core.ErrCodeBusy,
+				Cause: llm.ErrProviderResponseTooLarge,
+			},
+			want: ErrorFatal,
+		},
+		{
+			name: "hook rejected harness error",
+			err: &core.AgentHarnessError{
+				Code:  core.ErrCodeHookRejected,
+				Cause: llm.ErrProviderResponseTooLarge,
+			},
+			want: ErrorFatal,
+		},
+		{
+			name: "canceled cause",
+			err:  errors.Join(context.Canceled, llm.ErrProviderResponseTooLarge),
+			want: ErrorFatal,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, p.Classify(tt.err))
+			require.Equal(t, tt.wantRetry, p.ShouldRetry(ctx, tt.err, 0))
+		})
+	}
+}
+
 func TestClassifyNormalizedHarnessTerminalCodeOverridesProviderCause(t *testing.T) {
 	ctx, _ := newRetryTestCtx(t)
 	p := NewDefaultRetryPolicy(RetryConfig{MaxAttempts: 3}).(*DefaultRetryPolicy) //nolint:errcheck
