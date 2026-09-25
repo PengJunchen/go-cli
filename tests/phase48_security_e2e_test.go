@@ -4,7 +4,10 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -209,18 +212,50 @@ func TestET_Phase48_BashSandbox_SubstitutionBypass(t *testing.T) {
 	require.Error(t, err, "curl inside backticks should be blocked")
 }
 
-// TestET_Phase48_Onboarding_YAMLEscaping verifies that the onboarding wizard
-// single-quote-escapes API keys containing YAML special characters.
+// TestET_Phase48_Onboarding_YAMLEscaping verifies onboarding writes valid YAML
+// without embedding the API key and that a fresh auth chain can resolve the
+// scoped credential after the onboarding process has completed.
 func TestET_Phase48_Onboarding_YAMLEscaping(t *testing.T) {
-	t.Skip("API key is now stored in auth.json (JSON), not config.yaml (YAML)")
 	defer verify.AssertNoGoroutineLeak(t)()
+	previousTransport := http.DefaultTransport
+	http.DefaultTransport = phase48RegistryTransport(func(*http.Request) (*http.Response, error) {
+		body := io.NopCloser(strings.NewReader(`{}`))
+		return &http.Response{
+			StatusCode:    http.StatusOK,
+			Status:        "200 OK",
+			Header:        http.Header{"Content-Type": []string{"application/json"}},
+			Body:          body,
+			ContentLength: 2,
+		}, nil
+	})
+	defer func() { http.DefaultTransport = previousTransport }()
 
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(tmpDir, "xdg-config"))
+	t.Setenv("XDG_CACHE_HOME", filepath.Join(tmpDir, "xdg-cache"))
+	t.Setenv("GO_CLI_NO_ONBOARDING", "")
+	// An empty PATH makes the macOS keychain backend unavailable, forcing the
+	// normal private auth-file fallback without touching the developer's OS
+	// keychain.
+	securityPath := filepath.Join(tmpDir, "bin")
+	require.NoError(t, os.Mkdir(securityPath, 0o700))
+	t.Setenv("PATH", securityPath)
+	for _, item := range os.Environ() {
+		name, _, _ := strings.Cut(item, "=")
+		if strings.HasPrefix(name, "GO_CLI_CREDENTIAL_") {
+			t.Setenv(name, "")
+		}
+	}
+	t.Setenv("EINO_API_KEY", "")
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("ANTHROPIC_API_KEY", "")
+	t.Setenv("GOOGLE_API_KEY", "")
 	t.Chdir(tmpDir)
 
-	// API key with a single quote — must be doubled in YAML single-quoted strings.
-	apiKey := "sk-test'or'1='1"
+	// Keep YAML-special characters in the canary so the assertion also guards
+	// against accidentally moving the auth value back into config serialization.
+	apiKey := phase48AuthCanary(t) + "'#="
 	input := apiKey + "\n1\n1\n"
 
 	cfg := &config.Config{}
@@ -228,17 +263,58 @@ func TestET_Phase48_Onboarding_YAMLEscaping(t *testing.T) {
 	err := cli.RunOnboarding(cfg, strings.NewReader(input), &out)
 	require.NoError(t, err)
 
-	// Read the saved config file.
 	configPath := filepath.Join(tmpDir, ".go-cli", "config.yaml")
 	data, err := os.ReadFile(configPath)
 	require.NoError(t, err)
+	assert.NotContains(t, string(data), apiKey)
+	assert.NotContains(t, string(data), "api_key")
+	parsed, err := config.NewLoader().WithEnvPrefix("PHASE48_ISOLATED").WithFile(configPath).Load(context.Background())
+	require.NoError(t, err, "onboarding output must remain valid YAML")
+	require.NotEmpty(t, cfg.Model.Name)
+	assert.Equal(t, cfg.Model.Name, parsed.Model.Name)
+	assert.Equal(t, cfg.TUI.Theme, parsed.TUI.Theme)
+	assert.NotContains(t, out.String(), apiKey)
 
-	yamlStr := string(data)
-	// The single quote should be doubled: '' not just '
-	assert.Contains(t, yamlStr, "api_key: '"+strings.ReplaceAll(apiKey, "'", "''")+"'")
-	// Verify no unescaped injection is possible — the key should be wrapped in
-	// single quotes.
-	assert.Contains(t, yamlStr, "api_key: '")
+	authPath := filepath.Join(tmpDir, ".config", "go-cli", "auth.json")
+	authData, err := os.ReadFile(authPath)
+	require.NoError(t, err)
+	var auth struct {
+		Credentials []struct {
+			Provider string `json:"provider"`
+			Protocol string `json:"protocol"`
+			Origin   string `json:"origin"`
+			APIKey   string `json:"api_key"`
+		} `json:"credentials"`
+	}
+	require.NoError(t, json.Unmarshal(authData, &auth))
+	require.Len(t, auth.Credentials, 1)
+	assert.Equal(t, apiKey, auth.Credentials[0].APIKey)
+
+	// A newly constructed chain simulates a restarted CLI. The saved scope is
+	// the authority for lookup; no provider-only legacy fallback is used.
+	resolved, found, err := config.NewAuthChain().ResolveCredential(
+		context.Background(),
+		auth.Credentials[0].Provider,
+		auth.Credentials[0].Protocol,
+		auth.Credentials[0].Origin,
+	)
+	require.NoError(t, err)
+	assert.True(t, found)
+	assert.Equal(t, apiKey, resolved)
+}
+
+func phase48AuthCanary(t *testing.T) string {
+	t.Helper()
+	var value [16]byte
+	_, err := rand.Read(value[:])
+	require.NoError(t, err)
+	return "phase48-auth-" + hex.EncodeToString(value[:])
+}
+
+type phase48RegistryTransport func(*http.Request) (*http.Response, error)
+
+func (transport phase48RegistryTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	return transport(request)
 }
 
 // TestET_Phase48_ApprovalCache_FilePermissions verifies that SaveToFile
