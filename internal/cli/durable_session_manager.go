@@ -35,6 +35,30 @@ var (
 	ErrDurableSessionIdentityConflict = errors.New("cli: durable session identity conflicts with the selected session")
 )
 
+// SelectionAppliedCleanupError reports that the selected physical session is
+// active even though closing the previously selected session failed or timed out.
+type SelectionAppliedCleanupError struct {
+	SelectedPhysicalSessionID string
+	SelectedBranchID          string
+	Cause                     error
+}
+
+// Error describes the selected session and the failed cleanup cause.
+func (err *SelectionAppliedCleanupError) Error() string {
+	if err == nil {
+		return "cli: selection applied with prior-session cleanup error"
+	}
+	return fmt.Sprintf("cli: selected session %q branch %q; prior-session cleanup failed: %v", err.SelectedPhysicalSessionID, err.SelectedBranchID, err.Cause)
+}
+
+// Unwrap returns the prior-session cleanup error.
+func (err *SelectionAppliedCleanupError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.Cause
+}
+
 // resolveWorkspaceID captures and canonicalizes one explicit invocation root
 // before deriving a domain-separated identity for workspace quarantine.
 func resolveWorkspaceID(getwd func() (string, error)) (string, error) {
@@ -70,11 +94,11 @@ type durableSessionManager struct {
 	preparer  session.SessionPreparer
 	workspace string
 
-	selection sync.Mutex
-	mu        sync.Mutex
-	current   *managedPreparedSession
-	retired   map[*managedPreparedSession]struct{}
-	closing   bool
+	transition chan struct{}
+	mu         sync.Mutex
+	current    *managedPreparedSession
+	retired    map[*managedPreparedSession]struct{}
+	closing    bool
 }
 
 type managedPreparedSession struct {
@@ -109,10 +133,13 @@ func newDurableSessionManager(preparer session.SessionPreparer, workspaceID stri
 	if workspaceID == "" || strings.ContainsRune(workspaceID, '\x00') {
 		return nil, fmt.Errorf("%w: workspace ID must be non-empty and contain no NUL", ErrDurableWorkspaceIdentity)
 	}
+	transition := make(chan struct{}, 1)
+	transition <- struct{}{}
 	return &durableSessionManager{
-		preparer:  preparer,
-		workspace: workspaceID,
-		retired:   make(map[*managedPreparedSession]struct{}),
+		preparer:   preparer,
+		workspace:  workspaceID,
+		transition: transition,
+		retired:    make(map[*managedPreparedSession]struct{}),
 	}, nil
 }
 
@@ -120,8 +147,10 @@ func newDurableSessionManager(preparer session.SessionPreparer, workspaceID stri
 // active branch have been validated.
 func (manager *durableSessionManager) prepareNew(ctx context.Context, label string) error {
 	ctx = normalizeSessionContext(ctx)
-	manager.selection.Lock()
-	defer manager.selection.Unlock()
+	if err := manager.enterTransition(ctx); err != nil {
+		return fmt.Errorf("cli: wait to prepare new durable session: %w", err)
+	}
+	defer manager.leaveTransition()
 	if err := manager.checkOpenForSelection(); err != nil {
 		return err
 	}
@@ -132,7 +161,7 @@ func (manager *durableSessionManager) prepareNew(ctx context.Context, label stri
 	}
 	slot, err := newManagedPreparedSession(prepared)
 	if err != nil {
-		return closeRejectedPreparedSession(prepared, fmt.Errorf("cli: validate new durable session: %w", err))
+		return manager.closeRejectedPrepared(ctx, prepared, fmt.Errorf("cli: validate new durable session: %w", err))
 	}
 	return manager.installPreparedSession(ctx, slot)
 }
@@ -145,8 +174,10 @@ func (manager *durableSessionManager) selectResume(ctx context.Context, physical
 	if err := validateSessionIdentity("physical session ID", physicalSessionID); err != nil {
 		return err
 	}
-	manager.selection.Lock()
-	defer manager.selection.Unlock()
+	if err := manager.enterTransition(ctx); err != nil {
+		return fmt.Errorf("cli: wait to select durable session %q: %w", physicalSessionID, err)
+	}
+	defer manager.leaveTransition()
 	if err := manager.checkOpenForSelection(); err != nil {
 		return err
 	}
@@ -166,12 +197,27 @@ func (manager *durableSessionManager) selectResume(ctx context.Context, physical
 			manager.mu.Unlock()
 			return fmt.Errorf("%w: session %q requires exact reopen", ErrDurableSessionUnavailable, physicalSessionID)
 		}
-		snapshot, err := current.prepared.Snapshot()
+		prepared := current.prepared
+		manager.mu.Unlock()
+		snapshot, err := prepared.Snapshot()
+		manager.mu.Lock()
 		if err != nil {
 			current.poisoned = true
 			manager.signalSlotLocked(current)
+			closing := manager.closing
 			manager.mu.Unlock()
+			if closing {
+				return errors.Join(ErrDurableSessionManagerClosing, fmt.Errorf("%w: inspect session %q before reuse: %w", ErrDurableSessionUnavailable, physicalSessionID, err))
+			}
 			return fmt.Errorf("%w: inspect session %q before reuse: %w", ErrDurableSessionUnavailable, physicalSessionID, err)
+		}
+		if manager.closing {
+			manager.mu.Unlock()
+			return ErrDurableSessionManagerClosing
+		}
+		if manager.current != current || current.closeReq || current.closed || current.poisoned {
+			manager.mu.Unlock()
+			return fmt.Errorf("%w: session %q changed while checking reuse", ErrDurableSessionUnavailable, physicalSessionID)
 		}
 		if snapshot.SessionID != current.physical || snapshot.ActiveBranchID != current.branch {
 			current.poisoned = true
@@ -190,6 +236,9 @@ func (manager *durableSessionManager) selectResume(ctx context.Context, physical
 			return err
 		}
 	}
+	if err := manager.checkOpenForSelection(); err != nil {
+		return err
+	}
 
 	prepared, err := manager.preparer.PrepareResume(ctx, physicalSessionID)
 	if err != nil {
@@ -197,13 +246,13 @@ func (manager *durableSessionManager) selectResume(ctx context.Context, physical
 	}
 	slot, err := newManagedPreparedSession(prepared)
 	if err != nil {
-		return closeRejectedPreparedSession(prepared, fmt.Errorf("cli: validate resumed durable session %q: %w", physicalSessionID, err))
+		return manager.closeRejectedPrepared(ctx, prepared, fmt.Errorf("cli: validate resumed durable session %q: %w", physicalSessionID, err))
 	}
 	if slot.physical != physicalSessionID {
-		return closeRejectedPreparedSession(prepared, fmt.Errorf("%w: requested %q but preparer returned %q", ErrDurableSessionIdentityConflict, physicalSessionID, slot.physical))
+		return manager.closeRejectedSlot(ctx, slot, fmt.Errorf("%w: requested %q but preparer returned %q", ErrDurableSessionIdentityConflict, physicalSessionID, slot.physical))
 	}
 	if branchID != "" && branchID != slot.branch {
-		return closeRejectedPreparedSession(prepared, fmt.Errorf("%w: session %q has active branch %q; requested %q", ErrPreparedSessionBranchSelectionUnsupported, physicalSessionID, slot.branch, branchID))
+		return manager.closeRejectedSlot(ctx, slot, fmt.Errorf("%w: session %q has active branch %q; requested %q", ErrPreparedSessionBranchSelectionUnsupported, physicalSessionID, slot.branch, branchID))
 	}
 	return manager.installPreparedSession(ctx, slot)
 }
@@ -211,42 +260,74 @@ func (manager *durableSessionManager) selectResume(ctx context.Context, physical
 // acquireRunLease pins the current prepared handle and its physical identity.
 func (manager *durableSessionManager) acquireRunLease() (*durableSessionRunLease, error) {
 	manager.mu.Lock()
-	defer manager.mu.Unlock()
 	if manager.closing {
+		manager.mu.Unlock()
 		return nil, ErrDurableSessionManagerClosing
 	}
 	slot := manager.current
 	if slot == nil {
+		manager.mu.Unlock()
 		return nil, ErrNoDurableSessionSelected
 	}
 	if slot.closeReq || slot.closed || slot.prepared == nil {
 		if slot.poisoned {
+			manager.mu.Unlock()
 			return nil, fmt.Errorf("%w: session %q requires exact reopen", ErrDurableSessionUnavailable, slot.physical)
 		}
+		manager.mu.Unlock()
 		return nil, fmt.Errorf("%w: session %q is closing or closed", ErrDurableSessionManagerClosing, slot.physical)
 	}
 	if slot.poisoned {
+		manager.mu.Unlock()
 		return nil, fmt.Errorf("%w: session %q requires exact reopen", ErrDurableSessionUnavailable, slot.physical)
 	}
-	snapshot, err := slot.prepared.Snapshot()
-	if err != nil {
-		slot.poisoned = true
-		manager.signalSlotLocked(slot)
-		return nil, fmt.Errorf("%w: session %q snapshot failed: %w", ErrDurableSessionUnavailable, slot.physical, err)
-	}
-	if snapshot.SessionID != slot.physical || snapshot.ActiveBranchID != slot.branch {
-		slot.poisoned = true
-		manager.signalSlotLocked(slot)
-		return nil, fmt.Errorf("%w: session %q identity or active branch changed", ErrDurableSessionUnavailable, slot.physical)
-	}
-	slot.leases++
+	prepared := slot.prepared
+	physical, branch := slot.physical, slot.branch
+	slot.leases++ // A temporary borrow protects Snapshot from requester-path Close.
 	manager.signalSlotLocked(slot)
+	manager.mu.Unlock()
+
+	snapshot, err := prepared.Snapshot()
+
+	manager.mu.Lock()
+	if err != nil {
+		if manager.current == slot {
+			slot.poisoned = true
+			manager.signalSlotLocked(slot)
+		}
+		manager.releaseLeaseLocked(slot)
+		closing := manager.closing
+		manager.mu.Unlock()
+		unavailableErr := fmt.Errorf("%w: session %q snapshot failed: %w", ErrDurableSessionUnavailable, physical, err)
+		if closing {
+			return nil, errors.Join(ErrDurableSessionManagerClosing, unavailableErr)
+		}
+		return nil, unavailableErr
+	}
+	if manager.closing {
+		manager.releaseLeaseLocked(slot)
+		manager.mu.Unlock()
+		return nil, ErrDurableSessionManagerClosing
+	}
+	if manager.current != slot || slot.closeReq || slot.closed || slot.poisoned {
+		manager.releaseLeaseLocked(slot)
+		manager.mu.Unlock()
+		return nil, fmt.Errorf("%w: session %q changed while checking the run lease", ErrDurableSessionUnavailable, physical)
+	}
+	if snapshot.SessionID != physical || snapshot.ActiveBranchID != branch {
+		slot.poisoned = true
+		manager.signalSlotLocked(slot)
+		manager.releaseLeaseLocked(slot)
+		manager.mu.Unlock()
+		return nil, fmt.Errorf("%w: session %q identity or active branch changed", ErrDurableSessionUnavailable, physical)
+	}
+	manager.mu.Unlock()
 	return &durableSessionRunLease{
 		manager:   manager,
 		slot:      slot,
-		prepared:  slot.prepared,
-		physical:  slot.physical,
-		branch:    slot.branch,
+		prepared:  prepared,
+		physical:  physical,
+		branch:    branch,
 		workspace: manager.workspace,
 	}, nil
 }
@@ -255,11 +336,15 @@ func (manager *durableSessionManager) acquireRunLease() (*durableSessionRunLease
 // path after its outstanding run leases have returned.
 func (manager *durableSessionManager) requestClose(ctx context.Context) error {
 	ctx = normalizeSessionContext(ctx)
-	manager.selection.Lock()
-	defer manager.selection.Unlock()
-
 	manager.mu.Lock()
 	manager.closing = true
+	manager.mu.Unlock()
+	if err := manager.enterTransition(ctx); err != nil {
+		return fmt.Errorf("%w: wait for durable session transition: %w", ErrDurableSessionClosePending, err)
+	}
+	defer manager.leaveTransition()
+
+	manager.mu.Lock()
 	if manager.current != nil {
 		manager.retireLocked(manager.current)
 		manager.current = nil
@@ -285,8 +370,10 @@ func (manager *durableSessionManager) requestClose(ctx context.Context) error {
 // recovers the exact same physical ID before permitting another run.
 func (manager *durableSessionManager) reopenPoisoned(ctx context.Context) error {
 	ctx = normalizeSessionContext(ctx)
-	manager.selection.Lock()
-	defer manager.selection.Unlock()
+	if err := manager.enterTransition(ctx); err != nil {
+		return fmt.Errorf("cli: wait to recover durable session: %w", err)
+	}
+	defer manager.leaveTransition()
 
 	manager.mu.Lock()
 	if manager.closing {
@@ -303,8 +390,21 @@ func (manager *durableSessionManager) reopenPoisoned(ctx context.Context) error 
 			manager.mu.Unlock()
 			return fmt.Errorf("%w: session %q is not available for reopen", ErrDurableSessionUnavailable, slot.physical)
 		}
-		snapshot, err := slot.prepared.Snapshot()
-		if err == nil && snapshot.SessionID == slot.physical && snapshot.ActiveBranchID == slot.branch {
+		prepared, physicalID, branchID := slot.prepared, slot.physical, slot.branch
+		manager.mu.Unlock()
+
+		snapshot, snapshotErr := prepared.Snapshot()
+
+		manager.mu.Lock()
+		if manager.closing {
+			manager.mu.Unlock()
+			return ErrDurableSessionManagerClosing
+		}
+		if manager.current != slot || slot.closed || slot.closeReq {
+			manager.mu.Unlock()
+			return fmt.Errorf("%w: session %q changed while checking recovery", ErrDurableSessionUnavailable, physicalID)
+		}
+		if snapshotErr == nil && snapshot.SessionID == physicalID && snapshot.ActiveBranchID == branchID && !slot.poisoned {
 			manager.mu.Unlock()
 			return nil
 		}
@@ -319,19 +419,31 @@ func (manager *durableSessionManager) reopenPoisoned(ctx context.Context) error 
 	if err := manager.closeSlot(ctx, slot); err != nil {
 		return err
 	}
+	if err := manager.checkOpenForSelection(); err != nil {
+		return err
+	}
 	prepared, err := manager.preparer.PrepareResume(ctx, physicalID)
 	if err != nil {
 		return fmt.Errorf("%w: recover exact session %q: %w", ErrDurableSessionUnavailable, physicalID, err)
 	}
 	reopened, err := newManagedPreparedSession(prepared)
 	if err != nil {
-		return closeRejectedPreparedSession(prepared, fmt.Errorf("%w: validate reopened session %q: %w", ErrDurableSessionUnavailable, physicalID, err))
+		return manager.closeRejectedPrepared(ctx, prepared, fmt.Errorf("%w: validate reopened session %q: %w", ErrDurableSessionUnavailable, physicalID, err))
 	}
 	if reopened.physical != physicalID || reopened.branch != branchID {
-		return closeRejectedPreparedSession(prepared, fmt.Errorf("%w: reopened session %q changed physical identity or active branch", ErrDurableSessionUnavailable, physicalID))
+		return manager.closeRejectedSlot(ctx, reopened, fmt.Errorf("%w: reopened session %q changed physical identity or active branch", ErrDurableSessionUnavailable, physicalID))
 	}
 
 	manager.mu.Lock()
+	if manager.closing || manager.current != slot || !slot.closed || slot.physical != physicalID || slot.branch != branchID {
+		closing := manager.closing
+		manager.mu.Unlock()
+		cause := fmt.Errorf("%w: exact reopen for session %q lost its selection slot", ErrDurableSessionUnavailable, physicalID)
+		if closing {
+			cause = errors.Join(ErrDurableSessionManagerClosing, cause)
+		}
+		return manager.closeRejectedSlot(ctx, reopened, cause)
+	}
 	manager.current = reopened
 	manager.mu.Unlock()
 	return nil
@@ -341,16 +453,16 @@ func (manager *durableSessionManager) installPreparedSession(ctx context.Context
 	manager.mu.Lock()
 	if manager.closing {
 		manager.mu.Unlock()
-		return closeRejectedPreparedSession(slot.prepared, ErrDurableSessionManagerClosing)
+		return manager.closeRejectedSlot(ctx, slot, ErrDurableSessionManagerClosing)
 	}
 	old := manager.current
 	if old != nil && old.physical == slot.physical {
 		manager.mu.Unlock()
-		return closeRejectedPreparedSession(slot.prepared, fmt.Errorf("%w: %q", ErrDurableSessionIdentityConflict, slot.physical))
+		return manager.closeRejectedSlot(ctx, slot, fmt.Errorf("%w: %q", ErrDurableSessionIdentityConflict, slot.physical))
 	}
 	if retired := manager.findRetiredLocked(slot.physical); retired != nil {
 		manager.mu.Unlock()
-		return closeRejectedPreparedSession(slot.prepared, fmt.Errorf("%w: %q still has a retired prepared handle", ErrDurableSessionIdentityConflict, slot.physical))
+		return manager.closeRejectedSlot(ctx, slot, fmt.Errorf("%w: %q still has a retired prepared handle", ErrDurableSessionIdentityConflict, slot.physical))
 	}
 	if old != nil {
 		manager.retireLocked(old)
@@ -358,13 +470,21 @@ func (manager *durableSessionManager) installPreparedSession(ctx context.Context
 	manager.current = slot
 	manager.mu.Unlock()
 	if old != nil {
-		return manager.closeSlot(ctx, old)
+		if err := manager.closeSlot(ctx, old); err != nil {
+			return &SelectionAppliedCleanupError{
+				SelectedPhysicalSessionID: slot.physical,
+				SelectedBranchID:          slot.branch,
+				Cause:                     err,
+			}
+		}
 	}
 	return nil
 }
 
-// closeSlot requires manager.selection to serialize close requesters. The run
-// lease release path only changes the reference count and wakes this caller.
+// closeSlot is called by a transition-gate owner. The run lease release path
+// only changes the reference count and wakes this caller. PreparedSession.Close
+// has no context support: cancellation bounds gate and lease waits, but cannot
+// interrupt a Close call once it has started.
 func (manager *durableSessionManager) closeSlot(ctx context.Context, slot *managedPreparedSession) error {
 	ctx = normalizeSessionContext(ctx)
 	for {
@@ -416,11 +536,36 @@ func (manager *durableSessionManager) closeSlot(ctx context.Context, slot *manag
 
 func (manager *durableSessionManager) releaseRunLease(slot *managedPreparedSession) {
 	manager.mu.Lock()
+	manager.releaseLeaseLocked(slot)
+	manager.mu.Unlock()
+}
+
+func (manager *durableSessionManager) releaseLeaseLocked(slot *managedPreparedSession) {
 	if slot.leases > 0 {
 		slot.leases--
 		manager.signalSlotLocked(slot)
 	}
-	manager.mu.Unlock()
+}
+
+func (manager *durableSessionManager) enterTransition(ctx context.Context) error {
+	ctx = normalizeSessionContext(ctx)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-manager.transition:
+	}
+	if err := ctx.Err(); err != nil {
+		manager.leaveTransition()
+		return err
+	}
+	return nil
+}
+
+func (manager *durableSessionManager) leaveTransition() {
+	manager.transition <- struct{}{}
 }
 
 func (manager *durableSessionManager) checkOpenForSelection() error {
@@ -454,6 +599,34 @@ func (manager *durableSessionManager) signalSlotLocked(slot *managedPreparedSess
 	}
 	close(slot.changed)
 	slot.changed = make(chan struct{})
+}
+
+func (manager *durableSessionManager) closeRejectedPrepared(ctx context.Context, prepared session.PreparedSession, cause error) error {
+	if prepared == nil {
+		return cause
+	}
+	slot := &managedPreparedSession{
+		prepared: prepared,
+		changed:  make(chan struct{}),
+		closeReq: true,
+	}
+	return manager.closeRejectedSlot(ctx, slot, cause)
+}
+
+func (manager *durableSessionManager) closeRejectedSlot(ctx context.Context, slot *managedPreparedSession, cause error) error {
+	if slot == nil || slot.prepared == nil {
+		return cause
+	}
+	manager.mu.Lock()
+	slot.closeReq = true
+	manager.signalSlotLocked(slot)
+	manager.retired[slot] = struct{}{}
+	manager.mu.Unlock()
+
+	if err := manager.closeSlot(ctx, slot); err != nil {
+		return errors.Join(cause, fmt.Errorf("cli: close rejected prepared session: %w", err))
+	}
+	return cause
 }
 
 func newManagedPreparedSession(prepared session.PreparedSession) (*managedPreparedSession, error) {
