@@ -185,6 +185,49 @@ func TestAssembledSmallModelSamplingUsesSmallThenMatchingProviderSettings(t *tes
 	}
 }
 
+func TestAssembledLoadedSmallModelExplicitZeroSamplingIsEncoded(t *testing.T) {
+	capture := &providerRequestCapture{}
+	srv := httptest.NewServer(http.HandlerFunc(capture.handler))
+	t.Cleanup(srv.Close)
+
+	const providerName = "loaded-small-zero-provider"
+	rawConfig, err := json.Marshal(config.Config{
+		Provider: config.ProviderConfig{
+			Name:        providerName,
+			BaseURL:     srv.URL,
+			APIKey:      newTestCredentialCanary(t),
+			Temperature: 0.8,
+			MaxTokens:   512,
+		},
+		Model: config.ModelConfig{Name: "primary-model"},
+		SmallModel: config.SmallModelConfig{
+			Model:       "small-model",
+			Temperature: 0,
+			MaxTokens:   0,
+		},
+	})
+	require.NoError(t, err)
+	configPath := filepath.Join(t.TempDir(), "config.json")
+	require.NoError(t, os.WriteFile(configPath, rawConfig, 0o600))
+	rc, err := config.NewLoader().WithFile(configPath).WithEnvPrefix("R3_SMALL_ZERO_UNUSED").Load(context.Background())
+	require.NoError(t, err)
+	assert.True(t, rc.SmallModelSampling().TemperatureSet)
+	assert.True(t, rc.SmallModelSampling().MaxTokensSet)
+
+	assembly, err := AssembleAgent(context.Background(), rc, rc.Provider.Name, rc.Model.Name, io.Discard)
+	require.NoError(t, err)
+	t.Cleanup(assembly.Cleanup)
+	smallModel := assembly.ModelConfig.ModelSelector.SmallModel()
+	require.NotNil(t, smallModel)
+	response, err := smallModel.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "loaded small zero"}})
+	require.NoError(t, err)
+	require.NotNil(t, response)
+
+	request := decodeSamplingRequestBody(t, capture)
+	assertSamplingNumber(t, request, "temperature", "0")
+	assertSamplingNumber(t, request, "max_tokens", "0")
+}
+
 func TestAssembledSmallModelDoesNotInheritOtherProviderSampling(t *testing.T) {
 	primaryCapture := &providerRequestCapture{}
 	primaryServer := httptest.NewServer(http.HandlerFunc(primaryCapture.handler))
@@ -227,6 +270,67 @@ func TestAssembledSmallModelDoesNotInheritOtherProviderSampling(t *testing.T) {
 	assert.Empty(t, authorization)
 	primaryCount, _, _, _ := primaryCapture.snapshot()
 	assert.Zero(t, primaryCount)
+}
+
+func TestLoaderRejectsInvalidSmallModelSamplingBeforeProviderDispatch(t *testing.T) {
+	tests := []struct {
+		name      string
+		configure func(*config.Config)
+		wantError string
+	}{
+		{
+			name: "temperature out of range",
+			configure: func(cfg *config.Config) {
+				cfg.SmallModel.Temperature = 2.1
+			},
+			wantError: "small model temperature out of range",
+		},
+		{
+			name: "negative max tokens",
+			configure: func(cfg *config.Config) {
+				cfg.SmallModel.MaxTokens = -1
+			},
+			wantError: "small model max_tokens must be non-negative",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			capture := &providerRequestCapture{}
+			srv := httptest.NewServer(http.HandlerFunc(capture.handler))
+			t.Cleanup(srv.Close)
+
+			const providerName = "small-validation-provider"
+			source := config.Config{
+				Provider: config.ProviderConfig{
+					Name:    providerName,
+					BaseURL: srv.URL,
+					APIKey:  newTestCredentialCanary(t),
+				},
+				Model:      config.ModelConfig{Name: "primary-model"},
+				SmallModel: config.SmallModelConfig{Model: "small-model"},
+			}
+			tt.configure(&source)
+			body, err := json.Marshal(source)
+			require.NoError(t, err)
+			configPath := filepath.Join(t.TempDir(), "config.json")
+			require.NoError(t, os.WriteFile(configPath, body, 0o600))
+
+			rc, loadErr := config.NewLoader().WithFile(configPath).WithEnvPrefix("R3_INVALID_SMALL_SAMPLING_UNUSED").Load(context.Background())
+			if loadErr == nil {
+				assembly, assembleErr := AssembleAgent(context.Background(), rc, providerName, rc.Model.Name, io.Discard)
+				if assembleErr == nil {
+					t.Cleanup(assembly.Cleanup)
+					if smallModel := assembly.ModelConfig.ModelSelector.SmallModel(); smallModel != nil {
+						_, _ = smallModel.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "invalid small sampling"}})
+					}
+				}
+			}
+			require.Error(t, loadErr)
+			assert.Contains(t, loadErr.Error(), tt.wantError)
+			count, _, _, _ := capture.snapshot()
+			assert.Zero(t, count, "invalid small sampling must be rejected before any provider request")
+		})
+	}
 }
 
 func generateCapturedModelRequest(t *testing.T, capture *providerRequestCapture, rc *config.Config, providerName, modelName string, opts ...llm.Option) {

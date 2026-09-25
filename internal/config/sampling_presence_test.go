@@ -96,6 +96,41 @@ func TestLoaderRejectsJSONNullInsteadOfOverridingSamplingFallback(t *testing.T) 
 	assert.Contains(t, err.Error(), "null")
 }
 
+func TestLoaderValidatesSmallModelSamplingBounds(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{name: "temperature above maximum", body: "small_model:\n  temperature: 2.1\n", want: "small model temperature out of range"},
+		{name: "temperature below minimum", body: "small_model:\n  temperature: -0.1\n", want: "small model temperature out of range"},
+		{name: "negative max tokens", body: "small_model:\n  max_tokens: -1\n", want: "small model max_tokens must be non-negative"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.yaml")
+			require.NoError(t, os.WriteFile(path, []byte(tt.body), 0o600))
+			cfg, err := NewLoader().WithFile(path).Load(context.Background())
+			require.Error(t, err)
+			assert.Nil(t, cfg)
+			assert.Contains(t, err.Error(), tt.want)
+		})
+	}
+}
+
+func TestLoaderAllowsExplicitZeroSmallModelSampling(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	body := "small_model:\n  temperature: 0\n  max_tokens: 0\n"
+	require.NoError(t, os.WriteFile(path, []byte(body), 0o600))
+	cfg, err := NewLoader().WithFile(path).Load(context.Background())
+	require.NoError(t, err)
+	settings := cfg.SmallModelSampling()
+	assert.True(t, settings.TemperatureSet)
+	assert.Zero(t, settings.Temperature)
+	assert.True(t, settings.MaxTokensSet)
+	assert.Zero(t, settings.MaxTokens)
+}
+
 func TestLoaderSamplingPresenceAndZeroAwarePriority(t *testing.T) {
 	for _, key := range []string{
 		"GO_CLI_TEST_SAMPLING_PROVIDER_TEMPERATURE",
