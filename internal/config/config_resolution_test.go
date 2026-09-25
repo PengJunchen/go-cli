@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/pengjunchen/go-cli/internal/tracing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -195,7 +196,8 @@ func TestValidator_MultipleErrorsCombined(t *testing.T) {
 // helper used by tracing-level/exporter validation.
 func TestValidator_ContainsHelper(t *testing.T) {
 	assert.True(t, contains(validTracingLevels, "info"))
-	assert.True(t, contains(validTracingExporter, "none"))
+	assert.True(t, tracing.IsSupportedExporter("none"))
+	assert.False(t, tracing.IsSupportedExporter("otlp"))
 	assert.False(t, contains(validTracingLevels, "panic"))
 	assert.False(t, contains(nil, "x"))
 }

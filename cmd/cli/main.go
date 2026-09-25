@@ -11,7 +11,6 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
-	"time"
 
 	"github.com/pengjunchen/go-cli/internal/approval"
 	"github.com/pengjunchen/go-cli/internal/cli"
@@ -70,7 +69,11 @@ func run(argv []string, stdout, stderr io.Writer, loadConfig func() (*config.Con
 		return 1
 	}
 
-	tracer, exporter := newTracing(cfg)
+	tracer, exporter, err := newTracing(cfg, stdout)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "error: tracing: %v\n", err) //nolint:errcheck // CLI error output is best-effort
+		return 1
+	}
 	var root tracing.TraceSpan
 	tctx := ctx
 	if tracer != nil {
@@ -105,6 +108,9 @@ func run(argv []string, stdout, stderr io.Writer, loadConfig func() (*config.Con
 		}
 		if err := exporter.Shutdown(ctx); err != nil {
 			_, _ = fmt.Fprintf(stderr, "error: shutdown exporter: %v\n", err) //nolint:errcheck // CLI error output is best-effort
+			if code == 0 {
+				code = 1
+			}
 		}
 	}
 	return code
@@ -124,41 +130,18 @@ func runCLI(ctx context.Context, cfg *config.Config, argv []string, stdout, stde
 	return 0
 }
 
-// newTracing builds a *tracing.Tracer for the given config, or returns
-// (nil, exporter) when tracing is disabled/misconfigured. When a nil tracer is
-// returned, SpanFromContext yields noop spans and the CLI still runs.
-func newTracing(cfg *config.Config) (*tracing.Tracer, tracing.TraceExporter) {
+// newTracing builds the one invocation-owned tracing runtime using the CLI's
+// configured output writer for the explicit stdout sink.
+func newTracing(cfg *config.Config, stdout io.Writer) (*tracing.Tracer, tracing.TraceExporter, error) {
 	enabled := true
 	if cfg.Tracing.Enabled != nil {
 		enabled = *cfg.Tracing.Enabled
 	}
-	if !enabled || cfg.Tracing.Exporter == "none" {
-		return nil, nil
-	}
-
-	var exporter tracing.TraceExporter = tracing.NewStdoutTraceExporterWithWriter(false, os.Stdout)
-	switch cfg.Tracing.Exporter {
-	case "stdout":
-		exporter = tracing.NewStdoutTraceExporterWithWriter(false, os.Stdout)
-	case "jsonl":
-		dir := cfg.Tracing.FilePath
-		if dir == "" {
-			dir = filepath.Join(".go-cli", "traces")
-		}
-		e, err := tracing.NewJSONLTraceExporter(dir, "session-"+time.Now().Format("20060102T150405"))
-		if err == nil {
-			exporter = e
-		}
-	}
-
-	// Wrap the destination in an AsyncExporter so Shutdown reliably drains all
-	// in-flight spans before the underlying file/writer is closed.
-	redactionLevel := tracing.RedactionLevelRedact
-	if cfg.Tracing.RedactionLevel != "" {
-		redactionLevel = tracing.RedactionLevel(cfg.Tracing.RedactionLevel)
-	}
-	exporter = tracing.NewRedactingExporter(tracing.NewAsyncExporter(exporter, 1024, 16), redactionLevel)
-
-	tracer := tracing.NewTracer("", exporter)
-	return tracer, exporter
+	return tracing.BuildTracingRuntime(tracing.TracingRuntimeConfig{
+		Enabled:        enabled,
+		Exporter:       cfg.Tracing.Exporter,
+		FilePath:       cfg.Tracing.FilePath,
+		RedactionLevel: tracing.RedactionLevel(cfg.Tracing.RedactionLevel),
+		Stdout:         stdout,
+	})
 }

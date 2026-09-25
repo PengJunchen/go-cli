@@ -71,6 +71,16 @@ func tracerFromContext(ctx context.Context) *Tracer {
 	return t
 }
 
+// TracerFromContext returns the tracer carried by ctx, or nil when tracing is
+// not active. Assembly callers use this to reuse the invocation-owned tracer
+// without creating or owning another exporter.
+func TracerFromContext(ctx context.Context) *Tracer {
+	if ctx == nil {
+		return nil
+	}
+	return tracerFromContext(ctx)
+}
+
 // Tracer is the factory for Spans. Each CLI process owns one Tracer that
 // manages the current TraceID, an enable switch and the destination
 // TraceExporter.

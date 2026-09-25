@@ -65,9 +65,16 @@ func TestRunSuccessNoArgs(t *testing.T) {
 	t.Setenv("GO_CLI_NO_ONBOARDING", "1")
 	var stdout, stderr bytes.Buffer
 	code := run(nil, &stdout, &stderr, func() (*config.Config, error) {
-		return disabledCfg(), nil
+		return &config.Config{
+			Provider: config.ProviderConfig{
+				Name:    "openai",
+				BaseURL: "http://127.0.0.1:1",
+				APIKey:  "test-key",
+			},
+			Tracing: config.TracingConfig{Exporter: "none"},
+		}, nil
 	})
-	assert.Equal(t, 0, code)
+	assert.Equal(t, 0, code, "stderr: %s", stderr.String())
 	// No subcommand defaults to interactive mode.
 	assert.Contains(t, stdout.String(), "Interactive session started")
 }
@@ -99,23 +106,114 @@ func TestRunFlagParseErrorExitCode2(t *testing.T) {
 }
 
 func TestNewTracingDisabledReturnsNil(t *testing.T) {
-	tr, exp := newTracing(&config.Config{Tracing: config.TracingConfig{Enabled: boolPtr(false), Exporter: "jsonl"}})
+	tr, exp, err := newTracing(&config.Config{Tracing: config.TracingConfig{Enabled: boolPtr(false), Exporter: "jsonl"}}, io.Discard)
+	require.NoError(t, err)
 	assert.Nil(t, tr)
 	assert.Nil(t, exp)
 }
 
 func TestNewTracingNoneReturnsNil(t *testing.T) {
-	tr, exp := newTracing(&config.Config{Tracing: config.TracingConfig{Enabled: boolPtr(true), Exporter: "none"}})
+	tr, exp, err := newTracing(&config.Config{Tracing: config.TracingConfig{Enabled: boolPtr(true), Exporter: "none"}}, io.Discard)
+	require.NoError(t, err)
 	assert.Nil(t, tr)
 	assert.Nil(t, exp)
 }
 
-func TestNewTracingUnknownDefaultNoCrash(t *testing.T) {
-	tr, exp := newTracing(&config.Config{Tracing: config.TracingConfig{Enabled: boolPtr(true), Exporter: "bogus"}})
-	assert.NotNil(t, tr)
-	assert.NotNil(t, exp)
-	// Shutdown the wrapping AsyncExporter so its worker goroutine does not leak.
-	require.NoError(t, exp.Shutdown(context.Background()))
+func TestNewTracingUnsupportedExporterReturnsTypedError(t *testing.T) {
+	for _, name := range []string{"otlp", "kafka", "bogus"} {
+		t.Run(name, func(t *testing.T) {
+			tr, exp, err := newTracing(&config.Config{Tracing: config.TracingConfig{Enabled: boolPtr(true), Exporter: name}}, io.Discard)
+			require.Error(t, err)
+			assert.Nil(t, tr)
+			assert.Nil(t, exp)
+			var unsupported *tracing.UnsupportedExporterError
+			assert.ErrorAs(t, err, &unsupported)
+			assert.ErrorIs(t, err, tracing.ErrUnsupportedExporter)
+			assert.Equal(t, name, unsupported.Name)
+		})
+	}
+}
+
+func TestRunDisabledAndNoneTracingCreateNoTraceArtifacts(t *testing.T) {
+	tests := []struct {
+		name     string
+		enabled  bool
+		exporter string
+	}{
+		{name: "disabled", enabled: false, exporter: "jsonl"},
+		{name: "none", enabled: true, exporter: "none"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			previousDir, err := os.Getwd()
+			require.NoError(t, err)
+			require.NoError(t, os.Chdir(workDir))
+			t.Cleanup(func() { _ = os.Chdir(previousDir) })
+
+			traceDir := filepath.Join(workDir, "configured-traces")
+			cfg := &config.Config{Tracing: config.TracingConfig{
+				Enabled:  boolPtr(tt.enabled),
+				Exporter: tt.exporter,
+				FilePath: traceDir,
+			}}
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"version"}, &stdout, &stderr, func() (*config.Config, error) { return cfg, nil })
+			assert.Equal(t, 0, code)
+			assert.Contains(t, stdout.String(), cli.Version)
+			assert.NotContains(t, stdout.String(), "[TRACE]")
+			assert.Empty(t, stderr.String())
+			_, err = os.Stat(traceDir)
+			assert.ErrorIs(t, err, os.ErrNotExist)
+		})
+	}
+}
+
+func TestRunStdoutTracingUsesCLIStdoutWriter(t *testing.T) {
+	workDir := t.TempDir()
+	previousDir, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(workDir))
+	t.Cleanup(func() { _ = os.Chdir(previousDir) })
+
+	var stdout, stderr bytes.Buffer
+	cfg := &config.Config{Tracing: config.TracingConfig{
+		Enabled:  boolPtr(true),
+		Exporter: "stdout",
+	}}
+	code := run([]string{"version"}, &stdout, &stderr, func() (*config.Config, error) { return cfg, nil })
+	assert.Equal(t, 0, code)
+	assert.Contains(t, stdout.String(), cli.Version)
+	assert.Contains(t, stdout.String(), "[TRACE]")
+	assert.Empty(t, stderr.String())
+	_, err = os.Stat(filepath.Join(workDir, ".go-cli", "traces"))
+	assert.ErrorIs(t, err, os.ErrNotExist)
+}
+
+func TestRunUnsupportedTracingExporterFailsBeforeCommand(t *testing.T) {
+	for _, name := range []string{"otlp", "kafka", "bogus"} {
+		t.Run(name, func(t *testing.T) {
+			workDir := t.TempDir()
+			previousDir, err := os.Getwd()
+			require.NoError(t, err)
+			require.NoError(t, os.Chdir(workDir))
+			t.Cleanup(func() { _ = os.Chdir(previousDir) })
+
+			traceDir := filepath.Join(workDir, "traces")
+			cfg := &config.Config{Tracing: config.TracingConfig{
+				Enabled:  boolPtr(true),
+				Exporter: name,
+				FilePath: traceDir,
+			}}
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"version"}, &stdout, &stderr, func() (*config.Config, error) { return cfg, nil })
+			assert.Equal(t, 1, code)
+			assert.Contains(t, stderr.String(), "unsupported tracing exporter")
+			assert.NotContains(t, stdout.String(), "[TRACE]")
+			_, err = os.Stat(traceDir)
+			assert.ErrorIs(t, err, os.ErrNotExist)
+		})
+	}
 }
 
 // TestRunEmitsRealSpans proves the production path produces real (non-noop)
@@ -132,13 +230,19 @@ func TestRunEmitsRealSpans(t *testing.T) {
 
 	files, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
 	require.NoError(t, err)
-	require.NotEmpty(t, files, "expected a JSONL trace file")
+	require.Len(t, files, 1, "the invocation and command should share one JSONL owner")
 
 	data, err := os.ReadFile(files[0])
 	require.NoError(t, err)
-	content := string(data)
-	assert.Contains(t, content, "cli.invocation")
-	assert.Contains(t, content, "command.dispatch")
+	var spans []tracing.SpanData
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var span tracing.SpanData
+		require.NoError(t, json.Unmarshal([]byte(line), &span))
+		spans = append(spans, span)
+	}
+	require.Len(t, spans, 2)
+	assert.ElementsMatch(t, []string{"cli.invocation", "command.dispatch"}, []string{spans[0].Name, spans[1].Name})
+	assert.Equal(t, spans[0].TraceID, spans[1].TraceID)
 }
 
 // TestRunEmitsErrorSpanStatus verifies the root span reports an error status
@@ -153,7 +257,7 @@ func TestRunEmitsErrorSpanStatus(t *testing.T) {
 
 	files, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
 	require.NoError(t, err)
-	require.NotEmpty(t, files)
+	require.Len(t, files, 1)
 	data, err := os.ReadFile(files[0])
 	require.NoError(t, err)
 	assert.Contains(t, string(data), "cli.invocation")
@@ -164,15 +268,13 @@ func TestRunEmitsErrorSpanStatus(t *testing.T) {
 // newTracing emits a real exported span (not a noopSpan).
 func TestNewTracingSpanNonNoop(t *testing.T) {
 	dir := t.TempDir()
-	tr, exp := newTracing(enabledCfg(dir))
+	tr, exp, err := newTracing(enabledCfg(dir), io.Discard)
+	require.NoError(t, err)
 	require.NotNil(t, tr)
 
 	span, ctx := tr.Start(context.Background(), "cli.invocation", tracing.SpanKindInternal)
 	span.SetStatus(tracing.SpanStatusOK, "")
 	span.End()
-	// Allow the span's asynchronous export goroutine to enqueue before Shutdown
-	// drains the AsyncExporter (mirrors run()'s flush-on-exit behavior).
-	time.Sleep(50 * time.Millisecond)
 	require.NoError(t, exp.Shutdown(ctx))
 
 	files, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
@@ -184,37 +286,16 @@ func TestNewTracingSpanNonNoop(t *testing.T) {
 	assert.Contains(t, string(data), "cli.invocation")
 }
 
-func TestNewTracingFileFailureDoesNotEmitRawPrompt(t *testing.T) {
-	const promptCanary = "FAILED-TRACE-FILE-RAW-CANARY"
+func TestNewTracingFileFailureDoesNotFallbackToStdout(t *testing.T) {
 	blocker := filepath.Join(t.TempDir(), "not-a-directory")
 	require.NoError(t, os.WriteFile(blocker, []byte("x"), 0o600))
-	stdoutReader, stdoutWriter, err := os.Pipe()
-	require.NoError(t, err)
-	previousStdout := os.Stdout
-	os.Stdout = stdoutWriter
-	defer func() {
-		os.Stdout = previousStdout
-		_ = stdoutWriter.Close()
-		_ = stdoutReader.Close()
-	}()
-
+	var stdout bytes.Buffer
 	cfg := enabledCfg(filepath.Join(blocker, "traces"))
-	tracer, exporter := newTracing(cfg)
-	require.NotNil(t, tracer)
-	span, _ := tracer.Start(context.Background(), "prompt.run", tracing.SpanKindInternal)
-	span.SetAttributes(tracing.Attribute{Key: "args", Value: []string{promptCanary}})
-	span.SetAttributes(tracing.Attribute{Key: "prompt_length", Value: len(promptCanary)})
-	span.SetStatus(tracing.SpanStatusOK, "")
-	span.End()
-	require.NoError(t, exporter.Shutdown(context.Background()))
-	require.NoError(t, stdoutWriter.Close())
-
-	data, err := io.ReadAll(stdoutReader)
-	require.NoError(t, err)
-	assert.False(t, strings.Contains(string(data), promptCanary), "prompt canary leaked to stdout fallback")
-	assert.True(t, strings.Contains(string(data), "***REDACTED***"), "stdout fallback must retain redaction markers")
-	assert.True(t, strings.Contains(string(data), "prompt.run"), "stdout fallback must retain span identity")
-	assert.True(t, strings.Contains(string(data), "prompt_length"), "stdout fallback must retain prompt length metadata")
+	tracer, exporter, err := newTracing(cfg, &stdout)
+	require.Error(t, err)
+	assert.Nil(t, tracer)
+	assert.Nil(t, exporter)
+	assert.Empty(t, stdout.String())
 }
 
 // TestDefaultTraceContainsNoPrompt drives a prompt and tool call through the
@@ -271,15 +352,25 @@ func TestDefaultTraceContainsNoPrompt(t *testing.T) {
 
 	files, err := filepath.Glob(filepath.Join(traceDir, "*.jsonl"))
 	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(files), 2, "main CLI and Assembly should both export spans")
+	require.Len(t, files, 1, "the CLI root and Agent assembly must share one exporter")
 	logData, err := os.ReadFile(filepath.Join(workDir, ".go-cli", "logs", "go-cli.log"))
 	require.NoError(t, err)
 	var trace strings.Builder
+	traceIDs := make(map[string]struct{})
 	for _, path := range files {
 		data, readErr := os.ReadFile(path)
 		require.NoError(t, readErr)
 		trace.Write(data)
+		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+			if line == "" {
+				continue
+			}
+			var span tracing.SpanData
+			require.NoError(t, json.Unmarshal([]byte(line), &span))
+			traceIDs[span.TraceID] = struct{}{}
+		}
 	}
+	require.Len(t, traceIDs, 1, "all CLI and assembly spans must use one trace identity")
 	allRecords := trace.String() + string(logData)
 	assert.False(t, strings.Contains(allRecords, promptCanary), "prompt canary leaked to trace or log output")
 	assert.False(t, strings.Contains(allRecords, toolCanary), "tool argument canary leaked to trace or log output")
@@ -341,13 +432,14 @@ func TestDefaultTraceAndLogsRedactProviderErrorBody(t *testing.T) {
 
 	files, err := filepath.Glob(filepath.Join(traceDir, "*.jsonl"))
 	require.NoError(t, err)
-	require.GreaterOrEqual(t, len(files), 2, "main CLI and Assembly must both export spans")
+	require.Len(t, files, 1, "the CLI root and Agent assembly must share one exporter")
 	logData, err := os.ReadFile(filepath.Join(workDir, ".go-cli", "logs", "go-cli.log"))
 	require.NoError(t, err)
 	var trace strings.Builder
 	var failedStatus bool
 	var providerCode bool
 	var providerErrorType bool
+	traceIDs := make(map[string]struct{})
 	for _, path := range files {
 		data, readErr := os.ReadFile(path)
 		require.NoError(t, readErr)
@@ -358,6 +450,7 @@ func TestDefaultTraceAndLogsRedactProviderErrorBody(t *testing.T) {
 			}
 			var span tracing.SpanData
 			require.NoError(t, json.Unmarshal([]byte(line), &span))
+			traceIDs[span.TraceID] = struct{}{}
 			failedStatus = failedStatus || span.Status == tracing.SpanStatusError
 			for _, attr := range span.Attributes {
 				if attr.Key == "http_status_code" {
@@ -369,6 +462,7 @@ func TestDefaultTraceAndLogsRedactProviderErrorBody(t *testing.T) {
 			}
 		}
 	}
+	require.Len(t, traceIDs, 1, "all failed command spans must use one trace identity")
 	allRecords := trace.String() + string(logData) + stdout.String() + stderr.String()
 	if strings.Contains(allRecords, canary) {
 		t.Fatal("provider error response canary leaked to default trace or log output")

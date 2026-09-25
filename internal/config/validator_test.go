@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"testing"
 
+	"github.com/pengjunchen/go-cli/internal/tracing"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -54,6 +55,22 @@ func TestDefaultValidator_InvalidTracing(t *testing.T) {
 	err = NewDefaultValidator().Validate(*cfg)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tracing exporter")
+}
+
+func TestDefaultValidatorTracingExporterMatchesRuntimeSupport(t *testing.T) {
+	for _, name := range []string{"", "jsonl", "stdout", "none", "otlp", "kafka", "bogus"} {
+		t.Run(name, func(t *testing.T) {
+			cfg := defaultConfig()
+			cfg.Tracing.Exporter = name
+			err := NewDefaultValidator().Validate(*cfg)
+			if tracing.IsSupportedExporter(name) {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "tracing exporter")
+		})
+	}
 }
 
 func TestDefaultValidator_InvalidCompaction(t *testing.T) {
