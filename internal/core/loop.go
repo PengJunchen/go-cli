@@ -369,7 +369,7 @@ func (l *LoopAgent) Run(ctx context.Context, submission Submission, stream ...Ev
 // RunCanonical executes one ReAct run and returns a typed transcript delta
 // owned by this invocation. Prior submission history remains model context
 // only and is never copied into Transcript.
-func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, stream ...EventStream) (CanonicalRunResult, error) {
+func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, stream ...EventStream) (runResult CanonicalRunResult, runErr error) {
 	events := make([]AgentEvent, 0)
 	transcript := []TranscriptEntry{{Message: AgentMessage{
 		Role:      string(llm.RoleUser),
@@ -405,6 +405,34 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 	var es EventStream
 	if len(stream) > 0 {
 		es = stream[0]
+	}
+	consumer, commitErr := newRunCommitConsumer(spanCtx)
+	if commitErr != nil {
+		span.SetStatus(tracing.SpanStatusError, commitErr.Error())
+		return CanonicalRunResult{Transcript: transcript}, commitErr
+	}
+	if consumer != nil {
+		spanCtx = withRunCommitLoopScope(spanCtx)
+	}
+	terminalEligible := false
+	if consumer != nil {
+		if commitErr = consumer.commitInput(0, transcript[0].Message); commitErr != nil {
+			span.SetStatus(tracing.SpanStatusError, commitErr.Error())
+			markRunOutcomeUnknown(spanCtx)
+			return CanonicalRunResult{Transcript: transcript}, commitErr
+		}
+		terminalEligible = true
+		defer func() {
+			if !terminalEligible {
+				return
+			}
+			terminalErr := consumer.commitTerminal(runResult.Transcript, nil, terminalOutcome(runErr))
+			if terminalErr != nil {
+				markRunOutcomeUnknown(spanCtx)
+				runErr = errors.Join(runErr, terminalErr)
+				runResult.Events = append(runResult.Events, errEvent(terminalErr))
+			}
+		}()
 	}
 
 	if model == nil {
@@ -571,7 +599,15 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 		// so the model sees it on the next iteration.
 		if l.steerCh != nil {
 			for _, instruction := range drainSteerMessages(l.steerCh, &messages, logger) {
-				transcript = append(transcript, TranscriptEntry{Message: AgentMessage{Role: string(llm.RoleUser), Content: instruction, InputKind: InputKindSteering}})
+				entry := TranscriptEntry{Message: AgentMessage{Role: string(llm.RoleUser), Content: instruction, InputKind: InputKindSteering}}
+				if consumer != nil {
+					if commitErr := consumer.commitInput(uint64(len(transcript)), entry.Message); commitErr != nil {
+						span.SetStatus(tracing.SpanStatusError, commitErr.Error())
+						sendEvent(errEvent(commitErr))
+						return CanonicalRunResult{Events: events, Transcript: transcript}, commitErr
+					}
+				}
+				transcript = append(transcript, entry)
 			}
 		}
 
@@ -580,7 +616,15 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 		// model sees steering context first, then the follow-up.
 		if l.followUpCh != nil {
 			for _, content := range drainFollowUpMessages(l.followUpCh, &messages, logger) {
-				transcript = append(transcript, TranscriptEntry{Message: AgentMessage{Role: string(llm.RoleUser), Content: content, InputKind: InputKindFollowUp}})
+				entry := TranscriptEntry{Message: AgentMessage{Role: string(llm.RoleUser), Content: content, InputKind: InputKindFollowUp}}
+				if consumer != nil {
+					if commitErr := consumer.commitInput(uint64(len(transcript)), entry.Message); commitErr != nil {
+						span.SetStatus(tracing.SpanStatusError, commitErr.Error())
+						sendEvent(errEvent(commitErr))
+						return CanonicalRunResult{Events: events, Transcript: transcript}, commitErr
+					}
+				}
+				transcript = append(transcript, entry)
 			}
 		}
 
@@ -660,6 +704,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 			logger.Info("core.loop.finish", "iterations", iter+1, "messages", len(messages))
 			return CanonicalRunResult{Events: events, Transcript: transcript}, nil
 		}
+		assistantOrdinal := uint64(iter + 1)
 
 		if l.executionMode == ExecutionModeParallel && len(resp.ToolCalls) > 1 {
 			// Parallel mode: emit pre-tool-call events, then execute
@@ -681,61 +726,91 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 				sendEvent(AgentEvent{Kind: "tool_call", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID})
 				logger.Info("core.loop.tool_call", "iteration", iter, "tool", tc.Name, "mode", "parallel")
 			}
-			var parallelErr error
-			var unknownToolErr error
-			resultsByID := make(map[string]ParallelToolResult, len(activeCalls))
-			if len(activeCalls) > 0 {
-				results, execErr := executeToolsParallel(spanCtx, l.tools, activeCalls, es)
-				parallelErr = execErr
-				matched, matchErr := matchToolResultsByID(activeCalls, results)
-				if matchErr != nil {
-					parallelErr = errors.Join(parallelErr, matchErr)
-				} else {
-					for _, res := range matched {
-						resultsByID[res.ID] = res
+			if consumer != nil {
+				startIndex := len(transcript)
+				commitErr := consumer.executeParallelGroup(spanCtx, l.tools, assistantOrdinal, assistantEntry.Message, resp.ToolCalls, canceledCalls, es, &transcript, &messages)
+				for index := startIndex; index < len(transcript); index++ {
+					message := transcript[index].Message
+					if message.Role != string(llm.RoleTool) {
+						continue
+					}
+					sendEvent(AgentEvent{Kind: "tool_result", Content: message.Content, Timestamp: time.Now(), IsError: message.ReceiptOutcome != ReceiptOutcomeSuccess, ToolCallID: message.ToolCallID})
+				}
+				if commitErr != nil {
+					span.SetStatus(tracing.SpanStatusError, commitErr.Error())
+					sendEvent(errEvent(commitErr))
+					return CanonicalRunResult{Events: events, Transcript: transcript}, commitErr
+				}
+			} else {
+				var parallelErr error
+				var unknownToolErr error
+				resultsByID := make(map[string]ParallelToolResult, len(activeCalls))
+				if len(activeCalls) > 0 {
+					results, execErr := executeToolsParallel(spanCtx, l.tools, activeCalls, es)
+					parallelErr = execErr
+					matched, matchErr := matchToolResultsByID(activeCalls, results)
+					if matchErr != nil {
+						parallelErr = errors.Join(parallelErr, matchErr)
+					} else {
+						for _, res := range matched {
+							resultsByID[res.ID] = res
+						}
 					}
 				}
-			}
-			for _, tc := range resp.ToolCalls {
-				if canceledCalls[tc.ID] {
-					const canceledOutput = "Tool call canceled by interceptor"
-					sendEvent(AgentEvent{Kind: "tool_result", Content: canceledOutput, Timestamp: time.Now(), IsError: true, ToolCallID: tc.ID})
-					appendToolReceipt(&messages, &transcript, tc, canceledOutput, ReceiptOutcomeInterrupted)
-					continue
+				for _, tc := range resp.ToolCalls {
+					if canceledCalls[tc.ID] {
+						const canceledOutput = "Tool call canceled by interceptor"
+						sendEvent(AgentEvent{Kind: "tool_result", Content: canceledOutput, Timestamp: time.Now(), IsError: true, ToolCallID: tc.ID})
+						appendToolReceipt(&messages, &transcript, tc, canceledOutput, ReceiptOutcomeInterrupted)
+						continue
+					}
+					res, ok := resultsByID[tc.ID]
+					if !ok {
+						missingErr := fmt.Errorf("core: missing or uncorrelated result for tool call %q", tc.ID)
+						parallelErr = errors.Join(parallelErr, missingErr)
+						unknownToolErr = errors.Join(unknownToolErr, markUnknownToolOutcome(missingErr))
+						output := "Error: " + missingErr.Error()
+						sendEvent(AgentEvent{Kind: "tool_result", Content: output, Timestamp: time.Now(), IsError: true, ToolCallID: tc.ID})
+						appendToolReceipt(&messages, &transcript, tc, output, ReceiptOutcomeUnknown)
+						continue
+					}
+					if res.Err != nil {
+						logger.Warn("core.loop.tool_error", "tool", res.Name, "err", res.Err)
+						res.Output = "Error: " + res.Err.Error()
+						res.IsError = true
+					}
+					outcome := toolReceiptOutcome(spanCtx, res.Err, res.IsError)
+					sendEvent(AgentEvent{Kind: "tool_result", Content: res.Output, Timestamp: time.Now(), IsError: res.IsError, ToolCallID: res.ID})
+					appendToolReceipt(&messages, &transcript, tc, res.Output, outcome)
+					if outcome == ReceiptOutcomeUnknown && unknownToolErr == nil {
+						unknownToolErr = markUnknownToolOutcome(res.Err)
+					}
 				}
-				res, ok := resultsByID[tc.ID]
-				if !ok {
-					missingErr := fmt.Errorf("core: missing or uncorrelated result for tool call %q", tc.ID)
-					parallelErr = errors.Join(parallelErr, missingErr)
-					unknownToolErr = errors.Join(unknownToolErr, markUnknownToolOutcome(missingErr))
-					output := "Error: " + missingErr.Error()
-					sendEvent(AgentEvent{Kind: "tool_result", Content: output, Timestamp: time.Now(), IsError: true, ToolCallID: tc.ID})
-					appendToolReceipt(&messages, &transcript, tc, output, ReceiptOutcomeUnknown)
-					continue
+				if parallelErr != nil || unknownToolErr != nil {
+					runErr := errors.Join(parallelErr, unknownToolErr)
+					span.SetStatus(tracing.SpanStatusError, runErr.Error())
+					sendEvent(errEvent(runErr))
+					return CanonicalRunResult{Events: events, Transcript: transcript}, runErr
 				}
-				if res.Err != nil {
-					logger.Warn("core.loop.tool_error", "tool", res.Name, "err", res.Err)
-					res.Output = "Error: " + res.Err.Error()
-					res.IsError = true
-				}
-				outcome := toolReceiptOutcome(spanCtx, res.Err, res.IsError)
-				sendEvent(AgentEvent{Kind: "tool_result", Content: res.Output, Timestamp: time.Now(), IsError: res.IsError, ToolCallID: res.ID})
-				appendToolReceipt(&messages, &transcript, tc, res.Output, outcome)
-				if outcome == ReceiptOutcomeUnknown && unknownToolErr == nil {
-					unknownToolErr = markUnknownToolOutcome(res.Err)
-				}
-			}
-			if parallelErr != nil || unknownToolErr != nil {
-				runErr := errors.Join(parallelErr, unknownToolErr)
-				span.SetStatus(tracing.SpanStatusError, runErr.Error())
-				sendEvent(errEvent(runErr))
-				return CanonicalRunResult{Events: events, Transcript: transcript}, runErr
 			}
 		} else {
 			// Sequential mode: execute one tool at a time.
 			for callIndex, tc := range resp.ToolCalls {
 				if err := spanCtx.Err(); err != nil {
 					logger.Error("core.loop.canceled", "err", err)
+					if consumer != nil {
+						for _, undispatched := range resp.ToolCalls[callIndex:] {
+							const skippedOutput = "Tool call canceled before dispatch"
+							if commitErr := consumer.commitKnownCall(assistantOrdinal, assistantEntry.Message, "batch-"+newClaimID(), undispatched, uint64(len(transcript)), skippedOutput, ReceiptOutcomeInterrupted, &transcript, &messages); commitErr != nil {
+								span.SetStatus(tracing.SpanStatusError, commitErr.Error())
+								sendEvent(errEvent(commitErr))
+								return CanonicalRunResult{Events: events, Transcript: transcript}, commitErr
+							}
+							sendEvent(AgentEvent{Kind: "tool_result", Content: skippedOutput, Timestamp: time.Now(), IsError: true, ToolCallID: undispatched.ID})
+						}
+						sendEvent(errEvent(err))
+						return CanonicalRunResult{Events: events, Transcript: transcript}, err
+					}
 					emitCanceledToolResults(err)
 					sendEvent(errEvent(err))
 					return CanonicalRunResult{Events: events, Transcript: transcript}, err
@@ -748,13 +823,42 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 				if preEv.IsCancelled() {
 					logger.Info("core.loop.tool_canceled", "tool", tc.Name, "id", tc.ID)
 					sendEvent(AgentEvent{Kind: "tool_canceled", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID})
-					appendToolReceipt(&messages, &transcript, tc, "Tool call canceled by interceptor", ReceiptOutcomeInterrupted)
+					if consumer != nil {
+						const canceledOutput = "Tool call canceled by interceptor"
+						if commitErr := consumer.commitKnownCall(assistantOrdinal, assistantEntry.Message, "batch-"+newClaimID(), tc, uint64(len(transcript)), canceledOutput, ReceiptOutcomeInterrupted, &transcript, &messages); commitErr != nil {
+							span.SetStatus(tracing.SpanStatusError, commitErr.Error())
+							sendEvent(errEvent(commitErr))
+							return CanonicalRunResult{Events: events, Transcript: transcript}, commitErr
+						}
+					} else {
+						appendToolReceipt(&messages, &transcript, tc, "Tool call canceled by interceptor", ReceiptOutcomeInterrupted)
+					}
 					continue
 				}
 
 				sendEvent(AgentEvent{Kind: "tool_call", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID})
 				logger.Info("core.loop.tool_call", "iteration", iter, "tool", tc.Name)
 
+				if consumer != nil {
+					result, commitErr := consumer.executeSequentialCall(spanCtx, l.tools, assistantOrdinal, assistantEntry.Message, tc, es, &transcript, &messages)
+					sendEvent(AgentEvent{Kind: "tool_result", Content: result.output, Timestamp: time.Now(), IsError: result.isError, ToolCallID: tc.ID})
+					if commitErr != nil {
+						if !hasUnknownToolOutcome(commitErr) && callIndex+1 < len(resp.ToolCalls) && (errors.Is(commitErr, context.Canceled) || errors.Is(commitErr, context.DeadlineExceeded) || errors.Is(commitErr, ErrRunCommitPreparedInvocationUnavailable) || errors.Is(commitErr, ErrRunCommitChildUnsupported) || errors.Is(commitErr, ErrRunCommitStreamingUnsupported)) {
+							for _, undispatched := range resp.ToolCalls[callIndex+1:] {
+								const skippedOutput = "Tool call not dispatched because a prior tool call stopped the group"
+								if suffixErr := consumer.commitKnownCall(assistantOrdinal, assistantEntry.Message, "batch-"+newClaimID(), undispatched, uint64(len(transcript)), skippedOutput, ReceiptOutcomeInterrupted, &transcript, &messages); suffixErr != nil {
+									commitErr = errors.Join(commitErr, suffixErr)
+									break
+								}
+								sendEvent(AgentEvent{Kind: "tool_result", Content: skippedOutput, Timestamp: time.Now(), IsError: true, ToolCallID: undispatched.ID})
+							}
+						}
+						span.SetStatus(tracing.SpanStatusError, commitErr.Error())
+						sendEvent(errEvent(commitErr))
+						return CanonicalRunResult{Events: events, Transcript: transcript}, commitErr
+					}
+					continue
+				}
 				resultText, isErr, execErr := l.executeTool(spanCtx, toToolsCall(tc), es)
 				isError := isErr
 				if execErr != nil {
@@ -800,9 +904,19 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 		// mid-turn.
 		if midTurnCompactor != nil && compactor != nil && estimator != nil && maxTokens > 0 {
 			items := messagesToTurnItems(messages)
-			compacted, result, cerr := midTurnCompactor.CompactIfNeeded(spanCtx, items, maxTokens, estimator, compactor)
+			activeCompactor := compactor
+			if consumer != nil {
+				activeCompactor = unavailableRunCommitCompactor{}
+			}
+			compacted, result, cerr := midTurnCompactor.CompactIfNeeded(spanCtx, items, maxTokens, estimator, activeCompactor)
 			if cerr != nil {
 				logger.Warn("core.loop.midturn_compact_error", "err", cerr)
+				if consumer != nil && errors.Is(cerr, ErrRunCommitCompactionProjectionUnavailable) {
+					compactionErr := ErrRunCommitCompactionProjectionUnavailable
+					span.SetStatus(tracing.SpanStatusError, compactionErr.Error())
+					sendEvent(errEvent(compactionErr))
+					return CanonicalRunResult{Events: events, Transcript: transcript}, compactionErr
+				}
 			} else if result.Triggered {
 				messages = turnItemsToMessages(compacted)
 				logger.Info("core.loop.midturn_compact",
