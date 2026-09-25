@@ -350,7 +350,7 @@ func TestPrepareResumeAppliesValidatedResolutionBeforeInspectingMarkers(t *testi
 	secondOrdinal, secondTranscriptIndex := uint64(1), uint64(3)
 	appended := appendFixtureRows(t, fixture, SessionEntry{
 		ID: "execution-1", ParentID: fixture.intent.ID, Type: EntryTypeTool, RunID: "run-1", WorkspaceID: "workspace-1",
-		ActionBatchID: "batch-1", ActionID: "action-1", ActionState: ActionStateExecution,
+		ActionBatchID: "batch-1", ActionID: "action-1", ActionState: ActionStateExecution, DispatchState: DispatchStateDispatched,
 		AssistantTranscriptOrdinal: &zero, ToolCallID: "call-1", ToolName: "read", CompletionProof: tools.CompletionOwnedProcessGroupJoined, Timestamp: time.Unix(13, 0).UTC(),
 	}, SessionEntry{
 		ID: "receipt-1", ParentID: "execution-1", Type: EntryTypeTool, RunID: "run-1", WorkspaceID: "workspace-1",
@@ -553,6 +553,70 @@ func TestPrepareResumeRejectsLocalResolutionWithoutCompletionProof(t *testing.T)
 	}
 	if applyCalls != 0 {
 		t.Fatalf("global authority was called %d times for unprovable local identity", applyCalls)
+	}
+}
+
+func TestPrepareResumeRejectsLocalResolutionForNotDispatchedReceiptBeforeAuthority(t *testing.T) {
+	fixture := createRecoveryFixture(t, true)
+	appendRawFixtureRow(t, fixture, SessionEntry{
+		ID: "execution-1", ParentID: fixture.intent.ID, Type: EntryTypeTool, RunID: "run-1", WorkspaceID: "workspace-1",
+		ActionBatchID: "batch-1", ActionID: "action-1", ActionState: ActionStateExecution,
+		DispatchState: DispatchStateDispatched, AssistantTranscriptOrdinal: ptrUint64(0),
+		ToolCallID: "call-1", ToolName: "read", CompletionProof: tools.CompletionOwnedProcessGroupJoined,
+	})
+	appendRawFixtureRow(t, fixture, SessionEntry{
+		ID: "receipt-1", ParentID: "execution-1", Type: EntryTypeTool, RunID: "run-1", WorkspaceID: "workspace-1",
+		ActionBatchID: "batch-1", ActionID: "action-1", AssistantTranscriptOrdinal: ptrUint64(0),
+		TranscriptIndex: ptrUint64(2), ToolCallID: "call-1", ToolName: "read",
+		DispatchState: DispatchStateNotDispatched, ReceiptOutcome: core.ReceiptOutcomeInterrupted,
+	})
+	appendRawFixtureRow(t, fixture, SessionEntry{
+		ID: "resolution-1", ParentID: "receipt-1", Type: EntryTypeCheckpoint, RunID: "run-1", WorkspaceID: "workspace-1",
+		ActionBatchID: "batch-1", ActionID: "action-1", AssistantTranscriptOrdinal: ptrUint64(0), ToolCallID: "call-1",
+		CheckpointKind: CheckpointExecutionResolution,
+		ExecutionResolution: &core.ExecutionResolution{
+			RunID: "run-1", ActionID: "action-1", Evidence: core.ResolutionLocalResourcesStopped, EvidenceRef: "execution-1",
+		},
+	})
+	index := newWorkspaceQuarantineIndex(t.TempDir(), workspaceIndexIO{})
+	batch := workspaceTestBatch("workspace-1", fixture.sessionID, "run-1", "batch-1", "action-1", 0, "call-1")
+	if err := index.EnsureWorkspace(context.Background(), batch.WorkspaceID); err != nil {
+		t.Fatal(err)
+	}
+	if state, err := index.BeginDispatchBatch(context.Background(), batch); err != nil || state != WorkspaceDispatchCommittedNow {
+		t.Fatalf("BeginDispatchBatch = (%v, %v), want durable dispatch marker", state, err)
+	}
+	var applyCalls, inspectCalls int
+	authority := recoveryAuthorityFunc{
+		apply: func(ctx context.Context, resolutions []ValidatedExecutionResolution) error {
+			applyCalls++
+			return index.ApplyDurableResolutions(ctx, resolutions)
+		},
+		inspect: func(ctx context.Context, refs []PendingActionRef) ([]PendingActionDecision, error) {
+			inspectCalls++
+			return index.InspectDispatchMarkers(ctx, refs)
+		},
+	}
+	prepared, err := NewDurableJSONLSessionPreparer(fixture.directory, authority).PrepareResume(context.Background(), fixture.sessionID)
+	if err == nil {
+		if prepared != nil {
+			_ = prepared.Close()
+		}
+		t.Fatal("not-dispatched receipt plus positive execution proof must not resolve local resources")
+	}
+	if prepared != nil {
+		_ = prepared.Close()
+		t.Fatal("failed local-resolution validation returned a prepared session")
+	}
+	if applyCalls != 0 || inspectCalls != 0 {
+		t.Fatalf("authority calls for contradictory not-dispatched resolution = apply:%d inspect:%d, want 0/0", applyCalls, inspectCalls)
+	}
+	decisions, err := index.InspectDispatchMarkers(context.Background(), []PendingActionRef{batch.Actions[0].Action})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decisions) != 1 || decisions[0].MarkerState != DispatchMarkerPresent {
+		t.Fatalf("marker after rejected contradictory resolution = %#v, want still present/quarantined", decisions)
 	}
 }
 
