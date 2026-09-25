@@ -1,6 +1,6 @@
 # R7 扩展、技能与遥测生命周期设计
 
-状态：设计预研，尚未实现、尚未运行本文件列出的验收。
+状态：已有获准的窄实现切片；这不代表完整 R7 设计、实现或评审已闭环。本文件列出的整体验收尚未全部实现或运行。
 依据：`docs/audits/2026-09-24/07-extensions-tracing.md`、`docs/iterations/2026-09-25-runtime/execution-tasks.json` 的 R7-DES-01 / R7-BLD-01 / R7-BLD-02 / R7-REV-01，以及当前默认 CLI 装配链源码。
 范围：把 extension、skill、tracing 的声明能力与默认运行路径对齐；不重做 MCP transport，不在本轮设计里实现代码。
 
@@ -66,6 +66,10 @@ Tracing 有两个默认 owner：`cmd/cli/main.go:newTracing` 创建 CLI 根 trac
 目标每个实例的状态为 `pending → initializing → running → stopping → stopped`，失败为可查询的 `failed`；在调用扩展代码前先原子预留实例状态。同实例并发 Init 只执行一次，其余等待并获得同一结果；Init 期间 Shutdown 等待完成或按 ctx deadline 返回。成功 Init 的 extension 逆序 Shutdown 严格一次；失败 Init 不调用正常 Shutdown（如插件 API 要支持部分 acquire，需显式提供 rollback hook，否则 Init 必须自行回滚）。Shutdown 失败仍记为 `stopped-with-error`，不得第二次无条件重跑副作用。
 
 每个 extension Init 使用与父 registry 同接口的 staging registry。提交时在锁内检查全部名字冲突，再按注册顺序原子合并；Init 失败/冲突则丢弃 staging，避免半个 extension 对运行中的 agent 可见。Load 可继续尝试后续路径，但 `errors.Join` 必须保留路径错误；默认 assembly 可以保留已成功 extension 的部分可用策略，但要将加载/初始化错误和 failed extension 列入 `AssemblyDiagnostics`（及结构化日志），CLI/TUI 可以区分 ready/degraded，不可只记 warning 后宣称全部 ready。
+
+Init 的 owner 与等待者必须区分：等待者自己的 context 取消只结束该等待，不取消 owner 的 Init。Init owner 的 context 取消或收到 Shutdown 请求后，即使回调随后返回 nil，也不得发布 staging 或进入 `running`；保留 owner 和 callback 状态，等回调真实返回后丢弃 staging 并恰好调用一次 Shutdown 清理，再进入 `stopped` 或 `stopped-with-error`。若回调不响应取消，caller deadline 到期时返回 `cleanup_pending` 并继续保留 owner/资源引用。若 Init 已成功但 staging 原子提交因冲突失败，丢弃 staging 并恰好调用一次 Shutdown；返回冲突错误，并用 `errors.Join` 保留清理错误。只有 Init 回调本身返回错误时由插件自行回滚，不调用正常 Shutdown。
+
+本轮获准的 R7-BLD-01 部分切片仅覆盖扩展 registry/lifecycle 核心：`internal/extension/registry.go`、`manager.go`、`plugin_manager.go` 及对应 package 测试。它不包含 `internal/cli/assemble.go` 装配接线、skills、Hook/EventBridge、R1 `run_slot.go` admission fence，也不代表完整 R7-BLD-01、R7-DES-01 或 R7-REV-01 已完成。
 
 ### Hook 输入与 action
 

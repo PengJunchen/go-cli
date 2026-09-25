@@ -775,10 +775,11 @@
         "R1-REV-01",
         "R4-EFFECT-01"
       ],
-      "status": "pending",
+      "status": "in_progress",
       "commit_spec": "One commit for durable journal and truthful acknowledgment; persistence format changes require explicit versioning and fixture compatibility tests.",
       "phase_id": "R2",
-      "source_status": "proposed"
+      "source_status": "proposed",
+      "execution_scope": "Partial lane build_bash is preparing only the standalone durable workspace_index storage/RecoveryAuthority adapter and its tests. It may proceed without Loop/CLI wiring; do not connect it to dispatch until the R4 prepared-dispatch boundary is accepted. Cross-session marker matching, append+Sync/idempotency, quarantine and restart gates remain open, so this partial lane does not close R2-BLD-02 or R2."
     },
     {
       "id": "R2-REV-01",
@@ -1595,7 +1596,7 @@
         "EventBridge declares whether shutdown drains or abandons events and never claims lossless delivery for events already consumed but not delivered."
       ],
       "verification": [
-        "Planned tests: TestExtensionOrderStable, TestExtensionInitFailurePropagates, TestExtensionConcurrentInitAndShutdownSafe, TestHookEventDataIsImmutable, TestSkillLoaderHonorsLimitsAndCancel, TestSkillMetadataCannotInjectXML, TestSkillArgumentsValidated, TestUnsupportedRemoteExtensionRejected.",
+        "Planned tests: TestExtensionOrderStable, TestExtensionInitFailurePropagates, TestExtensionConcurrentInitAndShutdownSafe, TestExtensionWaiterCancellationDoesNotCancelInit, TestExtensionOwnerCancellationKeepsCleanupPendingUntilCallbackReturns, TestExtensionOwnerCancellationDropsStageAndShutsDownOnce, TestExtensionStagingConflictJoinsCleanupErrorAndShutsDownOnce, TestHookEventDataIsImmutable, TestSkillLoaderHonorsLimitsAndCancel, TestSkillMetadataCannotInjectXML, TestSkillArgumentsValidated, TestUnsupportedRemoteExtensionRejected.",
         "Exercise a small real extension through load/init/tool-or-hook/shutdown path; test malformed and oversized skill files.",
         "Planned test: TestEventBridgeCancelAfterReadReportsOrDrainsEvent; fill the output buffer, cancel after source read, and assert bounded drain or an explicit dropped-event count according to the reviewed contract."
       ],
@@ -1615,10 +1616,11 @@
       "depends_on": [
         "R7-DES-01"
       ],
-      "status": "pending",
+      "status": "in_progress",
       "commit_spec": "Separate lifecycle from skill parser changes; remove or mark dormant public API when product declines implementation.",
       "phase_id": "R7",
-      "source_status": "proposed"
+      "source_status": "proposed",
+      "execution_scope": "Partial extension registry/lifecycle-core lane only, owned by build_permissions: internal/extension/registry.go, manager.go, plugin_manager.go and matching package tests. Cover deterministic ordered snapshots, staging conflict atomicity, init owner/waiter cancellation semantics, late-success cleanup and exactly-once shutdown; conflict cleanup errors must remain discoverable with errors.Is/errors.Join. Planned new regressions are TestExtensionWaiterCancellationDoesNotCancelInit, TestExtensionOwnerCancellationKeepsCleanupPendingUntilCallbackReturns, TestExtensionOwnerCancellationDropsStageAndShutsDownOnce, and TestExtensionStagingConflictJoinsCleanupErrorAndShutsDownOnce. Do not touch internal/cli/assemble.go, skill files, Hook/EventBridge bridge files, or internal/core/run_slot.go. This is not full R7-BLD-01 or R7 acceptance; skills, default-assembly wiring and R7 gates remain pending."
     },
     {
       "id": "R7-BLD-02",
