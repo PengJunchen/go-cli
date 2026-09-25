@@ -159,13 +159,7 @@ func (h *HarnessImpl) Submit(ctx context.Context, msg string) (EventStream, erro
 		inputCancel()
 		return nil, err
 	}
-	wrapperDone, err := registerRunWrapper(h.runSlot, claim, nil)
-	if err != nil {
-		h.runSlot.Release(claim)
-		stopLifetime()
-		inputCancel()
-		return nil, err
-	}
+	var wrapperDone func()
 	transferred := false
 	var span tracing.TraceSpan
 	var stream *EventStreamImpl
@@ -173,19 +167,25 @@ func (h *HarnessImpl) Submit(ctx context.Context, msg string) (EventStream, erro
 		if transferred {
 			return
 		}
-		defer func() {
-			h.runSlot.Release(claim)
-			wrapperDone()
-			stopLifetime()
-			inputCancel()
-		}()
+		if wrapperDone != nil {
+			defer wrapperDone()
+		}
+		defer inputCancel()
+		defer stopLifetime()
+		defer h.runSlot.Release(claim)
 		if stream != nil {
-			stream.Close()
+			defer stream.Close()
 		}
 		if span != nil {
-			span.End()
+			defer span.End()
 		}
 	}()
+	// Install the fallback cleanup before calling an optional guard extension:
+	// a custom RunSlotWrapperRegistrar may panic during registration.
+	wrapperDone, err = registerRunWrapper(h.runSlot, claim, nil)
+	if err != nil {
+		return nil, err
+	}
 
 	// Borrowed tracing and bus producers are touched only after the guard has
 	// accepted this run, so a closed Assembly cannot race its teardown with a
@@ -245,8 +245,8 @@ func (h *HarnessImpl) Submit(ctx context.Context, msg string) (EventStream, erro
 // releases its claim when callback resources finish; the wrapper lease keeps
 // admission fenced through span export and stream close.
 func (h *HarnessImpl) run(ctx context.Context, span tracing.TraceSpan, stream *EventStreamImpl, submission Submission, owner *runOwner, wrapperDone func(), cleanupInput func()) {
-	defer cleanupInput()
 	defer wrapperDone()
+	defer cleanupInput()
 	defer stream.Close()
 	defer span.End()
 	// Pass the EventStream to the agent so events are emitted in real time
