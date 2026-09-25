@@ -54,6 +54,7 @@ type REPLSession struct {
 
 	// Flags
 	modelName        string
+	modelFlag        string
 	providerName     string
 	maxTokens        int
 	thinkingLevel    llm.ThinkingLevel
@@ -153,8 +154,11 @@ func (s *REPLSession) start(ctx context.Context) error {
 		if in == nil {
 			in = os.Stdin
 		}
-		if err := runOnboarding(ctx, s.rc, s.providerName, in, s.out); err != nil {
+		if err := runOnboardingWithModelOverride(ctx, s.rc, s.providerName, s.modelFlag, in, s.out); err != nil {
 			return err
+		}
+		if s.modelFlag == "" {
+			s.modelName = resolveModelName("", s.rc)
 		}
 	}
 	if err := s.setupAgent(ctx); err != nil {
@@ -211,6 +215,7 @@ func (s *REPLSession) parseFlags() error {
 	}
 
 	s.modelName = resolveModelName(modelFlag, s.rc)
+	s.modelFlag = modelFlag
 	s.providerName = resolveProviderName(providerFlag, s.rc)
 	if maxTokensFlag <= 0 {
 		maxTokensFlag = defaultMaxTokens

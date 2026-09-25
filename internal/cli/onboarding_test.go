@@ -858,6 +858,22 @@ func TestPromptModelFallbackOnNetworkError(t *testing.T) {
 	assert.Equal(t, onboardingModelChoices[0].Name, cfg.Provider.Model)
 }
 
+func TestPromptModelOverridesPreloadedDefaultsAndReportsCLIOverride(t *testing.T) {
+	cfg := &config.Config{
+		Provider: config.ProviderConfig{Model: "gpt-4o-mini"},
+		Model:    config.ModelConfig{Name: "legacy-conflict"},
+	}
+	reader := bufio.NewReader(strings.NewReader("2\n"))
+	var out bytes.Buffer
+
+	require.NoError(t, promptModelWithOverride(cfg, reader, &out, llm.NoopModelRegistry{}, "gpt-4o-mini"))
+
+	assert.Equal(t, "gpt-4o", cfg.Provider.Model)
+	assert.Equal(t, "gpt-4o", cfg.Model.Name)
+	assert.Contains(t, out.String(), "Default model selected: gpt-4o")
+	assert.Contains(t, out.String(), "Current session uses --model gpt-4o-mini")
+}
+
 // TestPromptModelProviderFilter verifies that fetchModelsFromRegistry collects
 // models from all providers returned by the registry, filters out deprecated
 // models, and deduplicates by name.
