@@ -8,6 +8,8 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
+	"encoding/json"
 	"encoding/pem"
 	"errors"
 	"fmt"
@@ -976,6 +978,14 @@ func TestE2E_Phase49_OnboardingAutoTrigger(t *testing.T) {
 	tmpDir := t.TempDir()
 	t.Setenv("HOME", tmpDir)
 	t.Chdir(tmpDir)
+	t.Setenv("OPENAI_API_KEY", "")
+	t.Setenv("GO_CLI_NO_ONBOARDING", "")
+	// RunOnboarding must not reach the host's macOS Keychain. An empty PATH
+	// makes the keychain backend unavailable and exercises the private auth
+	// file fallback without invoking the real security command.
+	pathDir := filepath.Join(tmpDir, "empty-bin")
+	require.NoError(t, os.Mkdir(pathDir, 0o700))
+	t.Setenv("PATH", pathDir)
 
 	// --- First-run detection: no config file in a fresh HOME ---
 	configPath := filepath.Join(tmpDir, ".go-cli", "config.yaml")
@@ -986,7 +996,7 @@ func TestE2E_Phase49_OnboardingAutoTrigger(t *testing.T) {
 	t.Setenv("GO_CLI_NO_ONBOARDING", "1")
 	cfg := &config.Config{}
 	var out strings.Builder
-	err = cli.RunOnboarding(cfg, strings.NewReader("sk-test\n"), &out)
+	err = cli.RunOnboarding(cfg, strings.NewReader(phase49AuthCanary(t)+"\n"), &out)
 	assert.NoError(t, err, "onboarding should be skipped without error")
 	assert.Equal(t, "", cfg.Provider.APIKey, "API key should not be set when onboarding is disabled")
 	assert.NotContains(t, out.String(), "Step 1", "wizard should not run when disabled")
@@ -994,7 +1004,7 @@ func TestE2E_Phase49_OnboardingAutoTrigger(t *testing.T) {
 	// --- Skip when API key is already configured ---
 	t.Setenv("GO_CLI_NO_ONBOARDING", "")
 	cfgWithKey := &config.Config{}
-	cfgWithKey.Provider.APIKey = "sk-already-set"
+	cfgWithKey.Provider.APIKey = phase49AuthCanary(t)
 	out.Reset()
 	err = cli.RunOnboarding(cfgWithKey, strings.NewReader(""), &out)
 	assert.NoError(t, err, "onboarding should skip when API key is set")
@@ -1002,22 +1012,51 @@ func TestE2E_Phase49_OnboardingAutoTrigger(t *testing.T) {
 
 	// --- Existing config path: prompt for API key only ---
 	// Create a config file so configExistsFunc() returns true. The wizard
-	// takes the "existing config" path which only calls promptAPIKey — no
-	// registry refresh (which would start HTTP client goroutines that leak)
-	// and no saveOnboardingConfig (which would hit the OS keychain).
+	// takes the "existing config" path which only calls promptAPIKey, skips
+	// registry refresh, and saves the scoped credential through the private
+	// auth-file fallback because PATH intentionally disables Keychain access.
 	require.NoError(t, os.MkdirAll(filepath.Dir(configPath), 0o750))
 	require.NoError(t, os.WriteFile(configPath, []byte("provider:\n  name: openai\n"), 0o600))
 
-	apiKey := "sk-test-key-1234567890abcdef"
-	cfgExisting := &config.Config{}
+	apiKey := phase49AuthCanary(t)
+	cfgExisting := &config.Config{Provider: config.ProviderConfig{Name: "openai"}}
 	out.Reset()
 	err = cli.RunOnboarding(cfgExisting, strings.NewReader(apiKey+"\n"), &out)
 	require.NoError(t, err, "onboarding should complete successfully with existing config")
-	assert.Equal(t, apiKey, cfgExisting.Provider.APIKey, "API key should be set from input")
+	assert.Empty(t, cfgExisting.Provider.APIKey, "prompted secret should not be copied into config")
 	assert.Contains(t, out.String(), "Step 1: API Key", "wizard should prompt for API key")
 	assert.Contains(t, out.String(), "API key saved", "wizard should confirm API key saved")
+	assert.NotContains(t, out.String(), apiKey, "CLI output must not expose the credential")
+	configData, err := os.ReadFile(filepath.Join(tmpDir, ".config", "go-cli", "auth.json"))
+	require.NoError(t, err)
+	var authDocument struct {
+		Credentials []struct {
+			Provider string `json:"provider"`
+			Protocol string `json:"protocol"`
+			Origin   string `json:"origin"`
+			APIKey   string `json:"api_key"`
+		} `json:"credentials"`
+	}
+	require.NoError(t, json.Unmarshal(configData, &authDocument))
+	require.Len(t, authDocument.Credentials, 1)
+	assert.Equal(t, "openai", authDocument.Credentials[0].Provider)
+	assert.Equal(t, apiKey, authDocument.Credentials[0].APIKey)
+	chain := config.NewAuthChain()
+	restartedKey, found, err := chain.ResolveCredential(context.Background(), authDocument.Credentials[0].Provider, authDocument.Credentials[0].Protocol, authDocument.Credentials[0].Origin)
+	require.NoError(t, err)
+	assert.True(t, found, "a new auth chain must resolve the saved exact-scope credential")
+	assert.Equal(t, apiKey, restartedKey)
 	// The "existing config" path should NOT show model/theme selection.
 	assert.NotContains(t, out.String(), "Step 2", "wizard should not prompt for model when config exists")
+}
+
+func phase49AuthCanary(t *testing.T) string {
+	t.Helper()
+	var value [16]byte
+	if _, err := rand.Read(value[:]); err != nil {
+		t.Fatalf("generate onboarding auth canary: %v", err)
+	}
+	return "phase49-auth-" + hex.EncodeToString(value[:])
 }
 
 // TestE2E_Phase49_ModelListDynamicFetch verifies that the model registry
