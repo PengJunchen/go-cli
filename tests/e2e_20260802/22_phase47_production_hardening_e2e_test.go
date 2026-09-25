@@ -1047,10 +1047,10 @@ Database helper skill body.`
 		Name: mcp.NormalizeToolName("db-srv", "query_db"),
 		Args: map[string]any{},
 	})
-	// The Streamable HTTP mock returns a valid text content block.
-	if err == nil && res != nil {
-		assert.Equal(t, "pipeline-mcp-1", res.ToolCallID)
-	}
+	require.NoError(t, err)
+	require.NotNil(t, res)
+	assert.Equal(t, "pipeline-mcp-1", res.ToolCallID)
+	assert.Contains(t, res.Output, "ok")
 
 	// --- Execute the skill tool ---
 	resSkill, err := tr.Execute(ctx, tools.ToolCall{
