@@ -302,6 +302,55 @@ func TestContinuationErrorReturnsFailure(t *testing.T) {
 	assert.Equal(t, 2, int(fixture.requests.Load()), "the failed continuation must terminate the turn without retry/fallback; modes=%v", fixture.requestModes())
 }
 
+func TestContinuationFailureClassesDoNotReplayIncompleteCandidate(t *testing.T) {
+	cases := []struct {
+		name       string
+		statusCode int
+		message    string
+	}{
+		{name: "server_error", statusCode: http.StatusInternalServerError, message: "temporary provider failure"},
+		{name: "rate_limit", statusCode: http.StatusTooManyRequests, message: "rate_limit_exceeded"},
+		{name: "context_overflow", statusCode: http.StatusBadRequest, message: "context_length_exceeded"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newAssemblyStreamFixture(t, func(w http.ResponseWriter, _ *http.Request, n int) {
+				if n == 1 {
+					writeAssemblyTextResponse(w, []string{"partial safe"}, "length")
+					return
+				}
+				if n == 2 {
+					http.Error(w, fmt.Sprintf(`{"error":{"message":%q}}`, tc.message), tc.statusCode)
+					return
+				}
+				writeAssemblyTextResponse(w, []string{"recovered"}, "stop")
+			})
+			_, stream := fixture.assembleAndSubmit(t, "Say hello to me.")
+			events, message, err := collectAssemblyEvents(stream)
+			require.Error(t, err, "a failed continuation must fail the turn")
+			assert.Empty(t, assemblyIncrementalText(events), "an incomplete candidate must not become visible")
+			assert.Empty(t, message.Content, "an incomplete candidate must not become a successful result")
+			assert.Equal(t, 2, int(fixture.requests.Load()), "the failed continuation must not retry, overflow-recover, or fall back; modes=%v", fixture.requestModes())
+		})
+	}
+}
+
+func TestInitialRequestStillUsesConfiguredRetry(t *testing.T) {
+	fixture := newAssemblyStreamFixture(t, func(w http.ResponseWriter, _ *http.Request, n int) {
+		if n == 1 {
+			http.Error(w, `{"error":{"message":"temporary provider failure"}}`, http.StatusInternalServerError)
+			return
+		}
+		writeAssemblyTextResponse(w, []string{"recovered initial request"}, "stop")
+	})
+	_, stream := fixture.assembleAndSubmit(t, "Say hello to me.")
+	events, message, err := collectAssemblyEvents(stream)
+	require.NoError(t, err)
+	assert.Equal(t, "recovered initial request", message.Content)
+	assert.Equal(t, 2, int(fixture.requests.Load()), "the initial request retains its configured retry; modes=%v", fixture.requestModes())
+	assert.NotEmpty(t, events)
+}
+
 func TestIncompleteToolArgumentsAreNotDispatched(t *testing.T) {
 	target := filepath.Join(t.TempDir(), "incomplete-arguments-must-not-write.txt")
 	fixture := newAssemblyStreamFixture(t, func(w http.ResponseWriter, _ *http.Request, n int) {

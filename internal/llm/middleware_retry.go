@@ -266,6 +266,9 @@ func (r *retryModel) Generate(ctx context.Context, msgs []Message, opts ...Optio
 			}
 			return msg, nil
 		}
+		if ContinuationNoReplay(ctx) {
+			return nil, err
+		}
 		if !r.policy.ShouldRetry(ctx, err, attempt) {
 			r.logger.Debug("middleware.retry",
 				"status", "giveup",
@@ -306,6 +309,9 @@ func (r *retryModel) Stream(ctx context.Context, msgs []Message, opts ...Option)
 				)
 			}
 			return ch, nil
+		}
+		if ContinuationNoReplay(ctx) {
+			return nil, err
 		}
 		if !r.policy.ShouldRetry(ctx, err, attempt) {
 			r.logger.Debug("middleware.retry",

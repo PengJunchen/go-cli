@@ -1313,7 +1313,8 @@ func (l *LoopAgent) generateWithContinuation(ctx context.Context, model llm.Base
 
 		logger.Info("core.loop.continuation", "attempt", attempt+1)
 
-		contResp, contErr := l.streamGenerateWithBudget(ctx, model, contMsgs, toolOpts, es, budget, !guarded)
+		contCtx := llm.WithContinuationNoReplay(ctx)
+		contResp, contErr := l.streamGenerateWithBudget(contCtx, model, contMsgs, toolOpts, es, budget, !guarded)
 		if contErr != nil {
 			return nil, fmt.Errorf("core: continuation %d failed: %w", attempt+1, contErr)
 		}
