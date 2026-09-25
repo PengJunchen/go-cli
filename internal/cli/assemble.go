@@ -1237,8 +1237,7 @@ func (s *assembleState) assembleSubAgent() {
 	subAgentFactory := core.NewRealSubAgentFactory(s.model, llm.NewProviderRegistry(), s.tr,
 		core.WithModelWrapper(newModelWrapperWithChain(s.pw, s.modelChain, s.circuitBreaker, s.guardChain, s.telemetry)),
 	)
-	core.RegisterSubAgentFactory(subAgentFactory)
-	dispatcher := core.NewDefaultSubagentDispatcher(nil)
+	dispatcher := core.NewDefaultSubagentDispatcher(subAgentFactory)
 	s.dispatcher = dispatcher
 	if subErr := s.tr.Register(s.ctx, core.NewSubagentTool(dispatcher)); subErr != nil {
 		s.logger.Warn("assemble_subagent_tool_failed", "err", subErr)
