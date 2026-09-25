@@ -2,6 +2,7 @@ package compaction
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 
@@ -136,6 +137,9 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 		if err == nil {
 			return u.finish(sctx, logger, span, items, current, maxTokens, estimator, result, StrategyMicro), nil
 		}
+		if errors.Is(err, errMalformedToolGroup) {
+			return nil, err
+		}
 		logger.Debug("compaction.unified.escalate", "from", "micro", "err", err)
 	}
 
@@ -146,6 +150,9 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 		result, err := u.summary.Compact(sctx, items, maxTokens, estimator)
 		if err == nil {
 			return u.finish(sctx, logger, span, items, current, maxTokens, estimator, result, StrategySummary), nil
+		}
+		if errors.Is(err, errMalformedToolGroup) {
+			return nil, err
 		}
 		logger.Debug("compaction.unified.escalate", "from", "summary", "err", err)
 	}

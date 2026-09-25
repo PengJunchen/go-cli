@@ -28,22 +28,26 @@ func (c *TruncatingCompactor) Compact(ctx context.Context, items []TurnItem, max
 	span, _ := tracing.SpanFromContext(ctx, "compaction.truncating", tracing.SpanKindInternal)
 	defer span.End()
 	logger := tracing.NewTraceLogger(span, slog.Default())
+	normalized, groups, err := groupTurnItems(items)
+	if err != nil {
+		return nil, err
+	}
 
-	tokensBefore := estimateTokens(items, estimator)
+	tokensBefore := estimateTokens(normalized, estimator)
 	span.SetAttributes(
-		tracing.Attribute{Key: "items_in", Value: len(items)},
+		tracing.Attribute{Key: "items_in", Value: len(normalized)},
 		tracing.Attribute{Key: "tokens_before", Value: tokensBefore},
 	)
 
-	result := make([]TurnItem, 0, len(items))
+	result := make([]TurnItem, 0, len(normalized))
 	system := make([]TurnItem, 0, 4)
-	nonSystem := make([]TurnItem, 0, len(items))
+	nonSystem := make([]itemGroup, 0, len(groups))
 
-	for _, it := range items {
-		if it.Role == RoleSystem {
-			system = append(system, it)
+	for _, group := range groups {
+		if group.system {
+			system = append(system, normalized[group.start:group.end]...)
 		} else {
-			nonSystem = append(nonSystem, it)
+			nonSystem = append(nonSystem, group)
 		}
 	}
 
@@ -54,19 +58,21 @@ func (c *TruncatingCompactor) Compact(ctx context.Context, items []TurnItem, max
 	// oldest. We iterate newest-first so the most recent entries win the
 	// remaining budget, but collect them into a temporary slice and reverse
 	// before appending so the result stays in chronological order.
-	kept := make([]TurnItem, 0, len(nonSystem))
+	kept := make([]itemGroup, 0, len(nonSystem))
 	for i := len(nonSystem) - 1; i >= 0; i-- {
-		n := estimateTokens([]TurnItem{nonSystem[i]}, estimator)
+		group := nonSystem[i]
+		n := estimateTokens(normalized[group.start:group.end], estimator)
 		if n <= budget {
-			kept = append(kept, nonSystem[i])
+			kept = append(kept, group)
 			budget -= n
 		}
 	}
 	for i, j := 0, len(kept)-1; i < j; i, j = i+1, j-1 {
 		kept[i], kept[j] = kept[j], kept[i]
 	}
-	kept = removeDanglingToolResults(kept)
-	result = append(result, kept...)
+	for _, group := range kept {
+		result = append(result, normalized[group.start:group.end]...)
+	}
 
 	tokensAfter := estimateTokens(result, estimator)
 	span.SetAttributes(
@@ -80,18 +86,4 @@ func (c *TruncatingCompactor) Compact(ctx context.Context, items []TurnItem, max
 		"tokens_before", tokensBefore,
 		"tokens_after", tokensAfter)
 	return result, nil
-}
-
-func removeDanglingToolResults(items []TurnItem) []TurnItem {
-	if len(items) == 0 {
-		return items
-	}
-	out := make([]TurnItem, 0, len(items))
-	for _, it := range items {
-		if it.Role == RoleTool && (len(out) == 0 || (out[len(out)-1].Role != RoleAssistant && out[len(out)-1].Role != RoleTool)) {
-			continue
-		}
-		out = append(out, it)
-	}
-	return out
 }
