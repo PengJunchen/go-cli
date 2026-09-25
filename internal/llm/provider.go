@@ -236,14 +236,19 @@ func (m *HTTPChatModel) generate(ctx context.Context, msgs []Message, opts ...Op
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		if cerr := respBody.Close(); cerr != nil {
-			slog.Warn("llm_close_body", "err", cerr)
-		}
-	}()
+	responseBody, truncated, readErr, closeErr := readBoundedProviderBody(respBody, maxProviderJSONBodyBytes)
+	if readErr != nil {
+		return nil, errors.Join(fmt.Errorf("llm: read response: %w", readErr), closeErr)
+	}
+	if truncated {
+		return nil, errors.Join(ErrProviderResponseTooLarge, closeErr)
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
 
 	var parsed openAIResponse
-	if err := json.NewDecoder(respBody).Decode(&parsed); err != nil {
+	if err := json.NewDecoder(bytes.NewReader(responseBody)).Decode(&parsed); err != nil {
 		return nil, fmt.Errorf("llm: decode response: %w", err)
 	}
 
@@ -511,22 +516,13 @@ func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadClos
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		defer func() {
-			if cerr := resp.Body.Close(); cerr != nil {
-				slog.Warn("llm_close_error_body", "err", cerr)
-			}
-		}()
-		payload, rerr := io.ReadAll(resp.Body)
-		if rerr != nil {
-			return nil, fmt.Errorf("llm: read error response: %w", rerr)
+		payload, truncated, readErr, closeErr := readBoundedProviderBody(resp.Body, maxProviderErrorBodyBytes)
+		if readErr != nil {
+			return nil, errors.Join(fmt.Errorf("llm: read error response: %w", readErr), closeErr)
 		}
-		// Truncate the error payload to avoid leaking large response bodies
-		// (which may contain sensitive data) into logs and error chains.
-		truncated := strings.TrimSpace(string(payload))
-		if len(truncated) > 512 {
-			truncated = truncated[:512] + "..."
-		}
-		return nil, newProviderError(resp.StatusCode, m.provider.name, truncated)
+		providerErr := newProviderError(resp.StatusCode, m.provider.name, string(payload))
+		providerErr.BodyTruncated = truncated
+		return nil, errors.Join(providerErr, closeErr)
 	}
 	return resp.Body, nil
 }

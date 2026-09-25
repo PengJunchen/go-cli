@@ -114,6 +114,11 @@ func TestClassifyError(t *testing.T) {
 			categoryFatal, true, false,
 		},
 		{
+			"oversized response fatal",
+			ErrProviderResponseTooLarge,
+			categoryFatal, true, false,
+		},
+		{
 			"server transient",
 			&ProviderError{StatusCode: 500, ErrorType: ErrTypeServer, Provider: "p", Message: "boom"},
 			categoryTransient, true, true,

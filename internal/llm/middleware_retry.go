@@ -88,6 +88,9 @@ func classifyError(err error) errorCategory {
 	if err == nil {
 		return categoryNone
 	}
+	if errors.Is(err, ErrProviderResponseTooLarge) {
+		return categoryFatal
+	}
 	// Prefer structured ProviderError (errors.As traverses the Unwrap chain).
 	var pe *ProviderError
 	if errors.As(err, &pe) {
