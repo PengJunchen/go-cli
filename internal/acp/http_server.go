@@ -369,10 +369,14 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 	return nil
 }
 
-// Stop shuts the server down and releases all sessions. It cancels the
-// server-level context to abort any in-flight dispatch goroutines, then
-// gracefully shuts down the HTTP server.
-func (s *HTTPServer) Stop(ctx context.Context) error {
+// BeginStop closes request admission and starts the server-owned close
+// operation without waiting for its handlers or dispatch workers. It is safe
+// to call before Stop; repeated calls share the same generation owner.
+func (s *HTTPServer) BeginStop() {
+	s.beginStop()
+}
+
+func (s *HTTPServer) beginStop() *httpServerGeneration {
 	s.mu.Lock()
 	generation := s.generation
 	if generation == nil {
@@ -397,9 +401,20 @@ func (s *HTTPServer) Stop(ctx context.Context) error {
 	s.mu.Unlock()
 
 	if startOwner {
-		// The owner launches before any potentially blocking cancellation or
-		// logging callbacks, so this caller can honor its own wait context.
+		// Launch before any potentially blocking cancellation or logging
+		// callback so the caller remains bounded even with a custom slog handler.
 		go s.closeGeneration(generation)
+	}
+	return generation
+}
+
+// Stop shuts the server down and releases all sessions. It cancels the
+// server-level context to abort any in-flight dispatch goroutines, then
+// gracefully shuts down the HTTP server.
+func (s *HTTPServer) Stop(ctx context.Context) error {
+	generation := s.beginStop()
+	if generation == nil {
+		return nil
 	}
 	if ctx == nil {
 		ctx = context.Background()

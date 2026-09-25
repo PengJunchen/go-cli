@@ -71,6 +71,10 @@ func TestHTTPServerStopJoinsDetachedDispatchBeforeRestart(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("detached dispatcher did not start")
 	}
+	server.BeginStop()
+	if server.Running() {
+		t.Fatal("BeginStop returned before closing HTTP admission")
+	}
 
 	stopCtx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
