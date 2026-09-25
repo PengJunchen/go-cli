@@ -73,13 +73,14 @@ func UnmarshalConfig(data []byte, format ConfigFormat, target any) error {
 		if err := json.Unmarshal(data, &values); err != nil {
 			return err
 		}
-		if err := validateSamplingNulls(target, values); err != nil {
+		samplingPresence, err := inspectJSONSamplingPresence(target, values)
+		if err != nil {
 			return err
 		}
 		if err := json.Unmarshal(data, target); err != nil {
 			return err
 		}
-		recordSamplingPresence(target, values)
+		applyJSONSamplingPresence(target, samplingPresence)
 		return nil
 	case ConfigFormatYAML:
 		tree, err := parseYAMLTree(data)
@@ -100,31 +101,135 @@ func UnmarshalConfig(data []byte, format ConfigFormat, target any) error {
 	}
 }
 
-func validateSamplingNulls(target any, values map[string]any) error {
+type samplingPresenceMarks struct {
+	provider   samplingFieldMarks
+	model      samplingFieldMarks
+	smallModel samplingFieldMarks
+}
+
+type samplingFieldMarks struct {
+	temperature bool
+	maxTokens   bool
+}
+
+func inspectJSONSamplingPresence(target any, values map[string]any) (samplingPresenceMarks, error) {
+	var marks samplingPresenceMarks
 	switch target.(type) {
 	case *Config:
-		for _, section := range []string{"provider", "model", "small_model"} {
-			if err := validateSamplingSectionNulls(section, mapValue(values, section)); err != nil {
-				return err
+		for _, section := range []struct {
+			key  string
+			dest *samplingFieldMarks
+		}{
+			{key: "provider", dest: &marks.provider},
+			{key: "model", dest: &marks.model},
+			{key: "small_model", dest: &marks.smallModel},
+		} {
+			value, exists, err := lookupJSONKey(values, section.key, section.key)
+			if err != nil {
+				return samplingPresenceMarks{}, err
+			}
+			if !exists || value == nil {
+				continue
+			}
+			sectionValues, ok := value.(map[string]any)
+			if !ok {
+				continue // json.Unmarshal reports the incompatible section type.
+			}
+			*section.dest, err = inspectJSONSamplingSection(section.key, sectionValues)
+			if err != nil {
+				return samplingPresenceMarks{}, err
 			}
 		}
 	case *ProviderConfig:
-		return validateSamplingSectionNulls("provider", values)
+		var err error
+		marks.provider, err = inspectJSONSamplingSection("provider", values)
+		if err != nil {
+			return samplingPresenceMarks{}, err
+		}
 	case *ModelConfig:
-		return validateSamplingSectionNulls("model", values)
+		var err error
+		marks.model, err = inspectJSONSamplingSection("model", values)
+		if err != nil {
+			return samplingPresenceMarks{}, err
+		}
 	case *SmallModelConfig:
-		return validateSamplingSectionNulls("small_model", values)
-	}
-	return nil
-}
-
-func validateSamplingSectionNulls(section string, values map[string]any) error {
-	for _, field := range []string{"temperature", "max_tokens"} {
-		if value, exists := values[field]; exists && value == nil {
-			return fmt.Errorf("config: %s.%s cannot be null", section, field)
+		var err error
+		marks.smallModel, err = inspectJSONSamplingSection("small_model", values)
+		if err != nil {
+			return samplingPresenceMarks{}, err
 		}
 	}
-	return nil
+	return marks, nil
+}
+
+func inspectJSONSamplingSection(section string, values map[string]any) (samplingFieldMarks, error) {
+	var marks samplingFieldMarks
+	for _, field := range []struct {
+		key string
+		set *bool
+	}{
+		{key: "temperature", set: &marks.temperature},
+		{key: "max_tokens", set: &marks.maxTokens},
+	} {
+		value, exists, err := lookupJSONKey(values, section+"."+field.key, field.key)
+		if err != nil {
+			return samplingFieldMarks{}, err
+		}
+		if exists && value == nil {
+			return samplingFieldMarks{}, fmt.Errorf("config: %s.%s cannot be null", section, field.key)
+		}
+		*field.set = exists
+	}
+	return marks, nil
+}
+
+func lookupJSONKey(values map[string]any, path, name string) (any, bool, error) {
+	var matched any
+	found := false
+	for key, value := range values {
+		if !strings.EqualFold(key, name) {
+			continue
+		}
+		if found {
+			return nil, false, fmt.Errorf("config: ambiguous case-folded keys for %s", path)
+		}
+		matched = value
+		found = true
+	}
+	return matched, found, nil
+}
+
+func applyJSONSamplingPresence(target any, marks samplingPresenceMarks) {
+	set := func(temperature, maxTokens *bool, source samplingFieldMarks) {
+		if source.temperature {
+			*temperature = true
+		}
+		if source.maxTokens {
+			*maxTokens = true
+		}
+	}
+	switch cfg := target.(type) {
+	case *Config:
+		if cfg == nil {
+			return
+		}
+		cfg.samplingPresenceKnown = true
+		set(&cfg.Provider.temperatureSet, &cfg.Provider.maxTokensSet, marks.provider)
+		set(&cfg.Model.temperatureSet, &cfg.Model.maxTokensSet, marks.model)
+		set(&cfg.SmallModel.temperatureSet, &cfg.SmallModel.maxTokensSet, marks.smallModel)
+	case *ProviderConfig:
+		if cfg != nil {
+			set(&cfg.temperatureSet, &cfg.maxTokensSet, marks.provider)
+		}
+	case *ModelConfig:
+		if cfg != nil {
+			set(&cfg.temperatureSet, &cfg.maxTokensSet, marks.model)
+		}
+	case *SmallModelConfig:
+		if cfg != nil {
+			set(&cfg.temperatureSet, &cfg.maxTokensSet, marks.smallModel)
+		}
+	}
 }
 
 func recordSamplingPresence(target any, values map[string]any) {
