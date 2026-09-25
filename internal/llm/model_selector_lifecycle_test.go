@@ -2,6 +2,7 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -426,4 +427,198 @@ func TestModelSelectorBuilderPanicFailsClosedWithoutClaimingCleanup(t *testing.T
 	require.NotNil(t, dispose)
 	assert.ErrorIs(t, dispose(), ErrModelBuilderPanicked, "unknown builder resources must remain a reported disposal failure")
 	assert.Equal(t, int32(1), initialCleanupCalls.Load(), "known current generation remains disposable")
+}
+
+func TestModelSelectorRejectsNilCandidatesAndCleansReturnedHandle(t *testing.T) {
+	initial := &selectorLifecycleModel{name: "initial"}
+	candidateCleanupCalls := atomic.Int32{}
+	callbackCalls := atomic.Int32{}
+	buildCalls := atomic.Int32{}
+	selector := NewDefaultModelSelector(initial, nil).
+		WithModelNames("openai", "initial", "", "").
+		WithModelSpecBuilder(func(_ context.Context, model ModelSpec) (BaseChatModel, func(), error) {
+			buildCalls.Add(1)
+			if model.ModelID == "nil-with-cleanup" {
+				return nil, func() { candidateCleanupCalls.Add(1) }, nil
+			}
+			if model.ModelID == "typed-nil" {
+				var typedNil *selectorLifecycleModel
+				return typedNil, nil, nil
+			}
+			return nil, nil, nil
+		}).
+		WithModelSwitchCallback(func(BaseChatModel) { callbackCalls.Add(1) })
+
+	err := selector.SwitchModelSpec(context.Background(), ModelSpec{ProviderID: "openai", ModelID: "nil-without-cleanup"})
+	require.ErrorIs(t, err, ErrModelBuilderReturnedNil)
+	assert.Same(t, initial, selector.PrimaryModel())
+	assert.Equal(t, ModelSpec{ProviderID: "openai", ModelID: "initial"}, selector.CurrentModelSpec())
+
+	err = selector.SwitchModelSpec(context.Background(), ModelSpec{ProviderID: "openai", ModelID: "typed-nil"})
+	require.ErrorIs(t, err, ErrModelBuilderReturnedNil, "typed nil model must not be published")
+	assert.Same(t, initial, selector.PrimaryModel())
+	assert.Equal(t, ModelSpec{ProviderID: "openai", ModelID: "initial"}, selector.CurrentModelSpec())
+
+	err = selector.SwitchModelSpec(context.Background(), ModelSpec{ProviderID: "openai", ModelID: "nil-with-cleanup"})
+	require.ErrorIs(t, err, ErrModelBuilderReturnedNil)
+	assert.Same(t, initial, selector.PrimaryModel())
+	assert.Equal(t, int32(1), candidateCleanupCalls.Load(), "rejected nil candidate must release its returned cleanup handle")
+	assert.Equal(t, int32(0), callbackCalls.Load())
+	assert.Equal(t, int32(3), buildCalls.Load())
+	assert.NoError(t, selector.Failure(), "a nil result with successful cleanup rejects only that switch")
+}
+
+func TestModelSelectorNilCandidateCleanupPanicIsRetainedAndPoisons(t *testing.T) {
+	initial := &selectorLifecycleModel{name: "initial"}
+	var cleanupCalls atomic.Int32
+	var handlerCalls atomic.Int32
+	selector := NewDefaultModelSelector(initial, nil).
+		WithModelNames("openai", "initial", "", "").
+		WithModelSpecBuilder(func(context.Context, ModelSpec) (BaseChatModel, func(), error) {
+			return nil, func() {
+				cleanupCalls.Add(1)
+				panic("sensitive nil-candidate cleanup panic")
+			}, nil
+		}).
+		WithModelSelectorFailureHandler(func() { handlerCalls.Add(1) })
+
+	err := selector.SwitchModelSpec(context.Background(), ModelSpec{ProviderID: "openai", ModelID: "nil-with-panic"})
+	require.ErrorIs(t, err, ErrModelBuilderReturnedNil)
+	require.ErrorIs(t, err, ErrModelSelectorFailed)
+	require.ErrorIs(t, err, ErrModelCleanupPanicked)
+	assert.NotContains(t, err.Error(), "sensitive nil-candidate cleanup panic")
+	assert.Same(t, initial, selector.PrimaryModel())
+	assert.Equal(t, int32(1), cleanupCalls.Load())
+	assert.Equal(t, int32(1), handlerCalls.Load())
+
+	dispose, sealErr := selector.SealAndDetach(context.Background())
+	require.ErrorIs(t, sealErr, ErrModelSelectorFailed)
+	require.NotNil(t, dispose)
+	assert.ErrorIs(t, dispose(), ErrModelCleanupPanicked)
+	assert.Equal(t, int32(1), cleanupCalls.Load(), "failed cleanup handle must never be retried")
+	require.Len(t, selector.disposer.generations, 1, "failed candidate generation and cleanup handle remain owned")
+	assert.NotNil(t, selector.disposer.generations[0].cleanup)
+}
+
+func TestModelGenerationDisposerRetainsOnlyFailedGenerationsWithoutRetry(t *testing.T) {
+	failedA := &modelGeneration{model: &selectorLifecycleModel{name: "failed-a"}}
+	failedB := &modelGeneration{model: &selectorLifecycleModel{name: "failed-b"}}
+	succeeded := &modelGeneration{model: &selectorLifecycleModel{name: "succeeded"}}
+	var failedACalls atomic.Int32
+	var failedBCalls atomic.Int32
+	var succeededCalls atomic.Int32
+	failedA.cleanup = func() {
+		failedACalls.Add(1)
+		panic("first cleanup failure")
+	}
+	failedB.cleanup = func() {
+		failedBCalls.Add(1)
+		panic("second cleanup failure")
+	}
+	succeeded.cleanup = func() { succeededCalls.Add(1) }
+	disposer := newModelGenerationDisposer([]*modelGeneration{failedA, succeeded, failedB}, nil)
+
+	err := disposer.run()
+	require.ErrorIs(t, err, ErrModelCleanupPanicked)
+	assert.Equal(t, int32(1), failedACalls.Load())
+	assert.Equal(t, int32(1), failedBCalls.Load())
+	assert.Equal(t, int32(1), succeededCalls.Load())
+	assert.Nil(t, succeeded.model, "successful generation references should be released")
+	assert.Nil(t, succeeded.cleanup)
+	require.Len(t, disposer.generations, 2, "only failed generations remain owned")
+	assert.Same(t, failedA, disposer.generations[0])
+	assert.Same(t, failedB, disposer.generations[1])
+	assert.True(t, failedA.cleanupAttempted)
+	assert.True(t, failedB.cleanupAttempted)
+	assert.NotNil(t, failedA.cleanup)
+	assert.NotNil(t, failedB.cleanup)
+
+	assert.ErrorIs(t, disposer.run(), ErrModelCleanupPanicked, "repeat disposal reports the stored result")
+	assert.Equal(t, int32(1), failedACalls.Load(), "failed cleanup is not retried")
+	assert.Equal(t, int32(1), failedBCalls.Load(), "failed cleanup is not retried")
+	assert.Equal(t, int32(1), succeededCalls.Load())
+	require.Len(t, disposer.generations, 2, "failed generations remain held after repeated disposal")
+}
+
+func TestModelSelectorConfiguredAdmissionWithoutReleaseRejectsCandidate(t *testing.T) {
+	initial := &selectorLifecycleModel{name: "initial"}
+	candidate := &selectorLifecycleModel{name: "candidate"}
+	var candidateCleanupCalls atomic.Int32
+	var callbackCalls atomic.Int32
+	selector := NewDefaultModelSelector(initial, nil).
+		WithModelNames("openai", "initial", "", "").
+		WithModelSpecBuilder(func(context.Context, ModelSpec) (BaseChatModel, func(), error) {
+			return candidate, func() { candidateCleanupCalls.Add(1) }, nil
+		}).
+		WithModelSwitchAdmission(func(context.Context) (func(), error) { return nil, nil }).
+		WithModelSwitchCallback(func(BaseChatModel) { callbackCalls.Add(1) })
+
+	err := selector.SwitchModelSpec(context.Background(), ModelSpec{ProviderID: "openai", ModelID: "candidate"})
+	require.ErrorIs(t, err, ErrModelSwitchAdmissionMissingRelease)
+	assert.Same(t, initial, selector.PrimaryModel())
+	assert.Equal(t, ModelSpec{ProviderID: "openai", ModelID: "initial"}, selector.CurrentModelSpec())
+	assert.Equal(t, int32(1), candidateCleanupCalls.Load())
+	assert.Equal(t, int32(0), callbackCalls.Load())
+	assert.NoError(t, selector.Failure(), "a rejected admission does not poison a healthy selector")
+}
+
+func TestModelSelectorAdmissionReleaseWithErrorRollsBackBeforeRelease(t *testing.T) {
+	tests := []struct {
+		name              string
+		cleanupPanics     bool
+		wantHandlerBefore bool
+	}{
+		{name: "normal cleanup"},
+		{name: "cleanup panic", cleanupPanics: true, wantHandlerBefore: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			initial := &selectorLifecycleModel{name: "initial"}
+			candidate := &selectorLifecycleModel{name: "candidate"}
+			admissionErr := errors.New("admission rejected")
+			var events []string
+			var cleanupCalls atomic.Int32
+			var releaseCalls atomic.Int32
+			var handlerCalls atomic.Int32
+			selector := NewDefaultModelSelector(initial, nil).
+				WithModelNames("openai", "initial", "", "").
+				WithModelSpecBuilder(func(context.Context, ModelSpec) (BaseChatModel, func(), error) {
+					return candidate, func() {
+						cleanupCalls.Add(1)
+						events = append(events, "cleanup")
+						if test.cleanupPanics {
+							panic("sensitive cleanup panic")
+						}
+					}, nil
+				}).
+				WithModelSwitchAdmission(func(context.Context) (func(), error) {
+					return func() {
+						releaseCalls.Add(1)
+						events = append(events, "release")
+					}, admissionErr
+				}).
+				WithModelSelectorFailureHandler(func() {
+					handlerCalls.Add(1)
+					events = append(events, "handler")
+				})
+
+			err := selector.SwitchModelSpec(context.Background(), ModelSpec{ProviderID: "openai", ModelID: "candidate"})
+			require.ErrorIs(t, err, admissionErr)
+			assert.Same(t, initial, selector.PrimaryModel())
+			assert.Equal(t, ModelSpec{ProviderID: "openai", ModelID: "initial"}, selector.CurrentModelSpec())
+			assert.Equal(t, int32(1), cleanupCalls.Load())
+			assert.Equal(t, int32(1), releaseCalls.Load(), "borrowed admission must be released exactly once")
+			if test.wantHandlerBefore {
+				require.ErrorIs(t, err, ErrModelSelectorFailed)
+				require.ErrorIs(t, err, ErrModelCleanupPanicked)
+				assert.Equal(t, int32(1), handlerCalls.Load())
+				assert.Equal(t, []string{"cleanup", "handler", "release"}, events)
+				assert.NotContains(t, err.Error(), "sensitive cleanup panic")
+			} else {
+				assert.NoError(t, selector.Failure())
+				assert.Equal(t, int32(0), handlerCalls.Load())
+				assert.Equal(t, []string{"cleanup", "release"}, events)
+			}
+		})
+	}
 }
