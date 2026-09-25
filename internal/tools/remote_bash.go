@@ -1,7 +1,6 @@
 package tools
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -146,55 +145,113 @@ func (t *RemoteBashTool) Execute(ctx context.Context, call ToolCall) (*ToolResul
 			return nil, err
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("remote_bash: canceled before dispatch: %w", err)
+	}
 
 	// Apply the tool's timeout.
 	execCtx, cancel := context.WithTimeout(ctx, t.timeout)
 	defer cancel()
 
-	stdout, stderr, exitCode, execErr := client.Exec(execCtx, command)
+	var stdout, stderr string
+	var exitCode int
+	var truncatedByClient bool
+	var execErr error
+	if bounded, ok := client.(BoundedSSHClient); ok {
+		boundedResult, boundedErr := bounded.ExecBounded(execCtx, command, t.maxOutput)
+		stdout, stderr, exitCode, truncatedByClient, execErr = boundedResult.Stdout, boundedResult.Stderr, boundedResult.ExitCode, boundedResult.Truncated, boundedErr
+	} else {
+		stdout, stderr, exitCode, execErr = client.Exec(execCtx, command)
+	}
 	ms := time.Since(start).Milliseconds()
 
-	// Build the combined output with the limitedWriter pattern (reused from
-	// bash.go) to cap the amount of buffered data.
-	var buf bytes.Buffer
-	limited := &limitedWriter{max: t.maxOutput, buf: &buf}
-	_, _ = limited.Write([]byte(stdout)) //nolint:errcheck
-	if stderr != "" {
-		_, _ = limited.Write([]byte(stderr)) //nolint:errcheck
-	}
-	limited.truncate()
-	output := buf.String()
+	stdout, stderr, output, truncated := boundedRemoteOutput(stdout, stderr, t.maxOutput, truncatedByClient)
 
 	metadata := map[string]any{
 		"duration_ms": ms,
 		"exit_code":   exitCode,
 		"stdout":      stdout,
 		"stderr":      stderr,
+		"truncated":   truncated,
+	}
+	if _, ok := client.(*DefaultSSHClient); ok {
+		// This describes only the local ssh/sshpass process group; it is not a
+		// receipt that the remote command stopped or stayed within that group.
+		// In password mode, sshpass starts its ssh child in a new session, so the
+		// field also does not claim full local transport-tree containment.
+		metadata["local_ssh_process_group_scope"] = processContainmentScope
 	}
 	if hostName != "" {
 		metadata["host"] = hostName
 	}
 
-	if execCtx.Err() != nil {
-		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-		metadata["error"] = "timed out"
-		logger.Error("remote_bash.timeout",
-			"tool", "remote_bash",
-			"duration_ms", ms,
-			"timeout", t.timeout.String())
-		return &ToolResult{Output: output, Metadata: metadata, ToolCallID: call.ID},
-			fmt.Errorf("remote_bash: timed out after %s: %w", t.timeout.String(), execCtx.Err())
-	}
-
 	if execErr != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-		logger.Error("remote_bash.exec_failed",
+		toolResult := &ToolResult{Output: output, Metadata: metadata, ToolCallID: call.ID, IsError: true}
+		var notDispatched interface{ ExecutionNotDispatched() bool }
+		if errors.As(execErr, &notDispatched) && notDispatched.ExecutionNotDispatched() {
+			metadata["remote_completion"] = "not_dispatched"
+			metadata["error"] = "not_dispatched"
+			logger.Error("remote_bash.not_dispatched",
+				"tool", "remote_bash",
+				"duration_ms", ms,
+				"err", execErr)
+			return toolResult, fmt.Errorf("remote_bash: %w", execErr)
+		}
+		metadata["remote_completion"] = "unknown"
+		if execCtx.Err() != nil {
+			message := "canceled"
+			if errors.Is(execCtx.Err(), context.DeadlineExceeded) {
+				message = "timed out"
+			}
+			metadata["error"] = message
+			logger.Error("remote_bash.execution_interrupted",
+				"tool", "remote_bash",
+				"duration_ms", ms,
+				"reason", message,
+				"timeout", t.timeout.String())
+		} else {
+			logger.Error("remote_bash.exec_failed",
+				"tool", "remote_bash",
+				"duration_ms", ms,
+				"exit_code", exitCode,
+				"err", execErr)
+		}
+		cause := fmt.Errorf("remote_bash: %w", execErr)
+		if execCtx.Err() != nil {
+			cause = errors.Join(cause, execCtx.Err())
+			// A canceled local invocation without an explicit pre-dispatch
+			// receipt cannot prove that the remote command stopped. Keep the
+			// remote claim pending even when the local SSH client reports only an
+			// unknown outcome after its own resources have joined.
+			return toolResult, pendingProcessError(cause, true)
+		}
+		var localPending PendingExecutionError
+		if !errors.As(execErr, &localPending) {
+			var unknownOutcome interface{ OutcomeUnknown() bool }
+			if errors.As(execErr, &unknownOutcome) && unknownOutcome.OutcomeUnknown() {
+				return toolResult, newUnknownExecutionError(cause)
+			}
+		}
+		return toolResult, pendingProcessError(cause, true)
+	}
+	if exitCode < 0 {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		metadata["remote_completion"] = "unknown"
+		cause := fmt.Errorf("remote_bash: SSH client returned no terminal exit status")
+		return &ToolResult{Output: output, Metadata: metadata, ToolCallID: call.ID, IsError: true}, pendingProcessError(cause, true)
+	}
+
+	metadata["remote_completion"] = "complete"
+	toolResult := &ToolResult{Output: output, Metadata: metadata, ToolCallID: call.ID}
+	if exitCode != 0 {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		toolResult.IsError = true
+		logger.Error("remote_bash.command_failed",
 			"tool", "remote_bash",
 			"duration_ms", ms,
-			"exit_code", exitCode,
-			"err", execErr)
-		return &ToolResult{Output: output, Metadata: metadata, ToolCallID: call.ID},
-			fmt.Errorf("remote_bash: %w", execErr)
+			"exit_code", exitCode)
+		return toolResult, fmt.Errorf("remote_bash: remote command exited with status %d", exitCode)
 	}
 
 	span.SetAttributes(tracing.Attribute{Key: "success", Value: true})
@@ -204,5 +261,29 @@ func (t *RemoteBashTool) Execute(ctx context.Context, call ToolCall) (*ToolResul
 		"exit_code", exitCode,
 		"output_bytes", len(output))
 
-	return &ToolResult{Output: output, Metadata: metadata, ToolCallID: call.ID}, nil
+	return toolResult, nil
+}
+
+func boundedRemoteOutput(stdout, stderr string, max int, alreadyTruncated bool) (string, string, string, bool) {
+	if max < 0 {
+		max = 0
+	}
+	truncated := alreadyTruncated
+	if len(stdout) > max {
+		stdout = stdout[:max]
+		stderr = ""
+		truncated = true
+	} else if remaining := max - len(stdout); len(stderr) > remaining {
+		stderr = stderr[:remaining]
+		truncated = true
+	}
+	// Clone bounded prefixes so a legacy client's large backing strings are
+	// not retained through metadata substrings after Execute returns.
+	stdout = strings.Clone(stdout)
+	stderr = strings.Clone(stderr)
+	combined := stdout + stderr
+	if truncated {
+		combined += "\n[output truncated]"
+	}
+	return stdout, stderr, combined, truncated
 }

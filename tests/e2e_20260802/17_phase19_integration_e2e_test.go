@@ -315,9 +315,24 @@ func TestE2E_Phase19_CompactionSinglePath(t *testing.T) {
 	// Many user/assistant turns with tool results.
 	for i := 0; i < 20; i++ {
 		items = append(items, compaction.TurnItem{
-			ID:         fmt.Sprintf("user-%d", i),
-			Role:       compaction.RoleUser,
-			Content:    fmt.Sprintf("User message number %d with some padding text to increase token count", i),
+			ID:      fmt.Sprintf("user-%d", i),
+			Role:    compaction.RoleUser,
+			Content: fmt.Sprintf("User message number %d with some padding text to increase token count", i),
+		})
+		items = append(items, compaction.TurnItem{
+			ID:      fmt.Sprintf("asst-call-%d", i),
+			Role:    compaction.RoleAssistant,
+			Content: fmt.Sprintf("Assistant response %d with additional text content", i),
+			ToolCalls: []llm.ToolCall{{
+				ID:   fmt.Sprintf("tool-%d", i),
+				Name: "read",
+			}},
+		})
+		items = append(items, compaction.TurnItem{
+			ID:         fmt.Sprintf("tool-%d", i),
+			Role:       compaction.RoleTool,
+			ToolCallID: fmt.Sprintf("tool-%d", i),
+			ToolName:   "read",
 			ToolResult: fmt.Sprintf("Tool result %d with lots of output text to bloat the context window significantly", i),
 		})
 		items = append(items, compaction.TurnItem{
@@ -546,11 +561,11 @@ func TestE2E_Phase19_ConfigFieldConsumption(t *testing.T) {
 	items := []compaction.TurnItem{
 		{ID: "1", Role: compaction.RoleSystem, Content: "system prompt"},
 		{ID: "2", Role: compaction.RoleUser, Content: "hello"},
-		{ID: "3", Role: compaction.RoleAssistant, Content: "hi"},
-		{ID: "4", Role: compaction.RoleTool, ToolResult: strings.Repeat("large tool result content ", 50)},
+		{ID: "3", Role: compaction.RoleAssistant, Content: "hi", ToolCalls: []llm.ToolCall{{ID: "tool-4", Name: "read"}}},
+		{ID: "4", Role: compaction.RoleTool, ToolCallID: "tool-4", ToolName: "read", ToolResult: strings.Repeat("large tool result content ", 50)},
 		{ID: "5", Role: compaction.RoleUser, Content: "next question"},
-		{ID: "6", Role: compaction.RoleAssistant, Content: "answer"},
-		{ID: "7", Role: compaction.RoleTool, ToolResult: strings.Repeat("another big tool result ", 50)},
+		{ID: "6", Role: compaction.RoleAssistant, Content: "answer", ToolCalls: []llm.ToolCall{{ID: "tool-7", Name: "read"}}},
+		{ID: "7", Role: compaction.RoleTool, ToolCallID: "tool-7", ToolName: "read", ToolResult: strings.Repeat("another big tool result ", 50)},
 	}
 	// Use a budget that micro can satisfy by placeholdering tool results.
 	out, err := compactor.Compact(context.Background(), items, 100, est)

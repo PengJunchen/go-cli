@@ -108,6 +108,133 @@ func TestSubAgentSendRecordsMessage(t *testing.T) {
 	require.NoError(t, werr)
 }
 
+type heldInboxSubAgentRunner struct {
+	started chan struct{}
+	release <-chan struct{}
+}
+
+func (r *heldInboxSubAgentRunner) Run(ctx context.Context, _ string, _ <-chan string, _ func(AgentEvent)) (AgentMessage, error) {
+	close(r.started)
+	select {
+	case <-r.release:
+		return AgentMessage{Role: "assistant", Content: "done"}, nil
+	case <-ctx.Done():
+		return AgentMessage{}, ctx.Err()
+	}
+}
+
+func TestSubagentSendReportsDroppedMessage(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseRunner := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseRunner()
+	runner := &heldInboxSubAgentRunner{started: started, release: release}
+	sub := mustSubAgent(NewDefaultSubAgent(
+		SubAgentConfig{Name: "held-inbox"},
+		WithSubAgentRunner(func(SubAgentConfig) subAgentRunner { return runner }),
+	))
+
+	_, err := sub.Run(context.Background(), "hold inbox")
+	require.NoError(t, err)
+	defer func() {
+		releaseRunner()
+		_, _ = sub.Wait(context.Background())
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("sub-agent runner did not start")
+	}
+
+	for i := range inboxBufferSize {
+		require.NoError(t, sub.Send(context.Background(), "queued-"+string(rune('a'+i))))
+	}
+
+	overflowErr := sub.Send(context.Background(), "overflow")
+	require.Error(t, overflowErr, "a full inbox must reject the message instead of reporting false success")
+	assert.Len(t, sub.Received(), inboxBufferSize,
+		"Received must contain only messages actually accepted into the inbox")
+
+	releaseRunner()
+	_, err = sub.Wait(context.Background())
+	require.NoError(t, err)
+}
+
+type panickingSubAgentRunner struct {
+	sideEffects *atomic.Int32
+}
+
+func (r *panickingSubAgentRunner) Run(context.Context, string, <-chan string, func(AgentEvent)) (AgentMessage, error) {
+	r.sideEffects.Add(1)
+	panic("runner fixture panic")
+}
+
+func TestSubAgentPanicIsContainedAndFinalized(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	tests := []struct {
+		name    string
+		factory SubAgentRunnerFactory
+	}{
+		{
+			name: "runner factory",
+			factory: func(SubAgentConfig) subAgentRunner {
+				panic("factory fixture panic")
+			},
+		},
+		{
+			name: "runner",
+			factory: func(SubAgentConfig) subAgentRunner {
+				return &panickingSubAgentRunner{}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sideEffects := &atomic.Int32{}
+			factory := tt.factory
+			if tt.name == "runner" {
+				factory = func(SubAgentConfig) subAgentRunner {
+					return &panickingSubAgentRunner{sideEffects: sideEffects}
+				}
+			}
+			sub := mustSubAgent(NewDefaultSubAgent(
+				SubAgentConfig{Name: "panic-" + tt.name},
+				WithSubAgentRunner(factory),
+			))
+			events, err := sub.Run(context.Background(), "trigger panic")
+			require.NoError(t, err)
+
+			waitCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			result, waitErr := sub.Wait(waitCtx)
+
+			require.ErrorIs(t, waitErr, ErrSubAgentPanicked, "panic must not be reported as successful completion")
+			var unknownOutcome interface{ OutcomeUnknown() bool }
+			require.ErrorAs(t, waitErr, &unknownOutcome)
+			assert.True(t, unknownOutcome.OutcomeUnknown(), "panic may follow an unobserved side effect")
+			if tt.name == "runner" {
+				assert.EqualValues(t, 1, sideEffects.Load(), "the runner may cause an effect before panicking")
+			}
+			assert.Empty(t, result)
+			assert.Equal(t, SubAgentFailed, sub.State())
+			assert.ErrorIs(t, sub.Send(context.Background(), "too late"), ErrSubAgentNotRunning)
+
+			var sawErrorEvent bool
+			for event := range events {
+				if event.Kind == "error" {
+					sawErrorEvent = true
+					assert.Contains(t, event.Content, "panic")
+				}
+			}
+			assert.True(t, sawErrorEvent, "panic failure should be recorded on the closed event stream")
+		})
+	}
+}
+
 func TestSubAgentInterruptStopsRun(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 

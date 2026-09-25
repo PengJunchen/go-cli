@@ -1,0 +1,21 @@
+--- FAIL: TestStdioWriterPanicIsContainedAndFencesSession (0.02s)
+    stdio_panic_test.go:21: 
+        	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/r6-acp-stdio-panic-test-b64da03/internal/acp/stdio_panic_test.go:168
+        	            				/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/r6-acp-stdio-panic-test-b64da03/internal/acp/stdio_panic_test.go:21
+        	Error:      	Received unexpected error:
+        	            	exit status 1
+        	Test:       	TestStdioWriterPanicIsContainedAndFencesSession
+        	Messages:   	isolated panic scenario "writer" failed: 2026/09/25 17:45:30 INFO acp.connect transport=Stdio endpoint=stdio://stdin-stdout trace_id="" span_id=""
+        	            	2026/09/25 17:45:30 ERROR acp.send.failed message_type=message receiver_id="" err="acp: stdio write pending: acp: stdio adapter is closing\nacp: stdio writer panicked after dispatch; delivery unknown" trace_id="" span_id=""
+        	            	--- FAIL: TestStdioWriterPanicIsContainedAndFencesSession (0.00s)
+        	            	    stdio_panic_test.go:35: 
+        	            	        	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/r6-acp-stdio-panic-test-b64da03/internal/acp/stdio_panic_test.go:35
+        	            	        	Error:      	Error message not equal:
+        	            	        	            	expected: "acp: stdio send: acp: stdio writer panicked after dispatch; delivery unknown"
+        	            	        	            	actual  : "acp: stdio send: acp: stdio write pending: acp: stdio adapter is closing\nacp: stdio writer panicked after dispatch; delivery unknown"
+        	            	        	Test:       	TestStdioWriterPanicIsContainedAndFencesSession
+        	            	2026/09/25 17:45:30 WARN acp.receive.read name=stdio err="acp: read stdio frame: io: read/write on closed pipe"
+        	            	FAIL
+FAIL
+FAIL	github.com/pengjunchen/go-cli/internal/acp	29.927s
+FAIL

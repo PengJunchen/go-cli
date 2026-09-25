@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -84,8 +85,10 @@ func TestEncodeOpenAIRequest_Options(t *testing.T) {
 	var req openAIRequest
 	require.NoError(t, json.Unmarshal(body, &req))
 	assert.Equal(t, "resolved", req.Model)
-	assert.Equal(t, 0.9, req.Temperature)
-	assert.Equal(t, 9, req.MaxTokens)
+	require.NotNil(t, req.Temperature)
+	assert.Equal(t, 0.9, *req.Temperature)
+	require.NotNil(t, req.MaxTokens)
+	assert.Equal(t, 9, *req.MaxTokens)
 	require.Len(t, req.Messages, 2)
 	assert.Equal(t, "tool", req.Messages[1].Role)
 	assert.Equal(t, "call_1", req.Messages[1].ToolCallID)
@@ -266,7 +269,8 @@ func TestNativeChatModelGenerate_EncodeError(t *testing.T) {
 	assert.Contains(t, err.Error(), "encode boom")
 }
 
-// TestNativeChatModelGenerate_Non2xx verifies non-2xx surfaces the payload.
+// TestNativeChatModelGenerate_Non2xx verifies non-2xx preserves structured
+// status metadata but keeps the provider payload out of the error summary.
 func TestNativeChatModelGenerate_Non2xx(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -286,7 +290,11 @@ func TestNativeChatModelGenerate_Non2xx(t *testing.T) {
 	}
 	_, err := m.Generate(context.Background(), nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "player-error-payload")
+	assert.NotContains(t, err.Error(), "player-error-payload")
+	assert.Contains(t, err.Error(), "HTTP 400")
+	var providerErr *ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Equal(t, "player-error-payload", providerErr.Message)
 }
 
 // TestNativeChatModelGenerate_DecodeError verifies a decode failure surfaces.
@@ -464,6 +472,8 @@ func TestStreamGemini_FunctionCallAccumulation(t *testing.T) {
 		"",
 		`data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"get_weather","args":{"city":"SF"}}}]},"finishReason":"STOP"}]}`,
 		"",
+		`data: {"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":2}}`,
+		"",
 	}, "\n")
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -500,6 +510,45 @@ func TestStreamGemini_FunctionCallAccumulation(t *testing.T) {
 	args, ok := tc.Args.(map[string]any)
 	require.True(t, ok)
 	assert.Equal(t, "SF", args["city"])
+	require.NotNil(t, final.Usage, "usage-only Gemini frame after terminal candidate must be preserved")
+	assert.Equal(t, 5, final.Usage.TotalTokens)
+}
+
+func TestStreamGeminiRejectsCandidatesAfterTerminalFinishReason(t *testing.T) {
+	for name, latePart := range map[string]string{
+		"text":          `{"text":"injected"}`,
+		"function call": `{"functionCall":{"name":"late_action","args":{}}}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			sseBody := strings.Join([]string{
+				`data: {"candidates":[{"content":{"parts":[{"text":"complete"}]},"finishReason":"STOP"}]}`,
+				"",
+				`data: {"candidates":[{"content":{"parts":[` + latePart + `]}}]}`,
+				"",
+			}, "\n")
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				writeResponse(t, w, sseBody)
+			}))
+			t.Cleanup(server.Close)
+
+			model, _, err := NewGeminiProvider(WithNativeBaseURL(server.URL)).Build(context.Background(), ModelConfig{Model: "m"})
+			require.NoError(t, err)
+			ch, err := model.Stream(context.Background(), nil)
+			require.NoError(t, err)
+			var chunks []MessageChunk
+			for chunk := range ch {
+				chunks = append(chunks, chunk)
+			}
+			require.NotEmpty(t, chunks)
+			assert.Equal(t, "complete", chunks[0].Content)
+			assertStreamFailedWithoutSuccess(t, chunks)
+			for _, chunk := range chunks {
+				assert.NotContains(t, chunk.Content, "injected")
+				assert.Empty(t, chunk.ToolCalls)
+			}
+		})
+	}
 }
 
 // TestStreamGemini_MultipleFunctionCalls verifies that multiple functionCall
@@ -565,12 +614,8 @@ func TestStreamGemini_TextAndToolCallMixed(t *testing.T) {
 		// First chunk: text only.
 		`data: {"candidates":[{"content":{"parts":[{"text":"I'll search "}]}}]}`,
 		"",
-		// Second chunk: functionCall only.
-		`data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"search","args":{"q":"golang"}}}]},"finishReason":"STOP"}]}`,
-		"",
-		// Third chunk: text after the function call (e.g. another candidate
-		// segment).
-		`data: {"candidates":[{"content":{"parts":[{"text":"done"}]}}]}`,
+		// The terminal candidate includes the final text and function call.
+		`data: {"candidates":[{"content":{"parts":[{"functionCall":{"name":"search","args":{"q":"golang"}}},{"text":"done"}]},"finishReason":"STOP"}]}`,
 		"",
 	}, "\n")
 
@@ -817,7 +862,7 @@ func TestNativeStreamingBypassesClientTimeout(t *testing.T) {
 			f.Flush()
 		}
 		time.Sleep(200 * time.Millisecond)
-		writeResponse(t, w, "data: {\"choices\":[{\"delta\":{\"content\":\"late\"}}]}\n\ndata: [DONE]\n\n")
+		writeResponse(t, w, "data: {\"choices\":[{\"delta\":{\"content\":\"late\"}}]}\n\ndata: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\ndata: [DONE]\n\n")
 	}))
 	defer srv.Close()
 
@@ -858,4 +903,499 @@ func TestNativeGenerateContextCancel(t *testing.T) {
 
 	_, err = model.Generate(ctx, nil)
 	require.Error(t, err)
+}
+
+func TestClaudeStreamRejectsNonObjectToolArguments(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	events := []string{
+		`{"type":"message_start","message":{"role":"assistant"}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"tool_use","id":"call_1","name":"read"}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"input_json_delta","partial_json":"null"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null}}`,
+		`{"type":"message_stop"}`,
+	}
+	sseBody := claudeSSEBody(t, events)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeResponse(t, w, sseBody)
+	}))
+	defer srv.Close()
+
+	provider := NewClaudeProvider(WithNativeBaseURL(srv.URL))
+	model, _, err := provider.Build(context.Background(), ModelConfig{Model: "claude-test"})
+	require.NoError(t, err)
+	stream, err := model.Stream(context.Background(), []Message{{Role: RoleUser, Content: "read"}})
+	require.NoError(t, err)
+	var streamErr error
+	for chunk := range stream {
+		if chunk.Error != nil {
+			streamErr = chunk.Error
+		}
+	}
+	require.ErrorContains(t, streamErr, "arguments must be a JSON object")
+}
+
+func TestClaudeStreamRejectsMalformedEventOrdering(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	tests := []struct {
+		name   string
+		events []string
+	}{
+		{
+			name: "delta before message start",
+			events: []string{
+				`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"early"}}`,
+				`{"type":"message_start","message":{"role":"assistant"}}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+				`{"type":"message_stop"}`,
+			},
+		},
+		{
+			name: "duplicate message start",
+			events: []string{
+				`{"type":"message_start","message":{"role":"assistant"}}`,
+				`{"type":"message_start","message":{"role":"assistant"}}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+				`{"type":"message_stop"}`,
+			},
+		},
+		{
+			name: "delta without active block",
+			events: []string{
+				`{"type":"message_start","message":{"role":"assistant"}}`,
+				`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"unframed"}}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+				`{"type":"message_stop"}`,
+			},
+		},
+		{
+			name: "delta references another block index",
+			events: []string{
+				`{"type":"message_start","message":{"role":"assistant"}}`,
+				`{"type":"content_block_start","index":0,"content_block":{"type":"text"}}`,
+				`{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"wrong block"}}`,
+				`{"type":"content_block_stop","index":0}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+				`{"type":"message_stop"}`,
+			},
+		},
+		{
+			name: "first block index is not zero",
+			events: []string{
+				`{"type":"message_start","message":{"role":"assistant"}}`,
+				`{"type":"content_block_start","index":2,"content_block":{"type":"text"}}`,
+				`{"type":"content_block_delta","index":2,"delta":{"type":"text_delta","text":"gap"}}`,
+				`{"type":"content_block_stop","index":2}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+				`{"type":"message_stop"}`,
+			},
+		},
+		{
+			name: "duplicate block start index",
+			events: []string{
+				`{"type":"message_start","message":{"role":"assistant"}}`,
+				`{"type":"content_block_start","index":0,"content_block":{"type":"text"}}`,
+				`{"type":"content_block_start","index":0,"content_block":{"type":"text"}}`,
+				`{"type":"content_block_stop","index":0}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+				`{"type":"message_stop"}`,
+			},
+		},
+		{
+			name: "block stop references another index",
+			events: []string{
+				`{"type":"message_start","message":{"role":"assistant"}}`,
+				`{"type":"content_block_start","index":0,"content_block":{"type":"text"}}`,
+				`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"text"}}`,
+				`{"type":"content_block_stop","index":1}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+				`{"type":"message_stop"}`,
+			},
+		},
+		{
+			name: "block stop omits index",
+			events: []string{
+				`{"type":"message_start","message":{"role":"assistant"}}`,
+				`{"type":"content_block_start","index":0,"content_block":{"type":"text"}}`,
+				`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"text"}}`,
+				`{"type":"content_block_stop"}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+				`{"type":"message_stop"}`,
+			},
+		},
+		{
+			name: "delta after block stop",
+			events: []string{
+				`{"type":"message_start","message":{"role":"assistant"}}`,
+				`{"type":"content_block_start","index":0,"content_block":{"type":"text"}}`,
+				`{"type":"content_block_stop","index":0}`,
+				`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"late"}}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+				`{"type":"message_stop"}`,
+			},
+		},
+		{
+			name: "duplicate block stop",
+			events: []string{
+				`{"type":"message_start","message":{"role":"assistant"}}`,
+				`{"type":"content_block_start","index":0,"content_block":{"type":"text"}}`,
+				`{"type":"content_block_stop","index":0}`,
+				`{"type":"content_block_stop","index":0}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+				`{"type":"message_stop"}`,
+			},
+		},
+		{
+			name: "unsupported block type",
+			events: []string{
+				`{"type":"message_start","message":{"role":"assistant"}}`,
+				`{"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+				`{"type":"message_stop"}`,
+			},
+		},
+		{
+			name: "message delta before block stop",
+			events: []string{
+				`{"type":"message_start","message":{"role":"assistant"}}`,
+				`{"type":"content_block_start","index":0,"content_block":{"type":"text"}}`,
+				`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"open"}}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+				`{"type":"content_block_stop","index":0}`,
+				`{"type":"message_stop"}`,
+			},
+		},
+		{
+			name: "content block after message delta",
+			events: []string{
+				`{"type":"message_start","message":{"role":"assistant"}}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+				`{"type":"content_block_start","index":0,"content_block":{"type":"text"}}`,
+				`{"type":"content_block_stop","index":0}`,
+				`{"type":"message_stop"}`,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sseBody := claudeSSEBody(t, tt.events)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				w.Header().Set("Content-Type", "text/event-stream")
+				writeResponse(t, w, sseBody)
+			}))
+			defer srv.Close()
+
+			provider := NewClaudeProvider(WithNativeBaseURL(srv.URL), WithNativeAPIKey("test"))
+			model, _, err := provider.Build(context.Background(), ModelConfig{Model: "claude-test"})
+			require.NoError(t, err)
+			stream, err := model.Stream(context.Background(), nil)
+			require.NoError(t, err)
+
+			var streamErr error
+			var sawFinal bool
+			for chunk := range stream {
+				if chunk.Error != nil {
+					streamErr = chunk.Error
+				}
+				sawFinal = sawFinal || chunk.Final
+			}
+			require.Error(t, streamErr)
+			assert.False(t, sawFinal, "malformed Claude stream must not produce a successful final chunk")
+		})
+	}
+}
+
+func TestClaudeStreamAllowsInterleavedContentBlocks(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	chunks := collectClaudeStream(t, []string{
+		`{"type":"message_start","message":{"role":"assistant","usage":{"input_tokens":4}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text"}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"before "}}`,
+		`{"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"call_1","name":"read"}}`,
+		`{"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"path\":\"file.txt\"}"}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"after"}}`,
+		`{"type":"content_block_stop","index":1}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":8}}`,
+		`{"type":"message_stop"}`,
+	})
+
+	var gotText strings.Builder
+	var final *MessageChunk
+	for i := range chunks {
+		if chunks[i].Error != nil {
+			t.Fatalf("valid interleaved Claude stream failed: %v", chunks[i].Error)
+		}
+		if chunks[i].Content != "" {
+			gotText.WriteString(chunks[i].Content)
+		}
+		if chunks[i].Final {
+			final = &chunks[i]
+		}
+	}
+	require.Equal(t, "before after", gotText.String())
+	require.NotNil(t, final)
+	require.Len(t, final.ToolCalls, 1)
+	args, ok := final.ToolCalls[0].Args.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "file.txt", args["path"])
+	require.NotNil(t, final.Usage)
+	assert.Equal(t, 4, final.Usage.InputTokens)
+	assert.Equal(t, 8, final.Usage.OutputTokens)
+	assert.Equal(t, 12, final.Usage.TotalTokens)
+}
+
+func TestClaudeStreamRejectsOutOfOrderInterleavedText(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	chunks := collectClaudeStream(t, []string{
+		`{"type":"message_start","message":{"role":"assistant"}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text"}}`,
+		`{"type":"content_block_start","index":1,"content_block":{"type":"text"}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A1"}}`,
+		`{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"B1"}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A2"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"content_block_stop","index":1}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}`,
+		`{"type":"message_stop"}`,
+	})
+
+	var gotText strings.Builder
+	var streamErr error
+	var sawFinal bool
+	for _, chunk := range chunks {
+		if chunk.Error != nil {
+			streamErr = chunk.Error
+		}
+		gotText.WriteString(chunk.Content)
+		sawFinal = sawFinal || chunk.Final
+	}
+	require.Error(t, streamErr)
+	assert.Equal(t, "A1", gotText.String(), "the lower-index block's partial text may be visible before rejection")
+	assert.False(t, sawFinal)
+}
+
+func TestClaudeStreamPreservesTextOrderAfterLowerBlockStops(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	chunks := collectClaudeStream(t, []string{
+		`{"type":"message_start","message":{"role":"assistant"}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text"}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"A1"}}`,
+		`{"type":"content_block_start","index":1,"content_block":{"type":"text"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"content_block_delta","index":1,"delta":{"type":"text_delta","text":"B1"}}`,
+		`{"type":"content_block_stop","index":1}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}`,
+		`{"type":"message_stop"}`,
+	})
+
+	var gotText strings.Builder
+	var streamErr error
+	var final *MessageChunk
+	for _, chunk := range chunks {
+		if chunk.Error != nil {
+			streamErr = chunk.Error
+		}
+		gotText.WriteString(chunk.Content)
+		if chunk.Final {
+			final = &chunk
+		}
+	}
+	require.NoError(t, streamErr)
+	assert.Equal(t, "A1B1", gotText.String())
+	require.NotNil(t, final)
+}
+
+func TestClaudeStreamAccumulatesMultipleMessageDeltas(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	chunks := collectClaudeStream(t, []string{
+		`{"type":"message_start","message":{"role":"assistant","usage":{"input_tokens":3}}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text"}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":2}}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"input_tokens":5,"output_tokens":7}}`,
+		`{"type":"message_stop"}`,
+	})
+
+	var streamErr error
+	var final *MessageChunk
+	for i := range chunks {
+		if chunks[i].Error != nil {
+			streamErr = chunks[i].Error
+		}
+		if chunks[i].Final {
+			final = &chunks[i]
+		}
+	}
+	require.NoError(t, streamErr)
+	require.NotNil(t, final)
+	assert.Equal(t, "end_turn", final.FinishReason)
+	require.NotNil(t, final.Usage)
+	assert.Equal(t, 5, final.Usage.InputTokens)
+	assert.Equal(t, 7, final.Usage.OutputTokens)
+	assert.Equal(t, 12, final.Usage.TotalTokens)
+}
+
+func TestClaudeStreamExplicitNullStopReasonClearsTerminalState(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	chunks := collectClaudeStream(t, []string{
+		`{"type":"message_start","message":{"role":"assistant"}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text"}}`,
+		`{"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"done"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null},"usage":{"output_tokens":5}}`,
+		`{"type":"message_delta","delta":{"stop_reason":null,"stop_sequence":null},"usage":{"output_tokens":8}}`,
+		`{"type":"message_stop"}`,
+	})
+
+	var streamErr error
+	var sawFinal bool
+	for _, chunk := range chunks {
+		if chunk.Error != nil {
+			streamErr = chunk.Error
+		}
+		sawFinal = sawFinal || chunk.Final
+	}
+	require.Error(t, streamErr)
+	assert.False(t, sawFinal, "an explicit null stop_reason must not reuse an earlier terminal reason")
+}
+
+func TestClaudeStreamRejectsMessageDeltaWithoutStopReason(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	chunks := collectClaudeStream(t, []string{
+		`{"type":"message_start","message":{"role":"assistant"}}`,
+		`{"type":"content_block_start","index":0,"content_block":{"type":"text"}}`,
+		`{"type":"content_block_stop","index":0}`,
+		`{"type":"message_delta","delta":{"stop_reason":"end_turn","stop_sequence":null}}`,
+		`{"type":"message_delta","delta":{"stop_sequence":null}}`,
+		`{"type":"message_stop"}`,
+	})
+
+	var streamErr error
+	var sawFinal bool
+	for _, chunk := range chunks {
+		if chunk.Error != nil {
+			streamErr = chunk.Error
+		}
+		sawFinal = sawFinal || chunk.Final
+	}
+	require.Error(t, streamErr)
+	assert.False(t, sawFinal)
+}
+
+func TestClaudeStreamRejectsMismatchedSSEEventName(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	tests := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "mismatch",
+			body: "event: content_block_start\ndata: {\"type\":\"message_start\",\"message\":{\"role\":\"assistant\"}}\n\n",
+		},
+		{
+			name: "missing name",
+			body: "data: {\"type\":\"message_start\",\"message\":{\"role\":\"assistant\"}}\n\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			chunks := collectClaudeStreamBody(t, tt.body)
+			var streamErr error
+			var sawFinal bool
+			for _, chunk := range chunks {
+				if chunk.Error != nil {
+					streamErr = chunk.Error
+				}
+				sawFinal = sawFinal || chunk.Final
+			}
+			require.Error(t, streamErr)
+			assert.False(t, sawFinal)
+		})
+	}
+}
+
+func TestClaudeStreamRejectsMissingTerminalEvent(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	tests := []struct {
+		name   string
+		events []string
+	}{
+		{
+			name: "missing message delta",
+			events: []string{
+				`{"type":"message_start","message":{"role":"assistant"}}`,
+				`{"type":"content_block_start","index":0,"content_block":{"type":"text"}}`,
+				`{"type":"content_block_stop","index":0}`,
+			},
+		},
+		{
+			name: "missing message stop",
+			events: []string{
+				`{"type":"message_start","message":{"role":"assistant"}}`,
+				`{"type":"content_block_start","index":0,"content_block":{"type":"text"}}`,
+				`{"type":"content_block_stop","index":0}`,
+				`{"type":"message_delta","delta":{"stop_reason":"end_turn"}}`,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			chunks := collectClaudeStream(t, tt.events)
+			var streamErr error
+			var sawFinal bool
+			for _, chunk := range chunks {
+				if chunk.Error != nil {
+					streamErr = chunk.Error
+				}
+				sawFinal = sawFinal || chunk.Final
+			}
+			require.Error(t, streamErr)
+			assert.False(t, sawFinal)
+		})
+	}
+}
+
+func collectClaudeStream(t *testing.T, events []string) []MessageChunk {
+	t.Helper()
+	return collectClaudeStreamBody(t, claudeSSEBody(t, events))
+}
+
+func collectClaudeStreamBody(t *testing.T, sseBody string) []MessageChunk {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeResponse(t, w, sseBody)
+	}))
+	defer srv.Close()
+
+	provider := NewClaudeProvider(WithNativeBaseURL(srv.URL), WithNativeAPIKey("test"))
+	model, _, err := provider.Build(context.Background(), ModelConfig{Model: "claude-test"})
+	require.NoError(t, err)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	stream, err := model.Stream(ctx, nil)
+	require.NoError(t, err)
+	var chunks []MessageChunk
+	for chunk := range stream {
+		chunks = append(chunks, chunk)
+	}
+	return chunks
+}
+
+func claudeSSEBody(t *testing.T, events []string) string {
+	t.Helper()
+	var body strings.Builder
+	for _, data := range events {
+		var event struct {
+			Type string `json:"type"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(data), &event))
+		require.NotEmpty(t, event.Type)
+		_, _ = fmt.Fprintf(&body, "event: %s\ndata: %s\n\n", event.Type, data)
+	}
+	return body.String()
 }

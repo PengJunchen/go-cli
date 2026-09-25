@@ -264,6 +264,99 @@ func TestScanHardcodedDefaults_CaseInsensitive(t *testing.T) {
 	assert.NotEmpty(t, findings, "case-insensitive match should detect 'DEFAULT TIMEOUT'")
 }
 
+func TestScanHardcodedDefaultsIgnoresStandardErrorMessageLiterals(t *testing.T) {
+	cases := []struct {
+		name string
+		code string
+	}{
+		{
+			name: "aliased errors New",
+			code: `package example
+import errorlib "errors"
+func reject() error { return errorlib.New("compaction: mandatory system prompt exceeds token budget") }
+`,
+		},
+		{
+			name: "standard errors New",
+			code: `package example
+import "errors"
+func reject() error { return errors.New("compaction: mandatory system prompt exceeds token budget") }
+`,
+		},
+		{
+			name: "aliased fmt Errorf",
+			code: `package example
+import formatter "fmt"
+func reject(err error) error { return formatter.Errorf("default timeout while waiting: %w", err) }
+`,
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			file := filepath.Join(dir, "errors.go")
+			require.NoError(t, os.WriteFile(file, []byte(testCase.code), 0o600))
+			assert.Empty(t, scanHardcodedDefaults(dir, []string{file}), "standard error messages are not embedded prompts")
+		})
+	}
+}
+
+func TestScanHardcodedDefaultsKeepsPromptLiteralsOutsideErrorMessages(t *testing.T) {
+	cases := []struct {
+		name string
+		code string
+	}{
+		{
+			name: "system instructions constant",
+			code: `package example
+const SystemInstructions = "You are a helpful assistant"
+`,
+		},
+		{
+			name: "fmt Errorf non-format argument",
+			code: `package example
+import formatter "fmt"
+func reject() error { return formatter.Errorf("%s", "You are a helpful assistant") }
+`,
+		},
+		{
+			name: "local variable shadows imported errors alias",
+			code: `package example
+import errorlib "errors"
+type fakeErrors struct{}
+func (fakeErrors) New(string) error { return nil }
+func prompt() error { errorlib := fakeErrors{}; return errorlib.New("You are a helpful assistant") }
+`,
+		},
+		{
+			name: "local variable shadows imported fmt",
+			code: `package example
+import "fmt"
+type fakeFormatter struct{}
+func (fakeFormatter) Errorf(string, ...any) error { return nil }
+func prompt() error { fmt := fakeFormatter{}; return fmt.Errorf("You are a helpful assistant") }
+`,
+		},
+		{
+			name: "non-standard errors package",
+			code: `package example
+import errors "example.com/not-standard/errors"
+func prompt() error { return errors.New("system prompt for the model") }
+`,
+		},
+	}
+
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			dir := t.TempDir()
+			file := filepath.Join(dir, "prompt.go")
+			require.NoError(t, os.WriteFile(file, []byte(testCase.code), 0o600))
+			assert.NotEmpty(t, scanHardcodedDefaults(dir, []string{file}), "prompt literals must remain detectable")
+		})
+	}
+}
+
 // ---------------------------------------------------------------------------
 // SCAN-010: scanCommandRouting & isCommandStringLiteral
 // ---------------------------------------------------------------------------
@@ -625,6 +718,7 @@ func TestExprName(t *testing.T) {
 
 func TestScanInterfaceDefaultImpl_Positive(t *testing.T) {
 	dir := t.TempDir()
+	writeScan012Module(t, dir)
 	code := `package example
 type Service interface {
 	Run() error
@@ -641,11 +735,13 @@ type Service interface {
 
 func TestScanInterfaceDefaultImpl_Negative_WithAssertion(t *testing.T) {
 	dir := t.TempDir()
+	writeScan012Module(t, dir)
 	code := `package example
 type Service interface {
 	Run() error
 }
 type defaultService struct{}
+func (*defaultService) Run() error { return nil }
 var _ Service = (*defaultService)(nil)
 `
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "svc.go"), []byte(code), 0o600))
@@ -653,8 +749,26 @@ var _ Service = (*defaultService)(nil)
 	assert.Empty(t, findings, "interface with default implementation assertion should not trigger")
 }
 
+func TestScanInterfaceDefaultImpl_RecognizesStructuralImplementation(t *testing.T) {
+	dir := t.TempDir()
+	writeScan012Module(t, dir)
+	code := `package example
+type Message struct{}
+type MessageSource interface {
+	Messages() []Message
+}
+type AgentImpl struct{}
+func (*AgentImpl) Messages() []Message { return nil }
+`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "agent.go"), []byte(code), 0o600))
+
+	findings := scanInterfaceDefaultImpl(dir, []string{filepath.Join(dir, "agent.go")})
+	assert.Empty(t, findings, "a method-set implementation should satisfy SCAN-012 without a compile-time assertion")
+}
+
 func TestScanInterfaceDefaultImpl_Negative_NoInterface(t *testing.T) {
 	dir := t.TempDir()
+	writeScan012Module(t, dir)
 	code := `package example
 type Service struct{ X int }
 `
@@ -665,11 +779,13 @@ type Service struct{ X int }
 
 func TestScanInterfaceDefaultImpl_MultipleInterfaces(t *testing.T) {
 	dir := t.TempDir()
+	writeScan012Module(t, dir)
 	code := `package example
 type Reader interface { Read() }
 type Writer interface { Write() }
 var _ Reader = (*fileReader)(nil)
 type fileReader struct{}
+func (*fileReader) Read() {}
 `
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "io.go"), []byte(code), 0o600))
 	findings := scanInterfaceDefaultImpl(dir, []string{filepath.Join(dir, "io.go")})
@@ -687,6 +803,156 @@ type fileReader struct{}
 	}
 }
 
+func TestScanInterfaceDefaultImpl_AssertionWithoutConcreteValueDoesNotCount(t *testing.T) {
+	dir := t.TempDir()
+	writeScan012Module(t, dir)
+	code := `package example
+type Service interface { Run() }
+type serviceStub struct{}
+var _ Service
+var _ Service = nil
+`
+	file := filepath.Join(dir, "service.go")
+	require.NoError(t, os.WriteFile(file, []byte(code), 0o600))
+
+	findings := scanInterfaceDefaultImpl(dir, []string{file})
+	require.Len(t, findings, 1)
+	assert.Equal(t, "SCAN-012", findings[0].RuleID)
+	assert.Equal(t, SeverityError, findings[0].Severity)
+	assert.Contains(t, findings[0].Message, "Service")
+}
+
+func TestScanInterfaceDefaultImpl_DistinctImportsWithSameAliasDoNotMatch(t *testing.T) {
+	dir := t.TempDir()
+	writeScan012Module(t, dir)
+	writeScan012File(t, dir, "dep-a/id.go", `package depa
+type ID string
+`)
+	writeScan012File(t, dir, "dep-b/id.go", `package depb
+type ID string
+`)
+	writeScan012File(t, dir, "service.go", `package example
+import dep "example.test/fixture/dep-a"
+type Service interface { Handle(dep.ID) }
+`)
+	writeScan012File(t, dir, "impl.go", `package example
+import dep "example.test/fixture/dep-b"
+type serviceImpl struct{}
+func (serviceImpl) Handle(dep.ID) {}
+`)
+
+	findings := scanInterfaceDefaultImpl(dir, []string{
+		filepath.Join(dir, "service.go"),
+		filepath.Join(dir, "impl.go"),
+	})
+	require.Len(t, findings, 1, "equal import alias text must not substitute for Go type identity")
+	assert.Equal(t, SeverityError, findings[0].Severity)
+	assert.Contains(t, findings[0].Message, "Service")
+}
+
+func TestScanInterfaceDefaultImpl_UnknownExternalEmbeddingIsError(t *testing.T) {
+	dir := t.TempDir()
+	writeScan012Module(t, dir)
+	code := `package example
+import "scanner012missingpkg"
+type Service interface { scanner012missingpkg.External }
+`
+	file := filepath.Join(dir, "service.go")
+	require.NoError(t, os.WriteFile(file, []byte(code), 0o600))
+
+	findings := scanInterfaceDefaultImpl(dir, []string{file})
+	require.NotEmpty(t, findings, "an unresolved embedded interface must not silently pass")
+	assert.Equal(t, "SCAN-012", findings[0].RuleID)
+	assert.Equal(t, SeverityError, findings[0].Severity)
+	assert.Contains(t, findings[0].Message, "could not type-check")
+	assert.Contains(t, findings[0].File, "service.go")
+	assert.NotZero(t, findings[0].Line)
+}
+
+func TestScanInterfaceDefaultImpl_ExcludesTypeSetConstraint(t *testing.T) {
+	dir := t.TempDir()
+	writeScan012Module(t, dir)
+	file := writeScan012File(t, dir, "constraint.go", `package example
+type Integer interface { ~int | ~int32 }
+`)
+
+	findings := scanInterfaceDefaultImpl(dir, []string{file})
+	assert.Empty(t, findings, "a non-basic type-set constraint cannot be a runtime interface value")
+}
+
+func TestScanInterfaceDefaultImpl_DoesNotSkipGenericRuntimeInterface(t *testing.T) {
+	dir := t.TempDir()
+	writeScan012Module(t, dir)
+	file := writeScan012File(t, dir, "reader.go", `package example
+type Reader[T any] interface { Read() T }
+`)
+
+	findings := scanInterfaceDefaultImpl(dir, []string{file})
+	require.Len(t, findings, 1, "a method-set generic interface is instantiable at runtime and must not be skipped")
+	assert.Equal(t, SeverityError, findings[0].Severity)
+	assert.Contains(t, findings[0].Message, "cannot prove a default implementation")
+}
+
+func TestScanInterfaceDefaultImpl_DoesNotClaimGenericConcreteInstantiation(t *testing.T) {
+	dir := t.TempDir()
+	writeScan012Module(t, dir)
+	file := writeScan012File(t, dir, "runner.go", `package example
+type Runner interface { Run() }
+type genericRunner[T any] struct{}
+func (genericRunner[T]) Run() {}
+var _ Runner = genericRunner[int]{}
+`)
+
+	findings := scanInterfaceDefaultImpl(dir, []string{file})
+	require.Len(t, findings, 1, "generic concrete candidates remain unresolved rather than being silently accepted")
+	assert.Equal(t, SeverityError, findings[0].Severity)
+	assert.Contains(t, findings[0].Message, "among non-generic types")
+}
+
+func TestScanInterfaceDefaultImpl_UsesPromotedMethodsFromEmbeddedConcreteType(t *testing.T) {
+	dir := t.TempDir()
+	writeScan012Module(t, dir)
+	writeScan012File(t, dir, "base/base.go", `package base
+type Base struct{}
+func (Base) Run() {}
+`)
+	file := writeScan012File(t, dir, "service.go", `package example
+import "example.test/fixture/base"
+type Service interface { Run() }
+type serviceImpl struct { base.Base }
+`)
+
+	findings := scanInterfaceDefaultImpl(dir, []string{file})
+	assert.Empty(t, findings, "go/types must include methods promoted from an imported embedded concrete type")
+}
+
+func TestScanInterfaceDefaultImpl_ResolvesTypeAliasesInMethodSignatures(t *testing.T) {
+	dir := t.TempDir()
+	writeScan012Module(t, dir)
+	file := writeScan012File(t, dir, "service.go", `package example
+type UserID = int
+type Service interface { Handle(UserID) }
+type serviceImpl struct{}
+func (serviceImpl) Handle(int) {}
+`)
+
+	findings := scanInterfaceDefaultImpl(dir, []string{file})
+	assert.Empty(t, findings, "an alias and its target type have identical Go method signatures")
+}
+
+func writeScan012Module(t *testing.T, dir string) {
+	t.Helper()
+	writeScan012File(t, dir, "go.mod", "module example.test/fixture\n\ngo 1.24.2\n")
+}
+
+func writeScan012File(t *testing.T, root, relativePath, contents string) string {
+	t.Helper()
+	path := filepath.Join(root, relativePath)
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o750))
+	require.NoError(t, os.WriteFile(path, []byte(contents), 0o600))
+	return path
+}
+
 func TestScanInterfaceDefaultImpl_SkipsTestFiles(t *testing.T) {
 	dir := t.TempDir()
 	code := `package example
@@ -695,6 +961,83 @@ type Service interface { Run() error }
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "svc_test.go"), []byte(code), 0o600))
 	findings := scanInterfaceDefaultImpl(dir, []string{filepath.Join(dir, "svc_test.go")})
 	assert.Empty(t, findings, "test files should be skipped")
+}
+
+func TestScanner_SCAN012IsScopedToCorePackage(t *testing.T) {
+	root := t.TempDir()
+	cliDir := filepath.Join(root, "internal", "cli")
+	require.NoError(t, os.MkdirAll(cliDir, 0o750))
+	code := `package cli
+type Service interface { Run() error }
+`
+	require.NoError(t, os.WriteFile(filepath.Join(cliDir, "service.go"), []byte(code), 0o600))
+
+	report, err := ScanDir(filepath.Join(root, "internal"))
+	require.NoError(t, err)
+	for _, finding := range report.Findings {
+		assert.NotEqual(t, "SCAN-012", finding.RuleID, "SCAN-012 applies to internal/core interfaces only")
+	}
+}
+
+func TestScanner_SCAN012RecognizesCrossPackageProductionImplementation(t *testing.T) {
+	root := t.TempDir()
+	writeScan012Module(t, root)
+	writeScan012File(t, root, "internal/core/hitl.go", `package core
+import "context"
+type HITLQuestionEvent struct{}
+type HITLQuestionEmitter interface { Emit(context.Context, HITLQuestionEvent) error }
+`)
+	writeScan012File(t, root, "internal/cli/interactive.go", `package cli
+import (
+	"context"
+	"example.test/fixture/internal/core"
+)
+type cliHITLEmitter struct{}
+func (cliHITLEmitter) Emit(context.Context, core.HITLQuestionEvent) error { return nil }
+var _ core.HITLQuestionEmitter = cliHITLEmitter{}
+`)
+
+	report, err := ScanDir(filepath.Join(root, "internal"))
+	require.NoError(t, err)
+	for _, finding := range report.Findings {
+		assert.NotEqual(t, "SCAN-012", finding.RuleID, "a production implementation in another internal package satisfies the interface")
+	}
+}
+
+func TestScanner_SCAN012DoesNotCountTestOnlyCrossPackageImplementation(t *testing.T) {
+	root := t.TempDir()
+	writeScan012Module(t, root)
+	writeScan012File(t, root, "internal/core/hitl.go", `package core
+import "context"
+type HITLQuestionEvent struct{}
+type HITLQuestionEmitter interface { Emit(context.Context, HITLQuestionEvent) error }
+`)
+	writeScan012File(t, root, "internal/cli/cli.go", `package cli
+func Command() {}
+`)
+	writeScan012File(t, root, "internal/cli/interactive_test.go", `package cli
+import (
+	"context"
+	"testing"
+	"example.test/fixture/internal/core"
+)
+type fakeHITLEmitter struct{}
+func (fakeHITLEmitter) Emit(context.Context, core.HITLQuestionEvent) error { return nil }
+var _ core.HITLQuestionEmitter = fakeHITLEmitter{}
+func TestFakeEmitter(t *testing.T) {}
+`)
+
+	report, err := ScanDir(filepath.Join(root, "internal"))
+	require.NoError(t, err)
+	var scan012 []Finding
+	for _, finding := range report.Findings {
+		if finding.RuleID == "SCAN-012" {
+			scan012 = append(scan012, finding)
+		}
+	}
+	require.Len(t, scan012, 1, "test-only implementation must not satisfy a production interface")
+	assert.Equal(t, SeverityError, scan012[0].Severity)
+	assert.Contains(t, scan012[0].Message, "HITLQuestionEmitter")
 }
 
 // ---------------------------------------------------------------------------

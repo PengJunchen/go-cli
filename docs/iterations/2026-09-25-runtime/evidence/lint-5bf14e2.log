@@ -1,0 +1,11 @@
+internal/cli/serve_cmd.go:207:3: SA1019: server.SetEventBus is deprecated: wire event forwarding on CoreHandler if another observer needs the process-wide event bus. (staticcheck)
+		server.SetEventBus(eventBus)
+		^
+internal/cli/durable_session_manager.go:654:6: func closeRejectedPreparedSession is unused (unused)
+func closeRejectedPreparedSession(prepared session.PreparedSession, cause error) error {
+     ^
+2 issues:
+* staticcheck: 1
+* unused: 1
+
+exit=1 elapsed=51.17s

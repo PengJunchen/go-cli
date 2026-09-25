@@ -113,6 +113,20 @@ func (t *GrepTool) Description() string {
 	return "grep: searches files under a directory for a regexp pattern. Args: pattern (string), glob (string, optional include filter), path (string, optional)."
 }
 
+// Parameters returns the JSON Schema for grep's model-supplied arguments.
+func (t *GrepTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"pattern": map[string]any{"type": "string"},
+			"glob":    map[string]any{"type": "string"},
+			"path":    map[string]any{"type": "string"},
+		},
+		"required":             []any{"pattern"},
+		"additionalProperties": false,
+	}
+}
+
 // Execute searches for pattern under path (default ".") and returns matching
 // lines as "file:line:content". Needs to accept an empty-path default resolved
 // against the workdir.
@@ -153,7 +167,10 @@ func (t *GrepTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 		return nil, err
 	}
 
-	ms, truncated, err := t.search(ctx, re, searchPath, glob)
+	ms, truncated, lifecycle, helperStarted, err := t.search(ctx, re, searchPath, glob)
+	if helperStarted {
+		reportPreparedLocalProcessCompletion(ctx, lifecycle)
+	}
 	if err != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		logger.Error("grep.search_failed", "tool", "grep", "path", searchPath, "err", err)
@@ -184,45 +201,75 @@ func (t *GrepTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 }
 
 // search runs ripgrep when available, otherwise the pure-Go walker. It returns
-// matched lines and whether the result was truncated by the output caps.
-func (t *GrepTool) search(ctx context.Context, re *regexp.Regexp, searchPath, glob string) ([]match, bool, error) {
+// matched lines, output truncation, and the last started helper lifecycle.
+func (t *GrepTool) search(ctx context.Context, re *regexp.Regexp, searchPath, glob string) ([]match, bool, managedLocalResult, bool, error) {
+	var lastLifecycle managedLocalResult
+	helperStarted := false
 	if !t.forcePureGo && hasRipgrep() {
-		ms, err := grepWithRipgrep(ctx, re, searchPath, glob)
+		ms, lifecycle, started, err := grepWithRipgrepManaged(ctx, re, searchPath, glob)
+		if started {
+			lastLifecycle = lifecycle
+			helperStarted = true
+		}
 		if err == nil {
 			tms, truncated := t.truncateMatches(ms)
-			return tms, truncated, nil
+			return tms, truncated, lastLifecycle, helperStarted, nil
+		}
+		if !shouldFallbackAfterManagedHelper(ctx, err) {
+			return nil, false, lastLifecycle, helperStarted, err
 		}
 		// rg was present but failed (bad path, permission, etc.): fall through
-		// to the pure-Go path.
+		// to the pure-Go path, but only after the managed helper has joined.
 	}
-	tms, truncated := t.truncateMatches(grepPureGo(ctx, re, searchPath, glob))
-	return tms, truncated, nil
+	ms, err := grepPureGo(ctx, re, searchPath, glob, t.whitelist)
+	if err != nil {
+		return nil, false, lastLifecycle, helperStarted, err
+	}
+	tms, truncated := t.truncateMatches(ms)
+	return tms, truncated, lastLifecycle, helperStarted, nil
 }
 
-// grepWithRipgrep runs `rg --line-number -n -g <glob> <pattern> <path>` and
-// parses its output. The pattern is passed as a literal argument (not combined
-// with flags) to avoid shell-argument injection, and --no-ignore is not used so
-// behavior stays deterministic.
+// grepWithRipgrep runs `rg --no-config --line-number -n [-g <glob>] -e
+// <pattern> -- <path>` and parses its output. Pattern and glob values cannot
+// be parsed as options, and ripgrep cannot load ambient configuration.
 func grepWithRipgrep(ctx context.Context, re *regexp.Regexp, searchPath, glob string) ([]match, error) {
-	args := []string{"--line-number", "-n"}
+	matches, _, _, err := grepWithRipgrepManaged(ctx, re, searchPath, glob)
+	return matches, err
+}
+
+func grepWithRipgrepManaged(ctx context.Context, re *regexp.Regexp, searchPath, glob string) ([]match, managedLocalResult, bool, error) {
+	args := []string{"--no-config", "--line-number", "-n"}
 	if glob != "" {
-		args = append(args, "-g", glob)
+		args = append(args, "--glob="+glob)
 	}
-	args = append(args, re.String(), searchPath)
+	args = append(args, "-e", re.String(), "--", searchPath)
 
-	cmd := exec.CommandContext(ctx, "rg", args...)
-	cmd.Stderr = &bytes.Buffer{}
-	out, err := cmd.Output()
-	if err != nil {
-		var ee *exec.ExitError
-		if errors.As(err, &ee) && ee.ExitCode() == 1 {
-			// rg exits 1 when no matches were found: return empty result.
-			return nil, nil
+	cmd := exec.Command("rg", args...)
+	cmd.Env = make([]string, 0, len(os.Environ()))
+	for _, entry := range os.Environ() {
+		key, _, _ := strings.Cut(entry, "=")
+		if strings.EqualFold(key, "RIPGREP_CONFIG_PATH") {
+			continue
 		}
-		return nil, fmt.Errorf("grep: rg: %w", err)
+		cmd.Env = append(cmd.Env, entry)
+	}
+	out, lifecycle, err := runManagedSearchCommand(ctx, cmd)
+	if err != nil {
+		return nil, lifecycle, false, fmt.Errorf("grep: rg: %w", err)
+	}
+	if err := managedSearchLifecycleError(ctx, "grep: rg", lifecycle); err != nil {
+		return nil, lifecycle, true, fmt.Errorf("grep: rg: %w", err)
+	}
+	if lifecycle.runErr != nil {
+		var ee *exec.ExitError
+		if errors.As(lifecycle.runErr, &ee) && ee.ExitCode() == 1 {
+			// rg exits 1 when no matches were found: return empty result.
+			return nil, lifecycle, true, nil
+		}
+		return nil, lifecycle, true, fmt.Errorf("grep: rg: %w", lifecycle.runErr)
 	}
 
-	return parseRipgrepOutput(out, re.String()), nil
+	return parseRipgrepOutput(out, re.String()), lifecycle, true, nil
 }
 
 // parseRipgrepOutput splits rg "path:line:content" output into matches.
@@ -259,20 +306,22 @@ func splitMatchLine(line string) (file string, lineNo int, content string, ok bo
 	return line[:first], n, line[first+1+second+1:], true
 }
 
-// grepPureGo walks searchPath and matches each line against re using
-// regexp.MatchString, respecting the glob include filter via path.Match.
-func grepPureGo(ctx context.Context, re *regexp.Regexp, searchPath, glob string) []match {
+// grepPureGo walks searchPath and matches each line against re using Go's
+// regexp engine, respecting the glob include filter via path.Match. It skips
+// symlinks and non-regular files rather than following paths outside the
+// validated search root or blocking on special files.
+func grepPureGo(ctx context.Context, re *regexp.Regexp, searchPath, glob string, whitelist PathWhitelist) ([]match, error) {
 	var ms []match
-	// Recursive walk is best-effort: unreadable or missing entries are skipped
-	// deterministically, so any returned walk error is intentionally ignored.
-	if walkErr := filepath.WalkDir(searchPath, func(p string, d fs.DirEntry, err error) error {
+	var scanErr error
+	walkErr := filepath.WalkDir(searchPath, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
 			return nil // skip unreadable entries deterministically
 		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
 		}
 		if d.IsDir() {
 			return nil
@@ -289,12 +338,25 @@ func grepPureGo(ctx context.Context, re *regexp.Regexp, searchPath, glob string)
 				return nil
 			}
 		}
-		scanFile(p, re, &ms)
+		if err := scanFile(ctx, p, re, &ms, whitelist); err != nil {
+			scanErr = err
+			return err
+		}
 		return nil
-	}); walkErr != nil {
-		return ms
+	})
+	if scanErr != nil {
+		return nil, scanErr
 	}
-	return ms
+	if walkErr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
+		return nil, walkErr
+	}
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+	return ms, nil
 }
 
 // matchGlob reports whether name matches glob, via path.Match (slash-based).
@@ -303,24 +365,51 @@ func matchGlob(glob, name string) bool {
 	return err == nil && ok
 }
 
-// scanFile reads and matches a single file's lines against re.
-func scanFile(filePath string, re *regexp.Regexp, ms *[]match) {
+// scanFile reads and matches one regular, in-scope file. A context error is
+// returned to the walk so cancellation cannot be reported as partial success.
+func scanFile(ctx context.Context, filePath string, re *regexp.Regexp, ms *[]match, whitelist PathWhitelist) error {
+	info, err := os.Lstat(filePath)
+	if err != nil {
+		return nil // preserve best-effort behavior for entries that disappeared.
+	}
+	if !info.Mode().IsRegular() {
+		return nil
+	}
+	if !whitelist.unrestricted() && !whitelist.IsAllowed(resolveSymlinks(filePath)) {
+		return nil
+	}
 	f, err := os.Open(filePath)
 	if err != nil {
-		return
+		return nil // preserve best-effort behavior for unreadable files.
 	}
 	defer func() { _ = f.Close() }() //nolint:errcheck // best-effort close during scan.
 
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
 	lineNo := 0
-	for sc.Scan() {
+	for {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		if !sc.Scan() {
+			break
+		}
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
 		lineNo++
 		content := sc.Text()
 		if re.MatchString(content) {
 			*ms = append(*ms, match{File: filePath, Line: lineNo, Content: content})
 		}
 	}
+	if scanErr := sc.Err(); scanErr != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		return scanErr
+	}
+	return ctx.Err()
 }
 
 // match is a single grep result line.

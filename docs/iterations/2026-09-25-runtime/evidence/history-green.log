@@ -1,0 +1,88 @@
+R1-BLD-02 Agent history consumer, deep-copy, and sub-agent delivery GREEN evidence
+
+Worktree: /Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/r1-history
+Branch: codex/runtime-r1-history
+Base: 764ca0cf88bce99a4403594f05f0b90f695830b3
+Baseline includes the integrated R0 fixes and shared CanonicalLoop type seam.
+
+The exact selected registrations were confirmed (exit 0):
+
+  rtk proxy go test ./internal/core -list '^(TestAgentConsumesCanonicalDeltaAcrossRepeatedUserTurns|TestAgentCanonicalHistoryDeepCopiesToolCallArgs|TestHistoryRejectsLegacyPureToolCallTurn|TestAgentLegacyLoopRejectsTextAndToolCalls|TestAgentLegacyPureToolCallIsNotSaved|TestAgentLegacyToolCallTurnsAreRejected|TestAgentWithHistoryPreservesOrder|TestAgentWithMultipleHistoryOptions|TestSubagentSendReportsDroppedMessage|TestSubAgentSendDoesNotBlockOnFullInbox|TestSubAgentSendAfterTerminalIsRejected)$'
+  Registered: TestAgentWithHistoryPreservesOrder, TestAgentWithMultipleHistoryOptions,
+  TestHistoryRejectsLegacyPureToolCallTurn, TestAgentLegacyLoopRejectsTextAndToolCalls,
+  TestAgentLegacyPureToolCallIsNotSaved, TestAgentLegacyToolCallTurnsAreRejected,
+  TestAgentConsumesCanonicalDeltaAcrossRepeatedUserTurns,
+  TestAgentCanonicalHistoryDeepCopiesToolCallArgs, TestSubAgentSendAfterTerminalIsRejected,
+  TestSubAgentSendDoesNotBlockOnFullInbox, TestSubagentSendReportsDroppedMessage
+
+Targeted GREEN race command (exit 0):
+
+  rtk env GOMAXPROCS=2 go test -race -p 2 -count=1 ./internal/core -run '^(TestAgentConsumesCanonicalDeltaAcrossRepeatedUserTurns|TestAgentCanonicalHistoryDeepCopiesToolCallArgs|TestHistoryRejectsLegacyPureToolCallTurn|TestAgentLegacyLoopRejectsTextAndToolCalls|TestAgentLegacyPureToolCallIsNotSaved|TestAgentLegacyToolCallTurnsAreRejected|TestAgentWithHistoryPreservesOrder|TestAgentWithMultipleHistoryOptions|TestSubagentSendReportsDroppedMessage|TestSubAgentSendDoesNotBlockOnFullInbox|TestSubAgentSendAfterTerminalIsRejected)$'
+  exit=0
+
+Coverage demonstrated by these tests:
+
+  - Repeated identical user text is appended once per call; the second canonical
+    loop input is old history plus exactly one current user input.
+  - The Agent invokes RunCanonical, appends its returned per-call delta once,
+    and preserves nested JSON ToolCall Args plus ContentBlocks ImageURL and
+    Usage across mutation of both the loop-returned values and Messages() copies.
+  - Legacy loops that expose unreceipted tool calls or injected steering/follow-up
+    fail closed with ErrCanonicalTranscriptRequired; simple legacy history stays
+    source-compatible.
+  - Sub-agent Send reports a full inbox or terminal state and Received includes
+    only messages accepted into the channel.
+
+The three real LoopAgent transcript cases remain pending lane 01's
+RunCanonical implementation and integration:
+
+  TestCancelClosesToolCallHistory
+  TestAgentHistoryIncludesSteeringAndFollowUp
+  TestAgentHistoryPairsParallelToolResultsByID
+
+No full core-package or cli-package race run is claimed in this commit; the
+coordinated final pass will run after lane 01's LoopAgent implementation lands.
+
+Canonical input-integrity follow-up (exact registrations confirmed, both
+commands exit 0):
+
+  rtk proxy go test ./internal/core -list '^(TestAgentConsumesCanonicalDeltaAcrossRepeatedUserTurns|TestAgentCanonicalHistoryDeepCopiesToolCallArgs|TestAgentRejectsInvalidCanonicalDelta|TestAgentAcceptsCanonicalDeltaForEmptyUserInput|TestHistoryRejectsLegacyPureToolCallTurn|TestAgentLegacyLoopRejectsTextAndToolCalls|TestAgentLegacyPureToolCallIsNotSaved|TestAgentLegacyToolCallTurnsAreRejected|TestAgentWithHistoryPreservesOrder|TestAgentWithMultipleHistoryOptions|TestSubagentSendReportsDroppedMessage|TestSubAgentSendDoesNotBlockOnFullInbox|TestSubAgentSendAfterTerminalIsRejected)$'
+  Registered all 13 names in the expression.
+
+  rtk env GOMAXPROCS=2 go test -race -p 2 -count=1 ./internal/core -run '^(TestAgentConsumesCanonicalDeltaAcrossRepeatedUserTurns|TestAgentRejectsInvalidCanonicalDelta|TestAgentAcceptsCanonicalDeltaForEmptyUserInput|TestAgentCanonicalHistoryDeepCopiesToolCallArgs|TestHistoryRejectsLegacyPureToolCallTurn|TestAgentLegacyLoopRejectsTextAndToolCalls|TestAgentLegacyPureToolCallIsNotSaved|TestAgentLegacyToolCallTurnsAreRejected|TestAgentWithHistoryPreservesOrder|TestAgentWithMultipleHistoryOptions|TestSubagentSendReportsDroppedMessage|TestSubAgentSendDoesNotBlockOnFullInbox|TestSubAgentSendAfterTerminalIsRejected)$'
+  exit=0
+
+Canonical delta validation rejects an empty delta, a missing or malformed
+initial user entry, a content mismatch, and duplicate initial user entries. On
+rejection it returns ErrCanonicalTranscriptInvalid, reports unsuccessful with
+an empty unverified result message, and keeps the previously valid history
+unchanged. A valid initial user with empty content remains accepted.
+
+Sub-agent panic containment (exact registrations confirmed; commands exit 0):
+
+  rtk proxy go test ./internal/core -list '^(TestSubAgentPanicIsContainedAndFinalized|TestSubagentSendReportsDroppedMessage|TestSubAgentSendDoesNotBlockOnFullInbox|TestSubAgentSendAfterTerminalIsRejected)$'
+  Registered TestSubAgentPanicIsContainedAndFinalized,
+  TestSubAgentSendAfterTerminalIsRejected, TestSubAgentSendDoesNotBlockOnFullInbox,
+  and TestSubagentSendReportsDroppedMessage.
+
+  rtk env GOMAXPROCS=2 go test -race -p 2 -count=1 ./internal/core -run '^(TestSubAgentPanicIsContainedAndFinalized|TestSubagentSendReportsDroppedMessage|TestSubAgentSendDoesNotBlockOnFullInbox|TestSubAgentSendAfterTerminalIsRejected)$'
+  exit=0
+
+The panic fixture covers both runner-factory and runner.Run panics. Each is
+converted to ErrSubAgentPanicked, marks the sub-agent Failed, stores an empty
+result and error, records an error event when the buffer has room, ends the run
+span, closes the event channel and done signal, and rejects a later Send. The
+test continues running after each panic, demonstrating that the host test
+process survives. Full core-package race remains pending lane 01's
+RunCanonical producer and integration.
+
+Panic outcome-uncertainty marker follow-up:
+
+  rtk env GOMAXPROCS=2 go test -race -p 2 -count=1 ./internal/core -run '^(TestSubAgentPanicIsContainedAndFinalized|TestSubagentSendReportsDroppedMessage|TestSubAgentSendDoesNotBlockOnFullInbox|TestSubAgentSendAfterTerminalIsRejected)$'
+  exit=0
+
+Both factory and runner panic Wait errors satisfy errors.Is(err,
+ErrSubAgentPanicked) and errors.As to the OutcomeUnknown() bool interface. The
+runner fixture records one simulated effect before panicking; the marker stays
+unknown for factory panics as a conservative outcome. No execution-done or
+pending marker is supplied.

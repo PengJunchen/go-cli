@@ -1,0 +1,9 @@
+snapshot=15a68d2d992e09cc5f5f2f2cf16b38ea8cab3458
+command=golangci-lint run ./...
+internal/tools/prepared_completion_test.go:57:44: context-as-argument: context.Context should be the first parameter of a function (revive)
+func registerPreparedBuiltin(t *testing.T, ctx context.Context, toolName string) (*DefaultToolRegistry, *MiddlewareToolRegistry) {
+                                           ^
+1 issues:
+* revive: 1
+
+exit=1 wall_seconds=42.94

@@ -37,6 +37,16 @@ func TestLoad_FromFile(t *testing.T) {
 	assert.Equal(t, 64000, cfg.Compaction.MaxTokens)
 }
 
+func TestLoad_RejectsUnknownWebSearchProvider(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	doc := `{"web_search":{"provider":"not-a-provider"}}`
+	require.NoError(t, os.WriteFile(path, []byte(doc), 0o600))
+
+	_, err := NewLoader().WithFile(path).Load(context.Background())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "web_search provider")
+}
+
 func TestLoad_FromFileMissing(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nope.json")
 	_, err := NewLoader().WithFile(path).Load(context.Background())

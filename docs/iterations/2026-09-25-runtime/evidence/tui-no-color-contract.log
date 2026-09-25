@@ -1,0 +1,4 @@
+=== RUN   TestNoColorSuppressesANSI
+--- PASS: TestNoColorSuppressesANSI (0.00s)
+PASS
+ok  	github.com/pengjunchen/go-cli/internal/tui	0.017s

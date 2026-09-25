@@ -2,8 +2,11 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
+	"strings"
 	"sync"
 )
 
@@ -15,6 +18,105 @@ type ModelBuilder func(ctx context.Context, modelName string) (BaseChatModel, fu
 
 // ModelLister returns the list of models available from the current provider.
 type ModelLister func() []ModelInfo
+
+// ModelSpecBuilder builds a model from its provider-scoped identity.
+type ModelSpecBuilder func(ctx context.Context, model ModelSpec) (BaseChatModel, func(), error)
+
+// ModelSpecLister returns provider-scoped model entries from the active catalog.
+type ModelSpecLister func() []ModelSpec
+
+// ModelSwitchAdmission borrows the caller's run-admission slot while a built
+// candidate is published and the previous generation is retired.
+type ModelSwitchAdmission func(context.Context) (func(), error)
+
+type modelGeneration struct {
+	model            BaseChatModel
+	providerID       string
+	modelName        string
+	cleanup          func()
+	cleanupAttempted bool
+	cleanupErr       error
+}
+
+type modelGenerationDisposer struct {
+	mu          sync.Mutex
+	finished    chan struct{}
+	generations []*modelGeneration
+	initialErr  error
+	err         error
+}
+
+func newModelGenerationDisposer(generations []*modelGeneration, initialErr error) *modelGenerationDisposer {
+	return &modelGenerationDisposer{generations: generations, initialErr: initialErr}
+}
+
+func (d *modelGenerationDisposer) run() error {
+	d.mu.Lock()
+	if d.finished != nil {
+		finished := d.finished
+		d.mu.Unlock()
+		<-finished
+		d.mu.Lock()
+		err := d.err
+		d.mu.Unlock()
+		return err
+	}
+	d.finished = make(chan struct{})
+	finished := d.finished
+	generations := d.generations
+	d.mu.Unlock()
+
+	disposeErr := d.initialErr
+	retained := make([]*modelGeneration, 0, len(generations))
+	for _, generation := range generations {
+		if generation == nil {
+			continue
+		}
+		if generation.cleanupAttempted {
+			disposeErr = errors.Join(disposeErr, generation.cleanupErr)
+			if generation.cleanupErr != nil {
+				retained = append(retained, generation)
+			} else {
+				generation.model = nil
+				generation.cleanup = nil
+			}
+			continue
+		}
+		if generation.cleanup == nil {
+			generation.model = nil
+			continue
+		}
+		generation.cleanupAttempted = true
+		if invokeCleanup(generation.cleanup) {
+			generation.cleanupErr = ErrModelCleanupPanicked
+			disposeErr = errors.Join(disposeErr, generation.cleanupErr)
+			retained = append(retained, generation)
+		} else {
+			generation.model = nil
+			generation.cleanup = nil
+		}
+	}
+
+	d.mu.Lock()
+	d.generations = retained
+	d.err = disposeErr
+	close(finished)
+	d.mu.Unlock()
+	return disposeErr
+}
+
+var ErrModelSwitchBusy = errors.New("llm: model switch is busy")
+var ErrModelSelectorClosed = errors.New("llm: model selector is closed")
+var ErrModelSwitchAdmissionClosed = errors.New("llm: model switch admission is closed")
+var ErrModelSwitchAdmissionMissingRelease = errors.New("llm: model switch admission returned no release handle")
+var ErrModelSelectorFailed = errors.New("llm: model selector failed closed")
+var ErrModelBuilderReturnedNil = errors.New("llm: model builder returned nil model")
+var ErrModelSwitchCallbackPanicked = errors.New("llm: model switch callback panicked")
+var ErrModelCleanupPanicked = errors.New("llm: model cleanup panicked")
+var ErrModelSelectorFailureHandlerPanicked = errors.New("llm: selector failure handler panicked")
+var ErrModelBuilderPanicked = errors.New("llm: model builder panicked")
+var ErrModelSwitchAdmissionPanicked = errors.New("llm: model switch admission panicked")
+var ErrModelSwitchAdmissionReleasePanicked = errors.New("llm: model switch admission release panicked")
 
 // DefaultModelSelector is a ModelSelector that holds a primary model for full
 // chat turns and an optional small model for lightweight tasks (summary, title,
@@ -52,17 +154,30 @@ type DefaultModelSelector struct {
 	// modelLister returns the list of models available from the current
 	// provider. When nil, AvailableModels returns nil.
 	modelLister ModelLister
+	// modelSpecBuilder and modelSpecLister preserve provider identity for
+	// catalog-based switching while the name-only API remains available.
+	modelSpecBuilder ModelSpecBuilder
+	modelSpecLister  ModelSpecLister
+	switchAdmission  ModelSwitchAdmission
+	failureHandler   func()
 	// onModelSwitched is called after a successful model switch so callers
 	// (e.g. the LoopAgent) can update their reference to the primary model.
 	onModelSwitched func(BaseChatModel)
 
-	// switchMu protects the primary model and the cleanup list during
-	// runtime model switching.
+	// switchMu protects the published model identity, lifecycle state, and
+	// generation ownership. It is never held across user callbacks.
 	switchMu sync.Mutex
-	// cleanups holds cleanup functions for switched-out models so they can
-	// be released when the selector is disposed or a new switch replaces
-	// them.
-	cleanups []func()
+	// mutationGate serializes builders, publication, callbacks, and retirement
+	// cleanup. Mutations acquire it non-blockingly; shutdown may wait with ctx.
+	mutationGate         chan struct{}
+	active               *modelGeneration
+	retired              []*modelGeneration
+	closing              bool
+	detached             bool
+	disposer             *modelGenerationDisposer
+	failure              error
+	failureNotified      bool
+	unprovenBuildFailure error
 }
 
 // Compile-time assertion that DefaultModelSelector satisfies ModelSelector.
@@ -71,7 +186,12 @@ var _ ModelSelector = (*DefaultModelSelector)(nil)
 // NewDefaultModelSelector creates a ModelSelector with the given primary and
 // small models. When small is nil, every task type uses the primary model.
 func NewDefaultModelSelector(primary, small BaseChatModel) *DefaultModelSelector {
-	return &DefaultModelSelector{primary: primary, small: small}
+	return &DefaultModelSelector{
+		primary:      primary,
+		small:        small,
+		active:       &modelGeneration{model: primary},
+		mutationGate: make(chan struct{}, 1),
+	}
 }
 
 // WithModelRegistry sets the external ModelRegistry used for token-aware model
@@ -87,10 +207,16 @@ func (s *DefaultModelSelector) WithModelRegistry(reg ModelRegistry) *DefaultMode
 // metadata in the registry. These must match the keys the registry uses
 // (e.g. the provider ID and model ID from models.dev).
 func (s *DefaultModelSelector) WithModelNames(primaryProvider, primaryName, smallProvider, smallName string) *DefaultModelSelector {
+	s.switchMu.Lock()
 	s.primaryProvider = primaryProvider
 	s.primaryName = primaryName
 	s.smallProvider = smallProvider
 	s.smallName = smallName
+	if s.active != nil {
+		s.active.providerID = primaryProvider
+		s.active.modelName = primaryName
+	}
+	s.switchMu.Unlock()
 	return s
 }
 
@@ -110,6 +236,110 @@ func (s *DefaultModelSelector) WithModelLister(lister ModelLister) *DefaultModel
 	return s
 }
 
+// WithModelSpecBuilder sets the provider-scoped model builder used by
+// SwitchModel and SwitchModelSpec when available.
+func (s *DefaultModelSelector) WithModelSpecBuilder(builder ModelSpecBuilder) *DefaultModelSelector {
+	s.modelSpecBuilder = builder
+	return s
+}
+
+// WithModelSpecLister sets the provider-scoped model catalog used by
+// AvailableModelSpecs.
+func (s *DefaultModelSelector) WithModelSpecLister(lister ModelSpecLister) *DefaultModelSelector {
+	s.modelSpecLister = lister
+	return s
+}
+
+// WithPrimaryCleanup transfers cleanup ownership of the initial primary model
+// to the selector's generation lifecycle.
+func (s *DefaultModelSelector) WithPrimaryCleanup(cleanup func()) *DefaultModelSelector {
+	s.switchMu.Lock()
+	if s.active != nil {
+		s.active.cleanup = cleanup
+	}
+	s.switchMu.Unlock()
+	return s
+}
+
+// WithModelSwitchAdmission borrows shared run admission after building a
+// candidate and holds it through publication, callback, and retirement.
+func (s *DefaultModelSelector) WithModelSwitchAdmission(admission ModelSwitchAdmission) *DefaultModelSelector {
+	s.switchAdmission = admission
+	return s
+}
+
+// WithModelSelectorFailureHandler closes shared run admission after an
+// unrecoverable callback or cleanup panic. The handler runs without state lock.
+func (s *DefaultModelSelector) WithModelSelectorFailureHandler(handler func()) *DefaultModelSelector {
+	s.failureHandler = handler
+	return s
+}
+
+// Failure reports a sanitized fail-closed reason, if the selector is poisoned.
+func (s *DefaultModelSelector) Failure() error {
+	s.switchMu.Lock()
+	defer s.switchMu.Unlock()
+	return s.failure
+}
+
+// SealAndDetach permanently rejects future switches, then waits for any
+// in-flight switch to leave its mutation gate before detaching owned model
+// generations. A timed-out caller leaves the selector sealed and may retry.
+func (s *DefaultModelSelector) SealAndDetach(ctx context.Context) (func() error, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	s.switchMu.Lock()
+	s.closing = true
+	if s.detached {
+		disposer := s.disposer
+		failure := s.failure
+		s.switchMu.Unlock()
+		return disposer.run, failure
+	}
+	s.switchMu.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	select {
+	case s.mutationGate <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if err := ctx.Err(); err != nil {
+		s.endMutation()
+		return nil, err
+	}
+	defer s.endMutation()
+
+	s.switchMu.Lock()
+	if s.detached {
+		disposer := s.disposer
+		failure := s.failure
+		s.switchMu.Unlock()
+		return disposer.run, failure
+	}
+
+	generations := make([]*modelGeneration, 0, len(s.retired)+1)
+	if s.active != nil {
+		generations = append(generations, s.active)
+	}
+	generations = append(generations, s.retired...)
+	s.active = nil
+	s.retired = nil
+	s.primary = nil
+	s.primaryProvider = ""
+	s.primaryName = ""
+	s.detached = true
+	s.disposer = newModelGenerationDisposer(generations, s.unprovenBuildFailure)
+	disposer := s.disposer
+	failure := s.failure
+	s.switchMu.Unlock()
+
+	return disposer.run, failure
+}
+
 // WithModelSwitchCallback sets a callback invoked after a successful model
 // switch. The callback receives the new primary model so callers (e.g. the
 // LoopAgent) can update their reference.
@@ -118,50 +348,414 @@ func (s *DefaultModelSelector) WithModelSwitchCallback(cb func(BaseChatModel)) *
 	return s
 }
 
-// SwitchModel replaces the primary model at runtime. It calls the configured
-// ModelBuilder to construct a new chat model from modelName, updates the
-// selector's primary model and name, and invokes the onModelSwitched callback
-// so downstream consumers (e.g. the LoopAgent) pick up the new model.
+type modelBuildPlan struct {
+	providerID     string
+	modelName      string
+	providerScoped bool
+	build          func(context.Context) (BaseChatModel, func(), error)
+}
+
+// SwitchModel replaces the primary model at runtime. Model construction and
+// publication are one non-queued mutation, so a concurrent switch is rejected
+// before it can construct a candidate.
 func (s *DefaultModelSelector) SwitchModel(ctx context.Context, modelName string) error {
-	if s.modelBuilder == nil {
-		return fmt.Errorf("llm: model switching not configured")
+	return s.switchPrimary(ctx, func() (modelBuildPlan, error) {
+		if s.modelSpecBuilder != nil {
+			current := s.currentModelSpec()
+			model := ModelSpec{
+				ProviderID: current.ProviderID,
+				ModelID:    strings.TrimSpace(modelName),
+			}
+			model.Info = ModelInfo{}
+			model.Known = false
+			if model.ProviderID == "" || model.ModelID == "" {
+				return modelBuildPlan{}, fmt.Errorf("llm: provider and model identities are required")
+			}
+			builder := s.modelSpecBuilder
+			return modelBuildPlan{
+				providerID:     model.ProviderID,
+				modelName:      model.ModelID,
+				providerScoped: true,
+				build: func(ctx context.Context) (BaseChatModel, func(), error) {
+					return builder(ctx, model)
+				},
+			}, nil
+		}
+		if s.modelBuilder == nil {
+			return modelBuildPlan{}, fmt.Errorf("llm: model switching not configured")
+		}
+		current := s.currentModelSpec()
+		builder := s.modelBuilder
+		return modelBuildPlan{
+			providerID: current.ProviderID,
+			modelName:  modelName,
+			build: func(ctx context.Context) (BaseChatModel, func(), error) {
+				return builder(ctx, modelName)
+			},
+		}, nil
+	})
+}
+
+// SwitchModelSpec replaces the primary model using an explicit provider/model
+// pair. Metadata supplied by the caller is ignored; the assembly builder
+// resolves the identity against its provider and credential snapshot.
+func (s *DefaultModelSelector) SwitchModelSpec(ctx context.Context, model ModelSpec) error {
+	return s.switchPrimary(ctx, func() (modelBuildPlan, error) {
+		if s.modelSpecBuilder == nil {
+			return modelBuildPlan{}, fmt.Errorf("llm: provider-scoped model switching not configured")
+		}
+		model.ProviderID = canonicalProviderID(model.ProviderID)
+		model.ModelID = strings.TrimSpace(model.ModelID)
+		model.Info = ModelInfo{}
+		model.Known = false
+		if model.ProviderID == "" || model.ModelID == "" {
+			return modelBuildPlan{}, fmt.Errorf("llm: provider and model identities are required")
+		}
+		builder := s.modelSpecBuilder
+		return modelBuildPlan{
+			providerID:     model.ProviderID,
+			modelName:      model.ModelID,
+			providerScoped: true,
+			build: func(ctx context.Context) (BaseChatModel, func(), error) {
+				return builder(ctx, model)
+			},
+		}, nil
+	})
+}
+
+func (s *DefaultModelSelector) switchPrimary(ctx context.Context, prepare func() (modelBuildPlan, error)) (resultErr error) {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	newModel, cleanup, err := s.modelBuilder(ctx, modelName)
+	if err := s.beginMutation(ctx); err != nil {
+		return err
+	}
+	defer s.endMutation()
+
+	var admissionRelease func()
+	defer func() {
+		if admissionRelease == nil {
+			return
+		}
+		if invokeRelease(admissionRelease) {
+			resultErr = errors.Join(resultErr, s.recordFailure(ErrModelSwitchAdmissionReleasePanicked))
+		}
+	}()
+
+	plan, err := prepare()
 	if err != nil {
-		return fmt.Errorf("llm: build model %q: %w", modelName, err)
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	model, cleanup, builderPanicked, buildErr := invokeModelBuilder(ctx, plan.build)
+	candidate := &modelGeneration{
+		model:      model,
+		providerID: plan.providerID,
+		modelName:  plan.modelName,
+		cleanup:    cleanup,
+	}
+	if builderPanicked {
+		s.switchMu.Lock()
+		s.unprovenBuildFailure = ErrModelBuilderPanicked
+		s.switchMu.Unlock()
+		return s.recordFailure(ErrModelBuilderPanicked)
+	}
+	if buildErr != nil {
+		wrapped := fmt.Errorf("llm: build model %q: %w", plan.modelName, buildErr)
+		if plan.providerScoped {
+			wrapped = fmt.Errorf("llm: build model %q for provider %q: %w", plan.modelName, plan.providerID, buildErr)
+		}
+		return errors.Join(wrapped, s.disposeUnpublished(candidate))
+	}
+	if isNilChatModel(model) {
+		return errors.Join(ErrModelBuilderReturnedNil, s.disposeUnpublished(candidate))
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(err, s.disposeUnpublished(candidate))
+	}
+	if err := s.mutationStateError(); err != nil {
+		return errors.Join(err, s.disposeUnpublished(candidate))
+	}
+
+	if s.switchAdmission != nil {
+		release, admissionPanicked, admissionErr := invokeAdmission(ctx, s.switchAdmission)
+		if admissionPanicked {
+			disposeErr := s.disposeUnpublished(candidate)
+			failure := s.recordFailure(ErrModelSwitchAdmissionPanicked)
+			return errors.Join(failure, disposeErr)
+		}
+		if admissionErr != nil {
+			admissionRelease = release
+			return errors.Join(admissionErr, s.disposeUnpublished(candidate))
+		}
+		if release == nil {
+			return errors.Join(ErrModelSwitchAdmissionMissingRelease, s.disposeUnpublished(candidate))
+		}
+		admissionRelease = release
+	}
+	if err := ctx.Err(); err != nil {
+		return errors.Join(err, s.disposeUnpublished(candidate))
+	}
+	if err := s.mutationStateError(); err != nil {
+		return errors.Join(err, s.disposeUnpublished(candidate))
 	}
 
 	s.switchMu.Lock()
-	oldCleanup := s.cleanups
-	s.cleanups = nil
-	if cleanup != nil {
-		s.cleanups = append(s.cleanups, cleanup)
+	if err := s.mutationStateErrorLocked(); err != nil {
+		s.switchMu.Unlock()
+		return errors.Join(err, s.disposeUnpublished(candidate))
 	}
-	s.primary = newModel
-	s.primaryName = modelName
-	cb := s.onModelSwitched
+	previous := s.active
+	s.active = candidate
+	s.primary = candidate.model
+	s.primaryProvider = candidate.providerID
+	s.primaryName = candidate.modelName
+	if previous != nil {
+		s.retired = append(s.retired, previous)
+	}
+	callback := s.onModelSwitched
 	s.switchMu.Unlock()
 
-	// Release the previous model's resources outside the lock to avoid
-	// blocking concurrent SelectModel calls during cleanup.
-	for _, fn := range oldCleanup {
-		fn()
+	if callback != nil && invokeSwitchCallback(callback, candidate.model) {
+		return s.recordFailure(ErrModelSwitchCallbackPanicked)
 	}
-
-	if cb != nil {
-		cb(newModel)
+	if previous != nil {
+		if err := s.disposeRetired(previous); err != nil {
+			return err
+		}
 	}
-	slog.Info("llm_model_switched", "model", modelName)
+	slog.Info("llm_model_switched", "provider", plan.providerID, "model", plan.modelName)
 	return nil
+}
+
+func (s *DefaultModelSelector) beginMutation(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if err := s.mutationStateError(); err != nil {
+		return err
+	}
+	select {
+	case s.mutationGate <- struct{}{}:
+	default:
+		return ErrModelSwitchBusy
+	}
+	if err := s.mutationStateError(); err != nil {
+		s.endMutation()
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		s.endMutation()
+		return err
+	}
+	return nil
+}
+
+func (s *DefaultModelSelector) endMutation() {
+	<-s.mutationGate
+}
+
+func (s *DefaultModelSelector) mutationStateError() error {
+	s.switchMu.Lock()
+	defer s.switchMu.Unlock()
+	return s.mutationStateErrorLocked()
+}
+
+func (s *DefaultModelSelector) mutationStateErrorLocked() error {
+	if s.failure != nil {
+		return s.failure
+	}
+	if s.closing {
+		return ErrModelSelectorClosed
+	}
+	return nil
+}
+
+func (s *DefaultModelSelector) currentModelSpec() ModelSpec {
+	s.switchMu.Lock()
+	defer s.switchMu.Unlock()
+	return ModelSpec{
+		ProviderID: canonicalProviderID(s.primaryProvider),
+		ModelID:    strings.TrimSpace(s.primaryName),
+	}
+}
+
+func (s *DefaultModelSelector) recordFailure(cause error) error {
+	s.switchMu.Lock()
+	if s.failure == nil {
+		s.failure = errors.Join(ErrModelSelectorFailed, cause)
+	} else if cause != nil && !errors.Is(s.failure, cause) {
+		s.failure = errors.Join(s.failure, cause)
+	}
+	failure := s.failure
+	callHandler := !s.failureNotified
+	if callHandler {
+		s.failureNotified = true
+	}
+	handler := s.failureHandler
+	s.switchMu.Unlock()
+
+	if callHandler && handler != nil && invokeFailureHandler(handler) {
+		s.switchMu.Lock()
+		s.failure = errors.Join(s.failure, ErrModelSelectorFailureHandlerPanicked)
+		failure = s.failure
+		s.switchMu.Unlock()
+	}
+	return failure
+}
+
+func (s *DefaultModelSelector) disposeUnpublished(candidate *modelGeneration) error {
+	if candidate == nil || candidate.cleanup == nil {
+		return nil
+	}
+	candidate.cleanupAttempted = true
+	if !invokeCleanup(candidate.cleanup) {
+		return nil
+	}
+	candidate.cleanupErr = ErrModelCleanupPanicked
+	s.switchMu.Lock()
+	s.retired = append(s.retired, candidate)
+	s.switchMu.Unlock()
+	return s.recordFailure(ErrModelCleanupPanicked)
+}
+
+func (s *DefaultModelSelector) disposeRetired(generation *modelGeneration) error {
+	if generation == nil || generation.cleanup == nil {
+		s.removeRetired(generation)
+		return nil
+	}
+	s.switchMu.Lock()
+	if generation.cleanupAttempted {
+		s.switchMu.Unlock()
+		return nil
+	}
+	generation.cleanupAttempted = true
+	s.switchMu.Unlock()
+
+	if invokeCleanup(generation.cleanup) {
+		generation.cleanupErr = ErrModelCleanupPanicked
+		return s.recordFailure(ErrModelCleanupPanicked)
+	}
+	s.removeRetired(generation)
+	return nil
+}
+
+func (s *DefaultModelSelector) removeRetired(target *modelGeneration) {
+	s.switchMu.Lock()
+	defer s.switchMu.Unlock()
+	for i, generation := range s.retired {
+		if generation == target {
+			copy(s.retired[i:], s.retired[i+1:])
+			s.retired[len(s.retired)-1] = nil
+			s.retired = s.retired[:len(s.retired)-1]
+			return
+		}
+	}
+}
+
+func invokeModelBuilder(ctx context.Context, build func(context.Context) (BaseChatModel, func(), error)) (model BaseChatModel, cleanup func(), panicked bool, err error) {
+	defer func() {
+		if recover() != nil {
+			model = nil
+			cleanup = nil
+			err = nil
+			panicked = true
+		}
+	}()
+	model, cleanup, err = build(ctx)
+	return
+}
+
+func isNilChatModel(model BaseChatModel) bool {
+	if model == nil {
+		return true
+	}
+	value := reflect.ValueOf(model)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+func invokeAdmission(ctx context.Context, admission ModelSwitchAdmission) (release func(), panicked bool, err error) {
+	defer func() {
+		if recover() != nil {
+			release = nil
+			err = nil
+			panicked = true
+		}
+	}()
+	release, err = admission(ctx)
+	return
+}
+
+func invokeRelease(release func()) (panicked bool) {
+	defer func() { panicked = recover() != nil }()
+	release()
+	return
+}
+
+func invokeSwitchCallback(callback func(BaseChatModel), model BaseChatModel) (panicked bool) {
+	defer func() { panicked = recover() != nil }()
+	callback(model)
+	return
+}
+
+func invokeCleanup(cleanup func()) (panicked bool) {
+	defer func() { panicked = recover() != nil }()
+	cleanup()
+	return
+}
+
+func invokeFailureHandler(handler func()) (panicked bool) {
+	defer func() { panicked = recover() != nil }()
+	handler()
+	return
 }
 
 // AvailableModels returns the list of models available from the current
 // provider. It returns nil when no ModelLister is configured.
 func (s *DefaultModelSelector) AvailableModels() []ModelInfo {
-	if s.modelLister == nil {
+	if s.modelLister != nil {
+		return s.modelLister()
+	}
+	models := s.AvailableModelSpecs()
+	if len(models) == 0 {
 		return nil
 	}
-	return s.modelLister()
+	result := make([]ModelInfo, 0, len(models))
+	for _, model := range models {
+		result = append(result, model.Info)
+	}
+	return result
+}
+
+// AvailableModelSpecs returns a copy of the provider-scoped model catalog.
+func (s *DefaultModelSelector) AvailableModelSpecs() []ModelSpec {
+	if s.modelSpecLister == nil {
+		return nil
+	}
+	models := s.modelSpecLister()
+	if models == nil {
+		return nil
+	}
+	result := make([]ModelSpec, len(models))
+	copy(result, models)
+	return result
+}
+
+// CurrentModelSpec returns the current provider/model identity.
+func (s *DefaultModelSelector) CurrentModelSpec() ModelSpec {
+	s.switchMu.Lock()
+	defer s.switchMu.Unlock()
+	return ModelSpec{
+		ProviderID: canonicalProviderID(s.primaryProvider),
+		ModelID:    strings.TrimSpace(s.primaryName),
+	}
 }
 
 // PrimaryModelName returns the name of the current primary model.
@@ -171,15 +765,12 @@ func (s *DefaultModelSelector) PrimaryModelName() string {
 	return s.primaryName
 }
 
-// CloseReleasesCleanups runs any pending cleanup functions for switched-out
-// models. Call this when the selector is being disposed.
+// CloseReleasesCleanups is the legacy, error-discarding selector close helper.
+// New callers should use SealAndDetach so cleanup failures remain observable.
 func (s *DefaultModelSelector) CloseReleasesCleanups() {
-	s.switchMu.Lock()
-	cleanups := s.cleanups
-	s.cleanups = nil
-	s.switchMu.Unlock()
-	for _, fn := range cleanups {
-		fn()
+	dispose, _ := s.SealAndDetach(context.Background())
+	if dispose != nil {
+		_ = dispose()
 	}
 }
 
@@ -225,12 +816,13 @@ func (s *DefaultModelSelector) SelectModelWithTokens(ctx context.Context, taskTy
 	s.switchMu.Lock()
 	primary := s.primary
 	primaryName := s.primaryName
+	primaryProvider := s.primaryProvider
 	s.switchMu.Unlock()
 	if candidate != primary {
 		return candidate
 	}
 
-	limit := s.modelInputLimit(ctx, s.primaryProvider, primaryName)
+	limit := s.modelInputLimit(ctx, primaryProvider, primaryName)
 	if limit <= 0 || estimatedTokens <= limit {
 		return candidate
 	}

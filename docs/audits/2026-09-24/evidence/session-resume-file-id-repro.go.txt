@@ -1,0 +1,53 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"os"
+	"time"
+
+	"github.com/pengjunchen/go-cli/internal/session"
+)
+
+func main() {
+	ctx := context.Background()
+	dir, err := os.MkdirTemp("", "go-cli-resume-repro-")
+	must(err)
+	defer os.RemoveAll(dir)
+
+	store := session.NewJSONLSessionStore(dir)
+	must(store.Open(ctx))
+	must(store.SetSessionID("session-a", true))
+	must(store.Append(ctx, &session.SessionEntry{ID: "entry-a", Type: session.EntryTypeUser, Content: "A", Timestamp: time.Now()}))
+	must(store.Save(ctx))
+	must(store.SetSessionID("session-b", true))
+	must(store.Append(ctx, &session.SessionEntry{ID: "entry-b", Type: session.EntryTypeUser, Content: "B", Timestamp: time.Now()}))
+	must(store.Save(ctx))
+	must(store.Close())
+
+	current := session.NewJSONLSessionStore(dir)
+	must(current.Open(ctx))
+	defer current.Close()
+	metas, err := current.ListSessions(ctx)
+	must(err)
+	tree, err := session.NewDefaultSessionTreeBuilder().BuildFromStore(ctx, current)
+	must(err)
+	h := session.NewSessionSlashHandler(tree, current)
+	_, err = h.Handle(ctx, session.SlashCommand{Name: "resume", Args: []string{"session-a"}})
+	fmt.Printf("listed_old_session=%t current_file=%q current_leaf=%q resume_error=%v\n", hasID(metas, "session-a"), current.FilePath(), tree.CurrentLeaf(), err)
+}
+
+func hasID(metas []session.SessionMeta, id string) bool {
+	for _, m := range metas {
+		if m.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func must(err error) {
+	if err != nil {
+		panic(err)
+	}
+}

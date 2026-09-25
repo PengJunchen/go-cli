@@ -178,7 +178,8 @@ func TestGrepPureGoFunctionDirectly(t *testing.T) {
 	dir := setupGrepDir(t)
 	re := mustCompile(t, "TODO")
 
-	ms := grepPureGo(context.Background(), re, dir, "")
+	ms, err := grepPureGo(context.Background(), re, dir, "", PathWhitelist{})
+	require.NoError(t, err)
 	got := map[string]bool{}
 	for _, m := range ms {
 		got[strings.Join([]string{filepath.Base(m.File), strconv.Itoa(m.Line), m.Content}, ":")] = true

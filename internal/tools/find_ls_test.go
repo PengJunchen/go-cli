@@ -2,8 +2,11 @@ package tools
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -42,6 +45,143 @@ func TestFindPureGoMatchesPaths(t *testing.T) {
 		assert.Contains(t, res.Output, want, "expected %q in output", want)
 	}
 	assert.Equal(t, 7, res.Metadata["matches"])
+	assert.Equal(t, false, res.Metadata["truncated"])
+}
+
+func TestFindGoReturnsGloballySortedTopKAndReportsTruncation(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	const total = findMaxResults + 5
+	for i := total - 1; i >= 0; i-- {
+		name := fmt.Sprintf("entry-%04d.txt", i)
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), nil, 0o600))
+	}
+	result, err := NewFindTool(WithFindWorkdir(dir), WithFindForceNode(true)).Execute(context.Background(), ToolCall{
+		Args: map[string]any{"type": "f"},
+	})
+	require.NoError(t, err)
+	want := make([]string, findMaxResults)
+	for i := range want {
+		want[i] = fmt.Sprintf("entry-%04d.txt", i)
+	}
+	assert.Equal(t, strings.Join(want, "\n"), result.Output)
+	assert.Equal(t, findMaxResults, result.Metadata["matches"])
+	assert.Equal(t, true, result.Metadata["truncated"])
+}
+
+func TestFindManagedBackendsReturnSameSortedTopK(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell helper fixtures require POSIX sh")
+	}
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	for _, backend := range []string{"fd", "find"} {
+		t.Run(backend, func(t *testing.T) {
+			dir := t.TempDir()
+			workdir := t.TempDir()
+			for i := 1004; i >= 0; i-- {
+				name := fmt.Sprintf("entry-%04d.txt", i)
+				require.NoError(t, os.WriteFile(filepath.Join(workdir, name), nil, 0o600))
+			}
+			script := "#!/bin/sh\nn=1004\nwhile [ \"$n\" -ge 0 ]; do printf 'entry-%04d.txt\\n' \"$n\"; n=$((n - 1)); done\n"
+			require.NoError(t, os.WriteFile(filepath.Join(dir, backend), []byte(script), 0o700))
+			t.Setenv("PATH", dir)
+
+			call := ToolCall{
+				Args: map[string]any{"type": "f"},
+			}
+			result, err := NewFindTool(WithFindWorkdir(workdir)).Execute(context.Background(), call)
+			require.NoError(t, err)
+			want := make([]string, findMaxResults)
+			for i := range want {
+				want[i] = fmt.Sprintf("entry-%04d.txt", i)
+			}
+			assert.Equal(t, strings.Join(want, "\n"), result.Output)
+			assert.Equal(t, findMaxResults, result.Metadata["matches"])
+			assert.Equal(t, true, result.Metadata["truncated"])
+
+			goResult, err := NewFindTool(WithFindWorkdir(workdir), WithFindForceNode(true)).Execute(context.Background(), call)
+			require.NoError(t, err)
+			assert.Equal(t, result.Output, goResult.Output, "Go and helper backends must agree for identical emitted path values")
+			assert.Equal(t, result.Metadata["truncated"], goResult.Metadata["truncated"])
+		})
+	}
+}
+
+func TestFindCaptureLimitDrainsHelperAndStopsFallback(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell helper fixtures require POSIX sh")
+	}
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	helperDir := t.TempDir()
+	markerDir := t.TempDir()
+	completedMarker := filepath.Join(markerDir, "fd-finished")
+	fallbackMarker := filepath.Join(markerDir, "find-fallback")
+	fdScript := "#!/bin/sh\nprintf '%04097d\\n' 0\nprintf 'discarded-after-limit\\n'\nprintf done > " + quoteDirectoryCaptureShellArg(completedMarker) + "\n"
+	findScript := "#!/bin/sh\nprintf called > " + quoteDirectoryCaptureShellArg(fallbackMarker) + "\nprintf 'fallback.txt\\n'\n"
+	require.NoError(t, os.WriteFile(filepath.Join(helperDir, "fd"), []byte(fdScript), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(helperDir, "find"), []byte(findScript), 0o700))
+	t.Setenv("PATH", helperDir)
+
+	workdir := t.TempDir()
+	result, err := NewFindTool(WithFindWorkdir(workdir)).Execute(context.Background(), ToolCall{Args: map[string]any{}})
+	require.ErrorIs(t, err, errDirectoryCaptureLimit)
+	require.NotNil(t, result)
+	assert.Empty(t, result.Output)
+	assert.FileExists(t, completedMarker, "capture saturation must drain and join the helper before returning")
+	assert.NoFileExists(t, fallbackMarker, "a typed capture error must stop backend fallback")
+}
+
+func TestFindOutputByteLimitKeepsWholeRecords(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell helper fixtures require POSIX sh")
+	}
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	helperDir := t.TempDir()
+	script := "#!/bin/sh\nn=999\nwhile [ \"$n\" -ge 0 ]; do printf '%01097d\\n' \"$n\"; n=$((n - 1)); done\n"
+	require.NoError(t, os.WriteFile(filepath.Join(helperDir, "fd"), []byte(script), 0o700))
+	t.Setenv("PATH", helperDir)
+
+	result, err := NewFindTool(WithFindWorkdir(t.TempDir())).Execute(context.Background(), ToolCall{Args: map[string]any{}})
+	require.NoError(t, err)
+	expectedRecords := directoryCaptureMaxOutputBytes / (1097 + 1)
+	assert.Equal(t, expectedRecords, result.Metadata["matches"])
+	assert.Equal(t, true, result.Metadata["truncated"])
+	assert.Equal(t, expectedRecords*(1097+1)-1, len(result.Output))
+	assert.NotContains(t, result.Output, "\n\n", "the byte cap must preserve complete records")
+}
+
+func TestFindRejectsOutsideWhitelistBeforeHelperDispatch(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell helper fixtures require POSIX sh")
+	}
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	helperDir := t.TempDir()
+	markers := []string{filepath.Join(t.TempDir(), "fd-called"), filepath.Join(t.TempDir(), "find-called")}
+	for i, name := range []string{"fd", "find"} {
+		script := "#!/bin/sh\nprintf called > " + quoteDirectoryCaptureShellArg(markers[i]) + "\nprintf 'unexpected\\n'\n"
+		require.NoError(t, os.WriteFile(filepath.Join(helperDir, name), []byte(script), 0o700))
+	}
+	t.Setenv("PATH", helperDir)
+	allowedDir := t.TempDir()
+	outsideDir := t.TempDir()
+
+	result, err := NewFindTool(WithFindWorkdir(allowedDir), WithFindPathWhitelist([]string{allowedDir})).Execute(context.Background(), ToolCall{
+		Args: map[string]any{"path": outsideDir},
+	})
+	require.Error(t, err)
+	assert.Nil(t, result)
+	for _, marker := range markers {
+		assert.NoFileExists(t, marker, "path validation must reject before dispatching either helper")
+	}
+}
+
+func quoteDirectoryCaptureShellArg(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\"'\"'") + "'"
 }
 
 func TestFindPureGoMatchesPattern(t *testing.T) {
@@ -76,6 +216,35 @@ func TestFindPureGoFiltersByTypeAndDepth(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, resShallow.Output, "sub")
 	assert.NotContains(t, resShallow.Output, "sub/c.go")
+}
+
+func TestFindPureGoDoesNotFollowSymlinkDirectories(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	root := t.TempDir()
+	target := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(target, "secret.txt"), []byte("x"), 0o600))
+	if err := os.Symlink(target, filepath.Join(root, "linked")); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+
+	result, err := NewFindTool(WithFindWorkdir(root), WithFindForceNode(true)).Execute(context.Background(), ToolCall{
+		Args: map[string]any{"pattern": "secret.txt"},
+	})
+	require.NoError(t, err)
+	assert.Empty(t, result.Output)
+	assert.Equal(t, 0, result.Metadata["matches"])
+	assert.Equal(t, false, result.Metadata["truncated"])
+
+	fileTarget := filepath.Join(target, "linked-file-target.txt")
+	require.NoError(t, os.WriteFile(fileTarget, []byte("x"), 0o600))
+	fileLink := filepath.Join(t.TempDir(), "linked-file.txt")
+	if err := os.Symlink(fileTarget, fileLink); err != nil {
+		t.Skipf("symlinks unavailable: %v", err)
+	}
+	rootLinkResult, err := findPureGo(context.Background(), fileLink, "linked-file.txt", "", 0)
+	require.NoError(t, err)
+	assert.Equal(t, []string{fileLink}, rootLinkResult.paths, "the legacy root-file path branch includes matching file symlinks")
 }
 
 func TestFindSingleFile(t *testing.T) {
@@ -122,6 +291,61 @@ func TestLSListsDirectory(t *testing.T) {
 	}
 	assert.NotContains(t, res.Output, "c.go") // not an immediate child
 	assert.Equal(t, 3, res.Metadata["entries"])
+	assert.Equal(t, false, res.Metadata["truncated"])
+}
+
+func TestLSTruncatesToStableSortedTopKForEverySortMode(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	type expectedEntry struct {
+		name string
+		size int
+		mod  time.Time
+	}
+	dir := t.TempDir()
+	const total = directoryCaptureMaxEntries + 5
+	entries := make([]expectedEntry, 0, total)
+	baseTime := time.Unix(1_700_000_000, 0)
+	for i := total - 1; i >= 0; i-- {
+		name := fmt.Sprintf("entry-%04d", i)
+		size := i % 5
+		path := filepath.Join(dir, name)
+		require.NoError(t, os.WriteFile(path, []byte(strings.Repeat("x", size)), 0o600))
+		mod := baseTime.Add(time.Duration(i%7) * time.Second)
+		require.NoError(t, os.Chtimes(path, mod, mod))
+		entries = append(entries, expectedEntry{name: name, size: size, mod: mod})
+	}
+
+	for _, sortBy := range []string{"name", "time", "size"} {
+		t.Run(sortBy, func(t *testing.T) {
+			ordered := append([]expectedEntry(nil), entries...)
+			sort.Slice(ordered, func(i, j int) bool {
+				switch sortBy {
+				case "time":
+					if !ordered[i].mod.Equal(ordered[j].mod) {
+						return ordered[i].mod.After(ordered[j].mod)
+					}
+				case "size":
+					if ordered[i].size != ordered[j].size {
+						return ordered[i].size < ordered[j].size
+					}
+				}
+				return ordered[i].name < ordered[j].name
+			})
+
+			result, err := NewLSTool().Execute(context.Background(), ToolCall{
+				Args: map[string]any{"path": dir, "sort": sortBy},
+			})
+			require.NoError(t, err)
+			want := make([]string, directoryCaptureMaxEntries)
+			for i := range want {
+				want[i] = ordered[i].name
+			}
+			assert.Equal(t, strings.Join(want, "\n"), result.Output)
+			assert.Equal(t, directoryCaptureMaxEntries, result.Metadata["entries"])
+			assert.Equal(t, true, result.Metadata["truncated"])
+		})
+	}
 }
 
 func TestLSAllIncludesDotfiles(t *testing.T) {

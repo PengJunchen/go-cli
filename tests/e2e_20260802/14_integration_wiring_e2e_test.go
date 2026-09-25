@@ -607,8 +607,15 @@ func TestWT_Compaction_UnifiedRouterDegrades(t *testing.T) {
 		items := []compaction.TurnItem{
 			{Role: compaction.RoleSystem, Content: "sys"},
 			{Role: compaction.RoleUser, Content: "hello"},
-			{Role: compaction.RoleTool, ToolName: "read", ToolResult: strings.Repeat("t", 200)},
-			{Role: compaction.RoleAssistant, Content: "hi"},
+			{
+				Role:    compaction.RoleAssistant,
+				Content: "hi",
+				ToolCalls: []llm.ToolCall{{
+					ID:   "read-1",
+					Name: "read",
+				}},
+			},
+			{Role: compaction.RoleTool, ToolCallID: "read-1", ToolName: "read", ToolResult: strings.Repeat("t", 200)},
 		}
 
 		out, err := uni.Compact(ctx, items, 100, est)
@@ -655,15 +662,25 @@ func TestWT_Compaction_LongConversationStability(t *testing.T) {
 			Role:    compaction.RoleUser,
 			Content: fmt.Sprintf("user message %d", i),
 		})
-		if turn.AssistantContent != "" {
+		assistantCalls := make([]llm.ToolCall, 0, len(turn.AssistantToolCalls))
+		for _, tc := range turn.AssistantToolCalls {
+			assistantCalls = append(assistantCalls, llm.ToolCall{
+				ID:   tc.ID,
+				Name: tc.Name,
+				Args: tc.Args,
+			})
+		}
+		if turn.AssistantContent != "" || len(assistantCalls) > 0 {
 			items = append(items, compaction.TurnItem{
-				Role:    compaction.RoleAssistant,
-				Content: turn.AssistantContent,
+				Role:      compaction.RoleAssistant,
+				Content:   turn.AssistantContent,
+				ToolCalls: assistantCalls,
 			})
 		}
 		for _, tc := range turn.AssistantToolCalls {
 			items = append(items, compaction.TurnItem{
 				Role:       compaction.RoleTool,
+				ToolCallID: tc.ID,
 				ToolName:   tc.Name,
 				ToolResult: fmt.Sprintf("result for %s at iteration %d", tc.Name, i),
 			})

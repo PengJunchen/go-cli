@@ -12,7 +12,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -224,7 +223,6 @@ func TestET_Phase22_Production_AuditLog(t *testing.T) {
 // TestET_Phase22_Production_Telemetry verifies that AssembleAgent wires a
 // non-nil Telemetry that records metrics and exposes them via Snapshot.
 func TestET_Phase22_Production_Telemetry(t *testing.T) {
-	t.Skip("Pre-existing failure: telemetry metric not recorded for tool calls")
 	assembly := phase22ProdAssemble(t, phase22ProdTestConfig())
 	require.NotNil(t, assembly.Telemetry, "Telemetry must be wired by AssembleAgent")
 
@@ -245,8 +243,9 @@ func TestET_Phase22_Production_Telemetry(t *testing.T) {
 	require.True(t, ok, "Telemetry should be *DefaultTelemetry")
 
 	snapshot := dt.Snapshot()
-	assert.Contains(t, snapshot, "e2e.test.counter")
-	assert.Equal(t, 42.0, snapshot["e2e.test.counter"])
+	const testCounterKey = "metric-v1|16:e2e.test.counter|1|4:test|7:phase22|"
+	assert.Contains(t, snapshot, testCounterKey)
+	assert.Equal(t, 42.0, snapshot[testCounterKey])
 
 	// Execute a tool through the assembled registry and verify telemetry
 	// records the tool call count metric.
@@ -261,16 +260,9 @@ func TestET_Phase22_Production_Telemetry(t *testing.T) {
 	require.NoError(t, err)
 
 	snapshot = dt.Snapshot()
-	// Telemetry now uses composite keys with labels (MD-7): name{k=v,...}
-	var foundToolCall bool
-	for k, v := range snapshot {
-		if strings.HasPrefix(k, "tool.call.count{") && v > 0.0 {
-			foundToolCall = true
-			break
-		}
-	}
-	assert.True(t, foundToolCall,
-		"telemetry should record tool.call.count with labels after tool execution")
+	const todoWriteCountKey = "metric-v1|15:tool.call.count|2|9:cache_hit|5:false|10:tool_class|5:other|"
+	assert.Equal(t, 1.0, snapshot[todoWriteCountKey],
+		"the assembled tool registry should record the executed tool under a bounded class")
 }
 
 // =============================================================================

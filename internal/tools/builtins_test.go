@@ -2,6 +2,8 @@ package tools
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -38,6 +40,46 @@ func TestRegisterDefaultsRegistersBuiltins(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, name, def.Name())
 	}
+}
+
+func TestRegisterDefaultsMintsOnlyReviewedWriteEffects(t *testing.T) {
+	ctx := context.Background()
+	reg := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	require.NoError(t, RegisterDefaults(ctx, reg))
+
+	for _, name := range []string{"write", "edit"} {
+		snapshot, err := reg.toolRegistrationSnapshot(ctx, name)
+		require.NoError(t, err)
+		assert.Equal(t, RegistrationSourceBuiltin, snapshot.identity.RegistrationSource())
+		assert.Equal(t, []TrustedToolEffect{EffectWorkspaceWrite}, snapshot.effects.Values())
+		assert.Equal(t, [32]byte{}, snapshot.identity.Scope().Fingerprint(), "no path scope is asserted here")
+	}
+
+	bashSnapshot, err := reg.toolRegistrationSnapshot(ctx, "bash")
+	require.NoError(t, err)
+	assert.Equal(t, RegistrationSourceBuiltin, bashSnapshot.identity.RegistrationSource())
+	assert.Equal(t, []TrustedToolEffect{EffectUnknown}, bashSnapshot.effects.Values(), "local process provenance does not grant a Plan effect")
+	assert.Empty(t, bashSnapshot.completionProof, "default RegisterDefaults has no approved sandbox configured")
+
+	for _, name := range []string{"read", "grep", "find", "ls"} {
+		snapshot, err := reg.toolRegistrationSnapshot(ctx, name)
+		require.NoError(t, err)
+		if name == "read" || name == "ls" {
+			assert.Equal(t, RegistrationSourceBuiltin, snapshot.identity.RegistrationSource())
+			assert.Equal(t, CompletionInlinePipelineJoined, snapshot.completionProof)
+		} else {
+			assert.Equal(t, RegistrationSourceToolRegistry, snapshot.identity.RegistrationSource())
+			assert.Empty(t, snapshot.completionProof)
+		}
+		assert.Equal(t, []TrustedToolEffect{EffectUnknown}, snapshot.effects.Values())
+	}
+
+	custom := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	require.NoError(t, custom.Register(ctx, NewWriteTool()))
+	customSnapshot, err := custom.toolRegistrationSnapshot(ctx, "write")
+	require.NoError(t, err)
+	assert.Equal(t, RegistrationSourceToolRegistry, customSnapshot.identity.RegistrationSource())
+	assert.Equal(t, []TrustedToolEffect{EffectUnknown}, customSnapshot.effects.Values())
 }
 
 func TestRegisterDefaultsNilRegistry(t *testing.T) {
@@ -204,18 +246,31 @@ func TestRegisterDefaultsEmptyWhitelistRegistersAll(t *testing.T) {
 
 	_, err = reg.Get(ctx, "bash")
 	assert.NoError(t, err)
+	read, err := reg.Get(ctx, "read")
+	require.NoError(t, err)
+	readConcrete, ok := read.(*ReadTool)
+	require.True(t, ok)
+	assert.Empty(t, readConcrete.whitelist.paths, "nil/empty registration scope preserves unrestricted Read behavior")
 }
 
 // TestRegisterDefaultsWithPathWhitelist verifies that RegisterDefaults wires the
-// path whitelist into both WriteTool and EditFileTool when the option is passed.
+// path whitelist into every default file tool when the option is passed.
 func TestRegisterDefaultsWithPathWhitelist(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	ctx := context.Background()
 	reg := NewDefaultToolRegistry()
 	dir := t.TempDir()
+	paths := []string{dir}
 
-	require.NoError(t, RegisterDefaults(ctx, reg, WithRegisteredPathWhitelist([]string{dir})))
+	require.NoError(t, RegisterDefaults(ctx, reg, WithRegisteredPathWhitelist(paths)))
+
+	// ReadTool should have the whitelist configured.
+	rt, err := reg.Get(ctx, "read")
+	require.NoError(t, err)
+	rtConcrete, ok := rt.(*ReadTool)
+	require.True(t, ok)
+	assert.True(t, len(rtConcrete.whitelist.paths) > 0)
 
 	// WriteTool should have the whitelist configured.
 	wt, err := reg.Get(ctx, "write")
@@ -230,4 +285,67 @@ func TestRegisterDefaultsWithPathWhitelist(t *testing.T) {
 	etConcrete, ok := et.(*EditFileTool)
 	require.True(t, ok)
 	assert.True(t, len(etConcrete.whitelist.paths) > 0)
+
+	// Search and listing tools should use the same configured path scope.
+	gt, err := reg.Get(ctx, "grep")
+	require.NoError(t, err)
+	gtConcrete, ok := gt.(*GrepTool)
+	require.True(t, ok)
+	assert.True(t, len(gtConcrete.whitelist.paths) > 0)
+
+	ft, err := reg.Get(ctx, "find")
+	require.NoError(t, err)
+	ftConcrete, ok := ft.(*FindTool)
+	require.True(t, ok)
+	assert.True(t, len(ftConcrete.whitelist.paths) > 0)
+
+	lt, err := reg.Get(ctx, "ls")
+	require.NoError(t, err)
+	ltConcrete, ok := lt.(*LSTool)
+	require.True(t, ok)
+	assert.True(t, len(ltConcrete.whitelist.paths) > 0)
+}
+
+func TestRegisterDefaultsPathWhitelistConstrainsWriteAndEdit(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	ctx := context.Background()
+	reg := NewDefaultToolRegistry()
+	allowedDir := t.TempDir()
+	outsideDir := t.TempDir()
+	require.NoError(t, RegisterDefaults(ctx, reg, WithRegisteredPathWhitelist([]string{allowedDir})))
+
+	allowedWrite := filepath.Join(allowedDir, "created.txt")
+	write, err := reg.Get(ctx, "write")
+	require.NoError(t, err)
+	_, err = write.Execute(ctx, ToolCall{Args: map[string]any{"path": allowedWrite, "content": "created"}})
+	require.NoError(t, err)
+
+	allowedEdit := filepath.Join(allowedDir, "edit.txt")
+	require.NoError(t, os.WriteFile(allowedEdit, []byte("before"), 0o600))
+	edit, err := reg.Get(ctx, "edit")
+	require.NoError(t, err)
+	_, err = edit.Execute(ctx, ToolCall{Args: map[string]any{
+		"file_path": allowedEdit, "old_string": "before", "new_string": "after",
+	}})
+	require.NoError(t, err)
+	content, err := os.ReadFile(allowedEdit)
+	require.NoError(t, err)
+	assert.Equal(t, "after", string(content))
+
+	outsideWrite := filepath.Join(outsideDir, "blocked.txt")
+	_, err = write.Execute(ctx, ToolCall{Args: map[string]any{"path": outsideWrite, "content": "blocked"}})
+	require.Error(t, err)
+	_, err = os.Stat(outsideWrite)
+	assert.Error(t, err, "blocked write must not create an outside file")
+
+	outsideEdit := filepath.Join(outsideDir, "edit.txt")
+	require.NoError(t, os.WriteFile(outsideEdit, []byte("before"), 0o600))
+	_, err = edit.Execute(ctx, ToolCall{Args: map[string]any{
+		"file_path": outsideEdit, "old_string": "before", "new_string": "after",
+	}})
+	require.Error(t, err)
+	content, err = os.ReadFile(outsideEdit)
+	require.NoError(t, err)
+	assert.Equal(t, "before", string(content), "blocked edit must not change an outside file")
 }

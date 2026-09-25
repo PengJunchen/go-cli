@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/pengjunchen/go-cli/internal/compaction"
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mock"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
@@ -80,8 +81,8 @@ func TestCompaction_MicroCompaction(t *testing.T) {
 	items := []compaction.TurnItem{
 		{Role: compaction.RoleSystem, Content: "You are a helpful assistant."},
 		{Role: compaction.RoleUser, Content: "What is in the file?"},
-		{Role: compaction.RoleAssistant, Content: "Let me read it for you."},
-		{Role: compaction.RoleTool, ToolName: "read", ToolResult: strings.Repeat("x", 400)},
+		{Role: compaction.RoleAssistant, Content: "Let me read it for you.", ToolCalls: []llm.ToolCall{{ID: "read-1", Name: "read"}}},
+		{Role: compaction.RoleTool, ToolCallID: "read-1", ToolName: "read", ToolResult: strings.Repeat("x", 400)},
 		{Role: compaction.RoleUser, Content: "Thank you."},
 		{Role: compaction.RoleAssistant, Content: "You are welcome."},
 	}
@@ -168,9 +169,9 @@ func TestCompaction_UnifiedStrategyRouting(t *testing.T) {
 	items := []compaction.TurnItem{
 		{Role: compaction.RoleSystem, Content: "sys"},
 		{Role: compaction.RoleUser, Content: "hello"},
-		{Role: compaction.RoleAssistant, Content: "hi"},
-		{Role: compaction.RoleTool, ToolName: "read", ToolResult: strings.Repeat("t", 200)},
-		{Role: compaction.RoleTool, ToolName: "grep", ToolResult: strings.Repeat("g", 200)},
+		{Role: compaction.RoleAssistant, Content: "hi", ToolCalls: []llm.ToolCall{{ID: "read-1", Name: "read"}, {ID: "grep-1", Name: "grep"}}},
+		{Role: compaction.RoleTool, ToolCallID: "grep-1", ToolName: "grep", ToolResult: strings.Repeat("g", 200)},
+		{Role: compaction.RoleTool, ToolCallID: "read-1", ToolName: "read", ToolResult: strings.Repeat("t", 200)},
 		{Role: compaction.RoleUser, Content: "ok"},
 	}
 
@@ -192,9 +193,16 @@ func TestCompaction_UnifiedStrategyRouting(t *testing.T) {
 
 		// Use items that force micro to fail and summary also can't produce a good result.
 		manyItems := make([]compaction.TurnItem, 0, 40)
-		for i := 0; i < 40; i++ {
+		for i := 0; i < 20; i++ {
+			callID := fmt.Sprintf("fallback-read-%d", i)
 			manyItems = append(manyItems, compaction.TurnItem{
-				Role: compaction.RoleTool, ToolName: "read", ToolResult: strings.Repeat("z", 100),
+				Role:      compaction.RoleAssistant,
+				ToolCalls: []llm.ToolCall{{ID: callID, Name: "read"}},
+			}, compaction.TurnItem{
+				Role:       compaction.RoleTool,
+				ToolCallID: callID,
+				ToolName:   "read",
+				ToolResult: strings.Repeat("z", 100),
 			})
 		}
 
@@ -302,7 +310,8 @@ func TestCompaction_TokenEstimation(t *testing.T) {
 		items := []compaction.TurnItem{
 			{Role: compaction.RoleSystem, Content: "system prompt here"},
 			{Role: compaction.RoleUser, Content: "user question"},
-			{Role: compaction.RoleTool, ToolName: "read", ToolResult: "tool result content"},
+			{Role: compaction.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "read-1", Name: "read"}}},
+			{Role: compaction.RoleTool, ToolCallID: "read-1", ToolName: "read", ToolResult: "tool result content"},
 		}
 		tokens := tokenSum(items, est)
 		// system prompt here (5) + user question (4) + tool result content (5) = 14
@@ -372,8 +381,8 @@ func TestCompaction_QualityEvaluation(t *testing.T) {
 	t.Run("end to end: compact then evaluate", func(t *testing.T) {
 		items := []compaction.TurnItem{
 			{Role: compaction.RoleUser, Content: strings.Repeat("u", 200)},
-			{Role: compaction.RoleAssistant, Content: strings.Repeat("a", 200)},
-			{Role: compaction.RoleTool, ToolName: "read", ToolResult: strings.Repeat("t", 400)},
+			{Role: compaction.RoleAssistant, Content: strings.Repeat("a", 200), ToolCalls: []llm.ToolCall{{ID: "read-1", Name: "read"}}},
+			{Role: compaction.RoleTool, ToolCallID: "read-1", ToolName: "read", ToolResult: strings.Repeat("t", 400)},
 			{Role: compaction.RoleUser, Content: "keep-me"},
 		}
 
@@ -403,23 +412,36 @@ func TestCompaction_ComplexLongConversation(t *testing.T) {
 
 	// Convert ConversationTemplate turns into compaction.TurnItem list.
 	items := make([]compaction.TurnItem, 0, len(tmpl.Turns)*2)
+	groupEnds := make([]int, 0, len(tmpl.Turns)/50+1)
 	for i, turn := range tmpl.Turns {
 		if len(turn.AssistantToolCalls) > 0 {
+			toolCalls := make([]llm.ToolCall, 0, len(turn.AssistantToolCalls))
+			for _, tc := range turn.AssistantToolCalls {
+				toolCalls = append(toolCalls, llm.ToolCall{ID: tc.ID, Name: tc.Name, Args: tc.Args})
+			}
+			items = append(items, compaction.TurnItem{
+				Role:      compaction.RoleAssistant,
+				Content:   turn.AssistantContent,
+				ToolCalls: toolCalls,
+			})
 			for _, tc := range turn.AssistantToolCalls {
 				items = append(items, compaction.TurnItem{
-					ID:       tc.ID,
-					Role:     compaction.RoleTool,
-					ToolName: tc.Name,
+					ID:         fmt.Sprintf("tool-%s", tc.ID),
+					Role:       compaction.RoleTool,
+					ToolCallID: tc.ID,
+					ToolName:   tc.Name,
 					ToolResult: fmt.Sprintf("result of %s on %v at iteration %d",
 						tc.Name, tc.Args, i),
 				})
 			}
-		}
-		if turn.AssistantContent != "" {
+		} else if turn.AssistantContent != "" {
 			items = append(items, compaction.TurnItem{
 				Role:    compaction.RoleAssistant,
 				Content: turn.AssistantContent,
 			})
+		}
+		if (i+1)%50 == 0 || i == len(tmpl.Turns)-1 {
+			groupEnds = append(groupEnds, len(items))
 		}
 	}
 
@@ -431,15 +453,12 @@ func TestCompaction_ComplexLongConversation(t *testing.T) {
 		compaction.WithSummary(summaryComp),
 	)
 
-	// Run compaction at every 50th turn, with a budget that forces compaction.
-	for step := 50; step <= len(items); step += 50 {
-		if step > len(items) {
-			break
-		}
-		slice := items[:step]
+	// Run compaction at every 50th generated turn, preserving complete tool groups.
+	for _, end := range groupEnds {
+		slice := items[:end]
 		out, err := uni.Compact(ctx, slice, 200, est)
-		require.NoError(t, err, "compaction at turn %d should succeed", step)
-		assert.LessOrEqual(t, tokenSum(out, est), 200, "compacted output at turn %d must fit budget", step)
+		require.NoError(t, err, "compaction at item boundary %d should succeed", end)
+		assert.LessOrEqual(t, tokenSum(out, est), 200, "compacted output at item boundary %d must fit budget", end)
 	}
 }
 
@@ -504,36 +523,50 @@ func TestCompaction_EdgeCases(t *testing.T) {
 
 	t.Run("all tool results no user content", func(t *testing.T) {
 		// Micro replaces tool results with placeholders. Each placeholder
-		// "[compacted tool result]" is ~7 tokens, so 3 items need ~21 tokens.
-		// Use a budget of 30 with 3 items to stay under the threshold.
-		items := make([]compaction.TurnItem, 3)
+		// "[compacted tool result]" is ~7 tokens, so 3 tool results need ~21 tokens.
+		// Use a budget of 30 with 3 complete call groups to stay under the threshold.
+		items := make([]compaction.TurnItem, 0, 6)
 		for i := 0; i < 3; i++ {
-			items[i] = compaction.TurnItem{
+			callID := fmt.Sprintf("micro-read-%d", i)
+			items = append(items, compaction.TurnItem{
+				Role:      compaction.RoleAssistant,
+				ToolCalls: []llm.ToolCall{{ID: callID, Name: "read"}},
+			}, compaction.TurnItem{
 				Role:       compaction.RoleTool,
+				ToolCallID: callID,
 				ToolName:   "read",
 				ToolResult: strings.Repeat("r", 100),
-			}
+			})
 		}
 
 		micro := compaction.NewMicroCompactor()
 		out, err := micro.Compact(ctx, items, 30, est)
 		require.NoError(t, err)
 		assert.LessOrEqual(t, tokenSum(out, est), 30)
-		for _, it := range out {
-			assert.Equal(t, "[compacted tool result]", it.ToolResult)
-			assert.Equal(t, compaction.RoleTool, it.Role)
+		require.Len(t, out, 6)
+		for i := 0; i < len(out); i += 2 {
+			assert.Equal(t, compaction.RoleAssistant, out[i].Role)
+			require.Len(t, out[i].ToolCalls, 1)
+			assert.Equal(t, compaction.RoleTool, out[i+1].Role)
+			assert.Equal(t, out[i].ToolCalls[0].ID, out[i+1].ToolCallID)
+			assert.Equal(t, "[compacted tool result]", out[i+1].ToolResult)
 		}
 	})
 
 	t.Run("budget exceeded even after micro compaction", func(t *testing.T) {
 		// Many tool entries whose placeholders still exceed the budget.
-		items := make([]compaction.TurnItem, 40)
+		items := make([]compaction.TurnItem, 0, 80)
 		for i := 0; i < 40; i++ {
-			items[i] = compaction.TurnItem{
+			callID := fmt.Sprintf("micro-large-%d", i)
+			items = append(items, compaction.TurnItem{
+				Role:      compaction.RoleAssistant,
+				ToolCalls: []llm.ToolCall{{ID: callID, Name: "read"}},
+			}, compaction.TurnItem{
 				Role:       compaction.RoleTool,
+				ToolCallID: callID,
 				ToolName:   "read",
 				ToolResult: strings.Repeat("z", 100),
-			}
+			})
 		}
 
 		micro := compaction.NewMicroCompactor()

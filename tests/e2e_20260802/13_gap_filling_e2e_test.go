@@ -550,8 +550,8 @@ func TestUnifiedCompactorRouteOrder(t *testing.T) {
 		items := []compaction.TurnItem{
 			{Role: compaction.RoleSystem, Content: "sys"},
 			{Role: compaction.RoleUser, Content: "hello"},
-			{Role: compaction.RoleTool, ToolName: "read", ToolResult: strings.Repeat("t", 200)},
-			{Role: compaction.RoleAssistant, Content: "hi"},
+			{Role: compaction.RoleAssistant, Content: "hi", ToolCalls: []llm.ToolCall{{ID: "read-1", Name: "read"}}},
+			{Role: compaction.RoleTool, ToolCallID: "read-1", ToolName: "read", ToolResult: strings.Repeat("t", 200)},
 		}
 
 		uni := compaction.NewUnifiedCompactor()

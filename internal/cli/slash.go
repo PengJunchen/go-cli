@@ -151,6 +151,7 @@ type slashContext struct {
 	// contextLoader loads CLAUDE.md / AGENTS.md files for the /context
 	// command. It is nil when not wired; /context degrades gracefully.
 	contextLoader core.ProjectContextLoader
+	mcpResources  *assemblyMCPResources
 }
 
 // Compile-time assertion that *slashContext satisfies Dependencies.
@@ -211,6 +212,13 @@ func (sc *slashContext) Estimator() compaction.TokenEstimator { return sc.estima
 
 func (sc *slashContext) PromptBuilder() core.SystemPromptBuilder  { return sc.promptBuilder }
 func (sc *slashContext) ContextLoader() core.ProjectContextLoader { return sc.contextLoader }
+
+func (sc *slashContext) ReloadMCP(ctx context.Context) (int, error) {
+	if sc.mcpResources == nil {
+		return 0, nil
+	}
+	return sc.mcpResources.Reload(ctx)
+}
 
 // defaultSlashReg is the fully populated registry shared by all interactive
 // sessions. It is built once at package initialization; the handlers it

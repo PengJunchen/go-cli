@@ -137,6 +137,33 @@ func TestExtensionMiddlewareAdapterWrap(t *testing.T) {
 	assert.True(t, mw.used, "WrapAgent should have been invoked")
 }
 
+type invocationCountingExtensionMiddleware struct{ calls int }
+
+func (*invocationCountingExtensionMiddleware) Name() string { return "invocation-counting" }
+
+func (m *invocationCountingExtensionMiddleware) WrapAgent(next extension.AgentFunc) extension.AgentFunc {
+	return func(ctx context.Context, input extension.AgentInput) (extension.AgentOutput, error) {
+		m.calls++
+		return next(ctx, input)
+	}
+}
+
+func TestExtensionMiddlewareFailsClosedBeforeCanonicalLoopExecution(t *testing.T) {
+	middleware := &invocationCountingExtensionMiddleware{}
+	base := &canonicalAssemblyTestLoop{}
+	wrapped := core.NewMiddlewareChain(newExtensionMiddlewareAdapter(middleware)).Wrap(base)
+
+	canonical, ok := wrapped.(core.CanonicalLoop)
+	require.True(t, ok)
+	result, err := canonical.RunCanonical(context.Background(), core.Submission{Content: "request"})
+
+	require.ErrorIs(t, err, core.ErrCanonicalMiddlewareUnsupported)
+	require.Len(t, result.Transcript, 1)
+	assert.Equal(t, core.InputKindUser, result.Transcript[0].Message.InputKind)
+	assert.Zero(t, base.calls, "the wrapped loop must not start under event-only extension middleware")
+	assert.Zero(t, middleware.calls, "unsupported extension middleware must not run")
+}
+
 // Name delegates to the underlying extension middleware.
 func TestExtensionMiddlewareAdapterName(t *testing.T) {
 	mw := &bridgeTestMiddleware{name: "named-mw"}

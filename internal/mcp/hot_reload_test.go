@@ -3,9 +3,12 @@ package mcp
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -82,6 +85,18 @@ func (c *recordingMCPClient) counts() (connects, disconnects, lists int) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.connects, c.disconnects, c.lists
+}
+
+type blockingConnectMCPClient struct {
+	*recordingMCPClient
+	connectStarted chan struct{}
+	connectRelease chan struct{}
+}
+
+func (c *blockingConnectMCPClient) Connect(ctx context.Context) error {
+	close(c.connectStarted)
+	<-c.connectRelease
+	return c.recordingMCPClient.Connect(ctx)
 }
 
 // reconnected reports whether at least one full cycle has occurred.
@@ -326,4 +341,408 @@ func TestHotReloaderRegistry(t *testing.T) {
 
 	require.Error(t, reg.RegisterHotReloader("", hr))
 	require.Error(t, reg.RegisterHotReloader("other", nil))
+}
+
+func TestHotReloaderWaitDoesNotRequestStop(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "mcp.json")
+	writeConfig(t, cfgPath, `{"version":"1"}`)
+
+	client := newRecordingMCPClient("srv", nil)
+	hr := NewDefaultHotReloader(client, func(_ []MCPTool) {}, WithPollInterval(time.Hour))
+	lifecycle, ok := hr.(HotReloadLifecycle)
+	require.True(t, ok, "default reloader exposes the lifecycle capability")
+	done := lifecycle.Done()
+
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	err := lifecycle.Wait(waitCtx)
+	cancelWait()
+	require.ErrorIs(t, err, ErrHotReloadPending)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	select {
+	case <-done:
+		t.Fatal("Wait must not implicitly request stop")
+	default:
+	}
+
+	watchCtx, cancelWatch := context.WithCancel(context.Background())
+	defer cancelWatch()
+	require.NoError(t, hr.Watch(watchCtx, cfgPath))
+	require.NoError(t, hr.Reload(context.Background()), "Wait timeout must not close reload admission")
+	assertReconnectCycle(t, client)
+
+	lifecycle.RequestStop()
+	stopCtx, cancelStop := context.WithTimeout(context.Background(), time.Second)
+	defer cancelStop()
+	require.NoError(t, lifecycle.Wait(stopCtx))
+}
+
+func TestHotReloaderRequestStopBeforeWatchClosesStableDone(t *testing.T) {
+	hr := NewDefaultHotReloader(newRecordingMCPClient("srv", nil), func(_ []MCPTool) {})
+	lifecycle, ok := hr.(HotReloadLifecycle)
+	require.True(t, ok)
+	done := lifecycle.Done()
+
+	lifecycle.RequestStop()
+	select {
+	case <-done:
+	default:
+		t.Fatal("stopping an unwatched reloader should complete immediately")
+	}
+	lifecycle.RequestStop()
+	assert.Equal(t, done, lifecycle.Done(), "Done must be stable across repeated stop requests")
+	require.NoError(t, lifecycle.Wait(context.Background()))
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "mcp.json")
+	writeConfig(t, cfgPath, `{"version":"1"}`)
+	require.Error(t, hr.Watch(context.Background(), cfgPath), "Watch after the stop fence must not publish a poller")
+}
+
+func TestHotReloaderRequestStopJoinsReconnectAndRegistrationCallback(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "mcp.json")
+	writeConfig(t, cfgPath, `{"version":"1"}`)
+	client := newRecordingMCPClient("srv", []MCPTool{{Name: "echo"}})
+	callbackStarted := make(chan struct{})
+	callbackRelease := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(callbackRelease) }) }
+	defer release()
+
+	hr := NewDefaultHotReloader(client, func(_ []MCPTool) {
+		close(callbackStarted)
+		<-callbackRelease
+	}, WithPollInterval(time.Hour))
+	lifecycle, ok := hr.(HotReloadLifecycle)
+	require.True(t, ok)
+	watchCtx, cancelWatch := context.WithCancel(context.Background())
+	defer cancelWatch()
+	require.NoError(t, hr.Watch(watchCtx, cfgPath))
+	require.NoError(t, hr.Reload(context.Background()))
+	select {
+	case <-callbackStarted:
+	case <-time.After(time.Second):
+		t.Fatal("registration callback did not start")
+	}
+
+	done := lifecycle.Done()
+	requestReturned := make(chan struct{})
+	go func() {
+		lifecycle.RequestStop()
+		close(requestReturned)
+	}()
+	select {
+	case <-requestReturned:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("RequestStop waited for the in-flight callback")
+	}
+	select {
+	case <-done:
+		t.Fatal("actual Done closed before the registration callback returned")
+	default:
+	}
+
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	err := lifecycle.Wait(waitCtx)
+	cancelWait()
+	require.ErrorIs(t, err, ErrHotReloadPending)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	stopReturned := make(chan error, 1)
+	go func() { stopReturned <- hr.Stop() }()
+	select {
+	case err := <-stopReturned:
+		t.Fatalf("Stop returned before callback join: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	release()
+	finalWaitCtx, cancelFinalWait := context.WithTimeout(context.Background(), time.Second)
+	defer cancelFinalWait()
+	require.NoError(t, lifecycle.Wait(finalWaitCtx))
+	select {
+	case err := <-stopReturned:
+		require.NoError(t, err)
+	case <-finalWaitCtx.Done():
+		t.Fatal("Stop did not return after callback joined")
+	}
+	select {
+	case <-done:
+	default:
+		t.Fatal("Done did not close after all reconnect work returned")
+	}
+}
+
+func TestHotReloaderRequestStopJoinsActiveMCPCall(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "mcp.json")
+	writeConfig(t, cfgPath, `{"version":"1"}`)
+	baseClient := newRecordingMCPClient("srv", []MCPTool{{Name: "echo"}})
+	client := &blockingConnectMCPClient{
+		recordingMCPClient: baseClient,
+		connectStarted:     make(chan struct{}),
+		connectRelease:     make(chan struct{}),
+	}
+	var registered atomic.Int32
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(client.connectRelease) }) }
+	defer release()
+
+	hr := NewDefaultHotReloader(client, func(_ []MCPTool) { registered.Add(1) }, WithPollInterval(time.Hour))
+	lifecycle, ok := hr.(HotReloadLifecycle)
+	require.True(t, ok)
+	watchCtx, cancelWatch := context.WithCancel(context.Background())
+	defer cancelWatch()
+	require.NoError(t, hr.Watch(watchCtx, cfgPath))
+	require.NoError(t, hr.Reload(context.Background()))
+	select {
+	case <-client.connectStarted:
+	case <-time.After(time.Second):
+		t.Fatal("reconnect Connect call did not start")
+	}
+
+	lifecycle.RequestStop()
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	err := lifecycle.Wait(waitCtx)
+	cancelWait()
+	require.ErrorIs(t, err, ErrHotReloadPending, "Done must include an uncooperative MCP call")
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+
+	release()
+	finalWaitCtx, cancelFinalWait := context.WithTimeout(context.Background(), time.Second)
+	defer cancelFinalWait()
+	require.NoError(t, lifecycle.Wait(finalWaitCtx))
+	assert.Zero(t, registered.Load(), "cancellation after Connect must not start ListTools or registration")
+	connects, disconnects, lists := baseClient.counts()
+	assert.Equal(t, 1, connects)
+	assert.Equal(t, 1, disconnects)
+	assert.Zero(t, lists)
+}
+
+func TestHotReloaderPendingChangeDoesNotRescheduleAfterStop(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "mcp.json")
+	writeConfig(t, cfgPath, `{"version":"1"}`)
+	client := newRecordingMCPClient("srv", []MCPTool{{Name: "echo"}})
+	callbackStarted := make(chan struct{})
+	callbackRelease := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(callbackRelease) }) }
+	defer release()
+	var callbacks atomic.Int32
+	hr := NewDefaultHotReloader(client, func(_ []MCPTool) {
+		callbacks.Add(1)
+		if callbacks.Load() == 1 {
+			close(callbackStarted)
+			<-callbackRelease
+		}
+	}, WithPollInterval(5*time.Millisecond), WithBackoffBase(time.Millisecond))
+	lifecycle, ok := hr.(HotReloadLifecycle)
+	require.True(t, ok)
+	watchCtx, cancelWatch := context.WithCancel(context.Background())
+	defer cancelWatch()
+	require.NoError(t, hr.Watch(watchCtx, cfgPath))
+	require.NoError(t, hr.Reload(context.Background()))
+	select {
+	case <-callbackStarted:
+	case <-time.After(time.Second):
+		t.Fatal("registration callback did not start")
+	}
+
+	writeConfig(t, cfgPath, `{"version":"2"}`)
+	impl := hr.(*DefaultHotReloader)
+	require.Eventually(t, func() bool {
+		impl.mu.Lock()
+		defer impl.mu.Unlock()
+		return impl.pending
+	}, time.Second, time.Millisecond, "poller should record a pending change while the callback runs")
+
+	lifecycle.RequestStop()
+	release()
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), time.Second)
+	defer cancelWait()
+	require.NoError(t, lifecycle.Wait(waitCtx))
+	assert.EqualValues(t, 1, callbacks.Load(), "pending reload must not be scheduled after the stop fence")
+	connects, disconnects, lists := client.counts()
+	assert.Equal(t, 1, connects)
+	assert.Equal(t, 1, disconnects)
+	assert.Equal(t, 1, lists)
+}
+
+func TestHotReloaderRequestStopRacingWatchHasNoLateOwner(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	for i := 0; i < 25; i++ {
+		t.Run(fmt.Sprintf("iteration-%02d", i), func(t *testing.T) {
+			dir := t.TempDir()
+			cfgPath := filepath.Join(dir, "mcp.json")
+			writeConfig(t, cfgPath, `{"version":"1"}`)
+			hr := NewDefaultHotReloader(newRecordingMCPClient("srv", nil), func(_ []MCPTool) {}, WithPollInterval(time.Hour))
+			lifecycle, ok := hr.(HotReloadLifecycle)
+			require.True(t, ok)
+			start := make(chan struct{})
+			watchResult := make(chan error, 1)
+			var wg sync.WaitGroup
+			wg.Add(2)
+			go func() {
+				defer wg.Done()
+				<-start
+				watchResult <- hr.Watch(context.Background(), cfgPath)
+			}()
+			go func() {
+				defer wg.Done()
+				<-start
+				lifecycle.RequestStop()
+			}()
+			close(start)
+			wg.Wait()
+			watchErr := <-watchResult
+			if watchErr != nil {
+				require.EqualError(t, watchErr, "mcp: hot reload: already stopped")
+			}
+			waitCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			require.NoError(t, lifecycle.Wait(waitCtx))
+			select {
+			case <-lifecycle.Done():
+			default:
+				t.Fatal("completed Watch/Stop race left Done open")
+			}
+			require.Error(t, hr.Reload(context.Background()), "a completed stop must keep reload admission closed")
+		})
+	}
+}
+
+func TestHotReloaderInvalidPollIntervalIsRejectedWithoutOwnerOrPanic(t *testing.T) {
+	const childModeEnv = "GOCLI_TEST_HOT_RELOAD_INVALID_POLL_INTERVAL"
+	if childMode := os.Getenv(childModeEnv); childMode != "" {
+		interval := time.Duration(0)
+		if childMode == "negative" {
+			interval = -time.Second
+		}
+		t.Run(childMode, func(t *testing.T) {
+			dir := t.TempDir()
+			configPath := filepath.Join(dir, "mcp.json")
+			writeConfig(t, configPath, `{"version":"1"}`)
+
+			invalid := NewDefaultHotReloader(newRecordingMCPClient("invalid", nil), func(_ []MCPTool) {}, WithPollInterval(interval)).(*DefaultHotReloader)
+			lifecycle := HotReloadLifecycle(invalid)
+			err := invalid.Watch(context.Background(), configPath)
+			require.ErrorIs(t, err, ErrHotReloadInvalidPollInterval)
+			invalid.mu.Lock()
+			assert.False(t, invalid.pollStarted, "invalid Watch must not publish a poll owner")
+			assert.Nil(t, invalid.pollCancel, "invalid Watch must not consume watch state")
+			assert.Empty(t, invalid.path)
+			assert.False(t, invalid.baseline)
+			assert.False(t, invalid.stopped)
+			invalid.mu.Unlock()
+
+			lifecycle.RequestStop()
+			waitCtx, cancel := context.WithTimeout(context.Background(), time.Second)
+			defer cancel()
+			require.NoError(t, lifecycle.Wait(waitCtx))
+			select {
+			case <-lifecycle.Done():
+			default:
+				t.Fatal("RequestStop after a rejected Watch must close Done without an owner")
+			}
+
+			reusable := NewDefaultHotReloader(newRecordingMCPClient("reusable", nil), func(_ []MCPTool) {}, WithPollInterval(interval)).(*DefaultHotReloader)
+			require.ErrorIs(t, reusable.Watch(context.Background(), configPath), ErrHotReloadInvalidPollInterval)
+			reusable.pollInterval = defaultPollInterval
+			require.NoError(t, reusable.Watch(context.Background(), configPath), "rejected Watch must leave state reusable")
+			reusableLife := HotReloadLifecycle(reusable)
+			reusableLife.RequestStop()
+			require.NoError(t, reusableLife.Wait(waitCtx))
+		})
+		return
+	}
+
+	defer verify.AssertNoGoroutineLeak(t)()
+	for _, childMode := range []string{"zero", "negative"} {
+		cmd := exec.Command(os.Args[0], "-test.run=^TestHotReloaderInvalidPollIntervalIsRejectedWithoutOwnerOrPanic$")
+		cmd.Env = append(os.Environ(), childModeEnv+"="+childMode)
+		output, err := cmd.CombinedOutput()
+		require.NoError(t, err, "invalid interval child %s failed; output:\n%s", childMode, output)
+	}
+}
+
+func TestHotReloaderRegistrationPanicIsSanitizedAndJoined(t *testing.T) {
+	const helperEnv = "GO_CLI_HOT_RELOAD_PANIC_HELPER"
+	if os.Getenv(helperEnv) == "1" {
+		testHotReloaderRegistrationPanicHelper(t)
+		return
+	}
+
+	helperCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(helperCtx, os.Args[0], "-test.run=^TestHotReloaderRegistrationPanicIsSanitizedAndJoined$")
+	cmd.Env = append(os.Environ(), helperEnv+"=1")
+	output, err := cmd.CombinedOutput()
+	require.NoErrorf(t, err, "panic helper subprocess failed: %s", output)
+}
+
+func testHotReloaderRegistrationPanicHelper(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "mcp.json")
+	writeConfig(t, cfgPath, `{"version":"1"}`)
+	client := newRecordingMCPClient("srv", []MCPTool{{Name: "echo"}})
+	callbackStarted := make(chan struct{})
+	panicRelease := make(chan struct{})
+	var panicReleaseOnce sync.Once
+	releasePanic := func() { panicReleaseOnce.Do(func() { close(panicRelease) }) }
+	defer releasePanic()
+	register := func(_ []MCPTool) {
+		close(callbackStarted)
+		<-panicRelease
+		panic("credential-panic-payload")
+	}
+	hr := NewDefaultHotReloader(client, register, WithPollInterval(time.Hour))
+	lifecycle, ok := hr.(HotReloadLifecycle)
+	require.True(t, ok)
+	exporter := &recordingExporter{}
+	tracer := tracing.NewTracer("hot-reload-panic", exporter)
+	rootSpan, ctx := tracer.Start(context.Background(), "test.root", tracing.SpanKindInternal)
+	defer rootSpan.End()
+	watchCtx, cancelWatch := context.WithCancel(ctx)
+	defer cancelWatch()
+	require.NoError(t, hr.Watch(watchCtx, cfgPath))
+	require.NoError(t, hr.Reload(context.Background()))
+	select {
+	case <-callbackStarted:
+	case <-time.After(time.Second):
+		t.Fatal("registration callback did not start")
+	}
+
+	lifecycle.RequestStop()
+	releasePanic()
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), time.Second)
+	defer cancelWait()
+	err := lifecycle.Wait(waitCtx)
+	var panicErr *HotReloadCallbackPanicError
+	require.ErrorAs(t, err, &panicErr)
+	require.ErrorIs(t, err, ErrHotReloadCallbackPanic)
+	assert.NotContains(t, err.Error(), "credential-panic-payload")
+	select {
+	case <-lifecycle.Done():
+	default:
+		t.Fatal("Done must close only after the panicking callback unwinds and reconnect span ends")
+	}
+	foundHotReloadSpan := false
+	for _, span := range exporter.Spans() {
+		if span.Name == "mcp.hot_reload" {
+			foundHotReloadSpan = true
+		}
+	}
+	assert.True(t, foundHotReloadSpan, "the reconnect span must be exported before Done closes")
+	assert.ErrorIs(t, hr.Stop(), ErrHotReloadCallbackPanic)
 }

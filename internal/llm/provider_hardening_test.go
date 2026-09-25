@@ -60,8 +60,8 @@ func TestEinoProviderBuild_ResolvesCfgModel(t *testing.T) {
 // HTTPChatModel.generate internals
 // ---------------------------------------------------------------------------
 
-// TestHTTPChatModel_roundTripErrorBody verifies a non-2xx response surfaces the
-// trimmed payload as an error.
+// TestHTTPChatModel_roundTripErrorBody verifies a non-2xx response preserves
+// safe classification metadata while hiding the free-form response payload.
 func TestHTTPChatModel_roundTripErrorBody(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -77,8 +77,12 @@ func TestHTTPChatModel_roundTripErrorBody(t *testing.T) {
 	}
 	_, err := m.Generate(context.Background(), nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "rate limited")
+	assert.NotContains(t, err.Error(), "rate limited")
+	assert.Contains(t, err.Error(), "rate_limit")
 	assert.Contains(t, err.Error(), "429")
+	var providerErr *ProviderError
+	require.ErrorAs(t, err, &providerErr)
+	assert.Equal(t, "rate limited", providerErr.Message)
 }
 
 // TestHTTPChatModel_roundTripRequestBuildError verifies an unparsable endpoint
@@ -166,8 +170,10 @@ func TestHTTPChatModel_UsageOverrides(t *testing.T) {
 	require.NoError(t, err)
 	var req openAIRequest
 	require.NoError(t, json.Unmarshal(body, &req))
-	assert.Equal(t, 0.9, req.Temperature)
-	assert.Equal(t, 42, req.MaxTokens)
+	require.NotNil(t, req.Temperature)
+	assert.Equal(t, 0.9, *req.Temperature)
+	require.NotNil(t, req.MaxTokens)
+	assert.Equal(t, 42, *req.MaxTokens)
 }
 
 // TestHTTPChatModel_StreamSuccess verifies Stream delivers the full content as

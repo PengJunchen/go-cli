@@ -155,77 +155,64 @@ func TestLastMessageEventReturnsEmptyContent(t *testing.T) {
 	assert.Equal(t, "", lastMessageEvent(events))
 }
 
-// TestHistoryIncludesPureToolCallTurn verifies that a pure tool call response
-// (empty Content, non-empty ToolCalls) enters the agent's history.
-func TestHistoryIncludesPureToolCallTurn(t *testing.T) {
+// TestHistoryRejectsLegacyPureToolCallTurn verifies that a legacy loop cannot
+// claim a canonical history when it reports an unreceipted tool call.
+func TestHistoryRejectsLegacyPureToolCallTurn(t *testing.T) {
 	agent := NewAgentImpl("test", pureToolCallEventLoop{})
 	_, err := agent.Run(context.Background(), Submission{Content: "go"})
-	require.NoError(t, err)
+	require.ErrorIs(t, err, ErrCanonicalTranscriptRequired)
 
 	msgs := agent.Messages()
-	require.Len(t, msgs, 2) // user + assistant
+	require.Len(t, msgs, 1) // the known user input remains, with no fabricated receipt
 	assert.Equal(t, "user", msgs[0].Role)
-	assert.Equal(t, "assistant", msgs[1].Role)
-	assert.Empty(t, msgs[1].Content)
-	require.Len(t, msgs[1].ToolCalls, 1)
-	assert.Equal(t, "read_file", msgs[1].ToolCalls[0].Name)
 }
 
-// TestAgentHistorySavesTextAndToolCalls verifies that an assistant response
-// with both text and tool calls saves both Content and ToolCalls to history.
-func TestAgentHistorySavesTextAndToolCalls(t *testing.T) {
+// TestAgentLegacyLoopRejectsTextAndToolCalls verifies that a legacy loop does
+// not persist an assistant tool call without typed terminal receipts.
+func TestAgentLegacyLoopRejectsTextAndToolCalls(t *testing.T) {
 	agent := NewAgentImpl("test", textAndToolCallEventLoop{})
 	res, err := agent.Run(context.Background(), Submission{Content: "go"})
-	require.NoError(t, err)
+	require.ErrorIs(t, err, ErrCanonicalTranscriptRequired)
+	assert.False(t, res.Success)
 	assert.Equal(t, "let me read", res.Message)
 
 	msgs := agent.Messages()
-	require.Len(t, msgs, 2) // user + assistant
-	assert.Equal(t, "assistant", msgs[1].Role)
-	assert.Equal(t, "let me read", msgs[1].Content)
-	require.Len(t, msgs[1].ToolCalls, 1)
-	assert.Equal(t, "read_file", msgs[1].ToolCalls[0].Name)
+	require.Len(t, msgs, 1)
+	assert.Equal(t, "user", msgs[0].Role)
 }
 
-// TestAgentHistoryPureToolCallSaved verifies that a pure tool call response
-// (no text content) is saved to history with its ToolCalls intact.
-func TestAgentHistoryPureToolCallSaved(t *testing.T) {
+// TestAgentLegacyPureToolCallIsNotSaved verifies that a pure tool call response
+// from a legacy loop is rejected rather than stored without its receipt.
+func TestAgentLegacyPureToolCallIsNotSaved(t *testing.T) {
 	agent := NewAgentImpl("test", pureToolCallEventLoop{})
 	res, err := agent.Run(context.Background(), Submission{Content: "go"})
-	require.NoError(t, err)
+	require.ErrorIs(t, err, ErrCanonicalTranscriptRequired)
+	assert.False(t, res.Success)
 	assert.Empty(t, res.Message)
 
 	msgs := agent.Messages()
-	require.Len(t, msgs, 2) // user + assistant
-	assert.Equal(t, "assistant", msgs[1].Role)
-	assert.Empty(t, msgs[1].Content)
-	require.Len(t, msgs[1].ToolCalls, 1)
-	assert.Equal(t, "c1", msgs[1].ToolCalls[0].ID)
-	assert.Equal(t, "read_file", msgs[1].ToolCalls[0].Name)
+	require.Len(t, msgs, 1)
+	assert.Equal(t, "user", msgs[0].Role)
 }
 
-// TestAgentHistoryMultipleToolCallTurnsAccumulate verifies that multiple Run
-// calls with tool call responses accumulate in history.
-func TestAgentHistoryMultipleToolCallTurnsAccumulate(t *testing.T) {
+// TestAgentLegacyToolCallTurnsAreRejected verifies that repeated legacy tool
+// call projections cannot be accepted as canonical history.
+func TestAgentLegacyToolCallTurnsAreRejected(t *testing.T) {
 	agent := NewAgentImpl("test", pureToolCallEventLoop{})
 
 	_, err := agent.Run(context.Background(), Submission{Content: "first"})
-	require.NoError(t, err)
+	require.ErrorIs(t, err, ErrCanonicalTranscriptRequired)
 
 	_, err = agent.Run(context.Background(), Submission{Content: "second"})
-	require.NoError(t, err)
+	require.ErrorIs(t, err, ErrCanonicalTranscriptRequired)
 
 	msgs := agent.Messages()
-	// user1 + assistant1 + user2 + assistant2
-	require.Len(t, msgs, 4)
+	// The known user inputs remain, but no assistant calls are fabricated.
+	require.Len(t, msgs, 2)
 	assert.Equal(t, "user", msgs[0].Role)
 	assert.Equal(t, "first", msgs[0].Content)
-	assert.Equal(t, "assistant", msgs[1].Role)
-	require.Len(t, msgs[1].ToolCalls, 1)
-	assert.Equal(t, "user", msgs[2].Role)
-	assert.Equal(t, "second", msgs[2].Content)
-	assert.Equal(t, "assistant", msgs[3].Role)
-	require.Len(t, msgs[3].ToolCalls, 1)
+	assert.Equal(t, "user", msgs[1].Role)
+	assert.Equal(t, "second", msgs[1].Content)
 }
 
 // TestLastAssistantMessageReturnsLastEvent verifies that lastAssistantMessage

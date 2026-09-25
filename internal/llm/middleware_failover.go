@@ -95,6 +95,9 @@ func (m *failoverModel) Generate(ctx context.Context, msgs []Message, opts ...Op
 			return resp, nil
 		}
 		lastErr = err
+		if ContinuationNoReplay(ctx) {
+			return nil, lastErr
+		}
 		// Fatal errors (auth, permission) should not trigger a fallback.
 		if classifyError(err) == categoryFatal {
 			return nil, err
@@ -121,6 +124,9 @@ func (m *failoverModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 			return ch, nil
 		}
 		lastErr = err
+		if ContinuationNoReplay(ctx) {
+			return nil, lastErr
+		}
 		// Fatal errors (auth, permission) should not trigger a fallback.
 		if classifyError(err) == categoryFatal {
 			return nil, err

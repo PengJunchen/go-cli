@@ -1,0 +1,11 @@
+--- FAIL: TestCanceledApprovalCannotBeApprovedBeforeCancelMessage (0.00s)
+    approval_entry_test.go:442: 
+        	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/tui/internal/tui/approval_entry_test.go:442
+        	Error:      	Not equal: 
+        	            	expected: 0
+        	            	actual  : 2
+        	Test:       	TestCanceledApprovalCannotBeApprovedBeforeCancelMessage
+FAIL
+FAIL	github.com/pengjunchen/go-cli/internal/tui	0.015s
+ok  	github.com/pengjunchen/go-cli/internal/approval	0.015s
+FAIL

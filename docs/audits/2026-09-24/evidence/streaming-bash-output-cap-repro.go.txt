@@ -1,0 +1,27 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/pengjunchen/go-cli/internal/tools"
+)
+
+func main() {
+	tool := tools.NewStreamingBashTool(
+		tools.WithTimeout(1200*time.Millisecond),
+		tools.WithMaxOutput(20),
+		tools.WithNoSandbox(),
+	)
+	call := tools.ToolCall{
+		Name: "bash",
+		Args: map[string]any{"command": "printf 'x\\n%.0s' {1..100000}"},
+	}
+	started := time.Now()
+	result, err := tool.ExecuteStreaming(context.Background(), call, nil)
+	fmt.Printf("elapsed=%s err=%v\n", time.Since(started).Round(time.Millisecond), err)
+	if result != nil {
+		fmt.Printf("output_bytes=%d output=%q metadata=%v\n", len(result.Output), result.Output, result.Metadata)
+	}
+}

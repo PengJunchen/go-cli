@@ -142,22 +142,61 @@ func (m *loopDetectModel) Generate(ctx context.Context, msgs []Message, opts ...
 // terminate the turn. The loop history is also recorded so subsequent calls
 // will detect the loop earlier.
 func (m *loopDetectModel) Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
-	ch, err := m.next.Stream(ctx, msgs, opts...)
+	streamCtx, cancel := context.WithCancel(ctx)
+	ch, err := m.next.Stream(streamCtx, msgs, opts...)
 	if err != nil {
+		cancel()
 		return nil, err
+	}
+	if ch == nil {
+		cancel()
+		return nil, fmt.Errorf("loopdetection: model returned a nil stream")
 	}
 
 	out := make(chan MessageChunk, 16)
 	go func() {
+		defer cancel()
 		defer close(out)
 		var acc strings.Builder
-		for chunk := range ch {
+		var totalBytes int
+		var totalChunks int
+		for {
+			var chunk MessageChunk
+			var ok bool
+			select {
+			case <-streamCtx.Done():
+				return
+			case chunk, ok = <-ch:
+			}
+			if !ok {
+				break
+			}
+			totalChunks++
+			if totalChunks > GuardedStreamMaxChunks {
+				select {
+				case out <- MessageChunk{Error: fmt.Errorf("loopdetection: stream exceeds %d chunks", GuardedStreamMaxChunks)}:
+				case <-streamCtx.Done():
+				}
+				return
+			}
+			textBytes := RetainedStreamChunkTextBytes(chunk)
+			if textBytes > GuardedStreamMaxBytes-totalBytes {
+				select {
+				case out <- MessageChunk{Error: fmt.Errorf("loopdetection: stream exceeds %d-byte candidate limit", GuardedStreamMaxBytes)}:
+				case <-streamCtx.Done():
+				}
+				return
+			}
+			totalBytes += textBytes
 			select {
 			case out <- chunk:
-			case <-ctx.Done():
+			case <-streamCtx.Done():
 				return
 			}
 			acc.WriteString(chunk.Content)
+			if chunk.Error != nil {
+				return
+			}
 		}
 		// Post-hoc loop detection after all chunks have been forwarded.
 		if loopErr := m.checkLoop(acc.String()); loopErr != nil {
@@ -167,7 +206,7 @@ func (m *loopDetectModel) Stream(ctx context.Context, msgs []Message, opts ...Op
 			)
 			select {
 			case out <- MessageChunk{Final: true, Error: loopErr}:
-			case <-ctx.Done():
+			case <-streamCtx.Done():
 			}
 		}
 	}()

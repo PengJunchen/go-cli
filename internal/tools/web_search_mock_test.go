@@ -19,7 +19,7 @@ func TestWebSearchMockWarning(t *testing.T) {
 	slog.SetDefault(slog.New(handler))
 	defer slog.SetDefault(oldLogger)
 
-	tool := NewWebSearchTool() // defaults to MockSearchProvider
+	tool := NewWebSearchTool(WithSearchProvider(NewMockSearchProvider()))
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"query": "golang"},
 	})

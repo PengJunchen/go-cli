@@ -79,7 +79,10 @@ func TestFactoryWithSummarizer(t *testing.T) {
 	require.NoError(t, err, "SummaryCompactor with injected summarizer must succeed")
 	require.NotEmpty(t, sum.conversations(), "injected summarizer must be invoked")
 	require.NotEmpty(t, out)
-	assert.Equal(t, "factory-injected summary", out[0].Content)
+	require.Len(t, out, 3)
+	assert.Equal(t, RoleSystem, out[0].Role)
+	assert.True(t, out[1].IsCompaction)
+	assert.Equal(t, "factory-injected summary", out[1].Content)
 
 	// AC-3: "unified" strategy wires the same summarizer into the
 	// UnifiedCompactor, so it routes to summary for large user content.

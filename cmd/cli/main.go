@@ -37,6 +37,11 @@ func main() {
 // argv are the arguments after the program name, stdout/stderr are the
 // output streams, and loadConfig is injectable for tests.
 func run(argv []string, stdout, stderr io.Writer, loadConfig func() (*config.Config, error)) int {
+	previousLogger := slog.Default()
+	defer slog.SetDefault(previousLogger)
+	logHandler := previousLogger.Handler()
+	var logFile *os.File
+
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
 
@@ -46,10 +51,17 @@ func run(argv []string, stdout, stderr io.Writer, loadConfig func() (*config.Con
 	// captured in the file.
 	logDir := filepath.Join(".go-cli", "logs")
 	if err := os.MkdirAll(logDir, 0o750); err == nil {
-		logFile, fErr := os.OpenFile(filepath.Join(logDir, "go-cli.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
+		var fErr error
+		logFile, fErr = os.OpenFile(filepath.Join(logDir, "go-cli.log"), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
 		if fErr == nil {
-			slog.SetDefault(slog.New(slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelInfo})))
+			logHandler = slog.NewTextHandler(logFile, &slog.HandlerOptions{Level: slog.LevelInfo})
+		} else {
+			logFile = nil
 		}
+	}
+	slog.SetDefault(slog.New(tracing.NewRedactingSlogHandler(logHandler)))
+	if logFile != nil {
+		defer func() { _ = logFile.Close() }()
 	}
 
 	cfg, err := loadConfig()
@@ -57,8 +69,16 @@ func run(argv []string, stdout, stderr io.Writer, loadConfig func() (*config.Con
 		_, _ = fmt.Fprintf(stderr, "error: %v\n", err) //nolint:errcheck // CLI error output is best-effort
 		return 1
 	}
+	if err := stdoutTracingOutputConflict(cfg, argv); err != nil {
+		_, _ = fmt.Fprintf(stderr, "error: %v\n", err) //nolint:errcheck // CLI error output is best-effort
+		return 2
+	}
 
-	tracer, exporter := newTracing(cfg)
+	tracer, exporter, err := newTracing(cfg, stdout)
+	if err != nil {
+		_, _ = fmt.Fprintf(stderr, "error: tracing: %v\n", err) //nolint:errcheck // CLI error output is best-effort
+		return 1
+	}
 	var root tracing.TraceSpan
 	tctx := ctx
 	if tracer != nil {
@@ -70,7 +90,7 @@ func run(argv []string, stdout, stderr io.Writer, loadConfig func() (*config.Con
 		root.SetAttributes(
 			tracing.Attribute{Key: "cli_version", Value: cli.Version},
 			tracing.Attribute{Key: "args_count", Value: len(argv)},
-			tracing.Attribute{Key: "command", Value: cmdName},
+			tracing.Attribute{Key: "command_name", Value: cmdName},
 		)
 	}
 
@@ -91,11 +111,75 @@ func run(argv []string, stdout, stderr io.Writer, loadConfig func() (*config.Con
 		if tracer != nil {
 			tracer.Flush()
 		}
-		if err := exporter.Shutdown(ctx); err != nil {
-			_, _ = fmt.Fprintf(stderr, "error: shutdown exporter: %v\n", err) //nolint:errcheck // CLI error output is best-effort
+		if shutdownCode := finalizeTracingExporter(ctx, exporter, stderr, tracing.DefaultAsyncExporterShutdownWaitBudget); shutdownCode != 0 && code == 0 {
+			code = shutdownCode
 		}
 	}
 	return code
+}
+
+type tracingShutdownReporter interface {
+	ShutdownWithReport(context.Context) (tracing.AsyncExporterReport, error)
+}
+
+// finalizeTracingExporter keeps the root process alive for the bounded owner
+// close even when the signal context has already been canceled. It emits only
+// safe status and numeric counts; callback error text can contain span data.
+func finalizeTracingExporter(ctx context.Context, exporter tracing.TraceExporter, stderr io.Writer, waitBudget time.Duration) int {
+	if exporter == nil {
+		return 0
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if waitBudget <= 0 {
+		waitBudget = tracing.DefaultAsyncExporterShutdownWaitBudget
+	}
+	waitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), waitBudget)
+	defer cancel()
+
+	var report tracing.AsyncExporterReport
+	reporter, ok := exporter.(tracingShutdownReporter)
+	if !ok {
+		_, _ = fmt.Fprintln(stderr, "error: tracing exporter shutdown unavailable (missing bounded owner)") //nolint:errcheck // CLI error output is best-effort
+		return 1
+	}
+	report, err := reporter.ShutdownWithReport(waitCtx)
+	if err == nil {
+		return 0
+	}
+	state := "failed"
+	if errors.Is(err, tracing.ErrShutdownPending) {
+		state = "pending"
+	}
+	_, _ = fmt.Fprintf(stderr, "error: tracing exporter shutdown %s (accepted=%d delivered=%d pending=%d)\n", state, report.Stats.Accepted, report.Stats.Delivered, report.Stats.Pending) //nolint:errcheck // CLI error output is best-effort
+	return 1
+}
+
+func stdoutTracingOutputConflict(cfg *config.Config, argv []string) error {
+	if cfg == nil || cfg.Tracing.Exporter != "stdout" {
+		return nil
+	}
+	enabled := true
+	if cfg.Tracing.Enabled != nil {
+		enabled = *cfg.Tracing.Enabled
+	}
+	if !enabled {
+		return nil
+	}
+
+	promptArgs, isPrompt, err := cli.PromptArgsFromCLI(argv)
+	if err != nil || !isPrompt {
+		return nil
+	}
+	mode, remaining, err := cli.ParsePromptOutputMode(promptArgs)
+	if err != nil || len(remaining) == 0 {
+		return nil
+	}
+	if mode == cli.OutputJSON || mode == cli.OutputStream {
+		return &cli.StdoutTracingOutputConflictError{Mode: mode}
+	}
+	return nil
 }
 
 // runCLI invokes the CLI framework and maps the returned error to an exit code.
@@ -112,37 +196,18 @@ func runCLI(ctx context.Context, cfg *config.Config, argv []string, stdout, stde
 	return 0
 }
 
-// newTracing builds a *tracing.Tracer for the given config, or returns
-// (nil, exporter) when tracing is disabled/misconfigured. When a nil tracer is
-// returned, SpanFromContext yields noop spans and the CLI still runs.
-func newTracing(cfg *config.Config) (*tracing.Tracer, tracing.TraceExporter) {
+// newTracing builds the one invocation-owned tracing runtime using the CLI's
+// configured output writer for the explicit stdout sink.
+func newTracing(cfg *config.Config, stdout io.Writer) (*tracing.Tracer, tracing.TraceExporter, error) {
 	enabled := true
 	if cfg.Tracing.Enabled != nil {
 		enabled = *cfg.Tracing.Enabled
 	}
-	if !enabled || cfg.Tracing.Exporter == "none" {
-		return nil, nil
-	}
-
-	var exporter tracing.TraceExporter = tracing.NewStdoutTraceExporterWithWriter(false, os.Stdout)
-	switch cfg.Tracing.Exporter {
-	case "stdout":
-		exporter = tracing.NewStdoutTraceExporterWithWriter(false, os.Stdout)
-	case "jsonl":
-		dir := cfg.Tracing.FilePath
-		if dir == "" {
-			dir = filepath.Join(".go-cli", "traces")
-		}
-		e, err := tracing.NewJSONLTraceExporter(dir, "session-"+time.Now().Format("20060102T150405"))
-		if err == nil {
-			exporter = e
-		}
-	}
-
-	// Wrap the destination in an AsyncExporter so Shutdown reliably drains all
-	// in-flight spans before the underlying file/writer is closed.
-	exporter = tracing.NewAsyncExporter(exporter, 1024, 16)
-
-	tracer := tracing.NewTracer("", exporter)
-	return tracer, exporter
+	return tracing.BuildTracingRuntime(tracing.TracingRuntimeConfig{
+		Enabled:        enabled,
+		Exporter:       cfg.Tracing.Exporter,
+		FilePath:       cfg.Tracing.FilePath,
+		RedactionLevel: tracing.RedactionLevel(cfg.Tracing.RedactionLevel),
+		Stdout:         stdout,
+	})
 }

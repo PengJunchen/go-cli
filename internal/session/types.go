@@ -9,14 +9,16 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
+	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 // EntryType categorizes a single immutable session entry.
 type EntryType string
 
 func init() {
-	slog.Debug("session types initialized", "entry_types", []string{"user", "assistant", "tool", "compaction", "system"})
+	slog.Debug("session types initialized", "entry_types", []string{"user", "assistant", "tool", "compaction", "system", "checkpoint"})
 }
 
 const (
@@ -30,6 +32,8 @@ const (
 	EntryTypeCompaction EntryType = "compaction"
 	// EntryTypeSystem is a system-level informational entry.
 	EntryTypeSystem EntryType = "system"
+	// EntryTypeCheckpoint stores durable run, branch, and recovery checkpoints.
+	EntryTypeCheckpoint EntryType = "checkpoint"
 )
 
 // SurfaceOp controls how an entry is projected into the model-visible message
@@ -56,8 +60,11 @@ type SessionEntry struct {
 	Type          EntryType          `json:"type"`
 	Content       string             `json:"content"`
 	ContentBlocks []llm.ContentBlock `json:"content_blocks,omitempty"`
-	Timestamp     time.Time          `json:"timestamp"`
-	Summary       string             `json:"summary,omitempty"`
+	// Usage preserves token accounting reported on the canonical assistant
+	// message so durable history can be compared with the R1 transcript.
+	Usage     *llm.Usage `json:"usage,omitempty"`
+	Timestamp time.Time  `json:"timestamp"`
+	Summary   string     `json:"summary,omitempty"`
 	// IsSummary marks an entry as an auto-generated branch summary appended to
 	// a departed branch by SessionTree.MoveTo. It does not affect replay.
 	IsSummary bool `json:"is_summary,omitempty"`
@@ -77,6 +84,79 @@ type SessionEntry struct {
 	// Seq is a monotonically increasing sequence number assigned by the
 	// session tree when the entry is appended. It is zero when unset.
 	Seq uint64 `json:"seq"`
+
+	// RecordVersion identifies the additive on-disk record schema. Missing
+	// values are legacy version zero.
+	RecordVersion uint16 `json:"record_version,omitempty"`
+	// SessionID is the opaque physical identity of the session file.
+	SessionID string `json:"session_id,omitempty"`
+	// SessionLabel preserves a user-facing name without using it as a path.
+	SessionLabel string `json:"session_label,omitempty"`
+	// BranchID identifies the branch that owns this entry or checkpoint.
+	BranchID string `json:"branch_id,omitempty"`
+	// ParentBranchID identifies the source branch for a branch checkpoint.
+	ParentBranchID string `json:"parent_branch_id,omitempty"`
+	// BaseLeafEntryID identifies the shared prefix leaf when a branch is created.
+	BaseLeafEntryID string `json:"base_leaf_entry_id,omitempty"`
+	// ActiveLeafEntryID is the durable active leaf recorded by a checkpoint.
+	ActiveLeafEntryID string `json:"active_leaf_entry_id,omitempty"`
+	// RunID identifies the run that produced the journal or transcript entry.
+	RunID string `json:"run_id,omitempty"`
+	// ActionBatchID groups a sequential reservation or parallel dispatch batch.
+	ActionBatchID string `json:"action_batch_id,omitempty"`
+	// ActionID identifies one reserved executor invocation.
+	ActionID string `json:"action_id,omitempty"`
+	// OwnerGeneration identifies the runtime generation that launched an action.
+	OwnerGeneration string `json:"owner_generation,omitempty"`
+	// WorkspaceID is a stable digest of the canonical workspace root.
+	WorkspaceID string `json:"workspace_id,omitempty"`
+	// InputKind preserves whether a user message is an initial, steering, or
+	// follow-up input.
+	InputKind string `json:"input_kind,omitempty"`
+	// ActionState separates journal-only intent/execution rows from receipts.
+	ActionState ActionState `json:"action_state,omitempty"`
+	// DispatchState records whether a reserved action crossed its dispatch fence.
+	DispatchState DispatchState `json:"dispatch_state,omitempty"`
+	// ResourceState is the run owner's local resource observation for an
+	// execution row. It is descriptive and never proves quiescence by itself.
+	ResourceState core.RunExecutionState `json:"resource_state,omitempty"`
+	// ReceiptOutcome records the known or unknown terminal outcome of a tool call.
+	ReceiptOutcome string `json:"receipt_outcome,omitempty"`
+	// PayloadDigest stores the canonical digest used to detect conflicting retries.
+	PayloadDigest string `json:"payload_digest,omitempty"`
+	// ArgumentDigest is the SHA-256 digest of normalized arguments, in lowercase hex.
+	ArgumentDigest string `json:"argument_digest,omitempty"`
+	// SchemaDigest is the SHA-256 digest of the captured tool schema, in lowercase hex.
+	SchemaDigest string `json:"schema_digest,omitempty"`
+	// ToolIdentity is a durable description of the executor registration. It
+	// records facts only and cannot restore runtime dispatch authority.
+	ToolIdentity *tools.TrustedToolIdentitySnapshot `json:"tool_identity,omitempty"`
+	// EffectSet records trusted effect labels as facts. Recovery never turns
+	// these labels back into a trusted runtime effect set.
+	EffectSet []tools.TrustedToolEffect `json:"effect_set,omitempty"`
+	// ExecutionIdentity describes a verifiable local resource identity when one
+	// was captured. Its persisted values are diagnostics, not permission to signal
+	// a process after restart.
+	ExecutionIdentity *ExecutionIdentity `json:"execution_identity,omitempty"`
+	// CompletionProof is a closed, action-scoped proof captured only after the
+	// prepared invocation's owned resources have signaled completion. It is
+	// validated against the complete action reference during recovery; identity
+	// fields remain diagnostic and are not themselves quiescence proof.
+	CompletionProof tools.PreparedCompletionProof `json:"completion_proof,omitempty"`
+	// AssistantTranscriptOrdinal identifies the assistant tool-call message
+	// occurrence within its run.
+	AssistantTranscriptOrdinal *uint64 `json:"assistant_transcript_ordinal,omitempty"`
+	// TranscriptIndex is the zero-based index of a canonical transcript item.
+	TranscriptIndex *uint64 `json:"transcript_index,omitempty"`
+	// CompactedThroughEntryID is the exact source boundary covered by a summary.
+	CompactedThroughEntryID string `json:"compacted_through_entry_id,omitempty"`
+	// RunOutcome records the terminal logical result of a run.
+	RunOutcome core.RunOutcome `json:"run_outcome,omitempty"`
+	// CheckpointKind identifies the durable checkpoint represented by this row.
+	CheckpointKind CheckpointKind `json:"checkpoint_kind,omitempty"`
+	// ExecutionResolution is the typed resource-quiescence proof carried by a
+	// checkpoint; a terminal receipt alone is never a resolution.
+	ExecutionResolution *core.ExecutionResolution `json:"execution_resolution,omitempty"`
 }
 
 // clone returns a defensive copy of the entry so callers cannot mutate the
@@ -86,24 +166,92 @@ func (e *SessionEntry) clone() *SessionEntry {
 		return nil
 	}
 	cp := *e
-	if e.ContentBlocks != nil {
-		cp.ContentBlocks = make([]llm.ContentBlock, len(e.ContentBlocks))
-		copy(cp.ContentBlocks, e.ContentBlocks)
-		for i := range cp.ContentBlocks {
-			if cp.ContentBlocks[i].ImageURL != nil {
-				cp.ContentBlocks[i].ImageURL = &llm.ImageURL{
-					URL:    cp.ContentBlocks[i].ImageURL.URL,
-					Detail: cp.ContentBlocks[i].ImageURL.Detail,
-				}
-			}
-		}
+	message := core.AgentMessage{
+		Role:           string(e.Type),
+		Content:        e.Content,
+		ContentBlocks:  e.ContentBlocks,
+		Usage:          e.Usage,
+		ToolCalls:      e.ToolCalls,
+		ToolCallID:     e.ToolCallID,
+		ToolName:       e.ToolName,
+		InputKind:      e.InputKind,
+		ReceiptOutcome: e.ReceiptOutcome,
 	}
-	if e.ToolCalls != nil {
-		cp.ToolCalls = make([]llm.ToolCall, len(e.ToolCalls))
-		copy(cp.ToolCalls, e.ToolCalls)
+	cloned := core.CloneAgentMessages([]core.AgentMessage{message})[0]
+	cp.ContentBlocks = cloned.ContentBlocks
+	cp.Usage = cloned.Usage
+	cp.ToolCalls = cloned.ToolCalls
+	if e.ExecutionIdentity != nil {
+		identity := *e.ExecutionIdentity
+		cp.ExecutionIdentity = &identity
+	}
+	if e.ToolIdentity != nil {
+		identity := *e.ToolIdentity
+		cp.ToolIdentity = &identity
+	}
+	if e.EffectSet != nil {
+		cp.EffectSet = append([]tools.TrustedToolEffect(nil), e.EffectSet...)
+	}
+	if e.ExecutionResolution != nil {
+		resolution := *e.ExecutionResolution
+		cp.ExecutionResolution = &resolution
+	}
+	if e.AssistantTranscriptOrdinal != nil {
+		ordinal := *e.AssistantTranscriptOrdinal
+		cp.AssistantTranscriptOrdinal = &ordinal
+	}
+	if e.TranscriptIndex != nil {
+		index := *e.TranscriptIndex
+		cp.TranscriptIndex = &index
 	}
 	return &cp
 }
+
+// ActionState describes a durable row in the action journal.
+type ActionState string
+
+const (
+	// ActionStateIntent marks a journal-only reservation row.
+	ActionStateIntent ActionState = "intent"
+	// ActionStateExecution marks a journal-only executor lifecycle row.
+	ActionStateExecution ActionState = "execution"
+)
+
+// DispatchState aliases the core action dispatch state for durable rows.
+type DispatchState = core.DispatchState
+
+const (
+	DispatchStateNotDispatched = core.DispatchStateNotDispatched
+	DispatchStateDispatched    = core.DispatchStateDispatched
+)
+
+// CheckpointKind identifies the durable checkpoint represented by an entry.
+type CheckpointKind string
+
+const (
+	// CheckpointRunTerminal marks a terminal run checkpoint.
+	CheckpointRunTerminal CheckpointKind = "run_terminal"
+	// CheckpointExecutionResolution marks validated action-resource evidence.
+	CheckpointExecutionResolution CheckpointKind = "execution_resolution"
+	// CheckpointActiveLeaf marks a branch's durable active leaf.
+	CheckpointActiveLeaf CheckpointKind = "active_leaf"
+	// CheckpointBranch marks a branch fork over a shared immutable prefix.
+	CheckpointBranch CheckpointKind = "branch"
+	// CheckpointReconciliation marks explicit operator reconciliation.
+	CheckpointReconciliation CheckpointKind = "reconciliation"
+)
+
+// ExecutionIdentity remains an alias so the JSON storage API stays compatible
+// while core owns the typed action commit contract.
+type ExecutionIdentity = core.ExecutionIdentity
+
+// ExecutionIdentityKind remains an alias for source compatibility.
+type ExecutionIdentityKind = core.ExecutionIdentityKind
+
+const (
+	ExecutionIdentityProcessGroup = core.ExecutionIdentityProcessGroup
+	ExecutionIdentityWindowsJob   = core.ExecutionIdentityWindowsJob
+)
 
 // SurfaceVisible reports whether the entry should be included in the
 // model-visible message stream. It returns true when SurfaceOp is empty

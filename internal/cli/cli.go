@@ -82,6 +82,40 @@ func Run(ctx context.Context, cfg Config, args []string, out io.Writer) error {
 	return RunWithRegistry(ctx, cfg, args, out, reg)
 }
 
+type globalFlags struct {
+	showVersion bool
+	printUsage  bool
+}
+
+func newGlobalFlagSet(out io.Writer) (*flag.FlagSet, *globalFlags) {
+	fs := flag.NewFlagSet("go-cli", flag.ContinueOnError)
+	fs.SetOutput(out)
+
+	options := &globalFlags{}
+	fs.BoolVar(&options.showVersion, "version", false, "print version and exit")
+	fs.BoolVar(&options.printUsage, "help", false, "print usage and exit")
+	return fs, options
+}
+
+// PromptArgsFromCLI applies the same global flag parsing and first-positional
+// command routing as RunWithRegistry, without executing a command. It reports
+// false when a global help/version flag takes precedence or when the selected
+// command is not prompt.
+func PromptArgsFromCLI(argv []string) ([]string, bool, error) {
+	fs, options := newGlobalFlagSet(io.Discard)
+	if err := fs.Parse(argv); err != nil {
+		return nil, false, newUsageError("flag parse: %v", err)
+	}
+	if options.showVersion || options.printUsage {
+		return nil, false, nil
+	}
+	args := fs.Args()
+	if len(args) == 0 || args[0] != "prompt" {
+		return nil, false, nil
+	}
+	return args[1:], true, nil
+}
+
 // RunWithRegistry executes the CLI with the given configuration, arguments,
 // output writer, and command registry. It parses top-level flags, resolves the
 // requested subcommand through reg, and executes it.
@@ -91,14 +125,7 @@ func RunWithRegistry(ctx context.Context, cfg Config, args []string, out io.Writ
 		return err
 	}
 
-	fs := flag.NewFlagSet("go-cli", flag.ContinueOnError)
-	fs.SetOutput(out)
-
-	var showVersion bool
-	fs.BoolVar(&showVersion, "version", false, "print version and exit")
-
-	var printUsage bool
-	fs.BoolVar(&printUsage, "help", false, "print usage and exit")
+	fs, options := newGlobalFlagSet(out)
 
 	fs.Usage = func() {
 		_, _ = fmt.Fprintf(out, "Usage: go-cli [options] <command> [args]\n\nOptions:\n") //nolint:errcheck // usage output is best-effort
@@ -141,11 +168,11 @@ func RunWithRegistry(ctx context.Context, cfg Config, args []string, out io.Writ
 		slog.Default().Info("built-in models command already registered; keeping caller's", "err", err)
 	}
 
-	if showVersion {
+	if options.showVersion {
 		return runCommand(ctx, cfg, newVersionCmd(out), nil)
 	}
 
-	if printUsage {
+	if options.printUsage {
 		fs.Usage()
 		return nil
 	}

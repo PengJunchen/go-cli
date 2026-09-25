@@ -45,7 +45,7 @@ func TestProduction_RetryPolicy_TransientErrors(t *testing.T) {
 	err := production.NewError(production.ErrorTransient, errors.New("connection reset"))
 	assert.True(t, p.ShouldRetry(ctx, err, 0))
 	assert.True(t, p.ShouldRetry(ctx, err, 1))
-	assert.True(t, p.ShouldRetry(ctx, err, 2))
+	assert.False(t, p.ShouldRetry(ctx, err, 2))
 	assert.False(t, p.ShouldRetry(ctx, err, 3))
 }
 
@@ -305,8 +305,8 @@ func TestProduction_Telemetry_RecordEvents(t *testing.T) {
 	dt, ok := tel.(*production.DefaultTelemetry)
 	require.True(t, ok)
 	snap := dt.Snapshot()
-	assert.Equal(t, float64(3), snap["tool.calls"])
-	assert.Equal(t, float64(100), snap["tokens"])
+	assert.Equal(t, float64(3), snap["metric-v1|10:tool.calls|0|"])
+	assert.Equal(t, float64(100), snap["metric-v1|6:tokens|0|"])
 }
 
 // =============================================================================

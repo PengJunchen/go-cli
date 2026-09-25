@@ -33,7 +33,8 @@ type EinoProvider struct {
 
 	// defaultBaseURL is the endpoint prefix used when a ModelConfig does not
 	// provide its own BaseURL. The chat completions path is appended to it.
-	defaultBaseURL string
+	defaultBaseURL    string
+	baseURLConfigured bool
 
 	// defaultAPIKeySource lazily supplies the bearer token used when a
 	// ModelConfig does not carry an APIKey. It may return an empty string when
@@ -90,7 +91,10 @@ func WithHTTPClient(c *http.Client) ProviderOption {
 // WithBaseURL overrides the default OpenAI-compatible endpoint prefix. The
 // chat completions path is joined to this value per request.
 func WithBaseURL(url string) ProviderOption {
-	return func(p *EinoProvider) { p.defaultBaseURL = url }
+	return func(p *EinoProvider) {
+		p.defaultBaseURL = url
+		p.baseURLConfigured = true
+	}
 }
 
 // WithAPIKey sets the bearer token used when a ModelConfig does not supply one.
@@ -107,9 +111,9 @@ func WithProviderName(name string) ProviderOption {
 // default model name to the first entry when present.
 func WithModels(models []ModelInfo) ProviderOption {
 	return func(p *EinoProvider) {
-		p.models = models
-		if len(models) > 0 && models[0].Name != "" {
-			p.defaultModel = models[0].Name
+		p.models = append([]ModelInfo(nil), models...)
+		if len(p.models) > 0 && p.models[0].Name != "" {
+			p.defaultModel = p.models[0].Name
 		}
 	}
 }
@@ -130,6 +134,14 @@ func (p *EinoProvider) Models() []ModelInfo {
 	return out
 }
 
+func (p *EinoProvider) credentialForOrigin(origin string) (string, bool) {
+	defaultOrigin, err := normalizeProviderOrigin(p.defaultBaseURL)
+	if err != nil || defaultOrigin != origin || p.defaultAPIKeySource == nil {
+		return "", false
+	}
+	return p.defaultAPIKeySource(), true
+}
+
 // Build constructs an HTTPChatModel bound to this provider. The returned
 // cleanup function is a no-op because the HTTP client owns no goroutines. It
 // returns an error only when cfg is clearly invalid (model name empty and no
@@ -142,10 +154,14 @@ func (p *EinoProvider) Build(_ context.Context, cfg ModelConfig) (BaseChatModel,
 	if model == "" {
 		return nil, nil, errors.New("llm: provider build requires a non-empty model name")
 	}
+	client, err := httpClientForResolvedScope(p.httpClient, cfg)
+	if err != nil {
+		return nil, nil, fmt.Errorf("llm: build provider for resolved scope: %w", err)
+	}
 	m := &HTTPChatModel{
 		provider: p,
 		cfg:      cfg,
-		client:   p.httpClient,
+		client:   client,
 	}
 	// Override resolved model back onto the config so the model reports the
 	// effective name.
@@ -186,6 +202,7 @@ func (m *HTTPChatModel) Generate(ctx context.Context, msgs []Message, opts ...Op
 
 	msg, err := m.generate(spanCtx, msgs, opts...)
 	if err != nil {
+		setProviderErrorSpanAttributes(span, err)
 		span.SetStatus(tracing.SpanStatusError, err.Error())
 	} else {
 		span.SetStatus(tracing.SpanStatusOK, "")
@@ -219,14 +236,19 @@ func (m *HTTPChatModel) generate(ctx context.Context, msgs []Message, opts ...Op
 	if err != nil {
 		return nil, err
 	}
-	defer func() {
-		if cerr := respBody.Close(); cerr != nil {
-			slog.Warn("llm_close_body", "err", cerr)
-		}
-	}()
+	responseBody, truncated, readErr, closeErr := readBoundedProviderBody(respBody, maxProviderJSONBodyBytes)
+	if readErr != nil {
+		return nil, errors.Join(fmt.Errorf("llm: read response: %w", readErr), closeErr)
+	}
+	if truncated {
+		return nil, errors.Join(ErrProviderResponseTooLarge, closeErr)
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
 
 	var parsed openAIResponse
-	if err := json.NewDecoder(respBody).Decode(&parsed); err != nil {
+	if err := json.NewDecoder(bytes.NewReader(responseBody)).Decode(&parsed); err != nil {
 		return nil, fmt.Errorf("llm: decode response: %w", err)
 	}
 
@@ -308,12 +330,18 @@ func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 		isJSON, jsonBody, err := detectJSONResponse(reader)
 		if err != nil {
 			slog.Error("llm_stream_peek_error", "err", err)
+			sendStreamError(ctx, ch, fmt.Errorf("llm: inspect provider stream: %w", err))
 			return
 		}
 		if isJSON {
 			var parsed openAIResponse
 			if err := json.Unmarshal(jsonBody, &parsed); err != nil {
 				slog.Error("llm_stream_json_parse_error", "err", err)
+				sendStreamError(ctx, ch, fmt.Errorf("llm: decode provider stream response: %w", err))
+				return
+			}
+			if len(parsed.Choices) == 0 {
+				sendStreamError(ctx, ch, fmt.Errorf("llm: provider stream response contains no choices"))
 				return
 			}
 			var content string
@@ -351,7 +379,11 @@ func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 		parser := NewDefaultSSEParser()
 		events, _ := parser.Parse(ctx, reader) //nolint:errcheck
 
-		toolCalls, finishReason, usage := accumulateOpenAIStreamToolCalls(ctx, events, ch)
+		toolCalls, finishReason, usage, streamErr := accumulateOpenAIStreamToolCalls(ctx, events, ch)
+		if streamErr != nil {
+			sendStreamError(ctx, ch, streamErr)
+			return
+		}
 		final := MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
 		if usage != nil {
 			final.Usage = usage
@@ -420,18 +452,11 @@ func (m *HTTPChatModel) buildBody(msgs []Message, opts ...Option) ([]byte, error
 	}
 
 	req := openAIRequest{
-		Model:     m.cfg.Model,
-		Messages:  reqMsgs,
-		MaxTokens: m.cfg.MaxTokens,
+		Model:    m.cfg.Model,
+		Messages: reqMsgs,
 	}
-	if genOpts.Temperature != nil {
-		req.Temperature = *genOpts.Temperature
-	} else {
-		req.Temperature = m.cfg.Temperature
-	}
-	if genOpts.MaxTokens != nil {
-		req.MaxTokens = *genOpts.MaxTokens
-	}
+	req.Temperature = samplingTemperature(m.cfg, genOpts.Temperature)
+	req.MaxTokens = samplingMaxTokens(m.cfg, genOpts.MaxTokens)
 	if len(genOpts.StopStrings) > 0 {
 		req.Stop = genOpts.StopStrings
 	}
@@ -478,7 +503,7 @@ func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadClos
 	req.Header.Set("Content-Type", "application/json")
 
 	apiKey := m.cfg.APIKey
-	if apiKey == "" && m.provider.defaultAPIKeySource != nil {
+	if apiKey == "" && !m.cfg.credentialResolved && m.provider.defaultAPIKeySource != nil {
 		apiKey = m.provider.defaultAPIKeySource()
 	}
 	if apiKey != "" {
@@ -491,22 +516,15 @@ func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadClos
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		defer func() {
-			if cerr := resp.Body.Close(); cerr != nil {
-				slog.Warn("llm_close_error_body", "err", cerr)
-			}
-		}()
-		payload, rerr := io.ReadAll(resp.Body)
-		if rerr != nil {
-			return nil, fmt.Errorf("llm: read error response: %w", rerr)
+		payload, truncated, readErr, closeErr := readBoundedProviderBody(resp.Body, maxProviderErrorBodyBytes)
+		if readErr != nil {
+			providerErr := newProviderError(resp.StatusCode, m.provider.name, string(payload))
+			providerErr.BodyTruncated = truncated
+			return nil, errors.Join(providerErr, fmt.Errorf("llm: read error response: %w", readErr), closeErr)
 		}
-		// Truncate the error payload to avoid leaking large response bodies
-		// (which may contain sensitive data) into logs and error chains.
-		truncated := strings.TrimSpace(string(payload))
-		if len(truncated) > 512 {
-			truncated = truncated[:512] + "..."
-		}
-		return nil, fmt.Errorf("llm: provider returned %s: %s", resp.Status, truncated)
+		providerErr := newProviderError(resp.StatusCode, m.provider.name, string(payload))
+		providerErr.BodyTruncated = truncated
+		return nil, errors.Join(providerErr, closeErr)
 	}
 	return resp.Body, nil
 }
@@ -515,11 +533,33 @@ func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadClos
 type openAIRequest struct {
 	Model       string          `json:"model"`
 	Messages    []openAIMessage `json:"messages"`
-	Temperature float64         `json:"temperature,omitempty"`
-	MaxTokens   int             `json:"max_tokens,omitempty"`
+	Temperature *float64        `json:"temperature,omitempty"`
+	MaxTokens   *int            `json:"max_tokens,omitempty"`
 	Stop        []string        `json:"stop,omitempty"`
 	Tools       []openAIToolDef `json:"tools,omitempty"`
 	ToolChoice  any             `json:"tool_choice,omitempty"`
+}
+
+func samplingTemperature(cfg ModelConfig, override *float64) *float64 {
+	if override != nil {
+		return override
+	}
+	if cfg.TemperatureSet || cfg.Temperature != 0 {
+		value := cfg.Temperature
+		return &value
+	}
+	return nil
+}
+
+func samplingMaxTokens(cfg ModelConfig, override *int) *int {
+	if override != nil {
+		return override
+	}
+	if cfg.MaxTokensSet || cfg.MaxTokens != 0 {
+		value := cfg.MaxTokens
+		return &value
+	}
+	return nil
 }
 
 // openAIToolDef is the OpenAI tool definition format.
@@ -644,7 +684,14 @@ func convertAssistantToolCalls(tc []openAIToolCall) []ToolCall {
 		if call.Function.Arguments != "" {
 			var decoded any
 			if err := json.Unmarshal([]byte(call.Function.Arguments), &decoded); err == nil {
-				args = decoded
+				if object, ok := decoded.(map[string]any); ok {
+					args = object
+				} else {
+					// Preserve malformed or non-object wire arguments as a string
+					// marker so core validation rejects them before dispatch. A
+					// typed nil Args remains available to callers for no-arg tools.
+					args = call.Function.Arguments
+				}
 			} else {
 				args = call.Function.Arguments
 			}

@@ -2,6 +2,7 @@ package compaction
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +10,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/verify"
 )
 
@@ -20,8 +22,14 @@ func largeToolItems() []TurnItem {
 		{Role: RoleAssistant, Content: "let me read it"},
 	}
 	for i := 0; i < 30; i++ {
+		callID := fmt.Sprintf("call-%d", i)
+		items = append(items, TurnItem{
+			Role:      RoleAssistant,
+			ToolCalls: []llm.ToolCall{{ID: callID, Name: "read"}},
+		})
 		items = append(items, TurnItem{
 			Role:       RoleTool,
+			ToolCallID: callID,
 			ToolName:   "read",
 			ToolResult: strings.Repeat("x", 200),
 		})
@@ -123,6 +131,54 @@ func TestUnifiedCompactorAlwaysWithinBudgetWithRealCompactors(t *testing.T) {
 	for _, it := range out {
 		assert.NotEqual(t, RoleTool, it.Role, "tools older than budget are dropped")
 	}
+}
+
+func TestUnifiedCompactorPropagatesMalformedToolGroupWithoutFallback(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+	ctx, _ := newTracedCtx(t)
+	est := tracedEstimator()
+	summarizer := &fakeSummarizer{summary: "must not run"}
+	micro := NewRecordingCompactor("micro").WithError(ErrRequiresTruncating)
+	truncating := NewRecordingCompactor("truncating").WithResult([]TurnItem{{Role: RoleUser, Content: "incorrect fallback"}})
+	uni := NewUnifiedCompactor(
+		WithMicro(micro),
+		WithSummary(NewSummaryCompactor(summarizer)),
+		WithTruncating(truncating),
+	)
+
+	items := []TurnItem{{
+		Role:       RoleTool,
+		ToolCallID: "orphan",
+		ToolName:   "read",
+		ToolResult: "orphan result",
+	}}
+	_, err := uni.Compact(ctx, items, 20, est)
+	require.ErrorIs(t, err, errMalformedToolGroup)
+	assert.Empty(t, summarizer.conversations())
+	assert.Empty(t, truncating.Called(), "malformed transcript is not a strategy escalation reason")
+}
+
+func TestUnifiedCompactorRejectsMandatorySystemOverBudgetBeforeStrategies(t *testing.T) {
+	ctx, _ := newTracedCtx(t)
+	est := runeCountEstimator{}
+	micro := NewRecordingCompactor("micro").WithResult([]TurnItem{{Role: RoleUser, Content: "unsafe"}})
+	summary := NewRecordingCompactor("summary").WithResult([]TurnItem{{Role: RoleUser, Content: "unsafe"}})
+	truncating := NewRecordingCompactor("truncating").WithResult([]TurnItem{{Role: RoleUser, Content: "unsafe"}})
+	uni := NewUnifiedCompactor(
+		WithMicro(micro),
+		WithSummary(summary),
+		WithTruncating(truncating),
+	)
+	items := []TurnItem{
+		{Role: RoleSystem, Content: "mandatory-system"},
+		{Role: RoleUser, Content: "question"},
+	}
+
+	_, err := uni.Compact(ctx, items, 5, est)
+	require.ErrorIs(t, err, ErrMandatorySystemPromptOverBudget)
+	assert.Empty(t, micro.Called())
+	assert.Empty(t, summary.Called())
+	assert.Empty(t, truncating.Called())
 }
 
 func TestUnifiedCompactorEmptyInput(t *testing.T) {

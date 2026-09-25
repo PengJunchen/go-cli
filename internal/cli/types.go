@@ -5,6 +5,16 @@ import "fmt"
 // OutputMode controls how the prompt command formats agent events on stdout.
 type OutputMode int
 
+// StdoutTracingOutputConflictError reports that trace records and structured
+// prompt output would both be written to stdout.
+type StdoutTracingOutputConflictError struct {
+	Mode OutputMode
+}
+
+func (e *StdoutTracingOutputConflictError) Error() string {
+	return fmt.Sprintf("stdout tracing is incompatible with prompt --output %s", e.Mode)
+}
+
 const (
 	// OutputText outputs human-readable text (default). Streams incremental
 	// tokens and prints complete messages with newlines.

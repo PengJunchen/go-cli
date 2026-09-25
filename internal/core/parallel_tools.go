@@ -13,6 +13,7 @@ import (
 
 // errNoTools reports that a LoopAgent has no tool registry wired up.
 var errNoTools = errors.New("core: agent loop has no tool registry")
+var errToolMissingReceipt = toolMissingReceiptError{}
 
 // ExecutionMode controls how multiple tool calls are executed when the model
 // returns more than one tool call in a single response.
@@ -70,17 +71,28 @@ func executeToolsParallel(ctx context.Context, tr tools.ToolRegistry, calls []ll
 
 	var wg sync.WaitGroup
 	for i, tc := range calls {
+		toolCall := toToolsCall(tc)
+		workerDone := registerRunWorker(ctx, tc.ID, tc.Name)
+		var workerDoneOnce sync.Once
+		finishWorker := func() { workerDoneOnce.Do(workerDone) }
 		wg.Add(1)
-		go func(idx int, call llm.ToolCall) {
+		go func(idx int, call llm.ToolCall, converted tools.ToolCall, done func()) {
 			defer wg.Done()
 			defer close(dones[idx])
+			defer func() {
+				if recover() != nil {
+					markRunOutcomeUnknown(ctx)
+					results[idx] = ParallelToolResult{ID: call.ID, Name: call.Name, Err: toolDispatchPanicError{}, IsError: true}
+					done()
+				}
+			}()
 			slog.Info("core.loop.tool_call_parallel",
 				"tool", call.Name,
 				"index", idx,
 				"call_id", call.ID,
 			)
 
-			output, isErr, err := executeSingleTool(ctx, tr, toToolsCall(call), es)
+			output, isErr, err := executeSingleToolRegistered(ctx, tr, converted, es, done)
 			results[idx] = ParallelToolResult{
 				ID:      call.ID,
 				Name:    call.Name,
@@ -88,7 +100,7 @@ func executeToolsParallel(ctx context.Context, tr tools.ToolRegistry, calls []ll
 				Err:     err,
 				IsError: isErr || err != nil,
 			}
-		}(i, tc)
+		}(i, tc, toolCall, finishWorker)
 	}
 
 	allDone := make(chan struct{})
@@ -134,6 +146,47 @@ func executeToolsParallel(ctx context.Context, tr tools.ToolRegistry, calls []ll
 // implements tools.StreamingBashTool and es is non-nil, it uses
 // ExecuteStreaming to push output lines in real time.
 func executeSingleTool(ctx context.Context, tr tools.ToolRegistry, call tools.ToolCall, es EventStream) (string, bool, error) {
+	return executeSingleToolRegistered(ctx, tr, call, es, registerRunWorker(ctx, call.ID, call.Name))
+}
+
+func executeSingleToolRegistered(ctx context.Context, tr tools.ToolRegistry, call tools.ToolCall, es EventStream, workerDone func()) (output string, isError bool, err error) {
+	if workerDone == nil {
+		workerDone = func() {}
+	}
+	dispatched := false
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if dispatched {
+				_ = recovered
+				err = toolDispatchPanicError{}
+				isError = true
+				markRunOutcomeUnknown(ctx)
+			} else {
+				_ = recovered
+				err = errors.New("core: tool lookup panicked")
+			}
+			output = ""
+		}
+		if dispatched && err != nil {
+			var pending tools.PendingExecutionError
+			if errors.As(err, &pending) {
+				registerRunPendingResource(ctx, call.ID, call.Name, pending.ExecutionDone())
+				if pending.OutcomeUnknown() {
+					markRunOutcomeUnknown(ctx)
+				}
+			} else {
+				var unknown runOutcomeUnknown
+				explicitOutcome := errors.As(err, &unknown)
+				if explicitOutcome && unknown.OutcomeUnknown() {
+					markRunOutcomeUnknown(ctx)
+				} else if !explicitOutcome && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+					err = toolOutcomeUnknownError{cause: err}
+					markRunOutcomeUnknown(ctx)
+				}
+			}
+		}
+		workerDone()
+	}()
 	if tr == nil {
 		return "", false, errNoTools
 	}
@@ -144,24 +197,43 @@ func executeSingleTool(ctx context.Context, tr tools.ToolRegistry, call tools.To
 	// Check if the tool supports streaming output.
 	if st, ok := def.(tools.StreamingBashTool); ok && es != nil {
 		sink := &eventStreamSink{es: es}
+		dispatched = true
 		result, err := st.ExecuteStreaming(ctx, call, sink)
 		if err != nil {
 			return "", false, err
 		}
 		if result == nil {
-			return "", false, nil
+			return "", false, errToolMissingReceipt
 		}
 		return result.Output, result.IsError, nil
 	}
+	dispatched = true
 	result, err := def.Execute(ctx, call)
 	if err != nil {
 		return "", false, err
 	}
 	if result == nil {
-		return "", false, nil
+		return "", false, errToolMissingReceipt
 	}
 	return result.Output, result.IsError, nil
 }
+
+type toolDispatchPanicError struct{}
+
+func (toolDispatchPanicError) Error() string { return "core: tool execution panicked after dispatch" }
+
+func (toolDispatchPanicError) OutcomeUnknown() bool { return true }
+
+type toolOutcomeUnknownError struct{ cause error }
+
+func (e toolOutcomeUnknownError) Error() string        { return "core: tool execution outcome unknown" }
+func (e toolOutcomeUnknownError) OutcomeUnknown() bool { return true }
+func (e toolOutcomeUnknownError) Unwrap() error        { return e.cause }
+
+type toolMissingReceiptError struct{}
+
+func (toolMissingReceiptError) Error() string        { return "core: tool execution returned no receipt" }
+func (toolMissingReceiptError) OutcomeUnknown() bool { return true }
 
 // errUnknownToolCallID is returned by matchToolResultsByID when a result's
 // ToolCallID does not match any of the input calls.

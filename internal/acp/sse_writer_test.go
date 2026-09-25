@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -84,14 +85,15 @@ func TestSSEStream(t *testing.T) {
 		SenderID: "sse-client",
 	}).Body.Close()
 
-	sess := srv.getSession("sse-client")
+	sess := testSessionByAlias(srv, "sse-client")
 	require.NotNil(t, sess)
 
 	// Connect to /events; it blocks until events arrive or the session closes.
-	eventsURL := baseURL + "/events?sender_id=sse-client"
+	eventsURL := baseURL + "/events?session_id=" + url.QueryEscape(httpTestSessionID(baseURL, "sse-client"))
 	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, eventsURL, nil)
 	require.NoError(t, err)
 	req.Header.Set("Accept", "text/event-stream")
+	req.Header.Set(ACPHTTPProfileHeader, ACPHTTPProfileV1)
 
 	resp, err := http.DefaultClient.Do(req)
 	require.NoError(t, err)
@@ -142,7 +144,7 @@ func TestSSEStream_MethodNotAllowed(t *testing.T) {
 	srv, baseURL := startTestHTTPServer(t, nil)
 	defer srv.Stop(context.Background())
 
-	resp, err := http.Post(baseURL+"/events?sender_id=x", "application/json", strings.NewReader("{}"))
+	resp, err := http.DefaultClient.Do(httpTestRequest(t, http.MethodPost, baseURL+"/events?session_id=x", strings.NewReader("{}")))
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusMethodNotAllowed, resp.StatusCode)
@@ -154,7 +156,7 @@ func TestSSEStream_MissingSenderID(t *testing.T) {
 	srv, baseURL := startTestHTTPServer(t, nil)
 	defer srv.Stop(context.Background())
 
-	resp, err := http.Get(baseURL + "/events")
+	resp, err := http.DefaultClient.Do(httpTestRequest(t, http.MethodGet, baseURL+"/events", nil))
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
@@ -166,7 +168,7 @@ func TestSSEStream_SessionNotFound(t *testing.T) {
 	srv, baseURL := startTestHTTPServer(t, nil)
 	defer srv.Stop(context.Background())
 
-	resp, err := http.Get(baseURL + "/events?sender_id=nonexistent")
+	resp, err := http.DefaultClient.Do(httpTestRequest(t, http.MethodGet, baseURL+"/events?session_id=nonexistent", nil))
 	require.NoError(t, err)
 	defer resp.Body.Close()
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
@@ -186,18 +188,11 @@ func TestSession_PublishEventAfterClose(t *testing.T) {
 
 // TestLastEventID verifies SSE Last-Event-ID reconnection: after a client
 // disconnects and reconnects with a Last-Event-ID header, the server replays
-// only events whose ID exceeds the header value from the session ring buffer.
-//
-// An EventBus is wired to the server so that live events are read from a
-// per-connection bus subscription (not the per-session channel). This avoids
-// duplicate delivery of events that are already in the ring buffer.
+// only events whose ID exceeds that value from the session ring buffer.
 func TestLastEventID(t *testing.T) {
-	bus := core.NewMemoryEventBus()
-	defer bus.Close()
-
 	handler := NewCoreHandler(nil, nil)
 	srv, baseURL := startTestHTTPServer(t, handler)
-	srv.SetEventBus(bus)
+	defer srv.Stop(context.Background())
 
 	// Create session.
 	postACP(t, baseURL, "/connect", ACPMessage{
@@ -205,7 +200,7 @@ func TestLastEventID(t *testing.T) {
 		SenderID: "lei-client",
 	}).Body.Close()
 
-	sess := srv.getSession("lei-client")
+	sess := testSessionByAlias(srv, "lei-client")
 	require.NotNil(t, sess)
 
 	// Publish 3 events to populate the session ring buffer.
@@ -221,7 +216,10 @@ func TestLastEventID(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// --- First connection: read all 3 events from ring buffer replay ---
-	resp1, err := http.Get(baseURL + "/events?sender_id=lei-client")
+	req1, err := http.NewRequest(http.MethodGet, baseURL+"/events?session_id="+url.QueryEscape(httpTestSessionID(baseURL, "lei-client")), nil)
+	require.NoError(t, err)
+	req1.Header.Set(ACPHTTPProfileHeader, ACPHTTPProfileV1)
+	resp1, err := http.DefaultClient.Do(req1)
 	require.NoError(t, err)
 
 	var ids1 []uint64
@@ -258,8 +256,9 @@ func TestLastEventID(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 
 	// --- Second connection with Last-Event-ID=1: replay events 2 and 3 ---
-	req2, err := http.NewRequest(http.MethodGet, baseURL+"/events?sender_id=lei-client", nil)
+	req2, err := http.NewRequest(http.MethodGet, baseURL+"/events?session_id="+url.QueryEscape(httpTestSessionID(baseURL, "lei-client")), nil)
 	require.NoError(t, err)
+	req2.Header.Set(ACPHTTPProfileHeader, ACPHTTPProfileV1)
 	req2.Header.Set("Last-Event-ID", "1")
 
 	resp2, err := http.DefaultClient.Do(req2)
@@ -294,4 +293,60 @@ func TestLastEventID(t *testing.T) {
 	require.Len(t, ids2, 2, "second connection should receive 2 replayed events")
 	assert.Equal(t, []uint64{2, 3}, ids2)
 	assert.Equal(t, []string{"second", "third"}, contents2)
+}
+
+func TestSSEStream_ExpiredCursorAnnouncesEventGap(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	srv, baseURL := startTestHTTPServer(t, nil)
+	defer srv.Stop(context.Background())
+
+	postACP(t, baseURL, "/connect", ACPMessage{
+		Type:     TypeConnect,
+		SenderID: "expired-cursor-client",
+	}).Body.Close()
+
+	sess := testSessionByAlias(srv, "expired-cursor-client")
+	require.NotNil(t, sess)
+	for i := 0; i < eventHistorySize+3; i++ {
+		sess.PublishEvent(core.AgentEvent{Kind: "message", Content: strconv.Itoa(i)})
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/events?session_id="+url.QueryEscape(httpTestSessionID(baseURL, "expired-cursor-client")), nil)
+	require.NoError(t, err)
+	req.Header.Set(ACPHTTPProfileHeader, ACPHTTPProfileV1)
+	req.Header.Set("Last-Event-ID", "0")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+
+	sc := bufio.NewScanner(resp.Body)
+	var firstEvent string
+	var firstID uint64
+	var dataLine string
+	for sc.Scan() {
+		line := sc.Text()
+		if strings.HasPrefix(line, "id: ") {
+			firstID, _ = strconv.ParseUint(strings.TrimPrefix(line, "id: "), 10, 64)
+		} else if strings.HasPrefix(line, "event: ") {
+			firstEvent = strings.TrimPrefix(line, "event: ")
+		} else if strings.HasPrefix(line, "data: ") {
+			dataLine = strings.TrimPrefix(line, "data: ")
+		} else if line == "" && firstEvent != "" {
+			break
+		}
+	}
+	assert.Equal(t, "event_gap", firstEvent, "an expired replay cursor must be reported before retained events")
+	assert.Equal(t, uint64(3), firstID)
+	var gap EventGap
+	require.NoError(t, json.Unmarshal([]byte(dataLine), &gap))
+	assert.Equal(t, "acp_session_transport", gap.Layer)
+	assert.Equal(t, "retention", gap.Reason)
+	assert.Equal(t, uint64(1), gap.MissingFrom)
+	assert.Equal(t, uint64(3), gap.MissingThrough)
+	assert.Equal(t, uint64(3), gap.MissingCount)
+	assert.Equal(t, uint64(4), gap.FirstAvailableID)
 }

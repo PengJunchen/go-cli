@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -11,6 +12,48 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type loopDetectCancelModel struct {
+	done chan struct{}
+}
+
+func (*loopDetectCancelModel) Generate(context.Context, []Message, ...Option) (*Message, error) {
+	return nil, fmt.Errorf("unexpected Generate call")
+}
+
+func (m *loopDetectCancelModel) Stream(ctx context.Context, _ []Message, _ ...Option) (<-chan MessageChunk, error) {
+	ch := make(chan MessageChunk)
+	go func() {
+		defer close(m.done)
+		defer close(ch)
+		select {
+		case ch <- MessageChunk{Content: strings.Repeat("x", GuardedStreamMaxBytes+1)}:
+		case <-ctx.Done():
+			return
+		}
+		<-ctx.Done()
+	}()
+	return ch, nil
+}
+
+func TestLoopDetectStreamCapsAndCancelsInnerWorker(t *testing.T) {
+	inner := &loopDetectCancelModel{done: make(chan struct{})}
+	wrapped := NewLoopDetectionModelMiddleware().WrapModel(inner)
+
+	ch, err := wrapped.Stream(context.Background(), nil)
+	require.NoError(t, err)
+	var received []MessageChunk
+	for chunk := range ch {
+		received = append(received, chunk)
+	}
+	require.Len(t, received, 1)
+	require.ErrorContains(t, received[0].Error, "candidate limit")
+	select {
+	case <-inner.done:
+	case <-time.After(time.Second):
+		t.Fatal("inner stream worker did not observe wrapper cancellation")
+	}
+}
 
 // TestLoopDetectStreamRealTimeForwarding verifies that chunks are forwarded
 // in real-time, not buffered until the stream completes.
@@ -125,6 +168,32 @@ func TestLoopDetectNoLoopWorksNormally(t *testing.T) {
 	}
 	assert.Equal(t, []string{"unique-a", "unique-b", "unique-c"}, contents)
 	assert.Equal(t, int32(1), callCount.Load())
+}
+
+func TestLoopDetectStreamChecksContentAfterInputCloses(t *testing.T) {
+	inner := &mockModel{
+		streamFn: func(context.Context, []Message, ...Option) (<-chan MessageChunk, error) {
+			ch := make(chan MessageChunk, 1)
+			ch <- MessageChunk{Role: RoleAssistant, Content: "closed-stream-content"}
+			close(ch)
+			return ch, nil
+		},
+	}
+	wrapped := NewLoopDetectionModelMiddleware(WithLoopThreshold(2), WithLoopWindowSize(5)).WrapModel(inner)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+
+	ch, err := wrapped.Stream(ctx, nil)
+	require.NoError(t, err)
+	var received []MessageChunk
+	for chunk := range ch {
+		received = append(received, chunk)
+	}
+	require.NoError(t, ctx.Err(), "closed input stream must terminate without waiting for cancellation")
+	require.Len(t, received, 1)
+	require.Equal(t, "closed-stream-content", received[0].Content)
+	require.False(t, received[0].Final)
+	require.NoError(t, received[0].Error)
 }
 
 // TestLoopDetectInitErrorReturnsError verifies that when the inner Stream

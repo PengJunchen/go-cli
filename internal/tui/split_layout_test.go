@@ -120,6 +120,41 @@ func TestTruncateLine_ANSI(t *testing.T) {
 	assert.Equal(t, colored, truncateLine(colored, 80))
 }
 
+func TestTruncateLineUsesTerminalCellAndGraphemeWidths(t *testing.T) {
+	linkOpen := "\x1b]8;;https://example.test\x07"
+	linkClose := "\x1b]8;;\x07"
+	cases := []struct {
+		name  string
+		input string
+		width int
+		want  string
+	}{
+		{name: "zero limit is unlimited", input: "unlimited", width: 0, want: "unlimited"},
+		{name: "one cell ASCII", input: "ab", width: 1, want: "a"},
+		{name: "one cell rejects half wide glyph", input: "界x", width: 1, want: ""},
+		{name: "two cells retain full width glyph", input: "界x", width: 2, want: "界"},
+		{name: "combining mark stays with base", input: "e\u0301x", width: 1, want: "e\u0301"},
+		{name: "variation selector stays with base", input: "✈️x", width: 2, want: "✈️"},
+		{name: "skin tone stays with emoji", input: "👍🏽x", width: 2, want: "👍🏽"},
+		{name: "ZWJ cluster stays together", input: "👨‍👩‍👧‍👦x", width: 2, want: "👨‍👩‍👧‍👦"},
+		{name: "flag stays together", input: "🇺🇸x", width: 2, want: "🇺🇸"},
+		{name: "SGR is zero width and reset", input: "\x1b[31mab界\x1b[0m", width: 2, want: "\x1b[31mab\x1b[0m"},
+		{name: "OSC8 is zero width and closed", input: linkOpen + "ab界" + linkClose, width: 2, want: linkOpen + "ab" + linkClose},
+		{name: "tab expansion includes CJK column", input: "界\tX", width: 8, want: "界      "},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got := truncateLine(tc.input, tc.width)
+			assert.Equal(t, tc.want, got)
+			if tc.width > 0 {
+				assert.LessOrEqual(t, lipglossWidth(got), tc.width)
+			}
+			assert.NotContains(t, got, "\t")
+		})
+	}
+}
+
 // TestRenderViewLocked_SplitLayout verifies that the split layout is
 // activated when width >= 120 and tool entries exist.
 func TestRenderViewLocked_SplitLayout(t *testing.T) {

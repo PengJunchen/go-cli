@@ -1,0 +1,13 @@
+=== RUN   TestReviewInvalidPollIntervalPanicsOutsideOwner
+    review_hot_reload_probe_test.go:76: zero-poll interval subprocess exited exit status 2 with expected process panic: panic: non-positive interval for NewTicker
+        
+        goroutine 8 [running]:
+        time.NewTicker(0x1?)
+        	/opt/homebrew/Cellar/go/1.26.4/libexec/src/time/tick.go:38 +0xbc
+        github.com/pengjunchen/go-cli/internal/mcp.(*DefaultHotReloader).poll(0x45f7a42541e0, {0x1036f0678, 0x45f7a4232b90})
+        	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/r7-mcp-hotreload-review-f67a1c1/internal/mcp/hot_reload.go:396 +0x38
+        created by github.com/pengjunchen/go-cli/internal/mcp.(*DefaultHotReloader).Watch in goroutine 7
+        	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/r7-mcp-hotreload-review-f67a1c1/internal/mcp/hot_reload.go:287 +0x2f8
+--- PASS: TestReviewInvalidPollIntervalPanicsOutsideOwner (0.01s)
+PASS
+ok  	github.com/pengjunchen/go-cli/internal/mcp	0.013s

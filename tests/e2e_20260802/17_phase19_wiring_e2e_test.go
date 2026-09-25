@@ -14,6 +14,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,10 +38,32 @@ func phase19wTestConfig() *config.Config {
 	return &config.Config{
 		Provider: config.ProviderConfig{
 			Name:    "openai",
-			BaseURL: "http://127.0.0.1:0",
+			BaseURL: "http://127.0.0.1:1",
 			APIKey:  "test-key",
 		},
 	}
+}
+
+type phase19wSearchTransport struct {
+	body     string
+	requests []*http.Request
+}
+
+func (transport *phase19wSearchTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	transport.requests = append(transport.requests, request)
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Header:     make(http.Header),
+		Body:       io.NopCloser(strings.NewReader(transport.body)),
+		Request:    request,
+	}, nil
+}
+
+func phase19wUseSearchTransport(t *testing.T, transport http.RoundTripper) {
+	t.Helper()
+	previous := http.DefaultTransport
+	http.DefaultTransport = transport
+	t.Cleanup(func() { http.DefaultTransport = previous })
 }
 
 // phase19wAssemble calls AssembleAgent and registers cleanup. The timeout
@@ -56,9 +79,8 @@ func phase19wAssemble(t *testing.T, cfg *config.Config) *cli.AgentAssembly {
 	return assembly
 }
 
-// phase19wFindTool returns the (unwrapped) ToolDefinition with the given name
-// from the registry. List() returns the original definitions without middleware
-// wrapping, so the concrete type is accessible.
+// phase19wFindTool returns the ToolDefinition with the given name. Assembly's
+// middleware registry exposes a protected proxy through List().
 func phase19wFindTool(t *testing.T, tr tools.ToolRegistry, name string) tools.ToolDefinition {
 	t.Helper()
 	defs, err := tr.List(context.Background())
@@ -70,6 +92,17 @@ func phase19wFindTool(t *testing.T, tr tools.ToolRegistry, name string) tools.To
 	}
 	t.Fatalf("tool %q not found in registry", name)
 	return nil
+}
+
+func phase19wExecuteWebSearch(t *testing.T, cfg *config.Config) (*tools.ToolResult, error) {
+	t.Helper()
+	assembly := phase19wAssemble(t, cfg)
+	tool := phase19wFindTool(t, assembly.ToolRegistry, "web_search")
+	return tool.Execute(context.Background(), tools.ToolCall{
+		ID:   "phase19-web-search",
+		Name: "web_search",
+		Args: map[string]any{"query": "provider test"},
+	})
 }
 
 // =============================================================================
@@ -225,32 +258,36 @@ func TestET_Phase19_AC3_PermissionModeResolverWired(t *testing.T) {
 }
 
 // =============================================================================
-// AC-4: WebSearchProvider defaults to mock, switches to fetch/brave with config
+// AC-4: WebSearchProvider stays unavailable by default and selects configured providers.
 // =============================================================================
 
 // TestET_Phase19_AC4_WebSearchProviderConfigDriven verifies that the
-// WebSearchProvider (D2) is selected from config.WebSearch: default is mock,
-// "fetch" uses FetchSearchProvider, "brave" with an API key uses
-// BraveSearchProvider, and "brave" without a key falls back to mock.
+// WebSearchProvider (D2) is selected from config.WebSearch: no real provider
+// stays unavailable, "fetch" uses FetchSearchProvider, and "brave" preserves
+// its provider identity while a missing key fails at request time.
 func TestET_Phase19_AC4_WebSearchProviderConfigDriven(t *testing.T) {
-	// Default (no config) → mock.
-	t.Run("default_mock", func(t *testing.T) {
-		assembly := phase19wAssemble(t, phase19wTestConfig())
-		ws := phase19wFindTool(t, assembly.ToolRegistry, "web_search")
-		wst, ok := ws.(*tools.WebSearchTool)
-		require.True(t, ok, "web_search should be *tools.WebSearchTool")
-		assert.Equal(t, "mock", wst.ProviderName())
+	// Default (no config) stays unavailable rather than manufacturing results.
+	t.Run("default_unavailable", func(t *testing.T) {
+		transport := &phase19wSearchTransport{}
+		phase19wUseSearchTransport(t, transport)
+		result, err := phase19wExecuteWebSearch(t, phase19wTestConfig())
+		require.Nil(t, result)
+		require.ErrorIs(t, err, tools.ErrWebSearchProviderUnavailable)
+		assert.Empty(t, transport.requests)
 	})
 
 	// fetch provider.
 	t.Run("fetch_provider", func(t *testing.T) {
 		cfg := phase19wTestConfig()
 		cfg.WebSearch.Provider = "fetch"
-		assembly := phase19wAssemble(t, cfg)
-		ws := phase19wFindTool(t, assembly.ToolRegistry, "web_search")
-		wst, ok := ws.(*tools.WebSearchTool)
-		require.True(t, ok)
-		assert.Equal(t, "fetch", wst.ProviderName())
+		transport := &phase19wSearchTransport{body: `<html><body><h2>Result</h2><a href="https://example.org">Link</a><p>Snippet</p></body></html>`}
+		phase19wUseSearchTransport(t, transport)
+		result, err := phase19wExecuteWebSearch(t, cfg)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Contains(t, result.Output, "https://example.org")
+		require.Len(t, transport.requests, 1)
+		assert.Equal(t, "html.duckduckgo.com", transport.requests[0].URL.Host)
 	})
 
 	// brave provider with API key.
@@ -258,22 +295,27 @@ func TestET_Phase19_AC4_WebSearchProviderConfigDriven(t *testing.T) {
 		cfg := phase19wTestConfig()
 		cfg.WebSearch.Provider = "brave"
 		cfg.WebSearch.APIKey = "test-key"
-		assembly := phase19wAssemble(t, cfg)
-		ws := phase19wFindTool(t, assembly.ToolRegistry, "web_search")
-		wst, ok := ws.(*tools.WebSearchTool)
-		require.True(t, ok)
-		assert.Equal(t, "brave", wst.ProviderName())
+		transport := &phase19wSearchTransport{body: `{"web":{"results":[{"title":"Result","url":"https://example.org","description":"Snippet"}]}}`}
+		phase19wUseSearchTransport(t, transport)
+		result, err := phase19wExecuteWebSearch(t, cfg)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Contains(t, result.Output, "https://example.org")
+		require.Len(t, transport.requests, 1)
+		assert.Equal(t, "test-key", transport.requests[0].Header.Get("X-Subscription-Token"))
 	})
 
-	// brave without API key → falls back to mock.
-	t.Run("brave_no_key_falls_back_to_mock", func(t *testing.T) {
+	// Brave without API key keeps its configured identity and fails closed.
+	t.Run("brave_no_key_unavailable", func(t *testing.T) {
 		cfg := phase19wTestConfig()
 		cfg.WebSearch.Provider = "brave"
-		assembly := phase19wAssemble(t, cfg)
-		ws := phase19wFindTool(t, assembly.ToolRegistry, "web_search")
-		wst, ok := ws.(*tools.WebSearchTool)
-		require.True(t, ok)
-		assert.Equal(t, "mock", wst.ProviderName())
+		transport := &phase19wSearchTransport{}
+		phase19wUseSearchTransport(t, transport)
+		result, err := phase19wExecuteWebSearch(t, cfg)
+		require.Nil(t, result)
+		require.ErrorIs(t, err, tools.ErrWebSearchProviderUnavailable)
+		assert.Contains(t, err.Error(), "Brave api key is required")
+		assert.Empty(t, transport.requests, "a missing Brave key must not dispatch HTTP")
 	})
 }
 

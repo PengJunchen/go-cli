@@ -1,0 +1,1 @@
+ok  	github.com/pengjunchen/go-cli/internal/mcp	3.393s

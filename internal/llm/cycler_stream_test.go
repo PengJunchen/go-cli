@@ -23,6 +23,16 @@ type testStreamProvider struct {
 
 func (p *testStreamProvider) Name() string { return "test-stream" }
 
+func (p *testStreamProvider) resolverSpec() ProviderSpec {
+	return ProviderSpec{
+		ProviderID:              "test-stream",
+		ProtocolID:              ProtocolOpenAICompatible,
+		DefaultBaseURL:          "https://fixture.invalid",
+		DefaultEndpointExplicit: true,
+		Enabled:                 true,
+	}
+}
+
 func (p *testStreamProvider) Build(_ context.Context, _ ModelConfig) (BaseChatModel, func(), error) {
 	if p.buildErr != nil {
 		return nil, nil, p.buildErr

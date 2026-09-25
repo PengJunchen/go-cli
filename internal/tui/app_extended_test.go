@@ -187,15 +187,18 @@ func TestAppToolOutputAppendsToToolCall(t *testing.T) {
 	m.handleEvent(AgentEvent{
 		ContentType: ContentTypeToolCall,
 		Content:     "bash echo hi",
+		ToolCallID:  "call-1",
 	})
 	m.handleEvent(AgentEvent{
 		ContentType: ContentTypeToolOutput,
 		Content:     "line one",
+		ToolCallID:  "call-1",
 		Stream:      "stdout",
 	})
 	m.handleEvent(AgentEvent{
 		ContentType: ContentTypeToolOutput,
 		Content:     "line two",
+		ToolCallID:  "call-1",
 		Stream:      "stderr",
 	})
 

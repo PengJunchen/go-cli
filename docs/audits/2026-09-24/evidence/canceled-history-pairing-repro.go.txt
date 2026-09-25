@@ -1,0 +1,50 @@
+package core
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+	"github.com/pengjunchen/go-cli/internal/mock"
+)
+
+// TestAudit_CanceledRunPersistsOrphanToolCall shows the actual AgentImpl ->
+// LoopAgent boundary: Loop emits a synthetic cancellation tool_result, but
+// AgentImpl.Messages() stores only the assistant message with ToolCalls.
+func TestAudit_CanceledRunPersistsOrphanToolCall(t *testing.T) {
+	toolRegistry := mock.NewMockToolServer()
+	blocker := &cancelBlockingTool{name: "audit_blocker", started: make(chan struct{})}
+	require.NoError(t, toolRegistry.Register(context.Background(), blocker))
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate(
+		"AUDIT-CANCEL-HISTORY", "cancel history",
+		mock.ConversationTurn{
+			AssistantToolCalls: []mock.ExpectedToolCall{{ID: "tc-audit", Name: "audit_blocker"}},
+		},
+	))
+	agent := NewAgentImpl("audit", NewLoopAgent(WithLLM(model), WithTools(toolRegistry)))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		_, err := agent.Run(ctx, Submission{Content: "run"})
+		done <- err
+	}()
+	select {
+	case <-blocker.started:
+	case <-time.After(3 * time.Second):
+		t.Fatal("tool did not start")
+	}
+	cancel()
+	require.Error(t, <-done)
+
+	// The current implementation has user + assistant(tool_call), but no tool
+	// result role in persisted in-memory history.
+	history := agent.Messages()
+	require.Len(t, history, 2)
+	require.Equal(t, "assistant", history[1].Role)
+	require.Len(t, history[1].ToolCalls, 1)
+	for _, msg := range history {
+		require.NotEqual(t, "tool", msg.Role)
+	}
+}

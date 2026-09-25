@@ -1,0 +1,8 @@
+Command: go test ./internal/core -run '^TestAudit_CanceledRunPersistsOrphanToolCall$' -count=1
+Result: PASS (1 test, 1 package; 0.720s)
+
+The passing assertion captures the defect: after cancellation in a tool call,
+AgentImpl.Messages() contains the assistant tool-call message but no tool-role
+result. The existing Loop-level cancellation tests only reconstruct messages
+from returned events and do not check AgentImpl history. The temporary test
+file was removed after this targeted run; no product source was changed.

@@ -89,11 +89,72 @@ func NewMiddlewareChain(mws ...Middleware) *MiddlewareChain {
 // Wrap composes the middlewares over base. The first middleware in the chain is
 // the outermost wrapper and runs first when the loop executes.
 func (c *MiddlewareChain) Wrap(base AgentLoop) AgentLoop {
-	loop := base
-	for i := len(c.middlewares) - 1; i >= 0; i-- {
-		loop = c.middlewares[i].Wrap(loop)
+	if len(c.middlewares) == 0 {
+		return base
 	}
-	return loop
+
+	loop := base
+	canonical, hasCanonical := base.(CanonicalLoop)
+	canonicalSupported := hasCanonical
+	for i := len(c.middlewares) - 1; i >= 0; i-- {
+		middleware := c.middlewares[i]
+		loop = middleware.Wrap(loop)
+		if !canonicalSupported {
+			continue
+		}
+		canonicalMiddleware, ok := middleware.(CanonicalMiddleware)
+		if !ok {
+			canonicalSupported = false
+			canonical = nil
+			continue
+		}
+		canonical = canonicalMiddleware.WrapCanonical(canonical)
+		if canonical == nil {
+			canonicalSupported = false
+		}
+	}
+	if !hasCanonical {
+		return loop
+	}
+	if !canonicalSupported {
+		return &unsupportedCanonicalMiddlewareLoop{next: loop}
+	}
+	return &canonicalMiddlewareChainLoop{next: loop, canonical: canonical}
+}
+
+type canonicalMiddlewareChainLoop struct {
+	next      AgentLoop
+	canonical CanonicalLoop
+}
+
+func (l *canonicalMiddlewareChainLoop) Run(ctx context.Context, submission Submission, stream ...EventStream) ([]AgentEvent, error) {
+	return l.next.Run(ctx, submission, stream...)
+}
+
+func (l *canonicalMiddlewareChainLoop) RunCanonical(ctx context.Context, submission Submission, stream ...EventStream) (CanonicalRunResult, error) {
+	return l.canonical.RunCanonical(ctx, submission, stream...)
+}
+
+type unsupportedCanonicalMiddlewareLoop struct{ next AgentLoop }
+
+func (l *unsupportedCanonicalMiddlewareLoop) Run(ctx context.Context, submission Submission, stream ...EventStream) ([]AgentEvent, error) {
+	return l.next.Run(ctx, submission, stream...)
+}
+
+func (*unsupportedCanonicalMiddlewareLoop) RunCanonical(_ context.Context, submission Submission, _ ...EventStream) (CanonicalRunResult, error) {
+	err := ErrCanonicalMiddlewareUnsupported
+	return CanonicalRunResult{
+		Events:     []AgentEvent{errEvent(err)},
+		Transcript: canonicalUserDelta(submission),
+	}, err
+}
+
+func canonicalUserDelta(submission Submission) []TranscriptEntry {
+	return []TranscriptEntry{{Message: AgentMessage{
+		Role:      "user",
+		Content:   submission.Content,
+		InputKind: InputKindUser,
+	}}}
 }
 
 // Apply composes the middlewares over base and returns the wrapped loop. It is
@@ -105,6 +166,7 @@ func (c *MiddlewareChain) Apply(base AgentLoop) AgentLoop { return c.Wrap(base) 
 type LoggingMiddleware struct{ name string }
 
 var _ Middleware = (*LoggingMiddleware)(nil)
+var _ CanonicalMiddleware = (*LoggingMiddleware)(nil)
 
 // NewLoggingMiddleware builds a named logging middleware.
 func NewLoggingMiddleware(name string) *LoggingMiddleware { return &LoggingMiddleware{name: name} }
@@ -120,6 +182,28 @@ func (m *LoggingMiddleware) Name() string {
 // Wrap returns a loop-view that logs around Run.
 func (m *LoggingMiddleware) Wrap(next AgentLoop) AgentLoop {
 	return &loggingLoop{name: m.Name(), next: next}
+}
+
+func (m *LoggingMiddleware) WrapCanonical(next CanonicalLoop) CanonicalLoop {
+	return &canonicalLoggingLoop{name: m.Name(), next: next}
+}
+
+type canonicalLoggingLoop struct {
+	name string
+	next CanonicalLoop
+}
+
+func (l *canonicalLoggingLoop) RunCanonical(ctx context.Context, submission Submission, stream ...EventStream) (CanonicalRunResult, error) {
+	span, spanCtx := tracing.SpanFromContext(ctx, "middleware."+l.name, tracing.SpanKindInternal)
+	defer span.End()
+	logger := tracing.NewTraceLogger(span, nil)
+	slog.Info("core.logging_middleware.run", "name", l.name, "type", submission.Type)
+	logger.Info("middleware.run", "name", l.name, "type", submission.Type)
+
+	result, err := l.next.RunCanonical(spanCtx, submission, stream...)
+	slog.Info("core.logging_middleware.done", "name", l.name, "events", len(result.Events), "error", err != nil)
+	logger.Info("middleware.done", "name", l.name, "events", len(result.Events), "error", err != nil)
+	return result, err
 }
 
 // loggingLoop is the concrete wrapped loop produced by LoggingMiddleware.

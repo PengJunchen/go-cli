@@ -196,14 +196,9 @@ func TestIntegration_MCPAutoDiscovery_ArrayFormat(t *testing.T) {
 
 	// Start a mock MCP HTTP server.
 	srv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodPost {
-			//nolint:errcheck // test HTTP response
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"search","description":"Search the web"}]}}`)) //nolint:errcheck
-		} else {
-			//nolint:errcheck // test HTTP response
-			_, _ = w.Write([]byte(`{}`)) //nolint:errcheck
-		}
+		writeMockMCPResult(w, r, map[string]any{
+			"tools": []map[string]any{{"name": "search", "description": "Search the web"}},
+		})
 	}))
 	defer srv.Close()
 
@@ -245,14 +240,9 @@ func TestIntegration_MCPAutoDiscovery_MapFormat(t *testing.T) {
 	ctx := context.Background()
 
 	srv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodPost {
-			//nolint:errcheck // test HTTP response
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"echo","description":"Echo tool"}]}}`)) //nolint:errcheck
-		} else {
-			//nolint:errcheck // test HTTP response
-			_, _ = w.Write([]byte(`{}`)) //nolint:errcheck
-		}
+		writeMockMCPResult(w, r, map[string]any{
+			"tools": []map[string]any{{"name": "echo", "description": "Echo tool"}},
+		})
 	}))
 	defer srv.Close()
 
@@ -291,26 +281,16 @@ func TestIntegration_MCPConfigOverridesAutoDiscovery(t *testing.T) {
 
 	// Two mock servers: one for config, one for auto-discovery.
 	configSrv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodPost {
-			//nolint:errcheck // test HTTP response
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"config-tool","description":"From config"}]}}`)) //nolint:errcheck
-		} else {
-			//nolint:errcheck // test HTTP response
-			_, _ = w.Write([]byte(`{}`)) //nolint:errcheck
-		}
+		writeMockMCPResult(w, r, map[string]any{
+			"tools": []map[string]any{{"name": "config-tool", "description": "From config"}},
+		})
 	}))
 	defer configSrv.Close()
 
 	autoSrv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		if r.Method == http.MethodPost {
-			//nolint:errcheck // test HTTP response
-			_, _ = w.Write([]byte(`{"jsonrpc":"2.0","id":0,"result":{"tools":[{"name":"auto-tool","description":"From auto-discovery"}]}}`)) //nolint:errcheck
-		} else {
-			//nolint:errcheck // test HTTP response
-			_, _ = w.Write([]byte(`{}`)) //nolint:errcheck
-		}
+		writeMockMCPResult(w, r, map[string]any{
+			"tools": []map[string]any{{"name": "auto-tool", "description": "From auto-discovery"}},
+		})
 	}))
 	defer autoSrv.Close()
 

@@ -14,6 +14,11 @@ import (
 // openPTY creates a pseudo-terminal pair and returns the slave end as an
 // *os.File (which reports true for xterm.IsTerminal).
 func openPTY(t *testing.T) (*os.File, func()) {
+	slave, _, cleanup := openPTYWithMaster(t)
+	return slave, cleanup
+}
+
+func openPTYWithMaster(t *testing.T) (*os.File, *os.File, func()) {
 	t.Helper()
 	if os.Getenv("CI") != "" {
 		t.Skip("PTY tests are skipped in CI environments")
@@ -31,8 +36,12 @@ func openPTY(t *testing.T) (*os.File, func()) {
 	slave, err := os.OpenFile(fmt.Sprintf("/dev/pts/%d", n), os.O_RDWR|unix.O_NOCTTY, 0)
 	require.NoError(t, err)
 
-	return slave, func() {
+	return slave, master, func() {
 		slave.Close()
 		master.Close()
 	}
+}
+
+func pendingPTYInputBytes(fd uintptr) (int, error) {
+	return unix.IoctlGetInt(int(fd), unix.TIOCINQ)
 }

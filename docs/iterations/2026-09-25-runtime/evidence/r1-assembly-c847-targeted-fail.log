@@ -1,0 +1,8 @@
+--- FAIL: TestOutputGuardRunsBeforeVisibleDelta (0.01s)
+    r1_assembly_stream_test.go:179: 
+        	Error Trace:	/Users/pengjunchen/Documents/github/go-cli-runtime-worktrees/r1-integration/internal/cli/r1_assembly_stream_test.go:179
+        	Error:      	Should NOT be empty, but was 
+        	Test:       	TestOutputGuardRunsBeforeVisibleDelta
+FAIL
+FAIL	github.com/pengjunchen/go-cli/internal/cli	0.062s
+FAIL

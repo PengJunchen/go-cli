@@ -1,0 +1,8 @@
+snapshot=5ec4989 command=go test -race -p 2 -count=1 ./internal/config ./internal/llm ./internal/session ./internal/cli ./cmd/cli
+ok  	github.com/pengjunchen/go-cli/internal/config	1.281s
+ok  	github.com/pengjunchen/go-cli/internal/llm	2.834s
+ok  	github.com/pengjunchen/go-cli/internal/session	8.377s
+ok  	github.com/pengjunchen/go-cli/internal/cli	17.931s
+ok  	github.com/pengjunchen/go-cli/cmd/cli	1.448s
+
+exit=0 elapsed_seconds=63.55

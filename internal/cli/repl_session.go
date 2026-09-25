@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/config"
@@ -54,6 +55,7 @@ type REPLSession struct {
 
 	// Flags
 	modelName        string
+	modelFlag        string
 	providerName     string
 	maxTokens        int
 	thinkingLevel    llm.ThinkingLevel
@@ -84,8 +86,12 @@ type REPLSession struct {
 	pendingWrites *session.PendingSessionWrites
 
 	// flushTicker periodically flushes pending writes as a safety net.
-	flushTicker *time.Ticker
-	flushDone   chan struct{}
+	flushMu      sync.Mutex
+	flushTicker  *time.Ticker
+	flushDone    chan struct{}
+	flushExited  chan struct{}
+	flushStarted bool
+	flushStopped bool
 
 	// Editor/expander
 	lineEditor      LineEditor
@@ -122,20 +128,33 @@ type REPLSession struct {
 
 // Run starts the session: it parses flags, assembles the agent, enters the
 // REPL loop, and cleans up on exit.
-func (s *REPLSession) Run(ctx context.Context, cfg Config, args []string) error {
+func (s *REPLSession) Run(ctx context.Context, cfg Config, args []string) (runErr error) {
 	s.cfg = cfg
 	s.args = args
+	sessionStarted := false
+	defer func() {
+		closeErr := closeAssemblyForCommand(context.Background(), s.assembly, "interactive")
+		if sessionStarted {
+			s.cleanup()
+		} else {
+			s.stopFlushTicker()
+		}
+		runErr = errors.Join(runErr, closeErr)
+		if s.span == nil {
+			return
+		}
+		if runErr != nil {
+			s.span.SetStatus(tracing.SpanStatusError, runErr.Error())
+		} else {
+			s.span.SetStatus(tracing.SpanStatusOK, "")
+		}
+		s.span.End()
+	}()
 	if err := s.start(ctx); err != nil {
 		return err
 	}
-	defer func() {
-		s.span.SetStatus(tracing.SpanStatusOK, "")
-		s.span.End()
-	}()
-	defer s.assembly.Cleanup()
-	s.readInput()
-	s.cleanup()
-	return nil
+	sessionStarted = true
+	return s.readInput()
 }
 
 // start performs all one-time session setup: flag parsing, onboarding, agent
@@ -153,8 +172,11 @@ func (s *REPLSession) start(ctx context.Context) error {
 		if in == nil {
 			in = os.Stdin
 		}
-		if err := RunOnboarding(s.rc, in, s.out); err != nil {
+		if err := runOnboardingWithModelOverride(ctx, s.rc, s.providerName, s.modelFlag, in, s.out); err != nil {
 			return err
+		}
+		if s.modelFlag == "" {
+			s.modelName = resolveModelName("", s.rc)
 		}
 	}
 	if err := s.setupAgent(ctx); err != nil {
@@ -211,6 +233,7 @@ func (s *REPLSession) parseFlags() error {
 	}
 
 	s.modelName = resolveModelName(modelFlag, s.rc)
+	s.modelFlag = modelFlag
 	s.providerName = resolveProviderName(providerFlag, s.rc)
 	if maxTokensFlag <= 0 {
 		maxTokensFlag = defaultMaxTokens
@@ -273,11 +296,25 @@ func (s *REPLSession) setupAgent(ctx context.Context) error {
 	assembly, err := AssembleAgent(s.spanCtx, s.rc, s.providerName, s.modelName, s.out,
 		assembleOpts...)
 	if err != nil {
-		s.span.SetStatus(tracing.SpanStatusError, err.Error())
-		s.span.End()
 		return newExecutionError("interactive: assemble agent", err)
 	}
 	s.assembly = assembly
+	if err := assembly.setInteractiveCloseHooks(func() {
+		s.stopFlushTicker()
+	}, func(ctx context.Context) error {
+		if assembly.SessionStore == nil || s.pendingWrites == nil {
+			return nil
+		}
+		flushErr := s.pendingWrites.Flush(ctx, assembly.SessionStore)
+		saveErr := assembly.SessionStore.Save(ctx)
+		return errors.Join(flushErr, saveErr)
+	}, func() {
+		if s.memoryCtxCancel != nil {
+			s.memoryCtxCancel()
+		}
+	}); err != nil {
+		return err
+	}
 	s.approvalCh = approvalCh
 	return nil
 }
@@ -336,6 +373,7 @@ func (s *REPLSession) setupSlashContext() {
 		estimator:       s.assembly.Estimator,
 		promptBuilder:   s.assembly.PromptBuilder,
 		contextLoader:   s.assembly.ContextLoader,
+		mcpResources:    s.assembly.mcpResources,
 	}
 
 	// Create a shared ThemeManager so /theme can switch themes at runtime
@@ -451,14 +489,28 @@ const pendingWritesFlushInterval = 1 * time.Second
 func (s *REPLSession) startFlushTicker() {
 	ticker := time.NewTicker(pendingWritesFlushInterval)
 	done := make(chan struct{})
+	exited := make(chan struct{})
+	s.flushMu.Lock()
+	if s.flushStopped || s.flushStarted {
+		s.flushMu.Unlock()
+		ticker.Stop()
+		return
+	}
 	s.flushTicker = ticker
 	s.flushDone = done
+	s.flushExited = exited
+	s.flushStarted = true
 	// Snapshot fields to avoid concurrent access from the ticker goroutine.
 	pw := s.pendingWrites
-	store := s.assembly.SessionStore
+	var store session.SessionStore
+	if s.assembly != nil {
+		store = s.assembly.SessionStore
+	}
 	ctx := s.spanCtx
 	logger := s.logger
+	s.flushMu.Unlock()
 	go func() {
+		defer close(exited)
 		for {
 			select {
 			case <-ticker.C:
@@ -478,11 +530,21 @@ func (s *REPLSession) startFlushTicker() {
 // stopFlushTicker stops the background flush goroutine. It is safe to call
 // when the ticker was never started.
 func (s *REPLSession) stopFlushTicker() {
-	if s.flushTicker != nil {
-		s.flushTicker.Stop()
+	s.flushMu.Lock()
+	if !s.flushStopped {
+		s.flushStopped = true
+		if s.flushTicker != nil {
+			s.flushTicker.Stop()
+		}
+		if s.flushDone != nil {
+			close(s.flushDone)
+		}
 	}
-	if s.flushDone != nil {
-		close(s.flushDone)
+	started := s.flushStarted
+	exited := s.flushExited
+	s.flushMu.Unlock()
+	if started && exited != nil {
+		<-exited
 	}
 }
 
@@ -513,7 +575,7 @@ func evaluateCtrlC(hadContent bool, lastInterrupt, now time.Time, window time.Du
 
 // readInput is the REPL for loop. It reads user input, routes slash commands,
 // expands @-mentions, and delegates each turn to executeTurn.
-func (s *REPLSession) readInput() {
+func (s *REPLSession) readInput() error {
 	for {
 		line, err := s.lineEditor.ReadLine(s.spanCtx, "> ")
 		if err != nil {
@@ -523,10 +585,10 @@ func (s *REPLSession) readInput() {
 				}
 				continue
 			}
-			if !errors.Is(err, io.EOF) {
-				s.logger.Warn("cli_interactive_readline_error", "err", err)
+			if errors.Is(err, io.EOF) || errors.Is(err, context.Canceled) {
+				break
 			}
-			break
+			return err
 		}
 		// Successful input resets the double-press timer.
 		s.lastInterruptTime = time.Time{}
@@ -563,6 +625,7 @@ func (s *REPLSession) readInput() {
 		s.line = line
 		s.executeTurn()
 	}
+	return nil
 }
 
 // handleInterrupt processes a Ctrl+C interrupt (errInterrupted) and returns
@@ -647,7 +710,10 @@ func (s *REPLSession) executeTurn() {
 // event stream, and expands @-mentions in the user input.
 func (s *REPLSession) setupTurn() {
 	s.turnSpan, s.turnCtx = tracing.SpanFromContext(s.spanCtx, spanInteractiveTurn, tracing.SpanKindInternal)
-	s.turnSpan.SetAttributes(tracing.SensitiveAttribute("user_message", s.line))
+	s.turnSpan.SetAttributes(
+		tracing.SensitiveAttribute("user_message", s.line),
+		tracing.Attribute{Key: "user_message_length", Value: len(s.line)},
+	)
 
 	// Expand @-mentions before processing. The SensitiveAttribute above
 	// already captured the original user input; Expand modifies line so
@@ -1007,27 +1073,6 @@ func (s *REPLSession) cleanup() {
 	// Stop the background flush goroutine first to prevent concurrent
 	// flushes during the final drain.
 	s.stopFlushTicker()
-
-	// Flush any remaining buffered session entries and sync the store
-	// before tearing down shared resources.
-	if s.assembly != nil && s.assembly.SessionStore != nil && s.pendingWrites != nil {
-		if flushErr := s.pendingWrites.Flush(s.spanCtx, s.assembly.SessionStore); flushErr != nil {
-			s.logger.Warn("cli_interactive_session_flush_final", "err", flushErr)
-		}
-		_ = s.assembly.SessionStore.Save(s.spanCtx) //nolint:errcheck
-	}
-
-	// Wait for in-flight memory extraction goroutines to finish before
-	// closing shared resources (MemoryStore, etc.). This ensures the
-	// extraction completes and writes memories before the store is closed.
-	// After the wait, cancel the memory context to release any remaining
-	// resources held by the context (no-op if extraction already finished).
-	if s.assembly != nil && s.assembly.MemoryWG != nil {
-		s.assembly.MemoryWG.Wait()
-	}
-	if s.memoryCtxCancel != nil {
-		s.memoryCtxCancel()
-	}
 
 	// Save history on exit (covers EOF, /exit, and exit text paths).
 	if dle, ok := s.lineEditor.(*DefaultLineEditor); ok {

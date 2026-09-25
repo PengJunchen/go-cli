@@ -1,0 +1,25 @@
+# R2 CLI production wiring design review
+
+Reviewed `2b8101ed5cf9105bc639dfcc41f2474b394c1a59` and its R2 CLI production wiring handoff in the dedicated worktree. This is a read-only design review of the prompt/REPL integration against the current core run owner, durable session helpers, R7 Assembly-close handoff, and the earlier R2 CLI session handoff. No code, tests, or ledger files were changed.
+
+## Findings
+
+### [P1] Define lease return when `RunTurn` rejects before core ownership
+
+The handoff explicitly describes returning the lease when prompt `Harness.Submit` rejects before owner acceptance, but does not state the same rule for REPL `TurnRunner.RunTurn` (`r2-cli-production-wiring-handoff.md:39,43`). This is a real ownership gap: `EinoTurnRunner.RunTurn` can return before `runOwner.run` adopts the context sink, including a nil loop, failed run-slot claim, wrapper registration failure, or wrapper-status installation failure (`internal/core/turnrunner.go:85-136,158-160,185-205`). The durable lease is released only through the sink's `CloseRunCommit` callback (`internal/cli/durable_cli_session.go:116-137`); a pre-owner return therefore leaves the manager's lease count pinned. During shutdown, R7 fences the shared run slot before requesting session close, so a bind/close race can make `RunTurn` reject after the CLI already acquired the session lease. Assembly close then waits on a lease no run owner can return.
+
+Specify one ownership boundary for both entrypoints: every return before the core owner has adopted the sink returns the lease exactly once on the caller path; after adoption, only the core owner releases it after callbacks/resources join. Do not add an unconditional caller defer, which would close a sink still owned by an accepted run. If the caller cannot reliably distinguish these paths through the current `RunTurn` result, define a narrow ownership-transfer signal/seam rather than guessing from an arbitrary error. Add a real manager/lease test for a pre-claim or wrapper rejection and verify close completes, plus an accepted-run test proving the caller does not release the lease early.
+
+### [P2] Reconcile durable prompt `--fork` with the earlier approved handoff
+
+The new handoff says it updates only the earlier document's source-state section and that the earlier approved handoff remains authoritative (`r2-cli-production-wiring-handoff.md:3`). However, it asks the builder to reject an “unsupported durable fork” without specifying whether this means prompt `--fork` or only the REPL slash commands (`:29,36`). The earlier R2 handoff explicitly requires durable prompt `--fork <entry-id>` to select an exact source physical ID, validate that the entry belongs to it, and fail before provider entry on absent or mismatched source selection (`r2-cli-session-handoff.md:19,60`). The existing durable helper only prepares a new or exact resumed session and binds a sink; it has no fork/copy operation (`internal/cli/durable_cli_session.go:18-56,102-137`). Resuming the source and merely calling `Agent.SetHistory` would leave the writer bound to the source's current branch and would not implement a durable fork.
+
+Before implementation, distinguish the prompt flag from slash `/fork` and choose one contract. For this bounded slice, the safe minimal choice is a typed unsupported error for prompt `--fork` whenever durable mode is selected, with an explicit note that this supersedes the earlier fork requirement. If durable prompt forking remains in scope, define how it creates a distinct physical target and seeds/persists the source view without writing into or mutating the source session; the current helper API does not supply those semantics.
+
+## Bounded design assessment
+
+The main durable-run path is otherwise implementable with the existing contracts and one R7 prerequisite. Preparing before agent publication, seeding model history only from `PreparedSessionSnapshot.PublishedView`, building navigation from the same snapshot, binding a single manager lease per accepted run, and retaining one transcript writer preserve the current ownership and history boundaries. Core owns the seven durable checkpoints and the actual run identity; the session manager owns the prepared handle; the R1 owner returns a run lease after its callback/resources and terminal policy finish. The R7 Assembly close owner must be merged and used as the only close path before this can be wired safely.
+
+The activation and isolation decisions are clear: configured `StorePath` activates prompt/REPL persistence without a new durable opt-in; resume uses an exact physical ID; legacy fallback is forbidden after durable setup failure; and durable `serve` fails typed before listener start instead of binding one session across ACP clients. The required `PublishedView` refresh after an acknowledged terminal is consistent with the session snapshot contract. A `cleanup_pending` result remains distinct from an acknowledged, joined run and cannot authorize another REPL turn or session close.
+
+No tests were run because this was a source/design review only.

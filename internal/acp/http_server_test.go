@@ -8,7 +8,9 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -17,6 +19,8 @@ import (
 
 // startTestHTTPServer creates and starts an HTTPServer on an ephemeral port,
 // returning the server and its base URL. It polls until the server is ready.
+var httpTestSessionIDs sync.Map
+
 func startTestHTTPServer(t *testing.T, handler *CoreHandler) (*HTTPServer, string) {
 	t.Helper()
 	srv := NewHTTPServer("test", "127.0.0.1:0", handler)
@@ -30,7 +34,9 @@ func startTestHTTPServer(t *testing.T, handler *CoreHandler) (*HTTPServer, strin
 	// Poll until the server accepts connections.
 	ready := false
 	for i := 0; i < 50; i++ {
-		resp, err := http.Get(baseURL + "/stream")
+		request, _ := http.NewRequest(http.MethodGet, baseURL+"/stream", nil)
+		request.Header.Set(ACPHTTPProfileHeader, ACPHTTPProfileV1)
+		resp, err := http.DefaultClient.Do(request)
 		if err == nil {
 			resp.Body.Close()
 			ready = true
@@ -41,16 +47,105 @@ func startTestHTTPServer(t *testing.T, handler *CoreHandler) (*HTTPServer, strin
 	if !ready {
 		t.Fatal("server did not become ready")
 	}
+	t.Cleanup(func() {
+		prefix := baseURL + "\x00"
+		httpTestSessionIDs.Range(func(key, _ any) bool {
+			if strings.HasPrefix(key.(string), prefix) {
+				httpTestSessionIDs.Delete(key)
+			}
+			return true
+		})
+	})
 	return srv, baseURL
 }
 
-// postACP sends a POST request with a JSON ACPMessage body.
+func httpTestSessionKey(baseURL, alias string) string {
+	if alias == "" {
+		alias = "anonymous"
+	}
+	return baseURL + "\x00" + alias
+}
+
+func httpTestSessionID(baseURL, alias string) string {
+	if value, ok := httpTestSessionIDs.Load(httpTestSessionKey(baseURL, alias)); ok {
+		return value.(string)
+	}
+	return ""
+}
+
+func httpTestRequest(t *testing.T, method, target string, body io.Reader) *http.Request {
+	t.Helper()
+	request, err := http.NewRequest(method, target, body)
+	if err != nil {
+		t.Fatalf("create request %s %s: %v", method, target, err)
+	}
+	request.Header.Set(ACPHTTPProfileHeader, ACPHTTPProfileV1)
+	if body != nil {
+		request.Header.Set("Content-Type", "application/json")
+	}
+	return request
+}
+
+func rememberHTTPConnectResponse(t *testing.T, baseURL, alias string, response *http.Response) *http.Response {
+	t.Helper()
+	if response.StatusCode != http.StatusOK {
+		return response
+	}
+	raw, err := io.ReadAll(response.Body)
+	response.Body.Close()
+	if err != nil {
+		t.Fatalf("read connect response: %v", err)
+	}
+	var result struct {
+		SessionID string `json:"session_id"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode connect response: %v", err)
+	}
+	if result.SessionID == "" {
+		t.Fatalf("connect response omitted session_id: %s", raw)
+	}
+	httpTestSessionIDs.Store(httpTestSessionKey(baseURL, alias), result.SessionID)
+	response.Body = io.NopCloser(bytes.NewReader(raw))
+	return response
+}
+
+func testSessionByAlias(server *HTTPServer, alias string) *Session {
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	for _, binding := range server.sessions {
+		if binding.senderAlias == alias {
+			return binding.session
+		}
+	}
+	return nil
+}
+
+// postACP sends a POST request through the private HTTP profile.
 func postACP(t *testing.T, baseURL, path string, msg ACPMessage) *http.Response {
 	t.Helper()
-	body, _ := json.Marshal(msg)
-	resp, err := http.Post(baseURL+path, "application/json", bytes.NewReader(body))
+	sessionID := ""
+	if msg.Type != TypeConnect {
+		sessionID = httpTestSessionID(baseURL, msg.SenderID)
+	}
+	envelope := httpEnvelopeFromMessage(sessionID, msg)
+	if msg.Type == TypeConnect {
+		envelope.Version = ACPHTTPProfileV1
+	}
+	body, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("marshal ACP request: %v", err)
+	}
+	request := httpTestRequest(t, http.MethodPost, baseURL+path, bytes.NewReader(body))
+	resp, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatalf("POST %s failed: %v", path, err)
+	}
+	if path == "/connect" {
+		return rememberHTTPConnectResponse(t, baseURL, msg.SenderID, resp)
+	}
+	if path == "/disconnect" && resp.StatusCode == http.StatusOK {
+		httpTestSessionIDs.Delete(httpTestSessionKey(baseURL, msg.SenderID))
 	}
 	return resp
 }
@@ -58,11 +153,12 @@ func postACP(t *testing.T, baseURL, path string, msg ACPMessage) *http.Response 
 // drainStream performs a GET /stream and returns decoded messages.
 func drainStream(t *testing.T, baseURL, senderID string) []ACPMessage {
 	t.Helper()
-	url := baseURL + "/stream"
-	if senderID != "" {
-		url += "?sender_id=" + senderID
+	target := baseURL + "/stream"
+	if sessionID := httpTestSessionID(baseURL, senderID); sessionID != "" {
+		target += "?session_id=" + url.QueryEscape(sessionID)
 	}
-	resp, err := http.Get(url)
+	request := httpTestRequest(t, http.MethodGet, target, nil)
+	resp, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatalf("GET /stream failed: %v", err)
 	}
@@ -297,7 +393,7 @@ func TestHTTPServer_MethodNotAllowed(t *testing.T) {
 	_, baseURL := startTestHTTPServer(t, nil)
 
 	for _, path := range []string{"/connect", "/send", "/disconnect"} {
-		resp, err := http.Get(baseURL + path)
+		resp, err := http.DefaultClient.Do(httpTestRequest(t, http.MethodGet, baseURL+path, nil))
 		if err != nil {
 			t.Fatalf("GET %s failed: %v", path, err)
 		}
@@ -307,7 +403,7 @@ func TestHTTPServer_MethodNotAllowed(t *testing.T) {
 		resp.Body.Close()
 	}
 
-	resp, err := http.Post(baseURL+"/stream", "application/json", strings.NewReader("{}"))
+	resp, err := http.DefaultClient.Do(httpTestRequest(t, http.MethodPost, baseURL+"/stream", strings.NewReader("{}")))
 	if err != nil {
 		t.Fatalf("POST /stream failed: %v", err)
 	}
@@ -320,7 +416,7 @@ func TestHTTPServer_MethodNotAllowed(t *testing.T) {
 func TestHTTPServer_InvalidJSON(t *testing.T) {
 	_, baseURL := startTestHTTPServer(t, nil)
 
-	resp, err := http.Post(baseURL+"/connect", "application/json", strings.NewReader("not-json"))
+	resp, err := http.DefaultClient.Do(httpTestRequest(t, http.MethodPost, baseURL+"/connect", strings.NewReader("not-json")))
 	if err != nil {
 		t.Fatalf("POST /connect failed: %v", err)
 	}
@@ -446,7 +542,7 @@ func startTestAuthHTTPServer(t *testing.T, handler *CoreHandler) (*HTTPServer, s
 
 	ready := false
 	for i := 0; i < 50; i++ {
-		resp, err := http.Get(baseURL + "/stream")
+		resp, err := http.DefaultClient.Do(httpTestRequest(t, http.MethodGet, baseURL+"/stream", nil))
 		if err == nil {
 			resp.Body.Close()
 			ready = true
@@ -464,18 +560,36 @@ func startTestAuthHTTPServer(t *testing.T, handler *CoreHandler) (*HTTPServer, s
 func authRequest(method, url string, body io.Reader) *http.Request {
 	req, _ := http.NewRequest(method, url, body)
 	req.Header.Set("Authorization", "Bearer "+testAuthToken)
+	req.Header.Set(ACPHTTPProfileHeader, ACPHTTPProfileV1)
 	return req
 }
 
-// postACPAuth sends an authenticated POST with a JSON ACPMessage body.
+// postACPAuth sends an authenticated POST with a private profile envelope.
 func postACPAuth(t *testing.T, baseURL, path string, msg ACPMessage) *http.Response {
 	t.Helper()
-	body, _ := json.Marshal(msg)
+	sessionID := ""
+	if msg.Type != TypeConnect {
+		sessionID = httpTestSessionID(baseURL, msg.SenderID)
+	}
+	envelope := httpEnvelopeFromMessage(sessionID, msg)
+	if msg.Type == TypeConnect {
+		envelope.Version = ACPHTTPProfileV1
+	}
+	body, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatalf("marshal authenticated ACP request: %v", err)
+	}
 	req := authRequest(http.MethodPost, baseURL+path, bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("POST %s failed: %v", path, err)
+	}
+	if path == "/connect" {
+		return rememberHTTPConnectResponse(t, baseURL, msg.SenderID, resp)
+	}
+	if path == "/disconnect" && resp.StatusCode == http.StatusOK {
+		httpTestSessionIDs.Delete(httpTestSessionKey(baseURL, msg.SenderID))
 	}
 	return resp
 }
@@ -556,7 +670,8 @@ func TestHTTPServer_AuthStreamBoundToSubject(t *testing.T) {
 
 	// Drain /stream with a *different* sender_id query param. Because auth
 	// is enabled, sender_id should be overridden to the auth subject.
-	req := authRequest(http.MethodGet, baseURL+"/stream?sender_id=attacker", nil)
+	sessionID := httpTestSessionID(baseURL, testAuthSubject)
+	req := authRequest(http.MethodGet, baseURL+"/stream?session_id="+url.QueryEscape(sessionID), nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET /stream failed: %v", err)
@@ -569,7 +684,7 @@ func TestHTTPServer_AuthStreamBoundToSubject(t *testing.T) {
 	}
 
 	// Verify the "attacker" session was never created.
-	if sess := srv.getSession("attacker"); sess != nil {
+	if sess := testSessionByAlias(srv, "attacker"); sess != nil {
 		t.Error("expected no session for 'attacker' sender_id")
 	}
 }
@@ -589,7 +704,8 @@ func TestHTTPServer_AuthEventsBoundToSubject(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	req := authRequest(http.MethodGet, baseURL+"/events?sender_id=attacker", nil)
+	sessionID := httpTestSessionID(baseURL, testAuthSubject)
+	req := authRequest(http.MethodGet, baseURL+"/events?session_id="+url.QueryEscape(sessionID), nil)
 	req = req.WithContext(ctx)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -605,7 +721,7 @@ func TestHTTPServer_AuthEventsBoundToSubject(t *testing.T) {
 	}
 
 	// Verify the "attacker" session was never created.
-	if sess := srv.getSession("attacker"); sess != nil {
+	if sess := testSessionByAlias(srv, "attacker"); sess != nil {
 		t.Error("expected no session for 'attacker' sender_id")
 	}
 }
@@ -683,7 +799,7 @@ func TestHTTPServer_SessionIDUniqueness(t *testing.T) {
 	var r1 map[string]string
 	json.NewDecoder(resp1.Body).Decode(&r1)
 
-	// Second connect with the same SenderID reuses the existing session.
+	// The same display alias creates a new, independently bound transport session.
 	resp2 := postACP(t, baseURL, "/connect", ACPMessage{
 		Type:     TypeConnect,
 		SenderID: "client-x",
@@ -692,9 +808,11 @@ func TestHTTPServer_SessionIDUniqueness(t *testing.T) {
 	var r2 map[string]string
 	json.NewDecoder(resp2.Body).Decode(&r2)
 
-	// Both should return the same session ID (session reuse).
+	// Each connect creates an opaque session, even when aliases are equal.
 	if r1["session_id"] != r2["session_id"] {
-		t.Errorf("same SenderID should return same session ID: %q vs %q", r1["session_id"], r2["session_id"])
+		// expected: distinct IDs
+	} else {
+		t.Errorf("same display alias must not reuse session ID %q", r1["session_id"])
 	}
 
 	// Different SenderID should get a different session ID.
@@ -710,9 +828,9 @@ func TestHTTPServer_SessionIDUniqueness(t *testing.T) {
 		t.Error("different SenderID should produce different session IDs")
 	}
 
-	// Verify exactly 2 sessions exist.
-	if n := srv.ActiveSessions(); n != 2 {
-		t.Errorf("expected 2 sessions, got %d", n)
+	// Verify all three connects created independent sessions.
+	if n := srv.ActiveSessions(); n != 3 {
+		t.Errorf("expected 3 sessions, got %d", n)
 	}
 }
 
@@ -800,8 +918,9 @@ func TestHTTPServer_GlobalDrainBlockedWithAuth(t *testing.T) {
 		Content:  "hello",
 	}).Body.Close()
 
-	// /stream with auth — sender_id is bound to auth subject, should work.
-	req := authRequest(http.MethodGet, baseURL+"/stream", nil)
+	// /stream with auth must present the session ID created for this principal.
+	sessionID := httpTestSessionID(baseURL, testAuthSubject)
+	req := authRequest(http.MethodGet, baseURL+"/stream?session_id="+url.QueryEscape(sessionID), nil)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatalf("GET /stream with auth failed: %v", err)
@@ -834,7 +953,7 @@ func TestHTTPServer_RateLimit(t *testing.T) {
 
 	// Poll until the server accepts connections.
 	for i := 0; i < 50; i++ {
-		resp, err := http.Get(baseURL + "/stream")
+		resp, err := http.DefaultClient.Do(httpTestRequest(t, http.MethodGet, baseURL+"/stream", nil))
 		if err == nil {
 			resp.Body.Close()
 			break
@@ -851,7 +970,7 @@ func TestHTTPServer_RateLimit(t *testing.T) {
 	// Open a long-lived /events connection to consume the single semaphore slot.
 	eventsCtx, eventsCancel := context.WithCancel(context.Background())
 	defer eventsCancel()
-	eventsReq, _ := http.NewRequest(http.MethodGet, baseURL+"/events?sender_id=rate-test", nil)
+	eventsReq := httpTestRequest(t, http.MethodGet, baseURL+"/events?session_id="+url.QueryEscape(httpTestSessionID(baseURL, "rate-test")), nil)
 	eventsReq = eventsReq.WithContext(eventsCtx)
 
 	eventsEstablished := make(chan struct{})
@@ -900,7 +1019,7 @@ func TestHTTPServer_SessionTTL(t *testing.T) {
 
 	// Poll until the server accepts connections.
 	for i := 0; i < 50; i++ {
-		resp, err := http.Get(baseURL + "/stream")
+		resp, err := http.DefaultClient.Do(httpTestRequest(t, http.MethodGet, baseURL+"/stream", nil))
 		if err == nil {
 			resp.Body.Close()
 			break
@@ -936,7 +1055,8 @@ func postOversizedBody(t *testing.T, baseURL, path string) *http.Response {
 	// Build a valid JSON object whose serialized size exceeds maxRequestBodySize.
 	big := strings.Repeat("x", maxRequestBodySize+1024)
 	body := `{"sender_id":"oversized","content":"` + big + `"}`
-	resp, err := http.Post(baseURL+path, "application/json", strings.NewReader(body))
+	request := httpTestRequest(t, http.MethodPost, baseURL+path, strings.NewReader(body))
+	resp, err := http.DefaultClient.Do(request)
 	if err != nil {
 		t.Fatalf("POST %s failed: %v", path, err)
 	}
@@ -1045,7 +1165,8 @@ func TestACPHTTP_EmptyBodyDisconnect(t *testing.T) {
 	// With an empty body, msg.SenderID defaults to "" so the handler
 	// falls through to the sender_id query param (also absent here).
 	// The key assertion is that the request is accepted (200), not rejected.
-	resp, err := http.Post(baseURL+"/disconnect", "application/json", strings.NewReader(""))
+	sessionID := httpTestSessionID(baseURL, "empty-body-test")
+	resp, err := http.DefaultClient.Do(httpTestRequest(t, http.MethodPost, baseURL+"/disconnect?session_id="+url.QueryEscape(sessionID), strings.NewReader("")))
 	if err != nil {
 		t.Fatalf("POST /disconnect failed: %v", err)
 	}

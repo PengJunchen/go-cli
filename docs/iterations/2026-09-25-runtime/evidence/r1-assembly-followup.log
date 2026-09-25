@@ -1,0 +1,14 @@
+=== RUN   TestOutputGuardRunsBeforeVisibleDelta
+--- PASS: TestOutputGuardRunsBeforeVisibleDelta (0.01s)
+=== RUN   TestOutputGuardBuffersAcrossLengthContinuationsBeforeVisibleDelta
+--- PASS: TestOutputGuardBuffersAcrossLengthContinuationsBeforeVisibleDelta (0.01s)
+=== RUN   TestOutputGuardBudgetCoversMiddlewareContinuationBuffers
+--- PASS: TestOutputGuardBudgetCoversMiddlewareContinuationBuffers (0.01s)
+=== RUN   TestContinuationErrorReturnsFailure
+--- PASS: TestContinuationErrorReturnsFailure (0.01s)
+=== RUN   TestIncompleteToolArgumentsAreNotDispatched
+--- PASS: TestIncompleteToolArgumentsAreNotDispatched (0.00s)
+=== RUN   TestOutputGuardBufferLimitFailsClosedWithoutVisibleDelta
+--- PASS: TestOutputGuardBufferLimitFailsClosedWithoutVisibleDelta (0.01s)
+PASS
+ok  	github.com/pengjunchen/go-cli/internal/cli	0.056s

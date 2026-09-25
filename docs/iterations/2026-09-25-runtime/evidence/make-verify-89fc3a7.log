@@ -1,0 +1,10 @@
+source_head=89fc3a758568879de6b64f618399af4ac403f5dd
+command=make verify
+GOMAXPROCS=2 NO_COLOR=1 TERM=dumb GOFLAGS=-p=2
+gofmt -s -w .
+Note: goimports not found, skipping (install with: go install golang.org/x/tools/cmd/goimports@latest)
+go vet ./...
+internal/approval/prepared_policy.go:210:2: unreachable code
+make: *** [vet] Error 1
+
+exit=2 elapsed_seconds=34.12

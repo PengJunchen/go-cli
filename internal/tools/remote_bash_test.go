@@ -3,6 +3,9 @@ package tools
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -192,10 +195,35 @@ func TestRemoteBashToolExecuteNonZeroExit(t *testing.T) {
 	res, err := tool.Execute(context.Background(), ToolCall{
 		Args: map[string]any{"command": "nonexistent"},
 	})
-	// Non-zero exit code is not an error at the SSH transport level.
-	require.NoError(t, err)
+	require.Error(t, err)
 	require.NotNil(t, res)
 	assert.Equal(t, 127, res.Metadata["exit_code"])
+	assert.True(t, res.IsError)
+}
+
+func TestRemoteBashKnownExit42IsToolError(t *testing.T) {
+	client := &mockSSHClient{
+		execFn: func(_ context.Context, _ string) (string, string, int, error) {
+			return "partial result", "command failed", 42, nil
+		},
+	}
+	tool := NewRemoteBashTool(client)
+
+	result, err := tool.Execute(context.Background(), ToolCall{
+		ID:   "call-remote-exit-42",
+		Name: "remote_bash",
+		Args: map[string]any{"command": "fail-known"},
+	})
+
+	require.Error(t, err)
+	require.NotNil(t, result)
+	assert.True(t, result.IsError)
+	assert.Equal(t, 42, result.Metadata["exit_code"])
+	assert.Equal(t, "complete", result.Metadata["remote_completion"])
+	var unknown interface{ OutcomeUnknown() bool }
+	assert.NotErrorAs(t, err, &unknown, "a terminal nonzero exit is known even though it failed")
+	var pending PendingExecutionError
+	assert.NotErrorAs(t, err, &pending)
 }
 
 func TestRemoteBashToolExecuteTransportError(t *testing.T) {
@@ -344,6 +372,202 @@ func TestRemoteBashToolOutputLimitingWithStderr(t *testing.T) {
 	assert.Contains(t, res.Output, "[output truncated]")
 }
 
+func TestRemoteBashCancellationReportsUnknownPendingExecution(t *testing.T) {
+	client := &mockSSHClient{
+		execFn: func(ctx context.Context, _ string) (string, string, int, error) {
+			<-ctx.Done()
+			return "partial remote output", "", -1, ctx.Err()
+		},
+	}
+	tool := NewRemoteBashTool(client, WithRemoteBashTimeout(50*time.Millisecond))
+
+	result, err := tool.Execute(context.Background(), ToolCall{
+		ID:   "call-remote-cancel",
+		Name: "remote_bash",
+		Args: map[string]any{"command": "mutate-and-lose-response"},
+	})
+
+	var pending PendingExecutionError
+	require.ErrorAs(t, err, &pending)
+	assert.True(t, pending.OutcomeUnknown(), "transport cancellation leaves the remote action receipt unresolved")
+	done := pending.ExecutionDone()
+	require.NotNil(t, done, "remote completion needs its own resource receipt")
+	select {
+	case <-done:
+		t.Fatal("local SSH cancellation cannot prove that the remote command stopped")
+	default:
+	}
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.NotNil(t, result)
+}
+
+func TestRemoteBashDeadlinePromotesUnknownOnlyClientErrorToPending(t *testing.T) {
+	client := &mockSSHClient{
+		execFn: func(ctx context.Context, _ string) (string, string, int, error) {
+			<-ctx.Done()
+			return "", "", -1, newUnknownExecutionError(ctx.Err())
+		},
+	}
+	tool := NewRemoteBashTool(client, WithRemoteBashTimeout(50*time.Millisecond))
+
+	result, err := tool.Execute(context.Background(), ToolCall{
+		ID:   "call-remote-timeout-unknown-only",
+		Name: "remote_bash",
+		Args: map[string]any{"command": "may-continue-after-disconnect"},
+	})
+
+	var pending PendingExecutionError
+	require.ErrorAs(t, err, &pending, "deadline takes precedence because the remote command may still be running")
+	assert.True(t, pending.OutcomeUnknown())
+	select {
+	case <-pending.ExecutionDone():
+		t.Fatal("an unknown-only local result cannot prove remote quiescence after timeout")
+	default:
+	}
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.NotNil(t, result)
+	assert.Equal(t, "unknown", result.Metadata["remote_completion"])
+}
+
+func TestRemoteBashSSHStartFailureIsNotPendingExecution(t *testing.T) {
+	t.Setenv("PATH", t.TempDir())
+	client := NewDefaultSSHClient(SSHConfig{
+		Host:    "example.invalid",
+		KeyPath: "/tmp/fake-key",
+	})
+	tool := NewRemoteBashTool(client, WithRemoteBashTimeout(time.Second))
+
+	result, err := tool.Execute(context.Background(), ToolCall{
+		ID:   "call-remote-start-failure",
+		Name: "remote_bash",
+		Args: map[string]any{"command": "must-not-dispatch"},
+	})
+
+	require.Error(t, err)
+	require.NotNil(t, result)
+	var pending PendingExecutionError
+	assert.NotErrorAs(t, err, &pending, "a local SSH start failure proves the remote command was not dispatched")
+	assert.Equal(t, "not_dispatched", result.Metadata["remote_completion"])
+}
+
+func TestDefaultSSHClientPreCanceledExecutionIsNotDispatched(t *testing.T) {
+	client := NewDefaultSSHClient(SSHConfig{Host: "example.invalid", KeyPath: "/tmp/fake-key"})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := client.ExecBounded(ctx, "must-not-dispatch", 100)
+
+	require.Error(t, err)
+	var notDispatched interface{ ExecutionNotDispatched() bool }
+	require.ErrorAs(t, err, &notDispatched)
+	assert.True(t, notDispatched.ExecutionNotDispatched())
+	var unknown interface{ OutcomeUnknown() bool }
+	require.ErrorAs(t, err, &unknown)
+	assert.False(t, unknown.OutcomeUnknown())
+}
+
+func TestRemoteBashSSHExit255IsUnknownPendingExecution(t *testing.T) {
+	installFakeSSH(t, "exit 255")
+	client := NewDefaultSSHClient(SSHConfig{
+		Host:    "example.invalid",
+		KeyPath: "/tmp/fake-key",
+	})
+	tool := NewRemoteBashTool(client, WithRemoteBashTimeout(time.Second))
+
+	result, err := tool.Execute(context.Background(), ToolCall{
+		ID:   "call-ssh-exit-255",
+		Name: "remote_bash",
+		Args: map[string]any{"command": "may-have-run"},
+	})
+
+	var pending PendingExecutionError
+	require.ErrorAs(t, err, &pending, "SSH exit 255 has no trusted remote command receipt")
+	assert.True(t, pending.OutcomeUnknown())
+	select {
+	case <-pending.ExecutionDone():
+		t.Fatal("a local SSH exit cannot prove remote completion")
+	default:
+	}
+	require.NotNil(t, result)
+	assert.Equal(t, "unknown", result.Metadata["remote_completion"])
+}
+
+func TestRemoteBashSSHPassLocalExitCodesAreUnknownButQuiescent(t *testing.T) {
+	for _, code := range []int{1, 2, 3, 4, 5, 6, 7} {
+		t.Run(strconv.Itoa(code), func(t *testing.T) {
+			installFakeSSHPass(t, code)
+			client := NewDefaultSSHClient(SSHConfig{
+				Host:     "example.invalid",
+				Password: "secret",
+			})
+			tool := NewRemoteBashTool(client, WithRemoteBashTimeout(time.Second))
+
+			result, err := tool.Execute(context.Background(), ToolCall{
+				ID:   "call-sshpass-ambiguous-status",
+				Name: "remote_bash",
+				Args: map[string]any{"command": "may-have-run"},
+			})
+
+			var unknown interface{ OutcomeUnknown() bool }
+			require.ErrorAs(t, err, &unknown, "sshpass local and remote statuses overlap without a separate receipt")
+			assert.True(t, unknown.OutcomeUnknown())
+			var pending PendingExecutionError
+			assert.NotErrorAs(t, err, &pending, "the local sshpass process and its readers have already stopped")
+			require.NotNil(t, result)
+			assert.Equal(t, "unknown", result.Metadata["remote_completion"])
+			assert.Equal(t, processContainmentScope, result.Metadata["local_ssh_process_group_scope"])
+		})
+	}
+}
+
+func installFakeSSHPass(t *testing.T, exitCode int) {
+	t.Helper()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sshpass")
+	script := "#!/bin/sh\nexit " + strconv.Itoa(exitCode) + "\n"
+	require.NoError(t, os.WriteFile(path, []byte(script), 0o755))
+	t.Setenv("PATH", dir)
+}
+
+func TestDefaultSSHClientExecBoundsCapturedOutput(t *testing.T) {
+	installFakeSSH(t, "printf '%1200000s' ''; printf '%1200000s' '' >&2")
+	client := NewDefaultSSHClient(SSHConfig{
+		Host:    "example.invalid",
+		KeyPath: "/tmp/fake-key",
+	})
+
+	stdout, stderr, exitCode, err := client.Exec(context.Background(), "ignored by fake ssh")
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, exitCode)
+	assert.LessOrEqual(t, len(stdout)+len(stderr), defaultBashMaxOutput, "SSH capture must stay within its default combined source-byte budget")
+}
+
+func TestRemoteBashDefaultSSHClientUsesConfiguredOutputBudget(t *testing.T) {
+	installFakeSSH(t, "printf '%1200000s' ''; printf '%1200000s' '' >&2")
+	client := NewDefaultSSHClient(SSHConfig{
+		Host:    "example.invalid",
+		KeyPath: "/tmp/fake-key",
+	})
+	tool := NewRemoteBashTool(client, WithRemoteBashMaxOutput(50))
+
+	result, err := tool.Execute(context.Background(), ToolCall{
+		ID:   "call-default-ssh-bounded-output",
+		Name: "remote_bash",
+		Args: map[string]any{"command": "ignored by fake ssh"},
+	})
+
+	require.NoError(t, err)
+	stdout, ok := result.Metadata["stdout"].(string)
+	require.True(t, ok)
+	stderr, ok := result.Metadata["stderr"].(string)
+	require.True(t, ok)
+	assert.LessOrEqual(t, len(stdout)+len(stderr), 50)
+	assert.Equal(t, true, result.Metadata["truncated"])
+	assert.Contains(t, result.Output, "[output truncated]")
+	assert.Equal(t, processContainmentScope, result.Metadata["local_ssh_process_group_scope"])
+}
+
 // ---------------------------------------------------------------------------
 // Host selection tests
 // ---------------------------------------------------------------------------
@@ -429,6 +653,7 @@ func TestRemoteBashToolContextCancel(t *testing.T) {
 		Args: map[string]any{"command": "echo should not run"},
 	})
 	require.Error(t, err)
+	assert.Empty(t, mc.execCalls, "an already-canceled call must not be sent to the remote client")
 }
 
 // ---------------------------------------------------------------------------

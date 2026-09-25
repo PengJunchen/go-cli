@@ -1,0 +1,44 @@
+# R6 adapter lifecycle handoff review
+
+**Reviewed handoff:** `3ed6f528d5eb270989e535302d7345688383de35`  
+**Source baseline named by the handoff:** `779bad1195516fa15f5cbf3896a59a5b622d4e74`  
+**Companion design:** `r6-entrypoint-design.md`  
+**Review type:** independent design/source-feasibility review only; no product changes or implementation gates were run.
+
+## Verdict
+
+**Needs revision before builder handoff.** The boundaries are generally implementable and substantially preserve R1/R2/R4 ownership, but three acceptance/lifecycle points leave observable gaps or require behavior that the current entrypoint cannot provide. Close the findings below in a docs-only delta. This review does not approve ACP, MCP, or Web implementation, protocol support, or any R6 release claim.
+
+## Findings
+
+1. **ACP event replay can still lose an event silently at the replay/live cutover.** The handoff correctly identifies the existing replay-to-subscribe race at line 22, but the proposed fix at line 32 only requires a bounded ring and gap reporting for an old cursor or observed backpressure. If the endpoint snapshots replay history, then registers its live subscription, an event published between those operations is in neither delivery path and is not necessarily counted as a drop. Specify one atomic cutover: for example, register the per-task live sink and capture the ring/cursor under the same synchronization used by publishers, then replay through that cursor and deduplicate live events. Alternatively, the adapter must detect and report this interval as `event_gap`; it cannot silently omit it. Add a barrier-controlled regression that publishes exactly at the cutover and asserts delivery or an explicit gap. Keep this local to the task/session projection; do not expand the global EventBus.
+
+2. **The real `serve` acceptance asks for a second authenticated principal that the supported CLI cannot configure.** Handoff line 95 asks the actual `serve` subprocess to run a second authenticated principal. In this source snapshot, `serve` calls `HTTPServer.SetAuth` once with one token and the fixed subject `cli` (`internal/cli/serve_cmd.go:125-127, 205-210`; `internal/acp/http_server.go:108-114`). The companion design also says the default is single-subject and makes no multi-tenant claim (`r6-entrypoint-design.md:21`). Revise the subprocess acceptance to exercise multiple opaque sessions and concurrent tasks under that configured subject, then assert cross-session/task reads are denied and forged or unauthenticated identity fields cannot select another record. If cross-principal routing logic needs coverage, use an isolated injected-auth-principal unit seam; do not add multi-principal configuration just to satisfy this process test.
+
+3. **stdio cancellation defines the unclosable-reader case but leaves a blocking caller-owned writer unbounded.** The handoff at line 43 requires joining read/write workers when resources are owned, and gives a bounded pending result for a generic unclosable reader. The existing `StdioAdapter` accepts any `io.Writer`; `SendMessage` writes synchronously through `writeMessage`, while `Disconnect` starts an asynchronous disconnect-frame writer (`internal/acp/stdio_adapter.go:90-128,131-197`). A blocked write to a caller-owned writer has no context cancellation or guaranteed `Close`, so it cannot be treated as joined merely because disconnect returned on a deadline. State the symmetric rule: only claim quiescence after the write returns or an explicitly owned closer/process interrupts it and the worker is joined; otherwise return boundedly with tracked pending/quarantined status. Add a blocked-writer fixture as well as the existing silent-reader fixture, and do not promise arbitrary `io.Writer` cancellation.
+
+## Reviewed boundaries that are sound
+
+- ACP is accurately limited to the private `go-cli-acp-json/1` JSON profile. It does not claim official ACP interoperability or gRPC. Treating sender/tool/project labels as non-authority, authenticating before lookup, minting opaque IDs, gating remote approval on the exact R4 prepared occurrence, and refusing remote `always_allow` are consistent with the companion design and current source shape.
+- ACP stdio is described as the existing library client over caller-owned I/O, not an inbound process or a new CLI command. The 1 MiB frame bound, unified write serialization, and explicit ownership distinction are feasible additions.
+- MCP is pinned to the versioned `2025-06-18` Streamable HTTP profile, with legacy HTTP+SSE fallback excluded. Its POST `Accept`, optional session-ID propagation, subsequent protocol-version header, GET `Accept`/SSE-or-405 behavior, accepted-notification `202`, SSE event framing, and no-replay rule for uncertain `tools/call` match the versioned transport requirements. The separation between explicit local cancellation and unexpected stream disconnection is also correct; a cancel notification and session DELETE are not proof that a remote action stopped. Unsupported OAuth remains an explicit failure rather than a credential fallback. See the [2025-06-18 transport spec](https://modelcontextprotocol.io/specification/2025-06-18/basic/transports), [cancellation spec](https://modelcontextprotocol.io/specification/2025-06-18/basic/utilities/cancellation), and [authorization spec](https://modelcontextprotocol.io/specification/2025-06-18/basic/authorization).
+- Web remains unavailable: returning 503 for placeholder chat/stream routes and rejecting unauthenticated non-loopback binds does not imply a Web Agent journey.
+- The handoff correctly keeps run cancellation/quiescence with R1, persistence and durable claims with R2, and tool identity/effects/approval with R4. It marks remote approval and atomic MCP definition replacement as dependent gates, keeps the authenticated Web journey deferred, and requires actual process/local-peer acceptance instead of presenting helper tests as end-to-end evidence.
+
+## Non-blocking status/compatibility note
+
+The R2 dependency row in the companion `r6-entrypoint-design.md:99` describes `r2-contract.md` as awaiting joint review, while that same snapshot's `r2-contract.md:3` says the design is approved and implementation/restart-safety acceptance remain incomplete. Update the status wording to distinguish approved design from incomplete implementation. Also, the 2025-06-18 transport allows a server to answer session `DELETE` with 405; orderly local teardown should tolerate that response without claiming the remote session or action was stopped.
+
+No tests were run because this was a docs/source-feasibility review. The stated package races, peer fixtures, and process journeys remain implementation acceptance gates.
+
+## Fixed follow-up review
+
+**Reviewed follow-up:** `14ce904bb9c018f4024d12f1313ac83c8a39438f` (docs-only delta on `3ed6f528d5eb270989e535302d7345688383de35`).
+
+**Verdict:** The three findings above are closed. The adapter handoff is approved for bounded implementation slices. The source-local atomic replay/live cutover and its bounded gap accounting can start independently; dispatch ownership, durable claims, remote approval, and registry replacement remain gated on their corresponding R1/R2/R4/R6-DES-01 seams. This is not implementation or release approval.
+
+- The ACP replay/live cutover is now linearized with `PublishEvent` under the shared publication lock: one operation snapshots the ring/cursor and registers the bounded subscriber, and publication sends the same identified `EventEntry` to ring and subscriber. The required barrier test asserts each event is delivered exactly once or accounted for by explicit transport `event_gap`.
+- The real `serve` journey now matches the one-token/one-subject source contract. It exercises multiple sessions/tasks under that subject and rejects forged identity fields and unauthenticated requests without requiring new multi-principal configuration.
+- stdio now covers blocked caller-owned readers and writers, records bounded `pending/quarantined` state, treats a pending write as unknown delivery without replay, and only reports quiescence after I/O returns or an owned closer/process interrupts and joins the worker. The integration fixture also releases the blocked peer before asserting quiescence.
+
+The companion `r6-entrypoint-design.md:99` still has the stale “awaiting joint review” description of R2; correct it to “design approved, implementation/restart-safety acceptance incomplete.” The adapter handoff's own R2 statement is accurate: until R2 is wired, adapters may claim ephemeral completion only. This documentation correction does not block the bounded ACP/stdio implementation handoff. The implementation races, real `serve` process, stdio peer, and MCP peer gates remain unrun by this design review.

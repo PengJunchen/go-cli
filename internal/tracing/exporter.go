@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 )
@@ -17,8 +18,9 @@ import (
 // JSONLTraceExporter (file) and StdoutTraceExporter (debug output). Users may
 // implement this interface to export to OpenTelemetry/Kafka etc.
 type TraceExporter interface {
-	// ExportSpan exports a completed span. It should be non-blocking and
-	// should guarantee at-least-once delivery.
+	// ExportSpan submits a completed span. Delivery guarantees are implementation
+	// specific; a nil result does not imply delivery or durable storage. Async
+	// implementations may report downstream failures from Shutdown.
 	ExportSpan(ctx context.Context, span TraceSpan) error
 	// Shutdown closes the exporter and flushes all buffered data.
 	// No new spans should be accepted after Shutdown is called.
@@ -92,16 +94,56 @@ const (
 	RedactionLevelFull RedactionLevel = "full"
 	// RedactionLevelRedact masks sensitive attributes (default).
 	RedactionLevelRedact RedactionLevel = "redact"
-	// RedactionLevelOff strips ALL attributes from exported spans.
+	// RedactionLevelOff strips ALL attributes and unstructured status messages.
 	RedactionLevelOff RedactionLevel = "off"
 )
 
 // redactedValue is the placeholder used for masked sensitive attributes.
 const redactedValue = "***REDACTED***"
 
-// RedactingExporter wraps a TraceExporter and masks or strips sensitive
-// attributes before delegating to the inner exporter. It is non-destructive:
-// the original span is never modified.
+// isSensitiveAttributeKey identifies unbounded or user-controlled values that
+// should be hidden from default telemetry even when a producer forgot to mark
+// the attribute explicitly.
+// This static set is classification data; it does not dispatch commands.
+var sensitiveAttributeKeys = map[string]struct{}{
+	"prompt": {}, "user_message": {}, "message": {}, "msg": {}, "content": {}, "args": {}, "arguments": {},
+	"tool_args": {}, "tool_arguments": {}, "tool_call": {}, "tool_calls": {}, "input": {}, "params": {},
+	"parameters": {}, "query": {}, "payload": {}, "body": {}, "request_body": {}, "response_body": {},
+	"cache_key": {}, "reason": {}, "summary": {}, "output": {}, "command": {}, "title": {}, "token": {},
+	"secret": {}, "password": {}, "api_key": {}, "authorization": {}, "cookie": {}, "private_key": {}, "credential": {},
+	"err": {}, "error": {}, "cause": {}, "original_error": {},
+}
+
+func isSensitiveAttributeKey(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	key = strings.NewReplacer(".", "_", "-", "_", " ", "_").Replace(key)
+
+	if _, ok := sensitiveAttributeKeys[key]; ok {
+		return true
+	}
+	return strings.HasSuffix(key, "_args") || strings.HasSuffix(key, "_arguments") ||
+		strings.HasSuffix(key, "_prompt") || strings.HasSuffix(key, "_message") ||
+		strings.HasSuffix(key, "_content") || strings.HasSuffix(key, "_payload") ||
+		strings.HasSuffix(key, "_token") || strings.HasSuffix(key, "_secret") ||
+		strings.HasSuffix(key, "_password") || strings.HasSuffix(key, "_api_key") ||
+		strings.HasSuffix(key, "_authorization") || strings.HasSuffix(key, "_credential")
+}
+
+func redactedValueWithLength(value any) string {
+	if text, ok := value.(string); ok {
+		return fmt.Sprintf("%s (bytes=%d)", redactedValue, len(text))
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return redactedValue
+	}
+	return fmt.Sprintf("%s (bytes=%d)", redactedValue, len(encoded))
+}
+
+// RedactingExporter wraps a TraceExporter and masks or strips explicitly
+// sensitive and known user-input attributes, plus unstructured status messages,
+// before delegating to the inner exporter. It is non-destructive: the original
+// span is never modified.
 type RedactingExporter struct {
 	inner TraceExporter
 	level RedactionLevel
@@ -110,7 +152,8 @@ type RedactingExporter struct {
 var _ TraceExporter = (*RedactingExporter)(nil)
 
 // NewRedactingExporter wraps inner with a redaction layer. When level is
-// empty, RedactionLevelRedact is used.
+// empty, RedactionLevelRedact is used. The redact policy masks attributes
+// marked sensitive and common prompt/tool-input fields by key.
 func NewRedactingExporter(inner TraceExporter, level RedactionLevel) *RedactingExporter {
 	return &RedactingExporter{inner: inner, level: level}
 }
@@ -127,21 +170,27 @@ func (e *RedactingExporter) ExportSpan(ctx context.Context, span TraceSpan) erro
 	case RedactionLevelOff:
 		// Strip all attributes.
 		data.Attributes = nil
+		data.StatusMessage = ""
 		for i := range data.Events {
 			data.Events[i].Attributes = nil
 		}
 	case RedactionLevelFull:
 		// Export as-is, no modification.
 	default: // RedactionLevelRedact or empty
+		if data.StatusMessage != "" {
+			data.StatusMessage = redactedValueWithLength(data.StatusMessage)
+		}
 		for i := range data.Attributes {
-			if data.Attributes[i].Sensitive {
-				data.Attributes[i].Value = redactedValue
+			if data.Attributes[i].Sensitive || isSensitiveAttributeKey(data.Attributes[i].Key) {
+				data.Attributes[i].Value = redactedValueWithLength(data.Attributes[i].Value)
+				data.Attributes[i].Sensitive = true
 			}
 		}
 		for i := range data.Events {
 			for j := range data.Events[i].Attributes {
-				if data.Events[i].Attributes[j].Sensitive {
-					data.Events[i].Attributes[j].Value = redactedValue
+				if data.Events[i].Attributes[j].Sensitive || isSensitiveAttributeKey(data.Events[i].Attributes[j].Key) {
+					data.Events[i].Attributes[j].Value = redactedValueWithLength(data.Events[i].Attributes[j].Value)
+					data.Events[i].Attributes[j].Sensitive = true
 				}
 			}
 		}

@@ -39,12 +39,14 @@ func TestTeaApprovalCallback_ImplementsInterface(t *testing.T) {
 func TestTeaApprovalCallback_SendsRequest(t *testing.T) {
 	ch := make(chan tui.ApprovalRequest, 1)
 	cb := NewTeaApprovalCallback(ch)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
 	args := map[string]any{"path": "/tmp/test", "mode": "w"}
 
 	done := make(chan requestResult, 1)
 	go func() {
-		res, err := cb.RequestApproval(context.Background(), "write", args)
+		res, err := cb.RequestApproval(ctx, "write", args)
 		done <- requestResult{res, err}
 	}()
 
@@ -54,6 +56,7 @@ func TestTeaApprovalCallback_SendsRequest(t *testing.T) {
 		assert.Equal(t, "write", req.ToolName)
 		assert.Equal(t, args, req.Args)
 		assert.NotNil(t, req.ResponseCh, "ResponseCh must be initialized")
+		assert.Same(t, ctx, req.Context, "the UI must observe cancellation of the approval waiter")
 		// Unblock the goroutine by replying with Allow.
 		req.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalAllow}
 	case <-time.After(time.Second):
@@ -67,6 +70,17 @@ func TestTeaApprovalCallback_SendsRequest(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("RequestApproval did not return")
 	}
+}
+
+func TestTeaApprovalCallback_DeniesAlwaysAllowResponseAfterCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	// Exercise the response-mapping path after the UI response was selected but
+	// the request context has become canceled before the callback returns it.
+	decision, err := approvalResultFromResponse(ctx, tui.ApprovalResponse{Decision: tui.ApprovalAlwaysAllow})
+	assert.Equal(t, ApprovalDeny, decision, "a canceled approval must not become an always-allow decision")
+	require.ErrorIs(t, err, context.Canceled)
 }
 
 // TestTeaApprovalCallback_ReceivesAllow verifies that when the user sends an

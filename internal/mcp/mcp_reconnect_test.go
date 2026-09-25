@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"sync/atomic"
@@ -56,8 +57,8 @@ func TestMCPNoReconnectWhenConnected(t *testing.T) {
 }
 
 // TestMCPReconnectMaxAttemptsExhausted verifies that when the connection is
-// lost, the adapter attempts to reconnect up to maxReconnect times and then
-// returns the error.
+// lost during a read-only request, the adapter attempts to reconnect up to
+// maxReconnect times and then returns the error.
 func TestMCPReconnectMaxAttemptsExhausted(t *testing.T) {
 	t.Parallel()
 
@@ -74,8 +75,8 @@ func TestMCPReconnectMaxAttemptsExhausted(t *testing.T) {
 	// Limit reconnect attempts to 1 to keep the test fast (1s backoff).
 	adapter.adapterCore.maxReconnect = 1
 
-	_, err := adapter.CallTool(context.Background(), "echo", nil)
-	require.Error(t, err, "CallTool must fail when the connection is lost")
+	_, err := adapter.ListTools(context.Background())
+	require.Error(t, err, "ListTools must fail when the connection is lost")
 
 	// Exactly 1 reconnection attempt should have been made.
 	assert.Equal(t, 1, adapter.adapterCore.reconnectAttempts,
@@ -118,14 +119,15 @@ func TestMCPReconnectRPCErrorNoReconnect(t *testing.T) {
 	_, err := adapter.CallTool(context.Background(), "echo", nil)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "rpc error")
+	assert.NotContains(t, err.Error(), "outcome unknown", "a matching valid JSON-RPC error is a definite response")
 
 	// RPC errors must not trigger reconnection.
 	assert.Equal(t, 0, adapter.adapterCore.reconnectAttempts,
 		"RPC errors must not trigger reconnection")
 }
 
-// TestMCPReconnectSucceeds verifies that when the connection drops and a
-// reconnect re-establishes it, the retried call succeeds.
+// TestMCPReconnectSucceeds verifies that a read-only request can be retried
+// after the connection drops and reconnects.
 func TestMCPReconnectSucceeds(t *testing.T) {
 	t.Parallel()
 
@@ -149,7 +151,7 @@ func TestMCPReconnectSucceeds(t *testing.T) {
 			if json.Unmarshal(sc.Bytes(), &req) != nil {
 				continue
 			}
-			if firstCall.Load() && req.Method == "tools/call" {
+			if firstCall.Load() && req.Method == "tools/list" {
 				firstCall.Store(false)
 				// Close the connection to simulate a drop.
 				closeConn(serverConn1)
@@ -185,7 +187,7 @@ func TestMCPReconnectSucceeds(t *testing.T) {
 			frame := map[string]any{
 				"jsonrpc": "2.0",
 				"id":      req.ID,
-				"result":  map[string]any{"content": "recovered"},
+				"result":  map[string]any{"tools": []any{}},
 			}
 			b, _ := json.Marshal(frame)
 			fmt.Fprintf(serverConn2, "%s\n", b)
@@ -209,10 +211,127 @@ func TestMCPReconnectSucceeds(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	result, err := adapter.CallTool(ctx, "echo", nil)
-	require.NoError(t, err, "CallTool should succeed after reconnection")
-	assert.Equal(t, "recovered", result.Content)
+	result, err := adapter.ListTools(ctx)
+	require.NoError(t, err, "ListTools should succeed after reconnection")
+	assert.Empty(t, result)
 	assert.GreaterOrEqual(t, adapter.adapterCore.reconnectAttempts, 1)
+}
+
+func TestMCPCallToolLostResponseIsUnknownAndNotRetried(t *testing.T) {
+	t.Parallel()
+
+	serverConn1, clientConn1 := net.Pipe()
+	var sideEffects atomic.Int32
+	callExecuted := make(chan struct{}, 1)
+	go func() {
+		sc := bufio.NewScanner(serverConn1)
+		for sc.Scan() {
+			var req struct {
+				Method string `json:"method"`
+			}
+			if json.Unmarshal(sc.Bytes(), &req) != nil || req.Method != "tools/call" {
+				continue
+			}
+			sideEffects.Add(1)
+			callExecuted <- struct{}{}
+			closeConn(serverConn1) // remote execution completed, response was lost
+			return
+		}
+	}()
+
+	conn1 := NewJSONRPCLineTransport(clientConn1, clientConn1, clientConn1.Close)
+	adapter := NewOfficialSDKAdapter(MCPServerConfig{Name: "srv", Transport: MCPTransportStdio}, WithConnection(conn1), WithoutInitialize())
+	require.NoError(t, adapter.Connect(context.Background()))
+	adapter.adapterCore.maxReconnect = 1
+
+	serverConn2, clientConn2 := net.Pipe()
+	defer closeConn(serverConn2)
+	go func() {
+		sc := bufio.NewScanner(serverConn2)
+		for sc.Scan() {
+			var req struct {
+				ID     int64  `json:"id"`
+				Method string `json:"method"`
+			}
+			if json.Unmarshal(sc.Bytes(), &req) != nil || req.Method != "tools/call" {
+				continue
+			}
+			sideEffects.Add(1)
+			frame := map[string]any{
+				"jsonrpc": "2.0",
+				"id":      req.ID,
+				"result":  map[string]any{"content": "retried"},
+			}
+			b, _ := json.Marshal(frame)
+			if _, err := fmt.Fprintf(serverConn2, "%s\n", b); err != nil {
+				return
+			}
+		}
+	}()
+
+	go func() {
+		<-callExecuted
+		adapter.adapterCore.mu.Lock()
+		adapter.adapterCore.conn = NewJSONRPCLineTransport(clientConn2, clientConn2, clientConn2.Close)
+		adapter.adapterCore.connected = false
+		adapter.adapterCore.mu.Unlock()
+	}()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	result, err := adapter.CallTool(ctx, "write", map[string]any{"path": "file"})
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "outcome unknown")
+	assert.Contains(t, err.Error(), "may have executed")
+	assertToolOutcomeUnknown(t, err)
+	assert.EqualValues(t, 1, sideEffects.Load(), "a lost response must not trigger a second tool execution")
+}
+
+func TestMCPCallToolMalformedMatchingResponseIsUnknown(t *testing.T) {
+	t.Parallel()
+
+	serverConn, clientConn := net.Pipe()
+	var sideEffects atomic.Int32
+	go func() {
+		defer closeConn(serverConn)
+		sc := bufio.NewScanner(serverConn)
+		for sc.Scan() {
+			var req struct {
+				ID     int64  `json:"id"`
+				Method string `json:"method"`
+			}
+			if json.Unmarshal(sc.Bytes(), &req) != nil || req.Method != "tools/call" {
+				continue
+			}
+			sideEffects.Add(1)
+			// The response refers to this call but is not a valid JSON-RPC 2.0
+			// envelope, so it cannot establish whether the tool completed.
+			frame := map[string]any{
+				"jsonrpc": "1.0",
+				"id":      req.ID,
+				"result":  map[string]any{"content": "maybe done"},
+			}
+			b, _ := json.Marshal(frame)
+			_, _ = fmt.Fprintf(serverConn, "%s\n", b)
+			return
+		}
+	}()
+
+	adapter := NewOfficialSDKAdapter(
+		MCPServerConfig{Name: "srv", Transport: MCPTransportStdio},
+		WithConnection(NewJSONRPCLineTransport(clientConn, clientConn, clientConn.Close)),
+		WithoutInitialize(),
+	)
+	require.NoError(t, adapter.Connect(context.Background()))
+
+	result, err := adapter.CallTool(context.Background(), "write", map[string]any{"path": "file"})
+	require.Error(t, err)
+	assert.Nil(t, result)
+	assert.Contains(t, err.Error(), "outcome unknown")
+	assert.Contains(t, err.Error(), "may have executed")
+	assertToolOutcomeUnknown(t, err)
+	assert.EqualValues(t, 1, sideEffects.Load())
 }
 
 // TestReconnectBackoff verifies the exponential backoff schedule.
@@ -238,8 +357,32 @@ func TestReconnectBackoff(t *testing.T) {
 func TestIsConnectionError(t *testing.T) {
 	t.Parallel()
 
-	assert.True(t, isConnectionError(fmt.Errorf("mcp: write request: broken pipe")))
-	assert.True(t, isConnectionError(fmt.Errorf("mcp: read response: EOF")))
+	assert.True(t, isConnectionError(newRequestBoundaryError(fmt.Errorf("mcp: write request: broken pipe"), true, true)))
+	assert.True(t, isConnectionError(newRequestBoundaryError(fmt.Errorf("mcp: read response: EOF"), true, true)))
+	assert.False(t, isConnectionError(fmt.Errorf("mcp: read response: EOF")), "message text alone is not a retry signal")
 	assert.False(t, isConnectionError(fmt.Errorf("mcp: rpc error: tool not found")))
+	assert.False(t, isConnectionError(newRequestBoundaryError(fmt.Errorf("mcp: invalid JSON-RPC response"), true, false)))
 	assert.False(t, isConnectionError(nil))
+}
+
+func TestToolCallOutcomeErrorDoesNotMarkPreDispatchFailuresUnknown(t *testing.T) {
+	t.Parallel()
+
+	preDispatch := fmt.Errorf("mcp: endpoint must remain on configured origin")
+	assert.NotContains(t, toolCallOutcomeError("write", preDispatch).Error(), "outcome unknown")
+
+	cause := errors.New("connection reset")
+	dispatched := newRequestBoundaryError(cause, true, false)
+	unknownErr := toolCallOutcomeError("write", dispatched)
+	assert.Contains(t, unknownErr.Error(), "outcome unknown")
+	assert.ErrorIs(t, unknownErr, cause, "unknown wrappers preserve the underlying error chain")
+	assertToolOutcomeUnknown(t, unknownErr)
+}
+
+func assertToolOutcomeUnknown(t *testing.T, err error) {
+	t.Helper()
+	var outcome OutcomeUnknown
+	if assert.ErrorAs(t, err, &outcome) {
+		assert.True(t, outcome.OutcomeUnknown())
+	}
 }

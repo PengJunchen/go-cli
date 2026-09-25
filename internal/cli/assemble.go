@@ -6,9 +6,12 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
+	"net/url"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -40,6 +43,31 @@ import (
 // defaultMaxTokens is the default compaction token budget used when no
 // explicit value is provided via AssembleOption.
 const defaultMaxTokens = 8000
+
+// ErrPreparedPostToolUseHookUnsupported identifies shell hooks that cannot
+// safely run in the prepared tool-dispatch pipeline yet.
+var ErrPreparedPostToolUseHookUnsupported = errors.New("cli: PostToolUse shell hooks are unsupported by prepared execution")
+
+// UnsupportedPostToolUseHookError identifies the configured hook that cannot
+// run in the prepared execution pipeline. It deliberately omits the command
+// contents so user-facing errors can identify the configuration location
+// without disclosing executable text.
+type UnsupportedPostToolUseHookError struct {
+	Path  string
+	Index int
+}
+
+func (e *UnsupportedPostToolUseHookError) Error() string {
+	return fmt.Sprintf("%v: %s hook %d", ErrPreparedPostToolUseHookUnsupported, e.Path, e.Index)
+}
+
+func (e *UnsupportedPostToolUseHookError) Unwrap() error {
+	return ErrPreparedPostToolUseHookUnsupported
+}
+
+// cliDefaultOpenAICompatibleBaseURL mirrors EinoProvider's default so small
+// model credential reuse can compare origins when provider.base_url is empty.
+const cliDefaultOpenAICompatibleBaseURL = "https://api.openai.com/v1"
 
 // CoreRuntime holds the primary agent execution components.
 type CoreRuntime struct {
@@ -225,6 +253,37 @@ type AgentAssembly struct {
 	// before, they are also registered here for dependency-injection use.
 	Registry *core.DefaultRegistry
 	Cleanup  func()
+
+	closeOwner   *assemblyCloseOwner
+	mcpResources *assemblyMCPResources
+}
+
+// Close stops admitting new runs and waits for the Assembly-owned resources to
+// finish. The caller context bounds only this wait; a timed-out close owner
+// retains the active resources and continues its serial shutdown.
+func (a *AgentAssembly) Close(ctx context.Context) error {
+	if a == nil || a.closeOwner == nil {
+		return nil
+	}
+	return a.closeOwner.Close(ctx)
+}
+
+func (a *AgentAssembly) setInteractiveCloseHooks(
+	stop func(),
+	beforeSessionClose func(context.Context) error,
+	afterMemoryJoin func(),
+) error {
+	if a == nil || a.closeOwner == nil {
+		return ErrAssemblyRunAdmissionUnavailable
+	}
+	return a.closeOwner.setInteractiveCloseHooks(stop, beforeSessionClose, afterMemoryJoin)
+}
+
+func (a *AgentAssembly) setHTTPServer(server *acp.HTTPServer) error {
+	if a == nil || a.closeOwner == nil {
+		return nil
+	}
+	return a.closeOwner.setHTTPServer(server)
 }
 
 // AssembleOption configures AssembleAgent behavior.
@@ -313,31 +372,40 @@ func AssembleAgent(
 	opts ...AssembleOption,
 ) (*AgentAssembly, error) {
 	s, thinkingLevel := newAssembleState(ctx, rc, providerName, modelName, out, opts...)
+	s.loadConfiguredShellHooks()
+	if len(s.unsupportedPostToolUseHooks) > 0 {
+		hook := s.unsupportedPostToolUseHooks[0]
+		return nil, errors.Join(&UnsupportedPostToolUseHookError{Path: hook.Path, Index: hook.Index}, s.runCleanup())
+	}
 
 	// Assemble subsystems in dependency order.
 	if err := s.assembleModel(); err != nil {
-		s.runCleanup()
-		return nil, err
+		return nil, errors.Join(err, s.runCleanup())
 	}
 	s.assembleTracing()
 	if err := s.assembleTools(); err != nil {
-		s.runCleanup()
-		return nil, err
+		return nil, errors.Join(err, s.runCleanup())
 	}
-	s.assembleExtensions()
-	s.assembleApproval()
-	s.assembleProductionResilience()
+	if err := s.assembleExtensions(); err != nil {
+		return nil, errors.Join(err, s.runCleanup())
+	}
+	if err := s.assembleApproval(); err != nil {
+		return nil, errors.Join(err, s.runCleanup())
+	}
+	if err := s.assembleProductionResilience(); err != nil {
+		return nil, errors.Join(err, s.runCleanup())
+	}
 	s.assembleOutputGuards()
 	s.assembleSubAgent()
-	s.assembleExtraTools()
+	if err := s.assembleExtraTools(); err != nil {
+		return nil, errors.Join(err, s.runCleanup())
+	}
 	s.assembleLoopAgent()
 	s.assembleMiddleware()
 	if err := s.assembleCompactor(); err != nil {
-		s.runCleanup()
-		return nil, err
+		return nil, errors.Join(err, s.runCleanup())
 	}
 	s.assembleSession()
-	s.appendFinalCleanup()
 
 	// Resume history from session store if requested.
 	var restoredHistory []core.AgentMessage
@@ -356,7 +424,7 @@ func AssembleAgent(
 		agentOpts = append(agentOpts, core.WithHistory(restoredHistory))
 	}
 	agent := core.NewAgentImpl(s.ac.agentName, s.loop, agentOpts...)
-	h := core.NewHarnessImpl(agent, core.WithEventBuffer(256), core.WithHarnessTracer(s.tracer), core.WithRunSlotGuard(s.runSlotGuard), core.WithHarnessEventBus(s.eventBus))
+	h := core.NewHarnessImpl(agent, core.WithEventBuffer(256), core.WithHarnessTracer(s.tracer), core.WithRunSlotGuard(s.runSlotGuard), core.WithHarnessEventBus(s.eventBus), core.WithRunLifetimeContext(s.lifetimeCtx))
 
 	// Build TurnRunner wired with the shared steering channel and agent.
 	turnRunner := core.NewEinoTurnRunner(s.loop)
@@ -365,6 +433,7 @@ func AssembleAgent(
 	turnRunner.SetAgent(agent)
 	turnRunner.SetHookChain(s.hookChain)
 	turnRunner.SetRunSlotGuard(s.runSlotGuard)
+	turnRunner.SetRunLifetimeContext(s.lifetimeCtx)
 	s.reg.RegisterTurnRunner(turnRunner)
 
 	// Emit assemble span for observability.
@@ -450,8 +519,10 @@ func AssembleAgent(
 			LSPClient:          s.lspClientField,
 			LSPWorkspaceRoot:   s.lspWorkspaceRoot,
 		},
-		Registry: s.reg,
-		Cleanup:  s.runCleanup,
+		Registry:     s.reg,
+		Cleanup:      func() { _ = s.runCleanup() },
+		closeOwner:   s.closeOwner,
+		mcpResources: s.mcpResources,
 	}, nil
 }
 
@@ -464,6 +535,9 @@ func newAssembleState(
 	out io.Writer,
 	opts ...AssembleOption,
 ) (*assembleState, llm.ThinkingLevel) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	ac := assembleConfig{
 		maxTokens:     0, // 0 means "not set"; resolved below
 		enableSession: false,
@@ -493,6 +567,7 @@ func newAssembleState(
 
 	logger := slog.Default()
 	reg := core.NewRegistry().(*core.DefaultRegistry) //nolint:errcheck
+	gitCwd := resolveGitCwd(rc)
 
 	// Resolve session ID: config.Session.ID takes priority, fallback to agentName.
 	sessionID := ac.agentName
@@ -500,20 +575,42 @@ func newAssembleState(
 		sessionID = rc.Session.ID
 	}
 
+	lifetimeCtx, lifetimeCancel := context.WithCancel(ctx)
 	s := &assembleState{
-		ctx:           ctx,
-		rc:            rc,
-		ac:            ac,
-		logger:        logger,
-		reg:           reg,
-		sessionID:     sessionID,
-		providerName:  providerName,
-		modelName:     modelName,
-		out:           out,
-		thinkingLevel: thinkingLevel,
-		eventBus:      core.NewMemoryEventBus(),
+		ctx:            lifetimeCtx,
+		rc:             rc,
+		ac:             ac,
+		logger:         logger,
+		reg:            reg,
+		sessionID:      sessionID,
+		providerName:   providerName,
+		modelName:      modelName,
+		out:            out,
+		thinkingLevel:  thinkingLevel,
+		eventBus:       core.NewMemoryEventBus(),
+		gitCwd:         gitCwd,
+		lifetimeCtx:    lifetimeCtx,
+		lifetimeCancel: lifetimeCancel,
+		mcpResources:   &assemblyMCPResources{},
 	}
+	s.closeOwner = newAssemblyCloseOwner(
+		func() core.RunSlotGuard { return s.runSlotGuard },
+		s.lifetimeCancel,
+		s.requestStopSources,
+		s.closeResources,
+	)
 	return s, thinkingLevel
+}
+
+func resolveGitCwd(rc *config.Config) string {
+	gitCwd, err := os.Getwd()
+	if err != nil {
+		gitCwd = "."
+	}
+	if rc != nil && rc.Git.WorkDir != "" {
+		gitCwd = rc.Git.WorkDir
+	}
+	return gitCwd
 }
 
 // assembleState holds intermediate assembly state shared across assembleXXX
@@ -534,20 +631,21 @@ type assembleState struct {
 	// Model section
 	model         llm.BaseChatModel
 	modelInfo     llm.ModelInfo
+	modelResolver *cliModelResolver
 	modelCycler   *llm.ModelCycler
 	modelRegistry llm.ModelRegistry
 	smallModel    llm.BaseChatModel
 	modelSelector *llm.DefaultModelSelector
 
 	// Tracing section
-	tracer        *tracing.Tracer
-	traceExporter tracing.TraceExporter
+	tracer *tracing.Tracer
 
 	// Tools section
 	tr               tools.ToolRegistry
 	underlyingReg    tools.ToolRegistry
 	fileTracker      *tools.FileTracker
 	diffGen          tools.DiffGenerator
+	mutationQueue    tools.FileMutationQueue
 	gitTool          tools.GitTool
 	gitCwd           string
 	worktreeMgr      *tools.WorktreeManager
@@ -558,10 +656,13 @@ type assembleState struct {
 	skillInfos       []core.SkillInfo
 
 	// Extensions section
-	extHooks      []core.Hook
-	extMiddleware []core.Middleware
-	hookChain     *core.HookChain
-	hookMgr       *core.HookManager
+	extHooks                    []core.Hook
+	extMiddleware               []core.Middleware
+	hookChain                   *core.HookChain
+	hookMgr                     *core.HookManager
+	shellHooksLoaded            bool
+	shellHooks                  []core.HookSystem
+	unsupportedPostToolUseHooks []UnsupportedPostToolUseHookError
 
 	// Approval section
 	modeResolver approval.PermissionModeResolver
@@ -615,51 +716,38 @@ type assembleState struct {
 	sessionStore *session.JSONLSessionStore
 
 	// Cleanup
-	cleanupList []func()
+	cleanupList []func(context.Context) error
+
+	lifetimeCtx    context.Context
+	lifetimeCancel context.CancelFunc
+	closeOwner     *assemblyCloseOwner
+	mcpResources   *assemblyMCPResources
+	pluginManagers []*extension.PluginManager
+
+	primaryModelCleanup func()
+	modelDisposer       func() error
+	smallModelCleanup   func()
+	worktreeStopSignal  func()
+	acpConnectErr       error
 }
 
-// runCleanup executes all registered cleanup functions in reverse order (LIFO).
-func (s *assembleState) runCleanup() {
-	for i := len(s.cleanupList) - 1; i >= 0; i-- {
-		s.cleanupList[i]()
+// runCleanup starts or joins the same close owner used by a returned Assembly.
+func (s *assembleState) runCleanup() error {
+	if s.closeOwner == nil {
+		return nil
 	}
-}
-
-// appendFinalCleanup adds the terminal cleanup closure for ACP client,
-// session store, memory store, and trace exporter. These run first during
-// LIFO cleanup because they are appended after all subsystem cleanups.
-func (s *assembleState) appendFinalCleanup() {
-	s.cleanupList = append(s.cleanupList, func() {
-		StopHotReloaders()
-		if s.eventBus != nil {
-			s.eventBus.Close()
-		}
-		if s.acpAdapter != nil {
-			s.acpAdapter.Close()
-		}
-		if s.acpClient != nil {
-			_ = s.acpClient.Disconnect(context.Background()) //nolint:errcheck
-		}
-		if s.sessionStore != nil {
-			s.sessionStore.Close() //nolint:errcheck,gosec
-		}
-		if s.memStore != nil {
-			s.memWG.Wait()
-			_ = s.memStore.Close() //nolint:errcheck
-		}
-		if s.traceExporter != nil {
-			if s.tracer != nil {
-				s.tracer.Flush()
-			}
-			_ = s.traceExporter.Shutdown(context.Background()) //nolint:errcheck
-		}
-	})
+	return s.closeOwner.Close(context.Background())
 }
 
 // assembleModel builds the primary model, ModelCycler, ModelRegistry, and small
 // model. It registers the model provider and appends model cleanups.
 func (s *assembleState) assembleModel() error {
-	model, modelInfo, modelCleanup, err := buildModel(s.ctx, s.rc, s.providerName, s.modelName)
+	modelResolver, err := newCLIModelResolver(s.rc, s.providerName, true, s.modelName)
+	if err != nil {
+		return fmt.Errorf("assemble: resolve model providers: %w", err)
+	}
+	s.modelResolver = modelResolver
+	model, modelInfo, modelCleanup, err := modelResolver.buildPrimary(s.ctx, s.rc, s.providerName, s.modelName)
 	if err != nil {
 		return fmt.Errorf("assemble: build model: %w", err)
 	}
@@ -667,7 +755,7 @@ func (s *assembleState) assembleModel() error {
 	s.model = model
 	s.modelInfo = modelInfo
 	if modelCleanup != nil {
-		s.cleanupList = append(s.cleanupList, modelCleanup)
+		s.primaryModelCleanup = modelCleanup
 	}
 
 	// Wire ModelCycler when enabled models are configured.
@@ -714,13 +802,13 @@ func (s *assembleState) assembleModel() error {
 		if smallProvider == "" {
 			smallProvider = s.providerName
 		}
-		sm, _, smallCleanup, smErr := buildSmallModel(s.ctx, s.rc, smallProvider, s.rc.SmallModel.Model)
+		sm, _, smallCleanup, smErr := modelResolver.buildSmall(s.ctx, s.rc, s.providerName, smallProvider, s.rc.SmallModel.Model)
 		if smErr != nil {
 			s.logger.Warn("assemble_small_model_failed", "err", smErr, "model", s.rc.SmallModel.Model)
 		} else {
 			s.smallModel = sm
 			if smallCleanup != nil {
-				s.cleanupList = append(s.cleanupList, smallCleanup)
+				s.smallModelCleanup = smallCleanup
 			}
 			s.logger.Info("assemble_small_model_enabled", "model", s.rc.SmallModel.Model)
 		}
@@ -741,14 +829,20 @@ func (s *assembleState) assembleModel() error {
 	}
 	s.modelSelector = llm.NewDefaultModelSelector(s.model, s.smallModel).
 		WithModelRegistry(s.modelRegistry).
+		WithPrimaryCleanup(s.primaryModelCleanup).
 		WithModelNames(s.providerName, s.modelName, smallProvider, smallModelName).
 		WithModelBuilder(func(ctx context.Context, name string) (llm.BaseChatModel, func(), error) {
-			m, _, cleanup, err := buildModel(ctx, s.rc, s.providerName, name)
+			m, _, cleanup, err := modelResolver.buildPrimary(ctx, s.rc, s.providerName, name)
+			return m, cleanup, err
+		}).
+		WithModelSpecBuilder(func(ctx context.Context, candidate llm.ModelSpec) (llm.BaseChatModel, func(), error) {
+			m, _, cleanup, err := modelResolver.buildInteractive(ctx, s.rc, candidate)
 			return m, cleanup, err
 		}).
 		WithModelLister(func() []llm.ModelInfo {
-			return listAvailableModels(s.rc, s.providerName)
+			return modelResolver.listAvailableModels(context.Background(), s.rc, s.providerName)
 		}).
+		WithModelSpecLister(modelResolver.listModelSpecs).
 		WithModelSwitchCallback(func(m llm.BaseChatModel) {
 			if s.loopAgent != nil {
 				s.loopAgent.SetModel(m)
@@ -758,21 +852,9 @@ func (s *assembleState) assembleModel() error {
 	return nil
 }
 
-// assembleTracing wires the tracer and trace exporter from config.
+// assembleTracing reuses the tracer owned by the outer invocation context.
 func (s *assembleState) assembleTracing() {
-	if s.rc != nil && s.rc.Tracing.Enabled != nil && *s.rc.Tracing.Enabled {
-		s.traceExporter = buildTraceExporter(s.rc.Tracing, s.sessionID, s.logger)
-		if s.traceExporter != nil {
-			redactionLevel := tracing.RedactionLevelRedact
-			if s.rc.Tracing.RedactionLevel != "" {
-				redactionLevel = tracing.RedactionLevel(s.rc.Tracing.RedactionLevel)
-			}
-			s.traceExporter = tracing.NewRedactingExporter(s.traceExporter, redactionLevel)
-			s.tracer = tracing.NewTracer(s.sessionID, s.traceExporter)
-			s.reg.RegisterTraceExporter(s.traceExporter)
-			s.logger.Info("assemble_tracing_enabled", "exporter", s.rc.Tracing.Exporter, "level", s.rc.Tracing.Level)
-		}
-	}
+	s.tracer = tracing.TracerFromContext(s.ctx)
 }
 
 // assembleTools creates the tool registry, registers builtins, custom tools,
@@ -808,14 +890,11 @@ func (s *assembleState) assembleTools() error {
 	s.htmlConverter = tools.NewDefaultHTMLConverter()
 
 	// Resolve the working directory for git tools.
-	gitCwd, err := os.Getwd()
-	if err != nil {
-		gitCwd = "."
+	gitCwd := s.gitCwd
+	if gitCwd == "" {
+		gitCwd = resolveGitCwd(s.rc)
+		s.gitCwd = gitCwd
 	}
-	if s.rc != nil && s.rc.Git.WorkDir != "" {
-		gitCwd = s.rc.Git.WorkDir
-	}
-	s.gitCwd = gitCwd
 	s.gitTool = tools.NewDefaultGitTool(gitCwd)
 
 	// Create a SnapshotManager anchored at the git working directory. When the
@@ -844,13 +923,29 @@ func (s *assembleState) assembleTools() error {
 		wtSigCh := make(chan os.Signal, 1)
 		signal.Notify(wtSigCh, syscall.SIGINT, syscall.SIGTERM)
 		wtDone := make(chan struct{})
-		wtMgr.StartSignalCleanup(wtSigCh, wtDone)
-		s.cleanupList = append(s.cleanupList, func() {
-			signal.Stop(wtSigCh)
-			close(wtDone)
-			if err := wtMgr.Cleanup(context.Background()); err != nil {
-				s.logger.Warn("assemble_worktree_cleanup_failed", "err", err)
+		wtSignalDone := make(chan struct{})
+		go func() {
+			defer close(wtSignalDone)
+			select {
+			case <-wtSigCh:
+				go func() {
+					if err := s.runCleanup(); err != nil {
+						s.logger.Warn("assemble_worktree_cleanup_failed", "err", err)
+					}
+				}()
+			case <-wtDone:
 			}
+		}()
+		var stopWorktreeSignal sync.Once
+		s.worktreeStopSignal = func() {
+			stopWorktreeSignal.Do(func() {
+				signal.Stop(wtSigCh)
+				close(wtDone)
+				<-wtSignalDone
+			})
+		}
+		s.cleanupList = append(s.cleanupList, func(ctx context.Context) error {
+			return wtMgr.Cleanup(ctx)
 		})
 	}
 
@@ -864,6 +959,9 @@ func (s *assembleState) assembleTools() error {
 		tools.WithRegisteredResourceLimits(resourceLimits),
 		tools.WithRegisteredGitTool(s.gitTool),
 	}
+	if s.rc != nil && len(s.rc.Sandbox.AllowedPaths) > 0 {
+		regOpts = append(regOpts, tools.WithRegisteredPathWhitelist(s.rc.Sandbox.AllowedPaths))
+	}
 	if s.rc != nil && len(s.rc.Tools.Builtin) > 0 {
 		regOpts = append(regOpts, tools.WithRegisteredBuiltinWhitelist(s.rc.Tools.Builtin))
 	}
@@ -875,7 +973,7 @@ func (s *assembleState) assembleTools() error {
 	registerCustomTools(s.ctx, s.rc, s.tr, s.logger)
 
 	// Register MCP tools.
-	if mcpErr := registerMCPTools(s.ctx, s.rc, dtr); mcpErr != nil {
+	if mcpErr := registerMCPToolsOwned(s.ctx, s.rc, dtr, s.mcpResources); mcpErr != nil {
 		s.logger.Warn("assemble_mcp_failed", "err", mcpErr)
 	}
 
@@ -883,16 +981,15 @@ func (s *assembleState) assembleTools() error {
 	if s.rc != nil && (len(s.rc.LSP.ServerCommand) > 0 || len(s.rc.LSP.Servers) > 0) {
 		lspClient, lspStarted := buildLSPClient(s.ctx, s.rc, s.logger)
 		if lspClient != nil && lspStarted {
+			client := lspClient
+			s.cleanupList = append(s.cleanupList, func(ctx context.Context) error {
+				return client.Shutdown(ctx)
+			})
 			if regErr := s.tr.Register(s.ctx, tools.NewLSPTool(lspClient)); regErr != nil {
 				s.logger.Warn("assemble_lsp_register_failed", "err", regErr)
-				_ = lspClient.Shutdown(context.Background()) //nolint:errcheck
 			} else {
 				s.lspClientField = lspClient
 				s.lspWorkspaceRoot = resolveLSPWorkspaceRoot(s.rc)
-				client := lspClient
-				s.cleanupList = append(s.cleanupList, func() {
-					_ = client.Shutdown(context.Background()) //nolint:errcheck
-				})
 				s.logger.Info("assemble_lsp_ready")
 			}
 		}
@@ -918,11 +1015,16 @@ func (s *assembleState) assembleTools() error {
 
 // assembleExtensions loads and initializes extensions, registering their tools,
 // hooks, and middleware. It also builds the hook chain.
-func (s *assembleState) assembleExtensions() {
+func (s *assembleState) assembleExtensions() error {
 	if s.rc != nil && s.rc.Extensions.Enabled != nil && *s.rc.Extensions.Enabled && len(s.rc.Extensions.PluginPaths) > 0 {
 		pm := extension.NewPluginManager(extension.NewDefaultPluginLoader())
-		_ = pm.Load(s.ctx, s.rc.Extensions.PluginPaths) //nolint:errcheck
-		_ = pm.Init(s.ctx)                              //nolint:errcheck
+		s.pluginManagers = append(s.pluginManagers, pm)
+		if err := pm.Load(s.ctx, s.rc.Extensions.PluginPaths); err != nil {
+			return fmt.Errorf("assemble: load extensions: %w", err)
+		}
+		if err := pm.Init(s.ctx); err != nil {
+			return fmt.Errorf("assemble: initialize extensions: %w", err)
+		}
 		for _, t := range pm.Tools() {
 			if regErr := s.tr.Register(s.ctx, t); regErr != nil {
 				s.logger.Warn("assemble_extension_tool_register_failed", "tool", t.Name(), "err", regErr)
@@ -935,22 +1037,31 @@ func (s *assembleState) assembleExtensions() {
 			s.extMiddleware = append(s.extMiddleware, newExtensionMiddlewareAdapter(m))
 		}
 		s.logger.Info("assemble_extensions_ready", "extensions", len(pm.Extensions()), "paths", len(s.rc.Extensions.PluginPaths), "hooks", len(s.extHooks), "middleware", len(s.extMiddleware))
-		s.cleanupList = append(s.cleanupList, func() {
-			_ = pm.Shutdown(context.Background()) //nolint:errcheck
-		})
 	}
 
-	// Load user-configured shell hooks from .go-cli/hooks.yaml.
+	s.loadConfiguredShellHooks()
+	if len(s.shellHooks) > 0 {
+		s.hookMgr = core.NewHookManager(s.shellHooks...)
+		s.extHooks = append(s.extHooks, s.hookMgr)
+	}
+
+	s.hookChain = core.NewHookChain(s.extHooks...)
+	return nil
+}
+
+func (s *assembleState) loadConfiguredShellHooks() {
+	if s.shellHooksLoaded {
+		return
+	}
+	s.shellHooksLoaded = true
 	hooksPath := filepath.Join(s.gitCwd, ".go-cli", "hooks.yaml")
 	if _, statErr := os.Stat(hooksPath); statErr == nil {
 		s.loadShellHooks(hooksPath)
 	}
-
-	s.hookChain = core.NewHookChain(s.extHooks...)
 }
 
 // loadShellHooks reads a hooks.yaml file, parses shell hook definitions, and
-// appends a HookManager to s.extHooks.
+// stores shell hooks for later assembly into the HookManager.
 func (s *assembleState) loadShellHooks(path string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -962,12 +1073,14 @@ func (s *assembleState) loadShellHooks(path string) {
 		s.logger.Warn("assemble_hooks_parse_failed", "path", path, "err", err)
 		return
 	}
-	var shellHooks []core.HookSystem
 	for i, hc := range hooksCfg.Hooks {
 		event, eventErr := parseHookEvent(hc.Event)
 		if eventErr != nil {
 			s.logger.Warn("assemble_hook_event_unknown", "index", i, "event", hc.Event, "err", eventErr)
 			continue
+		}
+		if event == core.EventPostToolUse {
+			s.unsupportedPostToolUseHooks = append(s.unsupportedPostToolUseHooks, UnsupportedPostToolUseHookError{Path: path, Index: i})
 		}
 		timeoutStr := hc.Timeout
 		if timeoutStr == "" {
@@ -979,13 +1092,9 @@ func (s *assembleState) loadShellHooks(path string) {
 			timeout = 10 * time.Second
 		}
 		name := fmt.Sprintf("shell-hook-%d", i)
-		shellHooks = append(shellHooks, core.NewShellHook(name, event, hc.Command, timeout))
+		s.shellHooks = append(s.shellHooks, core.NewShellHook(name, event, hc.Command, timeout))
 	}
-	if len(shellHooks) > 0 {
-		s.hookMgr = core.NewHookManager(shellHooks...)
-		s.extHooks = append(s.extHooks, s.hookMgr)
-	}
-	s.logger.Info("assemble_hooks_ready", "path", path, "count", len(shellHooks))
+	s.logger.Info("assemble_hooks_ready", "path", path, "count", len(s.shellHooks))
 }
 
 // parseHookEvent converts a config event string to a core.HookEvent.
@@ -998,9 +1107,15 @@ func parseHookEvent(s string) (core.HookEvent, error) {
 	}
 }
 
-// assembleApproval wires the approval middleware and mutation queue, wrapping
-// the tool registry.
-func (s *assembleState) assembleApproval() {
+// assembleApproval installs the approval policy and mutation queue on the
+// registry's prepared-dispatch pipeline.
+func (s *assembleState) assembleApproval() error {
+	fence, err := tools.DispatchFenceFromRegistry(s.tr)
+	if err != nil {
+		return fmt.Errorf("assemble: get prepared-dispatch fence: %w", err)
+	}
+	s.planCtrl = core.NewDefaultPlanModeController(fence)
+
 	var classifier approval.ApprovalClassifier
 	var approvalCallback approval.ApprovalCallback
 	var autoApprove bool
@@ -1068,28 +1183,37 @@ func (s *assembleState) assembleApproval() {
 	if approvalCallback != nil {
 		mwOpts = append(mwOpts, approval.WithCallback(approvalCallback))
 	}
+	mwOpts = append(mwOpts,
+		approval.WithDispatchFence(fence),
+		approval.WithPlanModeController(s.planCtrl),
+	)
 	approvalMW := approval.NewApprovalMiddleware(classifier, approvalStore, mwOpts...)
 	s.reg.RegisterApprovalClassifier(&approvalClassifierAdapter{inner: classifier})
 	s.reg.RegisterApprovalStore(&approvalStoreAdapter{inner: approvalStore})
-	mutationQueue := tools.NewDefaultFileMutationQueue(
+	s.mutationQueue = tools.NewDefaultFileMutationQueue(
 		tools.WithMutationFileTracker(s.fileTracker),
 		tools.WithMutationDiffGenerator(s.diffGen),
 	)
-	s.tr = tools.NewMiddlewareToolRegistry(s.tr, approvalMW.WrapToolCall, tools.NewMutationQueueWrapper(mutationQueue))
-	s.reg.RegisterToolRegistry(s.tr)
-
-	mq := mutationQueue
-	s.cleanupList = append(s.cleanupList, func() {
+	mq := s.mutationQueue
+	s.cleanupList = append(s.cleanupList, func(context.Context) error {
 		if cq, ok := mq.(*tools.DefaultFileMutationQueue); ok {
-			_ = cq.Close() //nolint:errcheck
+			return cq.Close()
 		}
+		return nil
 	})
+	preparedRegistry := tools.NewMiddlewareToolRegistry(s.tr)
+	if err := preparedRegistry.SetPreparedToolPolicy(approvalMW.PreparedPolicy); err != nil {
+		return fmt.Errorf("assemble: install prepared approval policy: %w", err)
+	}
+	s.tr = preparedRegistry
+	s.reg.RegisterToolRegistry(s.tr)
+	return nil
 }
 
 // assembleProductionResilience wires retry, cost tracking, circuit breaker,
-// idempotent cache, audit log, telemetry, and the plan-mode controller. It
-// wraps the tool registry with production middleware.
-func (s *assembleState) assembleProductionResilience() {
+// idempotent cache, audit log, and telemetry. It installs only the explicit
+// prepared execution stages on the registry assembled by assembleApproval.
+func (s *assembleState) assembleProductionResilience() error {
 	retryPolicy := production.NewDefaultRetryPolicy(production.RetryConfig{
 		MaxAttempts: 3,
 		BaseDelay:   time.Second,
@@ -1146,23 +1270,51 @@ func (s *assembleState) assembleProductionResilience() {
 	}
 
 	// Wrap tool registry with production middleware.
-	s.planCtrl = core.NewDefaultPlanModeController()
+	if s.planCtrl == nil || s.mutationQueue == nil {
+		return errors.New("assemble: prepared approval stages are unavailable")
+	}
 	pathNormalizer := tools.NewPathNormalizer("")
-	schemaValidator := tools.NewSchemaValidator(s.underlyingReg)
 	resultMasker := tools.NewResultMasker(nil)
 	promptInjectionGuard := production.NewPromptInjectionGuard()
 	wrappers := []tools.ToolExecutorWrapper{
 		production.NewPromptInjectionToolWrapper(promptInjectionGuard),
-		core.NewPlanModeToolWrapper(s.planCtrl),
-		tools.WithArgumentPreparation(pathNormalizer, schemaValidator),
-		newProductionToolWrapper(s.idempotentCache, s.auditLog, s.telemetry, s.sessionID),
+		newProductionToolWrapper(nil, s.auditLog, s.telemetry, s.sessionID),
 		tools.NewResultMaskingWrapper(resultMasker),
 	}
-	if s.hookMgr != nil {
-		wrappers = append(wrappers, s.hookMgr.PostToolUseWrapper())
+	// This attestation applies only to the exact wrappers constructed above.
+	// The production wrapper has no result cache, and its sidecars must be the
+	// synchronous built-in audit/telemetry implementations.
+	synchronousWrappers := defaultToolExecutionSidecarsAreSynchronous(s.auditLog, s.telemetry)
+	preparedRegistry, ok := s.tr.(*tools.MiddlewareToolRegistry)
+	if !ok {
+		return errors.New("assemble: prepared tool registry is unavailable")
 	}
-	s.tr = tools.NewMiddlewareToolRegistry(s.tr, wrappers...)
+	if err := preparedRegistry.SetPreparedToolStages(tools.PreparedToolStages{
+		ArgumentPreparers:            []tools.ArgumentPreparer{pathNormalizer},
+		ExecutionWrappers:            wrappers,
+		SynchronousExecutionWrappers: synchronousWrappers,
+		MutationQueue:                s.mutationQueue,
+	}); err != nil {
+		return fmt.Errorf("assemble: install prepared tool stages: %w", err)
+	}
 	s.reg.RegisterToolRegistry(s.tr)
+	return nil
+}
+
+// defaultToolExecutionSidecarsAreSynchronous only admits the sidecars used by
+// the fixed wrapper chain above: audit may be absent or the built-in sync log,
+// and telemetry must be the built-in in-memory collector. An injected
+// replacement keeps the wrappers installed but suppresses completion proof.
+func defaultToolExecutionSidecarsAreSynchronous(auditLog production.AuditLog, telemetry production.Telemetry) bool {
+	defaultTelemetry, ok := telemetry.(*production.DefaultTelemetry)
+	if !ok || defaultTelemetry == nil {
+		return false
+	}
+	if auditLog == nil {
+		return true
+	}
+	defaultAuditLog, ok := auditLog.(*production.DefaultAuditLog)
+	return ok && defaultAuditLog != nil
 }
 
 // assembleOutputGuards wires the output guard chain (PII + code injection +
@@ -1187,8 +1339,7 @@ func (s *assembleState) assembleSubAgent() {
 	subAgentFactory := core.NewRealSubAgentFactory(s.model, llm.NewProviderRegistry(), s.tr,
 		core.WithModelWrapper(newModelWrapperWithChain(s.pw, s.modelChain, s.circuitBreaker, s.guardChain, s.telemetry)),
 	)
-	core.RegisterSubAgentFactory(subAgentFactory)
-	dispatcher := core.NewDefaultSubagentDispatcher(nil)
+	dispatcher := core.NewDefaultSubagentDispatcher(subAgentFactory)
 	s.dispatcher = dispatcher
 	if subErr := s.tr.Register(s.ctx, core.NewSubagentTool(dispatcher)); subErr != nil {
 		s.logger.Warn("assemble_subagent_tool_failed", "err", subErr)
@@ -1207,7 +1358,7 @@ func (s *assembleState) assembleSubAgent() {
 		if s.acpClient != nil {
 			if connErr := s.acpClient.Connect(s.ctx); connErr != nil {
 				s.logger.Warn("assemble_acp_connect_failed", "err", connErr)
-				s.acpClient = nil
+				s.acpConnectErr = connErr
 			} else {
 				acpMW := acp.NewACPMiddleware("acp-bridge", s.acpClient)
 				s.acpAdapter = acp.NewACPMiddlewareAdapter(acpMW, dispatcher, s.acpClient)
@@ -1218,7 +1369,7 @@ func (s *assembleState) assembleSubAgent() {
 }
 
 // assembleExtraTools registers remaining tools (todo, task, goal, web, plan_mode, etc.).
-func (s *assembleState) assembleExtraTools() {
+func (s *assembleState) assembleExtraTools() error {
 	todoStore := tools.NewTodoStore()
 	taskStore := tools.NewTaskStore()
 	goalStore, _ := tools.NewDefaultGoalStore("") //nolint:errcheck
@@ -1227,34 +1378,30 @@ func (s *assembleState) assembleExtraTools() {
 	webSearchTool := tools.NewWebSearchTool()
 	if s.rc != nil {
 		switch s.rc.WebSearch.Provider {
+		case "":
+			// An unconfigured provider stays unavailable; never substitute sample results.
+		case "mock":
+			s.logger.Warn("assemble_web_search_mock_provider_disabled")
 		case "brave":
-			if s.rc.WebSearch.APIKey != "" {
-				webSearchTool = tools.NewWebSearchTool(tools.WithSearchProvider(
-					tools.NewBraveSearchProvider(s.rc.WebSearch.APIKey),
-				))
-			}
+			webSearchTool = tools.NewWebSearchTool(tools.WithSearchProvider(
+				tools.NewBraveSearchProvider(s.rc.WebSearch.APIKey),
+			))
 		case "fetch":
 			webSearchTool = tools.NewWebSearchTool(tools.WithSearchProvider(
 				tools.NewFetchSearchProvider(),
 			))
+		default:
+			s.logger.Warn("assemble_web_search_provider_unknown", "provider", s.rc.WebSearch.Provider)
 		}
 	}
+	webFetchTool := tools.NewWebFetchTool(tools.WithHTMLConverter(s.htmlConverter))
 
 	extraTools := []tools.ToolDefinition{
 		tools.NewTodoWriteTool(todoStore),
 		tools.NewTaskCreateTool(taskStore),
-		tools.NewTaskGetTool(taskStore),
-		tools.NewTaskListTool(taskStore),
 		tools.NewTaskUpdateTool(taskStore),
 		tools.NewGoalCreateTool(goalStore),
 		tools.NewGoalUpdateTool(goalStore),
-		tools.NewGoalListTool(goalStore, taskStore),
-		tools.NewGoalGetTool(goalStore, taskStore),
-		tools.NewWebFetchTool(tools.WithHTMLConverter(s.htmlConverter)),
-		webSearchTool,
-		core.NewAskUserQuestionTool(s.hitlEmitter, 30*time.Second),
-		tools.NewEnterPlanModeTool(s.planCtrl),
-		tools.NewExitPlanModeTool(s.planCtrl),
 		tools.NewGitPRCreateTool(s.gitCwd),
 	}
 	for _, t := range extraTools {
@@ -1262,9 +1409,36 @@ func (s *assembleState) assembleExtraTools() {
 			s.logger.Warn("assemble_tool_register_failed", "tool", t.Name(), "err", regErr)
 		}
 	}
-	if searchErr := s.tr.Register(s.ctx, tools.NewToolSearchTool(s.tr)); searchErr != nil {
-		s.logger.Warn("assemble_tool_register_failed", "tool", "tool_search", "err", searchErr)
+	trustedControls := []tools.ToolDefinition{
+		tools.NewTaskGetTool(taskStore),
+		tools.NewTaskListTool(taskStore),
+		tools.NewGoalListTool(goalStore, taskStore),
+		tools.NewGoalGetTool(goalStore, taskStore),
+		core.NewAskUserQuestionTool(s.hitlEmitter, 30*time.Second),
+		tools.NewEnterPlanModeTool(s.planCtrl),
+		tools.NewExitPlanModeTool(s.planCtrl),
+		tools.NewToolSearchTool(s.tr),
 	}
+	trustedNetworkReads := []tools.ToolDefinition{webFetchTool, webSearchTool}
+	registrar, ok := s.tr.(tools.TrustedControlRegistrar)
+	if !ok {
+		return errors.New("assemble: trusted control registrar unavailable")
+	}
+	for _, t := range trustedControls {
+		if regErr := registrar.RegisterTrustedControl(s.ctx, t); regErr != nil {
+			return fmt.Errorf("assemble: register trusted control tool %q: %w", t.Name(), regErr)
+		}
+	}
+	networkRegistrar, ok := s.tr.(tools.TrustedNetworkReadRegistrar)
+	if !ok {
+		return errors.New("assemble: trusted network read registrar unavailable")
+	}
+	for _, t := range trustedNetworkReads {
+		if regErr := networkRegistrar.RegisterTrustedNetworkRead(s.ctx, t); regErr != nil {
+			return fmt.Errorf("assemble: register trusted network read tool %q: %w", t.Name(), regErr)
+		}
+	}
+	return nil
 }
 
 // assembleLoopAgent builds the LoopAgent with model wrapper, memory store,
@@ -1377,13 +1551,22 @@ func (s *assembleState) assembleMiddleware() {
 	s.reminderMgr = core.NewDefaultSystemReminderManager()
 	s.failureSynthesizer = core.NewDefaultFailureTurnSynthesizer()
 
-	// Register unified ToolInterceptors (PreToolCallEvent is the single
-	// interception mechanism). Plan-mode blocking and shell-hook pre-tool-use
-	// both go through this path instead of separate middlewares.
-	core.RegisterToolInterceptor(core.NewPlanModeToolInterceptor(s.planCtrl))
+	// Bind this Assembly's pre-tool interceptors to its loop. Plan Mode runs
+	// first so blocked calls retain the tool_canceled event semantics; shell
+	// hooks then run only for calls allowed by Plan Mode. The executor wrapper
+	// remains a final Plan Mode guard for calls outside the loop path.
+	interceptors := []core.ToolInterceptor{core.NewPlanModeToolInterceptor(s.planCtrl)}
 	if s.hookMgr != nil {
-		core.RegisterToolInterceptor(s.hookMgr.PreToolUseInterceptor())
+		interceptors = append(interceptors, s.hookMgr.PreToolUseInterceptor())
 	}
+	s.loopAgent.SetToolInterceptor(func(toolName, toolCallID string, args map[string]any) error {
+		for _, interceptor := range interceptors {
+			if err := interceptor(toolName, toolCallID, args); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 
 	chain := []core.Middleware{
 		core.NewLoggingMiddleware(s.ac.agentName),
@@ -1462,107 +1645,507 @@ func (s *assembleState) assembleSession() {
 	}
 }
 
-// buildModel resolves an llm.BaseChatModel from the loaded configuration.
-// When the configuration supplies a BaseURL or APIKey, a custom provider is
-// built with those settings; otherwise the default provider registry is used.
-// It also returns the ModelInfo for the resolved model so callers can inspect
-// the context window and other metadata.
-func buildModel(ctx context.Context, rc *config.Config, providerName, modelName string) (llm.BaseChatModel, llm.ModelInfo, func(), error) {
-	cfg := llm.ModelConfig{Model: modelName}
+// cliModelResolver owns one immutable provider snapshot for the primary model,
+// configured small model, explicit /model switches, and model listing.
+type cliModelResolver struct {
+	resolver          *llm.ModelResolver
+	authChain         *config.AuthChain
+	primaryProviderID string
+	primaryEndpoint   string
+	smallProviderID   string
+	smallEndpoint     string
+	smallErr          error
+}
 
-	if rc != nil && (rc.Provider.BaseURL != "" || rc.Provider.APIKey != "") {
-		provider := llm.NewEinoProvider(
-			llm.WithProviderName(providerName),
-			llm.WithBaseURL(rc.Provider.BaseURL),
-			llm.WithAPIKey(rc.Provider.APIKey),
-			llm.WithDefaultModel(modelName),
-		)
-		m, cleanup, err := provider.Build(ctx, cfg)
-		if err != nil {
-			return nil, llm.ModelInfo{}, cleanup, err
-		}
-		return m, findModelInfo(provider.Models(), modelName), cleanup, nil
+type cliProviderCredential struct {
+	providerID string
+	endpoint   string
+	apiKey     string
+	optional   bool
+}
+
+// newCLIModelResolver builds the CLI's provider definitions before publishing
+// one resolver snapshot. Credentials remain in the scoped AuthChain and are
+// never stored in provider metadata or provider constructors.
+func newCLIModelResolver(rc *config.Config, primaryProviderName string, includeSmall bool, primaryModelName ...string) (*cliModelResolver, error) {
+	primaryProviderName = normalizeProviderName(primaryProviderName)
+	if primaryProviderName == "" {
+		return nil, fmt.Errorf("assemble: provider identity is required")
+	}
+	if isDisabledCLIProvider(primaryProviderName) {
+		return nil, unsupportedCLIProviderError(primaryProviderName)
 	}
 
-	reg := llm.NewProviderRegistry()
-	provider, err := reg.Get(providerName)
+	primary := cliProviderCredential{providerID: primaryProviderName}
+	if rc != nil {
+		configuredProviderName := resolveProviderName("", rc)
+		if providerIdentityMatches(configuredProviderName, primaryProviderName) {
+			primary.endpoint = rc.Provider.BaseURL
+			primary.apiKey = rc.Provider.APIKey
+		}
+	}
+	bindings := []cliProviderCredential{primary}
+	modelNamesByProvider := make(map[string][]llm.ModelInfo)
+	configuredPrimaryModel := ""
+	if len(primaryModelName) != 0 {
+		configuredPrimaryModel = strings.TrimSpace(primaryModelName[0])
+	}
+	if configuredPrimaryModel == "" && rc != nil {
+		configuredPrimaryModel = resolveModelName("", rc)
+	}
+	appendConfiguredModel(modelNamesByProvider, primaryProviderName, configuredPrimaryModel)
+	smallProviderName := ""
+	smallEndpoint := ""
+	var smallErr error
+	if includeSmall && rc != nil {
+		smallProviderName = normalizeProviderName(rc.SmallModel.Provider)
+		if smallProviderName == "" {
+			smallProviderName = primaryProviderName
+		}
+		endpoint, apiKey, err := resolveSmallModelProviderSettings(primaryProviderName, smallProviderName, rc)
+		if err != nil {
+			smallErr = err
+		} else if isDisabledCLIProvider(smallProviderName) {
+			smallErr = unsupportedCLIProviderError(smallProviderName)
+		} else {
+			smallEndpoint = endpoint
+			appendConfiguredModel(modelNamesByProvider, smallProviderName, rc.SmallModel.Model)
+			bindings = append(bindings, cliProviderCredential{providerID: smallProviderName, endpoint: endpoint, apiKey: apiKey, optional: true})
+		}
+	}
+
+	defaultProviderOptions := make([]llm.ProviderOption, 0, 2)
+	if models := modelNamesByProvider["eino"]; len(models) != 0 {
+		defaultProviderOptions = append(defaultProviderOptions,
+			llm.WithModels(models),
+			llm.WithDefaultModel(promptDefaultModel),
+		)
+	}
+	registry := llm.NewProviderRegistryWithDefaultProviderOptions(defaultProviderOptions...)
+	registered := map[string]struct{}{"eino": {}}
+	for _, binding := range bindings {
+		providerID := normalizeProviderName(binding.providerID)
+		if providerID == "" || isDisabledCLIProvider(providerID) {
+			continue
+		}
+		if _, exists := registered[providerID]; exists {
+			continue
+		}
+		provider, err := newCLICompatibleProvider(providerID, binding.endpoint, modelNamesByProvider[providerID]...)
+		if err != nil {
+			if binding.optional {
+				smallErr = err
+				continue
+			}
+			return nil, err
+		}
+		if err := registry.Register(provider); err != nil {
+			return nil, fmt.Errorf("assemble: register provider %q: %w", providerID, err)
+		}
+		registered[providerID] = struct{}{}
+	}
+
+	// Publish provider definitions first, then bind config keys to the resolver's
+	// canonical provider/protocol/origin. The AuthChain's other sources remain
+	// scope-aware; legacy provider-only sources stay inert.
+	resolver := registry.SnapshotResolver()
+	authChain := config.NewAuthChain()
+	configuredKeys := make(map[llm.CredentialRef]string)
+	for _, binding := range bindings {
+		if binding.apiKey == "" || isDisabledCLIProvider(binding.providerID) {
+			continue
+		}
+		if _, registeredProvider := registered[normalizeProviderName(binding.providerID)]; !registeredProvider {
+			continue
+		}
+		ref, err := resolver.CredentialRefFor(binding.providerID, binding.endpoint)
+		if err != nil {
+			if binding.optional {
+				smallErr = err
+				continue
+			}
+			return nil, fmt.Errorf("assemble: resolve configured credential scope for %q: %w", binding.providerID, err)
+		}
+		if prior, exists := configuredKeys[ref]; exists {
+			if prior != binding.apiKey {
+				conflictErr := fmt.Errorf("assemble: conflicting primary/small credentials configured for provider scope %q at %q", ref.ProviderID, ref.Origin)
+				if binding.optional {
+					smallErr = conflictErr
+					continue
+				}
+				return nil, conflictErr
+			}
+			continue
+		}
+		configuredKeys[ref] = binding.apiKey
+		authChain.WithScopedCLIFlag(config.AuthScope{
+			ProviderID: ref.ProviderID,
+			ProtocolID: string(ref.ProtocolID),
+			Origin:     ref.Origin,
+		}, binding.apiKey)
+	}
+	registry.SetCredentialResolver(authChain)
+	return &cliModelResolver{
+		resolver:          registry.SnapshotResolver(),
+		authChain:         authChain,
+		primaryProviderID: primaryProviderName,
+		primaryEndpoint:   primary.endpoint,
+		smallProviderID:   smallProviderName,
+		smallEndpoint:     smallEndpoint,
+		smallErr:          smallErr,
+	}, nil
+}
+
+func appendConfiguredModel(modelsByProvider map[string][]llm.ModelInfo, providerID, modelID string) {
+	providerID = normalizeProviderName(providerID)
+	modelID = strings.TrimSpace(modelID)
+	if providerID == "" || modelID == "" || isDisabledCLIProvider(providerID) {
+		return
+	}
+	for _, existing := range modelsByProvider[providerID] {
+		if existing.Name == modelID {
+			return
+		}
+	}
+	modelsByProvider[providerID] = append(modelsByProvider[providerID], llm.ModelInfo{Name: modelID})
+}
+
+func cliPrimaryCredentialScope(rc *config.Config, providerName string) (config.AuthScope, error) {
+	modelResolver, err := newCLIModelResolver(rc, providerName, false)
+	if err != nil {
+		return config.AuthScope{}, err
+	}
+	ref, err := modelResolver.resolver.CredentialRefFor(modelResolver.primaryProviderID, modelResolver.primaryEndpoint)
+	if err != nil {
+		return config.AuthScope{}, err
+	}
+	return config.AuthScope{ProviderID: ref.ProviderID, ProtocolID: string(ref.ProtocolID), Origin: ref.Origin}, nil
+}
+
+func resolveCLIPrimaryCredential(ctx context.Context, rc *config.Config, providerName string) (config.AuthScope, string, bool, error) {
+	modelResolver, err := newCLIModelResolver(rc, providerName, false)
+	if err != nil {
+		return config.AuthScope{}, "", false, err
+	}
+	ref, err := modelResolver.resolver.CredentialRefFor(modelResolver.primaryProviderID, modelResolver.primaryEndpoint)
+	if err != nil {
+		return config.AuthScope{}, "", false, err
+	}
+	scope := config.AuthScope{ProviderID: ref.ProviderID, ProtocolID: string(ref.ProtocolID), Origin: ref.Origin}
+	key, found, err := modelResolver.authChain.ResolveCredential(ctx, scope.ProviderID, scope.ProtocolID, scope.Origin)
+	return scope, key, found, err
+}
+
+func newCLICompatibleProvider(providerID, endpoint string, models ...llm.ModelInfo) (llm.ModelProvider, error) {
+	if isDisabledCLIProvider(providerID) {
+		return nil, unsupportedCLIProviderError(providerID)
+	}
+	if providerID == "eino" {
+		return nil, fmt.Errorf("assemble: default provider %q is already registered", providerID)
+	}
+	if providerID != "openai" && strings.TrimSpace(endpoint) == "" {
+		return nil, providerEndpointRequiredError(providerID)
+	}
+	options := []llm.ProviderOption{llm.WithProviderName(providerID)}
+	if len(models) != 0 {
+		options = append(options, llm.WithModels(models))
+	}
+	if strings.TrimSpace(endpoint) != "" {
+		options = append(options, llm.WithBaseURL(endpoint))
+	}
+	return llm.NewEinoProvider(options...), nil
+}
+
+func providerEndpointRequiredError(providerID string) error {
+	return fmt.Errorf("assemble: %w: provider %q requires an explicit base_url for OpenAI-compatible routing", llm.ErrProviderEndpointRequired, providerID)
+}
+
+func isDisabledCLIProvider(providerID string) bool {
+	switch normalizeProviderName(providerID) {
+	case "claude", "anthropic", "gemini", "google-gemini":
+		return true
+	default:
+		return false
+	}
+}
+
+func unsupportedCLIProviderError(providerID string) error {
+	return fmt.Errorf("assemble: %w: %s; native protocol support is unavailable in the CLI; use a custom provider name only for an OpenAI-compatible BaseURL", llm.ErrUnsupportedProviderProtocol, normalizeProviderName(providerID))
+}
+
+// buildModel resolves an llm.BaseChatModel from a fresh immutable snapshot for
+// direct callers. Assembly paths share one snapshot through cliModelResolver.
+func buildModel(ctx context.Context, rc *config.Config, providerName, modelName string) (llm.BaseChatModel, llm.ModelInfo, func(), error) {
+	modelResolver, err := newCLIModelResolver(rc, providerName, false, modelName)
 	if err != nil {
 		return nil, llm.ModelInfo{}, nil, err
 	}
-	m, cleanup, err := provider.Build(ctx, cfg)
-	if err != nil {
-		return nil, llm.ModelInfo{}, cleanup, err
-	}
-	return m, findModelInfo(provider.Models(), modelName), cleanup, nil
+	return modelResolver.buildPrimary(ctx, rc, providerName, modelName)
 }
 
-// listAvailableModels returns the models exposed by the provider identified by
-// providerName. It mirrors the provider-resolution logic in buildModel: when
-// the config supplies a BaseURL or APIKey, a custom EinoProvider is built;
-// otherwise the default provider registry is used.
-func listAvailableModels(rc *config.Config, providerName string) []llm.ModelInfo {
-	if rc != nil && (rc.Provider.BaseURL != "" || rc.Provider.APIKey != "") {
-		provider := llm.NewEinoProvider(
-			llm.WithProviderName(providerName),
-			llm.WithBaseURL(rc.Provider.BaseURL),
-			llm.WithAPIKey(rc.Provider.APIKey),
-		)
-		return provider.Models()
+func (r *cliModelResolver) buildPrimary(ctx context.Context, rc *config.Config, providerName, modelName string) (llm.BaseChatModel, llm.ModelInfo, func(), error) {
+	request := llm.ModelRequest{ProviderID: providerName, ModelID: modelName}
+	if providerIdentityMatches(r.primaryProviderID, providerName) {
+		request.Endpoint = r.primaryEndpoint
 	}
-	reg := llm.NewProviderRegistry()
-	provider, err := reg.Get(providerName)
-	if err != nil {
-		return nil
+	if rc != nil {
+		providerSampling := config.SamplingSettings{}
+		if providerIdentityMatches(resolveProviderName("", rc), providerName) {
+			providerSampling = rc.ProviderSampling()
+		}
+		applySamplingSettings(&request, rc.ModelSampling(), providerSampling)
+	} else {
+		request.MaxTokens = config.DefaultLLMMaxTokens
+		request.MaxTokensSet = true
 	}
-	return provider.Models()
+	return r.build(ctx, request)
 }
 
-// buildSmallModel builds a lightweight model from the SmallModelConfig section.
-// It uses the small model's own provider/BaseURL/APIKey when provided, falling
-// back to the primary provider settings.
-func buildSmallModel(ctx context.Context, rc *config.Config, providerName, modelName string) (llm.BaseChatModel, llm.ModelInfo, func(), error) {
+func (r *cliModelResolver) buildSmall(ctx context.Context, rc *config.Config, primaryProviderName, providerName, modelName string) (llm.BaseChatModel, llm.ModelInfo, func(), error) {
 	if rc == nil {
 		return nil, llm.ModelInfo{}, nil, fmt.Errorf("assemble: buildSmallModel: config is nil")
 	}
-	cfg := llm.ModelConfig{
-		Model:       modelName,
-		Temperature: rc.SmallModel.Temperature,
-		MaxTokens:   rc.SmallModel.MaxTokens,
+	if r.smallErr != nil {
+		return nil, llm.ModelInfo{}, nil, r.smallErr
 	}
-
-	baseURL := rc.SmallModel.BaseURL
-	apiKey := rc.SmallModel.APIKey
-	if baseURL == "" {
-		baseURL = rc.Provider.BaseURL
+	providerName = normalizeProviderName(providerName)
+	if providerName == "" {
+		providerName = normalizeProviderName(primaryProviderName)
 	}
-	if apiKey == "" {
-		apiKey = rc.Provider.APIKey
-	}
-
-	if baseURL != "" || apiKey != "" {
-		provider := llm.NewEinoProvider(
-			llm.WithProviderName(providerName),
-			llm.WithBaseURL(baseURL),
-			llm.WithAPIKey(apiKey),
-			llm.WithDefaultModel(modelName),
-		)
-		m, cleanup, err := provider.Build(ctx, cfg)
-		if err != nil {
-			return nil, llm.ModelInfo{}, cleanup, err
-		}
-		return m, findModelInfo(provider.Models(), modelName), cleanup, nil
-	}
-
-	reg := llm.NewProviderRegistry()
-	provider, err := reg.Get(providerName)
+	endpoint, _, err := resolveSmallModelProviderSettings(primaryProviderName, providerName, rc)
 	if err != nil {
 		return nil, llm.ModelInfo{}, nil, err
 	}
-	m, cleanup, err := provider.Build(ctx, cfg)
+	if providerName != "eino" && providerName != "openai" && strings.TrimSpace(endpoint) == "" {
+		return nil, llm.ModelInfo{}, nil, providerEndpointRequiredError(providerName)
+	}
+	request := llm.ModelRequest{
+		ProviderID: providerName,
+		ModelID:    modelName,
+		Endpoint:   endpoint,
+	}
+	providerSampling := config.SamplingSettings{}
+	if providerIdentityMatches(resolveProviderName("", rc), providerName) {
+		providerSampling = rc.ProviderSampling()
+	}
+	applySamplingSettings(&request, rc.SmallModelSampling(), providerSampling)
+	return r.build(ctx, request)
+}
+
+func applySamplingSettings(request *llm.ModelRequest, model, provider config.SamplingSettings) {
+	if model.TemperatureSet {
+		request.Temperature = model.Temperature
+		request.TemperatureSet = true
+	} else if provider.TemperatureSet {
+		request.Temperature = provider.Temperature
+		request.TemperatureSet = true
+	}
+
+	if model.MaxTokensSet {
+		request.MaxTokens = model.MaxTokens
+		request.MaxTokensSet = true
+	} else if provider.MaxTokensSet {
+		request.MaxTokens = provider.MaxTokens
+		request.MaxTokensSet = true
+	} else {
+		request.MaxTokens = config.DefaultLLMMaxTokens
+		request.MaxTokensSet = true
+	}
+}
+
+func (r *cliModelResolver) build(ctx context.Context, request llm.ModelRequest) (llm.BaseChatModel, llm.ModelInfo, func(), error) {
+	if isDisabledCLIProvider(request.ProviderID) {
+		return nil, llm.ModelInfo{}, nil, unsupportedCLIProviderError(request.ProviderID)
+	}
+	ref, err := r.resolver.CredentialRefFor(request.ProviderID, request.Endpoint)
+	if err != nil {
+		return nil, llm.ModelInfo{}, nil, err
+	}
+	request.Credential = ref
+	resolved, err := r.resolver.ResolveModel(ctx, request)
+	if err != nil {
+		return nil, llm.ModelInfo{}, nil, err
+	}
+	model, cleanup, err := resolved.Build(ctx)
 	if err != nil {
 		return nil, llm.ModelInfo{}, cleanup, err
 	}
-	return m, findModelInfo(provider.Models(), modelName), cleanup, nil
+	if resolved.Model.Known {
+		return model, resolved.Model.Info, cleanup, nil
+	}
+	return model, llm.ModelInfo{}, cleanup, nil
+}
+
+func (r *cliModelResolver) buildInteractive(ctx context.Context, rc *config.Config, candidate llm.ModelSpec) (llm.BaseChatModel, llm.ModelInfo, func(), error) {
+	providerName := normalizeProviderName(candidate.ProviderID)
+	modelName := strings.TrimSpace(candidate.ModelID)
+	if providerIdentityMatches(r.primaryProviderID, providerName) {
+		return r.buildPrimary(ctx, rc, providerName, modelName)
+	}
+
+	request := llm.ModelRequest{ProviderID: providerName, ModelID: modelName}
+	if providerIdentityMatches(r.smallProviderID, providerName) {
+		request.Endpoint = r.smallEndpoint
+	}
+	providerSampling := config.SamplingSettings{}
+	if rc != nil && providerIdentityMatches(resolveProviderName("", rc), providerName) {
+		providerSampling = rc.ProviderSampling()
+	}
+	applySamplingSettings(&request, config.SamplingSettings{}, providerSampling)
+	return r.build(ctx, request)
+}
+
+func (r *cliModelResolver) listModelSpecs() []llm.ModelSpec {
+	if r == nil || r.resolver == nil {
+		return nil
+	}
+	return r.resolver.ListModels()
+}
+
+// listAvailableModels returns only models for a provider request accepted by
+// the same immutable resolver and exact-scope credential chain as generation.
+func listAvailableModels(rc *config.Config, providerName string) []llm.ModelInfo {
+	modelResolver, err := newCLIModelResolver(rc, providerName, true)
+	if err != nil {
+		return nil
+	}
+	return modelResolver.listAvailableModels(context.Background(), rc, providerName)
+}
+
+func (r *cliModelResolver) listAvailableModels(ctx context.Context, rc *config.Config, providerName string) []llm.ModelInfo {
+	request := llm.ModelRequest{ProviderID: providerName}
+	if providerIdentityMatches(r.primaryProviderID, providerName) {
+		request.Endpoint = r.primaryEndpoint
+	}
+	if rc != nil {
+		request.ModelID = resolveModelName("", rc)
+		applySamplingSettings(&request, rc.ModelSampling(), config.SamplingSettings{})
+	}
+	resolved, err := r.resolve(ctx, request)
+	if err != nil {
+		return nil
+	}
+	models := r.listModelSpecs()
+	result := make([]llm.ModelInfo, 0, len(models))
+	for _, model := range models {
+		if model.ProviderID == resolved.ProviderID {
+			result = append(result, model.Info)
+		}
+	}
+	return result
+}
+
+func (r *cliModelResolver) resolve(ctx context.Context, request llm.ModelRequest) (llm.ResolvedModel, error) {
+	if isDisabledCLIProvider(request.ProviderID) {
+		return llm.ResolvedModel{}, unsupportedCLIProviderError(request.ProviderID)
+	}
+	ref, err := r.resolver.CredentialRefFor(request.ProviderID, request.Endpoint)
+	if err != nil {
+		return llm.ResolvedModel{}, err
+	}
+	request.Credential = ref
+	return r.resolver.ResolveModel(ctx, request)
+}
+
+// resolveCLIProvider resolves only provider protocols that the CLI can route
+// without guessing. An explicit BaseURL declares an OpenAI-compatible custom
+// endpoint, while API-key-only routing is accepted only for the named Eino or
+// OpenAI-compatible defaults. Native Claude/Gemini identities are unavailable
+// in the CLI until their request and tool-call contracts are complete.
+func normalizeProviderName(providerName string) string {
+	return strings.ToLower(strings.TrimSpace(providerName))
+}
+
+// buildSmallModel builds a lightweight model from the SmallModelConfig section.
+// Primary credentials are reused only when provider identity and effective
+// endpoint origin match; different identities or origins use small-model
+// settings only.
+func buildSmallModel(ctx context.Context, rc *config.Config, primaryProviderName, providerName, modelName string) (llm.BaseChatModel, llm.ModelInfo, func(), error) {
+	if rc == nil {
+		return nil, llm.ModelInfo{}, nil, fmt.Errorf("assemble: buildSmallModel: config is nil")
+	}
+	modelResolver, err := newCLIModelResolver(rc, primaryProviderName, true)
+	if err != nil {
+		return nil, llm.ModelInfo{}, nil, err
+	}
+	return modelResolver.buildSmall(ctx, rc, primaryProviderName, providerName, modelName)
+}
+
+// resolveSmallModelProviderSettings prevents credentials from crossing a
+// provider identity or origin boundary. The small model inherits the primary
+// endpoint and credential only when its provider identity matches. If it
+// explicitly selects another endpoint, a primary key may be reused only when
+// the normalized origins still match.
+func resolveSmallModelProviderSettings(primaryProviderName, smallProviderName string, rc *config.Config) (baseURL, apiKey string, err error) {
+	baseURL = rc.SmallModel.BaseURL
+	apiKey = rc.SmallModel.APIKey
+	if providerIdentityMatches(primaryProviderName, smallProviderName) {
+		// The provider block belongs to its declared provider name. A CLI
+		// override may use this endpoint/key only when it names the same
+		// canonical identity; otherwise the selected provider has its own
+		// endpoint and credential scope.
+		primaryConfigMatches := providerIdentityMatches(resolveProviderName("", rc), primaryProviderName)
+		if baseURL == "" {
+			if primaryConfigMatches {
+				baseURL = rc.Provider.BaseURL
+				if apiKey == "" {
+					apiKey = rc.Provider.APIKey
+				}
+			}
+			return baseURL, apiKey, nil
+		}
+
+		if primaryConfigMatches && apiKey == "" && rc.Provider.APIKey != "" {
+			primaryOrigin, primaryOK := effectiveCLIProviderOrigin(primaryProviderName, rc.Provider.BaseURL)
+			smallOrigin, smallOK := effectiveCLIProviderOrigin(smallProviderName, baseURL)
+			if primaryOK && smallOK && primaryOrigin == smallOrigin {
+				apiKey = rc.Provider.APIKey
+			}
+		}
+		return baseURL, apiKey, nil
+	}
+
+	if baseURL == "" && apiKey == "" {
+		return "", "", fmt.Errorf("assemble: small provider %q differs from primary provider %q and has no own base_url or api_key", smallProviderName, primaryProviderName)
+	}
+	return baseURL, apiKey, nil
+}
+
+func providerIdentityMatches(primaryProviderName, smallProviderName string) bool {
+	primaryName := normalizeProviderName(primaryProviderName)
+	return primaryName != "" && primaryName == normalizeProviderName(smallProviderName)
+}
+
+func effectiveCLIProviderOrigin(providerName, baseURL string) (string, bool) {
+	if baseURL == "" {
+		switch normalizeProviderName(providerName) {
+		case "eino", "openai":
+			baseURL = cliDefaultOpenAICompatibleBaseURL
+		default:
+			return "", false
+		}
+	}
+
+	parsed, err := url.Parse(baseURL)
+	if err != nil || parsed.Hostname() == "" {
+		return "", false
+	}
+	scheme := strings.ToLower(parsed.Scheme)
+	port := parsed.Port()
+	switch scheme {
+	case "http":
+		if port == "" {
+			port = "80"
+		}
+	case "https":
+		if port == "" {
+			port = "443"
+		}
+	default:
+		return "", false
+	}
+
+	return scheme + "://" + net.JoinHostPort(strings.ToLower(parsed.Hostname()), port), true
 }
 
 // llmModelSummarizer adapts an llm.BaseChatModel to the compaction.Summarizer
@@ -1603,51 +2186,6 @@ func findModelInfo(models []llm.ModelInfo, name string) llm.ModelInfo {
 	return llm.ModelInfo{}
 }
 
-// hotReloadersMu guards activeHotReloaders.
-var hotReloadersMu sync.Mutex
-
-// activeHotReloaders holds all running MCP HotReloaders so they can be
-// stopped on session cleanup and manually triggered by /mcp reload.
-var activeHotReloaders []mcp.HotReloader
-
-// addHotReloader appends a running HotReloader to the package-level list.
-func addHotReloader(hr mcp.HotReloader) {
-	hotReloadersMu.Lock()
-	defer hotReloadersMu.Unlock()
-	activeHotReloaders = append(activeHotReloaders, hr)
-}
-
-// StopHotReloaders stops all active MCP HotReloaders. It is safe to call from
-// session cleanup and is idempotent.
-func StopHotReloaders() {
-	hotReloadersMu.Lock()
-	reloaders := activeHotReloaders
-	activeHotReloaders = nil
-	hotReloadersMu.Unlock()
-
-	for _, hr := range reloaders {
-		if err := hr.Stop(); err != nil {
-			slog.Warn("assemble_mcp_hot_reload_stop_failed", "reloader", hr.Name(), "err", err)
-		}
-	}
-}
-
-// ReloadAllHotReloaders manually triggers Reload on every active HotReloader.
-// It returns the number of reloaders that were triggered.
-func ReloadAllHotReloaders(ctx context.Context) int {
-	hotReloadersMu.Lock()
-	reloaders := make([]mcp.HotReloader, len(activeHotReloaders))
-	copy(reloaders, activeHotReloaders)
-	hotReloadersMu.Unlock()
-
-	for _, hr := range reloaders {
-		if err := hr.Reload(ctx); err != nil {
-			slog.Warn("assemble_mcp_hot_reload_manual_failed", "reloader", hr.Name(), "err", err)
-		}
-	}
-	return len(reloaders)
-}
-
 // registerMCPTools connects to configured MCP servers and registers their
 // tools into the tool registry. When no MCP servers are configured in the
 // main config file, it auto-loads from .go-cli/mcp.json or
@@ -1658,6 +2196,10 @@ func ReloadAllHotReloaders(ctx context.Context) int {
 // created for each connected server so that editing the config file
 // automatically triggers a reconnect and tool re-registration.
 func registerMCPTools(ctx context.Context, rc *config.Config, tr tools.DeferredRegistry) error {
+	return registerMCPToolsOwned(ctx, rc, tr, nil)
+}
+
+func registerMCPToolsOwned(ctx context.Context, rc *config.Config, tr tools.DeferredRegistry, owner *assemblyMCPResources) error {
 	servers, configPath := loadMCPServersWithConfigPath(ctx, rc)
 	if len(servers) == 0 {
 		return nil
@@ -1686,16 +2228,19 @@ func registerMCPTools(ctx context.Context, rc *config.Config, tr tools.DeferredR
 					cfg.Env = append(cfg.Env, k+"="+v)
 				}
 			} else if srv.URL != "" {
-				cfg.Transport = mcp.MCPTransportSSE
+				cfg.Transport = mcp.MCPTransportStreamableHTTP
 			} else {
 				return nil
 			}
 
 			var client mcp.MCPClient
-			if cfg.Transport == mcp.MCPTransportSSE {
+			if cfg.Transport == mcp.MCPTransportStreamableHTTP {
 				client = mcp.NewHTTPClientAdapter(cfg)
 			} else {
 				client = mcp.NewOfficialSDKAdapter(cfg)
+			}
+			if owner != nil {
+				owner.addClient(client)
 			}
 
 			if err := client.Connect(gctx); err != nil {
@@ -1727,7 +2272,9 @@ func registerMCPTools(ctx context.Context, rc *config.Config, tr tools.DeferredR
 	// the client and re-registers its tools.
 	if configPath != "" {
 		for _, client := range connected {
-			createAndStartHotReloader(ctx, configPath, client, tr)
+			if owner != nil {
+				createAndStartHotReloader(ctx, configPath, client, tr, owner)
+			}
 		}
 	}
 
@@ -1752,18 +2299,23 @@ func registerMCPToolBatch(ctx context.Context, tr tools.DeferredRegistry, client
 
 // createAndStartHotReloader builds a HotReloader for a single MCP client,
 // starts watching the config file, and registers it for shutdown.
-func createAndStartHotReloader(ctx context.Context, configPath string, client mcp.MCPClient, tr tools.DeferredRegistry) {
+func createAndStartHotReloader(ctx context.Context, configPath string, client mcp.MCPClient, tr tools.DeferredRegistry, owner *assemblyMCPResources) {
 	clientRef := client
 	registerFn := mcp.RegisterToolsFunc(func(mcpTools []mcp.MCPTool) {
 		registerMCPToolBatch(context.Background(), tr, clientRef, mcpTools)
 		slog.Info("assemble_mcp_hot_reload_reregistered", "server", clientRef.Name(), "tools", len(mcpTools))
 	})
 	hr := mcp.NewDefaultHotReloader(client, registerFn)
-	if watchErr := hr.Watch(ctx, configPath); watchErr != nil {
-		slog.Warn("assemble_mcp_hot_reload_watch_failed", "server", client.Name(), "err", watchErr)
+	if err := owner.addReloader(hr); err != nil {
 		return
 	}
-	addHotReloader(hr)
+	if watchErr := hr.Watch(ctx, configPath); watchErr != nil {
+		slog.Warn("assemble_mcp_hot_reload_watch_failed", "server", client.Name(), "err", watchErr)
+		if lifecycle, ok := hr.(mcp.HotReloadLifecycle); ok {
+			lifecycle.RequestStop()
+		}
+		return
+	}
 	slog.Info("assemble_mcp_hot_reload_started", "server", client.Name(), "config_path", configPath)
 }
 
@@ -1990,6 +2542,7 @@ type loopDetectorMiddleware struct {
 }
 
 var _ core.Middleware = (*loopDetectorMiddleware)(nil)
+var _ core.CanonicalMiddleware = (*loopDetectorMiddleware)(nil)
 
 // Name returns the middleware identifier.
 func (m *loopDetectorMiddleware) Name() string {
@@ -2002,6 +2555,10 @@ func (m *loopDetectorMiddleware) Name() string {
 // Wrap returns a wrapped AgentLoop that monitors events for loops.
 func (m *loopDetectorMiddleware) Wrap(next core.AgentLoop) core.AgentLoop {
 	return &loopDetectorLoop{detector: m.detector, manager: m.manager, next: next}
+}
+
+func (m *loopDetectorMiddleware) WrapCanonical(next core.CanonicalLoop) core.CanonicalLoop {
+	return &canonicalLoopDetectorLoop{detector: m.detector, manager: m.manager, next: next}
 }
 
 // loopDetectorLoop is the concrete wrapped loop produced by
@@ -2020,12 +2577,31 @@ func (l *loopDetectorLoop) Run(ctx context.Context, submission core.Submission, 
 	if err != nil {
 		return events, err
 	}
+	observeLoopDetector(ctx, l.detector, l.manager, events)
+	return events, nil
+}
 
+type canonicalLoopDetectorLoop struct {
+	detector production.LoopDetector
+	manager  *core.DefaultSystemReminderManager
+	next     core.CanonicalLoop
+}
+
+func (l *canonicalLoopDetectorLoop) RunCanonical(ctx context.Context, submission core.Submission, stream ...core.EventStream) (core.CanonicalRunResult, error) {
+	result, err := l.next.RunCanonical(ctx, submission, stream...)
+	if err != nil {
+		return result, err
+	}
+	observeLoopDetector(ctx, l.detector, l.manager, result.Events)
+	return result, nil
+}
+
+func observeLoopDetector(ctx context.Context, detector production.LoopDetector, manager *core.DefaultSystemReminderManager, events []core.AgentEvent) {
 	for _, ev := range events {
-		_ = l.detector.Observe(ctx, ev) //nolint:errcheck
+		_ = detector.Observe(ctx, ev) //nolint:errcheck
 	}
 
-	res := l.detector.Check(ctx)
+	res := detector.Check(ctx)
 	if res.Detected {
 		slog.WarnContext(ctx, "loop_detected",
 			"dimension", res.Dimension,
@@ -2033,13 +2609,11 @@ func (l *loopDetectorLoop) Run(ctx context.Context, submission core.Submission, 
 			"threshold", res.Threshold,
 			"message", res.Message,
 		)
-		l.manager.AddReminder(core.SystemReminder{
+		manager.AddReminder(core.SystemReminder{
 			ID:      "loop-detector",
 			Content: fmt.Sprintf("Loop detected: %s. Please try a different approach.", res.Message),
 		})
 	}
-
-	return events, err
 }
 
 // defaultCacheTTL is the default time-to-live for idempotent tool call results.
@@ -2168,51 +2742,32 @@ func recordToolTelemetry(ctx context.Context, telemetry production.Telemetry, to
 	if telemetry == nil {
 		return
 	}
+	toolClass := "other"
+	switch toolName {
+	case "read", "grep", "find", "ls", "image_read", "git_status", "git_diff", "git_log", "git_blame":
+		toolClass = "read"
+	case "write", "edit", "git_branch", "git_checkout", "git_commit", "git_create_branch", "git_fetch", "git_merge", "git_pr_create", "git_pull", "git_push", "git_reset", "git_revert", "git_stash", "git_stash_pop":
+		toolClass = "mutation"
+	case "bash", "remote_bash":
+		toolClass = "process"
+	case "web_fetch", "web_search":
+		toolClass = "web"
+	}
 	_ = telemetry.Record(ctx, production.TelemetryMetric{ //nolint:errcheck
 		Name:  "tool.call.count",
 		Value: 1,
 		Labels: map[string]string{
-			"tool":      toolName,
-			"cache_hit": fmt.Sprintf("%v", cacheHit),
+			"tool_class": toolClass,
+			"cache_hit":  fmt.Sprintf("%v", cacheHit),
 		},
 	})
 	_ = telemetry.Record(ctx, production.TelemetryMetric{ //nolint:errcheck
 		Name:  "tool.call.duration_ms",
 		Value: float64(duration.Milliseconds()),
 		Labels: map[string]string{
-			"tool": toolName,
+			"tool_class": toolClass,
 		},
 	})
-}
-
-// buildTraceExporter creates the appropriate TraceExporter from the tracing
-// config. Supported exporter types: "jsonl" (default), "stdout", "otlp".
-// When the exporter cannot be created (e.g. file open failure), nil is
-// returned and a warning is logged so assembly continues without tracing.
-func buildTraceExporter(tc config.TracingConfig, sessionID string, logger *slog.Logger) tracing.TraceExporter {
-	switch tc.Exporter {
-	case "stdout":
-		return tracing.NewStdoutTraceExporter(false)
-	case "otlp":
-		endpoint := tc.FilePath
-		if endpoint == "" {
-			endpoint = "http://localhost:4318/v1/traces"
-		}
-		return tracing.NewOTLPTraceExporter(tracing.OTLPTraceExporterConfig{
-			Endpoint: endpoint,
-		})
-	default: // "jsonl" or empty
-		dir := tc.FilePath
-		if dir == "" {
-			dir = ".go-cli/traces"
-		}
-		exp, err := tracing.NewJSONLTraceExporter(dir, sessionID)
-		if err != nil {
-			logger.Warn("assemble_tracing_jsonl_failed", "dir", dir, "err", err)
-			return nil
-		}
-		return exp
-	}
 }
 
 // buildRemoteBashTool constructs a RemoteBashTool from the remote config. It

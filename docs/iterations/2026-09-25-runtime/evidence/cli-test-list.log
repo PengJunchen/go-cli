@@ -1,0 +1,3 @@
+TestHITLQuestionReachesRealBubbleteaModel
+TestHITLQuestionCancellationRemovesRealTUIWait
+ok  	github.com/pengjunchen/go-cli/internal/cli	0.019s

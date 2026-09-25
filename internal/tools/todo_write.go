@@ -16,6 +16,7 @@ type TodoWriteTool struct {
 }
 
 var _ ToolDefinition = (*TodoWriteTool)(nil)
+var _ Parameterized = (*TodoWriteTool)(nil)
 
 // NewTodoWriteTool returns a TodoWriteTool backed by the given TodoStore, which
 // must be non-nil.
@@ -29,6 +30,23 @@ func (t *TodoWriteTool) Name() string { return "todo_write" }
 // Description returns a brief description of the tool.
 func (t *TodoWriteTool) Description() string {
 	return "todo_write: manages a todo list. Args: action (string: add|update|list|remove), id (string), content (string), status (string), priority (string)."
+}
+
+// Parameters returns the JSON Schema for the todo action and its optional
+// action-specific fields.
+func (*TodoWriteTool) Parameters() any {
+	return map[string]any{
+		"type": "object",
+		"properties": map[string]any{
+			"action":   map[string]any{"type": "string", "enum": []string{"add", "update", "list", "remove"}},
+			"id":       map[string]any{"type": "string"},
+			"content":  map[string]any{"type": "string"},
+			"status":   map[string]any{"type": "string"},
+			"priority": map[string]any{"type": "string"},
+		},
+		"required":             []string{"action"},
+		"additionalProperties": false,
+	}
 }
 
 // Execute dispatches a todo action based on args["action"].

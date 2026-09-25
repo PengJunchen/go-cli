@@ -20,8 +20,31 @@ import (
 // resolveColorProfile(os.Stderr) — called by NewBubbleteaApp — also resolves to
 // TrueColor even though stderr is not a TTY in the test environment.
 func TestMain(m *testing.M) {
+	type envState struct {
+		key    string
+		value  string
+		exists bool
+	}
+	vars := []envState{}
+	for _, key := range []string{"NO_COLOR", "CLICOLOR_FORCE", "COLORTERM", "TERM"} {
+		value, exists := os.LookupEnv(key)
+		vars = append(vars, envState{key: key, value: value, exists: exists})
+	}
+	// ANSI-rendering contract tests run with a stable color profile regardless
+	// of the host shell's NO_COLOR or TERM. Product NO_COLOR behavior is covered
+	// by an explicit test that sets the variable itself.
+	_ = os.Unsetenv("NO_COLOR")
 	os.Setenv("CLICOLOR_FORCE", "1")
 	os.Setenv("COLORTERM", "truecolor")
+	os.Setenv("TERM", "xterm-256color")
 	lipgloss.SetColorProfile(termenv.TrueColor)
-	os.Exit(m.Run())
+	code := m.Run()
+	for _, state := range vars {
+		if state.exists {
+			_ = os.Setenv(state.key, state.value)
+		} else {
+			_ = os.Unsetenv(state.key)
+		}
+	}
+	os.Exit(code)
 }
