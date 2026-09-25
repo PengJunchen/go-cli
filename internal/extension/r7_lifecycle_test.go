@@ -375,6 +375,64 @@ func TestPluginManagerShutdownDuringInitQuarantinesUntilLateInitCleansUp(t *test
 	assert.Equal(t, int32(1), ext.stopCalls.Load(), "retrying Shutdown must not repeat cleanup")
 }
 
+func TestPluginManagerShutdownContinuesAfterLateInitCleanup(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	releaseCallback := r7ReleaseOnce(release)
+	defer releaseCallback()
+	events := make(chan string, 2)
+	earlier := &r7LifecycleExt{name: "earlier", shutdown: func(context.Context) error {
+		events <- "earlier"
+		return nil
+	}}
+	late := &r7LifecycleExt{
+		name: "late",
+		init: func(context.Context, ExtensionRegistry) error {
+			close(started)
+			<-release
+			return nil
+		},
+		shutdown: func(context.Context) error {
+			events <- "late"
+			return nil
+		},
+	}
+	loader := newMgrTestPluginLoader("test")
+	loader.SetResult("plugins", []Extension{earlier, late})
+	manager := NewPluginManager(loader)
+	require.NoError(t, manager.Load(context.Background(), []string{"plugins"}))
+
+	initResult := make(chan error, 1)
+	go func() { initResult <- manager.Init(context.Background()) }()
+	<-started
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, manager.Shutdown(shutdownCtx), ErrCleanupPending)
+	manager.mu.RLock()
+	shutdownOwner := manager.shutdownOp
+	manager.mu.RUnlock()
+	require.NotNil(t, shutdownOwner)
+	assert.Equal(t, int32(0), earlier.stopCalls.Load(), "dependent shutdown waits for late Init cleanup")
+	secondWaitCtx, cancelSecondWait := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	require.ErrorIs(t, manager.Shutdown(secondWaitCtx), ErrCleanupPending)
+	cancelSecondWait()
+	manager.mu.RLock()
+	assert.Same(t, shutdownOwner, manager.shutdownOp, "concurrent callers join the original shutdown owner")
+	manager.mu.RUnlock()
+
+	releaseCallback()
+	require.ErrorIs(t, <-initResult, ErrCleanupPending)
+	require.Eventually(t, func() bool {
+		manager.mu.RLock()
+		defer manager.mu.RUnlock()
+		return manager.shutdownComplete
+	}, time.Second, time.Millisecond, "the original shutdown owner must resume without a caller retry")
+	assert.Equal(t, int32(1), late.stopCalls.Load())
+	assert.Equal(t, int32(1), earlier.stopCalls.Load())
+	assert.Equal(t, []string{"late", "earlier"}, []string{<-events, <-events})
+}
+
 func TestPluginManagerShutdownErrorsPropagateWithoutRepeatingCallbacks(t *testing.T) {
 	firstErr := errors.New("first shutdown failed")
 	secondErr := errors.New("second shutdown failed")
