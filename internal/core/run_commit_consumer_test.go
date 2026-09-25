@@ -1,0 +1,420 @@
+package core
+
+import (
+	"context"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/compaction"
+	"github.com/pengjunchen/go-cli/internal/llm"
+	"github.com/pengjunchen/go-cli/internal/tools"
+)
+
+type runCommitCountingCompactor struct{ calls int }
+
+func (compactor *runCommitCountingCompactor) Compact(_ context.Context, items []compaction.TurnItem, _ int, _ compaction.TokenEstimator) ([]compaction.TurnItem, error) {
+	compactor.calls++
+	return items, nil
+}
+
+type consumerTestSink struct {
+	mu               sync.Mutex
+	steps            []string
+	intents          []RunIntentBatch
+	executions       []ActionExecution
+	receipts         []RunToolReceipt
+	resolutions      []ExecutionResolution
+	terminal         *RunTerminal
+	beginErr         error
+	cancelAfterBegin context.CancelFunc
+	commitContexts   []consumerCommitContext
+}
+
+type consumerCommitContext struct {
+	runID       string
+	bound       bool
+	hasDeadline bool
+	deadline    time.Time
+}
+
+func (s *consumerTestSink) recordContext(ctx context.Context) {
+	deadline, hasDeadline := ctx.Deadline()
+	_, _, bound := RunCommitFromContext(ctx)
+	s.mu.Lock()
+	s.commitContexts = append(s.commitContexts, consumerCommitContext{
+		runID:       RunIDFromContext(ctx),
+		bound:       bound,
+		hasDeadline: hasDeadline,
+		deadline:    deadline,
+	})
+	s.mu.Unlock()
+}
+
+func (s *consumerTestSink) add(step string) {
+	s.mu.Lock()
+	s.steps = append(s.steps, step)
+	s.mu.Unlock()
+}
+
+func (s *consumerTestSink) CommitInput(ctx context.Context, _ RunCommitInput) error {
+	s.recordContext(ctx)
+	s.add("input")
+	return nil
+}
+
+func (s *consumerTestSink) BeginIntentBatch(ctx context.Context, batch RunIntentBatch) error {
+	s.recordContext(ctx)
+	s.mu.Lock()
+	s.steps = append(s.steps, "begin")
+	s.intents = append(s.intents, batch)
+	err := s.beginErr
+	cancel := s.cancelAfterBegin
+	s.cancelAfterBegin = nil
+	s.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+	return err
+}
+
+func (s *consumerTestSink) RecordExecution(ctx context.Context, execution ActionExecution) error {
+	s.recordContext(ctx)
+	s.mu.Lock()
+	s.steps = append(s.steps, "execution")
+	s.executions = append(s.executions, execution)
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *consumerTestSink) RecordReceipt(ctx context.Context, receipt RunToolReceipt) error {
+	s.recordContext(ctx)
+	s.mu.Lock()
+	s.steps = append(s.steps, "receipt")
+	s.receipts = append(s.receipts, receipt)
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *consumerTestSink) ResolveExecution(ctx context.Context, resolution ExecutionResolution) error {
+	s.recordContext(ctx)
+	s.mu.Lock()
+	s.steps = append(s.steps, "resolution")
+	s.resolutions = append(s.resolutions, resolution)
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *consumerTestSink) CommitCompaction(ctx context.Context, _ CompactionProjection) error {
+	s.recordContext(ctx)
+	s.add("compaction")
+	return nil
+}
+
+func (s *consumerTestSink) CommitTerminal(ctx context.Context, terminal RunTerminal) error {
+	s.recordContext(ctx)
+	s.mu.Lock()
+	s.steps = append(s.steps, "terminal")
+	copy := terminal
+	s.terminal = &copy
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *consumerTestSink) contextSnapshot() []consumerCommitContext {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]consumerCommitContext(nil), s.commitContexts...)
+}
+
+func (s *consumerTestSink) executionSnapshot() []ActionExecution {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]ActionExecution(nil), s.executions...)
+}
+
+func (s *consumerTestSink) resolutionSnapshot() []ExecutionResolution {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]ExecutionResolution(nil), s.resolutions...)
+}
+
+func (s *consumerTestSink) snapshot() ([]string, []RunIntentBatch, []RunToolReceipt, *RunTerminal) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]string(nil), s.steps...), append([]RunIntentBatch(nil), s.intents...), append([]RunToolReceipt(nil), s.receipts...), s.terminal
+}
+
+func newPreparedConsumerRegistry(t *testing.T, names ...string) *tools.MiddlewareToolRegistry {
+	t.Helper()
+	ctx := context.Background()
+	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck
+	deferred := tools.NewDeferredToolRegistryAdapter(base)
+	require.NoError(t, tools.RegisterDefaults(ctx, deferred, tools.WithRegisteredBuiltinWhitelist(names)))
+	registry := tools.NewMiddlewareToolRegistry(deferred)
+	require.NoError(t, registry.SetPreparedToolPolicy(func(_ context.Context, request tools.PreparedPolicyRequest) (tools.PreparedPolicyDecision, error) {
+		return tools.PreparedPolicyDecision{Allowed: true, Generations: request.Generations}, nil
+	}))
+	require.NoError(t, registry.SetPreparedToolStages(tools.PreparedToolStages{}))
+	return registry
+}
+
+func newPreparedConsumerReadRegistry(t *testing.T) *tools.MiddlewareToolRegistry {
+	t.Helper()
+	return newPreparedConsumerRegistry(t, "read")
+}
+
+type panicPreparedInvocation struct{ tools.PreparedInvocation }
+
+func (panicPreparedInvocation) Dispatch(context.Context) (*tools.ToolResult, error) {
+	panic("prepared dispatch panic")
+}
+
+type panicPreparedRegistry struct {
+	tools.ToolRegistry
+	tools.ToolCallPreparer
+}
+
+func (registry *panicPreparedRegistry) PrepareToolCall(ctx context.Context, call tools.ToolCall) (tools.PreparedInvocation, error) {
+	invocation, err := registry.ToolCallPreparer.PrepareToolCall(ctx, call)
+	if err != nil {
+		return nil, err
+	}
+	return panicPreparedInvocation{PreparedInvocation: invocation}, nil
+}
+
+var _ tools.ToolCallPreparer = (*panicPreparedRegistry)(nil)
+
+func TestRunCommitConsumerWritesSequentialFactsBeforeAcknowledging(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "input.txt")
+	require.NoError(t, os.WriteFile(path, []byte("durable read"), 0o600))
+	sink := &consumerTestSink{}
+	model := &scriptedChatModel{seq: []*llm.Message{
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "read-1", Name: "read", Args: map[string]any{"path": path}}}},
+		{Role: llm.RoleAssistant, Content: "done"},
+	}}
+	agent := NewAgentImpl("durable", NewLoopAgent(WithLLM(model), WithTools(newPreparedConsumerReadRegistry(t))))
+	owner := newRunOwner(context.Background(), nil, RunClaim{ID: "run-consumer-sequential"}, nil)
+	owner.ctx = WithRunCommit(owner.ctx, sink, RunCommitBinding{SessionID: "session-1", WorkspaceID: "workspace-1"})
+
+	_, runErr := owner.run(time.Second, func(ctx context.Context) (Result, error) {
+		return agent.Run(ctx, Submission{Type: SubmissionUserMessage, Content: "read file"})
+	})
+	require.NoError(t, runErr)
+	steps, batches, receipts, terminal := sink.snapshot()
+	require.Equal(t, []string{"input", "begin", "execution", "receipt", "resolution", "terminal"}, steps)
+	require.Len(t, batches, 1)
+	require.Len(t, batches[0].Intents, 1)
+	require.Empty(t, batches[0].KnownReceipts)
+	require.Len(t, receipts, 1)
+	require.Equal(t, uint64(2), receipts[0].TranscriptIndex)
+	require.Equal(t, DispatchStateDispatched, receipts[0].DispatchState)
+	require.Equal(t, ReceiptOutcomeSuccess, receipts[0].ReceiptOutcome)
+	require.NotNil(t, terminal)
+	require.Equal(t, "run-consumer-sequential", terminal.RunID)
+	require.Equal(t, RunOutcomeSuccess, terminal.Outcome)
+	require.Equal(t, 4, len(terminal.Transcript))
+	require.Equal(t, 2, model.idx, "the next provider request is allowed only after receipt and resolution sync")
+}
+
+func TestRunCommitConsumerBuffersParallelReceiptsInCanonicalOrder(t *testing.T) {
+	root := t.TempDir()
+	firstPath := filepath.Join(root, "first.txt")
+	secondPath := filepath.Join(root, "second.txt")
+	require.NoError(t, os.WriteFile(firstPath, []byte("first"), 0o600))
+	require.NoError(t, os.WriteFile(secondPath, []byte("second"), 0o600))
+	sink := &consumerTestSink{}
+	model := &scriptedChatModel{seq: []*llm.Message{
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{
+			{ID: "read-1", Name: "read", Args: map[string]any{"path": firstPath}},
+			{ID: "read-2", Name: "read", Args: map[string]any{"path": secondPath}},
+		}},
+		{Role: llm.RoleAssistant, Content: "done"},
+	}}
+	agent := NewAgentImpl("durable-parallel", NewLoopAgent(
+		WithLLM(model),
+		WithTools(newPreparedConsumerReadRegistry(t)),
+		WithExecutionMode(ExecutionModeParallel),
+	))
+	owner := newRunOwner(context.Background(), nil, RunClaim{ID: "run-consumer-parallel"}, nil)
+	owner.ctx = WithRunCommit(owner.ctx, sink, RunCommitBinding{SessionID: "session-1", WorkspaceID: "workspace-1"})
+
+	_, runErr := owner.run(time.Second, func(ctx context.Context) (Result, error) {
+		return agent.Run(ctx, Submission{Type: SubmissionUserMessage, Content: "read both"})
+	})
+	require.NoError(t, runErr)
+	steps, batches, receipts, terminal := sink.snapshot()
+	require.Equal(t, []string{"input", "begin", "execution", "receipt", "execution", "receipt", "resolution", "resolution", "terminal"}, steps)
+	require.Len(t, batches, 1)
+	require.Len(t, batches[0].Intents, 2)
+	require.Equal(t, []string{"read-1", "read-2"}, []string{batches[0].Intents[0].ToolCallID, batches[0].Intents[1].ToolCallID})
+	require.Len(t, receipts, 2)
+	require.Equal(t, []string{"read-1", "read-2"}, []string{receipts[0].ToolCallID, receipts[1].ToolCallID})
+	require.Equal(t, []uint64{2, 3}, []uint64{receipts[0].TranscriptIndex, receipts[1].TranscriptIndex})
+	require.NotNil(t, terminal)
+	require.Equal(t, RunOutcomeSuccess, terminal.Outcome)
+	require.Equal(t, 2, model.idx, "the next provider request follows the canonical receipt and resolution sequence")
+}
+
+func TestRunCommitConsumerStopsAfterPreparedActionWithoutCompletionProof(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "match.txt"), []byte("needle\n"), 0o600))
+	sink := &consumerTestSink{}
+	model := &scriptedChatModel{seq: []*llm.Message{
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{
+			ID: "grep-1", Name: "grep", Args: map[string]any{"pattern": "needle", "path": root},
+		}}},
+		{Role: llm.RoleAssistant, Content: "must not be requested"},
+	}}
+	agent := NewAgentImpl("durable-proofless", NewLoopAgent(
+		WithLLM(model),
+		WithTools(newPreparedConsumerRegistry(t, "grep")),
+	))
+	owner := newRunOwner(context.Background(), nil, RunClaim{ID: "run-consumer-proofless"}, nil)
+	owner.ctx = WithRunCommit(owner.ctx, sink, RunCommitBinding{SessionID: "session-1", WorkspaceID: "workspace-1"})
+
+	_, runErr := owner.run(time.Second, func(ctx context.Context) (Result, error) {
+		return agent.Run(ctx, Submission{Type: SubmissionUserMessage, Content: "find needle"})
+	})
+	require.ErrorIs(t, runErr, ErrRunCommitQuiescenceUnproven)
+	steps, batches, receipts, terminal := sink.snapshot()
+	require.Equal(t, []string{"input", "begin", "execution", "receipt", "terminal"}, steps)
+	require.Len(t, batches, 1)
+	require.Len(t, receipts, 1)
+	require.Equal(t, ReceiptOutcomeSuccess, receipts[0].ReceiptOutcome, "the tool result is known independently from local quiescence")
+	require.NotNil(t, terminal)
+	require.Equal(t, RunOutcomeUnknown, terminal.Outcome)
+	require.Equal(t, 1, model.idx, "a nil completion proof keeps the dispatch marker unresolved and stops the provider")
+}
+
+func TestRunCommitConsumerFailsClosedBeforeCompactorOrNextProvider(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "input.txt")
+	require.NoError(t, os.WriteFile(path, []byte("durable read"), 0o600))
+	sink := &consumerTestSink{}
+	model := &scriptedChatModel{seq: []*llm.Message{
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "read-1", Name: "read", Args: map[string]any{"path": path}}}},
+		{Role: llm.RoleAssistant, Content: "must not be requested"},
+	}}
+	loop := NewLoopAgent(WithLLM(model), WithTools(newPreparedConsumerReadRegistry(t)))
+	compactor := &runCommitCountingCompactor{}
+	loop.SetMidTurnCompaction(compaction.NewMidTurnCompact(compaction.WithThresholdRatio(0.5)), compactor, compaction.NewHeuristicTokenEstimator(), 1)
+	agent := NewAgentImpl("durable-compaction", loop)
+	owner := newRunOwner(context.Background(), nil, RunClaim{ID: "run-consumer-compaction"}, nil)
+	owner.ctx = WithRunCommit(owner.ctx, sink, RunCommitBinding{SessionID: "session-1", WorkspaceID: "workspace-1"})
+
+	_, runErr := owner.run(time.Second, func(ctx context.Context) (Result, error) {
+		return agent.Run(ctx, Submission{Type: SubmissionUserMessage, Content: "read file"})
+	})
+	require.ErrorIs(t, runErr, ErrRunCommitCompactionProjectionUnavailable)
+	require.Zero(t, compactor.calls, "durable projection is unavailable before the real compactor or summarizer runs")
+	steps, _, receipts, terminal := sink.snapshot()
+	require.Equal(t, []string{"input", "begin", "execution", "receipt", "resolution", "terminal"}, steps)
+	require.Len(t, receipts, 1)
+	require.NotNil(t, terminal)
+	require.Equal(t, RunOutcomeError, terminal.Outcome)
+	require.Equal(t, 1, model.idx, "the next provider request is forbidden after threshold-triggered compaction is rejected")
+}
+
+func TestRunCommitConsumerUsesOneBoundedCleanupContextAfterCancellation(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "input.txt")
+	require.NoError(t, os.WriteFile(path, []byte("durable read"), 0o600))
+	sink := &consumerTestSink{}
+	parentCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	sink.cancelAfterBegin = cancel
+	model := &scriptedChatModel{seq: []*llm.Message{
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{
+			{ID: "read-1", Name: "read", Args: map[string]any{"path": path}},
+			{ID: "read-2", Name: "read", Args: map[string]any{"path": path}},
+		}},
+		{Role: llm.RoleAssistant, Content: "must not be requested"},
+	}}
+	agent := NewAgentImpl("durable-cancel", NewLoopAgent(WithLLM(model), WithTools(newPreparedConsumerReadRegistry(t))))
+	owner := newRunOwner(parentCtx, nil, RunClaim{ID: "run-consumer-cancel"}, nil)
+	owner.ctx = WithRunCommit(owner.ctx, sink, RunCommitBinding{SessionID: "session-1", WorkspaceID: "workspace-1"})
+
+	_, runErr := owner.run(time.Second, func(ctx context.Context) (Result, error) {
+		return agent.Run(ctx, Submission{Type: SubmissionUserMessage, Content: "read file"})
+	})
+	require.ErrorIs(t, runErr, context.Canceled)
+	steps, _, receipts, terminal := sink.snapshot()
+	require.Equal(t, []string{"input", "begin", "execution", "receipt", "resolution", "begin", "receipt", "terminal"}, steps)
+	require.Len(t, receipts, 2)
+	require.Equal(t, []string{ReceiptOutcomeInterrupted, ReceiptOutcomeInterrupted}, []string{receipts[0].ReceiptOutcome, receipts[1].ReceiptOutcome})
+	require.NotNil(t, terminal)
+	require.Equal(t, RunOutcomeCancelled, terminal.Outcome)
+	require.Equal(t, 1, model.idx, "cancellation prevents a follow-up provider request")
+
+	contexts := sink.contextSnapshot()
+	require.Len(t, contexts, len(steps))
+	for _, commitCtx := range contexts {
+		require.True(t, commitCtx.bound, "cleanup bookkeeping retains the original run binding")
+		require.Equal(t, "run-consumer-cancel", commitCtx.runID)
+	}
+	cleanupContexts := contexts[2:]
+	require.NotEmpty(t, cleanupContexts)
+	deadline := cleanupContexts[0].deadline
+	require.True(t, cleanupContexts[0].hasDeadline)
+	for _, commitCtx := range cleanupContexts {
+		require.True(t, commitCtx.hasDeadline)
+		require.Equal(t, deadline, commitCtx.deadline, "cancellation bookkeeping shares one absolute cleanup deadline")
+	}
+}
+
+func TestRunCommitConsumerRejectsDirectRealChildBeforeProvider(t *testing.T) {
+	sink := &consumerTestSink{}
+	model := &scriptedChatModel{seq: []*llm.Message{{Role: llm.RoleAssistant, Content: "must not be requested"}}}
+	runner := &realSubAgentRunner{model: model}
+	ctx := WithRunCommit(context.Background(), sink, RunCommitBinding{
+		SessionID:       "parent-session",
+		WorkspaceID:     "workspace-1",
+		OwnerGeneration: "parent-owner",
+	})
+
+	_, runErr := runner.Run(ctx, "same text as parent is irrelevant", nil, func(AgentEvent) {})
+	require.ErrorIs(t, runErr, ErrRunCommitChildUnsupported)
+	require.Zero(t, model.idx, "a child without an independent physical-session factory fails before provider work")
+	steps, _, _, _ := sink.snapshot()
+	require.Empty(t, steps, "the child must not reuse or mutate the parent's durable sink")
+}
+
+func TestRunCommitConsumerTreatsDispatchPanicAsPossiblyDispatched(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "input.txt")
+	require.NoError(t, os.WriteFile(path, []byte("durable read"), 0o600))
+	sink := &consumerTestSink{}
+	base := newPreparedConsumerReadRegistry(t)
+	registry := &panicPreparedRegistry{ToolRegistry: base, ToolCallPreparer: base}
+	model := &scriptedChatModel{seq: []*llm.Message{
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "read-panic", Name: "read", Args: map[string]any{"path": path}}}},
+		{Role: llm.RoleAssistant, Content: "must not be requested"},
+	}}
+	agent := NewAgentImpl("durable-panic", NewLoopAgent(WithLLM(model), WithTools(registry)))
+	owner := newRunOwner(context.Background(), nil, RunClaim{ID: "run-consumer-panic"}, nil)
+	owner.ctx = WithRunCommit(owner.ctx, sink, RunCommitBinding{SessionID: "session-1", WorkspaceID: "workspace-1"})
+
+	_, runErr := owner.run(time.Second, func(ctx context.Context) (Result, error) {
+		return agent.Run(ctx, Submission{Type: SubmissionUserMessage, Content: "read file"})
+	})
+	require.Error(t, runErr)
+	require.True(t, hasUnknownToolOutcome(runErr))
+	require.Equal(t, 1, model.idx, "a dispatch panic cannot authorize a later provider request")
+	steps, _, receipts, terminal := sink.snapshot()
+	require.Equal(t, []string{"input", "begin", "execution", "receipt", "terminal"}, steps)
+	require.Len(t, receipts, 1)
+	require.Equal(t, ReceiptOutcomeUnknown, receipts[0].ReceiptOutcome)
+	executions := sink.executionSnapshot()
+	require.Len(t, executions, 1)
+	require.Equal(t, DispatchStateDispatched, executions[0].DispatchState, "only a normally returned committed=false result proves pre-dispatch rejection")
+	require.Equal(t, RunExecutionCleanupPending, executions[0].ResourceState)
+	require.Empty(t, sink.resolutionSnapshot(), "panic is not a not-dispatched proof or a local completion proof")
+	require.NotNil(t, terminal)
+	require.Equal(t, RunOutcomeUnknown, terminal.Outcome)
+}

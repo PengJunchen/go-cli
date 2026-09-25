@@ -38,12 +38,25 @@ const (
 )
 
 type runCompletionTask struct {
-	intent ActionIntent
-	signal tools.PreparedCompletionSignal
-	state  runCompletionTaskState
-	done   <-chan struct{}
-	proof  tools.PreparedCompletionProof
-	read   func() tools.PreparedCompletionProof
+	intent                ActionIntent
+	signal                tools.PreparedCompletionSignal
+	state                 runCompletionTaskState
+	done                  <-chan struct{}
+	proof                 tools.PreparedCompletionProof
+	read                  func() tools.PreparedCompletionProof
+	receiptDurable        bool
+	proofExecutionDurable bool
+	resolutionDurable     bool
+}
+
+type runCompletionTaskDetails struct {
+	id                    uint64
+	intent                ActionIntent
+	state                 runCompletionTaskState
+	proof                 tools.PreparedCompletionProof
+	receiptDurable        bool
+	proofExecutionDurable bool
+	resolutionDurable     bool
 }
 
 type runCompletionTaskHandoff struct {
@@ -189,6 +202,39 @@ func handoffRunCompletionTask(ctx context.Context, taskID uint64) {
 	if ok && tracker != nil {
 		tracker.HandoffCompletionTask(taskID)
 	}
+}
+
+func markRunCompletionReceiptDurable(ctx context.Context, taskID uint64) {
+	if owner := runOwnerFromContext(ctx); owner != nil {
+		owner.markCompletionReceiptDurable(taskID)
+	}
+}
+
+func markRunCompletionProofExecutionDurable(ctx context.Context, taskID uint64) {
+	if owner := runOwnerFromContext(ctx); owner != nil {
+		owner.markCompletionProofExecutionDurable(taskID)
+	}
+}
+
+func markRunCompletionResolved(ctx context.Context, taskID uint64) {
+	if owner := runOwnerFromContext(ctx); owner != nil {
+		owner.markCompletionResolved(taskID)
+	}
+}
+
+func runCompletionDetails(ctx context.Context, taskID uint64) (runCompletionTaskDetails, bool) {
+	if owner := runOwnerFromContext(ctx); owner != nil {
+		return owner.completionDetails(taskID)
+	}
+	return runCompletionTaskDetails{}, false
+}
+
+func runOwnerFromContext(ctx context.Context) *runOwner {
+	if ctx == nil {
+		return nil
+	}
+	owner, _ := ctx.Value(runOwnerContextKey{}).(*runOwner)
+	return owner
 }
 
 func markRunOutcomeUnknown(ctx context.Context) {
@@ -407,6 +453,51 @@ func (o *runOwner) completionTaskSnapshot(id uint64) (runCompletionTaskState, to
 		return "", "", false
 	}
 	return task.state, task.proof, true
+}
+
+func (o *runOwner) completionDetails(id uint64) (runCompletionTaskDetails, bool) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	task := o.completionTasks[id]
+	if task == nil {
+		return runCompletionTaskDetails{}, false
+	}
+	return runCompletionTaskDetails{
+		id:                    id,
+		intent:                task.intent,
+		state:                 task.state,
+		proof:                 task.proof,
+		receiptDurable:        task.receiptDurable,
+		proofExecutionDurable: task.proofExecutionDurable,
+		resolutionDurable:     task.resolutionDurable,
+	}, true
+}
+
+func (o *runOwner) markCompletionReceiptDurable(id uint64) {
+	o.mu.Lock()
+	if task := o.completionTasks[id]; task != nil {
+		task.receiptDurable = true
+		o.signalLocked()
+	}
+	o.mu.Unlock()
+}
+
+func (o *runOwner) markCompletionProofExecutionDurable(id uint64) {
+	o.mu.Lock()
+	if task := o.completionTasks[id]; task != nil {
+		task.proofExecutionDurable = true
+		o.signalLocked()
+	}
+	o.mu.Unlock()
+}
+
+func (o *runOwner) markCompletionResolved(id uint64) {
+	o.mu.Lock()
+	if task := o.completionTasks[id]; task != nil {
+		task.resolutionDurable = true
+		o.signalLocked()
+	}
+	o.mu.Unlock()
 }
 
 // waitForCompletionTasks is a bounded, non-worker-path wait on the exact
@@ -848,8 +939,13 @@ func (o *runOwner) supervise() {
 		}
 		claim := o.claim
 		guard := o.guard
+		terminalSynced := !o.terminalSyncRequired || o.terminalSyncSuccess
 		o.mu.Unlock()
 
+		var lateCommitErr error
+		if terminalSynced {
+			lateCommitErr = o.drainLateCompletionTasks()
+		}
 		leasePanicked := false
 		if closeLease {
 			leasePanicked = closeRunCommitLease(lease)
@@ -858,12 +954,17 @@ func (o *runOwner) supervise() {
 
 		o.mu.Lock()
 		o.released = true
+		if lateCommitErr != nil {
+			o.runErr = errors.Join(o.runErr, lateCommitErr)
+			o.unknown = true
+			o.status.Outcome = RunOutcomeUnknown
+		}
 		if leasePanicked {
 			o.runErr = errors.Join(o.runErr, ErrRunCommitLeaseClosePanicked)
 			o.unknown = true
 			o.status.Outcome = RunOutcomeUnknown
 		}
-		if leasePanicked || !o.durableCommitSucceededLocked() {
+		if lateCommitErr != nil || leasePanicked || !o.durableCommitSucceededLocked() {
 			o.status.ExecutionState = RunExecutionQuarantined
 		} else {
 			o.status.ExecutionState = RunExecutionQuiescent
@@ -879,6 +980,69 @@ func (o *runOwner) supervise() {
 		}
 		return
 	}
+}
+
+// drainLateCompletionTasks is the one non-worker writer for proof that became
+// ready after the Loop's safe point. The terminal checkpoint and the exact
+// tool receipt must already be durable. A failed write is not retried here;
+// the run keeps its error/quarantine state and still releases local ownership
+// after all resources have joined.
+func (o *runOwner) drainLateCompletionTasks() error {
+	o.mu.Lock()
+	callbackCtx := o.callbackCtx
+	tasks := make([]runCompletionTaskDetails, 0, len(o.completionTasks))
+	for id := uint64(1); id <= o.nextCompletionTask; id++ {
+		task := o.completionTasks[id]
+		if task == nil || !task.receiptDurable || task.resolutionDurable || task.state != runCompletionTaskReady || !validRunCompletionProof(task.proof) {
+			continue
+		}
+		tasks = append(tasks, runCompletionTaskDetails{
+			id:                    id,
+			intent:                task.intent,
+			state:                 task.state,
+			proof:                 task.proof,
+			receiptDurable:        task.receiptDurable,
+			proofExecutionDurable: task.proofExecutionDurable,
+			resolutionDurable:     task.resolutionDurable,
+		})
+	}
+	o.mu.Unlock()
+	if len(tasks) == 0 {
+		return nil
+	}
+	sink, _, ok := RunCommitFromContext(callbackCtx)
+	if !ok {
+		return ErrRunCommitOwnerUnavailable
+	}
+	commitCtx := o.CleanupCommitContext(callbackCtx)
+	for _, task := range tasks {
+		intent := task.intent
+		if !task.proofExecutionDurable {
+			execution := ActionExecution{
+				RunID:                      intent.RunID,
+				AssistantTranscriptOrdinal: intent.AssistantTranscriptOrdinal,
+				ToolCallID:                 intent.ToolCallID,
+				ActionID:                   intent.ActionID,
+				OwnerGeneration:            intent.OwnerGeneration,
+				DispatchState:              DispatchStateDispatched,
+				ResourceState:              RunExecutionQuiescent,
+				CompletionProof:            task.proof,
+			}
+			if err := sink.RecordExecution(commitCtx, execution); err != nil {
+				return runCommitPersistenceError{operation: "late execution", cause: err}
+			}
+			o.markCompletionProofExecutionDurable(task.id)
+		}
+		if err := sink.ResolveExecution(commitCtx, ExecutionResolution{
+			RunID:    intent.RunID,
+			ActionID: intent.ActionID,
+			Evidence: ResolutionLocalResourcesStopped,
+		}); err != nil {
+			return runCommitPersistenceError{operation: "late execution resolution", cause: err}
+		}
+		o.markCompletionResolved(task.id)
+	}
+	return nil
 }
 
 func closeRunCommitLease(lease RunCommitRunLease) (panicked bool) {

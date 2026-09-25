@@ -47,6 +47,14 @@ var _ subAgentRunner = (*realSubAgentRunner)(nil)
 // recursion depth limit: if the depth propagated through the context meets or
 // exceeds maxDepth, the run is aborted with errSubAgentDepthExceeded.
 func (r *realSubAgentRunner) Run(ctx context.Context, prompt string, inbox <-chan string, emit func(AgentEvent)) (AgentMessage, error) {
+	// A real child inherits the caller's context. Until child runners can be
+	// given a separately prepared physical session and its own run binding, it
+	// must not reuse a parent's durable sink, even when invoked without the
+	// default dispatcher.
+	if _, _, bound := RunCommitFromContext(ctx); bound {
+		return AgentMessage{}, ErrRunCommitChildUnsupported
+	}
+
 	// Read the recursion depth from the context (default 0 for top-level).
 	depth := r.depth
 	if d, ok := ctx.Value(subagentDepthKey{}).(int); ok && d > depth {
