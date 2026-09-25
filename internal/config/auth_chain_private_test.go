@@ -233,16 +233,110 @@ func TestLookupScopedModelsJSONReadAndParseFailuresAreSourceErrors(t *testing.T)
 	}
 }
 
-func TestLookupScopedModelsJSONDoesNotRequirePrivateMetadataMode(t *testing.T) {
+func TestLookupScopedModelsJSONMetadataDoesNotRequirePrivatePermissions(t *testing.T) {
+	scope := AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test"}
+	for _, document := range []string{
+		`{"models":{"openai":{"name":"gpt-example"}}}`,
+		`{"credentials":[]}`,
+	} {
+		t.Run(document, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			modelsDir := filepath.Join(home, ".config", "go-cli")
+			require.NoError(t, os.MkdirAll(modelsDir, 0o755))
+			require.NoError(t, os.Chmod(modelsDir, 0o755))
+			path := filepath.Join(modelsDir, "models.json")
+			require.NoError(t, os.WriteFile(path, []byte(document), 0o644))
+			require.NoError(t, os.Chmod(path, 0o644))
+
+			key, err := lookupScopedModelsJSON(scope)
+			require.ErrorIs(t, err, ErrAuthNotFound)
+			assert.Empty(t, key)
+		})
+	}
+}
+
+func TestLookupScopedModelsJSONCredentialRequiresPrivateFileAndPath(t *testing.T) {
+	const secret = "models-secret-canary"
+	data := []byte(`{"credentials":[{"provider":"openai","protocol":"openai-compatible","origin":"https://api.example.test","api_key":"` + secret + `"}]}`)
+	scope := AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test"}
+	cases := []struct {
+		name  string
+		setup func(t *testing.T, home, path string)
+	}{
+		{
+			name: "wide file",
+			setup: func(t *testing.T, home, path string) {
+				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+				require.NoError(t, os.WriteFile(path, data, 0o644))
+				require.NoError(t, os.Chmod(path, 0o644))
+			},
+		},
+		{
+			name: "wide parent",
+			setup: func(t *testing.T, home, path string) {
+				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o755))
+				require.NoError(t, os.Chmod(filepath.Dir(path), 0o755))
+				require.NoError(t, os.WriteFile(path, data, 0o600))
+			},
+		},
+		{
+			name: "default config directory symlink",
+			setup: func(t *testing.T, home, path string) {
+				external := t.TempDir()
+				modelsDir := filepath.Join(external, "go-cli")
+				require.NoError(t, os.Mkdir(modelsDir, 0o700))
+				require.NoError(t, os.WriteFile(filepath.Join(modelsDir, "models.json"), data, 0o600))
+				require.NoError(t, os.Symlink(external, filepath.Join(home, ".config")))
+			},
+		},
+		{
+			name: "app directory symlink",
+			setup: func(t *testing.T, home, path string) {
+				configDir := filepath.Join(home, ".config")
+				require.NoError(t, os.Mkdir(configDir, 0o700))
+				external := t.TempDir()
+				require.NoError(t, os.Chmod(external, 0o700))
+				require.NoError(t, os.WriteFile(filepath.Join(external, "models.json"), data, 0o600))
+				require.NoError(t, os.Symlink(external, filepath.Join(configDir, "go-cli")))
+			},
+		},
+		{
+			name: "models file symlink",
+			setup: func(t *testing.T, home, path string) {
+				require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+				target := filepath.Join(filepath.Dir(path), "target.json")
+				require.NoError(t, os.WriteFile(target, data, 0o600))
+				require.NoError(t, os.Symlink(target, path))
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			path := filepath.Join(home, ".config", "go-cli", "models.json")
+			tc.setup(t, home, path)
+
+			key, err := lookupScopedModelsJSON(scope)
+			require.Error(t, err)
+			assert.False(t, errors.Is(err, ErrAuthNotFound))
+			assert.Empty(t, key)
+			assert.NotContains(t, err.Error(), secret)
+		})
+	}
+}
+
+func TestLookupScopedModelsJSONReadsCredentialFromPrivateFile(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	modelsDir := filepath.Join(home, ".config", "go-cli")
-	require.NoError(t, os.MkdirAll(modelsDir, 0o755))
-	scope, err := normalizeAuthScope(AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test"})
-	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(modelsDir, 0o700))
+	scope := AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test"}
 	data := []byte(`{"credentials":[{"provider":"openai","protocol":"openai-compatible","origin":"https://api.example.test","api_key":"models-secret"}]}`)
 	path := filepath.Join(modelsDir, "models.json")
-	require.NoError(t, os.WriteFile(path, data, 0o644))
+	require.NoError(t, os.WriteFile(path, data, 0o600))
 
 	key, err := lookupScopedModelsJSON(scope)
 	require.NoError(t, err)
@@ -289,6 +383,34 @@ func TestLookupScopedCredentialDataRejectsMalformedDocumentsAndRecords(t *testin
 		{name: "empty key", data: `{"credentials":[{"provider":"openai","protocol":"openai-compatible","origin":"https://api.example.test","api_key":""}]}`},
 		{name: "whitespace key", data: `{"credentials":[{"provider":"openai","protocol":"openai-compatible","origin":"https://api.example.test","api_key":"   "}]}`},
 		{name: "matched record followed by invalid record", data: `{"credentials":[{"provider":"openai","protocol":"openai-compatible","origin":"https://api.example.test","api_key":"` + secret + `"},null]}`},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			key, err := lookupScopedCredentialData([]byte(tc.data), scope)
+			require.Error(t, err)
+			assert.False(t, errors.Is(err, ErrAuthNotFound))
+			assert.Empty(t, key)
+			assert.NotContains(t, err.Error(), secret)
+		})
+	}
+}
+
+func TestLookupScopedCredentialDataRejectsDuplicateMembers(t *testing.T) {
+	scope, err := normalizeAuthScope(AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test"})
+	require.NoError(t, err)
+	const secret = "duplicate-member-secret"
+	validRecord := `{"provider":"openai","protocol":"openai-compatible","origin":"https://api.example.test","api_key":"` + secret + `"}`
+	cases := []struct {
+		name string
+		data string
+	}{
+		{name: "duplicate credentials", data: `{"credentials":[` + validRecord + `],"credentials":[]}`},
+		{name: "case alias credentials", data: `{"credentials":[],"Credentials":[]}`},
+		{name: "duplicate provider", data: `{"credentials":[{"provider":"openai","provider":"anthropic","protocol":"openai-compatible","origin":"https://api.example.test","api_key":"` + secret + `"}]}`},
+		{name: "duplicate protocol", data: `{"credentials":[{"provider":"openai","protocol":"openai-compatible","Protocol":"anthropic","origin":"https://api.example.test","api_key":"` + secret + `"}]}`},
+		{name: "duplicate origin", data: `{"credentials":[{"provider":"openai","protocol":"openai-compatible","origin":"https://api.example.test","Origin":"https://other.example.test","api_key":"` + secret + `"}]}`},
+		{name: "duplicate api key", data: `{"credentials":[{"provider":"openai","protocol":"openai-compatible","origin":"https://api.example.test","api_key":"first-secret","API_KEY":"second-secret"}]}`},
 	}
 
 	for _, tc := range cases {
