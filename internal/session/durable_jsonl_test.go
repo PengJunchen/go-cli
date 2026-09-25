@@ -662,7 +662,8 @@ func TestDurableWriterAllowsLateCompletionResolutionWhileSiblingCallOpen(t *test
 	futureProof = append(futureProof, SessionEntry{
 		ID: "execution-future", ParentID: "resolution-1", Type: EntryTypeTool, RunID: "run-late-proof",
 		WorkspaceID: "workspace-late-proof", ActionBatchID: "batch-1", ActionID: "action-1",
-		ActionState: ActionStateExecution, AssistantTranscriptOrdinal: ptrUint64(0), ToolCallID: "call-1", ToolName: "read",
+		ActionState: ActionStateExecution, DispatchState: DispatchStateDispatched,
+		AssistantTranscriptOrdinal: ptrUint64(0), ToolCallID: "call-1", ToolName: "read",
 		CompletionProof: tools.CompletionOwnedProcessGroupJoined, RecordVersion: 1, SessionID: snapshot.SessionID, BranchID: snapshot.ActiveBranchID,
 		Seq: snapshot.MaxSeq + 1,
 	})
@@ -794,7 +795,8 @@ func prepareTwoCallCompletionFixture(t *testing.T, proofBeforeReceipt bool) (*Du
 		proof, err := writer.AppendAndSync(context.Background(), SessionEntry{
 			ID: "execution-1", ParentID: parentID, Type: EntryTypeTool, RunID: "run-late-proof",
 			WorkspaceID: "workspace-late-proof", ActionBatchID: "batch-1", ActionID: "action-1",
-			ActionState: ActionStateExecution, AssistantTranscriptOrdinal: &ordinal, ToolCallID: "call-1", ToolName: "read",
+			ActionState: ActionStateExecution, DispatchState: DispatchStateDispatched,
+			AssistantTranscriptOrdinal: &ordinal, ToolCallID: "call-1", ToolName: "read",
 			CompletionProof: tools.CompletionOwnedProcessGroupJoined,
 		})
 		if err != nil {
@@ -819,7 +821,8 @@ func prepareTwoCallCompletionFixture(t *testing.T, proofBeforeReceipt bool) (*Du
 		proof, err := writer.AppendAndSync(context.Background(), SessionEntry{
 			ID: "execution-1", ParentID: receipt[0].ID, Type: EntryTypeTool, RunID: "run-late-proof",
 			WorkspaceID: "workspace-late-proof", ActionBatchID: "batch-1", ActionID: "action-1",
-			ActionState: ActionStateExecution, AssistantTranscriptOrdinal: &ordinal, ToolCallID: "call-1", ToolName: "read",
+			ActionState: ActionStateExecution, DispatchState: DispatchStateDispatched,
+			AssistantTranscriptOrdinal: &ordinal, ToolCallID: "call-1", ToolName: "read",
 			CompletionProof: tools.CompletionOwnedProcessGroupJoined,
 		})
 		if err != nil {

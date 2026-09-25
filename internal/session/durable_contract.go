@@ -270,10 +270,11 @@ func validateVersion1EntryCoordinates(entry SessionEntry) error {
 			}
 			return nil
 		case ActionStateExecution:
-			switch entry.CompletionProof {
-			case "", tools.CompletionInlinePipelineJoined, tools.CompletionQueuedJobJoined, tools.CompletionOwnedProcessGroupJoined:
-			default:
+			if !validCompletionProof(entry.CompletionProof) {
 				return fmt.Errorf("session: execution row has unsupported completion proof %q", entry.CompletionProof)
+			}
+			if entry.CompletionProof != "" && entry.DispatchState != DispatchStateDispatched {
+				return errors.New("session: positive completion proof requires a dispatched execution row")
 			}
 			return nil
 		default:
@@ -356,6 +357,15 @@ func isHexDigest(value string) bool {
 		}
 	}
 	return true
+}
+
+func validCompletionProof(proof tools.PreparedCompletionProof) bool {
+	switch proof {
+	case "", tools.CompletionInlinePipelineJoined, tools.CompletionQueuedJobJoined, tools.CompletionOwnedProcessGroupJoined:
+		return true
+	default:
+		return false
+	}
 }
 
 type actionOccurrenceKey struct {
