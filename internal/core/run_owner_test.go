@@ -473,7 +473,7 @@ func TestRunOwnerNonCooperativeCallbackReturnsPendingThenQuiesces(t *testing.T) 
 	require.ErrorIs(t, runErr, errRunCleanupPending)
 	assert.Equal(t, RunOutcomeUnknown, result.Outcome)
 	assert.Equal(t, RunExecutionCleanupPending, result.ExecutionState)
-	assert.Equal(t, 0, guard.releaseCount())
+	assert.Equal(t, 0, guard.releaseCount(), "the callback still owns the local claim")
 	waitForOwnerState(t, result.StatusHandle, RunExecutionQuarantined)
 
 	close(callbackRelease)
@@ -678,7 +678,7 @@ func TestRunOwnerPanickedCallbackQuarantinesClaim(t *testing.T) {
 	assert.NotContains(t, err.Error(), "secret panic payload")
 	assert.Equal(t, RunOutcomeUnknown, result.Outcome)
 	assert.Equal(t, RunExecutionQuarantined, result.ExecutionState)
-	assert.Equal(t, 0, guard.releaseCount())
+	assert.Equal(t, 1, guard.releaseCount(), "the callback has joined even though durable state is quarantined")
 }
 
 type invalidCanonicalLoop struct{}
@@ -703,7 +703,7 @@ func TestInvalidCanonicalDeltaQuarantinesRunClaim(t *testing.T) {
 	assert.Empty(t, result.Message)
 	assert.Equal(t, RunOutcomeUnknown, result.Outcome)
 	assert.Equal(t, RunExecutionQuarantined, result.StatusHandle.Snapshot().ExecutionState)
-	assert.Equal(t, 0, guard.releaseCount(), "an invalid delta did not commit canonical history")
+	assert.Equal(t, 1, guard.releaseCount(), "the failed canonical commit quarantines durable state but releases the joined local claim")
 }
 
 type pendingHarnessAgent struct {

@@ -65,6 +65,9 @@ func (a *runCommitCapturingAgent) Run(ctx context.Context, _ Submission, _ ...Ev
 	a.mu.Lock()
 	a.captures = append(a.captures, capture)
 	a.mu.Unlock()
+	if bound {
+		markRunCommitTerminalSynced(ctx)
+	}
 	return Result{Message: capture.runID}, nil
 }
 

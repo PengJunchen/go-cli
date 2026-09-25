@@ -44,6 +44,16 @@ type RunCommitBinding struct {
 // physical session, workspace, or owner-generation identifier.
 var ErrInvalidRunCommitBinding = errors.New("core: invalid run commit binding")
 
+// ErrRunCommitLeaseClosePanicked reports that an optional per-run sink lease
+// release panicked. The owner does not retry an uncertain release, but still
+// completes local run-slot cleanup after all owned resources have joined.
+var ErrRunCommitLeaseClosePanicked = errors.New("core: run commit lease close panicked")
+
+// ErrRunCommitTerminalNotSynced indicates that a bound durable run ended
+// without an acknowledged terminal checkpoint. The run is unknown until the
+// sink confirms the terminal append and sync.
+var ErrRunCommitTerminalNotSynced = errors.New("core: run commit terminal was not synced")
+
 // Validate reports whether the binding contains the minimum valid durable
 // identifiers. The run owner supplies OwnerGeneration before invoking user
 // code.
@@ -118,6 +128,16 @@ type RunCommitSink interface {
 	ResolveExecution(context.Context, ExecutionResolution) error
 	CommitCompaction(context.Context, CompactionProjection) error
 	CommitTerminal(context.Context, RunTerminal) error
+}
+
+// RunCommitRunLease is an optional capability implemented by sinks that borrow
+// a longer-lived prepared session. CloseRunCommit must only release this run's
+// idempotent borrow; it must not perform durable writes or close the underlying
+// session. Session managers own and report errors from physical session close.
+// The run owner calls it once, after the callback, workers, and completion
+// resources have joined, including when durable commit failed.
+type RunCommitRunLease interface {
+	CloseRunCommit()
 }
 
 // RunCommitInput is an input message at its canonical per-run transcript
