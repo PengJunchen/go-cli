@@ -477,25 +477,31 @@ func (consumer *runCommitConsumer) resolvePreparedTask(ctx context.Context, task
 	if !ok {
 		return false, nil
 	}
-	if details.state != runCompletionTaskReady || details.pendingResourceUnproven || !validRunCompletionProof(details.proof) {
-		if details.state != runCompletionTaskResourceOpen {
-			return false, nil
-		}
+	if details.state == runCompletionTaskResourceOpen {
 		ready, err := consumer.owner.waitForCompletionTasks(ctx, []uint64{taskID})
 		if !ready {
 			return false, err
 		}
 		details, ok = runCompletionDetails(ctx, taskID)
-		if !ok || details.state != runCompletionTaskReady || details.pendingResourceUnproven || !validRunCompletionProof(details.proof) {
-			return false, nil
-		}
-		if firstExecution.CompletionProof == "" {
-			lateExecution := firstExecution
-			lateExecution.ResourceState = RunExecutionQuiescent
-			lateExecution.CompletionProof = details.proof
-			if err := consumer.recordTaskExecution(taskID, lateExecution); err != nil {
-				return false, err
-			}
+	}
+	if !ok || details.state != runCompletionTaskReady || details.pendingResourceUnproven || !validRunCompletionProof(details.proof) {
+		return false, nil
+	}
+	// Receipt persistence can block while the owner observes the completion
+	// group. Recheck proof durability after that boundary, even when the task is
+	// already Ready now; otherwise Resolve could overtake the late proof row.
+	if !details.proofExecutionDurable {
+		lateExecution := firstExecution
+		lateExecution.RunID = intent.RunID
+		lateExecution.AssistantTranscriptOrdinal = intent.AssistantTranscriptOrdinal
+		lateExecution.ToolCallID = intent.ToolCallID
+		lateExecution.ActionID = intent.ActionID
+		lateExecution.OwnerGeneration = intent.OwnerGeneration
+		lateExecution.DispatchState = DispatchStateDispatched
+		lateExecution.ResourceState = RunExecutionQuiescent
+		lateExecution.CompletionProof = details.proof
+		if err := consumer.recordTaskExecution(taskID, lateExecution); err != nil {
+			return false, err
 		}
 	}
 	if err := consumer.resolveTask(taskID, ExecutionResolution{

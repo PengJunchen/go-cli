@@ -2,10 +2,13 @@ package core_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 
@@ -14,6 +17,84 @@ import (
 	"github.com/pengjunchen/go-cli/internal/session"
 	"github.com/pengjunchen/go-cli/internal/tools"
 )
+
+type receiptGateSessionWriter struct {
+	base          session.DurableSessionWriter
+	statusHandles <-chan core.RunStatusHandle
+	signals       <-chan tools.PreparedCompletionSignal
+	receiptAppend chan struct{}
+	receiptOnce   sync.Once
+}
+
+func (writer *receiptGateSessionWriter) AppendAndSync(ctx context.Context, entries ...session.SessionEntry) ([]session.SessionEntry, error) {
+	for _, entry := range entries {
+		if entry.Type != session.EntryTypeTool || entry.ReceiptOutcome == "" {
+			continue
+		}
+		writer.receiptOnce.Do(func() { close(writer.receiptAppend) })
+		var status core.RunStatusHandle
+		select {
+		case status = <-writer.statusHandles:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(3 * time.Second):
+			return nil, errors.New("test: run status handle was not attached before receipt sync")
+		}
+		var signal tools.PreparedCompletionSignal
+		select {
+		case signal = <-writer.signals:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(3 * time.Second):
+			return nil, errors.New("test: prepared completion signal was not captured")
+		}
+		timer := time.NewTimer(3 * time.Second)
+		defer timer.Stop()
+		ticker := time.NewTicker(time.Millisecond)
+		defer ticker.Stop()
+		for {
+			if done := signal.Done(); done != nil {
+				select {
+				case <-done:
+					if signal.Proof() != "" && status.Snapshot().PendingWorkers == 0 {
+						return writer.base.AppendAndSync(ctx, entries...)
+					}
+				default:
+				}
+			}
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-timer.C:
+				return nil, errors.New("test: receipt sync passed before local proof became owner-visible")
+			case <-ticker.C:
+			}
+		}
+	}
+	return writer.base.AppendAndSync(ctx, entries...)
+}
+
+type receiptGatedPreparedSession struct {
+	session.PreparedSession
+	writer session.DurableSessionWriter
+}
+
+func (prepared *receiptGatedPreparedSession) DurableWriter() session.DurableSessionWriter {
+	return prepared.writer
+}
+
+type sessionCapturingToolPreparer struct {
+	*tools.MiddlewareToolRegistry
+	signals chan tools.PreparedCompletionSignal
+}
+
+func (registry *sessionCapturingToolPreparer) PrepareToolCall(ctx context.Context, call tools.ToolCall) (tools.PreparedInvocation, error) {
+	invocation, err := registry.MiddlewareToolRegistry.PrepareToolCall(ctx, call)
+	if err == nil && invocation != nil {
+		registry.signals <- invocation.CompletionSignal()
+	}
+	return invocation, err
+}
 
 func TestRunCommitLoopPersistsAndReopensWithSessionSink(t *testing.T) {
 	root := t.TempDir()
@@ -281,6 +362,178 @@ func TestRunCommitLoopKeepsMarkerAfterClosedCompletionWithoutProofAndReopen(t *t
 	require.Equal(t, session.DispatchMarkerPresent, reopenedDecisions[0].MarkerState, "restart cannot clear a marker based only on closed Done")
 	_, err = session.NewSessionRunCommitSink(reopened, index, workspaceID, nil)
 	require.NoError(t, err, "the actual sink must validate and retain the recovered unresolved journal")
+}
+
+func TestRunCommitLoopPersistsLateProofDuringReceiptBeforeResolution(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	workspace := filepath.Join(root, "workspace")
+	require.NoError(t, os.MkdirAll(workspace, 0o700))
+	outputPath := filepath.Join(workspace, "output.txt")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	workspaceID := "workspace-v1-receipt-ready-race"
+	index, err := session.NewWorkspaceQuarantineIndex()
+	require.NoError(t, err)
+	require.NoError(t, index.EnsureWorkspace(context.Background(), workspaceID))
+	assertWorkspaceIndexUsesTempHome(t, root, workspaceID)
+	preparer := session.NewDurableJSONLSessionPreparer(filepath.Join(root, "durable"), index)
+	prepared, err := preparer.PrepareNew(context.Background(), "receipt ready proof race")
+	require.NoError(t, err)
+	preparedOpen := true
+	t.Cleanup(func() {
+		if preparedOpen {
+			_ = prepared.Close()
+		}
+	})
+	statusHandles := make(chan core.RunStatusHandle, 1)
+	completionSignals := make(chan tools.PreparedCompletionSignal, 1)
+	receiptAppend := make(chan struct{})
+	writer := &receiptGateSessionWriter{
+		base:          prepared.DurableWriter(),
+		statusHandles: statusHandles,
+		signals:       completionSignals,
+		receiptAppend: receiptAppend,
+	}
+	preparedForSink := &receiptGatedPreparedSession{PreparedSession: prepared, writer: writer}
+	sink, err := session.NewSessionRunCommitSink(preparedForSink, index, workspaceID, nil)
+	require.NoError(t, err)
+
+	queue := tools.NewDefaultFileMutationQueue().(*tools.DefaultFileMutationQueue) //nolint:errcheck
+	t.Cleanup(func() { _ = queue.Close() })
+	toolEntered := make(chan struct{}, 1)
+	var cancelOnce sync.Once
+	toolWrapper := tools.ToolExecutorWrapper(func(next func(context.Context, tools.ToolCall) (*tools.ToolResult, error)) func(context.Context, tools.ToolCall) (*tools.ToolResult, error) {
+		return func(toolCtx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
+			select {
+			case toolEntered <- struct{}{}:
+			default:
+			}
+			cancelOnce.Do(cancel)
+			return next(context.WithoutCancel(toolCtx), call)
+		}
+	})
+	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck
+	deferred := tools.NewDeferredToolRegistryAdapter(base)
+	require.NoError(t, tools.RegisterDefaults(ctx, deferred, tools.WithRegisteredBuiltinWhitelist([]string{"write"})))
+	middlewareRegistry := tools.NewMiddlewareToolRegistry(deferred)
+	require.NoError(t, middlewareRegistry.SetPreparedToolPolicy(func(_ context.Context, request tools.PreparedPolicyRequest) (tools.PreparedPolicyDecision, error) {
+		return tools.PreparedPolicyDecision{Allowed: true, Generations: request.Generations}, nil
+	}))
+	require.NoError(t, middlewareRegistry.SetPreparedToolStages(tools.PreparedToolStages{
+		MutationQueue:                queue,
+		ExecutionWrappers:            []tools.ToolExecutorWrapper{toolWrapper},
+		SynchronousExecutionWrappers: true,
+	}))
+	registry := &sessionCapturingToolPreparer{MiddlewareToolRegistry: middlewareRegistry, signals: completionSignals}
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate("receipt-proof-race", "receipt proof race",
+		mock.ConversationTurn{AssistantToolCalls: []mock.ExpectedToolCall{{
+			ID: "write-receipt-race", Name: "write", Args: map[string]any{"path": outputPath, "content": "queued content"},
+		}}},
+		mock.ConversationTurn{AssistantContent: "must not be requested after cancellation"},
+	))
+	agent := core.NewAgentImpl("receipt-proof-race", core.NewLoopAgent(core.WithLLM(model), core.WithTools(registry)))
+	harness := core.NewHarnessImpl(agent)
+	stream, err := harness.Submit(core.WithRunCommit(ctx, sink, core.RunCommitBinding{SessionID: prepared.View().SessionID, WorkspaceID: workspaceID}), "write output")
+	require.NoError(t, err)
+	statusSource, ok := stream.(core.RunStatusSource)
+	require.True(t, ok)
+	statusHandles <- statusSource.RunStatusHandle()
+	eventsDone := make(chan struct{})
+	go func() {
+		defer close(eventsDone)
+		for range stream.Events() {
+		}
+	}()
+	select {
+	case <-toolEntered:
+	case <-time.After(3 * time.Second):
+		<-eventsDone
+		_, runErr := stream.Result()
+		t.Fatalf("prepared write wrapper did not enter; run error: %v", runErr)
+	}
+	select {
+	case <-receiptAppend:
+	case <-time.After(3 * time.Second):
+		<-eventsDone
+		_, runErr := stream.Result()
+		t.Fatalf("session writer did not reach its gated receipt append; run error: %v", runErr)
+	}
+	<-eventsDone
+	_, runErr := stream.Result()
+	if errors.Is(runErr, core.ErrRunCommitQuiescenceUnproven) {
+		t.Fatalf("known local proof should be persisted before resolution, got: %v", runErr)
+	}
+	require.Equal(t, 1, model.CallCount(), "cancellation prevents a later provider request")
+
+	snapshot, err := prepared.Snapshot()
+	require.NoError(t, err)
+	var intent session.SessionEntry
+	var initialExecution session.SessionEntry
+	var receipt session.SessionEntry
+	var proofExecution session.SessionEntry
+	var terminal session.SessionEntry
+	var resolution session.SessionEntry
+	var proofExecutionCount int
+	for _, row := range snapshot.DurableEntries {
+		if row.Type == session.EntryTypeTool && row.ActionState == session.ActionStateIntent {
+			intent = row
+		}
+		if row.Type == session.EntryTypeTool && row.ReceiptOutcome == core.ReceiptOutcomeUnknown {
+			receipt = row
+		}
+		if row.Type == session.EntryTypeTool && row.ActionState == session.ActionStateExecution {
+			if row.CompletionProof == "" {
+				initialExecution = row
+			} else {
+				proofExecution = row
+				proofExecutionCount++
+			}
+		}
+		if row.CheckpointKind == session.CheckpointExecutionResolution {
+			resolution = row
+		}
+		if row.CheckpointKind == session.CheckpointRunTerminal {
+			terminal = row
+		}
+	}
+	require.NotEmpty(t, intent.ID)
+	require.NotEmpty(t, initialExecution.ID)
+	require.NotEmpty(t, receipt.ID)
+	require.NotEmpty(t, proofExecution.ID)
+	require.Equal(t, 1, proofExecutionCount, "the receipt-time recheck writes one positive execution row")
+	require.NotEmpty(t, resolution.ID)
+	require.NotEmpty(t, terminal.ID)
+	require.Equal(t, core.RunExecutionCleanupPending, initialExecution.ResourceState, "the initial execution write precedes actual resource completion")
+	require.Empty(t, initialExecution.CompletionProof)
+	require.Equal(t, core.ReceiptOutcomeUnknown, receipt.ReceiptOutcome, "late local proof does not rewrite a known-unknown tool outcome")
+	require.Less(t, initialExecution.Seq, receipt.Seq)
+	require.Less(t, receipt.Seq, proofExecution.Seq, "receipt callback gates until owner readiness; late proof is appended after receipt")
+	require.Less(t, proofExecution.Seq, resolution.Seq, "session resolution follows the durable positive proof row")
+	require.Equal(t, core.RunExecutionQuiescent, proofExecution.ResourceState)
+	require.Equal(t, core.RunOutcomeUnknown, terminal.RunOutcome, "unknown receipt outcome is preserved independently from local proof")
+	require.Equal(t, intent.ActionID, proofExecution.ActionID)
+	require.Equal(t, intent.ActionID, resolution.ActionID)
+
+	ref := session.PendingActionRef{
+		SessionID: prepared.View().SessionID, WorkspaceID: workspaceID, RunID: intent.RunID,
+		ActionBatchID: intent.ActionBatchID, AssistantTranscriptOrdinal: *intent.AssistantTranscriptOrdinal,
+		ToolCallID: intent.ToolCallID, ActionID: intent.ActionID,
+	}
+	decisions, err := index.InspectDispatchMarkers(context.Background(), []session.PendingActionRef{ref})
+	require.NoError(t, err)
+	require.Len(t, decisions, 1)
+	require.Equal(t, session.DispatchMarkerResolved, decisions[0].MarkerState)
+
+	require.NoError(t, prepared.Close())
+	preparedOpen = false
+	reopened, err := preparer.PrepareResume(context.Background(), prepared.View().SessionID)
+	require.NoError(t, err)
+	defer reopened.Close()
+	_, err = reopened.Snapshot()
+	require.NoError(t, err, "restart accepts the receipt-time proof row before its resolution")
 }
 
 func assertWorkspaceIndexUsesTempHome(t *testing.T, root, workspaceID string) {
