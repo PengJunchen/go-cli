@@ -105,7 +105,7 @@ func (p *DurableJSONLSessionPreparer) PrepareNew(ctx context.Context, label stri
 			_ = os.Remove(path)
 			return nil, fmt.Errorf("session: sync sessions directory: %w", err)
 		}
-		store := newDurableJSONLStore(file, sessionID, label, "main", nil, 0, p.io)
+		store := newDurableJSONLStore(file, sessionID, label, "main", nil, 0, nil, p.io)
 		store.view = SessionView{SessionID: sessionID, BranchID: "main"}
 		return &durablePreparedSession{store: store}, nil
 	}
@@ -188,7 +188,7 @@ func (p *DurableJSONLSessionPreparer) PrepareResume(ctx context.Context, physica
 	if _, err := file.Seek(0, io.SeekEnd); err != nil {
 		return nil, fmt.Errorf("session: seek append position: %w", err)
 	}
-	store := newDurableJSONLStore(file, physicalSessionID, label, activeBranch, entryMap, maxSeq, p.io)
+	store := newDurableJSONLStore(file, physicalSessionID, label, activeBranch, entryMap, maxSeq, durableEntryIDs(entries), p.io)
 	store.activeLeafID = activeLeaf
 	if len(plan.pending) > 0 {
 		recoveryRows, err := buildRecoveryReceipts(plan, decisions, physicalSessionID, activeBranch, activeLeaf, entryMap)
@@ -227,6 +227,13 @@ func (p *durablePreparedSession) View() SessionView {
 	return p.store.view.Clone()
 }
 
+func (p *durablePreparedSession) Snapshot() (PreparedSessionSnapshot, error) {
+	if p == nil || p.store == nil {
+		return PreparedSessionSnapshot{}, ErrDurableWriterClosed
+	}
+	return p.store.snapshot()
+}
+
 func (p *durablePreparedSession) DurableWriter() DurableSessionWriter {
 	if p == nil {
 		return closedDurableWriter{}
@@ -256,6 +263,7 @@ type durableJSONLStore struct {
 	activeBranchID string
 	activeLeafID   string
 	entries        map[string]*SessionEntry
+	appendOrder    []string
 	maxSeq         uint64
 	view           SessionView
 	poisoned       bool
@@ -263,7 +271,7 @@ type durableJSONLStore struct {
 	io             durableJSONLIO
 }
 
-func newDurableJSONLStore(file *os.File, sessionID, label, branchID string, entries map[string]*SessionEntry, maxSeq uint64, ioOps durableJSONLIO) *durableJSONLStore {
+func newDurableJSONLStore(file *os.File, sessionID, label, branchID string, entries map[string]*SessionEntry, maxSeq uint64, appendOrder []string, ioOps durableJSONLIO) *durableJSONLStore {
 	if entries == nil {
 		entries = make(map[string]*SessionEntry)
 	}
@@ -276,6 +284,7 @@ func newDurableJSONLStore(file *os.File, sessionID, label, branchID string, entr
 		sessionLabel:   label,
 		activeBranchID: branchID,
 		entries:        entries,
+		appendOrder:    append([]string(nil), appendOrder...),
 		maxSeq:         maxSeq,
 		io:             ioOps,
 	}
@@ -477,6 +486,9 @@ func (s *durableJSONLStore) AppendAndSync(ctx context.Context, entries ...Sessio
 	for id, entry := range newByID {
 		s.entries[id] = entry
 	}
+	for _, row := range newRows {
+		s.appendOrder = append(s.appendOrder, row.ID)
+	}
 	s.maxSeq = nextSeq
 	s.activeLeafID = candidateActiveLeafID
 	s.activeBranchID = candidateActiveBranchID
@@ -519,6 +531,53 @@ func cloneSessionEntries(entries []SessionEntry) []SessionEntry {
 		cloned[i] = *entries[i].clone()
 	}
 	return cloned
+}
+
+func durableEntryIDs(entries []SessionEntry) []string {
+	ids := make([]string, len(entries))
+	for index := range entries {
+		ids[index] = entries[index].ID
+	}
+	return ids
+}
+
+func (s *durableJSONLStore) snapshot() (PreparedSessionSnapshot, error) {
+	if s == nil {
+		return PreparedSessionSnapshot{}, ErrDurableWriterClosed
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.closed || s.file == nil {
+		return PreparedSessionSnapshot{}, ErrDurableWriterClosed
+	}
+	if s.poisoned {
+		return PreparedSessionSnapshot{}, ErrDurableWriterPoisoned
+	}
+	if len(s.appendOrder) != len(s.entries) {
+		return PreparedSessionSnapshot{}, fmt.Errorf("session: durable append order has %d IDs for %d entries", len(s.appendOrder), len(s.entries))
+	}
+	entries := make([]SessionEntry, 0, len(s.appendOrder))
+	seen := make(map[string]struct{}, len(s.appendOrder))
+	for _, id := range s.appendOrder {
+		if _, exists := seen[id]; exists {
+			return PreparedSessionSnapshot{}, fmt.Errorf("session: durable append order repeats entry %q", id)
+		}
+		seen[id] = struct{}{}
+		entry, exists := s.entries[id]
+		if !exists || entry == nil {
+			return PreparedSessionSnapshot{}, fmt.Errorf("session: durable append order references missing entry %q", id)
+		}
+		entries = append(entries, *entry.clone())
+	}
+	return PreparedSessionSnapshot{
+		SessionID:         s.sessionID,
+		SessionLabel:      s.sessionLabel,
+		DurableEntries:    entries,
+		ActiveBranchID:    s.activeBranchID,
+		ActiveLeafEntryID: s.activeLeafID,
+		MaxSeq:            s.maxSeq,
+		PublishedView:     s.view.Clone(),
+	}, nil
 }
 
 func contextErr(ctx context.Context) error {
