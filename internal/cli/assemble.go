@@ -279,6 +279,13 @@ func (a *AgentAssembly) setInteractiveCloseHooks(
 	return a.closeOwner.setInteractiveCloseHooks(stop, beforeSessionClose, afterMemoryJoin)
 }
 
+func (a *AgentAssembly) setHTTPServer(server *acp.HTTPServer) error {
+	if a == nil || a.closeOwner == nil {
+		return nil
+	}
+	return a.closeOwner.setHTTPServer(server)
+}
+
 // AssembleOption configures AssembleAgent behavior.
 type AssembleOption func(*assembleConfig)
 
