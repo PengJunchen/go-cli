@@ -118,12 +118,12 @@ func (k *KeychainSource) SetScoped(scope AuthScope, key string) error {
 
 // GetScoped retrieves a key that was stored for the exact scope tuple.
 func (k *KeychainSource) GetScoped(scope AuthScope) (string, error) {
-	if !k.Available() {
-		return "", ErrAuthNotFound
-	}
 	account, err := scopedCredentialAccount(scope)
 	if err != nil {
 		return "", fmt.Errorf("keychain: invalid scoped credential lookup: %w", err)
+	}
+	if !k.Available() {
+		return "", ErrAuthNotFound
 	}
 	out, err := k.run("security", "find-generic-password", "-s", k.service, "-a", account, "-w")
 	if err != nil {

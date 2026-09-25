@@ -195,6 +195,19 @@ func TestKeychainSource_GetScopedInvalidScopeIsSourceError(t *testing.T) {
 	assert.Empty(t, got)
 }
 
+func TestKeychainSource_GetScopedInvalidScopeIsErrorWhenBackendUnavailable(t *testing.T) {
+	kc := newFakeKeychain(func(string, ...string) ([]byte, error) {
+		t.Fatal("invalid scope must be rejected without invoking security")
+		return nil, nil
+	})
+	kc.availableFunc = func() bool { return false }
+
+	key, err := kc.GetScoped(AuthScope{})
+	require.Error(t, err)
+	assert.False(t, errors.Is(err, ErrAuthNotFound))
+	assert.Empty(t, key)
+}
+
 func TestKeychainSource_GetScopedFailureStopsAuthChainFallback(t *testing.T) {
 	fallbackCalls := 0
 	kc := newFakeKeychain(func(string, ...string) ([]byte, error) {
@@ -290,6 +303,7 @@ func TestKeychainExecClassifiesOnlyConfirmedMissingItem(t *testing.T) {
 	t.Run("empty success output", func(t *testing.T) {
 		t.Setenv("FAKE_SECURITY_MODE", "empty")
 		kc := NewKeychainSource()
+		kc.availableFunc = func() bool { return true }
 		key, err := kc.GetScoped(AuthScope{ProviderID: "openai", ProtocolID: "openai-compatible", Origin: "https://api.example.test"})
 		require.Error(t, err)
 		assert.False(t, errors.Is(err, ErrAuthNotFound))
