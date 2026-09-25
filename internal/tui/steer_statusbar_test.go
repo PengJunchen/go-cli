@@ -105,6 +105,7 @@ func TestSteerEditorCaretTracksInsertion(t *testing.T) {
 
 	updateKey(m, keyMsg(tea.KeyLeft))
 	assert.Equal(t, 3, m.steerCursor, "left should move by one UTF-8 rune")
+	assert.Contains(t, m.View(), "> steer> 你█好", "caret should render at the UTF-8 insertion point")
 	updateKey(m, runeKey('X'))
 	assert.Equal(t, "你X好", m.steerInput, "typing inserts at the caret, preserving the suffix")
 	assert.Equal(t, 4, m.steerCursor)
@@ -472,12 +473,16 @@ func TestFollowUpInputChineseBackspace(t *testing.T) {
 	}
 	assert.Equal(t, "你好", m.followUpInput)
 	assert.Equal(t, 6, m.followUpCursor)
+	updateKey(m, keyMsg(tea.KeyLeft))
+	assert.Contains(t, m.View(), "> followup> 你█好", "follow-up caret should render at the insertion point")
+	updateKey(m, keyMsg(tea.KeyRight))
 
 	// Backspace deletes "好".
 	updateKey(m, keyMsg(tea.KeyBackspace))
 	assert.True(t, utf8.ValidString(m.followUpInput))
 	assert.Equal(t, "你", m.followUpInput)
 	assert.Equal(t, 3, m.followUpCursor)
+	assert.Contains(t, m.View(), "> followup> 你█", "follow-up caret should render after the remaining rune")
 }
 
 // TestFollowUpInputChineseCtrlW verifies Ctrl+W in follow-up mode traverses
