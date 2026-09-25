@@ -48,6 +48,7 @@ type AuthScope struct {
 var ErrAuthNotFound = errors.New("auth: key not found in source")
 
 var errAuthFileInvalid = errors.New("auth: credential file is invalid or insecure")
+var errScopedCredentialSourceInvalid = errors.New("auth: scoped credential source is invalid")
 
 // ErrCredentialScopeRequired is returned when an API asks for a credential
 // using only a provider name. Provider identity alone is insufficient to bind
@@ -290,34 +291,114 @@ func lookupScopedAuthFilePath(path string, scope AuthScope) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return lookupScopedCredentialData(data, scope, true)
+	return lookupScopedCredentialData(data, scope)
 }
 
 func lookupScopedCredentialFile(path string, scope AuthScope) (string, error) {
+	if path == "" {
+		return "", ErrAuthNotFound
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return "", ErrAuthNotFound
+		if isMissingScopedCredentialFile(path, err) {
+			return "", ErrAuthNotFound
+		}
+		return "", errScopedCredentialSourceInvalid
 	}
-	return lookupScopedCredentialData(data, scope, false)
+	return lookupScopedCredentialData(data, scope)
 }
 
-func lookupScopedCredentialData(data []byte, scope AuthScope, authFile bool) (string, error) {
-	var document struct {
-		Credentials []scopedCredentialRecord `json:"credentials"`
+func lookupScopedCredentialData(data []byte, scope AuthScope) (string, error) {
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(data, &document); err != nil || document == nil {
+		return "", errScopedCredentialSourceInvalid
 	}
-	if err := json.Unmarshal(data, &document); err != nil {
-		if authFile {
-			return "", errAuthFileInvalid
+	var credentialsJSON json.RawMessage
+	hasCredentials := false
+	for name, value := range document {
+		if !strings.EqualFold(name, "credentials") {
+			continue
 		}
+		if hasCredentials {
+			return "", errScopedCredentialSourceInvalid
+		}
+		credentialsJSON = value
+		hasCredentials = true
+	}
+	if !hasCredentials {
+		// Legacy provider-only models and auth files are valid JSON, but they do
+		// not prove a complete credential scope.
 		return "", ErrAuthNotFound
 	}
-	for _, entry := range document.Credentials {
+
+	var records []json.RawMessage
+	if err := json.Unmarshal(credentialsJSON, &records); err != nil || records == nil {
+		return "", errScopedCredentialSourceInvalid
+	}
+	wantedScope, err := normalizeAuthScope(scope)
+	if err != nil {
+		return "", err
+	}
+
+	var matchedKey string
+	matched := false
+	seen := make(map[AuthScope]string, len(records))
+	for _, recordJSON := range records {
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(recordJSON, &fields); err != nil || fields == nil {
+			return "", errScopedCredentialSourceInvalid
+		}
+
+		var entry scopedCredentialRecord
+		if err := json.Unmarshal(recordJSON, &entry); err != nil {
+			return "", errScopedCredentialSourceInvalid
+		}
+		if entry.Provider == "" || entry.Protocol == "" || entry.Origin == "" || strings.TrimSpace(entry.APIKey) == "" {
+			return "", errScopedCredentialSourceInvalid
+		}
 		entryScope, scopeErr := normalizeAuthScope(AuthScope{ProviderID: entry.Provider, ProtocolID: entry.Protocol, Origin: entry.Origin})
-		if scopeErr == nil && entryScope == scope && entry.APIKey != "" {
-			return entry.APIKey, nil
+		if scopeErr != nil {
+			return "", errScopedCredentialSourceInvalid
+		}
+		if existing, ok := seen[entryScope]; ok && existing != entry.APIKey {
+			return "", errScopedCredentialSourceInvalid
+		}
+		seen[entryScope] = entry.APIKey
+		if entryScope == wantedScope {
+			if matched && matchedKey != entry.APIKey {
+				return "", errScopedCredentialSourceInvalid
+			}
+			matchedKey = entry.APIKey
+			matched = true
 		}
 	}
+	if matched {
+		return matchedKey, nil
+	}
 	return "", ErrAuthNotFound
+}
+
+func isMissingScopedCredentialFile(path string, readErr error) bool {
+	if !errors.Is(readErr, os.ErrNotExist) {
+		return false
+	}
+	if _, err := os.Lstat(path); err == nil || !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	for dir := filepath.Dir(path); ; {
+		parentInfo, parentErr := os.Stat(dir)
+		if parentErr == nil {
+			return parentInfo.IsDir()
+		}
+		if !errors.Is(parentErr, os.ErrNotExist) {
+			return false
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return true
+		}
+		dir = parent
+	}
 }
 
 // ScopedCredentialEnvName returns the deterministic environment variable name
@@ -409,6 +490,18 @@ func readPrivateAuthFile(path string) ([]byte, error) {
 	if path == "" {
 		return nil, ErrAuthNotFound
 	}
+	if configDir, isDefaultPath := defaultAuthConfigDir(path); isDefaultPath {
+		configInfo, err := os.Lstat(configDir)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, ErrAuthNotFound
+		}
+		if err != nil {
+			return nil, authFileError("inspect config directory", err)
+		}
+		if !configInfo.IsDir() {
+			return nil, authFileError("config directory must be a real directory", nil)
+		}
+	}
 	pathInfo, err := os.Lstat(path)
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, ErrAuthNotFound
@@ -470,10 +563,22 @@ func authFileError(reason string, cause error) error {
 	return fmt.Errorf("%w: %s: %w", errAuthFileInvalid, reason, cause)
 }
 
+func defaultAuthConfigDir(path string) (string, bool) {
+	defaultPath := authFilePath()
+	if defaultPath == "" || filepath.Clean(path) != filepath.Clean(defaultPath) {
+		return "", false
+	}
+	return filepath.Dir(filepath.Dir(defaultPath)), true
+}
+
 // modelsConfigPath returns the location of models.json under the user config
 // dir.
 func modelsConfigPath() string {
-	return configFilePath("models.json")
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return ""
+	}
+	return filepath.Join(home, ".config", "go-cli", "models.json")
 }
 
 // configFilePath returns ~/.config/go-cli/<name>.
