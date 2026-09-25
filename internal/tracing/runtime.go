@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"io"
 	"path/filepath"
-	"time"
 )
 
 var ErrUnsupportedExporter = errors.New("unsupported tracing exporter")
@@ -74,7 +73,8 @@ func BuildTracingRuntime(cfg TracingRuntimeConfig) (*Tracer, TraceExporter, erro
 		}
 		sessionID := cfg.SessionID
 		if sessionID == "" {
-			sessionID = "session-" + time.Now().Format("20060102T150405")
+			// Keep default invocation files distinct even when runs start in the same second.
+			sessionID = "session-" + generateID()
 		}
 		jsonl, err := NewJSONLTraceExporter(dir, sessionID)
 		if err != nil {

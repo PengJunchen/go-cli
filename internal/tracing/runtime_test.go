@@ -98,6 +98,39 @@ func TestBuildTracingRuntimeJSONLUsesSingleTraceIdentity(t *testing.T) {
 	}
 }
 
+func TestBuildTracingRuntimeExplicitSessionIDAppends(t *testing.T) {
+	dir := t.TempDir()
+	traceIDs := make(map[string]struct{}, 2)
+	for i := 0; i < 2; i++ {
+		tracer, exporter, err := BuildTracingRuntime(TracingRuntimeConfig{
+			Enabled:   true,
+			Exporter:  "jsonl",
+			FilePath:  dir,
+			SessionID: "configured-session",
+		})
+		require.NoError(t, err)
+		span, _ := tracer.Start(context.Background(), "cli.invocation", SpanKindInternal)
+		traceIDs[span.TraceID()] = struct{}{}
+		span.End()
+		require.NoError(t, exporter.Shutdown(context.Background()))
+	}
+
+	files, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
+	require.NoError(t, err)
+	require.Len(t, files, 1, "explicit session IDs preserve append behavior")
+	data, err := os.ReadFile(files[0])
+	require.NoError(t, err)
+	var spans []SpanData
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		var span SpanData
+		require.NoError(t, json.Unmarshal([]byte(line), &span))
+		spans = append(spans, span)
+	}
+	require.Len(t, spans, 2)
+	require.Len(t, traceIDs, 2)
+	assert.NotEqual(t, spans[0].TraceID, spans[1].TraceID)
+}
+
 func TestBuildTracingRuntimeStdoutUsesConfiguredWriter(t *testing.T) {
 	var stdout bytes.Buffer
 	dir := filepath.Join(t.TempDir(), "unused")

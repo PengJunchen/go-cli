@@ -245,6 +245,45 @@ func TestRunEmitsRealSpans(t *testing.T) {
 	assert.Equal(t, spans[0].TraceID, spans[1].TraceID)
 }
 
+func TestRunConsecutiveInvocationsUseDistinctTraceFiles(t *testing.T) {
+	workDir := t.TempDir()
+	previousDir, err := os.Getwd()
+	require.NoError(t, err)
+	require.NoError(t, os.Chdir(workDir))
+	t.Cleanup(func() { _ = os.Chdir(previousDir) })
+	dir := filepath.Join(workDir, "traces")
+	for i := 0; i < 2; i++ {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"version"}, &stdout, &stderr, func() (*config.Config, error) {
+			return enabledCfg(dir), nil
+		})
+		require.Equal(t, 0, code, "invocation %d stderr: %s", i, stderr.String())
+	}
+
+	files, err := filepath.Glob(filepath.Join(dir, "*.jsonl"))
+	require.NoError(t, err)
+	require.Len(t, files, 2, "each invocation must own a distinct JSONL file")
+
+	seenTraceIDs := make(map[string]struct{}, 2)
+	for _, path := range files {
+		data, readErr := os.ReadFile(path)
+		require.NoError(t, readErr)
+		var fileTraceIDs = make(map[string]struct{})
+		for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+			var span tracing.SpanData
+			require.NoError(t, json.Unmarshal([]byte(line), &span))
+			fileTraceIDs[span.TraceID] = struct{}{}
+		}
+		require.Len(t, fileTraceIDs, 1, "one invocation file must not mix trace identities")
+		for traceID := range fileTraceIDs {
+			_, alreadySeen := seenTraceIDs[traceID]
+			assert.False(t, alreadySeen, "separate invocation files must have distinct trace IDs")
+			seenTraceIDs[traceID] = struct{}{}
+		}
+	}
+	require.Len(t, seenTraceIDs, 2)
+}
+
 // TestRunEmitsErrorSpanStatus verifies the root span reports an error status
 // when the command exits non-zero (usage error path).
 func TestRunEmitsErrorSpanStatus(t *testing.T) {
