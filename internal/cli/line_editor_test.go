@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/muesli/cancelreader"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -37,6 +38,158 @@ func TestNewTTYByteReaderRejectsUncancelableInput(t *testing.T) {
 	reader, err := newTTYByteReader(strings.NewReader("input"))
 	require.Nil(t, reader)
 	require.ErrorIs(t, err, errTTYReaderCancellationUnsupported)
+}
+
+type testCancelableReader struct {
+	readStarted chan struct{}
+	canceled    chan struct{}
+	cancelCalls int
+	closeCalls  int
+}
+
+func (r *testCancelableReader) Read([]byte) (int, error) {
+	if r.readStarted != nil {
+		close(r.readStarted)
+	}
+	if r.canceled != nil {
+		<-r.canceled
+	}
+	return 0, errors.New("test reader canceled")
+}
+
+func (r *testCancelableReader) Cancel() bool {
+	r.cancelCalls++
+	if r.canceled != nil {
+		close(r.canceled)
+	}
+	return true
+}
+
+func (r *testCancelableReader) Close() error {
+	r.closeCalls++
+	return nil
+}
+
+func TestTTYByteReaderStopSkipsCancelWhenIdle(t *testing.T) {
+	input := &testCancelableReader{}
+	done := make(chan struct{})
+	close(done)
+	reader := &ttyByteReader{input: input, stopCh: make(chan struct{}), done: done}
+
+	require.NoError(t, reader.stop())
+	assert.Zero(t, input.cancelCalls)
+	assert.Equal(t, 1, input.closeCalls)
+}
+
+func TestTTYByteReaderStopCancelsAndJoinsActiveRead(t *testing.T) {
+	input := &testCancelableReader{readStarted: make(chan struct{}), canceled: make(chan struct{})}
+	reader := &ttyByteReader{
+		input:    input,
+		requests: make(chan struct{}),
+		results:  make(chan byteResult),
+		stopCh:   make(chan struct{}),
+		done:     make(chan struct{}),
+	}
+	go reader.run()
+	readDone := make(chan struct{})
+	go func() {
+		_, _ = reader.readByte(context.Background())
+		close(readDone)
+	}()
+	select {
+	case <-input.readStarted:
+	case <-time.After(time.Second):
+		t.Fatal("reader did not enter its blocking read")
+	}
+
+	require.NoError(t, reader.stop())
+	select {
+	case <-readDone:
+	case <-time.After(time.Second):
+		t.Fatal("read caller did not join after reader shutdown")
+	}
+	assert.Equal(t, 1, input.cancelCalls)
+	assert.Equal(t, 1, input.closeCalls)
+}
+
+type gatedCancelReader struct {
+	cancelreader.CancelReader
+	readEntered  chan struct{}
+	readRelease  chan struct{}
+	cancelResult chan bool
+}
+
+func (r *gatedCancelReader) Read(p []byte) (int, error) {
+	close(r.readEntered)
+	<-r.readRelease
+	return r.CancelReader.Read(p)
+}
+
+func (r *gatedCancelReader) Cancel() bool {
+	canceled := r.CancelReader.Cancel()
+	r.cancelResult <- canceled
+	return canceled
+}
+
+func TestTTYByteReaderStopCancelsBeforeUnderlyingReadEntry(t *testing.T) {
+	underlying := strings.NewReader("the canceled read must not consume this key")
+	inner, err := cancelreader.NewReader(underlying)
+	require.NoError(t, err)
+	input := &gatedCancelReader{
+		CancelReader: inner,
+		readEntered:  make(chan struct{}),
+		readRelease:  make(chan struct{}),
+		cancelResult: make(chan bool, 1),
+	}
+	reader := &ttyByteReader{
+		input:    input,
+		requests: make(chan struct{}),
+		results:  make(chan byteResult),
+		stopCh:   make(chan struct{}),
+		done:     make(chan struct{}),
+	}
+	go reader.run()
+
+	readResult := make(chan error, 1)
+	go func() {
+		_, readErr := reader.readByte(context.Background())
+		readResult <- readErr
+	}()
+	select {
+	case <-input.readEntered:
+	case <-time.After(time.Second):
+		t.Fatal("reader did not reach the gate after marking the read active")
+	}
+
+	stopResult := make(chan error, 1)
+	go func() { stopResult <- reader.stop() }()
+	var canceled bool
+	select {
+	case canceled = <-input.cancelResult:
+	case <-time.After(time.Second):
+		t.Fatal("stop did not invoke cancellation")
+	}
+	require.False(t, canceled, "fallback cancellation cannot interrupt an active underlying read")
+
+	// CancelReader records cancellation even when its return value says that
+	// it could not interrupt an already-running underlying read. Releasing this
+	// gate models cancellation in the narrow interval after the outer reader
+	// marks itself active but before the library's Read method begins.
+	close(input.readRelease)
+	select {
+	case stopErr := <-stopResult:
+		assert.ErrorIs(t, stopErr, errTTYReaderCancellationUnsupported)
+	case <-time.After(time.Second):
+		t.Fatal("reader shutdown waited for another input byte instead of observing the latched cancellation")
+	}
+	select {
+	case readErr := <-readResult:
+		assert.ErrorIs(t, readErr, io.ErrClosedPipe)
+	case <-time.After(time.Second):
+		t.Fatal("read caller did not join after the latched cancellation")
+	}
+	assert.Equal(t, len("the canceled read must not consume this key"), underlying.Len(),
+		"cancellation before the library Read call must not consume a user key")
 }
 
 // TestTerminalWidth_FallbackNonTTY verifies that terminalWidth returns the

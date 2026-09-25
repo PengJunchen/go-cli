@@ -534,22 +534,19 @@ type ttyByteReader struct {
 	done     chan struct{}
 	stopOnce sync.Once
 	stopErr  error
+	stateMu  sync.Mutex
+	stopping bool
+	reading  bool
+	readDone chan struct{}
 }
 
 func newTTYByteReader(input io.Reader) (*ttyByteReader, error) {
-	probe, err := cancelreader.NewReader(input)
-	if err != nil {
-		return nil, fmt.Errorf("create TTY cancellation probe: %w", err)
-	}
-	canCancel := probe.Cancel()
-	if err := probe.Close(); err != nil {
-		return nil, fmt.Errorf("close TTY cancellation probe: %w", err)
-	}
-	if !canCancel {
+	file, ok := input.(*os.File)
+	if !ok || !xterm.IsTerminal(int(file.Fd())) || !cancelReaderSupportsTTYFile(file) {
 		return nil, fmt.Errorf("%w: %T", errTTYReaderCancellationUnsupported, input)
 	}
 
-	reader, err := cancelreader.NewReader(input)
+	reader, err := cancelreader.NewReader(file)
 	if err != nil {
 		return nil, fmt.Errorf("create TTY input reader: %w", err)
 	}
@@ -580,10 +577,14 @@ func (r *ttyByteReader) run() {
 			}
 			return
 		}
+		if !r.beginRead() {
+			return
+		}
 
 		for {
 			var buf [1]byte
 			n, err := r.input.Read(buf[:])
+			r.endRead()
 			if n > 0 {
 				if !r.send(byteResult{b: buf[0]}) {
 					return
@@ -600,8 +601,30 @@ func (r *ttyByteReader) run() {
 				}
 				return
 			}
+			if !r.beginRead() {
+				return
+			}
 		}
 	}
+}
+
+func (r *ttyByteReader) beginRead() bool {
+	r.stateMu.Lock()
+	defer r.stateMu.Unlock()
+	if r.stopping {
+		return false
+	}
+	r.reading = true
+	r.readDone = make(chan struct{})
+	return true
+}
+
+func (r *ttyByteReader) endRead() {
+	r.stateMu.Lock()
+	r.reading = false
+	close(r.readDone)
+	r.readDone = nil
+	r.stateMu.Unlock()
 }
 
 func (r *ttyByteReader) send(result byteResult) bool {
@@ -633,14 +656,28 @@ func (r *ttyByteReader) readByte(ctx context.Context) (byte, error) {
 
 func (r *ttyByteReader) stop() error {
 	r.stopOnce.Do(func() {
-		canceled := r.input.Cancel()
+		r.stateMu.Lock()
+		r.stopping = true
+		reading := r.reading
+		readDone := r.readDone
+		r.stateMu.Unlock()
+		var cancelErr error
+		if reading {
+			if !r.input.Cancel() {
+				// CancelReader implementations latch cancellation for future
+				// reads even when they cannot interrupt one already in flight.
+				// Keep terminal ownership until this read has actually returned.
+				<-readDone
+				cancelErr = errTTYReaderCancellationUnsupported
+			}
+		}
 		close(r.stopCh)
 		<-r.done
 		if err := r.input.Close(); err != nil {
 			r.stopErr = errors.Join(r.stopErr, fmt.Errorf("close TTY input reader: %w", err))
 		}
-		if !canceled {
-			r.stopErr = errors.Join(r.stopErr, errTTYReaderCancellationUnsupported)
+		if cancelErr != nil {
+			r.stopErr = errors.Join(r.stopErr, fmt.Errorf("cancel active TTY input read: %w", cancelErr))
 		}
 	})
 	return r.stopErr
