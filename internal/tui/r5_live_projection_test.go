@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -199,6 +200,115 @@ func TestLiveBridgeDeepCopiesArgsBeforeModelProjection(t *testing.T) {
 	plain := stripEscape(h.model.View())
 	require.Contains(t, plain, `nested={"items":["first"]}`)
 	require.Contains(t, plain, "large=9007199254740993")
+}
+
+func TestLiveBridgeToolArgsUseJSONEncodedByteBudget(t *testing.T) {
+	const maxToolArgCloneBytes = 64 * 1024
+	const objectOverhead = len(`{"payload":""}`)
+	const escapedPatternBytes = len("é") + len(`\n`) + len(`\u0001`) + len(`\u003c`) + len(`\u0026`)
+	patternCount := (maxToolArgCloneBytes - objectOverhead) / escapedPatternBytes
+	paddingBytes := maxToolArgCloneBytes - objectOverhead - patternCount*escapedPatternBytes
+	exactPayload := strings.Repeat("é\n\x01<&", patternCount) + strings.Repeat("a", paddingBytes)
+	exactArgs := map[string]any{"payload": exactPayload}
+	exactJSON, err := json.Marshal(exactArgs)
+	require.NoError(t, err)
+	require.Len(t, exactJSON, maxToolArgCloneBytes, "the fixture must consume the encoded JSON budget exactly")
+
+	t.Run("multibyte and escaped controls at limit remain available in bridge view", func(t *testing.T) {
+		h := newLiveBridgeModel(t)
+		defer h.close()
+		bridged := h.send(t, core.AgentEvent{
+			Kind:      "message",
+			ToolCalls: []llm.ToolCall{{ID: "exact-budget", Name: "inspect", Args: exactArgs}},
+		})
+		require.Len(t, bridged.ToolCalls, 1)
+		require.False(t, bridged.ToolCalls[0].ArgsUnavailable)
+		require.Equal(t, ToolStatusPending, h.model.accordion.entries[0].ToolStatus)
+		require.Equal(t, "exact-budget", h.model.accordion.entries[0].ToolCallID)
+		require.NotContains(t, stripEscape(h.model.View()), "detail unavailable")
+	})
+
+	arrayJSONStringBytes := maxToolArgCloneBytes - len("[]")
+	arrayContentBytes := arrayJSONStringBytes - len(`""`)
+	arrayPatternCount := arrayContentBytes / escapedPatternBytes
+	arrayPaddingBytes := arrayContentBytes - arrayPatternCount*escapedPatternBytes
+	arrayPayload := strings.Repeat("é\n\x01<&", arrayPatternCount) + strings.Repeat("a", arrayPaddingBytes)
+	arrayArgs := []any{arrayPayload}
+	arrayJSON, err := json.Marshal(arrayArgs)
+	require.NoError(t, err)
+	require.Len(t, arrayJSON, maxToolArgCloneBytes, "the array fixture must consume the encoded JSON budget exactly")
+	t.Run("array framing at the limit remains available in bridge view", func(t *testing.T) {
+		h := newLiveBridgeModel(t)
+		defer h.close()
+		bridged := h.send(t, core.AgentEvent{
+			Kind:      "message",
+			ToolCalls: []llm.ToolCall{{ID: "exact-array-budget", Name: "inspect", Args: arrayArgs}},
+		})
+		require.Len(t, bridged.ToolCalls, 1)
+		require.False(t, bridged.ToolCalls[0].ArgsUnavailable)
+		require.NotContains(t, stripEscape(h.model.View()), "detail unavailable")
+	})
+
+	t.Run("budget is per call", func(t *testing.T) {
+		h := newLiveBridgeModel(t)
+		defer h.close()
+		bridged := h.send(t, core.AgentEvent{
+			Kind: "message",
+			ToolCalls: []llm.ToolCall{
+				{ID: "first-call", Name: "inspect", Args: map[string]any{"payload": strings.Repeat("a", maxToolArgCloneBytes/2)}},
+				{ID: "second-call", Name: "inspect", Args: map[string]any{"payload": strings.Repeat("b", maxToolArgCloneBytes/2)}},
+			},
+		})
+		require.Len(t, bridged.ToolCalls, 2)
+		require.False(t, bridged.ToolCalls[0].ArgsUnavailable)
+		require.False(t, bridged.ToolCalls[1].ArgsUnavailable)
+		require.NotContains(t, stripEscape(h.model.View()), "detail unavailable")
+	})
+
+	tests := []struct {
+		name string
+		args any
+		id   string
+	}{
+		{
+			name: "single oversized string",
+			args: map[string]any{"payload": strings.Repeat("x", maxToolArgCloneBytes) + "private-tail"},
+			id:   "large-string",
+		},
+		{
+			name: "oversized map key",
+			args: map[string]any{strings.Repeat("k", maxToolArgCloneBytes): "value"},
+			id:   "large-key",
+		},
+		{
+			name: "aggregate string values",
+			args: map[string]any{
+				"first":  strings.Repeat("a", maxToolArgCloneBytes/2),
+				"second": strings.Repeat("b", maxToolArgCloneBytes/2),
+			},
+			id: "aggregate",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			h := newLiveBridgeModel(t)
+			defer h.close()
+			bridged := h.send(t, core.AgentEvent{
+				Kind:      "message",
+				ToolCalls: []llm.ToolCall{{ID: test.id, Name: "inspect", Args: test.args}},
+			})
+
+			require.Len(t, bridged.ToolCalls, 1)
+			require.Equal(t, test.id, bridged.ToolCalls[0].ID, "oversized details must retain call identity")
+			require.True(t, bridged.ToolCalls[0].ArgsUnavailable)
+			require.Len(t, h.model.accordion.entries, 1)
+			require.Equal(t, test.id, h.model.accordion.entries[0].ToolCallID)
+			require.Equal(t, ToolStatusPending, h.model.accordion.entries[0].ToolStatus)
+			plain := stripEscape(h.model.View())
+			require.Contains(t, plain, "detail unavailable")
+			require.NotContains(t, plain, "private-tail", "over-budget input must not be silently rendered as a prefix")
+		})
+	}
 }
 
 func TestLiveBridgeDoneDoesNotRenderDuplicateAssistantAnswer(t *testing.T) {
