@@ -381,6 +381,7 @@ func TestPluginManagerShutdownContinuesAfterLateInitCleanup(t *testing.T) {
 	releaseCallback := r7ReleaseOnce(release)
 	defer releaseCallback()
 	events := make(chan string, 2)
+	cleanupHasDeadline := make(chan bool, 1)
 	earlier := &r7LifecycleExt{name: "earlier", shutdown: func(context.Context) error {
 		events <- "earlier"
 		return nil
@@ -392,7 +393,9 @@ func TestPluginManagerShutdownContinuesAfterLateInitCleanup(t *testing.T) {
 			<-release
 			return nil
 		},
-		shutdown: func(context.Context) error {
+		shutdown: func(ctx context.Context) error {
+			_, hasDeadline := ctx.Deadline()
+			cleanupHasDeadline <- hasDeadline
 			events <- "late"
 			return nil
 		},
@@ -428,9 +431,117 @@ func TestPluginManagerShutdownContinuesAfterLateInitCleanup(t *testing.T) {
 		defer manager.mu.RUnlock()
 		return manager.shutdownComplete
 	}, time.Second, time.Millisecond, "the original shutdown owner must resume without a caller retry")
+	assert.True(t, <-cleanupHasDeadline, "late-Init cleanup must receive the first Shutdown caller's deadline")
 	assert.Equal(t, int32(1), late.stopCalls.Load())
 	assert.Equal(t, int32(1), earlier.stopCalls.Load())
 	assert.Equal(t, []string{"late", "earlier"}, []string{<-events, <-events})
+}
+
+func TestPluginManagerShutdownCallbackGetsCallerDeadlineAndContinues(t *testing.T) {
+	callbackRelease := make(chan struct{})
+	defer close(callbackRelease)
+	callbackDeadline := make(chan bool, 1)
+	events := make(chan string, 2)
+	earlier := &r7LifecycleExt{name: "earlier", shutdown: func(context.Context) error {
+		events <- "earlier"
+		return nil
+	}}
+	later := &r7LifecycleExt{name: "later", shutdown: func(ctx context.Context) error {
+		_, hasDeadline := ctx.Deadline()
+		callbackDeadline <- hasDeadline
+		select {
+		case <-ctx.Done():
+			events <- "later"
+			return ctx.Err()
+		case <-callbackRelease:
+			events <- "later"
+			return nil
+		}
+	}}
+	loader := newMgrTestPluginLoader("test")
+	loader.SetResult("plugins", []Extension{earlier, later})
+	manager := NewPluginManager(loader)
+	require.NoError(t, manager.Load(context.Background(), []string{"plugins"}))
+	require.NoError(t, manager.Init(context.Background()))
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	shutdownErr := manager.Shutdown(shutdownCtx)
+	require.Error(t, shutdownErr)
+	require.Equal(t, true, <-callbackDeadline, "the actual extension callback must receive the first caller's deadline")
+	require.Eventually(t, func() bool {
+		manager.mu.RLock()
+		defer manager.mu.RUnlock()
+		return manager.shutdownComplete
+	}, time.Second, time.Millisecond, "a cooperative callback must let the owner continue reverse cleanup")
+	manager.mu.RLock()
+	ownerErr := manager.shutdownResult
+	manager.mu.RUnlock()
+	require.ErrorIs(t, ownerErr, context.DeadlineExceeded)
+	assert.Equal(t, int32(1), later.stopCalls.Load())
+	assert.Equal(t, int32(1), earlier.stopCalls.Load())
+	assert.Equal(t, []string{"later", "earlier"}, []string{<-events, <-events})
+}
+
+func TestPluginManagerShutdownWaitsForUncooperativeCallbackBeforeEarlierExtension(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	releaseCallback := r7ReleaseOnce(release)
+	defer releaseCallback()
+	events := make(chan string, 2)
+	earlier := &r7LifecycleExt{name: "earlier", shutdown: func(context.Context) error {
+		events <- "earlier"
+		return nil
+	}}
+	later := &r7LifecycleExt{name: "later", shutdown: func(context.Context) error {
+		close(started)
+		<-release
+		events <- "later"
+		return nil
+	}}
+	loader := newMgrTestPluginLoader("test")
+	loader.SetResult("plugins", []Extension{earlier, later})
+	manager := NewPluginManager(loader)
+	require.NoError(t, manager.Load(context.Background(), []string{"plugins"}))
+	require.NoError(t, manager.Init(context.Background()))
+
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	require.ErrorIs(t, manager.Shutdown(shutdownCtx), ErrCleanupPending)
+	<-started
+	assert.Equal(t, int32(0), earlier.stopCalls.Load(), "the owner must keep reverse order while the callback is still active")
+	manager.mu.RLock()
+	assert.False(t, manager.shutdownComplete)
+	manager.mu.RUnlock()
+
+	releaseCallback()
+	require.Eventually(t, func() bool {
+		manager.mu.RLock()
+		defer manager.mu.RUnlock()
+		return manager.shutdownComplete
+	}, time.Second, time.Millisecond)
+	assert.Equal(t, int32(1), later.stopCalls.Load())
+	assert.Equal(t, int32(1), earlier.stopCalls.Load())
+	assert.Equal(t, []string{"later", "earlier"}, []string{<-events, <-events})
+}
+
+func TestPluginManagerCallbackCleanupPendingErrorIsCompleted(t *testing.T) {
+	callbackErr := cleanupPending("sentinel", "Shutdown", errors.New("callback returned pending sentinel"))
+	ext := &r7LifecycleExt{name: "sentinel", shutdown: func(context.Context) error { return callbackErr }}
+	loader := newMgrTestPluginLoader("test")
+	loader.SetResult("plugins", []Extension{ext})
+	manager := NewPluginManager(loader)
+	require.NoError(t, manager.Load(context.Background(), []string{"plugins"}))
+	require.NoError(t, manager.Init(context.Background()))
+
+	err := manager.Shutdown(context.Background())
+	require.ErrorIs(t, err, ErrCleanupPending)
+	manager.mu.RLock()
+	complete := manager.shutdownComplete
+	manager.mu.RUnlock()
+	assert.True(t, complete, "a callback-returned pending sentinel is a completed shutdown result")
+	assert.Equal(t, extensionStateStoppedWithError, manager.coordinator.state(ext.name))
+	assert.Equal(t, int32(1), ext.stopCalls.Load())
 }
 
 func TestPluginManagerShutdownErrorsPropagateWithoutRepeatingCallbacks(t *testing.T) {

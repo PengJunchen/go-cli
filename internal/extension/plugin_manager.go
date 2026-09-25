@@ -210,24 +210,32 @@ func (pm *PluginManager) Shutdown(ctx context.Context) error {
 		return err
 	}
 	op := pm.shutdownOp
+	var loadOp, initOp *pluginManagerOperation
+	startOwner := false
 	if op == nil {
-		if pm.loadOp != nil && pm.loadOp.cancel != nil {
-			pm.loadOp.cancel()
-		}
-		if pm.initOp != nil && pm.initOp.cancel != nil {
-			pm.initOp.cancel()
-		}
+		loadOp = pm.loadOp
+		initOp = pm.initOp
 		op = &pluginManagerOperation{kind: "Shutdown", done: make(chan struct{})}
 		pm.shutdownOp = op
-		// Caller cancellation only ends this wait. The owned manager operation
-		// must finish reverse-order cleanup after pending extension callbacks settle.
-		go pm.runShutdownOwner(context.WithoutCancel(ctx), op)
+		startOwner = true
 	}
 	pm.mu.Unlock()
+	if startOwner {
+		pm.coordinator.requestShutdownCallbackContext(ctx)
+		if loadOp != nil && loadOp.cancel != nil {
+			loadOp.cancel()
+		}
+		if initOp != nil && initOp.cancel != nil {
+			initOp.cancel()
+		}
+		// The owner keeps waiting after this caller leaves, while extension
+		// callbacks still receive the first caller's original deadline and values.
+		go pm.runShutdownOwner(context.WithoutCancel(ctx), ctx, op)
+	}
 	return waitPluginManagerShutdown(ctx, op)
 }
 
-func (pm *PluginManager) runShutdownOwner(ctx context.Context, op *pluginManagerOperation) {
+func (pm *PluginManager) runShutdownOwner(waitCtx, callbackCtx context.Context, op *pluginManagerOperation) {
 	for {
 		pm.mu.RLock()
 		loadOp := pm.loadOp
@@ -250,12 +258,13 @@ func (pm *PluginManager) runShutdownOwner(ctx context.Context, op *pluginManager
 	var errs []error
 	for i := len(extensions) - 1; i >= 0; i-- {
 		ext := extensions[i]
-		if err := pm.coordinator.shutdownExtension(ctx, ext); err != nil {
+		if err := pm.coordinator.shutdownExtensionWithContexts(waitCtx, callbackCtx, ext); err != nil {
 			errs = append(errs, fmt.Errorf("extension %q Shutdown: %w", ext.Name(), err))
 		}
 	}
 
 	result := errors.Join(errs...)
+	pm.coordinator.clearShutdownCallbackContext()
 	pm.mu.Lock()
 	op.err = result
 	pm.shutdownComplete = true
