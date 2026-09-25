@@ -22,6 +22,30 @@ func TestDefaultValidator_ValidDefault(t *testing.T) {
 	require.NoError(t, err)
 }
 
+func TestDefaultValidator_WebSearchProviderValues(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		provider string
+	}{
+		{name: "unset"},
+		{name: "mock", provider: "mock"},
+		{name: "fetch", provider: "fetch"},
+		{name: "brave", provider: "brave"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			cfg := defaultConfig()
+			cfg.WebSearch.Provider = testCase.provider
+			require.NoError(t, NewDefaultValidator().Validate(*cfg))
+		})
+	}
+
+	cfg := defaultConfig()
+	cfg.WebSearch.Provider = "not-a-provider"
+	err := NewDefaultValidator().Validate(*cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "web_search provider")
+}
+
 func TestDefaultValidator_ValidEmptyModel(t *testing.T) {
 	// A config with no model configured (empty name) is still valid.
 	cfg := defaultConfig()
