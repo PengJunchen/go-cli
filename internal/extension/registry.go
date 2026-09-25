@@ -185,10 +185,18 @@ func (r *DefaultExtensionRegistry) commitFrom(staging *DefaultExtensionRegistry)
 	}
 	staging.mu.Lock()
 	defer staging.mu.Unlock()
-	staging.sealed = true
-
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	return r.commitFromLocked(staging)
+}
+
+// commitFromLocked seals staging and publishes it atomically. The caller must
+// hold staging.mu and r.mu in that order.
+func (r *DefaultExtensionRegistry) commitFromLocked(staging *DefaultExtensionRegistry) error {
+	if staging == nil || staging == r {
+		return ErrExtensionAtomicCommitUnsupported
+	}
+	staging.sealed = true
 	if r.sealed {
 		return ErrExtensionRegistrySealed
 	}

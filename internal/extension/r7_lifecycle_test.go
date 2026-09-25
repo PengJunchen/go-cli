@@ -544,6 +544,59 @@ func TestPluginManagerCallbackCleanupPendingErrorIsCompleted(t *testing.T) {
 	assert.Equal(t, int32(1), ext.stopCalls.Load())
 }
 
+func TestPluginManagerShutdownClosesCommitGateBeforePublication(t *testing.T) {
+	loader := newMgrTestPluginLoader("test")
+	stagingReady := make(chan *DefaultExtensionRegistry, 1)
+	initReturned := make(chan struct{})
+	ext := &r7LifecycleExt{name: "commit-race", init: func(ctx context.Context, registry ExtensionRegistry) error {
+		staging, ok := registry.(*DefaultExtensionRegistry)
+		if !ok {
+			return errors.New("Init did not receive staging registry")
+		}
+		if err := registry.RegisterTool(ctx, testTool{name: "must-not-publish"}); err != nil {
+			return err
+		}
+		stagingReady <- staging
+		close(initReturned)
+		return nil
+	}}
+	loader.SetResult("plugins", []Extension{ext})
+	manager := NewPluginManager(loader)
+	require.NoError(t, manager.Load(context.Background(), []string{"plugins"}))
+	registry := manager.Registry().(*DefaultExtensionRegistry)
+	registry.mu.Lock()
+	var unlockOnce sync.Once
+	unlockRegistry := func() { unlockOnce.Do(registry.mu.Unlock) }
+	defer unlockRegistry()
+
+	initResult := make(chan error, 1)
+	go func() { initResult <- manager.Init(context.Background()) }()
+	staging := <-stagingReady
+	<-initReturned
+	require.Eventually(t, func() bool {
+		if staging.mu.TryLock() {
+			staging.mu.Unlock()
+			return false
+		}
+		return true
+	}, time.Second, time.Millisecond, "Init owner should be waiting to publish its staging registry")
+
+	shutdownResult := make(chan error, 1)
+	go func() { shutdownResult <- manager.Shutdown(context.Background()) }()
+	require.Eventually(t, func() bool {
+		manager.mu.RLock()
+		defer manager.mu.RUnlock()
+		return manager.closing
+	}, time.Second, time.Millisecond, "Shutdown should close admission while publication is blocked")
+	unlockRegistry()
+
+	initErr := <-initResult
+	assert.Error(t, initErr, "an Init finishing after the shared close gate must not publish")
+	require.NoError(t, <-shutdownResult)
+	assert.Nil(t, registry.tool("must-not-publish"))
+	assert.Equal(t, int32(1), ext.stopCalls.Load(), "successful but uncommitted Init must be cleaned once")
+}
+
 func TestPluginManagerShutdownErrorsPropagateWithoutRepeatingCallbacks(t *testing.T) {
 	firstErr := errors.New("first shutdown failed")
 	secondErr := errors.New("second shutdown failed")

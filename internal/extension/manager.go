@@ -90,6 +90,14 @@ type managedExtension struct {
 	cancelRequested bool
 }
 
+// extensionLifecycleGate linearizes manager shutdown admission against staged
+// registry publication. Commit lock order is staging registry, parent registry,
+// gate, then coordinator; shutdown takes the gate but never a registry lock.
+type extensionLifecycleGate struct {
+	mu      sync.Mutex
+	closing bool
+}
+
 // extensionCoordinator drives extension lifecycle and hook dispatch while
 // recording tracing spans for every stage. It is package-internal; the Phase 4
 // lifecycle is exercised entirely by the package's own tests.
@@ -97,6 +105,7 @@ type extensionCoordinator struct {
 	mu                  sync.Mutex
 	reg                 ExtensionRegistry
 	managed             map[string]*managedExtension
+	gate                *extensionLifecycleGate
 	shutdownCallbackCtx context.Context
 }
 
@@ -109,6 +118,7 @@ func newExtensionCoordinator(registry ExtensionRegistry) *extensionCoordinator {
 	return &extensionCoordinator{
 		reg:     registry,
 		managed: make(map[string]*managedExtension),
+		gate:    &extensionLifecycleGate{},
 	}
 }
 
@@ -239,14 +249,26 @@ func (c *extensionCoordinator) runInitOwner(ctx context.Context, managed *manage
 		return
 	}
 
+	// Do not hold the coordinator lock while waiting for either registry lock.
+	// Shutdown can then close the shared gate while this publication is blocked
+	// on the parent registry, and the final check and merge remain atomic.
+	staging.mu.Lock()
+	parent.mu.Lock()
+	c.gate.mu.Lock()
 	c.mu.Lock()
-	aborted := managed.cancelRequested || ctx.Err() != nil
+	staging.sealed = true
+	aborted := managed.cancelRequested || ctx.Err() != nil || c.gate.closing
 	cleanupCtx := managed.cleanupCtx
+	unlockPublication := func() {
+		c.mu.Unlock()
+		c.gate.mu.Unlock()
+		parent.mu.Unlock()
+		staging.mu.Unlock()
+	}
 	if aborted {
 		managed.state = extensionStateCleanupPending
 		managed.operation = extensionOperationInitCleanup
-		c.mu.Unlock()
-		staging.seal()
+		unlockPublication()
 		cleanupErr := managed.ext.Shutdown(cleanupCtx)
 		resultErr := errors.Join(ErrExtensionInitCanceled, cleanupErr)
 		span.SetStatus(tracing.SpanStatusError, resultErr.Error())
@@ -258,12 +280,12 @@ func (c *extensionCoordinator) runInitOwner(ctx context.Context, managed *manage
 		return
 	}
 
-	commitErr := parent.commitFrom(staging)
+	commitErr := parent.commitFromLocked(staging)
 	if commitErr != nil {
 		managed.state = extensionStateStopping
 		managed.operation = extensionOperationInitCleanup
 		cleanupCtx := managed.cleanupCtx
-		c.mu.Unlock()
+		unlockPublication()
 		cleanupErr := managed.ext.Shutdown(cleanupCtx)
 		resultErr := errors.Join(commitErr, cleanupErr)
 		span.SetStatus(tracing.SpanStatusError, resultErr.Error())
@@ -282,7 +304,7 @@ func (c *extensionCoordinator) runInitOwner(ctx context.Context, managed *manage
 	cancel := managed.cancel
 	managed.cancel = nil
 	close(managed.done)
-	c.mu.Unlock()
+	unlockPublication()
 	span.SetStatus(tracing.SpanStatusOK, "")
 	if cancel != nil {
 		cancel()
