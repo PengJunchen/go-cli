@@ -2,6 +2,7 @@ package tracing
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -228,7 +229,10 @@ func TestAsyncExporterRejectsAfterClose(t *testing.T) {
 	require.NoError(t, async.Shutdown(context.Background()))
 
 	lateSpan := &localSpan{spanID: "late"}
-	require.Error(t, async.ExportSpan(context.Background(), lateSpan), "closed exporter must reject rather than orphan the span")
+	require.ErrorIs(t, async.ExportSpan(context.Background(), lateSpan), ErrExporterClosed, "closed exporter must reject rather than orphan the span")
+	report, err := async.ShutdownWithReport(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), report.Stats.RejectedAfterClose)
 }
 
 type shutdownCountingExporter struct {
@@ -264,6 +268,58 @@ func TestAsyncExporterConcurrentShutdownCallsInnerOnce(t *testing.T) {
 	assert.Equal(t, int32(1), inner.shutdownCalls.Load(), "all callers must join one close owner")
 }
 
+type accountingTestExporter struct {
+	calls   atomic.Int32
+	started chan struct{}
+	release chan struct{}
+	failure error
+}
+
+func (e *accountingTestExporter) ExportSpan(context.Context, TraceSpan) error {
+	if e.calls.Add(1) == 1 {
+		close(e.started)
+		<-e.release
+	}
+	return e.failure
+}
+
+func (*accountingTestExporter) Shutdown(context.Context) error { return nil }
+
+func TestAsyncExporterQueueFullAndSinkFailureAccounting(t *testing.T) {
+	sinkErr := errors.New("sentinel sink error")
+	inner := &accountingTestExporter{started: make(chan struct{}), release: make(chan struct{}), failure: sinkErr}
+	async := newAsyncExporterWithTimeouts(inner, 1, 1, time.Hour, time.Second, time.Second, time.Second)
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(inner.release) }) }
+	t.Cleanup(func() {
+		release()
+		_ = async.Shutdown(context.Background()) //nolint:errcheck // cleanup joins the owner
+	})
+	tr := NewTracer("accounting", nil)
+	spanA, _ := tr.Start(context.Background(), "a", SpanKindInternal)
+	spanB, _ := tr.Start(context.Background(), "b", SpanKindInternal)
+	spanC, _ := tr.Start(context.Background(), "c", SpanKindInternal)
+	require.NoError(t, async.ExportSpan(context.Background(), spanA))
+	select {
+	case <-inner.started:
+	case <-time.After(time.Second):
+		t.Fatal("first sink callback did not start")
+	}
+	require.NoError(t, async.ExportSpan(context.Background(), spanB))
+	require.ErrorIs(t, async.ExportSpan(context.Background(), spanC), ErrExporterQueueFull)
+	release()
+
+	report, err := async.ShutdownWithReport(context.Background())
+	require.ErrorIs(t, err, sinkErr)
+	assert.Equal(t, int64(2), report.Stats.Accepted)
+	assert.Zero(t, report.Stats.Delivered)
+	assert.Equal(t, int64(1), report.Stats.QueueFullDropped)
+	assert.Equal(t, int64(2), report.Stats.SinkFailed)
+	assert.Zero(t, report.Stats.RejectedAfterClose)
+	assert.Zero(t, report.Stats.AbandonedOnShutdown)
+	assert.Zero(t, report.Stats.Pending)
+}
+
 func TestAsyncExporterWaiterTimeoutRetainsOwnerUntilCallbackReturns(t *testing.T) {
 	g := newGatedExporter()
 	async := NewAsyncExporter(g, 2, 1)
@@ -291,9 +347,144 @@ func TestAsyncExporterWaiterTimeoutRetainsOwnerUntilCallbackReturns(t *testing.T
 		t.Fatal("Shutdown ignored the waiter's canceled context while retaining the in-flight callback")
 	}
 	require.Error(t, waiterErr, "a timed-out waiter must receive a pending result")
+	require.ErrorIs(t, waiterErr, ErrShutdownPending)
 
 	release()
 	require.NoError(t, async.Shutdown(context.Background()), "a later waiter should observe completion after the callback returns")
+}
+
+type asyncCallbackObservation struct {
+	spanID string
+	start  time.Time
+	limit  time.Time
+}
+
+type sharedDrainTestExporter struct {
+	calls        atomic.Int32
+	observed     chan asyncCallbackObservation
+	releaseFirst chan struct{}
+	shutdownAt   chan time.Time
+}
+
+func newSharedDrainTestExporter() *sharedDrainTestExporter {
+	return &sharedDrainTestExporter{
+		observed:     make(chan asyncCallbackObservation, 4),
+		releaseFirst: make(chan struct{}),
+		shutdownAt:   make(chan time.Time, 1),
+	}
+}
+
+func (e *sharedDrainTestExporter) ExportSpan(ctx context.Context, span TraceSpan) error {
+	started := time.Now()
+	deadline, _ := ctx.Deadline()
+	call := e.calls.Add(1)
+	e.observed <- asyncCallbackObservation{spanID: span.SpanID(), start: started, limit: deadline}
+	if call == 1 {
+		select {
+		case <-e.releaseFirst:
+			return nil
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	<-ctx.Done()
+	return ctx.Err()
+}
+
+func (e *sharedDrainTestExporter) Shutdown(context.Context) error {
+	e.shutdownAt <- time.Now()
+	return nil
+}
+
+func TestAsyncExporterSharedDrainDeadlineDoesNotResetPerSpan(t *testing.T) {
+	const (
+		drainBudget    = 300 * time.Millisecond
+		callbackBudget = 250 * time.Millisecond
+	)
+	inner := newSharedDrainTestExporter()
+	async := newAsyncExporterWithTimeouts(inner, 2, 1, time.Hour, drainBudget, callbackBudget, 100*time.Millisecond)
+	var releaseOnce sync.Once
+	releaseFirst := func() { releaseOnce.Do(func() { close(inner.releaseFirst) }) }
+	t.Cleanup(func() {
+		releaseFirst()
+		_ = async.Shutdown(context.Background()) //nolint:errcheck // cleanup joins the owner
+	})
+	tr := NewTracer("shared-drain", nil)
+	spanA, _ := tr.Start(context.Background(), "a", SpanKindInternal)
+	spanB, _ := tr.Start(context.Background(), "b", SpanKindInternal)
+	spanC, _ := tr.Start(context.Background(), "c", SpanKindInternal)
+	require.NoError(t, async.ExportSpan(context.Background(), spanA))
+	first := <-inner.observed
+	require.Equal(t, spanA.SpanID(), first.spanID)
+	require.NoError(t, async.ExportSpan(context.Background(), spanB))
+	require.NoError(t, async.ExportSpan(context.Background(), spanC))
+
+	shutdownRequested := time.Now()
+	result := make(chan struct {
+		report AsyncExporterReport
+		err    error
+	}, 1)
+	go func() {
+		report, err := async.ShutdownWithReport(context.Background())
+		result <- struct {
+			report AsyncExporterReport
+			err    error
+		}{report: report, err: err}
+	}()
+	probe := &localSpan{spanID: "closing-probe"}
+	var shutdownStarted time.Time
+	deadline := time.Now().Add(time.Second)
+	for {
+		err := async.ExportSpan(context.Background(), probe)
+		if errors.Is(err, ErrExporterClosed) {
+			shutdownStarted = time.Now()
+			break
+		}
+		require.ErrorIs(t, err, ErrExporterQueueFull)
+		if time.Now().After(deadline) {
+			t.Fatal("Shutdown did not close admission")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	assert.GreaterOrEqual(t, shutdownStarted, shutdownRequested)
+	// This callback began before Shutdown and must keep its original bounded
+	// context; the later callback will receive only the shared deadline's remainder.
+	time.Sleep(150 * time.Millisecond)
+	releaseFirst()
+
+	second := asyncCallbackObservation{}
+	select {
+	case second = <-inner.observed:
+	case <-time.After(time.Second):
+		t.Fatal("second callback did not begin")
+	}
+	require.Equal(t, spanB.SpanID(), second.spanID)
+	assert.LessOrEqual(t, first.limit.Sub(shutdownStarted), callbackBudget+25*time.Millisecond,
+		"a callback active before Shutdown keeps its existing per-callback deadline")
+	assert.Less(t, second.limit.Sub(second.start), callbackBudget-50*time.Millisecond,
+		"later callback must not receive a fresh full callback budget when the drain deadline is closer")
+	assert.LessOrEqual(t, second.limit.Sub(shutdownStarted), drainBudget+25*time.Millisecond,
+		"callback deadline must remain within the one shared drain deadline")
+
+	var done struct {
+		report AsyncExporterReport
+		err    error
+	}
+	select {
+	case done = <-result:
+	case <-time.After(time.Second):
+		t.Fatal("async exporter did not finish after its shared drain deadline")
+	}
+	require.ErrorIs(t, done.err, context.DeadlineExceeded)
+	assert.Equal(t, int64(3), done.report.Stats.Accepted)
+	assert.Equal(t, int64(1), done.report.Stats.Delivered)
+	assert.Equal(t, int64(1), done.report.Stats.SinkFailed)
+	assert.Equal(t, int64(1), done.report.Stats.AbandonedOnShutdown)
+	assert.Zero(t, done.report.Stats.Pending)
+	assert.True(t, done.report.OwnerFinished)
+	assert.False(t, done.report.CleanupPending)
+	assert.Equal(t, int32(2), inner.calls.Load(), "span C must not be handed off after the shared drain deadline")
+	<-inner.shutdownAt // inner shutdown runs only after the worker has joined
 }
 
 func TestAsyncExporterShutdownFlushesBufferedSpans(t *testing.T) {

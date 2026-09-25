@@ -86,10 +86,12 @@ func TestMultiExporterShutdownContinuesOnError(t *testing.T) {
 }
 
 // shutdownErrorExporter always fails on Shutdown.
+var errShutdownExporterTest = errors.New("shutdown failed")
+
 type shutdownErrorExporter struct{}
 
 func (shutdownErrorExporter) ExportSpan(context.Context, TraceSpan) error { return nil }
-func (shutdownErrorExporter) Shutdown(context.Context) error              { return errors.New("shutdown failed") }
+func (shutdownErrorExporter) Shutdown(context.Context) error              { return errShutdownExporterTest }
 
 // TestJSONLTraceExporterEmptySpanFields verifies the JSON line encodes optional
 // fields and that an empty/no-op span still produces a valid trailing line.
@@ -183,15 +185,11 @@ func TestStdoutTraceExporterNilWriterFallsBack(t *testing.T) {
 	require.NoError(t, exp.Shutdown(context.Background()))
 }
 
-// TestAsyncExporterExportFailureLogsWithoutStalling verifies that a failing
-// inner exporter is logged and the worker keeps running (span is not re-tried
-// but the loop is not wedged).
-func TestAsyncExporterExportFailureLogsWithoutStalling(t *testing.T) {
+// TestAsyncExporterExportFailureIsReportedWithoutStalling verifies that a
+// failing inner exporter is counted and the worker keeps running (span is not
+// re-tried but the loop is not wedged).
+func TestAsyncExporterExportFailureIsReportedWithoutStalling(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
-
-	lc := verify.NewLogCapturer()
-	ctx := lc.Attach(context.Background())
-	defer lc.Detach()
 
 	inner := &failingExporter{}
 	async := NewAsyncExporter(inner, 16, 1)
@@ -199,21 +197,18 @@ func TestAsyncExporterExportFailureLogsWithoutStalling(t *testing.T) {
 
 	tr := NewTracer("trace-async-fail", nil)
 	span, _ := tr.Start(context.Background(), "op", SpanKindInternal)
-	require.NoError(t, async.ExportSpan(ctx, span))
-
-	require.Eventually(t, func() bool {
-		for _, e := range lc.Entries() {
-			if e.Message == "failed to flush span" {
-				return true
-			}
-		}
-		return false
-	}, 2*time.Second, 5*time.Millisecond, "expected a 'failed to flush span' log")
+	require.NoError(t, async.ExportSpan(context.Background(), span))
+	require.Eventually(t, func() bool { return inner.count() == 1 }, 2*time.Second, 5*time.Millisecond)
 
 	// A second export must still be accepted (worker did not stall).
 	span2, _ := tr.Start(context.Background(), "op2", SpanKindInternal)
-	require.NoError(t, async.ExportSpan(ctx, span2))
+	require.NoError(t, async.ExportSpan(context.Background(), span2))
 	require.Eventually(t, func() bool { return inner.count() >= 2 }, 2*time.Second, 10*time.Millisecond)
+
+	report, err := async.ShutdownWithReport(context.Background())
+	require.Error(t, err, "sink failures must be returned to the owner")
+	assert.Equal(t, int64(2), report.Stats.SinkFailed)
+	assert.Zero(t, report.Stats.Pending)
 }
 
 // TestAsyncExporterShutdownPropagatesInnerError verifies Shutdown surfaces the
@@ -224,6 +219,7 @@ func TestAsyncExporterShutdownPropagatesInnerError(t *testing.T) {
 	async := NewAsyncExporter(&shutdownErrorExporter{}, 8, 4)
 	err := async.Shutdown(context.Background())
 	require.Error(t, err)
+	assert.ErrorIs(t, err, errShutdownExporterTest)
 	assert.Contains(t, err.Error(), "shutdown failed")
 }
 

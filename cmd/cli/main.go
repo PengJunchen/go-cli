@@ -11,6 +11,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/pengjunchen/go-cli/internal/approval"
 	"github.com/pengjunchen/go-cli/internal/cli"
@@ -110,14 +111,49 @@ func run(argv []string, stdout, stderr io.Writer, loadConfig func() (*config.Con
 		if tracer != nil {
 			tracer.Flush()
 		}
-		if err := exporter.Shutdown(ctx); err != nil {
-			_, _ = fmt.Fprintf(stderr, "error: shutdown exporter: %v\n", err) //nolint:errcheck // CLI error output is best-effort
-			if code == 0 {
-				code = 1
-			}
+		if shutdownCode := finalizeTracingExporter(ctx, exporter, stderr, tracing.DefaultAsyncExporterShutdownWaitBudget); shutdownCode != 0 && code == 0 {
+			code = shutdownCode
 		}
 	}
 	return code
+}
+
+type tracingShutdownReporter interface {
+	ShutdownWithReport(context.Context) (tracing.AsyncExporterReport, error)
+}
+
+// finalizeTracingExporter keeps the root process alive for the bounded owner
+// close even when the signal context has already been canceled. It emits only
+// safe status and numeric counts; callback error text can contain span data.
+func finalizeTracingExporter(ctx context.Context, exporter tracing.TraceExporter, stderr io.Writer, waitBudget time.Duration) int {
+	if exporter == nil {
+		return 0
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if waitBudget <= 0 {
+		waitBudget = tracing.DefaultAsyncExporterShutdownWaitBudget
+	}
+	waitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), waitBudget)
+	defer cancel()
+
+	var report tracing.AsyncExporterReport
+	reporter, ok := exporter.(tracingShutdownReporter)
+	if !ok {
+		_, _ = fmt.Fprintln(stderr, "error: tracing exporter shutdown unavailable (missing bounded owner)") //nolint:errcheck // CLI error output is best-effort
+		return 1
+	}
+	report, err := reporter.ShutdownWithReport(waitCtx)
+	if err == nil {
+		return 0
+	}
+	state := "failed"
+	if errors.Is(err, tracing.ErrShutdownPending) {
+		state = "pending"
+	}
+	_, _ = fmt.Fprintf(stderr, "error: tracing exporter shutdown %s (accepted=%d delivered=%d pending=%d)\n", state, report.Stats.Accepted, report.Stats.Delivered, report.Stats.Pending) //nolint:errcheck // CLI error output is best-effort
+	return 1
 }
 
 func stdoutTracingOutputConflict(cfg *config.Config, argv []string) error {
