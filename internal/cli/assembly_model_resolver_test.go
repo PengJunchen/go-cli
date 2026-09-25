@@ -59,6 +59,63 @@ func TestAssembledPrimaryUsesConfiguredSamplingAndCredentialScope(t *testing.T) 
 	assert.Equal(t, 128, request.MaxTokens, "model token limit takes precedence over provider defaults")
 }
 
+func TestReviewProviderFlagOverrideDoesNotRebindProviderConfigKey(t *testing.T) {
+	capture := &providerRequestCapture{}
+	srv := httptest.NewServer(http.HandlerFunc(capture.handler))
+	t.Cleanup(srv.Close)
+
+	const configProvider = "config-provider"
+	const overrideProvider = "override-provider"
+	apiKey := newTestCredentialCanary(t)
+	rc := &config.Config{Provider: config.ProviderConfig{
+		Name:    configProvider,
+		BaseURL: srv.URL,
+		APIKey:  apiKey,
+	}}
+	providerName := resolveProviderName(overrideProvider, rc)
+	assert.Equal(t, overrideProvider, providerName)
+
+	assembly, err := AssembleAgent(context.Background(), rc, providerName, "override-model", io.Discard)
+	if err == nil && assembly != nil {
+		t.Cleanup(assembly.Cleanup)
+		_, requestErr := assembly.ModelConfig.Model.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "override"}})
+		assert.NoError(t, requestErr)
+	}
+
+	count, _, authorization, body := capture.snapshot()
+	assert.Zero(t, count, "the config provider endpoint must not be treated as the override provider endpoint")
+	assert.NotContains(t, authorization, apiKey)
+	assert.NotContains(t, body, apiKey)
+	require.ErrorIs(t, err, llm.ErrProviderEndpointRequired, "an unconfigured custom override must fail closed")
+	assert.NotContains(t, err.Error(), apiKey)
+}
+
+func TestAssembledProviderFlagCanonicalAliasKeepsProviderConfig(t *testing.T) {
+	capture := &providerRequestCapture{}
+	srv := httptest.NewServer(http.HandlerFunc(capture.handler))
+	t.Cleanup(srv.Close)
+
+	apiKey := newTestCredentialCanary(t)
+	rc := &config.Config{Provider: config.ProviderConfig{
+		Name:    " OPENAI ",
+		BaseURL: srv.URL + "/configured-openai",
+		APIKey:  apiKey,
+	}}
+	providerName := resolveProviderName("openai", rc)
+
+	assembly, err := AssembleAgent(context.Background(), rc, providerName, "selected-model", io.Discard)
+	require.NoError(t, err)
+	t.Cleanup(assembly.Cleanup)
+
+	response, err := assembly.ModelConfig.Model.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "alias"}})
+	require.NoError(t, err)
+	require.NotNil(t, response)
+	count, path, authorization, _ := capture.snapshot()
+	assert.Equal(t, 1, count)
+	assert.Equal(t, "/configured-openai/chat/completions", path)
+	assert.Equal(t, "Bearer "+apiKey, authorization)
+}
+
 func TestAssembledSmallModelSharesCredentialOnlyWithinSameOrigin(t *testing.T) {
 	tests := []struct {
 		name              string
