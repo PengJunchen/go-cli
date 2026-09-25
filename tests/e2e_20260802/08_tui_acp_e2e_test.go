@@ -6,6 +6,7 @@ package e2e_20260802 //nolint:staticcheck
 import (
 	"bufio"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -841,37 +842,45 @@ func TestACP_StdioAdapterConnectDisconnect(t *testing.T) {
 	// disconnect frame. That real EOF lets the adapter join its reader worker.
 	peerErrCh := make(chan error, 1)
 	go func() {
-		defer peerOut.Close() //nolint:errcheck,gosec
+		defer func() {
+			_ = peerIn.Close()
+			_ = peerOut.Close()
+		}()
 		reader := bufio.NewReader(peerOut)
-		for _, expected := range []string{"connect", "disconnect"} {
+		for _, expected := range []string{acp.TypeConnect, acp.TypeDisconnect} {
 			frame, err := reader.ReadString('\n')
 			if err != nil {
 				peerErrCh <- err
 				return
 			}
-			if !strings.Contains(frame, expected) {
-				peerErrCh <- fmt.Errorf("expected %s frame, got %q", expected, frame)
+			var message acp.ACPMessage
+			if err := json.Unmarshal([]byte(frame), &message); err != nil {
+				peerErrCh <- fmt.Errorf("decode stdio frame: %w", err)
 				return
 			}
-			if expected == "disconnect" {
-				if err := peerIn.Close(); err != nil {
-					peerErrCh <- err
-					return
-				}
+			if message.Type != expected {
+				peerErrCh <- fmt.Errorf("expected frame type %q, got %q", expected, message.Type)
+				return
 			}
 		}
 		peerErrCh <- nil
 	}()
 
 	adapter := acp.NewStdioAdapter(adapterIn, adapterOut)
-	ctx := context.Background()
+	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer cancel()
 
 	err := adapter.Connect(ctx)
 	assert.NoError(t, err)
 
 	err = adapter.Disconnect(ctx)
 	assert.NoError(t, err)
-	require.NoError(t, <-peerErrCh)
+	select {
+	case err := <-peerErrCh:
+		require.NoError(t, err)
+	case <-ctx.Done():
+		t.Fatalf("stdio peer did not finish before deadline: %v", ctx.Err())
+	}
 }
 
 // =============================================================================
