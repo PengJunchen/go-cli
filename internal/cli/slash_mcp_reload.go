@@ -27,7 +27,17 @@ func (h *MCPHandler) Handle(ctx context.Context, args []string, deps Dependencie
 
 	switch args[0] {
 	case "reload":
-		count := ReloadAllHotReloaders(ctx)
+		reloader, ok := deps.(interface {
+			ReloadMCP(context.Context) (int, error)
+		})
+		if !ok {
+			fmt.Fprintln(out, "No active MCP hot reloaders to reload.") //nolint:errcheck
+			return "", nil
+		}
+		count, err := reloader.ReloadMCP(ctx)
+		if err != nil {
+			return "", err
+		}
 		if count == 0 {
 			fmt.Fprintln(out, "No active MCP hot reloaders to reload.") //nolint:errcheck
 			return "", nil

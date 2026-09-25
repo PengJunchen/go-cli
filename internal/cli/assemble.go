@@ -253,6 +253,30 @@ type AgentAssembly struct {
 	// before, they are also registered here for dependency-injection use.
 	Registry *core.DefaultRegistry
 	Cleanup  func()
+
+	closeOwner   *assemblyCloseOwner
+	mcpResources *assemblyMCPResources
+}
+
+// Close stops admitting new runs and waits for the Assembly-owned resources to
+// finish. The caller context bounds only this wait; a timed-out close owner
+// retains the active resources and continues its serial shutdown.
+func (a *AgentAssembly) Close(ctx context.Context) error {
+	if a == nil || a.closeOwner == nil {
+		return nil
+	}
+	return a.closeOwner.Close(ctx)
+}
+
+func (a *AgentAssembly) setInteractiveCloseHooks(
+	stop func(),
+	beforeSessionClose func(context.Context) error,
+	afterMemoryJoin func(),
+) error {
+	if a == nil || a.closeOwner == nil {
+		return ErrAssemblyRunAdmissionUnavailable
+	}
+	return a.closeOwner.setInteractiveCloseHooks(stop, beforeSessionClose, afterMemoryJoin)
 }
 
 // AssembleOption configures AssembleAgent behavior.
@@ -344,43 +368,37 @@ func AssembleAgent(
 	s.loadConfiguredShellHooks()
 	if len(s.unsupportedPostToolUseHooks) > 0 {
 		hook := s.unsupportedPostToolUseHooks[0]
-		s.runCleanup()
-		return nil, &UnsupportedPostToolUseHookError{Path: hook.Path, Index: hook.Index}
+		return nil, errors.Join(&UnsupportedPostToolUseHookError{Path: hook.Path, Index: hook.Index}, s.runCleanup())
 	}
 
 	// Assemble subsystems in dependency order.
 	if err := s.assembleModel(); err != nil {
-		s.runCleanup()
-		return nil, err
+		return nil, errors.Join(err, s.runCleanup())
 	}
 	s.assembleTracing()
 	if err := s.assembleTools(); err != nil {
-		s.runCleanup()
-		return nil, err
+		return nil, errors.Join(err, s.runCleanup())
 	}
-	s.assembleExtensions()
+	if err := s.assembleExtensions(); err != nil {
+		return nil, errors.Join(err, s.runCleanup())
+	}
 	if err := s.assembleApproval(); err != nil {
-		s.runCleanup()
-		return nil, err
+		return nil, errors.Join(err, s.runCleanup())
 	}
 	if err := s.assembleProductionResilience(); err != nil {
-		s.runCleanup()
-		return nil, err
+		return nil, errors.Join(err, s.runCleanup())
 	}
 	s.assembleOutputGuards()
 	s.assembleSubAgent()
 	if err := s.assembleExtraTools(); err != nil {
-		s.runCleanup()
-		return nil, err
+		return nil, errors.Join(err, s.runCleanup())
 	}
 	s.assembleLoopAgent()
 	s.assembleMiddleware()
 	if err := s.assembleCompactor(); err != nil {
-		s.runCleanup()
-		return nil, err
+		return nil, errors.Join(err, s.runCleanup())
 	}
 	s.assembleSession()
-	s.appendFinalCleanup()
 
 	// Resume history from session store if requested.
 	var restoredHistory []core.AgentMessage
@@ -399,7 +417,7 @@ func AssembleAgent(
 		agentOpts = append(agentOpts, core.WithHistory(restoredHistory))
 	}
 	agent := core.NewAgentImpl(s.ac.agentName, s.loop, agentOpts...)
-	h := core.NewHarnessImpl(agent, core.WithEventBuffer(256), core.WithHarnessTracer(s.tracer), core.WithRunSlotGuard(s.runSlotGuard), core.WithHarnessEventBus(s.eventBus))
+	h := core.NewHarnessImpl(agent, core.WithEventBuffer(256), core.WithHarnessTracer(s.tracer), core.WithRunSlotGuard(s.runSlotGuard), core.WithHarnessEventBus(s.eventBus), core.WithRunLifetimeContext(s.lifetimeCtx))
 
 	// Build TurnRunner wired with the shared steering channel and agent.
 	turnRunner := core.NewEinoTurnRunner(s.loop)
@@ -408,6 +426,7 @@ func AssembleAgent(
 	turnRunner.SetAgent(agent)
 	turnRunner.SetHookChain(s.hookChain)
 	turnRunner.SetRunSlotGuard(s.runSlotGuard)
+	turnRunner.SetRunLifetimeContext(s.lifetimeCtx)
 	s.reg.RegisterTurnRunner(turnRunner)
 
 	// Emit assemble span for observability.
@@ -493,8 +512,10 @@ func AssembleAgent(
 			LSPClient:          s.lspClientField,
 			LSPWorkspaceRoot:   s.lspWorkspaceRoot,
 		},
-		Registry: s.reg,
-		Cleanup:  s.runCleanup,
+		Registry:     s.reg,
+		Cleanup:      func() { _ = s.runCleanup() },
+		closeOwner:   s.closeOwner,
+		mcpResources: s.mcpResources,
 	}, nil
 }
 
@@ -507,6 +528,9 @@ func newAssembleState(
 	out io.Writer,
 	opts ...AssembleOption,
 ) (*assembleState, llm.ThinkingLevel) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
 	ac := assembleConfig{
 		maxTokens:     0, // 0 means "not set"; resolved below
 		enableSession: false,
@@ -544,20 +568,30 @@ func newAssembleState(
 		sessionID = rc.Session.ID
 	}
 
+	lifetimeCtx, lifetimeCancel := context.WithCancel(ctx)
 	s := &assembleState{
-		ctx:           ctx,
-		rc:            rc,
-		ac:            ac,
-		logger:        logger,
-		reg:           reg,
-		sessionID:     sessionID,
-		providerName:  providerName,
-		modelName:     modelName,
-		out:           out,
-		thinkingLevel: thinkingLevel,
-		eventBus:      core.NewMemoryEventBus(),
-		gitCwd:        gitCwd,
+		ctx:            lifetimeCtx,
+		rc:             rc,
+		ac:             ac,
+		logger:         logger,
+		reg:            reg,
+		sessionID:      sessionID,
+		providerName:   providerName,
+		modelName:      modelName,
+		out:            out,
+		thinkingLevel:  thinkingLevel,
+		eventBus:       core.NewMemoryEventBus(),
+		gitCwd:         gitCwd,
+		lifetimeCtx:    lifetimeCtx,
+		lifetimeCancel: lifetimeCancel,
+		mcpResources:   &assemblyMCPResources{},
 	}
+	s.closeOwner = newAssemblyCloseOwner(
+		func() core.RunSlotGuard { return s.runSlotGuard },
+		s.lifetimeCancel,
+		s.requestStopSources,
+		s.closeResources,
+	)
 	return s, thinkingLevel
 }
 
@@ -675,39 +709,27 @@ type assembleState struct {
 	sessionStore *session.JSONLSessionStore
 
 	// Cleanup
-	cleanupList []func()
+	cleanupList []func(context.Context) error
+
+	lifetimeCtx    context.Context
+	lifetimeCancel context.CancelFunc
+	closeOwner     *assemblyCloseOwner
+	mcpResources   *assemblyMCPResources
+	pluginManagers []*extension.PluginManager
+
+	primaryModelCleanup func()
+	modelDisposer       func() error
+	smallModelCleanup   func()
+	worktreeStopSignal  func()
+	acpConnectErr       error
 }
 
-// runCleanup executes all registered cleanup functions in reverse order (LIFO).
-func (s *assembleState) runCleanup() {
-	for i := len(s.cleanupList) - 1; i >= 0; i-- {
-		s.cleanupList[i]()
+// runCleanup starts or joins the same close owner used by a returned Assembly.
+func (s *assembleState) runCleanup() error {
+	if s.closeOwner == nil {
+		return nil
 	}
-}
-
-// appendFinalCleanup adds the terminal cleanup closure for ACP client,
-// session store, and memory store. These run first during
-// LIFO cleanup because they are appended after all subsystem cleanups.
-func (s *assembleState) appendFinalCleanup() {
-	s.cleanupList = append(s.cleanupList, func() {
-		StopHotReloaders()
-		if s.eventBus != nil {
-			s.eventBus.Close()
-		}
-		if s.acpAdapter != nil {
-			s.acpAdapter.Close()
-		}
-		if s.acpClient != nil {
-			_ = s.acpClient.Disconnect(context.Background()) //nolint:errcheck
-		}
-		if s.sessionStore != nil {
-			s.sessionStore.Close() //nolint:errcheck,gosec
-		}
-		if s.memStore != nil {
-			s.memWG.Wait()
-			_ = s.memStore.Close() //nolint:errcheck
-		}
-	})
+	return s.closeOwner.Close(context.Background())
 }
 
 // assembleModel builds the primary model, ModelCycler, ModelRegistry, and small
@@ -726,7 +748,7 @@ func (s *assembleState) assembleModel() error {
 	s.model = model
 	s.modelInfo = modelInfo
 	if modelCleanup != nil {
-		s.cleanupList = append(s.cleanupList, modelCleanup)
+		s.primaryModelCleanup = modelCleanup
 	}
 
 	// Wire ModelCycler when enabled models are configured.
@@ -779,7 +801,7 @@ func (s *assembleState) assembleModel() error {
 		} else {
 			s.smallModel = sm
 			if smallCleanup != nil {
-				s.cleanupList = append(s.cleanupList, smallCleanup)
+				s.smallModelCleanup = smallCleanup
 			}
 			s.logger.Info("assemble_small_model_enabled", "model", s.rc.SmallModel.Model)
 		}
@@ -800,6 +822,7 @@ func (s *assembleState) assembleModel() error {
 	}
 	s.modelSelector = llm.NewDefaultModelSelector(s.model, s.smallModel).
 		WithModelRegistry(s.modelRegistry).
+		WithPrimaryCleanup(s.primaryModelCleanup).
 		WithModelNames(s.providerName, s.modelName, smallProvider, smallModelName).
 		WithModelBuilder(func(ctx context.Context, name string) (llm.BaseChatModel, func(), error) {
 			m, _, cleanup, err := modelResolver.buildPrimary(ctx, s.rc, s.providerName, name)
@@ -893,13 +916,29 @@ func (s *assembleState) assembleTools() error {
 		wtSigCh := make(chan os.Signal, 1)
 		signal.Notify(wtSigCh, syscall.SIGINT, syscall.SIGTERM)
 		wtDone := make(chan struct{})
-		wtMgr.StartSignalCleanup(wtSigCh, wtDone)
-		s.cleanupList = append(s.cleanupList, func() {
-			signal.Stop(wtSigCh)
-			close(wtDone)
-			if err := wtMgr.Cleanup(context.Background()); err != nil {
-				s.logger.Warn("assemble_worktree_cleanup_failed", "err", err)
+		wtSignalDone := make(chan struct{})
+		go func() {
+			defer close(wtSignalDone)
+			select {
+			case <-wtSigCh:
+				go func() {
+					if err := s.runCleanup(); err != nil {
+						s.logger.Warn("assemble_worktree_cleanup_failed", "err", err)
+					}
+				}()
+			case <-wtDone:
 			}
+		}()
+		var stopWorktreeSignal sync.Once
+		s.worktreeStopSignal = func() {
+			stopWorktreeSignal.Do(func() {
+				signal.Stop(wtSigCh)
+				close(wtDone)
+				<-wtSignalDone
+			})
+		}
+		s.cleanupList = append(s.cleanupList, func(ctx context.Context) error {
+			return wtMgr.Cleanup(ctx)
 		})
 	}
 
@@ -927,7 +966,7 @@ func (s *assembleState) assembleTools() error {
 	registerCustomTools(s.ctx, s.rc, s.tr, s.logger)
 
 	// Register MCP tools.
-	if mcpErr := registerMCPTools(s.ctx, s.rc, dtr); mcpErr != nil {
+	if mcpErr := registerMCPToolsOwned(s.ctx, s.rc, dtr, s.mcpResources); mcpErr != nil {
 		s.logger.Warn("assemble_mcp_failed", "err", mcpErr)
 	}
 
@@ -935,16 +974,15 @@ func (s *assembleState) assembleTools() error {
 	if s.rc != nil && (len(s.rc.LSP.ServerCommand) > 0 || len(s.rc.LSP.Servers) > 0) {
 		lspClient, lspStarted := buildLSPClient(s.ctx, s.rc, s.logger)
 		if lspClient != nil && lspStarted {
+			client := lspClient
+			s.cleanupList = append(s.cleanupList, func(ctx context.Context) error {
+				return client.Shutdown(ctx)
+			})
 			if regErr := s.tr.Register(s.ctx, tools.NewLSPTool(lspClient)); regErr != nil {
 				s.logger.Warn("assemble_lsp_register_failed", "err", regErr)
-				_ = lspClient.Shutdown(context.Background()) //nolint:errcheck
 			} else {
 				s.lspClientField = lspClient
 				s.lspWorkspaceRoot = resolveLSPWorkspaceRoot(s.rc)
-				client := lspClient
-				s.cleanupList = append(s.cleanupList, func() {
-					_ = client.Shutdown(context.Background()) //nolint:errcheck
-				})
 				s.logger.Info("assemble_lsp_ready")
 			}
 		}
@@ -970,11 +1008,16 @@ func (s *assembleState) assembleTools() error {
 
 // assembleExtensions loads and initializes extensions, registering their tools,
 // hooks, and middleware. It also builds the hook chain.
-func (s *assembleState) assembleExtensions() {
+func (s *assembleState) assembleExtensions() error {
 	if s.rc != nil && s.rc.Extensions.Enabled != nil && *s.rc.Extensions.Enabled && len(s.rc.Extensions.PluginPaths) > 0 {
 		pm := extension.NewPluginManager(extension.NewDefaultPluginLoader())
-		_ = pm.Load(s.ctx, s.rc.Extensions.PluginPaths) //nolint:errcheck
-		_ = pm.Init(s.ctx)                              //nolint:errcheck
+		s.pluginManagers = append(s.pluginManagers, pm)
+		if err := pm.Load(s.ctx, s.rc.Extensions.PluginPaths); err != nil {
+			return fmt.Errorf("assemble: load extensions: %w", err)
+		}
+		if err := pm.Init(s.ctx); err != nil {
+			return fmt.Errorf("assemble: initialize extensions: %w", err)
+		}
 		for _, t := range pm.Tools() {
 			if regErr := s.tr.Register(s.ctx, t); regErr != nil {
 				s.logger.Warn("assemble_extension_tool_register_failed", "tool", t.Name(), "err", regErr)
@@ -987,9 +1030,6 @@ func (s *assembleState) assembleExtensions() {
 			s.extMiddleware = append(s.extMiddleware, newExtensionMiddlewareAdapter(m))
 		}
 		s.logger.Info("assemble_extensions_ready", "extensions", len(pm.Extensions()), "paths", len(s.rc.Extensions.PluginPaths), "hooks", len(s.extHooks), "middleware", len(s.extMiddleware))
-		s.cleanupList = append(s.cleanupList, func() {
-			_ = pm.Shutdown(context.Background()) //nolint:errcheck
-		})
 	}
 
 	s.loadConfiguredShellHooks()
@@ -999,6 +1039,7 @@ func (s *assembleState) assembleExtensions() {
 	}
 
 	s.hookChain = core.NewHookChain(s.extHooks...)
+	return nil
 }
 
 func (s *assembleState) loadConfiguredShellHooks() {
@@ -1147,10 +1188,11 @@ func (s *assembleState) assembleApproval() error {
 		tools.WithMutationDiffGenerator(s.diffGen),
 	)
 	mq := s.mutationQueue
-	s.cleanupList = append(s.cleanupList, func() {
+	s.cleanupList = append(s.cleanupList, func(context.Context) error {
 		if cq, ok := mq.(*tools.DefaultFileMutationQueue); ok {
-			_ = cq.Close() //nolint:errcheck
+			return cq.Close()
 		}
+		return nil
 	})
 	preparedRegistry := tools.NewMiddlewareToolRegistry(s.tr)
 	if err := preparedRegistry.SetPreparedToolPolicy(approvalMW.PreparedPolicy); err != nil {
@@ -1309,7 +1351,7 @@ func (s *assembleState) assembleSubAgent() {
 		if s.acpClient != nil {
 			if connErr := s.acpClient.Connect(s.ctx); connErr != nil {
 				s.logger.Warn("assemble_acp_connect_failed", "err", connErr)
-				s.acpClient = nil
+				s.acpConnectErr = connErr
 			} else {
 				acpMW := acp.NewACPMiddleware("acp-bridge", s.acpClient)
 				s.acpAdapter = acp.NewACPMiddlewareAdapter(acpMW, dispatcher, s.acpClient)
@@ -2137,51 +2179,6 @@ func findModelInfo(models []llm.ModelInfo, name string) llm.ModelInfo {
 	return llm.ModelInfo{}
 }
 
-// hotReloadersMu guards activeHotReloaders.
-var hotReloadersMu sync.Mutex
-
-// activeHotReloaders holds all running MCP HotReloaders so they can be
-// stopped on session cleanup and manually triggered by /mcp reload.
-var activeHotReloaders []mcp.HotReloader
-
-// addHotReloader appends a running HotReloader to the package-level list.
-func addHotReloader(hr mcp.HotReloader) {
-	hotReloadersMu.Lock()
-	defer hotReloadersMu.Unlock()
-	activeHotReloaders = append(activeHotReloaders, hr)
-}
-
-// StopHotReloaders stops all active MCP HotReloaders. It is safe to call from
-// session cleanup and is idempotent.
-func StopHotReloaders() {
-	hotReloadersMu.Lock()
-	reloaders := activeHotReloaders
-	activeHotReloaders = nil
-	hotReloadersMu.Unlock()
-
-	for _, hr := range reloaders {
-		if err := hr.Stop(); err != nil {
-			slog.Warn("assemble_mcp_hot_reload_stop_failed", "reloader", hr.Name(), "err", err)
-		}
-	}
-}
-
-// ReloadAllHotReloaders manually triggers Reload on every active HotReloader.
-// It returns the number of reloaders that were triggered.
-func ReloadAllHotReloaders(ctx context.Context) int {
-	hotReloadersMu.Lock()
-	reloaders := make([]mcp.HotReloader, len(activeHotReloaders))
-	copy(reloaders, activeHotReloaders)
-	hotReloadersMu.Unlock()
-
-	for _, hr := range reloaders {
-		if err := hr.Reload(ctx); err != nil {
-			slog.Warn("assemble_mcp_hot_reload_manual_failed", "reloader", hr.Name(), "err", err)
-		}
-	}
-	return len(reloaders)
-}
-
 // registerMCPTools connects to configured MCP servers and registers their
 // tools into the tool registry. When no MCP servers are configured in the
 // main config file, it auto-loads from .go-cli/mcp.json or
@@ -2192,6 +2189,10 @@ func ReloadAllHotReloaders(ctx context.Context) int {
 // created for each connected server so that editing the config file
 // automatically triggers a reconnect and tool re-registration.
 func registerMCPTools(ctx context.Context, rc *config.Config, tr tools.DeferredRegistry) error {
+	return registerMCPToolsOwned(ctx, rc, tr, nil)
+}
+
+func registerMCPToolsOwned(ctx context.Context, rc *config.Config, tr tools.DeferredRegistry, owner *assemblyMCPResources) error {
 	servers, configPath := loadMCPServersWithConfigPath(ctx, rc)
 	if len(servers) == 0 {
 		return nil
@@ -2231,6 +2232,9 @@ func registerMCPTools(ctx context.Context, rc *config.Config, tr tools.DeferredR
 			} else {
 				client = mcp.NewOfficialSDKAdapter(cfg)
 			}
+			if owner != nil {
+				owner.addClient(client)
+			}
 
 			if err := client.Connect(gctx); err != nil {
 				slog.Warn("assemble_mcp_connect_failed", "server", srv.Name, "err", err)
@@ -2261,7 +2265,9 @@ func registerMCPTools(ctx context.Context, rc *config.Config, tr tools.DeferredR
 	// the client and re-registers its tools.
 	if configPath != "" {
 		for _, client := range connected {
-			createAndStartHotReloader(ctx, configPath, client, tr)
+			if owner != nil {
+				createAndStartHotReloader(ctx, configPath, client, tr, owner)
+			}
 		}
 	}
 
@@ -2286,18 +2292,23 @@ func registerMCPToolBatch(ctx context.Context, tr tools.DeferredRegistry, client
 
 // createAndStartHotReloader builds a HotReloader for a single MCP client,
 // starts watching the config file, and registers it for shutdown.
-func createAndStartHotReloader(ctx context.Context, configPath string, client mcp.MCPClient, tr tools.DeferredRegistry) {
+func createAndStartHotReloader(ctx context.Context, configPath string, client mcp.MCPClient, tr tools.DeferredRegistry, owner *assemblyMCPResources) {
 	clientRef := client
 	registerFn := mcp.RegisterToolsFunc(func(mcpTools []mcp.MCPTool) {
 		registerMCPToolBatch(context.Background(), tr, clientRef, mcpTools)
 		slog.Info("assemble_mcp_hot_reload_reregistered", "server", clientRef.Name(), "tools", len(mcpTools))
 	})
 	hr := mcp.NewDefaultHotReloader(client, registerFn)
-	if watchErr := hr.Watch(ctx, configPath); watchErr != nil {
-		slog.Warn("assemble_mcp_hot_reload_watch_failed", "server", client.Name(), "err", watchErr)
+	if err := owner.addReloader(hr); err != nil {
 		return
 	}
-	addHotReloader(hr)
+	if watchErr := hr.Watch(ctx, configPath); watchErr != nil {
+		slog.Warn("assemble_mcp_hot_reload_watch_failed", "server", client.Name(), "err", watchErr)
+		if lifecycle, ok := hr.(mcp.HotReloadLifecycle); ok {
+			lifecycle.RequestStop()
+		}
+		return
+	}
 	slog.Info("assemble_mcp_hot_reload_started", "server", client.Name(), "config_path", configPath)
 }
 
