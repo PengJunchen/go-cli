@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
@@ -33,8 +34,8 @@ func (c ErrorCategory) String() string { return string(c) }
 
 // RetryConfig tunes the exponential-backoff retry policy.
 type RetryConfig struct {
-	// MaxAttempts is the total number of attempts allowed; ShouldRetry returns
-	// false once attempt >= MaxAttempts.
+	// MaxAttempts is the total number of calls allowed, including the initial
+	// call. attempt is the zero-based index of the call that just failed.
 	MaxAttempts int
 	// BaseDelay is the starting backoff for the first retry.
 	BaseDelay time.Duration
@@ -125,13 +126,28 @@ func (p *DefaultRetryPolicy) Classify(err error) ErrorCategory {
 	if err == nil {
 		return ErrorFatal
 	}
-	if c, ok := err.(categorized); ok {
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return ErrorFatal
+	}
+	var c categorized
+	if errors.As(err, &c) {
 		return c.ErrorCategory()
 	}
 	// Recognize AgentHarnessError and map its Code to an ErrorCategory.
 	var ahe *core.AgentHarnessError
 	if errors.As(err, &ahe) {
 		return classifyHarnessError(ahe)
+	}
+	var providerErr *llm.ProviderError
+	if errors.As(err, &providerErr) && providerErr != nil {
+		switch providerErr.ErrorType {
+		case llm.ErrTypeRateLimit:
+			return ErrorRateLimit
+		case llm.ErrTypeServer, llm.ErrTypeNetwork:
+			return ErrorTransient
+		case llm.ErrTypeAuth, llm.ErrTypeOverflow:
+			return ErrorFatal
+		}
 	}
 	switch {
 	case isRateLimit(err):
@@ -165,7 +181,13 @@ func classifyHarnessError(e *core.AgentHarnessError) ErrorCategory {
 // true only when the attempt count is below MaxAttempts and the error category
 // is retryable. It emits a production.retry span when a retry is warranted.
 func (p *DefaultRetryPolicy) ShouldRetry(ctx context.Context, err error, attempt int) bool {
-	if attempt >= p.cfg.MaxAttempts {
+	if ctx != nil && ctx.Err() != nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if err == nil || attempt < 0 || attempt >= p.cfg.MaxAttempts-1 {
 		return false
 	}
 	category := p.Classify(err)

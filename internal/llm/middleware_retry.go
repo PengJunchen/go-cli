@@ -128,13 +128,14 @@ func classifyError(err error) errorCategory {
 	return categoryTransient // default: retry unknown errors
 }
 
-// ShouldRetry reports whether attempt may be retried: true when the attempt
-// count is below MaxAttempts and the error is classified as retryable.
-func (p *defaultRetryPolicy) ShouldRetry(_ context.Context, err error, attempt int) bool {
-	if err == nil {
+// ShouldRetry reports whether another call may be made. MaxAttempts counts the
+// initial call, so a failed zero-based attempt may retry only when another
+// call remains within that total.
+func (p *defaultRetryPolicy) ShouldRetry(ctx context.Context, err error, attempt int) bool {
+	if (ctx != nil && ctx.Err() != nil) || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return false
 	}
-	if attempt >= p.cfg.MaxAttempts {
+	if err == nil || attempt < 0 || attempt >= p.cfg.MaxAttempts-1 {
 		return false
 	}
 	return classifyError(err).retryable()
@@ -249,6 +250,9 @@ var _ BaseChatModel = (*retryModel)(nil)
 // whether to retry and how long to back off.
 func (r *retryModel) Generate(ctx context.Context, msgs []Message, opts ...Option) (*Message, error) {
 	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		msg, err := r.next.Generate(ctx, msgs, opts...)
 		if err == nil {
 			if attempt > 0 {
@@ -287,6 +291,9 @@ func (r *retryModel) Generate(ctx context.Context, msgs []Message, opts ...Optio
 // successfully returned) are not retried.
 func (r *retryModel) Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
 	for attempt := 0; ; attempt++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		ch, err := r.next.Stream(ctx, msgs, opts...)
 		if err == nil {
 			if attempt > 0 {
