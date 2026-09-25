@@ -25,6 +25,7 @@ type runWorkerTracker interface {
 
 type runCompletionTaskTracker interface {
 	RegisterCompletionTask(ActionIntent, tools.PreparedCompletionSignal) uint64
+	AttachPendingExecution(uint64, <-chan struct{}) bool
 	HandoffCompletionTask(uint64)
 }
 
@@ -38,31 +39,35 @@ const (
 )
 
 type runCompletionTask struct {
-	intent                ActionIntent
-	signal                tools.PreparedCompletionSignal
-	state                 runCompletionTaskState
-	done                  <-chan struct{}
-	proof                 tools.PreparedCompletionProof
-	read                  func() tools.PreparedCompletionProof
-	receiptDurable        bool
-	proofExecutionDurable bool
-	resolutionDurable     bool
+	intent                  ActionIntent
+	signal                  tools.PreparedCompletionSignal
+	state                   runCompletionTaskState
+	resourceChannels        []<-chan struct{}
+	proof                   tools.PreparedCompletionProof
+	read                    func() tools.PreparedCompletionProof
+	pendingExecutionDone    <-chan struct{}
+	pendingExecutionSeen    bool
+	pendingResourceUnproven bool
+	receiptDurable          bool
+	proofExecutionDurable   bool
+	resolutionDurable       bool
 }
 
 type runCompletionTaskDetails struct {
-	id                    uint64
-	intent                ActionIntent
-	state                 runCompletionTaskState
-	proof                 tools.PreparedCompletionProof
-	receiptDurable        bool
-	proofExecutionDurable bool
-	resolutionDurable     bool
+	id                      uint64
+	intent                  ActionIntent
+	state                   runCompletionTaskState
+	proof                   tools.PreparedCompletionProof
+	pendingResourceUnproven bool
+	receiptDurable          bool
+	proofExecutionDurable   bool
+	resolutionDurable       bool
 }
 
 type runCompletionTaskHandoff struct {
-	id    uint64
-	done  <-chan struct{}
-	proof func() tools.PreparedCompletionProof
+	id       uint64
+	channels []<-chan struct{}
+	proof    func() tools.PreparedCompletionProof
 }
 
 type runOutcomeUnknown interface {
@@ -192,6 +197,14 @@ func registerRunCompletionTask(ctx context.Context, intent ActionIntent, signal 
 		return 0
 	}
 	return tracker.RegisterCompletionTask(intent, signal)
+}
+
+func attachRunCompletionPendingExecution(ctx context.Context, taskID uint64, done <-chan struct{}) bool {
+	if ctx == nil || taskID == 0 {
+		return false
+	}
+	tracker, ok := ctx.Value(runOwnerContextKey{}).(runCompletionTaskTracker)
+	return ok && tracker != nil && tracker.AttachPendingExecution(taskID, done)
 }
 
 func handoffRunCompletionTask(ctx context.Context, taskID uint64) {
@@ -333,6 +346,22 @@ func (o *runOwner) RegisterCompletionTask(intent ActionIntent, signal tools.Prep
 	return id
 }
 
+// AttachPendingExecution attaches the underlying resource channel reported by
+// a PendingExecutionError while the prepared placeholder still owns the worker.
+// Handoff folds this channel into the same action resource group as signal.Done.
+func (o *runOwner) AttachPendingExecution(id uint64, done <-chan struct{}) bool {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	task := o.completionTasks[id]
+	if task == nil || task.state != runCompletionTaskHandoffPending || task.pendingExecutionSeen {
+		return false
+	}
+	task.pendingExecutionSeen = true
+	task.pendingExecutionDone = done
+	task.pendingResourceUnproven = done == nil
+	return true
+}
+
 // HandoffCompletionTask observes the final Done attached to the same signal
 // after Dispatch returns. The worker remains counted until either the final
 // channel is adopted as a resource or the task is classified as proofless.
@@ -364,74 +393,90 @@ func (o *runOwner) finishCompletionTaskHandoff(id uint64, done <-chan struct{}, 
 }
 
 func (o *runOwner) handoffCompletionTask(id uint64, done <-chan struct{}, readProof func() tools.PreparedCompletionProof) {
-	if done == nil {
-		o.mu.Lock()
-		if task := o.completionTasks[id]; task != nil && task.state == runCompletionTaskHandoffPending {
-			task.state = runCompletionTaskNoProof
-			task.read = nil
-			o.workers--
-			o.refreshPendingLocked()
-			o.signalLocked()
-			o.signalCompletionLocked()
-		}
-		o.mu.Unlock()
-		return
+	channels := make([]<-chan struct{}, 0, 2)
+	if done != nil {
+		channels = append(channels, done)
 	}
-
-	select {
-	case <-done:
-		proof := tools.PreparedCompletionProof("")
-		if readProof != nil {
-			proof = readProof()
-		}
-		o.mu.Lock()
-		if task := o.completionTasks[id]; task != nil && task.state == runCompletionTaskHandoffPending {
-			task.state = runCompletionTaskReady
-			task.done = done
-			task.proof = proof
-			task.read = nil
-			o.workers--
-			o.refreshPendingLocked()
-			o.signalLocked()
-			o.signalCompletionLocked()
-		}
-		o.mu.Unlock()
-		return
-	default:
-	}
-
 	o.mu.Lock()
 	task := o.completionTasks[id]
 	if task == nil || task.state != runCompletionTaskHandoffPending {
 		o.mu.Unlock()
 		return
 	}
+	pendingDone := task.pendingExecutionDone
+	if pendingDone != nil && pendingDone != done {
+		channels = append(channels, pendingDone)
+	}
+	if task.pendingExecutionSeen && pendingDone == nil {
+		task.pendingResourceUnproven = true
+	}
+	if len(channels) == 0 {
+		task.state = runCompletionTaskNoProof
+		task.read = nil
+		o.workers--
+		o.refreshPendingLocked()
+		o.signalLocked()
+		o.signalCompletionLocked()
+		o.mu.Unlock()
+		return
+	}
+	if completionChannelsClosed(channels) {
+		proof := tools.PreparedCompletionProof("")
+		if done != nil && readProof != nil {
+			proof = readProof()
+		}
+		task.state = runCompletionTaskReady
+		task.resourceChannels = channels
+		task.proof = proof
+		task.read = nil
+		o.workers--
+		o.refreshPendingLocked()
+		o.signalLocked()
+		o.signalCompletionLocked()
+		o.mu.Unlock()
+		return
+	}
 	task.state = runCompletionTaskResourceOpen
-	task.done = done
+	task.resourceChannels = channels
 	task.read = readProof
-	// Increment the resource before releasing placeholder worker ownership.
+	// One action owns one resource group even when the prepared signal wraps a
+	// distinct underlying PendingExecutionError channel.
 	o.resources++
 	o.workers--
 	o.refreshPendingLocked()
 	o.signalLocked()
 	o.signalCompletionLocked()
 	o.mu.Unlock()
-
+	// One owner observer waits for every distinct resource channel attached to
+	// this action. The worker count is transferred before this observer starts.
 	go func() {
-		<-done
+		for _, resourceDone := range channels {
+			<-resourceDone
+		}
 		proof := tools.PreparedCompletionProof("")
-		if readProof != nil {
+		if done != nil && readProof != nil {
 			proof = readProof()
 		}
-		o.finishCompletionTaskResource(id, done, proof)
+		o.finishCompletionTaskResource(id, proof)
 	}()
 }
 
-func (o *runOwner) finishCompletionTaskResource(id uint64, done <-chan struct{}, proof tools.PreparedCompletionProof) {
+func completionChannelsClosed(channels []<-chan struct{}) bool {
+	for _, done := range channels {
+		select {
+		case <-done:
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+func (o *runOwner) finishCompletionTaskResource(id uint64, proof tools.PreparedCompletionProof) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	task := o.completionTasks[id]
-	if task == nil || task.state != runCompletionTaskResourceOpen || task.done != done {
+	if task == nil || task.state != runCompletionTaskResourceOpen || !completionChannelsClosed(task.resourceChannels) {
 		return
 	}
 	task.state = runCompletionTaskReady
@@ -463,13 +508,14 @@ func (o *runOwner) completionDetails(id uint64) (runCompletionTaskDetails, bool)
 		return runCompletionTaskDetails{}, false
 	}
 	return runCompletionTaskDetails{
-		id:                    id,
-		intent:                task.intent,
-		state:                 task.state,
-		proof:                 task.proof,
-		receiptDurable:        task.receiptDurable,
-		proofExecutionDurable: task.proofExecutionDurable,
-		resolutionDurable:     task.resolutionDurable,
+		id:                      id,
+		intent:                  task.intent,
+		state:                   task.state,
+		proof:                   task.proof,
+		pendingResourceUnproven: task.pendingResourceUnproven,
+		receiptDurable:          task.receiptDurable,
+		proofExecutionDurable:   task.proofExecutionDurable,
+		resolutionDurable:       task.resolutionDurable,
 	}, true
 }
 
@@ -559,7 +605,7 @@ func (o *runOwner) completionTasksReady(ids []uint64) (ready, terminal bool, err
 		case runCompletionTaskNoProof:
 			return false, true, nil
 		case runCompletionTaskReady:
-			if task.proof == "" {
+			if task.pendingResourceUnproven || task.proof == "" {
 				return false, true, nil
 			}
 		default:
@@ -574,22 +620,21 @@ func (o *runOwner) refreshClosedCompletionTasks(ids []uint64) {
 	handoffs := make([]runCompletionTaskHandoff, 0, len(ids))
 	for _, id := range ids {
 		if task := o.completionTasks[id]; task != nil && task.state == runCompletionTaskResourceOpen {
-			handoffs = append(handoffs, runCompletionTaskHandoff{id: id, done: task.done, proof: task.read})
+			handoffs = append(handoffs, runCompletionTaskHandoff{
+				id:       id,
+				channels: append([]<-chan struct{}(nil), task.resourceChannels...),
+				proof:    task.read,
+			})
 		}
 	}
 	o.mu.Unlock()
 	for _, handoff := range handoffs {
-		if handoff.done == nil {
-			continue
-		}
-		select {
-		case <-handoff.done:
+		if completionChannelsClosed(handoff.channels) {
 			proof := tools.PreparedCompletionProof("")
 			if handoff.proof != nil {
 				proof = handoff.proof()
 			}
-			o.finishCompletionTaskResource(handoff.id, handoff.done, proof)
-		default:
+			o.finishCompletionTaskResource(handoff.id, proof)
 		}
 	}
 }
@@ -993,7 +1038,7 @@ func (o *runOwner) drainLateCompletionTasks() error {
 	tasks := make([]runCompletionTaskDetails, 0, len(o.completionTasks))
 	for id := uint64(1); id <= o.nextCompletionTask; id++ {
 		task := o.completionTasks[id]
-		if task == nil || !task.receiptDurable || task.resolutionDurable || task.state != runCompletionTaskReady || !validRunCompletionProof(task.proof) {
+		if task == nil || !task.receiptDurable || task.resolutionDurable || task.pendingResourceUnproven || task.state != runCompletionTaskReady || !validRunCompletionProof(task.proof) {
 			continue
 		}
 		tasks = append(tasks, runCompletionTaskDetails{
@@ -1028,21 +1073,36 @@ func (o *runOwner) drainLateCompletionTasks() error {
 				ResourceState:              RunExecutionQuiescent,
 				CompletionProof:            task.proof,
 			}
-			if err := sink.RecordExecution(commitCtx, execution); err != nil {
+			if err := callLateCompletionSink("late execution", func() error {
+				return sink.RecordExecution(commitCtx, execution)
+			}); err != nil {
 				return runCommitPersistenceError{operation: "late execution", cause: err}
 			}
 			o.markCompletionProofExecutionDurable(task.id)
 		}
-		if err := sink.ResolveExecution(commitCtx, ExecutionResolution{
-			RunID:    intent.RunID,
-			ActionID: intent.ActionID,
-			Evidence: ResolutionLocalResourcesStopped,
+		if err := callLateCompletionSink("late execution resolution", func() error {
+			return sink.ResolveExecution(commitCtx, ExecutionResolution{
+				RunID:    intent.RunID,
+				ActionID: intent.ActionID,
+				Evidence: ResolutionLocalResourcesStopped,
+			})
 		}); err != nil {
 			return runCommitPersistenceError{operation: "late execution resolution", cause: err}
 		}
 		o.markCompletionResolved(task.id)
 	}
 	return nil
+}
+
+func callLateCompletionSink(operation string, call func() error) (err error) {
+	defer func() {
+		if recover() != nil {
+			// Sink panic payloads can contain sensitive tool or workspace data.
+			// Preserve only the operation name and the typed failure sentinel.
+			err = runCommitSinkPanicError{operation: operation}
+		}
+	}()
+	return call()
 }
 
 func closeRunCommitLease(lease RunCommitRunLease) (panicked bool) {
