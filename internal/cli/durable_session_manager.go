@@ -651,16 +651,6 @@ func newManagedPreparedSession(prepared session.PreparedSession) (*managedPrepar
 	}, nil
 }
 
-func closeRejectedPreparedSession(prepared session.PreparedSession, cause error) error {
-	if prepared == nil {
-		return cause
-	}
-	if err := prepared.Close(); err != nil {
-		return errors.Join(cause, fmt.Errorf("cli: close rejected prepared session: %w", err))
-	}
-	return cause
-}
-
 func closePendingError(physicalID string, cause error) error {
 	if cause == nil {
 		return fmt.Errorf("%w: session %q", ErrDurableSessionClosePending, physicalID)
