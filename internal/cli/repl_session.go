@@ -134,9 +134,9 @@ func (s *REPLSession) Run(ctx context.Context, cfg Config, args []string) error 
 		s.span.End()
 	}()
 	defer s.assembly.Cleanup()
-	s.readInput()
+	readErr := s.readInput()
 	s.cleanup()
-	return nil
+	return readErr
 }
 
 // start performs all one-time session setup: flag parsing, onboarding, agent
@@ -518,7 +518,7 @@ func evaluateCtrlC(hadContent bool, lastInterrupt, now time.Time, window time.Du
 
 // readInput is the REPL for loop. It reads user input, routes slash commands,
 // expands @-mentions, and delegates each turn to executeTurn.
-func (s *REPLSession) readInput() {
+func (s *REPLSession) readInput() error {
 	for {
 		line, err := s.lineEditor.ReadLine(s.spanCtx, "> ")
 		if err != nil {
@@ -528,10 +528,10 @@ func (s *REPLSession) readInput() {
 				}
 				continue
 			}
-			if !errors.Is(err, io.EOF) {
-				s.logger.Warn("cli_interactive_readline_error", "err", err)
+			if errors.Is(err, io.EOF) || errors.Is(err, context.Canceled) {
+				break
 			}
-			break
+			return err
 		}
 		// Successful input resets the double-press timer.
 		s.lastInterruptTime = time.Time{}
@@ -568,6 +568,7 @@ func (s *REPLSession) readInput() {
 		s.line = line
 		s.executeTurn()
 	}
+	return nil
 }
 
 // handleInterrupt processes a Ctrl+C interrupt (errInterrupted) and returns
