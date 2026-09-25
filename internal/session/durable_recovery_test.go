@@ -398,6 +398,92 @@ func TestPrepareResumeAppliesValidatedResolutionBeforeInspectingMarkers(t *testi
 	}
 }
 
+func TestPrepareResumeRejectsRemoteTerminalWithoutTypedEvidenceBeforeAuthority(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		outcome string
+	}{
+		{name: "success", outcome: core.ReceiptOutcomeSuccess},
+		{name: "known-error", outcome: core.ReceiptOutcomeError},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture := createRecoveryFixture(t, true)
+			index := newWorkspaceQuarantineIndex(t.TempDir(), workspaceIndexIO{})
+			batch := workspaceTestBatch("workspace-1", fixture.sessionID, "run-1", "batch-1", "action-1", 0, "call-1")
+			if err := index.EnsureWorkspace(context.Background(), batch.WorkspaceID); err != nil {
+				t.Fatal(err)
+			}
+			if state, err := index.BeginDispatchBatch(context.Background(), batch); err != nil || state != WorkspaceDispatchCommittedNow {
+				t.Fatalf("BeginDispatchBatch = (%v, %v), want durable dispatch marker", state, err)
+			}
+
+			appendRawFixtureRow(t, fixture, SessionEntry{
+				ID: "receipt-1", ParentID: fixture.intent.ID, Type: EntryTypeTool, RunID: "run-1", WorkspaceID: "workspace-1",
+				ActionBatchID: "batch-1", ActionID: "action-1", AssistantTranscriptOrdinal: ptrUint64(0),
+				TranscriptIndex: ptrUint64(2), ToolCallID: "call-1", ToolName: "read", DispatchState: DispatchStateDispatched,
+				ReceiptOutcome: test.outcome, Content: "remote command returned", Timestamp: time.Unix(13, 0).UTC(),
+			})
+			appendRawFixtureRow(t, fixture, SessionEntry{
+				ID: "resolution-1", ParentID: "receipt-1", Type: EntryTypeCheckpoint, RunID: "run-1", WorkspaceID: "workspace-1",
+				ActionBatchID: "batch-1", ActionID: "action-1", AssistantTranscriptOrdinal: ptrUint64(0), ToolCallID: "call-1",
+				CheckpointKind: CheckpointExecutionResolution,
+				ExecutionResolution: &core.ExecutionResolution{
+					RunID: "run-1", ActionID: "action-1", Evidence: core.ResolutionRemoteTerminal, EvidenceRef: "receipt-1",
+				},
+				Timestamp: time.Unix(14, 0).UTC(),
+			})
+			path := filepath.Join(fixture.directory, "sessions", fixture.sessionID+".jsonl")
+			before, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var applyCalls, inspectCalls int
+			authority := recoveryAuthorityFunc{
+				apply: func(ctx context.Context, resolutions []ValidatedExecutionResolution) error {
+					applyCalls++
+					return index.ApplyDurableResolutions(ctx, resolutions)
+				},
+				inspect: func(ctx context.Context, refs []PendingActionRef) ([]PendingActionDecision, error) {
+					inspectCalls++
+					return index.InspectDispatchMarkers(ctx, refs)
+				},
+			}
+			prepared, resumeErr := NewDurableJSONLSessionPreparer(fixture.directory, authority).PrepareResume(context.Background(), fixture.sessionID)
+			if resumeErr == nil {
+				if prepared != nil {
+					_ = prepared.Close()
+				}
+				t.Fatal("generic receipt outcome must not authorize remote-terminal resolution")
+			}
+			if !strings.Contains(resumeErr.Error(), "typed protocol-terminal evidence") {
+				t.Fatalf("resume error = %v, want explicit missing typed protocol-terminal evidence", resumeErr)
+			}
+			if prepared != nil {
+				_ = prepared.Close()
+				t.Fatal("failed validation returned a usable prepared session")
+			}
+			if applyCalls != 0 || inspectCalls != 0 {
+				t.Fatalf("authority calls before typed-evidence rejection = apply:%d inspect:%d, want 0/0", applyCalls, inspectCalls)
+			}
+			after, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !bytes.Equal(before, after) {
+				t.Fatalf("rejected remote proof changed session bytes: before=%d after=%d", len(before), len(after))
+			}
+			decisions, err := index.InspectDispatchMarkers(context.Background(), []PendingActionRef{batch.Actions[0].Action})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(decisions) != 1 || decisions[0].MarkerState != DispatchMarkerPresent {
+				t.Fatalf("remote marker after rejected recovery = %#v, want quarantined/present", decisions)
+			}
+		})
+	}
+}
+
 func TestPrepareResumeRejectsInvalidLocalResolutionBeforeAuthority(t *testing.T) {
 	fixture := createRecoveryFixture(t, true)
 	zero := uint64(0)

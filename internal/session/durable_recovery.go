@@ -517,9 +517,7 @@ func validateExecutionResolutionEvidence(
 			return errors.New("local quiescence proof does not reference a matching execution row with an identity")
 		}
 	case core.ResolutionRemoteTerminal:
-		if occurrence.receipt == nil || resolution.EvidenceRef != occurrence.receipt.ID || occurrence.receipt.DispatchState != DispatchStateDispatched || occurrence.receipt.ReceiptOutcome == string(core.ReceiptOutcomeUnknown) {
-			return errors.New("remote terminal proof does not reference a known dispatched receipt")
-		}
+		return errors.New("remote-terminal resolution requires typed protocol-terminal evidence; generic receipt outcomes are insufficient")
 	case core.ResolutionOperatorReconciled:
 		proof, exists := reconciliationRows[resolution.EvidenceRef]
 		if !exists || proof.Seq <= occurrence.receipt.Seq || proof.Seq >= resolutionSeq || !sameActionReference(occurrence.ref, refFromEntry(*proof, sessionID)) {
