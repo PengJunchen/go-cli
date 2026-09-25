@@ -63,7 +63,8 @@ type stdioSession struct {
 	stop         chan struct{}
 	inbound      chan ACPMessage
 	gate         chan struct{}
-	receiveReady bool // guarded by StdioAdapter.mu
+	receiveReady bool              // guarded by StdioAdapter.mu
+	activeWrite  *stdioWriteResult // guarded by StdioAdapter.mu
 
 	workers int // guarded by StdioAdapter.mu
 	joined  chan struct{}
@@ -233,7 +234,7 @@ func (s *StdioAdapter) Disconnect(ctx context.Context) error {
 
 	done := s.startCleanup(session, connected)
 	if err := ctx.Err(); err != nil {
-		return s.pendingFromChannel("disconnect", err, done, false)
+		return s.pendingDisconnect(session, err, done)
 	}
 	waitCtx := ctx
 	var cancel context.CancelFunc
@@ -248,7 +249,7 @@ func (s *StdioAdapter) Disconnect(ctx context.Context) error {
 		s.mu.Unlock()
 		return closeErr
 	case <-waitCtx.Done():
-		return s.pendingFromChannel("disconnect", waitCtx.Err(), done, false)
+		return s.pendingDisconnect(session, waitCtx.Err(), done)
 	}
 }
 
@@ -310,6 +311,10 @@ func (s *StdioAdapter) writeFrame(ctx context.Context, session *stdioSession, ms
 	if err := ctx.Err(); err != nil {
 		return stdioFrameWrite{}, err
 	}
+	frame, err := marshalFrame(msg)
+	if err != nil {
+		return stdioFrameWrite{}, err
+	}
 	select {
 	case session.gate <- struct{}{}:
 	case <-session.stop:
@@ -356,14 +361,20 @@ func (s *StdioAdapter) writeFrame(ctx context.Context, session *stdioSession, ms
 		default:
 			result.state = stdioWriteStarted
 			result.wasStarted = true
+			session.activeWrite = result
 			close(result.started)
 		}
 		started := result.state == stdioWriteStarted
 		result.mu.Unlock()
 		s.mu.Unlock()
 		if started {
-			result.err = writeLine(s.out, msg)
+			result.err = writeFrameBytes(s.out, frame)
 			close(result.ioReturned)
+			s.mu.Lock()
+			if session.activeWrite == result {
+				session.activeWrite = nil
+			}
+			s.mu.Unlock()
 			if result.err != nil {
 				// A failed or short frame can leave the byte stream at an
 				// unknown boundary. Fence this session instead of appending
@@ -471,6 +482,9 @@ func (s *StdioAdapter) readLoop(ctx context.Context, session *stdioSession) {
 		frame, err := readBoundedFrame(s.in)
 		if err != nil {
 			if errors.Is(err, io.EOF) {
+				// EOF is a terminal transport event. Close the receive channel
+				// and fence sends so the adapter cannot write into a dead session.
+				s.startCleanup(session, false)
 				return
 			}
 			slog.Warn("acp.receive.read", "name", s.name, "err", err)
@@ -484,6 +498,11 @@ func (s *StdioAdapter) readLoop(ctx context.Context, session *stdioSession) {
 		var msg ACPMessage
 		if err := json.Unmarshal(frame, &msg); err != nil {
 			slog.Warn("acp.receive.decode", "name", s.name, "err", err)
+			s.startCleanup(session, false)
+			return
+		}
+		if !isKnownACPMessageType(msg.Type) {
+			slog.Warn("acp.receive.decode", "name", s.name, "err", errStdioMalformed)
 			s.startCleanup(session, false)
 			return
 		}
@@ -553,7 +572,11 @@ func (s *StdioAdapter) startCleanup(session *stdioSession, sendDisconnect bool) 
 		select {
 		case session.gate <- struct{}{}:
 			s.addWorkerLocked(session)
-			disconnectWrite = &stdioWriteResult{done: make(chan struct{})}
+			disconnectWrite = &stdioWriteResult{
+				done:       make(chan struct{}),
+				started:    make(chan struct{}),
+				ioReturned: make(chan struct{}),
+			}
 		default:
 		}
 	}
@@ -566,7 +589,26 @@ func (s *StdioAdapter) startCleanup(session *stdioSession, sendDisconnect bool) 
 	if disconnectWrite != nil {
 		msg := ACPMessage{Type: TypeDisconnect, SenderID: s.name, Timestamp: time.Now()}
 		go func(result *stdioWriteResult) {
-			result.err = writeLine(s.out, msg)
+			frame, err := marshalFrame(msg)
+			if err == nil {
+				s.mu.Lock()
+				result.mu.Lock()
+				result.state = stdioWriteStarted
+				result.wasStarted = true
+				session.activeWrite = result
+				close(result.started)
+				result.mu.Unlock()
+				s.mu.Unlock()
+				result.err = writeFrameBytes(s.out, frame)
+				close(result.ioReturned)
+				s.mu.Lock()
+				if session.activeWrite == result {
+					session.activeWrite = nil
+				}
+				s.mu.Unlock()
+			} else {
+				result.err = err
+			}
 			<-session.gate
 			s.workerDone(session)
 			close(result.done)
@@ -637,19 +679,78 @@ func (s *StdioAdapter) pendingFromChannel(operation string, cause error, done <-
 	return &StdioPendingError{operation: operation, cause: cause, done: done, unknown: unknown}
 }
 
-// writeLine marshals and writes one complete frame with a single Write call.
-func writeLine(w io.Writer, msg ACPMessage) error {
+func (s *StdioAdapter) pendingDisconnect(session *stdioSession, cause error, done <-chan struct{}) error {
+	if done == nil {
+		done = make(chan struct{})
+	}
+	select {
+	case <-done:
+		return cause
+	default:
+	}
+	unknown := s.writeInFlight(session)
+	return s.pendingFromChannel("disconnect", cause, done, unknown)
+}
+
+func (s *StdioAdapter) writeInFlight(session *stdioSession) bool {
+	s.mu.Lock()
+	active := session.activeWrite
+	s.mu.Unlock()
+	if active == nil {
+		return false
+	}
+	active.mu.Lock()
+	started := active.state == stdioWriteStarted
+	active.mu.Unlock()
+	if !started {
+		return false
+	}
+	select {
+	case <-active.ioReturned:
+		return false
+	default:
+		return true
+	}
+}
+
+// marshalFrame encodes one complete outbound frame and applies the same
+// payload-byte limit as the inbound parser before any transport write begins.
+func marshalFrame(msg ACPMessage) ([]byte, error) {
 	data, err := json.Marshal(msg)
 	if err != nil {
-		return fmt.Errorf("acp: marshal message: %w", err)
+		return nil, fmt.Errorf("acp: marshal message: %w", err)
 	}
-	data = append(data, '\n')
-	n, err := w.Write(data)
+	if len(data) > stdioMaxFrameBytes {
+		return nil, errStdioTooLarge
+	}
+	return append(data, '\n'), nil
+}
+
+// writeLine marshals and writes one complete frame with a single Write call.
+func writeLine(w io.Writer, msg ACPMessage) error {
+	frame, err := marshalFrame(msg)
+	if err != nil {
+		return err
+	}
+	return writeFrameBytes(w, frame)
+}
+
+func writeFrameBytes(w io.Writer, frame []byte) error {
+	n, err := w.Write(frame)
 	if err != nil {
 		return fmt.Errorf("acp: write message: %w", err)
 	}
-	if n != len(data) {
+	if n != len(frame) {
 		return fmt.Errorf("acp: write message: %w", io.ErrShortWrite)
 	}
 	return nil
+}
+
+func isKnownACPMessageType(messageType string) bool {
+	switch messageType {
+	case TypeConnect, TypeDisconnect, TypeMessage, TypeResponse, TypeAck, TypeError, TypeRPC:
+		return true
+	default:
+		return false
+	}
 }

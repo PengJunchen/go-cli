@@ -77,6 +77,77 @@ func TestStdioFrameLimitUsesPayloadBytesAndCRLFTerminator(t *testing.T) {
 	}
 }
 
+func TestStdioCleanEOFClosesReceiveAndFencesSend(t *testing.T) {
+	reader, peerWriter := io.Pipe()
+	var out bytes.Buffer
+	client := NewStdioAdapter(reader, &out)
+	require.NoError(t, client.Connect(context.Background()))
+	inbound := client.ReceiveMessages()
+	require.NotNil(t, inbound)
+
+	require.NoError(t, peerWriter.Close())
+	select {
+	case _, open := <-inbound:
+		assert.False(t, open, "clean EOF must close the receive channel")
+	case <-time.After(time.Second):
+		t.Fatal("receive channel did not close after peer EOF")
+	}
+
+	err := client.SendMessage(context.Background(), ACPMessage{Type: TypeMessage, Content: "after-eof"})
+	require.ErrorIs(t, err, errStdioNotConnected, "clean EOF must fence later outbound frames")
+
+	var connect ACPMessage
+	line, err := readLineLen(&out)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(line, &connect))
+	assert.Equal(t, TypeConnect, connect.Type, "the only outbound frame should be the handshake")
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, client.Disconnect(ctx))
+}
+
+func TestStdioOutboundFrameLimitRejectsBeforeWriteWithoutPoisoning(t *testing.T) {
+	reader, peerWriter := io.Pipe()
+	var out bytes.Buffer
+	client := NewStdioAdapter(reader, &out)
+	require.NoError(t, client.Connect(context.Background()))
+	t.Cleanup(func() {
+		_ = peerWriter.Close()
+		_ = reader.Close()
+	})
+
+	msg := ACPMessage{Type: TypeMessage, Timestamp: time.Date(2026, time.September, 25, 0, 0, 0, 0, time.UTC)}
+	base, err := json.Marshal(msg)
+	require.NoError(t, err)
+	msg.Content = strings.Repeat("x", stdioMaxFrameBytes-len(base))
+	encoded, err := json.Marshal(msg)
+	require.NoError(t, err)
+	require.Len(t, encoded, stdioMaxFrameBytes, "exactly the configured outbound payload limit is allowed")
+	require.NoError(t, client.SendMessage(context.Background(), msg))
+
+	beforeOversized := append([]byte(nil), out.Bytes()...)
+	msg.Content += "x"
+	err = client.SendMessage(context.Background(), msg)
+	require.ErrorIs(t, err, errStdioTooLarge)
+	var pending stdioPending
+	assert.False(t, errors.As(err, &pending), "oversize rejection happens before dispatch and is not unknown delivery")
+	assert.Equal(t, beforeOversized, out.Bytes(), "oversized frame must not write a partial prefix")
+
+	require.NoError(t, client.SendMessage(context.Background(), ACPMessage{Type: TypeMessage, Content: "session-remains-usable"}),
+		"a rejected frame must not poison the live session")
+	require.NoError(t, peerWriter.Close())
+	inbound := client.ReceiveMessages()
+	select {
+	case _, open := <-inbound:
+		assert.False(t, open)
+	case <-time.After(time.Second):
+		t.Fatal("receive channel did not close after peer EOF")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	require.NoError(t, client.Disconnect(ctx))
+}
+
 func TestStdioMalformedFrameTerminatesSession(t *testing.T) {
 	valid, err := json.Marshal(ACPMessage{Type: TypeMessage, SenderID: "peer", Content: "must-not-arrive"})
 	require.NoError(t, err)
@@ -90,6 +161,28 @@ func TestStdioMalformedFrameTerminatesSession(t *testing.T) {
 		assert.Empty(t, got)
 	case <-time.After(time.Second):
 		t.Fatal("malformed frame did not terminate the receive session")
+	}
+}
+
+func TestStdioRejectsNonObjectAndUnknownTypeFrames(t *testing.T) {
+	for _, frame := range []string{
+		"null\n",
+		"{}\n",
+		`{"type":"future"}` + "\n",
+	} {
+		t.Run(strings.TrimSpace(frame), func(t *testing.T) {
+			client := NewStdioAdapter(strings.NewReader(frame), &bytes.Buffer{})
+			require.NoError(t, client.Connect(context.Background()))
+			inbound := client.ReceiveMessages()
+			select {
+			case _, open := <-inbound:
+				assert.False(t, open, "frames without an ACP object and known type must terminate the session")
+			case <-time.After(time.Second):
+				t.Fatal("invalid ACP envelope did not terminate the session")
+			}
+			err := client.SendMessage(context.Background(), ACPMessage{Type: TypeMessage, Content: "must-not-send"})
+			require.ErrorIs(t, err, errStdioNotConnected)
+		})
 	}
 }
 
@@ -308,6 +401,61 @@ func TestStdioCallerOwnedBlockedWriteIsPendingUnknownAndNotReplayed(t *testing.T
 	assertChannelCloses(t, disconnectDone)
 }
 
+func TestStdioDisconnectWithActiveSendReportsUnknownDelivery(t *testing.T) {
+	clientInput, peerInput := io.Pipe()
+	peerOutput, clientOutput := io.Pipe()
+	writer := &signalWriteAt{writer: clientOutput, blockAt: 2, started: make(chan struct{})}
+	t.Cleanup(func() {
+		_ = clientInput.Close()
+		_ = peerInput.Close()
+		_ = peerOutput.Close()
+		_ = clientOutput.Close()
+	})
+	client := NewStdioAdapter(clientInput, writer)
+	connectFrame := make(chan []byte, 1)
+	go func() {
+		line, _ := readLineLen(peerOutput)
+		connectFrame <- line
+	}()
+	require.NoError(t, client.Connect(context.Background()))
+	select {
+	case <-connectFrame:
+	case <-time.After(time.Second):
+		t.Fatal("peer did not receive the connect frame")
+	}
+
+	sendResult := make(chan error, 1)
+	go func() {
+		sendResult <- client.SendMessage(context.Background(), ACPMessage{Type: TypeMessage, Content: "active-during-disconnect"})
+	}()
+	select {
+	case <-writer.started:
+	case <-time.After(time.Second):
+		t.Fatal("SendMessage did not enter the blocking Write")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	err := client.Disconnect(ctx)
+	cancel()
+	done := requireStdioPending(t, err, true)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assertChannelOpen(t, done, "active caller-owned Write still owns cleanup")
+	assert.Equal(t, 2, writer.callCount(), "Disconnect must not append a frame while the send owns the writer gate")
+
+	select {
+	case sendErr := <-sendResult:
+		require.Error(t, sendErr, "the active send is canceled by session cleanup and is not replayed")
+		var sendPending stdioPending
+		require.ErrorAs(t, sendErr, &sendPending)
+		assert.True(t, sendPending.UnknownDelivery())
+	case <-time.After(time.Second):
+		t.Fatal("active SendMessage did not return pending after Disconnect fenced the session")
+	}
+	require.NoError(t, clientOutput.Close())
+	require.NoError(t, peerInput.Close())
+	assertChannelCloses(t, done)
+}
+
 func TestStdioConcurrentFramesAreSerialized(t *testing.T) {
 	writer := newSerializationProbeWriter()
 	reader, peerWriter := io.Pipe()
@@ -376,7 +524,12 @@ func TestStdioConcurrentFramesAreSerialized(t *testing.T) {
 
 func TestStdioPartialWriteFailureFencesSession(t *testing.T) {
 	writer := &partialFailureWriter{}
-	client := NewStdioAdapter(strings.NewReader(""), writer)
+	reader, peerWriter := io.Pipe()
+	t.Cleanup(func() {
+		_ = reader.Close()
+		_ = peerWriter.Close()
+	})
+	client := NewStdioAdapter(reader, writer)
 	require.NoError(t, client.Connect(context.Background()))
 
 	err := client.SendMessage(context.Background(), ACPMessage{Type: TypeMessage, Content: "partial"})
@@ -469,6 +622,31 @@ type blockingWriteNumber struct {
 	release          chan struct{}
 	releaseOnceValue sync.Once
 	output           bytes.Buffer
+}
+
+type signalWriteAt struct {
+	mu      sync.Mutex
+	writer  io.Writer
+	blockAt int
+	started chan struct{}
+	calls   int
+}
+
+func (w *signalWriteAt) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	w.calls++
+	call := w.calls
+	if call == w.blockAt {
+		close(w.started)
+	}
+	w.mu.Unlock()
+	return w.writer.Write(p)
+}
+
+func (w *signalWriteAt) callCount() int {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.calls
 }
 
 func newBlockingWriteNumber(blockAt int) *blockingWriteNumber {
