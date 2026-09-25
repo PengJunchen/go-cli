@@ -150,14 +150,14 @@ func (c *cancelAfterFirstErrCheckContext) Err() error {
 	return context.Canceled
 }
 
-func TestRunSlotGuard_ClaimRunCancellationAfterSemaphoreAcquireReturnsToken(t *testing.T) {
+func TestRunSlotGuard_ClaimRunCancellationBeforeClaimPublicationLeavesSlotAvailable(t *testing.T) {
 	g := NewDefaultRunSlotGuard()
 	ctx := newCancelAfterFirstErrCheckContext()
 	_, err := g.ClaimRun(ctx)
 	require.ErrorIs(t, err, context.Canceled)
 
 	claim, err := g.ClaimRun(context.Background())
-	require.NoError(t, err, "the failed acquisition must return the semaphore token")
+	require.NoError(t, err, "a canceled claim must leave the run slot available")
 	g.Release(claim)
 }
 
@@ -203,4 +203,148 @@ func TestRunSlotGuard_ExecuteClaimedRun_ReleasesOnPanic(t *testing.T) {
 	require.NoError(t, err)
 	assert.NotEqual(t, claim.ID, claim2.ID)
 	g.Release(claim2)
+}
+
+type runSlotWaitObservedContext struct {
+	context.Context
+	done         chan struct{}
+	waitObserved chan struct{}
+	waitOnce     sync.Once
+}
+
+func (c *runSlotWaitObservedContext) Done() <-chan struct{} {
+	c.waitOnce.Do(func() { close(c.waitObserved) })
+	return c.done
+}
+
+func TestDefaultRunSlotGuardCloseWakesBlockedClaim(t *testing.T) {
+	g := NewDefaultRunSlotGuard()
+	active, err := g.ClaimRun(context.Background())
+	require.NoError(t, err)
+
+	ctx := &runSlotWaitObservedContext{
+		Context:      context.Background(),
+		done:         make(chan struct{}),
+		waitObserved: make(chan struct{}),
+	}
+	claimResult := make(chan error, 1)
+	go func() {
+		_, claimErr := g.ClaimRun(ctx)
+		claimResult <- claimErr
+	}()
+
+	select {
+	case <-ctx.waitObserved:
+	case <-time.After(time.Second):
+		t.Fatal("second claim did not reach the wait state")
+	}
+
+	idle := g.CloseAdmission()
+	select {
+	case claimErr := <-claimResult:
+		require.ErrorIs(t, claimErr, ErrRunAdmissionClosed)
+	case <-time.After(time.Second):
+		t.Fatal("closing admission did not wake the blocked claim")
+	}
+
+	select {
+	case <-idle:
+		t.Fatal("idle signal closed while the original claim was still active")
+	default:
+	}
+
+	g.Release(active)
+	select {
+	case <-idle:
+	case <-time.After(time.Second):
+		t.Fatal("idle signal did not close after the real claim release")
+	}
+	require.Equal(t, idle, g.CloseAdmission(), "repeated close must return the same idle signal")
+}
+
+func TestDefaultRunSlotGuardCloseIsStableWhenIdle(t *testing.T) {
+	g := NewDefaultRunSlotGuard()
+	idle := g.CloseAdmission()
+
+	select {
+	case <-idle:
+	default:
+		t.Fatal("closing an idle guard must close the idle signal immediately")
+	}
+	require.Equal(t, idle, g.CloseAdmission(), "repeated close must return the same idle signal")
+
+	_, err := g.ClaimRun(context.Background())
+	require.ErrorIs(t, err, ErrRunAdmissionClosed)
+}
+
+func TestDefaultRunSlotGuardCloseRacesClaimAndRelease(t *testing.T) {
+	for attempt := 0; attempt < 100; attempt++ {
+		g := NewDefaultRunSlotGuard()
+		start := make(chan struct{})
+		type claimResult struct {
+			claim RunClaim
+			err   error
+		}
+		claimed := make(chan claimResult, 1)
+		idleResult := make(chan (<-chan struct{}), 1)
+		go func() {
+			<-start
+			claim, err := g.ClaimRun(context.Background())
+			claimed <- claimResult{claim: claim, err: err}
+		}()
+		go func() {
+			<-start
+			idleResult <- g.CloseAdmission()
+		}()
+		close(start)
+
+		result := <-claimed
+		idle := <-idleResult
+		if result.err == nil {
+			select {
+			case <-idle:
+				t.Fatalf("attempt %d: accepted claim was not retained until release", attempt)
+			default:
+			}
+			g.Release(result.claim)
+		} else {
+			require.ErrorIs(t, result.err, ErrRunAdmissionClosed, "attempt %d", attempt)
+		}
+		select {
+		case <-idle:
+		case <-time.After(time.Second):
+			t.Fatalf("attempt %d: guard never became idle", attempt)
+		}
+		_, err := g.ClaimRun(context.Background())
+		require.ErrorIs(t, err, ErrRunAdmissionClosed, "attempt %d: claim succeeded after close", attempt)
+	}
+
+	for attempt := 0; attempt < 100; attempt++ {
+		g := NewDefaultRunSlotGuard()
+		active, err := g.ClaimRun(context.Background())
+		require.NoError(t, err)
+
+		start := make(chan struct{})
+		released := make(chan struct{})
+		idleResult := make(chan (<-chan struct{}), 1)
+		go func() {
+			<-start
+			g.Release(active)
+			close(released)
+		}()
+		go func() {
+			<-start
+			idleResult <- g.CloseAdmission()
+		}()
+		close(start)
+		<-released
+		idle := <-idleResult
+		select {
+		case <-idle:
+		case <-time.After(time.Second):
+			t.Fatalf("release/close attempt %d: guard never became idle", attempt)
+		}
+		_, err = g.ClaimRun(context.Background())
+		require.ErrorIs(t, err, ErrRunAdmissionClosed, "release/close attempt %d: claim succeeded after close", attempt)
+	}
 }
