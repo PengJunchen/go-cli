@@ -3,6 +3,7 @@ package acp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -19,6 +20,10 @@ const eventHistorySize = 256
 // eventSubscriberBufferSize bounds each live session subscription. A slow
 // subscriber is detached with an explicit gap instead of blocking publishers.
 const eventSubscriberBufferSize = 64
+
+// ErrEventCursorAhead indicates that a replay cursor is newer than the
+// session's current event sequence.
+var ErrEventCursorAhead = errors.New("acp: event cursor is ahead of the session")
 
 // EventEntry pairs an AgentEvent with its monotonically increasing sequence
 // ID for Last-Event-ID reconnection support.
@@ -265,14 +270,17 @@ func (s *Session) EventHistorySince(afterID uint64) ([]EventEntry, uint64) {
 	return entries, s.eventSeq
 }
 
-// SubscribeAfter atomically snapshots retained events and registers a
-// bounded live subscriber under the same mutex used by PublishEvent. Each
-// publication is therefore present in Replay or Events, unless the bounded
-// live queue overflows, in which case Done closes and Close returns an
-// explicit EventGap.
-func (s *Session) SubscribeAfter(afterID uint64) *EventSubscription {
+// SubscribeAfter atomically validates the cursor, snapshots retained events,
+// and registers a bounded live subscriber under the same mutex used by
+// PublishEvent. Each publication is therefore present in Replay or Events,
+// unless the bounded live queue overflows, in which case Done closes and Close
+// returns an explicit EventGap.
+func (s *Session) SubscribeAfter(afterID uint64) (*EventSubscription, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if afterID > s.eventSeq {
+		return nil, fmt.Errorf("%w: requested %d, current %d", ErrEventCursorAhead, afterID, s.eventSeq)
+	}
 
 	replay, historyGap := s.historySinceLocked(afterID)
 	s.nextSubID++
@@ -290,10 +298,10 @@ func (s *Session) SubscribeAfter(afterID uint64) *EventSubscription {
 	}
 	if s.closed {
 		s.closeSubscriberLocked(subscriber)
-		return subscription
+		return subscription, nil
 	}
 	s.subscribers[s.nextSubID] = subscriber
-	return subscription
+	return subscription, nil
 }
 
 // historySinceLocked returns a copy of the retained suffix and an explicit

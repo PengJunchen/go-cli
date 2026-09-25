@@ -579,7 +579,15 @@ func (s *HTTPServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 
 	// Snapshot and register live delivery under the same Session lock used by
 	// PublishEvent. An event racing this call is present in Replay or Events.
-	subscription := sess.SubscribeAfter(afterID)
+	subscription, err := sess.SubscribeAfter(afterID)
+	if err != nil {
+		if errors.Is(err, ErrEventCursorAhead) {
+			http.Error(w, "Last-Event-ID is ahead of the current session event", http.StatusBadRequest)
+			return
+		}
+		http.Error(w, "failed to subscribe to session events", http.StatusInternalServerError)
+		return
+	}
 	defer subscription.Close()
 
 	sse, ok := NewSSEWriter(w)
@@ -608,28 +616,36 @@ func (s *HTTPServer) handleEvents(w http.ResponseWriter, r *http.Request) {
 			return
 		case entry, ok := <-subscription.Events():
 			if !ok {
+				_ = finishClosedEventSubscription(sse, subscription)
 				return
 			}
 			if err := sse.WriteEventWithID(entry.ID, entry.Event.Kind, entry.Event); err != nil {
 				return
 			}
 		case <-subscription.Done():
-			// Freeze the overflow range, detach from publication, then drain the
-			// contiguous buffered prefix before reporting the explicit gap.
-			gap := subscription.Close()
-			for entry := range subscription.Events() {
-				if err := sse.WriteEventWithID(entry.ID, entry.Event.Kind, entry.Event); err != nil {
-					return
-				}
-			}
-			if gap != nil {
-				_ = sse.WriteEventWithID(gap.Cursor, "event_gap", gap)
-			}
+			_ = finishClosedEventSubscription(sse, subscription)
 			return
 		case <-ticker.C:
 			sse.WriteComment("keep-alive")
 		}
 	}
+}
+
+// finishClosedEventSubscription detaches the subscriber, drains the complete
+// buffered prefix, and reports its frozen gap when one exists. Both closed
+// channel cases use this path because Session.Close closes Events and Done
+// together, making select case choice nondeterministic.
+func finishClosedEventSubscription(sse *SSEWriter, subscription *EventSubscription) error {
+	gap := subscription.Close()
+	for entry := range subscription.Events() {
+		if err := sse.WriteEventWithID(entry.ID, entry.Event.Kind, entry.Event); err != nil {
+			return err
+		}
+	}
+	if gap != nil {
+		return sse.WriteEventWithID(gap.Cursor, "event_gap", gap)
+	}
+	return nil
 }
 
 // ActiveSessions returns the number of currently active sessions. This is
