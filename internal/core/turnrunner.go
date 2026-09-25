@@ -17,6 +17,7 @@ import (
 var errTurnUnknown = errors.New("core: unknown or inactive turn")
 var errCanonicalTranscriptUnavailable = errors.New("core: loop cannot provide a canonical transcript for tool calls")
 var errMessageSnapshotPanic = errors.New("core: agent message snapshot panicked")
+var errTurnFinalizerPanic = errors.New("core: turn wrapper finalizer panicked")
 
 // maxTurnsHistory bounds the number of completed turns retained in the turns
 // map. Once the count of completed turns exceeds this value, the oldest ones
@@ -106,9 +107,18 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Re
 		runSlot = defaultRunSlotGuard
 	}
 	turnCtx, cancel, stopLifetime := linkRunLifetime(ctx, lifetimeCtx)
+	var contextStopOnce sync.Once
+	stopTurnContext := func() {
+		contextStopOnce.Do(func() {
+			stopLifetime()
+			cancel()
+		})
+	}
+	contextTransferred := false
 	defer func() {
-		stopLifetime()
-		cancel()
+		if !contextTransferred {
+			stopTurnContext()
+		}
 	}()
 	claimCtx, claimCancel := context.WithTimeout(turnCtx, 200*time.Millisecond)
 	claim, claimErr := runSlot.ClaimRun(claimCtx)
@@ -126,28 +136,36 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Re
 		return result, claimErr
 	}
 	turn.StartTime = time.Now()
-	wrapperDone, wrapperErr := registerRunWrapper(runSlot, claim, nil)
-	if wrapperErr != nil {
-		runSlot.Release(claim)
-		stopLifetime()
-		cancel()
-		return Result{Outcome: RunOutcomeError, ExecutionState: RunExecutionQuiescent}, wrapperErr
-	}
 	ownerStarted := false
+	var wrapperDone func()
 	var span tracing.TraceSpan
+	completionTransferred := false
+	var completionOnce sync.Once
+	completeWrapper := func() {
+		completionOnce.Do(func() {
+			if wrapperDone != nil {
+				defer callTurnWrapperCleanup("wrapper", wrapperDone)
+			}
+			defer stopTurnContext()
+			if !ownerStarted {
+				defer callTurnWrapperCleanup("claim release", func() { runSlot.Release(claim) })
+			}
+			if span != nil {
+				defer callTurnWrapperCleanup("span end", span.End)
+			}
+		})
+	}
 	defer func() {
-		defer func() {
-			wrapperDone()
-			stopLifetime()
-			cancel()
-		}()
-		if !ownerStarted {
-			runSlot.Release(claim)
-		}
-		if span != nil {
-			span.End()
+		if !completionTransferred {
+			completeWrapper()
 		}
 	}()
+	// Install claim cleanup before invoking the optional wrapper registrar.
+	// A custom registrar may panic before returning its completion callback.
+	wrapperDone, wrapperErr := registerRunWrapper(runSlot, claim, nil)
+	if wrapperErr != nil {
+		return Result{Outcome: RunOutcomeError, ExecutionState: RunExecutionQuiescent}, wrapperErr
+	}
 
 	// Claim before borrowing tracing or invoking any hook/message provider so
 	// Assembly.Close cannot observe idle while accepted entrypoint work runs.
@@ -158,6 +176,7 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Re
 	slog.Info("core.turn.runner.start", "id", id, "type", submission.Type)
 
 	var beforeMsgCount int
+	var beforeMsgCountCaptured bool
 	timeoutClose := func(result Result, err error) {
 		if stream != nil {
 			if eventStream, ok := stream.(*EventStreamImpl); ok {
@@ -199,8 +218,15 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Re
 				slog.Warn("core.turn.runner.hook.turn_start", "id", id, "err", herr)
 			}
 		}
+		if ctxErr := runCtx.Err(); ctxErr != nil {
+			return Result{}, ctxErr
+		}
 		if ms, ok := agent.(messageSource); ok {
 			beforeMsgCount = len(ms.Messages())
+			beforeMsgCountCaptured = true
+		}
+		if ctxErr := runCtx.Err(); ctxErr != nil {
+			return Result{}, ctxErr
 		}
 		if agent != nil {
 			if stream != nil {
@@ -257,42 +283,96 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Re
 	turnSnapshot := cloneTurn(*turn)
 	r.mu.Unlock()
 
-	// Post-run lifecycle hooks. OnError fires when the run failed; OnCompaction
-	// fires when the agent's message count decreased during the turn; OnTurnEnd
-	// always fires to signal the turn is complete.
-	if hookChain != nil {
-		if runErr != nil {
-			if herr := hookChain.OnError(spanCtx, id, runErr); herr != nil {
-				slog.Warn("core.turn.runner.hook.on_error", "id", id, "err", herr)
+	finishWrapper := func() {
+		defer completeWrapper()
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				logTurnFinalizerPanic("entrypoint")
 			}
-		}
-		if ms, ok := agent.(messageSource); ok {
-			afterMsgCount, snapshotErr := safeMessageCount(ms)
-			if snapshotErr != nil {
-				slog.Warn("core.turn.runner.message_snapshot", "id", id, "err", snapshotErr)
-			} else if afterMsgCount < beforeMsgCount {
-				if herr := hookChain.OnCompaction(spanCtx, beforeMsgCount, afterMsgCount); herr != nil {
-					slog.Warn("core.turn.runner.hook.compaction", "id", id, "err", herr)
+		}()
+		// Callback-local values and the message source are only inspected after
+		// owner.done establishes that the callback and its resources have joined.
+		if hookChain != nil {
+			if runErr != nil {
+				callTurnPostHook("on_error", func() error { return hookChain.OnError(spanCtx, id, runErr) })
+			}
+			if beforeMsgCountCaptured {
+				if ms, ok := agent.(messageSource); ok {
+					afterMsgCount, snapshotErr := safeMessageCount(ms)
+					if snapshotErr != nil {
+						safeTurnLog("core.turn.runner.message_snapshot", "id", id, "err", snapshotErr)
+					} else if afterMsgCount < beforeMsgCount {
+						callTurnPostHook("compaction", func() error {
+							return hookChain.OnCompaction(spanCtx, beforeMsgCount, afterMsgCount)
+						})
+					}
 				}
 			}
+			callTurnPostHook("turn_end", func() error {
+				return hookChain.OnTurnEnd(spanCtx, id, turnSnapshot.Result, runErr)
+			})
 		}
-		if herr := hookChain.OnTurnEnd(spanCtx, id, turnSnapshot.Result, runErr); herr != nil {
-			slog.Warn("core.turn.runner.hook.turn_end", "id", id, "err", herr)
+
+		endSpan, _ := tracing.SpanFromContext(spanCtx, "turn.end", tracing.SpanKindInternal)
+		if endSpan != nil {
+			defer callTurnWrapperCleanup("end span", endSpan.End)
+			endSpan.SetAttributes(tracing.Attribute{Key: "turn_id", Value: id}, tracing.Attribute{Key: "status", Value: turnSnapshot.Status.String()})
 		}
+
+		safeTurnLog("core.turn.runner.end",
+			"id", id,
+			"status", turnSnapshot.Status.String(),
+			"canceled", turnSnapshot.Canceled,
+			"error", runErr != nil,
+		)
+		logger.Info("turn.end", "id", id, "status", turnSnapshot.Status.String())
 	}
-
-	endSpan, _ := tracing.SpanFromContext(spanCtx, "turn.end", tracing.SpanKindInternal)
-	endSpan.SetAttributes(tracing.Attribute{Key: "turn_id", Value: id}, tracing.Attribute{Key: "status", Value: turnSnapshot.Status.String()})
-	endSpan.End()
-
-	slog.Info("core.turn.runner.end",
-		"id", id,
-		"status", turnSnapshot.Status.String(),
-		"canceled", turnSnapshot.Canceled,
-		"error", runErr != nil,
-	)
-	logger.Info("turn.end", "id", id, "status", turnSnapshot.Status.String())
+	select {
+	case <-owner.done:
+		finishWrapper()
+	default:
+		// RunTurn may return its bounded cleanup_pending snapshot while the
+		// callback is still active. Transfer the existing wrapper lease, span,
+		// and context lifetime to one continuation, which waits for that same
+		// owner before touching callback state or running posthooks.
+		completionTransferred = true
+		contextTransferred = true
+		go func() {
+			<-owner.done
+			finishWrapper()
+		}()
+	}
 	return result, runErr
+}
+
+func callTurnWrapperCleanup(stage string, cleanup func()) {
+	defer func() {
+		if recover() != nil {
+			logTurnFinalizerPanic(stage)
+		}
+	}()
+	cleanup()
+}
+
+func callTurnPostHook(stage string, callback func() error) {
+	defer func() {
+		if recover() != nil {
+			logTurnFinalizerPanic(stage)
+		}
+	}()
+	if err := callback(); err != nil {
+		safeTurnLog("core.turn.runner.hook_failed", "stage", stage, "err", err)
+	}
+}
+
+func logTurnFinalizerPanic(stage string) {
+	defer func() { _ = recover() }()
+	slog.Error("core.turn.runner.finalizer_panic", "stage", stage, "err", errTurnFinalizerPanic)
+}
+
+func safeTurnLog(message string, args ...any) {
+	defer func() { _ = recover() }()
+	slog.Warn(message, args...)
 }
 
 func safeMessageCount(source messageSource) (count int, err error) {
