@@ -652,7 +652,7 @@ func TestDispatchPendingExecutionErrorDoesNotDoubleTrackPreparedSignal(t *testin
 			if testCase.registerPreparedTask {
 				taskID = registerRunCompletionTask(ctx, ActionIntent{}, signal)
 			}
-			dispatch := dispatchPreparedRunCommitCall(ctx, call, taskID)
+			dispatch := dispatchPreparedRunCommitCall(ctx, call, nil, taskID)
 
 			require.True(t, dispatch.returned)
 			require.True(t, dispatch.committed)
