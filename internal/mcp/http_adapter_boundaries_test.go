@@ -113,6 +113,23 @@ func TestHTTPConnectCanceledBeforeDispatchDoesNotPoisonNextConnect(t *testing.T)
 	require.NoError(t, adapter.Disconnect(context.Background()))
 }
 
+func TestWaitForConnectDoesNotTreatCleanupCancelAsCallerCancel(t *testing.T) {
+	operationCtx, cancelOperation := context.WithCancel(context.Background())
+	op := &httpConnectOperation{done: make(chan struct{}), cancel: cancelOperation}
+	op.cancel()
+	released := make(chan struct{})
+	go func() {
+		defer close(released)
+		time.Sleep(20 * time.Millisecond)
+		close(op.done)
+	}()
+
+	require.ErrorIs(t, operationCtx.Err(), context.Canceled)
+	err := waitForConnect(context.Background(), op, httpConnectWaitPolicy{lifecycleCtx: context.Background(), owner: true})
+	<-released
+	require.NoError(t, err, "normal operation cleanup must not wake the waiter before done is published")
+}
+
 func TestReadSSEResponseCountsRawCRLFBytes(t *testing.T) {
 	t.Parallel()
 
