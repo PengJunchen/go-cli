@@ -319,12 +319,17 @@ func (r *EinoTurnRunner) RunTurn(ctx context.Context, submission Submission) (Re
 			endSpan.SetAttributes(tracing.Attribute{Key: "turn_id", Value: id}, tracing.Attribute{Key: "status", Value: turnSnapshot.Status.String()})
 		}
 
-		safeTurnLog("core.turn.runner.end",
+		endArgs := []any{
 			"id", id,
 			"status", turnSnapshot.Status.String(),
 			"canceled", turnSnapshot.Canceled,
 			"error", runErr != nil,
-		)
+		}
+		if runErr == nil && turnSnapshot.Status == TurnCompleted {
+			safeTurnInfo("core.turn.runner.end", endArgs...)
+		} else {
+			safeTurnLog("core.turn.runner.end", endArgs...)
+		}
 		logger.Info("turn.end", "id", id, "status", turnSnapshot.Status.String())
 	}
 	select {
@@ -373,6 +378,11 @@ func logTurnFinalizerPanic(stage string) {
 func safeTurnLog(message string, args ...any) {
 	defer func() { _ = recover() }()
 	slog.Warn(message, args...)
+}
+
+func safeTurnInfo(message string, args ...any) {
+	defer func() { _ = recover() }()
+	slog.Info(message, args...)
 }
 
 func safeMessageCount(source messageSource) (count int, err error) {
