@@ -543,9 +543,10 @@ func p4ACPStdio(ctx context.Context, t *testing.T) {
 }
 
 // p4ACPPeer reads newline-delimited ACP JSON frames from r and, for every
-// TypeMessage, writes a TypeResponse echoing the content back to w. It stops
-// when the reader hits end-of-stream or an error (e.g. the pipe is closed).
-func p4ACPPeer(r io.Reader, w io.Writer, done chan<- struct{}) {
+// TypeMessage, writes a TypeResponse echoing the content back to w. It closes
+// its owned output after acknowledging TypeDisconnect so the adapter observes
+// EOF and can join its caller-owned reader before Disconnect returns.
+func p4ACPPeer(r io.Reader, w io.WriteCloser, done chan<- struct{}) {
 	defer close(done)
 	sc := newLineScanner(r)
 	for sc.Scan() {
@@ -568,6 +569,10 @@ func p4ACPPeer(r io.Reader, w io.Writer, done chan<- struct{}) {
 			ack := acp.ACPMessage{Type: acp.TypeAck, SenderID: msg.ReceiverID, ReceiverID: msg.SenderID}
 			data, _ := json.Marshal(ack)       //nolint:errcheck // fixed shape.
 			_, _ = w.Write(append(data, '\n')) //nolint:errcheck // best-effort peer write.
+			if msg.Type == acp.TypeDisconnect {
+				_ = w.Close()
+				return
+			}
 		}
 	}
 }
