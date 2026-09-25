@@ -256,6 +256,9 @@ func TestPreparedWritersDuringApprovalWaitInvalidatePermit(t *testing.T) {
 			ctx := context.Background()
 			entered := make(chan struct{}, 1)
 			release := make(chan struct{})
+			var releaseOnce sync.Once
+			releaseCallback := func() { releaseOnce.Do(func() { close(release) }) }
+			defer releaseCallback()
 			callback := preparedWaitingApprovalCallback{entered: entered, release: release}
 			registry, middleware, controller, _, toolsByName := newPreparedRuntimeFixtureWithOptions(
 				t,
@@ -279,15 +282,31 @@ func TestPreparedWritersDuringApprovalWaitInvalidatePermit(t *testing.T) {
 			case <-time.After(5 * time.Second):
 				t.Fatal("approval callback did not enter")
 			}
-			switch writer {
-			case "mode":
-				middleware.SetPermissionMode(PermissionAuto)
-			case "plan":
-				require.NoError(t, controller.Enter(ctx, "stale user approval"))
-			case "registry":
-				require.NoError(t, registry.Register(ctx, &preparedRuntimeTool{name: "target"}))
+			writerDone := make(chan error, 1)
+			go func() {
+				switch writer {
+				case "mode":
+					middleware.SetPermissionMode(PermissionAuto)
+					writerDone <- nil
+				case "plan":
+					writerDone <- controller.Enter(ctx, "stale user approval")
+				case "registry":
+					writerDone <- registry.Register(ctx, &preparedRuntimeTool{name: "target"})
+				}
+			}()
+			select {
+			case err := <-writerDone:
+				require.NoError(t, err, "fence writer should complete while the approval callback waits")
+			case <-time.After(2 * time.Second):
+				releaseCallback()
+				select {
+				case <-writerDone:
+				case <-time.After(2 * time.Second):
+					t.Fatal("fence writer remained blocked after releasing the approval callback")
+				}
+				t.Fatal("fence writer blocked while the approval callback waited")
 			}
-			close(release)
+			releaseCallback()
 
 			var outcome result
 			select {
