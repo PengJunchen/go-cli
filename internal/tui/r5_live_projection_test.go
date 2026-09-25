@@ -8,8 +8,31 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
+
 	"github.com/stretchr/testify/require"
 )
+
+type callbackToolArgs struct {
+	called      *bool
+	panicOnCall bool
+}
+
+func (args callbackToolArgs) MarshalJSON() ([]byte, error) {
+	*args.called = true
+	if args.panicOnCall {
+		panic("custom argument encoder must not run")
+	}
+	return []byte(`{"custom":"encoder ran"}`), nil
+}
+
+type callbackTextToolArgs struct {
+	called *bool
+}
+
+func (args callbackTextToolArgs) MarshalText() ([]byte, error) {
+	*args.called = true
+	return []byte("text encoder ran"), nil
+}
 
 type liveBridgeModel struct {
 	stream *core.EventStreamImpl
@@ -90,6 +113,54 @@ func TestLiveBridgeInvalidToolArgsBecomeUnavailableWithoutPanic(t *testing.T) {
 	})
 }
 
+func TestLiveBridgeRejectsCustomToolArgEncoderWithoutCallingIt(t *testing.T) {
+	called := false
+	var got AgentEvent
+	require.NotPanics(t, func() {
+		got = CoreEventToAgentEvent(core.AgentEvent{
+			Kind:      "message",
+			ToolCalls: []llm.ToolCall{{ID: "custom", Name: "tool", Args: callbackToolArgs{called: &called, panicOnCall: true}}},
+		})
+	})
+	require.False(t, called, "argument copying must not invoke caller-provided marshal methods")
+	require.Len(t, got.ToolCalls, 1)
+	require.True(t, got.ToolCalls[0].ArgsUnavailable)
+}
+
+func TestLiveBridgeCustomToolArgEncoderStaysUnavailableInView(t *testing.T) {
+	called := false
+	h := newLiveBridgeModel(t)
+	defer h.close()
+	bridged := h.send(t, core.AgentEvent{
+		Kind: "message",
+		ToolCalls: []llm.ToolCall{{
+			ID: "custom-view", Name: "tool", Args: callbackToolArgs{called: &called},
+		}},
+	})
+
+	require.False(t, called)
+	require.Len(t, bridged.ToolCalls, 1)
+	require.True(t, bridged.ToolCalls[0].ArgsUnavailable)
+	require.Contains(t, stripEscape(h.model.View()), "detail unavailable")
+}
+
+func TestLiveBridgeCustomTextEncoderIsNotInvoked(t *testing.T) {
+	called := false
+	h := newLiveBridgeModel(t)
+	defer h.close()
+	bridged := h.send(t, core.AgentEvent{
+		Kind: "message",
+		ToolCalls: []llm.ToolCall{{
+			ID: "custom-text", Name: "tool", Args: callbackTextToolArgs{called: &called},
+		}},
+	})
+
+	require.False(t, called)
+	require.Len(t, bridged.ToolCalls, 1)
+	require.True(t, bridged.ToolCalls[0].ArgsUnavailable)
+	require.Contains(t, stripEscape(h.model.View()), "detail unavailable")
+}
+
 func TestLiveBridgeToolArgsRenderUnavailableAndSanitizeTerminalControls(t *testing.T) {
 	h := newLiveBridgeModel(t)
 	defer h.close()
@@ -163,6 +234,57 @@ func TestLiveBridgeDoneFinalizesIncrementalEntryWithoutRenderingContent(t *testi
 	h.send(t, core.AgentEvent{Kind: "done", Content: "partial final"})
 	require.Nil(t, h.model.streamingEntry)
 	require.Equal(t, 1, strings.Count(stripEscape(h.model.View()), "partial final"))
+}
+
+func TestLiveBridgeDoneClosesToolCallGroupBeforeLateResult(t *testing.T) {
+	h := newLiveBridgeModel(t)
+	defer h.close()
+
+	h.send(t, core.AgentEvent{Kind: "message", ToolCalls: []llm.ToolCall{{ID: "after-done", Name: "read_file"}}})
+	h.send(t, core.AgentEvent{Kind: "tool_call", Content: "read", ToolCallID: "after-done"})
+	entries := h.model.accordion.Entries()
+	require.Len(t, entries, 1)
+	call := entries[0]
+	require.Equal(t, ToolStatusRunning, call.ToolStatus)
+
+	h.send(t, core.AgentEvent{Kind: "done"})
+	require.Nil(t, h.model.toolCallGroup)
+	h.send(t, core.AgentEvent{Kind: "tool_result", Content: "late receipt", ToolCallID: "after-done"})
+
+	entries = h.model.accordion.Entries()
+	require.Len(t, entries, 2)
+	require.Equal(t, ToolStatusRunning, call.ToolStatus, "late receipts must not mutate a completed run's prior projection")
+	require.Empty(t, call.Children)
+	require.True(t, entries[1].Incomplete)
+	require.Equal(t, ContentTypeToolResult, entries[1].ContentType)
+	require.Contains(t, stripEscape(h.model.View()), "late receipt")
+	require.Contains(t, stripEscape(h.model.View()), "[incomplete]")
+}
+
+func TestLiveBridgeDuplicateTerminalReceiptIsStandaloneIncomplete(t *testing.T) {
+	h := newLiveBridgeModel(t)
+	defer h.close()
+
+	h.send(t, core.AgentEvent{Kind: "message", ToolCalls: []llm.ToolCall{{ID: "once", Name: "run"}}})
+	h.send(t, core.AgentEvent{Kind: "tool_call", Content: "run", ToolCallID: "once"})
+	h.send(t, core.AgentEvent{Kind: "tool_result", Content: "first success", ToolCallID: "once"})
+	entries := h.model.accordion.Entries()
+	require.Len(t, entries, 1)
+	call := entries[0]
+	require.Equal(t, ToolStatusCompleted, call.ToolStatus)
+	require.Len(t, call.Children, 1)
+
+	h.send(t, core.AgentEvent{Kind: "tool_result", Content: "duplicate failure", ToolCallID: "once", IsError: true})
+
+	entries = h.model.accordion.Entries()
+	require.Len(t, entries, 2)
+	require.Equal(t, ToolStatusCompleted, call.ToolStatus, "first terminal receipt remains authoritative")
+	require.Len(t, call.Children, 1, "a duplicate receipt must not be represented as a valid child")
+	require.False(t, call.Children[0].IsError)
+	require.True(t, entries[1].Incomplete)
+	require.True(t, entries[1].IsError)
+	require.Contains(t, stripEscape(h.model.View()), "duplicate failure")
+	require.Contains(t, stripEscape(h.model.View()), "[incomplete]")
 }
 
 func TestLiveBridgeStreamedFinalStillConsumesToolCallMetadata(t *testing.T) {
