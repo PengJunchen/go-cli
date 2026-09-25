@@ -179,8 +179,9 @@ func TestStdioAdapterDisconnectWithCanceledContext(t *testing.T) {
 func TestStdioAdapterDisconnectUnreadPipeReturns(t *testing.T) {
 	clientR, serverW := io.Pipe() // client reads, server writes
 	serverR, clientW := io.Pipe() // server reads, client writes
+	writer := &signalWriteAt{writer: clientW, blockAt: 2, started: make(chan struct{})}
 
-	client := NewStdioAdapter(clientR, clientW, WithName("client"))
+	client := NewStdioAdapter(clientR, writer, WithName("client"))
 
 	// Drain only the connect frame so Connect doesn't block; stop reading
 	// afterwards so the disconnect frame write blocks forever.
@@ -189,28 +190,32 @@ func TestStdioAdapterDisconnectUnreadPipeReturns(t *testing.T) {
 		_, _ = rd.ReadBytes('\n') //nolint:errcheck // drain connect frame only
 	}()
 
-	ctx := context.Background()
-	require.NoError(t, client.Connect(ctx))
-
-	// Close the client's input so readLoop's blocked reader unblocks.
-	closeIgnored(serverW)
+	require.NoError(t, client.Connect(context.Background()))
 
 	// Disconnect must return pending promptly even though the disconnect write
 	// is caller-owned and the peer stopped reading.
 	done := make(chan error, 1)
 	var cleanupDone <-chan struct{}
+	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		done <- client.Disconnect(ctx)
 	}()
+	select {
+	case <-writer.started:
+		cancel()
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("disconnect frame Write did not start")
+	}
 	select {
 	case err := <-done:
 		require.Error(t, err)
 		var pending stdioPending
 		require.ErrorAs(t, err, &pending)
-		assert.False(t, pending.UnknownDelivery())
+		assert.True(t, pending.UnknownDelivery(), "the disconnect frame Write started but has not returned")
 		assertChannelOpen(t, pending.Done(), "blocked disconnect Write must remain tracked")
 		cleanupDone = pending.Done()
-	case <-time.After(5 * time.Second):
+	case <-time.After(time.Second):
 		t.Fatal("Disconnect blocked when peer pipe was never read")
 	}
 
