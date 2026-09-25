@@ -29,34 +29,53 @@ func TestGrepPureGoPreCanceledContextIsNotSuccessfulPartialResult(t *testing.T) 
 func TestGrepPureGoMidWalkCancellationDoesNotReturnPartialSuccess(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "a.txt"), []byte("needle first\nsecond line\n"), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "b.txt"), []byte("later file\n"), 0o600))
 
-	ctx := &cancelAfterErrContext{
-		Context:     context.Background(),
-		done:        make(chan struct{}),
-		cancelAfter: 5, // after the first matching line, before scanning the second.
+	ctx := &cancelDuringWalkContext{
+		Context:         context.Background(),
+		done:            make(chan struct{}),
+		cancelDoneAfter: 3, // old walker: after a.txt matches, at b.txt's entry.
+		cancelErrAfter:  5, // current walker: after a.txt's first line matches.
 	}
 	tool := NewGrepTool(WithGrepWorkdir(dir), WithForcePureGo(true))
 
 	result, err := tool.Execute(ctx, ToolCall{Args: map[string]any{"pattern": "needle"}})
+	select {
+	case <-ctx.done:
+	default:
+		t.Fatal("cancellation did not occur before GrepTool returned")
+	}
 	require.ErrorIs(t, err, context.Canceled)
 	if result != nil {
 		require.Empty(t, result.Output)
 	}
 }
 
-type cancelAfterErrContext struct {
+// cancelDuringWalkContext supports both the pre-fix walker's Done polling and
+// the fixed scanner's Err polling. Either code path cancels only after the
+// first file has produced a matching line. Tests inspect done directly so an
+// assertion cannot itself trigger cancellation.
+type cancelDuringWalkContext struct {
 	context.Context
-	done        chan struct{}
-	errChecks   int
-	cancelAfter int
-	closeOnce   sync.Once
+	done            chan struct{}
+	doneChecks      int
+	errChecks       int
+	cancelDoneAfter int
+	cancelErrAfter  int
+	closeOnce       sync.Once
 }
 
-func (c *cancelAfterErrContext) Done() <-chan struct{} { return c.done }
+func (c *cancelDuringWalkContext) Done() <-chan struct{} {
+	c.doneChecks++
+	if c.cancelDoneAfter > 0 && c.doneChecks == c.cancelDoneAfter {
+		c.closeOnce.Do(func() { close(c.done) })
+	}
+	return c.done
+}
 
-func (c *cancelAfterErrContext) Err() error {
+func (c *cancelDuringWalkContext) Err() error {
 	c.errChecks++
-	if c.cancelAfter > 0 && c.errChecks == c.cancelAfter {
+	if c.cancelErrAfter > 0 && c.errChecks == c.cancelErrAfter {
 		c.closeOnce.Do(func() { close(c.done) })
 	}
 	select {
