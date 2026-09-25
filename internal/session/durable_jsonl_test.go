@@ -267,17 +267,29 @@ func TestDurableWriterPoisonsAfterSyncFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	reopened, err := NewDurableJSONLSessionPreparer(preparer.directory, nil).PrepareResume(context.Background(), sessionID)
+	var resumeSyncCalls atomic.Int32
+	reopened, err := newDurableJSONLSessionPreparer(preparer.directory, nil, durableJSONLIO{
+		sync: func(*os.File) error {
+			resumeSyncCalls.Add(1)
+			return nil
+		},
+	}).PrepareResume(context.Background(), sessionID)
 	if err != nil {
 		t.Fatalf("reopen after sync failure: %v", err)
 	}
 	defer reopened.Close()
+	if got := resumeSyncCalls.Load(); got != 1 {
+		t.Fatalf("resume file Sync calls = %d before returning handle, want 1", got)
+	}
 	canonical, err := reopened.DurableWriter().AppendAndSync(context.Background(), entry)
 	if err != nil {
 		t.Fatalf("exact retry after sync failure: %v", err)
 	}
 	if len(canonical) != 1 || canonical[0].Seq != 1 {
 		t.Fatalf("retry did not recover the existing persisted row: %#v", canonical)
+	}
+	if got := resumeSyncCalls.Load(); got != 1 {
+		t.Fatalf("exact retry unexpectedly changed resume Sync count to %d", got)
 	}
 }
 
