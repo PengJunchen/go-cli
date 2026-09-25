@@ -68,6 +68,10 @@ func run(argv []string, stdout, stderr io.Writer, loadConfig func() (*config.Con
 		_, _ = fmt.Fprintf(stderr, "error: %v\n", err) //nolint:errcheck // CLI error output is best-effort
 		return 1
 	}
+	if err := stdoutTracingOutputConflict(cfg, argv); err != nil {
+		_, _ = fmt.Fprintf(stderr, "error: %v\n", err) //nolint:errcheck // CLI error output is best-effort
+		return 2
+	}
 
 	tracer, exporter, err := newTracing(cfg, stdout)
 	if err != nil {
@@ -114,6 +118,32 @@ func run(argv []string, stdout, stderr io.Writer, loadConfig func() (*config.Con
 		}
 	}
 	return code
+}
+
+func stdoutTracingOutputConflict(cfg *config.Config, argv []string) error {
+	if cfg == nil || cfg.Tracing.Exporter != "stdout" {
+		return nil
+	}
+	enabled := true
+	if cfg.Tracing.Enabled != nil {
+		enabled = *cfg.Tracing.Enabled
+	}
+	if !enabled {
+		return nil
+	}
+
+	promptArgs, isPrompt, err := cli.PromptArgsFromCLI(argv)
+	if err != nil || !isPrompt {
+		return nil
+	}
+	mode, remaining, err := cli.ParsePromptOutputMode(promptArgs)
+	if err != nil || len(remaining) == 0 {
+		return nil
+	}
+	if mode == cli.OutputJSON || mode == cli.OutputStream {
+		return &cli.StdoutTracingOutputConflictError{Mode: mode}
+	}
+	return nil
 }
 
 // runCLI invokes the CLI framework and maps the returned error to an exit code.

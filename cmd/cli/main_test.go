@@ -204,6 +204,151 @@ func TestRunStdoutTracingUsesCLIStdoutWriter(t *testing.T) {
 	assert.ErrorIs(t, err, os.ErrNotExist)
 }
 
+func TestRunRejectsStdoutTracingForStructuredPromptOutputBeforeRuntime(t *testing.T) {
+	tests := []struct {
+		name      string
+		args      []string
+		wantError string
+	}{
+		{name: "long separate json", args: []string{"prompt", "--output", "json", "hello"}, wantError: "prompt --output json"},
+		{name: "long joined json", args: []string{"prompt", "--output=json", "hello"}, wantError: "prompt --output json"},
+		{name: "short separate stream", args: []string{"prompt", "-output", "stream", "hello"}, wantError: "prompt --output stream"},
+		{name: "short joined stream", args: []string{"prompt", "-output=stream", "hello"}, wantError: "prompt --output stream"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			t.Chdir(workDir)
+
+			var requests atomic.Int64
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+			}))
+			t.Cleanup(server.Close)
+
+			traceDir := filepath.Join(workDir, "configured-traces")
+			cfg := &config.Config{
+				Provider: config.ProviderConfig{
+					Name: "test", BaseURL: server.URL, APIKey: "test-key", Model: "test-model",
+				},
+				Tracing: config.TracingConfig{Enabled: boolPtr(true), Exporter: "stdout", FilePath: traceDir},
+			}
+			var stdout, stderr bytes.Buffer
+			code := run(tt.args, &stdout, &stderr, func() (*config.Config, error) { return cfg, nil })
+
+			assert.Equal(t, 2, code)
+			assert.Empty(t, stdout.String(), "the structured-output stream must stay empty")
+			assert.Contains(t, stderr.String(), "stdout tracing")
+			assert.Contains(t, stderr.String(), tt.wantError)
+			assert.Zero(t, requests.Load(), "preflight must run before model assembly or HTTP")
+			_, err := os.Stat(traceDir)
+			assert.ErrorIs(t, err, os.ErrNotExist)
+			_, err = os.Stat(filepath.Join(workDir, ".go-cli", "traces"))
+			assert.ErrorIs(t, err, os.ErrNotExist)
+		})
+	}
+}
+
+func TestStdoutTracingOutputConflictIsTypedAndHonorsDefaultEnabled(t *testing.T) {
+	for _, tt := range []struct {
+		mode string
+		want cli.OutputMode
+	}{
+		{mode: "json", want: cli.OutputJSON},
+		{mode: "stream", want: cli.OutputStream},
+	} {
+		err := stdoutTracingOutputConflict(&config.Config{Tracing: config.TracingConfig{Exporter: "stdout"}}, []string{"prompt", "--output=" + tt.mode, "hello"})
+		var conflict *cli.StdoutTracingOutputConflictError
+		require.ErrorAs(t, err, &conflict)
+		assert.Equal(t, tt.want, conflict.Mode)
+	}
+}
+
+func TestRunStdoutTracingStructuredOutputPreflightPreservesOtherModes(t *testing.T) {
+	tests := []struct {
+		name      string
+		enabled   bool
+		exporter  string
+		args      []string
+		wantTrace bool
+	}{
+		{name: "disabled json", enabled: false, exporter: "stdout", args: []string{"prompt", "--output=json", "hello"}},
+		{name: "none json", enabled: true, exporter: "none", args: []string{"prompt", "--output=json", "hello"}},
+		{name: "stdout text", enabled: true, exporter: "stdout", args: []string{"prompt", "hello"}, wantTrace: true},
+		{name: "stdout positional then output flag", enabled: true, exporter: "stdout", args: []string{"prompt", "hello", "--output=json"}, wantTrace: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			t.Chdir(workDir)
+
+			var requests atomic.Int64
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				requests.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+			}))
+			t.Cleanup(server.Close)
+
+			cfg := &config.Config{
+				Provider: config.ProviderConfig{
+					Name: "test", BaseURL: server.URL, APIKey: "test-key", Model: "test-model",
+				},
+				Tracing: config.TracingConfig{Enabled: boolPtr(tt.enabled), Exporter: tt.exporter},
+			}
+			var stdout, stderr bytes.Buffer
+			code := run(tt.args, &stdout, &stderr, func() (*config.Config, error) { return cfg, nil })
+
+			assert.Equal(t, 0, code, "stdout=%q stderr=%q", stdout.String(), stderr.String())
+			assert.Empty(t, stderr.String())
+			assert.EqualValues(t, 1, requests.Load(), "a bypassed mode should execute the prompt")
+			if tt.wantTrace {
+				assert.Contains(t, stdout.String(), "[TRACE]")
+			} else {
+				assert.NotContains(t, stdout.String(), "[TRACE]")
+			}
+			assert.Contains(t, stdout.String(), "ok")
+		})
+	}
+}
+
+func TestRunStdoutTracingKeepsPromptUsageAndGlobalHelpBehavior(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantCode   int
+		wantError  string
+		wantOutput string
+	}{
+		{name: "prompt help remains usage error", args: []string{"prompt", "--help", "hello"}, wantCode: 2, wantError: "help requested"},
+		{name: "invalid output remains usage error", args: []string{"prompt", "--output=invalid", "hello"}, wantCode: 2, wantError: "invalid output mode"},
+		{name: "missing message remains usage error", args: []string{"prompt", "--output=json"}, wantCode: 2, wantError: "missing message argument"},
+		{name: "global help wins before dispatch", args: []string{"--help", "prompt", "--output=json", "hello"}, wantCode: 0, wantOutput: "Usage:"},
+		{name: "global version wins before dispatch", args: []string{"--version", "prompt", "--output=json", "hello"}, wantCode: 0, wantOutput: cli.Version},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			t.Chdir(workDir)
+			cfg := &config.Config{Tracing: config.TracingConfig{Enabled: boolPtr(true), Exporter: "stdout"}}
+			var stdout, stderr bytes.Buffer
+			code := run(tt.args, &stdout, &stderr, func() (*config.Config, error) { return cfg, nil })
+
+			assert.Equal(t, tt.wantCode, code)
+			assert.Contains(t, stdout.String(), "[TRACE]")
+			if tt.wantError != "" {
+				assert.Contains(t, stderr.String(), tt.wantError)
+				assert.NotContains(t, stderr.String(), "stdout tracing")
+			} else {
+				assert.Empty(t, stderr.String())
+				assert.Contains(t, stdout.String(), tt.wantOutput)
+			}
+		})
+	}
+}
+
 func TestRunUnsupportedTracingExporterFailsBeforeCommand(t *testing.T) {
 	for _, name := range []string{"otlp", "kafka", "bogus"} {
 		t.Run(name, func(t *testing.T) {
