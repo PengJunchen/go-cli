@@ -302,7 +302,7 @@ func TestET_Phase19_AC4_WebSearchProviderConfigDriven(t *testing.T) {
 		require.NotNil(t, result)
 		assert.Contains(t, result.Output, "https://example.org")
 		require.Len(t, transport.requests, 1)
-		assert.Equal(t, "Bearer test-key", transport.requests[0].Header.Get("X-Subscription-Token"))
+		assert.Equal(t, "test-key", transport.requests[0].Header.Get("X-Subscription-Token"))
 	})
 
 	// Brave without API key keeps its configured identity and fails closed.

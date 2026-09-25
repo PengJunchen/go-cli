@@ -269,7 +269,7 @@ func TestAssembleAgent_WebSearchBraveProvider(t *testing.T) {
 	assert.Equal(t, false, result.Metadata["mock"], "provider=brave with API key should use BraveSearchProvider")
 	require.NotNil(t, request, "Brave provider should perform one localmocked request")
 	assert.Equal(t, "api.search.brave.com", request.URL.Host)
-	assert.Equal(t, "Bearer "+apiKey, request.Header.Get("X-Subscription-Token"))
+	assert.Equal(t, apiKey, request.Header.Get("X-Subscription-Token"))
 }
 
 // TestAssembleAgent_WebSearchBraveWithoutAPIKeyFailsClosed verifies that

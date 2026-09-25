@@ -49,6 +49,7 @@ var (
 	validTracingLevels        = []string{"debug", "info", "warn", "error"}
 	validCompactionStrategies = []string{"", "unified", "micro", "micro_first", "summary", "truncating"}
 	validGitPlatforms         = []string{"", "github", "gitlab", "bitbucket"}
+	validWebSearchProviders   = []string{"", "mock", "fetch", "brave"}
 	validTUIThemes            = []string{"", "dark", "light", "monokai", "solarized", "auto"}
 	validTUIDiffStyles        = []string{"", "unified", "split", "auto"}
 )
@@ -97,6 +98,9 @@ func (v *DefaultValidator) Validate(cfg Config) error {
 	// supported platforms.
 	if cfg.Git.APIToken != "" && !contains(validGitPlatforms, cfg.Git.Platform) {
 		errs = append(errs, "invalid git platform (supported: github, gitlab, bitbucket) required when api_token is set")
+	}
+	if !contains(validWebSearchProviders, cfg.WebSearch.Provider) {
+		errs = append(errs, "invalid web_search provider (supported: fetch, brave; empty and mock remain unavailable)")
 	}
 
 	// LSP config: when ServerCommand is non-empty, WorkspaceRoot (if set)
