@@ -284,6 +284,7 @@ func (s *MockACPServer) httpHandler(w http.ResponseWriter, r *http.Request) {
 		}
 		s.httpPending = remaining
 		s.mu.Unlock()
+		w.Header().Set("Content-Type", "application/x-ndjson")
 		w.WriteHeader(http.StatusOK)
 		for _, envelope := range out {
 			data, err := json.Marshal(envelope)
