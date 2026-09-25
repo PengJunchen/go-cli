@@ -455,7 +455,7 @@ func appendFixtureRows(t *testing.T, fixture recoveryFixture, rows ...SessionEnt
 		_ = file.Close()
 		t.Fatal(err)
 	}
-	store := newDurableJSONLStore(file, fixture.sessionID, label, branch, entryMap, maxSeq, durableJSONLIO{})
+	store := newDurableJSONLStore(file, fixture.sessionID, label, branch, entryMap, maxSeq, durableEntryIDs(loaded), durableJSONLIO{})
 	store.activeLeafID = leaf
 	canonical, err := store.AppendAndSync(context.Background(), rows...)
 	if err != nil {

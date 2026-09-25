@@ -61,11 +61,41 @@ func (v SessionView) Clone() SessionView {
 	return v
 }
 
+// PreparedSessionSnapshot is a read-only, defensive snapshot of the complete
+// durable session state owned by one prepared handle. DurableEntries preserves
+// physical JSONL append order, including legacy version-zero rows; it contains
+// journal, checkpoint, hidden, and branch rows as well as transcript entries.
+// PublishedView is the most recent complete model-history projection and may
+// lag DurableEntries while a tool-call group is durably open. Neither field
+// grants execution authority or replaces the prepared handle's file lock.
+type PreparedSessionSnapshot struct {
+	SessionID         string
+	SessionLabel      string
+	DurableEntries    []SessionEntry
+	ActiveBranchID    string
+	ActiveLeafEntryID string
+	MaxSeq            uint64
+	PublishedView     SessionView
+}
+
+// Clone returns an independent copy of the complete snapshot payload.
+func (s PreparedSessionSnapshot) Clone() PreparedSessionSnapshot {
+	if s.DurableEntries != nil {
+		s.DurableEntries = cloneSessionEntries(s.DurableEntries)
+	}
+	s.PublishedView = s.PublishedView.Clone()
+	return s
+}
+
 // PreparedSession is a locked, fully recovered session handle. View returns a
-// deep copy. DurableWriter remains bound to this handle and rejects writes
-// after Close. Close is idempotent and releases this handle's lock and store.
+// deep copy. Snapshot returns one coherent deep copy of all durable rows and
+// current session cursors while holding the store mutex; it errors after Close
+// or after a write/flush/sync failure poisons the writer. DurableWriter remains
+// bound to this handle and rejects writes after Close. Close is idempotent and
+// releases this handle's lock and store.
 type PreparedSession interface {
 	View() SessionView
+	Snapshot() (PreparedSessionSnapshot, error)
 	DurableWriter() DurableSessionWriter
 	Close() error
 }

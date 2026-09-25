@@ -401,6 +401,10 @@ type contractPreparedSession struct{}
 
 func (contractPreparedSession) View() SessionView { return SessionView{} }
 
+func (contractPreparedSession) Snapshot() (PreparedSessionSnapshot, error) {
+	return PreparedSessionSnapshot{}, nil
+}
+
 func (contractPreparedSession) DurableWriter() DurableSessionWriter { return contractWriter{} }
 
 func (contractPreparedSession) Close() error { return nil }
