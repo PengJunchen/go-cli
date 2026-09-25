@@ -39,6 +39,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/approval"
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mcp"
 	"github.com/pengjunchen/go-cli/internal/mock"
 	"github.com/pengjunchen/go-cli/internal/production"
@@ -286,7 +287,12 @@ func phaseRetry(ctx context.Context, t *testing.T, audit production.AuditLog) {
 	run := func(ctx context.Context) (string, error) {
 		for {
 			attempts++
-			err := production.NewError(production.ErrorTransient, context.DeadlineExceeded)
+			err := &llm.ProviderError{
+				StatusCode: 503,
+				ErrorType:  llm.ErrTypeServer,
+				Provider:   "phase3-test",
+				Message:    "temporary server failure",
+			}
 			if attempts >= 3 {
 				return "ok-after-retry", nil
 			}

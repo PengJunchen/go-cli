@@ -406,8 +406,8 @@ func TestBoundary_CircuitConcurrentLowThreshold(t *testing.T) {
 // RETRY BOUNDARY TESTS
 // =============================================================================
 
-// TestBoundary_RetryMaxAttemptsBoundary verifies ShouldRetry returns true
-// for attempt MaxAttempts-1 and false for attempt MaxAttempts.
+// TestBoundary_RetryMaxAttemptsBoundary verifies MaxAttempts is the total
+// number of dispatches, so only earlier failures can schedule another call.
 func TestBoundary_RetryMaxAttemptsBoundary(t *testing.T) {
 	ctx := context.Background()
 	p := production.NewDefaultRetryPolicy(production.RetryConfig{
@@ -422,8 +422,8 @@ func TestBoundary_RetryMaxAttemptsBoundary(t *testing.T) {
 	assert.True(t, p.ShouldRetry(ctx, transientErr, 0), "attempt 0 should retry")
 	assert.True(t, p.ShouldRetry(ctx, transientErr, 1), "attempt 1 should retry")
 
-	// attempt 2 is MaxAttempts-1 (last retry)
-	assert.True(t, p.ShouldRetry(ctx, transientErr, 2), "attempt 2 (last) should retry")
+	// attempt 2 is the third and final dispatch, so it must not retry.
+	assert.False(t, p.ShouldRetry(ctx, transientErr, 2), "attempt 2 (final) should NOT retry")
 
 	// attempt 3 == MaxAttempts - should NOT retry
 	assert.False(t, p.ShouldRetry(ctx, transientErr, 3), "attempt 3 should NOT retry")
