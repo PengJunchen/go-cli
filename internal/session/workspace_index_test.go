@@ -386,6 +386,102 @@ func TestWorkspaceIndexAlreadyExistsNeverGrantsExecutorPermit(t *testing.T) {
 	}
 }
 
+func TestWorkspaceIndexRejectsNULInStableRecordIdentityParts(t *testing.T) {
+	ctx := context.Background()
+	workspaceID := "workspace-nul-identity"
+	left := workspaceTestBatch(workspaceID, "session-a", "run\x00part", "tail", "action-a", 0, "call-a")
+	right := workspaceTestBatch(workspaceID, "session-a", "run", "part\x00tail", "action-a", 0, "call-a")
+	if leftID, rightID := workspaceDispatchRecordID(left), workspaceDispatchRecordID(right); leftID != rightID {
+		t.Fatalf("test setup requires ambiguous stable dispatch IDs, got %q and %q", leftID, rightID)
+	}
+	leftResolution := workspaceTestResolution(left.Actions[0].Action, "checkpoint-a", 1, core.ResolutionLocalResourcesStopped, "evidence-a")
+	rightResolution := workspaceTestResolution(right.Actions[0].Action, "checkpoint-b", 2, core.ResolutionLocalResourcesStopped, "evidence-b")
+	if leftID, rightID := workspaceResolutionRecordID(leftResolution.Action), workspaceResolutionRecordID(rightResolution.Action); leftID != rightID {
+		t.Fatalf("test setup requires ambiguous stable resolution IDs, got %q and %q", leftID, rightID)
+	}
+
+	mutators := []struct {
+		name   string
+		mutate func(*WorkspaceDispatchBatch)
+	}{
+		{name: "workspace ID", mutate: func(batch *WorkspaceDispatchBatch) {
+			batch.WorkspaceID += "\x00tail"
+			batch.Actions[0].Action.WorkspaceID = batch.WorkspaceID
+		}},
+		{name: "session ID", mutate: func(batch *WorkspaceDispatchBatch) {
+			batch.SessionID += "\x00tail"
+			batch.Actions[0].Action.SessionID = batch.SessionID
+		}},
+		{name: "run ID", mutate: func(batch *WorkspaceDispatchBatch) {
+			batch.RunID += "\x00tail"
+			batch.Actions[0].Action.RunID = batch.RunID
+		}},
+		{name: "action batch ID", mutate: func(batch *WorkspaceDispatchBatch) {
+			batch.ActionBatchID += "\x00tail"
+			batch.Actions[0].Action.ActionBatchID = batch.ActionBatchID
+		}},
+		{name: "action ID", mutate: func(batch *WorkspaceDispatchBatch) {
+			batch.Actions[0].Action.ActionID += "\x00tail"
+		}},
+	}
+
+	index := newWorkspaceQuarantineIndex(t.TempDir(), workspaceIndexIO{})
+	if err := index.EnsureWorkspace(ctx, workspaceID); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range mutators {
+		t.Run(test.name, func(t *testing.T) {
+			batch := workspaceTestBatch(workspaceID, "session-a", "run-a", "batch-a", "action-a", 0, "call-a")
+			test.mutate(&batch)
+			if _, err := normalizeWorkspaceDispatchBatch(batch); err == nil {
+				t.Fatal("dispatch API normalization accepted a NUL in a stable record identity part")
+			}
+			if result, err := index.BeginDispatchBatch(ctx, batch); err == nil || result != WorkspaceDispatchNotCommitted {
+				t.Fatalf("BeginDispatchBatch = (%v, %v), want rejection without a permit", result, err)
+			}
+			if _, err := index.InspectDispatchMarkers(ctx, []PendingActionRef{batch.Actions[0].Action}); err == nil {
+				t.Fatal("InspectDispatchMarkers accepted a NUL in a stable record identity part")
+			}
+			resolution := workspaceTestResolution(batch.Actions[0].Action, "checkpoint-nul", 1, core.ResolutionNeverDispatched, "receipt-nul")
+			if err := index.ApplyDurableResolutions(ctx, []ValidatedExecutionResolution{resolution}); err == nil {
+				t.Fatal("ApplyDurableResolutions accepted a NUL in a stable record identity part")
+			}
+
+			row := workspaceIndexRecord{
+				Version: 1, Seq: 2, RecordID: workspaceDispatchRecordID(batch), Kind: workspaceIndexDispatchReady,
+				WorkspaceID: batch.WorkspaceID, SessionID: batch.SessionID, RunID: batch.RunID,
+				ActionBatchID: batch.ActionBatchID, Actions: batch.Actions,
+			}
+			genesis := workspaceIndexRecord{Version: 1, Seq: 1, RecordID: workspaceGenesisRecordID(batch.WorkspaceID), Kind: workspaceIndexInitialized, WorkspaceID: batch.WorkspaceID}
+			if _, err := validateWorkspaceIndexRecords([]workspaceIndexRecord{genesis, row}, batch.WorkspaceID); err == nil {
+				t.Fatal("workspace row validation accepted a NUL in a stable record identity part")
+			}
+			resolutionRow := workspaceIndexRecord{
+				Version: 1, Seq: 2, RecordID: workspaceResolutionRecordID(resolution.Action), Kind: workspaceIndexResolution,
+				WorkspaceID: resolution.Action.WorkspaceID, Action: refPointer(resolution.Action),
+				CheckpointID: resolution.CheckpointEntryID, CheckpointSeq: resolution.CheckpointSeq,
+				Resolution: resolutionPointer(resolution.Resolution),
+			}
+			resolutionState := &workspaceIndexState{actionsByKey: make(map[workspaceActionKey]*workspaceIndexedAction)}
+			if err := resolutionState.addResolutionRecord(&resolutionRow); err == nil {
+				t.Fatal("resolution row validation accepted a NUL in a stable record identity part")
+			}
+			rows, err := readWorkspaceIndexFile(index.indexPath(workspaceID), filepath.Dir(index.indexPath(workspaceID)), workspaceID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(rows) != 1 {
+				t.Fatalf("invalid API input wrote %d index rows, want genesis only", len(rows))
+			}
+		})
+	}
+
+	valid := workspaceTestBatch(workspaceID, "session-normal", "run-normal", "batch-normal", "action-normal", 0, "call-normal")
+	if result, err := index.BeginDispatchBatch(ctx, valid); err != nil || result != WorkspaceDispatchCommittedNow {
+		t.Fatalf("ordinary stable ID values changed behavior: (%v, %v)", result, err)
+	}
+}
+
 func TestWorkspaceIndexNeverDispatchedWithoutMarkerIsIdempotentNoop(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
