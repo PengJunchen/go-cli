@@ -253,7 +253,7 @@ func (o *runOwner) run(timeout time.Duration, fn func(context.Context) (Result, 
 	o.mu.Lock()
 	o.cleanupTimeout = timeout
 	o.mu.Unlock()
-	callbackCtx := withRunWorkerTracker(o.ctx, o)
+	callbackCtx := withRunID(withRunWorkerTracker(o.ctx, o), o.claim.ID)
 	go o.supervise()
 	if ctxErr := callbackCtx.Err(); ctxErr != nil {
 		o.finishUndispatched(ctxErr)
