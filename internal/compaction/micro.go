@@ -14,9 +14,11 @@ const compactedToolResult = "[compacted tool result]"
 
 // MicroCompactor is the cheapest compaction strategy: it performs no LLM calls.
 // It shrinks the context by replacing the results of older tool calls with a
-// fixed placeholder while preserving user and assistant messages verbatim. When
-// even fully compacted tool results cannot bring the list under budget, it
-// returns ErrRequiresTruncating so a caller can fall back to a heavier strategy.
+// fixed placeholder while preserving ordinary conversation messages. Legacy
+// derived summaries are normalized on a defensive copy so they cannot retain
+// system-message authority. When even fully compacted tool results cannot bring
+// the list under budget, it returns ErrRequiresTruncating so a caller can fall
+// back to a heavier strategy.
 type MicroCompactor struct{}
 
 // Compile-time assertion that MicroCompactor satisfies Compactor.
@@ -27,15 +29,24 @@ func NewMicroCompactor() *MicroCompactor {
 	return &MicroCompactor{}
 }
 
-// Compact replaces old tool results with the placeholder until the estimated
-// size fits maxTokens. User and assistant messages are never modified.
+// Compact validates tool-call groups, normalizes legacy derived summaries on a
+// copy, checks mandatory system instructions, then replaces old tool results
+// with the placeholder until the estimated size fits maxTokens. It does not
+// mutate caller-owned items.
 func (c *MicroCompactor) Compact(ctx context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator) ([]TurnItem, error) {
 	span, _ := tracing.SpanFromContext(ctx, "compaction.micro", tracing.SpanKindInternal)
 	defer span.End()
 	logger := tracing.NewTraceLogger(span, slog.Default())
 
-	result := make([]TurnItem, len(items))
-	copy(result, items)
+	// Validate tool-call closure and normalize legacy derived summaries on a
+	// defensive copy, matching the other compaction strategies.
+	result, _, err := groupTurnItems(items)
+	if err != nil {
+		return nil, err
+	}
+	if err := checkMandatorySystemPromptBudget(result, maxTokens, estimator); err != nil {
+		return items, err
+	}
 
 	// Pre-compute the total token count once. The loop below maintains this
 	// total incrementally instead of re-estimating the entire list on every
