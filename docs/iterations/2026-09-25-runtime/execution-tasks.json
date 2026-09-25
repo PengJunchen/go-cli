@@ -740,7 +740,7 @@
       "commit_spec": "Separate identity/resume and loader/concurrency commits if contracts stay independent; each commit includes exact red-before-fix regression tests.",
       "phase_id": "R2",
       "source_status": "proposed",
-      "execution_scope": "Accepted partial mappings include session RunCommitSink changes 63e9fd→1f2a19b, 75ceb→bf4bbcb, 5a6dd→82d47bc; CLI wrapper changes 29765ab→edc1f27 and docs 9a074→800fa65; and test-only callback fixture 1945e8→d3cfcf5. The adapter review accepted its bounded tests, but the integrated 5bf14e2 run exposed nine stale session fixture expectations later corrected by the test-only commit. Actual run-owner late-proof wiring, Loop/CLI/session restart integration, typed compaction provenance, and child/process recovery remain open; the real CommitCompaction consumer waits on R3. This task is not done."
+      "execution_scope": "Accepted partial mappings include session RunCommitSink changes 63e9fd→1f2a19b, 75ceb→bf4bbcb, 5a6dd→82d47bc; CLI wrapper changes 29765ab→edc1f27 and docs 9a074→800fa65; test-only callback fixture 1945e8→d3cfcf5; and snapshot-to-tree compatibility fixes 3ff2d0c→48f5000, c4c1352→45e9c11. The adapter review accepted its bounded tests, but the integrated 5bf14e2 run exposed nine stale session fixture expectations later corrected by the test-only commit. The snapshot-to-tree slice fixes legacy V0 branch/parent projection only and does not prove durable CLI resume. A cross-module workspace-ID RED/fix (resolver→EnsureWorkspace→PrepareNew) is authorized and in progress; the handoff example has been corrected, but there is not yet a frozen source/test result. Actual run-owner late-proof wiring, Loop/CLI/session restart integration, typed compaction provenance, and child/process recovery remain open; the real CommitCompaction consumer waits on R3. This task is not done."
     },
     {
       "id": "R2-BLD-02",
@@ -781,7 +781,7 @@
       "commit_spec": "One commit for durable journal and truthful acknowledgment; persistence format changes require explicit versioning and fixture compatibility tests.",
       "phase_id": "R2",
       "source_status": "proposed",
-      "execution_scope": "Partial lane build_bash is preparing only the standalone durable workspace_index storage/RecoveryAuthority adapter and its tests. It may proceed without Loop/CLI wiring; do not connect it to dispatch until the R4 prepared-dispatch boundary is accepted. Cross-session marker matching, append+Sync/idempotency, quarantine and restart gates remain open, so this partial lane does not close R2-BLD-02 or R2."
+      "execution_scope": "Partial lane build_bash is preparing only the standalone durable workspace_index storage/RecoveryAuthority adapter and its tests. Separately, managed Grep/Find helper cancellation/completion behavior is accepted at 2bf4→d39dc37, 2e003→ca09393, and 1099c68→da7779a, including preservation of caller cancellation on forced pipe close; this does not wire default prepared registration/proof or establish whole-workspace recovery. The index may proceed without Loop/CLI wiring; do not connect it to dispatch until the R4 prepared-dispatch boundary is accepted. Cross-session marker matching, append+Sync/idempotency, quarantine and restart gates remain open, so this partial lane does not close R2-BLD-02 or R2."
     },
     {
       "id": "R2-REV-01",
@@ -1321,7 +1321,7 @@
       "commit_spec": "One focused commit per editor or keybinding behavior group; retain recorded PTY input/output for reviewer reproduction.",
       "phase_id": "R5",
       "source_status": "proposed",
-      "execution_scope": "Partial accepted slice only: the fixed R5 interaction source through d3ac6b29→ed72cd6 includes the reviewed UTF-8 caret and approval/editor interaction behavior. A real PTY run at fixed 84324fe failed because the first key after REPL submission was lost and ASCII spaces disappeared from free-text ask_user input; preserve that pre-fix evidence. The follow-up UI fix is still under review, so input/cancel/help journeys and PTY verification remain incomplete; this task is not done."
+      "execution_scope": "Partial accepted slices include the R5 interaction source through d3ac6b29→ed72cd6 and the fixed TTY/PTY follow-up 7ab3735→7b384ea, c5e338→7a33f3d, c48ec4→8e907e2, and 05f6902→37c7352. Preserve the real PTY failure at 84324fe as pre-fix evidence; the later fixed Darwin/arm64 PTY run passed nine loopback-provider requests and the independently reviewed TTY/PTY slice is accepted. Windows cross-compilation remains unverified because existing approval code references undefined syscall.Stat_t before this slice. Remaining input/cancel/help and complete TUI journey requirements, tagged E2E and full R5/R8 gates remain open; this task is not done."
     },
     {
       "id": "R5-REV-01",

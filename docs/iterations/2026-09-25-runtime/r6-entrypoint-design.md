@@ -96,7 +96,7 @@ MCP HTTP adapter 的具体约定：
 | 依赖 | R6 消费的合同 | 明确留在后续 lane 的工作 |
 |---|---|---|
 | R1（contract 已批准；source 在 `f00aa630` integration snapshot） | RunClaim ID、Outcome/ExecutionState、status snapshot、pending cleanup、worker/quiescence ownership、EventGapCount、typed transcript 语义。 | R6 不再实现第二套 run owner，也不从 AgentEvent 重建 transcript。 |
-| R2（[`r2-contract.md:1-12`](r2-contract.md#L1) 标记待 joint review，尚不是已实现存储） | 物理 SessionID/EntryID、durable commit acknowledgment、resume/fork 的 authority、WorkspaceID digest、unfinished action reconciliation。 | R6 不实现 ActionJournal、session migration、自动 replay；未拿到 R2 durable acknowledgment 时只声明 ephemeral。 |
+| R2（设计已批准；存储和消费者仍未完成） | `r2-contract.md` 已通过定向设计审查；物理 SessionID/EntryID、durable commit acknowledgment、resume/fork 的 authority、WorkspaceID digest、unfinished action reconciliation 仍需实现并验证。 | R6 不实现 ActionJournal、session migration、自动 replay；R2 durable acknowledgment、Loop/CLI 接线或重启恢复未完成时只声明 ephemeral。 |
 | R3（[`r3-provider-design.md:9-12,56-70,99-115`](r3-provider-design.md#L9) 定义统一 resolver 方向） | 唯一 provider resolver 规范化 provider/protocol/origin 并解析 `CredentialRef`；R6 仅将 `AuthChain` 接入该 resolver 的既定 secret-source seam。 | R6 不另建 provider factory、credential resolver 或 precedence；如 R3 seam 未可用，credential-bearing provider 请求 fail closed。 |
 | R4（[`r4-prepared-dispatch-design.md:1-8`](r4-prepared-dispatch-design.md#L1) 为待 review seam，不是已落能力） | 同一次 resolver 的 tool identity/registration generation、trusted EffectSet、schema snapshot、一次性 prepared dispatch 与 approval binding。 | R6 trust 不授予 tool capability；R4 完成前 unknown/untrusted MCP/custom tool 默认 deny，不能以名称或 project trust 声称 read-only。 |
 

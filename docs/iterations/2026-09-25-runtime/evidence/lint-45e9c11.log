@@ -1,0 +1,5 @@
+internal/cli/line_editor_pty_handoff_test.go:22:46: context-as-argument: context.Context should be the first parameter of a function (revive)
+func startPTYReadLine(le *DefaultLineEditor, ctx context.Context) <-chan ptyLineResult {
+                                             ^
+1 issues:
+* revive: 1
