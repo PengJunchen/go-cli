@@ -293,12 +293,11 @@ func TestPromptCmd_BuildModel_WithConfig(t *testing.T) {
 }
 
 func TestPromptCmd_BuildModel_WithNilConfig(t *testing.T) {
-	t.Run("default provider succeeds", func(t *testing.T) {
+	t.Run("default provider requires a scoped credential", func(t *testing.T) {
 		model, _, cleanup, err := buildModel(t.Context(), nil, "eino", "test-model")
-		require.NoError(t, err)
-		assert.NotNil(t, model)
-		require.NotNil(t, cleanup)
-		cleanup()
+		require.ErrorContains(t, err, "provider requires a scoped credential")
+		assert.Nil(t, model)
+		assert.Nil(t, cleanup)
 	})
 
 	t.Run("nonexistent provider fails", func(t *testing.T) {
@@ -331,12 +330,11 @@ func TestInteractiveCmd_BuildModel_WithConfig(t *testing.T) {
 }
 
 func TestInteractiveCmd_BuildModel_WithNilConfig(t *testing.T) {
-	t.Run("default provider succeeds", func(t *testing.T) {
+	t.Run("default provider requires a scoped credential", func(t *testing.T) {
 		model, _, cleanup, err := buildModel(t.Context(), nil, "eino", "test-model")
-		require.NoError(t, err)
-		assert.NotNil(t, model)
-		require.NotNil(t, cleanup)
-		cleanup()
+		require.ErrorContains(t, err, "provider requires a scoped credential")
+		assert.Nil(t, model)
+		assert.Nil(t, cleanup)
 	})
 
 	t.Run("nonexistent provider fails", func(t *testing.T) {

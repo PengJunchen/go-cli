@@ -14,14 +14,14 @@ import (
 )
 
 // newAssembleTestConfig returns a minimal Config whose provider section forces
-// buildModel down the EinoProvider path. EinoProvider.Build only constructs the
-// HTTPChatModel object (no network calls), so assembly succeeds without a live
-// endpoint.
+// buildModel down the OpenAI-compatible path with an explicitly scoped key.
+// EinoProvider.Build only constructs the HTTPChatModel object (no network
+// calls), so assembly succeeds without a live endpoint.
 func newAssembleTestConfig() *config.Config {
 	return &config.Config{
 		Provider: config.ProviderConfig{
 			Name:    "openai",
-			BaseURL: "http://127.0.0.1:0",
+			BaseURL: "http://127.0.0.1:1",
 			APIKey:  "test-key",
 		},
 	}
