@@ -153,6 +153,20 @@ func TestHTTPServerStopBeforeStartAndFailedListenAreIdempotent(t *testing.T) {
 	}
 }
 
+func TestHTTPServerSealAdmissionBeforeStartPreventsLateStart(t *testing.T) {
+	server := NewHTTPServer("test", "127.0.0.1:0", nil)
+	server.SealAdmission()
+	if err := server.Start(context.Background()); !errors.Is(err, ErrHTTPServerAdmissionClosed) {
+		t.Fatalf("Start after admission seal = %v, want ErrHTTPServerAdmissionClosed", err)
+	}
+	if server.Running() {
+		t.Fatal("server started after its owner sealed admission")
+	}
+	if err := server.Stop(context.Background()); err != nil {
+		t.Fatalf("Stop after pre-start seal: %v", err)
+	}
+}
+
 func TestHTTPServerConcurrentStartIsIdempotent(t *testing.T) {
 	server := NewHTTPServer("test", "127.0.0.1:0", nil)
 	start := make(chan error, 2)
@@ -316,5 +330,52 @@ func TestHTTPServerStopWaitDeadlineIsNotBlockedByLogger(t *testing.T) {
 	case <-time.After(150 * time.Millisecond):
 		releaseHandler()
 		t.Fatal("Stop waiter remained blocked in the logger instead of honoring its context")
+	}
+}
+
+func TestHTTPServerStartLoggerDoesNotHoldAdmissionLock(t *testing.T) {
+	server := NewHTTPServer("test", "127.0.0.1:0", nil)
+	oldLogger := slog.Default()
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseHandler := func() { releaseOnce.Do(func() { close(release) }) }
+	slog.SetDefault(slog.New(&blockedSlogHandler{started: started, release: release}))
+	t.Cleanup(func() {
+		releaseHandler()
+		slog.SetDefault(oldLogger)
+		_ = server.Stop(context.Background())
+	})
+
+	startResult := make(chan error, 1)
+	go func() { startResult <- server.Start(context.Background()) }()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("Start did not reach its log callback")
+	}
+
+	waitCtx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	stopResult := make(chan error, 1)
+	go func() { stopResult <- server.Stop(waitCtx) }()
+	select {
+	case err := <-stopResult:
+		var pending interface{ Done() <-chan struct{} }
+		if !errors.As(err, &pending) || pending.Done() == nil {
+			t.Fatalf("Stop error %T %v does not expose pending cleanup", err, err)
+		}
+		releaseHandler()
+		if err := <-startResult; err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		select {
+		case <-pending.Done():
+		case <-time.After(time.Second):
+			t.Fatal("generation did not finish after Start logger returned")
+		}
+	case <-time.After(150 * time.Millisecond):
+		releaseHandler()
+		t.Fatal("Stop was blocked on the server mutex held by Start logging")
 	}
 }
