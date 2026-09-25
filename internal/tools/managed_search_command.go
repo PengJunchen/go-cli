@@ -46,6 +46,9 @@ func runManagedSearchCommand(ctx context.Context, cmd *exec.Cmd) ([]byte, manage
 func managedSearchLifecycleError(ctx context.Context, label string, lifecycle managedLocalResult) error {
 	if lifecycle.forcedPipeClose {
 		cause := errors.Join(fmt.Errorf("%s: %w", label, errProcessContainmentUnconfirmed), lifecycle.runErr, lifecycle.cleanupErr, lifecycle.readerErr)
+		if ctx != nil {
+			cause = errors.Join(cause, ctx.Err())
+		}
 		if lifecycle.executionDone != nil {
 			return pendingProcessErrorWithDone(cause, true, lifecycle.executionDone)
 		}

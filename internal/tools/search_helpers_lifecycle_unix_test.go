@@ -62,6 +62,45 @@ func TestGrepForcedPipeCloseStopsFallbackAndWithholdsProof(t *testing.T) {
 	assertProcessFromFileStopped(t, pidPath)
 }
 
+func TestGrepTimeoutWithEscapedPipeWriterPreservesCancellationCause(t *testing.T) {
+	workdir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(workdir, "match.txt"), []byte("needle\n"), 0o600))
+	helperDir := t.TempDir()
+	pidPath := filepath.Join(t.TempDir(), "rg-timeout-escaped.pid")
+	testBinary, err := os.Executable()
+	require.NoError(t, err)
+	script := fmt.Sprintf(`#!/bin/sh
+%s -test.run=%s &
+child=$!
+while [ ! -s %s ]; do sleep 0.01; done
+wait "$child"
+`,
+		shellQuoteTestArgument(testBinary),
+		shellQuoteTestArgument("^TestSearchHelperEscapedPipeWriter$"),
+		shellQuoteTestArgument(pidPath))
+	require.NoError(t, os.WriteFile(filepath.Join(helperDir, "rg"), []byte(script), 0o700))
+	t.Setenv("PATH", helperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("SEARCH_HELPER_ESCAPED_PIPE_PID", pidPath)
+	t.Cleanup(func() { killProcessFromFile(t, pidPath) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	reported := make(chan searchCompletionReport, 1)
+	ctx = withPreparedCompletionReporter(ctx, func(proof PreparedCompletionProof, done <-chan struct{}) {
+		reported <- searchCompletionReport{proof: proof, done: done}
+	})
+	result, err := NewGrepTool(WithGrepWorkdir(workdir)).Execute(ctx, ToolCall{Args: map[string]any{"pattern": "needle"}})
+	pid := waitForChildPIDFile(t, pidPath)
+	require.Error(t, err)
+	require.Empty(t, result.Output, "unknown helper effects must not fall back to Go search")
+	assertUnknownWithoutPendingResource(t, err)
+	require.NoError(t, syscall.Kill(pid, 0), "escaped writer remains alive when Grep returns")
+	assertNoProcessCompletionReport(t, reported)
+	killProcessFromFile(t, pidPath)
+	assertProcessFromFileStopped(t, pidPath)
+	require.ErrorIs(t, err, context.DeadlineExceeded, "unknown outcome must retain the caller's cancellation cause")
+}
+
 func TestFindForcedPipeCloseStopsFallbackAndWithholdsProof(t *testing.T) {
 	workdir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(workdir, "target.go"), []byte("package main\n"), 0o600))
