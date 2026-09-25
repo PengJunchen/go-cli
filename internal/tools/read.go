@@ -218,7 +218,7 @@ func (t *ReadTool) resolvePath(path string) (string, error) {
 	if err != nil {
 		return abspath, err
 	}
-	if len(t.whitelist.paths) == 0 {
+	if t.whitelist.unrestricted() {
 		return abspath, nil
 	}
 
