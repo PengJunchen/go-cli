@@ -2,9 +2,11 @@ package tui
 
 import (
 	"context"
+	"encoding"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"math"
 	"reflect"
 	"strings"
 
@@ -72,10 +74,10 @@ func CoreEventToAgentEvent(ev core.AgentEvent) AgentEvent {
 	return ae
 }
 
-// copyToolCalls validates assistant tool-call arguments as JSON payloads and
-// then uses core's canonical history clone to prevent aliases to nested
-// maps/slices from crossing the core-to-TUI boundary. Invalid or unsupported
-// values remain visible as calls, with their details explicitly unavailable.
+// copyToolCalls copies only JSON-compatible argument values into presentation-
+// owned maps and slices. It does not invoke caller-provided encoder methods.
+// Invalid or unsupported values remain visible as calls, with their details
+// explicitly unavailable.
 func copyToolCalls(calls []llm.ToolCall) []ToolCallData {
 	if calls == nil {
 		return nil
@@ -88,65 +90,104 @@ func copyToolCalls(calls []llm.ToolCall) []ToolCallData {
 			continue
 		}
 
-		if _, err := json.Marshal(call.Args); err != nil || !isToolArgsJSONValue(reflect.ValueOf(call.Args)) {
+		remaining := maxToolArgCloneNodes
+		args, ok := cloneToolArgValue(reflect.ValueOf(call.Args), 0, &remaining)
+		if !ok {
 			copied[i].ArgsUnavailable = true
 			continue
 		}
-		messages := core.CloneAgentMessages([]core.AgentMessage{{ToolCalls: []llm.ToolCall{call}}})
-		copied[i].Args = messages[0].ToolCalls[0].Args
+		copied[i].Args = args
 	}
 	return copied
 }
 
-// isToolArgsJSONValue restricts cloning to the map/slice/scalar graphs used by
-// decoded JSON payloads. Structs and pointers may hide mutable aliases behind
-// custom encoders, so they are reported unavailable rather than shallow-copied.
-// json.Marshal is run first to reject cycles and unsupported values.
-func isToolArgsJSONValue(value reflect.Value) bool {
+const (
+	maxToolArgCloneDepth = 128
+	maxToolArgCloneNodes = 10000
+)
+
+// cloneToolArgValue accepts a bounded JSON scalar/map/slice tree and returns a
+// presentation-owned clone. Structs, pointers, cycles/deep trees, and custom
+// encoders are rejected without invoking caller-provided methods.
+func cloneToolArgValue(value reflect.Value, depth int, remaining *int) (any, bool) {
 	if !value.IsValid() {
-		return true
+		return nil, true
 	}
+	if depth > maxToolArgCloneDepth || *remaining <= 0 {
+		return nil, false
+	}
+	*remaining = *remaining - 1
+
 	typeOfValue := value.Type()
 	marshalerType := reflect.TypeOf((*json.Marshaler)(nil)).Elem()
-	if typeOfValue.Implements(marshalerType) ||
-		(typeOfValue.Kind() != reflect.Pointer && reflect.PointerTo(typeOfValue).Implements(marshalerType)) {
-		return false
+	textMarshalerType := reflect.TypeOf((*encoding.TextMarshaler)(nil)).Elem()
+	if typeOfValue.Implements(marshalerType) || typeOfValue.Implements(textMarshalerType) {
+		return nil, false
+	}
+	if typeOfValue.Kind() != reflect.Pointer {
+		pointerType := reflect.PointerTo(typeOfValue)
+		if pointerType.Implements(marshalerType) || pointerType.Implements(textMarshalerType) {
+			return nil, false
+		}
 	}
 
 	switch value.Kind() {
 	case reflect.Interface:
-		return value.IsNil() || isToolArgsJSONValue(value.Elem())
+		if value.IsNil() {
+			return nil, true
+		}
+		return cloneToolArgValue(value.Elem(), depth+1, remaining)
 	case reflect.Map:
 		if value.IsNil() {
-			return true
+			return map[string]any(nil), true
 		}
-		if value.Type().Key().Kind() != reflect.String {
-			return false
+		if value.Type().Key().Kind() != reflect.String || value.Len() > *remaining {
+			return nil, false
 		}
+		cloned := make(map[string]any, value.Len())
 		iter := value.MapRange()
 		for iter.Next() {
-			if !isToolArgsJSONValue(iter.Value()) {
-				return false
+			child, ok := cloneToolArgValue(iter.Value(), depth+1, remaining)
+			if !ok {
+				return nil, false
 			}
+			cloned[iter.Key().String()] = child
 		}
-		return true
+		return cloned, true
 	case reflect.Slice, reflect.Array:
 		if value.Kind() == reflect.Slice && value.IsNil() {
-			return true
+			return []any(nil), true
 		}
+		if value.Len() > *remaining {
+			return nil, false
+		}
+		cloned := make([]any, value.Len())
 		for i := 0; i < value.Len(); i++ {
-			if !isToolArgsJSONValue(value.Index(i)) {
-				return false
+			child, ok := cloneToolArgValue(value.Index(i), depth+1, remaining)
+			if !ok {
+				return nil, false
 			}
+			cloned[i] = child
 		}
-		return true
+		return cloned, true
 	case reflect.Bool, reflect.String,
 		reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64,
-		reflect.Float32, reflect.Float64:
-		return true
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		return value.Interface(), true
+	case reflect.Float32:
+		f := value.Float()
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return nil, false
+		}
+		return float32(f), true
+	case reflect.Float64:
+		f := value.Float()
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			return nil, false
+		}
+		return f, true
 	default:
-		return false
+		return nil, false
 	}
 }
 

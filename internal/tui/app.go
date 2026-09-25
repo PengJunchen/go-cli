@@ -79,12 +79,14 @@ type ToolCallData struct {
 type activeToolCallGroup struct {
 	byID      map[string]*AccordionEntry
 	ambiguous map[string]struct{}
+	consumed  map[string]struct{}
 }
 
 func newActiveToolCallGroup() *activeToolCallGroup {
 	return &activeToolCallGroup{
 		byID:      make(map[string]*AccordionEntry),
 		ambiguous: make(map[string]struct{}),
+		consumed:  make(map[string]struct{}),
 	}
 }
 
@@ -93,6 +95,9 @@ func (g *activeToolCallGroup) lookup(id string) (*AccordionEntry, bool) {
 		return nil, false
 	}
 	if _, ambiguous := g.ambiguous[id]; ambiguous {
+		return nil, false
+	}
+	if _, consumed := g.consumed[id]; consumed {
 		return nil, false
 	}
 	entry, ok := g.byID[id]
@@ -106,6 +111,9 @@ func (g *activeToolCallGroup) add(id string, entry *AccordionEntry) bool {
 	if _, ambiguous := g.ambiguous[id]; ambiguous {
 		return false
 	}
+	if _, consumed := g.consumed[id]; consumed {
+		return false
+	}
 	if _, exists := g.byID[id]; exists {
 		delete(g.byID, id)
 		g.ambiguous[id] = struct{}{}
@@ -113,6 +121,16 @@ func (g *activeToolCallGroup) add(id string, entry *AccordionEntry) bool {
 	}
 	g.byID[id] = entry
 	return true
+}
+
+// consume retires an ID after its single terminal result receipt. Later events
+// with the same ID remain visible but cannot be attached to the old call.
+func (g *activeToolCallGroup) consume(id string) {
+	if g == nil || id == "" {
+		return
+	}
+	delete(g.byID, id)
+	g.consumed[id] = struct{}{}
 }
 
 // TokenUsageData mirrors core.TokenUsage for the TUI layer.
@@ -1256,6 +1274,7 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 		m.mu.Lock()
 		m.streamingEntry = nil
 		m.streamingBuf.Reset()
+		m.toolCallGroup = nil
 		m.mu.Unlock()
 		return nil
 	}
@@ -1561,6 +1580,7 @@ func (m *teaModel) handleToolResultEvent(ev AgentEvent, rendered string) {
 		child := entryFor(ContentTypeToolResult, rendered, m.interactive, ev.ToolCallID)
 		child.IsError = ev.IsError
 		target.Children = append(target.Children, child)
+		m.toolCallGroup.consume(ev.ToolCallID)
 	} else {
 		m.addIncompleteToolEventLocked(ContentTypeToolResult, rendered, ev.ToolCallID, ev.IsError)
 	}
