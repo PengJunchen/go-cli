@@ -129,9 +129,6 @@ func (p *DefaultRetryPolicy) Classify(err error) ErrorCategory {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return ErrorFatal
 	}
-	if errors.Is(err, llm.ErrProviderResponseTooLarge) {
-		return ErrorFatal
-	}
 	var c categorized
 	if errors.As(err, &c) {
 		return c.ErrorCategory()
@@ -170,6 +167,9 @@ func (p *DefaultRetryPolicy) Classify(err error) ErrorCategory {
 }
 
 func classifyProviderError(err error) (ErrorCategory, bool) {
+	if errors.Is(err, llm.ErrProviderResponseTooLarge) {
+		return ErrorFatal, true
+	}
 	var providerErr *llm.ProviderError
 	if !errors.As(err, &providerErr) || providerErr == nil {
 		return "", false
