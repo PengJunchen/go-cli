@@ -55,6 +55,14 @@ func TestRun_HelpFlag(t *testing.T) {
 }
 
 func TestRun_NoArgs(t *testing.T) {
+	credentialEnv, err := config.ScopedCredentialEnvName(config.AuthScope{
+		ProviderID: "eino",
+		ProtocolID: "openai-compatible",
+		Origin:     "https://api.openai.com:443",
+	})
+	require.NoError(t, err)
+	t.Setenv(credentialEnv, "test-scoped-openai-key")
+
 	cfg := &mockConfig{verbose: false}
 	out, err := run(t.Context(), cfg)
 	require.NoError(t, err)

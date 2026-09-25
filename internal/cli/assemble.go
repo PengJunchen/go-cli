@@ -540,6 +540,7 @@ type assembleState struct {
 	// Model section
 	model         llm.BaseChatModel
 	modelInfo     llm.ModelInfo
+	modelResolver *cliModelResolver
 	modelCycler   *llm.ModelCycler
 	modelRegistry llm.ModelRegistry
 	smallModel    llm.BaseChatModel
@@ -665,7 +666,12 @@ func (s *assembleState) appendFinalCleanup() {
 // assembleModel builds the primary model, ModelCycler, ModelRegistry, and small
 // model. It registers the model provider and appends model cleanups.
 func (s *assembleState) assembleModel() error {
-	model, modelInfo, modelCleanup, err := buildModel(s.ctx, s.rc, s.providerName, s.modelName)
+	modelResolver, err := newCLIModelResolver(s.rc, s.providerName, true)
+	if err != nil {
+		return fmt.Errorf("assemble: resolve model providers: %w", err)
+	}
+	s.modelResolver = modelResolver
+	model, modelInfo, modelCleanup, err := modelResolver.buildPrimary(s.ctx, s.rc, s.providerName, s.modelName)
 	if err != nil {
 		return fmt.Errorf("assemble: build model: %w", err)
 	}
@@ -720,7 +726,7 @@ func (s *assembleState) assembleModel() error {
 		if smallProvider == "" {
 			smallProvider = s.providerName
 		}
-		sm, _, smallCleanup, smErr := buildSmallModel(s.ctx, s.rc, s.providerName, smallProvider, s.rc.SmallModel.Model)
+		sm, _, smallCleanup, smErr := modelResolver.buildSmall(s.ctx, s.rc, s.providerName, smallProvider, s.rc.SmallModel.Model)
 		if smErr != nil {
 			s.logger.Warn("assemble_small_model_failed", "err", smErr, "model", s.rc.SmallModel.Model)
 		} else {
@@ -749,11 +755,11 @@ func (s *assembleState) assembleModel() error {
 		WithModelRegistry(s.modelRegistry).
 		WithModelNames(s.providerName, s.modelName, smallProvider, smallModelName).
 		WithModelBuilder(func(ctx context.Context, name string) (llm.BaseChatModel, func(), error) {
-			m, _, cleanup, err := buildModel(ctx, s.rc, s.providerName, name)
+			m, _, cleanup, err := modelResolver.buildPrimary(ctx, s.rc, s.providerName, name)
 			return m, cleanup, err
 		}).
 		WithModelLister(func() []llm.ModelInfo {
-			return listAvailableModels(s.rc, s.providerName)
+			return modelResolver.listAvailableModels(context.Background(), s.rc, s.providerName)
 		}).
 		WithModelSwitchCallback(func(m llm.BaseChatModel) {
 			if s.loopAgent != nil {
@@ -1480,41 +1486,261 @@ func (s *assembleState) assembleSession() {
 	}
 }
 
-// buildModel resolves an llm.BaseChatModel from the loaded configuration.
-// It also returns the ModelInfo for the resolved model so callers can inspect
-// the context window and other metadata.
-func buildModel(ctx context.Context, rc *config.Config, providerName, modelName string) (llm.BaseChatModel, llm.ModelInfo, func(), error) {
-	cfg := llm.ModelConfig{Model: modelName}
-	baseURL, apiKey := "", ""
-	if rc != nil {
-		baseURL = rc.Provider.BaseURL
-		apiKey = rc.Provider.APIKey
+// cliModelResolver owns one immutable provider snapshot for the primary model,
+// configured small model, explicit /model switches, and model listing.
+type cliModelResolver struct {
+	registry *llm.ProviderRegistry
+	resolver *llm.ModelResolver
+	smallErr error
+}
+
+type cliProviderCredential struct {
+	providerID string
+	endpoint   string
+	apiKey     string
+	optional   bool
+}
+
+// newCLIModelResolver builds the CLI's provider definitions before publishing
+// one resolver snapshot. Credentials remain in the scoped AuthChain and are
+// never stored in provider metadata or provider constructors.
+func newCLIModelResolver(rc *config.Config, primaryProviderName string, includeSmall bool) (*cliModelResolver, error) {
+	primaryProviderName = normalizeProviderName(primaryProviderName)
+	if primaryProviderName == "" {
+		return nil, fmt.Errorf("assemble: provider identity is required")
 	}
-	provider, err := resolveCLIProvider(providerName, baseURL, apiKey)
+	if isDisabledCLIProvider(primaryProviderName) {
+		return nil, unsupportedCLIProviderError(primaryProviderName)
+	}
+
+	primary := cliProviderCredential{providerID: primaryProviderName}
+	if rc != nil {
+		primary.endpoint = rc.Provider.BaseURL
+		primary.apiKey = rc.Provider.APIKey
+	}
+	bindings := []cliProviderCredential{primary}
+	var smallErr error
+	if includeSmall && rc != nil {
+		smallProviderName := normalizeProviderName(rc.SmallModel.Provider)
+		if smallProviderName == "" {
+			smallProviderName = primaryProviderName
+		}
+		endpoint, apiKey, err := resolveSmallModelProviderSettings(primaryProviderName, smallProviderName, rc)
+		if err != nil {
+			smallErr = err
+		} else if isDisabledCLIProvider(smallProviderName) {
+			smallErr = unsupportedCLIProviderError(smallProviderName)
+		} else {
+			bindings = append(bindings, cliProviderCredential{providerID: smallProviderName, endpoint: endpoint, apiKey: apiKey, optional: true})
+		}
+	}
+
+	registry := llm.NewProviderRegistry()
+	registered := map[string]struct{}{"eino": {}}
+	for _, binding := range bindings {
+		providerID := normalizeProviderName(binding.providerID)
+		if providerID == "" || isDisabledCLIProvider(providerID) {
+			continue
+		}
+		if _, exists := registered[providerID]; exists {
+			continue
+		}
+		provider, err := newCLICompatibleProvider(providerID, binding.endpoint)
+		if err != nil {
+			if binding.optional {
+				smallErr = err
+				continue
+			}
+			return nil, err
+		}
+		if err := registry.Register(provider); err != nil {
+			return nil, fmt.Errorf("assemble: register provider %q: %w", providerID, err)
+		}
+		registered[providerID] = struct{}{}
+	}
+
+	// Publish provider definitions first, then bind config keys to the resolver's
+	// canonical provider/protocol/origin. The AuthChain's other sources remain
+	// scope-aware; legacy provider-only sources stay inert.
+	resolver := registry.SnapshotResolver()
+	authChain := config.NewAuthChain()
+	configuredKeys := make(map[llm.CredentialRef]string)
+	for _, binding := range bindings {
+		if binding.apiKey == "" || isDisabledCLIProvider(binding.providerID) {
+			continue
+		}
+		if _, registeredProvider := registered[normalizeProviderName(binding.providerID)]; !registeredProvider {
+			continue
+		}
+		ref, err := resolver.CredentialRefFor(binding.providerID, binding.endpoint)
+		if err != nil {
+			if binding.optional {
+				smallErr = err
+				continue
+			}
+			return nil, fmt.Errorf("assemble: resolve configured credential scope for %q: %w", binding.providerID, err)
+		}
+		if prior, exists := configuredKeys[ref]; exists {
+			if prior != binding.apiKey {
+				conflictErr := fmt.Errorf("assemble: conflicting primary/small credentials configured for provider scope %q at %q", ref.ProviderID, ref.Origin)
+				if binding.optional {
+					smallErr = conflictErr
+					continue
+				}
+				return nil, conflictErr
+			}
+			continue
+		}
+		configuredKeys[ref] = binding.apiKey
+		authChain.WithScopedCLIFlag(config.AuthScope{
+			ProviderID: ref.ProviderID,
+			ProtocolID: string(ref.ProtocolID),
+			Origin:     ref.Origin,
+		}, binding.apiKey)
+	}
+	registry.SetCredentialResolver(authChain)
+	return &cliModelResolver{registry: registry, resolver: registry.SnapshotResolver(), smallErr: smallErr}, nil
+}
+
+func newCLICompatibleProvider(providerID, endpoint string) (llm.ModelProvider, error) {
+	if isDisabledCLIProvider(providerID) {
+		return nil, unsupportedCLIProviderError(providerID)
+	}
+	if providerID == "eino" {
+		return nil, fmt.Errorf("assemble: default provider %q is already registered", providerID)
+	}
+	if providerID != "openai" && strings.TrimSpace(endpoint) == "" {
+		return nil, fmt.Errorf("assemble: provider %q requires an explicit base_url for OpenAI-compatible routing", providerID)
+	}
+	options := []llm.ProviderOption{llm.WithProviderName(providerID)}
+	if strings.TrimSpace(endpoint) != "" {
+		options = append(options, llm.WithBaseURL(endpoint))
+	}
+	return llm.NewEinoProvider(options...), nil
+}
+
+func isDisabledCLIProvider(providerID string) bool {
+	switch normalizeProviderName(providerID) {
+	case "claude", "anthropic", "gemini", "google-gemini":
+		return true
+	default:
+		return false
+	}
+}
+
+func unsupportedCLIProviderError(providerID string) error {
+	return fmt.Errorf("assemble: %w: %s; native protocol support is unavailable in the CLI; use a custom provider name only for an OpenAI-compatible BaseURL", llm.ErrUnsupportedProviderProtocol, normalizeProviderName(providerID))
+}
+
+// buildModel resolves an llm.BaseChatModel from a fresh immutable snapshot for
+// direct callers. Assembly paths share one snapshot through cliModelResolver.
+func buildModel(ctx context.Context, rc *config.Config, providerName, modelName string) (llm.BaseChatModel, llm.ModelInfo, func(), error) {
+	modelResolver, err := newCLIModelResolver(rc, providerName, false)
 	if err != nil {
 		return nil, llm.ModelInfo{}, nil, err
 	}
-	m, cleanup, err := provider.Build(ctx, cfg)
+	return modelResolver.buildPrimary(ctx, rc, providerName, modelName)
+}
+
+func (r *cliModelResolver) buildPrimary(ctx context.Context, rc *config.Config, providerName, modelName string) (llm.BaseChatModel, llm.ModelInfo, func(), error) {
+	request := llm.ModelRequest{ProviderID: providerName, ModelID: modelName}
+	if rc != nil {
+		request.Endpoint = rc.Provider.BaseURL
+		request.Temperature = rc.Model.Temperature
+		request.MaxTokens = rc.Model.MaxTokens
+	}
+	return r.build(ctx, request)
+}
+
+func (r *cliModelResolver) buildSmall(ctx context.Context, rc *config.Config, primaryProviderName, providerName, modelName string) (llm.BaseChatModel, llm.ModelInfo, func(), error) {
+	if rc == nil {
+		return nil, llm.ModelInfo{}, nil, fmt.Errorf("assemble: buildSmallModel: config is nil")
+	}
+	if r.smallErr != nil {
+		return nil, llm.ModelInfo{}, nil, r.smallErr
+	}
+	providerName = normalizeProviderName(providerName)
+	if providerName == "" {
+		providerName = normalizeProviderName(primaryProviderName)
+	}
+	endpoint, _, err := resolveSmallModelProviderSettings(primaryProviderName, providerName, rc)
+	if err != nil {
+		return nil, llm.ModelInfo{}, nil, err
+	}
+	if providerName != "eino" && providerName != "openai" && strings.TrimSpace(endpoint) == "" {
+		return nil, llm.ModelInfo{}, nil, fmt.Errorf("assemble: provider %q requires an explicit base_url for OpenAI-compatible routing", providerName)
+	}
+	request := llm.ModelRequest{
+		ProviderID:  providerName,
+		ModelID:     modelName,
+		Endpoint:    endpoint,
+		Temperature: rc.SmallModel.Temperature,
+		MaxTokens:   rc.SmallModel.MaxTokens,
+	}
+	return r.build(ctx, request)
+}
+
+func (r *cliModelResolver) build(ctx context.Context, request llm.ModelRequest) (llm.BaseChatModel, llm.ModelInfo, func(), error) {
+	if isDisabledCLIProvider(request.ProviderID) {
+		return nil, llm.ModelInfo{}, nil, unsupportedCLIProviderError(request.ProviderID)
+	}
+	ref, err := r.resolver.CredentialRefFor(request.ProviderID, request.Endpoint)
+	if err != nil {
+		return nil, llm.ModelInfo{}, nil, err
+	}
+	request.Credential = ref
+	resolved, err := r.resolver.ResolveModel(ctx, request)
+	if err != nil {
+		return nil, llm.ModelInfo{}, nil, err
+	}
+	model, cleanup, err := resolved.Build(ctx)
 	if err != nil {
 		return nil, llm.ModelInfo{}, cleanup, err
 	}
-	return m, findModelInfo(provider.Models(), modelName), cleanup, nil
+	if resolved.Model.Known {
+		return model, resolved.Model.Info, cleanup, nil
+	}
+	return model, llm.ModelInfo{}, cleanup, nil
 }
 
-// listAvailableModels returns the models exposed by the provider identified by
-// providerName. It uses the same provider resolver as buildModel so listing
-// cannot advertise a protocol the CLI cannot safely construct.
+// listAvailableModels returns only models for a provider request accepted by
+// the same immutable resolver and exact-scope credential chain as generation.
 func listAvailableModels(rc *config.Config, providerName string) []llm.ModelInfo {
-	baseURL, apiKey := "", ""
-	if rc != nil {
-		baseURL = rc.Provider.BaseURL
-		apiKey = rc.Provider.APIKey
+	modelResolver, err := newCLIModelResolver(rc, providerName, false)
+	if err != nil {
+		return nil
 	}
-	provider, err := resolveCLIProvider(providerName, baseURL, apiKey)
+	return modelResolver.listAvailableModels(context.Background(), rc, providerName)
+}
+
+func (r *cliModelResolver) listAvailableModels(ctx context.Context, rc *config.Config, providerName string) []llm.ModelInfo {
+	request := llm.ModelRequest{ProviderID: providerName}
+	if rc != nil {
+		request.Endpoint = rc.Provider.BaseURL
+		request.ModelID = rc.Model.Name
+		request.Temperature = rc.Model.Temperature
+		request.MaxTokens = rc.Model.MaxTokens
+	}
+	if _, err := r.resolve(ctx, request); err != nil {
+		return nil
+	}
+	provider, err := r.registry.Get(providerName)
 	if err != nil {
 		return nil
 	}
 	return provider.Models()
+}
+
+func (r *cliModelResolver) resolve(ctx context.Context, request llm.ModelRequest) (llm.ResolvedModel, error) {
+	if isDisabledCLIProvider(request.ProviderID) {
+		return llm.ResolvedModel{}, unsupportedCLIProviderError(request.ProviderID)
+	}
+	ref, err := r.resolver.CredentialRefFor(request.ProviderID, request.Endpoint)
+	if err != nil {
+		return llm.ResolvedModel{}, err
+	}
+	request.Credential = ref
+	return r.resolver.ResolveModel(ctx, request)
 }
 
 // resolveCLIProvider resolves only provider protocols that the CLI can route
@@ -1522,37 +1748,6 @@ func listAvailableModels(rc *config.Config, providerName string) []llm.ModelInfo
 // endpoint, while API-key-only routing is accepted only for the named Eino or
 // OpenAI-compatible defaults. Native Claude/Gemini identities are unavailable
 // in the CLI until their request and tool-call contracts are complete.
-func resolveCLIProvider(providerName, baseURL, apiKey string) (llm.ModelProvider, error) {
-	normalizedName := normalizeProviderName(providerName)
-	switch normalizedName {
-	case "claude", "anthropic", "gemini":
-		return nil, fmt.Errorf("assemble: provider %q requires native protocol support, which is unavailable in the CLI; use a custom provider name only for an OpenAI-compatible BaseURL", providerName)
-	}
-
-	if baseURL != "" {
-		return llm.NewEinoProvider(
-			llm.WithProviderName(providerName),
-			llm.WithBaseURL(baseURL),
-			llm.WithAPIKey(apiKey),
-		), nil
-	}
-
-	if apiKey != "" {
-		switch normalizedName {
-		case "eino", "openai":
-			return llm.NewEinoProvider(
-				llm.WithProviderName(providerName),
-				llm.WithAPIKey(apiKey),
-			), nil
-		default:
-			return nil, fmt.Errorf("assemble: provider %q requires an explicit base_url for OpenAI-compatible credential routing", providerName)
-		}
-	}
-
-	reg := llm.NewProviderRegistry()
-	return reg.Get(providerName)
-}
-
 func normalizeProviderName(providerName string) string {
 	return strings.ToLower(strings.TrimSpace(providerName))
 }
@@ -1565,26 +1760,11 @@ func buildSmallModel(ctx context.Context, rc *config.Config, primaryProviderName
 	if rc == nil {
 		return nil, llm.ModelInfo{}, nil, fmt.Errorf("assemble: buildSmallModel: config is nil")
 	}
-	cfg := llm.ModelConfig{
-		Model:       modelName,
-		Temperature: rc.SmallModel.Temperature,
-		MaxTokens:   rc.SmallModel.MaxTokens,
-	}
-
-	baseURL, apiKey, err := resolveSmallModelProviderSettings(primaryProviderName, providerName, rc)
+	modelResolver, err := newCLIModelResolver(rc, primaryProviderName, true)
 	if err != nil {
 		return nil, llm.ModelInfo{}, nil, err
 	}
-
-	provider, err := resolveCLIProvider(providerName, baseURL, apiKey)
-	if err != nil {
-		return nil, llm.ModelInfo{}, nil, err
-	}
-	m, cleanup, err := provider.Build(ctx, cfg)
-	if err != nil {
-		return nil, llm.ModelInfo{}, cleanup, err
-	}
-	return m, findModelInfo(provider.Models(), modelName), cleanup, nil
+	return modelResolver.buildSmall(ctx, rc, primaryProviderName, providerName, modelName)
 }
 
 // resolveSmallModelProviderSettings prevents credentials from crossing a
