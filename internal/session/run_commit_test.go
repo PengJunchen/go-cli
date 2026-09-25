@@ -23,12 +23,18 @@ type preparedSessionWithoutWriter struct{ PreparedSession }
 func (preparedSessionWithoutWriter) DurableWriter() DurableSessionWriter { return nil }
 
 type sessionCommitTestAgent struct {
-	commit func(context.Context, core.RunCommitSink, core.RunCommitBinding, string) error
+	sink    core.RunCommitSink
+	binding core.RunCommitBinding
+	commit  func(context.Context, core.RunCommitSink, core.RunCommitBinding, string) error
 }
 
 func (*sessionCommitTestAgent) Name() string { return "session-commit-test-agent" }
 
 func (a *sessionCommitTestAgent) Run(ctx context.Context, _ core.Submission, _ ...core.EventStream) (core.Result, error) {
+	// These adapter tests call the sink's low-level methods directly. Bind it
+	// inside the callback so Harness does not treat the fixture as a durable
+	// production run that must acknowledge a terminal checkpoint.
+	ctx = core.WithRunCommit(ctx, a.sink, a.binding)
 	sink, binding, ok := core.RunCommitFromContext(ctx)
 	if !ok {
 		return core.Result{}, errTestRunCommitContextMissing
@@ -57,9 +63,11 @@ func requireSessionSinkCallbackDidNotAcknowledgeRun(t *testing.T, err error) {
 
 func runSessionCommitAgentWithContext(parent context.Context, t *testing.T, sink core.RunCommitSink, binding core.RunCommitBinding, commit func(context.Context, core.RunCommitSink, core.RunCommitBinding, string) error) error {
 	t.Helper()
-	harness := core.NewHarnessImpl(&sessionCommitTestAgent{commit: commit})
-	ctx := core.WithRunCommit(parent, sink, binding)
-	stream, err := harness.Submit(ctx, "test input")
+	if lease, ok := sink.(core.RunCommitRunLease); ok {
+		defer lease.CloseRunCommit()
+	}
+	harness := core.NewHarnessImpl(&sessionCommitTestAgent{sink: sink, binding: binding, commit: commit})
+	stream, err := harness.Submit(parent, "test input")
 	require.NoError(t, err)
 	for range stream.Events() {
 	}
