@@ -299,6 +299,37 @@ func withStreamFlag(body []byte) ([]byte, error) {
 	return out, nil
 }
 
+func updateClaudeRequestField(body []byte, name string, value json.RawMessage) ([]byte, error) {
+	var request map[string]json.RawMessage
+	if err := json.Unmarshal(body, &request); err != nil || request == nil {
+		return nil, errors.New("llm: decode Claude request JSON")
+	}
+	request[name] = value
+	updated, err := json.Marshal(request)
+	if err != nil {
+		return nil, errors.New("llm: marshal Claude request JSON")
+	}
+	return updated, nil
+}
+
+func injectClaudeThinking(data []byte, genOpts *GenerationOptions) ([]byte, error) {
+	config, ok := ThinkingFromOpts(genOpts)
+	if !ok || config.Level == ThinkingNone {
+		return data, nil
+	}
+	thinking := make(map[string]any)
+	ClaudeThinkingAdapter{}.Apply(thinking, config)
+	rawThinking, err := json.Marshal(thinking)
+	if err != nil {
+		return nil, errors.New("llm: marshal Claude thinking configuration")
+	}
+	return updateClaudeRequestField(data, "thinking", rawThinking)
+}
+
+func withClaudeStreamFlag(body []byte) ([]byte, error) {
+	return updateClaudeRequestField(body, "stream", json.RawMessage(`true`))
+}
+
 // injectThinking retrieves the ThinkingConfig stored by WithThinking on
 // genOpts, and if present with a non-None level, decodes the JSON body into a
 // map, applies the provider adapter, and re-encodes. When targetKey is
@@ -478,9 +509,10 @@ type claudeStreamMessage struct {
 
 // claudeStreamBlock describes a content block from content_block_start.
 type claudeStreamBlock struct {
-	Type string `json:"type"`           // "text" or "tool_use"
-	ID   string `json:"id,omitempty"`   // tool_use ID
-	Name string `json:"name,omitempty"` // tool name
+	Type  string          `json:"type"`           // "text" or "tool_use"
+	ID    string          `json:"id,omitempty"`   // tool_use ID
+	Name  string          `json:"name,omitempty"` // tool name
+	Input json.RawMessage `json:"input,omitempty"`
 }
 
 // claudeStreamDelta carries the nested delta from a content or message event.
@@ -513,7 +545,7 @@ func updateClaudeStopReason(current *string, raw json.RawMessage) error {
 	}
 	var reason string
 	if err := json.Unmarshal(raw, &reason); err != nil {
-		return fmt.Errorf("llm: decode Claude message_delta stop_reason: %w", err)
+		return errors.New("llm: decode Claude message_delta stop reason")
 	}
 	*current = reason
 	return nil
@@ -521,9 +553,10 @@ func updateClaudeStopReason(current *string, raw json.RawMessage) error {
 
 // claudeToolAccum accumulates a single tool call's fragments across chunks.
 type claudeToolAccum struct {
-	id   string
-	name string
-	args strings.Builder
+	id           string
+	name         string
+	initialInput json.RawMessage
+	args         strings.Builder
 }
 
 // streamClaude sends a streaming Anthropic messages request and parses the SSE
@@ -539,7 +572,7 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 		close(ch)
 		return ch, err
 	}
-	streamBody, err := withStreamFlag(body)
+	streamBody, err := withClaudeStreamFlag(body)
 	if err != nil {
 		close(ch)
 		return ch, err
@@ -565,6 +598,7 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 		tools := map[int]*claudeToolAccum{}
 		blocks := map[int]*claudeStreamBlockState{}
 		var toolIndices []int
+		toolIDs := make(map[string]struct{})
 		var stopReason string
 		var inputTokens, outputTokens int
 		var hasUsage bool
@@ -575,6 +609,7 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 		messageStopped := false
 		openBlockCount := 0
 		nextBlockIndex := 0
+		sawToolUse := false
 
 		for event := range events {
 			if event.Error != nil {
@@ -599,11 +634,11 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 			}
 			var ce claudeStreamEvent
 			if err := json.Unmarshal([]byte(event.Data), &ce); err != nil {
-				sendStreamError(ctx, ch, fmt.Errorf("llm: decode Claude stream event: %w", err))
+				sendStreamError(ctx, ch, errors.New("llm: decode Claude stream event"))
 				return
 			}
 			if event.Type == "" || event.Type != ce.Type {
-				sendStreamError(ctx, ch, fmt.Errorf("llm: Claude SSE event name %q does not match data type %q", event.Type, ce.Type))
+				sendStreamError(ctx, ch, errors.New("llm: Claude SSE event name does not match data type"))
 				return
 			}
 			if ce.Type == "error" {
@@ -650,6 +685,10 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 					sendStreamError(ctx, ch, errors.New("llm: Claude content block has an unsupported or missing type"))
 					return
 				}
+				if ce.ContentBlock.Type == "text" && sawToolUse {
+					sendStreamError(ctx, ch, errors.New("llm: Claude content blocks use an unsupported order"))
+					return
+				}
 				blocks[idx] = &claudeStreamBlockState{blockType: ce.ContentBlock.Type}
 				openBlockCount++
 				nextBlockIndex++
@@ -662,6 +701,11 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 						sendStreamError(ctx, ch, fmt.Errorf("llm: Claude tool block %d is missing an ID or name", idx))
 						return
 					}
+					if _, exists := toolIDs[ce.ContentBlock.ID]; exists {
+						sendStreamError(ctx, ch, errors.New("llm: Claude stream contains duplicate tool call IDs"))
+						return
+					}
+					toolIDs[ce.ContentBlock.ID] = struct{}{}
 					if _, ok := tools[idx]; ok {
 						sendStreamError(ctx, ch, fmt.Errorf("llm: Claude tool block %d was declared more than once", idx))
 						return
@@ -670,13 +714,27 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 					if ok {
 						nextBytes, ok = addBoundedStreamBytes(nextBytes, len(ce.ContentBlock.Name))
 					}
+					if ok && len(ce.ContentBlock.Input) > 0 {
+						nextBytes, ok = addBoundedStreamBytes(nextBytes, len(ce.ContentBlock.Input))
+					}
 					if !ok {
 						sendStreamError(ctx, ch, fmt.Errorf("llm: Claude tool payload exceeds %d-byte limit", GuardedStreamMaxBytes))
 						return
 					}
 					toolPayloadBytes = nextBytes
-					tools[idx] = &claudeToolAccum{id: ce.ContentBlock.ID, name: ce.ContentBlock.Name}
+					if len(ce.ContentBlock.Input) > 0 {
+						if _, err := decodeClaudeJSONObject(ce.ContentBlock.Input); err != nil {
+							sendStreamError(ctx, ch, errors.New("llm: Claude tool input must be a JSON object"))
+							return
+						}
+					}
+					tools[idx] = &claudeToolAccum{
+						id:           ce.ContentBlock.ID,
+						name:         ce.ContentBlock.Name,
+						initialInput: append(json.RawMessage(nil), ce.ContentBlock.Input...),
+					}
 					toolIndices = append(toolIndices, idx)
+					sawToolUse = true
 				}
 
 			case "content_block_delta":
@@ -701,6 +759,10 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 				case "text_delta":
 					if block.blockType != "text" {
 						sendStreamError(ctx, ch, errors.New("llm: Claude text delta does not match the active block type"))
+						return
+					}
+					if sawToolUse {
+						sendStreamError(ctx, ch, errors.New("llm: Claude content blocks use an unsupported order"))
 						return
 					}
 					for lowerIndex := 0; lowerIndex < *ce.Index; lowerIndex++ {
@@ -736,7 +798,7 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 					toolPayloadBytes = nextBytes
 					accum.args.WriteString(ce.Delta.PartialJSON)
 				default:
-					sendStreamError(ctx, ch, fmt.Errorf("llm: unsupported Claude delta type %q", ce.Delta.Type))
+					sendStreamError(ctx, ch, errors.New("llm: unsupported Claude content delta type"))
 					return
 				}
 
@@ -782,6 +844,10 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 
 			case "ping":
 				// These are valid non-terminal protocol events.
+
+			default:
+				sendStreamError(ctx, ch, errors.New("llm: unsupported Claude stream event type"))
+				return
 			}
 		}
 
@@ -793,42 +859,27 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 			sendStreamError(ctx, ch, errors.New("llm: Claude stream ended without message_stop"))
 			return
 		}
-		finishReason := stopReason
-		if stopReason == "max_tokens" {
-			finishReason = finishReasonLength
+		if (stopReason == "tool_use") != (len(toolIndices) > 0) {
+			sendStreamError(ctx, ch, errors.New("llm: Claude tool calls do not match the terminal stop reason"))
+			return
 		}
+		finishReason := claudeFinishReason(stopReason)
 		final := MessageChunk{Role: RoleAssistant, Final: true, FinishReason: finishReason}
 		if len(toolIndices) > 0 {
 			final.ToolCalls = make([]ToolCall, 0, len(toolIndices))
 			for _, idx := range toolIndices {
 				accum := tools[idx]
 				rawArgs := accum.args.String()
-				var args any
-				if rawArgs == "" {
-					if finishReason != finishReasonLength {
-						sendStreamError(ctx, ch, fmt.Errorf("llm: Claude tool call %q has no arguments", accum.id))
-						return
-					}
-					args = rawArgs
-				} else {
-					var object map[string]any
-					if err := json.Unmarshal([]byte(rawArgs), &object); err != nil {
-						if finishReason != finishReasonLength {
-							sendStreamError(ctx, ch, fmt.Errorf("llm: decode arguments for Claude tool call %q: %w", accum.id, err))
-							return
-						}
-						args = rawArgs
-					} else if object == nil {
-						if finishReason != finishReasonLength {
-							sendStreamError(ctx, ch, fmt.Errorf("llm: Claude tool call %q arguments must be a JSON object", accum.id))
-							return
-						}
-						args = rawArgs
-					} else {
-						args = object
-					}
+				input := json.RawMessage(rawArgs)
+				if len(input) == 0 {
+					input = accum.initialInput
 				}
-				final.ToolCalls = append(final.ToolCalls, ToolCall{ID: accum.id, Name: accum.name, Args: args})
+				decodedArgs, decodeErr := decodeClaudeJSONObject(input)
+				if decodeErr != nil {
+					sendStreamError(ctx, ch, errors.New("llm: Claude tool input must be a complete JSON object"))
+					return
+				}
+				final.ToolCalls = append(final.ToolCalls, ToolCall{ID: accum.id, Name: accum.name, Args: decodedArgs})
 			}
 		}
 		if hasUsage {
@@ -1330,6 +1381,7 @@ type claudeRequest struct {
 	MaxTokens int                 `json:"max_tokens"`
 	System    string              `json:"system,omitempty"`
 	Messages  []claudeUserMessage `json:"messages"`
+	Tools     []claudeToolDef     `json:"tools,omitempty"`
 }
 
 // claudeUserMessage is a single user/assistant turn in the Anthropic protocol.
@@ -1338,11 +1390,22 @@ type claudeUserMessage struct {
 	Content []claudeBlock `json:"content"`
 }
 
-// claudeBlock is a single content item (text or image).
+// claudeBlock is a single content item in the Claude Messages API.
 type claudeBlock struct {
-	Type   string             `json:"type"`
-	Text   string             `json:"text,omitempty"`
-	Source *claudeImageSource `json:"source,omitempty"` // when Type == "image"
+	Type      string             `json:"type"`
+	Text      string             `json:"text,omitempty"`
+	Source    *claudeImageSource `json:"source,omitempty"` // when Type == "image"
+	ID        string             `json:"id,omitempty"`
+	Name      string             `json:"name,omitempty"`
+	Input     json.RawMessage    `json:"input,omitempty"`
+	ToolUseID string             `json:"tool_use_id,omitempty"`
+	Content   string             `json:"content,omitempty"`
+}
+
+type claudeToolDef struct {
+	Name        string          `json:"name"`
+	Description string          `json:"description,omitempty"`
+	InputSchema json.RawMessage `json:"input_schema"`
 }
 
 // claudeImageSource is the Anthropic image source: a base64-encoded blob with
@@ -1355,9 +1418,10 @@ type claudeImageSource struct {
 
 // claudeResponse is the Anthropic messages response body.
 type claudeResponse struct {
+	Role       string        `json:"role"`
 	Content    []claudeBlock `json:"content"`
 	Usage      *claudeUsage  `json:"usage,omitempty"`
-	StopReason string        `json:"stop_reason,omitempty"`
+	StopReason string        `json:"stop_reason"`
 }
 
 // claudeUsage reports token consumption.
@@ -1366,13 +1430,15 @@ type claudeUsage struct {
 	OutputTokens int `json:"output_tokens"`
 }
 
-// buildClaudeBlocks converts a Message into a slice of claudeBlock values.
-// When ContentBlocks is non-nil, it maps text and image blocks to the Anthropic
-// format (image blocks require a base64 data URI). Otherwise it falls back to a
-// single text block built from Content.
-func buildClaudeBlocks(msg Message) []claudeBlock {
+// buildClaudeBlocks converts supported text and base64 image content into
+// Anthropic content blocks. Unsupported blocks return an error instead of
+// silently changing the conversation sent to the provider.
+func buildClaudeBlocks(msg Message) ([]claudeBlock, error) {
 	if msg.ContentBlocks == nil {
-		return []claudeBlock{{Type: "text", Text: msg.Content}}
+		if msg.Content == "" {
+			return nil, nil
+		}
+		return []claudeBlock{{Type: "text", Text: msg.Content}}, nil
 	}
 	blocks := make([]claudeBlock, 0, len(msg.ContentBlocks))
 	for _, cb := range msg.ContentBlocks {
@@ -1381,11 +1447,11 @@ func buildClaudeBlocks(msg Message) []claudeBlock {
 			blocks = append(blocks, claudeBlock{Type: "text", Text: cb.Text})
 		case "image_url":
 			if cb.ImageURL == nil {
-				continue
+				return nil, errors.New("llm: Claude image content is missing its source")
 			}
 			mediaType, data, ok := parseDataURI(cb.ImageURL.URL)
 			if !ok {
-				continue // Claude requires base64 data URIs
+				return nil, errors.New("llm: Claude images require a base64 data URI")
 			}
 			blocks = append(blocks, claudeBlock{
 				Type: "image",
@@ -1395,9 +1461,64 @@ func buildClaudeBlocks(msg Message) []claudeBlock {
 					Data:      data,
 				},
 			})
+		default:
+			return nil, errors.New("llm: Claude content contains an unsupported block type")
 		}
 	}
-	return blocks
+	return blocks, nil
+}
+
+func marshalClaudeJSONObject(value any, nilAsEmptyObject bool, description string) (json.RawMessage, error) {
+	if value == nil && nilAsEmptyObject {
+		return json.RawMessage(`{}`), nil
+	}
+	raw, err := json.Marshal(value)
+	if err != nil {
+		return nil, fmt.Errorf("llm: %s must be a JSON object", description)
+	}
+	var object map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &object); err != nil || object == nil {
+		return nil, fmt.Errorf("llm: %s must be a JSON object", description)
+	}
+	return json.RawMessage(raw), nil
+}
+
+func decodeClaudeJSONObject(raw json.RawMessage) (map[string]any, error) {
+	if len(raw) == 0 {
+		return nil, errors.New("llm: Claude tool input is missing")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	var object map[string]any
+	if err := decoder.Decode(&object); err != nil || object == nil {
+		return nil, errors.New("llm: Claude tool input must be a JSON object")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return nil, errors.New("llm: Claude tool input must be a single JSON object")
+	}
+	return object, nil
+}
+
+func validClaudeToolName(name string) bool {
+	if len(name) == 0 || len(name) > 128 {
+		return false
+	}
+	for _, char := range name {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') || char == '_' || char == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func claudeFinishReason(stopReason string) string {
+	if stopReason == "max_tokens" {
+		return finishReasonLength
+	}
+	return stopReason
 }
 
 // encodeClaudeRequest marshals a conversation into the Anthropic message body.
@@ -1417,6 +1538,9 @@ func encodeClaudeRequest(cfg ModelConfig, model string, msgs []Message, opts []O
 	conv := make([]Message, 0, len(msgs))
 	for _, msg := range msgs {
 		if msg.Role == RoleSystem {
+			if len(msg.ToolCalls) != 0 || msg.ToolCallID != "" || msg.Name != "" || msg.ContentBlocks != nil {
+				return nil, errors.New("llm: invalid Claude system message fields")
+			}
 			// Anthropic takes system as a top-level field; concatenate any
 			// system messages there.
 			if system != "" {
@@ -1428,11 +1552,121 @@ func encodeClaudeRequest(cfg ModelConfig, model string, msgs []Message, opts []O
 		conv = append(conv, msg)
 	}
 
+	toolDefs := make([]claudeToolDef, 0, len(genOpts.Tools))
+	toolNames := make(map[string]struct{}, len(genOpts.Tools))
+	for _, def := range genOpts.Tools {
+		if !validClaudeToolName(def.Name) {
+			return nil, errors.New("llm: Claude tool name is invalid")
+		}
+		if _, exists := toolNames[def.Name]; exists {
+			return nil, errors.New("llm: Claude tool names must be unique")
+		}
+		toolNames[def.Name] = struct{}{}
+		schema := def.Parameters
+		if schema == nil {
+			schema = map[string]any{"type": "object", "properties": map[string]any{}}
+		}
+		inputSchema, err := marshalClaudeJSONObject(schema, false, "Claude tool schema")
+		if err != nil {
+			return nil, err
+		}
+		toolDefs = append(toolDefs, claudeToolDef{
+			Name:        def.Name,
+			Description: def.Description,
+			InputSchema: inputSchema,
+		})
+	}
+
 	reqMsgs := make([]claudeUserMessage, 0, len(conv))
-	for _, msg := range conv {
-		role := string(msg.Role)
-		blocks := buildClaudeBlocks(msg)
-		reqMsgs = append(reqMsgs, claudeUserMessage{Role: role, Content: blocks})
+	for i := 0; i < len(conv); {
+		msg := conv[i]
+		switch msg.Role {
+		case RoleUser:
+			if len(msg.ToolCalls) != 0 || msg.ToolCallID != "" || msg.Name != "" {
+				return nil, errors.New("llm: invalid Claude user message fields")
+			}
+			blocks, err := buildClaudeBlocks(msg)
+			if err != nil {
+				return nil, err
+			}
+			reqMsgs = append(reqMsgs, claudeUserMessage{Role: string(RoleUser), Content: blocks})
+			i++
+
+		case RoleAssistant:
+			if msg.ToolCallID != "" || msg.Name != "" {
+				return nil, errors.New("llm: invalid Claude assistant message fields")
+			}
+			blocks, err := buildClaudeBlocks(msg)
+			if err != nil {
+				return nil, err
+			}
+			if len(msg.ToolCalls) == 0 {
+				reqMsgs = append(reqMsgs, claudeUserMessage{Role: string(RoleAssistant), Content: blocks})
+				i++
+				continue
+			}
+
+			callIDs := make(map[string]int, len(msg.ToolCalls))
+			for callIndex, call := range msg.ToolCalls {
+				if call.ID == "" || call.Name == "" {
+					return nil, errors.New("llm: Claude tool call is missing its ID or name")
+				}
+				if _, exists := callIDs[call.ID]; exists {
+					return nil, errors.New("llm: Claude tool call IDs must be unique")
+				}
+				args, err := marshalClaudeJSONObject(call.Args, true, "Claude tool-call arguments")
+				if err != nil {
+					return nil, err
+				}
+				callIDs[call.ID] = callIndex
+				blocks = append(blocks, claudeBlock{Type: "tool_use", ID: call.ID, Name: call.Name, Input: args})
+			}
+			reqMsgs = append(reqMsgs, claudeUserMessage{Role: string(RoleAssistant), Content: blocks})
+
+			resultCount := len(msg.ToolCalls)
+			if resultCount > len(conv)-i-1 {
+				return nil, errors.New("llm: Claude assistant tool calls have incomplete results")
+			}
+			resultsByID := make(map[string]Message, resultCount)
+			for resultIndex := i + 1; resultIndex <= i+resultCount; resultIndex++ {
+				result := conv[resultIndex]
+				if result.Role != RoleTool || result.ToolCallID == "" || len(result.ToolCalls) != 0 || result.ContentBlocks != nil {
+					return nil, errors.New("llm: Claude tool results must immediately follow their assistant tool calls")
+				}
+				callIndex, exists := callIDs[result.ToolCallID]
+				if !exists {
+					return nil, errors.New("llm: Claude tool result has an unknown tool call ID")
+				}
+				if _, exists := resultsByID[result.ToolCallID]; exists {
+					return nil, errors.New("llm: Claude tool result IDs must be unique")
+				}
+				call := msg.ToolCalls[callIndex]
+				if result.Name != "" && result.Name != call.Name {
+					return nil, errors.New("llm: Claude tool result name does not match its tool call")
+				}
+				resultsByID[result.ToolCallID] = result
+			}
+			toolResultBlocks := make([]claudeBlock, 0, resultCount)
+			for _, call := range msg.ToolCalls {
+				result, exists := resultsByID[call.ID]
+				if !exists {
+					return nil, errors.New("llm: Claude assistant tool calls have incomplete results")
+				}
+				toolResultBlocks = append(toolResultBlocks, claudeBlock{
+					Type:      "tool_result",
+					ToolUseID: call.ID,
+					Content:   result.Content,
+				})
+			}
+			reqMsgs = append(reqMsgs, claudeUserMessage{Role: string(RoleUser), Content: toolResultBlocks})
+			i += resultCount + 1
+
+		case RoleTool:
+			return nil, errors.New("llm: Claude tool result has no preceding assistant tool call")
+
+		default:
+			return nil, errors.New("llm: unsupported Claude message role")
+		}
 	}
 
 	req := claudeRequest{
@@ -1440,12 +1674,13 @@ func encodeClaudeRequest(cfg ModelConfig, model string, msgs []Message, opts []O
 		MaxTokens: maxTokens,
 		System:    system,
 		Messages:  reqMsgs,
+		Tools:     toolDefs,
 	}
 	data, err := json.Marshal(req)
 	if err != nil {
-		return nil, fmt.Errorf("llm: marshal request: %w", err)
+		return nil, errors.New("llm: marshal Claude request")
 	}
-	return injectThinking(data, genOpts, ClaudeThinkingAdapter{}, "")
+	return injectClaudeThinking(data, genOpts)
 }
 
 // decodeClaudeResponse parses an Anthropic messages response, joining any text
@@ -1453,16 +1688,48 @@ func encodeClaudeRequest(cfg ModelConfig, model string, msgs []Message, opts []O
 func decodeClaudeResponse(body []byte) (*Message, error) {
 	var parsed claudeResponse
 	if err := json.Unmarshal(body, &parsed); err != nil {
-		return nil, fmt.Errorf("llm: decode response: %w", err)
+		return nil, errors.New("llm: decode Claude response JSON")
+	}
+	if parsed.Role != string(RoleAssistant) {
+		return nil, errors.New("llm: Claude response role must be assistant")
+	}
+	if parsed.StopReason == "" {
+		return nil, errors.New("llm: Claude response is missing a terminal stop reason")
 	}
 	var sb strings.Builder
+	toolCalls := make([]ToolCall, 0)
+	toolIDs := make(map[string]struct{})
+	sawToolUse := false
 	for _, block := range parsed.Content {
-		if block.Type == "text" {
+		switch block.Type {
+		case "text":
+			if sawToolUse {
+				return nil, errors.New("llm: Claude response content blocks use an unsupported order")
+			}
 			sb.WriteString(block.Text)
+		case "tool_use":
+			sawToolUse = true
+			if block.ID == "" || block.Name == "" {
+				return nil, errors.New("llm: Claude tool call is missing its ID or name")
+			}
+			if _, exists := toolIDs[block.ID]; exists {
+				return nil, errors.New("llm: Claude response contains duplicate tool call IDs")
+			}
+			args, err := decodeClaudeJSONObject(block.Input)
+			if err != nil {
+				return nil, errors.New("llm: Claude tool input must be a JSON object")
+			}
+			toolIDs[block.ID] = struct{}{}
+			toolCalls = append(toolCalls, ToolCall{ID: block.ID, Name: block.Name, Args: args})
+		default:
+			return nil, errors.New("llm: Claude response contains an unsupported content block")
 		}
 	}
-	msg := &Message{Role: RoleAssistant, Content: sb.String()}
-	msg.FinishReason = parsed.StopReason
+	if (parsed.StopReason == "tool_use") != (len(toolCalls) > 0) {
+		return nil, errors.New("llm: Claude tool calls do not match the terminal stop reason")
+	}
+	msg := &Message{Role: RoleAssistant, Content: sb.String(), ToolCalls: toolCalls}
+	msg.FinishReason = claudeFinishReason(parsed.StopReason)
 	if parsed.Usage != nil {
 		msg.Usage = &Usage{
 			InputTokens:  parsed.Usage.InputTokens,
