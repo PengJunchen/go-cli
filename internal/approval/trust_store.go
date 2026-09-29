@@ -22,6 +22,18 @@ type TrustEntry struct {
 	// ExpiresAt is the RFC3339 timestamp (empty meaning never) after which the
 	// trust entry must be treated as untrusted.
 	ExpiresAt string `json:"expires_at,omitempty"`
+	// ManifestVersion is zero for legacy path-only trust entries. Such entries
+	// remain readable but cannot authorize project executable sources.
+	ManifestVersion int `json:"manifest_version,omitempty"`
+	// CanonicalRoot is the canonical workspace root bound to the source manifest.
+	CanonicalRoot string `json:"canonical_root,omitempty"`
+	// ProjectSources records every captured file source, including absent files.
+	ProjectSources []ProjectSourceRecord `json:"project_sources,omitempty"`
+	// ProjectSourceDirectories records each tracked directory and its sorted
+	// captured membership, including absent directories.
+	ProjectSourceDirectories []ProjectSourceDirectoryRecord `json:"project_source_directories,omitempty"`
+	// ManifestDigest is the digest of the complete source and membership set.
+	ManifestDigest string `json:"manifest_digest,omitempty"`
 }
 
 // TrustStore persists project trust entries keyed by canonical path. It is the
@@ -68,7 +80,7 @@ func (s *FileTrustStore) Save(entries map[string]TrustEntry) error {
 	// Defensive copy so json.Marshal does not race with caller mutations.
 	copied := make(map[string]TrustEntry, len(entries))
 	for k, v := range entries {
-		copied[k] = v
+		copied[k] = cloneTrustEntry(v)
 	}
 	return s.writeLocked(copied)
 }
@@ -82,7 +94,7 @@ func (s *FileTrustStore) Add(path string, entry TrustEntry) error {
 	if err != nil {
 		return err
 	}
-	entries[path] = entry
+	entries[path] = cloneTrustEntry(entry)
 	return s.writeLocked(entries)
 }
 
@@ -149,7 +161,7 @@ func (s *InMemoryTrustStore) Load() (map[string]TrustEntry, error) {
 	defer s.mu.RUnlock()
 	entries := make(map[string]TrustEntry, len(s.entries))
 	for path, entry := range s.entries {
-		entries[path] = entry
+		entries[path] = cloneTrustEntry(entry)
 	}
 	return entries, nil
 }
@@ -160,7 +172,7 @@ func (s *InMemoryTrustStore) Save(entries map[string]TrustEntry) error {
 	defer s.mu.Unlock()
 	s.entries = make(map[string]TrustEntry, len(entries))
 	for k, v := range entries {
-		s.entries[k] = v
+		s.entries[k] = cloneTrustEntry(v)
 	}
 	return nil
 }
@@ -169,8 +181,14 @@ func (s *InMemoryTrustStore) Save(entries map[string]TrustEntry) error {
 func (s *InMemoryTrustStore) Add(path string, entry TrustEntry) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.entries[path] = entry
+	s.entries[path] = cloneTrustEntry(entry)
 	return nil
+}
+
+func cloneTrustEntry(entry TrustEntry) TrustEntry {
+	entry.ProjectSources = append([]ProjectSourceRecord(nil), entry.ProjectSources...)
+	entry.ProjectSourceDirectories = cloneDirectoryRecords(entry.ProjectSourceDirectories)
+	return entry
 }
 
 // Remove deletes the entry under path (no-op when absent).

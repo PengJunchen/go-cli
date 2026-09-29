@@ -1,6 +1,10 @@
 package config
 
-import "time"
+import (
+	"time"
+
+	"github.com/pengjunchen/go-cli/internal/approval"
+)
 
 // DefaultLLMMaxTokens is the final model-token fallback when neither the
 // selected model nor its matching provider configuration sets a value.
@@ -36,9 +40,17 @@ type Config struct {
 	ModelRegistry ModelRegistryConfig `json:"model_registry"`
 	History       HistoryConfig       `json:"history"`
 	TUI           TUIConfig           `json:"tui" yaml:"tui"`
+	// ProjectSourceTrustStatus is a presentation value only. It is not proof
+	// that project configuration or other executable sources may be consumed.
+	ProjectSourceTrustStatus ProjectSourceTrustStatus `json:"project_source_trust_status,omitempty"`
 
-	verbose               bool
-	samplingPresenceKnown bool
+	verbose                bool
+	samplingPresenceKnown  bool
+	projectSourceSnapshot  *approval.ProjectSourceSnapshot
+	verifiedProjectSources *approval.VerifiedProjectSources
+	projectOverlay         *Config
+	userGlobalConfig       *Config
+	mcpServersProvenance   MCPServersProvenance
 }
 
 // Verbose returns whether verbose output is enabled.
