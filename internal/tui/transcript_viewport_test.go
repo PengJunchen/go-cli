@@ -298,6 +298,42 @@ func TestTranscriptViewportSetRowsReusesMetadataAndRejectsBadKeys(t *testing.T) 
 	assert.Equal(t, before.lines, v.Window().lines, "invalid replacement is atomic")
 }
 
+func TestTranscriptViewportUpdateRowReindexesOnlyChangedRow(t *testing.T) {
+	rows := makeTranscriptViewportRows(10_000)
+	rows[4_999].text = "selected anchor"
+	v := newTranscriptViewport(16, 3)
+	require.NoError(t, v.SetRows(rows, "loaded session s, branch main"))
+	hit, found := v.Search("selected anchor", "")
+	require.True(t, found)
+	require.Equal(t, "entry-04999", hit)
+	require.True(t, v.Select("entry-04999"))
+	v.ScrollLines(-1_000)
+	anchor := v.Anchor()
+	_ = v.Window()
+	before := viewportCacheVersions(v.cacheKeys)
+
+	updated := transcriptViewportRow{key: "entry-04999", text: strings.TrimSuffix(strings.Repeat("changed\n", 50), "\n"), revision: 2}
+	require.NoError(t, v.updateRow(updated))
+	assert.Equal(t, anchor.rowKey, v.Anchor().rowKey)
+	assert.Equal(t, anchor.sourceOffset, v.Anchor().sourceOffset)
+	assert.Equal(t, "entry-04999", v.SelectedKey())
+	assert.Equal(t, "entry-04999", v.SearchHitKey())
+	assert.Equal(t, "loaded session s, branch main", v.Window().loadedScope)
+	assert.Equal(t, 50, v.rowMetadata[v.indexByKey[updated.key]].lineCount)
+	assert.Equal(t, 10_049, v.totalLines, "the indexed total includes only the changed row's line-count delta")
+	after := viewportCacheVersions(v.cacheKeys)
+	for key, version := range before {
+		if key == updated.key {
+			assert.NotEqual(t, version, after[key], "the visible updated row gets a new cache version")
+			continue
+		}
+		assert.Equal(t, version, after[key], "unmodified visible rows retain cached fragments")
+	}
+
+	require.ErrorIs(t, v.updateRow(transcriptViewportRow{key: updated.key, text: "stale", revision: 1}), errTranscriptViewportStaleRevision)
+	assert.Equal(t, updated.text, v.rows[v.indexByKey[updated.key]].text, "a stale revision cannot mutate the row")
+}
+
 func TestTranscriptViewportEmptyAndCellSafeRows(t *testing.T) {
 	v := newTranscriptViewport(5, 3)
 	require.NoError(t, v.SetRows(nil, "loaded empty snapshot"))

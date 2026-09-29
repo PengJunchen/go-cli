@@ -26,6 +26,32 @@ func TestEventStreamBoundedBuffering(t *testing.T) {
 	assert.Len(t, got, 3)
 }
 
+func TestEventStreamCopiesOccurrenceCoordinatePointers(t *testing.T) {
+	stream := NewEventStream(1)
+	index := uint64(4)
+	ordinal := uint64(2)
+	truncated := true
+	require.NoError(t, stream.Send(AgentEvent{
+		Kind:                       "tool_result",
+		RunID:                      "run-1",
+		CanonicalTranscriptIndex:   &index,
+		AssistantTranscriptOrdinal: &ordinal,
+		SourceTruncated:            &truncated,
+	}))
+	index = 9
+	ordinal = 8
+	truncated = false
+
+	event, ok := <-stream.Events()
+	require.True(t, ok)
+	require.NotNil(t, event.CanonicalTranscriptIndex)
+	require.NotNil(t, event.AssistantTranscriptOrdinal)
+	require.NotNil(t, event.SourceTruncated)
+	assert.Equal(t, uint64(4), *event.CanonicalTranscriptIndex)
+	assert.Equal(t, uint64(2), *event.AssistantTranscriptOrdinal)
+	assert.True(t, *event.SourceTruncated)
+}
+
 func TestEventStreamZeroCapacityWithConsumer(t *testing.T) {
 	// A zero-capacity (synchronous) stream requires a consumer for Send to
 	// complete. Drive a reader concurrently and verify the event lands and the

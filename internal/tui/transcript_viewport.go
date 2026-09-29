@@ -17,6 +17,8 @@ var (
 	errTranscriptViewportEmptyKey      = errors.New("transcript viewport row key is empty")
 	errTranscriptViewportDuplicateKey  = errors.New("transcript viewport row key is duplicated")
 	errTranscriptViewportScopeRequired = errors.New("transcript viewport loaded scope is required")
+	errTranscriptViewportStaleRevision = errors.New("transcript viewport row revision is stale")
+	errTranscriptViewportMissingRow    = errors.New("transcript viewport row key is not loaded")
 )
 
 // transcriptViewportRow is an immutable presentation input. Key is only a
@@ -80,7 +82,7 @@ type transcriptViewport struct {
 	rows        []transcriptViewportRow
 	indexByKey  map[string]int
 	rowMetadata []*transcriptViewportRowMetadata
-	linePrefix  []int
+	lineTree    []int
 	totalLines  int
 
 	anchor       transcriptViewportAnchor
@@ -156,7 +158,7 @@ func (v *transcriptViewport) SetRows(rows []transcriptViewportRow, loadedScope s
 	v.indexByKey = newIndex
 	v.rowMetadata = newMetadata
 	v.loadedScope = loadedScope
-	v.rebuildLinePrefix()
+	v.rebuildLineIndex()
 	if _, ok := v.indexByKey[v.selectedKey]; !ok {
 		v.selectedKey = ""
 	}
@@ -190,7 +192,7 @@ func (v *transcriptViewport) SetRows(rows []transcriptViewportRow, loadedScope s
 			if nearest >= len(v.rows) {
 				nearest = len(v.rows) - 1
 			}
-			v.setAnchorAtLine(v.linePrefix[nearest])
+			v.setAnchorAtLine(v.linePrefix(nearest))
 		}
 	default:
 		v.setAnchorAtLine(0)
@@ -225,16 +227,73 @@ func (v *transcriptViewport) newTranscriptViewportRowMetadata(row transcriptView
 	}
 }
 
-func (v *transcriptViewport) rebuildLinePrefix() {
-	v.linePrefix = make([]int, len(v.rowMetadata)+1)
-	for i, meta := range v.rowMetadata {
+func (v *transcriptViewport) updateRow(row transcriptViewportRow) error {
+	index, ok := v.indexByKey[row.key]
+	if !ok {
+		if row.key == "" {
+			return errTranscriptViewportEmptyKey
+		}
+		return fmt.Errorf("%w: %q", errTranscriptViewportMissingRow, row.key)
+	}
+	previous := v.rows[index]
+	if row.revision < previous.revision || (row.revision == previous.revision && row != previous) {
+		return fmt.Errorf("%w: %q", errTranscriptViewportStaleRevision, row.key)
+	}
+	if row == previous {
+		return nil
+	}
+
+	oldAnchor := v.anchor
+	oldFollowTail := v.followTail
+	oldLineCount := v.rowMetadata[index].lineCount
+	v.rows[index] = row
+	v.rowMetadata[index] = v.newTranscriptViewportRowMetadata(row, v.width)
+	newLineCount := v.rowMetadata[index].lineCount
+	v.addLineCount(index, newLineCount-oldLineCount)
+	v.totalLines = v.linePrefix(len(v.rowMetadata))
+
+	if oldFollowTail && v.width > 0 && v.height > 0 {
+		v.setAnchorAtLine(v.maximumStartLine())
+	} else if oldAnchor.rowKey == row.key {
+		v.restoreAnchor(index, oldAnchor.sourceOffset)
+	} else if v.totalLines == 0 {
+		v.setAnchorAtLine(0)
+	}
+	v.markRenderCacheDirty()
+	return nil
+}
+
+func (v *transcriptViewport) rebuildLineIndex() {
+	v.lineTree = make([]int, len(v.rowMetadata)+1)
+	for index, meta := range v.rowMetadata {
 		count := meta.lineCount
 		if count < 1 {
 			count = 1
 		}
-		v.linePrefix[i+1] = v.linePrefix[i] + count
+		v.addLineCount(index, count)
 	}
-	v.totalLines = v.linePrefix[len(v.linePrefix)-1]
+	v.totalLines = v.linePrefix(len(v.rowMetadata))
+}
+
+func (v *transcriptViewport) addLineCount(index, delta int) {
+	for position := index + 1; position < len(v.lineTree); position += position & -position {
+		v.lineTree[position] += delta
+	}
+}
+
+// linePrefix returns the number of rendered lines in rows before rowCount.
+func (v *transcriptViewport) linePrefix(rowCount int) int {
+	if rowCount > len(v.rowMetadata) {
+		rowCount = len(v.rowMetadata)
+	}
+	if rowCount < 0 {
+		rowCount = 0
+	}
+	lines := 0
+	for position := rowCount; position > 0; position -= position & -position {
+		lines += v.lineTree[position]
+	}
+	return lines
 }
 
 // Resize reflows keyed source rows at the supplied cell dimensions. A zero or
@@ -252,7 +311,7 @@ func (v *transcriptViewport) Resize(width, height int) {
 		for i, row := range v.rows {
 			v.rowMetadata[i] = v.newTranscriptViewportRowMetadata(row, width)
 		}
-		v.rebuildLinePrefix()
+		v.rebuildLineIndex()
 	}
 	if width <= 0 || height <= 0 {
 		if widthChanged && width > 0 && !v.followTail && oldAnchor.rowKey != "" {
@@ -362,8 +421,8 @@ func (v *transcriptViewport) ensureRowVisible(index int) {
 	if v.height <= v.totalLines-start {
 		end = start + v.height
 	}
-	rowStart := v.linePrefix[index]
-	rowEnd := v.linePrefix[index+1]
+	rowStart := v.linePrefix(index)
+	rowEnd := v.linePrefix(index + 1)
 	if rowStart < end && rowEnd > start {
 		return
 	}
@@ -446,14 +505,15 @@ func (v *transcriptViewport) renderRange(start, end int) {
 	}
 
 	index := v.rowIndexForLine(start)
-	for index < len(v.rows) && v.linePrefix[index] < end {
+	for index < len(v.rows) && v.linePrefix(index) < end {
 		row := v.rows[index]
 		meta := v.rowMetadata[index]
-		localStart := start - v.linePrefix[index]
+		rowStart := v.linePrefix(index)
+		localStart := start - rowStart
 		if localStart < 0 {
 			localStart = 0
 		}
-		localEnd := end - v.linePrefix[index]
+		localEnd := end - rowStart
 		if localEnd > meta.lineCount {
 			localEnd = meta.lineCount
 		}
@@ -519,7 +579,24 @@ func (v *transcriptViewport) rowIndexForLine(line int) int {
 	if line >= v.totalLines {
 		line = v.totalLines - 1
 	}
-	return sort.Search(len(v.rows), func(i int) bool { return v.linePrefix[i+1] > line })
+	index := 0
+	lines := 0
+	step := 1
+	for step<<1 < len(v.lineTree) {
+		step <<= 1
+	}
+	for step > 0 {
+		next := index + step
+		if next < len(v.lineTree) && lines+v.lineTree[next] <= line {
+			index = next
+			lines += v.lineTree[next]
+		}
+		step >>= 1
+	}
+	if index >= len(v.rows) {
+		return len(v.rows) - 1
+	}
+	return index
 }
 
 func (v *transcriptViewport) setAnchorAtLine(line int) {
@@ -535,7 +612,7 @@ func (v *transcriptViewport) setAnchorAtLine(line int) {
 		line = v.totalLines - 1
 	}
 	index := v.rowIndexForLine(line)
-	localLine := line - v.linePrefix[index]
+	localLine := line - v.linePrefix(index)
 	offsets := transcriptViewportSourceLineOffsets(v.rows[index].text, v.width)
 	if localLine >= len(offsets) {
 		localLine = len(offsets) - 1
@@ -580,7 +657,7 @@ func (v *transcriptViewport) currentStartLine() int {
 	if localLine >= v.rowMetadata[index].lineCount {
 		localLine = v.rowMetadata[index].lineCount - 1
 	}
-	return v.linePrefix[index] + localLine
+	return v.linePrefix(index) + localLine
 }
 
 func (v *transcriptViewport) maximumStartLine() int {

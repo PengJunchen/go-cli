@@ -32,6 +32,38 @@ func TestEventBus_PublishSubscribe(t *testing.T) {
 	assert.Equal(t, "done", got[1].Kind)
 }
 
+func TestEventBusCopiesOccurrenceCoordinatePointers(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	bus := NewMemoryEventBus()
+	defer bus.Close()
+	ch := bus.Subscribe(ctx)
+
+	index := uint64(4)
+	ordinal := uint64(2)
+	truncated := true
+	bus.Publish(AgentEvent{
+		Kind:                       "tool_result",
+		RunID:                      "run-1",
+		CanonicalTranscriptIndex:   &index,
+		AssistantTranscriptOrdinal: &ordinal,
+		SourceTruncated:            &truncated,
+	})
+	index = 9
+	ordinal = 8
+	truncated = false
+
+	event := receiveEvents(t, ch, 1, time.Second)[0]
+	require.Equal(t, "run-1", event.RunID)
+	require.NotNil(t, event.CanonicalTranscriptIndex)
+	require.NotNil(t, event.AssistantTranscriptOrdinal)
+	require.NotNil(t, event.SourceTruncated)
+	assert.Equal(t, uint64(4), *event.CanonicalTranscriptIndex)
+	assert.Equal(t, uint64(2), *event.AssistantTranscriptOrdinal)
+	assert.True(t, *event.SourceTruncated)
+}
+
 func TestEventBus_MultipleSubscribers(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 

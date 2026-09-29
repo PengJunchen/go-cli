@@ -30,7 +30,18 @@ func TestKindToContentType(t *testing.T) {
 }
 
 func TestCoreEventToAgentEvent(t *testing.T) {
-	ev := core.AgentEvent{Kind: "tool_call", Content: "read_file"}
+	index := uint64(7)
+	ordinal := uint64(3)
+	truncated := false
+	ev := core.AgentEvent{
+		Kind:                       "tool_call",
+		Content:                    "read_file",
+		RunID:                      "run-1",
+		CanonicalTranscriptIndex:   &index,
+		AssistantTranscriptOrdinal: &ordinal,
+		ReceiptOutcome:             "success",
+		SourceTruncated:            &truncated,
+	}
 	got := CoreEventToAgentEvent(ev)
 	if got.Type != "tool_call" {
 		t.Errorf("Type = %q, want %q", got.Type, "tool_call")
@@ -40,6 +51,20 @@ func TestCoreEventToAgentEvent(t *testing.T) {
 	}
 	if got.ContentType != ContentTypeToolCall {
 		t.Errorf("ContentType = %q, want %q", got.ContentType, ContentTypeToolCall)
+	}
+	if got.RunID != "run-1" || got.ReceiptOutcome != "success" {
+		t.Fatalf("occurrence identity and typed outcome were not bridged: %#v", got)
+	}
+	if got.CanonicalTranscriptIndex == nil || *got.CanonicalTranscriptIndex != 7 ||
+		got.AssistantTranscriptOrdinal == nil || *got.AssistantTranscriptOrdinal != 3 ||
+		got.SourceTruncated == nil || *got.SourceTruncated {
+		t.Fatalf("occurrence coordinates and tri-state metadata were not bridged: %#v", got)
+	}
+	index = 8
+	ordinal = 4
+	truncated = true
+	if *got.CanonicalTranscriptIndex != 7 || *got.AssistantTranscriptOrdinal != 3 || *got.SourceTruncated {
+		t.Fatal("bridge event pointers alias the source event")
 	}
 }
 
