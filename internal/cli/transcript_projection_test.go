@@ -2,6 +2,9 @@ package cli
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -10,6 +13,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/compaction"
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
+	"github.com/pengjunchen/go-cli/internal/mock"
 	"github.com/pengjunchen/go-cli/internal/session"
 	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tui"
@@ -50,6 +54,100 @@ func TestTranscriptProjectionUsesPublishedSourceIDs(t *testing.T) {
 	duplicateSource.PublishedView.SourceEntryIDs[2] = "assistant-source"
 	_, err = ProjectPreparedTranscript(context.Background(), duplicateSource)
 	require.Error(t, err, "a repeated source ID must reject the whole projection")
+}
+
+func TestTranscriptProjectionAfterDurableReopenKeepsSourceTruncationUnknown(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+
+	workspaceID := "workspace-source-truncated-reopen"
+	index, err := session.NewWorkspaceQuarantineIndex()
+	require.NoError(t, err)
+	require.NoError(t, index.EnsureWorkspace(ctx, workspaceID))
+	storeDir := filepath.Join(root, "durable")
+	prepared, err := session.NewDurableJSONLSessionPreparer(storeDir, index).PrepareNew(ctx, "source truncation reopen")
+	require.NoError(t, err)
+	preparedOpen := true
+	t.Cleanup(func() {
+		if preparedOpen {
+			require.NoError(t, prepared.Close())
+		}
+	})
+	sessionID := prepared.View().SessionID
+	sink, err := session.NewSessionRunCommitSink(prepared, index, workspaceID, nil)
+	require.NoError(t, err)
+
+	readDir := filepath.Join(root, "read-input")
+	require.NoError(t, os.Mkdir(readDir, 0o700))
+	for item := 0; item < 1005; item++ {
+		name := filepath.Join(readDir, fmt.Sprintf("entry-%04d.txt", item))
+		require.NoError(t, os.WriteFile(name, nil, 0o600))
+	}
+	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck
+	deferred := tools.NewDeferredToolRegistryAdapter(base)
+	require.NoError(t, tools.RegisterDefaults(ctx, deferred, tools.WithRegisteredBuiltinWhitelist([]string{"read"})))
+	registry := tools.NewMiddlewareToolRegistry(deferred)
+	require.NoError(t, registry.SetPreparedToolPolicy(func(_ context.Context, request tools.PreparedPolicyRequest) (tools.PreparedPolicyDecision, error) {
+		return tools.PreparedPolicyDecision{Allowed: true, Generations: request.Generations}, nil
+	}))
+	require.NoError(t, registry.SetPreparedToolStages(tools.PreparedToolStages{}))
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate("source-truncated-reopen", "source truncation reopen",
+		mock.ConversationTurn{AssistantToolCalls: []mock.ExpectedToolCall{{
+			ID: "read-truncated-reopen", Name: "read", Args: map[string]any{"path": readDir},
+		}}},
+		mock.ConversationTurn{AssistantContent: "directory inspected"},
+	))
+	loop := core.NewLoopAgent(core.WithLLM(model), core.WithTools(registry))
+	harness := core.NewHarnessImpl(core.NewAgentImpl("source-truncated-reopen", loop))
+	stream, err := harness.Submit(core.WithRunCommit(ctx, sink, core.RunCommitBinding{
+		SessionID: sessionID, WorkspaceID: workspaceID,
+	}), "inspect the directory")
+	require.NoError(t, err)
+	var sourceTruncatedEvent *core.AgentEvent
+	for event := range stream.Events() {
+		if event.Kind == "tool_result" && event.ToolCallID == "read-truncated-reopen" {
+			eventCopy := event
+			sourceTruncatedEvent = &eventCopy
+		}
+	}
+	_, err = stream.Result()
+	require.NoError(t, err)
+	require.NotNil(t, sourceTruncatedEvent)
+	require.NotNil(t, sourceTruncatedEvent.SourceTruncated)
+	require.True(t, *sourceTruncatedEvent.SourceTruncated, "live event carries the exact read tool's structured truncation fact")
+
+	beforeClose, err := prepared.Snapshot()
+	require.NoError(t, err)
+	liveProjection, err := ProjectPreparedTranscript(ctx, beforeClose)
+	require.NoError(t, err)
+	var liveTool *tui.CanonicalTranscriptRow
+	for row := range liveProjection.Rows {
+		if liveProjection.Rows[row].Kind == tui.TranscriptRowTool {
+			liveTool = &liveProjection.Rows[row]
+		}
+	}
+	require.NotNil(t, liveTool)
+	require.Nil(t, liveTool.SourceTruncated, "durable projection never upgrades an absent stored fact from live event metadata")
+
+	require.NoError(t, prepared.Close())
+	preparedOpen = false
+	reopened, err := session.NewDurableJSONLSessionPreparer(storeDir, index).PrepareResume(ctx, sessionID)
+	require.NoError(t, err)
+	defer reopened.Close()
+	afterRestart, err := reopened.Snapshot()
+	require.NoError(t, err)
+	reopenedProjection, err := ProjectPreparedTranscript(ctx, afterRestart)
+	require.NoError(t, err)
+	var reopenedTool *tui.CanonicalTranscriptRow
+	for row := range reopenedProjection.Rows {
+		if reopenedProjection.Rows[row].Kind == tui.TranscriptRowTool {
+			reopenedTool = &reopenedProjection.Rows[row]
+		}
+	}
+	require.NotNil(t, reopenedTool)
+	require.Nil(t, reopenedTool.SourceTruncated, "reopened canonical rows remain unknown because this runtime-only fact is not durable schema")
 }
 
 func TestTranscriptProjectionKeepsCompactionTyped(t *testing.T) {
