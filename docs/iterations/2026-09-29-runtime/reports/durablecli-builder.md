@@ -94,6 +94,8 @@ Validation after the source change:
 
 This process test establishes exact restart and no replay after a synced successful receipt, including a kill while the next provider request is outstanding. It does **not** exercise an OS child process/tool that survives parent exit, quarantine of such a live orphan, or a kill before receipt durability; those crash windows remain unclaimed. It also does not close R2 as a whole.
 
+Existing coverage map: `cmd/cli/auth_persistence_e2e_test.go` also launches actual CLI child processes, but tests onboarding/API-key persistence and model selection without a durable session store or tool receipt. `internal/core/run_owner_test.go` and `run_owner_completion_test.go` cover pending cleanup and quarantine using in-process workers. `internal/session/durable_recovery_test.go` and `workspace_index_test.go` cover durable authority/marker recovery using prepared-session fixtures, not spawned CLI processes. The test inventory has no other actual CLI process scenario that combines a durable side effect with parent exit and live-orphan quarantine.
+
 ## Remaining boundary
 
 Durable session fork, ACP serve sessions, REPL session navigation mutations, and history-mutating `/compact`, `/clear`, and `/retry` remain explicitly unsupported. Durable compaction/fork semantics are not implemented. The slash `/compact` guard does not close the separate R3 source-path gap: `Agent.Run`'s post-terminal compaction hook / direct `Agent.Compact` path remains assigned to the R3 core owner and is not changed here. This CLI slice does not close the full R2 runtime plan; it wires the supported default prompt/REPL path to the existing prepared-session and run-owner seams.
