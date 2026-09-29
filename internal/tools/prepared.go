@@ -741,8 +741,13 @@ func (p *preparedInvocation) commitAndInvoke(ctx context.Context) (*ToolResult, 
 	if err != nil {
 		return nil, err
 	}
+	leaseTransferredToCompletion := false
 	if release != nil {
-		defer release()
+		defer func() {
+			if !leaseTransferredToCompletion {
+				release()
+			}
+		}()
 	}
 	if err := p.commit(ctx); err != nil {
 		return nil, err
@@ -758,6 +763,10 @@ func (p *preparedInvocation) commitAndInvoke(ctx context.Context) (*ToolResult, 
 		done := p.completion.begin(CompletionOwnedProcessGroupJoined)
 		if done == nil {
 			return nil, ErrPreparedInvocationUnavailable
+		}
+		if release != nil {
+			p.completion.addDoneCallback(done, release)
+			leaseTransferredToCompletion = true
 		}
 		completed := false
 		defer func() { p.completion.finish(done, completed) }()
@@ -872,8 +881,13 @@ func (p *preparedStreamingInvocation) DispatchStreaming(ctx context.Context, sin
 	if err != nil {
 		return nil, err
 	}
+	leaseTransferredToCompletion := false
 	if release != nil {
-		defer release()
+		defer func() {
+			if !leaseTransferredToCompletion {
+				release()
+			}
+		}()
 	}
 	if err := p.commit(ctx); err != nil {
 		return nil, err
@@ -893,6 +907,10 @@ func (p *preparedStreamingInvocation) DispatchStreaming(ctx context.Context, sin
 		done := p.completion.begin(CompletionOwnedProcessGroupJoined)
 		if done == nil {
 			return nil, ErrPreparedInvocationUnavailable
+		}
+		if release != nil {
+			p.completion.addDoneCallback(done, release)
+			leaseTransferredToCompletion = true
 		}
 		completed := false
 		defer func() { p.completion.finish(done, completed) }()

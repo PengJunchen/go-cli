@@ -66,6 +66,7 @@ type preparedCompletionState struct {
 	pipelineReturned   bool
 	pipelineSuccessful bool
 	finalized          bool
+	doneCallbacks      []func()
 }
 
 func newPreparedCompletionState() *preparedCompletionState {
@@ -140,8 +141,8 @@ func (s *preparedCompletionState) finish(done chan struct{}, completed bool) {
 		return
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if s.ownedDone != done || s.finalized {
+		s.mu.Unlock()
 		return
 	}
 	if s.processMode {
@@ -151,9 +152,12 @@ func (s *preparedCompletionState) finish(done chan struct{}, completed bool) {
 			s.proofInvalidated = true
 			s.proof = ""
 		}
+		var callbacks []func()
 		if !s.processObserved || s.processClosed {
-			s.finishProcessLocked()
+			callbacks = s.finishProcessLocked()
 		}
+		s.mu.Unlock()
+		runPreparedCompletionCallbacks(callbacks)
 		return
 	}
 	if !completed {
@@ -162,6 +166,30 @@ func (s *preparedCompletionState) finish(done chan struct{}, completed bool) {
 	}
 	s.finalized = true
 	close(done)
+	callbacks := s.takeDoneCallbacksLocked()
+	s.mu.Unlock()
+	runPreparedCompletionCallbacks(callbacks)
+}
+
+// addDoneCallback binds cleanup to this exact prepared completion. If the
+// completion already finalized, cleanup runs immediately after releasing the
+// state mutex.
+func (s *preparedCompletionState) addDoneCallback(done chan struct{}, callback func()) {
+	if callback == nil {
+		return
+	}
+	if s == nil || done == nil {
+		callback()
+		return
+	}
+	s.mu.Lock()
+	if s.ownedDone != done || s.finalized {
+		s.mu.Unlock()
+		callback()
+		return
+	}
+	s.doneCallbacks = append(s.doneCallbacks, callback)
+	s.mu.Unlock()
 }
 
 func (s *preparedCompletionState) attach(proof PreparedCompletionProof, done <-chan struct{}) bool {
@@ -181,20 +209,24 @@ func (s *preparedCompletionState) attach(proof PreparedCompletionProof, done <-c
 			s.processClosed = true
 		default:
 		}
+		var callbacks []func()
 		if s.pipelineReturned && s.processClosed {
-			s.finishProcessLocked()
+			callbacks = s.finishProcessLocked()
 		}
 		wait := !s.processClosed
 		s.mu.Unlock()
+		runPreparedCompletionCallbacks(callbacks)
 		if wait {
 			go func() {
 				<-done
 				s.mu.Lock()
 				s.processClosed = true
+				var callbacks []func()
 				if s.pipelineReturned {
-					s.finishProcessLocked()
+					callbacks = s.finishProcessLocked()
 				}
 				s.mu.Unlock()
+				runPreparedCompletionCallbacks(callbacks)
 			}()
 		}
 		return true
@@ -210,9 +242,9 @@ func (s *preparedCompletionState) attach(proof PreparedCompletionProof, done <-c
 	return true
 }
 
-func (s *preparedCompletionState) finishProcessLocked() {
+func (s *preparedCompletionState) finishProcessLocked() []func() {
 	if s.ownedDone == nil || !s.processMode || s.finalized {
-		return
+		return nil
 	}
 	if !s.proofInvalidated && s.pipelineSuccessful && s.processObserved && s.processClosed {
 		s.proof = CompletionOwnedProcessGroupJoined
@@ -221,6 +253,19 @@ func (s *preparedCompletionState) finishProcessLocked() {
 	}
 	s.finalized = true
 	close(s.ownedDone)
+	return s.takeDoneCallbacksLocked()
+}
+
+func (s *preparedCompletionState) takeDoneCallbacksLocked() []func() {
+	callbacks := s.doneCallbacks
+	s.doneCallbacks = nil
+	return callbacks
+}
+
+func runPreparedCompletionCallbacks(callbacks []func()) {
+	for _, callback := range callbacks {
+		callback()
+	}
 }
 
 func (s *preparedCompletionState) invalidateProof() {
