@@ -313,6 +313,18 @@ func (a *DeferredToolRegistryAdapter) preparedToolPipeline() (*preparedToolPipel
 	return provider.preparedToolPipeline()
 }
 
+func (a *DeferredToolRegistryAdapter) registerTrustedWithMCPReservation(def ToolDefinition, register func() error) error {
+	if def == nil {
+		return register()
+	}
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	if reservation, exists := a.mcpReservations[def.Name()]; exists {
+		return fmt.Errorf("%w: %q is reserved by MCP source %q generation %d", ErrMCPNameReserved, def.Name(), reservation.sourceID, reservation.generation)
+	}
+	return register()
+}
+
 // RegisterTrustedControl forwards only the narrow first-party control
 // registration capability exposed by the underlying registry.
 func (a *DeferredToolRegistryAdapter) RegisterTrustedControl(ctx context.Context, def ToolDefinition) error {
@@ -320,7 +332,7 @@ func (a *DeferredToolRegistryAdapter) RegisterTrustedControl(ctx context.Context
 	if !ok {
 		return ErrTrustedControlRegistrationUnavailable
 	}
-	return registrar.RegisterTrustedControl(ctx, def)
+	return a.registerTrustedWithMCPReservation(def, func() error { return registrar.RegisterTrustedControl(ctx, def) })
 }
 
 // RegisterTrustedNetworkRead forwards the narrow reviewed network-reader
@@ -330,7 +342,7 @@ func (a *DeferredToolRegistryAdapter) RegisterTrustedNetworkRead(ctx context.Con
 	if !ok {
 		return ErrTrustedNetworkReadRegistrationUnavailable
 	}
-	return registrar.RegisterTrustedNetworkRead(ctx, def)
+	return a.registerTrustedWithMCPReservation(def, func() error { return registrar.RegisterTrustedNetworkRead(ctx, def) })
 }
 
 func (a *DeferredToolRegistryAdapter) registerTrustedWorkspaceWrite(ctx context.Context, def ToolDefinition) error {
@@ -338,7 +350,7 @@ func (a *DeferredToolRegistryAdapter) registerTrustedWorkspaceWrite(ctx context.
 	if !ok {
 		return ErrPreparedRegistrationUnavailable
 	}
-	return registrar.registerTrustedWorkspaceWrite(ctx, def)
+	return a.registerTrustedWithMCPReservation(def, func() error { return registrar.registerTrustedWorkspaceWrite(ctx, def) })
 }
 
 func (a *DeferredToolRegistryAdapter) registerTrustedLocalProcess(ctx context.Context, def ToolDefinition) error {
@@ -346,7 +358,7 @@ func (a *DeferredToolRegistryAdapter) registerTrustedLocalProcess(ctx context.Co
 	if !ok {
 		return ErrPreparedRegistrationUnavailable
 	}
-	return registrar.registerTrustedLocalProcess(ctx, def)
+	return a.registerTrustedWithMCPReservation(def, func() error { return registrar.registerTrustedLocalProcess(ctx, def) })
 }
 
 func (a *DeferredToolRegistryAdapter) registerTrustedInlineLocalReader(ctx context.Context, def ToolDefinition) error {
@@ -354,7 +366,7 @@ func (a *DeferredToolRegistryAdapter) registerTrustedInlineLocalReader(ctx conte
 	if !ok {
 		return ErrPreparedRegistrationUnavailable
 	}
-	return registrar.registerTrustedInlineLocalReader(ctx, def)
+	return a.registerTrustedWithMCPReservation(def, func() error { return registrar.registerTrustedInlineLocalReader(ctx, def) })
 }
 
 func (a *DeferredToolRegistryAdapter) registerTrustedScopedWorkspaceRead(ctx context.Context, def ToolDefinition) error {
@@ -362,7 +374,7 @@ func (a *DeferredToolRegistryAdapter) registerTrustedScopedWorkspaceRead(ctx con
 	if !ok {
 		return ErrPreparedRegistrationUnavailable
 	}
-	return registrar.registerTrustedScopedWorkspaceRead(ctx, def)
+	return a.registerTrustedWithMCPReservation(def, func() error { return registrar.registerTrustedScopedWorkspaceRead(ctx, def) })
 }
 
 func (a *DeferredToolRegistryAdapter) toolRegistrationSnapshot(ctx context.Context, name string) (registeredToolSnapshot, error) {
