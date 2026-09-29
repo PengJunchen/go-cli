@@ -778,6 +778,7 @@ func TestApproval_EdgeCases(t *testing.T) {
 
 	t.Run("file trust store handles empty file", func(t *testing.T) {
 		dir := t.TempDir()
+		require.NoError(t, os.Chmod(dir, 0o700), "trust store parent must satisfy the private-file contract")
 		path := filepath.Join(dir, "empty.json")
 		err := os.WriteFile(path, []byte{}, 0o600)
 		require.NoError(t, err)

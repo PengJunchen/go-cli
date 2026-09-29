@@ -137,14 +137,7 @@ func TestRunBrokenConfigStillBlocksNonEarlyArguments(t *testing.T) {
 }
 
 func TestCLIBinaryGlobalHelpAndVersionIgnoreBrokenConfig(t *testing.T) {
-	workDirForBuild, err := os.Getwd()
-	require.NoError(t, err)
-	binaryPath := filepath.Join(t.TempDir(), "go-cli")
-	build := exec.Command("go", "build", "-o", binaryPath, ".")
-	build.Dir = workDirForBuild
-	if output, buildErr := build.CombinedOutput(); buildErr != nil {
-		t.Fatalf("build CLI binary: %v\n%s", buildErr, output)
-	}
+	binaryPath := buildCLIBinary(t)
 
 	tests := []struct {
 		name       string
@@ -155,7 +148,7 @@ func TestCLIBinaryGlobalHelpAndVersionIgnoreBrokenConfig(t *testing.T) {
 	}{
 		{name: "help", args: []string{"--help"}, wantOutput: "Usage:"},
 		{name: "version", args: []string{"--version"}, wantOutput: cli.Version},
-		{name: "unknown command still loads config", args: []string{"unknown-command"}, wantExit: 1, wantError: "config validation"},
+		{name: "unknown command still loads config", args: []string{"unknown-command"}, wantExit: 1, wantError: "config:"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -180,11 +173,94 @@ func TestCLIBinaryGlobalHelpAndVersionIgnoreBrokenConfig(t *testing.T) {
 				return
 			}
 			assert.Contains(t, string(output), tt.wantOutput)
+			if tt.name == "help" {
+				assert.Contains(t, string(output), "trust", "the trust command must be registered before early root help dispatch")
+			}
 			assert.NotContains(t, string(output), "Interactive session started")
 			_, sessionErr := os.Stat(filepath.Join(workDir, ".go-cli", "sessions"))
 			assert.ErrorIs(t, sessionErr, os.ErrNotExist, "help/version must not create a session store")
 		})
 	}
+}
+
+func buildCLIBinary(t *testing.T) string {
+	t.Helper()
+	workDirForBuild, err := os.Getwd()
+	require.NoError(t, err)
+	binaryPath := filepath.Join(t.TempDir(), "go-cli")
+	build := exec.Command("go", "build", "-o", binaryPath, ".")
+	build.Dir = workDirForBuild
+	if output, buildErr := build.CombinedOutput(); buildErr != nil {
+		t.Fatalf("build CLI binary: %v\n%s", buildErr, output)
+	}
+	return binaryPath
+}
+
+func runCLIBinary(t *testing.T, binaryPath, workDir, home string, args ...string) (int, string) {
+	t.Helper()
+	command := exec.Command(binaryPath, args...)
+	command.Dir = workDir
+	command.Env = environmentWithHome(home)
+	output, runErr := command.CombinedOutput()
+	if runErr == nil {
+		return 0, string(output)
+	}
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, runErr, &exitErr, "output=%q", output)
+	return exitErr.ExitCode(), string(output)
+}
+
+func TestCLIBinaryTrustGrantRejectsNonTTYAndListRevokeWorkNonTTY(t *testing.T) {
+	binaryPath := buildCLIBinary(t)
+	workDir := t.TempDir()
+	home := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, ".go-cli.yaml"), []byte("model:\n  name: project\n"), 0o600))
+	root, err := filepath.EvalSymlinks(workDir)
+	require.NoError(t, err)
+	storePath := filepath.Join(home, ".config", "go-cli", "trust.json")
+
+	code, output := runCLIBinary(t, binaryPath, workDir, home, "trust", "grant")
+	require.Equal(t, 1, code, "output=%q", output)
+	assert.Contains(t, output, "trust grant requires an interactive terminal")
+	_, err = os.Stat(storePath)
+	assert.ErrorIs(t, err, os.ErrNotExist, "non-TTY grant must not create a trust entry")
+
+	code, output = runCLIBinary(t, binaryPath, workDir, home, "trust", "list")
+	require.Zero(t, code, "output=%q", output)
+	assert.Contains(t, output, "No trust entries.")
+
+	code, output = runCLIBinary(t, binaryPath, workDir, home, "trust", "revoke", root)
+	require.Zero(t, code, "output=%q", output)
+	assert.Contains(t, output, "Revoked trust for "+root)
+}
+
+func TestCLIBinaryTrustListFailsClosedOnCorruptOrNonPrivateStore(t *testing.T) {
+	binaryPath := buildCLIBinary(t)
+	workDir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, ".go-cli.yaml"), []byte("model:\n  name: project\n"), 0o600))
+
+	t.Run("corrupt file", func(t *testing.T) {
+		home := t.TempDir()
+		storeDir := filepath.Join(home, ".config", "go-cli")
+		require.NoError(t, os.MkdirAll(storeDir, 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(storeDir, "trust.json"), []byte("{broken"), 0o600))
+		code, output := runCLIBinary(t, binaryPath, workDir, home, "trust", "list")
+		require.Equal(t, 1, code, "output=%q", output)
+		assert.Contains(t, output, "list trust entries")
+		assert.NotContains(t, output, "No trust entries.")
+	})
+
+	t.Run("replaceable parent directory", func(t *testing.T) {
+		home := t.TempDir()
+		storeDir := filepath.Join(home, ".config", "go-cli")
+		require.NoError(t, os.MkdirAll(storeDir, 0o700))
+		require.NoError(t, os.WriteFile(filepath.Join(storeDir, "trust.json"), []byte("{}"), 0o600))
+		require.NoError(t, os.Chmod(storeDir, 0o755))
+		code, output := runCLIBinary(t, binaryPath, workDir, home, "trust", "list")
+		require.Equal(t, 1, code, "output=%q", output)
+		assert.Contains(t, output, "list trust entries")
+		assert.NotContains(t, output, "No trust entries.")
+	})
 }
 
 func environmentWithHome(home string) []string {

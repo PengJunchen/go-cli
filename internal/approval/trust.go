@@ -32,6 +32,13 @@ type TrustManager interface {
 	TrustedProjects() []string
 }
 
+// TrustEntryReader is the optional read-only capability for inspecting stored
+// trust metadata. It preserves load errors and exposes legacy entries without
+// treating them as authorization.
+type TrustEntryReader interface {
+	LoadTrustEntries() (map[string]TrustEntry, error)
+}
+
 // DefaultTrustManager is the default TrustManager. It wraps a TrustStore by
 // interface so the persistence backend can be swapped. It is safety-aware: an
 // unknown or expired project is not trusted.
@@ -40,6 +47,7 @@ type DefaultTrustManager struct {
 }
 
 var _ TrustManager = (*DefaultTrustManager)(nil)
+var _ TrustEntryReader = (*DefaultTrustManager)(nil)
 
 // NewDefaultTrustManager builds a DefaultTrustManager over the given store.
 // A nil store is replaced with an in-memory trust store.
@@ -138,6 +146,23 @@ func (m *DefaultTrustManager) TrustedProjects() []string {
 	}
 	sort.Strings(paths)
 	return paths
+}
+
+// LoadTrustEntries returns a defensive copy of stored entries and propagates
+// store errors so read-only trust listing cannot mistake corruption for emptiness.
+func (m *DefaultTrustManager) LoadTrustEntries() (map[string]TrustEntry, error) {
+	if m == nil || m.store == nil {
+		return nil, errors.New("approval: trust store is unavailable")
+	}
+	entries, err := m.store.Load()
+	if err != nil {
+		return nil, fmt.Errorf("approval: load trust entries: %w", err)
+	}
+	copied := make(map[string]TrustEntry, len(entries))
+	for path, entry := range entries {
+		copied[path] = cloneTrustEntry(entry)
+	}
+	return copied, nil
 }
 
 // expired reports whether the entry has a valid ExpiresAt that is past now.
