@@ -163,6 +163,7 @@ func (r *MiddlewareToolRegistry) prepareToolCallWithStreamSink(ctx context.Conte
 		execute:                 executor,
 		completionProof:         completionProof,
 		streamingSink:           attestedSink,
+		terminalObserver:        decision.TerminalObserver,
 	}
 	if preparedQueue != nil {
 		config.schedule = preparedMutationScheduler(preparedQueue, frozenCall)

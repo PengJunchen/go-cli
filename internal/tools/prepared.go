@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"reflect"
 	"sort"
 	"sync"
@@ -61,6 +62,9 @@ var (
 	// ErrPreparedOpaqueWrapperUnsupported indicates that a legacy wrapper has
 	// not been assigned to a reviewed prepared stage and cannot be bypassed.
 	ErrPreparedOpaqueWrapperUnsupported = errors.New("tools: opaque legacy tool wrapper is unsupported for prepared dispatch")
+	// ErrPreparedTerminalObserverFailed identifies a sanitized terminal-observer
+	// callback failure without exposing callback error text.
+	ErrPreparedTerminalObserverFailed = errors.New("tools: prepared terminal observer failed")
 )
 
 // DispatchFenceDomain identifies a shared mutable state source that can
@@ -556,12 +560,44 @@ type PreparedPolicyRequest struct {
 	Fence       *DispatchFence
 }
 
-// PreparedPolicyDecision contains only the authorization result and the
-// generation snapshot against which it was made. It cannot grant effects or
-// change the captured tool identity.
+// PreparedTerminalError* constants are the finite categories emitted by the
+// prepared terminal outcome hook.
+const (
+	PreparedTerminalErrorSuccess         = "success"
+	PreparedTerminalErrorDispatchReject  = "dispatch_rejected"
+	PreparedTerminalErrorCleanupPending  = "cleanup_pending"
+	PreparedTerminalErrorContextCanceled = "context_canceled"
+	PreparedTerminalErrorExecutor        = "executor_error"
+	PreparedTerminalErrorResult          = "result_error"
+	PreparedTerminalErrorUnknown         = "unknown_error"
+)
+
+// PreparedTerminalOutcome contains only bounded call identity, dispatch
+// status, and result flags. It deliberately excludes arguments, output, and
+// raw errors. CleanupPending means Dispatch returned while a joined resource
+// completion signal remained open; it must not be recorded as success.
+type PreparedTerminalOutcome struct {
+	ToolCallID        string
+	ToolName          string
+	DispatchCommitted bool
+	ResultPresent     bool
+	ResultIsError     bool
+	ErrorClass        string
+}
+
+// PreparedTerminalObserver records one caller-visible prepared dispatch
+// outcome. If it returns an error, the observer owner must expose that failure
+// through its own readable health or error channel; dispatch preserves the
+// already completed tool result and never retries or rolls back execution.
+type PreparedTerminalObserver func(PreparedTerminalOutcome) error
+
+// PreparedPolicyDecision contains the authorization result, the generation
+// snapshot against which it was made, and an optional observer for the final
+// caller-visible outcome. It cannot grant effects or change tool identity.
 type PreparedPolicyDecision struct {
-	Allowed     bool
-	Generations DispatchFenceSnapshot
+	Allowed          bool
+	Generations      DispatchFenceSnapshot
+	TerminalObserver PreparedTerminalObserver
 }
 
 // PreparedToolPolicy evaluates approval and Plan policy for a frozen
@@ -625,6 +661,7 @@ type preparedInvocationConfig struct {
 	schedule                func(context.Context, *preparedInvocation) (*ToolResult, error)
 	completionProof         PreparedCompletionProof
 	streamingSink           *synchronousStreamSink
+	terminalObserver        PreparedTerminalObserver
 }
 
 type preparedInvocation struct {
@@ -642,8 +679,10 @@ type preparedInvocation struct {
 	schedule                func(context.Context, *preparedInvocation) (*ToolResult, error)
 	completionProof         PreparedCompletionProof
 	completion              *preparedCompletionState
+	terminalObserver        PreparedTerminalObserver
 	consumed                atomic.Bool
 	committed               atomic.Bool
+	terminalObserved        atomic.Bool
 	scopedReadProofIssued   atomic.Bool
 }
 
@@ -666,6 +705,7 @@ func newPreparedInvocation(config preparedInvocationConfig) *preparedInvocation 
 		execute:                 config.execute,
 		schedule:                config.schedule,
 		completionProof:         config.completionProof,
+		terminalObserver:        config.terminalObserver,
 		completion:              newPreparedCompletionState(),
 	}
 }
@@ -709,10 +749,17 @@ func (p *preparedInvocation) invalidateCompletionProof() {
 
 // Dispatch consumes the invocation and runs the captured executor outside the
 // shared fence after its generation check and linearization marker complete.
-func (p *preparedInvocation) Dispatch(ctx context.Context) (*ToolResult, error) {
+func (p *preparedInvocation) Dispatch(ctx context.Context) (result *ToolResult, err error) {
 	if p == nil {
 		return nil, ErrPreparedInvocationUnavailable
 	}
+	defer func() {
+		panicValue := recover()
+		p.observeTerminal(result, err, panicValue != nil)
+		if panicValue != nil {
+			panic(panicValue)
+		}
+	}()
 	if err := p.admit(); err != nil {
 		return nil, err
 	}
@@ -726,6 +773,98 @@ func (p *preparedInvocation) Dispatch(ctx context.Context) (*ToolResult, error) 
 		return p.schedule(ctx, p)
 	}
 	return p.commitAndInvoke(ctx)
+}
+
+func (p *preparedInvocation) observeTerminal(result *ToolResult, dispatchErr error, panicked bool) {
+	if p == nil || p.terminalObserver == nil || !p.terminalObserved.CompareAndSwap(false, true) {
+		return
+	}
+	outcome := PreparedTerminalOutcome{
+		ToolCallID:        p.call.id,
+		ToolName:          p.identity.ToolName(),
+		DispatchCommitted: p.committed.Load(),
+		ResultPresent:     result != nil,
+		ResultIsError:     result != nil && result.IsError,
+	}
+	if outcome.ToolName == "" {
+		outcome.ToolName = p.call.name
+	}
+	outcome.ErrorClass = preparedTerminalErrorClass(p, result, dispatchErr, panicked)
+	callbackErr := callPreparedTerminalObserver(p.terminalObserver, outcome)
+	if callbackErr != nil {
+		class := "callback_error"
+		if errors.Is(callbackErr, ErrPreparedTerminalObserverFailed) {
+			class = "callback_panic"
+		}
+		slog.Error("tools.prepared_terminal_observer.failed", "error_class", class)
+	}
+}
+
+func callPreparedTerminalObserver(observer PreparedTerminalObserver, outcome PreparedTerminalOutcome) (err error) {
+	if observer == nil {
+		return nil
+	}
+	defer func() {
+		if recover() != nil {
+			err = ErrPreparedTerminalObserverFailed
+		}
+	}()
+	return observer(outcome)
+}
+
+func preparedTerminalErrorClass(p *preparedInvocation, result *ToolResult, dispatchErr error, panicked bool) string {
+	committed := p != nil && p.committed.Load()
+	if committed && preparedCleanupPending(p, dispatchErr) {
+		return PreparedTerminalErrorCleanupPending
+	}
+	if dispatchErr != nil && (errors.Is(dispatchErr, context.Canceled) || errors.Is(dispatchErr, context.DeadlineExceeded)) {
+		return PreparedTerminalErrorContextCanceled
+	}
+	if !committed {
+		if dispatchErr != nil || panicked {
+			return PreparedTerminalErrorDispatchReject
+		}
+		return PreparedTerminalErrorUnknown
+	}
+	if panicked {
+		return PreparedTerminalErrorUnknown
+	}
+	if dispatchErr != nil {
+		return PreparedTerminalErrorExecutor
+	}
+	if result == nil {
+		return PreparedTerminalErrorUnknown
+	}
+	if result.IsError {
+		return PreparedTerminalErrorResult
+	}
+	return PreparedTerminalErrorSuccess
+}
+
+func preparedCleanupPending(p *preparedInvocation, dispatchErr error) bool {
+	if p == nil || !p.committed.Load() {
+		return false
+	}
+	if done := p.completion.signal().Done(); done != nil {
+		select {
+		case <-done:
+		default:
+			return true
+		}
+	}
+	var pending PendingExecutionError
+	if errors.As(dispatchErr, &pending) {
+		resourceDone := pending.ExecutionDone()
+		if resourceDone == nil {
+			return true
+		}
+		select {
+		case <-resourceDone:
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 // commitAndInvoke is also the only prepared execution entrypoint used by a
@@ -858,10 +997,17 @@ func newPreparedStreamingInvocation(config preparedInvocationConfig, executeStre
 
 // DispatchStreaming consumes the same one-use state as Dispatch and invokes
 // the captured streaming executor with the caller's sink.
-func (p *preparedStreamingInvocation) DispatchStreaming(ctx context.Context, sink StreamSink) (*ToolResult, error) {
+func (p *preparedStreamingInvocation) DispatchStreaming(ctx context.Context, sink StreamSink) (result *ToolResult, err error) {
 	if p == nil || p.preparedInvocation == nil {
 		return nil, ErrPreparedInvocationUnavailable
 	}
+	defer func() {
+		panicValue := recover()
+		p.preparedInvocation.observeTerminal(result, err, panicValue != nil)
+		if panicValue != nil {
+			panic(panicValue)
+		}
+	}()
 	if err := p.admit(); err != nil {
 		return nil, err
 	}
