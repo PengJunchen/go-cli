@@ -90,7 +90,7 @@ func TestServeApproveAskRejectedBeforeTokenWriteOrListener(t *testing.T) {
 			args := append([]string{"--addr", "127.0.0.1:0", "--token-file", tokenPath}, tc.args...)
 			ctx, cancel := context.WithCancel(context.Background())
 			cancel()
-			err := c.Run(ctx, newAssembleTestConfig(), args)
+			err := c.Run(ctx, newAssembleTestConfig(t), args)
 			if err == nil || !strings.Contains(strings.ToLower(err.Error()), "unsupported") {
 				t.Fatalf("expected unsupported remote approval error, got %v", err)
 			}
@@ -132,7 +132,7 @@ func TestServeRemoteTUIRejectedBeforeAssemblyOrTokenWrite(t *testing.T) {
 		return nil, errors.New("assembly must not run for unsupported remote TUI")
 	}
 
-	err := c.Run(context.Background(), newAssembleTestConfig(), []string{
+	err := c.Run(context.Background(), newAssembleTestConfig(t), []string{
 		"--tui",
 		"--addr", "127.0.0.1:0",
 		"--token-file", tokenPath,
@@ -182,7 +182,7 @@ func TestServeStartsAssembledRuntimeWithExplicitDenyOnLoopback(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Run(ctx, newAssembleTestConfig(), []string{
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{
 			"--no-auth",
 			"--approve", "deny",
 			"--addr", "127.0.0.1:0",
@@ -224,7 +224,7 @@ func TestServe_TokenNotInStdout(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Run(ctx, newAssembleTestConfig(), []string{
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{
 			"--addr", "127.0.0.1:0",
 			"--approve", "deny",
 			"--token-file", tokenPath,
@@ -267,7 +267,7 @@ func TestServe_TokenFilePermission(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Run(ctx, newAssembleTestConfig(), []string{
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{
 			"--addr", "127.0.0.1:0",
 			"--approve", "deny",
 			"--token-file", tokenPath,
@@ -301,7 +301,7 @@ func TestServe_TokenFileReadable(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Run(ctx, newAssembleTestConfig(), []string{
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{
 			"--addr", "127.0.0.1:0",
 			"--approve", "deny",
 			"--token-file", tokenPath,
@@ -351,7 +351,7 @@ func TestServe_ExplicitTokenToStderr(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Run(ctx, newAssembleTestConfig(), []string{
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{
 			"--addr", "127.0.0.1:0",
 			"--approve", "deny",
 			"--token", "explicit-secret-token",
@@ -393,7 +393,7 @@ func TestServe_TokenFileCustomPath(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Run(ctx, newAssembleTestConfig(), []string{
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{
 			"--addr", "127.0.0.1:0",
 			"--approve", "deny",
 			"--token-file", customPath,
@@ -442,7 +442,7 @@ func TestServeDefaultAddrIsLocalhost(t *testing.T) {
 	go func() {
 		// Use --no-auth so we don't need to deal with tokens.
 		// Don't pass --addr to test the default.
-		done <- c.Run(ctx, newAssembleTestConfig(), []string{"--no-auth", "--approve", "deny"})
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{"--no-auth", "--approve", "deny"})
 	}()
 
 	// Poll for output or error. The server may fail if port 9090 is
@@ -496,7 +496,7 @@ func TestServeGeneratesAuthToken(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Run(ctx, newAssembleTestConfig(), []string{
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{
 			"--addr", "127.0.0.1:0",
 			"--approve", "deny",
 			"--token-file", tokenPath,
@@ -561,7 +561,7 @@ func TestServeCustomTokenUsed(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Run(ctx, newAssembleTestConfig(), []string{
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{
 			"--addr", "127.0.0.1:0",
 			"--approve", "deny",
 			"--token", "my-custom-token",
@@ -692,7 +692,7 @@ func TestServeTokenFileFailureDoesNotStartListener(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Run(ctx, newAssembleTestConfig(), []string{
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{
 			"--addr", addr,
 			"--approve", "deny",
 			"--token-file", filepath.Join(dir, "serve-token"),
@@ -748,7 +748,7 @@ func TestServeBindFailureDoesNotPublishTokenOrLeaveListener(t *testing.T) {
 			errOut := &safeBuffer{}
 			c := newServeCmd(out)
 			c.errOut = errOut
-			err = c.Run(context.Background(), newAssembleTestConfig(), []string{
+			err = c.Run(context.Background(), newAssembleTestConfig(t), []string{
 				"--addr", addr,
 				"--approve", "deny",
 				"--token-file", tokenPath,
@@ -799,7 +799,7 @@ func TestServeAssemblyFailureDoesNotWriteTokenOrStartListener(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := newAssembleTestConfig()
+	cfg := newAssembleTestConfig(t)
 	cfg.Git.WorkDir = workDir
 	out := &safeBuffer{}
 	c := newServeCmd(out)
@@ -832,7 +832,7 @@ func TestServeAssemblyFailureDoesNotWriteTokenOrStartListener(t *testing.T) {
 }
 
 func TestServeAssemblyErrorClosesReturnedAssembly(t *testing.T) {
-	assembly, err := AssembleAgent(context.Background(), newAssembleTestConfig(), "openai", "test-model", io.Discard,
+	assembly, err := AssembleAgent(context.Background(), newAssembleTestConfig(t), "openai", "test-model", io.Discard,
 		WithApproveMode(ApproveDeny),
 	)
 	if err != nil {
@@ -851,7 +851,7 @@ func TestServeAssemblyErrorClosesReturnedAssembly(t *testing.T) {
 		return assembly, fixtureErr
 	}
 	tokenPath := privateServeTokenPath(t)
-	err = c.Run(context.Background(), newAssembleTestConfig(), []string{
+	err = c.Run(context.Background(), newAssembleTestConfig(t), []string{
 		"--approve", "deny",
 		"--addr", "127.0.0.1:0",
 		"--token-file", tokenPath,

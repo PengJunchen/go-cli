@@ -34,7 +34,7 @@ func TestAssemblePreparedPlanAllowsScopedReadersAndRejectsUnscopedPaths(t *testi
 	outsideFile := filepath.Join(outsideDir, "outside.txt")
 	require.NoError(t, os.WriteFile(outsideFile, []byte("needle outside"), 0o600))
 
-	cfg := newAssembleTestConfig()
+	cfg := newAssembleTestConfig(t)
 	cfg.Sandbox.AllowedPaths = []string{allowedDir}
 	assembly, err := AssembleAgent(ctx, cfg, "openai", "test-model", io.Discard,
 		WithApproveMode(ApproveAuto), WithNoSandbox())

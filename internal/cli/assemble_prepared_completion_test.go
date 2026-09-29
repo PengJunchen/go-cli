@@ -21,7 +21,7 @@ func TestAssembledReadAndLSCompletionCoversDefaultWrappers(t *testing.T) {
 	require.NoError(t, os.WriteFile(filePath, []byte("assembled read"), 0o600))
 	missingPath := filepath.Join(root, "missing")
 
-	cfg := newAssembleTestConfig()
+	cfg := newAssembleTestConfig(t)
 	cfg.Sandbox.AllowedPaths = []string{root}
 	auditEnabled := true
 	cfg.Production.Audit.Enabled = &auditEnabled

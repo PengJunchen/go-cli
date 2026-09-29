@@ -15,7 +15,7 @@ import (
 
 func TestAssembleAgent_UnconfiguredWebSearchIsHiddenFromCapabilitySurfaces(t *testing.T) {
 	ctx := context.Background()
-	assembly, err := AssembleAgent(ctx, newAssembleTestConfig(), "openai", "web-search-fixture", io.Discard, WithApproveMode(ApproveAuto))
+	assembly, err := AssembleAgent(ctx, newAssembleTestConfig(t), "openai", "web-search-fixture", io.Discard, WithApproveMode(ApproveAuto))
 	require.NoError(t, err)
 	t.Cleanup(assembly.Cleanup)
 
@@ -48,7 +48,7 @@ func TestAssembleAgent_UnconfiguredWebSearchIsHiddenFromCapabilitySurfaces(t *te
 
 func TestAssembleAgent_ConfiguredWebSearchRemainsDiscoverable(t *testing.T) {
 	ctx := context.Background()
-	cfg := newAssembleTestConfig()
+	cfg := newAssembleTestConfig(t)
 	cfg.WebSearch.Provider = "fetch"
 	var request *http.Request
 	withAssembleDefaultTransport(t, assembleRoundTripFunc(func(req *http.Request) (*http.Response, error) {

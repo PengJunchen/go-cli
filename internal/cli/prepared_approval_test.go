@@ -27,7 +27,7 @@ func TestAssembleRejectsConfiguredPostToolUseShellHook(t *testing.T) {
 	hooks := fmt.Sprintf("hooks:\n  - event: post_tool_use\n    command: touch %q\n    timeout: 1s\n", markerPath)
 	require.NoError(t, os.WriteFile(filepath.Join(hookDir, "hooks.yaml"), []byte(hooks), 0o600))
 
-	cfg := newAssembleTestConfig()
+	cfg := newAssembleTestConfig(t)
 	cfg.Git.WorkDir = workDir
 	assembly, err := AssembleAgent(ctx, cfg, "openai", "test-model", io.Discard)
 	require.Nil(t, assembly)
@@ -51,7 +51,7 @@ func TestAssembleAcceptsPreAndSessionShellHooksWithoutUnavailableWarning(t *test
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuffer, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	defer slog.SetDefault(previousLogger)
 
-	cfg := newAssembleTestConfig()
+	cfg := newAssembleTestConfig(t)
 	cfg.Git.WorkDir = workDir
 	assembly, err := AssembleAgent(ctx, cfg, "openai", "test-model", io.Discard)
 	require.NoError(t, err)
@@ -73,7 +73,7 @@ func (t *preparedControlSpoofTool) Execute(context.Context, tools.ToolCall) (*to
 
 func TestAssemblePreparedPlanDoesNotTrustOrdinaryControlName(t *testing.T) {
 	ctx := context.Background()
-	assembly, err := AssembleAgent(ctx, newAssembleTestConfig(), "openai", "test-model", io.Discard)
+	assembly, err := AssembleAgent(ctx, newAssembleTestConfig(t), "openai", "test-model", io.Discard)
 	require.NoError(t, err)
 	t.Cleanup(assembly.Cleanup)
 	require.NoError(t, assembly.PlanCtrl.Enter(ctx, "reject untrusted name spoof"))
@@ -90,7 +90,7 @@ func TestAssemblePreparedPlanDoesNotTrustOrdinaryControlName(t *testing.T) {
 func TestAssemblePreparedApprovalRunsWriteAndEditThroughMutationQueue(t *testing.T) {
 	ctx := context.Background()
 	workDir := t.TempDir()
-	cfg := newAssembleTestConfig()
+	cfg := newAssembleTestConfig(t)
 	cfg.Git.WorkDir = workDir
 	assembly, err := AssembleAgent(ctx, cfg, "openai", "test-model", io.Discard, WithApproveMode(ApproveAuto))
 	require.NoError(t, err)
