@@ -2,9 +2,11 @@ package tui
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"unicode/utf8"
+	"unsafe"
 
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/require"
@@ -80,8 +82,83 @@ func TestStreamingMarkdownAppendChunkKeepsGraphemesTogether(t *testing.T) {
 	require.Contains(t, w.Content, "界")
 	require.Contains(t, w.Content, "👩‍💻")
 	for _, line := range strings.Split(w.Content, "\n") {
-		require.LessOrEqual(t, cellWidth(line), 4, "wide grapheme clusters may exceed a two-cell viewport but must remain intact")
+		require.LessOrEqual(t, cellWidth(line), 2, "each fitting grapheme must wrap within the two-cell viewport")
 	}
+}
+
+func TestStreamingMarkdownAppendChunkWrapsTwoWideGraphemes(t *testing.T) {
+	renderer := NewStreamingMarkdownRenderer(NewMarkdownRenderer())
+	w := renderer.AppendChunk(context.Background(), "界界", RenderOpts{Width: 2})
+
+	require.Equal(t, "界\n界", w.Content)
+	for _, line := range strings.Split(w.Content, "\n") {
+		require.LessOrEqual(t, cellWidth(line), 2)
+	}
+}
+
+func TestStreamingMarkdownAppendChunkBoundsPendingGraphemeBytes(t *testing.T) {
+	renderer := NewStreamingMarkdownRenderer(NewMarkdownRenderer())
+	w := renderer.AppendChunk(context.Background(), strings.Repeat("x", maxStreamingRenderBytes+1), RenderOpts{Width: maxStreamingRenderBytes * 2})
+
+	require.LessOrEqual(t, len(w.Content), maxStreamingRenderBytes)
+	require.True(t, w.HasHiddenPrefix, "text omitted to preserve the byte budget must be reported")
+	require.True(t, utf8.ValidString(w.Content))
+}
+
+func TestStreamingMarkdownAppendChunkDoesNotRetainChunkBacking(t *testing.T) {
+	renderer := NewStreamingMarkdownRenderer(NewMarkdownRenderer())
+	chunk := strings.Repeat("x", 1<<20)
+	renderer.AppendChunk(context.Background(), chunk, RenderOpts{Width: 80})
+
+	for _, line := range renderer.windowLines {
+		require.False(t, sharesStringBacking(line, chunk), "committed lines must not retain a large caller chunk")
+	}
+	for _, part := range renderer.windowLineParts {
+		require.False(t, sharesStringBacking(part, chunk), "open line parts must not retain a large caller chunk")
+	}
+	require.False(t, sharesStringBacking(renderer.graphemePending, chunk), "pending graphemes must not retain a large caller chunk")
+	require.LessOrEqual(t, len(renderer.Window().Content), maxStreamingRenderBytes)
+}
+
+func TestStreamingMarkdownReplaceWindowClonesRetainedRenderedLines(t *testing.T) {
+	renderer := NewStreamingMarkdownRenderer(NewMarkdownRenderer())
+	line := strings.Repeat("x", 512)
+	rendered := strings.Repeat(line+"\n", 1024)
+	renderer.replaceWindowWithText(rendered, false)
+
+	for _, retained := range renderer.windowLines {
+		require.False(t, sharesStringBacking(retained, rendered), "retained output lines must not pin the complete render allocation")
+	}
+	w := renderer.Window()
+	require.LessOrEqual(t, len(w.Content), maxStreamingRenderBytes)
+	require.LessOrEqual(t, renderer.stats().renderedLines, maxStreamingRenderLines)
+	require.LessOrEqual(t, cap(renderer.windowLines), maxStreamingRenderLines*2, "line storage capacity must stay bounded by the window limit")
+}
+
+func TestStreamingMarkdownFinishSourceTailStartsAtGraphemeBoundary(t *testing.T) {
+	renderer := NewStreamingMarkdownRenderer(NewMarkdownRenderer())
+	ctx := context.Background()
+	opts := RenderOpts{ContentType: ContentTypeMarkdown, Width: 80}
+	source := "head" + "e\u0301" + strings.Repeat("x", maxStreamingRenderBytes-2)
+
+	renderer.Finish(ctx, source, opts)
+	tail := renderer.sourceTailString()
+	require.False(t, strings.HasPrefix(tail, "\u0301"), "a retained source tail must not start with a detached combining mark")
+	require.True(t, renderer.sourceTailHidden)
+}
+
+func TestStreamingMarkdownFinishIsIdempotent(t *testing.T) {
+	renderer := NewStreamingMarkdownRenderer(NewMarkdownRenderer())
+	ctx := context.Background()
+	opts := RenderOpts{ContentType: ContentTypeMarkdown, Width: 80}
+	source := "# once\n\ncanonical **text**"
+
+	first := renderer.Finish(ctx, source, opts)
+	second := renderer.Finish(ctx, source, opts)
+
+	require.Equal(t, first, second)
+	require.EqualValues(t, 1, renderer.stats().markdownRenderCalls)
+	require.EqualValues(t, len(source), renderer.stats().markdownRenderBytes)
 }
 
 func TestStreamingMarkdownAppendChunkBoundsAnOversizedPendingGrapheme(t *testing.T) {
@@ -192,4 +269,37 @@ func TestStreamingMarkdownAppendCountersDoNotScaleWithAccumulatedPrefix(t *testi
 	require.LessOrEqual(t, stats.renderedLines, maxStreamingRenderLines)
 	require.LessOrEqual(t, stats.renderedBytes, maxStreamingRenderBytes)
 	require.LessOrEqual(t, stats.retainedSourceBytes, maxStreamingRenderBytes)
+}
+
+func TestStreamingMarkdownAppendChunkScalingCounters(t *testing.T) {
+	const totalBytes = 1 << 20
+	for _, chunks := range []int{1, 16, 256, 1000} {
+		t.Run(fmt.Sprintf("chunks_%d", chunks), func(t *testing.T) {
+			renderer := NewStreamingMarkdownRenderer(NewMarkdownRenderer())
+			chunkSize := totalBytes / chunks
+			remainder := totalBytes % chunks
+			for i := range chunks {
+				size := chunkSize
+				if i < remainder {
+					size++
+				}
+				renderer.AppendChunk(context.Background(), strings.Repeat("x", size), RenderOpts{ContentType: ContentTypeStreaming, Width: 120})
+			}
+			stats := renderer.stats()
+			require.EqualValues(t, totalBytes, stats.inputBytes)
+			require.EqualValues(t, totalBytes, stats.parserBytes)
+			require.Zero(t, stats.markdownRenderCalls)
+			require.LessOrEqual(t, stats.renderedBytes, maxStreamingRenderBytes)
+			require.LessOrEqual(t, stats.retainedSourceBytes, maxStreamingRenderBytes)
+		})
+	}
+}
+
+func sharesStringBacking(text, backing string) bool {
+	if text == "" || backing == "" {
+		return false
+	}
+	textStart := uintptr(unsafe.Pointer(unsafe.StringData(text)))
+	backingStart := uintptr(unsafe.Pointer(unsafe.StringData(backing)))
+	return textStart >= backingStart && textStart < backingStart+uintptr(len(backing))
 }
