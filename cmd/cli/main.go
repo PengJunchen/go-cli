@@ -18,17 +18,36 @@ import (
 	"github.com/pengjunchen/go-cli/internal/cli"
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/tracing"
+	"golang.org/x/term"
 )
 
 func main() {
-	tm := approval.NewDefaultTrustManager(nil)
-	trustCheck := func(ctx context.Context, projectPath string) bool {
-		return tm.IsTrusted(ctx, projectPath)
+	tm, err := newPersistentTrustManager()
+	if err != nil {
+		_, _ = fmt.Fprintf(os.Stderr, "warning: persistent trust store unavailable: %v\n", err) //nolint:errcheck // startup warning is best-effort
 	}
-	loadConfig := func() (*config.Config, error) {
-		return config.LoadTrusted(trustCheck)
+	os.Exit(runWithTrustManager(os.Args[1:], os.Stdout, os.Stderr, tm))
+}
+
+// newPersistentTrustManager creates the one process-wide manager over the
+// fixed private trust store. An unavailable home directory fails closed by
+// returning no manager; callers must not substitute an in-memory store.
+func newPersistentTrustManager() (approval.TrustManager, error) {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return nil, fmt.Errorf("resolve user home for trust store: %w", err)
 	}
-	os.Exit(run(os.Args[1:], os.Stdout, os.Stderr, loadConfig))
+	if home == "" || !filepath.IsAbs(home) {
+		return nil, errors.New("resolve user home for trust store: home must be an absolute path")
+	}
+	path := filepath.Join(home, ".config", "go-cli", "trust.json")
+	return approval.NewDefaultTrustManager(approval.NewFileTrustStore(path)), nil
+}
+
+func runWithTrustManager(argv []string, stdout, stderr io.Writer, manager approval.TrustManager) int {
+	return runWithContextLoader(argv, stdout, stderr, func(ctx context.Context) (*config.Config, error) {
+		return config.LoadTrustedWithManager(ctx, manager)
+	}, manager, defaultInvocationProducerWaitBudget)
 }
 
 // run is the testable entry point. It wires signal cancellation, config
@@ -47,6 +66,18 @@ func runWithInvocationWaitBudget(
 	argv []string,
 	stdout, stderr io.Writer,
 	loadConfig func() (*config.Config, error),
+	producerWaitBudget time.Duration,
+) int {
+	return runWithContextLoader(argv, stdout, stderr, func(context.Context) (*config.Config, error) {
+		return loadConfig()
+	}, nil, producerWaitBudget)
+}
+
+func runWithContextLoader(
+	argv []string,
+	stdout, stderr io.Writer,
+	loadConfig func(context.Context) (*config.Config, error),
+	manager approval.TrustManager,
 	producerWaitBudget time.Duration,
 ) int {
 	previousLogger := slog.Default()
@@ -88,13 +119,19 @@ func runWithInvocationWaitBudget(
 
 	registry := cli.NewDefaultCommandRegistry()
 	cli.RegisterBuiltinCommands(registry, stdout)
+	if err := registry.Register(cli.NewTrustCommand(manager, os.Stdin, stdout, func() bool {
+		return term.IsTerminal(int(os.Stdin.Fd())) && term.IsTerminal(int(os.Stdout.Fd()))
+	})); err != nil {
+		_, _ = fmt.Fprintf(stderr, "error: register trust command: %v\n", err) //nolint:errcheck // CLI error output is best-effort
+		return 1
+	}
 
 	var cfg *config.Config
 	if cli.IsGlobalHelpOrVersion(argv) {
 		cfg = rootHelpVersionConfig()
 	} else {
 		var err error
-		cfg, err = loadConfig()
+		cfg, err = loadConfig(ctx)
 		if err != nil {
 			_, _ = fmt.Fprintf(stderr, "error: %v\n", err) //nolint:errcheck // CLI error output is best-effort
 			return 1
