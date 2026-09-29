@@ -86,20 +86,37 @@ func TestET_Phase23_InboxConsumption(t *testing.T) {
 
 	sub := core.NewDefaultSubAgent(core.SubAgentConfig{
 		Name:     "inbox-test",
-		MaxTurns: 3,
+		MaxTurns: 40,
 	})
+	ds, ok := sub.(*core.DefaultSubAgent)
+	require.True(t, ok, "sub should be *DefaultSubAgent")
 
-	// Send a follow-up message before Run. It lands in the inbox buffer and
-	// is drained on the first turn iteration via pumpInbox.
-	require.NoError(t, sub.Send(ctx, "follow-up message"))
+	// Idle sub-agents cannot accept messages; the message is not recorded.
+	require.ErrorIs(t, sub.Send(ctx, "follow-up message"), core.ErrSubAgentNotRunning)
+	assert.Empty(t, ds.Received())
 
 	evCh, err := sub.Run(ctx, "initial prompt")
 	require.NoError(t, err)
+
+	// Let the simulated runner fill its bounded event buffer. It then remains
+	// running while blocked on output, giving this test a deterministic window
+	// to send a supported follow-up message.
+	for len(evCh) < cap(evCh) {
+		select {
+		case <-ctx.Done():
+			t.Fatal("sub-agent did not fill its event buffer while running")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	require.Equal(t, core.SubAgentRunning, ds.State())
+	require.NoError(t, sub.Send(ctx, "follow-up message"))
 
 	var events []core.AgentEvent
 	for ev := range evCh {
 		events = append(events, ev)
 	}
+	_, err = sub.Wait(ctx)
+	require.NoError(t, err)
 
 	// The sent message must appear as a "user" event (pumpInbox emits inbox
 	// messages as user events).
@@ -114,8 +131,6 @@ func TestET_Phase23_InboxConsumption(t *testing.T) {
 		"sent message should be consumed from inbox and emitted as a user event")
 
 	// Received() should include the sent message.
-	ds, ok := sub.(*core.DefaultSubAgent)
-	require.True(t, ok, "sub should be *DefaultSubAgent")
 	assert.Contains(t, ds.Received(), "follow-up message")
 
 	// The runner should have produced response events.
@@ -125,7 +140,7 @@ func TestET_Phase23_InboxConsumption(t *testing.T) {
 			responseCount++
 		}
 	}
-	assert.Equal(t, 3, responseCount, "should have 3 response messages (MaxTurns=3)")
+	assert.Equal(t, 40, responseCount, "should have 40 response messages (MaxTurns=40)")
 }
 
 // TestET_Phase23_ToolFiltering verifies that when a sub-agent task specifies
