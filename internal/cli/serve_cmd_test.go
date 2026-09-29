@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -114,6 +115,40 @@ func TestServeApproveAskRejectedBeforeTokenWriteOrListener(t *testing.T) {
 				t.Fatalf("token file changed before rejecting ask mode: %q", data)
 			}
 		})
+	}
+}
+
+func TestServeRemoteTUIRejectedBeforeAssemblyOrTokenWrite(t *testing.T) {
+	out := &safeBuffer{}
+	c := newServeCmd(out)
+	tokenPath := privateServeTokenPath(t)
+	const oldToken = "preserve-existing-token"
+	if err := os.WriteFile(tokenPath, []byte(oldToken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	assemblyCalls := 0
+	c.assemblyFactory = func(context.Context, *config.Config, string, string, io.Writer, ...AssembleOption) (*AgentAssembly, error) {
+		assemblyCalls++
+		return nil, errors.New("assembly must not run for unsupported remote TUI")
+	}
+
+	err := c.Run(context.Background(), newAssembleTestConfig(), []string{
+		"--tui",
+		"--addr", "127.0.0.1:0",
+		"--token-file", tokenPath,
+	})
+	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "flag provided but not defined") {
+		t.Fatalf("expected unsupported remote TUI flag error, got %v", err)
+	}
+	if assemblyCalls != 0 {
+		t.Fatalf("agent assembly ran before rejecting remote TUI %d time(s)", assemblyCalls)
+	}
+	if strings.Contains(out.String(), "listening") {
+		t.Fatalf("serve listened despite unsupported remote TUI: %s", out.String())
+	}
+	data, readErr := os.ReadFile(tokenPath)
+	if readErr != nil || string(data) != oldToken {
+		t.Fatalf("unsupported remote TUI changed the token file: data=%q err=%v", data, readErr)
 	}
 }
 
@@ -632,6 +667,15 @@ func TestWriteTokenFileReplacesWideFilePrivately(t *testing.T) {
 }
 
 func TestServeTokenFileFailureDoesNotStartListener(t *testing.T) {
+	reservation, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := reservation.Addr().String()
+	if err := reservation.Close(); err != nil {
+		t.Fatal(err)
+	}
+
 	dir := filepath.Join(t.TempDir(), "shared")
 	if err := os.Mkdir(dir, 0o755); err != nil {
 		t.Fatal(err)
@@ -649,7 +693,7 @@ func TestServeTokenFileFailureDoesNotStartListener(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		done <- c.Run(ctx, newAssembleTestConfig(), []string{
-			"--addr", "127.0.0.1:0",
+			"--addr", addr,
 			"--approve", "deny",
 			"--token-file", filepath.Join(dir, "serve-token"),
 		})
@@ -663,10 +707,82 @@ func TestServeTokenFileFailureDoesNotStartListener(t *testing.T) {
 		if strings.Contains(out.String(), "listening") {
 			t.Fatalf("listener started despite token file failure: %s", out.String())
 		}
+		probe, listenErr := net.Listen("tcp", addr)
+		if listenErr != nil {
+			t.Fatalf("token file failure left a listener on %s: %v", addr, listenErr)
+		}
+		if err := probe.Close(); err != nil {
+			t.Fatal(err)
+		}
 	case <-time.After(300 * time.Millisecond):
 		cancel()
 		<-done
 		t.Fatal("serve did not fail before listener startup")
+	}
+}
+
+func TestServeBindFailureDoesNotPublishTokenOrLeaveListener(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		existingToken string
+	}{
+		{name: "new token"},
+		{name: "preserve existing token", existingToken: "previous-token"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			occupied, err := net.Listen("tcp", "127.0.0.1:0")
+			if err != nil {
+				t.Fatal(err)
+			}
+			addr := occupied.Addr().String()
+			defer occupied.Close()
+
+			tokenPath := privateServeTokenPath(t)
+			if tc.existingToken != "" {
+				if err := os.WriteFile(tokenPath, []byte(tc.existingToken), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			out := &safeBuffer{}
+			errOut := &safeBuffer{}
+			c := newServeCmd(out)
+			c.errOut = errOut
+			err = c.Run(context.Background(), newAssembleTestConfig(), []string{
+				"--addr", addr,
+				"--approve", "deny",
+				"--token-file", tokenPath,
+			})
+			if err == nil || !strings.Contains(strings.ToLower(err.Error()), "listen") {
+				t.Fatalf("expected bind failure, got %v", err)
+			}
+			if strings.Contains(out.String(), "listening") {
+				t.Fatalf("serve reported success after bind failure: %s", out.String())
+			}
+			if strings.Contains(errOut.String(), "Auth token:") {
+				t.Fatalf("serve disclosed a token after bind failure: %s", errOut.String())
+			}
+
+			data, readErr := os.ReadFile(tokenPath)
+			if tc.existingToken == "" {
+				if !os.IsNotExist(readErr) {
+					t.Fatalf("failed serve published a token file: data=%q err=%v", data, readErr)
+				}
+			} else if readErr != nil || string(data) != tc.existingToken {
+				t.Fatalf("failed serve replaced the existing token: data=%q err=%v", data, readErr)
+			}
+
+			if err := occupied.Close(); err != nil {
+				t.Fatal(err)
+			}
+			probe, err := net.Listen("tcp", addr)
+			if err != nil {
+				t.Fatalf("failed serve left a listener on %s: %v", addr, err)
+			}
+			if err := probe.Close(); err != nil {
+				t.Fatal(err)
+			}
+		})
 	}
 }
 

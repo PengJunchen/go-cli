@@ -210,12 +210,6 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 			if path == "" {
 				path = defaultServeTokenPath()
 			}
-			if err := writeTokenFile(path, authToken); err != nil {
-				return errors.Join(
-					newExecutionError("serve: write token file", err),
-					closeAssemblyForCommand(context.Background(), assembly, "serve"),
-				)
-			}
 			tokenWrittenTo = path
 		}
 	}
@@ -239,6 +233,14 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 			newExecutionError("serve: start server", err),
 			closeAssemblyForCommand(context.Background(), assembly, "serve"),
 		)
+	}
+	if tokenWrittenTo != "" {
+		if err := writeTokenFile(tokenWrittenTo, authToken); err != nil {
+			return errors.Join(
+				newExecutionError("serve: write token file", err),
+				closeAssemblyForCommand(context.Background(), assembly, "serve"),
+			)
+		}
 	}
 
 	fmt.Fprintf(c.out, "ACP HTTP server listening on %s\n", addr) //nolint:errcheck
