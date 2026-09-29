@@ -12,6 +12,16 @@ import (
 // path. The stable 0600 sidecar is kept after release so concurrent processes
 // always lock the same inode while path itself is atomically replaced.
 func WithExclusiveLock(ctx context.Context, path string, update func() error) error {
+	if err := validateLockArgs(ctx, path, update); err != nil {
+		return err
+	}
+	if err := ensurePrivateParent(filepath.Dir(path)); err != nil {
+		return fmt.Errorf("privatefile: secure lock parent directory: %w", err)
+	}
+	return withLockFile(ctx, path+".lock", update)
+}
+
+func validateLockArgs(ctx context.Context, path string, update func() error) error {
 	if ctx == nil {
 		return errors.New("privatefile: lock context is required")
 	}
@@ -21,13 +31,11 @@ func WithExclusiveLock(ctx context.Context, path string, update func() error) er
 	if update == nil {
 		return errors.New("privatefile: locked update is required")
 	}
-	if err := ctx.Err(); err != nil {
-		return err
-	}
-	if err := ensurePrivateParent(filepath.Dir(path)); err != nil {
-		return fmt.Errorf("privatefile: secure lock parent directory: %w", err)
-	}
-	file, err := openLockFile(path + ".lock")
+	return ctx.Err()
+}
+
+func withLockFile(ctx context.Context, lockPath string, update func() error) error {
+	file, err := openLockFile(lockPath)
 	if err != nil {
 		return fmt.Errorf("privatefile: open lock file: %w", err)
 	}

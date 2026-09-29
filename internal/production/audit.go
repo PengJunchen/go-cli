@@ -211,7 +211,7 @@ func (l *DefaultAuditLog) Log(ctx context.Context, entry AuditEntry) error {
 	}
 	lockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), l.auditLockTimeout())
 	defer cancel()
-	appendErr := privatefile.WithExclusiveLock(lockCtx, l.path, func() error {
+	appendErr := privatefile.WithAuditExclusiveLock(lockCtx, l.path, func() error {
 		if err := l.refreshChain(); err != nil {
 			return err
 		}
@@ -387,7 +387,7 @@ func (l *DefaultAuditLog) VerifyChain() error {
 	defer l.mu.RUnlock()
 	lockCtx, cancel := context.WithTimeout(context.Background(), l.auditLockTimeout())
 	defer cancel()
-	return privatefile.WithExclusiveLock(lockCtx, l.path, func() error {
+	return privatefile.WithAuditExclusiveLock(lockCtx, l.path, func() error {
 		_, _, err := walkAuditLog(l.path, nil)
 		return err
 	})
@@ -406,7 +406,7 @@ func (l *DefaultAuditLog) Query(ctx context.Context, filter AuditFilter) ([]Audi
 	var filtered []AuditEntry
 	lockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), l.auditLockTimeout())
 	defer cancel()
-	err := privatefile.WithExclusiveLock(lockCtx, l.path, func() error {
+	err := privatefile.WithAuditExclusiveLock(lockCtx, l.path, func() error {
 		_, _, walkErr := walkAuditLog(l.path, func(entry AuditEntry) error {
 			if filter.Matches(entry) {
 				filtered = append(filtered, entry)

@@ -271,6 +271,207 @@ func TestWithExclusiveLockWaitIsCancellable(t *testing.T) {
 	require.NoError(t, <-firstDone)
 }
 
+func TestWithAuditExclusiveLockSupportsOwnerSharedParent(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("advisory file locks are supported on Darwin and Linux")
+	}
+	dir := filepath.Join(t.TempDir(), "shared")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	require.NoError(t, os.Chmod(dir, 0o755))
+	path := filepath.Join(dir, "audit.jsonl")
+
+	for i := 0; i < 2; i++ {
+		require.NoError(t, WithAuditExclusiveLock(context.Background(), path, func() error { return nil }))
+	}
+	parentInfo, err := os.Stat(dir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o755), parentInfo.Mode().Perm(), "the existing project directory is not chmodded")
+
+	lockDir := filepath.Join(dir, ".go-cli-audit-locks")
+	lockDirInfo, err := os.Lstat(lockDir)
+	require.NoError(t, err)
+	assert.True(t, lockDirInfo.IsDir())
+	assert.Equal(t, os.FileMode(0o700), lockDirInfo.Mode().Perm())
+	lockFiles, err := os.ReadDir(lockDir)
+	require.NoError(t, err)
+	require.Len(t, lockFiles, 1)
+	lockPath := filepath.Join(lockDir, lockFiles[0].Name())
+	lockInfo, err := os.Lstat(lockPath)
+	require.NoError(t, err)
+	assert.True(t, lockInfo.Mode().IsRegular())
+	assert.Equal(t, os.FileMode(0o600), lockInfo.Mode().Perm())
+	firstLockInfo := lockInfo
+	require.NoError(t, WithAuditExclusiveLock(context.Background(), path, func() error { return nil }))
+	lockInfo, err = os.Lstat(lockPath)
+	require.NoError(t, err)
+	assert.True(t, os.SameFile(firstLockInfo, lockInfo), "repeated calls use the same stable lock inode")
+
+	calls := 0
+	err = WithExclusiveLock(context.Background(), path, func() error {
+		calls++
+		return nil
+	})
+	require.Error(t, err, "the strict private-file lock contract remains unchanged")
+	assert.Zero(t, calls)
+}
+
+func TestWithAuditExclusiveLockSupportsGroupReadOnlyParent(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("advisory file locks are supported on Darwin and Linux")
+	}
+	dir := filepath.Join(t.TempDir(), "shared")
+	require.NoError(t, os.Mkdir(dir, 0o750))
+	require.NoError(t, os.Chmod(dir, 0o750))
+	called := false
+	err := WithAuditExclusiveLock(context.Background(), filepath.Join(dir, "audit.jsonl"), func() error {
+		called = true
+		return nil
+	})
+	require.NoError(t, err)
+	assert.True(t, called)
+	parentInfo, err := os.Stat(dir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o750), parentInfo.Mode().Perm())
+}
+
+func TestWithAuditExclusiveLockRejectsWideExistingTargetInSharedParent(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("advisory file locks are supported on Darwin and Linux")
+	}
+	dir := filepath.Join(t.TempDir(), "shared")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	require.NoError(t, os.Chmod(dir, 0o755))
+	path := filepath.Join(dir, "audit.jsonl")
+	require.NoError(t, os.WriteFile(path, []byte("existing audit data"), 0o644))
+	require.NoError(t, os.Chmod(path, 0o644))
+	called := false
+	err := WithAuditExclusiveLock(context.Background(), path, func() error {
+		called = true
+		return nil
+	})
+	require.Error(t, err)
+	assert.False(t, called)
+	assert.Contains(t, err.Error(), "0600")
+	data, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	assert.Equal(t, "existing audit data", string(data))
+	info, statErr := os.Stat(path)
+	require.NoError(t, statErr)
+	assert.Equal(t, os.FileMode(0o644), info.Mode().Perm())
+}
+
+func TestWithAuditExclusiveLockRejectsUnsafeExistingTargets(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("advisory file locks are supported on Darwin and Linux")
+	}
+	t.Run("symlink", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.Chmod(dir, 0o700))
+		path := filepath.Join(dir, "audit.jsonl")
+		target := filepath.Join(dir, "target")
+		require.NoError(t, os.WriteFile(target, []byte("unchanged"), 0o600))
+		require.NoError(t, os.Symlink(target, path))
+		called := false
+		err := WithAuditExclusiveLock(context.Background(), path, func() error {
+			called = true
+			return nil
+		})
+		require.Error(t, err)
+		assert.False(t, called)
+		data, readErr := os.ReadFile(target)
+		require.NoError(t, readErr)
+		assert.Equal(t, "unchanged", string(data))
+		info, statErr := os.Stat(target)
+		require.NoError(t, statErr)
+		assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
+	})
+
+	t.Run("non-regular target", func(t *testing.T) {
+		dir := t.TempDir()
+		require.NoError(t, os.Chmod(dir, 0o700))
+		called := false
+		err := WithAuditExclusiveLock(context.Background(), dir, func() error {
+			called = true
+			return nil
+		})
+		require.Error(t, err)
+		assert.False(t, called)
+	})
+}
+
+func TestWithAuditExclusiveLockRejectsUnsafeParents(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("advisory file locks are supported on Darwin and Linux")
+	}
+	for _, mode := range []os.FileMode{0o775, 0o777} {
+		t.Run(mode.String(), func(t *testing.T) {
+			dir := filepath.Join(t.TempDir(), "shared")
+			require.NoError(t, os.Mkdir(dir, mode))
+			require.NoError(t, os.Chmod(dir, mode))
+			called := false
+			err := WithAuditExclusiveLock(context.Background(), filepath.Join(dir, "audit.jsonl"), func() error {
+				called = true
+				return nil
+			})
+			require.Error(t, err)
+			assert.False(t, called)
+			_, statErr := os.Lstat(filepath.Join(dir, ".go-cli-audit-locks"))
+			assert.ErrorIs(t, statErr, os.ErrNotExist)
+		})
+	}
+
+	t.Run("symlink parent", func(t *testing.T) {
+		root := t.TempDir()
+		target := filepath.Join(root, "target")
+		link := filepath.Join(root, "linked")
+		require.NoError(t, os.Mkdir(target, 0o755))
+		require.NoError(t, os.Chmod(target, 0o755))
+		require.NoError(t, os.Symlink(target, link))
+		called := false
+		err := WithAuditExclusiveLock(context.Background(), filepath.Join(link, "audit.jsonl"), func() error {
+			called = true
+			return nil
+		})
+		require.Error(t, err)
+		assert.False(t, called)
+	})
+
+	t.Run("preexisting insecure lock directory", func(t *testing.T) {
+		dir := filepath.Join(t.TempDir(), "shared")
+		require.NoError(t, os.Mkdir(dir, 0o755))
+		require.NoError(t, os.Chmod(dir, 0o755))
+		lockDir := filepath.Join(dir, auditLockDirectoryName)
+		require.NoError(t, os.Mkdir(lockDir, 0o755))
+		require.NoError(t, os.Chmod(lockDir, 0o755))
+		called := false
+		err := WithAuditExclusiveLock(context.Background(), filepath.Join(dir, "audit.jsonl"), func() error {
+			called = true
+			return nil
+		})
+		require.Error(t, err)
+		assert.False(t, called)
+		lockInfo, statErr := os.Stat(lockDir)
+		require.NoError(t, statErr)
+		assert.Equal(t, os.FileMode(0o755), lockInfo.Mode().Perm(), "an existing lock directory is never chmodded")
+	})
+}
+
+func TestWithAuditExclusiveLockFallsBackToStrictLockWhenOwnershipIsUnknown(t *testing.T) {
+	if runtime.GOOS == "darwin" || runtime.GOOS == "linux" {
+		t.Skip("ownership validation is supported on Darwin and Linux")
+	}
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	called := false
+	err := WithAuditExclusiveLock(context.Background(), filepath.Join(dir, "audit.jsonl"), func() error {
+		called = true
+		return nil
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unsupported on this platform")
+	assert.False(t, called, "unsupported lock platforms fail closed through the existing strict path")
+}
+
 func TestWriteFullHandlesShortWrites(t *testing.T) {
 	w := &shortWriter{}
 	require.NoError(t, writeFull(w, []byte("complete")))
