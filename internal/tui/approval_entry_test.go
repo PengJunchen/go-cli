@@ -200,8 +200,9 @@ func TestTeaModel_ApprovalKeyIgnoredWhenNoPending(t *testing.T) {
 	assert.Nil(t, cmd)
 }
 
-// TestApprovalRequestMsg_UpdateFlow verifies that an approvalRequestMsg sets
-// pendingApproval and re-arms the waitForApproval command.
+// TestApprovalRequestMsg_UpdateFlow verifies a request delivered by the
+// app-owned approval pump becomes the active interaction without creating a
+// second detached channel reader.
 func TestApprovalRequestMsg_UpdateFlow(t *testing.T) {
 	m := &teaModel{
 		accordion:  NewAccordionModel(),
@@ -217,7 +218,7 @@ func TestApprovalRequestMsg_UpdateFlow(t *testing.T) {
 	require.NotNil(t, updated)
 	require.NotNil(t, m.activeInteraction)
 	assert.NotNil(t, m.activeInteraction.approval)
-	assert.NotNil(t, cmd, "waitForApproval should be re-armed")
+	assert.Nil(t, cmd, "approval channel ownership stays with BubbleteaApp.Run")
 }
 
 func TestTUIApprovalDisplaysAuthoritativeRequestID(t *testing.T) {

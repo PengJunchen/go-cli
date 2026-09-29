@@ -140,6 +140,28 @@ type TokenUsage struct {
 	Cost float64 `json:"cost,omitempty"`
 }
 
+// DurablePublicationState describes the durable visibility of a run result.
+type DurablePublicationState string
+
+const (
+	// DurablePublicationUnbound means the run had no durable session binding.
+	DurablePublicationUnbound DurablePublicationState = "unbound"
+	// DurablePublicationPending means durable publication or owner cleanup is incomplete.
+	DurablePublicationPending DurablePublicationState = "pending"
+	// DurablePublicationSynced means the owner's terminal commit and cleanup were acknowledged.
+	DurablePublicationSynced DurablePublicationState = "synced"
+	// DurablePublicationFailed means a bound run finished without positive durable publication evidence.
+	DurablePublicationFailed DurablePublicationState = "failed"
+)
+
+// DurablePublication contains owner-derived evidence for one run's durable transcript.
+type DurablePublication struct {
+	State           DurablePublicationState
+	RunID           string
+	SessionID       string
+	OwnerGeneration string
+}
+
 // String returns a time-stamped representation of the event and logs it.
 func (e AgentEvent) String() string {
 	return e.Timestamp.Format(time.RFC3339Nano) + " [" + e.Kind + "] " + e.Content
@@ -159,6 +181,8 @@ type Result struct {
 	ExecutionState RunExecutionState
 	// StatusHandle provides a fresh immutable status snapshot while cleanup drains.
 	StatusHandle RunStatusHandle
+	// DurablePublication is the owner-derived publication state for this result.
+	DurablePublication DurablePublication
 }
 
 // String returns a short summary of the result and logs it.

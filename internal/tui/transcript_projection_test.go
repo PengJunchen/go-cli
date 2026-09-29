@@ -15,13 +15,20 @@ func TestCanonicalTranscriptSnapshotCloneIsDeepAndIndependent(t *testing.T) {
 		PhysicalSessionID: "physical",
 		BranchID:          "main",
 		Rows: []CanonicalTranscriptRow{{
-			Key:     DurableTranscriptKey{PhysicalSessionID: "physical", BranchID: "main", EntryID: "assistant-1"},
-			Kind:    TranscriptRowAssistant,
-			Message: core.AgentMessage{Role: "assistant", Usage: &llm.Usage{InputTokens: 2}, ToolCalls: []llm.ToolCall{{ID: "call-1", Name: "read", Args: args}}},
+			Key:                 DurableTranscriptKey{PhysicalSessionID: "physical", BranchID: "main", EntryID: "assistant-1"},
+			Kind:                TranscriptRowAssistant,
+			Message:             core.AgentMessage{Role: "assistant", Usage: &llm.Usage{InputTokens: 2}, ToolCalls: []llm.ToolCall{{ID: "call-1", Name: "read", Args: args}}},
+			AssistantOccurrence: &AssistantOccurrenceKey{RunID: "run-1", CanonicalTranscriptIndex: 0},
 			Calls: []ToolOccurrence{{
 				Key:      ToolOccurrenceKey{RunID: "run-1", AssistantTranscriptOrdinal: 0, ToolCallID: "call-1"},
 				ToolName: "read", JournalFacts: []ActionJournalFact{{EntryID: "intent-1", Stage: ActionJournalIntent}},
 			}},
+		}, {
+			Key:             DurableTranscriptKey{PhysicalSessionID: "physical", BranchID: "main", EntryID: "tool-1"},
+			Kind:            TranscriptRowTool,
+			Message:         core.AgentMessage{Role: "tool", ToolCallID: "call-1", ToolName: "read"},
+			Occurrence:      &ToolOccurrenceKey{RunID: "run-1", AssistantTranscriptOrdinal: 0, ToolCallID: "call-1"},
+			SourceTruncated: boolPointerTUI(true),
 		}},
 	}
 
@@ -29,14 +36,20 @@ func TestCanonicalTranscriptSnapshotCloneIsDeepAndIndependent(t *testing.T) {
 	clone.Rows[0].Message.ToolCalls[0].Args.(map[string]any)["nested"].(map[string]any)["items"].([]any)[0] = "clone-only"
 	clone.Rows[0].Message.Usage.InputTokens = 99
 	clone.Rows[0].Calls[0].JournalFacts[0].EntryID = "clone-entry"
+	clone.Rows[0].AssistantOccurrence.CanonicalTranscriptIndex = 99
+	*clone.Rows[1].SourceTruncated = false
 
 	require.Equal(t, "before", snapshot.Rows[0].Message.ToolCalls[0].Args.(map[string]any)["nested"].(map[string]any)["items"].([]any)[0])
 	require.Equal(t, 2, snapshot.Rows[0].Message.Usage.InputTokens)
 	require.Equal(t, "intent-1", snapshot.Rows[0].Calls[0].JournalFacts[0].EntryID)
+	require.Equal(t, uint64(0), snapshot.Rows[0].AssistantOccurrence.CanonicalTranscriptIndex)
+	require.True(t, *snapshot.Rows[1].SourceTruncated)
 
 	snapshot.Rows[0].Message.ToolCalls[0].Args.(map[string]any)["nested"].(map[string]any)["items"].([]any)[0] = "source-only"
 	require.Equal(t, "clone-only", clone.Rows[0].Message.ToolCalls[0].Args.(map[string]any)["nested"].(map[string]any)["items"].([]any)[0])
 }
+
+func boolPointerTUI(value bool) *bool { return &value }
 
 func TestCanonicalTranscriptSnapshotValidateRejectsInconsistentRows(t *testing.T) {
 	valid := CanonicalTranscriptSnapshot{

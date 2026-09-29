@@ -168,6 +168,11 @@ func projectTranscriptRows(input transcriptProjectionInput) (tui.CanonicalTransc
 			Key:  tui.DurableTranscriptKey{PhysicalSessionID: snapshot.SessionID, BranchID: snapshot.ActiveBranchID, EntryID: entryID},
 			Kind: kind, Message: message, SourceSeq: entry.Seq, ActionID: entry.ActionID,
 		}
+		if kind == tui.TranscriptRowAssistant && entry.RunID != "" && entry.TranscriptIndex != nil {
+			row.AssistantOccurrence = &tui.AssistantOccurrenceKey{
+				RunID: entry.RunID, CanonicalTranscriptIndex: *entry.TranscriptIndex,
+			}
+		}
 		if kind == tui.TranscriptRowCompaction {
 			summary := entry.Summary
 			if summary == "" {

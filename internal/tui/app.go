@@ -19,6 +19,8 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/term"
 	"github.com/muesli/termenv"
+
+	"github.com/pengjunchen/go-cli/internal/core"
 )
 
 // Msg is the generic message type delivered to an App via Send. It corresponds
@@ -69,6 +71,25 @@ type AgentEvent struct {
 	// message event. These are provisional until a matching tool_call event
 	// confirms execution has started.
 	ToolCalls []ToolCallData
+}
+
+func (event AgentEvent) clone() AgentEvent {
+	if event.CanonicalTranscriptIndex != nil {
+		index := *event.CanonicalTranscriptIndex
+		event.CanonicalTranscriptIndex = &index
+	}
+	if event.AssistantTranscriptOrdinal != nil {
+		ordinal := *event.AssistantTranscriptOrdinal
+		event.AssistantTranscriptOrdinal = &ordinal
+	}
+	if event.SourceTruncated != nil {
+		truncated := *event.SourceTruncated
+		event.SourceTruncated = &truncated
+	}
+	if event.ToolCalls != nil {
+		event.ToolCalls = append([]ToolCallData(nil), event.ToolCalls...)
+	}
+	return event
 }
 
 // ToolCallData is the presentation-safe subset of an assistant tool call.
@@ -178,6 +199,23 @@ var _ App = (*BubbleteaApp)(nil)
 // AppOption configures a BubbleteaApp at construction time.
 type AppOption func(*BubbleteaApp)
 
+// WithInitialTranscript seeds a new app with one validated selected-branch
+// snapshot. The value is cloned before the app exposes it to the model.
+func WithInitialTranscript(snapshot CanonicalTranscriptSnapshot) AppOption {
+	return func(a *BubbleteaApp) {
+		cloned := snapshot.Clone()
+		a.initialTranscript = &cloned
+	}
+}
+
+// WithRunPublicationIdentity binds reliable refreshes to the active owner run.
+func WithRunPublicationIdentity(runID, ownerGeneration string) AppOption {
+	return func(a *BubbleteaApp) {
+		a.expectedRunID = runID
+		a.expectedOwnerGeneration = ownerGeneration
+	}
+}
+
 // WithRegistry sets the renderer registry used for content-type dispatch.
 func WithRegistry(reg *RendererRegistry) AppOption {
 	return func(a *BubbleteaApp) { a.reg = reg }
@@ -232,6 +270,13 @@ func WithFollowUpCallback(cb func(string)) AppOption {
 // cancel the running turn.
 func WithCancelCallback(cb func()) AppOption {
 	return func(a *BubbleteaApp) { a.cancelCallback = cb }
+}
+
+// WithDeferQuitUntilTranscriptRefresh keeps the app alive when the user asks
+// to quit, while still invoking the cancel callback. The caller must apply
+// the joined run's canonical transcript refresh and then call Quit.
+func WithDeferQuitUntilTranscriptRefresh() AppOption {
+	return func(a *BubbleteaApp) { a.deferQuitUntilTranscriptRefresh = true }
 }
 
 // WithPauseCallback registers a callback invoked when the user presses Space
@@ -326,17 +371,28 @@ type BubbleteaApp struct {
 
 	// done closes once Run has fully cleaned up and exited.
 	done chan struct{}
+	// eventSourceDone closes after the model has observed the event stream end.
+	eventSourceDone chan struct{}
+	// ownedPumps joins the app-owned event and control source readers before
+	// Run closes Done. Bubble Tea command goroutines are intentionally not
+	// treated as app-owned workers because Bubble Tea does not expose a join.
+	ownedPumps sync.WaitGroup
 	// queueSpace receives a coalesced notification after the render loop takes
 	// a queued message, allowing critical senders to wait without polling.
 	queueSpace chan struct{}
 	// sendMu protects send admission and the active run/quit state.
 	sendMu        sync.Mutex
 	activeRunDone <-chan struct{}
+	uiContextDone <-chan struct{}
 	quitRequested bool
 
 	// quitOnce guards the quit channel so Quit is idempotent.
 	quitOnce sync.Once
 	quitCh   chan struct{}
+
+	controlMu     sync.Mutex
+	activeRefresh *transcriptRefreshRequest
+	nextControlID atomic.Uint64
 
 	// programReady is closed once Run has stored the tea.Program, allowing
 	// callers to wait for program availability without polling. It is closed
@@ -354,12 +410,13 @@ type BubbleteaApp struct {
 
 	// Option fields applied by WithXxx. They are mirrored into the model at
 	// construction time and retained here for test inspection.
-	reg         *RendererRegistry
-	themeMgr    *ThemeManager
-	events      <-chan AgentEvent
-	width       int
-	inputReader io.Reader
-	interactive bool
+	deferQuitUntilTranscriptRefresh bool
+	reg                             *RendererRegistry
+	themeMgr                        *ThemeManager
+	events                          <-chan AgentEvent
+	width                           int
+	inputReader                     io.Reader
+	interactive                     bool
 
 	onUpdate           func(string)
 	steerCallback      func(string)
@@ -378,6 +435,11 @@ type BubbleteaApp struct {
 	modeLabel string
 	wordWrap  int
 	diffStyle string
+
+	initialTranscript       *CanonicalTranscriptSnapshot
+	initialTranscriptErr    error
+	expectedRunID           string
+	expectedOwnerGeneration string
 }
 
 // NewBubbleteaApp constructs an app wired to the given event source, using a
@@ -387,14 +449,15 @@ type BubbleteaApp struct {
 // Run where the run context is available.
 func NewBubbleteaApp(events <-chan AgentEvent, opts ...AppOption) *BubbleteaApp {
 	a := &BubbleteaApp{
-		reg:          NewDefaultRegistry(),
-		themeMgr:     NewThemeManager(),
-		events:       events,
-		done:         make(chan struct{}),
-		queueSpace:   make(chan struct{}, 1),
-		quitCh:       make(chan struct{}),
-		programReady: make(chan struct{}),
-		interactive:  isTerminal(),
+		reg:             NewDefaultRegistry(),
+		themeMgr:        NewThemeManager(),
+		events:          events,
+		done:            make(chan struct{}),
+		eventSourceDone: make(chan struct{}),
+		queueSpace:      make(chan struct{}, 1),
+		quitCh:          make(chan struct{}),
+		programReady:    make(chan struct{}),
+		interactive:     isTerminal(),
 	}
 	for _, opt := range opts {
 		opt(a)
@@ -404,12 +467,34 @@ func NewBubbleteaApp(events <-chan AgentEvent, opts ...AppOption) *BubbleteaApp 
 	// consistent with the stream lipgloss actually renders to.
 	lipgloss.SetColorProfile(resolveColorProfile(os.Stderr))
 	a.model = newTeaModel(a)
+	if a.initialTranscript != nil {
+		if err := a.initialTranscript.Validate(); err != nil {
+			a.initialTranscriptErr = err
+		} else {
+			a.model.transcriptSnapshot = a.initialTranscript.Clone()
+			a.model.hasTranscriptSnapshot = true
+			if err := a.model.installTranscriptSnapshotLocked(a.model.transcriptSnapshot); err != nil {
+				a.initialTranscriptErr = err
+			}
+		}
+	}
 	return a
 }
 
+// NewBubbleteaAppWithTranscript constructs an app from a validated canonical
+// selected-branch snapshot.
+func NewBubbleteaAppWithTranscript(events <-chan AgentEvent, snapshot CanonicalTranscriptSnapshot, opts ...AppOption) (*BubbleteaApp, error) {
+	app := NewBubbleteaApp(events, append(opts, WithInitialTranscript(snapshot))...)
+	if app.initialTranscriptErr != nil {
+		return nil, app.initialTranscriptErr
+	}
+	return app, nil
+}
+
 // Run starts the bubbletea program. It returns when the context is canceled,
-// the event channel closes, or Quit is invoked. The loop tears down internal
-// resources before returning.
+// Quit is invoked, or an event source closes before a canonical transcript
+// snapshot was attached. Snapshot-backed apps remain active for a final model
+// refresh after their event source closes.
 //
 // In interactive (TTY) mode bubbletea owns terminal rendering (raw mode,
 // keyboard, resize, diff-based repaint) on stderr. In non-interactive mode the
@@ -420,16 +505,32 @@ func (a *BubbleteaApp) Run(ctx context.Context) error {
 	if !a.running.CompareAndSwap(false, true) {
 		return errAlreadyRunning
 	}
-	// runCtx is canceled when Run returns so any waitForEvent/waitForMsg
-	// command goroutines still blocked on their channels unblock and exit
-	// (bubbletea cannot kill a cmd func blocked on a user channel). It is also
-	// passed to the program as its context so context cancellation propagates
-	// to the event loop.
+	a.sendMu.Lock()
+	if a.cleaned {
+		a.done = make(chan struct{})
+		a.quitCh = make(chan struct{})
+		a.quitOnce = sync.Once{}
+		a.quitRequested = false
+		a.programReady = make(chan struct{})
+		a.readyOnce = sync.Once{}
+		a.cleaned = false
+		a.model.quitCh = a.quitCh
+	}
+	a.uiContextDone = ctx.Done()
+	a.sendMu.Unlock()
+	// runCtx is the context for the program and its app-owned message pump.
 	runCtx, cancelRun := context.WithCancel(ctx)
+	var messagePumpDone <-chan struct{}
 	defer func() {
 		cancelRun()
+		a.ownedPumps.Wait()
+		a.closePendingTranscriptRefresh(ErrTranscriptRefreshClosed)
+		if messagePumpDone != nil {
+			<-messagePumpDone
+		}
 		a.sendMu.Lock()
 		a.activeRunDone = nil
+		a.uiContextDone = nil
 		a.running.Store(false)
 		a.sendMu.Unlock()
 		a.program.Store(nil)
@@ -442,9 +543,55 @@ func (a *BubbleteaApp) Run(ctx context.Context) error {
 	a.model.runDone = runCtx.Done()
 	prog := tea.NewProgram(a.model, a.programOptions(runCtx)...)
 	a.program.Store(prog)
+	messagePumpDone = startMessagePump(runCtx, a.model.msgCh, a.queueSpace, prog.Send)
+	a.startSourcePumps(runCtx, prog.Send)
 	a.readyOnce.Do(func() { close(a.programReady) })
 	_, err := prog.Run()
 	return err
+}
+
+func (a *BubbleteaApp) startSourcePumps(ctx context.Context, send func(tea.Msg)) {
+	if a.events != nil {
+		a.ownedPumps.Add(1)
+		go func() {
+			defer a.ownedPumps.Done()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case event, ok := <-a.events:
+					if !ok {
+						send(agentEventStreamClosedMsg{})
+						return
+					}
+					send(agentEventMsg{event: event})
+				}
+			}
+		}()
+	}
+
+	a.ownedPumps.Add(1)
+	go func() {
+		defer a.ownedPumps.Done()
+		quitCh := (<-chan struct{})(a.quitCh)
+		approvalCh := a.approvalCh
+		for quitCh != nil || approvalCh != nil {
+			select {
+			case <-ctx.Done():
+				return
+			case <-quitCh:
+				send(quitRequestedMsg{})
+				return
+			case request, ok := <-approvalCh:
+				if !ok {
+					approvalCh = nil
+					send(approvalChannelClosedMsg{})
+					continue
+				}
+				send(approvalRequestMsg{req: request})
+			}
+		}
+	}()
 }
 
 // programOptions builds the tea.ProgramOption set for the current run. Input is
@@ -480,12 +627,24 @@ func (a *BubbleteaApp) Quit() {
 		close(a.quitCh)
 		a.sendMu.Unlock()
 	})
+	a.closePendingTranscriptRefresh(ErrTranscriptRefreshClosed)
 	slog.Debug("tui.app.quit", "requested", true)
 }
 
 // Done returns a channel that closes once the render loop has fully cleaned
 // up and exited, enabling callers to wait on quit completion.
-func (a *BubbleteaApp) Done() <-chan struct{} { return a.done }
+func (a *BubbleteaApp) Done() <-chan struct{} {
+	a.sendMu.Lock()
+	defer a.sendMu.Unlock()
+	return a.done
+}
+
+// EventSourceDone closes after the model has processed the event-stream close
+// message. Snapshot-backed callers can wait for it before applying a durable
+// refresh while the UI remains active.
+func (a *BubbleteaApp) EventSourceDone() <-chan struct{} {
+	return a.model.eventSourceDone
+}
 
 // Program returns the underlying tea.Program after Run has started.
 // Returns nil before Run is called or after it has exited.
@@ -502,6 +661,8 @@ func (a *BubbleteaApp) Program() *tea.Program {
 // a nil-check on Program() to handle the window where the program has
 // not yet been stored.
 func (a *BubbleteaApp) ProgramReady() <-chan struct{} {
+	a.sendMu.Lock()
+	defer a.sendMu.Unlock()
 	return a.programReady
 }
 
@@ -540,10 +701,12 @@ func (a *BubbleteaApp) cleanup() {
 		a.model.todoSnapshot = nil
 		a.model.mu.Unlock()
 	}
+	a.sendMu.Lock()
 	if !a.cleaned {
 		a.cleaned = true
 		close(a.done)
 	}
+	a.sendMu.Unlock()
 	slog.Debug("tui.app.cleanup", "cleaned", true)
 }
 
@@ -561,13 +724,14 @@ type teaModel struct {
 	interactive bool
 
 	// event / message sources
-	events     <-chan AgentEvent
-	msgCh      chan Msg
-	queueSpace chan<- struct{}
-	quitCh     <-chan struct{}
+	events          <-chan AgentEvent
+	eventSourceDone chan struct{}
+	msgCh           chan Msg
+	queueSpace      chan<- struct{}
+	quitCh          <-chan struct{}
 	// runDone is closed (via runCtx cancellation) when the current Run exits,
-	// unblocking lingering waitForEvent/waitForMsg command goroutines so they
-	// do not leak. It is nil when the model is exercised without a program.
+	// unblocking interaction-cancel command goroutines. It is nil when the
+	// model is exercised without a program.
 	runDone <-chan struct{}
 
 	// accordion + streaming
@@ -594,11 +758,12 @@ type teaModel struct {
 	followUpCallback  func(string)
 
 	// callbacks
-	onUpdate       func(string)
-	cancelCallback func()
-	pauseCallback  func()
-	resumeCallback func()
-	paused         bool
+	deferQuitUntilTranscriptRefresh bool
+	onUpdate                        func(string)
+	cancelCallback                  func()
+	pauseCallback                   func()
+	resumeCallback                  func()
+	paused                          bool
 
 	// interaction flow serializes approval and ask_user modals in arrival order.
 	approvalCh          <-chan ApprovalRequest
@@ -620,6 +785,35 @@ type teaModel struct {
 	wordWrap  int
 	diffStyle string
 
+	transcriptSnapshot     CanonicalTranscriptSnapshot
+	transcriptLoadedScope  string
+	hasTranscriptSnapshot  bool
+	transcriptViewport     *transcriptViewport
+	toolTranscriptViewport *transcriptViewport
+	transcriptSplitActive  bool
+	hasTranscriptToolRows  bool
+	liveTranscriptRows     map[string]transcriptViewportRow
+	liveAssistantRows      map[AssistantOccurrenceKey]string
+	liveAssistantRenderers map[AssistantOccurrenceKey]*StreamingMarkdownRenderer
+	liveToolRows           map[liveToolOccurrence]string
+	liveToolRenderers      map[liveToolOccurrence]*StreamingMarkdownRenderer
+	liveToolTruncation     map[liveToolOccurrence]*bool
+	liveToolReceipts       map[liveToolOccurrence]string
+	canonicalAssistantKeys map[AssistantOccurrenceKey]struct{}
+	canonicalToolEntryKeys map[liveToolOccurrence]string
+	liveRowOrder           []string
+	liveRowSequence        uint64
+	transcriptSearchMode   bool
+	transcriptSearchInput  string
+	transcriptSearchAfter  string
+	selectedTranscriptKey  string
+	selectedTranscriptTool bool
+	liveStatus             string
+	runObservation         RunObservation
+	durablePublication     core.DurablePublication
+	expectedRunID          string
+	expectedOwnerGen       string
+
 	// token usage
 	tokenInput  int
 	tokenOutput int
@@ -633,6 +827,8 @@ type teaModel struct {
 	// quitting is set when the user requests quit so View can render a
 	// goodbye line.
 	quitting bool
+	// eventSourceClosed records source completion without ending the UI task.
+	eventSourceClosed bool
 
 	// helpOverlay is set when the user presses '?' to show the keyboard
 	// shortcut help overlay. While true the overlay is modal: only Esc or
@@ -658,59 +854,84 @@ type teaModel struct {
 // BubbleteaApp adapter.
 func newTeaModel(a *BubbleteaApp) *teaModel {
 	return &teaModel{
-		reg:                a.reg,
-		themeMgr:           a.themeMgr,
-		width:              a.width,
-		interactive:        a.interactive,
-		events:             a.events,
-		msgCh:              make(chan Msg, 16),
-		queueSpace:         a.queueSpace,
-		quitCh:             a.quitCh,
-		streamBuf:          make(map[string]*strings.Builder),
-		accordion:          NewAccordionModel(),
-		onUpdate:           a.onUpdate,
-		steerCallback:      a.steerCallback,
-		followUpCallback:   a.followUpCallback,
-		cancelCallback:     a.cancelCallback,
-		pauseCallback:      a.pauseCallback,
-		resumeCallback:     a.resumeCallback,
-		approvalCh:         a.approvalCh,
-		thinkingVisibility: a.thinkingVisibility,
-		modelName:          a.modelName,
-		turnCount:          a.turnCount,
-		sessionID:          a.sessionID,
-		modeLabel:          a.modeLabel,
-		wordWrap:           a.wordWrap,
-		diffStyle:          a.diffStyle,
-		spinner:            spinner.New(spinner.WithSpinner(spinner.MiniDot)),
+		reg:                             a.reg,
+		themeMgr:                        a.themeMgr,
+		width:                           a.width,
+		interactive:                     a.interactive,
+		events:                          a.events,
+		eventSourceDone:                 a.eventSourceDone,
+		msgCh:                           make(chan Msg, 16),
+		queueSpace:                      a.queueSpace,
+		quitCh:                          a.quitCh,
+		streamBuf:                       make(map[string]*strings.Builder),
+		liveTranscriptRows:              make(map[string]transcriptViewportRow),
+		liveAssistantRows:               make(map[AssistantOccurrenceKey]string),
+		liveAssistantRenderers:          make(map[AssistantOccurrenceKey]*StreamingMarkdownRenderer),
+		liveToolRows:                    make(map[liveToolOccurrence]string),
+		liveToolRenderers:               make(map[liveToolOccurrence]*StreamingMarkdownRenderer),
+		liveToolTruncation:              make(map[liveToolOccurrence]*bool),
+		liveToolReceipts:                make(map[liveToolOccurrence]string),
+		canonicalAssistantKeys:          make(map[AssistantOccurrenceKey]struct{}),
+		canonicalToolEntryKeys:          make(map[liveToolOccurrence]string),
+		accordion:                       NewAccordionModel(),
+		onUpdate:                        a.onUpdate,
+		steerCallback:                   a.steerCallback,
+		followUpCallback:                a.followUpCallback,
+		cancelCallback:                  a.cancelCallback,
+		deferQuitUntilTranscriptRefresh: a.deferQuitUntilTranscriptRefresh,
+		pauseCallback:                   a.pauseCallback,
+		resumeCallback:                  a.resumeCallback,
+		approvalCh:                      a.approvalCh,
+		thinkingVisibility:              a.thinkingVisibility,
+		modelName:                       a.modelName,
+		turnCount:                       a.turnCount,
+		sessionID:                       a.sessionID,
+		modeLabel:                       a.modeLabel,
+		wordWrap:                        a.wordWrap,
+		diffStyle:                       a.diffStyle,
+		expectedRunID:                   a.expectedRunID,
+		expectedOwnerGen:                a.expectedOwnerGeneration,
+		spinner:                         spinner.New(spinner.WithSpinner(spinner.MiniDot)),
 	}
 }
 
-// Init starts the bubbletea command loop. It arms listeners for the agent event
-// stream, messages pushed via Send, the quit signal, and (when wired) approval
-// requests from the middleware. The spinner tick is started on demand.
+// Init leaves channel ownership to BubbleteaApp.Run, which starts and joins the
+// event, message, quit, and approval pumps around the Bubble Tea program.
 func (m *teaModel) Init() tea.Cmd {
-	done := m.runDone
-	cmds := []tea.Cmd{
-		waitForEvent(m.events, done),
-		waitForMsg(m.msgCh, done, m.queueSpace),
-		waitForQuit(m.quitCh, done),
-	}
-	if m.approvalCh != nil {
-		cmds = append(cmds, waitForApproval(m.approvalCh, done))
-	}
-	return tea.Batch(cmds...)
+	return nil
 }
 
 // Update handles all incoming tea.Msg values: agent events from the stream,
 // keyboard input, terminal resizes, spinner ticks, and messages pushed via Send.
 func (m *teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
+	case transcriptRefreshControlMsg:
+		if msg.request != nil {
+			msg.request.apply(m)
+		}
+		return m, nil
 	case agentEventMsg:
 		m.eventsSeen.Add(1)
 		cmd := m.handleEvent(msg.event)
-		return m, tea.Batch(waitForEvent(m.events, m.runDone), cmd)
-	case agentEventStreamClosedMsg, quitRequestedMsg:
+		return m, cmd
+	case agentEventStreamClosedMsg:
+		m.mu.Lock()
+		if !m.eventSourceClosed {
+			m.eventSourceClosed = true
+			if m.eventSourceDone != nil {
+				close(m.eventSourceDone)
+			}
+		}
+		keepSnapshotRefreshOpen := m.hasTranscriptSnapshot
+		if !keepSnapshotRefreshOpen {
+			m.cancelInteractionsLocked()
+		}
+		m.mu.Unlock()
+		if !keepSnapshotRefreshOpen {
+			return m, tea.Quit
+		}
+		return m, nil
+	case quitRequestedMsg:
 		m.mu.Lock()
 		m.cancelInteractionsLocked()
 		m.mu.Unlock()
@@ -733,17 +954,13 @@ func (m *teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if m.shouldNotify() {
 			view = m.renderViewLocked()
 		}
-		var next tea.Cmd
-		if !m.approvalReaderDone && m.approvalCh != nil {
-			next = waitForApproval(m.approvalCh, m.runDone)
-		}
 		m.mu.Unlock()
 		m.notify(view)
 		var cancelWait tea.Cmd
 		if finished != nil {
 			cancelWait = waitForInteractionCancel(msg.req.Context, token, finished, m.runDone)
 		}
-		return m, tea.Batch(next, cancelWait)
+		return m, cancelWait
 	case HITLMessage:
 		return m.handleHITLMessage(msg)
 	case interactionCanceledMsg:
@@ -766,6 +983,11 @@ func (m *teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			current.detailOffset = 0
 			current.reviewedDetailLines = nil
 			current.reviewedDetailCount = 0
+		}
+		if m.hasTranscriptSnapshot && (m.width >= splitWidthThreshold) != m.transcriptSplitActive {
+			if err := m.rebuildTranscriptPaneLayoutLocked(); err != nil {
+				slog.Debug("tui.transcript.resize_layout_failed", "err", err)
+			}
 		}
 		// Panel dimensions (leftWidth, rightWidth, panelHeight) are derived
 		// on the fly in renderViewLocked() from m.width/m.height, so no
@@ -806,11 +1028,11 @@ func (m *teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.mu.Unlock()
 		m.notify(view)
-		return m, waitForMsg(m.msgCh, m.runDone, m.queueSpace)
+		return m, nil
 	default:
 		// A message pushed via Send that is not a recognized tea message.
 		m.msgsSeen.Add(1)
-		return m, waitForMsg(m.msgCh, m.runDone, m.queueSpace)
+		return m, nil
 	}
 }
 
@@ -855,6 +1077,9 @@ func (m *teaModel) renderViewLocked() string {
 	// Agent event flow is unaffected — only UI rendering is redirected.
 	if m.helpOverlay {
 		return m.withLocalSendGapNotice(m.renderHelpOverlay())
+	}
+	if m.hasTranscriptSnapshot && m.transcriptViewport != nil {
+		return m.renderCanonicalTranscriptViewLocked()
 	}
 	var sb strings.Builder
 
@@ -951,6 +1176,94 @@ func (m *teaModel) renderViewLocked() string {
 		sb.WriteString("\n[quitting...]")
 	}
 	return m.withLocalSendGapNotice(sb.String())
+}
+
+// renderFooterLocked builds the actual non-modal footer before transcript
+// geometry is calculated, including wrapped status, input, todo, and gap rows.
+func (m *teaModel) renderFooterLocked() string {
+	var sb strings.Builder
+	if m.spinnerActive {
+		sb.WriteString("\n")
+		sb.WriteString(m.spinner.View())
+		sb.WriteString(" working...")
+	}
+	if current := m.activeInteraction; current != nil {
+		sb.WriteString("\n")
+		if current.approval != nil {
+			sb.WriteString(renderApprovalRequestDisplay(current.approval, current.showDiff))
+		} else if current.hitl != nil {
+			sb.WriteString(renderHITLQuestion(current.hitl, current.answer, current.selectedOption))
+		}
+	}
+	if m.steerInputMode {
+		sb.WriteString("\n> steer> ")
+		sb.WriteString(renderInputWithCaret(m.steerInput, m.steerCursor))
+	}
+	if m.followUpInputMode {
+		sb.WriteString("\n> followup> ")
+		sb.WriteString(renderInputWithCaret(m.followUpInput, m.followUpCursor))
+	}
+	if m.liveStatus != "" {
+		sb.WriteString("\n")
+		sb.WriteString(m.liveStatus)
+	}
+	if m.transcriptSearchMode {
+		sb.WriteString("\n> search> ")
+		sb.WriteString(renderInputWithCaret(m.transcriptSearchInput, len(m.transcriptSearchInput)))
+	}
+	if todoPanel := m.renderTodoPanelLocked(); todoPanel != "" {
+		sb.WriteString("\n")
+		sb.WriteString(todoPanel)
+	}
+	if m.tokenMax > 0 || m.tokenCost > 0 || m.modelName != "" || m.turnCount > 0 || m.sessionID != "" || m.modeLabel != "" {
+		sb.WriteString("\n")
+		sb.WriteString(m.renderStatusBarLocked())
+	}
+	if m.paused {
+		sb.WriteString("\n[PAUSED - press Space to resume]")
+	}
+	if m.quitting {
+		sb.WriteString("\n[quitting...]")
+	}
+	if m.runObservation.EventGapCount > 0 {
+		sb.WriteString(fmt.Sprintf("\n[Core event gaps: %d; live events may be incomplete]", m.runObservation.EventGapCount))
+	}
+	if status := m.renderDurablePublicationStatusLocked(); status != "" {
+		sb.WriteString("\n")
+		sb.WriteString(status)
+	}
+	return m.withLocalSendGapNotice(sb.String())
+}
+
+func (m *teaModel) renderDurablePublicationStatusLocked() string {
+	publication := m.durablePublication
+	switch publication.State {
+	case core.DurablePublicationUnbound, "":
+		return ""
+	case core.DurablePublicationPending:
+		return "[durable publication: pending]"
+	case core.DurablePublicationFailed:
+		return "[durable publication: not confirmed]"
+	case core.DurablePublicationSynced:
+		if !m.durablePublicationIsSavedLocked() {
+			return "[durable publication: unconfirmed]"
+		}
+		return fmt.Sprintf("[saved: %s]", m.runObservation.Outcome)
+	default:
+		return "[durable publication: unconfirmed]"
+	}
+}
+
+func (m *teaModel) durablePublicationIsSavedLocked() bool {
+	publication := m.durablePublication
+	observation := m.runObservation
+	return publication.State == core.DurablePublicationSynced &&
+		publication.RunID != "" && publication.RunID == observation.RunID &&
+		publication.SessionID != "" && publication.SessionID == m.transcriptSnapshot.PhysicalSessionID &&
+		publication.OwnerGeneration != "" && publication.OwnerGeneration == observation.OwnerGeneration &&
+		observation.ExecutionState == core.RunExecutionQuiescent &&
+		observation.Outcome != core.RunOutcomeUnknown && observation.TerminalEntryID != "" &&
+		observation.TerminalOutcome == observation.Outcome
 }
 
 func (m *teaModel) withLocalSendGapNotice(view string) string {
@@ -1204,60 +1517,31 @@ func waitForApproval(ch <-chan ApprovalRequest, done <-chan struct{}) tea.Cmd {
 	}
 }
 
-// waitForEvent returns a tea.Cmd that blocks until an event arrives on the
-// stream. When the stream closes it returns tea.Quit so the program exits
-// cleanly; otherwise it returns the event wrapped in an agentEventMsg. When
-// done closes (the run is ending) it returns nil so the command goroutine can
-// exit instead of leaking.
-func waitForEvent(events <-chan AgentEvent, done <-chan struct{}) tea.Cmd {
-	return func() tea.Msg {
-		select {
-		case ev, ok := <-events:
-			if !ok {
-				return agentEventStreamClosedMsg{}
-			}
-			return agentEventMsg{event: ev}
-		case <-done:
-			return nil
-		}
-	}
-}
-
-// waitForMsg returns a tea.Cmd that blocks until a message is pushed via Send.
-// When the message channel closes it returns tea.Quit. When done closes it
-// returns nil so the command goroutine can exit instead of leaking.
-func waitForMsg(ch chan Msg, done <-chan struct{}, queueSpace chan<- struct{}) tea.Cmd {
-	return func() tea.Msg {
-		select {
-		case msg, ok := <-ch:
-			if !ok {
-				return tea.Quit()
-			}
+// startMessagePump owns delivery from the app's bounded local queue into the
+// active Bubble Tea program. Run cancels and joins it before App.Done closes.
+func startMessagePump(ctx context.Context, messages <-chan Msg, queueSpace chan<- struct{}, send func(tea.Msg)) <-chan struct{} {
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
 			select {
-			case queueSpace <- struct{}{}:
-			default:
+			case <-ctx.Done():
+				return
+			case msg, ok := <-messages:
+				if !ok {
+					return
+				}
+				select {
+				case queueSpace <- struct{}{}:
+				default:
+				}
+				if send != nil {
+					send(tea.Msg(msg))
+				}
 			}
-			return tea.Msg(msg)
-		case <-done:
-			return nil
 		}
-	}
-}
-
-// waitForQuit returns a tea.Cmd that blocks until the quit channel closes or
-// done closes, then returns tea.Quit. This makes Quit() race-free regardless of
-// whether the program has started. Selecting on done ensures the command
-// goroutine exits instead of leaking when the run ends (e.g. when the event
-// channel closes and the program exits via waitForEvent's tea.Quit).
-func waitForQuit(ch <-chan struct{}, done <-chan struct{}) tea.Cmd {
-	return func() tea.Msg {
-		select {
-		case <-ch:
-			return quitRequestedMsg{}
-		case <-done:
-			return nil
-		}
-	}
+	}()
+	return done
 }
 
 // ---------- event handling ----------
@@ -1269,6 +1553,7 @@ func waitForQuit(ch <-chan struct{}, done <-chan struct{}) tea.Cmd {
 // entries; other entries are expanded by default. It returns a tea.Cmd (a
 // spinner tick) when the spinner is activated, nil otherwise.
 func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
+	ev = ev.clone()
 	ctx := context.Background()
 
 	// Handle token_usage events by updating the status bar data and re-rendering.
@@ -1317,6 +1602,17 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 		m.toolCallGroup = nil
 		m.mu.Unlock()
 		return nil
+	}
+
+	m.mu.Lock()
+	hasCanonicalTranscript := m.hasTranscriptSnapshot
+	m.mu.Unlock()
+	if hasCanonicalTranscript {
+		if ev.ContentType == ContentTypeToolCall || ev.ContentType == ContentTypeToolOutput || ev.ContentType == ContentTypeToolResult ||
+			ev.Type == "message" || ev.ContentType == ContentTypeAssistant {
+			return m.handleCanonicalTranscriptEvent(ev)
+		}
+		return m.handleCanonicalAuxiliaryEvent(ctx, ev)
 	}
 
 	if ev.Incremental {
@@ -1861,6 +2157,9 @@ func (m *teaModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	if m.followUpInputMode {
 		return m.handleFollowUpKeyLocked(msg)
 	}
+	if m.transcriptSearchMode {
+		return m.handleTranscriptSearchKeyLocked(msg)
+	}
 	// The help overlay is modal: while open only Esc or '?' close it and
 	// all other keys are ignored. It does not affect agent event flow.
 	if m.helpOverlay {
@@ -1880,9 +2179,33 @@ func (m *teaModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 	case tea.KeySpace:
 		m.togglePauseLocked()
 	case tea.KeyUp:
-		m.accordion.Select(-1)
+		if m.hasTranscriptSnapshot {
+			viewport := m.selectedTranscriptViewportLocked()
+			m.selectedTranscriptKey = viewport.SelectRelative(-1)
+		} else {
+			m.accordion.Select(-1)
+		}
 	case tea.KeyDown:
-		m.accordion.Select(1)
+		if m.hasTranscriptSnapshot {
+			viewport := m.selectedTranscriptViewportLocked()
+			m.selectedTranscriptKey = viewport.SelectRelative(1)
+		} else {
+			m.accordion.Select(1)
+		}
+	case tea.KeyPgUp:
+		if m.hasTranscriptSnapshot {
+			viewport := m.selectedTranscriptViewportLocked()
+			viewport.ScrollLines(-max(1, viewport.height-1))
+		}
+	case tea.KeyPgDown:
+		if m.hasTranscriptSnapshot {
+			viewport := m.selectedTranscriptViewportLocked()
+			viewport.ScrollLines(max(1, viewport.height-1))
+		}
+	case tea.KeyEnd:
+		if m.hasTranscriptSnapshot {
+			m.selectedTranscriptViewportLocked().End()
+		}
 	case tea.KeyEnter:
 		m.accordion.Toggle()
 	case tea.KeyRunes:
@@ -1902,6 +2225,11 @@ func (m *teaModel) handleKey(msg tea.KeyMsg) tea.Cmd {
 			m.followUpInputMode = true
 			m.followUpInput = ""
 			m.followUpCursor = 0
+		case "/":
+			if m.hasTranscriptSnapshot {
+				m.transcriptSearchMode = true
+				m.transcriptSearchInput = ""
+			}
 		}
 	}
 	return nil
@@ -2434,6 +2762,12 @@ func (m *teaModel) togglePauseLocked() {
 // quitLocked marks the model as quitting, invokes the cancel callback, and
 // returns the tea.Quit command. The caller must hold m.mu.
 func (m *teaModel) quitLocked() tea.Cmd {
+	if m.deferQuitUntilTranscriptRefresh {
+		if m.cancelCallback != nil {
+			m.cancelCallback()
+		}
+		return nil
+	}
 	m.quitting = true
 	if m.cancelCallback != nil {
 		m.cancelCallback()

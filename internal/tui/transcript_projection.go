@@ -7,12 +7,25 @@ import (
 	"github.com/pengjunchen/go-cli/internal/core"
 )
 
+var (
+	ErrTranscriptRefreshInFlight = errors.New("tui: a transcript refresh is already in flight")
+	ErrTranscriptRefreshClosed   = errors.New("tui: transcript refresh app is closed")
+	ErrTranscriptRefreshIdentity = errors.New("tui: transcript refresh identity does not match the active app")
+)
+
 // DurableTranscriptKey identifies one canonical row in the selected durable
 // session projection.
 type DurableTranscriptKey struct {
 	PhysicalSessionID string
 	BranchID          string
 	EntryID           string
+}
+
+// AssistantOccurrenceKey identifies one canonical assistant row in its run.
+// Canonical transcript indexes and tool-call ordinals are distinct coordinates.
+type AssistantOccurrenceKey struct {
+	RunID                    string
+	CanonicalTranscriptIndex uint64
 }
 
 // TranscriptRowKind identifies the durable source row kind. It is deliberately
@@ -71,14 +84,16 @@ type ToolOccurrence struct {
 
 // CanonicalTranscriptRow is one visible durable message and its provenance.
 type CanonicalTranscriptRow struct {
-	Key        DurableTranscriptKey
-	Kind       TranscriptRowKind
-	Message    core.AgentMessage
-	SourceSeq  uint64
-	ActionID   string
-	Compaction *CompactionFact
-	Occurrence *ToolOccurrenceKey
-	Calls      []ToolOccurrence
+	Key                 DurableTranscriptKey
+	Kind                TranscriptRowKind
+	Message             core.AgentMessage
+	SourceSeq           uint64
+	ActionID            string
+	Compaction          *CompactionFact
+	AssistantOccurrence *AssistantOccurrenceKey
+	Occurrence          *ToolOccurrenceKey
+	SourceTruncated     *bool
+	Calls               []ToolOccurrence
 }
 
 // CanonicalTranscriptSnapshot is a value-only replacement for one complete
@@ -96,11 +111,20 @@ type CanonicalTranscriptSnapshot struct {
 // observed in the same durable snapshot. A terminal row is not an ACK.
 type RunObservation struct {
 	RunID           string
+	OwnerGeneration string
 	Outcome         core.RunOutcome
 	ExecutionState  core.RunExecutionState
 	EventGapCount   uint64
 	TerminalEntryID string
 	TerminalOutcome core.RunOutcome
+}
+
+// TranscriptRefresh is one same-source snapshot and owner observation applied
+// atomically by the active model. Publication remains an explicit owner fact.
+type TranscriptRefresh struct {
+	Snapshot    CanonicalTranscriptSnapshot
+	Observation RunObservation
+	Publication core.DurablePublication
 }
 
 // Clone returns an independent snapshot, including nested message arguments.
@@ -121,9 +145,17 @@ func (s CanonicalTranscriptSnapshot) Clone() CanonicalTranscriptSnapshot {
 			fact := *row.Compaction
 			row.Compaction = &fact
 		}
+		if row.AssistantOccurrence != nil {
+			key := *row.AssistantOccurrence
+			row.AssistantOccurrence = &key
+		}
 		if row.Occurrence != nil {
 			key := *row.Occurrence
 			row.Occurrence = &key
+		}
+		if row.SourceTruncated != nil {
+			truncated := *row.SourceTruncated
+			row.SourceTruncated = &truncated
 		}
 		if row.Calls != nil {
 			row.Calls = append([]ToolOccurrence(nil), row.Calls...)
@@ -162,11 +194,17 @@ func (s CanonicalTranscriptSnapshot) Validate() error {
 		if (row.Kind == TranscriptRowCompaction) != (row.Compaction != nil) {
 			return fmt.Errorf("tui: transcript row %d has inconsistent compaction facts", rowIndex)
 		}
+		if row.AssistantOccurrence != nil && (row.Kind != TranscriptRowAssistant || row.AssistantOccurrence.RunID == "") {
+			return fmt.Errorf("tui: transcript row %d has an invalid assistant occurrence", rowIndex)
+		}
 		if row.Occurrence != nil {
 			if row.Kind != TranscriptRowTool || row.Occurrence.RunID == "" || row.Occurrence.ToolCallID == "" ||
 				row.Occurrence.ToolCallID != row.Message.ToolCallID || row.Message.ToolName == "" {
 				return fmt.Errorf("tui: transcript row %d has an invalid tool occurrence", rowIndex)
 			}
+		}
+		if row.SourceTruncated != nil && row.Kind != TranscriptRowTool {
+			return fmt.Errorf("tui: transcript row %d has source truncation metadata on a non-tool row", rowIndex)
 		}
 		if len(row.Calls) > 0 && row.Kind != TranscriptRowAssistant {
 			return fmt.Errorf("tui: non-assistant transcript row %d has tool call facts", rowIndex)

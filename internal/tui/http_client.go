@@ -107,8 +107,16 @@ func acpDefaultHTTPClient() *http.Client {
 // closes when the context is canceled, the reconnect limit is exhausted, or an
 // unrecoverable request-construction error occurs.
 func (a *ACPStreamAdapter) Stream(ctx context.Context) <-chan AgentEvent {
+	return a.StreamOwned(ctx).Events()
+}
+
+// StreamOwned returns the remote event source together with a join signal for
+// its reconnect and SSE reader goroutine.
+func (a *ACPStreamAdapter) StreamOwned(ctx context.Context) *OwnedAgentEventStream {
 	ch := make(chan AgentEvent, 64)
+	done := make(chan struct{})
 	go func() {
+		defer close(done)
 		defer close(ch)
 
 		client := a.httpClient
@@ -195,7 +203,7 @@ func (a *ACPStreamAdapter) Stream(ctx context.Context) <-chan AgentEvent {
 			wait = growBackoff(wait, base, ceil)
 		}
 	}()
-	return ch
+	return &OwnedAgentEventStream{events: ch, done: done}
 }
 
 // scheduleReconnect waits for the backoff delay, respecting context

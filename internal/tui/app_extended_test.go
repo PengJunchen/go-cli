@@ -97,18 +97,31 @@ func TestAppCleanupSingleRelease(t *testing.T) {
 	require.True(t, app.cleaned)
 }
 
-// TestAppRunWithNilEventsChannel verifies Run returns promptly when the event
-// channel is (nil) closed, exercising the events-closed exit path.
-func TestAppRunWithNilEventsChannel(t *testing.T) {
+// TestAppRunWithClosedEventsWaitsForQuit keeps the model available for a final
+// durable snapshot refresh after the producer has closed its event stream.
+func TestAppRunWithClosedEventsWaitsForQuit(t *testing.T) {
 	closed := make(chan AgentEvent)
 	close(closed)
-	app := NewBubbleteaApp(closed)
-	require.NoError(t, app.Run(context.Background()))
+	app := NewBubbleteaApp(closed, WithInitialTranscript(appControlSnapshot("session-1", "main", "initial")))
+	runDone := make(chan error, 1)
+	go func() { runDone <- app.Run(context.Background()) }() //nolint:errcheck
+	select {
+	case <-app.ProgramReady():
+	case <-time.After(time.Second):
+		t.Fatal("program did not become ready")
+	}
 	assert.Equal(t, int64(0), app.EventsProcessed())
 	select {
-	case <-app.Done():
+	case err := <-runDone:
+		t.Fatalf("Run exited when only its event source closed: %v", err)
 	default:
-		t.Fatal("Done not closed after events channel closed")
+	}
+	app.Quit()
+	select {
+	case err := <-runDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("Run did not return after Quit")
 	}
 }
 

@@ -122,6 +122,91 @@ func bindTestRunCommitSink(owner *runOwner, sink RunCommitSink) {
 	})
 }
 
+type panicReleaseRunSlotGuard struct{ *countingRunSlotGuard }
+
+func (guard *panicReleaseRunSlotGuard) Release(RunClaim) {
+	panic("private release failure")
+}
+
+func TestRunResultDurablePublicationIsOwnerDerived(t *testing.T) {
+	t.Run("unbound callback cannot forge saved identity", func(t *testing.T) {
+		guard := newCountingRunSlotGuard()
+		owner := newRunOwner(context.Background(), guard, guard.claim, nil)
+		result, err := owner.run(time.Second, func(context.Context) (Result, error) {
+			return Result{DurablePublication: DurablePublication{
+				State: DurablePublicationSynced, RunID: "forged-run", SessionID: "forged-session", OwnerGeneration: "forged-owner",
+			}}, nil
+		})
+		require.NoError(t, err)
+		assert.Equal(t, DurablePublication{State: DurablePublicationUnbound}, result.DurablePublication)
+	})
+
+	t.Run("bound but undispatched cancellation is failed after release", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		guard := newCountingRunSlotGuard()
+		owner := newRunOwner(ctx, guard, guard.claim, nil)
+		bindTestRunCommitSink(owner, &runCommitLeaseTestSink{})
+		result, err := owner.run(time.Second, func(context.Context) (Result, error) {
+			t.Fatal("pre-canceled bound run must not dispatch")
+			return Result{}, nil
+		})
+		require.ErrorIs(t, err, context.Canceled)
+		assert.Equal(t, DurablePublicationFailed, result.DurablePublication.State)
+		assert.Equal(t, owner.claim.ID, result.DurablePublication.RunID)
+		assert.Equal(t, "session-test", result.DurablePublication.SessionID)
+		assert.Equal(t, owner.ownerGeneration, result.DurablePublication.OwnerGeneration)
+	})
+
+	t.Run("missing terminal acknowledgement and forged callback value are failed", func(t *testing.T) {
+		guard := newCountingRunSlotGuard()
+		owner := newRunOwner(context.Background(), guard, guard.claim, nil)
+		bindTestRunCommitSink(owner, &runCommitLeaseTestSink{})
+		result, err := owner.run(time.Second, func(context.Context) (Result, error) {
+			return Result{DurablePublication: DurablePublication{
+				State: DurablePublicationSynced, RunID: owner.claim.ID, SessionID: "session-test", OwnerGeneration: owner.ownerGeneration,
+			}}, nil
+		})
+		require.ErrorIs(t, err, ErrRunCommitTerminalNotSynced)
+		assert.Equal(t, DurablePublicationFailed, result.DurablePublication.State)
+		assert.Equal(t, owner.claim.ID, result.DurablePublication.RunID)
+		assert.Equal(t, "session-test", result.DurablePublication.SessionID)
+		assert.Equal(t, owner.ownerGeneration, result.DurablePublication.OwnerGeneration)
+	})
+
+	t.Run("positive terminal acknowledgement survives run error", func(t *testing.T) {
+		guard := newCountingRunSlotGuard()
+		owner := newRunOwner(context.Background(), guard, guard.claim, nil)
+		sink := &runCommitLeaseTestSink{}
+		bindTestRunCommitSink(owner, sink)
+		result, err := owner.run(time.Second, func(ctx context.Context) (Result, error) {
+			completionTestAPI(t, owner).markRunCommitTerminalSynced()
+			return Result{DurablePublication: DurablePublication{
+				State: DurablePublicationFailed, RunID: "forged-run", SessionID: "forged-session", OwnerGeneration: "forged-owner",
+			}}, errors.New("provider reported an error after durable partial commit")
+		})
+		require.ErrorContains(t, err, "provider reported an error")
+		assert.Equal(t, DurablePublication{
+			State: DurablePublicationSynced, RunID: owner.claim.ID, SessionID: "session-test", OwnerGeneration: owner.ownerGeneration,
+		}, result.DurablePublication)
+	})
+
+	t.Run("release panic fails publication and remains contained", func(t *testing.T) {
+		baseGuard := newCountingRunSlotGuard()
+		guard := &panicReleaseRunSlotGuard{countingRunSlotGuard: baseGuard}
+		owner := newRunOwner(context.Background(), guard, baseGuard.claim, nil)
+		bindTestRunCommitSink(owner, &runCommitLeaseTestSink{})
+		result, err := owner.run(time.Second, func(context.Context) (Result, error) {
+			completionTestAPI(t, owner).markRunCommitTerminalSynced()
+			return Result{}, nil
+		})
+		require.ErrorIs(t, err, ErrRunSlotReleasePanicked)
+		assert.Equal(t, DurablePublicationFailed, result.DurablePublication.State)
+		assert.Equal(t, RunExecutionQuarantined, result.ExecutionState)
+		assert.Zero(t, baseGuard.releaseCount())
+	})
+}
+
 func TestRunOwnerCompletionTaskHandoffKeepsPendingResourceOwned(t *testing.T) {
 	guard := newCountingRunSlotGuard()
 	owner := newRunOwner(context.Background(), guard, guard.claim, nil)

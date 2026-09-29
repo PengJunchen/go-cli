@@ -27,9 +27,19 @@ func TestTranscriptProjectionUsesPublishedSourceIDs(t *testing.T) {
 	require.Equal(t, "physical-1", got.PhysicalSessionID)
 	require.Equal(t, "main", got.BranchID)
 	require.Equal(t, []string{"receipt-user", "receipt-assistant", "receipt-tool"}, projectedEntryIDs(got.Rows))
+	require.Equal(t, &tui.AssistantOccurrenceKey{RunID: "run-1", CanonicalTranscriptIndex: 1}, got.Rows[1].AssistantOccurrence)
 	require.Equal(t, uint64(0), got.Rows[1].Calls[0].Key.AssistantTranscriptOrdinal)
 	require.Equal(t, []string{"receipt-intent", "receipt-execution"}, journalEntryIDs(got.Rows[1].Calls[0].JournalFacts))
 	require.Equal(t, &tui.ToolOccurrenceKey{RunID: "run-1", AssistantTranscriptOrdinal: 0, ToolCallID: "call-1"}, got.Rows[2].Occurrence)
+	require.Nil(t, got.Rows[2].SourceTruncated, "receipt text alone does not prove source truncation metadata")
+
+	legacy := snapshot.Clone()
+	legacy.DurableEntries[1].RecordVersion = 0
+	legacy.DurableEntries[1].TranscriptIndex = nil
+	legacy.DurableEntries[1].RunID = ""
+	legacyProjection, err := ProjectPreparedTranscript(context.Background(), legacy)
+	require.NoError(t, err)
+	require.Nil(t, legacyProjection.Rows[1].AssistantOccurrence, "legacy rows without producer coordinates stay uncorrelated")
 
 	badSource := snapshot.Clone()
 	badSource.PublishedView.SourceEntryIDs[1] = "missing-source"

@@ -360,26 +360,59 @@ func indentLines(s, indent string) string {
 	return strings.Join(lines, "\n")
 }
 
-// BridgeEvents drains a core.EventStream and forwards each event as a
-// tui.AgentEvent on the returned channel. The channel closes when the stream
-// closes or the context is canceled. BridgeEvents is the single integration
-// point between the core runtime and the TUI layer.
-func BridgeEvents(ctx context.Context, stream core.EventStream) <-chan AgentEvent {
-	ch := make(chan AgentEvent, 64)
+// OwnedAgentEventStream is a TUI event source whose producer has an explicit
+// join signal. Callers that start a stream pump must wait for Done during
+// cleanup instead of assuming that closing the output channel joined it.
+type OwnedAgentEventStream struct {
+	events <-chan AgentEvent
+	done   <-chan struct{}
+}
+
+// Events returns the event values produced by the owned pump.
+func (stream *OwnedAgentEventStream) Events() <-chan AgentEvent {
+	if stream == nil {
+		return nil
+	}
+	return stream.events
+}
+
+// Done closes after the pump has stopped and its output channel has closed.
+func (stream *OwnedAgentEventStream) Done() <-chan struct{} {
+	if stream == nil {
+		return nil
+	}
+	return stream.done
+}
+
+// BridgeEventsOwned drains a core.EventStream and forwards each event as a
+// tui.AgentEvent. It exposes a completion signal so callers can join the
+// bridge after the TUI observes source closure.
+func BridgeEventsOwned(ctx context.Context, source core.EventStream) *OwnedAgentEventStream {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	var sourceEvents <-chan core.AgentEvent
+	if source != nil {
+		sourceEvents = source.Events()
+	}
+	events := make(chan AgentEvent, 64)
+	done := make(chan struct{})
+	owned := &OwnedAgentEventStream{events: events, done: done}
 	go func() {
-		defer close(ch)
+		defer close(done)
+		defer close(events)
 		for {
 			select {
 			case <-ctx.Done():
 				slog.Debug("tui.bridge.canceled", "err", ctx.Err())
 				return
-			case ev, ok := <-stream.Events():
+			case event, ok := <-sourceEvents:
 				if !ok {
 					slog.Debug("tui.bridge.stream_closed")
 					return
 				}
 				select {
-				case ch <- CoreEventToAgentEvent(ev):
+				case events <- CoreEventToAgentEvent(event):
 				case <-ctx.Done():
 					slog.Debug("tui.bridge.canceled_send", "err", ctx.Err())
 					return
@@ -387,5 +420,13 @@ func BridgeEvents(ctx context.Context, stream core.EventStream) <-chan AgentEven
 			}
 		}
 	}()
-	return ch
+	return owned
+}
+
+// BridgeEvents drains a core.EventStream and forwards each event as a
+// tui.AgentEvent on the returned channel. The channel closes when the stream
+// closes or the context is canceled. BridgeEvents is the single integration
+// point between the core runtime and the TUI layer.
+func BridgeEvents(ctx context.Context, source core.EventStream) <-chan AgentEvent {
+	return BridgeEventsOwned(ctx, source).Events()
 }

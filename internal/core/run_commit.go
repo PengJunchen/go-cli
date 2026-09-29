@@ -51,6 +51,9 @@ var ErrInvalidRunCommitBinding = errors.New("core: invalid run commit binding")
 // completes local run-slot cleanup after all owned resources have joined.
 var ErrRunCommitLeaseClosePanicked = errors.New("core: run commit lease close panicked")
 
+// ErrRunSlotReleasePanicked reports an uncertain panic from the run-slot guard release.
+var ErrRunSlotReleasePanicked = errors.New("core: run slot release panicked")
+
 // ErrRunCommitTerminalNotSynced indicates that a bound durable run ended
 // without an acknowledged terminal checkpoint. The run is unknown until the
 // sink confirms the terminal append and sync.

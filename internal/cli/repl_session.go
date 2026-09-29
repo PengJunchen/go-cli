@@ -125,7 +125,13 @@ type REPLSession struct {
 	turnDone    chan struct{}
 	isTTY       bool
 	app         *tui.BubbleteaApp
+	eventSource *tui.OwnedAgentEventStream
+	uiCtx       context.Context
+	cancelUI    context.CancelFunc
+	appStarted  bool
 }
+
+const durableOwnerJoinWait = 2 * time.Second
 
 type durableRunBindingError struct {
 	cause error
@@ -731,9 +737,20 @@ func (s *REPLSession) handleInterrupt(err error) bool {
 // persists the session and extracts memories.
 func (s *REPLSession) executeTurn() error {
 	s.setupTurn()
-	s.runAgentGoroutine()
-	s.renderTUI()
-	s.waitForTurnCompletion()
+	runCtx, preparedSnapshot, initialTranscript, runSink, err := s.prepareDurableTurn()
+	if err != nil {
+		s.finishTurnSetupFailure(err)
+		return err
+	}
+	if err := s.renderTUI(initialTranscript); err != nil {
+		if runSink != nil {
+			runSink.CloseRunCommit()
+		}
+		s.finishTurnSetupFailure(err)
+		return err
+	}
+	s.runAgentGoroutine(runCtx)
+	waitErr := s.waitForTurnCompletion()
 
 	// Clear the HITL program reference now that the turn is complete.
 	// The bubbletea program from this turn has exited; leaving a stale
@@ -747,20 +764,35 @@ func (s *REPLSession) executeTurn() error {
 	var bindingErr *durableRunBindingError
 	bindingFailed := errors.As(s.turnErr, &bindingErr)
 
-	interrupted := s.turnCtx.Err() != nil
-	s.cancelTurn()
-	s.interrupter.Stop()
 	if bindingFailed {
-		s.turnSpan.SetStatus(tracing.SpanStatusError, bindingErr.Error())
-	} else {
-		s.turnSpan.SetStatus(tracing.SpanStatusOK, "")
-	}
-	s.turnSpan.End()
-
-	s.app.Quit()
-	if bindingFailed {
+		s.finishTurnSpan(bindingErr)
+		s.cancelTurn()
+		s.interrupter.Stop()
+		s.stopTUI()
 		return bindingErr
 	}
+	if waitErr != nil {
+		s.finishTurnSpan(waitErr)
+		s.cancelTurn()
+		s.interrupter.Stop()
+		s.stopTUI()
+		return waitErr
+	}
+
+	if s.assembly.durableSession != nil {
+		if err := s.applyDurableTurnRefresh(preparedSnapshot); err != nil {
+			s.finishTurnSpan(err)
+			s.cancelTurn()
+			s.interrupter.Stop()
+			s.stopTUI()
+			return err
+		}
+	}
+	interrupted := s.turnCtx.Err() != nil
+	s.finishTurnSpan(nil)
+	s.cancelTurn()
+	s.interrupter.Stop()
+	s.stopTUI()
 
 	if s.assembly.durableSession != nil && !durableTurnIsJoinable(s.turnResult) {
 		status := s.turnResult
@@ -771,11 +803,8 @@ func (s *REPLSession) executeTurn() error {
 		}
 		return fmt.Errorf("interactive: durable run did not reach a known joined terminal state (outcome=%s execution=%s)", status.Outcome, status.ExecutionState)
 	}
-
-	if s.assembly.durableSession != nil {
-		if err := s.refreshDurableSession(); err != nil {
-			return err
-		}
+	if s.assembly.durableSession != nil && s.turnResult.DurablePublication.State == core.DurablePublicationFailed {
+		return errors.New("interactive: durable run finished without positive transcript publication")
 	}
 
 	if s.turnErr != nil && !interrupted {
@@ -815,6 +844,81 @@ func (s *REPLSession) executeTurn() error {
 	return nil
 }
 
+func (s *REPLSession) prepareDurableTurn() (
+	context.Context,
+	*session.PreparedSessionSnapshot,
+	*tui.CanonicalTranscriptSnapshot,
+	*session.SessionRunCommitSink,
+	error,
+) {
+	if s.assembly == nil || s.assembly.durableSession == nil {
+		return s.turnCtx, nil, nil, nil, nil
+	}
+	runCtx, sink, err := s.assembly.durableSession.bindRun(s.turnCtx)
+	if err != nil {
+		return nil, nil, nil, nil, &durableRunBindingError{cause: err}
+	}
+	if err := hydrateDurableRunHistory(s.assembly.Agent, sink); err != nil {
+		sink.CloseRunCommit()
+		return nil, nil, nil, nil, &durableRunBindingError{cause: err}
+	}
+	prepared, err := s.assembly.durableSession.snapshotSelected()
+	if err != nil {
+		sink.CloseRunCommit()
+		return nil, nil, nil, nil, fmt.Errorf("interactive: prepare initial durable transcript: %w", err)
+	}
+	transcript, err := ProjectPreparedTranscript(s.spanCtx, prepared)
+	if err != nil {
+		sink.CloseRunCommit()
+		return nil, nil, nil, nil, fmt.Errorf("interactive: project initial durable transcript: %w", err)
+	}
+	return runCtx, &prepared, &transcript, sink, nil
+}
+
+func (s *REPLSession) finishTurnSetupFailure(err error) {
+	if s.cancelTurn != nil {
+		s.cancelTurn()
+	}
+	if s.interrupter != nil {
+		s.interrupter.Stop()
+	}
+	if s.turnSpan != nil {
+		s.turnSpan.SetStatus(tracing.SpanStatusError, err.Error())
+		s.turnSpan.End()
+	}
+	s.stopTUI()
+}
+
+func (s *REPLSession) stopTUI() {
+	if s.cancelTurn != nil {
+		s.cancelTurn()
+	}
+	if s.app != nil {
+		s.app.Quit()
+		if s.cancelUI != nil {
+			s.cancelUI()
+		}
+		if s.appStarted {
+			<-s.app.Done()
+		}
+	}
+	if s.eventSource != nil {
+		<-s.eventSource.Done()
+	}
+}
+
+func (s *REPLSession) finishTurnSpan(err error) {
+	if s.turnSpan == nil {
+		return
+	}
+	if err != nil {
+		s.turnSpan.SetStatus(tracing.SpanStatusError, err.Error())
+	} else {
+		s.turnSpan.SetStatus(tracing.SpanStatusOK, "")
+	}
+	s.turnSpan.End()
+}
+
 func durableTurnIsJoinable(result core.Result) bool {
 	if result.StatusHandle != nil {
 		status := result.StatusHandle.Snapshot()
@@ -824,11 +928,112 @@ func durableTurnIsJoinable(result core.Result) bool {
 	return result.ExecutionState == core.RunExecutionQuiescent && result.Outcome != core.RunOutcomeUnknown
 }
 
-func (s *REPLSession) refreshDurableSession() error {
-	snapshot, err := s.assembly.durableSession.snapshotSelected()
-	if err != nil {
-		return fmt.Errorf("interactive: refresh durable session after turn: %w", err)
+func (s *REPLSession) applyDurableTurnRefresh(initial *session.PreparedSessionSnapshot) error {
+	if initial == nil || s.app == nil || s.uiCtx == nil {
+		return errors.New("interactive: durable transcript refresh requires its initial snapshot and active TUI")
 	}
+	result := s.turnResult
+	publication := result.DurablePublication
+	if publication.State == "" {
+		publication.State = core.DurablePublicationUnbound
+	}
+	var status core.RunStatus
+	var waitErr error
+	if result.StatusHandle != nil {
+		waiter, ok := result.StatusHandle.(core.RunStatusWaiter)
+		if !ok {
+			status = result.StatusHandle.Snapshot()
+			waitErr = errors.New("interactive: durable run owner cannot be joined through its status handle")
+		} else {
+			waitCtx, cancel := context.WithTimeout(s.spanCtx, durableOwnerJoinWait)
+			status, publication, waitErr = waiter.WaitForCompletion(waitCtx)
+			cancel()
+		}
+	} else if publication.State != core.DurablePublicationUnbound {
+		waitErr = errors.New("interactive: durable publication has no owner status handle")
+	}
+
+	var sourceSnapshot session.PreparedSessionSnapshot
+	var transcript tui.CanonicalTranscriptSnapshot
+	if waitErr == nil && publication.State == core.DurablePublicationSynced {
+		if status.ExecutionState != core.RunExecutionQuiescent || status.Outcome == core.RunOutcomeUnknown ||
+			publication.RunID == "" || publication.RunID != result.RunID ||
+			publication.SessionID != initial.SessionID || publication.OwnerGeneration == "" {
+			return fmt.Errorf(
+				"interactive: owner publication did not match the joined durable run (quiescent=%t outcome_known=%t run_matches=%t session_matches=%t owner_generation_present=%t)",
+				status.ExecutionState == core.RunExecutionQuiescent,
+				status.Outcome != core.RunOutcomeUnknown,
+				publication.RunID != "" && publication.RunID == result.RunID,
+				publication.SessionID == initial.SessionID,
+				publication.OwnerGeneration != "",
+			)
+		}
+		var err error
+		sourceSnapshot, err = s.assembly.durableSession.snapshotSelected()
+		if err != nil {
+			return fmt.Errorf("interactive: refresh durable session after joined run: %w", err)
+		}
+		if err := validateSamePreparedTranscript(*initial, sourceSnapshot); err != nil {
+			return err
+		}
+		transcript, err = ProjectPreparedTranscript(s.spanCtx, sourceSnapshot)
+		if err != nil {
+			return fmt.Errorf("interactive: project joined durable transcript: %w", err)
+		}
+	} else {
+		if publication.State != core.DurablePublicationUnbound &&
+			(publication.RunID == "" || publication.SessionID != initial.SessionID || publication.OwnerGeneration == "") {
+			return errors.New("interactive: pending durable publication has an incomplete run binding")
+		}
+		sourceSnapshot = initial.Clone()
+		var err error
+		transcript, err = ProjectPreparedTranscript(s.spanCtx, sourceSnapshot)
+		if err != nil {
+			return fmt.Errorf("interactive: retain initial durable transcript while publication is pending: %w", err)
+		}
+	}
+
+	refresh := tui.TranscriptRefresh{Snapshot: transcript, Publication: publication}
+	if result.StatusHandle != nil {
+		resultRunID := publication.RunID
+		if resultRunID == "" {
+			resultRunID = result.RunID
+		}
+		observation, err := ProjectRunObservation(s.spanCtx, sourceSnapshot, result.StatusHandle, resultRunID)
+		if err != nil {
+			return fmt.Errorf("interactive: observe durable run owner: %w", err)
+		}
+		observation.OwnerGeneration = publication.OwnerGeneration
+		refresh.Observation = observation
+	}
+	if err := s.app.ApplyTranscriptRefresh(s.uiCtx, refresh); err != nil {
+		return fmt.Errorf("interactive: wait for canonical transcript apply acknowledgement: %w", err)
+	}
+
+	if publication.State == core.DurablePublicationSynced && waitErr == nil {
+		if err := s.applyDurableSessionSnapshot(sourceSnapshot); err != nil {
+			return err
+		}
+		return nil
+	}
+	if waitErr != nil {
+		return fmt.Errorf("interactive: durable owner remains unjoined; publication is %s: %w", publication.State, waitErr)
+	}
+	if publication.State == core.DurablePublicationFailed {
+		return errors.New("interactive: durable run finished without positive transcript publication")
+	}
+	return fmt.Errorf("interactive: durable run publication is %s; the selected transcript was not advanced", publication.State)
+}
+
+func validateSamePreparedTranscript(initial, refreshed session.PreparedSessionSnapshot) error {
+	if initial.SessionID == "" || initial.ActiveBranchID == "" ||
+		refreshed.SessionID != initial.SessionID || refreshed.ActiveBranchID != initial.ActiveBranchID {
+		return errors.New("interactive: durable refresh changed the prepared physical session or branch")
+	}
+	return nil
+}
+
+func (s *REPLSession) applyDurableSessionSnapshot(snapshot session.PreparedSessionSnapshot) error {
 	tree, err := session.NewDefaultSessionTreeBuilder().BuildFromSnapshot(s.spanCtx, snapshot)
 	if err != nil {
 		return fmt.Errorf("interactive: rebuild durable session tree after turn: %w", err)
@@ -898,30 +1103,10 @@ func (s *REPLSession) setupTurn() {
 
 // runAgentGoroutine launches the RunTurn goroutine that processes the user
 // submission and streams events.
-func (s *REPLSession) runAgentGoroutine() {
+func (s *REPLSession) runAgentGoroutine(runCtx context.Context) {
 	s.turnDone = make(chan struct{})
 	go func() {
 		defer close(s.turnDone)
-		runCtx := s.turnCtx
-		if s.assembly.durableSession != nil {
-			boundCtx, sink, err := s.assembly.durableSession.bindRun(runCtx)
-			if err != nil {
-				s.turnErr = &durableRunBindingError{cause: err}
-				s.turnResult = core.Result{Outcome: core.RunOutcomeError, ExecutionState: core.RunExecutionQuiescent}
-				s.stream.SetResult(core.AgentMessage{Role: "assistant"}, err)
-				s.stream.Close()
-				return
-			}
-			if err := hydrateDurableRunHistory(s.assembly.Agent, sink); err != nil {
-				sink.CloseRunCommit()
-				s.turnErr = &durableRunBindingError{cause: err}
-				s.turnResult = core.Result{Outcome: core.RunOutcomeError, ExecutionState: core.RunExecutionQuiescent}
-				s.stream.SetResult(core.AgentMessage{Role: "assistant"}, err)
-				s.stream.Close()
-				return
-			}
-			runCtx = boundCtx
-		}
 		s.turnResult, s.turnErr = s.assembly.TurnRunner.RunTurn(runCtx, core.Submission{
 			Type:    core.SubmissionUserMessage,
 			Content: s.line,
@@ -944,17 +1129,18 @@ func (s *REPLSession) runAgentGoroutine() {
 
 // renderTUI builds the TUI options, creates the BubbleteaApp, starts the
 // render goroutine, and wires HITL through the bubbletea program.
-func (s *REPLSession) renderTUI() {
+func (s *REPLSession) renderTUI(initialTranscript *tui.CanonicalTranscriptSnapshot) error {
 	// Bridge core events to TUI events and render. Bubbletea owns terminal
 	// rendering in TTY mode (raw mode, diff-based repaint on stderr), so
 	// the legacy onUpdate manual redraw and ANSI cursor logic has been
 	// removed.
-	var tuiEvents <-chan tui.AgentEvent
+	var eventSource *tui.OwnedAgentEventStream
 	if s.rc != nil && s.rc.TUI.Mode == "remote" && s.rc.TUI.RemoteURL != "" {
-		tuiEvents = tui.NewACPStreamAdapter(s.rc.TUI.RemoteURL).Stream(s.turnCtx)
+		eventSource = tui.NewACPStreamAdapter(s.rc.TUI.RemoteURL).StreamOwned(s.turnCtx)
 	} else {
-		tuiEvents = tui.BridgeEvents(s.turnCtx, s.stream)
+		eventSource = tui.BridgeEventsOwned(s.turnCtx, s.stream)
 	}
+	s.eventSource = eventSource
 	s.turnCounter++
 	s.isTTY = tui.IsTerminal()
 	tsp := tui.NewDefaultTerminalSizeProvider()
@@ -985,16 +1171,31 @@ func (s *REPLSession) renderTUI() {
 	if s.slashCtx.thinkingVisibility != "" {
 		appOpts = append(appOpts, tui.WithThinkingVisibility(s.slashCtx.thinkingVisibility))
 	}
+	if s.assembly.durableSession != nil {
+		appOpts = append(appOpts, tui.WithDeferQuitUntilTranscriptRefresh())
+	}
 	appOpts = append(appOpts, s.buildCallbackOptions()...)
-	s.app = tui.NewBubbleteaApp(tuiEvents, appOpts...)
+	s.uiCtx, s.cancelUI = context.WithCancel(s.spanCtx)
+	if initialTranscript != nil {
+		app, err := tui.NewBubbleteaAppWithTranscript(eventSource.Events(), *initialTranscript, appOpts...)
+		if err != nil {
+			s.cancelUI()
+			return fmt.Errorf("interactive: create canonical transcript TUI: %w", err)
+		}
+		s.app = app
+	} else {
+		s.app = tui.NewBubbleteaApp(eventSource.Events(), appOpts...)
+	}
 
+	s.appStarted = true
 	go func() {
-		if runErr := s.app.Run(s.turnCtx); runErr != nil && runErr != context.Canceled {
+		if runErr := s.app.Run(s.uiCtx); runErr != nil && runErr != context.Canceled {
 			s.logger.Debug("cli_interactive_tui_error", "err", runErr)
 		}
 	}()
 
 	s.wireHITL()
+	return nil
 }
 
 // buildCallbackOptions constructs the steer, follow-up, cancel, pause, and
@@ -1070,24 +1271,78 @@ func (s *REPLSession) wireHITL() {
 
 // waitForTurnCompletion waits for the render loop to finish, forwarding any
 // steer messages that arrive during the wait.
-func (s *REPLSession) waitForTurnCompletion() {
-	// Wait for the render loop to finish. The app exits when the bridge
-	// channel closes (stream closed by the RunTurn goroutine). Steer
-	// messages arriving on the interrupter's channel are forwarded to
-	// the TurnRunner via Steer(), which delivers them to the running
-	// loop between LLM iterations.
-	turnComplete := false
-	for !turnComplete {
+func (s *REPLSession) waitForTurnCompletion() error {
+	durableApp := s.assembly != nil && s.assembly.durableSession != nil
+	turnDone := s.turnDone
+	var bridgeDone <-chan struct{}
+	if s.eventSource != nil {
+		bridgeDone = s.eventSource.Done()
+	}
+	var eventSourceDone <-chan struct{}
+	var appDone <-chan struct{}
+	if s.app != nil {
+		eventSourceDone = s.app.EventSourceDone()
+		appDone = s.app.Done()
+	}
+	turnCtxDone := s.turnCtx.Done()
+	var steerMessages <-chan string
+	if s.interrupter != nil {
+		steerMessages = s.interrupter.SteerChannel()
+	}
+	var appExitedEarly bool
+	var sourceClosed bool
+	for turnDone != nil || bridgeDone != nil || eventSourceDone != nil || (!durableApp && appDone != nil) {
 		select {
-		case <-s.app.Done():
-			turnComplete = true
-		case <-s.turnCtx.Done():
-			<-s.app.Done()
-			turnComplete = true
-		case steerMsg := <-s.interrupter.SteerChannel():
-			s.handleSteer(steerMsg)
+		case <-turnDone:
+			turnDone = nil
+		case <-bridgeDone:
+			bridgeDone = nil
+		case <-eventSourceDone:
+			eventSourceDone = nil
+			sourceClosed = true
+		case <-appDone:
+			appDone = nil
+			if !sourceClosed && eventSourceDone != nil {
+				select {
+				case <-eventSourceDone:
+					eventSourceDone = nil
+					sourceClosed = true
+				default:
+				}
+			}
+			if durableApp || !sourceClosed {
+				// The app can be stopped by the parent invocation context. In a
+				// legacy non-durable REPL that is a normal shutdown path; in the
+				// durable path it still forbids a refresh because no live model is
+				// available to acknowledge it.
+				parentCanceledUI := s.uiCtx != nil && s.uiCtx.Err() != nil
+				appExitedEarly = !parentCanceledUI || durableApp
+				eventSourceDone = nil
+				if s.cancelTurn != nil {
+					s.cancelTurn()
+				}
+			}
+		case <-turnCtxDone:
+			turnCtxDone = nil
+		case steerMsg, ok := <-steerMessages:
+			if !ok {
+				steerMessages = nil
+			} else if s.turnCtx.Err() == nil {
+				s.handleSteer(steerMsg)
+			}
 		}
 	}
+	if appExitedEarly {
+		return errors.New("interactive: TUI exited before its event source and durable refresh completed")
+	}
+	if durableApp && s.app != nil {
+		select {
+		case <-s.app.Done():
+			return errors.New("interactive: TUI exited before its durable refresh completed")
+		default:
+		}
+	}
+	return nil
 }
 
 // handleSteer forwards a steer message to the TurnRunner or the shared

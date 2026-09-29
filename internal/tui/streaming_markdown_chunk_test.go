@@ -32,6 +32,24 @@ func TestStreamingMarkdownAppendChunkHandlesSplitUTF8AndANSI(t *testing.T) {
 	require.True(t, utf8.ValidString(fourth.Content))
 }
 
+func TestStreamingMarkdownAppendChunkLinesMatchWindowContent(t *testing.T) {
+	renderer := NewStreamingMarkdownRenderer(NewMarkdownRenderer())
+	opts := RenderOpts{ContentType: ContentTypeStreaming, Width: 12}
+	for _, chunk := range []string{"first line\n", "second line with a long tail", "\x1b[31m red\x1b[0m", "\nlast"} {
+		want := renderer.AppendChunk(context.Background(), chunk, opts)
+		got := renderer.WindowLines()
+		lines := append([]string(nil), got.Lines...)
+		if got.HasCurrentLine {
+			lines = append(lines, got.CurrentLine)
+		}
+		if got.HasNextLine {
+			lines = append(lines, got.NextLine)
+		}
+		require.Equal(t, want.Content, strings.Join(lines, "\n"))
+		require.Equal(t, want.HasHiddenPrefix, got.HasHiddenPrefix)
+	}
+}
+
 func TestStreamingMarkdownAppendChunkBoundsUnterminatedControls(t *testing.T) {
 	renderer := NewStreamingMarkdownRenderer(NewMarkdownRenderer())
 	opts := RenderOpts{ContentType: ContentTypeStreaming, Width: 80}

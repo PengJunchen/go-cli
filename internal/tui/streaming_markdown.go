@@ -25,6 +25,18 @@ type StreamRenderWindow struct {
 	HasHiddenPrefix bool
 }
 
+// StreamRenderLines is a bounded preview represented as separate immutable
+// line strings so an app can update a live viewport without joining and
+// rewrapping the entire retained window after every chunk.
+type StreamRenderLines struct {
+	Lines           []string
+	CurrentLine     string
+	HasCurrentLine  bool
+	NextLine        string
+	HasNextLine     bool
+	HasHiddenPrefix bool
+}
+
 type terminalControlMode uint8
 
 const (
@@ -112,6 +124,19 @@ func NewStreamingMarkdownRenderer(md *MarkdownRenderer) *StreamingMarkdownRender
 // the caller-owned canonical source once so document-wide references and block
 // semantics are preserved.
 func (s *StreamingMarkdownRenderer) AppendChunk(ctx context.Context, chunk string, opts RenderOpts) StreamRenderWindow {
+	s.appendChunk(ctx, chunk, opts)
+	return s.Window()
+}
+
+// AppendChunkLines appends a chunk and returns the retained preview as lines.
+// Lines borrows the renderer's completed-line slice and remains valid only
+// until the next mutation; CurrentLine and NextLine hold the open grapheme row.
+func (s *StreamingMarkdownRenderer) AppendChunkLines(ctx context.Context, chunk string, opts RenderOpts) StreamRenderLines {
+	s.appendChunk(ctx, chunk, opts)
+	return s.WindowLines()
+}
+
+func (s *StreamingMarkdownRenderer) appendChunk(ctx context.Context, chunk string, opts RenderOpts) {
 	if s.windowFinished {
 		s.Reset()
 	}
@@ -136,7 +161,6 @@ func (s *StreamingMarkdownRenderer) AppendChunk(ctx context.Context, chunk strin
 		s.consumePreviewByte(b)
 		i++
 	}
-	return s.Window()
 }
 
 // Finish performs the one full-document Markdown render and replaces the
@@ -165,10 +189,63 @@ func (s *StreamingMarkdownRenderer) Finish(ctx context.Context, canonicalSource 
 // Window returns the current finite presentation window. It never claims to be
 // the entire message when HasHiddenPrefix is true.
 func (s *StreamingMarkdownRenderer) Window() StreamRenderWindow {
+	pending, pendingWrap := s.windowPending()
+	var content strings.Builder
+	content.Grow(s.windowDataBytes + len(pending) + s.windowNewlines + boolInt(pendingWrap))
+	for i, line := range s.windowLines {
+		if i > 0 {
+			content.WriteByte('\n')
+		}
+		content.WriteString(line)
+	}
+	if s.windowLineOpen || len(s.windowLineParts) > 0 || pending != "" {
+		if len(s.windowLines) > 0 {
+			content.WriteByte('\n')
+		}
+		for _, part := range s.windowLineParts {
+			content.WriteString(part)
+		}
+		if pendingWrap {
+			content.WriteByte('\n')
+		}
+		content.WriteString(pending)
+	}
+	return StreamRenderWindow{
+		Content:         content.String(),
+		HasHiddenPrefix: s.windowHidden,
+	}
+}
+
+// WindowLines returns the same bounded safe preview as Window without joining
+// retained lines into one string.
+func (s *StreamingMarkdownRenderer) WindowLines() StreamRenderLines {
+	pending, pendingWrap := s.windowPending()
+	window := StreamRenderLines{Lines: s.windowLines, HasHiddenPrefix: s.windowHidden}
+	if s.windowLineOpen || len(s.windowLineParts) > 0 || pending != "" {
+		var current strings.Builder
+		current.Grow(s.windowLineBytes + len(pending))
+		for _, part := range s.windowLineParts {
+			current.WriteString(part)
+		}
+		if pendingWrap {
+			window.CurrentLine = current.String()
+			window.HasCurrentLine = true
+			window.NextLine = pending
+			window.HasNextLine = true
+		} else {
+			current.WriteString(pending)
+			window.CurrentLine = current.String()
+			window.HasCurrentLine = true
+		}
+	}
+	return window
+}
+
+func (s *StreamingMarkdownRenderer) windowPending() (string, bool) {
 	pending := s.graphemePending
 	pendingWrap := false
 	if pending != "" {
-		width := ansi.StringWidth(pending)
+		width := streamingGraphemeWidth(pending)
 		pendingWrap = width > 0 && s.windowColumn() > 0 && s.windowColumn()+width > s.windowWidth
 		pendingBytes := len(pending)
 		if pendingWrap {
@@ -202,30 +279,7 @@ func (s *StreamingMarkdownRenderer) Window() StreamRenderWindow {
 		pendingWrap = false
 		s.windowHidden = true
 	}
-	var content strings.Builder
-	content.Grow(s.windowDataBytes + len(pending) + s.windowNewlines + boolInt(pendingWrap))
-	for i, line := range s.windowLines {
-		if i > 0 {
-			content.WriteByte('\n')
-		}
-		content.WriteString(line)
-	}
-	if s.windowLineOpen || len(s.windowLineParts) > 0 || pending != "" {
-		if len(s.windowLines) > 0 {
-			content.WriteByte('\n')
-		}
-		for _, part := range s.windowLineParts {
-			content.WriteString(part)
-		}
-		if pendingWrap {
-			content.WriteByte('\n')
-		}
-		content.WriteString(pending)
-	}
-	return StreamRenderWindow{
-		Content:         content.String(),
-		HasHiddenPrefix: s.windowHidden,
-	}
+	return pending, pendingWrap
 }
 
 // Resize reflows only the retained tail. If Finish has already run, it renders
@@ -427,7 +481,12 @@ func (s *StreamingMarkdownRenderer) pushRune(r rune) {
 		s.windowHidden = true
 		return
 	}
-	seq, width, n, _ := ansi.GraphemeWidth.DecodeSequenceInString(candidate, ansi.NormalState, ansi.NewParser())
+	seq, width, n := candidate, 0, 0
+	if len(candidate) == 1 && candidate[0] >= 0x20 && candidate[0] <= 0x7e {
+		width, n = 1, 1
+	} else {
+		seq, width, n, _ = ansi.GraphemeWidth.DecodeSequenceInString(candidate, ansi.NormalState, ansi.NewParser())
+	}
 	if n <= 0 || n >= len(candidate) {
 		s.graphemePending = candidate
 		return
@@ -438,7 +497,12 @@ func (s *StreamingMarkdownRenderer) pushRune(r rune) {
 
 func (s *StreamingMarkdownRenderer) flushGrapheme() {
 	for s.graphemePending != "" {
-		seq, width, n, _ := ansi.GraphemeWidth.DecodeSequenceInString(s.graphemePending, ansi.NormalState, ansi.NewParser())
+		seq, width, n := s.graphemePending, 0, 0
+		if len(seq) == 1 && seq[0] >= 0x20 && seq[0] <= 0x7e {
+			width, n = 1, 1
+		} else {
+			seq, width, n, _ = ansi.GraphemeWidth.DecodeSequenceInString(s.graphemePending, ansi.NormalState, ansi.NewParser())
+		}
 		if n <= 0 {
 			seq = s.graphemePending
 			n = len(seq)
@@ -450,6 +514,13 @@ func (s *StreamingMarkdownRenderer) flushGrapheme() {
 		s.emitGrapheme(seq, width)
 		s.graphemePending = s.graphemePending[n:]
 	}
+}
+
+func streamingGraphemeWidth(text string) int {
+	if len(text) == 1 && text[0] >= 0x20 && text[0] <= 0x7e {
+		return 1
+	}
+	return ansi.StringWidth(text)
 }
 
 func (s *StreamingMarkdownRenderer) emitGrapheme(text string, width int) {
