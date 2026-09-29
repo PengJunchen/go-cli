@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/compaction"
+	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/session"
@@ -33,6 +35,25 @@ const (
 	// exitCommand is the user input that terminates the interactive session.
 	exitCommand = "exit"
 )
+
+// ErrInteractiveRemoteModeUnsupported indicates that interactive remote mode
+// has no prompt-and-dispatch protocol in the current CLI.
+var ErrInteractiveRemoteModeUnsupported = errors.New("cli: interactive remote mode is unsupported")
+
+// UnsupportedInteractiveRemoteModeError identifies an unsupported TUI mode.
+type UnsupportedInteractiveRemoteModeError struct {
+	Mode string
+}
+
+// Error implements error.
+func (e *UnsupportedInteractiveRemoteModeError) Error() string {
+	return fmt.Sprintf("interactive: tui.mode %q is unsupported; set tui.mode to local", e.Mode)
+}
+
+// Unwrap identifies the unsupported interactive capability.
+func (e *UnsupportedInteractiveRemoteModeError) Unwrap() error {
+	return ErrInteractiveRemoteModeUnsupported
+}
 
 // interactiveCmd implements Command and runs an interactive multi-turn agent
 // session with TUI rendering, MCP tool support, skill execution, and automatic
@@ -63,6 +84,10 @@ func (c *interactiveCmd) Synopsis() string {
 // First-run onboarding is handled inside REPLSession.start() after flag
 // parsing so that invalid flags produce a UsageError before the wizard runs.
 func (c *interactiveCmd) Run(ctx context.Context, cfg Config, args []string) error {
+	if rc, ok := cfg.(*config.Config); ok && rc.TUI.Mode == "remote" {
+		return &UnsupportedInteractiveRemoteModeError{Mode: rc.TUI.Mode}
+	}
+
 	rs := &REPLSession{
 		cmd:             c,
 		out:             c.out,

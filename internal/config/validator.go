@@ -51,7 +51,7 @@ var (
 	validGitPlatforms         = []string{"", "github", "gitlab", "bitbucket"}
 	validWebSearchProviders   = []string{"", "mock", "fetch", "brave"}
 	validTUIThemes            = []string{"", "dark", "light", "monokai", "solarized", "auto"}
-	validTUIDiffStyles        = []string{"", "unified", "split", "auto"}
+	validTUIDiffStyles        = []string{"", defaultTUIDiffStyle}
 )
 
 // Validate evaluates the configuration and returns a combined error listing
@@ -122,7 +122,7 @@ func (v *DefaultValidator) Validate(cfg Config) error {
 		errs = append(errs, "invalid tui theme (supported: dark, light, monokai, solarized, auto)")
 	}
 	if !contains(validTUIDiffStyles, cfg.TUI.DiffStyle) {
-		errs = append(errs, "invalid tui diff_style (supported: unified, split, auto)")
+		errs = append(errs, "invalid tui diff_style (supported: unified)")
 	}
 	if cfg.TUI.WordWrap < 0 {
 		errs = append(errs, "tui word_wrap must be non-negative")

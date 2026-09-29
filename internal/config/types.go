@@ -6,6 +6,8 @@ import "time"
 // selected model nor its matching provider configuration sets a value.
 const DefaultLLMMaxTokens = 4096
 
+const defaultTUIDiffStyle = "unified"
+
 // Config is the root application configuration. It is deeply nested into
 // sections mirroring the go-cli configuration file / environment schema.
 type Config struct {
@@ -538,8 +540,8 @@ type TUIConfig struct {
 	Theme string `json:"theme" yaml:"theme"`
 	// WordWrap sets the render word-wrap width in columns. Zero disables wrapping.
 	WordWrap int `json:"word_wrap" yaml:"word_wrap"`
-	// DiffStyle selects the diff preview style: unified, split, or auto.
-	// Empty defaults to auto.
+	// DiffStyle selects the supported diff preview style. Empty defaults to
+	// unified.
 	DiffStyle string `json:"diff_style" yaml:"diff_style"`
 	// Mode selects the TUI event source: "local" (default) consumes events
 	// from the in-process EventStream; "remote" consumes SSE events from a

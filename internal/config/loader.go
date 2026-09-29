@@ -295,6 +295,7 @@ func defaultConfig() *Config {
 			Strategy:  "micro_first",
 			MaxTokens: defaultCompactionMaxTokens,
 		},
+		TUI: TUIConfig{DiffStyle: defaultTUIDiffStyle},
 		Production: ProductionConfig{
 			Audit: AuditConfig{Enabled: &auditEnabled},
 		},
