@@ -127,7 +127,7 @@ func TestClaudeProviderGenerateCannedCompletion(t *testing.T) {
 		assert.Equal(t, "hello", req.Messages[0].Content[0].Text)
 
 		w.Header().Set("Content-Type", "application/json")
-		writeResponse(t, w, `{"content":[{"type":"text","text":"bonjour"}],"usage":{"input_tokens":4,"output_tokens":2}}`)
+		writeResponse(t, w, `{"role":"assistant","content":[{"type":"text","text":"bonjour"}],"stop_reason":"end_turn","usage":{"input_tokens":4,"output_tokens":2}}`)
 	}))
 	defer srv.Close()
 
@@ -160,7 +160,7 @@ func TestClaudeProviderGenerateSystemOnly(t *testing.T) {
 		assert.Equal(t, "sys A\nsys B", req.System)
 		require.Len(t, req.Messages, 0)
 		w.Header().Set("Content-Type", "application/json")
-		writeResponse(t, w, `{"content":[]}`)
+		writeResponse(t, w, `{"role":"assistant","content":[],"stop_reason":"end_turn"}`)
 	}))
 	defer srv.Close()
 

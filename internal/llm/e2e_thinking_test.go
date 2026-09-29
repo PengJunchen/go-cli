@@ -74,7 +74,7 @@ func TestET_thinking_level_params_correct(t *testing.T) {
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			capturedBody, _ = io.ReadAll(r.Body)
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"content":[{"type":"text","text":"ok"}],"stop_reason":"stop"}`))
+			_, _ = w.Write([]byte(`{"role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}`))
 		}))
 		defer srv.Close()
 

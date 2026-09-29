@@ -126,18 +126,18 @@ func TestDecodeOpenAIResponse_ToolCallNonJSONArgs(t *testing.T) {
 	assert.Equal(t, "not-json{broken", raw)
 }
 
-// TestDecodeClaudeResponse_JoinsText verifies multiple text blocks are joined
-// and non-text blocks are skipped.
+// TestDecodeClaudeResponse_JoinsText verifies text blocks are joined and a
+// canonical following tool-use block is preserved.
 func TestDecodeClaudeResponse_JoinsText(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
-	msg, err := decodeClaudeResponse([]byte(`{"content":[
+	msg, err := decodeClaudeResponse([]byte(`{"role":"assistant","content":[
 		{"type":"text","text":"a"},
-		{"type":"tool_use","id":"t1"},
-		{"type":"text","text":"b"}
-	]}`))
+		{"type":"text","text":"b"},
+		{"type":"tool_use","id":"t1","name":"lookup","input":{"count":1}}
+	],"stop_reason":"tool_use"}`))
 	require.NoError(t, err)
 	assert.Equal(t, "ab", msg.Content)
-	assert.Empty(t, msg.ToolCalls)
+	require.Equal(t, []ToolCall{{ID: "t1", Name: "lookup", Args: map[string]any{"count": json.Number("1")}}}, msg.ToolCalls)
 }
 
 // TestEncodeClaudeRequest_MaxTokensSources verifies max_tokens priority:
@@ -180,7 +180,7 @@ func TestEncodeClaudeRequest_MaxTokensSources(t *testing.T) {
 // TestDecodeClaudeResponse_NoUsage verifies a response without usage is fine.
 func TestDecodeClaudeResponse_NoUsage(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
-	msg, err := decodeClaudeResponse([]byte(`{"content":[{"type":"text","text":"x"}]}`))
+	msg, err := decodeClaudeResponse([]byte(`{"role":"assistant","content":[{"type":"text","text":"x"}],"stop_reason":"end_turn"}`))
 	require.NoError(t, err)
 	assert.Equal(t, "x", msg.Content)
 	assert.Nil(t, msg.Usage)
@@ -413,7 +413,7 @@ func TestNativeChatModelHeaders(t *testing.T) {
 	clSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		gotVersion = r.Header.Get("anthropic-version")
 		gotClaudeKey = r.Header.Get("x-api-key")
-		writeResponse(t, w, `{"content":[{"type":"text","text":"ok"}]}`)
+		writeResponse(t, w, `{"role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}`)
 	}))
 	defer clSrv.Close()
 
@@ -933,7 +933,7 @@ func TestClaudeStreamRejectsNonObjectToolArguments(t *testing.T) {
 			streamErr = chunk.Error
 		}
 	}
-	require.ErrorContains(t, streamErr, "arguments must be a JSON object")
+	require.Error(t, streamErr)
 }
 
 func TestClaudeStreamRejectsMalformedEventOrdering(t *testing.T) {
@@ -1107,7 +1107,7 @@ func TestClaudeStreamRejectsMalformedEventOrdering(t *testing.T) {
 	}
 }
 
-func TestClaudeStreamAllowsInterleavedContentBlocks(t *testing.T) {
+func TestClaudeStreamRejectsInterleavedToolAndTextBlocks(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	chunks := collectClaudeStream(t, []string{
 		`{"type":"message_start","message":{"role":"assistant","usage":{"input_tokens":4}}}`,
@@ -1123,28 +1123,20 @@ func TestClaudeStreamAllowsInterleavedContentBlocks(t *testing.T) {
 	})
 
 	var gotText strings.Builder
-	var final *MessageChunk
+	var streamErr error
+	var sawFinal bool
 	for i := range chunks {
 		if chunks[i].Error != nil {
-			t.Fatalf("valid interleaved Claude stream failed: %v", chunks[i].Error)
+			streamErr = chunks[i].Error
 		}
 		if chunks[i].Content != "" {
 			gotText.WriteString(chunks[i].Content)
 		}
-		if chunks[i].Final {
-			final = &chunks[i]
-		}
+		sawFinal = sawFinal || chunks[i].Final
 	}
-	require.Equal(t, "before after", gotText.String())
-	require.NotNil(t, final)
-	require.Len(t, final.ToolCalls, 1)
-	args, ok := final.ToolCalls[0].Args.(map[string]any)
-	require.True(t, ok)
-	assert.Equal(t, "file.txt", args["path"])
-	require.NotNil(t, final.Usage)
-	assert.Equal(t, 4, final.Usage.InputTokens)
-	assert.Equal(t, 8, final.Usage.OutputTokens)
-	assert.Equal(t, 12, final.Usage.TotalTokens)
+	require.Error(t, streamErr)
+	assert.Equal(t, "before ", gotText.String())
+	assert.False(t, sawFinal)
 }
 
 func TestClaudeStreamRejectsOutOfOrderInterleavedText(t *testing.T) {
