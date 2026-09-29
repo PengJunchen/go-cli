@@ -74,8 +74,17 @@ func (h *CostHandler) Description() string { return "Show accumulated cost and u
 
 func (h *CostHandler) Handle(_ context.Context, _ []string, deps Dependencies) (string, error) {
 	if deps.CostTracker() != nil {
-		fmt.Fprintf(deps.Out(), "Total cost: $%.4f\n", deps.CostTracker().Total()) //nolint:errcheck
-		fmt.Fprintf(deps.Out(), "Total calls: %d\n", deps.CostTracker().Calls())   //nolint:errcheck
+		_, attemptSummary := deps.CostTracker().AttemptCostSnapshot()
+		if attemptSummary.Attempts > 0 {
+			fmt.Fprintf(deps.Out(), "Known cost subtotal: $%.4f\n", attemptSummary.KnownCostSubtotal)                                             //nolint:errcheck
+			fmt.Fprintf(deps.Out(), "Provider attempts: %d\n", attemptSummary.Attempts)                                                           //nolint:errcheck
+			fmt.Fprintf(deps.Out(), "Known provider tokens: %d in / %d out\n", attemptSummary.KnownInputTokens, attemptSummary.KnownOutputTokens) //nolint:errcheck
+			fmt.Fprintf(deps.Out(), "Unknown usage attempts: %d\n", attemptSummary.UnknownUsageAttempts)                                          //nolint:errcheck
+			fmt.Fprintf(deps.Out(), "Unknown cost attempts: %d\n", attemptSummary.UnknownCostAttempts)                                            //nolint:errcheck
+		} else {
+			fmt.Fprintf(deps.Out(), "Total cost: $%.4f\n", deps.CostTracker().Total()) //nolint:errcheck
+			fmt.Fprintf(deps.Out(), "Total calls: %d\n", deps.CostTracker().Calls())   //nolint:errcheck
+		}
 
 		// Sub-agent cost breakdown.
 		subTotal := deps.CostTracker().SubagentTotal()

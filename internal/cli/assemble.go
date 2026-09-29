@@ -806,11 +806,19 @@ func (s *assembleState) assembleModel() error {
 				TaskType: llm.TaskType(m.TaskType),
 			}
 		}
+		resolvedModels := make([]llm.ResolvedModel, 0, len(entries))
+		for _, entry := range entries {
+			resolved, resolveErr := modelResolver.resolveCyclerCandidate(s.ctx, entry.Provider, entry.Model)
+			if resolveErr != nil {
+				return fmt.Errorf("assemble: resolve model cycler candidate %q/%q: %w", entry.Provider, entry.Model, resolveErr)
+			}
+			resolvedModels = append(resolvedModels, resolved)
+		}
 		s.modelCycler = llm.NewModelCycler(llm.ModelCyclerConfig{
 			Models:   entries,
 			Strategy: s.rc.ModelCycler.Strategy,
 		})
-		s.modelCycler.WithRegistry(llm.NewProviderRegistry())
+		s.modelCycler.WithResolvedModels(resolvedModels)
 		s.model = s.modelCycler.WrapModel(s.model)
 		s.logger.Info("assemble_model_cycler_enabled",
 			"strategy", s.rc.ModelCycler.Strategy,
@@ -1505,6 +1513,13 @@ func (s *assembleState) assembleLoopAgent() {
 		core.WithFollowUpChannel(s.followUpCh),
 		core.WithThinkingConfig(llm.ThinkingConfigForLevel(s.thinkingLevel)),
 	}
+	if s.costTracker != nil {
+		tracker := s.costTracker
+		loopOpts = append(loopOpts, core.WithProviderAttemptRecorder(func(result llm.ProviderAttemptResult) error {
+			_, err := tracker.RecordAttempt(result)
+			return err
+		}))
+	}
 	if s.rc != nil && s.rc.Agent.MaxIterations != 0 {
 		loopOpts = append(loopOpts, core.WithMaxIterations(s.rc.Agent.MaxIterations))
 	}
@@ -1626,7 +1641,7 @@ func (s *assembleState) assembleCompactor() error {
 	// factory rather than bypassing it, so the factory owns compactor
 	// construction for every strategy.
 	var factoryOpts []compaction.DefaultCompactorFactoryOption
-	if s.smallModel != nil && (strategy == "" || strategy == "unified" || strategy == "micro_first") {
+	if s.smallModel != nil && (strategy == "" || strategy == "unified" || strategy == "micro_first" || strategy == "summary") {
 		summarizer := &llmModelSummarizer{model: s.smallModel}
 		factoryOpts = append(factoryOpts, compaction.WithFactorySummarizer(summarizer))
 		s.logger.Info("assemble_compaction_small_model_wired")
@@ -1737,6 +1752,32 @@ func newCLIModelResolver(rc *config.Config, primaryProviderName string, includeS
 			smallEndpoint = endpoint
 			appendConfiguredModel(modelNamesByProvider, smallProviderName, rc.SmallModel.Model)
 			bindings = append(bindings, cliProviderCredential{providerID: smallProviderName, endpoint: endpoint, apiKey: apiKey, optional: true})
+		}
+	}
+	if rc != nil && rc.ModelCycler.Enabled != nil && *rc.ModelCycler.Enabled {
+		configuredProviderName := normalizeProviderName(resolveProviderName("", rc))
+		for _, candidate := range rc.ModelCycler.Models {
+			providerID := normalizeProviderName(candidate.Provider)
+			if providerID == "" || strings.TrimSpace(candidate.Model) == "" {
+				return nil, fmt.Errorf("assemble: model cycler candidate requires provider and model")
+			}
+			if isDisabledCLIProvider(providerID) {
+				return nil, unsupportedCLIProviderError(providerID)
+			}
+			appendConfiguredModel(modelNamesByProvider, providerID, candidate.Model)
+			if providerID == "eino" || providerIdentityMatches(primaryProviderName, providerID) ||
+				providerIdentityMatches(smallProviderName, providerID) {
+				continue
+			}
+			if configuredProviderName == providerID {
+				bindings = append(bindings, cliProviderCredential{
+					providerID: providerID,
+					endpoint:   rc.Provider.BaseURL,
+					apiKey:     rc.Provider.APIKey,
+				})
+				continue
+			}
+			bindings = append(bindings, cliProviderCredential{providerID: providerID})
 		}
 	}
 
@@ -2002,6 +2043,17 @@ func (r *cliModelResolver) build(ctx context.Context, request llm.ModelRequest) 
 	return model, llm.ModelInfo{}, cleanup, nil
 }
 
+func (r *cliModelResolver) resolveCyclerCandidate(ctx context.Context, providerName, modelName string) (llm.ResolvedModel, error) {
+	providerName = normalizeProviderName(providerName)
+	request := llm.ModelRequest{ProviderID: providerName, ModelID: strings.TrimSpace(modelName)}
+	if providerIdentityMatches(r.primaryProviderID, providerName) {
+		request.Endpoint = r.primaryEndpoint
+	} else if providerIdentityMatches(r.smallProviderID, providerName) {
+		request.Endpoint = r.smallEndpoint
+	}
+	return r.resolver.ResolveModel(ctx, request)
+}
+
 func (r *cliModelResolver) buildInteractive(ctx context.Context, rc *config.Config, candidate llm.ModelSpec) (llm.BaseChatModel, llm.ModelInfo, func(), error) {
 	providerName := normalizeProviderName(candidate.ProviderID)
 	modelName := strings.TrimSpace(candidate.ModelID)
@@ -2188,6 +2240,17 @@ var _ compaction.Summarizer = (*llmModelSummarizer)(nil)
 // the model's response as the summary.
 func (s *llmModelSummarizer) Summarize(ctx context.Context, conversation string) (string, error) {
 	ctx = llm.WithTaskType(ctx, llm.TaskTypeSummary)
+	if candidates := llm.ProviderCandidatesFromModel(s.model); len(candidates) > 0 {
+		factory, ok := llm.RunOperationFactoryFromContext(ctx)
+		if !ok {
+			return "", llm.ErrOperationAuthorityRequired
+		}
+		authority, err := factory.NewOperation(ctx, llm.OperationSummary, 3, candidates)
+		if err != nil {
+			return "", fmt.Errorf("cli: create summary provider operation: %w", err)
+		}
+		ctx = llm.WithOperationDispatchAuthority(ctx, authority)
+	}
 	msgs := []llm.Message{
 		{Role: llm.RoleUser, Content: conversation},
 	}

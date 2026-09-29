@@ -50,16 +50,66 @@ func (m *attemptFencedTestModel) Generate(ctx context.Context, messages []Messag
 }
 
 func (m *attemptFencedTestModel) Stream(ctx context.Context, messages []Message, opts ...Option) (<-chan MessageChunk, error) {
-	chunks, err := m.inner.Stream(ctx, messages, opts...)
-	if err != nil || chunks == nil {
-		return chunks, err
-	}
 	attempt, err := (providerDispatchBinding{mode: GuardedCandidateBuild, candidate: m.candidate}).begin(ctx)
 	if err != nil {
-		drainMessageChunks(chunks)
 		return nil, err
 	}
-	return finishProviderAttemptStream(ctx, chunks, attempt), nil
+	attemptCtx, cancel := context.WithCancelCause(ctx)
+	chunks, err := m.inner.Stream(attemptCtx, messages, opts...)
+	if err != nil || chunks == nil {
+		cancelStreamAttempt(ctx, cancel, err)
+		drainMessageChunks(chunks)
+		if err == nil {
+			err = errors.New("test provider returned a nil stream")
+		}
+		if finishErr := finishProviderAttempt(ctx, attempt, err, nil); finishErr != nil {
+			err = finishErr
+		}
+		return nil, err
+	}
+	return finishAttemptTestStream(ctx, cancel, chunks, attempt), nil
+}
+
+func finishAttemptTestStream(parent context.Context, cancel context.CancelCauseFunc, source <-chan MessageChunk, attempt *ProviderAttempt) <-chan MessageChunk {
+	out := make(chan MessageChunk, cap(source))
+	go func() {
+		defer close(out)
+		var usage *Usage
+		var terminalErr error
+		for chunk := range source {
+			if chunk.Usage != nil {
+				copyUsage := *chunk.Usage
+				usage = &copyUsage
+			}
+			if chunk.Error != nil {
+				terminalErr = chunk.Error
+				cancelStreamAttempt(parent, cancel, terminalErr)
+				continue
+			}
+			if terminalErr != nil {
+				continue
+			}
+			select {
+			case out <- chunk:
+			case <-parent.Done():
+				cause := context.Cause(parent)
+				if cause == nil {
+					cause = parent.Err()
+				}
+				terminalErr = cause
+				cancelStreamAttempt(parent, cancel, cause)
+			}
+		}
+		finishErr := finishProviderAttempt(parent, attempt, terminalErr, usage)
+		if finishErr != nil {
+			select {
+			case out <- MessageChunk{Error: finishErr}:
+			case <-parent.Done():
+			}
+		}
+		cancel(nil)
+	}()
+	return out
 }
 
 var _ BaseChatModel = (*attemptFencedTestModel)(nil)
@@ -80,6 +130,14 @@ func (a *attemptTestAuthority) AuthorizeCandidate(_ context.Context, proposal Ca
 		return DispatchDecision{Denial: a.denial}, nil
 	}
 	return DispatchDecision{Authorized: true}, nil
+}
+
+func (a *attemptTestAuthority) RecordPreDispatchFailure(_ context.Context, err error) (PreDispatchCandidateFailure, error) {
+	failure, ok := PreDispatchCandidateFailureFromError(err)
+	if !ok {
+		return PreDispatchCandidateFailure{}, errors.New("test authority: missing resolver pre-dispatch evidence")
+	}
+	return failure, nil
 }
 
 func (a *attemptTestAuthority) BeginDispatch(permit *DispatchPermit, candidate ResolvedCandidateHandle) (ProviderAttemptID, error) {
@@ -415,6 +473,20 @@ func TestDispatchedProviderFailureFinishesWithUnknownUsage(t *testing.T) {
 	assert.Nil(t, attempt.result.Usage.Usage)
 }
 
+func TestProviderClientTimeoutIsTransientUnlessRequestContextEnded(t *testing.T) {
+	liveContext := context.Background()
+	timeout := &providerTransportFailure{cause: context.DeadlineExceeded}
+	terminal := providerAttemptTerminal(liveContext, timeout, nil)
+	assert.Equal(t, AttemptTransportFailure, terminal.Outcome)
+	assert.Equal(t, FailureTransientProvider, terminal.Failure)
+
+	canceledContext, cancel := context.WithCancel(context.Background())
+	cancel()
+	terminal = providerAttemptTerminal(canceledContext, &providerTransportFailure{cause: context.Canceled}, nil)
+	assert.Equal(t, AttemptCancelled, terminal.Outcome)
+	assert.Equal(t, FailureCancelled, terminal.Failure)
+}
+
 func TestDirectBuildRemainsUnboundOneCall(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -508,6 +580,60 @@ func TestGuardedStreamFinishesAfterSourceClosesWithUsage(t *testing.T) {
 	require.NotNil(t, attempt.result.Usage.Usage)
 	assert.Equal(t, 4, attempt.result.Usage.Usage.InputTokens)
 	assert.Equal(t, 3, attempt.result.Usage.Usage.OutputTokens)
+}
+
+func TestGuardedStreamErrorFinishesAfterResponseBodyClose(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		w.Header().Set("Content-Type", "text/event-stream")
+		writeSSE(w, `{"choices":[{"delta":{"content":"partial"}}]}`)
+		writeSSE(w, `{ malformed json`)
+		writeSSE(w, "[DONE]")
+	}))
+	defer server.Close()
+
+	var responseBodyClosed atomic.Bool
+	var finishSawClosedBody atomic.Bool
+	client := &http.Client{Transport: closeTrackingRoundTripper{
+		next:   server.Client().Transport,
+		closed: &responseBodyClosed,
+	}}
+	registry := NewProviderRegistry()
+	require.NoError(t, registry.Register(NewEinoProvider(
+		WithProviderName("attempt-stream-error"),
+		WithHTTPClient(client),
+	)))
+	resolved, err := registry.SnapshotResolver().ResolveModel(context.Background(), ModelRequest{
+		ProviderID: "attempt-stream-error",
+		ModelID:    "attempt-test-model",
+		Endpoint:   server.URL,
+	})
+	require.NoError(t, err)
+	model, cleanup, err := resolved.Build(context.Background())
+	require.NoError(t, err)
+	defer cleanup()
+
+	authority := &attemptTestAuthority{id: "stream-error-operation"}
+	authority.onFinish = func() { finishSawClosedBody.Store(responseBodyClosed.Load()) }
+	stream, err := model.Stream(WithOperationDispatchAuthority(context.Background(), authority), []Message{{Role: RoleUser, Content: "request"}})
+	require.NoError(t, err)
+	var streamErr error
+	for chunk := range stream {
+		if chunk.Error != nil {
+			streamErr = chunk.Error
+			assert.True(t, responseBodyClosed.Load(), "the response body must close before an error reaches the caller")
+			require.Len(t, authority.attempts, 1)
+			assert.True(t, authority.attempts[0].finished, "the provider attempt must finish before the error reaches the caller")
+		}
+	}
+
+	require.Equal(t, 1, requests)
+	require.Error(t, streamErr)
+	assert.True(t, finishSawClosedBody.Load(), "Finish must join response-body cleanup on an error stream")
+	require.Len(t, authority.attempts, 1)
+	assert.True(t, authority.attempts[0].finished, "the attempt must finish before the output stream closes")
+	assert.Equal(t, FailureProtocol, authority.attempts[0].result.Failure)
 }
 
 type closeTrackingRoundTripper struct {

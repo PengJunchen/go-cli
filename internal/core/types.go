@@ -138,6 +138,10 @@ type TokenUsage struct {
 	MaxTokens int `json:"max_tokens,omitempty"`
 	// Cost is the accumulated monetary cost in USD.
 	Cost float64 `json:"cost,omitempty"`
+	// UnknownUsageAttempts counts provider attempts without authoritative token counts.
+	UnknownUsageAttempts int `json:"unknown_usage_attempts,omitempty"`
+	// UnknownCostAttempts counts provider attempts without an authoritative or estimated cost.
+	UnknownCostAttempts int `json:"unknown_cost_attempts,omitempty"`
 }
 
 // DurablePublicationState describes the durable visibility of a run result.

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -37,27 +38,34 @@ var errMaxIterations = errors.New("core: agent loop exceeded max iterations")
 // loopConfig holds the configurable dependencies of a LoopAgent. All
 // dependencies are interface types.
 type loopConfig struct {
-	model                llm.BaseChatModel
-	tools                tools.ToolRegistry
-	maxIterations        int
-	modelWrapper         ModelWrapper
-	executionMode        ExecutionMode
-	toolInterceptors     []ToolInterceptor
-	systemPromptOverride string
-	promptBuilder        SystemPromptBuilder
-	promptOpts           SystemPromptOptions
-	tracer               *tracing.Tracer
-	steerCh              chan string
-	followUpCh           chan string
-	thinkingConfig       *llm.ThinkingConfig
-	midTurnCompactor     *compaction.MidTurnCompact
-	compactor            compaction.Compactor
-	estimator            compaction.TokenEstimator
-	maxTokens            int
+	model                   llm.BaseChatModel
+	providerAttemptRecorder func(llm.ProviderAttemptResult) error
+	tools                   tools.ToolRegistry
+	maxIterations           int
+	modelWrapper            ModelWrapper
+	executionMode           ExecutionMode
+	toolInterceptors        []ToolInterceptor
+	systemPromptOverride    string
+	promptBuilder           SystemPromptBuilder
+	promptOpts              SystemPromptOptions
+	tracer                  *tracing.Tracer
+	steerCh                 chan string
+	followUpCh              chan string
+	thinkingConfig          *llm.ThinkingConfig
+	midTurnCompactor        *compaction.MidTurnCompact
+	compactor               compaction.Compactor
+	estimator               compaction.TokenEstimator
+	maxTokens               int
 }
 
 // LoopOption configures a LoopAgent at construction time.
 type LoopOption func(*loopConfig)
+
+// WithProviderAttemptRecorder installs the run-scoped sink for immutable
+// provider results produced by resolver-built models.
+func WithProviderAttemptRecorder(record func(llm.ProviderAttemptResult) error) LoopOption {
+	return func(c *loopConfig) { c.providerAttemptRecorder = record }
+}
 
 // WithLLM sets the chat model the loop drives.
 func WithLLM(m llm.BaseChatModel) LoopOption {
@@ -143,23 +151,24 @@ func WithThinkingConfig(cfg llm.ThinkingConfig) LoopOption {
 // the injected chat model, servicing any tool calls the model requests, and
 // returns the events it fired.
 type LoopAgent struct {
-	model                llm.BaseChatModel
-	tools                tools.ToolRegistry
-	maxIterations        int
-	modelWrapper         ModelWrapper
-	executionMode        ExecutionMode
-	toolInterceptors     []ToolInterceptor
-	systemPromptOverride string
-	promptBuilder        SystemPromptBuilder
-	promptOpts           SystemPromptOptions
-	tracer               *tracing.Tracer
-	steerCh              chan string
-	followUpCh           chan string
-	thinkingConfig       *llm.ThinkingConfig
-	midTurnCompactor     *compaction.MidTurnCompact
-	compactor            compaction.Compactor
-	estimator            compaction.TokenEstimator
-	maxTokens            int
+	model                   llm.BaseChatModel
+	providerAttemptRecorder func(llm.ProviderAttemptResult) error
+	tools                   tools.ToolRegistry
+	maxIterations           int
+	modelWrapper            ModelWrapper
+	executionMode           ExecutionMode
+	toolInterceptors        []ToolInterceptor
+	systemPromptOverride    string
+	promptBuilder           SystemPromptBuilder
+	promptOpts              SystemPromptOptions
+	tracer                  *tracing.Tracer
+	steerCh                 chan string
+	followUpCh              chan string
+	thinkingConfig          *llm.ThinkingConfig
+	midTurnCompactor        *compaction.MidTurnCompact
+	compactor               compaction.Compactor
+	estimator               compaction.TokenEstimator
+	maxTokens               int
 	// toolSearchThreshold is the maximum number of tools to expose to the LLM
 	// without filtering. When the tool count exceeds this, tools are
 	// dynamically scored and filtered by relevance to the current query.
@@ -240,23 +249,24 @@ func NewLoopAgent(opts ...LoopOption) *LoopAgent {
 		cfg.maxIterations = defaultMaxIterations
 	}
 	la := &LoopAgent{
-		model:                cfg.model,
-		tools:                cfg.tools,
-		maxIterations:        cfg.maxIterations,
-		modelWrapper:         cfg.modelWrapper,
-		executionMode:        cfg.executionMode,
-		toolInterceptors:     append([]ToolInterceptor(nil), cfg.toolInterceptors...),
-		systemPromptOverride: cfg.systemPromptOverride,
-		promptBuilder:        cfg.promptBuilder,
-		promptOpts:           cfg.promptOpts,
-		tracer:               cfg.tracer,
-		steerCh:              cfg.steerCh,
-		followUpCh:           cfg.followUpCh,
-		thinkingConfig:       cfg.thinkingConfig,
-		midTurnCompactor:     cfg.midTurnCompactor,
-		compactor:            cfg.compactor,
-		estimator:            cfg.estimator,
-		maxTokens:            cfg.maxTokens,
+		model:                   cfg.model,
+		providerAttemptRecorder: cfg.providerAttemptRecorder,
+		tools:                   cfg.tools,
+		maxIterations:           cfg.maxIterations,
+		modelWrapper:            cfg.modelWrapper,
+		executionMode:           cfg.executionMode,
+		toolInterceptors:        append([]ToolInterceptor(nil), cfg.toolInterceptors...),
+		systemPromptOverride:    cfg.systemPromptOverride,
+		promptBuilder:           cfg.promptBuilder,
+		promptOpts:              cfg.promptOpts,
+		tracer:                  cfg.tracer,
+		steerCh:                 cfg.steerCh,
+		followUpCh:              cfg.followUpCh,
+		thinkingConfig:          cfg.thinkingConfig,
+		midTurnCompactor:        cfg.midTurnCompactor,
+		compactor:               cfg.compactor,
+		estimator:               cfg.estimator,
+		maxTokens:               cfg.maxTokens,
 	}
 	slog.Info("core.loop.new",
 		"max_iterations", la.maxIterations,
@@ -399,6 +409,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 
 	span, spanCtx := tracing.SpanFromContext(ctx, "loop.run", tracing.SpanKindInternal)
 	defer span.End()
+	spanCtx = llm.WithRunOperationFactory(spanCtx, &providerOperationFactory{record: l.providerAttemptRecorder})
 	logger := tracing.NewTraceLogger(span, nil)
 	logger.Info("core.loop.run", "type", submission.Type, "iterations", l.maxIterations)
 
@@ -703,7 +714,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 		}
 		eventCoordinates = iterationCoordinates
 		iterationCtx := withAgentEventCoordinates(spanCtx, iterationCoordinates)
-		resp, err := l.generateWithContinuation(iterationCtx, model, messages, iterOpts, es, logger)
+		resp, err := l.generateWithContinuationAndCompaction(iterationCtx, model, messages, iterOpts, es, logger, consumer, compactor, estimator, maxTokens)
 		if err != nil {
 			var providerErr *llm.ProviderError
 			if errors.As(err, &providerErr) && providerErr != nil {
@@ -1407,6 +1418,9 @@ func (l *LoopAgent) streamGenerateWithBudget(ctx context.Context, model llm.Base
 			// The complete non-incremental "message" event is emitted by the
 			// loop once the response finishes.
 			if publishIncremental && es != nil {
+				if budget != nil {
+					budget.visible = true
+				}
 				_ = es.Send(stampAgentEvent(agentEventCoordinatesFromContext(ctx), AgentEvent{ //nolint:errcheck
 					Kind:        "message",
 					Content:     chunk.Content,
@@ -1479,6 +1493,21 @@ func (l *LoopAgent) streamGenerateWithBudget(ctx context.Context, model llm.Base
 // is still truncated after that, the candidate is rejected and no complete
 // assistant turn is returned.
 func (l *LoopAgent) generateWithContinuation(ctx context.Context, model llm.BaseChatModel, messages []llm.Message, toolOpts []llm.Option, es EventStream, logger *slog.Logger) (*llm.Message, error) {
+	return l.generateWithContinuationAndCompaction(ctx, model, messages, toolOpts, es, logger, nil, nil, nil, 0)
+}
+
+func (l *LoopAgent) generateWithContinuationAndCompaction(
+	ctx context.Context,
+	model llm.BaseChatModel,
+	messages []llm.Message,
+	toolOpts []llm.Option,
+	es EventStream,
+	logger *slog.Logger,
+	consumer *runCommitConsumer,
+	compactor compaction.Compactor,
+	estimator compaction.TokenEstimator,
+	maxTokens int,
+) (*llm.Message, error) {
 	guard, guarded := model.(CompleteResponseGuard)
 	if guarded {
 		if guard.MaxCandidateBytes() != guardedStreamMaxBytes {
@@ -1487,9 +1516,31 @@ func (l *LoopAgent) generateWithContinuation(ctx context.Context, model llm.Base
 		ctx = llm.WithLoopOwnedContinuation(ctx)
 	}
 	budget := &guardedStreamBudget{}
-	resp, err := l.streamGenerateWithBudget(ctx, model, messages, toolOpts, es, budget, !guarded)
+	mainCtx, operationActive, operationErr := providerOperationContext(ctx, model, llm.OperationMainRequest)
+	if operationErr != nil {
+		return nil, operationErr
+	}
+	resp, err := l.streamGenerateWithBudget(mainCtx, model, messages, toolOpts, es, budget, !guarded)
 	if err != nil || resp == nil {
-		return resp, err
+		if err == nil || resp != nil {
+			return resp, err
+		}
+		recovered, compactedMessages, recoveryBudget, recoveredOK, recoveryErr := l.recoverOverflowAttempt(
+			mainCtx, model, messages, toolOpts, es, budget, guarded, operationActive,
+			consumer, compactor, estimator, maxTokens, err,
+		)
+		if recoveryErr != nil {
+			return nil, errors.Join(err, recoveryErr)
+		}
+		if !recoveredOK {
+			return nil, err
+		}
+		resp = recovered
+		messages = compactedMessages
+		budget = recoveryBudget
+		if resp == nil {
+			return nil, errors.New("core: overflow recovery returned a nil response")
+		}
 	}
 
 	// Lazily create a continuation span only when the response is truncated.
@@ -1547,6 +1598,10 @@ func (l *LoopAgent) generateWithContinuation(ctx context.Context, model llm.Base
 		logger.Info("core.loop.continuation", "attempt", attempt+1)
 
 		contCtx := llm.WithContinuationNoReplay(ctx)
+		contCtx, _, operationErr = providerOperationContext(contCtx, model, llm.OperationContinuation)
+		if operationErr != nil {
+			return nil, operationErr
+		}
 		contResp, contErr := l.streamGenerateWithBudget(contCtx, model, contMsgs, toolOpts, es, budget, !guarded)
 		if contErr != nil {
 			return nil, fmt.Errorf("core: continuation %d failed: %w", attempt+1, contErr)
@@ -1620,12 +1675,141 @@ func (l *LoopAgent) generateWithContinuation(ctx context.Context, model llm.Base
 		if candidateBytes > guard.MaxCandidateBytes() {
 			return nil, fmt.Errorf("core: guarded response payload exceeds %d-byte candidate limit", guard.MaxCandidateBytes())
 		}
-		if es != nil && resp.Content != "" {
-			_ = es.Send(stampAgentEvent(agentEventCoordinatesFromContext(ctx), AgentEvent{Kind: "message", Content: resp.Content, Timestamp: time.Now(), Incremental: true})) //nolint:errcheck
+			if es != nil && resp.Content != "" {
+				budget.visible = true
+				_ = es.Send(stampAgentEvent(agentEventCoordinatesFromContext(ctx), AgentEvent{Kind: "message", Content: resp.Content, Timestamp: time.Now(), Incremental: true})) //nolint:errcheck
 		}
 	}
 
 	return resp, nil
+}
+
+func (l *LoopAgent) recoverOverflowAttempt(
+	ctx context.Context,
+	model llm.BaseChatModel,
+	messages []llm.Message,
+	toolOpts []llm.Option,
+	es EventStream,
+	failedBudget *guardedStreamBudget,
+	guarded bool,
+	operationActive bool,
+	consumer *runCommitConsumer,
+	compactor compaction.Compactor,
+	estimator compaction.TokenEstimator,
+	maxTokens int,
+	callErr error,
+) (*llm.Message, []llm.Message, *guardedStreamBudget, bool, error) {
+	if !guarded || !operationActive || failedBudget == nil || failedBudget.visible || failedBudget.bytes != 0 || failedBudget.chunks != 0 {
+		return nil, nil, nil, false, nil
+	}
+	attempt, finished := llm.FinishedProviderAttemptFromError(callErr)
+	if !finished || attempt.Failure != llm.FailureOverflow || attempt.AttemptID == "" {
+		return nil, nil, nil, false, nil
+	}
+	authority, ok := llm.OperationDispatchAuthorityFromContext(ctx)
+	if !ok {
+		return nil, nil, nil, false, nil
+	}
+	recoveryOwner, ok := authority.(llm.OverflowRecoveryAuthority)
+	if !ok {
+		return nil, nil, nil, false, nil
+	}
+	var candidate llm.ResolvedCandidateHandle
+	for _, resolved := range llm.ProviderCandidatesFromModel(model) {
+		if resolved != nil && resolved.CandidateID() == attempt.Identity.Candidate && resolved.Identity() == attempt.Identity {
+			candidate = resolved
+			break
+		}
+	}
+	if candidate == nil {
+		return nil, nil, nil, false, nil
+	}
+	if err := recoveryOwner.BeginOverflowRecovery(ctx, attempt.AttemptID); err != nil {
+		return nil, nil, nil, false, nil
+	}
+
+	compacted, err := compactOverflowRequest(ctx, messages, consumer, compactor, estimator, maxTokens)
+	if err != nil {
+		return nil, nil, nil, false, err
+	}
+	proposal := llm.CandidateProposal{
+		OperationID: authority.ID(),
+		Candidate:   candidate,
+		Reason:      llm.CandidateOverflow,
+		Antecedent: llm.CandidateAntecedent{
+			Kind:      llm.AntecedentFinishedOverflow,
+			AttemptID: attempt.AttemptID,
+		},
+	}
+	recoveryCtx := llm.WithCandidateProposal(ctx, proposal)
+	recoveryBudget := &guardedStreamBudget{}
+	response, err := l.streamGenerateWithBudget(recoveryCtx, model, compacted, toolOpts, es, recoveryBudget, false)
+	if err != nil {
+		return nil, nil, nil, false, err
+	}
+	if response == nil {
+		return nil, nil, nil, false, errors.New("core: overflow recovery returned a nil response")
+	}
+	return response, compacted, recoveryBudget, true, nil
+}
+
+func compactOverflowRequest(
+	ctx context.Context,
+	messages []llm.Message,
+	consumer *runCommitConsumer,
+	compactor compaction.Compactor,
+	estimator compaction.TokenEstimator,
+	maxTokens int,
+) ([]llm.Message, error) {
+	if compactor == nil || estimator == nil || maxTokens <= 0 {
+		return nil, errors.New("core: overflow recovery requires a configured compactor, estimator, and token budget")
+	}
+	items := messagesToTurnItems(messages)
+	if consumer != nil {
+		if consumer.source == nil {
+			return nil, ErrRunCommitCompactionProjectionUnavailable
+		}
+		if err := validateDurableRequestSource(items, consumer.source, consumer.runID); err != nil {
+			return nil, err
+		}
+	}
+	if err := compaction.ValidateCompactionEligible(items); err != nil {
+		return nil, fmt.Errorf("core: overflow recovery cannot compact this request: %w", err)
+	}
+	result, err := compactor.Compact(ctx, items, maxTokens, estimator)
+	if err != nil {
+		return nil, fmt.Errorf("core: compact overflow request: %w", err)
+	}
+	if reflect.DeepEqual(items, result.Items) {
+		return nil, errors.New("core: overflow compactor made no progress")
+	}
+	if consumer != nil {
+		projection, err := validateDurableCompactionResult(items, result, consumer.source, consumer.runID)
+		if err != nil {
+			return nil, err
+		}
+		if err := consumer.commitCompaction(projection); err != nil {
+			markRunOutcomeUnknown(ctx)
+			return nil, err
+		}
+	}
+	return turnItemsToMessages(result.Items), nil
+}
+
+func providerOperationContext(ctx context.Context, model llm.BaseChatModel, kind llm.ProviderOperationKind) (context.Context, bool, error) {
+	candidates := llm.ProviderCandidatesFromModel(model)
+	if len(candidates) == 0 {
+		return ctx, false, nil
+	}
+	factory, ok := llm.RunOperationFactoryFromContext(ctx)
+	if !ok {
+		return nil, false, llm.ErrOperationAuthorityRequired
+	}
+	authority, err := factory.NewOperation(ctx, kind, defaultProviderOperationAttempts, candidates)
+	if err != nil {
+		return nil, false, fmt.Errorf("core: create provider operation: %w", err)
+	}
+	return llm.WithOperationDispatchAuthority(ctx, authority), true, nil
 }
 
 // eventStreamSink adapts a core.EventStream to satisfy tools.StreamSink.

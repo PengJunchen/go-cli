@@ -121,7 +121,7 @@ var _ llm.BaseChatModel = (*costTrackingModel)(nil)
 func (m *costTrackingModel) Generate(ctx context.Context, msgs []llm.Message, opts ...llm.Option) (*llm.Message, error) {
 	resp, err := m.next.Generate(ctx, msgs, opts...)
 	if err == nil && resp != nil {
-		m.recordUsage(resp)
+		m.recordUsage(ctx, resp)
 	}
 	return resp, err
 }
@@ -133,8 +133,12 @@ func (m *costTrackingModel) Stream(ctx context.Context, msgs []llm.Message, opts
 	return m.next.Stream(ctx, msgs, opts...)
 }
 
+func (m *costTrackingModel) ProviderCandidates() []llm.ResolvedCandidateHandle {
+	return llm.ProviderCandidatesFromModel(m.next)
+}
+
 // recordUsage records token counts to the cost tracker and stats registry.
-func (m *costTrackingModel) recordUsage(resp *llm.Message) {
+func (m *costTrackingModel) recordUsage(ctx context.Context, resp *llm.Message) {
 	if resp.Usage == nil {
 		return
 	}
@@ -144,7 +148,8 @@ func (m *costTrackingModel) recordUsage(resp *llm.Message) {
 	if m.stats != nil {
 		m.stats.RecordTokens(m.sessionID, in, out)
 	}
-	if m.tracker != nil {
+	_, operationOwnsAccounting := llm.OperationDispatchAuthorityFromContext(ctx)
+	if m.tracker != nil && !operationOwnsAccounting {
 		if _, err := m.tracker.Record(m.modelName, in, out); err != nil {
 			slog.Warn("production.llm_integration.cost_record_failed",
 				"err", err,

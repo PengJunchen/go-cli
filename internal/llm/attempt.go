@@ -319,9 +319,19 @@ type CandidateProposal struct {
 type OperationDispatchAuthority interface {
 	ID() ProviderOperationID
 	AuthorizeCandidate(context.Context, CandidateProposal) (DispatchDecision, error)
+	// RecordPreDispatchFailure validates resolver-created setup evidence and
+	// returns the Loop-owned antecedent allowed for a later safe proposal.
+	RecordPreDispatchFailure(context.Context, error) (PreDispatchCandidateFailure, error)
 	// BeginDispatch must validate permit.ValidFor with its receiver and the exact candidate before allocating an attempt ID.
 	BeginDispatch(*DispatchPermit, ResolvedCandidateHandle) (ProviderAttemptID, error)
 	FinishAttempt(ProviderAttemptResult) error
+}
+
+// OverflowRecoveryAuthority is the optional Loop-owned gate for a single
+// typed context-limit recovery. Core consumes it before compaction; candidate
+// authorization then requires the same finished overflow attempt.
+type OverflowRecoveryAuthority interface {
+	BeginOverflowRecovery(context.Context, ProviderAttemptID) error
 }
 
 // RunOperationFactory creates independent main, continuation, or summary
@@ -379,6 +389,7 @@ type PreDispatchCandidateError struct {
 	CandidateID CandidateID
 	Class       PreDispatchFailureClass
 	Err         error
+	candidate   *resolvedCandidateHandle
 }
 
 // Error returns a safe summary that does not include provider endpoint data.
@@ -427,7 +438,20 @@ func preDispatchCandidateError(candidate *resolvedCandidateHandle, class PreDisp
 	if class < PreDispatchCandidateUnavailable || class > PreDispatchSetupUnknown {
 		class = preDispatchFailureClass(err)
 	}
-	return &PreDispatchCandidateError{CandidateID: candidateID, Class: class, Err: err}
+	return &PreDispatchCandidateError{CandidateID: candidateID, Class: class, Err: err, candidate: candidate}
+}
+
+// PreDispatchCandidateFailureFromError returns resolver-owned setup evidence.
+// A caller-created PreDispatchCandidateError is rejected because it lacks the
+// private candidate binding attached by this package.
+func PreDispatchCandidateFailureFromError(err error) (PreDispatchCandidateFailure, bool) {
+	var setupErr *PreDispatchCandidateError
+	if !errors.As(err, &setupErr) || setupErr == nil || setupErr.candidate == nil ||
+		setupErr.CandidateID == "" || setupErr.CandidateID != setupErr.candidate.id ||
+		setupErr.Class < PreDispatchCandidateUnavailable || setupErr.Class > PreDispatchSetupUnknown {
+		return PreDispatchCandidateFailure{}, false
+	}
+	return PreDispatchCandidateFailure{FailedCandidateID: setupErr.candidate.id, Class: setupErr.Class}, true
 }
 
 var (
@@ -480,6 +504,46 @@ func sameOperationAuthority(left, right OperationDispatchAuthority) bool {
 	return reflect.ValueOf(left).Interface() == reflect.ValueOf(right).Interface()
 }
 
+// ProviderCandidateSource exposes the resolver-created finite candidate set
+// available to one Loop operation. Candidate handles remain opaque and are
+// usable only by the guarded adapter bound to the same handle.
+type ProviderCandidateSource interface {
+	ProviderCandidates() []ResolvedCandidateHandle
+}
+
+// ProviderCandidatesFromModel returns a defensive copy of resolver-owned
+// candidates exposed by a model or wrapper chain.
+func ProviderCandidatesFromModel(model BaseChatModel) []ResolvedCandidateHandle {
+	if model == nil {
+		return nil
+	}
+	source, ok := model.(ProviderCandidateSource)
+	if !ok {
+		return nil
+	}
+	return append([]ResolvedCandidateHandle(nil), source.ProviderCandidates()...)
+}
+
+type resolvedCandidateModel struct {
+	inner     BaseChatModel
+	candidate *resolvedCandidateHandle
+}
+
+func (m *resolvedCandidateModel) Generate(ctx context.Context, messages []Message, opts ...Option) (*Message, error) {
+	return m.inner.Generate(ctx, messages, opts...)
+}
+
+func (m *resolvedCandidateModel) Stream(ctx context.Context, messages []Message, opts ...Option) (<-chan MessageChunk, error) {
+	return m.inner.Stream(ctx, messages, opts...)
+}
+
+func (m *resolvedCandidateModel) ProviderCandidates() []ResolvedCandidateHandle {
+	if m == nil || m.candidate == nil {
+		return nil
+	}
+	return []ResolvedCandidateHandle{m.candidate}
+}
+
 type candidateCleanupBinding struct {
 	parent  *candidateCleanupBinding
 	once    sync.Once
@@ -516,6 +580,11 @@ func RunOperationFactoryFromContext(ctx context.Context) (RunOperationFactory, b
 }
 
 // WithOperationDispatchAuthority attaches the current provider operation owner.
+// This is a trusted application-composition seam: production callers must use
+// the Loop-owned factory. Model, tool, and configuration input must never
+// install or replace an authority. Resolver-built adapters still require this
+// authority and create their private one-shot permit only after it authorizes a
+// candidate.
 func WithOperationDispatchAuthority(ctx context.Context, operation OperationDispatchAuthority) context.Context {
 	if nilOperationAuthority(operation) {
 		return context.WithValue(ctx, operationDispatchAuthorityContextKey, (*operationAuthorityBinding)(nil))
@@ -712,12 +781,15 @@ func providerAttemptTerminal(ctx context.Context, err error, usage *Usage) Provi
 	if err == nil {
 		return ProviderAttemptTerminal{Outcome: AttemptSuccess, Failure: FailureNone, Usage: evidence}
 	}
-	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if ctx != nil && (errors.Is(ctx.Err(), context.Canceled) || errors.Is(ctx.Err(), context.DeadlineExceeded)) {
 		return ProviderAttemptTerminal{Outcome: AttemptCancelled, Failure: FailureCancelled, Usage: evidence}
 	}
 	var transportErr *providerTransportFailure
 	if errors.As(err, &transportErr) {
 		return ProviderAttemptTerminal{Outcome: AttemptTransportFailure, Failure: FailureTransientProvider, Usage: evidence}
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return ProviderAttemptTerminal{Outcome: AttemptCancelled, Failure: FailureCancelled, Usage: evidence}
 	}
 	var providerErr *ProviderError
 	if errors.As(err, &providerErr) {
@@ -789,7 +861,112 @@ func finishProviderAttempt(ctx context.Context, attempt *ProviderAttempt, err er
 	if result.AttemptID != attempt.ID() {
 		return errors.Join(err, errors.New("llm: provider attempt returned a mismatched terminal result"))
 	}
-	return err
+	if err != nil {
+		return &FinishedProviderAttemptError{Result: result, cause: err}
+	}
+	return nil
+}
+
+// FinishedProviderAttemptError keeps the provider error chain available while
+// carrying the immutable result that the operation owner already finished.
+type FinishedProviderAttemptError struct {
+	Result ProviderAttemptResult
+	cause  error
+}
+
+func (e *FinishedProviderAttemptError) Error() string {
+	if e == nil || e.cause == nil {
+		return "llm: provider attempt failed"
+	}
+	return e.cause.Error()
+}
+
+func (e *FinishedProviderAttemptError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.cause
+}
+
+// FinishedProviderAttemptFromError extracts the immutable finished result
+// attached by the actual provider adapter. Wrapper code must not infer an
+// attempt from an ordinary provider error.
+func FinishedProviderAttemptFromError(err error) (ProviderAttemptResult, bool) {
+	var finished *FinishedProviderAttemptError
+	if !errors.As(err, &finished) || finished == nil || finished.Result.AttemptID == "" || finished.Result.OperationID == "" {
+		return ProviderAttemptResult{}, false
+	}
+	return cloneProviderAttemptResult(finished.Result), true
+}
+
+func withFinishedAttemptProposal(ctx context.Context, model BaseChatModel, reason CandidateReason, result ProviderAttemptResult, candidateID CandidateID) (context.Context, error) {
+	authority, active := OperationDispatchAuthorityFromContext(ctx)
+	if !active {
+		return ctx, nil
+	}
+	candidates := ProviderCandidatesFromModel(model)
+	var candidate ResolvedCandidateHandle
+	for _, current := range candidates {
+		if candidateID != "" && current.CandidateID() == candidateID {
+			candidate = current
+			break
+		}
+		if candidateID == "" && len(candidates) == 1 {
+			candidate = current
+			break
+		}
+	}
+	if candidate == nil {
+		return nil, ErrDispatchPermitRequired
+	}
+	antecedent := CandidateAntecedent{Kind: AntecedentFinishedAttempt, AttemptID: result.AttemptID}
+	if reason == CandidateOverflow {
+		antecedent.Kind = AntecedentFinishedOverflow
+	}
+	return WithCandidateProposal(ctx, CandidateProposal{
+		OperationID: authority.ID(),
+		Candidate:   candidate,
+		Reason:      reason,
+		Antecedent:  antecedent,
+	}), nil
+}
+
+func withPreDispatchCandidateProposal(ctx context.Context, nextModel BaseChatModel, failedErr error, reason CandidateReason) (context.Context, error) {
+	candidates := ProviderCandidatesFromModel(nextModel)
+	if len(candidates) != 1 || candidates[0] == nil {
+		return nil, errors.New("llm: pre-dispatch fallback requires one resolved candidate")
+	}
+	return withPreDispatchCandidateProposalFor(ctx, candidates[0], failedErr, reason)
+}
+
+func withPreDispatchCandidateProposalFor(ctx context.Context, nextCandidate ResolvedCandidateHandle, failedErr error, reason CandidateReason) (context.Context, error) {
+	authority, active := OperationDispatchAuthorityFromContext(ctx)
+	if !active {
+		return nil, ErrOperationAuthorityRequired
+	}
+	if reason != CandidateFailover && reason != CandidateCyclerPrimary {
+		return nil, errors.New("llm: invalid pre-dispatch proposal reason")
+	}
+	failure, ok := PreDispatchCandidateFailureFromError(failedErr)
+	if !ok || failure.Class != PreDispatchCandidateUnavailable {
+		return nil, errors.New("llm: pre-dispatch fallback requires resolver unavailable evidence")
+	}
+	failure, err := authority.RecordPreDispatchFailure(ctx, failedErr)
+	if err != nil {
+		return nil, fmt.Errorf("llm: record pre-dispatch candidate failure: %w", err)
+	}
+	if nextCandidate == nil {
+		return nil, errors.New("llm: pre-dispatch fallback requires a resolved candidate")
+	}
+	return WithCandidateProposal(ctx, CandidateProposal{
+		OperationID: authority.ID(),
+		Candidate:   nextCandidate,
+		Reason:      reason,
+		Antecedent: CandidateAntecedent{
+			Kind:        AntecedentPreDispatchFailure,
+			PreDispatch: &failure,
+		},
+	}), nil
 }
 
 func finishProviderAttemptStream(ctx context.Context, source <-chan MessageChunk, attempt *ProviderAttempt) <-chan MessageChunk {
@@ -837,6 +1014,10 @@ func finishProviderAttemptStream(ctx context.Context, source <-chan MessageChunk
 				}
 				if chunk.Error != nil {
 					terminalErr = chunk.Error
+					continue
+				}
+				if terminalErr != nil {
+					continue
 				}
 				select {
 				case out <- chunk:

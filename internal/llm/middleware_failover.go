@@ -88,6 +88,9 @@ func (m *failoverModel) orderedModels() []BaseChatModel {
 // permission) short-circuit: the error is returned immediately without trying
 // fallbacks. Each failover attempt is traced at debug level.
 func (m *failoverModel) Generate(ctx context.Context, msgs []Message, opts ...Option) (*Message, error) {
+	if _, operationActive := OperationDispatchAuthorityFromContext(ctx); operationActive {
+		return m.generateWithOperation(ctx, msgs, opts...)
+	}
 	models := m.orderedModels()
 	var lastErr error
 	for i, model := range models {
@@ -117,6 +120,9 @@ func (m *failoverModel) Generate(ctx context.Context, msgs []Message, opts ...Op
 // (auth, permission) short-circuit: the error is returned immediately without
 // trying fallbacks. Each failover attempt is traced at debug level.
 func (m *failoverModel) Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
+	if _, operationActive := OperationDispatchAuthorityFromContext(ctx); operationActive {
+		return m.streamWithOperation(ctx, msgs, opts...)
+	}
 	models := m.orderedModels()
 	var lastErr error
 	for i, model := range models {
@@ -151,4 +157,167 @@ func (m *failoverModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 		}
 	}
 	return nil, lastErr
+}
+
+type failoverCandidateRoute struct {
+	model     BaseChatModel
+	candidate ResolvedCandidateHandle
+}
+
+func (m *failoverModel) generateWithOperation(ctx context.Context, msgs []Message, opts ...Option) (*Message, error) {
+	models := m.orderedModels()
+	if len(models) == 0 {
+		return nil, errors.New("llm: failover has no candidate models")
+	}
+	start := 0
+	proposal, hasProposal := CandidateProposalFromContext(ctx)
+	if hasProposal {
+		var found bool
+		start, found = failoverModelIndex(models, proposal.Candidate)
+		if !found {
+			return nil, ErrDispatchPermitRequired
+		}
+	} else if len(ProviderCandidatesFromModel(models[0])) == 0 {
+		return nil, ErrOperationAuthorityRequired
+	}
+
+	response, lastErr := models[start].Generate(ctx, msgs, opts...)
+	if lastErr == nil || ContinuationNoReplay(ctx) {
+		return response, lastErr
+	}
+	visited := map[CandidateID]struct{}{}
+	if result, ok := FinishedProviderAttemptFromError(lastErr); ok {
+		visited[result.Identity.Candidate] = struct{}{}
+	} else if failure, ok := PreDispatchCandidateFailureFromError(lastErr); ok {
+		visited[failure.FailedCandidateID] = struct{}{}
+	}
+	for _, route := range m.failoverRoutes(models, start+1, visited) {
+		proposalCtx, proposalErr := m.proposeAfterFailure(ctx, route, lastErr)
+		if proposalErr != nil {
+			return nil, errors.Join(lastErr, proposalErr)
+		}
+		response, err := route.model.Generate(proposalCtx, msgs, opts...)
+		if err == nil {
+			return response, nil
+		}
+		lastErr = err
+		if ContinuationNoReplay(proposalCtx) {
+			return nil, lastErr
+		}
+		if result, ok := FinishedProviderAttemptFromError(lastErr); ok {
+			visited[result.Identity.Candidate] = struct{}{}
+		} else if failure, ok := PreDispatchCandidateFailureFromError(lastErr); ok {
+			visited[failure.FailedCandidateID] = struct{}{}
+		}
+	}
+	return nil, lastErr
+}
+
+func (m *failoverModel) streamWithOperation(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
+	models := m.orderedModels()
+	if len(models) == 0 {
+		return nil, errors.New("llm: failover has no candidate models")
+	}
+	start := 0
+	proposal, hasProposal := CandidateProposalFromContext(ctx)
+	if hasProposal {
+		var found bool
+		start, found = failoverModelIndex(models, proposal.Candidate)
+		if !found {
+			return nil, ErrDispatchPermitRequired
+		}
+	} else if len(ProviderCandidatesFromModel(models[0])) == 0 {
+		return nil, ErrOperationAuthorityRequired
+	}
+
+	attemptCtx, cancel := context.WithCancelCause(ctx)
+	stream, lastErr := models[start].Stream(attemptCtx, msgs, opts...)
+	if lastErr == nil && stream != nil {
+		return forwardMessageStreamAttempt(ctx, cancel, stream), nil
+	}
+	if lastErr == nil {
+		lastErr = errors.New("failover: model returned a nil stream without an error")
+	}
+	cancelStreamAttempt(ctx, cancel, lastErr)
+	drainMessageChunks(stream)
+	if ctx.Err() != nil || ContinuationNoReplay(ctx) {
+		return nil, lastErr
+	}
+	visited := map[CandidateID]struct{}{}
+	if result, ok := FinishedProviderAttemptFromError(lastErr); ok {
+		visited[result.Identity.Candidate] = struct{}{}
+	} else if failure, ok := PreDispatchCandidateFailureFromError(lastErr); ok {
+		visited[failure.FailedCandidateID] = struct{}{}
+	}
+	for _, route := range m.failoverRoutes(models, start+1, visited) {
+		proposalCtx, proposalErr := m.proposeAfterFailure(ctx, route, lastErr)
+		if proposalErr != nil {
+			return nil, errors.Join(lastErr, proposalErr)
+		}
+		attemptCtx, cancel = context.WithCancelCause(proposalCtx)
+		stream, err := route.model.Stream(attemptCtx, msgs, opts...)
+		if err == nil && stream != nil {
+			return forwardMessageStreamAttempt(proposalCtx, cancel, stream), nil
+		}
+		if err == nil {
+			err = errors.New("failover: candidate returned a nil stream without an error")
+		}
+		cancelStreamAttempt(proposalCtx, cancel, err)
+		drainMessageChunks(stream)
+		lastErr = err
+		if proposalCtx.Err() != nil || ContinuationNoReplay(proposalCtx) {
+			return nil, lastErr
+		}
+		if result, ok := FinishedProviderAttemptFromError(lastErr); ok {
+			visited[result.Identity.Candidate] = struct{}{}
+		} else if failure, ok := PreDispatchCandidateFailureFromError(lastErr); ok {
+			visited[failure.FailedCandidateID] = struct{}{}
+		}
+	}
+	return nil, lastErr
+}
+
+func failoverModelIndex(models []BaseChatModel, candidate ResolvedCandidateHandle) (int, bool) {
+	if candidate == nil {
+		return 0, false
+	}
+	for index, model := range models {
+		for _, current := range ProviderCandidatesFromModel(model) {
+			if current == candidate {
+				return index, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func (m *failoverModel) failoverRoutes(models []BaseChatModel, start int, visited map[CandidateID]struct{}) []failoverCandidateRoute {
+	routes := make([]failoverCandidateRoute, 0, len(models)-start)
+	for index := start; index < len(models); index++ {
+		candidates := ProviderCandidatesFromModel(models[index])
+		for _, candidate := range candidates {
+			if candidate == nil {
+				continue
+			}
+			if _, alreadyVisited := visited[candidate.CandidateID()]; alreadyVisited {
+				continue
+			}
+			routes = append(routes, failoverCandidateRoute{model: models[index], candidate: candidate})
+		}
+	}
+	return routes
+}
+
+func (m *failoverModel) proposeAfterFailure(ctx context.Context, route failoverCandidateRoute, failedErr error) (context.Context, error) {
+	if result, ok := FinishedProviderAttemptFromError(failedErr); ok {
+		if result.Failure != FailureTransientProvider || result.Identity.Candidate == route.candidate.CandidateID() {
+			return nil, errors.New("llm: failover requires a distinct candidate after a transient finished attempt")
+		}
+		return withFinishedAttemptProposal(ctx, m, CandidateFailover, result, route.candidate.CandidateID())
+	}
+	failure, ok := PreDispatchCandidateFailureFromError(failedErr)
+	if !ok || failure.Class != PreDispatchCandidateUnavailable {
+		return nil, errors.New("llm: failover requires a transient attempt or resolver unavailable evidence")
+	}
+	return withPreDispatchCandidateProposalFor(ctx, route.candidate, failedErr, CandidateFailover)
 }

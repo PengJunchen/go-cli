@@ -203,40 +203,58 @@ func emitTokenUsageEvent(stream *core.EventStreamImpl, assembly *AgentAssembly) 
 	messages := assembly.Agent.Messages()
 
 	var inputTokens, outputTokens int
+	var unknownUsageAttempts, unknownCostAttempts int
+	var attemptUsageAvailable bool
+	cost := 0.0
+	if assembly.CostTracker != nil {
+		_, summary := assembly.CostTracker.AttemptCostSnapshot()
+		if summary.Attempts > 0 {
+			attemptUsageAvailable = true
+			inputTokens = summary.KnownInputTokens
+			outputTokens = summary.KnownOutputTokens
+			unknownUsageAttempts = summary.UnknownUsageAttempts
+			unknownCostAttempts = summary.UnknownCostAttempts
+			cost = summary.KnownCostSubtotal
+		}
+	}
 
 	// Prefer API-reported usage from the last assistant message that has it.
 	// API usage reflects the actual token consumption for the full
 	// conversation (input = prompt tokens, output = completion tokens).
-	if usage := lastAssistantAPIUsage(messages); usage != nil {
-		inputTokens = usage.InputTokens
-		outputTokens = usage.OutputTokens
-	} else {
-		// Fall back to local estimation when the API did not report usage.
-		if assembly.Estimator == nil {
-			return
-		}
-		for _, msg := range messages {
-			n, _ := assembly.Estimator.Estimate(msg.Content) //nolint:errcheck
-			if msg.Role == "assistant" {
-				outputTokens += n
-			} else {
-				inputTokens += n
+	if !attemptUsageAvailable {
+		if usage := lastAssistantAPIUsage(messages); usage != nil {
+			inputTokens = usage.InputTokens
+			outputTokens = usage.OutputTokens
+		} else {
+			// Fall back to local estimation when neither the operation ledger nor
+			// the latest assistant response reported authoritative usage.
+			if assembly.Estimator == nil {
+				return
+			}
+			for _, msg := range messages {
+				n, _ := assembly.Estimator.Estimate(msg.Content) //nolint:errcheck
+				if msg.Role == "assistant" {
+					outputTokens += n
+				} else {
+					inputTokens += n
+				}
 			}
 		}
 	}
 
-	cost := 0.0
-	if assembly.CostTracker != nil {
+	if !attemptUsageAvailable && assembly.CostTracker != nil {
 		cost = assembly.CostTracker.Total()
 	}
 	_ = stream.Send(core.AgentEvent{ //nolint:errcheck
 		Kind:      "token_usage",
 		Timestamp: time.Now(),
 		TokenUsage: &core.TokenUsage{
-			InputTokens:  inputTokens,
-			OutputTokens: outputTokens,
-			MaxTokens:    assembly.ContextWindow,
-			Cost:         cost,
+			InputTokens:          inputTokens,
+			OutputTokens:         outputTokens,
+			MaxTokens:            assembly.ContextWindow,
+			Cost:                 cost,
+			UnknownUsageAttempts: unknownUsageAttempts,
+			UnknownCostAttempts:  unknownCostAttempts,
 		},
 	})
 }

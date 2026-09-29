@@ -18,6 +18,10 @@ type circuitBreakerModel struct {
 	breaker production.CircuitBreaker
 }
 
+func (m *circuitBreakerModel) ProviderCandidates() []llm.ResolvedCandidateHandle {
+	return llm.ProviderCandidatesFromModel(m.inner)
+}
+
 var _ llm.BaseChatModel = (*circuitBreakerModel)(nil)
 
 func (m *circuitBreakerModel) Generate(ctx context.Context, msgs []llm.Message, opts ...llm.Option) (*llm.Message, error) {
