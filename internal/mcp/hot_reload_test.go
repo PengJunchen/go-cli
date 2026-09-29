@@ -121,6 +121,21 @@ func writeConfig(t *testing.T, path, content string) {
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
 }
 
+func writeConfigAtomically(t *testing.T, path, content string) {
+	t.Helper()
+	temporary, err := os.CreateTemp(filepath.Dir(path), ".mcp-config-*")
+	require.NoError(t, err)
+	temporaryPath := temporary.Name()
+	t.Cleanup(func() { _ = os.Remove(temporaryPath) })
+	defer temporary.Close()
+
+	_, err = temporary.WriteString(content)
+	require.NoError(t, err)
+	require.NoError(t, temporary.Sync())
+	require.NoError(t, temporary.Close())
+	require.NoError(t, os.Rename(temporaryPath, path))
+}
+
 func TestHotReloaderWatchDetectsChange(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -448,7 +463,7 @@ func TestConfigHotReloaderRecordsFailureAndRetriesOnLaterTrigger(t *testing.T) {
 	default:
 	}
 
-	require.NoError(t, os.WriteFile(path, []byte(`{"servers":[{"name":"changed"}]}`), 0o600))
+	writeConfigAtomically(t, path, `{"servers":[{"name":"changed"}]}`)
 	select {
 	case call := <-started:
 		assert.EqualValues(t, 2, call)
