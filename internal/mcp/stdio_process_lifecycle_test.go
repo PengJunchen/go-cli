@@ -60,6 +60,52 @@ func TestMCPStdioOwnedChildHelper(t *testing.T) {
 			}
 		}
 
+		if len(request.ID) > 0 && request.Method == "tools/call" {
+			switch mode {
+			case "oversized-line":
+				writeHelperChildOutput(t, []byte(strings.Repeat("x", maxHTTPResponseSize+1)+"\n"))
+				continue
+			case "oversized-fragment":
+				writeHelperChildOutput(t, []byte(strings.Repeat("x", maxHTTPResponseSize+1)))
+				continue
+			case "ignored-lines-over-budget":
+				padding := strings.Repeat("p", 64*1024)
+				for index := 0; index < 161; index++ {
+					frame := map[string]any{"jsonrpc": "2.0"}
+					if index%2 == 0 {
+						frame["method"] = "notifications/progress"
+						frame["params"] = map[string]any{"padding": padding}
+					} else {
+						frame["id"] = 999999
+						frame["result"] = map[string]any{"padding": padding}
+					}
+					response, err := json.Marshal(frame)
+					if err != nil {
+						t.Fatal(err)
+					}
+					response = append(response, '\n')
+					writeHelperChildOutput(t, response)
+				}
+				continue
+			case "boundary-line":
+				prefix := []byte(fmt.Sprintf(`{"jsonrpc":"2.0","id":%s,"result":{"content":"`, request.ID))
+				suffix := []byte(`"}}` + "\n")
+				paddingSize := maxHTTPResponseSize - len(prefix) - len(suffix)
+				if paddingSize < 0 {
+					t.Fatal("response prefix exceeds the stdio boundary")
+				}
+				response := make([]byte, 0, maxHTTPResponseSize)
+				response = append(response, prefix...)
+				response = append(response, strings.Repeat("a", paddingSize)...)
+				response = append(response, suffix...)
+				if len(response) != maxHTTPResponseSize {
+					t.Fatalf("constructed response length %d, want %d", len(response), maxHTTPResponseSize)
+				}
+				writeHelperChildOutput(t, response)
+				continue
+			}
+		}
+
 		if len(request.ID) == 0 || request.Method != "initialize" {
 			continue
 		}
@@ -89,6 +135,17 @@ func TestMCPStdioOwnedChildHelper(t *testing.T) {
 	}
 	if err := scanner.Err(); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func writeHelperChildOutput(t *testing.T, payload []byte) {
+	t.Helper()
+	n, err := os.Stdout.Write(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != len(payload) {
+		t.Fatalf("child wrote %d bytes, want %d", n, len(payload))
 	}
 }
 
@@ -391,6 +448,59 @@ func TestOwnedStdioCancelAndDisconnectShareOneJoin(t *testing.T) {
 	wire, err := os.ReadFile(wireFile)
 	require.NoError(t, err)
 	assert.Equal(t, 1, strings.Count(string(wire), "tools/call"), "racing teardown must not replay a dispatched call")
+}
+
+func TestOwnedStdioResponseBudgetRejectsOversizedFramesAndJoinsChild(t *testing.T) {
+	for _, mode := range []string{"oversized-line", "oversized-fragment", "ignored-lines-over-budget"} {
+		t.Run(mode, func(t *testing.T) {
+			adapter, pidFile, wireFile := newOwnedStdioHelperAdapter(t, mode)
+			require.NoError(t, adapter.Connect(context.Background()))
+			waitForHelperFile(t, pidFile)
+			proc := adapter.adapterCore.proc
+			owner := adapter.adapterCore.procOwner
+			require.NotNil(t, proc)
+			require.NotNil(t, owner)
+
+			callCtx, cancelCall := context.WithTimeout(context.Background(), time.Second)
+			defer cancelCall()
+			_, callErr := adapter.CallTool(callCtx, "oversized", nil)
+			require.Error(t, callErr)
+			var protocolErr interface{ isStdioProtocolError() }
+			require.ErrorAs(t, callErr, &protocolErr, "oversize must be reported as a typed stdio protocol failure")
+			var unknown interface{ OutcomeUnknown() bool }
+			require.ErrorAs(t, callErr, &unknown)
+			assert.True(t, unknown.OutcomeUnknown(), "an oversized reply cannot establish the dispatched call outcome")
+			var pending interface{ ExecutionDone() <-chan struct{} }
+			require.ErrorAs(t, callErr, &pending)
+			assert.True(t, pending.ExecutionDone() == owner.done, "the request must expose its exact owned-process receipt")
+			select {
+			case <-pending.ExecutionDone():
+			case <-time.After(3 * time.Second):
+				t.Fatal("oversized response did not close the owned transport and join its child")
+			}
+			require.NotNil(t, proc.ProcessState, "response completion closed before cmd.Wait")
+
+			wire, err := os.ReadFile(wireFile)
+			require.NoError(t, err)
+			assert.Equal(t, 1, strings.Count(string(wire), "tools/call"), "a protocol error must not replay the dispatched call")
+			require.NoError(t, adapter.Disconnect(context.Background()))
+		})
+	}
+}
+
+func TestOwnedStdioResponseBudgetAcceptsExactBoundary(t *testing.T) {
+	adapter, pidFile, _ := newOwnedStdioHelperAdapter(t, "boundary-line")
+	require.NoError(t, adapter.Connect(context.Background()))
+	waitForHelperFile(t, pidFile)
+
+	callCtx, cancelCall := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelCall()
+	result, err := adapter.CallTool(callCtx, "boundary", nil)
+	require.NoError(t, err, "a complete response at the byte limit should be accepted")
+	content, ok := result.Content.(string)
+	require.True(t, ok, "helper should return its boundary payload as a string")
+	assert.Len(t, content, maxHTTPResponseSize-len(`{"jsonrpc":"2.0","id":1,"result":{"content":""}}`)-1)
+	require.NoError(t, adapter.Disconnect(context.Background()))
 }
 
 func TestOwnedStdioTransportCloseJoinsActiveSilentCall(t *testing.T) {
