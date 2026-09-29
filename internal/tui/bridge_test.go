@@ -150,3 +150,31 @@ func TestBridgeEventsOwnedJoinsAfterClosingItsOutput(t *testing.T) {
 		t.Fatal("owned bridge did not close its join signal after output closure")
 	}
 }
+
+func TestBridgePreservesTokenUsageProvenance(t *testing.T) {
+	coreEvent := core.AgentEvent{
+		Kind: "token_usage",
+		TokenUsage: &core.TokenUsage{
+			InputTokens: 12, OutputTokens: 4, MaxTokens: 100,
+			Cost: 0.0012, UnknownUsageAttempts: 1, UnknownCostAttempts: 2,
+			UsageSource:    core.TokenUsageSourceReported,
+			CostSources:    []core.TokenUsageCostSource{core.TokenUsageCostEstimated, core.TokenUsageCostUnknown},
+			PriceSources:   []core.TokenUsagePriceSource{core.TokenUsagePriceConfiguredTier},
+			ProviderModels: []core.TokenUsageProviderModel{{ProviderID: "openai", ModelID: "gpt-4o-mini"}},
+		},
+	}
+
+	got := CoreEventToAgentEvent(coreEvent)
+	if got.TokenUsage == nil {
+		t.Fatal("token usage was dropped")
+	}
+	if got.TokenUsage.UnknownUsageAttempts != 1 || got.TokenUsage.UnknownCostAttempts != 2 {
+		t.Fatalf("unknown attempt counts = (%d, %d), want (1, 2)", got.TokenUsage.UnknownUsageAttempts, got.TokenUsage.UnknownCostAttempts)
+	}
+	if got.TokenUsage.UsageSource != core.TokenUsageSourceReported || len(got.TokenUsage.CostSources) != 2 || len(got.TokenUsage.PriceSources) != 1 {
+		t.Fatalf("token usage sources were not preserved: %+v", got.TokenUsage)
+	}
+	if len(got.TokenUsage.ProviderModels) != 1 || got.TokenUsage.ProviderModels[0].ProviderID != "openai" || got.TokenUsage.ProviderModels[0].ModelID != "gpt-4o-mini" {
+		t.Fatalf("provider/model evidence was not preserved: %+v", got.TokenUsage.ProviderModels)
+	}
+}
