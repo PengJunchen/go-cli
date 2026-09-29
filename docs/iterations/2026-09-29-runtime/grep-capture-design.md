@@ -1,0 +1,80 @@
+# Grep bounded capture design handoff
+
+**Design snapshot:** `17ab7b76ef0b7636abff1e5a055de7acf6f6bb31` (`codex/runtime-repair-20260929`).
+**Status:** design only. Grep implementation remains blocked until a follow-up directory-capture repair is independently accepted. The independent review rejected `c3e584872c0b4406a4924575bd15c6d045202526` because its package test gate is red; the accepting follow-up SHA is still pending. No source changes or Grep test runs are claimed here.
+**Scope:** Grep JSON capture, pure-Go traversal, and Grep-specific tests. This does not change Read/Ls/Find behavior, public Grep options, tool registration, approval, or helper process ownership.
+
+## Inputs and current evidence
+
+This handoff revises [the reviewed R4 Grep capture design](../2026-09-25-runtime/r4-grep-bounded-capture-design-handoff.md) using the bounded-directory helper surface and the ordering/memory caveats from [the directory-capture review](../2026-09-25-runtime/reviews/r4-directory-capture-design-review.md). The governing cross-repo rules are [go-cli-infra/CLAUDE.md](../../../../go-cli-infra/CLAUDE.md), [go-cli-infra/AGENTS.md](../../../../go-cli-infra/AGENTS.md), [go-validation-rules.md](../../../../go-cli-infra/rules/go-validation-rules.md), and [verify-rules.md](../../../../go-cli-infra/rules/verify-rules.md).
+
+Current source evidence:
+
+- `GrepTool.Execute` resolves and validates the requested root before `search`, then reports `file:line:content`, `matches`, and `truncated`.
+- `grepWithRipgrepManaged` still captures all stdout through `runManagedSearchCommand`'s `bytes.Buffer`; `truncateMatches` runs only after parsing. `grepPureGo` uses `filepath.WalkDir`, whose per-directory lexical ordering requires materializing and sorting all sibling entries, and retains every match before truncation.
+- The Grep tests assert result membership with `Contains`; repository docs describe regex search and output shape but do not promise result order or a cross-backend truncation prefix. This makes an explicit backend traversal-order contract an acceptable implementation change for this slice.
+- Local `rg` is 15.2.0. A real single-file invocation with `rg --no-config -n -e GrepTool -- internal/tools/grep.go` emits `39:// ...` without a filename. The same query in `--json` mode emits a `match` event containing `data.path.text`, `data.line_number`, and `data.lines.text`. Thus JSON fields, not display-line splitting, are required for a file root.
+- `directory_capture.go` already defines `directoryBatchReader`, `scanDirectoryBatches`, `directoryReadBatchSize`, `boundedDirectoryOutput`, and `boundedTopK`. `managed_search_command.go` already defines `runManagedSearchCommandWithStdoutWriter`, `managedSearchLifecycleError`, and `shouldFallbackAfterManagedHelper`.
+
+## Ordering and bounded pure-Go traversal
+
+`filepath.WalkDir` visits each directory's names lexically, but it reads and sorts that directory as a whole. Replacing it with a one-entry cursor changes that ordering: `os.File.ReadDir(1)` returns entries in filesystem directory order, which is not guaranteed to be lexical. With `MaxMatches` or `MaxOutput`, the retained whole-record prefix can therefore change. Existing public descriptions and Grep tests do not promise lexical result order or a cross-backend truncation prefix, so make the filesystem-order change explicit rather than retaining/sorting all sibling names.
+
+Make that behavior explicit. Use one-entry DFS reads and preserve the order observed from each backend: filesystem traversal order for forced/fallback Go, and ripgrep JSON event order for `rg`. Count and byte limits retain only a complete prefix in that backend order. Do not sort all names, add a top-K reorder, or claim that capped Go and `rg` calls return the same records. For uncapped results, tests compare the match sets without imposing cross-backend order. This is consistent with the current public contract and avoids turning a memory fix into a new global-ordering policy. Unlike Find, whose existing tests and handoff explicitly preserve a globally lexical top-K prefix, Grep's cap is traversal/event-order based.
+
+Implement the Grep walker with `os.Open` plus `ReadDir(1)` (or `scanDirectoryBatches` with batch size `1`) and depth-first descent as soon as a directory entry is seen. Do not recurse while holding a multi-entry batch. Each active frame may retain its directory handle, path, and at most its current `DirEntry`; memory for directory enumeration is therefore independent of a directory's width. The stack and open directory handles remain `O(depth)`, and active path strings remain `O(sum of active path lengths)`. Keep the existing 1 MiB Scanner token ceiling. This is a width-memory bound, not a traversal-time, depth, or total-file-bytes bound.
+
+Preserve these path and filter rules:
+
+- A validated root regular file is scanned as the one file if it passes the same basename/relative-path glob check; a validated root directory itself is not a match and its descendants are visited. Special files and symlinks are skipped, and descendant symlink directories are never followed.
+- Apply glob matching only to files. Match the base name or the slash-joined path relative to the validated root, exactly as the current `matchGlob` branch does; never prune a directory because its name does not match.
+- Keep the per-file whitelist check. The root must pass `resolveAndValidatePath` before either backend is selected or a helper is spawned.
+- A requested-root open/enumeration/close error, including opening a root-file fixture, is an error with its cause wrapped by `%w`. This follows the already-reviewed Grep handoff; the current `WalkDir` callback accidentally swallows a missing-root error, so add a regression test for that correction. A descendant open/enumeration, file-open, or disappearing-entry error is best-effort but sets `truncated=true`. A file Scanner/read error is an error and returns no partial matches.
+- Check `ctx.Err()` before and after every `ReadDir`, before each entry/file, after empty/EOF completion, and after the walk. Return `ctx.Err()` without partial output; close every active directory handle while unwinding. A cancellation racing with an empty/EOF read must not become success.
+
+Use the Grep capture to retain at most the effective non-negative `MaxMatches` and the serialized complete-record bytes allowed by `MaxOutput`. Account for the displayed path (including `strconv.Quote` when the path contains control bytes or invalid UTF-8), colon separators, decimal line number, content, and one newline byte. If a matching record does not fit, omit the whole record, set `truncated`, and retain no later record; continue the Go walk to preserve scanner errors and cancellation. For ripgrep, stop decoding after the first known omitted record but keep draining stdout through the managed owner. The existing truncation marker remains outside the match-output byte budget. Clamp negative limits to zero; exact count/byte boundaries are not truncated unless a real matching record is omitted.
+
+The deterministic memory evidence is structural, not a heap-timing threshold:
+
+| Live data | Bound to assert |
+| --- | --- |
+| Go directory enumeration | `ReadDir` request/return size is one per active DFS frame; no directory-sized `[]DirEntry` or pending sibling batch is retained. |
+| Returned matches | retained match count is at most `max(0, MaxMatches)` and retained serialized bytes are at most `max(0, MaxOutput)`. |
+| Ripgrep parsing | one newline-framed JSON event is at most 8 MiB; after capture saturation, frame storage is cleared while the pipe continues to drain. |
+| File scanning | Scanner token buffer remains at its current 1 MiB ceiling; an overlong token becomes a typed capture-limit error. |
+| Active resources | directory handles are proportional to DFS depth and close on success, error, and cancellation; helper pipe readers are joined by the existing lifecycle owner. |
+
+Do not use `WalkDir`, `os.ReadDir`, or `File.ReadDir(-1)` in the Grep fallback. A benchmark may supplement these assertions, but an allocation/RSS threshold is not the primary proof because allocator and filesystem behavior vary by host.
+
+## Ripgrep framing and lifecycle
+
+Keep the reviewed JSON contract: invoke `rg --no-config --json -n [-g=<glob>] -e <pattern> -- <validated-root>`. Keep `RIPGREP_CONFIG_PATH` removed and all unrelated environment entries inherited. The pattern stays behind `-e`, the path after `--`, and glob remains one argument.
+
+Parse newline-delimited JSON incrementally. Only `match` events add results; parse and ignore valid begin/end/summary events. Decode `path` and `lines` from either `text` or base64 `bytes` representations, and require `line_number`. A malformed JSON frame or malformed match event is a typed protocol error. A frame over 8 MiB is a typed capture-limit error. Neither error may fall back to Go.
+
+Normalize event line bytes to the exact `bufio.ScanLines` result: remove one trailing LF if present, then one trailing CR; this also removes one terminal CR from a final line without LF. Keep decoded path bytes unchanged in `match.File`. Display normal paths and colon-bearing paths as before; quote only paths containing control bytes or invalid UTF-8 so one actual match is one output record. Add tests for exact internal path bytes and the one-record output.
+
+Wait until the follow-up directory-capture repair for c3 is independently accepted before implementing the external writer path; its accepting SHA is pending and must be recorded at that gate. The rejected c3 snapshot is not a prerequisite. Then reuse `runManagedSearchCommandWithStdoutWriter` from `managed_search_command.go`; do not change that file or duplicate process supervision. Its writer must be synchronous inside the owned stdout reader. Capture errors are latched, never returned from `Write`: return `len(p), nil`, discard the current oversized frame and later stdout, and let stderr drain and readers join. Only call the capture writer's `Finish` after the lifecycle owner returns. If join, cancellation, or containment is uncertain, return no partial output and preserve `errors.Is` for the context/capture cause plus `errors.As` for pending/unknown lifecycle errors. Typed capture/protocol failures, cancellation, pending cleanup, and unconfirmed containment are terminal; only an ordinary, fully joined helper failure may use the existing Go fallback.
+
+Also reuse `scanDirectoryBatches` with `batchSize=1` if its accepted implementation provides the needed post-read/cancellation behavior; otherwise keep the Grep-specific `ReadDir(1)` loop in `grep.go`. Reuse `boundedDirectoryOutput` only if it can preserve Grep's existing text marker and metadata semantics without changing the shared helper. Do not edit `directory_capture.go` or `managed_search_command.go` in the Grep slice. Do not apply Find's 4 KiB candidate-key guard to Grep paths; that would add a new path rejection policy.
+
+## RED and acceptance evidence
+
+Start with compile-successful REDs. The primary RED is a real temporary single-file fixture searched through the installed `rg` route: it must assert the exact fixture path, line number, and content, and fail on the current plain `-n` parser because it discards `line:content`. Skip only if `exec.LookPath("rg")` fails; this checkout's local rig has `rg 15.2.0`. Add a separate forced-Go RED where more matching lines than the configured count are scanned but only the configured complete prefix is retained, proving limits are applied during scanning rather than after collecting all matches.
+
+| Evidence | Fixture and required assertion |
+| --- | --- |
+| Real `rg` path/framing | Real file-root fixture, directory-root fixture, colon filename, and POSIX LF filename. Compare exact `match.File`, line, and content; `Execute` must produce one displayed record for an LF path and metadata must count one. |
+| Real `rg` versus Go semantics | CRLF and a final CR without LF yield identical `Content` under the real JSON backend and forced Go. With no truncation, compare match sets, not order. |
+| Traversal order change | Create matching files in a wide directory, independently read the directory with `ReadDir(1)`, and assert forced-Go output follows that observed order. Include a nested directory, root-file search, and a glob that excludes a directory name but includes a nested file. With count/output caps, assert the retained records are a whole prefix in observed Go order. This test documents the intentional change from WalkDir lexical order. |
+| Capture budgets | Unit-test negative, zero, exact, and exceeded count/byte limits. Assert count and retained-byte counters never exceed the configured effective bounds; an oversized next record is omitted whole, marker and metadata agree, and exact-boundary output is not truncated without a later match. |
+| Realistic helper drain/join | Put a PATH-local `rg` shim ahead of the real PATH. It emits JSON across deliberately split writes, writes a completion marker after the final frame, then exits. Saturate the capture and assert the marker exists before return, helper readers joined, no fallback marker was written, and output contains only the accepted complete prefix plus the truncation marker. |
+| Frame/protocol fail-closed | Fake helper emits malformed JSON, missing match fields, invalid base64, a frame split across many writes, a final event without LF, and an event just over 8 MiB. Assert typed errors preserve `errors.Is`, the oversized case drains to its marker, output is empty on error, and Go fallback is not called. |
+| Lifecycle/FD cleanup | Retain `TestGrepTimeoutWithEscapedPipeWriterPreservesCancellationCause` and `TestGrepForcedPipeCloseStopsFallbackAndWithholdsProof`; make their fake helper emit a valid JSON match before the escaped writer. Assert context cause, no partial result/fallback/completion proof for escaped writers. On Darwin/Linux, run repeated normal writer-backed helpers and compare `/dev/fd` counts before/after with a small documented tolerance, while asserting `readersJoined`; separately cancel a deep Go walk and assert cancellation is returned and open directory descriptors return to baseline. |
+| Memory independence | A synthetic incremental `directoryBatchReader` with a large entry count records the requested and maximum returned `n`; assert Grep requests one entry and retains no sibling slice. Feed more matches/bytes/frames than limits and assert structural retained-count, retained-byte, and maximum-frame counters. Do not use wall-clock or heap-size assertions as the sole proof. |
+| Root/security and incompleteness | Missing/unreadable requested root returns its wrapped cause; a descendant access failure is best-effort and marks `truncated`; a scanner error returns no partial matches; outside-whitelist root and symlink-escape root do not invoke the helper marker. Pre-canceled and mid-walk cancellation return `ctx.Err()` even at EOF. |
+| Environment/argv | Extend the existing pattern-separation test for JSON flags and `--glob=<value>` placement; assert the child sees `RIPGREP_CONFIG_PATH` unset and an unrelated sentinel environment variable inherited. |
+
+Preserve the existing default limits (1,000 matches; 1 MiB displayed match bytes), `Metadata["matches"]` as returned record count, always-present `Metadata["truncated"]`, the `\n[results truncated]` marker, and the `errors.Is`/`errors.As` lifecycle contract. Do not add public configuration, generic traversal/capture abstractions, or a claim of production/live validation.
+
+After implementation and directory-fix acceptance, run the Grep-related tests and lifecycle checks from the reviewed handoff, then the package race suite and R4 dependent race selections. Keep static checks, unit tests, lifecycle/fd evidence, and live backend evidence separately reported. This document itself has not executed source tests.
