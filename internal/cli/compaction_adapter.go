@@ -38,7 +38,7 @@ func newCompactionHook(
 		}
 
 		// Convert TurnItem -> AgentMessage
-		result := turnItemsToMessages(compacted)
+		result := turnItemsToMessages(compacted.Items)
 
 		slog.Info("cli_compaction_hook",
 			"op", "cli.compaction.hook",

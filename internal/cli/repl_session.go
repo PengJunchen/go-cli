@@ -890,8 +890,16 @@ func (s *REPLSession) runAgentGoroutine() {
 		defer close(s.turnDone)
 		runCtx := s.turnCtx
 		if s.assembly.durableSession != nil {
-			boundCtx, _, err := s.assembly.durableSession.bindRun(runCtx)
+			boundCtx, sink, err := s.assembly.durableSession.bindRun(runCtx)
 			if err != nil {
+				s.turnErr = &durableRunBindingError{cause: err}
+				s.turnResult = core.Result{Outcome: core.RunOutcomeError, ExecutionState: core.RunExecutionQuiescent}
+				s.stream.SetResult(core.AgentMessage{Role: "assistant"}, err)
+				s.stream.Close()
+				return
+			}
+			if err := hydrateDurableRunHistory(s.assembly.Agent, sink); err != nil {
+				sink.CloseRunCommit()
 				s.turnErr = &durableRunBindingError{cause: err}
 				s.turnResult = core.Result{Outcome: core.RunOutcomeError, ExecutionState: core.RunExecutionQuiescent}
 				s.stream.SetResult(core.AgentMessage{Role: "assistant"}, err)

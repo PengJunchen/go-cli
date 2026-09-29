@@ -351,10 +351,10 @@ func TestE2E_Phase19_CompactionSinglePath(t *testing.T) {
 	require.NoError(t, err)
 
 	// Verify history shrinks.
-	afterTokens := estimateItemsTokens(compacted, estimator)
+	afterTokens := estimateItemsTokens(compacted.Items, estimator)
 	assert.Less(t, afterTokens, beforeTokens, "compacted tokens should be fewer")
 	assert.LessOrEqual(t, afterTokens, maxTokens, "compacted tokens should be within budget")
-	assert.Less(t, len(compacted), len(items), "compacted item count should be fewer")
+	assert.Less(t, len(compacted.Items), len(items), "compacted item count should be fewer")
 
 	// Verify only one strategy was used (single path).
 	strategy := compactor.LastStrategy()
@@ -362,7 +362,7 @@ func TestE2E_Phase19_CompactionSinglePath(t *testing.T) {
 
 	// Verify system messages survive.
 	hasSystem := false
-	for _, it := range compacted {
+	for _, it := range compacted.Items {
 		if it.Role == compaction.RoleSystem {
 			hasSystem = true
 			break
@@ -568,7 +568,7 @@ func TestE2E_Phase19_ConfigFieldConsumption(t *testing.T) {
 		{ID: "7", Role: compaction.RoleTool, ToolCallID: "tool-7", ToolName: "read", ToolResult: strings.Repeat("another big tool result ", 50)},
 	}
 	// Use a budget that micro can satisfy by placeholdering tool results.
-	out, err := compactor.Compact(context.Background(), items, 100, est)
+	out, err := compactItemsForTest(context.Background(), compactor, items, 100, est)
 	require.NoError(t, err)
 	assert.NotEmpty(t, out, "micro compactor should produce output")
 

@@ -530,7 +530,7 @@ func TestCompactionMidTurnThreshold(t *testing.T) {
 		out:  []compaction.TurnItem{{Role: compaction.RoleSystem, Content: "compacted", IsCompaction: true}},
 	}
 
-	out, res, err := mtc.CompactIfNeeded(ctx, items, 50, est, rc)
+	out, res, err := compactIfNeededForTest(ctx, mtc, items, 50, est, rc)
 	require.NoError(t, err)
 	assert.True(t, res.Triggered, "compaction should be triggered when items exceed threshold")
 	assert.Equal(t, compaction.TriggerThreshold, res.Reason)
@@ -555,7 +555,7 @@ func TestUnifiedCompactorRouteOrder(t *testing.T) {
 		}
 
 		uni := compaction.NewUnifiedCompactor()
-		out, err := uni.Compact(ctx, items, 100, est)
+		out, err := compactItemsForTest(ctx, uni, items, 100, est)
 		require.NoError(t, err)
 		assert.Equal(t, compaction.StrategyMicro, uni.LastStrategy())
 		assert.LessOrEqual(t, tokenSum(out, est), 100)
@@ -572,7 +572,7 @@ func TestUnifiedCompactorRouteOrder(t *testing.T) {
 		}
 
 		uni := compaction.NewUnifiedCompactor()
-		out, err := uni.Compact(ctx, items, 20, est)
+		out, err := compactItemsForTest(ctx, uni, items, 20, est)
 		require.NoError(t, err)
 		assert.Equal(t, compaction.StrategyTruncating, uni.LastStrategy())
 		assert.LessOrEqual(t, tokenSum(out, est), 20)

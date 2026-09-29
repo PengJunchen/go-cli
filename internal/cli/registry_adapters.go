@@ -127,5 +127,5 @@ func (a *compactorAdapter) Compact(ctx context.Context, messages []core.AgentMes
 	if err != nil {
 		return nil, fmt.Errorf("registry compactor adapter: %w", err)
 	}
-	return turnItemsToMessages(compacted), nil
+	return turnItemsToMessages(compacted.Items), nil
 }

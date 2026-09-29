@@ -88,8 +88,10 @@ func TestCompaction_MicroCompaction(t *testing.T) {
 	}
 
 	compactor := compaction.NewMicroCompactor()
-	out, err := compactor.Compact(ctx, items, 80, est)
+	outResult, err := compactor.Compact(ctx, items, 80, est)
 	require.NoError(t, err)
+	assert.Equal(t, compaction.StrategyMicro, outResult.Strategy)
+	out := outResult.Items
 
 	// System, user, assistant messages preserved verbatim.
 	assert.Equal(t, "You are a helpful assistant.", out[0].Content)
@@ -129,7 +131,7 @@ func TestCompaction_TruncatingCompaction(t *testing.T) {
 	}
 
 	compactor := compaction.NewTruncatingCompactor()
-	out, err := compactor.Compact(ctx, items, 30, est)
+	out, err := compactItemsForTest(ctx, compactor, items, 30, est)
 	require.NoError(t, err)
 
 	// The system entry is always kept.
@@ -177,7 +179,7 @@ func TestCompaction_UnifiedStrategyRouting(t *testing.T) {
 
 	t.Run("micro-first routing with real compactors", func(t *testing.T) {
 		uni := compaction.NewUnifiedCompactor()
-		out, err := uni.Compact(ctx, items, 100, est)
+		out, err := compactItemsForTest(ctx, uni, items, 100, est)
 		require.NoError(t, err)
 		// Micro should succeed because tool results can be placeholdered.
 		assert.Equal(t, compaction.StrategyMicro, uni.LastStrategy())
@@ -210,7 +212,7 @@ func TestCompaction_UnifiedStrategyRouting(t *testing.T) {
 			compaction.WithMicro(micro),
 			compaction.WithSummary(summaryCompactor),
 		)
-		out, err := uni.Compact(ctx, manyItems, 20, est)
+		out, err := compactItemsForTest(ctx, uni, manyItems, 20, est)
 		require.NoError(t, err)
 		// The routing should fall through micro -> summary -> truncating.
 		assert.Equal(t, compaction.StrategyTruncating, uni.LastStrategy())
@@ -234,7 +236,7 @@ func TestCompaction_MidTurnThreshold(t *testing.T) {
 		comp := &recordingCompactor{name: "micro"}
 		mtc := compaction.NewMidTurnCompact() // default ratio 0.8
 
-		out, res, err := mtc.CompactIfNeeded(ctx, items, 200, est, comp)
+		out, res, err := compactIfNeededForTest(ctx, mtc, items, 200, est, comp)
 		require.NoError(t, err)
 		assert.False(t, res.Triggered)
 		assert.Equal(t, compaction.TriggerNone, res.Reason)
@@ -253,7 +255,7 @@ func TestCompaction_MidTurnThreshold(t *testing.T) {
 		}
 		mtc := compaction.NewMidTurnCompact()
 
-		out, res, err := mtc.CompactIfNeeded(ctx, items, 50, est, comp)
+		out, res, err := compactIfNeededForTest(ctx, mtc, items, 50, est, comp)
 		require.NoError(t, err)
 		assert.True(t, res.Triggered)
 		assert.Equal(t, compaction.TriggerThreshold, res.Reason)
@@ -271,7 +273,7 @@ func TestCompaction_MidTurnThreshold(t *testing.T) {
 		}
 		mtc := compaction.NewMidTurnCompact()
 
-		out, res, err := mtc.CompactTriggered(ctx, items, 1000, est, comp)
+		out, res, err := compactTriggeredForTest(ctx, mtc, items, 1000, est, comp)
 		require.NoError(t, err)
 		assert.True(t, res.Triggered)
 		assert.Equal(t, compaction.TriggerManual, res.Reason)
@@ -387,7 +389,7 @@ func TestCompaction_QualityEvaluation(t *testing.T) {
 		}
 
 		trunc := compaction.NewTruncatingCompactor()
-		out, err := trunc.Compact(ctx, items, 50, est)
+		out, err := compactItemsForTest(ctx, trunc, items, 50, est)
 		require.NoError(t, err)
 
 		eval := compaction.NewDefaultQualityEvaluator(est)
@@ -456,7 +458,7 @@ func TestCompaction_ComplexLongConversation(t *testing.T) {
 	// Run compaction at every 50th generated turn, preserving complete tool groups.
 	for _, end := range groupEnds {
 		slice := items[:end]
-		out, err := uni.Compact(ctx, slice, 200, est)
+		out, err := compactItemsForTest(ctx, uni, slice, 200, est)
 		require.NoError(t, err, "compaction at item boundary %d should succeed", end)
 		assert.LessOrEqual(t, tokenSum(out, est), 200, "compacted output at item boundary %d must fit budget", end)
 	}
@@ -472,17 +474,17 @@ func TestCompaction_EdgeCases(t *testing.T) {
 
 	t.Run("empty items list", func(t *testing.T) {
 		micro := compaction.NewMicroCompactor()
-		out, err := micro.Compact(ctx, nil, 100, est)
+		out, err := compactItemsForTest(ctx, micro, nil, 100, est)
 		require.NoError(t, err)
 		assert.Empty(t, out)
 
 		trunc := compaction.NewTruncatingCompactor()
-		out, err = trunc.Compact(ctx, nil, 100, est)
+		out, err = compactItemsForTest(ctx, trunc, nil, 100, est)
 		require.NoError(t, err)
 		assert.Empty(t, out)
 
 		uni := compaction.NewUnifiedCompactor()
-		out, err = uni.Compact(ctx, nil, 100, est)
+		out, err = compactItemsForTest(ctx, uni, nil, 100, est)
 		require.NoError(t, err)
 		assert.Empty(t, out)
 	})
@@ -493,12 +495,12 @@ func TestCompaction_EdgeCases(t *testing.T) {
 		}
 
 		micro := compaction.NewMicroCompactor()
-		out, err := micro.Compact(ctx, items, 100, est)
+		out, err := compactItemsForTest(ctx, micro, items, 100, est)
 		require.NoError(t, err)
 		assert.Equal(t, items, out)
 
 		trunc := compaction.NewTruncatingCompactor()
-		out, err = trunc.Compact(ctx, items, 100, est)
+		out, err = compactItemsForTest(ctx, trunc, items, 100, est)
 		require.NoError(t, err)
 		assert.Equal(t, items, out)
 	})
@@ -512,7 +514,7 @@ func TestCompaction_EdgeCases(t *testing.T) {
 
 		// Truncating keeps all system messages even over budget.
 		trunc := compaction.NewTruncatingCompactor()
-		out, err := trunc.Compact(ctx, items, 5, est)
+		out, err := compactItemsForTest(ctx, trunc, items, 5, est)
 		require.NoError(t, err)
 		// System messages are always preserved.
 		assert.Len(t, out, 3)
@@ -540,7 +542,7 @@ func TestCompaction_EdgeCases(t *testing.T) {
 		}
 
 		micro := compaction.NewMicroCompactor()
-		out, err := micro.Compact(ctx, items, 30, est)
+		out, err := compactItemsForTest(ctx, micro, items, 30, est)
 		require.NoError(t, err)
 		assert.LessOrEqual(t, tokenSum(out, est), 30)
 		require.Len(t, out, 6)
@@ -581,7 +583,7 @@ func TestCompaction_EdgeCases(t *testing.T) {
 		}
 
 		micro := compaction.NewMicroCompactor()
-		out, err := micro.Compact(ctx, items, 100, nil)
+		out, err := compactItemsForTest(ctx, micro, items, 100, nil)
 		require.NoError(t, err)
 		assert.Equal(t, items, out)
 	})
@@ -630,12 +632,27 @@ type recordingCompactor struct {
 
 var _ compaction.Compactor = (*recordingCompactor)(nil)
 
-func (r *recordingCompactor) Compact(_ context.Context, _ []compaction.TurnItem, _ int, _ compaction.TokenEstimator) ([]compaction.TurnItem, error) {
+func (r *recordingCompactor) Compact(_ context.Context, _ []compaction.TurnItem, _ int, _ compaction.TokenEstimator) (compaction.CompactionResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, r.name)
 	if r.err != nil {
-		return nil, r.err
+		return compaction.CompactionResult{}, r.err
 	}
-	return r.out, nil
+	return compaction.CompactionResult{Items: r.out, Strategy: compaction.StrategyMicro}, nil
+}
+
+func compactItemsForTest(ctx context.Context, compactor compaction.Compactor, items []compaction.TurnItem, maxTokens int, estimator compaction.TokenEstimator) ([]compaction.TurnItem, error) {
+	result, err := compactor.Compact(ctx, items, maxTokens, estimator)
+	return result.Items, err
+}
+
+func compactIfNeededForTest(ctx context.Context, midTurn *compaction.MidTurnCompact, items []compaction.TurnItem, maxTokens int, estimator compaction.TokenEstimator, compactor compaction.Compactor) ([]compaction.TurnItem, compaction.CompactResult, error) {
+	result, trigger, err := midTurn.CompactIfNeeded(ctx, items, maxTokens, estimator, compactor)
+	return result.Items, trigger, err
+}
+
+func compactTriggeredForTest(ctx context.Context, midTurn *compaction.MidTurnCompact, items []compaction.TurnItem, maxTokens int, estimator compaction.TokenEstimator, compactor compaction.Compactor) ([]compaction.TurnItem, compaction.CompactResult, error) {
+	result, trigger, err := midTurn.CompactTriggered(ctx, items, maxTokens, estimator, compactor)
+	return result.Items, trigger, err
 }

@@ -733,7 +733,7 @@ func TestBoundary_CompactionOneTokenBudget(t *testing.T) {
 
 	// Verify result fits within the budget
 	tokenCount := 0
-	for _, it := range result {
+	for _, it := range result.Items {
 		if it.Content != "" {
 			n, _ := estimator.Estimate(it.Content) //nolint:errcheck,gosec
 			tokenCount += n
@@ -745,5 +745,5 @@ func TestBoundary_CompactionOneTokenBudget(t *testing.T) {
 	}
 	assert.LessOrEqual(t, tokenCount, 5, "result should fit within budget")
 	// With maxTokens=5, only some items should remain
-	assert.LessOrEqual(t, len(result), 1, "at most 1 item should survive")
+	assert.LessOrEqual(t, len(result.Items), 1, "at most 1 item should survive")
 }

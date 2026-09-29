@@ -652,13 +652,14 @@ func TestE2E_Phase47_CompactionPreservesContext(t *testing.T) {
 
 	compacted, err := compactor.Compact(ctx, items, maxTokens, estimator)
 	require.NoError(t, err, "compaction should succeed")
+	compactedItems := compacted.Items
 
 	// Compacted history should be shorter than the original.
-	assert.Less(t, len(compacted), len(items), "compacted history should have fewer items")
+	assert.Less(t, len(compactedItems), len(items), "compacted history should have fewer items")
 
 	// System messages must be preserved.
 	systemCount := 0
-	for _, item := range compacted {
+	for _, item := range compactedItems {
 		if item.Role == compaction.RoleSystem {
 			systemCount++
 		}
@@ -672,14 +673,14 @@ func TestE2E_Phase47_CompactionPreservesContext(t *testing.T) {
 		compaction.RoleAssistant: true,
 		compaction.RoleTool:      true,
 	}
-	for _, item := range compacted {
+	for _, item := range compactedItems {
 		assert.True(t, validRoles[item.Role], "role %q should be valid", item.Role)
 	}
 
 	// The compacted token count should be within the budget (or close to it
 	// when the system messages alone exceed the budget).
 	compactedTokens := 0
-	for _, item := range compacted {
+	for _, item := range compactedItems {
 		compactedTokens += estimateItemTokensSimple(item, estimator)
 	}
 	// TruncatingCompactor guarantees the result fits the budget (or is the
@@ -690,7 +691,7 @@ func TestE2E_Phase47_CompactionPreservesContext(t *testing.T) {
 	}
 
 	// Verify the system messages' content is intact.
-	for _, item := range compacted {
+	for _, item := range compactedItems {
 		if item.Role == compaction.RoleSystem {
 			assert.NotEmpty(t, item.Content, "system message content must not be empty")
 		}
