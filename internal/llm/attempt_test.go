@@ -336,6 +336,36 @@ func TestResolvedBuildUsesMatchingOperationPermitAtHTTPFence(t *testing.T) {
 	assert.NotContains(t, identityText, "prompt-canary")
 }
 
+func TestResolvedBuildTreatsMissingOpenAIUsageTokensAsUnknown(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		writeResponse(t, w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{}}`)
+	}))
+	defer server.Close()
+
+	registry := NewProviderRegistry()
+	require.NoError(t, registry.Register(NewEinoProvider(
+		WithProviderName("attempt-unknown-usage"),
+		WithHTTPClient(server.Client()),
+	)))
+	resolved, err := registry.SnapshotResolver().ResolveModel(context.Background(), ModelRequest{
+		ProviderID: "attempt-unknown-usage",
+		ModelID:    "unknown-usage-model",
+		Endpoint:   server.URL,
+	})
+	require.NoError(t, err)
+	model, cleanup, err := resolved.Build(context.Background())
+	require.NoError(t, err)
+	defer cleanup()
+
+	authority := &attemptTestAuthority{id: "unknown-usage-operation"}
+	_, err = model.Generate(WithOperationDispatchAuthority(context.Background(), authority), []Message{{Role: RoleUser, Content: "request"}})
+	require.NoError(t, err)
+	require.Len(t, authority.attempts, 1)
+	assert.Equal(t, UsageUnknown, authority.attempts[0].result.Usage.State,
+		"an empty usage object has no authoritative token counts and must not become known zero usage")
+}
+
 func TestResolvedOpenAINativeBuildUsesTheSameAttemptFence(t *testing.T) {
 	requests := 0
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -369,6 +399,32 @@ func TestResolvedOpenAINativeBuildUsesTheSameAttemptFence(t *testing.T) {
 	assert.Equal(t, "openai", attempt.result.Identity.ProviderID)
 	assert.Equal(t, ProtocolOpenAICompatible, attempt.result.Identity.ProtocolID)
 	assert.Equal(t, UsageKnown, attempt.result.Usage.State)
+}
+
+func TestResolvedOpenAINativeBuildTreatsMissingUsageTokensAsUnknown(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		writeResponse(t, w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}],"usage":{}}`)
+	}))
+	defer server.Close()
+
+	registry := NewProviderRegistry()
+	require.NoError(t, registry.Register(NewOpenAIProvider(WithNativeHTTPClient(server.Client()))))
+	resolved, err := registry.SnapshotResolver().ResolveModel(context.Background(), ModelRequest{
+		ProviderID: "openai",
+		ModelID:    "native-unknown-usage-model",
+		Endpoint:   server.URL,
+	})
+	require.NoError(t, err)
+	model, cleanup, err := resolved.Build(context.Background())
+	require.NoError(t, err)
+	defer cleanup()
+
+	authority := &attemptTestAuthority{id: "native-unknown-usage-operation"}
+	_, err = model.Generate(WithOperationDispatchAuthority(context.Background(), authority), []Message{{Role: RoleUser, Content: "request"}})
+	require.NoError(t, err)
+	require.Len(t, authority.attempts, 1)
+	assert.Equal(t, UsageUnknown, authority.attempts[0].result.Usage.State)
 }
 
 func TestResolvedCandidateIDsAreOpaqueAndUnique(t *testing.T) {

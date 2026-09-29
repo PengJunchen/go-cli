@@ -468,13 +468,7 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 				}
 			}
 			final := MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
-			if parsed.Usage != nil {
-				final.Usage = &Usage{
-					InputTokens:  parsed.Usage.PromptTokens,
-					OutputTokens: parsed.Usage.CompletionTokens,
-					TotalTokens:  parsed.Usage.PromptTokens + parsed.Usage.CompletionTokens,
-				}
-			}
+			final.Usage = parsed.Usage.toUsage()
 			select {
 			case ch <- final:
 			case <-ctx.Done():
@@ -617,7 +611,7 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 		toolIDs := make(map[string]struct{})
 		var stopReason string
 		var inputTokens, outputTokens int
-		var hasUsage bool
+		var hasInputTokens, hasOutputTokens bool
 		var eventCount int
 		var toolPayloadBytes int
 		messageStarted := false
@@ -677,9 +671,14 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 						return
 					}
 					if ce.Message.Usage != nil {
-						inputTokens = ce.Message.Usage.InputTokens
-						outputTokens = ce.Message.Usage.OutputTokens
-						hasUsage = true
+						if ce.Message.Usage.InputTokens != nil {
+							inputTokens = *ce.Message.Usage.InputTokens
+							hasInputTokens = true
+						}
+						if ce.Message.Usage.OutputTokens != nil {
+							outputTokens = *ce.Message.Usage.OutputTokens
+							hasOutputTokens = true
+						}
 					}
 				}
 
@@ -843,11 +842,12 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 				if ce.Usage != nil {
 					if ce.Usage.InputTokens != nil {
 						inputTokens = *ce.Usage.InputTokens
+						hasInputTokens = true
 					}
 					if ce.Usage.OutputTokens != nil {
 						outputTokens = *ce.Usage.OutputTokens
+						hasOutputTokens = true
 					}
-					hasUsage = true
 				}
 				messageDeltaSeen = true
 
@@ -898,7 +898,7 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 				final.ToolCalls = append(final.ToolCalls, ToolCall{ID: accum.id, Name: accum.name, Args: decodedArgs})
 			}
 		}
-		if hasUsage {
+		if hasInputTokens && hasOutputTokens {
 			final.Usage = &Usage{InputTokens: inputTokens, OutputTokens: outputTokens, TotalTokens: inputTokens + outputTokens}
 		}
 		select {
@@ -978,13 +978,7 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 			}
 			// Gemini sends usageMetadata in the response chunks; the final
 			// chunk carries the cumulative totals.
-			if parsed.UsageMetadata != nil {
-				usage = &Usage{
-					InputTokens:  parsed.UsageMetadata.PromptTokenCount,
-					OutputTokens: parsed.UsageMetadata.CandidatesTokenCount,
-					TotalTokens:  parsed.UsageMetadata.PromptTokenCount + parsed.UsageMetadata.CandidatesTokenCount,
-				}
-			}
+			usage = parsed.UsageMetadata.toUsage()
 			if len(parsed.Candidates) > 0 {
 				if terminalSeen {
 					sendStreamError(ctx, ch, errors.New("llm: Gemini stream emitted candidates after a terminal finish reason"))
@@ -1331,13 +1325,7 @@ func decodeOpenAIResponse(body []byte) (*Message, error) {
 		msg.ToolCalls = convertAssistantToolCalls(choice.Message.ToolCalls)
 		msg.FinishReason = choice.FinishReason
 	}
-	if parsed.Usage != nil {
-		msg.Usage = &Usage{
-			InputTokens:  parsed.Usage.PromptTokens,
-			OutputTokens: parsed.Usage.CompletionTokens,
-			TotalTokens:  parsed.Usage.PromptTokens + parsed.Usage.CompletionTokens,
-		}
-	}
+	msg.Usage = parsed.Usage.toUsage()
 	return msg, nil
 }
 
@@ -1453,8 +1441,19 @@ type claudeResponse struct {
 
 // claudeUsage reports token consumption.
 type claudeUsage struct {
-	InputTokens  int `json:"input_tokens"`
-	OutputTokens int `json:"output_tokens"`
+	InputTokens  *int `json:"input_tokens,omitempty"`
+	OutputTokens *int `json:"output_tokens,omitempty"`
+}
+
+func (u *claudeUsage) toUsage() *Usage {
+	if u == nil || u.InputTokens == nil || u.OutputTokens == nil {
+		return nil
+	}
+	return &Usage{
+		InputTokens:  *u.InputTokens,
+		OutputTokens: *u.OutputTokens,
+		TotalTokens:  *u.InputTokens + *u.OutputTokens,
+	}
 }
 
 // buildClaudeBlocks converts supported text and base64 image content into
@@ -1757,13 +1756,7 @@ func decodeClaudeResponse(body []byte) (*Message, error) {
 	}
 	msg := &Message{Role: RoleAssistant, Content: sb.String(), ToolCalls: toolCalls}
 	msg.FinishReason = claudeFinishReason(parsed.StopReason)
-	if parsed.Usage != nil {
-		msg.Usage = &Usage{
-			InputTokens:  parsed.Usage.InputTokens,
-			OutputTokens: parsed.Usage.OutputTokens,
-			TotalTokens:  parsed.Usage.InputTokens + parsed.Usage.OutputTokens,
-		}
-	}
+	msg.Usage = parsed.Usage.toUsage()
 	return msg, nil
 }
 
@@ -1888,8 +1881,20 @@ type geminiCandidate struct {
 
 // geminiUsage reports token consumption.
 type geminiUsage struct {
-	PromptTokenCount     int `json:"promptTokenCount"`
-	CandidatesTokenCount int `json:"candidatesTokenCount"`
+	PromptTokenCount     *int `json:"promptTokenCount,omitempty"`
+	CandidatesTokenCount *int `json:"candidatesTokenCount,omitempty"`
+	TotalTokenCount      *int `json:"totalTokenCount,omitempty"`
+}
+
+func (u *geminiUsage) toUsage() *Usage {
+	if u == nil || u.PromptTokenCount == nil || u.CandidatesTokenCount == nil {
+		return nil
+	}
+	total := *u.PromptTokenCount + *u.CandidatesTokenCount
+	if u.TotalTokenCount != nil {
+		total = *u.TotalTokenCount
+	}
+	return &Usage{InputTokens: *u.PromptTokenCount, OutputTokens: *u.CandidatesTokenCount, TotalTokens: total}
 }
 
 // buildGeminiParts converts a Message into a slice of geminiPart values.
@@ -2069,12 +2074,6 @@ func decodeGeminiResponse(body []byte) (*Message, error) {
 			msg.Content = sb.String()
 		}
 	}
-	if parsed.UsageMetadata != nil {
-		msg.Usage = &Usage{
-			InputTokens:  parsed.UsageMetadata.PromptTokenCount,
-			OutputTokens: parsed.UsageMetadata.CandidatesTokenCount,
-			TotalTokens:  parsed.UsageMetadata.PromptTokenCount + parsed.UsageMetadata.CandidatesTokenCount,
-		}
-	}
+	msg.Usage = parsed.UsageMetadata.toUsage()
 	return msg, nil
 }

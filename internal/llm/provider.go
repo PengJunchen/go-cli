@@ -276,13 +276,7 @@ func (m *HTTPChatModel) generate(ctx context.Context, msgs []Message, opts ...Op
 		msg.Role = RoleAssistant
 		msg.ToolCalls = convertAssistantToolCalls(choice.Message.ToolCalls)
 	}
-	if parsed.Usage != nil {
-		msg.Usage = &Usage{
-			InputTokens:  parsed.Usage.PromptTokens,
-			OutputTokens: parsed.Usage.CompletionTokens,
-			TotalTokens:  parsed.Usage.PromptTokens + parsed.Usage.CompletionTokens,
-		}
-	}
+	msg.Usage = parsed.Usage.toUsage()
 	return msg, attempt, nil
 }
 
@@ -377,13 +371,7 @@ func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 				}
 			}
 			final := MessageChunk{Role: RoleAssistant, Final: true, ToolCalls: toolCalls, FinishReason: finishReason}
-			if parsed.Usage != nil {
-				final.Usage = &Usage{
-					InputTokens:  parsed.Usage.PromptTokens,
-					OutputTokens: parsed.Usage.CompletionTokens,
-					TotalTokens:  parsed.Usage.PromptTokens + parsed.Usage.CompletionTokens,
-				}
-			}
+			final.Usage = parsed.Usage.toUsage()
 			select {
 			case ch <- final:
 			case <-ctx.Done():
@@ -673,8 +661,20 @@ type openAIChoice struct {
 
 // openAIUsage reports token consumption.
 type openAIUsage struct {
-	PromptTokens     int `json:"prompt_tokens"`
-	CompletionTokens int `json:"completion_tokens"`
+	PromptTokens     *int `json:"prompt_tokens,omitempty"`
+	CompletionTokens *int `json:"completion_tokens,omitempty"`
+	TotalTokens      *int `json:"total_tokens,omitempty"`
+}
+
+func (u *openAIUsage) toUsage() *Usage {
+	if u == nil || u.PromptTokens == nil || u.CompletionTokens == nil {
+		return nil
+	}
+	total := *u.PromptTokens + *u.CompletionTokens
+	if u.TotalTokens != nil {
+		total = *u.TotalTokens
+	}
+	return &Usage{InputTokens: *u.PromptTokens, OutputTokens: *u.CompletionTokens, TotalTokens: total}
 }
 
 // openAIToolCall is an assistant tool invocation request. In streaming
