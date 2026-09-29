@@ -98,20 +98,21 @@ type httpSessionBinding struct {
 }
 
 type httpServerGeneration struct {
-	server      *http.Server
-	ctx         context.Context
-	cancel      context.CancelFunc
-	serveDone   chan struct{}
-	startDone   chan struct{}
-	cleanupDone chan struct{}
-	closeDone   chan struct{}
-	dispatches  sync.WaitGroup
-	requests    sync.WaitGroup
-	closing     bool
-	admitting   bool
-	serveErr    error
-	closeErr    error
-	workerPanic atomic.Bool
+	server        *http.Server
+	ctx           context.Context
+	cancel        context.CancelFunc
+	serveDone     chan struct{}
+	startDone     chan struct{}
+	cleanupDone   chan struct{}
+	closeDone     chan struct{}
+	dispatches    sync.WaitGroup
+	requests      sync.WaitGroup
+	dispatchSlots chan struct{}
+	closing       bool
+	admitting     bool
+	serveErr      error
+	closeErr      error
+	workerPanic   atomic.Bool
 }
 
 type httpServerCleanupPendingError struct {
@@ -160,8 +161,10 @@ type HTTPServer struct {
 	running    bool
 	sealed     bool
 
-	// maxConcurrency limits the number of concurrent in-flight requests.
-	// Default: 64. Set before calling Start.
+	// maxConcurrency sizes independent HTTP request and detached-dispatch
+	// admission limits. Both default to 64; dispatch slots remain occupied
+	// until ProcessMessage completes, after the /send handler returns.
+	// Set before calling Start.
 	maxConcurrency int
 	sem            chan struct{}
 
@@ -336,13 +339,14 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 
 	genCtx, cancel := context.WithCancel(ctx)
 	generation := &httpServerGeneration{
-		ctx:         genCtx,
-		cancel:      cancel,
-		serveDone:   make(chan struct{}),
-		startDone:   make(chan struct{}),
-		cleanupDone: make(chan struct{}),
-		closeDone:   make(chan struct{}),
-		admitting:   true,
+		ctx:           genCtx,
+		cancel:        cancel,
+		serveDone:     make(chan struct{}),
+		startDone:     make(chan struct{}),
+		cleanupDone:   make(chan struct{}),
+		closeDone:     make(chan struct{}),
+		dispatchSlots: make(chan struct{}, s.maxConcurrency),
+		admitting:     true,
 	}
 	handler = s.generationRequestMiddleware(generation, handler)
 
@@ -740,6 +744,13 @@ func (s *HTTPServer) handleSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		srvCtx := generation.ctx
+		select {
+		case generation.dispatchSlots <- struct{}{}:
+		default:
+			s.mu.Unlock()
+			http.Error(w, "too many concurrent dispatches", http.StatusServiceUnavailable)
+			return
+		}
 		generation.dispatches.Add(1)
 		s.mu.Unlock()
 		if srvCtx != nil {
@@ -754,11 +765,13 @@ func (s *HTTPServer) handleSend(w http.ResponseWriter, r *http.Request) {
 						generation.workerPanic.Store(true)
 						slog.Error("acp.server.process_message_panicked", "name", s.name, "reason", "panic")
 					}
+					<-generation.dispatchSlots
 					generation.dispatches.Done()
 				}()
 				s.handler.ProcessMessage(dispatchCtx, msg, sess)
 			}()
 		} else {
+			<-generation.dispatchSlots
 			generation.dispatches.Done()
 		}
 	} else {
