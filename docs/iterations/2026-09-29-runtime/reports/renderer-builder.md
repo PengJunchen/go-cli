@@ -34,3 +34,11 @@ The measurements show increasing snapshot allocation and time as the same input 
 ## Limits
 
 `Finish` still sends the complete canonical source through Glamour once to preserve document-wide Markdown semantics. This report makes no claim that this full-document render has bounded latency or peak memory. The app is not wired to this primitive by this change.
+
+## Review follow-up: pending wrapped row
+
+The independent review found that the final pending grapheme could add a virtual wrapped row after the retained-line limit was enforced. The exact width-1 probe returned 257 visible rows while `stats().renderedLines` reported 256. A regression test reproduced 257 rows before the fix.
+
+`Window` now counts the pending row before returning the snapshot and evicts the oldest retained row when needed, keeping `HasHiddenPrefix` set. `stats().renderedLines` now reflects the returned snapshot's actual row count.
+
+Follow-up verification passed: the width-1 regression; CJK width-2, pending-byte, backing-clone, and Finish contract tests; `go test -race -count=1 ./internal/tui -run '^TestStreamingMarkdown'` (22 cases); full `go test -race -count=1 ./internal/tui` (562 tests); `go vet ./...`; `golangci-lint run ./...`; and `git diff --check`.

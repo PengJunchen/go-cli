@@ -185,6 +185,23 @@ func (s *StreamingMarkdownRenderer) Window() StreamRenderWindow {
 			s.windowHidden = true
 		}
 	}
+	visibleRows := len(s.windowLines)
+	if s.windowLineOpen || len(s.windowLineParts) > 0 || pending != "" {
+		visibleRows++
+	}
+	if pendingWrap {
+		visibleRows++
+	}
+	for visibleRows > maxStreamingRenderLines && len(s.windowLines) > 0 {
+		s.dropFirstWindowLine()
+		visibleRows--
+	}
+	if visibleRows > maxStreamingRenderLines && pendingWrap {
+		// The current row cannot be evicted here, so omit only the virtual row.
+		pending = ""
+		pendingWrap = false
+		s.windowHidden = true
+	}
 	var content strings.Builder
 	content.Grow(s.windowDataBytes + len(pending) + s.windowNewlines + boolInt(pendingWrap))
 	for i, line := range s.windowLines {
@@ -764,9 +781,9 @@ func (s *StreamingMarkdownRenderer) appendWindowLine(line string, separator bool
 
 func (s *StreamingMarkdownRenderer) stats() streamingMarkdownStats {
 	window := s.Window()
-	lineCount := len(s.windowLines)
-	if s.windowLineOpen || len(s.windowLineParts) > 0 || s.graphemePending != "" {
-		lineCount++
+	lineCount := 0
+	if len(s.windowLines) > 0 || s.windowLineOpen || len(s.windowLineParts) > 0 || window.Content != "" {
+		lineCount = strings.Count(window.Content, "\n") + 1
 	}
 	return streamingMarkdownStats{
 		inputBytes:          s.inputBytes,
