@@ -832,7 +832,7 @@ func TestDefaultInteractiveTraceContainsNoPrompt(t *testing.T) {
 		Exporter: "jsonl",
 		FilePath: traceDir,
 	}
-	cfg.Session.StorePath = filepath.Join(workDir, "sessions.jsonl")
+	cfg.Session.StorePath = filepath.Join(workDir, "sessions")
 	cfg.History.Path = filepath.Join(workDir, "history.jsonl")
 	var stdout, stderr bytes.Buffer
 	code := run(nil, &stdout, &stderr, func() (*config.Config, error) { return cfg, nil })
