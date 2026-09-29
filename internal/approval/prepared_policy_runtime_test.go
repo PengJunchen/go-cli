@@ -151,9 +151,11 @@ func (c *preparedRuntimeCallback) count(toolName string) int {
 }
 
 type preparedRuntimeTool struct {
-	name  string
-	mu    sync.Mutex
-	calls int
+	name          string
+	resultOutput  string
+	resultIsError bool
+	mu            sync.Mutex
+	calls         int
 }
 
 func (t *preparedRuntimeTool) Name() string        { return t.name }
@@ -162,7 +164,11 @@ func (t *preparedRuntimeTool) Execute(context.Context, tools.ToolCall) (*tools.T
 	t.mu.Lock()
 	t.calls++
 	t.mu.Unlock()
-	return &tools.ToolResult{Output: t.name}, nil
+	output := t.resultOutput
+	if output == "" {
+		output = t.name
+	}
+	return &tools.ToolResult{Output: output, IsError: t.resultIsError}, nil
 }
 
 func (t *preparedRuntimeTool) callCount() int {
@@ -227,7 +233,7 @@ func TestApprovalAuditRecordsFinalChoice(t *testing.T) {
 	dir := privateAuditTestDir(t)
 	trail := NewAuditTrail(dir)
 	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck
-	target := &preparedRuntimeTool{name: "audit_target"}
+	target := &preparedRuntimeTool{name: "audit_target", resultOutput: "raw-output-secret-sentinel"}
 	require.NoError(t, base.Register(ctx, target))
 	fence := base.DispatchFence()
 	controller := core.NewDefaultPlanModeController(fence)
@@ -243,6 +249,7 @@ func TestApprovalAuditRecordsFinalChoice(t *testing.T) {
 	require.NoError(t, registry.SetPreparedToolStages(tools.PreparedToolStages{}))
 
 	invocation, err := registry.PrepareToolCall(ctx, tools.ToolCall{
+		ID:   "call-id-secret-sentinel",
 		Name: "audit_target",
 		Args: map[string]any{"content": "prompt-secret-sentinel"},
 	})
@@ -250,21 +257,103 @@ func TestApprovalAuditRecordsFinalChoice(t *testing.T) {
 	result, err := invocation.Dispatch(ctx)
 	require.NoError(t, err)
 	require.NotNil(t, result)
+	assert.Equal(t, "raw-output-secret-sentinel", result.Output)
+	assert.False(t, result.IsError)
 	assert.Equal(t, 1, target.callCount())
 
-	entries, err := trail.ReadEntries(time.Now())
+	reopened := NewAuditTrail(dir)
+	entries, err := reopened.ReadEntries(time.Now())
 	require.NoError(t, err)
-	require.Len(t, entries, 2)
+	require.Len(t, entries, 3)
 	assert.Equal(t, "classifier_proposal", entries[0].Stage)
 	assert.Equal(t, "ask", entries[0].Decision)
 	assert.Equal(t, "approval_resolution", entries[1].Stage)
 	assert.Equal(t, "ask", entries[1].Decision)
 	assert.Equal(t, "allow_always", entries[1].UserChoice)
 	assert.Equal(t, "user", entries[1].Resolution)
+	assert.Equal(t, "tool_outcome", entries[2].Stage)
+	assert.Equal(t, "ask", entries[2].Decision)
+	assert.Equal(t, "allow_always", entries[2].UserChoice)
+	assert.Equal(t, "user", entries[2].Resolution)
+	assert.Equal(t, tools.PreparedTerminalErrorSuccess, entries[2].ToolOutcome)
+	assert.True(t, entries[2].DispatchCommitted)
+	assert.True(t, entries[2].ResultPresent)
+	assert.False(t, entries[2].ResultIsError)
+	assert.Regexp(t, `^sha256:[0-9a-f]{64}$`, entries[2].ToolCallID)
 
 	raw, err := os.ReadFile(filepath.Join(dir, time.Now().UTC().Format("2006-01-02")+".jsonl"))
 	require.NoError(t, err)
 	assert.NotContains(t, string(raw), "prompt-secret-sentinel")
+	assert.NotContains(t, string(raw), "call-id-secret-sentinel")
+	assert.NotContains(t, string(raw), "raw-output-secret-sentinel")
+}
+
+func TestPreparedTerminalAuditFailurePreservesToolResultAndMarksHealth(t *testing.T) {
+	ctx := context.Background()
+	dir := privateAuditTestDir(t)
+	trail := NewAuditTrail(dir)
+	syncErr := errors.New("raw-sync-secret-sentinel")
+	syncCounter := &auditSyncCounter{}
+	trail.openFile = func(path string, flag int, perm os.FileMode) (auditTrailFile, error) {
+		file, err := os.OpenFile(path, flag, perm)
+		if err != nil {
+			return nil, err
+		}
+		return &auditNthSyncFailureFile{File: file, counter: syncCounter, failAt: 3, syncErr: syncErr}, nil
+	}
+	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck
+	target := &preparedRuntimeTool{
+		name:          "audit_target",
+		resultOutput:  "raw-output-secret-sentinel",
+		resultIsError: true,
+	}
+	require.NoError(t, base.Register(ctx, target))
+	fence := base.DispatchFence()
+	controller := core.NewDefaultPlanModeController(fence)
+	classifier := NewAuditClassifier(preparedRuntimeAskClassifier{}, trail, PermissionDefault, "session-1")
+	middleware := NewApprovalMiddleware(classifier, NewInMemoryApprovalStore(),
+		WithCallback(NewInteractiveApprovalCallback(strings.NewReader("y\n"), io.Discard)),
+		WithDispatchFence(fence),
+		WithPlanModeController(controller),
+	)
+	registry := tools.NewMiddlewareToolRegistry(base)
+	require.NoError(t, registry.SetPreparedToolPolicy(middleware.PreparedPolicy))
+	require.NoError(t, registry.SetPreparedToolStages(tools.PreparedToolStages{}))
+
+	invocation, err := registry.PrepareToolCall(ctx, tools.ToolCall{
+		ID:   "call-id-secret-sentinel",
+		Name: "audit_target",
+		Args: map[string]any{"content": "prompt-secret-sentinel"},
+	})
+	require.NoError(t, err)
+	result, err := invocation.Dispatch(ctx)
+	require.NoError(t, err, "a post-dispatch audit failure cannot rewrite the completed tool result")
+	require.NotNil(t, result)
+	assert.True(t, result.IsError)
+	assert.Equal(t, "raw-output-secret-sentinel", result.Output)
+	assert.Equal(t, 1, target.callCount(), "audit observer failure must not retry or replay dispatch")
+
+	health := trail.Health()
+	assert.True(t, health.Enabled)
+	assert.False(t, health.Healthy)
+	assert.Equal(t, AuditTrailErrorClassSyncFailed, health.ErrorClass)
+	assert.Equal(t, health, middleware.AuditHealth(), "the middleware exposes the sticky observer failure independently of Dispatch")
+	entries, err := trail.ReadEntries(time.Now())
+	require.NoError(t, err)
+	require.Len(t, entries, 2, "the failed outcome append is rolled back while earlier audit stages remain durable")
+	assert.Equal(t, "approval_resolution", entries[1].Stage)
+	assert.Equal(t, "allow_once", entries[1].UserChoice)
+
+	raw, err := os.ReadFile(filepath.Join(dir, time.Now().UTC().Format("2006-01-02")+".jsonl"))
+	require.NoError(t, err)
+	for _, secret := range []string{
+		"raw-output-secret-sentinel",
+		"prompt-secret-sentinel",
+		"call-id-secret-sentinel",
+		"raw-sync-secret-sentinel",
+	} {
+		assert.NotContains(t, string(raw), secret)
+	}
 }
 
 func TestPreparedApprovalAuditWriteFailureStopsDispatch(t *testing.T) {
@@ -316,7 +405,7 @@ func TestPreparedApprovalResolutionAuditFailureStopsDispatch(t *testing.T) {
 		if err != nil {
 			return nil, err
 		}
-		return &auditSecondSyncFailureFile{File: file, counter: syncCounter, failAt: 2, syncErr: syncErr}, nil
+		return &auditNthSyncFailureFile{File: file, counter: syncCounter, failAt: 2, syncErr: syncErr}, nil
 	}
 	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck
 	target := &preparedRuntimeTool{name: "audit_target"}
@@ -357,14 +446,14 @@ func (c *auditSyncCounter) next() int {
 	return c.calls
 }
 
-type auditSecondSyncFailureFile struct {
+type auditNthSyncFailureFile struct {
 	*os.File
 	counter *auditSyncCounter
 	failAt  int
 	syncErr error
 }
 
-func (f *auditSecondSyncFailureFile) Sync() error {
+func (f *auditNthSyncFailureFile) Sync() error {
 	if f.counter.next() == f.failAt {
 		return f.syncErr
 	}
