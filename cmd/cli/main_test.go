@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -78,6 +79,124 @@ func TestRunSuccessHelp(t *testing.T) {
 	})
 	assert.Equal(t, 0, code)
 	assert.Contains(t, stdout.String(), "Usage:")
+}
+
+func TestRunGlobalHelpAndVersionBypassBrokenConfig(t *testing.T) {
+	tests := []struct {
+		name       string
+		args       []string
+		wantOutput string
+	}{
+		{name: "help", args: []string{"--help"}, wantOutput: "Usage:"},
+		{name: "version", args: []string{"--version"}, wantOutput: cli.Version},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			var stdout, stderr bytes.Buffer
+			var loadCalls int
+			code := run(tt.args, &stdout, &stderr, func() (*config.Config, error) {
+				loadCalls++
+				return nil, errors.New("broken config")
+			})
+
+			assert.Zero(t, code, "stdout=%q stderr=%q", stdout.String(), stderr.String())
+			assert.Zero(t, loadCalls, "config loader must not run for parser-recognized global help/version")
+			assert.Contains(t, stdout.String(), tt.wantOutput)
+			assert.Empty(t, stderr.String())
+		})
+	}
+}
+
+func TestRunBrokenConfigStillBlocksNonEarlyArguments(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "version command", args: []string{"version"}},
+		{name: "unknown command", args: []string{"unknown-command"}},
+		{name: "help disabled", args: []string{"--help=false"}},
+		{name: "version disabled", args: []string{"--version=false"}},
+		{name: "subcommand help", args: []string{"prompt", "--help"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Chdir(t.TempDir())
+			var stdout, stderr bytes.Buffer
+			var loadCalls int
+			code := run(tt.args, &stdout, &stderr, func() (*config.Config, error) {
+				loadCalls++
+				return nil, errors.New("broken config")
+			})
+
+			assert.Equal(t, 1, code, "stdout=%q stderr=%q", stdout.String(), stderr.String())
+			assert.Equal(t, 1, loadCalls)
+			assert.Contains(t, stderr.String(), "broken config")
+		})
+	}
+}
+
+func TestCLIBinaryGlobalHelpAndVersionIgnoreBrokenConfig(t *testing.T) {
+	workDirForBuild, err := os.Getwd()
+	require.NoError(t, err)
+	binaryPath := filepath.Join(t.TempDir(), "go-cli")
+	build := exec.Command("go", "build", "-o", binaryPath, ".")
+	build.Dir = workDirForBuild
+	if output, buildErr := build.CombinedOutput(); buildErr != nil {
+		t.Fatalf("build CLI binary: %v\n%s", buildErr, output)
+	}
+
+	tests := []struct {
+		name       string
+		args       []string
+		wantExit   int
+		wantOutput string
+		wantError  string
+	}{
+		{name: "help", args: []string{"--help"}, wantOutput: "Usage:"},
+		{name: "version", args: []string{"--version"}, wantOutput: cli.Version},
+		{name: "unknown command still loads config", args: []string{"unknown-command"}, wantExit: 1, wantError: "config validation"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			workDir := t.TempDir()
+			homeDir := t.TempDir()
+			require.NoError(t, os.WriteFile(filepath.Join(workDir, ".go-cli.yaml"), []byte("provider: [\n"), 0o600))
+			globalConfigDir := filepath.Join(homeDir, ".go-cli")
+			require.NoError(t, os.MkdirAll(globalConfigDir, 0o700))
+			require.NoError(t, os.WriteFile(filepath.Join(globalConfigDir, "config.yaml"), []byte("provider: [\n"), 0o600))
+
+			command := exec.Command(binaryPath, tt.args...)
+			command.Dir = workDir
+			command.Env = environmentWithHome(homeDir)
+			output, runErr := command.CombinedOutput()
+			if tt.wantExit == 0 {
+				require.NoError(t, runErr, "output=%q", output)
+			} else {
+				var exitErr *exec.ExitError
+				require.ErrorAs(t, runErr, &exitErr, "output=%q", output)
+				assert.Equal(t, tt.wantExit, exitErr.ExitCode(), "output=%q", output)
+				assert.Contains(t, string(output), tt.wantError)
+				return
+			}
+			assert.Contains(t, string(output), tt.wantOutput)
+			assert.NotContains(t, string(output), "Interactive session started")
+			_, sessionErr := os.Stat(filepath.Join(workDir, ".go-cli", "sessions"))
+			assert.ErrorIs(t, sessionErr, os.ErrNotExist, "help/version must not create a session store")
+		})
+	}
+}
+
+func environmentWithHome(home string) []string {
+	env := os.Environ()
+	filtered := make([]string, 0, len(env)+1)
+	for _, entry := range env {
+		if strings.HasPrefix(entry, "HOME=") {
+			continue
+		}
+		filtered = append(filtered, entry)
+	}
+	return append(filtered, "HOME="+home)
 }
 
 func TestRunSuccessNoArgs(t *testing.T) {
@@ -343,10 +462,11 @@ func TestRunStdoutTracingKeepsPromptUsageAndGlobalHelpBehavior(t *testing.T) {
 		wantCode   int
 		wantError  string
 		wantOutput string
+		wantTrace  bool
 	}{
-		{name: "prompt help remains usage error", args: []string{"prompt", "--help", "hello"}, wantCode: 2, wantError: "help requested"},
-		{name: "invalid output remains usage error", args: []string{"prompt", "--output=invalid", "hello"}, wantCode: 2, wantError: "invalid output mode"},
-		{name: "missing message remains usage error", args: []string{"prompt", "--output=json"}, wantCode: 2, wantError: "missing message argument"},
+		{name: "prompt help remains usage error", args: []string{"prompt", "--help", "hello"}, wantCode: 2, wantError: "help requested", wantTrace: true},
+		{name: "invalid output remains usage error", args: []string{"prompt", "--output=invalid", "hello"}, wantCode: 2, wantError: "invalid output mode", wantTrace: true},
+		{name: "missing message remains usage error", args: []string{"prompt", "--output=json"}, wantCode: 2, wantError: "missing message argument", wantTrace: true},
 		{name: "global help wins before dispatch", args: []string{"--help", "prompt", "--output=json", "hello"}, wantCode: 0, wantOutput: "Usage:"},
 		{name: "global version wins before dispatch", args: []string{"--version", "prompt", "--output=json", "hello"}, wantCode: 0, wantOutput: cli.Version},
 	}
@@ -359,7 +479,11 @@ func TestRunStdoutTracingKeepsPromptUsageAndGlobalHelpBehavior(t *testing.T) {
 			code := run(tt.args, &stdout, &stderr, func() (*config.Config, error) { return cfg, nil })
 
 			assert.Equal(t, tt.wantCode, code)
-			assert.Contains(t, stdout.String(), "[TRACE]")
+			if tt.wantTrace {
+				assert.Contains(t, stdout.String(), "[TRACE]")
+			} else {
+				assert.NotContains(t, stdout.String(), "[TRACE]")
+			}
 			if tt.wantError != "" {
 				assert.Contains(t, stderr.String(), tt.wantError)
 				assert.NotContains(t, stderr.String(), "stdout tracing")

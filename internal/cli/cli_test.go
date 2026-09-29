@@ -54,6 +54,84 @@ func TestRun_HelpFlag(t *testing.T) {
 	assert.Contains(t, out, "Usage: go-cli")
 }
 
+func TestIsGlobalHelpOrVersionUsesParsedRootFlags(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want bool
+	}{
+		{name: "help", args: []string{"--help"}, want: true},
+		{name: "help before command", args: []string{"--help", "version"}, want: true},
+		{name: "version", args: []string{"--version"}, want: true},
+		{name: "subcommand help", args: []string{"version", "--help"}},
+		{name: "help disabled", args: []string{"--help=false"}},
+		{name: "version disabled", args: []string{"--version=false"}},
+		{name: "invalid flag after help", args: []string{"--help", "--invalid"}},
+		{name: "help command", args: []string{"help"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, IsGlobalHelpOrVersion(tt.args))
+		})
+	}
+}
+
+func TestRunWithRegistryDispatchesGlobalHelpAndVersionCommands(t *testing.T) {
+	var helpCalls, versionCalls, otherCalls int
+	reg := NewDefaultCommandRegistry()
+	for _, cmd := range []Command{
+		&dispatchCountCommand{name: "help", calls: &helpCalls},
+		&dispatchCountCommand{name: "version", calls: &versionCalls},
+		&dispatchCountCommand{name: "other", calls: &otherCalls},
+	} {
+		require.NoError(t, reg.Register(cmd))
+	}
+	var out bytes.Buffer
+	cfg := &mockConfig{}
+
+	require.NoError(t, RunWithRegistry(t.Context(), cfg, []string{"--help"}, &out, reg))
+	assert.Equal(t, 1, helpCalls)
+	assert.Zero(t, versionCalls)
+	assert.Zero(t, otherCalls)
+
+	require.NoError(t, RunWithRegistry(t.Context(), cfg, []string{"--version"}, &out, reg))
+	assert.Equal(t, 1, helpCalls)
+	assert.Equal(t, 1, versionCalls)
+	assert.Zero(t, otherCalls)
+}
+
+func TestRunWithRegistryDoesNotReregisterInitializedBuiltins(t *testing.T) {
+	reg := &countingCommandRegistry{CommandRegistry: NewDefaultCommandRegistry()}
+	var out bytes.Buffer
+	RegisterBuiltinCommands(reg, &out)
+	before := reg.registerCalls
+	require.NoError(t, RunWithRegistry(t.Context(), &mockConfig{}, []string{"--version"}, &out, reg))
+	assert.Equal(t, before, reg.registerCalls)
+	assert.Contains(t, out.String(), Version)
+}
+
+type countingCommandRegistry struct {
+	CommandRegistry
+	registerCalls int
+}
+
+func (r *countingCommandRegistry) Register(cmd Command) error {
+	r.registerCalls++
+	return r.CommandRegistry.Register(cmd)
+}
+
+type dispatchCountCommand struct {
+	name  string
+	calls *int
+}
+
+func (c *dispatchCountCommand) Name() string     { return c.name }
+func (c *dispatchCountCommand) Synopsis() string { return c.name }
+func (c *dispatchCountCommand) Run(context.Context, Config, []string) error {
+	(*c.calls)++
+	return nil
+}
+
 func TestRun_NoArgs(t *testing.T) {
 	credentialEnv, err := config.ScopedCredentialEnvName(config.AuthScope{
 		ProviderID: "eino",

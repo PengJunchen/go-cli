@@ -86,10 +86,19 @@ func runWithInvocationWaitBudget(
 	invocationLogger = slog.New(tracing.NewRedactingSlogHandler(logHandler))
 	slog.SetDefault(invocationLogger)
 
-	cfg, err := loadConfig()
-	if err != nil {
-		_, _ = fmt.Fprintf(stderr, "error: %v\n", err) //nolint:errcheck // CLI error output is best-effort
-		return 1
+	registry := cli.NewDefaultCommandRegistry()
+	cli.RegisterBuiltinCommands(registry, stdout)
+
+	var cfg *config.Config
+	if cli.IsGlobalHelpOrVersion(argv) {
+		cfg = rootHelpVersionConfig()
+	} else {
+		var err error
+		cfg, err = loadConfig()
+		if err != nil {
+			_, _ = fmt.Fprintf(stderr, "error: %v\n", err) //nolint:errcheck // CLI error output is best-effort
+			return 1
+		}
 	}
 	if err := stdoutTracingOutputConflict(cfg, argv); err != nil {
 		_, _ = fmt.Fprintf(stderr, "error: %v\n", err) //nolint:errcheck // CLI error output is best-effort
@@ -116,7 +125,7 @@ func runWithInvocationWaitBudget(
 		)
 	}
 
-	result := runCLI(tctx, cfg, argv, stdout, stderr, root)
+	result := runCLI(tctx, cfg, argv, stdout, stderr, root, registry)
 	producerDone := closedInvocationBarrier()
 	if result.err != nil && errors.Is(result.err, cli.ErrAssemblyClosePending) {
 		channels, valid := cli.AssemblyCloseCompletions(result.err)
@@ -139,6 +148,11 @@ func runWithInvocationWaitBudget(
 		_, _ = fmt.Fprintln(stderr, "error: invocation close completed after the command reported Assembly close pending") //nolint:errcheck // CLI error output is best-effort
 	}
 	return code
+}
+
+func rootHelpVersionConfig() *config.Config {
+	tracingEnabled := false
+	return &config.Config{Tracing: config.TracingConfig{Enabled: &tracingEnabled, Exporter: "none"}}
 }
 
 type tracingShutdownReporter interface {
@@ -426,8 +440,8 @@ type cliRunResult struct {
 
 // runCLI invokes the CLI framework and preserves its error chain so run can
 // join a real Assembly-close owner before ending the invocation span.
-func runCLI(ctx context.Context, cfg *config.Config, argv []string, stdout, stderr io.Writer, root tracing.TraceSpan) cliRunResult {
-	if err := cli.Run(ctx, cfg, argv, stdout); err != nil {
+func runCLI(ctx context.Context, cfg *config.Config, argv []string, stdout, stderr io.Writer, root tracing.TraceSpan, reg cli.CommandRegistry) cliRunResult {
+	if err := cli.RunWithRegistry(ctx, cfg, argv, stdout, reg); err != nil {
 		if errors.Is(err, cli.ErrAssemblyClosePending) {
 			return cliRunResult{exitCode: 1, err: err}
 		}
