@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/session"
+	"github.com/pengjunchen/go-cli/internal/tui"
 )
 
 type blockedREPLFlushLogger struct {
@@ -86,5 +87,46 @@ func TestStopFlushTickerIsSafeWhenNeverStarted(t *testing.T) {
 	repl.stopFlushTicker()
 	if repl.flushTicker != nil || repl.flushDone != nil {
 		t.Fatal("stopping an unstarted ticker should not create resources")
+	}
+}
+
+func TestStopTUIWaitsForGracefulRendererShutdownBeforeCancelingContext(t *testing.T) {
+	events := make(chan tui.AgentEvent, 1)
+	app := tui.NewBubbleteaApp(events)
+	uiCtx, cancelUI := context.WithCancel(context.Background())
+	t.Cleanup(cancelUI)
+	go func() { _ = app.Run(uiCtx) }()
+	select {
+	case <-app.ProgramReady():
+	case <-time.After(time.Second):
+		t.Fatal("TUI program did not become ready")
+	}
+	events <- tui.AgentEvent{ContentType: tui.ContentTypeStatus, Content: "active"}
+	deadline := time.After(time.Second)
+	for app.EventsProcessed() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("TUI event loop did not process the readiness event")
+		case <-time.After(time.Millisecond):
+		}
+	}
+
+	canceledAfterDone := false
+	repl := &REPLSession{
+		app:        app,
+		appStarted: true,
+		cancelUI: func() {
+			select {
+			case <-app.Done():
+				canceledAfterDone = true
+			default:
+			}
+			cancelUI()
+		},
+	}
+	repl.stopTUI()
+
+	if !canceledAfterDone {
+		t.Fatal("TUI context canceled before graceful Bubble Tea shutdown completed")
 	}
 }

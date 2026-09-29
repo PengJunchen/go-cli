@@ -35,6 +35,10 @@ type transcriptRefreshControlMsg struct {
 	request *transcriptRefreshRequest
 }
 
+type transcriptRefreshViewQueuedMsg struct {
+	request *transcriptRefreshRequest
+}
+
 func newTranscriptRefreshRequest(id uint64, refresh TranscriptRefresh) *transcriptRefreshRequest {
 	return &transcriptRefreshRequest{id: id, refresh: refresh, ack: make(chan error, 1)}
 }
@@ -69,7 +73,14 @@ func (request *transcriptRefreshRequest) cancelPending(err error) bool {
 }
 
 func (request *transcriptRefreshRequest) closePending(err error) bool {
-	return request.complete(transcriptRefreshPending, transcriptRefreshClosed, err)
+	request.mu.Lock()
+	defer request.mu.Unlock()
+	if request.state != transcriptRefreshPending && request.state != transcriptRefreshClaimed {
+		return false
+	}
+	request.state = transcriptRefreshClosed
+	request.ack <- err
+	return true
 }
 
 func (request *transcriptRefreshRequest) complete(expected, terminal transcriptRefreshState, err error) bool {
@@ -108,15 +119,15 @@ func (request *transcriptRefreshRequest) wait(ctx context.Context) error {
 	}
 }
 
-func (request *transcriptRefreshRequest) apply(model *teaModel) {
+func (request *transcriptRefreshRequest) apply(model *teaModel) bool {
 	refresh := request.refresh
 	refresh.Snapshot = refresh.Snapshot.Clone()
 	if err := model.validateTranscriptRefresh(refresh); err != nil {
 		request.reject(err)
-		return
+		return false
 	}
 	if !request.claim() {
-		return
+		return false
 	}
 
 	model.mu.Lock()
@@ -126,9 +137,9 @@ func (request *transcriptRefreshRequest) apply(model *teaModel) {
 	model.mu.Unlock()
 	if err != nil {
 		request.completeClaimed(err)
-		return
+		return false
 	}
-	request.completeApplied()
+	return true
 }
 
 func (m *teaModel) validateTranscriptRefresh(refresh TranscriptRefresh) error {
@@ -180,7 +191,7 @@ type TranscriptRefresher interface {
 }
 
 // ApplyTranscriptRefresh sends one reliable control request to the active
-// model and waits until that model validates and atomically applies it.
+// model and waits until Bubble Tea has queued its updated view for rendering.
 func (a *BubbleteaApp) ApplyTranscriptRefresh(ctx context.Context, refresh TranscriptRefresh) error {
 	if ctx == nil {
 		return context.Canceled

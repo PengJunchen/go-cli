@@ -906,8 +906,14 @@ func (m *teaModel) Init() tea.Cmd {
 func (m *teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case transcriptRefreshControlMsg:
+		if msg.request == nil || !msg.request.apply(m) {
+			return m, nil
+		}
+		request := msg.request
+		return m, func() tea.Msg { return transcriptRefreshViewQueuedMsg{request: request} }
+	case transcriptRefreshViewQueuedMsg:
 		if msg.request != nil {
-			msg.request.apply(m)
+			msg.request.completeApplied()
 		}
 		return m, nil
 	case agentEventMsg:

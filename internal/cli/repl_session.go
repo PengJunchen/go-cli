@@ -885,11 +885,11 @@ func (s *REPLSession) stopTUI() {
 	}
 	if s.app != nil {
 		s.app.Quit()
-		if s.cancelUI != nil {
-			s.cancelUI()
-		}
 		if s.appStarted {
 			<-s.app.Done()
+		}
+		if s.cancelUI != nil {
+			s.cancelUI()
 		}
 	}
 	if s.eventSource != nil {
