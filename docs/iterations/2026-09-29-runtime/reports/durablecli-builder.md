@@ -78,8 +78,22 @@ For the interrupted run, the actual log contains `msg=write.done ... bytes=11`, 
 
 An additional full-package `rtk go test -count=1 ./cmd/cli` run initially reported 54 passed and one fixture incompatibility: `TestDefaultInteractiveTraceContainsNoPrompt` configured `session.store_path` as `.../sessions.jsonl`, so the durable CLI rejected it as a legacy file path. Running that test alone reproduced the same error. In a separate follow-up test-fixture change, only that setting was corrected to a directory (`.../sessions`); its focused rerun passed, then the full package passed with 55 tests and no skips. All prompt-canary, trace-identity, redaction, and timing assertions in that test remain unchanged.
 
+### Durable REPL run-binding failure propagation
+
+Added `internal/cli/repl_durable_binding_test.go` for a reachable `SessionRunCommitSink` construction failure. The prepared session has a valid selected snapshot and the workspace index is initialized; the test calls `snapshotSelected()` successfully before dispatch. Its prepared writer is nil, so `bindRun` fails while constructing the sink before a core run can start. On the pre-fix source, the compiled test failed because `readInput` returned nil and consumed all three scripted lines (first prompt, second prompt, exit), although the expected behavior is an error after only the first prompt. The agent loop/provider path stayed at zero calls.
+
+The fix wraps only `bindRun` failures in the private `durableRunBindingError` type. After the stream closes and `turnDone` joins, `executeTurn` marks the turn span as failed and returns that typed error. It does not classify ordinary errors returned by a started `RunTurn` as binding failures; those retain the existing recoverable REPL behavior. The binding-failure regression passes and verifies the typed error chain, one input read, zero agent-loop calls, and that the failed lease is returned so the manager closes its prepared handle once.
+
+Validation after the source change:
+
+- `rtk go test -count=1 ./internal/cli -run '^(TestDurableREPLStopsAfterRunCommitBindingFailure)$'` — passed.
+- `rtk go test -count=1 ./internal/cli` — 736 passed.
+- `rtk go test -race -count=1 ./internal/cli` — 736 passed.
+- `rtk go vet ./internal/cli` — passed.
+- `rtk golangci-lint run ./internal/cli` — no issues.
+
 This process test establishes exact restart and no replay after a synced successful receipt, including a kill while the next provider request is outstanding. It does **not** exercise an OS child process/tool that survives parent exit, quarantine of such a live orphan, or a kill before receipt durability; those crash windows remain unclaimed. It also does not close R2 as a whole.
 
 ## Remaining boundary
 
-Durable session fork, ACP serve sessions, REPL session navigation mutations, and history-mutating `/compact`, `/clear`, and `/retry` remain explicitly unsupported. Durable compaction/fork semantics are not implemented. This CLI slice does not close the full R2 runtime plan; it wires the supported default prompt/REPL path to the existing prepared-session and run-owner seams.
+Durable session fork, ACP serve sessions, REPL session navigation mutations, and history-mutating `/compact`, `/clear`, and `/retry` remain explicitly unsupported. Durable compaction/fork semantics are not implemented. The slash `/compact` guard does not close the separate R3 source-path gap: `Agent.Run`'s post-terminal compaction hook / direct `Agent.Compact` path remains assigned to the R3 core owner and is not changed here. This CLI slice does not close the full R2 runtime plan; it wires the supported default prompt/REPL path to the existing prepared-session and run-owner seams.
