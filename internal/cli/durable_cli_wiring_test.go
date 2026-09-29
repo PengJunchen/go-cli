@@ -422,7 +422,7 @@ func TestServeRejectsConfiguredDurableSessionBeforeListenerStart(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 
-	err := newServeCmd(io.Discard).Run(ctx, cfg, []string{"--addr", "127.0.0.1:0", "--no-auth"})
+	err := newServeCmd(io.Discard).Run(ctx, cfg, []string{"--addr", "127.0.0.1:0", "--no-auth", "--approve", "deny"})
 	require.Error(t, err)
 	var unsupported *UnsupportedDurableCLIError
 	require.ErrorAs(t, err, &unsupported)
