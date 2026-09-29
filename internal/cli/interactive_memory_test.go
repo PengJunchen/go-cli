@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
@@ -9,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,16 +19,26 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/pengjunchen/go-cli/internal/config"
+	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/llm"
+	"github.com/pengjunchen/go-cli/internal/memory"
 	"github.com/pengjunchen/go-cli/internal/verify"
 )
 
-const memoryExtractionResponse = `{"choices":[{"message":{"role":"assistant","content":"[{\"content\":\"user prefers Go\",\"category\":\"preference\"}]"}}]}`
+const (
+	memoryExtractionResponse = `{"choices":[{"message":{"role":"assistant","content":"[{\"content\":\"automatically extracted canary\",\"category\":\"preference\"}]"}}]}`
+	conversationResponse     = `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`
+	storedMemoryCanary       = "private stored memory must stay out of model prompts"
+)
 
-const conversationResponse = `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`
+type memoryTestServer struct {
+	*httptest.Server
 
-// delayedReader is an io.Reader that yields the given lines one at a time,
-// sleeping for delay before each line after the first. Used by E2E tests
-// that need to control input pacing.
+	extractionRequests atomic.Int32
+	requestsMu         sync.Mutex
+	requests           [][]byte
+}
+
 type delayedReader struct {
 	lines []string
 	idx   int
@@ -52,49 +65,43 @@ func (r *delayedReader) Read(p []byte) (int, error) {
 	return n, nil
 }
 
-// newMemoryTestServer creates an httptest.Server that distinguishes between
-// normal conversation requests and memory extraction requests by checking
-// whether any message content contains "Analyze the following conversation".
-// Extraction requests receive extractResponse (after an optional delay), while
-// conversation requests always receive a simple assistant reply.
-func newMemoryTestServer(t *testing.T, extractResponse string, extractDelay time.Duration, extractStatus int) *httptest.Server {
+// newMemoryTestServer records model requests and recognizes automatic memory
+// extraction requests. Its extraction response makes accidental default
+// extraction visible in the persisted JSONL store.
+func newMemoryTestServer(t *testing.T) *memoryTestServer {
 	t.Helper()
-	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-
-		var req struct {
-			Messages []struct {
-				Role    string `json:"role"`
-				Content string `json:"content"`
-			} `json:"messages"`
-		}
-		_ = json.Unmarshal(body, &req)
-
-		isExtraction := false
-		for _, m := range req.Messages {
-			if strings.Contains(m.Content, "Analyze the following conversation") {
-				isExtraction = true
-				break
-			}
-		}
-
-		if isExtraction {
-			if extractDelay > 0 {
-				time.Sleep(extractDelay)
-			}
-			if extractStatus != 0 {
-				w.WriteHeader(extractStatus)
-				_, _ = w.Write([]byte(`{"error":"extraction failed"}`))
-				return
-			}
-			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(extractResponse))
+	fixture := &memoryTestServer{}
+	fixture.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read request body", http.StatusBadRequest)
 			return
 		}
+		_ = r.Body.Close()
+		fixture.requestsMu.Lock()
+		fixture.requests = append(fixture.requests, append([]byte(nil), body...))
+		fixture.requestsMu.Unlock()
 
+		if strings.Contains(string(body), "Analyze the following conversation") {
+			fixture.extractionRequests.Add(1)
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(w, memoryExtractionResponse)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(conversationResponse))
+		_, _ = io.WriteString(w, conversationResponse)
 	}))
+	return fixture
+}
+
+func (s *memoryTestServer) requestBodies() [][]byte {
+	s.requestsMu.Lock()
+	defer s.requestsMu.Unlock()
+	bodies := make([][]byte, len(s.requests))
+	for i := range s.requests {
+		bodies[i] = append([]byte(nil), s.requests[i]...)
+	}
+	return bodies
 }
 
 // newMemoryTestConfig creates a config that redirects the memory store to a
@@ -119,180 +126,145 @@ func newMemoryTestConfig(t *testing.T, srvURL string) (*config.Config, string) {
 	return cfg, homeDir
 }
 
-// TestMemoryExtraction verifies that after a turn, the memory extractor is
-// called and extracted memories are persisted to the memory store file.
-func TestMemoryExtraction(t *testing.T) {
-	defer verify.AssertNoGoroutineLeak(t)()
-
-	srv := newMemoryTestServer(t, memoryExtractionResponse, 0, 0)
-	defer srv.Close()
-
-	cfg, homeDir := newMemoryTestConfig(t, srv.URL)
-
-	var out bytes.Buffer
-	in := strings.NewReader("hello\nexit\n")
-	cmd := newInteractiveCmd(in, &out)
-
-	err := cmd.Run(t.Context(), cfg, nil)
+func addStoredMemory(t *testing.T, path string, item memory.Memory) {
+	t.Helper()
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+	store, err := memory.NewFileMemoryStore(path)
 	require.NoError(t, err)
-	assert.Contains(t, out.String(), "Session ended")
-
-	memPath := filepath.Join(homeDir, ".go-cli", "memories.jsonl")
-	data, err := os.ReadFile(memPath)
-	require.NoError(t, err)
-	assert.Contains(t, string(data), "user prefers Go")
+	require.NoError(t, store.Add(t.Context(), item))
+	require.NoError(t, store.Close())
 }
 
-// TestMemoryExtractionAsync verifies that the Extract call does not block the
-// main interaction flow. The mock server delays extraction responses by 2
-// seconds; the session should still accept and process input quickly.
-// Cleanup waits for the extraction goroutine via WaitGroup, ensuring the
-// extracted memory is persisted before Run returns.
-func TestMemoryExtractionAsync(t *testing.T) {
-	defer verify.AssertNoGoroutineLeak(t)()
-
-	srv := newMemoryTestServer(t, memoryExtractionResponse, 2*time.Second, 0)
-	defer srv.Close()
-
-	cfg, homeDir := newMemoryTestConfig(t, srv.URL)
-
-	var out bytes.Buffer
-	in := strings.NewReader("hello\nexit\n")
-	cmd := newInteractiveCmd(in, &out)
-
-	err := cmd.Run(t.Context(), cfg, nil)
+func readStoredMemories(t *testing.T, path string) []memory.Memory {
+	t.Helper()
+	store, err := memory.NewFileMemoryStore(path)
 	require.NoError(t, err)
-	assert.Contains(t, out.String(), "Session ended")
-
-	// With the WaitGroup, Cleanup waits for the extraction goroutine to
-	// finish before closing the memory store. The extracted memory should
-	// be persisted.
-	memPath := filepath.Join(homeDir, ".go-cli", "memories.jsonl")
-	data, err := os.ReadFile(memPath)
+	defer func() { require.NoError(t, store.Close()) }()
+	items, err := store.List(t.Context())
 	require.NoError(t, err)
-	assert.Contains(t, string(data), "user prefers Go")
+	return items
 }
 
-// TestMemoryExtractionError verifies that when Extract fails (server returns
-// 500), the main flow is not affected and the session ends normally.
-func TestMemoryExtractionError(t *testing.T) {
-	defer verify.AssertNoGoroutineLeak(t)()
-
-	srv := newMemoryTestServer(t, "", 0, http.StatusInternalServerError)
-	defer srv.Close()
-
-	cfg, _ := newMemoryTestConfig(t, srv.URL)
-
-	var out bytes.Buffer
-	in := strings.NewReader("hello\nexit\n")
-	cmd := newInteractiveCmd(in, &out)
-
-	err := cmd.Run(t.Context(), cfg, nil)
-	require.NoError(t, err)
-	assert.Contains(t, out.String(), "Session ended")
+type injectedMemoryExtractor struct {
+	calls atomic.Int32
 }
 
-// TestE2EMemoryExtraction performs a full multi-turn conversation and verifies
-// that memories are extracted after each turn.
-func TestE2EMemoryExtraction(t *testing.T) {
-	defer verify.AssertNoGoroutineLeak(t)()
-
-	srv := newMemoryTestServer(t, memoryExtractionResponse, 0, 0)
-	defer srv.Close()
-
-	cfg, homeDir := newMemoryTestConfig(t, srv.URL)
-
-	var out bytes.Buffer
-	in := strings.NewReader("hello\nworld\nexit\n")
-	cmd := newInteractiveCmd(in, &out)
-
-	err := cmd.Run(t.Context(), cfg, nil)
-	require.NoError(t, err)
-	assert.Contains(t, out.String(), "Session ended")
-
-	memPath := filepath.Join(homeDir, ".go-cli", "memories.jsonl")
-	data, err := os.ReadFile(memPath)
-	require.NoError(t, err)
-	assert.Contains(t, string(data), "user prefers Go")
+func (e *injectedMemoryExtractor) Extract(context.Context, []llm.Message) ([]memory.Memory, error) {
+	e.calls.Add(1)
+	return []memory.Memory{{Content: "explicit library memory", Category: "fact", Source: "manual"}}, nil
 }
 
-// TestMemoryExtractionCleanupRace verifies that calling Cleanup immediately
-// after a turn (while the extraction goroutine is still running) does not
-// cause a panic, data race, or goroutine leak. The extractor has a 2s delay
-// to ensure the goroutine is in-flight when Cleanup runs.
-func TestMemoryExtractionCleanupRace(t *testing.T) {
+func TestExplicitLibraryMemoryExtractorCanBeInjected(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	srv := newMemoryTestServer(t, memoryExtractionResponse, 2*time.Second, 0)
-	defer srv.Close()
-
-	cfg, _ := newMemoryTestConfig(t, srv.URL)
-
-	var out bytes.Buffer
-	in := strings.NewReader("hello\nexit\n")
-	cmd := newInteractiveCmd(in, &out)
-
-	err := cmd.Run(t.Context(), cfg, nil)
+	store, err := memory.NewFileMemoryStore(filepath.Join(t.TempDir(), "memories.jsonl"))
 	require.NoError(t, err)
-	assert.Contains(t, out.String(), "Session ended")
-}
-
-// TestMemoryExtractionCleanupPreservesData verifies that when the extraction
-// goroutine is writing to the memory file during shutdown, the resulting
-// memories.jsonl is complete and readable (no JSON truncation).
-func TestMemoryExtractionCleanupPreservesData(t *testing.T) {
-	defer verify.AssertNoGoroutineLeak(t)()
-
-	srv := newMemoryTestServer(t, memoryExtractionResponse, 500*time.Millisecond, 0)
-	defer srv.Close()
-
-	cfg, homeDir := newMemoryTestConfig(t, srv.URL)
-
-	var out bytes.Buffer
-	in := strings.NewReader("hello\nexit\n")
-	cmd := newInteractiveCmd(in, &out)
-
-	err := cmd.Run(t.Context(), cfg, nil)
-	require.NoError(t, err)
-
-	// Verify memories.jsonl is complete and valid JSON lines.
-	memPath := filepath.Join(homeDir, ".go-cli", "memories.jsonl")
-	data, err := os.ReadFile(memPath)
-	require.NoError(t, err)
-	assert.Contains(t, string(data), "user prefers Go")
-
-	// Verify each line is valid JSON.
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		if line == "" {
-			continue
-		}
-		var v map[string]any
-		require.NoError(t, json.Unmarshal([]byte(line), &v), "memories.jsonl contains invalid JSON line: %s", line)
+	defer func() { require.NoError(t, store.Close()) }()
+	extractor := &injectedMemoryExtractor{}
+	var wg sync.WaitGroup
+	agent := core.NewAgentImpl("test", stubLoop{}, core.WithHistory([]core.AgentMessage{
+		{Role: "user", Content: "remember this"},
+		{Role: "assistant", Content: "noted"},
+	}))
+	repl := &REPLSession{
+		assembly: &AgentAssembly{
+			CoreRuntime: CoreRuntime{Agent: agent},
+			SessionManagement: SessionManagement{
+				MemoryStore:     store,
+				MemoryExtractor: extractor,
+				MemoryWG:        &wg,
+			},
+		},
 	}
+	repl.extractMemory()
+	wg.Wait()
+	if repl.memoryCtxCancel != nil {
+		repl.memoryCtxCancel()
+	}
+
+	require.Equal(t, int32(1), extractor.calls.Load())
+	items, err := store.List(t.Context())
+	require.NoError(t, err)
+	require.Len(t, items, 1)
+	assert.Equal(t, "explicit library memory", items[0].Content)
 }
 
-// TestMultipleTurnsMemoryGoroutineDrainage verifies that after 3 consecutive
-// turns with immediate exit, all memory extraction goroutines are drained
-// by Cleanup before the memory store is closed.
-func TestMultipleTurnsMemoryGoroutineDrainage(t *testing.T) {
+func TestInteractiveMemoryIsManualOnlyByDefault(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	srv := newMemoryTestServer(t, memoryExtractionResponse, 100*time.Millisecond, 0)
+	srv := newMemoryTestServer(t)
 	defer srv.Close()
-
 	cfg, homeDir := newMemoryTestConfig(t, srv.URL)
+	memPath := filepath.Join(homeDir, ".go-cli", "memories.jsonl")
+	addStoredMemory(t, memPath, memory.Memory{
+		ID:       "mem_stored_canary",
+		Content:  storedMemoryCanary,
+		Category: "preference",
+		Source:   "manual",
+	})
 
 	var out bytes.Buffer
-	in := strings.NewReader("turn1\nturn2\nturn3\nexit\n")
-	cmd := newInteractiveCmd(in, &out)
-
-	err := cmd.Run(t.Context(), cfg, nil)
-	require.NoError(t, err)
+	cmd := newInteractiveCmd(strings.NewReader("hello\nexit\n"), &out)
+	require.NoError(t, cmd.Run(t.Context(), cfg, nil))
 	assert.Contains(t, out.String(), "Session ended")
 
-	// All 3 extraction goroutines should have completed and written memories.
+	assert.Equal(t, int32(0), srv.extractionRequests.Load(), "the default REPL must not call an LLM memory extractor")
+	memories := readStoredMemories(t, memPath)
+	require.Len(t, memories, 1, "normal conversation turns must not create memories")
+	assert.Equal(t, "mem_stored_canary", memories[0].ID)
+
+	bodies := srv.requestBodies()
+	require.Len(t, bodies, 1, "a single conversation turn should make one model request")
+	assert.NotContains(t, string(bodies[0]), storedMemoryCanary, "existing memory must not be injected into the model prompt")
+}
+
+func TestInteractiveMultipleTurnsDoNotExtractMemoryByDefault(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	srv := newMemoryTestServer(t)
+	defer srv.Close()
+	cfg, homeDir := newMemoryTestConfig(t, srv.URL)
+	var out bytes.Buffer
+	cmd := newInteractiveCmd(strings.NewReader("first turn\nsecond turn\nexit\n"), &out)
+	require.NoError(t, cmd.Run(t.Context(), cfg, nil))
+	assert.Contains(t, out.String(), "Session ended")
+
+	assert.Equal(t, int32(0), srv.extractionRequests.Load())
+	bodies := srv.requestBodies()
+	assert.Len(t, bodies, 2, "each user turn should produce one model request, without extraction requests")
 	memPath := filepath.Join(homeDir, ".go-cli", "memories.jsonl")
-	data, err := os.ReadFile(memPath)
-	require.NoError(t, err)
-	assert.Contains(t, string(data), "user prefers Go")
+	assert.Empty(t, readStoredMemories(t, memPath), "the default REPL should not persist extracted facts")
+}
+
+func TestMemoryRequestBodiesAreValidJSON(t *testing.T) {
+	srv := newMemoryTestServer(t)
+	defer srv.Close()
+	cfg, _ := newMemoryTestConfig(t, srv.URL)
+	var out bytes.Buffer
+	cmd := newInteractiveCmd(strings.NewReader("hello\nexit\n"), &out)
+	require.NoError(t, cmd.Run(t.Context(), cfg, nil))
+
+	bodies := srv.requestBodies()
+	require.Len(t, bodies, 1)
+	var request map[string]any
+	require.NoError(t, json.Unmarshal(bodies[0], &request))
+	assert.Equal(t, "test-model", request["model"])
+}
+
+func TestInteractiveMemoryStoreIsManualOnlyWhenNoTurnsRun(t *testing.T) {
+	srv := newMemoryTestServer(t)
+	defer srv.Close()
+	cfg, homeDir := newMemoryTestConfig(t, srv.URL)
+	var out bytes.Buffer
+	cmd := newInteractiveCmd(strings.NewReader("/memory add a hand-entered memory\n/memory list\nexit\n"), &out)
+	require.NoError(t, cmd.Run(t.Context(), cfg, nil))
+	assert.Contains(t, out.String(), "Added memory")
+	assert.Contains(t, out.String(), "a hand-entered memory")
+	assert.Zero(t, srv.extractionRequests.Load())
+	assert.Empty(t, srv.requestBodies(), "slash memory CRUD should not invoke the model")
+
+	items := readStoredMemories(t, filepath.Join(homeDir, ".go-cli", "memories.jsonl"))
+	require.Len(t, items, 1)
+	assert.Equal(t, "a hand-entered memory", items[0].Content)
+	assert.Equal(t, "manual", items[0].Source)
 }

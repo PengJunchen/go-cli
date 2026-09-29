@@ -170,7 +170,7 @@ func TestSlashCommandCompleter_RegistryReturnsRealDescription(t *testing.T) {
 	completions, _ := c.Complete("/mem", 4)
 	require.Len(t, completions, 1)
 	assert.Equal(t, "/memory", completions[0].Text)
-	assert.Equal(t, "Manage cross-session memories: list, add, delete, search, clear",
+	assert.Equal(t, "Manage manually stored memories: list, add, delete, search, clear",
 		completions[0].Description)
 }
 

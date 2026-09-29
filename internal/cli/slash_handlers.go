@@ -20,9 +20,9 @@ const maxHistoryPreview = 60
 // Existing commands (migrated from the switch in slash.go)
 // ----------------------------------------------------------------------------
 
-// HelpHandler lists all registered slash commands. It reads the handler list
-// dynamically from the registry so newly registered commands appear
-// automatically.
+// HelpHandler lists registered slash commands and the default entry's static
+// capability boundaries. It reads the command list dynamically from the
+// registry so newly registered commands appear automatically.
 type HelpHandler struct {
 	reg *SlashCommandRegistry
 }
@@ -40,6 +40,23 @@ func (h *HelpHandler) Handle(_ context.Context, _ []string, deps Dependencies) (
 		}
 	}
 	fmt.Fprintln(deps.Out(), "  exit      Exit the interactive session") //nolint:errcheck
+	fmt.Fprintln(deps.Out(), "\nCapability boundaries (default entry):") //nolint:errcheck
+	for _, boundary := range []string{
+		"Memory: user-managed with /memory only; no automatic extraction or prompt injection.",
+		"Goal, Task, and Todo: stored only in memory for this process; not kept across restarts.",
+		"Session resume: only from a configured session directory by exact physical session ID; no automatic latest-session selection.",
+		"Fork, branch switch, snapshot, and migration are unsupported.",
+		"Image reading and Web Agent UI: unavailable. Web Search requires a configured provider.",
+		"Remote TUI is unavailable. Serve exposes only the private go-cli-acp-json/1 profile; official ACP and ask approvals are unavailable.",
+		"Serve requires --approve auto or --approve deny. Hard cost budgets are unsupported; usage and cost reports may be incomplete or estimated, and a displayed $0 is not proof of zero spend.",
+		"Plan Mode changes only through the user's /plan enter|exit commands; model calls cannot switch it.",
+		"Themes cover a renderer subset. Diffs are unified; ASCII mode is unsupported; NO_COLOR only disables color.",
+		"MCP server configuration hot reload is unsupported.",
+		"Interactive terminal evidence is limited to one native Darwin arm64 journey; Linux and Windows are unverified.",
+		"Docker target is linux/amd64; runtime support is unverified.",
+	} {
+		fmt.Fprintf(deps.Out(), "  %s\n", boundary) //nolint:errcheck
+	}
 	return "", nil
 }
 
