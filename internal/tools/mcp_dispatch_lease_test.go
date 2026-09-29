@@ -304,6 +304,82 @@ func TestPreparedStreamingDispatchLeaseCoversSynchronousJoin(t *testing.T) {
 	assert.Equal(t, CompletionInlinePipelineJoined, invocation.CompletionSignal().Proof())
 }
 
+func TestPreparedDispatchLeaseWaitsForOwnedProcessGroupJoin(t *testing.T) {
+	lease := &mcpDispatchLeaseProbe{}
+	processDone := make(chan struct{})
+	fence := NewDispatchFence()
+	invocation := newPreparedInvocation(preparedInvocationConfig{
+		fence:           fence,
+		generations:     fence.Snapshot(),
+		call:            mustFreezeToolCall(t, ToolCall{ID: "call-process", Name: "mcp-process"}),
+		dispatchLease:   lease,
+		completionProof: CompletionOwnedProcessGroupJoined,
+		execute: func(ctx context.Context, call ToolCall) (*ToolResult, error) {
+			reportPreparedCompletion(ctx, CompletionOwnedProcessGroupJoined, processDone)
+			return &ToolResult{Output: call.ID}, nil
+		},
+	})
+	dispatchDone := make(chan error, 1)
+	go func() {
+		_, err := invocation.Dispatch(context.Background())
+		dispatchDone <- err
+	}()
+
+	select {
+	case err := <-dispatchDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		close(processDone)
+		t.Fatal("dispatch blocked waiting for the process-group join instead of returning its pending completion")
+	}
+	assert.Zero(t, lease.releaseCount.Load(), "dispatch may return while its exact process-group completion remains pending")
+	assert.Empty(t, invocation.CompletionSignal().Proof(), "a pending process group has no completion proof")
+
+	close(processDone)
+	require.Eventually(t, func() bool { return lease.releaseCount.Load() == 1 }, time.Second, time.Millisecond)
+	assert.EqualValues(t, 1, lease.releaseCount.Load())
+	assert.Equal(t, CompletionOwnedProcessGroupJoined, invocation.CompletionSignal().Proof())
+}
+
+func TestPreparedStreamingDispatchLeaseWaitsForOwnedProcessGroupJoin(t *testing.T) {
+	lease := &mcpDispatchLeaseProbe{}
+	processDone := make(chan struct{})
+	attested, err := AttestSynchronousStreamSink(&preparedCaptureSink{})
+	require.NoError(t, err)
+	fence := NewDispatchFence()
+	invocation := newPreparedStreamingInvocation(preparedInvocationConfig{
+		fence:           fence,
+		generations:     fence.Snapshot(),
+		call:            mustFreezeToolCall(t, ToolCall{ID: "call-stream-process", Name: "mcp-process-stream"}),
+		dispatchLease:   lease,
+		completionProof: CompletionOwnedProcessGroupJoined,
+		streamingSink:   attested.(*synchronousStreamSink),
+	}, func(ctx context.Context, call ToolCall, _ StreamSink) (*ToolResult, error) {
+		reportPreparedCompletion(ctx, CompletionOwnedProcessGroupJoined, processDone)
+		return &ToolResult{Output: call.ID}, nil
+	})
+	dispatchDone := make(chan error, 1)
+	go func() {
+		_, dispatchErr := invocation.DispatchStreaming(context.Background(), attested)
+		dispatchDone <- dispatchErr
+	}()
+
+	select {
+	case err := <-dispatchDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		close(processDone)
+		t.Fatal("streaming dispatch blocked waiting for the process-group join instead of returning its pending completion")
+	}
+	assert.Zero(t, lease.releaseCount.Load(), "streaming dispatch may return while its exact process-group completion remains pending")
+	assert.Empty(t, invocation.CompletionSignal().Proof(), "a pending process group has no completion proof")
+
+	close(processDone)
+	require.Eventually(t, func() bool { return lease.releaseCount.Load() == 1 }, time.Second, time.Millisecond)
+	assert.EqualValues(t, 1, lease.releaseCount.Load())
+	assert.Equal(t, CompletionOwnedProcessGroupJoined, invocation.CompletionSignal().Proof())
+}
+
 type cancelAfterPreparedCommitContext struct {
 	context.Context
 	errCalls atomic.Int32
