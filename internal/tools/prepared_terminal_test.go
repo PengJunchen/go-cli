@@ -2,9 +2,13 @@ package tools
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -71,7 +75,7 @@ func TestPreparedTerminalObserverReportsCallerVisibleResult(t *testing.T) {
 			}
 			assert.Same(t, test.result, result)
 			assert.EqualValues(t, 1, observed.Load())
-			assert.Equal(t, "call-1", outcome.ToolCallID)
+			assert.Equal(t, terminalFingerprint("call-1"), outcome.ToolCallID)
 			assert.Equal(t, "capture", outcome.ToolName)
 			assert.True(t, outcome.DispatchCommitted)
 			assert.Equal(t, test.wantResult, outcome.ResultPresent)
@@ -158,7 +162,7 @@ func TestPreparedTerminalObserverIsCapturedFromPolicyDecision(t *testing.T) {
 			Allowed: true, Generations: request.Generations,
 			TerminalObserver: func(outcome PreparedTerminalOutcome) error {
 				observed.Add(1)
-				assert.Equal(t, "call-3", outcome.ToolCallID)
+				assert.Equal(t, terminalFingerprint("call-3"), outcome.ToolCallID)
 				assert.Equal(t, "capture", outcome.ToolName)
 				return nil
 			},
@@ -202,7 +206,7 @@ func TestPreparedTerminalObserverRunsAfterQueuedResult(t *testing.T) {
 	assert.Equal(t, "queued", string(contents))
 	assert.Contains(t, result.Output, "wrote 6 bytes")
 	assert.EqualValues(t, 1, observed.Load())
-	assert.Equal(t, "call-queued", outcome.ToolCallID)
+	assert.Equal(t, terminalFingerprint("call-queued"), outcome.ToolCallID)
 	assert.Equal(t, "write", outcome.ToolName)
 	assert.True(t, outcome.DispatchCommitted)
 	assert.True(t, outcome.ResultPresent)
@@ -235,7 +239,7 @@ func TestPreparedTerminalObserverRunsAfterStreamingResult(t *testing.T) {
 	assert.Equal(t, "streamed", result.Output)
 	assert.Equal(t, "line", sink.content)
 	assert.EqualValues(t, 1, observed.Load())
-	assert.Equal(t, "call-stream", outcome.ToolCallID)
+	assert.Equal(t, terminalFingerprint("call-stream"), outcome.ToolCallID)
 	assert.Equal(t, "bash", outcome.ToolName)
 	assert.True(t, outcome.DispatchCommitted)
 	assert.Equal(t, PreparedTerminalErrorSuccess, outcome.ErrorClass)
@@ -264,8 +268,80 @@ func TestPreparedTerminalObserverReportsStalePreparedDispatchOnce(t *testing.T) 
 	_, err = invocation.Dispatch(context.Background())
 	require.ErrorIs(t, err, ErrPreparedInvocationConsumed)
 	assert.EqualValues(t, 1, observed.Load())
-	assert.Equal(t, "call-stale", outcome.ToolCallID)
+	assert.Equal(t, terminalFingerprint("call-stale"), outcome.ToolCallID)
 	assert.False(t, outcome.DispatchCommitted)
 	assert.False(t, outcome.ResultPresent)
 	assert.Equal(t, PreparedTerminalErrorDispatchReject, outcome.ErrorClass)
+}
+
+func TestPreparedTerminalOutcomeBoundsAndSanitizesUntrustedIdentity(t *testing.T) {
+	tests := []struct {
+		name         string
+		callID       string
+		toolName     string
+		wantToolName string
+	}{
+		{
+			name:         "oversized identity",
+			callID:       strings.Repeat("provider-call-", 512),
+			toolName:     strings.Repeat("tool-name-", 512),
+			wantToolName: "[redacted:oversized]",
+		},
+		{
+			name:         "control characters",
+			callID:       "call\x00\tsecret\nvalue",
+			toolName:     "read\nworkspace\tfiles",
+			wantToolName: "read_workspace_files",
+		},
+		{
+			name:         "credential-like identity",
+			callID:       "api_key=sk-live-super-secret-value",
+			toolName:     "fetch_token=private-credential-value",
+			wantToolName: "[redacted]",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			fence := NewDispatchFence()
+			var outcome PreparedTerminalOutcome
+			invocation := newPreparedInvocation(preparedInvocationConfig{
+				fence:       fence,
+				generations: fence.Snapshot(),
+				identity:    TrustedToolIdentity{toolName: test.toolName},
+				call:        mustFreezeToolCall(t, ToolCall{ID: test.callID, Name: test.toolName}),
+				execute: func(context.Context, ToolCall) (*ToolResult, error) {
+					return &ToolResult{Output: "done"}, nil
+				},
+				terminalObserver: func(got PreparedTerminalOutcome) error {
+					outcome = got
+					return nil
+				},
+			})
+
+			_, err := invocation.Dispatch(context.Background())
+			require.NoError(t, err)
+			assert.Equal(t, terminalFingerprint(test.callID), outcome.ToolCallID)
+			assert.Equal(t, test.wantToolName, outcome.ToolName)
+			assert.LessOrEqual(t, len(outcome.ToolCallID), 128)
+			assert.LessOrEqual(t, len(outcome.ToolName), 128)
+			assert.NotContains(t, outcome.ToolCallID, test.callID)
+			assert.NotContains(t, outcome.ToolName, test.toolName)
+			for _, r := range outcome.ToolName {
+				assert.False(t, r < 0x20 || r == 0x7f, "control rune leaked into tool name")
+			}
+
+			encoded, err := json.Marshal(outcome)
+			require.NoError(t, err)
+			assert.NotContains(t, string(encoded), test.callID)
+			assert.NotContains(t, string(encoded), test.toolName)
+			assert.NotContains(t, string(encoded), "sk-live-super-secret-value")
+			assert.NotContains(t, string(encoded), "private-credential-value")
+		})
+	}
+}
+
+func terminalFingerprint(value string) string {
+	digest := sha256.Sum256([]byte(value))
+	return "sha256:" + hex.EncodeToString(digest[:])
 }

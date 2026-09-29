@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"reflect"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -572,10 +573,17 @@ const (
 	PreparedTerminalErrorUnknown         = "unknown_error"
 )
 
-// PreparedTerminalOutcome contains only bounded call identity, dispatch
-// status, and result flags. It deliberately excludes arguments, output, and
-// raw errors. CleanupPending means Dispatch returned while a joined resource
-// completion signal remained open; it must not be recorded as success.
+const (
+	preparedTerminalIdentityMaxBytes  = 128
+	preparedTerminalToolNameRedacted  = "[redacted]"
+	preparedTerminalToolNameOversized = "[redacted:oversized]"
+)
+
+// PreparedTerminalOutcome contains a fixed-size call-ID fingerprint, a
+// sanitized bounded tool name, dispatch status, and result flags. It
+// deliberately excludes arguments, output, and raw errors. CleanupPending
+// means Dispatch returned while a joined resource completion signal remained
+// open; it must not be recorded as success.
 type PreparedTerminalOutcome struct {
 	ToolCallID        string
 	ToolName          string
@@ -780,14 +788,14 @@ func (p *preparedInvocation) observeTerminal(result *ToolResult, dispatchErr err
 		return
 	}
 	outcome := PreparedTerminalOutcome{
-		ToolCallID:        p.call.id,
-		ToolName:          p.identity.ToolName(),
+		ToolCallID:        preparedTerminalCallIDFingerprint(p.call.id),
+		ToolName:          preparedTerminalSafeToolName(p.identity.ToolName()),
 		DispatchCommitted: p.committed.Load(),
 		ResultPresent:     result != nil,
 		ResultIsError:     result != nil && result.IsError,
 	}
 	if outcome.ToolName == "" {
-		outcome.ToolName = p.call.name
+		outcome.ToolName = preparedTerminalSafeToolName(p.call.name)
 	}
 	outcome.ErrorClass = preparedTerminalErrorClass(p, result, dispatchErr, panicked)
 	callbackErr := callPreparedTerminalObserver(p.terminalObserver, outcome)
@@ -798,6 +806,44 @@ func (p *preparedInvocation) observeTerminal(result *ToolResult, dispatchErr err
 		}
 		slog.Error("tools.prepared_terminal_observer.failed", "error_class", class)
 	}
+}
+
+func preparedTerminalCallIDFingerprint(callID string) string {
+	digest := sha256.Sum256([]byte(callID))
+	return "sha256:" + hex.EncodeToString(digest[:])
+}
+
+func preparedTerminalSafeToolName(toolName string) string {
+	if len(toolName) > preparedTerminalIdentityMaxBytes {
+		return preparedTerminalToolNameOversized
+	}
+	if containsPreparedTerminalSensitiveMarker(toolName) {
+		return preparedTerminalToolNameRedacted
+	}
+
+	var sanitized strings.Builder
+	sanitized.Grow(len(toolName))
+	for _, value := range toolName {
+		if value >= 'a' && value <= 'z' || value >= 'A' && value <= 'Z' || value >= '0' && value <= '9' || strings.ContainsRune("_.:-", value) {
+			sanitized.WriteRune(value)
+			continue
+		}
+		sanitized.WriteByte('_')
+	}
+	return sanitized.String()
+}
+
+func containsPreparedTerminalSensitiveMarker(value string) bool {
+	lowerValue := strings.ToLower(value)
+	if strings.Contains(lowerValue, "=") {
+		return true
+	}
+	for _, marker := range [...]string{"secret", "token", "password", "passwd", "credential", "api_key", "api-key", "authorization", "bearer"} {
+		if strings.Contains(lowerValue, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func callPreparedTerminalObserver(observer PreparedTerminalObserver, outcome PreparedTerminalOutcome) (err error) {
