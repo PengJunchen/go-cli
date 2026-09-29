@@ -2653,12 +2653,17 @@ func newProductionToolWrapper(
 	return func(next func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error)) func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
 		return func(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
 			start := time.Now()
-			cacheKey := toolCacheKey(call.Name, call.Args)
 
 			// Mutation tools bypass the cache so they always reach the
 			// approval middleware. Caching their results would let a
 			// duplicate call skip user approval.
 			skipCache := noCacheTools[call.Name]
+			cacheKey := ""
+			if !skipCache && cache != nil {
+				var cacheable bool
+				cacheKey, cacheable = toolCacheKey(call.Name, call.Args)
+				skipCache = !cacheable
+			}
 
 			// Check idempotent cache (skipped for mutation tools).
 			if !skipCache && cache != nil {
@@ -2691,14 +2696,22 @@ func newProductionToolWrapper(
 	}
 }
 
-// toolCacheKey generates a deterministic cache key from the tool name and
-// arguments by JSON-marshaling the args map.
-func toolCacheKey(name string, args map[string]any) string {
+const toolCacheKeyDomain = "go-cli/tool-cache/v1\x00"
+
+// toolCacheKey returns a bounded, deterministic key without retaining or
+// exposing the serialized tool arguments. A failed encoding is not cacheable.
+func toolCacheKey(name string, args map[string]any) (string, bool) {
 	data, err := json.Marshal(args)
 	if err != nil {
-		return name
+		return "", false
 	}
-	return name + ":" + string(data)
+	digestInput := make([]byte, 0, len(toolCacheKeyDomain)+len(name)+1+len(data))
+	digestInput = append(digestInput, toolCacheKeyDomain...)
+	digestInput = append(digestInput, name...)
+	digestInput = append(digestInput, 0)
+	digestInput = append(digestInput, data...)
+	sum := sha256.Sum256(digestInput)
+	return "tool-cache:v1:" + hex.EncodeToString(sum[:]), true
 }
 
 // hashValue computes a SHA-256 hex digest of the JSON representation of v.
