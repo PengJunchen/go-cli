@@ -52,6 +52,13 @@ func NewJSONRPCLineTransport(in io.Reader, out io.Writer, closeFn func() error) 
 // the agent loop indefinitely.
 const defaultJSONRPCTimeout = 30 * time.Second
 
+// maxStdioResponseSize matches the HTTP adapter's established response cap.
+// A single Request accounts for all consumed frames, including notifications
+// and responses with unrelated IDs.
+const maxStdioResponseSize = maxHTTPResponseSize
+
+var errStdioResponseTooLarge = fmt.Errorf("response exceeds %d byte limit", maxStdioResponseSize)
+
 // Request sends a JSON-RPC request with a fresh id and blocks until a response
 // with a matching id arrives. It returns the parsed result object. Cancellation
 // interrupts blocking I/O only when this transport owns a stdio child; a
@@ -175,6 +182,7 @@ func (t *JSONRPCLineTransport) Request(ctx context.Context, method string, param
 		return nil, newRequestBoundaryError(fmt.Errorf("mcp: write request: %w", err), true, true)
 	}
 
+	budget := newResponseByteBudget(int64(maxStdioResponseSize))
 	for {
 		select {
 		case <-ctx.Done():
@@ -187,8 +195,17 @@ func (t *JSONRPCLineTransport) Request(ctx context.Context, method string, param
 		default:
 		}
 
-		line, readErr := t.in.ReadString('\n')
+		line, readErr := readLimitedStdioLine(t.in, budget)
 		if readErr != nil {
+			if errors.Is(readErr, errStdioResponseTooLarge) {
+				cause := &stdioProtocolError{cause: readErr}
+				if owner != nil {
+					owner.startStop()
+					finishWatch()
+					return nil, ownedRequestError(cause, true, false)
+				}
+				return nil, newRequestBoundaryError(cause, true, false)
+			}
 			cause := fmt.Errorf("mcp: read response: %w", readErr)
 			if owner != nil {
 				wasStopping := owner.isStopping()
@@ -203,7 +220,7 @@ func (t *JSONRPCLineTransport) Request(ctx context.Context, method string, param
 		}
 
 		var frame map[string]json.RawMessage
-		if err := json.Unmarshal([]byte(line), &frame); err != nil {
+		if err := json.Unmarshal(line, &frame); err != nil {
 			continue
 		}
 
@@ -213,7 +230,7 @@ func (t *JSONRPCLineTransport) Request(ctx context.Context, method string, param
 		// stalled.
 		if _, hasID := frame["id"]; !hasID {
 			select {
-			case t.notifications <- json.RawMessage(strings.TrimSpace(line)):
+			case t.notifications <- json.RawMessage(strings.TrimSpace(string(line))):
 			default:
 			}
 			continue
@@ -223,13 +240,82 @@ func (t *JSONRPCLineTransport) Request(ctx context.Context, method string, param
 		if len(frame["id"]) == 0 || json.Unmarshal(frame["id"], &responseID) != nil || responseID != id {
 			continue
 		}
-		result, responseErr := parseJSONRPCResponse([]byte(line), id)
+		result, responseErr := parseJSONRPCResponse(line, id)
 		if owner != nil && finishWatch() {
 			return nil, ownedRequestError(contextCause(ctx), true, false)
 		}
 		return result, responseErr
 	}
 }
+
+func readLimitedStdioLine(reader *bufio.Reader, budget *responseByteBudget) ([]byte, error) {
+	var line []byte
+	for {
+		if budget.remaining <= 0 {
+			return nil, errStdioResponseTooLarge
+		}
+
+		fragment, err := reader.ReadSlice('\n')
+		if int64(len(fragment)) > budget.remaining || len(fragment) > maxStdioResponseSize-len(line) {
+			budget.remaining = 0
+			return nil, errStdioResponseTooLarge
+		}
+		budget.remaining -= int64(len(fragment))
+
+		var ok bool
+		line, ok = appendStdioResponseFragment(line, fragment)
+		if !ok {
+			budget.remaining = 0
+			return nil, errStdioResponseTooLarge
+		}
+		if err == nil {
+			return line, nil
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			// A full budget without a delimiter cannot become an in-budget frame.
+			if budget.remaining == 0 {
+				return nil, errStdioResponseTooLarge
+			}
+			continue
+		}
+		return line, err
+	}
+}
+
+func appendStdioResponseFragment(line, fragment []byte) ([]byte, bool) {
+	if len(fragment) > maxStdioResponseSize-len(line) {
+		return nil, false
+	}
+	needed := len(line) + len(fragment)
+	if needed > cap(line) {
+		capacity := cap(line) * 2
+		if capacity < 4096 {
+			capacity = 4096
+		}
+		if capacity < needed {
+			capacity = needed
+		}
+		if capacity > maxStdioResponseSize {
+			capacity = maxStdioResponseSize
+		}
+		grown := make([]byte, len(line), capacity)
+		copy(grown, line)
+		line = grown
+	}
+	return append(line, fragment...), true
+}
+
+type stdioProtocolError struct {
+	cause error
+}
+
+func (e *stdioProtocolError) Error() string {
+	return fmt.Sprintf("mcp: stdio protocol error: %v", e.cause)
+}
+
+func (e *stdioProtocolError) Unwrap() error { return e.cause }
+
+func (*stdioProtocolError) isStdioProtocolError() {}
 
 // Send sends a JSON-RPC notification (no id, no response expected) to the
 // server. It is used for the notifications/initialized message in the MCP
