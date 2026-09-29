@@ -62,6 +62,7 @@ type REPLSession struct {
 	thinkingFlag     string
 	verboseFlag      bool
 	resumeFlag       bool
+	resumeSessionID  string
 	noSandboxFlag    bool
 	noOnboardingFlag bool
 
@@ -182,7 +183,9 @@ func (s *REPLSession) start(ctx context.Context) error {
 	if err := s.setupAgent(ctx); err != nil {
 		return err
 	}
-	s.setupSlashContext()
+	if err := s.setupSlashContext(); err != nil {
+		return err
+	}
 	s.setupEditors()
 	return nil
 }
@@ -199,6 +202,7 @@ func (s *REPLSession) parseFlags() error {
 		maxTokensFlag    int
 		verboseFlag      bool
 		resumeFlag       bool
+		resumeSessionID  string
 		thinkingFlag     string
 		noSandboxFlag    bool
 		noOnboardingFlag bool
@@ -208,6 +212,7 @@ func (s *REPLSession) parseFlags() error {
 	fs.IntVar(&maxTokensFlag, "max-tokens", defaultMaxTokens, "compaction token budget")
 	fs.BoolVar(&verboseFlag, "verbose", false, "enable verbose output")
 	fs.BoolVar(&resumeFlag, "resume", false, "resume previous session from store path")
+	fs.StringVar(&resumeSessionID, "resume-session", "", "resume an exact durable physical session ID")
 	fs.StringVar(&thinkingFlag, "thinking", "medium", "thinking level: none|minimal|low|medium|high|max")
 	fs.BoolVar(&noSandboxFlag, "no-sandbox", false, "disable bash sandbox enforcement")
 	fs.BoolVar(&noOnboardingFlag, "no-onboarding", false, "skip first-run onboarding wizard")
@@ -222,6 +227,12 @@ func (s *REPLSession) parseFlags() error {
 
 	if v, ok := s.cfg.(*config.Config); ok {
 		s.rc = v
+	}
+	if s.rc != nil && s.rc.Session.StorePath != "" && resumeFlag {
+		return newUsageError("interactive: durable sessions require --resume-session <physical-id>; --resume is ambiguous")
+	}
+	if resumeSessionID != "" && (s.rc == nil || s.rc.Session.StorePath == "") {
+		return newUsageError("interactive: --resume-session requires session.store_path")
 	}
 
 	// Build the dynamic slash command registry: built-in commands plus any
@@ -243,6 +254,7 @@ func (s *REPLSession) parseFlags() error {
 	s.thinkingFlag = thinkingFlag
 	s.verboseFlag = verboseFlag
 	s.resumeFlag = resumeFlag
+	s.resumeSessionID = resumeSessionID
 	s.noSandboxFlag = noSandboxFlag
 	s.noOnboardingFlag = noOnboardingFlag
 	return nil
@@ -279,12 +291,23 @@ func (s *REPLSession) setupAgent(ctx context.Context) error {
 	// of blocking on stdin readline. The same channel is passed to each
 	// per-turn BubbleteaApp via tui.WithApprovalChannel.
 	var approvalCh chan tui.ApprovalRequest
+	var durableSession *durableCLISession
+	if s.rc != nil && s.rc.Session.StorePath != "" {
+		var err error
+		durableSession, err = newDurableCLISession(s.spanCtx, s.rc.Session.StorePath, "interactive", s.resumeSessionID, "")
+		if err != nil {
+			return newExecutionError("interactive: prepare durable session", err)
+		}
+	}
 	assembleOpts := []AssembleOption{
 		WithMaxTokens(s.maxTokens),
 		WithResume(s.resumeFlag),
 		WithSessionPersistence(true),
 		WithAgentName("interactive"),
 		WithThinkingLevel(s.thinkingLevel),
+	}
+	if durableSession != nil {
+		assembleOpts = append(assembleOpts, withDurableCLISession(durableSession))
 	}
 	if s.noSandboxFlag {
 		assembleOpts = append(assembleOpts, WithNoSandbox())
@@ -302,6 +325,9 @@ func (s *REPLSession) setupAgent(ctx context.Context) error {
 	if err := assembly.setInteractiveCloseHooks(func() {
 		s.stopFlushTicker()
 	}, func(ctx context.Context) error {
+		if assembly.durableSession != nil {
+			return nil
+		}
 		if assembly.SessionStore == nil || s.pendingWrites == nil {
 			return nil
 		}
@@ -321,9 +347,20 @@ func (s *REPLSession) setupAgent(ctx context.Context) error {
 
 // setupSlashContext builds the slash command context from the assembled
 // components and initializes the shared theme manager.
-func (s *REPLSession) setupSlashContext() {
+func (s *REPLSession) setupSlashContext() error {
 	// Build slash command context from the assembled components.
-	if s.assembly.SessionStore != nil {
+	if s.assembly.durableSession != nil {
+		snapshot, err := s.assembly.durableSession.snapshotSelected()
+		if err != nil {
+			return fmt.Errorf("interactive: snapshot durable session for slash commands: %w", err)
+		}
+		s.sessionTree, err = session.NewDefaultSessionTreeBuilder().BuildFromSnapshot(s.spanCtx, snapshot)
+		if err != nil {
+			return fmt.Errorf("interactive: build durable session tree: %w", err)
+		}
+		s.assembly.Agent.SetHistory(snapshot.PublishedView.Messages)
+		s.sessionHandler = session.NewDurableReadOnlySessionSlashHandler(s.sessionTree)
+	} else if s.assembly.SessionStore != nil {
 		treeBuilder := session.NewDefaultSessionTreeBuilder()
 		var err error
 		s.sessionTree, err = treeBuilder.BuildFromStore(s.spanCtx, s.assembly.SessionStore)
@@ -356,6 +393,7 @@ func (s *REPLSession) setupSlashContext() {
 		costTracker:     s.assembly.CostTracker,
 		statsRegistry:   s.assembly.StatsRegistry,
 		sessionID:       s.assembly.SessionID,
+		durableMode:     s.assembly.durableSession != nil,
 		toolRegistry:    s.assembly.ToolRegistry,
 		modelName:       s.modelName,
 		sessionHandler:  s.sessionHandler,
@@ -374,6 +412,9 @@ func (s *REPLSession) setupSlashContext() {
 		promptBuilder:   s.assembly.PromptBuilder,
 		contextLoader:   s.assembly.ContextLoader,
 		mcpResources:    s.assembly.mcpResources,
+	}
+	if s.assembly.PhysicalSessionID != "" {
+		s.slashCtx.sessionID = s.assembly.PhysicalSessionID
 	}
 
 	// Create a shared ThemeManager so /theme can switch themes at runtime
@@ -401,6 +442,7 @@ func (s *REPLSession) setupSlashContext() {
 		s.pendingWrites = session.NewPendingSessionWrites()
 		s.startFlushTicker()
 	}
+	return nil
 }
 
 // setupEditors initializes the input reader, line editor (with history and
@@ -623,7 +665,9 @@ func (s *REPLSession) readInput() error {
 		}
 
 		s.line = line
-		s.executeTurn()
+		if err := s.executeTurn(); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -653,7 +697,7 @@ func (s *REPLSession) handleInterrupt(err error) bool {
 // executeTurn orchestrates a single agent turn: it sets up the turn context,
 // launches the agent goroutine, renders the TUI, waits for completion, then
 // persists the session and extracts memories.
-func (s *REPLSession) executeTurn() {
+func (s *REPLSession) executeTurn() error {
 	s.setupTurn()
 	s.runAgentGoroutine()
 	s.renderTUI()
@@ -677,6 +721,22 @@ func (s *REPLSession) executeTurn() {
 
 	s.app.Quit()
 
+	if s.assembly.durableSession != nil && !durableTurnIsJoinable(s.turnResult) {
+		status := s.turnResult
+		if status.StatusHandle != nil {
+			fresh := status.StatusHandle.Snapshot()
+			status.Outcome = fresh.Outcome
+			status.ExecutionState = fresh.ExecutionState
+		}
+		return fmt.Errorf("interactive: durable run did not reach a known joined terminal state (outcome=%s execution=%s)", status.Outcome, status.ExecutionState)
+	}
+
+	if s.assembly.durableSession != nil {
+		if err := s.refreshDurableSession(); err != nil {
+			return err
+		}
+	}
+
 	if s.turnErr != nil && !interrupted {
 		if ufe := classifyError(s.turnErr); ufe != nil {
 			fmt.Fprintf(s.out, "Error: %s\n", ufe.Action) //nolint:errcheck
@@ -684,7 +744,10 @@ func (s *REPLSession) executeTurn() {
 		} else {
 			fmt.Fprintf(s.out, "Error: %v\n", s.turnErr) //nolint:errcheck
 		}
-		return
+		if s.assembly.durableSession != nil {
+			s.extractMemory()
+		}
+		return nil
 	}
 
 	if interrupted {
@@ -699,11 +762,44 @@ func (s *REPLSession) executeTurn() {
 		fmt.Fprintf(s.out, "AI: %s\n", s.turnResult.Message) //nolint:errcheck
 	}
 
-	s.persistSession()
+	if s.assembly.durableSession != nil {
+		s.extractMemory()
+	} else {
+		s.persistSession()
+	}
 
 	s.logger.Info("cli_interactive_turn_complete",
 		"op", "cli.interactive.turn_complete",
 	)
+	return nil
+}
+
+func durableTurnIsJoinable(result core.Result) bool {
+	if result.StatusHandle != nil {
+		status := result.StatusHandle.Snapshot()
+		result.Outcome = status.Outcome
+		result.ExecutionState = status.ExecutionState
+	}
+	return result.ExecutionState == core.RunExecutionQuiescent && result.Outcome != core.RunOutcomeUnknown
+}
+
+func (s *REPLSession) refreshDurableSession() error {
+	snapshot, err := s.assembly.durableSession.snapshotSelected()
+	if err != nil {
+		return fmt.Errorf("interactive: refresh durable session after turn: %w", err)
+	}
+	tree, err := session.NewDefaultSessionTreeBuilder().BuildFromSnapshot(s.spanCtx, snapshot)
+	if err != nil {
+		return fmt.Errorf("interactive: rebuild durable session tree after turn: %w", err)
+	}
+	s.sessionTree = tree
+	if s.assembly.durableSession != nil {
+		s.sessionHandler = session.NewDurableReadOnlySessionSlashHandler(tree)
+		s.slashCtx.sessionHandler = s.sessionHandler
+	}
+	s.assembly.Agent.SetHistory(snapshot.PublishedView.Messages)
+	s.entryCounter = len(s.assembly.Agent.Messages())
+	return nil
 }
 
 // setupTurn creates the cancelable turn context, interrupt handler, and
@@ -765,7 +861,19 @@ func (s *REPLSession) runAgentGoroutine() {
 	s.turnDone = make(chan struct{})
 	go func() {
 		defer close(s.turnDone)
-		s.turnResult, s.turnErr = s.assembly.TurnRunner.RunTurn(s.turnCtx, core.Submission{
+		runCtx := s.turnCtx
+		if s.assembly.durableSession != nil {
+			boundCtx, _, err := s.assembly.durableSession.bindRun(runCtx)
+			if err != nil {
+				s.turnErr = err
+				s.turnResult = core.Result{Outcome: core.RunOutcomeError, ExecutionState: core.RunExecutionQuiescent}
+				s.stream.SetResult(core.AgentMessage{Role: "assistant"}, err)
+				s.stream.Close()
+				return
+			}
+			runCtx = boundCtx
+		}
+		s.turnResult, s.turnErr = s.assembly.TurnRunner.RunTurn(runCtx, core.Submission{
 			Type:    core.SubmissionUserMessage,
 			Content: s.line,
 		})

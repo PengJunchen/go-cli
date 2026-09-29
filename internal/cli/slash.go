@@ -110,6 +110,7 @@ type slashContext struct {
 	costTracker    *production.CostTracker
 	statsRegistry  *production.StatsRegistry
 	sessionID      string
+	durableMode    bool
 	toolRegistry   tools.ToolRegistry
 	modelName      string
 	sessionHandler *session.SessionSlashHandler
@@ -239,6 +240,12 @@ func (c *interactiveCmd) handleSlashCommand(ctx context.Context, cmd session.Sla
 	if !ok {
 		fmt.Fprintf(deps.Out(), "Unknown command: /%s. Type /help for available commands.\n", cmd.Name) //nolint:errcheck
 		return ""
+	}
+	if slashDeps, ok := deps.(*slashContext); ok && slashDeps.durableMode {
+		if err := durableHistoryMutationUnsupported(handler.Name()); err != nil {
+			fmt.Fprintf(deps.Out(), "Error: %v\n", err) //nolint:errcheck
+			return ""
+		}
 	}
 	pendingInput, err := handler.Handle(spanCtx, cmd.Args, deps)
 	if err != nil {

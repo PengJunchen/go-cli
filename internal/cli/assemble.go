@@ -130,6 +130,9 @@ type ProductionResilience struct {
 type SessionManagement struct {
 	SessionStore *session.JSONLSessionStore
 	SessionID    string
+	// PhysicalSessionID is set when this Assembly uses the prepared durable CLI
+	// session protocol. SessionID remains the configured logical label.
+	PhysicalSessionID string
 	// MemoryStore persists cross-session memories for the /memory slash
 	// command and system prompt injection.
 	MemoryStore *memory.FileMemoryStore
@@ -254,8 +257,9 @@ type AgentAssembly struct {
 	Registry *core.DefaultRegistry
 	Cleanup  func()
 
-	closeOwner   *assemblyCloseOwner
-	mcpResources *assemblyMCPResources
+	closeOwner     *assemblyCloseOwner
+	mcpResources   *assemblyMCPResources
+	durableSession *durableCLISession
 }
 
 // Close stops admitting new runs and waits for the Assembly-owned resources to
@@ -290,11 +294,12 @@ func (a *AgentAssembly) setHTTPServer(server *acp.HTTPServer) error {
 type AssembleOption func(*assembleConfig)
 
 type assembleConfig struct {
-	maxTokens     int
-	resumeFlag    bool
-	enableSession bool
-	agentName     string
-	thinkingLevel *llm.ThinkingLevel
+	maxTokens      int
+	resumeFlag     bool
+	enableSession  bool
+	durableSession *durableCLISession
+	agentName      string
+	thinkingLevel  *llm.ThinkingLevel
 	// noSandbox disables bash sandbox enforcement, replacing the default
 	// sandbox with an AllowAllSandbox that permits every command.
 	noSandbox bool
@@ -338,6 +343,13 @@ func WithSessionPersistence(b bool) AssembleOption {
 	return func(c *assembleConfig) { c.enableSession = b }
 }
 
+func withDurableCLISession(durableSession *durableCLISession) AssembleOption {
+	return func(c *assembleConfig) {
+		c.durableSession = durableSession
+		c.enableSession = durableSession != nil || c.enableSession
+	}
+}
+
 // WithAgentName sets the agent's name used in tracing, logging, and session ID.
 func WithAgentName(name string) AssembleOption {
 	return func(c *assembleConfig) { c.agentName = name }
@@ -372,6 +384,13 @@ func AssembleAgent(
 	opts ...AssembleOption,
 ) (*AgentAssembly, error) {
 	s, thinkingLevel := newAssembleState(ctx, rc, providerName, modelName, out, opts...)
+	if s.durableSession != nil {
+		snapshot, err := s.durableSession.snapshotSelected()
+		if err != nil {
+			return nil, errors.Join(fmt.Errorf("assemble: inspect selected durable session: %w", err), s.runCleanup())
+		}
+		s.initialSnapshot = snapshot.Clone()
+	}
 	s.loadConfiguredShellHooks()
 	if len(s.unsupportedPostToolUseHooks) > 0 {
 		hook := s.unsupportedPostToolUseHooks[0]
@@ -409,7 +428,9 @@ func AssembleAgent(
 
 	// Resume history from session store if requested.
 	var restoredHistory []core.AgentMessage
-	if s.ac.resumeFlag && s.sessionStore != nil {
+	if s.durableSession != nil {
+		restoredHistory = append([]core.AgentMessage(nil), s.initialSnapshot.PublishedView.Messages...)
+	} else if s.ac.resumeFlag && s.sessionStore != nil {
 		restoredHistory, _ = loadSessionHistory(s.sessionStore.FilePath()) //nolint:errcheck
 		if len(restoredHistory) > 0 {
 			s.logger.Info("assemble_session_resumed", "messages", len(restoredHistory))
@@ -481,15 +502,16 @@ func AssembleAgent(
 			Telemetry:       s.telemetry,
 		},
 		SessionManagement: SessionManagement{
-			SessionStore:    s.sessionStore,
-			SessionID:       s.sessionID,
-			MemoryStore:     s.memStore,
-			MemoryExtractor: s.memExtractor,
-			MemoryWG:        &s.memWG,
-			Compactor:       s.compactor,
-			Estimator:       s.estimator,
-			MidTurn:         s.midTurn,
-			MaxTokens:       s.ac.maxTokens,
+			SessionStore:      s.sessionStore,
+			SessionID:         s.sessionID,
+			PhysicalSessionID: s.initialSnapshot.SessionID,
+			MemoryStore:       s.memStore,
+			MemoryExtractor:   s.memExtractor,
+			MemoryWG:          &s.memWG,
+			Compactor:         s.compactor,
+			Estimator:         s.estimator,
+			MidTurn:           s.midTurn,
+			MaxTokens:         s.ac.maxTokens,
 		},
 		GitIntegration: GitIntegration{
 			GitTool:         s.gitTool,
@@ -519,10 +541,11 @@ func AssembleAgent(
 			LSPClient:          s.lspClientField,
 			LSPWorkspaceRoot:   s.lspWorkspaceRoot,
 		},
-		Registry:     s.reg,
-		Cleanup:      func() { _ = s.runCleanup() },
-		closeOwner:   s.closeOwner,
-		mcpResources: s.mcpResources,
+		Registry:       s.reg,
+		Cleanup:        func() { _ = s.runCleanup() },
+		closeOwner:     s.closeOwner,
+		mcpResources:   s.mcpResources,
+		durableSession: s.durableSession,
 	}, nil
 }
 
@@ -592,6 +615,7 @@ func newAssembleState(
 		lifetimeCtx:    lifetimeCtx,
 		lifetimeCancel: lifetimeCancel,
 		mcpResources:   &assemblyMCPResources{},
+		durableSession: ac.durableSession,
 	}
 	s.closeOwner = newAssemblyCloseOwner(
 		func() core.RunSlotGuard { return s.runSlotGuard },
@@ -714,7 +738,9 @@ type assembleState struct {
 	midTurn   *compaction.MidTurnCompact
 
 	// Session section
-	sessionStore *session.JSONLSessionStore
+	sessionStore    *session.JSONLSessionStore
+	durableSession  *durableCLISession
+	initialSnapshot session.PreparedSessionSnapshot
 
 	// Cleanup
 	cleanupList []func(context.Context) error
@@ -1637,6 +1663,9 @@ func (s *assembleState) assembleCompactor() error {
 
 // assembleSession wires session persistence (if enabled).
 func (s *assembleState) assembleSession() {
+	if s.durableSession != nil {
+		return
+	}
 	if s.ac.enableSession && s.rc != nil && s.rc.Session.StorePath != "" {
 		s.sessionStore = session.NewJSONLSessionStore(s.rc.Session.StorePath)
 		if openErr := s.sessionStore.Open(s.ctx); openErr != nil {

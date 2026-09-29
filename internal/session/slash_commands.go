@@ -2,10 +2,30 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
 )
+
+var ErrDurableSessionCommandUnsupported = errors.New("session: durable session command is unsupported")
+
+// UnsupportedDurableSessionCommandError identifies a slash command whose
+// mutation semantics are not yet supported by the durable session protocol.
+type UnsupportedDurableSessionCommandError struct {
+	Command string
+}
+
+func (err *UnsupportedDurableSessionCommandError) Error() string {
+	if err == nil || err.Command == "" {
+		return ErrDurableSessionCommandUnsupported.Error()
+	}
+	return fmt.Sprintf("%v: /%s", ErrDurableSessionCommandUnsupported, err.Command)
+}
+
+func (err *UnsupportedDurableSessionCommandError) Unwrap() error {
+	return ErrDurableSessionCommandUnsupported
+}
 
 // SlashCommand represents a parsed session slash command.
 type SlashCommand struct {
@@ -47,8 +67,9 @@ func (c SlashCommand) String() string {
 // SessionSlashHandler handles session-related slash commands: /tree, /fork, and
 // /resume. It operates on a SessionTree and SessionStore.
 type SessionSlashHandler struct {
-	tree  SessionTree
-	store SessionStore
+	tree            SessionTree
+	store           SessionStore
+	readOnlyDurable bool
 	// OnResume, when non-nil, is invoked after a successful /resume with the
 	// rebuilt branch context so callers (e.g. the interactive REPL) can inject
 	// the history into the agent.
@@ -63,10 +84,22 @@ func NewSessionSlashHandler(tree SessionTree, store SessionStore) *SessionSlashH
 	return &SessionSlashHandler{tree: tree, store: store}
 }
 
+// NewDurableReadOnlySessionSlashHandler exposes canonical tree inspection while
+// rejecting branch and resume mutations before they can alter local state.
+func NewDurableReadOnlySessionSlashHandler(tree SessionTree) *SessionSlashHandler {
+	return &SessionSlashHandler{tree: tree, readOnlyDurable: true}
+}
+
 // Handle executes the given slash command. It returns the textual output of the
 // command and any error.
 func (h *SessionSlashHandler) Handle(ctx context.Context, cmd SlashCommand) (string, error) {
 	slog.Info("session.slash.handle", "command", cmd.Name, "args", cmd.Args)
+	if h != nil && h.readOnlyDurable {
+		switch cmd.Name {
+		case "resume", "fork", "clone", "switch":
+			return "", &UnsupportedDurableSessionCommandError{Command: cmd.Name}
+		}
+	}
 
 	switch cmd.Name {
 	case "tree":

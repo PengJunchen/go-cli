@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"sync"
 
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/core"
@@ -40,6 +41,43 @@ type promptCmd struct {
 	out io.Writer
 }
 
+type cancelOnWriteError struct {
+	mu     sync.Mutex
+	writer io.Writer
+	cancel context.CancelFunc
+	err    error
+}
+
+func (writer *cancelOnWriteError) Write(data []byte) (int, error) {
+	writer.mu.Lock()
+	if writer.err != nil {
+		err := writer.err
+		writer.mu.Unlock()
+		return 0, err
+	}
+	n, err := writer.writer.Write(data)
+	if err == nil && n < len(data) {
+		err = io.ErrShortWrite
+	}
+	if err != nil {
+		writer.err = err
+		cancel := writer.cancel
+		writer.mu.Unlock()
+		if cancel != nil {
+			cancel()
+		}
+		return n, err
+	}
+	writer.mu.Unlock()
+	return n, nil
+}
+
+func (writer *cancelOnWriteError) Err() error {
+	writer.mu.Lock()
+	defer writer.mu.Unlock()
+	return writer.err
+}
+
 // newPromptCmd creates a prompt command writing to out.
 func newPromptCmd(out io.Writer) *promptCmd {
 	return &promptCmd{out: out}
@@ -52,14 +90,15 @@ func (c *promptCmd) Name() string { return "prompt" }
 func (c *promptCmd) Synopsis() string { return "Run an agent with a natural-language prompt" }
 
 type parsedPromptArgs struct {
-	modelFlag    string
-	providerFlag string
-	verboseFlag  bool
-	outputMode   OutputMode
-	approveMode  ApproveMode
-	forkFlag     string
-	noSandbox    bool
-	remaining    []string
+	modelFlag     string
+	providerFlag  string
+	verboseFlag   bool
+	outputMode    OutputMode
+	approveMode   ApproveMode
+	forkFlag      string
+	resumeSession string
+	noSandbox     bool
+	remaining     []string
 }
 
 func parsePromptArgs(args []string, out io.Writer) (parsedPromptArgs, error) {
@@ -73,6 +112,7 @@ func parsePromptArgs(args []string, out io.Writer) (parsedPromptArgs, error) {
 	fs.Var(&parsed.outputMode, "output", "output format: json|stream|text (default text)")
 	fs.Var(&parsed.approveMode, "approve", "approval mode: auto|deny|ask (default ask)")
 	fs.StringVar(&parsed.forkFlag, "fork", "", "fork from an existing session id")
+	fs.StringVar(&parsed.resumeSession, "resume-session", "", "resume an exact durable physical session ID")
 	fs.BoolVar(&parsed.noSandbox, "no-sandbox", false, "disable bash sandbox enforcement")
 	if err := fs.Parse(args); err != nil {
 		return parsed, newUsageError("prompt: %v", err)
@@ -106,12 +146,19 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) (runErr 
 	outputMode := parsed.outputMode
 	approveMode := parsed.approveMode
 	forkFlag := parsed.forkFlag
+	resumeSessionID := parsed.resumeSession
 	noSandbox := parsed.noSandbox
 	prompt := parsed.remaining[0]
 
 	var rc *config.Config
 	if v, ok := cfg.(*config.Config); ok {
 		rc = v
+	}
+	if rc != nil && rc.Session.StorePath != "" && forkFlag != "" {
+		return &UnsupportedDurableCLIError{Feature: "durable prompt fork"}
+	}
+	if resumeSessionID != "" && (rc == nil || rc.Session.StorePath == "") {
+		return newUsageError("prompt: --resume-session requires session.store_path")
 	}
 
 	modelName := resolveModelName(modelFlag, rc)
@@ -153,7 +200,14 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) (runErr 
 	// interactive: model wrapping, tools, approval gates, retry/cost tracking,
 	// output guards, subagent, compaction).
 	assembleOpts := []AssembleOption{WithApproveMode(approveMode)}
-	if forkFlag != "" {
+	var durableSession *durableCLISession
+	if rc != nil && rc.Session.StorePath != "" {
+		durableSession, err = newDurableCLISession(dispatchCtx, rc.Session.StorePath, "prompt", resumeSessionID, "")
+		if err != nil {
+			return newExecutionError("prompt: prepare durable session", err)
+		}
+		assembleOpts = append(assembleOpts, withDurableCLISession(durableSession))
+	} else if forkFlag != "" {
 		// --fork requires a session store to build the tree from.
 		assembleOpts = append(assembleOpts, WithSessionPersistence(true))
 	}
@@ -171,6 +225,15 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) (runErr 
 		runErr = errors.Join(runErr, closeAssemblyForCommand(context.Background(), assembly, "prompt"))
 	}()
 
+	if assembly.PhysicalSessionID != "" {
+		slog.Info("cli_prompt_durable_session", "physical_session_id", assembly.PhysicalSessionID)
+		if outputMode == OutputText {
+			if _, err := fmt.Fprintf(c.out, "Session ID: %s\n", assembly.PhysicalSessionID); err != nil {
+				return newExecutionError("prompt: write session ID", err)
+			}
+		}
+	}
+
 	// Fork from an existing session: build a SessionTree from the store,
 	// zero-copy branch at the requested entry, rebuild context, and inject
 	// the resulting history into the agent.
@@ -182,28 +245,47 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) (runErr 
 		}
 	}
 
-	stream, err := assembly.Harness.Submit(dispatchCtx, prompt)
+	runCtx, cancelRun := context.WithCancel(dispatchCtx)
+	defer cancelRun()
+	if assembly.durableSession != nil {
+		runCtx, _, err = assembly.durableSession.bindRun(runCtx)
+		if err != nil {
+			dispatchSpan.SetStatus(tracing.SpanStatusError, err.Error())
+			dispatchSpan.End()
+			return newExecutionError("prompt: bind durable run", err)
+		}
+	}
+	stream, err := assembly.Harness.Submit(runCtx, prompt)
 	if err != nil {
 		dispatchSpan.SetStatus(tracing.SpanStatusError, err.Error())
 		dispatchSpan.End()
 		return newExecutionError("prompt: submit", err)
 	}
 
-	out := c.out
-	if err := c.consumeEvents(out, stream.Events(), outputMode); err != nil {
-		dispatchSpan.SetStatus(tracing.SpanStatusError, err.Error())
-		dispatchSpan.End()
-		return newExecutionError("prompt: write output", err)
-	}
-
+	out := &cancelOnWriteError{writer: c.out, cancel: cancelRun}
+	outputErr := c.consumeEvents(out, stream.Events(), outputMode)
 	result, err := stream.Result()
-	dispatchSpan.SetStatus(tracing.SpanStatusOK, "")
+	if outputErr == nil {
+		outputErr = out.Err()
+	}
+	var runErrors []error
+	if outputErr != nil {
+		runErrors = append(runErrors, newExecutionError("prompt: write output", outputErr))
+	}
+	if err != nil {
+		runErrors = append(runErrors, newExecutionError("prompt", err))
+	}
+	if len(runErrors) == 0 {
+		dispatchSpan.SetStatus(tracing.SpanStatusOK, "")
+	} else {
+		dispatchSpan.SetStatus(tracing.SpanStatusError, errors.Join(runErrors...).Error())
+	}
 	dispatchSpan.End()
 
 	c.emitClosedown(spanCtx, c.Name())
 
-	if err != nil {
-		return newExecutionError("prompt", err)
+	if len(runErrors) > 0 {
+		return errors.Join(runErrors...)
 	}
 	if result.Content != "" {
 		slog.Info("cli_prompt_complete",
@@ -231,68 +313,73 @@ func (c *promptCmd) consumeEvents(out io.Writer, events <-chan core.AgentEvent, 
 // (NDJSON), suitable for programmatic consumption in CI/CD pipelines.
 func (c *promptCmd) consumeEventsJSON(out io.Writer, events <-chan core.AgentEvent) error {
 	enc := json.NewEncoder(out)
+	var outputErr error
 	for ev := range events {
 		if err := enc.Encode(ev); err != nil {
-			return err
+			if outputErr == nil {
+				outputErr = err
+			}
 		}
 	}
-	return nil
+	return outputErr
 }
 
 // consumeEventsStream outputs raw content tokens without formatting, suitable
 // for piping to other tools. Only incremental message tokens are emitted to
 // avoid duplicating content from non-incremental complete messages.
 func (c *promptCmd) consumeEventsStream(out io.Writer, events <-chan core.AgentEvent) error {
+	var outputErr error
 	for ev := range events {
 		if ev.Content == "" || ev.Kind == "done" {
 			continue
 		}
 		if !ev.Incremental && ev.Kind == "message" {
 			// Non-incremental complete message: output once with newline.
-			if _, err := fmt.Fprintln(out, ev.Content); err != nil { //nolint:errcheck
-				return err
+			if _, err := fmt.Fprintln(out, ev.Content); err != nil && outputErr == nil { //nolint:errcheck
+				outputErr = err
 			}
 			continue
 		}
-		if _, err := fmt.Fprint(out, ev.Content); err != nil { //nolint:errcheck
-			return err
+		if _, err := fmt.Fprint(out, ev.Content); err != nil && outputErr == nil { //nolint:errcheck
+			outputErr = err
 		}
 	}
-	return nil
+	return outputErr
 }
 
 // consumeEventsText outputs human-readable text. Streams incremental tokens
 // and prints complete messages with newlines.
 func (c *promptCmd) consumeEventsText(out io.Writer, events <-chan core.AgentEvent) error {
 	streaming := false
+	var outputErr error
 	for ev := range events {
 		if ev.Content == "" || ev.Kind == "done" {
 			continue
 		}
 		if ev.Incremental {
 			streaming = true
-			if _, err := fmt.Fprint(out, ev.Content); err != nil { //nolint:errcheck
-				return err
+			if _, err := fmt.Fprint(out, ev.Content); err != nil && outputErr == nil { //nolint:errcheck
+				outputErr = err
 			}
 			continue
 		}
 		if streaming {
-			if _, err := fmt.Fprintln(out); err != nil { //nolint:errcheck
-				return err
+			if _, err := fmt.Fprintln(out); err != nil && outputErr == nil { //nolint:errcheck
+				outputErr = err
 			}
 		} else {
-			if _, err := fmt.Fprintf(out, "%s\n", ev.Content); err != nil { //nolint:errcheck
-				return err
+			if _, err := fmt.Fprintf(out, "%s\n", ev.Content); err != nil && outputErr == nil { //nolint:errcheck
+				outputErr = err
 			}
 		}
 		streaming = false
 	}
 	if streaming {
-		if _, err := fmt.Fprintln(out); err != nil { //nolint:errcheck
-			return err
+		if _, err := fmt.Fprintln(out); err != nil && outputErr == nil { //nolint:errcheck
+			outputErr = err
 		}
 	}
-	return nil
+	return outputErr
 }
 
 // emitClosedown records the closedown span emitted once the harness has

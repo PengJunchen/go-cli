@@ -147,6 +147,9 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	if rc == nil {
 		return newExecutionError("serve: runtime unavailable", ErrServeRuntimeUnavailable)
 	}
+	if rc.Session.StorePath != "" {
+		return &UnsupportedDurableCLIError{Feature: "durable ACP sessions"}
+	}
 
 	modelName := resolveModelName(modelFlag, rc)
 	providerName := resolveProviderName(providerFlag, rc)
