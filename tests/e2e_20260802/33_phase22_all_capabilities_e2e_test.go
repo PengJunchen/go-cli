@@ -53,6 +53,9 @@ func phase33TestConfig() *config.Config {
 // uses a fresh context.
 func phase33Assemble(t *testing.T, cfg *config.Config) *cli.AgentAssembly {
 	t.Helper()
+	if cfg.Git.WorkDir == "" {
+		cfg.Git.WorkDir = t.TempDir()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
 	assembly, err := cli.AssembleAgent(ctx, cfg, "openai", "test-model", io.Discard, cli.WithApproveMode(cli.ApproveAuto))
@@ -63,6 +66,9 @@ func phase33Assemble(t *testing.T, cfg *config.Config) *cli.AgentAssembly {
 
 func phase33AssembleWithApproval(t *testing.T, cfg *config.Config, approvalCh chan tui.ApprovalRequest) *cli.AgentAssembly {
 	t.Helper()
+	if cfg.Git.WorkDir == "" {
+		cfg.Git.WorkDir = t.TempDir()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
 	assembly, err := cli.AssembleAgent(ctx, cfg, "openai", "test-model", io.Discard, cli.WithApprovalChannel(approvalCh))
@@ -217,7 +223,9 @@ func (d phase33PlanSlashDeps) PlanCtrl() core.PlanModeController { return d.plan
 // unavailable to model calls and remain available through the user /plan
 // slash handler.
 func TestET_Phase22_AllCapabilities_AC1_ToolRegistryCompleteness(t *testing.T) {
-	assembly := phase33Assemble(t, phase33TestConfig())
+	cfg := phase33TestConfig()
+	cfg.WebSearch.Provider = "fetch"
+	assembly := phase33Assemble(t, cfg)
 
 	names := phase33ToolNames(t, assembly.ToolRegistry)
 

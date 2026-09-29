@@ -71,6 +71,9 @@ func phase19wUseSearchTransport(t *testing.T, transport http.RoundTripper) {
 // uses a fresh context.
 func phase19wAssemble(t *testing.T, cfg *config.Config) *cli.AgentAssembly {
 	t.Helper()
+	if cfg.Git.WorkDir == "" {
+		cfg.Git.WorkDir = t.TempDir()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
 	assembly, err := cli.AssembleAgent(ctx, cfg, "openai", "test-model", io.Discard, cli.WithApproveMode(cli.ApproveAuto))
@@ -97,7 +100,10 @@ func phase19wFindTool(t *testing.T, tr tools.ToolRegistry, name string) tools.To
 func phase19wExecuteWebSearch(t *testing.T, cfg *config.Config) (*tools.ToolResult, error) {
 	t.Helper()
 	assembly := phase19wAssemble(t, cfg)
-	tool := phase19wFindTool(t, assembly.ToolRegistry, "web_search")
+	tool, err := assembly.ToolRegistry.Get(context.Background(), "web_search")
+	if err != nil {
+		return nil, err
+	}
 	return tool.Execute(context.Background(), tools.ToolCall{
 		ID:   "phase19-web-search",
 		Name: "web_search",
@@ -250,17 +256,20 @@ func TestET_Phase19_AC3_PermissionModeResolverWired(t *testing.T) {
 // =============================================================================
 
 // TestET_Phase19_AC4_WebSearchProviderConfigDriven verifies that the
-// WebSearchProvider (D2) is selected from config.WebSearch: no real provider
-// stays unavailable, "fetch" uses FetchSearchProvider, and "brave" preserves
-// its provider identity while a missing key fails at request time.
+// WebSearchProvider (D2) is selected from config.WebSearch: unconfigured or
+// incomplete providers stay hidden, while configured "fetch" and "brave"
+// providers are exposed and use their selected implementation.
 func TestET_Phase19_AC4_WebSearchProviderConfigDriven(t *testing.T) {
-	// Default (no config) stays unavailable rather than manufacturing results.
+	// Default (no config) keeps the unavailable provider out of the callable
+	// registry rather than manufacturing results.
 	t.Run("default_unavailable", func(t *testing.T) {
 		transport := &phase19wSearchTransport{}
 		phase19wUseSearchTransport(t, transport)
-		result, err := phase19wExecuteWebSearch(t, phase19wTestConfig())
+		cfg := phase19wTestConfig()
+		require.Empty(t, cfg.WebSearch.Provider)
+		result, err := phase19wExecuteWebSearch(t, cfg)
 		require.Nil(t, result)
-		require.ErrorIs(t, err, tools.ErrWebSearchProviderUnavailable)
+		require.ErrorIs(t, err, tools.ErrToolNotFound)
 		assert.Empty(t, transport.requests)
 	})
 
@@ -293,16 +302,16 @@ func TestET_Phase19_AC4_WebSearchProviderConfigDriven(t *testing.T) {
 		assert.Equal(t, "test-key", transport.requests[0].Header.Get("X-Subscription-Token"))
 	})
 
-	// Brave without API key keeps its configured identity and fails closed.
+	// Brave without an API key is not exposed as a callable provider.
 	t.Run("brave_no_key_unavailable", func(t *testing.T) {
 		cfg := phase19wTestConfig()
 		cfg.WebSearch.Provider = "brave"
+		require.Empty(t, cfg.WebSearch.APIKey)
 		transport := &phase19wSearchTransport{}
 		phase19wUseSearchTransport(t, transport)
 		result, err := phase19wExecuteWebSearch(t, cfg)
 		require.Nil(t, result)
-		require.ErrorIs(t, err, tools.ErrWebSearchProviderUnavailable)
-		assert.Contains(t, err.Error(), "Brave api key is required")
+		require.ErrorIs(t, err, tools.ErrToolNotFound)
 		assert.Empty(t, transport.requests, "a missing Brave key must not dispatch HTTP")
 	})
 }
