@@ -114,7 +114,7 @@ func TestE2ERegistryCannedRenderer(t *testing.T) {
 func TestE2ESendMessagesConsumed(t *testing.T) {
 	events := make(chan AgentEvent, 4)
 	app := NewBubbleteaApp(events)
-	app.Send("pre")
+	require.NoError(t, app.Send("pre"))
 	require.Zero(t, app.MessagesProcessed(), "messages not consumed until Run")
 
 	runErr := make(chan error, 1)

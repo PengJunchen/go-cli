@@ -44,7 +44,7 @@ func TestAppSendDeliversMsg(t *testing.T) {
 	runErr := make(chan error, 1)
 	go func() { runErr <- app.Run(ctx) }() //nolint:errcheck
 
-	app.Send("probe")
+	require.NoError(t, app.Send("probe"))
 	require.Eventually(t, func() bool { return app.MessagesProcessed() == 1 },
 		time.Second, 5*time.Millisecond, "Send message not consumed")
 
