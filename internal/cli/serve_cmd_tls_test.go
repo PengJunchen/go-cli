@@ -30,6 +30,7 @@ func TestServeCmdNonLoopbackNoAuthRejected(t *testing.T) {
 			go func() {
 				done <- c.Run(ctx, NewDefaultConfig(false), []string{
 					"--no-auth",
+					"--approve", "deny",
 					"--addr", addr,
 				})
 			}()
@@ -86,8 +87,9 @@ func TestServeCmdNonLoopbackWarning(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		// Auth is enabled (default); no TLS. Should print warning.
-		done <- c.Run(ctx, NewDefaultConfig(false), []string{
+		done <- c.Run(ctx, newAssembleTestConfig(), []string{
 			"--addr", "0.0.0.0:0",
+			"--approve", "deny",
 			"--token-file", tokenPath,
 		})
 	}()
@@ -141,8 +143,9 @@ func TestServeCmdNonLoopbackWithTLSNoWarning(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Run(ctx, NewDefaultConfig(false), []string{
+		done <- c.Run(ctx, newAssembleTestConfig(), []string{
 			"--addr", "0.0.0.0:0",
+			"--approve", "deny",
 			"--token-file", tokenPath,
 			"--tls-cert", certPath,
 			"--tls-key", keyPath,
@@ -190,6 +193,7 @@ func TestServeCmdTLSMissingKey(t *testing.T) {
 	// Only cert, no key.
 	err := c.Run(context.Background(), NewDefaultConfig(false), []string{
 		"--addr", "127.0.0.1:0",
+		"--approve", "deny",
 		"--tls-cert", "cert.pem",
 	})
 	if err == nil {
@@ -206,6 +210,7 @@ func TestServeCmdTLSMissingKey(t *testing.T) {
 	// Only key, no cert.
 	err = c.Run(context.Background(), NewDefaultConfig(false), []string{
 		"--addr", "127.0.0.1:0",
+		"--approve", "deny",
 		"--tls-key", "key.pem",
 	})
 	if err == nil {
@@ -222,6 +227,7 @@ func TestServeCmdTLSFileNotReadable(t *testing.T) {
 	missingPath := filepath.Join(t.TempDir(), "nonexistent.pem")
 	err := c.Run(context.Background(), NewDefaultConfig(false), []string{
 		"--addr", "127.0.0.1:0",
+		"--approve", "deny",
 		"--tls-cert", missingPath,
 		"--tls-key", missingPath,
 	})
@@ -250,9 +256,10 @@ func TestServeCmdLoopbackNoWarning(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Run(ctx, NewDefaultConfig(false), []string{
+		done <- c.Run(ctx, newAssembleTestConfig(), []string{
 			"--no-auth",
 			"--addr", "127.0.0.1:0",
+			"--approve", "deny",
 		})
 	}()
 
