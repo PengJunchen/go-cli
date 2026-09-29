@@ -146,6 +146,59 @@ func TestMCPGenerationCandidateDoesNotRetainMutableAdapterReceiver(t *testing.T)
 	assert.Equal(t, "original", client.last, "published execution must retain the captured remote tool name")
 }
 
+func TestMCPGenerationCandidatePreservesInputSchemaPresence(t *testing.T) {
+	generation, err := NewMCPClientGeneration(&fakeClient{name: "srv"})
+	require.NoError(t, err)
+
+	emptySchema := MCPTool{Name: "zero-args", ArgsSchema: map[string]any{}}
+	adapter := generation.NewToolAdapter(emptySchema)
+	parameters, ok := adapter.Parameters().(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "object", parameters["type"])
+	assert.Equal(t, map[string]any{}, parameters["properties"])
+	assert.Equal(t, false, parameters["additionalProperties"])
+	candidate, err := adapter.MCPGenerationCandidate()
+	require.NoError(t, err, "a present empty object schema represents a zero-argument tool")
+
+	missing := generation.NewToolAdapter(MCPTool{Name: "missing-schema"})
+	_, err = missing.MCPGenerationCandidate()
+	assert.ErrorIs(t, err, ErrMCPToolInputSchemaMissing)
+
+	for name, schema := range map[string]any{"null": nil, "string": "not-an-object", "array": []any{}} {
+		tool := mcpToolFromProtocolObject(map[string]any{"name": name, "inputSchema": schema})
+		_, err := generation.NewToolAdapter(tool).MCPGenerationCandidate()
+		assert.ErrorIs(t, err, ErrMCPToolInputSchemaInvalid, name)
+	}
+
+	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry)
+	registry := tools.NewDeferredToolRegistryAdapter(base)
+	update, err := registry.BeginMCPGenerationUpdate(context.Background(), "schema-presence", 1, []tools.MCPToolCandidate{candidate})
+	require.NoError(t, err)
+	require.NoError(t, update.Publish())
+	loaded, err := registry.Get(context.Background(), "mcp__srv__zero-args")
+	require.NoError(t, err)
+	loadedSchema, ok := loaded.(tools.Parameterized).Parameters().(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "object", loadedSchema["type"])
+	assert.Equal(t, false, loadedSchema["additionalProperties"])
+}
+
+func TestMCPProtocolToolDecoderDistinguishesMissingNullAndEmptySchema(t *testing.T) {
+	missing := mcpToolFromProtocolObject(map[string]any{"name": "missing"})
+	assert.False(t, missing.inputSchemaPresent)
+	assert.False(t, missing.inputSchemaInvalid)
+
+	invalid := mcpToolFromProtocolObject(map[string]any{"name": "null", "inputSchema": nil})
+	assert.True(t, invalid.inputSchemaPresent)
+	assert.True(t, invalid.inputSchemaInvalid)
+
+	empty := mcpToolFromProtocolObject(map[string]any{"name": "empty", "inputSchema": map[string]any{}})
+	assert.True(t, empty.inputSchemaPresent)
+	assert.False(t, empty.inputSchemaInvalid)
+	assert.NotNil(t, empty.ArgsSchema)
+	assert.Empty(t, empty.ArgsSchema)
+}
+
 func TestMCPClientGenerationRetirementJoinsPreparedLeases(t *testing.T) {
 	generation, err := NewMCPClientGeneration(&fakeClient{name: "srv"})
 	require.NoError(t, err)

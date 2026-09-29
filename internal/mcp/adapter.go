@@ -888,12 +888,7 @@ func (c *adapterCore) ListTools(ctx context.Context) ([]MCPTool, error) {
 		if !ok {
 			continue
 		}
-		t := MCPTool{
-			Name:        stringOf(obj["name"]),
-			Description: stringOf(obj["description"]),
-			ArgsSchema:  mapOf(obj["inputSchema"]),
-		}
-		tools = append(tools, t)
+		tools = append(tools, mcpToolFromProtocolObject(obj))
 	}
 	return tools, nil
 }
@@ -1029,12 +1024,4 @@ func boolVal(v any) bool {
 		return b
 	}
 	return false
-}
-
-// mapOf returns v as a map[string]any, or nil.
-func mapOf(v any) map[string]any {
-	if m, ok := v.(map[string]any); ok {
-		return m
-	}
-	return nil
 }

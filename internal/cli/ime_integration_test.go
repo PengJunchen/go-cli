@@ -197,7 +197,7 @@ func TestIntegration_MCPAutoDiscovery_ArrayFormat(t *testing.T) {
 	// Start a mock MCP HTTP server.
 	srv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
 		writeMockMCPResult(w, r, map[string]any{
-			"tools": []map[string]any{{"name": "search", "description": "Search the web"}},
+			"tools": []map[string]any{{"name": "search", "description": "Search the web", "inputSchema": mockMCPInputSchema()}},
 		})
 	}))
 	defer srv.Close()
@@ -221,7 +221,7 @@ func TestIntegration_MCPAutoDiscovery_ArrayFormat(t *testing.T) {
 	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 
 	// Pass a config with no MCP servers - auto-discovery should find mcp.json.
-	rc := &config.Config{}
+	rc := trustedMCPTestConfig(t)
 	require.NoError(t, registerMCPTools(ctx, rc, tr))
 
 	// The tool from the auto-discovered MCP server should be registered.
@@ -241,7 +241,7 @@ func TestIntegration_MCPAutoDiscovery_MapFormat(t *testing.T) {
 
 	srv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
 		writeMockMCPResult(w, r, map[string]any{
-			"tools": []map[string]any{{"name": "echo", "description": "Echo tool"}},
+			"tools": []map[string]any{{"name": "echo", "description": "Echo tool", "inputSchema": mockMCPInputSchema()}},
 		})
 	}))
 	defer srv.Close()
@@ -265,7 +265,7 @@ func TestIntegration_MCPAutoDiscovery_MapFormat(t *testing.T) {
 	t.Chdir(tempDir)
 
 	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
-	rc := &config.Config{}
+	rc := trustedMCPTestConfig(t)
 	require.NoError(t, registerMCPTools(ctx, rc, tr))
 
 	tool, err := tr.Get(ctx, mcp.NormalizeToolName("echo-server", "echo"))
@@ -282,14 +282,14 @@ func TestIntegration_MCPConfigOverridesAutoDiscovery(t *testing.T) {
 	// Two mock servers: one for config, one for auto-discovery.
 	configSrv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
 		writeMockMCPResult(w, r, map[string]any{
-			"tools": []map[string]any{{"name": "config-tool", "description": "From config"}},
+			"tools": []map[string]any{{"name": "config-tool", "description": "From config", "inputSchema": mockMCPInputSchema()}},
 		})
 	}))
 	defer configSrv.Close()
 
 	autoSrv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
 		writeMockMCPResult(w, r, map[string]any{
-			"tools": []map[string]any{{"name": "auto-tool", "description": "From auto-discovery"}},
+			"tools": []map[string]any{{"name": "auto-tool", "description": "From auto-discovery", "inputSchema": mockMCPInputSchema()}},
 		})
 	}))
 	defer autoSrv.Close()
@@ -312,13 +312,7 @@ func TestIntegration_MCPConfigOverridesAutoDiscovery(t *testing.T) {
 	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 
 	// Config has its own MCP server - should take priority over mcp.json.
-	rc := &config.Config{
-		MCP: config.MCPConfig{
-			Servers: []config.MCPServerConfig{
-				{Name: "config-server", URL: configSrv.URL},
-			},
-		},
-	}
+	rc := trustedGlobalMCPTestConfig(t, []config.MCPServerConfig{{Name: "config-server", URL: configSrv.URL}})
 	require.NoError(t, registerMCPTools(ctx, rc, tr))
 
 	// Config server's tool should be registered.

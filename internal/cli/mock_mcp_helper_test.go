@@ -6,10 +6,15 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/require"
+
 	"github.com/pengjunchen/go-cli/internal/approval"
+	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/mcp"
 )
 
@@ -154,4 +159,60 @@ func setupTestTrust(t *testing.T) {
 	orig := approval.GetTrustManager()
 	t.Cleanup(func() { approval.RegisterTrustManager(orig) })
 	approval.RegisterTrustManager(alwaysTrustManager{})
+}
+
+type canonicalMCPTestTrustManager struct {
+	*approval.DefaultTrustManager
+}
+
+func (m canonicalMCPTestTrustManager) IsTrusted(ctx context.Context, path string) bool {
+	return m.DefaultTrustManager.IsTrusted(ctx, canonicalMCPProjectRoot(path))
+}
+
+func trustedMCPTestConfig(t *testing.T) *config.Config {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	baseManager := approval.NewDefaultTrustManager(approval.NewInMemoryTrustStore()).(*approval.DefaultTrustManager)
+	manager := canonicalMCPTestTrustManager{DefaultTrustManager: baseManager}
+	previous := approval.GetTrustManager()
+	approval.RegisterTrustManager(manager)
+	t.Cleanup(func() { approval.RegisterTrustManager(previous) })
+
+	uncurated, err := config.LoadTrustedWithManager(context.Background(), manager)
+	require.NoError(t, err)
+	snapshot := uncurated.CapturedProjectSourcesForGrant()
+	if snapshot != nil {
+		require.NoError(t, manager.TrustProjectSourceSnapshot(context.Background(), snapshot))
+	}
+	trusted, err := config.LoadTrustedWithManager(context.Background(), manager)
+	require.NoError(t, err)
+	return trusted
+}
+
+func trustedGlobalMCPTestConfig(t *testing.T, servers []config.MCPServerConfig) *config.Config {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	globalDir := filepath.Join(home, ".go-cli")
+	require.NoError(t, os.MkdirAll(globalDir, 0o700))
+	data, err := json.Marshal(config.Config{MCP: config.MCPConfig{Servers: servers}})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(filepath.Join(globalDir, "config.json"), data, 0o600))
+	baseManager := approval.NewDefaultTrustManager(approval.NewInMemoryTrustStore()).(*approval.DefaultTrustManager)
+	manager := canonicalMCPTestTrustManager{DefaultTrustManager: baseManager}
+	previous := approval.GetTrustManager()
+	approval.RegisterTrustManager(manager)
+	t.Cleanup(func() { approval.RegisterTrustManager(previous) })
+	cfg, err := config.LoadTrustedWithManager(context.Background(), manager)
+	require.NoError(t, err)
+	return cfg
+}
+
+func mockMCPInputSchema() map[string]any {
+	return map[string]any{
+		"type":                 "object",
+		"properties":           map[string]any{},
+		"additionalProperties": false,
+	}
 }

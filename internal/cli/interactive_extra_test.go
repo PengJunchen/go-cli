@@ -134,18 +134,12 @@ func TestInteractiveCmd_RegisterMCPTools_EmptyServers(t *testing.T) {
 func TestInteractiveCmd_RegisterMCPTools_StdioServer(t *testing.T) {
 	ctx := t.Context()
 	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
-	rc := &config.Config{
-		MCP: config.MCPConfig{
-			Servers: []config.MCPServerConfig{
-				{
-					Name:    "stdio-server",
-					Command: "/nonexistent/command/xyz",
-					Args:    []string{"--flag"},
-					Env:     map[string]string{"KEY": "VALUE"},
-				},
-			},
-		},
-	}
+	rc := trustedGlobalMCPTestConfig(t, []config.MCPServerConfig{{
+		Name:    "stdio-server",
+		Command: "/nonexistent/command/xyz",
+		Args:    []string{"--flag"},
+		Env:     map[string]string{"KEY": "VALUE"},
+	}})
 
 	err := registerMCPTools(ctx, rc, tr)
 	require.NoError(t, err) // Connect failures are logged, not propagated.
@@ -174,7 +168,7 @@ func TestInteractiveCmd_RegisterMCPTools_StreamableHTTPServer(t *testing.T) {
 		switch request.Method {
 		case "tools/list":
 			writeMockMCPResult(w, r, map[string]any{
-				"tools": []map[string]any{{"name": "http-tool", "description": "A Streamable HTTP tool"}},
+				"tools": []map[string]any{{"name": "http-tool", "description": "A Streamable HTTP tool", "inputSchema": mockMCPInputSchema()}},
 			})
 		case "tools/call":
 			writeMockMCPResult(w, r, map[string]any{
@@ -187,13 +181,7 @@ func TestInteractiveCmd_RegisterMCPTools_StreamableHTTPServer(t *testing.T) {
 	defer srv.Close()
 
 	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
-	rc := &config.Config{
-		MCP: config.MCPConfig{
-			Servers: []config.MCPServerConfig{
-				{Name: "http-server", URL: srv.URL},
-			},
-		},
-	}
+	rc := trustedGlobalMCPTestConfig(t, []config.MCPServerConfig{{Name: "http-server", URL: srv.URL}})
 
 	err := registerMCPTools(ctx, rc, tr)
 	require.NoError(t, err)
@@ -235,13 +223,7 @@ func TestHTTPMCPAdapterRejectsLegacySSEBeforeNetwork(t *testing.T) {
 func TestInteractiveCmd_RegisterMCPTools_NoTransport(t *testing.T) {
 	ctx := t.Context()
 	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
-	rc := &config.Config{
-		MCP: config.MCPConfig{
-			Servers: []config.MCPServerConfig{
-				{Name: "no-transport-server"},
-			},
-		},
-	}
+	rc := trustedGlobalMCPTestConfig(t, []config.MCPServerConfig{{Name: "no-transport-server"}})
 
 	err := registerMCPTools(ctx, rc, tr)
 	require.NoError(t, err)

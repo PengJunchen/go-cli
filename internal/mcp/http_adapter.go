@@ -644,11 +644,7 @@ func (a *HTTPClientAdapter) ListTools(ctx context.Context) ([]MCPTool, error) {
 		if !ok {
 			continue
 		}
-		tools = append(tools, MCPTool{
-			Name:        stringOf(obj["name"]),
-			Description: stringOf(obj["description"]),
-			ArgsSchema:  mapOf(obj["inputSchema"]),
-		})
+		tools = append(tools, mcpToolFromProtocolObject(obj))
 	}
 	return tools, nil
 }

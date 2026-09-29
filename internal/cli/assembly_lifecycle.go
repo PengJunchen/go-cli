@@ -414,6 +414,9 @@ type assemblyMCPResources struct {
 	closing   bool
 	clients   []mcp.MCPClient
 	reloaders []mcp.HotReloader
+	sources   map[string]*assemblyMCPSourceState
+	staged    map[*assemblyMCPGeneration]struct{}
+	retired   map[*assemblyMCPGeneration]struct{}
 }
 
 func (r *assemblyMCPResources) addClient(client mcp.MCPClient) {
@@ -510,6 +513,11 @@ func (r *assemblyMCPResources) waitReloaders(ctx context.Context) error {
 }
 
 func (r *assemblyMCPResources) closeClients(ctx context.Context) error {
+	if err := r.closeMCPGenerations(ctx); err != nil {
+		if assemblyCompletionUnknown(err) {
+			return err
+		}
+	}
 	r.mu.Lock()
 	clients := append([]mcp.MCPClient(nil), r.clients...)
 	r.mu.Unlock()
