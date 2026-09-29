@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/charmbracelet/x/ansi"
+	"github.com/rivo/uniseg"
 )
 
 const (
@@ -141,7 +142,11 @@ func (s *StreamingMarkdownRenderer) AppendChunk(ctx context.Context, chunk strin
 // Finish performs the one full-document Markdown render and replaces the
 // provisional preview with its bounded rendered tail. The source argument is
 // borrowed for this call only; the renderer does not retain a full copy.
+// Repeated calls return the finished window without rendering the document again.
 func (s *StreamingMarkdownRenderer) Finish(ctx context.Context, canonicalSource string, opts RenderOpts) StreamRenderWindow {
+	if s.windowFinished {
+		return s.Window()
+	}
 	s.ensureChunkWidth(ctx, opts)
 	if s.lineIsFence {
 		s.inCodeBlock = !s.inCodeBlock
@@ -160,22 +165,45 @@ func (s *StreamingMarkdownRenderer) Finish(ctx context.Context, canonicalSource 
 // Window returns the current finite presentation window. It never claims to be
 // the entire message when HasHiddenPrefix is true.
 func (s *StreamingMarkdownRenderer) Window() StreamRenderWindow {
+	pending := s.graphemePending
+	pendingWrap := false
+	if pending != "" {
+		width := ansi.StringWidth(pending)
+		pendingWrap = width > 0 && s.windowColumn() > 0 && s.windowColumn()+width > s.windowWidth
+		pendingBytes := len(pending)
+		if pendingWrap {
+			pendingBytes++
+		}
+		for s.windowDataBytes+s.windowNewlines+pendingBytes > maxStreamingRenderBytes && len(s.windowLines) > 0 {
+			s.dropFirstWindowLine()
+		}
+		if s.windowDataBytes+s.windowNewlines+pendingBytes > maxStreamingRenderBytes {
+			// Keep the previous complete content and omit this complete grapheme;
+			// never cut its UTF-8 bytes to meet the output budget.
+			pending = ""
+			pendingWrap = false
+			s.windowHidden = true
+		}
+	}
 	var content strings.Builder
-	content.Grow(s.windowDataBytes + len(s.graphemePending) + s.windowNewlines)
+	content.Grow(s.windowDataBytes + len(pending) + s.windowNewlines + boolInt(pendingWrap))
 	for i, line := range s.windowLines {
 		if i > 0 {
 			content.WriteByte('\n')
 		}
 		content.WriteString(line)
 	}
-	if s.windowLineOpen || len(s.windowLineParts) > 0 || s.graphemePending != "" {
+	if s.windowLineOpen || len(s.windowLineParts) > 0 || pending != "" {
 		if len(s.windowLines) > 0 {
 			content.WriteByte('\n')
 		}
 		for _, part := range s.windowLineParts {
 			content.WriteString(part)
 		}
-		content.WriteString(s.graphemePending)
+		if pendingWrap {
+			content.WriteByte('\n')
+		}
+		content.WriteString(pending)
 	}
 	return StreamRenderWindow{
 		Content:         content.String(),
@@ -555,6 +583,7 @@ func (s *StreamingMarkdownRenderer) setSourceTail(text string) {
 		start++
 	}
 	if start > 0 {
+		start = nextGraphemeBoundary(text, start)
 		sourceTail := text[start:]
 		if newline := strings.IndexByte(sourceTail, '\n'); newline >= 0 && newline+1 < len(sourceTail) {
 			start += newline + 1
@@ -575,6 +604,27 @@ func (s *StreamingMarkdownRenderer) setSourceTail(text string) {
 	}
 }
 
+func nextGraphemeBoundary(text string, offset int) int {
+	state := -1
+	for position := 0; position < len(text); {
+		cluster, _, _, nextState := uniseg.FirstGraphemeClusterInString(text[position:], state)
+		size := len(cluster)
+		if size <= 0 {
+			_, size = utf8.DecodeRuneInString(text[position:])
+		}
+		if size <= 0 {
+			size = 1
+		}
+		next := position + size
+		if next >= offset {
+			return next
+		}
+		state = nextState
+		position = next
+	}
+	return len(text)
+}
+
 func (s *StreamingMarkdownRenderer) appendWindowPart(part string) {
 	if part == "" {
 		return
@@ -583,6 +633,7 @@ func (s *StreamingMarkdownRenderer) appendWindowPart(part string) {
 		for s.windowLineBytes+len(part) > maxStreamingRenderBytes && len(s.windowLineParts) > 0 {
 			s.windowLineBytes -= len(s.windowLineParts[0])
 			s.windowDataBytes -= len(s.windowLineParts[0])
+			s.windowLineParts[0] = ""
 			s.windowLineParts = s.windowLineParts[1:]
 			s.windowHidden = true
 		}
@@ -591,7 +642,7 @@ func (s *StreamingMarkdownRenderer) appendWindowPart(part string) {
 			return
 		}
 	}
-	s.windowLineParts = append(s.windowLineParts, part)
+	s.windowLineParts = append(s.windowLineParts, strings.Clone(part))
 	s.windowLineBytes += len(part)
 	s.windowDataBytes += len(part)
 	s.windowLineOpen = true
@@ -619,6 +670,7 @@ func (s *StreamingMarkdownRenderer) enforceWindowBounds() {
 	for s.windowLineBytes+s.windowNewlines > maxStreamingRenderBytes && len(s.windowLineParts) > 0 {
 		s.windowDataBytes -= len(s.windowLineParts[0])
 		s.windowLineBytes -= len(s.windowLineParts[0])
+		s.windowLineParts[0] = ""
 		s.windowLineParts = s.windowLineParts[1:]
 		s.windowHidden = true
 	}
@@ -637,6 +689,7 @@ func (s *StreamingMarkdownRenderer) dropFirstWindowLine() {
 		return
 	}
 	s.windowDataBytes -= len(s.windowLines[0])
+	s.windowLines[0] = ""
 	s.windowLines = s.windowLines[1:]
 	if s.windowNewlines > 0 {
 		s.windowNewlines--
@@ -666,32 +719,46 @@ func (s *StreamingMarkdownRenderer) replaceWindowWithText(text string, keepLastO
 	if keepLastOpen {
 		last := len(parts) - 1
 		for i, line := range parts[:last] {
-			s.windowLines = append(s.windowLines, line)
-			s.windowDataBytes += len(line)
-			if i > 0 || len(s.windowLines) > 1 {
-				s.windowNewlines++
-			}
+			s.appendWindowLine(line, i > 0)
 		}
 		if len(parts) > 1 {
 			s.windowNewlines++
 		}
 		s.windowLineOpen = true
-		s.windowLineParts = append(s.windowLineParts, parts[last])
-		s.windowLineBytes = len(parts[last])
-		s.windowDataBytes += len(parts[last])
-		s.column = cellWidth(parts[last])
+		if len(parts[last]) <= maxStreamingRenderBytes {
+			if parts[last] != "" {
+				s.windowLineParts = append(s.windowLineParts, strings.Clone(parts[last]))
+				s.windowLineBytes = len(parts[last])
+				s.windowDataBytes += len(parts[last])
+			}
+			s.column = cellWidth(parts[last])
+		} else {
+			s.windowHidden = true
+		}
 	} else {
 		for i, line := range parts {
 			if i == len(parts)-1 && line == "" {
 				break
 			}
-			s.windowLines = append(s.windowLines, line)
-			s.windowDataBytes += len(line)
-			if i > 0 {
-				s.windowNewlines++
-			}
+			s.appendWindowLine(line, i > 0)
 		}
 	}
+	s.enforceWindowBounds()
+}
+
+func (s *StreamingMarkdownRenderer) appendWindowLine(line string, separator bool) {
+	if separator {
+		s.windowNewlines++
+	}
+	if len(line) > maxStreamingRenderBytes {
+		for len(s.windowLines) > 0 {
+			s.dropFirstWindowLine()
+		}
+		s.windowHidden = true
+		return
+	}
+	s.windowLines = append(s.windowLines, strings.Clone(line))
+	s.windowDataBytes += len(line)
 	s.enforceWindowBounds()
 }
 
