@@ -91,6 +91,8 @@ type CostTracker struct {
 	tiers          map[string]CostTier
 	total          float64
 	calls          int
+	legacyTotal    float64
+	legacyCalls    int
 	attemptRecords map[string]AttemptCostRecord
 	attemptSummary AttemptCostSummary
 	priceSource    AttemptCostPriceSource
@@ -154,6 +156,8 @@ func (t *CostTracker) Record(model string, inputTokens, outputTokens int) (float
 	t.mu.Lock()
 	t.total += cost
 	t.calls++
+	t.legacyTotal += cost
+	t.legacyCalls++
 	calls := t.calls
 	total := t.total
 	budget := t.budgetLimit

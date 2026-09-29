@@ -162,6 +162,55 @@ func TestEmitTokenUsageEventCarriesActualAttemptProvenance(t *testing.T) {
 	}
 }
 
+func TestEmitTokenUsageEventCombinesLegacyAndAttemptCosts(t *testing.T) {
+	tracker := production.NewCostTracker(nil)
+	_, err := tracker.Record("gpt-4o", 1000, 500)
+	require.NoError(t, err)
+	_, err = tracker.RecordAttempt(llm.ProviderAttemptResult{
+		OperationID: "op-mixed-cost",
+		AttemptID:   "attempt-mixed-cost",
+		Identity: llm.AttemptIdentity{
+			ProviderID: "actual-provider",
+			ModelID:    "gpt-4o",
+			ProtocolID: llm.ProtocolOpenAICompatible,
+			OriginKind: llm.OriginResolverDefaultEndpoint,
+			Candidate:  "candidate-mixed-cost",
+		},
+		Outcome: llm.AttemptSuccess,
+		Usage: llm.UsageEvidence{
+			State:  llm.UsageKnown,
+			Usage:  &llm.Usage{InputTokens: 1000, OutputTokens: 500, TotalTokens: 1500},
+			Source: llm.UsageProviderResponse,
+		},
+	})
+	require.NoError(t, err)
+
+	agent := core.NewAgentImpl("mixed-cost", noopLoop{}, core.WithHistory([]core.AgentMessage{
+		{Role: "user", Content: "request"},
+		{Role: "assistant", Content: "response"},
+	}))
+	stream := core.NewEventStream(8)
+	emitTokenUsageEvent(stream, &AgentAssembly{
+		CoreRuntime:          CoreRuntime{Agent: agent},
+		ProductionResilience: ProductionResilience{CostTracker: tracker},
+		ModelConfig:          ModelConfig{ContextWindow: 8192},
+	})
+
+	select {
+	case event := <-stream.Events():
+		require.NotNil(t, event.TokenUsage)
+		assert.InDelta(t, 0.015, event.TokenUsage.Cost, 0.000001,
+			"the token event must include the legacy estimate and the attempt subtotal once each")
+		assert.Equal(t, 1, event.TokenUsage.UnknownUsageAttempts,
+			"legacy rows have no typed usage provenance in the attempt ledger")
+		assert.Equal(t, "reported", string(event.TokenUsage.UsageSource))
+		assert.Equal(t, []core.TokenUsageCostSource{core.TokenUsageCostEstimated}, event.TokenUsage.CostSources)
+		assert.Equal(t, []core.TokenUsagePriceSource{core.TokenUsagePriceDefaultTier}, event.TokenUsage.PriceSources)
+	default:
+		t.Fatal("expected a token_usage event")
+	}
+}
+
 // TestEmitTokenUsageEvent_NoEstimatorNoUsage verifies that when there is no
 // API usage and no estimator, the function emits explicit unknown provenance.
 func TestEmitTokenUsageEvent_NoEstimatorNoUsage(t *testing.T) {

@@ -212,15 +212,16 @@ func emitTokenUsageEvent(stream *core.EventStreamImpl, assembly *AgentAssembly) 
 	costSources := make(map[core.TokenUsageCostSource]struct{})
 	priceSources := make(map[core.TokenUsagePriceSource]struct{})
 	cost := 0.0
+	var costSummary production.AttemptCostSummary
 	if assembly.CostTracker != nil {
 		attempts, summary := assembly.CostTracker.AttemptCostSnapshot()
+		costSummary = summary
 		if summary.Attempts > 0 {
 			attemptUsageAvailable = true
 			inputTokens = summary.KnownInputTokens
 			outputTokens = summary.KnownOutputTokens
 			unknownUsageAttempts = summary.UnknownUsageAttempts
 			unknownCostAttempts = summary.UnknownCostAttempts
-			cost = summary.KnownCostSubtotal
 			if summary.UnknownUsageAttempts < summary.Attempts {
 				usageSource = core.TokenUsageSourceReported
 			}
@@ -232,6 +233,11 @@ func emitTokenUsageEvent(stream *core.EventStreamImpl, assembly *AgentAssembly) 
 				costSources[tokenUsageCostSource(attempt.Status)] = struct{}{}
 				priceSources[tokenUsagePriceSource(attempt.PriceSource)] = struct{}{}
 			}
+		}
+		if summary.LegacyCalls > 0 {
+			unknownUsageAttempts += summary.LegacyCalls
+			costSources[core.TokenUsageCostEstimated] = struct{}{}
+			priceSources[tokenUsagePriceSource(summary.LegacyPriceSource)] = struct{}{}
 		}
 	}
 
@@ -260,11 +266,8 @@ func emitTokenUsageEvent(stream *core.EventStreamImpl, assembly *AgentAssembly) 
 		}
 	}
 
-	if !attemptUsageAvailable && assembly.CostTracker != nil {
-		cost = assembly.CostTracker.Total()
-		if assembly.CostTracker.Calls() > 0 {
-			costSources[core.TokenUsageCostUnknown] = struct{}{}
-		}
+	if assembly.CostTracker != nil {
+		cost = costSummary.CombinedKnownCostSubtotal
 	}
 	if len(costSources) == 0 {
 		costSources[core.TokenUsageCostUnknown] = struct{}{}
