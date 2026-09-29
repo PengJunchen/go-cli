@@ -1675,9 +1675,9 @@ func (l *LoopAgent) generateWithContinuationAndCompaction(
 		if candidateBytes > guard.MaxCandidateBytes() {
 			return nil, fmt.Errorf("core: guarded response payload exceeds %d-byte candidate limit", guard.MaxCandidateBytes())
 		}
-			if es != nil && resp.Content != "" {
-				budget.visible = true
-				_ = es.Send(stampAgentEvent(agentEventCoordinatesFromContext(ctx), AgentEvent{Kind: "message", Content: resp.Content, Timestamp: time.Now(), Incremental: true})) //nolint:errcheck
+		if es != nil && resp.Content != "" {
+			budget.visible = true
+			_ = es.Send(stampAgentEvent(agentEventCoordinatesFromContext(ctx), AgentEvent{Kind: "message", Content: resp.Content, Timestamp: time.Now(), Incremental: true})) //nolint:errcheck
 		}
 	}
 
