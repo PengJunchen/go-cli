@@ -24,10 +24,16 @@ type DefaultToolRegistry struct {
 	mu       sync.RWMutex
 	tools    map[string]ToolDefinition
 	metadata map[string]toolRegistrationMetadata
-	order    []string
-	version  int // incremented on every Register call
-	fence    *DispatchFence
-	prepared *preparedToolPipelineState
+	// mcpReservations protects source-owned deferred names before their
+	// definitions are materialized into tools.
+	mcpReservations map[string]mcpGenerationOwner
+	// mcpMaterialized records which source generation installed each eager
+	// MCP definition and carries its exact client-generation lease.
+	mcpMaterialized map[string]mcpMaterializedOwner
+	order           []string
+	version         int // incremented on every Register call
+	fence           *DispatchFence
+	prepared        *preparedToolPipelineState
 }
 
 var (
@@ -43,17 +49,19 @@ var (
 // NewDefaultToolRegistry returns an empty, ready-to-use registry.
 func NewDefaultToolRegistry() ToolRegistry {
 	return &DefaultToolRegistry{
-		tools:    map[string]ToolDefinition{},
-		metadata: map[string]toolRegistrationMetadata{},
-		fence:    NewDispatchFence(),
-		prepared: &preparedToolPipelineState{},
+		tools:           map[string]ToolDefinition{},
+		metadata:        map[string]toolRegistrationMetadata{},
+		mcpReservations: map[string]mcpGenerationOwner{},
+		mcpMaterialized: map[string]mcpMaterializedOwner{},
+		fence:           NewDispatchFence(),
+		prepared:        &preparedToolPipelineState{},
 	}
 }
 
 // Register stores def under its name. It returns an error when def is nil.
 // Registering a name a second time overwrites the previous definition.
-func (r *DefaultToolRegistry) Register(_ context.Context, def ToolDefinition) error {
-	return r.registerDefinition(def, RegistrationSourceToolRegistry, unknownTrustedEffects())
+func (r *DefaultToolRegistry) Register(ctx context.Context, def ToolDefinition) error {
+	return r.registerDefaultToolGuarded(ctx, def)
 }
 
 // Version returns a monotonically increasing counter that changes every time
