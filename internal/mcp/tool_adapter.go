@@ -138,10 +138,11 @@ func NewMCPClientGeneration(client MCPClient) (*MCPClientGeneration, error) {
 	return &MCPClientGeneration{client: client, serverName: serverName}, nil
 }
 
-// NewToolAdapter returns an adapter tied to this exact client generation.
+// NewToolAdapter returns an adapter tied to this exact client generation, or
+// nil when the generation is unavailable.
 func (g *MCPClientGeneration) NewToolAdapter(tool MCPTool) *MCPToolAdapter {
 	if !g.valid() {
-		return &MCPToolAdapter{tool: tool}
+		return nil
 	}
 	return &MCPToolAdapter{client: g.client, tool: tool, generation: g}
 }

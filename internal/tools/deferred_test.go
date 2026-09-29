@@ -550,13 +550,15 @@ func TestDeferredListTakesDTRSnapshotBeforeBackingSnapshot(t *testing.T) {
 
 	newOne := newMCPGenerationTestTool("mcp__srv__new_one")
 	newTwo := newMCPGenerationTestTool("mcp__srv__new_two")
+	newOneCandidate := newMCPGenerationTestCandidate(t, newOne)
+	newTwoCandidate := newMCPGenerationTestCandidate(t, newTwo)
 	updateStarted := make(chan struct{})
 	updateDone := make(chan error, 1)
 	go func() {
 		close(updateStarted)
 		update, err := adapter.BeginMCPGenerationUpdate(context.Background(), "list-snapshot", 2, []MCPToolCandidate{
-			newMCPGenerationTestCandidate(t, newOne),
-			newMCPGenerationTestCandidate(t, newTwo),
+			newOneCandidate,
+			newTwoCandidate,
 		})
 		if err == nil {
 			err = update.Publish()
