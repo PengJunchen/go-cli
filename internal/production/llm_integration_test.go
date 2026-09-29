@@ -137,7 +137,11 @@ func TestLoopRetriesLiveHTTPClientTimeoutWithProductionRetryPolicy(t *testing.T)
 
 	policy := NewDefaultRetryPolicy(RetryConfig{MaxAttempts: 2, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond})
 	retried := llm.NewRetryModelMiddleware(llm.WithRetryPolicy(policy)).WrapModel(model)
-	loop := core.NewLoopAgent(core.WithLLM(retried), core.WithMaxIterations(1))
+	loop := core.NewLoopAgent(
+		core.WithLLM(retried),
+		core.WithMaxIterations(1),
+		core.WithProviderRetryPolicy(policy),
+	)
 	result, err := loop.RunCanonical(context.Background(), core.Submission{Content: "retry the transport timeout"})
 	require.NoError(t, err)
 	require.NotEmpty(t, result.Transcript)
