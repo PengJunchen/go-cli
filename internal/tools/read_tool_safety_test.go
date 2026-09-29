@@ -36,7 +36,7 @@ func writeCaptureExecutable(t *testing.T, dir, name, stdout string) (string, str
 
 func TestGrepSeparatesPatternAndIgnoresRipgrepConfig(t *testing.T) {
 	dir := t.TempDir()
-	_, argsPath, envPath := writeCaptureExecutable(t, dir, "rg", "fixture:1:matched\\n")
+	_, argsPath, envPath := writeCaptureExecutable(t, dir, "rg", "{\"type\":\"match\",\"data\":{\"path\":{\"text\":\"fixture\"},\"lines\":{\"text\":\"matched\\n\"},\"line_number\":1}}\n")
 	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("RIPGREP_CONFIG_PATH", filepath.Join(dir, "hostile-rg-config"))
 
@@ -49,7 +49,7 @@ func TestGrepSeparatesPatternAndIgnoresRipgrepConfig(t *testing.T) {
 	args, err := os.ReadFile(argsPath)
 	require.NoError(t, err)
 	assert.Equal(t, []string{
-		"--no-config", "--line-number", "-n", "-e", pattern, "--", filepath.Join(dir, "root"),
+		"--no-config", "--json", "-n", "-e", pattern, "--", filepath.Join(dir, "root"),
 	}, strings.Split(strings.TrimSuffix(string(args), "\n"), "\n"))
 	configEnv, err := os.ReadFile(envPath)
 	require.NoError(t, err)

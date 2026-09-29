@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -178,8 +179,11 @@ func TestGrepPureGoFunctionDirectly(t *testing.T) {
 	dir := setupGrepDir(t)
 	re := mustCompile(t, "TODO")
 
-	ms, err := grepPureGo(context.Background(), re, dir, "", PathWhitelist{})
+	capture := newGrepMatchCapture(grepDefaultMaxMatches, grepDefaultMaxOutput)
+	truncated, err := grepPureGo(context.Background(), re, dir, "", PathWhitelist{}, capture)
 	require.NoError(t, err)
+	assert.False(t, truncated)
+	ms := capture.Matches()
 	got := map[string]bool{}
 	for _, m := range ms {
 		got[strings.Join([]string{filepath.Base(m.File), strconv.Itoa(m.Line), m.Content}, ":")] = true
@@ -189,15 +193,26 @@ func TestGrepPureGoFunctionDirectly(t *testing.T) {
 	assert.True(t, got["skip.md:1:TODO in markdown"])
 }
 
-func TestParseRipgrepOutput(t *testing.T) {
-	ms := parseRipgrepOutput([]byte("a.go:2: // TODO\nb.txt:10:TODO\n"), "TODO")
-	require.Len(t, ms, 2)
-	assert.Equal(t, "a.go", ms[0].File)
-	assert.Equal(t, 2, ms[0].Line)
-	assert.Equal(t, " // TODO", ms[0].Content)
-	assert.Equal(t, "b.txt", ms[1].File)
-	assert.Equal(t, 10, ms[1].Line)
-	assert.Equal(t, "TODO", ms[1].Content)
+func TestGrepRipgrepSingleFileRetainsPathLineAndContent(t *testing.T) {
+	if _, err := exec.LookPath("rg"); err != nil {
+		t.Skip("ripgrep is not installed")
+	}
+
+	file := filepath.Join(t.TempDir(), "single-file.txt")
+	require.NoError(t, os.WriteFile(file, []byte("first line\nneedle with detail\n"), 0o600))
+	re := mustCompile(t, "needle")
+
+	matches, err := grepWithRipgrep(context.Background(), re, file, "")
+	require.NoError(t, err)
+	require.Equal(t, []match{{File: file, Line: 2, Content: "needle with detail"}}, matches)
+}
+
+func TestParseRipgrepJSONFrame(t *testing.T) {
+	frame := []byte(`{"type":"match","data":{"path":{"text":"a:odd.txt"},"lines":{"text":"needle\r\n"},"line_number":2}}`)
+	m, isMatch, err := parseRipgrepJSONFrame(frame)
+	require.NoError(t, err)
+	require.True(t, isMatch)
+	assert.Equal(t, match{File: "a:odd.txt", Line: 2, Content: "needle"}, m)
 }
 
 func TestGrepName(t *testing.T) {
