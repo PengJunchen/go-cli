@@ -84,6 +84,14 @@ type AuditEntry struct {
 	Resolution string `json:"resolution,omitempty"`
 	// ToolOutcome records the result of tool execution independently of approval.
 	ToolOutcome string `json:"tool_outcome,omitempty"`
+	// ToolCallID is a stable fingerprint of the tool call identifier.
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	// DispatchCommitted records whether execution crossed its commit boundary.
+	DispatchCommitted bool `json:"dispatch_committed,omitempty"`
+	// ResultPresent records whether dispatch returned a tool result.
+	ResultPresent bool `json:"result_present,omitempty"`
+	// ResultIsError records the structured error bit on the tool result.
+	ResultIsError bool `json:"result_is_error,omitempty"`
 	// PrevHash links this entry to the preceding durable entry for the day.
 	PrevHash string `json:"prev_hash,omitempty"`
 	// Hash is the SHA-256 digest of this entry and PrevHash.
@@ -458,7 +466,34 @@ func sanitizeAuditEntry(entry AuditEntry) AuditEntry {
 	entry.UserChoice = boundAuditText(entry.UserChoice, 32)
 	entry.Resolution = boundAuditText(entry.Resolution, 32)
 	entry.ToolOutcome = boundAuditText(entry.ToolOutcome, 32)
+	entry.ToolCallID = safeAuditToolCallID(entry.ToolCallID)
+	if entry.Stage == "tool_outcome" {
+		entry.ToolOutcome = safeAuditToolOutcome(entry.ToolOutcome)
+	}
 	return entry
+}
+
+func safeAuditToolCallID(value string) string {
+	if value == "" {
+		return ""
+	}
+	const prefix = "sha256:"
+	if len(value) == len(prefix)+sha256.Size*2 && strings.HasPrefix(value, prefix) {
+		if _, err := hex.DecodeString(value[len(prefix):]); err == nil {
+			return prefix + strings.ToLower(value[len(prefix):])
+		}
+	}
+	digest := sha256.Sum256([]byte(value))
+	return prefix + hex.EncodeToString(digest[:])
+}
+
+func safeAuditToolOutcome(value string) string {
+	switch value {
+	case "success", "dispatch_rejected", "cleanup_pending", "context_canceled", "executor_error", "result_error", "unknown_error":
+		return value
+	default:
+		return "unknown_error"
+	}
 }
 
 func boundAuditText(value string, maxBytes int) string {

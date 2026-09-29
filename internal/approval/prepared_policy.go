@@ -81,6 +81,8 @@ func (m *ApprovalMiddleware) PreparedPolicy(ctx context.Context, req tools.Prepa
 	}
 
 	call := req.Call.ToolCall()
+	classifier := m.preparedClassifiers[mode]
+	auditClassifier, _ := classifier.(*AuditClassifier)
 	if planActive {
 		allowed := preparedPlanCallAllowed(req, call.Name)
 		recordPreparedDecision(span, req, mode, "plan", false, true, allowed)
@@ -88,6 +90,7 @@ func (m *ApprovalMiddleware) PreparedPolicy(ctx context.Context, req tools.Prepa
 			return decision, ErrToolDenied
 		}
 		decision.Allowed = true
+		decision.TerminalObserver = preparedTerminalAuditObserver(auditClassifier, "", "", "plan_mode")
 		return decision, nil
 	}
 
@@ -105,6 +108,7 @@ func (m *ApprovalMiddleware) PreparedPolicy(ctx context.Context, req tools.Prepa
 		}
 		recordPreparedDecision(span, req, mode, "cached", true, false, true)
 		decision.Allowed = true
+		decision.TerminalObserver = preparedTerminalAuditObserver(auditClassifier, "", "", "session_cache")
 		return decision, nil
 	}
 	if m.opts.cache != nil {
@@ -114,6 +118,7 @@ func (m *ApprovalMiddleware) PreparedPolicy(ctx context.Context, req tools.Prepa
 			}
 			recordPreparedDecision(span, req, mode, "always_allow_cache", true, false, true)
 			decision.Allowed = true
+			decision.TerminalObserver = preparedTerminalAuditObserver(auditClassifier, "", "", "always_allow_cache")
 			return decision, nil
 		}
 	}
@@ -131,19 +136,17 @@ func (m *ApprovalMiddleware) PreparedPolicy(ctx context.Context, req tools.Prepa
 			}
 			recordPreparedDecision(span, req, mode, "approval_store", true, false, true)
 			decision.Allowed = true
+			decision.TerminalObserver = preparedTerminalAuditObserver(auditClassifier, "", "", "approval_store")
 			return decision, nil
 		}
 	}
 
-	classifier := m.preparedClassifiers[mode]
 	if classifier == nil {
 		recordPreparedDecision(span, req, mode, "missing_classifier", false, false, false)
 		return decision, ErrToolDenied
 	}
-	var auditClassifier *AuditClassifier
 	var classification Classification
 	if audited, ok := classifier.(*AuditClassifier); ok {
-		auditClassifier = audited
 		var err error
 		classification, err = audited.classifyAndAudit(ctx, call)
 		if err != nil {
@@ -164,7 +167,7 @@ func (m *ApprovalMiddleware) PreparedPolicy(ctx context.Context, req tools.Prepa
 		if err := recordPreparedResolution(auditClassifier, call, proposal, "", "classifier"); err != nil {
 			return decision, err
 		}
-		return m.publishPreparedAllow(ctx, span, req, mode, key, false)
+		return m.publishPreparedAllow(ctx, span, req, mode, key, false, auditClassifier, proposal, "", "classifier")
 	case Deny:
 		if err := recordPreparedResolution(auditClassifier, call, proposal, "", "classifier"); err != nil {
 			return decision, errors.Join(ErrToolDenied, err)
@@ -203,6 +206,7 @@ func (m *ApprovalMiddleware) resolvePreparedAsk(
 			}
 			recordPreparedDecision(span, req, mode, "auto_approve", false, false, true)
 			decision.Allowed = true
+			decision.TerminalObserver = preparedTerminalAuditObserver(auditClassifier, proposal, "", "auto_approve")
 			return decision, nil
 		}
 		if err := recordPreparedResolution(auditClassifier, call, proposal, "", "policy_deny"); err != nil {
@@ -227,6 +231,7 @@ func (m *ApprovalMiddleware) resolvePreparedAsk(
 		}
 		recordPreparedDecision(span, req, mode, "allow_once", false, false, true)
 		decision.Allowed = true
+		decision.TerminalObserver = preparedTerminalAuditObserver(auditClassifier, proposal, choice, resolution)
 		return decision, nil
 	case ApprovalAlwaysAllow:
 		if err := recordPreparedResolution(auditClassifier, call, proposal, choice, resolution); err != nil {
@@ -235,7 +240,7 @@ func (m *ApprovalMiddleware) resolvePreparedAsk(
 		if m.fence.Snapshot() != req.Generations {
 			return decision, tools.ErrDispatchFenceChanged
 		}
-		return m.publishPreparedAllow(ctx, span, req, mode, key, true)
+		return m.publishPreparedAllow(ctx, span, req, mode, key, true, auditClassifier, proposal, choice, resolution)
 	case ApprovalDeny:
 		auditErr := recordPreparedResolution(auditClassifier, call, proposal, choice, resolution)
 		if m.fence.Snapshot() != req.Generations {
@@ -292,6 +297,35 @@ func recordPreparedResolution(auditClassifier *AuditClassifier, call tools.ToolC
 	return nil
 }
 
+func preparedTerminalAuditObserver(
+	auditClassifier *AuditClassifier,
+	proposal, choice, resolution string,
+) tools.PreparedTerminalObserver {
+	if auditClassifier == nil || auditClassifier.audit == nil {
+		return nil
+	}
+	return func(outcome tools.PreparedTerminalOutcome) error {
+		return auditClassifier.recordToolOutcome(outcome, proposal, choice, resolution)
+	}
+}
+
+// AuditHealth exposes the current prepared classifier's redacted sticky audit
+// health so observer failures remain readable after Dispatch preserves its
+// caller-visible result.
+func (m *ApprovalMiddleware) AuditHealth() AuditTrailHealth {
+	if m == nil {
+		return AuditTrailHealth{Healthy: true}
+	}
+	mode, _, _ := m.preparedState()
+	if audited, ok := m.preparedClassifiers[mode].(*AuditClassifier); ok {
+		return audited.AuditHealth()
+	}
+	if audited, ok := m.classifier.(*AuditClassifier); ok {
+		return audited.AuditHealth()
+	}
+	return AuditTrailHealth{Healthy: true}
+}
+
 func (m *ApprovalMiddleware) publishPreparedAllow(
 	ctx context.Context,
 	span tracing.TraceSpan,
@@ -299,6 +333,8 @@ func (m *ApprovalMiddleware) publishPreparedAllow(
 	mode PermissionMode,
 	key string,
 	cacheGrant bool,
+	auditClassifier *AuditClassifier,
+	proposal, choice, resolution string,
 ) (tools.PreparedPolicyDecision, error) {
 	decision := tools.PreparedPolicyDecision{Generations: req.Generations}
 	cacheUpdate := func() { m.sessionStore(key, Allow) }
@@ -326,6 +362,7 @@ func (m *ApprovalMiddleware) publishPreparedAllow(
 		return decision, tools.ErrDispatchFenceChanged
 	}
 	decision.Allowed = true
+	decision.TerminalObserver = preparedTerminalAuditObserver(auditClassifier, proposal, choice, resolution)
 	recordPreparedDecision(span, req, mode, map[bool]string{true: "always_allow", false: "classifier_allow"}[cacheGrant], false, false, true)
 	return decision, nil
 }

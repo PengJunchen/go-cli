@@ -208,6 +208,40 @@ func (c *AuditClassifier) recordResolution(call tools.ToolCall, proposal, choice
 	})
 }
 
+func (c *AuditClassifier) recordToolOutcome(
+	outcome tools.PreparedTerminalOutcome,
+	proposal, choice, resolution string,
+) error {
+	if c == nil || c.audit == nil {
+		return nil
+	}
+	return c.audit.Record(AuditEntry{
+		Timestamp:         time.Now().UTC(),
+		Tool:              outcome.ToolName,
+		ToolCallID:        outcome.ToolCallID,
+		Decision:          proposal,
+		Classifier:        c.inner.Name(),
+		PermissionMode:    c.mode.String(),
+		SessionID:         c.session,
+		Stage:             "tool_outcome",
+		UserChoice:        choice,
+		Resolution:        resolution,
+		ToolOutcome:       safeAuditToolOutcome(outcome.ErrorClass),
+		DispatchCommitted: outcome.DispatchCommitted,
+		ResultPresent:     outcome.ResultPresent,
+		ResultIsError:     outcome.ResultIsError,
+	})
+}
+
+// AuditHealth returns a redacted sticky health view for this classifier's
+// audit trail. A nil receiver or disabled trail is healthy and disabled.
+func (c *AuditClassifier) AuditHealth() AuditTrailHealth {
+	if c == nil || c.audit == nil {
+		return AuditTrailHealth{Healthy: true}
+	}
+	return c.audit.Health()
+}
+
 // AuditResolver wraps a PermissionModeResolver so that every classifier
 // returned by Resolve is itself wrapped with an AuditClassifier. This keeps
 // audit recording in effect when the ApprovalMiddleware selects its classifier
@@ -226,6 +260,15 @@ var _ PermissionModeResolver = (*AuditResolver)(nil)
 // entries. The session is recorded as metadata on each audit entry.
 func NewAuditResolver(inner PermissionModeResolver, audit *AuditTrail, session string) *AuditResolver {
 	return &AuditResolver{inner: inner, audit: audit, session: session}
+}
+
+// AuditHealth returns a redacted sticky health view for the resolver's audit
+// trail. A nil receiver or disabled trail is healthy and disabled.
+func (r *AuditResolver) AuditHealth() AuditTrailHealth {
+	if r == nil || r.audit == nil {
+		return AuditTrailHealth{Healthy: true}
+	}
+	return r.audit.Health()
 }
 
 // Name returns the wrapped resolver's identifier.
