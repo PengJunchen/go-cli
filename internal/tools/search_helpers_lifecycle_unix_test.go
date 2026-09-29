@@ -245,13 +245,14 @@ func TestGrepJoinsFailedHelperDescendantBeforeFallback(t *testing.T) {
 	assertOneCompletedProcessGroupReport(t, reported)
 }
 
-func TestFindJoinsFDFailedHelperDescendantBeforeSystemFindFallback(t *testing.T) {
+func TestFindTreatsFDExitOneAsErrorAndJoinsDescendantBeforeFallback(t *testing.T) {
 	workdir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(workdir, "target.go"), []byte("package main\n"), 0o600))
 
 	helperDir := t.TempDir()
 	pidPath := filepath.Join(t.TempDir(), "fd-descendant.pid")
-	writeFailingHelperWithDescendant(t, helperDir, "fd")
+	fdScript := "#!/bin/sh\nsleep 10 &\nprintf '%s' \"$!\" > \"$SEARCH_HELPER_DESCENDANT_PID\"\nexit 1\n"
+	require.NoError(t, os.WriteFile(filepath.Join(helperDir, "fd"), []byte(fdScript), 0o700))
 	t.Setenv("PATH", helperDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	t.Setenv("SEARCH_HELPER_DESCENDANT_PID", pidPath)
 	defer killProcessFromFile(t, pidPath)

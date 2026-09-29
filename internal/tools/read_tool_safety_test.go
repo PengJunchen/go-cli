@@ -68,14 +68,14 @@ func TestFindSeparatesPatternFromFdOptions(t *testing.T) {
 
 	args, err := os.ReadFile(argsPath)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"--type", "f", "--max-depth", "3", "--", pattern, dir}, strings.Split(strings.TrimSuffix(string(args), "\n"), "\n"))
+	assert.Equal(t, []string{"--print0", "--glob", "--case-sensitive", "--hidden", "--no-ignore", "--type", "f", "--max-depth", "3", "--", pattern, dir}, strings.Split(strings.TrimSuffix(string(args), "\n"), "\n"))
 
 	_, ok, err = findWithFd(context.Background(), dir, "", "", 0)
 	require.NoError(t, err)
 	require.True(t, ok)
 	args, err = os.ReadFile(argsPath)
 	require.NoError(t, err)
-	assert.Equal(t, []string{"--", "", dir}, strings.Split(strings.TrimSuffix(string(args), "\n"), "\n"), "an explicit empty pattern keeps the following path out of the pattern slot")
+	assert.Equal(t, []string{"--print0", "--glob", "--case-sensitive", "--hidden", "--no-ignore", "--", "", dir}, strings.Split(strings.TrimSuffix(string(args), "\n"), "\n"), "an explicit empty pattern keeps the following path out of the pattern slot")
 }
 
 func writePoisonHelper(t *testing.T, body string) string {

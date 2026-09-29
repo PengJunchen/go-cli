@@ -178,6 +178,11 @@ func (t *FindTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 
 // find runs fd, then find, then falls back to the pure-Go walker.
 func (t *FindTool) find(ctx context.Context, searchPath, pattern, kind string, maxDepth int) (findCaptureResult, managedLocalResult, bool, error) {
+	if info, err := os.Stat(searchPath); err == nil && !info.IsDir() {
+		captured, err := findPureGo(ctx, searchPath, pattern, kind, maxDepth)
+		return captured, managedLocalResult{}, false, err
+	}
+
 	var lastLifecycle managedLocalResult
 	helperStarted := false
 	if !t.forceNode {
@@ -209,10 +214,9 @@ func (t *FindTool) find(ctx context.Context, searchPath, pattern, kind string, m
 	return captured, lastLifecycle, helperStarted, err
 }
 
-// findWithFd runs `fd --type <kind> --max-depth <n> -- <pattern> <path>` when
-// the fd binary is available. The separator prevents a model-supplied pattern
-// from enabling fd execution options. ok is false when fd is not on PATH or
-// fails.
+// findWithFd runs fd with glob matching and NUL-separated output when the fd
+// binary is available. The separator prevents a model-supplied pattern from
+// enabling fd execution options. ok is false when fd is not on PATH or fails.
 func findWithFd(ctx context.Context, searchPath, pattern, kind string, maxDepth int) ([]string, bool, error) {
 	captured, ok, _, _, err := findWithFdManaged(ctx, searchPath, pattern, kind, maxDepth)
 	return captured.paths, ok, err
@@ -222,7 +226,7 @@ func findWithFdManaged(ctx context.Context, searchPath, pattern, kind string, ma
 	if _, err := exec.LookPath("fd"); err != nil {
 		return findCaptureResult{}, false, managedLocalResult{}, false, nil
 	}
-	args := []string{"--print0"}
+	args := []string{"--print0", "--glob", "--case-sensitive", "--hidden", "--no-ignore"}
 	if kind == "f" {
 		args = append(args, "--type", "f")
 	} else if kind == "d" {
@@ -251,11 +255,6 @@ func findWithFdManaged(ctx context.Context, searchPath, pattern, kind string, ma
 		return findCaptureResult{}, false, lifecycle, true, errors.Join(captureErr, lifecycle.runErr)
 	}
 	if lifecycle.runErr != nil {
-		var ee *exec.ExitError
-		if errors.As(lifecycle.runErr, &ee) && ee.ExitCode() == 1 {
-			// fd exits 1 when no matches: empty result is valid.
-			return findCaptureResult{}, true, lifecycle, true, nil
-		}
 		return findCaptureResult{}, false, lifecycle, true, lifecycle.runErr
 	}
 	return findCaptureResult{paths: capture.Results(), truncated: capture.Truncated()}, true, lifecycle, true, nil
@@ -267,6 +266,9 @@ func findWithFindManaged(ctx context.Context, searchPath, pattern, kind string, 
 		return findCaptureResult{}, false, managedLocalResult{}, false, nil
 	}
 	args := []string{searchPath}
+	if info, statErr := os.Stat(searchPath); statErr == nil && info.IsDir() {
+		args = append(args, "-mindepth", "1")
+	}
 	if maxDepth > 0 {
 		args = append(args, "-maxdepth", fmt.Sprintf("%d", maxDepth))
 	}
