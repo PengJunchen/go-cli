@@ -7,6 +7,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -57,6 +58,156 @@ func startTestHTTPServer(t *testing.T, handler *CoreHandler) (*HTTPServer, strin
 		})
 	})
 	return srv, baseURL
+}
+
+func readUntilConnectionClose(t *testing.T, conn net.Conn, timeout time.Duration) []byte {
+	t.Helper()
+	if err := conn.SetReadDeadline(time.Now().Add(timeout)); err != nil {
+		t.Fatalf("set connection read deadline: %v", err)
+	}
+	data, err := io.ReadAll(conn)
+	if err != nil {
+		t.Fatalf("read timed request response: %v", err)
+	}
+	return data
+}
+
+func TestHTTPServer_ConfiguresIngressLimits(t *testing.T) {
+	srv, _ := startTestHTTPServer(t, nil)
+	server := srv.generation.server
+	if server.ReadHeaderTimeout != 3*time.Second {
+		t.Fatalf("ReadHeaderTimeout = %s, want 3s", server.ReadHeaderTimeout)
+	}
+	if server.ReadTimeout != 10*time.Second {
+		t.Fatalf("ReadTimeout = %s, want 10s", server.ReadTimeout)
+	}
+	if server.IdleTimeout != 60*time.Second {
+		t.Fatalf("IdleTimeout = %s, want 60s", server.IdleTimeout)
+	}
+	if server.MaxHeaderBytes != 32<<10 {
+		t.Fatalf("MaxHeaderBytes = %d, want %d", server.MaxHeaderBytes, 32<<10)
+	}
+	if server.WriteTimeout != 0 {
+		t.Fatalf("WriteTimeout = %s, want zero for long-lived SSE", server.WriteTimeout)
+	}
+}
+
+func TestHTTPServer_PartialHeadersExpireAndServerAcceptsFollowUp(t *testing.T) {
+	srv, baseURL := startTestHTTPServer(t, nil)
+
+	conn, err := net.DialTimeout("tcp", srv.Addr(), time.Second)
+	if err != nil {
+		t.Fatalf("dial ACP server: %v", err)
+	}
+	defer conn.Close()
+	_, err = io.WriteString(conn, "POST /connect HTTP/1.1\r\nHost: "+srv.Addr()+"\r\nX-Stalled: ")
+	if err != nil {
+		t.Fatalf("write partial request headers: %v", err)
+	}
+	readUntilConnectionClose(t, conn, 5*time.Second)
+
+	resp := postACP(t, baseURL, "/connect", ACPMessage{Type: TypeConnect, SenderID: "after-header-timeout"})
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("valid follow-up connect got status %d", resp.StatusCode)
+	}
+}
+
+func TestHTTPServer_StalledConnectBodyExpiresWithoutClosingAuthenticatedSSE(t *testing.T) {
+	srv, baseURL := startTestAuthHTTPServer(t, nil)
+
+	connect := postACPAuth(t, baseURL, "/connect", ACPMessage{Type: TypeConnect, SenderID: testAuthSubject})
+	if connect.StatusCode != http.StatusOK {
+		connect.Body.Close()
+		t.Fatalf("authenticated connect got status %d", connect.StatusCode)
+	}
+	connect.Body.Close()
+	sessionID := httpTestSessionID(baseURL, testAuthSubject)
+	streamCtx, streamCancel := context.WithCancel(context.Background())
+	defer streamCancel()
+	streamTarget := baseURL + "/events?session_id=" + url.QueryEscape(sessionID)
+	streamReq := authRequest(http.MethodGet, streamTarget, nil).WithContext(streamCtx)
+	streamResp, err := http.DefaultClient.Do(streamReq)
+	if err != nil {
+		t.Fatalf("open authenticated event stream: %v", err)
+	}
+	defer streamResp.Body.Close()
+	if streamResp.StatusCode != http.StatusOK {
+		t.Fatalf("authenticated event stream got status %d", streamResp.StatusCode)
+	}
+
+	conn, err := net.DialTimeout("tcp", srv.Addr(), time.Second)
+	if err != nil {
+		t.Fatalf("dial ACP server for stalled body: %v", err)
+	}
+	defer conn.Close()
+	request := "POST /connect HTTP/1.1\r\nHost: " + srv.Addr() + "\r\n" +
+		"Authorization: Bearer " + testAuthToken + "\r\n" +
+		ACPHTTPProfileHeader + ": " + ACPHTTPProfileV1 + "\r\n" +
+		"Content-Type: application/json\r\nContent-Length: 100\r\n\r\n{"
+	if _, err := io.WriteString(conn, request); err != nil {
+		t.Fatalf("write partial connect body: %v", err)
+	}
+	readUntilConnectionClose(t, conn, 12*time.Second)
+
+	followUp := postACPAuth(t, baseURL, "/connect", ACPMessage{Type: TypeConnect, SenderID: testAuthSubject})
+	defer followUp.Body.Close()
+	if followUp.StatusCode != http.StatusOK {
+		t.Fatalf("valid authenticated follow-up connect got status %d", followUp.StatusCode)
+	}
+
+	srv.mu.Lock()
+	binding, ok := srv.sessions[sessionID]
+	srv.mu.Unlock()
+	if !ok {
+		t.Fatal("authenticated session was not retained")
+	}
+	binding.session.PublishEvent(core.AgentEvent{Kind: "message", Content: "stream-survived-request-timeout"})
+
+	eventSeen := make(chan bool, 1)
+	go func() {
+		scanner := bufio.NewScanner(streamResp.Body)
+		for scanner.Scan() {
+			if strings.Contains(scanner.Text(), "stream-survived-request-timeout") {
+				eventSeen <- true
+				return
+			}
+		}
+		eventSeen <- false
+	}()
+	select {
+	case seen := <-eventSeen:
+		if !seen {
+			t.Fatal("authenticated SSE stream ended before the follow-up event")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("authenticated SSE stream did not deliver the follow-up event")
+	}
+}
+
+func TestHTTPServer_RejectsOversizedRequestHeader(t *testing.T) {
+	srv, _ := startTestHTTPServer(t, nil)
+
+	conn, err := net.DialTimeout("tcp", srv.Addr(), time.Second)
+	if err != nil {
+		t.Fatalf("dial ACP server: %v", err)
+	}
+	defer conn.Close()
+	request := "GET /stream HTTP/1.1\r\nHost: " + srv.Addr() + "\r\nX-Large: " + strings.Repeat("x", 40<<10) + "\r\n\r\n"
+	if _, err := io.WriteString(conn, request); err != nil {
+		t.Fatalf("write oversized request header: %v", err)
+	}
+	if err := conn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("set response deadline: %v", err)
+	}
+	response, err := http.ReadResponse(bufio.NewReader(conn), &http.Request{Method: http.MethodGet})
+	if err != nil {
+		t.Fatalf("read oversized-header response: %v", err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusRequestHeaderFieldsTooLarge {
+		t.Fatalf("oversized header got status %d", response.StatusCode)
+	}
 }
 
 func httpTestSessionKey(baseURL, alias string) string {

@@ -32,6 +32,20 @@ const authSubjectKey contextKey = iota
 const maxRequestBodySize = 1 * 1024 * 1024 // 1 MB
 
 const (
+	// readHeaderTimeout limits how long an ACP peer can spend sending request
+	// headers before the server rejects the connection.
+	readHeaderTimeout = 3 * time.Second
+	// readTimeout bounds the complete request, including the body capped by
+	// maxRequestBodySize. Ten seconds permits a 1 MiB request at roughly 100 KiB/s.
+	readTimeout = 10 * time.Second
+	// idleTimeout releases keep-alive connections that do not send another request.
+	idleTimeout = 60 * time.Second
+	// maxRequestHeaderBytes keeps auth and profile headers comfortably below
+	// net/http's 1 MiB default while allowing ordinary proxy metadata.
+	maxRequestHeaderBytes = 32 << 10
+)
+
+const (
 	// ACPHTTPProfileHeader selects the private versioned HTTP profile.
 	ACPHTTPProfileHeader = "X-Go-CLI-ACP-Profile"
 	// ACPHTTPProfileV1 is the only HTTP ACP profile served by this adapter.
@@ -351,8 +365,14 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 	handler = s.generationRequestMiddleware(generation, handler)
 
 	srv := &http.Server{
-		Addr:    s.addr,
-		Handler: handler,
+		Addr:              s.addr,
+		Handler:           handler,
+		ReadHeaderTimeout: readHeaderTimeout,
+		ReadTimeout:       readTimeout,
+		IdleTimeout:       idleTimeout,
+		MaxHeaderBytes:    maxRequestHeaderBytes,
+		// WriteTimeout remains unset because it bounds the whole response, and
+		// /events intentionally keeps authenticated SSE responses open.
 	}
 	generation.server = srv
 
