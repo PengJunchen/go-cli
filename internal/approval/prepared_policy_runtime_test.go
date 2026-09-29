@@ -224,7 +224,7 @@ func TestPreparedApprovalUserDenyInvalidatesSiblingPermit(t *testing.T) {
 
 func TestApprovalAuditRecordsFinalChoice(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
+	dir := privateAuditTestDir(t)
 	trail := NewAuditTrail(dir)
 	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck
 	target := &preparedRuntimeTool{name: "audit_target"}
@@ -269,7 +269,7 @@ func TestApprovalAuditRecordsFinalChoice(t *testing.T) {
 
 func TestPreparedApprovalAuditWriteFailureStopsDispatch(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
+	dir := privateAuditTestDir(t)
 	trail := NewAuditTrail(dir)
 	syncErr := errors.New("sync sentinel")
 	rollbackErr := errors.New("truncate sentinel")
@@ -307,7 +307,7 @@ func TestPreparedApprovalAuditWriteFailureStopsDispatch(t *testing.T) {
 
 func TestPreparedApprovalResolutionAuditFailureStopsDispatch(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
+	dir := privateAuditTestDir(t)
 	trail := NewAuditTrail(dir)
 	syncErr := errors.New("resolution sync sentinel")
 	syncCounter := &auditSyncCounter{}

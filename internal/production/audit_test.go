@@ -1,11 +1,15 @@
 package production
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"testing"
@@ -14,13 +18,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pengjunchen/go-cli/internal/privatefile"
 	"github.com/pengjunchen/go-cli/internal/verify"
 )
 
 func TestAuditLogLogAndQueryRoundTrip(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	path := auditLogTestPath(t, "audit.jsonl")
 	l := NewDefaultAuditLog(path)
 
 	now := time.Now()
@@ -46,7 +51,7 @@ func TestAuditLogLogAndQueryRoundTrip(t *testing.T) {
 func TestAuditLogFilters(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	path := auditLogTestPath(t, "audit.jsonl")
 	l := NewDefaultAuditLog(path)
 
 	base := time.Now()
@@ -79,7 +84,7 @@ func TestAuditLogFilters(t *testing.T) {
 func TestAuditLogMissingFileReturnsEmpty(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "does-not-exist.jsonl")
+	path := auditLogTestPath(t, "does-not-exist.jsonl")
 	l := NewDefaultAuditLog(path)
 
 	entries, err := l.Query(ctx, AuditFilter{})
@@ -90,7 +95,7 @@ func TestAuditLogMissingFileReturnsEmpty(t *testing.T) {
 func TestAuditLogAutoTimestamp(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	path := auditLogTestPath(t, "audit.jsonl")
 	l := NewDefaultAuditLog(path)
 
 	require.NoError(t, l.Log(ctx, AuditEntry{Operation: "op"}))
@@ -103,7 +108,7 @@ func TestAuditLogAutoTimestamp(t *testing.T) {
 func TestAuditLogConcurrentWrites(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	path := auditLogTestPath(t, "audit.jsonl")
 	l := NewDefaultAuditLog(path)
 
 	var wg sync.WaitGroup
@@ -135,7 +140,7 @@ func TestAuditLogContextCancellation(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	path := auditLogTestPath(t, "audit.jsonl")
 	l := NewDefaultAuditLog(path)
 
 	require.NoError(t, l.Log(ctx, AuditEntry{Operation: "op"}))
@@ -147,7 +152,7 @@ func TestAuditLogContextCancellation(t *testing.T) {
 func TestAuditLogStreamingFilterOnLargeFile(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	path := auditLogTestPath(t, "audit.jsonl")
 	l := NewDefaultAuditLog(path)
 
 	// Write a large number of entries; only a subset matches the filter.
@@ -184,7 +189,7 @@ func TestAuditLogStreamingFilterOnLargeFile(t *testing.T) {
 func TestAuditLogStreamingHandlesLargeLines(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	path := auditLogTestPath(t, "audit.jsonl")
 	l := NewDefaultAuditLog(path)
 
 	// Create an entry with large Args payload (> 64 KB default scanner buffer).
@@ -212,7 +217,7 @@ func TestAuditLogStreamingHandlesLargeLines(t *testing.T) {
 func TestAuditLogHashChain(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	path := auditLogTestPath(t, "audit.jsonl")
 	l := NewDefaultAuditLog(path)
 
 	require.NoError(t, l.Log(ctx, AuditEntry{Operation: "op1"}))
@@ -253,7 +258,7 @@ func TestAuditHashAdvancesOnlyAfterAppend(t *testing.T) {
 		{name: "sync failure", syncErr: errors.New("sync sentinel"), wantErr: ErrAuditLogSync},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "audit.jsonl")
+			path := auditLogTestPath(t, "audit.jsonl")
 			log, ok := NewDefaultAuditLog(path).(*DefaultAuditLog)
 			require.True(t, ok)
 			ctx := context.Background()
@@ -285,7 +290,7 @@ func TestAuditHashAdvancesOnlyAfterAppend(t *testing.T) {
 }
 
 func TestAuditLogRollbackFailurePoisonsWriter(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	path := auditLogTestPath(t, "audit.jsonl")
 	log, ok := NewDefaultAuditLog(path).(*DefaultAuditLog)
 	require.True(t, ok)
 	syncErr := errors.New("sync sentinel")
@@ -303,7 +308,7 @@ func TestAuditLogRollbackFailurePoisonsWriter(t *testing.T) {
 }
 
 func TestAuditLogContinuesHashChainAfterRestart(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	path := auditLogTestPath(t, "audit.jsonl")
 	ctx := context.Background()
 	first, ok := NewDefaultAuditLog(path).(*DefaultAuditLog)
 	require.True(t, ok)
@@ -319,10 +324,187 @@ func TestAuditLogContinuesHashChainAfterRestart(t *testing.T) {
 	require.NoError(t, reopened.VerifyChain())
 }
 
+func TestAuditLogMultipleInstancesRefreshHashChain(t *testing.T) {
+	path := auditLogTestPath(t, "audit.jsonl")
+	ctx := context.Background()
+	first, ok := NewDefaultAuditLog(path).(*DefaultAuditLog)
+	require.True(t, ok)
+	second, ok := NewDefaultAuditLog(path).(*DefaultAuditLog)
+	require.True(t, ok)
+	for index := 0; index < 20; index++ {
+		log := first
+		if index%2 == 1 {
+			log = second
+		}
+		require.NoError(t, log.Log(ctx, AuditEntry{Operation: fmt.Sprintf("operation-%02d", index)}))
+	}
+
+	entries, err := first.Query(ctx, AuditFilter{})
+	require.NoError(t, err)
+	require.Len(t, entries, 20)
+	for index := 1; index < len(entries); index++ {
+		assert.Equal(t, entries[index-1].Hash, entries[index].PrevHash, "entry %d must continue the latest durable chain", index)
+	}
+	require.NoError(t, first.VerifyChain())
+}
+
+func TestProductionAuditCrossProcessAppendHelper(t *testing.T) {
+	mode := os.Getenv("GOCLI_PROD_AUDIT_HELPER_MODE")
+	if mode == "" {
+		return
+	}
+	log, ok := NewDefaultAuditLog(os.Getenv("GOCLI_PROD_AUDIT_HELPER_PATH")).(*DefaultAuditLog)
+	if !ok {
+		t.Fatal("default audit log implementation unavailable")
+	}
+	if mode == "block" {
+		openFile := log.openFile
+		log.openFile = func(path string, flag int, perm os.FileMode) (auditFile, error) {
+			file, err := openFile(path, flag, perm)
+			if err != nil {
+				return nil, err
+			}
+			if err := writeProductionAuditMarker(os.Getenv("GOCLI_PROD_AUDIT_HELPER_OPENED")); err != nil {
+				_ = file.Close()
+				return nil, err
+			}
+			if err := waitForProductionAuditMarker(os.Getenv("GOCLI_PROD_AUDIT_HELPER_RELEASE"), 5*time.Second); err != nil {
+				_ = file.Close()
+				return nil, err
+			}
+			return file, nil
+		}
+	} else if mode == "waiter" {
+		if err := writeProductionAuditMarker(os.Getenv("GOCLI_PROD_AUDIT_HELPER_ATTEMPTED")); err != nil {
+			t.Errorf("write attempted marker: %v", err)
+		}
+	}
+
+	err := log.Log(context.Background(), AuditEntry{Operation: os.Getenv("GOCLI_PROD_AUDIT_HELPER_OPERATION")})
+	if err != nil {
+		t.Errorf("record audit entry: %v", err)
+	}
+	if mode == "waiter" {
+		if err := writeProductionAuditMarker(os.Getenv("GOCLI_PROD_AUDIT_HELPER_COMPLETE")); err != nil {
+			t.Errorf("write complete marker: %v", err)
+		}
+	}
+}
+
+func TestAuditLogSerializesCrossProcessAppend(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("cross-process advisory locks are supported on Darwin and Linux")
+	}
+	path := auditLogTestPath(t, "audit.jsonl")
+	opened := path + ".opened"
+	attempted := path + ".attempted"
+	complete := path + ".complete"
+	release := path + ".release"
+	firstOutput := &bytes.Buffer{}
+	first := startProductionAuditProcess(t, firstOutput, path, "block", "first", opened, attempted, complete, release)
+	if err := waitForProductionAuditMarker(opened, 5*time.Second); err != nil {
+		_ = first.Process.Kill()
+		_ = first.Wait()
+		t.Fatalf("first process did not enter its open hook: %v; output: %s", err, firstOutput.String())
+	}
+	secondOutput := &bytes.Buffer{}
+	second := startProductionAuditProcess(t, secondOutput, path, "waiter", "second", opened, attempted, complete, release)
+	if err := waitForProductionAuditMarker(attempted, 5*time.Second); err != nil {
+		_ = writeProductionAuditMarker(release)
+		_ = first.Wait()
+		_ = second.Process.Kill()
+		_ = second.Wait()
+		t.Fatalf("second process did not attempt its append: %v; output: %s", err, secondOutput.String())
+	}
+	time.Sleep(200 * time.Millisecond)
+	_, completeErr := os.Stat(complete)
+	completedBeforeRelease := completeErr == nil
+	require.True(t, errors.Is(completeErr, os.ErrNotExist) || completedBeforeRelease, "inspect second process completion")
+	require.NoError(t, writeProductionAuditMarker(release))
+	firstErr := first.Wait()
+	secondErr := second.Wait()
+	require.NoError(t, firstErr, firstOutput.String())
+	require.NoError(t, secondErr, secondOutput.String())
+	assert.False(t, completedBeforeRelease, "the second process must wait while the first owns the audit append lock")
+
+	log, ok := NewDefaultAuditLog(path).(*DefaultAuditLog)
+	require.True(t, ok)
+	entries, err := log.Query(context.Background(), AuditFilter{})
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+	assert.Equal(t, entries[0].Hash, entries[1].PrevHash)
+	require.NoError(t, log.VerifyChain())
+}
+
+func startProductionAuditProcess(t *testing.T, output *bytes.Buffer, path, mode, operation, opened, attempted, complete, release string) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestProductionAuditCrossProcessAppendHelper$")
+	cmd.Env = append(os.Environ(),
+		"GOCLI_PROD_AUDIT_HELPER_MODE="+mode,
+		"GOCLI_PROD_AUDIT_HELPER_PATH="+path,
+		"GOCLI_PROD_AUDIT_HELPER_OPERATION="+operation,
+		"GOCLI_PROD_AUDIT_HELPER_OPENED="+opened,
+		"GOCLI_PROD_AUDIT_HELPER_ATTEMPTED="+attempted,
+		"GOCLI_PROD_AUDIT_HELPER_COMPLETE="+complete,
+		"GOCLI_PROD_AUDIT_HELPER_RELEASE="+release,
+	)
+	cmd.Stdout = output
+	cmd.Stderr = output
+	require.NoError(t, cmd.Start())
+	return cmd
+}
+
+func writeProductionAuditMarker(path string) error {
+	return os.WriteFile(path, []byte("ready"), 0o600)
+}
+
+func waitForProductionAuditMarker(path string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		_, err := os.Stat(path)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return fmt.Errorf("marker %q was not created before timeout", path)
+}
+
+func TestAuditLogRejectsLegacyUnhashedFile(t *testing.T) {
+	path := auditLogTestPath(t, "audit.jsonl")
+	legacy := []byte(`{"Operation":"legacy"}` + "\n")
+	require.NoError(t, os.WriteFile(path, legacy, 0o600))
+	log, ok := NewDefaultAuditLog(path).(*DefaultAuditLog)
+	require.True(t, ok)
+
+	err := log.Log(context.Background(), AuditEntry{Operation: "new"})
+	assert.ErrorIs(t, err, ErrAuditLogCorrupt)
+	got, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	assert.Equal(t, legacy, got, "a legacy file must be rejected without migration or append")
+}
+
+func TestAuditLogFailsClosedWhenLockUnavailable(t *testing.T) {
+	path := auditLogTestPath(t, "audit.jsonl")
+	require.NoError(t, os.WriteFile(path+".lock", nil, 0o644))
+	require.NoError(t, os.Chmod(path+".lock", 0o644))
+	log, ok := NewDefaultAuditLog(path).(*DefaultAuditLog)
+	require.True(t, ok)
+
+	err := log.Log(context.Background(), AuditEntry{Operation: "new"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "privatefile")
+	_, statErr := os.Stat(path)
+	assert.ErrorIs(t, statErr, os.ErrNotExist, "no audit record is appended without the lock")
+}
+
 func TestAuditLogTamperDetection(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	path := auditLogTestPath(t, "audit.jsonl")
 	l := NewDefaultAuditLog(path)
 
 	require.NoError(t, l.Log(ctx, AuditEntry{Operation: "op1", UserID: "u1"}))
@@ -345,10 +527,55 @@ func TestAuditLogTamperDetection(t *testing.T) {
 	assert.Contains(t, err.Error(), "hash mismatch")
 }
 
+func TestAuditLogLockWaitIsBoundedAfterCallerCancellation(t *testing.T) {
+	path := auditLogTestPath(t, "audit.jsonl")
+	log, ok := NewDefaultAuditLog(path).(*DefaultAuditLog)
+	require.True(t, ok)
+	log.lockTimeout = 50 * time.Millisecond
+	release := holdProductionAuditLock(t, path)
+	defer release()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := log.Log(ctx, AuditEntry{Operation: "blocked"})
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	_, statErr := os.Stat(path)
+	assert.ErrorIs(t, statErr, os.ErrNotExist, "a record is not appended after the lock wait expires")
+}
+
+func holdProductionAuditLock(t *testing.T, path string) func() {
+	t.Helper()
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- privatefile.WithExclusiveLock(context.Background(), path, func() error {
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-locked:
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("test process did not acquire the audit lock")
+	}
+	var once sync.Once
+	finish := func() {
+		once.Do(func() {
+			close(release)
+			require.NoError(t, <-done)
+		})
+	}
+	t.Cleanup(finish)
+	return finish
+}
+
 func TestAuditLogRotation(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	path := auditLogTestPath(t, "audit.jsonl")
 	l := NewDefaultAuditLog(path, WithMaxSize(512))
 
 	// Write enough entries to trigger at least one rotation.
@@ -373,7 +600,7 @@ func TestAuditLogRotation(t *testing.T) {
 func TestAuditLogConcurrentWrite(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	path := auditLogTestPath(t, "audit.jsonl")
 	l := NewDefaultAuditLog(path)
 
 	var wg sync.WaitGroup
@@ -436,4 +663,11 @@ func faultAuditFileOpener(writeMode string, syncErr, truncateErr error) auditFil
 		}
 		return &auditFaultFile{File: file, writeMode: writeMode, syncErr: syncErr, truncateErr: truncateErr}, nil
 	}
+}
+
+func auditLogTestPath(t *testing.T, name string) string {
+	t.Helper()
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	return filepath.Join(dir, name)
 }

@@ -3,7 +3,6 @@ package production
 import (
 	"context"
 	"errors"
-	"path/filepath"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -174,7 +173,7 @@ func TestAuditTelemetryEndToEnd(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
 
-	path := filepath.Join(t.TempDir(), "e2e-audit.jsonl")
+	path := auditLogTestPath(t, "e2e-audit.jsonl")
 	audit := NewDefaultAuditLog(path)
 	tel, ok := NewDefaultTelemetry().(*DefaultTelemetry)
 	require.True(t, ok)

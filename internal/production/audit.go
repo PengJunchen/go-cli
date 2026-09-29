@@ -17,6 +17,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/pengjunchen/go-cli/internal/privatefile"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
@@ -34,6 +35,7 @@ var (
 )
 
 const maxAuditLogLineBytes = 64 * 1024
+const defaultAuditLogLockTimeout = 5 * time.Second
 
 type auditFile interface {
 	io.Writer
@@ -99,7 +101,7 @@ type DefaultAuditLog struct {
 	path        string
 	name        string
 	lastHash    string
-	chainLoaded bool
+	lockTimeout time.Duration
 	poisoned    error
 	maxSize     int64
 	openFile    auditFileOpener
@@ -165,10 +167,11 @@ func boundAuditLogText(value string, maxBytes int) string {
 // NewDefaultAuditLog returns a DefaultAuditLog that appends JSON-lines to path.
 func NewDefaultAuditLog(path string, opts ...AuditLogOption) AuditLog {
 	a := &DefaultAuditLog{
-		path:     path,
-		name:     "default-audit-log",
-		maxSize:  defaultAuditMaxSize,
-		openFile: openAuditLogFile,
+		path:        path,
+		name:        "default-audit-log",
+		maxSize:     defaultAuditMaxSize,
+		lockTimeout: defaultAuditLogLockTimeout,
+		openFile:    openAuditLogFile,
 	}
 	for _, opt := range opts {
 		if opt != nil {
@@ -204,37 +207,33 @@ func (l *DefaultAuditLog) Log(ctx context.Context, entry AuditEntry) error {
 		span.SetStatus(tracing.SpanStatusError, err.Error())
 		return err
 	}
-	if err := l.loadChain(); err != nil {
-		l.mu.Unlock()
-		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-		span.SetStatus(tracing.SpanStatusError, err.Error())
-		return err
-	}
-	// Build the next hash without changing in-memory chain state.
-	entry.PrevHash = l.lastHash
-	payload, err := json.Marshal(entry)
-	if err != nil {
-		l.mu.Unlock()
-		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-		span.SetStatus(tracing.SpanStatusError, err.Error())
-		return err
-	}
-	h := sha256.Sum256([]byte(entry.PrevHash + string(payload)))
-	entry.Hash = hex.EncodeToString(h[:])
-	data, err := json.Marshal(entry)
-	if err != nil {
-		l.mu.Unlock()
-		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-		span.SetStatus(tracing.SpanStatusError, err.Error())
-		return err
-	}
-	durable, rotated, appendErr := l.appendLine(data)
-	if durable {
-		l.lastHash = entry.Hash
-		if rotated {
-			l.lastHash = ""
+	lockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), l.auditLockTimeout())
+	defer cancel()
+	appendErr := privatefile.WithExclusiveLock(lockCtx, l.path, func() error {
+		if err := l.loadChain(); err != nil {
+			return err
 		}
-	}
+
+		entry.PrevHash = l.lastHash
+		payload, err := json.Marshal(entry)
+		if err != nil {
+			return err
+		}
+		h := sha256.Sum256([]byte(entry.PrevHash + string(payload)))
+		entry.Hash = hex.EncodeToString(h[:])
+		data, err := json.Marshal(entry)
+		if err != nil {
+			return err
+		}
+		durable, rotated, appendErr := l.appendLine(data)
+		if durable {
+			l.lastHash = entry.Hash
+			if rotated {
+				l.lastHash = ""
+			}
+		}
+		return appendErr
+	})
 	l.mu.Unlock()
 
 	span.SetAttributes(
@@ -256,13 +255,29 @@ func (l *DefaultAuditLog) Log(ctx context.Context, entry AuditEntry) error {
 	return nil
 }
 
+func (l *DefaultAuditLog) auditLockTimeout() time.Duration {
+	if l.lockTimeout <= 0 {
+		return defaultAuditLogLockTimeout
+	}
+	return l.lockTimeout
+}
+
+func (l *DefaultAuditLog) loadChain() error {
+	lastHash, _, err := walkAuditLog(l.path, nil)
+	if err != nil {
+		return err
+	}
+	l.lastHash = lastHash
+	return nil
+}
+
 // appendLine writes a single JSON line to the log file, creating the file and
 // parent directory if needed. After writing, it checks whether the file exceeds
 // maxSize and rotates it (single generation: path → path+".1") if so. It must
 // be called while l.mu is held.
 func (l *DefaultAuditLog) appendLine(data []byte) (bool, bool, error) {
 	if dir := filepath.Dir(l.path); dir != "." {
-		if err := os.MkdirAll(dir, 0o750); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return false, false, fmt.Errorf("audit log: mkdir: %w", err)
 		}
 	}
@@ -328,19 +343,6 @@ func wrapAuditLogClose(err error) error {
 	return fmt.Errorf("%w: %w", ErrAuditLogClose, err)
 }
 
-func (l *DefaultAuditLog) loadChain() error {
-	if l.chainLoaded {
-		return nil
-	}
-	lastHash, _, err := walkAuditLog(l.path, nil)
-	if err != nil {
-		return err
-	}
-	l.lastHash = lastHash
-	l.chainLoaded = true
-	return nil
-}
-
 // VerifyChain reads the log file and verifies the SHA-256 hash chain: each
 // entry's Hash must equal sha256(PrevHash + payload-without-Hash) and each
 // PrevHash must equal the previous entry's Hash. It returns an error
@@ -348,8 +350,12 @@ func (l *DefaultAuditLog) loadChain() error {
 func (l *DefaultAuditLog) VerifyChain() error {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
-	_, _, err := walkAuditLog(l.path, nil)
-	return err
+	lockCtx, cancel := context.WithTimeout(context.Background(), l.auditLockTimeout())
+	defer cancel()
+	return privatefile.WithExclusiveLock(lockCtx, l.path, func() error {
+		_, _, err := walkAuditLog(l.path, nil)
+		return err
+	})
 }
 
 // Query streams the log file line by line and returns entries that match
@@ -363,11 +369,16 @@ func (l *DefaultAuditLog) Query(ctx context.Context, filter AuditFilter) ([]Audi
 	defer l.mu.RUnlock()
 
 	var filtered []AuditEntry
-	_, _, err := walkAuditLog(l.path, func(entry AuditEntry) error {
-		if filter.Matches(entry) {
-			filtered = append(filtered, entry)
-		}
-		return nil
+	lockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), l.auditLockTimeout())
+	defer cancel()
+	err := privatefile.WithExclusiveLock(lockCtx, l.path, func() error {
+		_, _, walkErr := walkAuditLog(l.path, func(entry AuditEntry) error {
+			if filter.Matches(entry) {
+				filtered = append(filtered, entry)
+			}
+			return nil
+		})
+		return walkErr
 	})
 	if err != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
