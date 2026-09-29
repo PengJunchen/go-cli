@@ -2,7 +2,7 @@
 
 Baseline: `5dcf538c5edbffd2304808fa3a6117e602a9088e`.
 
-This audit covers the 15 R0/R1 planned test names that remained unmatched after `TestEventStreamDropVisibleToRunOwner` landed in the root branch. It updates a planned name only where an existing test proves the same acceptance behavior. Task status fields remain unchanged. Eleven planned names now point to existing test functions; four remain unresolved below.
+This audit covers the 15 R0/R1 planned test names that remained unmatched after `TestEventStreamDropVisibleToRunOwner` landed in the root branch. It updates a planned name only where an existing test proves the same acceptance behavior. Task status fields remain unchanged. Eleven planned names map to equivalent tests; three more now have exact acceptance tests. The remaining legacy SSE case is excluded by the current transport boundary below.
 
 ## Equivalent mappings
 
@@ -20,17 +20,18 @@ This audit covers the 15 R0/R1 planned test names that remained unmatched after 
 | `TestUnknownOutcomeRetainsMutationSlot` | `TestAssemblySharesRunSlotGuardAcrossHarnessAndTurnRunner` | `internal/cli/run_ownership_integration_test.go:252` uses actual `AssembleAgent` wiring in sequential and parallel cases; an unknown pending mutation blocks the opposite run entry point until worker release, then the claim becomes reusable. |
 | `TestHarnessSpanEndsAfterRun` | `TestHarnessSpanEndsAfterRunAndIncludesOutcomeAttributes` | `internal/core/run_owner_test.go:664` keeps the span open while the run is active, ends it on observed completion, and checks outcome, execution state, and run ID attributes. |
 
-## Still pending
+## Later exact acceptance tests
 
-| Unmatched planned acceptance | Why no existing name is substituted |
+| Planned acceptance | Current test and scope |
 | --- | --- |
-| `TestMCPRejectsCrossOriginEndpointWithCredentials` | `TestHTTPAdapterRejectsCrossOriginRedirectBeforeCredentials` in `internal/mcp/http_adapter_test.go:587` proves the redirect case only. No test was found for a configured foreign absolute SSE endpoint receiving neither a request nor credentials, as required by `r0-contract.md`. |
-| `TestPlanModeBlocksKnownMutatingBuiltins` | The controller table in `internal/core/plan_mode_test.go` enumerates names, but the middleware/wrapper tests do not execute every registered Git mutation through the actual Plan Mode guard. The existing write/edit/bash cases and generic external-tool denial are partial coverage. |
-| `TestPlanModePreservesApprovedReadOnlyTools` | `TestDefaultPlanModeController_ShouldNotBlockReadTools_WhenActive` covers control tools, not the R0 contract's exact registered read-only built-ins. R4 prepared effect/identity-policy tests are not substitutes for this R0 name-based stopgap acceptance. |
-| `TestNonCooperativeWorkerQuarantinedAfterDeadline` | `TestRunOwnerNonCooperativeCallbackReturnsPendingThenQuiesces` covers a non-cooperative top-level callback; worker-focused tests prove claim retention but do not prove worker-level quarantine after the deadline. |
+| `TestPlanModeBlocksKnownMutatingBuiltins` | `internal/core/plan_mode_r0_acceptance_test.go:25` runs registered mutation tools through the actual Plan Mode guard. This proves the R0 name-based stopgap, not the R4 effect policy. |
+| `TestPlanModePreservesApprovedReadOnlyTools` | `internal/core/plan_mode_r0_acceptance_test.go:58` runs the approved registered read and control tools through that same guard. |
+| `TestNonCooperativeWorkerQuarantinedAfterDeadline` | `internal/cli/run_ownership_integration_test.go:397` exercises a non-cooperative Assembly worker and its retained run claim after the cleanup deadline. |
 
-The R0 contract explicitly keeps its conservative name-based Plan Mode guard separate from the general effect/capability model assigned to R4. No R4 prepared-policy result is counted as evidence for either pending R0 Plan Mode acceptance.
+`TestMCPRejectsCrossOriginEndpointWithCredentials` remains unregistered. The historical foreign absolute SSE endpoint flow is not implemented by the current Streamable HTTP adapter; [the reachability review](../evidence/r0-mcp-foreign-sse-endpoint-reachability.md) records the source proof and the applicable `TestHTTPAdapterRejectsCrossOriginRedirectBeforeCredentials` regression. Do not count an absent test name or an inapplicable flow as a passing test.
+
+The R0 contract keeps its conservative name-based Plan Mode guard separate from the general effect/capability model assigned to R4. No R4 prepared-policy result is counted as R0 Plan Mode acceptance.
 
 ## Verification
 
-The added ANSI-isolation test was verified with targeted `go test -list` and passed through `verify-test-gate` while the gate inherited `NO_COLOR=1 TERM=dumb`. The TUI package also passed `go test -race -count=1` and `go vet`; `git diff --check` passed.
+The added ANSI-isolation test was verified with targeted `go test -list` and passed through `verify-test-gate` while the gate inherited `NO_COLOR=1 TERM=dumb`. The TUI package also passed `go test -race -count=1` and `go vet`. Later exact Plan Mode and worker tests were independently run under race before integration; their names were checked in the current source. Full final-branch verification is tracked separately.
