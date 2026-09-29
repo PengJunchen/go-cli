@@ -14,11 +14,12 @@ import (
 	"syscall"
 	"time"
 
+	"golang.org/x/term"
+
 	"github.com/pengjunchen/go-cli/internal/approval"
 	"github.com/pengjunchen/go-cli/internal/cli"
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/tracing"
-	"golang.org/x/term"
 )
 
 func main() {
