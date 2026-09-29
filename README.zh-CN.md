@@ -131,10 +131,12 @@ EinoProvider 基于 `net/http` 实现 OpenAI 兼容协议，零外部依赖。
 
 ### 内置工具
 
+此表描述已实现的工具组件，不等同于每次运行时实际提供给模型的工具注册表。请在交互会话中用 `/tools` 查看本次注册的工具，并用 `/help` 查看默认能力边界。
+
 | 分类 | 工具 | 说明 |
 |---|---|---|
 | 文件/Shell | `bash` | 执行 shell 命令 (流式输出、沙箱与资源限制) |
-| 文件/Shell | `read` | 读取文件 (支持图片) |
+| 文件/Shell | `read` | 读取文本文件 |
 | 文件/Shell | `write` | 写入文件 |
 | 文件/Shell | `edit` | 差异编辑 (old/new 替换) |
 | 文件/Shell | `grep` | 正则搜索 (支持纯 Go 模式) |
@@ -145,15 +147,15 @@ EinoProvider 基于 `net/http` 实现 OpenAI 兼容协议，零外部依赖。
 | Git | `git_merge`/`git_stash`/`git_stash_pop`/`git_reset`/`git_revert` | Git 工作流 |
 | Git | `git_pr_create` | 创建 Pull Request |
 | Web | `web_fetch` | 抓取 URL 内容 |
-| Web | `web_search` | 网页搜索 (mock/fetch/brave 提供者) |
+| Web | `web_search` | 需要配置搜索提供者；默认不可用 |
 | Web | `tool_search` | 语义工具搜索 |
-| 效率 | `todo_write` | Todo 列表管理 |
-| 效率 | `task_create`/`task_get`/`task_list`/`task_update` | 任务存储 |
-| 效率 | `goal_create`/`goal_update`/`goal_list`/`goal_get` | 目标存储 |
+| 效率 | `todo_write` | 仅当前进程有效；重启后不保留 |
+| 效率 | `task_create`/`task_get`/`task_list`/`task_update` | 仅当前进程有效；重启后不保留 |
+| 效率 | `goal_create`/`goal_update`/`goal_list`/`goal_get` | 仅当前进程有效；重启后不保留 |
 | 代码 | `lsp_query` | 语言服务器协议查询 |
-| 多模态 | `image_read` | 读取并解码图片 |
+| 多模态 | `image_read` | 默认 CLI 未注册 |
 | 交互 | `ask_user` | 人机协作提问 |
-| 交互 | `enter_plan_mode`/`exit_plan_mode` | 计划模式切换 |
+| 交互 | `/plan enter`/`/plan exit` | 仅由用户控制 Plan Mode；不是模型调用工具 |
 | Agent | `dispatch_subagent` | SubAgent 调度 |
 | Agent | `remote_bash` | 通过 SSH 的远程 Shell |
 
@@ -173,9 +175,10 @@ EinoProvider 基于 `net/http` 实现 OpenAI 兼容协议，零外部依赖。
 
 ### Session 管理
 
-- **SessionTree**: append-only 树结构，支持分支 (`Branch`)、移动 (`MoveTo`)、上下文重建 (`BuildContext`)
+- **SessionTree**: 核心 API 支持分支 (`Branch`)、移动 (`MoveTo`) 和上下文重建 (`BuildContext`)。默认 CLI 只在配置的 session 目录中按准确的物理 session ID 恢复；不支持 fork、切换分支、snapshot 或 migration。
 - **JSONLSessionStore**: 文件持久化，每条记录一行 JSON，追加写入
 - **BranchSummary**: 离开分支时自动生成摘要
+- **Memory**: `/memory` 管理用户手动录入的记录；默认 CLI 不会自动提取记忆，也不会把已有记录注入模型提示。
 
 ### 扩展系统
 
