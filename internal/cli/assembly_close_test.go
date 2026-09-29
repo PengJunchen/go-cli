@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -372,6 +373,87 @@ func TestAssemblyCloseOwnerKeepsOneSequenceAcrossWaiters(t *testing.T) {
 	close(blocked)
 	require.NoError(t, owner.Close(context.Background()))
 	require.EqualValues(t, 1, closeCalls.Load())
+}
+
+type unrelatedDoneError struct {
+	done <-chan struct{}
+}
+
+func (e unrelatedDoneError) Error() string { return "unrelated done error" }
+
+func (e unrelatedDoneError) Done() <-chan struct{} { return e.done }
+
+func TestAssemblyCloseCompletionsSelectsActualOwnerChannel(t *testing.T) {
+	guard := core.NewDefaultRunSlotGuard()
+	closeStarted := make(chan struct{})
+	releaseClose := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseClose) }) }
+	owner := newAssemblyCloseOwner(
+		func() core.RunSlotGuard { return guard },
+		nil,
+		nil,
+		func(context.Context, <-chan struct{}) error {
+			close(closeStarted)
+			<-releaseClose
+			return nil
+		},
+	)
+	t.Cleanup(func() {
+		release()
+		_ = owner.Close(context.Background())
+	})
+
+	waiterCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	pendingErr := owner.Close(waiterCtx)
+	require.ErrorIs(t, pendingErr, ErrAssemblyClosePending)
+	select {
+	case <-closeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("Assembly close owner did not start")
+	}
+
+	unrelatedDone := make(chan struct{})
+	close(unrelatedDone)
+	joined := errors.Join(unrelatedDoneError{done: unrelatedDone}, pendingErr)
+	completions, ok := AssemblyCloseCompletions(joined)
+	require.True(t, ok)
+	require.Len(t, completions, 1)
+	select {
+	case <-completions[0]:
+		t.Fatal("extractor selected the unrelated already-closed Done channel")
+	default:
+	}
+
+	release()
+	select {
+	case <-completions[0]:
+	case <-time.After(time.Second):
+		t.Fatal("actual Assembly close completion did not become observable")
+	}
+}
+
+func TestAssemblyCloseCompletionsCollectAllAndRejectInvalid(t *testing.T) {
+	first := make(chan struct{})
+	second := make(chan struct{})
+	joined := errors.Join(
+		&assemblyClosePendingError{done: first},
+		fmt.Errorf("wrapped: %w", &assemblyClosePendingError{done: second}),
+		&assemblyClosePendingError{done: first},
+	)
+	completions, ok := AssemblyCloseCompletions(joined)
+	require.True(t, ok)
+	require.Len(t, completions, 2, "actual owner channels are deduplicated")
+	require.Contains(t, completions, (<-chan struct{})(first))
+	require.Contains(t, completions, (<-chan struct{})(second))
+
+	invalid := errors.Join(
+		&assemblyClosePendingError{done: first},
+		&assemblyClosePendingError{done: nil},
+	)
+	_, ok = AssemblyCloseCompletions(invalid)
+	require.False(t, ok, "one missing actual owner channel must fail closed")
 }
 
 func TestAssemblyCloseFencesBeforeBlockedStopCallback(t *testing.T) {

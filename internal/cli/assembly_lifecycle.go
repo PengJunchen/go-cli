@@ -22,6 +22,72 @@ var (
 	ErrAssemblyResourceCompletionUnknown = errors.New("cli: assembly resource completion is unknown")
 )
 
+type assemblyClosePendingError struct {
+	reason string
+	cause  error
+	done   <-chan struct{}
+}
+
+func (e *assemblyClosePendingError) Error() string {
+	if e == nil {
+		return ErrAssemblyClosePending.Error()
+	}
+	if e.reason == "" {
+		return ErrAssemblyClosePending.Error()
+	}
+	return fmt.Sprintf("%s: %s", ErrAssemblyClosePending, e.reason)
+}
+
+func (e *assemblyClosePendingError) Unwrap() error {
+	if e == nil {
+		return ErrAssemblyClosePending
+	}
+	return errors.Join(ErrAssemblyClosePending, e.cause)
+}
+
+func (e *assemblyClosePendingError) Done() <-chan struct{} {
+	if e == nil {
+		return nil
+	}
+	return e.done
+}
+
+// AssemblyCloseCompletions returns the actual completion channels carried by
+// Assembly close-pending errors in err's wrapping or join tree. Unrelated
+// errors with a Done method are ignored. ok is false when no Assembly pending
+// error is present or any such error has no valid completion channel.
+func AssemblyCloseCompletions(err error) (channels []<-chan struct{}, ok bool) {
+	found := false
+	valid := true
+	seen := make(map[<-chan struct{}]struct{})
+	var visit func(error)
+	visit = func(current error) {
+		if current == nil {
+			return
+		}
+		if pending, isPending := current.(*assemblyClosePendingError); isPending {
+			found = true
+			if pending == nil || pending.done == nil {
+				valid = false
+			} else if _, exists := seen[pending.done]; !exists {
+				seen[pending.done] = struct{}{}
+				channels = append(channels, pending.done)
+			}
+		}
+		if many, hasMany := current.(interface{ Unwrap() []error }); hasMany {
+			for _, cause := range many.Unwrap() {
+				visit(cause)
+			}
+			return
+		}
+		if one, hasOne := current.(interface{ Unwrap() error }); hasOne {
+			visit(one.Unwrap())
+		}
+	}
+	visit(err)
+	return channels, found && valid && len(channels) > 0
+}
+
 type assemblyCloseOwner struct {
 	startOnce sync.Once
 	done      chan struct{}
@@ -323,8 +389,7 @@ func (o *assemblyCloseOwner) pending(reason string) error {
 	o.mu.Lock()
 	lastErr := o.err
 	o.mu.Unlock()
-	pendingErr := fmt.Errorf("%w: %s", ErrAssemblyClosePending, reason)
-	return errors.Join(pendingErr, lastErr)
+	return &assemblyClosePendingError{reason: reason, cause: lastErr, done: o.done}
 }
 
 func (o *assemblyCloseOwner) markPending(err error) {
