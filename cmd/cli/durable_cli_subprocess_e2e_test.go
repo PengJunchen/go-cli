@@ -3,7 +3,10 @@ package main
 import (
 	"bufio"
 	"bytes"
+	cryptorand "crypto/rand"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -13,6 +16,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -138,6 +142,414 @@ func TestDurableCLIBinaryPersistsWriteReceiptAndDoesNotReplayAfterRestart(t *tes
 	})
 }
 
+func TestDurableCLIBinaryQuarantinesLiveOrphanedBashAndNeverReplays(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	require.NoError(t, err)
+	binary := filepath.Join(t.TempDir(), "go-cli")
+	build := exec.Command("go", "build", "-o", binary, "./cmd/cli")
+	build.Dir = root
+	buildOutput, err := build.CombinedOutput()
+	require.NoError(t, err, "build real CLI: %s", buildOutput)
+	t.Logf("build command: go build -o %s ./cmd/cli\nbuild exit: 0\nbuild output: %s", binary, buildOutput)
+
+	fixture := newDurableCLIBinaryFixtureWithTools(t, binary, false, []string{"bash", "write"})
+	t.Cleanup(func() { fixture.server.Close() })
+	orphan := newDurableCLIOrphanControl(t, fixture.workDir)
+	t.Cleanup(func() {
+		if err := orphan.cleanup(3 * time.Second); err != nil {
+			t.Errorf("release and observe the fixture-owned Bash process exit during cleanup: %v", err)
+		}
+	})
+	fixture.peer.setResponsePlan(
+		durableCLIToolCall("call-live-orphan-bash", "bash", map[string]string{"command": orphan.command()}),
+		durableCLIFinal("exact resume after live orphan"),
+		durableCLIToolCall("call-blocked-fresh-write", "write", map[string]string{
+			"path":    "fresh-session-effect.txt",
+			"content": "must-not-dispatch",
+		}),
+		durableCLIFinal("recovered denied fresh-session mutation"),
+	)
+
+	command, stdout, stderr, wait := fixture.start(t,
+		"prompt", "-provider=openai", "-output=text", "-approve=auto", "-no-sandbox", "create durable orphan marker")
+	physicalID := waitForDurableCLIOutput(t, stdout, "Session ID: ")
+	rows, action := waitForDurableBashDispatch(t, fixture, physicalID, "call-live-orphan-bash")
+	requireDurableSourceIDsUnique(t, rows, physicalID)
+	indexRows := fixture.readWorkspaceIndex(t, action.workspaceID)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, physicalID, action.actionID, action.toolCallID, 1, 0)
+	require.Empty(t, receiptsForCall(rows, "call-live-orphan-bash"), "no tool receipt may precede managed Bash completion")
+	require.Empty(t, requireRunTerminals(t, rows, physicalID, 0), "the run cannot have a terminal while managed Bash is still running")
+	require.NoFileExists(t, orphan.effectPath, "the fixture holds the actual tool child before the external effect")
+	waitForOrphanStarted(t, orphan)
+	requireOrphanLedgerCounts(t, orphan, 1, 0, "after managed Bash start and before its effect gate opens")
+	rows, action = waitForDurableBashDispatch(t, fixture, physicalID, "call-live-orphan-bash")
+	requireDurableSourceIDsUnique(t, rows, physicalID)
+	indexRows = fixture.readWorkspaceIndex(t, action.workspaceID)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, physicalID, action.actionID, action.toolCallID, 1, 0)
+	require.NoFileExists(t, orphan.effectPath, "the effect gate keeps the managed command behind the synced durable marker")
+	require.NoError(t, orphan.releaseEffectGate())
+	waitForOrphanEffect(t, orphan)
+	requireOrphanLedgerCounts(t, orphan, 1, 1, "before parent kill")
+	heartbeat := waitForOrphanHeartbeat(t, orphan, 0)
+	heartbeat = waitForOrphanHeartbeatAdvance(t, orphan, heartbeat)
+	requests := fixture.assertPeerRequests(t, 1)
+	require.Contains(t, string(requests[0]), `"content":"create durable orphan marker"`)
+	t.Logf("pre-crash durable boundary physical_id=%s action_id=%s tool_call_id=%s workspace_id=%s dispatches=1 resolutions=0 receipt=absent terminals=0 effect=%s child_nonce=%s heartbeat=%d", physicalID, action.actionID, action.toolCallID, action.workspaceID, orphan.effectPath, orphan.nonce, heartbeat)
+
+	require.NoError(t, command.Process.Kill(), "SIGKILL only the owned CLI process; leave its managed Bash process group alone")
+	firstErr := <-wait
+	first := durableCLIChildResult{stdout: stdout.String(), stderr: stderr.String(), err: firstErr, exitCode: command.ProcessState.ExitCode(), state: command.ProcessState.String()}
+	requireCLIChildExit(t, first, -1)
+	t.Logf("killed actual CLI parent exit=%d state=%s stdout=%q stderr=%q", first.exitCode, first.state, first.stdout, first.stderr)
+	rows = fixture.readRows(t, physicalID)
+	requireDurableSourceIDsUnique(t, rows, physicalID)
+	require.Empty(t, receiptsForCall(rows, "call-live-orphan-bash"), "SIGKILL before tool completion must leave the receipt absent")
+	require.Empty(t, requireRunTerminals(t, rows, physicalID, 0), "SIGKILL must leave the original run without a terminal checkpoint")
+	indexRows = fixture.readWorkspaceIndex(t, action.workspaceID)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, physicalID, action.actionID, action.toolCallID, 1, 0)
+	heartbeat = waitForOrphanHeartbeatAdvance(t, orphan, heartbeat)
+	requireOrphanLedgerCounts(t, orphan, 1, 1, "after parent kill")
+	t.Logf("post-parent-kill orphan still alive physical_id=%s action_id=%s child_nonce=%s heartbeat=%d receipt=absent terminals=0 dispatches=1 resolutions=0", physicalID, action.actionID, orphan.nonce, heartbeat)
+
+	resumed := fixture.run(t,
+		"prompt", "-provider=openai", "-output=text", "-approve=auto", "-no-sandbox", "-resume-session", physicalID, "resume exact orphaned session")
+	requireCLIChildExit(t, resumed, 0)
+	require.Equal(t, physicalID, durableCLIPhysicalSessionIDFromOutput(t, resumed.stdout), "restart must select the same physical session")
+	require.Contains(t, resumed.stdout, "exact resume after live orphan")
+	requireOrphanLedgerCounts(t, orphan, 1, 1, "after exact resume")
+	rows = fixture.readRows(t, physicalID)
+	requireDurableSourceIDsUnique(t, rows, physicalID)
+	recoveredReceipt := requireRecoveredUnknownBashReceipt(t, rows, physicalID, action)
+	terminals := requireRunTerminals(t, rows, physicalID, 1)
+	logDurableFileEvidence(t, "live-orphan exact resume", physicalID, rows, action, terminals)
+	requests = fixture.assertPeerRequests(t, 2)
+	resumedRequest := string(requests[1])
+	require.Contains(t, resumedRequest, `"content":"create durable orphan marker"`)
+	require.Contains(t, resumedRequest, `"tool_call_id":"call-live-orphan-bash"`)
+	require.Contains(t, resumedRequest, recoveredReceipt.Content, "the recovered exact-session request must expose the durable unknown receipt")
+	require.Equal(t, action.actionID, recoveredReceipt.ActionID)
+	indexRows = fixture.readWorkspaceIndex(t, action.workspaceID)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, physicalID, action.actionID, action.toolCallID, 1, 0)
+	heartbeat = waitForOrphanHeartbeatAdvance(t, orphan, heartbeat)
+
+	blocked := fixture.run(t,
+		"prompt", "-provider=openai", "-output=text", "-approve=auto", "-no-sandbox", "attempt conflicting mutation from a new session")
+	requireCLIChildFailure(t, blocked, 1)
+	freshPhysicalID := durableCLIPhysicalSessionIDFromOutput(t, blocked.stdout)
+	require.NotEqual(t, physicalID, freshPhysicalID, "a new CLI prompt must have a distinct physical session")
+	require.Contains(t, blocked.stderr, "workspace is quarantined by unresolved actions")
+	require.Contains(t, blocked.stderr, "unreceipted tool calls")
+	require.NoFileExists(t, filepath.Join(fixture.workDir, "fresh-session-effect.txt"), "the second physical session cannot dispatch a conflicting mutation while the orphan remains unresolved")
+	requireOrphanLedgerCounts(t, orphan, 1, 1, "after distinct-session mutation rejection; that session has zero effects")
+	blockedRows := fixture.readRows(t, freshPhysicalID)
+	requireDurableSourceIDsUnique(t, blockedRows, freshPhysicalID)
+	blockedAction := requirePendingWriteAttempt(t, blockedRows, freshPhysicalID, "call-blocked-fresh-write")
+	require.NotEqual(t, action.actionID, blockedAction.actionID, "the fresh session must have its own action identity")
+	require.Equal(t, action.workspaceID, blockedAction.workspaceID, "both physical sessions must share the exact captured workspace authority")
+	require.Empty(t, receiptsForCall(blockedRows, "call-blocked-fresh-write"), "the failed pre-dispatch commit must not be fabricated as a durable receipt")
+	require.Empty(t, requireRunTerminals(t, blockedRows, freshPhysicalID, 0), "the failing fresh-session run has no durable terminal")
+	requests = fixture.assertPeerRequests(t, 3)
+	require.Contains(t, string(requests[2]), `"content":"attempt conflicting mutation from a new session"`)
+	requireOrphanLedgerCounts(t, orphan, 1, 1, "after distinct-session mutation rejection")
+	indexRows = fixture.readWorkspaceIndex(t, action.workspaceID)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, physicalID, action.actionID, action.toolCallID, 1, 0)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, freshPhysicalID, blockedAction.actionID, blockedAction.toolCallID, 0, 0)
+	heartbeat = waitForOrphanHeartbeatAdvance(t, orphan, heartbeat)
+	t.Logf("fresh-session conflict denied physical_id=%s intent_action_id=%s receipt=absent terminal=absent old_action_id=%s old_dispatches=1 old_resolutions=0 heartbeat=%d provider_requests=%d exit=%d", freshPhysicalID, blockedAction.actionID, action.actionID, heartbeat, len(requests), blocked.exitCode)
+
+	blockedResume := fixture.run(t,
+		"prompt", "-provider=openai", "-output=text", "-approve=auto", "-no-sandbox", "-resume-session", freshPhysicalID, "resume after denied mutation")
+	requireCLIChildExit(t, blockedResume, 0)
+	require.Equal(t, freshPhysicalID, durableCLIPhysicalSessionIDFromOutput(t, blockedResume.stdout), "the failed fresh session must resume by its exact physical ID")
+	require.Contains(t, blockedResume.stdout, "recovered denied fresh-session mutation")
+	blockedRows = fixture.readRows(t, freshPhysicalID)
+	requireDurableSourceIDsUnique(t, blockedRows, freshPhysicalID)
+	interruptedReceipt := requireRecoveredInterruptedWriteReceipt(t, blockedRows, freshPhysicalID, blockedAction)
+	blockedTerminals := requireRunTerminals(t, blockedRows, freshPhysicalID, 1)
+	logDurableFileEvidence(t, "fresh-session exact resume after denial", freshPhysicalID, blockedRows, blockedAction, blockedTerminals)
+	requests = fixture.assertPeerRequests(t, 4)
+	require.Contains(t, string(requests[3]), `"tool_call_id":"call-blocked-fresh-write"`)
+	require.Contains(t, string(requests[3]), interruptedReceipt.Content, "the resumed request uses real marker-absent recovery evidence")
+	indexRows = fixture.readWorkspaceIndex(t, action.workspaceID)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, physicalID, action.actionID, action.toolCallID, 1, 0)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, freshPhysicalID, blockedAction.actionID, blockedAction.toolCallID, 0, 0)
+	require.NoFileExists(t, filepath.Join(fixture.workDir, "fresh-session-effect.txt"), "exact recovery of the denied distinct-session mutation must not create an effect")
+	requireOrphanLedgerCounts(t, orphan, 1, 1, "after denied distinct-session exact resume")
+
+	require.NoError(t, orphan.releaseAndWait(10*time.Second), "the nonce-bound release file must let the actual orphaned Bash process exit")
+	requireOrphanExitProofs(t, orphan)
+	requireOrphanLedgerCounts(t, orphan, 1, 1, "after orphan exit")
+	rows = fixture.readRows(t, physicalID)
+	recoveredAgain := requireRecoveredUnknownBashReceipt(t, rows, physicalID, action)
+	require.Equal(t, recoveredReceipt.ID, recoveredAgain.ID, "fixture child exit does not replace the durable unknown receipt")
+	require.Equal(t, "unknown", recoveredAgain.ReceiptOutcome)
+	indexRows = fixture.readWorkspaceIndex(t, action.workspaceID)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, physicalID, action.actionID, action.toolCallID, 1, 0)
+	require.Equal(t, "interrupted", interruptedReceipt.ReceiptOutcome)
+	require.Equal(t, "not_dispatched", string(interruptedReceipt.DispatchState))
+	t.Logf("orphan released physical_id=%s action_id=%s exit_proof=%s receipt_id=%s receipt_outcome=%s dispatches=1 resolutions=0 fresh_write_receipt_id=%s fresh_write_outcome=%s fresh_write_dispatch_state=%s", physicalID, action.actionID, orphan.exitPath, recoveredAgain.ID, recoveredAgain.ReceiptOutcome, interruptedReceipt.ID, interruptedReceipt.ReceiptOutcome, interruptedReceipt.DispatchState)
+}
+
+type durableCLIOrphanControl struct {
+	nonce          string
+	invocationID   string
+	startedPath    string
+	effectGatePath string
+	effectPath     string
+	heartbeatPath  string
+	releasePath    string
+	exitPath       string
+}
+
+func newDurableCLIOrphanControl(t *testing.T, workDir string) *durableCLIOrphanControl {
+	t.Helper()
+	var nonceBytes [16]byte
+	_, err := cryptorand.Read(nonceBytes[:])
+	require.NoError(t, err)
+	nonce := hex.EncodeToString(nonceBytes[:])
+	prefix := filepath.Join(workDir, ".durable-orphan-"+nonce)
+	return &durableCLIOrphanControl{
+		nonce:          nonce,
+		startedPath:    prefix + ".started",
+		effectGatePath: prefix + ".effect-gate",
+		effectPath:     filepath.Join(workDir, "durable-orphan-effect.jsonl"),
+		heartbeatPath:  prefix + ".heartbeat",
+		releasePath:    prefix + ".release",
+		exitPath:       prefix + ".exit-proof",
+	}
+}
+
+func (control *durableCLIOrphanControl) command() string {
+	return strings.Join([]string{
+		"invocation_id=" + shellQuote(control.nonce) + ":$$:$RANDOM",
+		"printf '%s\\n' \"$invocation_id\" >> " + shellQuote(control.startedPath) + " && sync || exit 91",
+		"while [ \"$(cat " + shellQuote(control.effectGatePath) + " 2>/dev/null)\" != " + shellQuote(control.nonce) + " ]; do sleep 0.02; done",
+		"printf '%s\\n' \"$invocation_id\" >> " + shellQuote(control.effectPath) + " && sync || exit 92",
+		"i=0",
+		"while [ \"$(cat " + shellQuote(control.releasePath) + " 2>/dev/null)\" != " + shellQuote(control.nonce) + " ]; do i=$((i + 1)); printf '%s:%s\\n' \"$invocation_id\" \"$i\" > " + shellQuote(control.heartbeatPath) + "; sleep 0.02; done",
+		"printf '%s\\n' \"$invocation_id\" >> " + shellQuote(control.exitPath) + " && sync || exit 93",
+		"exit 0",
+	}, "; ")
+}
+
+func shellQuote(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
+}
+
+func (control *durableCLIOrphanControl) started() bool {
+	entries, err := readDurableCLIOrphanLedger(control.startedPath)
+	if err != nil || len(entries) == 0 {
+		return false
+	}
+	if control.invocationID == "" {
+		control.invocationID = entries[0]
+	}
+	return true
+}
+
+func (control *durableCLIOrphanControl) releaseEffectGate() error {
+	return os.WriteFile(control.effectGatePath, []byte(control.nonce), 0o600)
+}
+
+func (control *durableCLIOrphanControl) releaseAndWait(timeout time.Duration) error {
+	if err := control.releaseEffectGate(); err != nil {
+		return fmt.Errorf("write nonce-bound effect gate: %w", err)
+	}
+	if err := os.WriteFile(control.releasePath, []byte(control.nonce), 0o600); err != nil {
+		return fmt.Errorf("write nonce-bound release file: %w", err)
+	}
+	if err := waitForOrphanExitProofs(control, timeout); err != nil {
+		return fmt.Errorf("wait for fixture-specific Bash exit proofs: %w", err)
+	}
+	if err := waitForOrphanHeartbeatStable(control, 150*time.Millisecond); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (control *durableCLIOrphanControl) cleanup(timeout time.Duration) error {
+	if err := control.releaseEffectGate(); err != nil {
+		return fmt.Errorf("write cleanup effect gate: %w", err)
+	}
+	if err := os.WriteFile(control.releasePath, []byte(control.nonce), 0o600); err != nil {
+		return fmt.Errorf("write cleanup release file: %w", err)
+	}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if control.started() || control.hasExitProof() {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if !control.started() && !control.hasExitProof() {
+		return nil
+	}
+	if err := waitForOrphanExitProofs(control, timeout); err != nil {
+		return fmt.Errorf("wait for fixture-specific Bash exit proofs during cleanup: %w", err)
+	}
+	if _, ok := readOrphanHeartbeat(control); ok {
+		return waitForOrphanHeartbeatStable(control, 150*time.Millisecond)
+	}
+	return nil
+}
+
+func (control *durableCLIOrphanControl) hasExitProof() bool {
+	entries, err := readDurableCLIOrphanLedger(control.exitPath)
+	return err == nil && len(entries) > 0
+}
+
+func readDurableCLIOrphanLedger(path string) ([]string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var entries []string
+	for _, line := range strings.Split(string(data), "\n") {
+		line = strings.TrimSpace(line)
+		if line != "" {
+			entries = append(entries, line)
+		}
+	}
+	return entries, nil
+}
+
+func requireOrphanLedgerCounts(t *testing.T, control *durableCLIOrphanControl, wantStarted, wantEffects int, phase string) {
+	t.Helper()
+	started, err := readDurableCLIOrphanLedger(control.startedPath)
+	require.NoError(t, err, "%s: read append-only Bash start ledger", phase)
+	effects, err := readDurableCLIOrphanLedger(control.effectPath)
+	require.NoError(t, err, "%s: read append-only external-effect ledger", phase)
+	require.Len(t, started, wantStarted, "%s: actual managed Bash invocation count", phase)
+	require.Len(t, effects, wantEffects, "%s: visible external effect count", phase)
+	for _, invocationID := range started {
+		require.True(t, strings.HasPrefix(invocationID, control.nonce+":"), "%s: start record carries this fixture nonce", phase)
+	}
+	for _, invocationID := range effects {
+		require.Contains(t, started, invocationID, "%s: effect record belongs to a recorded managed Bash invocation", phase)
+	}
+	if len(started) > 0 {
+		require.Equal(t, started[0], control.invocationID, "%s: fixture identity remains bound to the original managed Bash invocation", phase)
+	}
+}
+
+func requireOrphanExitProofs(t *testing.T, control *durableCLIOrphanControl) {
+	t.Helper()
+	started, err := readDurableCLIOrphanLedger(control.startedPath)
+	require.NoError(t, err)
+	exits, err := readDurableCLIOrphanLedger(control.exitPath)
+	require.NoError(t, err)
+	require.True(t, sameLedgerRecords(started, exits), "every fixture-owned Bash invocation must publish its own exit proof")
+}
+
+func waitForOrphanExitProofs(control *durableCLIOrphanControl, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		started, startedErr := readDurableCLIOrphanLedger(control.startedPath)
+		exits, exitErr := readDurableCLIOrphanLedger(control.exitPath)
+		if startedErr == nil && exitErr == nil && len(started) > 0 && sameLedgerRecords(started, exits) {
+			return nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	return fmt.Errorf("not every managed Bash invocation has an exact exit proof within %s", timeout)
+}
+
+func sameLedgerRecords(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for _, entry := range left {
+		found := false
+		for _, other := range right {
+			if entry == other {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+func waitForOrphanStarted(t *testing.T, control *durableCLIOrphanControl) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		entries, err := readDurableCLIOrphanLedger(control.startedPath)
+		if err == nil && len(entries) > 0 {
+			require.Len(t, entries, 1, "only the original managed Bash invocation may start before reopening its session")
+			require.True(t, strings.HasPrefix(entries[0], control.nonce+":"), "the invocation record must carry this fixture nonce")
+			control.invocationID = entries[0]
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("the actual managed Bash command did not append its nonce-bound start record to %s", control.startedPath)
+}
+
+func waitForOrphanEffect(t *testing.T, control *durableCLIOrphanControl) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		entries, err := readDurableCLIOrphanLedger(control.effectPath)
+		if err == nil && len(entries) > 0 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("the actual managed Bash command did not append its nonce-bound effect record to %s", control.effectPath)
+}
+
+func waitForOrphanHeartbeat(t *testing.T, control *durableCLIOrphanControl, after int) int {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		if value, ok := readOrphanHeartbeat(control); ok && value > after {
+			return value
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("fixture-owned Bash heartbeat did not advance past %d", after)
+	return 0
+}
+
+func waitForOrphanHeartbeatAdvance(t *testing.T, control *durableCLIOrphanControl, previous int) int {
+	t.Helper()
+	return waitForOrphanHeartbeat(t, control, previous)
+}
+
+func readOrphanHeartbeat(control *durableCLIOrphanControl) (int, bool) {
+	data, err := os.ReadFile(control.heartbeatPath)
+	if err != nil {
+		return 0, false
+	}
+	line := strings.TrimSpace(string(data))
+	prefix := control.invocationID + ":"
+	if control.invocationID == "" || !strings.HasPrefix(line, prefix) {
+		return 0, false
+	}
+	value, err := strconv.Atoi(strings.TrimPrefix(line, prefix))
+	return value, err == nil
+}
+
+func waitForOrphanHeartbeatStable(control *durableCLIOrphanControl, duration time.Duration) error {
+	value, ok := readOrphanHeartbeat(control)
+	if !ok {
+		return fmt.Errorf("fixture heartbeat %s is missing or has the wrong nonce", control.heartbeatPath)
+	}
+	time.Sleep(duration)
+	latest, ok := readOrphanHeartbeat(control)
+	if !ok || latest != value {
+		return fmt.Errorf("fixture heartbeat advanced after its exit proof: before=%d after=%d valid=%t", value, latest, ok)
+	}
+	return nil
+}
+
 type durableCLIBinaryFixture struct {
 	binary      string
 	home        string
@@ -152,6 +564,10 @@ type durableCLIBinaryFixture struct {
 }
 
 func newDurableCLIBinaryFixture(t *testing.T, binary string, blockAfterToolReceipt bool) *durableCLIBinaryFixture {
+	return newDurableCLIBinaryFixtureWithTools(t, binary, blockAfterToolReceipt, []string{"write"})
+}
+
+func newDurableCLIBinaryFixtureWithTools(t *testing.T, binary string, blockAfterToolReceipt bool, builtins []string) *durableCLIBinaryFixture {
 	t.Helper()
 	peer := newDurableCLIPeer(blockAfterToolReceipt)
 	server := httptest.NewServer(peer)
@@ -170,7 +586,8 @@ func newDurableCLIBinaryFixture(t *testing.T, binary string, blockAfterToolRecei
 	require.NoError(t, os.MkdirAll(tmpDir, 0o700))
 	configPath := filepath.Join(fixture.home, ".go-cli", "config.yaml")
 	require.NoError(t, os.MkdirAll(filepath.Dir(configPath), 0o700))
-	configYAML := fmt.Sprintf("provider:\n  name: openai\n  base_url: %q\n  model: durable-cli-fixture\nmodel:\n  name: durable-cli-fixture\nsession:\n  store_path: %q\ntools:\n  builtin:\n    - write\ntracing:\n  enabled: false\n", server.URL+"/v1", fixture.storeDir)
+	builtinYAML := strings.Join(builtins, "\n    - ")
+	configYAML := fmt.Sprintf("provider:\n  name: openai\n  base_url: %q\n  model: durable-cli-fixture\nmodel:\n  name: durable-cli-fixture\nsession:\n  store_path: %q\ntools:\n  builtin:\n    - %s\ntracing:\n  enabled: false\n", server.URL+"/v1", fixture.storeDir, builtinYAML)
 	require.NoError(t, os.WriteFile(configPath, []byte(configYAML), 0o600))
 	fixture.childEnv = []string{
 		"PATH=" + os.Getenv("PATH"),
@@ -298,13 +715,7 @@ func (fixture *durableCLIBinaryFixture) readRows(t *testing.T, physicalID string
 
 func (fixture *durableCLIBinaryFixture) readWorkspaceIndex(t *testing.T, workspaceID string) []durableCLIWorkspaceIndexRow {
 	t.Helper()
-	root := fixture.configDir
-	if runtime.GOOS == "darwin" {
-		root = filepath.Join(fixture.home, "Library", "Application Support")
-	} else if runtime.GOOS == "windows" {
-		root = filepath.Join(fixture.home, "AppData", "Roaming")
-	}
-	path := filepath.Join(root, "go-cli", "workspace-quarantine", workspaceID+".jsonl")
+	path := workspaceIndexPath(fixture, workspaceID)
 	data, err := os.ReadFile(path)
 	require.NoError(t, err, "read authoritative synced workspace index %s", path)
 	rows := make([]durableCLIWorkspaceIndexRow, 0)
@@ -316,6 +727,16 @@ func (fixture *durableCLIBinaryFixture) readWorkspaceIndex(t *testing.T, workspa
 	}
 	require.NoError(t, scanner.Err())
 	return rows
+}
+
+func workspaceIndexPath(fixture *durableCLIBinaryFixture, workspaceID string) string {
+	root := fixture.configDir
+	if runtime.GOOS == "darwin" {
+		root = filepath.Join(fixture.home, "Library", "Application Support")
+	} else if runtime.GOOS == "windows" {
+		root = filepath.Join(fixture.home, "AppData", "Roaming")
+	}
+	return filepath.Join(root, "go-cli", "workspace-quarantine", workspaceID+".jsonl")
 }
 
 type durableCLIChildResult struct {
@@ -335,6 +756,13 @@ func requireCLIChildExit(t *testing.T, result durableCLIChildResult, want int) {
 		return
 	}
 	require.NoError(t, result.err, "child exit=%d state=%s stdout=%s stderr=%s", result.exitCode, result.state, result.stdout, result.stderr)
+	require.Equal(t, want, result.exitCode)
+}
+
+func requireCLIChildFailure(t *testing.T, result durableCLIChildResult, want int) {
+	t.Helper()
+	var exitErr *exec.ExitError
+	require.ErrorAs(t, result.err, &exitErr, "the fail-closed CLI command must return a nonzero process status")
 	require.Equal(t, want, result.exitCode)
 }
 
@@ -414,6 +842,132 @@ func waitForDurableReceipt(t *testing.T, path, physicalID string) []session.Sess
 	return nil
 }
 
+func waitForDurableBashDispatch(t *testing.T, fixture *durableCLIBinaryFixture, physicalID, toolCallID string) ([]session.SessionEntry, durableCLIAction) {
+	t.Helper()
+	sessionPath := filepath.Join(fixture.storeDir, "sessions", physicalID+".jsonl")
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		rows, ok := readDurableRowsForPoll(sessionPath)
+		if ok {
+			if action, ready := durableBashActionForCall(rows, physicalID, toolCallID); ready {
+				indexRows, indexOK := readWorkspaceIndexForPoll(fixture, action.workspaceID)
+				if indexOK && hasWorkspaceDispatch(indexRows, physicalID, action.actionID, action.toolCallID) {
+					return rows, action
+				}
+			}
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatalf("actual CLI did not sync the Bash intent and its global dispatch marker for session %q / tool call %q", physicalID, toolCallID)
+	return nil, durableCLIAction{}
+}
+
+func readDurableRowsForPoll(path string) ([]session.SessionEntry, bool) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, false
+	}
+	rows := make([]session.SessionEntry, 0)
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	scanner.Buffer(make([]byte, 4096), 4*1024*1024)
+	for scanner.Scan() {
+		var row session.SessionEntry
+		if json.Unmarshal(scanner.Bytes(), &row) != nil {
+			return nil, false
+		}
+		rows = append(rows, row)
+	}
+	return rows, scanner.Err() == nil && len(rows) > 0
+}
+
+func durableBashActionForCall(rows []session.SessionEntry, physicalID, toolCallID string) (durableCLIAction, bool) {
+	return durableActionForCall(rows, physicalID, toolCallID, "bash")
+}
+
+func durableActionForCall(rows []session.SessionEntry, physicalID, toolCallID, toolName string) (durableCLIAction, bool) {
+	var assistant *session.SessionEntry
+	var intent *session.SessionEntry
+	for i := range rows {
+		row := &rows[i]
+		if row.SessionID != physicalID {
+			continue
+		}
+		if row.Type == session.EntryTypeAssistant {
+			for _, call := range row.ToolCalls {
+				if call.ID == toolCallID && call.Name == toolName {
+					assistant = row
+				}
+			}
+		}
+		if row.Type == session.EntryTypeTool && row.ActionState == session.ActionStateIntent && row.ToolCallID == toolCallID && row.ToolName == toolName {
+			intent = row
+		}
+	}
+	if assistant == nil || intent == nil || intent.ActionID == "" || intent.WorkspaceID == "" {
+		return durableCLIAction{}, false
+	}
+	if assistant.RunID == "" || intent.RunID != assistant.RunID || intent.WorkspaceID == "" {
+		return durableCLIAction{}, false
+	}
+	return durableCLIAction{actionID: intent.ActionID, toolCallID: intent.ToolCallID, workspaceID: intent.WorkspaceID}, true
+}
+
+func requirePendingWriteAttempt(t *testing.T, rows []session.SessionEntry, physicalID, toolCallID string) durableCLIAction {
+	t.Helper()
+	action, ok := durableActionForCall(rows, physicalID, toolCallID, "write")
+	require.True(t, ok, "the fresh session must durably record the write call and its intent before the workspace rejects dispatch")
+	require.NotEmpty(t, action.actionID)
+	require.NotEmpty(t, action.workspaceID)
+	return action
+}
+
+func requireRecoveredInterruptedWriteReceipt(t *testing.T, rows []session.SessionEntry, physicalID string, action durableCLIAction) session.SessionEntry {
+	t.Helper()
+	receipts := receiptsForCall(rows, action.toolCallID)
+	require.Len(t, receipts, 1, "exact reopen must record one receipt based on the absent global dispatch marker")
+	receipt := receipts[0]
+	require.Equal(t, physicalID, receipt.SessionID)
+	require.NotEmpty(t, receipt.ID)
+	require.Equal(t, "write", receipt.ToolName)
+	require.Equal(t, "interrupted", receipt.ReceiptOutcome)
+	require.Equal(t, "not_dispatched", string(receipt.DispatchState))
+	require.Equal(t, action.actionID, receipt.ActionID)
+	require.Equal(t, action.workspaceID, receipt.WorkspaceID)
+	require.NotEmpty(t, receipt.RunID)
+	return receipt
+}
+
+func hasWorkspaceDispatch(rows []durableCLIWorkspaceIndexRow, physicalID, actionID, toolCallID string) bool {
+	for _, row := range rows {
+		if row.Kind != "dispatch_ready" {
+			continue
+		}
+		for _, action := range row.Actions {
+			if action.Action.SessionID == physicalID && action.Action.ActionID == actionID && action.Action.ToolCallID == toolCallID {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func readWorkspaceIndexForPoll(fixture *durableCLIBinaryFixture, workspaceID string) ([]durableCLIWorkspaceIndexRow, bool) {
+	data, err := os.ReadFile(workspaceIndexPath(fixture, workspaceID))
+	if err != nil {
+		return nil, false
+	}
+	rows := make([]durableCLIWorkspaceIndexRow, 0)
+	scanner := bufio.NewScanner(bytes.NewReader(data))
+	for scanner.Scan() {
+		var row durableCLIWorkspaceIndexRow
+		if json.Unmarshal(scanner.Bytes(), &row) != nil {
+			return nil, false
+		}
+		rows = append(rows, row)
+	}
+	return rows, scanner.Err() == nil && len(rows) > 0
+}
+
 type durableCLIAction struct {
 	actionID    string
 	toolCallID  string
@@ -470,6 +1024,46 @@ func requireDurableWriteLifecycle(t *testing.T, rows []session.SessionEntry, phy
 	require.Equal(t, toolCalls[0].RunID, intents[0].RunID)
 	require.Equal(t, toolCalls[0].WorkspaceID, intents[0].WorkspaceID)
 	return durableCLIAction{actionID: actionID, toolCallID: receipts[0].ToolCallID, workspaceID: intents[0].WorkspaceID}
+}
+
+func receiptsForCall(rows []session.SessionEntry, toolCallID string) []session.SessionEntry {
+	var receipts []session.SessionEntry
+	for _, row := range rows {
+		if row.Type == session.EntryTypeTool && row.ActionState == "" && row.ToolCallID == toolCallID && row.ReceiptOutcome != "" {
+			receipts = append(receipts, row)
+		}
+	}
+	return receipts
+}
+
+func requireRecoveredUnknownBashReceipt(t *testing.T, rows []session.SessionEntry, physicalID string, action durableCLIAction) session.SessionEntry {
+	t.Helper()
+	receipts := receiptsForCall(rows, action.toolCallID)
+	require.Len(t, receipts, 1, "the exact Bash occurrence has one durable receipt after recovery")
+	receipt := receipts[0]
+	require.Equal(t, physicalID, receipt.SessionID)
+	require.NotEmpty(t, receipt.ID)
+	require.Equal(t, "bash", receipt.ToolName)
+	require.Equal(t, "unknown", receipt.ReceiptOutcome, "recovery must preserve the unresolved process result as unknown")
+	require.Equal(t, "dispatched", string(receipt.DispatchState))
+	require.Equal(t, action.actionID, receipt.ActionID)
+	require.Equal(t, action.workspaceID, receipt.WorkspaceID)
+	require.NotEmpty(t, receipt.RunID)
+	return receipt
+}
+
+func requireDurableSourceIDsUnique(t *testing.T, rows []session.SessionEntry, physicalID string) {
+	t.Helper()
+	seen := make(map[string]struct{}, len(rows))
+	for _, row := range rows {
+		require.NotEmpty(t, row.ID)
+		require.Equal(t, uint16(1), row.RecordVersion)
+		require.Equal(t, physicalID, row.SessionID)
+		if _, duplicate := seen[row.ID]; duplicate {
+			t.Fatalf("physical JSONL repeats source ID %q", row.ID)
+		}
+		seen[row.ID] = struct{}{}
+	}
 }
 
 func requireRunTerminals(t *testing.T, rows []session.SessionEntry, physicalID string, want int) []session.SessionEntry {
@@ -583,6 +1177,10 @@ type durableCLIWorkspaceIndexRow struct {
 }
 
 func requireWorkspaceActionLifecycle(t *testing.T, rows []durableCLIWorkspaceIndexRow, physicalID, actionID string, wantDispatch, wantResolution int) {
+	requireWorkspaceActionLifecycleForCall(t, rows, physicalID, actionID, "call-durable-write-once", wantDispatch, wantResolution)
+}
+
+func requireWorkspaceActionLifecycleForCall(t *testing.T, rows []durableCLIWorkspaceIndexRow, physicalID, actionID, toolCallID string, wantDispatch, wantResolution int) {
 	t.Helper()
 	dispatches, resolutions := 0, 0
 	seenRecordIDs := make(map[string]struct{}, len(rows))
@@ -602,17 +1200,17 @@ func requireWorkspaceActionLifecycle(t *testing.T, rows []durableCLIWorkspaceInd
 		switch row.Kind {
 		case "dispatch_ready":
 			for _, action := range row.Actions {
-				require.Equal(t, physicalID, action.Action.SessionID)
 				if action.Action.ActionID == actionID {
 					dispatches++
-					require.Equal(t, "call-durable-write-once", action.Action.ToolCallID)
+					require.Equal(t, physicalID, action.Action.SessionID)
+					require.Equal(t, toolCallID, action.Action.ToolCallID)
 				}
 			}
 		case "execution_resolution":
 			if row.Action != nil && row.Action.ActionID == actionID {
 				resolutions++
 				require.Equal(t, physicalID, row.Action.SessionID)
-				require.Equal(t, "call-durable-write-once", row.Action.ToolCallID)
+				require.Equal(t, toolCallID, row.Action.ToolCallID)
 			}
 		}
 	}
@@ -637,10 +1235,18 @@ type durableCLIPeer struct {
 	mu             sync.Mutex
 	bodies         [][]byte
 	authorizations []string
+	responses      []durableCLIPeerResponse
 	blockAfterTool bool
 	barrierReached chan struct{}
 	release        chan struct{}
 	barrierOnce    sync.Once
+}
+
+type durableCLIPeerResponse struct {
+	toolCallID string
+	toolName   string
+	arguments  map[string]string
+	content    string
 }
 
 func newDurableCLIPeer(blockAfterTool bool) *durableCLIPeer {
@@ -649,6 +1255,20 @@ func newDurableCLIPeer(blockAfterTool bool) *durableCLIPeer {
 		barrierReached: make(chan struct{}),
 		release:        make(chan struct{}),
 	}
+}
+
+func durableCLIToolCall(toolCallID, toolName string, arguments map[string]string) durableCLIPeerResponse {
+	return durableCLIPeerResponse{toolCallID: toolCallID, toolName: toolName, arguments: arguments}
+}
+
+func durableCLIFinal(content string) durableCLIPeerResponse {
+	return durableCLIPeerResponse{content: content}
+}
+
+func (peer *durableCLIPeer) setResponsePlan(responses ...durableCLIPeerResponse) {
+	peer.mu.Lock()
+	defer peer.mu.Unlock()
+	peer.responses = append([]durableCLIPeerResponse(nil), responses...)
 }
 
 func (peer *durableCLIPeer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -665,6 +1285,11 @@ func (peer *durableCLIPeer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	index := len(peer.bodies)
 	peer.bodies = append(peer.bodies, append([]byte(nil), body...))
 	peer.authorizations = append(peer.authorizations, r.Header.Get("Authorization"))
+	var planned durableCLIPeerResponse
+	plannedResponse := index < len(peer.responses)
+	if plannedResponse {
+		planned = peer.responses[index]
+	}
 	peer.mu.Unlock()
 
 	if peer.blockAfterTool && index == 1 {
@@ -676,11 +1301,56 @@ func (peer *durableCLIPeer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	w.Header().Set("Content-Type", "application/json")
+	if plannedResponse {
+		writeDurableCLIPeerResponse(w, index, planned)
+		return
+	}
 	if index == 0 {
 		_, _ = fmt.Fprint(w, `{"id":"chatcmpl-durable-write","choices":[{"index":0,"message":{"role":"assistant","content":null,"tool_calls":[{"id":"call-durable-write-once","type":"function","function":{"name":"write","arguments":"{\"path\":\"durable-effect.txt\",\"content\":\"effect-once\"}"}}]},"finish_reason":"tool_calls"}]}`)
 		return
 	}
 	_, _ = fmt.Fprintf(w, `{"id":"chatcmpl-durable-final-%d","choices":[{"index":0,"message":{"role":"assistant","content":"provider completed call"},"finish_reason":"stop"}]}`, index)
+}
+
+func writeDurableCLIPeerResponse(w http.ResponseWriter, index int, planned durableCLIPeerResponse) {
+	message := map[string]any{"role": "assistant"}
+	finishReason := "stop"
+	if planned.toolName != "" {
+		arguments, err := json.Marshal(planned.arguments)
+		if err != nil {
+			http.Error(w, "cannot encode planned tool arguments", http.StatusInternalServerError)
+			return
+		}
+		message["content"] = nil
+		message["tool_calls"] = []any{map[string]any{
+			"id":   planned.toolCallID,
+			"type": "function",
+			"function": map[string]string{
+				"name":      planned.toolName,
+				"arguments": string(arguments),
+			},
+		}}
+		finishReason = "tool_calls"
+	} else {
+		if planned.content == "" {
+			planned.content = "provider completed call"
+		}
+		message["content"] = planned.content
+	}
+	response := map[string]any{
+		"id": "chatcmpl-durable-plan-" + fmt.Sprint(index),
+		"choices": []any{map[string]any{
+			"index":         0,
+			"message":       message,
+			"finish_reason": finishReason,
+		}},
+	}
+	body, err := json.Marshal(response)
+	if err != nil {
+		http.Error(w, "cannot encode planned provider response", http.StatusInternalServerError)
+		return
+	}
+	_, _ = w.Write(body)
 }
 
 func (peer *durableCLIPeer) requestBodies() [][]byte {
