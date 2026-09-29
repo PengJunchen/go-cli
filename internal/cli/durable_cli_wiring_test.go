@@ -242,6 +242,7 @@ func TestInteractiveDurableSessionKeepsOnePhysicalSessionAcrossTurns(t *testing.
 	cmd := newInteractiveCmd(nil, &out)
 	cmd.lineEditor = &scriptedLineEditor{results: []lineReadResult{
 		{line: "first turn"},
+		{line: "/help"},
 		{line: "/session tree"},
 		{line: "/session branches"},
 		{line: "/session fork alternate"},
@@ -263,6 +264,15 @@ func TestInteractiveDurableSessionKeepsOnePhysicalSessionAcrossTurns(t *testing.
 	require.Contains(t, out.String(), "Session tree", "read-only slash view must use the selected canonical snapshot")
 	require.Contains(t, out.String(), "No branches in session tree.", "branch listing remains available in durable mode")
 	require.Contains(t, out.String(), "durable session command is unsupported", "branch and resume mutations must fail before changing state")
+	require.Contains(t, out.String(), "Durable session commands: /session tree and /session branches; resume at startup with --resume-session <physical-id>.")
+	sessionHandler, ok := repl.slashReg.Lookup("session")
+	require.True(t, ok)
+	sessionCompletions, ok := sessionHandler.(SubcommandProvider)
+	require.True(t, ok)
+	require.Equal(t, []Subcommand{
+		{Name: "tree", Description: "Show the durable session tree"},
+		{Name: "branches", Description: "List durable session branches"},
+	}, sessionCompletions.Subcommands(), "durable completion must not offer slash mutations")
 	require.Empty(t, repl.sessionTree.ListBranches(), "rejected slash mutations must not change the selected tree")
 	_, slashErr := repl.sessionHandler.Handle(context.Background(), session.SlashCommand{Name: "fork", Args: []string{"rejected"}})
 	var unsupportedSlash *session.UnsupportedDurableSessionCommandError
@@ -287,6 +297,35 @@ func TestInteractiveDurableSessionKeepsOnePhysicalSessionAcrossTurns(t *testing.
 	requirePublishedMessages(t, snapshot, "first turn", "interactive first", "second turn", "interactive second")
 	require.Equal(t, "main", snapshot.ActiveBranchID)
 	require.NoError(t, resumed.requestClose(t.Context()))
+}
+
+func TestInteractiveWithoutSessionStoreReportsSessionCommandsUnsupported(t *testing.T) {
+	configureDurableCLISessionTest(t)
+	server, script := newDurablePromptServer(t, `{"choices":[{"message":{"content":"unused"}}]}`)
+	defer server.Close()
+	cfg := durablePromptConfig(server.URL, "")
+	var out bytes.Buffer
+	cmd := newInteractiveCmd(nil, &out)
+	cmd.lineEditor = &scriptedLineEditor{results: []lineReadResult{
+		{line: "/help"},
+		{line: "/session"},
+		{line: "/session fork draft"},
+		{line: "exit"},
+	}}
+	repl := &REPLSession{cmd: cmd, out: &out, lineEditor: cmd.lineEditor}
+	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
+	defer cancel()
+	require.NoError(t, repl.Run(ctx, cfg, []string{"--no-onboarding"}))
+	require.Nil(t, repl.sessionHandler, "the default no-store CLI must not imply a session handler exists")
+	require.Contains(t, out.String(), "Session commands are unsupported without session.store_path.")
+	require.Contains(t, out.String(), "Unsupported: /session requires session.store_path.")
+	require.NotContains(t, out.String(), "Session tree not configured")
+	require.Empty(t, script.requestBodies(), "slash capability checks must not call the model")
+	handler, ok := repl.slashReg.Lookup("session")
+	require.True(t, ok)
+	provider, ok := handler.(SubcommandProvider)
+	require.True(t, ok)
+	require.Empty(t, provider.Subcommands(), "no-store completion must not offer unavailable session commands")
 }
 
 func TestInteractiveConfiguredStoreRejectsBooleanResume(t *testing.T) {
