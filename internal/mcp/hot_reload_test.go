@@ -399,6 +399,132 @@ func TestHotReloaderRequestStopBeforeWatchClosesStableDone(t *testing.T) {
 	require.Error(t, hr.Watch(context.Background(), cfgPath), "Watch after the stop fence must not publish a poller")
 }
 
+func TestConfigHotReloaderRecordsFailureAndRetriesOnLaterTrigger(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"servers":[]}`), 0o600))
+	secret := "candidate rejected: credential=top-secret-value"
+	wantFailure := errors.New(secret)
+	var calls atomic.Int32
+	started := make(chan int32, 2)
+	logCapturer := verify.NewLogCapturer()
+	logCtx := logCapturer.Attach(context.Background())
+	t.Cleanup(logCapturer.Detach)
+	traceExporter := &configReloadTraceCapture{spans: make(chan tracing.SpanData, 4)}
+	tracer := tracing.NewTracer("config-reload-test", traceExporter)
+	parentSpan, reloadCtx := tracer.Start(logCtx, "config-reload-test", tracing.SpanKindInternal)
+	t.Cleanup(parentSpan.End)
+	reloader := NewConfigHotReloader(func(context.Context, string) error {
+		call := calls.Add(1)
+		started <- call
+		if call == 1 {
+			return wantFailure
+		}
+		return nil
+	}, WithPollInterval(5*time.Millisecond))
+	require.Equal(t, "mcp-config-hot-reloader", reloader.Name())
+	require.NoError(t, reloader.Watch(reloadCtx, path))
+	t.Cleanup(func() { assert.NoError(t, reloader.Stop()) })
+
+	require.NoError(t, reloader.Reload(reloadCtx))
+	select {
+	case call := <-started:
+		assert.EqualValues(t, 1, call)
+	case <-time.After(time.Second):
+		t.Fatal("config reload callback did not run")
+	}
+	first := waitForConfigReloadAttempt(t, reloader, func(attempt MCPConfigReloadAttempt) bool {
+		return attempt.ErrorClass == MCPConfigReloadErrorCandidate
+	})
+	assert.Equal(t, MCPConfigReloadErrorCandidate, first.ErrorClass)
+	assert.NotContains(t, fmt.Sprint(first), secret, "attempt status must not retain raw callback error text")
+	failureSpan := waitForConfigReloadTrace(t, traceExporter.spans, "mcp.hot_reload")
+	assert.NotContains(t, fmt.Sprint(failureSpan), secret, "trace span must not contain raw callback error text")
+	assert.NotContains(t, fmt.Sprint(logCapturer.Entries()), secret, "logs must not contain raw callback error text")
+	time.Sleep(20 * time.Millisecond)
+	assert.EqualValues(t, 1, calls.Load(), "an ordinary candidate error is recorded once without stopping the watcher or retrying in a loop")
+	select {
+	case <-reloader.Done():
+		t.Fatal("ordinary candidate failure stopped the config watcher")
+	default:
+	}
+
+	require.NoError(t, os.WriteFile(path, []byte(`{"servers":[{"name":"changed"}]}`), 0o600))
+	select {
+	case call := <-started:
+		assert.EqualValues(t, 2, call)
+	case <-time.After(time.Second):
+		t.Fatal("a later selected-source file change did not retry the config generation")
+	}
+	second := waitForConfigReloadAttempt(t, reloader, func(attempt MCPConfigReloadAttempt) bool {
+		return attempt.ErrorClass == "" && attempt.CompletedAt.After(first.CompletedAt)
+	})
+	assert.Empty(t, second.ErrorClass)
+	assert.EqualValues(t, 2, calls.Load())
+}
+
+func TestConfigHotReloaderStopsAfterCallbackPanic(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	require.NoError(t, os.WriteFile(path, []byte(`{"servers":[]}`), 0o600))
+	reloader := NewConfigHotReloader(func(context.Context, string) error {
+		panic("sensitive callback detail")
+	}, WithPollInterval(time.Hour))
+	require.NoError(t, reloader.Watch(context.Background(), path))
+	require.NoError(t, reloader.Reload(context.Background()))
+
+	attempt := waitForConfigReloadAttempt(t, reloader, func(attempt MCPConfigReloadAttempt) bool {
+		return attempt.ErrorClass == MCPConfigReloadErrorPanic
+	})
+	assert.Equal(t, MCPConfigReloadErrorPanic, attempt.ErrorClass)
+	assert.NotContains(t, fmt.Sprint(attempt), "sensitive callback detail")
+	select {
+	case <-reloader.Done():
+	case <-time.After(time.Second):
+		t.Fatal("config reloader did not stop after its callback panicked")
+	}
+	assert.ErrorIs(t, reloader.Stop(), ErrHotReloadCallbackPanic)
+}
+
+type configReloadTraceCapture struct {
+	spans chan tracing.SpanData
+}
+
+func (e *configReloadTraceCapture) ExportSpan(_ context.Context, span tracing.TraceSpan) error {
+	e.spans <- tracing.SpanToData(span)
+	return nil
+}
+
+func (*configReloadTraceCapture) Shutdown(context.Context) error { return nil }
+
+func waitForConfigReloadTrace(t *testing.T, spans <-chan tracing.SpanData, name string) tracing.SpanData {
+	t.Helper()
+	deadline := time.After(time.Second)
+	for {
+		select {
+		case span := <-spans:
+			if span.Name == name {
+				return span
+			}
+		case <-deadline:
+			t.Fatalf("trace span %q was not exported", name)
+			return tracing.SpanData{}
+		}
+	}
+}
+
+func waitForConfigReloadAttempt(t *testing.T, reloader *DefaultHotReloader, matches func(MCPConfigReloadAttempt) bool) MCPConfigReloadAttempt {
+	t.Helper()
+	deadline := time.Now().Add(time.Second)
+	for time.Now().Before(deadline) {
+		attempt, ok := reloader.LastAttempt()
+		if ok && matches(attempt) {
+			return attempt
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatal("config reload attempt status did not reach the expected result")
+	return MCPConfigReloadAttempt{}
+}
+
 func TestHotReloaderRequestStopJoinsReconnectAndRegistrationCallback(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 

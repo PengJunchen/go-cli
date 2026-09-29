@@ -53,8 +53,8 @@ type HotReloadLifecycle interface {
 // owner and its callbacks had actually returned.
 var ErrHotReloadPending = errors.New("mcp: hot reload cleanup pending")
 
-// ErrHotReloadCallbackPanic reports that a reconnect callback panicked. The
-// panic value is deliberately omitted because it may contain sensitive data.
+// ErrHotReloadCallbackPanic reports that a reload callback panicked. The panic
+// value is deliberately omitted because it may contain sensitive data.
 var ErrHotReloadCallbackPanic = errors.New("mcp: hot reload callback panicked")
 
 // ErrHotReloadWorkerPanic reports an unexpected panic in the reloader owner.
@@ -88,8 +88,8 @@ func (e *HotReloadPendingError) Is(target error) bool {
 	return target == ErrHotReloadPending
 }
 
-// HotReloadCallbackPanicError is a sanitized terminal error for a panic from
-// the tool registration callback.
+// HotReloadCallbackPanicError is a sanitized terminal error for a panic from a
+// reload callback.
 type HotReloadCallbackPanicError struct{}
 
 func (*HotReloadCallbackPanicError) Error() string { return ErrHotReloadCallbackPanic.Error() }
@@ -111,6 +111,30 @@ func (*HotReloadWorkerPanicError) Is(target error) bool {
 // RegisterToolsFunc re-registers the currently advertised MCP tools after a
 // reconnect. It is called with the tools reported by the reconnected client.
 type RegisterToolsFunc func(tools []MCPTool)
+
+// MCPConfigReloadFunc builds and publishes one complete config-source
+// generation. A returned error records a failed attempt while leaving the
+// watcher active for a later change or manual reload.
+type MCPConfigReloadFunc func(context.Context, string) error
+
+// MCPConfigReloadErrorClass is a finite, redacted category for a failed
+// config-generation attempt. It never includes callback error text.
+type MCPConfigReloadErrorClass string
+
+const (
+	MCPConfigReloadErrorCandidate MCPConfigReloadErrorClass = "candidate_error"
+	MCPConfigReloadErrorCanceled  MCPConfigReloadErrorClass = "context_canceled"
+	MCPConfigReloadErrorDeadline  MCPConfigReloadErrorClass = "deadline_exceeded"
+	MCPConfigReloadErrorPanic     MCPConfigReloadErrorClass = "callback_panic"
+)
+
+// MCPConfigReloadAttempt is the most recent terminal result from a config
+// generation attempt. ErrorClass is deliberately redacted and does not expose
+// the callback's error or any path, credential, or parser text it may contain.
+type MCPConfigReloadAttempt struct {
+	CompletedAt time.Time
+	ErrorClass  MCPConfigReloadErrorClass
+}
 
 // Default values used by DefaultHotReloader. All of them live in one const
 // block and can be overridden through the With* options.
@@ -194,8 +218,9 @@ type fileSnapshot struct {
 // (Disconnect -> Connect -> ListTools -> Re-register) with exponential-backoff
 // retry on connection failure.
 type DefaultHotReloader struct {
-	client   MCPClient
-	register RegisterToolsFunc
+	client       MCPClient
+	register     RegisterToolsFunc
+	reloadConfig MCPConfigReloadFunc
 
 	pollInterval  time.Duration
 	backoffBase   time.Duration
@@ -222,6 +247,8 @@ type DefaultHotReloader struct {
 	baseline       bool
 	lastMissing    bool
 	snapshot       fileSnapshot
+	lastAttempt    MCPConfigReloadAttempt
+	attempted      bool
 }
 
 var _ HotReloader = (*DefaultHotReloader)(nil)
@@ -256,6 +283,46 @@ func NewDefaultHotReloader(client MCPClient, register RegisterToolsFunc, opts ..
 	}
 }
 
+// NewConfigHotReloader returns a reloader that delegates each selected-source
+// change or manual reload to reload. Candidate failures are recorded as one
+// attempt and do not stop the watcher.
+func NewConfigHotReloader(reload MCPConfigReloadFunc, opts ...HotReloaderOption) *DefaultHotReloader {
+	o := &hotReloaderOptions{
+		pollInterval:  defaultPollInterval,
+		backoffBase:   defaultBackoffBase,
+		backoffFactor: defaultBackoffFactor,
+		maxBackoff:    defaultMaxBackoff,
+		maxRetries:    defaultMaxRetries,
+		transport:     MCPTransportStreamableHTTP,
+	}
+	for _, opt := range opts {
+		opt(o)
+	}
+	return &DefaultHotReloader{
+		reloadConfig:  reload,
+		pollInterval:  o.pollInterval,
+		backoffBase:   o.backoffBase,
+		backoffFactor: o.backoffFactor,
+		maxBackoff:    o.maxBackoff,
+		maxRetries:    o.maxRetries,
+		transport:     o.transport,
+		stopCh:        make(chan struct{}),
+		done:          make(chan struct{}),
+	}
+}
+
+// LastAttempt returns the most recent config-generation attempt and whether an
+// attempt has completed. ErrorClass is a sanitized category; callback error
+// text is never returned.
+func (h *DefaultHotReloader) LastAttempt() (MCPConfigReloadAttempt, bool) {
+	if h == nil {
+		return MCPConfigReloadAttempt{}, false
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.lastAttempt, h.attempted
+}
+
 // Watch starts the stdlib poller goroutine and records the baseline state of
 // the config file before returning. Invalid polling intervals are rejected
 // before reading the file or publishing the poll owner. The poller exits
@@ -263,6 +330,9 @@ func NewDefaultHotReloader(client MCPClient, register RegisterToolsFunc, opts ..
 func (h *DefaultHotReloader) Watch(ctx context.Context, configPath string) error {
 	if h.pollInterval <= 0 {
 		return ErrHotReloadInvalidPollInterval
+	}
+	if h.client == nil && h.reloadConfig == nil {
+		return errors.New("mcp: hot reload: no client or config reload callback")
 	}
 	if configPath == "" {
 		return errors.New("mcp: hot reload: empty config path")
@@ -396,7 +466,12 @@ func (h *DefaultHotReloader) Reload(ctx context.Context) error {
 }
 
 // Name returns the logical name of the reloader.
-func (h *DefaultHotReloader) Name() string { return "mcp-hot-reloader" }
+func (h *DefaultHotReloader) Name() string {
+	if h != nil && h.reloadConfig != nil {
+		return "mcp-config-hot-reloader"
+	}
+	return "mcp-hot-reloader"
+}
 
 // poll is the stdlib watcher loop. It establishes a baseline on the first tick
 // and then calls scheduleReconnect whenever a config change is detected.
@@ -583,6 +658,25 @@ func (h *DefaultHotReloader) runCycle(ctx context.Context) (bool, error) {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		return false, nil
 	}
+	if h.reloadConfig != nil {
+		err := h.callConfigReload(spanCtx, path)
+		errorClass := mcpConfigReloadErrorClass(err)
+		h.mu.Lock()
+		h.lastAttempt = MCPConfigReloadAttempt{CompletedAt: time.Now(), ErrorClass: errorClass}
+		h.attempted = true
+		h.mu.Unlock()
+		if err != nil {
+			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+			logger.Error("mcp.config_reload.failed", "attempt", count, "error_class", errorClass)
+			if errors.Is(err, ErrHotReloadCallbackPanic) {
+				return false, err
+			}
+			return true, nil
+		}
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: true})
+		logger.Info("mcp.config_reload.completed", "attempt", count)
+		return true, nil
+	}
 
 	if err := h.client.Disconnect(spanCtx); err != nil {
 		logger.Warn("mcp.hot_reload.disconnect", "server", h.client.Name(), "err", err)
@@ -629,6 +723,33 @@ func (h *DefaultHotReloader) runCycle(ctx context.Context) (bool, error) {
 	span.SetAttributes(tracing.Attribute{Key: "success", Value: true})
 	logger.Info("mcp.hot_reload", "server", h.client.Name(), "tools", len(tools))
 	return true, nil
+}
+
+func (h *DefaultHotReloader) callConfigReload(ctx context.Context, path string) (err error) {
+	defer func() {
+		if recover() != nil {
+			err = &HotReloadCallbackPanicError{}
+		}
+	}()
+	if h.reloadConfig == nil {
+		return errors.New("mcp: hot reload: config reload callback is unavailable")
+	}
+	return h.reloadConfig(ctx, path)
+}
+
+func mcpConfigReloadErrorClass(err error) MCPConfigReloadErrorClass {
+	switch {
+	case err == nil:
+		return ""
+	case errors.Is(err, ErrHotReloadCallbackPanic):
+		return MCPConfigReloadErrorPanic
+	case errors.Is(err, context.DeadlineExceeded):
+		return MCPConfigReloadErrorDeadline
+	case errors.Is(err, context.Canceled):
+		return MCPConfigReloadErrorCanceled
+	default:
+		return MCPConfigReloadErrorCandidate
+	}
 }
 
 func (h *DefaultHotReloader) mayStartWork(ctx context.Context) bool {
