@@ -2,6 +2,8 @@ package approval
 
 import (
 	"encoding/json"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"testing"
@@ -43,7 +45,8 @@ func TestAuditTrail_Record(t *testing.T) {
 	assert.Equal(t, "default", decoded["permission_mode"])
 	assert.Equal(t, "sess-1", decoded["session_id"])
 	assert.NotEmpty(t, decoded["timestamp"])
-	assert.Equal(t, "path", decoded["args_summary"])
+	assert.Equal(t, "redacted", decoded["args_summary"])
+	assert.NotEmpty(t, decoded["hash"])
 }
 
 // TestAuditTrail_AppendOnly verifies that multiple records are appended to the
@@ -100,6 +103,142 @@ func TestAuditTrail_DirectoryCreated(t *testing.T) {
 	filename := filepath.Join(dir, "2026-08-09.jsonl")
 	_, err := os.Stat(filename)
 	require.NoError(t, err)
+}
+
+func TestAuditTrail_ReadsAndContinuesHashChainAfterRestart(t *testing.T) {
+	dir := t.TempDir()
+	ts := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	first := NewAuditTrail(dir)
+	require.NoError(t, first.Record(AuditEntry{Timestamp: ts, Tool: "read_file", Decision: "allow"}))
+
+	reopened := NewAuditTrail(dir)
+	require.NoError(t, reopened.Record(AuditEntry{Timestamp: ts, Tool: "bash", Decision: "deny"}))
+
+	entries, err := reopened.ReadEntries(ts)
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+	assert.Empty(t, entries[0].PrevHash)
+	assert.Equal(t, entries[0].Hash, entries[1].PrevHash)
+	assert.NotEmpty(t, entries[1].Hash)
+}
+
+func TestAuditTrail_FailedAppendDoesNotAdvanceHash(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		writeMode string
+		syncErr   error
+		wantErr   error
+	}{
+		{name: "short write", writeMode: "short", wantErr: io.ErrShortWrite},
+		{name: "sync failure", syncErr: errors.New("sync sentinel"), wantErr: ErrAuditTrailSync},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			trail := NewAuditTrail(dir)
+			ts := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+			require.NoError(t, trail.Record(AuditEntry{Timestamp: ts, Tool: "first"}))
+			before, err := os.ReadFile(filepath.Join(dir, "2026-08-09.jsonl"))
+			require.NoError(t, err)
+
+			trail.openFile = func(path string, flag int, perm os.FileMode) (auditTrailFile, error) {
+				file, openErr := os.OpenFile(path, flag, perm)
+				if openErr != nil {
+					return nil, openErr
+				}
+				return &auditTrailFaultFile{File: file, writeMode: tc.writeMode, syncErr: tc.syncErr}, nil
+			}
+			recordErr := trail.Record(AuditEntry{Timestamp: ts, Tool: "failed"})
+			require.Error(t, recordErr)
+			if tc.wantErr == ErrAuditTrailSync {
+				assert.ErrorIs(t, recordErr, tc.wantErr)
+				assert.ErrorIs(t, recordErr, tc.syncErr)
+			} else {
+				assert.ErrorIs(t, recordErr, tc.wantErr)
+				assert.ErrorIs(t, recordErr, ErrAuditTrailAppend)
+			}
+			trail.openFile = openAuditTrailFile
+
+			after, err := os.ReadFile(filepath.Join(dir, "2026-08-09.jsonl"))
+			require.NoError(t, err)
+			assert.Equal(t, before, after, "failed append must be rolled back")
+			require.NoError(t, trail.Record(AuditEntry{Timestamp: ts, Tool: "second"}))
+			entries, err := trail.ReadEntries(ts)
+			require.NoError(t, err)
+			require.Len(t, entries, 2)
+			assert.Equal(t, entries[0].Hash, entries[1].PrevHash)
+		})
+	}
+}
+
+func TestAuditTrail_RollbackFailurePoisonsTrail(t *testing.T) {
+	dir := t.TempDir()
+	trail := NewAuditTrail(dir)
+	ts := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	syncErr := errors.New("sync sentinel")
+	rollbackErr := errors.New("truncate sentinel")
+	trail.openFile = func(path string, flag int, perm os.FileMode) (auditTrailFile, error) {
+		file, err := os.OpenFile(path, flag, perm)
+		if err != nil {
+			return nil, err
+		}
+		return &auditTrailFaultFile{File: file, syncErr: syncErr, truncateErr: rollbackErr}, nil
+	}
+
+	err := trail.Record(AuditEntry{Timestamp: ts, Tool: "failed"})
+	assert.ErrorIs(t, err, ErrAuditTrailSync)
+	assert.ErrorIs(t, err, ErrAuditTrailRollback)
+	assert.ErrorIs(t, err, syncErr)
+	assert.ErrorIs(t, err, rollbackErr)
+
+	err = trail.Record(AuditEntry{Timestamp: ts, Tool: "blocked"})
+	assert.ErrorIs(t, err, ErrAuditTrailRollback)
+}
+
+func TestAuditTrail_RedactsAndBoundsArgumentSummary(t *testing.T) {
+	dir := t.TempDir()
+	trail := NewAuditTrail(dir)
+	ts := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	require.NoError(t, trail.Record(AuditEntry{
+		Timestamp:   ts,
+		Tool:        "bash",
+		ArgsSummary: "prompt-secret-should-not-be-written",
+	}))
+
+	raw, err := os.ReadFile(filepath.Join(dir, "2026-08-09.jsonl"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "prompt-secret-should-not-be-written")
+	assert.Contains(t, string(raw), `"args_summary":"redacted"`)
+}
+
+type auditTrailFaultFile struct {
+	*os.File
+	writeMode   string
+	syncErr     error
+	syncCalls   int
+	truncateErr error
+}
+
+func (f *auditTrailFaultFile) Write(data []byte) (int, error) {
+	if f.writeMode == "short" {
+		return len(data) / 2, nil
+	}
+	return f.File.Write(data)
+}
+
+func (f *auditTrailFaultFile) Sync() error {
+	if f.syncErr != nil && f.syncCalls == 0 {
+		f.syncCalls++
+		return f.syncErr
+	}
+	f.syncCalls++
+	return f.File.Sync()
+}
+
+func (f *auditTrailFaultFile) Truncate(size int64) error {
+	if f.truncateErr != nil {
+		return f.truncateErr
+	}
+	return f.File.Truncate(size)
 }
 
 // TestAuditTrail_ClassifierRecordsDecision verifies that AuditClassifier wraps
@@ -192,7 +331,7 @@ func TestAuditResolver_NilAuditPassesThrough(t *testing.T) {
 func TestAuditTrail_SummarizeArgs(t *testing.T) {
 	assert.Equal(t, "", summarizeArgs(nil))
 	assert.Equal(t, "", summarizeArgs(map[string]any{}))
-	assert.Equal(t, "a,b,c", summarizeArgs(map[string]any{
+	assert.Equal(t, "redacted", summarizeArgs(map[string]any{
 		"c": 3, "a": 1, "b": 2,
 	}))
 }

@@ -2,6 +2,8 @@ package production
 
 import (
 	"context"
+	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -240,6 +242,83 @@ func TestAuditLogHashChain(t *testing.T) {
 	assert.NoError(t, al.VerifyChain())
 }
 
+func TestAuditHashAdvancesOnlyAfterAppend(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		writeMode string
+		syncErr   error
+		wantErr   error
+	}{
+		{name: "short write", writeMode: "short", wantErr: ErrAuditLogAppend},
+		{name: "sync failure", syncErr: errors.New("sync sentinel"), wantErr: ErrAuditLogSync},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "audit.jsonl")
+			log, ok := NewDefaultAuditLog(path).(*DefaultAuditLog)
+			require.True(t, ok)
+			ctx := context.Background()
+			require.NoError(t, log.Log(ctx, AuditEntry{Operation: "first"}))
+			before, err := log.Query(ctx, AuditFilter{})
+			require.NoError(t, err)
+			require.Len(t, before, 1)
+			previousHash := before[0].Hash
+
+			log.openFile = faultAuditFileOpener(tc.writeMode, tc.syncErr, nil)
+			err = log.Log(ctx, AuditEntry{Operation: "failed"})
+			require.Error(t, err)
+			assert.ErrorIs(t, err, tc.wantErr)
+			if tc.writeMode == "short" {
+				assert.ErrorIs(t, err, io.ErrShortWrite)
+			} else {
+				assert.ErrorIs(t, err, tc.syncErr)
+			}
+
+			log.openFile = openAuditLogFile
+			require.NoError(t, log.Log(ctx, AuditEntry{Operation: "second"}))
+			after, err := log.Query(ctx, AuditFilter{})
+			require.NoError(t, err)
+			require.Len(t, after, 2)
+			assert.Equal(t, previousHash, after[1].PrevHash)
+			require.NoError(t, log.VerifyChain())
+		})
+	}
+}
+
+func TestAuditLogRollbackFailurePoisonsWriter(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	log, ok := NewDefaultAuditLog(path).(*DefaultAuditLog)
+	require.True(t, ok)
+	syncErr := errors.New("sync sentinel")
+	rollbackErr := errors.New("truncate sentinel")
+	log.openFile = faultAuditFileOpener("", syncErr, rollbackErr)
+
+	err := log.Log(context.Background(), AuditEntry{Operation: "failed"})
+	assert.ErrorIs(t, err, ErrAuditLogSync)
+	assert.ErrorIs(t, err, ErrAuditLogRollback)
+	assert.ErrorIs(t, err, syncErr)
+	assert.ErrorIs(t, err, rollbackErr)
+
+	err = log.Log(context.Background(), AuditEntry{Operation: "blocked"})
+	assert.ErrorIs(t, err, ErrAuditLogRollback)
+}
+
+func TestAuditLogContinuesHashChainAfterRestart(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	ctx := context.Background()
+	first, ok := NewDefaultAuditLog(path).(*DefaultAuditLog)
+	require.True(t, ok)
+	require.NoError(t, first.Log(ctx, AuditEntry{Operation: "first"}))
+
+	reopened, ok := NewDefaultAuditLog(path).(*DefaultAuditLog)
+	require.True(t, ok)
+	require.NoError(t, reopened.Log(ctx, AuditEntry{Operation: "second"}))
+	entries, err := reopened.Query(ctx, AuditFilter{})
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+	assert.Equal(t, entries[0].Hash, entries[1].PrevHash)
+	require.NoError(t, reopened.VerifyChain())
+}
+
 func TestAuditLogTamperDetection(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
@@ -316,4 +395,45 @@ func TestAuditLogConcurrentWrite(t *testing.T) {
 	// Hash chain should be intact despite concurrent writes.
 	al := l.(*DefaultAuditLog)
 	assert.NoError(t, al.VerifyChain())
+}
+
+type auditFaultFile struct {
+	*os.File
+	writeMode   string
+	syncErr     error
+	syncCalls   int
+	truncateErr error
+}
+
+func (f *auditFaultFile) Write(data []byte) (int, error) {
+	if f.writeMode == "short" {
+		return len(data) / 2, nil
+	}
+	return f.File.Write(data)
+}
+
+func (f *auditFaultFile) Sync() error {
+	if f.syncErr != nil && f.syncCalls == 0 {
+		f.syncCalls++
+		return f.syncErr
+	}
+	f.syncCalls++
+	return f.File.Sync()
+}
+
+func (f *auditFaultFile) Truncate(size int64) error {
+	if f.truncateErr != nil {
+		return f.truncateErr
+	}
+	return f.File.Truncate(size)
+}
+
+func faultAuditFileOpener(writeMode string, syncErr, truncateErr error) auditFileOpener {
+	return func(path string, flag int, perm os.FileMode) (auditFile, error) {
+		file, err := os.OpenFile(path, flag, perm)
+		if err != nil {
+			return nil, err
+		}
+		return &auditFaultFile{File: file, writeMode: writeMode, syncErr: syncErr, truncateErr: truncateErr}, nil
+	}
 }
