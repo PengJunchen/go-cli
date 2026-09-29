@@ -1012,7 +1012,6 @@ func TestE2E_Phase19_SubAgentSystemPrompt(t *testing.T) {
 // conversion works through WebFetchTool with DefaultHTMLConverter: output is
 // Markdown (no HTML tags), and script/style content is removed.
 func TestE2E_Phase19_HTMLConverterWithWebFetch(t *testing.T) {
-	t.Skip("Pre-existing failure: web_fetch blocks private IP 127.0.0.1")
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
@@ -1036,7 +1035,9 @@ func TestE2E_Phase19_HTMLConverterWithWebFetch(t *testing.T) {
 	defer srv.Close()
 
 	converter := tools.NewDefaultHTMLConverter()
-	tool := tools.NewWebFetchTool(tools.WithHTMLConverter(converter))
+	// The custom client is scoped to this controlled httptest loopback fixture;
+	// production WebFetchTool requests continue to use SSRF validation.
+	tool := tools.NewWebFetchTool(tools.WithWebFetchClient(srv.Client()), tools.WithHTMLConverter(converter))
 
 	res, err := tool.Execute(ctx, toolCallWithArgs("web_fetch", map[string]any{
 		"url": srv.URL,

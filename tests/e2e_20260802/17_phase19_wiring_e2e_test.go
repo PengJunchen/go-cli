@@ -11,7 +11,6 @@ import (
 	"context"
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -112,12 +111,11 @@ func phase19wExecuteWebSearch(t *testing.T, cfg *config.Config) (*tools.ToolResu
 // =============================================================================
 
 // TestET_Phase19_AC1_AssembledComponentsNotNil verifies that AssembleAgent
-// creates and wires the four PARTIAL components: FileTracker (D5) and
-// DiffGenerator (D6) are exposed on the assembly; BashSandbox (D7) is wired
-// into the BashTool (public Sandbox field); HTMLConverter (D9) is wired into
-// the WebFetchTool (verified behaviorally via HTML→Markdown conversion).
+// exposes FileTracker (D5) and DiffGenerator (D6), and checks BashSandbox (D7)
+// and WebFetch's default loopback protection (D9) through the public prepared
+// tool proxies. HTML conversion is tested separately with an explicit client
+// for the controlled loopback fixture.
 func TestET_Phase19_AC1_AssembledComponentsNotNil(t *testing.T) {
-	t.Skip("Pre-existing failure: web_fetch blocks private IP 127.0.0.1")
 	assembly := phase19wAssemble(t, phase19wTestConfig())
 
 	// D5: FileTracker must be created and exposed.
@@ -126,36 +124,30 @@ func TestET_Phase19_AC1_AssembledComponentsNotNil(t *testing.T) {
 	// D6: DiffGenerator must be created and exposed.
 	require.NotNil(t, assembly.DiffGenerator, "DiffGenerator must be wired by AssembleAgent")
 
-	// D7: BashSandbox must be wired into the BashTool. AssembleAgent now
-	// uses StreamingBashToolImpl which embeds *BashTool, so Sandbox is
-	// promoted and accessible directly.
+	// D7: the assembled registry exposes a protected streaming proxy, not the
+	// raw BashTool. Verify the public capability and that the assembled sandbox
+	// blocks a blacklisted command without affecting a disposable sentinel.
 	bashDef := phase19wFindTool(t, assembly.ToolRegistry, "bash")
-	streamingBash, ok := bashDef.(*tools.StreamingBashToolImpl)
-	require.True(t, ok, "bash tool should be *tools.StreamingBashToolImpl")
-	require.NotNil(t, streamingBash.Sandbox, "BashSandbox must be wired into BashTool")
-
-	// D9: HTMLConverter must be wired into the WebFetchTool. The converter
-	// field is private, so we verify behaviorally: fetch HTML from a test
-	// server and confirm the output is Markdown (no HTML tags).
-	htmlPage := `<html><head><title>T</title></head><body><h1>Title</h1><p>Para</p></body></html>`
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		_, _ = w.Write([]byte(htmlPage))
+	_, ok := bashDef.(tools.StreamingBashTool)
+	require.True(t, ok, "bash proxy should expose the streaming capability")
+	probeFile := filepath.Join(t.TempDir(), "sandbox-probe")
+	require.NoError(t, os.WriteFile(probeFile, []byte("keep"), 0o600))
+	quotedProbePath := "'" + strings.ReplaceAll(probeFile, "'", "'\\''") + "'"
+	_, err := bashDef.Execute(context.Background(), toolCallWithArgs("bash", map[string]any{
+		"command": "rm -f " + quotedProbePath,
 	}))
-	defer srv.Close()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "bash sandbox: command blocked")
+	require.FileExists(t, probeFile, "the sandbox must preserve the probe file")
 
+	// D9: the assembled registry exposes the protected web_fetch definition and
+	// retains its default SSRF protection. HTML conversion uses an explicit test
+	// client only in its dedicated controlled-loopback integration test.
 	fetchDef := phase19wFindTool(t, assembly.ToolRegistry, "web_fetch")
-	fetchTool, ok := fetchDef.(*tools.WebFetchTool)
-	require.True(t, ok, "web_fetch tool should be *tools.WebFetchTool")
-
-	res, err := fetchTool.Execute(context.Background(), toolCallWithArgs("web_fetch", map[string]any{
-		"url": srv.URL,
+	_, err = fetchDef.Execute(context.Background(), toolCallWithArgs("web_fetch", map[string]any{
+		"url": "http://127.0.0.1",
 	}))
-	require.NoError(t, err)
-	// Conversion happened → Markdown heading present, no HTML tags.
-	assert.Contains(t, res.Output, "# Title")
-	assert.NotContains(t, res.Output, "<html>")
-	assert.NotContains(t, res.Output, "<h1>")
+	require.ErrorIs(t, err, tools.ErrPrivateIP)
 }
 
 // =============================================================================
