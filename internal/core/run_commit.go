@@ -132,6 +132,56 @@ type RunCommitSink interface {
 	CommitTerminal(context.Context, RunTerminal) error
 }
 
+// CompactionSourceSnapshot is the exact immutable history view captured by a
+// run's sink. It ties runtime source metadata to the same branch revision the
+// sink will later use to validate compaction projections.
+type CompactionSourceSnapshot struct {
+	Revision       string
+	BranchID       string
+	Messages       []AgentMessage
+	SourceEntryIDs []string
+}
+
+// Validate checks the one-to-one message/source mapping required for durable
+// history hydration.
+func (snapshot CompactionSourceSnapshot) Validate() error {
+	if snapshot.BranchID == "" {
+		return errors.New("core: compaction source snapshot requires a branch ID")
+	}
+	if len(snapshot.Messages) != len(snapshot.SourceEntryIDs) {
+		return fmt.Errorf("core: compaction source snapshot has %d messages and %d source IDs", len(snapshot.Messages), len(snapshot.SourceEntryIDs))
+	}
+	if len(snapshot.Messages) > 0 && snapshot.Revision == "" {
+		return errors.New("core: non-empty compaction source snapshot requires a revision")
+	}
+	seen := make(map[string]struct{}, len(snapshot.SourceEntryIDs))
+	for index, id := range snapshot.SourceEntryIDs {
+		if id == "" {
+			return fmt.Errorf("core: compaction source snapshot has an empty entry ID at index %d", index)
+		}
+		if _, exists := seen[id]; exists {
+			return fmt.Errorf("core: compaction source snapshot repeats entry ID %q", id)
+		}
+		seen[id] = struct{}{}
+	}
+	return nil
+}
+
+// Clone returns a defensive copy of the exact source view.
+func (snapshot CompactionSourceSnapshot) Clone() CompactionSourceSnapshot {
+	snapshot.Messages = CloneAgentMessages(snapshot.Messages)
+	if snapshot.SourceEntryIDs != nil {
+		snapshot.SourceEntryIDs = append([]string(nil), snapshot.SourceEntryIDs...)
+	}
+	return snapshot
+}
+
+// RunCommitCompactionSource is an optional capability on a run sink that
+// exposes the same captured view used for later durable source mapping.
+type RunCommitCompactionSource interface {
+	CompactionSourceSnapshot() (CompactionSourceSnapshot, error)
+}
+
 // RunCommitRunLease is an optional capability implemented by sinks that borrow
 // a longer-lived prepared session. CloseRunCommit must only release this run's
 // idempotent borrow; it must not perform durable writes or close the underlying

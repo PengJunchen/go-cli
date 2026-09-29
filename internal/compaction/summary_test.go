@@ -95,7 +95,8 @@ func TestSummaryCompactorProducesPlaceholderWithinBudget(t *testing.T) {
 	}
 
 	compactor := NewSummaryCompactor(sum)
-	out, err := compactor.Compact(ctx, items, 50, est)
+	outResult, err := compactor.Compact(ctx, items, 50, est)
+	out := outResult.Items
 	require.NoError(t, err)
 
 	// The mandatory system prompt precedes the derived summary.
@@ -143,7 +144,9 @@ func TestSummaryCompactorPreservesMandatorySystemEntriesAtTheirCutPositions(t *t
 	}
 	original := append([]TurnItem(nil), items...)
 
-	out, err := NewSummaryCompactor(summarizer).Compact(ctx, items, 140, est)
+	outResult, err := NewSummaryCompactor(summarizer).Compact(ctx, items, 140, est)
+
+	out := outResult.Items
 	require.NoError(t, err)
 	require.Len(t, out, 4)
 	assert.Equal(t, systemBefore, out[0], "the original system item and metadata must survive unchanged")
@@ -200,7 +203,9 @@ func TestUnifiedCompactorFallsBackAfterTransientSummaryError(t *testing.T) {
 	}
 	uni := NewUnifiedCompactor(WithSummary(NewSummaryCompactor(summarizer)))
 
-	out, err := uni.Compact(ctx, items, 20, est)
+	outResult, err := uni.Compact(ctx, items, 20, est)
+
+	out := outResult.Items
 	require.NoError(t, err)
 	assert.Equal(t, StrategyTruncating, uni.LastStrategy())
 	assert.LessOrEqual(t, estimateTokens(out, est), 20)
@@ -223,7 +228,8 @@ func TestSummaryCompactorUsesPlaceholderOnEmptySummary(t *testing.T) {
 	}
 
 	compactor := NewSummaryCompactor(sum)
-	out, err := compactor.Compact(ctx, items, 35, est)
+	outResult, err := compactor.Compact(ctx, items, 35, est)
+	out := outResult.Items
 	require.NoError(t, err)
 	require.Len(t, out, 3)
 	assert.Equal(t, RoleSystem, out[0].Role)
@@ -248,7 +254,8 @@ func TestSummaryCompactorIncrementalOnlySummarizesUncompactedRegion(t *testing.T
 	}
 
 	compactor := NewSummaryCompactor(sum)
-	out, err := compactor.Compact(ctx, items, 80, est)
+	outResult, err := compactor.Compact(ctx, items, 80, est)
+	out := outResult.Items
 	require.NoError(t, err)
 
 	// Exactly one compaction entry remains: the freshly produced one.
@@ -477,7 +484,9 @@ func TestSummarySmallModel(t *testing.T) {
 	summaryCompactor := NewSummaryCompactor(smallSummarizer)
 	uni := NewUnifiedCompactor(WithSummary(summaryCompactor))
 
-	out, err := uni.Compact(ctx, items, 30, est)
+	outResult, err := uni.Compact(ctx, items, 30, est)
+
+	out := outResult.Items
 	require.NoError(t, err)
 	assert.Equal(t, StrategySummary, uni.LastStrategy(),
 		"should use summary strategy when small model is configured")
@@ -494,7 +503,8 @@ func TestSummarySmallModel(t *testing.T) {
 	// AC-6: Without a small-model summarizer, compaction falls back to
 	// truncating and never invokes summary.
 	uniNoSmall := NewUnifiedCompactor()
-	out2, err2 := uniNoSmall.Compact(ctx, items, 30, est)
+	out2Result, err2 := uniNoSmall.Compact(ctx, items, 30, est)
+	out2 := out2Result.Items
 	require.NoError(t, err2)
 	assert.NotEqual(t, StrategySummary, uniNoSmall.LastStrategy(),
 		"should not use summary when no small model configured")

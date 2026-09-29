@@ -29,7 +29,8 @@ func TestTruncatingCompactorKeepsSystem(t *testing.T) {
 	}
 
 	compactor := NewTruncatingCompactor()
-	out, err := compactor.Compact(ctx, items, 40, est)
+	outResult, err := compactor.Compact(ctx, items, 40, est)
+	out := outResult.Items
 	require.NoError(t, err)
 
 	// The system entry is always kept.
@@ -59,7 +60,8 @@ func TestTruncatingCompactorTruncatesOldestNonSystem(t *testing.T) {
 	}
 
 	compactor := NewTruncatingCompactor()
-	out, err := compactor.Compact(ctx, items, 20, est)
+	outResult, err := compactor.Compact(ctx, items, 20, est)
+	out := outResult.Items
 	require.NoError(t, err)
 
 	// The oldest large entry is dropped; the newest ones remain, ordered by recency.
@@ -85,7 +87,8 @@ func TestTruncatingCompactorCompressesToBudget(t *testing.T) {
 	}
 
 	compactor := NewTruncatingCompactor()
-	out, err := compactor.Compact(ctx, items, 50, est)
+	outResult, err := compactor.Compact(ctx, items, 50, est)
+	out := outResult.Items
 	require.NoError(t, err)
 	assert.LessOrEqual(t, estimateTokens(out, est), 50)
 	assert.NotEmpty(t, out)
@@ -98,7 +101,8 @@ func TestTruncatingCompactorEmptyInputNoPanic(t *testing.T) {
 	est := tracedEstimator()
 
 	compactor := NewTruncatingCompactor()
-	out, err := compactor.Compact(ctx, nil, 100, est)
+	outResult, err := compactor.Compact(ctx, nil, 100, est)
+	out := outResult.Items
 	require.NoError(t, err)
 	assert.Empty(t, out)
 }
@@ -136,7 +140,8 @@ func TestTruncatingCompactorPreservesChronologicalOrder(t *testing.T) {
 	}
 
 	compactor := NewTruncatingCompactor()
-	out, err := compactor.Compact(ctx, items, 200, est)
+	outResult, err := compactor.Compact(ctx, items, 200, est)
+	out := outResult.Items
 	require.NoError(t, err)
 
 	// The non-system entries must remain in their original chronological
@@ -166,7 +171,8 @@ func TestTruncatingCompactorDropsOldestKeepsOrder(t *testing.T) {
 	}
 
 	compactor := NewTruncatingCompactor()
-	out, err := compactor.Compact(ctx, items, 30, est)
+	outResult, err := compactor.Compact(ctx, items, 30, est)
+	out := outResult.Items
 	require.NoError(t, err)
 
 	expected := []string{"sys", "keep-a", "keep-b", "keep-c"}
@@ -216,7 +222,8 @@ func TestTruncatingCompactorKeepsPairedToolResults(t *testing.T) {
 	}
 
 	compactor := NewTruncatingCompactor()
-	out, err := compactor.Compact(ctx, items, 200, est)
+	outResult, err := compactor.Compact(ctx, items, 200, est)
+	out := outResult.Items
 	require.NoError(t, err)
 
 	roles := make([]string, len(out))

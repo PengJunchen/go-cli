@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
@@ -97,7 +98,7 @@ func addSystemReminders(submission Submission, reminders []string) Submission {
 	}
 	systemMessages := make([]AgentMessage, len(reminders))
 	for i, reminder := range reminders {
-		systemMessages[i] = AgentMessage{Role: "system", Content: reminder}
+		systemMessages[i] = AgentMessage{Role: "system", Content: reminder, Runtime: llm.RuntimeMetadata{Source: llm.SourceRef{Kind: llm.SourceEphemeral}}}
 	}
 	submission.History = append(systemMessages, submission.History...)
 	return submission

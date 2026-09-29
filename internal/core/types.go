@@ -45,6 +45,9 @@ type AgentMessage struct {
 	InputKind string `json:"input_kind,omitempty"`
 	// ReceiptOutcome records the terminal truth for a tool receipt.
 	ReceiptOutcome string `json:"receipt_outcome,omitempty"`
+	// Runtime carries per-item source coordinates through runtime-only
+	// conversions. It is not persisted in session rows or sent to providers.
+	Runtime llm.RuntimeMetadata `json:"-"`
 }
 
 // String returns a compact one-line representation of the message.

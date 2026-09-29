@@ -221,7 +221,8 @@ func TestTruncatingCompactorKeepsOrDropsToolGroupAtomically(t *testing.T) {
 	}
 
 	t.Run("drop the complete group when only one receipt could fit", func(t *testing.T) {
-		out, err := NewTruncatingCompactor().Compact(ctx, items, 2, est)
+		outResult, err := NewTruncatingCompactor().Compact(ctx, items, 2, est)
+		out := outResult.Items
 		require.NoError(t, err)
 		require.Len(t, out, 1)
 		assert.Equal(t, RoleUser, out[0].Role)
@@ -229,7 +230,8 @@ func TestTruncatingCompactorKeepsOrDropsToolGroupAtomically(t *testing.T) {
 	})
 
 	t.Run("retain the complete group when it fits", func(t *testing.T) {
-		out, err := NewTruncatingCompactor().Compact(ctx, items, 3, est)
+		outResult, err := NewTruncatingCompactor().Compact(ctx, items, 3, est)
+		out := outResult.Items
 		require.NoError(t, err)
 		require.Len(t, out, len(items))
 		assert.Equal(t, items, out)
@@ -244,7 +246,9 @@ func TestTruncatingCompactorFillsUniqueMissingReceiptToolNameWithoutMutation(t *
 		{Role: RoleTool, ToolCallID: "call-read", ToolResult: "contents"},
 	}
 
-	out, err := NewTruncatingCompactor().Compact(ctx, items, 100, tracedEstimator())
+	outResult, err := NewTruncatingCompactor().Compact(ctx, items, 100, tracedEstimator())
+
+	out := outResult.Items
 	require.NoError(t, err)
 	require.Len(t, out, 2)
 	assert.Equal(t, "read", out[1].ToolName)
@@ -261,7 +265,9 @@ func TestTruncatingCompactorAllowsCallIDReuseAfterGroupClosure(t *testing.T) {
 		{Role: RoleTool, ToolCallID: "call-1", ToolName: "grep", ToolResult: "second"},
 	}
 
-	out, err := NewTruncatingCompactor().Compact(ctx, items, 100, tracedEstimator())
+	outResult, err := NewTruncatingCompactor().Compact(ctx, items, 100, tracedEstimator())
+
+	out := outResult.Items
 	require.NoError(t, err)
 	assert.Equal(t, items, out)
 }
@@ -299,7 +305,9 @@ func TestSummaryCompactorCutsOnlyAtClosedToolGroupBoundaries(t *testing.T) {
 		{Role: RoleUser, Content: "recent"},
 	}
 
-	out, err := NewSummaryCompactor(summarizer).Compact(ctx, items, 120, tracedEstimator())
+	outResult, err := NewSummaryCompactor(summarizer).Compact(ctx, items, 120, tracedEstimator())
+
+	out := outResult.Items
 	require.NoError(t, err)
 	require.NotEmpty(t, out)
 	assert.Equal(t, RoleUser, out[0].Role, "derived summary is projected as user-role context")

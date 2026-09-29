@@ -24,16 +24,19 @@ func NewTruncatingCompactor() *TruncatingCompactor {
 
 // Compact keeps all system entries and the newest non-system entries that fit
 // the budget.
-func (c *TruncatingCompactor) Compact(ctx context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator) ([]TurnItem, error) {
+func (c *TruncatingCompactor) Compact(ctx context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator) (CompactionResult, error) {
 	span, _ := tracing.SpanFromContext(ctx, "compaction.truncating", tracing.SpanKindInternal)
 	defer span.End()
 	logger := tracing.NewTraceLogger(span, slog.Default())
+	if err := validateDurableCompactionInput(items); err != nil {
+		return CompactionResult{Items: items}, err
+	}
 	normalized, groups, err := groupTurnItems(items)
 	if err != nil {
-		return nil, err
+		return CompactionResult{}, err
 	}
 	if err := checkMandatorySystemPromptBudget(normalized, maxTokens, estimator); err != nil {
-		return items, err
+		return CompactionResult{Items: items}, err
 	}
 
 	tokensBefore := estimateTokens(normalized, estimator)
@@ -88,5 +91,5 @@ func (c *TruncatingCompactor) Compact(ctx context.Context, items []TurnItem, max
 		"items_out", len(result),
 		"tokens_before", tokensBefore,
 		"tokens_after", tokensAfter)
-	return result, nil
+	return CompactionResult{Items: result, Strategy: StrategyTruncating}, nil
 }

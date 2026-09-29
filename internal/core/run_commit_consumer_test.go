@@ -19,9 +19,9 @@ import (
 
 type runCommitCountingCompactor struct{ calls int }
 
-func (compactor *runCommitCountingCompactor) Compact(_ context.Context, items []compaction.TurnItem, _ int, _ compaction.TokenEstimator) ([]compaction.TurnItem, error) {
+func (compactor *runCommitCountingCompactor) Compact(_ context.Context, items []compaction.TurnItem, _ int, _ compaction.TokenEstimator) (compaction.CompactionResult, error) {
 	compactor.calls++
-	return items, nil
+	return compaction.CompactionResult{Items: items}, nil
 }
 
 type consumerTestSink struct {
@@ -408,7 +408,7 @@ func TestRunCommitConsumerStopsAfterPreparedActionWithoutCompletionProof(t *test
 	require.Equal(t, 1, model.idx, "a nil completion proof keeps the dispatch marker unresolved and stops the provider")
 }
 
-func TestRunCommitConsumerFailsClosedBeforeCompactorOrNextProvider(t *testing.T) {
+func TestRunCommitConsumerFailsClosedBeforeInitialOverBudgetProvider(t *testing.T) {
 	root := t.TempDir()
 	path := filepath.Join(root, "input.txt")
 	require.NoError(t, os.WriteFile(path, []byte("durable read"), 0o600))
@@ -430,11 +430,11 @@ func TestRunCommitConsumerFailsClosedBeforeCompactorOrNextProvider(t *testing.T)
 	require.ErrorIs(t, runErr, ErrRunCommitCompactionProjectionUnavailable)
 	require.Zero(t, compactor.calls, "durable projection is unavailable before the real compactor or summarizer runs")
 	steps, _, receipts, terminal := sink.snapshot()
-	require.Equal(t, []string{"input", "begin", "execution", "receipt", "resolution", "terminal"}, steps)
-	require.Len(t, receipts, 1)
+	require.Equal(t, []string{"input", "terminal"}, steps)
+	require.Empty(t, receipts)
 	require.NotNil(t, terminal)
 	require.Equal(t, RunOutcomeError, terminal.Outcome)
-	require.Equal(t, 1, model.idx, "the next provider request is forbidden after threshold-triggered compaction is rejected")
+	require.Equal(t, 0, model.idx, "an over-budget first request is rejected before any provider call when the sink cannot prove its source view")
 }
 
 func TestRunCommitConsumerUsesOneBoundedCleanupContextAfterCancellation(t *testing.T) {

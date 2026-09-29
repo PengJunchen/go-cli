@@ -33,19 +33,22 @@ func NewMicroCompactor() *MicroCompactor {
 // copy, checks mandatory system instructions, then replaces old tool results
 // with the placeholder until the estimated size fits maxTokens. It does not
 // mutate caller-owned items.
-func (c *MicroCompactor) Compact(ctx context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator) ([]TurnItem, error) {
+func (c *MicroCompactor) Compact(ctx context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator) (CompactionResult, error) {
 	span, _ := tracing.SpanFromContext(ctx, "compaction.micro", tracing.SpanKindInternal)
 	defer span.End()
 	logger := tracing.NewTraceLogger(span, slog.Default())
+	if err := validateDurableCompactionInput(items); err != nil {
+		return CompactionResult{Items: items}, err
+	}
 
 	// Validate tool-call closure and normalize legacy derived summaries on a
 	// defensive copy, matching the other compaction strategies.
 	result, _, err := groupTurnItems(items)
 	if err != nil {
-		return nil, err
+		return CompactionResult{}, err
 	}
 	if err := checkMandatorySystemPromptBudget(result, maxTokens, estimator); err != nil {
-		return items, err
+		return CompactionResult{Items: items}, err
 	}
 
 	// Pre-compute the total token count once. The loop below maintains this
@@ -95,7 +98,7 @@ func (c *MicroCompactor) Compact(ctx context.Context, items []TurnItem, maxToken
 
 	if tokensAfter > maxTokens {
 		logger.Warn("compaction.micro.insufficient", "max_tokens", maxTokens, "tokens_after", tokensAfter)
-		return result, ErrRequiresTruncating
+		return CompactionResult{Items: result, Strategy: StrategyMicro}, ErrRequiresTruncating
 	}
 
 	logger.Info("compaction.micro.done",
@@ -103,5 +106,5 @@ func (c *MicroCompactor) Compact(ctx context.Context, items []TurnItem, maxToken
 		"items_out", len(result),
 		"tokens_before", tokensBefore,
 		"tokens_after", tokensAfter)
-	return result, nil
+	return CompactionResult{Items: result, Strategy: StrategyMicro}, nil
 }

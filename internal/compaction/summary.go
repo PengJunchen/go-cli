@@ -7,6 +7,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
@@ -156,17 +157,20 @@ func (c *SummaryCompactor) findCutPointAtGroups(items []TurnItem, groups []itemG
 }
 
 // Compact summarizes the oldest region and keeps the newest turns whole.
-func (c *SummaryCompactor) Compact(ctx context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator) ([]TurnItem, error) {
+func (c *SummaryCompactor) Compact(ctx context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator) (CompactionResult, error) {
 	span, _ := tracing.SpanFromContext(ctx, "compaction.summary", tracing.SpanKindInternal)
 	defer span.End()
 	logger := tracing.NewTraceLogger(span, slog.Default())
+	if err := validateDurableCompactionInput(items); err != nil {
+		return CompactionResult{Items: items}, err
+	}
 
 	normalized, groups, err := groupTurnItems(items)
 	if err != nil {
-		return items, err
+		return CompactionResult{Items: items}, err
 	}
 	if err := checkMandatorySystemPromptBudget(normalized, maxTokens, estimator); err != nil {
-		return items, err
+		return CompactionResult{Items: items}, err
 	}
 	tokensBefore := estimateTokens(normalized, estimator)
 	span.SetAttributes(
@@ -179,20 +183,28 @@ func (c *SummaryCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 		// Nothing can be summarized without exceeding budget; escalate to the
 		// truncating fallback. Returning the input unchanged primitives the
 		// unified router to escalate.
-		return normalized, ErrRequiresTruncating
+		return CompactionResult{Items: normalized}, ErrRequiresTruncating
 	}
 
 	old := normalized[:cut]
 	keep := normalized[cut:]
+	through, hasSource, err := sourceThroughForPrefix(old)
+	if err != nil {
+		return CompactionResult{Items: normalized}, err
+	}
+	runID := currentRunID(items)
+	if hasSource && runID == "" {
+		return CompactionResult{Items: normalized}, ErrInvalidRunRequestHistory
+	}
 
 	prompt, err := c.buildSummaryPrompt(old, estimator)
 	if err != nil {
-		return normalized, err
+		return CompactionResult{Items: normalized}, err
 	}
 	summary, err := c.summarizer.Summarize(ctx, prompt)
 	if err != nil {
 		logger.Warn("compaction.summary.failed", "err", err)
-		return normalized, err
+		return CompactionResult{Items: normalized}, err
 	}
 	if summary == "" {
 		summary = summaryPlaceholder
@@ -209,11 +221,17 @@ func (c *SummaryCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 			result = append(result, items[i])
 		}
 	}
-	result = append(result, TurnItem{
+	summaryItem := TurnItem{
 		Role:         RoleUser,
 		Content:      summary,
 		IsCompaction: true,
-	})
+	}
+	var projection *NewProjection
+	if hasSource {
+		summaryItem.Runtime.Source = llm.SourceRef{Kind: llm.SourceRunSummary, RunID: runID, Through: through}
+		projection = &NewProjection{Summary: summary, Through: through}
+	}
+	result = append(result, summaryItem)
 	for i := cut; i < len(normalized); i++ {
 		if items[i].Role == RoleSystem && !items[i].IsCompaction {
 			result = append(result, items[i])
@@ -231,7 +249,7 @@ func (c *SummaryCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 
 	if tokensAfter > maxTokens {
 		logger.Warn("compaction.summary.insufficient", "max_tokens", maxTokens, "tokens_after", tokensAfter)
-		return result, ErrRequiresTruncating
+		return CompactionResult{Items: result}, ErrRequiresTruncating
 	}
 
 	logger.Info("compaction.summary.done",
@@ -240,7 +258,7 @@ func (c *SummaryCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 		"items_out", len(result),
 		"tokens_before", tokensBefore,
 		"tokens_after", tokensAfter)
-	return result, nil
+	return CompactionResult{Items: result, Strategy: StrategySummary, NewProjection: projection}, nil
 }
 
 // buildSummaryPrompt renders the history in transcript order, enforcing both

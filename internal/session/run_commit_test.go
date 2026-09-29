@@ -65,6 +65,22 @@ func runSessionCommitAgentWithContext(parent context.Context, t *testing.T, sink
 	return err
 }
 
+func TestDurableRowMatchesMessageIgnoresRuntimeOnlyMetadata(t *testing.T) {
+	row := SessionEntry{
+		RecordVersion: 1, Type: EntryTypeTool, Content: "result", ToolCallID: "call-1",
+		ToolName: "read", ReceiptOutcome: core.ReceiptOutcomeUnknown,
+	}
+	expected := core.AgentMessage{
+		Role: "tool", Content: "result", ToolCallID: "call-1",
+		ToolName: "read", ReceiptOutcome: core.ReceiptOutcomeUnknown,
+		Runtime: llm.RuntimeMetadata{
+			Source:         llm.SourceRef{Kind: llm.SourceRunTranscript, RunID: "run-1", TranscriptIndex: 2},
+			ReceiptOutcome: core.ReceiptOutcomeUnknown,
+		},
+	}
+	require.True(t, durableRowMatchesMessage(row, expected), "json:- source metadata is not part of the persisted row comparison")
+}
+
 func TestSessionRunCommitSinkCommitInputPersistsBeforeReturning(t *testing.T) {
 	ctx := context.Background()
 	prepared, err := NewDurableJSONLSessionPreparer(t.TempDir(), nil).PrepareNew(ctx, "commit input")

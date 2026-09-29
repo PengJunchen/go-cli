@@ -110,20 +110,23 @@ func (u *UnifiedCompactor) setLastStrategy(s Strategy) {
 // It emits a single `compaction` span annotating the trigger reason, the token
 // counts, and which strategy ultimately succeeded, and it exposes the chosen
 // strategy through LastStrategy.
-func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator) ([]TurnItem, error) {
+func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator) (CompactionResult, error) {
 	span, sctx := tracing.SpanFromContext(ctx, "compaction", tracing.SpanKindInternal)
 	defer span.End()
 	logger := tracing.NewTraceLogger(span, slog.Default())
 	originalItems := items
+	if err := validateDurableCompactionInput(items); err != nil {
+		return CompactionResult{Items: items}, err
+	}
 
 	// Validate tool-call closure and normalize legacy derived summaries on a
 	// defensive copy before trying any strategy.
 	normalized, _, err := groupTurnItems(items)
 	if err != nil {
-		return nil, err
+		return CompactionResult{}, err
 	}
 	if err := checkMandatorySystemPromptBudget(normalized, maxTokens, estimator); err != nil {
-		return items, err
+		return CompactionResult{Items: items}, err
 	}
 	items = normalized
 
@@ -154,7 +157,7 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 			return u.finish(sctx, logger, span, originalItems, current, maxTokens, estimator, result, StrategyMicro), nil
 		}
 		if errors.Is(err, errMalformedToolGroup) {
-			return nil, err
+			return CompactionResult{}, err
 		}
 		logger.Debug("compaction.unified.escalate", "from", "micro", "err", err)
 	}
@@ -168,7 +171,7 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 			return u.finish(sctx, logger, span, originalItems, current, maxTokens, estimator, result, StrategySummary), nil
 		}
 		if errors.Is(err, errMalformedToolGroup) {
-			return nil, err
+			return CompactionResult{}, err
 		}
 		logger.Debug("compaction.unified.escalate", "from", "summary", "err", err)
 	}
@@ -181,31 +184,32 @@ func (u *UnifiedCompactor) Compact(ctx context.Context, items []TurnItem, maxTok
 		if err == nil {
 			return u.finish(sctx, logger, span, originalItems, current, maxTokens, estimator, result, StrategyTruncating), nil
 		}
-		return nil, err
+		return CompactionResult{}, err
 	}
 
 	// No strategy could run; surface a descriptive error rather than returning
 	// an unconstrained result.
-	return nil, ErrRequiresTruncating
+	return CompactionResult{Items: items}, ErrRequiresTruncating
 }
 
 // finish records the winning strategy, emits the result attributes, runs the
 // quality evaluator (when configured), and returns the compacted items.
 // tokensIn is the pre-computed total for the input items, passed from Compact
 // to avoid a redundant re-estimation.
-func (u *UnifiedCompactor) finish(ctx context.Context, logger *slog.Logger, span tracing.TraceSpan, items []TurnItem, tokensIn, maxTokens int, estimator TokenEstimator, result []TurnItem, strategy Strategy) []TurnItem {
+func (u *UnifiedCompactor) finish(ctx context.Context, logger *slog.Logger, span tracing.TraceSpan, items []TurnItem, tokensIn, maxTokens int, estimator TokenEstimator, result CompactionResult, strategy Strategy) CompactionResult {
 	u.setLastStrategy(strategy)
 
-	after := estimateTokensCopy(result, estimator)
+	result.Strategy = strategy
+	after := estimateTokensCopy(result.Items, estimator)
 	span.SetAttributes(
 		tracing.Attribute{Key: "strategy_used", Value: strategy.String()},
-		tracing.Attribute{Key: "compacted_items", Value: len(result)},
+		tracing.Attribute{Key: "compacted_items", Value: len(result.Items)},
 		tracing.Attribute{Key: "compacted_tokens", Value: after},
 	)
 	logger.Info("compaction.unified.done",
 		"strategy", strategy.String(),
 		"items_in", len(items),
-		"items_out", len(result),
+		"items_out", len(result.Items),
 		"tokens_in", tokensIn,
 		"tokens_out", after,
 		"max_tokens", maxTokens)
@@ -217,7 +221,7 @@ func (u *UnifiedCompactor) finish(ctx context.Context, logger *slog.Logger, span
 		metrics, err := u.evaluator.Evaluate(
 			ctx,
 			append([]TurnItem(nil), items...),
-			append([]TurnItem(nil), result...),
+			append([]TurnItem(nil), result.Items...),
 		)
 		if err != nil {
 			logger.Warn("compaction.quality.failed", "strategy", strategy.String(), "err", err)

@@ -34,7 +34,7 @@ func TestMidTurnCompactDoesNotTriggerWithinThreshold(t *testing.T) {
 	require.NoError(t, err)
 	assert.False(t, res.Triggered)
 	assert.Equal(t, TriggerNone, res.Reason)
-	assert.Equal(t, items, out)
+	assert.Equal(t, items, out.Items)
 	assert.Empty(t, compactor.Called(), "compaction must not run under threshold")
 }
 
@@ -55,7 +55,7 @@ func TestMidTurnCompactTriggersAtThreshold(t *testing.T) {
 	assert.True(t, res.Triggered)
 	assert.Equal(t, TriggerThreshold, res.Reason)
 	assert.Equal(t, []string{"micro"}, compactor.Called())
-	assert.Len(t, out, 1)
+	assert.Len(t, out.Items, 1)
 
 	// The compaction.trigger span is emitted when compaction runs.
 	assertSpanEventually(t, exp, "compaction.trigger")
@@ -79,7 +79,7 @@ func TestMidTurnCompactCompactTriggeredAlwaysRuns(t *testing.T) {
 	assert.True(t, res.Triggered)
 	assert.Equal(t, TriggerManual, res.Reason)
 	assert.Equal(t, []string{"micro"}, compactor.Called())
-	assert.Len(t, out, 1)
+	assert.Len(t, out.Items, 1)
 
 	assertSpanEventually(t, exp, "compaction.trigger")
 }
