@@ -499,6 +499,38 @@ func TestConfigHotReloaderStopsAfterCallbackPanic(t *testing.T) {
 	assert.ErrorIs(t, reloader.Stop(), ErrHotReloadCallbackPanic)
 }
 
+func TestConfigHotReloaderUsesSourceRevisionBeyondSelectedFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "mcp.json")
+	writeConfig(t, path, `{"servers":[]}`)
+	var revision atomic.Value
+	revision.Store("manifest-1")
+	var calls atomic.Int32
+	started := make(chan int32, 2)
+	reloader := NewConfigHotReloader(func(context.Context, string) error {
+		call := calls.Add(1)
+		started <- call
+		return nil
+	},
+		WithPollInterval(5*time.Millisecond),
+		WithConfigSourceRevision(func(context.Context) (string, error) {
+			return revision.Load().(string), nil
+		}, "manifest-1"),
+	)
+	require.NoError(t, reloader.Watch(context.Background(), path))
+
+	revision.Store("manifest-2")
+	select {
+	case call := <-started:
+		assert.EqualValues(t, 1, call)
+	case <-time.After(time.Second):
+		t.Fatal("a source-manifest change did not trigger a config generation")
+	}
+	waitForConfigReloadAttempt(t, reloader, func(attempt MCPConfigReloadAttempt) bool {
+		return attempt.ErrorClass == "" && !attempt.CompletedAt.IsZero()
+	})
+	assert.EqualValues(t, 1, calls.Load(), "the manifest change should trigger one complete generation attempt")
+}
+
 type configReloadTraceCapture struct {
 	spans chan tracing.SpanData
 }

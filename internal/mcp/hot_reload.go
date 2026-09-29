@@ -117,6 +117,11 @@ type RegisterToolsFunc func(tools []MCPTool)
 // watcher active for a later change or manual reload.
 type MCPConfigReloadFunc func(context.Context, string) error
 
+// MCPConfigSourceRevisionFunc returns an opaque revision token for the full
+// selected source manifest. It is used when watching one path is insufficient
+// to detect changes to the source set.
+type MCPConfigSourceRevisionFunc func(context.Context) (string, error)
+
 // MCPConfigReloadErrorClass is a finite, redacted category for a failed
 // config-generation attempt. It never includes callback error text.
 type MCPConfigReloadErrorClass string
@@ -159,12 +164,14 @@ const (
 // HotReloaderOption closures do not reference the concrete
 // DefaultHotReloader type.
 type hotReloaderOptions struct {
-	pollInterval  time.Duration
-	backoffBase   time.Duration
-	backoffFactor int
-	maxBackoff    time.Duration
-	maxRetries    int
-	transport     MCPTransport
+	pollInterval    time.Duration
+	backoffBase     time.Duration
+	backoffFactor   int
+	maxBackoff      time.Duration
+	maxRetries      int
+	transport       MCPTransport
+	sourceRevision  MCPConfigSourceRevisionFunc
+	initialRevision string
 }
 
 // HotReloaderOption configures a DefaultHotReloader.
@@ -203,6 +210,17 @@ func WithTransport(t MCPTransport) HotReloaderOption {
 	return func(o *hotReloaderOptions) { o.transport = t }
 }
 
+// WithConfigSourceRevision makes a config reloader poll a complete source-set
+// revision instead of inferring changes only from the selected file path.
+// initialRevision must describe the generation currently published by the
+// caller so edits made while a candidate is being built are not missed.
+func WithConfigSourceRevision(revision MCPConfigSourceRevisionFunc, initialRevision string) HotReloaderOption {
+	return func(o *hotReloaderOptions) {
+		o.sourceRevision = revision
+		o.initialRevision = initialRevision
+	}
+}
+
 // fileSnapshot captures the observable identity of the config file at one point
 // in time. Comparing snapshots across polls detects a config change.
 type fileSnapshot struct {
@@ -222,12 +240,14 @@ type DefaultHotReloader struct {
 	register     RegisterToolsFunc
 	reloadConfig MCPConfigReloadFunc
 
-	pollInterval  time.Duration
-	backoffBase   time.Duration
-	backoffFactor int
-	maxBackoff    time.Duration
-	maxRetries    int
-	transport     MCPTransport
+	pollInterval        time.Duration
+	backoffBase         time.Duration
+	backoffFactor       int
+	maxBackoff          time.Duration
+	maxRetries          int
+	transport           MCPTransport
+	sourceRevision      MCPConfigSourceRevisionFunc
+	sourceRevisionValue string
 
 	path string
 
@@ -270,16 +290,18 @@ func NewDefaultHotReloader(client MCPClient, register RegisterToolsFunc, opts ..
 		opt(o)
 	}
 	return &DefaultHotReloader{
-		client:        client,
-		register:      register,
-		pollInterval:  o.pollInterval,
-		backoffBase:   o.backoffBase,
-		backoffFactor: o.backoffFactor,
-		maxBackoff:    o.maxBackoff,
-		maxRetries:    o.maxRetries,
-		transport:     o.transport,
-		stopCh:        make(chan struct{}),
-		done:          make(chan struct{}),
+		client:              client,
+		register:            register,
+		pollInterval:        o.pollInterval,
+		backoffBase:         o.backoffBase,
+		backoffFactor:       o.backoffFactor,
+		maxBackoff:          o.maxBackoff,
+		maxRetries:          o.maxRetries,
+		transport:           o.transport,
+		sourceRevision:      o.sourceRevision,
+		sourceRevisionValue: o.initialRevision,
+		stopCh:              make(chan struct{}),
+		done:                make(chan struct{}),
 	}
 }
 
@@ -299,15 +321,17 @@ func NewConfigHotReloader(reload MCPConfigReloadFunc, opts ...HotReloaderOption)
 		opt(o)
 	}
 	return &DefaultHotReloader{
-		reloadConfig:  reload,
-		pollInterval:  o.pollInterval,
-		backoffBase:   o.backoffBase,
-		backoffFactor: o.backoffFactor,
-		maxBackoff:    o.maxBackoff,
-		maxRetries:    o.maxRetries,
-		transport:     o.transport,
-		stopCh:        make(chan struct{}),
-		done:          make(chan struct{}),
+		reloadConfig:        reload,
+		pollInterval:        o.pollInterval,
+		backoffBase:         o.backoffBase,
+		backoffFactor:       o.backoffFactor,
+		maxBackoff:          o.maxBackoff,
+		maxRetries:          o.maxRetries,
+		transport:           o.transport,
+		sourceRevision:      o.sourceRevision,
+		sourceRevisionValue: o.initialRevision,
+		stopCh:              make(chan struct{}),
+		done:                make(chan struct{}),
 	}
 }
 
@@ -337,7 +361,11 @@ func (h *DefaultHotReloader) Watch(ctx context.Context, configPath string) error
 	if configPath == "" {
 		return errors.New("mcp: hot reload: empty config path")
 	}
-	snap, present := readSnapshot(configPath)
+	var snap fileSnapshot
+	present := false
+	if h.sourceRevision == nil {
+		snap, present = readSnapshot(configPath)
+	}
 
 	h.mu.Lock()
 
@@ -352,8 +380,10 @@ func (h *DefaultHotReloader) Watch(ctx context.Context, configPath string) error
 
 	h.path = configPath
 	h.baseline = true
-	h.snapshot = snap
-	h.lastMissing = !present
+	if h.sourceRevision == nil {
+		h.snapshot = snap
+		h.lastMissing = !present
+	}
 	pollCtx, cancel := context.WithCancel(ctx)
 	h.pollCtx = pollCtx
 	h.pollCancel = cancel
@@ -499,7 +529,7 @@ func (h *DefaultHotReloader) poll(ctx context.Context) {
 // detectAndMaybeReconnect re-checks the config file and, if it changed since the
 // last poll, triggers the reconnect state machine.
 func (h *DefaultHotReloader) detectAndMaybeReconnect(ctx context.Context) {
-	if h.detectChange() {
+	if h.detectChange(ctx) {
 		h.scheduleReconnect(ctx)
 	}
 }
@@ -507,7 +537,21 @@ func (h *DefaultHotReloader) detectAndMaybeReconnect(ctx context.Context) {
 // detectChange compares the current config file state against the stored one.
 // The first successful visit only establishes the baseline. It returns true
 // once per observable change (creation, modification, or removal).
-func (h *DefaultHotReloader) detectChange() bool {
+func (h *DefaultHotReloader) detectChange(ctx context.Context) bool {
+	if h.sourceRevision != nil {
+		revision := h.readSourceRevision(ctx)
+		h.mu.Lock()
+		defer h.mu.Unlock()
+		if !h.baseline {
+			h.baseline = true
+			h.sourceRevisionValue = revision
+			return false
+		}
+		changed := revision != h.sourceRevisionValue
+		h.sourceRevisionValue = revision
+		return changed
+	}
+
 	// Read the file outside the lock to avoid blocking other callers (Stop,
 	// Reload, scheduleReconnect) during I/O.
 	snap, present := readSnapshot(h.path)
@@ -526,6 +570,19 @@ func (h *DefaultHotReloader) detectChange() bool {
 	h.snapshot = snap
 	h.lastMissing = !present
 	return changed
+}
+
+func (h *DefaultHotReloader) readSourceRevision(ctx context.Context) (revision string) {
+	defer func() {
+		if recover() != nil {
+			revision = "probe-error:" + string(MCPConfigReloadErrorPanic)
+		}
+	}()
+	value, err := h.sourceRevision(ctx)
+	if err != nil {
+		return "probe-error:" + string(mcpConfigReloadErrorClass(err))
+	}
+	return value
 }
 
 // scheduleReconnect kicks off one reconnect cycle on a background goroutine. If
