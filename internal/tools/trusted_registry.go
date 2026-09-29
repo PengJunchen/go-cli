@@ -230,7 +230,18 @@ func (r *DefaultToolRegistry) preparedToolPipeline() (*preparedToolPipelineState
 }
 
 func (r *DefaultToolRegistry) RegisterTrustedControl(ctx context.Context, def ToolDefinition) error {
-	return r.registerDefinition(def, RegistrationSourceTrustedControl, newTrustedEffectSet(EffectControl))
+	completionProof := PreparedCompletionProof("")
+	if askUser, ok := def.(*AskUserQuestionTool); ok {
+		if askUser == nil {
+			return errors.New("tools: trusted ask_user control must be non-nil")
+		}
+		// AskUserQuestionTool returns only after the matching answer has been
+		// delivered, and it owns no detached work after Execute returns. Grant
+		// this proof only to that concrete control tool; other trusted controls
+		// keep the default unproven completion behavior.
+		completionProof = CompletionInlinePipelineJoined
+	}
+	return r.registerDefinitionWithCompletion(def, RegistrationSourceTrustedControl, newTrustedEffectSet(EffectControl), completionProof)
 }
 
 func (r *DefaultToolRegistry) RegisterTrustedNetworkRead(ctx context.Context, def ToolDefinition) error {

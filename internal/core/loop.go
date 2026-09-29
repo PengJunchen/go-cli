@@ -508,13 +508,23 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 		toolOpts = append(toolOpts, llm.WithThinking(*l.thinkingConfig))
 	}
 
+	eventCoordinates := agentEventCoordinates{runID: RunIDFromContext(spanCtx)}
+
 	// sendEvent emits an event both to the local events slice and (when
 	// streaming) to the EventStream in real time.
 	sendEvent := func(ev AgentEvent) {
+		ev = stampAgentEvent(eventCoordinates, ev)
 		events = append(events, ev)
 		if es != nil {
 			_ = es.Send(ev) //nolint:errcheck
 		}
+	}
+	sendToolResultEvent := func(content string, isError bool, toolCallID, outcome string, sourceTruncated *bool) {
+		sendEvent(AgentEvent{
+			Kind: "tool_result", Content: content, Timestamp: time.Now(), IsError: isError,
+			ToolCallID: toolCallID, ReceiptOutcome: outcome,
+			SourceTruncated: cloneOptionalBool(sourceTruncated),
+		})
 	}
 
 	// Build the conversation from history (if any) plus the current
@@ -594,13 +604,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 		}
 		for _, tc := range synthCalls {
 			appendTranscriptToolReceipt(&transcript, tc, "Error: "+errMsg, ReceiptOutcomeInterrupted, consumer)
-			sendEvent(AgentEvent{
-				Kind:       "tool_result",
-				Content:    "Error: " + errMsg,
-				Timestamp:  time.Now(),
-				IsError:    true,
-				ToolCallID: tc.ID,
-			})
+			sendToolResultEvent("Error: "+errMsg, true, tc.ID, ReceiptOutcomeInterrupted, nil)
 		}
 	}
 
@@ -691,7 +695,15 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 			}
 		}
 
-		resp, err := l.generateWithContinuation(spanCtx, model, messages, iterOpts, es, logger)
+		assistantIndex := uint64(len(transcript))
+		assistantOrdinal := uint64(iter + 1)
+		iterationCoordinates := agentEventCoordinates{runID: RunIDFromContext(spanCtx)}
+		if iterationCoordinates.runID != "" {
+			iterationCoordinates.canonicalTranscriptIndex = &assistantIndex
+		}
+		eventCoordinates = iterationCoordinates
+		iterationCtx := withAgentEventCoordinates(spanCtx, iterationCoordinates)
+		resp, err := l.generateWithContinuation(iterationCtx, model, messages, iterOpts, es, logger)
 		if err != nil {
 			var providerErr *llm.ProviderError
 			if errors.As(err, &providerErr) && providerErr != nil {
@@ -717,13 +729,18 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 			sendEvent(errEvent(err))
 			return CanonicalRunResult{Events: events, Transcript: transcript}, err
 		}
+		if len(resp.ToolCalls) > 0 && iterationCoordinates.runID != "" {
+			iterationCoordinates.assistantTranscriptOrdinal = &assistantOrdinal
+			eventCoordinates = iterationCoordinates
+			iterationCtx = withAgentEventCoordinates(iterationCtx, iterationCoordinates)
+		}
 		assistantEntry, err := transcriptAssistantEntry(resp)
 		if err != nil {
 			span.SetStatus(tracing.SpanStatusError, err.Error())
 			sendEvent(errEvent(err))
 			return CanonicalRunResult{Events: events, Transcript: transcript}, err
 		}
-		assistantEntry.Message.Runtime = consumer.transcriptMetadata(uint64(len(transcript)), "")
+		assistantEntry.Message.Runtime = consumer.transcriptMetadata(assistantIndex, "")
 		transcript = append(transcript, assistantEntry)
 
 		logger.Info("core.loop.turn",
@@ -751,8 +768,6 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 			logger.Info("core.loop.finish", "iterations", iter+1, "messages", len(messages))
 			return CanonicalRunResult{Events: events, Transcript: transcript}, nil
 		}
-		assistantOrdinal := uint64(iter + 1)
-
 		if l.executionMode == ExecutionModeParallel && len(resp.ToolCalls) > 1 {
 			// Parallel mode: emit pre-tool-call events, then execute
 			// non-canceled tools concurrently, matching results by
@@ -775,13 +790,14 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 			}
 			if consumer != nil {
 				startIndex := len(transcript)
-				commitErr := consumer.executeParallelGroup(spanCtx, l.tools, assistantOrdinal, assistantEntry.Message, resp.ToolCalls, canceledCalls, es, &transcript, &messages)
+				commitErr := consumer.executeParallelGroup(iterationCtx, l.tools, assistantOrdinal, assistantEntry.Message, resp.ToolCalls, canceledCalls, es, &transcript, &messages)
 				for index := startIndex; index < len(transcript); index++ {
-					message := transcript[index].Message
+					entry := transcript[index]
+					message := entry.Message
 					if message.Role != string(llm.RoleTool) {
 						continue
 					}
-					sendEvent(AgentEvent{Kind: "tool_result", Content: message.Content, Timestamp: time.Now(), IsError: message.ReceiptOutcome != ReceiptOutcomeSuccess, ToolCallID: message.ToolCallID})
+					sendToolResultEvent(message.Content, message.ReceiptOutcome != ReceiptOutcomeSuccess, message.ToolCallID, message.ReceiptOutcome, entry.SourceTruncated)
 				}
 				if commitErr != nil {
 					span.SetStatus(tracing.SpanStatusError, commitErr.Error())
@@ -793,7 +809,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 				var unknownToolErr error
 				resultsByID := make(map[string]ParallelToolResult, len(activeCalls))
 				if len(activeCalls) > 0 {
-					results, execErr := executeToolsParallel(spanCtx, l.tools, activeCalls, es)
+					results, execErr := executeToolsParallel(iterationCtx, l.tools, activeCalls, es)
 					parallelErr = execErr
 					matched, matchErr := matchToolResultsByID(activeCalls, results)
 					if matchErr != nil {
@@ -807,7 +823,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 				for _, tc := range resp.ToolCalls {
 					if canceledCalls[tc.ID] {
 						const canceledOutput = "Tool call canceled by interceptor"
-						sendEvent(AgentEvent{Kind: "tool_result", Content: canceledOutput, Timestamp: time.Now(), IsError: true, ToolCallID: tc.ID})
+						sendToolResultEvent(canceledOutput, true, tc.ID, ReceiptOutcomeInterrupted, nil)
 						appendToolReceipt(&messages, &transcript, tc, canceledOutput, ReceiptOutcomeInterrupted, consumer)
 						continue
 					}
@@ -817,7 +833,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 						parallelErr = errors.Join(parallelErr, missingErr)
 						unknownToolErr = errors.Join(unknownToolErr, markUnknownToolOutcome(missingErr))
 						output := "Error: " + missingErr.Error()
-						sendEvent(AgentEvent{Kind: "tool_result", Content: output, Timestamp: time.Now(), IsError: true, ToolCallID: tc.ID})
+						sendToolResultEvent(output, true, tc.ID, ReceiptOutcomeUnknown, nil)
 						appendToolReceipt(&messages, &transcript, tc, output, ReceiptOutcomeUnknown, consumer)
 						continue
 					}
@@ -826,8 +842,8 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 						res.Output = "Error: " + res.Err.Error()
 						res.IsError = true
 					}
-					outcome := toolReceiptOutcome(spanCtx, res.Err, res.IsError)
-					sendEvent(AgentEvent{Kind: "tool_result", Content: res.Output, Timestamp: time.Now(), IsError: res.IsError, ToolCallID: res.ID})
+					outcome := toolReceiptOutcome(iterationCtx, res.Err, res.IsError)
+					sendToolResultEvent(res.Output, res.IsError, res.ID, outcome, nil)
 					appendToolReceipt(&messages, &transcript, tc, res.Output, outcome, consumer)
 					if outcome == ReceiptOutcomeUnknown && unknownToolErr == nil {
 						unknownToolErr = markUnknownToolOutcome(res.Err)
@@ -853,7 +869,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 								sendEvent(errEvent(commitErr))
 								return CanonicalRunResult{Events: events, Transcript: transcript}, commitErr
 							}
-							sendEvent(AgentEvent{Kind: "tool_result", Content: skippedOutput, Timestamp: time.Now(), IsError: true, ToolCallID: undispatched.ID})
+							sendToolResultEvent(skippedOutput, true, undispatched.ID, ReceiptOutcomeInterrupted, nil)
 						}
 						sendEvent(errEvent(err))
 						return CanonicalRunResult{Events: events, Transcript: transcript}, err
@@ -869,7 +885,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 				sendEvent(AgentEvent{Kind: EventKindPreToolCall, Timestamp: time.Now(), PreToolCall: preEv})
 				if preEv.IsCancelled() {
 					logger.Info("core.loop.tool_canceled", "tool", tc.Name, "id", tc.ID)
-					sendEvent(AgentEvent{Kind: "tool_canceled", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID})
+					sendEvent(AgentEvent{Kind: "tool_canceled", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID, ReceiptOutcome: ReceiptOutcomeInterrupted})
 					if consumer != nil {
 						const canceledOutput = "Tool call canceled by interceptor"
 						if commitErr := consumer.commitKnownCall(assistantOrdinal, assistantEntry.Message, "batch-"+newClaimID(), tc, uint64(len(transcript)), canceledOutput, ReceiptOutcomeInterrupted, &transcript, &messages); commitErr != nil {
@@ -887,8 +903,8 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 				logger.Info("core.loop.tool_call", "iteration", iter, "tool", tc.Name)
 
 				if consumer != nil {
-					result, commitErr := consumer.executeSequentialCall(spanCtx, l.tools, assistantOrdinal, assistantEntry.Message, tc, es, &transcript, &messages)
-					sendEvent(AgentEvent{Kind: "tool_result", Content: result.output, Timestamp: time.Now(), IsError: result.isError, ToolCallID: tc.ID})
+					result, commitErr := consumer.executeSequentialCall(iterationCtx, l.tools, assistantOrdinal, assistantEntry.Message, tc, es, &transcript, &messages)
+					sendToolResultEvent(result.output, result.isError, tc.ID, result.outcome, result.sourceTruncated)
 					if commitErr != nil {
 						if !hasUnknownToolOutcome(commitErr) && callIndex+1 < len(resp.ToolCalls) && (errors.Is(commitErr, context.Canceled) || errors.Is(commitErr, context.DeadlineExceeded) || errors.Is(commitErr, ErrRunCommitPreparedInvocationUnavailable) || errors.Is(commitErr, ErrRunCommitChildUnsupported) || errors.Is(commitErr, ErrRunCommitStreamingUnsupported)) {
 							for _, undispatched := range resp.ToolCalls[callIndex+1:] {
@@ -897,7 +913,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 									commitErr = errors.Join(commitErr, suffixErr)
 									break
 								}
-								sendEvent(AgentEvent{Kind: "tool_result", Content: skippedOutput, Timestamp: time.Now(), IsError: true, ToolCallID: undispatched.ID})
+								sendToolResultEvent(skippedOutput, true, undispatched.ID, ReceiptOutcomeInterrupted, nil)
 							}
 						}
 						span.SetStatus(tracing.SpanStatusError, commitErr.Error())
@@ -906,15 +922,15 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 					}
 					continue
 				}
-				resultText, isErr, execErr := l.executeTool(spanCtx, toToolsCall(tc), es)
+				resultText, isErr, execErr := l.executeTool(iterationCtx, toToolsCall(tc), es)
 				isError := isErr
 				if execErr != nil {
 					logger.Warn("core.loop.tool_error", "tool", tc.Name, "err", execErr)
 					resultText = "Error: " + execErr.Error()
 					isError = true
 				}
-				sendEvent(AgentEvent{Kind: "tool_result", Content: resultText, Timestamp: time.Now(), IsError: isError, ToolCallID: tc.ID})
-				outcome := toolReceiptOutcome(spanCtx, execErr, isError)
+				outcome := toolReceiptOutcome(iterationCtx, execErr, isError)
+				sendToolResultEvent(resultText, isError, tc.ID, outcome, nil)
 				appendToolReceipt(&messages, &transcript, tc, resultText, outcome, consumer)
 				if outcome == ReceiptOutcomeUnknown {
 					for _, undispatched := range resp.ToolCalls[callIndex+1:] {
@@ -922,7 +938,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 						if spanCtx.Err() != nil {
 							skippedOutput = "Tool call canceled because a prior tool outcome is unknown"
 						}
-						sendEvent(AgentEvent{Kind: "tool_result", Content: skippedOutput, Timestamp: time.Now(), IsError: true, ToolCallID: undispatched.ID})
+						sendToolResultEvent(skippedOutput, true, undispatched.ID, ReceiptOutcomeInterrupted, nil)
 						appendToolReceipt(&messages, &transcript, undispatched, skippedOutput, ReceiptOutcomeInterrupted, consumer)
 					}
 					unknownErr := markUnknownToolOutcome(execErr)
@@ -1391,12 +1407,12 @@ func (l *LoopAgent) streamGenerateWithBudget(ctx context.Context, model llm.Base
 			// The complete non-incremental "message" event is emitted by the
 			// loop once the response finishes.
 			if publishIncremental && es != nil {
-				_ = es.Send(AgentEvent{ //nolint:errcheck
+				_ = es.Send(stampAgentEvent(agentEventCoordinatesFromContext(ctx), AgentEvent{ //nolint:errcheck
 					Kind:        "message",
 					Content:     chunk.Content,
 					Timestamp:   time.Now(),
 					Incremental: true,
-				})
+				}))
 			}
 		}
 		if chunk.Final {
@@ -1605,7 +1621,7 @@ func (l *LoopAgent) generateWithContinuation(ctx context.Context, model llm.Base
 			return nil, fmt.Errorf("core: guarded response payload exceeds %d-byte candidate limit", guard.MaxCandidateBytes())
 		}
 		if es != nil && resp.Content != "" {
-			_ = es.Send(AgentEvent{Kind: "message", Content: resp.Content, Timestamp: time.Now(), Incremental: true}) //nolint:errcheck
+			_ = es.Send(stampAgentEvent(agentEventCoordinatesFromContext(ctx), AgentEvent{Kind: "message", Content: resp.Content, Timestamp: time.Now(), Incremental: true})) //nolint:errcheck
 		}
 	}
 
@@ -1618,19 +1634,20 @@ func (l *LoopAgent) generateWithContinuation(ctx context.Context, model llm.Base
 // "tool_output" AgentEvent carrying the ToolCallID and Stream ("stdout"/
 // "stderr") so consumers can associate the line with its originating call.
 type eventStreamSink struct {
-	es EventStream
+	es          EventStream
+	coordinates agentEventCoordinates
 }
 
 // Send wraps content as a "tool_output" AgentEvent and forwards it to the
 // underlying EventStream.
 func (s *eventStreamSink) Send(content, toolCallID, stream string) error {
-	return s.es.Send(AgentEvent{
+	return s.es.Send(stampAgentEvent(s.coordinates, AgentEvent{
 		Kind:       "tool_output",
 		Content:    content,
 		Timestamp:  time.Now(),
 		ToolCallID: toolCallID,
 		Stream:     stream,
-	})
+	}))
 }
 
 // executeTool looks up the tool and runs its definition against the registry.
