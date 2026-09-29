@@ -560,6 +560,56 @@ func TestOwnerStatusTracksEventGapAndTerminalIsSentOnce(t *testing.T) {
 	assert.Equal(t, uint64(1), owner.Snapshot().EventGapCount)
 }
 
+type eventDropHarnessAgent struct {
+	runDone chan struct{}
+}
+
+func (*eventDropHarnessAgent) Name() string { return "event-drop-harness" }
+
+func (agent *eventDropHarnessAgent) Run(_ context.Context, _ Submission, streams ...EventStream) (Result, error) {
+	defer close(agent.runDone)
+	if len(streams) == 0 || streams[0] == nil {
+		return Result{}, errors.New("expected harness event stream")
+	}
+	for _, event := range []AgentEvent{
+		{Kind: "message", Content: "kept"},
+		{Kind: "message", Content: "dropped"},
+	} {
+		if err := streams[0].Send(event); err != nil {
+			return Result{}, err
+		}
+	}
+	return Result{Message: "authoritative answer", Success: true}, nil
+}
+
+func TestEventStreamDropVisibleToRunOwner(t *testing.T) {
+	agent := &eventDropHarnessAgent{runDone: make(chan struct{})}
+	harness := NewHarnessImpl(agent, WithEventBuffer(1), WithDiscardPolicy(DiscardNewest))
+
+	stream, err := harness.Submit(context.Background(), "hello")
+	require.NoError(t, err)
+	statusSource, ok := stream.(RunStatusSource)
+	require.True(t, ok, "the returned harness stream must expose owner status")
+	statusHandle := statusSource.RunStatusHandle()
+	require.NotNil(t, statusHandle)
+	<-agent.runDone
+
+	gapSource, ok := stream.(interface{ GapCount() uint64 })
+	require.True(t, ok, "the harness stream must expose its event projection gap count")
+	assert.Greater(t, gapSource.GapCount(), uint64(0), "the bounded projection must record its dropped event")
+
+	events := drainEvents(stream)
+	assert.Equal(t, []string{"kept"}, findEvents(events, "message"), "the dropped projection event must not be delivered")
+	result, resultErr := stream.Result()
+	require.NoError(t, resultErr)
+	assert.Equal(t, "authoritative answer", result.Content)
+
+	status := statusHandle.Snapshot()
+	assert.Equal(t, RunOutcomeSuccess, status.Outcome)
+	assert.Equal(t, RunExecutionQuiescent, status.ExecutionState)
+	assert.Equal(t, gapSource.GapCount(), status.EventGapCount, "the run owner must surface event projection loss")
+}
+
 type recordingOwnerSpanExporter struct {
 	mu    sync.Mutex
 	spans []tracing.SpanData
