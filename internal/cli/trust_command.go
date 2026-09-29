@@ -101,7 +101,7 @@ func (c *trustCommand) grant(ctx context.Context, cfg Config) error {
 		return fmt.Errorf("cli: read trust grant confirmation: %w", readErr)
 	}
 	if strings.TrimSpace(line) != "TRUST" {
-		_, err := fmt.Fprintln(c.out, "Grant cancelled")
+		_, err := fmt.Fprintln(c.out, "Grant canceled")
 		if err != nil {
 			return fmt.Errorf("cli: write trust cancellation: %w", err)
 		}

@@ -58,7 +58,7 @@ func TestTrustCommandGrantRequiresTTYAndExplicitConfirmation(t *testing.T) {
 		command := NewTrustCommand(manager, strings.NewReader("no\n"), &out, func() bool { return true })
 
 		require.NoError(t, command.Run(context.Background(), cfg, []string{"grant"}))
-		assert.Contains(t, out.String(), "Grant cancelled")
+		assert.Contains(t, out.String(), "Grant canceled")
 		entries, loadErr := manager.(interface {
 			LoadTrustEntries() (map[string]approval.TrustEntry, error)
 		}).LoadTrustEntries()
