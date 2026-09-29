@@ -11,7 +11,6 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
-	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -23,14 +22,23 @@ import (
 	"github.com/pengjunchen/go-cli/internal/verify"
 )
 
-// moduleRoot returns the project root directory (where go.mod lives) by
-// walking up three directories from this test file's location.
+// moduleRoot returns the project root directory by walking up from this
+// package's working directory until it finds go.mod.
 func moduleRoot(t *testing.T) string {
 	t.Helper()
-	_, filename, _, ok := runtime.Caller(0)
-	require.True(t, ok, "runtime.Caller failed")
-	// tests/e2e_20260802/28_..._test.go -> tests/e2e_20260802 -> tests -> root
-	return filepath.Dir(filepath.Dir(filepath.Dir(filename)))
+	dir, err := os.Getwd()
+	require.NoError(t, err, "failed to read test working directory")
+	for {
+		if info, statErr := os.Stat(filepath.Join(dir, "go.mod")); statErr == nil && !info.IsDir() {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			t.Fatalf("could not find go.mod walking up from %q", dir)
+			return ""
+		}
+		dir = parent
+	}
 }
 
 // isStdoutTTY reports whether os.Stdout is a terminal device. Test processes
