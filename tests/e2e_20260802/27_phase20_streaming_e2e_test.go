@@ -112,24 +112,43 @@ func TestET_Phase20_Streaming_AC1_SSEParser(t *testing.T) {
 // mock Claude SSE endpoint returns multiple MessageChunks (not just one) with
 // the correct content and a Final chunk.
 func TestET_Phase20_Streaming_AC2_ClaudeStream(t *testing.T) {
-	// Build Claude SSE events: message_start, two text deltas, message_stop.
+	// Build a complete Claude message with one text block, two deltas, and an
+	// explicit terminal reason before message_stop.
 	msgStart, _ := json.Marshal(map[string]any{
 		"type":    "message_start",
 		"message": map[string]any{"role": "assistant"},
 	})
+	blockStart, _ := json.Marshal(map[string]any{
+		"type":          "content_block_start",
+		"index":         0,
+		"content_block": map[string]any{"type": "text"},
+	})
 	delta1, _ := json.Marshal(map[string]any{
 		"type":  "content_block_delta",
+		"index": 0,
 		"delta": map[string]any{"type": "text_delta", "text": "Hello"},
 	})
 	delta2, _ := json.Marshal(map[string]any{
 		"type":  "content_block_delta",
+		"index": 0,
 		"delta": map[string]any{"type": "text_delta", "text": " world"},
+	})
+	blockStop, _ := json.Marshal(map[string]any{
+		"type":  "content_block_stop",
+		"index": 0,
+	})
+	messageDelta, _ := json.Marshal(map[string]any{
+		"type":  "message_delta",
+		"delta": map[string]any{"stop_reason": "end_turn", "stop_sequence": nil},
 	})
 	msgStop, _ := json.Marshal(map[string]any{"type": "message_stop"})
 
 	sseBody := phase20SSEEvent("message_start", string(msgStart)) +
+		phase20SSEEvent("content_block_start", string(blockStart)) +
 		phase20SSEEvent("content_block_delta", string(delta1)) +
 		phase20SSEEvent("content_block_delta", string(delta2)) +
+		phase20SSEEvent("content_block_stop", string(blockStop)) +
+		phase20SSEEvent("message_delta", string(messageDelta)) +
 		phase20SSEEvent("message_stop", string(msgStop))
 
 	srv := phase20SSEServer(t, sseBody)
@@ -153,16 +172,20 @@ func TestET_Phase20_Streaming_AC2_ClaudeStream(t *testing.T) {
 
 	// Collect text content from non-final chunks.
 	var content strings.Builder
-	var hasFinal bool
+	var finalCount int
+	var finalReason string
 	for _, c := range chunks {
-		content.WriteString(c.Content)
 		if c.Final {
-			hasFinal = true
+			finalCount++
+			finalReason = c.FinishReason
+			continue
 		}
+		content.WriteString(c.Content)
 	}
 	assert.Contains(t, content.String(), "Hello")
 	assert.Contains(t, content.String(), "world")
-	assert.True(t, hasFinal, "stream must include a Final chunk")
+	assert.Equal(t, 1, finalCount, "stream must include exactly one Final chunk")
+	assert.Equal(t, "end_turn", finalReason, "Final chunk must retain Claude's terminal reason")
 }
 
 // =============================================================================
@@ -171,9 +194,10 @@ func TestET_Phase20_Streaming_AC2_ClaudeStream(t *testing.T) {
 
 // TestET_Phase20_Streaming_AC3_OpenAIStream verifies that streaming against a
 // mock OpenAI SSE endpoint returns a content chunk followed by a Final chunk
-// when the server sends `data: [DONE]`.
+// after a terminal finish_reason and `data: [DONE]`.
 func TestET_Phase20_Streaming_AC3_OpenAIStream(t *testing.T) {
-	sseBody := phase20SSEData(`{"choices":[{"delta":{"content":"hello"}}]}`) +
+	sseBody := phase20SSEData(`{"choices":[{"delta":{"content":"hello"},"finish_reason":null}]}`) +
+		phase20SSEData(`{"choices":[{"delta":{},"finish_reason":"stop"}]}`) +
 		phase20SSEData("[DONE]")
 
 	srv := phase20SSEServer(t, sseBody)
@@ -195,17 +219,21 @@ func TestET_Phase20_Streaming_AC3_OpenAIStream(t *testing.T) {
 	chunks := phase20CollectChunks(t, ch)
 	require.GreaterOrEqual(t, len(chunks), 2, "OpenAI stream must have at least content + final chunks")
 
-	var foundContent, foundFinal bool
+	var foundContent bool
+	var finalCount int
+	var finalReason string
 	for _, c := range chunks {
 		if c.Content == "hello" {
 			foundContent = true
 		}
 		if c.Final {
-			foundFinal = true
+			finalCount++
+			finalReason = c.FinishReason
 		}
 	}
 	assert.True(t, foundContent, "stream must include a content chunk with 'hello'")
-	assert.True(t, foundFinal, "stream must include a Final chunk")
+	assert.Equal(t, 1, finalCount, "stream must include exactly one Final chunk")
+	assert.Equal(t, "stop", finalReason, "Final chunk must retain OpenAI's finish reason")
 }
 
 // =============================================================================
@@ -314,12 +342,22 @@ func TestET_Phase20_Streaming_AC6_ClaudeToolUse(t *testing.T) {
 		"index": 0,
 		"delta": map[string]any{"type": "input_json_delta", "partial_json": `"SF"}`},
 	})
+	blockStop, _ := json.Marshal(map[string]any{
+		"type":  "content_block_stop",
+		"index": 0,
+	})
+	messageDelta, _ := json.Marshal(map[string]any{
+		"type":  "message_delta",
+		"delta": map[string]any{"stop_reason": "tool_use", "stop_sequence": nil},
+	})
 	msgStop, _ := json.Marshal(map[string]any{"type": "message_stop"})
 
 	sseBody := phase20SSEEvent("message_start", string(msgStart)) +
 		phase20SSEEvent("content_block_start", string(blockStart)) +
 		phase20SSEEvent("content_block_delta", string(delta1)) +
 		phase20SSEEvent("content_block_delta", string(delta2)) +
+		phase20SSEEvent("content_block_stop", string(blockStop)) +
+		phase20SSEEvent("message_delta", string(messageDelta)) +
 		phase20SSEEvent("message_stop", string(msgStop))
 
 	srv := phase20SSEServer(t, sseBody)
@@ -349,6 +387,7 @@ func TestET_Phase20_Streaming_AC6_ClaudeToolUse(t *testing.T) {
 		}
 	}
 	require.NotNil(t, finalChunk, "stream must include a Final chunk")
+	assert.Equal(t, "tool_use", finalChunk.FinishReason, "Final chunk must retain Claude's tool-use stop reason")
 	require.Len(t, finalChunk.ToolCalls, 1, "Final chunk must have exactly one ToolCall")
 
 	tc := finalChunk.ToolCalls[0]
