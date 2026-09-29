@@ -10,6 +10,7 @@ package e2e_20260802 //nolint:staticcheck
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -154,11 +155,8 @@ func phase33CallWithApproval(
 	var request tui.ApprovalRequest
 	select {
 	case request = <-approvalCh:
-	case outcome := <-done:
+	case <-done:
 		joined = true
-		if outcome.err != nil {
-			return nil, fmt.Errorf("prepared tool call completed before approval request for %q: %w", call.Name, outcome.err)
-		}
 		return nil, fmt.Errorf("prepared tool call completed before approval request for %q", call.Name)
 	case <-ctx.Done():
 		t.Fatalf("tool call did not request approval: %v", ctx.Err())
@@ -639,6 +637,23 @@ func TestET_Phase22_AllCapabilities_AC9_ApprovalSystem(t *testing.T) {
 		assert.Empty(t, approvalCh, "Plan Mode blocks mutation before an approval prompt")
 		_, statErr := os.Stat(marker)
 		assert.ErrorIs(t, statErr, os.ErrNotExist, "AutoFull must not bypass active Plan Mode")
+	})
+
+	t.Run("pre-prompt Plan Mode denial does not count as explicit approval", func(t *testing.T) {
+		approvalCh := make(chan tui.ApprovalRequest, 1)
+		registry, planController, workspace := phase33PreparedModeRegistry(t, approval.PermissionAutoFull, approvalCh)
+		require.NoError(t, planController.Enter(ctx, "AC9 pre-prompt denial regression"))
+		marker := filepath.Join(workspace, "pre-prompt-plan-denial")
+
+		_, err := phase33CallWithApproval(t, registry, approvalCh,
+			toolCallWithArgs("bash", map[string]any{"command": fmt.Sprintf("touch %q", marker)}),
+			marker, tui.ApprovalAllow)
+		assert.ErrorContains(t, err, "completed before approval request")
+		assert.False(t, errors.Is(err, approval.ErrToolDenied),
+			"a policy denial before any prompt must not look like the user's explicit denial")
+		assert.Empty(t, approvalCh, "Plan Mode must reject before asking for approval")
+		_, statErr := os.Stat(marker)
+		assert.ErrorIs(t, statErr, os.ErrNotExist, "pre-prompt Plan Mode denial must have no effect")
 	})
 }
 
