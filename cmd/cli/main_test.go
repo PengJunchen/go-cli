@@ -22,6 +22,7 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/cli"
 	"github.com/pengjunchen/go-cli/internal/config"
+	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
@@ -676,7 +677,7 @@ func TestDefaultTraceContainsNoPrompt(t *testing.T) {
 	allRecords := trace.String() + string(logData)
 	assert.False(t, strings.Contains(allRecords, promptCanary), "prompt canary leaked to trace or log output")
 	assert.False(t, strings.Contains(allRecords, toolCanary), "tool argument canary leaked to trace or log output")
-	assert.True(t, strings.Contains(string(logData), "core.plan_mode.enter"), "the real plan-mode reason log must remain observable")
+	assert.NotContains(t, string(logData), "core.plan_mode.enter", "a model-requested plan-mode transition must not execute")
 	assert.True(t, strings.Contains(allRecords, "prompt.run"), "trace must retain span identity")
 	assert.True(t, strings.Contains(allRecords, "command_name"), "trace must retain command identity")
 	assert.True(t, strings.Contains(allRecords, "user_message_length"), "trace must retain prompt length metadata")
@@ -692,6 +693,19 @@ func TestDefaultTraceContainsNoPrompt(t *testing.T) {
 		var record map[string]any
 		require.NoError(t, json.Unmarshal([]byte(line), &record))
 	}
+}
+
+func TestUserPlanModeReasonLogKeepsEventWithoutRawReason(t *testing.T) {
+	const reasonCanary = "PRIVATE-PLAN-REASON-CANARY-42"
+	var logData bytes.Buffer
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(tracing.NewRedactingSlogHandler(slog.NewTextHandler(&logData, nil))))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	require.NoError(t, core.NewDefaultPlanModeController().Enter(context.Background(), reasonCanary))
+	assert.Contains(t, logData.String(), "core.plan_mode.enter")
+	assert.NotContains(t, logData.String(), reasonCanary)
+	assert.Contains(t, logData.String(), "bytes=")
 }
 
 func TestDefaultTraceAndLogsRedactProviderErrorBody(t *testing.T) {
