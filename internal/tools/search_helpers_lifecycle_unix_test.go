@@ -136,7 +136,7 @@ func TestFindCaptureLimitJoinsContainmentFailure(t *testing.T) {
 	testBinary, err := os.Executable()
 	require.NoError(t, err)
 	fdScript := fmt.Sprintf(`#!/bin/sh
-printf '%%04097d\n' 0
+printf '%%04097d\000' 0
 %s -test.run=%s &
 while [ ! -s %s ]; do sleep 0.01; done
 exit 2
@@ -144,7 +144,7 @@ exit 2
 		shellQuoteTestArgument(testBinary),
 		shellQuoteTestArgument("^TestSearchHelperEscapedPipeWriter$"),
 		shellQuoteTestArgument(pidPath))
-	findScript := "#!/bin/sh\nprintf called > " + shellQuoteTestArgument(fallbackMarker) + "\nprintf 'fallback.txt\\n'\n"
+	findScript := "#!/bin/sh\nprintf called > " + shellQuoteTestArgument(fallbackMarker) + "\nprintf 'fallback.txt\\000'\n"
 	require.NoError(t, os.WriteFile(filepath.Join(helperDir, "fd"), []byte(fdScript), 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(helperDir, "find"), []byte(findScript), 0o700))
 	originalPath := os.Getenv("PATH")

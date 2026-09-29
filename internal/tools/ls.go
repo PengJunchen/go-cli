@@ -187,12 +187,12 @@ func (t *LSTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, error
 			line.WriteString(" ")
 			line.WriteString(e.info.ModTime().Format("Jan _2 15:04"))
 			line.WriteString(" ")
-			line.WriteString(e.path)
+			line.WriteString(directoryDisplayName(e.path))
 			if e.info.IsDir() {
 				line.WriteString("/")
 			}
 		} else {
-			line.WriteString(e.path)
+			line.WriteString(directoryDisplayName(e.path))
 			if e.info.IsDir() {
 				line.WriteString("/")
 			}

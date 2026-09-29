@@ -149,7 +149,7 @@ func (t *FindTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 
 	output := newBoundedDirectoryOutput(directoryCaptureMaxOutputBytes)
 	for _, match := range captured.paths {
-		if !output.AppendLine(match) {
+		if !output.AppendLine(directoryDisplayName(match)) {
 			break
 		}
 	}
@@ -222,7 +222,7 @@ func findWithFdManaged(ctx context.Context, searchPath, pattern, kind string, ma
 	if _, err := exec.LookPath("fd"); err != nil {
 		return findCaptureResult{}, false, managedLocalResult{}, false, nil
 	}
-	args := []string{}
+	args := []string{"--print0"}
 	if kind == "f" {
 		args = append(args, "--type", "f")
 	} else if kind == "d" {
@@ -279,6 +279,7 @@ func findWithFindManaged(ctx context.Context, searchPath, pattern, kind string, 
 	if pattern != "" {
 		args = append(args, "-name", pattern)
 	}
+	args = append(args, "-print0")
 
 	cmd := exec.Command(path, args...)
 	capture := newFindPathCaptureWriter(findMaxResults, directoryCaptureMaxEntryBytes)
