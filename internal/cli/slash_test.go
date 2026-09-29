@@ -203,7 +203,57 @@ func TestSlashCostShowsKnownSubtotalsAndUnknownAttemptCounts(t *testing.T) {
 	assert.Contains(t, output, "Provider attempts: 1")
 	assert.Contains(t, output, "Unknown usage attempts: 1")
 	assert.Contains(t, output, "Unknown cost attempts: 1")
+	assert.Contains(t, output, `provider="openai" model="gpt-4o" usage=unknown`)
+	assert.Contains(t, output, "cost=unknown price_source=unknown")
 	assert.NotContains(t, output, "Total cost: $0.0000", "unknown cost must not be represented as a complete zero total")
+}
+
+func TestSlashCostShowsActualProviderModelAndEvidenceSources(t *testing.T) {
+	tracker := production.NewCostTracker(nil)
+	result := llm.ProviderAttemptResult{
+		OperationID: "op-cost-source",
+		AttemptID:   "attempt-cost-source",
+		Identity: llm.AttemptIdentity{
+			ProviderID: "actual-provider",
+			ModelID:    "gpt-4o",
+			ProtocolID: llm.ProtocolOpenAICompatible,
+			OriginKind: llm.OriginResolverDefaultEndpoint,
+			Candidate:  "candidate-private-marker",
+		},
+		Outcome: llm.AttemptSuccess,
+		Usage: llm.UsageEvidence{
+			State:  llm.UsageKnown,
+			Usage:  &llm.Usage{InputTokens: 100, OutputTokens: 10, TotalTokens: 110},
+			Source: llm.UsageProviderResponse,
+		},
+	}
+	_, err := tracker.RecordAttempt(result)
+	require.NoError(t, err)
+	reportedCost := 0.03
+	providerReported := result
+	providerReported.OperationID = "op-cost-reported"
+	providerReported.AttemptID = "attempt-cost-reported"
+	providerReported.Identity.ProviderID = "reported-provider"
+	providerReported.Identity.ModelID = "unpriced-model"
+	providerReported.Identity.Candidate = "candidate-reported"
+	providerReported.Usage = llm.UnknownUsageEvidence()
+	providerReported.ProviderReportedCostUSD = &reportedCost
+	_, err = tracker.RecordAttempt(providerReported)
+	require.NoError(t, err)
+
+	_, buf := newTestCmd()
+	sc := &slashContext{out: buf, costTracker: tracker}
+	_, err = (&CostHandler{}).Handle(context.Background(), nil, sc)
+	require.NoError(t, err)
+
+	output := buf.String()
+	assert.Contains(t, output, `provider="actual-provider" model="gpt-4o" usage=reported (100 in / 10 out)`)
+	assert.Contains(t, output, "cost=estimated")
+	assert.Contains(t, output, "price_source=default_tier")
+	assert.Contains(t, output, `provider="reported-provider" model="unpriced-model" usage=unknown cost=reported price_source=provider`)
+	assert.NotContains(t, output, "candidate-private-marker")
+	assert.NotContains(t, output, "candidate-reported")
+	assert.NotContains(t, output, "https://")
 }
 
 // TestCostHandlerWorksWithSnapshot verifies that CostHandler.Handle renders the

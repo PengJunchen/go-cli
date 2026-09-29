@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
+	"github.com/pengjunchen/go-cli/internal/production"
 	"github.com/pengjunchen/go-cli/internal/session"
 	"github.com/pengjunchen/go-cli/internal/tui"
 
@@ -205,9 +207,13 @@ func emitTokenUsageEvent(stream *core.EventStreamImpl, assembly *AgentAssembly) 
 	var inputTokens, outputTokens int
 	var unknownUsageAttempts, unknownCostAttempts int
 	var attemptUsageAvailable bool
+	usageSource := core.TokenUsageSourceUnknown
+	providerModels := make(map[core.TokenUsageProviderModel]struct{})
+	costSources := make(map[core.TokenUsageCostSource]struct{})
+	priceSources := make(map[core.TokenUsagePriceSource]struct{})
 	cost := 0.0
 	if assembly.CostTracker != nil {
-		_, summary := assembly.CostTracker.AttemptCostSnapshot()
+		attempts, summary := assembly.CostTracker.AttemptCostSnapshot()
 		if summary.Attempts > 0 {
 			attemptUsageAvailable = true
 			inputTokens = summary.KnownInputTokens
@@ -215,6 +221,17 @@ func emitTokenUsageEvent(stream *core.EventStreamImpl, assembly *AgentAssembly) 
 			unknownUsageAttempts = summary.UnknownUsageAttempts
 			unknownCostAttempts = summary.UnknownCostAttempts
 			cost = summary.KnownCostSubtotal
+			if summary.UnknownUsageAttempts < summary.Attempts {
+				usageSource = core.TokenUsageSourceReported
+			}
+			for _, attempt := range attempts {
+				providerModels[core.TokenUsageProviderModel{
+					ProviderID: attempt.Result.Identity.ProviderID,
+					ModelID:    attempt.Result.Identity.ModelID,
+				}] = struct{}{}
+				costSources[tokenUsageCostSource(attempt.Status)] = struct{}{}
+				priceSources[tokenUsagePriceSource(attempt.PriceSource)] = struct{}{}
+			}
 		}
 	}
 
@@ -225,18 +242,19 @@ func emitTokenUsageEvent(stream *core.EventStreamImpl, assembly *AgentAssembly) 
 		if usage := lastAssistantAPIUsage(messages); usage != nil {
 			inputTokens = usage.InputTokens
 			outputTokens = usage.OutputTokens
+			usageSource = core.TokenUsageSourceReported
 		} else {
 			// Fall back to local estimation when neither the operation ledger nor
 			// the latest assistant response reported authoritative usage.
-			if assembly.Estimator == nil {
-				return
-			}
-			for _, msg := range messages {
-				n, _ := assembly.Estimator.Estimate(msg.Content) //nolint:errcheck
-				if msg.Role == "assistant" {
-					outputTokens += n
-				} else {
-					inputTokens += n
+			if assembly.Estimator != nil {
+				usageSource = core.TokenUsageSourceEstimated
+				for _, msg := range messages {
+					n, _ := assembly.Estimator.Estimate(msg.Content) //nolint:errcheck
+					if msg.Role == "assistant" {
+						outputTokens += n
+					} else {
+						inputTokens += n
+					}
 				}
 			}
 		}
@@ -244,7 +262,23 @@ func emitTokenUsageEvent(stream *core.EventStreamImpl, assembly *AgentAssembly) 
 
 	if !attemptUsageAvailable && assembly.CostTracker != nil {
 		cost = assembly.CostTracker.Total()
+		if assembly.CostTracker.Calls() > 0 {
+			costSources[core.TokenUsageCostUnknown] = struct{}{}
+		}
 	}
+	if len(costSources) == 0 {
+		costSources[core.TokenUsageCostUnknown] = struct{}{}
+	}
+	providerModelList := make([]core.TokenUsageProviderModel, 0, len(providerModels))
+	for providerModel := range providerModels {
+		providerModelList = append(providerModelList, providerModel)
+	}
+	sort.Slice(providerModelList, func(i, j int) bool {
+		if providerModelList[i].ProviderID != providerModelList[j].ProviderID {
+			return providerModelList[i].ProviderID < providerModelList[j].ProviderID
+		}
+		return providerModelList[i].ModelID < providerModelList[j].ModelID
+	})
 	_ = stream.Send(core.AgentEvent{ //nolint:errcheck
 		Kind:      "token_usage",
 		Timestamp: time.Now(),
@@ -255,8 +289,54 @@ func emitTokenUsageEvent(stream *core.EventStreamImpl, assembly *AgentAssembly) 
 			Cost:                 cost,
 			UnknownUsageAttempts: unknownUsageAttempts,
 			UnknownCostAttempts:  unknownCostAttempts,
+			UsageSource:          usageSource,
+			CostSources:          sortedTokenUsageCostSources(costSources),
+			PriceSources:         sortedTokenUsagePriceSources(priceSources),
+			ProviderModels:       providerModelList,
 		},
 	})
+}
+
+func tokenUsageCostSource(status production.AttemptCostStatus) core.TokenUsageCostSource {
+	switch status {
+	case production.AttemptCostProviderReported:
+		return core.TokenUsageCostReported
+	case production.AttemptCostEstimated:
+		return core.TokenUsageCostEstimated
+	default:
+		return core.TokenUsageCostUnknown
+	}
+}
+
+func tokenUsagePriceSource(source production.AttemptCostPriceSource) core.TokenUsagePriceSource {
+	switch source {
+	case production.AttemptCostFromProvider:
+		return core.TokenUsagePriceProvider
+	case production.AttemptCostFromDefaultTier:
+		return core.TokenUsagePriceDefaultTier
+	case production.AttemptCostFromConfiguredTier:
+		return core.TokenUsagePriceConfiguredTier
+	default:
+		return core.TokenUsagePriceUnknown
+	}
+}
+
+func sortedTokenUsageCostSources(sources map[core.TokenUsageCostSource]struct{}) []core.TokenUsageCostSource {
+	result := make([]core.TokenUsageCostSource, 0, len(sources))
+	for source := range sources {
+		result = append(result, source)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	return result
+}
+
+func sortedTokenUsagePriceSources(sources map[core.TokenUsagePriceSource]struct{}) []core.TokenUsagePriceSource {
+	result := make([]core.TokenUsagePriceSource, 0, len(sources))
+	for source := range sources {
+		result = append(result, source)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i] < result[j] })
+	return result
 }
 
 // lastAssistantAPIUsage scans messages from the end and returns the Usage from
