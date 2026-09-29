@@ -4,7 +4,9 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -501,6 +503,156 @@ func TestOwnedStdioResponseBudgetAcceptsExactBoundary(t *testing.T) {
 	require.True(t, ok, "helper should return its boundary payload as a string")
 	assert.Len(t, content, maxHTTPResponseSize-len(`{"jsonrpc":"2.0","id":1,"result":{"content":""}}`)-1)
 	require.NoError(t, adapter.Disconnect(context.Background()))
+}
+
+func TestOwnedStdioConnectRecoversAfterCanceledCallWithoutReplay(t *testing.T) {
+	adapter, pidFile, wireFile := newOwnedStdioHelperAdapter(t, "silent-call")
+	require.NoError(t, adapter.Connect(context.Background()))
+	waitForHelperFile(t, pidFile)
+	oldOwner := adapter.adapterCore.procOwner
+	require.NotNil(t, oldOwner)
+
+	callCtx, cancelCall := context.WithCancel(context.Background())
+	callDone := make(chan error, 1)
+	go func() {
+		_, err := adapter.CallTool(callCtx, "silent", nil)
+		callDone <- err
+	}()
+	require.Eventually(t, func() bool {
+		data, err := os.ReadFile(wireFile)
+		return err == nil && strings.Contains(string(data), "tools/call")
+	}, 2*time.Second, 5*time.Millisecond, "child should receive the one tool call")
+	cancelCall()
+	callErr := <-callDone
+	require.Error(t, callErr)
+	var pending interface{ ExecutionDone() <-chan struct{} }
+	require.ErrorAs(t, callErr, &pending)
+	select {
+	case <-pending.ExecutionDone():
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled call did not positively join its child")
+	}
+
+	require.NoError(t, adapter.Connect(context.Background()), "an explicit Connect should replace an already-stopped stdio generation")
+	adapter.adapterCore.mu.Lock()
+	newOwner := adapter.adapterCore.procOwner
+	connected := adapter.adapterCore.connected
+	adapter.adapterCore.mu.Unlock()
+	require.NotNil(t, newOwner)
+	if newOwner == oldOwner {
+		t.Error("Connect must not report a healthy session backed by a completed owner")
+	}
+	assert.True(t, connected, "successful recovery should publish the new session")
+	wire, err := os.ReadFile(wireFile)
+	require.NoError(t, err)
+	assert.Equal(t, 1, strings.Count(string(wire), "tools/call"), "recovery must not replay the outcome-unknown call")
+	require.NoError(t, adapter.Disconnect(context.Background()))
+}
+
+type cancelCauseWriter struct {
+	writer        io.Writer
+	cancel        context.CancelCauseFunc
+	cause         error
+	writeReady    chan struct{}
+	continueWrite <-chan struct{}
+}
+
+func (w cancelCauseWriter) Write(data []byte) (int, error) {
+	n, err := w.writer.Write(data)
+	if err == nil {
+		close(w.writeReady)
+		<-w.continueWrite
+		w.cancel(w.cause)
+	}
+	return n, err
+}
+
+func TestOwnedStdioRequestPreservesPreWriteCancelCause(t *testing.T) {
+	adapter, _, wireFile := newOwnedStdioHelperAdapter(t, "silent-call")
+	require.NoError(t, adapter.Connect(context.Background()))
+
+	cause := errors.New("request canceled before dispatch")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	cancel(cause)
+	_, err := adapter.adapterCore.conn.Request(ctx, "tools/call", nil)
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, cause, "pre-write cancellation should preserve its caller-supplied cause")
+	assert.False(t, requestMayHaveBeenDispatched(err), "pre-write cancellation must not claim dispatch")
+	wire, readErr := os.ReadFile(wireFile)
+	require.NoError(t, readErr)
+	assert.NotContains(t, string(wire), "tools/call")
+	require.NoError(t, adapter.Disconnect(context.Background()))
+}
+
+func TestOwnedStdioRequestPreservesCancelCauseAfterDispatch(t *testing.T) {
+	adapter, _, wireFile := newOwnedStdioHelperAdapter(t, "silent-call")
+	require.NoError(t, adapter.Connect(context.Background()))
+	owner := adapter.adapterCore.procOwner
+	conn := adapter.adapterCore.conn
+	require.NotNil(t, owner)
+	require.NotNil(t, conn)
+
+	cause := errors.New("request canceled after dispatch")
+	ctx, cancel := context.WithCancelCause(context.Background())
+	defer cancel(nil)
+	writeReady := make(chan struct{})
+	continueWrite := make(chan struct{})
+	released := false
+	defer func() {
+		if !released {
+			close(continueWrite)
+		}
+	}()
+	conn.out = cancelCauseWriter{
+		writer:        conn.out,
+		cancel:        cancel,
+		cause:         cause,
+		writeReady:    writeReady,
+		continueWrite: continueWrite,
+	}
+	requestDone := make(chan error, 1)
+	go func() {
+		_, requestErr := conn.Request(ctx, "tools/call", nil)
+		requestDone <- requestErr
+	}()
+	select {
+	case <-writeReady:
+	case <-time.After(2 * time.Second):
+		t.Fatal("request writer did not reach the post-write barrier")
+	}
+	require.Eventually(t, func() bool {
+		data, readErr := os.ReadFile(wireFile)
+		return readErr == nil && strings.Contains(string(data), "tools/call")
+	}, 2*time.Second, 5*time.Millisecond, "child should receive the write before cancellation")
+	close(continueWrite)
+	released = true
+	var err error
+	select {
+	case err = <-requestDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("canceled request remained blocked after the write completed")
+	}
+	require.Error(t, err)
+	require.ErrorIs(t, err, context.Canceled)
+	require.ErrorIs(t, err, cause, "post-write cancellation should preserve its caller-supplied cause")
+	assert.True(t, requestMayHaveBeenDispatched(err), "the successful write leaves the tool outcome unknown")
+	var unknown interface{ OutcomeUnknown() bool }
+	require.ErrorAs(t, err, &unknown)
+	assert.True(t, unknown.OutcomeUnknown())
+	var pending interface{ ExecutionDone() <-chan struct{} }
+	require.ErrorAs(t, err, &pending)
+	assert.True(t, pending.ExecutionDone() == owner.done)
+	select {
+	case <-pending.ExecutionDone():
+	case <-time.After(2 * time.Second):
+		t.Fatal("post-dispatch cancellation did not join the owned child")
+	}
+	wire, readErr := os.ReadFile(wireFile)
+	require.NoError(t, readErr)
+	assert.Equal(t, 1, strings.Count(string(wire), "tools/call"))
+	assert.NotNil(t, adapter.adapterCore.proc.ProcessState)
+	assert.NoError(t, adapter.Disconnect(context.Background()))
 }
 
 func TestOwnedStdioTransportCloseJoinsActiveSilentCall(t *testing.T) {

@@ -80,7 +80,7 @@ func (t *JSONRPCLineTransport) Request(ctx context.Context, method string, param
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if err := ctx.Err(); err != nil {
-		return nil, err
+		return nil, contextCause(ctx)
 	}
 
 	id := t.nextID
@@ -163,9 +163,9 @@ func (t *JSONRPCLineTransport) Request(ctx context.Context, method string, param
 		if owner != nil {
 			owner.startStop()
 			finishWatch()
-			return nil, ownedRequestError(err, false, false)
+			return nil, ownedRequestError(contextCause(ctx), false, false)
 		}
-		return nil, err
+		return nil, contextCause(ctx)
 	}
 
 	if _, err := fmt.Fprintln(t.out, string(req)); err != nil { //nolint:errcheck
@@ -189,9 +189,9 @@ func (t *JSONRPCLineTransport) Request(ctx context.Context, method string, param
 			if owner != nil {
 				owner.startStop()
 				finishWatch()
-				return nil, ownedRequestError(ctx.Err(), true, false)
+				return nil, ownedRequestError(contextCause(ctx), true, false)
 			}
-			return nil, newRequestBoundaryError(ctx.Err(), true, false)
+			return nil, newRequestBoundaryError(contextCause(ctx), true, false)
 		default:
 		}
 
@@ -576,8 +576,11 @@ func (c *adapterCore) Connect(ctx context.Context) error {
 	for {
 		c.mu.Lock()
 		if c.connected {
-			c.mu.Unlock()
-			return nil
+			if owner := c.procOwner; owner == nil || !owner.isStopping() {
+				c.mu.Unlock()
+				return nil
+			}
+			c.connected = false
 		}
 		if c.connecting {
 			done := c.connectDone
