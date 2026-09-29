@@ -43,6 +43,39 @@ func TestCostTrackerRecordAttemptRetainsKnownSubtotalAndUnknownCounts(t *testing
 	assert.Equal(t, 50, summary.KnownOutputTokens)
 }
 
+func TestCostTrackerMixedLegacyAndAttemptSnapshotSeparatesAndCombinesTotals(t *testing.T) {
+	tracker := NewCostTracker(nil)
+	legacyCost, err := tracker.Record("gpt-4o", 1000, 500)
+	require.NoError(t, err)
+	known := attemptResult("mixed-operation", "mixed-known", "gpt-4o", llm.UsageEvidence{
+		State:  llm.UsageKnown,
+		Usage:  &llm.Usage{InputTokens: 1000, OutputTokens: 500, TotalTokens: 1500},
+		Source: llm.UsageProviderResponse,
+	})
+	_, err = tracker.RecordAttempt(known)
+	require.NoError(t, err)
+	_, err = tracker.RecordAttempt(known)
+	require.NoError(t, err, "duplicate attempt evidence must not affect combined totals")
+	unknown := attemptResult("mixed-operation", "mixed-unknown", "unpriced-model", llm.UnknownUsageEvidence())
+	unknown.Outcome = llm.AttemptTransportFailure
+	unknown.Failure = llm.FailureTransientProvider
+	_, err = tracker.RecordAttempt(unknown)
+	require.NoError(t, err)
+
+	rows, summary := tracker.AttemptCostSnapshot()
+	require.Len(t, rows, 2)
+	assert.InDelta(t, legacyCost, summary.LegacyKnownCostSubtotal, 0.000001)
+	assert.Equal(t, 1, summary.LegacyCalls)
+	assert.Equal(t, AttemptCostFromDefaultTier, summary.LegacyPriceSource)
+	assert.InDelta(t, 0.0075, summary.KnownCostSubtotal, 0.000001,
+		"the attempt-only subtotal remains scoped to attempt records")
+	assert.InDelta(t, 0.015, summary.CombinedKnownCostSubtotal, 0.000001,
+		"combined subtotal must include the legacy record and known attempt exactly once")
+	assert.InDelta(t, summary.CombinedKnownCostSubtotal, tracker.Total(), 0.000001)
+	assert.Equal(t, 1, summary.UnknownCostAttempts, "unknown attempt cost must not enter the combined subtotal")
+	assert.Equal(t, 3, tracker.Calls())
+}
+
 func TestCostTrackerRecordAttemptDistinguishesProviderCostAndUnknownPrice(t *testing.T) {
 	tracker := NewCostTracker([]CostTier{{Model: "known-model", InputPer1K: 1, OutputPer1K: 1}})
 	reportedCost := 0.125

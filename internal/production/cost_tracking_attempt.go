@@ -43,14 +43,24 @@ type AttemptCostRecord struct {
 	CostUSD     float64
 }
 
-// AttemptCostSummary contains known subtotals and explicit unknown counts.
+// AttemptCostSummary contains attempt-only and combined known subtotals plus
+// explicit unknown counts and legacy-record provenance.
 type AttemptCostSummary struct {
-	Attempts             int
-	KnownInputTokens     int
-	KnownOutputTokens    int
+	Attempts          int
+	KnownInputTokens  int
+	KnownOutputTokens int
+	// KnownCostSubtotal covers attempt records only.
 	KnownCostSubtotal    float64
 	UnknownUsageAttempts int
 	UnknownCostAttempts  int
+	// LegacyCalls counts old Record writes that have no provider attempt identity.
+	LegacyCalls int
+	// LegacyKnownCostSubtotal is the known amount from old Record writes.
+	LegacyKnownCostSubtotal float64
+	// LegacyPriceSource is the configured pricing source for legacy records, or unknown if none exist.
+	LegacyPriceSource AttemptCostPriceSource
+	// CombinedKnownCostSubtotal includes legacy records and known attempt costs exactly once.
+	CombinedKnownCostSubtotal float64
 }
 
 var (
@@ -143,7 +153,15 @@ func (t *CostTracker) AttemptCostSnapshot() ([]AttemptCostRecord, AttemptCostSum
 	for _, id := range ids {
 		rows = append(rows, cloneAttemptCostRecord(t.attemptRecords[id]))
 	}
-	return rows, t.attemptSummary
+	summary := t.attemptSummary
+	summary.LegacyCalls = t.legacyCalls
+	summary.LegacyKnownCostSubtotal = t.legacyTotal
+	summary.CombinedKnownCostSubtotal = t.total
+	summary.LegacyPriceSource = AttemptCostPriceUnknown
+	if t.legacyCalls > 0 {
+		summary.LegacyPriceSource = t.priceSource
+	}
+	return rows, summary
 }
 
 func validateAttemptResult(result llm.ProviderAttemptResult) error {

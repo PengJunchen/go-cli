@@ -77,7 +77,8 @@ func (h *CostHandler) Handle(_ context.Context, _ []string, deps Dependencies) (
 	if deps.CostTracker() != nil {
 		attempts, attemptSummary := deps.CostTracker().AttemptCostSnapshot()
 		if attemptSummary.Attempts > 0 {
-			fmt.Fprintf(deps.Out(), "Known cost subtotal: $%.4f\n", attemptSummary.KnownCostSubtotal)                                             //nolint:errcheck
+			fmt.Fprintf(deps.Out(), "Known cost subtotal: $%.4f\n", attemptSummary.CombinedKnownCostSubtotal)                                     //nolint:errcheck
+			fmt.Fprintf(deps.Out(), "Attempt known cost subtotal: $%.4f\n", attemptSummary.KnownCostSubtotal)                                     //nolint:errcheck
 			fmt.Fprintf(deps.Out(), "Provider attempts: %d\n", attemptSummary.Attempts)                                                           //nolint:errcheck
 			fmt.Fprintf(deps.Out(), "Known provider tokens: %d in / %d out\n", attemptSummary.KnownInputTokens, attemptSummary.KnownOutputTokens) //nolint:errcheck
 			fmt.Fprintf(deps.Out(), "Unknown usage attempts: %d\n", attemptSummary.UnknownUsageAttempts)                                          //nolint:errcheck
@@ -90,7 +91,14 @@ func (h *CostHandler) Handle(_ context.Context, _ []string, deps Dependencies) (
 					usageSource = "reported"
 					usageDetail = fmt.Sprintf(" (%d in / %d out)", attempt.Result.Usage.Usage.InputTokens, attempt.Result.Usage.Usage.OutputTokens)
 				}
-				_, _ = fmt.Fprintf(deps.Out(), "  provider=%q model=%q usage=%s%s cost=%s price_source=%s\n",
+				amount := "unknown"
+				if attempt.Status != production.AttemptCostUnknown {
+					amount = fmt.Sprintf("$%.4f", attempt.CostUSD)
+				}
+				_, _ = fmt.Fprintf(deps.Out(), "  attempt_id=%q outcome=%s amount=%s provider=%q model=%q usage=%s%s cost=%s price_source=%s\n",
+					attempt.Result.AttemptID,
+					attemptOutcomeLabel(attempt.Result.Outcome),
+					amount,
 					attempt.Result.Identity.ProviderID,
 					attempt.Result.Identity.ModelID,
 					usageSource,
@@ -102,6 +110,13 @@ func (h *CostHandler) Handle(_ context.Context, _ []string, deps Dependencies) (
 		} else {
 			fmt.Fprintf(deps.Out(), "Total cost: $%.4f\n", deps.CostTracker().Total()) //nolint:errcheck
 			fmt.Fprintf(deps.Out(), "Total calls: %d\n", deps.CostTracker().Calls())   //nolint:errcheck
+		}
+		if attemptSummary.LegacyCalls > 0 {
+			_, _ = fmt.Fprintf(deps.Out(), "Legacy cost records: %d; known subtotal: $%.4f; provider/model and usage provenance not retained; price_source=%s\n",
+				attemptSummary.LegacyCalls,
+				attemptSummary.LegacyKnownCostSubtotal,
+				attemptCostPriceSourceLabel(attemptSummary.LegacyPriceSource),
+			)
 		}
 
 		// Sub-agent cost breakdown.
@@ -147,6 +162,21 @@ func attemptCostStatusLabel(status production.AttemptCostStatus) string {
 		return "reported"
 	case production.AttemptCostEstimated:
 		return "estimated"
+	default:
+		return "unknown"
+	}
+}
+
+func attemptOutcomeLabel(outcome llm.AttemptOutcome) string {
+	switch outcome {
+	case llm.AttemptSuccess:
+		return "success"
+	case llm.AttemptProviderFailure:
+		return "provider_failure"
+	case llm.AttemptTransportFailure:
+		return "transport_failure"
+	case llm.AttemptCancelled:
+		return "canceled"
 	default:
 		return "unknown"
 	}

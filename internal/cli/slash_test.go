@@ -205,6 +205,7 @@ func TestSlashCostShowsKnownSubtotalsAndUnknownAttemptCounts(t *testing.T) {
 	assert.Contains(t, output, "Unknown cost attempts: 1")
 	assert.Contains(t, output, `provider="openai" model="gpt-4o" usage=unknown`)
 	assert.Contains(t, output, "cost=unknown price_source=unknown")
+	assert.Contains(t, output, `attempt_id="attempt-cost-report" outcome=transport_failure amount=unknown`)
 	assert.NotContains(t, output, "Total cost: $0.0000", "unknown cost must not be represented as a complete zero total")
 }
 
@@ -254,6 +255,45 @@ func TestSlashCostShowsActualProviderModelAndEvidenceSources(t *testing.T) {
 	assert.NotContains(t, output, "candidate-private-marker")
 	assert.NotContains(t, output, "candidate-reported")
 	assert.NotContains(t, output, "https://")
+}
+
+func TestSlashCostCombinesLegacyAndAttemptCostsWithoutDoubleCounting(t *testing.T) {
+	tracker := production.NewCostTracker(nil)
+	legacyCost, err := tracker.Record("gpt-4o", 1000, 500)
+	require.NoError(t, err)
+	_, err = tracker.RecordAttempt(llm.ProviderAttemptResult{
+		OperationID: "op-mixed-cost-report",
+		AttemptID:   "attempt-mixed-cost-report",
+		Identity: llm.AttemptIdentity{
+			ProviderID: "actual-provider",
+			ModelID:    "gpt-4o",
+			ProtocolID: llm.ProtocolOpenAICompatible,
+			OriginKind: llm.OriginResolverDefaultEndpoint,
+			Candidate:  "candidate-private",
+		},
+		Outcome: llm.AttemptSuccess,
+		Usage: llm.UsageEvidence{
+			State:  llm.UsageKnown,
+			Usage:  &llm.Usage{InputTokens: 1000, OutputTokens: 500, TotalTokens: 1500},
+			Source: llm.UsageProviderResponse,
+		},
+	})
+	require.NoError(t, err)
+
+	_, buf := newTestCmd()
+	_, err = (&CostHandler{}).Handle(context.Background(), nil, &slashContext{out: buf, costTracker: tracker})
+	require.NoError(t, err)
+
+	output := buf.String()
+	assert.InDelta(t, 0.015, tracker.Total(), 0.000001)
+	assert.InDelta(t, 0.0075, legacyCost, 0.000001)
+	assert.Contains(t, output, "Known cost subtotal: $0.0150",
+		"the aggregate must include both the legacy record and the attempt once each")
+	assert.Contains(t, output, "Attempt known cost subtotal: $0.0075")
+	assert.Contains(t, output, "Legacy cost records: 1; known subtotal: $0.0075")
+	assert.Contains(t, output, "provider/model and usage provenance not retained; price_source=default_tier")
+	assert.Contains(t, output, `attempt_id="attempt-mixed-cost-report" outcome=success amount=$0.0075`)
+	assert.NotContains(t, output, "candidate-private")
 }
 
 // TestCostHandlerWorksWithSnapshot verifies that CostHandler.Handle renders the
