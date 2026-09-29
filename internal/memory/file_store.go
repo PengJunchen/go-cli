@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"math"
 	"os"
@@ -21,6 +22,65 @@ import (
 )
 
 const memoryFilePerm = 0o600
+const maxMemoryRecordBytes = 1 << 20
+
+// ErrMemoryStoreClosed is returned when a write is attempted after Close.
+var ErrMemoryStoreClosed = errors.New("memory: store is closed")
+
+// ErrMemoryStoreUnavailable is returned when a committed file replacement
+// cannot be reopened for further writes.
+var ErrMemoryStoreUnavailable = errors.New("memory: store is unavailable")
+
+// ErrMemoryStorePoisoned marks a store whose last append could not be rolled
+// back with confirmed file operations.
+var ErrMemoryStorePoisoned = errors.New("memory: store state is unknown")
+
+// ErrMemoryRecordTooLarge is returned when a serialized memory exceeds the
+// maximum JSONL record size.
+var ErrMemoryRecordTooLarge = errors.New("memory: record exceeds maximum size")
+
+// MemoryStorePoisonedError describes an append failure whose rollback could
+// not be confirmed. The store rejects later writes to avoid compounding an
+// unknown on-disk state.
+type MemoryStorePoisonedError struct {
+	Cause error
+}
+
+// Error returns the poisoned store error and its rollback failure cause.
+func (e *MemoryStorePoisonedError) Error() string {
+	if e.Cause == nil {
+		return ErrMemoryStorePoisoned.Error()
+	}
+	return fmt.Sprintf("%s: %v", ErrMemoryStorePoisoned, e.Cause)
+}
+
+// Unwrap exposes both the poisoned-state marker and the underlying failures.
+func (e *MemoryStorePoisonedError) Unwrap() []error {
+	if e.Cause == nil {
+		return []error{ErrMemoryStorePoisoned}
+	}
+	return []error{ErrMemoryStorePoisoned, e.Cause}
+}
+
+type memoryFileIO struct {
+	createTemp func(dir, pattern string) (*os.File, error)
+	openFile   func(name string, flag int, perm os.FileMode) (*os.File, error)
+	write      func(file *os.File, data []byte) (int, error)
+	sync       func(file *os.File) error
+	truncate   func(file *os.File, size int64) error
+	rename     func(oldPath, newPath string) error
+}
+
+func defaultMemoryFileIO() memoryFileIO {
+	return memoryFileIO{
+		createTemp: os.CreateTemp,
+		openFile:   os.OpenFile,
+		write:      (*os.File).Write,
+		sync:       (*os.File).Sync,
+		truncate:   (*os.File).Truncate,
+		rename:     os.Rename,
+	}
+}
 
 // ErrMemoryNotFound is returned when a memory ID does not exist.
 var ErrMemoryNotFound = errors.New("memory: not found")
@@ -29,10 +89,14 @@ var ErrMemoryNotFound = errors.New("memory: not found")
 // appended on Add and kept in memory for fast lookup and TF-IDF search. It is
 // concurrency-safe.
 type FileMemoryStore struct {
-	path  string
-	mu    sync.RWMutex
-	items map[string]Memory
-	file  *os.File
+	path           string
+	mu             sync.RWMutex
+	items          map[string]Memory
+	file           *os.File
+	fileIO         memoryFileIO
+	closed         bool
+	poisoned       *MemoryStorePoisonedError
+	unavailableErr error
 	// TF-IDF index structures
 	termIdx map[string][]string // term -> memory IDs (unique per term)
 	docLen  map[string]int      // id -> token count
@@ -48,11 +112,12 @@ func NewFileMemoryStore(path string) (*FileMemoryStore, error) {
 		items:   make(map[string]Memory),
 		termIdx: make(map[string][]string),
 		docLen:  make(map[string]int),
+		fileIO:  defaultMemoryFileIO(),
 	}
 	if err := s.load(); err != nil {
 		return nil, fmt.Errorf("memory: load: %w", err)
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, memoryFilePerm)
+	f, err := s.fileIO.openFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, memoryFilePerm)
 	if err != nil {
 		return nil, fmt.Errorf("memory: open store file: %w", err)
 	}
@@ -71,10 +136,16 @@ func (s *FileMemoryStore) load() error {
 	}
 	defer func() { _ = f.Close() }() //nolint:errcheck // best-effort close of read-only file
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
+	reader := bufio.NewReaderSize(f, 64*1024)
+	for {
+		record, ok, err := readMemoryRecord(reader)
+		if err != nil {
+			return fmt.Errorf("memory: read store file: %w", err)
+		}
+		if !ok {
+			break
+		}
+		line := bytes.TrimSpace(record)
 		if len(line) == 0 {
 			continue
 		}
@@ -91,9 +162,6 @@ func (s *FileMemoryStore) load() error {
 		}
 		s.items[m.ID] = m
 		s.indexDocument(m)
-	}
-	if err := scanner.Err(); err != nil {
-		return fmt.Errorf("memory: read store file: %w", err)
 	}
 	return nil
 }
@@ -122,8 +190,8 @@ func (s *FileMemoryStore) Add(ctx context.Context, mem Memory) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if s.file == nil {
-		return errors.New("memory: store is closed")
+	if err := s.writeAvailabilityErrorLocked(); err != nil {
+		return err
 	}
 
 	if _, exists := s.items[mem.ID]; exists {
@@ -134,9 +202,20 @@ func (s *FileMemoryStore) Add(ctx context.Context, mem Memory) error {
 	if err != nil {
 		return fmt.Errorf("memory: encode entry: %w", err)
 	}
+	if len(data) > maxMemoryRecordBytes {
+		return fmt.Errorf("%w: %d bytes exceeds %d", ErrMemoryRecordTooLarge, len(data), maxMemoryRecordBytes)
+	}
+	info, err := s.file.Stat()
+	if err != nil {
+		return fmt.Errorf("memory: stat store before append: %w", err)
+	}
 	data = append(data, '\n')
-	if _, err := s.file.Write(data); err != nil {
-		return fmt.Errorf("memory: write entry: %w", err)
+	appendErr := writeMemoryFileAll(s.fileIO.write, s.file, data)
+	if appendErr == nil {
+		appendErr = s.fileIO.sync(s.file)
+	}
+	if appendErr != nil {
+		return s.rollbackAppendLocked(info.Size(), appendErr)
 	}
 
 	s.items[mem.ID] = mem
@@ -178,30 +257,21 @@ func (s *FileMemoryStore) Delete(ctx context.Context, id string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if err := s.writeAvailabilityErrorLocked(); err != nil {
+		return err
+	}
 
-	m, ok := s.items[id]
+	_, ok := s.items[id]
 	if !ok {
 		return ErrMemoryNotFound
 	}
-	delete(s.items, id)
-
-	// Rebuild the search index from the remaining items.
-	s.termIdx = make(map[string][]string)
-	s.docLen = make(map[string]int)
-	for _, mm := range s.items {
-		s.indexDocument(mm)
-	}
-	if err := s.rewriteFileLocked(); err != nil {
-		// Rollback: restore the deleted item and rebuild the index.
-		s.items[id] = m
-		s.termIdx = make(map[string][]string)
-		s.docLen = make(map[string]int)
-		for _, mm := range s.items {
-			s.indexDocument(mm)
+	candidate := make(map[string]Memory, len(s.items)-1)
+	for itemID, item := range s.items {
+		if itemID != id {
+			candidate[itemID] = item
 		}
-		return err
 	}
-	return nil
+	return s.rewriteFileLocked(candidate)
 }
 
 // Search returns memories matching the query, scored with TF-IDF and sorted by
@@ -305,6 +375,10 @@ func (s *FileMemoryStore) Search(_ context.Context, query string, limit int) ([]
 func (s *FileMemoryStore) Close() error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.closed {
+		return nil
+	}
+	s.closed = true
 	if s.file == nil {
 		return nil
 	}
@@ -313,73 +387,162 @@ func (s *FileMemoryStore) Close() error {
 	return err
 }
 
-// rewriteFileLocked truncates and rewrites the entire JSONL file from the
-// in-memory items, then reopens the file for appending. It must be called while
-// holding the write lock. On any error path it attempts to reopen the file in
-// append mode so the store remains usable for subsequent operations.
-func (s *FileMemoryStore) rewriteFileLocked() error {
-	if err := s.file.Close(); err != nil {
-		s.file = nil
-		s.tryReopenLocked()
-		return fmt.Errorf("memory: close for rewrite: %w", err)
-	}
-	s.file = nil
-
+// rewriteFileLocked writes candidate to a synced temporary JSONL file and
+// atomically replaces the store. The in-memory state changes only after rename
+// commits the replacement. It must be called while holding the write lock.
+func (s *FileMemoryStore) rewriteFileLocked(candidate map[string]Memory) error {
 	var buf bytes.Buffer
-	for _, m := range s.items {
+	for _, m := range candidate {
 		data, err := json.Marshal(m)
 		if err != nil {
-			s.tryReopenLocked()
 			return fmt.Errorf("memory: encode entry: %w", err)
+		}
+		if len(data) > maxMemoryRecordBytes {
+			return fmt.Errorf("%w: %d bytes exceeds %d", ErrMemoryRecordTooLarge, len(data), maxMemoryRecordBytes)
 		}
 		buf.Write(data)
 		buf.WriteByte('\n')
 	}
 
-	// Atomic write: write to a temp file in the same directory, then rename.
+	// Replace the store from a synced temporary file in the same directory.
 	dir := filepath.Dir(s.path)
-	tmp, err := os.CreateTemp(dir, "memories-*.jsonl.tmp")
+	tmp, err := s.fileIO.createTemp(dir, "memories-*.jsonl.tmp")
 	if err != nil {
-		s.tryReopenLocked()
 		return fmt.Errorf("memory: create temp file: %w", err)
 	}
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }() //nolint:errcheck
 
-	if _, err := tmp.Write(buf.Bytes()); err != nil {
-		_ = tmp.Close() //nolint:errcheck
-		s.tryReopenLocked()
-		return fmt.Errorf("memory: write temp file: %w", err)
+	if err := writeMemoryFileAll(s.fileIO.write, tmp, buf.Bytes()); err != nil {
+		writeErr := fmt.Errorf("memory: write temp file: %w", err)
+		if closeErr := tmp.Close(); closeErr != nil {
+			return errors.Join(writeErr, fmt.Errorf("memory: close temp file: %w", closeErr))
+		}
+		return writeErr
+	}
+	if err := s.fileIO.sync(tmp); err != nil {
+		syncErr := fmt.Errorf("memory: sync temp file: %w", err)
+		if closeErr := tmp.Close(); closeErr != nil {
+			return errors.Join(syncErr, fmt.Errorf("memory: close temp file: %w", closeErr))
+		}
+		return syncErr
 	}
 	if err := tmp.Close(); err != nil {
-		s.tryReopenLocked()
 		return fmt.Errorf("memory: close temp file: %w", err)
 	}
-	if err := os.Rename(tmpName, s.path); err != nil {
-		s.tryReopenLocked()
-		return fmt.Errorf("memory: rename temp file: %w", err)
+	oldFile := s.file
+	if err := oldFile.Close(); err != nil {
+		s.file = nil
+		return s.restoreFileAfterPreRenameFailureLocked(fmt.Errorf("memory: close store file before replacement: %w", err))
+	}
+	s.file = nil
+	if err := s.fileIO.rename(tmpName, s.path); err != nil {
+		return s.restoreFileAfterPreRenameFailureLocked(fmt.Errorf("memory: rename temp file: %w", err))
 	}
 
-	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, memoryFilePerm)
+	s.items = candidate
+	s.rebuildIndexLocked()
+	f, err := s.fileIO.openFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, memoryFilePerm)
 	if err != nil {
-		s.tryReopenLocked()
-		return fmt.Errorf("memory: reopen store file: %w", err)
+		s.file = nil
+		s.unavailableErr = fmt.Errorf("memory: reopen store file after replacement: %w: %w", ErrMemoryStoreUnavailable, err)
+		return s.unavailableErr
 	}
 	s.file = f
 	return nil
 }
 
-// tryReopenLocked attempts to reopen the store file in append mode after an
-// error. It must be called while holding the write lock. If reopening fails,
-// the store's file handle remains nil and subsequent writes will error, but
-// the in-memory state is preserved.
-func (s *FileMemoryStore) tryReopenLocked() {
-	f, err := os.OpenFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, memoryFilePerm)
+func (s *FileMemoryStore) restoreFileAfterPreRenameFailureLocked(cause error) error {
+	f, err := s.fileIO.openFile(s.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, memoryFilePerm)
 	if err != nil {
-		slog.Error("memory.reopen_failed", "path", s.path, "err", err)
-		return
+		s.unavailableErr = fmt.Errorf("memory: restore store after failed replacement: %w: %w", ErrMemoryStoreUnavailable, err)
+		return errors.Join(cause, s.unavailableErr)
 	}
 	s.file = f
+	return cause
+}
+
+func (s *FileMemoryStore) writeAvailabilityErrorLocked() error {
+	if s.closed {
+		return ErrMemoryStoreClosed
+	}
+	if s.poisoned != nil {
+		return s.poisoned
+	}
+	if s.unavailableErr != nil {
+		return s.unavailableErr
+	}
+	if s.file == nil {
+		return ErrMemoryStoreUnavailable
+	}
+	return nil
+}
+
+func (s *FileMemoryStore) rollbackAppendLocked(originalSize int64, appendErr error) error {
+	truncateErr := s.fileIO.truncate(s.file, originalSize)
+	syncErr := s.fileIO.sync(s.file)
+	if truncateErr != nil || syncErr != nil {
+		poisoned := &MemoryStorePoisonedError{Cause: errors.Join(appendErr, truncateErr, syncErr)}
+		s.poisoned = poisoned
+		return fmt.Errorf("memory: append failed and rollback could not be confirmed: %w", poisoned)
+	}
+	return fmt.Errorf("memory: append entry: %w", appendErr)
+}
+
+func writeMemoryFileAll(write func(*os.File, []byte) (int, error), file *os.File, data []byte) error {
+	for len(data) > 0 {
+		n, err := write(file, data)
+		if n < 0 || n > len(data) {
+			return fmt.Errorf("memory: invalid file write count %d", n)
+		}
+		data = data[n:]
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return io.ErrShortWrite
+		}
+	}
+	return nil
+}
+
+func (s *FileMemoryStore) rebuildIndexLocked() {
+	s.termIdx = make(map[string][]string)
+	s.docLen = make(map[string]int)
+	for _, m := range s.items {
+		s.indexDocument(m)
+	}
+}
+
+func readMemoryRecord(reader *bufio.Reader) ([]byte, bool, error) {
+	line := make([]byte, 0, 64*1024)
+	for {
+		part, err := reader.ReadSlice('\n')
+		if len(line)+len(part) > maxMemoryRecordBytes+1 {
+			return nil, false, ErrMemoryRecordTooLarge
+		}
+		line = append(line, part...)
+		if err == nil {
+			line = line[:len(line)-1]
+			if len(line) > maxMemoryRecordBytes {
+				return nil, false, ErrMemoryRecordTooLarge
+			}
+			return line, true, nil
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		if errors.Is(err, io.EOF) {
+			if len(line) == 0 {
+				return nil, false, nil
+			}
+			if len(line) > maxMemoryRecordBytes {
+				return nil, false, ErrMemoryRecordTooLarge
+			}
+			return line, true, nil
+		}
+		return nil, false, err
+	}
 }
 
 // indexDocument adds a document to the TF-IDF index. It must be called while
