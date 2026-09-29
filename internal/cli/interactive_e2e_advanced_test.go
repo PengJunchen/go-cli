@@ -58,10 +58,8 @@ func TestE2E_ContextCancellationViaInteractive(t *testing.T) {
 	assert.Contains(t, out.String(), "Session ended")
 }
 
-// TestE2E_SessionPersistenceViaInteractive verifies that when a session store
-// path is configured, user and assistant entries are persisted to the JSONL
-// file. After the REPL exits, the file should contain at least one user entry
-// and one assistant entry.
+// TestE2E_SessionPersistenceViaInteractive verifies that a configured durable
+// store path persists user and assistant entries in the selected physical file.
 func TestE2E_SessionPersistenceViaInteractive(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -72,7 +70,7 @@ func TestE2E_SessionPersistenceViaInteractive(t *testing.T) {
 	defer srv.Close()
 
 	cfg := newE2ETestConfig(t, srv.URL)
-	sessionPath := filepath.Join(t.TempDir(), "session.jsonl")
+	sessionPath := filepath.Join(t.TempDir(), "sessions")
 	cfg.Session.StorePath = sessionPath
 
 	var out bytes.Buffer
@@ -81,16 +79,20 @@ func TestE2E_SessionPersistenceViaInteractive(t *testing.T) {
 		delay: 200 * time.Millisecond,
 	}
 	cmd := newInteractiveCmd(in, &out)
+	repl := &REPLSession{cmd: cmd, out: &out, in: in}
 
 	ctx, cancel := context.WithTimeout(t.Context(), 30*time.Second)
 	defer cancel()
 
-	err := cmd.Run(ctx, cfg, nil)
+	err := repl.Run(ctx, cfg, nil)
 	require.NoError(t, err)
 	assert.Contains(t, out.String(), "Session ended")
+	require.NotNil(t, repl.assembly)
+	physicalID := repl.assembly.PhysicalSessionID
+	require.NotEmpty(t, physicalID)
 
-	// Read the session file and verify entries were persisted.
-	file, err := os.Open(sessionPath)
+	// Read the physical session file and verify entries were persisted.
+	file, err := os.Open(filepath.Join(sessionPath, "sessions", physicalID+".jsonl"))
 	require.NoError(t, err)
 	defer file.Close() //nolint:errcheck
 

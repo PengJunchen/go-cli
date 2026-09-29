@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/session"
@@ -12,11 +14,46 @@ import (
 
 var (
 	errDurableSessionDirectoryRequired        = errors.New("cli: durable session directory is required")
+	errDurableSessionPathNotDirectory         = errors.New("cli: durable session path must be a directory")
 	errDurableSessionBranchRequiresPhysicalID = errors.New("cli: a durable branch requires an exact physical session ID")
 )
 
-// durableCLISession owns the selected physical session for one CLI invocation.
-// It is intentionally not connected to prompt or REPL lifecycle yet.
+// ErrDurableCLIUnsupported identifies a durable CLI operation outside the
+// supported command boundary.
+var ErrDurableCLIUnsupported = errors.New("cli: durable CLI feature is unsupported")
+
+// UnsupportedDurableCLIError identifies a durable CLI operation that is
+// intentionally outside the currently supported command boundary.
+type UnsupportedDurableCLIError struct {
+	Feature string
+}
+
+func durableHistoryMutationUnsupported(command string) error {
+	switch command {
+	case "clear", "compact", "retry":
+		return &UnsupportedDurableCLIError{Feature: "durable /" + command}
+	default:
+		return nil
+	}
+}
+
+func (err *UnsupportedDurableCLIError) Error() string {
+	if err == nil || err.Feature == "" {
+		return ErrDurableCLIUnsupported.Error()
+	}
+	verb := "is"
+	if strings.HasSuffix(strings.ToLower(err.Feature), "sessions") {
+		verb = "are"
+	}
+	return fmt.Sprintf("cli: %s %s unsupported", err.Feature, verb)
+}
+
+func (err *UnsupportedDurableCLIError) Unwrap() error {
+	return ErrDurableCLIUnsupported
+}
+
+// durableCLISession owns the selected physical session for one prompt or REPL
+// invocation.
 type durableCLISession struct {
 	manager        *durableSessionManager
 	index          *session.WorkspaceQuarantineIndex
@@ -35,6 +72,9 @@ func newDurableCLISession(
 ) (*durableCLISession, error) {
 	if storeDirectory == "" {
 		return nil, errDurableSessionDirectoryRequired
+	}
+	if err := validateDurableSessionStorePath(storeDirectory); err != nil {
+		return nil, err
 	}
 	if resumePhysicalID == "" && resumeBranchID != "" {
 		return nil, errDurableSessionBranchRequiresPhysicalID
@@ -77,6 +117,26 @@ func newDurableCLISession(
 	}, nil
 }
 
+func validateDurableSessionStorePath(storeDirectory string) error {
+	if strings.TrimSpace(storeDirectory) == "" {
+		return errDurableSessionDirectoryRequired
+	}
+	if strings.EqualFold(filepath.Ext(filepath.Clean(storeDirectory)), ".jsonl") {
+		return fmt.Errorf("%w: %q is a legacy JSONL file", errDurableSessionPathNotDirectory, storeDirectory)
+	}
+	info, err := os.Stat(storeDirectory)
+	if err == nil {
+		if !info.IsDir() {
+			return fmt.Errorf("%w: %q is a file", errDurableSessionPathNotDirectory, storeDirectory)
+		}
+		return nil
+	}
+	if !os.IsNotExist(err) {
+		return fmt.Errorf("cli: inspect durable session store path %q: %w", storeDirectory, err)
+	}
+	return nil
+}
+
 // snapshotSelected returns one defensive snapshot while holding a temporary
 // run lease so a concurrent close request cannot close its prepared handle.
 func (cliSession *durableCLISession) snapshotSelected() (session.PreparedSessionSnapshot, error) {
@@ -107,6 +167,12 @@ func (cliSession *durableCLISession) bindRun(ctx context.Context) (context.Conte
 		return nil, nil, ErrNoDurableSessionSelected
 	}
 	lease, err := cliSession.manager.acquireRunLease()
+	if errors.Is(err, ErrDurableSessionUnavailable) {
+		if reopenErr := cliSession.manager.reopenPoisoned(ctx); reopenErr != nil {
+			return nil, nil, errors.Join(fmt.Errorf("cli: recover exact durable session before run: %w", reopenErr), err)
+		}
+		lease, err = cliSession.manager.acquireRunLease()
+	}
 	if err != nil {
 		return nil, nil, fmt.Errorf("cli: acquire durable session run lease: %w", err)
 	}

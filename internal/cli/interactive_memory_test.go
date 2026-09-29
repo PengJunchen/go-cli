@@ -98,7 +98,7 @@ func newMemoryTestServer(t *testing.T, extractResponse string, extractDelay time
 }
 
 // newMemoryTestConfig creates a config that redirects the memory store to a
-// temp HOME directory and the session store to a temp file. It returns the
+// temp HOME directory and the durable session store to a temp directory. It returns the
 // config and the HOME path (where memories.jsonl will be written).
 func newMemoryTestConfig(t *testing.T, srvURL string) (*config.Config, string) {
 	t.Helper()
@@ -113,7 +113,7 @@ func newMemoryTestConfig(t *testing.T, srvURL string) (*config.Config, string) {
 			Model:   "test-model",
 		},
 		Session: config.SessionConfig{
-			StorePath: filepath.Join(t.TempDir(), "session.jsonl"),
+			StorePath: filepath.Join(t.TempDir(), "sessions"),
 		},
 	}
 	return cfg, homeDir

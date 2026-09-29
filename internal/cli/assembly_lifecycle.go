@@ -677,6 +677,14 @@ func (s *assembleState) closeResources(ctx context.Context, idle <-chan struct{}
 		}
 	}
 
+	if s.durableSession != nil {
+		if err := s.durableSession.requestClose(ctx); err != nil {
+			if errors.Is(err, ErrDurableSessionClosePending) {
+				return errors.Join(errors.Join(errs...), fmt.Errorf("close durable CLI session: %w", errors.Join(err, ErrAssemblyResourceCompletionUnknown)))
+			}
+			errs = append(errs, fmt.Errorf("close durable CLI session: %w", err))
+		}
+	}
 	if s.sessionStore != nil {
 		if err := s.closeOwner.drainInteractiveSession(ctx); err != nil {
 			errs = append(errs, fmt.Errorf("flush interactive session: %w", err))
