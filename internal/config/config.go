@@ -7,8 +7,6 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
-
-	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
 // defaultConfigPaths lists the file paths probed by Load in order. The first
@@ -99,105 +97,10 @@ func probeGlobalConfigFile() string {
 	return ""
 }
 
-// probeProjectConfigFile searches only project-level (CWD-relative) config paths.
-func probeProjectConfigFile() string {
-	paths := []string{
-		".go-cli.yaml",
-		".go-cli.yml",
-		".go-cli.json",
-		"go-cli.yaml",
-		"go-cli.yml",
-		"go-cli.json",
-	}
-	for _, p := range paths {
-		if p == "" {
-			continue
-		}
-		info, err := os.Stat(p)
-		if err == nil && !info.IsDir() {
-			return p
-		}
-	}
-	return ""
-}
-
-// LoadTrusted loads configuration in two phases: first global config (from
-// $HOME), then project-level config (from CWD) only if the trustCheck
-// callback approves the current working directory. When trustCheck is nil,
-// it behaves identically to Load (backward compatible).
-func LoadTrusted(trustCheck func(ctx context.Context, projectPath string) bool) (*Config, error) {
-	ctx := context.Background()
-
-	// Phase 1: Load global config only.
-	globalPath := probeGlobalConfigFile()
-	loader := NewLoader()
-	if globalPath != "" {
-		loader = loader.WithFile(globalPath)
-		slog.Info("config_load_trusted",
-			"op", "config.load.trusted",
-			"phase", "global",
-			"file_path", globalPath,
-		)
-	} else {
-		slog.Info("config_load_trusted",
-			"op", "config.load.trusted",
-			"phase", "global",
-			"file_path", "",
-		)
-	}
-
-	cfg, err := loader.Load(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("config validation: %w", err)
-	}
-
-	// Phase 2: If a project-level config exists, check trust before loading.
-	projectPath := probeProjectConfigFile()
-	if projectPath == "" {
-		// No project config to load.
-		return cfg, nil
-	}
-
-	cwd, _ := os.Getwd()
-	trusted := true
-	if trustCheck != nil {
-		trusted = trustCheck(ctx, cwd)
-	}
-
-	if !trusted {
-		slog.Warn("config_load_trusted",
-			"op", "config.load.trusted",
-			"phase", "project",
-			"file_path", projectPath,
-			"trusted", false,
-			"reason", "project not trusted, skipping project config",
-		)
-		return cfg, nil
-	}
-
-	// Load and merge project-level config on top of global config.
-	span, spanCtx := tracing.SpanFromContext(ctx, "config.load.trusted", tracing.SpanKindInternal)
-	defer span.End()
-	span.SetAttributes(
-		tracing.Attribute{Key: "project_path", Value: projectPath},
-		tracing.Attribute{Key: "trusted", Value: trusted},
-	)
-
-	projectLoader := NewLoader().WithFile(projectPath)
-	projectCfg, err := projectLoader.Load(spanCtx)
-	if err != nil {
-		return nil, fmt.Errorf("project config validation: %w", err)
-	}
-
-	// Merge: project config overlays global config.
-	cfg = mergeConfigs(cfg, projectCfg)
-
-	slog.Info("config_load_trusted",
-		"op", "config.load.trusted",
-		"phase", "project",
-		"file_path", projectPath,
-		"trusted", true,
-	)
-
-	return cfg, nil
+// LoadTrusted is a compatibility wrapper. The historical path callback cannot
+// authorize executable project sources, so this path now returns the safe
+// global-only config. Use LoadTrustedWithManager with a frozen-source manager
+// to load a project overlay.
+func LoadTrusted(_ func(ctx context.Context, projectPath string) bool) (*Config, error) {
+	return LoadTrustedWithManager(context.Background(), nil)
 }

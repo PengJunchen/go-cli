@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -101,8 +102,25 @@ func (m *DefaultTrustManager) TrustProject(_ context.Context, projectPath string
 
 // RevokeTrust removes the project from the trusted set and logs the change.
 func (m *DefaultTrustManager) RevokeTrust(_ context.Context, projectPath string) error {
-	if err := m.store.Remove(projectPath); err != nil {
-		return err
+	lookupPath := projectPath
+	if canonicalRoot, err := canonicalProjectRoot(projectPath); err == nil {
+		lookupPath = canonicalRoot
+	}
+	var removeErr error
+	if err := m.store.Remove(lookupPath); err != nil {
+		removeErr = err
+	}
+	if lookupPath != projectPath {
+		if err := m.store.Remove(projectPath); err != nil {
+			if removeErr == nil {
+				removeErr = err
+			} else {
+				removeErr = errors.Join(removeErr, err)
+			}
+		}
+	}
+	if removeErr != nil {
+		return removeErr
 	}
 	slog.Info("approval.revoke_trust", "path", projectPath)
 	return nil

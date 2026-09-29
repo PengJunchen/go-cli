@@ -33,11 +33,13 @@ const (
 // < Flag < Override. A later source overrides an earlier one on a per-field
 // basis (Override wins).
 type Loader struct {
-	filePath  string
-	envPrefix string
-	flag      *Config
-	override  *Config
-	validate  Validator
+	filePath     string
+	fileBytes    []byte
+	hasFileBytes bool
+	envPrefix    string
+	flag         *Config
+	override     *Config
+	validate     Validator
 }
 
 // NewLoader returns a Loader that uses the default environment prefix and the
@@ -52,6 +54,17 @@ func NewLoader() *Loader {
 // WithFile sets the configuration file layer source.
 func (l *Loader) WithFile(path string) *Loader {
 	l.filePath = path
+	l.fileBytes = nil
+	l.hasFileBytes = false
+	return l
+}
+
+// WithFileBytes sets a file layer whose format comes from originPath while
+// parsing only the supplied frozen bytes.
+func (l *Loader) WithFileBytes(originPath string, data []byte) *Loader {
+	l.filePath = originPath
+	l.fileBytes = append([]byte(nil), data...)
+	l.hasFileBytes = true
 	return l
 }
 
@@ -169,6 +182,26 @@ func (l *Loader) Load(ctx context.Context) (*Config, error) {
 	return cfg, nil
 }
 
+// LoadFileLayer parses only the configured file layer and does not apply
+// defaults, environment variables, flags, overrides, or final validation.
+func (l *Loader) LoadFileLayer(ctx context.Context) (*Config, error) {
+	if l.filePath == "" {
+		return nil, fmt.Errorf("config: file layer is not configured")
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	format := ConfigFormatJSON
+	if detected, err := DetectConfigFormat(l.filePath); err == nil {
+		format = detected
+	}
+	cfg, err := l.loadFile(ctx, format)
+	if err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
 // loadFile reads the configuration file (JSON or YAML, chosen by format) into
 // a partial Config and emits a per-source trace span.
 func (l *Loader) loadFile(ctx context.Context, format ConfigFormat) (*Config, error) {
@@ -180,10 +213,20 @@ func (l *Loader) loadFile(ctx context.Context, format ConfigFormat) (*Config, er
 		tracing.Attribute{Key: "format", Value: format.String()},
 	)
 
-	data, err := os.ReadFile(l.filePath)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		span.SetStatus(tracing.SpanStatusError, err.Error())
-		return nil, fmt.Errorf("read config file: %w", err)
+		return nil, err
+	}
+	var data []byte
+	if l.hasFileBytes {
+		data = append([]byte(nil), l.fileBytes...)
+	} else {
+		var err error
+		data, err = os.ReadFile(l.filePath)
+		if err != nil {
+			span.SetStatus(tracing.SpanStatusError, err.Error())
+			return nil, fmt.Errorf("read config file: %w", err)
+		}
 	}
 
 	var cfg Config
