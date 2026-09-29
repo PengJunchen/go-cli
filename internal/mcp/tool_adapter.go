@@ -8,6 +8,7 @@ import (
 	"reflect"
 	"regexp"
 	"strings"
+	"sync"
 
 	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tracing"
@@ -20,6 +21,10 @@ var ErrInvalidToolResult = errors.New("mcp: invalid tool result")
 // ErrMCPClientGenerationUnavailable reports that a tool is not bound to an
 // owned MCP client generation.
 var ErrMCPClientGenerationUnavailable = errors.New("mcp: client generation is unavailable")
+
+// ErrMCPClientGenerationRetired reports an attempt to acquire a generation
+// lease after retirement has closed dispatch admission.
+var ErrMCPClientGenerationRetired = errors.New("mcp: client generation is retired")
 
 // promptInjectionWarning is prepended to content flagged as potentially
 // containing prompt-injection instructions. It alerts the model that the
@@ -121,9 +126,15 @@ func NewMCPToolAdapter(client MCPClient, tool MCPTool) *MCPToolAdapter {
 type MCPClientGeneration struct {
 	client     MCPClient
 	serverName string
+	mu         sync.Mutex
+	leases     int
+	retiring   bool
+	drained    chan struct{}
+	drainedSet bool
 }
 
 var _ tools.MCPGenerationClient = (*MCPClientGeneration)(nil)
+var _ tools.PreparedDispatchLease = (*MCPClientGeneration)(nil)
 
 // NewMCPClientGeneration creates an opaque generation handle for one owned
 // client instance.
@@ -135,13 +146,13 @@ func NewMCPClientGeneration(client MCPClient) (*MCPClientGeneration, error) {
 	if strings.TrimSpace(serverName) == "" {
 		return nil, fmt.Errorf("%w: server name is empty", ErrMCPClientGenerationUnavailable)
 	}
-	return &MCPClientGeneration{client: client, serverName: serverName}, nil
+	return &MCPClientGeneration{client: client, serverName: serverName, drained: make(chan struct{})}, nil
 }
 
 // NewToolAdapter returns an adapter tied to this exact client generation, or
 // nil when the generation is unavailable.
 func (g *MCPClientGeneration) NewToolAdapter(tool MCPTool) *MCPToolAdapter {
-	if !g.valid() {
+	if !g.acceptingLeases() {
 		return nil
 	}
 	return &MCPToolAdapter{client: g.client, tool: tool, generation: g}
@@ -149,6 +160,80 @@ func (g *MCPClientGeneration) NewToolAdapter(tool MCPTool) *MCPToolAdapter {
 
 func (g *MCPClientGeneration) valid() bool {
 	return g != nil && !isNilMCPClient(g.client) && strings.TrimSpace(g.serverName) != ""
+}
+
+func (g *MCPClientGeneration) acceptingLeases() bool {
+	if !g.valid() {
+		return false
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return !g.retiring
+}
+
+// Acquire pins this exact client generation for one prepared dispatch.
+func (g *MCPClientGeneration) Acquire() (func(), error) {
+	if !g.valid() {
+		return nil, ErrMCPClientGenerationUnavailable
+	}
+	g.mu.Lock()
+	if g.retiring {
+		g.mu.Unlock()
+		return nil, ErrMCPClientGenerationRetired
+	}
+	g.leases++
+	g.mu.Unlock()
+
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			g.mu.Lock()
+			g.leases--
+			g.closeDrainedIfReadyLocked()
+			g.mu.Unlock()
+		})
+	}, nil
+}
+
+// Retire closes lease admission and returns a signal that closes after all
+// leases acquired before retirement have been released.
+func (g *MCPClientGeneration) Retire() <-chan struct{} {
+	if g == nil {
+		done := make(chan struct{})
+		close(done)
+		return done
+	}
+	g.mu.Lock()
+	if g.drained == nil {
+		g.drained = make(chan struct{})
+	}
+	g.retiring = true
+	g.closeDrainedIfReadyLocked()
+	done := g.drained
+	g.mu.Unlock()
+	return done
+}
+
+// WaitForRetirement closes lease admission and waits for earlier leases to
+// release, or returns when ctx is canceled.
+func (g *MCPClientGeneration) WaitForRetirement(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("mcp: generation retirement context is nil")
+	}
+	select {
+	case <-g.Retire():
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (g *MCPClientGeneration) closeDrainedIfReadyLocked() {
+	if !g.retiring || g.leases != 0 || g.drainedSet {
+		return
+	}
+	g.drainedSet = true
+	close(g.drained)
 }
 
 // ExecuteMCPTool calls a tool through this client generation. Its receiver is
@@ -192,13 +277,10 @@ func (a *MCPToolAdapter) Parameters() any {
 	return a.tool.ArgsSchema
 }
 
-// MCPGenerationCandidate snapshots this adapter's MCP tool metadata into an
-// opaque source-generation candidate. The adapter must come from
-// MCPClientGeneration.NewToolAdapter for the exact client generation retained
-// for this publication. That client must not be reused or reconfigured for a
-// different generation.
-func (a *MCPToolAdapter) MCPGenerationCandidate(lease tools.PreparedDispatchLease) (tools.MCPToolCandidate, error) {
-	if a == nil || !a.generation.valid() {
+// MCPGenerationCandidate snapshots this adapter's MCP metadata and exact
+// client generation into an opaque source-generation candidate.
+func (a *MCPToolAdapter) MCPGenerationCandidate() (tools.MCPToolCandidate, error) {
+	if a == nil || !a.generation.acceptingLeases() {
 		return tools.MCPToolCandidate{}, ErrMCPClientGenerationUnavailable
 	}
 	tool := a.tool
@@ -212,7 +294,7 @@ func (a *MCPToolAdapter) MCPGenerationCandidate(lease tools.PreparedDispatchLeas
 		tool.Description,
 		tool.ArgsSchema,
 		handle,
-		lease,
+		a.generation,
 	)
 }
 

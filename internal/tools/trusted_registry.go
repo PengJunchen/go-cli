@@ -75,6 +75,7 @@ type toolRegistrationMetadata struct {
 	identity                TrustedToolIdentity
 	effects                 TrustedEffectSet
 	completionProof         PreparedCompletionProof
+	dispatchLease           PreparedDispatchLease
 	canonicalWorkspaceRoot  string
 	workspaceReadWhitelist  []string
 	scopedReadProofEligible bool
@@ -92,6 +93,7 @@ type registeredToolSnapshot struct {
 	identity                TrustedToolIdentity
 	effects                 TrustedEffectSet
 	completionProof         PreparedCompletionProof
+	dispatchLease           PreparedDispatchLease
 	canonicalWorkspaceRoot  string
 	workspaceReadWhitelist  []string
 	scopedReadProofEligible bool
@@ -559,6 +561,7 @@ func (r *DefaultToolRegistry) toolRegistrationSnapshot(_ context.Context, name s
 			identity:                metadata.identity,
 			effects:                 newTrustedEffectSet(metadata.effects.Values()...),
 			completionProof:         metadata.completionProof,
+			dispatchLease:           metadata.dispatchLease,
 			canonicalWorkspaceRoot:  metadata.canonicalWorkspaceRoot,
 			workspaceReadWhitelist:  append([]string(nil), metadata.workspaceReadWhitelist...),
 			scopedReadProofEligible: metadata.scopedReadProofEligible,

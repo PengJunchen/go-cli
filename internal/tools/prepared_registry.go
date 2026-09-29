@@ -154,6 +154,7 @@ func (r *MiddlewareToolRegistry) prepareToolCallWithStreamSink(ctx context.Conte
 		generations:             decision.Generations,
 		identity:                snapshot.identity,
 		effects:                 snapshot.effects,
+		dispatchLease:           snapshot.dispatchLease,
 		canonicalWorkspaceRoot:  snapshot.canonicalWorkspaceRoot,
 		workspaceReadWhitelist:  append([]string(nil), snapshot.workspaceReadWhitelist...),
 		scopedReadProofEligible: snapshot.scopedReadProofEligible,

@@ -87,6 +87,19 @@ func isNilMCPGenerationClient(client MCPGenerationClient) bool {
 	}
 }
 
+func isNilPreparedDispatchLease(lease PreparedDispatchLease) bool {
+	if lease == nil {
+		return true
+	}
+	value := reflect.ValueOf(lease)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
 // MCPToolCandidate is one immutable tool descriptor in an unpublished MCP
 // generation. Its fields are private so callers cannot replace the frozen
 // metadata or omit its typed client-generation handle.
@@ -109,8 +122,8 @@ func NewMCPToolCandidate(
 	client MCPGenerationClientHandle,
 	lease PreparedDispatchLease,
 ) (MCPToolCandidate, error) {
-	if strings.TrimSpace(registryName) == "" || strings.TrimSpace(remoteToolName) == "" || !client.valid() {
-		return MCPToolCandidate{}, fmt.Errorf("%w: missing tool name or client generation", ErrMCPGenerationCandidateInvalid)
+	if strings.TrimSpace(registryName) == "" || strings.TrimSpace(remoteToolName) == "" || !client.valid() || isNilPreparedDispatchLease(lease) {
+		return MCPToolCandidate{}, fmt.Errorf("%w: missing tool name, client generation, or dispatch lease", ErrMCPGenerationCandidateInvalid)
 	}
 	frozenSchema, err := freezeToolSchema(schema)
 	if err != nil {
@@ -323,8 +336,8 @@ func (u *MCPGenerationUpdate) finish() {
 }
 
 func prepareMCPGenerationCandidate(candidate MCPToolCandidate) (mcpGenerationCandidate, error) {
-	if strings.TrimSpace(candidate.name) == "" || strings.TrimSpace(candidate.remoteName) == "" || !candidate.client.valid() {
-		return mcpGenerationCandidate{}, fmt.Errorf("%w: missing tool name or client generation", ErrMCPGenerationCandidateInvalid)
+	if strings.TrimSpace(candidate.name) == "" || strings.TrimSpace(candidate.remoteName) == "" || !candidate.client.valid() || isNilPreparedDispatchLease(candidate.lease) {
+		return mcpGenerationCandidate{}, fmt.Errorf("%w: missing tool name, client generation, or dispatch lease", ErrMCPGenerationCandidateInvalid)
 	}
 	if !candidate.schema.Present() {
 		return mcpGenerationCandidate{}, fmt.Errorf("%w: MCP tool %q has no input schema", ErrMCPGenerationCandidateInvalid, candidate.name)
@@ -335,6 +348,7 @@ func prepareMCPGenerationCandidate(candidate MCPToolCandidate) (mcpGenerationCan
 	metadata := toolRegistrationMetadata{
 		description:   candidate.description,
 		effects:       unknownTrustedEffects(),
+		dispatchLease: candidate.lease,
 		hasParameters: true,
 		schema:        candidate.schema,
 	}
