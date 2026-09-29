@@ -196,7 +196,7 @@ func executeSingleToolRegistered(ctx context.Context, tr tools.ToolRegistry, cal
 	}
 	// Check if the tool supports streaming output.
 	if st, ok := def.(tools.StreamingBashTool); ok && es != nil {
-		sink := &eventStreamSink{es: es}
+		sink := &eventStreamSink{es: es, coordinates: agentEventCoordinatesFromContext(ctx)}
 		dispatched = true
 		result, err := st.ExecuteStreaming(ctx, call, sink)
 		if err != nil {

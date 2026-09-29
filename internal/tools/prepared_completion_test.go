@@ -20,6 +20,55 @@ func TestPreparedCompletionProofValuesAreStable(t *testing.T) {
 	assert.Equal(t, "owned_process_group_joined", string(CompletionOwnedProcessGroupJoined))
 }
 
+func TestTrustedAskUserControlProvidesInlineCompletionProof(t *testing.T) {
+	ctx := context.Background()
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	registry := NewMiddlewareToolRegistry(base)
+	configurePreparedRegistry(t, registry, allowPreparedCall, PreparedToolStages{})
+	emitter := &fakeEmitter{autoAnswer: true, answer: HITLAnswer{Answer: "confirmed"}}
+	tool := NewAskUserQuestionTool(emitter, time.Second)
+	require.NoError(t, registry.RegisterTrustedControl(ctx, tool))
+
+	invocation, err := registry.PrepareToolCall(ctx, ToolCall{
+		ID:   "ask-control",
+		Name: "ask_user",
+		Args: map[string]any{"question": "Continue?"},
+	})
+	require.NoError(t, err)
+	_, err = invocation.Dispatch(ctx)
+	require.NoError(t, err)
+
+	signal := invocation.CompletionSignal()
+	require.NotNil(t, signal.Done())
+	select {
+	case <-signal.Done():
+	default:
+		t.Fatal("ask_user completion must join before its result is returned")
+	}
+	assert.Equal(t, CompletionInlinePipelineJoined, signal.Proof())
+}
+
+func TestTrustedControlWithoutReviewedCompletionRemainsUnproven(t *testing.T) {
+	ctx := context.Background()
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	registry := NewMiddlewareToolRegistry(base)
+	configurePreparedRegistry(t, registry, allowPreparedCall, PreparedToolStages{})
+	tool := &stubTool{name: "reviewed-control-without-inline-proof"}
+	require.NoError(t, registry.RegisterTrustedControl(ctx, tool))
+
+	invocation, err := registry.PrepareToolCall(ctx, ToolCall{
+		ID:   "control-call",
+		Name: tool.Name(),
+	})
+	require.NoError(t, err)
+	_, err = invocation.Dispatch(ctx)
+	require.NoError(t, err)
+
+	signal := invocation.CompletionSignal()
+	assert.Nil(t, signal.Done(), "only the concrete ask_user control action may claim inline completion")
+	assert.Empty(t, signal.Proof())
+}
+
 func TestPreparedCompletionForcedPipeCloseClosesLocalSignalWithoutProof(t *testing.T) {
 	state := newPreparedCompletionState()
 	done := state.begin(CompletionOwnedProcessGroupJoined)

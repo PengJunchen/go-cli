@@ -55,17 +55,19 @@ type runCommitConsumer struct {
 }
 
 type runCommitDispatchResult struct {
-	output    string
-	isError   bool
-	err       error
-	returned  bool
-	committed bool
+	output          string
+	isError         bool
+	err             error
+	returned        bool
+	committed       bool
+	sourceTruncated *bool
 }
 
 type runCommitToolResult struct {
-	output  string
-	isError bool
-	outcome string
+	output          string
+	isError         bool
+	outcome         string
+	sourceTruncated *bool
 }
 
 type runCommitQuiescenceError struct{ cause error }
@@ -144,7 +146,24 @@ func dispatchPreparedRunCommitCall(ctx context.Context, invocation tools.Prepare
 	}
 	result.output = toolResult.Output
 	result.isError = toolResult.IsError
+	result.sourceTruncated = sourceTruncatedFromMetadata(toolResult.Metadata)
 	return result
+}
+
+func sourceTruncatedFromMetadata(metadata map[string]any) *bool {
+	value, ok := metadata["truncated"].(bool)
+	if !ok {
+		return nil
+	}
+	return &value
+}
+
+func cloneOptionalBool(value *bool) *bool {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
 }
 
 func newRunCommitConsumer(ctx context.Context) (*runCommitConsumer, error) {
@@ -421,7 +440,7 @@ func (consumer *runCommitConsumer) prepareInvocation(ctx context.Context, regist
 		// registration identity, authorization, schema, and execution stages.
 		if definition, err := registry.Get(ctx, call.Name); err == nil {
 			if _, streaming := definition.(tools.StreamingBashTool); streaming {
-				streamSink := attestedEventStreamSink(stream)
+				streamSink := attestedEventStreamSinkForContext(ctx, stream)
 				if streamSink == nil {
 					return nil, nil, ErrRunCommitStreamingUnsupported
 				}
@@ -529,29 +548,40 @@ func (consumer *runCommitConsumer) executeSequentialCall(
 	outcome := runCommitReceiptOutcome(ctx, dispatch)
 	appendToolReceipt(messages, transcript, call, dispatch.output, outcome, consumer)
 	index := uint64(len(*transcript) - 1)
+	(*transcript)[len(*transcript)-1].SourceTruncated = cloneOptionalBool(dispatch.sourceTruncated)
+	toolResult := runCommitToolResult{
+		output: dispatch.output, isError: dispatch.isError, outcome: outcome,
+		sourceTruncated: cloneOptionalBool(dispatch.sourceTruncated),
+	}
 	if err := consumer.recordActionReceipt(taskID, ordinal, intent, dispatchState, index, (*transcript)[len(*transcript)-1]); err != nil {
-		return runCommitToolResult{output: dispatch.output, isError: true, outcome: outcome}, err
+		toolResult.isError = true
+		return toolResult, err
 	}
 	if !dispatch.committed {
 		if err := consumer.resolveTask(taskID, ExecutionResolution{RunID: intent.RunID, ActionID: intent.ActionID, Evidence: ResolutionNeverDispatched}); err != nil {
-			return runCommitToolResult{output: dispatch.output, isError: true, outcome: outcome}, err
+			toolResult.isError = true
+			return toolResult, err
 		}
 		if ctx.Err() != nil {
-			return runCommitToolResult{output: dispatch.output, isError: true, outcome: outcome}, ctx.Err()
+			toolResult.isError = true
+			return toolResult, ctx.Err()
 		}
 	} else {
 		resolved, err := consumer.resolvePreparedTask(ctx, taskID, intent, execution)
 		if err != nil {
-			return runCommitToolResult{output: dispatch.output, isError: true, outcome: outcome}, err
+			toolResult.isError = true
+			return toolResult, err
 		}
 		if !resolved {
-			return runCommitToolResult{output: dispatch.output, isError: true, outcome: outcome}, runCommitQuiescenceError{cause: ErrRunCommitQuiescenceUnproven}
+			toolResult.isError = true
+			return toolResult, runCommitQuiescenceError{cause: ErrRunCommitQuiescenceUnproven}
 		}
 	}
 	if outcome == ReceiptOutcomeUnknown {
-		return runCommitToolResult{output: dispatch.output, isError: true, outcome: outcome}, markUnknownToolOutcome(dispatch.err)
+		toolResult.isError = true
+		return toolResult, markUnknownToolOutcome(dispatch.err)
 	}
-	return runCommitToolResult{output: dispatch.output, isError: dispatch.isError, outcome: outcome}, nil
+	return toolResult, nil
 }
 
 func (consumer *runCommitConsumer) resolvePreparedTask(ctx context.Context, taskID uint64, intent ActionIntent, firstExecution ActionExecution) (bool, error) {
@@ -785,6 +815,7 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 			outcome = ReceiptOutcomeUnknown
 		}
 		appendToolReceipt(messages, transcript, action.call, output, outcome, consumer)
+		(*transcript)[len(*transcript)-1].SourceTruncated = cloneOptionalBool(dispatch.sourceTruncated)
 		entry := (*transcript)[len(*transcript)-1]
 		if err := consumer.recordActionReceipt(action.taskID, ordinal, action.intent, dispatchState, transcriptIndex, entry); err != nil {
 			return err

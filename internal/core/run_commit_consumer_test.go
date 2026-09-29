@@ -667,3 +667,32 @@ func TestDispatchPendingExecutionErrorDoesNotDoubleTrackPreparedSignal(t *testin
 		})
 	}
 }
+
+func TestSourceTruncatedFromMetadataRequiresExplicitBoolean(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata map[string]any
+		want     *bool
+	}{
+		{name: "true", metadata: map[string]any{"truncated": true}, want: boolPointer(true)},
+		{name: "false", metadata: map[string]any{"truncated": false}, want: boolPointer(false)},
+		{name: "missing", metadata: map[string]any{"other": true}},
+		{name: "non-boolean", metadata: map[string]any{"truncated": "true"}},
+		{name: "nil", metadata: nil},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := sourceTruncatedFromMetadata(test.metadata)
+			if test.want == nil {
+				require.Nil(t, got)
+				return
+			}
+			require.NotNil(t, got)
+			require.Equal(t, *test.want, *got)
+			*test.want = !*test.want
+			require.Equal(t, !*test.want, *got, "the returned optional value must not alias its caller")
+		})
+	}
+}
+
+func boolPointer(value bool) *bool { return &value }

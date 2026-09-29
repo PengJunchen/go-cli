@@ -50,6 +50,9 @@ type CanonicalRunResult struct {
 // TranscriptEntry wraps a single typed message in the canonical run history.
 type TranscriptEntry struct {
 	Message AgentMessage
+	// SourceTruncated is transient result metadata from the exact prepared
+	// invocation. It is not part of AgentMessage and is never persisted.
+	SourceTruncated *bool `json:"-"`
 }
 
 // CanonicalLoop is an optional extension to AgentLoop for implementations that

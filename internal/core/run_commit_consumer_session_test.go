@@ -3,6 +3,7 @@ package core_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -122,6 +123,18 @@ func collectToolOutputEvents(stream core.EventStream) <-chan []core.AgentEvent {
 	return collected
 }
 
+func collectAgentEvents(stream core.EventStream) <-chan []core.AgentEvent {
+	collected := make(chan []core.AgentEvent, 1)
+	go func() {
+		var events []core.AgentEvent
+		for event := range stream.Events() {
+			events = append(events, event)
+		}
+		collected <- events
+	}()
+	return collected
+}
+
 type durableConsumerUnattestedEventBus struct {
 	toolOutputPublished atomic.Int32
 }
@@ -182,16 +195,70 @@ func TestRunCommitLoopStreamsPreparedBashAndReopensWithSessionSink(t *testing.T)
 		SessionID: prepared.View().SessionID, WorkspaceID: workspaceID,
 	}), "run a streaming command")
 	require.NoError(t, err)
-	events := <-collectToolOutputEvents(stream)
+	events := <-collectAgentEvents(stream)
 	result, runErr := stream.Result()
 	require.NoError(t, runErr)
 	require.Equal(t, "streaming command completed", result.Content)
 	require.Equal(t, int32(1), policyCalls.Load())
 	require.Equal(t, 2, model.CallCount(), "proof-bearing streaming completion must permit the next provider call")
-	require.Len(t, events, 2)
+	require.NotEmpty(t, events)
+	var assistantEvent *core.AgentEvent
+	var finalAssistantEvent *core.AgentEvent
+	var toolCallEvent *core.AgentEvent
+	var toolResultEvent *core.AgentEvent
+	var toolOutputEvents []core.AgentEvent
+	for index := range events {
+		event := &events[index]
+		if event.Kind == "message" && event.Content == "" && len(event.ToolCalls) == 1 {
+			assistantEvent = event
+		}
+		if event.Kind == "message" && event.Content == "streaming command completed" {
+			finalAssistantEvent = event
+		}
+		if event.Kind == "tool_call" && event.ToolCallID == "bash-stream-1" {
+			toolCallEvent = event
+		}
+		if event.Kind == "tool_result" && event.ToolCallID == "bash-stream-1" {
+			toolResultEvent = event
+		}
+		if event.Kind == "tool_output" {
+			toolOutputEvents = append(toolOutputEvents, *event)
+		}
+	}
+	require.NotNil(t, assistantEvent)
+	require.NotEmpty(t, assistantEvent.RunID)
+	runID := assistantEvent.RunID
+	require.NotNil(t, assistantEvent.CanonicalTranscriptIndex)
+	require.Equal(t, uint64(1), *assistantEvent.CanonicalTranscriptIndex)
+	require.NotNil(t, assistantEvent.AssistantTranscriptOrdinal)
+	require.Equal(t, uint64(1), *assistantEvent.AssistantTranscriptOrdinal)
+	require.NotNil(t, finalAssistantEvent)
+	require.Equal(t, runID, finalAssistantEvent.RunID)
+	require.NotNil(t, finalAssistantEvent.CanonicalTranscriptIndex)
+	require.Equal(t, uint64(3), *finalAssistantEvent.CanonicalTranscriptIndex)
+	require.Nil(t, finalAssistantEvent.AssistantTranscriptOrdinal, "a final answer without tool calls is not a tool-call occurrence")
+	require.NotNil(t, toolCallEvent)
+	require.Equal(t, runID, toolCallEvent.RunID)
+	require.NotNil(t, toolCallEvent.CanonicalTranscriptIndex)
+	require.Equal(t, uint64(1), *toolCallEvent.CanonicalTranscriptIndex)
+	require.NotNil(t, toolCallEvent.AssistantTranscriptOrdinal)
+	require.Equal(t, uint64(1), *toolCallEvent.AssistantTranscriptOrdinal)
+	require.NotNil(t, toolResultEvent)
+	require.Equal(t, runID, toolResultEvent.RunID)
+	require.Equal(t, core.ReceiptOutcomeSuccess, toolResultEvent.ReceiptOutcome)
+	require.NotNil(t, toolResultEvent.AssistantTranscriptOrdinal)
+	require.Equal(t, uint64(1), *toolResultEvent.AssistantTranscriptOrdinal)
+	require.NotNil(t, toolResultEvent.SourceTruncated, "explicit metadata false must survive the producer path")
+	require.False(t, *toolResultEvent.SourceTruncated)
+	require.Len(t, toolOutputEvents, 2)
 	byStream := make(map[string]core.AgentEvent, len(events))
-	for _, event := range events {
+	for _, event := range toolOutputEvents {
 		require.Equal(t, "bash-stream-1", event.ToolCallID)
+		require.Equal(t, runID, event.RunID)
+		require.NotNil(t, event.CanonicalTranscriptIndex)
+		require.Equal(t, uint64(1), *event.CanonicalTranscriptIndex)
+		require.NotNil(t, event.AssistantTranscriptOrdinal)
+		require.Equal(t, uint64(1), *event.AssistantTranscriptOrdinal)
 		byStream[event.Stream] = event
 	}
 	require.Equal(t, "durable stdout", byStream["stdout"].Content)
@@ -239,6 +306,54 @@ func TestRunCommitLoopStreamsPreparedBashAndReopensWithSessionSink(t *testing.T)
 	defer reopened.Close()
 	_, err = session.NewSessionRunCommitSink(reopened, index, workspaceID, nil)
 	require.NoError(t, err, "reopen validates the proof-bearing streaming receipt and resolution")
+}
+
+func TestRunCommitLoopPublishesStructuredReadTruncationOnToolResult(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	workspaceID := "workspace-v1-truncated-read"
+	_, prepared, sink := prepareRunCommitSession(t, root, workspaceID, "truncated read")
+	defer prepared.Close()
+	readDir := filepath.Join(root, "read-input")
+	require.NoError(t, os.Mkdir(readDir, 0o700))
+	for index := 0; index < 1005; index++ {
+		name := filepath.Join(readDir, fmt.Sprintf("entry-%04d.txt", index))
+		require.NoError(t, os.WriteFile(name, nil, 0o600))
+	}
+	sourceProbe, err := tools.NewReadTool().Execute(context.Background(), tools.ToolCall{Args: map[string]any{"path": readDir}})
+	require.NoError(t, err)
+	require.True(t, sourceProbe.Metadata["truncated"].(bool)) //nolint:errcheck
+
+	registry := newRunCommitStreamingRegistry(context.Background(), t, nil)
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate("truncated-read", "truncated read",
+		mock.ConversationTurn{AssistantToolCalls: []mock.ExpectedToolCall{{
+			ID: "read-truncated-1", Name: "read", Args: map[string]any{"path": readDir},
+		}}},
+		mock.ConversationTurn{AssistantContent: "directory inspected"},
+	))
+	agent := core.NewAgentImpl("r2-truncated-read", core.NewLoopAgent(core.WithLLM(model), core.WithTools(registry)))
+	harness := core.NewHarnessImpl(agent)
+	stream, err := harness.Submit(core.WithRunCommit(context.Background(), sink, core.RunCommitBinding{
+		SessionID: prepared.View().SessionID, WorkspaceID: workspaceID,
+	}), "inspect the directory")
+	require.NoError(t, err)
+	events := <-collectAgentEvents(stream)
+	result, runErr := stream.Result()
+	require.NoError(t, runErr)
+	require.Equal(t, "directory inspected", result.Content)
+
+	var receipt *core.AgentEvent
+	for index := range events {
+		if events[index].Kind == "tool_result" && events[index].ToolCallID == "read-truncated-1" {
+			receipt = &events[index]
+			break
+		}
+	}
+	require.NotNil(t, receipt)
+	require.Equal(t, core.ReceiptOutcomeSuccess, receipt.ReceiptOutcome)
+	require.NotNil(t, receipt.SourceTruncated)
+	require.True(t, *receipt.SourceTruncated, "only structured read metadata should establish source truncation")
 }
 
 func TestRunCommitLoopStreamsBashAlongsideNonStreamingToolInCanonicalOrder(t *testing.T) {
