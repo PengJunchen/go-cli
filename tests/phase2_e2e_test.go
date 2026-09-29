@@ -137,13 +137,16 @@ func phase2Compaction(spanCtx context.Context, t *testing.T, estimator compactio
 
 	items := oversizedItems(24)
 
-	compacted, res, err := midturn.CompactIfNeeded(spanCtx, items, maxTokens, estimator, unified)
+	compactedResult, res, err := midturn.CompactIfNeeded(spanCtx, items, maxTokens, estimator, unified)
 	require.NoError(t, err, "auto-compaction should not error")
 	require.True(t, res.Triggered, "oversized context must trigger compaction")
 	require.NotEqual(t, compaction.TriggerNone, res.Reason, "trigger reason should be set")
 	require.NotEqual(t, compaction.StrategyNone, unified.LastStrategy(),
 		"a concrete strategy (micro/summary/truncating) must be selected")
+	require.Equal(t, unified.LastStrategy(), compactedResult.Strategy,
+		"the typed compaction result must identify the per-call winning strategy")
 
+	compacted := compactedResult.Items
 	require.LessOrEqual(t, countTokens(compacted, estimator), maxTokens,
 		"compacted result must fit within maxTokens")
 	require.LessOrEqual(t, len(compacted), len(items), "compaction must not grow the context")

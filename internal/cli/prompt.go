@@ -248,11 +248,18 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) (runErr 
 	runCtx, cancelRun := context.WithCancel(dispatchCtx)
 	defer cancelRun()
 	if assembly.durableSession != nil {
-		runCtx, _, err = assembly.durableSession.bindRun(runCtx)
+		var sink *session.SessionRunCommitSink
+		runCtx, sink, err = assembly.durableSession.bindRun(runCtx)
 		if err != nil {
 			dispatchSpan.SetStatus(tracing.SpanStatusError, err.Error())
 			dispatchSpan.End()
 			return newExecutionError("prompt: bind durable run", err)
+		}
+		if err := hydrateDurableRunHistory(assembly.Agent, sink); err != nil {
+			sink.CloseRunCommit()
+			dispatchSpan.SetStatus(tracing.SpanStatusError, err.Error())
+			dispatchSpan.End()
+			return newExecutionError("prompt: hydrate durable history", err)
 		}
 	}
 	stream, err := assembly.Harness.Submit(runCtx, prompt)

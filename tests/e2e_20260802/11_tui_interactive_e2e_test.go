@@ -369,7 +369,7 @@ func TestE2EInteractive_AutoCompaction(t *testing.T) {
 	assert.Equal(t, compaction.TriggerThreshold, compactResult.Reason)
 
 	// Verify the result has fewer tokens.
-	afterTokens := tokenSum(result, est)
+	afterTokens := tokenSum(result.Items, est)
 	assert.LessOrEqual(t, afterTokens, maxTokens, "compacted items should fit within the budget")
 	assert.Less(t, afterTokens, beforeTokens, "compacted items should have fewer tokens than before")
 }
