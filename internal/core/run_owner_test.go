@@ -592,7 +592,11 @@ func TestEventStreamDropVisibleToRunOwner(t *testing.T) {
 	require.True(t, ok, "the returned harness stream must expose owner status")
 	statusHandle := statusSource.RunStatusHandle()
 	require.NotNil(t, statusHandle)
-	<-agent.runDone
+	select {
+	case <-agent.runDone:
+	case <-time.After(5 * time.Second):
+		t.Fatal("harness agent did not finish")
+	}
 
 	gapSource, ok := stream.(interface{ GapCount() uint64 })
 	require.True(t, ok, "the harness stream must expose its event projection gap count")
