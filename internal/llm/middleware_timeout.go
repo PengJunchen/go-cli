@@ -116,34 +116,53 @@ func (t *timeoutModel) Stream(ctx context.Context, msgs []Message, opts ...Optio
 		NewLocalStreamAbortCause(timeoutError("total")),
 	)
 	streamCtx, cancel := context.WithCancelCause(budgetCtx)
-	abortSetup := func(source <-chan MessageChunk, failure error) error {
-		if parentCtx.Err() != nil {
-			cause := context.Cause(parentCtx)
-			if cause == nil {
-				cause = parentCtx.Err()
-			}
-			cancelStreamAttempt(parentCtx, cancel, cause)
-			drainMessageChunks(source)
-			cancel(nil)
-			stopBudget()
+	attemptCause := func(fallback error) error {
+		if cause := context.Cause(streamCtx); cause != nil {
 			return cause
+		}
+		if cause := context.Cause(parentCtx); cause != nil {
+			cancel(cause)
+			return cause
+		}
+		if cause := context.Cause(budgetCtx); cause != nil {
+			cancel(cause)
+			return cause
+		}
+		if parentCtx.Err() != nil {
+			cancel(parentCtx.Err())
+			return parentCtx.Err()
 		}
 		if budgetCtx.Err() != nil {
-			cause := context.Cause(budgetCtx)
-			if cause == nil {
-				cause = budgetCtx.Err()
-			}
-			cancelStreamAttempt(parentCtx, cancel, cause)
-			drainMessageChunks(source)
-			cancel(nil)
-			stopBudget()
-			return cause
+			cancel(budgetCtx.Err())
+			return budgetCtx.Err()
 		}
-		cancelStreamAttempt(parentCtx, cancel, failure)
+		if fallback != nil {
+			cancelStreamAttempt(parentCtx, cancel, fallback)
+			if cause := context.Cause(streamCtx); cause != nil {
+				return cause
+			}
+			return NewLocalStreamAbortCause(fallback)
+		}
+		return nil
+	}
+	abortSetup := func(source <-chan MessageChunk, failure error) error {
+		firstCause := attemptCause(failure)
+		resultErr := failure
+		if firstCause != nil {
+			if failure == nil {
+				resultErr = firstCause
+			} else if !errors.Is(firstCause, failure) {
+				// Preserve a prior immutable context cause while retaining a
+				// later setup error for errors.Is/errors.As classification.
+				resultErr = errors.Join(firstCause, failure)
+			}
+			// If the setup failure caused this attempt cancellation, keep the
+			// original error as the primary returned error.
+		}
 		drainMessageChunks(source)
 		cancel(nil)
 		stopBudget()
-		return failure
+		return resultErr
 	}
 
 	ch, err := t.next.Stream(streamCtx, msgs, opts...)
@@ -155,7 +174,7 @@ func (t *timeoutModel) Stream(ctx context.Context, msgs []Message, opts ...Optio
 		return nil, abortSetup(nil, err)
 	}
 	if parentCtx.Err() != nil || budgetCtx.Err() != nil {
-		return nil, abortSetup(ch, timeoutError("total"))
+		return nil, abortSetup(ch, nil)
 	}
 
 	out := make(chan MessageChunk, 64)

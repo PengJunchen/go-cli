@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"errors"
+	"sync"
 	"testing"
 	"time"
 
@@ -236,6 +237,127 @@ func TestTimeoutModelMiddleware_StreamPreservesCallerDeadlineCause(t *testing.T)
 		require.NotErrorAs(t, cause, &localAbort, "the source must retain the caller's deadline cause")
 	case <-time.After(time.Second):
 		t.Fatal("source did not observe the caller's deadline")
+	}
+}
+
+func TestReview812cProbeLateCallerDeadlineDoesNotReplaceEarlierBudgetCause(t *testing.T) {
+	started := make(chan struct{})
+	observedCause := make(chan error, 1)
+	sourceRelease := make(chan struct{})
+	releaseSource := sync.OnceFunc(func() { close(sourceRelease) })
+	defer releaseSource()
+	setupErr := errors.New("late setup error")
+	var callerCtx context.Context
+	model := &mockModel{
+		streamFn: func(ctx context.Context, _ []Message, _ ...Option) (<-chan MessageChunk, error) {
+			close(started)
+			<-ctx.Done()
+			observedCause <- context.Cause(ctx)
+			<-callerCtx.Done()
+			ch := make(chan MessageChunk)
+			go func() {
+				<-sourceRelease
+				close(ch)
+			}()
+			return ch, setupErr
+		},
+	}
+	wrapped := NewTimeoutModelMiddleware(
+		WithTotalTimeout(20*time.Millisecond),
+		WithStreamChunkTimeout(time.Second),
+	).WrapModel(model)
+	var cancelCaller context.CancelFunc
+	callerCtx, cancelCaller = context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancelCaller()
+	result := make(chan error, 1)
+	go func() {
+		_, err := wrapped.Stream(callerCtx, nil)
+		result <- err
+	}()
+	<-started
+	select {
+	case cause := <-observedCause:
+		var localAbort *LocalStreamAbortCause
+		require.ErrorAs(t, cause, &localAbort)
+		require.ErrorIs(t, cause, context.DeadlineExceeded)
+	case <-time.After(time.Second):
+		t.Fatal("source did not observe the earlier configured deadline")
+	}
+	<-callerCtx.Done()
+	select {
+	case err := <-result:
+		t.Fatalf("Stream returned before joining the setup-error source: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	releaseSource()
+	select {
+	case err := <-result:
+		var localAbort *LocalStreamAbortCause
+		require.ErrorAs(t, err, &localAbort, "the earlier local deadline must remain the first cause")
+		require.ErrorIs(t, err, context.DeadlineExceeded)
+		require.ErrorIs(t, err, setupErr, "the late setup error should remain classifiable")
+	case <-time.After(time.Second):
+		t.Fatal("Stream did not return after joining the setup-error source")
+	}
+}
+
+func TestTimeoutModelMiddleware_LateCallerDeadlineDoesNotReplaceLocalCauseForNilSetup(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		setupErr error
+	}{
+		{name: "nil channel with setup error", setupErr: errors.New("late nil-channel setup error")},
+		{name: "nil nil"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			started := make(chan struct{})
+			observedCause := make(chan error, 1)
+			var callerCtx context.Context
+			model := &mockModel{
+				streamFn: func(ctx context.Context, _ []Message, _ ...Option) (<-chan MessageChunk, error) {
+					close(started)
+					<-ctx.Done()
+					observedCause <- context.Cause(ctx)
+					<-callerCtx.Done()
+					return nil, test.setupErr
+				},
+			}
+			wrapped := NewTimeoutModelMiddleware(
+				WithTotalTimeout(20*time.Millisecond),
+				WithStreamChunkTimeout(time.Second),
+			).WrapModel(model)
+			var cancelCaller context.CancelFunc
+			callerCtx, cancelCaller = context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancelCaller()
+			result := make(chan error, 1)
+			go func() {
+				_, err := wrapped.Stream(callerCtx, nil)
+				result <- err
+			}()
+			<-started
+			select {
+			case cause := <-observedCause:
+				var localAbort *LocalStreamAbortCause
+				require.ErrorAs(t, cause, &localAbort)
+				require.ErrorIs(t, cause, context.DeadlineExceeded)
+			case <-time.After(time.Second):
+				t.Fatal("source did not observe the earlier configured deadline")
+			}
+			<-callerCtx.Done()
+			select {
+			case err := <-result:
+				var localAbort *LocalStreamAbortCause
+				require.ErrorAs(t, err, &localAbort, "the earlier local deadline must remain the first cause")
+				require.ErrorIs(t, err, context.DeadlineExceeded)
+				if test.setupErr != nil {
+					require.ErrorIs(t, err, test.setupErr)
+				} else {
+					require.ErrorContains(t, err, "nil stream")
+				}
+			case <-time.After(time.Second):
+				t.Fatal("Stream did not return after nil setup")
+			}
+		})
 	}
 }
 

@@ -53,3 +53,18 @@ Both review probes failed before the fixes for the expected reasons: synchronous
 - `git diff --check` — passed after the follow-up report and source changes.
 
 The follow-up changed only `internal/llm/middleware_timeout.go`, `internal/llm/middleware_timeout_test.go`, `internal/llm/cycler.go`, and `internal/llm/cycler_stream_test.go` in addition to this report. It does not modify native/provider sources or the breaker/live-detector slice.
+
+## Independent review follow-up: preserve the first timeout cause
+
+A fresh review of commit `812c01f` found that the synchronous setup join path preferred `parentCtx.Err()` after draining. If the configured local deadline fired first but the provider ignored cancellation until a later caller deadline, the return error was relabeled as caller cancellation. A deterministic probe reproduced this with a 20 ms local budget, a 100 ms caller deadline, and a setup result containing both a channel and a late error.
+
+The follow-up now selects the attempt's immutable child `context.Cause` before the parent or budget context, captures it before draining, and returns that first cause after joining. A later setup error remains available through `errors.Is`/`errors.As`; normal setup errors still return as the primary error when they caused the attempt abort. The same selection covers channel-plus-error, nil-channel-plus-error, and nil-nil setup results. The earlier caller-deadline test continues to verify that a caller cause which wins first is not relabeled as local.
+
+The deterministic review probe failed before the fix because the returned error lacked `LocalStreamAbortCause`, then passed after it. Final scoped validation on this follow-up state:
+
+- `go test -race -p 2 -count=1 ./internal/llm` — 660 tests passed.
+- `go vet ./internal/llm` — passed.
+- `golangci-lint run ./internal/llm` — no issues found.
+- `git diff --check` — passed.
+
+This follow-up changes only the timeout middleware, its tests, and this report. Earlier commits remain unchanged; no provider/native source or shared root changes are included.
