@@ -256,9 +256,10 @@ type AgentAssembly struct {
 	Registry *core.DefaultRegistry
 	Cleanup  func()
 
-	closeOwner     *assemblyCloseOwner
-	mcpResources   *assemblyMCPResources
-	durableSession *durableCLISession
+	closeOwner          *assemblyCloseOwner
+	mcpResources        *assemblyMCPResources
+	durableSession      *durableCLISession
+	approvalAuditHealth func() approval.AuditTrailHealth
 }
 
 // Close stops admitting new runs and waits for the Assembly-owned resources to
@@ -269,6 +270,16 @@ func (a *AgentAssembly) Close(ctx context.Context) error {
 		return nil
 	}
 	return a.closeOwner.Close(ctx)
+}
+
+// ApprovalAuditHealth returns the redacted, sticky health state for approval
+// audit appends. Interactive callers can read this after a tool dispatch even
+// when the terminal observer preserves the already returned tool result.
+func (a *AgentAssembly) ApprovalAuditHealth() approval.AuditTrailHealth {
+	if a == nil || a.approvalAuditHealth == nil {
+		return approval.AuditTrailHealth{Healthy: true}
+	}
+	return a.approvalAuditHealth()
 }
 
 func (a *AgentAssembly) setInteractiveCloseHooks(
@@ -539,11 +550,12 @@ func AssembleAgent(
 			LSPClient:          s.lspClientField,
 			LSPWorkspaceRoot:   s.lspWorkspaceRoot,
 		},
-		Registry:       s.reg,
-		Cleanup:        func() { _ = s.runCleanup() },
-		closeOwner:     s.closeOwner,
-		mcpResources:   s.mcpResources,
-		durableSession: s.durableSession,
+		Registry:            s.reg,
+		Cleanup:             func() { _ = s.runCleanup() },
+		closeOwner:          s.closeOwner,
+		mcpResources:        s.mcpResources,
+		durableSession:      s.durableSession,
+		approvalAuditHealth: s.approvalAuditHealth,
 	}, nil
 }
 
@@ -688,7 +700,8 @@ type assembleState struct {
 	unsupportedPostToolUseHooks []UnsupportedPostToolUseHookError
 
 	// Approval section
-	modeResolver approval.PermissionModeResolver
+	modeResolver        approval.PermissionModeResolver
+	approvalAuditHealth func() approval.AuditTrailHealth
 
 	// Production resilience section
 	planCtrl        core.PlanModeController
@@ -1215,6 +1228,7 @@ func (s *assembleState) assembleApproval() error {
 		approval.WithPlanModeController(s.planCtrl),
 	)
 	approvalMW := approval.NewApprovalMiddleware(classifier, approvalStore, mwOpts...)
+	s.approvalAuditHealth = approvalMW.AuditHealth
 	s.reg.RegisterApprovalClassifier(&approvalClassifierAdapter{inner: classifier})
 	s.reg.RegisterApprovalStore(&approvalStoreAdapter{inner: approvalStore})
 	s.mutationQueue = tools.NewDefaultFileMutationQueue(
