@@ -35,7 +35,8 @@ func (e assemblyPendingExecutionError) ExecutionDone() <-chan struct{} { return 
 func (e assemblyPendingExecutionError) Unwrap() error                  { return errAssemblyPendingMutation }
 
 type assemblyBarrierMutationTool struct {
-	release <-chan struct{}
+	release        <-chan struct{}
+	nonCooperative bool
 
 	mu          sync.Mutex
 	dispatched  map[string]int
@@ -52,9 +53,18 @@ func newAssemblyBarrierMutationTool(release <-chan struct{}) *assemblyBarrierMut
 	}
 }
 
+func newAssemblyNonCooperativeMutationTool(release <-chan struct{}) *assemblyBarrierMutationTool {
+	tool := newAssemblyBarrierMutationTool(release)
+	tool.nonCooperative = true
+	return tool
+}
+
 func (*assemblyBarrierMutationTool) Name() string { return assemblyPendingMutationToolName }
 
-func (*assemblyBarrierMutationTool) Description() string {
+func (tool *assemblyBarrierMutationTool) Description() string {
+	if tool.nonCooperative {
+		return "Block inside Execute without cooperating with cancellation."
+	}
 	return "Apply a controlled test mutation and wait for its execution barrier."
 }
 
@@ -79,6 +89,17 @@ func (tool *assemblyBarrierMutationTool) Execute(_ context.Context, call tools.T
 	select {
 	case tool.countSignal <- struct{}{}:
 	default:
+	}
+	if tool.nonCooperative {
+		<-tool.release // Deliberately ignores the canceled run context.
+		tool.mu.Lock()
+		tool.completed[label]++
+		tool.mu.Unlock()
+		select {
+		case tool.countSignal <- struct{}{}:
+		default:
+		}
+		return &tools.ToolResult{Output: "mutated: " + label}, nil
 	}
 
 	done := make(chan struct{})
@@ -371,6 +392,76 @@ func TestAssemblySharesRunSlotGuardAcrossHarnessAndTurnRunner(t *testing.T) {
 			assert.Zero(t, blockedCalls)
 		})
 	}
+}
+
+func TestNonCooperativeWorkerQuarantinedAfterDeadline(t *testing.T) {
+	previousLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	t.Cleanup(cancel)
+	fixture := newAssemblyOwnershipFixture(t, false)
+	config := newE2ETestConfig(t, fixture.streamFixture.server.URL)
+	config.Git.WorkDir = t.TempDir()
+	assembly, err := AssembleAgent(ctx, config, config.Provider.Name, config.Provider.Model, io.Discard, WithApproveMode(ApproveAuto))
+	require.NoError(t, err)
+	t.Cleanup(assembly.Cleanup)
+
+	releaseBarrier := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseBarrier) }) }
+	t.Cleanup(release)
+	mutationTool := newAssemblyNonCooperativeMutationTool(releaseBarrier)
+	require.NoError(t, assembly.ToolRegistry.Register(ctx, mutationTool))
+	assembly.TurnRunner.SetRunCleanupTimeout(50 * time.Millisecond)
+
+	firstCtx, cancelFirst := context.WithCancel(ctx)
+	firstDone := make(chan struct{})
+	var firstResult core.Result
+	var firstErr error
+	go func() {
+		defer close(firstDone)
+		firstResult, firstErr = assembly.TurnRunner.RunTurn(firstCtx, core.Submission{Content: "blocked"})
+	}()
+	mutationTool.waitForCount(t, "blocked", 1, 0)
+	cancelFirst()
+	select {
+	case <-firstDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("TurnRunner did not return its bounded cleanup snapshot")
+	}
+	require.Error(t, firstErr)
+	assert.Equal(t, core.RunExecutionCleanupPending, firstResult.ExecutionState)
+	assert.Equal(t, core.RunOutcomeUnknown, firstResult.Outcome)
+	require.NotNil(t, firstResult.StatusHandle)
+	require.Eventually(t, func() bool {
+		return firstResult.StatusHandle.Snapshot().ExecutionState == core.RunExecutionQuarantined
+	}, 2*time.Second, time.Millisecond, "the live status should quarantine the still-running tool worker")
+	status := firstResult.StatusHandle.Snapshot()
+	assert.Equal(t, 1, status.PendingWorkers)
+	assert.Equal(t, core.RunOutcomeUnknown, status.Outcome)
+
+	conflictCtx, cancelConflict := context.WithTimeout(ctx, 50*time.Millisecond)
+	_, conflictErr := assembly.Harness.Submit(conflictCtx, "primary")
+	cancelConflict()
+	assert.ErrorIs(t, conflictErr, context.DeadlineExceeded)
+	assert.Equal(t, 0, fixture.requestCount("primary"), "the conflicting mutation must be rejected before provider entry")
+	conflictCalls, _ := mutationTool.count("primary")
+	assert.Zero(t, conflictCalls, "the conflicting mutation must not dispatch")
+
+	release()
+	mutationTool.waitForCount(t, "blocked", 1, 1)
+	require.Eventually(t, func() bool {
+		return firstResult.StatusHandle.Snapshot().ExecutionState == core.RunExecutionQuiescent
+	}, 2*time.Second, time.Millisecond, "worker exit should let the owner release its run claim")
+	assert.Zero(t, firstResult.StatusHandle.Snapshot().PendingWorkers)
+
+	secondResult, secondErr := assembly.TurnRunner.RunTurn(ctx, core.Submission{Content: "after-release"})
+	require.NoError(t, secondErr)
+	assert.Equal(t, core.RunExecutionQuiescent, secondResult.ExecutionState)
+	assert.Equal(t, 2, fixture.requestCount("after-release"), "a new mutation can enter after the old worker exits and the model can request its final turn")
+	mutationTool.waitForCount(t, "after-release", 1, 1)
 }
 
 func waitForAssemblyPendingStatus(t *testing.T, handle core.RunStatusHandle) core.RunStatus {
