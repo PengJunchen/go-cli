@@ -85,8 +85,14 @@ type AuditTrail struct {
 	lockTimeout time.Duration
 	mu          sync.Mutex
 	lastHash    map[string]string
+	cursors     map[string]auditTrailCursor
 	poisoned    map[string]error
 	openFile    auditTrailOpenFileFunc
+}
+
+type auditTrailCursor struct {
+	fingerprint privatefile.FileFingerprint
+	valid       bool
 }
 
 // NewAuditTrail creates an AuditTrail that writes daily JSONL files under dir.
@@ -96,6 +102,7 @@ func NewAuditTrail(dir string) *AuditTrail {
 		dir:         dir,
 		lockTimeout: defaultAuditTrailLockTimeout,
 		lastHash:    make(map[string]string),
+		cursors:     make(map[string]auditTrailCursor),
 		poisoned:    make(map[string]error),
 		openFile:    openAuditTrailFile,
 	}
@@ -128,7 +135,7 @@ func (a *AuditTrail) Record(entry AuditEntry) error {
 	lockCtx, cancel := context.WithTimeout(context.Background(), a.auditLockTimeout())
 	defer cancel()
 	err := privatefile.WithExclusiveLock(lockCtx, filename, func() error {
-		if err := a.loadChain(filename); err != nil {
+		if err := a.refreshChain(filename); err != nil {
 			return err
 		}
 
@@ -166,8 +173,10 @@ func (a *AuditTrail) Record(entry AuditEntry) error {
 		// Sync is the durability boundary: state advances only after it succeeds.
 		a.lastHash[filename] = entry.Hash
 		if err := f.Close(); err != nil {
+			delete(a.cursors, filename)
 			return fmt.Errorf("%w: %w", ErrAuditTrailClose, err)
 		}
+		a.captureCursor(filename)
 		return nil
 	})
 	if err != nil {
@@ -187,17 +196,36 @@ func (a *AuditTrail) ReadEntries(day time.Time) ([]AuditEntry, error) {
 	filename := filepath.Join(a.dir, day.UTC().Format("2006-01-02")+".jsonl")
 	var entries []AuditEntry
 	var lastHash string
+	var fingerprint privatefile.FileFingerprint
+	var fingerprintValid bool
 	lockCtx, cancel := context.WithTimeout(context.Background(), a.auditLockTimeout())
 	defer cancel()
 	err := privatefile.WithExclusiveLock(lockCtx, filename, func() error {
+		before, beforeErr := privatefile.FingerprintFile(filename)
 		var readErr error
 		entries, lastHash, readErr = readApprovalAuditFile(filename)
-		return readErr
+		if readErr != nil {
+			return readErr
+		}
+		after, afterErr := privatefile.FingerprintFile(filename)
+		if beforeErr == nil && afterErr == nil && before != after {
+			return fmt.Errorf("%w: file changed while verifying chain", ErrAuditTrailCorrupt)
+		}
+		if beforeErr == nil && afterErr == nil {
+			fingerprint = after
+			fingerprintValid = true
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, fmt.Errorf("approval audit: locked read: %w", err)
 	}
 	a.lastHash[filename] = lastHash
+	if fingerprintValid {
+		a.cursors[filename] = auditTrailCursor{fingerprint: fingerprint, valid: true}
+	} else {
+		delete(a.cursors, filename)
+	}
 	return entries, nil
 }
 
@@ -208,16 +236,42 @@ func (a *AuditTrail) auditLockTimeout() time.Duration {
 	return a.lockTimeout
 }
 
-func (a *AuditTrail) loadChain(filename string) error {
+func (a *AuditTrail) refreshChain(filename string) error {
+	before, beforeErr := privatefile.FingerprintFile(filename)
+	if beforeErr == nil {
+		if cursor := a.cursors[filename]; cursor.valid && cursor.fingerprint == before {
+			return nil
+		}
+	}
+
 	_, lastHash, err := readApprovalAuditFile(filename)
 	if err != nil {
 		return err
 	}
+	after, afterErr := privatefile.FingerprintFile(filename)
+	if beforeErr == nil && afterErr == nil && before != after {
+		return fmt.Errorf("%w: file changed while verifying chain", ErrAuditTrailCorrupt)
+	}
 	a.lastHash[filename] = lastHash
+	if beforeErr == nil && afterErr == nil {
+		a.cursors[filename] = auditTrailCursor{fingerprint: after, valid: true}
+	} else {
+		delete(a.cursors, filename)
+	}
 	return nil
 }
 
+func (a *AuditTrail) captureCursor(filename string) {
+	fingerprint, err := privatefile.FingerprintFile(filename)
+	if err != nil {
+		delete(a.cursors, filename)
+		return
+	}
+	a.cursors[filename] = auditTrailCursor{fingerprint: fingerprint, valid: true}
+}
+
 func (a *AuditTrail) rollback(filename string, f auditTrailFile, originalSize int64, sentinel, cause error) error {
+	delete(a.cursors, filename)
 	rollbackErr := f.Truncate(originalSize)
 	if rollbackErr == nil {
 		rollbackErr = f.Sync()

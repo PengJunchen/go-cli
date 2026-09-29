@@ -151,6 +151,26 @@ func TestAuditTrail_MultipleInstancesRefreshHashChain(t *testing.T) {
 	}
 }
 
+func TestAuditTrailRejectsSameSizeHistoricalTamperingBeforeAppend(t *testing.T) {
+	dir := privateAuditTestDir(t)
+	ts := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	trail := NewAuditTrail(dir)
+	require.NoError(t, trail.Record(AuditEntry{Timestamp: ts, Tool: "alpha", Decision: "allow"}))
+	path := filepath.Join(dir, "2026-08-09.jsonl")
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	tampered := bytes.Replace(raw, []byte(`"tool":"alpha"`), []byte(`"tool":"bravo"`), 1)
+	require.NotEqual(t, raw, tampered)
+	require.Equal(t, len(raw), len(tampered))
+	require.NoError(t, os.WriteFile(path, tampered, 0o600))
+
+	err = trail.Record(AuditEntry{Timestamp: ts, Tool: "later", Decision: "allow"})
+	assert.ErrorIs(t, err, ErrAuditTrailCorrupt)
+	entries, readErr := trail.ReadEntries(ts)
+	assert.ErrorIs(t, readErr, ErrAuditTrailCorrupt)
+	assert.Empty(t, entries)
+}
+
 func TestAuditTrailLockWaitIsBounded(t *testing.T) {
 	dir := privateAuditTestDir(t)
 	ts := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
