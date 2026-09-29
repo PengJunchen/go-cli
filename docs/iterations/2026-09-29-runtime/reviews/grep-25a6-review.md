@@ -32,3 +32,11 @@ This is a test-completeness item for the explicit requested-root open/enumeratio
 ## Validation record
 
 Reviewer-run: exact target/parent verification, source and fixture review, and `git diff --check 5db266977b260ba0f1707e766f327bcba92671dd 25a68d3ebcadcf9d38ccb50529765ca158189553` (pass). Test and lint results above are builder-reported evidence, not reviewer reruns.
+
+## Integrated requested-root opener follow-up
+
+The original P2 was test coverage only: the reviewed implementation already wrapped the requested-root open cause; the fixture did not exercise that injected `openDir` error path. An independent diff review checked the supplemental test patch `927850f`; its integrated equivalent is `8ccd6c2` (the test-file diff between those snapshots is identical). The current integrated source contains `TestGrepPureGoRootOpenErrorPreservesCauseAndFailsClosed` in `internal/tools/grep_capture_test.go`.
+
+Source/fixture review confirms the test uses an existing requested-root directory and a sentinel opener error, requires `errors.Is(err, cause)`, checks the root-open context, and asserts the injected opener is called only for that root. It verifies no matches escape, both `capture.Truncated()` and the returned `truncated` are false, and the failure is not converted into descendant best-effort truncation. Its `GrepTool.Execute` case also checks a forced-Go missing root preserves `os.ErrNotExist`, returns empty output, and leaves metadata nil. This closes the P2 coverage follow-up; it does not report a product-code defect or close R4.
+
+Root-run integrated validation on source `8ccd6c2`: `rtk proxy env GOMAXPROCS=2 NO_COLOR=1 TERM=dumb GOFLAGS='-p=2 -trimpath' go test -race -count=1 ./internal/tools` — PASS, 45.447s (recorded execution session 86238, exit 0). Later commits `960f1ee` and `182e1bf` changed documentation only; the tested product source remained unchanged. This is a root-run package race result, distinct from the original reviewer-run tests above; no additional test run was performed for this addendum.
