@@ -1053,7 +1053,7 @@ func TestAssemblyCloseFencesAdmissionAndWaitsForRun(t *testing.T) {
 	t.Setenv("XDG_CACHE_HOME", isolatedHome+"/cache")
 	t.Setenv("XDG_DATA_HOME", isolatedHome+"/data")
 
-	assembly, err := AssembleAgent(context.Background(), newAssembleTestConfig(), "openai", "test-model", io.Discard)
+	assembly, err := AssembleAgent(context.Background(), newAssembleTestConfig(t), "openai", "test-model", io.Discard)
 	require.NoError(t, err)
 
 	closer, ok := any(assembly).(assemblyContextCloser)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -19,8 +20,12 @@ import (
 // buildModel down the OpenAI-compatible path with an explicitly scoped key.
 // EinoProvider.Build only constructs the HTTPChatModel object (no network
 // calls), so assembly succeeds without a live endpoint.
-func newAssembleTestConfig() *config.Config {
+func newAssembleTestConfig(t *testing.T) *config.Config {
+	t.Helper()
 	return &config.Config{
+		Git: config.GitConfig{
+			WorkDir: t.TempDir(),
+		},
 		Provider: config.ProviderConfig{
 			Name:    "openai",
 			BaseURL: "http://127.0.0.1:1",
@@ -29,12 +34,23 @@ func newAssembleTestConfig() *config.Config {
 	}
 }
 
+func TestNewAssembleTestConfigUsesIsolatedWorkDir(t *testing.T) {
+	first := newAssembleTestConfig(t)
+	second := newAssembleTestConfig(t)
+
+	require.NotEmpty(t, first.Git.WorkDir)
+	require.NotEmpty(t, second.Git.WorkDir)
+	require.NotEqual(t, first.Git.WorkDir, second.Git.WorkDir)
+	require.True(t, filepath.IsAbs(first.Git.WorkDir))
+	require.True(t, filepath.IsAbs(second.Git.WorkDir))
+}
+
 // TestAssembleAgent_RegistryNotNil verifies that AssembleAgent populates the
 // Registry field on the returned AgentAssembly.
 func TestAssembleAgent_RegistryNotNil(t *testing.T) {
 	assembly, err := AssembleAgent(
 		context.Background(),
-		newAssembleTestConfig(),
+		newAssembleTestConfig(t),
 		"openai", "test-model",
 		io.Discard,
 	)
@@ -49,7 +65,7 @@ func TestAssembleAgent_RegistryNotNil(t *testing.T) {
 func TestAssembleAgent_RegistryRetrieval(t *testing.T) {
 	assembly, err := AssembleAgent(
 		context.Background(),
-		newAssembleTestConfig(),
+		newAssembleTestConfig(t),
 		"openai", "test-model",
 		io.Discard,
 	)
@@ -85,7 +101,7 @@ func TestAssembleAgent_RegistryRetrieval(t *testing.T) {
 func TestAssembleAgent_RegistryOverride(t *testing.T) {
 	assembly, err := AssembleAgent(
 		context.Background(),
-		newAssembleTestConfig(),
+		newAssembleTestConfig(t),
 		"openai", "test-model",
 		io.Discard,
 	)
@@ -132,7 +148,7 @@ var _ llm.ModelProvider = (*fakeModelProvider)(nil)
 func TestAssembleAgent_WiresPartialComponents(t *testing.T) {
 	assembly, err := AssembleAgent(
 		context.Background(),
-		newAssembleTestConfig(),
+		newAssembleTestConfig(t),
 		"openai", "test-model",
 		io.Discard,
 	)
@@ -157,7 +173,7 @@ func TestAssembleAgent_WiresPartialComponents(t *testing.T) {
 func TestAssembleAgent_WiresPermissionModeResolver(t *testing.T) {
 	assembly, err := AssembleAgent(
 		context.Background(),
-		newAssembleTestConfig(),
+		newAssembleTestConfig(t),
 		"openai", "test-model",
 		io.Discard,
 	)
@@ -218,7 +234,7 @@ func TestAssembleAgent_WebSearchWithoutRealProviderFailsClosed(t *testing.T) {
 		{name: "unknown", provider: "not-a-provider"},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
-			cfg := newAssembleTestConfig()
+			cfg := newAssembleTestConfig(t)
 			cfg.WebSearch.Provider = testCase.provider
 			var requests int
 			withAssembleDefaultTransport(t, assembleRoundTripFunc(func(*http.Request) (*http.Response, error) {
@@ -246,7 +262,7 @@ func TestAssembleAgent_WebSearchWithoutRealProviderFailsClosed(t *testing.T) {
 // web_search.provider = "fetch", the WebSearchTool uses the
 // FetchSearchProvider (task 19-7).
 func TestAssembleAgent_WebSearchFetchProvider(t *testing.T) {
-	cfg := newAssembleTestConfig()
+	cfg := newAssembleTestConfig(t)
 	cfg.WebSearch.Provider = "fetch"
 	var request *http.Request
 	withAssembleDefaultTransport(t, assembleRoundTripFunc(func(req *http.Request) (*http.Response, error) {
@@ -264,7 +280,7 @@ func TestAssembleAgent_WebSearchFetchProvider(t *testing.T) {
 // web_search.provider = "brave" with an API key, the WebSearchTool uses the
 // BraveSearchProvider (task 19-7).
 func TestAssembleAgent_WebSearchBraveProvider(t *testing.T) {
-	cfg := newAssembleTestConfig()
+	cfg := newAssembleTestConfig(t)
 	cfg.WebSearch.Provider = "brave"
 	apiKey := t.TempDir()
 	cfg.WebSearch.APIKey = apiKey
@@ -284,7 +300,7 @@ func TestAssembleAgent_WebSearchBraveProvider(t *testing.T) {
 // TestAssembleAgent_WebSearchBraveWithoutAPIKeyFailsClosed verifies that
 // missing Brave credentials never select fabricated mock results.
 func TestAssembleAgent_WebSearchBraveWithoutAPIKeyFailsClosed(t *testing.T) {
-	cfg := newAssembleTestConfig()
+	cfg := newAssembleTestConfig(t)
 	cfg.WebSearch.Provider = "brave"
 	var requests int
 	withAssembleDefaultTransport(t, assembleRoundTripFunc(func(*http.Request) (*http.Response, error) {

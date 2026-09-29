@@ -16,7 +16,7 @@ import (
 func TestAssembleAgent_ExposesTurnRunner(t *testing.T) {
 	assembly, err := AssembleAgent(
 		context.Background(),
-		newAssembleTestConfig(),
+		newAssembleTestConfig(t),
 		"openai", "test-model",
 		io.Discard,
 	)
@@ -33,7 +33,7 @@ func TestAssembleAgent_ExposesTurnRunner(t *testing.T) {
 func TestAssembleAgent_TurnRunnerSharesSteerChannel(t *testing.T) {
 	assembly, err := AssembleAgent(
 		context.Background(),
-		newAssembleTestConfig(),
+		newAssembleTestConfig(t),
 		"openai", "test-model",
 		io.Discard,
 	)
@@ -49,7 +49,7 @@ func TestAssembleAgent_TurnRunnerSharesSteerChannel(t *testing.T) {
 func TestAssembleAgent_ExposesLoopAgent(t *testing.T) {
 	assembly, err := AssembleAgent(
 		context.Background(),
-		newAssembleTestConfig(),
+		newAssembleTestConfig(t),
 		"openai", "test-model",
 		io.Discard,
 	)

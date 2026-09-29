@@ -87,7 +87,7 @@ func TestServeCmdNonLoopbackWarning(t *testing.T) {
 	done := make(chan error, 1)
 	go func() {
 		// Auth is enabled (default); no TLS. Should print warning.
-		done <- c.Run(ctx, newAssembleTestConfig(), []string{
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{
 			"--addr", "0.0.0.0:0",
 			"--approve", "deny",
 			"--token-file", tokenPath,
@@ -143,7 +143,7 @@ func TestServeCmdNonLoopbackWithTLSNoWarning(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Run(ctx, newAssembleTestConfig(), []string{
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{
 			"--addr", "0.0.0.0:0",
 			"--approve", "deny",
 			"--token-file", tokenPath,
@@ -256,7 +256,7 @@ func TestServeCmdLoopbackNoWarning(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Run(ctx, newAssembleTestConfig(), []string{
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{
 			"--no-auth",
 			"--addr", "127.0.0.1:0",
 			"--approve", "deny",

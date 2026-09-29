@@ -19,7 +19,7 @@ import (
 
 func TestAssembleAgentExtraToolSchemasReachLoopModel(t *testing.T) {
 	ctx := context.Background()
-	assembly, err := AssembleAgent(ctx, newAssembleTestConfig(), "openai", "schema-fixture", io.Discard, WithApproveMode(ApproveAuto))
+	assembly, err := AssembleAgent(ctx, newAssembleTestConfig(t), "openai", "schema-fixture", io.Discard, WithApproveMode(ApproveAuto))
 	require.NoError(t, err)
 	t.Cleanup(assembly.Cleanup)
 	require.NotNil(t, assembly.ToolRegistry)

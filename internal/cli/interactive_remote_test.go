@@ -11,7 +11,7 @@ import (
 )
 
 func TestInteractiveRemoteModeRejectedBeforeSessionSetup(t *testing.T) {
-	cfg := newAssembleTestConfig()
+	cfg := newAssembleTestConfig(t)
 	cfg.TUI.Mode = "remote"
 	cfg.TUI.RemoteURL = "http://127.0.0.1:1/events"
 	sessionPath := filepath.Join(t.TempDir(), "session.jsonl")

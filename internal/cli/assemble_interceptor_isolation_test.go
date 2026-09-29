@@ -21,7 +21,7 @@ func TestAssemblyInterceptorsAreIsolated(t *testing.T) {
 
 	newAssembly := func(name, workdir string) *AgentAssembly {
 		t.Helper()
-		cfg := newAssembleTestConfig()
+		cfg := newAssembleTestConfig(t)
 		cfg.Git.WorkDir = workdir
 		assembly, err := AssembleAgent(
 			context.Background(),

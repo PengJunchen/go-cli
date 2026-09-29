@@ -32,7 +32,7 @@ func TestAssembleAgentConfiguredPathsConstrainDefaultFileTools(t *testing.T) {
 	linkDir := filepath.Join(allowedDir, "escape")
 	require.NoError(t, os.Symlink(outsideDir, linkDir))
 
-	cfg := newAssembleTestConfig()
+	cfg := newAssembleTestConfig(t)
 	cfg.Sandbox.AllowedPaths = []string{allowedDir}
 
 	assembly, err := AssembleAgent(
@@ -89,7 +89,7 @@ func TestAssembleAgentEmptyAllowedPathsLeavesReadUnrestricted(t *testing.T) {
 	require.NoError(t, os.WriteFile(path, []byte("unrestricted"), 0o600))
 
 	assembly, err := AssembleAgent(
-		context.Background(), newAssembleTestConfig(), "openai", "test-model", io.Discard,
+		context.Background(), newAssembleTestConfig(t), "openai", "test-model", io.Discard,
 		WithApproveMode(ApproveAuto),
 	)
 	require.NoError(t, err)

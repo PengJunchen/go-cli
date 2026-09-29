@@ -42,7 +42,7 @@ func (e *assemblyTraceExporter) exportedSpans() []tracing.SpanData {
 
 func TestAssembleAgentWithoutInvocationTracerIsNoop(t *testing.T) {
 	traceDir := filepath.Join(t.TempDir(), "traces")
-	cfg := newAssembleTestConfig()
+	cfg := newAssembleTestConfig(t)
 	cfg.Tracing = config.TracingConfig{
 		Enabled:  boolPointer(true),
 		Exporter: "jsonl",
@@ -60,7 +60,7 @@ func TestAssembleAgentWithoutInvocationTracerIsNoop(t *testing.T) {
 
 func TestAssembleAgentReusesInvocationTracerAndDoesNotShutdownIt(t *testing.T) {
 	traceDir := filepath.Join(t.TempDir(), "traces")
-	cfg := newAssembleTestConfig()
+	cfg := newAssembleTestConfig(t)
 	cfg.Tracing = config.TracingConfig{
 		Enabled:  boolPointer(true),
 		Exporter: "jsonl",
