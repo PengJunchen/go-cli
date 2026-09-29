@@ -225,7 +225,16 @@ func TestAssembleAgent_WebSearchWithoutRealProviderFailsClosed(t *testing.T) {
 				requests++
 				return nil, assert.AnError
 			}))
-			result, err := executeAssembledWebSearch(t, cfg)
+			assembly, err := AssembleAgent(context.Background(), cfg, "openai", "test-model", io.Discard, WithApproveMode(ApproveAuto))
+			require.NoError(t, err)
+			t.Cleanup(assembly.Cleanup)
+			_, err = assembly.ToolRegistry.Get(context.Background(), "web_search")
+			require.ErrorIs(t, err, tools.ErrToolNotFound, "an unusable search tool must not be registered")
+
+			result, err := tools.NewWebSearchTool().Execute(context.Background(), tools.ToolCall{
+				Name: "web_search",
+				Args: map[string]any{"query": "provider test"},
+			})
 			require.Nil(t, result, "unconfigured search must not return fabricated results")
 			require.ErrorIs(t, err, tools.ErrWebSearchProviderUnavailable)
 			assert.Zero(t, requests)
@@ -282,7 +291,16 @@ func TestAssembleAgent_WebSearchBraveWithoutAPIKeyFailsClosed(t *testing.T) {
 		requests++
 		return nil, assert.AnError
 	}))
-	result, err := executeAssembledWebSearch(t, cfg)
+	assembly, err := AssembleAgent(context.Background(), cfg, "openai", "test-model", io.Discard, WithApproveMode(ApproveAuto))
+	require.NoError(t, err)
+	t.Cleanup(assembly.Cleanup)
+	_, err = assembly.ToolRegistry.Get(context.Background(), "web_search")
+	require.ErrorIs(t, err, tools.ErrToolNotFound, "Brave search without credentials is not callable")
+
+	result, err := tools.NewWebSearchTool(tools.WithSearchProvider(tools.NewBraveSearchProvider(cfg.WebSearch.APIKey))).Execute(context.Background(), tools.ToolCall{
+		Name: "web_search",
+		Args: map[string]any{"query": "provider test"},
+	})
 	require.Nil(t, result, "missing Brave credentials must not return fabricated results")
 	require.ErrorIs(t, err, tools.ErrWebSearchProviderUnavailable)
 	assert.Contains(t, err.Error(), "Brave api key is required")
