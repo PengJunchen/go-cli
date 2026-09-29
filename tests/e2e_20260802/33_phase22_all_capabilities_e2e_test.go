@@ -164,7 +164,6 @@ func TestET_Phase22_AllCapabilities_AC1_ToolRegistryCompleteness(t *testing.T) {
 // core tools (read, write, grep) execute successfully through the assembled
 // (wrapped) registry. The bash tool is verified separately in AC-9 (approval).
 func TestET_Phase22_AllCapabilities_AC2_CoreToolsFunctional(t *testing.T) {
-	t.Skip("Pre-existing failure: write tool output format changed (queued → wrote)")
 	assembly := phase33Assemble(t, phase33TestConfig())
 
 	dir := t.TempDir()
@@ -180,7 +179,7 @@ func TestET_Phase22_AllCapabilities_AC2_CoreToolsFunctional(t *testing.T) {
 		"content": "hello world\nline2\n",
 	}))
 	require.NoError(t, err)
-	assert.Contains(t, res.Output, "queued")
+	assert.Equal(t, "wrote 18 bytes to "+filePath, res.Output)
 
 	// Verify file on disk.
 	data, err := os.ReadFile(filePath)
