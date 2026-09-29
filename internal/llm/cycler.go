@@ -349,6 +349,24 @@ func (m *cycledModel) Stream(ctx context.Context, msgs []Message, opts ...Option
 				finish()
 				return
 			}
+			if chunk.Error != nil {
+				cancelStreamAttempt(ctx, cancel, chunk.Error)
+				select {
+				case out <- chunk:
+				case <-ctx.Done():
+					cause := context.Cause(ctx)
+					if cause == nil {
+						cause = ctx.Err()
+					}
+					cancelStreamAttempt(ctx, cancel, cause)
+					drainMessageChunks(ch)
+					finish()
+					return
+				}
+				drainMessageChunks(ch)
+				finish()
+				return
+			}
 			select {
 			case out <- chunk:
 			case <-ctx.Done():
