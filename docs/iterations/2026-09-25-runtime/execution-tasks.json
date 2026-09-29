@@ -214,7 +214,7 @@
         "Regression tests proving rejected calls leave the original file byte-for-byte unchanged."
       ],
       "verification": [
-        "Planned tests: TestApprovalAllowOnlyAuthorizesCurrentCall, TestWriteMissingContentPreservesExistingFile, TestEditMissingNewStringPreservesMatchedText, TestExplicitEmptyContentClearsFile.",
+        "Planned tests: TestMiddlewareCallbackAllowOnlyAppliesToCurrentCall, TestWriteMissingContentArg, TestEditMissingNewStringDoesNotChangeFile, TestWriteEmptyContent.",
         "Assert exact test names through go test -list, run affected packages with -race -count=1, and exercise the CLI middleware path."
       ],
       "rule_mapping": [
@@ -242,7 +242,7 @@
         "Prompt-bearing trace/log attributes are redacted or disabled by default through every actual tracer."
       ],
       "verification": [
-        "Planned tests: TestServeNoAuthWildcardRejected, TestProviderCredentialNeverSentToWrongOrigin, TestMCPRejectsCrossOriginEndpointWithCredentials, TestMCPCallUnknownDoesNotReplay, TestDefaultTraceContainsNoPrompt.",
+        "Planned tests: TestServeCmdNonLoopbackNoAuthRejected, TestProviderCredentialNeverSentToWrongOrigin, TestMCPRejectsCrossOriginEndpointWithCredentials, TestMCPCallToolLostResponseIsUnknownAndNotRetried, TestMCPToolCallLostResponseIsUnknownAndNotRetried, TestDefaultTraceContainsNoPrompt.",
         "Use loopback httptest servers and verify the second origin receives neither request nor credential; exercise the actual CLI factory and tracing wiring."
       ],
       "rule_mapping": [
@@ -475,7 +475,7 @@
         "R4 replaces the temporary table with reviewed effect metadata without opening a policy gap."
       ],
       "verification": [
-        "Planned tests: TestPlanModeBlocksKnownMutatingBuiltins, TestPlanModeBlocksUnknownEffectTool, TestPlanModePreservesApprovedReadOnlyTools.",
+        "Planned tests: TestPlanModeBlocksKnownMutatingBuiltins, TestPlanModeToolWrapper_FailsClosedForUnknownAndExternalTools, TestPlanModePreservesApprovedReadOnlyTools.",
         "Exercise every registered git mutation and a fake MCP/custom side-effect through the real plan middleware; assert zero executor invocations."
       ],
       "rule_mapping": [
@@ -567,7 +567,7 @@
         "Per-assembly interceptor/registry state does not leak between Assemblies."
       ],
       "verification": [
-        "Planned tests: TestCancelDoesNotMarkRunQuiescentBeforeToolExit, TestUnknownOutcomeRetainsMutationSlot, TestCancelClosesToolCallHistory, TestSubagentSendReportsDroppedMessage, TestAssemblyInterceptorsAreIsolated.",
+        "Planned tests: TestRunOwnerCancellationKeepsClaimUntilWorkerStops, TestAssemblySharesRunSlotGuardAcrossHarnessAndTurnRunner, TestCancelClosesToolCallHistory, TestSubagentSendReportsDroppedMessage, TestAssemblyInterceptorsAreIsolated.",
         "Block a mutation worker on a channel; after bounded wait assert cleanup_pending/quarantined and second mutation is rejected; release/kill it and assert only then slot becomes available.",
         "Exercise cancellation via real AssembleAgent and actual shared RunSlotGuard."
       ],
@@ -602,7 +602,7 @@
         "No unbounded output retention in remote Bash metadata."
       ],
       "verification": [
-        "Planned tests: TestEventStreamDropVisibleToRunOwner, TestHarnessSpanEndsAfterRun, TestNonCooperativeWorkerQuarantinedAfterDeadline, TestRemoteBashMetadataRemainsBounded.",
+        "Planned tests: TestEventStreamDropVisibleToRunOwner, TestHarnessSpanEndsAfterRunAndIncludesOutcomeAttributes, TestNonCooperativeWorkerQuarantinedAfterDeadline, TestRemoteBashMetadataRemainsBounded.",
         "Inject a full 30-second-default projection using a test-configured short timeout; assert loss is surfaced and authoritative transcript remains complete."
       ],
       "rule_mapping": [
