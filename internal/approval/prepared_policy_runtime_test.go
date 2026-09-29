@@ -2,7 +2,12 @@ package approval
 
 import (
 	"context"
+	"errors"
+	"io"
+	"os"
+	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -215,6 +220,155 @@ func TestPreparedApprovalUserDenyInvalidatesSiblingPermit(t *testing.T) {
 	require.ErrorIs(t, err, tools.ErrDispatchFenceChanged, "an explicit user denial revokes previously prepared permits")
 	assert.Zero(t, toolsByName["write_a"].callCount())
 	assert.Zero(t, toolsByName["write_b"].callCount())
+}
+
+func TestApprovalAuditRecordsFinalChoice(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	trail := NewAuditTrail(dir)
+	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck
+	target := &preparedRuntimeTool{name: "audit_target"}
+	require.NoError(t, base.Register(ctx, target))
+	fence := base.DispatchFence()
+	controller := core.NewDefaultPlanModeController(fence)
+	classifier := NewAuditClassifier(preparedRuntimeAskClassifier{}, trail, PermissionDefault, "session-1")
+	callback := NewInteractiveApprovalCallback(strings.NewReader("a\n"), io.Discard)
+	middleware := NewApprovalMiddleware(classifier, NewInMemoryApprovalStore(),
+		WithCallback(callback),
+		WithDispatchFence(fence),
+		WithPlanModeController(controller),
+	)
+	registry := tools.NewMiddlewareToolRegistry(base)
+	require.NoError(t, registry.SetPreparedToolPolicy(middleware.PreparedPolicy))
+	require.NoError(t, registry.SetPreparedToolStages(tools.PreparedToolStages{}))
+
+	invocation, err := registry.PrepareToolCall(ctx, tools.ToolCall{
+		Name: "audit_target",
+		Args: map[string]any{"content": "prompt-secret-sentinel"},
+	})
+	require.NoError(t, err)
+	result, err := invocation.Dispatch(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, 1, target.callCount())
+
+	entries, err := trail.ReadEntries(time.Now())
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+	assert.Equal(t, "classifier_proposal", entries[0].Stage)
+	assert.Equal(t, "ask", entries[0].Decision)
+	assert.Equal(t, "approval_resolution", entries[1].Stage)
+	assert.Equal(t, "ask", entries[1].Decision)
+	assert.Equal(t, "allow_always", entries[1].UserChoice)
+	assert.Equal(t, "user", entries[1].Resolution)
+
+	raw, err := os.ReadFile(filepath.Join(dir, time.Now().UTC().Format("2006-01-02")+".jsonl"))
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "prompt-secret-sentinel")
+}
+
+func TestPreparedApprovalAuditWriteFailureStopsDispatch(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	trail := NewAuditTrail(dir)
+	syncErr := errors.New("sync sentinel")
+	rollbackErr := errors.New("truncate sentinel")
+	trail.openFile = func(path string, flag int, perm os.FileMode) (auditTrailFile, error) {
+		file, err := os.OpenFile(path, flag, perm)
+		if err != nil {
+			return nil, err
+		}
+		return &auditTrailFaultFile{File: file, syncErr: syncErr, truncateErr: rollbackErr}, nil
+	}
+	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck
+	target := &preparedRuntimeTool{name: "audit_target"}
+	require.NoError(t, base.Register(ctx, target))
+	fence := base.DispatchFence()
+	controller := core.NewDefaultPlanModeController(fence)
+	callback := &preparedRuntimeCallback{results: map[string][]ApprovalResult{"audit_target": {ApprovalAlwaysAllow}}, calls: make(map[string]int)}
+	classifier := NewAuditClassifier(preparedRuntimeAskClassifier{}, trail, PermissionDefault, "session-1")
+	middleware := NewApprovalMiddleware(classifier, NewInMemoryApprovalStore(),
+		WithCallback(callback),
+		WithDispatchFence(fence),
+		WithPlanModeController(controller),
+	)
+	registry := tools.NewMiddlewareToolRegistry(base)
+	require.NoError(t, registry.SetPreparedToolPolicy(middleware.PreparedPolicy))
+	require.NoError(t, registry.SetPreparedToolStages(tools.PreparedToolStages{}))
+
+	_, err := registry.PrepareToolCall(ctx, tools.ToolCall{Name: "audit_target"})
+	assert.ErrorIs(t, err, ErrAuditTrailSync)
+	assert.ErrorIs(t, err, ErrAuditTrailRollback)
+	assert.ErrorIs(t, err, syncErr)
+	assert.ErrorIs(t, err, rollbackErr)
+	assert.Zero(t, callback.count("audit_target"), "approval must not be requested after a failed classifier audit")
+	assert.Zero(t, target.callCount(), "tool dispatch must stop when its classifier audit cannot be committed")
+}
+
+func TestPreparedApprovalResolutionAuditFailureStopsDispatch(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	trail := NewAuditTrail(dir)
+	syncErr := errors.New("resolution sync sentinel")
+	syncCounter := &auditSyncCounter{}
+	trail.openFile = func(path string, flag int, perm os.FileMode) (auditTrailFile, error) {
+		file, err := os.OpenFile(path, flag, perm)
+		if err != nil {
+			return nil, err
+		}
+		return &auditSecondSyncFailureFile{File: file, counter: syncCounter, failAt: 2, syncErr: syncErr}, nil
+	}
+	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck
+	target := &preparedRuntimeTool{name: "audit_target"}
+	require.NoError(t, base.Register(ctx, target))
+	fence := base.DispatchFence()
+	controller := core.NewDefaultPlanModeController(fence)
+	callback := &preparedRuntimeCallback{results: map[string][]ApprovalResult{"audit_target": {ApprovalAlwaysAllow}}, calls: make(map[string]int)}
+	classifier := NewAuditClassifier(preparedRuntimeAskClassifier{}, trail, PermissionDefault, "session-1")
+	middleware := NewApprovalMiddleware(classifier, NewInMemoryApprovalStore(),
+		WithCallback(callback),
+		WithDispatchFence(fence),
+		WithPlanModeController(controller),
+	)
+	registry := tools.NewMiddlewareToolRegistry(base)
+	require.NoError(t, registry.SetPreparedToolPolicy(middleware.PreparedPolicy))
+	require.NoError(t, registry.SetPreparedToolStages(tools.PreparedToolStages{}))
+
+	_, err := registry.PrepareToolCall(ctx, tools.ToolCall{Name: "audit_target"})
+	assert.ErrorIs(t, err, ErrAuditTrailSync)
+	assert.ErrorIs(t, err, syncErr)
+	assert.Equal(t, 1, callback.count("audit_target"))
+	assert.Zero(t, target.callCount(), "an undurable final approval choice must not publish a permit")
+	entries, readErr := trail.ReadEntries(time.Now())
+	require.NoError(t, readErr)
+	require.Len(t, entries, 1, "the failed resolution append must roll back without damaging the prior proposal")
+	assert.Equal(t, "classifier_proposal", entries[0].Stage)
+}
+
+type auditSyncCounter struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (c *auditSyncCounter) next() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.calls++
+	return c.calls
+}
+
+type auditSecondSyncFailureFile struct {
+	*os.File
+	counter *auditSyncCounter
+	failAt  int
+	syncErr error
+}
+
+func (f *auditSecondSyncFailureFile) Sync() error {
+	if f.counter.next() == f.failAt {
+		return f.syncErr
+	}
+	return f.File.Sync()
 }
 
 func TestPreparedPermitStalesOnModePlanAndRegistryChange(t *testing.T) {
