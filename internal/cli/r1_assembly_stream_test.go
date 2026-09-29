@@ -570,9 +570,22 @@ func TestAutoFullModelCannotChangePlanModeButUserSlashCan(t *testing.T) {
 	}
 	stream, err := assembly.Harness.Submit(ctx, "Do not change plan mode.")
 	require.NoError(t, err)
-	_, _, _ = collectAssemblyEvents(stream)
+	events, _, runErr := collectAssemblyEvents(stream)
+	require.NoError(t, runErr)
 	assert.False(t, assembly.PlanCtrl.IsActive(), "model-emitted control calls under auto approval must have no mode effect")
 	assert.Equal(t, int32(2), fixture.requests.Load(), "the first response contains unregistered calls and the second completes the turn")
+	lookupErrors := make(map[string]bool)
+	for _, event := range events {
+		if event.Kind != "tool_result" || !event.IsError {
+			continue
+		}
+		if event.ToolCallID == "call-enter-plan" || event.ToolCallID == "call-exit-plan" {
+			assert.Contains(t, event.Content, "tool not found", "unregistered model calls must fail at registry lookup before execution")
+			lookupErrors[event.ToolCallID] = true
+		}
+	}
+	assert.True(t, lookupErrors["call-enter-plan"], "enter_plan_mode must produce a lookup failure and never reach an executor")
+	assert.True(t, lookupErrors["call-exit-plan"], "exit_plan_mode must produce a lookup failure and never reach an executor")
 
 	modelTools := <-requestToolNames
 	assert.Contains(t, modelTools, "todo_write", "the request should include the assembled default tool registry")
