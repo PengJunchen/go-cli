@@ -105,6 +105,16 @@ func TestStreamingMarkdownAppendChunkBoundsPendingGraphemeBytes(t *testing.T) {
 	require.True(t, utf8.ValidString(w.Content))
 }
 
+func TestStreamingMarkdownAppendChunkBoundsPendingWrappedRow(t *testing.T) {
+	renderer := NewStreamingMarkdownRenderer(NewMarkdownRenderer())
+	w := renderer.AppendChunk(context.Background(), strings.Repeat("x", maxStreamingRenderLines+10), RenderOpts{Width: 1})
+	visibleRows := strings.Count(w.Content, "\n") + 1
+
+	require.LessOrEqual(t, visibleRows, maxStreamingRenderLines)
+	require.Equal(t, visibleRows, renderer.stats().renderedLines)
+	require.True(t, w.HasHiddenPrefix, "evicting a row to retain the pending wrapped grapheme must be reported")
+}
+
 func TestStreamingMarkdownAppendChunkDoesNotRetainChunkBacking(t *testing.T) {
 	renderer := NewStreamingMarkdownRenderer(NewMarkdownRenderer())
 	chunk := strings.Repeat("x", 1<<20)
