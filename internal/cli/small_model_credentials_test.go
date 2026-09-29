@@ -46,7 +46,7 @@ func TestSmallModelSameProviderReusesPrimaryCredential(t *testing.T) {
 		defer cleanup()
 	}
 
-	_, err = model.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "summarize"}})
+	_, err = model.Generate(withCLITestOperation(context.Background()), []llm.Message{{Role: llm.RoleUser, Content: "summarize"}})
 	require.NoError(t, err)
 
 	count, path, authorization, _ := capture.snapshot()
@@ -79,7 +79,7 @@ func TestSmallModelProviderChangeDoesNotInheritPrimaryConfiguration(t *testing.T
 		defer cleanup()
 	}
 	if err == nil {
-		_, requestErr := model.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "summarize"}})
+		_, requestErr := model.Generate(withCLITestOperation(context.Background()), []llm.Message{{Role: llm.RoleUser, Content: "summarize"}})
 		assert.NoError(t, requestErr)
 	}
 
@@ -120,7 +120,7 @@ func TestSmallModelDifferentEndpointDoesNotInheritPrimaryCredential(t *testing.T
 		defer cleanup()
 	}
 
-	_, err = model.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "summarize"}})
+	_, err = model.Generate(withCLITestOperation(context.Background()), []llm.Message{{Role: llm.RoleUser, Content: "summarize"}})
 	require.NoError(t, err)
 
 	primaryCount, _, primaryAuthorization, _ := primaryCapture.snapshot()
@@ -158,7 +158,7 @@ func TestSmallModelSameOriginMayReusePrimaryCredential(t *testing.T) {
 		defer cleanup()
 	}
 
-	_, err = model.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "summarize"}})
+	_, err = model.Generate(withCLITestOperation(context.Background()), []llm.Message{{Role: llm.RoleUser, Content: "summarize"}})
 	require.NoError(t, err)
 
 	count, path, authorization, _ := capture.snapshot()
@@ -197,7 +197,7 @@ func TestSmallModelOwnCredentialStaysAtOwnOrigin(t *testing.T) {
 		defer cleanup()
 	}
 
-	_, err = model.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "summarize"}})
+	_, err = model.Generate(withCLITestOperation(context.Background()), []llm.Message{{Role: llm.RoleUser, Content: "summarize"}})
 	require.NoError(t, err)
 
 	primaryCount, _, primaryAuthorization, _ := primaryCapture.snapshot()

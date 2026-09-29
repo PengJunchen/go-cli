@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"sync/atomic"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/production"
 )
@@ -539,39 +541,58 @@ func TestCircuitBreakerModelDoesNotRetryPostHandoffFailure(t *testing.T) {
 
 func TestCircuitBreakerModelCoversModelCyclerSetupFallback(t *testing.T) {
 	var selectedCalls atomic.Int32
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+	selectedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		selectedCalls.Add(1)
 		http.Error(w, "selected setup failed", http.StatusServiceUnavailable)
 	}))
-	defer server.Close()
+	defer selectedServer.Close()
+	var primaryCalls atomic.Int32
+	primaryServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		primaryCalls.Add(1)
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"primary recovered\"}}]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer primaryServer.Close()
 	registry := llm.NewProviderRegistryWithDefaultProviderOptions(
-		llm.WithProviderName("eino"),
-		llm.WithBaseURL(server.URL),
+		llm.WithBaseURL(selectedServer.URL),
 		llm.WithAPIKey("test-key"),
+		llm.WithHTTPClient(selectedServer.Client()),
 	)
+	require.NoError(t, registry.Register(llm.NewEinoProvider(
+		llm.WithProviderName("eino-primary"),
+		llm.WithBaseURL(primaryServer.URL),
+		llm.WithAPIKey("test-key"),
+		llm.WithHTTPClient(primaryServer.Client()),
+	)))
+	resolver := registry.SnapshotResolver()
+	selected, err := resolver.ResolveModel(context.Background(), llm.ModelRequest{
+		ProviderID: "eino", ModelID: "test-model",
+	})
+	require.NoError(t, err)
+	primary, err := resolver.ResolveModel(context.Background(), llm.ModelRequest{
+		ProviderID: "eino-primary", ModelID: "primary-model",
+	})
+	require.NoError(t, err)
+	primaryModel, cleanup, err := primary.Build(context.Background())
+	require.NoError(t, err)
+	defer cleanup()
 	cycler := llm.NewModelCycler(llm.ModelCyclerConfig{
 		Models:   []llm.ModelEntry{{Provider: "eino", Model: "test-model"}},
 		Strategy: llm.StrategyRoundRobin,
-	}).WithRegistry(registry)
+	}).WithResolvedModels([]llm.ResolvedModel{selected})
 	chain := llm.NewStandardMiddlewareChain(cycler)
 	breaker := production.NewDefaultCircuitBreaker(production.CircuitBreakerConfig{FailureThreshold: 1})
-	primary := &breakerTestModel{}
-	wrapped := newModelWrapperWithChain(production.NewProductionModelWrapper(), chain, breaker, nil)(primary).(llm.BaseChatModel)
+	wrapped := newModelWrapperWithChain(production.NewProductionModelWrapper(), chain, breaker, nil)(primaryModel).(llm.BaseChatModel)
 
-	stream, err := wrapped.Stream(context.Background(), nil)
+	loop := core.NewLoopAgent(core.WithLLM(wrapped), core.WithMaxIterations(1))
+	result, err := loop.RunCanonical(context.Background(), core.Submission{Content: "recover from selected setup failure"})
 	require.NoError(t, err)
-	var finals int
-	for chunk := range stream {
-		if chunk.Error != nil {
-			t.Fatalf("ModelCycler should fall back to the primary stream: %v", chunk.Error)
-		}
-		if chunk.Final {
-			finals++
-		}
-	}
 	require.EqualValues(t, 1, selectedCalls.Load())
-	require.EqualValues(t, 1, primary.streamCalls.Load())
-	require.Equal(t, 1, finals)
+	require.EqualValues(t, 1, primaryCalls.Load())
+	require.NotEmpty(t, result.Transcript)
+	require.Equal(t, "primary recovered", result.Transcript[len(result.Transcript)-1].Message.Content)
 	require.Equal(t, production.CircuitClosed, breaker.State(), "selected setup failure and primary recovery are one successful admission")
 }
 

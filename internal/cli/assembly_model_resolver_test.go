@@ -6,9 +6,11 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 
 	"github.com/pengjunchen/go-cli/internal/config"
+	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
 
 	"github.com/stretchr/testify/assert"
@@ -40,7 +42,11 @@ func TestAssembledPrimaryUsesConfiguredSamplingAndCredentialScope(t *testing.T) 
 	require.NoError(t, err)
 	t.Cleanup(assembly.Cleanup)
 
-	response, err := assembly.ModelConfig.Model.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "hello"}})
+	_, missingOwnerErr := assembly.ModelConfig.Model.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "hello"}})
+	require.ErrorIs(t, missingOwnerErr, llm.ErrOperationAuthorityRequired)
+	count, _, _, _ := capture.snapshot()
+	assert.Zero(t, count, "a resolver-built model must not dispatch without the Core Loop operation owner")
+	response, err := assembly.ModelConfig.Model.Generate(withCLITestOperation(context.Background()), []llm.Message{{Role: llm.RoleUser, Content: "hello"}})
 	require.NoError(t, err)
 	require.NotNil(t, response)
 
@@ -57,6 +63,64 @@ func TestAssembledPrimaryUsesConfiguredSamplingAndCredentialScope(t *testing.T) 
 	assert.Equal(t, "selected-model", request.Model)
 	assert.Equal(t, 0.25, request.Temperature, "model sampling config takes precedence over provider defaults")
 	assert.Equal(t, 128, request.MaxTokens, "model token limit takes precedence over provider defaults")
+}
+
+func TestAssembledModelCyclerUsesResolvedCandidatesAndAttemptAccounting(t *testing.T) {
+	var mu sync.Mutex
+	var requestModels []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		requestModels = append(requestModels, request.Model)
+		mu.Unlock()
+		if request.Model == "cycle-selected-model" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			_, _ = io.WriteString(w, `{"error":{"message":"temporary failure","type":"server_error"}}`)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"primary response\"}}]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":4,\"completion_tokens\":3}}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(server.Close)
+	enabled := true
+	const providerName = "cycler-assembly-provider"
+	rc := &config.Config{
+		Provider: config.ProviderConfig{
+			Name:    providerName,
+			BaseURL: server.URL,
+			APIKey:  newTestCredentialCanary(t),
+		},
+		ModelCycler: config.ModelCyclerConfig{
+			Enabled:  &enabled,
+			Strategy: llm.StrategyRoundRobin,
+			Models:   []config.ModelEntry{{Provider: providerName, Model: "cycle-selected-model"}},
+		},
+	}
+
+	assembly, err := AssembleAgent(context.Background(), rc, providerName, "cycle-primary-model", io.Discard, WithApproveMode(ApproveAuto))
+	require.NoError(t, err)
+	t.Cleanup(assembly.Cleanup)
+	result, err := assembly.TurnRunner.RunTurn(context.Background(), core.Submission{Content: "route through the cycler"})
+	require.NoError(t, err)
+	assert.Equal(t, "primary response", result.Message)
+
+	mu.Lock()
+	require.Equal(t, []string{"cycle-selected-model", "cycle-primary-model"}, requestModels)
+	mu.Unlock()
+	_, summary := assembly.CostTracker.AttemptCostSnapshot()
+	assert.Equal(t, 2, summary.Attempts)
+	assert.Equal(t, 1, summary.UnknownUsageAttempts, "the failed selected provider attempt has no authoritative usage")
+	assert.Equal(t, 4, summary.KnownInputTokens)
+	assert.Equal(t, 3, summary.KnownOutputTokens)
 }
 
 func TestReviewProviderFlagOverrideDoesNotRebindProviderConfigKey(t *testing.T) {
@@ -78,7 +142,7 @@ func TestReviewProviderFlagOverrideDoesNotRebindProviderConfigKey(t *testing.T) 
 	assembly, err := AssembleAgent(context.Background(), rc, providerName, "override-model", io.Discard)
 	if err == nil && assembly != nil {
 		t.Cleanup(assembly.Cleanup)
-		_, requestErr := assembly.ModelConfig.Model.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "override"}})
+		_, requestErr := assembly.ModelConfig.Model.Generate(withCLITestOperation(context.Background()), []llm.Message{{Role: llm.RoleUser, Content: "override"}})
 		assert.NoError(t, requestErr)
 	}
 
@@ -107,7 +171,7 @@ func TestAssembledProviderFlagCanonicalAliasKeepsProviderConfig(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(assembly.Cleanup)
 
-	response, err := assembly.ModelConfig.Model.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "alias"}})
+	response, err := assembly.ModelConfig.Model.Generate(withCLITestOperation(context.Background()), []llm.Message{{Role: llm.RoleUser, Content: "alias"}})
 	require.NoError(t, err)
 	require.NotNil(t, response)
 	count, path, authorization, _ := capture.snapshot()
@@ -210,7 +274,7 @@ func TestAssembledSmallModelSharesCredentialOnlyWithinSameOrigin(t *testing.T) {
 			smallModel := assembly.ModelConfig.ModelSelector.SmallModel()
 			require.NotNil(t, smallModel)
 
-			response, err := smallModel.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "summarize"}})
+			response, err := smallModel.Generate(withCLITestOperation(context.Background()), []llm.Message{{Role: llm.RoleUser, Content: "summarize"}})
 			require.NoError(t, err)
 			require.NotNil(t, response)
 
@@ -264,7 +328,7 @@ func TestAssembledConflictingSameScopeSmallCredentialFailsWithoutLeak(t *testing
 	t.Cleanup(assembly.Cleanup)
 	assert.Nil(t, assembly.ModelConfig.ModelSelector.SmallModel(), "ambiguous same-scope credentials must disable only the small model")
 
-	response, err := assembly.ModelConfig.Model.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "primary"}})
+	response, err := assembly.ModelConfig.Model.Generate(withCLITestOperation(context.Background()), []llm.Message{{Role: llm.RoleUser, Content: "primary"}})
 	require.NoError(t, err)
 	require.NotNil(t, response)
 
@@ -309,7 +373,7 @@ func TestAssembledModelSwitchUsesConfiguredResolverRequest(t *testing.T) {
 	count, _, _, _ := capture.snapshot()
 	assert.Zero(t, count, "switching constructs a scoped model without dispatching a provider request")
 
-	response, err := assembly.ModelConfig.ModelSelector.PrimaryModel().Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "after switch"}})
+	response, err := assembly.ModelConfig.ModelSelector.PrimaryModel().Generate(withCLITestOperation(context.Background()), []llm.Message{{Role: llm.RoleUser, Content: "after switch"}})
 	require.NoError(t, err)
 	require.NotNil(t, response)
 
@@ -368,7 +432,7 @@ func TestAssembledModelConfigExplicitZeroSamplingOverridesProviderDefaults(t *te
 	require.NoError(t, err)
 	t.Cleanup(assembly.Cleanup)
 
-	_, err = assembly.ModelConfig.Model.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "hello"}})
+	_, err = assembly.ModelConfig.Model.Generate(withCLITestOperation(context.Background()), []llm.Message{{Role: llm.RoleUser, Content: "hello"}})
 	require.NoError(t, err)
 	_, _, _, body := capture.snapshot()
 	assert.Contains(t, body, `"temperature":0`)

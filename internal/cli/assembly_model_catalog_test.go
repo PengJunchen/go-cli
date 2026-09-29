@@ -160,7 +160,7 @@ func TestCLIModelResolverScopedSwitchKeepsCredentialAndSamplingWithTargetProvide
 	if cleanup != nil {
 		defer cleanup()
 	}
-	_, err = model.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "scope fixture"}})
+	_, err = model.Generate(withCLITestOperation(context.Background()), []llm.Message{{Role: llm.RoleUser, Content: "scope fixture"}})
 	require.NoError(t, err)
 
 	primaryCount, _, primaryAuthorization, primaryBody := primaryCapture.snapshot()
@@ -227,7 +227,7 @@ func TestCLIModelResolverSamePrimaryAndSmallIdentityUsesPrimarySampling(t *testi
 	if cleanup != nil {
 		defer cleanup()
 	}
-	_, err = model.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "role fixture"}})
+	_, err = model.Generate(withCLITestOperation(context.Background()), []llm.Message{{Role: llm.RoleUser, Content: "role fixture"}})
 	require.NoError(t, err)
 
 	count, _, authorization, body := capture.snapshot()
