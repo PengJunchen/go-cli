@@ -28,7 +28,7 @@ func TestAssembleAgentExtraToolSchemasReachLoopModel(t *testing.T) {
 	wantNames := []string{
 		"todo_write", "task_create", "task_update", "goal_create", "goal_update", "git_pr_create",
 		"task_get", "task_list", "goal_list", "goal_get", "ask_user", "tool_search",
-		"web_fetch", "web_search",
+		"web_fetch",
 	}
 	wantByName := make(map[string]bool, len(wantNames))
 	for _, name := range wantNames {
@@ -37,6 +37,8 @@ func TestAssembleAgentExtraToolSchemasReachLoopModel(t *testing.T) {
 
 	definitions, err := assembly.ToolRegistry.List(ctx)
 	require.NoError(t, err)
+	_, err = assembly.ToolRegistry.Get(ctx, "web_search")
+	require.ErrorIs(t, err, tools.ErrToolNotFound, "an unconfigured provider must not register an unusable tool")
 	registrySchemas := make(map[string]any, len(wantNames))
 	for _, definition := range definitions {
 		if !wantByName[definition.Name()] {
@@ -65,6 +67,9 @@ func TestAssembleAgentExtraToolSchemasReachLoopModel(t *testing.T) {
 	require.NoError(t, err)
 
 	modelTools := model.capturedTools()
+	for _, definition := range modelTools {
+		assert.NotEqual(t, "web_search", definition.Name, "an unconfigured provider must not be offered to the model")
+	}
 	modelSchemas := make(map[string]any, len(modelTools))
 	for _, definition := range modelTools {
 		if wantByName[definition.Name] {

@@ -1402,17 +1402,21 @@ func (s *assembleState) assembleExtraTools() error {
 	goalStore, _ := tools.NewDefaultGoalStore("") //nolint:errcheck
 	s.hitlEmitter = &cliHITLEmitter{out: s.out}
 
-	webSearchTool := tools.NewWebSearchTool()
+	var webSearchTool tools.ToolDefinition
 	if s.rc != nil {
 		switch s.rc.WebSearch.Provider {
 		case "":
-			// An unconfigured provider stays unavailable; never substitute sample results.
+			// An unconfigured provider is unavailable; do not expose it as a callable tool.
 		case "mock":
 			s.logger.Warn("assemble_web_search_mock_provider_disabled")
 		case "brave":
-			webSearchTool = tools.NewWebSearchTool(tools.WithSearchProvider(
-				tools.NewBraveSearchProvider(s.rc.WebSearch.APIKey),
-			))
+			if strings.TrimSpace(s.rc.WebSearch.APIKey) == "" {
+				s.logger.Warn("assemble_web_search_brave_api_key_missing")
+			} else {
+				webSearchTool = tools.NewWebSearchTool(tools.WithSearchProvider(
+					tools.NewBraveSearchProvider(s.rc.WebSearch.APIKey),
+				))
+			}
 		case "fetch":
 			webSearchTool = tools.NewWebSearchTool(tools.WithSearchProvider(
 				tools.NewFetchSearchProvider(),
@@ -1446,7 +1450,10 @@ func (s *assembleState) assembleExtraTools() error {
 		core.NewAskUserQuestionTool(s.hitlEmitter, 30*time.Second),
 		tools.NewToolSearchTool(s.tr),
 	}
-	trustedNetworkReads := []tools.ToolDefinition{webFetchTool, webSearchTool}
+	trustedNetworkReads := []tools.ToolDefinition{webFetchTool}
+	if webSearchTool != nil {
+		trustedNetworkReads = append(trustedNetworkReads, webSearchTool)
+	}
 	registrar, ok := s.tr.(tools.TrustedControlRegistrar)
 	if !ok {
 		return errors.New("assemble: trusted control registrar unavailable")
