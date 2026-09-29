@@ -70,11 +70,7 @@ func accumulateOpenAIStreamToolCalls(ctx context.Context, events <-chan SSEEvent
 		// OpenAI sends usage in a final chunk with an empty choices array
 		// when stream_options.include_usage is true.
 		if chunk.Usage != nil {
-			usage = &Usage{
-				InputTokens:  chunk.Usage.PromptTokens,
-				OutputTokens: chunk.Usage.CompletionTokens,
-				TotalTokens:  chunk.Usage.PromptTokens + chunk.Usage.CompletionTokens,
-			}
+			usage = chunk.Usage.toUsage()
 		}
 		if len(chunk.Choices) == 0 {
 			continue
