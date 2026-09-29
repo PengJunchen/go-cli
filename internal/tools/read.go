@@ -187,7 +187,7 @@ func (t *ReadTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 
 		output := newBoundedDirectoryOutput(directoryCaptureMaxOutputBytes)
 		for _, entry := range entries.Sorted() {
-			name := entry.name
+			name := directoryDisplayName(entry.name)
 			if entry.isDir {
 				name += "/"
 			}

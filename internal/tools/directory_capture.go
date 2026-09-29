@@ -6,9 +6,13 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"unicode"
+	"unicode/utf8"
 )
 
 const (
@@ -164,6 +168,24 @@ func (o *boundedDirectoryOutput) Records() int { return o.records }
 
 func (o *boundedDirectoryOutput) Truncated() bool { return o.truncated }
 
+// directoryDisplayName leaves ordinary filenames readable and quotes names
+// that could otherwise be confused with record separators or lose bytes.
+func directoryDisplayName(value string) string {
+	if utf8.ValidString(value) && !strings.ContainsFunc(value, unicode.IsControl) && !hasWhitespaceOnlyPathComponent(value) {
+		return value
+	}
+	return strconv.Quote(value)
+}
+
+func hasWhitespaceOnlyPathComponent(value string) bool {
+	for _, component := range strings.Split(value, string(filepath.Separator)) {
+		if component != "" && strings.TrimSpace(component) == "" {
+			return true
+		}
+	}
+	return strings.TrimSpace(value) == ""
+}
+
 type directoryBatchReader interface {
 	ReadDir(n int) ([]fs.DirEntry, error)
 }
@@ -177,6 +199,9 @@ func scanDirectoryBatches(ctx context.Context, reader directoryBatchReader, batc
 			return err
 		}
 		entries, readErr := reader.ReadDir(batchSize)
+		if err := ctx.Err(); err != nil {
+			return err
+		}
 		for _, entry := range entries {
 			if err := ctx.Err(); err != nil {
 				return err
@@ -226,7 +251,7 @@ func (w *findPathCaptureWriter) Write(p []byte) (int, error) {
 		return len(p), nil
 	}
 	for _, value := range p {
-		if value == '\n' {
+		if value == 0 {
 			w.captureLineLocked()
 			if w.captureErr != nil {
 				return len(p), nil
@@ -245,10 +270,10 @@ func (w *findPathCaptureWriter) Write(p []byte) (int, error) {
 }
 
 func (w *findPathCaptureWriter) captureLineLocked() {
-	line := string(w.line)
-	if strings.TrimSpace(line) == "" {
+	if len(w.line) == 0 {
 		return
 	}
+	line := string(w.line)
 	if err := w.candidates.Add(line); err != nil {
 		w.captureErr = err
 	}

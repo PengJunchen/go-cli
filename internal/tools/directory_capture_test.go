@@ -6,7 +6,9 @@ import (
 	"io"
 	"io/fs"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -76,15 +78,62 @@ func TestScanDirectoryBatchesBoundsBatchAndPropagatesCancellation(t *testing.T) 
 	assert.ErrorIs(t, err, readErr)
 }
 
+func TestScanDirectoryBatchesDoesNotSwallowCancellationDuringRead(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	defer func() {
+		select {
+		case <-release:
+		default:
+			close(release)
+		}
+	}()
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	reader := &blockingCaptureDirReader{entered: entered, release: release}
+	done := make(chan error, 1)
+	go func() {
+		done <- scanDirectoryBatches(ctx, reader, 128, func(fs.DirEntry) error { return nil })
+	}()
+
+	select {
+	case <-entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ReadDir was not entered")
+	}
+	cancel()
+	close(release)
+
+	select {
+	case err := <-done:
+		assert.ErrorIs(t, err, context.Canceled)
+	case <-time.After(2 * time.Second):
+		t.Fatal("directory scan did not return after ReadDir completed")
+	}
+}
+
 func TestFindPathCaptureWriterDrainsAndReportsCaptureLimit(t *testing.T) {
 	writer := newFindPathCaptureWriter(10, 4)
-	chunk := []byte("ok\n12345\nignored\n")
+	chunk := []byte("ok\x0012345\x00ignored\x00")
 	n, err := writer.Write(chunk)
 	require.NoError(t, err)
 	assert.Equal(t, len(chunk), n, "capture errors must not stop pipe draining")
 	assert.ErrorIs(t, writer.Finish(), errDirectoryCaptureLimit)
 	assert.Equal(t, []string{"ok"}, writer.Results())
 	assert.Empty(t, writer.line, "the rest of the same read chunk must not be retained after the limit")
+}
+
+func TestFindPathCaptureWriterUsesNULRecordsAndPreservesRawNames(t *testing.T) {
+	writer := newFindPathCaptureWriter(4, 32)
+	payload := []byte("line\nbreak\x00   \x00")
+	payload = append(payload, 0xff, 0, 0)
+	n, err := writer.Write(payload)
+	require.NoError(t, err)
+	assert.Equal(t, len(payload), n)
+	require.NoError(t, writer.Finish())
+
+	assert.Equal(t, []string{"   ", "line\nbreak", string([]byte{0xff})}, writer.Results())
 }
 
 func TestFindPathCaptureWriterFinishesUnterminatedLine(t *testing.T) {
@@ -97,7 +146,7 @@ func TestFindPathCaptureWriterFinishesUnterminatedLine(t *testing.T) {
 
 func TestFindPathCaptureWriterKeepsSortedTopKAcrossChunks(t *testing.T) {
 	writer := newFindPathCaptureWriter(2, 16)
-	for _, chunk := range []string{"z\nb", "\na\n"} {
+	for _, chunk := range []string{"z\x00b", "\x00a\x00"} {
 		n, err := writer.Write([]byte(chunk))
 		require.NoError(t, err)
 		assert.Equal(t, len(chunk), n)
@@ -136,6 +185,18 @@ func (r *syntheticCaptureDirReader) ReadDir(n int) ([]fs.DirEntry, error) {
 		return result, io.EOF
 	}
 	return result, nil
+}
+
+type blockingCaptureDirReader struct {
+	entered chan<- struct{}
+	release <-chan struct{}
+	once    sync.Once
+}
+
+func (r *blockingCaptureDirReader) ReadDir(int) ([]fs.DirEntry, error) {
+	r.once.Do(func() { close(r.entered) })
+	<-r.release
+	return nil, io.EOF
 }
 
 type syntheticCaptureDirEntry struct{ name string }

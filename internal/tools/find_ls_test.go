@@ -4,9 +4,11 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -84,7 +86,7 @@ func TestFindManagedBackendsReturnSameSortedTopK(t *testing.T) {
 				name := fmt.Sprintf("entry-%04d.txt", i)
 				require.NoError(t, os.WriteFile(filepath.Join(workdir, name), nil, 0o600))
 			}
-			script := "#!/bin/sh\nn=1004\nwhile [ \"$n\" -ge 0 ]; do printf 'entry-%04d.txt\\n' \"$n\"; n=$((n - 1)); done\n"
+			script := "#!/bin/sh\nn=1004\nwhile [ \"$n\" -ge 0 ]; do printf 'entry-%04d.txt\\000' \"$n\"; n=$((n - 1)); done\n"
 			require.NoError(t, os.WriteFile(filepath.Join(dir, backend), []byte(script), 0o700))
 			t.Setenv("PATH", dir)
 
@@ -109,6 +111,112 @@ func TestFindManagedBackendsReturnSameSortedTopK(t *testing.T) {
 	}
 }
 
+func TestDirectoryToolsRenderUnusualNamesReversibly(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fixture filenames require POSIX path bytes")
+	}
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	names := writeUnusualDirectoryCaptureFiles(t, dir)
+	wantByName := map[string]string{
+		"   ":                strconv.Quote("   "),
+		"odd\nname":          strconv.Quote("odd\nname"),
+		"ordinary name":      "ordinary name",
+		string([]byte{0xff}): strconv.Quote(string([]byte{0xff})),
+	}
+	want := make([]string, 0, len(names))
+	for _, name := range names {
+		want = append(want, wantByName[name])
+	}
+	wantOutput := strings.Join(want, "\n")
+
+	readResult, err := NewReadTool(WithWorkdir(dir)).Execute(context.Background(), ToolCall{Args: map[string]any{"path": "."}})
+	require.NoError(t, err)
+	assert.Equal(t, wantOutput, readResult.Output)
+	assert.Equal(t, len(names), readResult.Metadata["entries"])
+	assert.Equal(t, false, readResult.Metadata["truncated"])
+
+	lsResult, err := NewLSTool().Execute(context.Background(), ToolCall{Args: map[string]any{"path": dir}})
+	require.NoError(t, err)
+	assert.Equal(t, wantOutput, lsResult.Output)
+	assert.Equal(t, len(names), lsResult.Metadata["entries"])
+	assert.Equal(t, false, lsResult.Metadata["truncated"])
+
+	findResult, err := NewFindTool(WithFindWorkdir(dir), WithFindForceNode(true)).Execute(context.Background(), ToolCall{Args: map[string]any{"type": "f"}})
+	require.NoError(t, err)
+	assert.Equal(t, wantOutput, findResult.Output)
+	assert.Equal(t, len(names), findResult.Metadata["matches"])
+	assert.Equal(t, false, findResult.Metadata["truncated"])
+}
+
+func TestFindFDShimUsesNULRecordsForUnusualNames(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell helper fixtures require POSIX sh")
+	}
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	helperDir := t.TempDir()
+	script := "#!/bin/sh\nfor arg do\n  if [ \"$arg\" = \"--print0\" ]; then print0=yes; fi\ndone\n[ \"$print0\" = yes ] || exit 23\nprintf 'odd\\nname\\000   \\000\\377\\000\\000'\n"
+	require.NoError(t, os.WriteFile(filepath.Join(helperDir, "fd"), []byte(script), 0o700))
+	t.Setenv("PATH", helperDir)
+
+	result, err := NewFindTool(WithFindWorkdir(t.TempDir())).Execute(context.Background(), ToolCall{Args: map[string]any{"type": "f"}})
+	require.NoError(t, err)
+	want := strings.Join([]string{strconv.Quote("   "), strconv.Quote("odd\nname"), strconv.Quote(string([]byte{0xff}))}, "\n")
+	assert.Equal(t, want, result.Output)
+	assert.Equal(t, 3, result.Metadata["matches"])
+	assert.Equal(t, false, result.Metadata["truncated"])
+}
+
+func TestFindSystemFindUsesNULRecordsForUnusualNames(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("system find fixture requires POSIX symlinks and paths")
+	}
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	findPath, err := exec.LookPath("find")
+	require.NoError(t, err)
+	dir := t.TempDir()
+	names := writeUnusualDirectoryCaptureFiles(t, dir)
+	helperDir := t.TempDir()
+	require.NoError(t, os.Symlink(findPath, filepath.Join(helperDir, "find")))
+	t.Setenv("PATH", helperDir)
+
+	result, err := NewFindTool(WithFindWorkdir(dir)).Execute(context.Background(), ToolCall{Args: map[string]any{"type": "f"}})
+	require.NoError(t, err)
+	wantPaths := make([]string, 0, len(names))
+	for _, name := range names {
+		path := filepath.Join(dir, name)
+		if name == "   " || name == "odd\nname" || !isValidUTF8CaptureName(name) {
+			path = strconv.Quote(path)
+		}
+		wantPaths = append(wantPaths, path)
+	}
+	assert.Equal(t, strings.Join(wantPaths, "\n"), result.Output)
+	assert.Equal(t, len(names), result.Metadata["matches"])
+	assert.Equal(t, false, result.Metadata["truncated"])
+}
+
+func writeUnusualDirectoryCaptureFiles(t *testing.T, dir string) []string {
+	t.Helper()
+	names := []string{"odd\nname", "   ", "ordinary name"}
+	if runtime.GOOS != "darwin" {
+		// APFS/HFS rejects invalid UTF-8 path components. The capture-writer and
+		// fd-shim tests still exercise raw invalid bytes on every POSIX platform.
+		names = append(names, string([]byte{0xff}))
+	}
+	for _, name := range names {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), nil, 0o600))
+	}
+	sort.Strings(names)
+	return names
+}
+
+func isValidUTF8CaptureName(value string) bool {
+	return strings.ToValidUTF8(value, "") == value
+}
+
 func TestFindCaptureLimitDrainsHelperAndStopsFallback(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("shell helper fixtures require POSIX sh")
@@ -119,8 +227,8 @@ func TestFindCaptureLimitDrainsHelperAndStopsFallback(t *testing.T) {
 	markerDir := t.TempDir()
 	completedMarker := filepath.Join(markerDir, "fd-finished")
 	fallbackMarker := filepath.Join(markerDir, "find-fallback")
-	fdScript := "#!/bin/sh\nprintf '%04097d\\n' 0\nprintf 'discarded-after-limit\\n'\nprintf done > " + quoteDirectoryCaptureShellArg(completedMarker) + "\n"
-	findScript := "#!/bin/sh\nprintf called > " + quoteDirectoryCaptureShellArg(fallbackMarker) + "\nprintf 'fallback.txt\\n'\n"
+	fdScript := "#!/bin/sh\nprintf '%04097d\\000' 0\nprintf 'discarded-after-limit\\000'\nprintf done > " + quoteDirectoryCaptureShellArg(completedMarker) + "\n"
+	findScript := "#!/bin/sh\nprintf called > " + quoteDirectoryCaptureShellArg(fallbackMarker) + "\nprintf 'fallback.txt\\000'\n"
 	require.NoError(t, os.WriteFile(filepath.Join(helperDir, "fd"), []byte(fdScript), 0o700))
 	require.NoError(t, os.WriteFile(filepath.Join(helperDir, "find"), []byte(findScript), 0o700))
 	t.Setenv("PATH", helperDir)
@@ -141,7 +249,7 @@ func TestFindOutputByteLimitKeepsWholeRecords(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	helperDir := t.TempDir()
-	script := "#!/bin/sh\nn=999\nwhile [ \"$n\" -ge 0 ]; do printf '%01097d\\n' \"$n\"; n=$((n - 1)); done\n"
+	script := "#!/bin/sh\nn=999\nwhile [ \"$n\" -ge 0 ]; do printf '%01097d\\000' \"$n\"; n=$((n - 1)); done\n"
 	require.NoError(t, os.WriteFile(filepath.Join(helperDir, "fd"), []byte(script), 0o700))
 	t.Setenv("PATH", helperDir)
 
