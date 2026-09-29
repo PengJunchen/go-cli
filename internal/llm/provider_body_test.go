@@ -121,7 +121,7 @@ func TestHTTPChatModelJoinsSanitizedReadAndCloseFailures(t *testing.T) {
 		reader:   &providerBodyErrorReader{data: []byte("partial"), err: readCause},
 		closeErr: closeCause,
 	}
-	model := &HTTPChatModel{
+	model := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(),
 		cfg:      ModelConfig{Model: "m"},
 		client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
@@ -228,7 +228,7 @@ func TestHTTPChatModelSanitizesReadAndClosePanics(t *testing.T) {
 		readPanic:  "reader panic: " + canary,
 		closePanic: "closer panic: " + canary,
 	}
-	model := &HTTPChatModel{
+	model := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(),
 		cfg:      ModelConfig{Model: "m"},
 		client: &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {

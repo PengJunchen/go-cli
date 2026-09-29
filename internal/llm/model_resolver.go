@@ -117,11 +117,22 @@ type ResolvedModel struct {
 	Model      ModelSpec
 	provider   ModelProvider
 	cfg        ModelConfig
+	candidate  *resolvedCandidateHandle
 }
 
-// Build constructs the adapter using the already resolved scope and secret.
+// Build constructs a guarded adapter using the resolver-issued candidate and
+// its already resolved endpoint and credential scope.
 func (m ResolvedModel) Build(ctx context.Context) (BaseChatModel, func(), error) {
-	return m.provider.Build(ctx, m.cfg)
+	if m.candidate == nil {
+		return nil, nil, ErrGuardedCandidateUnavailable
+	}
+	return m.candidate.build(ctx)
+}
+
+// CandidateHandle returns the opaque handle that binds this resolved model to
+// its actual provider, protocol, endpoint, and scoped credential state.
+func (m ResolvedModel) CandidateHandle() ResolvedCandidateHandle {
+	return m.candidate
 }
 
 // SnapshotResolver returns the registry's current immutable resolution
@@ -258,6 +269,26 @@ func (r *ModelResolver) resolveModel(ctx context.Context, request ModelRequest, 
 		Credential:         scope,
 		credentialResolved: true,
 	}
+	candidateID, err := newCandidateID()
+	if err != nil {
+		return ResolvedModel{}, err
+	}
+	originKind := OriginResolverDefaultEndpoint
+	if strings.TrimSpace(request.Endpoint) != "" {
+		originKind = OriginExplicitRequestEndpoint
+	}
+	candidate := &resolvedCandidateHandle{
+		id: candidateID,
+		identity: AttemptIdentity{
+			ProviderID: spec.ProviderID,
+			ModelID:    modelID,
+			ProtocolID: spec.ProtocolID,
+			OriginKind: originKind,
+			Candidate:  candidateID,
+		},
+		provider: definition.provider,
+		cfg:      cfg,
+	}
 	return ResolvedModel{
 		ProviderID: spec.ProviderID,
 		ModelID:    modelID,
@@ -267,6 +298,7 @@ func (r *ModelResolver) resolveModel(ctx context.Context, request ModelRequest, 
 		Model:      modelSpec,
 		provider:   definition.provider,
 		cfg:        cfg,
+		candidate:  candidate,
 	}, nil
 }
 

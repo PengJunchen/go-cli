@@ -256,9 +256,10 @@ func TestNativeChatModel_GenerateCanceledContext(t *testing.T) {
 func TestNativeChatModelGenerate_EncodeError(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	m := &nativeChatModel{
-		client:   http.DefaultClient,
-		provider: "x",
-		model:    "m",
+		client:    http.DefaultClient,
+		provider:  "x",
+		model:     "m",
+		buildMode: UnboundLibraryBuild,
 		encode: func(_ []Message, _ []Option) ([]byte, error) {
 			return nil, errors.New("llm: encode boom")
 		},
@@ -280,13 +281,14 @@ func TestNativeChatModelGenerate_Non2xx(t *testing.T) {
 	defer srv.Close()
 
 	m := &nativeChatModel{
-		client:   http.DefaultClient,
-		endpoint: srv.URL,
-		provider: "x",
-		model:    "m",
-		header:   func() map[string]string { return nil },
-		encode:   func(_ []Message, _ []Option) ([]byte, error) { return []byte("{}"), nil },
-		decode:   func(_ []byte) (*Message, error) { return nil, nil },
+		client:    http.DefaultClient,
+		endpoint:  srv.URL,
+		provider:  "x",
+		model:     "m",
+		buildMode: UnboundLibraryBuild,
+		header:    func() map[string]string { return nil },
+		encode:    func(_ []Message, _ []Option) ([]byte, error) { return []byte("{}"), nil },
+		decode:    func(_ []byte) (*Message, error) { return nil, nil },
 	}
 	_, err := m.Generate(context.Background(), nil)
 	require.Error(t, err)
@@ -307,11 +309,12 @@ func TestNativeChatModelGenerate_DecodeError(t *testing.T) {
 	defer srv.Close()
 
 	m := &nativeChatModel{
-		client:   http.DefaultClient,
-		endpoint: srv.URL,
-		provider: "x",
-		model:    "m",
-		encode:   func(_ []Message, _ []Option) ([]byte, error) { return []byte("{}"), nil },
+		client:    http.DefaultClient,
+		endpoint:  srv.URL,
+		provider:  "x",
+		model:     "m",
+		buildMode: UnboundLibraryBuild,
+		encode:    func(_ []Message, _ []Option) ([]byte, error) { return []byte("{}"), nil },
 		decode: func(_ []byte) (*Message, error) {
 			return nil, errors.New("llm: decode boom")
 		},
@@ -332,12 +335,13 @@ func TestNativeChatModel_StreamError(t *testing.T) {
 	defer srv.Close()
 
 	m := &nativeChatModel{
-		client:   http.DefaultClient,
-		endpoint: srv.URL,
-		provider: openaiProviderName,
-		model:    "m",
-		encode:   func(_ []Message, _ []Option) ([]byte, error) { return []byte("{}"), nil },
-		decode:   func(_ []byte) (*Message, error) { return &Message{Role: RoleAssistant}, nil },
+		client:    http.DefaultClient,
+		endpoint:  srv.URL,
+		provider:  openaiProviderName,
+		model:     "m",
+		buildMode: UnboundLibraryBuild,
+		encode:    func(_ []Message, _ []Option) ([]byte, error) { return []byte("{}"), nil },
+		decode:    func(_ []byte) (*Message, error) { return &Message{Role: RoleAssistant}, nil },
 	}
 	ch, err := m.Stream(context.Background(), nil)
 	require.Error(t, err)
@@ -354,11 +358,12 @@ func TestNativeChatModelGenerate_HTTPDoError(t *testing.T) {
 				return nil, errors.New("llm: dial boom")
 			}),
 		},
-		endpoint: "http://127.0.0.1:1/chat/completions",
-		provider: "x",
-		model:    "m",
-		encode:   func(_ []Message, _ []Option) ([]byte, error) { return []byte("{}"), nil },
-		decode:   func(_ []byte) (*Message, error) { return nil, nil },
+		endpoint:  "http://127.0.0.1:1/chat/completions",
+		provider:  "x",
+		model:     "m",
+		buildMode: UnboundLibraryBuild,
+		encode:    func(_ []Message, _ []Option) ([]byte, error) { return []byte("{}"), nil },
+		decode:    func(_ []byte) (*Message, error) { return nil, nil },
 	}
 	_, err := m.Generate(context.Background(), nil)
 	require.Error(t, err)

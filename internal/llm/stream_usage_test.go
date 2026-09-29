@@ -88,7 +88,7 @@ func TestStreamEino_CapturesUsageFromFinalChunk(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	model := &HTTPChatModel{
+	model := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(WithBaseURL(srv.URL)),
 		cfg:      ModelConfig{Model: "m"},
 		client:   http.DefaultClient,

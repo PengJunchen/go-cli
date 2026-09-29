@@ -97,7 +97,7 @@ func TestProviderRegistryUsesMatchingScopedCredentialAtRealOrigin(t *testing.T) 
 	model, cleanup, err := registry.GetModel(context.Background(), "local-compatible", ModelConfig{Model: "custom-model", BaseURL: server.URL})
 	require.NoError(t, err)
 	defer cleanup()
-	_, err = model.Generate(context.Background(), []Message{{Role: RoleUser, Content: "hello"}})
+	_, err = model.Generate(attemptTestContext(), []Message{{Role: RoleUser, Content: "hello"}})
 	require.NoError(t, err)
 	assert.Equal(t, "Bearer "+secret, gotAuthorization)
 }
@@ -162,7 +162,7 @@ func TestProviderRegistryAllowsConstructorCredentialOnlyOnSameOrigin(t *testing.
 	})
 	require.NoError(t, err)
 	defer cleanup()
-	_, err = model.Generate(context.Background(), []Message{{Role: RoleUser, Content: "hello"}})
+	_, err = model.Generate(attemptTestContext(), []Message{{Role: RoleUser, Content: "hello"}})
 	require.NoError(t, err)
 	assert.Equal(t, "Bearer "+secret, gotAuthorization)
 }
@@ -197,7 +197,7 @@ func TestProviderRegistryRejectsCrossOriginRedirectBeforeSecondDispatch(t *testi
 	model, cleanup, err := registry.GetModel(context.Background(), "local-compatible", ModelConfig{Model: "m", BaseURL: first.URL})
 	require.NoError(t, err)
 	defer cleanup()
-	_, err = model.Generate(context.Background(), []Message{{Role: RoleUser, Content: "hello"}})
+	_, err = model.Generate(attemptTestContext(), []Message{{Role: RoleUser, Content: "hello"}})
 	require.Error(t, err, "a cross-origin redirect is not a successful provider response")
 	assert.Equal(t, 1, firstRequests)
 	assert.Equal(t, "Bearer "+secret, firstAuthorization)
@@ -242,7 +242,7 @@ func TestProviderRegistryRejectsCustomRedirectCallbackOriginRewrite(t *testing.T
 	require.NoError(t, err)
 	defer cleanup()
 
-	_, err = model.Generate(context.Background(), []Message{{Role: RoleUser, Content: "hello"}})
+	_, err = model.Generate(attemptTestContext(), []Message{{Role: RoleUser, Content: "hello"}})
 	require.Error(t, err, "callback-rewritten cross-origin redirects are not valid provider responses")
 	assert.Equal(t, 1, firstRequests)
 	assert.Zero(t, secondRequests, "callback must not redirect a scoped credential to another origin")
@@ -271,7 +271,7 @@ func TestProviderRegistryRejectsCustomRedirectCallbackHostRewrite(t *testing.T) 
 	require.NoError(t, err)
 	defer cleanup()
 
-	_, err = model.Generate(context.Background(), []Message{{Role: RoleUser, Content: "hello"}})
+	_, err = model.Generate(attemptTestContext(), []Message{{Role: RoleUser, Content: "hello"}})
 	require.Error(t, err, "a redirected HTTP authority must remain inside the credential scope")
 	assert.Equal(t, 1, requests, "callback-mutated Host must be rejected before a second request")
 }
@@ -486,7 +486,7 @@ func TestProviderRegistryPreservesExplicitOpenAICompatibleCustomEndpoint(t *test
 	require.NoError(t, err)
 	defer cleanup()
 
-	message, err := model.Generate(context.Background(), []Message{{Role: RoleUser, Content: "hello"}})
+	message, err := model.Generate(attemptTestContext(), []Message{{Role: RoleUser, Content: "hello"}})
 	require.NoError(t, err)
 	assert.Equal(t, "ok", message.Content)
 	assert.Equal(t, "Bearer "+secret, gotAuthorization)
@@ -507,7 +507,7 @@ func TestProviderRegistryAllowsExplicitCredentiallessCompatibleEndpoint(t *testi
 	require.NoError(t, err)
 	defer cleanup()
 
-	message, err := model.Generate(context.Background(), []Message{{Role: RoleUser, Content: "hello"}})
+	message, err := model.Generate(attemptTestContext(), []Message{{Role: RoleUser, Content: "hello"}})
 	require.NoError(t, err)
 	assert.Equal(t, "ok", message.Content)
 	assert.Empty(t, gotAuthorization, "explicit local compatible endpoints may use anonymous access")
@@ -557,7 +557,7 @@ func TestProviderRegistryDoesNotSendProviderDefaultKeyToOverrideOrigin(t *testin
 	require.NoError(t, err)
 	defer cleanup()
 
-	_, err = model.Generate(context.Background(), []Message{{Role: RoleUser, Content: "hello"}})
+	_, err = model.Generate(attemptTestContext(), []Message{{Role: RoleUser, Content: "hello"}})
 	require.NoError(t, err)
 	assert.Empty(t, gotAuthorization, "a provider default credential must not follow a different origin")
 }

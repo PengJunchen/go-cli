@@ -52,7 +52,7 @@ func TestExtraToolSchemaMixedProviderDecodersReachPreparedExecutor(t *testing.T)
 	// captured by the protected registry, and its response decoder produces the
 	// JSON-decoded argument shape consumed by the prepared tool path.
 	openAIOptions := []Option{WithTools([]ToolDefinition{{Name: "ask_user", Parameters: schema}})}
-	compatibleBody, err := (&HTTPChatModel{cfg: ModelConfig{Model: "fixture"}}).buildBody(
+	compatibleBody, err := (&HTTPChatModel{buildMode: UnboundLibraryBuild, cfg: ModelConfig{Model: "fixture"}}).buildBody(
 		[]Message{{Role: RoleUser, Content: "choose"}}, openAIOptions...,
 	)
 	require.NoError(t, err)
