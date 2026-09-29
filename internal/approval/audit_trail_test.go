@@ -1,22 +1,30 @@
 package approval
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/privatefile"
 )
 
 // TestAuditTrail_Record verifies that a single entry is written to the daily
 // JSONL file with all required fields.
 func TestAuditTrail_Record(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateAuditTestDir(t)
 	trail := NewAuditTrail(dir)
 
 	ts := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
@@ -52,7 +60,7 @@ func TestAuditTrail_Record(t *testing.T) {
 // TestAuditTrail_AppendOnly verifies that multiple records are appended to the
 // same file (AC-5: append-only design).
 func TestAuditTrail_AppendOnly(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateAuditTestDir(t)
 	trail := NewAuditTrail(dir)
 
 	ts := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
@@ -106,7 +114,7 @@ func TestAuditTrail_DirectoryCreated(t *testing.T) {
 }
 
 func TestAuditTrail_ReadsAndContinuesHashChainAfterRestart(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateAuditTestDir(t)
 	ts := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
 	first := NewAuditTrail(dir)
 	require.NoError(t, first.Record(AuditEntry{Timestamp: ts, Tool: "read_file", Decision: "allow"}))
@@ -122,6 +130,221 @@ func TestAuditTrail_ReadsAndContinuesHashChainAfterRestart(t *testing.T) {
 	assert.NotEmpty(t, entries[1].Hash)
 }
 
+func TestAuditTrail_MultipleInstancesRefreshHashChain(t *testing.T) {
+	dir := privateAuditTestDir(t)
+	ts := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	first := NewAuditTrail(dir)
+	second := NewAuditTrail(dir)
+	for index := 0; index < 20; index++ {
+		trail := first
+		if index%2 == 1 {
+			trail = second
+		}
+		require.NoError(t, trail.Record(AuditEntry{Timestamp: ts, Tool: fmt.Sprintf("tool-%02d", index)}))
+	}
+
+	entries, err := first.ReadEntries(ts)
+	require.NoError(t, err)
+	require.Len(t, entries, 20)
+	for index := 1; index < len(entries); index++ {
+		assert.Equal(t, entries[index-1].Hash, entries[index].PrevHash, "entry %d must continue the latest durable chain", index)
+	}
+}
+
+func TestAuditTrailLockWaitIsBounded(t *testing.T) {
+	dir := privateAuditTestDir(t)
+	ts := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	trail := NewAuditTrail(dir)
+	trail.lockTimeout = 50 * time.Millisecond
+	path := filepath.Join(dir, "2026-08-09.jsonl")
+	release := holdApprovalAuditLock(t, path)
+	defer release()
+
+	err := trail.Record(AuditEntry{Timestamp: ts, Tool: "blocked", Decision: "allow"})
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	_, statErr := os.Stat(path)
+	assert.ErrorIs(t, statErr, os.ErrNotExist, "a record is not appended after the lock wait expires")
+}
+
+func holdApprovalAuditLock(t *testing.T, path string) func() {
+	t.Helper()
+	locked := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- privatefile.WithExclusiveLock(context.Background(), path, func() error {
+			close(locked)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-locked:
+	case <-time.After(5 * time.Second):
+		close(release)
+		t.Fatal("test process did not acquire the audit lock")
+	}
+	var once sync.Once
+	finish := func() {
+		once.Do(func() {
+			close(release)
+			require.NoError(t, <-done)
+		})
+	}
+	t.Cleanup(finish)
+	return finish
+}
+
+func TestAuditTrailCrossProcessAppendHelper(t *testing.T) {
+	mode := os.Getenv("GOCLI_AUDIT_TRAIL_HELPER_MODE")
+	if mode == "" {
+		return
+	}
+	trail := NewAuditTrail(os.Getenv("GOCLI_AUDIT_TRAIL_HELPER_DIR"))
+	if mode == "block" {
+		openFile := trail.openFile
+		trail.openFile = func(path string, flag int, perm os.FileMode) (auditTrailFile, error) {
+			file, err := openFile(path, flag, perm)
+			if err != nil {
+				return nil, err
+			}
+			if err := writeAuditTestMarker(os.Getenv("GOCLI_AUDIT_TRAIL_HELPER_OPENED")); err != nil {
+				_ = file.Close()
+				return nil, err
+			}
+			if err := waitForAuditTestMarker(os.Getenv("GOCLI_AUDIT_TRAIL_HELPER_RELEASE"), 5*time.Second); err != nil {
+				_ = file.Close()
+				return nil, err
+			}
+			return file, nil
+		}
+	} else if mode == "waiter" {
+		if err := writeAuditTestMarker(os.Getenv("GOCLI_AUDIT_TRAIL_HELPER_ATTEMPTED")); err != nil {
+			t.Errorf("write attempted marker: %v", err)
+		}
+	}
+
+	err := trail.Record(AuditEntry{
+		Timestamp: time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC),
+		Tool:      os.Getenv("GOCLI_AUDIT_TRAIL_HELPER_TOOL"),
+	})
+	if err != nil {
+		t.Errorf("record audit entry: %v", err)
+	}
+	if mode == "waiter" {
+		if err := writeAuditTestMarker(os.Getenv("GOCLI_AUDIT_TRAIL_HELPER_COMPLETE")); err != nil {
+			t.Errorf("write complete marker: %v", err)
+		}
+	}
+}
+
+func TestAuditTrailSerializesCrossProcessAppend(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("cross-process advisory locks are supported on Darwin and Linux")
+	}
+	dir := privateAuditTestDir(t)
+	opened := filepath.Join(dir, "opened")
+	attempted := filepath.Join(dir, "attempted")
+	complete := filepath.Join(dir, "complete")
+	release := filepath.Join(dir, "release")
+	firstOutput := &bytes.Buffer{}
+	first := startAuditTrailProcess(t, firstOutput, dir, "block", "first", opened, attempted, complete, release)
+	if err := waitForAuditTestMarker(opened, 5*time.Second); err != nil {
+		_ = first.Process.Kill()
+		_ = first.Wait()
+		t.Fatalf("first process did not enter its open hook: %v; output: %s", err, firstOutput.String())
+	}
+	secondOutput := &bytes.Buffer{}
+	second := startAuditTrailProcess(t, secondOutput, dir, "waiter", "second", opened, attempted, complete, release)
+	if err := waitForAuditTestMarker(attempted, 5*time.Second); err != nil {
+		_ = writeAuditTestMarker(release)
+		_ = first.Wait()
+		_ = second.Process.Kill()
+		_ = second.Wait()
+		t.Fatalf("second process did not attempt its append: %v; output: %s", err, secondOutput.String())
+	}
+	time.Sleep(200 * time.Millisecond)
+	_, completeErr := os.Stat(complete)
+	completedBeforeRelease := completeErr == nil
+	require.True(t, errors.Is(completeErr, os.ErrNotExist) || completedBeforeRelease, "inspect second process completion")
+	require.NoError(t, writeAuditTestMarker(release))
+	firstErr := first.Wait()
+	secondErr := second.Wait()
+	require.NoError(t, firstErr, firstOutput.String())
+	require.NoError(t, secondErr, secondOutput.String())
+	assert.False(t, completedBeforeRelease, "the second process must wait while the first owns the audit append lock")
+
+	entries, err := NewAuditTrail(dir).ReadEntries(time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC))
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+	assert.Equal(t, entries[0].Hash, entries[1].PrevHash)
+}
+
+func startAuditTrailProcess(t *testing.T, output *bytes.Buffer, dir, mode, tool, opened, attempted, complete, release string) *exec.Cmd {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^TestAuditTrailCrossProcessAppendHelper$")
+	cmd.Env = append(os.Environ(),
+		"GOCLI_AUDIT_TRAIL_HELPER_MODE="+mode,
+		"GOCLI_AUDIT_TRAIL_HELPER_DIR="+dir,
+		"GOCLI_AUDIT_TRAIL_HELPER_TOOL="+tool,
+		"GOCLI_AUDIT_TRAIL_HELPER_OPENED="+opened,
+		"GOCLI_AUDIT_TRAIL_HELPER_ATTEMPTED="+attempted,
+		"GOCLI_AUDIT_TRAIL_HELPER_COMPLETE="+complete,
+		"GOCLI_AUDIT_TRAIL_HELPER_RELEASE="+release,
+	)
+	cmd.Stdout = output
+	cmd.Stderr = output
+	require.NoError(t, cmd.Start())
+	return cmd
+}
+
+func writeAuditTestMarker(path string) error {
+	return os.WriteFile(path, []byte("ready"), 0o600)
+}
+
+func waitForAuditTestMarker(path string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		_, err := os.Stat(path)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		time.Sleep(time.Millisecond)
+	}
+	return fmt.Errorf("marker %q was not created before timeout", path)
+}
+
+func TestAuditTrailRejectsLegacyUnhashedFile(t *testing.T) {
+	dir := privateAuditTestDir(t)
+	ts := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	path := filepath.Join(dir, "2026-08-09.jsonl")
+	legacy := []byte(`{"tool":"legacy","decision":"allow"}` + "\n")
+	require.NoError(t, os.WriteFile(path, legacy, 0o600))
+
+	err := NewAuditTrail(dir).Record(AuditEntry{Timestamp: ts, Tool: "new"})
+	assert.ErrorIs(t, err, ErrAuditTrailCorrupt)
+	got, readErr := os.ReadFile(path)
+	require.NoError(t, readErr)
+	assert.Equal(t, legacy, got, "a legacy file must be rejected without migration or append")
+}
+
+func TestAuditTrailFailsClosedWhenLockUnavailable(t *testing.T) {
+	dir := privateAuditTestDir(t)
+	ts := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	path := filepath.Join(dir, "2026-08-09.jsonl")
+	require.NoError(t, os.WriteFile(path+".lock", nil, 0o644))
+	require.NoError(t, os.Chmod(path+".lock", 0o644))
+
+	err := NewAuditTrail(dir).Record(AuditEntry{Timestamp: ts, Tool: "new"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "privatefile")
+	_, statErr := os.Stat(path)
+	assert.ErrorIs(t, statErr, os.ErrNotExist, "no audit record is appended without the lock")
+}
+
 func TestAuditTrail_FailedAppendDoesNotAdvanceHash(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -133,7 +356,7 @@ func TestAuditTrail_FailedAppendDoesNotAdvanceHash(t *testing.T) {
 		{name: "sync failure", syncErr: errors.New("sync sentinel"), wantErr: ErrAuditTrailSync},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := privateAuditTestDir(t)
 			trail := NewAuditTrail(dir)
 			ts := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
 			require.NoError(t, trail.Record(AuditEntry{Timestamp: ts, Tool: "first"}))
@@ -171,7 +394,7 @@ func TestAuditTrail_FailedAppendDoesNotAdvanceHash(t *testing.T) {
 }
 
 func TestAuditTrail_RollbackFailurePoisonsTrail(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateAuditTestDir(t)
 	trail := NewAuditTrail(dir)
 	ts := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
 	syncErr := errors.New("sync sentinel")
@@ -195,7 +418,7 @@ func TestAuditTrail_RollbackFailurePoisonsTrail(t *testing.T) {
 }
 
 func TestAuditTrail_RedactsAndBoundsArgumentSummary(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateAuditTestDir(t)
 	trail := NewAuditTrail(dir)
 	ts := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
 	require.NoError(t, trail.Record(AuditEntry{
@@ -245,7 +468,7 @@ func (f *auditTrailFaultFile) Truncate(size int64) error {
 // an inner classifier, returns its decision, and records the decision to the
 // audit trail.
 func TestAuditTrail_ClassifierRecordsDecision(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateAuditTestDir(t)
 	trail := NewAuditTrail(dir)
 
 	inner := &AllowAllClassifier{}
@@ -287,7 +510,7 @@ func TestAuditTrail_ClassifierNilAudit(t *testing.T) {
 // regression guard for the HIGH-1 bypass where effectiveClassifier returned a
 // bare classifier from the resolver, skipping the AuditClassifier decorator.
 func TestAuditResolver_WrapsResolvedClassifier(t *testing.T) {
-	dir := t.TempDir()
+	dir := privateAuditTestDir(t)
 	trail := NewAuditTrail(dir)
 
 	resolver := NewAuditResolver(NewDefaultPermissionModeResolver(), trail, "sess-r")
@@ -351,6 +574,13 @@ func splitLines(s string) []string {
 		lines = append(lines, s[start:])
 	}
 	return lines
+}
+
+func privateAuditTestDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	return dir
 }
 
 // TestAuditTrail_DirectoryPermissions verifies that the audit directory is

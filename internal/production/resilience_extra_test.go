@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
 	"testing"
 	"time"
@@ -85,8 +84,7 @@ func TestAuditFilterMatches(t *testing.T) {
 func TestAuditLogQueryCorruptLineErrors(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
-	dir := t.TempDir()
-	path := filepath.Join(dir, "corrupt.jsonl")
+	path := auditLogTestPath(t, "corrupt.jsonl")
 	require.NoError(t, os.WriteFile(path, []byte("{not-json}\n"), 0o600))
 
 	l := NewDefaultAuditLog(path)
@@ -112,7 +110,7 @@ func TestAuditLogQueryOnDirectoryIsHarmless(t *testing.T) {
 func TestAuditLogRedactsRawArgumentAndResultValues(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	path := auditLogTestPath(t, "audit.jsonl")
 	l := NewDefaultAuditLog(path)
 	now := time.Now().UTC()
 

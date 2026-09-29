@@ -2,6 +2,7 @@ package approval
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -15,6 +16,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf8"
+
+	"github.com/pengjunchen/go-cli/internal/privatefile"
 )
 
 var (
@@ -31,6 +34,7 @@ var (
 )
 
 const maxAuditTrailLineBytes = 64 * 1024
+const defaultAuditTrailLockTimeout = 5 * time.Second
 
 // AuditEntry records one approval audit event. Decision is the classifier's
 // proposal; UserChoice and ToolOutcome are separate fields for later stages.
@@ -77,23 +81,23 @@ type auditTrailOpenFileFunc func(path string, flag int, perm os.FileMode) (audit
 // AuditTrail is a durable append-only approval audit log. Each record is
 // written to {dir}/{date}.jsonl and linked to the preceding record by hash.
 type AuditTrail struct {
-	dir      string
-	mu       sync.Mutex
-	lastHash map[string]string
-	loaded   map[string]bool
-	poisoned map[string]error
-	openFile auditTrailOpenFileFunc
+	dir         string
+	lockTimeout time.Duration
+	mu          sync.Mutex
+	lastHash    map[string]string
+	poisoned    map[string]error
+	openFile    auditTrailOpenFileFunc
 }
 
 // NewAuditTrail creates an AuditTrail that writes daily JSONL files under dir.
 // The directory is created lazily on the first Record call.
 func NewAuditTrail(dir string) *AuditTrail {
 	return &AuditTrail{
-		dir:      dir,
-		lastHash: make(map[string]string),
-		loaded:   make(map[string]bool),
-		poisoned: make(map[string]error),
-		openFile: openAuditTrailFile,
+		dir:         dir,
+		lockTimeout: defaultAuditTrailLockTimeout,
+		lastHash:    make(map[string]string),
+		poisoned:    make(map[string]error),
+		openFile:    openAuditTrailFile,
 	}
 }
 
@@ -121,48 +125,53 @@ func (a *AuditTrail) Record(entry AuditEntry) error {
 	if poison := a.poisoned[filename]; poison != nil {
 		return fmt.Errorf("%w: writer quarantined: %w", ErrAuditTrailRollback, poison)
 	}
-	if err := a.loadChain(filename); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(a.dir, 0o700); err != nil {
-		return fmt.Errorf("approval audit: mkdir: %w", err)
-	}
+	lockCtx, cancel := context.WithTimeout(context.Background(), a.auditLockTimeout())
+	defer cancel()
+	err := privatefile.WithExclusiveLock(lockCtx, filename, func() error {
+		if err := a.loadChain(filename); err != nil {
+			return err
+		}
 
-	entry.PrevHash = a.lastHash[filename]
-	hash, err := approvalAuditHash(entry)
-	if err != nil {
-		return fmt.Errorf("approval audit: hash: %w", err)
-	}
-	entry.Hash = hash
-	data, err := json.Marshal(entry)
-	if err != nil {
-		return fmt.Errorf("approval audit: marshal: %w", err)
-	}
-	line := append(data, '\n')
-	f, err := a.openFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
-	if err != nil {
-		return fmt.Errorf("approval audit: open: %w", err)
-	}
-	info, err := f.Stat()
-	if err != nil {
-		return errors.Join(fmt.Errorf("approval audit: stat: %w", err), wrapAuditTrailClose(f.Close()))
-	}
+		entry.PrevHash = a.lastHash[filename]
+		hash, err := approvalAuditHash(entry)
+		if err != nil {
+			return fmt.Errorf("approval audit: hash: %w", err)
+		}
+		entry.Hash = hash
+		data, err := json.Marshal(entry)
+		if err != nil {
+			return fmt.Errorf("approval audit: marshal: %w", err)
+		}
+		line := append(data, '\n')
+		f, err := a.openFile(filename, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			return fmt.Errorf("approval audit: open: %w", err)
+		}
+		info, err := f.Stat()
+		if err != nil {
+			return errors.Join(fmt.Errorf("approval audit: stat: %w", err), wrapAuditTrailClose(f.Close()))
+		}
 
-	written, writeErr := f.Write(line)
-	if writeErr == nil && written != len(line) {
-		writeErr = io.ErrShortWrite
-	}
-	if writeErr != nil {
-		return a.rollback(filename, f, info.Size(), ErrAuditTrailAppend, writeErr)
-	}
-	if err := f.Sync(); err != nil {
-		return a.rollback(filename, f, info.Size(), ErrAuditTrailSync, err)
-	}
+		written, writeErr := f.Write(line)
+		if writeErr == nil && written != len(line) {
+			writeErr = io.ErrShortWrite
+		}
+		if writeErr != nil {
+			return a.rollback(filename, f, info.Size(), ErrAuditTrailAppend, writeErr)
+		}
+		if err := f.Sync(); err != nil {
+			return a.rollback(filename, f, info.Size(), ErrAuditTrailSync, err)
+		}
 
-	// Sync is the durability boundary: state advances only after it succeeds.
-	a.lastHash[filename] = entry.Hash
-	if err := f.Close(); err != nil {
-		return fmt.Errorf("%w: %w", ErrAuditTrailClose, err)
+		// Sync is the durability boundary: state advances only after it succeeds.
+		a.lastHash[filename] = entry.Hash
+		if err := f.Close(); err != nil {
+			return fmt.Errorf("%w: %w", ErrAuditTrailClose, err)
+		}
+		return nil
+	})
+	if err != nil {
+		return fmt.Errorf("approval audit: locked append: %w", err)
 	}
 	slog.Info("approval.audit.appended", "stage", entry.Stage, "tool", entry.Tool, "hash", entry.Hash)
 	return nil
@@ -176,25 +185,35 @@ func (a *AuditTrail) ReadEntries(day time.Time) ([]AuditEntry, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	filename := filepath.Join(a.dir, day.UTC().Format("2006-01-02")+".jsonl")
-	entries, lastHash, err := readApprovalAuditFile(filename)
+	var entries []AuditEntry
+	var lastHash string
+	lockCtx, cancel := context.WithTimeout(context.Background(), a.auditLockTimeout())
+	defer cancel()
+	err := privatefile.WithExclusiveLock(lockCtx, filename, func() error {
+		var readErr error
+		entries, lastHash, readErr = readApprovalAuditFile(filename)
+		return readErr
+	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("approval audit: locked read: %w", err)
 	}
 	a.lastHash[filename] = lastHash
-	a.loaded[filename] = true
 	return entries, nil
 }
 
-func (a *AuditTrail) loadChain(filename string) error {
-	if a.loaded[filename] {
-		return nil
+func (a *AuditTrail) auditLockTimeout() time.Duration {
+	if a.lockTimeout <= 0 {
+		return defaultAuditTrailLockTimeout
 	}
+	return a.lockTimeout
+}
+
+func (a *AuditTrail) loadChain(filename string) error {
 	_, lastHash, err := readApprovalAuditFile(filename)
 	if err != nil {
 		return err
 	}
 	a.lastHash[filename] = lastHash
-	a.loaded[filename] = true
 	return nil
 }
 
