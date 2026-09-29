@@ -2,6 +2,7 @@ package tui
 
 import (
 	"os"
+	"os/exec"
 	"testing"
 
 	"github.com/charmbracelet/lipgloss"
@@ -129,6 +130,33 @@ func TestNoColorSuppressesANSI(t *testing.T) {
 		"NO_COLOR=1 should suppress all ANSI escape sequences")
 	assert.Equal(t, "hello", styled,
 		"NO_COLOR=1 should produce plain text with no styling")
+}
+
+const externalNoColorGateChild = "GO_CLI_TUI_EXTERNAL_NO_COLOR_GATE_CHILD"
+
+// TestGateIgnoresExternalNoColorForANSIContractOnly verifies that an ANSI
+// contract test stays hermetic when the Go test process inherits NO_COLOR.
+// Product NO_COLOR behavior is covered separately by TestNoColorSuppressesANSI.
+func TestGateIgnoresExternalNoColorForANSIContractOnly(t *testing.T) {
+	if os.Getenv(externalNoColorGateChild) == "1" {
+		require.Empty(t, os.Getenv("NO_COLOR"), "test setup must clear inherited NO_COLOR")
+		require.Equal(t, "xterm-256color", os.Getenv("TERM"), "test setup must normalize inherited TERM")
+
+		styled := lipgloss.NewStyle().
+			Foreground(lipgloss.Color("#FF0000")).
+			Render("contract")
+		require.Contains(t, styled, "\x1b[", "ANSI contract rendering must survive inherited NO_COLOR")
+		return
+	}
+
+	cmd := exec.Command(os.Args[0], "-test.run=^TestGateIgnoresExternalNoColorForANSIContractOnly$")
+	cmd.Env = append(os.Environ(),
+		"NO_COLOR=1",
+		"TERM=dumb",
+		externalNoColorGateChild+"=1",
+	)
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "child test with hostile terminal environment failed:\n%s", output)
 }
 
 // TestClicolorForceProducesANSI verifies that CLICOLOR_FORCE=1 with
