@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
 	"time"
 
@@ -37,10 +38,33 @@ func main() {
 // argv are the arguments after the program name, stdout/stderr are the
 // output streams, and loadConfig is injectable for tests.
 func run(argv []string, stdout, stderr io.Writer, loadConfig func() (*config.Config, error)) int {
+	return runWithInvocationWaitBudget(argv, stdout, stderr, loadConfig, defaultInvocationProducerWaitBudget)
+}
+
+const defaultInvocationProducerWaitBudget = 20 * time.Second
+
+func runWithInvocationWaitBudget(
+	argv []string,
+	stdout, stderr io.Writer,
+	loadConfig func() (*config.Config, error),
+	producerWaitBudget time.Duration,
+) int {
 	previousLogger := slog.Default()
-	defer slog.SetDefault(previousLogger)
 	logHandler := previousLogger.Handler()
 	var logFile *os.File
+	var invocationLogger *slog.Logger
+	ownershipTransferred := false
+	defer func() {
+		if ownershipTransferred {
+			return
+		}
+		if logFile != nil {
+			_ = logFile.Close()
+		}
+		if slog.Default() == invocationLogger {
+			slog.SetDefault(previousLogger)
+		}
+	}()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer cancel()
@@ -59,10 +83,8 @@ func run(argv []string, stdout, stderr io.Writer, loadConfig func() (*config.Con
 			logFile = nil
 		}
 	}
-	slog.SetDefault(slog.New(tracing.NewRedactingSlogHandler(logHandler)))
-	if logFile != nil {
-		defer func() { _ = logFile.Close() }()
-	}
+	invocationLogger = slog.New(tracing.NewRedactingSlogHandler(logHandler))
+	slog.SetDefault(invocationLogger)
 
 	cfg, err := loadConfig()
 	if err != nil {
@@ -94,26 +116,27 @@ func run(argv []string, stdout, stderr io.Writer, loadConfig func() (*config.Con
 		)
 	}
 
-	code := runCLI(tctx, cfg, argv, stdout, stderr, root)
-
-	if root != nil {
-		root.SetAttributes(
-			tracing.Attribute{Key: "exit_code", Value: code},
-		)
-		if code != 0 {
-			root.SetStatus(tracing.SpanStatusError, fmt.Sprintf("exit code %d", code))
-		} else {
-			root.SetStatus(tracing.SpanStatusOK, "")
-		}
-		root.End()
+	result := runCLI(tctx, cfg, argv, stdout, stderr, root)
+	producerDone := closedInvocationBarrier()
+	if result.err != nil && errors.Is(result.err, cli.ErrAssemblyClosePending) {
+		channels, valid := cli.AssemblyCloseCompletions(result.err)
+		producerDone = invocationProducerBarrier(channels, valid)
 	}
-	if exporter != nil {
-		if tracer != nil {
-			tracer.Flush()
-		}
-		if shutdownCode := finalizeTracingExporter(ctx, exporter, stderr, tracing.DefaultAsyncExporterShutdownWaitBudget); shutdownCode != 0 && code == 0 {
-			code = shutdownCode
-		}
+	owner := newInvocationCloseOwner(producerDone, invocationFinalizer{
+		root:               root,
+		tracer:             tracer,
+		exporter:           exporter,
+		stderr:             stderr,
+		logFile:            logFile,
+		previousLogger:     previousLogger,
+		invocationLogger:   invocationLogger,
+		exitCode:           result.exitCode,
+		exporterWaitBudget: tracing.DefaultAsyncExporterShutdownWaitBudget,
+	})
+	ownershipTransferred = true
+	code, completed := waitForInvocationClose(owner, producerWaitBudget, stderr)
+	if result.err != nil && errors.Is(result.err, cli.ErrAssemblyClosePending) && completed {
+		_, _ = fmt.Fprintln(stderr, "error: invocation close completed after the command reported Assembly close pending") //nolint:errcheck // CLI error output is best-effort
 	}
 	return code
 }
@@ -126,8 +149,18 @@ type tracingShutdownReporter interface {
 // close even when the signal context has already been canceled. It emits only
 // safe status and numeric counts; callback error text can contain span data.
 func finalizeTracingExporter(ctx context.Context, exporter tracing.TraceExporter, stderr io.Writer, waitBudget time.Duration) int {
+	_, _, code := finalizeTracingExporterWithReport(ctx, exporter, stderr, waitBudget)
+	return code
+}
+
+func finalizeTracingExporterWithReport(
+	ctx context.Context,
+	exporter tracing.TraceExporter,
+	stderr io.Writer,
+	waitBudget time.Duration,
+) (report tracing.AsyncExporterReport, ownerFinished bool, code int) {
 	if exporter == nil {
-		return 0
+		return tracing.AsyncExporterReport{OwnerFinished: true}, true, 0
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -138,22 +171,226 @@ func finalizeTracingExporter(ctx context.Context, exporter tracing.TraceExporter
 	waitCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), waitBudget)
 	defer cancel()
 
-	var report tracing.AsyncExporterReport
 	reporter, ok := exporter.(tracingShutdownReporter)
 	if !ok {
 		_, _ = fmt.Fprintln(stderr, "error: tracing exporter shutdown unavailable (missing bounded owner)") //nolint:errcheck // CLI error output is best-effort
-		return 1
+		return tracing.AsyncExporterReport{}, false, 1
 	}
 	report, err := reporter.ShutdownWithReport(waitCtx)
-	if err == nil {
-		return 0
+	if err == nil && report.OwnerFinished {
+		return report, true, 0
 	}
 	state := "failed"
-	if errors.Is(err, tracing.ErrShutdownPending) {
+	if errors.Is(err, tracing.ErrShutdownPending) || !report.OwnerFinished {
 		state = "pending"
 	}
 	_, _ = fmt.Fprintf(stderr, "error: tracing exporter shutdown %s (accepted=%d delivered=%d pending=%d)\n", state, report.Stats.Accepted, report.Stats.Delivered, report.Stats.Pending) //nolint:errcheck // CLI error output is best-effort
-	return 1
+	return report, report.OwnerFinished, 1
+}
+
+type invocationFinalizer struct {
+	root               tracing.TraceSpan
+	tracer             *tracing.Tracer
+	exporter           tracing.TraceExporter
+	stderr             io.Writer
+	logFile            io.Closer
+	previousLogger     *slog.Logger
+	invocationLogger   *slog.Logger
+	exitCode           int
+	exporterWaitBudget time.Duration
+}
+
+type invocationCloseOwner struct {
+	producerDone <-chan struct{}
+	finalizer    invocationFinalizer
+	startOnce    sync.Once
+	initialDone  chan struct{}
+	done         chan struct{}
+
+	mu              sync.Mutex
+	exitCode        int
+	exporterPending bool
+}
+
+func newInvocationCloseOwner(producerDone <-chan struct{}, finalizer invocationFinalizer) *invocationCloseOwner {
+	return &invocationCloseOwner{
+		producerDone: producerDone,
+		finalizer:    finalizer,
+		initialDone:  make(chan struct{}),
+		done:         make(chan struct{}),
+		exitCode:     finalizer.exitCode,
+	}
+}
+
+func (o *invocationCloseOwner) Done() <-chan struct{} {
+	if o == nil {
+		return nil
+	}
+	return o.done
+}
+
+func (o *invocationCloseOwner) start() {
+	if o == nil {
+		return
+	}
+	o.startOnce.Do(func() {
+		go o.run()
+	})
+}
+
+func (o *invocationCloseOwner) run() {
+	// A nil barrier means that Assembly completion could not be proven. Keep
+	// the invocation resources owned until the process exits or evidence arrives.
+	if o.producerDone == nil {
+		select {}
+	}
+	<-o.producerDone
+
+	exporterFinished, finalizerCode := o.finalizer.finalize()
+	o.mu.Lock()
+	if finalizerCode != 0 && o.exitCode == 0 {
+		o.exitCode = finalizerCode
+	}
+	if !exporterFinished && o.exitCode == 0 {
+		o.exitCode = 1
+	}
+	o.exporterPending = !exporterFinished
+	o.mu.Unlock()
+	close(o.initialDone)
+
+	if !exporterFinished {
+		// The bounded caller result is not callback completion. Rejoin the same
+		// shared AsyncExporter owner without a caller deadline; only its positive
+		// OwnerFinished report permits the logger/file teardown below.
+		reporter, ok := o.finalizer.exporter.(tracingShutdownReporter)
+		if !ok {
+			return
+		}
+		backgroundReport, err := reporter.ShutdownWithReport(context.Background())
+		if !backgroundReport.OwnerFinished {
+			return
+		}
+		if err != nil {
+			o.mu.Lock()
+			if o.exitCode == 0 {
+				o.exitCode = 1
+			}
+			o.mu.Unlock()
+		}
+	}
+
+	o.finalizer.closeLogAndRestoreLogger()
+	close(o.done)
+}
+
+func (f invocationFinalizer) finalize() (bool, int) {
+	if f.root != nil {
+		f.root.SetAttributes(tracing.Attribute{Key: "exit_code", Value: f.exitCode})
+		if f.exitCode != 0 {
+			f.root.SetStatus(tracing.SpanStatusError, fmt.Sprintf("exit code %d", f.exitCode))
+		} else {
+			f.root.SetStatus(tracing.SpanStatusOK, "")
+		}
+		f.root.End()
+	}
+	if f.tracer != nil {
+		// Tracer.Flush is retained for compatibility and is currently a no-op.
+		f.tracer.Flush()
+	}
+	_, ownerFinished, code := finalizeTracingExporterWithReport(context.Background(), f.exporter, f.stderr, f.exporterWaitBudget)
+	return ownerFinished, code
+}
+
+func (f invocationFinalizer) closeLogAndRestoreLogger() {
+	if f.logFile != nil {
+		_ = f.logFile.Close()
+	}
+	if slog.Default() == f.invocationLogger {
+		slog.SetDefault(f.previousLogger)
+	}
+}
+
+func waitForInvocationClose(owner *invocationCloseOwner, producerWaitBudget time.Duration, stderr io.Writer) (int, bool) {
+	if owner == nil {
+		return 1, false
+	}
+	owner.start()
+	if !waitForProducerBarrier(owner.producerDone, producerWaitBudget) {
+		_, _ = fmt.Fprintln(stderr, "error: invocation shutdown remains pending; trace and log finalization was deferred") //nolint:errcheck // CLI error output is best-effort
+		return 1, false
+	}
+	<-owner.initialDone
+
+	owner.mu.Lock()
+	code := owner.exitCode
+	exporterPending := owner.exporterPending
+	owner.mu.Unlock()
+	if exporterPending {
+		if code == 0 {
+			code = 1
+		}
+		return code, false
+	}
+	<-owner.done
+	owner.mu.Lock()
+	code = owner.exitCode
+	owner.mu.Unlock()
+	return code, true
+}
+
+func waitForProducerBarrier(done <-chan struct{}, waitBudget time.Duration) bool {
+	if done == nil {
+		return false
+	}
+	select {
+	case <-done:
+		return true
+	default:
+	}
+	if waitBudget <= 0 {
+		return false
+	}
+	timer := time.NewTimer(waitBudget)
+	defer timer.Stop()
+	select {
+	case <-done:
+		return true
+	case <-timer.C:
+		select {
+		case <-done:
+			return true
+		default:
+			return false
+		}
+	}
+}
+
+func closedInvocationBarrier() <-chan struct{} {
+	done := make(chan struct{})
+	close(done)
+	return done
+}
+
+func invocationProducerBarrier(channels []<-chan struct{}, valid bool) <-chan struct{} {
+	if !valid {
+		return nil
+	}
+	if len(channels) == 0 {
+		return closedInvocationBarrier()
+	}
+	for _, channel := range channels {
+		if channel == nil {
+			return nil
+		}
+	}
+	done := make(chan struct{})
+	go func() {
+		for _, channel := range channels {
+			<-channel
+		}
+		close(done)
+	}()
+	return done
 }
 
 func stdoutTracingOutputConflict(cfg *config.Config, argv []string) error {
@@ -182,18 +419,27 @@ func stdoutTracingOutputConflict(cfg *config.Config, argv []string) error {
 	return nil
 }
 
-// runCLI invokes the CLI framework and maps the returned error to an exit code.
-func runCLI(ctx context.Context, cfg *config.Config, argv []string, stdout, stderr io.Writer, root tracing.TraceSpan) int {
+type cliRunResult struct {
+	exitCode int
+	err      error
+}
+
+// runCLI invokes the CLI framework and preserves its error chain so run can
+// join a real Assembly-close owner before ending the invocation span.
+func runCLI(ctx context.Context, cfg *config.Config, argv []string, stdout, stderr io.Writer, root tracing.TraceSpan) cliRunResult {
 	if err := cli.Run(ctx, cfg, argv, stdout); err != nil {
+		if errors.Is(err, cli.ErrAssemblyClosePending) {
+			return cliRunResult{exitCode: 1, err: err}
+		}
 		var usageErr *cli.UsageError
 		if errors.As(err, &usageErr) {
 			_, _ = fmt.Fprintf(stderr, "error: %v\n", err) //nolint:errcheck // CLI error output is best-effort
-			return 2
+			return cliRunResult{exitCode: 2, err: err}
 		}
 		_, _ = fmt.Fprintf(stderr, "error: %v\n", err) //nolint:errcheck // CLI error output is best-effort
-		return 1
+		return cliRunResult{exitCode: 1, err: err}
 	}
-	return 0
+	return cliRunResult{}
 }
 
 // newTracing builds the one invocation-owned tracing runtime using the CLI's
