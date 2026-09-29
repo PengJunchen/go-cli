@@ -109,7 +109,7 @@ func TestAuditLogQueryOnDirectoryIsHarmless(t *testing.T) {
 }
 
 // DefaultAuditLog: a zero Timestamp when reading back after AutoTimestamp.
-func TestAuditLogPreservesFullEntry(t *testing.T) {
+func TestAuditLogRedactsRawArgumentAndResultValues(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
@@ -120,8 +120,8 @@ func TestAuditLogPreservesFullEntry(t *testing.T) {
 		Timestamp: now,
 		Operation: "tool.run",
 		ToolName:  "bash",
-		Args:      map[string]any{"cmd": "ls"},
-		Result:    map[string]any{"exit": 0},
+		Args:      map[string]any{"cmd": "private-prompt-secret"},
+		Result:    map[string]any{"output": "private-tool-output-secret"},
 		UserID:    "u-9",
 		SessionID: "s-7",
 	}))
@@ -130,8 +130,12 @@ func TestAuditLogPreservesFullEntry(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, entries, 1)
 	assert.Equal(t, now, entries[0].Timestamp)
-	assert.Equal(t, map[string]any{"cmd": "ls"}, entries[0].Args)
-	assert.Equal(t, map[string]any{"exit": float64(0)}, entries[0].Result)
+	assert.Equal(t, map[string]any{"redacted": true, "field_count": float64(1)}, entries[0].Args)
+	assert.Equal(t, map[string]any{"redacted": true, "field_count": float64(1)}, entries[0].Result)
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	assert.NotContains(t, string(raw), "private-prompt-secret")
+	assert.NotContains(t, string(raw), "private-tool-output-secret")
 }
 
 // Telemetry: lastSeen tracks the most recent timestamp per name.
