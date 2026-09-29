@@ -197,7 +197,7 @@ func (t *StreamingBashToolImpl) ExecuteStreaming(ctx context.Context, call ToolC
 	cmd.Dir = t.Workdir
 	cmd.Env = filteredEnv(t.Env)
 
-	managed, err := startManagedLocalCommand(cancel, cmd)
+	managed, err := startManagedLocalBashCommand(cancel, cmd, execCtx)
 	if err != nil {
 		return nil, fmt.Errorf("bash: start: %w", err)
 	}

@@ -3,6 +3,7 @@
 package tools
 
 import (
+	"context"
 	"errors"
 	"os/exec"
 )
@@ -19,4 +20,8 @@ func signalCommandProcessGroup(_ int, _ bool) error {
 
 func commandProcessGroupAlive(_ int) (bool, error) {
 	return false, errProcessContainmentUnsupported
+}
+
+func startManagedLocalBashCommandWithIdentityObserver(_ context.CancelFunc, _ *exec.Cmd, _ context.Context, _ ProcessExecutionIdentityObserver) (*managedLocalCommand, error) {
+	return nil, errProcessContainmentUnsupported
 }

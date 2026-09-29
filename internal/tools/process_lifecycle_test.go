@@ -2,10 +2,12 @@ package tools
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -67,6 +69,131 @@ func TestBashCancellationAtStartupRace(t *testing.T) {
 		cancel()
 		require.ErrorIs(t, err, context.DeadlineExceeded)
 	}
+}
+
+func TestPreparedBashWaitsForDurableProcessIdentityBeforeCommandRuns(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is required for process lifecycle tests")
+	}
+	marker := filepath.Join(t.TempDir(), "prepared-bash-ran")
+	observed := make(chan ProcessExecutionIdentity, 1)
+	release := make(chan struct{})
+	ctx := WithProcessExecutionIdentityObserver(context.Background(), func(_ context.Context, identity ProcessExecutionIdentity) error {
+		observed <- identity
+		<-release
+		return nil
+	})
+	result := make(chan error, 1)
+	go func() {
+		_, err := NewBashTool(WithTimeout(5*time.Second), WithNoSandbox()).Execute(ctx, ToolCall{
+			ID:   "call-durable-process-identity",
+			Name: "bash",
+			Args: map[string]any{"command": "printf ran > " + shellQuoteTestArgument(marker)},
+		})
+		result <- err
+	}()
+
+	select {
+	case identity := <-observed:
+		require.Equal(t, runtime.GOOS, identity.Platform)
+		require.NotEmpty(t, identity.HostGeneration)
+		require.Positive(t, identity.LeaderPID)
+		require.NotEmpty(t, identity.ProcessStartToken)
+		require.Equal(t, identity.LeaderPID, identity.ProcessGroupID)
+		require.Positive(t, identity.OwnerPID)
+		require.NotEmpty(t, identity.OwnerProcessStartToken)
+		require.NoFileExists(t, marker, "the command must remain behind the start gate until its exact identity is durably recorded")
+		close(release)
+	case err := <-result:
+		t.Fatalf("prepared Bash returned without waiting for the durable process identity: err=%v marker_exists=%t", err, fileExists(marker))
+	case <-time.After(3 * time.Second):
+		t.Fatal("prepared Bash did not report its process identity")
+	}
+
+	require.NoError(t, <-result)
+	require.FileExists(t, marker, "the command starts after the observer confirms durable identity")
+}
+
+func TestPreparedBashDoesNotRunWhenProcessIdentityPersistenceFails(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is required for process lifecycle tests")
+	}
+	marker := filepath.Join(t.TempDir(), "prepared-bash-must-not-run")
+	persistErr := errors.New("identity journal sync failed")
+	ctx := WithProcessExecutionIdentityObserver(context.Background(), func(context.Context, ProcessExecutionIdentity) error {
+		return persistErr
+	})
+	_, err := NewBashTool(WithTimeout(5*time.Second), WithNoSandbox()).Execute(ctx, ToolCall{
+		ID:   "call-identity-sync-failure",
+		Name: "bash",
+		Args: map[string]any{"command": "printf ran > " + shellQuoteTestArgument(marker)},
+	})
+	require.ErrorIs(t, err, persistErr)
+	require.NoFileExists(t, marker, "an identity persistence failure must keep user code behind the gate")
+}
+
+func TestPreparedStreamingBashWaitsForIdentityPersistence(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is required for process lifecycle tests")
+	}
+	marker := filepath.Join(t.TempDir(), "prepared-streaming-bash-ran")
+	observed := make(chan ProcessExecutionIdentity, 1)
+	release := make(chan struct{})
+	ctx := WithProcessExecutionIdentityObserver(context.Background(), func(_ context.Context, identity ProcessExecutionIdentity) error {
+		observed <- identity
+		<-release
+		return nil
+	})
+	result := make(chan error, 1)
+	go func() {
+		_, err := NewStreamingBashTool(WithTimeout(5*time.Second), WithNoSandbox()).ExecuteStreaming(ctx, ToolCall{
+			ID:   "call-streaming-durable-process-identity",
+			Name: "bash",
+			Args: map[string]any{"command": "printf ran > " + shellQuoteTestArgument(marker)},
+		}, nil)
+		result <- err
+	}()
+
+	select {
+	case identity := <-observed:
+		require.Equal(t, runtime.GOOS, identity.Platform)
+		require.Positive(t, identity.LeaderPID)
+		require.NotEmpty(t, identity.ProcessStartToken)
+		require.Equal(t, identity.LeaderPID, identity.ProcessGroupID)
+		require.NoFileExists(t, marker, "streaming Bash must wait for durable process identity before user code runs")
+		close(release)
+	case err := <-result:
+		t.Fatalf("prepared streaming Bash returned without waiting for process identity: err=%v marker_exists=%t", err, fileExists(marker))
+	case <-time.After(3 * time.Second):
+		t.Fatal("prepared streaming Bash did not report its process identity")
+	}
+
+	require.NoError(t, <-result)
+	require.FileExists(t, marker)
+}
+
+func TestPreparedStreamingBashCancellationBeforeGateReleaseDoesNotRun(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is required for process lifecycle tests")
+	}
+	marker := filepath.Join(t.TempDir(), "prepared-streaming-bash-cancelled")
+	ctx := WithProcessExecutionIdentityObserver(context.Background(), func(ctx context.Context, _ ProcessExecutionIdentity) error {
+		<-ctx.Done()
+		return ctx.Err()
+	})
+	tool := NewStreamingBashTool(WithTimeout(100*time.Millisecond), WithNoSandbox())
+	_, err := tool.ExecuteStreaming(ctx, ToolCall{
+		ID:   "call-streaming-process-identity-cancelled",
+		Name: "bash",
+		Args: map[string]any{"command": "printf ran > " + shellQuoteTestArgument(marker)},
+	}, nil)
+	require.Error(t, err)
+	require.NoFileExists(t, marker, "cancellation while identity persistence is pending must abort before user code")
+}
+
+func fileExists(path string) bool {
+	_, err := os.Stat(path)
+	return err == nil
 }
 
 func TestDefaultSSHClientCancellationStopsLocalTransportDescendants(t *testing.T) {
