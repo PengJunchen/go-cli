@@ -1,9 +1,13 @@
 # R0 Test Gate Wiring Review
 
-**Review status:** Wiring reviewed; one source-level timeout cleanup gap remains open.  
+**Review status:** Historical wiring review; timeout cleanup finding resolved in subsequent source commits.
 **Review snapshot:** `84324fe7a55ea852583f5082fe5d76ac0dd0608a`  
 **Proposal:** `protected-changes-test-gate.patch` (`d249b64cf452cca6467fdcab7253af47fddb0b8fea6672f98942350a3f9d4bf2`).  
 **Patch status:** Not applied. No protected Makefile or workflow file was changed during this review.
+
+## Current correction (2026-09-30)
+
+R0GATE-01 below describes the behavior at the `84324fe` review snapshot, not the current source. `e70118d` introduced owned process-group cleanup for timeout and post-leader descendants on Darwin/Linux, with fail-closed behavior on unsupported systems; `4633544` bounded the output-overflow path and cleans its group before the deadline. The regression tests cover timeout, overflow, pipe-holding descendants, foreign process groups, and unsupported hosts. On the current repair branch at `5dcf538`, `go test -race -p 2 -count=1` passed for `./internal/verify/cmd/test-gate`, `./internal/verify/cmd/gatecapture`, and `./internal/verify/cmd/scanner-gate`. This closes the specific source-level finding on the tested Darwin host; it does not authorize or apply the separate protected Makefile/workflow patch. R0GATE-02 is addressed in that proposed patch and remains unapplied.
 
 ## Scope and conclusion
 
