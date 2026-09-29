@@ -406,6 +406,122 @@ func TestAssemblyCloseFencesBeforeBlockedStopCallback(t *testing.T) {
 	<-resourcesClosed
 }
 
+func TestAssemblyCloseFencesMCPReloadBeforeAsyncStopAndJoinsAdmittedReload(t *testing.T) {
+	resources := &assemblyMCPResources{}
+	reloader := newAssemblyAdmissionBarrierReloader()
+	require.NoError(t, resources.addReloader(reloader))
+	client := &assemblyTestMCPClient{
+		disconnectStarted: make(chan struct{}),
+		done:              make(chan struct{}),
+	}
+	resources.addClient(client)
+	state := &assembleState{mcpResources: resources}
+
+	stopCallbackEntered := make(chan struct{})
+	releaseStopCallback := make(chan struct{})
+	var releaseStopOnce sync.Once
+	releaseStop := func() { releaseStopOnce.Do(func() { close(releaseStopCallback) }) }
+	var stopCalls atomic.Int32
+	var closeCalls atomic.Int32
+	closeResourcesEntered := make(chan struct{})
+	owner := newAssemblyCloseOwner(
+		func() core.RunSlotGuard { return core.NewDefaultRunSlotGuard() },
+		nil,
+		func() {
+			stopCalls.Add(1)
+			close(stopCallbackEntered)
+			<-releaseStopCallback
+			state.requestStopSources()
+		},
+		func(ctx context.Context, idle <-chan struct{}) error {
+			closeCalls.Add(1)
+			close(closeResourcesEntered)
+			return state.closeResources(ctx, idle)
+		},
+	)
+	owner.mcpResources = resources
+	state.closeOwner = owner
+	assembly := &AgentAssembly{closeOwner: owner, mcpResources: resources}
+
+	var releaseClientOnce sync.Once
+	releaseClient := func() { releaseClientOnce.Do(func() { close(client.done) }) }
+	t.Cleanup(func() {
+		releaseStop()
+		reloader.releaseReload()
+		releaseClient()
+	})
+
+	firstReloadResult := make(chan error, 1)
+	go func() {
+		_, err := resources.Reload(context.Background())
+		reloader.markReloadJoined()
+		firstReloadResult <- err
+	}()
+	select {
+	case <-reloader.reloadEntered:
+	case <-time.After(time.Second):
+		t.Fatal("first admitted reload did not reach the controlled callback")
+	}
+
+	waiterCtx, cancelWaiter := context.WithCancel(context.Background())
+	closeResult := make(chan error, 1)
+	go func() { closeResult <- assembly.Close(waiterCtx) }()
+	select {
+	case <-stopCallbackEntered:
+	case <-time.After(time.Second):
+		cancelWaiter()
+		t.Fatal("async close owner did not reach its stop barrier")
+	}
+	cancelWaiter()
+	require.ErrorIs(t, <-closeResult, ErrAssemblyClosePending)
+
+	postCloseCtx, cancelPostClose := context.WithCancel(context.Background())
+	cancelPostClose()
+	_, reloadErr := resources.Reload(postCloseCtx)
+	require.ErrorIs(t, reloadErr, mcp.ErrHotReloadPending, "Close must synchronously fence new MCP reload admission")
+	require.EqualValues(t, 1, reloader.reloadCalls.Load(), "a reload after Close returned pending must not enter the reloader")
+
+	repeatCtx, cancelRepeat := context.WithCancel(context.Background())
+	cancelRepeat()
+	require.ErrorIs(t, assembly.Close(repeatCtx), ErrAssemblyClosePending)
+	require.EqualValues(t, 1, stopCalls.Load(), "repeated Close must retain the original stop owner")
+	require.EqualValues(t, 0, closeCalls.Load(), "resource cleanup must remain behind the held async stop owner")
+
+	releaseStop()
+	select {
+	case <-reloader.stopRequested:
+	case <-time.After(time.Second):
+		t.Fatal("async close owner did not request reloader stop after release")
+	}
+	select {
+	case <-closeResourcesEntered:
+	case <-time.After(time.Second):
+		t.Fatal("resource close did not start after the async stop owner")
+	}
+	select {
+	case <-client.disconnectStarted:
+		t.Fatal("MCP client cleanup began before the admitted reload actually joined")
+	default:
+	}
+
+	reloader.releaseReload()
+	select {
+	case err := <-firstReloadResult:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("admitted reload did not return after releasing its callback")
+	}
+	select {
+	case <-client.disconnectStarted:
+	case <-time.After(time.Second):
+		t.Fatal("MCP client cleanup did not continue after the admitted reload joined")
+	}
+	releaseClient()
+	require.NoError(t, assembly.Close(context.Background()))
+	require.EqualValues(t, 1, stopCalls.Load(), "the stop callback must have one owner")
+	require.EqualValues(t, 1, closeCalls.Load(), "resource cleanup must have one owner")
+}
+
 func TestAssemblyClosePanicRetainsPendingOwner(t *testing.T) {
 	resourcesStarted := atomic.Bool{}
 	owner := newAssemblyCloseOwner(
@@ -743,6 +859,81 @@ type assemblyBarrierReloader struct {
 	stopRequested chan struct{}
 	releaseDone   chan struct{}
 	stopOnce      sync.Once
+}
+
+type assemblyAdmissionBarrierReloader struct {
+	reloadEntered chan struct{}
+	release       chan struct{}
+	stopRequested chan struct{}
+	reloadJoined  chan struct{}
+	done          chan struct{}
+	reloadCalls   atomic.Int32
+
+	reloadOnce  sync.Once
+	stopOnce    sync.Once
+	releaseOnce sync.Once
+	joinedOnce  sync.Once
+	doneOnce    sync.Once
+}
+
+func newAssemblyAdmissionBarrierReloader() *assemblyAdmissionBarrierReloader {
+	return &assemblyAdmissionBarrierReloader{
+		reloadEntered: make(chan struct{}),
+		release:       make(chan struct{}),
+		stopRequested: make(chan struct{}),
+		reloadJoined:  make(chan struct{}),
+		done:          make(chan struct{}),
+	}
+}
+
+func (*assemblyAdmissionBarrierReloader) Watch(context.Context, string) error { return nil }
+func (r *assemblyAdmissionBarrierReloader) Stop() error {
+	r.RequestStop()
+	<-r.done
+	return nil
+}
+func (r *assemblyAdmissionBarrierReloader) Reload(ctx context.Context) error {
+	r.reloadCalls.Add(1)
+	r.reloadOnce.Do(func() { close(r.reloadEntered) })
+	select {
+	case <-r.release:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func (*assemblyAdmissionBarrierReloader) Name() string { return "assembly-admission-barrier-reloader" }
+func (r *assemblyAdmissionBarrierReloader) RequestStop() {
+	r.stopOnce.Do(func() { close(r.stopRequested) })
+	r.maybeFinish()
+}
+func (r *assemblyAdmissionBarrierReloader) Done() <-chan struct{} { return r.done }
+func (r *assemblyAdmissionBarrierReloader) Wait(ctx context.Context) error {
+	select {
+	case <-r.done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+func (r *assemblyAdmissionBarrierReloader) releaseReload() {
+	r.releaseOnce.Do(func() { close(r.release) })
+}
+func (r *assemblyAdmissionBarrierReloader) markReloadJoined() {
+	r.joinedOnce.Do(func() { close(r.reloadJoined) })
+	r.maybeFinish()
+}
+func (r *assemblyAdmissionBarrierReloader) maybeFinish() {
+	select {
+	case <-r.stopRequested:
+	default:
+		return
+	}
+	select {
+	case <-r.reloadJoined:
+		r.doneOnce.Do(func() { close(r.done) })
+	default:
+	}
 }
 
 func newAssemblyBarrierReloader() *assemblyBarrierReloader {

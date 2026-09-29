@@ -27,6 +27,7 @@ type assemblyCloseOwner struct {
 	done      chan struct{}
 
 	guard              func() core.RunSlotGuard
+	mcpResources       *assemblyMCPResources
 	httpServer         *acp.HTTPServer
 	cancel             context.CancelFunc
 	requestStop        func()
@@ -67,6 +68,11 @@ func (o *assemblyCloseOwner) Close(ctx context.Context) error {
 		o.mu.Lock()
 		o.deadline = startedAt.Add(assemblyCloseBudget)
 		o.mu.Unlock()
+		if o.mcpResources != nil {
+			// Publish the MCP reload admission fence before the asynchronous owner
+			// can block in any stop callback.
+			o.mcpResources.fenceReloadAdmission()
+		}
 
 		// Cancel linked Harness/TurnRunner inputs synchronously, before the
 		// asynchronous owner invokes any potentially blocking resource callback.
@@ -365,6 +371,15 @@ func (r *assemblyMCPResources) addReloader(reloader mcp.HotReloader) error {
 	}
 	r.reloaders = append(r.reloaders, reloader)
 	return nil
+}
+
+func (r *assemblyMCPResources) fenceReloadAdmission() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.closing = true
+	r.mu.Unlock()
 }
 
 func (r *assemblyMCPResources) requestStopReloaders() {

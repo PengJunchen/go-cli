@@ -599,6 +599,7 @@ func newAssembleState(
 		s.requestStopSources,
 		s.closeResources,
 	)
+	s.closeOwner.mcpResources = s.mcpResources
 	return s, thinkingLevel
 }
 
