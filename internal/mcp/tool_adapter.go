@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
 	"regexp"
 	"strings"
 
@@ -15,6 +16,10 @@ import (
 // ErrInvalidToolResult indicates that an MCP client returned no result and no
 // call error for a tool invocation.
 var ErrInvalidToolResult = errors.New("mcp: invalid tool result")
+
+// ErrMCPClientGenerationUnavailable reports that a tool is not bound to an
+// owned MCP client generation.
+var ErrMCPClientGenerationUnavailable = errors.New("mcp: client generation is unavailable")
 
 // promptInjectionWarning is prepended to content flagged as potentially
 // containing prompt-injection instructions. It alerts the model that the
@@ -96,8 +101,9 @@ func wrapUntrustedContent(text string) string {
 // executed through the normal agent loop. The tool's registry name is
 // normalized to mcp__{server}__{tool}.
 type MCPToolAdapter struct {
-	client MCPClient
-	tool   MCPTool
+	client     MCPClient
+	tool       MCPTool
+	generation *MCPClientGeneration
 }
 
 var _ tools.ToolDefinition = (*MCPToolAdapter)(nil)
@@ -106,6 +112,64 @@ var _ tools.ToolDefinition = (*MCPToolAdapter)(nil)
 // by client.
 func NewMCPToolAdapter(client MCPClient, tool MCPTool) *MCPToolAdapter {
 	return &MCPToolAdapter{client: client, tool: tool}
+}
+
+// MCPClientGeneration binds MCP tool executions to one source-owned client
+// instance and snapshots its server name. Construct a distinct generation for
+// each source configuration; reconnecting or reconfiguring its client in
+// place does not create a new generation and is not safe for publication.
+type MCPClientGeneration struct {
+	client     MCPClient
+	serverName string
+}
+
+var _ tools.MCPGenerationClient = (*MCPClientGeneration)(nil)
+
+// NewMCPClientGeneration creates an opaque generation handle for one owned
+// client instance.
+func NewMCPClientGeneration(client MCPClient) (*MCPClientGeneration, error) {
+	if isNilMCPClient(client) {
+		return nil, ErrMCPClientGenerationUnavailable
+	}
+	serverName := client.Name()
+	if strings.TrimSpace(serverName) == "" {
+		return nil, fmt.Errorf("%w: server name is empty", ErrMCPClientGenerationUnavailable)
+	}
+	return &MCPClientGeneration{client: client, serverName: serverName}, nil
+}
+
+// NewToolAdapter returns an adapter tied to this exact client generation.
+func (g *MCPClientGeneration) NewToolAdapter(tool MCPTool) *MCPToolAdapter {
+	if !g.valid() {
+		return &MCPToolAdapter{tool: tool}
+	}
+	return &MCPToolAdapter{client: g.client, tool: tool, generation: g}
+}
+
+func (g *MCPClientGeneration) valid() bool {
+	return g != nil && !isNilMCPClient(g.client) && strings.TrimSpace(g.serverName) != ""
+}
+
+// ExecuteMCPTool calls a tool through this client generation. Its receiver is
+// the generation handle, not a caller-owned MCPToolAdapter.
+func (g *MCPClientGeneration) ExecuteMCPTool(ctx context.Context, remoteToolName string, call tools.ToolCall) (*tools.ToolResult, error) {
+	if !g.valid() {
+		return nil, ErrMCPClientGenerationUnavailable
+	}
+	return executeMCPTool(ctx, g.client, remoteToolName, call)
+}
+
+func isNilMCPClient(client MCPClient) bool {
+	if client == nil {
+		return true
+	}
+	value := reflect.ValueOf(client)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+		return value.IsNil()
+	default:
+		return false
+	}
 }
 
 // Name returns the normalized registry name mcp__{server}__{tool}.
@@ -127,24 +191,58 @@ func (a *MCPToolAdapter) Parameters() any {
 	return a.tool.ArgsSchema
 }
 
+// MCPGenerationCandidate snapshots this adapter's MCP tool metadata into an
+// opaque source-generation candidate. The adapter must come from
+// MCPClientGeneration.NewToolAdapter for the exact client generation retained
+// for this publication. That client must not be reused or reconfigured for a
+// different generation.
+func (a *MCPToolAdapter) MCPGenerationCandidate(lease tools.PreparedDispatchLease) (tools.MCPToolCandidate, error) {
+	if a == nil || !a.generation.valid() {
+		return tools.MCPToolCandidate{}, ErrMCPClientGenerationUnavailable
+	}
+	tool := a.tool
+	handle, err := tools.NewMCPGenerationClientHandle(a.generation)
+	if err != nil {
+		return tools.MCPToolCandidate{}, err
+	}
+	return tools.NewMCPToolCandidate(
+		NormalizeToolName(a.generation.serverName, tool.Name),
+		tool.Name,
+		tool.Description,
+		tool.ArgsSchema,
+		handle,
+		lease,
+	)
+}
+
 // Execute forwards the call to the remote MCP client and maps its result into
 // a tools.ToolResult. ToolCallID is set so the result can be matched back to
 // the originating call.
 func (a *MCPToolAdapter) Execute(ctx context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
+	if a == nil {
+		return nil, errors.New("mcp: MCP tool adapter is nil")
+	}
+	return executeMCPTool(ctx, a.client, a.tool.Name, call)
+}
+
+func executeMCPTool(ctx context.Context, client MCPClient, remoteToolName string, call tools.ToolCall) (*tools.ToolResult, error) {
+	if client == nil {
+		return nil, errors.New("mcp: MCP client is nil")
+	}
 	span, spanCtx := tracing.SpanFromContext(ctx, "tool.call", tracing.SpanKindClient)
 	defer span.End()
 	span.SetAttributes(tracing.Attribute{Key: "tool_name", Value: call.Name})
 
-	result, err := a.client.CallTool(spanCtx, a.tool.Name, call.Args)
+	result, err := client.CallTool(spanCtx, remoteToolName, call.Args)
 	if err != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-		slog.Error("mcp.tool_adapter.failed", "tool", a.tool.Name, "err", err)
+		slog.Error("mcp.tool_adapter.failed", "tool", remoteToolName, "err", err)
 		return nil, err
 	}
 	if result == nil {
-		err := fmt.Errorf("%w: client returned nil result for tool %q", ErrInvalidToolResult, a.tool.Name)
+		err := fmt.Errorf("%w: client returned nil result for tool %q", ErrInvalidToolResult, remoteToolName)
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-		slog.Error("mcp.tool_adapter.failed", "tool", a.tool.Name, "err", err)
+		slog.Error("mcp.tool_adapter.failed", "tool", remoteToolName, "err", err)
 		return nil, err
 	}
 
@@ -160,7 +258,7 @@ func (a *MCPToolAdapter) Execute(ctx context.Context, call tools.ToolCall) (*too
 	// tags so the model can reference it without obeying embedded
 	// instructions.
 	if sanitized, detected := scanPromptInjection(output); detected {
-		slog.Warn("mcp.tool_adapter.prompt_injection_detected", "tool", a.tool.Name)
+		slog.Warn("mcp.tool_adapter.prompt_injection_detected", "tool", remoteToolName)
 		output = sanitized
 	}
 
