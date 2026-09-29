@@ -93,10 +93,36 @@ type AgentEvent struct {
 	// detection. When true, consumers use this boolean instead of string
 	// matching on Content to determine whether the tool failed.
 	IsError bool `json:"is_error,omitempty"`
+	// RunID identifies the owner that produced this event.
+	RunID string `json:"run_id,omitempty"`
+	// CanonicalTranscriptIndex identifies the assistant row in the durable run transcript.
+	CanonicalTranscriptIndex *uint64 `json:"canonical_transcript_index,omitempty"`
+	// AssistantTranscriptOrdinal identifies the tool-call assistant occurrence.
+	AssistantTranscriptOrdinal *uint64 `json:"assistant_transcript_ordinal,omitempty"`
+	// ReceiptOutcome carries the exact typed tool receipt outcome when present.
+	ReceiptOutcome string `json:"receipt_outcome,omitempty"`
+	// SourceTruncated reports a source truncation fact when structured metadata provides one.
+	SourceTruncated *bool `json:"source_truncated,omitempty"`
 	// PreToolCall carries a cancelable handle for "pre_tool_call" events.
 	// External interceptors call PreToolCall.Cancel() to prevent the
 	// tool from executing. It is nil for all other event kinds.
 	PreToolCall *PreToolCallEvent `json:"pre_tool_call,omitempty"`
+}
+
+func cloneAgentEvent(event AgentEvent) AgentEvent {
+	if event.CanonicalTranscriptIndex != nil {
+		index := *event.CanonicalTranscriptIndex
+		event.CanonicalTranscriptIndex = &index
+	}
+	if event.AssistantTranscriptOrdinal != nil {
+		ordinal := *event.AssistantTranscriptOrdinal
+		event.AssistantTranscriptOrdinal = &ordinal
+	}
+	if event.SourceTruncated != nil {
+		truncated := *event.SourceTruncated
+		event.SourceTruncated = &truncated
+	}
+	return event
 }
 
 // TokenUsage carries token consumption and cost data for a token_usage event.

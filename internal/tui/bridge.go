@@ -55,14 +55,28 @@ func KindToContentType(kind string) string {
 // token usage plus safe tool-call details when present.
 func CoreEventToAgentEvent(ev core.AgentEvent) AgentEvent {
 	ae := AgentEvent{
-		Type:        ev.Kind,
-		Content:     ev.Content,
-		ContentType: KindToContentType(ev.Kind),
-		Incremental: ev.Incremental,
-		ToolCallID:  ev.ToolCallID,
-		Stream:      ev.Stream,
-		IsError:     ev.IsError,
-		ToolCalls:   copyToolCalls(ev.ToolCalls),
+		Type:           ev.Kind,
+		Content:        ev.Content,
+		ContentType:    KindToContentType(ev.Kind),
+		Incremental:    ev.Incremental,
+		ToolCallID:     ev.ToolCallID,
+		Stream:         ev.Stream,
+		IsError:        ev.IsError,
+		RunID:          ev.RunID,
+		ReceiptOutcome: ev.ReceiptOutcome,
+		ToolCalls:      copyToolCalls(ev.ToolCalls),
+	}
+	if ev.CanonicalTranscriptIndex != nil {
+		index := *ev.CanonicalTranscriptIndex
+		ae.CanonicalTranscriptIndex = &index
+	}
+	if ev.AssistantTranscriptOrdinal != nil {
+		ordinal := *ev.AssistantTranscriptOrdinal
+		ae.AssistantTranscriptOrdinal = &ordinal
+	}
+	if ev.SourceTruncated != nil {
+		truncated := *ev.SourceTruncated
+		ae.SourceTruncated = &truncated
 	}
 	if ev.TokenUsage != nil {
 		ae.TokenUsage = &TokenUsageData{
@@ -329,6 +343,7 @@ func SubagentEventToAgentEvent(taskID string, ev core.AgentEvent) AgentEvent {
 		Content:     prefix + indented,
 		ContentType: ContentTypeSubagent,
 		Incremental: ev.Incremental,
+		RunID:       ev.RunID,
 	}
 }
 

@@ -111,6 +111,7 @@ func NewEventStream(capacity int, opts ...EventStreamOption) *EventStreamImpl {
 //   - DiscardOldest: evict the oldest buffered event to make room (non-blocking).
 //   - BlockUntilConsumed (default): block the sender until a consumer reads.
 func (s *EventStreamImpl) Send(event AgentEvent) error {
+	event = cloneAgentEvent(event)
 	if s.closed.Load() {
 		s.gapCount.Add(1)
 		return nil
@@ -231,6 +232,7 @@ func (s *EventStreamImpl) notifyBackpressure() func() {
 // SendTerminal makes one non-blocking attempt to enqueue the terminal event.
 // A full or closed stream records a visible gap instead of delaying cleanup.
 func (s *EventStreamImpl) SendTerminal(event AgentEvent) error {
+	event = cloneAgentEvent(event)
 	s.terminalOnce.Do(func() { s.sendTerminal(event) })
 	return nil
 }

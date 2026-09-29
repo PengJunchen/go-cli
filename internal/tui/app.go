@@ -57,6 +57,14 @@ type AgentEvent struct {
 	// IsError preserves the structured error marker from tool events. On a
 	// uniquely associated tool_result, it sets the call status to Error.
 	IsError bool
+	// RunID and transcript coordinates identify the producer-owned occurrence.
+	RunID                      string
+	CanonicalTranscriptIndex   *uint64
+	AssistantTranscriptOrdinal *uint64
+	// ReceiptOutcome carries the exact typed tool receipt outcome when present.
+	ReceiptOutcome string
+	// SourceTruncated is copied only from structured source metadata.
+	SourceTruncated *bool
 	// ToolCalls carries the assistant-proposed tool calls attached to a
 	// message event. These are provisional until a matching tool_call event
 	// confirms execution has started.
