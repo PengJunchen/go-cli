@@ -33,6 +33,7 @@ type consumerTestSink struct {
 	resolutions       []ExecutionResolution
 	terminal          *RunTerminal
 	beginErr          error
+	recordReceiptErr  error
 	cancelAfterBegin  context.CancelFunc
 	afterBegin        func()
 	recordReceiptHook func(RunToolReceipt)
@@ -158,13 +159,16 @@ func (s *consumerTestSink) RecordReceipt(ctx context.Context, receipt RunToolRec
 	s.recordContext(ctx)
 	s.mu.Lock()
 	s.steps = append(s.steps, "receipt")
-	s.receipts = append(s.receipts, receipt)
+	err := s.recordReceiptErr
+	if err == nil {
+		s.receipts = append(s.receipts, receipt)
+	}
 	hook := s.recordReceiptHook
 	s.mu.Unlock()
 	if hook != nil {
 		hook(receipt)
 	}
-	return nil
+	return err
 }
 
 func (s *consumerTestSink) ResolveExecution(ctx context.Context, resolution ExecutionResolution) error {
@@ -336,6 +340,57 @@ func TestRunCommitConsumerWritesSequentialFactsBeforeAcknowledging(t *testing.T)
 	require.Equal(t, RunOutcomeSuccess, terminal.Outcome)
 	require.Equal(t, 4, len(terminal.Transcript))
 	require.Equal(t, 2, model.idx, "the next provider request is allowed only after receipt and resolution sync")
+}
+
+func TestRunCommitReceiptPersistenceFailureDoesNotPublishSuccess(t *testing.T) {
+	root := t.TempDir()
+	path := filepath.Join(root, "input.txt")
+	require.NoError(t, os.WriteFile(path, []byte("durable read"), 0o600))
+	sink := &consumerTestSink{recordReceiptErr: errors.New("injected receipt sync failure")}
+	model := &scriptedChatModel{seq: []*llm.Message{
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "read-receipt-sync-failure", Name: "read", Args: map[string]any{"path": path}}}},
+		{Role: llm.RoleAssistant, Content: "must not be requested"},
+	}}
+	agent := NewAgentImpl("durable-receipt-sync-failure", NewLoopAgent(WithLLM(model), WithTools(newPreparedConsumerReadRegistry(t))))
+	owner := newRunOwner(context.Background(), nil, RunClaim{ID: "run-receipt-sync-failure"}, nil)
+	owner.ctx = WithRunCommit(owner.ctx, sink, RunCommitBinding{SessionID: "session-1", WorkspaceID: "workspace-1"})
+	events := NewEventStream(32)
+
+	_, runErr := owner.run(time.Second, func(ctx context.Context) (Result, error) {
+		return agent.Run(ctx, Submission{Type: SubmissionUserMessage, Content: "read file"}, events)
+	})
+	events.Close()
+	require.Error(t, runErr)
+	require.True(t, hasUnknownToolOutcome(runErr), "a possibly committed side effect without a durable receipt remains unknown")
+
+	var toolResult *AgentEvent
+	for event := range events.Events() {
+		if event.Kind == "tool_result" && event.ToolCallID == "read-receipt-sync-failure" {
+			copy := event
+			toolResult = &copy
+			break
+		}
+	}
+	require.NotNil(t, toolResult)
+	require.True(t, toolResult.IsError)
+	require.Equal(t, ReceiptOutcomeUnknown, toolResult.ReceiptOutcome, "the TUI event must not claim success before receipt persistence")
+
+	steps, _, receipts, terminal := sink.snapshot()
+	require.Equal(t, []string{"input", "begin", "execution", "receipt", "terminal"}, steps)
+	require.Empty(t, receipts, "the injected receipt sync failure means no receipt was durably recorded")
+	require.NotNil(t, terminal)
+	require.Equal(t, RunOutcomeUnknown, terminal.Outcome)
+	var terminalReceipt *AgentMessage
+	for index := range terminal.Transcript {
+		if terminal.Transcript[index].Message.Role == string(llm.RoleTool) && terminal.Transcript[index].Message.ToolCallID == "read-receipt-sync-failure" {
+			copy := terminal.Transcript[index].Message
+			terminalReceipt = &copy
+			break
+		}
+	}
+	require.NotNil(t, terminalReceipt)
+	require.Equal(t, ReceiptOutcomeUnknown, terminalReceipt.ReceiptOutcome, "the failed write must not leak success into the terminal projection")
+	require.Equal(t, 1, model.idx, "receipt persistence failure must stop later provider work")
 }
 
 func TestRunCommitConsumerBuffersParallelReceiptsInCanonicalOrder(t *testing.T) {

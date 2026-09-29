@@ -46,6 +46,10 @@ func wrapCellText(text string, width int) string {
 // Other terminal control sequences are discarded so content cannot execute
 // terminal commands. Any style or link opened here is closed before return.
 func safeTerminalText(text string) string {
+	if utf8.ValidString(text) && !containsTerminalControl(text) {
+		return text
+	}
+
 	var out strings.Builder
 	out.Grow(len(text))
 
@@ -131,6 +135,18 @@ func safeTerminalText(text string) string {
 		out.WriteString("\x1b[0m")
 	}
 	return out.String()
+}
+
+func containsTerminalControl(text string) bool {
+	for _, r := range text {
+		if r != '\n' && !unicode.IsControl(r) {
+			continue
+		}
+		if r != '\n' {
+			return true
+		}
+	}
+	return false
 }
 
 func hasResetSGRSuffix(text string) bool {

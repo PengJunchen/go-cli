@@ -267,6 +267,26 @@ func TestTranscriptRefreshSavedRequiresExactQuiescentTerminalProof(t *testing.T)
 	app.model.mu.Unlock()
 	require.NotContains(t, app.model.View(), "[saved: success]")
 	require.Contains(t, app.model.View(), "[durable publication: unconfirmed]")
+
+	app.model.mu.Lock()
+	app.model.runObservation.ExecutionState = core.RunExecutionQuiescent
+	app.model.runObservation.EventGapCount = 1
+	app.model.mu.Unlock()
+	view := app.model.View()
+	require.NotContains(t, view, "[saved: success]", "a core event gap means the live projection is incomplete")
+	require.Contains(t, view, "[Core event gaps: 1; live events may be incomplete]")
+	require.Contains(t, view, "[durable publication: unconfirmed]")
+
+	for _, outcome := range []core.RunOutcome{core.RunOutcomeError, core.RunOutcomeCancelled} {
+		app.model.mu.Lock()
+		app.model.runObservation.EventGapCount = 0
+		app.model.runObservation.Outcome = outcome
+		app.model.runObservation.TerminalOutcome = outcome
+		app.model.mu.Unlock()
+		view = app.model.View()
+		require.NotContains(t, view, "[saved: "+string(outcome)+"]", "only a successful terminal run can receive a saved badge")
+		require.Contains(t, view, "[durable publication: unconfirmed]")
+	}
 }
 
 func TestCoreAndLocalEventGapsRenderAsSeparateFacts(t *testing.T) {

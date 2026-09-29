@@ -71,7 +71,19 @@ func (m *teaModel) installTranscriptSnapshotLocked(snapshot CanonicalTranscriptS
 		delete(m.liveTranscriptRows, m.liveToolRows[occurrence])
 		delete(m.liveToolRows, occurrence)
 		delete(m.liveToolRenderers, occurrence)
+		delete(m.liveToolTruncation, occurrence)
+		delete(m.liveToolReceipts, occurrence)
 	}
+	remainingOrder := m.liveRowOrder[:0]
+	for _, key := range m.liveRowOrder {
+		if _, exists := m.liveTranscriptRows[key]; exists {
+			remainingOrder = append(remainingOrder, key)
+		}
+	}
+	for index := len(remainingOrder); index < len(m.liveRowOrder); index++ {
+		m.liveRowOrder[index] = ""
+	}
+	m.liveRowOrder = remainingOrder
 	m.hasTranscriptToolRows = len(toolRows) > 0
 	m.transcriptSplitActive = m.width >= splitWidthThreshold
 	m.transcriptSnapshot = snapshot.Clone()
@@ -198,7 +210,9 @@ func applyLiveToolMetadataToCanonicalRow(
 			value := *fact
 			rows[index].sourceTruncated = &value
 		}
-		rows[index].receiptOutcome = receipt
+		if receipt != "" {
+			rows[index].receiptOutcome = receipt
+		}
 		composeTranscriptViewportRowText(&rows[index])
 		return
 	}
@@ -280,6 +294,7 @@ func canonicalTranscriptViewportRows(snapshot CanonicalTranscriptSnapshot) []tra
 			expanded:        true,
 			viewTruncated:   viewTruncated,
 			sourceTruncated: sourceTruncated,
+			receiptOutcome:  source.Message.ReceiptOutcome,
 			toolPane:        source.Kind == TranscriptRowTool,
 		})
 		composeTranscriptViewportRowText(&rows[len(rows)-1])
@@ -573,10 +588,6 @@ func (m *teaModel) handleCanonicalToolEvent(event AgentEvent) tea.Cmd {
 	}
 	if event.ReceiptOutcome != "" {
 		m.liveToolReceipts[occurrence] = event.ReceiptOutcome
-	} else if event.IsError {
-		m.liveToolReceipts[occurrence] = "error"
-	} else if event.ContentType == ContentTypeToolResult && m.liveToolReceipts[occurrence] == "" {
-		m.liveToolReceipts[occurrence] = "complete"
 	}
 	if canonicalMatch {
 		if index, exists := m.toolTranscriptViewport.indexByKey[entryKey]; exists {
@@ -642,10 +653,6 @@ func (m *teaModel) updateLiveToolRowLocked(event AgentEvent, occurrence liveTool
 		}
 		if event.ReceiptOutcome != "" {
 			m.liveToolReceipts[occurrence] = event.ReceiptOutcome
-		} else if event.IsError {
-			m.liveToolReceipts[occurrence] = "error"
-		} else {
-			m.liveToolReceipts[occurrence] = "complete"
 		}
 	default:
 		return

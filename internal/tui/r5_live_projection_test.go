@@ -397,6 +397,30 @@ func TestLiveBridgeDuplicateTerminalReceiptIsStandaloneIncomplete(t *testing.T) 
 	require.Contains(t, stripEscape(h.model.View()), "[incomplete]")
 }
 
+func TestCanonicalToolResultWithoutReceiptOutcomeDoesNotClaimSuccess(t *testing.T) {
+	h := newLiveBridgeModel(t)
+	defer h.close()
+	index := uint64(1)
+	ordinal := uint64(1)
+	occurrence := liveToolOccurrence{
+		Key:                      ToolOccurrenceKey{RunID: "run-no-receipt", AssistantTranscriptOrdinal: ordinal, ToolCallID: "call-no-receipt"},
+		CanonicalTranscriptIndex: index,
+	}
+
+	h.send(t, core.AgentEvent{
+		Kind: "tool_call", Content: "read", ToolCallID: "call-no-receipt",
+		RunID: "run-no-receipt", CanonicalTranscriptIndex: &index, AssistantTranscriptOrdinal: &ordinal,
+	})
+	h.send(t, core.AgentEvent{
+		Kind: "tool_result", Content: "unacknowledged output", ToolCallID: "call-no-receipt",
+		RunID: "run-no-receipt", CanonicalTranscriptIndex: &index, AssistantTranscriptOrdinal: &ordinal,
+	})
+
+	_, hasReceipt := h.model.liveToolReceipts[occurrence]
+	require.False(t, hasReceipt, "a result event without typed receipt metadata is not a durable receipt")
+	require.NotContains(t, stripEscape(h.model.View()), "[receipt: complete]")
+}
+
 func TestLiveBridgeStreamedFinalStillConsumesToolCallMetadata(t *testing.T) {
 	h := newLiveBridgeModel(t)
 	defer h.close()

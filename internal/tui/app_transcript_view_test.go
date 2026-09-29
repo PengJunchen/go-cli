@@ -45,6 +45,127 @@ func TestAppCanonicalTranscriptRendersThroughUpdateAndView(t *testing.T) {
 	require.Contains(t, view, "canonical assistant answer")
 }
 
+func TestAppRestoredUnknownReceiptSurvivesTranscriptRefresh(t *testing.T) {
+	occurrence := ToolOccurrenceKey{RunID: "run-restored", AssistantTranscriptOrdinal: 1, ToolCallID: "call-restored"}
+	assistantOccurrence := AssistantOccurrenceKey{RunID: "run-restored", CanonicalTranscriptIndex: 1}
+	snapshot := CanonicalTranscriptSnapshot{
+		PhysicalSessionID: "session-restored",
+		BranchID:          "branch-restored",
+		Revision:          "revision-restored",
+		Rows: []CanonicalTranscriptRow{
+			{
+				Key:                 DurableTranscriptKey{PhysicalSessionID: "session-restored", BranchID: "branch-restored", EntryID: "assistant-restored"},
+				Kind:                TranscriptRowAssistant,
+				Message:             core.AgentMessage{Role: "assistant", Content: "read the directory", ToolCalls: []llm.ToolCall{{ID: "call-restored", Name: "read"}}},
+				AssistantOccurrence: &assistantOccurrence,
+				Calls:               []ToolOccurrence{{Key: occurrence, ToolName: "read"}},
+			},
+			{
+				Key:        DurableTranscriptKey{PhysicalSessionID: "session-restored", BranchID: "branch-restored", EntryID: "tool-restored"},
+				Kind:       TranscriptRowTool,
+				Message:    core.AgentMessage{Role: "tool", ToolName: "read", ToolCallID: "call-restored", Content: "directory result", ReceiptOutcome: "unknown"},
+				Occurrence: &occurrence,
+			},
+		},
+	}
+	app, err := NewBubbleteaAppWithTranscript(nil, snapshot, WithWidth(80), WithRunPublicationIdentity("run-restored", "owner-restored"))
+	require.NoError(t, err)
+	app.model.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
+	require.Contains(t, app.model.View(), "[receipt: unknown]", "a restored receipt outcome is part of the durable transcript projection")
+
+	refresh := newTranscriptRefreshRequest(1, TranscriptRefresh{
+		Snapshot: snapshot.Clone(),
+		Observation: RunObservation{
+			RunID: "run-restored", OwnerGeneration: "owner-restored",
+			Outcome: core.RunOutcomeError, ExecutionState: core.RunExecutionQuiescent,
+			TerminalEntryID: "terminal-restored", TerminalOutcome: core.RunOutcomeError,
+		},
+		Publication: core.DurablePublication{
+			State:           core.DurablePublicationSynced,
+			RunID:           "run-restored",
+			SessionID:       "session-restored",
+			OwnerGeneration: "owner-restored",
+		},
+	})
+	refresh.apply(app.model)
+	require.NoError(t, <-refresh.ack)
+	require.Contains(t, app.model.View(), "[receipt: unknown]", "same-source refresh must retain the persisted receipt status")
+}
+
+func TestAppCanonicalRefreshRetiresMatchedLiveRowsAndOccurrenceCaches(t *testing.T) {
+	const runID = "run-live-handoff"
+	const sessionID = "session-live-handoff"
+	const branchID = "branch-live-handoff"
+	index := uint64(2)
+	ordinal := uint64(1)
+	occurrenceKey := ToolOccurrenceKey{RunID: runID, AssistantTranscriptOrdinal: ordinal, ToolCallID: "call-live-handoff"}
+	occurrence := liveToolOccurrence{Key: occurrenceKey, CanonicalTranscriptIndex: index}
+	assistantOccurrence := AssistantOccurrenceKey{RunID: runID, CanonicalTranscriptIndex: index}
+	app, err := NewBubbleteaAppWithTranscript(nil, CanonicalTranscriptSnapshot{
+		PhysicalSessionID: sessionID, BranchID: branchID, Revision: "revision-empty",
+	}, WithWidth(80))
+	require.NoError(t, err)
+	app.model.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
+	app.model.Update(agentEventMsg{event: AgentEvent{
+		Type: "message", ContentType: ContentTypeAssistant, Content: "live assistant",
+		Incremental: true, RunID: runID, CanonicalTranscriptIndex: &index,
+	}})
+	truncated := false
+	app.model.Update(agentEventMsg{event: AgentEvent{
+		Type: "tool_call", ContentType: ContentTypeToolCall, Content: "read", ToolCallID: occurrenceKey.ToolCallID,
+		RunID: runID, CanonicalTranscriptIndex: &index, AssistantTranscriptOrdinal: &ordinal,
+	}})
+	app.model.Update(agentEventMsg{event: AgentEvent{
+		Type: "tool_output", ContentType: ContentTypeToolOutput, Content: "live output", ToolCallID: occurrenceKey.ToolCallID,
+		RunID: runID, CanonicalTranscriptIndex: &index, AssistantTranscriptOrdinal: &ordinal,
+	}})
+	app.model.Update(agentEventMsg{event: AgentEvent{
+		Type: "tool_result", ContentType: ContentTypeToolResult, Content: "live output", ToolCallID: occurrenceKey.ToolCallID,
+		RunID: runID, CanonicalTranscriptIndex: &index, AssistantTranscriptOrdinal: &ordinal,
+		ReceiptOutcome: "unknown", SourceTruncated: &truncated,
+	}})
+	require.NotEmpty(t, app.model.liveRowOrder)
+	require.Contains(t, app.model.liveToolReceipts, occurrence)
+	require.Contains(t, app.model.liveToolTruncation, occurrence)
+
+	snapshot := CanonicalTranscriptSnapshot{
+		PhysicalSessionID: sessionID, BranchID: branchID, Revision: "revision-canonical", ActiveLeafEntryID: "tool-entry",
+		Rows: []CanonicalTranscriptRow{
+			{
+				Key:                 DurableTranscriptKey{PhysicalSessionID: sessionID, BranchID: branchID, EntryID: "assistant-entry"},
+				Kind:                TranscriptRowAssistant,
+				Message:             core.AgentMessage{Role: "assistant", Content: "live assistant", ToolCalls: []llm.ToolCall{{ID: occurrenceKey.ToolCallID, Name: "read"}}},
+				AssistantOccurrence: &assistantOccurrence,
+				Calls:               []ToolOccurrence{{Key: occurrenceKey, ToolName: "read"}},
+			},
+			{
+				Key:             DurableTranscriptKey{PhysicalSessionID: sessionID, BranchID: branchID, EntryID: "tool-entry"},
+				Kind:            TranscriptRowTool,
+				Message:         core.AgentMessage{Role: "tool", ToolName: "read", ToolCallID: occurrenceKey.ToolCallID, Content: "live output", ReceiptOutcome: "unknown"},
+				Occurrence:      &occurrenceKey,
+				SourceTruncated: &truncated,
+			},
+		},
+	}
+	for index := 1; index <= 2; index++ {
+		refresh := newTranscriptRefreshRequest(uint64(index), TranscriptRefresh{
+			Snapshot: snapshot.Clone(), Publication: core.DurablePublication{State: core.DurablePublicationUnbound},
+		})
+		refresh.apply(app.model)
+		require.NoError(t, <-refresh.ack)
+	}
+	require.Empty(t, app.model.liveRowOrder)
+	require.Empty(t, app.model.liveTranscriptRows)
+	require.Empty(t, app.model.liveAssistantRows)
+	require.Empty(t, app.model.liveAssistantRenderers)
+	require.Empty(t, app.model.liveToolRows)
+	require.Empty(t, app.model.liveToolRenderers)
+	require.Empty(t, app.model.liveToolTruncation)
+	require.Empty(t, app.model.liveToolReceipts)
+	require.Equal(t, 1, len(app.model.toolTranscriptViewport.rows), "repeated canonical handoff must not retain a duplicate live tool projection")
+	require.Contains(t, app.model.View(), "[receipt: unknown]")
+}
+
 func TestAppCanonicalTranscriptSearchUsesFullLoadedSource(t *testing.T) {
 	content := "needle-beyond-preview\n" + strings.Repeat("long source line ", 8_000)
 	snapshot := CanonicalTranscriptSnapshot{
