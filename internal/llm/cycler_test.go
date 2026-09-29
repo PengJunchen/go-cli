@@ -261,6 +261,13 @@ func (p *cyclerTestProvider) Build(_ context.Context, cfg ModelConfig) (BaseChat
 		streamErr:  p.genErr,
 	}, func() {}, nil
 }
+func (p *cyclerTestProvider) buildGuarded(ctx context.Context, cfg ModelConfig, candidate *resolvedCandidateHandle) (BaseChatModel, func(), error) {
+	model, cleanup, err := p.Build(ctx, cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	return &attemptFencedTestModel{inner: model, candidate: candidate}, cleanup, nil
+}
 
 // newCyclerTestRegistry creates a ProviderRegistry with cyclerTestProvider
 // instances registered under the compatible identities used by threeModels. When genErr is
@@ -286,7 +293,7 @@ func TestModelCycler_WrapModel_DelegatesToSelected(t *testing.T) {
 	primary := &fbMockModel{genContent: "primary-ok"}
 	wrapped := c.WrapModel(primary)
 
-	resp, err := wrapped.Generate(context.Background(), nil)
+	resp, err := wrapped.Generate(attemptTestContext(), nil)
 	require.NoError(t, err)
 	assert.Contains(t, []string{"gpt-4o", "claude-3", "gemini-pro"}, resp.Content,
 		"response should come from a selected model, not the primary")
@@ -305,7 +312,7 @@ func TestModelCycler_WrapModel_FallbackOnError(t *testing.T) {
 	primary := &fbMockModel{genContent: "primary-ok"}
 	wrapped := c.WrapModel(primary)
 
-	resp, err := wrapped.Generate(context.Background(), nil)
+	resp, err := wrapped.Generate(attemptTestContext(), nil)
 	require.NoError(t, err)
 	assert.Equal(t, "primary-ok", resp.Content, "should fall back to primary on error")
 	assert.Equal(t, 1, primary.genCalls, "primary should be called exactly once as fallback")
@@ -344,7 +351,7 @@ func TestModelCycler_WrapModel_RoundRobin(t *testing.T) {
 
 	expected := []string{"gpt-4o", "claude-3", "gemini-pro"}
 	for i, want := range expected {
-		resp, err := wrapped.Generate(context.Background(), nil)
+		resp, err := wrapped.Generate(attemptTestContext(), nil)
 		require.NoError(t, err)
 		assert.Equal(t, want, resp.Content, "call %d should select model %q", i, want)
 	}
@@ -364,10 +371,9 @@ func TestModelCycler_WrapModel_SessionAffinity(t *testing.T) {
 	primary := &fbMockModel{genContent: "primary-ok"}
 	wrapped := c.WrapModel(primary)
 
-	ctx := WithSessionID(context.Background(), "session-A")
-
 	var firstContent string
 	for i := 0; i < 5; i++ {
+		ctx := WithSessionID(attemptTestContext(), "session-A")
 		resp, err := wrapped.Generate(ctx, nil)
 		require.NoError(t, err)
 		if i == 0 {
@@ -397,7 +403,7 @@ func TestModelCycler_WrapModel_SessionAffinity_DifferentSessions(t *testing.T) {
 
 	contents := make(map[string]bool)
 	for _, sid := range []string{"s1", "s2", "s3"} {
-		ctx := WithSessionID(context.Background(), sid)
+		ctx := WithSessionID(attemptTestContext(), sid)
 		resp, err := wrapped.Generate(ctx, nil)
 		require.NoError(t, err)
 		contents[resp.Content] = true
@@ -419,7 +425,7 @@ func TestModelCycler_WrapModel_Stream_Delegates(t *testing.T) {
 	primary := &fbMockModel{streamText: "primary-stream"}
 	wrapped := c.WrapModel(primary)
 
-	ch, err := wrapped.Stream(context.Background(), nil)
+	ch, err := wrapped.Stream(attemptTestContext(), nil)
 	require.NoError(t, err)
 
 	var got string
@@ -443,7 +449,7 @@ func TestModelCycler_WrapModel_Stream_FallbackOnError(t *testing.T) {
 	primary := &fbMockModel{streamText: "primary-stream"}
 	wrapped := c.WrapModel(primary)
 
-	ch, err := wrapped.Stream(context.Background(), nil)
+	ch, err := wrapped.Stream(attemptTestContext(), nil)
 	require.NoError(t, err)
 
 	var got string
