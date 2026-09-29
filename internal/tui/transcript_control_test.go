@@ -149,6 +149,55 @@ func TestTranscriptRefreshClaimMakesCancellationWaitForApplyAck(t *testing.T) {
 	}
 }
 
+func TestTranscriptRefreshShutdownReleasesClaimedWaiter(t *testing.T) {
+	request := newTranscriptRefreshRequest(22, TranscriptRefresh{})
+	require.True(t, request.claim())
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- request.wait(context.Background()) }() //nolint:errcheck
+	require.True(t, request.closePending(ErrTranscriptRefreshClosed), "shutdown must release a claimed request whose view was not acknowledged")
+	select {
+	case err := <-waitDone:
+		require.ErrorIs(t, err, ErrTranscriptRefreshClosed)
+	case <-time.After(time.Second):
+		t.Fatal("shutdown did not release a claimed refresh waiter")
+	}
+}
+
+func TestTranscriptRefreshAcknowledgesAfterViewQueuedForRenderer(t *testing.T) {
+	initial := appControlSnapshot("session-1", "main", "old")
+	app, err := NewBubbleteaAppWithTranscript(make(chan AgentEvent), initial,
+		WithRunPublicationIdentity("run-1", "owner-1"), WithWidth(80))
+	require.NoError(t, err)
+	app.model.Update(tea.WindowSizeMsg{Width: 80, Height: 10})
+	request := newTranscriptRefreshRequest(3, appControlRefresh("rendered replacement", core.DurablePublicationPending))
+
+	model, renderAck := app.model.Update(transcriptRefreshControlMsg{request: request})
+	require.NotNil(t, renderAck, "a successful apply must schedule a view-queued ACK")
+	require.IsType(t, &teaModel{}, model)
+	app.model.mu.Lock()
+	require.Equal(t, "rendered replacement", app.model.transcriptSnapshot.Rows[0].Message.Content)
+	app.model.mu.Unlock()
+	select {
+	case err := <-request.ack:
+		t.Fatalf("refresh acknowledged before Bubble Tea queued its replacement view: %v", err)
+	default:
+	}
+
+	waitDone := make(chan error, 1)
+	go func() { waitDone <- request.wait(context.Background()) }() //nolint:errcheck
+	view := app.model.View()
+	require.Contains(t, view, "rendered replacement")
+	viewQueuedMsg := renderAck()
+	require.IsType(t, transcriptRefreshViewQueuedMsg{}, viewQueuedMsg)
+	_, _ = app.model.Update(viewQueuedMsg)
+	select {
+	case err := <-waitDone:
+		require.NoError(t, err)
+	case <-time.After(time.Second):
+		t.Fatal("view-queued ACK did not release the refresh waiter")
+	}
+}
+
 func TestTranscriptRefreshInFlightIsBoundedToOne(t *testing.T) {
 	initial := appControlSnapshot("session-1", "main", "old")
 	events := make(chan AgentEvent)

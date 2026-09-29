@@ -87,8 +87,7 @@ func TestAppRestoredUnknownReceiptSurvivesTranscriptRefresh(t *testing.T) {
 			OwnerGeneration: "owner-restored",
 		},
 	})
-	refresh.apply(app.model)
-	require.NoError(t, <-refresh.ack)
+	applyAndQueueTranscriptRefreshView(t, app.model, refresh)
 	require.Contains(t, app.model.View(), "[receipt: unknown]", "same-source refresh must retain the persisted receipt status")
 }
 
@@ -151,8 +150,7 @@ func TestAppCanonicalRefreshRetiresMatchedLiveRowsAndOccurrenceCaches(t *testing
 		refresh := newTranscriptRefreshRequest(uint64(index), TranscriptRefresh{
 			Snapshot: snapshot.Clone(), Publication: core.DurablePublication{State: core.DurablePublicationUnbound},
 		})
-		refresh.apply(app.model)
-		require.NoError(t, <-refresh.ack)
+		applyAndQueueTranscriptRefreshView(t, app.model, refresh)
 	}
 	require.Empty(t, app.model.liveRowOrder)
 	require.Empty(t, app.model.liveTranscriptRows)
@@ -266,9 +264,18 @@ func TestAppToolResultSourceTruncationUsesExactStructuredOccurrence(t *testing.T
 	require.Nil(t, app.model.transcriptSnapshot.Rows[1].SourceTruncated, "live metadata must not mutate the canonical snapshot")
 
 	refresh := newTranscriptRefreshRequest(1, TranscriptRefresh{Snapshot: snapshot, Publication: core.DurablePublication{State: core.DurablePublicationUnbound}})
-	refresh.apply(app.model)
-	require.NoError(t, <-refresh.ack)
+	applyAndQueueTranscriptRefreshView(t, app.model, refresh)
 	require.Contains(t, app.model.View(), "[source output truncated]", "the exact live occurrence fact survives same-branch canonical replacement")
+}
+
+func applyAndQueueTranscriptRefreshView(t *testing.T, model *teaModel, request *transcriptRefreshRequest) {
+	t.Helper()
+	_, renderAck := model.Update(transcriptRefreshControlMsg{request: request})
+	require.NotNil(t, renderAck)
+	_ = model.View()
+	viewQueuedMsg := renderAck()
+	_, _ = model.Update(viewQueuedMsg)
+	require.NoError(t, <-request.ack)
 }
 
 func TestAppTranscriptPaneLayoutAcrossSupportedWidths(t *testing.T) {
