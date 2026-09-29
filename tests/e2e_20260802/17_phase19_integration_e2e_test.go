@@ -17,6 +17,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -41,19 +42,19 @@ import (
 // TestE2E_Phase19_ApprovalCallbackWithSandbox
 // -----------------------------------------------------------------------------
 
-// alwaysAllowCallback is a test ApprovalCallback that always returns Allow.
-// It replaces InteractiveApprovalCallback in E2E tests because the interactive
-// callback's strings.Reader is consumed after the first read.
-type alwaysAllowCallback struct{}
+// countingAllowCallback records whether the approval callback was reached.
+type countingAllowCallback struct {
+	calls atomic.Int32
+}
 
-func (alwaysAllowCallback) RequestApproval(_ context.Context, _ string, _ map[string]any) (approval.ApprovalResult, error) {
+func (callback *countingAllowCallback) RequestApproval(_ context.Context, _ string, _ map[string]any) (approval.ApprovalResult, error) {
+	callback.calls.Add(1)
 	return approval.ApprovalAllow, nil
 }
 
-// TestE2E_Phase19_ApprovalCallbackWithSandbox verifies that a bash command goes
-// through both BashSandbox validation and ApprovalCallback. The AutoClassifier
-// returns Ask for bash so the callback is consulted; the BashSandbox then
-// validates the command inside the tool.
+// TestE2E_Phase19_ApprovalCallbackWithSandbox verifies that prepared dispatch
+// rejects an opaque legacy approval wrapper before invoking its callback or a
+// tool. It also checks that the BashSandbox still blocks unsafe commands.
 func TestE2E_Phase19_ApprovalCallbackWithSandbox(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -61,7 +62,7 @@ func TestE2E_Phase19_ApprovalCallbackWithSandbox(t *testing.T) {
 
 	dir := t.TempDir()
 
-	// 1. Create BashTool with BashSandbox (whitelist temp dir, blacklist rm).
+	// Create BashTool with BashSandbox (whitelist temp dir, blacklist rm).
 	sb := tools.NewDefaultBashSandbox(
 		tools.WithWhitelist([]string{dir}),
 	)
@@ -77,38 +78,32 @@ func TestE2E_Phase19_ApprovalCallbackWithSandbox(t *testing.T) {
 	tr := tools.NewDefaultToolRegistry()
 	require.NoError(t, tr.Register(ctx, bashTool))
 
-	// Test 1: safe command in whitelisted dir -> callback allows -> sandbox
-	// passes -> executes.
-	mw1 := approval.NewApprovalMiddleware(
+	// The compatibility wrapper is intentionally rejected by prepared
+	// dispatch. A denial here proves it cannot be treated as an audited
+	// production approval stage.
+	callback := &countingAllowCallback{}
+	mw := approval.NewApprovalMiddleware(
 		approval.NewAutoClassifier(nil, []string{"bash"}),
 		approval.NewInMemoryApprovalStore(),
-		approval.WithCallback(alwaysAllowCallback{}),
+		approval.WithCallback(callback),
 	)
-	wrapped1 := tools.NewMiddlewareToolRegistry(tr, mw1.WrapToolCall)
-	def1, err := wrapped1.Get(ctx, "bash")
-	require.NoError(t, err)
+	wrapped := tools.NewMiddlewareToolRegistry(tr, mw.WrapToolCall)
+	def, err := wrapped.Get(ctx, "bash")
+	require.Nil(t, def)
+	require.ErrorIs(t, err, tools.ErrPreparedOpaqueWrapperUnsupported)
+	assert.Zero(t, callback.calls.Load(), "rejected wrappers must not prompt for approval")
 
-	res, err := def1.Execute(ctx, toolCallWithArgs("bash", map[string]any{
-		"command": "echo hello",
-	}))
-	require.NoError(t, err)
-	assert.Equal(t, "hello\n", res.Output)
-
-	// Test 2: "rm -rf /" -> callback allows -> sandbox blocks.
-	mw2 := approval.NewApprovalMiddleware(
-		approval.NewAutoClassifier(nil, []string{"bash"}),
-		approval.NewInMemoryApprovalStore(),
-		approval.WithCallback(alwaysAllowCallback{}),
-	)
-	wrapped2 := tools.NewMiddlewareToolRegistry(tr, mw2.WrapToolCall)
-	def2, err := wrapped2.Get(ctx, "bash")
-	require.NoError(t, err)
-
-	_, err = def2.Execute(ctx, toolCallWithArgs("bash", map[string]any{
-		"command": "rm -rf /",
+	// The sandbox independently rejects a destructive command before the
+	// shell executes it. Its target is confined to this test's temporary dir.
+	protectedPath := filepath.Join(dir, "protected.txt")
+	require.NoError(t, os.WriteFile(protectedPath, []byte("keep"), 0600))
+	_, err = bashTool.Execute(ctx, toolCallWithArgs("bash", map[string]any{
+		"command": fmt.Sprintf("rm -rf %q", protectedPath),
 	}))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "sandbox")
+	_, err = os.Stat(protectedPath)
+	require.NoError(t, err, "the sandbox must preserve the targeted temporary file")
 
 	// Test 3: "echo hi" in non-whitelisted dir -> sandbox blocks. We need a
 	// separate BashTool with a non-whitelisted workdir.
@@ -118,19 +113,7 @@ func TestE2E_Phase19_ApprovalCallbackWithSandbox(t *testing.T) {
 		tools.WithBashSandbox(sb), // same sandbox whitelisted to dir, not otherDir
 		tools.WithTimeout(10*time.Second),
 	)
-	tr2 := tools.NewDefaultToolRegistry()
-	require.NoError(t, tr2.Register(ctx, bashToolOther))
-
-	mw3 := approval.NewApprovalMiddleware(
-		approval.NewAutoClassifier(nil, []string{"bash"}),
-		approval.NewInMemoryApprovalStore(),
-		approval.WithCallback(alwaysAllowCallback{}),
-	)
-	wrapped3 := tools.NewMiddlewareToolRegistry(tr2, mw3.WrapToolCall)
-	def3, err := wrapped3.Get(ctx, "bash")
-	require.NoError(t, err)
-
-	_, err = def3.Execute(ctx, toolCallWithArgs("bash", map[string]any{
+	_, err = bashToolOther.Execute(ctx, toolCallWithArgs("bash", map[string]any{
 		"command": "echo hi",
 	}))
 	require.Error(t, err)
@@ -515,7 +498,7 @@ func TestE2E_Phase19_GoalManagementWithPlanMode(t *testing.T) {
 	assert.True(t, planCtrl.IsActive())
 	assert.True(t, planCtrl.ShouldBlockWrite("write"))
 	assert.True(t, planCtrl.ShouldBlockWrite("bash"))
-	assert.False(t, planCtrl.ShouldBlockWrite("read"))
+	assert.False(t, planCtrl.ShouldBlockWrite("goal_list"), "the explicit read-only goal-list control remains available in Plan Mode")
 
 	// 7. PlanMode inactive -> write tool allowed.
 	require.NoError(t, planCtrl.Exit(ctx, "plan complete"))

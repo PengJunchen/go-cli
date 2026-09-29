@@ -24,6 +24,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/approval"
 	"github.com/pengjunchen/go-cli/internal/cli"
 	"github.com/pengjunchen/go-cli/internal/config"
+	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
@@ -158,13 +159,12 @@ func TestET_Phase19_AC1_AssembledComponentsNotNil(t *testing.T) {
 }
 
 // =============================================================================
-// AC-2: PlanModeController is exposed in AgentAssembly and wired into tools
+// AC-2: PlanModeController remains exposed while model-facing controls stay absent
 // =============================================================================
 
 // TestET_Phase19_AC2_PlanModeControllerExposedAndWired verifies that
-// PlanModeController (D22) is exposed on AgentAssembly and that the
-// enter_plan_mode / exit_plan_mode tools in the assembled registry share the
-// same controller instance, proving the wiring is live end-to-end.
+// PlanModeController remains available to user-controlled command handling,
+// while model-facing enter_plan_mode / exit_plan_mode tools are not registered.
 func TestET_Phase19_AC2_PlanModeControllerExposedAndWired(t *testing.T) {
 	assembly := phase19wAssemble(t, phase19wTestConfig())
 
@@ -173,33 +173,20 @@ func TestET_Phase19_AC2_PlanModeControllerExposedAndWired(t *testing.T) {
 	assert.False(t, assembly.PlanCtrl.IsActive(), "plan mode should be inactive initially")
 
 	ctx := context.Background()
+	for _, name := range []string{"enter_plan_mode", "exit_plan_mode"} {
+		_, err := assembly.ToolRegistry.Get(ctx, name)
+		require.ErrorIs(t, err, tools.ErrToolNotFound,
+			"model-facing plan control %q must stay unavailable", name)
+	}
 
-	// Execute enter_plan_mode through the wrapped registry (E2E: approval +
-	// mutation middleware). The tool shares the same PlanCtrl as the
-	// assembly, so IsActive must flip to true.
-	enterDef, err := assembly.ToolRegistry.Get(ctx, "enter_plan_mode")
-	require.NoError(t, err)
-	_, err = enterDef.Execute(ctx, toolCallWithArgs("enter_plan_mode", map[string]any{
-		"reason": "e2e planning",
-	}))
-	require.NoError(t, err)
-	assert.True(t, assembly.PlanCtrl.IsActive(), "plan mode must be active after enter_plan_mode")
-
-	// Exit plan mode through the registry.
-	exitDef, err := assembly.ToolRegistry.Get(ctx, "exit_plan_mode")
-	require.NoError(t, err)
-	_, err = exitDef.Execute(ctx, toolCallWithArgs("exit_plan_mode", map[string]any{
-		"summary": "done",
-	}))
-	require.NoError(t, err)
-	assert.False(t, assembly.PlanCtrl.IsActive(), "plan mode must be inactive after exit_plan_mode")
-
-	// ShouldBlockWrite reflects plan-mode semantics while active.
-	require.NoError(t, assembly.PlanCtrl.Enter(ctx, "block check"))
+	// User-controlled Plan Mode transitions still update the exposed controller.
+	require.NoError(t, assembly.PlanCtrl.Enter(ctx, "user requested planning"))
 	assert.True(t, assembly.PlanCtrl.ShouldBlockWrite("write"))
 	assert.True(t, assembly.PlanCtrl.ShouldBlockWrite("bash"))
-	assert.False(t, assembly.PlanCtrl.ShouldBlockWrite("read"))
-	require.NoError(t, assembly.PlanCtrl.Exit(ctx, ""))
+	assert.False(t, assembly.PlanCtrl.ShouldBlockWrite("goal_list"))
+	require.NoError(t, assembly.PlanCtrl.Exit(ctx, "user completed planning"))
+	assert.False(t, assembly.PlanCtrl.IsActive())
+	assert.False(t, assembly.PlanCtrl.ShouldBlockWrite("write"))
 }
 
 // =============================================================================
@@ -208,10 +195,8 @@ func TestET_Phase19_AC2_PlanModeControllerExposedAndWired(t *testing.T) {
 
 // TestET_Phase19_AC3_PermissionModeResolverWired verifies that
 // PermissionModeResolver (D1/D24) is created by AssembleAgent, exposed on the
-// assembly, and functional: it resolves PermissionMode values to the correct
-// classifiers. A middleware built with the resolver + PermissionPlan mode
-// denies write (Ask→Deny with autoApprove=false), proving the resolver drives
-// classification.
+// assembly, resolves modes to the expected classifiers, and drives a prepared
+// middleware decision in PermissionPlan mode.
 func TestET_Phase19_AC3_PermissionModeResolverWired(t *testing.T) {
 	assembly := phase19wAssemble(t, phase19wTestConfig())
 
@@ -235,26 +220,37 @@ func TestET_Phase19_AC3_PermissionModeResolverWired(t *testing.T) {
 	assert.Equal(t, approval.Allow, autoFullClassifier.Classify(ctx, toolCall("write")),
 		"PermissionAutoFull classifier should return Allow for write")
 
-	// Behavioral: a middleware built with the resolver + PermissionPlan mode
-	// denies write (Ask → Deny with autoApprove=false, no callback). This
-	// proves the resolver drives the effective classifier inside the
-	// ApprovalMiddleware.
+	writeTool := &recordingTool{name: "write"}
+	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck
+	require.NoError(t, base.Register(ctx, writeTool))
+	fence := base.DispatchFence()
+	controller := core.NewDefaultPlanModeController(fence)
+	mutationQueue := tools.NewDefaultFileMutationQueue()
+	defer func() {
+		require.NoError(t, mutationQueue.(*tools.DefaultFileMutationQueue).Close())
+	}()
 	mw := approval.NewApprovalMiddleware(
 		&approval.AllowAllClassifier{}, // static classifier; overridden by resolver
 		approval.NewInMemoryApprovalStore(),
 		approval.WithAutoApprove(false),
+		approval.WithDispatchFence(fence),
+		approval.WithPlanModeController(controller),
 		approval.WithPermissionModeResolver(assembly.ModeResolver),
 		approval.WithPermissionMode(approval.PermissionPlan),
 	)
-	tr := tools.NewDefaultToolRegistry()
-	require.NoError(t, tr.Register(ctx, &recordingTool{name: "write"}))
-	wrapped := tools.NewMiddlewareToolRegistry(tr, mw.WrapToolCall)
+	wrapped := tools.NewMiddlewareToolRegistry(base)
+	require.NoError(t, wrapped.SetPreparedToolPolicy(mw.PreparedPolicy))
+	require.NoError(t, wrapped.SetPreparedToolStages(tools.PreparedToolStages{MutationQueue: mutationQueue}))
 
 	def, err := wrapped.Get(ctx, "write")
 	require.NoError(t, err)
-	_, err = def.Execute(ctx, toolCall("write"))
+	_, err = def.Execute(ctx, toolCallWithArgs("write", map[string]any{
+		"path":    "denied.txt",
+		"content": "must not be written",
+	}))
 	require.ErrorIs(t, err, approval.ErrToolDenied,
-		"PermissionPlan + resolver should deny write (Ask→Deny)")
+		"PermissionPlan should resolve Ask to Deny on the prepared path")
+	assert.Zero(t, writeTool.calls.Load(), "the resolved PermissionPlan decision must prevent execution")
 }
 
 // =============================================================================
