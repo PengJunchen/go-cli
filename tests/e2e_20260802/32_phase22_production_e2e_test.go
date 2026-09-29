@@ -47,6 +47,9 @@ func phase22ProdTestConfig() *config.Config {
 // uses a fresh context.
 func phase22ProdAssemble(t *testing.T, cfg *config.Config) *cli.AgentAssembly {
 	t.Helper()
+	if cfg.Git.WorkDir == "" {
+		cfg.Git.WorkDir = t.TempDir()
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	t.Cleanup(cancel)
 	assembly, err := cli.AssembleAgent(ctx, cfg, "openai", "test-model", io.Discard, cli.WithApproveMode(cli.ApproveAuto))
