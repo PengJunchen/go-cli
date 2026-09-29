@@ -198,6 +198,215 @@ func TestFindSystemFindUsesNULRecordsForUnusualNames(t *testing.T) {
 	assert.Equal(t, false, result.Metadata["truncated"])
 }
 
+func TestFindGlobPatternMatchesSameEntriesAcrossBackends(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("backend fixtures require POSIX helper shims")
+	}
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	findPath, err := exec.LookPath("find")
+	require.NoError(t, err)
+	dir := t.TempDir()
+	for _, name := range []string{"foo.txt", "FOO.txt", "xfoo.txt", ".foo-hidden.txt", "ignored-foo.txt"} {
+		require.NoError(t, os.WriteFile(filepath.Join(dir, name), nil, 0o600))
+	}
+	require.NoError(t, os.WriteFile(filepath.Join(dir, ".gitignore"), []byte("xfoo.txt\nignored-foo.txt\n"), 0o600))
+	call := ToolCall{Args: map[string]any{"pattern": "*foo*.txt", "type": "f"}}
+
+	goResult, err := NewFindTool(WithFindWorkdir(dir), WithFindForceNode(true)).Execute(context.Background(), call)
+	require.NoError(t, err)
+	assert.Equal(t, []string{".foo-hidden.txt", "foo.txt", "ignored-foo.txt", "xfoo.txt"}, sortedFindOutputBasenames(goResult.Output))
+	assert.Equal(t, 4, goResult.Metadata["matches"])
+
+	fdDir := t.TempDir()
+	fdScript := fmt.Sprintf(`#!/bin/sh
+glob=no
+print0=no
+kind=
+	pattern=
+	root=
+	while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --glob) glob=yes; shift ;;
+    --print0) print0=yes; shift ;;
+    --case-sensitive) case_sensitive=yes; shift ;;
+    --hidden) hidden=yes; shift ;;
+    --no-ignore) no_ignore=yes; shift ;;
+    --type) kind=$2; shift 2 ;;
+    --) shift; pattern=$1; root=$2; break ;;
+    *) shift ;;
+  esac
+done
+[ "$glob" = yes ] && [ "$print0" = yes ] && [ "$case_sensitive" = yes ] && [ "$hidden" = yes ] && [ "$no_ignore" = yes ] && [ "$pattern" = '*foo*.txt' ] || exit 24
+exec %s "$root" -mindepth 1 -type "$kind" -name "$pattern" -print0
+`, quoteDirectoryCaptureShellArg(findPath))
+	require.NoError(t, os.WriteFile(filepath.Join(fdDir, "fd"), []byte(fdScript), 0o700))
+	t.Setenv("PATH", fdDir)
+	fdResult, err := NewFindTool(WithFindWorkdir(dir)).Execute(context.Background(), call)
+	require.NoError(t, err)
+	assert.Equal(t, []string{".foo-hidden.txt", "foo.txt", "ignored-foo.txt", "xfoo.txt"}, sortedFindOutputBasenames(fdResult.Output))
+	assert.Equal(t, 4, fdResult.Metadata["matches"])
+
+	systemFindDir := t.TempDir()
+	require.NoError(t, os.Symlink(findPath, filepath.Join(systemFindDir, "find")))
+	t.Setenv("PATH", systemFindDir)
+	systemResult, err := NewFindTool(WithFindWorkdir(dir)).Execute(context.Background(), call)
+	require.NoError(t, err)
+	assert.Equal(t, []string{".foo-hidden.txt", "foo.txt", "ignored-foo.txt", "xfoo.txt"}, sortedFindOutputBasenames(systemResult.Output))
+	assert.Equal(t, 4, systemResult.Metadata["matches"])
+}
+
+func sortedFindOutputBasenames(output string) []string {
+	if output == "" {
+		return []string{}
+	}
+	lines := strings.Split(output, "\n")
+	names := make([]string, 0, len(lines))
+	for _, line := range lines {
+		names = append(names, filepath.Base(line))
+	}
+	sort.Strings(names)
+	return names
+}
+
+func TestFindSystemFindExcludesDirectoryRootAndFileRootIsIncluded(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("system find fixture requires POSIX symlinks")
+	}
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	findPath, err := exec.LookPath("find")
+	require.NoError(t, err)
+	helperDir := t.TempDir()
+	require.NoError(t, os.Symlink(findPath, filepath.Join(helperDir, "find")))
+	t.Setenv("PATH", helperDir)
+
+	dir := t.TempDir()
+	rootName := filepath.Base(dir)
+	call := ToolCall{Args: map[string]any{"path": ".", "pattern": rootName}}
+	systemDirectoryResult, err := NewFindTool(WithFindWorkdir(dir)).Execute(context.Background(), call)
+	require.NoError(t, err)
+	assert.Empty(t, systemDirectoryResult.Output)
+	assert.Equal(t, 0, systemDirectoryResult.Metadata["matches"])
+
+	goDirectoryResult, err := NewFindTool(WithFindWorkdir(dir), WithFindForceNode(true)).Execute(context.Background(), call)
+	require.NoError(t, err)
+	assert.Empty(t, goDirectoryResult.Output)
+	assert.Equal(t, 0, goDirectoryResult.Metadata["matches"])
+
+	fdMarker := filepath.Join(helperDir, "fd-called")
+	fdScript := "#!/bin/sh\nprintf called > " + quoteDirectoryCaptureShellArg(fdMarker) + "\nexit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(helperDir, "fd"), []byte(fdScript), 0o700))
+	rootFile := filepath.Join(dir, "root-file.txt")
+	require.NoError(t, os.WriteFile(rootFile, nil, 0o600))
+	fileCall := ToolCall{Args: map[string]any{"path": rootFile, "pattern": "root-file.txt", "type": "f"}}
+	fileRootResult, err := NewFindTool(WithFindWorkdir(dir)).Execute(context.Background(), fileCall)
+	require.NoError(t, err)
+	assert.Equal(t, rootFile, fileRootResult.Output)
+	assert.Equal(t, 1, fileRootResult.Metadata["matches"])
+	assert.NoFileExists(t, fdMarker, "a file root must be handled before directory-only helpers")
+	goFileResult, err := NewFindTool(WithFindWorkdir(dir), WithFindForceNode(true)).Execute(context.Background(), fileCall)
+	require.NoError(t, err)
+	assert.Equal(t, rootFile, goFileResult.Output)
+	assert.Equal(t, fileRootResult.Metadata["matches"], goFileResult.Metadata["matches"])
+}
+
+func TestFindFDZeroExitWithNoResultsReturnsEmptyResult(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell helper fixtures require POSIX sh")
+	}
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	helperDir := t.TempDir()
+	fdMarker := filepath.Join(helperDir, "fd-called")
+	findMarker := filepath.Join(helperDir, "find-called")
+	fdScript := "#!/bin/sh\nprintf called > " + quoteDirectoryCaptureShellArg(fdMarker) + "\nexit 0\n"
+	findScript := "#!/bin/sh\nprintf called > " + quoteDirectoryCaptureShellArg(findMarker) + "\nexit 0\n"
+	require.NoError(t, os.WriteFile(filepath.Join(helperDir, "fd"), []byte(fdScript), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(helperDir, "find"), []byte(findScript), 0o700))
+	t.Setenv("PATH", helperDir)
+
+	result, err := NewFindTool(WithFindWorkdir(t.TempDir())).Execute(context.Background(), ToolCall{Args: map[string]any{"pattern": "missing*.txt", "type": "f"}})
+	require.NoError(t, err)
+	assert.Empty(t, result.Output)
+	assert.Equal(t, 0, result.Metadata["matches"])
+	assert.Equal(t, false, result.Metadata["truncated"])
+	assert.FileExists(t, fdMarker)
+	assert.NoFileExists(t, findMarker)
+}
+
+func TestFindFDExitOneFallsBackAsHelperError(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell helper fixtures require POSIX sh")
+	}
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	helperDir := t.TempDir()
+	fdMarker := filepath.Join(helperDir, "fd-called")
+	findMarker := filepath.Join(helperDir, "find-called")
+	fdScript := "#!/bin/sh\nprintf called > " + quoteDirectoryCaptureShellArg(fdMarker) + "\nprintf 'partial.txt\\000'\nexit 1\n"
+	findScript := "#!/bin/sh\nprintf called > " + quoteDirectoryCaptureShellArg(findMarker) + "\nprintf 'fallback.txt\\000'\n"
+	require.NoError(t, os.WriteFile(filepath.Join(helperDir, "fd"), []byte(fdScript), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(helperDir, "find"), []byte(findScript), 0o700))
+	t.Setenv("PATH", helperDir)
+
+	result, err := NewFindTool(WithFindWorkdir(t.TempDir())).Execute(context.Background(), ToolCall{Args: map[string]any{"pattern": "*.txt", "type": "f"}})
+	require.NoError(t, err)
+	assert.Equal(t, "fallback.txt", result.Output)
+	assert.Equal(t, 1, result.Metadata["matches"])
+	assert.FileExists(t, fdMarker)
+	assert.FileExists(t, findMarker)
+}
+
+func TestFindFDArgvKeepsDashPatternsAfterOptionSeparator(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("shell helper fixtures require POSIX sh")
+	}
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	for _, pattern := range []string{"--exec=touch", "-glob"} {
+		t.Run(pattern, func(t *testing.T) {
+			helperDir := t.TempDir()
+			workdir := t.TempDir()
+			argvFile := filepath.Join(helperDir, "argv")
+			script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > " + quoteDirectoryCaptureShellArg(argvFile) + "\n"
+			require.NoError(t, os.WriteFile(filepath.Join(helperDir, "fd"), []byte(script), 0o700))
+			t.Setenv("PATH", helperDir)
+
+			_, err := NewFindTool(WithFindWorkdir(workdir)).Execute(context.Background(), ToolCall{Args: map[string]any{"pattern": pattern, "type": "f"}})
+			require.NoError(t, err)
+			data, err := os.ReadFile(argvFile)
+			require.NoError(t, err)
+			assert.Equal(t, []string{"--print0", "--glob", "--case-sensitive", "--hidden", "--no-ignore", "--type", "f", "--", pattern, filepath.Clean(workdir)}, strings.Split(strings.TrimSuffix(string(data), "\n"), "\n"))
+		})
+	}
+}
+
+func TestFindAvailableFDDoesNotExecuteDashPattern(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fd integration fixture requires POSIX filenames")
+	}
+	fdPath, err := exec.LookPath("fd")
+	if err != nil {
+		t.Skip("fd is not installed")
+	}
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "--exec=touch")
+	require.NoError(t, os.WriteFile(path, nil, 0o600))
+	oldTime := time.Date(2020, time.January, 2, 3, 4, 5, 0, time.Local)
+	require.NoError(t, os.Chtimes(path, oldTime, oldTime))
+	t.Setenv("PATH", filepath.Dir(fdPath))
+
+	result, err := NewFindTool(WithFindWorkdir(dir)).Execute(context.Background(), ToolCall{Args: map[string]any{"pattern": "--exec=touch", "type": "f"}})
+	require.NoError(t, err)
+	assert.Equal(t, 1, result.Metadata["matches"])
+	info, err := os.Stat(path)
+	require.NoError(t, err)
+	assert.True(t, info.ModTime().Equal(oldTime), "a dash-prefixed pattern must not activate fd's command option")
+}
+
 func writeUnusualDirectoryCaptureFiles(t *testing.T, dir string) []string {
 	t.Helper()
 	names := []string{"odd\nname", "   ", "ordinary name"}
