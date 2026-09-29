@@ -3,7 +3,6 @@ package core
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -52,6 +51,28 @@ func (r *attemptResultRecorder) snapshot() []llm.ProviderAttemptResult {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return append([]llm.ProviderAttemptResult(nil), r.results...)
+}
+
+type operationControlledRetryPolicy struct {
+	mu             sync.Mutex
+	allowedRetries int
+	attempts       []int
+}
+
+func (p *operationControlledRetryPolicy) ShouldRetry(_ context.Context, _ error, attempt int) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.attempts = append(p.attempts, attempt)
+	return attempt < p.allowedRetries
+}
+
+func (*operationControlledRetryPolicy) NextBackoff(context.Context, int) time.Duration { return 0 }
+func (*operationControlledRetryPolicy) Name() string                                   { return "operation-controlled" }
+
+func (p *operationControlledRetryPolicy) calls() []int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]int(nil), p.attempts...)
 }
 
 func TestLoopOwnsResolvedProviderDispatchAndFinish(t *testing.T) {
@@ -132,6 +153,7 @@ func TestLoopCapsActualDispatchesAcrossRetryMiddleware(t *testing.T) {
 		WithLLM(model),
 		WithMaxIterations(1),
 		WithProviderAttemptRecorder(recorder.record),
+		WithProviderRetryPolicy(operationTestRetryPolicy{}),
 		WithModelWrapper(func(value any) any {
 			base, ok := value.(llm.BaseChatModel)
 			if !ok {
@@ -142,7 +164,9 @@ func TestLoopCapsActualDispatchesAcrossRetryMiddleware(t *testing.T) {
 	)
 	_, err = loop.Run(context.Background(), Submission{Content: "hello"})
 	require.Error(t, err)
-	require.True(t, errors.Is(err, llm.ErrDispatchPermitDenied) || errors.Is(err, llm.ErrDispatchPermitRequired))
+	terminal, finished := llm.FinishedProviderAttemptFromError(err)
+	require.True(t, finished, "the operation returns its final joined provider terminal")
+	require.Equal(t, llm.FailureTransientProvider, terminal.Failure)
 	require.Equal(t, defaultProviderOperationAttempts, requests, "the actual HTTP dispatch count must honor the Loop-owned cap")
 
 	results := recorder.snapshot()
@@ -157,6 +181,55 @@ func TestLoopCapsActualDispatchesAcrossRetryMiddleware(t *testing.T) {
 		}
 		seen[result.AttemptID] = struct{}{}
 	}
+}
+
+func TestLoopOwnsRetryPolicyDecisionForActiveOperation(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		http.Error(w, "temporary provider failure", http.StatusServiceUnavailable)
+	}))
+	defer server.Close()
+
+	registry := llm.NewProviderRegistry()
+	require.NoError(t, registry.Register(llm.NewEinoProvider(
+		llm.WithProviderName("core-retry-owner-test"),
+		llm.WithHTTPClient(server.Client()),
+	)))
+	resolved, err := registry.SnapshotResolver().ResolveModel(context.Background(), llm.ModelRequest{
+		ProviderID: "core-retry-owner-test",
+		ModelID:    "core-retry-owner-model",
+		Endpoint:   server.URL,
+	})
+	require.NoError(t, err)
+	model, cleanup, err := resolved.Build(context.Background())
+	require.NoError(t, err)
+	defer cleanup()
+
+	loopPolicy := &operationControlledRetryPolicy{allowedRetries: 1}
+	middlewarePolicy := &operationControlledRetryPolicy{allowedRetries: 5}
+	retry := llm.NewRetryModelMiddleware(llm.WithRetryPolicy(middlewarePolicy))
+	recorder := &attemptResultRecorder{}
+	loop := NewLoopAgent(
+		WithLLM(model),
+		WithMaxIterations(1),
+		WithProviderAttemptRecorder(recorder.record),
+		WithProviderRetryPolicy(loopPolicy),
+		WithModelWrapper(func(value any) any {
+			base, ok := value.(llm.BaseChatModel)
+			if !ok {
+				return value
+			}
+			return retry.WrapModel(base)
+		}),
+	)
+
+	_, err = loop.Run(context.Background(), Submission{Content: "retry policy owner"})
+	require.Error(t, err)
+	require.Equal(t, 2, requests, "the Loop policy allows one retry and the operation owner stops further dispatch")
+	require.Len(t, recorder.snapshot(), 2)
+	require.Equal(t, []int{0, 1}, loopPolicy.calls(), "the Loop must evaluate the policy against typed finished attempts")
+	require.Empty(t, middlewarePolicy.calls(), "active retry middleware must not make policy decisions")
 }
 
 func TestLoopModelCyclerUsesCoreAuthorityForSelectedAndPrimaryDispatches(t *testing.T) {
@@ -384,4 +457,93 @@ func TestLoopOwnsTypedOverflowRecoveryAfterCompactionAndBeforeCandidateDispatch(
 	}
 	require.Len(t, incremental, 1, "the failed partial candidate must not have been published")
 	require.Equal(t, "recovered", incremental[0].Content)
+}
+
+func TestLoopSharesDispatchBudgetAcrossRetryFailoverAndOverflow(t *testing.T) {
+	var requestModels []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		requestModels = append(requestModels, request.Model)
+		if request.Model == "shared-budget-primary" {
+			http.Error(w, "temporary provider failure", http.StatusServiceUnavailable)
+			return
+		}
+		http.Error(w, "context_length_exceeded", http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	registry := llm.NewProviderRegistry()
+	for _, provider := range []string{"shared-budget-primary-provider", "shared-budget-fallback-provider"} {
+		require.NoError(t, registry.Register(llm.NewEinoProvider(
+			llm.WithProviderName(provider),
+			llm.WithHTTPClient(server.Client()),
+		)))
+	}
+	resolver := registry.SnapshotResolver()
+	primary, err := resolver.ResolveModel(context.Background(), llm.ModelRequest{
+		ProviderID: "shared-budget-primary-provider",
+		ModelID:    "shared-budget-primary",
+		Endpoint:   server.URL,
+	})
+	require.NoError(t, err)
+	fallback, err := resolver.ResolveModel(context.Background(), llm.ModelRequest{
+		ProviderID: "shared-budget-fallback-provider",
+		ModelID:    "shared-budget-fallback",
+		Endpoint:   server.URL,
+	})
+	require.NoError(t, err)
+	primaryModel, primaryCleanup, err := primary.Build(context.Background())
+	require.NoError(t, err)
+	defer primaryCleanup()
+	fallbackModel, fallbackCleanup, err := fallback.Build(context.Background())
+	require.NoError(t, err)
+	defer fallbackCleanup()
+
+	policy := &operationControlledRetryPolicy{allowedRetries: 1}
+	model := llm.NewFailoverModelMiddleware(llm.WithFallbackModels(fallbackModel)).WrapModel(
+		llm.NewRetryModelMiddleware(llm.WithRetryPolicy(policy)).WrapModel(primaryModel),
+	)
+	model = llm.NewOverflowRecoveryMiddleware().WrapModel(model)
+	recorder := &attemptResultRecorder{}
+	var compactionCalls int
+	compactor := overflowSummaryCompactor{onCompact: func(context.Context, []compaction.TurnItem) {
+		compactionCalls++
+	}}
+	loop := NewLoopAgent(
+		WithLLM(attemptGuardedModel{BaseChatModel: model}),
+		WithSystemPrompt("system"),
+		WithMaxIterations(1),
+		WithProviderAttemptRecorder(recorder.record),
+		WithProviderRetryPolicy(policy),
+	)
+	loop.SetMidTurnCompaction(nil, compactor, compaction.NewHeuristicTokenEstimator(), 3)
+
+	_, err = loop.Run(context.Background(), Submission{Content: strings.Repeat("long request context ", 300)})
+	require.Error(t, err)
+	require.Equal(t, []string{"shared-budget-primary", "shared-budget-primary", "shared-budget-fallback"}, requestModels,
+		"retry, candidate switch, and overflow must share one three-dispatch operation")
+	require.Zero(t, compactionCalls,
+		"an overflow received after the shared dispatch budget is exhausted must not compact before a denied fourth dispatch")
+
+	results := recorder.snapshot()
+	require.Len(t, results, defaultProviderOperationAttempts)
+	operationID := results[0].OperationID
+	seen := make(map[llm.ProviderAttemptID]struct{}, len(results))
+	for _, result := range results {
+		require.Equal(t, operationID, result.OperationID)
+		require.NotEmpty(t, result.AttemptID)
+		if _, duplicate := seen[result.AttemptID]; duplicate {
+			t.Fatalf("attempt ID %q was recorded more than once", result.AttemptID)
+		}
+		seen[result.AttemptID] = struct{}{}
+	}
+	require.Equal(t, llm.FailureTransientProvider, results[0].Failure)
+	require.Equal(t, llm.FailureTransientProvider, results[1].Failure)
+	require.Equal(t, llm.FailureOverflow, results[2].Failure)
 }

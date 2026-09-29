@@ -40,6 +40,7 @@ var errMaxIterations = errors.New("core: agent loop exceeded max iterations")
 type loopConfig struct {
 	model                   llm.BaseChatModel
 	providerAttemptRecorder func(llm.ProviderAttemptResult) error
+	providerRetryPolicy     llm.RetryPolicy
 	tools                   tools.ToolRegistry
 	maxIterations           int
 	modelWrapper            ModelWrapper
@@ -65,6 +66,13 @@ type LoopOption func(*loopConfig)
 // provider results produced by resolver-built models.
 func WithProviderAttemptRecorder(record func(llm.ProviderAttemptResult) error) LoopOption {
 	return func(c *loopConfig) { c.providerAttemptRecorder = record }
+}
+
+// WithProviderRetryPolicy installs the policy used by the Loop-owned provider
+// operation scheduler. Active middleware dispatches only the candidate chosen
+// by Core and does not make retry decisions.
+func WithProviderRetryPolicy(policy llm.RetryPolicy) LoopOption {
+	return func(c *loopConfig) { c.providerRetryPolicy = policy }
 }
 
 // WithLLM sets the chat model the loop drives.
@@ -153,6 +161,7 @@ func WithThinkingConfig(cfg llm.ThinkingConfig) LoopOption {
 type LoopAgent struct {
 	model                   llm.BaseChatModel
 	providerAttemptRecorder func(llm.ProviderAttemptResult) error
+	providerRetryPolicy     llm.RetryPolicy
 	tools                   tools.ToolRegistry
 	maxIterations           int
 	modelWrapper            ModelWrapper
@@ -251,6 +260,7 @@ func NewLoopAgent(opts ...LoopOption) *LoopAgent {
 	la := &LoopAgent{
 		model:                   cfg.model,
 		providerAttemptRecorder: cfg.providerAttemptRecorder,
+		providerRetryPolicy:     cfg.providerRetryPolicy,
 		tools:                   cfg.tools,
 		maxIterations:           cfg.maxIterations,
 		modelWrapper:            cfg.modelWrapper,
@@ -409,7 +419,10 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 
 	span, spanCtx := tracing.SpanFromContext(ctx, "loop.run", tracing.SpanKindInternal)
 	defer span.End()
-	spanCtx = llm.WithRunOperationFactory(spanCtx, &providerOperationFactory{record: l.providerAttemptRecorder})
+	spanCtx = llm.WithRunOperationFactory(spanCtx, &providerOperationFactory{
+		record:      l.providerAttemptRecorder,
+		retryPolicy: l.providerRetryPolicy,
+	})
 	logger := tracing.NewTraceLogger(span, nil)
 	logger.Info("core.loop.run", "type", submission.Type, "iterations", l.maxIterations)
 
@@ -1515,32 +1528,19 @@ func (l *LoopAgent) generateWithContinuationAndCompaction(
 		}
 		ctx = llm.WithLoopOwnedContinuation(ctx)
 	}
-	budget := &guardedStreamBudget{}
 	mainCtx, operationActive, operationErr := providerOperationContext(ctx, model, llm.OperationMainRequest)
 	if operationErr != nil {
 		return nil, operationErr
 	}
-	resp, err := l.streamGenerateWithBudget(mainCtx, model, messages, toolOpts, es, budget, !guarded)
-	if err != nil || resp == nil {
-		if err == nil || resp != nil {
-			return resp, err
-		}
-		recovered, compactedMessages, recoveryBudget, recoveredOK, recoveryErr := l.recoverOverflowAttempt(
-			mainCtx, model, messages, toolOpts, es, budget, guarded, operationActive,
-			consumer, compactor, estimator, maxTokens, err,
-		)
-		if recoveryErr != nil {
-			return nil, errors.Join(err, recoveryErr)
-		}
-		if !recoveredOK {
-			return nil, err
-		}
-		resp = recovered
-		messages = compactedMessages
-		budget = recoveryBudget
-		if resp == nil {
-			return nil, errors.New("core: overflow recovery returned a nil response")
-		}
+	resp, messages, budget, err := l.runMainProviderOperation(
+		mainCtx, model, messages, toolOpts, es, guarded, operationActive,
+		consumer, compactor, estimator, maxTokens,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if resp == nil {
+		return nil, errors.New("core: provider operation returned a nil response")
 	}
 
 	// Lazily create a continuation span only when the response is truncated.
@@ -1684,6 +1684,107 @@ func (l *LoopAgent) generateWithContinuationAndCompaction(
 	return resp, nil
 }
 
+func (l *LoopAgent) runMainProviderOperation(
+	ctx context.Context,
+	model llm.BaseChatModel,
+	messages []llm.Message,
+	toolOpts []llm.Option,
+	es EventStream,
+	guarded bool,
+	operationActive bool,
+	consumer *runCommitConsumer,
+	compactor compaction.Compactor,
+	estimator compaction.TokenEstimator,
+	maxTokens int,
+) (*llm.Message, []llm.Message, *guardedStreamBudget, error) {
+	currentMessages := messages
+	var response *llm.Message
+	var successfulBudget *guardedStreamBudget
+	runSchedule := func(operationCtx context.Context, dispatchModel llm.BaseChatModel) error {
+		for {
+			attemptBudget := &guardedStreamBudget{}
+			candidate, callErr := l.streamGenerateWithBudget(operationCtx, dispatchModel, currentMessages, toolOpts, es, attemptBudget, !guarded)
+			if callErr == nil {
+				if candidate == nil {
+					return errors.New("core: provider returned a nil response")
+				}
+				response = candidate
+				successfulBudget = attemptBudget
+				return nil
+			}
+
+			recovered, compactedMessages, recoveryBudget, recoveredOK, recoveryErr := l.recoverOverflowAttempt(
+				operationCtx, dispatchModel, currentMessages, toolOpts, es, attemptBudget, guarded, operationActive,
+				consumer, compactor, estimator, maxTokens, callErr,
+			)
+			if recoveryErr != nil {
+				return errors.Join(callErr, recoveryErr)
+			}
+			if recoveredOK {
+				if recovered == nil {
+					return errors.New("core: overflow recovery returned a nil response")
+				}
+				response = recovered
+				currentMessages = compactedMessages
+				successfulBudget = recoveryBudget
+				return nil
+			}
+			if !operationActive || attemptBudget.visible || llm.ContinuationNoReplay(operationCtx) {
+				return callErr
+			}
+
+			authority, ok := llm.OperationDispatchAuthorityFromContext(operationCtx)
+			if !ok {
+				return callErr
+			}
+			owner, ok := authority.(*providerOperationAuthority)
+			if !ok {
+				return callErr
+			}
+			proposal, backoff, planned := owner.nextCandidateProposal(operationCtx, callErr)
+			if !planned {
+				return callErr
+			}
+			if waitErr := waitProviderRetry(operationCtx, backoff); waitErr != nil {
+				return errors.Join(callErr, waitErr)
+			}
+			operationCtx = llm.WithCandidateProposal(operationCtx, proposal)
+		}
+	}
+
+	var runErr error
+	if operationActive {
+		if runner, ok := model.(llm.ProviderOperationRunner); ok {
+			runErr = runner.RunProviderOperation(ctx, runSchedule)
+		} else {
+			runErr = runSchedule(ctx, model)
+		}
+	} else {
+		runErr = runSchedule(ctx, model)
+	}
+	if runErr != nil {
+		return nil, currentMessages, nil, runErr
+	}
+	return response, currentMessages, successfulBudget, nil
+}
+
+func waitProviderRetry(ctx context.Context, delay time.Duration) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if delay <= 0 {
+		return nil
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-timer.C:
+		return nil
+	}
+}
+
 func (l *LoopAgent) recoverOverflowAttempt(
 	ctx context.Context,
 	model llm.BaseChatModel,
@@ -1740,6 +1841,13 @@ func (l *LoopAgent) recoverOverflowAttempt(
 			Kind:      llm.AntecedentFinishedOverflow,
 			AttemptID: attempt.AttemptID,
 		},
+	}
+	owner, ok := authority.(*providerOperationAuthority)
+	if !ok {
+		return nil, nil, nil, false, errors.New("core: overflow recovery requires the Loop-owned dispatch authority")
+	}
+	if err := owner.planCandidateProposal(proposal); err != nil {
+		return nil, nil, nil, false, err
 	}
 	recoveryCtx := llm.WithCandidateProposal(ctx, proposal)
 	recoveryBudget := &guardedStreamBudget{}

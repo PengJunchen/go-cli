@@ -252,6 +252,11 @@ var _ BaseChatModel = (*retryModel)(nil)
 // 0-based: attempt 0 is the initial call. After each failure the policy decides
 // whether to retry and how long to back off.
 func (r *retryModel) Generate(ctx context.Context, msgs []Message, opts ...Option) (*Message, error) {
+	if _, active := OperationDispatchAuthorityFromContext(ctx); active {
+		// The Core operation owner decides whether to retry after it sees the
+		// joined terminal facts for this dispatch. Active middleware is one pass.
+		return r.next.Generate(ctx, msgs, opts...)
+	}
 	for attempt := 0; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err
@@ -298,30 +303,8 @@ func (r *retryModel) Generate(ctx context.Context, msgs []Message, opts ...Optio
 }
 
 func (r *retryModel) prepareRetry(ctx context.Context, err error, attempt int) (context.Context, bool, error) {
-	result, operationActive := ProviderAttemptResult{}, false
-	if _, operationActive = OperationDispatchAuthorityFromContext(ctx); operationActive {
-		var finished bool
-		result, finished = FinishedProviderAttemptFromError(err)
-		if !finished || result.Failure != FailureTransientProvider {
-			return ctx, false, nil
-		}
-	}
-	policyErr := err
-	if operationActive && (ctx == nil || ctx.Err() == nil) &&
-		(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
-		// An immutable transient attempt result plus a live caller context means
-		// this deadline came from the HTTP client/transport, not caller cancel.
-		policyErr = errors.New("provider transport timeout")
-	}
-	if !r.policy.ShouldRetry(ctx, policyErr, attempt) {
+	if !r.policy.ShouldRetry(ctx, err, attempt) {
 		return ctx, false, nil
-	}
-	if operationActive {
-		retryCtx, proposalErr := withFinishedAttemptProposal(ctx, r.next, CandidateRetry, result, result.Identity.Candidate)
-		if proposalErr != nil {
-			return ctx, false, proposalErr
-		}
-		return retryCtx, true, nil
 	}
 	return ctx, true, nil
 }
@@ -330,6 +313,10 @@ func (r *retryModel) prepareRetry(ctx context.Context, err error, attempt int) (
 // an error. Mid-stream errors (chunks that stop arriving after the channel is
 // successfully returned) are not retried.
 func (r *retryModel) Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
+	if _, active := OperationDispatchAuthorityFromContext(ctx); active {
+		// Do not replay a provider call here. Core owns the operation schedule.
+		return r.next.Stream(ctx, msgs, opts...)
+	}
 	for attempt := 0; ; attempt++ {
 		if err := ctx.Err(); err != nil {
 			return nil, err

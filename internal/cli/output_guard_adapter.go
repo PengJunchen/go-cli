@@ -40,6 +40,7 @@ type outputGuardModel struct {
 }
 
 var _ llm.BaseChatModel = (*outputGuardModel)(nil)
+var _ llm.ProviderOperationRunner = (*outputGuardModel)(nil)
 
 func (m *outputGuardModel) Generate(ctx context.Context, msgs []llm.Message, opts ...llm.Option) (*llm.Message, error) {
 	resp, err := m.inner.Generate(ctx, msgs, opts...)
@@ -77,6 +78,16 @@ func (m *outputGuardModel) MaxCandidateBytes() int { return llm.GuardedStreamMax
 
 func (m *outputGuardModel) ProviderCandidates() []llm.ResolvedCandidateHandle {
 	return llm.ProviderCandidatesFromModel(m.inner)
+}
+
+// RunProviderOperation forwards the Core-owned schedule through outer model
+// decorators so a breaker can admit the whole operation once. Core applies
+// this guard to the completed candidate after each provider dispatch joins.
+func (m *outputGuardModel) RunProviderOperation(ctx context.Context, run func(context.Context, llm.BaseChatModel) error) error {
+	if runner, ok := m.inner.(llm.ProviderOperationRunner); ok {
+		return runner.RunProviderOperation(ctx, run)
+	}
+	return run(ctx, m.inner)
 }
 
 func (m *outputGuardModel) CheckCandidate(ctx context.Context, text string) (*core.CandidateOutputResult, error) {

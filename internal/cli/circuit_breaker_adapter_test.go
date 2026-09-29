@@ -6,6 +6,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -481,6 +482,91 @@ func (singleRetryPolicy) ShouldRetry(_ context.Context, _ error, attempt int) bo
 }
 func (singleRetryPolicy) NextBackoff(context.Context, int) time.Duration { return 0 }
 func (singleRetryPolicy) Name() string                                   { return "single-retry" }
+
+type operationBreakerTicket struct {
+	mu       sync.Mutex
+	complete int
+	outcome  production.StreamOutcome
+}
+
+func (t *operationBreakerTicket) Complete(outcome production.StreamOutcome) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.complete != 0 {
+		return false
+	}
+	t.complete = 1
+	t.outcome = outcome
+	return true
+}
+
+type operationCountingBreaker struct {
+	begin  atomic.Int32
+	ticket *operationBreakerTicket
+}
+
+func (*operationCountingBreaker) Execute(ctx context.Context, fn func() (any, error)) (any, error) {
+	return fn()
+}
+func (*operationCountingBreaker) State() production.CircuitState { return production.CircuitClosed }
+func (*operationCountingBreaker) Reset(context.Context) error    { return nil }
+func (*operationCountingBreaker) Name() string                   { return "operation-counting" }
+func (b *operationCountingBreaker) BeginStream(context.Context) (production.CircuitBreakerStreamTicket, error) {
+	b.begin.Add(1)
+	b.ticket = &operationBreakerTicket{}
+	return b.ticket, nil
+}
+
+var _ production.StreamingCircuitBreaker = (*operationCountingBreaker)(nil)
+
+func TestCoreOwnedRetryUsesOneCircuitBreakerAdmission(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			http.Error(w, "temporary provider failure", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"recovered\"}}]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	registry := llm.NewProviderRegistry()
+	require.NoError(t, registry.Register(llm.NewEinoProvider(
+		llm.WithProviderName("core-breaker-runner"),
+		llm.WithHTTPClient(server.Client()),
+	)))
+	resolved, err := registry.SnapshotResolver().ResolveModel(context.Background(), llm.ModelRequest{
+		ProviderID: "core-breaker-runner",
+		ModelID:    "core-breaker-runner-model",
+		Endpoint:   server.URL,
+	})
+	require.NoError(t, err)
+	model, cleanup, err := resolved.Build(context.Background())
+	require.NoError(t, err)
+	defer cleanup()
+
+	breaker := &operationCountingBreaker{}
+	chain := llm.NewStandardMiddlewareChain(llm.NewRetryModelMiddleware(llm.WithRetryPolicy(singleRetryPolicy{})))
+	wrapped := newModelWrapperWithChain(production.NewProductionModelWrapper(), chain, breaker, nil)(model).(llm.BaseChatModel)
+	loop := core.NewLoopAgent(
+		core.WithLLM(wrapped),
+		core.WithMaxIterations(1),
+		core.WithProviderRetryPolicy(singleRetryPolicy{}),
+	)
+	result, err := loop.RunCanonical(context.Background(), core.Submission{Content: "retry inside one operation"})
+	require.NoError(t, err)
+	require.NotEmpty(t, result.Transcript)
+	require.Equal(t, "recovered", result.Transcript[len(result.Transcript)-1].Message.Content)
+	require.EqualValues(t, 2, requests.Load(), "Core owns both the failed and retried dispatch")
+	require.EqualValues(t, 1, breaker.begin.Load(), "the logical operation receives one breaker admission")
+	breaker.ticket.mu.Lock()
+	require.Equal(t, 1, breaker.ticket.complete)
+	require.Equal(t, production.StreamSucceeded, breaker.ticket.outcome)
+	breaker.ticket.mu.Unlock()
+}
 
 func TestCircuitBreakerModelKeepsRetrySetupInsideOneLogicalTicket(t *testing.T) {
 	setupErr := errors.New("first setup failed")
