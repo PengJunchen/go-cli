@@ -44,8 +44,11 @@ func (h *HelpHandler) Handle(_ context.Context, _ []string, deps Dependencies) (
 	for _, boundary := range []string{
 		"Memory: user-managed with /memory only; no automatic extraction or prompt injection.",
 		"Goal, Task, and Todo: stored only in memory for this process; not kept across restarts.",
-		"Session resume: only from a configured session directory by exact physical session ID; no automatic latest-session selection.",
-		"Fork, branch switch, snapshot, and migration are unsupported.",
+		"Session storage: without session.store_path, /session is unsupported.",
+		"Durable mode exposes /session tree and /session branches; resume uses --resume-session <physical-id> at startup.",
+		"Durable /session resume, fork, clone, and switch are unsupported.",
+		"Legacy mutable mode supports /session tree, branches, resume, fork, clone, and switch with a wired mutable tree; resume listing needs a session store.",
+		"Session snapshot and schema migration are unavailable.",
 		"Image reading and Web Agent UI: unavailable. Web Search requires a configured provider.",
 		"Remote TUI is unavailable. Serve exposes only the private go-cli-acp-json/1 profile; official ACP and ask approvals are unavailable.",
 		"Serve requires --approve auto or --approve deny. Hard cost budgets are unsupported; usage and cost reports may be incomplete or estimated, and a displayed $0 is not proof of zero spend.",
@@ -276,20 +279,49 @@ func (h *ModelHandler) Handle(ctx context.Context, args []string, deps Dependenc
 	return "", nil
 }
 
-// SessionHandler delegates to the SessionSlashHandler for session tree
-// operations (/tree, /fork, /resume). Without sub-arguments it defaults to
-// showing the tree.
-type SessionHandler struct{}
+// sessionCommandMode describes the session capabilities wired into one REPL.
+type sessionCommandMode uint8
+
+const (
+	sessionCommandModeUnavailable sessionCommandMode = iota
+	sessionCommandModeDurable
+	sessionCommandModeLegacy
+)
+
+// SessionHandler delegates to the SessionSlashHandler for session operations.
+// Without sub-arguments it defaults to showing the tree.
+type SessionHandler struct {
+	mode sessionCommandMode
+}
 
 var _ SlashCommandHandler = (*SessionHandler)(nil)
 
 func (h *SessionHandler) Name() string { return "session" }
 func (h *SessionHandler) Description() string {
-	return "Session operations (subcommands: tree, fork, resume, branches, clone, switch)"
+	if h == nil {
+		return "Session commands are unsupported without session.store_path."
+	}
+	switch h.mode {
+	case sessionCommandModeDurable:
+		return "Durable session commands: /session tree and /session branches; resume at startup with --resume-session <physical-id>."
+	case sessionCommandModeLegacy:
+		return "Legacy session operations (subcommands: tree, fork, resume, branches, clone, switch; requires a mutable session tree)."
+	default:
+		return "Session commands are unsupported without session.store_path."
+	}
 }
 
 // Subcommands returns the subcommands supported by /session for tab completion.
 func (h *SessionHandler) Subcommands() []Subcommand {
+	if h == nil || h.mode == sessionCommandModeUnavailable {
+		return nil
+	}
+	if h.mode == sessionCommandModeDurable {
+		return []Subcommand{
+			{Name: "tree", Description: "Show the durable session tree"},
+			{Name: "branches", Description: "List durable session branches"},
+		}
+	}
 	return []Subcommand{
 		{Name: "tree", Description: "Show session tree (default)"},
 		{Name: "fork", Description: "Fork the current session"},
@@ -302,7 +334,7 @@ func (h *SessionHandler) Subcommands() []Subcommand {
 
 func (h *SessionHandler) Handle(ctx context.Context, args []string, deps Dependencies) (string, error) {
 	if deps.SessionHandler() == nil {
-		fmt.Fprintln(deps.Out(), "Session tree not configured.") //nolint:errcheck
+		fmt.Fprintln(deps.Out(), "Unsupported: /session requires session.store_path.") //nolint:errcheck
 		return "", nil
 	}
 	// Map /session to /tree when no subcommand is given; otherwise use the

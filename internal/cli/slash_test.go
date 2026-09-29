@@ -99,8 +99,11 @@ func TestSlashHelp(t *testing.T) {
 		"Memory: user-managed with /memory only",
 		"no automatic extraction or prompt injection",
 		"Goal, Task, and Todo: stored only in memory for this process",
-		"Session resume:",
-		"Fork, branch switch, snapshot, and migration are unsupported",
+		"Session storage: without session.store_path, /session is unsupported.",
+		"Durable mode exposes /session tree and /session branches; resume uses --resume-session <physical-id> at startup.",
+		"Durable /session resume, fork, clone, and switch are unsupported.",
+		"Legacy mutable mode supports /session tree, branches, resume, fork, clone, and switch with a wired mutable tree; resume listing needs a session store.",
+		"Session snapshot and schema migration are unavailable.",
 		"Image reading and Web Agent UI: unavailable",
 		"Web Search requires a configured provider",
 		"Remote TUI is unavailable",
@@ -119,6 +122,8 @@ func TestSlashHelp(t *testing.T) {
 	} {
 		assert.Contains(t, output, want, "help output must state boundary: %s", want)
 	}
+	assert.NotContains(t, output, "Fork, branch switch, snapshot, and migration are unsupported",
+		"legacy mutable handlers support fork and switch, so the boundary must distinguish durable mode")
 }
 
 func TestThemeHandler(t *testing.T) {
@@ -395,7 +400,9 @@ func TestSlashSessionNotConfigured(t *testing.T) {
 	sc := &slashContext{out: buf, sessionHandler: nil}
 	c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "session"}, sc)
 
-	assert.Contains(t, buf.String(), "Session tree not configured")
+	assert.Contains(t, buf.String(), "Unsupported:")
+	assert.Contains(t, buf.String(), "session.store_path")
+	assert.NotContains(t, buf.String(), "Session tree not configured")
 }
 
 func TestSlashSessionWithHandler(t *testing.T) {

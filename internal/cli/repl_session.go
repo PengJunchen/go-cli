@@ -406,6 +406,20 @@ func (s *REPLSession) setupSlashContext() error {
 			}
 		}
 	}
+	if s.slashReg != nil {
+		if registered, ok := s.slashReg.Lookup("session"); ok {
+			if handler, ok := registered.(*SessionHandler); ok {
+				switch {
+				case s.assembly.durableSession != nil:
+					handler.mode = sessionCommandModeDurable
+				case s.assembly.SessionStore != nil:
+					handler.mode = sessionCommandModeLegacy
+				default:
+					handler.mode = sessionCommandModeUnavailable
+				}
+			}
+		}
+	}
 	s.slashCtx = slashContext{
 		agent:           s.assembly.Agent,
 		costTracker:     s.assembly.CostTracker,
