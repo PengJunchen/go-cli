@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/pengjunchen/go-cli/internal/llm"
 )
@@ -14,7 +15,8 @@ import (
 const defaultProviderOperationAttempts = 3
 
 type providerOperationFactory struct {
-	record func(llm.ProviderAttemptResult) error
+	record      func(llm.ProviderAttemptResult) error
+	retryPolicy llm.RetryPolicy
 }
 
 func (f *providerOperationFactory) NewOperation(_ context.Context, kind llm.ProviderOperationKind, maxAttempts int, candidates []llm.ResolvedCandidateHandle) (llm.OperationDispatchAuthority, error) {
@@ -45,36 +47,45 @@ func (f *providerOperationFactory) NewOperation(_ context.Context, kind llm.Prov
 		byID[candidate.CandidateID()] = candidate
 	}
 	return &providerOperationAuthority{
-		id:            id,
-		kind:          kind,
-		maxAttempts:   maxAttempts,
-		candidates:    byID,
-		pending:       make(map[llm.ProviderAttemptID]llm.CandidateID),
-		finished:      make(map[llm.ProviderAttemptID]llm.ProviderAttemptResult),
-		setupFailures: make(map[llm.CandidateID]llm.PreDispatchCandidateFailure),
-		usedSetup:     make(map[llm.CandidateID]bool),
-		record:        f.record,
+		id:                  id,
+		kind:                kind,
+		maxAttempts:         maxAttempts,
+		candidates:          byID,
+		candidateOrder:      append([]llm.ResolvedCandidateHandle(nil), candidates...),
+		pending:             make(map[llm.ProviderAttemptID]llm.CandidateID),
+		finished:            make(map[llm.ProviderAttemptID]llm.ProviderAttemptResult),
+		attemptsByCandidate: make(map[llm.CandidateID]int, len(candidates)),
+		setupFailures:       make(map[llm.CandidateID]llm.PreDispatchCandidateFailure),
+		usedSetup:           make(map[llm.CandidateID]bool),
+		record:              f.record,
+		retryPolicy:         f.retryPolicy,
 	}, nil
 }
 
 type providerOperationAuthority struct {
-	mu                sync.Mutex
-	id                llm.ProviderOperationID
-	kind              llm.ProviderOperationKind
-	maxAttempts       int
-	actualAttempts    int
-	candidates        map[llm.CandidateID]llm.ResolvedCandidateHandle
-	pending           map[llm.ProviderAttemptID]llm.CandidateID
-	finished          map[llm.ProviderAttemptID]llm.ProviderAttemptResult
-	lastFinished      llm.ProviderAttemptID
-	setupFailures     map[llm.CandidateID]llm.PreDispatchCandidateFailure
-	usedSetup         map[llm.CandidateID]bool
-	authorized        llm.ResolvedCandidateHandle
-	authorizationOn   bool
-	overflowUsed      bool
-	overflowReady     bool
-	overflowCandidate llm.CandidateID
-	record            func(llm.ProviderAttemptResult) error
+	mu                  sync.Mutex
+	id                  llm.ProviderOperationID
+	kind                llm.ProviderOperationKind
+	maxAttempts         int
+	actualAttempts      int
+	retryPolicy         llm.RetryPolicy
+	candidates          map[llm.CandidateID]llm.ResolvedCandidateHandle
+	candidateOrder      []llm.ResolvedCandidateHandle
+	pending             map[llm.ProviderAttemptID]llm.CandidateID
+	finished            map[llm.ProviderAttemptID]llm.ProviderAttemptResult
+	attemptsByCandidate map[llm.CandidateID]int
+	lastFinished        llm.ProviderAttemptID
+	setupFailures       map[llm.CandidateID]llm.PreDispatchCandidateFailure
+	usedSetup           map[llm.CandidateID]bool
+	initialCandidate    llm.CandidateID
+	initialReason       llm.CandidateReason
+	planned             *llm.CandidateProposal
+	authorized          llm.ResolvedCandidateHandle
+	authorizationOn     bool
+	overflowUsed        bool
+	overflowReady       bool
+	overflowCandidate   llm.CandidateID
+	record              func(llm.ProviderAttemptResult) error
 }
 
 func (a *providerOperationAuthority) ID() llm.ProviderOperationID { return a.id }
@@ -114,6 +125,10 @@ func (a *providerOperationAuthority) AuthorizeCandidate(ctx context.Context, pro
 		}
 		a.authorized = candidate
 		a.authorizationOn = true
+		if a.initialCandidate == "" {
+			a.initialCandidate = candidate.CandidateID()
+			a.initialReason = proposal.Reason
+		}
 		return llm.DispatchDecision{Authorized: true}, nil
 	}
 	if proposal.Antecedent.Kind == llm.AntecedentPreDispatchFailure {
@@ -122,7 +137,7 @@ func (a *providerOperationAuthority) AuthorizeCandidate(ctx context.Context, pro
 			return deny(llm.DeniedStalePrevious)
 		}
 		stored, ok := a.setupFailures[failure.FailedCandidateID]
-		if !ok || a.usedSetup[failure.FailedCandidateID] || stored != *failure ||
+		if !a.matchesPlannedProposal(proposal) || !ok || a.usedSetup[failure.FailedCandidateID] || stored != *failure ||
 			failure.Class != llm.PreDispatchCandidateUnavailable ||
 			(proposal.Reason != llm.CandidateFailover && proposal.Reason != llm.CandidateCyclerPrimary) {
 			return deny(llm.DeniedRepeatedPreDispatchFailure)
@@ -131,12 +146,16 @@ func (a *providerOperationAuthority) AuthorizeCandidate(ctx context.Context, pro
 			return deny(llm.DeniedStalePrevious)
 		}
 		a.usedSetup[failure.FailedCandidateID] = true
+		a.planned = nil
 		a.authorized = candidate
 		a.authorizationOn = true
 		return llm.DispatchDecision{Authorized: true}, nil
 	}
 	if proposal.Antecedent.Kind != llm.AntecedentFinishedAttempt && proposal.Antecedent.Kind != llm.AntecedentFinishedOverflow {
 		return deny(llm.DeniedStalePrevious)
+	}
+	if !a.matchesPlannedProposal(proposal) {
+		return deny(llm.DeniedSafetyFact)
 	}
 	if proposal.Antecedent.AttemptID == "" || proposal.Antecedent.PreDispatch != nil || proposal.Antecedent.AttemptID != a.lastFinished {
 		return deny(llm.DeniedStalePrevious)
@@ -165,6 +184,7 @@ func (a *providerOperationAuthority) AuthorizeCandidate(ctx context.Context, pro
 	default:
 		return deny(llm.DeniedSafetyFact)
 	}
+	a.planned = nil
 	a.authorized = candidate
 	a.authorizationOn = true
 	return llm.DispatchDecision{Authorized: true}, nil
@@ -179,6 +199,9 @@ func (a *providerOperationAuthority) BeginOverflowRecovery(ctx context.Context, 
 	if a.kind != llm.OperationMainRequest || attemptID == "" || a.overflowUsed || a.lastFinished != attemptID {
 		return errors.New("core: overflow recovery requires the latest main-request attempt and may be used once")
 	}
+	if a.actualAttempts >= a.maxAttempts || len(a.pending) != 0 || a.authorizationOn {
+		return &llm.DispatchDeniedError{Code: llm.DeniedBudget}
+	}
 	result, ok := a.finished[attemptID]
 	if !ok || result.Outcome == llm.AttemptSuccess || result.Failure != llm.FailureOverflow || result.Identity.Candidate == "" {
 		return errors.New("core: overflow recovery requires a finished typed context-limit attempt")
@@ -187,6 +210,166 @@ func (a *providerOperationAuthority) BeginOverflowRecovery(ctx context.Context, 
 	a.overflowReady = true
 	a.overflowCandidate = result.Identity.Candidate
 	return nil
+}
+
+func (a *providerOperationAuthority) nextCandidateProposal(ctx context.Context, err error) (llm.CandidateProposal, time.Duration, bool) {
+	if ctx == nil || ctx.Err() != nil || llm.ContinuationNoReplay(ctx) {
+		return llm.CandidateProposal{}, 0, false
+	}
+	if failure, ok := llm.PreDispatchCandidateFailureFromError(err); ok {
+		if failure.Class != llm.PreDispatchCandidateUnavailable {
+			return llm.CandidateProposal{}, 0, false
+		}
+		failure, recordErr := a.RecordPreDispatchFailure(ctx, err)
+		if recordErr != nil {
+			return llm.CandidateProposal{}, 0, false
+		}
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		if a.actualAttempts >= a.maxAttempts || len(a.pending) != 0 || a.authorizationOn {
+			return llm.CandidateProposal{}, 0, false
+		}
+		candidate, reason, found := a.nextUnvisitedCandidateLocked(failure.FailedCandidateID)
+		if !found {
+			return llm.CandidateProposal{}, 0, false
+		}
+		proposal := llm.CandidateProposal{
+			OperationID: a.id,
+			Candidate:   candidate,
+			Reason:      reason,
+			Antecedent: llm.CandidateAntecedent{
+				Kind:        llm.AntecedentPreDispatchFailure,
+				PreDispatch: &failure,
+			},
+		}
+		a.setPlannedProposalLocked(proposal)
+		return proposal, 0, true
+	}
+
+	result, finished := llm.FinishedProviderAttemptFromError(err)
+	if !finished || result.OperationID == "" || result.AttemptID == "" {
+		return llm.CandidateProposal{}, 0, false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if ctx.Err() != nil || a.actualAttempts >= a.maxAttempts || len(a.pending) != 0 || a.authorizationOn || result.OperationID != a.id || result.AttemptID != a.lastFinished || result.Failure != llm.FailureTransientProvider {
+		return llm.CandidateProposal{}, 0, false
+	}
+	finishedResult, exists := a.finished[result.AttemptID]
+	if !exists || finishedResult.AttemptID != result.AttemptID || finishedResult.OperationID != result.OperationID ||
+		finishedResult.Identity != result.Identity || finishedResult.Outcome != result.Outcome ||
+		finishedResult.Failure != result.Failure || result.Identity.Candidate == "" {
+		return llm.CandidateProposal{}, 0, false
+	}
+	candidate, exists := a.candidates[result.Identity.Candidate]
+	if !exists || candidate.Identity() != result.Identity {
+		return llm.CandidateProposal{}, 0, false
+	}
+	if a.initialReason == llm.CandidateCyclerSelected && len(a.candidateOrder) > 0 {
+		primary := a.candidateOrder[0]
+		if primary.CandidateID() != result.Identity.Candidate && a.attemptsByCandidate[primary.CandidateID()] == 0 && !a.usedSetup[primary.CandidateID()] {
+			proposal := llm.CandidateProposal{
+				OperationID: a.id,
+				Candidate:   primary,
+				Reason:      llm.CandidateCyclerPrimary,
+				Antecedent:  llm.CandidateAntecedent{Kind: llm.AntecedentFinishedAttempt, AttemptID: result.AttemptID},
+			}
+			a.setPlannedProposalLocked(proposal)
+			return proposal, 0, true
+		}
+	}
+	attemptIndex := a.attemptsByCandidate[result.Identity.Candidate] - 1
+	policyErr := err
+	if ctx.Err() == nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		policyErr = errors.New("provider transport timeout")
+	}
+	if a.retryPolicy != nil && a.retryPolicy.ShouldRetry(ctx, policyErr, attemptIndex) {
+		proposal := llm.CandidateProposal{
+			OperationID: a.id,
+			Candidate:   candidate,
+			Reason:      llm.CandidateRetry,
+			Antecedent:  llm.CandidateAntecedent{Kind: llm.AntecedentFinishedAttempt, AttemptID: result.AttemptID},
+		}
+		a.setPlannedProposalLocked(proposal)
+		return proposal, a.retryPolicy.NextBackoff(ctx, attemptIndex), true
+	}
+	next, reason, found := a.nextUnvisitedCandidateLocked(result.Identity.Candidate)
+	if !found {
+		return llm.CandidateProposal{}, 0, false
+	}
+	proposal := llm.CandidateProposal{
+		OperationID: a.id,
+		Candidate:   next,
+		Reason:      reason,
+		Antecedent:  llm.CandidateAntecedent{Kind: llm.AntecedentFinishedAttempt, AttemptID: result.AttemptID},
+	}
+	a.setPlannedProposalLocked(proposal)
+	return proposal, 0, true
+}
+
+func (a *providerOperationAuthority) nextUnvisitedCandidateLocked(failed llm.CandidateID) (llm.ResolvedCandidateHandle, llm.CandidateReason, bool) {
+	unvisited := func(candidate llm.ResolvedCandidateHandle) bool {
+		if candidate == nil || a.attemptsByCandidate[candidate.CandidateID()] != 0 || a.usedSetup[candidate.CandidateID()] {
+			return false
+		}
+		_, failedSetup := a.setupFailures[candidate.CandidateID()]
+		return !failedSetup
+	}
+	if a.initialReason == llm.CandidateCyclerSelected && len(a.candidateOrder) > 0 && a.candidateOrder[0].CandidateID() != failed && unvisited(a.candidateOrder[0]) {
+		return a.candidateOrder[0], llm.CandidateCyclerPrimary, true
+	}
+	index := -1
+	for i, candidate := range a.candidateOrder {
+		if candidate != nil && candidate.CandidateID() == failed {
+			index = i
+			break
+		}
+	}
+	if a.actualAttempts == 0 && index > 0 && unvisited(a.candidateOrder[0]) {
+		return a.candidateOrder[0], llm.CandidateCyclerPrimary, true
+	}
+	for i := index + 1; i < len(a.candidateOrder); i++ {
+		if unvisited(a.candidateOrder[i]) {
+			return a.candidateOrder[i], llm.CandidateFailover, true
+		}
+	}
+	return nil, 0, false
+}
+
+func (a *providerOperationAuthority) planCandidateProposal(proposal llm.CandidateProposal) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if proposal.OperationID != a.id || proposal.Candidate == nil || a.candidates[proposal.Candidate.CandidateID()] != proposal.Candidate {
+		return errors.New("core: cannot plan a candidate outside the provider operation")
+	}
+	if a.actualAttempts >= a.maxAttempts || len(a.pending) != 0 || a.authorizationOn {
+		return &llm.DispatchDeniedError{Code: llm.DeniedBudget}
+	}
+	a.setPlannedProposalLocked(proposal)
+	return nil
+}
+
+func (a *providerOperationAuthority) setPlannedProposalLocked(proposal llm.CandidateProposal) {
+	copy := proposal
+	if proposal.Antecedent.PreDispatch != nil {
+		failure := *proposal.Antecedent.PreDispatch
+		copy.Antecedent.PreDispatch = &failure
+	}
+	a.planned = &copy
+}
+
+func (a *providerOperationAuthority) matchesPlannedProposal(proposal llm.CandidateProposal) bool {
+	if a.planned == nil || a.planned.OperationID != proposal.OperationID || a.planned.Candidate != proposal.Candidate || a.planned.Reason != proposal.Reason {
+		return false
+	}
+	plannedAntecedent := a.planned.Antecedent
+	if plannedAntecedent.Kind != proposal.Antecedent.Kind || plannedAntecedent.AttemptID != proposal.Antecedent.AttemptID {
+		return false
+	}
+	if plannedAntecedent.PreDispatch == nil || proposal.Antecedent.PreDispatch == nil {
+		return plannedAntecedent.PreDispatch == nil && proposal.Antecedent.PreDispatch == nil
+	}
+	return *plannedAntecedent.PreDispatch == *proposal.Antecedent.PreDispatch
 }
 
 func (a *providerOperationAuthority) RecordPreDispatchFailure(ctx context.Context, err error) (llm.PreDispatchCandidateFailure, error) {
@@ -255,6 +438,7 @@ func (a *providerOperationAuthority) FinishAttempt(result llm.ProviderAttemptRes
 	delete(a.pending, result.AttemptID)
 	result = cloneCoreAttemptResult(result)
 	a.finished[result.AttemptID] = result
+	a.attemptsByCandidate[candidateID]++
 	a.lastFinished = result.AttemptID
 	record := a.record
 	a.mu.Unlock()

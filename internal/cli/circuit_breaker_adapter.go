@@ -22,7 +22,74 @@ func (m *circuitBreakerModel) ProviderCandidates() []llm.ResolvedCandidateHandle
 	return llm.ProviderCandidatesFromModel(m.inner)
 }
 
+// RunProviderOperation admits the complete Core-owned schedule as one breaker
+// operation. Each nested provider dispatch still passes through its guarded
+// adapter, while retry and candidate decisions remain in Core.
+func (m *circuitBreakerModel) RunProviderOperation(ctx context.Context, run func(context.Context, llm.BaseChatModel) error) error {
+	if run == nil {
+		return errors.New("circuit breaker: nil provider operation")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if streaming, ok := m.breaker.(production.StreamingCircuitBreaker); ok {
+		ticket, err := streaming.BeginStream(ctx)
+		if err != nil {
+			return err
+		}
+		if ticket == nil {
+			return errors.New("circuit breaker: streaming admission returned a nil ticket")
+		}
+		err = run(ctx, m.inner)
+		outcome := production.StreamFailed
+		if err == nil {
+			outcome = production.StreamSucceeded
+		} else if ctx.Err() != nil {
+			outcome = callerCancellationOutcome(ctx)
+		}
+		ticket.Complete(outcome)
+		return err
+	}
+
+	called := false
+	var operationErr error
+	invoke := func() (any, error) {
+		called = true
+		operationErr = run(ctx, m.inner)
+		return struct{}{}, operationErr
+	}
+	var result any
+	var err error
+	if strict, ok := m.breaker.(production.CircuitBreakerWithoutFallback); ok {
+		result, err = strict.ExecuteWithoutFallback(ctx, invoke)
+	} else {
+		result, err = m.breaker.Execute(ctx, invoke)
+	}
+	if operationErr != nil {
+		return operationErr
+	}
+	if !called {
+		if err != nil {
+			return err
+		}
+		return production.ErrCircuitOpen
+	}
+	if err != nil {
+		if errors.Is(err, production.ErrCircuitOpen) {
+			slog.WarnContext(ctx, "circuit_breaker_open_refused", "breaker", m.breaker.Name())
+		}
+		return err
+	}
+	if result != nil {
+		if _, ok := result.(struct{}); !ok {
+			return fmt.Errorf("circuit breaker: unexpected operation result type %T", result)
+		}
+	}
+	return nil
+}
+
 var _ llm.BaseChatModel = (*circuitBreakerModel)(nil)
+var _ llm.ProviderOperationRunner = (*circuitBreakerModel)(nil)
 
 func (m *circuitBreakerModel) Generate(ctx context.Context, msgs []llm.Message, opts ...llm.Option) (*llm.Message, error) {
 	var once sync.Once

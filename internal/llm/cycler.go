@@ -443,11 +443,7 @@ func (m *cycledModel) generateResolved(ctx context.Context, msgs []Message, opts
 	if err != nil {
 		return nil, err
 	}
-	response, err := m.generateResolvedCandidate(ctx, selected, msgs, opts...)
-	if err == nil || ContinuationNoReplay(ctx) {
-		return response, err
-	}
-	return m.generatePrimaryAfterSelectionFailure(ctx, err, msgs, opts...)
+	return m.generateResolvedCandidate(ctx, selected, msgs, opts...)
 }
 
 func (m *cycledModel) generateProposedCandidate(ctx context.Context, proposal CandidateProposal, msgs []Message, opts ...Option) (*Message, error) {
@@ -517,11 +513,7 @@ func (m *cycledModel) streamResolved(ctx context.Context, msgs []Message, opts .
 	if err != nil {
 		return nil, err
 	}
-	stream, err := m.streamResolvedCandidate(ctx, selected, msgs, opts...)
-	if err == nil || ContinuationNoReplay(ctx) {
-		return stream, err
-	}
-	return m.streamPrimaryAfterSelectionFailure(ctx, err, msgs, opts...)
+	return m.streamResolvedCandidate(ctx, selected, msgs, opts...)
 }
 
 func (m *cycledModel) streamProposedCandidate(ctx context.Context, proposal CandidateProposal, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {

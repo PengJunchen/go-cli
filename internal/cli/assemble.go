@@ -704,16 +704,17 @@ type assembleState struct {
 	approvalAuditHealth func() approval.AuditTrailHealth
 
 	// Production resilience section
-	planCtrl        core.PlanModeController
-	pw              *production.ProductionModelWrapper
-	modelChain      *llm.DefaultModelMiddlewareChain
-	circuitBreaker  production.CircuitBreaker
-	guardChain      *production.OutputGuardChain
-	telemetry       production.Telemetry
-	costTracker     *production.CostTracker
-	statsRegistry   *production.StatsRegistry
-	idempotentCache production.IdempotentCache
-	auditLog        production.AuditLog
+	planCtrl            core.PlanModeController
+	pw                  *production.ProductionModelWrapper
+	modelChain          *llm.DefaultModelMiddlewareChain
+	providerRetryPolicy llm.RetryPolicy
+	circuitBreaker      production.CircuitBreaker
+	guardChain          *production.OutputGuardChain
+	telemetry           production.Telemetry
+	costTracker         *production.CostTracker
+	statsRegistry       *production.StatsRegistry
+	idempotentCache     production.IdempotentCache
+	auditLog            production.AuditLog
 
 	// SubAgent section
 	acpAdapter *acp.ACPMiddlewareAdapter
@@ -1277,9 +1278,11 @@ func (s *assembleState) assembleProductionResilience() error {
 		production.WithWrapperSessionID(s.sessionID),
 	)
 
+	providerRetryPolicy := &retryPolicyAdapter{inner: retryPolicy}
+	s.providerRetryPolicy = providerRetryPolicy
 	s.modelChain = llm.NewStandardMiddlewareChain(
 		llm.NewFailoverModelMiddleware(),
-		llm.NewRetryModelMiddleware(llm.WithRetryPolicy(&retryPolicyAdapter{inner: retryPolicy})),
+		llm.NewRetryModelMiddleware(llm.WithRetryPolicy(providerRetryPolicy)),
 		llm.NewTimeoutModelMiddleware(),
 		llm.NewSanitizeModelMiddleware(),
 		llm.NewLoopDetectionModelMiddleware(),
@@ -1512,6 +1515,9 @@ func (s *assembleState) assembleLoopAgent() {
 		core.WithSteeringChannel(s.steerCh),
 		core.WithFollowUpChannel(s.followUpCh),
 		core.WithThinkingConfig(llm.ThinkingConfigForLevel(s.thinkingLevel)),
+	}
+	if s.providerRetryPolicy != nil {
+		loopOpts = append(loopOpts, core.WithProviderRetryPolicy(s.providerRetryPolicy))
 	}
 	if s.costTracker != nil {
 		tracker := s.costTracker

@@ -340,6 +340,15 @@ type RunOperationFactory interface {
 	NewOperation(context.Context, ProviderOperationKind, int, []ResolvedCandidateHandle) (OperationDispatchAuthority, error)
 }
 
+// ProviderOperationRunner keeps one logical operation inside an outer
+// application boundary, such as a circuit breaker, while the Loop schedules
+// the operation's individual candidate calls. Only trusted application code
+// may install a runner; model inputs and provider configuration cannot supply
+// one.
+type ProviderOperationRunner interface {
+	RunProviderOperation(context.Context, func(context.Context, BaseChatModel) error) error
+}
+
 // ProviderAttempt is an llm-owned concrete one-shot handle for one actual
 // provider dispatch. Its zero value is invalid and callers cannot implement
 // or mint an attempt.
