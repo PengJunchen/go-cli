@@ -10,11 +10,13 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -333,9 +335,22 @@ func TestE2E_Phase46_CompactionPointConsistency(t *testing.T) {
 // closeIgnore closes c and ignores the error (best-effort cleanup).
 func closeIgnore(c io.Closer) { _ = c.Close() } //nolint:errcheck // best-effort
 
-// TestE2E_Phase46_StdioAdapterNoGoroutineLeak verifies that Disconnect returns
-// promptly even when the peer never reads the disconnect frame, and that no
-// goroutines leak after cleanup.
+type phase46ObservedWriter struct {
+	io.Writer
+	writes               atomic.Int32
+	disconnectWriteStart chan struct{}
+}
+
+func (w *phase46ObservedWriter) Write(p []byte) (int, error) {
+	if w.writes.Add(1) == 2 {
+		close(w.disconnectWriteStart)
+	}
+	return w.Writer.Write(p)
+}
+
+// TestE2E_Phase46_StdioAdapterNoGoroutineLeak verifies that Disconnect reports
+// tracked pending work when a caller-owned peer stops reading, then joins the
+// real blocked Write after the caller releases the pipe.
 func TestE2E_Phase46_StdioAdapterNoGoroutineLeak(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
@@ -343,7 +358,37 @@ func TestE2E_Phase46_StdioAdapterNoGoroutineLeak(t *testing.T) {
 	clientR, serverW := io.Pipe() // client reads, server writes
 	serverR, clientW := io.Pipe() // server reads, client writes
 
-	client := acp.NewStdioAdapter(clientR, clientW, acp.WithName("e2e-client"))
+	writer := &phase46ObservedWriter{Writer: clientW, disconnectWriteStart: make(chan struct{})}
+	client := acp.NewStdioAdapter(clientR, writer, acp.WithName("e2e-client"))
+	var cleanupDone <-chan struct{}
+	defer func() {
+		// The adapter does not own these pipe endpoints. Closing the peer ends
+		// releases actual Read/Write calls before the goroutine leak check runs.
+		closeIgnore(serverR)
+		closeIgnore(serverW)
+		closeIgnore(clientW)
+		closeIgnore(clientR)
+
+		if cleanupDone != nil {
+			select {
+			case <-cleanupDone:
+			case <-time.After(2 * time.Second):
+				t.Error("stdio workers did not join after caller released pipe endpoints")
+			}
+			return
+		}
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		err := client.Disconnect(cleanupCtx)
+		cancel()
+		var pending *acp.StdioPendingError
+		if errors.As(err, &pending) {
+			select {
+			case <-pending.Done():
+			case <-time.After(2 * time.Second):
+				t.Error("stdio workers did not join during failure cleanup")
+			}
+		}
+	}()
 
 	// Drain only the connect frame so Connect doesn't block; stop reading
 	// afterwards so the disconnect frame write blocks.
@@ -366,27 +411,52 @@ func TestE2E_Phase46_StdioAdapterNoGoroutineLeak(t *testing.T) {
 		t.Fatal("timed out waiting for connect frame drain")
 	}
 
-	// Close the client's input so readLoop's blocked reader unblocks.
-	closeIgnore(serverW)
-
-	// Disconnect must return within 5 seconds even though the disconnect
-	// write blocks (nobody reads serverR anymore).
-	done := make(chan error, 1)
-	go func() {
-		done <- client.Disconnect(ctx)
-	}()
+	// Confirm the real second Write has started against a pipe with no reader.
+	// Keep the input open so the session remains connected while Disconnect
+	// starts its frame write; EOF would independently begin cleanup first.
+	disconnectCtx, cancelDisconnect := context.WithCancel(context.Background())
+	defer cancelDisconnect()
+	disconnectResult := make(chan error, 1)
+	go func() { disconnectResult <- client.Disconnect(disconnectCtx) }()
 
 	select {
-	case err := <-done:
-		require.NoError(t, err, "Disconnect should not return an error")
-	case <-time.After(5 * time.Second):
-		t.Fatal("Disconnect blocked when peer pipe was never read")
+	case <-writer.disconnectWriteStart:
+	case <-time.After(2 * time.Second):
+		cancelDisconnect()
+		t.Fatal("disconnect frame Write did not start")
+	}
+	cancelDisconnect()
+
+	var disconnectErr error
+	select {
+	case disconnectErr = <-disconnectResult:
+	case <-time.After(2 * time.Second):
+		t.Fatal("Disconnect did not report pending work after its wait was canceled")
+	}
+	var pending *acp.StdioPendingError
+	if errors.As(disconnectErr, &pending) {
+		cleanupDone = pending.Done()
+	}
+	require.ErrorAs(t, disconnectErr, &pending, "an in-flight caller-owned Write must remain tracked")
+	require.ErrorIs(t, disconnectErr, context.Canceled)
+	assert.True(t, pending.UnknownDelivery(), "the disconnect frame Write started but has not returned")
+	select {
+	case <-pending.Done():
+		t.Fatal("pending cleanup completed while the peer still owns an unread pipe")
+	default:
 	}
 
-	// Cleanup: closing all pipe ends unblocks any leaked write goroutines.
-	closeIgnore(clientW)
+	// The caller owns the peer reader. Releasing it unblocks the actual Write;
+	// Done closes only after the tracked worker exits.
 	closeIgnore(serverR)
+	closeIgnore(serverW)
+	closeIgnore(clientW)
 	closeIgnore(clientR)
+	select {
+	case <-pending.Done():
+	case <-time.After(2 * time.Second):
+		t.Fatal("pending cleanup did not join after caller released the pipe")
+	}
 }
 
 // TestE2E_Phase46_StdioAdapterNormalDisconnect verifies that when the peer
