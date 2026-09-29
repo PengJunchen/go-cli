@@ -17,6 +17,7 @@ type registerDefaultsConfig struct {
 	gitTool          GitTool
 	builtinWhitelist map[string]bool
 	pathWhitelist    []string
+	canonicalRoot    string
 }
 
 // WithRegisteredFileTracker wires a FileTracker into the WriteTool and
@@ -74,6 +75,12 @@ func WithRegisteredPathWhitelist(paths []string) RegisterDefaultsOption {
 	return func(c *registerDefaultsConfig) { c.pathWhitelist = paths }
 }
 
+// WithRegisteredCanonicalWorkspaceRoot pins the canonical workspace root
+// captured by the durable session manager for scoped built-in read proofs.
+func WithRegisteredCanonicalWorkspaceRoot(root string) RegisterDefaultsOption {
+	return func(c *registerDefaultsConfig) { c.canonicalRoot = root }
+}
+
 // RegisterDefaults registers the built-in read, bash, write, edit, grep, find
 // and ls tools into the given registry. It returns an error if any
 // registration conflicts with an existing tool name. Options may be passed to
@@ -105,6 +112,11 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDef
 	readOpts := []ReadToolOption{}
 	if len(cfg.pathWhitelist) > 0 {
 		readOpts = append(readOpts, WithReadPathWhitelist(cfg.pathWhitelist))
+	} else if cfg.canonicalRoot != "" {
+		readOpts = append(readOpts, WithReadPathWhitelist([]string{cfg.canonicalRoot}))
+	}
+	if cfg.canonicalRoot != "" {
+		readOpts = append(readOpts, withReadCanonicalWorkspaceRoot(cfg.canonicalRoot))
 	}
 
 	// Build EditFileTool options.
@@ -144,6 +156,11 @@ func RegisterDefaults(ctx context.Context, reg ToolRegistry, opts ...RegisterDef
 	lsOpts := []LSToolOption{}
 	if len(cfg.pathWhitelist) > 0 {
 		lsOpts = append(lsOpts, WithLSPathWhitelist(cfg.pathWhitelist))
+	} else if cfg.canonicalRoot != "" {
+		lsOpts = append(lsOpts, WithLSPathWhitelist([]string{cfg.canonicalRoot}))
+	}
+	if cfg.canonicalRoot != "" {
+		lsOpts = append(lsOpts, withLSCanonicalWorkspaceRoot(cfg.canonicalRoot))
 	}
 
 	defs := []ToolDefinition{

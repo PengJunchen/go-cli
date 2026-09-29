@@ -608,31 +608,38 @@ type PreparedStreamingInvocation interface {
 }
 
 type preparedInvocationConfig struct {
-	fence           *DispatchFence
-	generations     DispatchFenceSnapshot
-	identity        TrustedToolIdentity
-	effects         TrustedEffectSet
-	schema          ToolSchemaSnapshot
-	call            FrozenToolCall
-	execute         func(context.Context, ToolCall) (*ToolResult, error)
-	schedule        func(context.Context, *preparedInvocation) (*ToolResult, error)
-	completionProof PreparedCompletionProof
-	streamingSink   *synchronousStreamSink
+	fence                   *DispatchFence
+	generations             DispatchFenceSnapshot
+	identity                TrustedToolIdentity
+	effects                 TrustedEffectSet
+	canonicalWorkspaceRoot  string
+	workspaceReadWhitelist  []string
+	scopedReadProofEligible bool
+	schema                  ToolSchemaSnapshot
+	call                    FrozenToolCall
+	execute                 func(context.Context, ToolCall) (*ToolResult, error)
+	schedule                func(context.Context, *preparedInvocation) (*ToolResult, error)
+	completionProof         PreparedCompletionProof
+	streamingSink           *synchronousStreamSink
 }
 
 type preparedInvocation struct {
-	fence           *DispatchFence
-	generations     DispatchFenceSnapshot
-	identity        TrustedToolIdentity
-	effects         TrustedEffectSet
-	schema          ToolSchemaSnapshot
-	call            FrozenToolCall
-	execute         func(context.Context, ToolCall) (*ToolResult, error)
-	schedule        func(context.Context, *preparedInvocation) (*ToolResult, error)
-	completionProof PreparedCompletionProof
-	completion      *preparedCompletionState
-	consumed        atomic.Bool
-	committed       atomic.Bool
+	fence                   *DispatchFence
+	generations             DispatchFenceSnapshot
+	identity                TrustedToolIdentity
+	effects                 TrustedEffectSet
+	canonicalWorkspaceRoot  string
+	workspaceReadWhitelist  []string
+	scopedReadProofEligible bool
+	schema                  ToolSchemaSnapshot
+	call                    FrozenToolCall
+	execute                 func(context.Context, ToolCall) (*ToolResult, error)
+	schedule                func(context.Context, *preparedInvocation) (*ToolResult, error)
+	completionProof         PreparedCompletionProof
+	completion              *preparedCompletionState
+	consumed                atomic.Bool
+	committed               atomic.Bool
+	scopedReadProofIssued   atomic.Bool
 }
 
 var _ PreparedInvocation = (*preparedInvocation)(nil)
@@ -641,16 +648,19 @@ func (*preparedInvocation) preparedInvocationCapability() {}
 
 func newPreparedInvocation(config preparedInvocationConfig) *preparedInvocation {
 	return &preparedInvocation{
-		fence:           config.fence,
-		generations:     config.generations,
-		identity:        config.identity,
-		effects:         newTrustedEffectSet(config.effects.Values()...),
-		schema:          config.schema,
-		call:            config.call,
-		execute:         config.execute,
-		schedule:        config.schedule,
-		completionProof: config.completionProof,
-		completion:      newPreparedCompletionState(),
+		fence:                   config.fence,
+		generations:             config.generations,
+		identity:                config.identity,
+		effects:                 newTrustedEffectSet(config.effects.Values()...),
+		canonicalWorkspaceRoot:  config.canonicalWorkspaceRoot,
+		workspaceReadWhitelist:  append([]string(nil), config.workspaceReadWhitelist...),
+		scopedReadProofEligible: config.scopedReadProofEligible,
+		schema:                  config.schema,
+		call:                    config.call,
+		execute:                 config.execute,
+		schedule:                config.schedule,
+		completionProof:         config.completionProof,
+		completion:              newPreparedCompletionState(),
 	}
 }
 

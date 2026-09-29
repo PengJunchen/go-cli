@@ -72,32 +72,38 @@ func DispatchFenceFromRegistry(reg ToolRegistry) (*DispatchFence, error) {
 }
 
 type toolRegistrationMetadata struct {
-	identity            TrustedToolIdentity
-	effects             TrustedEffectSet
-	completionProof     PreparedCompletionProof
-	schema              ToolSchemaSnapshot
-	hasParameters       bool
-	description         string
-	hasPromptGuidelines bool
-	promptGuidelines    []string
-	hasStreaming        bool
-	hasTopTools         bool
+	identity                TrustedToolIdentity
+	effects                 TrustedEffectSet
+	completionProof         PreparedCompletionProof
+	canonicalWorkspaceRoot  string
+	workspaceReadWhitelist  []string
+	scopedReadProofEligible bool
+	schema                  ToolSchemaSnapshot
+	hasParameters           bool
+	description             string
+	hasPromptGuidelines     bool
+	promptGuidelines        []string
+	hasStreaming            bool
+	hasTopTools             bool
 }
 
 type registeredToolSnapshot struct {
-	definition          ToolDefinition
-	identity            TrustedToolIdentity
-	effects             TrustedEffectSet
-	completionProof     PreparedCompletionProof
-	schema              ToolSchemaSnapshot
-	hasParameters       bool
-	description         string
-	hasPromptGuidelines bool
-	promptGuidelines    []string
-	hasStreaming        bool
-	hasTopTools         bool
-	generations         DispatchFenceSnapshot
-	pipeline            preparedToolPipelineSnapshot
+	definition              ToolDefinition
+	identity                TrustedToolIdentity
+	effects                 TrustedEffectSet
+	completionProof         PreparedCompletionProof
+	canonicalWorkspaceRoot  string
+	workspaceReadWhitelist  []string
+	scopedReadProofEligible bool
+	schema                  ToolSchemaSnapshot
+	hasParameters           bool
+	description             string
+	hasPromptGuidelines     bool
+	promptGuidelines        []string
+	hasStreaming            bool
+	hasTopTools             bool
+	generations             DispatchFenceSnapshot
+	pipeline                preparedToolPipelineSnapshot
 }
 
 type registrationSnapshotProvider interface {
@@ -293,6 +299,8 @@ func (r *DefaultToolRegistry) registerTrustedInlineLocalReader(ctx context.Conte
 func (r *DefaultToolRegistry) registerTrustedScopedWorkspaceRead(ctx context.Context, def ToolDefinition) error {
 	var whitelist PathWhitelist
 	completionProof := PreparedCompletionProof("")
+	canonicalRoot := ""
+	proofEligibleReader := false
 	switch tool := def.(type) {
 	case *ReadTool:
 		if tool == nil {
@@ -300,12 +308,16 @@ func (r *DefaultToolRegistry) registerTrustedScopedWorkspaceRead(ctx context.Con
 		}
 		whitelist = tool.whitelist
 		completionProof = CompletionInlinePipelineJoined
+		canonicalRoot = tool.canonicalWorkspaceRoot
+		proofEligibleReader = true
 	case *LSTool:
 		if tool == nil {
 			return errors.New("tools: scoped workspace-read registration requires a non-nil ls tool")
 		}
 		whitelist = tool.whitelist
 		completionProof = CompletionInlinePipelineJoined
+		canonicalRoot = tool.canonicalWorkspaceRoot
+		proofEligibleReader = true
 	case *GrepTool:
 		if tool == nil {
 			return errors.New("tools: scoped workspace-read registration requires a non-nil grep tool")
@@ -330,6 +342,9 @@ func (r *DefaultToolRegistry) registerTrustedScopedWorkspaceRead(ctx context.Con
 	scope := trustedWorkspaceReadScope(whitelist.paths)
 	if scope.Fingerprint() == ([32]byte{}) {
 		return errors.New("tools: scoped workspace-read registration requires a non-empty canonical scope")
+	}
+	if proofEligibleReader && canonicalRoot != "" {
+		return r.registerDefinitionWithScopedWorkspaceRead(def, scope, canonicalRoot, whitelist.paths)
 	}
 	return r.registerDefinitionWithScopeAndCompletion(def, RegistrationSourceBuiltin, newTrustedEffectSet(EffectWorkspaceRead), scope, completionProof)
 }
@@ -428,6 +443,26 @@ func (r *DefaultToolRegistry) registerDefinitionWithCompletion(def ToolDefinitio
 }
 
 func (r *DefaultToolRegistry) registerDefinitionWithScopeAndCompletion(def ToolDefinition, source string, effects TrustedEffectSet, scope TrustedToolScope, completionProof PreparedCompletionProof) error {
+	return r.registerDefinitionWithRuntimeReadScope(def, source, effects, scope, completionProof, "", nil, false)
+}
+
+func (r *DefaultToolRegistry) registerDefinitionWithScopedWorkspaceRead(def ToolDefinition, scope TrustedToolScope, canonicalRoot string, whitelist []string) error {
+	return r.registerDefinitionWithRuntimeReadScope(
+		def, RegistrationSourceBuiltin, newTrustedEffectSet(EffectWorkspaceRead), scope,
+		CompletionInlinePipelineJoined, canonicalRoot, whitelist, true,
+	)
+}
+
+func (r *DefaultToolRegistry) registerDefinitionWithRuntimeReadScope(
+	def ToolDefinition,
+	source string,
+	effects TrustedEffectSet,
+	scope TrustedToolScope,
+	completionProof PreparedCompletionProof,
+	canonicalRoot string,
+	workspaceReadWhitelist []string,
+	scopedReadProofEligible bool,
+) error {
 	if def == nil {
 		return errors.New("tools: cannot register a nil tool definition")
 	}
@@ -440,9 +475,12 @@ func (r *DefaultToolRegistry) registerDefinitionWithScopeAndCompletion(def ToolD
 	}
 
 	metadata := toolRegistrationMetadata{
-		description:     def.Description(),
-		effects:         newTrustedEffectSet(effects.Values()...),
-		completionProof: completionProof,
+		description:             def.Description(),
+		effects:                 newTrustedEffectSet(effects.Values()...),
+		completionProof:         completionProof,
+		canonicalWorkspaceRoot:  canonicalRoot,
+		workspaceReadWhitelist:  append([]string(nil), workspaceReadWhitelist...),
+		scopedReadProofEligible: scopedReadProofEligible,
 	}
 	if parameterized, ok := def.(Parameterized); ok {
 		metadata.hasParameters = true
@@ -512,19 +550,22 @@ func (r *DefaultToolRegistry) toolRegistrationSnapshot(_ context.Context, name s
 		}
 		found = true
 		snapshot = registeredToolSnapshot{
-			definition:          definition,
-			identity:            metadata.identity,
-			effects:             newTrustedEffectSet(metadata.effects.Values()...),
-			completionProof:     metadata.completionProof,
-			schema:              metadata.schema,
-			hasParameters:       metadata.hasParameters,
-			description:         metadata.description,
-			hasPromptGuidelines: metadata.hasPromptGuidelines,
-			promptGuidelines:    append([]string(nil), metadata.promptGuidelines...),
-			hasStreaming:        metadata.hasStreaming,
-			hasTopTools:         metadata.hasTopTools,
-			generations:         generations,
-			pipeline:            r.prepared.snapshot(),
+			definition:              definition,
+			identity:                metadata.identity,
+			effects:                 newTrustedEffectSet(metadata.effects.Values()...),
+			completionProof:         metadata.completionProof,
+			canonicalWorkspaceRoot:  metadata.canonicalWorkspaceRoot,
+			workspaceReadWhitelist:  append([]string(nil), metadata.workspaceReadWhitelist...),
+			scopedReadProofEligible: metadata.scopedReadProofEligible,
+			schema:                  metadata.schema,
+			hasParameters:           metadata.hasParameters,
+			description:             metadata.description,
+			hasPromptGuidelines:     metadata.hasPromptGuidelines,
+			promptGuidelines:        append([]string(nil), metadata.promptGuidelines...),
+			hasStreaming:            metadata.hasStreaming,
+			hasTopTools:             metadata.hasTopTools,
+			generations:             generations,
+			pipeline:                r.prepared.snapshot(),
 		}
 	})
 	if err != nil {

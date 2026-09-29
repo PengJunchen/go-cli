@@ -81,7 +81,7 @@ func newDurableCLISession(
 	}
 	ctx = normalizeSessionContext(ctx)
 
-	workspaceID, err := resolveWorkspaceID(os.Getwd)
+	canonicalRoot, workspaceID, err := resolveWorkspaceIdentity(os.Getwd)
 	if err != nil {
 		return nil, fmt.Errorf("cli: resolve durable session workspace: %w", err)
 	}
@@ -93,7 +93,7 @@ func newDurableCLISession(
 		return nil, fmt.Errorf("cli: initialize durable session workspace authority: %w", err)
 	}
 	preparer := session.NewDurableJSONLSessionPreparer(storeDirectory, index)
-	manager, err := newDurableSessionManager(preparer, workspaceID)
+	manager, err := newDurableSessionManagerForWorkspace(preparer, canonicalRoot, workspaceID)
 	if err != nil {
 		return nil, fmt.Errorf("cli: create durable session manager: %w", err)
 	}
@@ -199,6 +199,7 @@ func bindDurableSessionRun(
 	}
 	binding := core.RunCommitBinding{
 		SessionID: lease.SessionID(), WorkspaceID: lease.WorkspaceID(),
+		CanonicalWorkspaceRoot: lease.CanonicalWorkspaceRoot(),
 	}
 	return core.WithRunCommit(ctx, sink, binding), sink, nil
 }

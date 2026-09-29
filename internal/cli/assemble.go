@@ -986,6 +986,9 @@ func (s *assembleState) assembleTools() error {
 		tools.WithRegisteredResourceLimits(resourceLimits),
 		tools.WithRegisteredGitTool(s.gitTool),
 	}
+	if s.durableSession != nil && s.durableSession.manager != nil {
+		regOpts = append(regOpts, tools.WithRegisteredCanonicalWorkspaceRoot(s.durableSession.manager.root))
+	}
 	if s.rc != nil && len(s.rc.Sandbox.AllowedPaths) > 0 {
 		regOpts = append(regOpts, tools.WithRegisteredPathWhitelist(s.rc.Sandbox.AllowedPaths))
 	}

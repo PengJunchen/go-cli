@@ -24,6 +24,10 @@ const (
 // LSToolOption configures an LSTool.
 type LSToolOption func(*LSTool)
 
+func withLSCanonicalWorkspaceRoot(root string) LSToolOption {
+	return func(tool *LSTool) { tool.canonicalWorkspaceRoot = root }
+}
+
 // WithLSWorkdir sets the base directory that relative paths are resolved
 // against.
 func WithLSWorkdir(dir string) LSToolOption {
@@ -47,7 +51,8 @@ type LSTool struct {
 	Workdir string
 	// whitelist, when configured, restricts listings to paths within the
 	// allowed base directories. Symlink escape is detected and rejected.
-	whitelist PathWhitelist
+	whitelist              PathWhitelist
+	canonicalWorkspaceRoot string
 }
 
 var _ ToolDefinition = (*LSTool)(nil)

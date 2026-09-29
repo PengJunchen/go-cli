@@ -283,6 +283,15 @@ func (s *SessionRunCommitSink) BeginIntentBatch(ctx context.Context, batch core.
 		if err != nil {
 			return fmt.Errorf("session: invalid trusted effects for intent %q: %w", intent.ToolCallID, err)
 		}
+		if intent.ScopedReadProof != nil {
+			workspaceID, rootErr := WorkspaceIDForCanonicalRoot(batch.CanonicalWorkspaceRoot)
+			if rootErr != nil || workspaceID != s.workspaceID || !intent.ScopedReadProof.MatchesAction(
+				intent.ToolIdentity, intent.EffectSet, intent.SchemaDigest, intent.ArgumentDigest,
+				intent.ToolCallID, batch.CanonicalWorkspaceRoot,
+			) {
+				return fmt.Errorf("session: scoped read proof does not match prepared intent %q", intent.ToolCallID)
+			}
+		}
 		entryID, err := stableRunCommitEntryID("intent", struct {
 			SessionID string
 			Workspace string
@@ -324,6 +333,7 @@ func (s *SessionRunCommitSink) BeginIntentBatch(ctx context.Context, batch core.
 				ToolCallID: intent.ToolCallID, ActionID: intent.ActionID,
 			},
 			ToolIdentity: &identity, EffectSet: append([]tools.TrustedToolEffect(nil), effects...),
+			ScopedReadProof: intent.ScopedReadProof,
 		})
 	}
 	if existingIntentCount != 0 && existingIntentCount != len(batch.Intents) {
@@ -343,6 +353,7 @@ func (s *SessionRunCommitSink) BeginIntentBatch(ctx context.Context, batch core.
 	dispatchBatch := WorkspaceDispatchBatch{
 		WorkspaceID: s.workspaceID, SessionID: s.sessionID, RunID: batch.RunID,
 		ActionBatchID: batch.ActionBatchID, Actions: dispatchActions,
+		CanonicalWorkspaceRoot: batch.CanonicalWorkspaceRoot,
 	}
 	result, err := s.index.BeginDispatchBatch(ctx, dispatchBatch)
 	if err != nil {

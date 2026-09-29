@@ -47,16 +47,18 @@ type WorkspaceDispatchAction struct {
 	ToolIdentity      *tools.TrustedToolIdentitySnapshot `json:"tool_identity,omitempty"`
 	EffectSet         []tools.TrustedToolEffect          `json:"effect_set"`
 	ExecutionIdentity *ExecutionIdentity                 `json:"execution_identity,omitempty"`
+	ScopedReadProof   *tools.ScopedWorkspaceReadProof    `json:"-"`
 }
 
 // WorkspaceDispatchBatch is the complete session reservation batch whose
 // global marker must be synced before any contained executor starts.
 type WorkspaceDispatchBatch struct {
-	WorkspaceID   string                    `json:"workspace_id"`
-	SessionID     string                    `json:"session_id"`
-	RunID         string                    `json:"run_id"`
-	ActionBatchID string                    `json:"action_batch_id"`
-	Actions       []WorkspaceDispatchAction `json:"actions"`
+	WorkspaceID            string                    `json:"workspace_id"`
+	SessionID              string                    `json:"session_id"`
+	RunID                  string                    `json:"run_id"`
+	ActionBatchID          string                    `json:"action_batch_id"`
+	Actions                []WorkspaceDispatchAction `json:"actions"`
+	CanonicalWorkspaceRoot string                    `json:"-"`
 }
 
 type WorkspaceDispatchResult uint8
@@ -244,6 +246,7 @@ func (i *WorkspaceQuarantineIndex) BeginDispatchBatch(ctx context.Context, batch
 		return WorkspaceDispatchNotCommitted, err
 	}
 	var result WorkspaceDispatchResult
+	persisted := stripWorkspaceDispatchRuntime(normalized)
 	err = i.withLockedIndex(ctx, normalized.WorkspaceID, func(handle *workspaceIndexHandle) error {
 		// A prior append may have become visible before Sync reported an error.
 		// Confirm the current bytes before using any resolution row to release
@@ -256,7 +259,7 @@ func (i *WorkspaceQuarantineIndex) BeginDispatchBatch(ctx context.Context, batch
 		}
 		key := workspaceBatchKey{sessionID: normalized.SessionID, runID: normalized.RunID, batchID: normalized.ActionBatchID}
 		if existing := handle.state.batches[key]; existing != nil {
-			if existing.WorkspaceID != normalized.WorkspaceID || !reflect.DeepEqual(existing.Actions, normalized.Actions) {
+			if existing.WorkspaceID != persisted.WorkspaceID || !reflect.DeepEqual(existing.Actions, persisted.Actions) {
 				return errors.New("session: workspace dispatch batch ID was reused with different action references")
 			}
 			result = WorkspaceDispatchAlreadyExists
@@ -271,17 +274,18 @@ func (i *WorkspaceQuarantineIndex) BeginDispatchBatch(ctx context.Context, batch
 				return errors.New("session: workspace action ID is already assigned to another occurrence")
 			}
 		}
-		if handle.state.hasUnresolvedMarker() {
-			// Safe reads need both a trusted effect and an enforced path-scope
-			// permit from R4. This storage-only adapter has no such permit, so it
-			// conservatively blocks every new action while anything is unresolved.
+		hasUnresolved := handle.state.hasUnresolvedMarker()
+		if hasUnresolved && !workspaceDispatchBatchHasScopedReadProofs(normalized, true) {
+			return ErrWorkspaceQuarantined
+		}
+		if !claimWorkspaceDispatchReadProofs(normalized) {
 			return ErrWorkspaceQuarantined
 		}
 		record := workspaceIndexRecord{
-			Version: 1, RecordID: workspaceDispatchRecordID(normalized),
-			Kind: workspaceIndexDispatchReady, WorkspaceID: normalized.WorkspaceID,
-			SessionID: normalized.SessionID, RunID: normalized.RunID,
-			ActionBatchID: normalized.ActionBatchID, Actions: normalized.Actions,
+			Version: 1, RecordID: workspaceDispatchRecordID(persisted),
+			Kind: workspaceIndexDispatchReady, WorkspaceID: persisted.WorkspaceID,
+			SessionID: persisted.SessionID, RunID: persisted.RunID,
+			ActionBatchID: persisted.ActionBatchID, Actions: persisted.Actions,
 		}
 		if err := contextErr(ctx); err != nil {
 			return err
@@ -950,6 +954,7 @@ func normalizeWorkspaceDispatchBatch(batch WorkspaceDispatchBatch) (WorkspaceDis
 	normalized := WorkspaceDispatchBatch{
 		WorkspaceID: batch.WorkspaceID, SessionID: batch.SessionID, RunID: batch.RunID,
 		ActionBatchID: batch.ActionBatchID, Actions: make([]WorkspaceDispatchAction, len(batch.Actions)),
+		CanonicalWorkspaceRoot: batch.CanonicalWorkspaceRoot,
 	}
 	seenCalls := make(map[string]struct{}, len(batch.Actions))
 	seenActionIDs := make(map[string]struct{}, len(batch.Actions))
@@ -973,6 +978,68 @@ func normalizeWorkspaceDispatchBatch(batch WorkspaceDispatchBatch) (WorkspaceDis
 		normalized.Actions[n].EffectSet = effects
 	}
 	return normalized, nil
+}
+
+func stripWorkspaceDispatchRuntime(batch WorkspaceDispatchBatch) WorkspaceDispatchBatch {
+	batch.CanonicalWorkspaceRoot = ""
+	batch.Actions = append([]WorkspaceDispatchAction(nil), batch.Actions...)
+	for index := range batch.Actions {
+		batch.Actions[index] = cloneWorkspaceDispatchAction(batch.Actions[index])
+		batch.Actions[index].ScopedReadProof = nil
+	}
+	return batch
+}
+
+func workspaceDispatchBatchHasScopedReadProofs(batch WorkspaceDispatchBatch, requireAll bool) bool {
+	if len(batch.Actions) == 0 {
+		return false
+	}
+	hasProof := false
+	for _, action := range batch.Actions {
+		if action.ScopedReadProof != nil {
+			hasProof = true
+		} else if requireAll {
+			return false
+		}
+	}
+	if !hasProof {
+		return !requireAll
+	}
+	if batch.CanonicalWorkspaceRoot == "" {
+		return false
+	}
+	workspaceID, err := WorkspaceIDForCanonicalRoot(batch.CanonicalWorkspaceRoot)
+	if err != nil || workspaceID != batch.WorkspaceID {
+		return false
+	}
+	for _, action := range batch.Actions {
+		if action.ScopedReadProof == nil {
+			continue
+		}
+		if action.ToolIdentity == nil || !action.ScopedReadProof.MatchesWorkspaceAction(
+			*action.ToolIdentity, action.EffectSet, action.Action.ToolCallID, batch.CanonicalWorkspaceRoot,
+		) {
+			return false
+		}
+	}
+	return true
+}
+
+func claimWorkspaceDispatchReadProofs(batch WorkspaceDispatchBatch) bool {
+	if !workspaceDispatchBatchHasScopedReadProofs(batch, false) {
+		return false
+	}
+	for _, action := range batch.Actions {
+		if action.ScopedReadProof == nil {
+			continue
+		}
+		if action.ToolIdentity == nil || !action.ScopedReadProof.ClaimWorkspaceAdmission(
+			*action.ToolIdentity, action.EffectSet, action.Action.ToolCallID, batch.CanonicalWorkspaceRoot,
+		) {
+			return false
+		}
+	}
+	return true
 }
 
 func validateWorkspaceDispatchAction(action WorkspaceDispatchAction, workspaceID, sessionID, runID, batchID string) error {
