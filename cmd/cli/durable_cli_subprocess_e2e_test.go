@@ -142,6 +142,85 @@ func TestDurableCLIBinaryPersistsWriteReceiptAndDoesNotReplayAfterRestart(t *tes
 	})
 }
 
+func TestDurableCLIBinaryKeepsSyncedInputWithoutReplayingInterruptedProviderCall(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	require.NoError(t, err)
+	binary := filepath.Join(t.TempDir(), "go-cli")
+	build := exec.Command("go", "build", "-o", binary, "./cmd/cli")
+	build.Dir = root
+	buildOutput, err := build.CombinedOutput()
+	require.NoError(t, err, "build real CLI: %s", buildOutput)
+	t.Logf("build command: go build -o %s ./cmd/cli\nbuild exit: 0\nbuild output: %s", binary, buildOutput)
+
+	fixture := newDurableCLIBinaryFixture(t, binary, false)
+	defer func() {
+		fixture.releaseBarrier()
+		fixture.server.Close()
+	}()
+	fixture.peer.blockFirstRequest = true
+	fixture.peer.setResponsePlan(
+		durableCLIFinal("must not arrive before the first process is killed"),
+		durableCLIFinal("explicit post-restart request completed"),
+	)
+
+	command, stdout, stderr, wait := fixture.start(t,
+		"prompt", "-provider=openai", "-output=text", "-approve=auto", "first request interrupted by process death")
+	physicalID := waitForDurableCLIOutput(t, stdout, "Session ID: ")
+	waitForDurableCLIBarrier(t, fixture.peer.barrierReached)
+	firstRequests := fixture.assertPeerRequests(t, 1)
+	require.Contains(t, string(firstRequests[0]), `"content":"first request interrupted by process death"`)
+
+	rows := fixture.readRows(t, physicalID)
+	requireDurableSourceIDsUnique(t, rows, physicalID)
+	var firstInput *session.SessionEntry
+	for index := range rows {
+		row := &rows[index]
+		if row.Type == session.EntryTypeUser && row.TranscriptIndex != nil {
+			require.Nil(t, firstInput, "the first provider request has exactly one durable user input")
+			firstInput = row
+		}
+	}
+	require.NotNil(t, firstInput, "the submitted input must be on disk before the first provider request is allowed to start")
+	require.Equal(t, "first request interrupted by process death", firstInput.Content)
+	require.NotEmpty(t, firstInput.RunID, "the durable input identifies the interrupted run")
+	firstRunID := firstInput.RunID
+	for _, row := range rows {
+		require.False(t, row.Type == session.EntryTypeCheckpoint && row.CheckpointKind == session.CheckpointRunTerminal && row.RunID == firstRunID,
+			"the first run has no terminal while its provider response is blocked")
+		require.False(t, row.Type == session.EntryTypeAssistant && row.RunID == firstRunID,
+			"no assistant output can be durable before the blocked provider responds")
+	}
+
+	require.NoError(t, command.Process.Kill(), "SIGKILL only the owned CLI process while its first provider response is blocked")
+	firstErr := <-wait
+	first := durableCLIChildResult{stdout: stdout.String(), stderr: stderr.String(), err: firstErr, exitCode: command.ProcessState.ExitCode(), state: command.ProcessState.String()}
+	requireCLIChildExit(t, first, -1)
+	require.Len(t, fixture.peer.requestBodies(), 1, "the dead process has made exactly one provider request")
+	rows = fixture.readRows(t, physicalID)
+	requireDurableSourceIDsUnique(t, rows, physicalID)
+	requireRunTerminals(t, rows, physicalID, 0)
+	requireDurableTranscriptSequenceForInterruptedInput(t, rows, physicalID, firstRunID, "first request interrupted by process death")
+
+	second := fixture.run(t, "prompt", "-provider=openai", "-output=text", "-approve=auto", "-resume-session", physicalID, "explicit request after restart")
+	requireCLIChildExit(t, second, 0)
+	require.Equal(t, physicalID, durableCLIPhysicalSessionIDFromOutput(t, second.stdout), "restart must use the exact physical session")
+	require.Contains(t, second.stdout, "explicit post-restart request completed")
+	requests := fixture.assertPeerRequests(t, 2)
+	require.Contains(t, string(requests[0]), `"content":"first request interrupted by process death"`)
+	restartedRequest := string(requests[1])
+	require.Contains(t, restartedRequest, `"content":"first request interrupted by process death"`, "the synced input is restored as history")
+	require.Contains(t, restartedRequest, `"content":"explicit request after restart"`, "the new user input is explicit")
+
+	rows = fixture.readRows(t, physicalID)
+	requireDurableSourceIDsUnique(t, rows, physicalID)
+	requireDurableTranscriptSequenceForInterruptedInput(t, rows, physicalID, firstRunID, "first request interrupted by process death")
+	terminals := requireRunTerminals(t, rows, physicalID, 1)
+	require.NotEqual(t, firstRunID, terminals[0].RunID, "only the explicit post-restart run receives a terminal")
+	require.Len(t, fixture.peer.requestBodies(), 2, "the old request is not automatically replayed between processes")
+	t.Logf("real CLI first-request crash boundary physical_id=%s interrupted_run_id=%s synced_user_input=%q killed_parent_state=%s provider_requests=%d resumed_terminal_run_id=%s",
+		physicalID, firstRunID, firstInput.Content, first.state, len(requests), terminals[0].RunID)
+}
+
 func TestDurableCLIBinaryQuarantinesLiveOrphanedBashAndNeverReplays(t *testing.T) {
 	root, err := filepath.Abs(filepath.Join("..", ".."))
 	require.NoError(t, err)
@@ -1341,6 +1420,32 @@ func requireDurableTranscriptSequence(t *testing.T, rows []session.SessionEntry,
 	}
 }
 
+func requireDurableTranscriptSequenceForInterruptedInput(
+	t *testing.T,
+	rows []session.SessionEntry,
+	physicalID, runID, prompt string,
+) {
+	t.Helper()
+	inputCount := 0
+	for _, row := range rows {
+		if row.TranscriptIndex == nil || row.RunID != runID {
+			continue
+		}
+		require.Equal(t, physicalID, row.SessionID)
+		switch row.Type {
+		case session.EntryTypeUser:
+			inputCount++
+			require.Equal(t, prompt, row.Content, "the interrupted run retains its exact submitted input")
+			require.Equal(t, uint64(0), *row.TranscriptIndex)
+		case session.EntryTypeAssistant, session.EntryTypeTool:
+			t.Fatalf("interrupted first provider call unexpectedly has durable %s transcript row: %#v", row.Type, row)
+		default:
+			t.Fatalf("interrupted first provider call has unexpected transcript row type %q", row.Type)
+		}
+	}
+	require.Equal(t, 1, inputCount, "the interrupted run has exactly its synced user input and no provider/tool transcript")
+}
+
 type durableCLIWorkspaceIndexRow struct {
 	Version   uint16 `json:"version"`
 	Seq       uint64 `json:"seq"`
@@ -1459,14 +1564,15 @@ func logDurableFileEvidence(t *testing.T, phase, physicalID string, rows []sessi
 }
 
 type durableCLIPeer struct {
-	mu             sync.Mutex
-	bodies         [][]byte
-	authorizations []string
-	responses      []durableCLIPeerResponse
-	blockAfterTool bool
-	barrierReached chan struct{}
-	release        chan struct{}
-	barrierOnce    sync.Once
+	mu                sync.Mutex
+	bodies            [][]byte
+	authorizations    []string
+	responses         []durableCLIPeerResponse
+	blockAfterTool    bool
+	blockFirstRequest bool
+	barrierReached    chan struct{}
+	release           chan struct{}
+	barrierOnce       sync.Once
 }
 
 type durableCLIPeerResponse struct {
@@ -1519,7 +1625,7 @@ func (peer *durableCLIPeer) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	peer.mu.Unlock()
 
-	if peer.blockAfterTool && index == 1 {
+	if (peer.blockAfterTool && index == 1) || (peer.blockFirstRequest && index == 0) {
 		peer.barrierOnce.Do(func() { close(peer.barrierReached) })
 		select {
 		case <-peer.release:
