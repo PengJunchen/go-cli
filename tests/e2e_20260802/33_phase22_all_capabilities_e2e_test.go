@@ -70,15 +70,26 @@ func phase33ToolNames(t *testing.T, tr tools.ToolRegistry) map[string]bool {
 	return names
 }
 
+// phase33PlanSlashDeps supplies the only dependencies used by PlanHandler.
+// The remaining accessors are intentionally unavailable in this focused test.
+type phase33PlanSlashDeps struct {
+	cli.Dependencies
+	planCtrl core.PlanModeController
+}
+
+func (d phase33PlanSlashDeps) Out() io.Writer { return io.Discard }
+
+func (d phase33PlanSlashDeps) PlanCtrl() core.PlanModeController { return d.planCtrl }
+
 // =============================================================================
 // AC-1: ToolRegistry Completeness — all expected tools registered
 // =============================================================================
 
 // TestET_Phase22_AllCapabilities_AC1_ToolRegistryCompleteness verifies that
-// the assembled ToolRegistry contains all expected builtin, task, goal, web,
-// plan-mode, git, and subagent tools. Tool name discrepancies between the
-// task spec and actual code are reported as logged warnings but do not fail
-// the test; the test checks for the ACTUAL names.
+// the assembled model-facing ToolRegistry contains the expected builtin,
+// task, goal, web, git, and subagent tools. Plan Mode transitions stay
+// unavailable to model calls and remain available through the user /plan
+// slash handler.
 func TestET_Phase22_AllCapabilities_AC1_ToolRegistryCompleteness(t *testing.T) {
 	assembly := phase33Assemble(t, phase33TestConfig())
 
@@ -95,8 +106,6 @@ func TestET_Phase22_AllCapabilities_AC1_ToolRegistryCompleteness(t *testing.T) {
 		"web_fetch", "web_search",
 		// User interaction
 		"ask_user",
-		// Plan mode
-		"enter_plan_mode", "exit_plan_mode",
 		// Git
 		"git_diff", "git_status", "git_commit",
 		// Subagent
@@ -113,18 +122,35 @@ func TestET_Phase22_AllCapabilities_AC1_ToolRegistryCompleteness(t *testing.T) {
 	}
 	assert.Empty(t, missing, "all expected tools should be registered; missing: %v", missing)
 
+	ctx := context.Background()
+	for _, name := range []string{"enter_plan_mode", "exit_plan_mode"} {
+		_, err := assembly.ToolRegistry.Get(ctx, name)
+		require.ErrorIs(t, err, tools.ErrToolNotFound,
+			"model-facing plan control %q must stay unavailable", name)
+	}
+
 	// Report discrepancies between task spec names and actual names.
-	// The task spec lists different names; the actual code uses these:
+	// Plan Mode transition names are intentionally not mapped because these
+	// controls are user-only, not model-facing tools.
 	discrepancies := map[string]string{
 		"ask_user_question": "ask_user",
-		"plan_mode_enter":   "enter_plan_mode",
-		"plan_mode_exit":    "exit_plan_mode",
 		"subagent":          "dispatch_subagent",
 	}
 	for specName, actualName := range discrepancies {
 		assert.True(t, names[actualName],
 			"task spec lists %q but actual tool name is %q (found in registry)", specName, actualName)
 	}
+
+	require.NotNil(t, assembly.PlanCtrl, "user /plan commands require the assembled PlanMode controller")
+	planHandler := &cli.PlanHandler{}
+	require.Equal(t, "plan", planHandler.Name(), "the user slash command is /plan")
+	planDeps := phase33PlanSlashDeps{planCtrl: assembly.PlanCtrl}
+	_, err := planHandler.Handle(ctx, []string{"enter", "user requested"}, planDeps)
+	require.NoError(t, err)
+	assert.True(t, assembly.PlanCtrl.IsActive(), "/plan enter must still activate plan mode")
+	_, err = planHandler.Handle(ctx, []string{"exit", "user completed planning"}, planDeps)
+	require.NoError(t, err)
+	assert.False(t, assembly.PlanCtrl.IsActive(), "/plan exit must still deactivate plan mode")
 
 	// Sanity: the registry should have a reasonable number of tools.
 	assert.GreaterOrEqual(t, len(names), 25, "registry should have at least 25 tools")
