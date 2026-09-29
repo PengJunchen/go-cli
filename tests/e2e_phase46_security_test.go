@@ -25,6 +25,7 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/acp"
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mock"
 	"github.com/pengjunchen/go-cli/internal/production"
 	"github.com/pengjunchen/go-cli/internal/session"
@@ -555,7 +556,6 @@ func (r *countingRegistry) Version() int {
 // tool definitions across Run calls and invalidates the cache when a new tool
 // is registered (registry version changes).
 func TestE2E_Phase46_ToolDefinitionCacheHit(t *testing.T) {
-	t.Skip("Tool definition cache behavior is flaky in CI — needs investigation")
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
@@ -576,9 +576,8 @@ func TestE2E_Phase46_ToolDefinitionCacheHit(t *testing.T) {
 		mock.ConversationTurn{AssistantContent: "third response"},
 	))
 
-	// Create a LoopAgent with the registry and mock LLM. Use a custom system
-	// prompt to avoid the default systemPrompt() calling List() on every Run,
-	// so the only List() calls come from buildToolDefinitions.
+	// Create a LoopAgent with the registry and mock LLM. The custom system
+	// prompt keeps default prompt construction out of this cache-focused test.
 	agent := core.NewLoopAgent(
 		core.WithLLM(mockLLM),
 		core.WithTools(countingReg),
@@ -586,7 +585,8 @@ func TestE2E_Phase46_ToolDefinitionCacheHit(t *testing.T) {
 		core.WithMaxIterations(5),
 	)
 
-	// First Run: cache miss — buildToolDefinitions calls List().
+	// First Run: the live tool snapshot and the cold model-definition cache
+	// each call List().
 	_, err := agent.Run(ctx, core.Submission{
 		Type:    core.SubmissionUserMessage,
 		Content: "first query",
@@ -594,10 +594,11 @@ func TestE2E_Phase46_ToolDefinitionCacheHit(t *testing.T) {
 	require.NoError(t, err)
 
 	listCountAfterFirst := countingReg.listCount
-	assert.GreaterOrEqual(t, listCountAfterFirst, 1,
-		"first Run should call List() at least once (cache miss)")
+	assert.Equal(t, 2, listCountAfterFirst,
+		"first Run should list live tools and build model-facing definitions")
 
-	// Second Run: cache hit — buildToolDefinitions should NOT call List().
+	// Second Run: the live snapshot still calls List(), while the model-facing
+	// definitions come from the unchanged-version cache.
 	_, err = agent.Run(ctx, core.Submission{
 		Type:    core.SubmissionUserMessage,
 		Content: "second query",
@@ -605,14 +606,15 @@ func TestE2E_Phase46_ToolDefinitionCacheHit(t *testing.T) {
 	require.NoError(t, err)
 
 	listCountAfterSecond := countingReg.listCount
-	assert.Equal(t, listCountAfterFirst, listCountAfterSecond,
-		"second Run should reuse cached tool definitions (no List() call)")
+	assert.Equal(t, listCountAfterFirst+1, listCountAfterSecond,
+		"second Run should list live tools once and reuse cached model definitions")
 
 	// Register a new tool — this increments the registry version and should
 	// invalidate the cache.
 	require.NoError(t, reg.Register(ctx, tools.NewLSTool()))
 
-	// Third Run: cache invalidated — buildToolDefinitions calls List() again.
+	// Third Run: the live snapshot and the version-invalidated model-definition
+	// cache each call List().
 	_, err = agent.Run(ctx, core.Submission{
 		Type:    core.SubmissionUserMessage,
 		Content: "third query",
@@ -620,8 +622,27 @@ func TestE2E_Phase46_ToolDefinitionCacheHit(t *testing.T) {
 	require.NoError(t, err)
 
 	listCountAfterThird := countingReg.listCount
-	assert.Greater(t, listCountAfterThird, listCountAfterSecond,
-		"third Run should rebuild tool definitions after registry change (cache invalidated)")
+	assert.Equal(t, listCountAfterSecond+2, listCountAfterThird,
+		"third Run should list live tools and rebuild model definitions after registry change")
+
+	callLog := mockLLM.CallLog()
+	require.Len(t, callLog, 3)
+	toolNamesFromCall := func(call mock.LLMCallRecord) []string {
+		var generationOptions llm.GenerationOptions
+		for _, option := range call.Options {
+			option(&generationOptions)
+		}
+
+		names := make([]string, 0, len(generationOptions.Tools))
+		for _, tool := range generationOptions.Tools {
+			names = append(names, tool.Name)
+		}
+		return names
+	}
+	assert.NotContains(t, toolNamesFromCall(callLog[1]), "ls",
+		"second Run should retain the cached pre-registration tool definitions")
+	assert.Contains(t, toolNamesFromCall(callLog[2]), "ls",
+		"third Run should expose the newly registered tool to the model")
 }
 
 // ---------------------------------------------------------------------------
