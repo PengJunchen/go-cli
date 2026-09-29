@@ -255,19 +255,23 @@ func TestNativeChatModel_GenerateCanceledContext(t *testing.T) {
 // without contacting any server.
 func TestNativeChatModelGenerate_EncodeError(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
+	encodeErr := errors.New("llm: encode boom")
 	m := &nativeChatModel{
 		client:    http.DefaultClient,
 		provider:  "x",
 		model:     "m",
 		buildMode: UnboundLibraryBuild,
 		encode: func(_ []Message, _ []Option) ([]byte, error) {
-			return nil, errors.New("llm: encode boom")
+			return nil, encodeErr
 		},
 		decode: func(_ []byte) (*Message, error) { return nil, nil },
 	}
 	_, err := m.Generate(context.Background(), nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "encode boom")
+	require.ErrorIs(t, err, encodeErr)
+	var setupErr *PreDispatchCandidateError
+	require.ErrorAs(t, err, &setupErr)
+	assert.Equal(t, PreDispatchInvalidRequest, setupErr.Class)
 }
 
 // TestNativeChatModelGenerate_Non2xx verifies non-2xx preserves structured

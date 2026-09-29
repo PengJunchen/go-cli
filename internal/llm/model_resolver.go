@@ -124,7 +124,7 @@ type ResolvedModel struct {
 // its already resolved endpoint and credential scope.
 func (m ResolvedModel) Build(ctx context.Context) (BaseChatModel, func(), error) {
 	if m.candidate == nil {
-		return nil, nil, ErrGuardedCandidateUnavailable
+		return nil, nil, preDispatchCandidateError(nil, PreDispatchCandidateUnavailable, ErrGuardedCandidateUnavailable)
 	}
 	return m.candidate.build(ctx)
 }
@@ -157,7 +157,11 @@ func (r *ProviderRegistry) SetCredentialResolver(source ScopedCredentialResolver
 // CredentialRef must match the resolver's canonical provider, protocol, and
 // origin exactly. A zero CredentialRef is filled from the request identity.
 func (r *ModelResolver) ResolveModel(ctx context.Context, request ModelRequest) (ResolvedModel, error) {
-	return r.resolveModel(ctx, request, "")
+	resolved, err := r.resolveModel(ctx, request, "")
+	if err != nil {
+		return ResolvedModel{}, preDispatchCandidateError(nil, preDispatchFailureClass(err), err)
+	}
+	return resolved, nil
 }
 
 // CredentialRefFor returns the exact scope a later request will resolve to.
@@ -235,7 +239,12 @@ func (r *ModelResolver) resolveModel(ctx context.Context, request ModelRequest, 
 		var found bool
 		apiKey, found, err = r.credentials.ResolveCredential(ctx, scope.ProviderID, string(scope.ProtocolID), scope.Origin)
 		if err != nil {
-			return ResolvedModel{}, fmt.Errorf("llm: resolve scoped credential for %s: %w", spec.ProviderID, err)
+			wrapped := fmt.Errorf("llm: resolve scoped credential for %s: %w", spec.ProviderID, err)
+			class := PreDispatchAuth
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+				class = PreDispatchCancelled
+			}
+			return ResolvedModel{}, preDispatchCandidateError(nil, class, wrapped)
 		}
 		if !found {
 			apiKey = ""

@@ -17,12 +17,16 @@ import (
 )
 
 type attemptTestAuthority struct {
-	id                   ProviderOperationID
-	denial               *DispatchDenial
-	wrongPermitCandidate bool
-	proposals            []CandidateProposal
-	attempts             []*attemptTestProviderAttempt
-	onFinish             func()
+	id                       ProviderOperationID
+	denial                   *DispatchDenial
+	beginErr                 error
+	proposals                []CandidateProposal
+	attempts                 []*attemptTestProviderAttempt
+	permits                  []*DispatchPermit
+	permitCopy               *DispatchPermit
+	rejectedWrongOwner       bool
+	rejectedAliasedCandidate bool
+	onFinish                 func()
 }
 
 // attemptFencedTestModel adapts a mock model through the same operation-owner
@@ -75,76 +79,92 @@ func (a *attemptTestAuthority) AuthorizeCandidate(_ context.Context, proposal Ca
 	if a.denial != nil {
 		return DispatchDecision{Denial: a.denial}, nil
 	}
-	candidateID := proposal.Candidate.CandidateID()
-	if a.wrongPermitCandidate {
-		candidateID = "another-candidate"
-	}
-	return DispatchDecision{Permit: &attemptTestPermit{
-		owner:       a,
-		operationID: a.id,
-		candidateID: candidateID,
-		candidate:   proposal.Candidate,
-	}}, nil
+	return DispatchDecision{Authorized: true}, nil
 }
 
-func (a *attemptTestAuthority) BeginDispatch(permit DispatchPermit, candidate ResolvedCandidateHandle) (ProviderAttempt, error) {
-	issued, ok := permit.(*attemptTestPermit)
-	if !ok || issued.owner != a || issued.consumed || issued.operationID != a.id || issued.candidate != candidate {
-		return nil, ErrDispatchPermitRequired
+func (a *attemptTestAuthority) BeginDispatch(permit *DispatchPermit, candidate ResolvedCandidateHandle) (ProviderAttemptID, error) {
+	if !permit.ValidFor(a, candidate) {
+		return "", ErrDispatchPermitRequired
 	}
-	issued.consumed = true
-	attempt := &attemptTestProviderAttempt{
-		id:        ProviderAttemptID(fmt.Sprintf("attempt-%d", len(a.attempts)+1)),
-		operation: a.id,
-		identity:  candidate.Identity(),
-		onFinish:  a.onFinish,
+	copy := *permit
+	a.permitCopy = &copy
+	a.rejectedWrongOwner = !permit.ValidFor(&attemptTestAuthority{id: a.id}, candidate)
+	a.rejectedAliasedCandidate = !permit.ValidFor(a, &resolvedCandidateHandle{id: candidate.CandidateID()})
+	a.permits = append(a.permits, permit)
+	if a.beginErr != nil {
+		return "", a.beginErr
 	}
+	attempt := &attemptTestProviderAttempt{id: ProviderAttemptID(fmt.Sprintf("attempt-%d", len(a.attempts)+1))}
 	a.attempts = append(a.attempts, attempt)
-	return attempt, nil
+	return attempt.id, nil
 }
 
-type attemptTestPermit struct {
-	owner       *attemptTestAuthority
-	operationID ProviderOperationID
-	candidateID CandidateID
-	candidate   ResolvedCandidateHandle
-	consumed    bool
+func TestDispatchPermitIsBoundToOwnerCandidateAndOneBegin(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		writeResponse(t, w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`)
+	}))
+	defer server.Close()
+
+	resolved := newAttemptTestResolvedModel(t, server, "attempt-permit-binding")
+	model, cleanup, err := resolved.Build(context.Background())
+	require.NoError(t, err)
+	defer cleanup()
+	authority := &attemptTestAuthority{id: "permit-binding-operation"}
+	_, err = model.Generate(WithOperationDispatchAuthority(context.Background(), authority), []Message{{Role: RoleUser, Content: "request"}})
+	require.NoError(t, err)
+	require.Len(t, authority.permits, 1)
+	permit := authority.permits[0]
+	require.True(t, authority.rejectedWrongOwner, "a permit must reject a different authority with the same operation ID")
+	require.True(t, authority.rejectedAliasedCandidate, "a permit must reject a different handle with the same candidate ID")
+	require.False(t, permit.ValidFor(authority, resolved.CandidateHandle()), "a permit is valid only during its one BeginDispatch callback")
+	require.False(t, authority.permitCopy.ValidFor(authority, resolved.CandidateHandle()), "copying a permit must not copy its one-shot state")
+	require.False(t, permit.ValidFor(&attemptTestAuthority{id: authority.id}, resolved.CandidateHandle()), "a permit is bound to the exact operation authority")
+	require.False(t, permit.ValidFor(authority, &resolvedCandidateHandle{id: resolved.CandidateHandle().CandidateID()}), "a permit is bound to the exact resolved candidate handle")
 }
 
-func (p *attemptTestPermit) OperationID() ProviderOperationID { return p.operationID }
-func (p *attemptTestPermit) CandidateID() CandidateID         { return p.candidateID }
+func TestBeginDispatchRejectionDoesNotCreateAttemptOrReachHTTP(t *testing.T) {
+	requests := 0
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		writeResponse(t, w, `{"choices":[{"message":{"role":"assistant","content":"unexpected"}}]}`)
+	}))
+	defer server.Close()
+
+	resolved := newAttemptTestResolvedModel(t, server, "attempt-begin-denied")
+	model, cleanup, err := resolved.Build(context.Background())
+	require.NoError(t, err)
+	defer cleanup()
+	beginErr := errors.New("operation budget exhausted")
+	authority := &attemptTestAuthority{id: "begin-denied-operation", beginErr: beginErr}
+	_, err = model.Generate(WithOperationDispatchAuthority(context.Background(), authority), []Message{{Role: RoleUser, Content: "request"}})
+	require.ErrorIs(t, err, beginErr)
+	require.Zero(t, requests, "BeginDispatch rejection must happen before client.Do")
+	require.Empty(t, authority.attempts, "a rejected dispatch must not allocate an attempt ID")
+	require.Len(t, authority.permits, 1)
+	require.False(t, authority.permits[0].ValidFor(authority, resolved.CandidateHandle()), "the rejected permit cannot be replayed")
+}
+
+func (a *attemptTestAuthority) FinishAttempt(result ProviderAttemptResult) error {
+	for _, attempt := range a.attempts {
+		if attempt.id == result.AttemptID {
+			if attempt.finished {
+				return errors.New("attempt already finished")
+			}
+			attempt.finished = true
+			attempt.result = cloneProviderAttemptResult(result)
+			if a.onFinish != nil {
+				a.onFinish()
+			}
+			return nil
+		}
+	}
+	return errors.New("unknown attempt")
+}
 
 type attemptTestProviderAttempt struct {
-	id        ProviderAttemptID
-	operation ProviderOperationID
-	identity  AttemptIdentity
-	finished  bool
-	terminal  ProviderAttemptTerminal
-	result    ProviderAttemptResult
-	onFinish  func()
-}
-
-func (a *attemptTestProviderAttempt) ID() ProviderAttemptID { return a.id }
-
-func (a *attemptTestProviderAttempt) Finish(terminal ProviderAttemptTerminal) (ProviderAttemptResult, error) {
-	if a.finished {
-		return ProviderAttemptResult{}, errors.New("attempt already finished")
-	}
-	a.finished = true
-	a.terminal = cloneProviderAttemptTerminal(terminal)
-	if a.onFinish != nil {
-		a.onFinish()
-	}
-	a.result = ProviderAttemptResult{
-		OperationID:             a.operation,
-		AttemptID:               a.id,
-		Identity:                a.identity,
-		Outcome:                 terminal.Outcome,
-		Failure:                 terminal.Failure,
-		Usage:                   cloneUsageEvidence(terminal.Usage),
-		ProviderReportedCostUSD: cloneFloat(terminal.ProviderReportedCostUSD),
-	}
-	return a.result, nil
+	id       ProviderAttemptID
+	finished bool
+	result   ProviderAttemptResult
 }
 
 func newAttemptTestResolvedModel(t *testing.T, server *httptest.Server, providerID string) ResolvedModel {
@@ -317,7 +337,7 @@ func TestResolvedCandidateIDsAreOpaqueAndUnique(t *testing.T) {
 	assert.NotContains(t, string(encoded), server.URL)
 }
 
-func TestResolvedBuildDenialAndMismatchedPermitDoNotReachHTTP(t *testing.T) {
+func TestResolvedBuildDenialAndCrossCandidateProposalDoNotReachHTTP(t *testing.T) {
 	for _, test := range []struct {
 		name    string
 		setup   func(*attemptTestAuthority, ResolvedCandidateHandle) context.Context
@@ -332,16 +352,16 @@ func TestResolvedBuildDenialAndMismatchedPermitDoNotReachHTTP(t *testing.T) {
 			wantErr: ErrDispatchPermitDenied,
 		},
 		{
-			name: "wrong candidate permit",
+			name: "cross-candidate proposal",
 			setup: func(authority *attemptTestAuthority, candidate ResolvedCandidateHandle) context.Context {
-				permit := &attemptTestPermit{
-					owner:       authority,
-					operationID: authority.id,
-					candidateID: "different-candidate",
-					candidate:   candidate,
-				}
 				ctx := WithOperationDispatchAuthority(context.Background(), authority)
-				return WithDispatchPermit(ctx, permit)
+				other := &resolvedCandidateHandle{id: CandidateID(string(candidate.CandidateID()) + "-other")}
+				return WithCandidateProposal(ctx, CandidateProposal{
+					OperationID: authority.id,
+					Candidate:   other,
+					Reason:      CandidateRetry,
+					Antecedent:  CandidateAntecedent{Kind: AntecedentInitial},
+				})
 			},
 			wantErr: ErrDispatchPermitRequired,
 		},

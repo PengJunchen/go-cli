@@ -4,9 +4,10 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/llm"
 )
 
 func TestCostTrackerRecordAttemptRetainsKnownSubtotalAndUnknownCounts(t *testing.T) {
