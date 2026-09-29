@@ -25,8 +25,47 @@ type attemptTestAuthority struct {
 	onFinish             func()
 }
 
+// attemptFencedTestModel adapts a mock model through the same operation-owner
+// authorization and attempt terminal APIs as a guarded provider adapter.
+type attemptFencedTestModel struct {
+	inner     BaseChatModel
+	candidate *resolvedCandidateHandle
+}
+
+func (m *attemptFencedTestModel) Generate(ctx context.Context, messages []Message, opts ...Option) (*Message, error) {
+	attempt, err := (providerDispatchBinding{mode: GuardedCandidateBuild, candidate: m.candidate}).begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	message, err := m.inner.Generate(ctx, messages, opts...)
+	var usage *Usage
+	if message != nil {
+		usage = message.Usage
+	}
+	return message, finishProviderAttempt(ctx, attempt, err, usage)
+}
+
+func (m *attemptFencedTestModel) Stream(ctx context.Context, messages []Message, opts ...Option) (<-chan MessageChunk, error) {
+	chunks, err := m.inner.Stream(ctx, messages, opts...)
+	if err != nil || chunks == nil {
+		return chunks, err
+	}
+	attempt, err := (providerDispatchBinding{mode: GuardedCandidateBuild, candidate: m.candidate}).begin(ctx)
+	if err != nil {
+		drainMessageChunks(chunks)
+		return nil, err
+	}
+	return finishProviderAttemptStream(ctx, chunks, attempt), nil
+}
+
+var _ BaseChatModel = (*attemptFencedTestModel)(nil)
+
 func attemptTestContext() context.Context {
-	return WithOperationDispatchAuthority(context.Background(), &attemptTestAuthority{id: "resolver-test-operation"})
+	return withAttemptTestAuthority(context.Background())
+}
+
+func withAttemptTestAuthority(ctx context.Context) context.Context {
+	return WithOperationDispatchAuthority(ctx, &attemptTestAuthority{id: "resolver-test-operation"})
 }
 
 func (a *attemptTestAuthority) ID() ProviderOperationID { return a.id }

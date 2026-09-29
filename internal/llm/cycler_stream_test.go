@@ -40,6 +40,13 @@ func (p *testStreamProvider) Build(_ context.Context, _ ModelConfig) (BaseChatMo
 	return p.model, p.cleanup, nil
 }
 
+func (p *testStreamProvider) buildGuarded(_ context.Context, _ ModelConfig, candidate *resolvedCandidateHandle) (BaseChatModel, func(), error) {
+	if p.buildErr != nil {
+		return nil, nil, p.buildErr
+	}
+	return &attemptFencedTestModel{inner: p.model, candidate: candidate}, p.cleanup, nil
+}
+
 func (p *testStreamProvider) Models() []ModelInfo { return nil }
 
 // delayedStreamModel sends chunks with configurable delays between them.
@@ -96,7 +103,7 @@ func TestStreamCleanupCalledAfterDrain(t *testing.T) {
 
 	wrapped := cycler.WrapModel(&mockModel{})
 
-	ch, err := wrapped.Stream(context.Background(), nil)
+	ch, err := wrapped.Stream(attemptTestContext(), nil)
 	require.NoError(t, err)
 
 	// Drain the channel.
@@ -129,7 +136,7 @@ func TestStreamCleanupNotCalledOnInitError(t *testing.T) {
 	// The primary model should be used as fallback (no error from primary).
 	wrapped := cycler.WrapModel(&mockModel{})
 
-	ch, err := wrapped.Stream(context.Background(), nil)
+	ch, err := wrapped.Stream(attemptTestContext(), nil)
 	// Fallback to primary succeeds.
 	require.NoError(t, err)
 	// Drain the fallback channel.
@@ -164,7 +171,7 @@ func TestStreamNilCleanupReturnsOriginal(t *testing.T) {
 
 	wrapped := cycler.WrapModel(&mockModel{})
 
-	ch, err := wrapped.Stream(context.Background(), nil)
+	ch, err := wrapped.Stream(attemptTestContext(), nil)
 	require.NoError(t, err)
 
 	var contents []string
@@ -198,7 +205,7 @@ func TestStreamChunksForwardedInOrder(t *testing.T) {
 
 	wrapped := cycler.WrapModel(&mockModel{})
 
-	ch, err := wrapped.Stream(context.Background(), nil)
+	ch, err := wrapped.Stream(attemptTestContext(), nil)
 	require.NoError(t, err)
 
 	var contents []string
@@ -236,7 +243,7 @@ func TestStreamRaceConcurrentCalls(t *testing.T) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			ch, err := wrapped.Stream(context.Background(), nil)
+			ch, err := wrapped.Stream(attemptTestContext(), nil)
 			if err != nil {
 				return
 			}
@@ -309,7 +316,7 @@ func TestStreamCleanupAndOutputCloseWaitForSourceAndCleanup(t *testing.T) {
 		Models: []ModelEntry{{Provider: "test-stream", Model: "m1"}},
 	}).WithRegistry(reg).WrapModel(&mockModel{})
 	ctx, cancel := context.WithCancel(context.Background())
-	out, err := wrapped.Stream(ctx, nil)
+	out, err := wrapped.Stream(withAttemptTestAuthority(ctx), nil)
 	require.NoError(t, err)
 	cancel()
 	select {
@@ -390,7 +397,7 @@ func TestStreamErrorChunkCancelsAndJoinsSelectedSource(t *testing.T) {
 	wrapped := NewModelCycler(ModelCyclerConfig{
 		Models: []ModelEntry{{Provider: "test-stream", Model: "m1"}},
 	}).WithRegistry(reg).WrapModel(&mockModel{})
-	out, err := wrapped.Stream(context.Background(), nil)
+	out, err := wrapped.Stream(attemptTestContext(), nil)
 	require.NoError(t, err)
 
 	var terminal MessageChunk
@@ -479,7 +486,7 @@ func TestStreamCallerCancelBeforeErrorKeepsCallerCause(t *testing.T) {
 		Models: []ModelEntry{{Provider: "test-stream", Model: "m1"}},
 	}).WithRegistry(reg).WrapModel(&mockModel{})
 	ctx, cancel := context.WithCancel(context.Background())
-	out, err := wrapped.Stream(ctx, nil)
+	out, err := wrapped.Stream(withAttemptTestAuthority(ctx), nil)
 	require.NoError(t, err)
 	cancel()
 
@@ -551,7 +558,7 @@ func TestStreamSetupErrorWithChannelJoinsCleanupBeforeFallback(t *testing.T) {
 	}).WithRegistry(reg).WrapModel(fallback)
 	finished := make(chan error, 1)
 	go func() {
-		ch, err := wrapped.Stream(context.Background(), nil)
+		ch, err := wrapped.Stream(attemptTestContext(), nil)
 		if err == nil {
 			for range ch {
 			}
@@ -607,7 +614,7 @@ func TestStreamNilNilIsRejectedAndContinuationDoesNotFallback(t *testing.T) {
 			Models: []ModelEntry{{Provider: "test-stream", Model: "m1"}},
 		}).WithRegistry(reg).WrapModel(fallback)
 
-		ch, err := wrapped.Stream(context.Background(), nil)
+		ch, err := wrapped.Stream(attemptTestContext(), nil)
 		require.ErrorContains(t, err, "nil stream")
 		require.Nil(t, ch)
 		require.Zero(t, fallback.streamCalls)
@@ -626,7 +633,7 @@ func TestStreamNilNilIsRejectedAndContinuationDoesNotFallback(t *testing.T) {
 			Models: []ModelEntry{{Provider: "test-stream", Model: "m1"}},
 		}).WithRegistry(reg).WrapModel(fallback)
 
-		ch, err := wrapped.Stream(WithContinuationNoReplay(context.Background()), nil)
+		ch, err := wrapped.Stream(withAttemptTestAuthority(WithContinuationNoReplay(context.Background())), nil)
 		require.ErrorIs(t, err, setupErr)
 		require.Nil(t, ch)
 		require.Zero(t, fallback.streamCalls)
