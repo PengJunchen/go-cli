@@ -324,7 +324,6 @@ func TestET_Phase19_AC4_WebSearchProviderConfigDriven(t *testing.T) {
 // new file through the assembled (wrapped) registry must produce a checkpoint
 // in the shared FileTracker exposed on the assembly.
 func TestET_Phase19_AC5_WriteToolFileTrackerCheckpoint(t *testing.T) {
-	t.Skip("Pre-existing failure: write tool output format changed (queued → wrote)")
 	assembly := phase19wAssemble(t, phase19wTestConfig())
 
 	dir := t.TempDir()
@@ -342,7 +341,7 @@ func TestET_Phase19_AC5_WriteToolFileTrackerCheckpoint(t *testing.T) {
 		"content": "ac5 content",
 	}))
 	require.NoError(t, err)
-	assert.Contains(t, res.Output, "queued")
+	assert.Equal(t, "wrote 11 bytes to "+filePath, res.Output)
 
 	// Verify the file was created on disk.
 	data, err := os.ReadFile(filePath)
@@ -353,14 +352,21 @@ func TestET_Phase19_AC5_WriteToolFileTrackerCheckpoint(t *testing.T) {
 	// calls Backup before writing; for a new file the checkpoint has
 	// Existed=false.
 	checkpoints := assembly.FileTracker.ListCheckpoints()
-	var found bool
+	var checkpoint *tools.CheckpointMeta
 	for _, cp := range checkpoints {
 		if cp.Path == filePath {
-			found = true
+			checkpoint = &cp
 			break
 		}
 	}
-	assert.True(t, found, "FileTracker must have a checkpoint for the written file")
+	require.NotNil(t, checkpoint, "FileTracker must have a checkpoint for the written file")
+	assert.False(t, checkpoint.Existed, "the checkpoint must record that the target was new")
+	assert.Zero(t, checkpoint.Size)
+	_, hasBackup := assembly.FileTracker.BackupContent(checkpoint.ID)
+	assert.False(t, hasBackup, "a new-file checkpoint has no prior content to back up")
+	require.NoError(t, assembly.FileTracker.Restore(checkpoint.ID))
+	_, err = os.Stat(filePath)
+	assert.True(t, os.IsNotExist(err), "restoring a new-file checkpoint must remove the written file")
 }
 
 // =============================================================================
@@ -373,7 +379,6 @@ func TestET_Phase19_AC5_WriteToolFileTrackerCheckpoint(t *testing.T) {
 // produce a checkpoint in the shared FileTracker, and Restore must revert the
 // content to the original.
 func TestET_Phase19_AC6_EditToolFileTrackerCheckpoint(t *testing.T) {
-	t.Skip("Pre-existing failure: edit tool output format changed (queued → replaced)")
 	assembly := phase19wAssemble(t, phase19wTestConfig())
 
 	dir := t.TempDir()
@@ -394,7 +399,7 @@ func TestET_Phase19_AC6_EditToolFileTrackerCheckpoint(t *testing.T) {
 		"new_string": "line2 delta",
 	}))
 	require.NoError(t, err)
-	assert.Contains(t, res.Output, "queued")
+	assert.Equal(t, "replaced 10-byte block with 11-byte block in "+filePath, res.Output)
 
 	// Verify the file was modified on disk.
 	data, err := os.ReadFile(filePath)
@@ -404,17 +409,22 @@ func TestET_Phase19_AC6_EditToolFileTrackerCheckpoint(t *testing.T) {
 
 	// Verify a checkpoint was created in the shared FileTracker.
 	checkpoints := assembly.FileTracker.ListCheckpoints()
-	var cpID string
+	var checkpoint *tools.CheckpointMeta
 	for _, cp := range checkpoints {
 		if cp.Path == filePath {
-			cpID = cp.ID
+			checkpoint = &cp
 			break
 		}
 	}
-	require.NotEmpty(t, cpID, "FileTracker must have a checkpoint for the edited file")
+	require.NotNil(t, checkpoint, "FileTracker must have a checkpoint for the edited file")
+	assert.True(t, checkpoint.Existed, "the checkpoint must record that the target existed")
+	assert.Equal(t, int64(len(original)), checkpoint.Size)
+	backup, hasBackup := assembly.FileTracker.BackupContent(checkpoint.ID)
+	require.True(t, hasBackup, "an existing-file checkpoint must retain the prior content")
+	assert.Equal(t, original, string(backup))
 
 	// Verify Restore reverts the content (undo).
-	require.NoError(t, assembly.FileTracker.Restore(cpID))
+	require.NoError(t, assembly.FileTracker.Restore(checkpoint.ID))
 	data, err = os.ReadFile(filePath)
 	require.NoError(t, err)
 	assert.Equal(t, original, string(data), "Restore must revert to original content")

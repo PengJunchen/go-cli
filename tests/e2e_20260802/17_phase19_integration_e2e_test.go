@@ -191,35 +191,76 @@ func TestE2E_Phase19_FileTrackerBackupDiffUndo(t *testing.T) {
 // TestE2E_Phase19_ParallelToolsWithApproval verifies that parallel execution
 // with per-tool approval works: read tools execute while bash is denied, and
 // the denial does not block other tools. Results are collected in input order.
+type phase19PreparedDecisionCounter struct {
+	inner     approval.ApprovalClassifier
+	mu        sync.Mutex
+	decisions map[string]int
+}
+
+func (c *phase19PreparedDecisionCounter) Name() string { return c.inner.Name() }
+
+func (c *phase19PreparedDecisionCounter) Classify(ctx context.Context, call tools.ToolCall) approval.Classification {
+	c.mu.Lock()
+	c.decisions[call.Name]++
+	c.mu.Unlock()
+	return c.inner.Classify(ctx, call)
+}
+
+func (c *phase19PreparedDecisionCounter) Counts() map[string]int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	counts := make(map[string]int, len(c.decisions))
+	for name, count := range c.decisions {
+		counts[name] = count
+	}
+	return counts
+}
+
 func TestE2E_Phase19_ParallelToolsWithApproval(t *testing.T) {
-	t.Skip("Pre-existing failure: read2 must execute assertion fails")
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	// Create 3 tools: 2 read + 1 bash.
-	readTool1 := &recordingTool{name: "read1"}
-	readTool2 := &recordingTool{name: "read2"}
+	dir := t.TempDir()
+	readPath := filepath.Join(dir, "read-target.txt")
+	require.NoError(t, os.WriteFile(readPath, []byte("read-one-sentinel"), 0600))
+
+	// Register real trusted read/ls builtins with a bounded workspace scope.
+	// A recording bash fixture remains untrusted and must be denied before its
+	// executor can run.
+	base := tools.NewDefaultToolRegistry()
+	require.NoError(t, tools.RegisterDefaults(ctx, base,
+		tools.WithRegisteredBuiltinWhitelist([]string{"read", "ls"}),
+		tools.WithRegisteredPathWhitelist([]string{dir}),
+	))
 	bashTool := &recordingTool{name: "bash"}
+	require.NoError(t, base.Register(ctx, bashTool))
 
-	tr := tools.NewDefaultToolRegistry()
-	require.NoError(t, tr.Register(ctx, readTool1))
-	require.NoError(t, tr.Register(ctx, readTool2))
-	require.NoError(t, tr.Register(ctx, bashTool))
-
-	// ApprovalMiddleware: SafetyPolicyClassifier denies bash, allows reads.
+	// The classifier counts every policy decision while preserving the real
+	// deny-first safety policy: trusted read/ls are allowed and bash is denied.
+	classifier := &phase19PreparedDecisionCounter{
+		inner:     approval.NewSafetyPolicyClassifier([]string{"bash"}),
+		decisions: make(map[string]int),
+	}
+	fence, err := tools.DispatchFenceFromRegistry(base)
+	require.NoError(t, err)
+	planController := core.NewDefaultPlanModeController(fence)
 	mw := approval.NewApprovalMiddleware(
-		approval.NewSafetyPolicyClassifier([]string{"bash"}),
+		classifier,
 		approval.NewInMemoryApprovalStore(),
-		approval.WithAutoApprove(false),
+		approval.WithDispatchFence(fence),
+		approval.WithPlanModeController(planController),
 	)
-	wrapped := tools.NewMiddlewareToolRegistry(tr, mw.WrapToolCall)
+	preparedRegistry := tools.NewMiddlewareToolRegistry(base)
+	require.NoError(t, preparedRegistry.SetPreparedToolPolicy(mw.PreparedPolicy))
+	require.NoError(t, preparedRegistry.SetPreparedToolStages(tools.PreparedToolStages{}))
 
-	// Execute all 3 concurrently.
+	// Prepare and dispatch all calls concurrently through the actual one-use
+	// prepared capability; no legacy Tool.Execute wrapper participates.
 	calls := []tools.ToolCall{
-		{ID: "1", Name: "read1", Args: map[string]any{}},
+		{ID: "1", Name: "read", Args: map[string]any{"path": readPath}},
 		{ID: "2", Name: "bash", Args: map[string]any{}},
-		{ID: "3", Name: "read2", Args: map[string]any{}},
+		{ID: "3", Name: "ls", Args: map[string]any{"path": dir}},
 	}
 
 	type result struct {
@@ -234,12 +275,12 @@ func TestE2E_Phase19_ParallelToolsWithApproval(t *testing.T) {
 		wg.Add(1)
 		go func(idx int, call tools.ToolCall) {
 			defer wg.Done()
-			def, err := wrapped.Get(ctx, call.Name)
+			invocation, err := preparedRegistry.PrepareToolCall(ctx, call)
 			if err != nil {
 				results[idx] = result{index: idx, err: err}
 				return
 			}
-			res, err := def.Execute(ctx, call)
+			res, err := invocation.Dispatch(ctx)
 			if err != nil {
 				results[idx] = result{index: idx, err: err}
 				return
@@ -256,16 +297,16 @@ func TestE2E_Phase19_ParallelToolsWithApproval(t *testing.T) {
 
 	// Read tools should succeed.
 	assert.NoError(t, results[0].err)
-	assert.Equal(t, "ok:read1", results[0].out)
-	assert.True(t, readTool1.executed, "read1 must execute")
+	assert.Contains(t, results[0].out, "read-one-sentinel")
 
 	assert.NoError(t, results[2].err)
-	assert.Equal(t, "ok:read2", results[2].out)
-	assert.True(t, readTool2.executed, "read2 must execute")
+	assert.Contains(t, results[2].out, "read-target.txt")
 
-	// Bash should be denied.
+	// Bash should be denied before its test executor can cause a side effect.
 	assert.ErrorIs(t, results[1].err, approval.ErrToolDenied)
+	assert.Zero(t, bashTool.calls.Load(), "bash executor must not run")
 	assert.False(t, bashTool.executed, "bash must not execute")
+	assert.Equal(t, map[string]int{"read": 1, "ls": 1, "bash": 1}, classifier.Counts(), "each parallel tool call gets one approval decision")
 }
 
 // -----------------------------------------------------------------------------
