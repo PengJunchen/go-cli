@@ -6,11 +6,14 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/fs"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+
+	"gopkg.in/yaml.v3"
 
 	"github.com/pengjunchen/go-cli/internal/approval"
 	"github.com/pengjunchen/go-cli/internal/config"
@@ -74,6 +77,28 @@ func selectMCPServerSource(ctx context.Context, rc *config.Config, manager appro
 		return nil, errors.New("cli: cannot determine project root for MCP source selection")
 	}
 	projectRoot := canonicalMCPProjectRoot(cwd)
+	verified := verifiedProjectSources(rc, projectRoot)
+	if verified != nil {
+		project := rc.ProjectOverlayForVerifiedSources()
+		if project == nil {
+			return nil, errMCPSourceUnverified
+		}
+		projectServersPresent, err := verifiedProjectConfigMCPServersPresent(verified)
+		if err != nil {
+			return nil, err
+		}
+		if projectServersPresent {
+			return &mcpServerSource{
+				kind:            mcpServerSourceProjectConfig,
+				id:              mcpServerSourceIDProjectConfig,
+				path:            projectConfigPath(projectRoot, verified.SourceRecords()),
+				projectRoot:     projectRoot,
+				initialRevision: "verified:" + verified.ManifestDigest(),
+				servers:         cloneMCPServerConfigs(project.MCP.Servers),
+				manager:         manager,
+			}, nil
+		}
+	}
 
 	if rc != nil && len(rc.MCP.Servers) > 0 {
 		switch rc.MCPServersProvenance() {
@@ -132,7 +157,7 @@ func selectMCPServerSource(ctx context.Context, rc *config.Config, manager appro
 			if snapshot := rc.CapturedProjectSourcesForGrant(); snapshot != nil {
 				revision = "captured:" + snapshot.ManifestDigest()
 			} else {
-				revision = mcpSourcePathRevision(projectMCPPath)
+				revision = mcpProjectPathMetadataRevision(projectMCPPath)
 			}
 		}
 		source := &mcpServerSource{
@@ -276,7 +301,7 @@ func (s *mcpServerSource) currentRevision(ctx context.Context) (string, error) {
 		return revision, nil
 	}
 	if err != nil {
-		return mcpSourcePathRevision(s.path), nil
+		return mcpProjectPathMetadataRevision(s.path), nil
 	}
 	return revision, nil
 }
@@ -287,18 +312,11 @@ func currentUnverifiedProjectRevision(cfg *config.Config, path string) string {
 			return "captured:" + snapshot.ManifestDigest()
 		}
 	}
-	return mcpSourcePathRevision(path)
+	return mcpProjectPathMetadataRevision(path)
 }
 
 func projectConfigPath(root string, records []approval.ProjectSourceRecord) string {
-	for _, id := range []string{
-		config.ProjectConfigGoCLIYAMLSourceID,
-		config.ProjectConfigGoCLIYMLSourceID,
-		config.ProjectConfigGoCLIJSONSourceID,
-		config.ProjectConfigYAMLSourceID,
-		config.ProjectConfigYMLSourceID,
-		config.ProjectConfigJSONSourceID,
-	} {
+	for _, id := range projectConfigSourceIDs() {
 		for _, record := range records {
 			if record.ID == id && record.Present {
 				return filepath.Join(root, filepath.FromSlash(record.RelativePath))
@@ -306,6 +324,78 @@ func projectConfigPath(root string, records []approval.ProjectSourceRecord) stri
 		}
 	}
 	return filepath.Join(root, ".go-cli.yaml")
+}
+
+func projectConfigSourceIDs() []string {
+	return []string{
+		config.ProjectConfigGoCLIYAMLSourceID,
+		config.ProjectConfigGoCLIYMLSourceID,
+		config.ProjectConfigGoCLIJSONSourceID,
+		config.ProjectConfigYAMLSourceID,
+		config.ProjectConfigYMLSourceID,
+		config.ProjectConfigJSONSourceID,
+	}
+}
+
+func verifiedProjectConfigMCPServersPresent(verified *approval.VerifiedProjectSources) (bool, error) {
+	if verified == nil {
+		return false, nil
+	}
+	var data []byte
+	for _, id := range projectConfigSourceIDs() {
+		if candidate, present := verified.SourceBytes(id); present {
+			data = candidate
+			break
+		}
+	}
+	if data == nil {
+		return false, nil
+	}
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil || len(document.Content) == 0 {
+		return false, errMCPSourceMalformed
+	}
+	root := yamlMappingValue(document.Content[0], "mcp")
+	if root == nil {
+		return false, nil
+	}
+	if root.Kind == yaml.AliasNode {
+		root = root.Alias
+	}
+	if root == nil || root.Kind != yaml.MappingNode {
+		return false, errMCPSourceMalformed
+	}
+	return yamlMappingHasKey(root, "servers"), nil
+}
+
+func yamlMappingValue(mapping *yaml.Node, key string) *yaml.Node {
+	if mapping == nil {
+		return nil
+	}
+	if mapping.Kind == yaml.AliasNode {
+		mapping = mapping.Alias
+	}
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return nil
+	}
+	for index := 0; index+1 < len(mapping.Content); index += 2 {
+		if mapping.Content[index].Kind == yaml.ScalarNode && strings.EqualFold(mapping.Content[index].Value, key) {
+			return mapping.Content[index+1]
+		}
+	}
+	return nil
+}
+
+func yamlMappingHasKey(mapping *yaml.Node, key string) bool {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return false
+	}
+	for index := 0; index+1 < len(mapping.Content); index += 2 {
+		if mapping.Content[index].Kind == yaml.ScalarNode && strings.EqualFold(mapping.Content[index].Value, key) {
+			return true
+		}
+	}
+	return false
 }
 
 func verifiedProjectSources(rc *config.Config, expectedRoot string) *approval.VerifiedProjectSources {
@@ -431,4 +521,18 @@ func mcpSourcePathRevision(path string) string {
 		return "read-error"
 	}
 	return mcpSourceBytesRevision(data)
+}
+
+func mcpProjectPathMetadataRevision(path string) string {
+	if path == "" {
+		return "missing"
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return "missing"
+		}
+		return "metadata-error"
+	}
+	return fmt.Sprintf("metadata:%d:%d", info.Mode(), info.ModTime().UnixNano())
 }

@@ -86,6 +86,50 @@ func TestMCPSourceSelectionAcceptsOnlyUserGlobalInlineConfigAsStatic(t *testing.
 	assert.False(t, source.reloadable())
 }
 
+func TestMCPSourceSelectionKeepsExplicitEmptyProjectInlineSource(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".go-cli.json"), []byte(`{"mcp":{"servers":[]}}`), 0o600))
+	projectMCPPath := filepath.Join(root, ".go-cli", "mcp.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(projectMCPPath), 0o700))
+	require.NoError(t, os.WriteFile(projectMCPPath, []byte(`{"servers":[{"name":"project-file","url":"http://127.0.0.1:9"}]}`), 0o600))
+	writeGlobalMCPTestFile(t, `{"servers":[{"name":"global-file","url":"http://127.0.0.1:9"}]}`)
+	changeMCPTestWorkingDirectory(t, root)
+
+	manager := approval.NewDefaultTrustManager(approval.NewInMemoryTrustStore())
+	trustMCPTestProjectSnapshot(t, root, manager)
+	cfg, err := config.LoadTrustedWithManager(context.Background(), manager)
+	require.NoError(t, err)
+	require.NotNil(t, cfg.VerifiedProjectSources())
+	assert.Empty(t, cfg.MCP.Servers)
+
+	source, err := selectMCPServerSource(context.Background(), cfg, manager)
+	require.NoError(t, err)
+	require.NotNil(t, source)
+	assert.Equal(t, mcpServerSourceProjectConfig, source.kind)
+	assert.Equal(t, mcpServerSourceIDProjectConfig, source.id)
+	assert.Empty(t, source.servers, "explicit empty project config must shadow lower-priority sources")
+	assert.True(t, source.reloadable())
+}
+
+func TestMCPProjectPathRevisionDoesNotReadSymlinkTarget(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "outside.txt")
+	link := filepath.Join(root, ".go-cli", "mcp.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(link), 0o700))
+	require.NoError(t, os.WriteFile(target, []byte("first"), 0o600))
+	if err := os.Symlink(target, link); err != nil {
+		t.Skipf("symlink creation unavailable: %v", err)
+	}
+
+	before := mcpProjectPathMetadataRevision(link)
+	require.NoError(t, os.WriteFile(target, []byte("changed target bytes"), 0o600))
+	after := mcpProjectPathMetadataRevision(link)
+
+	assert.Equal(t, before, after, "an unverified project path revision must describe the link itself, not read its target")
+	assert.Contains(t, before, "metadata:")
+}
+
 func TestParseMCPServerConfigBytesPreservesEmptyAndSortsMapFormat(t *testing.T) {
 	empty, err := parseMCPServerConfigBytes([]byte(`{"servers":[]}`))
 	require.NoError(t, err)
