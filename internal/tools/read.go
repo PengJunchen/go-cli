@@ -27,6 +27,10 @@ const (
 // ReadToolOption configures a ReadTool.
 type ReadToolOption func(*ReadTool)
 
+func withReadCanonicalWorkspaceRoot(root string) ReadToolOption {
+	return func(tool *ReadTool) { tool.canonicalWorkspaceRoot = root }
+}
+
 // WithWorkdir sets the base directory that relative paths are resolved
 // against.
 func WithWorkdir(dir string) ReadToolOption {
@@ -53,11 +57,12 @@ func WithReadPathWhitelist(paths []string) ReadToolOption {
 // ReadTool reads the contents of files and lists directories. It implements
 // the ToolDefinition interface.
 type ReadTool struct {
-	workdir        string
-	maxBytes       int
-	FollowSymlinks bool
-	names          []string
-	whitelist      PathWhitelist
+	workdir                string
+	maxBytes               int
+	FollowSymlinks         bool
+	names                  []string
+	whitelist              PathWhitelist
+	canonicalWorkspaceRoot string
 }
 
 var _ ToolDefinition = (*ReadTool)(nil)

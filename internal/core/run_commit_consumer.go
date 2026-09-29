@@ -212,6 +212,7 @@ func (consumer *runCommitConsumer) beginIntentBatch(batch RunIntentBatch) error 
 		return nil
 	}
 	batch.RunID = consumer.runID
+	batch.CanonicalWorkspaceRoot = consumer.binding.CanonicalWorkspaceRoot
 	if err := consumer.sink.BeginIntentBatch(consumer.commitContext(), batch); err != nil {
 		return runCommitPersistenceError{operation: "intent batch", cause: err}
 	}
@@ -297,6 +298,7 @@ func (consumer *runCommitConsumer) commitTerminal(transcript []TranscriptEntry, 
 }
 
 func (consumer *runCommitConsumer) actionIntent(batchID string, ordinal uint64, call llm.ToolCall, invocation tools.PreparedInvocation) ActionIntent {
+	readProof, _ := tools.ScopedWorkspaceReadProofFor(invocation, consumer.binding.CanonicalWorkspaceRoot)
 	return ActionIntent{
 		SessionID:                  consumer.binding.SessionID,
 		WorkspaceID:                consumer.binding.WorkspaceID,
@@ -310,6 +312,7 @@ func (consumer *runCommitConsumer) actionIntent(batchID string, ordinal uint64, 
 		SchemaDigest:               invocation.SchemaDigest(),
 		ArgumentDigest:             invocation.ArgumentDigest(),
 		EffectSet:                  invocation.EffectSet(),
+		ScopedReadProof:            readProof,
 	}
 }
 

@@ -31,7 +31,7 @@ func TestDurableCLISessionCreatesPhysicalSessionAndBindsRunLease(t *testing.T) {
 	cliSession, err := newDurableCLISession(ctx, storeDirectory, "display-label", "", "")
 	require.NoError(t, err)
 
-	expectedWorkspaceID, err := resolveWorkspaceID(os.Getwd)
+	expectedRoot, expectedWorkspaceID, err := resolveWorkspaceIdentity(os.Getwd)
 	require.NoError(t, err)
 	snapshot, err := cliSession.snapshotSelected()
 	require.NoError(t, err)
@@ -53,6 +53,7 @@ func TestDurableCLISessionCreatesPhysicalSessionAndBindsRunLease(t *testing.T) {
 	assert.Same(t, sink, boundSink)
 	assert.Equal(t, snapshot.SessionID, binding.SessionID)
 	assert.Equal(t, expectedWorkspaceID, binding.WorkspaceID)
+	assert.Equal(t, expectedRoot, binding.CanonicalWorkspaceRoot)
 	assert.Empty(t, binding.OwnerGeneration, "the run owner fills its own generation")
 	_, ok = any(sink).(core.RunCommitRunLease)
 	assert.True(t, ok, "the run sink must return the helper's lease to the core owner")

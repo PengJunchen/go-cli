@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -491,6 +492,176 @@ func TestSessionRunCommitSinkBuffersCanonicalReceiptOrderAcrossKnownDenial(t *te
 		ActionBatchID: intent.ActionBatchID, AssistantTranscriptOrdinal: 0,
 		ToolCallID: intent.ToolCallID, ActionID: intent.ActionID,
 	}), "the receipt itself must not resolve a dispatch marker")
+}
+
+func TestSessionRunCommitSinkAdmitsOnlyPreparedReadBesideKnownErrorDenial(t *testing.T) {
+	ctx := context.Background()
+	root := canonicalWorkspaceIndexTestRoot(t, t.TempDir())
+	readPath := filepath.Join(root, "safe.txt")
+	require.NoError(t, os.WriteFile(readPath, []byte("safe\n"), 0o600))
+	workspaceID, err := WorkspaceIDForCanonicalRoot(root)
+	require.NoError(t, err)
+	index := newWorkspaceQuarantineIndex(t.TempDir(), workspaceIndexIO{})
+	require.NoError(t, index.EnsureWorkspace(ctx, workspaceID))
+	oldMutation := workspaceTestBatch(workspaceID, "session-old", "run-old", "batch-old", "action-old", 0, "write-old")
+	oldMutation.Actions[0].EffectSet = []tools.TrustedToolEffect{tools.EffectWorkspaceWrite}
+	firstMarker, err := index.BeginDispatchBatch(ctx, oldMutation)
+	require.NoError(t, err)
+	require.Equal(t, WorkspaceDispatchCommittedNow, firstMarker)
+
+	prepared, err := NewDurableJSONLSessionPreparer(t.TempDir(), index).PrepareNew(ctx, "safe read with known denial")
+	require.NoError(t, err)
+	defer prepared.Close()
+	sink, err := NewSessionRunCommitSink(prepared, index, workspaceID, nil)
+	require.NoError(t, err)
+	invocation, proof := preparedWorkspaceIndexRead(t, root, readPath, "safe-read-call")
+	call := invocation.NormalizedCall()
+	var readAction PendingActionRef
+	var executorCalls int
+	err = runSessionCommitAgent(t, sink, core.RunCommitBinding{
+		SessionID: prepared.View().SessionID, WorkspaceID: workspaceID,
+		CanonicalWorkspaceRoot: root, OwnerGeneration: "parent-generation",
+	}, func(ctx context.Context, actual core.RunCommitSink, binding core.RunCommitBinding, runID string) error {
+		if err := actual.CommitInput(ctx, core.RunCommitInput{
+			RunID: runID, TranscriptIndex: 0,
+			Message: core.AgentMessage{Role: "user", Content: "read the safe file"}, InputKind: core.InputKindUser,
+		}); err != nil {
+			return err
+		}
+		intent := core.ActionIntent{
+			SessionID: binding.SessionID, WorkspaceID: binding.WorkspaceID, RunID: runID,
+			ActionBatchID: "safe-read-batch", OwnerGeneration: binding.OwnerGeneration,
+			AssistantTranscriptOrdinal: 0, ToolCallID: call.ID, ActionID: "safe-read-action",
+			ToolIdentity: invocation.ToolIdentity(), SchemaDigest: invocation.SchemaDigest(),
+			ArgumentDigest: invocation.ArgumentDigest(), EffectSet: invocation.EffectSet(), ScopedReadProof: proof,
+		}
+		assistant := core.AgentMessage{Role: "assistant", ToolCalls: []llm.ToolCall{
+			{ID: call.ID, Name: call.Name, Args: call.Args},
+			{ID: "denied-write-call", Name: "write", Args: map[string]any{"path": "outside.txt", "content": "blocked"}},
+		}}
+		denial := core.RunToolReceipt{
+			RunID: runID, AssistantTranscriptOrdinal: 0, ToolCallID: "denied-write-call",
+			TranscriptIndex: 3, DispatchState: core.DispatchStateNotDispatched,
+			ReceiptOutcome: core.ReceiptOutcomeError,
+			Message:        core.AgentMessage{Role: "tool", ToolCallID: "denied-write-call", ToolName: "write", Content: "denied", ReceiptOutcome: core.ReceiptOutcomeError},
+		}
+		if err := actual.BeginIntentBatch(ctx, core.RunIntentBatch{
+			RunID: runID, ActionBatchID: intent.ActionBatchID, AssistantTranscriptOrdinal: 0,
+			AssistantMessage: assistant, Intents: []core.ActionIntent{intent}, KnownReceipts: []core.RunToolReceipt{denial},
+			CanonicalWorkspaceRoot: root,
+		}); err != nil {
+			return err
+		}
+		readAction = PendingActionRef{
+			SessionID: intent.SessionID, WorkspaceID: intent.WorkspaceID, RunID: runID,
+			ActionBatchID: intent.ActionBatchID, AssistantTranscriptOrdinal: 0,
+			ToolCallID: intent.ToolCallID, ActionID: intent.ActionID,
+		}
+		executorCalls++
+		readResult, dispatchErr := invocation.Dispatch(ctx)
+		if dispatchErr != nil {
+			return dispatchErr
+		}
+		if readResult == nil || readResult.Output != "safe\n" {
+			return fmt.Errorf("actual read result = %#v, want safe file contents", readResult)
+		}
+		return nil
+	})
+	require.NoError(t, err)
+	require.Equal(t, 1, executorCalls)
+	decisions, err := index.InspectDispatchMarkers(ctx, []PendingActionRef{oldMutation.Actions[0].Action, readAction})
+	require.NoError(t, err)
+	require.Len(t, decisions, 2)
+	require.Equal(t, DispatchMarkerPresent, decisions[0].MarkerState, "the earlier mutation remains unresolved")
+	require.Equal(t, DispatchMarkerPresent, decisions[1].MarkerState, "the read receives its own marker")
+
+	rows, err := readWorkspaceIndexFile(index.indexPath(workspaceID), filepath.Dir(index.indexPath(workspaceID)), workspaceID)
+	require.NoError(t, err)
+	var sessionDispatchRows int
+	for _, row := range rows {
+		if row.Kind == workspaceIndexDispatchReady && row.SessionID == prepared.View().SessionID {
+			require.Len(t, row.Actions, 1)
+			require.Equal(t, "safe-read-call", row.Actions[0].Action.ToolCallID)
+			sessionDispatchRows++
+		}
+	}
+	require.Equal(t, 1, sessionDispatchRows, "only the fresh read intent reaches the global dispatch index")
+}
+
+func TestSessionRunCommitSinkRejectsUnknownReceiptBeforeScopedReadAdmission(t *testing.T) {
+	ctx := context.Background()
+	root := canonicalWorkspaceIndexTestRoot(t, t.TempDir())
+	readPath := filepath.Join(root, "safe.txt")
+	require.NoError(t, os.WriteFile(readPath, []byte("safe\n"), 0o600))
+	workspaceID, err := WorkspaceIDForCanonicalRoot(root)
+	require.NoError(t, err)
+	index := newWorkspaceQuarantineIndex(t.TempDir(), workspaceIndexIO{})
+	require.NoError(t, index.EnsureWorkspace(ctx, workspaceID))
+	oldMutation := workspaceTestBatch(workspaceID, "session-old", "run-old", "batch-old", "action-old", 0, "write-old")
+	_, err = index.BeginDispatchBatch(ctx, oldMutation)
+	require.NoError(t, err)
+
+	prepared, err := NewDurableJSONLSessionPreparer(t.TempDir(), index).PrepareNew(ctx, "reject unknown receipt")
+	require.NoError(t, err)
+	defer prepared.Close()
+	sink, err := NewSessionRunCommitSink(prepared, index, workspaceID, nil)
+	require.NoError(t, err)
+	invocation, proof := preparedWorkspaceIndexRead(t, root, readPath, "read-before-unknown")
+	call := invocation.NormalizedCall()
+	var attemptedRef PendingActionRef
+	var executorCalls atomic.Int32
+	err = runSessionCommitAgent(t, sink, core.RunCommitBinding{
+		SessionID: prepared.View().SessionID, WorkspaceID: workspaceID,
+		CanonicalWorkspaceRoot: root, OwnerGeneration: "parent-generation",
+	}, func(ctx context.Context, actual core.RunCommitSink, binding core.RunCommitBinding, runID string) error {
+		if err := actual.CommitInput(ctx, core.RunCommitInput{
+			RunID: runID, TranscriptIndex: 0,
+			Message: core.AgentMessage{Role: "user", Content: "read with an invalid denial"}, InputKind: core.InputKindUser,
+		}); err != nil {
+			return err
+		}
+		intent := core.ActionIntent{
+			SessionID: binding.SessionID, WorkspaceID: binding.WorkspaceID, RunID: runID,
+			ActionBatchID: "unknown-receipt-batch", OwnerGeneration: binding.OwnerGeneration,
+			AssistantTranscriptOrdinal: 0, ToolCallID: call.ID, ActionID: "unknown-receipt-action",
+			ToolIdentity: invocation.ToolIdentity(), SchemaDigest: invocation.SchemaDigest(),
+			ArgumentDigest: invocation.ArgumentDigest(), EffectSet: invocation.EffectSet(), ScopedReadProof: proof,
+		}
+		attemptedRef = PendingActionRef{
+			SessionID: intent.SessionID, WorkspaceID: intent.WorkspaceID, RunID: runID,
+			ActionBatchID: intent.ActionBatchID, AssistantTranscriptOrdinal: 0,
+			ToolCallID: intent.ToolCallID, ActionID: intent.ActionID,
+		}
+		unknown := core.RunToolReceipt{
+			RunID: runID, AssistantTranscriptOrdinal: 0, ToolCallID: "unknown-write-call",
+			TranscriptIndex: 3, DispatchState: core.DispatchStateNotDispatched,
+			ReceiptOutcome: core.ReceiptOutcomeUnknown,
+			Message:        core.AgentMessage{Role: "tool", ToolCallID: "unknown-write-call", ToolName: "write", Content: "outcome unknown", ReceiptOutcome: core.ReceiptOutcomeUnknown},
+		}
+		beginErr := actual.BeginIntentBatch(ctx, core.RunIntentBatch{
+			RunID: runID, ActionBatchID: intent.ActionBatchID, AssistantTranscriptOrdinal: 0,
+			AssistantMessage: core.AgentMessage{Role: "assistant", ToolCalls: []llm.ToolCall{
+				{ID: call.ID, Name: call.Name, Args: call.Args},
+				{ID: "unknown-write-call", Name: "write", Args: map[string]any{"path": "outside.txt", "content": "blocked"}},
+			}},
+			Intents: []core.ActionIntent{intent}, KnownReceipts: []core.RunToolReceipt{unknown},
+			CanonicalWorkspaceRoot: root,
+		})
+		if beginErr == nil {
+			executorCalls.Add(1)
+			_, beginErr = invocation.Dispatch(ctx)
+		}
+		return beginErr
+	})
+	require.Error(t, err)
+	require.Zero(t, executorCalls.Load(), "unknown no-intent denial must fail before read dispatch")
+	snapshot, err := prepared.Snapshot()
+	require.NoError(t, err)
+	require.Len(t, snapshot.DurableEntries, 1, "unknown receipt must be rejected before assistant/intent persistence")
+	decisions, err := index.InspectDispatchMarkers(ctx, []PendingActionRef{attemptedRef})
+	require.NoError(t, err)
+	require.Len(t, decisions, 1)
+	require.Equal(t, DispatchMarkerAbsent, decisions[0].MarkerState)
 }
 
 func TestSessionRunCommitSinkCommitTerminalAppendsOnlySuffixAndIsIdempotent(t *testing.T) {

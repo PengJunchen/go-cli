@@ -2,8 +2,6 @@ package cli
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"os"
 	"path/filepath"
@@ -30,13 +28,20 @@ func TestResolveWorkspaceIDUsesCanonicalSymlinkTarget(t *testing.T) {
 	require.NoError(t, os.Mkdir(target, 0o700))
 	require.NoError(t, os.Symlink(target, link))
 
-	workspaceID, err := resolveWorkspaceID(func() (string, error) { return link, nil })
+	getwdCalls := 0
+	canonicalRoot, workspaceID, err := resolveWorkspaceIdentity(func() (string, error) {
+		getwdCalls++
+		return link, nil
+	})
 	require.NoError(t, err)
+	assert.Equal(t, 1, getwdCalls, "canonical root and workspace ID must share one CWD capture")
 
 	canonical, err := filepath.EvalSymlinks(target)
 	require.NoError(t, err)
-	digest := sha256.Sum256([]byte(workspaceIdentityDomain + filepath.Clean(canonical)))
-	assert.Equal(t, "workspace-v1-"+hex.EncodeToString(digest[:]), workspaceID)
+	assert.Equal(t, filepath.Clean(canonical), canonicalRoot)
+	expectedWorkspaceID, err := session.WorkspaceIDForCanonicalRoot(canonicalRoot)
+	require.NoError(t, err)
+	assert.Equal(t, expectedWorkspaceID, workspaceID)
 
 	otherID, err := resolveWorkspaceID(func() (string, error) { return target, nil })
 	require.NoError(t, err)
@@ -60,6 +65,26 @@ func TestResolveWorkspaceIDFailsClosedOnGetwdAndCanonicalizationErrors(t *testin
 		return filepath.Join(t.TempDir(), "missing"), nil
 	})
 	assert.Error(t, err)
+}
+
+func TestDurableSessionManagerLeaseCarriesRootFromWorkspaceIdentityCapture(t *testing.T) {
+	canonicalRoot, err := filepath.EvalSymlinks(t.TempDir())
+	require.NoError(t, err)
+	workspaceID, err := session.WorkspaceIDForCanonicalRoot(canonicalRoot)
+	require.NoError(t, err)
+	prepared := newManagerTestPrepared("session-root", "branch-main")
+	manager, err := newDurableSessionManagerForWorkspace(newManagerTestPreparer(prepared), canonicalRoot, workspaceID)
+	require.NoError(t, err)
+	require.NoError(t, manager.prepareNew(context.Background(), "root capture"))
+	lease, err := manager.acquireRunLease()
+	require.NoError(t, err)
+	assert.Equal(t, canonicalRoot, lease.CanonicalWorkspaceRoot())
+	assert.Equal(t, workspaceID, lease.WorkspaceID())
+	lease.CloseRunCommit()
+	require.NoError(t, manager.requestClose(context.Background()))
+
+	_, err = newDurableSessionManagerForWorkspace(newManagerTestPreparer(newManagerTestPrepared("session-other", "branch-main")), canonicalRoot, "workspace-v1-wrong-root")
+	require.ErrorIs(t, err, ErrDurableWorkspaceIdentity)
 }
 
 func TestResolveWorkspaceIDIsAcceptedByDurableIndexAndSessionPreparer(t *testing.T) {

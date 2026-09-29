@@ -36,9 +36,10 @@ type runCommitContextKey struct{}
 // durable run. OwnerGeneration is overwritten by the run owner before the
 // callback begins; callers must not use a supplied value as authority.
 type RunCommitBinding struct {
-	SessionID       string
-	WorkspaceID     string
-	OwnerGeneration string
+	SessionID              string
+	WorkspaceID            string
+	CanonicalWorkspaceRoot string `json:"-"`
+	OwnerGeneration        string
 }
 
 // ErrInvalidRunCommitBinding indicates that a durable run lacks a valid
@@ -211,6 +212,7 @@ type RunIntentBatch struct {
 	AssistantMessage           AgentMessage     `json:"assistant_message"`
 	Intents                    []ActionIntent   `json:"intents,omitempty"`
 	KnownReceipts              []RunToolReceipt `json:"known_receipts,omitempty"`
+	CanonicalWorkspaceRoot     string           `json:"-"`
 }
 
 // ActionIntent reserves one registered invocation without storing its raw
@@ -232,7 +234,8 @@ type ActionIntent struct {
 	ArgumentDigest [32]byte                  `json:"argument_digest"`
 	// EffectSet is runtime-only trust. A durable sink may persist Values() as
 	// facts, but must not hydrate those labels into an authorization capability.
-	EffectSet tools.TrustedEffectSet `json:"-"`
+	EffectSet       tools.TrustedEffectSet          `json:"-"`
+	ScopedReadProof *tools.ScopedWorkspaceReadProof `json:"-"`
 }
 
 // ActionExecution records the dispatch fence and local resource observation

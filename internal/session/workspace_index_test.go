@@ -802,6 +802,240 @@ func TestWorkspaceIndexUnresolvedMarkerBlocksAllNewActionsWithoutScopeProof(t *t
 	}
 }
 
+func TestWorkspaceIndexAllowsOnlyFreshPreparedBuiltinReadDuringQuarantine(t *testing.T) {
+	ctx := context.Background()
+	root := canonicalWorkspaceIndexTestRoot(t, t.TempDir())
+	readPath := filepath.Join(root, "safe.txt")
+	if err := os.WriteFile(readPath, []byte("safe contents\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workspaceID, err := WorkspaceIDForCanonicalRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := newWorkspaceQuarantineIndex(t.TempDir(), workspaceIndexIO{})
+	if err := index.EnsureWorkspace(ctx, workspaceID); err != nil {
+		t.Fatal(err)
+	}
+	oldMutation := workspaceTestBatch(workspaceID, "session-old", "run-old", "batch-old", "action-old", 0, "write-old")
+	oldMutation.Actions[0].EffectSet = []tools.TrustedToolEffect{tools.EffectWorkspaceWrite}
+	if got, err := index.BeginDispatchBatch(ctx, oldMutation); err != nil || got != WorkspaceDispatchCommittedNow {
+		t.Fatalf("initial mutation marker = (%v, %v), want committed-now", got, err)
+	}
+
+	invocation, proof := preparedWorkspaceIndexRead(t, root, readPath, "read-fresh")
+	identity := invocation.ToolIdentity().Snapshot()
+	readBatch := WorkspaceDispatchBatch{
+		WorkspaceID: workspaceID, SessionID: "session-read", RunID: "run-read", ActionBatchID: "batch-read",
+		CanonicalWorkspaceRoot: root,
+		Actions: []WorkspaceDispatchAction{{
+			Action:       workspaceTestRef(workspaceID, "session-read", "run-read", "batch-read", "action-read", 0, "read-fresh"),
+			ToolIdentity: &identity, EffectSet: invocation.EffectSet().Values(), ScopedReadProof: proof,
+		}},
+	}
+	executorCalls := 0
+	tryRead := func(attemptCtx context.Context, prepared tools.PreparedInvocation, batch WorkspaceDispatchBatch) (WorkspaceDispatchResult, error, *tools.ToolResult) {
+		state, beginErr := index.BeginDispatchBatch(attemptCtx, batch)
+		if beginErr != nil || state != WorkspaceDispatchCommittedNow {
+			return state, beginErr, nil
+		}
+		executorCalls++
+		result, dispatchErr := prepared.Dispatch(attemptCtx)
+		return state, dispatchErr, result
+	}
+
+	// Invalid runtime facts and pre-dispatch cancellation must fail before the
+	// prepared invocation's actual ReadTool executor is entered.
+	wrongRoot := canonicalWorkspaceIndexTestRoot(t, t.TempDir())
+	wrongRootBatch := readBatch
+	wrongRootBatch.CanonicalWorkspaceRoot = wrongRoot
+	if got, err, _ := tryRead(ctx, invocation, wrongRootBatch); !errors.Is(err, ErrWorkspaceQuarantined) || got != WorkspaceDispatchNotCommitted {
+		t.Fatalf("root-mismatched read = (%v, %v), want quarantine", got, err)
+	}
+	mixedBatch := readBatch
+	mixedBatch.Actions = append(append([]WorkspaceDispatchAction(nil), readBatch.Actions...), WorkspaceDispatchAction{
+		Action:    workspaceTestRef(workspaceID, "session-read", "run-read", "batch-read", "action-write", 0, "write-mixed"),
+		EffectSet: []tools.TrustedToolEffect{tools.EffectWorkspaceWrite},
+	})
+	if got, err, _ := tryRead(ctx, invocation, mixedBatch); !errors.Is(err, ErrWorkspaceQuarantined) || got != WorkspaceDispatchNotCommitted {
+		t.Fatalf("mixed read/write batch = (%v, %v), want quarantine", got, err)
+	}
+	compositeBatch := readBatch
+	compositeBatch.Actions = append([]WorkspaceDispatchAction(nil), readBatch.Actions...)
+	compositeBatch.Actions[0].EffectSet = []tools.TrustedToolEffect{tools.EffectWorkspaceRead, tools.EffectWorkspaceWrite}
+	if got, err, _ := tryRead(ctx, invocation, compositeBatch); !errors.Is(err, ErrWorkspaceQuarantined) || got != WorkspaceDispatchNotCommitted {
+		t.Fatalf("composite-effect read = (%v, %v), want quarantine", got, err)
+	}
+	canceled, cancel := context.WithCancel(ctx)
+	cancel()
+	if got, err, _ := tryRead(canceled, invocation, readBatch); !errors.Is(err, context.Canceled) || got != WorkspaceDispatchNotCommitted {
+		t.Fatalf("canceled read = (%v, %v), want canceled without a permit", got, err)
+	}
+	noProofInvocation, _ := preparedWorkspaceIndexRead(t, root, readPath, "read-dto-only")
+	noProofIdentity := noProofInvocation.ToolIdentity().Snapshot()
+	noProofBatch := WorkspaceDispatchBatch{
+		WorkspaceID: workspaceID, SessionID: "session-dto", RunID: "run-dto", ActionBatchID: "batch-dto",
+		CanonicalWorkspaceRoot: root,
+		Actions: []WorkspaceDispatchAction{{
+			Action:       workspaceTestRef(workspaceID, "session-dto", "run-dto", "batch-dto", "action-dto", 0, "read-dto-only"),
+			ToolIdentity: &noProofIdentity, EffectSet: noProofInvocation.EffectSet().Values(),
+		}},
+	}
+	if got, err, _ := tryRead(ctx, noProofInvocation, noProofBatch); !errors.Is(err, ErrWorkspaceQuarantined) || got != WorkspaceDispatchNotCommitted {
+		t.Fatalf("matching public identity/effect DTO without private proof = (%v, %v), want quarantine", got, err)
+	}
+	if executorCalls != 0 {
+		t.Fatalf("rejected read attempts entered actual executor %d times, want zero", executorCalls)
+	}
+
+	got, err, result := tryRead(ctx, invocation, readBatch)
+	if err != nil || got != WorkspaceDispatchCommittedNow {
+		t.Fatalf("fresh prepared builtin read = (%v, %v), want committed-now", got, err)
+	}
+	if result == nil || result.Output != "safe contents\n" {
+		t.Fatalf("actual read result = %#v, want captured file contents", result)
+	}
+	if got, err := index.BeginDispatchBatch(ctx, readBatch); err != nil || got != WorkspaceDispatchAlreadyExists {
+		t.Fatalf("duplicate marker attempt = (%v, %v), want already-exists without replay", got, err)
+	}
+	cloneBatch := readBatch
+	cloneBatch.SessionID, cloneBatch.RunID, cloneBatch.ActionBatchID = "session-clone", "run-clone", "batch-clone"
+	cloneBatch.Actions = append([]WorkspaceDispatchAction(nil), readBatch.Actions...)
+	cloneBatch.Actions[0].Action = workspaceTestRef(workspaceID, cloneBatch.SessionID, cloneBatch.RunID, cloneBatch.ActionBatchID, "action-clone", 0, "read-fresh")
+	if got, err := index.BeginDispatchBatch(ctx, cloneBatch); !errors.Is(err, ErrWorkspaceQuarantined) || got != WorkspaceDispatchNotCommitted {
+		t.Fatalf("cloned claimed proof = (%v, %v), want quarantine", got, err)
+	}
+	mutation := workspaceTestBatch(workspaceID, "session-new", "run-new", "batch-new", "action-new", 0, "write-new")
+	mutation.Actions[0].EffectSet = []tools.TrustedToolEffect{tools.EffectWorkspaceWrite}
+	if got, err := index.BeginDispatchBatch(ctx, mutation); !errors.Is(err, ErrWorkspaceQuarantined) || got != WorkspaceDispatchNotCommitted {
+		t.Fatalf("new mutation while old marker unresolved = (%v, %v), want quarantine", got, err)
+	}
+	if executorCalls != 1 {
+		t.Fatalf("actual prepared read executor entered %d times, want exactly once", executorCalls)
+	}
+
+	decisions, err := index.InspectDispatchMarkers(ctx, []PendingActionRef{oldMutation.Actions[0].Action, readBatch.Actions[0].Action})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decisions) != 2 || decisions[0].MarkerState != DispatchMarkerPresent || decisions[1].MarkerState != DispatchMarkerPresent {
+		t.Fatalf("old mutation/read marker states = %#v, want both unresolved", decisions)
+	}
+	payload, err := os.ReadFile(index.indexPath(workspaceID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(payload), root) || strings.Contains(string(payload), "ScopedWorkspaceReadProof") {
+		t.Fatalf("runtime read proof/root leaked into durable index: %s", payload)
+	}
+}
+
+func TestWorkspaceIndexSyncFailureConsumesNoSafeReadExecutorPermit(t *testing.T) {
+	ctx := context.Background()
+	root := canonicalWorkspaceIndexTestRoot(t, t.TempDir())
+	readPath := filepath.Join(root, "safe.txt")
+	if err := os.WriteFile(readPath, []byte("safe contents\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	workspaceID, err := WorkspaceIDForCanonicalRoot(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var failSync atomic.Bool
+	var syncCalls atomic.Int32
+	indexRoot := t.TempDir()
+	index := newWorkspaceQuarantineIndex(indexRoot, workspaceIndexIO{sync: func(file *os.File) error {
+		if failSync.Load() && syncCalls.Add(1) == 2 {
+			return errors.New("injected safe-read marker sync failure")
+		}
+		return file.Sync()
+	}})
+	if err := index.EnsureWorkspace(ctx, workspaceID); err != nil {
+		t.Fatal(err)
+	}
+	oldMutation := workspaceTestBatch(workspaceID, "session-old", "run-old", "batch-old", "action-old", 0, "write-old")
+	if got, err := index.BeginDispatchBatch(ctx, oldMutation); err != nil || got != WorkspaceDispatchCommittedNow {
+		t.Fatalf("initial mutation marker = (%v, %v)", got, err)
+	}
+	invo, proof := preparedWorkspaceIndexRead(t, root, readPath, "read-sync-failure")
+	identity := invo.ToolIdentity().Snapshot()
+	batch := WorkspaceDispatchBatch{
+		WorkspaceID: workspaceID, SessionID: "session-safe", RunID: "run-safe", ActionBatchID: "batch-safe",
+		CanonicalWorkspaceRoot: root,
+		Actions: []WorkspaceDispatchAction{{
+			Action:       workspaceTestRef(workspaceID, "session-safe", "run-safe", "batch-safe", "action-safe", 0, "read-sync-failure"),
+			ToolIdentity: &identity, EffectSet: invo.EffectSet().Values(), ScopedReadProof: proof,
+		}},
+	}
+	var executorCalls atomic.Int32
+	failSync.Store(true)
+	syncCalls.Store(0)
+	got, beginErr := index.BeginDispatchBatch(ctx, batch)
+	if got == WorkspaceDispatchCommittedNow {
+		executorCalls.Add(1)
+		_, _ = invo.Dispatch(ctx)
+	}
+	if beginErr == nil || got != WorkspaceDispatchNotCommitted {
+		t.Fatalf("safe read after failed marker sync = (%v, %v), want no permit", got, beginErr)
+	}
+	if executorCalls.Load() != 0 {
+		t.Fatalf("safe-read sync failure entered executor %d times, want zero", executorCalls.Load())
+	}
+
+	failSync.Store(false)
+	reopened := newWorkspaceQuarantineIndex(indexRoot, workspaceIndexIO{})
+	decisions, err := reopened.InspectDispatchMarkers(ctx, []PendingActionRef{batch.Actions[0].Action})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(decisions) != 1 || decisions[0].MarkerState != DispatchMarkerPresent {
+		t.Fatalf("failed-sync safe-read marker = %#v, want present/unknown", decisions)
+	}
+	got, beginErr = reopened.BeginDispatchBatch(ctx, batch)
+	if beginErr != nil || got != WorkspaceDispatchAlreadyExists {
+		t.Fatalf("retry after failed safe-read marker sync = (%v, %v), want already-exists without replay", got, beginErr)
+	}
+	if executorCalls.Load() != 0 {
+		t.Fatalf("safe-read sync retry entered executor %d times, want zero", executorCalls.Load())
+	}
+}
+
+func canonicalWorkspaceIndexTestRoot(t *testing.T, path string) string {
+	t.Helper()
+	canonical, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return canonical
+}
+
+func preparedWorkspaceIndexRead(t *testing.T, root, path, callID string) (tools.PreparedInvocation, *tools.ScopedWorkspaceReadProof) {
+	t.Helper()
+	ctx := context.Background()
+	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry)
+	registry := tools.NewMiddlewareToolRegistry(base)
+	if err := registry.SetPreparedToolStages(tools.PreparedToolStages{}); err != nil {
+		t.Fatal(err)
+	}
+	if err := registry.SetPreparedToolPolicy(func(_ context.Context, request tools.PreparedPolicyRequest) (tools.PreparedPolicyDecision, error) {
+		return tools.PreparedPolicyDecision{Allowed: true, Generations: request.Generations}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := tools.RegisterDefaults(ctx, registry, tools.WithRegisteredCanonicalWorkspaceRoot(root)); err != nil {
+		t.Fatal(err)
+	}
+	invocation, err := registry.PrepareToolCall(ctx, tools.ToolCall{ID: callID, Name: "read", Args: map[string]any{"path": path}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	proof, ok := tools.ScopedWorkspaceReadProofFor(invocation, root)
+	if !ok {
+		t.Fatal("actual prepared built-in read did not issue a scoped proof")
+	}
+	return invocation, proof
+}
+
 func workspaceTestBatch(workspaceID, sessionID, runID, batchID, actionID string, ordinal uint64, toolCallID string) WorkspaceDispatchBatch {
 	ref := workspaceTestRef(workspaceID, sessionID, runID, batchID, actionID, ordinal, toolCallID)
 	return WorkspaceDispatchBatch{

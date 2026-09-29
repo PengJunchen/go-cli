@@ -150,15 +150,18 @@ func (r *MiddlewareToolRegistry) prepareToolCallWithStreamSink(ctx context.Conte
 
 	executor := preparedExecutor(snapshot.definition, snapshot.pipeline.stages.ExecutionWrappers, frozenCall)
 	config := preparedInvocationConfig{
-		fence:           fence,
-		generations:     decision.Generations,
-		identity:        snapshot.identity,
-		effects:         snapshot.effects,
-		schema:          snapshot.schema,
-		call:            frozenCall,
-		execute:         executor,
-		completionProof: completionProof,
-		streamingSink:   attestedSink,
+		fence:                   fence,
+		generations:             decision.Generations,
+		identity:                snapshot.identity,
+		effects:                 snapshot.effects,
+		canonicalWorkspaceRoot:  snapshot.canonicalWorkspaceRoot,
+		workspaceReadWhitelist:  append([]string(nil), snapshot.workspaceReadWhitelist...),
+		scopedReadProofEligible: snapshot.scopedReadProofEligible,
+		schema:                  snapshot.schema,
+		call:                    frozenCall,
+		execute:                 executor,
+		completionProof:         completionProof,
+		streamingSink:           attestedSink,
 	}
 	if preparedQueue != nil {
 		config.schedule = preparedMutationScheduler(preparedQueue, frozenCall)

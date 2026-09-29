@@ -2,8 +2,6 @@ package cli
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -12,8 +10,6 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/session"
 )
-
-const workspaceIdentityDomain = "go-cli/workspace-quarantine/v1\x00"
 
 var (
 	// ErrDurableWorkspaceIdentity indicates that the invocation root could not
@@ -62,30 +58,38 @@ func (err *SelectionAppliedCleanupError) Unwrap() error {
 // resolveWorkspaceID captures and canonicalizes one explicit invocation root
 // before deriving a domain-separated identity for workspace quarantine.
 func resolveWorkspaceID(getwd func() (string, error)) (string, error) {
+	_, workspaceID, err := resolveWorkspaceIdentity(getwd)
+	return workspaceID, err
+}
+
+func resolveWorkspaceIdentity(getwd func() (string, error)) (string, string, error) {
 	if getwd == nil {
-		return "", fmt.Errorf("%w: working-directory source is nil", ErrDurableWorkspaceIdentity)
+		return "", "", fmt.Errorf("%w: working-directory source is nil", ErrDurableWorkspaceIdentity)
 	}
 	root, err := getwd()
 	if err != nil {
-		return "", fmt.Errorf("%w: get invocation working directory: %w", ErrDurableWorkspaceIdentity, err)
+		return "", "", fmt.Errorf("%w: get invocation working directory: %w", ErrDurableWorkspaceIdentity, err)
 	}
 	if root == "" {
-		return "", fmt.Errorf("%w: invocation working directory is empty", ErrDurableWorkspaceIdentity)
+		return "", "", fmt.Errorf("%w: invocation working directory is empty", ErrDurableWorkspaceIdentity)
 	}
 	absolute, err := filepath.Abs(root)
 	if err != nil {
-		return "", fmt.Errorf("%w: make workspace root absolute: %w", ErrDurableWorkspaceIdentity, err)
+		return "", "", fmt.Errorf("%w: make workspace root absolute: %w", ErrDurableWorkspaceIdentity, err)
 	}
 	clean := filepath.Clean(absolute)
 	canonical, err := filepath.EvalSymlinks(clean)
 	if err != nil {
-		return "", fmt.Errorf("%w: resolve workspace root symlinks: %w", ErrDurableWorkspaceIdentity, err)
+		return "", "", fmt.Errorf("%w: resolve workspace root symlinks: %w", ErrDurableWorkspaceIdentity, err)
 	}
 	if !filepath.IsAbs(canonical) {
-		return "", fmt.Errorf("%w: canonical workspace root is not absolute", ErrDurableWorkspaceIdentity)
+		return "", "", fmt.Errorf("%w: canonical workspace root is not absolute", ErrDurableWorkspaceIdentity)
 	}
-	digest := sha256.Sum256([]byte(workspaceIdentityDomain + canonical))
-	return "workspace-v1-" + hex.EncodeToString(digest[:]), nil
+	workspaceID, err := session.WorkspaceIDForCanonicalRoot(canonical)
+	if err != nil {
+		return "", "", fmt.Errorf("%w: derive canonical workspace identity: %w", ErrDurableWorkspaceIdentity, err)
+	}
+	return canonical, workspaceID, nil
 }
 
 // durableSessionManager owns one prepared session handle and lends counted,
@@ -93,6 +97,7 @@ func resolveWorkspaceID(getwd func() (string, error)) (string, error) {
 type durableSessionManager struct {
 	preparer  session.SessionPreparer
 	workspace string
+	root      string
 
 	transition chan struct{}
 	mu         sync.Mutex
@@ -122,22 +127,34 @@ type durableSessionRunLease struct {
 	physical  string
 	branch    string
 	workspace string
+	root      string
 	once      sync.Once
 }
 
 // newDurableSessionManager creates an empty manager for one workspace identity.
 func newDurableSessionManager(preparer session.SessionPreparer, workspaceID string) (*durableSessionManager, error) {
+	return newDurableSessionManagerForWorkspace(preparer, "", workspaceID)
+}
+
+func newDurableSessionManagerForWorkspace(preparer session.SessionPreparer, canonicalRoot, workspaceID string) (*durableSessionManager, error) {
 	if preparer == nil {
 		return nil, errors.New("cli: durable session preparer is required")
 	}
 	if workspaceID == "" || strings.ContainsRune(workspaceID, '\x00') {
 		return nil, fmt.Errorf("%w: workspace ID must be non-empty and contain no NUL", ErrDurableWorkspaceIdentity)
 	}
+	if canonicalRoot != "" {
+		derivedWorkspaceID, err := session.WorkspaceIDForCanonicalRoot(canonicalRoot)
+		if err != nil || derivedWorkspaceID != workspaceID {
+			return nil, fmt.Errorf("%w: canonical workspace root does not match workspace ID", ErrDurableWorkspaceIdentity)
+		}
+	}
 	transition := make(chan struct{}, 1)
 	transition <- struct{}{}
 	return &durableSessionManager{
 		preparer:   preparer,
 		workspace:  workspaceID,
+		root:       canonicalRoot,
 		transition: transition,
 		retired:    make(map[*managedPreparedSession]struct{}),
 	}, nil
@@ -329,6 +346,7 @@ func (manager *durableSessionManager) acquireRunLease() (*durableSessionRunLease
 		physical:  physical,
 		branch:    branch,
 		workspace: manager.workspace,
+		root:      manager.root,
 	}, nil
 }
 
@@ -702,6 +720,15 @@ func (lease *durableSessionRunLease) WorkspaceID() string {
 		return ""
 	}
 	return lease.workspace
+}
+
+// CanonicalWorkspaceRoot returns the canonical workspace path captured by the
+// manager for this run lease.
+func (lease *durableSessionRunLease) CanonicalWorkspaceRoot() string {
+	if lease == nil {
+		return ""
+	}
+	return lease.root
 }
 
 // CloseRunCommit returns this run's manager borrow exactly once. It does not
