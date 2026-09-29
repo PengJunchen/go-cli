@@ -67,3 +67,15 @@ PASS
 ## Backend limits
 
 The real-rg CRLF/final-CR fixture verifies line normalization only. Ripgrep still applies its default hidden/ignore/binary selection while the Go fallback scans regular files without those filters. Go regexp and Rust regex also differ for some Unicode character classes and boundaries, including `\w` and `\b`. This change does not claim general pattern/backend parity, a production/live validation, or a traversal-time/total-file-bytes bound.
+
+## Post-acceptance root-open regression
+
+The supplemental test `TestGrepPureGoRootOpenErrorPreservesCauseAndFailsClosed` covers the injected root-opener branch with a real, existing directory and a sentinel open error. It verifies `errors.Is` and the root-open context, confirms the opener is called only for the requested root, and checks that no matches or truncation state escape. The same test calls `GrepTool.Execute` on a missing forced-Go root and verifies the wrapped `os.ErrNotExist`, empty output, and nil metadata. This closes the root-opener fixture gap without changing product source; the existing descendant-opener test continues to verify best-effort descendant truncation.
+
+```text
+rtk proxy env GOMAXPROCS=2 NO_COLOR=1 TERM=dumb go test -race -p 2 -count=1 -run '^TestGrepPureGoRootOpenErrorPreservesCauseAndFailsClosed$' ./internal/tools
+PASS
+
+rtk proxy env GOMAXPROCS=2 NO_COLOR=1 TERM=dumb go test -list '^TestGrepPureGo(Root|Descendant)' ./internal/tools
+PASS: root-file/missing-root, injected root opener, descendant failure/EOF cancellation, root read/close causes
+```
