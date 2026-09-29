@@ -127,7 +127,9 @@ type nativeChatModel struct {
 	// encode serializes msgs+options into the provider's request body.
 	encode func(msgs []Message, opts []Option) ([]byte, error)
 	// decode parses the provider's response body into an assistant Message.
-	decode func(body []byte) (*Message, error)
+	decode    func(body []byte) (*Message, error)
+	buildMode ProviderBuildMode
+	candidate *resolvedCandidateHandle
 }
 
 // Compile-time assertion that the shared helper satisfies the chat contract.
@@ -145,7 +147,12 @@ func (m *nativeChatModel) Generate(ctx context.Context, msgs []Message, opts ...
 		tracing.Attribute{Key: "model", Value: m.model},
 	)
 
-	msg, err := m.generate(spanCtx, msgs, opts...)
+	msg, attempt, err := m.generate(spanCtx, msgs, opts...)
+	var usage *Usage
+	if msg != nil {
+		usage = msg.Usage
+	}
+	err = finishProviderAttempt(spanCtx, attempt, err, usage)
 	if err != nil {
 		setProviderErrorSpanAttributes(span, err)
 		span.SetStatus(tracing.SpanStatusError, err.Error())
@@ -170,15 +177,15 @@ func (m *nativeChatModel) Generate(ctx context.Context, msgs []Message, opts ...
 	return msg, err
 }
 
-func (m *nativeChatModel) generate(ctx context.Context, msgs []Message, opts ...Option) (*Message, error) {
+func (m *nativeChatModel) generate(ctx context.Context, msgs []Message, opts ...Option) (*Message, ProviderAttempt, error) {
 	body, err := m.encode(msgs, opts)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("llm: build request: %w", err)
+		return nil, nil, fmt.Errorf("llm: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if m.header != nil {
@@ -187,9 +194,13 @@ func (m *nativeChatModel) generate(ctx context.Context, msgs []Message, opts ...
 		}
 	}
 
+	attempt, err := (providerDispatchBinding{mode: m.buildMode, candidate: m.candidate}).begin(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("llm: do request: %w", err)
+		return nil, attempt, fmt.Errorf("llm: do request: %w", &providerTransportFailure{cause: err})
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -197,24 +208,25 @@ func (m *nativeChatModel) generate(ctx context.Context, msgs []Message, opts ...
 		if readErr != nil {
 			providerErr := newProviderError(resp.StatusCode, m.provider, string(payload))
 			providerErr.BodyTruncated = truncated
-			return nil, errors.Join(providerErr, fmt.Errorf("llm: read error response: %w", readErr), closeErr)
+			return nil, attempt, errors.Join(providerErr, fmt.Errorf("llm: read error response: %w", readErr), closeErr)
 		}
 		providerErr := newProviderError(resp.StatusCode, m.provider, string(payload))
 		providerErr.BodyTruncated = truncated
-		return nil, errors.Join(providerErr, closeErr)
+		return nil, attempt, errors.Join(providerErr, closeErr)
 	}
 
 	data, truncated, readErr, closeErr := readBoundedProviderBody(resp.Body, maxProviderJSONBodyBytes)
 	if readErr != nil {
-		return nil, errors.Join(fmt.Errorf("llm: read response: %w", readErr), closeErr)
+		return nil, attempt, errors.Join(fmt.Errorf("llm: read response: %w", readErr), closeErr)
 	}
 	if truncated {
-		return nil, errors.Join(ErrProviderResponseTooLarge, closeErr)
+		return nil, attempt, errors.Join(ErrProviderResponseTooLarge, closeErr)
 	}
 	if closeErr != nil {
-		return nil, closeErr
+		return nil, attempt, closeErr
 	}
-	return m.decode(data)
+	msg, decodeErr := m.decode(data)
+	return msg, attempt, decodeErr
 }
 
 // Stream returns the generation result as a channel of MessageChunk. For the
@@ -243,7 +255,7 @@ func (m *nativeChatModel) Stream(ctx context.Context, msgs []Message, opts ...Op
 // For streaming, a shallow copy of the client is made with Timeout=0 so that
 // SSE streams are not cut off by the client-level timeout. The caller's
 // context provides cancellation instead (AC-2, AC-3).
-func (m *nativeChatModel) streamRoundTrip(ctx context.Context, body []byte, endpoint string) (io.ReadCloser, error) {
+func (m *nativeChatModel) streamRoundTrip(ctx context.Context, body []byte, endpoint string) (io.ReadCloser, ProviderAttempt, error) {
 	// Copy the client and clear the Timeout so long-lived SSE streams are
 	// not terminated by the default 120s client timeout. Context
 	// cancellation still applies (AC-3).
@@ -255,7 +267,7 @@ func (m *nativeChatModel) streamRoundTrip(ctx context.Context, body []byte, endp
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("llm: build request: %w", err)
+		return nil, nil, fmt.Errorf("llm: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
@@ -265,9 +277,13 @@ func (m *nativeChatModel) streamRoundTrip(ctx context.Context, body []byte, endp
 		}
 	}
 
+	attempt, err := (providerDispatchBinding{mode: m.buildMode, candidate: m.candidate}).begin(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
 	resp, err := streamClient.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("llm: do request: %w", err)
+		return nil, attempt, fmt.Errorf("llm: do request: %w", &providerTransportFailure{cause: err})
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -275,13 +291,13 @@ func (m *nativeChatModel) streamRoundTrip(ctx context.Context, body []byte, endp
 		if readErr != nil {
 			providerErr := newProviderError(resp.StatusCode, m.provider, string(payload))
 			providerErr.BodyTruncated = truncated
-			return nil, errors.Join(providerErr, fmt.Errorf("llm: read error response: %w", readErr), closeErr)
+			return nil, attempt, errors.Join(providerErr, fmt.Errorf("llm: read error response: %w", readErr), closeErr)
 		}
 		providerErr := newProviderError(resp.StatusCode, m.provider, string(payload))
 		providerErr.BodyTruncated = truncated
-		return nil, errors.Join(providerErr, closeErr)
+		return nil, attempt, errors.Join(providerErr, closeErr)
 	}
-	return resp.Body, nil
+	return resp.Body, attempt, nil
 }
 
 // withStreamFlag decodes the request body, injects "stream": true, and
@@ -401,10 +417,10 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 		}
 	}
 
-	respBody, err := m.streamRoundTrip(ctx, streamBody, m.endpoint)
+	respBody, attempt, err := m.streamRoundTrip(ctx, streamBody, m.endpoint)
 	if err != nil {
 		close(ch)
-		return ch, err
+		return ch, finishProviderAttempt(ctx, attempt, err, nil)
 	}
 
 	go func() {
@@ -484,7 +500,7 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 		}
 	}()
 
-	return ch, nil
+	return finishProviderAttemptStream(ctx, ch, attempt), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -578,10 +594,10 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 		return ch, err
 	}
 
-	respBody, err := m.streamRoundTrip(ctx, streamBody, m.endpoint)
+	respBody, attempt, err := m.streamRoundTrip(ctx, streamBody, m.endpoint)
 	if err != nil {
 		close(ch)
-		return ch, err
+		return ch, finishProviderAttempt(ctx, attempt, err, nil)
 	}
 
 	go func() {
@@ -892,7 +908,7 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 		}
 	}()
 
-	return ch, nil
+	return finishProviderAttemptStream(ctx, ch, attempt), nil
 }
 
 // ---------------------------------------------------------------------------
@@ -915,10 +931,10 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 	// Switch the endpoint to the streaming variant.
 	streamEndpoint := strings.Replace(m.endpoint, geminiGenerateAction, geminiStreamAction, 1)
 
-	respBody, err := m.streamRoundTrip(ctx, body, streamEndpoint)
+	respBody, attempt, err := m.streamRoundTrip(ctx, body, streamEndpoint)
 	if err != nil {
 		close(ch)
-		return ch, err
+		return ch, finishProviderAttempt(ctx, attempt, err, nil)
 	}
 
 	go func() {
@@ -1043,7 +1059,7 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 		}
 	}()
 
-	return ch, nil
+	return finishProviderAttemptStream(ctx, ch, attempt), nil
 }
 
 // nativeProviderBase holds the shared state of the three native providers.
@@ -1103,15 +1119,16 @@ func (b *nativeProviderBase) credentialForOrigin(origin string) (string, bool) {
 // endpoint/header/encode/decode closures.
 func (b *nativeProviderBase) newChatModel(cfg ModelConfig, model, baseURL, apiKey, endpoint string, header func() map[string]string, encode func(msgs []Message, opts []Option) ([]byte, error), decode func(body []byte) (*Message, error)) *nativeChatModel {
 	return &nativeChatModel{
-		client:   b.httpClient,
-		baseURL:  baseURL,
-		apiKey:   apiKey,
-		provider: b.name,
-		model:    model,
-		endpoint: endpoint,
-		header:   header,
-		encode:   encode,
-		decode:   decode,
+		client:    b.httpClient,
+		baseURL:   baseURL,
+		apiKey:    apiKey,
+		provider:  b.name,
+		model:     model,
+		endpoint:  endpoint,
+		header:    header,
+		encode:    encode,
+		decode:    decode,
+		buildMode: UnboundLibraryBuild,
 	}
 }
 
@@ -1194,6 +1211,14 @@ func (p *OpenAIProvider) Models() []ModelInfo { return p.modelsCopy() }
 // Build returns a native HTTP chat model bound to the OpenAI chat completions
 // endpoint.
 func (p *OpenAIProvider) Build(_ context.Context, cfg ModelConfig) (BaseChatModel, func(), error) {
+	return p.build(cfg, UnboundLibraryBuild, nil)
+}
+
+func (p *OpenAIProvider) buildGuarded(_ context.Context, cfg ModelConfig, candidate *resolvedCandidateHandle) (BaseChatModel, func(), error) {
+	return p.build(cfg, GuardedCandidateBuild, candidate)
+}
+
+func (p *OpenAIProvider) build(cfg ModelConfig, mode ProviderBuildMode, candidate *resolvedCandidateHandle) (BaseChatModel, func(), error) {
 	model, err := p.buildCommon(cfg)
 	if err != nil {
 		return nil, nil, err
@@ -1221,6 +1246,8 @@ func (p *OpenAIProvider) Build(_ context.Context, cfg ModelConfig) (BaseChatMode
 	}
 	chatModel := p.newChatModel(cfg, model, baseURL, apiKey, endpoint, header, encode, decode)
 	chatModel.client = client
+	chatModel.buildMode = mode
+	chatModel.candidate = candidate
 	return chatModel, func() {}, nil
 }
 

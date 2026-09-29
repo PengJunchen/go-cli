@@ -95,7 +95,7 @@ func TestHTTPChatModelGenerateToolCall(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	model := &HTTPChatModel{
+	model := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(WithBaseURL(srv.URL)),
 		cfg:      ModelConfig{Model: "m"},
 		client:   http.DefaultClient,
@@ -120,7 +120,7 @@ func TestHTTPChatModelHTTP500(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	model := &HTTPChatModel{
+	model := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(WithBaseURL(srv.URL)),
 		cfg:      ModelConfig{Model: "m", APIKey: "k"},
 		client:   http.DefaultClient,
@@ -145,7 +145,7 @@ func TestHTTPChatModelMalformedJSON(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	model := &HTTPChatModel{
+	model := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(WithBaseURL(srv.URL)),
 		cfg:      ModelConfig{Model: "m"},
 		client:   http.DefaultClient,
@@ -164,7 +164,7 @@ func TestHTTPChatModelContextCanceled(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	model := &HTTPChatModel{
+	model := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(WithBaseURL(srv.URL)),
 		cfg:      ModelConfig{Model: "m"},
 		client:   http.DefaultClient,
@@ -188,7 +188,7 @@ func TestHTTPChatModelBaseURLJoin(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	model := &HTTPChatModel{
+	model := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(),
 		cfg:      ModelConfig{Model: "m", BaseURL: srv.URL + "/"},
 		client:   http.DefaultClient,
@@ -209,7 +209,7 @@ func TestHTTPChatModelStreamSingleChunk(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	model := &HTTPChatModel{
+	model := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(WithBaseURL(srv.URL)),
 		cfg:      ModelConfig{Model: "m"},
 		client:   http.DefaultClient,
@@ -231,7 +231,7 @@ func TestHTTPChatModelStreamSingleChunk(t *testing.T) {
 // TestBuildBodyOptions verifies per-call options override config defaults.
 func TestBuildBodyOptions(t *testing.T) {
 	p := NewEinoProvider(WithBaseURL("http://example.com"))
-	m := &HTTPChatModel{
+	m := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: p,
 		cfg:      ModelConfig{Model: "m", Temperature: 0.2, MaxTokens: 10},
 		client:   http.DefaultClient,

@@ -104,7 +104,7 @@ func TestHTTPChatModelBuildBodyPreservesSamplingPresence(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			model := &HTTPChatModel{provider: NewEinoProvider(), cfg: tt.config}
+			model := &HTTPChatModel{buildMode: UnboundLibraryBuild, provider: NewEinoProvider(), cfg: tt.config}
 			body, err := model.buildBody([]Message{{Role: RoleUser, Content: "x"}}, tt.options...)
 			require.NoError(t, err)
 			var request openAIRequest
@@ -135,7 +135,7 @@ func TestHTTPChatModelStreamError(t *testing.T) {
 // provider call surfaces, exercising the generate error path.
 func TestHTTPChatModelGenerate_ResponseReadError(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
-	m := &HTTPChatModel{
+	m := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(),
 		cfg:      ModelConfig{Model: "m", BaseURL: "http://127.0.0.1:1"},
 		client: &http.Client{
@@ -159,7 +159,7 @@ func (e testTransportError) Error() string { return string(e) }
 // per-call options are given.
 func TestBuildBodyNoOptions(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
-	m := &HTTPChatModel{
+	m := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(),
 		cfg:      ModelConfig{Model: "m", Temperature: 0.5, MaxTokens: 11},
 		client:   http.DefaultClient,

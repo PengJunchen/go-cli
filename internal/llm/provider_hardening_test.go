@@ -70,7 +70,7 @@ func TestHTTPChatModel_roundTripErrorBody(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	m := &HTTPChatModel{
+	m := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(WithBaseURL(srv.URL)),
 		cfg:      ModelConfig{Model: "m"},
 		client:   http.DefaultClient,
@@ -92,7 +92,7 @@ func TestHTTPChatModel_roundTripRequestBuildError(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	// "http://[::1" is an unterminated bracketed host so
 	// http.NewRequestWithContext fails during request construction.
-	m := &HTTPChatModel{
+	m := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(WithBaseURL("http://[::1")),
 		cfg:      ModelConfig{Model: "m"},
 		client:   http.DefaultClient,
@@ -106,7 +106,7 @@ func TestHTTPChatModel_roundTripRequestBuildError(t *testing.T) {
 // serialized with their ToolCallID and Name preserved in the request body.
 func TestHTTPChatModel_buildBodyToolMessages(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
-	m := &HTTPChatModel{
+	m := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(),
 		cfg:      ModelConfig{Model: "m"},
 		client:   http.DefaultClient,
@@ -161,7 +161,7 @@ func TestHTTPChatModel_GenerateUsageTokens(t *testing.T) {
 // temperature / max tokens for the HTTPChatModel.
 func TestHTTPChatModel_UsageOverrides(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
-	m := &HTTPChatModel{
+	m := &HTTPChatModel{buildMode: UnboundLibraryBuild,
 		provider: NewEinoProvider(),
 		cfg:      ModelConfig{Model: "m", Temperature: 0.1, MaxTokens: 3},
 		client:   http.DefaultClient,

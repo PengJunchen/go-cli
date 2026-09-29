@@ -147,6 +147,14 @@ func (p *EinoProvider) credentialForOrigin(origin string) (string, bool) {
 // returns an error only when cfg is clearly invalid (model name empty and no
 // provider default is available).
 func (p *EinoProvider) Build(_ context.Context, cfg ModelConfig) (BaseChatModel, func(), error) {
+	return p.build(cfg, UnboundLibraryBuild, nil)
+}
+
+func (p *EinoProvider) buildGuarded(_ context.Context, cfg ModelConfig, candidate *resolvedCandidateHandle) (BaseChatModel, func(), error) {
+	return p.build(cfg, GuardedCandidateBuild, candidate)
+}
+
+func (p *EinoProvider) build(cfg ModelConfig, mode ProviderBuildMode, candidate *resolvedCandidateHandle) (BaseChatModel, func(), error) {
 	model := cfg.Model
 	if model == "" {
 		model = p.defaultModel
@@ -159,9 +167,11 @@ func (p *EinoProvider) Build(_ context.Context, cfg ModelConfig) (BaseChatModel,
 		return nil, nil, fmt.Errorf("llm: build provider for resolved scope: %w", err)
 	}
 	m := &HTTPChatModel{
-		provider: p,
-		cfg:      cfg,
-		client:   client,
+		provider:  p,
+		cfg:       cfg,
+		client:    client,
+		buildMode: mode,
+		candidate: candidate,
 	}
 	// Override resolved model back onto the config so the model reports the
 	// effective name.
@@ -176,9 +186,11 @@ func (p *EinoProvider) Build(_ context.Context, cfg ModelConfig) (BaseChatModel,
 // Zero external dependencies: it constructs the JSON body by hand, POSTs it to
 // {base}/chat/completions, and decodes the OpenAI-shaped response.
 type HTTPChatModel struct {
-	provider *EinoProvider
-	cfg      ModelConfig
-	client   *http.Client
+	provider  *EinoProvider
+	cfg       ModelConfig
+	client    *http.Client
+	buildMode ProviderBuildMode
+	candidate *resolvedCandidateHandle
 }
 
 // Compile-time assertions that the concrete types satisfy the llm contracts.
@@ -200,7 +212,12 @@ func (m *HTTPChatModel) Generate(ctx context.Context, msgs []Message, opts ...Op
 	}
 	span.SetAttributes(attrs...)
 
-	msg, err := m.generate(spanCtx, msgs, opts...)
+	msg, attempt, err := m.generate(spanCtx, msgs, opts...)
+	var usage *Usage
+	if msg != nil {
+		usage = msg.Usage
+	}
+	err = finishProviderAttempt(spanCtx, attempt, err, usage)
 	if err != nil {
 		setProviderErrorSpanAttributes(span, err)
 		span.SetStatus(tracing.SpanStatusError, err.Error())
@@ -226,30 +243,30 @@ func (m *HTTPChatModel) Generate(ctx context.Context, msgs []Message, opts ...Op
 	return msg, err
 }
 
-func (m *HTTPChatModel) generate(ctx context.Context, msgs []Message, opts ...Option) (*Message, error) {
+func (m *HTTPChatModel) generate(ctx context.Context, msgs []Message, opts ...Option) (*Message, ProviderAttempt, error) {
 	body, err := m.buildBody(msgs, opts...)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
-	respBody, err := m.roundTrip(ctx, body)
+	respBody, attempt, err := m.roundTrip(ctx, body)
 	if err != nil {
-		return nil, err
+		return nil, attempt, err
 	}
 	responseBody, truncated, readErr, closeErr := readBoundedProviderBody(respBody, maxProviderJSONBodyBytes)
 	if readErr != nil {
-		return nil, errors.Join(fmt.Errorf("llm: read response: %w", readErr), closeErr)
+		return nil, attempt, errors.Join(fmt.Errorf("llm: read response: %w", readErr), closeErr)
 	}
 	if truncated {
-		return nil, errors.Join(ErrProviderResponseTooLarge, closeErr)
+		return nil, attempt, errors.Join(ErrProviderResponseTooLarge, closeErr)
 	}
 	if closeErr != nil {
-		return nil, closeErr
+		return nil, attempt, closeErr
 	}
 
 	var parsed openAIResponse
 	if err := json.NewDecoder(bytes.NewReader(responseBody)).Decode(&parsed); err != nil {
-		return nil, fmt.Errorf("llm: decode response: %w", err)
+		return nil, attempt, fmt.Errorf("llm: decode response: %w", err)
 	}
 
 	msg := &Message{Role: RoleAssistant}
@@ -266,7 +283,7 @@ func (m *HTTPChatModel) generate(ctx context.Context, msgs []Message, opts ...Op
 			TotalTokens:  parsed.Usage.PromptTokens + parsed.Usage.CompletionTokens,
 		}
 	}
-	return msg, nil
+	return msg, attempt, nil
 }
 
 // Stream returns the generation result as a channel of MessageChunk. It sends
@@ -309,10 +326,10 @@ func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 		return ch, fmt.Errorf("llm: marshal stream request: %w", err)
 	}
 
-	respBody, err := m.roundTrip(ctx, streamBody)
+	respBody, attempt, err := m.roundTrip(ctx, streamBody)
 	if err != nil {
 		close(ch)
-		return ch, err
+		return ch, finishProviderAttempt(ctx, attempt, err, nil)
 	}
 
 	go func() {
@@ -394,7 +411,7 @@ func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 		}
 	}()
 
-	return ch, nil
+	return finishProviderAttemptStream(ctx, ch, attempt), nil
 }
 
 // openAIStreamChunk is one SSE data payload of a streaming response.
@@ -489,7 +506,7 @@ func (m *HTTPChatModel) buildBody(msgs []Message, opts ...Option) ([]byte, error
 // roundTrip builds the HTTP request, executes it against the provider, and
 // verifies a 2xx status. It returns the response body for decoding and closes
 // it via the deferred call in the caller.
-func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadCloser, error) {
+func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadCloser, ProviderAttempt, error) {
 	baseURL := m.cfg.BaseURL
 	if baseURL == "" {
 		baseURL = m.provider.defaultBaseURL
@@ -498,7 +515,7 @@ func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadClos
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, fmt.Errorf("llm: build request: %w", err)
+		return nil, nil, fmt.Errorf("llm: build request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 
@@ -510,9 +527,13 @@ func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadClos
 		req.Header.Set("Authorization", "Bearer "+apiKey)
 	}
 
+	attempt, err := (providerDispatchBinding{mode: m.buildMode, candidate: m.candidate}).begin(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
 	resp, err := m.client.Do(req)
 	if err != nil {
-		return nil, fmt.Errorf("llm: do request: %w", err)
+		return nil, attempt, fmt.Errorf("llm: do request: %w", &providerTransportFailure{cause: err})
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
@@ -520,13 +541,13 @@ func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadClos
 		if readErr != nil {
 			providerErr := newProviderError(resp.StatusCode, m.provider.name, string(payload))
 			providerErr.BodyTruncated = truncated
-			return nil, errors.Join(providerErr, fmt.Errorf("llm: read error response: %w", readErr), closeErr)
+			return nil, attempt, errors.Join(providerErr, fmt.Errorf("llm: read error response: %w", readErr), closeErr)
 		}
 		providerErr := newProviderError(resp.StatusCode, m.provider.name, string(payload))
 		providerErr.BodyTruncated = truncated
-		return nil, errors.Join(providerErr, closeErr)
+		return nil, attempt, errors.Join(providerErr, closeErr)
 	}
-	return resp.Body, nil
+	return resp.Body, attempt, nil
 }
 
 // openAIRequest is the OpenAI chat completions request body.
