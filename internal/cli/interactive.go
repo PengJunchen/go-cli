@@ -115,6 +115,7 @@ func messagesToTurnItems(msgs []core.AgentMessage) []compaction.TurnItem {
 			ToolName:       m.ToolName,
 			InputKind:      m.InputKind,
 			ReceiptOutcome: m.ReceiptOutcome,
+			Runtime:        m.Runtime,
 		}
 		if m.Role == compaction.RoleTool {
 			item.ToolResult = m.Content
@@ -140,6 +141,7 @@ func turnItemsToMessages(items []compaction.TurnItem) []core.AgentMessage {
 			ToolName:       it.ToolName,
 			InputKind:      it.InputKind,
 			ReceiptOutcome: it.ReceiptOutcome,
+			Runtime:        it.Runtime,
 		}
 		if it.Role == compaction.RoleTool {
 			msg.Content = it.ToolResult
