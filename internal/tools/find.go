@@ -319,7 +319,7 @@ func findPureGo(ctx context.Context, searchPath, pattern, kind string, maxDepth 
 	}
 	if !info.IsDir() {
 		// A single file path: include it if its base name matches.
-		if findMatches(filepath.Base(searchPath), pattern) && findKindOK(kind, false) {
+		if findMatches(filepath.Base(searchPath), pattern) && findKindOK(kind, info.Mode()) {
 			paths := newBoundedTopK[string](findMaxResults, directoryCaptureMaxEntryBytes,
 				func(path string) string { return path }, func(a, b string) bool { return a < b })
 			if err := paths.Add(searchPath); err != nil {
@@ -409,7 +409,7 @@ func findPureGo(ctx context.Context, searchPath, pattern, kind string, maxDepth 
 		relativePath := filepath.Join(frame.relativePath, name)
 		fullPath := filepath.Join(frame.fullPath, name)
 		isDir := info.IsDir()
-		if findKindOK(kind, isDir) && findMatches(name, pattern) {
+		if findKindOK(kind, info.Mode()) && findMatches(name, pattern) {
 			cleanPath := filepath.Clean(relativePath)
 			if err := paths.Add(cleanPath); err != nil {
 				return findCaptureResult{}, err
@@ -446,14 +446,14 @@ type findDirectoryFrame struct {
 	depth        int
 }
 
-// findKindOK reports whether a DirEntry of the given isDir-ness should be
-// included given the requested type filter. type "" matches everything.
-func findKindOK(kind string, isDir bool) bool {
+// findKindOK reports whether an entry with the given mode should be included
+// given the requested type filter. type "" matches everything.
+func findKindOK(kind string, mode os.FileMode) bool {
 	switch kind {
 	case "f":
-		return !isDir
+		return mode.IsRegular()
 	case "d":
-		return isDir
+		return mode.IsDir()
 	default:
 		return true
 	}
