@@ -18,11 +18,11 @@ import (
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
-const cachePrivacySecret = "CACHE_PRIVACY_SENTINEL_DO_NOT_EMIT_9d0e1a"
+const cachePrivacyMarker = "CACHE_PRIVACY_SENTINEL_DO_NOT_EMIT_9d0e1a"
 
 func TestToolCacheUsesBoundedDomainSeparatedDigest(t *testing.T) {
 	argsA := map[string]any{
-		"token": cachePrivacySecret,
+		"token": cachePrivacyMarker,
 		"nested": map[string]any{
 			"z": 2,
 			"a": 1,
@@ -30,7 +30,7 @@ func TestToolCacheUsesBoundedDomainSeparatedDigest(t *testing.T) {
 	}
 	argsB := map[string]any{}
 	argsB["nested"] = map[string]any{"a": 1, "z": 2}
-	argsB["token"] = cachePrivacySecret
+	argsB["token"] = cachePrivacyMarker
 
 	keyA := runAndCaptureToolCacheKey(t, "read", argsA)
 	keyB := runAndCaptureToolCacheKey(t, "read", argsB)
@@ -40,7 +40,7 @@ func TestToolCacheUsesBoundedDomainSeparatedDigest(t *testing.T) {
 	assert.Equal(t, keyA, keyB, "JSON map insertion order must not affect the cache key")
 	assert.NotEqual(t, keyA, keyDifferentTool, "tool names must be part of the digest input")
 	assert.NotEqual(t, keyA, keyDifferentArgs, "different arguments must not alias")
-	assert.NotContains(t, keyA, cachePrivacySecret)
+	assert.NotContains(t, keyA, cachePrivacyMarker)
 	assert.NotContains(t, keyA, `"token"`)
 	assert.Regexp(t, `^tool-cache:v1:[0-9a-f]{64}$`, keyA)
 
@@ -72,7 +72,7 @@ func TestToolCacheDoesNotLogRawArgs(t *testing.T) {
 	)
 	call := tools.ToolCall{
 		Name: "read",
-		Args: map[string]any{"api_key": cachePrivacySecret, "query": "private search text"},
+		Args: map[string]any{"api_key": cachePrivacyMarker, "query": "private search text"},
 	}
 
 	for range 2 {
@@ -84,12 +84,12 @@ func TestToolCacheDoesNotLogRawArgs(t *testing.T) {
 
 	encodedArgs, err := json.Marshal(call.Args)
 	require.NoError(t, err)
-	assert.NotContains(t, logBuffer.String(), cachePrivacySecret)
+	assert.NotContains(t, logBuffer.String(), cachePrivacyMarker)
 	assert.NotContains(t, logBuffer.String(), string(encodedArgs))
 
 	spanJSON, err := json.Marshal(exporter.snapshot())
 	require.NoError(t, err)
-	assert.NotContains(t, string(spanJSON), cachePrivacySecret)
+	assert.NotContains(t, string(spanJSON), cachePrivacyMarker)
 	assert.NotContains(t, string(spanJSON), string(encodedArgs))
 
 	var sawCacheKey bool
@@ -118,7 +118,7 @@ func TestToolCacheMarshalFailureBypassesGetAndSet(t *testing.T) {
 	)
 	call := tools.ToolCall{
 		Name: "read",
-		Args: map[string]any{"api_key": cachePrivacySecret, "unmarshalable": make(chan int)},
+		Args: map[string]any{"api_key": cachePrivacyMarker, "unmarshalable": make(chan int)},
 	}
 
 	for range 2 {
