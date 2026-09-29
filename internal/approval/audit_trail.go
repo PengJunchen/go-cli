@@ -33,6 +33,28 @@ var (
 	ErrAuditTrailClose = errors.New("approval audit: close failed")
 )
 
+// AuditTrailErrorClass is a bounded, non-sensitive category for audit health.
+// It never contains a path, operating-system message, or event payload.
+type AuditTrailErrorClass string
+
+const (
+	AuditTrailErrorClassLockUnavailable AuditTrailErrorClass = "lock_unavailable"
+	AuditTrailErrorClassAppendFailed    AuditTrailErrorClass = "append_failed"
+	AuditTrailErrorClassSyncFailed      AuditTrailErrorClass = "sync_failed"
+	AuditTrailErrorClassRollbackFailed  AuditTrailErrorClass = "rollback_failed"
+	AuditTrailErrorClassCloseFailed     AuditTrailErrorClass = "close_failed"
+	AuditTrailErrorClassChainCorrupt    AuditTrailErrorClass = "chain_corrupt"
+	AuditTrailErrorClassStorageFailed   AuditTrailErrorClass = "storage_failed"
+)
+
+// AuditTrailHealth reports whether audit writes have failed in this process.
+// ErrorClass is sticky after the first failure and is safe to expose to callers.
+type AuditTrailHealth struct {
+	Enabled    bool                 `json:"enabled"`
+	Healthy    bool                 `json:"healthy"`
+	ErrorClass AuditTrailErrorClass `json:"error_class,omitempty"`
+}
+
 const maxAuditTrailLineBytes = 64 * 1024
 const defaultAuditTrailLockTimeout = 5 * time.Second
 
@@ -87,6 +109,7 @@ type AuditTrail struct {
 	lastHash    map[string]string
 	cursors     map[string]auditTrailCursor
 	poisoned    map[string]error
+	healthClass AuditTrailErrorClass
 	openFile    auditTrailOpenFileFunc
 }
 
@@ -112,6 +135,51 @@ func openAuditTrailFile(path string, flag int, perm os.FileMode) (auditTrailFile
 	return os.OpenFile(path, flag, perm)
 }
 
+// Health returns a process-local, redacted view of audit append health. Once
+// an append has failed, successful later records do not clear the missing-event
+// signal; a new AuditTrail instance starts with healthy process-local state.
+func (a *AuditTrail) Health() AuditTrailHealth {
+	if a == nil {
+		return AuditTrailHealth{Healthy: true}
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return AuditTrailHealth{
+		Enabled:    true,
+		Healthy:    a.healthClass == "",
+		ErrorClass: a.healthClass,
+	}
+}
+
+func (a *AuditTrail) markUnhealthyLocked(class AuditTrailErrorClass) {
+	if a.healthClass == "" {
+		a.healthClass = class
+	}
+}
+
+func classifyAuditTrailError(err error, lockCallbackEntered bool) AuditTrailErrorClass {
+	if err == nil {
+		return ""
+	}
+	if !lockCallbackEntered {
+		return AuditTrailErrorClassLockUnavailable
+	}
+	switch {
+	case errors.Is(err, ErrAuditTrailRollback):
+		return AuditTrailErrorClassRollbackFailed
+	case errors.Is(err, ErrAuditTrailCorrupt):
+		return AuditTrailErrorClassChainCorrupt
+	case errors.Is(err, ErrAuditTrailSync):
+		return AuditTrailErrorClassSyncFailed
+	case errors.Is(err, ErrAuditTrailAppend):
+		return AuditTrailErrorClassAppendFailed
+	case errors.Is(err, ErrAuditTrailClose):
+		return AuditTrailErrorClassCloseFailed
+	default:
+		return AuditTrailErrorClassStorageFailed
+	}
+}
+
 // Record durably appends an audit entry. The chain advances only after a
 // complete line write and successful Sync. A nil receiver disables auditing.
 func (a *AuditTrail) Record(entry AuditEntry) error {
@@ -130,11 +198,14 @@ func (a *AuditTrail) Record(entry AuditEntry) error {
 
 	filename := filepath.Join(a.dir, entry.Timestamp.Format("2006-01-02")+".jsonl")
 	if poison := a.poisoned[filename]; poison != nil {
+		a.markUnhealthyLocked(AuditTrailErrorClassRollbackFailed)
 		return fmt.Errorf("%w: writer quarantined: %w", ErrAuditTrailRollback, poison)
 	}
 	lockCtx, cancel := context.WithTimeout(context.Background(), a.auditLockTimeout())
 	defer cancel()
+	lockCallbackEntered := false
 	err := privatefile.WithAuditExclusiveLock(lockCtx, filename, func() error {
+		lockCallbackEntered = true
 		if err := a.refreshChain(filename); err != nil {
 			return err
 		}
@@ -180,6 +251,7 @@ func (a *AuditTrail) Record(entry AuditEntry) error {
 		return nil
 	})
 	if err != nil {
+		a.markUnhealthyLocked(classifyAuditTrailError(err, lockCallbackEntered))
 		return fmt.Errorf("approval audit: locked append: %w", err)
 	}
 	slog.Info("approval.audit.appended", "stage", entry.Stage, "tool", entry.Tool, "hash", entry.Hash)
@@ -200,7 +272,9 @@ func (a *AuditTrail) ReadEntries(day time.Time) ([]AuditEntry, error) {
 	var fingerprintValid bool
 	lockCtx, cancel := context.WithTimeout(context.Background(), a.auditLockTimeout())
 	defer cancel()
+	lockCallbackEntered := false
 	err := privatefile.WithAuditExclusiveLock(lockCtx, filename, func() error {
+		lockCallbackEntered = true
 		before, beforeErr := privatefile.FingerprintFile(filename)
 		var readErr error
 		entries, lastHash, readErr = readApprovalAuditFile(filename)
@@ -218,6 +292,7 @@ func (a *AuditTrail) ReadEntries(day time.Time) ([]AuditEntry, error) {
 		return nil
 	})
 	if err != nil {
+		a.markUnhealthyLocked(classifyAuditTrailError(err, lockCallbackEntered))
 		return nil, fmt.Errorf("approval audit: locked read: %w", err)
 	}
 	a.lastHash[filename] = lastHash

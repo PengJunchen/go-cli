@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -384,11 +385,84 @@ func TestAuditTrailFailsClosedWhenLockUnavailable(t *testing.T) {
 	require.NoError(t, os.WriteFile(path+".lock", nil, 0o644))
 	require.NoError(t, os.Chmod(path+".lock", 0o644))
 
-	err := NewAuditTrail(dir).Record(AuditEntry{Timestamp: ts, Tool: "new"})
+	trail := NewAuditTrail(dir)
+	err := trail.Record(AuditEntry{Timestamp: ts, Tool: "new"})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "privatefile")
+	assert.Equal(t, AuditTrailErrorClassLockUnavailable, trail.Health().ErrorClass)
 	_, statErr := os.Stat(path)
 	assert.ErrorIs(t, statErr, os.ErrNotExist, "no audit record is appended without the lock")
+}
+
+func TestAuditTrailHealthIsStickyUntilRestart(t *testing.T) {
+	dir := privateAuditTestDir(t)
+	ts := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	trail := NewAuditTrail(dir)
+	syncErr := errors.New("private sync failure detail")
+	trail.openFile = func(path string, flag int, perm os.FileMode) (auditTrailFile, error) {
+		file, err := os.OpenFile(path, flag, perm)
+		if err != nil {
+			return nil, err
+		}
+		return &auditTrailFaultFile{File: file, syncErr: syncErr}, nil
+	}
+
+	err := trail.Record(AuditEntry{Timestamp: ts, Tool: "first"})
+	assert.ErrorIs(t, err, ErrAuditTrailSync)
+	health := trail.Health()
+	assert.True(t, health.Enabled)
+	assert.False(t, health.Healthy)
+	assert.Equal(t, AuditTrailErrorClassSyncFailed, health.ErrorClass)
+	assert.NotContains(t, fmt.Sprint(health), syncErr.Error(), "health must not expose raw storage errors")
+
+	trail.openFile = openAuditTrailFile
+	require.NoError(t, trail.Record(AuditEntry{Timestamp: ts, Tool: "later"}))
+	assert.Equal(t, health, trail.Health(), "a later append cannot erase the earlier audit gap")
+
+	restarted := NewAuditTrail(dir)
+	assert.Equal(t, AuditTrailHealth{Enabled: true, Healthy: true}, restarted.Health(), "health is process-local and resets on restart")
+}
+
+func TestAuditTrailHealthReadsAreConcurrentSafe(t *testing.T) {
+	dir := privateAuditTestDir(t)
+	trail := NewAuditTrail(dir)
+	var failFirst atomic.Bool
+	failFirst.Store(true)
+	trail.openFile = func(path string, flag int, perm os.FileMode) (auditTrailFile, error) {
+		file, err := os.OpenFile(path, flag, perm)
+		if err != nil {
+			return nil, err
+		}
+		if failFirst.CompareAndSwap(true, false) {
+			return &auditTrailFaultFile{File: file, syncErr: errors.New("sync detail")}, nil
+		}
+		return file, nil
+	}
+
+	var group sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			for j := 0; j < 100; j++ {
+				_ = trail.Health()
+			}
+		}()
+	}
+	for i := 0; i < 8; i++ {
+		group.Add(1)
+		go func(i int) {
+			defer group.Done()
+			ts := time.Date(2026, 8, 9, 12, i, 0, 0, time.UTC)
+			_ = trail.Record(AuditEntry{Timestamp: ts, Tool: "concurrent"})
+		}(i)
+	}
+	group.Wait()
+
+	health := trail.Health()
+	assert.True(t, health.Enabled)
+	assert.False(t, health.Healthy)
+	assert.Equal(t, AuditTrailErrorClassSyncFailed, health.ErrorClass)
 }
 
 func TestAuditTrail_FailedAppendDoesNotAdvanceHash(t *testing.T) {
