@@ -103,17 +103,17 @@ func TestMCPGenerationCandidateDoesNotRetainMutableAdapterReceiver(t *testing.T)
 		},
 	}
 	legacyAdapter := NewMCPToolAdapter(client, tool)
-	_, err := legacyAdapter.MCPGenerationCandidate(nil)
+	_, err := legacyAdapter.MCPGenerationCandidate()
 	assert.ErrorIs(t, err, ErrMCPClientGenerationUnavailable, "a generic adapter must not create a generation candidate")
 	invalidAdapter := (&MCPClientGeneration{}).NewToolAdapter(tool)
 	assert.Nil(t, invalidAdapter, "a zero-value generation must not produce an adapter whose methods can panic")
-	_, err = invalidAdapter.MCPGenerationCandidate(nil)
+	_, err = invalidAdapter.MCPGenerationCandidate()
 	assert.ErrorIs(t, err, ErrMCPClientGenerationUnavailable, "a zero-value generation cannot create a candidate")
 	generation, err := NewMCPClientGeneration(client)
 	require.NoError(t, err)
 	adapter := generation.NewToolAdapter(tool)
 	originalSchemaType := adapter.tool.ArgsSchema["type"]
-	candidate, err := adapter.MCPGenerationCandidate(nil)
+	candidate, err := adapter.MCPGenerationCandidate()
 	require.NoError(t, err)
 	update, err := registry.BeginMCPGenerationUpdate(context.Background(), "project-config", 1, []tools.MCPToolCandidate{candidate})
 	require.NoError(t, err)
@@ -144,6 +144,73 @@ func TestMCPGenerationCandidateDoesNotRetainMutableAdapterReceiver(t *testing.T)
 	client.mu.Lock()
 	defer client.mu.Unlock()
 	assert.Equal(t, "original", client.last, "published execution must retain the captured remote tool name")
+}
+
+func TestMCPClientGenerationRetirementJoinsPreparedLeases(t *testing.T) {
+	generation, err := NewMCPClientGeneration(&fakeClient{name: "srv"})
+	require.NoError(t, err)
+	release, err := generation.Acquire()
+	require.NoError(t, err)
+	drained := generation.Retire()
+	select {
+	case <-drained:
+		t.Fatal("retirement completed while a prepared dispatch still held a lease")
+	default:
+	}
+	_, err = generation.Acquire()
+	assert.ErrorIs(t, err, ErrMCPClientGenerationRetired, "retirement closes admission before waiting for active calls")
+	assert.Nil(t, generation.NewToolAdapter(MCPTool{Name: "late"}), "retired generations cannot produce new candidate adapters")
+
+	release()
+	select {
+	case <-drained:
+	default:
+		t.Fatal("retirement did not complete after the active dispatch released its lease")
+	}
+	release()
+	assert.NoError(t, generation.WaitForRetirement(context.Background()))
+}
+
+func TestMCPGenerationCandidateUsesItsOwnRetirementLease(t *testing.T) {
+	client := &fakeClient{name: "srv"}
+	generation, err := NewMCPClientGeneration(client)
+	require.NoError(t, err)
+	tool := MCPTool{
+		Name:        "echo",
+		Description: "echo",
+		ArgsSchema: map[string]any{
+			"type":                 "object",
+			"properties":           map[string]any{},
+			"additionalProperties": false,
+		},
+	}
+	adapter := generation.NewToolAdapter(tool)
+	candidate, err := adapter.MCPGenerationCandidate()
+	require.NoError(t, err)
+	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry)
+	deferred := tools.NewDeferredToolRegistryAdapter(base)
+	update, err := deferred.BeginMCPGenerationUpdate(context.Background(), "project-mcp", 1, []tools.MCPToolCandidate{candidate})
+	require.NoError(t, err)
+	require.NoError(t, update.Publish())
+
+	registry := tools.NewMiddlewareToolRegistry(deferred)
+	require.NoError(t, registry.SetPreparedToolStages(tools.PreparedToolStages{}))
+	require.NoError(t, registry.SetPreparedToolPolicy(func(_ context.Context, request tools.PreparedPolicyRequest) (tools.PreparedPolicyDecision, error) {
+		return tools.PreparedPolicyDecision{Allowed: true, Generations: request.Generations}, nil
+	}))
+	invocation, err := registry.PrepareToolCall(context.Background(), tools.ToolCall{
+		ID:   "call-retired",
+		Name: "mcp__srv__echo",
+		Args: map[string]any{},
+	})
+	require.NoError(t, err)
+	<-generation.Retire()
+	_, err = invocation.Dispatch(context.Background())
+	assert.ErrorIs(t, err, tools.ErrPreparedDispatchLeaseUnavailable)
+	assert.ErrorIs(t, err, ErrMCPClientGenerationRetired)
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	assert.Empty(t, client.last, "a retired generation candidate must not execute without acquiring its own lease")
 }
 
 func TestMCPToolAdapterExecutePropagatesError(t *testing.T) {

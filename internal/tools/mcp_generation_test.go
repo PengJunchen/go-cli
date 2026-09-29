@@ -46,11 +46,15 @@ func (e mcpGenerationTestExecutor) ExecuteMCPTool(context.Context, string, ToolC
 	return &ToolResult{Output: e.output}, nil
 }
 
+type mcpGenerationTestLease struct{}
+
+func (mcpGenerationTestLease) Acquire() (func(), error) { return func() {}, nil }
+
 func newMCPGenerationTestCandidate(t *testing.T, tool *mcpGenerationTestTool) MCPToolCandidate {
 	t.Helper()
 	handle, err := NewMCPGenerationClientHandle(mcpGenerationTestExecutor{output: tool.Name(), calls: &tool.calls})
 	require.NoError(t, err)
-	candidate, err := NewMCPToolCandidate(tool.Name(), tool.Name(), tool.Description(), tool.Parameters(), handle, nil)
+	candidate, err := NewMCPToolCandidate(tool.Name(), tool.Name(), tool.Description(), tool.Parameters(), handle, mcpGenerationTestLease{})
 	require.NoError(t, err)
 	return candidate
 }
@@ -90,7 +94,7 @@ func TestMCPGenerationUpdatePublishesCompleteGeneration(t *testing.T) {
 	assert.ErrorIs(t, func() error { _, err := base.Get(context.Background(), oldOne.Name()); return err }(), ErrToolNotFound)
 }
 
-func TestMCPGenerationRejectsCandidateWithoutGenerationHandle(t *testing.T) {
+func TestMCPGenerationRejectsCandidateWithoutHandleOrLease(t *testing.T) {
 	base := NewDefaultToolRegistry().(*DefaultToolRegistry)
 	adapter := NewDeferredToolRegistryAdapter(base)
 	update, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 1, []MCPToolCandidate{{}})
@@ -98,6 +102,13 @@ func TestMCPGenerationRejectsCandidateWithoutGenerationHandle(t *testing.T) {
 	assert.ErrorIs(t, err, ErrMCPGenerationCandidateInvalid)
 	assert.True(t, adapter.mu.TryLock(), "invalid candidate must fail before holding the DTR lock")
 	adapter.mu.Unlock()
+
+	tool := newMCPGenerationTestTool("mcp__srv__without_lease")
+	handle, err := NewMCPGenerationClientHandle(mcpGenerationTestExecutor{output: tool.Name(), calls: &tool.calls})
+	require.NoError(t, err)
+	candidate, err := NewMCPToolCandidate(tool.Name(), tool.Name(), tool.Description(), tool.Parameters(), handle, nil)
+	assert.Equal(t, MCPToolCandidate{}, candidate)
+	assert.ErrorIs(t, err, ErrMCPGenerationCandidateInvalid, "every source-owned client generation must carry its retirement lease")
 }
 
 func TestMCPGenerationCollisionDisablesOnlySourceOwnedTools(t *testing.T) {

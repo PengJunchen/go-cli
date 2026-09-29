@@ -28,6 +28,9 @@ var (
 	// ErrPreparedInvocationUnavailable indicates that the captured executor is
 	// not available for this invocation.
 	ErrPreparedInvocationUnavailable = errors.New("tools: prepared executor is unavailable")
+	// ErrPreparedDispatchLeaseUnavailable indicates that a generation lease
+	// could not be acquired or did not return its release function.
+	ErrPreparedDispatchLeaseUnavailable = errors.New("tools: prepared dispatch lease is unavailable")
 	// ErrPreparedValueNotJSON indicates that a call or schema contains a value
 	// outside the supported JSON protocol tree.
 	ErrPreparedValueNotJSON = errors.New("tools: prepared value is not JSON-compatible")
@@ -612,6 +615,7 @@ type preparedInvocationConfig struct {
 	generations             DispatchFenceSnapshot
 	identity                TrustedToolIdentity
 	effects                 TrustedEffectSet
+	dispatchLease           PreparedDispatchLease
 	canonicalWorkspaceRoot  string
 	workspaceReadWhitelist  []string
 	scopedReadProofEligible bool
@@ -628,6 +632,7 @@ type preparedInvocation struct {
 	generations             DispatchFenceSnapshot
 	identity                TrustedToolIdentity
 	effects                 TrustedEffectSet
+	dispatchLease           PreparedDispatchLease
 	canonicalWorkspaceRoot  string
 	workspaceReadWhitelist  []string
 	scopedReadProofEligible bool
@@ -652,6 +657,7 @@ func newPreparedInvocation(config preparedInvocationConfig) *preparedInvocation 
 		generations:             config.generations,
 		identity:                config.identity,
 		effects:                 newTrustedEffectSet(config.effects.Values()...),
+		dispatchLease:           config.dispatchLease,
 		canonicalWorkspaceRoot:  config.canonicalWorkspaceRoot,
 		workspaceReadWhitelist:  append([]string(nil), config.workspaceReadWhitelist...),
 		scopedReadProofEligible: config.scopedReadProofEligible,
@@ -731,6 +737,13 @@ func (p *preparedInvocation) commitAndInvoke(ctx context.Context) (*ToolResult, 
 	if err := validatePreparedContext(ctx); err != nil {
 		return nil, err
 	}
+	release, err := p.acquireDispatchLease()
+	if err != nil {
+		return nil, err
+	}
+	if release != nil {
+		defer release()
+	}
 	if err := p.commit(ctx); err != nil {
 		return nil, err
 	}
@@ -764,6 +777,24 @@ func (p *preparedInvocation) commitAndInvoke(ctx context.Context) (*ToolResult, 
 		return result, err
 	}
 	return p.execute(executeCtx, p.call.ToolCall())
+}
+
+func (p *preparedInvocation) acquireDispatchLease() (func(), error) {
+	if p == nil || isNilPreparedDispatchLease(p.dispatchLease) {
+		return nil, nil
+	}
+	release, err := p.dispatchLease.Acquire()
+	if err != nil {
+		if release != nil {
+			release()
+		}
+		return nil, fmt.Errorf("%w: %w", ErrPreparedDispatchLeaseUnavailable, err)
+	}
+	if release == nil {
+		return nil, ErrPreparedDispatchLeaseUnavailable
+	}
+	var once sync.Once
+	return func() { once.Do(release) }, nil
 }
 
 func validatePreparedContext(ctx context.Context) error {
@@ -836,6 +867,13 @@ func (p *preparedStreamingInvocation) DispatchStreaming(ctx context.Context, sin
 	}
 	if err := validatePreparedContext(ctx); err != nil {
 		return nil, err
+	}
+	release, err := p.acquireDispatchLease()
+	if err != nil {
+		return nil, err
+	}
+	if release != nil {
+		defer release()
 	}
 	if err := p.commit(ctx); err != nil {
 		return nil, err
