@@ -340,21 +340,29 @@ func TestMCPServersCheckerNoServers(t *testing.T) {
 }
 
 func TestMCPServersCheckerFailedServer(t *testing.T) {
-	c := &MCPServersChecker{
-		configLoader: func() (*config.Config, error) {
-			return &config.Config{
-				MCP: config.MCPConfig{
-					Servers: []config.MCPServerConfig{
-						{Name: "bad", URL: "http://127.0.0.1:1"},
-					},
-				},
-			}, nil
-		},
-	}
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Chdir(t.TempDir())
+	globalConfigDir := filepath.Join(home, ".go-cli")
+	require.NoError(t, os.MkdirAll(globalConfigDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(globalConfigDir, "config.json"), []byte(`{"mcp":{"servers":[{"name":"bad","url":"http://127.0.0.1:1"}]}}`), 0o600))
+	c := NewMCPServersChecker()
 	chk := c.Check(context.Background())
 	assert.Equal(t, doctorWarn, chk.Status)
 	assert.Contains(t, chk.Message, "failed")
 	assert.Contains(t, chk.Message, "Advice")
+}
+
+func TestMCPServersCheckerRejectsUnknownServerProvenance(t *testing.T) {
+	c := &MCPServersChecker{
+		configLoader: func() (*config.Config, error) {
+			return &config.Config{MCP: config.MCPConfig{Servers: []config.MCPServerConfig{{Name: "ambiguous", URL: "http://127.0.0.1:1"}}}}, nil
+		},
+	}
+	chk := c.Check(context.Background())
+	assert.Equal(t, doctorWarn, chk.Status)
+	assert.Contains(t, chk.Message, "ambiguous provenance")
+	assert.NotContains(t, chk.Message, "127.0.0.1")
 }
 
 // --- LSPChecker ---

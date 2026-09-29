@@ -59,6 +59,21 @@ type MCPTool struct {
 	Description string `json:"description"`
 	// ArgsSchema is a JSON-schema shaped argument specification.
 	ArgsSchema map[string]any `json:"args_schema,omitempty"`
+
+	inputSchemaPresent bool
+	inputSchemaInvalid bool
+}
+
+func mcpToolFromProtocolObject(obj map[string]any) MCPTool {
+	rawSchema, present := obj["inputSchema"]
+	schema, isObject := rawSchema.(map[string]any)
+	return MCPTool{
+		Name:               stringOf(obj["name"]),
+		Description:        stringOf(obj["description"]),
+		ArgsSchema:         schema,
+		inputSchemaPresent: present,
+		inputSchemaInvalid: present && !isObject,
+	}
 }
 
 // MCPToolResult is the outcome of calling a single MCP tool.

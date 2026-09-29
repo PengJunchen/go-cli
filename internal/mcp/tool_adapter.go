@@ -26,6 +26,14 @@ var ErrMCPClientGenerationUnavailable = errors.New("mcp: client generation is un
 // lease after retirement has closed dispatch admission.
 var ErrMCPClientGenerationRetired = errors.New("mcp: client generation is retired")
 
+// ErrMCPToolInputSchemaMissing reports a remote tool that omitted
+// inputSchema entirely.
+var ErrMCPToolInputSchemaMissing = errors.New("mcp: tool input schema is missing")
+
+// ErrMCPToolInputSchemaInvalid reports a present inputSchema that is not an
+// object suitable for the prepared tool registry.
+var ErrMCPToolInputSchemaInvalid = errors.New("mcp: tool input schema is invalid")
+
 // promptInjectionWarning is prepended to content flagged as potentially
 // containing prompt-injection instructions. It alerts the model that the
 // wrapped block is untrusted and must not be obeyed as instructions.
@@ -271,10 +279,11 @@ func (a *MCPToolAdapter) Description() string {
 // Parameters returns the MCP tool's input schema so the LLM knows what
 // arguments it can pass. Implements tools.Parameterized.
 func (a *MCPToolAdapter) Parameters() any {
-	if len(a.tool.ArgsSchema) == 0 {
+	schema, err := mcpToolInputSchema(a.tool)
+	if err != nil {
 		return nil
 	}
-	return a.tool.ArgsSchema
+	return schema
 }
 
 // MCPGenerationCandidate snapshots this adapter's MCP metadata and exact
@@ -284,6 +293,10 @@ func (a *MCPToolAdapter) MCPGenerationCandidate() (tools.MCPToolCandidate, error
 		return tools.MCPToolCandidate{}, ErrMCPClientGenerationUnavailable
 	}
 	tool := a.tool
+	schema, err := mcpToolInputSchema(tool)
+	if err != nil {
+		return tools.MCPToolCandidate{}, err
+	}
 	handle, err := tools.NewMCPGenerationClientHandle(a.generation)
 	if err != nil {
 		return tools.MCPToolCandidate{}, err
@@ -292,10 +305,30 @@ func (a *MCPToolAdapter) MCPGenerationCandidate() (tools.MCPToolCandidate, error
 		NormalizeToolName(a.generation.serverName, tool.Name),
 		tool.Name,
 		tool.Description,
-		tool.ArgsSchema,
+		schema,
 		handle,
 		a.generation,
 	)
+}
+
+func mcpToolInputSchema(tool MCPTool) (map[string]any, error) {
+	if tool.inputSchemaInvalid {
+		return nil, ErrMCPToolInputSchemaInvalid
+	}
+	if tool.ArgsSchema == nil {
+		if !tool.inputSchemaPresent {
+			return nil, ErrMCPToolInputSchemaMissing
+		}
+		return nil, ErrMCPToolInputSchemaInvalid
+	}
+	if len(tool.ArgsSchema) == 0 {
+		return map[string]any{
+			"type":                 "object",
+			"properties":           map[string]any{},
+			"additionalProperties": false,
+		}, nil
+	}
+	return tool.ArgsSchema, nil
 }
 
 // Execute forwards the call to the remote MCP client and maps its result into

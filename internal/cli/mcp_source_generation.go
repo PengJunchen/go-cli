@@ -150,10 +150,8 @@ func selectMCPServerSource(ctx context.Context, rc *config.Config, manager appro
 	projectMCPPath := filepath.Join(projectRoot, ".go-cli", "mcp.json")
 	projectFilePresent, presenceErr := mcpSourcePathPresent(projectMCPPath)
 	if projectFilePresent || presenceErr != nil {
-		status := config.ProjectSourceTrustUnknown
-		revision := "unverified:" + string(status)
+		revision := "unverified:" + string(config.ProjectSourceTrustUnknown)
 		if rc != nil {
-			status = rc.ProjectSourceTrustStatus
 			if snapshot := rc.CapturedProjectSourcesForGrant(); snapshot != nil {
 				revision = "captured:" + snapshot.ManifestDigest()
 			} else {

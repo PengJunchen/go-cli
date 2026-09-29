@@ -14,7 +14,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/mcp"
 	"github.com/pengjunchen/go-cli/internal/tools"
@@ -46,8 +45,8 @@ func TestE2E_RealConfigScenario_FullPipeline(t *testing.T) {
 	mcpSrv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
 		writeMockMCPResult(w, r, map[string]any{
 			"tools": []map[string]any{
-				{"name": "webSearchPro", "description": "Professional web search"},
-				{"name": "webSearchStd", "description": "Standard web search"},
+				{"name": "webSearchPro", "description": "Professional web search", "inputSchema": mockMCPInputSchema()},
+				{"name": "webSearchStd", "description": "Standard web search", "inputSchema": mockMCPInputSchema()},
 			},
 		})
 	}))
@@ -95,8 +94,8 @@ DOCX skill body.
 	))
 
 	// --- Step 1: Load config (mirrors what the CLI does) ---
-	cfg, err := config.Load()
-	require.NoError(t, err, "config must load from .go-cli.yaml")
+	cfg := trustedMCPTestConfig(t)
+	var err error
 	require.NotEmpty(t, cfg.MCP.Servers, "MCP servers must be loaded from config")
 	require.Equal(t, "zhipu-web-search", cfg.MCP.Servers[0].Name)
 	require.Equal(t, ".go-cli/skills", cfg.Skill.Dir, "skill.dir must be loaded from config")
@@ -188,6 +187,7 @@ func TestE2E_RealConfigScenario_MCPDescriptionPropagated(t *testing.T) {
 			"tools": []map[string]any{{
 				"name":        "customSearch",
 				"description": "A custom search engine for testing",
+				"inputSchema": mockMCPInputSchema(),
 			}},
 		})
 	}))
@@ -200,8 +200,8 @@ func TestE2E_RealConfigScenario_MCPDescriptionPropagated(t *testing.T) {
 `, mcpSrv.URL)
 	require.NoError(t, os.WriteFile(".go-cli.yaml", []byte(yamlContent), 0o600))
 
-	cfg, err := config.Load()
-	require.NoError(t, err)
+	cfg := trustedMCPTestConfig(t)
+	var err error
 	require.Len(t, cfg.MCP.Servers, 1)
 
 	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
@@ -258,7 +258,7 @@ Body.
 	mcpSrv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
 		writeMockMCPResult(w, r, map[string]any{
 			"tools": []map[string]any{
-				{"name": "autoTool", "description": "Auto-discovered MCP tool"},
+				{"name": "autoTool", "description": "Auto-discovered MCP tool", "inputSchema": mockMCPInputSchema()},
 			},
 		})
 	}))
@@ -275,8 +275,8 @@ Body.
 	require.NoError(t, os.WriteFile(".go-cli/mcp.json", mcpData, 0o600))
 
 	// --- Step 1: Load config (no mcp/skill in config) ---
-	cfg, err := config.Load()
-	require.NoError(t, err)
+	cfg := trustedMCPTestConfig(t)
+	var err error
 	assert.Empty(t, cfg.MCP.Servers, "config should have no MCP servers")
 	assert.Empty(t, cfg.Skill.Dir, "config should have no skill dir")
 
@@ -318,7 +318,7 @@ func TestE2E_RealConfigScenario_ConfigWinsOverAutoDiscovery(t *testing.T) {
 	// Config server.
 	configSrv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
 		writeMockMCPResult(w, r, map[string]any{
-			"tools": []map[string]any{{"name": "fromConfig", "description": "From config"}},
+			"tools": []map[string]any{{"name": "fromConfig", "description": "From config", "inputSchema": mockMCPInputSchema()}},
 		})
 	}))
 	defer configSrv.Close()
@@ -326,7 +326,7 @@ func TestE2E_RealConfigScenario_ConfigWinsOverAutoDiscovery(t *testing.T) {
 	// Auto-discovery server (should NOT be used).
 	autoSrv := httptest.NewServer(mockMCPHandshake(func(w http.ResponseWriter, r *http.Request) {
 		writeMockMCPResult(w, r, map[string]any{
-			"tools": []map[string]any{{"name": "fromAuto", "description": "From auto"}},
+			"tools": []map[string]any{{"name": "fromAuto", "description": "From auto", "inputSchema": mockMCPInputSchema()}},
 		})
 	}))
 	defer autoSrv.Close()
@@ -349,8 +349,8 @@ func TestE2E_RealConfigScenario_ConfigWinsOverAutoDiscovery(t *testing.T) {
 	autoData, _ := json.Marshal(autoConfig) //nolint:errcheck
 	require.NoError(t, os.WriteFile(".go-cli/mcp.json", autoData, 0o600))
 
-	cfg, err := config.Load()
-	require.NoError(t, err)
+	cfg := trustedMCPTestConfig(t)
+	var err error
 
 	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 	require.NoError(t, registerMCPTools(ctx, cfg, tr))
