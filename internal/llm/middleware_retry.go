@@ -269,7 +269,11 @@ func (r *retryModel) Generate(ctx context.Context, msgs []Message, opts ...Optio
 		if ContinuationNoReplay(ctx) {
 			return nil, err
 		}
-		if !r.policy.ShouldRetry(ctx, err, attempt) {
+		retryCtx, retry, prepareErr := r.prepareRetry(ctx, err, attempt)
+		if prepareErr != nil {
+			return nil, prepareErr
+		}
+		if !retry {
 			r.logger.Debug("middleware.retry",
 				"status", "giveup",
 				"attempt", attempt,
@@ -277,6 +281,7 @@ func (r *retryModel) Generate(ctx context.Context, msgs []Message, opts ...Optio
 			)
 			return nil, err
 		}
+		ctx = retryCtx
 		backoff := r.policy.NextBackoff(ctx, attempt)
 		r.logger.Debug("middleware.retry",
 			"status", "retry",
@@ -290,6 +295,35 @@ func (r *retryModel) Generate(ctx context.Context, msgs []Message, opts ...Optio
 		case <-time.After(backoff):
 		}
 	}
+}
+
+func (r *retryModel) prepareRetry(ctx context.Context, err error, attempt int) (context.Context, bool, error) {
+	result, operationActive := ProviderAttemptResult{}, false
+	if _, operationActive = OperationDispatchAuthorityFromContext(ctx); operationActive {
+		var finished bool
+		result, finished = FinishedProviderAttemptFromError(err)
+		if !finished || result.Failure != FailureTransientProvider {
+			return ctx, false, nil
+		}
+	}
+	policyErr := err
+	if operationActive && (ctx == nil || ctx.Err() == nil) &&
+		(errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		// An immutable transient attempt result plus a live caller context means
+		// this deadline came from the HTTP client/transport, not caller cancel.
+		policyErr = errors.New("provider transport timeout")
+	}
+	if !r.policy.ShouldRetry(ctx, policyErr, attempt) {
+		return ctx, false, nil
+	}
+	if operationActive {
+		retryCtx, proposalErr := withFinishedAttemptProposal(ctx, r.next, CandidateRetry, result, result.Identity.Candidate)
+		if proposalErr != nil {
+			return ctx, false, proposalErr
+		}
+		return retryCtx, true, nil
+	}
+	return ctx, true, nil
 }
 
 // Stream retries the underlying call only when the initial Stream() call returns
@@ -326,7 +360,11 @@ func (r *retryModel) Stream(ctx context.Context, msgs []Message, opts ...Option)
 		if ContinuationNoReplay(ctx) {
 			return nil, err
 		}
-		if !r.policy.ShouldRetry(ctx, err, attempt) {
+		retryCtx, retry, prepareErr := r.prepareRetry(ctx, err, attempt)
+		if prepareErr != nil {
+			return nil, prepareErr
+		}
+		if !retry {
 			r.logger.Debug("middleware.retry",
 				"status", "giveup_stream",
 				"attempt", attempt,
@@ -334,6 +372,7 @@ func (r *retryModel) Stream(ctx context.Context, msgs []Message, opts ...Option)
 			)
 			return nil, err
 		}
+		ctx = retryCtx
 		backoff := r.policy.NextBackoff(ctx, attempt)
 		r.logger.Debug("middleware.retry",
 			"status", "retry_stream",

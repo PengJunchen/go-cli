@@ -96,6 +96,52 @@ func TestOverflowRecoveryMiddlewareDoesNotRetryContinuationRequest(t *testing.T)
 	}
 }
 
+func TestOverflowRecoveryMiddlewareLeavesOperationOwnedRecoveryToLoop(t *testing.T) {
+	for _, mode := range []string{"generate", "stream"} {
+		t.Run(mode, func(t *testing.T) {
+			model := &mockModel{
+				generateFn: func(context.Context, []Message, ...Option) (*Message, error) {
+					return nil, &FinishedProviderAttemptError{
+						Result: ProviderAttemptResult{
+							OperationID: "operation-1",
+							AttemptID:   "attempt-1",
+							Failure:     FailureOverflow,
+						},
+						cause: &ProviderError{StatusCode: 400, ErrorType: ErrTypeOverflow},
+					}
+				},
+				streamFn: func(context.Context, []Message, ...Option) (<-chan MessageChunk, error) {
+					return nil, &FinishedProviderAttemptError{
+						Result: ProviderAttemptResult{
+							OperationID: "operation-1",
+							AttemptID:   "attempt-1",
+							Failure:     FailureOverflow,
+						},
+						cause: &ProviderError{StatusCode: 400, ErrorType: ErrTypeOverflow},
+					}
+				},
+			}
+			wrapped := NewOverflowRecoveryMiddleware(WithOverflowMaxRetries(3)).WrapModel(model)
+			ctx := withAttemptTestAuthority(context.Background())
+
+			if mode == "generate" {
+				_, err := wrapped.Generate(ctx, []Message{{Role: RoleUser, Content: "request"}})
+				require.Error(t, err)
+				_, finished := FinishedProviderAttemptFromError(err)
+				require.True(t, finished, "the typed terminal provider result must reach Core unchanged")
+				assert.Equal(t, int32(1), atomic.LoadInt32(&model.generateCalls), "the wrapper must not dispatch a second request")
+				return
+			}
+
+			_, err := wrapped.Stream(ctx, []Message{{Role: RoleUser, Content: "request"}})
+			require.Error(t, err)
+			_, finished := FinishedProviderAttemptFromError(err)
+			require.True(t, finished, "the typed terminal provider result must reach Core unchanged")
+			assert.Equal(t, int32(1), atomic.LoadInt32(&model.streamCalls), "the wrapper must not dispatch a second request")
+		})
+	}
+}
+
 func TestOverflowRecoveryMiddlewareDoesNotContinueMarkedCandidate(t *testing.T) {
 	model := &mockModel{
 		generateFn: func(context.Context, []Message, ...Option) (*Message, error) {

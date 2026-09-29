@@ -175,6 +175,37 @@ func TestSlashCost(t *testing.T) {
 	assert.Contains(t, output, "Total calls: 1")
 }
 
+func TestSlashCostShowsKnownSubtotalsAndUnknownAttemptCounts(t *testing.T) {
+	tracker := production.NewCostTracker(nil)
+	result := llm.ProviderAttemptResult{
+		OperationID: "op-cost-report",
+		AttemptID:   "attempt-cost-report",
+		Identity: llm.AttemptIdentity{
+			ProviderID: "openai",
+			ModelID:    "gpt-4o",
+			ProtocolID: llm.ProtocolOpenAICompatible,
+			OriginKind: llm.OriginResolverDefaultEndpoint,
+			Candidate:  "candidate-cost-report",
+		},
+		Outcome: llm.AttemptTransportFailure,
+		Failure: llm.FailureTransientProvider,
+		Usage:   llm.UnknownUsageEvidence(),
+	}
+	_, err := tracker.RecordAttempt(result)
+	require.NoError(t, err)
+
+	c, buf := newTestCmd()
+	sc := &slashContext{out: buf, costTracker: tracker}
+	c.handleSlashCommand(context.Background(), session.SlashCommand{Name: "cost"}, sc)
+	output := buf.String()
+
+	assert.Contains(t, output, "Known cost subtotal: $0.0000")
+	assert.Contains(t, output, "Provider attempts: 1")
+	assert.Contains(t, output, "Unknown usage attempts: 1")
+	assert.Contains(t, output, "Unknown cost attempts: 1")
+	assert.NotContains(t, output, "Total cost: $0.0000", "unknown cost must not be represented as a complete zero total")
+}
+
 // TestCostHandlerWorksWithSnapshot verifies that CostHandler.Handle renders the
 // sub-agent cost breakdown using SubagentCostSnapshot without direct field
 // access.

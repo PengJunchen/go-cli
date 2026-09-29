@@ -126,7 +126,11 @@ func (m ResolvedModel) Build(ctx context.Context) (BaseChatModel, func(), error)
 	if m.candidate == nil {
 		return nil, nil, preDispatchCandidateError(nil, PreDispatchCandidateUnavailable, ErrGuardedCandidateUnavailable)
 	}
-	return m.candidate.build(ctx)
+	model, cleanup, err := m.candidate.build(ctx)
+	if err != nil {
+		return nil, cleanup, err
+	}
+	return &resolvedCandidateModel{inner: model, candidate: m.candidate}, cleanup, nil
 }
 
 // CandidateHandle returns the opaque handle that binds this resolved model to

@@ -107,6 +107,12 @@ func (m *overflowRecoveryModel) Generate(ctx context.Context, msgs []Message, op
 			}
 			return result, nil
 		}
+		if _, operationActive := OperationDispatchAuthorityFromContext(ctx); operationActive {
+			// A Loop operation owns the one overflow recovery decision. Preserve
+			// the typed finished attempt so Core can compact, sync any durable
+			// projection, and authorize the one follow-up dispatch.
+			return nil, err
+		}
 
 		if !isOverflowError(err) {
 			return nil, err
@@ -352,6 +358,11 @@ func (m *overflowRecoveryModel) Stream(ctx context.Context, msgs []Message, opts
 		}
 		cancelStreamAttempt(ctx, cancel, err)
 		drainMessageChunks(ch)
+		if _, operationActive := OperationDispatchAuthorityFromContext(ctx); operationActive {
+			// The stream source and its cleanup are joined before handing the
+			// terminal result back to the Loop-owned recovery path.
+			return nil, err
+		}
 
 		if !isOverflowError(err) {
 			return nil, err

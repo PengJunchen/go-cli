@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,6 +14,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
 )
 
@@ -100,6 +103,46 @@ func TestProductionModelWrapperRetryExhausted(t *testing.T) {
 
 	_, err := wrapped.Generate(context.Background(), nil)
 	assert.Error(t, err)
+}
+
+func TestLoopRetriesLiveHTTPClientTimeoutWithProductionRetryPolicy(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if requests.Add(1) == 1 {
+			time.Sleep(150 * time.Millisecond)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{\"content\":\"recovered\"}}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	client := &http.Client{Transport: server.Client().Transport, Timeout: 50 * time.Millisecond}
+	registry := llm.NewProviderRegistry()
+	require.NoError(t, registry.Register(llm.NewEinoProvider(
+		llm.WithProviderName("timeout-retry"),
+		llm.WithHTTPClient(client),
+	)))
+	resolved, err := registry.SnapshotResolver().ResolveModel(context.Background(), llm.ModelRequest{
+		ProviderID: "timeout-retry",
+		ModelID:    "timeout-retry-model",
+		Endpoint:   server.URL,
+	})
+	require.NoError(t, err)
+	model, cleanup, err := resolved.Build(context.Background())
+	require.NoError(t, err)
+	defer cleanup()
+
+	policy := NewDefaultRetryPolicy(RetryConfig{MaxAttempts: 2, BaseDelay: time.Millisecond, MaxDelay: time.Millisecond})
+	retried := llm.NewRetryModelMiddleware(llm.WithRetryPolicy(policy)).WrapModel(model)
+	loop := core.NewLoopAgent(core.WithLLM(retried), core.WithMaxIterations(1))
+	result, err := loop.RunCanonical(context.Background(), core.Submission{Content: "retry the transport timeout"})
+	require.NoError(t, err)
+	require.NotEmpty(t, result.Transcript)
+	assert.Equal(t, "recovered", result.Transcript[len(result.Transcript)-1].Message.Content)
+	assert.EqualValues(t, 2, requests.Load(), "one timed-out Do and one successful retry should be dispatched")
 }
 
 func TestProductionModelWrapperMaxAttemptsBoundsTotalDispatches(t *testing.T) {

@@ -75,6 +75,10 @@ func (m *outputGuardModel) Stream(ctx context.Context, msgs []llm.Message, opts 
 
 func (m *outputGuardModel) MaxCandidateBytes() int { return llm.GuardedStreamMaxBytes }
 
+func (m *outputGuardModel) ProviderCandidates() []llm.ResolvedCandidateHandle {
+	return llm.ProviderCandidatesFromModel(m.inner)
+}
+
 func (m *outputGuardModel) CheckCandidate(ctx context.Context, text string) (*core.CandidateOutputResult, error) {
 	result, err := m.checkCandidate(ctx, text)
 	if err != nil {
@@ -312,6 +316,10 @@ func (m *telemetryModel) Generate(ctx context.Context, msgs []llm.Message, opts 
 
 func (m *telemetryModel) Stream(ctx context.Context, msgs []llm.Message, opts ...llm.Option) (<-chan llm.MessageChunk, error) {
 	return m.inner.Stream(ctx, msgs, opts...)
+}
+
+func (m *telemetryModel) ProviderCandidates() []llm.ResolvedCandidateHandle {
+	return llm.ProviderCandidatesFromModel(m.inner)
 }
 
 // newModelWrapper creates a core.ModelWrapper that applies ProductionModelWrapper

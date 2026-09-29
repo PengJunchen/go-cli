@@ -64,10 +64,11 @@ type ModelEntry struct {
 // ModelCycler implements model rotation across multiple providers. It is
 // safe for concurrent use.
 type ModelCycler struct {
-	config   ModelCyclerConfig
-	registry *ProviderRegistry
-	counter  atomic.Int64
-	mu       sync.Mutex
+	config         ModelCyclerConfig
+	registry       *ProviderRegistry
+	resolvedModels []ResolvedModel
+	counter        atomic.Int64
+	mu             sync.Mutex
 	// sessions maps sessionID -> model index when SessionAffinity is enabled.
 	sessions map[string]int
 	// maxSessions bounds the sessions map to prevent unbounded memory growth.
@@ -92,6 +93,17 @@ func NewModelCycler(config ModelCyclerConfig) *ModelCycler {
 // model for every call. Returns the cycler for chaining.
 func (c *ModelCycler) WithRegistry(r *ProviderRegistry) *ModelCycler {
 	c.registry = r
+	c.resolvedModels = nil
+	return c
+}
+
+// WithResolvedModels binds the cycler to a finite resolver-issued candidate
+// set. Each selected model remains guarded and can only dispatch with the
+// current Loop operation's permit. The models are built on demand so their
+// cleanup remains scoped to one provider call.
+func (c *ModelCycler) WithResolvedModels(models []ResolvedModel) *ModelCycler {
+	c.resolvedModels = append([]ResolvedModel(nil), models...)
+	c.registry = nil
 	return c
 }
 
@@ -226,6 +238,22 @@ type cycledModel struct {
 
 var _ BaseChatModel = (*cycledModel)(nil)
 
+func (m *cycledModel) ProviderCandidates() []ResolvedCandidateHandle {
+	if m == nil {
+		return nil
+	}
+	candidates := ProviderCandidatesFromModel(m.primary)
+	if m.cycler == nil {
+		return candidates
+	}
+	for _, resolved := range m.cycler.resolvedModels {
+		if resolved.candidate != nil {
+			candidates = append(candidates, resolved.candidate)
+		}
+	}
+	return dedupeProviderCandidates(candidates)
+}
+
 // buildSelectedModel resolves the model at idx via the registry. It returns an
 // error when no registry is configured, the index is out of range, or the
 // registry fails to build the model.
@@ -238,21 +266,33 @@ func (m *cycledModel) buildSelectedModel(ctx context.Context, idx int) (BaseChat
 		return nil, nil, errors.New("llm: model index out of range")
 	}
 	entry := models[idx]
-	return m.cycler.registry.GetModel(ctx, entry.Provider, ModelConfig{
-		Model: entry.Model,
-	})
+	resolver := m.cycler.registry.SnapshotResolver()
+	if resolver == nil {
+		return nil, nil, ErrMissingProviderSpec
+	}
+	resolved, err := resolver.ResolveModel(ctx, ModelRequest{ProviderID: entry.Provider, ModelID: entry.Model})
+	if err != nil {
+		return nil, nil, err
+	}
+	return resolved.Build(ctx)
 }
 
 // Generate routes the call to the model selected by the cycler's strategy. On
 // build failure or generation error it falls back to the primary model.
 func (m *cycledModel) Generate(ctx context.Context, msgs []Message, opts ...Option) (*Message, error) {
+	if len(m.cycler.resolvedModels) > 0 {
+		return m.generateResolved(ctx, msgs, opts...)
+	}
+	if m.cycler.registry == nil {
+		return m.primary.Generate(ctx, msgs, opts...)
+	}
 	sessionID := sessionIDFromContext(ctx)
 	taskType := TaskTypeFromContext(ctx)
 	idx := m.cycler.selectModel(sessionID, taskType)
 
 	model, cleanup, err := m.buildSelectedModel(ctx, idx)
 	if err != nil {
-		return m.primary.Generate(ctx, msgs, opts...)
+		return m.generatePrimaryAfterSelectionFailure(ctx, err, msgs, opts...)
 	}
 	if cleanup != nil {
 		cleanup = onceCleanup(cleanup)
@@ -265,7 +305,7 @@ func (m *cycledModel) Generate(ctx context.Context, msgs []Message, opts ...Opti
 		if cleanup != nil {
 			cleanup()
 		}
-		return m.primary.Generate(ctx, msgs, opts...)
+		return m.generatePrimaryAfterSelectionFailure(ctx, err, msgs, opts...)
 	}
 	return resp, nil
 }
@@ -275,19 +315,19 @@ func (m *cycledModel) Generate(ctx context.Context, msgs []Message, opts ...Opti
 // model. The returned channel is wrapped in a forwarding goroutine so attempt
 // cancellation and any model cleanup finish before the output channel closes.
 func (m *cycledModel) Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
+	if len(m.cycler.resolvedModels) > 0 {
+		return m.streamResolved(ctx, msgs, opts...)
+	}
+	if m.cycler.registry == nil {
+		return m.primary.Stream(ctx, msgs, opts...)
+	}
 	sessionID := sessionIDFromContext(ctx)
 	taskType := TaskTypeFromContext(ctx)
 	idx := m.cycler.selectModel(sessionID, taskType)
 
 	model, cleanup, err := m.buildSelectedModel(ctx, idx)
 	if err != nil {
-		if ContinuationNoReplay(ctx) {
-			return nil, err
-		}
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return m.primary.Stream(ctx, msgs, opts...)
+		return m.streamPrimaryAfterSelectionFailure(ctx, err, msgs, opts...)
 	}
 	if cleanup != nil {
 		cleanup = onceCleanup(cleanup)
@@ -302,13 +342,7 @@ func (m *cycledModel) Stream(ctx context.Context, msgs []Message, opts ...Option
 		if cleanup != nil {
 			cleanup()
 		}
-		if ContinuationNoReplay(ctx) {
-			return nil, err
-		}
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
-		}
-		return m.primary.Stream(ctx, msgs, opts...)
+		return m.streamPrimaryAfterSelectionFailure(ctx, err, msgs, opts...)
 	}
 	if ch == nil {
 		err = errors.New("llm: selected model returned a nil stream")
@@ -391,6 +425,196 @@ func (m *cycledModel) Stream(ctx context.Context, msgs []Message, opts ...Option
 		}
 	}()
 	return out, nil
+}
+
+func (m *cycledModel) generateResolved(ctx context.Context, msgs []Message, opts ...Option) (*Message, error) {
+	if _, ok := OperationDispatchAuthorityFromContext(ctx); !ok {
+		return nil, ErrOperationAuthorityRequired
+	}
+	if proposal, ok := CandidateProposalFromContext(ctx); ok {
+		return m.generateProposedCandidate(ctx, proposal, msgs, opts...)
+	}
+	index := m.cycler.selectModel(sessionIDFromContext(ctx), TaskTypeFromContext(ctx))
+	if index < 0 || index >= len(m.cycler.resolvedModels) {
+		return nil, errors.New("llm: selected resolver candidate is unavailable")
+	}
+	selected := m.cycler.resolvedModels[index]
+	ctx, err := withCyclerSelectedProposal(ctx, selected.CandidateHandle())
+	if err != nil {
+		return nil, err
+	}
+	response, err := m.generateResolvedCandidate(ctx, selected, msgs, opts...)
+	if err == nil || ContinuationNoReplay(ctx) {
+		return response, err
+	}
+	return m.generatePrimaryAfterSelectionFailure(ctx, err, msgs, opts...)
+}
+
+func (m *cycledModel) generateProposedCandidate(ctx context.Context, proposal CandidateProposal, msgs []Message, opts ...Option) (*Message, error) {
+	if proposal.Candidate == nil {
+		return nil, ErrDispatchPermitRequired
+	}
+	if primaryCandidate := singleProviderCandidate(m.primary); primaryCandidate != nil && primaryCandidate == proposal.Candidate {
+		return m.primary.Generate(ctx, msgs, opts...)
+	}
+	resolved, found := m.resolvedModelForCandidate(proposal.Candidate)
+	if !found {
+		return nil, ErrDispatchPermitRequired
+	}
+	return m.generateResolvedCandidate(ctx, resolved, msgs, opts...)
+}
+
+func (m *cycledModel) generateResolvedCandidate(ctx context.Context, resolved ResolvedModel, msgs []Message, opts ...Option) (*Message, error) {
+	model, cleanup, err := resolved.Build(ctx)
+	if err != nil {
+		return nil, err
+	}
+	cleanup = onceCleanup(cleanup)
+	callCtx := withCandidateCleanup(ctx, cleanup)
+	defer finishCandidateCleanup(callCtx)
+	return model.Generate(callCtx, msgs, opts...)
+}
+
+func (m *cycledModel) generatePrimaryAfterSelectionFailure(ctx context.Context, failedErr error, msgs []Message, opts ...Option) (*Message, error) {
+	primaryCandidate := singleProviderCandidate(m.primary)
+	if primaryCandidate == nil {
+		return nil, failedErr
+	}
+	if failure, ok := PreDispatchCandidateFailureFromError(failedErr); ok {
+		if failure.Class != PreDispatchCandidateUnavailable {
+			return nil, failedErr
+		}
+		ctx, err := withPreDispatchCandidateProposal(ctx, m.primary, failedErr, CandidateCyclerPrimary)
+		if err != nil {
+			return nil, errors.Join(failedErr, err)
+		}
+		return m.primary.Generate(ctx, msgs, opts...)
+	}
+	result, ok := FinishedProviderAttemptFromError(failedErr)
+	if !ok || result.Failure != FailureTransientProvider || result.Identity.Candidate == primaryCandidate.CandidateID() {
+		return nil, failedErr
+	}
+	ctx, err := withFinishedAttemptProposal(ctx, m, CandidateCyclerPrimary, result, primaryCandidate.CandidateID())
+	if err != nil {
+		return nil, errors.Join(failedErr, err)
+	}
+	return m.primary.Generate(ctx, msgs, opts...)
+}
+
+func (m *cycledModel) streamResolved(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
+	if _, ok := OperationDispatchAuthorityFromContext(ctx); !ok {
+		return nil, ErrOperationAuthorityRequired
+	}
+	if proposal, ok := CandidateProposalFromContext(ctx); ok {
+		return m.streamProposedCandidate(ctx, proposal, msgs, opts...)
+	}
+	index := m.cycler.selectModel(sessionIDFromContext(ctx), TaskTypeFromContext(ctx))
+	if index < 0 || index >= len(m.cycler.resolvedModels) {
+		return nil, errors.New("llm: selected resolver candidate is unavailable")
+	}
+	selected := m.cycler.resolvedModels[index]
+	ctx, err := withCyclerSelectedProposal(ctx, selected.CandidateHandle())
+	if err != nil {
+		return nil, err
+	}
+	stream, err := m.streamResolvedCandidate(ctx, selected, msgs, opts...)
+	if err == nil || ContinuationNoReplay(ctx) {
+		return stream, err
+	}
+	return m.streamPrimaryAfterSelectionFailure(ctx, err, msgs, opts...)
+}
+
+func (m *cycledModel) streamProposedCandidate(ctx context.Context, proposal CandidateProposal, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
+	if proposal.Candidate == nil {
+		return nil, ErrDispatchPermitRequired
+	}
+	if primaryCandidate := singleProviderCandidate(m.primary); primaryCandidate != nil && primaryCandidate == proposal.Candidate {
+		return m.primary.Stream(ctx, msgs, opts...)
+	}
+	resolved, found := m.resolvedModelForCandidate(proposal.Candidate)
+	if !found {
+		return nil, ErrDispatchPermitRequired
+	}
+	return m.streamResolvedCandidate(ctx, resolved, msgs, opts...)
+}
+
+func (m *cycledModel) streamResolvedCandidate(ctx context.Context, resolved ResolvedModel, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
+	model, cleanup, err := resolved.Build(ctx)
+	if err != nil {
+		return nil, err
+	}
+	cleanup = onceCleanup(cleanup)
+	callCtx := withCandidateCleanup(ctx, cleanup)
+	stream, err := model.Stream(callCtx, msgs, opts...)
+	if err != nil {
+		drainMessageChunks(stream)
+		finishCandidateCleanup(callCtx)
+		return nil, err
+	}
+	if stream == nil {
+		finishCandidateCleanup(callCtx)
+		return nil, errors.New("llm: selected resolver candidate returned a nil stream")
+	}
+	return stream, nil
+}
+
+func (m *cycledModel) streamPrimaryAfterSelectionFailure(ctx context.Context, failedErr error, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
+	primaryCandidate := singleProviderCandidate(m.primary)
+	if primaryCandidate == nil {
+		return nil, failedErr
+	}
+	if failure, ok := PreDispatchCandidateFailureFromError(failedErr); ok {
+		if failure.Class != PreDispatchCandidateUnavailable {
+			return nil, failedErr
+		}
+		ctx, err := withPreDispatchCandidateProposal(ctx, m.primary, failedErr, CandidateCyclerPrimary)
+		if err != nil {
+			return nil, errors.Join(failedErr, err)
+		}
+		return m.primary.Stream(ctx, msgs, opts...)
+	}
+	result, ok := FinishedProviderAttemptFromError(failedErr)
+	if !ok || result.Failure != FailureTransientProvider || result.Identity.Candidate == primaryCandidate.CandidateID() {
+		return nil, failedErr
+	}
+	ctx, err := withFinishedAttemptProposal(ctx, m, CandidateCyclerPrimary, result, primaryCandidate.CandidateID())
+	if err != nil {
+		return nil, errors.Join(failedErr, err)
+	}
+	return m.primary.Stream(ctx, msgs, opts...)
+}
+
+func (m *cycledModel) resolvedModelForCandidate(candidate ResolvedCandidateHandle) (ResolvedModel, bool) {
+	for _, resolved := range m.cycler.resolvedModels {
+		if resolved.CandidateHandle() == candidate {
+			return resolved, true
+		}
+	}
+	return ResolvedModel{}, false
+}
+
+func singleProviderCandidate(model BaseChatModel) ResolvedCandidateHandle {
+	candidates := ProviderCandidatesFromModel(model)
+	if len(candidates) != 1 {
+		return nil
+	}
+	return candidates[0]
+}
+
+func withCyclerSelectedProposal(ctx context.Context, candidate ResolvedCandidateHandle) (context.Context, error) {
+	authority, ok := OperationDispatchAuthorityFromContext(ctx)
+	if !ok {
+		return nil, ErrOperationAuthorityRequired
+	}
+	if candidate == nil {
+		return nil, ErrDispatchPermitRequired
+	}
+	return WithCandidateProposal(ctx, CandidateProposal{
+		OperationID: authority.ID(),
+		Candidate:   candidate,
+		Reason:      CandidateCyclerSelected,
+		Antecedent:  CandidateAntecedent{Kind: AntecedentInitial},
+	}), nil
 }
 
 func onceCleanup(cleanup func()) func() {

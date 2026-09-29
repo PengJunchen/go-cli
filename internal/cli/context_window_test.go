@@ -53,6 +53,62 @@ func TestTokenUsageEvent(t *testing.T) {
 	}
 }
 
+func TestTokenUsageEventUsesAttemptSubtotalsAndUnknownCounts(t *testing.T) {
+	agent := core.NewAgentImpl("attempt-usage", &stubAgentLoop{}, core.WithHistory([]core.AgentMessage{
+		{Role: "user", Content: "request"},
+		{Role: "assistant", Content: "response", Usage: &llm.Usage{InputTokens: 99, OutputTokens: 99}},
+	}))
+	tracker := production.NewCostTracker(nil)
+	known := llm.ProviderAttemptResult{
+		OperationID: "op-known",
+		AttemptID:   "attempt-known",
+		Identity: llm.AttemptIdentity{
+			ProviderID: "openai",
+			ModelID:    "gpt-4o",
+			ProtocolID: llm.ProtocolOpenAICompatible,
+			OriginKind: llm.OriginResolverDefaultEndpoint,
+			Candidate:  "candidate-known",
+		},
+		Outcome: llm.AttemptSuccess,
+		Usage: llm.UsageEvidence{
+			State:  llm.UsageKnown,
+			Usage:  &llm.Usage{InputTokens: 12, OutputTokens: 4, TotalTokens: 16},
+			Source: llm.UsageProviderResponse,
+		},
+	}
+	unknown := known
+	unknown.OperationID = "op-unknown"
+	unknown.AttemptID = "attempt-unknown"
+	unknown.Identity.Candidate = "candidate-unknown"
+	unknown.Outcome = llm.AttemptTransportFailure
+	unknown.Failure = llm.FailureTransientProvider
+	unknown.Usage = llm.UnknownUsageEvidence()
+	_, err := tracker.RecordAttempt(known)
+	require.NoError(t, err)
+	_, err = tracker.RecordAttempt(unknown)
+	require.NoError(t, err)
+
+	assembly := &AgentAssembly{
+		CoreRuntime:          CoreRuntime{Agent: agent},
+		ProductionResilience: ProductionResilience{CostTracker: tracker},
+		ModelConfig:          ModelConfig{ContextWindow: 8192},
+	}
+	stream := core.NewEventStream(16)
+	emitTokenUsageEvent(stream, assembly)
+
+	select {
+	case event := <-stream.Events():
+		require.NotNil(t, event.TokenUsage)
+		assert.Equal(t, 12, event.TokenUsage.InputTokens)
+		assert.Equal(t, 4, event.TokenUsage.OutputTokens)
+		assert.Equal(t, 1, event.TokenUsage.UnknownUsageAttempts)
+		assert.Equal(t, 1, event.TokenUsage.UnknownCostAttempts)
+		assert.Greater(t, event.TokenUsage.Cost, 0.0)
+	default:
+		t.Fatal("expected a token_usage event")
+	}
+}
+
 // TestCostHandler verifies that the /cost command displays context window
 // occupancy (total tokens / context window as a percentage).
 func TestCostHandler(t *testing.T) {
