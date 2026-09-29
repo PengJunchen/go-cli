@@ -270,6 +270,7 @@ func TestAssemblySharesRunSlotGuardAcrossHarnessAndTurnRunner(t *testing.T) {
 			t.Cleanup(cancel)
 			fixture := newAssemblyOwnershipFixture(t, tc.parallel)
 			config := newE2ETestConfig(t, fixture.streamFixture.server.URL)
+			config.Git.WorkDir = t.TempDir()
 			parallel := tc.parallel
 			config.Tools.Parallel = &parallel
 			assembly, err := AssembleAgent(ctx, config, config.Provider.Name, config.Provider.Model, io.Discard, WithApproveMode(ApproveAuto))

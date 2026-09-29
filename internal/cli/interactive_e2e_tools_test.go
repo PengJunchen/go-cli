@@ -45,13 +45,11 @@ func newE2ETestConfig(t *testing.T, srvURL string) *config.Config {
 func TestE2E_NonTTYApprovalDenied(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 
-	fixtureDir, err := os.MkdirTemp(".", "interactive-e2e-read-")
-	require.NoError(t, err)
-	t.Cleanup(func() { _ = os.RemoveAll(fixtureDir) })
+	workspaceDir := t.TempDir()
 	fixtureContent := "interactive read fixture"
-	fixturePath := filepath.Join(fixtureDir, "fixture.txt")
+	fixturePath := filepath.Join(workspaceDir, "fixture.txt")
 	require.NoError(t, os.WriteFile(fixturePath, []byte(fixtureContent), 0o600))
-	relativePath, err := filepath.Rel(".", fixturePath)
+	relativePath, err := filepath.Rel(workspaceDir, fixturePath)
 	require.NoError(t, err)
 	toolArgs, err := json.Marshal(map[string]string{"path": filepath.ToSlash(relativePath)})
 	require.NoError(t, err)
@@ -107,6 +105,7 @@ func TestE2E_NonTTYApprovalDenied(t *testing.T) {
 	defer srv.Close()
 
 	cfg := newE2ETestConfig(t, srv.URL)
+	cfg.Git.WorkDir = workspaceDir
 
 	var out bytes.Buffer
 	in := &delayedReader{
