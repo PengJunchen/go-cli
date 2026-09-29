@@ -40,7 +40,7 @@ func phase33TestConfig() *config.Config {
 	return &config.Config{
 		Provider: config.ProviderConfig{
 			Name:    "openai",
-			BaseURL: "http://127.0.0.1:0",
+			BaseURL: "http://127.0.0.1:12345/v1",
 			APIKey:  "test-key",
 		},
 	}
