@@ -71,9 +71,14 @@ func NewInteractiveApprovalCallback(stdin io.Reader, stdout io.Writer) *Interact
 // RequestApproval prints a y/n/a prompt and reads a line from stdin. "y" allows
 // the call once, "n" denies it, and "a" allows it and persists the decision.
 // When stdin is not a terminal (non-TTY) the call is denied without blocking.
-func (c *InteractiveApprovalCallback) RequestApproval(_ context.Context, toolName string, _ map[string]any) (ApprovalResult, error) {
+func (c *InteractiveApprovalCallback) RequestApproval(ctx context.Context, toolName string, args map[string]any) (ApprovalResult, error) {
+	result, _, _, err := c.requestApprovalWithChoice(ctx, toolName, args)
+	return result, err
+}
+
+func (c *InteractiveApprovalCallback) requestApprovalWithChoice(_ context.Context, toolName string, _ map[string]any) (ApprovalResult, string, string, error) {
 	if !isTerminalReader(c.stdin) {
-		return ApprovalDeny, nil
+		return ApprovalDeny, "", "non_tty_deny", nil
 	}
 
 	fmt.Fprintf(c.stdout, "[approval] Tool '%s' wants to execute. Allow? (y/n/a): ", toolName) //nolint:errcheck
@@ -82,19 +87,19 @@ func (c *InteractiveApprovalCallback) RequestApproval(_ context.Context, toolNam
 	for {
 		line, err := reader.ReadString('\n')
 		if err != nil && err != io.EOF {
-			return ApprovalDeny, fmt.Errorf("read approval input: %w", err)
+			return ApprovalDeny, "", "callback_error", fmt.Errorf("read approval input: %w", err)
 		}
 		answer := strings.TrimSpace(strings.ToLower(line))
 		switch answer {
 		case "y", "yes":
-			return ApprovalAllow, nil
+			return ApprovalAllow, "allow_once", "user", nil
 		case "n", "no":
-			return ApprovalDeny, nil
+			return ApprovalDeny, "deny", "user", nil
 		case "a", "always":
-			return ApprovalAlwaysAllow, nil
+			return ApprovalAlwaysAllow, "allow_always", "user", nil
 		}
 		if err == io.EOF {
-			return ApprovalDeny, nil
+			return ApprovalDeny, "", "input_ended", nil
 		}
 		fmt.Fprintf(c.stdout, "[approval] Invalid input. Allow? (y/n/a): ") //nolint:errcheck
 	}

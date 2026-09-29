@@ -140,7 +140,19 @@ func (m *ApprovalMiddleware) PreparedPolicy(ctx context.Context, req tools.Prepa
 		recordPreparedDecision(span, req, mode, "missing_classifier", false, false, false)
 		return decision, ErrToolDenied
 	}
-	classification := classifier.Classify(ctx, call)
+	var auditClassifier *AuditClassifier
+	var classification Classification
+	if audited, ok := classifier.(*AuditClassifier); ok {
+		auditClassifier = audited
+		var err error
+		classification, err = audited.classifyAndAudit(ctx, call)
+		if err != nil {
+			return decision, err
+		}
+	} else {
+		classification = classifier.Classify(ctx, call)
+	}
+	proposal := classification.String()
 	if classification == Allow && !preparedClassifierAllowTrusted(req, mode) {
 		// Classifier name lists are compatibility policy inputs, not trusted
 		// registration facts. An unreviewed tool cannot receive a built-in
@@ -149,13 +161,22 @@ func (m *ApprovalMiddleware) PreparedPolicy(ctx context.Context, req tools.Prepa
 	}
 	switch classification {
 	case Allow:
+		if err := recordPreparedResolution(auditClassifier, call, proposal, "", "classifier"); err != nil {
+			return decision, err
+		}
 		return m.publishPreparedAllow(ctx, span, req, mode, key, false)
 	case Deny:
+		if err := recordPreparedResolution(auditClassifier, call, proposal, "", "classifier"); err != nil {
+			return decision, errors.Join(ErrToolDenied, err)
+		}
 		recordPreparedDecision(span, req, mode, classification.String(), false, false, false)
 		return decision, ErrToolDenied
 	case Ask:
-		return m.resolvePreparedAsk(ctx, span, req, mode, key)
+		return m.resolvePreparedAsk(ctx, span, req, mode, key, auditClassifier, proposal)
 	default:
+		if err := recordPreparedResolution(auditClassifier, call, proposal, "", "invalid_classification"); err != nil {
+			return decision, errors.Join(ErrToolDenied, err)
+		}
 		recordPreparedDecision(span, req, mode, "invalid_classification", false, false, false)
 		return decision, ErrToolDenied
 	}
@@ -167,10 +188,16 @@ func (m *ApprovalMiddleware) resolvePreparedAsk(
 	req tools.PreparedPolicyRequest,
 	mode PermissionMode,
 	key string,
+	auditClassifier *AuditClassifier,
+	proposal string,
 ) (tools.PreparedPolicyDecision, error) {
 	decision := tools.PreparedPolicyDecision{Generations: req.Generations}
+	call := req.Call.ToolCall()
 	if m.opts.callback == nil {
 		if m.opts.autoApprove {
+			if err := recordPreparedResolution(auditClassifier, call, proposal, "", "auto_approve"); err != nil {
+				return decision, err
+			}
 			if m.fence.Snapshot() != req.Generations {
 				return decision, tools.ErrDispatchFenceChanged
 			}
@@ -178,35 +205,91 @@ func (m *ApprovalMiddleware) resolvePreparedAsk(
 			decision.Allowed = true
 			return decision, nil
 		}
+		if err := recordPreparedResolution(auditClassifier, call, proposal, "", "policy_deny"); err != nil {
+			return decision, errors.Join(ErrToolDenied, err)
+		}
 		recordPreparedDecision(span, req, mode, "ask_denied", false, false, false)
 		return decision, ErrToolDenied
 	}
 
-	call := req.Call.ToolCall()
-	result, err := m.opts.callback.RequestApproval(ctx, call.Name, call.Args)
+	result, choice, resolution, err := m.requestPreparedApproval(ctx, call)
 	if err != nil {
-		return decision, err
-	}
-	if m.fence.Snapshot() != req.Generations {
-		return decision, tools.ErrDispatchFenceChanged
+		auditErr := recordPreparedResolution(auditClassifier, call, proposal, "", "callback_error")
+		return decision, errors.Join(err, auditErr)
 	}
 	switch result {
 	case ApprovalAllow:
+		if err := recordPreparedResolution(auditClassifier, call, proposal, choice, resolution); err != nil {
+			return decision, err
+		}
+		if m.fence.Snapshot() != req.Generations {
+			return decision, tools.ErrDispatchFenceChanged
+		}
 		recordPreparedDecision(span, req, mode, "allow_once", false, false, true)
 		decision.Allowed = true
 		return decision, nil
 	case ApprovalAlwaysAllow:
+		if err := recordPreparedResolution(auditClassifier, call, proposal, choice, resolution); err != nil {
+			return decision, err
+		}
+		if m.fence.Snapshot() != req.Generations {
+			return decision, tools.ErrDispatchFenceChanged
+		}
 		return m.publishPreparedAllow(ctx, span, req, mode, key, true)
 	case ApprovalDeny:
+		auditErr := recordPreparedResolution(auditClassifier, call, proposal, choice, resolution)
+		if m.fence.Snapshot() != req.Generations {
+			return decision, errors.Join(tools.ErrDispatchFenceChanged, auditErr)
+		}
 		if err := m.publishPreparedRevocation(req.Generations); err != nil {
-			return decision, fmt.Errorf("publish explicit approval denial: %w", err)
+			return decision, errors.Join(fmt.Errorf("publish explicit approval denial: %w", err), auditErr)
+		}
+		if auditErr != nil {
+			return decision, errors.Join(ErrToolDenied, auditErr)
 		}
 		recordPreparedDecision(span, req, mode, "callback_deny", false, false, false)
 		return decision, ErrToolDenied
 	default:
+		if err := recordPreparedResolution(auditClassifier, call, proposal, "", "invalid_response"); err != nil {
+			return decision, errors.Join(ErrToolDenied, err)
+		}
 		recordPreparedDecision(span, req, mode, "invalid_approval_result", false, false, false)
 		return decision, ErrToolDenied
 	}
+}
+
+type approvalChoiceProvider interface {
+	requestApprovalWithChoice(context.Context, string, map[string]any) (ApprovalResult, string, string, error)
+}
+
+func (m *ApprovalMiddleware) requestPreparedApproval(ctx context.Context, call tools.ToolCall) (ApprovalResult, string, string, error) {
+	if provider, ok := m.opts.callback.(approvalChoiceProvider); ok {
+		return provider.requestApprovalWithChoice(ctx, call.Name, call.Args)
+	}
+	result, err := m.opts.callback.RequestApproval(ctx, call.Name, call.Args)
+	choice := ""
+	resolution := "callback"
+	switch result {
+	case ApprovalAllow:
+		choice = "allow_once"
+	case ApprovalAlwaysAllow:
+		choice = "allow_always"
+	case ApprovalDeny:
+		choice = "deny"
+	default:
+		resolution = "invalid_response"
+	}
+	return result, choice, resolution, err
+}
+
+func recordPreparedResolution(auditClassifier *AuditClassifier, call tools.ToolCall, proposal, choice, resolution string) error {
+	if auditClassifier == nil {
+		return nil
+	}
+	if err := auditClassifier.recordResolution(call, proposal, choice, resolution); err != nil {
+		return fmt.Errorf("approval audit resolution: %w", err)
+	}
+	return nil
 }
 
 func (m *ApprovalMiddleware) publishPreparedAllow(

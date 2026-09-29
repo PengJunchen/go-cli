@@ -54,6 +54,8 @@ type AuditEntry struct {
 	Stage string `json:"stage,omitempty"`
 	// UserChoice records an actual approval response independently of Decision.
 	UserChoice string `json:"user_choice,omitempty"`
+	// Resolution identifies how the approval decision was resolved.
+	Resolution string `json:"resolution,omitempty"`
 	// ToolOutcome records the result of tool execution independently of approval.
 	ToolOutcome string `json:"tool_outcome,omitempty"`
 	// PrevHash links this entry to the preceding durable entry for the day.
@@ -306,6 +308,7 @@ func sanitizeAuditEntry(entry AuditEntry) AuditEntry {
 	entry.SessionID = boundAuditText(entry.SessionID, 128)
 	entry.Stage = boundAuditText(entry.Stage, 32)
 	entry.UserChoice = boundAuditText(entry.UserChoice, 32)
+	entry.Resolution = boundAuditText(entry.Resolution, 32)
 	entry.ToolOutcome = boundAuditText(entry.ToolOutcome, 32)
 	return entry
 }

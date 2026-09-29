@@ -2,6 +2,7 @@ package approval
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -138,10 +139,8 @@ func toSet(items []string) map[string]struct{} {
 	return set
 }
 
-// AuditClassifier wraps an ApprovalClassifier and records each classification
-// decision to an AuditTrail. It is transparent: the wrapped classifier's
-// decision is returned unchanged. If the AuditTrail is nil or Record fails,
-// the decision is still returned — auditing must never block or alter approval.
+// AuditClassifier wraps an ApprovalClassifier and durably records its proposal
+// before the approval middleware can dispatch a tool.
 type AuditClassifier struct {
 	inner   ApprovalClassifier
 	audit   *AuditTrail
@@ -160,9 +159,18 @@ func NewAuditClassifier(inner ApprovalClassifier, audit *AuditTrail, mode Permis
 // Name returns the wrapped classifier's name.
 func (c *AuditClassifier) Name() string { return c.inner.Name() }
 
-// Classify delegates to the wrapped classifier and records the decision. Audit
-// failures are logged as warnings but never propagated.
+// Classify delegates to the wrapped classifier and records its proposal. If
+// the proposal cannot be durably recorded, it returns Deny.
 func (c *AuditClassifier) Classify(ctx context.Context, call tools.ToolCall) Classification {
+	result, err := c.classifyAndAudit(ctx, call)
+	if err != nil {
+		slog.Warn("approval.audit.record_failed", "err", err)
+		return Deny
+	}
+	return result
+}
+
+func (c *AuditClassifier) classifyAndAudit(ctx context.Context, call tools.ToolCall) (Classification, error) {
 	result := c.inner.Classify(ctx, call)
 	if c.audit != nil {
 		entry := AuditEntry{
@@ -173,12 +181,31 @@ func (c *AuditClassifier) Classify(ctx context.Context, call tools.ToolCall) Cla
 			Classifier:     c.inner.Name(),
 			PermissionMode: c.mode.String(),
 			SessionID:      c.session,
+			Stage:          "classifier_proposal",
 		}
 		if err := c.audit.Record(entry); err != nil {
-			slog.Warn("approval.audit.record_failed", "err", err)
+			return Deny, fmt.Errorf("approval audit classifier proposal: %w", err)
 		}
 	}
-	return result
+	return result, nil
+}
+
+func (c *AuditClassifier) recordResolution(call tools.ToolCall, proposal, choice, resolution string) error {
+	if c == nil || c.audit == nil {
+		return nil
+	}
+	return c.audit.Record(AuditEntry{
+		Timestamp:      time.Now().UTC(),
+		Tool:           call.Name,
+		ArgsSummary:    summarizeArgs(call.Args),
+		Decision:       proposal,
+		Classifier:     c.inner.Name(),
+		PermissionMode: c.mode.String(),
+		SessionID:      c.session,
+		Stage:          "approval_resolution",
+		UserChoice:     choice,
+		Resolution:     resolution,
+	})
 }
 
 // AuditResolver wraps a PermissionModeResolver so that every classifier
