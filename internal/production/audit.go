@@ -101,6 +101,8 @@ type DefaultAuditLog struct {
 	path        string
 	name        string
 	lastHash    string
+	cursor      privatefile.FileFingerprint
+	cursorValid bool
 	lockTimeout time.Duration
 	poisoned    error
 	maxSize     int64
@@ -210,7 +212,7 @@ func (l *DefaultAuditLog) Log(ctx context.Context, entry AuditEntry) error {
 	lockCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), l.auditLockTimeout())
 	defer cancel()
 	appendErr := privatefile.WithExclusiveLock(lockCtx, l.path, func() error {
-		if err := l.loadChain(); err != nil {
+		if err := l.refreshChain(); err != nil {
 			return err
 		}
 
@@ -231,6 +233,9 @@ func (l *DefaultAuditLog) Log(ctx context.Context, entry AuditEntry) error {
 			if rotated {
 				l.lastHash = ""
 			}
+			l.captureCursor()
+		} else {
+			l.cursorValid = false
 		}
 		return appendErr
 	})
@@ -262,13 +267,42 @@ func (l *DefaultAuditLog) auditLockTimeout() time.Duration {
 	return l.lockTimeout
 }
 
-func (l *DefaultAuditLog) loadChain() error {
+// refreshChain reuses a hash cursor only while the file's identity, size, and
+// ctime remain unchanged. A change, missing cursor, or unavailable fingerprint
+// forces a complete hash-chain verification while the cross-process lock is
+// held.
+func (l *DefaultAuditLog) refreshChain() error {
+	before, beforeErr := privatefile.FingerprintFile(l.path)
+	if beforeErr == nil && l.cursorValid && l.cursor == before {
+		return nil
+	}
+
 	lastHash, _, err := walkAuditLog(l.path, nil)
 	if err != nil {
 		return err
 	}
+	after, afterErr := privatefile.FingerprintFile(l.path)
+	if beforeErr == nil && afterErr == nil && before != after {
+		return fmt.Errorf("%w: file changed while verifying chain", ErrAuditLogCorrupt)
+	}
 	l.lastHash = lastHash
+	if beforeErr == nil && afterErr == nil {
+		l.cursor = after
+		l.cursorValid = true
+	} else {
+		l.cursorValid = false
+	}
 	return nil
+}
+
+func (l *DefaultAuditLog) captureCursor() {
+	fingerprint, err := privatefile.FingerprintFile(l.path)
+	if err != nil {
+		l.cursorValid = false
+		return
+	}
+	l.cursor = fingerprint
+	l.cursorValid = true
 }
 
 // appendLine writes a single JSON line to the log file, creating the file and
@@ -323,6 +357,7 @@ func (l *DefaultAuditLog) appendLine(data []byte) (bool, bool, error) {
 }
 
 func (l *DefaultAuditLog) rollbackAppend(f auditFile, originalSize int64, sentinel, cause error) (bool, bool, error) {
+	l.cursorValid = false
 	rollbackErr := f.Truncate(originalSize)
 	if rollbackErr == nil {
 		rollbackErr = f.Sync()

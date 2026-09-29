@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -30,6 +31,44 @@ func TestWriteAtomicCreatesPrivateParentAndReplacesWideFile(t *testing.T) {
 	dirInfo, err := os.Stat(filepath.Dir(path))
 	require.NoError(t, err)
 	assert.Equal(t, os.FileMode(0o700), dirInfo.Mode().Perm())
+}
+
+func TestFingerprintFileTracksSameSizeHistoricalChanges(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("file fingerprints are supported on Darwin and Linux")
+	}
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	missing, err := FingerprintFile(path)
+	require.NoError(t, err)
+	assert.False(t, missing.Exists)
+
+	require.NoError(t, os.WriteFile(path, []byte("first"), 0o600))
+	before, err := FingerprintFile(path)
+	require.NoError(t, err)
+	require.True(t, before.Exists)
+	assert.Equal(t, int64(len("first")), before.Size)
+
+	// A same-length overwrite must change the ctime fingerprint so a cached
+	// verified hash cursor cannot hide historical tampering.
+	time.Sleep(2 * time.Millisecond)
+	f, err := os.OpenFile(path, os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, writeErr := f.WriteAt([]byte("other"), 0)
+	require.NoError(t, writeErr)
+	require.NoError(t, f.Sync())
+	require.NoError(t, f.Close())
+
+	after, err := FingerprintFile(path)
+	require.NoError(t, err)
+	assert.Equal(t, before.Size, after.Size)
+	assert.NotEqual(t, before, after)
+}
+
+func TestFingerprintFileRejectsNonRegularPath(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nested")
+	require.NoError(t, os.Mkdir(path, 0o700))
+	_, err := FingerprintFile(path)
+	assert.Error(t, err)
 }
 
 func TestWriteAtomicRejectsAccessibleParentWithoutChangingIt(t *testing.T) {

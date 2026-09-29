@@ -159,7 +159,11 @@ func TestAuditLogStreamingFilterOnLargeFile(t *testing.T) {
 	const total = 5000
 	const matchingOp = "match.me"
 	base := time.Now()
+	started := time.Now()
 	for i := 0; i < total; i++ {
+		if time.Since(started) > 60*time.Second {
+			t.Fatalf("appending %d audit entries exceeded the 60s bound", i)
+		}
 		op := "other"
 		if i%10 == 0 {
 			op = matchingOp
@@ -525,6 +529,23 @@ func TestAuditLogTamperDetection(t *testing.T) {
 	err = al.VerifyChain()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "hash mismatch")
+}
+
+func TestAuditLogRejectsSameSizeHistoricalTamperingBeforeAppend(t *testing.T) {
+	path := auditLogTestPath(t, "audit.jsonl")
+	log, ok := NewDefaultAuditLog(path).(*DefaultAuditLog)
+	require.True(t, ok)
+	ctx := context.Background()
+	require.NoError(t, log.Log(ctx, AuditEntry{Operation: "alpha"}))
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	tampered := bytes.Replace(raw, []byte(`"Operation":"alpha"`), []byte(`"Operation":"bravo"`), 1)
+	require.NotEqual(t, raw, tampered)
+	require.Equal(t, len(raw), len(tampered))
+	require.NoError(t, os.WriteFile(path, tampered, 0o600))
+
+	err = log.Log(ctx, AuditEntry{Operation: "later"})
+	assert.ErrorIs(t, err, ErrAuditLogCorrupt)
 }
 
 func TestAuditLogLockWaitIsBoundedAfterCallerCancellation(t *testing.T) {
