@@ -114,8 +114,8 @@ func newMCPGenerationPeer(
 		peer.requests.Add(1)
 		handshake(w, r)
 	}))
-	t.Cleanup(peer.release)
 	t.Cleanup(peer.server.Close)
+	t.Cleanup(peer.release)
 	return peer
 }
 
@@ -234,6 +234,49 @@ func awaitMCPGenerationAttempt(t *testing.T, owner *assemblyMCPResources, after 
 	return attempt
 }
 
+func awaitMCPGenerationPublication(
+	t *testing.T,
+	owner *assemblyMCPResources,
+	registry tools.ToolRegistry,
+	after time.Time,
+	wantNames []string,
+) mcp.MCPConfigReloadAttempt {
+	t.Helper()
+	var reloader *mcp.DefaultHotReloader
+	owner.mu.Lock()
+	for _, candidate := range owner.reloaders {
+		if current, ok := candidate.(*mcp.DefaultHotReloader); ok {
+			reloader = current
+			break
+		}
+	}
+	owner.mu.Unlock()
+	require.NotNil(t, reloader, "assembly must own a config generation watcher")
+	var attempt mcp.MCPConfigReloadAttempt
+	var visible []string
+	completed := assert.Eventually(t, func() bool {
+		var hasAttempt bool
+		attempt, hasAttempt = reloader.LastAttempt()
+		if !hasAttempt || !attempt.CompletedAt.After(after) || attempt.ErrorClass != "" {
+			return false
+		}
+		visible = visibleMCPGenerationNames(t, registry)
+		if len(visible) != len(wantNames) {
+			return false
+		}
+		for index := range wantNames {
+			if visible[index] != wantNames[index] {
+				return false
+			}
+		}
+		return true
+	}, 5*time.Second, 5*time.Millisecond)
+	if !completed {
+		t.Fatalf("MCP generation was not published: latest attempt=%+v visible names=%v, want=%v", attempt, visible, wantNames)
+	}
+	return attempt
+}
+
 func triggerMCPGenerationReload(t *testing.T, owner *assemblyMCPResources) {
 	t.Helper()
 	count, err := owner.Reload(context.Background())
@@ -310,10 +353,9 @@ func TestMCPGenerationReplacementRetainsOnFailureAndJoinsPreparedCalls(t *testin
 	}
 	assert.Equal(t, oldNames, visibleMCPGenerationNames(t, deferred), "the old complete generation stays visible while the replacement is staged")
 	newPeer.release()
-	successAttempt := awaitMCPGenerationAttempt(t, owner, failedAttempt.CompletedAt)
-	assert.Empty(t, successAttempt.ErrorClass)
 	newNames := []string{"mcp__generation-server__new_read", "mcp__generation-server__new_search"}
-	assert.Equal(t, newNames, visibleMCPGenerationNames(t, deferred), "publication swaps the entire source tool set")
+	successAttempt := awaitMCPGenerationPublication(t, owner, deferred, failedAttempt.CompletedAt, newNames)
+	assert.Empty(t, successAttempt.ErrorClass)
 	newGeneration := owner.sources[mcpServerSourceIDProjectFile].current
 	require.NotNil(t, newGeneration)
 	if oldGeneration.clients[0] == newGeneration.clients[0] {
