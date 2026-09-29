@@ -109,12 +109,13 @@ func TestE2E_ModelMiddlewareChain_RetryAndValidate(t *testing.T) {
 }
 
 // =============================================================================
-// Test 2: PlanMode – Coarse preflight blocks unverified names
+// Test 2: PlanMode – R0 preflight blocks writes and preserves approved reads
 // =============================================================================
 
 // TestE2E_PlanMode_BlocksWriteTools verifies that the controller's coarse
-// name-based preflight allows no unverified read names. Prepared policy tests
-// exercise the captured capability and side-effect boundary separately.
+// R0 name-based preflight blocks writes while allowing its explicitly
+// approved built-in reads. Prepared policy tests exercise the captured
+// capability and side-effect boundary separately.
 func TestE2E_PlanMode_BlocksWriteTools(t *testing.T) {
 	ctx := t.Context()
 	plan := core.NewDefaultPlanModeController()
@@ -133,10 +134,10 @@ func TestE2E_PlanMode_BlocksWriteTools(t *testing.T) {
 			"plan mode should block %q", name)
 	}
 
-	// Familiar names do not prove a scoped read capability.
+	// R0 explicitly permits these built-in reads during Plan Mode.
 	for _, name := range []string{"read", "grep", "ls"} {
-		assert.True(t, plan.ShouldBlockWrite(name),
-			"coarse Plan Mode preflight should block unverified %q", name)
+		assert.False(t, plan.ShouldBlockWrite(name),
+			"R0 Plan Mode preflight should preserve approved read %q", name)
 	}
 
 	// Deactivate plan mode.

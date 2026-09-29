@@ -68,7 +68,7 @@ func TestPlanModeToolWrapper_BlocksBashWhenActive(t *testing.T) {
 	assert.Equal(t, true, result.Metadata["plan_mode_blocked"])
 }
 
-func TestPlanModeToolWrapper_BlocksUnverifiedReadWhenActive(t *testing.T) {
+func TestPlanModeToolWrapper_AllowsR0ReadToolsWhenActive(t *testing.T) {
 	var callCount atomic.Int32
 	next := mockExecutor(&callCount)
 
@@ -76,26 +76,13 @@ func TestPlanModeToolWrapper_BlocksUnverifiedReadWhenActive(t *testing.T) {
 	require.NoError(t, ctrl.Enter(context.Background(), "planning"))
 	wrapped := NewPlanModeToolWrapper(ctrl)(next)
 
-	result, err := wrapped(context.Background(), tools.ToolCall{Name: "read"})
-	require.ErrorIs(t, err, ErrPlanModeBlocked)
-	assert.Equal(t, int32(0), callCount.Load(), "unverified reads must not bypass prepared effect policy")
-	require.NotNil(t, result)
-	assert.Equal(t, true, result.Metadata["plan_mode_blocked"])
-}
-
-func TestPlanModeToolWrapper_BlocksUnverifiedGrepWhenActive(t *testing.T) {
-	var callCount atomic.Int32
-	next := mockExecutor(&callCount)
-
-	ctrl := NewDefaultPlanModeController()
-	require.NoError(t, ctrl.Enter(context.Background(), "planning"))
-	wrapped := NewPlanModeToolWrapper(ctrl)(next)
-
-	result, err := wrapped(context.Background(), tools.ToolCall{Name: "grep"})
-	require.ErrorIs(t, err, ErrPlanModeBlocked)
-	assert.Equal(t, int32(0), callCount.Load(), "unverified search tools must not bypass prepared effect policy")
-	require.NotNil(t, result)
-	assert.Equal(t, true, result.Metadata["plan_mode_blocked"])
+	for _, name := range r0PlanModeReadOnlyToolNames {
+		result, err := wrapped(context.Background(), tools.ToolCall{Name: name})
+		require.NoError(t, err, "%s is explicitly approved by the R0 name guard", name)
+		require.NotNil(t, result)
+		assert.Equal(t, "ok", result.Output)
+	}
+	assert.Equal(t, int32(len(r0PlanModeReadOnlyToolNames)), callCount.Load())
 }
 
 func TestPlanModeToolWrapper_PassthroughWhenInactive(t *testing.T) {
@@ -161,10 +148,10 @@ func TestPlanModeToolWrapper_NilNext(t *testing.T) {
 	require.NotNil(t, result)
 	assert.Equal(t, true, result.Metadata["plan_mode_blocked"])
 
-	// An unverified read is blocked before a nil next executor could run.
+	// An approved read passes the guard even when no executor is installed.
 	result2, err2 := wrapped(context.Background(), tools.ToolCall{Name: "read"})
-	assert.ErrorIs(t, err2, ErrPlanModeBlocked)
-	assert.NotNil(t, result2)
+	assert.NoError(t, err2)
+	assert.Nil(t, result2)
 }
 
 // planModeStubToolDef is a minimal ToolDefinition for the integration test.

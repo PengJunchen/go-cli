@@ -26,13 +26,15 @@ type PlanModeController interface {
 	ShouldBlockWrite(toolName string) bool
 }
 
-// planModeReadOnlyToolNames is the coarse preflight allowlist for explicit
-// control tools. Prepared approval still validates captured registration
-// provenance; a matching name alone does not authorize execution. Unverified
-// reads, external tools, and mutations fail closed until their effects and
-// scopes are proven. exit_plan_mode preserves its existing behavior while
-// D-01 remains deferred.
+// planModeReadOnlyToolNames is the R0 name-based stopgap allowlist for the
+// explicitly approved built-in reads and Plan Mode control tools. All other
+// names, including mutations, custom tools, and unknown tools, fail closed;
+// the guard does not infer permission from prefixes or registration names.
 var planModeReadOnlyToolNames = map[string]struct{}{
+	"read": {}, "ls": {}, "grep": {}, "find": {},
+	"web_search": {}, "web_fetch": {},
+	"git_diff": {}, "git_status": {}, "git_log": {}, "git_branch": {}, "git_blame": {}, "git_remote": {},
+	"lsp_query":   {},
 	"tool_search": {}, "ask_user": {},
 	"goal_get": {}, "goal_list": {}, "task_get": {}, "task_list": {},
 	"enter_plan_mode": {}, "exit_plan_mode": {},
@@ -106,8 +108,8 @@ func (c *DefaultPlanModeController) IsActive() bool {
 }
 
 // ShouldBlockWrite reports whether the named tool should be blocked. It returns
-// true when plan mode is active and the tool name is not in the coarse control
-// preflight set. Prepared policy separately verifies trusted identity/effects.
+// true when plan mode is active and the tool name is not in the explicit R0
+// built-in read/control allowlist.
 func (c *DefaultPlanModeController) ShouldBlockWrite(toolName string) bool {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
