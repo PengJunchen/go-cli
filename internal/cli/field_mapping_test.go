@@ -67,6 +67,10 @@ func TestTurnItemsToMessages_RoundTrip(t *testing.T) {
 			Role:    "assistant",
 			Content: "calling tool",
 			Usage:   &llm.Usage{InputTokens: 7, OutputTokens: 2, TotalTokens: 9},
+			Runtime: llm.RuntimeMetadata{Source: llm.SourceRef{
+				Kind: llm.SourcePriorPublished, HistoryRevision: "revision-1", BranchID: "main",
+				SourceEntryID: "assistant-entry", PriorOrdinal: 1,
+			}},
 			ToolCalls: []llm.ToolCall{
 				{ID: "tc-1", Name: "write", Args: map[string]any{"path": "/tmp", "nested": map[string]any{"flag": true}}},
 			},
@@ -80,8 +84,12 @@ func TestTurnItemsToMessages_RoundTrip(t *testing.T) {
 			ToolCallID:     "tc-1",
 			ToolName:       "write",
 			ReceiptOutcome: core.ReceiptOutcomeUnknown,
+			Runtime: llm.RuntimeMetadata{
+				Source:         llm.SourceRef{Kind: llm.SourceRunTranscript, RunID: "run-roundtrip", PriorSourceCount: 2, TranscriptIndex: 1},
+				ReceiptOutcome: core.ReceiptOutcomeUnknown,
+			},
 		},
-		{Role: "user", Content: "follow-up", InputKind: core.InputKindFollowUp},
+		{Role: "user", Content: "follow-up", InputKind: core.InputKindFollowUp, Runtime: llm.RuntimeMetadata{Source: llm.SourceRef{Kind: llm.SourceRunTranscript, RunID: "run-roundtrip", PriorSourceCount: 2, TranscriptIndex: 2}}},
 	}
 
 	items := messagesToTurnItems(original)
