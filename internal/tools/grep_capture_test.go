@@ -186,6 +186,35 @@ func TestGrepPureGoRootFileAndMissingRoot(t *testing.T) {
 	require.ErrorIs(t, err, os.ErrNotExist)
 }
 
+func TestGrepPureGoRootOpenErrorPreservesCauseAndFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	cause := errors.New("injected root open failure")
+	var opened []string
+	capture := newGrepMatchCapture(10, 1024)
+	truncated, err := grepPureGoWithOpen(context.Background(), mustCompile(t, "needle"), root, "", PathWhitelist{}, capture, func(path string) (grepDirectoryReader, error) {
+		opened = append(opened, path)
+		return nil, cause
+	})
+	require.ErrorIs(t, err, cause)
+	assert.Contains(t, err.Error(), "open root directory")
+	assert.Contains(t, err.Error(), root)
+	assert.Equal(t, []string{root}, opened, "the root error must not be swallowed as a best-effort descendant failure")
+	assert.Empty(t, capture.Matches(), "a requested-root open failure cannot return partial matches")
+	assert.False(t, capture.Truncated())
+	assert.False(t, truncated)
+
+	dir := t.TempDir()
+	missing := filepath.Join(dir, "missing-root")
+	result, executeErr := NewGrepTool(WithGrepWorkdir(dir), WithForcePureGo(true)).Execute(context.Background(), ToolCall{
+		Args: map[string]any{"pattern": "needle", "path": "missing-root"},
+	})
+	require.ErrorIs(t, executeErr, os.ErrNotExist)
+	require.NotNil(t, result)
+	assert.Equal(t, "", result.Output)
+	assert.Nil(t, result.Metadata, "failed Execute results must not claim successful search metadata")
+	assert.Contains(t, executeErr.Error(), missing)
+}
+
 func TestGrepPureGoOutputBudgetUsesWholePrefixAndExactBoundary(t *testing.T) {
 	dir := t.TempDir()
 	file := filepath.Join(dir, "matches.txt")
