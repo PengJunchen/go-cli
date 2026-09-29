@@ -27,3 +27,15 @@ include multi-process serialization, same-size historical tampering,
 rollback poisoning, and lock contention. This is a focused gate; full
 `make verify`, tagged E2E, coverage, CLI/PTY, and Dockerfile validation still
 need a final fixed-SHA run after the remaining source lands.
+
+The subsequent broader `make verify` at `c6f7b82` **failed**. The new
+private-parent requirement for audit sidecar locks rejects multiple existing
+CLI and E2E audit paths whose immediate parent is accessible by group or
+others; tool calls then stop before dispatch. This is an integration
+regression in the accepted narrow audit slice, not a passing release gate.
+The exact log is `/tmp/go-cli-verify-c6f7b82.log`. A repair must preserve
+private trust-file policy and cross-process audit serialization while
+supporting the configured/default audit locations. The same run also found
+independent MCP and R6 fixture failures; those are owned by their respective
+lanes. Audit integration acceptance is held open until the broader gate is
+green on a fixed source snapshot.
