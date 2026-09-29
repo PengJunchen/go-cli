@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
@@ -45,16 +46,22 @@ var ErrCanonicalTranscriptRequired = errors.New("core: canonical transcript requ
 // groups.
 var ErrCanonicalTranscriptInvalid = errors.New("core: invalid canonical transcript")
 
+// ErrDurableCompactionUnsupported reports a durable compaction shape or entry
+// point that cannot be represented by the existing source projection schema.
+var ErrDurableCompactionUnsupported = errors.New("core: durable compaction is unsupported")
+
 // AgentImpl is a stateful wrapper around an AgentLoop. It maintains message
 // history across Run calls and records its name so the runtime can address it.
 type AgentImpl struct {
-	name           string
-	loop           AgentLoop
-	mu             sync.RWMutex
-	history        []AgentMessage
-	events         []AgentEvent
-	compactionHook CompactionHook
-	state          AgentState
+	name             string
+	loop             AgentLoop
+	mu               sync.RWMutex
+	history          []AgentMessage
+	events           []AgentEvent
+	compactionHook   CompactionHook
+	durableBound     bool
+	priorSourceCount uint64
+	state            AgentState
 }
 
 var _ Agent = (*AgentImpl)(nil)
@@ -125,6 +132,14 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...Ev
 	logger := tracing.NewTraceLogger(span, nil)
 	logger.Info("core.agent.run", "name", a.name, "type", submission.Type, "content", submission.Content)
 
+	a.mu.RLock()
+	durableBound := a.durableBound
+	priorSourceCount := a.priorSourceCount
+	a.mu.RUnlock()
+	if durableBound && RunIDFromContext(spanCtx) == "" {
+		return Result{}, fmt.Errorf("%w: bound Agent run requires an owned run ID", ErrDurableCompactionUnsupported)
+	}
+
 	// Mark the agent as running before dispatching to the loop. If the
 	// state transition is rejected (e.g. the agent is in an incompatible
 	// state), log the error but proceed — the state machine is best-effort
@@ -134,15 +149,24 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...Ev
 	}
 
 	canonicalLoop, hasCanonicalTranscript := a.loop.(CanonicalLoop)
+	if durableBound && !hasCanonicalTranscript {
+		return Result{}, fmt.Errorf("%w: bound Agent requires a canonical loop", ErrDurableCompactionUnsupported)
+	}
 	if hasCanonicalTranscript {
 		a.mu.RLock()
 		history := cloneAgentMessages(a.history)
 		a.mu.RUnlock()
-		submission.History = append(history, AgentMessage{
+		input := AgentMessage{
 			Role:      "user",
 			Content:   submission.Content,
 			InputKind: InputKindUser,
-		})
+		}
+		if durableBound {
+			input.Runtime.Source = llm.SourceRef{
+				Kind: llm.SourcePendingRunInput, RunID: RunIDFromContext(spanCtx), PriorSourceCount: priorSourceCount,
+			}
+		}
+		submission.History = append(history, input)
 		submission.History = cloneAgentMessages(submission.History)
 	} else {
 		// Legacy AgentLoop implementations keep the previous simple-run
@@ -213,7 +237,7 @@ func (a *AgentImpl) Run(ctx context.Context, submission Submission, stream ...Ev
 
 	// Apply compaction hook if set: the hook may trim or summarize the
 	// history to keep it within the token budget.
-	if a.compactionHook != nil {
+	if a.compactionHook != nil && !durableBound {
 		a.mu.RLock()
 		historyCopy := cloneAgentMessages(a.history)
 		a.mu.RUnlock()
@@ -265,6 +289,8 @@ func (a *AgentImpl) ClearHistory() {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.history = nil
+	a.durableBound = false
+	a.priorSourceCount = 0
 	slog.Info("core.agent.history_cleared", "name", a.name)
 }
 
@@ -274,13 +300,48 @@ func (a *AgentImpl) SetHistory(messages []AgentMessage) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	a.history = cloneAgentMessages(messages)
+	a.durableBound = false
+	a.priorSourceCount = 0
 	slog.Info("core.agent.history_set", "name", a.name, "messages", len(messages))
+}
+
+// SetHistoryFromSourceSnapshot hydrates one run-bound durable history view and
+// records the immutable source count captured by the run sink.
+func (a *AgentImpl) SetHistoryFromSourceSnapshot(snapshot CompactionSourceSnapshot) error {
+	if err := snapshot.Validate(); err != nil {
+		return err
+	}
+	history := snapshot.Clone().Messages
+	for i := range history {
+		if history[i].Runtime.ReceiptOutcome != "" && history[i].Runtime.ReceiptOutcome != history[i].ReceiptOutcome {
+			return fmt.Errorf("%w: runtime receipt differs from canonical history at ordinal %d", ErrDurableCompactionUnsupported, i)
+		}
+		history[i].Runtime = llm.RuntimeMetadata{
+			Source: llm.SourceRef{
+				Kind: llm.SourcePriorPublished, HistoryRevision: snapshot.Revision,
+				BranchID: snapshot.BranchID, SourceEntryID: snapshot.SourceEntryIDs[i], PriorOrdinal: uint64(i),
+			},
+			ReceiptOutcome: history[i].ReceiptOutcome,
+		}
+	}
+	a.mu.Lock()
+	a.history = cloneAgentMessages(history)
+	a.durableBound = true
+	a.priorSourceCount = uint64(len(snapshot.SourceEntryIDs))
+	a.mu.Unlock()
+	return nil
 }
 
 // Compact manually triggers the compaction hook on the current history.
 // It is used by the /compact slash command. When no compaction hook is
 // configured, it is a no-op.
 func (a *AgentImpl) Compact(ctx context.Context) error {
+	a.mu.RLock()
+	durableBound := a.durableBound
+	a.mu.RUnlock()
+	if durableBound {
+		return ErrDurableCompactionUnsupported
+	}
 	if a.compactionHook == nil {
 		return nil
 	}

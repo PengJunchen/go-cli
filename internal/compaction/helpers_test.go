@@ -36,14 +36,14 @@ func (r *recordingCompactor) WithError(err error) *recordingCompactor {
 }
 
 // Compact records the call and returns the configured result.
-func (r *recordingCompactor) Compact(_ context.Context, _ []TurnItem, _ int, _ TokenEstimator) ([]TurnItem, error) {
+func (r *recordingCompactor) Compact(_ context.Context, _ []TurnItem, _ int, _ TokenEstimator) (CompactionResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls = append(r.calls, r.name)
 	if r.err != nil {
-		return nil, r.err
+		return CompactionResult{}, r.err
 	}
-	return r.out, nil
+	return CompactionResult{Items: r.out}, nil
 }
 
 // Called reports the ordered names of every compactor invoked.

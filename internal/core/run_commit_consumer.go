@@ -44,12 +44,14 @@ func (err runCommitPersistenceError) Unwrap() error    { return err.cause }
 func (runCommitPersistenceError) OutcomeUnknown() bool { return true }
 
 type runCommitConsumer struct {
-	ctx        context.Context
-	owner      *runOwner
-	sink       RunCommitSink
-	binding    RunCommitBinding
-	runID      string
-	terminalID TerminalCheckpointID
+	ctx         context.Context
+	owner       *runOwner
+	sink        RunCommitSink
+	source      *CompactionSourceSnapshot
+	projections []CompactionProjection
+	binding     RunCommitBinding
+	runID       string
+	terminalID  TerminalCheckpointID
 }
 
 type runCommitDispatchResult struct {
@@ -170,14 +172,26 @@ func newRunCommitConsumer(ctx context.Context) (*runCommitConsumer, error) {
 	if ownerRunID != runID || ownerGeneration != binding.OwnerGeneration {
 		return nil, fmt.Errorf("%w: owner run identity does not match durable binding", ErrInvalidRunCommitBinding)
 	}
-	return &runCommitConsumer{
+	consumer := &runCommitConsumer{
 		ctx:        ctx,
 		owner:      owner,
 		sink:       sink,
 		binding:    binding,
 		runID:      runID,
 		terminalID: TerminalCheckpointID("terminal-" + newClaimID()),
-	}, nil
+	}
+	if sourceSink, ok := sink.(RunCommitCompactionSource); ok {
+		snapshot, err := sourceSink.CompactionSourceSnapshot()
+		if err != nil {
+			return nil, fmt.Errorf("core: capture durable compaction source snapshot: %w", err)
+		}
+		if err := snapshot.Validate(); err != nil {
+			return nil, fmt.Errorf("core: validate durable compaction source snapshot: %w", err)
+		}
+		snapshot = snapshot.Clone()
+		consumer.source = &snapshot
+	}
+	return consumer, nil
 }
 
 func withRunCommitLoopScope(ctx context.Context) context.Context {
@@ -205,6 +219,33 @@ func (consumer *runCommitConsumer) commitInput(index uint64, message AgentMessag
 		InputKind:       message.InputKind,
 	})
 	return persistenceError("input", err)
+}
+
+func (consumer *runCommitConsumer) transcriptMetadata(index uint64, receiptOutcome string) llm.RuntimeMetadata {
+	metadata := llm.RuntimeMetadata{ReceiptOutcome: receiptOutcome}
+	if consumer == nil {
+		return metadata
+	}
+	priorCount := uint64(0)
+	if consumer.source != nil {
+		priorCount = uint64(len(consumer.source.SourceEntryIDs))
+	}
+	metadata.Source = llm.SourceRef{
+		Kind: llm.SourceRunTranscript, RunID: consumer.runID,
+		PriorSourceCount: priorCount, TranscriptIndex: index,
+	}
+	return metadata
+}
+
+func (consumer *runCommitConsumer) commitCompaction(projection CompactionProjection) error {
+	if consumer == nil {
+		return nil
+	}
+	if err := consumer.sink.CommitCompaction(consumer.commitContext(), projection); err != nil {
+		return runCommitPersistenceError{operation: "compaction", cause: err}
+	}
+	consumer.projections = append(consumer.projections, projection)
+	return nil
 }
 
 func (consumer *runCommitConsumer) beginIntentBatch(batch RunIntentBatch) error {
@@ -282,6 +323,9 @@ func (consumer *runCommitConsumer) resolveTask(taskID uint64, resolution Executi
 func (consumer *runCommitConsumer) commitTerminal(transcript []TranscriptEntry, projections []CompactionProjection, outcome RunOutcome) error {
 	if consumer == nil {
 		return nil
+	}
+	if projections == nil {
+		projections = consumer.projections
 	}
 	terminal := RunTerminal{
 		RunID:                consumer.runID,
@@ -483,7 +527,7 @@ func (consumer *runCommitConsumer) executeSequentialCall(
 		return runCommitToolResult{}, err
 	}
 	outcome := runCommitReceiptOutcome(ctx, dispatch)
-	appendToolReceipt(messages, transcript, call, dispatch.output, outcome)
+	appendToolReceipt(messages, transcript, call, dispatch.output, outcome, consumer)
 	index := uint64(len(*transcript) - 1)
 	if err := consumer.recordActionReceipt(taskID, ordinal, intent, dispatchState, index, (*transcript)[len(*transcript)-1]); err != nil {
 		return runCommitToolResult{output: dispatch.output, isError: true, outcome: outcome}, err
@@ -685,7 +729,7 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 		action := &actions[index]
 		transcriptIndex := uint64(len(*transcript))
 		if action.known != nil {
-			appendToolReceipt(messages, transcript, action.call, action.known.output, action.known.outcome)
+			appendToolReceipt(messages, transcript, action.call, action.known.output, action.known.outcome, consumer)
 			entry := (*transcript)[len(*transcript)-1]
 			if err := consumer.recordTranscriptReceipt(ordinal, nil, transcriptIndex, entry); err != nil {
 				return err
@@ -740,7 +784,7 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 		if !action.complete {
 			outcome = ReceiptOutcomeUnknown
 		}
-		appendToolReceipt(messages, transcript, action.call, output, outcome)
+		appendToolReceipt(messages, transcript, action.call, output, outcome, consumer)
 		entry := (*transcript)[len(*transcript)-1]
 		if err := consumer.recordActionReceipt(action.taskID, ordinal, action.intent, dispatchState, transcriptIndex, entry); err != nil {
 			return err
@@ -815,7 +859,7 @@ func (consumer *runCommitConsumer) commitKnownCall(ordinal uint64, assistant Age
 	}); err != nil {
 		return err
 	}
-	appendToolReceipt(messages, transcript, call, output, outcome)
+	appendToolReceipt(messages, transcript, call, output, outcome, consumer)
 	if err := consumer.recordTranscriptReceipt(ordinal, nil, index, (*transcript)[len(*transcript)-1]); err != nil {
 		return err
 	}
@@ -870,6 +914,6 @@ func validRunCompletionProof(proof tools.PreparedCompletionProof) bool {
 
 type unavailableRunCommitCompactor struct{}
 
-func (unavailableRunCommitCompactor) Compact(_ context.Context, items []compaction.TurnItem, _ int, _ compaction.TokenEstimator) ([]compaction.TurnItem, error) {
-	return items, ErrRunCommitCompactionProjectionUnavailable
+func (unavailableRunCommitCompactor) Compact(_ context.Context, items []compaction.TurnItem, _ int, _ compaction.TokenEstimator) (compaction.CompactionResult, error) {
+	return compaction.CompactionResult{Items: items}, ErrRunCommitCompactionProjectionUnavailable
 }

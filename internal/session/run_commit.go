@@ -41,6 +41,7 @@ type SessionRunCommitSink struct {
 }
 
 var _ core.RunCommitSink = (*SessionRunCommitSink)(nil)
+var _ core.RunCommitCompactionSource = (*SessionRunCommitSink)(nil)
 
 // NewSessionRunCommitSink captures the active branch and run-start view from
 // prepared. workspaceID must already be canonical and initialized in index
@@ -91,6 +92,25 @@ func NewSessionRunCommitSink(
 		branchID: snapshot.ActiveBranchID, leafID: snapshot.ActiveLeafEntryID,
 		baseView: snapshot.PublishedView.Clone(),
 		allRows:  allRows, branchRows: branchRows, release: release,
+	}, nil
+}
+
+// CompactionSourceSnapshot returns a defensive copy of the exact PublishedView
+// captured when this sink was created. It intentionally does not refresh from
+// a separately loaded session view.
+func (s *SessionRunCommitSink) CompactionSourceSnapshot() (core.CompactionSourceSnapshot, error) {
+	if s == nil {
+		return core.CompactionSourceSnapshot{}, errors.New("session: compaction source snapshot requires a run sink")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return core.CompactionSourceSnapshot{}, errors.New("session: compaction source snapshot is unavailable after run sink close")
+	}
+	return core.CompactionSourceSnapshot{
+		Revision: s.baseView.Revision, BranchID: s.baseView.BranchID,
+		Messages:       core.CloneAgentMessages(s.baseView.Messages),
+		SourceEntryIDs: append([]string(nil), s.baseView.SourceEntryIDs...),
 	}, nil
 }
 
@@ -1507,7 +1527,13 @@ func nextTranscriptIndex(rows map[uint64]SessionEntry) (uint64, error) {
 
 func durableRowMatchesMessage(row SessionEntry, expected core.AgentMessage) bool {
 	actual, ok := sessionEntryToAgentMessage(row)
-	return ok && reflect.DeepEqual(actual, expected)
+	if !ok {
+		return false
+	}
+	// Runtime source coordinates intentionally stay outside the durable row
+	// schema. Compare only the message fields the sink actually persists.
+	expected.Runtime = llm.RuntimeMetadata{}
+	return reflect.DeepEqual(actual, expected)
 }
 
 func cloneRunCommitMessage(message core.AgentMessage) core.AgentMessage {

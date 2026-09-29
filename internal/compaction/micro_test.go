@@ -29,7 +29,8 @@ func TestMicroCompactorReplacesLargeToolResults(t *testing.T) {
 	}
 
 	compactor := NewMicroCompactor()
-	out, err := compactor.Compact(ctx, items, 80, est)
+	outResult, err := compactor.Compact(ctx, items, 80, est)
+	out := outResult.Items
 	require.NoError(t, err)
 
 	// User/assistant/system content preserved verbatim.
@@ -64,7 +65,8 @@ func TestMicroCompactorKeepsUserAssistantWhenUnderBudget(t *testing.T) {
 	}
 
 	compactor := NewMicroCompactor()
-	out, err := compactor.Compact(ctx, items, 1000, est)
+	outResult, err := compactor.Compact(ctx, items, 1000, est)
+	out := outResult.Items
 	require.NoError(t, err)
 	assert.Equal(t, items, out) // unchanged because it already fits
 }
@@ -102,7 +104,8 @@ func TestMicroCompactorEmptyInput(t *testing.T) {
 	est := tracedEstimator()
 
 	compactor := NewMicroCompactor()
-	out, err := compactor.Compact(ctx, nil, 100, est)
+	outResult, err := compactor.Compact(ctx, nil, 100, est)
+	out := outResult.Items
 	require.NoError(t, err)
 	assert.Empty(t, out)
 }
@@ -137,7 +140,9 @@ func TestMicroCompactorNormalizesLegacySummaryWithoutMutatingInput(t *testing.T)
 	before := append([]TurnItem(nil), items...)
 	before[3].ToolCalls = append([]llm.ToolCall(nil), items[3].ToolCalls...)
 
-	out, err := compactor.Compact(ctx, items, 180, runeCountEstimator{})
+	outResult, err := compactor.Compact(ctx, items, 180, runeCountEstimator{})
+
+	out := outResult.Items
 	require.NoError(t, err)
 	require.Len(t, out, len(items))
 
@@ -162,7 +167,9 @@ func TestMicroCompactorRejectsMandatorySystemOverBudgetBeforeReplacement(t *test
 	}
 	before := append([]TurnItem(nil), items...)
 
-	out, err := NewMicroCompactor().Compact(ctx, items, 10, runeCountEstimator{})
+	outResult, err := NewMicroCompactor().Compact(ctx, items, 10, runeCountEstimator{})
+
+	out := outResult.Items
 	require.ErrorIs(t, err, ErrMandatorySystemPromptOverBudget)
 	assert.Equal(t, before, out, "preflight failure should return the original input unchanged")
 	assert.Equal(t, before, items, "preflight failure must not mutate caller-owned items")

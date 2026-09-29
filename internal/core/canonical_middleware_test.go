@@ -160,7 +160,7 @@ func TestCanonicalSystemReminderInjectorPreservesHistoryTransformation(t *testin
 	require.NoError(t, err)
 	require.Len(t, base.submissions, 1)
 	require.Len(t, base.submissions[0].History, 2)
-	assert.Equal(t, AgentMessage{Role: "system", Content: "remember this"}, base.submissions[0].History[0])
+	assert.Equal(t, AgentMessage{Role: "system", Content: "remember this", Runtime: llm.RuntimeMetadata{Source: llm.SourceRef{Kind: llm.SourceEphemeral}}}, base.submissions[0].History[0])
 	assert.Equal(t, "earlier", base.submissions[0].History[1].Content)
 }
 

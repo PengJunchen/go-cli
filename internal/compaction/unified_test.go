@@ -46,7 +46,8 @@ func TestUnifiedCompactorMicroFirst(t *testing.T) {
 
 	// Micro succeeds on its own (large tool results are placeholdered).
 	uni := NewUnifiedCompactor(WithTriggerReason("threshold"))
-	out, err := uni.Compact(ctx, items, 300, est)
+	outResult, err := uni.Compact(ctx, items, 300, est)
+	out := outResult.Items
 	require.NoError(t, err)
 	assert.Equal(t, StrategyMicro, uni.LastStrategy())
 	assert.LessOrEqual(t, estimateTokens(out, est), 300)
@@ -74,7 +75,8 @@ func TestUnifiedCompactorEscalatesMicroToSummary(t *testing.T) {
 		WithSummary(summary),
 		WithTruncating(truncating),
 	)
-	out, err := uni.Compact(ctx, items, 100, est)
+	outResult, err := uni.Compact(ctx, items, 100, est)
+	out := outResult.Items
 	require.NoError(t, err)
 	assert.Equal(t, StrategySummary, uni.LastStrategy())
 	assert.Equal(t, []string{"micro"}, micro.Called(), "micro was tried first and escalated")
@@ -102,7 +104,8 @@ func TestUnifiedCompactorEscalatesToTruncatingWhenNoSummarizer(t *testing.T) {
 		WithMicro(micro),
 		WithTruncating(truncating),
 	)
-	out, err := uni.Compact(ctx, items, 100, est)
+	outResult, err := uni.Compact(ctx, items, 100, est)
+	out := outResult.Items
 	require.NoError(t, err)
 	assert.Equal(t, StrategyTruncating, uni.LastStrategy())
 	assert.Equal(t, []string{"micro"}, micro.Called(), "micro escalates")
@@ -122,7 +125,8 @@ func TestUnifiedCompactorAlwaysWithinBudgetWithRealCompactors(t *testing.T) {
 	// Real micro + no summary + real truncating: the fallback guarantees the
 	// result never exceeds the tiny budget.
 	uni := NewUnifiedCompactor()
-	out, err := uni.Compact(ctx, items, 40, est)
+	outResult, err := uni.Compact(ctx, items, 40, est)
+	out := outResult.Items
 	require.NoError(t, err)
 	assert.Equal(t, StrategyTruncating, uni.LastStrategy())
 	assert.LessOrEqual(t, estimateTokens(out, est), 40)
@@ -188,7 +192,8 @@ func TestUnifiedCompactorEmptyInput(t *testing.T) {
 	est := tracedEstimator()
 
 	uni := NewUnifiedCompactor()
-	out, err := uni.Compact(ctx, nil, 100, est)
+	outResult, err := uni.Compact(ctx, nil, 100, est)
+	out := outResult.Items
 	require.NoError(t, err)
 	assert.Empty(t, out)
 	assert.Equal(t, StrategyMicro, uni.LastStrategy())
@@ -236,7 +241,9 @@ func TestQualityAutoEvaluate(t *testing.T) {
 	rec := &recordingEvaluator{}
 	uni := NewUnifiedCompactor(WithQualityEvaluator(rec))
 
-	out, err := uni.Compact(ctx, items, 300, est)
+	outResult, err := uni.Compact(ctx, items, 300, est)
+
+	out := outResult.Items
 	require.NoError(t, err)
 	assert.Equal(t, StrategyMicro, uni.LastStrategy())
 	assert.LessOrEqual(t, estimateTokens(out, est), 300)
@@ -261,7 +268,8 @@ func TestQualityAutoEvaluateWithDefaultEvaluator(t *testing.T) {
 	uni := NewUnifiedCompactor(
 		WithQualityEvaluator(NewDefaultQualityEvaluator(est, WithQualityStrategy(StrategyMicro))),
 	)
-	out, err := uni.Compact(ctx, items, 300, est)
+	outResult, err := uni.Compact(ctx, items, 300, est)
+	out := outResult.Items
 	require.NoError(t, err)
 	assert.Equal(t, StrategyMicro, uni.LastStrategy())
 

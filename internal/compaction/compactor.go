@@ -71,6 +71,8 @@ type TurnItem struct {
 	InputKind string `json:"input_kind,omitempty"`
 	// ReceiptOutcome preserves the terminal outcome for canonical tool receipts.
 	ReceiptOutcome string `json:"receipt_outcome,omitempty"`
+	// Runtime preserves runtime-only source coordinates through compaction.
+	Runtime llm.RuntimeMetadata `json:"-"`
 }
 
 // Strategy identifies which compaction approach produced or was requested for a
@@ -88,6 +90,22 @@ const (
 	// StrategyTruncating uses the truncation fallback strategy.
 	StrategyTruncating
 )
+
+// NewProjection describes the exact source boundary and raw body for a newly
+// created summary. It is nil for strategies that do not create a summary.
+type NewProjection struct {
+	Summary string
+	Through llm.SourceThrough
+}
+
+// CompactionResult contains the exact output and winner of one strategy call.
+// Projection facts are returned with that call rather than inferred from
+// mutable strategy telemetry.
+type CompactionResult struct {
+	Items         []TurnItem
+	Strategy      Strategy
+	NewProjection *NewProjection
+}
 
 // String returns a stable, lowercase identifier for the strategy.
 func (s Strategy) String() string {
@@ -116,10 +134,10 @@ var ErrMandatorySystemPromptOverBudget = errors.New("compaction: mandatory syste
 // exceed maxTokens.
 type Compactor interface {
 	// Compact compacts items under the given token budget, returning the
-	// rewritten list and any error. Implementations must be safe for concurrent
-	// use and must not mutate the input slice's backing array unless they are
-	// the sole owner.
-	Compact(ctx context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator) ([]TurnItem, error)
+	// rewritten list, per-call winner and any new source projection. Implementations
+	// must be safe for concurrent use and must not mutate the input slice's
+	// backing array unless they are the sole owner.
+	Compact(ctx context.Context, items []TurnItem, maxTokens int, estimator TokenEstimator) (CompactionResult, error)
 }
 
 // Summarizer produces a summary for a given conversation text. It is a narrow,
