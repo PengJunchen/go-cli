@@ -243,3 +243,70 @@ func TestTurnRunnerOwnerAdoptsEntryLeaseOnce(t *testing.T) {
 	require.True(t, result.Success)
 	require.EqualValues(t, 1, sink.closeCalls.Load(), "entrypoint adoption and runOwner context fallback must not double-release")
 }
+
+func TestHarnessTransfersLeaseToOwnerUntilCallbackJoins(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	defer releaseOnce.Do(func() { close(release) })
+
+	sink := newLeaseHandoffSink(nil)
+	closeStarted := make(chan struct{})
+	sink.runCommitLeaseTestSink.closeStarted = closeStarted
+	slot := NewDefaultRunSlotGuard()
+	agent := &leaseHandoffBlockingAgent{started: started, release: release}
+	harness := NewHarnessImpl(agent,
+		WithRunSlotGuard(slot),
+		WithRunCleanupTimeout(15*time.Millisecond),
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ctx = WithRunCommit(ctx, sink, RunCommitBinding{
+		SessionID:   "lease-handoff-session",
+		WorkspaceID: "workspace-v1-lease-handoff",
+	})
+
+	stream, err := harness.Submit(ctx, "hello")
+	require.NoError(t, err)
+	require.NotNil(t, stream)
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("owner callback did not start")
+	}
+
+	cancel()
+	idle := slot.CloseAdmission()
+	drained := make(chan struct{})
+	go func() {
+		for range stream.Events() {
+		}
+		close(drained)
+	}()
+	select {
+	case <-drained:
+	case <-time.After(time.Second):
+		t.Fatal("accepted harness run did not return its bounded pending observation")
+	}
+	_, streamErr := stream.Result()
+	require.ErrorIs(t, streamErr, errRunCleanupPending)
+	require.Zero(t, sink.closeCalls.Load(), "a pending live owner still owns its borrowed session")
+	select {
+	case <-idle:
+		t.Fatal("run slot became idle before the accepted callback joined")
+	default:
+	}
+
+	releaseOnce.Do(func() { close(release) })
+	select {
+	case <-closeStarted:
+	case <-time.After(time.Second):
+		t.Fatal("run owner did not return its lease after the callback joined")
+	}
+	select {
+	case <-idle:
+	case <-time.After(time.Second):
+		t.Fatal("run owner did not release its run slot after the callback joined")
+	}
+	require.EqualValues(t, 1, sink.closeCalls.Load())
+}
