@@ -9,6 +9,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/pengjunchen/go-cli/internal/llm"
+	"github.com/pengjunchen/go-cli/internal/production"
 	"github.com/pengjunchen/go-cli/internal/session"
 )
 
@@ -74,13 +75,30 @@ func (h *CostHandler) Description() string { return "Show accumulated cost and u
 
 func (h *CostHandler) Handle(_ context.Context, _ []string, deps Dependencies) (string, error) {
 	if deps.CostTracker() != nil {
-		_, attemptSummary := deps.CostTracker().AttemptCostSnapshot()
+		attempts, attemptSummary := deps.CostTracker().AttemptCostSnapshot()
 		if attemptSummary.Attempts > 0 {
 			fmt.Fprintf(deps.Out(), "Known cost subtotal: $%.4f\n", attemptSummary.KnownCostSubtotal)                                             //nolint:errcheck
 			fmt.Fprintf(deps.Out(), "Provider attempts: %d\n", attemptSummary.Attempts)                                                           //nolint:errcheck
 			fmt.Fprintf(deps.Out(), "Known provider tokens: %d in / %d out\n", attemptSummary.KnownInputTokens, attemptSummary.KnownOutputTokens) //nolint:errcheck
 			fmt.Fprintf(deps.Out(), "Unknown usage attempts: %d\n", attemptSummary.UnknownUsageAttempts)                                          //nolint:errcheck
 			fmt.Fprintf(deps.Out(), "Unknown cost attempts: %d\n", attemptSummary.UnknownCostAttempts)                                            //nolint:errcheck
+			fmt.Fprintln(deps.Out(), "Attempt evidence:")                                                                                         //nolint:errcheck
+			for _, attempt := range attempts {
+				usageSource := "unknown"
+				usageDetail := ""
+				if attempt.Result.Usage.State == llm.UsageKnown && attempt.Result.Usage.Source == llm.UsageProviderResponse {
+					usageSource = "reported"
+					usageDetail = fmt.Sprintf(" (%d in / %d out)", attempt.Result.Usage.Usage.InputTokens, attempt.Result.Usage.Usage.OutputTokens)
+				}
+				_, _ = fmt.Fprintf(deps.Out(), "  provider=%q model=%q usage=%s%s cost=%s price_source=%s\n",
+					attempt.Result.Identity.ProviderID,
+					attempt.Result.Identity.ModelID,
+					usageSource,
+					usageDetail,
+					attemptCostStatusLabel(attempt.Status),
+					attemptCostPriceSourceLabel(attempt.PriceSource),
+				)
+			}
 		} else {
 			fmt.Fprintf(deps.Out(), "Total cost: $%.4f\n", deps.CostTracker().Total()) //nolint:errcheck
 			fmt.Fprintf(deps.Out(), "Total calls: %d\n", deps.CostTracker().Calls())   //nolint:errcheck
@@ -121,6 +139,30 @@ func (h *CostHandler) Handle(_ context.Context, _ []string, deps Dependencies) (
 		fmt.Fprintf(deps.Out(), "  Context:   %d/%d (%d%%)\n", totalTokens, deps.ContextWindow(), pct) //nolint:errcheck
 	}
 	return "", nil
+}
+
+func attemptCostStatusLabel(status production.AttemptCostStatus) string {
+	switch status {
+	case production.AttemptCostProviderReported:
+		return "reported"
+	case production.AttemptCostEstimated:
+		return "estimated"
+	default:
+		return "unknown"
+	}
+}
+
+func attemptCostPriceSourceLabel(source production.AttemptCostPriceSource) string {
+	switch source {
+	case production.AttemptCostFromProvider:
+		return "provider"
+	case production.AttemptCostFromDefaultTier:
+		return "default_tier"
+	case production.AttemptCostFromConfiguredTier:
+		return "configured_tier"
+	default:
+		return "unknown"
+	}
 }
 
 // CompactHandler manually triggers the compaction hook on the agent's history

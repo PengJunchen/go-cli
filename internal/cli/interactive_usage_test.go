@@ -2,6 +2,7 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -10,6 +11,7 @@ import (
 	"github.com/pengjunchen/go-cli/internal/compaction"
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
+	"github.com/pengjunchen/go-cli/internal/production"
 )
 
 // noopLoop is a minimal AgentLoop that does nothing, used only to satisfy
@@ -55,6 +57,7 @@ func TestEmitTokenUsageEvent_PrefersAPIUsage(t *testing.T) {
 		assert.Equal(t, 10, ev.TokenUsage.InputTokens)
 		assert.Equal(t, 3, ev.TokenUsage.OutputTokens)
 		assert.Equal(t, 8000, ev.TokenUsage.MaxTokens)
+		assert.Equal(t, "reported", string(ev.TokenUsage.UsageSource))
 	default:
 		t.Fatal("expected a token_usage event on the stream")
 	}
@@ -88,14 +91,79 @@ func TestEmitTokenUsageEvent_FallbackToEstimate(t *testing.T) {
 		assert.Equal(t, 3, ev.TokenUsage.InputTokens)
 		assert.Equal(t, 2, ev.TokenUsage.OutputTokens)
 		assert.Equal(t, 4096, ev.TokenUsage.MaxTokens)
+		assert.Equal(t, "estimated", string(ev.TokenUsage.UsageSource))
 	default:
 		t.Fatal("expected a token_usage event on the stream")
 	}
 }
 
+func TestEmitTokenUsageEventCarriesActualAttemptProvenance(t *testing.T) {
+	tracker := production.NewCostTracker(nil)
+	result := llm.ProviderAttemptResult{
+		OperationID: "op-display-provenance",
+		AttemptID:   "attempt-display-provenance",
+		Identity: llm.AttemptIdentity{
+			ProviderID: "actual-provider",
+			ModelID:    "gpt-4o",
+			ProtocolID: llm.ProtocolOpenAICompatible,
+			OriginKind: llm.OriginExplicitRequestEndpoint,
+			Candidate:  "candidate-private-marker",
+		},
+		Outcome: llm.AttemptSuccess,
+		Usage: llm.UsageEvidence{
+			State:  llm.UsageKnown,
+			Usage:  &llm.Usage{InputTokens: 12, OutputTokens: 5, TotalTokens: 17},
+			Source: llm.UsageProviderResponse,
+		},
+	}
+	_, err := tracker.RecordAttempt(result)
+	require.NoError(t, err)
+	reportedCost := 0.02
+	reported := result
+	reported.OperationID = "op-provider-cost"
+	reported.AttemptID = "attempt-provider-cost"
+	reported.Identity.ProviderID = "reported-provider"
+	reported.Identity.ModelID = "custom-model"
+	reported.Identity.Candidate = "candidate-provider-cost"
+	reported.Usage = llm.UnknownUsageEvidence()
+	reported.ProviderReportedCostUSD = &reportedCost
+	_, err = tracker.RecordAttempt(reported)
+	require.NoError(t, err)
+	agent := core.NewAgentImpl("provenance", noopLoop{}, core.WithHistory([]core.AgentMessage{
+		{Role: "user", Content: "request"},
+		{Role: "assistant", Content: "response"},
+	}))
+	assembly := &AgentAssembly{
+		CoreRuntime:          CoreRuntime{Agent: agent},
+		ProductionResilience: ProductionResilience{CostTracker: tracker},
+		SessionManagement:    SessionManagement{Estimator: compaction.NewHeuristicTokenEstimator()},
+		ModelConfig:          ModelConfig{ContextWindow: 8192},
+	}
+	stream := core.NewEventStream(8)
+	emitTokenUsageEvent(stream, assembly)
+
+	select {
+	case event := <-stream.Events():
+		require.NotNil(t, event.TokenUsage)
+		assert.Equal(t, "reported", string(event.TokenUsage.UsageSource))
+		assert.Equal(t, []core.TokenUsageProviderModel{
+			{ProviderID: "actual-provider", ModelID: "gpt-4o"},
+			{ProviderID: "reported-provider", ModelID: "custom-model"},
+		}, event.TokenUsage.ProviderModels)
+		assert.Equal(t, []core.TokenUsageCostSource{core.TokenUsageCostEstimated, core.TokenUsageCostReported}, event.TokenUsage.CostSources)
+		assert.Equal(t, []core.TokenUsagePriceSource{core.TokenUsagePriceDefaultTier, core.TokenUsagePriceProvider}, event.TokenUsage.PriceSources)
+		assert.Equal(t, 1, event.TokenUsage.UnknownUsageAttempts)
+		encoded, marshalErr := json.Marshal(event.TokenUsage)
+		require.NoError(t, marshalErr)
+		assert.NotContains(t, string(encoded), "candidate-private-marker")
+		assert.NotContains(t, string(encoded), "origin")
+	default:
+		t.Fatal("expected a token_usage event")
+	}
+}
+
 // TestEmitTokenUsageEvent_NoEstimatorNoUsage verifies that when there is no
-// API usage and no estimator, the function returns early without sending an
-// event.
+// API usage and no estimator, the function emits explicit unknown provenance.
 func TestEmitTokenUsageEvent_NoEstimatorNoUsage(t *testing.T) {
 	agent := core.NewAgentImpl("test", noopLoop{}, core.WithHistory([]core.AgentMessage{
 		{Role: "user", Content: "hello"},
@@ -112,9 +180,10 @@ func TestEmitTokenUsageEvent_NoEstimatorNoUsage(t *testing.T) {
 
 	select {
 	case ev := <-stream.Events():
-		t.Fatalf("expected no event, got: %+v", ev)
+		require.NotNil(t, ev.TokenUsage)
+		assert.Equal(t, "unknown", string(ev.TokenUsage.UsageSource))
 	default:
-		// Expected: no event sent.
+		t.Fatal("expected an explicit unknown token_usage event")
 	}
 }
 

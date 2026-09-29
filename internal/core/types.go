@@ -125,7 +125,51 @@ func cloneAgentEvent(event AgentEvent) AgentEvent {
 		truncated := *event.SourceTruncated
 		event.SourceTruncated = &truncated
 	}
+	if event.TokenUsage != nil {
+		usage := *event.TokenUsage
+		usage.ProviderModels = append([]TokenUsageProviderModel(nil), event.TokenUsage.ProviderModels...)
+		usage.CostSources = append([]TokenUsageCostSource(nil), event.TokenUsage.CostSources...)
+		usage.PriceSources = append([]TokenUsagePriceSource(nil), event.TokenUsage.PriceSources...)
+		event.TokenUsage = &usage
+	}
 	return event
+}
+
+// TokenUsageSource identifies whether the displayed token counts came from a
+// provider response, local estimate, or no usable evidence.
+type TokenUsageSource string
+
+const (
+	TokenUsageSourceReported  TokenUsageSource = "reported"
+	TokenUsageSourceEstimated TokenUsageSource = "estimated"
+	TokenUsageSourceUnknown   TokenUsageSource = "unknown"
+)
+
+// TokenUsageCostSource describes the evidence behind accumulated cost.
+type TokenUsageCostSource string
+
+const (
+	TokenUsageCostReported  TokenUsageCostSource = "reported"
+	TokenUsageCostEstimated TokenUsageCostSource = "estimated"
+	TokenUsageCostUnknown   TokenUsageCostSource = "unknown"
+)
+
+// TokenUsagePriceSource names a safe pricing source without exposing price
+// configuration contents or provider endpoint data.
+type TokenUsagePriceSource string
+
+const (
+	TokenUsagePriceProvider       TokenUsagePriceSource = "provider"
+	TokenUsagePriceDefaultTier    TokenUsagePriceSource = "default_tier"
+	TokenUsagePriceConfiguredTier TokenUsagePriceSource = "configured_tier"
+	TokenUsagePriceUnknown        TokenUsagePriceSource = "unknown"
+)
+
+// TokenUsageProviderModel identifies a provider/model pair that contributed to
+// the usage summary. Endpoint and credential data are intentionally omitted.
+type TokenUsageProviderModel struct {
+	ProviderID string `json:"provider_id"`
+	ModelID    string `json:"model_id"`
 }
 
 // TokenUsage carries token consumption and cost data for a token_usage event.
@@ -142,6 +186,14 @@ type TokenUsage struct {
 	UnknownUsageAttempts int `json:"unknown_usage_attempts,omitempty"`
 	// UnknownCostAttempts counts provider attempts without an authoritative or estimated cost.
 	UnknownCostAttempts int `json:"unknown_cost_attempts,omitempty"`
+	// UsageSource identifies the evidence behind the displayed token counts.
+	UsageSource TokenUsageSource `json:"usage_source,omitempty"`
+	// CostSources lists the distinct evidence classes contributing to Cost.
+	CostSources []TokenUsageCostSource `json:"cost_sources,omitempty"`
+	// PriceSources lists the distinct safe sources used to price provider attempts.
+	PriceSources []TokenUsagePriceSource `json:"price_sources,omitempty"`
+	// ProviderModels lists actual resolved provider/model pairs in the attempt ledger.
+	ProviderModels []TokenUsageProviderModel `json:"provider_models,omitempty"`
 }
 
 // DurablePublicationState describes the durable visibility of a run result.

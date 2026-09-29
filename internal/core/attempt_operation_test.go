@@ -232,6 +232,71 @@ func TestLoopOwnsRetryPolicyDecisionForActiveOperation(t *testing.T) {
 	require.Empty(t, middlewarePolicy.calls(), "active retry middleware must not make policy decisions")
 }
 
+func TestLoopRetryStreamIncrementalEventsCarryRunAndTranscriptCoordinates(t *testing.T) {
+	var requests int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests++
+		if requests == 1 {
+			http.Error(w, "temporary provider failure", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"retried response\"}}]}\n\n")
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer server.Close()
+
+	registry := llm.NewProviderRegistry()
+	require.NoError(t, registry.Register(llm.NewEinoProvider(
+		llm.WithProviderName("core-retry-coordinate-test"),
+		llm.WithHTTPClient(server.Client()),
+	)))
+	resolved, err := registry.SnapshotResolver().ResolveModel(context.Background(), llm.ModelRequest{
+		ProviderID: "core-retry-coordinate-test",
+		ModelID:    "core-retry-coordinate-model",
+		Endpoint:   server.URL,
+	})
+	require.NoError(t, err)
+	model, cleanup, err := resolved.Build(context.Background())
+	require.NoError(t, err)
+	defer cleanup()
+
+	policy := &operationControlledRetryPolicy{allowedRetries: 1}
+	loop := NewLoopAgent(
+		WithLLM(model),
+		WithMaxIterations(1),
+		WithProviderRetryPolicy(policy),
+	)
+	stream := &collectingEventStream{}
+	result, err := loop.RunCanonical(withRunID(context.Background(), "run-retry-coordinate"), Submission{Content: "retry this stream"}, stream)
+	require.NoError(t, err)
+	require.NotEmpty(t, result.Transcript)
+	require.Equal(t, 2, requests, "Core should retry the first transient HTTP failure once")
+
+	var incremental []AgentEvent
+	var complete []AgentEvent
+	for _, event := range stream.collected() {
+		if event.Kind != "message" {
+			continue
+		}
+		if event.Incremental {
+			incremental = append(incremental, event)
+		} else {
+			complete = append(complete, event)
+		}
+	}
+	require.Len(t, incremental, 1, "the failed request must not publish a partial event")
+	require.Len(t, complete, 1)
+	for _, event := range []AgentEvent{incremental[0], complete[0]} {
+		require.Equal(t, "run-retry-coordinate", event.RunID)
+		require.NotNil(t, event.CanonicalTranscriptIndex)
+		require.Equal(t, uint64(1), *event.CanonicalTranscriptIndex, "the assistant row follows the input at canonical index zero")
+	}
+	require.Equal(t, "retried response", incremental[0].Content)
+	require.Equal(t, "retried response", complete[0].Content)
+}
+
 func TestLoopModelCyclerUsesCoreAuthorityForSelectedAndPrimaryDispatches(t *testing.T) {
 	var requestModels []string
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
