@@ -91,6 +91,31 @@ func TestAuditTrail_AppendOnly(t *testing.T) {
 	}
 }
 
+func TestAuditTrailSupportsOwnerSharedProjectAuditDirectory(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("advisory file locks are supported on Darwin and Linux")
+	}
+	dir := filepath.Join(t.TempDir(), ".go-cli", "audit")
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.Chmod(dir, 0o755))
+	ts := time.Date(2026, 8, 9, 12, 0, 0, 0, time.UTC)
+	first := NewAuditTrail(dir)
+	second := NewAuditTrail(dir)
+
+	require.NoError(t, first.Record(AuditEntry{Timestamp: ts, Tool: "first"}))
+	require.NoError(t, second.Record(AuditEntry{Timestamp: ts, Tool: "second"}))
+	entries, err := first.ReadEntries(ts)
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+
+	parentInfo, err := os.Stat(dir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o755), parentInfo.Mode().Perm(), "the project audit directory remains unchanged")
+	lockDirInfo, err := os.Stat(filepath.Join(dir, ".go-cli-audit-locks"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), lockDirInfo.Mode().Perm())
+}
+
 // TestAuditTrail_NilSafe verifies that a nil AuditTrail does not panic.
 func TestAuditTrail_NilSafe(t *testing.T) {
 	var trail *AuditTrail
@@ -192,7 +217,7 @@ func holdApprovalAuditLock(t *testing.T, path string) func() {
 	release := make(chan struct{})
 	done := make(chan error, 1)
 	go func() {
-		done <- privatefile.WithExclusiveLock(context.Background(), path, func() error {
+		done <- privatefile.WithAuditExclusiveLock(context.Background(), path, func() error {
 			close(locked)
 			<-release
 			return nil
@@ -263,6 +288,7 @@ func TestAuditTrailSerializesCrossProcessAppend(t *testing.T) {
 		t.Skip("cross-process advisory locks are supported on Darwin and Linux")
 	}
 	dir := privateAuditTestDir(t)
+	require.NoError(t, os.Chmod(dir, 0o755), "cross-process locking must hold for an owner-owned shared project directory")
 	opened := filepath.Join(dir, "opened")
 	attempted := filepath.Join(dir, "attempted")
 	complete := filepath.Join(dir, "complete")

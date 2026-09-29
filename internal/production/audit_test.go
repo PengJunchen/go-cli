@@ -48,6 +48,32 @@ func TestAuditLogLogAndQueryRoundTrip(t *testing.T) {
 	assert.Equal(t, "u1", entries[0].UserID)
 }
 
+func TestAuditLogDefaultPathSupportsOwnerSharedConfigDirectory(t *testing.T) {
+	if runtime.GOOS != "darwin" && runtime.GOOS != "linux" {
+		t.Skip("advisory file locks are supported on Darwin and Linux")
+	}
+	dir := filepath.Join(t.TempDir(), ".go-cli")
+	require.NoError(t, os.Mkdir(dir, 0o755))
+	require.NoError(t, os.Chmod(dir, 0o755))
+	path := filepath.Join(dir, "audit.jsonl")
+	first := NewDefaultAuditLog(path)
+	second := NewDefaultAuditLog(path)
+	ctx := context.Background()
+
+	require.NoError(t, first.Log(ctx, AuditEntry{Operation: "first"}))
+	require.NoError(t, second.Log(ctx, AuditEntry{Operation: "second"}))
+	entries, err := first.Query(ctx, AuditFilter{})
+	require.NoError(t, err)
+	require.Len(t, entries, 2)
+
+	parentInfo, err := os.Stat(dir)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o755), parentInfo.Mode().Perm(), "the config directory remains unchanged")
+	lockDirInfo, err := os.Stat(filepath.Join(dir, ".go-cli-audit-locks"))
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0o700), lockDirInfo.Mode().Perm())
+}
+
 func TestAuditLogFilters(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx := context.Background()

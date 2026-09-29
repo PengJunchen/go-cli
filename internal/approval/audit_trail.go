@@ -134,7 +134,7 @@ func (a *AuditTrail) Record(entry AuditEntry) error {
 	}
 	lockCtx, cancel := context.WithTimeout(context.Background(), a.auditLockTimeout())
 	defer cancel()
-	err := privatefile.WithExclusiveLock(lockCtx, filename, func() error {
+	err := privatefile.WithAuditExclusiveLock(lockCtx, filename, func() error {
 		if err := a.refreshChain(filename); err != nil {
 			return err
 		}
@@ -200,7 +200,7 @@ func (a *AuditTrail) ReadEntries(day time.Time) ([]AuditEntry, error) {
 	var fingerprintValid bool
 	lockCtx, cancel := context.WithTimeout(context.Background(), a.auditLockTimeout())
 	defer cancel()
-	err := privatefile.WithExclusiveLock(lockCtx, filename, func() error {
+	err := privatefile.WithAuditExclusiveLock(lockCtx, filename, func() error {
 		before, beforeErr := privatefile.FingerprintFile(filename)
 		var readErr error
 		entries, lastHash, readErr = readApprovalAuditFile(filename)
