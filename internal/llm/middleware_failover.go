@@ -5,6 +5,7 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 )
 
@@ -119,9 +120,22 @@ func (m *failoverModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 	models := m.orderedModels()
 	var lastErr error
 	for i, model := range models {
-		ch, err := model.Stream(ctx, msgs, opts...)
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		attemptCtx, cancel := context.WithCancelCause(ctx)
+		ch, err := model.Stream(attemptCtx, msgs, opts...)
+		if err == nil && ch != nil {
+			return forwardMessageStreamAttempt(ctx, cancel, ch), nil
+		}
 		if err == nil {
-			return ch, nil
+			err = errors.New("failover: model returned a nil stream without an error")
+			cancelStreamAttempt(ctx, cancel, err)
+			return nil, err
+		}
+		cancelStreamAttempt(ctx, cancel, err)
+		if ch != nil {
+			drainMessageChunks(ch)
 		}
 		lastErr = err
 		if ContinuationNoReplay(ctx) {

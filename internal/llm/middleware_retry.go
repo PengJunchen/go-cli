@@ -300,15 +300,28 @@ func (r *retryModel) Stream(ctx context.Context, msgs []Message, opts ...Option)
 		if err := ctx.Err(); err != nil {
 			return nil, err
 		}
-		ch, err := r.next.Stream(ctx, msgs, opts...)
-		if err == nil {
+		attemptCtx, cancel := context.WithCancelCause(ctx)
+		ch, err := r.next.Stream(attemptCtx, msgs, opts...)
+		if err == nil && ch != nil {
 			if attempt > 0 {
 				r.logger.Debug("middleware.retry",
 					"status", "recovered_stream",
 					"attempt", attempt,
 				)
 			}
-			return ch, nil
+			return forwardMessageStreamAttempt(ctx, cancel, ch), nil
+		}
+		if err == nil {
+			err = errors.New("retry: model returned a nil stream without an error")
+			cancelStreamAttempt(ctx, cancel, err)
+			return nil, err
+		}
+		cancelStreamAttempt(ctx, cancel, err)
+		if ch != nil {
+			drainMessageChunks(ch)
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
 		if ContinuationNoReplay(ctx) {
 			return nil, err

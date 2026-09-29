@@ -6,7 +6,116 @@
 // against them.
 package llm
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// LocalStreamAbortCause marks cancellation initiated by a stream consumer
+// because the stream could not be accepted locally. Its fixed error text keeps
+// provider response details out of cancellation diagnostics, while Unwrap
+// preserves the original cause for errors.Is and errors.As classification.
+type LocalStreamAbortCause struct {
+	cause error
+}
+
+// NewLocalStreamAbortCause wraps the reason a stream consumer stopped reading.
+func NewLocalStreamAbortCause(cause error) *LocalStreamAbortCause {
+	return &LocalStreamAbortCause{cause: cause}
+}
+
+// Error returns a stable, provider-independent description.
+func (*LocalStreamAbortCause) Error() string { return "local stream abort" }
+
+// Unwrap exposes the local failure for typed and sentinel error classification.
+func (c *LocalStreamAbortCause) Unwrap() error { return c.cause }
+
+func cancelStreamAttempt(parent context.Context, cancel context.CancelCauseFunc, cause error) {
+	if inherited := context.Cause(parent); inherited != nil {
+		cancel(inherited)
+		return
+	}
+	if cause == nil {
+		cause = context.Canceled
+	}
+	cancel(NewLocalStreamAbortCause(cause))
+}
+
+func drainMessageChunks(ch <-chan MessageChunk) {
+	if ch == nil {
+		return
+	}
+	for range ch {
+	}
+}
+
+// forwardMessageStreamAttempt owns a successful attempt channel until it closes
+// so the attempt context can be released without canceling the live stream.
+func forwardMessageStreamAttempt(parent context.Context, cancel context.CancelCauseFunc, source <-chan MessageChunk) <-chan MessageChunk {
+	out := make(chan MessageChunk, cap(source))
+	go func() {
+		defer close(out)
+		var finalChunk *MessageChunk
+		fail := func(failure error) {
+			select {
+			case out <- MessageChunk{Error: failure}:
+			case <-parent.Done():
+			}
+			cancelStreamAttempt(parent, cancel, failure)
+			drainMessageChunks(source)
+		}
+		for {
+			var chunk MessageChunk
+			var ok bool
+			select {
+			case <-parent.Done():
+				cause := context.Cause(parent)
+				if cause == nil {
+					cause = parent.Err()
+				}
+				cancelStreamAttempt(parent, cancel, cause)
+				drainMessageChunks(source)
+				return
+			case chunk, ok = <-source:
+			}
+			if !ok {
+				cancel(nil)
+				if finalChunk != nil {
+					select {
+					case out <- *finalChunk:
+					case <-parent.Done():
+					}
+				}
+				return
+			}
+			if chunk.Error != nil {
+				fail(chunk.Error)
+				return
+			}
+			if finalChunk != nil {
+				fail(errors.New("llm: stream emitted data after its final chunk"))
+				return
+			}
+			if chunk.Final {
+				final := chunk
+				finalChunk = &final
+				continue
+			}
+			select {
+			case out <- chunk:
+			case <-parent.Done():
+				cause := context.Cause(parent)
+				if cause == nil {
+					cause = parent.Err()
+				}
+				cancelStreamAttempt(parent, cancel, cause)
+				drainMessageChunks(source)
+				return
+			}
+		}
+	}()
+	return out
+}
 
 // Role identifies the speaker of a message in a conversation.
 type Role string
@@ -225,7 +334,8 @@ type BaseChatModel interface {
 	// Generate produces a complete response for the given conversation.
 	Generate(ctx context.Context, msgs []Message, opts ...Option) (*Message, error)
 	// Stream produces the conversation response as a chunk channel. The
-	// channel must eventually be closed by the implementation.
+	// implementation must close the channel only after it has stopped sending
+	// and finished cleaning up request resources such as response bodies.
 	Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error)
 }
 

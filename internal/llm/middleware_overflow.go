@@ -157,36 +157,49 @@ func (m *overflowRecoveryModel) Stream(ctx context.Context, msgs []Message, opts
 	currentMsgs := msgs
 
 	for attempt := 0; attempt <= m.mw.maxRetries; attempt++ {
-		streamCtx, cancel := context.WithCancel(ctx)
+		streamCtx, cancel := context.WithCancelCause(ctx)
 		ch, err := m.inner.Stream(streamCtx, currentMsgs, opts...)
+		if err == nil && ch == nil {
+			err = errors.New("overflow: inner model returned a nil stream")
+			cancelStreamAttempt(ctx, cancel, err)
+			return nil, err
+		}
 		if err == nil {
-			if ch == nil {
-				cancel()
-				return nil, errors.New("overflow: inner model returned a nil stream")
-			}
 			// Success: forward bounded chunks in real-time, but hold the final
 			// marker until any middleware-owned continuation has completed.
 			outCh := make(chan MessageChunk, 64)
 			go func() {
 				defer close(outCh)
-				defer cancel()
 				var contentBuf strings.Builder
 				completeContent := ""
 				var contentBytes int
 				var chunkCount int
 				var finalChunk *MessageChunk
-				fail := func(err error) { sendStreamError(streamCtx, outCh, err) }
+				sourceClosed := false
+				fail := func(failure error) {
+					sendStreamError(streamCtx, outCh, failure)
+					cancelStreamAttempt(ctx, cancel, failure)
+					if !sourceClosed {
+						drainMessageChunks(ch)
+						sourceClosed = true
+					}
+				}
 
 				for {
 					var chunk MessageChunk
 					var ok bool
 					select {
 					case <-streamCtx.Done():
-						fail(streamCtx.Err())
+						cause := context.Cause(streamCtx)
+						if cause == nil {
+							cause = streamCtx.Err()
+						}
+						fail(cause)
 						return
 					case chunk, ok = <-ch:
 					}
 					if !ok {
+						sourceClosed = true
 						break
 					}
 					if chunk.Error != nil {
@@ -194,7 +207,11 @@ func (m *overflowRecoveryModel) Stream(ctx context.Context, msgs []Message, opts
 						return
 					}
 					if streamCtx.Err() != nil {
-						fail(streamCtx.Err())
+						cause := context.Cause(streamCtx)
+						if cause == nil {
+							cause = streamCtx.Err()
+						}
+						fail(cause)
 						return
 					}
 					if finalChunk != nil {
@@ -222,7 +239,11 @@ func (m *overflowRecoveryModel) Stream(ctx context.Context, msgs []Message, opts
 						select {
 						case outCh <- contentOnly:
 						case <-streamCtx.Done():
-							fail(streamCtx.Err())
+							cause := context.Cause(streamCtx)
+							if cause == nil {
+								cause = streamCtx.Err()
+							}
+							fail(cause)
 							return
 						}
 					}
@@ -234,7 +255,11 @@ func (m *overflowRecoveryModel) Stream(ctx context.Context, msgs []Message, opts
 				}
 
 				if streamCtx.Err() != nil {
-					fail(streamCtx.Err())
+					cause := context.Cause(streamCtx)
+					if cause == nil {
+						cause = streamCtx.Err()
+					}
+					fail(cause)
 					return
 				}
 				if finalChunk == nil {
@@ -272,6 +297,11 @@ func (m *overflowRecoveryModel) Stream(ctx context.Context, msgs []Message, opts
 							select {
 							case outCh <- MessageChunk{Role: RoleAssistant, Content: extra}:
 							case <-streamCtx.Done():
+								cause := context.Cause(streamCtx)
+								if cause == nil {
+									cause = streamCtx.Err()
+								}
+								fail(cause)
 								return
 							}
 						}
@@ -308,14 +338,20 @@ func (m *overflowRecoveryModel) Stream(ctx context.Context, msgs []Message, opts
 				}
 				select {
 				case outCh <- *finalChunk:
+					cancel(nil)
 				case <-streamCtx.Done():
-					fail(streamCtx.Err())
+					cause := context.Cause(streamCtx)
+					if cause == nil {
+						cause = streamCtx.Err()
+					}
+					fail(cause)
 					return
 				}
 			}()
 			return outCh, nil
 		}
-		cancel()
+		cancelStreamAttempt(ctx, cancel, err)
+		drainMessageChunks(ch)
 
 		if !isOverflowError(err) {
 			return nil, err
