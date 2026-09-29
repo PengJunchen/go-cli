@@ -26,7 +26,6 @@ import (
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/mock"
 	"github.com/pengjunchen/go-cli/internal/tools"
-	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
 // =============================================================================
@@ -345,50 +344,13 @@ func TestET_Phase22_AllCapabilities_AC7_Phase19ComponentsNotNil(t *testing.T) {
 // AC-8: Config-Driven Tracing — Tracer non-nil when enabled, JSONL file created
 // =============================================================================
 
-// TestET_Phase22_AllCapabilities_AC8_ConfigDrivenTracing verifies that when
-// config has tracing.enabled=true with exporter=jsonl, the assembled Tracer is
-// non-nil and the JSONL trace file is created on disk after a span is emitted.
+// TestET_Phase22_AllCapabilities_AC8_ConfigDrivenTracing verifies that the real
+// CLI invocation loads enabled JSONL tracing from user config and writes spans.
 func TestET_Phase22_AllCapabilities_AC8_ConfigDrivenTracing(t *testing.T) {
-	dir := t.TempDir()
-
-	cfg := phase33TestConfig()
-	tracingEnabled := true
-	cfg.Tracing.Enabled = &tracingEnabled
-	cfg.Tracing.Exporter = "jsonl"
-	cfg.Tracing.FilePath = dir
-
-	assembly := phase33Assemble(t, cfg)
-	require.NotNil(t, assembly.Tracer, "Tracer must be non-nil when tracing is enabled")
-
-	// The assembly process emits an "assemble.agent" span via
-	// SpanFromContext, but the caller's context does not carry the Tracer, so
-	// that span is a noop. Manually emit a span through the Tracer to verify
-	// the JSONL exporter writes to disk.
-	span, _ := assembly.Tracer.Start(context.Background(), "e2e.test.span", tracing.SpanKindInternal)
-	span.End()
-
-	// span.End() launches a goroutine to export asynchronously, so poll the
-	// trace file until it contains data (or timeout).
-	traceFile := filepath.Join(dir, "main.jsonl")
-
-	var traceData []byte
-	deadline := time.Now().Add(3 * time.Second)
-	for time.Now().Before(deadline) {
-		data, statErr := os.ReadFile(traceFile)
-		if statErr == nil && len(data) > 0 {
-			traceData = data
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-
-	// Verify the trace file exists and is non-empty.
-	info, err := os.Stat(traceFile)
-	require.NoError(t, err, "JSONL trace file should exist at %s", traceFile)
-	assert.Greater(t, info.Size(), int64(0), "trace file should be non-empty")
-
-	// Verify the file contains valid JSON lines.
-	require.NotEmpty(t, traceData, "trace file should contain span data")
+	spans := requireRealCLIInvocationTrace(t)
+	require.Len(t, spans, 2, "version command should emit the root and command dispatch spans")
+	assert.ElementsMatch(t, []string{"cli.invocation", "command.dispatch"}, []string{spans[0].Name, spans[1].Name})
+	assert.Equal(t, spans[0].TraceID, spans[1].TraceID)
 }
 
 // =============================================================================

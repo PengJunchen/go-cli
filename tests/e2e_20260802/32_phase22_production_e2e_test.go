@@ -320,22 +320,18 @@ func TestET_Phase22_Production_HookChain(t *testing.T) {
 }
 
 // =============================================================================
-// AC-9: Tracing config — Tracer non-nil when enabled, nil when disabled
+// AC-9: Tracing config — standalone assembly leaves tracer ownership to CLI
 // =============================================================================
 
-// TestET_Phase22_Production_TracingEnabled verifies that when config has
-// tracing.enabled = true, the assembled Tracer is non-nil.
-func TestET_Phase22_Production_TracingEnabled(t *testing.T) {
-	dir := t.TempDir()
-
+// TestET_Phase22_Production_StandaloneAssemblyDefersTracingOwnership verifies
+// that standalone assembly leaves tracer ownership to the CLI invocation.
+func TestET_Phase22_Production_StandaloneAssemblyDefersTracingOwnership(t *testing.T) {
 	cfg := phase22ProdTestConfig()
 	tracingEnabled := true
 	cfg.Tracing.Enabled = &tracingEnabled
-	cfg.Tracing.Exporter = "jsonl"
-	cfg.Tracing.FilePath = dir
 
 	assembly := phase22ProdAssemble(t, cfg)
-	require.NotNil(t, assembly.Tracer, "Tracer must be non-nil when tracing is enabled")
+	assert.Nil(t, assembly.Tracer, "standalone assembly must not create a second invocation tracer")
 }
 
 // TestET_Phase22_Production_TracingDisabled verifies that when tracing is not
