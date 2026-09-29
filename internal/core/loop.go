@@ -1145,17 +1145,38 @@ func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel,
 }
 
 func (l *LoopAgent) streamGenerateWithBudget(ctx context.Context, model llm.BaseChatModel, messages []llm.Message, toolOpts []llm.Option, es EventStream, budget *guardedStreamBudget, publishIncremental bool) (*llm.Message, error) {
-	streamCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
+	streamCtx, cancel := context.WithCancelCause(ctx)
 	ch, err := model.Stream(streamCtx, messages, toolOpts...)
 	if err != nil {
+		cause := context.Cause(ctx)
+		if cause == nil {
+			cancel(llm.NewLocalStreamAbortCause(err))
+		} else {
+			cancel(cause)
+		}
+		if ch != nil {
+			for range ch {
+			}
+		}
 		// Stream failed — propagate the error directly rather than falling
 		// back to Generate, because Generate would advance the model's
 		// call index a second time and return a different result.
 		return nil, err
 	}
 	if ch == nil {
-		return nil, fmt.Errorf("streamGenerate: nil channel from model")
+		err = fmt.Errorf("streamGenerate: nil channel from model")
+		cancel(llm.NewLocalStreamAbortCause(err))
+		return nil, err
+	}
+	abortAndDrain := func(failure error) {
+		cause := context.Cause(ctx)
+		if cause == nil {
+			cancel(llm.NewLocalStreamAbortCause(failure))
+		} else {
+			cancel(cause)
+		}
+		for range ch {
+		}
 	}
 
 	var contentBuf strings.Builder
@@ -1169,28 +1190,47 @@ func (l *LoopAgent) streamGenerateWithBudget(ctx context.Context, model llm.Base
 		var ok bool
 		select {
 		case <-streamCtx.Done():
-			return nil, fmt.Errorf("core: stream canceled: %w", streamCtx.Err())
+			cause := context.Cause(ctx)
+			if cause == nil {
+				cause = context.Cause(streamCtx)
+			}
+			if cause == nil {
+				cause = streamCtx.Err()
+			}
+			abortAndDrain(cause)
+			return nil, fmt.Errorf("core: stream canceled: %w", cause)
 		case chunk, ok = <-ch:
 		}
 		if !ok {
 			break
 		}
 		if chunk.Error != nil {
+			abortAndDrain(chunk.Error)
 			return nil, chunk.Error
 		}
 		if ctx.Err() != nil {
-			return nil, fmt.Errorf("core: stream canceled: %w", ctx.Err())
+			cause := context.Cause(ctx)
+			if cause == nil {
+				cause = ctx.Err()
+			}
+			abortAndDrain(cause)
+			return nil, fmt.Errorf("core: stream canceled: %w", cause)
 		}
 		if finalSeen {
-			return nil, errors.New("core: stream emitted data after its final chunk")
+			err = errors.New("core: stream emitted data after its final chunk")
+			abortAndDrain(err)
+			return nil, err
 		}
 		if budget != nil {
 			if err := budget.accountChunk(chunk); err != nil {
+				abortAndDrain(err)
 				return nil, err
 			}
 		}
 		if !chunk.Final && len(chunk.ToolCalls) > 0 {
-			return nil, errors.New("core: stream emitted tool calls before the final chunk")
+			err = errors.New("core: stream emitted tool calls before the final chunk")
+			abortAndDrain(err)
+			return nil, err
 		}
 		if chunk.Content != "" {
 			contentBuf.WriteString(chunk.Content)
@@ -1224,10 +1264,17 @@ func (l *LoopAgent) streamGenerateWithBudget(ctx context.Context, model llm.Base
 	}
 
 	if ctx.Err() != nil {
-		return nil, fmt.Errorf("core: stream canceled: %w", ctx.Err())
+		cause := context.Cause(ctx)
+		if cause == nil {
+			cause = ctx.Err()
+		}
+		abortAndDrain(cause)
+		return nil, fmt.Errorf("core: stream canceled: %w", cause)
 	}
 	if !finalSeen {
-		return nil, errors.New("core: stream ended without a final chunk")
+		err = errors.New("core: stream ended without a final chunk")
+		abortAndDrain(err)
+		return nil, err
 	}
 
 	response := &llm.Message{
@@ -1240,12 +1287,16 @@ func (l *LoopAgent) streamGenerateWithBudget(ctx context.Context, model llm.Base
 	if budget != nil {
 		candidateBytes, sizeErr := candidatePayloadBytes(response)
 		if sizeErr != nil {
+			cancel(llm.NewLocalStreamAbortCause(sizeErr))
 			return nil, sizeErr
 		}
 		if candidateBytes > guardedStreamMaxBytes {
-			return nil, fmt.Errorf("core: response segment exceeds %d-byte candidate limit", guardedStreamMaxBytes)
+			err = fmt.Errorf("core: response segment exceeds %d-byte candidate limit", guardedStreamMaxBytes)
+			cancel(llm.NewLocalStreamAbortCause(err))
+			return nil, err
 		}
 	}
+	cancel(nil)
 	return response, nil
 }
 

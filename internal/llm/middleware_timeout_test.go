@@ -95,7 +95,8 @@ func TestTimeoutModelMiddleware_StreamRejectsDataAfterFinal(t *testing.T) {
 		chunks = append(chunks, chunk)
 	}
 	require.Len(t, chunks, 2)
-	require.True(t, chunks[0].Final)
+	require.False(t, chunks[0].Final, "the final marker must be held until source close")
+	require.Equal(t, "complete", chunks[0].Content)
 	require.ErrorContains(t, chunks[1].Error, "emitted data after its final chunk")
 }
 
@@ -122,7 +123,8 @@ func TestTimeoutModelMiddleware_StreamPreservesErrorAfterFinal(t *testing.T) {
 		chunks = append(chunks, chunk)
 	}
 	require.Len(t, chunks, 2)
-	require.True(t, chunks[0].Final)
+	require.False(t, chunks[0].Final, "the final marker must be held until source close")
+	require.Equal(t, "complete", chunks[0].Content)
 	require.ErrorIs(t, chunks[1].Error, lateErr)
 }
 
@@ -152,7 +154,8 @@ func TestTimeoutModelMiddleware_FinalMustBeFollowedByChannelClose(t *testing.T) 
 		chunks = append(chunks, chunk)
 	}
 	require.Len(t, chunks, 2)
-	require.True(t, chunks[0].Final)
+	require.False(t, chunks[0].Final, "the final marker must be held until source close")
+	require.Equal(t, "terminal", chunks[0].Content)
 	require.ErrorContains(t, chunks[1].Error, "idle exceeded")
 	select {
 	case <-innerStopped:

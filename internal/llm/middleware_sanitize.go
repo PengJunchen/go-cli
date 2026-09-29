@@ -5,6 +5,7 @@ package llm
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"regexp"
 	"strings"
@@ -105,19 +106,33 @@ func (m *sanitizeModel) Generate(ctx context.Context, msgs []Message, opts ...Op
 // model. Edge whitespace is intentionally preserved so that content split
 // across chunks is not corrupted.
 func (m *sanitizeModel) Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
-	ch, err := m.next.Stream(ctx, msgs, opts...)
+	streamCtx, cancel := context.WithCancelCause(ctx)
+	ch, err := m.next.Stream(streamCtx, msgs, opts...)
 	if err != nil {
+		cancelStreamAttempt(ctx, cancel, err)
+		drainMessageChunks(ch)
 		return nil, err
 	}
-	out := make(chan MessageChunk)
+	if ch == nil {
+		err = errors.New("sanitize: model returned a nil stream")
+		cancelStreamAttempt(ctx, cancel, err)
+		return nil, err
+	}
+	out := make(chan MessageChunk, 1)
 	go func() {
 		defer close(out)
+		abort := func(cause error) {
+			cancelStreamAttempt(ctx, cancel, cause)
+			drainMessageChunks(ch)
+		}
 		for {
 			select {
-			case <-ctx.Done():
+			case <-streamCtx.Done():
+				abort(context.Cause(streamCtx))
 				return
 			case chunk, ok := <-ch:
 				if !ok {
+					cancel(nil)
 					return
 				}
 				original := chunk.Content
@@ -126,9 +141,15 @@ func (m *sanitizeModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 					m.logger.Debug("sanitize.stream.modified",
 						"before_len", len(original), "after_len", len(chunk.Content))
 				}
+				if chunk.Error != nil {
+					out <- chunk
+					abort(chunk.Error)
+					return
+				}
 				select {
 				case out <- chunk:
-				case <-ctx.Done():
+				case <-streamCtx.Done():
+					abort(context.Cause(streamCtx))
 					return
 				}
 			}

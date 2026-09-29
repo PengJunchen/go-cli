@@ -113,40 +113,77 @@ func (m *outputGuardModel) checkCandidate(ctx context.Context, text string) (*pr
 }
 
 func (m *outputGuardModel) streamAndGuardCompleteResponse(ctx context.Context, msgs []llm.Message, opts ...llm.Option) (<-chan llm.MessageChunk, error) {
-	streamCtx, cancel := context.WithCancel(ctx)
+	streamCtx, cancel := context.WithCancelCause(ctx)
 	inner, err := m.inner.Stream(streamCtx, msgs, opts...)
 	if err != nil {
-		cancel()
+		cause := context.Cause(ctx)
+		if cause == nil {
+			cancel(llm.NewLocalStreamAbortCause(err))
+		} else {
+			cancel(cause)
+		}
+		if inner != nil {
+			for range inner {
+			}
+		}
 		return nil, err
 	}
 	if inner == nil {
-		cancel()
-		return nil, errors.New("output guard: model returned a nil stream")
+		err = errors.New("output guard: model returned a nil stream")
+		cancel(llm.NewLocalStreamAbortCause(err))
+		return nil, err
 	}
 	out := make(chan llm.MessageChunk, 2)
 	go func() {
 		defer close(out)
-		defer cancel()
 		var content strings.Builder
 		var contentBytes int
 		var chunkCount int
 		var final *llm.MessageChunk
+		sourceClosed := false
+		errorSent := false
 		fail := func(err error) {
+			if errorSent {
+				return
+			}
+			errorSent = true
+			if len(out) == cap(out) {
+				select {
+				case <-out:
+				default:
+				}
+			}
 			select {
 			case out <- llm.MessageChunk{Error: err}:
 			default:
+			}
+			if !sourceClosed {
+				cause := context.Cause(ctx)
+				if cause == nil {
+					cancel(llm.NewLocalStreamAbortCause(err))
+				} else {
+					cancel(cause)
+				}
+				for range inner {
+				}
+				sourceClosed = true
 			}
 		}
 		for {
 			var chunk llm.MessageChunk
 			var ok bool
 			select {
-			case <-streamCtx.Done():
-				fail(fmt.Errorf("output guard: stream canceled: %w", streamCtx.Err()))
+			case <-ctx.Done():
+				cause := context.Cause(ctx)
+				if cause == nil {
+					cause = ctx.Err()
+				}
+				fail(fmt.Errorf("output guard: stream canceled: %w", cause))
 				return
 			case chunk, ok = <-inner:
 			}
 			if !ok {
+				sourceClosed = true
 				break
 			}
 			if chunk.Error != nil {
@@ -176,8 +213,12 @@ func (m *outputGuardModel) streamAndGuardCompleteResponse(ctx context.Context, m
 				final = &copy
 			}
 		}
-		if streamCtx.Err() != nil {
-			fail(fmt.Errorf("output guard: stream canceled: %w", streamCtx.Err()))
+		if ctx.Err() != nil {
+			cause := context.Cause(ctx)
+			if cause == nil {
+				cause = ctx.Err()
+			}
+			fail(fmt.Errorf("output guard: stream canceled: %w", cause))
 			return
 		}
 		if final == nil {
@@ -219,16 +260,24 @@ func (m *outputGuardModel) streamAndGuardCompleteResponse(ctx context.Context, m
 		if text != "" {
 			select {
 			case out <- llm.MessageChunk{Role: llm.RoleAssistant, Content: text}:
-			case <-streamCtx.Done():
-				fail(fmt.Errorf("output guard: stream canceled: %w", streamCtx.Err()))
+			case <-ctx.Done():
+				cause := context.Cause(ctx)
+				if cause == nil {
+					cause = ctx.Err()
+				}
+				fail(fmt.Errorf("output guard: stream canceled: %w", cause))
 				return
 			}
 		}
 		final.Content = ""
 		select {
 		case out <- *final:
-		case <-streamCtx.Done():
-			fail(fmt.Errorf("output guard: stream canceled: %w", streamCtx.Err()))
+		case <-ctx.Done():
+			cause := context.Cause(ctx)
+			if cause == nil {
+				cause = ctx.Err()
+			}
+			fail(fmt.Errorf("output guard: stream canceled: %w", cause))
 			return
 		}
 	}()

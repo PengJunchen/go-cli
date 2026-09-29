@@ -21,6 +21,16 @@ type sequenceStreamModel struct {
 
 type contextBlockedStreamModel struct {
 	stopped chan struct{}
+	release chan struct{}
+}
+
+type heldCoreBudgetAbortModel struct {
+	content    string
+	setupErr   error
+	nilNil     bool
+	release    <-chan struct{}
+	cancelled  chan error
+	cleanupEnd chan struct{}
 }
 
 func (*contextBlockedStreamModel) Generate(context.Context, []llm.Message, ...llm.Option) (*llm.Message, error) {
@@ -32,8 +42,30 @@ func (m *contextBlockedStreamModel) Stream(ctx context.Context, _ []llm.Message,
 	go func() {
 		<-ctx.Done()
 		close(m.stopped)
+		<-m.release
+		close(ch)
 	}()
 	return ch, nil
+}
+
+func (*heldCoreBudgetAbortModel) Generate(context.Context, []llm.Message, ...llm.Option) (*llm.Message, error) {
+	return nil, errors.New("unexpected Generate call")
+}
+
+func (m *heldCoreBudgetAbortModel) Stream(ctx context.Context, _ []llm.Message, _ ...llm.Option) (<-chan llm.MessageChunk, error) {
+	if m.nilNil {
+		return nil, nil
+	}
+	ch := make(chan llm.MessageChunk, 1)
+	ch <- llm.MessageChunk{Role: llm.RoleAssistant, Content: m.content}
+	go func() {
+		<-ctx.Done()
+		m.cancelled <- context.Cause(ctx)
+		<-m.release
+		close(m.cleanupEnd)
+		close(ch)
+	}()
+	return ch, m.setupErr
 }
 
 func (m *sequenceStreamModel) Generate(context.Context, []llm.Message, ...llm.Option) (*llm.Message, error) {
@@ -209,18 +241,121 @@ func TestGuardedStreamBudgetIgnoresChunkFramingAndEmptyContent(t *testing.T) {
 	require.Zero(t, emptyChunks.bytes, "empty fragments consume only the independent chunk-count budget")
 }
 
-func TestStreamGenerateCancellationDoesNotWaitForInnerChannelClose(t *testing.T) {
-	model := &contextBlockedStreamModel{stopped: make(chan struct{})}
+func TestStreamGenerateCancellationWaitsForInnerChannelClose(t *testing.T) {
+	model := &contextBlockedStreamModel{stopped: make(chan struct{}), release: make(chan struct{})}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	loop := NewLoopAgent()
-	_, err := loop.streamGenerateWithBudget(ctx, model, nil, nil, nil, &guardedStreamBudget{}, false)
-	require.ErrorIs(t, err, context.Canceled)
+	finished := make(chan error, 1)
+	go func() {
+		_, err := loop.streamGenerateWithBudget(ctx, model, nil, nil, nil, &guardedStreamBudget{}, false)
+		finished <- err
+	}()
 	select {
 	case <-model.stopped:
 	case <-time.After(time.Second):
 		t.Fatal("inner stream did not observe cancellation")
 	}
+	select {
+	case err := <-finished:
+		t.Fatalf("stream returned before source close: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(model.release)
+	select {
+	case err := <-finished:
+		require.ErrorIs(t, err, context.Canceled)
+	case <-time.After(time.Second):
+		t.Fatal("stream did not return after source close")
+	}
+}
+
+func TestStreamGenerateBudgetAbortWaitsForInnerChannelClose(t *testing.T) {
+	release := make(chan struct{})
+	model := &heldCoreBudgetAbortModel{
+		content:    strings.Repeat("x", guardedStreamMaxBytes+1),
+		release:    release,
+		cancelled:  make(chan error, 1),
+		cleanupEnd: make(chan struct{}),
+	}
+	finished := make(chan error, 1)
+	go func() {
+		_, err := NewLoopAgent().streamGenerateWithBudget(context.Background(), model, nil, nil, nil, &guardedStreamBudget{}, false)
+		finished <- err
+	}()
+	select {
+	case cause := <-model.cancelled:
+		var localAbort *llm.LocalStreamAbortCause
+		require.ErrorAs(t, cause, &localAbort)
+		require.ErrorContains(t, cause, "local stream abort")
+	case <-time.After(time.Second):
+		t.Fatal("budget failure did not cancel the source with a typed local abort")
+	}
+	select {
+	case err := <-finished:
+		t.Fatalf("stream returned before source close: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-model.cleanupEnd:
+	case <-time.After(time.Second):
+		t.Fatal("source cleanup did not finish after release")
+	}
+	select {
+	case err := <-finished:
+		require.ErrorContains(t, err, "candidate limit")
+	case <-time.After(time.Second):
+		t.Fatal("stream did not return after source close")
+	}
+}
+
+func TestStreamGenerateSetupErrorJoinsReturnedChannel(t *testing.T) {
+	setupErr := errors.New("stream setup failed")
+	release := make(chan struct{})
+	model := &heldCoreBudgetAbortModel{
+		content:    "partial",
+		setupErr:   setupErr,
+		release:    release,
+		cancelled:  make(chan error, 1),
+		cleanupEnd: make(chan struct{}),
+	}
+	finished := make(chan error, 1)
+	go func() {
+		_, err := NewLoopAgent().streamGenerateWithBudget(context.Background(), model, nil, nil, nil, &guardedStreamBudget{}, false)
+		finished <- err
+	}()
+	select {
+	case cause := <-model.cancelled:
+		var localAbort *llm.LocalStreamAbortCause
+		require.ErrorAs(t, cause, &localAbort)
+		require.ErrorIs(t, cause, setupErr)
+	case <-time.After(time.Second):
+		t.Fatal("setup failure did not cancel the returned source")
+	}
+	select {
+	case err := <-finished:
+		t.Fatalf("stream returned before joining setup-error source: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-model.cleanupEnd:
+	case <-time.After(time.Second):
+		t.Fatal("source cleanup did not finish after release")
+	}
+	select {
+	case err := <-finished:
+		require.ErrorIs(t, err, setupErr)
+	case <-time.After(time.Second):
+		t.Fatal("stream did not return after joining setup-error source")
+	}
+}
+
+func TestStreamGenerateRejectsNilChannelWithoutError(t *testing.T) {
+	model := &heldCoreBudgetAbortModel{nilNil: true}
+	_, err := NewLoopAgent().streamGenerateWithBudget(context.Background(), model, nil, nil, nil, &guardedStreamBudget{}, false)
+	require.ErrorContains(t, err, "nil channel")
 }
 
 func TestStreamGenerateRejectsClosedStreamWithoutFinalChunk(t *testing.T) {

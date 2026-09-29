@@ -190,10 +190,11 @@ func TestLoopDetectStreamChecksContentAfterInputCloses(t *testing.T) {
 		received = append(received, chunk)
 	}
 	require.NoError(t, ctx.Err(), "closed input stream must terminate without waiting for cancellation")
-	require.Len(t, received, 1)
+	require.Len(t, received, 2)
 	require.Equal(t, "closed-stream-content", received[0].Content)
 	require.False(t, received[0].Final)
 	require.NoError(t, received[0].Error)
+	require.ErrorContains(t, received[1].Error, "ended without a final chunk")
 }
 
 // TestLoopDetectInitErrorReturnsError verifies that when the inner Stream

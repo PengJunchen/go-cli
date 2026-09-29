@@ -32,6 +32,41 @@ type assemblyStreamFixture struct {
 	modes    []bool
 }
 
+type assemblyStreamBodyCloseTransport struct {
+	base            http.RoundTripper
+	requestPaths    chan string
+	responseWrapped chan struct{}
+	closeStarted    chan struct{}
+	releaseClose    <-chan struct{}
+	closeOnce       sync.Once
+}
+
+type assemblyStreamBodyCloseGate struct {
+	io.ReadCloser
+	transport *assemblyStreamBodyCloseTransport
+}
+
+func (t *assemblyStreamBodyCloseTransport) RoundTrip(request *http.Request) (*http.Response, error) {
+	t.requestPaths <- request.URL.Path
+	response, err := t.base.RoundTrip(request)
+	if err != nil || !strings.Contains(request.URL.Path, "completions") {
+		return response, err
+	}
+	response.Body = &assemblyStreamBodyCloseGate{ReadCloser: response.Body, transport: t}
+	close(t.responseWrapped)
+	return response, nil
+}
+
+func (b *assemblyStreamBodyCloseGate) Close() error {
+	var closeErr error
+	b.transport.closeOnce.Do(func() {
+		closeErr = b.ReadCloser.Close()
+		close(b.transport.closeStarted)
+		<-b.transport.releaseClose
+	})
+	return closeErr
+}
+
 func newAssemblyStreamFixture(t *testing.T, handle func(http.ResponseWriter, *http.Request, int)) *assemblyStreamFixture {
 	t.Helper()
 	fixture := &assemblyStreamFixture{}
@@ -188,6 +223,93 @@ func TestOutputGuardRunsBeforeVisibleDelta(t *testing.T) {
 			assert.NotContains(t, event.Content, piiEmail)
 		}
 	}
+}
+
+func TestAssembledStreamJoinsProviderBodyCleanupBeforeEventClose(t *testing.T) {
+	requestStarted := make(chan struct{})
+	requestContextDone := make(chan struct{})
+	fixture := newAssemblyStreamFixture(t, func(w http.ResponseWriter, r *http.Request, _ int) {
+		writeAssemblyStreamHeaders(w)
+		writeAssemblyChunk(w, map[string]any{"content": "partial"}, nil)
+		close(requestStarted)
+		<-r.Context().Done()
+		close(requestContextDone)
+	})
+	closeStarted := make(chan struct{})
+	releaseClose := make(chan struct{})
+	requestPaths := make(chan string, 8)
+	responseWrapped := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseClose) }) }
+	t.Cleanup(release)
+	withAssembleDefaultTransport(t, &assemblyStreamBodyCloseTransport{
+		base:            http.DefaultTransport,
+		requestPaths:    requestPaths,
+		responseWrapped: responseWrapped,
+		closeStarted:    closeStarted,
+		releaseClose:    releaseClose,
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	config := newE2ETestConfig(t, fixture.server.URL)
+	assembly, err := AssembleAgent(ctx, config, config.Provider.Name, config.Provider.Model, io.Discard, WithApproveMode(ApproveAuto))
+	require.NoError(t, err)
+	t.Cleanup(assembly.Cleanup)
+	stream, err := assembly.Harness.Submit(ctx, "hold provider body cleanup")
+	require.NoError(t, err)
+	eventsClosed := make(chan struct{})
+	go func() {
+		for range stream.Events() {
+		}
+		close(eventsClosed)
+	}()
+	select {
+	case <-requestStarted:
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("assembled provider stream did not start")
+	}
+	select {
+	case requestPath := <-requestPaths:
+		require.Contains(t, requestPath, "completions")
+	case <-time.After(time.Second):
+		t.Fatal("assembled stream request did not pass through the response-body gate transport")
+	}
+	select {
+	case <-responseWrapped:
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider response body was not installed in the cleanup gate")
+	}
+	require.Equal(t, []bool{true}, fixture.requestModes(), "the assembled request must use the streaming endpoint")
+	cancel()
+	select {
+	case <-requestContextDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("caller cancellation did not reach the assembled provider request context")
+	}
+	select {
+	case <-closeStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("assembled cancellation did not reach provider response-body cleanup")
+	}
+
+	deadline := time.NewTimer(30 * time.Millisecond)
+	defer deadline.Stop()
+	select {
+	case <-eventsClosed:
+		t.Fatal("assembled event channel closed before provider body cleanup returned")
+	case <-deadline.C:
+	}
+	release()
+	select {
+	case <-eventsClosed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("assembled event channel did not close after provider cleanup returned")
+	}
+	message, resultErr := stream.Result()
+	require.ErrorIs(t, resultErr, context.Canceled)
+	require.Empty(t, message.Content)
 }
 
 func TestOutputGuardBuffersAcrossLengthContinuationsBeforeVisibleDelta(t *testing.T) {

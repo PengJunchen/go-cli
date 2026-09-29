@@ -130,6 +130,16 @@ func TestOutputGuardStreamRejectsClosedStreamWithoutFinalChunk(t *testing.T) {
 	require.ErrorContains(t, streamErr, "ended without a final chunk")
 }
 
+func TestOutputGuardRejectsNilStreamWithoutError(t *testing.T) {
+	inner := &streamFuncModel{streamFn: func(context.Context, []llm.Message, ...llm.Option) (<-chan llm.MessageChunk, error) {
+		return nil, nil
+	}}
+	wrapped := &outputGuardModel{inner: inner, guard: production.NewLengthGuard(100)}
+	out, err := wrapped.Stream(context.Background(), nil)
+	require.Nil(t, out)
+	require.ErrorContains(t, err, "nil stream")
+}
+
 func TestOutputGuardStreamCancelsInnerAfterChunkLimitFailure(t *testing.T) {
 	innerStopped := make(chan struct{})
 	inner := &streamFuncModel{streamFn: func(ctx context.Context, _ []llm.Message, _ ...llm.Option) (<-chan llm.MessageChunk, error) {
@@ -162,6 +172,309 @@ func TestOutputGuardStreamCancelsInnerAfterChunkLimitFailure(t *testing.T) {
 	case <-innerStopped:
 	case <-time.After(time.Second):
 		t.Fatal("inner stream did not stop after output guard failure")
+	}
+}
+
+type heldGuardStreamModel struct {
+	chunks        []llm.MessageChunk
+	setupErr      error
+	release       <-chan struct{}
+	cancelCause   chan error
+	cleanupDone   chan struct{}
+	waitForCancel bool
+}
+
+func (m *heldGuardStreamModel) Generate(context.Context, []llm.Message, ...llm.Option) (*llm.Message, error) {
+	return nil, errors.New("unexpected Generate call")
+}
+
+func (m *heldGuardStreamModel) Stream(ctx context.Context, _ []llm.Message, _ ...llm.Option) (<-chan llm.MessageChunk, error) {
+	ch := make(chan llm.MessageChunk, len(m.chunks))
+	for _, chunk := range m.chunks {
+		ch <- chunk
+	}
+	go func() {
+		if m.waitForCancel {
+			<-ctx.Done()
+			m.cancelCause <- context.Cause(ctx)
+		}
+		<-m.release
+		close(m.cleanupDone)
+		close(ch)
+	}()
+	return ch, m.setupErr
+}
+
+func TestOutputGuardWaitsForCanceledSourceClose(t *testing.T) {
+	release := make(chan struct{})
+	model := &heldGuardStreamModel{
+		chunks:        []llm.MessageChunk{{Role: llm.RoleAssistant, Content: "partial"}},
+		release:       release,
+		cancelCause:   make(chan error, 1),
+		cleanupDone:   make(chan struct{}),
+		waitForCancel: true,
+	}
+	wrapped := &outputGuardModel{inner: model, guard: production.NewLengthGuard(100)}
+	ctx, cancel := context.WithCancel(context.Background())
+	out, err := wrapped.Stream(ctx, nil)
+	require.NoError(t, err)
+	cancel()
+	select {
+	case cause := <-model.cancelCause:
+		require.ErrorIs(t, cause, context.Canceled)
+		var localAbort *llm.LocalStreamAbortCause
+		require.NotErrorAs(t, cause, &localAbort)
+	case <-time.After(time.Second):
+		t.Fatal("source did not observe caller cancellation")
+	}
+	_ = requireGuardOutputOpenUntil(t, out, 25*time.Millisecond)
+	close(release)
+	select {
+	case <-model.cleanupDone:
+	case <-time.After(time.Second):
+		t.Fatal("source cleanup did not finish")
+	}
+	collectGuardOutput(t, out)
+}
+
+func TestOutputGuardLocalCapAbortJoinsBeforeOutputClose(t *testing.T) {
+	release := make(chan struct{})
+	chunks := make([]llm.MessageChunk, llm.GuardedStreamMaxChunks+1)
+	model := &heldGuardStreamModel{
+		chunks:        chunks,
+		release:       release,
+		cancelCause:   make(chan error, 1),
+		cleanupDone:   make(chan struct{}),
+		waitForCancel: true,
+	}
+	wrapped := &outputGuardModel{inner: model, guard: production.NewLengthGuard(100)}
+	out, err := wrapped.Stream(context.Background(), nil)
+	require.NoError(t, err)
+	select {
+	case cause := <-model.cancelCause:
+		var localAbort *llm.LocalStreamAbortCause
+		require.ErrorAs(t, cause, &localAbort)
+		require.EqualError(t, cause, "local stream abort")
+	case <-time.After(time.Second):
+		t.Fatal("output guard did not cancel the capped source")
+	}
+	pending := requireGuardOutputOpenUntil(t, out, 25*time.Millisecond)
+	close(release)
+	select {
+	case <-model.cleanupDone:
+	case <-time.After(time.Second):
+		t.Fatal("source cleanup did not finish")
+	}
+	chunksOut := append(pending, collectGuardOutput(t, out)...)
+	require.Len(t, chunksOut, 1)
+	require.ErrorContains(t, chunksOut[0].Error, "chunks")
+}
+
+func TestOutputGuardJoinsErrorChunkSourceBeforeOutputClose(t *testing.T) {
+	providerErr := errors.New("provider stream failed")
+	release := make(chan struct{})
+	model := &heldGuardStreamModel{
+		chunks:        []llm.MessageChunk{{Error: providerErr}},
+		release:       release,
+		cancelCause:   make(chan error, 1),
+		cleanupDone:   make(chan struct{}),
+		waitForCancel: true,
+	}
+	wrapped := &outputGuardModel{inner: model, guard: production.NewLengthGuard(100)}
+	out, err := wrapped.Stream(context.Background(), nil)
+	require.NoError(t, err)
+	select {
+	case cause := <-model.cancelCause:
+		var localAbort *llm.LocalStreamAbortCause
+		require.ErrorAs(t, cause, &localAbort)
+		require.ErrorIs(t, cause, providerErr)
+	case <-time.After(time.Second):
+		t.Fatal("provider error did not locally abort the source")
+	}
+	pending := requireGuardOutputOpenUntil(t, out, 25*time.Millisecond)
+	close(release)
+	select {
+	case <-model.cleanupDone:
+	case <-time.After(time.Second):
+		t.Fatal("source cleanup did not finish")
+	}
+	chunksOut := append(pending, collectGuardOutput(t, out)...)
+	require.Len(t, chunksOut, 1)
+	require.ErrorIs(t, chunksOut[0].Error, providerErr)
+}
+
+func TestOutputGuardJoinsSetupErrorChannelBeforeReturning(t *testing.T) {
+	setupErr := errors.New("provider setup failed")
+	release := make(chan struct{})
+	model := &heldGuardStreamModel{
+		chunks:        []llm.MessageChunk{{Role: llm.RoleAssistant, Content: "partial"}},
+		setupErr:      setupErr,
+		release:       release,
+		cancelCause:   make(chan error, 1),
+		cleanupDone:   make(chan struct{}),
+		waitForCancel: true,
+	}
+	wrapped := &outputGuardModel{inner: model, guard: production.NewLengthGuard(100)}
+	returned := make(chan error, 1)
+	go func() {
+		out, err := wrapped.Stream(context.Background(), nil)
+		if out != nil {
+			for range out {
+			}
+		}
+		returned <- err
+	}()
+	select {
+	case cause := <-model.cancelCause:
+		var localAbort *llm.LocalStreamAbortCause
+		require.ErrorAs(t, cause, &localAbort)
+		require.ErrorIs(t, cause, setupErr)
+	case <-time.After(time.Second):
+		t.Fatal("setup error did not locally abort its returned source")
+	}
+	select {
+	case err := <-returned:
+		t.Fatalf("output guard returned before joining setup-error source: %v", err)
+	case <-time.After(25 * time.Millisecond):
+	}
+	close(release)
+	select {
+	case <-model.cleanupDone:
+	case <-time.After(time.Second):
+		t.Fatal("source cleanup did not finish")
+	}
+	select {
+	case err := <-returned:
+		require.ErrorIs(t, err, setupErr)
+	case <-time.After(time.Second):
+		t.Fatal("output guard did not return after source close")
+	}
+}
+
+func TestOutputGuardMalformedAfterFinalJoinsSourceBeforeOutputClose(t *testing.T) {
+	release := make(chan struct{})
+	model := &heldGuardStreamModel{
+		chunks: []llm.MessageChunk{
+			{Role: llm.RoleAssistant, Final: true},
+			{Role: llm.RoleAssistant, Content: "late"},
+		},
+		release:       release,
+		cancelCause:   make(chan error, 1),
+		cleanupDone:   make(chan struct{}),
+		waitForCancel: true,
+	}
+	wrapped := &outputGuardModel{inner: model, guard: production.NewLengthGuard(100)}
+	out, err := wrapped.Stream(context.Background(), nil)
+	require.NoError(t, err)
+	select {
+	case cause := <-model.cancelCause:
+		var localAbort *llm.LocalStreamAbortCause
+		require.ErrorAs(t, cause, &localAbort)
+	case <-time.After(time.Second):
+		t.Fatal("malformed stream did not locally abort its source")
+	}
+	pending := requireGuardOutputOpenUntil(t, out, 25*time.Millisecond)
+	close(release)
+	select {
+	case <-model.cleanupDone:
+	case <-time.After(time.Second):
+		t.Fatal("source cleanup did not finish")
+	}
+	chunksOut := append(pending, collectGuardOutput(t, out)...)
+	require.Len(t, chunksOut, 1)
+	require.ErrorContains(t, chunksOut[0].Error, "after its final chunk")
+}
+
+func TestOutputGuardHoldsFinalUntilSourceClose(t *testing.T) {
+	release := make(chan struct{})
+	model := &heldGuardStreamModel{
+		chunks:      []llm.MessageChunk{{Role: llm.RoleAssistant, Content: "complete", Final: true}},
+		release:     release,
+		cleanupDone: make(chan struct{}),
+	}
+	wrapped := &outputGuardModel{inner: model, guard: production.NewLengthGuard(100)}
+	out, err := wrapped.Stream(context.Background(), nil)
+	require.NoError(t, err)
+	_ = requireGuardOutputOpenUntil(t, out, 25*time.Millisecond)
+	close(release)
+	select {
+	case <-model.cleanupDone:
+	case <-time.After(time.Second):
+		t.Fatal("source cleanup did not finish")
+	}
+	chunksOut := collectGuardOutput(t, out)
+	require.Len(t, chunksOut, 2)
+	require.Equal(t, "complete", chunksOut[0].Content)
+	require.True(t, chunksOut[1].Final)
+}
+
+func TestOutputGuardDenialAfterSourceCloseDoesNotCancelProviderContext(t *testing.T) {
+	providerCtx := make(chan context.Context, 1)
+	inner := &streamFuncModel{streamFn: func(ctx context.Context, _ []llm.Message, _ ...llm.Option) (<-chan llm.MessageChunk, error) {
+		providerCtx <- ctx
+		ch := make(chan llm.MessageChunk, 2)
+		ch <- llm.MessageChunk{Role: llm.RoleAssistant, Content: "john@example.com"}
+		ch <- llm.MessageChunk{Role: llm.RoleAssistant, Final: true}
+		close(ch)
+		return ch, nil
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	wrapped := &outputGuardModel{inner: inner, guard: production.NewPIIOutputGuard()}
+	out, err := wrapped.Stream(ctx, nil)
+	require.NoError(t, err)
+	chunksOut := collectGuardOutput(t, out)
+	require.Len(t, chunksOut, 1)
+	require.ErrorContains(t, chunksOut[0].Error, "candidate denied")
+	var innerCtx context.Context
+	select {
+	case innerCtx = <-providerCtx:
+	case <-time.After(time.Second):
+		t.Fatal("provider context was not captured")
+	}
+	select {
+	case <-innerCtx.Done():
+		t.Fatal("guard denial after source close canceled the completed provider context")
+	default:
+	}
+	require.NoError(t, innerCtx.Err())
+	require.Nil(t, context.Cause(innerCtx), "post-close guard denial must leave the provider cause unchanged")
+	cancel()
+}
+
+func requireGuardOutputOpenUntil(t *testing.T, ch <-chan llm.MessageChunk, wait time.Duration) []llm.MessageChunk {
+	t.Helper()
+	timer := time.NewTimer(wait)
+	defer timer.Stop()
+	var received []llm.MessageChunk
+	for {
+		select {
+		case chunk, ok := <-ch:
+			if !ok {
+				t.Fatal("output guard closed before its input source")
+			}
+			received = append(received, chunk)
+		case <-timer.C:
+			return received
+		}
+	}
+}
+
+func collectGuardOutput(t *testing.T, ch <-chan llm.MessageChunk) []llm.MessageChunk {
+	t.Helper()
+	collected := make(chan []llm.MessageChunk, 1)
+	go func() {
+		var chunks []llm.MessageChunk
+		for chunk := range ch {
+			chunks = append(chunks, chunk)
+		}
+		collected <- chunks
+	}()
+	select {
+	case chunks := <-collected:
+		return chunks
+	case <-time.After(time.Second):
+		t.Fatal("output guard did not close after source cleanup")
+		return nil
 	}
 }
 

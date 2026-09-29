@@ -142,61 +142,94 @@ func (m *loopDetectModel) Generate(ctx context.Context, msgs []Message, opts ...
 // terminate the turn. The loop history is also recorded so subsequent calls
 // will detect the loop earlier.
 func (m *loopDetectModel) Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
-	streamCtx, cancel := context.WithCancel(ctx)
+	streamCtx, cancel := context.WithCancelCause(ctx)
 	ch, err := m.next.Stream(streamCtx, msgs, opts...)
 	if err != nil {
-		cancel()
+		cancelStreamAttempt(ctx, cancel, err)
+		drainMessageChunks(ch)
 		return nil, err
 	}
 	if ch == nil {
-		cancel()
-		return nil, fmt.Errorf("loopdetection: model returned a nil stream")
+		err = fmt.Errorf("loopdetection: model returned a nil stream")
+		cancelStreamAttempt(ctx, cancel, err)
+		return nil, err
 	}
 
 	out := make(chan MessageChunk, 16)
 	go func() {
-		defer cancel()
 		defer close(out)
 		var acc strings.Builder
 		var totalBytes int
 		var totalChunks int
+		var finalChunk *MessageChunk
+		fail := func(failure error, sourceOpen bool) {
+			sendStreamError(streamCtx, out, failure)
+			cancelStreamAttempt(ctx, cancel, failure)
+			if sourceOpen {
+				drainMessageChunks(ch)
+			}
+		}
 		for {
 			var chunk MessageChunk
 			var ok bool
 			select {
 			case <-streamCtx.Done():
+				fail(context.Cause(streamCtx), true)
 				return
 			case chunk, ok = <-ch:
 			}
 			if !ok {
 				break
 			}
+			if chunk.Error != nil {
+				fail(chunk.Error, true)
+				return
+			}
+			if finalChunk != nil {
+				fail(fmt.Errorf("loopdetection: stream emitted data after its final chunk"), true)
+				return
+			}
 			totalChunks++
 			if totalChunks > GuardedStreamMaxChunks {
-				select {
-				case out <- MessageChunk{Error: fmt.Errorf("loopdetection: stream exceeds %d chunks", GuardedStreamMaxChunks)}:
-				case <-streamCtx.Done():
-				}
+				fail(fmt.Errorf("loopdetection: stream exceeds %d chunks", GuardedStreamMaxChunks), true)
 				return
 			}
 			textBytes := RetainedStreamChunkTextBytes(chunk)
 			if textBytes > GuardedStreamMaxBytes-totalBytes {
-				select {
-				case out <- MessageChunk{Error: fmt.Errorf("loopdetection: stream exceeds %d-byte candidate limit", GuardedStreamMaxBytes)}:
-				case <-streamCtx.Done():
-				}
+				fail(fmt.Errorf("loopdetection: stream exceeds %d-byte candidate limit", GuardedStreamMaxBytes), true)
 				return
 			}
 			totalBytes += textBytes
+			acc.WriteString(chunk.Content)
+			if chunk.Final {
+				final := chunk
+				final.Content = ""
+				finalChunk = &final
+				if chunk.Content != "" {
+					contentOnly := chunk
+					contentOnly.Final = false
+					contentOnly.ToolCalls = nil
+					contentOnly.FinishReason = ""
+					contentOnly.Usage = nil
+					select {
+					case out <- contentOnly:
+					case <-streamCtx.Done():
+						fail(context.Cause(streamCtx), true)
+						return
+					}
+				}
+				continue
+			}
 			select {
 			case out <- chunk:
 			case <-streamCtx.Done():
+				fail(context.Cause(streamCtx), true)
 				return
 			}
-			acc.WriteString(chunk.Content)
-			if chunk.Error != nil {
-				return
-			}
+		}
+		if finalChunk == nil {
+			fail(fmt.Errorf("loopdetection: stream ended without a final chunk"), false)
+			return
 		}
 		// Post-hoc loop detection after all chunks have been forwarded.
 		if loopErr := m.checkLoop(acc.String()); loopErr != nil {
@@ -204,10 +237,18 @@ func (m *loopDetectModel) Stream(ctx context.Context, msgs []Message, opts ...Op
 				"op", "loopdetection.stream.post_hoc",
 				"error", loopErr.Error(),
 			)
-			select {
-			case out <- MessageChunk{Final: true, Error: loopErr}:
-			case <-streamCtx.Done():
+			fail(loopErr, false)
+			return
+		}
+		select {
+		case out <- *finalChunk:
+			cancel(nil)
+		case <-ctx.Done():
+			cause := context.Cause(ctx)
+			if cause == nil {
+				cause = ctx.Err()
 			}
+			fail(cause, false)
 		}
 	}()
 	return out, nil
