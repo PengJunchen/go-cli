@@ -23,3 +23,16 @@ The BUILD-1-only worktree state was tested with the cycler source and cycler tes
 - Assembler response-body cleanup barrier test — passed three consecutive focused runs before the final race gate.
 
 No breaker, live detector, assembly policy, config, native/provider source, or protected/shared-ledger file is part of this slice.
+
+## Cycler lifecycle follow-up
+
+The selected-model cycler now joins a channel returned alongside a setup error before running cleanup or deciding whether to fall back. It rejects `(nil, nil)` and suppresses fallback replay during continuation. Every successful selected stream uses one forwarding owner, including models without a cleanup callback, so caller cancellation stops forwarding and drains the same channel; normal completion joins the source, completes optional cleanup, releases the attempt context, then closes the output.
+
+The cycler tests hold source close and cleanup independently to prove source-close → cleanup-complete → output-close order. They also assert caller cancellation remains `context.Canceled`, setup failure reaches the source as `LocalStreamAbortCause` preserving the setup error through `Unwrap`, and fallback begins only after join and cleanup.
+
+The final integrated worktree passed:
+
+- `GOMAXPROCS=2 go test -p 2 -race -count=1 ./internal/llm ./internal/core ./internal/cli` — all three packages passed with the cycler follow-up present.
+- `go vet ./internal/llm ./internal/core ./internal/cli` — passed.
+- `golangci-lint run ./internal/llm ./internal/core ./internal/cli` — no issues found.
+- `git diff --check` — passed.

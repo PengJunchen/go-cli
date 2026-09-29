@@ -267,10 +267,8 @@ func (m *cycledModel) Generate(ctx context.Context, msgs []Message, opts ...Opti
 
 // Stream routes the call to the model selected by the cycler's strategy. On
 // build failure or stream initialization error it falls back to the primary
-// model. When a cleanup function is returned by buildSelectedModel, the
-// returned channel is wrapped in a forwarding goroutine that calls cleanup
-// after the inner channel is drained. When cleanup is nil the original
-// channel is returned without a wrapper.
+// model. The returned channel is wrapped in a forwarding goroutine so attempt
+// cancellation and any model cleanup finish before the output channel closes.
 func (m *cycledModel) Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
 	sessionID := sessionIDFromContext(ctx)
 	taskType := TaskTypeFromContext(ctx)
@@ -278,32 +276,89 @@ func (m *cycledModel) Stream(ctx context.Context, msgs []Message, opts ...Option
 
 	model, cleanup, err := m.buildSelectedModel(ctx, idx)
 	if err != nil {
-		return m.primary.Stream(ctx, msgs, opts...)
-	}
-
-	ch, err := model.Stream(ctx, msgs, opts...)
-	if err != nil {
-		if cleanup != nil {
-			cleanup()
+		if ContinuationNoReplay(ctx) {
+			return nil, err
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
 		}
 		return m.primary.Stream(ctx, msgs, opts...)
 	}
 
-	// nil cleanup: return original channel without a wrapper goroutine.
-	if cleanup == nil {
-		return ch, nil
+	attemptCtx, cancel := context.WithCancelCause(ctx)
+	ch, err := model.Stream(attemptCtx, msgs, opts...)
+	if err != nil {
+		cancelStreamAttempt(ctx, cancel, err)
+		drainMessageChunks(ch)
+		if cleanup != nil {
+			cleanup()
+		}
+		if ContinuationNoReplay(ctx) {
+			return nil, err
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return m.primary.Stream(ctx, msgs, opts...)
+	}
+	if ch == nil {
+		err = errors.New("llm: selected model returned a nil stream")
+		cancelStreamAttempt(ctx, cancel, err)
+		if cleanup != nil {
+			cleanup()
+		}
+		return nil, err
 	}
 
-	// Wrap the channel with a forwarding goroutine that calls cleanup when
-	// the inner channel is drained (closed).
+	// Join the source before cleanup, attempt cancellation, and output close.
 	out := make(chan MessageChunk, 16)
 	go func() {
-		defer cleanup()
-		defer close(out)
-		for chunk := range ch {
+		finish := func() {
+			if cleanup != nil {
+				cleanup()
+			}
+			cancel(nil)
+			close(out)
+		}
+		for {
+			var chunk MessageChunk
+			var ok bool
+			select {
+			case <-ctx.Done():
+				cause := context.Cause(ctx)
+				if cause == nil {
+					cause = ctx.Err()
+				}
+				cancelStreamAttempt(ctx, cancel, cause)
+				drainMessageChunks(ch)
+				finish()
+				return
+			case chunk, ok = <-ch:
+			}
+			if !ok {
+				finish()
+				return
+			}
+			if ctx.Err() != nil {
+				cause := context.Cause(ctx)
+				if cause == nil {
+					cause = ctx.Err()
+				}
+				cancelStreamAttempt(ctx, cancel, cause)
+				drainMessageChunks(ch)
+				finish()
+				return
+			}
 			select {
 			case out <- chunk:
 			case <-ctx.Done():
+				cause := context.Cause(ctx)
+				if cause == nil {
+					cause = ctx.Err()
+				}
+				cancelStreamAttempt(ctx, cancel, cause)
+				drainMessageChunks(ch)
+				finish()
 				return
 			}
 		}

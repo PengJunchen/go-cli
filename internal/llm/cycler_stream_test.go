@@ -246,3 +246,227 @@ func TestStreamRaceConcurrentCalls(t *testing.T) {
 	}
 	wg.Wait()
 }
+
+type heldCyclerStreamModel struct {
+	initial       []MessageChunk
+	sourceRelease <-chan struct{}
+	cancelCause   chan error
+	sourceClosed  chan struct{}
+	setupErr      error
+	nilSuccess    bool
+}
+
+func (*heldCyclerStreamModel) Generate(context.Context, []Message, ...Option) (*Message, error) {
+	return nil, errors.New("unexpected Generate call")
+}
+
+func (m *heldCyclerStreamModel) Stream(ctx context.Context, _ []Message, _ ...Option) (<-chan MessageChunk, error) {
+	if m.nilSuccess {
+		return nil, nil
+	}
+	ch := make(chan MessageChunk, len(m.initial))
+	for _, chunk := range m.initial {
+		ch <- chunk
+	}
+	go func() {
+		<-ctx.Done()
+		if m.cancelCause != nil {
+			m.cancelCause <- context.Cause(ctx)
+		}
+		if m.sourceRelease != nil {
+			<-m.sourceRelease
+		}
+		close(ch)
+		if m.sourceClosed != nil {
+			close(m.sourceClosed)
+		}
+	}()
+	return ch, m.setupErr
+}
+
+func TestStreamCleanupAndOutputCloseWaitForSourceAndCleanup(t *testing.T) {
+	sourceRelease := make(chan struct{})
+	cleanupRelease := make(chan struct{})
+	model := &heldCyclerStreamModel{
+		initial:       []MessageChunk{{Role: RoleAssistant, Content: "partial"}},
+		sourceRelease: sourceRelease,
+		cancelCause:   make(chan error, 1),
+		sourceClosed:  make(chan struct{}),
+	}
+	cleanupStarted := make(chan struct{})
+	cleanupDone := make(chan struct{})
+	provider := &testStreamProvider{
+		model: model,
+		cleanup: func() {
+			close(cleanupStarted)
+			<-cleanupRelease
+			close(cleanupDone)
+		},
+	}
+	reg := &ProviderRegistry{providers: map[string]ModelProvider{}}
+	require.NoError(t, reg.Register(provider))
+	wrapped := NewModelCycler(ModelCyclerConfig{
+		Models: []ModelEntry{{Provider: "test-stream", Model: "m1"}},
+	}).WithRegistry(reg).WrapModel(&mockModel{})
+	ctx, cancel := context.WithCancel(context.Background())
+	out, err := wrapped.Stream(ctx, nil)
+	require.NoError(t, err)
+	cancel()
+	select {
+	case cause := <-model.cancelCause:
+		require.ErrorIs(t, cause, context.Canceled)
+		var localAbort *LocalStreamAbortCause
+		require.NotErrorAs(t, cause, &localAbort, "caller cancellation must remain distinct from a local abort")
+	case <-time.After(time.Second):
+		t.Fatal("selected source did not observe cancellation")
+	}
+	requireChannelOpenUntil(t, out, 20*time.Millisecond)
+	close(sourceRelease)
+	select {
+	case <-model.sourceClosed:
+	case <-time.After(time.Second):
+		t.Fatal("selected source did not close after release")
+	}
+	select {
+	case <-cleanupStarted:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not start after source close")
+	}
+	requireChannelOpenUntil(t, out, 20*time.Millisecond)
+	close(cleanupRelease)
+	select {
+	case <-cleanupDone:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not finish after release")
+	}
+	drained := make(chan struct{})
+	go func() {
+		for range out {
+		}
+		close(drained)
+	}()
+	select {
+	case <-drained:
+	case <-time.After(time.Second):
+		t.Fatal("output did not close after cleanup")
+	}
+}
+
+func TestStreamSetupErrorWithChannelJoinsCleanupBeforeFallback(t *testing.T) {
+	setupErr := errors.New("stream setup failed")
+	sourceRelease := make(chan struct{})
+	cleanupRelease := make(chan struct{})
+	model := &heldCyclerStreamModel{
+		sourceRelease: sourceRelease,
+		cancelCause:   make(chan error, 1),
+		sourceClosed:  make(chan struct{}),
+		setupErr:      setupErr,
+	}
+	cleanupStarted := make(chan struct{})
+	cleanupDone := make(chan struct{})
+	provider := &testStreamProvider{model: model, cleanup: func() {
+		close(cleanupStarted)
+		<-cleanupRelease
+		close(cleanupDone)
+	}}
+	reg := &ProviderRegistry{providers: map[string]ModelProvider{}}
+	require.NoError(t, reg.Register(provider))
+	fallbackBeforeCleanup := make(chan bool, 1)
+	fallback := &joinSetupModel{streamFn: func(context.Context, int32) (<-chan MessageChunk, error) {
+		select {
+		case <-cleanupDone:
+			fallbackBeforeCleanup <- false
+		default:
+			fallbackBeforeCleanup <- true
+		}
+		ch := make(chan MessageChunk)
+		close(ch)
+		return ch, nil
+	}}
+	wrapped := NewModelCycler(ModelCyclerConfig{
+		Models: []ModelEntry{{Provider: "test-stream", Model: "m1"}},
+	}).WithRegistry(reg).WrapModel(fallback)
+	finished := make(chan error, 1)
+	go func() {
+		ch, err := wrapped.Stream(context.Background(), nil)
+		if err == nil {
+			for range ch {
+			}
+		}
+		finished <- err
+	}()
+	select {
+	case cause := <-model.cancelCause:
+		var localAbort *LocalStreamAbortCause
+		require.ErrorAs(t, cause, &localAbort)
+		require.ErrorIs(t, cause, setupErr)
+	case <-time.After(time.Second):
+		t.Fatal("setup-error source did not observe cancellation")
+	}
+	require.Zero(t, fallback.streamCalls.Load(), "fallback must wait for source join and cleanup")
+	select {
+	case err := <-finished:
+		t.Fatalf("Stream returned before source join: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(sourceRelease)
+	select {
+	case <-cleanupStarted:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not start after source close")
+	}
+	select {
+	case err := <-finished:
+		t.Fatalf("fallback returned before cleanup completed: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	require.Zero(t, fallback.streamCalls.Load(), "fallback must wait for cleanup completion")
+	close(cleanupRelease)
+	select {
+	case <-cleanupDone:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not complete after source close")
+	}
+	require.NoError(t, <-finished)
+	require.False(t, <-fallbackBeforeCleanup, "cleanup must complete before fallback starts")
+	require.EqualValues(t, 1, fallback.streamCalls.Load())
+}
+
+func TestStreamNilNilIsRejectedAndContinuationDoesNotFallback(t *testing.T) {
+	t.Run("nil success", func(t *testing.T) {
+		model := &heldCyclerStreamModel{nilSuccess: true}
+		cleanupDone := make(chan struct{})
+		provider := &testStreamProvider{model: model, cleanup: func() { close(cleanupDone) }}
+		reg := &ProviderRegistry{providers: map[string]ModelProvider{}}
+		require.NoError(t, reg.Register(provider))
+		fallback := &fbMockModel{streamText: "must not run"}
+		wrapped := NewModelCycler(ModelCyclerConfig{
+			Models: []ModelEntry{{Provider: "test-stream", Model: "m1"}},
+		}).WithRegistry(reg).WrapModel(fallback)
+
+		ch, err := wrapped.Stream(context.Background(), nil)
+		require.ErrorContains(t, err, "nil stream")
+		require.Nil(t, ch)
+		require.Zero(t, fallback.streamCalls)
+		<-cleanupDone
+	})
+
+	t.Run("continuation setup error", func(t *testing.T) {
+		setupErr := errors.New("continuation setup failed")
+		model := &heldCyclerStreamModel{setupErr: setupErr}
+		cleanupDone := make(chan struct{})
+		provider := &testStreamProvider{model: model, cleanup: func() { close(cleanupDone) }}
+		reg := &ProviderRegistry{providers: map[string]ModelProvider{}}
+		require.NoError(t, reg.Register(provider))
+		fallback := &fbMockModel{streamText: "must not run"}
+		wrapped := NewModelCycler(ModelCyclerConfig{
+			Models: []ModelEntry{{Provider: "test-stream", Model: "m1"}},
+		}).WithRegistry(reg).WrapModel(fallback)
+
+		ch, err := wrapped.Stream(WithContinuationNoReplay(context.Background()), nil)
+		require.ErrorIs(t, err, setupErr)
+		require.Nil(t, ch)
+		require.Zero(t, fallback.streamCalls)
+		<-cleanupDone
+	})
+}
