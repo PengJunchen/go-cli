@@ -36,6 +36,25 @@ func newMCPGenerationTestTool(name string) *mcpGenerationTestTool {
 	}
 }
 
+type mcpGenerationTestExecutor struct {
+	output string
+	calls  *atomic.Int32
+}
+
+func (e mcpGenerationTestExecutor) ExecuteMCPTool(context.Context, string, ToolCall) (*ToolResult, error) {
+	e.calls.Add(1)
+	return &ToolResult{Output: e.output}, nil
+}
+
+func newMCPGenerationTestCandidate(t *testing.T, tool *mcpGenerationTestTool) MCPToolCandidate {
+	t.Helper()
+	handle, err := NewMCPGenerationClientHandle(mcpGenerationTestExecutor{output: tool.Name(), calls: &tool.calls})
+	require.NoError(t, err)
+	candidate, err := NewMCPToolCandidate(tool.Name(), tool.Name(), tool.Description(), tool.Parameters(), handle, nil)
+	require.NoError(t, err)
+	return candidate
+}
+
 func TestMCPGenerationUpdatePublishesCompleteGeneration(t *testing.T) {
 	base := NewDefaultToolRegistry().(*DefaultToolRegistry)
 	adapter := NewDeferredToolRegistryAdapter(base)
@@ -44,8 +63,8 @@ func TestMCPGenerationUpdatePublishesCompleteGeneration(t *testing.T) {
 	oldTwo := newMCPGenerationTestTool("mcp__srv__old_two")
 
 	first, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 1, []MCPToolCandidate{
-		{Definition: oldOne},
-		{Definition: oldTwo},
+		newMCPGenerationTestCandidate(t, oldOne),
+		newMCPGenerationTestCandidate(t, oldTwo),
 	})
 	require.NoError(t, err)
 	require.NoError(t, first.Publish())
@@ -59,7 +78,7 @@ func TestMCPGenerationUpdatePublishesCompleteGeneration(t *testing.T) {
 	assert.Equal(t, oldOne.Name(), loaded.Name())
 	beforeReplace := base.DispatchFence().Snapshot()
 	newOnly := newMCPGenerationTestTool("mcp__srv__new_only")
-	second, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 2, []MCPToolCandidate{{Definition: newOnly}})
+	second, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 2, []MCPToolCandidate{newMCPGenerationTestCandidate(t, newOnly)})
 	require.NoError(t, err)
 	require.NoError(t, second.Publish())
 	assert.Equal(t, beforeReplace.Registry+1, base.DispatchFence().Snapshot().Registry)
@@ -71,11 +90,21 @@ func TestMCPGenerationUpdatePublishesCompleteGeneration(t *testing.T) {
 	assert.ErrorIs(t, func() error { _, err := base.Get(context.Background(), oldOne.Name()); return err }(), ErrToolNotFound)
 }
 
+func TestMCPGenerationRejectsCandidateWithoutGenerationHandle(t *testing.T) {
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry)
+	adapter := NewDeferredToolRegistryAdapter(base)
+	update, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 1, []MCPToolCandidate{{}})
+	assert.Nil(t, update)
+	assert.ErrorIs(t, err, ErrMCPGenerationCandidateInvalid)
+	assert.True(t, adapter.mu.TryLock(), "invalid candidate must fail before holding the DTR lock")
+	adapter.mu.Unlock()
+}
+
 func TestMCPGenerationCollisionDisablesOnlySourceOwnedTools(t *testing.T) {
 	base := NewDefaultToolRegistry().(*DefaultToolRegistry)
 	adapter := NewDeferredToolRegistryAdapter(base)
 	old := newMCPGenerationTestTool("mcp__srv__old")
-	first, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 1, []MCPToolCandidate{{Definition: old}})
+	first, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 1, []MCPToolCandidate{newMCPGenerationTestCandidate(t, old)})
 	require.NoError(t, err)
 	require.NoError(t, first.Publish())
 	_, err = adapter.Get(context.Background(), old.Name())
@@ -85,7 +114,7 @@ func TestMCPGenerationCollisionDisablesOnlySourceOwnedTools(t *testing.T) {
 	require.NoError(t, base.Register(context.Background(), foreign))
 	beforeRejectedPublish := base.DispatchFence().Snapshot()
 	candidate := newMCPGenerationTestTool(foreign.Name())
-	second, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 2, []MCPToolCandidate{{Definition: candidate}})
+	second, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 2, []MCPToolCandidate{newMCPGenerationTestCandidate(t, candidate)})
 	require.NoError(t, err)
 	require.ErrorIs(t, second.Publish(), ErrMCPNameReserved)
 	assert.Equal(t, beforeRejectedPublish, base.DispatchFence().Snapshot(), "checked rejection must not bump any fence generation")
@@ -102,7 +131,7 @@ func TestMCPGenerationReservationsRejectEagerAndDeferredShadowing(t *testing.T) 
 	base := NewDefaultToolRegistry().(*DefaultToolRegistry)
 	adapter := NewDeferredToolRegistryAdapter(base)
 	tool := newMCPGenerationTestTool("mcp__srv__reserved")
-	update, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 1, []MCPToolCandidate{{Definition: tool}})
+	update, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 1, []MCPToolCandidate{newMCPGenerationTestCandidate(t, tool)})
 	require.NoError(t, err)
 	require.NoError(t, update.Publish())
 	fence := base.DispatchFence().Snapshot()
@@ -123,7 +152,7 @@ func TestMCPGenerationRejectsTrustedRegistrationOverReservedName(t *testing.T) {
 	base := NewDefaultToolRegistry().(*DefaultToolRegistry)
 	adapter := NewDeferredToolRegistryAdapter(base)
 	tool := newMCPGenerationTestTool("mcp__srv__reserved")
-	update, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 1, []MCPToolCandidate{{Definition: tool}})
+	update, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 1, []MCPToolCandidate{newMCPGenerationTestCandidate(t, tool)})
 	require.NoError(t, err)
 	require.NoError(t, update.Publish())
 	fence := base.DispatchFence().Snapshot()
@@ -142,7 +171,7 @@ func TestMCPGenerationSnapshotsCandidateNameAndSchemaBeforePublish(t *testing.T)
 	adapter := NewDeferredToolRegistryAdapter(base)
 	tool := newMCPGenerationTestTool("mcp__srv__original")
 	originalSchema := tool.Parameters()
-	update, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 1, []MCPToolCandidate{{Definition: tool}})
+	update, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 1, []MCPToolCandidate{newMCPGenerationTestCandidate(t, tool)})
 	require.NoError(t, err)
 
 	tool.name = "mcp__srv__mutated"
@@ -163,7 +192,7 @@ func TestMCPDeferredMaterializationFailureIsRetryable(t *testing.T) {
 	base := NewDefaultToolRegistry().(*DefaultToolRegistry)
 	adapter := NewDeferredToolRegistryAdapter(base)
 	tool := newMCPGenerationTestTool("mcp__srv__retry")
-	update, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 1, []MCPToolCandidate{{Definition: tool}})
+	update, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 1, []MCPToolCandidate{newMCPGenerationTestCandidate(t, tool)})
 	require.NoError(t, err)
 	require.NoError(t, update.Publish())
 
@@ -204,7 +233,7 @@ func TestMCPDeferredLoadSerializesAgainstReplacement(t *testing.T) {
 	base := NewDefaultToolRegistry().(*DefaultToolRegistry)
 	adapter := NewDeferredToolRegistryAdapter(base)
 	old := newMCPGenerationTestTool("mcp__srv__shared")
-	first, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 1, []MCPToolCandidate{{Definition: old}})
+	first, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 1, []MCPToolCandidate{newMCPGenerationTestCandidate(t, old)})
 	require.NoError(t, err)
 	require.NoError(t, first.Publish())
 
@@ -227,7 +256,7 @@ func TestMCPDeferredLoadSerializesAgainstReplacement(t *testing.T) {
 	newTool := newMCPGenerationTestTool(old.Name())
 	replacementDone := make(chan error, 1)
 	go func() {
-		replacement, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 2, []MCPToolCandidate{{Definition: newTool}})
+		replacement, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 2, []MCPToolCandidate{newMCPGenerationTestCandidate(t, newTool)})
 		if err == nil {
 			err = replacement.Publish()
 		}
@@ -255,7 +284,7 @@ func TestMCPGenerationDisablePreservesForeignReservationsAndAdvancesGeneration(t
 	base := NewDefaultToolRegistry().(*DefaultToolRegistry)
 	adapter := NewDeferredToolRegistryAdapter(base)
 	firstTool := newMCPGenerationTestTool("mcp__srv__first")
-	first, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 1, []MCPToolCandidate{{Definition: firstTool}})
+	first, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 1, []MCPToolCandidate{newMCPGenerationTestCandidate(t, firstTool)})
 	require.NoError(t, err)
 	require.NoError(t, first.Publish())
 	foreign := &fakeTool{name: "mcp__other__foreign", description: "foreign"}
@@ -286,7 +315,7 @@ func TestMCPGenerationRejectedCandidateDoesNotMutateBeforeDisable(t *testing.T) 
 	foreign := &fakeTool{name: "mcp__srv__foreign", description: "foreign"}
 	require.NoError(t, base.Register(context.Background(), foreign))
 	before := base.DispatchFence().Snapshot()
-	update, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 1, []MCPToolCandidate{{Definition: newMCPGenerationTestTool(foreign.Name())}})
+	update, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 1, []MCPToolCandidate{newMCPGenerationTestCandidate(t, newMCPGenerationTestTool(foreign.Name()))})
 	require.NoError(t, err)
 	err = update.Publish()
 	require.ErrorIs(t, err, ErrMCPNameReserved)

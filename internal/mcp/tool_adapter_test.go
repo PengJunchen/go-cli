@@ -89,6 +89,61 @@ func TestMCPToolAdapterExecuteEndToEnd(t *testing.T) {
 	client.mu.Unlock()
 }
 
+func TestMCPGenerationCandidateDoesNotRetainMutableAdapterReceiver(t *testing.T) {
+	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry)
+	registry := tools.NewDeferredToolRegistryAdapter(base)
+	client := &fakeClient{name: "srv"}
+	tool := MCPTool{
+		Name:        "original",
+		Description: "original description",
+		ArgsSchema: map[string]any{
+			"type":                 "object",
+			"properties":           map[string]any{},
+			"additionalProperties": false,
+		},
+	}
+	legacyAdapter := NewMCPToolAdapter(client, tool)
+	_, err := legacyAdapter.MCPGenerationCandidate(nil)
+	assert.ErrorIs(t, err, ErrMCPClientGenerationUnavailable, "a generic adapter must not create a generation candidate")
+	_, err = (&MCPClientGeneration{}).NewToolAdapter(tool).MCPGenerationCandidate(nil)
+	assert.ErrorIs(t, err, ErrMCPClientGenerationUnavailable, "a zero-value generation cannot create a candidate")
+	generation, err := NewMCPClientGeneration(client)
+	require.NoError(t, err)
+	adapter := generation.NewToolAdapter(tool)
+	originalSchemaType := adapter.tool.ArgsSchema["type"]
+	candidate, err := adapter.MCPGenerationCandidate(nil)
+	require.NoError(t, err)
+	update, err := registry.BeginMCPGenerationUpdate(context.Background(), "project-config", 1, []tools.MCPToolCandidate{candidate})
+	require.NoError(t, err)
+
+	adapter.tool.Name = "mutated"
+	adapter.tool.Description = "mutated description"
+	adapter.tool.ArgsSchema["type"] = "string"
+	adapter.client = &fakeClient{name: "replacement"}
+	adapter.generation = nil
+	require.NoError(t, update.Publish())
+
+	loaded, err := registry.Get(context.Background(), "mcp__srv__original")
+	require.NoError(t, err)
+	assert.Equal(t, "original description", loaded.Description())
+	parameterized, ok := loaded.(tools.Parameterized)
+	require.True(t, ok)
+	frozenSchema, ok := parameterized.Parameters().(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, originalSchemaType, frozenSchema["type"])
+	result, err := loaded.Execute(context.Background(), tools.ToolCall{
+		ID:   "call-original",
+		Name: "mcp__srv__original",
+		Args: map[string]any{"msg": "hello"},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, result)
+
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	assert.Equal(t, "original", client.last, "published execution must retain the captured remote tool name")
+}
+
 func TestMCPToolAdapterExecutePropagatesError(t *testing.T) {
 	client := &fakeClient{name: "srv", errored: true}
 	adapter := NewMCPToolAdapter(client, MCPTool{Name: "echo", Description: "echoes a message"})

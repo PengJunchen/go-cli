@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 )
@@ -27,6 +28,9 @@ var (
 	ErrMCPGenerationStale = errors.New("tools: MCP tool generation is stale")
 	// ErrMCPGenerationTransactionClosed reports an operation on a consumed update.
 	ErrMCPGenerationTransactionClosed = errors.New("tools: MCP generation transaction is closed")
+	// ErrMCPGenerationCandidateInvalid reports an MCP candidate without frozen
+	// metadata or a generation-scoped execution handle.
+	ErrMCPGenerationCandidateInvalid = errors.New("tools: MCP generation candidate is invalid")
 )
 
 // PreparedDispatchLease pins one exact MCP client generation for a committed
@@ -36,11 +40,96 @@ type PreparedDispatchLease interface {
 	Acquire() (release func(), err error)
 }
 
-// MCPToolCandidate is one fully built tool in an unpublished MCP generation.
-// The caller owns the definition and lease until Publish or Abort completes.
+// MCPGenerationClient executes one remote MCP tool through a source-owned
+// client generation. Implementations must remain bound to that generation;
+// callers must not reconnect or reconfigure a client in place across sources.
+type MCPGenerationClient interface {
+	ExecuteMCPTool(ctx context.Context, remoteToolName string, call ToolCall) (*ToolResult, error)
+}
+
+// MCPGenerationClientHandle is an opaque reference to one MCP client
+// generation. Its zero value is invalid.
+type MCPGenerationClientHandle struct {
+	client MCPGenerationClient
+}
+
+// NewMCPGenerationClientHandle creates a handle for one source-owned MCP
+// client generation. The handle retains the narrow generation caller, never a
+// ToolDefinition or its Execute method value.
+func NewMCPGenerationClientHandle(client MCPGenerationClient) (MCPGenerationClientHandle, error) {
+	if isNilMCPGenerationClient(client) {
+		return MCPGenerationClientHandle{}, fmt.Errorf("%w: missing client generation", ErrMCPGenerationCandidateInvalid)
+	}
+	return MCPGenerationClientHandle{client: client}, nil
+}
+
+func (h MCPGenerationClientHandle) valid() bool {
+	return !isNilMCPGenerationClient(h.client)
+}
+
+func (h MCPGenerationClientHandle) execute(ctx context.Context, remoteToolName string, call ToolCall) (*ToolResult, error) {
+	if !h.valid() {
+		return nil, fmt.Errorf("%w: missing client generation", ErrMCPGenerationCandidateInvalid)
+	}
+	return h.client.ExecuteMCPTool(ctx, remoteToolName, call)
+}
+
+func isNilMCPGenerationClient(client MCPGenerationClient) bool {
+	if client == nil {
+		return true
+	}
+	value := reflect.ValueOf(client)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice, reflect.UnsafePointer:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+// MCPToolCandidate is one immutable tool descriptor in an unpublished MCP
+// generation. Its fields are private so callers cannot replace the frozen
+// metadata or omit its typed client-generation handle.
 type MCPToolCandidate struct {
-	Definition ToolDefinition
-	Lease      PreparedDispatchLease
+	name        string
+	remoteName  string
+	description string
+	schema      ToolSchemaSnapshot
+	client      MCPGenerationClientHandle
+	lease       PreparedDispatchLease
+}
+
+// NewMCPToolCandidate snapshots one remote MCP tool's public descriptor and
+// binds it to an exact client-generation handle.
+func NewMCPToolCandidate(
+	registryName string,
+	remoteToolName string,
+	description string,
+	schema any,
+	client MCPGenerationClientHandle,
+	lease PreparedDispatchLease,
+) (MCPToolCandidate, error) {
+	if strings.TrimSpace(registryName) == "" || strings.TrimSpace(remoteToolName) == "" || !client.valid() {
+		return MCPToolCandidate{}, fmt.Errorf("%w: missing tool name or client generation", ErrMCPGenerationCandidateInvalid)
+	}
+	frozenSchema, err := freezeToolSchema(schema)
+	if err != nil {
+		return MCPToolCandidate{}, fmt.Errorf("%w: snapshot MCP schema: %w", ErrMCPGenerationCandidateInvalid, err)
+	}
+	if !frozenSchema.Present() {
+		return MCPToolCandidate{}, fmt.Errorf("%w: MCP tool %q has no input schema", ErrMCPGenerationCandidateInvalid, registryName)
+	}
+	if err := validatePreparedSchemaNode(frozenSchema.Schema(), true); err != nil {
+		return MCPToolCandidate{}, fmt.Errorf("%w: validate MCP schema for %q: %w", ErrMCPGenerationCandidateInvalid, registryName, err)
+	}
+	return MCPToolCandidate{
+		name:        registryName,
+		remoteName:  remoteToolName,
+		description: description,
+		schema:      frozenSchema,
+		client:      client,
+		lease:       lease,
+	}, nil
 }
 
 type mcpGenerationOwner struct {
@@ -78,30 +167,22 @@ type mcpGenerationCandidate struct {
 type frozenMCPGenerationDefinition struct {
 	name        string
 	description string
+	remoteName  string
 	schema      ToolSchemaSnapshot
-	execute     func(context.Context, ToolCall) (*ToolResult, error)
+	client      MCPGenerationClientHandle
 }
 
 func (d *frozenMCPGenerationDefinition) Name() string        { return d.name }
 func (d *frozenMCPGenerationDefinition) Description() string { return d.description }
 func (d *frozenMCPGenerationDefinition) Parameters() any     { return d.schema.Schema() }
 func (d *frozenMCPGenerationDefinition) Execute(ctx context.Context, call ToolCall) (*ToolResult, error) {
-	if d == nil || d.execute == nil {
+	if d == nil || !d.client.valid() {
 		return nil, ErrPreparedInvocationUnavailable
 	}
 	if call.Name != d.name {
 		return nil, ErrPreparedProxyNameMismatch
 	}
-	return d.execute(ctx, call)
-}
-
-type frozenMCPGenerationGuidedDefinition struct {
-	*frozenMCPGenerationDefinition
-	guidelines []string
-}
-
-func (d *frozenMCPGenerationGuidedDefinition) PromptGuidelines() []string {
-	return append([]string(nil), d.guidelines...)
+	return d.client.execute(ctx, d.remoteName, call)
 }
 
 // MCPGenerationUpdate owns the DTR write lock until Publish, Disable, or Abort.
@@ -242,58 +323,27 @@ func (u *MCPGenerationUpdate) finish() {
 }
 
 func prepareMCPGenerationCandidate(candidate MCPToolCandidate) (mcpGenerationCandidate, error) {
-	if candidate.Definition == nil {
-		return mcpGenerationCandidate{}, errors.New("tools: MCP generation contains a nil tool")
+	if strings.TrimSpace(candidate.name) == "" || strings.TrimSpace(candidate.remoteName) == "" || !candidate.client.valid() {
+		return mcpGenerationCandidate{}, fmt.Errorf("%w: missing tool name or client generation", ErrMCPGenerationCandidateInvalid)
 	}
-	if _, ok := candidate.Definition.(StreamingBashTool); ok {
-		return mcpGenerationCandidate{}, errors.New("tools: MCP generation does not accept streaming executors")
+	if !candidate.schema.Present() {
+		return mcpGenerationCandidate{}, fmt.Errorf("%w: MCP tool %q has no input schema", ErrMCPGenerationCandidateInvalid, candidate.name)
 	}
-	if _, ok := candidate.Definition.(TopToolsProvider); ok {
-		return mcpGenerationCandidate{}, errors.New("tools: MCP generation does not accept registry providers")
+	if err := validatePreparedSchemaNode(candidate.schema.Schema(), true); err != nil {
+		return mcpGenerationCandidate{}, fmt.Errorf("%w: validate MCP schema for %q: %w", ErrMCPGenerationCandidateInvalid, candidate.name, err)
 	}
-	name := candidate.Definition.Name()
-	if strings.TrimSpace(name) == "" {
-		return mcpGenerationCandidate{}, errors.New("tools: MCP generation contains a tool with an empty name")
-	}
-	description := candidate.Definition.Description()
 	metadata := toolRegistrationMetadata{
-		description: description,
-		effects:     unknownTrustedEffects(),
-	}
-	parameterized, ok := candidate.Definition.(Parameterized)
-	if !ok {
-		return mcpGenerationCandidate{}, fmt.Errorf("%w: MCP tool %q has no input schema", ErrPreparedSchemaInvalid, name)
-	}
-	metadata.hasParameters = true
-	schema, err := freezeToolSchema(parameterized.Parameters())
-	if err != nil {
-		return mcpGenerationCandidate{}, fmt.Errorf("tools: snapshot MCP schema for %q: %w", name, err)
-	}
-	if !schema.Present() {
-		return mcpGenerationCandidate{}, fmt.Errorf("%w: MCP tool %q has no input schema", ErrPreparedSchemaInvalid, name)
-	}
-	if err := validatePreparedSchemaNode(schema.Schema(), true); err != nil {
-		return mcpGenerationCandidate{}, fmt.Errorf("tools: validate MCP schema for %q: %w", name, err)
-	}
-	metadata.schema = schema
-	var guidelines []string
-	if guideliner, ok := candidate.Definition.(PromptGuideliner); ok {
-		metadata.hasPromptGuidelines = true
-		guidelines = append([]string(nil), guideliner.PromptGuidelines()...)
-		metadata.promptGuidelines = append([]string(nil), guidelines...)
+		description:   candidate.description,
+		effects:       unknownTrustedEffects(),
+		hasParameters: true,
+		schema:        candidate.schema,
 	}
 	frozenDefinition := &frozenMCPGenerationDefinition{
-		name:        name,
-		description: description,
-		schema:      schema,
-		execute:     candidate.Definition.Execute,
-	}
-	var definition ToolDefinition = frozenDefinition
-	if metadata.hasPromptGuidelines {
-		definition = &frozenMCPGenerationGuidedDefinition{
-			frozenMCPGenerationDefinition: frozenDefinition,
-			guidelines:                    guidelines,
-		}
+		name:        candidate.name,
+		description: candidate.description,
+		remoteName:  candidate.remoteName,
+		schema:      candidate.schema,
+		client:      candidate.client,
 	}
 
 	var nonce [32]byte
@@ -301,9 +351,9 @@ func prepareMCPGenerationCandidate(candidate MCPToolCandidate) (mcpGenerationCan
 		return mcpGenerationCandidate{}, fmt.Errorf("tools: create MCP executor fingerprint: %w", err)
 	}
 	return mcpGenerationCandidate{
-		name:        name,
-		definition:  definition,
-		lease:       candidate.Lease,
+		name:        candidate.name,
+		definition:  frozenDefinition,
+		lease:       candidate.lease,
 		metadata:    metadata,
 		fingerprint: sha256.Sum256(nonce[:]),
 	}, nil
