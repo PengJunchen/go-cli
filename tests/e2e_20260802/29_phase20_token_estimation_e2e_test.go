@@ -81,12 +81,29 @@ func TestET_Phase20_TokenEstimation(t *testing.T) {
 		assert.Equal(t, fastN, n, "long text should use fast estimator")
 	})
 
-	// AC-7: AgentAssembly after AssembleAgent uses UnicodeTokenEstimator.
-	t.Run("AC7_AssemblyUsesUnicodeEstimator", func(t *testing.T) {
-		t.Skip("Pre-existing failure: estimator type mismatch")
+	// AC-7: AgentAssembly uses a composite estimator with precise short-text
+	// estimates and a fast path for long input.
+	t.Run("AC7_AssemblyUsesCompositeEstimator", func(t *testing.T) {
 		assembly := phase19wAssemble(t, phase19wTestConfig())
 		require.NotNil(t, assembly.Estimator, "Estimator must be non-nil after AssembleAgent")
-		_, ok := assembly.Estimator.(*compaction.UnicodeTokenEstimator)
-		assert.True(t, ok, "Estimator should be *compaction.UnicodeTokenEstimator")
+		composite, ok := assembly.Estimator.(*compaction.CompositeTokenEstimator)
+		require.True(t, ok, "Estimator should be *compaction.CompositeTokenEstimator")
+
+		shortText := "你好世界"
+		shortEstimate, err := composite.Estimate(shortText)
+		require.NoError(t, err)
+		preciseEstimate, err := compaction.NewUnicodeTokenEstimator().Estimate(shortText)
+		require.NoError(t, err)
+		assert.Equal(t, preciseEstimate, shortEstimate, "short text should use the precise Unicode estimator")
+
+		longText := strings.Repeat("你", 4000) // 12000 bytes, above the composite threshold.
+		longEstimate, err := composite.Estimate(longText)
+		require.NoError(t, err)
+		fastEstimate, err := compaction.NewFastTokenEstimator().Estimate(longText)
+		require.NoError(t, err)
+		unicodeEstimate, err := compaction.NewUnicodeTokenEstimator().Estimate(longText)
+		require.NoError(t, err)
+		assert.NotEqual(t, unicodeEstimate, fastEstimate, "fixture should distinguish the precise and fast paths")
+		assert.Equal(t, fastEstimate, longEstimate, "long text should use the fast estimator")
 	})
 }

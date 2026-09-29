@@ -8,6 +8,7 @@ package e2e_20260802 //nolint:staticcheck
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"sync"
 	"testing"
 	"time"
@@ -317,24 +318,33 @@ func TestET_Phase31_PluginManagerLifecycle(t *testing.T) {
 
 // Test ID:   ET-PHASE31-003
 // Task ref:  test(extension): add plugin ecosystem E2E tests
-// Feature:   PluginManager graceful error handling for non-existent paths
+// Feature:   PluginManager reports a bad path and continues loading later paths
 func TestET_Phase31_PluginManagerGracefulErrorHandling(t *testing.T) {
-	t.Skip("Pre-existing failure: plugin loader does not swallow non-existent path errors")
 	defer verify.AssertNoGoroutineLeak(t)()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	pm := extension.NewPluginManager(extension.NewDefaultPluginLoader())
+	badPath := "/missing/plugin.so"
+	goodPath := "/plugins/valid"
+	loader := newReviewerLoader("test")
+	loader.SetError(badPath, errors.New("plugin file not found"))
+	goodExtension := &reviewerExt{name: "valid-extension"}
+	loader.SetResult(goodPath, []extension.Extension{goodExtension})
+	pm := extension.NewPluginManager(loader)
 
-	// Load with a non-existent path should not panic or return an error.
+	// A bad path should be reported without panicking, and later paths should
+	// still be attempted and retained.
+	var loadErr error
 	assert.NotPanics(t, func() {
-		err := pm.Load(ctx, []string{"/nonexistent/path/to/plugin.so"})
-		assert.NoError(t, err, "Load should swallow individual path errors")
+		loadErr = pm.Load(ctx, []string{badPath, goodPath})
 	})
-
-	// No extensions should have been loaded.
-	assert.Empty(t, pm.Extensions())
+	require.Error(t, loadErr)
+	assert.Contains(t, loadErr.Error(), badPath)
+	assert.Contains(t, loadErr.Error(), "plugin file not found")
+	loaded := pm.Extensions()
+	require.Len(t, loaded, 1, "the valid path should load after the failed path")
+	assert.Same(t, goodExtension, loaded[0])
 }
 
 // =============================================================================
