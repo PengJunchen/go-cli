@@ -441,7 +441,8 @@ func TestInteractiveDurableHistoryMutatorsAreUnsupportedAndReadOnlySlashStillWor
 	require.Contains(t, turnBodies[1], `"content":"second turn"`)
 	require.NotContains(t, out.String(), "unexpected retry reply")
 	require.Equal(t, 3, strings.Count(out.String(), "durable /"), "compact, retry, and clear each explain the durable boundary")
-	require.Contains(t, out.String(), "Total cost:", "read-only commands remain available")
+	require.Contains(t, out.String(), "Known cost subtotal:", "read-only commands remain available")
+	require.Contains(t, out.String(), "Provider attempts:", "the read-only report distinguishes provider attempts")
 	require.Contains(t, out.String(), "Session tree", "durable published history remains readable")
 	physicalID := repl.assembly.PhysicalSessionID
 	require.NotEmpty(t, physicalID)

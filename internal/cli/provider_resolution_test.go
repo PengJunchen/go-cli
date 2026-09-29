@@ -68,7 +68,7 @@ func TestProviderCredentialNeverSentToWrongOrigin(t *testing.T) {
 				defer cleanup()
 			}
 			if err == nil {
-				_, requestErr := model.Generate(context.Background(), []llm.Message{{
+				_, requestErr := model.Generate(withCLITestOperation(context.Background()), []llm.Message{{
 					Role:    llm.RoleUser,
 					Content: "do not forward this credential",
 				}})
@@ -131,7 +131,7 @@ func TestProviderCustomOpenAICompatibleAliasUsesConfiguredOrigin(t *testing.T) {
 		defer cleanup()
 	}
 
-	response, err := model.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "hello"}})
+	response, err := model.Generate(withCLITestOperation(context.Background()), []llm.Message{{Role: llm.RoleUser, Content: "hello"}})
 	require.NoError(t, err)
 	require.NotNil(t, response)
 	assert.Equal(t, "ok", response.Content)

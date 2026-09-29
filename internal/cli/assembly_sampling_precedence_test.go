@@ -174,7 +174,7 @@ func TestAssembledSmallModelSamplingUsesSmallThenMatchingProviderSettings(t *tes
 			t.Cleanup(assembly.Cleanup)
 			smallModel := assembly.ModelConfig.ModelSelector.SmallModel()
 			require.NotNil(t, smallModel)
-			response, err := smallModel.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "small sampling"}})
+			response, err := smallModel.Generate(withCLITestOperation(context.Background()), []llm.Message{{Role: llm.RoleUser, Content: "small sampling"}})
 			require.NoError(t, err)
 			require.NotNil(t, response)
 
@@ -219,7 +219,7 @@ func TestAssembledLoadedSmallModelExplicitZeroSamplingIsEncoded(t *testing.T) {
 	t.Cleanup(assembly.Cleanup)
 	smallModel := assembly.ModelConfig.ModelSelector.SmallModel()
 	require.NotNil(t, smallModel)
-	response, err := smallModel.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "loaded small zero"}})
+	response, err := smallModel.Generate(withCLITestOperation(context.Background()), []llm.Message{{Role: llm.RoleUser, Content: "loaded small zero"}})
 	require.NoError(t, err)
 	require.NotNil(t, response)
 
@@ -258,7 +258,7 @@ func TestAssembledSmallModelDoesNotInheritOtherProviderSampling(t *testing.T) {
 	t.Cleanup(assembly.Cleanup)
 	smallModel := assembly.ModelConfig.ModelSelector.SmallModel()
 	require.NotNil(t, smallModel)
-	response, err := smallModel.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "small sampling"}})
+	response, err := smallModel.Generate(withCLITestOperation(context.Background()), []llm.Message{{Role: llm.RoleUser, Content: "small sampling"}})
 	require.NoError(t, err)
 	require.NotNil(t, response)
 
@@ -321,7 +321,7 @@ func TestLoaderRejectsInvalidSmallModelSamplingBeforeProviderDispatch(t *testing
 				if assembleErr == nil {
 					t.Cleanup(assembly.Cleanup)
 					if smallModel := assembly.ModelConfig.ModelSelector.SmallModel(); smallModel != nil {
-						_, _ = smallModel.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "invalid small sampling"}})
+						_, _ = smallModel.Generate(withCLITestOperation(context.Background()), []llm.Message{{Role: llm.RoleUser, Content: "invalid small sampling"}})
 					}
 				}
 			}
@@ -338,7 +338,7 @@ func generateCapturedModelRequest(t *testing.T, capture *providerRequestCapture,
 	assembly, err := AssembleAgent(context.Background(), rc, providerName, modelName, io.Discard)
 	require.NoError(t, err)
 	t.Cleanup(assembly.Cleanup)
-	response, err := assembly.ModelConfig.Model.Generate(context.Background(), []llm.Message{{Role: llm.RoleUser, Content: "sampling precedence"}}, opts...)
+	response, err := assembly.ModelConfig.Model.Generate(withCLITestOperation(context.Background()), []llm.Message{{Role: llm.RoleUser, Content: "sampling precedence"}}, opts...)
 	require.NoError(t, err)
 	require.NotNil(t, response)
 	count, _, _, _ := capture.snapshot()

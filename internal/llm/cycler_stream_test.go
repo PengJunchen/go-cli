@@ -122,9 +122,9 @@ func TestStreamCleanupCalledAfterDrain(t *testing.T) {
 	assert.True(t, finishSawCleanup.Load(), "attempt Finish must wait for the selected candidate cleanup")
 }
 
-// TestStreamCleanupNotCalledOnInitError verifies that cleanup is not called
-// when the inner Stream returns an initialization error.
-func TestStreamCleanupNotCalledOnInitError(t *testing.T) {
+// TestStreamProtocolInitErrorDoesNotFallbackAndJoinsCleanup verifies that a
+// post-begin protocol error is returned after cleanup without primary replay.
+func TestStreamProtocolInitErrorDoesNotFallbackAndJoinsCleanup(t *testing.T) {
 	var cleanupCalled atomic.Bool
 	cleanup := func() { cleanupCalled.Store(true) }
 
@@ -140,23 +140,14 @@ func TestStreamCleanupNotCalledOnInitError(t *testing.T) {
 		Models: []ModelEntry{{Provider: "test-stream", Model: "m1"}},
 	}).WithRegistry(reg)
 
-	// The primary model should be used as fallback (no error from primary).
-	wrapped := cycler.WrapModel(&mockModel{})
+	primary := &fbMockModel{streamText: "must not replay"}
+	wrapped := cycler.WrapModel(primary)
 
 	ch, err := wrapped.Stream(attemptTestContext(), nil)
-	// Fallback to primary succeeds.
-	require.NoError(t, err)
-	// Drain the fallback channel.
-	for range ch {
-	}
-
-	// Cleanup from the failed inner model should NOT have been called because
-	// the error path already handles it. The cleanup we registered was for the
-	// inner model; since Stream returned an error, cleanup was called in the
-	// error-handling path before falling back.
-	// Actually, looking at the code: on Stream error, cleanup IS called.
-	// So cleanupCalled should be true.
+	require.Error(t, err)
+	require.Nil(t, ch)
 	assert.True(t, cleanupCalled.Load(), "cleanup should be called on init error")
+	assert.Zero(t, primary.streamCalls, "protocol failures must not replay through the primary")
 }
 
 // TestStreamNilCleanupReturnsOriginal verifies that when cleanup is nil,
@@ -407,13 +398,6 @@ func TestStreamErrorChunkCancelsAndJoinsSelectedSource(t *testing.T) {
 	out, err := wrapped.Stream(attemptTestContext(), nil)
 	require.NoError(t, err)
 
-	var terminal MessageChunk
-	select {
-	case terminal = <-out:
-	case <-time.After(time.Second):
-		t.Fatal("cycler did not forward the selected source error")
-	}
-	require.ErrorIs(t, terminal.Error, providerErr)
 	select {
 	case cause := <-observedCause:
 		var localAbort *LocalStreamAbortCause
@@ -422,7 +406,7 @@ func TestStreamErrorChunkCancelsAndJoinsSelectedSource(t *testing.T) {
 	case <-time.After(60 * time.Millisecond):
 		t.Fatal("cycler did not cancel the selected source after its error chunk")
 	}
-	requireChannelOpenUntil(t, out, 20*time.Millisecond)
+	requireChannelOpenUntil(t, out, 60*time.Millisecond)
 	select {
 	case <-cleanupStarted:
 		t.Fatal("cleanup started before the source channel closed")
@@ -447,7 +431,7 @@ func TestStreamErrorChunkCancelsAndJoinsSelectedSource(t *testing.T) {
 		t.Fatal("cleanup did not finish after release")
 	}
 
-	terminalCount := 1
+	terminalCount := 0
 	for chunk := range out {
 		if chunk.Error != nil || chunk.Final {
 			terminalCount++
@@ -529,7 +513,7 @@ func TestStreamCallerCancelBeforeErrorKeepsCallerCause(t *testing.T) {
 	}
 }
 
-func TestStreamSetupErrorWithChannelJoinsCleanupBeforeFallback(t *testing.T) {
+func TestStreamProtocolSetupErrorWithChannelJoinsCleanupWithoutFallback(t *testing.T) {
 	setupErr := errors.New("stream setup failed")
 	sourceRelease := make(chan struct{})
 	cleanupRelease := make(chan struct{})
@@ -548,14 +532,7 @@ func TestStreamSetupErrorWithChannelJoinsCleanupBeforeFallback(t *testing.T) {
 	}}
 	reg := &ProviderRegistry{providers: map[string]ModelProvider{}}
 	require.NoError(t, reg.Register(provider))
-	fallbackBeforeCleanup := make(chan bool, 1)
 	fallback := &joinSetupModel{streamFn: func(context.Context, int32) (<-chan MessageChunk, error) {
-		select {
-		case <-cleanupDone:
-			fallbackBeforeCleanup <- false
-		default:
-			fallbackBeforeCleanup <- true
-		}
 		ch := make(chan MessageChunk)
 		close(ch)
 		return ch, nil
@@ -594,7 +571,7 @@ func TestStreamSetupErrorWithChannelJoinsCleanupBeforeFallback(t *testing.T) {
 	}
 	select {
 	case err := <-finished:
-		t.Fatalf("fallback returned before cleanup completed: %v", err)
+		t.Fatalf("Stream returned before cleanup completed: %v", err)
 	case <-time.After(20 * time.Millisecond):
 	}
 	require.Zero(t, fallback.streamCalls.Load(), "fallback must wait for cleanup completion")
@@ -604,9 +581,8 @@ func TestStreamSetupErrorWithChannelJoinsCleanupBeforeFallback(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("cleanup did not complete after source close")
 	}
-	require.NoError(t, <-finished)
-	require.False(t, <-fallbackBeforeCleanup, "cleanup must complete before fallback starts")
-	require.EqualValues(t, 1, fallback.streamCalls.Load())
+	require.ErrorIs(t, <-finished, setupErr)
+	require.Zero(t, fallback.streamCalls.Load(), "protocol failures must not replay through the unbound primary")
 }
 
 func TestStreamNilNilIsRejectedAndContinuationDoesNotFallback(t *testing.T) {

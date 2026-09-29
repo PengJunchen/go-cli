@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/pengjunchen/go-cli/internal/config"
+	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mcp"
 	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/verify"
@@ -348,7 +349,7 @@ func TestPromptCmd_BuildModel_WithConfig(t *testing.T) {
 func TestPromptCmd_BuildModel_WithNilConfig(t *testing.T) {
 	t.Run("default provider requires a scoped credential", func(t *testing.T) {
 		model, _, cleanup, err := buildModel(t.Context(), nil, "eino", "test-model")
-		require.ErrorContains(t, err, "provider requires a scoped credential")
+		require.ErrorIs(t, err, llm.ErrProviderCredentialRequired)
 		assert.Nil(t, model)
 		assert.Nil(t, cleanup)
 	})
@@ -385,7 +386,7 @@ func TestInteractiveCmd_BuildModel_WithConfig(t *testing.T) {
 func TestInteractiveCmd_BuildModel_WithNilConfig(t *testing.T) {
 	t.Run("default provider requires a scoped credential", func(t *testing.T) {
 		model, _, cleanup, err := buildModel(t.Context(), nil, "eino", "test-model")
-		require.ErrorContains(t, err, "provider requires a scoped credential")
+		require.ErrorIs(t, err, llm.ErrProviderCredentialRequired)
 		assert.Nil(t, model)
 		assert.Nil(t, cleanup)
 	})
