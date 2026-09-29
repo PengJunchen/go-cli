@@ -86,6 +86,27 @@ func TestMCPSourceSelectionAcceptsOnlyUserGlobalInlineConfigAsStatic(t *testing.
 	assert.False(t, source.reloadable())
 }
 
+func TestMCPSourceSelectionRejectsUserGlobalMCPFileSymlink(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := t.TempDir()
+	changeMCPTestWorkingDirectory(t, root)
+
+	globalDir := filepath.Join(home, ".config", "go-cli")
+	require.NoError(t, os.MkdirAll(globalDir, 0o700))
+	target := filepath.Join(home, "target.json")
+	require.NoError(t, os.WriteFile(target, []byte(`{"servers":[{"name":"target","url":"http://127.0.0.1:9"}]}`), 0o600))
+	require.NoError(t, os.Symlink(target, filepath.Join(globalDir, "mcp.json")))
+
+	manager := approval.NewDefaultTrustManager(approval.NewInMemoryTrustStore())
+	source, err := selectMCPServerSource(context.Background(), &config.Config{}, manager)
+	require.NoError(t, err)
+	require.NotNil(t, source)
+	assert.Equal(t, mcpServerSourceUserGlobalFile, source.kind)
+	assert.ErrorIs(t, source.initialErr, errMCPSourceGlobalRejected)
+	assert.Empty(t, source.servers)
+}
+
 func TestMCPSourceSelectionKeepsExplicitEmptyProjectInlineSource(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	root := t.TempDir()

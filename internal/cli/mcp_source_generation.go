@@ -187,15 +187,15 @@ func selectMCPServerSource(ctx context.Context, rc *config.Config, manager appro
 		path:    globalMCPPath,
 		manager: manager,
 	}
-	if presenceErr != nil || approval.ValidateGlobalConfigFile(globalMCPPath) != nil {
+	if presenceErr != nil {
 		source.initialErr = errMCPSourceGlobalRejected
 		source.initialRevision = "rejected"
 		return source, nil
 	}
-	data, err := os.ReadFile(globalMCPPath)
+	data, err := approval.ReadGlobalConfigFile(globalMCPPath)
 	if err != nil {
 		source.initialErr = errMCPSourceGlobalRejected
-		source.initialRevision = "read-error"
+		source.initialRevision = "rejected"
 		return source, nil
 	}
 	source.initialRevision = mcpSourceBytesRevision(data)
@@ -260,17 +260,14 @@ func (s *mcpServerSource) loadCurrent(ctx context.Context) ([]config.MCPServerCo
 	case mcpServerSourceUserGlobalFile:
 		present, err := mcpSourcePathPresent(s.path)
 		if err != nil {
-			return nil, mcpSourcePathRevision(s.path), errMCPSourceGlobalRejected
+			return nil, "rejected", errMCPSourceGlobalRejected
 		}
 		if !present {
 			return []config.MCPServerConfig{}, "missing", nil
 		}
-		if err := approval.ValidateGlobalConfigFile(s.path); err != nil {
-			return nil, "rejected", errMCPSourceGlobalRejected
-		}
-		data, err := os.ReadFile(s.path)
+		data, err := approval.ReadGlobalConfigFile(s.path)
 		if err != nil {
-			return nil, "read-error", errMCPSourceGlobalRejected
+			return nil, "rejected", errMCPSourceGlobalRejected
 		}
 		servers, err := parseMCPServerConfigBytes(data)
 		return servers, mcpSourceBytesRevision(data), err
@@ -285,14 +282,15 @@ func (s *mcpServerSource) currentRevision(ctx context.Context) (string, error) {
 	}
 	if !s.projectOwned() {
 		if s.kind == mcpServerSourceUserGlobalFile {
-			if err := approval.ValidateGlobalConfigFile(s.path); err != nil {
+			data, err := approval.ReadGlobalConfigFile(s.path)
+			if err != nil {
 				present, presenceErr := mcpSourcePathPresent(s.path)
 				if !present && presenceErr == nil {
 					return "missing", nil
 				}
 				return "rejected", nil
 			}
-			return mcpSourcePathRevision(s.path), nil
+			return mcpSourceBytesRevision(data), nil
 		}
 		return s.initialRevision, nil
 	}
@@ -507,20 +505,6 @@ func cloneMCPEnvironment(environment map[string]string) map[string]string {
 func mcpSourceBytesRevision(data []byte) string {
 	digest := sha256.Sum256(data)
 	return "sha256:" + hex.EncodeToString(digest[:])
-}
-
-func mcpSourcePathRevision(path string) string {
-	if path == "" {
-		return "missing"
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if errors.Is(err, fs.ErrNotExist) {
-			return "missing"
-		}
-		return "read-error"
-	}
-	return mcpSourceBytesRevision(data)
 }
 
 func mcpProjectPathMetadataRevision(path string) string {
