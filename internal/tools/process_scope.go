@@ -57,6 +57,10 @@ type managedLocalResult struct {
 // startManagedLocalCommand starts a command in a fresh process group and owns
 // both pipe ends so leader exit can be observed independently of reader EOF.
 func startManagedLocalCommand(cancel context.CancelFunc, cmd *exec.Cmd) (*managedLocalCommand, error) {
+	return startManagedLocalCommandWithStartHook(cancel, cmd, nil)
+}
+
+func startManagedLocalCommandWithStartHook(cancel context.CancelFunc, cmd *exec.Cmd, onStarted func(*exec.Cmd) error) (*managedLocalCommand, error) {
 	scope, err := newLocalProcessScope(cmd)
 	if err != nil {
 		return nil, err
@@ -85,7 +89,31 @@ func startManagedLocalCommand(cancel context.CancelFunc, cmd *exec.Cmd) (*manage
 	_ = stdoutWrite.Close()
 	_ = stderrWrite.Close()
 	scope.started(cmd)
+	if onStarted != nil {
+		if err := onStarted(cmd); err != nil {
+			// The hook is used by prepared Bash to keep user code behind a start
+			// gate until the exact process identity has synced. On failure, reap
+			// the gated leader and confirm the owned group is gone before return.
+			_ = scope.requestKill()
+			_ = cmd.Wait()
+			_, _, _, cleanupErr := scope.cleanupRemaining()
+			_ = stdoutRead.Close()
+			_ = stderrRead.Close()
+			if cleanupErr != nil {
+				return nil, errors.Join(fmt.Errorf("tools: process start hook: %w", err), cleanupErr)
+			}
+			return nil, fmt.Errorf("tools: process start hook: %w", err)
+		}
+	}
 	return &managedLocalCommand{cmd: cmd, scope: scope, stdout: stdoutRead, stderr: stderrRead, cancel: cancel}, nil
+}
+
+func startManagedLocalBashCommand(cancel context.CancelFunc, cmd *exec.Cmd, ctx context.Context) (*managedLocalCommand, error) {
+	observer := processExecutionIdentityObserverFromContext(ctx)
+	if observer == nil {
+		return startManagedLocalCommand(cancel, cmd)
+	}
+	return startManagedLocalBashCommandWithIdentityObserver(cancel, cmd, ctx, observer)
 }
 
 // collect drains both pipes concurrently while the owner watches the leader,

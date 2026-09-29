@@ -211,7 +211,7 @@ func (t *BashTool) Execute(ctx context.Context, call ToolCall) (*ToolResult, err
 	cmd.Dir = t.Workdir
 	cmd.Env = filteredEnv(t.Env)
 
-	managed, err := startManagedLocalCommand(cancel, cmd)
+	managed, err := startManagedLocalBashCommand(cancel, cmd, execCtx)
 	if err != nil {
 		return nil, fmt.Errorf("bash: start: %w", err)
 	}
