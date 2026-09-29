@@ -127,6 +127,24 @@ type REPLSession struct {
 	app         *tui.BubbleteaApp
 }
 
+type durableRunBindingError struct {
+	cause error
+}
+
+func (err *durableRunBindingError) Error() string {
+	if err == nil || err.cause == nil {
+		return "interactive: durable run binding failed"
+	}
+	return fmt.Sprintf("interactive: durable run binding failed: %v", err.cause)
+}
+
+func (err *durableRunBindingError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.cause
+}
+
 // Run starts the session: it parses flags, assembles the agent, enters the
 // REPL loop, and cleans up on exit.
 func (s *REPLSession) Run(ctx context.Context, cfg Config, args []string) (runErr error) {
@@ -712,14 +730,23 @@ func (s *REPLSession) executeTurn() error {
 
 	// Wait for RunTurn to finish so turnResult and turnErr are populated.
 	<-s.turnDone
+	var bindingErr *durableRunBindingError
+	bindingFailed := errors.As(s.turnErr, &bindingErr)
 
 	interrupted := s.turnCtx.Err() != nil
 	s.cancelTurn()
 	s.interrupter.Stop()
-	s.turnSpan.SetStatus(tracing.SpanStatusOK, "")
+	if bindingFailed {
+		s.turnSpan.SetStatus(tracing.SpanStatusError, bindingErr.Error())
+	} else {
+		s.turnSpan.SetStatus(tracing.SpanStatusOK, "")
+	}
 	s.turnSpan.End()
 
 	s.app.Quit()
+	if bindingFailed {
+		return bindingErr
+	}
 
 	if s.assembly.durableSession != nil && !durableTurnIsJoinable(s.turnResult) {
 		status := s.turnResult
@@ -865,7 +892,7 @@ func (s *REPLSession) runAgentGoroutine() {
 		if s.assembly.durableSession != nil {
 			boundCtx, _, err := s.assembly.durableSession.bindRun(runCtx)
 			if err != nil {
-				s.turnErr = err
+				s.turnErr = &durableRunBindingError{cause: err}
 				s.turnResult = core.Result{Outcome: core.RunOutcomeError, ExecutionState: core.RunExecutionQuiescent}
 				s.stream.SetResult(core.AgentMessage{Role: "assistant"}, err)
 				s.stream.Close()
