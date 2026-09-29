@@ -177,15 +177,15 @@ func (m *nativeChatModel) Generate(ctx context.Context, msgs []Message, opts ...
 	return msg, err
 }
 
-func (m *nativeChatModel) generate(ctx context.Context, msgs []Message, opts ...Option) (*Message, ProviderAttempt, error) {
+func (m *nativeChatModel) generate(ctx context.Context, msgs []Message, opts ...Option) (*Message, *ProviderAttempt, error) {
 	body, err := m.encode(msgs, opts)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, err)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, m.endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, nil, fmt.Errorf("llm: build request: %w", err)
+		return nil, nil, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, fmt.Errorf("llm: build request: %w", err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if m.header != nil {
@@ -244,7 +244,7 @@ func (m *nativeChatModel) Stream(ctx context.Context, msgs []Message, opts ...Op
 	case openaiProviderName:
 		return m.streamOpenAI(ctx, msgs, opts)
 	default:
-		return nil, fmt.Errorf("llm: provider %q does not support native streaming; use Generate instead", m.provider)
+		return nil, preDispatchCandidateError(m.candidate, PreDispatchProtocol, fmt.Errorf("llm: provider %q does not support native streaming; use Generate instead", m.provider))
 	}
 }
 
@@ -255,7 +255,7 @@ func (m *nativeChatModel) Stream(ctx context.Context, msgs []Message, opts ...Op
 // For streaming, a shallow copy of the client is made with Timeout=0 so that
 // SSE streams are not cut off by the client-level timeout. The caller's
 // context provides cancellation instead (AC-2, AC-3).
-func (m *nativeChatModel) streamRoundTrip(ctx context.Context, body []byte, endpoint string) (io.ReadCloser, ProviderAttempt, error) {
+func (m *nativeChatModel) streamRoundTrip(ctx context.Context, body []byte, endpoint string) (io.ReadCloser, *ProviderAttempt, error) {
 	// Copy the client and clear the Timeout so long-lived SSE streams are
 	// not terminated by the default 120s client timeout. Context
 	// cancellation still applies (AC-3).
@@ -267,7 +267,7 @@ func (m *nativeChatModel) streamRoundTrip(ctx context.Context, body []byte, endp
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, nil, fmt.Errorf("llm: build request: %w", err)
+		return nil, nil, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, fmt.Errorf("llm: build request: %w", err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "text/event-stream")
@@ -397,12 +397,12 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 	body, err := m.encode(msgs, opts)
 	if err != nil {
 		close(ch)
-		return ch, err
+		return ch, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, err)
 	}
 	streamBody, err := withStreamFlag(body)
 	if err != nil {
 		close(ch)
-		return ch, err
+		return ch, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, err)
 	}
 	// Ensure stream_options.include_usage is set so usage stats are streamed.
 	var streamReqMap map[string]any
@@ -412,7 +412,7 @@ func (m *nativeChatModel) streamOpenAI(ctx context.Context, msgs []Message, opts
 			streamBody, err = json.Marshal(streamReqMap)
 			if err != nil {
 				close(ch)
-				return ch, err
+				return ch, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, err)
 			}
 		}
 	}
@@ -586,12 +586,12 @@ func (m *nativeChatModel) streamClaude(ctx context.Context, msgs []Message, opts
 	body, err := m.encode(msgs, opts)
 	if err != nil {
 		close(ch)
-		return ch, err
+		return ch, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, err)
 	}
 	streamBody, err := withClaudeStreamFlag(body)
 	if err != nil {
 		close(ch)
-		return ch, err
+		return ch, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, err)
 	}
 
 	respBody, attempt, err := m.streamRoundTrip(ctx, streamBody, m.endpoint)
@@ -925,7 +925,7 @@ func (m *nativeChatModel) streamGemini(ctx context.Context, msgs []Message, opts
 	body, err := m.encode(msgs, opts)
 	if err != nil {
 		close(ch)
-		return ch, err
+		return ch, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, err)
 	}
 
 	// Switch the endpoint to the streaming variant.

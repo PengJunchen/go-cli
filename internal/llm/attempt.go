@@ -7,6 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"reflect"
+	"sync"
+	"sync/atomic"
 )
 
 // ProviderOperationID identifies one logical provider operation.
@@ -121,7 +124,7 @@ const (
 	FailureInvalidRequest
 	// FailureProtocol means the provider response violated the expected protocol.
 	FailureProtocol
-	// FailureCancelled means the attempt ended through cancellation.
+	// FailureCancelled means the attempt ended after it was canceled.
 	FailureCancelled
 	// FailureOther means the failure is not eligible for a generic retry policy.
 	FailureOther
@@ -160,8 +163,9 @@ const (
 	AntecedentPreDispatchFailure
 )
 
-// Origin and candidate provenance are safe to pass to accounting and diagnostics.
-// They deliberately omit endpoint, credential, headers, and prompt data.
+// AttemptIdentity contains safe origin and candidate provenance for accounting
+// and diagnostics. It deliberately omits endpoint, credential, headers, and
+// prompt data.
 type AttemptIdentity struct {
 	ProviderID string
 	ModelID    string
@@ -191,7 +195,7 @@ type CandidateAntecedent struct {
 type DispatchDenialCode uint8
 
 const (
-	// DeniedCancelled means the operation context is cancelled.
+	// DeniedCancelled means the operation context is canceled.
 	DeniedCancelled DispatchDenialCode = iota + 1
 	// DeniedReplayForbidden means the operation cannot replay its current action.
 	DeniedReplayForbidden
@@ -216,10 +220,11 @@ type DispatchDenial struct {
 	Code DispatchDenialCode
 }
 
-// DispatchDecision carries either a one-shot permit or a typed policy denial.
+// DispatchDecision carries an authorization decision or a typed policy denial.
+// The adapter creates its private one-shot permit only after authorization.
 type DispatchDecision struct {
-	Permit DispatchPermit
-	Denial *DispatchDenial
+	Authorized bool
+	Denial     *DispatchDenial
 }
 
 // UsageEvidence retains explicit unknown usage rather than interpreting zero
@@ -255,11 +260,39 @@ type ProviderAttemptResult struct {
 	ProviderReportedCostUSD *float64
 }
 
-// DispatchPermit is a one-shot authorization for one operation and candidate.
-// The operation owner validates its private ownership binding at BeginDispatch.
-type DispatchPermit interface {
-	OperationID() ProviderOperationID
-	CandidateID() CandidateID
+// DispatchPermit is an llm-owned one-shot authorization for one operation and
+// resolver-issued candidate. Its zero value is invalid and callers cannot
+// construct a valid permit.
+type DispatchPermit struct {
+	operation *operationAuthorityBinding
+	candidate *resolvedCandidateHandle
+	state     *atomic.Uint32
+}
+
+// OperationID returns the operation that authorized this permit.
+func (p *DispatchPermit) OperationID() ProviderOperationID {
+	if p == nil || p.operation == nil {
+		return ""
+	}
+	return p.operation.id
+}
+
+// CandidateID returns the resolver-issued candidate bound to this permit.
+func (p *DispatchPermit) CandidateID() CandidateID {
+	if p == nil || p.candidate == nil {
+		return ""
+	}
+	return p.candidate.id
+}
+
+// ValidFor reports whether this permit is currently being presented at the
+// dispatch fence for its bound authority and exact candidate handle.
+func (p *DispatchPermit) ValidFor(authority OperationDispatchAuthority, candidate ResolvedCandidateHandle) bool {
+	if p == nil || p.operation == nil || p.candidate == nil || p.state == nil || p.state.Load() != 1 || candidate == nil || nilOperationAuthority(authority) {
+		return false
+	}
+	resolved, ok := candidate.(*resolvedCandidateHandle)
+	return ok && p.candidate == resolved && p.operation.id == authority.ID() && sameOperationAuthority(p.operation.authority, authority)
 }
 
 // ResolvedCandidateHandle exposes safe identity for one immutable candidate.
@@ -281,10 +314,14 @@ type CandidateProposal struct {
 }
 
 // OperationDispatchAuthority is implemented by the Loop operation owner, which
-// alone authorizes provider dispatch proposals.
+// alone authorizes proposals, accounts for the actual dispatch fence, and
+// stores one immutable terminal result.
 type OperationDispatchAuthority interface {
 	ID() ProviderOperationID
 	AuthorizeCandidate(context.Context, CandidateProposal) (DispatchDecision, error)
+	// BeginDispatch must validate permit.ValidFor with its receiver and the exact candidate before allocating an attempt ID.
+	BeginDispatch(*DispatchPermit, ResolvedCandidateHandle) (ProviderAttemptID, error)
+	FinishAttempt(ProviderAttemptResult) error
 }
 
 // RunOperationFactory creates independent main, continuation, or summary
@@ -293,16 +330,47 @@ type RunOperationFactory interface {
 	NewOperation(context.Context, ProviderOperationKind, int, []ResolvedCandidateHandle) (OperationDispatchAuthority, error)
 }
 
-// ProviderDispatchAuthority consumes a permit and allocates an AttemptID at
-// the adapter's actual client.Do boundary.
-type ProviderDispatchAuthority interface {
-	BeginDispatch(DispatchPermit, ResolvedCandidateHandle) (ProviderAttempt, error)
+// ProviderAttempt is an llm-owned concrete one-shot handle for one actual
+// provider dispatch. Its zero value is invalid and callers cannot implement
+// or mint an attempt.
+type ProviderAttempt struct {
+	operation *operationAuthorityBinding
+	id        ProviderAttemptID
+	identity  AttemptIdentity
+	finished  *atomic.Bool
 }
 
-// ProviderAttempt accepts exactly one terminal result for a dispatched call.
-type ProviderAttempt interface {
-	ID() ProviderAttemptID
-	Finish(ProviderAttemptTerminal) (ProviderAttemptResult, error)
+// ID returns the opaque identifier allocated at the actual dispatch fence.
+func (a *ProviderAttempt) ID() ProviderAttemptID {
+	if a == nil {
+		return ""
+	}
+	return a.id
+}
+
+// Finish reports one terminal result to the operation owner. The handle
+// rejects duplicate finishes even when callers race.
+func (a *ProviderAttempt) Finish(terminal ProviderAttemptTerminal) (ProviderAttemptResult, error) {
+	if a == nil || a.operation == nil || a.id == "" || a.finished == nil {
+		return ProviderAttemptResult{}, errors.New("llm: invalid provider attempt")
+	}
+	if !a.finished.CompareAndSwap(false, true) {
+		return ProviderAttemptResult{}, errors.New("llm: provider attempt already finished")
+	}
+	terminal = cloneProviderAttemptTerminal(terminal)
+	result := ProviderAttemptResult{
+		OperationID:             a.operation.id,
+		AttemptID:               a.id,
+		Identity:                a.identity,
+		Outcome:                 terminal.Outcome,
+		Failure:                 terminal.Failure,
+		Usage:                   cloneUsageEvidence(terminal.Usage),
+		ProviderReportedCostUSD: cloneFloat(terminal.ProviderReportedCostUSD),
+	}
+	if err := a.operation.authority.FinishAttempt(cloneProviderAttemptResult(result)); err != nil {
+		return result, err
+	}
+	return result, nil
 }
 
 // PreDispatchCandidateError describes a typed candidate setup failure. It does
@@ -329,11 +397,42 @@ func (e *PreDispatchCandidateError) Unwrap() error {
 	return e.Err
 }
 
+func preDispatchFailureClass(err error) PreDispatchFailureClass {
+	switch {
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return PreDispatchCancelled
+	case errors.Is(err, ErrProviderCredentialRequired), errors.Is(err, ErrCredentialScopeMismatch):
+		return PreDispatchAuth
+	case errors.Is(err, ErrUnsupportedProviderProtocol):
+		return PreDispatchProtocol
+	case errors.Is(err, ErrProviderEndpointRequired):
+		return PreDispatchInvalidRequest
+	default:
+		return PreDispatchSetupUnknown
+	}
+}
+
+func preDispatchCandidateError(candidate *resolvedCandidateHandle, class PreDispatchFailureClass, err error) error {
+	if err == nil {
+		return nil
+	}
+	var existing *PreDispatchCandidateError
+	if errors.As(err, &existing) {
+		return err
+	}
+	candidateID := CandidateID("")
+	if candidate != nil {
+		candidateID = candidate.id
+	}
+	if class < PreDispatchCandidateUnavailable || class > PreDispatchSetupUnknown {
+		class = preDispatchFailureClass(err)
+	}
+	return &PreDispatchCandidateError{CandidateID: candidateID, Class: class, Err: err}
+}
+
 var (
 	// ErrOperationAuthorityRequired is returned when a guarded model has no Loop authority.
 	ErrOperationAuthorityRequired = errors.New("llm: guarded provider model requires an operation authority")
-	// ErrProviderDispatchAuthorityRequired is returned when no dispatch owner can consume a permit.
-	ErrProviderDispatchAuthorityRequired = errors.New("llm: guarded provider model requires a dispatch authority")
 	// ErrGuardedCandidateUnavailable is returned when a resolver build cannot create a guarded adapter.
 	ErrGuardedCandidateUnavailable = errors.New("llm: resolved candidate has no guarded provider adapter")
 	// ErrDispatchPermitRequired is returned when guarded dispatch lacks a matching permit.
@@ -349,9 +448,60 @@ type attemptContextKey uint8
 const (
 	runOperationFactoryContextKey attemptContextKey = iota + 1
 	operationDispatchAuthorityContextKey
-	dispatchPermitContextKey
 	candidateProposalContextKey
 )
+
+type operationAuthorityBinding struct {
+	authority OperationDispatchAuthority
+	id        ProviderOperationID
+}
+
+func nilOperationAuthority(authority OperationDispatchAuthority) bool {
+	if authority == nil {
+		return true
+	}
+	value := reflect.ValueOf(authority)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		return value.IsNil()
+	default:
+		return false
+	}
+}
+
+func sameOperationAuthority(left, right OperationDispatchAuthority) bool {
+	if nilOperationAuthority(left) || nilOperationAuthority(right) {
+		return false
+	}
+	leftType := reflect.TypeOf(left)
+	if leftType != reflect.TypeOf(right) || !leftType.Comparable() {
+		return false
+	}
+	return reflect.ValueOf(left).Interface() == reflect.ValueOf(right).Interface()
+}
+
+type candidateCleanupBinding struct {
+	parent  *candidateCleanupBinding
+	once    sync.Once
+	cleanup func()
+}
+
+type candidateCleanupContextKey struct{}
+
+func withCandidateCleanup(ctx context.Context, cleanup func()) context.Context {
+	if cleanup == nil {
+		return ctx
+	}
+	parent, _ := ctx.Value(candidateCleanupContextKey{}).(*candidateCleanupBinding)
+	return context.WithValue(ctx, candidateCleanupContextKey{}, &candidateCleanupBinding{parent: parent, cleanup: cleanup})
+}
+
+func finishCandidateCleanup(ctx context.Context) {
+	binding, _ := ctx.Value(candidateCleanupContextKey{}).(*candidateCleanupBinding)
+	for current := binding; current != nil; current = current.parent {
+		current.once.Do(current.cleanup)
+	}
+}
 
 // WithRunOperationFactory attaches the run-scoped factory used for independent
 // summary operations.
@@ -367,24 +517,19 @@ func RunOperationFactoryFromContext(ctx context.Context) (RunOperationFactory, b
 
 // WithOperationDispatchAuthority attaches the current provider operation owner.
 func WithOperationDispatchAuthority(ctx context.Context, operation OperationDispatchAuthority) context.Context {
-	return context.WithValue(ctx, operationDispatchAuthorityContextKey, operation)
+	if nilOperationAuthority(operation) {
+		return context.WithValue(ctx, operationDispatchAuthorityContextKey, (*operationAuthorityBinding)(nil))
+	}
+	return context.WithValue(ctx, operationDispatchAuthorityContextKey, &operationAuthorityBinding{authority: operation, id: operation.ID()})
 }
 
 // OperationDispatchAuthorityFromContext returns the current provider operation owner.
 func OperationDispatchAuthorityFromContext(ctx context.Context) (OperationDispatchAuthority, bool) {
-	operation, ok := ctx.Value(operationDispatchAuthorityContextKey).(OperationDispatchAuthority)
-	return operation, ok && operation != nil
-}
-
-// WithDispatchPermit attaches the one-shot permit for the downstream candidate.
-func WithDispatchPermit(ctx context.Context, permit DispatchPermit) context.Context {
-	return context.WithValue(ctx, dispatchPermitContextKey, permit)
-}
-
-// DispatchPermitFromContext returns a permit attached by an authorized operation path.
-func DispatchPermitFromContext(ctx context.Context) (DispatchPermit, bool) {
-	permit, ok := ctx.Value(dispatchPermitContextKey).(DispatchPermit)
-	return permit, ok && permit != nil
+	binding, ok := ctx.Value(operationDispatchAuthorityContextKey).(*operationAuthorityBinding)
+	if !ok || binding == nil || nilOperationAuthority(binding.authority) || binding.id == "" {
+		return nil, false
+	}
+	return binding.authority, true
 }
 
 // WithCandidateProposal attaches a typed candidate proposal for the next guarded adapter.
@@ -416,9 +561,29 @@ func (*resolvedCandidateHandle) resolvedCandidateHandle()    {}
 func (c *resolvedCandidateHandle) build(ctx context.Context) (BaseChatModel, func(), error) {
 	builder, ok := c.provider.(guardedResolvedModelBuilder)
 	if !ok {
-		return nil, nil, ErrGuardedCandidateUnavailable
+		return nil, nil, preDispatchCandidateError(c, PreDispatchCandidateUnavailable, ErrGuardedCandidateUnavailable)
 	}
-	return builder.buildGuarded(ctx, c.cfg, c)
+	if err := ctx.Err(); err != nil {
+		return nil, nil, preDispatchCandidateError(c, PreDispatchCancelled, err)
+	}
+	model, cleanup, err := builder.buildGuarded(ctx, c.cfg, c)
+	if err != nil {
+		if cleanup != nil {
+			cleanup()
+		}
+		class := preDispatchFailureClass(err)
+		if errors.Is(err, ErrGuardedCandidateUnavailable) {
+			class = PreDispatchCandidateUnavailable
+		}
+		return nil, nil, preDispatchCandidateError(c, class, err)
+	}
+	if model == nil {
+		if cleanup != nil {
+			cleanup()
+		}
+		return nil, nil, preDispatchCandidateError(c, PreDispatchCandidateUnavailable, ErrGuardedCandidateUnavailable)
+	}
+	return model, cleanup, nil
 }
 
 func newCandidateID() (CandidateID, error) {
@@ -434,64 +599,85 @@ type providerDispatchBinding struct {
 	candidate *resolvedCandidateHandle
 }
 
-func (b providerDispatchBinding) begin(ctx context.Context) (ProviderAttempt, error) {
+func (b providerDispatchBinding) begin(ctx context.Context) (*ProviderAttempt, error) {
 	if b.mode == UnboundLibraryBuild {
 		return nil, nil
 	}
 	if b.mode != GuardedCandidateBuild || b.candidate == nil || b.candidate.id == "" {
 		return nil, ErrGuardedCandidateUnavailable
 	}
-	operation, ok := OperationDispatchAuthorityFromContext(ctx)
-	if !ok || operation.ID() == "" {
+	if err := ctx.Err(); err != nil {
+		return nil, preDispatchCandidateError(b.candidate, PreDispatchCancelled, err)
+	}
+	binding, ok := ctx.Value(operationDispatchAuthorityContextKey).(*operationAuthorityBinding)
+	if !ok || binding == nil || nilOperationAuthority(binding.authority) || binding.id == "" {
 		return nil, ErrOperationAuthorityRequired
 	}
-	providerAuthority, ok := operation.(ProviderDispatchAuthority)
-	if !ok {
-		return nil, ErrProviderDispatchAuthorityRequired
+	if binding.authority.ID() != binding.id {
+		return nil, ErrOperationAuthorityRequired
 	}
 
 	proposal, hasProposal := CandidateProposalFromContext(ctx)
-	permit, hasPermit := DispatchPermitFromContext(ctx)
 	if hasProposal {
-		if proposal.OperationID != operation.ID() || proposal.Candidate == nil || proposal.Candidate.CandidateID() != b.candidate.id {
+		proposalCandidate, candidateOK := proposal.Candidate.(*resolvedCandidateHandle)
+		if proposal.OperationID != binding.id || !candidateOK || proposalCandidate != b.candidate {
 			return nil, ErrDispatchPermitRequired
 		}
-	} else if !hasPermit {
+	} else {
 		proposal = CandidateProposal{
-			OperationID: operation.ID(),
+			OperationID: binding.id,
 			Candidate:   b.candidate,
 			Reason:      CandidateInitial,
 			Antecedent:  CandidateAntecedent{Kind: AntecedentInitial},
 		}
 	}
 
-	if !hasPermit {
-		decision, err := operation.AuthorizeCandidate(ctx, proposal)
-		if err != nil {
-			return nil, fmt.Errorf("llm: authorize provider candidate: %w", err)
-		}
-		if decision.Denial != nil {
-			if decision.Permit != nil {
-				return nil, ErrInvalidDispatchDecision
-			}
-			return nil, &DispatchDeniedError{Code: decision.Denial.Code}
-		}
-		if decision.Permit == nil {
+	decision, err := binding.authority.AuthorizeCandidate(ctx, proposal)
+	if err != nil {
+		return nil, fmt.Errorf("llm: authorize provider candidate: %w", err)
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, preDispatchCandidateError(b.candidate, PreDispatchCancelled, err)
+	}
+	if decision.Denial != nil {
+		if decision.Authorized {
 			return nil, ErrInvalidDispatchDecision
 		}
-		permit = decision.Permit
+		return nil, &DispatchDeniedError{Code: decision.Denial.Code}
 	}
-	if permit.OperationID() != operation.ID() || permit.CandidateID() != b.candidate.id {
+	if !decision.Authorized {
+		return nil, ErrInvalidDispatchDecision
+	}
+	permit := &DispatchPermit{operation: binding, candidate: b.candidate, state: &atomic.Uint32{}}
+	if !permit.begin(binding, b.candidate) {
 		return nil, ErrDispatchPermitRequired
 	}
-	attempt, err := providerAuthority.BeginDispatch(permit, b.candidate)
+	if err := ctx.Err(); err != nil {
+		permit.end()
+		return nil, preDispatchCandidateError(b.candidate, PreDispatchCancelled, err)
+	}
+	attemptID, err := binding.authority.BeginDispatch(permit, b.candidate)
+	permit.end()
 	if err != nil {
 		return nil, fmt.Errorf("llm: begin provider dispatch: %w", err)
 	}
-	if attempt == nil || attempt.ID() == "" {
-		return nil, errors.New("llm: dispatch authority returned an invalid provider attempt")
+	if attemptID == "" {
+		return nil, errors.New("llm: dispatch authority returned an invalid provider attempt ID")
 	}
-	return attempt, nil
+	return &ProviderAttempt{operation: binding, id: attemptID, identity: b.candidate.identity, finished: &atomic.Bool{}}, nil
+}
+
+func (p *DispatchPermit) begin(operation *operationAuthorityBinding, candidate *resolvedCandidateHandle) bool {
+	if p == nil || p.operation != operation || p.candidate != candidate || p.state == nil || operation == nil || candidate == nil {
+		return false
+	}
+	return p.state.CompareAndSwap(0, 1)
+}
+
+func (p *DispatchPermit) end() {
+	if p != nil && p.state != nil {
+		p.state.Store(2)
+	}
 }
 
 // DispatchDeniedError reports an operation policy denial without exposing
@@ -590,11 +776,13 @@ func cloneProviderAttemptResult(result ProviderAttemptResult) ProviderAttemptRes
 	return clone
 }
 
-func finishProviderAttempt(ctx context.Context, attempt ProviderAttempt, err error, usage *Usage) error {
+func finishProviderAttempt(ctx context.Context, attempt *ProviderAttempt, err error, usage *Usage) error {
 	if attempt == nil {
 		return err
 	}
-	result, finishErr := attempt.Finish(providerAttemptTerminal(ctx, err, usage))
+	terminal := providerAttemptTerminal(ctx, err, usage)
+	finishCandidateCleanup(ctx)
+	result, finishErr := attempt.Finish(terminal)
 	if finishErr != nil {
 		return errors.Join(err, fmt.Errorf("llm: finish provider attempt %s: %w", attempt.ID(), finishErr))
 	}
@@ -604,7 +792,7 @@ func finishProviderAttempt(ctx context.Context, attempt ProviderAttempt, err err
 	return err
 }
 
-func finishProviderAttemptStream(ctx context.Context, source <-chan MessageChunk, attempt ProviderAttempt) <-chan MessageChunk {
+func finishProviderAttemptStream(ctx context.Context, source <-chan MessageChunk, attempt *ProviderAttempt) <-chan MessageChunk {
 	if attempt == nil {
 		return source
 	}
@@ -630,7 +818,7 @@ func finishProviderAttemptStream(ctx context.Context, source <-chan MessageChunk
 					}
 				}
 				if err := finishProviderAttempt(ctx, attempt, terminalErr, usage); err != nil {
-					slog.Warn("llm_finish_cancelled_provider_attempt", "attempt", attempt.ID(), "err", err)
+					slog.Warn("llm_finish_canceled_provider_attempt", "attempt", attempt.ID(), "err", err)
 				}
 				return
 			case chunk, ok := <-source:

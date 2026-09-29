@@ -99,7 +99,9 @@ func TestHTTPChatModel_roundTripRequestBuildError(t *testing.T) {
 	}
 	_, err := m.Generate(context.Background(), nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "build request")
+	var setupErr *PreDispatchCandidateError
+	require.ErrorAs(t, err, &setupErr)
+	assert.Equal(t, PreDispatchInvalidRequest, setupErr.Class)
 }
 
 // TestHTTPChatModel_buildBodyToolMessages verifies tool input messages are

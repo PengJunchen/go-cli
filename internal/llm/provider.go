@@ -243,10 +243,10 @@ func (m *HTTPChatModel) Generate(ctx context.Context, msgs []Message, opts ...Op
 	return msg, err
 }
 
-func (m *HTTPChatModel) generate(ctx context.Context, msgs []Message, opts ...Option) (*Message, ProviderAttempt, error) {
+func (m *HTTPChatModel) generate(ctx context.Context, msgs []Message, opts ...Option) (*Message, *ProviderAttempt, error) {
 	body, err := m.buildBody(msgs, opts...)
 	if err != nil {
-		return nil, nil, err
+		return nil, nil, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, err)
 	}
 
 	respBody, attempt, err := m.roundTrip(ctx, body)
@@ -306,7 +306,7 @@ func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 	body, err := m.buildBody(msgs, opts...)
 	if err != nil {
 		close(ch)
-		return ch, err
+		return ch, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, err)
 	}
 
 	// Re-marshal with stream=true. buildBody does not expose a streaming flag
@@ -314,7 +314,7 @@ func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 	var reqMap map[string]any
 	if unmarshalErr := json.Unmarshal(body, &reqMap); unmarshalErr != nil {
 		close(ch)
-		return ch, fmt.Errorf("llm: decode stream request: %w", unmarshalErr)
+		return ch, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, fmt.Errorf("llm: decode stream request: %w", unmarshalErr))
 	}
 	reqMap["stream"] = true
 	if reqMap["stream_options"] == nil {
@@ -323,7 +323,7 @@ func (m *HTTPChatModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 	streamBody, err := json.Marshal(reqMap)
 	if err != nil {
 		close(ch)
-		return ch, fmt.Errorf("llm: marshal stream request: %w", err)
+		return ch, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, fmt.Errorf("llm: marshal stream request: %w", err))
 	}
 
 	respBody, attempt, err := m.roundTrip(ctx, streamBody)
@@ -506,7 +506,7 @@ func (m *HTTPChatModel) buildBody(msgs []Message, opts ...Option) ([]byte, error
 // roundTrip builds the HTTP request, executes it against the provider, and
 // verifies a 2xx status. It returns the response body for decoding and closes
 // it via the deferred call in the caller.
-func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadCloser, ProviderAttempt, error) {
+func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadCloser, *ProviderAttempt, error) {
 	baseURL := m.cfg.BaseURL
 	if baseURL == "" {
 		baseURL = m.provider.defaultBaseURL
@@ -515,7 +515,7 @@ func (m *HTTPChatModel) roundTrip(ctx context.Context, body []byte) (io.ReadClos
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return nil, nil, fmt.Errorf("llm: build request: %w", err)
+		return nil, nil, preDispatchCandidateError(m.candidate, PreDispatchInvalidRequest, fmt.Errorf("llm: build request: %w", err))
 	}
 	req.Header.Set("Content-Type", "application/json")
 

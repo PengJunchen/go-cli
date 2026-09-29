@@ -255,11 +255,16 @@ func (m *cycledModel) Generate(ctx context.Context, msgs []Message, opts ...Opti
 		return m.primary.Generate(ctx, msgs, opts...)
 	}
 	if cleanup != nil {
+		cleanup = onceCleanup(cleanup)
+		ctx = withCandidateCleanup(ctx, cleanup)
 		defer cleanup()
 	}
 
 	resp, err := model.Generate(ctx, msgs, opts...)
 	if err != nil {
+		if cleanup != nil {
+			cleanup()
+		}
 		return m.primary.Generate(ctx, msgs, opts...)
 	}
 	return resp, nil
@@ -284,8 +289,12 @@ func (m *cycledModel) Stream(ctx context.Context, msgs []Message, opts ...Option
 		}
 		return m.primary.Stream(ctx, msgs, opts...)
 	}
+	if cleanup != nil {
+		cleanup = onceCleanup(cleanup)
+	}
+	selectedCtx := withCandidateCleanup(ctx, cleanup)
 
-	attemptCtx, cancel := context.WithCancelCause(ctx)
+	attemptCtx, cancel := context.WithCancelCause(selectedCtx)
 	ch, err := model.Stream(attemptCtx, msgs, opts...)
 	if err != nil {
 		cancelStreamAttempt(ctx, cancel, err)
@@ -382,4 +391,12 @@ func (m *cycledModel) Stream(ctx context.Context, msgs []Message, opts ...Option
 		}
 	}()
 	return out, nil
+}
+
+func onceCleanup(cleanup func()) func() {
+	if cleanup == nil {
+		return nil
+	}
+	var once sync.Once
+	return func() { once.Do(cleanup) }
 }

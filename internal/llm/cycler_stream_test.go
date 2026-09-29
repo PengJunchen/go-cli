@@ -83,6 +83,7 @@ var _ BaseChatModel = (*delayedStreamModel)(nil)
 // the outer channel is fully drained.
 func TestStreamCleanupCalledAfterDrain(t *testing.T) {
 	var cleanupCalled atomic.Bool
+	var finishSawCleanup atomic.Bool
 	cleanup := func() { cleanupCalled.Store(true) }
 
 	inner := &delayedStreamModel{
@@ -103,7 +104,12 @@ func TestStreamCleanupCalledAfterDrain(t *testing.T) {
 
 	wrapped := cycler.WrapModel(&mockModel{})
 
-	ch, err := wrapped.Stream(attemptTestContext(), nil)
+	authority := &attemptTestAuthority{
+		id:       "cycler-cleanup-operation",
+		onFinish: func() { finishSawCleanup.Store(cleanupCalled.Load()) },
+	}
+	ctx := WithOperationDispatchAuthority(context.Background(), authority)
+	ch, err := wrapped.Stream(ctx, nil)
 	require.NoError(t, err)
 
 	// Drain the channel.
@@ -113,6 +119,7 @@ func TestStreamCleanupCalledAfterDrain(t *testing.T) {
 	// Give the goroutine time to call cleanup after close.
 	require.Eventually(t, func() bool { return cleanupCalled.Load() }, time.Second, 10*time.Millisecond,
 		"cleanup should be called after channel drain")
+	assert.True(t, finishSawCleanup.Load(), "attempt Finish must wait for the selected candidate cleanup")
 }
 
 // TestStreamCleanupNotCalledOnInitError verifies that cleanup is not called
