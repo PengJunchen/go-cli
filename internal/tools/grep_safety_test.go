@@ -32,10 +32,9 @@ func TestGrepPureGoMidWalkCancellationDoesNotReturnPartialSuccess(t *testing.T) 
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "b.txt"), []byte("later file\n"), 0o600))
 
 	ctx := &cancelDuringWalkContext{
-		Context:         context.Background(),
-		done:            make(chan struct{}),
-		cancelDoneAfter: 3, // old walker: after a.txt matches, at b.txt's entry.
-		cancelErrAfter:  5, // current walker: after a.txt's first line matches.
+		Context:        context.Background(),
+		done:           make(chan struct{}),
+		cancelErrAfter: 11, // cancel after the first file's matching line.
 	}
 	tool := NewGrepTool(WithGrepWorkdir(dir), WithForcePureGo(true))
 
@@ -51,10 +50,8 @@ func TestGrepPureGoMidWalkCancellationDoesNotReturnPartialSuccess(t *testing.T) 
 	}
 }
 
-// cancelDuringWalkContext supports both the pre-fix walker's Done polling and
-// the fixed scanner's Err polling. Either code path cancels only after the
-// first file has produced a matching line. Tests inspect done directly so an
-// assertion cannot itself trigger cancellation.
+// cancelDuringWalkContext cancels after the first file's matching line.
+// Tests inspect done directly so an assertion cannot itself trigger it.
 type cancelDuringWalkContext struct {
 	context.Context
 	done            chan struct{}
@@ -95,7 +92,7 @@ func TestGrepPureGoScannerErrorDoesNotReturnPartialSuccess(t *testing.T) {
 
 	result, err := tool.Execute(context.Background(), ToolCall{Args: map[string]any{"pattern": "needle"}})
 	require.Error(t, err)
-	require.ErrorContains(t, err, "token too long")
+	require.ErrorIs(t, err, errGrepCaptureLimit)
 	if result != nil {
 		require.Empty(t, result.Output)
 	}

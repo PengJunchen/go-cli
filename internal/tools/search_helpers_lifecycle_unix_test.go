@@ -70,6 +70,7 @@ func TestGrepTimeoutWithEscapedPipeWriterPreservesCancellationCause(t *testing.T
 	testBinary, err := os.Executable()
 	require.NoError(t, err)
 	script := fmt.Sprintf(`#!/bin/sh
+printf '%%s\n' '{"type":"match","data":{"path":{"text":"match.txt"},"lines":{"text":"needle\n"},"line_number":1}}'
 %s -test.run=%s &
 child=$!
 while [ ! -s %s ]; do sleep 0.01; done
@@ -169,7 +170,11 @@ func writeFailingHelperWithEscapedPipeWriter(t *testing.T, dir, name, pidPath st
 	t.Helper()
 	testBinary, err := os.Executable()
 	require.NoError(t, err)
-	script := fmt.Sprintf("#!/bin/sh\n%s -test.run=%s &\nchild=$!\nwhile [ ! -s %s ]; do sleep 0.01; done\nexit 2\n",
+	prelude := ""
+	if name == "rg" {
+		prelude = `printf '%s\n' '{"type":"match","data":{"path":{"text":"match.txt"},"lines":{"text":"needle\n"},"line_number":1}}'` + "\n"
+	}
+	script := "#!/bin/sh\n" + prelude + fmt.Sprintf("%s -test.run=%s &\nchild=$!\nwhile [ ! -s %s ]; do sleep 0.01; done\nexit 2\n",
 		shellQuoteTestArgument(testBinary),
 		shellQuoteTestArgument("^TestSearchHelperEscapedPipeWriter$"),
 		shellQuoteTestArgument(pidPath))
