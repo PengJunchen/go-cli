@@ -29,5 +29,12 @@ at `a354dc2` still failed exactly one test:
 `TestET_Phase22_AllCapabilities_AC1_ToolRegistryCompleteness`, whose fixture
 expects removed model-facing Plan Mode tools. Thirteen tests were skipped.
 These are not release-gate completion evidence; the complete fixed-SHA
-`make verify`, tagged gate, Dockerfile build, UI journey, and final review
+`make verify`, final fixed-SHA tagged gate, Dockerfile build, UI journey, and final review
 remain pending.
+
+After the independently reviewed Phase22 Plan Mode fixture correction
+(`bda61d28`, integrated as `d5178ae`), the explicit tagged race gate passed:
+786 test functions started, 773 passed, 0 failed, 13 skipped across two
+packages. Evidence: `/tmp/go-cli-tagged-e2e-d5178ae-gate.log`. The skips are
+being audited separately and later product changes still require a final
+fixed-SHA rerun.
