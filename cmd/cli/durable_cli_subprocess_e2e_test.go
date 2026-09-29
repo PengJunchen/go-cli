@@ -290,6 +290,192 @@ func TestDurableCLIBinaryQuarantinesLiveOrphanedBashAndNeverReplays(t *testing.T
 	t.Logf("orphan released physical_id=%s action_id=%s exit_proof=%s receipt_id=%s receipt_outcome=%s dispatches=1 resolutions=0 fresh_write_receipt_id=%s fresh_write_outcome=%s fresh_write_dispatch_state=%s", physicalID, action.actionID, orphan.exitPath, recoveredAgain.ID, recoveredAgain.ReceiptOutcome, interruptedReceipt.ID, interruptedReceipt.ReceiptOutcome, interruptedReceipt.DispatchState)
 }
 
+func TestDurableCLIBinaryAllowsScopedReadersDuringLiveOrphanAndRetainsMutationQuarantine(t *testing.T) {
+	root, err := filepath.Abs(filepath.Join("..", ".."))
+	require.NoError(t, err)
+	binary := filepath.Join(t.TempDir(), "go-cli")
+	build := exec.Command("go", "build", "-o", binary, "./cmd/cli")
+	build.Dir = root
+	buildOutput, err := build.CombinedOutput()
+	require.NoError(t, err, "build real CLI: %s", buildOutput)
+	t.Logf("build command: go build -o %s ./cmd/cli\nbuild exit: 0\nbuild output: %s", binary, buildOutput)
+
+	fixture := newDurableCLIBinaryFixtureWithTools(t, binary, false, []string{"bash", "read", "ls", "write"})
+	t.Cleanup(func() { fixture.server.Close() })
+	const readMarker = "safe-read-existing-content"
+	readPath := filepath.Join(fixture.workDir, "safe-read-existing.txt")
+	require.NoError(t, os.WriteFile(readPath, []byte(readMarker), 0o600))
+	orphan := newDurableCLIOrphanControl(t, fixture.workDir)
+	t.Cleanup(func() {
+		if err := orphan.cleanup(3 * time.Second); err != nil {
+			t.Errorf("release and observe the fixture-owned Bash process exit during cleanup: %v", err)
+		}
+	})
+	fixture.peer.setResponsePlan(
+		durableCLIToolCall("call-live-orphan-bash", "bash", map[string]string{"command": orphan.command()}),
+		durableCLIToolCall("call-quarantined-read", "read", map[string]string{"path": "safe-read-existing.txt"}),
+		durableCLIFinal("scoped read completed during quarantine"),
+		durableCLIToolCall("call-quarantined-ls", "ls", map[string]string{"path": "."}),
+		durableCLIFinal("scoped listing completed during quarantine"),
+		durableCLIToolCall("call-blocked-quarantined-write", "write", map[string]string{
+			"path":    "fresh-session-effect.txt",
+			"content": "must-not-dispatch",
+		}),
+		durableCLIFinal("exact old session resumed after safe reads"),
+	)
+
+	command, stdout, stderr, wait := fixture.start(t,
+		"prompt", "-provider=openai", "-output=text", "-approve=auto", "-no-sandbox", "create unresolved mutation marker")
+	orphanPhysicalID := waitForDurableCLIOutput(t, stdout, "Session ID: ")
+	orphanRows, orphanAction := waitForDurableBashDispatch(t, fixture, orphanPhysicalID, "call-live-orphan-bash")
+	requireDurableSourceIDsUnique(t, orphanRows, orphanPhysicalID)
+	indexRows := fixture.readWorkspaceIndex(t, orphanAction.workspaceID)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, orphanPhysicalID, orphanAction.actionID, orphanAction.toolCallID, 1, 0)
+	requireWorkspaceActionTotals(t, indexRows, 1, 0)
+	require.Empty(t, receiptsForCall(orphanRows, orphanAction.toolCallID), "the original Bash must have no receipt before the CLI parent is killed")
+	require.Empty(t, requireRunTerminals(t, orphanRows, orphanPhysicalID, 0), "the original run has no terminal while Bash is live")
+	waitForOrphanStarted(t, orphan)
+	requireOrphanLedgerCounts(t, orphan, 1, 0, "safe-read matrix before opening the Bash effect gate")
+	require.NoError(t, orphan.releaseEffectGate())
+	waitForOrphanEffect(t, orphan)
+	requireOrphanLedgerCounts(t, orphan, 1, 1, "safe-read matrix before parent kill")
+	heartbeat := waitForOrphanHeartbeat(t, orphan, 0)
+	heartbeat = waitForOrphanHeartbeatAdvance(t, orphan, heartbeat)
+	require.Contains(t, string(fixture.assertPeerRequests(t, 1)[0]), `"content":"create unresolved mutation marker"`)
+	t.Logf("pre-crash safe-read matrix boundary physical_id=%s action_id=%s tool_call_id=%s workspace_id=%s dispatches=1 resolutions=0 receipt=absent terminals=0 effect_count=1 child_nonce=%s heartbeat=%d", orphanPhysicalID, orphanAction.actionID, orphanAction.toolCallID, orphanAction.workspaceID, orphan.nonce, heartbeat)
+
+	require.NoError(t, command.Process.Kill(), "SIGKILL only the owned CLI process; leave its managed Bash process group alone")
+	firstErr := <-wait
+	first := durableCLIChildResult{stdout: stdout.String(), stderr: stderr.String(), err: firstErr, exitCode: command.ProcessState.ExitCode(), state: command.ProcessState.String()}
+	requireCLIChildExit(t, first, -1)
+	orphanRows = fixture.readRows(t, orphanPhysicalID)
+	requireDurableSourceIDsUnique(t, orphanRows, orphanPhysicalID)
+	require.Empty(t, receiptsForCall(orphanRows, orphanAction.toolCallID), "parent SIGKILL before Bash completion must leave the receipt absent")
+	require.Empty(t, requireRunTerminals(t, orphanRows, orphanPhysicalID, 0), "parent SIGKILL leaves the original run without a terminal")
+	indexRows = fixture.readWorkspaceIndex(t, orphanAction.workspaceID)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, orphanPhysicalID, orphanAction.actionID, orphanAction.toolCallID, 1, 0)
+	requireWorkspaceActionTotals(t, indexRows, 1, 0)
+	heartbeat = waitForOrphanHeartbeatAdvance(t, orphan, heartbeat)
+	requireOrphanLedgerCounts(t, orphan, 1, 1, "after parent SIGKILL")
+	t.Logf("post-parent-kill safe-read matrix boundary physical_id=%s action_id=%s heartbeat=%d receipt=absent terminals=0 dispatches=1 resolutions=0", orphanPhysicalID, orphanAction.actionID, heartbeat)
+
+	readResult := fixture.run(t,
+		"prompt", "-provider=openai", "-output=text", "-approve=auto", "-no-sandbox", "read existing workspace file during quarantine")
+	requireCLIChildExit(t, readResult, 0)
+	readPhysicalID := durableCLIPhysicalSessionIDFromOutput(t, readResult.stdout)
+	require.NotEqual(t, orphanPhysicalID, readPhysicalID, "the safe Read executes from a distinct physical session")
+	readRows := fixture.readRows(t, readPhysicalID)
+	requireDurableSourceIDsUnique(t, readRows, readPhysicalID)
+	readAction := requireSuccessfulScopedReader(t, readRows, readPhysicalID, "call-quarantined-read", "read")
+	require.NotEqual(t, orphanAction.actionID, readAction.actionID)
+	require.Equal(t, orphanAction.workspaceID, readAction.workspaceID, "the real Read must use the same captured workspace authority as the orphan")
+	readTerminals := requireRunTerminals(t, readRows, readPhysicalID, 1)
+	logDurableFileEvidence(t, "safe Read while old mutation is unresolved", readPhysicalID, readRows, readAction, readTerminals)
+	requests := fixture.assertPeerRequests(t, 3)
+	require.Contains(t, string(requests[1]), `"content":"read existing workspace file during quarantine"`)
+	require.Contains(t, string(requests[2]), readMarker, "the real Read result is returned to the provider")
+	indexRows = fixture.readWorkspaceIndex(t, orphanAction.workspaceID)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, orphanPhysicalID, orphanAction.actionID, orphanAction.toolCallID, 1, 0)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, readPhysicalID, readAction.actionID, readAction.toolCallID, 1, 1)
+	requireWorkspaceActionTotals(t, indexRows, 2, 1)
+	requireOrphanLedgerCounts(t, orphan, 1, 1, "after a separate physical session completes scoped Read")
+	heartbeat = waitForOrphanHeartbeatAdvance(t, orphan, heartbeat)
+	fileContents, err := os.ReadFile(readPath)
+	require.NoError(t, err)
+	require.Equal(t, readMarker, string(fileContents), "the existing workspace file remains unchanged by Read")
+
+	lsResult := fixture.run(t,
+		"prompt", "-provider=openai", "-output=text", "-approve=auto", "-no-sandbox", "list workspace during quarantine")
+	requireCLIChildExit(t, lsResult, 0)
+	lsPhysicalID := durableCLIPhysicalSessionIDFromOutput(t, lsResult.stdout)
+	require.NotEqual(t, orphanPhysicalID, lsPhysicalID, "the safe LS executes from a fresh physical session")
+	require.NotEqual(t, readPhysicalID, lsPhysicalID, "Read and LS use separate physical sessions")
+	lsRows := fixture.readRows(t, lsPhysicalID)
+	requireDurableSourceIDsUnique(t, lsRows, lsPhysicalID)
+	lsAction := requireSuccessfulScopedReader(t, lsRows, lsPhysicalID, "call-quarantined-ls", "ls")
+	require.NotEqual(t, orphanAction.actionID, lsAction.actionID)
+	require.Equal(t, orphanAction.workspaceID, lsAction.workspaceID, "the real LS must use the same captured workspace authority as the orphan")
+	lsTerminals := requireRunTerminals(t, lsRows, lsPhysicalID, 1)
+	logDurableFileEvidence(t, "safe LS while old mutation is unresolved", lsPhysicalID, lsRows, lsAction, lsTerminals)
+	requests = fixture.assertPeerRequests(t, 5)
+	require.Contains(t, string(requests[3]), `"content":"list workspace during quarantine"`)
+	require.Contains(t, string(requests[4]), "safe-read-existing.txt", "the real LS result includes the existing workspace file")
+	indexRows = fixture.readWorkspaceIndex(t, orphanAction.workspaceID)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, orphanPhysicalID, orphanAction.actionID, orphanAction.toolCallID, 1, 0)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, readPhysicalID, readAction.actionID, readAction.toolCallID, 1, 1)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, lsPhysicalID, lsAction.actionID, lsAction.toolCallID, 1, 1)
+	requireWorkspaceActionTotals(t, indexRows, 3, 2)
+	requireOrphanLedgerCounts(t, orphan, 1, 1, "after a separate physical session completes scoped LS")
+	heartbeat = waitForOrphanHeartbeatAdvance(t, orphan, heartbeat)
+
+	blocked := fixture.run(t,
+		"prompt", "-provider=openai", "-output=text", "-approve=auto", "-no-sandbox", "attempt write during unresolved mutation quarantine")
+	requireCLIChildFailure(t, blocked, 1)
+	blockedPhysicalID := durableCLIPhysicalSessionIDFromOutput(t, blocked.stdout)
+	require.NotEqual(t, orphanPhysicalID, blockedPhysicalID, "the blocked Write also uses a distinct physical session")
+	require.NotEqual(t, readPhysicalID, blockedPhysicalID)
+	require.NotEqual(t, lsPhysicalID, blockedPhysicalID)
+	require.Contains(t, blocked.stderr, "workspace is quarantined by unresolved actions")
+	require.Contains(t, blocked.stderr, "unreceipted tool calls")
+	require.NoFileExists(t, filepath.Join(fixture.workDir, "fresh-session-effect.txt"), "the fresh physical session's Write has no visible effect")
+	blockedRows := fixture.readRows(t, blockedPhysicalID)
+	requireDurableSourceIDsUnique(t, blockedRows, blockedPhysicalID)
+	blockedAction := requirePendingWriteAttempt(t, blockedRows, blockedPhysicalID, "call-blocked-quarantined-write")
+	require.Equal(t, orphanAction.workspaceID, blockedAction.workspaceID)
+	require.Empty(t, receiptsForCall(blockedRows, blockedAction.toolCallID), "a rejected pre-dispatch Write does not receive a fabricated receipt")
+	require.Empty(t, requireRunTerminals(t, blockedRows, blockedPhysicalID, 0), "the baseline CLI leaves this rejected tool-call group uncommitted")
+	requests = fixture.assertPeerRequests(t, 6)
+	require.Contains(t, string(requests[5]), `"content":"attempt write during unresolved mutation quarantine"`)
+	indexRows = fixture.readWorkspaceIndex(t, orphanAction.workspaceID)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, orphanPhysicalID, orphanAction.actionID, orphanAction.toolCallID, 1, 0)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, readPhysicalID, readAction.actionID, readAction.toolCallID, 1, 1)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, lsPhysicalID, lsAction.actionID, lsAction.toolCallID, 1, 1)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, blockedPhysicalID, blockedAction.actionID, blockedAction.toolCallID, 0, 0)
+	requireWorkspaceActionTotals(t, indexRows, 3, 2)
+	requireOrphanLedgerCounts(t, orphan, 1, 1, "after the distinct-session Write is blocked with zero dispatch and effects")
+	heartbeat = waitForOrphanHeartbeatAdvance(t, orphan, heartbeat)
+	fileContents, err = os.ReadFile(readPath)
+	require.NoError(t, err)
+	require.Equal(t, readMarker, string(fileContents), "the existing file stays unchanged after the rejected Write")
+
+	resumed := fixture.run(t,
+		"prompt", "-provider=openai", "-output=text", "-approve=auto", "-no-sandbox", "-resume-session", orphanPhysicalID, "resume original session after safe reads")
+	requireCLIChildExit(t, resumed, 0)
+	require.Equal(t, orphanPhysicalID, durableCLIPhysicalSessionIDFromOutput(t, resumed.stdout), "only the exact old physical session is resumed")
+	require.Contains(t, resumed.stdout, "exact old session resumed after safe reads")
+	orphanRows = fixture.readRows(t, orphanPhysicalID)
+	requireDurableSourceIDsUnique(t, orphanRows, orphanPhysicalID)
+	recoveredReceipt := requireRecoveredUnknownBashReceipt(t, orphanRows, orphanPhysicalID, orphanAction)
+	orphanTerminals := requireRunTerminals(t, orphanRows, orphanPhysicalID, 1)
+	logDurableFileEvidence(t, "exact old-session resume after scoped reads", orphanPhysicalID, orphanRows, orphanAction, orphanTerminals)
+	requests = fixture.assertPeerRequests(t, 7)
+	resumedRequest := string(requests[6])
+	require.Contains(t, resumedRequest, `"content":"resume original session after safe reads"`)
+	require.Contains(t, resumedRequest, `"tool_call_id":"call-live-orphan-bash"`)
+	require.Contains(t, resumedRequest, recoveredReceipt.Content, "the resumed exact session carries its real unknown receipt")
+	indexRows = fixture.readWorkspaceIndex(t, orphanAction.workspaceID)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, orphanPhysicalID, orphanAction.actionID, orphanAction.toolCallID, 1, 0)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, readPhysicalID, readAction.actionID, readAction.toolCallID, 1, 1)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, lsPhysicalID, lsAction.actionID, lsAction.toolCallID, 1, 1)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, blockedPhysicalID, blockedAction.actionID, blockedAction.toolCallID, 0, 0)
+	requireWorkspaceActionTotals(t, indexRows, 3, 2)
+	requireOrphanLedgerCounts(t, orphan, 1, 1, "after exact old-session resume; the Bash mutation is not replayed")
+	heartbeat = waitForOrphanHeartbeatAdvance(t, orphan, heartbeat)
+
+	require.NoError(t, orphan.releaseAndWait(10*time.Second), "release the actual orphaned Bash child after the complete matrix")
+	requireOrphanExitProofs(t, orphan)
+	requireOrphanLedgerCounts(t, orphan, 1, 1, "after the orphaned Bash child exits")
+	orphanRows = fixture.readRows(t, orphanPhysicalID)
+	recoveredAgain := requireRecoveredUnknownBashReceipt(t, orphanRows, orphanPhysicalID, orphanAction)
+	require.Equal(t, recoveredReceipt.ID, recoveredAgain.ID, "child exit does not replace the recovered unknown receipt")
+	indexRows = fixture.readWorkspaceIndex(t, orphanAction.workspaceID)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, orphanPhysicalID, orphanAction.actionID, orphanAction.toolCallID, 1, 0)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, readPhysicalID, readAction.actionID, readAction.toolCallID, 1, 1)
+	requireWorkspaceActionLifecycleForCall(t, indexRows, lsPhysicalID, lsAction.actionID, lsAction.toolCallID, 1, 1)
+	requireWorkspaceActionTotals(t, indexRows, 3, 2)
+	t.Logf("safe-read crash matrix complete old_action=%s old_receipt=%s read_action=%s ls_action=%s blocked_write_action=%s dispatches=3 resolutions=2 old_quarantine=unresolved orphan_exit=%s", orphanAction.actionID, recoveredAgain.ID, readAction.actionID, lsAction.actionID, blockedAction.actionID, orphan.exitPath)
+}
+
 type durableCLIOrphanControl struct {
 	nonce          string
 	invocationID   string
@@ -1216,6 +1402,47 @@ func requireWorkspaceActionLifecycleForCall(t *testing.T, rows []durableCLIWorks
 	}
 	require.Equal(t, wantDispatch, dispatches, "the authoritative workspace JSONL has one synced dispatch marker")
 	require.Equal(t, wantResolution, resolutions, "the authoritative workspace JSONL records the matching effect-resolution fact")
+}
+
+func requireWorkspaceActionTotals(t *testing.T, rows []durableCLIWorkspaceIndexRow, wantDispatches, wantResolutions int) {
+	t.Helper()
+	dispatches, resolutions := 0, 0
+	for _, row := range rows {
+		switch row.Kind {
+		case "dispatch_ready":
+			dispatches += len(row.Actions)
+		case "execution_resolution":
+			resolutions++
+		}
+	}
+	require.Equal(t, wantDispatches, dispatches, "the durable workspace index contains only expected dispatched actions")
+	require.Equal(t, wantResolutions, resolutions, "the durable workspace index contains only expected action resolutions")
+}
+
+func requireSuccessfulScopedReader(t *testing.T, rows []session.SessionEntry, physicalID, toolCallID, toolName string) durableCLIAction {
+	t.Helper()
+	action, ok := durableActionForCall(rows, physicalID, toolCallID, toolName)
+	require.True(t, ok, "the real provider call has one matching persisted %s intent", toolName)
+	receipts := receiptsForCall(rows, toolCallID)
+	require.Len(t, receipts, 1, "the real scoped reader has one persisted completion receipt")
+	receipt := receipts[0]
+	require.Equal(t, physicalID, receipt.SessionID)
+	require.NotEmpty(t, receipt.ID)
+	require.Equal(t, toolName, receipt.ToolName)
+	require.Equal(t, "success", receipt.ReceiptOutcome)
+	require.Equal(t, "dispatched", string(receipt.DispatchState))
+	require.Equal(t, action.actionID, receipt.ActionID)
+	require.Equal(t, action.workspaceID, receipt.WorkspaceID)
+	require.NotEmpty(t, receipt.RunID)
+	var executions []session.SessionEntry
+	for _, row := range rows {
+		if row.ActionState == session.ActionStateExecution && row.ToolCallID == toolCallID {
+			executions = append(executions, row)
+			require.Equal(t, action.actionID, row.ActionID)
+		}
+	}
+	require.NotEmpty(t, executions, "the real scoped reader has persisted executor evidence")
+	return action
 }
 
 func logDurableFileEvidence(t *testing.T, phase, physicalID string, rows []session.SessionEntry, action durableCLIAction, terminals []session.SessionEntry) {
