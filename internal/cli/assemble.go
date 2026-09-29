@@ -133,14 +133,13 @@ type SessionManagement struct {
 	// PhysicalSessionID is set when this Assembly uses the prepared durable CLI
 	// session protocol. SessionID remains the configured logical label.
 	PhysicalSessionID string
-	// MemoryStore persists cross-session memories for the /memory slash
-	// command and system prompt injection.
+	// MemoryStore persists memories for user-managed /memory commands.
 	MemoryStore *memory.FileMemoryStore
-	// MemoryExtractor extracts key facts from conversations for memory
-	// storage.
+	// MemoryExtractor is optional. The default CLI leaves it nil; a library
+	// caller may set an extractor explicitly for a custom interactive workflow.
 	MemoryExtractor memory.MemoryExtractor
-	// MemoryWG tracks in-flight memory extraction goroutines so Cleanup
-	// can wait for them before closing the MemoryStore.
+	// MemoryWG tracks explicitly configured memory extraction goroutines so
+	// Cleanup can wait for them before closing the MemoryStore.
 	MemoryWG  *sync.WaitGroup
 	Compactor compaction.Compactor
 	Estimator compaction.TokenEstimator
@@ -506,7 +505,6 @@ func AssembleAgent(
 			SessionID:         s.sessionID,
 			PhysicalSessionID: s.initialSnapshot.SessionID,
 			MemoryStore:       s.memStore,
-			MemoryExtractor:   s.memExtractor,
 			MemoryWG:          &s.memWG,
 			Compactor:         s.compactor,
 			Estimator:         s.estimator,
@@ -719,7 +717,6 @@ type assembleState struct {
 	loopAgent     *core.LoopAgent
 	loop          core.AgentLoop
 	memStore      *memory.FileMemoryStore
-	memExtractor  memory.MemoryExtractor
 	memWG         sync.WaitGroup
 	promptBuilder core.SystemPromptBuilder
 	contextLoader core.ProjectContextLoader
@@ -1439,14 +1436,14 @@ func (s *assembleState) assembleExtraTools() error {
 			s.logger.Warn("assemble_tool_register_failed", "tool", t.Name(), "err", regErr)
 		}
 	}
+	// Plan Mode transitions remain user-controlled through /plan enter|exit;
+	// model-facing tool calls must not change that user-owned mode.
 	trustedControls := []tools.ToolDefinition{
 		tools.NewTaskGetTool(taskStore),
 		tools.NewTaskListTool(taskStore),
 		tools.NewGoalListTool(goalStore, taskStore),
 		tools.NewGoalGetTool(goalStore, taskStore),
 		core.NewAskUserQuestionTool(s.hitlEmitter, 30*time.Second),
-		tools.NewEnterPlanModeTool(s.planCtrl),
-		tools.NewExitPlanModeTool(s.planCtrl),
 		tools.NewToolSearchTool(s.tr),
 	}
 	trustedNetworkReads := []tools.ToolDefinition{webFetchTool, webSearchTool}
@@ -1511,30 +1508,6 @@ func (s *assembleState) assembleLoopAgent() {
 		}
 	}
 
-	var memoryEntries []core.MemoryEntry
-	if s.memStore != nil {
-		memories, memErr := s.memStore.List(s.ctx)
-		if memErr != nil {
-			s.logger.Warn("assemble_memory_list_failed", "err", memErr)
-		}
-		for _, m := range memories {
-			memoryEntries = append(memoryEntries, core.MemoryEntry{
-				ID:       m.ID,
-				Content:  m.Content,
-				Category: m.Category,
-			})
-		}
-	}
-
-	// Create memory extractor.
-	if s.memStore != nil {
-		extractModel := s.model
-		if s.smallModel != nil {
-			extractModel = s.smallModel
-		}
-		s.memExtractor = memory.NewLLMMemoryExtractor(extractModel, s.memStore)
-	}
-
 	// Wire dynamic system prompt builder with project context.
 	s.contextLoader = core.NewDefaultProjectContextLoader()
 	s.promptBuilder = core.NewDefaultSystemPromptBuilder()
@@ -1554,7 +1527,6 @@ func (s *assembleState) assembleLoopAgent() {
 			Cwd:          cwd,
 			ContextFiles: contextFiles,
 			Skills:       s.skillInfos,
-			Memories:     memoryEntries,
 			CustomPrompt: customPrompt,
 			AppendPrompt: appendPrompt,
 		}),

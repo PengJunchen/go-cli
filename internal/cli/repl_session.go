@@ -1101,9 +1101,10 @@ func (s *REPLSession) handleSteer(steerMsg string) {
 }
 
 // persistSession appends user and assistant entries to the session store and
-// tree, saves the store, and triggers memory extraction. Entries are buffered
-// through PendingSessionWrites and flushed in a single batch, reducing the
-// number of individual store writes.
+// tree, saves the store, and invokes an explicitly configured memory extractor
+// when present. The default CLI assembly leaves that extractor unset. Entries
+// are buffered through PendingSessionWrites and flushed in a single batch,
+// reducing the number of individual store writes.
 func (s *REPLSession) persistSession() {
 	// Persist to session store (even on interruption to preserve history).
 	// Use spanCtx, not turnCtx, because turnCtx may be canceled by the
@@ -1166,14 +1167,14 @@ func (s *REPLSession) persistSession() {
 	s.extractMemory()
 }
 
-// extractMemory asynchronously extracts memories from the conversation for
-// cross-session context continuity.
+// extractMemory runs an explicitly configured extractor asynchronously. The
+// default CLI does not supply one, so conversation content is not extracted or
+// persisted automatically.
 func (s *REPLSession) extractMemory() {
-	// Asynchronously extract memories from the conversation for
-	// cross-session context continuity. Uses a stored cancellable context
-	// (derived from context.Background so it survives turn cancellation)
-	// that Cleanup can cancel to promptly release goroutines. Errors are
-	// logged only and do not block the main interaction loop.
+	// An injected extractor uses a stored cancellable context (derived from
+	// context.Background so it survives turn cancellation) that Cleanup can
+	// cancel to promptly release goroutines. Errors are logged only and do not
+	// block the main interaction loop.
 	if s.assembly.MemoryExtractor == nil || s.assembly.MemoryStore == nil {
 		return
 	}

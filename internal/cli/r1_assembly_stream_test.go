@@ -21,6 +21,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/session"
 )
 
 const assemblyCandidateLimitBytes = 400_000
@@ -501,6 +502,98 @@ func TestIncompleteToolArgumentsAreNotDispatched(t *testing.T) {
 	assert.Equal(t, int32(1), fixture.requests.Load(), "an incomplete call must fail before a follow-up model request; modes=%v", fixture.requestModes())
 	_, err := os.Stat(target)
 	assert.True(t, os.IsNotExist(err), "the incomplete write must not create the target")
+}
+
+func TestAutoFullModelCannotChangePlanModeButUserSlashCan(t *testing.T) {
+	requestToolNames := make(chan []string, 1)
+	fixture := newAssemblyStreamFixture(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "read request", http.StatusBadRequest)
+			return
+		}
+		var request struct {
+			Tools []struct {
+				Function struct {
+					Name string `json:"name"`
+				} `json:"function"`
+			} `json:"tools"`
+		}
+		if err := json.Unmarshal(body, &request); err != nil {
+			http.Error(w, "decode request", http.StatusBadRequest)
+			return
+		}
+		if n == 1 {
+			var names []string
+			for _, tool := range request.Tools {
+				names = append(names, tool.Function.Name)
+			}
+			requestToolNames <- names
+			writeAssemblyStreamHeaders(w)
+			writeAssemblyChunk(w, map[string]any{"tool_calls": []any{
+				map[string]any{
+					"index": 0,
+					"id":    "call-enter-plan",
+					"type":  "function",
+					"function": map[string]any{
+						"name":      "enter_plan_mode",
+						"arguments": `{"reason":"model attempt"}`,
+					},
+				},
+				map[string]any{
+					"index": 1,
+					"id":    "call-exit-plan",
+					"type":  "function",
+					"function": map[string]any{
+						"name":      "exit_plan_mode",
+						"arguments": `{"summary":"model attempt"}`,
+					},
+				},
+			}}, nil)
+			writeAssemblyChunk(w, map[string]any{}, "tool_calls")
+			_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+			return
+		}
+		writeAssemblyTextResponse(w, []string{"model call handled"}, "stop")
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cfg := newE2ETestConfig(t, fixture.server.URL)
+	assembly, err := AssembleAgent(ctx, cfg, cfg.Provider.Name, cfg.Provider.Model, io.Discard, WithApproveMode(ApproveAuto))
+	require.NoError(t, err)
+	t.Cleanup(assembly.Cleanup)
+
+	for _, name := range []string{"enter_plan_mode", "exit_plan_mode", "image_read"} {
+		_, err := assembly.ToolRegistry.Get(ctx, name)
+		require.Error(t, err, "%s must not be registered in the default model-facing registry", name)
+	}
+	stream, err := assembly.Harness.Submit(ctx, "Do not change plan mode.")
+	require.NoError(t, err)
+	_, _, _ = collectAssemblyEvents(stream)
+	assert.False(t, assembly.PlanCtrl.IsActive(), "model-emitted control calls under auto approval must have no mode effect")
+	assert.Equal(t, int32(2), fixture.requests.Load(), "the first response contains unregistered calls and the second completes the turn")
+
+	modelTools := <-requestToolNames
+	assert.Contains(t, modelTools, "todo_write", "the request should include the assembled default tool registry")
+	for _, name := range modelTools {
+		assert.NotEqual(t, "enter_plan_mode", name)
+		assert.NotEqual(t, "exit_plan_mode", name)
+	}
+
+	var output bytes.Buffer
+	interactive := &interactiveCmd{out: &output, slashReg: defaultSlashReg}
+	deps := &slashContext{out: &output, planCtrl: assembly.PlanCtrl, toolRegistry: assembly.ToolRegistry}
+	interactive.handleSlashCommand(ctx, session.SlashCommand{Name: "tools"}, deps)
+	assert.Contains(t, output.String(), "Registered tools")
+	assert.NotContains(t, output.String(), "enter_plan_mode")
+	assert.NotContains(t, output.String(), "exit_plan_mode")
+	assert.NotContains(t, output.String(), "image_read")
+	output.Reset()
+	interactive.handleSlashCommand(ctx, session.SlashCommand{Name: "plan", Args: []string{"enter", "user requested"}}, deps)
+	assert.True(t, assembly.PlanCtrl.IsActive(), "the user slash command must still enter plan mode")
+	interactive.handleSlashCommand(ctx, session.SlashCommand{Name: "plan", Args: []string{"exit", "user done"}}, deps)
+	assert.False(t, assembly.PlanCtrl.IsActive(), "the user slash command must still exit plan mode")
 }
 
 func TestOutputGuardBufferLimitFailsClosedWithoutVisibleDelta(t *testing.T) {

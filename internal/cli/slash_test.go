@@ -94,6 +94,31 @@ func TestSlashHelp(t *testing.T) {
 	} {
 		assert.Contains(t, output, want, "help output should list %s", want)
 	}
+	for _, want := range []string{
+		"Capability boundaries",
+		"Memory: user-managed with /memory only",
+		"no automatic extraction or prompt injection",
+		"Goal, Task, and Todo: stored only in memory for this process",
+		"Session resume:",
+		"Fork, branch switch, snapshot, and migration are unsupported",
+		"Image reading and Web Agent UI: unavailable",
+		"Web Search requires a configured provider",
+		"Remote TUI is unavailable",
+		"private go-cli-acp-json/1 profile",
+		"official ACP and ask approvals are unavailable",
+		"Hard cost budgets are unsupported",
+		"a displayed $0 is not proof of zero spend",
+		"Plan Mode changes only through the user's /plan enter|exit commands",
+		"Themes cover a renderer subset",
+		"Diffs are unified; ASCII mode is unsupported",
+		"NO_COLOR only disables color",
+		"MCP server configuration hot reload is unsupported",
+		"Darwin arm64",
+		"Linux and Windows are unverified",
+		"Docker target is linux/amd64; runtime support is unverified",
+	} {
+		assert.Contains(t, output, want, "help output must state boundary: %s", want)
+	}
 }
 
 func TestThemeHandler(t *testing.T) {

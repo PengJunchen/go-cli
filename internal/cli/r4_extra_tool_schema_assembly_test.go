@@ -27,8 +27,8 @@ func TestAssembleAgentExtraToolSchemasReachLoopModel(t *testing.T) {
 
 	wantNames := []string{
 		"todo_write", "task_create", "task_update", "goal_create", "goal_update", "git_pr_create",
-		"task_get", "task_list", "goal_list", "goal_get", "ask_user", "enter_plan_mode",
-		"exit_plan_mode", "tool_search", "web_fetch", "web_search",
+		"task_get", "task_list", "goal_list", "goal_get", "ask_user", "tool_search",
+		"web_fetch", "web_search",
 	}
 	wantByName := make(map[string]bool, len(wantNames))
 	for _, name := range wantNames {
