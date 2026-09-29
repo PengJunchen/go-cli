@@ -156,7 +156,10 @@ func phase33CallWithApproval(
 	case request = <-approvalCh:
 	case outcome := <-done:
 		joined = true
-		return outcome.result, outcome.err
+		if outcome.err != nil {
+			return nil, fmt.Errorf("prepared tool call completed before approval request for %q: %w", call.Name, outcome.err)
+		}
+		return nil, fmt.Errorf("prepared tool call completed before approval request for %q", call.Name)
 	case <-ctx.Done():
 		t.Fatalf("tool call did not request approval: %v", ctx.Err())
 	}
@@ -596,6 +599,19 @@ func TestET_Phase22_AllCapabilities_AC9_ApprovalSystem(t *testing.T) {
 			"an untrusted local-process identity must be asked even when its name classifier allows unknown tools")
 		_, statErr := os.Stat(marker)
 		assert.ErrorIs(t, statErr, os.ErrNotExist)
+	})
+
+	t.Run("auto-allowed call cannot masquerade as explicitly approved", func(t *testing.T) {
+		approvalCh := make(chan tui.ApprovalRequest, 1)
+		registry, _, workspace := phase33PreparedModeRegistry(t, approval.PermissionAuto, approvalCh)
+		readPath := filepath.Join(workspace, "auto_read_without_prompt.txt")
+		require.NoError(t, os.WriteFile(readPath, []byte("auto-read"), 0o600))
+
+		_, err := phase33CallWithApproval(t, registry, approvalCh,
+			toolCallWithArgs("read", map[string]any{"path": readPath}), "", tui.ApprovalAllow)
+		assert.ErrorContains(t, err, "completed before approval request",
+			"a successful auto-allowed call is not evidence that an explicit approval occurred")
+		assert.Empty(t, approvalCh, "the scoped read should be auto-allowed without a prompt")
 	})
 
 	t.Run("PermissionPlan asks for each call", func(t *testing.T) {
