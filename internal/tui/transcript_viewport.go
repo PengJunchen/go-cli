@@ -25,10 +25,19 @@ var (
 // source/view identity supplied by the caller; SourceOffset is never persisted
 // or used as a durable identity.
 type transcriptViewportRow struct {
-	key      string
-	text     string
-	revision uint64
-	expanded bool
+	key               string
+	baseText          string
+	text              string
+	lines             []string
+	lineWidth         int
+	searchText        string
+	receiptOutcome    string
+	revision          uint64
+	expanded          bool
+	viewTruncated     bool
+	sourceTruncated   *bool
+	excludeFromSearch bool
+	toolPane          bool
 }
 
 type transcriptViewportAnchor struct {
@@ -52,6 +61,8 @@ type transcriptViewportWindow struct {
 type transcriptViewportRowMetadata struct {
 	key            string
 	text           string
+	renderedLines  []string
+	lineOffsets    []int
 	revision       uint64
 	width          int
 	expanded       bool
@@ -100,6 +111,10 @@ type transcriptViewport struct {
 	cacheHeight        int
 	cacheValid         bool
 	nextContentVersion uint64
+	setRowsCalls       uint64
+	sameRowsCalls      uint64
+	updateRowCalls     uint64
+	appendRowCalls     uint64
 }
 
 func newTranscriptViewport(width, height int) *transcriptViewport {
@@ -107,6 +122,7 @@ func newTranscriptViewport(width, height int) *transcriptViewport {
 		width:      width,
 		height:     height,
 		indexByKey: make(map[string]int),
+		lineTree:   []int{0},
 		followTail: true,
 	}
 }
@@ -115,6 +131,7 @@ func newTranscriptViewport(width, height int) *transcriptViewport {
 // rows reuse their line-count metadata across snapshots; rendered fragments
 // remain limited to the visible window and fixed overscan.
 func (v *transcriptViewport) SetRows(rows []transcriptViewportRow, loadedScope string) error {
+	v.setRowsCalls++
 	if strings.TrimSpace(loadedScope) == "" {
 		return errTranscriptViewportScopeRequired
 	}
@@ -139,15 +156,17 @@ func (v *transcriptViewport) SetRows(rows []transcriptViewportRow, loadedScope s
 	oldAnchorIndex, hadOldAnchor := v.indexByKey[oldAnchor.rowKey]
 	oldFollowTail := v.followTail
 	oldMetadata := make(map[string]*transcriptViewportRowMetadata, len(v.rowMetadata))
-	for _, meta := range v.rowMetadata {
+	oldRows := make(map[string]transcriptViewportRow, len(v.rows))
+	for index, meta := range v.rowMetadata {
 		oldMetadata[meta.key] = meta
+		oldRows[meta.key] = v.rows[index]
 	}
 
 	newRows := append([]transcriptViewportRow(nil), rows...)
 	newMetadata := make([]*transcriptViewportRowMetadata, len(newRows))
 	for i, row := range newRows {
 		if previous, ok := oldMetadata[row.key]; ok && previous.width == v.width &&
-			previous.revision == row.revision && previous.text == row.text && previous.expanded == row.expanded {
+			sameTranscriptViewportRow(row, oldRows[row.key]) {
 			newMetadata[i] = previous
 			continue
 		}
@@ -202,19 +221,84 @@ func (v *transcriptViewport) SetRows(rows []transcriptViewportRow, loadedScope s
 }
 
 func (v *transcriptViewport) sameRows(rows []transcriptViewportRow) bool {
+	v.sameRowsCalls++
 	if len(rows) != len(v.rows) {
 		return false
 	}
 	for i, row := range rows {
-		if row != v.rows[i] {
+		if !sameTranscriptViewportRow(row, v.rows[i]) {
 			return false
 		}
 	}
 	return true
 }
 
+func sameTranscriptViewportRow(a, b transcriptViewportRow) bool {
+	if a.key != b.key || a.baseText != b.baseText || a.text != b.text || a.lineWidth != b.lineWidth ||
+		a.searchText != b.searchText || a.receiptOutcome != b.receiptOutcome || a.revision != b.revision ||
+		a.expanded != b.expanded || a.viewTruncated != b.viewTruncated || a.sourceTruncated != b.sourceTruncated ||
+		a.excludeFromSearch != b.excludeFromSearch || a.toolPane != b.toolPane || len(a.lines) != len(b.lines) {
+		return false
+	}
+	for index := range a.lines {
+		if a.lines[index] != b.lines[index] {
+			return false
+		}
+	}
+	return true
+}
+
+// AppendRow adds one newly observed live row without rebuilding the loaded
+// projection. Rows are appended in arrival order; later chunks should use
+// updateRow with the same private or durable key.
+func (v *transcriptViewport) AppendRow(row transcriptViewportRow) error {
+	v.appendRowCalls++
+	if row.key == "" {
+		return errTranscriptViewportEmptyKey
+	}
+	if _, exists := v.indexByKey[row.key]; exists {
+		return fmt.Errorf("%w: %q", errTranscriptViewportDuplicateKey, row.key)
+	}
+	index := len(v.rows)
+	v.rows = append(v.rows, row)
+	meta := v.newTranscriptViewportRowMetadata(row, v.width)
+	v.rowMetadata = append(v.rowMetadata, meta)
+	v.indexByKey[row.key] = index
+	newPosition := index + 1
+	newTree := append(v.lineTree, 0)
+	lowBit := newPosition & -newPosition
+	priorRangeStart := newPosition - lowBit
+	priorRange := v.linePrefix(newPosition-1) - v.linePrefix(priorRangeStart)
+	newTree[newPosition] = priorRange + meta.lineCount
+	v.lineTree = newTree
+	v.totalLines += meta.lineCount
+	if v.followTail && v.width > 0 && v.height > 0 {
+		v.setAnchorAtLine(v.maximumStartLine())
+	}
+	v.markRenderCacheDirty()
+	return nil
+}
+
 func (v *transcriptViewport) newTranscriptViewportRowMetadata(row transcriptViewportRow, width int) *transcriptViewportRowMetadata {
 	v.nextContentVersion++
+	if row.lines != nil {
+		rendered, offsets := transcriptViewportWrapLines(row.lines, width, row.lineWidth)
+		if len(rendered) == 0 {
+			rendered = []string{""}
+			offsets = []int{0}
+		}
+		return &transcriptViewportRowMetadata{
+			key:            row.key,
+			text:           row.text,
+			renderedLines:  rendered,
+			lineOffsets:    offsets,
+			revision:       row.revision,
+			width:          width,
+			expanded:       row.expanded,
+			contentVersion: v.nextContentVersion,
+			lineCount:      len(rendered),
+		}
+	}
 	count := len(transcriptViewportSourceLineOffsets(row.text, width))
 	return &transcriptViewportRowMetadata{
 		key:            row.key,
@@ -227,7 +311,50 @@ func (v *transcriptViewport) newTranscriptViewportRowMetadata(row transcriptView
 	}
 }
 
+func transcriptViewportWrapLines(lines []string, width, sourceWidth int) ([]string, []int) {
+	if width == sourceWidth {
+		offsets := make([]int, 0, len(lines))
+		sourceOffset := 0
+		for index, line := range lines {
+			safe, _ := transcriptViewportSafeText(line)
+			offsets = append(offsets, sourceOffset)
+			sourceOffset += len(safe)
+			if index < len(lines)-1 {
+				sourceOffset++
+			}
+		}
+		return lines, offsets
+	}
+	wrapped := make([]string, 0, len(lines))
+	offsets := make([]int, 0, len(lines))
+	sourceOffset := 0
+	for index, line := range lines {
+		safe, _ := transcriptViewportSafeText(line)
+		if width <= 0 || width == sourceWidth || ansi.StringWidth(safe) <= width {
+			wrapped = append(wrapped, safe)
+			offsets = append(offsets, sourceOffset)
+		} else {
+			lineText, lineOffsets := transcriptViewportWrapWithOffsets(safe, width)
+			parts := strings.Split(lineText, "\n")
+			for partIndex, part := range parts {
+				wrapped = append(wrapped, part)
+				offset := 0
+				if partIndex < len(lineOffsets) {
+					offset = lineOffsets[partIndex]
+				}
+				offsets = append(offsets, sourceOffset+offset)
+			}
+		}
+		sourceOffset += len(safe)
+		if index < len(lines)-1 {
+			sourceOffset++
+		}
+	}
+	return wrapped, offsets
+}
+
 func (v *transcriptViewport) updateRow(row transcriptViewportRow) error {
+	v.updateRowCalls++
 	index, ok := v.indexByKey[row.key]
 	if !ok {
 		if row.key == "" {
@@ -236,10 +363,10 @@ func (v *transcriptViewport) updateRow(row transcriptViewportRow) error {
 		return fmt.Errorf("%w: %q", errTranscriptViewportMissingRow, row.key)
 	}
 	previous := v.rows[index]
-	if row.revision < previous.revision || (row.revision == previous.revision && row != previous) {
+	if row.revision < previous.revision || (row.revision == previous.revision && !sameTranscriptViewportRow(row, previous)) {
 		return fmt.Errorf("%w: %q", errTranscriptViewportStaleRevision, row.key)
 	}
-	if row == previous {
+	if sameTranscriptViewportRow(row, previous) {
 		return nil
 	}
 
@@ -380,6 +507,44 @@ func (v *transcriptViewport) Select(key string) bool {
 	return true
 }
 
+// SelectRelative moves the keyed selection through currently loaded rows,
+// clamping at either end. With no prior selection, Down selects the first
+// row and Up selects the last row.
+func (v *transcriptViewport) SelectRelative(delta int) string {
+	if len(v.rows) == 0 || delta == 0 {
+		return v.selectedKey
+	}
+	index, exists := v.indexByKey[v.selectedKey]
+	if !exists {
+		if delta > 0 {
+			index = -1
+		} else {
+			index = len(v.rows)
+		}
+	}
+	if delta < 0 {
+		if delta < -index {
+			index = 0
+		} else {
+			index += delta
+		}
+	} else if delta > len(v.rows)-1-index {
+		index = len(v.rows) - 1
+	} else {
+		index += delta
+	}
+	v.Select(v.rows[index].key)
+	return v.selectedKey
+}
+
+func (v *transcriptViewport) SelectSearchHit(key string) bool {
+	if !v.Select(key) {
+		return false
+	}
+	v.searchHitKey = key
+	return true
+}
+
 // Search finds the next case-insensitive match in the currently loaded source
 // rows. It stores a key, not copied result bodies, and scrolls an offscreen hit
 // into view. A non-empty loaded scope is always returned by Window.
@@ -400,7 +565,14 @@ func (v *transcriptViewport) Search(query, afterKey string) (string, bool) {
 	}
 	for step := 0; step < len(v.rows); step++ {
 		index := (start + step) % len(v.rows)
-		safeRow, _ := transcriptViewportSafeText(v.rows[index].text)
+		if v.rows[index].excludeFromSearch {
+			continue
+		}
+		searchText := v.rows[index].searchText
+		if searchText == "" {
+			searchText = v.rows[index].text
+		}
+		safeRow, _ := transcriptViewportSafeText(searchText)
 		if strings.Contains(strings.ToLower(safeRow), needle) {
 			v.searchHitKey = v.rows[index].key
 			v.followTail = false
@@ -542,8 +714,13 @@ func (v *transcriptViewport) renderRange(start, end int) {
 				continue
 			}
 		}
-		wrappedText, offsets := transcriptViewportWrapWithOffsets(row.text, v.width)
-		wrapped := strings.Split(wrappedText, "\n")
+		wrapped := meta.renderedLines
+		offsets := meta.lineOffsets
+		if wrapped == nil {
+			wrappedText, textOffsets := transcriptViewportWrapWithOffsets(row.text, v.width)
+			wrapped = strings.Split(wrappedText, "\n")
+			offsets = textOffsets
+		}
 		for local := localStart; local < localEnd; local++ {
 			if local >= len(wrapped) {
 				break
@@ -613,7 +790,7 @@ func (v *transcriptViewport) setAnchorAtLine(line int) {
 	}
 	index := v.rowIndexForLine(line)
 	localLine := line - v.linePrefix(index)
-	offsets := transcriptViewportSourceLineOffsets(v.rows[index].text, v.width)
+	offsets := v.rowLineOffsets(index)
 	if localLine >= len(offsets) {
 		localLine = len(offsets) - 1
 	}
@@ -629,8 +806,19 @@ func (v *transcriptViewport) restoreAnchor(index, sourceOffset int) {
 		v.setAnchorAtLine(0)
 		return
 	}
-	sourceOffset = transcriptViewportSafeOffset(v.rows[index].text, sourceOffset)
-	offsets := transcriptViewportSourceLineOffsets(v.rows[index].text, v.width)
+	offsets := v.rowLineOffsets(index)
+	if len(v.rowMetadata[index].lineOffsets) > 0 {
+		localLine := sort.Search(len(offsets), func(i int) bool { return offsets[i] > sourceOffset }) - 1
+		if localLine < 0 {
+			localLine = 0
+		}
+		if localLine >= len(offsets) {
+			localLine = len(offsets) - 1
+		}
+		sourceOffset = offsets[localLine]
+	} else {
+		sourceOffset = transcriptViewportSafeOffset(v.rows[index].text, sourceOffset)
+	}
 	localLine := sort.Search(len(offsets), func(i int) bool { return offsets[i] > sourceOffset }) - 1
 	if localLine < 0 {
 		localLine = 0
@@ -640,6 +828,16 @@ func (v *transcriptViewport) restoreAnchor(index, sourceOffset int) {
 	}
 	v.anchor = transcriptViewportAnchor{rowKey: v.rows[index].key, sourceOffset: sourceOffset}
 	v.anchorLine = localLine
+}
+
+func (v *transcriptViewport) rowLineOffsets(index int) []int {
+	if index >= 0 && index < len(v.rowMetadata) && len(v.rowMetadata[index].lineOffsets) > 0 {
+		return v.rowMetadata[index].lineOffsets
+	}
+	if index < 0 || index >= len(v.rows) {
+		return nil
+	}
+	return transcriptViewportSourceLineOffsets(v.rows[index].text, v.width)
 }
 
 func (v *transcriptViewport) currentStartLine() int {

@@ -206,6 +206,21 @@ func TestCtrlCQuit(t *testing.T) {
 	assert.True(t, called.Load(), "cancel callback should be invoked on Ctrl+C")
 }
 
+func TestDurableTranscriptCtrlCDefersQuitToParent(t *testing.T) {
+	var called atomic.Bool
+	app := NewBubbleteaApp(make(chan AgentEvent, 1),
+		WithDeferQuitUntilTranscriptRefresh(),
+		WithCancelCallback(func() { called.Store(true) }),
+	)
+	model := app.model
+	model.interactive = false
+
+	cmd := model.handleKey(keyMsg(tea.KeyCtrlC))
+	assert.Nil(t, cmd, "the durable owner must stay alive until the parent applies its acknowledged refresh")
+	assert.False(t, model.quitting)
+	assert.True(t, called.Load(), "Ctrl+C must cancel the active run")
+}
+
 // TestPauseToggle verifies that Space toggles pause/resume callbacks.
 func TestPauseToggle(t *testing.T) {
 	var pauseCalled, resumeCalled atomic.Bool

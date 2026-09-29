@@ -106,6 +106,8 @@ type runOwner struct {
 	terminalSyncRequired bool
 	terminalSyncSuccess  bool
 	runCommitLeaseGuard  *runCommitLeaseGuard
+	leaseCloseFailed     bool
+	runSlotReleaseFailed bool
 	leaseCloseAttempted  bool
 	workers              int
 	resources            int
@@ -735,6 +737,39 @@ func (o *runOwner) Snapshot() RunStatus {
 	return o.status
 }
 
+// WaitForCompletion waits until this owner has closed done, which occurs only
+// after its callback and owned resources have joined, durable terminal sync
+// has been evaluated, and its run lease and slot have been released. A canceled
+// wait returns one fresh status/publication snapshot and the context error.
+func (o *runOwner) WaitForCompletion(ctx context.Context) (RunStatus, DurablePublication, error) {
+	if o == nil {
+		return RunStatus{}, DurablePublication{}, errors.New("core: run status owner is nil")
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	snapshot := func() (RunStatus, DurablePublication) {
+		o.mu.Lock()
+		defer o.mu.Unlock()
+		o.refreshPendingLocked()
+		return o.status, o.durablePublicationLocked()
+	}
+	select {
+	case <-o.done:
+		status, publication := snapshot()
+		return status, publication, nil
+	case <-ctx.Done():
+		select {
+		case <-o.done:
+			status, publication := snapshot()
+			return status, publication, nil
+		default:
+			status, publication := snapshot()
+			return status, publication, ctx.Err()
+		}
+	}
+}
+
 func (o *runOwner) SetEventGapSource(source interface{ GapCount() uint64 }) {
 	o.mu.Lock()
 	o.eventGapSource = source
@@ -1016,10 +1051,12 @@ func (o *runOwner) supervise() {
 		if closeLease {
 			leasePanicked = leaseGuard.close()
 		}
-		guard.Release(claim)
+		releasePanicked := releaseRunSlotGuard(guard, claim)
 
 		o.mu.Lock()
 		o.released = true
+		o.leaseCloseFailed = leasePanicked
+		o.runSlotReleaseFailed = releasePanicked
 		if lateCommitErr != nil {
 			o.runErr = errors.Join(o.runErr, lateCommitErr)
 			o.unknown = true
@@ -1030,7 +1067,12 @@ func (o *runOwner) supervise() {
 			o.unknown = true
 			o.status.Outcome = RunOutcomeUnknown
 		}
-		if lateCommitErr != nil || leasePanicked || !o.durableCommitSucceededLocked() {
+		if releasePanicked {
+			o.runErr = errors.Join(o.runErr, ErrRunSlotReleasePanicked)
+			o.unknown = true
+			o.status.Outcome = RunOutcomeUnknown
+		}
+		if lateCommitErr != nil || leasePanicked || releasePanicked || !o.durableCommitSucceededLocked() {
 			o.status.ExecutionState = RunExecutionQuarantined
 		} else {
 			o.status.ExecutionState = RunExecutionQuiescent
@@ -1046,6 +1088,16 @@ func (o *runOwner) supervise() {
 		}
 		return
 	}
+}
+
+func releaseRunSlotGuard(guard RunSlotGuard, claim RunClaim) (panicked bool) {
+	defer func() {
+		if recover() != nil {
+			panicked = true
+		}
+	}()
+	guard.Release(claim)
+	return false
 }
 
 // drainLateCompletionTasks is the one non-worker writer for proof that became
@@ -1195,7 +1247,33 @@ func (o *runOwner) resultSnapshotLocked() Result {
 	result.ExecutionState = o.status.ExecutionState
 	result.StatusHandle = o
 	result.Success = result.Outcome == RunOutcomeSuccess
+	result.DurablePublication = o.durablePublicationLocked()
 	return result
+}
+
+func (o *runOwner) durablePublicationLocked() DurablePublication {
+	if !o.runCommitBound {
+		return DurablePublication{State: DurablePublicationUnbound}
+	}
+	publication := DurablePublication{
+		State:           DurablePublicationPending,
+		RunID:           o.claim.ID,
+		SessionID:       o.runCommitBinding.SessionID,
+		OwnerGeneration: o.ownerGeneration,
+	}
+	if !o.released {
+		return publication
+	}
+	if o.terminalSyncRequired && o.terminalSyncSuccess && o.transcriptCommitted &&
+		!o.leaseCloseFailed && !o.runSlotReleaseFailed &&
+		o.runCommitBinding.Validate() == nil &&
+		o.runCommitBinding.OwnerGeneration == o.ownerGeneration &&
+		o.claim.ID != "" && o.status.ExecutionState == RunExecutionQuiescent {
+		publication.State = DurablePublicationSynced
+		return publication
+	}
+	publication.State = DurablePublicationFailed
+	return publication
 }
 
 func (o *runOwner) refreshPendingLocked() {

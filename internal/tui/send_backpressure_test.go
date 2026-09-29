@@ -272,8 +272,6 @@ func TestTUICriticalSendContextStopsWhenRunEnds(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("critical send did not observe the old run ending")
 	}
-	require.Len(t, app.model.msgCh, cap(app.model.msgCh)-1, "old critical message must not enter a newly available slot")
-
 	releaseModel()
 
 	select {
@@ -281,6 +279,12 @@ func TestTUICriticalSendContextStopsWhenRunEnds(t *testing.T) {
 		require.ErrorIs(t, err, context.Canceled)
 	case <-time.After(time.Second):
 		t.Fatal("app run did not return after context cancellation")
+	}
+	for len(app.model.msgCh) > 0 {
+		msg := <-app.model.msgCh
+		if text, ok := msg.(string); ok {
+			require.NotEqual(t, "critical", text, "a message rejected after run cancellation must never enter the local queue")
+		}
 	}
 
 	// The cumulative Done channel remains closed, but Run is intentionally
@@ -341,10 +345,15 @@ func startBlockedQueueRun(runCtx context.Context, t *testing.T) (*BubbleteaApp, 
 			return false
 		}
 	}, time.Second, time.Millisecond, "render loop did not block in the test callback")
-	for i := 0; i < cap(app.model.msgCh); i++ {
+	for i := 0; i < cap(app.model.msgCh)+1; i++ {
 		require.NoError(t, app.Send(i))
 	}
-	require.Len(t, app.model.msgCh, cap(app.model.msgCh))
+	require.Equal(t, cap(app.model.msgCh), len(app.model.msgCh), "the bounded local queue should be full")
+	select {
+	case <-app.queueSpace:
+	default:
+		t.Fatal("the pump did not publish its bounded-queue space notification for its one in-flight item")
+	}
 	return app, release, runErr
 }
 

@@ -136,3 +136,17 @@ func TestBridgeEventsEmptyStream(t *testing.T) {
 		}
 	}
 }
+
+func TestBridgeEventsOwnedJoinsAfterClosingItsOutput(t *testing.T) {
+	stream := core.NewEventStream(1)
+	owned := BridgeEventsOwned(context.Background(), stream)
+	stream.Close()
+
+	for range owned.Events() {
+	}
+	select {
+	case <-owned.Done():
+	case <-time.After(time.Second):
+		t.Fatal("owned bridge did not close its join signal after output closure")
+	}
+}
