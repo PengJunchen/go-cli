@@ -10,12 +10,14 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/pengjunchen/go-cli/internal/approval"
 	"github.com/pengjunchen/go-cli/internal/tools"
+	"github.com/pengjunchen/go-cli/internal/tui"
 )
 
 func TestAssembleRejectsConfiguredPostToolUseShellHook(t *testing.T) {
@@ -120,4 +122,131 @@ func TestAssemblePreparedApprovalRunsWriteAndEditThroughMutationQueue(t *testing
 	contents, err := os.ReadFile(path)
 	require.NoError(t, err)
 	assert.Equal(t, "after", string(contents))
+}
+
+type assembledWriteOutcome struct {
+	result *tools.ToolResult
+	err    error
+}
+
+func newAssembledApprovalWrite(t *testing.T, opts ...AssembleOption) (*AgentAssembly, tools.ToolDefinition, string) {
+	t.Helper()
+	workDir := t.TempDir()
+	cfg := newAssembleTestConfig(t)
+	cfg.Git.WorkDir = workDir
+	assembly, err := AssembleAgent(context.Background(), cfg, "openai", "test-model", io.Discard, opts...)
+	require.NoError(t, err)
+	t.Cleanup(assembly.Cleanup)
+	write, err := assembly.ToolRegistry.Get(context.Background(), "write")
+	require.NoError(t, err)
+	return assembly, write, filepath.Join(workDir, "approval-matrix.txt")
+}
+
+func assembledWriteCall(path string) tools.ToolCall {
+	return tools.ToolCall{
+		Name: "write",
+		Args: map[string]any{"path": path, "content": "approved"},
+	}
+}
+
+func TestAssemblePreparedWriteApprovalModesKeepDecisionAtAssemblyBoundary(t *testing.T) {
+	t.Run("headless ask denies without a terminal", func(t *testing.T) {
+		previousStdin := os.Stdin
+		nonTerminal, err := os.Open(os.DevNull)
+		require.NoError(t, err)
+		os.Stdin = nonTerminal
+		t.Cleanup(func() {
+			os.Stdin = previousStdin
+			assert.NoError(t, nonTerminal.Close())
+		})
+
+		_, write, path := newAssembledApprovalWrite(t, WithApproveMode(ApproveAsk))
+		result, err := write.Execute(context.Background(), assembledWriteCall(path))
+		require.ErrorIs(t, err, approval.ErrToolDenied)
+		assert.Nil(t, result)
+		assert.NoFileExists(t, path, "headless Ask must deny rather than block or execute")
+	})
+
+	t.Run("explicit auto dispatches", func(t *testing.T) {
+		_, write, path := newAssembledApprovalWrite(t, WithApproveMode(ApproveAuto))
+		result, err := write.Execute(context.Background(), assembledWriteCall(path))
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Equal(t, true, result.Metadata["queued"])
+		contents, err := os.ReadFile(path)
+		require.NoError(t, err)
+		assert.Equal(t, "approved", string(contents))
+	})
+
+	t.Run("explicit deny does not dispatch", func(t *testing.T) {
+		_, write, path := newAssembledApprovalWrite(t, WithApproveMode(ApproveDeny))
+		result, err := write.Execute(context.Background(), assembledWriteCall(path))
+		require.ErrorIs(t, err, approval.ErrToolDenied)
+		assert.Nil(t, result)
+		assert.NoFileExists(t, path)
+	})
+
+	t.Run("plan mode blocks even explicit auto", func(t *testing.T) {
+		assembly, write, path := newAssembledApprovalWrite(t, WithApproveMode(ApproveAuto))
+		require.NoError(t, assembly.PlanCtrl.Enter(context.Background(), "approval matrix"))
+		result, err := write.Execute(context.Background(), assembledWriteCall(path))
+		require.ErrorIs(t, err, approval.ErrToolDenied)
+		assert.Nil(t, result)
+		assert.NoFileExists(t, path)
+	})
+}
+
+func TestAssembleTUIApprovalChannelControlsPreparedWriteDispatch(t *testing.T) {
+	for _, testCase := range []struct {
+		name     string
+		decision tui.ApprovalDecision
+		allowed  bool
+	}{
+		{name: "allow", decision: tui.ApprovalAllow, allowed: true},
+		{name: "deny", decision: tui.ApprovalDeny},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			approvalCh := make(chan tui.ApprovalRequest)
+			_, write, path := newAssembledApprovalWrite(t, WithApprovalChannel(approvalCh))
+			ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+			defer cancel()
+			done := make(chan assembledWriteOutcome, 1)
+			go func() {
+				result, err := write.Execute(ctx, assembledWriteCall(path))
+				done <- assembledWriteOutcome{result: result, err: err}
+			}()
+
+			var request tui.ApprovalRequest
+			select {
+			case request = <-approvalCh:
+			case <-time.After(3 * time.Second):
+				t.Fatal("TUI approval channel did not receive the prepared write request")
+			}
+			assert.Equal(t, "write", request.ToolName)
+			assert.Equal(t, path, request.Args["path"])
+			assert.NotNil(t, request.ResponseCh)
+			assert.NoFileExists(t, path, "executor must wait for the TUI approval response")
+			request.ResponseCh <- tui.ApprovalResponse{Decision: testCase.decision}
+
+			var outcome assembledWriteOutcome
+			select {
+			case outcome = <-done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("prepared write did not finish after the TUI approval response")
+			}
+			if testCase.allowed {
+				require.NoError(t, outcome.err)
+				require.NotNil(t, outcome.result)
+				assert.Equal(t, true, outcome.result.Metadata["queued"])
+				contents, err := os.ReadFile(path)
+				require.NoError(t, err)
+				assert.Equal(t, "approved", string(contents))
+				return
+			}
+
+			require.ErrorIs(t, outcome.err, approval.ErrToolDenied)
+			assert.Nil(t, outcome.result)
+			assert.NoFileExists(t, path, "TUI denial must not reach the mutation executor")
+		})
+	}
 }
