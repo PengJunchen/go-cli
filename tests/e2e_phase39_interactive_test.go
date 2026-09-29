@@ -44,8 +44,9 @@ func (m *phase39Model) Stream(ctx context.Context, msgs []llm.Message, opts ...l
 	if err != nil {
 		return nil, err
 	}
-	ch := make(chan llm.MessageChunk, 1)
+	ch := make(chan llm.MessageChunk, 2)
 	ch <- llm.MessageChunk{Content: resp.Content}
+	ch <- llm.MessageChunk{Final: true, FinishReason: "stop"}
 	close(ch)
 	return ch, nil
 }
