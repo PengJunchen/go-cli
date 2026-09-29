@@ -55,7 +55,8 @@ func TestMCPGenerationUpdatePublishesCompleteGeneration(t *testing.T) {
 
 	loaded, err := adapter.Get(context.Background(), oldOne.Name())
 	require.NoError(t, err)
-	assert.Same(t, oldOne, loaded)
+	assert.NotSame(t, oldOne, loaded, "published generations expose a candidate-owned immutable definition wrapper")
+	assert.Equal(t, oldOne.Name(), loaded.Name())
 	beforeReplace := base.DispatchFence().Snapshot()
 	newOnly := newMCPGenerationTestTool("mcp__srv__new_only")
 	second, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 2, []MCPToolCandidate{{Definition: newOnly}})
@@ -118,6 +119,46 @@ func TestMCPGenerationReservationsRejectEagerAndDeferredShadowing(t *testing.T) 
 	assert.Equal(t, []string{tool.Name()}, deferredToolNames(mustListTools(t, adapter)))
 }
 
+func TestMCPGenerationRejectsTrustedRegistrationOverReservedName(t *testing.T) {
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry)
+	adapter := NewDeferredToolRegistryAdapter(base)
+	tool := newMCPGenerationTestTool("mcp__srv__reserved")
+	update, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 1, []MCPToolCandidate{{Definition: tool}})
+	require.NoError(t, err)
+	require.NoError(t, update.Publish())
+	fence := base.DispatchFence().Snapshot()
+
+	trusted := newMCPGenerationTestTool(tool.Name())
+	err = base.RegisterTrustedControl(context.Background(), trusted)
+	assert.ErrorIs(t, err, ErrMCPNameReserved, "direct trusted registration must respect source reservations")
+	err = adapter.RegisterTrustedControl(context.Background(), trusted)
+	assert.ErrorIs(t, err, ErrMCPNameReserved, "adapter-forwarded trusted registration must respect source reservations")
+	assert.Equal(t, fence, base.DispatchFence().Snapshot(), "rejected registrations must not change the published generation")
+	assert.Equal(t, []string{tool.Name()}, deferredToolNames(mustListTools(t, adapter)))
+}
+
+func TestMCPGenerationSnapshotsCandidateNameAndSchemaBeforePublish(t *testing.T) {
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry)
+	adapter := NewDeferredToolRegistryAdapter(base)
+	tool := newMCPGenerationTestTool("mcp__srv__original")
+	originalSchema := tool.Parameters()
+	update, err := adapter.BeginMCPGenerationUpdate(context.Background(), "project-config", 1, []MCPToolCandidate{{Definition: tool}})
+	require.NoError(t, err)
+
+	tool.name = "mcp__srv__mutated"
+	tool.parameters = map[string]any{"type": "string"}
+	require.NoError(t, update.Publish())
+
+	loaded, err := adapter.Get(context.Background(), "mcp__srv__original")
+	require.NoError(t, err)
+	assert.Equal(t, "mcp__srv__original", loaded.Name())
+	parameterized, ok := loaded.(Parameterized)
+	require.True(t, ok)
+	assert.Equal(t, originalSchema, parameterized.Parameters(), "published schema must not retain the caller's mutable map")
+	_, err = adapter.Get(context.Background(), "mcp__srv__mutated")
+	assert.ErrorIs(t, err, ErrToolNotFound)
+}
+
 func TestMCPDeferredMaterializationFailureIsRetryable(t *testing.T) {
 	base := NewDefaultToolRegistry().(*DefaultToolRegistry)
 	adapter := NewDeferredToolRegistryAdapter(base)
@@ -151,7 +192,10 @@ func TestMCPDeferredMaterializationFailureIsRetryable(t *testing.T) {
 	base.mu.Unlock()
 	got, err := adapter.Load(context.Background(), tool.Name())
 	require.NoError(t, err)
-	assert.Same(t, tool, got)
+	assert.Equal(t, tool.Name(), got.Name())
+	result, err := got.Execute(context.Background(), ToolCall{Name: tool.Name()})
+	require.NoError(t, err)
+	assert.Equal(t, tool.Name(), result.Output)
 	assert.True(t, adapter.IsLoaded(tool.Name()))
 	assert.Equal(t, fence.Registry+1, base.DispatchFence().Snapshot().Registry)
 }
@@ -201,8 +245,9 @@ func TestMCPDeferredLoadSerializesAgainstReplacement(t *testing.T) {
 
 	got, err := adapter.Get(context.Background(), old.Name())
 	require.NoError(t, err)
-	assert.Same(t, newTool, got)
+	assert.Equal(t, newTool.Name(), got.Name())
 	assert.Equal(t, int32(0), old.calls.Load())
+	assert.Equal(t, int32(0), newTool.calls.Load(), "materialization must not execute the captured candidate")
 	assert.Equal(t, []string{old.Name()}, deferredToolNames(mustListTools(t, adapter)))
 }
 

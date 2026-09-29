@@ -511,43 +511,74 @@ func TestAdapter_Concurrent(t *testing.T) {
 func TestDeferredListTakesDTRSnapshotBeforeBackingSnapshot(t *testing.T) {
 	base := NewDefaultToolRegistry().(*DefaultToolRegistry)
 	adapter := NewDeferredToolRegistryAdapter(base)
-	old := &fakeTool{name: "mcp__srv__old", description: "old"}
-	oldLoader := &recorderLoader{name: old.Name(), payload: old}
-	require.NoError(t, adapter.RegisterDeferred(context.Background(), old.Name(), oldLoader.fn()))
-	_, err := adapter.Load(context.Background(), old.Name())
+	oldOne := newMCPGenerationTestTool("mcp__srv__old_one")
+	oldTwo := newMCPGenerationTestTool("mcp__srv__old_two")
+	first, err := adapter.BeginMCPGenerationUpdate(context.Background(), "list-snapshot", 1, []MCPToolCandidate{
+		{Definition: oldOne},
+		{Definition: oldTwo},
+	})
+	require.NoError(t, err)
+	require.NoError(t, first.Publish())
+	_, err = adapter.Get(context.Background(), oldOne.Name())
 	require.NoError(t, err)
 
 	barrier := &deferredListSnapshotBarrier{DefaultToolRegistry: base}
 	adapter.underlying = barrier
+	snapshotReached := make(chan struct{})
+	resumeSnapshot := make(chan struct{})
+	var snapshotOnce sync.Once
+	var resumeOnce sync.Once
+	defer resumeOnce.Do(func() { close(resumeSnapshot) })
 	barrier.afterSnapshot = func() {
-		// A successful TryLock here proves List took the backing registry
-		// snapshot before acquiring DTR's read lock. Simulate a complete
-		// generation switch at that exact point: the old backing snapshot is
-		// now stale, while DTR exposes the new placeholder.
-		if !adapter.mu.TryLock() {
-			return
+		snapshotOnce.Do(func() {
+			close(snapshotReached)
+			<-resumeSnapshot
+		})
+	}
+
+	type listResult struct {
+		defs []ToolDefinition
+		err  error
+	}
+	listDone := make(chan listResult, 1)
+	go func() {
+		defs, err := adapter.List(context.Background())
+		listDone <- listResult{defs: defs, err: err}
+	}()
+	<-snapshotReached
+	assert.False(t, adapter.mu.TryLock(), "the concrete generation path must hold the DTR read lock before backing List snapshots")
+
+	newOne := newMCPGenerationTestTool("mcp__srv__new_one")
+	newTwo := newMCPGenerationTestTool("mcp__srv__new_two")
+	updateStarted := make(chan struct{})
+	updateDone := make(chan error, 1)
+	go func() {
+		close(updateStarted)
+		update, err := adapter.BeginMCPGenerationUpdate(context.Background(), "list-snapshot", 2, []MCPToolCandidate{
+			{Definition: newOne},
+			{Definition: newTwo},
+		})
+		if err == nil {
+			err = update.Publish()
 		}
-		adapter.mu.Unlock()
-		replaceDeferredGenerationForTest(adapter, base, old.Name(), "mcp__srv__new")
+		updateDone <- err
+	}()
+	<-updateStarted
+	select {
+	case err := <-updateDone:
+		t.Fatalf("generation replacement crossed the backing snapshot barrier: %v", err)
+	default:
 	}
+	resumeOnce.Do(func() { close(resumeSnapshot) })
 
-	got, err := adapter.List(context.Background())
-	require.NoError(t, err)
-	gotNames := make(map[string]bool, len(got))
-	for _, def := range got {
-		gotNames[def.Name()] = true
-	}
-	assert.False(t, gotNames[old.Name()] && gotNames["mcp__srv__new"], "List combined an old backing snapshot with new deferred state")
-
-	if !gotNames["mcp__srv__new"] {
-		// With DTR-before-registry ordering the callback above observes the
-		// read lock and leaves the reader on the complete old generation.
-		replaceDeferredGenerationForTest(adapter, base, old.Name(), "mcp__srv__new")
-	}
+	got := <-listDone
+	require.NoError(t, got.err)
+	assert.ElementsMatch(t, []string{oldOne.Name(), oldTwo.Name()}, deferredToolNames(got.defs), "List must return the complete old generation")
+	require.NoError(t, <-updateDone)
 
 	current, err := adapter.List(context.Background())
 	require.NoError(t, err)
-	assert.Equal(t, []string{"mcp__srv__new"}, deferredToolNames(current))
+	assert.ElementsMatch(t, []string{newOne.Name(), newTwo.Name()}, deferredToolNames(current))
 }
 
 func TestDeferredListRetriesGenericBackingWhenOverlayChanges(t *testing.T) {

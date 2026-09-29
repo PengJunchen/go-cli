@@ -504,9 +504,13 @@ func (r *DefaultToolRegistry) registerDefinitionWithRuntimeReadScope(
 	}
 	fingerprint = sha256.Sum256(nonce[:])
 
-	_, err := r.fence.Publish(DispatchFenceRegistry, nil, func() {
+	_, err := r.fence.publishChecked(DispatchFenceRegistry, nil, func() error {
 		r.mu.Lock()
 		defer r.mu.Unlock()
+		r.ensureMCPMapsLocked()
+		if owner, reserved := r.mcpReservations[name]; reserved {
+			return fmt.Errorf("%w: %q is reserved by MCP source %q generation %d", ErrMCPNameReserved, name, owner.sourceID, owner.generation)
+		}
 
 		if r.tools == nil {
 			r.tools = make(map[string]ToolDefinition)
@@ -526,6 +530,7 @@ func (r *DefaultToolRegistry) registerDefinitionWithRuntimeReadScope(
 		r.tools[name] = def
 		r.metadata[name] = metadata
 		r.version++
+		return nil
 	})
 	return err
 }

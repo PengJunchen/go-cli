@@ -75,6 +75,35 @@ type mcpGenerationCandidate struct {
 	fingerprint [32]byte
 }
 
+type frozenMCPGenerationDefinition struct {
+	name        string
+	description string
+	schema      ToolSchemaSnapshot
+	execute     func(context.Context, ToolCall) (*ToolResult, error)
+}
+
+func (d *frozenMCPGenerationDefinition) Name() string        { return d.name }
+func (d *frozenMCPGenerationDefinition) Description() string { return d.description }
+func (d *frozenMCPGenerationDefinition) Parameters() any     { return d.schema.Schema() }
+func (d *frozenMCPGenerationDefinition) Execute(ctx context.Context, call ToolCall) (*ToolResult, error) {
+	if d == nil || d.execute == nil {
+		return nil, ErrPreparedInvocationUnavailable
+	}
+	if call.Name != d.name {
+		return nil, ErrPreparedProxyNameMismatch
+	}
+	return d.execute(ctx, call)
+}
+
+type frozenMCPGenerationGuidedDefinition struct {
+	*frozenMCPGenerationDefinition
+	guidelines []string
+}
+
+func (d *frozenMCPGenerationGuidedDefinition) PromptGuidelines() []string {
+	return append([]string(nil), d.guidelines...)
+}
+
 // MCPGenerationUpdate owns the DTR write lock until Publish, Disable, or Abort.
 // It stages only local metadata; client construction and network work must be
 // complete before BeginMCPGenerationUpdate is called.
@@ -216,12 +245,19 @@ func prepareMCPGenerationCandidate(candidate MCPToolCandidate) (mcpGenerationCan
 	if candidate.Definition == nil {
 		return mcpGenerationCandidate{}, errors.New("tools: MCP generation contains a nil tool")
 	}
+	if _, ok := candidate.Definition.(StreamingBashTool); ok {
+		return mcpGenerationCandidate{}, errors.New("tools: MCP generation does not accept streaming executors")
+	}
+	if _, ok := candidate.Definition.(TopToolsProvider); ok {
+		return mcpGenerationCandidate{}, errors.New("tools: MCP generation does not accept registry providers")
+	}
 	name := candidate.Definition.Name()
 	if strings.TrimSpace(name) == "" {
 		return mcpGenerationCandidate{}, errors.New("tools: MCP generation contains a tool with an empty name")
 	}
+	description := candidate.Definition.Description()
 	metadata := toolRegistrationMetadata{
-		description: candidate.Definition.Description(),
+		description: description,
 		effects:     unknownTrustedEffects(),
 	}
 	parameterized, ok := candidate.Definition.(Parameterized)
@@ -240,12 +276,25 @@ func prepareMCPGenerationCandidate(candidate MCPToolCandidate) (mcpGenerationCan
 		return mcpGenerationCandidate{}, fmt.Errorf("tools: validate MCP schema for %q: %w", name, err)
 	}
 	metadata.schema = schema
+	var guidelines []string
 	if guideliner, ok := candidate.Definition.(PromptGuideliner); ok {
 		metadata.hasPromptGuidelines = true
-		metadata.promptGuidelines = append([]string(nil), guideliner.PromptGuidelines()...)
+		guidelines = append([]string(nil), guideliner.PromptGuidelines()...)
+		metadata.promptGuidelines = append([]string(nil), guidelines...)
 	}
-	_, metadata.hasStreaming = candidate.Definition.(StreamingBashTool)
-	_, metadata.hasTopTools = candidate.Definition.(TopToolsProvider)
+	frozenDefinition := &frozenMCPGenerationDefinition{
+		name:        name,
+		description: description,
+		schema:      schema,
+		execute:     candidate.Definition.Execute,
+	}
+	var definition ToolDefinition = frozenDefinition
+	if metadata.hasPromptGuidelines {
+		definition = &frozenMCPGenerationGuidedDefinition{
+			frozenMCPGenerationDefinition: frozenDefinition,
+			guidelines:                    guidelines,
+		}
+	}
 
 	var nonce [32]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
@@ -253,7 +302,7 @@ func prepareMCPGenerationCandidate(candidate MCPToolCandidate) (mcpGenerationCan
 	}
 	return mcpGenerationCandidate{
 		name:        name,
-		definition:  candidate.Definition,
+		definition:  definition,
 		lease:       candidate.Lease,
 		metadata:    metadata,
 		fingerprint: sha256.Sum256(nonce[:]),
