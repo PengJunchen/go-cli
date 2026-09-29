@@ -149,8 +149,14 @@ type App interface {
 	// Run consumes events until the associated context is canceled, the event
 	// channel closes, or Quit is called. It returns the loop's stopping error.
 	Run(ctx context.Context) error
-	// Send enqueues a message for the render loop to process.
-	Send(msg Msg)
+	// Send enqueues a message for the render loop to process, returning an
+	// inspectable error if the bounded queue is full or the app is stopping.
+	Send(msg Msg) error
+	// CriticalSendContext enqueues a critical message, waiting for queue space
+	// while the current app run remains active and ctx is not canceled.
+	CriticalSendContext(ctx context.Context, msg Msg) error
+	// LocalSendGapCount reports messages rejected by the local TUI queue.
+	LocalSendGapCount() uint64
 	// Quit requests a graceful stop of the render loop.
 	Quit()
 }
@@ -312,6 +318,13 @@ type BubbleteaApp struct {
 
 	// done closes once Run has fully cleaned up and exited.
 	done chan struct{}
+	// queueSpace receives a coalesced notification after the render loop takes
+	// a queued message, allowing critical senders to wait without polling.
+	queueSpace chan struct{}
+	// sendMu protects send admission and the active run/quit state.
+	sendMu        sync.Mutex
+	activeRunDone <-chan struct{}
+	quitRequested bool
 
 	// quitOnce guards the quit channel so Quit is idempotent.
 	quitOnce sync.Once
@@ -370,6 +383,7 @@ func NewBubbleteaApp(events <-chan AgentEvent, opts ...AppOption) *BubbleteaApp 
 		themeMgr:     NewThemeManager(),
 		events:       events,
 		done:         make(chan struct{}),
+		queueSpace:   make(chan struct{}, 1),
 		quitCh:       make(chan struct{}),
 		programReady: make(chan struct{}),
 		interactive:  isTerminal(),
@@ -404,13 +418,19 @@ func (a *BubbleteaApp) Run(ctx context.Context) error {
 	// passed to the program as its context so context cancellation propagates
 	// to the event loop.
 	runCtx, cancelRun := context.WithCancel(ctx)
-	defer cancelRun()
 	defer func() {
+		cancelRun()
+		a.sendMu.Lock()
+		a.activeRunDone = nil
 		a.running.Store(false)
+		a.sendMu.Unlock()
 		a.program.Store(nil)
 		a.cleanup()
 	}()
 
+	a.sendMu.Lock()
+	a.activeRunDone = runCtx.Done()
+	a.sendMu.Unlock()
 	a.model.runDone = runCtx.Done()
 	prog := tea.NewProgram(a.model, a.programOptions(runCtx)...)
 	a.program.Store(prog)
@@ -443,18 +463,15 @@ func (a *BubbleteaApp) programOptions(ctx context.Context) []tea.ProgramOption {
 	return opts
 }
 
-// Send pushes a message into the model's message queue, dropping it if the
-// queue is full so a slow renderer never blocks the producer. It is safe to
-// call before Run starts; the queued message is drained once the program's
-// event loop begins.
-func (a *BubbleteaApp) Send(msg Msg) {
-	a.model.send(msg)
-}
-
 // Quit requests a graceful stop of the render loop. It is safe to call
 // multiple times and from any goroutine.
 func (a *BubbleteaApp) Quit() {
-	a.quitOnce.Do(func() { close(a.quitCh) })
+	a.quitOnce.Do(func() {
+		a.sendMu.Lock()
+		a.quitRequested = true
+		close(a.quitCh)
+		a.sendMu.Unlock()
+	})
 	slog.Debug("tui.app.quit", "requested", true)
 }
 
@@ -485,6 +502,12 @@ func (a *BubbleteaApp) EventsProcessed() int64 { return a.model.eventsSeen.Load(
 
 // MessagesProcessed reports how many messages the loop has consumed via Send.
 func (a *BubbleteaApp) MessagesProcessed() int64 { return a.model.msgsSeen.Load() }
+
+// LocalSendGapCount reports messages rejected by the local TUI message queue.
+// It is independent of any event-gap count reported by Core.
+func (a *BubbleteaApp) LocalSendGapCount() uint64 {
+	return a.model.localSendGapCount.Load()
+}
 
 // View returns the current rendered view. It is safe for concurrent callers and
 // delegates to the model under its mutex. In interactive mode the accordion
@@ -530,9 +553,10 @@ type teaModel struct {
 	interactive bool
 
 	// event / message sources
-	events <-chan AgentEvent
-	msgCh  chan Msg
-	quitCh <-chan struct{}
+	events     <-chan AgentEvent
+	msgCh      chan Msg
+	queueSpace chan<- struct{}
+	quitCh     <-chan struct{}
 	// runDone is closed (via runCtx cancellation) when the current Run exits,
 	// unblocking lingering waitForEvent/waitForMsg command goroutines so they
 	// do not leak. It is nil when the model is exercised without a program.
@@ -616,9 +640,10 @@ type teaModel struct {
 	// concurrency: guards all mutable state above. Update runs single-threaded
 	// inside bubbletea, but external callers (tests, View) access the model
 	// concurrently, so the mutex serializes View against in-flight updates.
-	mu         sync.Mutex
-	eventsSeen atomic.Int64
-	msgsSeen   atomic.Int64
+	mu                sync.Mutex
+	eventsSeen        atomic.Int64
+	msgsSeen          atomic.Int64
+	localSendGapCount atomic.Uint64
 }
 
 // newTeaModel builds a teaModel from the option fields already applied to the
@@ -631,6 +656,7 @@ func newTeaModel(a *BubbleteaApp) *teaModel {
 		interactive:        a.interactive,
 		events:             a.events,
 		msgCh:              make(chan Msg, 16),
+		queueSpace:         a.queueSpace,
 		quitCh:             a.quitCh,
 		streamBuf:          make(map[string]*strings.Builder),
 		accordion:          NewAccordionModel(),
@@ -659,7 +685,7 @@ func (m *teaModel) Init() tea.Cmd {
 	done := m.runDone
 	cmds := []tea.Cmd{
 		waitForEvent(m.events, done),
-		waitForMsg(m.msgCh, done),
+		waitForMsg(m.msgCh, done, m.queueSpace),
 		waitForQuit(m.quitCh, done),
 	}
 	if m.approvalCh != nil {
@@ -772,11 +798,11 @@ func (m *teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.mu.Unlock()
 		m.notify(view)
-		return m, waitForMsg(m.msgCh, m.runDone)
+		return m, waitForMsg(m.msgCh, m.runDone, m.queueSpace)
 	default:
 		// A message pushed via Send that is not a recognized tea message.
 		m.msgsSeen.Add(1)
-		return m, waitForMsg(m.msgCh, m.runDone)
+		return m, waitForMsg(m.msgCh, m.runDone, m.queueSpace)
 	}
 }
 
@@ -815,12 +841,12 @@ func renderInputWithCaret(input string, cursor int) string {
 
 func (m *teaModel) renderViewLocked() string {
 	if current := m.activeInteraction; current != nil && current.approval != nil {
-		return m.renderApprovalInteractionLocked(current)
+		return m.withLocalSendGapNotice(m.renderApprovalInteractionLocked(current))
 	}
 	// When the help overlay is open, render it instead of the normal view.
 	// Agent event flow is unaffected — only UI rendering is redirected.
 	if m.helpOverlay {
-		return m.renderHelpOverlay()
+		return m.withLocalSendGapNotice(m.renderHelpOverlay())
 	}
 	var sb strings.Builder
 
@@ -916,7 +942,18 @@ func (m *teaModel) renderViewLocked() string {
 	if m.quitting {
 		sb.WriteString("\n[quitting...]")
 	}
-	return sb.String()
+	return m.withLocalSendGapNotice(sb.String())
+}
+
+func (m *teaModel) withLocalSendGapNotice(view string) string {
+	count := m.localSendGapCount.Load()
+	if count == 0 {
+		return view
+	}
+	if view != "" {
+		view += "\n"
+	}
+	return view + fmt.Sprintf("[Local TUI queue gaps: %d messages not delivered]", count)
 }
 
 func (m *teaModel) renderApprovalInteractionLocked(current *pendingInteraction) string {
@@ -1181,12 +1218,16 @@ func waitForEvent(events <-chan AgentEvent, done <-chan struct{}) tea.Cmd {
 // waitForMsg returns a tea.Cmd that blocks until a message is pushed via Send.
 // When the message channel closes it returns tea.Quit. When done closes it
 // returns nil so the command goroutine can exit instead of leaking.
-func waitForMsg(ch chan Msg, done <-chan struct{}) tea.Cmd {
+func waitForMsg(ch chan Msg, done <-chan struct{}, queueSpace chan<- struct{}) tea.Cmd {
 	return func() tea.Msg {
 		select {
 		case msg, ok := <-ch:
 			if !ok {
 				return tea.Quit()
+			}
+			select {
+			case queueSpace <- struct{}{}:
+			default:
 			}
 			return tea.Msg(msg)
 		case <-done:
@@ -1208,15 +1249,6 @@ func waitForQuit(ch <-chan struct{}, done <-chan struct{}) tea.Cmd {
 		case <-done:
 			return nil
 		}
-	}
-}
-
-// send pushes a message onto the model's queue, dropping it when full so a slow
-// consumer never blocks the producer.
-func (m *teaModel) send(msg Msg) {
-	select {
-	case m.msgCh <- msg:
-	default:
 	}
 }
 

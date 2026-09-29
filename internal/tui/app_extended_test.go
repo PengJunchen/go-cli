@@ -48,30 +48,24 @@ func TestIsStreamingRenderContentType(t *testing.T) {
 	assert.False(t, isStreamingRenderContentType(ContentTypeToolCall))
 }
 
-// TestAppSendDropsWhenFull verifies Send drops a message rather than blocking
-// when the internal queue is saturated. It must never block the caller.
-func TestAppSendDropsWhenFull(t *testing.T) {
+// TestAppSendReturnsQueueFull verifies Send reports saturation without
+// blocking the caller.
+func TestAppSendReturnsQueueFull(t *testing.T) {
 	app := NewBubbleteaApp(make(chan AgentEvent, 1))
 	ch := app.model.msgCh
 	require.Len(t, ch, 0)
 
 	// Fill the buffered (capacity 16) queue completely.
 	for i := 0; i < cap(ch); i++ {
-		app.Send(i)
+		require.NoError(t, app.Send(i))
 	}
 	require.Len(t, ch, cap(ch))
 
-	// The next Send must drop (default branch) without blocking.
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		app.Send("overflow")
-	}()
-	select {
-	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("Send blocked on a full queue; expected non-blocking drop")
-	}
+	// The next Send reports the rejected message immediately.
+	start := time.Now()
+	err := app.Send("overflow")
+	require.ErrorIs(t, err, ErrSendQueueFull)
+	require.Less(t, time.Since(start), time.Second)
 	assert.Len(t, ch, cap(ch), "overflow message should have been dropped")
 }
 
@@ -166,8 +160,8 @@ func TestAppSendAndEventsBothConsumed(t *testing.T) {
 	go func() { runErr <- app.Run(context.Background()) }() //nolint:errcheck
 
 	events <- AgentEvent{ContentType: ContentTypeCode, Content: "x"}
-	app.Send("msg1")
-	app.Send("msg2")
+	require.NoError(t, app.Send("msg1"))
+	require.NoError(t, app.Send("msg2"))
 	events <- AgentEvent{ContentType: ContentTypeCode, Content: "y"}
 
 	require.Eventually(t, func() bool {
