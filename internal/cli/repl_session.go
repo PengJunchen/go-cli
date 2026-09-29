@@ -789,22 +789,12 @@ func (s *REPLSession) executeTurn() error {
 		}
 	}
 	interrupted := s.turnCtx.Err() != nil
-	s.finishTurnSpan(nil)
 	s.cancelTurn()
 	s.interrupter.Stop()
 	s.stopTUI()
 
-	if s.assembly.durableSession != nil && !durableTurnIsJoinable(s.turnResult) {
-		status := s.turnResult
-		if status.StatusHandle != nil {
-			fresh := status.StatusHandle.Snapshot()
-			status.Outcome = fresh.Outcome
-			status.ExecutionState = fresh.ExecutionState
-		}
-		return fmt.Errorf("interactive: durable run did not reach a known joined terminal state (outcome=%s execution=%s)", status.Outcome, status.ExecutionState)
-	}
-	if s.assembly.durableSession != nil && s.turnResult.DurablePublication.State == core.DurablePublicationFailed {
-		return errors.New("interactive: durable run finished without positive transcript publication")
+	if err := s.finishTurnSpanAfterCompletion(interrupted); err != nil {
+		return err
 	}
 
 	if s.turnErr != nil && !interrupted {
@@ -917,6 +907,32 @@ func (s *REPLSession) finishTurnSpan(err error) {
 		s.turnSpan.SetStatus(tracing.SpanStatusOK, "")
 	}
 	s.turnSpan.End()
+}
+
+func (s *REPLSession) finishTurnSpanAfterCompletion(interrupted bool) error {
+	var completionErr error
+	if s.assembly.durableSession != nil && !durableTurnIsJoinable(s.turnResult) {
+		status := s.turnResult
+		if status.StatusHandle != nil {
+			fresh := status.StatusHandle.Snapshot()
+			status.Outcome = fresh.Outcome
+			status.ExecutionState = fresh.ExecutionState
+		}
+		completionErr = fmt.Errorf("interactive: durable run did not reach a known joined terminal state (outcome=%s execution=%s)", status.Outcome, status.ExecutionState)
+	} else if s.assembly.durableSession != nil && s.turnResult.DurablePublication.State == core.DurablePublicationFailed {
+		completionErr = errors.New("interactive: durable run finished without positive transcript publication")
+	}
+
+	spanErr := completionErr
+	if spanErr == nil {
+		if s.turnErr != nil {
+			spanErr = s.turnErr
+		} else if interrupted {
+			spanErr = context.Canceled
+		}
+	}
+	s.finishTurnSpan(spanErr)
+	return completionErr
 }
 
 func durableTurnIsJoinable(result core.Result) bool {

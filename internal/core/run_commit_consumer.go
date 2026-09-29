@@ -151,6 +151,9 @@ func dispatchPreparedRunCommitCall(ctx context.Context, invocation tools.Prepare
 }
 
 func sourceTruncatedFromMetadata(metadata map[string]any) *bool {
+	// This preserves only a tool-reported structured fact from the exact
+	// prepared invocation. Transcript text, previews, and restored unknown
+	// metadata never synthesize a truncation value.
 	value, ok := metadata["truncated"].(bool)
 	if !ok {
 		return nil
@@ -430,6 +433,22 @@ func (consumer *runCommitConsumer) recordActionReceipt(taskID uint64, ordinal ui
 	return consumer.recordTaskReceipt(taskID, receipt)
 }
 
+func markLatestToolReceiptUnknown(messages *[]llm.Message, transcript *[]TranscriptEntry) {
+	if messages != nil && len(*messages) > 0 {
+		message := &(*messages)[len(*messages)-1]
+		if message.Role == llm.RoleTool {
+			message.Runtime.ReceiptOutcome = ReceiptOutcomeUnknown
+		}
+	}
+	if transcript != nil && len(*transcript) > 0 {
+		entry := &(*transcript)[len(*transcript)-1]
+		if entry.Message.Role == string(llm.RoleTool) {
+			entry.Message.ReceiptOutcome = ReceiptOutcomeUnknown
+			entry.Message.Runtime.ReceiptOutcome = ReceiptOutcomeUnknown
+		}
+	}
+}
+
 func (consumer *runCommitConsumer) prepareInvocation(ctx context.Context, registry tools.ToolRegistry, call llm.ToolCall, stream EventStream) (tools.PreparedInvocation, tools.SynchronousStreamSink, error) {
 	if call.Name == "dispatch_subagent" {
 		return nil, nil, ErrRunCommitChildUnsupported
@@ -554,7 +573,9 @@ func (consumer *runCommitConsumer) executeSequentialCall(
 		sourceTruncated: cloneOptionalBool(dispatch.sourceTruncated),
 	}
 	if err := consumer.recordActionReceipt(taskID, ordinal, intent, dispatchState, index, (*transcript)[len(*transcript)-1]); err != nil {
+		markLatestToolReceiptUnknown(messages, transcript)
 		toolResult.isError = true
+		toolResult.outcome = ReceiptOutcomeUnknown
 		return toolResult, err
 	}
 	if !dispatch.committed {
@@ -818,6 +839,7 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 		(*transcript)[len(*transcript)-1].SourceTruncated = cloneOptionalBool(dispatch.sourceTruncated)
 		entry := (*transcript)[len(*transcript)-1]
 		if err := consumer.recordActionReceipt(action.taskID, ordinal, action.intent, dispatchState, transcriptIndex, entry); err != nil {
+			markLatestToolReceiptUnknown(messages, transcript)
 			return err
 		}
 		if outcome == ReceiptOutcomeUnknown {

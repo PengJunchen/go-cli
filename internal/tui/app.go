@@ -1262,7 +1262,7 @@ func (m *teaModel) durablePublicationIsSavedLocked() bool {
 		publication.SessionID != "" && publication.SessionID == m.transcriptSnapshot.PhysicalSessionID &&
 		publication.OwnerGeneration != "" && publication.OwnerGeneration == observation.OwnerGeneration &&
 		observation.ExecutionState == core.RunExecutionQuiescent &&
-		observation.Outcome != core.RunOutcomeUnknown && observation.TerminalEntryID != "" &&
+		observation.Outcome == core.RunOutcomeSuccess && observation.EventGapCount == 0 && observation.TerminalEntryID != "" &&
 		observation.TerminalOutcome == observation.Outcome
 }
 

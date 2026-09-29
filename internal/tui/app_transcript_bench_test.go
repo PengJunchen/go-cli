@@ -98,6 +98,63 @@ func BenchmarkBubbleTeaTranscriptUpdateView(b *testing.B) {
 	}
 }
 
+// BenchmarkBubbleTeaLongTranscriptProjectionRetainedHeap measures the extra
+// retained memory needed to construct a 10k-row viewport from 8 KiB source
+// rows. Source bodies are distinct so the measurement includes real loaded
+// transcript text rather than repeated string aliases.
+func BenchmarkBubbleTeaLongTranscriptProjectionRetainedHeap(b *testing.B) {
+	const rowCount = 10_000
+	const bodyBytes = 8 << 10
+	body := strings.Repeat("x", bodyBytes-8)
+	b.ReportAllocs()
+	b.ResetTimer()
+	for operation := 0; operation < b.N; operation++ {
+		snapshot := benchmarkLongTranscriptSnapshot(rowCount, bodyBytes, body)
+		runtime.GC()
+		var before runtime.MemStats
+		runtime.ReadMemStats(&before)
+		app, err := NewBubbleteaAppWithTranscript(nil, snapshot, WithWidth(80))
+		if err != nil {
+			b.Fatal(err)
+		}
+		app.model.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
+		_ = app.View()
+		runtime.GC()
+		var after runtime.MemStats
+		runtime.ReadMemStats(&after)
+		runtime.KeepAlive(snapshot)
+		runtime.KeepAlive(app)
+		b.ReportMetric(float64(after.HeapAlloc-before.HeapAlloc), "projection_retained_B")
+		b.ReportMetric(float64(after.HeapAlloc), "total_heap_B")
+	}
+}
+
+func benchmarkLongTranscriptSnapshot(rowCount, bodyBytes int, body string) CanonicalTranscriptSnapshot {
+	snapshot := CanonicalTranscriptSnapshot{
+		PhysicalSessionID: "benchmark-long-session",
+		BranchID:          "benchmark-long-branch",
+		Revision:          "benchmark-long-revision",
+		Rows:              make([]CanonicalTranscriptRow, 0, rowCount),
+	}
+	for index := 0; index < rowCount; index++ {
+		content := fmt.Sprintf("%08d%s", index, body)
+		if len(content) != bodyBytes {
+			panic("benchmark long transcript row has an unexpected size")
+		}
+		snapshot.Rows = append(snapshot.Rows, CanonicalTranscriptRow{
+			Key: DurableTranscriptKey{
+				PhysicalSessionID: snapshot.PhysicalSessionID,
+				BranchID:          snapshot.BranchID,
+				EntryID:           fmt.Sprintf("long-entry-%05d", index),
+			},
+			Kind:      TranscriptRowAssistant,
+			Message:   core.AgentMessage{Role: "assistant", Content: content},
+			SourceSeq: uint64(index + 1),
+		})
+	}
+	return snapshot
+}
+
 func newBenchmarkBubbleteaApp(b *testing.B, historyRows int) *BubbleteaApp {
 	b.Helper()
 	app, err := NewBubbleteaAppWithTranscript(nil, benchmarkTranscriptSnapshot(historyRows), WithWidth(80))
