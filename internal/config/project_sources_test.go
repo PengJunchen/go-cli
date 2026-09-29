@@ -4,6 +4,7 @@ import (
 	"context"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -148,6 +149,124 @@ func TestCaptureProjectSourcesRejectsOutOfRootReferencesAndSymlinks(t *testing.T
 	require.ErrorIs(t, err, ErrProjectSourceSymlink)
 }
 
+func TestCaptureProjectSourcesResolvesRelativePATHFromExecutionDirectory(t *testing.T) {
+	root := t.TempDir()
+	executionDir := t.TempDir()
+	binDir := filepath.Join(executionDir, "bin")
+	require.NoError(t, os.MkdirAll(binDir, 0o700))
+	executable := filepath.Join(binDir, "project-mcp")
+	require.NoError(t, os.WriteFile(executable, []byte("outside executable"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".go-cli.json"), []byte(`{"mcp":{"servers":[{"name":"server","command":"project-mcp"}]}}`), 0o600))
+	t.Setenv("PATH", "bin")
+	chdir(t, executionDir)
+
+	_, err := lookPathExecutable(context.Background(), "project-mcp")
+	require.ErrorIs(t, err, exec.ErrDot, "relative PATH results must retain Go exec.Command's fail-closed behavior")
+	command := exec.Command("project-mcp")
+	_, err = command.CombinedOutput()
+	require.ErrorIs(t, err, exec.ErrDot, "the executable fixture must match actual exec.Command behavior")
+
+	_, err = CaptureProjectSources(context.Background(), root, nil)
+	require.ErrorIs(t, err, ErrProjectSourceOutsideRoot, "a relative PATH result must not become an absent in-root reference")
+}
+
+func TestCaptureProjectSourcesIncludesConfiguredLSPServerCommands(t *testing.T) {
+	root := t.TempDir()
+	workspace := filepath.Join(root, "lsp-workspace")
+	workspaceBin := filepath.Join(workspace, "bin")
+	processBin := filepath.Join(root, "bin")
+	require.NoError(t, os.MkdirAll(workspaceBin, 0o700))
+	require.NoError(t, os.MkdirAll(processBin, 0o700))
+	writeExecutable := func(path, output string) {
+		t.Helper()
+		content := []byte("#!/bin/sh\nprintf '%s\\n' '" + output + "'\n")
+		require.NoError(t, os.WriteFile(path, content, 0o700))
+	}
+	writeExecutable(filepath.Join(workspaceBin, "gopls"), "workspace gopls")
+	writeExecutable(filepath.Join(workspaceBin, "tsserver"), "workspace tsserver")
+	writeExecutable(filepath.Join(processBin, "gopls"), "process cwd gopls decoy")
+	writeExecutable(filepath.Join(processBin, "tsserver"), "process cwd tsserver decoy")
+	config := `{"lsp":{"servers":[{"server_command":["./bin/gopls","serve"],"workspace_root":"lsp-workspace","file_extensions":["go"]},{"server_command":["./bin/tsserver"],"workspace_root":"lsp-workspace","file_extensions":["ts"]}]}}`
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".go-cli.json"), []byte(config), 0o600))
+	chdir(t, root)
+
+	command := exec.Command("./bin/gopls", "serve")
+	command.Dir = workspace
+	output, err := command.CombinedOutput()
+	require.NoError(t, err, "LSP executable paths are resolved after Cmd.Dir is applied")
+	assert.Equal(t, "workspace gopls\n", string(output))
+
+	snapshot, err := CaptureProjectSources(context.Background(), root, nil)
+	require.NoError(t, err)
+	for id, want := range map[string]string{
+		"lsp-command/lsp-workspace/bin/gopls":    "workspace gopls",
+		"lsp-command/lsp-workspace/bin/tsserver": "workspace tsserver",
+	} {
+		got, present := snapshot.SourceBytes(id)
+		require.Truef(t, present, "LSP server executable %s should be bound", id)
+		assert.Contains(t, string(got), want)
+	}
+
+	externalDir := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(externalDir, "bin"), 0o700))
+	writeExecutable(filepath.Join(externalDir, "bin", "external-lsp"), "external executable")
+	config = `{"lsp":{"servers":[{"server_command":["./bin/external-lsp"],"workspace_root":"` + filepath.ToSlash(externalDir) + `"}]}}`
+	require.NoError(t, os.WriteFile(filepath.Join(root, ".go-cli.json"), []byte(config), 0o600))
+	_, err = CaptureProjectSources(context.Background(), root, nil)
+	require.ErrorIs(t, err, ErrProjectSourceOutsideRoot, "external LSP executable must prevent project trust")
+}
+
+func TestCaptureProjectSourcesMatchesCustomToolExecutionDirectory(t *testing.T) {
+	root := t.TempDir()
+	workDir := filepath.Join(root, "workdir")
+	processBin := filepath.Join(root, "bin")
+	workBin := filepath.Join(workDir, "bin")
+	require.NoError(t, os.MkdirAll(processBin, 0o700))
+	require.NoError(t, os.MkdirAll(workBin, 0o700))
+	writeExecutable := func(path, output string) {
+		t.Helper()
+		content := []byte("#!/bin/sh\nprintf '%s\\n' '" + output + "'\n")
+		require.NoError(t, os.WriteFile(path, content, 0o700))
+	}
+	writeExecutable(filepath.Join(processBin, "path-tool"), "process PATH executable")
+	writeExecutable(filepath.Join(workBin, "path-tool"), "working-directory PATH executable")
+	writeExecutable(filepath.Join(root, "bin", "slash-tool"), "process cwd slash executable")
+	writeExecutable(filepath.Join(workBin, "slash-tool"), "working-directory slash executable")
+	configPath := filepath.Join(root, ".go-cli.json")
+	config := `{"tools":{"custom_tools":[{"name":"slash","command":["./bin/slash-tool"],"working_dir":"workdir"}]}}`
+	require.NoError(t, os.WriteFile(configPath, []byte(config), 0o600))
+	t.Setenv("PATH", "bin")
+	chdir(t, root)
+
+	cmd := exec.Command("./bin/slash-tool")
+	cmd.Dir = "workdir"
+	output, err := cmd.CombinedOutput()
+	require.NoError(t, err, "a relative slash path is resolved after exec.Cmd applies its configured working directory")
+	assert.Equal(t, "working-directory slash executable\n", string(output))
+
+	snapshot, err := CaptureProjectSources(context.Background(), root, nil)
+	require.NoError(t, err)
+	data, present := snapshot.SourceBytes("custom-tools/workdir/bin/slash-tool")
+	require.True(t, present, "the custom tool executable resolved from WorkingDir should be bound")
+	assert.Contains(t, string(data), "working-directory slash executable")
+
+	config = `{"tools":{"custom_tools":[{"name":"path","command":["path-tool"],"working_dir":"workdir"}]}}`
+	require.NoError(t, os.WriteFile(configPath, []byte(config), 0o600))
+	cmd = exec.Command("path-tool")
+	cmd.Dir = "workdir"
+	_, err = cmd.CombinedOutput()
+	require.ErrorIs(t, err, exec.ErrDot, "Go rejects the relative PATH result before applying Cmd.Dir")
+	_, err = CaptureProjectSources(context.Background(), root, nil)
+	require.ErrorIs(t, err, ErrProjectSourceOutsideRoot, "relative PATH must remain untrusted instead of capturing guessed bytes")
+
+	externalDir := t.TempDir()
+	writeExecutable(filepath.Join(externalDir, "outside-tool"), "outside executable")
+	config = `{"tools":{"custom_tools":[{"name":"outside","command":["./outside-tool"],"working_dir":"` + filepath.ToSlash(externalDir) + `"}]}}`
+	require.NoError(t, os.WriteFile(configPath, []byte(config), 0o600))
+	_, err = CaptureProjectSources(context.Background(), root, nil)
+	require.ErrorIs(t, err, ErrProjectSourceOutsideRoot, "a relative command executed from an external WorkingDir must not become an absent in-root reference")
+}
+
 func TestCaptureProjectSourcesIncludesCommandsReferencedByProjectMCPSource(t *testing.T) {
 	root := t.TempDir()
 	binDir := filepath.Join(root, "bin")
@@ -157,6 +276,7 @@ func TestCaptureProjectSourcesIncludesCommandsReferencedByProjectMCPSource(t *te
 	require.NoError(t, os.WriteFile(filepath.Join(binDir, "map-server"), []byte("map executable"), 0o700))
 	mcpBytes := []byte(`{"servers":[{"name":"array","command":"./bin/array-server"}],"mcpServers":{"map":{"command":"bin/map-server"}}}`)
 	require.NoError(t, os.WriteFile(filepath.Join(root, ".go-cli", "mcp.json"), mcpBytes, 0o600))
+	chdir(t, root)
 
 	snapshot, err := CaptureProjectSources(context.Background(), root, nil)
 	require.NoError(t, err)
@@ -322,8 +442,11 @@ func TestLoadTrustedWithManagerPreservesGlobalAndProjectMCPProvenance(t *testing
 	projectOnly := cfg.ProjectOverlayForVerifiedSources()
 	require.NotNil(t, projectOnly)
 	assert.Equal(t, []string{"project"}, mcpNames(projectOnly.MCP.Servers))
+	assert.Equal(t, MCPServersFromProject, projectOnly.MCPServersProvenance())
 	projectOnly.MCP.Servers[0].Name = "mutated project copy"
-	assert.Equal(t, []string{"project"}, mcpNames(cfg.ProjectOverlayForVerifiedSources().MCP.Servers))
+	projectCopyAgain := cfg.ProjectOverlayForVerifiedSources()
+	assert.Equal(t, []string{"project"}, mcpNames(projectCopyAgain.MCP.Servers))
+	assert.Equal(t, MCPServersFromProject, projectCopyAgain.MCPServersProvenance())
 
 	projectBytes, ok := verified.SourceBytes("config/.go-cli.json")
 	require.True(t, ok)

@@ -204,5 +204,6 @@ func cloneConfigValues(source *Config) *Config {
 	clone.SmallModel.temperatureSet = source.SmallModel.temperatureSet
 	clone.SmallModel.maxTokensSet = source.SmallModel.maxTokensSet
 	clone.ProjectSourceTrustStatus = source.ProjectSourceTrustStatus
+	clone.mcpServersProvenance = source.mcpServersProvenance
 	return &clone
 }
