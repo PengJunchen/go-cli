@@ -188,7 +188,9 @@ func TestProjectSourceManifestPersistsAcrossTrustManagers(t *testing.T) {
 func TestProjectSourceStoreCorruptionFailsClosed(t *testing.T) {
 	root := t.TempDir()
 	snapshot := testProjectSnapshot(t, root, []byte("config"), nil, nil)
-	storePath := filepath.Join(t.TempDir(), "trust.json")
+	storeDir := t.TempDir()
+	require.NoError(t, os.Chmod(storeDir, 0o700))
+	storePath := filepath.Join(storeDir, "trust.json")
 	require.NoError(t, os.WriteFile(storePath, []byte("{"), 0o600))
 	manager := NewDefaultTrustManager(NewFileTrustStore(storePath))
 	verified, err := manager.(FrozenProjectSourceTrust).CheckProjectSourceSnapshot(context.Background(), snapshot)

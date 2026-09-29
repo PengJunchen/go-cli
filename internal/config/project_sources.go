@@ -320,27 +320,35 @@ func captureConfigReferences(capture *sourceCapture, cfg *Config, projectLayer b
 	}
 	for _, tool := range cfg.Tools.CustomTools {
 		if len(tool.Command) > 0 {
-			if err := captureCommandReference(capture, "custom-tools", tool.Command[0], projectLayer); err != nil {
+			if err := captureCommandReference(capture, "custom-tools", tool.Command[0], tool.WorkingDir, projectLayer); err != nil {
 				return err
 			}
 		}
 	}
 	for _, server := range cfg.MCP.Servers {
 		if server.Command != "" {
-			if err := captureCommandReference(capture, "mcp-command", server.Command, projectLayer); err != nil {
+			if err := captureCommandReference(capture, "mcp-command", server.Command, "", projectLayer); err != nil {
 				return err
 			}
 		}
 	}
 	if len(cfg.LSP.ServerCommand) > 0 {
-		if err := captureCommandReference(capture, "lsp-command", cfg.LSP.ServerCommand[0], projectLayer); err != nil {
+		if err := captureCommandReference(capture, "lsp-command", cfg.LSP.ServerCommand[0], cfg.LSP.WorkspaceRoot, projectLayer); err != nil {
+			return err
+		}
+	}
+	for _, server := range cfg.LSP.Servers {
+		if len(server.ServerCommand) == 0 {
+			continue
+		}
+		if err := captureCommandReference(capture, "lsp-command", server.ServerCommand[0], server.WorkspaceRoot, projectLayer); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func captureCommandReference(capture *sourceCapture, category, command string, projectLayer bool) error {
+func captureCommandReference(capture *sourceCapture, category, command, workingDir string, projectLayer bool) error {
 	if command == "" {
 		return nil
 	}
@@ -370,6 +378,12 @@ func captureCommandReference(capture *sourceCapture, category, command string, p
 			}
 			command = resolved
 		}
+	} else if !filepath.IsAbs(command) {
+		workingDirectory, err := commandExecutionDirectory(workingDir)
+		if err != nil {
+			return fmt.Errorf("config: resolve command working directory: %w", err)
+		}
+		command = filepath.Join(workingDirectory, command)
 	}
 	return captureReferencedPath(capture, category, command, sourceExtensionDirectory, projectLayer)
 }
@@ -396,10 +410,39 @@ func lookPathExecutable(ctx context.Context, command string) (string, error) {
 		}
 		resolved, err := exec.LookPath(candidate)
 		if err == nil {
-			return resolved, nil
+			// exec.Command rejects a relative path found through PATH with
+			// exec.ErrDot. Preserve that fail-closed behavior here instead of
+			// binding bytes from a guessed working directory.
+			if !filepath.IsAbs(resolved) {
+				return "", exec.ErrDot
+			}
+			absolute, absErr := filepath.Abs(resolved)
+			if absErr != nil {
+				return "", fmt.Errorf("config: make PATH executable absolute: %w", absErr)
+			}
+			return filepath.Clean(absolute), nil
 		}
 	}
 	return "", exec.ErrNotFound
+}
+
+func commandExecutionDirectory(workingDir string) (string, error) {
+	workingDirectory, err := os.Getwd()
+	if err != nil {
+		return "", fmt.Errorf("config: get process working directory: %w", err)
+	}
+	if workingDir != "" {
+		if filepath.IsAbs(workingDir) {
+			workingDirectory = workingDir
+		} else {
+			workingDirectory = filepath.Join(workingDirectory, workingDir)
+		}
+	}
+	absolute, err := filepath.Abs(workingDirectory)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(absolute), nil
 }
 
 func resolvedWithinRoot(capture *sourceCapture, resolved string) (bool, error) {

@@ -2,7 +2,10 @@ package approval
 
 import (
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
+	"path/filepath"
 	"sync"
 
 	"github.com/pengjunchen/go-cli/internal/privatefile"
@@ -114,11 +117,14 @@ func (s *FileTrustStore) Remove(path string) error {
 // loadLocked reads and decodes the trust file. Callers must hold the lock. A
 // missing file is not an error and yields an empty map.
 func (s *FileTrustStore) loadLocked() (map[string]TrustEntry, error) {
-	data, err := os.ReadFile(s.path)
-	if err != nil {
+	if _, err := os.Lstat(s.path); err != nil {
 		if os.IsNotExist(err) {
 			return make(map[string]TrustEntry), nil
 		}
+		return nil, err
+	}
+	data, err := readPrivateTrustFile(s.path)
+	if err != nil {
 		return nil, err
 	}
 
@@ -130,6 +136,76 @@ func (s *FileTrustStore) loadLocked() (map[string]TrustEntry, error) {
 		return nil, err
 	}
 	return entries, nil
+}
+
+// readPrivateTrustFile returns bytes only from a current-user-owned, private
+// regular file in a current-user-owned, non-replaceable parent directory. The
+// opened file is checked against the path before reading to reject symlinks
+// and replacement races.
+func readPrivateTrustFile(path string) ([]byte, error) {
+	parent := filepath.Dir(path)
+	parentInfo, err := os.Lstat(parent)
+	if err != nil {
+		return nil, fmt.Errorf("approval: inspect trust store parent: %w", err)
+	}
+	if parentInfo.Mode()&os.ModeSymlink != 0 || !parentInfo.IsDir() {
+		return nil, fmt.Errorf("approval: trust store parent %s must be a directory", parent)
+	}
+	if parentInfo.Mode().Perm()&0o077 != 0 {
+		return nil, fmt.Errorf("approval: trust store parent %s is accessible by group or others", parent)
+	}
+	if err := validateFileOwner(parentInfo, parent); err != nil {
+		return nil, fmt.Errorf("approval: insecure trust store parent: %w", err)
+	}
+
+	pathInfo, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("approval: inspect trust store file: %w", err)
+	}
+	if pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() {
+		return nil, fmt.Errorf("approval: trust store %s must be a regular file", path)
+	}
+	if pathInfo.Mode().Perm() != 0o600 {
+		return nil, fmt.Errorf("approval: trust store %s has permissions %o, expected 0600", path, pathInfo.Mode().Perm())
+	}
+	if err := validateFileOwner(pathInfo, path); err != nil {
+		return nil, fmt.Errorf("approval: insecure trust store file: %w", err)
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("approval: open trust store: %w", err)
+	}
+	openedInfo, statErr := file.Stat()
+	currentInfo, pathErr := os.Lstat(path)
+	if statErr != nil || pathErr != nil {
+		_ = file.Close()
+		if statErr != nil {
+			return nil, fmt.Errorf("approval: stat opened trust store: %w", statErr)
+		}
+		return nil, fmt.Errorf("approval: restat trust store: %w", pathErr)
+	}
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(pathInfo, openedInfo) || !os.SameFile(openedInfo, currentInfo) {
+		_ = file.Close()
+		return nil, fmt.Errorf("approval: trust store %s changed while opening", path)
+	}
+	if openedInfo.Mode().Perm() != 0o600 {
+		_ = file.Close()
+		return nil, fmt.Errorf("approval: trust store %s has permissions %o, expected 0600", path, openedInfo.Mode().Perm())
+	}
+	if err := validateFileOwner(openedInfo, path); err != nil {
+		_ = file.Close()
+		return nil, fmt.Errorf("approval: insecure opened trust store: %w", err)
+	}
+	data, readErr := io.ReadAll(file)
+	closeErr := file.Close()
+	if readErr != nil {
+		return nil, fmt.Errorf("approval: read trust store: %w", readErr)
+	}
+	if closeErr != nil {
+		return nil, fmt.Errorf("approval: close trust store: %w", closeErr)
+	}
+	return data, nil
 }
 
 // writeLocked persists entries atomically. Callers must hold s.mu.
