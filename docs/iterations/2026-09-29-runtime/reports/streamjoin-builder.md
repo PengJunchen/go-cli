@@ -36,3 +36,20 @@ The final integrated worktree passed:
 - `go vet ./internal/llm ./internal/core ./internal/cli` — passed.
 - `golangci-lint run ./internal/llm ./internal/core ./internal/cli` — no issues found.
 - `git diff --check` — passed.
+
+## Independent review follow-up: timeout setup budget and cycler error abort
+
+The two implementation commits above were left intact after an independent review found two additional source defects. Their earlier passing package gates did not cover these cases, so those passes are historical evidence and do not establish acceptance of the reviewed behavior.
+
+The timeout reader previously started its total timer only after `next.Stream` returned. A synchronous provider setup could therefore block past the configured total timeout. The follow-up now creates one deadline context before calling `next.Stream` and keeps that same deadline across setup and chunk forwarding. A configured deadline reaches the source as `LocalStreamAbortCause` wrapping `context.DeadlineExceeded`; an earlier caller cancellation keeps its inherited cause. Setup failures still cancel and drain any returned source channel before returning.
+
+The cycler previously forwarded a successful stream's `Error` chunk and continued reading without canceling the selected attempt. The follow-up forwards that one terminal error, cancels with a typed local cause, drains the same source channel to close, then completes cleanup before closing the output. Existing caller-cancel coverage continues to verify an inherited caller cause stays distinct from a local abort.
+
+Both review probes failed before the fixes for the expected reasons: synchronous timeout setup returned only after external release instead of observing the configured deadline, and the cycler source did not observe cancellation after its error chunk. After the fixes, both review probes passed; additional focused tests verify caller deadlines are not relabeled as local timeouts and caller cancellation remains the first cause when it precedes a source error. The final-target checks passed:
+
+- `GOMAXPROCS=2 go test -p 2 -race -count=1 ./internal/llm ./internal/core ./internal/cli` — 2,258 tests passed across all three packages.
+- `go vet ./internal/llm ./internal/core ./internal/cli` — passed.
+- `golangci-lint run ./internal/llm ./internal/core ./internal/cli` — no issues found.
+- `git diff --check` — passed after the follow-up report and source changes.
+
+The follow-up changed only `internal/llm/middleware_timeout.go`, `internal/llm/middleware_timeout_test.go`, `internal/llm/cycler.go`, and `internal/llm/cycler_stream_test.go` in addition to this report. It does not modify native/provider sources or the breaker/live-detector slice.

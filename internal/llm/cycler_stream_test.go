@@ -352,6 +352,169 @@ func TestStreamCleanupAndOutputCloseWaitForSourceAndCleanup(t *testing.T) {
 	}
 }
 
+func TestStreamErrorChunkCancelsAndJoinsSelectedSource(t *testing.T) {
+	providerErr := errors.New("source failed")
+	sourceRelease := make(chan struct{})
+	releaseSource := sync.OnceFunc(func() { close(sourceRelease) })
+	defer releaseSource()
+	cleanupRelease := make(chan struct{})
+	releaseCleanup := sync.OnceFunc(func() { close(cleanupRelease) })
+	defer releaseCleanup()
+	observedCause := make(chan error, 1)
+	sourceClosed := make(chan struct{})
+	model := &joinSetupModel{streamFn: func(ctx context.Context, _ int32) (<-chan MessageChunk, error) {
+		ch := make(chan MessageChunk, 2)
+		ch <- MessageChunk{Error: providerErr}
+		go func() {
+			select {
+			case <-ctx.Done():
+				observedCause <- context.Cause(ctx)
+				ch <- MessageChunk{Role: RoleAssistant, Content: "late source data"}
+				<-sourceRelease
+			case <-sourceRelease:
+			}
+			close(ch)
+			close(sourceClosed)
+		}()
+		return ch, nil
+	}}
+	cleanupStarted := make(chan struct{})
+	cleanupDone := make(chan struct{})
+	provider := &testStreamProvider{model: model, cleanup: func() {
+		close(cleanupStarted)
+		<-cleanupRelease
+		close(cleanupDone)
+	}}
+	reg := &ProviderRegistry{providers: map[string]ModelProvider{}}
+	require.NoError(t, reg.Register(provider))
+	wrapped := NewModelCycler(ModelCyclerConfig{
+		Models: []ModelEntry{{Provider: "test-stream", Model: "m1"}},
+	}).WithRegistry(reg).WrapModel(&mockModel{})
+	out, err := wrapped.Stream(context.Background(), nil)
+	require.NoError(t, err)
+
+	var terminal MessageChunk
+	select {
+	case terminal = <-out:
+	case <-time.After(time.Second):
+		t.Fatal("cycler did not forward the selected source error")
+	}
+	require.ErrorIs(t, terminal.Error, providerErr)
+	select {
+	case cause := <-observedCause:
+		var localAbort *LocalStreamAbortCause
+		require.ErrorAs(t, cause, &localAbort)
+		require.ErrorIs(t, cause, providerErr)
+	case <-time.After(60 * time.Millisecond):
+		t.Fatal("cycler did not cancel the selected source after its error chunk")
+	}
+	requireChannelOpenUntil(t, out, 20*time.Millisecond)
+	select {
+	case <-cleanupStarted:
+		t.Fatal("cleanup started before the source channel closed")
+	default:
+	}
+	releaseSource()
+	select {
+	case <-sourceClosed:
+	case <-time.After(time.Second):
+		t.Fatal("selected source did not close after release")
+	}
+	select {
+	case <-cleanupStarted:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not start after source close")
+	}
+	requireChannelOpenUntil(t, out, 20*time.Millisecond)
+	releaseCleanup()
+	select {
+	case <-cleanupDone:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not finish after release")
+	}
+
+	terminalCount := 1
+	for chunk := range out {
+		if chunk.Error != nil || chunk.Final {
+			terminalCount++
+			require.ErrorIs(t, chunk.Error, providerErr)
+		}
+		require.NotContains(t, chunk.Content, "late source data", "chunks after the error must be drained, not forwarded")
+	}
+	require.Equal(t, 1, terminalCount, "the source error must remain the single terminal event")
+}
+
+func TestStreamCallerCancelBeforeErrorKeepsCallerCause(t *testing.T) {
+	providerErr := errors.New("late source failure")
+	sourceRelease := make(chan struct{})
+	releaseSource := sync.OnceFunc(func() { close(sourceRelease) })
+	defer releaseSource()
+	cleanupRelease := make(chan struct{})
+	releaseCleanup := sync.OnceFunc(func() { close(cleanupRelease) })
+	defer releaseCleanup()
+	observedCause := make(chan error, 1)
+	sourceClosed := make(chan struct{})
+	model := &joinSetupModel{streamFn: func(ctx context.Context, _ int32) (<-chan MessageChunk, error) {
+		ch := make(chan MessageChunk, 1)
+		go func() {
+			<-ctx.Done()
+			observedCause <- context.Cause(ctx)
+			ch <- MessageChunk{Error: providerErr}
+			<-sourceRelease
+			close(ch)
+			close(sourceClosed)
+		}()
+		return ch, nil
+	}}
+	cleanupStarted := make(chan struct{})
+	cleanupDone := make(chan struct{})
+	provider := &testStreamProvider{model: model, cleanup: func() {
+		close(cleanupStarted)
+		<-cleanupRelease
+		close(cleanupDone)
+	}}
+	reg := &ProviderRegistry{providers: map[string]ModelProvider{}}
+	require.NoError(t, reg.Register(provider))
+	wrapped := NewModelCycler(ModelCyclerConfig{
+		Models: []ModelEntry{{Provider: "test-stream", Model: "m1"}},
+	}).WithRegistry(reg).WrapModel(&mockModel{})
+	ctx, cancel := context.WithCancel(context.Background())
+	out, err := wrapped.Stream(ctx, nil)
+	require.NoError(t, err)
+	cancel()
+
+	select {
+	case cause := <-observedCause:
+		require.ErrorIs(t, cause, context.Canceled)
+		var localAbort *LocalStreamAbortCause
+		require.NotErrorAs(t, cause, &localAbort, "caller cancellation must win over the later source error")
+	case <-time.After(time.Second):
+		t.Fatal("selected source did not observe caller cancellation")
+	}
+	requireChannelOpenUntil(t, out, 20*time.Millisecond)
+	releaseSource()
+	select {
+	case <-sourceClosed:
+	case <-time.After(time.Second):
+		t.Fatal("selected source did not close after release")
+	}
+	select {
+	case <-cleanupStarted:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not start after source close")
+	}
+	requireChannelOpenUntil(t, out, 20*time.Millisecond)
+	releaseCleanup()
+	select {
+	case <-cleanupDone:
+	case <-time.After(time.Second):
+		t.Fatal("cleanup did not finish after release")
+	}
+	for chunk := range out {
+		require.Nil(t, chunk.Error, "a source error arriving after caller cancellation must not replace its cause")
+	}
+}
+
 func TestStreamSetupErrorWithChannelJoinsCleanupBeforeFallback(t *testing.T) {
 	setupErr := errors.New("stream setup failed")
 	sourceRelease := make(chan struct{})

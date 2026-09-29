@@ -98,29 +98,73 @@ func (t *timeoutModel) Generate(ctx context.Context, msgs []Message, opts ...Opt
 	return msg, err
 }
 
-// Stream wraps the context with totalTimeout and monitors chunk arrival times.
-// If no chunk arrives within streamChunkTimeout the context is canceled and the
-// output channel is closed. The initial Stream() call error (if any) is returned
-// directly; mid-stream timeouts manifest as a closed output channel.
+// Stream starts the totalTimeout budget before calling the wrapped model and
+// monitors chunk arrival times. If no chunk arrives within streamChunkTimeout
+// the context is canceled and the output channel is closed. Initial setup errors
+// are returned directly; mid-stream timeouts manifest as a closed output channel.
 func (t *timeoutModel) Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
 	parentCtx := ctx
-	streamCtx, cancel := context.WithCancelCause(ctx)
+	timeoutError := func(kind string) error {
+		if kind == "total" {
+			return fmt.Errorf("timeout: stream exceeded %s: %w", t.totalTimeout, context.DeadlineExceeded)
+		}
+		return fmt.Errorf("timeout: stream idle exceeded %s: %w", t.streamChunkTimeout, context.DeadlineExceeded)
+	}
+	budgetCtx, stopBudget := context.WithTimeoutCause(
+		parentCtx,
+		t.totalTimeout,
+		NewLocalStreamAbortCause(timeoutError("total")),
+	)
+	streamCtx, cancel := context.WithCancelCause(budgetCtx)
+	abortSetup := func(source <-chan MessageChunk, failure error) error {
+		if parentCtx.Err() != nil {
+			cause := context.Cause(parentCtx)
+			if cause == nil {
+				cause = parentCtx.Err()
+			}
+			cancelStreamAttempt(parentCtx, cancel, cause)
+			drainMessageChunks(source)
+			cancel(nil)
+			stopBudget()
+			return cause
+		}
+		if budgetCtx.Err() != nil {
+			cause := context.Cause(budgetCtx)
+			if cause == nil {
+				cause = budgetCtx.Err()
+			}
+			cancelStreamAttempt(parentCtx, cancel, cause)
+			drainMessageChunks(source)
+			cancel(nil)
+			stopBudget()
+			return cause
+		}
+		cancelStreamAttempt(parentCtx, cancel, failure)
+		drainMessageChunks(source)
+		cancel(nil)
+		stopBudget()
+		return failure
+	}
 
 	ch, err := t.next.Stream(streamCtx, msgs, opts...)
 	if err != nil {
-		cancelStreamAttempt(parentCtx, cancel, err)
-		drainMessageChunks(ch)
-		return nil, err
+		return nil, abortSetup(ch, err)
 	}
 	if ch == nil {
 		err = fmt.Errorf("timeout: model returned a nil stream")
-		cancelStreamAttempt(parentCtx, cancel, err)
-		return nil, err
+		return nil, abortSetup(nil, err)
+	}
+	if parentCtx.Err() != nil || budgetCtx.Err() != nil {
+		return nil, abortSetup(ch, timeoutError("total"))
 	}
 
 	out := make(chan MessageChunk, 64)
 	go func() {
-		defer close(out)
+		defer func() {
+			cancel(nil)
+			stopBudget()
+			close(out)
+		}()
 		var finalChunk *MessageChunk
 		terminalErrorSent := false
 		emitError := func(err error) {
@@ -143,20 +187,12 @@ func (t *timeoutModel) Stream(ctx context.Context, msgs []Message, opts ...Optio
 			}
 		}
 
-		totalTimer := time.NewTimer(t.totalTimeout)
-		defer totalTimer.Stop()
 		chunkTimer := time.NewTimer(t.streamChunkTimeout)
 		defer chunkTimer.Stop()
 		fail := func(failure error) {
 			emitError(failure)
 			cancelStreamAttempt(parentCtx, cancel, failure)
 			drainMessageChunks(ch)
-		}
-		timeoutError := func(kind string) error {
-			if kind == "total" {
-				return fmt.Errorf("timeout: stream exceeded %s: %w", t.totalTimeout, context.DeadlineExceeded)
-			}
-			return fmt.Errorf("timeout: stream idle exceeded %s: %w", t.streamChunkTimeout, context.DeadlineExceeded)
 		}
 
 		for {
@@ -172,7 +208,15 @@ func (t *timeoutModel) Stream(ctx context.Context, msgs []Message, opts ...Optio
 				}
 				fail(fmt.Errorf("timeout: stream canceled: %w", cause))
 				return
-			case <-totalTimer.C:
+			case <-budgetCtx.Done():
+				if parentCtx.Err() != nil {
+					cause := context.Cause(parentCtx)
+					if cause == nil {
+						cause = parentCtx.Err()
+					}
+					fail(fmt.Errorf("timeout: stream canceled: %w", cause))
+					return
+				}
 				t.logger.Debug("middleware.timeout",
 					"op", "stream",
 					"status", "timeout",
@@ -204,6 +248,16 @@ func (t *timeoutModel) Stream(ctx context.Context, msgs []Message, opts ...Optio
 							cause = parentCtx.Err()
 						}
 						emitError(fmt.Errorf("timeout: stream canceled: %w", cause))
+					case <-budgetCtx.Done():
+						if parentCtx.Err() != nil {
+							cause := context.Cause(parentCtx)
+							if cause == nil {
+								cause = parentCtx.Err()
+							}
+							emitError(fmt.Errorf("timeout: stream canceled: %w", cause))
+						} else {
+							emitError(timeoutError("total"))
+						}
 					}
 					return
 				}
@@ -246,7 +300,15 @@ func (t *timeoutModel) Stream(ctx context.Context, msgs []Message, opts ...Optio
 					}
 					fail(fmt.Errorf("timeout: stream canceled: %w", cause))
 					return
-				case <-totalTimer.C:
+				case <-budgetCtx.Done():
+					if parentCtx.Err() != nil {
+						cause := context.Cause(parentCtx)
+						if cause == nil {
+							cause = parentCtx.Err()
+						}
+						fail(fmt.Errorf("timeout: stream canceled: %w", cause))
+						return
+					}
 					fail(timeoutError("total"))
 					return
 				}
