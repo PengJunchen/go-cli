@@ -80,10 +80,16 @@ func CoreEventToAgentEvent(ev core.AgentEvent) AgentEvent {
 	}
 	if ev.TokenUsage != nil {
 		ae.TokenUsage = &TokenUsageData{
-			InputTokens:  ev.TokenUsage.InputTokens,
-			OutputTokens: ev.TokenUsage.OutputTokens,
-			MaxTokens:    ev.TokenUsage.MaxTokens,
-			Cost:         ev.TokenUsage.Cost,
+			InputTokens:          ev.TokenUsage.InputTokens,
+			OutputTokens:         ev.TokenUsage.OutputTokens,
+			MaxTokens:            ev.TokenUsage.MaxTokens,
+			Cost:                 ev.TokenUsage.Cost,
+			UnknownUsageAttempts: ev.TokenUsage.UnknownUsageAttempts,
+			UnknownCostAttempts:  ev.TokenUsage.UnknownCostAttempts,
+			UsageSource:          ev.TokenUsage.UsageSource,
+			CostSources:          append([]core.TokenUsageCostSource(nil), ev.TokenUsage.CostSources...),
+			PriceSources:         append([]core.TokenUsagePriceSource(nil), ev.TokenUsage.PriceSources...),
+			ProviderModels:       append([]core.TokenUsageProviderModel(nil), ev.TokenUsage.ProviderModels...),
 		}
 	}
 	return ae

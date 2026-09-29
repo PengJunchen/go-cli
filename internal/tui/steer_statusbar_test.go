@@ -11,6 +11,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/core"
 )
 
 // keyMsg is a tiny helper that builds a tea.KeyMsg from a key type and optional
@@ -282,12 +284,16 @@ func TestStatusBarRendering(t *testing.T) {
 	m.tokenOutput = 500
 	m.tokenMax = 8000
 	m.tokenCost = 0.025
+	m.tokenUsageSource = core.TokenUsageSourceReported
+	m.tokenCostSources = []core.TokenUsageCostSource{core.TokenUsageCostEstimated}
+	m.tokenPriceSources = []core.TokenUsagePriceSource{core.TokenUsagePriceDefaultTier}
+	m.tokenProviderModels = []core.TokenUsageProviderModel{{ProviderID: "openai", ModelID: "gpt-4o-mini"}}
 	bar := m.renderStatusBarLocked()
 	m.mu.Unlock()
 
 	assert.Contains(t, bar, "Tokens: 1500/8000 (18%)")
 	assert.Contains(t, bar, "Cost: $0.0250")
-	assert.NotContains(t, bar, "\x1b[", "should not have warning color under 80%")
+	assert.NotContains(t, bar, "\x1b[38;", "should not have warning color under 80%")
 
 	// High usage (over 80%).
 	m.mu.Lock()
@@ -327,7 +333,7 @@ func TestStatusBar_TwoLines(t *testing.T) {
 	assert.Contains(t, lines[0], "chat")
 	// Line 2 contains tokens/cost.
 	assert.Contains(t, lines[1], "Tokens:")
-	assert.Contains(t, lines[1], "Cost:")
+	assert.Contains(t, lines[1], "Known cost:", "a cost without evidence is shown as a known subtotal")
 }
 
 // TestStatusBar_ModelInfo verifies the model name appears on line 1.

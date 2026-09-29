@@ -8,10 +8,12 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/spinner"
@@ -89,6 +91,13 @@ func (event AgentEvent) clone() AgentEvent {
 	if event.ToolCalls != nil {
 		event.ToolCalls = append([]ToolCallData(nil), event.ToolCalls...)
 	}
+	if event.TokenUsage != nil {
+		usage := *event.TokenUsage
+		usage.CostSources = append([]core.TokenUsageCostSource(nil), event.TokenUsage.CostSources...)
+		usage.PriceSources = append([]core.TokenUsagePriceSource(nil), event.TokenUsage.PriceSources...)
+		usage.ProviderModels = append([]core.TokenUsageProviderModel(nil), event.TokenUsage.ProviderModels...)
+		event.TokenUsage = &usage
+	}
 	return event
 }
 
@@ -164,10 +173,16 @@ func (g *activeToolCallGroup) consume(id string) {
 
 // TokenUsageData mirrors core.TokenUsage for the TUI layer.
 type TokenUsageData struct {
-	InputTokens  int
-	OutputTokens int
-	MaxTokens    int
-	Cost         float64
+	InputTokens          int
+	OutputTokens         int
+	MaxTokens            int
+	Cost                 float64
+	UnknownUsageAttempts int
+	UnknownCostAttempts  int
+	UsageSource          core.TokenUsageSource
+	CostSources          []core.TokenUsageCostSource
+	PriceSources         []core.TokenUsagePriceSource
+	ProviderModels       []core.TokenUsageProviderModel
 }
 
 // App is the top-level TUI application entry point. It runs a message-queue-
@@ -815,10 +830,16 @@ type teaModel struct {
 	expectedOwnerGen       string
 
 	// token usage
-	tokenInput  int
-	tokenOutput int
-	tokenMax    int
-	tokenCost   float64
+	tokenInput                int
+	tokenOutput               int
+	tokenMax                  int
+	tokenCost                 float64
+	tokenUnknownUsageAttempts int
+	tokenUnknownCostAttempts  int
+	tokenUsageSource          core.TokenUsageSource
+	tokenCostSources          []core.TokenUsageCostSource
+	tokenPriceSources         []core.TokenUsagePriceSource
+	tokenProviderModels       []core.TokenUsageProviderModel
 
 	// spinner (bubbles spinner) shown while a tool call is in progress.
 	spinner       spinner.Model
@@ -1169,7 +1190,7 @@ func (m *teaModel) renderViewLocked() string {
 	}
 	// Status bar (model/turn/session/mode + tokens/cost). Shown when any
 	// status info is available.
-	if m.tokenMax > 0 || m.tokenCost > 0 || m.modelName != "" || m.turnCount > 0 || m.sessionID != "" || m.modeLabel != "" {
+	if m.hasTokenUsageStatus() || m.modelName != "" || m.turnCount > 0 || m.sessionID != "" || m.modeLabel != "" {
 		sb.WriteString("\n")
 		sb.WriteString(m.renderStatusBarLocked())
 	}
@@ -1221,7 +1242,7 @@ func (m *teaModel) renderFooterLocked() string {
 		sb.WriteString("\n")
 		sb.WriteString(todoPanel)
 	}
-	if m.tokenMax > 0 || m.tokenCost > 0 || m.modelName != "" || m.turnCount > 0 || m.sessionID != "" || m.modeLabel != "" {
+	if m.hasTokenUsageStatus() || m.modelName != "" || m.turnCount > 0 || m.sessionID != "" || m.modeLabel != "" {
 		sb.WriteString("\n")
 		sb.WriteString(m.renderStatusBarLocked())
 	}
@@ -1425,6 +1446,11 @@ func (m *teaModel) renderWidth() int {
 func (m *teaModel) renderStatusBarLocked() string {
 	// Line 1: model | turn #N | session | mode
 	parts := make([]string, 0, 4)
+	if m.hasTokenUsageStatus() {
+		parts = append(parts, "actual="+tokenUsageProviderModels(m.tokenProviderModels))
+		parts = append(parts, "cost="+strings.Join(tokenUsageCostSourceLabels(m.tokenCostSources), ","))
+		parts = append(parts, "price="+strings.Join(tokenUsagePriceSourceLabels(m.tokenPriceSources), ","))
+	}
 	if m.modelName != "" {
 		parts = append(parts, m.modelName)
 	}
@@ -1443,9 +1469,10 @@ func (m *teaModel) renderStatusBarLocked() string {
 		parts = append(parts, m.modeLabel)
 	}
 	line1 := strings.Join(parts, " | ")
+	line1 = truncateStatusBarText(line1, m.width)
 
-	// Line 2: tokens/cost — only rendered when token data is available.
-	if m.tokenMax == 0 && m.tokenCost == 0 {
+	// Line 2: tokens, cost, and evidence — only rendered when token data is available.
+	if !m.hasTokenUsageStatus() {
 		if line1 == "" {
 			return ""
 		}
@@ -1457,7 +1484,32 @@ func (m *teaModel) renderStatusBarLocked() string {
 	if maxT > 0 {
 		pct = total * 100 / maxT
 	}
-	line2 := fmt.Sprintf("Tokens: %d/%d (%d%%) | Cost: $%.4f", total, maxT, pct, m.tokenCost)
+	usageDetails := fmt.Sprintf("Tokens: %d/%d (%d%%) [usage=%s", total, maxT, pct, tokenUsageSourceLabel(m.tokenUsageSource))
+	if m.tokenUnknownUsageAttempts > 0 {
+		usageDetails += fmt.Sprintf(", unknown usage attempts=%d", m.tokenUnknownUsageAttempts)
+	}
+	usageDetails += "]"
+
+	costSources := tokenUsageCostSourceLabels(m.tokenCostSources)
+	unknownCost := m.tokenUnknownCostAttempts > 0 || slicesContain(costSources, string(core.TokenUsageCostUnknown))
+	costDetails := ""
+	switch {
+	case unknownCost && m.tokenCost <= 0:
+		costDetails = "Cost: unknown"
+	case unknownCost:
+		costDetails = fmt.Sprintf("Known cost: $%.4f", m.tokenCost)
+	default:
+		costDetails = fmt.Sprintf("Cost: $%.4f", m.tokenCost)
+	}
+	if unknownCost {
+		if m.tokenUnknownCostAttempts > 0 {
+			costDetails += fmt.Sprintf(" (unknown cost attempts=%d)", m.tokenUnknownCostAttempts)
+		} else {
+			costDetails += " (cost source unknown)"
+		}
+	}
+
+	line2 := truncateStatusBarText(fmt.Sprintf("%s | %s", costDetails, usageDetails), m.width)
 	if pct > 80 {
 		line2 = statusBarWarnStyle.Render(line2)
 	}
@@ -1466,6 +1518,136 @@ func (m *teaModel) renderStatusBarLocked() string {
 		return line2
 	}
 	return statusBarLineStyle.Render(line1) + "\n" + line2
+}
+
+func truncateStatusBarText(value string, width int) string {
+	if width <= 0 || lipgloss.Width(value) <= width {
+		return value
+	}
+	ellipsis := "…"
+	available := width - lipgloss.Width(ellipsis)
+	if available <= 0 {
+		return ellipsis
+	}
+	var clipped strings.Builder
+	used := 0
+	for _, r := range value {
+		runeText := string(r)
+		runeWidth := lipgloss.Width(runeText)
+		if used+runeWidth > available {
+			break
+		}
+		clipped.WriteRune(r)
+		used += runeWidth
+	}
+	return clipped.String() + ellipsis
+}
+
+func (m *teaModel) hasTokenUsageStatus() bool {
+	return m.tokenMax != 0 || m.tokenCost != 0 || m.tokenInput != 0 || m.tokenOutput != 0 ||
+		m.tokenUsageSource != "" || len(m.tokenCostSources) > 0 || len(m.tokenPriceSources) > 0 ||
+		len(m.tokenProviderModels) > 0 || m.tokenUnknownUsageAttempts > 0 || m.tokenUnknownCostAttempts > 0
+}
+
+func tokenUsageSourceLabel(source core.TokenUsageSource) string {
+	switch source {
+	case core.TokenUsageSourceReported, core.TokenUsageSourceEstimated:
+		return string(source)
+	default:
+		return string(core.TokenUsageSourceUnknown)
+	}
+}
+
+func tokenUsageCostSourceLabels(sources []core.TokenUsageCostSource) []string {
+	labels := make([]string, 0, len(sources))
+	seen := make(map[string]struct{}, len(sources))
+	for _, source := range sources {
+		label := string(source)
+		switch source {
+		case core.TokenUsageCostReported, core.TokenUsageCostEstimated, core.TokenUsageCostUnknown:
+		default:
+			label = string(core.TokenUsageCostUnknown)
+		}
+		if _, ok := seen[label]; !ok {
+			seen[label] = struct{}{}
+			labels = append(labels, label)
+		}
+	}
+	if len(labels) == 0 {
+		return []string{string(core.TokenUsageCostUnknown)}
+	}
+	sort.Strings(labels)
+	return labels
+}
+
+func tokenUsagePriceSourceLabels(sources []core.TokenUsagePriceSource) []string {
+	labels := make([]string, 0, len(sources))
+	seen := make(map[string]struct{}, len(sources))
+	for _, source := range sources {
+		label := string(source)
+		switch source {
+		case core.TokenUsagePriceProvider, core.TokenUsagePriceDefaultTier, core.TokenUsagePriceConfiguredTier, core.TokenUsagePriceUnknown:
+		default:
+			label = string(core.TokenUsagePriceUnknown)
+		}
+		if _, ok := seen[label]; !ok {
+			seen[label] = struct{}{}
+			labels = append(labels, label)
+		}
+	}
+	if len(labels) == 0 {
+		return []string{string(core.TokenUsagePriceUnknown)}
+	}
+	sort.Strings(labels)
+	return labels
+}
+
+func tokenUsageProviderModels(models []core.TokenUsageProviderModel) string {
+	pairs := make([]string, 0, len(models))
+	seen := make(map[string]struct{}, len(models))
+	for _, model := range models {
+		provider := safeTokenIdentity(model.ProviderID)
+		modelID := safeTokenIdentity(model.ModelID)
+		if provider == "" {
+			provider = "unknown"
+		}
+		if modelID == "" {
+			modelID = "unknown"
+		}
+		pair := provider + "/" + modelID
+		if _, ok := seen[pair]; !ok {
+			seen[pair] = struct{}{}
+			pairs = append(pairs, pair)
+		}
+	}
+	if len(pairs) == 0 {
+		return "unknown"
+	}
+	sort.Strings(pairs)
+	return strings.Join(pairs, ",")
+}
+
+func safeTokenIdentity(value string) string {
+	clean := strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) {
+			return -1
+		}
+		return r
+	}, strings.TrimSpace(value))
+	runes := []rune(clean)
+	if len(runes) > 48 {
+		return string(runes[:48]) + "…"
+	}
+	return clean
+}
+
+func slicesContain(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------- command factories ----------
@@ -1571,6 +1753,12 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 		m.tokenOutput = ev.TokenUsage.OutputTokens
 		m.tokenMax = ev.TokenUsage.MaxTokens
 		m.tokenCost = ev.TokenUsage.Cost
+		m.tokenUnknownUsageAttempts = ev.TokenUsage.UnknownUsageAttempts
+		m.tokenUnknownCostAttempts = ev.TokenUsage.UnknownCostAttempts
+		m.tokenUsageSource = ev.TokenUsage.UsageSource
+		m.tokenCostSources = append([]core.TokenUsageCostSource(nil), ev.TokenUsage.CostSources...)
+		m.tokenPriceSources = append([]core.TokenUsagePriceSource(nil), ev.TokenUsage.PriceSources...)
+		m.tokenProviderModels = append([]core.TokenUsageProviderModel(nil), ev.TokenUsage.ProviderModels...)
 		if notify {
 			view = m.renderViewLocked()
 		}
