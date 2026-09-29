@@ -1,0 +1,5 @@
+# Tagged E2E streaming fixtures review
+
+Verdict: **ACCEPT, four fixture-only regressions**. I independently inspected builder commit `8b6d5ed4f1724bf664836f41bbaa31cc9f0bad4d` against `33739e3` and integrated it as `8f0c96f`. The three Phase20 mocks previously sent incomplete provider streams, while Phase39's mock ended without a terminal chunk. The current production stream path correctly rejects those inputs; weakening it would hide incomplete responses.
+
+The updated Claude fixtures send indexed block starts/deltas/stops, a `message_delta` with `end_turn` or `tool_use`, and then `message_stop`. The OpenAI fixture sends a terminal `finish_reason:"stop"` before `[DONE]`. Phase39's mock sends a separate Final chunk. The tests retain content/tool-call assertions and now require exactly one terminal chunk with the expected provider reason. The builder reproduced RED and passed each selected tagged race suite five times. The integrated branch passed a combined tagged race selection for the four test functions in both affected packages. This does not close the full tagged E2E gate or prove a live provider integration.
