@@ -89,7 +89,7 @@ func TestAssembledLoopDetectorStopsDurableRunAtFrozenAttemptThreshold(t *testing
 	t.Cleanup(assembly.Cleanup)
 	t.Cleanup(func() { _ = durableSession.requestClose(context.WithoutCancel(ctx)) })
 
-	runCtx := bindActiveLoopDurableRun(t, assembly, durableSession, ctx)
+	runCtx := bindActiveLoopDurableRun(ctx, t, assembly, durableSession)
 	stream, err := assembly.Harness.Submit(runCtx, "write the same marker twice")
 	require.NoError(t, err)
 	for range stream.Events() {
@@ -172,9 +172,9 @@ func TestAssembledLoopDetectorStopsParallelDurableBatchBeforeDispatch(t *testing
 	}))
 	defer provider.Close()
 
-	assembly, durableSession, _ := newActiveLoopDurableAssembly(t, ctx, provider.URL, "terminate", 2)
+	assembly, durableSession, _ := newActiveLoopDurableAssembly(ctx, t, provider.URL, "terminate", 2)
 	require.NoError(t, assembly.ToolRegistry.Register(ctx, executorProbe))
-	runCtx := bindActiveLoopDurableRun(t, assembly, durableSession, ctx)
+	runCtx := bindActiveLoopDurableRun(ctx, t, assembly, durableSession)
 	stream, err := assembly.Harness.Submit(runCtx, "repeat the write in parallel")
 	require.NoError(t, err)
 	for range stream.Events() {
@@ -258,7 +258,7 @@ func TestAssembledLoopDetectorCallerCancellationWinsOnCanonicalDurablePath(t *te
 	}))
 	defer provider.Close()
 
-	assembly, durableSession, _ := newActiveLoopDurableAssembly(t, callerCtx, provider.URL, "terminate", 1)
+	assembly, durableSession, _ := newActiveLoopDurableAssembly(callerCtx, t, provider.URL, "terminate", 1)
 	assembly.LoopAgent.SetToolInterceptor(func(toolName, toolCallID string, _ map[string]any) error {
 		if toolName == "write" && toolCallID == "caller-first-call" {
 			// This runs synchronously inside the canonical pre-tool boundary, before
@@ -267,7 +267,7 @@ func TestAssembledLoopDetectorCallerCancellationWinsOnCanonicalDurablePath(t *te
 		}
 		return nil
 	})
-	runCtx := bindActiveLoopDurableRun(t, assembly, durableSession, callerCtx)
+	runCtx := bindActiveLoopDurableRun(callerCtx, t, assembly, durableSession)
 	stream, err := assembly.Harness.Submit(runCtx, "write the marker")
 	require.NoError(t, err)
 	for range stream.Events() {
@@ -351,8 +351,8 @@ func TestAssembledLoopDetectorWarnsContinuesAndInjectsNextTurnReminder(t *testin
 	}))
 	defer provider.Close()
 
-	assembly, durableSession, _ := newActiveLoopDurableAssembly(t, ctx, provider.URL, "", 2)
-	runCtx := bindActiveLoopDurableRun(t, assembly, durableSession, ctx)
+	assembly, durableSession, _ := newActiveLoopDurableAssembly(ctx, t, provider.URL, "", 2)
+	runCtx := bindActiveLoopDurableRun(ctx, t, assembly, durableSession)
 	firstRun, err := assembly.Harness.Submit(runCtx, "read the same marker repeatedly")
 	require.NoError(t, err)
 	for range firstRun.Events() {
@@ -376,7 +376,7 @@ func TestAssembledLoopDetectorWarnsContinuesAndInjectsNextTurnReminder(t *testin
 	}
 	require.Equal(t, 3, receipts, "every post-warning execution still receives its canonical durable receipt")
 
-	secondRunCtx := bindActiveLoopDurableRun(t, assembly, durableSession, ctx)
+	secondRunCtx := bindActiveLoopDurableRun(ctx, t, assembly, durableSession)
 	secondRun, err := assembly.Harness.Submit(secondRunCtx, "continue")
 	require.NoError(t, err)
 	for range secondRun.Events() {
@@ -392,7 +392,7 @@ func TestAssembledLoopDetectorWarnsContinuesAndInjectsNextTurnReminder(t *testin
 	}
 }
 
-func newActiveLoopDurableAssembly(t *testing.T, ctx context.Context, providerURL, disposition string, threshold int) (*AgentAssembly, *durableCLISession, string) {
+func newActiveLoopDurableAssembly(ctx context.Context, t *testing.T, providerURL, disposition string, threshold int) (*AgentAssembly, *durableCLISession, string) {
 	t.Helper()
 	configureDurableCLISessionTest(t)
 	workspaceRoot, err := os.Getwd()
@@ -419,7 +419,7 @@ func newActiveLoopDurableAssembly(t *testing.T, ctx context.Context, providerURL
 	return assembly, durableSession, workspaceRoot
 }
 
-func bindActiveLoopDurableRun(t *testing.T, assembly *AgentAssembly, durableSession *durableCLISession, ctx context.Context) context.Context {
+func bindActiveLoopDurableRun(ctx context.Context, t *testing.T, assembly *AgentAssembly, durableSession *durableCLISession) context.Context {
 	t.Helper()
 	runCtx, sink, err := durableSession.bindRun(ctx)
 	require.NoError(t, err)
