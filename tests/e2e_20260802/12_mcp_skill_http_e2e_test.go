@@ -462,8 +462,8 @@ Summarize the provided text concisely.`
 	assert.Equal(t, "deploy-helper", deployDef.Name())
 	desc := deployDef.Description()
 	assert.Contains(t, desc, "Helps deploy services")
-	assert.Contains(t, desc, "tools: bash, read")
-	assert.Contains(t, desc, "parameters: dry_run, max_retries")
+	assert.Contains(t, desc, "suggested tools (not enforced): bash, read")
+	assert.Contains(t, desc, "legacy parameter metadata (not accepted as arguments): dry_run, max_retries")
 
 	// Execute the skill through the registry and verify the output marker.
 	result, err := tr.Execute(ctx, tools.ToolCall{
