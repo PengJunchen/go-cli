@@ -225,7 +225,7 @@ func startAssembledSubagentPolicyTurn(ctx context.Context, assembly *AgentAssemb
 	return done
 }
 
-func awaitAssembledApproval(t *testing.T, ctx context.Context, approvalCh <-chan tui.ApprovalRequest, expectedTool string) tui.ApprovalRequest {
+func awaitAssembledApproval(ctx context.Context, t *testing.T, approvalCh <-chan tui.ApprovalRequest, expectedTool string) tui.ApprovalRequest {
 	t.Helper()
 	select {
 	case request := <-approvalCh:
@@ -240,7 +240,7 @@ func awaitAssembledApproval(t *testing.T, ctx context.Context, approvalCh <-chan
 	return tui.ApprovalRequest{}
 }
 
-func awaitAssembledSubagentTurn(t *testing.T, ctx context.Context, done <-chan assembledSubagentPolicyTurn) assembledSubagentPolicyTurn {
+func awaitAssembledSubagentTurn(ctx context.Context, t *testing.T, done <-chan assembledSubagentPolicyTurn) assembledSubagentPolicyTurn {
 	t.Helper()
 	select {
 	case outcome := <-done:
@@ -257,9 +257,9 @@ func TestAssembleRealSubAgentParentDenyNeverStartsChild(t *testing.T) {
 	assembly, provider, ctx, approvalCh := newAssembledSubagentPolicyFixture(t, false)
 	done := startAssembledSubagentPolicyTurn(ctx, assembly)
 
-	parentApproval := awaitAssembledApproval(t, ctx, approvalCh, "dispatch_subagent")
+	parentApproval := awaitAssembledApproval(ctx, t, approvalCh, "dispatch_subagent")
 	parentApproval.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalDeny}
-	outcome := awaitAssembledSubagentTurn(t, ctx, done)
+	outcome := awaitAssembledSubagentTurn(ctx, t, done)
 	require.NoError(t, outcome.err)
 
 	assert.Greater(t, provider.parentRequests.Load(), int32(0), "the parent request must use the configured provider")
@@ -273,14 +273,14 @@ func TestAssembleRealSubAgentChildWriteNeedsSeparateApproval(t *testing.T) {
 	assembly, provider, ctx, approvalCh := newAssembledSubagentPolicyFixture(t, false)
 	done := startAssembledSubagentPolicyTurn(ctx, assembly)
 
-	parentApproval := awaitAssembledApproval(t, ctx, approvalCh, "dispatch_subagent")
+	parentApproval := awaitAssembledApproval(ctx, t, approvalCh, "dispatch_subagent")
 	parentApproval.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalAllow}
 
-	childApproval := awaitAssembledApproval(t, ctx, approvalCh, "write")
+	childApproval := awaitAssembledApproval(ctx, t, approvalCh, "write")
 	assert.Equal(t, provider.writePath, childApproval.Args["path"])
 	assert.NoFileExists(t, provider.writePath, "parent dispatch approval must not grant the child's write")
 	childApproval.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalDeny}
-	outcome := awaitAssembledSubagentTurn(t, ctx, done)
+	outcome := awaitAssembledSubagentTurn(ctx, t, done)
 	require.NoError(t, outcome.err)
 
 	assert.EqualValues(t, 1, provider.childWriteCalls.Load())
@@ -293,13 +293,13 @@ func TestAssembleRealSubAgentChildWriteRunsOnceAfterIndependentApprovals(t *test
 	assembly, provider, ctx, approvalCh := newAssembledSubagentPolicyFixture(t, false)
 	done := startAssembledSubagentPolicyTurn(ctx, assembly)
 
-	parentApproval := awaitAssembledApproval(t, ctx, approvalCh, "dispatch_subagent")
+	parentApproval := awaitAssembledApproval(ctx, t, approvalCh, "dispatch_subagent")
 	parentApproval.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalAllow}
-	childApproval := awaitAssembledApproval(t, ctx, approvalCh, "write")
+	childApproval := awaitAssembledApproval(ctx, t, approvalCh, "write")
 	assert.Equal(t, provider.writePath, childApproval.Args["path"])
 	assert.NoFileExists(t, provider.writePath)
 	childApproval.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalAllow}
-	outcome := awaitAssembledSubagentTurn(t, ctx, done)
+	outcome := awaitAssembledSubagentTurn(ctx, t, done)
 	require.NoError(t, outcome.err)
 
 	contents, err := os.ReadFile(provider.writePath)
@@ -316,7 +316,7 @@ func TestAssembleRealSubAgentChildWriteObservesPlanTransitionAfterAdmission(t *t
 	assembly, provider, ctx, approvalCh := newAssembledSubagentPolicyFixture(t, true)
 	done := startAssembledSubagentPolicyTurn(ctx, assembly)
 
-	parentApproval := awaitAssembledApproval(t, ctx, approvalCh, "dispatch_subagent")
+	parentApproval := awaitAssembledApproval(ctx, t, approvalCh, "dispatch_subagent")
 	parentApproval.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalAllow}
 	select {
 	case <-provider.childStarted:
@@ -353,16 +353,16 @@ func TestAssembleRealSubAgentChildWriteReplacementStalesPendingApproval(t *testi
 	assembly, provider, ctx, approvalCh := newAssembledSubagentPolicyFixture(t, false)
 	done := startAssembledSubagentPolicyTurn(ctx, assembly)
 
-	parentApproval := awaitAssembledApproval(t, ctx, approvalCh, "dispatch_subagent")
+	parentApproval := awaitAssembledApproval(ctx, t, approvalCh, "dispatch_subagent")
 	parentApproval.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalAllow}
-	childApproval := awaitAssembledApproval(t, ctx, approvalCh, "write")
+	childApproval := awaitAssembledApproval(ctx, t, approvalCh, "write")
 	assert.Equal(t, provider.writePath, childApproval.Args["path"])
 	assert.NoFileExists(t, provider.writePath)
 
 	replacement := &assembledSubagentReplacementTool{}
 	require.NoError(t, assembly.ToolRegistry.Register(ctx, replacement))
 	childApproval.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalAllow}
-	outcome := awaitAssembledSubagentTurn(t, ctx, done)
+	outcome := awaitAssembledSubagentTurn(ctx, t, done)
 	require.NoError(t, outcome.err)
 
 	assert.Zero(t, replacement.calls.Load(), "a replacement must not execute under the child's prior approval")
