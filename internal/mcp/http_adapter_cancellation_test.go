@@ -110,7 +110,7 @@ func TestHTTPAdapterSendsBestEffortCancellationNotification(t *testing.T) {
 			select {
 			case callErr = <-callDone:
 			case <-time.After(3 * time.Second):
-				t.Fatal("cancelled tools/call did not return")
+				t.Fatal("canceled tools/call did not return")
 			}
 			require.Error(t, callErr)
 			assertToolOutcomeUnknown(t, callErr)
@@ -120,7 +120,7 @@ func TestHTTPAdapterSendsBestEffortCancellationNotification(t *testing.T) {
 			case notification := <-notificationSeen:
 				assert.Equal(t, "notifications/cancelled", notification.Method)
 				assert.JSONEq(t, string(callID), string(notification.Params.RequestID), "notification must target the exact request")
-				assert.Equal(t, "local run cancelled", notification.Params.Reason)
+				assert.Equal(t, "local run canceled", notification.Params.Reason)
 			case <-time.After(3 * time.Second):
 				t.Fatal("server did not receive notifications/cancelled")
 			}

@@ -141,7 +141,7 @@ var errSSELineTooLong = errors.New("mcp: SSE line exceeds response limit")
 const defaultHTTPTimeout = 60 * time.Second
 
 // cancellationNotificationTimeout bounds the best-effort control request
-// independently of the request context that has already been cancelled.
+// independently of the request context that has already been canceled.
 const cancellationNotificationTimeout = 2 * time.Second
 
 // maxHTTPResponseSize caps the size of an HTTP response body read by the
@@ -758,9 +758,9 @@ func (a *HTTPClientAdapter) notifyRequestCancelled(ctx context.Context, gen *htt
 
 	reason := ""
 	if ctx != nil && ctx.Err() == context.Canceled {
-		reason = "local run cancelled"
+		reason = "local run canceled"
 	} else if gen.lifeCtx != nil && gen.lifeCtx.Err() != nil {
-		reason = "local session cancelled"
+		reason = "local session canceled"
 	}
 	if reason == "" {
 		return
@@ -778,7 +778,7 @@ func (a *HTTPClientAdapter) sendCancellationNotification(endpoint, version, sess
 
 	body, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0",
-		"method":  "notifications/cancelled",
+		"method":  "notifications/cancelled", //nolint:misspell // MCP 2025-06-18 mandates this wire spelling.
 		"params": map[string]any{
 			"requestId": id,
 			"reason":    reason,
