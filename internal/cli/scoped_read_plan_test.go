@@ -76,10 +76,9 @@ func TestAssemblePreparedPlanAllowsScopedReadersAndRejectsUnscopedPaths(t *testi
 	}
 	for _, call := range blockedCalls {
 		invocation, prepareErr := preparer.PrepareToolCall(ctx, call)
-		require.NoError(t, prepareErr, call.Name)
-		_, dispatchErr := invocation.Dispatch(ctx)
-		require.Error(t, dispatchErr, call.Name)
-		assert.Contains(t, dispatchErr.Error(), "whitelist", call.Name)
+		require.Error(t, prepareErr, call.Name)
+		require.Nil(t, invocation, call.Name)
+		assert.Contains(t, prepareErr.Error(), "whitelist", call.Name)
 	}
 
 	spoof := &scopedReadPlanSpoof{}

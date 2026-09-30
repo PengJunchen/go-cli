@@ -84,6 +84,77 @@ func TestAssembleAgentConfiguredPathsConstrainDefaultFileTools(t *testing.T) {
 	}
 }
 
+func TestAssemblePreparedWorkspaceReadsValidatePathsBeforePolicy(t *testing.T) {
+	allowedDir := t.TempDir()
+	allowedFile := filepath.Join(allowedDir, "inside.txt")
+	require.NoError(t, os.WriteFile(allowedFile, []byte("needle inside"), 0o600))
+
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "outside.txt")
+	require.NoError(t, os.WriteFile(outsideFile, []byte("needle outside"), 0o600))
+	outsideNestedDir := filepath.Join(outsideDir, "nested")
+	require.NoError(t, os.Mkdir(outsideNestedDir, 0o750))
+	require.NoError(t, os.WriteFile(filepath.Join(outsideNestedDir, "nested.txt"), []byte("needle nested"), 0o600))
+	linkDir := filepath.Join(allowedDir, "parent-escape")
+	require.NoError(t, os.Symlink(outsideDir, linkDir))
+
+	cfg := newAssembleTestConfig(t)
+	cfg.Sandbox.AllowedPaths = []string{allowedDir}
+	assembly, err := AssembleAgent(
+		context.Background(), cfg, "openai", "test-model", io.Discard,
+		WithApproveMode(ApproveAuto),
+		WithNoSandbox(),
+	)
+	require.NoError(t, err)
+	t.Cleanup(assembly.Cleanup)
+
+	preparer, ok := assembly.ToolRegistry.(tools.ToolCallPreparer)
+	require.True(t, ok)
+	policySetter, ok := assembly.ToolRegistry.(interface {
+		SetPreparedToolPolicy(tools.PreparedToolPolicy) error
+	})
+	require.True(t, ok)
+	policyCalls := 0
+	require.NoError(t, policySetter.SetPreparedToolPolicy(func(_ context.Context, request tools.PreparedPolicyRequest) (tools.PreparedPolicyDecision, error) {
+		policyCalls++
+		return tools.PreparedPolicyDecision{Allowed: true, Generations: request.Generations}, nil
+	}))
+
+	allowedCalls := []tools.ToolCall{
+		{Name: "read", Args: map[string]any{"path": allowedFile}},
+		{Name: "grep", Args: map[string]any{"pattern": "needle", "path": allowedDir}},
+		{Name: "find", Args: map[string]any{"path": allowedDir, "pattern": "inside.txt"}},
+		{Name: "ls", Args: map[string]any{"path": allowedDir}},
+	}
+	for _, call := range allowedCalls {
+		invocation, prepareErr := preparer.PrepareToolCall(context.Background(), call)
+		require.NoError(t, prepareErr, call.Name)
+		require.Equal(t, []tools.TrustedToolEffect{tools.EffectWorkspaceRead}, invocation.EffectSet().Values(), call.Name)
+		_, dispatchErr := invocation.Dispatch(context.Background())
+		require.NoError(t, dispatchErr, call.Name)
+	}
+	classifiedAllowedCalls := policyCalls
+	require.Equal(t, len(allowedCalls), classifiedAllowedCalls)
+
+	blockedCalls := []tools.ToolCall{
+		{Name: "read", Args: map[string]any{"path": outsideFile}},
+		{Name: "grep", Args: map[string]any{"pattern": "needle", "path": outsideDir}},
+		{Name: "find", Args: map[string]any{"path": outsideDir}},
+		{Name: "ls", Args: map[string]any{"path": outsideDir}},
+		{Name: "read", Args: map[string]any{"path": filepath.Join(linkDir, "outside.txt")}},
+		{Name: "grep", Args: map[string]any{"pattern": "needle", "path": filepath.Join(linkDir, "outside.txt")}},
+		{Name: "find", Args: map[string]any{"path": filepath.Join(linkDir, "nested")}},
+		{Name: "ls", Args: map[string]any{"path": filepath.Join(linkDir, "nested")}},
+	}
+	for _, call := range blockedCalls {
+		invocation, prepareErr := preparer.PrepareToolCall(context.Background(), call)
+		require.Error(t, prepareErr, call.Name)
+		require.Nil(t, invocation, call.Name)
+		require.Contains(t, prepareErr.Error(), "whitelist", call.Name)
+		require.Equal(t, classifiedAllowedCalls, policyCalls, "escaped path must be rejected before policy can classify workspace_read: %s", call.Name)
+	}
+}
+
 func TestAssembleAgentEmptyAllowedPathsLeavesReadUnrestricted(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "outside.txt")
 	require.NoError(t, os.WriteFile(path, []byte("unrestricted"), 0o600))
