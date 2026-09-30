@@ -2,9 +2,11 @@ package tui
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"hash"
 	"io"
 	"log/slog"
 	"os"
@@ -753,11 +755,18 @@ type teaModel struct {
 	accordion      *AccordionModel
 	streamBuf      map[string]*strings.Builder
 	streamingEntry *AccordionEntry
-	streamingBuf   strings.Builder
-	toolCallGroup  *activeToolCallGroup
-	// streamingMD caches rendered markdown lines during incremental streaming
-	// so each token chunk does not trigger an O(n²) full re-render. It is
-	// lazily created and Reset when a new streaming message begins.
+	// streamingBuf owns the complete source for the one active provisional
+	// response; streamingMD retains only a bounded terminal preview.
+	streamingBuf  strings.Builder
+	streamingHash hash.Hash
+	// finalizedStreamDigest identifies a producer's optional duplicate final
+	// assistant event after a done marker without retaining another full copy.
+	finalizedStreamDigest      [sha256.Size]byte
+	finalizedStreamSourceBytes int
+	hasFinalizedStreamDigest   bool
+	toolCallGroup              *activeToolCallGroup
+	// streamingMD incrementally consumes new chunks and keeps only a bounded
+	// safe preview window. It is reset when a new streaming message begins.
 	streamingMD *StreamingMarkdownRenderer
 
 	// steer input
@@ -1006,6 +1015,7 @@ func (m *teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.mu.Lock()
 		m.width = msg.Width
 		m.height = msg.Height
+		m.refreshStreamingPreviewLocked(context.Background())
 		if current := m.activeInteraction; current != nil && current.approval != nil {
 			current.detailOffset = 0
 			current.reviewedDetailLines = nil
@@ -1849,11 +1859,20 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 	// answer, so it is never rendered as user-visible text.
 	if ev.Type == "done" {
 		m.mu.Lock()
-		m.streamingEntry = nil
-		m.streamingBuf.Reset()
+		finalizedStream := m.finishStreamingLocked(ctx)
 		m.toolCallGroup = nil
+		view := ""
+		if finalizedStream && m.shouldNotify() {
+			view = m.renderViewLocked()
+		}
 		m.mu.Unlock()
+		m.notify(view)
 		return nil
+	}
+	if ev.Type == "message" && ev.ContentType == ContentTypeUser {
+		m.mu.Lock()
+		m.hasFinalizedStreamDigest = false
+		m.mu.Unlock()
 	}
 
 	m.mu.Lock()
@@ -1881,15 +1900,20 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 	// creates a fresh entry rather than appending to a completed message.
 	m.mu.Lock()
 	hadStreaming := m.streamingEntry != nil
-	m.streamingEntry = nil
-	m.streamingBuf.Reset()
+	skipFinalDuplicate := false
+	if hadStreaming {
+		m.finishStreamingLocked(ctx)
+		skipFinalDuplicate = isAssistantMessage && m.matchesFinalizedStreamLocked(ev.Content)
+	} else if isAssistantMessage && m.matchesFinalizedStreamLocked(ev.Content) {
+		skipFinalDuplicate = true
+	}
 	m.mu.Unlock()
 
 	// When the loop finishes streaming, it sends a non-incremental "message"
 	// event carrying the complete content for downstream consumers (harness
-	// result, lastMessageEvent). The TUI has already rendered the content
-	// incrementally, so skip this duplicate.
-	if hadStreaming && isAssistantMessage {
+	// result, lastMessageEvent). Skip it only when its source exactly matches
+	// the stream; a distinct message must remain visible.
+	if skipFinalDuplicate {
 		m.startToolCallGroup(ev.ToolCalls)
 		return nil
 	}
@@ -2196,10 +2220,10 @@ func (m *teaModel) addIncompleteToolEventLocked(contentType, rendered, toolCallI
 // accumulated content and re-renders the entry in place, producing a live
 // typewriter effect.
 //
-// For markdown-style content (assistant text/code streaming) the rendering goes
-// through StreamingMarkdownRenderer, which caches already-rendered stable lines
-// and re-renders only the trailing unstable lines. This avoids re-parsing the
-// full accumulated buffer on every token chunk, which was O(n²).
+// The full source remains in streamingBuf while StreamingMarkdownRenderer
+// incrementally maintains a bounded terminal tail. Completion replaces that
+// preview with one full document render so Markdown semantics and all text are
+// preserved after the provisional stream ends.
 func (m *teaModel) handleIncremental(ctx context.Context, ev AgentEvent) {
 	ct := ev.ContentType
 	r, ok := m.reg.Get(ct)
@@ -2212,8 +2236,20 @@ func (m *teaModel) handleIncremental(ctx context.Context, ev AgentEvent) {
 	notify := m.shouldNotify()
 
 	m.mu.Lock()
+	if m.streamingEntry == nil {
+		// The previous finalized stream is no longer the active source. A new
+		// stream starts with a clean source buffer and renderer state.
+		m.streamingBuf.Reset()
+		m.hasFinalizedStreamDigest = false
+		m.streamingHash = sha256.New()
+		if m.streamingMD != nil {
+			m.streamingMD.Reset()
+		}
+	}
 	m.streamingBuf.WriteString(ev.Content)
-	accumulated := m.streamingBuf.String()
+	if m.streamingHash != nil {
+		_, _ = m.streamingHash.Write([]byte(ev.Content))
+	}
 
 	theme := Theme(DarkTheme{})
 	if m.themeMgr != nil {
@@ -2225,28 +2261,11 @@ func (m *teaModel) handleIncremental(ctx context.Context, ev AgentEvent) {
 		ContentType: ct,
 	}
 
-	// A nil streamingEntry marks the first chunk of a new streaming message.
-	// Reset the streaming markdown cache before rendering so stale rendered
-	// lines from the previous message are dropped.
-	if m.streamingEntry == nil && m.streamingMD != nil {
-		m.streamingMD.Reset()
+	if m.streamingMD == nil {
+		m.streamingMD = NewStreamingMarkdownRenderer(NewMarkdownRenderer())
 	}
-
-	// Render the accumulated content so styles wrap the full message.
-	out := accumulated
-	if ok && r != nil {
-		if m.isStreamingMarkdown(ct) {
-			// Incremental markdown rendering: cache stable lines and only
-			// re-render the unstable tail, avoiding an O(n²) full re-render
-			// per streaming token.
-			if m.streamingMD == nil {
-				m.streamingMD = NewStreamingMarkdownRenderer(NewMarkdownRenderer())
-			}
-			out = m.streamingMD.RenderIncremental(ctx, accumulated, opts)
-		} else {
-			out = r.Render(ctx, accumulated, opts)
-		}
-	}
+	window := m.streamingMD.AppendChunkLines(ctx, ev.Content, opts)
+	out := m.renderStreamingPreviewLocked(ctx, ct, r, ok, opts, window)
 
 	if m.streamingEntry == nil {
 		entry := entryFor(ct, out, m.interactive, "")
@@ -2266,6 +2285,161 @@ func (m *teaModel) handleIncremental(ctx context.Context, ev AgentEvent) {
 	m.notify(view)
 }
 
+// renderStreamingPreviewLocked serializes only the visible tail of the bounded
+// renderer window. The complete event source remains in streamingBuf until the
+// final Markdown render, while offscreen live text remains recoverable there.
+func (m *teaModel) renderStreamingPreviewLocked(
+	ctx context.Context,
+	contentType string,
+	renderer Renderer,
+	rendererAvailable bool,
+	opts RenderOpts,
+	window StreamRenderLines,
+) string {
+	preview := streamingPreviewText(window, m.streamingPreviewRowsLocked())
+	if rendererAvailable && renderer != nil && !m.isStreamingMarkdown(contentType) {
+		// Non-Markdown streaming renderers (for example, thinking) retain their
+		// style, but only receive the bounded safe preview.
+		return renderer.Render(ctx, preview, opts)
+	}
+	return preview
+}
+
+func (m *teaModel) streamingPreviewRowsLocked() int {
+	if m.height <= 0 {
+		return 24
+	}
+	// Keep the live answer to the body area beneath the footer, status, and
+	// optional prompts. A marker and at least one tail row remain visible.
+	return max(2, m.height-8)
+}
+
+func (m *teaModel) refreshStreamingPreviewLocked(ctx context.Context) {
+	if m.streamingEntry == nil || m.streamingMD == nil {
+		return
+	}
+	contentType := m.streamingEntry.ContentType
+	renderer, ok := m.reg.Get(contentType)
+	if !ok || renderer == nil {
+		contentType = DefaultContentType
+		renderer, ok = m.reg.Get(DefaultContentType)
+	}
+	theme := Theme(DarkTheme{})
+	if m.themeMgr != nil {
+		theme = m.themeMgr.Get()
+	}
+	opts := RenderOpts{Theme: theme, Width: m.renderWidth(), ContentType: contentType}
+	m.streamingMD.Resize(ctx, opts)
+	m.streamingEntry.Full = m.renderStreamingPreviewLocked(ctx, contentType, renderer, ok, opts, m.streamingMD.WindowLines())
+	m.streamingEntry.Summary = summarizeFirstLine(m.streamingEntry.Full, 80)
+}
+
+// finishStreamingLocked replaces the bounded live preview with a complete
+// final render while the caller still owns the full source in streamingBuf.
+// It must be called with m.mu held.
+func (m *teaModel) finishStreamingLocked(ctx context.Context) bool {
+	if m.streamingEntry == nil {
+		return false
+	}
+
+	source := m.streamingBuf.String()
+	if m.streamingHash != nil {
+		copy(m.finalizedStreamDigest[:], m.streamingHash.Sum(nil))
+	} else {
+		m.finalizedStreamDigest = sha256.Sum256([]byte(source))
+	}
+	m.finalizedStreamSourceBytes = len(source)
+	m.hasFinalizedStreamDigest = true
+
+	contentType := m.streamingEntry.ContentType
+	renderer, ok := m.reg.Get(contentType)
+	if !ok || renderer == nil {
+		contentType = DefaultContentType
+		renderer, _ = m.reg.Get(DefaultContentType)
+	}
+	theme := Theme(DarkTheme{})
+	if m.themeMgr != nil {
+		theme = m.themeMgr.Get()
+	}
+	output := source
+	if renderer != nil {
+		output = renderer.Render(ctx, source, RenderOpts{
+			Theme: theme, Width: m.renderWidth(), ContentType: contentType,
+		})
+	}
+	m.streamingEntry.Full = output
+	m.streamingEntry.Summary = summarizeFirstLine(output, 80)
+	m.streamingEntry = nil
+	m.streamingBuf.Reset()
+	m.streamingHash = nil
+	if m.streamingMD != nil {
+		m.streamingMD.Reset()
+	}
+	return true
+}
+
+// matchesFinalizedStreamLocked consumes the optional full-message duplicate
+// that some producers emit after done. The digest keeps duplicate detection
+// constant-space rather than retaining another copy of the streamed answer.
+// It must be called with m.mu held.
+func (m *teaModel) matchesFinalizedStreamLocked(content string) bool {
+	if !m.hasFinalizedStreamDigest {
+		return false
+	}
+	matched := len(content) == m.finalizedStreamSourceBytes && sha256.Sum256([]byte(content)) == m.finalizedStreamDigest
+	m.hasFinalizedStreamDigest = false
+	return matched
+}
+
+func streamingPreviewText(window StreamRenderLines, maxLines int) string {
+	if maxLines < 2 {
+		maxLines = 2
+	}
+	lineCount := len(window.Lines)
+	if window.HasCurrentLine {
+		lineCount++
+	}
+	if window.HasNextLine {
+		lineCount++
+	}
+	hidden := window.HasHiddenPrefix || lineCount > maxLines
+	visibleLineLimit := maxLines
+	if hidden {
+		visibleLineLimit--
+	}
+	firstVisibleLine := max(0, lineCount-visibleLineLimit)
+	var preview strings.Builder
+	preview.Grow(maxLines * 80)
+	if hidden {
+		preview.WriteString("[earlier content hidden]")
+	}
+	hasLine := false
+	appendLine := func(line string) {
+		if hasLine {
+			preview.WriteByte('\n')
+		}
+		preview.WriteString(line)
+		hasLine = true
+	}
+	lineIndex := 0
+	for _, line := range window.Lines {
+		if lineIndex >= firstVisibleLine {
+			appendLine(line)
+		}
+		lineIndex++
+	}
+	if window.HasCurrentLine {
+		if lineIndex >= firstVisibleLine {
+			appendLine(window.CurrentLine)
+		}
+		lineIndex++
+	}
+	if window.HasNextLine && lineIndex >= firstVisibleLine {
+		appendLine(window.NextLine)
+	}
+	return preview.String()
+}
+
 // isStreamingMarkdown reports whether an incremental event of content type ct
 // should be rendered as streaming markdown via StreamingMarkdownRenderer
 // instead of the registry's renderer. Assistant text (markdown and the
@@ -2273,7 +2447,7 @@ func (m *teaModel) handleIncremental(ctx context.Context, ev AgentEvent) {
 // faint plain text and keeps the registry's StreamingThinkingRenderer.
 func (m *teaModel) isStreamingMarkdown(ct string) bool {
 	switch ct {
-	case ContentTypeMarkdown, ContentTypeStreaming, ContentTypeStreamingCode:
+	case ContentTypeAssistant, ContentTypeMarkdown, ContentTypeStreaming, ContentTypeStreamingCode:
 		return true
 	}
 	return false
