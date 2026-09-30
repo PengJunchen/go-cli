@@ -135,11 +135,11 @@ func TestExtensionHookAdapterBeforeRunBlock(t *testing.T) {
 	assert.NotContains(t, err.Error(), reasonCanary)
 	assert.NotContains(t, err.Error(), "block-hook")
 	assert.NotContains(t, err.Error(), "private request canary")
-	var observerErr *extensionHookObserverError
+	var observerErr ExtensionHookObserverIdentity
 	require.ErrorAs(t, err, &observerErr)
-	assert.Equal(t, "registered-owner", observerErr.owner)
-	assert.Equal(t, "block-hook", observerErr.hookName)
-	assert.Equal(t, "agent.before_run", observerErr.eventName)
+	assert.Equal(t, "registered-owner", observerErr.ExtensionOwner())
+	assert.Equal(t, "block-hook", observerErr.HookName())
+	assert.Equal(t, "agent.before_run", observerErr.EventName())
 }
 
 // AfterRun forwards the agent.after_run event and does not error on pass.

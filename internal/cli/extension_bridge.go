@@ -25,6 +25,16 @@ type extensionHookAdapter struct {
 	registration extension.HookRegistration
 }
 
+// ExtensionHookObserverIdentity lets callers inspect which registration
+// produced a bridge error via errors.As without interpolating identity into
+// Error() output or default logs.
+type ExtensionHookObserverIdentity interface {
+	error
+	ExtensionOwner() string
+	HookName() string
+	EventName() string
+}
+
 // extensionHookObserverError preserves local registration identity without
 // putting extension-controlled names, request data, or Hook diagnostics in its
 // fixed Error string. Unwrap retains errors.Is behavior for the stable bridge
@@ -35,6 +45,8 @@ type extensionHookObserverError struct {
 	eventName string
 	cause     error
 }
+
+var _ ExtensionHookObserverIdentity = (*extensionHookObserverError)(nil)
 
 func (e *extensionHookObserverError) Error() string {
 	if e == nil || e.cause == nil {
@@ -48,6 +60,27 @@ func (e *extensionHookObserverError) Unwrap() error {
 		return nil
 	}
 	return e.cause
+}
+
+func (e *extensionHookObserverError) ExtensionOwner() string {
+	if e == nil {
+		return ""
+	}
+	return e.owner
+}
+
+func (e *extensionHookObserverError) HookName() string {
+	if e == nil {
+		return ""
+	}
+	return e.hookName
+}
+
+func (e *extensionHookObserverError) EventName() string {
+	if e == nil {
+		return ""
+	}
+	return e.eventName
 }
 
 var _ core.Hook = (*extensionHookAdapter)(nil)
