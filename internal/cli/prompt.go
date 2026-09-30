@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 
 	"github.com/pengjunchen/go-cli/internal/config"
@@ -148,7 +149,7 @@ func (c *promptCmd) Run(ctx context.Context, cfg Config, args []string) (runErr 
 	forkFlag := parsed.forkFlag
 	resumeSessionID := parsed.resumeSession
 	noSandbox := parsed.noSandbox
-	prompt := parsed.remaining[0]
+	prompt := strings.Join(parsed.remaining, " ")
 
 	var rc *config.Config
 	if v, ok := cfg.(*config.Config); ok {
