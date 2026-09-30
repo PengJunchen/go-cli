@@ -1092,7 +1092,7 @@ func preflightNonDurableRequest(
 	}
 	currentSubmissionID := items[currentSubmissionIndex].ID
 	currentSubmission := cloneLLMMessage(messages[currentSubmissionIndex])
-	compacted, result, err := midTurnCompactor.CompactIfNeeded(ctx, cloneCompactionTurnItems(items), maxTokens, estimator, compactor)
+	compacted, result, err := midTurnCompactor.CompactIfNeeded(ctx, items, maxTokens, estimator, withIsolatedCompactorInput(compactor))
 	if err != nil {
 		return nil, currentSubmissionIndex, result, err
 	}

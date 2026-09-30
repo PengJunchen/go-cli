@@ -220,6 +220,18 @@ func TestDurableCurrentInputPreservationUsesTypedSourceIdentity(t *testing.T) {
 	require.NoError(t, validateDurableCurrentInputPreserved(captured, []compaction.TurnItem{prior, current}))
 }
 
+func TestCloneCompactionTurnItemCopiesNestedToolArguments(t *testing.T) {
+	args := map[string]any{"nested": []any{map[string]any{"path": "original"}}}
+	item := compaction.TurnItem{
+		Role:      compaction.RoleAssistant,
+		ToolCalls: []llm.ToolCall{{ID: "call-1", Name: "read", Args: args}},
+	}
+	cloned := cloneCompactionTurnItem(item)
+	args["nested"].([]any)[0].(map[string]any)["path"] = "mutated"
+	require.Equal(t, "original", cloned.ToolCalls[0].Args.(map[string]any)["nested"].([]any)[0].(map[string]any)["path"],
+		"JSON tool arguments must not remain aliased to the mutable compactor input graph")
+}
+
 func TestClosedHistoricalUnknownPassesRequestGateButNotOverBudgetCompactionGate(t *testing.T) {
 	snapshot := &CompactionSourceSnapshot{
 		Revision: "rev-unknown", BranchID: "branch-main",
