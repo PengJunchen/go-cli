@@ -1,0 +1,24 @@
+> R8 active stream                                                                                                                                                                                      
+Session: s_f1440b7432c34d4cad39f7aaa0eb1c46 | Branch: main | Loaded rows: 50 | loaded projection only                                                                                                   
+R8-ANSWER-18 durable viewport marker.                                                               │[tool: read]                                                                                       
+[user]                                                                                               R8_TOOL_PANE_MARKER structured read output                                                         
+R8 seed 19                                                                                                                                                                                              
+[assistant]                                                                                          [receipt: success]                                                                                 
+R8-ANSWER-19 durable viewport marker.                                                                                                                                                                   
+[user]                                                                                                                                                                                                  
+R8 seed 20                                                                                                                                                                                              
+[assistant]                                                                                                                                                                                             
+R8-ANSWER-20 durable viewport marker.                                                                                                                                                                   
+[user]                                                                                                                                                                                                  
+R8 seed 21                                                                                                                                                                                              
+[assistant]                                                                                                                                                                                             
+R8-ANSWER-21 durable viewport marker.                                                                                                                                                                   
+[user]                                                                                                                                                                                                  
+R8 seed 22                                                                                                                                                                                              
+[assistant]                                                                                                                                                                                             
+R8-ANSWER-22 durable viewport marker.                                                                                                                                                                   
+[user]                                                                                                                                                                                                  
+R8 seed 23                                                                                                                                                                                              
+[assistant]                                                                                                                                                                                             
+R8-ANSWER-23 durable viewport marker.                                                                                                                                                                   
+r8-local-fixture | turn #25 | interact | chat
