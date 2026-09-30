@@ -259,8 +259,8 @@ func TestSkill_Adapter_WrappingAsTool(t *testing.T) {
 	adapter := skill.NewSkillAdapter(def)
 	assert.Equal(t, "test-skill", adapter.Name())
 	assert.Contains(t, adapter.Description(), "A test skill")
-	assert.Contains(t, adapter.Description(), "tools: bash, read")
-	assert.Contains(t, adapter.Description(), "parameters: verbose")
+	assert.Contains(t, adapter.Description(), "suggested tools (not enforced): bash, read")
+	assert.Contains(t, adapter.Description(), "legacy parameter metadata (not accepted as arguments): verbose")
 
 	result, err := adapter.Execute(ctx, tools.ToolCall{
 		ID:   "call-1",
@@ -552,8 +552,8 @@ Expert refactoring body.`
 	adapter := skill.NewSkillAdapter(got)
 	assert.Equal(t, "refactor", adapter.Name())
 	assert.Contains(t, adapter.Description(), "Refactoring skill")
-	assert.Contains(t, adapter.Description(), "tools: bash, read, write")
-	assert.Contains(t, adapter.Description(), "parameters: max_files")
+	assert.Contains(t, adapter.Description(), "suggested tools (not enforced): bash, read, write")
+	assert.Contains(t, adapter.Description(), "legacy parameter metadata (not accepted as arguments): max_files")
 
 	// Step 6: Register into tool registry and execute.
 	toolReg := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck,gosec
