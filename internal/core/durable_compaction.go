@@ -1,6 +1,7 @@
 package core
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -225,6 +226,26 @@ func cloneCompactionTurnItems(items []compaction.TurnItem) []compaction.TurnItem
 		cloned[index] = cloneCompactionTurnItem(item)
 	}
 	return cloned
+}
+
+type isolatedCompactorInput struct {
+	delegate compaction.Compactor
+}
+
+func (compactor isolatedCompactorInput) Compact(
+	ctx context.Context,
+	items []compaction.TurnItem,
+	maxTokens int,
+	estimator compaction.TokenEstimator,
+) (compaction.CompactionResult, error) {
+	return compactor.delegate.Compact(ctx, cloneCompactionTurnItems(items), maxTokens, estimator)
+}
+
+func withIsolatedCompactorInput(compactor compaction.Compactor) compaction.Compactor {
+	if compactor == nil {
+		return nil
+	}
+	return isolatedCompactorInput{delegate: compactor}
 }
 
 func validateDurableCurrentInputPreserved(current compaction.TurnItem, result []compaction.TurnItem) error {
