@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"sync"
 
-	"github.com/pengjunchen/go-cli/internal/compaction"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/tools"
 )
@@ -1048,10 +1047,4 @@ func validRunCompletionProof(proof tools.PreparedCompletionProof) bool {
 	default:
 		return false
 	}
-}
-
-type unavailableRunCommitCompactor struct{}
-
-func (unavailableRunCommitCompactor) Compact(_ context.Context, items []compaction.TurnItem, _ int, _ compaction.TokenEstimator) (compaction.CompactionResult, error) {
-	return compaction.CompactionResult{Items: items}, ErrRunCommitCompactionProjectionUnavailable
 }
