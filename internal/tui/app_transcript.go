@@ -250,18 +250,27 @@ func composeTranscriptViewportRowText(row *transcriptViewportRow) {
 		base = row.text
 	}
 	row.text = base
+	if row.baseLines != nil {
+		row.lines = append([]string(nil), row.baseLines...)
+	}
+	appendLabel := func(label string) {
+		row.text += "\n" + label
+		if row.baseLines != nil {
+			row.lines = append(row.lines, label)
+		}
+	}
 	if row.sourceTruncated != nil {
 		if *row.sourceTruncated {
-			row.text += "\n[source output truncated]"
+			appendLabel("[source output truncated]")
 		} else {
-			row.text += "\n[source output not truncated]"
+			appendLabel("[source output not truncated]")
 		}
 	}
 	if row.receiptOutcome != "" {
-		row.text += "\n[receipt: " + safeTerminalText(row.receiptOutcome) + "]"
+		appendLabel("[receipt: " + safeTerminalText(row.receiptOutcome) + "]")
 	}
 	if row.viewTruncated {
-		row.text += "\n[view truncated]"
+		appendLabel("[view truncated]")
 	}
 }
 
@@ -272,11 +281,11 @@ func canonicalTranscriptViewportRows(snapshot CanonicalTranscriptSnapshot) []tra
 		if content == "" && source.Compaction != nil {
 			content = source.Compaction.Summary
 		}
-		preview, viewTruncated := boundedCanonicalTranscriptPreview(content)
-		baseDisplay := transcriptRowHeader(source)
-		if preview != "" {
-			baseDisplay += "\n" + preview
-		}
+		previewLines, viewTruncated := canonicalTranscriptPreviewLines(content)
+		header := transcriptRowHeader(source)
+		baseLines := make([]string, 0, len(previewLines)+1)
+		baseLines = append(baseLines, header)
+		baseLines = append(baseLines, previewLines...)
 		revision := source.SourceSeq
 		if revision == 0 {
 			revision = uint64(index + 1)
@@ -288,7 +297,8 @@ func canonicalTranscriptViewportRows(snapshot CanonicalTranscriptSnapshot) []tra
 		}
 		rows = append(rows, transcriptViewportRow{
 			key:             source.Key.EntryID,
-			baseText:        baseDisplay,
+			baseText:        header,
+			baseLines:       baseLines,
 			searchText:      content,
 			revision:        revision,
 			expanded:        true,
@@ -300,6 +310,31 @@ func canonicalTranscriptViewportRows(snapshot CanonicalTranscriptSnapshot) []tra
 		composeTranscriptViewportRowText(&rows[len(rows)-1])
 	}
 	return rows
+}
+
+func canonicalTranscriptPreviewLines(source string) ([]string, bool) {
+	if len(source) <= maxCanonicalTranscriptPreviewBytes {
+		if source == "" {
+			return nil, false
+		}
+		preview := safeTerminalText(source)
+		if containsTerminalControl(source) || !utf8.ValidString(source) {
+			return []string{preview}, false
+		}
+		return strings.Split(preview, "\n"), false
+	}
+	start := len(source) - maxCanonicalTranscriptPreviewBytes
+	for start < len(source) && !utf8.RuneStart(source[start]) {
+		start++
+	}
+	preview := safeTerminalText(source[start:])
+	lines := []string{"[earlier content hidden]"}
+	if containsTerminalControl(source[start:]) || !utf8.ValidString(source[start:]) {
+		lines = append(lines, preview)
+	} else {
+		lines = append(lines, strings.Split(preview, "\n")...)
+	}
+	return lines, true
 }
 
 func transcriptRowHeader(row CanonicalTranscriptRow) string {

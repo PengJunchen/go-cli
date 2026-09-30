@@ -27,6 +27,7 @@ var (
 type transcriptViewportRow struct {
 	key               string
 	baseText          string
+	baseLines         []string
 	text              string
 	lines             []string
 	lineWidth         int
@@ -63,6 +64,7 @@ type transcriptViewportRowMetadata struct {
 	text           string
 	renderedLines  []string
 	lineOffsets    []int
+	renderOnDemand bool
 	revision       uint64
 	width          int
 	expanded       bool
@@ -237,11 +239,19 @@ func sameTranscriptViewportRow(a, b transcriptViewportRow) bool {
 	if a.key != b.key || a.baseText != b.baseText || a.text != b.text || a.lineWidth != b.lineWidth ||
 		a.searchText != b.searchText || a.receiptOutcome != b.receiptOutcome || a.revision != b.revision ||
 		a.expanded != b.expanded || a.viewTruncated != b.viewTruncated || a.sourceTruncated != b.sourceTruncated ||
-		a.excludeFromSearch != b.excludeFromSearch || a.toolPane != b.toolPane || len(a.lines) != len(b.lines) {
+		a.excludeFromSearch != b.excludeFromSearch || a.toolPane != b.toolPane ||
+		!sameTranscriptViewportLines(a.baseLines, b.baseLines) || !sameTranscriptViewportLines(a.lines, b.lines) {
 		return false
 	}
-	for index := range a.lines {
-		if a.lines[index] != b.lines[index] {
+	return true
+}
+
+func sameTranscriptViewportLines(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for index := range a {
+		if a[index] != b[index] {
 			return false
 		}
 	}
@@ -283,6 +293,21 @@ func (v *transcriptViewport) newTranscriptViewportRowMetadata(row transcriptView
 	v.nextContentVersion++
 	if row.lines != nil {
 		rendered, offsets := transcriptViewportWrapLines(row.lines, width, row.lineWidth)
+		if row.baseLines != nil {
+			if len(rendered) == 0 {
+				rendered = []string{""}
+			}
+			return &transcriptViewportRowMetadata{
+				key:            row.key,
+				text:           row.text,
+				renderOnDemand: true,
+				revision:       row.revision,
+				width:          width,
+				expanded:       row.expanded,
+				contentVersion: v.nextContentVersion,
+				lineCount:      len(rendered),
+			}
+		}
 		if len(rendered) == 0 {
 			rendered = []string{""}
 			offsets = []int{0}
@@ -716,7 +741,9 @@ func (v *transcriptViewport) renderRange(start, end int) {
 		}
 		wrapped := meta.renderedLines
 		offsets := meta.lineOffsets
-		if wrapped == nil {
+		if meta.renderOnDemand {
+			wrapped, offsets = transcriptViewportWrapLines(row.lines, v.width, row.lineWidth)
+		} else if wrapped == nil {
 			wrappedText, textOffsets := transcriptViewportWrapWithOffsets(row.text, v.width)
 			wrapped = strings.Split(wrappedText, "\n")
 			offsets = textOffsets
