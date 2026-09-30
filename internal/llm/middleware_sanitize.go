@@ -4,6 +4,7 @@
 package llm
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"log/slog"
@@ -86,6 +87,106 @@ func sanitizeContent(content string) string {
 	return content
 }
 
+type streamSanitizeMarker struct {
+	open  []byte
+	close []byte
+}
+
+var streamSanitizeMarkers = [...]streamSanitizeMarker{
+	{open: []byte("<antThinking>"), close: []byte("</antThinking>")},
+	{open: []byte("【"), close: []byte("】")},
+	{open: []byte("```thinking\n"), close: []byte("```")},
+}
+
+// streamContentSanitizer keeps only a possible marker prefix between chunks.
+// Sensitive block bodies are discarded as they arrive, so carry memory is
+// bounded by the longest marker rather than by block or response size.
+type streamContentSanitizer struct {
+	block      *streamSanitizeMarker
+	pending    []byte
+	closing    []byte
+	newlineRun int
+}
+
+func (s *streamContentSanitizer) sanitize(content string) string {
+	var output strings.Builder
+	output.Grow(len(content))
+	for i := 0; i < len(content); i++ {
+		value := content[i]
+		if s.block != nil {
+			s.consumeSensitive(value)
+			continue
+		}
+
+		s.pending = append(s.pending, value)
+		for len(s.pending) > 0 {
+			var matched *streamSanitizeMarker
+			possiblePrefix := false
+			for i := range streamSanitizeMarkers {
+				marker := &streamSanitizeMarkers[i]
+				if bytes.Equal(s.pending, marker.open) {
+					matched = marker
+					break
+				}
+				if len(s.pending) < len(marker.open) && bytes.Equal(s.pending, marker.open[:len(s.pending)]) {
+					possiblePrefix = true
+				}
+			}
+			if matched != nil {
+				s.block = matched
+				s.pending = s.pending[:0]
+				s.closing = s.closing[:0]
+				break
+			}
+			if possiblePrefix {
+				break
+			}
+
+			s.writeVisible(s.pending[0], &output)
+			copy(s.pending, s.pending[1:])
+			s.pending = s.pending[:len(s.pending)-1]
+		}
+	}
+	return output.String()
+}
+
+func (s *streamContentSanitizer) consumeSensitive(value byte) {
+	s.closing = append(s.closing, value)
+	if bytes.Equal(s.closing, s.block.close) {
+		s.block = nil
+		s.closing = s.closing[:0]
+		return
+	}
+
+	maxPrefix := len(s.block.close) - 1
+	if len(s.closing) < maxPrefix {
+		maxPrefix = len(s.closing)
+	}
+	keep := 0
+	for size := maxPrefix; size > 0; size-- {
+		if bytes.Equal(s.closing[len(s.closing)-size:], s.block.close[:size]) {
+			keep = size
+			break
+		}
+	}
+	if keep > 0 {
+		copy(s.closing[:keep], s.closing[len(s.closing)-keep:])
+	}
+	s.closing = s.closing[:keep]
+}
+
+func (s *streamContentSanitizer) writeVisible(value byte, output *strings.Builder) {
+	if value == '\n' {
+		if s.newlineRun < 2 {
+			output.WriteByte(value)
+			s.newlineRun++
+		}
+		return
+	}
+	s.newlineRun = 0
+	output.WriteByte(value)
+}
+
 // Generate sanitizes the response content returned by the next model. The
 // complete response is also trimmed of surrounding whitespace.
 func (m *sanitizeModel) Generate(ctx context.Context, msgs []Message, opts ...Option) (*Message, error) {
@@ -102,9 +203,8 @@ func (m *sanitizeModel) Generate(ctx context.Context, msgs []Message, opts ...Op
 	return resp, nil
 }
 
-// Stream sanitizes each chunk's content as it is forwarded from the next
-// model. Edge whitespace is intentionally preserved so that content split
-// across chunks is not corrupted.
+// Stream sanitizes content across chunk boundaries. Each source chunk still
+// produces one output chunk with its metadata intact; only Content is rewritten.
 func (m *sanitizeModel) Stream(ctx context.Context, msgs []Message, opts ...Option) (<-chan MessageChunk, error) {
 	streamCtx, cancel := context.WithCancelCause(ctx)
 	ch, err := m.next.Stream(streamCtx, msgs, opts...)
@@ -121,6 +221,7 @@ func (m *sanitizeModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 	out := make(chan MessageChunk, 1)
 	go func() {
 		defer close(out)
+		var sanitizer streamContentSanitizer
 		abort := func(cause error) {
 			cancelStreamAttempt(ctx, cancel, cause)
 			drainMessageChunks(ch)
@@ -136,14 +237,18 @@ func (m *sanitizeModel) Stream(ctx context.Context, msgs []Message, opts ...Opti
 					return
 				}
 				original := chunk.Content
-				chunk.Content = sanitizeContent(original)
+				chunk.Content = sanitizer.sanitize(original)
 				if chunk.Content != original {
 					m.logger.Debug("sanitize.stream.modified",
 						"before_len", len(original), "after_len", len(chunk.Content))
 				}
 				if chunk.Error != nil {
-					out <- chunk
-					abort(chunk.Error)
+					select {
+					case out <- chunk:
+						abort(chunk.Error)
+					case <-streamCtx.Done():
+						abort(context.Cause(streamCtx))
+					}
 					return
 				}
 				select {

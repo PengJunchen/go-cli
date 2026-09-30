@@ -2,7 +2,11 @@ package llm
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -101,4 +105,237 @@ func TestSanitizeModelMiddleware_StreamSanitized(t *testing.T) {
 		got += chunk.Content
 	}
 	assert.Equal(t, "Hello World", got)
+}
+
+func TestSanitizeModelMiddleware_StreamRedactsMarkersAcrossEverySplit(t *testing.T) {
+	cases := []struct {
+		name   string
+		secret string
+		text   string
+		want   string
+	}{
+		{
+			name:   "claude",
+			secret: "CLAUDE-SECRET",
+			text:   "before <antThinking>CLAUDE-SECRET\nprivate</antThinking> after",
+			want:   "before  after",
+		},
+		{
+			name:   "gpt",
+			secret: "GPT-SECRET",
+			text:   "before【GPT-SECRET】 after",
+			want:   "before after",
+		},
+		{
+			name:   "gemini",
+			secret: "GEMINI-SECRET",
+			text:   "before```thinking\nGEMINI-SECRET\nprivate\n``` after",
+			want:   "before after",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for split := 0; split <= len(tc.text); split++ {
+				t.Run(fmt.Sprintf("split-%d", split), func(t *testing.T) {
+					base := &sanitizeMockModel{streamChunks: []MessageChunk{
+						{Role: RoleAssistant, Content: tc.text[:split]},
+						{Role: RoleAssistant, Content: tc.text[split:], Final: true},
+					}}
+					wrapped := NewSanitizeModelMiddleware().WrapModel(base)
+					ch, err := wrapped.Stream(context.Background(), nil)
+					require.NoError(t, err)
+
+					var got strings.Builder
+					for chunk := range ch {
+						got.WriteString(chunk.Content)
+					}
+					assert.NotContains(t, got.String(), tc.secret)
+					assert.Equal(t, tc.want, got.String())
+				})
+			}
+		})
+	}
+}
+
+func TestSanitizeModelMiddleware_StreamFailsClosedForUnclosedSensitiveBlocks(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+	}{
+		{name: "claude", text: "answer<antThinking>CLAUDE-EOF-SECRET"},
+		{name: "gpt", text: "answer【GPT-EOF-SECRET"},
+		{name: "gemini", text: "answer```thinking\nGEMINI-EOF-SECRET"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			base := &sanitizeMockModel{streamChunks: []MessageChunk{{Content: tc.text}}}
+			wrapped := NewSanitizeModelMiddleware().WrapModel(base)
+			ch, err := wrapped.Stream(context.Background(), nil)
+			require.NoError(t, err)
+
+			var got strings.Builder
+			for chunk := range ch {
+				got.WriteString(chunk.Content)
+			}
+			assert.Equal(t, "answer", got.String())
+			assert.NotContains(t, got.String(), "SECRET")
+		})
+	}
+}
+
+func TestSanitizeModelMiddleware_StreamDropsIncompleteOpeningMarkerAtEOF(t *testing.T) {
+	base := &sanitizeMockModel{streamChunks: []MessageChunk{{Content: "answer <antThink"}}}
+	wrapped := NewSanitizeModelMiddleware().WrapModel(base)
+	ch, err := wrapped.Stream(context.Background(), nil)
+	require.NoError(t, err)
+
+	var got strings.Builder
+	for chunk := range ch {
+		got.WriteString(chunk.Content)
+	}
+	assert.Equal(t, "answer ", got.String())
+}
+
+func TestSanitizeModelMiddleware_StreamCollapsesNewlinesAcrossChunksAndKeepsWhitespace(t *testing.T) {
+	base := &sanitizeMockModel{streamChunks: []MessageChunk{
+		{Role: RoleAssistant, Content: "  leading\n"},
+		{Role: RoleAssistant, Content: "\n\ntrailing  ", Final: true},
+	}}
+	wrapped := NewSanitizeModelMiddleware().WrapModel(base)
+	ch, err := wrapped.Stream(context.Background(), nil)
+	require.NoError(t, err)
+
+	var got strings.Builder
+	for chunk := range ch {
+		got.WriteString(chunk.Content)
+	}
+	assert.Equal(t, "  leading\n\ntrailing  ", got.String())
+}
+
+func TestSanitizeModelMiddleware_StreamPreservesChunkMetadataAndBackpressure(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	started := make(chan struct{})
+	thirdRead := make(chan struct{})
+	upstream := make(chan MessageChunk)
+	base := &blockingSanitizeModel{stream: func() <-chan MessageChunk { return upstream }}
+	wrapped := NewSanitizeModelMiddleware().WrapModel(base)
+	out, err := wrapped.Stream(ctx, nil)
+	require.NoError(t, err)
+
+	go func() {
+		close(started)
+		upstream <- MessageChunk{Role: RoleAssistant, Content: "visible", Final: false}
+		upstream <- MessageChunk{Role: RoleAssistant, Content: "later", Final: false}
+		upstream <- MessageChunk{Role: RoleAssistant, Content: "last", Final: true, FinishReason: "stop", Usage: &Usage{TotalTokens: 2}}
+		close(thirdRead)
+		close(upstream)
+	}()
+	<-started
+
+	select {
+	case <-thirdRead:
+		t.Fatal("sanitizer read a third upstream chunk while both output slots were occupied")
+	case <-time.After(20 * time.Millisecond):
+	}
+
+	first := <-out
+	assert.Equal(t, "visible", first.Content)
+	assert.False(t, first.Final)
+	second := <-out
+	assert.Equal(t, "later", second.Content)
+	assert.False(t, second.Final)
+	third := <-out
+	assert.Equal(t, "last", third.Content)
+	assert.True(t, third.Final)
+	assert.Equal(t, "stop", third.FinishReason)
+	require.NotNil(t, third.Usage)
+	assert.Equal(t, 2, third.Usage.TotalTokens)
+	_, ok := <-out
+	assert.False(t, ok)
+}
+
+func TestSanitizeModelMiddleware_StreamCancellationReachesUpstream(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	upstreamCanceled := make(chan struct{})
+	base := &cancelAwareSanitizeModel{canceled: upstreamCanceled}
+	wrapped := NewSanitizeModelMiddleware().WrapModel(base)
+	out, err := wrapped.Stream(ctx, nil)
+	require.NoError(t, err)
+	cancel()
+
+	for range out {
+	}
+	select {
+	case <-upstreamCanceled:
+	case <-time.After(time.Second):
+		t.Fatal("sanitizer did not cancel the upstream stream")
+	}
+}
+
+func TestSanitizeModelMiddleware_StreamPreservesFinalErrorCauseWithoutLeakingContent(t *testing.T) {
+	stopErr := errors.New("provider stream stopped")
+	base := &sanitizeMockModel{streamChunks: []MessageChunk{{
+		Role:    RoleAssistant,
+		Content: "visible【GPT-ERROR-SECRET",
+		Error:   stopErr,
+	}}}
+	wrapped := NewSanitizeModelMiddleware().WrapModel(base)
+	ch, err := wrapped.Stream(context.Background(), nil)
+	require.NoError(t, err)
+
+	var got strings.Builder
+	var gotErr error
+	for chunk := range ch {
+		got.WriteString(chunk.Content)
+		gotErr = chunk.Error
+	}
+	assert.Equal(t, "visible", got.String())
+	require.ErrorIs(t, gotErr, stopErr)
+	assert.NotContains(t, got.String(), "SECRET")
+}
+
+func TestStreamContentSanitizerRetainsOnlyBoundedMarkerCarry(t *testing.T) {
+	const secretSize = 1 << 20
+	secret := strings.Repeat("private", secretSize/len("private"))
+	var sanitizer streamContentSanitizer
+	got := sanitizer.sanitize("visible【" + secret)
+	assert.Equal(t, "visible", got)
+	assert.Same(t, &streamSanitizeMarkers[1], sanitizer.block)
+	assert.LessOrEqual(t, len(sanitizer.pending), len(streamSanitizeMarkers[2].open))
+	assert.LessOrEqual(t, len(sanitizer.closing), len(streamSanitizeMarkers[0].close)-1)
+
+	got = sanitizer.sanitize("】after")
+	assert.Equal(t, "after", got)
+	assert.Nil(t, sanitizer.block)
+}
+
+type blockingSanitizeModel struct {
+	stream func() <-chan MessageChunk
+}
+
+func (*blockingSanitizeModel) Generate(context.Context, []Message, ...Option) (*Message, error) {
+	return nil, fmt.Errorf("unexpected Generate call")
+}
+
+func (m *blockingSanitizeModel) Stream(context.Context, []Message, ...Option) (<-chan MessageChunk, error) {
+	return m.stream(), nil
+}
+
+type cancelAwareSanitizeModel struct {
+	canceled chan struct{}
+}
+
+func (*cancelAwareSanitizeModel) Generate(context.Context, []Message, ...Option) (*Message, error) {
+	return nil, fmt.Errorf("unexpected Generate call")
+}
+
+func (m *cancelAwareSanitizeModel) Stream(ctx context.Context, _ []Message, _ ...Option) (<-chan MessageChunk, error) {
+	ch := make(chan MessageChunk)
+	go func() {
+		defer close(ch)
+		<-ctx.Done()
+		close(m.canceled)
+	}()
+	return ch, nil
 }
