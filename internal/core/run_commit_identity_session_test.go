@@ -1,3 +1,5 @@
+//go:build linux || darwin
+
 package core_test
 
 import (
@@ -6,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -129,7 +132,7 @@ func TestRunCommitPersistsManagedBashIdentityBeforeSequentialUserCode(t *testing
 	t.Setenv("HOME", root)
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
 	writer := newExecutionIdentityGateWriter(nil, 1)
-	prepared, sink, _ := prepareExecutionIdentitySession(t, root, "workspace-v1-identity-sequential", "identity sequential", writer)
+	prepared, sink, index := prepareExecutionIdentitySession(t, root, "workspace-v1-identity-sequential", "identity sequential", writer)
 	defer prepared.Close()
 	defer close(writer.releaseAll)
 
@@ -146,12 +149,31 @@ func TestRunCommitPersistsManagedBashIdentityBeforeSequentialUserCode(t *testing
 	require.Equal(t, core.RunExecutionCleanupPending, identityRow.ResourceState)
 	require.NotNil(t, identityRow.ExecutionIdentity)
 	require.NoError(t, identityRow.ExecutionIdentity.Validate())
+	requirePlatformPIDNamespaceToken(t, identityRow.ExecutionIdentity.PIDNamespaceToken)
 	writer.releases <- struct{}{}
 
 	awaitIdentityRun(t, stream, events)
 	require.FileExists(t, effectPath)
 	require.Equal(t, "bash-sequential-1", identityRow.ToolCallID)
 	requireIdentityRowMatchesIntent(t, prepared, identityRow)
+	sessionID := prepared.View().SessionID
+	require.NoError(t, prepared.Close())
+	reopened, err := session.NewDurableJSONLSessionPreparer(filepath.Join(root, "durable"), index).PrepareResume(context.Background(), sessionID)
+	require.NoError(t, err)
+	defer reopened.Close()
+	_, err = session.NewSessionRunCommitSink(reopened, index, "workspace-v1-identity-sequential", nil)
+	require.NoError(t, err, "new PID namespace tokens must remain readable through the normal session recovery path")
+	reopenedSnapshot, err := reopened.Snapshot()
+	require.NoError(t, err)
+	var readBackIdentity *session.ExecutionIdentity
+	for _, row := range reopenedSnapshot.DurableEntries {
+		if row.ID == identityRow.ID {
+			readBackIdentity = row.ExecutionIdentity
+			break
+		}
+	}
+	require.NotNil(t, readBackIdentity)
+	require.Equal(t, identityRow.ExecutionIdentity, readBackIdentity)
 }
 
 func TestRunCommitPersistsEachManagedBashIdentityBeforeParallelUserCode(t *testing.T) {
@@ -184,6 +206,7 @@ func TestRunCommitPersistsEachManagedBashIdentityBeforeParallelUserCode(t *testi
 		require.Equal(t, core.RunExecutionCleanupPending, row.ResourceState)
 		require.NotNil(t, row.ExecutionIdentity)
 		require.NoError(t, row.ExecutionIdentity.Validate())
+		requirePlatformPIDNamespaceToken(t, row.ExecutionIdentity.PIDNamespaceToken)
 		seen[row.ToolCallID] = row
 		writer.releases <- struct{}{}
 	}
@@ -193,6 +216,18 @@ func TestRunCommitPersistsEachManagedBashIdentityBeforeParallelUserCode(t *testi
 		require.FileExists(t, effectPath)
 		requireIdentityRowMatchesIntent(t, prepared, seen[callID])
 	}
+}
+
+func requirePlatformPIDNamespaceToken(t *testing.T, token string) {
+	t.Helper()
+	if runtime.GOOS == "linux" {
+		want, err := core.CurrentPIDNamespaceToken()
+		require.NoError(t, err)
+		require.NotEmpty(t, want)
+		require.Equal(t, want, token, "the exact Linux PID namespace must be synced before Bash starts")
+		return
+	}
+	require.Empty(t, token, "Darwin does not support PID namespace tokens")
 }
 
 func TestRunCommitKeepsManagedBashGatedWhenIdentitySyncFails(t *testing.T) {

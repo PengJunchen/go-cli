@@ -305,6 +305,14 @@ func (consumer *runCommitConsumer) recordTaskExecution(taskID uint64, execution 
 }
 
 func (consumer *runCommitConsumer) processExecutionIdentityObserver(taskID uint64, intent ActionIntent) tools.ProcessExecutionIdentityObserver {
+	return consumer.processExecutionIdentityObserverWithPIDNamespaceTokenSource(taskID, intent, CurrentPIDNamespaceToken)
+}
+
+func (consumer *runCommitConsumer) processExecutionIdentityObserverWithPIDNamespaceTokenSource(
+	taskID uint64,
+	intent ActionIntent,
+	readPIDNamespaceToken func() (string, error),
+) tools.ProcessExecutionIdentityObserver {
 	return func(_ context.Context, observed tools.ProcessExecutionIdentity) error {
 		identity := ExecutionIdentity{
 			Kind:              ExecutionIdentityProcessGroup,
@@ -313,6 +321,19 @@ func (consumer *runCommitConsumer) processExecutionIdentityObserver(taskID uint6
 			LeaderPID:         observed.LeaderPID,
 			ProcessStartToken: observed.ProcessStartToken,
 			ProcessGroupID:    observed.ProcessGroupID,
+		}
+		if observed.Platform == "linux" {
+			if readPIDNamespaceToken == nil {
+				return errors.New("core: Linux PID namespace token source is unavailable")
+			}
+			pidNamespaceToken, err := readPIDNamespaceToken()
+			if err != nil {
+				return fmt.Errorf("core: read current Linux PID namespace token: %w", err)
+			}
+			if pidNamespaceToken == "" {
+				return errors.New("core: current Linux PID namespace token is empty")
+			}
+			identity.PIDNamespaceToken = pidNamespaceToken
 		}
 		if err := identity.Validate(); err != nil {
 			return fmt.Errorf("core: invalid prepared process execution identity: %w", err)
