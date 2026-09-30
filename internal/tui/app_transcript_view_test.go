@@ -254,6 +254,36 @@ func TestCanonicalTranscriptViewportPreservesANSIStateAcrossSourceLines(t *testi
 	require.Contains(t, strings.Join(displayed, "\n"), content, "SGR state must survive a source newline")
 }
 
+func TestCanonicalTranscriptViewportPreservesInRowAnchorAcrossResize(t *testing.T) {
+	contentLines := make([]string, 40)
+	for index := range contentLines {
+		contentLines[index] = fmt.Sprintf("source-line-%02d", index)
+	}
+	snapshot := CanonicalTranscriptSnapshot{
+		PhysicalSessionID: "session-row-anchor",
+		BranchID:          "branch-row-anchor",
+		Revision:          "revision-row-anchor",
+		Rows: []CanonicalTranscriptRow{{
+			Key:     DurableTranscriptKey{PhysicalSessionID: "session-row-anchor", BranchID: "branch-row-anchor", EntryID: "row-anchor"},
+			Kind:    TranscriptRowAssistant,
+			Message: core.AgentMessage{Role: "assistant", Content: strings.Join(contentLines, "\n")},
+		}},
+	}
+	viewport := newTranscriptViewport(20, 0)
+	require.NoError(t, viewport.SetRows(canonicalTranscriptViewportRows(snapshot), "row-anchor"))
+	viewport.Resize(20, 5)
+	viewport.ScrollLines(-12)
+	anchorBeforeResize := viewport.Anchor()
+	require.Greater(t, anchorBeforeResize.sourceOffset, len("[assistant]"), "scrolling within a canonical row anchors by body source offset")
+	before := viewport.Window()
+	require.NotEqual(t, "[assistant]", before.lines[0].text, "scrolling down into the canonical body must leave the row header")
+
+	viewport.Resize(24, 5)
+	after := viewport.Window()
+	require.Equal(t, anchorBeforeResize.sourceOffset, viewport.Anchor().sourceOffset, "resize preserves the in-row source anchor")
+	require.Equal(t, before.lines[0].text, after.lines[0].text, "unchanged-width-independent source lines remain anchored across resize")
+}
+
 func TestAppLiveAssistantChunkUpdatesViewportRowThroughUpdate(t *testing.T) {
 	snapshot := CanonicalTranscriptSnapshot{
 		PhysicalSessionID: "session-live",
