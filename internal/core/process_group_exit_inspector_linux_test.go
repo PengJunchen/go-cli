@@ -333,6 +333,25 @@ func TestInspectLinuxProcessGroupExitRejectsGroupOneProbe(t *testing.T) {
 	}
 }
 
+func TestInspectLinuxProcessGroupExitRejectsPIDMaxAsUnallocatable(t *testing.T) {
+	pidMax, err := currentLinuxPIDMax()
+	if err != nil {
+		t.Fatalf("currentLinuxPIDMax() error = %v", err)
+	}
+	identity := testLinuxProcessGroupIdentity()
+	identity.ProcessGroupID = pidMax
+	groupProbeCalled := false
+	inspection := inspectLinuxProcessGroupExit(identity, identity.HostGeneration, identity.PIDNamespaceToken, func(int) (string, int, string, error) {
+		return "", 0, "", os.ErrNotExist
+	}, func(int) error {
+		groupProbeCalled = true
+		return syscall.ESRCH
+	})
+	if inspection.Status != ProcessGroupExitUnknown || groupProbeCalled {
+		t.Fatalf("inspection = %#v, group probe called = %t; pid_max itself is not an allocatable PID or PGID", inspection, groupProbeCalled)
+	}
+}
+
 func TestParseLinuxProcessStatHandlesParenthesesInCommandName(t *testing.T) {
 	fields := make([]string, 20)
 	fields[0] = "S"
