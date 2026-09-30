@@ -684,6 +684,91 @@ func TestRunEmitsErrorSpanStatus(t *testing.T) {
 	assert.Contains(t, string(data), "ERROR")
 }
 
+func TestPromptUsesFullPositionalTextAndFailureSpan(t *testing.T) {
+	requestBodies := make(chan []byte, 1)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read model request: %v", err)
+			http.Error(w, "unable to read request", http.StatusInternalServerError)
+			return
+		}
+		requestBodies <- body
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = io.WriteString(w, `{"error":{"message":"rejected test prompt","type":"invalid_request_error","code":"invalid_request"}}`)
+	}))
+	defer srv.Close()
+
+	traceDir := t.TempDir()
+	workDir := t.TempDir()
+	t.Chdir(workDir)
+	cfg := &config.Config{Provider: config.ProviderConfig{
+		Name:    "test",
+		BaseURL: srv.URL,
+		APIKey:  "test",
+		Model:   "test-model",
+	}}
+	cfg.Tracing = config.TracingConfig{
+		Enabled:  boolPtr(true),
+		Exporter: "jsonl",
+		FilePath: traceDir,
+	}
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"prompt", "-approve", "auto", "hello", "world"}, &stdout, &stderr, func() (*config.Config, error) {
+		return cfg, nil
+	})
+	require.Equal(t, 1, code, "a provider rejection must remain a failed invocation: %s", stderr.String())
+
+	var requestBody []byte
+	select {
+	case requestBody = <-requestBodies:
+	case <-time.After(5 * time.Second):
+		t.Fatal("CLI did not send a model request")
+	}
+	var modelRequest struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	require.NoError(t, json.Unmarshal(requestBody, &modelRequest))
+	var userPrompt string
+	for _, message := range modelRequest.Messages {
+		if message.Role == "user" {
+			userPrompt = message.Content
+		}
+	}
+	assert.Equal(t, "hello world", userPrompt, "all positional prompt words must reach the model")
+
+	files, err := filepath.Glob(filepath.Join(traceDir, "*.jsonl"))
+	require.NoError(t, err)
+	require.Len(t, files, 1)
+	data, err := os.ReadFile(files[0])
+	require.NoError(t, err)
+	spansByName := make(map[string]tracing.SpanData)
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var span tracing.SpanData
+		require.NoError(t, json.Unmarshal([]byte(line), &span))
+		spansByName[span.Name] = span
+	}
+	for _, spanName := range []string{"cli.invocation", "command.dispatch", "prompt.run"} {
+		span, ok := spansByName[spanName]
+		require.True(t, ok, "trace must contain %s", spanName)
+		assert.Equal(t, tracing.SpanStatusError, span.Status, "%s must preserve the provider failure", spanName)
+	}
+	var promptLength any
+	for _, attribute := range spansByName["prompt.run"].Attributes {
+		if attribute.Key == "prompt_length" {
+			promptLength = attribute.Value
+		}
+	}
+	assert.Equal(t, float64(len(userPrompt)), promptLength, "prompt span length must describe the complete positional text")
+}
+
 type finalizerGateExporter struct {
 	started chan struct{}
 	release chan struct{}
