@@ -120,16 +120,21 @@ func (l *YAMLSkillLoader) Load(ctx context.Context, path string) (*SkillDefiniti
 }
 
 func (l *YAMLSkillLoader) loadFile(ctx context.Context, path string) (*SkillDefinition, int64, error) {
+	absPath := path
+	if p, err := filepath.Abs(path); err == nil {
+		absPath = p
+	}
+	return l.loadFileWithOpener(ctx, path, absPath, func() (*os.File, error) {
+		return openRegularSkillFile(absPath)
+	})
+}
+
+func (l *YAMLSkillLoader) loadFileWithOpener(ctx context.Context, path, absPath string, openFile func() (*os.File, error)) (*SkillDefinition, int64, error) {
 	span, spanCtx := tracing.SpanFromContext(ctx, "skill.load", tracing.SpanKindInternal)
 	logger := tracing.NewTraceLogger(span, slog.Default())
 	defer span.End()
 
 	span.SetAttributes(tracing.Attribute{Key: "source_path", Value: path})
-
-	absPath := path
-	if p, err := filepath.Abs(path); err == nil {
-		absPath = p
-	}
 
 	if err := spanCtx.Err(); err != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
@@ -137,7 +142,7 @@ func (l *YAMLSkillLoader) loadFile(ctx context.Context, path string) (*SkillDefi
 		return nil, 0, err
 	}
 
-	file, err := openRegularSkillFile(absPath)
+	file, err := openFile()
 	if err != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		span.SetStatus(tracing.SpanStatusError, err.Error())
@@ -199,18 +204,15 @@ func (l *YAMLSkillLoader) LoadDir(ctx context.Context, dirPath string) ([]*Skill
 	if err != nil {
 		return fail(fmt.Errorf("skill: scan dir %s: %w", dirPath, err))
 	}
-	rootInfo, err := os.Stat(root)
+	rootHandle, err := os.OpenRoot(root)
 	if err != nil {
 		return fail(fmt.Errorf("skill: scan dir %s: %w", dirPath, err))
-	}
-	if !rootInfo.IsDir() {
-		return fail(fmt.Errorf("skill: scan dir %s: %w", dirPath, ErrSkillUnsafeSource))
 	}
 
 	var defs []*SkillDefinition
 	var candidateFiles int
 	var totalBytes int64
-	err = walkSkillDirectory(spanCtx, root, func(path, relative string, d os.DirEntry) error {
+	err = walkSkillDirectory(spanCtx, rootHandle, root, func(path, relative string, d os.FileInfo, openCandidate func() (*os.File, error)) error {
 		if d.IsDir() {
 			if isSkillFileName(d.Name()) {
 				return fmt.Errorf("%w: candidate %q is a directory", ErrSkillUnsafeSource, relative)
@@ -224,10 +226,10 @@ func (l *YAMLSkillLoader) LoadDir(ctx context.Context, dirPath string) ([]*Skill
 		if candidateFiles > maxSkillCandidateFiles {
 			return fmt.Errorf("%w: directory contains more than %d skill candidates", ErrSkillResourceLimit, maxSkillCandidateFiles)
 		}
-		if d.Type()&os.ModeSymlink != 0 {
+		if d.Mode()&os.ModeSymlink != 0 {
 			return fmt.Errorf("%w: candidate %q is a symlink", ErrSkillUnsafeSource, relative)
 		}
-		def, bytesRead, err := l.loadFile(spanCtx, path)
+		def, bytesRead, err := l.loadFileWithOpener(spanCtx, path, path, openCandidate)
 		totalBytes += bytesRead
 		if totalBytes > maxSkillDirectoryBytes {
 			return fmt.Errorf("%w: directory source bytes exceed %d", ErrSkillResourceLimit, maxSkillDirectoryBytes)
@@ -243,6 +245,9 @@ func (l *YAMLSkillLoader) LoadDir(ctx context.Context, dirPath string) ([]*Skill
 		defs = append(defs, def)
 		return nil
 	})
+	if closeErr := rootHandle.Close(); closeErr != nil {
+		err = errors.Join(err, closeErr)
+	}
 	if err != nil {
 		return fail(fmt.Errorf("skill: scan dir %s: %w", dirPath, err))
 	}
@@ -253,14 +258,14 @@ func (l *YAMLSkillLoader) LoadDir(ctx context.Context, dirPath string) ([]*Skill
 	return defs, nil
 }
 
-func walkSkillDirectory(ctx context.Context, root string, visit func(path, relative string, entry os.DirEntry) error) error {
+func walkSkillDirectory(ctx context.Context, root *os.Root, rootPath string, visit func(path, relative string, entry os.FileInfo, openCandidate func() (*os.File, error)) error) error {
 	entriesRead := 0
-	var walk func(path, relative string) error
-	walk = func(path, relative string) error {
+	var walk func(relative string, expected os.FileInfo) error
+	walk = func(relative string, expected os.FileInfo) error {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		dir, err := openSkillDirectory(path)
+		dir, err := openSkillDirectory(root, relative, expected)
 		if err != nil {
 			return err
 		}
@@ -293,46 +298,141 @@ func walkSkillDirectory(ctx context.Context, root string, visit func(path, relat
 			if relative != "." {
 				childRelative = filepath.Join(relative, child.Name())
 			}
-			childPath := filepath.Join(path, child.Name())
-			if child.IsDir() && skillPathDepth(childRelative) > maxSkillDirectoryDepth {
-				return fmt.Errorf("%w: directory depth exceeds %d", ErrSkillResourceLimit, maxSkillDirectoryDepth)
-			}
-			if err := visit(childPath, childRelative, child); err != nil {
+			childInfo, err := lstatSkillPath(root, childRelative)
+			if err != nil {
+				if errors.Is(err, os.ErrNotExist) && !child.IsDir() {
+					continue
+				}
 				return err
 			}
-			if child.IsDir() {
-				if err := walk(childPath, childRelative); err != nil {
+			if childInfo.IsDir() && skillPathDepth(childRelative) > maxSkillDirectoryDepth {
+				return fmt.Errorf("%w: directory depth exceeds %d", ErrSkillResourceLimit, maxSkillDirectoryDepth)
+			}
+			var openCandidate func() (*os.File, error)
+			if !childInfo.IsDir() && isSkillFileName(child.Name()) {
+				openCandidate = func() (*os.File, error) {
+					return openRegularSkillFileAt(root, childRelative, childInfo)
+				}
+			}
+			childPath := filepath.Join(rootPath, childRelative)
+			if err := visit(childPath, childRelative, childInfo, openCandidate); err != nil {
+				return err
+			}
+			if childInfo.IsDir() {
+				if err := walk(childRelative, childInfo); err != nil {
 					return err
 				}
 			}
 		}
 		return nil
 	}
-	return walk(root, ".")
+	return walk(".", nil)
 }
 
-func openSkillDirectory(path string) (*os.File, error) {
-	before, err := os.Lstat(path)
+func openSkillDirectory(root *os.Root, relative string, expected os.FileInfo) (*os.File, error) {
+	before, err := lstatSkillPath(root, relative)
 	if err != nil {
 		return nil, err
 	}
-	if before.Mode()&os.ModeSymlink != 0 || !before.IsDir() {
-		return nil, fmt.Errorf("%w: %q is not a regular directory", ErrSkillUnsafeSource, path)
+	if before.Mode()&os.ModeSymlink != 0 || !before.IsDir() || (expected != nil && !os.SameFile(expected, before)) {
+		return nil, fmt.Errorf("%w: %q is not a regular directory", ErrSkillUnsafeSource, relative)
 	}
-	dir, err := os.Open(path)
+	dir, err := root.Open(relative)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: open directory %q: %w", ErrSkillUnsafeSource, relative, err)
 	}
 	after, err := dir.Stat()
 	if err != nil {
 		_ = dir.Close()
 		return nil, err
 	}
-	if !after.IsDir() || !os.SameFile(before, after) {
+	afterPath, err := lstatSkillPath(root, relative)
+	if err != nil {
+		closeErr := dir.Close()
+		return nil, errors.Join(err, closeErr)
+	}
+	if !after.IsDir() || afterPath.Mode()&os.ModeSymlink != 0 || !os.SameFile(before, after) || !os.SameFile(before, afterPath) {
 		_ = dir.Close()
-		return nil, fmt.Errorf("%w: %q changed while opening", ErrSkillUnsafeSource, path)
+		return nil, fmt.Errorf("%w: %q changed while opening", ErrSkillUnsafeSource, relative)
 	}
 	return dir, nil
+}
+
+func lstatSkillPath(root *os.Root, relative string) (os.FileInfo, error) {
+	if relative == "." {
+		return root.Stat(".")
+	}
+	cleaned := filepath.Clean(relative)
+	if filepath.IsAbs(relative) || filepath.VolumeName(relative) != "" || cleaned != relative || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) {
+		return nil, fmt.Errorf("%w: path %q is not root-relative", ErrSkillUnsafeSource, relative)
+	}
+
+	parts := strings.Split(cleaned, string(filepath.Separator))
+	prefix := ""
+	var info os.FileInfo
+	var err error
+	for i, part := range parts {
+		if part == "" || part == "." || part == ".." {
+			return nil, fmt.Errorf("%w: path %q is not root-relative", ErrSkillUnsafeSource, relative)
+		}
+		if prefix == "" {
+			prefix = part
+		} else {
+			prefix = filepath.Join(prefix, part)
+		}
+		info, err = root.Lstat(prefix)
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return nil, err
+			}
+			return nil, fmt.Errorf("%w: inspect %q: %w", ErrSkillUnsafeSource, relative, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			if i == len(parts)-1 {
+				return info, nil
+			}
+			return nil, fmt.Errorf("%w: path %q has a symlink ancestor", ErrSkillUnsafeSource, relative)
+		}
+		if i < len(parts)-1 && !info.IsDir() {
+			return nil, fmt.Errorf("%w: path %q has a non-directory ancestor", ErrSkillUnsafeSource, relative)
+		}
+	}
+	return info, nil
+}
+
+func openRegularSkillFileAt(root *os.Root, relative string, expected os.FileInfo) (*os.File, error) {
+	before, err := lstatSkillPath(root, relative)
+	if err != nil {
+		return nil, err
+	}
+	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() || (expected != nil && !os.SameFile(expected, before)) {
+		return nil, fmt.Errorf("%w: %q is not the expected regular file", ErrSkillUnsafeSource, relative)
+	}
+
+	file, err := root.Open(relative)
+	if err != nil {
+		if current, statErr := lstatSkillPath(root, relative); errors.Is(statErr, ErrSkillUnsafeSource) {
+			return nil, statErr
+		} else if statErr == nil && current.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("%w: %q changed to a symlink while opening", ErrSkillUnsafeSource, relative)
+		}
+		return nil, err
+	}
+	after, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	afterPath, err := lstatSkillPath(root, relative)
+	if err != nil {
+		closeErr := file.Close()
+		return nil, errors.Join(err, closeErr)
+	}
+	if !after.Mode().IsRegular() || afterPath.Mode()&os.ModeSymlink != 0 || !os.SameFile(before, after) || !os.SameFile(before, afterPath) {
+		_ = file.Close()
+		return nil, fmt.Errorf("%w: %q changed while opening", ErrSkillUnsafeSource, relative)
+	}
+	return file, nil
 }
 
 // LoadSources parses a previously captured skill source set. Source files are
