@@ -32,6 +32,26 @@ func (b *hookPayloadBudget) node(depth int) error {
 	return nil
 }
 
+// requireContainer checks the minimum node cost for a container and its
+// entries before any copy allocation is proportional to the source width.
+// The caller accounts for the nodes normally as it traverses the value.
+func (b *hookPayloadBudget) requireContainer(width, minimumNodesPerEntry int) error {
+	remaining := hookPayloadMaxNodes - b.nodes
+	if width < 0 || minimumNodesPerEntry < 1 || remaining < 1 || width > (remaining-1)/minimumNodesPerEntry {
+		return extension.ErrHookPayloadLimitExceeded
+	}
+	return nil
+}
+
+// requireEntries checks a container whose node has already been counted.
+func (b *hookPayloadBudget) requireEntries(width, minimumNodesPerEntry int) error {
+	remaining := hookPayloadMaxNodes - b.nodes
+	if width < 0 || minimumNodesPerEntry < 1 || remaining < 0 || width > remaining/minimumNodesPerEntry {
+		return extension.ErrHookPayloadLimitExceeded
+	}
+	return nil
+}
+
 func (b *hookPayloadBudget) string(depth int, value string) error {
 	if err := b.node(depth); err != nil {
 		return err
@@ -138,6 +158,9 @@ func buildHookSubmissionSnapshot(submission core.Submission, budget *hookPayload
 			return extension.HookSubmissionSnapshot{}, extension.ErrHookPayloadUnsupported
 		}
 	}
+	if err := budget.requireContainer(len(submission.History), 1); err != nil {
+		return extension.HookSubmissionSnapshot{}, err
+	}
 	if submission.History != nil {
 		snapshot.Messages = make([]extension.HookMessageSnapshot, len(submission.History))
 	}
@@ -167,6 +190,9 @@ func buildHookMessageSnapshot(message core.AgentMessage, budget *hookPayloadBudg
 		if err := budget.string(depth+1, value); err != nil {
 			return extension.HookMessageSnapshot{}, err
 		}
+	}
+	if err := budget.requireContainer(len(message.ContentBlocks), 1); err != nil {
+		return extension.HookMessageSnapshot{}, err
 	}
 	if message.ContentBlocks != nil {
 		snapshot.ContentBlocks = make([]extension.HookContentBlockSnapshot, len(message.ContentBlocks))
@@ -226,6 +252,9 @@ func buildHookMessageSnapshot(message core.AgentMessage, budget *hookPayloadBudg
 			}
 		}
 		snapshot.Usage = usage
+	}
+	if err := budget.requireContainer(len(message.ToolCalls), 1); err != nil {
+		return extension.HookMessageSnapshot{}, err
 	}
 	if message.ToolCalls != nil {
 		snapshot.ToolCalls = make([]extension.HookToolCallSnapshot, len(message.ToolCalls))
@@ -440,6 +469,9 @@ func cloneHookSnapshot(value reflect.Value, budget *hookPayloadBudget, depth int
 		}
 		stack[id] = struct{}{}
 		defer delete(stack, id)
+		if err := budget.requireEntries(value.Len(), 2); err != nil {
+			return reflect.Value{}, err
+		}
 		result := reflect.MakeMapWithSize(value.Type(), value.Len())
 		iter := value.MapRange()
 		for iter.Next() {
@@ -467,6 +499,9 @@ func cloneHookSnapshot(value reflect.Value, budget *hookPayloadBudget, depth int
 		}
 		stack[id] = struct{}{}
 		defer delete(stack, id)
+		if err := budget.requireEntries(value.Len(), 1); err != nil {
+			return reflect.Value{}, err
+		}
 		result := reflect.MakeSlice(value.Type(), value.Len(), value.Len())
 		for index := 0; index < value.Len(); index++ {
 			item, err := cloneHookSnapshot(value.Index(index), budget, depth+1, stack)
@@ -554,6 +589,9 @@ func cloneJSONValue(value reflect.Value, budget *hookPayloadBudget, depth int, s
 		}
 		stack[id] = struct{}{}
 		defer delete(stack, id)
+		if err := budget.requireEntries(value.Len(), 2); err != nil {
+			return reflect.Value{}, err
+		}
 		result := make(map[string]any, value.Len())
 		iter := value.MapRange()
 		for iter.Next() {
@@ -589,6 +627,9 @@ func cloneJSONValue(value reflect.Value, budget *hookPayloadBudget, depth int, s
 			}
 			stack[id] = struct{}{}
 			defer delete(stack, id)
+		}
+		if err := budget.requireEntries(value.Len(), 1); err != nil {
+			return reflect.Value{}, err
 		}
 		result := make([]any, value.Len())
 		for index := 0; index < value.Len(); index++ {
