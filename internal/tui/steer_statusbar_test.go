@@ -307,8 +307,8 @@ func TestStatusBarRendering(t *testing.T) {
 	assert.Contains(t, bar, "100%")
 }
 
-// TestStatusBar_TwoLines verifies the status bar renders as two lines when
-// both model info and token usage are present.
+// TestStatusBar_TwoLines verifies the status bar renders context, metrics, and
+// one bounded provenance line.
 func TestStatusBar_TwoLines(t *testing.T) {
 	m := NewBubbleteaApp(make(chan AgentEvent, 1)).model
 	m.mu.Lock()
@@ -323,17 +323,18 @@ func TestStatusBar_TwoLines(t *testing.T) {
 	bar := m.renderStatusBarLocked()
 	m.mu.Unlock()
 
-	// Two lines separated by \n.
+	// Three lines separated by \n.
 	lines := splitLines(bar)
-	assert.Len(t, lines, 2, "status bar should be two lines")
+	assert.Len(t, lines, 3, "status bar should be three lines")
 	// Line 1 contains model/turn/session/mode info.
 	assert.Contains(t, lines[0], "claude-sonnet-4")
 	assert.Contains(t, lines[0], "turn #3")
 	assert.Contains(t, lines[0], "abc12345")
 	assert.Contains(t, lines[0], "chat")
-	// Line 2 contains tokens/cost.
+	// Line 2 contains tokens/cost; line 3 points to details.
 	assert.Contains(t, lines[1], "Tokens:")
 	assert.Contains(t, lines[1], "Known cost:", "a cost without evidence is shown as a known subtotal")
+	assert.Contains(t, lines[2], "/cost")
 }
 
 // TestStatusBar_ModelInfo verifies the model name appears on line 1.
@@ -370,12 +371,28 @@ func TestStatusBar_TokenWarning(t *testing.T) {
 	m.tokenOutput = 0
 	m.tokenMax = 10000
 	m.tokenCost = 0.02
+	m.tokenUsageSource = core.TokenUsageSourceReported
 	bar := m.renderStatusBarLocked()
 	m.mu.Unlock()
 
 	// 8500/10000 = 85% > 80%, so the token line should have ANSI styling.
 	assert.Contains(t, bar, "\x1b[", "over 80% should have warning ANSI styling")
 	assert.Contains(t, bar, "85%")
+}
+
+func TestStatusBarSuppressesExactWarningForPartialUsage(t *testing.T) {
+	m := NewBubbleteaApp(make(chan AgentEvent, 1)).model
+	m.mu.Lock()
+	m.tokenInput = 8500
+	m.tokenMax = 10000
+	m.tokenUsageSource = core.TokenUsageSourceReported
+	m.tokenUnknownUsageAttempts = 1
+	bar := m.renderStatusBarLocked()
+	m.mu.Unlock()
+
+	assert.Contains(t, bar, "Known tokens: 8500/10000")
+	assert.NotContains(t, bar, "85%")
+	assert.NotContains(t, bar, "\x1b[38;", "partial token lower bound must not receive an exact percentage warning")
 }
 
 // TestInteractive_TUIConfigWired verifies that TUIConfig options are correctly

@@ -1132,8 +1132,12 @@ func (m *teaModel) renderViewLocked() string {
 		if rightWidth < 1 {
 			rightWidth = 1
 		}
-		// Reserve ~2 lines for the status bar at the bottom.
-		panelHeight := m.height - 2
+		// Reserve two status lines plus the bounded provenance line when usage is present.
+		statusRows := 2
+		if m.hasTokenUsageStatus() {
+			statusRows++
+		}
+		panelHeight := m.height - statusRows
 		if panelHeight < 1 {
 			panelHeight = 0 // no clipping
 		}
@@ -1439,18 +1443,17 @@ func (m *teaModel) renderWidth() int {
 	return m.width
 }
 
-// renderStatusBarLocked formats a two-line status bar. The first line shows
-// model/turn/session/mode info; the second shows token usage and cost. When
-// token usage exceeds 80%, the second line is rendered in warning color.
+// renderStatusBarLocked formats a fixed-height status bar. The first line
+// shows model/turn/session/mode; the second shows token usage and cost; the
+// third shows bounded provenance or points to the full /cost detail.
 // The caller must hold m.mu.
 func (m *teaModel) renderStatusBarLocked() string {
+	statusWidth := m.width
+	if statusWidth <= 0 {
+		statusWidth = 80
+	}
 	// Line 1: model | turn #N | session | mode
 	parts := make([]string, 0, 4)
-	if m.hasTokenUsageStatus() {
-		parts = append(parts, "actual="+tokenUsageProviderModels(m.tokenProviderModels))
-		parts = append(parts, "cost="+strings.Join(tokenUsageCostSourceLabels(m.tokenCostSources), ","))
-		parts = append(parts, "price="+strings.Join(tokenUsagePriceSourceLabels(m.tokenPriceSources), ","))
-	}
 	if m.modelName != "" {
 		parts = append(parts, m.modelName)
 	}
@@ -1469,9 +1472,17 @@ func (m *teaModel) renderStatusBarLocked() string {
 		parts = append(parts, m.modeLabel)
 	}
 	line1 := strings.Join(parts, " | ")
-	line1 = truncateStatusBarText(line1, m.width)
+	if lipgloss.Width(line1) > statusWidth && len(parts) > 1 {
+		fixedWidth := lipgloss.Width(strings.Join(parts[1:], " | ")) + lipgloss.Width(" | ")
+		modelBudget := statusWidth - fixedWidth
+		if modelBudget > 0 {
+			parts[0] = truncateStatusBarText(parts[0], modelBudget)
+			line1 = strings.Join(parts, " | ")
+		}
+	}
+	line1 = truncateStatusBarText(line1, statusWidth)
 
-	// Line 2: tokens, cost, and evidence — only rendered when token data is available.
+	// Line 2: core token metric and cost. Evidence details stay on line 3.
 	if !m.hasTokenUsageStatus() {
 		if line1 == "" {
 			return ""
@@ -1484,11 +1495,14 @@ func (m *teaModel) renderStatusBarLocked() string {
 	if maxT > 0 {
 		pct = total * 100 / maxT
 	}
-	usageDetails := fmt.Sprintf("Tokens: %d/%d (%d%%) [usage=%s", total, maxT, pct, tokenUsageSourceLabel(m.tokenUsageSource))
-	if m.tokenUnknownUsageAttempts > 0 {
-		usageDetails += fmt.Sprintf(", unknown usage attempts=%d", m.tokenUnknownUsageAttempts)
+	usageSource := tokenUsageSourceLabel(m.tokenUsageSource)
+	usageDetails := "Tokens: unknown"
+	switch {
+	case m.tokenUnknownUsageAttempts > 0:
+		usageDetails = fmt.Sprintf("Known tokens: %d/%d", total, maxT)
+	case usageSource != string(core.TokenUsageSourceUnknown):
+		usageDetails = fmt.Sprintf("Tokens: %d/%d (%d%%)", total, maxT, pct)
 	}
-	usageDetails += "]"
 
 	costSources := tokenUsageCostSourceLabels(m.tokenCostSources)
 	unknownCost := m.tokenUnknownCostAttempts > 0 || slicesContain(costSources, string(core.TokenUsageCostUnknown))
@@ -1501,23 +1515,32 @@ func (m *teaModel) renderStatusBarLocked() string {
 	default:
 		costDetails = fmt.Sprintf("Cost: $%.4f", m.tokenCost)
 	}
-	if unknownCost {
-		if m.tokenUnknownCostAttempts > 0 {
-			costDetails += fmt.Sprintf(" (unknown cost attempts=%d)", m.tokenUnknownCostAttempts)
-		} else {
-			costDetails += " (cost source unknown)"
-		}
-	}
-
-	line2 := truncateStatusBarText(fmt.Sprintf("%s | %s", costDetails, usageDetails), m.width)
-	if pct > 80 {
+	line2 := truncateStatusBarText(fmt.Sprintf("%s | %s", usageDetails, costDetails), statusWidth)
+	usageComplete := m.tokenUnknownUsageAttempts == 0 && usageSource != string(core.TokenUsageSourceUnknown)
+	if usageComplete && pct > 80 {
 		line2 = statusBarWarnStyle.Render(line2)
 	}
 
+	provenance := tokenUsageProvenanceLine(m, statusWidth)
 	if line1 == "" {
-		return line2
+		return line2 + "\n" + provenance
 	}
-	return statusBarLineStyle.Render(line1) + "\n" + line2
+	return statusBarLineStyle.Render(line1) + "\n" + line2 + "\n" + provenance
+}
+
+func tokenUsageProvenanceLine(m *teaModel, width int) string {
+	if width > 0 && width < splitWidthThreshold {
+		return truncateStatusBarText(fmt.Sprintf("Provenance: see /cost (unknown usage=%d, unknown cost=%d)", m.tokenUnknownUsageAttempts, m.tokenUnknownCostAttempts), width)
+	}
+	return truncateStatusBarText(fmt.Sprintf(
+		"Sources: usage=%s/u%d cost=%s/c%d price=%s actual=%s",
+		tokenUsageSourceLabel(m.tokenUsageSource),
+		m.tokenUnknownUsageAttempts,
+		strings.Join(tokenUsageCostSourceLabels(m.tokenCostSources), ","),
+		m.tokenUnknownCostAttempts,
+		strings.Join(tokenUsagePriceSourceLabels(m.tokenPriceSources), ","),
+		tokenUsageProviderModels(m.tokenProviderModels),
+	), width)
 }
 
 func truncateStatusBarText(value string, width int) string {
