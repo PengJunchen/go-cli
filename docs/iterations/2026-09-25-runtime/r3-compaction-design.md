@@ -24,6 +24,8 @@ R1 `CanonicalRunResult.Transcript` 仍是当前 run 的唯一 transcript delta�
 
 保留 `MidTurnCompact` 的增量估算和 compactor 路由，但在 preflight 中避免 80% margin 被重复应用：先算出安全 `messageBudget`，再以 threshold ratio `1.0` 检查 `messages` 是否超过该值，超出时压到同一个 `messageBudget`。其余 turn-end/旧触发点移除，保证真正送 provider 的调用前只有一个权威检查。Compaction error、输出仍超预算、mandatory prompt 本身超预算或 transcript 校验失败时返回明确的 context/protocol error，并且不调用 provider。当前 submission 与已消费的本 run steering/follow-up 是不可静默丢弃的输入；若这些保留输入连同 system prompt 和工具 schemas 仍不能装入预算，向用户明确报 oversized context。
 
+> **预算公式 supersession（2026-10-01）：** 下列 whole-`C` 公式保留作历史提案记录，但在 first/main provider request envelope preflight 边界已由[更新的 R3 handoff](../2026-09-30-runtime/r3-provider-envelope-preflight-handoff.md)取代。该 handoff 将 `C` 作为本地 message compaction 上界，并以 `accountedMessageTokens` 与独立的 active-candidate provider envelope 上界核算；只在已知 provider 上界中扣除 final schema 与 protocol framing/header。该 handoff 的更新公式仍待独立设计复核，复核通过前不得实现旧公式或新提案。此次 supersession 仅覆盖 provider envelope preflight 预算，不改变本设计的 durable projection、tool-group 或其它 compaction 契约。
+
 有效 provider request 预算按以下公式解析并打日志（整数向下取整）：
 
 1. 若 active model 明确提供 `InputTokenLimit`，`rawLimit = min(Compaction.MaxTokens (默认 8000), InputTokenLimit)`；否则若 `ContextWindow` 已知，`outputReserve = 当前 generation 的显式 output cap`，未配置时使用 metadata `MaxOutputTokens`，再算 `rawLimit = min(Compaction.MaxTokens, ContextWindow - outputReserve)`。metadata 缺失时仅能使用配置 ceiling，必须标记模型限额未知，不可声称保证符合 provider context。
