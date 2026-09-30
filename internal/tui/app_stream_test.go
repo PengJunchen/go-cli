@@ -34,7 +34,7 @@ func TestIncrementalAssistantPreviewIsBoundedAndFinalMessageKeepsFullMarkdown(t 
 	}
 
 	preview := app.model.View()
-	require.Contains(t, preview, "[earlier content hidden]")
+	require.Contains(t, preview, "[earlier content hidden]\n", "the truncation notice must occupy its own line")
 	require.NotContains(t, preview, "FULL-START-MARKER")
 	require.Contains(t, preview, "FINAL-TAIL-MARKER")
 	require.Equal(t, 0, app.model.accordion.selected, "stream updates must not move an existing selection anchor")
@@ -48,7 +48,7 @@ func TestIncrementalAssistantPreviewIsBoundedAndFinalMessageKeepsFullMarkdown(t 
 	require.Equal(t, 40, app.model.streamingMD.windowWidth, "resize must reflow only the retained live tail")
 	require.Equal(t, 0, app.model.accordion.selected, "resize must preserve the user's existing selection anchor")
 	resizedPreview := app.model.View()
-	require.Contains(t, resizedPreview, "[earlier content hidden]")
+	require.Contains(t, resizedPreview, "[earlier content hidden]\n", "the resized truncation notice must occupy its own line")
 	require.Contains(t, resizedPreview, "FINAL-TAIL-MARKER")
 	require.LessOrEqual(t, strings.Count(app.model.streamingEntry.Full, "\n")+1, 2, "the live preview must fit the terminal body rows")
 
@@ -107,4 +107,31 @@ func TestFinalAssistantMessageDifferentFromStreamIsNotDropped(t *testing.T) {
 	require.Len(t, entries, 2)
 	require.Contains(t, entries[0].Full, "provisional answer")
 	require.Contains(t, entries[1].Full, "corrected final answer")
+}
+
+func TestDoneDigestDoesNotSuppressLaterIdenticalAssistantAfterInterveningEvent(t *testing.T) {
+	const source = "same answer"
+	app := NewBubbleteaApp(nil, WithWidth(80))
+	app.model.Update(agentEventMsg{event: AgentEvent{
+		Type: "message", ContentType: ContentTypeAssistant,
+		Content: source, Incremental: true,
+	}})
+	app.model.Update(agentEventMsg{event: AgentEvent{Type: "done", Content: source}})
+
+	// The digest may only suppress the immediate complete-message duplicate
+	// associated with this done. Once another event intervenes, an identical
+	// later answer is a distinct assistant message and must remain visible.
+	app.model.Update(agentEventMsg{event: AgentEvent{
+		Type: "tool_result", ContentType: ContentTypeToolResult,
+		Content: "tool finished", ToolCallID: "tool-1",
+	}})
+	app.model.Update(agentEventMsg{event: AgentEvent{
+		Type: "message", ContentType: ContentTypeAssistant, Content: source,
+	}})
+
+	entries := app.model.accordion.Entries()
+	require.Len(t, entries, 3)
+	require.Contains(t, entries[0].Full, source)
+	require.Contains(t, entries[1].Full, "tool finished")
+	require.Contains(t, entries[2].Full, source)
 }

@@ -759,8 +759,8 @@ type teaModel struct {
 	// response; streamingMD retains only a bounded terminal preview.
 	streamingBuf  strings.Builder
 	streamingHash hash.Hash
-	// finalizedStreamDigest identifies a producer's optional duplicate final
-	// assistant event after a done marker without retaining another full copy.
+	// finalizedStreamDigest identifies a producer's optional complete-message
+	// duplicate immediately after done without retaining another full copy.
 	finalizedStreamDigest      [sha256.Size]byte
 	finalizedStreamSourceBytes int
 	hasFinalizedStreamDigest   bool
@@ -1812,6 +1812,15 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 	ev = ev.clone()
 	ctx := context.Background()
 
+	// A done event may precede one producer's optional complete-message
+	// duplicate. Keep the digest only for the immediately following complete
+	// message; any intervening event makes later identical content a new message.
+	if ev.Type != "message" || ev.Incremental || ev.ContentType == ContentTypeUser {
+		m.mu.Lock()
+		m.hasFinalizedStreamDigest = false
+		m.mu.Unlock()
+	}
+
 	// Handle token_usage events by updating the status bar data and re-rendering.
 	if ev.Type == "token_usage" && ev.TokenUsage != nil {
 		var view string
@@ -1869,12 +1878,6 @@ func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 		m.notify(view)
 		return nil
 	}
-	if ev.Type == "message" && ev.ContentType == ContentTypeUser {
-		m.mu.Lock()
-		m.hasFinalizedStreamDigest = false
-		m.mu.Unlock()
-	}
-
 	m.mu.Lock()
 	hasCanonicalTranscript := m.hasTranscriptSnapshot
 	m.mu.Unlock()
@@ -2413,7 +2416,7 @@ func streamingPreviewText(window StreamRenderLines, maxLines int) string {
 	if hidden {
 		preview.WriteString("[earlier content hidden]")
 	}
-	hasLine := false
+	hasLine := hidden
 	appendLine := func(line string) {
 		if hasLine {
 			preview.WriteByte('\n')
