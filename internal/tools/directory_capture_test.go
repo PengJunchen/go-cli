@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"io/fs"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -154,6 +155,40 @@ func TestFindPathCaptureWriterKeepsSortedTopKAcrossChunks(t *testing.T) {
 	require.NoError(t, writer.Finish())
 	assert.Equal(t, []string{"a", "b"}, writer.Results())
 	assert.True(t, writer.Truncated())
+}
+
+func TestFindPathCaptureWriterNormalizesDirectoryRecordsBeforeTopK(t *testing.T) {
+	writer := newFindPathCaptureWriter(3, 64)
+	writer.setDirectoryRoot("nested")
+	payload := []byte("nested/z.txt\x00./nested/a.txt\x00nested\x00")
+	n, err := writer.Write(payload)
+	require.NoError(t, err)
+	assert.Equal(t, len(payload), n)
+	require.NoError(t, writer.Finish())
+	assert.Equal(t, []string{"a.txt", "z.txt"}, writer.Results())
+	assert.False(t, writer.Truncated())
+}
+
+func TestFindPathCaptureWriterNormalizesParentRelativeRoot(t *testing.T) {
+	writer := newFindPathCaptureWriter(2, 64)
+	writer.setDirectoryRoot("..")
+	payload := []byte("../child.txt\x00")
+	n, err := writer.Write(payload)
+	require.NoError(t, err)
+	assert.Equal(t, len(payload), n)
+	require.NoError(t, writer.Finish())
+	assert.Equal(t, []string{"child.txt"}, writer.Results())
+}
+
+func TestFindPathCaptureWriterRejectsPathsOutsideDirectoryRootAndKeepsDraining(t *testing.T) {
+	writer := newFindPathCaptureWriter(3, 64)
+	writer.setDirectoryRoot(filepath.Join(string(filepath.Separator), "workspace"))
+	payload := []byte("/workspace/../outside.txt\x00later.txt\x00")
+	n, err := writer.Write(payload)
+	require.NoError(t, err)
+	assert.Equal(t, len(payload), n)
+	assert.ErrorIs(t, writer.Finish(), errDirectoryCaptureLimit)
+	assert.Empty(t, writer.Results())
 }
 
 type syntheticCaptureDirReader struct {

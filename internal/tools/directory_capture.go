@@ -223,12 +223,14 @@ func scanDirectoryBatches(ctx context.Context, reader directoryBatchReader, batc
 }
 
 type findPathCaptureWriter struct {
-	mu           sync.Mutex
-	candidates   *boundedTopK[string]
-	line         []byte
-	maxLineBytes int
-	finished     bool
-	captureErr   error
+	mu            sync.Mutex
+	candidates    *boundedTopK[string]
+	line          []byte
+	maxLineBytes  int
+	directoryRoot string
+	normalizeDir  bool
+	finished      bool
+	captureErr    error
 }
 
 func newFindPathCaptureWriter(maxEntries, maxLineBytes int) *findPathCaptureWriter {
@@ -274,9 +276,27 @@ func (w *findPathCaptureWriter) captureLineLocked() {
 		return
 	}
 	line := string(w.line)
+	if w.normalizeDir {
+		normalized, include, err := normalizeFindDirectoryPath(w.directoryRoot, line)
+		if err != nil {
+			w.captureErr = newDirectoryCaptureLimitError("helper output path escapes the search root")
+			return
+		}
+		if !include {
+			return
+		}
+		line = normalized
+	}
 	if err := w.candidates.Add(line); err != nil {
 		w.captureErr = err
 	}
+}
+
+func (w *findPathCaptureWriter) setDirectoryRoot(root string) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	w.directoryRoot = root
+	w.normalizeDir = true
 }
 
 // Finish processes a final non-newline-terminated path. It must be called only
