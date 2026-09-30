@@ -367,15 +367,22 @@ func inspectPendingBashExecutionIdentities(
 			Reason:          "matching dispatched process-group identity is missing",
 		}
 		var identity *core.ExecutionIdentity
-		ownerMismatch := false
+		identityUnavailable := false
 		for _, execution := range occurrence.executions {
-			if execution.DispatchState != DispatchStateDispatched || execution.ExecutionIdentity == nil {
+			if execution.DispatchState != DispatchStateDispatched {
 				continue
 			}
 			if execution.OwnerGeneration == "" || execution.OwnerGeneration != occurrence.intent.OwnerGeneration {
 				diagnostic.Reason = "dispatched execution identity owner generation does not match its intent"
 				diagnostic.ExecutionEntryID = ""
-				ownerMismatch = true
+				identity = nil
+				identityUnavailable = true
+				break
+			}
+			if execution.ExecutionIdentity == nil {
+				diagnostic.Reason = "dispatched execution row is missing a valid process-group identity"
+				diagnostic.ExecutionEntryID = ""
+				identityUnavailable = true
 				break
 			}
 			if identity == nil {
@@ -388,10 +395,11 @@ func inspectPendingBashExecutionIdentities(
 				diagnostic.Reason = "matching dispatched execution rows contain conflicting process identities"
 				identity = nil
 				diagnostic.ExecutionEntryID = ""
+				identityUnavailable = true
 				break
 			}
 		}
-		if identity != nil && !ownerMismatch {
+		if identity != nil && !identityUnavailable {
 			observation := inspect(*identity)
 			switch observation.Status {
 			case core.ProcessGroupExitUnknown, core.ProcessGroupExitPresent, core.ProcessGroupExitAbsent:

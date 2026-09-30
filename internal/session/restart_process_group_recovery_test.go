@@ -154,6 +154,76 @@ func TestPrepareResumeReportsMissingProcessIdentityAsUnknown(t *testing.T) {
 	}
 }
 
+func TestPrepareResumeMixedDispatchedExecutionIdentityRowsRemainUnknown(t *testing.T) {
+	fixture := createDispatchedBashRecoveryFixture(t, "owner-generation-1", true)
+	missingIdentity := SessionEntry{
+		ID: "recovery-execution-missing-identity", ParentID: fixture.intent.ID, Type: EntryTypeTool,
+		RunID: fixture.intent.RunID, WorkspaceID: fixture.intent.WorkspaceID,
+		ActionBatchID: fixture.intent.ActionBatchID, ActionID: fixture.intent.ActionID,
+		OwnerGeneration: fixture.intent.OwnerGeneration, ActionState: ActionStateExecution,
+		AssistantTranscriptOrdinal: fixture.intent.AssistantTranscriptOrdinal,
+		ToolCallID:                 fixture.intent.ToolCallID,
+		ToolName:                   fixture.intent.ToolName,
+		DispatchState:              DispatchStateDispatched,
+		ResourceState:              core.RunExecutionCleanupPending,
+		Timestamp:                  time.Unix(14, 0).UTC(),
+	}
+	appendFixtureRows(t, recoveryFixture{directory: fixture.directory, sessionID: fixture.sessionID}, missingIdentity)
+
+	var processInspections, resolutionCalls int
+	authority := recoveryAuthorityFunc{
+		apply: func(_ context.Context, resolutions []ValidatedExecutionResolution) error {
+			resolutionCalls++
+			if len(resolutions) != 0 {
+				t.Fatalf("mixed execution rows must not produce a local resolution: %#v", resolutions)
+			}
+			return nil
+		},
+		inspect: func(_ context.Context, refs []PendingActionRef) ([]PendingActionDecision, error) {
+			return []PendingActionDecision{{Action: refs[0], MarkerState: DispatchMarkerPresent}}, nil
+		},
+	}
+	preparer := NewDurableJSONLSessionPreparer(fixture.directory, authority)
+	preparer.inspectExecutionIdentity = func(core.ExecutionIdentity) core.ProcessGroupExitInspection {
+		processInspections++
+		return core.ProcessGroupExitInspection{Status: core.ProcessGroupExitAbsent, Reason: "misleading absent"}
+	}
+
+	prepared, err := preparer.PrepareResume(context.Background(), fixture.sessionID)
+	if err != nil {
+		t.Fatalf("resume session: %v", err)
+	}
+	view := prepared.View()
+	if len(view.ExecutionRecoveryDiagnostics) != 1 {
+		t.Fatalf("diagnostics = %#v, want one mixed-row action diagnostic", view.ExecutionRecoveryDiagnostics)
+	}
+	diagnostic := view.ExecutionRecoveryDiagnostics[0]
+	if diagnostic.Status != core.ProcessGroupExitUnknown || diagnostic.ExecutionEntryID != "" || !strings.Contains(diagnostic.Reason, "missing") {
+		t.Fatalf("mixed dispatched rows must remain Unknown without naming one row as authoritative: %#v", diagnostic)
+	}
+	if processInspections != 0 {
+		t.Fatalf("process inspector calls = %d, want 0 for mixed identity completeness", processInspections)
+	}
+	if len(view.Messages) == 0 || view.Messages[len(view.Messages)-1].ReceiptOutcome != core.ReceiptOutcomeUnknown {
+		t.Fatalf("mixed dispatched rows must retain an unknown receipt: %#v", view.Messages)
+	}
+	if err := prepared.Close(); err != nil {
+		t.Fatal(err)
+	}
+	rows := readFixtureRows(t, fixture.directory, fixture.sessionID)
+	if got := countReceipts(rows, fixture.intent.ToolCallID); got != 1 {
+		t.Fatalf("receipt count = %d, want one non-replayed unknown receipt", got)
+	}
+	for _, row := range rows {
+		if row.CheckpointKind == CheckpointExecutionResolution {
+			t.Fatalf("mixed dispatched rows wrote an execution-resolution checkpoint: %#v", row)
+		}
+	}
+	if resolutionCalls != 1 {
+		t.Fatalf("authority resolution calls = %d, want one empty reconciliation call", resolutionCalls)
+	}
+}
+
 func TestPrepareResumeRejectsAbsentMarkerWhenExecutionWasDurablyDispatched(t *testing.T) {
 	fixture := createDispatchedBashRecoveryFixture(t, "owner-generation-1", true)
 	authority := recoveryAuthorityFunc{
