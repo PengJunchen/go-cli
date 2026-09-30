@@ -50,7 +50,18 @@ func TestRegisterSkillToolsUsesVerifiedSnapshotAfterDiskChanges(t *testing.T) {
 	root := t.TempDir()
 	skillDir := filepath.Join(root, ".go-cli", "skills")
 	originalPath := filepath.Join(skillDir, "original", "SKILL.md")
-	writeProjectSkill(t, originalPath, projectSkillContent("approved-skill", "approved prompt"))
+	writeProjectSkill(t, originalPath, `---
+name: approved-skill
+description: captured description
+tools:
+  - read
+parameters:
+  mode: captured-default
+parameter_schema: |
+  {"type":"object","properties":{"query":{"type":"string"}},"required":["query"],"additionalProperties":false}
+---
+approved prompt
+`)
 	writeProjectSkill(t, filepath.Join(skillDir, "flat.md"), projectSkillContent("flat-skill", "flat prompt"))
 	writeProjectSkill(t, filepath.Join(skillDir, "schema.yaml"), projectSkillContent("yaml-skill", "yaml prompt"))
 	writeProjectSkill(t, filepath.Join(skillDir, "schema-yml.yml"), projectSkillContent("yml-skill", "yml prompt"))
@@ -85,17 +96,34 @@ func TestRegisterSkillToolsUsesVerifiedSnapshotAfterDiskChanges(t *testing.T) {
 
 	tool, err := registry.Get(ctx, "approved-skill")
 	require.NoError(t, err)
-	result, err := tool.Execute(ctx, tools.ToolCall{ID: "skill-test", Name: tool.Name()})
+	parameterized, ok := tool.(tools.Parameterized)
+	require.True(t, ok)
+	assert.Equal(t, map[string]any{
+		"type":                 "object",
+		"properties":           map[string]any{"query": map[string]any{"type": "string"}},
+		"required":             []any{"query"},
+		"additionalProperties": false,
+	}, parameterized.Parameters())
+	result, err := tool.Execute(ctx, tools.ToolCall{ID: "skill-test", Name: tool.Name(), Args: map[string]any{"query": "captured argument"}})
 	require.NoError(t, err)
 	assert.Contains(t, result.Output, "approved prompt")
+	assert.Contains(t, result.Output, `{"query":"captured argument"}`)
 	assert.NotContains(t, result.Output, "changed prompt")
 	assert.NotContains(t, result.Output, "added prompt")
+	assert.Equal(t, []string{"read"}, result.Metadata["tools"])
+	assert.Equal(t, map[string]any{"mode": "captured-default"}, result.Metadata["parameters"])
+	assert.Equal(t, map[string]any{"query": "captured argument"}, result.Metadata["arguments"])
 
 	flatTool, err := registry.Get(ctx, "flat-skill")
 	require.NoError(t, err)
 	flatResult, err := flatTool.Execute(ctx, tools.ToolCall{ID: "flat-skill-test", Name: flatTool.Name()})
 	require.NoError(t, err)
 	assert.Contains(t, flatResult.Output, "flat prompt")
+
+	current, err := config.LoadTrustedWithManager(ctx, manager)
+	require.NoError(t, err)
+	assert.Nil(t, current.VerifiedProjectSources(), "the next live source verification rejects the disk changes")
+	assert.Equal(t, config.ProjectSourceTrustChanged, current.ProjectSourceTrustStatus)
 }
 
 func TestRegisterSkillToolsRejectsProjectDirectorySwappedToUserRoot(t *testing.T) {

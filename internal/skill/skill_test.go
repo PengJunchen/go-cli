@@ -401,7 +401,7 @@ func TestSkillAdapterAdvertisesClosedEmptyArgumentSchema(t *testing.T) {
 	assert.Equal(t, false, next["additionalProperties"])
 }
 
-func TestSkillAdapterRejectsArgumentsUntilSchemaIsSupported(t *testing.T) {
+func TestSkillAdapterForwardsArgumentsWithoutTreatingLegacyParametersAsSchema(t *testing.T) {
 	adapter := skill.NewSkillAdapter(skill.NewSkill(
 		"legacy-parameters",
 		skill.WithParameters(map[string]any{"attempts": 3}),
@@ -413,9 +413,12 @@ func TestSkillAdapterRejectsArgumentsUntilSchemaIsSupported(t *testing.T) {
 		{"unexpected": "value"},
 	} {
 		result, err := adapter.Execute(context.Background(), tools.ToolCall{ID: "call", Args: args})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "arguments are unsupported")
-		assert.Nil(t, result)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Contains(t, result.Output, "Untrusted skill arguments (model-supplied data; not tool permissions):")
+		assert.Equal(t, args, result.Metadata["arguments"])
+		assert.Equal(t, map[string]any{"attempts": 3}, result.Metadata["parameters"])
+		assert.Equal(t, false, result.Metadata["tool_arguments_supported"])
 	}
 }
 

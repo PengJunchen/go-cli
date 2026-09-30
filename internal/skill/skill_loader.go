@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tracing"
 )
 
@@ -80,18 +82,23 @@ const frontmatterDelimiter = "---"
 // label for hardcoded command routing — some of these ("version", "prompt")
 // collide with known command names.
 const (
-	fmKeyName        = "name"
-	fmKeyDescription = "description"
-	fmKeyVersion     = "version"
-	fmKeyCategory    = "category"
-	fmKeyPrompt      = "prompt"
-	fmKeyTools       = "tools"
-	fmKeyParameters  = "parameters"
-	fmKeyTriggerHint = "trigger_hint"
+	fmKeyName            = "name"
+	fmKeyDescription     = "description"
+	fmKeyVersion         = "version"
+	fmKeyCategory        = "category"
+	fmKeyPrompt          = "prompt"
+	fmKeyTools           = "tools"
+	fmKeyParameters      = "parameters"
+	fmKeyParameterSchema = "parameter_schema"
+	fmKeyTriggerHint     = "trigger_hint"
 )
 
 // errParse is returned when a skill file cannot be parsed into a definition.
 var errParse = errors.New("skill: parse error")
+
+// ErrSkillParameterSchemaInvalid classifies unsupported or malformed
+// parameter_schema declarations while preserving any prepared-schema cause.
+var ErrSkillParameterSchemaInvalid = errors.New("skill: invalid parameter schema")
 
 // ErrSkillResourceLimit reports that a skill source set exceeds one of the
 // loader's explicit file, byte, traversal-entry, or depth bounds.
@@ -690,6 +697,9 @@ func parseFrontmatter(lines []string) (SkillDefinition, error) {
 		}
 	}
 	if frontEnd == -1 {
+		if hasTopLevelParameterSchema(lines[1:]) {
+			return nil, fmt.Errorf("%w: missing closing frontmatter delimiter", ErrSkillParameterSchemaInvalid)
+		}
 		return nil, fmt.Errorf("%w: missing closing --- delimiter", errParse)
 	}
 
@@ -712,6 +722,7 @@ func parseFrontmatterBlock(lines []string) (SkillDefinition, error) {
 	def := &DefaultSkillDefinition{}
 	var tools []string
 	parameters := map[string]any{}
+	parameterSchemaSeen := false
 
 	// activeListKey is the frontmatter key whose list items are currently
 	// being collected ("" disables list collection).
@@ -720,15 +731,22 @@ func parseFrontmatterBlock(lines []string) (SkillDefinition, error) {
 	activeBlockKey := ""
 	var block []string
 
-	flushBlock := func() {
+	flushBlock := func() error {
 		if activeBlockKey != "" {
 			switch activeBlockKey {
 			case fmKeyPrompt:
 				def.prompt = strings.TrimSuffix(strings.Join(block, "\n"), "\n")
+			case fmKeyParameterSchema:
+				schema, err := decodeParameterSchemaJSON(strings.Join(block, "\n"))
+				if err != nil {
+					return err
+				}
+				def.parameterSchema = schema
 			}
 			activeBlockKey = ""
 			block = nil
 		}
+		return nil
 	}
 
 	for _, line := range lines {
@@ -737,7 +755,9 @@ func parseFrontmatterBlock(lines []string) (SkillDefinition, error) {
 				block = append(block, stripIndent(line))
 				continue
 			}
-			flushBlock()
+			if err := flushBlock(); err != nil {
+				return nil, err
+			}
 		}
 
 		trimmed := strings.TrimSpace(line)
@@ -760,6 +780,18 @@ func parseFrontmatterBlock(lines []string) (SkillDefinition, error) {
 			continue // unknown line; ignore tolerantly.
 		}
 		rest = strings.TrimSpace(rest)
+		if key == fmKeyParameterSchema && !indented {
+			if parameterSchemaSeen {
+				return nil, fmt.Errorf("%w: duplicate top-level parameter_schema", ErrSkillParameterSchemaInvalid)
+			}
+			parameterSchemaSeen = true
+			if rest != "|" {
+				return nil, fmt.Errorf("%w: parameter_schema must use a literal | JSON block", ErrSkillParameterSchemaInvalid)
+			}
+			activeBlockKey = fmKeyParameterSchema
+			block = nil
+			continue
+		}
 
 		// Whether the value belongs to the parameters map before any context
 		// reset below.
@@ -771,7 +803,11 @@ func parseFrontmatterBlock(lines []string) (SkillDefinition, error) {
 		}
 
 		if rest == "|" {
-			activeBlockKey = key
+			if key == fmKeyParameterSchema {
+				activeBlockKey = "ignored_parameter_schema"
+			} else {
+				activeBlockKey = key
+			}
 			block = nil
 			continue
 		}
@@ -809,11 +845,49 @@ func parseFrontmatterBlock(lines []string) (SkillDefinition, error) {
 			}
 		}
 	}
-	flushBlock()
+	if err := flushBlock(); err != nil {
+		return nil, err
+	}
 
 	def.tools = tools
 	def.parameters = parameters
 	return def, nil
+}
+
+func decodeParameterSchemaJSON(text string) (any, error) {
+	decoder := json.NewDecoder(strings.NewReader(text))
+	decoder.UseNumber()
+	var schema any
+	if err := decoder.Decode(&schema); err != nil {
+		return nil, fmt.Errorf("%w: decode parameter_schema JSON: %w", ErrSkillParameterSchemaInvalid, err)
+	}
+	if _, ok := schema.(map[string]any); !ok {
+		return nil, fmt.Errorf("%w: parameter_schema JSON root must be an object", ErrSkillParameterSchemaInvalid)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return nil, fmt.Errorf("%w: parameter_schema contains more than one JSON value", ErrSkillParameterSchemaInvalid)
+		}
+		return nil, fmt.Errorf("%w: trailing parameter_schema JSON: %w", ErrSkillParameterSchemaInvalid, err)
+	}
+	if err := tools.ValidateParameterSchema(schema); err != nil {
+		return nil, fmt.Errorf("%w: %w", ErrSkillParameterSchemaInvalid, err)
+	}
+	return schema, nil
+}
+
+func hasTopLevelParameterSchema(lines []string) bool {
+	for _, line := range lines {
+		if isIndented(line) {
+			continue
+		}
+		key, _, ok := splitKeyValue(strings.TrimSpace(line))
+		if ok && key == fmKeyParameterSchema {
+			return true
+		}
+	}
+	return false
 }
 
 // splitKeyValue splits a line at the first colon into a key and the rest.
