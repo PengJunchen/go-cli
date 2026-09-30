@@ -168,6 +168,51 @@ func TestPendingInputUsesCapturedPriorCountAndWriterAssignedIndex(t *testing.T) 
 	}
 }
 
+func TestDurableCurrentInputPreservationUsesTypedSourceIdentity(t *testing.T) {
+	snapshot := &CompactionSourceSnapshot{
+		Revision: "rev-current-identity", BranchID: "branch-main",
+		Messages:       []AgentMessage{{Role: "user", Content: "same text"}},
+		SourceEntryIDs: []string{"prior-same-text"},
+	}
+	current := compaction.TurnItem{
+		ID: "current-input", Role: compaction.RoleUser, Content: "same text",
+		Runtime: llm.RuntimeMetadata{Source: llm.SourceRef{
+			Kind: llm.SourceRunTranscript, RunID: "run-current-identity", PriorSourceCount: 1, TranscriptIndex: 0,
+		}},
+	}
+	prior := compaction.TurnItem{
+		ID: "prior-input", Role: compaction.RoleUser, Content: "same text",
+		Runtime: llm.RuntimeMetadata{Source: priorRef(snapshot, 0)},
+	}
+
+	captured, err := captureDurableCurrentInput([]compaction.TurnItem{prior, current}, snapshot, "run-current-identity")
+	require.NoError(t, err)
+	require.Equal(t, current.Runtime.Source, captured.Runtime.Source,
+		"same text in an older durable row must not substitute for the current transcript identity")
+	require.Equal(t, current, captured)
+
+	changed := current
+	changed.Content = "edited current input"
+	wrongIdentity := current
+	wrongIdentity.Runtime.Source.TranscriptIndex = 1
+
+	tests := []struct {
+		name   string
+		result []compaction.TurnItem
+	}{
+		{name: "missing current input", result: []compaction.TurnItem{prior}},
+		{name: "changed current input", result: []compaction.TurnItem{changed}},
+		{name: "duplicated current input", result: []compaction.TurnItem{current, current}},
+		{name: "same text with different typed identity", result: []compaction.TurnItem{prior, wrongIdentity}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			require.ErrorIs(t, validateDurableCurrentInputPreserved(captured, test.result), ErrDurableCompactionUnsupported)
+		})
+	}
+	require.NoError(t, validateDurableCurrentInputPreserved(captured, []compaction.TurnItem{prior, current}))
+}
+
 func TestClosedHistoricalUnknownPassesRequestGateButNotOverBudgetCompactionGate(t *testing.T) {
 	snapshot := &CompactionSourceSnapshot{
 		Revision: "rev-unknown", BranchID: "branch-main",

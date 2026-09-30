@@ -164,6 +164,60 @@ func validateDurableCompactionResult(input []compaction.TurnItem, result compact
 	}, nil
 }
 
+func captureDurableCurrentInput(items []compaction.TurnItem, snapshot *CompactionSourceSnapshot, runID string) (compaction.TurnItem, error) {
+	unsupported := func(reason string) (compaction.TurnItem, error) {
+		return compaction.TurnItem{}, fmt.Errorf("%w: current user input %s", ErrDurableCompactionUnsupported, reason)
+	}
+	if snapshot == nil {
+		return unsupported("cannot be identified without the captured source snapshot")
+	}
+	if runID == "" {
+		return unsupported("cannot be identified without the current run ID")
+	}
+	priorCount := uint64(len(snapshot.SourceEntryIDs))
+	var current compaction.TurnItem
+	found := false
+	for index, item := range items {
+		source := item.Runtime.Source
+		if source.Kind != llm.SourceRunTranscript || source.RunID != runID || source.TranscriptIndex != 0 {
+			continue
+		}
+		if found {
+			return unsupported("has a duplicated transcript source identity")
+		}
+		if source.PriorSourceCount != priorCount || item.Role != compaction.RoleUser {
+			return unsupported(fmt.Sprintf("has an invalid transcript source at item %d", index))
+		}
+		current = item
+		found = true
+	}
+	if !found {
+		return unsupported("is missing its original transcript source identity")
+	}
+	return current, nil
+}
+
+func validateDurableCurrentInputPreserved(current compaction.TurnItem, result []compaction.TurnItem) error {
+	source := current.Runtime.Source
+	if source.Kind != llm.SourceRunTranscript || source.TranscriptIndex != 0 {
+		return fmt.Errorf("%w: captured current input does not have its initial transcript identity", ErrDurableCompactionUnsupported)
+	}
+	matches := 0
+	for _, item := range result {
+		if item.Runtime.Source != source {
+			continue
+		}
+		matches++
+		if !sameDurableSuffixItem(current, item) {
+			return fmt.Errorf("%w: captured current input changed during compaction", ErrDurableCompactionUnsupported)
+		}
+	}
+	if matches != 1 {
+		return fmt.Errorf("%w: captured current input occurs %d times after compaction, want exactly once", ErrDurableCompactionUnsupported, matches)
+	}
+	return nil
+}
+
 func exactSourceBoundary(items []compaction.TurnItem, expected llm.SourceThrough) (int, error) {
 	var cursor llm.SourceThrough
 	lastRunSummaryCursor := llm.SourceThrough{}

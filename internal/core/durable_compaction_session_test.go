@@ -23,6 +23,15 @@ func (durableCompactionSummarizer) Summarize(context.Context, string) (string, e
 	return "raw durable summary", nil
 }
 
+type recordingDurableCompactionSummarizer struct {
+	calls int
+}
+
+func (summarizer *recordingDurableCompactionSummarizer) Summarize(context.Context, string) (string, error) {
+	summarizer.calls++
+	return "raw durable summary", nil
+}
+
 type oneTokenForNonEmptyText struct{}
 
 func (oneTokenForNonEmptyText) Estimate(text string) (int, error) {
@@ -32,9 +41,40 @@ func (oneTokenForNonEmptyText) Estimate(text string) (int, error) {
 	return 1, nil
 }
 
+type durableCharacterEstimator struct{}
+
+func (durableCharacterEstimator) Estimate(text string) (int, error) {
+	return len([]rune(text)), nil
+}
+
 type snapshotCheckingChatModel struct {
 	base  llm.BaseChatModel
 	check func([]llm.Message) error
+}
+
+type failingDurableCompactionWriter struct {
+	base            session.DurableSessionWriter
+	compactionErr   error
+	compactionCalls int
+}
+
+func (writer *failingDurableCompactionWriter) AppendAndSync(ctx context.Context, entries ...session.SessionEntry) ([]session.SessionEntry, error) {
+	for _, entry := range entries {
+		if entry.Type == session.EntryTypeCompaction {
+			writer.compactionCalls++
+			return nil, writer.compactionErr
+		}
+	}
+	return writer.base.AppendAndSync(ctx, entries...)
+}
+
+type durableWriterOverrideSession struct {
+	session.PreparedSession
+	writer session.DurableSessionWriter
+}
+
+func (prepared *durableWriterOverrideSession) DurableWriter() session.DurableSessionWriter {
+	return prepared.writer
 }
 
 func (model *snapshotCheckingChatModel) Generate(ctx context.Context, messages []llm.Message, opts ...llm.Option) (*llm.Message, error) {
@@ -66,6 +106,223 @@ func submitDurableCompactionRun(t *testing.T, agent core.Agent, sink core.RunCom
 	}
 	_, err = stream.Result()
 	require.NoError(t, err)
+}
+
+func runDurableCompactionRun(t *testing.T, agent core.Agent, sink core.RunCommitSink, prepared session.PreparedSession, workspaceID, content string) error {
+	t.Helper()
+	harness := core.NewHarnessImpl(agent)
+	stream, err := harness.Submit(core.WithRunCommit(context.Background(), sink, core.RunCommitBinding{
+		SessionID: prepared.View().SessionID, WorkspaceID: workspaceID,
+	}), content)
+	require.NoError(t, err)
+	for range stream.Events() {
+	}
+	_, err = stream.Result()
+	return err
+}
+
+func TestDurableCompactionRejectsSummaryThatConsumesOversizedCurrentInput(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	workspaceID := "workspace-v1-durable-current-input"
+	index, prepared, sink := prepareRunCommitSession(t, root, workspaceID, "durable current input")
+	preparedOpen := true
+	t.Cleanup(func() {
+		if preparedOpen {
+			_ = prepared.Close()
+		}
+	})
+
+	content := "current input:" + strings.Repeat("x", 1000)
+	summarizer := &recordingDurableCompactionSummarizer{}
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate("durable-current-input", "durable current input",
+		mock.ConversationTurn{AssistantContent: "must not be requested"},
+	))
+	loop := core.NewLoopAgent(core.WithLLM(model), core.WithSystemPrompt("s"))
+	loop.SetMidTurnCompaction(
+		compaction.NewMidTurnCompact(compaction.WithThresholdRatio(1)),
+		compaction.NewSummaryCompactor(summarizer),
+		durableCharacterEstimator{},
+		100,
+	)
+	agent := core.NewAgentImpl("durable-current-input", loop)
+
+	runErr := runDurableCompactionRun(t, agent, sink, prepared, workspaceID, content)
+	require.ErrorIs(t, runErr, core.ErrDurableCompactionUnsupported,
+		"durable preflight must fail closed if the only way to fit the request is to summarize its current input")
+	require.Equal(t, 1, summarizer.calls, "the deterministic summary provider proves this reached the cut-through-input path")
+	require.Zero(t, model.CallCount(), "an unsupported current-input projection must be rejected before provider dispatch")
+
+	live, err := prepared.Snapshot()
+	require.NoError(t, err)
+	for _, entry := range live.DurableEntries {
+		require.NotEqual(t, session.EntryTypeCompaction, entry.Type, "a rejected input projection must not be committed")
+	}
+	require.Len(t, live.PublishedView.Messages, 1)
+	require.Equal(t, content, live.PublishedView.Messages[0].Content)
+
+	sessionID := live.SessionID
+	require.NoError(t, prepared.Close())
+	preparedOpen = false
+	reopened, err := session.NewDurableJSONLSessionPreparer(filepath.Join(root, "durable"), index).PrepareResume(context.Background(), sessionID)
+	require.NoError(t, err)
+	defer reopened.Close()
+	reopenedSnapshot, err := reopened.Snapshot()
+	require.NoError(t, err)
+	require.Equal(t, live.PublishedView, reopenedSnapshot.PublishedView,
+		"the rejected projection must leave the raw user input unchanged after durable reopen")
+	require.Len(t, reopenedSnapshot.PublishedView.Messages, 1)
+	require.Equal(t, content, reopenedSnapshot.PublishedView.Messages[0].Content)
+}
+
+func TestDurableCompactionWithoutCutSendsCurrentInputOnceAndReopens(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	workspaceID := "workspace-v1-durable-no-compaction-input"
+	index, prepared, sink := prepareRunCommitSession(t, root, workspaceID, "durable no compaction input")
+	preparedOpen := true
+	t.Cleanup(func() {
+		if preparedOpen {
+			_ = prepared.Close()
+		}
+	})
+
+	content := "keep this current input unchanged"
+	summarizer := &recordingDurableCompactionSummarizer{}
+	baseModel := mock.NewMockLLMServer(mock.NewConversationTemplate("durable-no-compaction-input", "durable no compaction input",
+		mock.ConversationTurn{AssistantContent: "accepted"},
+	))
+	providerInputCount := 0
+	model := &snapshotCheckingChatModel{
+		base: baseModel,
+		check: func(messages []llm.Message) error {
+			providerInputCount = 0
+			for _, message := range messages {
+				if message.Role != llm.RoleUser || message.Content != content {
+					continue
+				}
+				providerInputCount++
+				if message.Runtime.Source.Kind != llm.SourceRunTranscript || message.Runtime.Source.TranscriptIndex != 0 {
+					return fmt.Errorf("test: provider received current input with unexpected source identity: %#v", message.Runtime.Source)
+				}
+			}
+			if providerInputCount != 1 {
+				return fmt.Errorf("test: provider received current input %d times", providerInputCount)
+			}
+			return nil
+		},
+	}
+	loop := core.NewLoopAgent(core.WithLLM(model), core.WithSystemPrompt("s"))
+	loop.SetMidTurnCompaction(
+		compaction.NewMidTurnCompact(compaction.WithThresholdRatio(1)),
+		compaction.NewSummaryCompactor(summarizer),
+		oneTokenForNonEmptyText{},
+		10,
+	)
+	agent := core.NewAgentImpl("durable-no-compaction-input", loop)
+
+	require.NoError(t, runDurableCompactionRun(t, agent, sink, prepared, workspaceID, content))
+	require.Equal(t, 1, baseModel.CallCount())
+	require.Equal(t, 1, providerInputCount)
+	require.Zero(t, summarizer.calls, "an input already under budget must not be summarized")
+
+	live, err := prepared.Snapshot()
+	require.NoError(t, err)
+	require.Len(t, live.PublishedView.Messages, 2)
+	require.Equal(t, content, live.PublishedView.Messages[0].Content)
+	for _, entry := range live.DurableEntries {
+		require.NotEqual(t, session.EntryTypeCompaction, entry.Type)
+	}
+
+	sessionID := live.SessionID
+	require.NoError(t, prepared.Close())
+	preparedOpen = false
+	reopened, err := session.NewDurableJSONLSessionPreparer(filepath.Join(root, "durable"), index).PrepareResume(context.Background(), sessionID)
+	require.NoError(t, err)
+	defer reopened.Close()
+	reopenedSnapshot, err := reopened.Snapshot()
+	require.NoError(t, err)
+	require.Equal(t, live.PublishedView, reopenedSnapshot.PublishedView)
+	require.Len(t, reopenedSnapshot.PublishedView.Messages, 2)
+	require.Equal(t, content, reopenedSnapshot.PublishedView.Messages[0].Content)
+}
+
+func TestDurableCompactionCommitFailureBlocksProviderAndPreservesCurrentInput(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	workspaceID := "workspace-v1-durable-compaction-commit-failure"
+	index, prepared, firstSink := prepareRunCommitSession(t, root, workspaceID, "durable compaction commit failure")
+	preparedOpen := true
+	t.Cleanup(func() {
+		if preparedOpen {
+			_ = prepared.Close()
+		}
+	})
+
+	firstModel := runDurableCompactionTurn(t, firstSink, prepared, workspaceID, "repeat text", nil, 0, false)
+	require.Equal(t, 1, firstModel.CallCount())
+	firstSnapshot, err := prepared.Snapshot()
+	require.NoError(t, err)
+	require.Len(t, firstSnapshot.PublishedView.Messages, 2)
+	compactionErr := errors.New("test: compaction projection sync rejected")
+	failingWriter := &failingDurableCompactionWriter{
+		base:          prepared.DurableWriter(),
+		compactionErr: compactionErr,
+	}
+	preparedWithFailingWriter := &durableWriterOverrideSession{PreparedSession: prepared, writer: failingWriter}
+	failingSink, err := session.NewSessionRunCommitSink(preparedWithFailingWriter, index, workspaceID, nil)
+	require.NoError(t, err)
+	sourceSnapshot, err := failingSink.CompactionSourceSnapshot()
+	require.NoError(t, err)
+
+	content := "current turn"
+	summarizer := &recordingDurableCompactionSummarizer{}
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate("durable-compaction-commit-failure", "durable compaction commit failure",
+		mock.ConversationTurn{AssistantContent: "must not be requested"},
+	))
+	loop := core.NewLoopAgent(core.WithLLM(model), core.WithSystemPrompt("s"))
+	loop.SetMidTurnCompaction(
+		compaction.NewMidTurnCompact(compaction.WithThresholdRatio(1)),
+		compaction.NewSummaryCompactor(summarizer),
+		oneTokenForNonEmptyText{},
+		3,
+	)
+	agent := core.NewAgentImpl("durable-compaction-commit-failure", loop)
+	require.NoError(t, agent.SetHistoryFromSourceSnapshot(sourceSnapshot))
+
+	runErr := runDurableCompactionRun(t, agent, failingSink, prepared, workspaceID, content)
+	require.ErrorIs(t, runErr, compactionErr)
+	require.Equal(t, 1, summarizer.calls, "the compaction projection must be prepared before its sync failure")
+	require.Equal(t, 1, failingWriter.compactionCalls)
+	require.Zero(t, model.CallCount(), "a failed durable compaction commit must stop provider dispatch")
+
+	live, err := prepared.Snapshot()
+	require.NoError(t, err)
+	for _, entry := range live.DurableEntries {
+		require.NotEqual(t, session.EntryTypeCompaction, entry.Type, "the failing sink must not append a projection")
+	}
+	currentCount := 0
+	for _, message := range live.PublishedView.Messages {
+		if message.Content == content {
+			currentCount++
+		}
+	}
+	require.Equal(t, 1, currentCount)
+	require.Equal(t, content, live.PublishedView.Messages[len(live.PublishedView.Messages)-1].Content)
+
+	sessionID := live.SessionID
+	require.NoError(t, prepared.Close())
+	preparedOpen = false
+	reopened, err := session.NewDurableJSONLSessionPreparer(filepath.Join(root, "durable"), index).PrepareResume(context.Background(), sessionID)
+	require.NoError(t, err)
+	defer reopened.Close()
+	reopenedSnapshot, err := reopened.Snapshot()
+	require.NoError(t, err)
+	require.Equal(t, live.PublishedView, reopenedSnapshot.PublishedView)
+	require.Equal(t, content, reopenedSnapshot.PublishedView.Messages[len(reopenedSnapshot.PublishedView.Messages)-1].Content)
 }
 
 func runDurableCompactionTurn(t *testing.T, sink core.RunCommitSink, prepared session.PreparedSession, workspaceID, content string, model llm.BaseChatModel, maxTokens int, withSummary bool) *mock.MockLLMServer {
@@ -157,6 +414,19 @@ func TestDurableCompactionSessionProjectionSyncsBeforeRequestAndReopensExactly(t
 			}
 			if summaryCount != 1 {
 				return fmt.Errorf("test: provider received %d wrapped summary messages", summaryCount)
+			}
+			currentInputCount := 0
+			for _, message := range messages {
+				if message.Role != llm.RoleUser || message.Content != "current turn" {
+					continue
+				}
+				currentInputCount++
+				if message.Runtime.Source.Kind != llm.SourceRunTranscript || message.Runtime.Source.RunID == "" || message.Runtime.Source.PriorSourceCount != 2 || message.Runtime.Source.TranscriptIndex != 0 {
+					return fmt.Errorf("test: provider received current input with unexpected source identity: %#v", message.Runtime.Source)
+				}
+			}
+			if currentInputCount != 1 {
+				return fmt.Errorf("test: provider received current input %d times", currentInputCount)
 			}
 			return nil
 		},
