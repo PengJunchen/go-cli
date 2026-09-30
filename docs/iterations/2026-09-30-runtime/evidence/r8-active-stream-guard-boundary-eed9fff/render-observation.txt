@@ -1,0 +1,14 @@
+source_commit=eed9fff60bb552aab1d4d3fb1261a0d2a4ee942b
+binary_sha256=a2e4d0c92b8217129fcc19a3c43fc29c5be11156188e7c865e2b8a1a1e148af6
+platform=Darwin native openpty; TERM=xterm-256color; 80x24
+provider_active_render_wait=11 seconds; provider emitted non-empty content about every 1.5 seconds
+provider_initial_chunk_flushed=true
+provider_nonempty_keepalives_flushed_before_wait_expired=7
+cli_pty_raw_contains_initial_marker=false
+cli_tui_current_frame_contains_initial_marker=false
+cli_process_alive_after_render_wait=true
+render_wait_result=timeout waiting for rendered R8-ACTIVE-PARTIAL
+pageup_or_end_sent=false (the required active-text render precondition was not met)
+provider_response_finalized_while_waiting=false
+terminal_restore_check=not exercised in this failed active-stream journey
+source_modifications=none

@@ -1,0 +1,58 @@
+[
+  {
+    "event": "chunk_flushed",
+    "marker": "R8-ACTIVE-PARTIAL",
+    "flushed": true,
+    "monotonic_ns": 209526126730500,
+    "wall_time": "2026-09-30T20:48:34+0800"
+  },
+  {
+    "event": "chunk_flushed",
+    "marker": "R8-RENDER-KEEPALIVE-1",
+    "flushed": true,
+    "monotonic_ns": 209527630818583,
+    "wall_time": "2026-09-30T20:48:35+0800"
+  },
+  {
+    "event": "chunk_flushed",
+    "marker": "R8-RENDER-KEEPALIVE-2",
+    "flushed": true,
+    "monotonic_ns": 209529136855250,
+    "wall_time": "2026-09-30T20:48:37+0800"
+  },
+  {
+    "event": "chunk_flushed",
+    "marker": "R8-RENDER-KEEPALIVE-3",
+    "flushed": true,
+    "monotonic_ns": 209530645924416,
+    "wall_time": "2026-09-30T20:48:38+0800"
+  },
+  {
+    "event": "chunk_flushed",
+    "marker": "R8-RENDER-KEEPALIVE-4",
+    "flushed": true,
+    "monotonic_ns": 209532152723208,
+    "wall_time": "2026-09-30T20:48:40+0800"
+  },
+  {
+    "event": "chunk_flushed",
+    "marker": "R8-RENDER-KEEPALIVE-5",
+    "flushed": true,
+    "monotonic_ns": 209533656168125,
+    "wall_time": "2026-09-30T20:48:41+0800"
+  },
+  {
+    "event": "chunk_flushed",
+    "marker": "R8-RENDER-KEEPALIVE-6",
+    "flushed": true,
+    "monotonic_ns": 209535166283875,
+    "wall_time": "2026-09-30T20:48:43+0800"
+  },
+  {
+    "event": "chunk_flushed",
+    "marker": "R8-RENDER-KEEPALIVE-7",
+    "flushed": true,
+    "monotonic_ns": 209536676034125,
+    "wall_time": "2026-09-30T20:48:44+0800"
+  }
+]
