@@ -77,6 +77,7 @@ func LoadTrustedWithManager(ctx context.Context, manager approval.TrustManager) 
 	if len(projectOverlay.MCP.Servers) > 0 {
 		projectOverlay.mcpServersProvenance = MCPServersFromProject
 	}
+	projectOverlay.projectExtensionSourceIDs = cloneStringMap(captured.projectExtensionSourceIDs)
 	merged := mergeConfigs(globalConfig, projectOverlay)
 	if err := NewDefaultValidator().Validate(*merged); err != nil {
 		return nil, fmt.Errorf("config: validate merged trusted configuration: %w", err)
@@ -85,6 +86,7 @@ func LoadTrustedWithManager(ctx context.Context, manager approval.TrustManager) 
 	merged.projectSourceSnapshot = captured.snapshot
 	merged.verifiedProjectSources = verified
 	merged.projectTrustManager = manager
+	merged.projectExtensionSourceIDs = cloneStringMap(captured.projectExtensionSourceIDs)
 	merged.projectOverlay = cloneConfigValues(projectOverlay)
 	merged.userGlobalConfig = cloneConfigValues(globalConfig)
 	merged.mcpServersProvenance = mcpProvenanceFor(globalConfig, projectOverlay)
@@ -98,6 +100,25 @@ func (c *Config) VerifiedProjectSources() *approval.VerifiedProjectSources {
 		return nil
 	}
 	return c.verifiedProjectSources
+}
+
+// ProjectExtensionBytesForVerifiedPath returns the captured bytes for a
+// project plugin path. The raw configured path is mapped to its manifest
+// source ID during capture, so assembly does not reopen or resolve the
+// project's live path after verification.
+func (c *Config) ProjectExtensionBytesForVerifiedPath(path string) ([]byte, bool) {
+	if c == nil {
+		return nil, false
+	}
+	verified := c.VerifiedProjectSources()
+	if verified == nil {
+		return nil, false
+	}
+	sourceID, ok := c.projectExtensionSourceIDs[path]
+	if !ok {
+		return nil, false
+	}
+	return verified.SourceBytes(sourceID)
 }
 
 // ProjectTrustManager returns the manager used to verify this configuration's
@@ -217,6 +238,7 @@ func cloneConfigValues(source *Config) *Config {
 	clone.SmallModel.maxTokensSet = source.SmallModel.maxTokensSet
 	clone.ProjectSourceTrustStatus = source.ProjectSourceTrustStatus
 	clone.projectTrustManager = source.projectTrustManager
+	clone.projectExtensionSourceIDs = cloneStringMap(source.projectExtensionSourceIDs)
 	clone.mcpServersProvenance = source.mcpServersProvenance
 	return &clone
 }

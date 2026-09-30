@@ -132,6 +132,31 @@ func (tool *r6RunCommitProjectTool) Execute(context.Context, tools.ToolCall) (*t
 	return &tools.ToolResult{Output: "must not run"}, nil
 }
 
+type r6RunCommitBlockingProjectTool struct {
+	calls   atomic.Int32
+	entered chan<- struct{}
+	release <-chan struct{}
+}
+
+func (*r6RunCommitBlockingProjectTool) Name() string { return "project_commit_win" }
+func (*r6RunCommitBlockingProjectTool) Description() string {
+	return "R6 committed action survives a later project trust revoke"
+}
+func (tool *r6RunCommitBlockingProjectTool) Execute(ctx context.Context, _ tools.ToolCall) (*tools.ToolResult, error) {
+	tool.calls.Add(1)
+	select {
+	case tool.entered <- struct{}{}:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	select {
+	case <-tool.release:
+		return &tools.ToolResult{Output: "committed project action finished"}, nil
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+}
+
 func newRunCommitStreamingRegistry(ctx context.Context, t *testing.T, policyCalls *atomic.Int32) *tools.MiddlewareToolRegistry {
 	t.Helper()
 	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck
@@ -261,8 +286,13 @@ func TestRunCommitProjectRevocationDuringAskWritesOneNotDispatchedReceipt(t *tes
 	require.NoError(t, registry.SetPreparedToolPolicy(middleware.PreparedPolicy))
 	require.NoError(t, registry.SetPreparedToolStages(tools.PreparedToolStages{}))
 
-	_, prepared, sink := prepareRunCommitSession(t, root, workspaceID, "R6 revoke during Ask")
-	t.Cleanup(func() { _ = prepared.Close() })
+	index, prepared, sink := prepareRunCommitSession(t, root, workspaceID, "R6 revoke during Ask")
+	preparedOpen := true
+	t.Cleanup(func() {
+		if preparedOpen {
+			_ = prepared.Close()
+		}
+	})
 	model := mock.NewMockLLMServer(mock.NewConversationTemplate("r6-revoke-during-ask", "R6 revoke during Ask",
 		mock.ConversationTurn{AssistantToolCalls: []mock.ExpectedToolCall{{
 			ID: "project-call-1", Name: target.Name(), Args: map[string]any{"value": "x"},
@@ -311,7 +341,13 @@ func TestRunCommitProjectRevocationDuringAskWritesOneNotDispatchedReceipt(t *tes
 	require.Zero(t, target.calls.Load(), "the project executor must never start after revoke")
 	require.Equal(t, 2, model.CallCount(), "the run should persist a terminal result after the known pre-dispatch rejection")
 
-	state, err := prepared.Snapshot()
+	sessionID := prepared.View().SessionID
+	require.NoError(t, prepared.Close())
+	preparedOpen = false
+	reopened, err := session.NewDurableJSONLSessionPreparer(filepath.Join(root, "durable"), index).PrepareResume(ctx, sessionID)
+	require.NoError(t, err, "the rejected receipt must survive closing and reopening the physical session")
+	t.Cleanup(func() { _ = reopened.Close() })
+	state, err := reopened.Snapshot()
 	require.NoError(t, err)
 	var intents []session.SessionEntry
 	var receipts []session.SessionEntry
@@ -332,6 +368,144 @@ func TestRunCommitProjectRevocationDuringAskWritesOneNotDispatchedReceipt(t *tes
 	require.NotEmpty(t, receipts[0].ActionID)
 	require.Equal(t, core.DispatchStateNotDispatched, receipts[0].DispatchState)
 	require.Equal(t, core.ReceiptOutcomeError, receipts[0].ReceiptOutcome)
+}
+
+func TestRunCommitProjectRevocationAfterDispatchKeepsCommittedReceipt(t *testing.T) {
+	const (
+		storePathEnv = "GO_CLI_R6_RUN_COMMIT_LATE_REVOKE_STORE"
+		rootPathEnv  = "GO_CLI_R6_RUN_COMMIT_LATE_REVOKE_ROOT"
+	)
+	if storePath := os.Getenv(storePathEnv); storePath != "" {
+		manager := approval.NewDefaultTrustManager(approval.NewFileTrustStore(storePath))
+		if err := manager.RevokeTrust(context.Background(), os.Getenv(rootPathEnv)); err != nil {
+			_, _ = os.Stderr.WriteString(err.Error())
+			os.Exit(2)
+		}
+		os.Exit(0)
+	}
+
+	ctx := context.Background()
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	workspaceID := "workspace-v1-r6-committed-late-revoke"
+	workspace := filepath.Join(root, "workspace")
+	require.NoError(t, os.MkdirAll(workspace, 0o700))
+	projectConfig := filepath.Join(workspace, ".go-cli.yaml")
+	require.NoError(t, os.WriteFile(projectConfig, []byte("tools: {}\n"), 0o600))
+	trustPath := filepath.Join(root, "config", "go-cli", "trust.json")
+	manager := approval.NewDefaultTrustManager(approval.NewFileTrustStore(trustPath))
+	snapshot, err := config.CaptureProjectSources(ctx, workspace, nil)
+	require.NoError(t, err)
+	frozen, ok := manager.(approval.FrozenProjectSourceTrust)
+	require.True(t, ok)
+	require.NoError(t, frozen.TrustProjectSourceSnapshot(ctx, snapshot))
+	binding, err := frozen.CheckProjectSourceSnapshot(ctx, snapshot)
+	require.NoError(t, err)
+
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseExecutor := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseExecutor)
+	target := &r6RunCommitBlockingProjectTool{entered: entered, release: release}
+	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck
+	require.NoError(t, base.RegisterProjectSourced(ctx, target, binding))
+	fence := base.DispatchFence()
+	middleware := approval.NewApprovalMiddleware(approval.AllowAllClassifier{}, approval.NewInMemoryApprovalStore(),
+		approval.WithAutoApprove(true),
+		approval.WithDispatchFence(fence),
+		approval.WithPlanModeController(core.NewDefaultPlanModeController(fence)),
+	)
+	registry := tools.NewMiddlewareToolRegistry(base)
+	require.NoError(t, registry.SetPreparedToolPolicy(middleware.PreparedPolicy))
+	require.NoError(t, registry.SetPreparedToolStages(tools.PreparedToolStages{}))
+
+	index, prepared, sink := prepareRunCommitSession(t, root, workspaceID, "R6 committed action before late revoke")
+	sessionID := prepared.View().SessionID
+	preparedOpen := true
+	t.Cleanup(func() {
+		if preparedOpen {
+			_ = prepared.Close()
+		}
+	})
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate("r6-committed-late-revoke", "R6 committed late revoke",
+		mock.ConversationTurn{AssistantToolCalls: []mock.ExpectedToolCall{{
+			ID: "project-commit-win-1", Name: target.Name(), Args: map[string]any{"value": "x"},
+		}}},
+		mock.ConversationTurn{AssistantContent: "The committed project call completed."},
+	))
+	agent := core.NewAgentImpl("r6-committed-late-revoke", core.NewLoopAgent(core.WithLLM(model), core.WithTools(registry)))
+	harness := core.NewHarnessImpl(agent, core.WithHarnessEventBus(core.NewMemoryEventBus()))
+	stream, err := harness.Submit(core.WithRunCommit(ctx, sink, core.RunCommitBinding{
+		SessionID: sessionID, WorkspaceID: workspaceID,
+	}), "call the project tool")
+	require.NoError(t, err)
+	eventsDone := make(chan struct{})
+	go func() {
+		for range stream.Events() {
+		}
+		close(eventsDone)
+	}()
+	select {
+	case <-entered:
+		// Execute is entered only after the prepared invocation has set its
+		// final dispatch marker; the trust-store lock is no longer held.
+	case <-time.After(5 * time.Second):
+		_, runErr := stream.Result()
+		t.Fatalf("project executor did not enter after the dispatch marker: run error %v", runErr)
+	}
+
+	command := exec.Command(os.Args[0], "-test.run=^TestRunCommitProjectRevocationAfterDispatchKeepsCommittedReceipt$")
+	command.Env = append(os.Environ(), storePathEnv+"="+trustPath, rootPathEnv+"="+snapshot.CanonicalRoot())
+	if err := command.Start(); err != nil {
+		releaseExecutor()
+		t.Fatal(err)
+	}
+	revokeDone := make(chan error, 1)
+	go func() { revokeDone <- command.Wait() }()
+	select {
+	case err := <-revokeDone:
+		require.NoError(t, err, "a later cross-process revoke must complete while the committed executor is paused")
+	case <-time.After(5 * time.Second):
+		releaseExecutor()
+		_ = <-revokeDone
+		t.Fatal("cross-process revoke blocked while the committed executor was running")
+	}
+	releaseExecutor()
+	<-eventsDone
+	_, runErr := stream.Result()
+	require.ErrorIs(t, runErr, core.ErrRunCommitQuiescenceUnproven, "an extension-style prepared tool has no R1 completion proof")
+	require.EqualValues(t, 1, target.calls.Load(), "revocation after dispatch cannot undo the committed tool action")
+	require.Equal(t, 1, model.CallCount(), "without an R1 completion proof, the durable run cannot request another model turn")
+
+	require.NoError(t, prepared.Close())
+	preparedOpen = false
+	reopened, err := session.NewDurableJSONLSessionPreparer(filepath.Join(root, "durable"), index).PrepareResume(ctx, sessionID)
+	require.NoError(t, err, "the committed receipt must survive closing and reopening the physical session")
+	t.Cleanup(func() { _ = reopened.Close() })
+	state, err := reopened.Snapshot()
+	require.NoError(t, err)
+	var intents []session.SessionEntry
+	var receipts []session.SessionEntry
+	for _, row := range state.DurableEntries {
+		if row.Type != session.EntryTypeTool || row.ToolCallID != "project-commit-win-1" {
+			continue
+		}
+		if row.ActionState == session.ActionStateIntent {
+			intents = append(intents, row)
+		}
+		if row.ReceiptOutcome != "" {
+			receipts = append(receipts, row)
+		}
+	}
+	require.Len(t, intents, 1, "the ActionID must be reserved once before dispatch")
+	require.Len(t, receipts, 1, "exactly one committed terminal receipt must be persisted")
+	require.NotEmpty(t, intents[0].ActionID)
+	require.Equal(t, intents[0].ActionID, receipts[0].ActionID)
+	require.Equal(t, core.DispatchStateDispatched, receipts[0].DispatchState)
+	require.Equal(t, core.ReceiptOutcomeSuccess, receipts[0].ReceiptOutcome)
+	require.Equal(t, "committed project action finished", receipts[0].Content)
 }
 
 func TestRunCommitLoopStreamsPreparedBashAndReopensWithSessionSink(t *testing.T) {

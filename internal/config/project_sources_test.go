@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"context"
 	"io"
 	"os"
@@ -335,6 +336,61 @@ func TestCaptureProjectSourcesHonorsBoundsAndCancellation(t *testing.T) {
 		require.ErrorIs(t, err, ErrProjectSourceLimit)
 	})
 
+	t.Run("project extension module can use the remaining aggregate budget", func(t *testing.T) {
+		root := t.TempDir()
+		pluginPath := filepath.Join(root, "plugins", "native.so")
+		require.NoError(t, os.MkdirAll(filepath.Dir(pluginPath), 0o700))
+		pluginBytes := bytes.Repeat([]byte{0x5a}, projectSourceMaxFileBytes+1)
+		require.NoError(t, os.WriteFile(pluginPath, pluginBytes, 0o600))
+		configBytes := []byte(`{"extensions":{"plugin_paths":["plugins/native.so"]}}`)
+		require.NoError(t, os.WriteFile(filepath.Join(root, ".go-cli.json"), configBytes, 0o600))
+
+		snapshot, err := CaptureProjectSources(context.Background(), root, nil)
+		require.NoError(t, err)
+		captured, present := snapshot.SourceBytes("extensions/plugins/native.so")
+		require.True(t, present)
+		assert.Equal(t, pluginBytes, captured)
+	})
+
+	t.Run("project extension module limit remains bounded by total manifest budget", func(t *testing.T) {
+		root := t.TempDir()
+		pluginPath := filepath.Join(root, "plugins", "native.so")
+		require.NoError(t, os.MkdirAll(filepath.Dir(pluginPath), 0o700))
+		require.NoError(t, os.WriteFile(pluginPath, make([]byte, projectSourceMaxTotalBytes+1), 0o600))
+		configBytes := []byte(`{"extensions":{"plugin_paths":["plugins/native.so"]}}`)
+		require.NoError(t, os.WriteFile(filepath.Join(root, ".go-cli.json"), configBytes, 0o600))
+
+		_, err := CaptureProjectSources(context.Background(), root, nil)
+		require.ErrorIs(t, err, ErrProjectSourceLimit)
+	})
+
+	t.Run("project extension module cannot exceed aggregate manifest budget", func(t *testing.T) {
+		root := t.TempDir()
+		pluginPath := filepath.Join(root, "plugins", "native.so")
+		commandPath := filepath.Join(root, "bin", "helper")
+		require.NoError(t, os.MkdirAll(filepath.Dir(pluginPath), 0o700))
+		require.NoError(t, os.MkdirAll(filepath.Dir(commandPath), 0o700))
+		require.NoError(t, os.WriteFile(pluginPath, make([]byte, projectSourceMaxTotalBytes-512), 0o600))
+		require.NoError(t, os.WriteFile(commandPath, make([]byte, projectSourceMaxFileBytes), 0o700))
+		configBytes := []byte(`{"extensions":{"plugin_paths":["plugins/native.so"]},"tools":{"custom_tools":[{"name":"helper","command":["` + filepath.ToSlash(commandPath) + `"]}]}}`)
+		require.NoError(t, os.WriteFile(filepath.Join(root, ".go-cli.json"), configBytes, 0o600))
+
+		_, err := CaptureProjectSources(context.Background(), root, nil)
+		require.ErrorIs(t, err, ErrProjectSourceLimit)
+	})
+
+	t.Run("global extension source retains ordinary file limit", func(t *testing.T) {
+		root := t.TempDir()
+		pluginPath := filepath.Join(root, "plugins", "native.so")
+		require.NoError(t, os.MkdirAll(filepath.Dir(pluginPath), 0o700))
+		require.NoError(t, os.WriteFile(pluginPath, make([]byte, projectSourceMaxFileBytes+1), 0o600))
+
+		_, err := CaptureProjectSources(context.Background(), root, &Config{
+			Extensions: ExtensionsConfig{PluginPaths: []string{pluginPath}},
+		})
+		require.ErrorIs(t, err, ErrProjectSourceLimit)
+	})
+
 	t.Run("candidate limit", func(t *testing.T) {
 		root := t.TempDir()
 		skillRoot := filepath.Join(root, ".go-cli", "skills")
@@ -397,7 +453,7 @@ func TestCaptureProjectSourcesHonorsBoundsAndCancellation(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		reader := &cancelAfterChunkReader{cancel: cancel}
 		var total int64
-		_, err := readProjectSourceChunks(ctx, reader, "source", 0, &total)
+		_, err := readProjectSourceChunks(ctx, reader, "source", 0, projectSourceMaxFileBytes, projectSourceMaxTotalBytes, &total)
 		require.ErrorIs(t, err, context.Canceled)
 		require.Equal(t, int64(projectSourceReadChunkBytes), total)
 	})

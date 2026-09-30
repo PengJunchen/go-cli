@@ -1085,7 +1085,16 @@ func (s *assembleState) assembleExtensions() error {
 		}
 		pm := extension.NewPluginManager(loader)
 		s.pluginManagers = append(s.pluginManagers, pm)
-		if err := pm.Load(s.ctx, s.rc.Extensions.PluginPaths); err != nil {
+		pluginPaths := s.rc.Extensions.PluginPaths
+		if projectBinding != nil {
+			materializedPaths, cleanup, err := materializeProjectExtensionPaths(s.rc, pluginPaths)
+			if err != nil {
+				return fmt.Errorf("assemble: materialize verified project extensions: %w", err)
+			}
+			s.cleanupList = append(s.cleanupList, cleanup)
+			pluginPaths = materializedPaths
+		}
+		if err := pm.Load(s.ctx, pluginPaths); err != nil {
 			return fmt.Errorf("assemble: load extensions: %w", err)
 		}
 		if err := pm.Init(s.ctx); err != nil {

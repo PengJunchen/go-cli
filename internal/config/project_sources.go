@@ -23,7 +23,10 @@ const (
 	projectSourceMaxPathBytes         = 64 << 10
 	projectSourceMaxFileBytes         = 1 << 20
 	projectSourceMaxTotalBytes        = 16 << 20
-	projectSourceReadChunkBytes       = 32 << 10
+	// Native project extension modules use the aggregate manifest limit as
+	// their per-file ceiling. The aggregate limit remains authoritative.
+	projectSourceMaxExtensionModuleBytes = projectSourceMaxTotalBytes
+	projectSourceReadChunkBytes          = 32 << 10
 )
 
 const (
@@ -89,21 +92,23 @@ const (
 )
 
 type capturedProjectSources struct {
-	snapshot         *approval.ProjectSourceSnapshot
-	selectedConfigID string
-	selectedPath     string
+	snapshot                  *approval.ProjectSourceSnapshot
+	selectedConfigID          string
+	selectedPath              string
+	projectExtensionSourceIDs map[string]string
 }
 
 type sourceCapture struct {
-	ctx          context.Context
-	root         string
-	rootAliases  []string
-	files        []approval.ProjectSourceFileInput
-	directories  []approval.ProjectSourceDirectoryInput
-	fileIDs      map[string]struct{}
-	directoryIDs map[string]struct{}
-	readBytes    map[string][]byte
-	totalBytes   int64
+	ctx                       context.Context
+	root                      string
+	rootAliases               []string
+	files                     []approval.ProjectSourceFileInput
+	directories               []approval.ProjectSourceDirectoryInput
+	fileIDs                   map[string]struct{}
+	directoryIDs              map[string]struct{}
+	projectExtensionSourceIDs map[string]string
+	readBytes                 map[string][]byte
+	totalBytes                int64
 }
 
 type sourceDirectoryKind int
@@ -137,12 +142,13 @@ func captureProjectSources(ctx context.Context, root string, globalConfig *Confi
 		return nil, fmt.Errorf("%w: %v", ErrProjectSourceCanonicalization, err)
 	}
 	capture := &sourceCapture{
-		ctx:          ctx,
-		root:         canonicalRoot,
-		rootAliases:  []string{filepath.Clean(requestedRoot), canonicalRoot},
-		fileIDs:      make(map[string]struct{}),
-		directoryIDs: make(map[string]struct{}),
-		readBytes:    make(map[string][]byte),
+		ctx:                       ctx,
+		root:                      canonicalRoot,
+		rootAliases:               []string{filepath.Clean(requestedRoot), canonicalRoot},
+		fileIDs:                   make(map[string]struct{}),
+		directoryIDs:              make(map[string]struct{}),
+		projectExtensionSourceIDs: make(map[string]string),
+		readBytes:                 make(map[string][]byte),
 	}
 	projectConfig, selectedID, selectedPath, err := captureRootConfigCandidates(capture)
 	if err != nil {
@@ -160,9 +166,10 @@ func captureProjectSources(ctx context.Context, root string, globalConfig *Confi
 		return nil, fmt.Errorf("config: build project source snapshot: %w", err)
 	}
 	return &capturedProjectSources{
-		snapshot:         snapshot,
-		selectedConfigID: selectedID,
-		selectedPath:     selectedPath,
+		snapshot:                  snapshot,
+		selectedConfigID:          selectedID,
+		selectedPath:              selectedPath,
+		projectExtensionSourceIDs: cloneStringMap(capture.projectExtensionSourceIDs),
 	}, nil
 }
 
@@ -490,6 +497,9 @@ func captureReferencedPath(capture *sourceCapture, category, raw string, directo
 		return err
 	}
 	id := projectSourceID(category, relative)
+	if projectLayer && category == "extensions" {
+		capture.projectExtensionSourceIDs[raw] = id
+	}
 	if info == nil {
 		input := approval.ProjectSourceFileInput{ID: id, RelativePath: relative, Present: false}
 		capture.addFile(input)
@@ -501,7 +511,11 @@ func captureReferencedPath(capture *sourceCapture, category, raw string, directo
 	if !info.Mode().IsRegular() {
 		return fmt.Errorf("%w: %s", ErrProjectSourceNonRegular, absolute)
 	}
-	input, _, _, err := captureFile(capture, id, relative)
+	maxFileBytes := int64(projectSourceMaxFileBytes)
+	if projectLayer && category == "extensions" && filepath.Ext(relative) == ".so" {
+		maxFileBytes = int64(projectSourceMaxExtensionModuleBytes)
+	}
+	input, _, _, err := captureFileWithLimit(capture, id, relative, maxFileBytes)
 	if err != nil {
 		return err
 	}
@@ -755,8 +769,15 @@ func inspectProjectPath(root, relative string) (os.FileInfo, error) {
 }
 
 func captureFile(capture *sourceCapture, id, relative string) (approval.ProjectSourceFileInput, []byte, bool, error) {
+	return captureFileWithLimit(capture, id, relative, int64(projectSourceMaxFileBytes))
+}
+
+func captureFileWithLimit(capture *sourceCapture, id, relative string, maxFileBytes int64) (approval.ProjectSourceFileInput, []byte, bool, error) {
 	if err := capture.ctx.Err(); err != nil {
 		return approval.ProjectSourceFileInput{}, nil, false, err
+	}
+	if _, exists := capture.fileIDs[id]; exists {
+		return approval.ProjectSourceFileInput{ID: id}, nil, false, nil
 	}
 	info, err := inspectProjectPath(capture.root, relative)
 	if err != nil {
@@ -770,18 +791,30 @@ func captureFile(capture *sourceCapture, id, relative string) (approval.ProjectS
 	}
 	data, ok := capture.readBytes[relative]
 	if !ok {
-		data, err = readProjectSourceFile(capture, relative, info)
+		remainingBytes := int64(projectSourceMaxTotalBytes) - capture.totalBytes
+		if info.Size() > maxFileBytes {
+			return approval.ProjectSourceFileInput{}, nil, false, fmt.Errorf("%w: source %s exceeds %d bytes", ErrProjectSourceLimit, relative, maxFileBytes)
+		}
+		if info.Size() > remainingBytes {
+			return approval.ProjectSourceFileInput{}, nil, false, fmt.Errorf("%w: captured bytes exceed %d", ErrProjectSourceLimit, projectSourceMaxTotalBytes)
+		}
+		data, err = readProjectSourceFile(capture, relative, info, maxFileBytes, remainingBytes)
 		if err != nil {
 			return approval.ProjectSourceFileInput{}, nil, false, err
 		}
 		capture.readBytes[relative] = append([]byte(nil), data...)
+	} else if int64(len(data)) > maxFileBytes {
+		return approval.ProjectSourceFileInput{}, nil, false, fmt.Errorf("%w: source %s exceeds %d bytes", ErrProjectSourceLimit, relative, maxFileBytes)
 	}
 	return approval.ProjectSourceFileInput{ID: id, RelativePath: relative, Present: true, Bytes: append([]byte(nil), data...)}, data, true, nil
 }
 
-func readProjectSourceFile(capture *sourceCapture, relative string, expected os.FileInfo) (data []byte, resultErr error) {
-	if expected.Size() > projectSourceMaxFileBytes {
-		return nil, fmt.Errorf("%w: source %s exceeds %d bytes", ErrProjectSourceLimit, relative, projectSourceMaxFileBytes)
+func readProjectSourceFile(capture *sourceCapture, relative string, expected os.FileInfo, maxFileBytes, remainingBytes int64) (data []byte, resultErr error) {
+	if expected.Size() > maxFileBytes {
+		return nil, fmt.Errorf("%w: source %s exceeds %d bytes", ErrProjectSourceLimit, relative, maxFileBytes)
+	}
+	if expected.Size() > remainingBytes {
+		return nil, fmt.Errorf("%w: captured bytes exceed %d", ErrProjectSourceLimit, projectSourceMaxTotalBytes)
 	}
 	path := filepath.Join(capture.root, filepath.FromSlash(relative))
 	file, err := os.Open(path)
@@ -812,14 +845,17 @@ func readProjectSourceFile(capture *sourceCapture, relative string, expected os.
 	if !openedInfo.Mode().IsRegular() || !os.SameFile(openedInfo, pathInfo) || !os.SameFile(expected, openedInfo) {
 		return nil, fmt.Errorf("%w: %s", ErrProjectSourceNonRegular, relative)
 	}
-	return readProjectSourceChunks(capture.ctx, file, relative, openedInfo.Size(), &capture.totalBytes)
+	return readProjectSourceChunks(capture.ctx, file, relative, openedInfo.Size(), maxFileBytes, remainingBytes, &capture.totalBytes)
 }
 
-func readProjectSourceChunks(ctx context.Context, reader io.Reader, relative string, initialSize int64, totalBytes *int64) ([]byte, error) {
-	if initialSize > projectSourceMaxFileBytes {
-		return nil, fmt.Errorf("%w: source %s exceeds %d bytes", ErrProjectSourceLimit, relative, projectSourceMaxFileBytes)
+func readProjectSourceChunks(ctx context.Context, reader io.Reader, relative string, initialSize, maxFileBytes, remainingBytes int64, totalBytes *int64) ([]byte, error) {
+	if initialSize > maxFileBytes {
+		return nil, fmt.Errorf("%w: source %s exceeds %d bytes", ErrProjectSourceLimit, relative, maxFileBytes)
 	}
-	buffer := make([]byte, 0, min(int(initialSize), projectSourceMaxFileBytes))
+	if initialSize > remainingBytes {
+		return nil, fmt.Errorf("%w: captured bytes exceed %d", ErrProjectSourceLimit, projectSourceMaxTotalBytes)
+	}
+	buffer := make([]byte, 0, min(int(initialSize), int(maxFileBytes), int(remainingBytes)))
 	chunk := make([]byte, projectSourceReadChunkBytes)
 	for {
 		if err := ctx.Err(); err != nil {
@@ -827,10 +863,10 @@ func readProjectSourceChunks(ctx context.Context, reader io.Reader, relative str
 		}
 		count, readErr := reader.Read(chunk)
 		if count > 0 {
-			if len(buffer)+count > projectSourceMaxFileBytes {
-				return nil, fmt.Errorf("%w: source %s exceeds %d bytes", ErrProjectSourceLimit, relative, projectSourceMaxFileBytes)
+			if int64(len(buffer)+count) > maxFileBytes {
+				return nil, fmt.Errorf("%w: source %s exceeds %d bytes", ErrProjectSourceLimit, relative, maxFileBytes)
 			}
-			if *totalBytes+int64(count) > projectSourceMaxTotalBytes {
+			if *totalBytes+int64(count) > int64(projectSourceMaxTotalBytes) {
 				return nil, fmt.Errorf("%w: captured bytes exceed %d", ErrProjectSourceLimit, projectSourceMaxTotalBytes)
 			}
 			buffer = append(buffer, chunk[:count]...)
