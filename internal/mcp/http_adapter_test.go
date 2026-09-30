@@ -683,6 +683,7 @@ func TestMCPToolCallLostResponseIsUnknownAndNotRetried(t *testing.T) {
 	t.Parallel()
 
 	var sideEffects atomic.Int32
+	var cancellationNotifications atomic.Int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
 			t.Errorf("unexpected HTTP method %q", r.Method)
@@ -704,6 +705,11 @@ func TestMCPToolCallLostResponseIsUnknownAndNotRetried(t *testing.T) {
 			return
 		}
 		if req.Method == "notifications/initialized" {
+			w.WriteHeader(http.StatusAccepted)
+			return
+		}
+		if req.Method == "notifications/cancelled" {
+			cancellationNotifications.Add(1)
 			w.WriteHeader(http.StatusAccepted)
 			return
 		}
@@ -749,6 +755,7 @@ func TestMCPToolCallLostResponseIsUnknownAndNotRetried(t *testing.T) {
 	assert.Contains(t, err.Error(), "may have executed")
 	assertToolOutcomeUnknown(t, err)
 	assert.EqualValues(t, 1, sideEffects.Load(), "the remote side effect completed once before its response was lost")
+	assert.Zero(t, cancellationNotifications.Load(), "an unexpected transport disconnect must not notify remote cancellation")
 }
 
 func TestHTTPAdapterCallToolUntrustedResponsesHaveUnknownOutcome(t *testing.T) {

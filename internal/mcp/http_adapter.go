@@ -140,6 +140,10 @@ var errSSELineTooLong = errors.New("mcp: SSE line exceeds response limit")
 // without a cap a hung server would block the agent loop forever.
 const defaultHTTPTimeout = 60 * time.Second
 
+// cancellationNotificationTimeout bounds the best-effort control request
+// independently of the request context that has already been cancelled.
+const cancellationNotificationTimeout = 2 * time.Second
+
 // maxHTTPResponseSize caps the size of an HTTP response body read by the
 // adapter. This prevents a malicious or buggy server from exhausting memory
 // by streaming an arbitrarily large response.
@@ -724,7 +728,9 @@ func (a *HTTPClientAdapter) request(ctx context.Context, method string, params m
 	}
 	resp, err := a.doHTTP(req)
 	if err != nil {
-		return nil, newRequestBoundaryError(fmt.Errorf("mcp: do request: %w", err), true, false)
+		requestErr := newRequestBoundaryError(fmt.Errorf("mcp: do request: %w", err), true, false)
+		a.notifyRequestCancelled(ctx, gen, endpoint, version, sessionID, id, requestErr)
+		return nil, requestErr
 	}
 	var responseBodyClose sync.Once
 	closeResponseBody := func() {
@@ -738,9 +744,65 @@ func (a *HTTPClientAdapter) request(ctx context.Context, method string, params m
 		result, responseErr = a.resumeRequestResponse(requestCtx, endpoint, version, sessionID, id, cursor, responseBudget)
 	}
 	if responseErr != nil {
-		return nil, markRequestDispatched(responseErr)
+		requestErr := markRequestDispatched(responseErr)
+		a.notifyRequestCancelled(ctx, gen, endpoint, version, sessionID, id, requestErr)
+		return nil, requestErr
 	}
 	return result, nil
+}
+
+func (a *HTTPClientAdapter) notifyRequestCancelled(ctx context.Context, gen *httpConnectionGeneration, endpoint, version, sessionID string, id int64, requestErr error) {
+	if !requestMayHaveBeenDispatched(requestErr) || !errors.Is(requestErr, context.Canceled) {
+		return
+	}
+
+	reason := ""
+	if ctx != nil && ctx.Err() == context.Canceled {
+		reason = "local run cancelled"
+	} else if gen.lifeCtx != nil && gen.lifeCtx.Err() != nil {
+		reason = "local session cancelled"
+	}
+	if reason == "" {
+		return
+	}
+
+	// A successful POST only confirms transport acceptance, not that the peer
+	// stopped the action. Preserve the original request's unknown outcome and
+	// never retry it if this best-effort notification fails.
+	_ = a.sendCancellationNotification(endpoint, version, sessionID, id, reason)
+}
+
+func (a *HTTPClientAdapter) sendCancellationNotification(endpoint, version, sessionID string, id int64, reason string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), cancellationNotificationTimeout)
+	defer cancel()
+
+	body, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "notifications/cancelled",
+		"params": map[string]any{
+			"requestId": id,
+			"reason":    reason,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("mcp: marshal cancellation notification: %w", err)
+	}
+	req, err := a.newHTTPMessageRequest(ctx, http.MethodPost, endpoint, body, version, sessionID, "application/json, text/event-stream", "")
+	if err != nil {
+		return fmt.Errorf("mcp: build cancellation notification: %w", err)
+	}
+	resp, err := a.doHTTP(req)
+	if err != nil {
+		return fmt.Errorf("mcp: send cancellation notification: %w", err)
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode != http.StatusAccepted {
+		return httpProtocolError("cancellation notification returned HTTP status %d, want 202", resp.StatusCode)
+	}
+	if err := validateResponseSessionID(resp, sessionID); err != nil {
+		return err
+	}
+	return nil
 }
 
 // truncate returns s trimmed to at most n characters with an ellipsis.
