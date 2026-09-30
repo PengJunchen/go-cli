@@ -598,7 +598,7 @@ func (consumer *runCommitConsumer) executeSequentialCall(
 		if err := consumer.commitKnownCall(ordinal, assistant, "batch-"+newClaimID(), call, uint64(len(*transcript)), output, outcome, transcript, messages); err != nil {
 			return runCommitToolResult{output: output, isError: true, outcome: outcome}, err
 		}
-		if errors.Is(prepareErr, ErrRunCommitPreparedInvocationUnavailable) || errors.Is(prepareErr, ErrRunCommitChildUnsupported) || errors.Is(prepareErr, ErrRunCommitStreamingUnsupported) {
+		if errors.Is(prepareErr, ErrRunCommitPreparedInvocationUnavailable) || errors.Is(prepareErr, ErrRunCommitChildUnsupported) || errors.Is(prepareErr, ErrRunCommitStreamingUnsupported) || errors.Is(prepareErr, ErrLoopDetected) {
 			return runCommitToolResult{output: output, isError: true, outcome: outcome}, prepareErr
 		}
 		return runCommitToolResult{output: output, isError: true, outcome: outcome}, nil
@@ -794,7 +794,7 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 				known.outcome = ReceiptOutcomeInterrupted
 			}
 			action.known = &known
-			if errors.Is(err, ErrRunCommitPreparedInvocationUnavailable) || errors.Is(err, ErrRunCommitChildUnsupported) || errors.Is(err, ErrRunCommitStreamingUnsupported) {
+			if errors.Is(err, ErrRunCommitPreparedInvocationUnavailable) || errors.Is(err, ErrRunCommitChildUnsupported) || errors.Is(err, ErrRunCommitStreamingUnsupported) || errors.Is(err, ErrLoopDetected) {
 				action.stopErr = err
 			}
 			batch.KnownReceipts = append(batch.KnownReceipts, consumer.knownReceipt(ordinal, call, uint64(len(*transcript)+index), known.output, known.outcome))
@@ -1014,6 +1014,9 @@ func terminalOutcome(err error) RunOutcome {
 	if err == nil {
 		return RunOutcomeSuccess
 	}
+	if errors.Is(err, ErrLoopDetected) {
+		return RunOutcomeError
+	}
 	if hasUnknownToolOutcome(err) {
 		return RunOutcomeUnknown
 	}
@@ -1025,6 +1028,19 @@ func terminalOutcome(err error) RunOutcome {
 		return RunOutcomeCancelled
 	}
 	return RunOutcomeError
+}
+
+func normalizeLoopDetectedCause(ctx context.Context, err error) error {
+	if !errors.Is(context.Cause(ctx), ErrLoopDetected) {
+		return err
+	}
+	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return ErrLoopDetected
+	}
+	if errors.Is(err, ErrLoopDetected) {
+		return err
+	}
+	return errors.Join(ErrLoopDetected, err)
 }
 
 func cloneTranscriptEntries(entries []TranscriptEntry) []TranscriptEntry {

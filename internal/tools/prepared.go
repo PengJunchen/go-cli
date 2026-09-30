@@ -365,6 +365,25 @@ type FrozenToolCall struct {
 	digest [32]byte
 }
 
+// FrozenPreparedAttempt is the immutable identity and argument digest captured
+// for one registered call after normalization and validation but before policy.
+// It deliberately excludes the provider-supplied call ID and raw arguments.
+type FrozenPreparedAttempt struct {
+	identity       TrustedToolIdentity
+	argumentDigest [32]byte
+}
+
+// ToolIdentity returns the registered tool identity captured for the attempt.
+func (attempt FrozenPreparedAttempt) ToolIdentity() TrustedToolIdentity { return attempt.identity }
+
+// ArgumentDigest returns the digest of the normalized frozen arguments.
+func (attempt FrozenPreparedAttempt) ArgumentDigest() [32]byte { return attempt.argumentDigest }
+
+// PreparedAttemptObserver observes one frozen, registered attempt before
+// approval policy runs. Returning an error rejects preparation and never
+// creates a PreparedInvocation or enters the executor.
+type PreparedAttemptObserver func(context.Context, FrozenPreparedAttempt) error
+
 // ToolCall returns a deep copy of the frozen call.
 func (c FrozenToolCall) ToolCall() ToolCall {
 	return ToolCall{ID: c.id, Name: c.name, Args: cloneFrozenMap(c.args)}

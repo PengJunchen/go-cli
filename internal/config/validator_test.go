@@ -46,6 +46,22 @@ func TestDefaultValidator_WebSearchProviderValues(t *testing.T) {
 	assert.Contains(t, err.Error(), "web_search provider")
 }
 
+func TestDefaultValidatorLoopDetectorDisposition(t *testing.T) {
+	for _, disposition := range []string{"", "warn", "steer", "terminate"} {
+		t.Run("valid/"+disposition, func(t *testing.T) {
+			cfg := defaultConfig()
+			cfg.Production.LoopDetector.Disposition = disposition
+			require.NoError(t, NewDefaultValidator().Validate(*cfg))
+		})
+	}
+
+	cfg := defaultConfig()
+	cfg.Production.LoopDetector.Disposition = "stop"
+	err := NewDefaultValidator().Validate(*cfg)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "production.loop_detector disposition")
+}
+
 func TestDefaultValidator_ValidEmptyModel(t *testing.T) {
 	// A config with no model configured (empty name) is still valid.
 	cfg := defaultConfig()

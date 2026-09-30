@@ -123,6 +123,10 @@ type registrationSnapshotProvider interface {
 type PreparedToolStages struct {
 	ArgumentPreparers []ArgumentPreparer
 	ExecutionWrappers []ToolExecutorWrapper
+	// PreparedAttemptObserver synchronously observes the authoritative frozen
+	// identity and normalized argument digest after validation and before policy.
+	// It cannot approve, dispatch, or mint a PreparedInvocation.
+	PreparedAttemptObserver PreparedAttemptObserver
 	// SynchronousExecutionWrappers is an explicit trusted-assembly attestation
 	// that every configured execution wrapper returns only after all work it
 	// starts has stopped and preserves the frozen call. The current CLI caller
@@ -168,6 +172,7 @@ func (p *preparedToolPipelineState) snapshot() preparedToolPipelineSnapshot {
 		stages: PreparedToolStages{
 			ArgumentPreparers:            append([]ArgumentPreparer(nil), p.stages.ArgumentPreparers...),
 			ExecutionWrappers:            append([]ToolExecutorWrapper(nil), p.stages.ExecutionWrappers...),
+			PreparedAttemptObserver:      p.stages.PreparedAttemptObserver,
 			SynchronousExecutionWrappers: p.stages.SynchronousExecutionWrappers,
 			MutationQueue:                p.stages.MutationQueue,
 		},
@@ -189,6 +194,7 @@ func (p *preparedToolPipelineState) setStages(stages PreparedToolStages) {
 	p.stages = PreparedToolStages{
 		ArgumentPreparers:            append([]ArgumentPreparer(nil), stages.ArgumentPreparers...),
 		ExecutionWrappers:            append([]ToolExecutorWrapper(nil), stages.ExecutionWrappers...),
+		PreparedAttemptObserver:      stages.PreparedAttemptObserver,
 		SynchronousExecutionWrappers: stages.SynchronousExecutionWrappers,
 		MutationQueue:                stages.MutationQueue,
 	}

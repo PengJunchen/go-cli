@@ -355,6 +355,9 @@ type LoopDetectorConfig struct {
 	TestFailureThreshold int `json:"test_failure_threshold"`
 	// SameToolCallThreshold triggers after this many repeated identical tool calls.
 	SameToolCallThreshold int `json:"same_tool_call_threshold"`
+	// Disposition chooses whether a detected loop warns or stops the active
+	// run. Empty keeps the backward-compatible warn behavior.
+	Disposition string `json:"disposition"`
 }
 
 // SandboxConfig controls workspace path scopes and resource limits for default tools.
