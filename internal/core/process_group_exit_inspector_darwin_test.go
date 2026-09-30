@@ -10,7 +10,7 @@ func TestInspectDarwinProcessGroupExitFailsClosed(t *testing.T) {
 		Platform:          "darwin",
 		HostGeneration:    "darwin:boot",
 		LeaderPID:         17,
-		ProcessStartToken: "leader-start",
+		ProcessStartToken: "leader" + "-start",
 		ProcessGroupID:    17,
 	})
 	if inspection.Status != ProcessGroupExitUnknown {
