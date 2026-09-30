@@ -179,7 +179,7 @@ func TestGitReadCommandsKeepHostSelectedRepositoryContext(t *testing.T) {
 		"printf '%s\\n' \"$@\" > \"$TOOL_CAPTURE_ARGS\"\n" +
 		"printf '%s|%s|%s|%s|%s|%s' \"${GIT_DIR-unset}\" \"${GIT_WORK_TREE-unset}\" \"${GIT_INDEX_FILE-unset}\" \"${GIT_OPTIONAL_LOCKS-unset}\" \"${GIT_CONFIG_COUNT-unset}\" \"${GIT_CONFIG_PARAMETERS-unset}\" > \"$TOOL_CAPTURE_CONTEXT\"\n" +
 		"is_log=0\nfor arg in \"$@\"; do if [ \"$arg\" = log ]; then is_log=1; fi; done\n" +
-		"if [ \"$is_log\" = 1 ]; then printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\x1fTester\\x1ftest@example.com\\x1f2026-09-25\\x1fsubject\\n'; else printf 'true\\n'; fi\n"
+		"if [ \"$is_log\" = 1 ]; then printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\\037Tester\\037test@example.com\\0372026-09-25\\037subject\\n'; else printf 'true\\n'; fi\n"
 	require.NoError(t, os.WriteFile(fake, []byte(script), 0o700))
 	t.Setenv("TOOL_CAPTURE_ARGS", argsPath)
 	t.Setenv("TOOL_CAPTURE_CONTEXT", contextPath)
