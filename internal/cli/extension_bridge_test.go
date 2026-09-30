@@ -424,8 +424,8 @@ func TestHookPayloadBudgetRejectsContainerWidthsBeforeAllocation(t *testing.T) {
 }
 
 func TestHookErrorSnapshotOmitsRawError(t *testing.T) {
-	const secret = "provider-secret-error-canary-2049"
-	secretErr := &bridgeCanaryError{secret: secret}
+	const errorCanary = "provider-secret-error-canary-2049"
+	secretErr := &bridgeCanaryError{secret: errorCanary}
 	runErr := &bridgeWrappedCanaryError{cause: secretErr}
 	first := &bridgeTestHook{name: "observer-one", action: extension.HookActionPass, handle: func(_ context.Context, event extension.HookEvent) extension.HookResult {
 		if event.Name == "agent.after_run" {
@@ -434,7 +434,7 @@ func TestHookErrorSnapshotOmitsRawError(t *testing.T) {
 			assert.Equal(t, extension.HookErrorClassUnknown, snapshot.Error.Class)
 		}
 		if event.Name == "agent.after_run" {
-			return extension.HookResult{Action: extension.HookActionBlock, Reason: secret}
+			return extension.HookResult{Action: extension.HookActionBlock, Reason: errorCanary}
 		}
 		return extension.HookResult{Action: extension.HookActionPass}
 	}}
@@ -451,7 +451,7 @@ func TestHookErrorSnapshotOmitsRawError(t *testing.T) {
 	assert.Equal(t, []string{"agent.before_run", "agent.after_run"}, first.Calls())
 	assert.Equal(t, []string{"agent.before_run", "agent.after_run"}, second.Calls(), "later observers still run after a failure")
 	assert.Zero(t, secretErr.calls, "error classification must not call Error")
-	assert.NotContains(t, logs.String(), secret)
+	assert.NotContains(t, logs.String(), errorCanary)
 	assert.NotContains(t, logs.String(), "provider-secret-error-canary")
 }
 
