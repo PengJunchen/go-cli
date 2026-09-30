@@ -2,6 +2,7 @@ package skill
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -45,11 +46,26 @@ type SkillLoader interface {
 	LoadDir(ctx context.Context, dirPath string) ([]*SkillDefinition, error)
 }
 
+// SkillSourceLoader is the optional loader capability for parsing captured
+// skill bytes without reopening their filesystem paths.
+type SkillSourceLoader interface {
+	LoadSources(ctx context.Context, sources []SkillSourceFile) ([]*SkillDefinition, error)
+}
+
+// SkillSourceFile holds captured skill bytes and their path relative to the
+// skill directory. It lets callers load a verified source set without
+// reopening mutable filesystem paths.
+type SkillSourceFile struct {
+	RelativePath string
+	Content      []byte
+}
+
 // YAMLSkillLoader implements SkillLoader for the YAML-frontmatter format.
 type YAMLSkillLoader struct{}
 
 // Compile-time assertion that YAMLSkillLoader satisfies SkillLoader.
 var _ SkillLoader = (*YAMLSkillLoader)(nil)
+var _ SkillSourceLoader = (*YAMLSkillLoader)(nil)
 
 // NewYAMLSkillLoader returns a ready-to-use YAMLSkillLoader.
 func NewYAMLSkillLoader() SkillLoader { return &YAMLSkillLoader{} }
@@ -178,6 +194,101 @@ func (l *YAMLSkillLoader) LoadDir(ctx context.Context, dirPath string) ([]*Skill
 	span.SetStatus(tracing.SpanStatusOK, "")
 	logger.Info("skill.load_dir", "dir", dirPath, "count", len(defs))
 	return defs, nil
+}
+
+// LoadSources parses a previously captured skill source set. Source files are
+// consumed in the order supplied and are never reopened from disk. Malformed
+// skill files follow LoadDir's skip-with-warning behavior.
+func (l *YAMLSkillLoader) LoadSources(ctx context.Context, sources []SkillSourceFile) ([]*SkillDefinition, error) {
+	span, spanCtx := tracing.SpanFromContext(ctx, "skill.load_sources", tracing.SpanKindInternal)
+	logger := tracing.NewTraceLogger(span, slog.Default())
+	defer span.End()
+
+	if err := spanCtx.Err(); err != nil {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		span.SetStatus(tracing.SpanStatusError, err.Error())
+		return nil, err
+	}
+
+	defs := make([]*SkillDefinition, 0, len(sources))
+	for _, source := range sources {
+		if err := spanCtx.Err(); err != nil {
+			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+			span.SetStatus(tracing.SpanStatusError, err.Error())
+			return nil, err
+		}
+		def, err := l.loadSource(spanCtx, source)
+		if err != nil {
+			if ctxErr := spanCtx.Err(); ctxErr != nil {
+				span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+				span.SetStatus(tracing.SpanStatusError, ctxErr.Error())
+				return nil, ctxErr
+			}
+			logger.Warn("skill.load_sources.skipped", "path", source.RelativePath, "err", err)
+			continue
+		}
+		defs = append(defs, def)
+	}
+
+	span.SetAttributes(
+		tracing.Attribute{Key: "count", Value: len(defs)},
+		tracing.Attribute{Key: "success", Value: true},
+	)
+	span.SetStatus(tracing.SpanStatusOK, "")
+	logger.Info("skill.load_sources", "count", len(defs))
+	return defs, nil
+}
+
+func (l *YAMLSkillLoader) loadSource(ctx context.Context, source SkillSourceFile) (*SkillDefinition, error) {
+	span, spanCtx := tracing.SpanFromContext(ctx, "skill.load", tracing.SpanKindInternal)
+	logger := tracing.NewTraceLogger(span, slog.Default())
+	defer span.End()
+
+	relativePath := filepath.Clean(source.RelativePath)
+	if filepath.IsAbs(relativePath) || relativePath == "." || relativePath == ".." || strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		span.SetStatus(tracing.SpanStatusError, "skill source path is not relative")
+		return nil, fmt.Errorf("skill: source path %q is not relative to its directory", source.RelativePath)
+	}
+	span.SetAttributes(tracing.Attribute{Key: "source_path", Value: filepath.ToSlash(relativePath)})
+	if err := spanCtx.Err(); err != nil {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		span.SetStatus(tracing.SpanStatusError, err.Error())
+		return nil, err
+	}
+
+	scanner := bufio.NewScanner(bytes.NewReader(source.Content))
+	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
+	var lines []string
+	for scanner.Scan() {
+		if err := spanCtx.Err(); err != nil {
+			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+			span.SetStatus(tracing.SpanStatusError, err.Error())
+			return nil, err
+		}
+		lines = append(lines, scanner.Text())
+	}
+	if scanErr := scanner.Err(); scanErr != nil {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		span.SetStatus(tracing.SpanStatusError, scanErr.Error())
+		logger.Error("skill.load.scan_failed", "path", relativePath, "err", scanErr)
+		return nil, fmt.Errorf("skill: read captured source %s: %w", relativePath, scanErr)
+	}
+
+	def, err := parseFrontmatter(lines)
+	if err != nil {
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		span.SetStatus(tracing.SpanStatusError, err.Error())
+		logger.Error("skill.load.parse_failed", "path", relativePath, "err", err)
+		return nil, fmt.Errorf("skill: load captured source %s: %w", relativePath, err)
+	}
+	span.SetAttributes(
+		tracing.Attribute{Key: "skill_name", Value: def.Name()},
+		tracing.Attribute{Key: "success", Value: true},
+	)
+	span.SetStatus(tracing.SpanStatusOK, "")
+	logger.Info("skill.load", "path", relativePath, "name", def.Name())
+	return &def, nil
 }
 
 // isSkillFileName reports whether name looks like a skill file.

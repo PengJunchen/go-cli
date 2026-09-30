@@ -94,7 +94,6 @@ func TestIntegration_SkillDescriptionOmittedWhenEmpty(t *testing.T) {
 // This tests the fix for the issue where skills were silently skipped when
 // the config didn't explicitly set skill.dir.
 func TestIntegration_SkillAutoDiscovery(t *testing.T) {
-	setupTestTrust(t)
 	ctx := context.Background()
 	tempDir := t.TempDir()
 
@@ -138,8 +137,8 @@ Flat skill body.
 
 	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
 
-	// Pass a config with no skill.dir — the auto-discovery should kick in.
-	rc := &config.Config{}
+	// Load a verified project snapshot before auto-discovery consumes project skills.
+	rc := trustedMCPTestConfig(t)
 	infos := registerSkillTools(ctx, rc, tr)
 
 	require.Len(t, infos, 2, "both auto-discovered skills should be registered")
@@ -344,7 +343,6 @@ func TestIntegration_LoadMCPServers_NoFiles(t *testing.T) {
 // SkillInfo into the DefaultSystemPromptBuilder to verify the full pipeline
 // produces a system prompt containing the skill name and description.
 func TestIntegration_FullSystemPromptWithAutoDiscoveredSkills(t *testing.T) {
-	setupTestTrust(t)
 	ctx := context.Background()
 	tempDir := t.TempDir()
 
@@ -370,7 +368,7 @@ This skill guides integration test execution.
 
 	// Step 1: Auto-discover and register skills (no skill.dir in config).
 	tr := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
-	rc := &config.Config{}
+	rc := trustedMCPTestConfig(t)
 	infos := registerSkillTools(ctx, rc, tr)
 	require.Len(t, infos, 1)
 

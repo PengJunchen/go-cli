@@ -2311,32 +2311,65 @@ func loadMCPServers(ctx context.Context, rc *config.Config) []config.MCPServerCo
 // for injection into the system prompt.
 func registerSkillTools(ctx context.Context, rc *config.Config, tr tools.DeferredRegistry) []core.SkillInfo {
 	skillDir := ""
-	autoDiscovered := false
 	if rc != nil && rc.Skill.Dir != "" {
 		skillDir = rc.Skill.Dir
 	} else {
 		// Auto-discover default skill directories.
-		autoDiscovered = true
 		skillDir = discoverSkillDir()
 	}
 	if skillDir == "" {
 		return nil
 	}
 
-	// Trust check: skip auto-discovered project-level skill directory if
-	// project is not trusted.
-	if autoDiscovered && !filepath.IsAbs(skillDir) {
-		cwd, _ := os.Getwd()
-		if !approval.GetTrustManager().IsTrusted(ctx, cwd) {
-			slog.Warn("assemble_skill_skip_untrusted", "dir", skillDir, "reason", "project not trusted")
+	loader := skill.NewYAMLSkillLoader()
+	verified := (*approval.VerifiedProjectSources)(nil)
+	if rc != nil {
+		verified = rc.VerifiedProjectSources()
+	}
+	projectRoot := ""
+	if verified != nil {
+		projectRoot = verified.CanonicalRoot()
+	} else {
+		var err error
+		projectRoot, err = canonicalCurrentDirectory()
+		if err != nil {
+			slog.Warn("assemble_skill_skip_unavailable", "reason", "project root is unavailable")
 			return nil
 		}
 	}
 
-	loader := skill.NewYAMLSkillLoader()
-	defs, err := loader.LoadDir(ctx, skillDir)
+	requestedDir, err := absoluteSkillDirectory(projectRoot, skillDir)
 	if err != nil {
-		slog.Warn("assemble_skill_load_failed", "dir", skillDir, "err", err)
+		slog.Warn("assemble_skill_skip_unavailable", "reason", "skill directory is unavailable")
+		return nil
+	}
+	userSkillPath, userSkillRoot := canonicalUserSkillDirectory()
+	var defs []*skill.SkillDefinition
+	if userSkillPath != "" && requestedDir == userSkillPath {
+		if userSkillRoot == "" {
+			slog.Warn("assemble_skill_skip_unavailable", "reason", "user skill directory is unavailable")
+			return nil
+		}
+		defs, err = loader.LoadDir(ctx, userSkillRoot)
+	} else {
+		relativeDir, insideProject := relativeSkillDirectory(projectRoot, requestedDir)
+		if !insideProject {
+			slog.Warn("assemble_skill_skip_unavailable", "reason", "skill directory is outside approved roots")
+			return nil
+		}
+		resolvedProjectDir, resolveErr := canonicalExistingDirectory(requestedDir)
+		if resolveErr != nil || resolvedProjectDir != requestedDir {
+			slog.Warn("assemble_skill_skip_unavailable", "reason", "project skill directory no longer matches its configured path")
+			return nil
+		}
+		if verified == nil || !verified.Valid() {
+			slog.Warn("assemble_skill_skip_untrusted", "reason", "project skill sources are not verified")
+			return nil
+		}
+		defs, err = loadVerifiedProjectSkills(ctx, verified, relativeDir)
+	}
+	if err != nil {
+		slog.Warn("assemble_skill_load_failed", "err", err)
 		return nil
 	}
 
@@ -2364,6 +2397,133 @@ func registerSkillTools(ctx context.Context, rc *config.Config, tr tools.Deferre
 		slog.Info("assemble_skills_registered", "dir", skillDir, "count", count)
 	}
 	return infos
+}
+
+func canonicalCurrentDirectory() (string, error) {
+	workingDir, err := os.Getwd()
+	if err != nil {
+		return "", err
+	}
+	return canonicalExistingDirectory(workingDir)
+}
+
+func canonicalUserSkillDirectory() (string, string) {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return "", ""
+	}
+	requested, err := filepath.Abs(filepath.Join(home, ".config", "go-cli", "skills"))
+	if err != nil {
+		return "", ""
+	}
+	dir, err := canonicalExistingDirectory(requested)
+	if err != nil {
+		return filepath.Clean(requested), ""
+	}
+	return filepath.Clean(requested), dir
+}
+
+func canonicalExistingDirectory(path string) (string, error) {
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	canonical, err := filepath.EvalSymlinks(absolute)
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", fmt.Errorf("skill directory is not a directory")
+	}
+	return filepath.Clean(canonical), nil
+}
+
+func absoluteSkillDirectory(projectRoot, path string) (string, error) {
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(projectRoot, path)
+	}
+	absolute, err := filepath.Abs(path)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Clean(absolute), nil
+}
+
+func relativeSkillDirectory(root, dir string) (string, bool) {
+	relative, err := filepath.Rel(root, dir)
+	if err != nil || filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", false
+	}
+	return filepath.ToSlash(relative), true
+}
+
+func loadVerifiedProjectSkills(ctx context.Context, verified *approval.VerifiedProjectSources, relativeDir string) ([]*skill.SkillDefinition, error) {
+	if verified == nil || !verified.Valid() {
+		return nil, errors.New("cli: verified project skill sources are unavailable")
+	}
+	cleanRelativeDir := filepath.ToSlash(filepath.Clean(filepath.FromSlash(relativeDir)))
+	directoryID := ""
+	for _, directory := range verified.DirectoryRecords() {
+		if strings.HasPrefix(directory.ID, "skills/") && filepath.ToSlash(filepath.Clean(filepath.FromSlash(directory.RelativePath))) == cleanRelativeDir && directory.Present {
+			directoryID = directory.ID
+			break
+		}
+	}
+	if directoryID == "" {
+		return nil, errors.New("cli: verified project skill directory is missing from the source manifest")
+	}
+	members, ok := verified.DirectoryMembers(directoryID)
+	if !ok {
+		return nil, errors.New("cli: verified project skill membership is unavailable")
+	}
+	memberSet := make(map[string]struct{}, len(members))
+	for _, member := range members {
+		memberSet[member] = struct{}{}
+	}
+
+	records := verified.SourceRecords()
+	sources := make([]skill.SkillSourceFile, 0)
+	capturedPaths := make(map[string]struct{})
+	for _, record := range records {
+		if !record.Present || !strings.HasPrefix(record.ID, "skill/") {
+			continue
+		}
+		memberRelativePath, inside := relativeSkillDirectory(cleanRelativeDir, filepath.ToSlash(filepath.FromSlash(record.RelativePath)))
+		if !inside || memberRelativePath == "." {
+			continue
+		}
+		if _, isMember := memberSet[record.RelativePath]; !isMember {
+			return nil, fmt.Errorf("cli: project skill source %q is not in its verified directory membership", record.RelativePath)
+		}
+		content, present := verified.SourceBytes(record.ID)
+		if !present {
+			return nil, fmt.Errorf("cli: verified project skill bytes are unavailable for %q", record.RelativePath)
+		}
+		sources = append(sources, skill.SkillSourceFile{RelativePath: memberRelativePath, Content: content})
+		capturedPaths[record.RelativePath] = struct{}{}
+	}
+	for _, member := range members {
+		if !isSkillSourceCandidate(member) {
+			continue
+		}
+		if _, captured := capturedPaths[member]; !captured {
+			return nil, fmt.Errorf("cli: project skill source %q is missing from its verified manifest", member)
+		}
+	}
+	sourceLoader, ok := skill.NewYAMLSkillLoader().(skill.SkillSourceLoader)
+	if !ok {
+		return nil, errors.New("cli: skill loader cannot consume verified project sources")
+	}
+	return sourceLoader.LoadSources(ctx, sources)
+}
+
+func isSkillSourceCandidate(path string) bool {
+	name := filepath.Base(filepath.FromSlash(path))
+	return name == "SKILL.md" || strings.HasSuffix(name, ".md") || strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml")
 }
 
 // discoverSkillDir probes default skill directories and returns the first one

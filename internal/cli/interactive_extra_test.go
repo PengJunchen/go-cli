@@ -273,7 +273,10 @@ func TestInteractiveCmd_RegisterSkillTools_LoadError(t *testing.T) {
 
 func TestInteractiveCmd_RegisterSkillTools_ValidDir(t *testing.T) {
 	ctx := t.Context()
-	dir := t.TempDir()
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".config", "go-cli", "skills")
+	require.NoError(t, os.MkdirAll(dir, 0o700))
 
 	skillContent := `---
 name: registered-skill
