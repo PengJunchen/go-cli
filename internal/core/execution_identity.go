@@ -3,6 +3,7 @@ package core
 import (
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // DispatchState records whether a reserved action crossed its final dispatch
@@ -23,6 +24,7 @@ type ExecutionIdentity struct {
 	Kind              ExecutionIdentityKind `json:"kind"`
 	Platform          string                `json:"platform"`
 	HostGeneration    string                `json:"host_generation,omitempty"`
+	PIDNamespaceToken string                `json:"pid_namespace_token,omitempty"`
 	LeaderPID         int                   `json:"leader_pid,omitempty"`
 	ProcessStartToken string                `json:"process_start_token,omitempty"`
 	ProcessGroupID    int                   `json:"process_group_id,omitempty"`
@@ -45,6 +47,14 @@ const (
 func (i ExecutionIdentity) Validate() error {
 	if i.HostGeneration == "" {
 		return errors.New("core: execution identity host generation is required")
+	}
+	if i.PIDNamespaceToken != "" {
+		if i.Platform != "linux" {
+			return fmt.Errorf("core: PID namespace token is unsupported on %q", i.Platform)
+		}
+		if !strings.HasPrefix(i.PIDNamespaceToken, "linux:pidns:v1:") {
+			return errors.New("core: PID namespace token has an unsupported format")
+		}
 	}
 	switch i.Kind {
 	case ExecutionIdentityProcessGroup:
