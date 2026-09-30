@@ -742,6 +742,7 @@ type assembleState struct {
 
 	// Middleware section
 	loopDetector       production.LoopDetector
+	loopDetectorConfig production.LoopDetectionConfig
 	reminderMgr        *core.DefaultSystemReminderManager
 	failureSynthesizer core.FailureTurnSynthesizer
 
@@ -1346,6 +1347,7 @@ func (s *assembleState) assembleProductionResilience() error {
 	if err := preparedRegistry.SetPreparedToolStages(tools.PreparedToolStages{
 		ArgumentPreparers:            []tools.ArgumentPreparer{pathNormalizer},
 		ExecutionWrappers:            wrappers,
+		PreparedAttemptObserver:      observePreparedToolAttempt,
 		SynchronousExecutionWrappers: synchronousWrappers,
 		MutationQueue:                s.mutationQueue,
 	}); err != nil {
@@ -1592,7 +1594,9 @@ func (s *assembleState) assembleMiddleware() {
 		ldCfg.EditThreshold = s.rc.Production.LoopDetector.EditThreshold
 		ldCfg.TestFailureThreshold = s.rc.Production.LoopDetector.TestFailureThreshold
 		ldCfg.SameToolCallThreshold = s.rc.Production.LoopDetector.SameToolCallThreshold
+		ldCfg.Disposition = production.Disposition(s.rc.Production.LoopDetector.Disposition)
 	}
+	s.loopDetectorConfig = ldCfg
 	s.loopDetector = production.NewDefaultLoopDetector(ldCfg)
 	production.RegisterLoopDetector(s.loopDetector)
 	s.reminderMgr = core.NewDefaultSystemReminderManager()
@@ -1617,7 +1621,7 @@ func (s *assembleState) assembleMiddleware() {
 
 	chain := []core.Middleware{
 		core.NewLoggingMiddleware(s.ac.agentName),
-		&loopDetectorMiddleware{detector: s.loopDetector, manager: s.reminderMgr},
+		&loopDetectorMiddleware{detector: s.loopDetector, manager: s.reminderMgr, attemptConfig: s.loopDetectorConfig},
 		core.NewSystemReminderInjector(s.reminderMgr),
 		core.NewFailureSynthesisMiddleware(s.failureSynthesizer),
 		core.NewHookMiddleware(s.hookChain),
@@ -2615,9 +2619,10 @@ func registerCustomTools(ctx context.Context, rc *config.Config, tr tools.ToolRe
 // added to the reminder manager so the SystemReminderInjector can inject it
 // on the next turn.
 type loopDetectorMiddleware struct {
-	detector production.LoopDetector
-	manager  *core.DefaultSystemReminderManager
-	name     string
+	detector      production.LoopDetector
+	manager       *core.DefaultSystemReminderManager
+	attemptConfig production.LoopDetectionConfig
+	name          string
 }
 
 var _ core.Middleware = (*loopDetectorMiddleware)(nil)
@@ -2633,43 +2638,57 @@ func (m *loopDetectorMiddleware) Name() string {
 
 // Wrap returns a wrapped AgentLoop that monitors events for loops.
 func (m *loopDetectorMiddleware) Wrap(next core.AgentLoop) core.AgentLoop {
-	return &loopDetectorLoop{detector: m.detector, manager: m.manager, next: next}
+	return &loopDetectorLoop{detector: m.detector, manager: m.manager, attemptConfig: m.attemptConfig, next: next}
 }
 
 func (m *loopDetectorMiddleware) WrapCanonical(next core.CanonicalLoop) core.CanonicalLoop {
-	return &canonicalLoopDetectorLoop{detector: m.detector, manager: m.manager, next: next}
+	return &canonicalLoopDetectorLoop{detector: m.detector, manager: m.manager, attemptConfig: m.attemptConfig, next: next}
 }
 
 // loopDetectorLoop is the concrete wrapped loop produced by
 // loopDetectorMiddleware.
 type loopDetectorLoop struct {
-	detector production.LoopDetector
-	manager  *core.DefaultSystemReminderManager
-	next     core.AgentLoop
+	detector      production.LoopDetector
+	manager       *core.DefaultSystemReminderManager
+	attemptConfig production.LoopDetectionConfig
+	next          core.AgentLoop
 }
 
 // Run delegates to the wrapped loop, then feeds the returned events to the
 // LoopDetector. When a loop is detected, a SystemReminder is registered for
 // injection on the next turn.
 func (l *loopDetectorLoop) Run(ctx context.Context, submission core.Submission, stream ...core.EventStream) ([]core.AgentEvent, error) {
-	events, err := l.next.Run(ctx, submission, stream...)
+	runCtx, cancel, state := newLoopDetectorRunContext(ctx, l.attemptConfig)
+	defer cancel(nil)
+	events, err := l.next.Run(runCtx, submission, stream...)
+	err = normalizeLoopDetectorRunError(runCtx, err)
 	if err != nil {
 		return events, err
+	}
+	if runCtx.Err() == nil {
+		addLoopDetectorReminder(l.manager, state)
 	}
 	observeLoopDetector(ctx, l.detector, l.manager, events)
 	return events, nil
 }
 
 type canonicalLoopDetectorLoop struct {
-	detector production.LoopDetector
-	manager  *core.DefaultSystemReminderManager
-	next     core.CanonicalLoop
+	detector      production.LoopDetector
+	manager       *core.DefaultSystemReminderManager
+	attemptConfig production.LoopDetectionConfig
+	next          core.CanonicalLoop
 }
 
 func (l *canonicalLoopDetectorLoop) RunCanonical(ctx context.Context, submission core.Submission, stream ...core.EventStream) (core.CanonicalRunResult, error) {
-	result, err := l.next.RunCanonical(ctx, submission, stream...)
+	runCtx, cancel, state := newLoopDetectorRunContext(ctx, l.attemptConfig)
+	defer cancel(nil)
+	result, err := l.next.RunCanonical(runCtx, submission, stream...)
+	err = normalizeLoopDetectorRunError(runCtx, err)
 	if err != nil {
 		return result, err
+	}
+	if runCtx.Err() == nil {
+		addLoopDetectorReminder(l.manager, state)
 	}
 	observeLoopDetector(ctx, l.detector, l.manager, result.Events)
 	return result, nil

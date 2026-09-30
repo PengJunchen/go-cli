@@ -46,12 +46,13 @@ func validTemperature(value float64) bool {
 }
 
 var (
-	validTracingLevels        = []string{"debug", "info", "warn", "error"}
-	validCompactionStrategies = []string{"", "unified", "micro", "micro_first", "summary", "truncating"}
-	validGitPlatforms         = []string{"", "github", "gitlab", "bitbucket"}
-	validWebSearchProviders   = []string{"", "mock", "fetch", "brave"}
-	validTUIThemes            = []string{"", "dark", "light", "monokai", "solarized", "auto"}
-	validTUIDiffStyles        = []string{"", defaultTUIDiffStyle}
+	validTracingLevels            = []string{"debug", "info", "warn", "error"}
+	validCompactionStrategies     = []string{"", "unified", "micro", "micro_first", "summary", "truncating"}
+	validGitPlatforms             = []string{"", "github", "gitlab", "bitbucket"}
+	validWebSearchProviders       = []string{"", "mock", "fetch", "brave"}
+	validTUIThemes                = []string{"", "dark", "light", "monokai", "solarized", "auto"}
+	validTUIDiffStyles            = []string{"", defaultTUIDiffStyle}
+	validLoopDetectorDispositions = []string{"", "warn", "steer", "terminate"}
 )
 
 // Validate evaluates the configuration and returns a combined error listing
@@ -101,6 +102,9 @@ func (v *DefaultValidator) Validate(cfg Config) error {
 	}
 	if !contains(validWebSearchProviders, cfg.WebSearch.Provider) {
 		errs = append(errs, "invalid web_search provider (supported: fetch, brave; empty and mock remain unavailable)")
+	}
+	if !contains(validLoopDetectorDispositions, cfg.Production.LoopDetector.Disposition) {
+		errs = append(errs, "invalid production.loop_detector disposition (supported: warn, steer, terminate)")
 	}
 
 	// LSP config: when ServerCommand is non-empty, WorkspaceRoot (if set)

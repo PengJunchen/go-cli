@@ -3,6 +3,7 @@ package tools
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"sync"
@@ -148,6 +149,88 @@ func TestPrepareToolCallNormalizesValidatesAndFreezesCapturedArguments(t *testin
 	_, err = invocation.Dispatch(ctx)
 	require.ErrorIs(t, err, ErrPreparedInvocationConsumed)
 	assert.Equal(t, 1, tool.snapshotCalls())
+}
+
+func TestPreparedAttemptObserverSeesFrozenIdentityAndDigestBeforePolicy(t *testing.T) {
+	ctx := context.Background()
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	tool := &preparedCaptureTool{
+		name: "capture",
+		schema: map[string]any{
+			"type":     "object",
+			"required": []string{"path", "content"},
+			"properties": map[string]any{
+				"path":    map[string]any{"type": "string"},
+				"content": map[string]any{"type": "string"},
+			},
+		},
+	}
+	require.NoError(t, base.Register(ctx, tool))
+	registry := NewMiddlewareToolRegistry(NewDeferredToolRegistryAdapter(base))
+	var observed []FrozenPreparedAttempt
+	var policyCalls int
+	policy := PreparedToolPolicy(func(_ context.Context, request PreparedPolicyRequest) (PreparedPolicyDecision, error) {
+		policyCalls++
+		if policyCalls == 1 {
+			return PreparedPolicyDecision{Allowed: false, Generations: request.Generations}, nil
+		}
+		return PreparedPolicyDecision{Allowed: true, Generations: request.Generations}, nil
+	})
+	configurePreparedRegistry(t, registry, policy, PreparedToolStages{
+		ArgumentPreparers: []ArgumentPreparer{NewPathNormalizer(t.TempDir())},
+		PreparedAttemptObserver: func(_ context.Context, attempt FrozenPreparedAttempt) error {
+			observed = append(observed, attempt)
+			return nil
+		},
+	})
+
+	args := map[string]any{"path": "relative.txt", "content": "private-call-arguments"}
+	_, err := registry.PrepareToolCall(ctx, ToolCall{ID: "display-id-one", Name: "capture", Args: args})
+	require.ErrorIs(t, err, ErrPreparedToolPolicyDenied)
+	require.Len(t, observed, 1, "a policy-denied attempt is observed after it is frozen")
+
+	invocation, err := registry.PrepareToolCall(ctx, ToolCall{ID: "display-id-two", Name: "capture", Args: args})
+	require.NoError(t, err)
+	require.Len(t, observed, 2)
+	require.Equal(t, 2, policyCalls)
+	require.Equal(t, invocation.ToolIdentity(), observed[1].ToolIdentity())
+	require.Equal(t, invocation.ArgumentDigest(), observed[1].ArgumentDigest())
+	require.Equal(t, observed[0].ToolIdentity(), observed[1].ToolIdentity())
+	require.Equal(t, observed[0].ArgumentDigest(), observed[1].ArgumentDigest(), "display call IDs do not affect attempt identity")
+
+	protected, err := registry.Get(ctx, "capture")
+	require.NoError(t, err)
+	_, err = protected.Execute(ctx, ToolCall{ID: "display-id-three", Name: "capture", Args: args})
+	require.NoError(t, err, "the ordinary protected proxy traverses the same observer seam")
+	require.Len(t, observed, 3)
+	require.Equal(t, 3, policyCalls)
+	require.Equal(t, invocation.ToolIdentity(), observed[2].ToolIdentity())
+	require.Equal(t, invocation.ArgumentDigest(), observed[2].ArgumentDigest())
+}
+
+func TestPreparedAttemptObserverRejectionPreventsPolicyAndInvocation(t *testing.T) {
+	ctx := context.Background()
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	tool := &preparedCaptureTool{name: "capture"}
+	require.NoError(t, base.Register(ctx, tool))
+	registry := NewMiddlewareToolRegistry(NewDeferredToolRegistryAdapter(base))
+	reject := errors.New("loop threshold reached")
+	var policyCalls int
+	configurePreparedRegistry(t, registry,
+		func(_ context.Context, request PreparedPolicyRequest) (PreparedPolicyDecision, error) {
+			policyCalls++
+			return PreparedPolicyDecision{Allowed: true, Generations: request.Generations}, nil
+		},
+		PreparedToolStages{PreparedAttemptObserver: func(context.Context, FrozenPreparedAttempt) error {
+			return reject
+		}},
+	)
+
+	invocation, err := registry.PrepareToolCall(ctx, ToolCall{ID: "display-id", Name: "capture", Args: map[string]any{"content": "canary"}})
+	require.ErrorIs(t, err, reject)
+	require.Nil(t, invocation)
+	require.Zero(t, policyCalls)
+	require.Zero(t, tool.snapshotCalls(), "a rejected prepared attempt never enters its executor")
 }
 
 func TestPreparedWorkspaceReadPreflightUsesFrozenCallSnapshot(t *testing.T) {

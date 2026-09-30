@@ -134,6 +134,15 @@ func (r *MiddlewareToolRegistry) prepareToolCallWithStreamSink(ctx context.Conte
 			return nil, fmt.Errorf("tools: validate workspace-read path before policy classification for %q: %w", call.Name, err)
 		}
 	}
+	if observer := snapshot.pipeline.stages.PreparedAttemptObserver; observer != nil {
+		if err := validatePreparedContext(ctx); err != nil {
+			return nil, err
+		}
+		attempt := FrozenPreparedAttempt{identity: snapshot.identity, argumentDigest: frozenCall.Digest()}
+		if err := observer(ctx, attempt); err != nil {
+			return nil, fmt.Errorf("tools: observe prepared attempt: %w", err)
+		}
+	}
 	fence := r.DispatchFence()
 	if fence == nil {
 		return nil, ErrDispatchFenceUnavailable

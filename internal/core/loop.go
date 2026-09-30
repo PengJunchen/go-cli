@@ -32,6 +32,10 @@ const maxContinuationAttempts = 3
 // errNilModel reports that a LoopAgent has no chat model wired up.
 var errNilModel = errors.New("core: agent loop has no chat model")
 
+// ErrLoopDetected is returned when an active tool attempt reaches the
+// configured repeated-action threshold with terminate disposition.
+var ErrLoopDetected = errors.New("core: active loop detected")
+
 // errMaxIterations reports that a LoopAgent exhausted its iteration budget.
 var errMaxIterations = errors.New("core: agent loop exceeded max iterations")
 
@@ -469,11 +473,17 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 			if !terminalEligible {
 				return
 			}
+			runErr = normalizeLoopDetectedCause(spanCtx, runErr)
 			terminalErr := consumer.commitTerminal(runResult.Transcript, consumer.projections, terminalOutcome(runErr))
 			if terminalErr != nil {
 				markRunOutcomeUnknown(spanCtx)
 				runErr = errors.Join(runErr, terminalErr)
 				runResult.Events = append(runResult.Events, errEvent(terminalErr))
+			}
+		}()
+		defer func() {
+			if errors.Is(context.Cause(spanCtx), ErrLoopDetected) {
+				runErr = ErrLoopDetected
 			}
 		}()
 	}
