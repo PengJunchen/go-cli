@@ -17,6 +17,8 @@ import (
 	"reflect"
 	"strings"
 	"sync"
+
+	"github.com/pengjunchen/go-cli/internal/core"
 )
 
 const maxDurableJSONLineBytes = 1 << 20
@@ -44,9 +46,10 @@ type durableJSONLIO struct {
 // files. directory is a store root; session files live under its sessions
 // child and are named only by opaque physical IDs.
 type DurableJSONLSessionPreparer struct {
-	directory string
-	authority RecoveryAuthority
-	io        durableJSONLIO
+	directory                string
+	authority                RecoveryAuthority
+	io                       durableJSONLIO
+	inspectExecutionIdentity func(core.ExecutionIdentity) core.ProcessGroupExitInspection
 }
 
 // NewDurableJSONLSessionPreparer returns a durable per-session JSONL opener.
@@ -57,7 +60,10 @@ func NewDurableJSONLSessionPreparer(directory string, authority RecoveryAuthorit
 }
 
 func newDurableJSONLSessionPreparer(directory string, authority RecoveryAuthority, ioOps durableJSONLIO) *DurableJSONLSessionPreparer {
-	return &DurableJSONLSessionPreparer{directory: directory, authority: authority, io: ioOps}
+	return &DurableJSONLSessionPreparer{
+		directory: directory, authority: authority, io: ioOps,
+		inspectExecutionIdentity: core.InspectProcessGroupExit,
+	}
 }
 
 // PrepareNew creates a unique physical session file with exclusive creation,
@@ -186,6 +192,9 @@ func (p *DurableJSONLSessionPreparer) PrepareResume(ctx context.Context, physica
 			if err := validatePendingActionDecisions(plan.pending, decisions); err != nil {
 				return nil, err
 			}
+			if err := rejectAbsentMarkerForDispatchedExecution(plan, decisions); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if _, err := file.Seek(0, io.SeekEnd); err != nil {
@@ -212,6 +221,7 @@ func (p *DurableJSONLSessionPreparer) PrepareResume(ctx context.Context, physica
 	if err != nil {
 		return nil, err
 	}
+	view.ExecutionRecoveryDiagnostics = inspectPendingBashExecutionIdentities(plan, p.inspectExecutionIdentity)
 	store.view = view
 	failed = false
 	return &durablePreparedSession{store: store}, nil

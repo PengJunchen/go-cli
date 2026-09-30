@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 type durableActionOccurrence struct {
@@ -17,6 +18,7 @@ type durableActionOccurrence struct {
 	callIndex  int
 	toolName   string
 	intent     *SessionEntry
+	executions []*SessionEntry
 	receipt    *SessionEntry
 	resolution *ValidatedExecutionResolution
 }
@@ -191,6 +193,7 @@ func analyzeDurableActionJournal(entries []SessionEntry, sessionID string) (*dur
 			if !durableEntryIsAncestor(entriesByID, occurrence.intent.ID, entry.ID) {
 				return nil, fmt.Errorf("session: execution row %q is outside its intent's parent chain", entry.ID)
 			}
+			occurrence.executions = append(occurrence.executions, entry)
 		}
 		if entry.Type == EntryTypeTool && entry.ActionState == "" {
 			key, err := actionKeyForEntry(*entry, sessionID)
@@ -300,6 +303,108 @@ func analyzeDurableActionJournal(entries []SessionEntry, sessionID string) (*dur
 		}
 	}
 	return plan, nil
+}
+
+func rejectAbsentMarkerForDispatchedExecution(plan *durableRecoveryPlan, decisions []PendingActionDecision) error {
+	if plan == nil || len(plan.pending) != len(decisions) {
+		return errors.New("session: dispatch marker decisions do not match the pending action list")
+	}
+	for index, ref := range plan.pending {
+		if decisions[index].MarkerState != DispatchMarkerAbsent {
+			continue
+		}
+		for _, occurrence := range plan.occurrences {
+			if occurrence.intent == nil || occurrence.ref != ref {
+				continue
+			}
+			for _, execution := range occurrence.executions {
+				if execution.DispatchState == DispatchStateDispatched {
+					return fmt.Errorf("session: workspace dispatch marker is absent despite durable dispatched execution %q", execution.ID)
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func inspectPendingBashExecutionIdentities(
+	plan *durableRecoveryPlan,
+	inspect func(core.ExecutionIdentity) core.ProcessGroupExitInspection,
+) []ExecutionRecoveryDiagnostic {
+	if plan == nil || len(plan.pending) == 0 {
+		return nil
+	}
+	if inspect == nil {
+		inspect = core.InspectProcessGroupExit
+	}
+	byKey := make(map[actionOccurrenceKey]*durableActionOccurrence, len(plan.occurrences))
+	for _, occurrence := range plan.occurrences {
+		key := actionOccurrenceKey{
+			sessionID: occurrence.ref.SessionID,
+			runID:     occurrence.ref.RunID,
+			ordinal:   occurrence.ref.AssistantTranscriptOrdinal,
+			toolCall:  occurrence.ref.ToolCallID,
+		}
+		byKey[key] = occurrence
+	}
+	diagnostics := make([]ExecutionRecoveryDiagnostic, 0, len(plan.pending))
+	for _, ref := range plan.pending {
+		occurrence := byKey[actionOccurrenceKey{
+			sessionID: ref.SessionID,
+			runID:     ref.RunID,
+			ordinal:   ref.AssistantTranscriptOrdinal,
+			toolCall:  ref.ToolCallID,
+		}]
+		if occurrence == nil || occurrence.intent == nil || occurrence.toolName != "bash" ||
+			occurrence.intent.ToolIdentity == nil || occurrence.intent.ToolIdentity.RegistrationSource != tools.RegistrationSourceBuiltin {
+			continue
+		}
+		diagnostic := ExecutionRecoveryDiagnostic{
+			Action:          ref,
+			IntentEntryID:   occurrence.intent.ID,
+			OwnerGeneration: occurrence.intent.OwnerGeneration,
+			Status:          core.ProcessGroupExitUnknown,
+			Reason:          "matching dispatched process-group identity is missing",
+		}
+		var identity *core.ExecutionIdentity
+		ownerMismatch := false
+		for _, execution := range occurrence.executions {
+			if execution.DispatchState != DispatchStateDispatched || execution.ExecutionIdentity == nil {
+				continue
+			}
+			if execution.OwnerGeneration == "" || execution.OwnerGeneration != occurrence.intent.OwnerGeneration {
+				diagnostic.Reason = "dispatched execution identity owner generation does not match its intent"
+				diagnostic.ExecutionEntryID = ""
+				ownerMismatch = true
+				break
+			}
+			if identity == nil {
+				copy := *execution.ExecutionIdentity
+				identity = &copy
+				diagnostic.ExecutionEntryID = execution.ID
+				continue
+			}
+			if *identity != *execution.ExecutionIdentity {
+				diagnostic.Reason = "matching dispatched execution rows contain conflicting process identities"
+				identity = nil
+				diagnostic.ExecutionEntryID = ""
+				break
+			}
+		}
+		if identity != nil && !ownerMismatch {
+			observation := inspect(*identity)
+			switch observation.Status {
+			case core.ProcessGroupExitUnknown, core.ProcessGroupExitPresent, core.ProcessGroupExitAbsent:
+				diagnostic.Status = observation.Status
+				diagnostic.Reason = observation.Reason
+				diagnostic.ObservedAt = observation.ObservedAt
+			default:
+				diagnostic.Reason = "process-group inspector returned an unsupported status"
+			}
+		}
+		diagnostics = append(diagnostics, diagnostic)
+	}
+	return diagnostics
 }
 
 func durableEntryIsAncestor(entries map[string]*SessionEntry, ancestorID, descendantID string) bool {

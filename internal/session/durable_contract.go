@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/tools"
@@ -18,11 +19,26 @@ type DurableSessionWriter interface {
 // SessionView is an immutable projection of one physical session branch.
 // Messages and SourceEntryIDs have a one-to-one positional mapping.
 type SessionView struct {
-	SessionID      string
-	BranchID       string
-	Revision       string
-	Messages       []core.AgentMessage
-	SourceEntryIDs []string
+	SessionID                    string
+	BranchID                     string
+	Revision                     string
+	Messages                     []core.AgentMessage
+	SourceEntryIDs               []string
+	ExecutionRecoveryDiagnostics []ExecutionRecoveryDiagnostic
+}
+
+// ExecutionRecoveryDiagnostic is a read-only, in-memory observation of the
+// exact local Bash action checked while opening a durable session. It is not
+// durable proof that an action stopped: process-group absence cannot detect
+// descendants that escaped the group.
+type ExecutionRecoveryDiagnostic struct {
+	Action           PendingActionRef
+	IntentEntryID    string
+	OwnerGeneration  string
+	ExecutionEntryID string
+	Status           core.ProcessGroupExitStatus
+	Reason           string
+	ObservedAt       time.Time
 }
 
 // Validate checks the required identity and source-message mapping.
@@ -57,6 +73,9 @@ func (v SessionView) Clone() SessionView {
 	v.Messages = core.CloneAgentMessages(v.Messages)
 	if v.SourceEntryIDs != nil {
 		v.SourceEntryIDs = append([]string(nil), v.SourceEntryIDs...)
+	}
+	if v.ExecutionRecoveryDiagnostics != nil {
+		v.ExecutionRecoveryDiagnostics = append([]ExecutionRecoveryDiagnostic(nil), v.ExecutionRecoveryDiagnostics...)
 	}
 	return v
 }
