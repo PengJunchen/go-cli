@@ -183,8 +183,8 @@ func inspectLinuxProcessGroupExit(
 	if err != nil {
 		return unknownProcessGroupInspection("Linux PID limit is unavailable")
 	}
-	if identity.ProcessGroupID > pidMax {
-		return unknownProcessGroupInspection("recorded process group ID exceeds the Linux PID limit")
+	if identity.ProcessGroupID >= pidMax {
+		return unknownProcessGroupInspection("recorded process group ID is outside the allocatable Linux PID range")
 	}
 	groupProbeErr := groupProbe(identity.ProcessGroupID)
 	if groupProbeErr == nil {
