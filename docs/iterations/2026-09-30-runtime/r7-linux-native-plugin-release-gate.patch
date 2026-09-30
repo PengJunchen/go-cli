@@ -1,0 +1,25 @@
+diff --git a/.github/workflows/ci.yml b/.github/workflows/ci.yml
+--- a/.github/workflows/ci.yml
++++ b/.github/workflows/ci.yml
+@@ -66,6 +66,9 @@ jobs:
+   test:
+     name: Test (race + coverage)
+     runs-on: ubuntu-latest
++    env:
++      CGO_ENABLED: "1"
++      GOCLI_REQUIRE_NATIVE_PLUGIN_TEST: "1"
+     steps:
+       - uses: actions/checkout@v4
+ 
+diff --git a/.github/workflows/pr-check.yml b/.github/workflows/pr-check.yml
+--- a/.github/workflows/pr-check.yml
++++ b/.github/workflows/pr-check.yml
+@@ -13,5 +13,8 @@ jobs:
+   compliant:
+     name: Compliant
+     runs-on: ubuntu-latest
++    env:
++      CGO_ENABLED: "1"
++      GOCLI_REQUIRE_NATIVE_PLUGIN_TEST: "1"
+     steps:
+       - uses: actions/checkout@v4
