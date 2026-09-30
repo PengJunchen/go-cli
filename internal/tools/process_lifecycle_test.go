@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -130,6 +131,141 @@ func TestPreparedBashDoesNotRunWhenProcessIdentityPersistenceFails(t *testing.T)
 	})
 	require.ErrorIs(t, err, persistErr)
 	require.NoFileExists(t, marker, "an identity persistence failure must keep user code behind the gate")
+}
+
+func TestPreparedBashDoesNotSourceBashEnvBeforeIdentityPersistence(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is required for process lifecycle tests")
+	}
+	directory := t.TempDir()
+	marker := filepath.Join(directory, "bash-env-ran")
+	envMarker := filepath.Join(directory, "env-ran")
+	startup := filepath.Join(directory, "bash-env")
+	envStartup := filepath.Join(directory, "env-startup")
+	require.NoError(t, os.WriteFile(startup, []byte("touch "+shellQuoteTestArgument(marker)+"\n"), 0o600))
+	require.NoError(t, os.WriteFile(envStartup, []byte("touch "+shellQuoteTestArgument(envMarker)+"\n"), 0o600))
+	env := filteredEnv(map[string]string{"BASH_ENV": startup, "ENV": envStartup})
+	require.Contains(t, env, "BASH_ENV="+startup)
+	require.Contains(t, env, "ENV="+envStartup)
+	control := exec.Command("bash", "--noprofile", "--norc", "-c", ":")
+	control.Env = env
+	require.NoError(t, control.Run())
+	require.FileExists(t, marker, "the fixture must demonstrate that this Bash honors BASH_ENV")
+	require.NoFileExists(t, envMarker, "noninteractive Bash must not source ENV")
+	require.NoError(t, os.Remove(marker))
+	helperEnv, delayedEnv := splitBashStartupEnvironment(env)
+	require.Contains(t, delayedEnv, "BASH_ENV="+startup)
+	require.Contains(t, delayedEnv, "ENV="+envStartup)
+	helperControl := exec.Command("/bin/sh", "-c", ":")
+	helperControl.Env = helperEnv
+	require.NoError(t, helperControl.Run())
+	require.NoFileExists(t, envMarker, "the selected noninteractive /bin/sh helper must not source ENV")
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseGate := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseGate()
+	observed := make(chan struct{})
+	ctx := WithProcessExecutionIdentityObserver(context.Background(), func(context.Context, ProcessExecutionIdentity) error {
+		close(observed)
+		<-release
+		return nil
+	})
+	result := make(chan error, 1)
+	go func() {
+		_, err := NewBashTool(WithTimeout(5*time.Second), WithNoSandbox(), WithEnv(map[string]string{"BASH_ENV": startup, "ENV": envStartup})).Execute(ctx, ToolCall{
+			ID: "call-bash-env-gated", Name: "bash", Args: map[string]any{"command": ":"},
+		})
+		result <- err
+	}()
+
+	select {
+	case <-observed:
+	case err := <-result:
+		t.Fatalf("prepared Bash returned before identity callback: err=%v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("prepared Bash did not enter the identity callback")
+	}
+	// cmd.Start returns before the new process necessarily completes startup.
+	// Poll while the observer remains blocked so a wrongly sourced BASH_ENV has
+	// a bounded window to make its side effect visible.
+	startupDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(startupDeadline) {
+		if fileExists(marker) || fileExists(envMarker) {
+			releaseGate()
+			require.NoError(t, <-result, "allow the blocked process to unwind after detecting the regression")
+			t.Fatal("BASH_ENV or ENV executed before process identity persistence")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	require.NoFileExists(t, marker, "BASH_ENV must not execute before process identity persistence")
+	require.NoFileExists(t, envMarker, "ENV must not execute before process identity persistence")
+	releaseGate()
+	require.NoError(t, <-result)
+	require.FileExists(t, marker, "the original Bash environment must be restored after identity persistence")
+	require.NoFileExists(t, envMarker, "the original noninteractive Bash invocation must not source ENV")
+}
+
+func TestPreparedBashStartGateDoesNotImportBashReadFunction(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is required for process lifecycle tests")
+	}
+	directory := t.TempDir()
+	marker := filepath.Join(directory, "bash-function-ran")
+	function := "() { touch " + shellQuoteTestArgument(marker) + "; }"
+	env := filteredEnv(map[string]string{"BASH_FUNC_read%%": function})
+	control := exec.Command("bash", "--noprofile", "--norc", "-c", "read -r _")
+	control.Env = env
+	control.Stdin = strings.NewReader("ready\n")
+	require.NoError(t, control.Run())
+	if !fileExists(marker) {
+		t.Skip("this Bash does not import exported Bash functions")
+	}
+	require.NoError(t, os.Remove(marker))
+	helperEnv, delayedEnv := splitBashStartupEnvironment(env)
+	require.Contains(t, delayedEnv, "BASH_FUNC_read%%="+function)
+
+	helper := exec.Command("/bin/sh", "-c", "read -r _")
+	helper.Env = helperEnv
+	helper.Stdin = strings.NewReader("ready\n")
+	require.NoError(t, helper.Run())
+	require.NoFileExists(t, marker, "the noninteractive /bin/sh helper must not import Bash-specific functions")
+
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseGate := func() { releaseOnce.Do(func() { close(release) }) }
+	defer releaseGate()
+	observed := make(chan struct{})
+	ctx := WithProcessExecutionIdentityObserver(context.Background(), func(context.Context, ProcessExecutionIdentity) error {
+		close(observed)
+		<-release
+		return nil
+	})
+	result := make(chan error, 1)
+	go func() {
+		_, err := NewBashTool(WithTimeout(5*time.Second), WithNoSandbox(), WithEnv(map[string]string{"BASH_FUNC_read%%": function})).Execute(ctx, ToolCall{
+			ID: "call-bash-function-gated", Name: "bash", Args: map[string]any{"command": ":"},
+		})
+		result <- err
+	}()
+	select {
+	case <-observed:
+	case err := <-result:
+		t.Fatalf("prepared Bash returned before identity callback: err=%v", err)
+	case <-time.After(3 * time.Second):
+		t.Fatal("prepared Bash did not enter the identity callback")
+	}
+	startupDeadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(startupDeadline) {
+		if fileExists(marker) {
+			releaseGate()
+			require.NoError(t, <-result, "allow the blocked process to unwind after detecting the regression")
+			t.Fatal("Bash-specific read function executed before process identity persistence")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	releaseGate()
+	require.NoError(t, <-result)
+	require.NoFileExists(t, marker, "the released command does not invoke the imported read function")
 }
 
 func TestPreparedStreamingBashWaitsForIdentityPersistence(t *testing.T) {

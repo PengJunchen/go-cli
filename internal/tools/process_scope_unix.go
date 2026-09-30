@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 )
@@ -83,8 +84,22 @@ type bashProcessStartGate struct {
 }
 
 func installBashProcessStartGate(cmd *exec.Cmd) (*bashProcessStartGate, error) {
-	if cmd == nil || cmd.Path == "" || len(cmd.Args) != 3 || cmd.Args[1] != "-lc" || len(cmd.ExtraFiles) != 0 {
+	if cmd == nil || cmd.Path == "" || cmd.Env == nil || len(cmd.Args) != 3 || cmd.Args[1] != "-lc" || len(cmd.ExtraFiles) != 0 {
 		return nil, errors.New("managed Bash start gate requires the exact local bash -lc invocation")
+	}
+	info, err := os.Stat("/bin/sh")
+	if err != nil {
+		return nil, fmt.Errorf("managed Bash start gate requires /bin/sh: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return nil, errors.New("managed Bash start gate requires an executable /bin/sh")
+	}
+	info, err = os.Stat("/usr/bin/env")
+	if err != nil {
+		return nil, fmt.Errorf("managed Bash start gate requires /usr/bin/env: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return nil, errors.New("managed Bash start gate requires an executable /usr/bin/env")
 	}
 	readEnd, writeEnd, err := os.Pipe()
 	if err != nil {
@@ -93,12 +108,30 @@ func installBashProcessStartGate(cmd *exec.Cmd) (*bashProcessStartGate, error) {
 	fd := 3 + len(cmd.ExtraFiles)
 	cmd.ExtraFiles = append(cmd.ExtraFiles, readEnd)
 	command := cmd.Args[2]
-	cmd.Args = []string{
-		cmd.Args[0], "--noprofile", "--norc", "-c",
-		fmt.Sprintf("IFS= read -r _ <&%d || exit 125; exec %d<&-; exec \"$2\" -lc \"$1\"", fd, fd),
-		"go-cli-managed-bash", command, cmd.Path,
+	bashPath := cmd.Path
+	bootstrapEnv, delayedEnv := splitBashStartupEnvironment(cmd.Env)
+	cmd.Env = bootstrapEnv
+	cmd.Path = "/bin/sh"
+	argRefs := make([]string, len(delayedEnv))
+	for index := range delayedEnv {
+		argRefs[index] = fmt.Sprintf("\"$%d\"", index+3)
 	}
+	script := fmt.Sprintf("IFS= read -r _ <&%d || exit 125; exec %d<&-; set -- %s \"$2\" -lc \"$1\"; exec /usr/bin/env \"$@\"", fd, fd, strings.Join(argRefs, " "))
+	cmd.Args = append([]string{"sh", "-c", script, "go-cli-managed-bash", command, bashPath}, delayedEnv...)
 	return &bashProcessStartGate{readEnd: readEnd, writeEnd: writeEnd}, nil
+}
+
+func splitBashStartupEnvironment(env []string) (bootstrap []string, delayed []string) {
+	bootstrap = make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, ok := strings.Cut(entry, "=")
+		if ok && (key == "BASH_ENV" || key == "ENV" || strings.HasPrefix(key, "BASH_FUNC_")) {
+			delayed = append(delayed, entry)
+			continue
+		}
+		bootstrap = append(bootstrap, entry)
+	}
+	return bootstrap, delayed
 }
 
 func (g *bashProcessStartGate) release() error {
