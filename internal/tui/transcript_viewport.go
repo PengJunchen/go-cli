@@ -844,7 +844,7 @@ func (v *transcriptViewport) restoreAnchor(index, sourceOffset int) {
 		}
 		sourceOffset = offsets[localLine]
 	} else {
-		sourceOffset = transcriptViewportSafeOffset(v.rows[index].text, sourceOffset)
+		sourceOffset = transcriptViewportSafeOffsetRow(v.rows[index], sourceOffset)
 	}
 	localLine := sort.Search(len(offsets), func(i int) bool { return offsets[i] > sourceOffset }) - 1
 	if localLine < 0 {
@@ -863,6 +863,10 @@ func (v *transcriptViewport) rowLineOffsets(index int) []int {
 	}
 	if index < 0 || index >= len(v.rows) {
 		return nil
+	}
+	if v.rowMetadata[index].renderOnDemand {
+		_, offsets := transcriptViewportWrapLines(v.rows[index].lines, v.width, v.rows[index].lineWidth)
+		return offsets
 	}
 	return transcriptViewportSourceLineOffsets(v.rows[index].text, v.width)
 }
@@ -963,6 +967,25 @@ func transcriptViewportSafeOffset(text string, offset int) int {
 		state = nextState
 	}
 	return position
+}
+
+func transcriptViewportSafeOffsetRow(row transcriptViewportRow, offset int) int {
+	if row.lines == nil {
+		return transcriptViewportSafeOffset(row.text, offset)
+	}
+
+	sourceOffset := 0
+	for index, line := range row.lines {
+		safe, _ := transcriptViewportSafeText(line)
+		if offset <= sourceOffset+len(safe) {
+			return sourceOffset + transcriptViewportSafeOffset(safe, offset-sourceOffset)
+		}
+		sourceOffset += len(safe)
+		if index < len(row.lines)-1 {
+			sourceOffset++
+		}
+	}
+	return sourceOffset
 }
 
 // transcriptViewportSafeText avoids allocating ANSI parser scratch for the
