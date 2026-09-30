@@ -325,9 +325,9 @@ func TestCoordinatorRunHookActions(t *testing.T) {
 	hook := newMgrTestHook("act")
 	event := HookEvent{Name: "e", Timestamp: time.Now()}
 
-	hook.SetResult(HookResult{Action: hookActionBlock, Reason: "denied"})
+	hook.SetResult(HookResult{Action: HookActionBlock, Reason: "denied"})
 	res := coord.runHook(ctx, hook, event)
-	assert.Equal(t, hookActionBlock, res.Action)
+	assert.Equal(t, HookActionBlock, res.Action)
 	assert.Equal(t, "denied", res.Reason)
 
 	hook.SetResult(HookResult{Action: hookActionReplace, Replacement: "repl"})
