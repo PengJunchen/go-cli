@@ -30,6 +30,12 @@ var (
 	ErrProjectSourceSnapshotInvalid = errors.New("approval: invalid project source snapshot")
 	// ErrProjectSourceManagerUnavailable means the trust manager has no store.
 	ErrProjectSourceManagerUnavailable = errors.New("approval: project source trust manager is unavailable")
+	// ErrTransactionalTrustStoreUnavailable means the trust manager's backend
+	// cannot provide the lock-scoped generation check required for dispatch.
+	ErrTransactionalTrustStoreUnavailable = errors.New("approval: transactional trust store is unavailable")
+	// ErrProjectSourceTrustStale means this capability no longer matches the
+	// current persisted project trust generation.
+	ErrProjectSourceTrustStale = errors.New("approval: project source trust generation is stale")
 )
 
 // ProjectSourceFileInput is one file's caller-captured source data. RelativePath
@@ -247,16 +253,47 @@ func (s *ProjectSourceSnapshot) DirectoryMembers(id string) ([]string, bool) {
 // VerifiedProjectSources is an opaque capability minted only after a
 // FrozenProjectSourceTrust store comparison succeeds.
 type VerifiedProjectSources struct {
-	snapshot *ProjectSourceSnapshot
-	seal     [32]byte
+	snapshot        *ProjectSourceSnapshot
+	trustGeneration uint64
+	manager         *DefaultTrustManager
+	seal            [32]byte
 }
 
 // Valid reports whether this value carries a manager-minted source proof.
 func (v *VerifiedProjectSources) Valid() bool {
-	if v == nil || v.snapshot == nil || !v.snapshot.valid || v.snapshot.manifestDigest == "" {
+	if v == nil || v.snapshot == nil || !v.snapshot.valid || v.snapshot.manifestDigest == "" ||
+		v.trustGeneration == 0 || v.manager == nil {
 		return false
 	}
-	return v.seal == verifiedProjectSourceSeal(v.snapshot)
+	return v.seal == verifiedProjectSourceSeal(v.snapshot, v.trustGeneration)
+}
+
+// TrustGeneration returns the persisted project trust epoch captured by this
+// verified source capability.
+func (v *VerifiedProjectSources) TrustGeneration() uint64 {
+	if !v.Valid() {
+		return 0
+	}
+	return v.trustGeneration
+}
+
+// CommitIfCurrent holds the trust-store transaction lock while running the
+// short in-memory dispatch commit callback. Revocation that wins the lock first
+// rejects the callback; a later revocation observes an already-committed action.
+func (v *VerifiedProjectSources) CommitIfCurrent(ctx context.Context, commit func() error) error {
+	if ctx == nil {
+		return errors.New("approval: project source commit context is nil")
+	}
+	if commit == nil {
+		return errors.New("approval: project source commit callback is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if !v.Valid() {
+		return ErrProjectSourceSnapshotInvalid
+	}
+	return v.manager.commitProjectSourceCapability(ctx, v, commit)
 }
 
 // CanonicalRoot returns the workspace root bound to this verified capability.
@@ -340,30 +377,47 @@ func (m *DefaultTrustManager) CheckProjectSourceSnapshot(
 	if snapshot == nil || !snapshot.valid || snapshot.manifestDigest == "" {
 		return nil, ErrProjectSourceSnapshotInvalid
 	}
-	entry, ok, err := m.lookup(snapshot.root)
+	var verified *VerifiedProjectSources
+	err := m.update(ctx, func(entries map[string]TrustEntry) (bool, error) {
+		entry, ok := entries[snapshot.root]
+		if !ok || entry.Revoked {
+			return false, ErrProjectSourceUntrusted
+		}
+		if entry.ManifestVersion == 0 {
+			return false, ErrProjectSourceLegacy
+		}
+		if entry.ManifestVersion != snapshot.manifestVersion || entry.CanonicalRoot != snapshot.root ||
+			entry.Path != snapshot.root || entry.ManifestDigest != snapshot.manifestDigest ||
+			!equalProjectSourceRecords(entry.ProjectSources, snapshot.fileRecords) ||
+			!equalProjectSourceDirectoryRecords(entry.ProjectSourceDirectories, snapshot.directories) {
+			return false, ErrProjectSourceManifestMismatch
+		}
+		if expired(entry, time.Now()) {
+			return false, ErrProjectSourceExpired
+		}
+		generation := effectiveTrustGeneration(entry)
+		if generation == 0 {
+			return false, ErrProjectSourceTrustStale
+		}
+		frozen := cloneProjectSourceSnapshot(snapshot)
+		verified = &VerifiedProjectSources{
+			snapshot:        frozen,
+			trustGeneration: generation,
+			manager:         m,
+			seal:            verifiedProjectSourceSeal(frozen, generation),
+		}
+		return false, nil
+	})
 	if err != nil {
-		return nil, fmt.Errorf("approval: load project source trust: %w", err)
-	}
-	if !ok {
-		return nil, ErrProjectSourceUntrusted
-	}
-	if entry.ManifestVersion == 0 {
-		return nil, ErrProjectSourceLegacy
-	}
-	if entry.ManifestVersion != snapshot.manifestVersion || entry.CanonicalRoot != snapshot.root ||
-		entry.Path != snapshot.root || entry.ManifestDigest != snapshot.manifestDigest ||
-		!equalProjectSourceRecords(entry.ProjectSources, snapshot.fileRecords) ||
-		!equalProjectSourceDirectoryRecords(entry.ProjectSourceDirectories, snapshot.directories) {
-		return nil, ErrProjectSourceManifestMismatch
-	}
-	if expired(entry, time.Now()) {
-		return nil, ErrProjectSourceExpired
+		return nil, fmt.Errorf("approval: check project source trust: %w", err)
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
-	frozen := cloneProjectSourceSnapshot(snapshot)
-	return &VerifiedProjectSources{snapshot: frozen, seal: verifiedProjectSourceSeal(frozen)}, nil
+	if verified == nil || !verified.Valid() {
+		return nil, ErrProjectSourceTrustStale
+	}
+	return verified, nil
 }
 
 // TrustProjectSourceSnapshot persists the raw capture as a future manifest
@@ -381,19 +435,62 @@ func (m *DefaultTrustManager) TrustProjectSourceSnapshot(
 	if snapshot == nil || !snapshot.valid || snapshot.manifestDigest == "" {
 		return ErrProjectSourceSnapshotInvalid
 	}
-	entry := TrustEntry{
-		Path:                     snapshot.root,
-		TrustedAt:                time.Now().UTC().Format(time.RFC3339),
-		ManifestVersion:          snapshot.manifestVersion,
-		CanonicalRoot:            snapshot.root,
-		ProjectSources:           snapshot.SourceRecords(),
-		ProjectSourceDirectories: snapshot.DirectoryRecords(),
-		ManifestDigest:           snapshot.manifestDigest,
+	return m.update(ctx, func(entries map[string]TrustEntry) (bool, error) {
+		maxGeneration := uint64(0)
+		for key, existing := range entries {
+			if trustEntryIdentifiesRoot(key, existing, snapshot.root) {
+				maxGeneration = maxTrustGeneration(maxGeneration, effectiveTrustGeneration(existing))
+			}
+		}
+		if maxGeneration == ^uint64(0) {
+			return false, errTrustGenerationOverflow
+		}
+		entries[snapshot.root] = TrustEntry{
+			Path:                     snapshot.root,
+			TrustedAt:                time.Now().UTC().Format(time.RFC3339),
+			ManifestVersion:          snapshot.manifestVersion,
+			CanonicalRoot:            snapshot.root,
+			ProjectSources:           snapshot.SourceRecords(),
+			ProjectSourceDirectories: snapshot.DirectoryRecords(),
+			ManifestDigest:           snapshot.manifestDigest,
+			TrustGeneration:          maxGeneration + 1,
+		}
+		return true, nil
+	})
+}
+
+func (m *DefaultTrustManager) commitProjectSourceCapability(
+	ctx context.Context,
+	verified *VerifiedProjectSources,
+	commit func() error,
+) error {
+	if err := ctx.Err(); err != nil {
+		return err
 	}
-	if err := m.store.Add(snapshot.root, entry); err != nil {
-		return fmt.Errorf("approval: persist project source trust: %w", err)
+	if m == nil || m.store == nil || verified == nil || !verified.Valid() || verified.manager != m {
+		return ErrProjectSourceManagerUnavailable
 	}
-	return nil
+	return m.update(ctx, func(entries map[string]TrustEntry) (bool, error) {
+		entry, ok := entries[verified.snapshot.root]
+		if !ok || entry.Revoked {
+			return false, ErrProjectSourceTrustStale
+		}
+		generation := effectiveTrustGeneration(entry)
+		if generation != verified.trustGeneration || entry.ManifestVersion != verified.snapshot.manifestVersion ||
+			entry.CanonicalRoot != verified.snapshot.root || entry.Path != verified.snapshot.root ||
+			entry.ManifestDigest != verified.snapshot.manifestDigest ||
+			!equalProjectSourceRecords(entry.ProjectSources, verified.snapshot.fileRecords) ||
+			!equalProjectSourceDirectoryRecords(entry.ProjectSourceDirectories, verified.snapshot.directories) {
+			return false, ErrProjectSourceTrustStale
+		}
+		if expired(entry, time.Now()) {
+			return false, ErrProjectSourceExpired
+		}
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		return false, commit()
+	})
 }
 
 func canonicalProjectRoot(root string) (string, error) {
@@ -505,8 +602,14 @@ func writeManifestBool(h hash.Hash, value bool) {
 	_, _ = h.Write([]byte{0})
 }
 
-func verifiedProjectSourceSeal(snapshot *ProjectSourceSnapshot) [32]byte {
-	return sha256.Sum256([]byte("go-cli-verified-project-source-v1\x00" + snapshot.root + "\x00" + snapshot.manifestDigest))
+func verifiedProjectSourceSeal(snapshot *ProjectSourceSnapshot, generation uint64) [32]byte {
+	if snapshot == nil {
+		return [32]byte{}
+	}
+	var encoded [8]byte
+	binary.BigEndian.PutUint64(encoded[:], generation)
+	material := append([]byte("go-cli-verified-project-source-v2\x00"+snapshot.root+"\x00"+snapshot.manifestDigest+"\x00"), encoded[:]...)
+	return sha256.Sum256(material)
 }
 
 func cloneProjectSourceSnapshot(snapshot *ProjectSourceSnapshot) *ProjectSourceSnapshot {

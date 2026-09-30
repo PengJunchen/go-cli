@@ -11,6 +11,7 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/approval"
 	"github.com/pengjunchen/go-cli/internal/config"
+	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 func TestAssembleUsesLoadedTrustManagerForProjectCustomTools(t *testing.T) {
@@ -32,9 +33,12 @@ func TestAssembleUsesLoadedTrustManagerForProjectCustomTools(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(home, ".go-cli", "config.yaml"), []byte(globalConfig), 0o600))
 	projectConfig := "tools:\n  custom_tools:\n    - name: project_custom\n      description: Project-scoped custom tool\n      command:\n        - ./bin/project-tool\n"
 	require.NoError(t, os.WriteFile(filepath.Join(root, ".go-cli.yaml"), []byte(projectConfig), 0o600))
-	require.NoError(t, os.WriteFile(filepath.Join(root, "bin", "project-tool"), []byte("#!/bin/sh\nprintf 'project custom ran\\n'\n"), 0o700))
+	marker := filepath.Join(root, "bin", "calls.log")
+	script := "#!/bin/sh\nprintf 'called\\n' >> ./bin/calls.log\nprintf 'project custom ran\\n'\n"
+	require.NoError(t, os.WriteFile(filepath.Join(root, "bin", "project-tool"), []byte(script), 0o700))
 
-	manager := approval.NewDefaultTrustManager(approval.NewFileTrustStore(filepath.Join(home, ".config", "go-cli", "trust.json")))
+	trustStorePath := filepath.Join(home, ".config", "go-cli", "trust.json")
+	manager := approval.NewDefaultTrustManager(approval.NewFileTrustStore(trustStorePath))
 	snapshot, err := config.CaptureProjectSources(ctx, root, nil)
 	require.NoError(t, err)
 	frozen, ok := manager.(approval.FrozenProjectSourceTrust)
@@ -57,8 +61,27 @@ func TestAssembleUsesLoadedTrustManagerForProjectCustomTools(t *testing.T) {
 		toolNames = append(toolNames, definition.Name())
 	}
 	require.Contains(t, toolNames, "project_custom")
+	projectTool, err := assembly.ToolRegistry.Get(ctx, "project_custom")
+	require.NoError(t, err)
+	preparer, ok := assembly.ToolRegistry.(tools.ToolCallPreparer)
+	require.True(t, ok)
+	call := tools.ToolCall{ID: "first", Name: "project_custom", Args: map[string]any{}}
+	prepared, err := preparer.PrepareToolCall(ctx, call)
+	require.NoError(t, err)
+	require.Equal(t, tools.RegistrationSourceProjectSourced, prepared.ToolIdentity().RegistrationSource())
+	_, err = prepared.Dispatch(ctx)
+	require.NoError(t, err)
+	firstCalls, err := os.ReadFile(marker)
+	require.NoError(t, err)
+	require.Equal(t, "called\n", string(firstCalls))
 
-	require.NoError(t, manager.RevokeTrust(ctx, snapshot.CanonicalRoot()))
+	secondManager := approval.NewDefaultTrustManager(approval.NewFileTrustStore(trustStorePath))
+	require.NoError(t, secondManager.RevokeTrust(ctx, snapshot.CanonicalRoot()))
+	_, err = projectTool.Execute(ctx, tools.ToolCall{ID: "second", Name: "project_custom", Args: map[string]any{}})
+	require.Error(t, err, "the same protected proxy must reject the revoked project generation")
+	secondCalls, err := os.ReadFile(marker)
+	require.NoError(t, err)
+	require.Equal(t, firstCalls, secondCalls, "the project command must not start after revocation")
 	revokedConfig, err := config.LoadTrustedWithManager(ctx, manager)
 	require.NoError(t, err)
 	require.Empty(t, revokedConfig.Tools.CustomTools)

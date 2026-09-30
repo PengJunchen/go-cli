@@ -122,7 +122,9 @@ func TestFileTrustStoreRemovePersists(t *testing.T) {
 }
 
 func TestFileTrustStoreMissingFileYieldsEmpty(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "does-not-exist.json")
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0o700))
+	path := filepath.Join(dir, "does-not-exist.json")
 	store := NewFileTrustStore(path)
 	entries, err := store.Load()
 	require.NoError(t, err, "missing file must not error")

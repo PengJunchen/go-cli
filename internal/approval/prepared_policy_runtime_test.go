@@ -5,6 +5,7 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -51,6 +52,32 @@ type preparedArgumentCaptureTool struct {
 	mutationFinished <-chan struct{}
 	mu               sync.Mutex
 	args             map[string]any
+}
+
+type preparedBlockingRuntimeTool struct {
+	name    string
+	started chan struct{}
+	release <-chan struct{}
+	once    sync.Once
+	mu      sync.Mutex
+	calls   int
+}
+
+func (t *preparedBlockingRuntimeTool) Name() string      { return t.name }
+func (*preparedBlockingRuntimeTool) Description() string { return "prepared blocking project tool" }
+func (t *preparedBlockingRuntimeTool) Execute(_ context.Context, _ tools.ToolCall) (*tools.ToolResult, error) {
+	t.once.Do(func() { close(t.started) })
+	<-t.release
+	t.mu.Lock()
+	t.calls++
+	t.mu.Unlock()
+	return &tools.ToolResult{Output: "completed"}, nil
+}
+
+func (t *preparedBlockingRuntimeTool) callCount() int {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.calls
 }
 
 func (c preparedConcurrentAlwaysCallback) RequestApproval(ctx context.Context, toolName string, _ map[string]any) (ApprovalResult, error) {
@@ -156,6 +183,155 @@ type preparedRuntimeTool struct {
 	resultIsError bool
 	mu            sync.Mutex
 	calls         int
+}
+
+func TestProjectTrustRevokeDuringAskDoesNotHoldLockOrDispatch(t *testing.T) {
+	const (
+		storePathEnv = "GO_CLI_TRUST_ASK_HELPER_STORE"
+		rootPathEnv  = "GO_CLI_TRUST_ASK_HELPER_ROOT"
+	)
+	if storePath := os.Getenv(storePathEnv); storePath != "" {
+		manager := NewDefaultTrustManager(NewFileTrustStore(storePath)).(*DefaultTrustManager)
+		if err := manager.RevokeTrust(context.Background(), os.Getenv(rootPathEnv)); err != nil {
+			_, _ = os.Stderr.WriteString(err.Error())
+			os.Exit(2)
+		}
+		os.Exit(0)
+	}
+
+	ctx := context.Background()
+	storePath := privateTrustStorePath(t)
+	root := t.TempDir()
+	snapshot := testProjectSnapshot(t, root, []byte("ask-time revocation"), nil, nil)
+	manager := NewDefaultTrustManager(NewFileTrustStore(storePath)).(*DefaultTrustManager)
+	require.NoError(t, manager.TrustProjectSourceSnapshot(ctx, snapshot))
+	binding, err := manager.CheckProjectSourceSnapshot(ctx, snapshot)
+	require.NoError(t, err)
+
+	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck
+	target := &preparedRuntimeTool{name: "ask_target"}
+	registrar := tools.ProjectSourcedToolRegistrar(base)
+	require.NoError(t, registrar.RegisterProjectSourced(ctx, target, binding))
+	fence := base.DispatchFence()
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	middleware := NewApprovalMiddleware(preparedRuntimeAskClassifier{}, NewInMemoryApprovalStore(),
+		WithCallback(preparedWaitingApprovalCallback{entered: entered, release: release}),
+		WithDispatchFence(fence),
+		WithPlanModeController(core.NewDefaultPlanModeController(fence)),
+	)
+	registry := tools.NewMiddlewareToolRegistry(base)
+	require.NoError(t, registry.SetPreparedToolPolicy(middleware.PreparedPolicy))
+	require.NoError(t, registry.SetPreparedToolStages(tools.PreparedToolStages{}))
+	type preparedResult struct {
+		invocation tools.PreparedInvocation
+		err        error
+	}
+	prepareDone := make(chan preparedResult, 1)
+	go func() {
+		invocation, prepareErr := registry.PrepareToolCall(ctx, tools.ToolCall{Name: target.Name(), Args: map[string]any{"value": "x"}})
+		prepareDone <- preparedResult{invocation: invocation, err: prepareErr}
+	}()
+	select {
+	case <-entered:
+	case <-time.After(3 * time.Second):
+		t.Fatal("approval callback did not block before the trust revocation")
+	}
+
+	command := exec.Command(os.Args[0], "-test.run=^TestProjectTrustRevokeDuringAskDoesNotHoldLockOrDispatch$")
+	command.Env = append(os.Environ(), storePathEnv+"="+storePath, rootPathEnv+"="+snapshot.CanonicalRoot())
+	if err := command.Start(); err != nil {
+		close(release)
+		t.Fatal(err)
+	}
+	revokeDone := make(chan error, 1)
+	go func() { revokeDone <- command.Wait() }()
+	select {
+	case err := <-revokeDone:
+		require.NoError(t, err, "a second process must revoke while approval is waiting")
+	case <-time.After(5 * time.Second):
+		close(release)
+		_ = <-revokeDone
+		t.Fatal("cross-process revoke was blocked while the approval callback was waiting")
+	}
+
+	close(release)
+	select {
+	case prepared := <-prepareDone:
+		require.NoError(t, prepared.err, "the Ask callback may approve without a trust lock held")
+		require.NotNil(t, prepared.invocation)
+		_, err := prepared.invocation.Dispatch(ctx)
+		require.Error(t, err, "a permit approved before revoke must fail its final generation commit")
+		assert.False(t, prepared.invocation.DispatchCommitted())
+	case <-time.After(3 * time.Second):
+		t.Fatal("prepared call did not return after approval was released")
+	}
+	assert.Zero(t, target.callCount(), "revoked tool execution must not start")
+}
+
+func TestProjectTrustCommitWinsBeforeLateRevoke(t *testing.T) {
+	ctx := context.Background()
+	storePath := privateTrustStorePath(t)
+	root := t.TempDir()
+	snapshot := testProjectSnapshot(t, root, []byte("commit-before-revoke"), nil, nil)
+	first := NewDefaultTrustManager(NewFileTrustStore(storePath)).(*DefaultTrustManager)
+	second := NewDefaultTrustManager(NewFileTrustStore(storePath)).(*DefaultTrustManager)
+	require.NoError(t, first.TrustProjectSourceSnapshot(ctx, snapshot))
+	binding, err := first.CheckProjectSourceSnapshot(ctx, snapshot)
+	require.NoError(t, err)
+
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseExecutor := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseExecutor)
+	target := &preparedBlockingRuntimeTool{name: "late_revoke", started: make(chan struct{}), release: release}
+	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck
+	require.NoError(t, base.RegisterProjectSourced(ctx, target, binding))
+	fence := base.DispatchFence()
+	callback := &preparedRuntimeCallback{
+		results: map[string][]ApprovalResult{"late_revoke": {ApprovalAllow}},
+		calls:   make(map[string]int),
+	}
+	middleware := NewApprovalMiddleware(preparedRuntimeAskClassifier{}, NewInMemoryApprovalStore(),
+		WithCallback(callback),
+		WithDispatchFence(fence),
+		WithPlanModeController(core.NewDefaultPlanModeController(fence)),
+	)
+	registry := tools.NewMiddlewareToolRegistry(base)
+	require.NoError(t, registry.SetPreparedToolPolicy(middleware.PreparedPolicy))
+	require.NoError(t, registry.SetPreparedToolStages(tools.PreparedToolStages{}))
+	invocation, err := registry.PrepareToolCall(ctx, tools.ToolCall{Name: target.Name(), Args: map[string]any{"value": "x"}})
+	require.NoError(t, err)
+	dispatchDone := make(chan struct {
+		result *tools.ToolResult
+		err    error
+	}, 1)
+	go func() {
+		result, dispatchErr := invocation.Dispatch(ctx)
+		dispatchDone <- struct {
+			result *tools.ToolResult
+			err    error
+		}{result: result, err: dispatchErr}
+	}()
+	select {
+	case <-target.started:
+	case <-time.After(3 * time.Second):
+		releaseExecutor()
+		t.Fatal("project executor did not start after the final trust commit")
+	}
+	assert.True(t, invocation.DispatchCommitted())
+	require.NoError(t, second.RevokeTrust(ctx, snapshot.CanonicalRoot()))
+	releaseExecutor()
+	select {
+	case completed := <-dispatchDone:
+		require.NoError(t, completed.err, "a revoke after commit cannot reclassify an active execution")
+		require.NotNil(t, completed.result)
+		assert.Equal(t, "completed", completed.result.Output)
+	case <-time.After(3 * time.Second):
+		t.Fatal("committed project call did not finish after late revoke")
+	}
+	assert.True(t, invocation.DispatchCommitted())
+	assert.Equal(t, 1, target.callCount())
 }
 
 func (t *preparedRuntimeTool) Name() string        { return t.name }

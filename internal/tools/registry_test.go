@@ -2,8 +2,11 @@ package tools
 
 import (
 	"context"
+	"errors"
+	"path/filepath"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -31,6 +34,27 @@ type schemaStubTool struct {
 }
 
 func (s *schemaStubTool) Parameters() any { return s.schema }
+
+var errProjectTrustBindingRevoked = errors.New("project trust binding revoked")
+
+type projectTrustBindingStub struct {
+	root       string
+	generation uint64
+	valid      bool
+}
+
+func (b *projectTrustBindingStub) CanonicalRoot() string   { return b.root }
+func (b *projectTrustBindingStub) TrustGeneration() uint64 { return b.generation }
+func (b *projectTrustBindingStub) Valid() bool             { return b.valid }
+func (b *projectTrustBindingStub) CommitIfCurrent(ctx context.Context, commit func() error) error {
+	if !b.valid {
+		return errProjectTrustBindingRevoked
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return commit()
+}
 
 func TestRegistryRegisterGetList(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
@@ -222,6 +246,151 @@ func TestRegistryRegistrationSnapshotBindsSchemaIdentityEffectsAndFence(t *testi
 	assert.Equal(t, uint64(2), secondSnapshot.generations.Registry)
 	assert.NotEqual(t, firstSnapshot.identity.ExecutorFingerprint(), secondSnapshot.identity.ExecutorFingerprint())
 	assert.Equal(t, [32]byte{}, firstSnapshot.identity.Scope().Fingerprint(), "unscoped ordinary registrations carry no scope authority")
+}
+
+func TestProjectSourcedRegistrationCarriesBindingThroughPreparedProxy(t *testing.T) {
+	ctx := context.Background()
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	deferred := NewDeferredToolRegistryAdapter(base)
+	registry := NewMiddlewareToolRegistry(deferred)
+	binding := &projectTrustBindingStub{root: "/workspace", generation: 7, valid: true}
+	var calls int
+	definition := &countingProjectTool{name: "project_tool", calls: &calls}
+
+	registrar, ok := any(registry).(ProjectSourcedToolRegistrar)
+	require.True(t, ok)
+	require.NoError(t, registrar.RegisterProjectSourced(ctx, definition, binding))
+
+	snapshot, err := base.toolRegistrationSnapshot(ctx, definition.Name())
+	require.NoError(t, err)
+	assert.Equal(t, RegistrationSourceProjectSourced, snapshot.identity.RegistrationSource())
+	assert.Same(t, binding, snapshot.projectTrustBinding)
+
+	require.NoError(t, registry.SetPreparedToolStages(PreparedToolStages{}))
+	require.NoError(t, registry.SetPreparedToolPolicy(func(_ context.Context, request PreparedPolicyRequest) (PreparedPolicyDecision, error) {
+		return PreparedPolicyDecision{Allowed: true, Generations: request.Generations}, nil
+	}))
+	prepared, err := registry.PrepareToolCall(ctx, ToolCall{ID: "call", Name: definition.Name()})
+	require.NoError(t, err)
+	binding.valid = false
+	_, err = prepared.Dispatch(ctx)
+	assert.ErrorIs(t, err, errProjectTrustBindingRevoked)
+	assert.False(t, prepared.DispatchCommitted())
+	assert.Equal(t, 0, calls)
+}
+
+func TestProjectSourcedDeferredRegistrationRetainsBindingWhenLoaded(t *testing.T) {
+	ctx := context.Background()
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+	deferred := NewDeferredToolRegistryAdapter(base)
+	registry := NewMiddlewareToolRegistry(deferred)
+	binding := &projectTrustBindingStub{root: "/workspace", generation: 3, valid: true}
+	definition := &stubTool{name: "project_skill"}
+
+	registrar, ok := any(registry).(ProjectSourcedDeferredToolRegistrar)
+	require.True(t, ok)
+	require.NoError(t, registrar.RegisterProjectSourcedDeferred(ctx, definition.Name(), func() (ToolDefinition, error) {
+		return definition, nil
+	}, binding))
+
+	loaded, err := deferred.Load(ctx, definition.Name())
+	require.NoError(t, err)
+	assert.Same(t, definition, loaded)
+	snapshot, err := base.toolRegistrationSnapshot(ctx, definition.Name())
+	require.NoError(t, err)
+	assert.Same(t, binding, snapshot.projectTrustBinding)
+	assert.Equal(t, RegistrationSourceProjectSourced, snapshot.identity.RegistrationSource())
+}
+
+func TestProjectTrustCommitGuardsStreamingAndQueuedDispatch(t *testing.T) {
+	t.Run("streaming", func(t *testing.T) {
+		ctx := context.Background()
+		base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+		binding := &projectTrustBindingStub{root: "/workspace", generation: 4, valid: true}
+		tool := &preparedStreamingCaptureTool{preparedCaptureTool: preparedCaptureTool{name: "project_stream"}}
+		require.NoError(t, base.RegisterProjectSourced(ctx, tool, binding))
+		registry := NewMiddlewareToolRegistry(base)
+		configurePreparedRegistry(t, registry, allowPreparedCall, PreparedToolStages{})
+		preparer, ok := any(registry).(StreamingToolCallPreparer)
+		require.True(t, ok)
+		sink := &preparedCaptureSink{}
+		attested, err := AttestSynchronousStreamSink(sink)
+		require.NoError(t, err)
+		invocation, err := preparer.PrepareStreamingToolCall(ctx, ToolCall{Name: tool.Name()}, attested)
+		require.NoError(t, err)
+		binding.valid = false
+
+		_, err = invocation.DispatchStreaming(ctx, attested)
+		assert.ErrorIs(t, err, errProjectTrustBindingRevoked)
+		assert.False(t, invocation.DispatchCommitted())
+		assert.Zero(t, tool.streamCalls)
+		assert.Empty(t, sink.content, "stale streaming calls cannot emit a chunk before the final commit")
+	})
+
+	t.Run("queued mutation", func(t *testing.T) {
+		ctx := &preparedQueueGateContext{
+			Context:          context.Background(),
+			workerCheckStart: make(chan struct{}),
+			allowWorkerCheck: make(chan struct{}),
+		}
+		base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
+		binding := &projectTrustBindingStub{root: "/workspace", generation: 9, valid: true}
+		tool := &preparedCaptureTool{name: "write"}
+		require.NoError(t, base.RegisterProjectSourced(ctx, tool, binding))
+		queue := NewDefaultFileMutationQueue()
+		t.Cleanup(func() {
+			select {
+			case <-ctx.allowWorkerCheck:
+			default:
+				close(ctx.allowWorkerCheck)
+			}
+			assert.NoError(t, queue.(interface{ Close() error }).Close())
+		})
+		registry := NewMiddlewareToolRegistry(base)
+		configurePreparedRegistry(t, registry, allowPreparedCall, PreparedToolStages{MutationQueue: queue})
+		path := filepath.Join(t.TempDir(), "revoked-before-dequeue.txt")
+		invocation, err := registry.PrepareToolCall(ctx, ToolCall{Name: tool.Name(), Args: map[string]any{"path": path, "content": "must not run"}})
+		require.NoError(t, err)
+
+		type dispatchResult struct {
+			err error
+		}
+		dispatchDone := make(chan dispatchResult, 1)
+		go func() {
+			_, dispatchErr := invocation.Dispatch(ctx)
+			dispatchDone <- dispatchResult{err: dispatchErr}
+		}()
+		select {
+		case <-ctx.workerCheckStart:
+		case <-time.After(3 * time.Second):
+			t.Fatal("mutation worker did not reach its dequeue-time commit gate")
+		}
+		binding.valid = false
+		close(ctx.allowWorkerCheck)
+		select {
+		case completed := <-dispatchDone:
+			assert.ErrorIs(t, completed.err, errProjectTrustBindingRevoked)
+		case <-time.After(3 * time.Second):
+			t.Fatal("queued mutation did not report the stale project binding")
+		}
+		assert.False(t, invocation.DispatchCommitted())
+		assert.Zero(t, tool.snapshotCalls())
+		assert.NoFileExists(t, path, "a stale queued mutation must not write after dequeue")
+		_, err = invocation.Dispatch(ctx)
+		assert.ErrorIs(t, err, ErrPreparedInvocationConsumed)
+	})
+}
+
+type countingProjectTool struct {
+	name  string
+	calls *int
+}
+
+func (t *countingProjectTool) Name() string        { return t.name }
+func (t *countingProjectTool) Description() string { return "project tool" }
+func (t *countingProjectTool) Execute(context.Context, ToolCall) (*ToolResult, error) {
+	*t.calls++
+	return &ToolResult{Output: "ran"}, nil
 }
 
 func TestRegistryTrustedControlRequiresExplicitRegistrationAndSharesFence(t *testing.T) {

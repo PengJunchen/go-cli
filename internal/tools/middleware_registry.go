@@ -34,6 +34,8 @@ var (
 	_ DispatchFenceProvider               = (*MiddlewareToolRegistry)(nil)
 	_ TrustedControlRegistrar             = (*MiddlewareToolRegistry)(nil)
 	_ TrustedNetworkReadRegistrar         = (*MiddlewareToolRegistry)(nil)
+	_ ProjectSourcedToolRegistrar         = (*MiddlewareToolRegistry)(nil)
+	_ ProjectSourcedDeferredToolRegistrar = (*MiddlewareToolRegistry)(nil)
 	_ trustedScopedWorkspaceReadRegistrar = (*MiddlewareToolRegistry)(nil)
 )
 
@@ -115,6 +117,22 @@ func (r *MiddlewareToolRegistry) RegisterTrustedNetworkRead(ctx context.Context,
 		return ErrTrustedNetworkReadRegistrationUnavailable
 	}
 	return registrar.RegisterTrustedNetworkRead(ctx, def)
+}
+
+func (r *MiddlewareToolRegistry) RegisterProjectSourced(ctx context.Context, def ToolDefinition, binding ProjectTrustBinding) error {
+	registrar, ok := r.inner.(ProjectSourcedToolRegistrar)
+	if !ok {
+		return ErrProjectSourcedRegistrationUnavailable
+	}
+	return registrar.RegisterProjectSourced(ctx, def, binding)
+}
+
+func (r *MiddlewareToolRegistry) RegisterProjectSourcedDeferred(ctx context.Context, name string, loader func() (ToolDefinition, error), binding ProjectTrustBinding) error {
+	registrar, ok := r.inner.(ProjectSourcedDeferredToolRegistrar)
+	if !ok {
+		return ErrProjectSourcedRegistrationUnavailable
+	}
+	return registrar.RegisterProjectSourcedDeferred(ctx, name, loader, binding)
 }
 
 func (r *MiddlewareToolRegistry) registerTrustedWorkspaceWrite(ctx context.Context, def ToolDefinition) error {

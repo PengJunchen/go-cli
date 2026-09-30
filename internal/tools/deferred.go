@@ -50,10 +50,11 @@ const deferredStubDescription = "deferred tool (not yet loaded)"
 type DefaultDeferredToolRegistry struct {
 	underlying ToolRegistry // dependency held by interface.
 
-	mu       sync.RWMutex
-	loaders  map[string]func() (ToolDefinition, error)
-	loaded   map[string]ToolDefinition
-	revision uint64
+	mu              sync.RWMutex
+	loaders         map[string]func() (ToolDefinition, error)
+	loaded          map[string]ToolDefinition
+	projectBindings map[string]ProjectTrustBinding
+	revision        uint64
 
 	// MCP generation metadata is protected by mu alongside loaders/loaded.
 	mcpSources      map[string]mcpSourceState
@@ -71,6 +72,7 @@ func NewDefaultDeferredToolRegistry(underlying ToolRegistry) DeferredToolRegistr
 		underlying:      underlying,
 		loaders:         map[string]func() (ToolDefinition, error){},
 		loaded:          map[string]ToolDefinition{},
+		projectBindings: map[string]ProjectTrustBinding{},
 		mcpSources:      map[string]mcpSourceState{},
 		mcpReservations: map[string]mcpGenerationOwner{},
 		mcpEntries:      map[string]mcpDeferredEntry{},
@@ -95,6 +97,43 @@ func (r *DefaultDeferredToolRegistry) RegisterDeferred(_ context.Context, name s
 	}
 	r.loaders[name] = loader
 	delete(r.loaded, name)
+	delete(r.projectBindings, name)
+	r.revision++
+	return nil
+}
+
+func (r *DefaultDeferredToolRegistry) registerProjectSourcedDeferred(
+	ctx context.Context,
+	name string,
+	loader func() (ToolDefinition, error),
+	binding ProjectTrustBinding,
+) error {
+	if ctx == nil {
+		return errors.New("tools: project deferred registration context is nil")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if strings.TrimSpace(name) == "" || loader == nil {
+		return errors.New("tools: project deferred registration requires a name and loader")
+	}
+	if !validProjectTrustBinding(binding) {
+		return ErrProjectTrustBindingInvalid
+	}
+	if r == nil || r.underlying == nil {
+		return ErrProjectSourcedRegistrationUnavailable
+	}
+	if _, ok := r.underlying.(ProjectSourcedToolRegistrar); !ok {
+		return ErrProjectSourcedRegistrationUnavailable
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if reservation, exists := r.mcpReservations[name]; exists {
+		return fmt.Errorf("%w: %q is reserved by MCP source %q generation %d", ErrMCPNameReserved, name, reservation.sourceID, reservation.generation)
+	}
+	r.loaders[name] = loader
+	delete(r.loaded, name)
+	r.projectBindings[name] = binding
 	r.revision++
 	return nil
 }
@@ -137,6 +176,7 @@ func (r *DefaultDeferredToolRegistry) Load(ctx context.Context, name string) (To
 		return nil, ErrDeferredToolNotFound
 	}
 	mcpEntry, mcpOwned := r.mcpEntries[name]
+	projectBinding, projectOwned := r.projectBindings[name]
 	if mcpOwned {
 		state, current := r.mcpSources[mcpEntry.owner.sourceID]
 		reservation, reserved := r.mcpReservations[name]
@@ -190,7 +230,18 @@ func (r *DefaultDeferredToolRegistry) Load(ctx context.Context, name string) (To
 		r.revision++
 	}
 	if !mcpOwned && r.underlying != nil {
-		if regErr := r.underlying.Register(ctx, def); regErr != nil {
+		var regErr error
+		if projectOwned {
+			registrar, ok := r.underlying.(ProjectSourcedToolRegistrar)
+			if !ok {
+				regErr = ErrProjectSourcedRegistrationUnavailable
+			} else {
+				regErr = registrar.RegisterProjectSourced(ctx, def, projectBinding)
+			}
+		} else {
+			regErr = r.underlying.Register(ctx, def)
+		}
+		if regErr != nil {
 			delete(r.loaded, name)
 			logger.Error("tools.deferred.load.register_failed", "tool", name, "err", regErr)
 			return def, fmt.Errorf("tools: deferred load %q: register: %w", name, regErr)
@@ -294,6 +345,26 @@ func (a *DeferredToolRegistryAdapter) Register(ctx context.Context, def ToolDefi
 		}
 	}
 	return a.underlying.Register(ctx, def)
+}
+
+func (a *DeferredToolRegistryAdapter) RegisterProjectSourced(ctx context.Context, def ToolDefinition, binding ProjectTrustBinding) error {
+	if a == nil || a.underlying == nil {
+		return ErrProjectSourcedRegistrationUnavailable
+	}
+	registrar, ok := a.underlying.(ProjectSourcedToolRegistrar)
+	if !ok {
+		return ErrProjectSourcedRegistrationUnavailable
+	}
+	return a.registerTrustedWithMCPReservation(def, func() error {
+		return registrar.RegisterProjectSourced(ctx, def, binding)
+	})
+}
+
+func (a *DeferredToolRegistryAdapter) RegisterProjectSourcedDeferred(ctx context.Context, name string, loader func() (ToolDefinition, error), binding ProjectTrustBinding) error {
+	if a == nil || a.DefaultDeferredToolRegistry == nil {
+		return ErrProjectSourcedRegistrationUnavailable
+	}
+	return a.DefaultDeferredToolRegistry.registerProjectSourcedDeferred(ctx, name, loader, binding)
 }
 
 // DispatchFence forwards the underlying registry's shared dispatch fence.

@@ -93,7 +93,15 @@ func replaceMCPSourceGeneration(
 	owner *assemblyMCPResources,
 ) error {
 	generationNumber := owner.nextMCPGeneration(source.id)
-	candidate, definitions, err := buildMCPGeneration(ctx, source.id, generationNumber, servers, owner)
+	var projectBinding tools.ProjectTrustBinding
+	if source.projectOwned() {
+		binding, ok := source.latchedProjectBinding()
+		if !ok {
+			return errMCPSourceUnverified
+		}
+		projectBinding = binding
+	}
+	candidate, definitions, err := buildMCPGeneration(ctx, source.id, generationNumber, servers, owner, projectBinding)
 	if err != nil {
 		return err
 	}
@@ -155,6 +163,7 @@ func buildMCPGeneration(
 	generationNumber uint64,
 	servers []config.MCPServerConfig,
 	owner *assemblyMCPResources,
+	projectBinding tools.ProjectTrustBinding,
 ) (*assemblyMCPGeneration, []tools.MCPToolCandidate, error) {
 	if err := validateMCPServerSet(servers); err != nil {
 		return nil, nil, err
@@ -206,6 +215,12 @@ func buildMCPGeneration(
 				toolCandidate, candidateErr := adapter.MCPGenerationCandidate()
 				if candidateErr != nil {
 					return fmt.Errorf("cli: MCP candidate schema rejected: %w", candidateErr)
+				}
+				if projectBinding != nil {
+					toolCandidate, candidateErr = toolCandidate.WithProjectTrustBinding(projectBinding)
+					if candidateErr != nil {
+						return fmt.Errorf("cli: project MCP candidate binding rejected: %w", candidateErr)
+					}
 				}
 				definitions = append(definitions, toolCandidate)
 			}

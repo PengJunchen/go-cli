@@ -8,6 +8,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"reflect"
 	"runtime"
 	"sort"
 	"sync"
@@ -25,6 +26,9 @@ const (
 	// RegistrationSourceTrustedNetworkRead identifies concrete first-party
 	// network readers registered through the narrow reviewed path.
 	RegistrationSourceTrustedNetworkRead = "builtin_network_read"
+	// RegistrationSourceProjectSourced identifies a tool whose executable
+	// definition was captured from a verified project source manifest.
+	RegistrationSourceProjectSourced = "project_sourced"
 )
 
 var (
@@ -40,6 +44,12 @@ var (
 	// ErrUnreviewedNetworkReadDefinition indicates that the supplied definition
 	// is not one of the concrete reviewed first-party network readers.
 	ErrUnreviewedNetworkReadDefinition = errors.New("tools: network-read registration requires a reviewed concrete tool")
+	// ErrProjectSourcedRegistrationUnavailable indicates that a registry cannot
+	// preserve the trust binding for a project-sourced tool.
+	ErrProjectSourcedRegistrationUnavailable = errors.New("tools: project-sourced registration is unavailable")
+	// ErrProjectTrustBindingInvalid indicates a missing or invalid project trust
+	// capability at registration time.
+	ErrProjectTrustBindingInvalid = errors.New("tools: project trust binding is invalid")
 )
 
 // TrustedControlRegistrar is the narrow registration capability used by
@@ -53,6 +63,28 @@ type TrustedControlRegistrar interface {
 // readers. It does not accept a caller-selected effect or scope.
 type TrustedNetworkReadRegistrar interface {
 	RegisterTrustedNetworkRead(context.Context, ToolDefinition) error
+}
+
+// ProjectTrustBinding is the narrow tools-layer view of a manager-minted
+// verified project-source capability. Tools depend on this interface instead
+// of importing approval.
+type ProjectTrustBinding interface {
+	CanonicalRoot() string
+	TrustGeneration() uint64
+	Valid() bool
+	CommitIfCurrent(context.Context, func() error) error
+}
+
+// ProjectSourcedToolRegistrar registers a tool only when its verified project
+// trust binding can be captured by prepared dispatch.
+type ProjectSourcedToolRegistrar interface {
+	RegisterProjectSourced(context.Context, ToolDefinition, ProjectTrustBinding) error
+}
+
+// ProjectSourcedDeferredToolRegistrar retains a verified project binding until
+// a deferred project tool is materialized.
+type ProjectSourcedDeferredToolRegistrar interface {
+	RegisterProjectSourcedDeferred(context.Context, string, func() (ToolDefinition, error), ProjectTrustBinding) error
 }
 
 // DispatchFenceProvider exposes the shared fence used by a registry and its
@@ -86,6 +118,7 @@ type toolRegistrationMetadata struct {
 	promptGuidelines        []string
 	hasStreaming            bool
 	hasTopTools             bool
+	projectTrustBinding     ProjectTrustBinding
 }
 
 type registeredToolSnapshot struct {
@@ -104,12 +137,27 @@ type registeredToolSnapshot struct {
 	promptGuidelines        []string
 	hasStreaming            bool
 	hasTopTools             bool
+	projectTrustBinding     ProjectTrustBinding
 	generations             DispatchFenceSnapshot
 	pipeline                preparedToolPipelineSnapshot
 }
 
 type registrationSnapshotProvider interface {
 	toolRegistrationSnapshot(context.Context, string) (registeredToolSnapshot, error)
+}
+
+func validProjectTrustBinding(binding ProjectTrustBinding) bool {
+	if binding == nil {
+		return false
+	}
+	value := reflect.ValueOf(binding)
+	switch value.Kind() {
+	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
+		if value.IsNil() {
+			return false
+		}
+	}
+	return binding.Valid() && binding.CanonicalRoot() != "" && binding.TrustGeneration() > 0
 }
 
 // PreparedToolStages separates argument normalization from execution
@@ -257,6 +305,13 @@ func (r *DefaultToolRegistry) RegisterTrustedNetworkRead(ctx context.Context, de
 	default:
 		return ErrUnreviewedNetworkReadDefinition
 	}
+}
+
+func (r *DefaultToolRegistry) RegisterProjectSourced(ctx context.Context, def ToolDefinition, binding ProjectTrustBinding) error {
+	if !validProjectTrustBinding(binding) {
+		return ErrProjectTrustBindingInvalid
+	}
+	return r.registerDefaultToolGuardedWithBinding(ctx, def, binding)
 }
 
 func (r *DefaultToolRegistry) registerTrustedWorkspaceWrite(ctx context.Context, def ToolDefinition) error {
@@ -589,6 +644,7 @@ func (r *DefaultToolRegistry) toolRegistrationSnapshot(_ context.Context, name s
 			promptGuidelines:        append([]string(nil), metadata.promptGuidelines...),
 			hasStreaming:            metadata.hasStreaming,
 			hasTopTools:             metadata.hasTopTools,
+			projectTrustBinding:     metadata.projectTrustBinding,
 			generations:             generations,
 			pipeline:                r.prepared.snapshot(),
 		}
