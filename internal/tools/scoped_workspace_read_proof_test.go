@@ -64,7 +64,7 @@ func TestScopedWorkspaceReadProofIsOpaqueAndBoundToPreparedInvocation(t *testing
 		t.Run(name, func(t *testing.T) {
 			root := canonicalScopedReadTestRoot(t)
 			_, registry := newScopedReadProofRegistry(t, root)
-			invocation := prepareScopedReadProofInvocation(t, registry, name, "call-one", "README.md")
+			invocation := prepareScopedReadProofInvocation(t, registry, name, "call-one", filepath.Join(root, "README.md"))
 			proof, ok := ScopedWorkspaceReadProofFor(invocation, root)
 			require.True(t, ok, "attested built-in reader should receive a scoped proof")
 			require.True(t, proof.MatchesAction(
@@ -77,12 +77,12 @@ func TestScopedWorkspaceReadProofIsOpaqueAndBoundToPreparedInvocation(t *testing
 			require.NotContains(t, string(encoded), root, "proof JSON must not reveal its workspace path")
 			require.NotContains(t, string(encoded), "workspace_read", "proof JSON must not serialize authorization facts")
 
-			changedArgs := prepareScopedReadProofInvocation(t, registry, name, "call-one", "different.txt")
+			changedArgs := prepareScopedReadProofInvocation(t, registry, name, "call-one", filepath.Join(root, "different.txt"))
 			require.False(t, proof.MatchesAction(
 				changedArgs.ToolIdentity(), changedArgs.EffectSet(), changedArgs.SchemaDigest(),
 				changedArgs.ArgumentDigest(), changedArgs.NormalizedCall().ID, root,
 			), "a proof from another normalized argument digest must not match")
-			otherCall := prepareScopedReadProofInvocation(t, registry, name, "call-two", "README.md")
+			otherCall := prepareScopedReadProofInvocation(t, registry, name, "call-two", filepath.Join(root, "README.md"))
 			require.False(t, proof.MatchesAction(
 				otherCall.ToolIdentity(), otherCall.EffectSet(), otherCall.SchemaDigest(),
 				otherCall.ArgumentDigest(), otherCall.NormalizedCall().ID, root,
@@ -136,7 +136,7 @@ func TestScopedWorkspaceReadProofRejectsUntrustedOrUnscopedRegistration(t *testi
 		outside := canonicalScopedReadTestRoot(t)
 		base, registry := newScopedReadProofRegistry(t, root, WithRegisteredPathWhitelist([]string{outside}))
 		require.Equal(t, []string{outside}, base.tools["read"].(*ReadTool).whitelist.paths, "configured executor scope must stay authoritative")
-		invocation := prepareScopedReadProofInvocation(t, registry, "read", "outside-call", "README.md")
+		invocation := prepareScopedReadProofInvocation(t, registry, "read", "outside-call", filepath.Join(outside, "README.md"))
 		_, ok := ScopedWorkspaceReadProofFor(invocation, root)
 		require.False(t, ok, "a configured whitelist outside the captured workspace must not mint a proof")
 	})
@@ -167,7 +167,7 @@ func TestScopedWorkspaceReadProofRejectsUntrustedOrUnscopedRegistration(t *testi
 			return func(ctx context.Context, call ToolCall) (*ToolResult, error) { return next(ctx, call) }
 		})
 		require.NoError(t, registry.SetPreparedToolStages(PreparedToolStages{ExecutionWrappers: []ToolExecutorWrapper{wrapper}}))
-		invocation := prepareScopedReadProofInvocation(t, registry, "read", "wrapped-call", "README.md")
+		invocation := prepareScopedReadProofInvocation(t, registry, "read", "wrapped-call", filepath.Join(root, "README.md"))
 		_, ok := ScopedWorkspaceReadProofFor(invocation, root)
 		require.False(t, ok, "an unreviewed wrapper must disable the completion proof needed for admission")
 	})
@@ -223,7 +223,7 @@ func TestRegisterDefaultsWithoutDurableRootKeepsUnrestrictedReadBehavior(t *test
 func TestScopedWorkspaceReadProofRechecksCurrentGeneration(t *testing.T) {
 	root := canonicalScopedReadTestRoot(t)
 	_, registry := newScopedReadProofRegistry(t, root)
-	invocation := prepareScopedReadProofInvocation(t, registry, "read", "stale-call", "README.md")
+	invocation := prepareScopedReadProofInvocation(t, registry, "read", "stale-call", filepath.Join(root, "README.md"))
 	proof, ok := ScopedWorkspaceReadProofFor(invocation, root)
 	require.True(t, ok)
 

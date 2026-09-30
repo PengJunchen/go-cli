@@ -122,6 +122,11 @@ func (r *MiddlewareToolRegistry) prepareToolCallWithStreamSink(ctx context.Conte
 			return nil, errors.New("tools: prepared mutation has no file path")
 		}
 	}
+	if snapshot.effects.Contains(EffectWorkspaceRead) {
+		if err := validatePreparedWorkspaceReadPath(snapshot.definition, normalized); err != nil {
+			return nil, fmt.Errorf("tools: validate workspace-read path before policy classification for %q: %w", call.Name, err)
+		}
+	}
 	frozenCall, err := freezeToolCall(normalized)
 	if err != nil {
 		return nil, err
@@ -173,6 +178,41 @@ func (r *MiddlewareToolRegistry) prepareToolCallWithStreamSink(ctx context.Conte
 		return newPreparedStreamingInvocation(config, streamExecutor), nil
 	}
 	return newPreparedInvocation(config), nil
+}
+
+func validatePreparedWorkspaceReadPath(def ToolDefinition, call ToolCall) error {
+	switch tool := def.(type) {
+	case *ReadTool:
+		path := getStringArg(call, "path")
+		if strings.TrimSpace(path) == "" {
+			return nil
+		}
+		_, err := tool.resolvePath(path)
+		return err
+	case *GrepTool:
+		path := grepDefaultPath
+		if value := getStringArg(call, "path"); strings.TrimSpace(value) != "" {
+			path = value
+		}
+		_, err := resolveAndValidatePath("grep", tool.Workdir, path, tool.whitelist)
+		return err
+	case *FindTool:
+		path := findDefaultPath
+		if value := getStringArg(call, "path"); strings.TrimSpace(value) != "" {
+			path = value
+		}
+		_, err := resolveAndValidatePath("find", tool.Workdir, path, tool.whitelist)
+		return err
+	case *LSTool:
+		path := lsDefaultPath
+		if value := getStringArg(call, "path"); strings.TrimSpace(value) != "" {
+			path = value
+		}
+		_, err := resolveAndValidatePath("ls", tool.Workdir, path, tool.whitelist)
+		return err
+	default:
+		return nil
+	}
 }
 
 func (r *MiddlewareToolRegistry) validateProxyPin(ctx context.Context, pin protectedRegistrationPin) error {
