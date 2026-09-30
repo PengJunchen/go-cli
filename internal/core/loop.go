@@ -1051,12 +1051,19 @@ func preflightDurableRequest(
 	if consumer.source == nil || compactor == nil {
 		return nil, ErrRunCommitCompactionProjectionUnavailable
 	}
+	currentInput, err := captureDurableCurrentInput(items, consumer.source, consumer.runID)
+	if err != nil {
+		return nil, err
+	}
 	result, err := compactor.Compact(ctx, items, maxTokens, estimator)
 	if err != nil {
 		return nil, err
 	}
 	projection, err := validateDurableCompactionResult(items, result, consumer.source, consumer.runID)
 	if err != nil {
+		return nil, err
+	}
+	if err := validateDurableCurrentInputPreserved(currentInput, result.Items); err != nil {
 		return nil, err
 	}
 	if err := consumer.commitCompaction(projection); err != nil {
@@ -1939,6 +1946,14 @@ func compactOverflowRequest(
 	if err := compaction.ValidateCompactionEligible(items); err != nil {
 		return nil, fmt.Errorf("core: overflow recovery cannot compact this request: %w", err)
 	}
+	var currentInput compaction.TurnItem
+	if consumer != nil {
+		var err error
+		currentInput, err = captureDurableCurrentInput(items, consumer.source, consumer.runID)
+		if err != nil {
+			return nil, err
+		}
+	}
 	result, err := compactor.Compact(ctx, items, maxTokens, estimator)
 	if err != nil {
 		return nil, fmt.Errorf("core: compact overflow request: %w", err)
@@ -1949,6 +1964,9 @@ func compactOverflowRequest(
 	if consumer != nil {
 		projection, err := validateDurableCompactionResult(items, result, consumer.source, consumer.runID)
 		if err != nil {
+			return nil, err
+		}
+		if err := validateDurableCurrentInputPreserved(currentInput, result.Items); err != nil {
 			return nil, err
 		}
 		if err := consumer.commitCompaction(projection); err != nil {

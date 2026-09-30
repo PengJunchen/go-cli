@@ -22,7 +22,12 @@ type overflowProjectionSink struct {
 }
 
 func (sink *overflowProjectionSink) CompactionSourceSnapshot() (CompactionSourceSnapshot, error) {
-	return CompactionSourceSnapshot{Revision: "overflow-revision", BranchID: "main"}, nil
+	return CompactionSourceSnapshot{
+		Revision:       "overflow-revision",
+		BranchID:       "main",
+		Messages:       []AgentMessage{{Role: string(llm.RoleUser), Content: "prior durable context"}},
+		SourceEntryIDs: []string{"overflow-prior-entry"},
+	}, nil
 }
 
 func (sink *overflowProjectionSink) CommitCompaction(ctx context.Context, projection CompactionProjection) error {
@@ -43,6 +48,7 @@ func (compactor overflowSummaryCompactor) Compact(ctx context.Context, items []c
 	}
 	var runID string
 	through := llm.SourceThrough{}
+	var retained []compaction.TurnItem
 	for _, item := range items {
 		source := item.Runtime.Source
 		switch source.Kind {
@@ -52,24 +58,24 @@ func (compactor overflowSummaryCompactor) Compact(ctx context.Context, items []c
 			}
 		case llm.SourceRunTranscript:
 			runID = source.RunID
-			if source.TranscriptIndex+1 > through.TranscriptCount {
-				through.TranscriptCount = source.TranscriptIndex + 1
-			}
+			retained = append(retained, item)
 		}
 	}
-	result := compaction.CompactionResult{
-		Items: []compaction.TurnItem{
-			items[0],
-			{
-				ID:           "overflow-summary",
-				Role:         compaction.RoleUser,
-				Content:      "compacted context",
-				IsCompaction: true,
-				Runtime: llm.RuntimeMetadata{Source: llm.SourceRef{
-					Kind: llm.SourceRunSummary, RunID: runID, Through: through,
-				}},
-			},
+	resultItems := []compaction.TurnItem{
+		items[0],
+		{
+			ID:           "overflow-summary",
+			Role:         compaction.RoleUser,
+			Content:      "compacted context",
+			IsCompaction: true,
+			Runtime: llm.RuntimeMetadata{Source: llm.SourceRef{
+				Kind: llm.SourceRunSummary, RunID: runID, Through: through,
+			}},
 		},
+	}
+	resultItems = append(resultItems, retained...)
+	result := compaction.CompactionResult{
+		Items:         resultItems,
 		Strategy:      compaction.StrategySummary,
 		NewProjection: &compaction.NewProjection{Summary: "compacted context", Through: through},
 	}
@@ -80,6 +86,7 @@ func TestDurableOverflowRetryWaitsForSynchronizedProjection(t *testing.T) {
 	sink := &overflowProjectionSink{consumerTestSink: &consumerTestSink{}}
 	var requests atomic.Int32
 	var secondRequestSawProjection atomic.Bool
+	var secondRequestSawCurrent atomic.Bool
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		var request struct {
 			Messages []struct {
@@ -90,11 +97,19 @@ func TestDurableOverflowRetryWaitsForSynchronizedProjection(t *testing.T) {
 			http.Error(w, "invalid request", http.StatusBadRequest)
 			return
 		}
-		if requests.Add(1) == 1 {
+		requestNumber := requests.Add(1)
+		if requestNumber == 1 {
 			http.Error(w, "context_length_exceeded", http.StatusBadRequest)
 			return
 		}
 		secondRequestSawProjection.Store(sink.committed.Load())
+		currentInputCount := 0
+		for _, message := range request.Messages {
+			if message.Content == "current durable request" {
+				currentInputCount++
+			}
+		}
+		secondRequestSawCurrent.Store(currentInputCount == 1)
 		w.Header().Set("Content-Type", "text/event-stream")
 		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{\"content\":\"durable recovery\"}}]}\n\n")
 		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
@@ -108,6 +123,11 @@ func TestDurableOverflowRetryWaitsForSynchronizedProjection(t *testing.T) {
 	loop := NewLoopAgent(WithLLM(model), WithMaxIterations(1), WithProviderAttemptRecorder(recorder.record))
 	loop.SetMidTurnCompaction(nil, overflowSummaryCompactor{}, compaction.NewHeuristicTokenEstimator(), 10000)
 	agent := NewAgentImpl("durable-overflow", loop)
+	require.NoError(t, agent.SetHistoryFromSourceSnapshot(CompactionSourceSnapshot{
+		Revision: "overflow-revision", BranchID: "main",
+		Messages:       []AgentMessage{{Role: string(llm.RoleUser), Content: "prior durable context"}},
+		SourceEntryIDs: []string{"overflow-prior-entry"},
+	}))
 	owner := newRunOwner(context.Background(), nil, RunClaim{ID: "overflow-run"}, nil)
 	owner.ctx = WithRunCommit(owner.ctx, sink, RunCommitBinding{SessionID: "overflow-session", WorkspaceID: "overflow-workspace"})
 
@@ -118,6 +138,7 @@ func TestDurableOverflowRetryWaitsForSynchronizedProjection(t *testing.T) {
 	require.Equal(t, "durable recovery", result.Message)
 	require.Equal(t, 2, int(requests.Load()))
 	require.True(t, secondRequestSawProjection.Load(), "the durable projection must be committed before the retry crosses client.Do")
+	require.True(t, secondRequestSawCurrent.Load(), "the overflow retry must retain the exact current input exactly once")
 	steps, _, _, _ := sink.snapshot()
 	require.Contains(t, steps, "compaction")
 	require.Len(t, recorder.snapshot(), 2)
