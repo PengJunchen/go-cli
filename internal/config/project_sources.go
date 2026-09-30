@@ -704,7 +704,7 @@ func scanProjectDirectory(
 func isProjectSourceCandidate(kind sourceDirectoryKind, name string) bool {
 	switch kind {
 	case sourceSkillDirectory:
-		return name == "SKILL.md"
+		return name == "SKILL.md" || strings.HasSuffix(name, ".md") || strings.HasSuffix(name, ".yaml") || strings.HasSuffix(name, ".yml")
 	case sourceCommandDirectory:
 		return strings.EqualFold(filepath.Ext(name), ".md")
 	case sourceExtensionDirectory:

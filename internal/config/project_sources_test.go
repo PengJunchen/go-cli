@@ -105,6 +105,38 @@ func TestCaptureProjectSourcesBindsSixCandidatesAndReferencedDirectories(t *test
 	assert.Equal(t, snapshot.ManifestDigest(), projectAgain.ManifestDigest())
 }
 
+func TestCaptureProjectSourcesBindsEverySupportedSkillFileFormat(t *testing.T) {
+	root := t.TempDir()
+	skillDir := filepath.Join(root, ".go-cli", "skills")
+	require.NoError(t, os.MkdirAll(skillDir, 0o700))
+	for relative, content := range map[string]string{
+		"flat.md":               "flat skill",
+		"nested/SKILL.md":       "nested skill",
+		"schema.yaml":           "yaml skill",
+		"schema-yml.yml":        "yml skill",
+		"nested/deeper/file.md": "deep skill",
+	} {
+		path := filepath.Join(skillDir, filepath.FromSlash(relative))
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+		require.NoError(t, os.WriteFile(path, []byte(content), 0o600))
+	}
+
+	snapshot, err := CaptureProjectSources(context.Background(), root, nil)
+	require.NoError(t, err)
+	for relative, want := range map[string]string{
+		"flat.md":               "flat skill",
+		"nested/SKILL.md":       "nested skill",
+		"schema.yaml":           "yaml skill",
+		"schema-yml.yml":        "yml skill",
+		"nested/deeper/file.md": "deep skill",
+	} {
+		id := "skill/.go-cli/skills/" + relative
+		got, present := snapshot.SourceBytes(id)
+		assert.Truef(t, present, "skill bytes for %s must be captured", relative)
+		assert.Equal(t, want, string(got))
+	}
+}
+
 func TestCaptureProjectSourcesRejectsOutOfRootReferencesAndSymlinks(t *testing.T) {
 	root := t.TempDir()
 	outside := t.TempDir()
