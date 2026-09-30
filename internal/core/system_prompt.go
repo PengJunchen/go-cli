@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/xml"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -32,6 +33,24 @@ type SkillInfo struct {
 	Description string
 	// Category is the coarse grouping the skill belongs to.
 	Category string
+}
+
+// skillPromptElement defines the stable attribute order used for skill
+// metadata in the system prompt. encoding/xml handles XML attribute escaping.
+type skillPromptElement struct {
+	Name        string `xml:"name,attr"`
+	Category    string `xml:"category,attr,omitempty"`
+	Description string `xml:"description,attr,omitempty"`
+}
+
+type skillsPromptElement struct {
+	XMLName xml.Name             `xml:"skills"`
+	Skills  []skillPromptElement `xml:"skill"`
+}
+
+type memoryPromptElement struct {
+	XMLName xml.Name `xml:"memory"`
+	Content string   `xml:",chardata"`
 }
 
 // MemoryEntry is the core-layer representation of a memory, used to inject
@@ -267,23 +286,30 @@ func (b *DefaultSystemPromptBuilder) buildInner(opts SystemPromptOptions) string
 
 	// 5. Skills as XML.
 	if len(opts.Skills) > 0 {
-		sb.WriteString("\n\n<skills>")
-		for _, s := range opts.Skills {
-			sb.WriteString(fmt.Sprintf(`<skill name="%s"`, s.Name))
-			if s.Category != "" {
-				sb.WriteString(fmt.Sprintf(` category="%s"`, s.Category))
-			}
-			if s.Description != "" {
-				sb.WriteString(fmt.Sprintf(` description=%q`, s.Description))
-			}
-			sb.WriteString(`/>`)
+		skills := skillsPromptElement{
+			Skills: make([]skillPromptElement, 0, len(opts.Skills)),
 		}
-		sb.WriteString("</skills>")
+		for _, s := range opts.Skills {
+			skills.Skills = append(skills.Skills, skillPromptElement{
+				Name:        s.Name,
+				Category:    s.Category,
+				Description: s.Description,
+			})
+		}
+		encoded, err := xml.Marshal(skills)
+		if err != nil {
+			// The fixed prompt element schema should always marshal. Keep an
+			// unexpected serializer failure visible without logging metadata.
+			slog.Error("system_prompt.skills.encode")
+		} else {
+			sb.WriteString("\n\n")
+			sb.Write(encoded)
+		}
 	}
 
 	// 6. Memories as XML, grouped by category.
 	if len(opts.Memories) > 0 {
-		sb.WriteString("\n\n<memory>")
+		var content strings.Builder
 		memoryCategories := []struct {
 			category string
 			header   string
@@ -301,11 +327,11 @@ func (b *DefaultSystemPromptBuilder) buildInner(opts SystemPromptOptions) string
 				}
 			}
 			if len(lines) > 0 {
-				sb.WriteString("\n")
-				sb.WriteString(mc.header)
+				content.WriteString("\n")
+				content.WriteString(mc.header)
 				for _, l := range lines {
-					sb.WriteString("\n")
-					sb.WriteString(l)
+					content.WriteString("\n")
+					content.WriteString(l)
 				}
 			}
 		}
@@ -320,13 +346,21 @@ func (b *DefaultSystemPromptBuilder) buildInner(opts SystemPromptOptions) string
 			}
 		}
 		if len(otherLines) > 0 {
-			sb.WriteString("\n## Other")
+			content.WriteString("\n## Other")
 			for _, l := range otherLines {
-				sb.WriteString("\n")
-				sb.WriteString(l)
+				content.WriteString("\n")
+				content.WriteString(l)
 			}
 		}
-		sb.WriteString("\n</memory>")
+		encoded, err := xml.Marshal(memoryPromptElement{Content: content.String()})
+		if err != nil {
+			// The fixed prompt element schema should always marshal. Keep an
+			// unexpected serializer failure visible without logging memory data.
+			slog.Error("system_prompt.memory.encode")
+		} else {
+			sb.WriteString("\n\n")
+			sb.Write(encoded)
+		}
 	}
 
 	// 7. Current date and working directory.
