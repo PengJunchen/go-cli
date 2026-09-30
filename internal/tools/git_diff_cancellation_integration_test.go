@@ -21,16 +21,19 @@ func TestPreparedDefaultMutationCancellationDuringGitDiffPreservesFile(t *testin
 		t.Run(toolName, func(t *testing.T) {
 			root := t.TempDir()
 			started := filepath.Join(root, "git-child-started")
+			reaped := filepath.Join(root, "git-child-reaped")
 			installFakeGit(t, t.TempDir(), fmt.Sprintf(`
 case "$*" in
   *rev-parse*)
-    /bin/sleep 3 &
-    printf '%%s' "$!" > %q
-    exit 0
+    /bin/sleep 10 &
+    child=$!
+    trap 'kill "$child" 2>/dev/null || true; wait "$child" 2>/dev/null || true; printf done > %q; exit 143' TERM INT
+    printf '%%s' "$child" > %q
+    wait "$child"
     ;;
   *) exit 0 ;;
 esac
-`, started))
+`, reaped, started))
 			path := filepath.Join(root, "existing.txt")
 			const original = "old content\n"
 			require.NoError(t, os.WriteFile(path, []byte(original), 0o600))
@@ -75,6 +78,8 @@ esac
 			case <-time.After(5 * time.Second):
 				t.Fatal("accepted queue job did not join its Git helper")
 			}
+			_, err = os.Stat(reaped)
+			require.NoError(t, err, "fake Git must reap its canceled child before returning")
 			contents, err := os.ReadFile(path)
 			require.NoError(t, err)
 			assert.Equal(t, original, string(contents), "canceled Git preview must not permit a late file mutation")
