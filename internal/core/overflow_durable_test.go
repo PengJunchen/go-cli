@@ -39,7 +39,8 @@ func (sink *overflowProjectionSink) CommitCompaction(ctx context.Context, projec
 }
 
 type overflowSummaryCompactor struct {
-	onCompact func(context.Context, []compaction.TurnItem)
+	onCompact         func(context.Context, []compaction.TurnItem)
+	cutThroughCurrent bool
 }
 
 func (compactor overflowSummaryCompactor) Compact(ctx context.Context, items []compaction.TurnItem, _ int, _ compaction.TokenEstimator) (compaction.CompactionResult, error) {
@@ -58,7 +59,13 @@ func (compactor overflowSummaryCompactor) Compact(ctx context.Context, items []c
 			}
 		case llm.SourceRunTranscript:
 			runID = source.RunID
-			retained = append(retained, item)
+			if compactor.cutThroughCurrent {
+				if source.TranscriptIndex+1 > through.TranscriptCount {
+					through.TranscriptCount = source.TranscriptIndex + 1
+				}
+			} else {
+				retained = append(retained, item)
+			}
 		}
 	}
 	resultItems := []compaction.TurnItem{
@@ -142,6 +149,47 @@ func TestDurableOverflowRetryWaitsForSynchronizedProjection(t *testing.T) {
 	steps, _, _, _ := sink.snapshot()
 	require.Contains(t, steps, "compaction")
 	require.Len(t, recorder.snapshot(), 2)
+}
+
+func TestDurableOverflowRetryRejectsProjectionThatConsumesCurrentInput(t *testing.T) {
+	sink := &overflowProjectionSink{consumerTestSink: &consumerTestSink{}}
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		http.Error(w, "context_length_exceeded", http.StatusBadRequest)
+	}))
+	defer server.Close()
+
+	model, cleanup := buildOverflowTestModel(t, server)
+	defer cleanup()
+	var compactions atomic.Int32
+	recorder := &attemptResultRecorder{}
+	loop := NewLoopAgent(WithLLM(model), WithMaxIterations(1), WithProviderAttemptRecorder(recorder.record))
+	loop.SetMidTurnCompaction(nil, overflowSummaryCompactor{
+		cutThroughCurrent: true,
+		onCompact:         func(context.Context, []compaction.TurnItem) { compactions.Add(1) },
+	}, compaction.NewHeuristicTokenEstimator(), 10000)
+	agent := NewAgentImpl("durable-overflow-current-input", loop)
+	require.NoError(t, agent.SetHistoryFromSourceSnapshot(CompactionSourceSnapshot{
+		Revision: "overflow-revision", BranchID: "main",
+		Messages:       []AgentMessage{{Role: string(llm.RoleUser), Content: "prior durable context"}},
+		SourceEntryIDs: []string{"overflow-prior-entry"},
+	}))
+	owner := newRunOwner(context.Background(), nil, RunClaim{ID: "overflow-current-input-run"}, nil)
+	owner.ctx = WithRunCommit(owner.ctx, sink, RunCommitBinding{SessionID: "overflow-session", WorkspaceID: "overflow-workspace"})
+
+	_, runErr := owner.run(time.Second, func(ctx context.Context) (Result, error) {
+		return agent.Run(ctx, Submission{Type: SubmissionUserMessage, Content: "current durable request"})
+	})
+	require.ErrorIs(t, runErr, ErrDurableCompactionUnsupported)
+	require.Equal(t, 1, int(requests.Load()), "a cut-through-current projection must stop before overflow retry dispatch")
+	require.Equal(t, int32(1), compactions.Load(), "the rejected path must exercise durable overflow compaction")
+	require.False(t, sink.committed.Load(), "an unsupported projection must not be committed")
+	steps, _, _, _ := sink.snapshot()
+	require.Contains(t, steps, "input")
+	require.NotContains(t, steps, "compaction")
+	require.Contains(t, steps, "terminal")
+	require.Len(t, recorder.snapshot(), 1)
 }
 
 func TestDurableOverflowRetryFailsClosedWithoutCapturedSourceSnapshot(t *testing.T) {
