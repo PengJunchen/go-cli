@@ -17,9 +17,9 @@ func testLinuxProcessGroupIdentity() ExecutionIdentity {
 		Kind:              ExecutionIdentityProcessGroup,
 		Platform:          "linux",
 		HostGeneration:    "linux:boot-a",
-		PIDNamespaceToken: "linux:pidns:v1:dev:ino:init-start",
+		PIDNamespaceToken: "linux:" + "pidns:v1:dev:ino:init-start",
 		LeaderPID:         37,
-		ProcessStartToken: "linux:leader-start",
+		ProcessStartToken: "linux:" + "leader-start",
 		ProcessGroupID:    41,
 	}
 }
