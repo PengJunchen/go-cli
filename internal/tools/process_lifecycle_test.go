@@ -1,6 +1,7 @@
 package tools
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -153,13 +154,6 @@ func TestPreparedBashDoesNotSourceBashEnvBeforeIdentityPersistence(t *testing.T)
 	require.FileExists(t, marker, "the fixture must demonstrate that this Bash honors BASH_ENV")
 	require.NoFileExists(t, envMarker, "noninteractive Bash must not source ENV")
 	require.NoError(t, os.Remove(marker))
-	helperEnv, delayedEnv := splitBashStartupEnvironment(env)
-	require.Contains(t, delayedEnv, "BASH_ENV="+startup)
-	require.Contains(t, delayedEnv, "ENV="+envStartup)
-	helperControl := exec.Command("/bin/sh", "-c", ":")
-	helperControl.Env = helperEnv
-	require.NoError(t, helperControl.Run())
-	require.NoFileExists(t, envMarker, "the selected noninteractive /bin/sh helper must not source ENV")
 	release := make(chan struct{})
 	var releaseOnce sync.Once
 	releaseGate := func() { releaseOnce.Do(func() { close(release) }) }
@@ -205,7 +199,7 @@ func TestPreparedBashDoesNotSourceBashEnvBeforeIdentityPersistence(t *testing.T)
 	require.NoFileExists(t, envMarker, "the original noninteractive Bash invocation must not source ENV")
 }
 
-func TestPreparedBashStartGateDoesNotImportBashReadFunction(t *testing.T) {
+func TestPreparedBashRejectsExportedFunctionsBeforeStart(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash is required for process lifecycle tests")
 	}
@@ -221,14 +215,31 @@ func TestPreparedBashStartGateDoesNotImportBashReadFunction(t *testing.T) {
 		t.Skip("this Bash does not import exported Bash functions")
 	}
 	require.NoError(t, os.Remove(marker))
-	helperEnv, delayedEnv := splitBashStartupEnvironment(env)
-	require.Contains(t, delayedEnv, "BASH_FUNC_read%%="+function)
+	observerCalled := false
+	ctx := WithProcessExecutionIdentityObserver(context.Background(), func(context.Context, ProcessExecutionIdentity) error {
+		observerCalled = true
+		return nil
+	})
+	_, err := NewBashTool(WithTimeout(5*time.Second), WithNoSandbox(), WithEnv(map[string]string{"BASH_FUNC_read%%": function})).Execute(ctx, ToolCall{
+		ID: "call-bash-function-gated", Name: "bash", Args: map[string]any{"command": "read -r _ < /dev/null"},
+	})
+	require.ErrorContains(t, err, "cannot be restored safely")
+	require.False(t, observerCalled, "unsupported exported functions must fail before starting a child")
+	require.NoFileExists(t, marker, "an unsupported exported function must not run before the identity gate")
+}
 
-	helper := exec.Command("/bin/sh", "-c", "read -r _")
-	helper.Env = helperEnv
-	helper.Stdin = strings.NewReader("ready\n")
-	require.NoError(t, helper.Run())
-	require.NoFileExists(t, marker, "the noninteractive /bin/sh helper must not import Bash-specific functions")
+func TestPreparedBashDoesNotEvaluatePS4BeforeIdentityPersistence(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is required for process lifecycle tests")
+	}
+	marker := filepath.Join(t.TempDir(), "ps4-command-substitution-ran")
+	ps4 := "$(touch " + shellQuoteTestArgument(marker) + ")"
+	env := filteredEnv(map[string]string{"SHELLOPTS": "xtrace", "PS4": ps4})
+	control := exec.Command("bash", "--noprofile", "--norc", "-c", ":")
+	control.Env = env
+	require.NoError(t, control.Run())
+	require.FileExists(t, marker, "the fixture must demonstrate that Bash expands PS4 when xtrace is enabled")
+	require.NoError(t, os.Remove(marker))
 
 	release := make(chan struct{})
 	var releaseOnce sync.Once
@@ -242,8 +253,8 @@ func TestPreparedBashStartGateDoesNotImportBashReadFunction(t *testing.T) {
 	})
 	result := make(chan error, 1)
 	go func() {
-		_, err := NewBashTool(WithTimeout(5*time.Second), WithNoSandbox(), WithEnv(map[string]string{"BASH_FUNC_read%%": function})).Execute(ctx, ToolCall{
-			ID: "call-bash-function-gated", Name: "bash", Args: map[string]any{"command": ":"},
+		_, err := NewBashTool(WithTimeout(5*time.Second), WithNoSandbox(), WithEnv(map[string]string{"SHELLOPTS": "xtrace", "PS4": ps4})).Execute(ctx, ToolCall{
+			ID: "call-bash-ps4-gated", Name: "bash", Args: map[string]any{"command": ":"},
 		})
 		result <- err
 	}()
@@ -259,13 +270,86 @@ func TestPreparedBashStartGateDoesNotImportBashReadFunction(t *testing.T) {
 		if fileExists(marker) {
 			releaseGate()
 			require.NoError(t, <-result, "allow the blocked process to unwind after detecting the regression")
-			t.Fatal("Bash-specific read function executed before process identity persistence")
+			t.Fatal("PS4 command substitution executed before process identity persistence")
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	require.NoFileExists(t, marker, "SHELLOPTS and PS4 must not affect the bootstrap before identity persistence")
 	releaseGate()
 	require.NoError(t, <-result)
-	require.NoFileExists(t, marker, "the released command does not invoke the imported read function")
+	require.FileExists(t, marker, "the original Bash tracing environment must be restored after identity persistence")
+}
+
+func TestManagedBashStartGatePreservesArgv0(t *testing.T) {
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash is required for process lifecycle tests")
+	}
+	cmd := exec.Command("bash", "-lc", `printf '%s' "$0"`)
+	cmd.Env = filteredEnv(nil)
+	var output bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &output
+	cmd.Stderr = &stderr
+	gate, err := installBashProcessStartGate(cmd)
+	require.NoError(t, err)
+	require.Equal(t, bashPath, cmd.Path)
+	require.Equal(t, "bash", cmd.Args[0], "the original Bash argv0 must remain available to the post-gate exec")
+	require.Empty(t, cmd.Env, "the bootstrap process must receive no user-controlled environment")
+	require.NoError(t, cmd.Start())
+	gate.closeReadEnd()
+	require.NoError(t, gate.release())
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("gated command failed: %v; stderr=%s", err, stderr.String())
+	}
+	require.Equal(t, "bash", output.String(), "bash -lc must retain its original $0")
+}
+
+func TestManagedBashStartGateRestoresEnvironmentWithoutShellParsing(t *testing.T) {
+	bashPath, err := exec.LookPath("bash")
+	if err != nil {
+		t.Skip("bash is required for process lifecycle tests")
+	}
+	marker := filepath.Join(t.TempDir(), "environment-value-executed")
+	value := " leading space\nquote: ' ; touch " + shellQuoteTestArgument(marker) + " $(touch " + shellQuoteTestArgument(marker) + ") trailing space "
+	cmd := exec.Command("bash", "-lc", `printf '%s' "$GATE_VALUE"`)
+	cmd.Env = filteredEnv(map[string]string{"GATE_VALUE": value})
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	gate, err := installBashProcessStartGate(cmd)
+	require.NoError(t, err)
+	require.Equal(t, bashPath, cmd.Path)
+	require.NoError(t, cmd.Start())
+	gate.closeReadEnd()
+	require.NoError(t, gate.release())
+	require.NoError(t, cmd.Wait())
+	require.Equal(t, value, output.String(), "newline, quote, and shell metacharacters must survive opaque NUL-delimited restoration")
+	require.NoFileExists(t, marker, "environment values must not be parsed as shell code")
+}
+
+func TestManagedBashStartGateRestoresBashOptions(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is required for process lifecycle tests")
+	}
+	command := `shopt -q extglob && printf yes || printf no`
+	env := filteredEnv(map[string]string{"BASHOPTS": "extglob"})
+	control := exec.Command("bash", "-lc", command)
+	control.Env = env
+	var expected bytes.Buffer
+	control.Stdout = &expected
+	require.NoError(t, control.Run())
+
+	cmd := exec.Command("bash", "-lc", command)
+	cmd.Env = env
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	gate, err := installBashProcessStartGate(cmd)
+	require.NoError(t, err)
+	require.NoError(t, cmd.Start())
+	gate.closeReadEnd()
+	require.NoError(t, gate.release())
+	require.NoError(t, cmd.Wait())
+	require.Equal(t, expected.String(), output.String(), "BASHOPTS behavior must match an ordinary Bash invocation")
 }
 
 func TestPreparedStreamingBashWaitsForIdentityPersistence(t *testing.T) {
