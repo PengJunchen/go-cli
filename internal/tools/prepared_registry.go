@@ -287,6 +287,23 @@ func validateCapturedSchema(args map[string]any, schema any) error {
 	return nil
 }
 
+// ValidateParameterSchema validates a JSON-safe schema using the same closed
+// subset enforced by the prepared tool-call gate. The defensive freeze keeps
+// callers from changing values while validation walks the schema tree.
+func ValidateParameterSchema(schema any) error {
+	snapshot, err := freezeToolSchema(schema)
+	if err != nil {
+		return fmt.Errorf("tools: snapshot parameter schema: %w", err)
+	}
+	if !snapshot.Present() {
+		return fmt.Errorf("%w: schema is absent", ErrPreparedSchemaInvalid)
+	}
+	if err := validatePreparedSchemaNode(snapshot.Schema(), true); err != nil {
+		return err
+	}
+	return nil
+}
+
 func validatePreparedSchemaNode(value any, root bool) error {
 	schema, ok := value.(map[string]any)
 	if !ok {
