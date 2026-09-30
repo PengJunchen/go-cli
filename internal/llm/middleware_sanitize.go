@@ -1,6 +1,6 @@
 // Package llm middleware_sanitize.go - SanitizeModelMiddleware strips
-// cross-model artifacts (Claude thinking tags, GPT watermark markers, Gemini
-// thinking blocks) from model responses and normalizes excessive whitespace.
+// cross-model artifacts (Claude thinking tags and Gemini thinking blocks)
+// from model responses and normalizes excessive whitespace.
 package llm
 
 import (
@@ -73,9 +73,10 @@ type streamSanitizeMarker struct {
 	close []byte
 }
 
+// Only unambiguous text-protocol blocks belong here. GPT reasoning markers
+// need typed provider metadata; broad bracket matching corrupts ordinary text.
 var streamSanitizeMarkers = [...]streamSanitizeMarker{
 	{open: []byte("<antThinking>"), close: []byte("</antThinking>")},
-	{open: []byte("【"), close: []byte("】")},
 	{open: []byte("```thinking\n"), close: []byte("```")},
 }
 

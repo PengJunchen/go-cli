@@ -53,16 +53,25 @@ func TestSanitizeModelMiddleware_ClaudeArtifactRemoved(t *testing.T) {
 	assert.Equal(t, "Hello world", resp.Content)
 }
 
-// TestSanitizeModelMiddleware_GPTMarkerRemoved verifies that GPT watermark
-// markers such as 【6bc68d3a】 are stripped from the response.
-func TestSanitizeModelMiddleware_GPTMarkerRemoved(t *testing.T) {
-	base := &sanitizeMockModel{genContent: "Hello【6bc68d3a】 world"}
-	mw := NewSanitizeModelMiddleware()
-	wrapped := mw.WrapModel(base)
+// TestSanitizeModelMiddleware_PreservesBracketText verifies bracket-shaped
+// prose is not treated as hidden reasoning without a typed provider fixture.
+func TestSanitizeModelMiddleware_PreservesBracketText(t *testing.T) {
+	cases := []string{
+		"Hello【6bc68d3a】 world",
+		"中文【重要内容尚未闭合",
+		"日本語【未完了の見出し",
+		"Code: `【6bc68d3a】` and quoted “【internal】” text.",
+	}
+	for _, text := range cases {
+		t.Run(text, func(t *testing.T) {
+			base := &sanitizeMockModel{genContent: text}
+			wrapped := NewSanitizeModelMiddleware().WrapModel(base)
 
-	resp, err := wrapped.Generate(context.Background(), nil)
-	require.NoError(t, err)
-	assert.Equal(t, "Hello world", resp.Content)
+			resp, err := wrapped.Generate(context.Background(), nil)
+			require.NoError(t, err)
+			assert.Equal(t, text, resp.Content)
+		})
+	}
 }
 
 // TestSanitizeModelMiddleware_GeminiBlockRemoved verifies that Gemini
@@ -95,7 +104,6 @@ func TestSanitizeModelMiddleware_GenerateFailsClosedForUnclosedSensitiveBlocks(t
 		text string
 	}{
 		{name: "claude", text: "answer<antThinking>CLAUDE-GENERATE-SECRET"},
-		{name: "gpt", text: "answer【GPT-GENERATE-SECRET"},
 		{name: "gemini", text: "answer```thinking\nGEMINI-GENERATE-SECRET"},
 	}
 	for _, tc := range cases {
@@ -111,7 +119,7 @@ func TestSanitizeModelMiddleware_GenerateFailsClosedForUnclosedSensitiveBlocks(t
 }
 
 func TestSanitizeModelMiddleware_GeneratePreservesOrdinaryTextNearMarkerPrefixes(t *testing.T) {
-	const text = "Documentation: <antThinkingX>, ```thinking example, and literal braces remain visible."
+	const text = "Documentation: <antThinkingX>, ```thinking example, 【section, and literal braces remain visible."
 	base := &sanitizeMockModel{genContent: text}
 	wrapped := NewSanitizeModelMiddleware().WrapModel(base)
 	resp, err := wrapped.Generate(context.Background(), nil)
@@ -152,12 +160,6 @@ func TestSanitizeModelMiddleware_StreamRedactsMarkersAcrossEverySplit(t *testing
 			want:   "before  after",
 		},
 		{
-			name:   "gpt",
-			secret: "GPT-SECRET",
-			text:   "before【GPT-SECRET】 after",
-			want:   "before after",
-		},
-		{
 			name:   "gemini",
 			secret: "GEMINI-SECRET",
 			text:   "before```thinking\nGEMINI-SECRET\nprivate\n``` after",
@@ -194,7 +196,6 @@ func TestSanitizeModelMiddleware_StreamFailsClosedForUnclosedSensitiveBlocks(t *
 		text string
 	}{
 		{name: "claude", text: "answer<antThinking>CLAUDE-EOF-SECRET"},
-		{name: "gpt", text: "answer【GPT-EOF-SECRET"},
 		{name: "gemini", text: "answer```thinking\nGEMINI-EOF-SECRET"},
 	}
 	for _, tc := range cases {
@@ -247,6 +248,7 @@ func TestSanitizeModelMiddleware_StreamPreservesChunkMetadataAndBackpressure(t *
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	secondAccepted := make(chan struct{})
+	thirdStarted := make(chan struct{})
 	thirdAccepted := make(chan struct{})
 	upstream := make(chan MessageChunk)
 	base := &blockingSanitizeModel{stream: func() <-chan MessageChunk { return upstream }}
@@ -256,14 +258,21 @@ func TestSanitizeModelMiddleware_StreamPreservesChunkMetadataAndBackpressure(t *
 
 	go func() {
 		upstream <- MessageChunk{Role: RoleAssistant, Content: "visible", Final: false}
-		upstream <- MessageChunk{Role: RoleAssistant, Content: "later", Final: false}
+		upstream <- MessageChunk{Role: RoleAssistant, Content: "later<antThinking>private</antThinking>", Final: false}
 		close(secondAccepted)
+		close(thirdStarted)
 		upstream <- MessageChunk{Role: RoleAssistant, Content: "last", Final: true, FinishReason: "stop", Usage: &Usage{TotalTokens: 2}}
 		close(thirdAccepted)
 		close(upstream)
 	}()
-	<-secondAccepted
+	waitForSanitizeSignal(t, secondAccepted, "second source chunk was consumed")
+	waitForSanitizeSignal(t, thirdStarted, "third source send started")
 	assert.Equal(t, 1, cap(out), "the sanitizer output queue must remain bounded to one chunk")
+	select {
+	case <-thirdAccepted:
+		t.Fatal("sanitizer consumed the third source chunk before downstream drained its bounded output queue")
+	case <-time.After(time.Second):
+	}
 
 	first := <-out
 	assert.Equal(t, "visible", first.Content)
@@ -277,7 +286,7 @@ func TestSanitizeModelMiddleware_StreamPreservesChunkMetadataAndBackpressure(t *
 	assert.Equal(t, "stop", third.FinishReason)
 	require.NotNil(t, third.Usage)
 	assert.Equal(t, 2, third.Usage.TotalTokens)
-	<-thirdAccepted
+	waitForSanitizeSignal(t, thirdAccepted, "third source chunk was consumed after downstream progress")
 	_, ok := <-out
 	assert.False(t, ok)
 }
@@ -300,11 +309,33 @@ func TestSanitizeModelMiddleware_StreamCancellationReachesUpstream(t *testing.T)
 	}
 }
 
+func TestSanitizeModelMiddleware_StreamPreservesBracketTextAcrossChunks(t *testing.T) {
+	text := []string{
+		"中文【重要内容",
+		"尚未闭合、日本語【未完了の見出し",
+		" and code `【6bc68d3a】` with quote “【internal】”.",
+	}
+	base := &sanitizeMockModel{streamChunks: []MessageChunk{
+		{Role: RoleAssistant, Content: text[0]},
+		{Role: RoleAssistant, Content: text[1]},
+		{Role: RoleAssistant, Content: text[2], Final: true},
+	}}
+	wrapped := NewSanitizeModelMiddleware().WrapModel(base)
+	ch, err := wrapped.Stream(context.Background(), nil)
+	require.NoError(t, err)
+
+	var got strings.Builder
+	for chunk := range ch {
+		got.WriteString(chunk.Content)
+	}
+	assert.Equal(t, strings.Join(text, ""), got.String())
+}
+
 func TestSanitizeModelMiddleware_StreamPreservesFinalErrorCauseWithoutLeakingContent(t *testing.T) {
 	stopErr := errors.New("provider stream stopped")
 	base := &sanitizeMockModel{streamChunks: []MessageChunk{{
 		Role:    RoleAssistant,
-		Content: "visible【GPT-ERROR-SECRET",
+		Content: "visible<antThinking>CLAUDE-ERROR-SECRET",
 		Error:   stopErr,
 	}}}
 	wrapped := NewSanitizeModelMiddleware().WrapModel(base)
@@ -326,13 +357,13 @@ func TestStreamContentSanitizerRetainsOnlyBoundedMarkerCarry(t *testing.T) {
 	const secretSize = 1 << 20
 	secret := strings.Repeat("private", secretSize/len("private"))
 	var sanitizer streamContentSanitizer
-	got := sanitizer.sanitize("visible【" + secret)
+	got := sanitizer.sanitize("visible<antThinking>" + secret)
 	assert.Equal(t, "visible", got)
-	assert.Same(t, &streamSanitizeMarkers[1], sanitizer.block)
-	assert.LessOrEqual(t, len(sanitizer.pending), len(streamSanitizeMarkers[2].open))
+	assert.Same(t, &streamSanitizeMarkers[0], sanitizer.block)
+	assert.LessOrEqual(t, len(sanitizer.pending), len(streamSanitizeMarkers[1].open))
 	assert.LessOrEqual(t, len(sanitizer.closing), len(streamSanitizeMarkers[0].close)-1)
 
-	got = sanitizer.sanitize("】after")
+	got = sanitizer.sanitize("</antThinking>after")
 	assert.Equal(t, "after", got)
 	assert.Nil(t, sanitizer.block)
 }
@@ -356,6 +387,15 @@ func TestStreamContentSanitizerDoesNotAllocateForLargeRedactedBody(t *testing.T)
 
 type blockingSanitizeModel struct {
 	stream func() <-chan MessageChunk
+}
+
+func waitForSanitizeSignal(t *testing.T, signal <-chan struct{}, description string) {
+	t.Helper()
+	select {
+	case <-signal:
+	case <-time.After(time.Second):
+		t.Fatalf("timed out waiting for %s", description)
+	}
 }
 
 func (*blockingSanitizeModel) Generate(context.Context, []Message, ...Option) (*Message, error) {
