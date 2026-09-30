@@ -218,7 +218,7 @@ func TestLoopToolNilResult(t *testing.T) {
 	assert.Equal(t, 1, model.idx, "the model must not be called again after a missing receipt")
 }
 
-func TestLoopStopsAfterMidTurnMandatorySystemBudgetError(t *testing.T) {
+func TestLoopStopsBeforeProviderWhenMandatorySystemBudgetError(t *testing.T) {
 	model := &scriptedChatModel{seq: []*llm.Message{
 		{
 			Role:      llm.RoleAssistant,
@@ -241,7 +241,7 @@ func TestLoopStopsAfterMidTurnMandatorySystemBudgetError(t *testing.T) {
 
 	events, err := loop.Run(context.Background(), Submission{Content: "run tool"})
 	require.ErrorIs(t, err, compaction.ErrMandatorySystemPromptOverBudget)
-	assert.Equal(t, 1, model.idx, "mid-turn compaction runs after the first provider call and must stop the next dispatch")
+	assert.Equal(t, 0, model.idx, "mandatory context that exceeds the budget must stop before provider dispatch")
 	assert.NotEmpty(t, findEvents(events, "error"))
 }
 

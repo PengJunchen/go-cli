@@ -13,6 +13,17 @@ type itemGroup struct {
 	system bool
 }
 
+// NormalizeToolCallGroups validates that every assistant tool call has one
+// matching terminal receipt and returns a defensive copy with legacy receipt
+// names filled in when uniquely inferable.
+func NormalizeToolCallGroups(items []TurnItem) ([]TurnItem, error) {
+	normalized, _, err := groupTurnItems(items)
+	if err != nil {
+		return nil, err
+	}
+	return normalized, nil
+}
+
 // groupTurnItems validates tool-call closure in the current assistant-message
 // scope and returns a copy with uniquely inferable receipt names filled in.
 // ToolCallIDs are intentionally not tracked across closed groups.

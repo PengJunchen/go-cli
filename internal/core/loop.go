@@ -35,6 +35,8 @@ var errNilModel = errors.New("core: agent loop has no chat model")
 // errMaxIterations reports that a LoopAgent exhausted its iteration budget.
 var errMaxIterations = errors.New("core: agent loop exceeded max iterations")
 
+var errCurrentSubmissionNotPreserved = errors.New("core: compaction did not preserve the current submission")
+
 // loopConfig holds the configurable dependencies of a LoopAgent. All
 // dependencies are interface types.
 type loopConfig struct {
@@ -435,6 +437,9 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 		span.SetStatus(tracing.SpanStatusError, commitErr.Error())
 		return CanonicalRunResult{Transcript: transcript}, commitErr
 	}
+	if consumer == nil && midTurnCompactor != nil {
+		midTurnCompactor = midTurnCompactor.NewRun()
+	}
 	if consumer != nil {
 		spanCtx = withRunCommitLoopScope(spanCtx)
 	}
@@ -613,6 +618,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 		}
 		messages = append(messages, message)
 	}
+	currentSubmissionIndex := len(messages) - 1
 
 	// emitCanceledToolResults synthesizes error tool_result messages for any
 	// tool calls in the last assistant message that lack a matching
@@ -697,6 +703,26 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 				return CanonicalRunResult{Events: events, Transcript: transcript}, compactErr
 			}
 			messages = compacted
+		} else if midTurnCompactor != nil && compactor != nil && estimator != nil && maxTokens > 0 {
+			compacted, compactedSubmissionIndex, compactResult, compactErr := preflightNonDurableRequest(
+				spanCtx, messages, currentSubmissionIndex, midTurnCompactor, compactor, estimator, maxTokens,
+			)
+			if compactErr != nil {
+				logger.Warn("core.loop.midturn_compact_error", "err", compactErr)
+				span.SetStatus(tracing.SpanStatusError, compactErr.Error())
+				sendEvent(errEvent(compactErr))
+				return CanonicalRunResult{Events: events, Transcript: transcript}, compactErr
+			}
+			if compactResult.Triggered {
+				messagesBefore := len(messages)
+				messages = compacted
+				currentSubmissionIndex = compactedSubmissionIndex
+				logger.Info("core.loop.midturn_compact",
+					"reason", compactResult.Reason.String(),
+					"messages_before", messagesBefore,
+					"messages_after", len(messages),
+				)
+			}
 		}
 
 		// ---- LLM call (streaming) ----
@@ -985,37 +1011,6 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 			}
 		}
 
-		// Mid-turn compaction: if the context has grown beyond the
-		// threshold fraction of the token budget, compact before the
-		// next LLM call to avoid overflowing the context window
-		// mid-turn.
-		if consumer == nil && midTurnCompactor != nil && compactor != nil && estimator != nil && maxTokens > 0 {
-			items := messagesToTurnItems(messages)
-			activeCompactor := compactor
-			if consumer != nil {
-				activeCompactor = unavailableRunCommitCompactor{}
-			}
-			compacted, result, cerr := midTurnCompactor.CompactIfNeeded(spanCtx, items, maxTokens, estimator, activeCompactor)
-			if cerr != nil {
-				logger.Warn("core.loop.midturn_compact_error", "err", cerr)
-				if consumer != nil && errors.Is(cerr, ErrRunCommitCompactionProjectionUnavailable) {
-					compactionErr := ErrRunCommitCompactionProjectionUnavailable
-					span.SetStatus(tracing.SpanStatusError, compactionErr.Error())
-					sendEvent(errEvent(compactionErr))
-					return CanonicalRunResult{Events: events, Transcript: transcript}, compactionErr
-				}
-				span.SetStatus(tracing.SpanStatusError, cerr.Error())
-				sendEvent(errEvent(cerr))
-				return CanonicalRunResult{Events: events, Transcript: transcript}, cerr
-			} else if result.Triggered {
-				messages = turnItemsToMessages(compacted.Items)
-				logger.Info("core.loop.midturn_compact",
-					"reason", result.Reason.String(),
-					"messages_before", len(items),
-					"messages_after", len(compacted.Items),
-				)
-			}
-		}
 	}
 
 	// Iteration budget exhausted.
@@ -1059,6 +1054,56 @@ func preflightDurableRequest(
 		return nil, err
 	}
 	return turnItemsToMessages(result.Items), nil
+}
+
+func preflightNonDurableRequest(
+	ctx context.Context,
+	messages []llm.Message,
+	currentSubmissionIndex int,
+	midTurnCompactor *compaction.MidTurnCompact,
+	compactor compaction.Compactor,
+	estimator compaction.TokenEstimator,
+	maxTokens int,
+) ([]llm.Message, int, compaction.CompactResult, error) {
+	if currentSubmissionIndex < 0 || currentSubmissionIndex >= len(messages) {
+		return nil, currentSubmissionIndex, compaction.CompactResult{}, errCurrentSubmissionNotPreserved
+	}
+	items := messagesToTurnItems(messages)
+	items, err := compaction.NormalizeToolCallGroups(items)
+	if err != nil {
+		return nil, currentSubmissionIndex, compaction.CompactResult{}, err
+	}
+	currentSubmissionID := items[currentSubmissionIndex].ID
+	currentSubmission := messages[currentSubmissionIndex]
+	compacted, result, err := midTurnCompactor.CompactIfNeeded(ctx, items, maxTokens, estimator, compactor)
+	if err != nil {
+		return nil, currentSubmissionIndex, result, err
+	}
+	if !result.Triggered {
+		return messages, currentSubmissionIndex, result, nil
+	}
+	compactedItems, err := compaction.NormalizeToolCallGroups(compacted.Items)
+	if err != nil {
+		return nil, currentSubmissionIndex, result, err
+	}
+	compactedSubmissionIndex := -1
+	for index, item := range compactedItems {
+		if item.ID != currentSubmissionID {
+			continue
+		}
+		if compactedSubmissionIndex >= 0 {
+			return nil, currentSubmissionIndex, result, errCurrentSubmissionNotPreserved
+		}
+		compactedSubmissionIndex = index
+	}
+	if compactedSubmissionIndex < 0 {
+		return nil, currentSubmissionIndex, result, errCurrentSubmissionNotPreserved
+	}
+	compactedMessages := turnItemsToMessages(compactedItems)
+	if !reflect.DeepEqual(currentSubmission, compactedMessages[compactedSubmissionIndex]) {
+		return nil, currentSubmissionIndex, result, errCurrentSubmissionNotPreserved
+	}
+	return compactedMessages, compactedSubmissionIndex, result, nil
 }
 
 type pendingInput struct {
