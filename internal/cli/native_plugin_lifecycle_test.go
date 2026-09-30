@@ -123,7 +123,7 @@ func nativePluginUnavailable(t *testing.T, reason string) {
 func nativePluginBuildSupported(goos, goarch string) bool {
 	switch goos + "/" + goarch {
 	case "linux/386", "linux/amd64", "linux/arm", "linux/arm64", "linux/loong64", "linux/ppc64le", "linux/riscv64", "linux/s390x",
-		"android/386", "android/amd64", "darwin/amd64", "darwin/arm64", "freebsd/amd64":
+		"darwin/amd64", "darwin/arm64", "freebsd/amd64":
 		return true
 	default:
 		return false
