@@ -108,28 +108,31 @@ func (r *MiddlewareToolRegistry) prepareToolCallWithStreamSink(ctx context.Conte
 			return nil, ErrPreparedCallMutation
 		}
 	}
+	// Freeze once before validation so the policy, preflight, and executor all
+	// consume the same normalized argument snapshot.
+	frozenCall, err := freezeToolCall(normalized)
+	if err != nil {
+		return nil, err
+	}
+	capturedCall := frozenCall.ToolCall()
 	if snapshot.schema.Present() {
 		schema := snapshot.schema.Schema()
-		if err := validateCapturedSchema(normalized.Args, schema); err != nil {
+		if err := validateCapturedSchema(capturedCall.Args, schema); err != nil {
 			return nil, fmt.Errorf("tools: validate prepared call %q: %w", call.Name, err)
 		}
 	}
 	if mutationToolNames[call.Name] {
-		if err := validateMutationPayload(normalized); err != nil {
+		if err := validateMutationPayload(capturedCall); err != nil {
 			return nil, fmt.Errorf("tools: invalid prepared mutation payload: %w", err)
 		}
-		if mutationPathFromCall(normalized) == "" {
+		if mutationPathFromCall(capturedCall) == "" {
 			return nil, errors.New("tools: prepared mutation has no file path")
 		}
 	}
 	if snapshot.effects.Contains(EffectWorkspaceRead) {
-		if err := validatePreparedWorkspaceReadPath(snapshot.definition, normalized); err != nil {
+		if err := validatePreparedWorkspaceReadPath(snapshot.definition, frozenCall); err != nil {
 			return nil, fmt.Errorf("tools: validate workspace-read path before policy classification for %q: %w", call.Name, err)
 		}
-	}
-	frozenCall, err := freezeToolCall(normalized)
-	if err != nil {
-		return nil, err
 	}
 	fence := r.DispatchFence()
 	if fence == nil {
@@ -180,7 +183,8 @@ func (r *MiddlewareToolRegistry) prepareToolCallWithStreamSink(ctx context.Conte
 	return newPreparedInvocation(config), nil
 }
 
-func validatePreparedWorkspaceReadPath(def ToolDefinition, call ToolCall) error {
+func validatePreparedWorkspaceReadPath(def ToolDefinition, frozenCall FrozenToolCall) error {
+	call := frozenCall.ToolCall()
 	switch tool := def.(type) {
 	case *ReadTool:
 		path := getStringArg(call, "path")

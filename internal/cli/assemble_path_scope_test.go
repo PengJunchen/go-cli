@@ -114,9 +114,9 @@ func TestAssemblePreparedWorkspaceReadsValidatePathsBeforePolicy(t *testing.T) {
 		SetPreparedToolPolicy(tools.PreparedToolPolicy) error
 	})
 	require.True(t, ok)
-	policyCalls := 0
+	policyCalls := make([]tools.FrozenToolCall, 0, 4)
 	require.NoError(t, policySetter.SetPreparedToolPolicy(func(_ context.Context, request tools.PreparedPolicyRequest) (tools.PreparedPolicyDecision, error) {
-		policyCalls++
+		policyCalls = append(policyCalls, request.Call)
 		return tools.PreparedPolicyDecision{Allowed: true, Generations: request.Generations}, nil
 	}))
 
@@ -126,14 +126,28 @@ func TestAssemblePreparedWorkspaceReadsValidatePathsBeforePolicy(t *testing.T) {
 		{Name: "find", Args: map[string]any{"path": allowedDir, "pattern": "inside.txt"}},
 		{Name: "ls", Args: map[string]any{"path": allowedDir}},
 	}
-	for _, call := range allowedCalls {
+	for index, call := range allowedCalls {
+		allowedPath := call.Args["path"].(string)
 		invocation, prepareErr := preparer.PrepareToolCall(context.Background(), call)
 		require.NoError(t, prepareErr, call.Name)
 		require.Equal(t, []tools.TrustedToolEffect{tools.EffectWorkspaceRead}, invocation.EffectSet().Values(), call.Name)
-		_, dispatchErr := invocation.Dispatch(context.Background())
+		require.Equal(t, allowedPath, invocation.NormalizedCall().Args["path"], call.Name)
+		require.Equal(t, allowedPath, policyCalls[index].ToolCall().Args["path"], call.Name)
+		if call.Name == "read" {
+			call.Args["path"] = outsideFile
+		} else {
+			call.Args["path"] = outsideDir
+		}
+		result, dispatchErr := invocation.Dispatch(context.Background())
 		require.NoError(t, dispatchErr, call.Name)
+		require.NotNil(t, result, call.Name)
+		if call.Name == "read" {
+			require.Equal(t, "needle inside", result.Output)
+		} else {
+			require.Contains(t, result.Output, "inside.txt", call.Name)
+		}
 	}
-	classifiedAllowedCalls := policyCalls
+	classifiedAllowedCalls := len(policyCalls)
 	require.Equal(t, len(allowedCalls), classifiedAllowedCalls)
 
 	blockedCalls := []tools.ToolCall{
@@ -151,7 +165,7 @@ func TestAssemblePreparedWorkspaceReadsValidatePathsBeforePolicy(t *testing.T) {
 		require.Error(t, prepareErr, call.Name)
 		require.Nil(t, invocation, call.Name)
 		require.Contains(t, prepareErr.Error(), "whitelist", call.Name)
-		require.Equal(t, classifiedAllowedCalls, policyCalls, "escaped path must be rejected before policy can classify workspace_read: %s", call.Name)
+		require.Equal(t, classifiedAllowedCalls, len(policyCalls), "escaped path must be rejected before policy can classify workspace_read: %s", call.Name)
 	}
 }
 
