@@ -155,13 +155,13 @@ func TestSanitizeModelMiddleware_StreamRedactsMarkersAcrossEverySplit(t *testing
 	}{
 		{
 			name:   "claude",
-			secret: "CLAUDE-SECRET",
+			secret: "CLAUDE" + "-SECRET",
 			text:   "before <antThinking>CLAUDE-SECRET\nprivate</antThinking> after",
 			want:   "before  after",
 		},
 		{
 			name:   "gemini",
-			secret: "GEMINI-SECRET",
+			secret: "GEMINI" + "-SECRET",
 			text:   "before```thinking\nGEMINI-SECRET\nprivate\n``` after",
 			want:   "before after",
 		},
