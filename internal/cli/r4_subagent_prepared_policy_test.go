@@ -216,7 +216,7 @@ func newAssembledSubagentPolicyFixture(t *testing.T, blockChild bool) (*AgentAss
 	return assembly, provider, ctx, approvalCh
 }
 
-func startAssembledSubagentPolicyTurn(assembly *AgentAssembly, ctx context.Context) <-chan assembledSubagentPolicyTurn {
+func startAssembledSubagentPolicyTurn(ctx context.Context, assembly *AgentAssembly) <-chan assembledSubagentPolicyTurn {
 	done := make(chan assembledSubagentPolicyTurn, 1)
 	go func() {
 		result, err := assembly.TurnRunner.RunTurn(ctx, core.Submission{Content: "delegate the requested file write to a child"})
@@ -255,7 +255,7 @@ func awaitAssembledSubagentTurn(t *testing.T, ctx context.Context, done <-chan a
 
 func TestAssembleRealSubAgentParentDenyNeverStartsChild(t *testing.T) {
 	assembly, provider, ctx, approvalCh := newAssembledSubagentPolicyFixture(t, false)
-	done := startAssembledSubagentPolicyTurn(assembly, ctx)
+	done := startAssembledSubagentPolicyTurn(ctx, assembly)
 
 	parentApproval := awaitAssembledApproval(t, ctx, approvalCh, "dispatch_subagent")
 	parentApproval.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalDeny}
@@ -271,7 +271,7 @@ func TestAssembleRealSubAgentParentDenyNeverStartsChild(t *testing.T) {
 
 func TestAssembleRealSubAgentChildWriteNeedsSeparateApproval(t *testing.T) {
 	assembly, provider, ctx, approvalCh := newAssembledSubagentPolicyFixture(t, false)
-	done := startAssembledSubagentPolicyTurn(assembly, ctx)
+	done := startAssembledSubagentPolicyTurn(ctx, assembly)
 
 	parentApproval := awaitAssembledApproval(t, ctx, approvalCh, "dispatch_subagent")
 	parentApproval.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalAllow}
@@ -291,7 +291,7 @@ func TestAssembleRealSubAgentChildWriteNeedsSeparateApproval(t *testing.T) {
 
 func TestAssembleRealSubAgentChildWriteRunsOnceAfterIndependentApprovals(t *testing.T) {
 	assembly, provider, ctx, approvalCh := newAssembledSubagentPolicyFixture(t, false)
-	done := startAssembledSubagentPolicyTurn(assembly, ctx)
+	done := startAssembledSubagentPolicyTurn(ctx, assembly)
 
 	parentApproval := awaitAssembledApproval(t, ctx, approvalCh, "dispatch_subagent")
 	parentApproval.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalAllow}
@@ -314,7 +314,7 @@ func TestAssembleRealSubAgentChildWriteRunsOnceAfterIndependentApprovals(t *test
 
 func TestAssembleRealSubAgentChildWriteObservesPlanTransitionAfterAdmission(t *testing.T) {
 	assembly, provider, ctx, approvalCh := newAssembledSubagentPolicyFixture(t, true)
-	done := startAssembledSubagentPolicyTurn(assembly, ctx)
+	done := startAssembledSubagentPolicyTurn(ctx, assembly)
 
 	parentApproval := awaitAssembledApproval(t, ctx, approvalCh, "dispatch_subagent")
 	parentApproval.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalAllow}
@@ -351,7 +351,7 @@ func TestAssembleRealSubAgentChildWriteObservesPlanTransitionAfterAdmission(t *t
 
 func TestAssembleRealSubAgentChildWriteReplacementStalesPendingApproval(t *testing.T) {
 	assembly, provider, ctx, approvalCh := newAssembledSubagentPolicyFixture(t, false)
-	done := startAssembledSubagentPolicyTurn(assembly, ctx)
+	done := startAssembledSubagentPolicyTurn(ctx, assembly)
 
 	parentApproval := awaitAssembledApproval(t, ctx, approvalCh, "dispatch_subagent")
 	parentApproval.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalAllow}

@@ -228,6 +228,26 @@ func TestPreparedApprovalUserDenyInvalidatesSiblingPermit(t *testing.T) {
 	assert.Zero(t, toolsByName["write_b"].callCount())
 }
 
+func TestPreparedApprovalAllowOnceAsksAgainForIdenticalCall(t *testing.T) {
+	ctx := context.Background()
+	callback := &preparedRuntimeCallback{
+		results: map[string][]ApprovalResult{"target": {ApprovalAllow, ApprovalAllow}},
+		calls:   make(map[string]int),
+	}
+	registry, _, _, _, toolsByName := newPreparedRuntimeFixture(t, callback, nil, "target")
+	call := tools.ToolCall{Name: "target", Args: map[string]any{"path": "same-file"}}
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		invocation, err := registry.PrepareToolCall(ctx, call)
+		require.NoError(t, err)
+		require.NotNil(t, invocation)
+		_, err = invocation.Dispatch(ctx)
+		require.NoError(t, err)
+		assert.Equal(t, attempt, callback.count("target"), "ApprovalAllow is a one-call decision, not a reusable grant")
+		assert.Equal(t, attempt, toolsByName["target"].callCount())
+	}
+}
+
 func TestApprovalAuditRecordsFinalChoice(t *testing.T) {
 	ctx := context.Background()
 	dir := privateAuditTestDir(t)
