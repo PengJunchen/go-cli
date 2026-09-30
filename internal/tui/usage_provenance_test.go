@@ -31,7 +31,7 @@ func TestStatusBarShowsTokenSourcesUnknownCountsAndActualModels(t *testing.T) {
 
 	for _, expected := range []string{
 		"Known tokens: 2000/8000",
-		"Known cost: $0.0250",
+		"Estimated cost: $0.0250",
 		"usage=reported/u1",
 		"cost=estimated,unknown/c2",
 		"price=configured_tier,unknown",
@@ -90,11 +90,18 @@ func TestStatusBarClipsLongProvenanceAtNarrowWidthsWithoutDisplacingPrompt(t *te
 			if !strings.Contains(lines[0], "claude-sonnet-4") || !strings.Contains(lines[0], "turn #3") || !strings.Contains(lines[0], "abc12345") || !strings.Contains(lines[0], "chat") {
 				t.Errorf("status context was lost at width %d: %q", width, lines[0])
 			}
-			if !strings.Contains(lines[1], "Known tokens: 2000/8000") || !strings.Contains(lines[1], "Known cost: $0.0250") {
-				t.Errorf("full token metric or known cost was lost at width %d: %q", width, lines[1])
+			if !strings.Contains(lines[1], "Known tokens: 2000/8000") || !strings.Contains(lines[1], "Estimated cost: $0.0250") {
+				t.Errorf("full token metric or estimated cost subtotal was lost at width %d: %q", width, lines[1])
 			}
-			if !strings.Contains(lines[2], "/cost") || !strings.Contains(lines[2], "unknown usage=1") || !strings.Contains(lines[2], "unknown cost=2") {
-				t.Errorf("bounded provenance cue missing at width %d: %q", width, lines[2])
+			if !strings.Contains(lines[2], "/cost") || !strings.Contains(lines[2], "usage=reported") || !strings.Contains(lines[2], "cost=estimated") {
+				t.Errorf("bounded source provenance cue missing at width %d: %q", width, lines[2])
+			}
+			if width < 70 {
+				if !strings.Contains(lines[2], "unknown:1") || !strings.Contains(lines[2], "unknown:2") {
+					t.Errorf("compact unknown counts missing at width %d: %q", width, lines[2])
+				}
+			} else if !strings.Contains(lines[2], "unknown usage=1") || !strings.Contains(lines[2], "unknown cost=2") {
+				t.Errorf("unknown counts missing at width %d: %q", width, lines[2])
 			}
 			if strings.Contains(bar, "https://") || strings.Contains(bar, "sk-SECRET") {
 				t.Errorf("status bar leaked endpoint or credential-like data: %q", bar)
@@ -140,6 +147,70 @@ func TestStatusBarShowsFullProvenanceAtWideWidth(t *testing.T) {
 	}
 	if got := lipgloss.Width(lines[2]); got > 120 {
 		t.Fatalf("provenance line width=%d exceeds 120 columns: %q", got, lines[2])
+	}
+}
+
+func TestStatusBarLabelsEstimatedPartialUsageAndCostAtCommonWidths(t *testing.T) {
+	for _, width := range []int{60, 80, 120} {
+		t.Run(strconv.Itoa(width), func(t *testing.T) {
+			m := NewBubbleteaApp(make(chan AgentEvent, 1)).model
+			m.width = width
+			m.modelName = "claude-sonnet-4"
+			m.turnCount = 3
+			m.sessionID = "abc12345"
+			m.modeLabel = "chat"
+			m.handleEvent(AgentEvent{
+				Type: "token_usage",
+				TokenUsage: &TokenUsageData{
+					InputTokens: 1500, OutputTokens: 500, MaxTokens: 8000, Cost: 0.025,
+					UnknownUsageAttempts: 1, UnknownCostAttempts: 2,
+					UsageSource:    core.TokenUsageSourceEstimated,
+					CostSources:    []core.TokenUsageCostSource{core.TokenUsageCostEstimated, core.TokenUsageCostUnknown},
+					PriceSources:   []core.TokenUsagePriceSource{core.TokenUsagePriceConfiguredTier, core.TokenUsagePriceUnknown},
+					ProviderModels: []core.TokenUsageProviderModel{{ProviderID: "openai", ModelID: "gpt-4o-mini"}},
+				},
+			})
+
+			m.mu.Lock()
+			bar := m.renderStatusBarLocked()
+			m.mu.Unlock()
+			lines := strings.Split(bar, "\n")
+			if len(lines) != 3 {
+				t.Fatalf("status bar has %d lines at width %d, want 3: %q", len(lines), width, bar)
+			}
+			for _, line := range lines {
+				if got := lipgloss.Width(line); got > width {
+					t.Errorf("status line width=%d exceeds %d columns: %q", got, width, line)
+				}
+			}
+			for _, expected := range []string{"Estimated tokens: 2000/8000", "Estimated cost: $0.0250"} {
+				if !strings.Contains(lines[1], expected) {
+					t.Errorf("partial estimated metric line %q does not contain %q", lines[1], expected)
+				}
+			}
+			if strings.Contains(lines[1], "Known tokens") || strings.Contains(lines[1], "Known cost") || strings.Contains(lines[1], "25%") {
+				t.Errorf("partial estimated totals were presented as known or exact: %q", lines[1])
+			}
+			if width < 70 {
+				for _, expected := range []string{"usage=estimated", "unknown:1", "cost=estimated", "unknown:2", "/cost"} {
+					if !strings.Contains(lines[2], expected) {
+						t.Errorf("narrow provenance line %q does not contain %q", lines[2], expected)
+					}
+				}
+			} else if width < splitWidthThreshold {
+				for _, expected := range []string{"usage=estimated", "unknown usage=1", "cost=estimated", "unknown cost=2", "/cost"} {
+					if !strings.Contains(lines[2], expected) {
+						t.Errorf("medium provenance line %q does not contain %q", lines[2], expected)
+					}
+				}
+			} else {
+				for _, expected := range []string{"usage=estimated/u1", "cost=estimated,unknown/c2", "actual=openai/gpt-4o-mini"} {
+					if !strings.Contains(lines[2], expected) {
+						t.Errorf("wide provenance line %q does not contain %q", lines[2], expected)
+					}
+				}
+			}
+		})
 	}
 }
 

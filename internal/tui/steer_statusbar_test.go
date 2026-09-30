@@ -292,7 +292,7 @@ func TestStatusBarRendering(t *testing.T) {
 	m.mu.Unlock()
 
 	assert.Contains(t, bar, "Tokens: 1500/8000 (18%)")
-	assert.Contains(t, bar, "Cost: $0.0250")
+	assert.Contains(t, bar, "Estimated cost: $0.0250")
 	assert.NotContains(t, bar, "\x1b[38;", "should not have warning color under 80%")
 
 	// High usage (over 80%).
