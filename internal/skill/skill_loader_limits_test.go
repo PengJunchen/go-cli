@@ -3,9 +3,11 @@ package skill
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -103,6 +105,69 @@ func TestSkillLoaderHonorsLimitsAndCancel(t *testing.T) {
 		require.ErrorIs(t, err, ErrSkillUnsafeSource)
 		assert.Nil(t, defs)
 	})
+}
+
+func TestWalkSkillDirectoryRejectsConcurrentAncestorSymlinkSwap(t *testing.T) {
+	root := t.TempDir()
+	nested := filepath.Join(root, "nested")
+	moved := filepath.Join(root, "nested-original")
+	outside := t.TempDir()
+	require.NoError(t, os.Mkdir(nested, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(nested, "000-trigger.txt"), nil, 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(nested, "z-escape.md"), []byte(skillFixture), 0o600))
+	require.NoError(t, os.WriteFile(filepath.Join(outside, "z-escape.md"), []byte("---\nname: escaped\n---\noutside\n"), 0o600))
+	rootHandle, err := os.OpenRoot(root)
+	require.NoError(t, err)
+	defer func() { _ = rootHandle.Close() }()
+
+	startSwap := make(chan struct{})
+	swapDone := make(chan error, 1)
+	var startOnce sync.Once
+	start := func() { startOnce.Do(func() { close(startSwap) }) }
+	go func() {
+		<-startSwap
+		if err := os.Rename(nested, moved); err != nil {
+			swapDone <- err
+			return
+		}
+		swapDone <- os.Symlink(outside, nested)
+	}()
+	swapResultRead := false
+	defer func() {
+		start()
+		if !swapResultRead {
+			if err := <-swapDone; err != nil {
+				t.Errorf("swap ancestor to symlink: %v", err)
+			}
+		}
+	}()
+
+	var loadedOutside bool
+	err = walkSkillDirectory(context.Background(), rootHandle, root, func(path, relative string, entry os.FileInfo, openCandidate func() (*os.File, error)) error {
+		if relative == filepath.Join("nested", "000-trigger.txt") {
+			start()
+			err := <-swapDone
+			swapResultRead = true
+			return err
+		}
+		if relative != filepath.Join("nested", "z-escape.md") {
+			return nil
+		}
+		file, err := openCandidate()
+		if err != nil {
+			return err
+		}
+		defer func() { _ = file.Close() }()
+		content, err := io.ReadAll(file)
+		if err != nil {
+			return err
+		}
+		loadedOutside = strings.Contains(string(content), "name: escaped")
+		return nil
+	})
+
+	assert.False(t, loadedOutside, "walker must not open an external skill through a replaced ancestor")
+	require.ErrorIs(t, err, ErrSkillUnsafeSource)
 }
 
 func TestSkillLoadSourcesEnforcesAggregateBoundsBeforeReturningDefinitions(t *testing.T) {
