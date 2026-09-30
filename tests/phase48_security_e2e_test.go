@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -154,31 +155,27 @@ func TestET_Phase48_PromptInjection_FailClosed(t *testing.T) {
 		"output must be replaced with blocked message on guard error")
 }
 
-// TestET_Phase48_SSRF_BlocksPrivateIPs verifies that the default plugin
-// loader blocks HTTP requests to private IP addresses.
-func TestET_Phase48_SSRF_BlocksPrivateIPs(t *testing.T) {
+// TestET_Phase48_RemotePluginDescriptorsUnavailable verifies that remote
+// extension descriptors are rejected before transport access. SSRF behavior
+// remains covered at the shared HTTP-client boundary in internal/tools.
+func TestET_Phase48_RemotePluginDescriptorsUnavailable(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	loader := extension.NewDefaultPluginLoader()
-
-	// HTTPS to a private IP should be blocked by validateHost/checkBlockedIP.
-	_, err := loader.Load(ctx, "https://10.0.0.1/extensions.json")
-	require.Error(t, err)
-	assert.Contains(t, strings.ToLower(err.Error()), "blocked",
-		"private IP should be blocked")
-
-	// HTTPS to link-local address should also be blocked.
-	_, err = loader.Load(ctx, "https://169.254.169.254/latest/meta-data")
-	require.Error(t, err)
-	assert.Contains(t, strings.ToLower(err.Error()), "blocked",
-		"link-local IP should be blocked")
+	for _, endpoint := range []string{"https://10.0.0.1/extensions.json", "https://169.254.169.254/latest/meta-data"} {
+		_, err := loader.Load(ctx, endpoint)
+		if errors.Is(err, extension.ErrUnsupportedRPC) { // Entire loader disabled by -tags no_plugin.
+			continue
+		}
+		require.ErrorIs(t, err, extension.ErrRemoteExtensionUnsupported)
+	}
 }
 
-// TestET_Phase48_SSRF_RequiresHTTPS verifies that the default plugin loader
-// rejects non-HTTPS endpoints except for localhost.
-func TestET_Phase48_SSRF_RequiresHTTPS(t *testing.T) {
+// TestET_Phase48_HTTPPluginDescriptorsUnavailable verifies that HTTP is an
+// unavailable extension capability regardless of host or TLS scheme.
+func TestET_Phase48_HTTPPluginDescriptorsUnavailable(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -186,9 +183,9 @@ func TestET_Phase48_SSRF_RequiresHTTPS(t *testing.T) {
 	loader := extension.NewDefaultPluginLoader()
 
 	_, err := loader.Load(ctx, "http://example.com/extensions.json")
-	require.Error(t, err)
-	assert.Contains(t, strings.ToLower(err.Error()), "https",
-		"non-HTTPS non-localhost endpoint should be rejected")
+	if !errors.Is(err, extension.ErrUnsupportedRPC) { // Entire loader disabled by -tags no_plugin.
+		require.ErrorIs(t, err, extension.ErrRemoteExtensionUnsupported)
+	}
 }
 
 // TestET_Phase48_BashSandbox_SubstitutionBypass verifies that the command

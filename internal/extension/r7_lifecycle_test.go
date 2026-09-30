@@ -720,3 +720,38 @@ func TestPluginManagerShutdownErrorsPropagateWithoutRepeatingCallbacks(t *testin
 	assert.Equal(t, int32(1), first.stopCalls.Load())
 	assert.Equal(t, int32(1), second.stopCalls.Load())
 }
+
+func TestHookRegistrationOwnerSurvivesStageCommit(t *testing.T) {
+	loader := newMgrTestPluginLoader("test")
+	register := func(name string) func(context.Context, ExtensionRegistry) error {
+		return func(ctx context.Context, registry ExtensionRegistry) error {
+			return registry.RegisterHook(ctx, newRegTestHook(name))
+		}
+	}
+
+	first := &r7LifecycleExt{name: "owner-one", init: register("hook-one")}
+	failed := &r7LifecycleExt{name: "owner-failed", init: func(ctx context.Context, registry ExtensionRegistry) error {
+		if err := registry.RegisterHook(ctx, newRegTestHook("hook-failed")); err != nil {
+			return err
+		}
+		return errors.New("init failed")
+	}}
+	second := &r7LifecycleExt{name: "owner-two", init: register("hook-two")}
+	conflict := &r7LifecycleExt{name: "owner-conflict", init: register("hook-one")}
+	loader.SetResult("plugins", []Extension{first, failed, second, conflict})
+	manager := NewPluginManager(loader)
+	require.NoError(t, manager.Load(context.Background(), []string{"plugins"}))
+	require.Error(t, manager.Init(context.Background()))
+
+	registrations := manager.HookRegistrations()
+	require.Len(t, registrations, 2)
+	assert.Equal(t, HookRegistration{Owner: "owner-one", Hook: registrations[0].Hook}, registrations[0])
+	assert.Equal(t, "hook-one", registrations[0].Hook.Name())
+	assert.Equal(t, "owner-one", registrations[0].Owner)
+	assert.Equal(t, "owner-two", registrations[1].Owner)
+	assert.Equal(t, "hook-two", registrations[1].Hook.Name())
+	assert.Equal(t, []Hook{registrations[0].Hook, registrations[1].Hook}, manager.Hooks())
+	assert.Equal(t, int32(1), conflict.stopCalls.Load(), "a conflicting stage is cleaned up once")
+	assert.Equal(t, int32(0), failed.stopCalls.Load(), "a failed Init does not publish or gain a shutdown callback")
+	require.NoError(t, manager.Shutdown(context.Background()))
+}

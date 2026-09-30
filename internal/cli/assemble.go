@@ -1082,8 +1082,8 @@ func (s *assembleState) assembleExtensions() error {
 				s.logger.Warn("assemble_extension_tool_register_failed", "tool", t.Name(), "err", regErr)
 			}
 		}
-		for _, h := range pm.Hooks() {
-			s.extHooks = append(s.extHooks, newExtensionHookAdapter(h))
+		for _, registration := range pm.HookRegistrations() {
+			s.extHooks = append(s.extHooks, newExtensionHookAdapter(registration))
 		}
 		for _, m := range pm.Middleware() {
 			s.extMiddleware = append(s.extMiddleware, newExtensionMiddlewareAdapter(m))

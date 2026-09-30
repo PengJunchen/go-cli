@@ -94,14 +94,17 @@ func (pm *PluginManager) Load(ctx context.Context, paths []string) error {
 func (pm *PluginManager) loadPaths(ctx context.Context, paths []string) error {
 	var errs []error
 	for _, path := range paths {
-		if err := ctx.Err(); err != nil {
-			errs = append(errs, fmt.Errorf("plugin %q: %w", path, err))
-			break
+		safePath := safeExtensionPath(path)
+		if !isRemoteExtensionPath(path) {
+			if err := ctx.Err(); err != nil {
+				errs = append(errs, fmt.Errorf("plugin %q: %w", safePath, err))
+				break
+			}
 		}
 		extensions, err := pm.loader.Load(ctx, path)
 		if err != nil {
-			slog.Warn("extension.plugin_manager.load_failed", "path", path, "err", err)
-			errs = append(errs, fmt.Errorf("plugin %q: %w", path, err))
+			slog.Warn("extension.plugin_manager.load_failed", "path", safePath, "err", err)
+			errs = append(errs, fmt.Errorf("plugin %q: %w", safePath, err))
 			continue
 		}
 		if err := pm.appendLoaded(path, extensions); err != nil {
@@ -393,6 +396,15 @@ func (pm *PluginManager) Tools() []tools.ToolDefinition {
 func (pm *PluginManager) Hooks() []Hook {
 	if der, ok := pm.coordinator.registry().(*DefaultExtensionRegistry); ok {
 		return der.AllHooks()
+	}
+	return nil
+}
+
+// HookRegistrations returns ordered Hook registrations with the name of the
+// extension that successfully initialized each Hook.
+func (pm *PluginManager) HookRegistrations() []HookRegistration {
+	if der, ok := pm.coordinator.registry().(*DefaultExtensionRegistry); ok {
+		return der.AllHookRegistrations()
 	}
 	return nil
 }

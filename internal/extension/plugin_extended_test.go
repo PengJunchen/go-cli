@@ -4,10 +4,10 @@ package extension_test
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -16,131 +16,81 @@ import (
 	"github.com/pengjunchen/go-cli/internal/extension"
 )
 
-// TestPluginLoaderNames verifies the default loader name and the registered-name
-// fallback behavior.
-func TestPluginLoaderNames(t *testing.T) {
-	l := extension.NewDefaultPluginLoader()
-	assert.Equal(t, "default-plugin-loader", l.Name())
-}
-
-// TestPluginLoaderGRPCVariousCasing verifies gRPC detection is case-insensitive
-// on the scheme prefix.
-func TestPluginLoaderGRPCVariousCasing(t *testing.T) {
-	loader := extension.NewDefaultPluginLoader()
-	for _, p := range []string{"grpc://host", "GRPC://host"} {
-		_, err := loader.Load(context.Background(), p)
-		assert.ErrorIs(t, err, extension.ErrUnsupportedRPC, "path %q", p)
-	}
-}
-
-// TestPluginLoaderHTTPNoExtensions verifies an endpoint with an empty extension
-// list is rejected.
 func TestPluginLoaderHTTPNoExtensions(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{"extensions": []string{}}) //nolint:errcheck
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte(`{"extensions":[]}`)) //nolint:errcheck
 	}))
 	defer srv.Close()
-
-	loader := extension.NewDefaultPluginLoader()
-	_, err := loader.Load(context.Background(), srv.URL)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no extensions")
+	assertRemoteRejectedNoRequest(t, srv.URL+"/empty", &requests)
 }
 
-// TestPluginLoaderHTTPMissingKey verifies an endpoint lacking the extensions key
-// (empty bundle) is treated as returning no extensions.
 func TestPluginLoaderHTTPMissingKey(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
 		_, _ = w.Write([]byte(`{}`)) //nolint:errcheck
 	}))
 	defer srv.Close()
-
-	loader := extension.NewDefaultPluginLoader()
-	_, err := loader.Load(context.Background(), srv.URL)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "no extensions")
+	assertRemoteRejectedNoRequest(t, srv.URL+"/missing", &requests)
 }
 
-// TestPluginLoaderHTTPEmptyBody verifies an empty response body yields a decode
-// error.
 func TestPluginLoaderHTTPEmptyBody(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
 		_, _ = w.Write(nil) //nolint:errcheck
 	}))
 	defer srv.Close()
-
-	loader := extension.NewDefaultPluginLoader()
-	_, err := loader.Load(context.Background(), srv.URL)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "decode")
+	assertRemoteRejectedNoRequest(t, srv.URL+"/empty-body", &requests)
 }
 
-// TestPluginLoaderHTTPConcurrent verifies the loader handles concurrent requests
-// to a healthy endpoint without data races.
 func TestPluginLoaderHTTPConcurrent(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-			"extensions": []map[string]any{{"name": "a"}},
-		})
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		_, _ = w.Write([]byte(`{"extensions":[{"name":"unused"}]}`)) //nolint:errcheck
 	}))
 	defer srv.Close()
-
 	loader := extension.NewDefaultPluginLoader()
+	const workers = 16
+	errs := make(chan error, workers)
 	var wg sync.WaitGroup
-	for i := 0; i < 16; i++ {
+	for range workers {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			exts, err := loader.Load(context.Background(), srv.URL)
-			require.NoError(t, err)
-			require.Len(t, exts, 1)
-			assert.Equal(t, "a", exts[0].Name())
+			_, err := loader.Load(context.Background(), srv.URL)
+			errs <- err
 		}()
 	}
 	wg.Wait()
+	close(errs)
+	for err := range errs {
+		assert.ErrorIs(t, err, extension.ErrRemoteExtensionUnsupported)
+	}
+	assert.Zero(t, requests.Load())
 }
 
-// TestPluginLoaderCanceledContext verifies a canceled context propagates to the
-// HTTP request and surfaces an error.
 func TestPluginLoaderCanceledContext(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-r.Context().Done()
-	}))
+	var requests atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests.Add(1) }))
 	defer srv.Close()
-
 	loader := extension.NewDefaultPluginLoader()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	_, err := loader.Load(ctx, srv.URL)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "query endpoint")
+	require.ErrorIs(t, err, extension.ErrRemoteExtensionUnsupported)
+	assert.Zero(t, requests.Load())
 }
 
-// TestPluginLoaderNonHTTPNonPlugin verifies an arbitrary path is routed to the
-// Go plugin loader and fails to open with a descriptive error.
-func TestPluginLoaderNonHTTPNonPlugin(t *testing.T) {
-	loader := extension.NewDefaultPluginLoader()
-	_, err := loader.Load(context.Background(), "/no/such/module.so")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "open plugin")
-	assert.Contains(t, err.Error(), "/no/such/module.so")
-}
-
-// TestPluginLoaderHTTPS verifies the https scheme is routed to the HTTP loader
-// just like http.
 func TestPluginLoaderHTTPS(t *testing.T) {
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck
-			"extensions": []map[string]any{{"name": "sec"}},
-		})
-	}))
+	var requests atomic.Int32
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { requests.Add(1) }))
 	defer srv.Close()
-
-	// Inject a client that trusts the test server's self-signed certificate.
-	// (The loader's default SSRF-safe client uses the standard trust store.)
 	loader := extension.NewDefaultPluginLoader(extension.WithPluginHTTPClient(srv.Client()))
-	exts, err := loader.Load(context.Background(), srv.URL)
-	require.NoError(t, err)
-	require.Len(t, exts, 1)
-	assert.Equal(t, "sec", exts[0].Name())
+	_, err := loader.Load(context.Background(), srv.URL)
+	require.ErrorIs(t, err, extension.ErrRemoteExtensionUnsupported)
+	assert.Zero(t, requests.Load())
 }

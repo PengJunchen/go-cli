@@ -49,7 +49,9 @@ type DefaultExtensionRegistry struct {
 	providers       map[string]llm.ModelProvider
 	providerOrder   []string
 	hooks           map[string]Hook
+	hookOwners      map[string]string
 	hookOrder       []string
+	hookOwner       string
 	middlewares     map[string]Middleware
 	middlewareOrder []string
 	sealed          bool
@@ -64,6 +66,7 @@ func NewExtensionRegistry() ExtensionRegistry {
 		commands:    make(map[string]func(args []string) error),
 		providers:   make(map[string]llm.ModelProvider),
 		hooks:       make(map[string]Hook),
+		hookOwners:  make(map[string]string),
 		middlewares: make(map[string]Middleware),
 	}
 }
@@ -144,6 +147,7 @@ func (r *DefaultExtensionRegistry) RegisterHook(_ context.Context, h Hook) error
 		return fmt.Errorf("extension already registered: %s", name)
 	}
 	r.hooks[name] = h
+	r.hookOwners[name] = r.hookOwner
 	r.hookOrder = append(r.hookOrder, name)
 	return nil
 }
@@ -230,6 +234,7 @@ func (r *DefaultExtensionRegistry) commitFromLocked(staging *DefaultExtensionReg
 	r.providerOrder = append(r.providerOrder, staging.providerOrder...)
 	for _, name := range staging.hookOrder {
 		r.hooks[name] = staging.hooks[name]
+		r.hookOwners[name] = staging.hookOwners[name]
 	}
 	r.hookOrder = append(r.hookOrder, staging.hookOrder...)
 	for _, name := range staging.middlewareOrder {
@@ -314,6 +319,19 @@ func (r *DefaultExtensionRegistry) AllHooks() []Hook {
 	result := make([]Hook, 0, len(r.hookOrder))
 	for _, name := range r.hookOrder {
 		result = append(result, r.hooks[name])
+	}
+	return result
+}
+
+// AllHookRegistrations returns ordered, owner-bearing Hook registrations.
+// The returned slice is a snapshot; the Hook values themselves remain the
+// registered extension objects.
+func (r *DefaultExtensionRegistry) AllHookRegistrations() []HookRegistration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := make([]HookRegistration, 0, len(r.hookOrder))
+	for _, name := range r.hookOrder {
+		result = append(result, HookRegistration{Owner: r.hookOwners[name], Hook: r.hooks[name]})
 	}
 	return result
 }

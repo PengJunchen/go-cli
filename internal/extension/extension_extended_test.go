@@ -54,7 +54,7 @@ func TestHookEventFields(t *testing.T) {
 func TestHookResultActions(t *testing.T) {
 	actions := map[HookAction]string{
 		HookActionPass:      "pass",
-		hookActionBlock:     "block",
+		HookActionBlock:     "block",
 		hookActionTerminate: "terminate",
 		hookActionReplace:   "replace",
 	}
@@ -66,8 +66,8 @@ func TestHookResultActions(t *testing.T) {
 // TestHookResultCarriesReasonAndReplacement verifies HookResult relays the
 // decision plus optional metadata for block/replace outcomes.
 func TestHookResultCarriesReasonAndReplacement(t *testing.T) {
-	block := HookResult{Action: hookActionBlock, Reason: "denied"}
-	assert.Equal(t, hookActionBlock, block.Action)
+	block := HookResult{Action: HookActionBlock, Reason: "denied"}
+	assert.Equal(t, HookActionBlock, block.Action)
 	assert.Equal(t, "denied", block.Reason)
 
 	replace := HookResult{Action: hookActionReplace, Replacement: "sub"}

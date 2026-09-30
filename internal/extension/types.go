@@ -2,6 +2,7 @@ package extension
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"time"
 )
@@ -60,15 +61,126 @@ const (
 	// HookActionPass indicates the event was observed and processing should
 	// continue with the next hook.
 	HookActionPass HookAction = "pass"
-	// hookActionBlock indicates processing should stop and the event should be
+	// HookActionBlock indicates processing should stop and the event should be
 	// rejected (e.g. a permission denial).
-	hookActionBlock HookAction = "block"
+	HookActionBlock HookAction = "block"
 	// hookActionTerminate indicates the whole run should stop immediately.
 	hookActionTerminate HookAction = "terminate"
 	// hookActionReplace indicates the caller should substitute its payload with
 	// the HookResult.Replacement value.
 	hookActionReplace HookAction = "replace"
 )
+
+var (
+	// ErrHookPayloadUnsupported reports that a Hook payload contains a value
+	// outside the JSON-compatible observer contract.
+	ErrHookPayloadUnsupported = errors.New("extension: hook payload is unsupported")
+	// ErrHookPayloadLimitExceeded reports that an observer payload exceeded a
+	// fixed depth, node-count, or byte-count limit.
+	ErrHookPayloadLimitExceeded = errors.New("extension: hook payload limit exceeded")
+	// ErrUnsupportedHookAction reports that a Hook returned an action or
+	// replacement value unsupported by the observer bridge.
+	ErrUnsupportedHookAction = errors.New("extension: hook action is unsupported")
+	// ErrHookBlocked reports that a Hook blocked the run.
+	ErrHookBlocked = errors.New("extension: hook blocked the run")
+)
+
+// HookSubmissionType is the extension-owned representation of a submission
+// kind. It intentionally does not alias a core enum.
+type HookSubmissionType string
+
+// HookRunOutcome is the extension-owned representation of a run outcome.
+type HookRunOutcome string
+
+// HookRunExecutionState is the extension-owned representation of run cleanup
+// state.
+type HookRunExecutionState string
+
+// HookErrorClass is a stable, message-free error category for observers.
+type HookErrorClass string
+
+const (
+	HookErrorClassCanceled          HookErrorClass = "canceled"
+	HookErrorClassDeadline          HookErrorClass = "deadline"
+	HookErrorClassBlocked           HookErrorClass = "hook_blocked"
+	HookErrorClassUnsupportedAction HookErrorClass = "unsupported_action"
+	HookErrorClassUnsupported       HookErrorClass = "unsupported_payload"
+	HookErrorClassUnknown           HookErrorClass = "unknown"
+)
+
+// HookRegistration binds a Hook to the extension that successfully
+// initialized it. Owner is assigned by the coordinator and cannot be
+// overridden by the Hook.
+type HookRegistration struct {
+	Owner string
+	Hook  Hook
+}
+
+// HookSubmissionSnapshot is a bounded, extension-owned copy of a submission.
+type HookSubmissionSnapshot struct {
+	Type     HookSubmissionType
+	Content  string
+	Metadata map[string]any
+	Messages []HookMessageSnapshot
+}
+
+// HookMessageSnapshot is the extension-owned representation of one message.
+type HookMessageSnapshot struct {
+	Role, Content             string
+	ContentBlocks             []HookContentBlockSnapshot
+	Usage                     *HookUsageSnapshot
+	ToolCalls                 []HookToolCallSnapshot
+	ToolCallID, ToolName      string
+	InputKind, ReceiptOutcome string
+}
+
+// HookContentBlockSnapshot is the extension-owned representation of a
+// multimodal content block.
+type HookContentBlockSnapshot struct {
+	Type, Text string
+	ImageURL   *HookImageURLSnapshot
+}
+
+// HookImageURLSnapshot contains copied image URL data.
+type HookImageURLSnapshot struct{ URL, Detail string }
+
+// HookUsageSnapshot contains copied token usage values.
+type HookUsageSnapshot struct{ InputTokens, OutputTokens, TotalTokens int }
+
+// HookToolCallSnapshot contains copied tool call identity and JSON arguments.
+type HookToolCallSnapshot struct {
+	ID, Name string
+	Args     any
+}
+
+// HookBeforeRunSnapshot is the concrete Data value for agent.before_run.
+type HookBeforeRunSnapshot struct{ Submission HookSubmissionSnapshot }
+
+// HookAfterRunSnapshot is the concrete Data value for agent.after_run.
+type HookAfterRunSnapshot struct {
+	Submission HookSubmissionSnapshot
+	Run        HookRunSnapshot
+	Error      HookErrorSnapshot
+}
+
+// HookRunSnapshot contains copied scalar fields about a completed run.
+type HookRunSnapshot struct {
+	Message                 string
+	Success                 bool
+	RunID                   string
+	RunIDAvailable          bool
+	Outcome                 HookRunOutcome
+	OutcomeAvailable        bool
+	ExecutionState          HookRunExecutionState
+	ExecutionStateAvailable bool
+}
+
+// HookErrorSnapshot exposes only presence and a stable category. It never
+// carries the underlying error or its text.
+type HookErrorSnapshot struct {
+	Present bool
+	Class   HookErrorClass
+}
 
 // HookEvent is the immutable description of an event delivered to a Hook.
 type HookEvent struct {
