@@ -239,7 +239,7 @@ func findWithFdManaged(ctx context.Context, searchPath, pattern, kind string, ma
 	args = append(args, searchPath)
 
 	cmd := exec.Command("fd", args...)
-	capture := newFindPathCaptureWriter(findMaxResults, directoryCaptureMaxEntryBytes)
+	capture := newFindPathCaptureWriterForSearchPath(searchPath)
 	lifecycle, err := runManagedSearchCommandWithStdoutWriter(ctx, cmd, capture)
 	if err != nil {
 		return findCaptureResult{}, false, lifecycle, false, err
@@ -284,7 +284,7 @@ func findWithFindManaged(ctx context.Context, searchPath, pattern, kind string, 
 	args = append(args, "-print0")
 
 	cmd := exec.Command(path, args...)
-	capture := newFindPathCaptureWriter(findMaxResults, directoryCaptureMaxEntryBytes)
+	capture := newFindPathCaptureWriterForSearchPath(searchPath)
 	lifecycle, err := runManagedSearchCommandWithStdoutWriter(ctx, cmd, capture)
 	if err != nil {
 		return findCaptureResult{}, false, lifecycle, false, err
@@ -303,6 +303,51 @@ func findWithFindManaged(ctx context.Context, searchPath, pattern, kind string, 
 		return findCaptureResult{}, false, lifecycle, true, lifecycle.runErr
 	}
 	return findCaptureResult{paths: capture.Results(), truncated: capture.Truncated()}, true, lifecycle, true, nil
+}
+
+func newFindPathCaptureWriterForSearchPath(searchPath string) *findPathCaptureWriter {
+	capture := newFindPathCaptureWriter(findMaxResults, directoryCaptureMaxEntryBytes)
+	if info, err := os.Stat(searchPath); err == nil && info.IsDir() {
+		capture.setDirectoryRoot(searchPath)
+	}
+	return capture
+}
+
+// normalizeFindDirectoryPath converts helper output for a directory search to
+// the pure-Go finder's cleaned path relative to the search root. Relative
+// records already rooted at searchPath are stripped; root-relative records
+// from shims are also accepted. Directory roots themselves are omitted.
+func normalizeFindDirectoryPath(searchPath, candidate string) (string, bool, error) {
+	root := filepath.Clean(searchPath)
+	var relative string
+	if filepath.IsAbs(candidate) {
+		rootAbs, err := filepath.Abs(root)
+		if err != nil {
+			return "", false, err
+		}
+		relative, err = filepath.Rel(rootAbs, filepath.Clean(candidate))
+		if err != nil {
+			return "", false, err
+		}
+	} else {
+		relative = filepath.Clean(candidate)
+		if !filepath.IsAbs(root) && root != "." {
+			if relative == root {
+				relative = "."
+			} else if strings.HasPrefix(relative, root+string(filepath.Separator)) {
+				relative = strings.TrimPrefix(relative, root+string(filepath.Separator))
+			}
+		}
+	}
+
+	relative = filepath.Clean(relative)
+	if filepath.IsAbs(relative) || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", false, fmt.Errorf("helper path %q is outside search root %q", candidate, searchPath)
+	}
+	if relative == "." {
+		return "", false, nil
+	}
+	return relative, true, nil
 }
 
 // findPureGo walks searchPath depth-first with one-entry ReadDir calls,

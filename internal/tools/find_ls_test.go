@@ -187,7 +187,7 @@ func TestFindSystemFindUsesNULRecordsForUnusualNames(t *testing.T) {
 	require.NoError(t, err)
 	wantPaths := make([]string, 0, len(names))
 	for _, name := range names {
-		path := filepath.Join(dir, name)
+		path := name
 		if name == "   " || name == "odd\nname" || !isValidUTF8CaptureName(name) {
 			path = strconv.Quote(path)
 		}
@@ -196,6 +196,132 @@ func TestFindSystemFindUsesNULRecordsForUnusualNames(t *testing.T) {
 	assert.Equal(t, strings.Join(wantPaths, "\n"), result.Output)
 	assert.Equal(t, len(names), result.Metadata["matches"])
 	assert.Equal(t, false, result.Metadata["truncated"])
+}
+
+func TestFindSystemFindNormalizesDirectoryPathsToSearchRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("system find fixture requires POSIX paths")
+	}
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	findPath, err := exec.LookPath("find")
+	require.NoError(t, err)
+	helperDir := t.TempDir()
+	require.NoError(t, os.Symlink(findPath, filepath.Join(helperDir, "find")))
+	t.Setenv("PATH", helperDir)
+
+	dir := setupFindDir(t)
+	t.Chdir(dir)
+
+	for _, tc := range []struct {
+		name string
+		tool *FindTool
+		path string
+		want string
+	}{
+		{name: "dot root", tool: NewFindTool(), path: ".", want: "a.txt\nb.go\nsub\nsub/c.go\nsub/d.txt\nsub/deep\nsub/deep/e.txt"},
+		{name: "absolute root", tool: NewFindTool(WithFindWorkdir("")), path: dir, want: "a.txt\nb.go\nsub\nsub/c.go\nsub/d.txt\nsub/deep\nsub/deep/e.txt"},
+		{name: "nested relative root", tool: NewFindTool(), path: "sub", want: "c.go\nd.txt\ndeep\ndeep/e.txt"},
+		{name: "nested absolute root", tool: NewFindTool(WithFindWorkdir("")), path: filepath.Join(dir, "sub"), want: "c.go\nd.txt\ndeep\ndeep/e.txt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := tc.tool.Execute(context.Background(), ToolCall{Args: map[string]any{"path": tc.path}})
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, result.Output)
+			assert.Equal(t, strings.Count(tc.want, "\n")+1, result.Metadata["matches"])
+			assert.False(t, result.Metadata["truncated"].(bool))
+		})
+	}
+}
+
+func TestFindFDNormalizesDirectoryPathsToSearchRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fd fixture requires POSIX paths")
+	}
+	fdPath, err := exec.LookPath("fd")
+	if err != nil {
+		t.Skip("fd is not installed")
+	}
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	helperDir := t.TempDir()
+	require.NoError(t, os.Symlink(fdPath, filepath.Join(helperDir, "fd")))
+	t.Setenv("PATH", helperDir)
+
+	dir := setupFindDir(t)
+	t.Chdir(dir)
+
+	for _, tc := range []struct {
+		name string
+		tool *FindTool
+		path string
+		want string
+	}{
+		{name: "dot root", tool: NewFindTool(), path: ".", want: "a.txt\nb.go\nsub\nsub/c.go\nsub/d.txt\nsub/deep\nsub/deep/e.txt"},
+		{name: "absolute root", tool: NewFindTool(WithFindWorkdir("")), path: dir, want: "a.txt\nb.go\nsub\nsub/c.go\nsub/d.txt\nsub/deep\nsub/deep/e.txt"},
+		{name: "nested relative root", tool: NewFindTool(), path: "sub", want: "c.go\nd.txt\ndeep\ndeep/e.txt"},
+		{name: "nested absolute root", tool: NewFindTool(WithFindWorkdir("")), path: filepath.Join(dir, "sub"), want: "c.go\nd.txt\ndeep\ndeep/e.txt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result, err := tc.tool.Execute(context.Background(), ToolCall{Args: map[string]any{"path": tc.path}})
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, result.Output)
+			assert.Equal(t, strings.Count(tc.want, "\n")+1, result.Metadata["matches"])
+			assert.False(t, result.Metadata["truncated"].(bool))
+		})
+	}
+}
+
+func TestFindFDShimNormalizesDirectoryPathsToSearchRoot(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("fd shim requires POSIX shell")
+	}
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	helperDir := t.TempDir()
+	marker := filepath.Join(helperDir, "fd-called")
+	script := "#!/bin/sh\nprintf called > " + quoteDirectoryCaptureShellArg(marker) + "\n" + `
+while [ "$#" -gt 0 ]; do
+  if [ "$1" = "--" ]; then shift; pattern=$1; root=$2; break; fi
+  shift
+done
+[ "$pattern" = "" ] || exit 23
+case "$root" in
+  .) printf '.\000./sub/deep/e.txt\000./a.txt\000./sub/c.go\000./b.go\000./sub/d.txt\000./sub/deep\000./sub\000' ;;
+  sub) printf 'sub\000sub/deep/e.txt\000sub/c.go\000sub/d.txt\000sub/deep\000' ;;
+  */sub) printf '%s\000%s/deep/e.txt\000%s/c.go\000%s/d.txt\000%s/deep\000' "$root" "$root" "$root" "$root" "$root" ;;
+  *) printf '%s\000%s/sub/deep/e.txt\000%s/a.txt\000%s/sub/c.go\000%s/b.go\000%s/sub/d.txt\000%s/sub/deep\000%s/sub\000' "$root" "$root" "$root" "$root" "$root" "$root" "$root" "$root" ;;
+esac
+`
+	require.NoError(t, os.WriteFile(filepath.Join(helperDir, "fd"), []byte(script), 0o700))
+	t.Setenv("PATH", helperDir)
+
+	dir := setupFindDir(t)
+	t.Chdir(dir)
+
+	for _, tc := range []struct {
+		name string
+		tool *FindTool
+		path string
+		want string
+	}{
+		{name: "dot root", tool: NewFindTool(), path: ".", want: "a.txt\nb.go\nsub\nsub/c.go\nsub/d.txt\nsub/deep\nsub/deep/e.txt"},
+		{name: "absolute root", tool: NewFindTool(WithFindWorkdir("")), path: dir, want: "a.txt\nb.go\nsub\nsub/c.go\nsub/d.txt\nsub/deep\nsub/deep/e.txt"},
+		{name: "nested relative root", tool: NewFindTool(), path: "sub", want: "c.go\nd.txt\ndeep\ndeep/e.txt"},
+		{name: "nested absolute root", tool: NewFindTool(WithFindWorkdir("")), path: filepath.Join(dir, "sub"), want: "c.go\nd.txt\ndeep\ndeep/e.txt"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.NoError(t, os.WriteFile(marker, nil, 0o600))
+			result, err := tc.tool.Execute(context.Background(), ToolCall{Args: map[string]any{"path": tc.path}})
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, result.Output)
+			assert.Equal(t, strings.Count(tc.want, "\n")+1, result.Metadata["matches"])
+			assert.False(t, result.Metadata["truncated"].(bool))
+			data, err := os.ReadFile(marker)
+			require.NoError(t, err)
+			assert.Equal(t, "called", string(data), "the exact-output assertion must exercise the fd shim")
+		})
+	}
 }
 
 func TestFindGlobPatternMatchesSameEntriesAcrossBackends(t *testing.T) {
@@ -309,6 +435,13 @@ func TestFindSystemFindExcludesDirectoryRootAndFileRootIsIncluded(t *testing.T) 
 	require.NoError(t, err)
 	assert.Equal(t, rootFile, goFileResult.Output)
 	assert.Equal(t, fileRootResult.Metadata["matches"], goFileResult.Metadata["matches"])
+
+	t.Chdir(dir)
+	relativeFileResult, err := NewFindTool().Execute(context.Background(), ToolCall{Args: map[string]any{
+		"path": "root-file.txt", "pattern": "root-file.txt", "type": "f",
+	}})
+	require.NoError(t, err)
+	assert.Equal(t, "root-file.txt", relativeFileResult.Output)
 }
 
 func TestFindFDZeroExitWithNoResultsReturnsEmptyResult(t *testing.T) {
