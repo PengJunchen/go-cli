@@ -13,12 +13,43 @@ import (
 
 type preparedUnfencedDenyStore struct{}
 
+type preparedInvalidClassifier struct{}
+
+func (preparedInvalidClassifier) Name() string { return "prepared_invalid" }
+func (preparedInvalidClassifier) Classify(context.Context, tools.ToolCall) Classification {
+	return Classification(99)
+}
+
 func (preparedUnfencedDenyStore) Get(context.Context, string) (Classification, bool, error) {
 	return Deny, true, nil
 }
 
 func (preparedUnfencedDenyStore) Set(context.Context, string, Classification) error { return nil }
 func (preparedUnfencedDenyStore) Delete(context.Context, string) error              { return nil }
+
+func TestPreparedPolicyFailsClosedOnInvalidClassification(t *testing.T) {
+	ctx := context.Background()
+	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck
+	target := &preparedRuntimeTool{name: "target"}
+	require.NoError(t, base.Register(ctx, target))
+	fence := base.DispatchFence()
+	controller := core.NewDefaultPlanModeController(fence)
+	callback := &preparedRuntimeCallback{
+		results: map[string][]ApprovalResult{"target": {ApprovalAllow}},
+		calls:   make(map[string]int),
+	}
+	middleware := NewApprovalMiddleware(preparedInvalidClassifier{}, NewInMemoryApprovalStore(),
+		WithDispatchFence(fence), WithPlanModeController(controller), WithCallback(callback))
+	registry := tools.NewMiddlewareToolRegistry(base)
+	require.NoError(t, registry.SetPreparedToolPolicy(middleware.PreparedPolicy))
+	require.NoError(t, registry.SetPreparedToolStages(tools.PreparedToolStages{}))
+
+	invocation, err := registry.PrepareToolCall(ctx, tools.ToolCall{Name: "target"})
+	assert.ErrorIs(t, err, ErrToolDenied)
+	assert.Nil(t, invocation, "invalid classifier output must not publish a prepared invocation")
+	assert.Zero(t, callback.count("target"), "invalid classification is denied without asking for approval")
+	assert.Zero(t, target.callCount(), "invalid classification must never reach the executor")
+}
 
 func TestPreparedPolicyFailsClosedWithUnfencedApprovalStore(t *testing.T) {
 	ctx := context.Background()
