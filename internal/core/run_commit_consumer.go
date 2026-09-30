@@ -52,6 +52,8 @@ type runCommitConsumer struct {
 	binding     RunCommitBinding
 	runID       string
 	terminalID  TerminalCheckpointID
+	identityMu  sync.RWMutex
+	identities  map[string]ExecutionIdentity
 }
 
 type runCommitDispatchResult struct {
@@ -302,6 +304,63 @@ func (consumer *runCommitConsumer) recordTaskExecution(taskID uint64, execution 
 	return nil
 }
 
+func (consumer *runCommitConsumer) processExecutionIdentityObserver(taskID uint64, intent ActionIntent) tools.ProcessExecutionIdentityObserver {
+	return func(_ context.Context, observed tools.ProcessExecutionIdentity) error {
+		identity := ExecutionIdentity{
+			Kind:              ExecutionIdentityProcessGroup,
+			Platform:          observed.Platform,
+			HostGeneration:    observed.HostGeneration,
+			LeaderPID:         observed.LeaderPID,
+			ProcessStartToken: observed.ProcessStartToken,
+			ProcessGroupID:    observed.ProcessGroupID,
+		}
+		if err := identity.Validate(); err != nil {
+			return fmt.Errorf("core: invalid prepared process execution identity: %w", err)
+		}
+		execution := ActionExecution{
+			RunID:                      intent.RunID,
+			AssistantTranscriptOrdinal: intent.AssistantTranscriptOrdinal,
+			ToolCallID:                 intent.ToolCallID,
+			ActionID:                   intent.ActionID,
+			OwnerGeneration:            intent.OwnerGeneration,
+			DispatchState:              DispatchStateDispatched,
+			ResourceState:              RunExecutionCleanupPending,
+			ExecutionIdentity:          &identity,
+		}
+		if err := consumer.recordTaskExecution(taskID, execution); err != nil {
+			return err
+		}
+		consumer.identityMu.Lock()
+		if consumer.identities == nil {
+			consumer.identities = make(map[string]ExecutionIdentity)
+		}
+		consumer.identities[intent.ActionID] = identity
+		consumer.identityMu.Unlock()
+		return nil
+	}
+}
+
+func (consumer *runCommitConsumer) executionIdentity(actionID string) *ExecutionIdentity {
+	if consumer == nil || actionID == "" {
+		return nil
+	}
+	consumer.identityMu.RLock()
+	identity, ok := consumer.identities[actionID]
+	consumer.identityMu.RUnlock()
+	if !ok {
+		return nil
+	}
+	copy := identity
+	return &copy
+}
+
+func (consumer *runCommitConsumer) processExecutionIdentityContext(ctx context.Context, taskID uint64, intent ActionIntent, invocation tools.PreparedInvocation) context.Context {
+	if consumer == nil || invocation == nil || taskID == 0 || invocation.NormalizedCall().Name != "bash" || invocation.ToolIdentity().RegistrationSource() != tools.RegistrationSourceBuiltin {
+		return ctx
+	}
+	return tools.WithProcessExecutionIdentityObserver(ctx, consumer.processExecutionIdentityObserver(taskID, intent))
+}
+
 func (consumer *runCommitConsumer) recordReceipt(receipt RunToolReceipt) error {
 	if consumer == nil {
 		return nil
@@ -538,7 +597,8 @@ func (consumer *runCommitConsumer) executeSequentialCall(
 	taskID := registerRunCompletionTask(ctx, intent, invocation.CompletionSignal())
 	dispatch := runCommitDispatchResult{output: "Error: run owner cannot track prepared completion", isError: true, err: ErrRunCommitOwnerUnavailable}
 	if taskID > 0 {
-		dispatch = dispatchPreparedRunCommitCall(ctx, invocation, streamSink, taskID)
+		dispatchCtx := consumer.processExecutionIdentityContext(ctx, taskID, intent, invocation)
+		dispatch = dispatchPreparedRunCommitCall(dispatchCtx, invocation, streamSink, taskID)
 	}
 	dispatchState := DispatchStateDispatched
 	resourceState := RunExecutionCleanupPending
@@ -559,6 +619,7 @@ func (consumer *runCommitConsumer) executeSequentialCall(
 		OwnerGeneration:            intent.OwnerGeneration,
 		DispatchState:              dispatchState,
 		ResourceState:              resourceState,
+		ExecutionIdentity:          consumer.executionIdentity(intent.ActionID),
 		CompletionProof:            proof,
 	}
 	if err := consumer.recordTaskExecution(taskID, execution); err != nil {
@@ -746,7 +807,8 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 				action.result = runCommitDispatchResult{output: "Error: run owner cannot track prepared completion", isError: true, err: ErrRunCommitOwnerUnavailable}
 				return
 			}
-			action.result = dispatchPreparedRunCommitCall(ctx, action.invocation, action.streamSink, action.taskID)
+			dispatchCtx := consumer.processExecutionIdentityContext(ctx, action.taskID, action.intent, action.invocation)
+			action.result = dispatchPreparedRunCommitCall(dispatchCtx, action.invocation, action.streamSink, action.taskID)
 		}(action)
 	}
 	allDone := make(chan struct{})
@@ -826,6 +888,7 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 			OwnerGeneration:            action.intent.OwnerGeneration,
 			DispatchState:              dispatchState,
 			ResourceState:              resourceState,
+			ExecutionIdentity:          consumer.executionIdentity(action.intent.ActionID),
 			CompletionProof:            proof,
 		}
 		if err := consumer.recordTaskExecution(action.taskID, execution); err != nil {
@@ -887,6 +950,7 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 				OwnerGeneration:            action.intent.OwnerGeneration,
 				DispatchState:              DispatchStateDispatched,
 				ResourceState:              RunExecutionQuiescent,
+				ExecutionIdentity:          consumer.executionIdentity(action.intent.ActionID),
 				CompletionProof:            details.proof,
 			}
 			if err := consumer.recordTaskExecution(action.taskID, lateExecution); err != nil {
