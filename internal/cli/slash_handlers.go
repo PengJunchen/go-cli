@@ -144,14 +144,9 @@ func (h *CostHandler) Handle(_ context.Context, _ []string, deps Dependencies) (
 		}
 	}
 	if deps.ContextWindow() > 0 {
-		totalTokens := 0
-		if deps.StatsRegistry() != nil && deps.SessionID() != "" {
-			if stats, ok := deps.StatsRegistry().GetSessionStats(deps.SessionID()); ok {
-				totalTokens = stats.TokensIn + stats.TokensOut
-			}
-		}
-		pct := totalTokens * 100 / deps.ContextWindow()
-		fmt.Fprintf(deps.Out(), "  Context:   %d/%d (%d%%)\n", totalTokens, deps.ContextWindow(), pct) //nolint:errcheck
+		// SessionStats tokens accumulate across provider calls; they do not
+		// describe the current prompt's context-window occupancy.
+		fmt.Fprintf(deps.Out(), "  Context:   unknown/%d (current occupancy unavailable)\n", deps.ContextWindow()) //nolint:errcheck
 	}
 	return "", nil
 }

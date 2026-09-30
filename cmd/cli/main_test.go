@@ -788,6 +788,78 @@ func (e *finalizerGateExporter) Shutdown(ctx context.Context) error {
 	}
 }
 
+type finalizerReportExporter struct {
+	report tracing.AsyncExporterReport
+	err    error
+}
+
+func (*finalizerReportExporter) ExportSpan(context.Context, tracing.TraceSpan) error { return nil }
+
+func (e *finalizerReportExporter) Shutdown(context.Context) error { return e.err }
+
+func (e *finalizerReportExporter) ShutdownWithReport(context.Context) (tracing.AsyncExporterReport, error) {
+	return e.report, e.err
+}
+
+func TestTracingFinalizerReportsAllCountersForCompletedLossyShutdown(t *testing.T) {
+	// This finalizer-visible rejection models a production late producer; low-level rejection probes test that counter independently.
+	exporter := &finalizerReportExporter{
+		report: tracing.AsyncExporterReport{
+			Stats: tracing.AsyncExporterStats{
+				Accepted:            7,
+				Delivered:           3,
+				QueueFullDropped:    1,
+				SinkFailed:          2,
+				RejectedAfterClose:  1,
+				AbandonedOnShutdown: 1,
+				Pending:             1,
+			},
+			OwnerFinished: true,
+		},
+	}
+	var stderr bytes.Buffer
+
+	code := finalizeTracingExporter(context.Background(), exporter, &stderr, time.Second)
+
+	assert.Equal(t, 1, code, "delivery anomalies in a completed report must affect command status")
+	assert.Equal(t,
+		"error: tracing exporter shutdown completed with delivery issues (accepted=7 delivered=3 queue_full_dropped=1 sink_failed=2 rejected_after_close=1 abandoned_on_shutdown=1 pending=1)\n",
+		stderr.String(),
+		"the bounded report must include every counter without exporter payloads",
+	)
+}
+
+func TestTracingFinalizerFailureReportIncludesAllCountersWithoutCallbackText(t *testing.T) {
+	canary := "private exporter callback detail"
+	exporter := &finalizerReportExporter{
+		report: tracing.AsyncExporterReport{
+			Stats: tracing.AsyncExporterStats{
+				Accepted:            7,
+				Delivered:           3,
+				QueueFullDropped:    1,
+				SinkFailed:          2,
+				RejectedAfterClose:  1,
+				AbandonedOnShutdown: 1,
+				Pending:             1,
+			},
+			OwnerFinished: true,
+		},
+		err: errors.New(canary),
+	}
+	var stderr bytes.Buffer
+
+	code := finalizeTracingExporter(context.Background(), exporter, &stderr, time.Second)
+
+	assert.Equal(t, 1, code)
+	assert.Contains(t, stderr.String(), "tracing exporter shutdown failed")
+	assert.Contains(t, stderr.String(), "queue_full_dropped=1")
+	assert.Contains(t, stderr.String(), "sink_failed=2")
+	assert.Contains(t, stderr.String(), "rejected_after_close=1")
+	assert.Contains(t, stderr.String(), "abandoned_on_shutdown=1")
+	assert.Contains(t, stderr.String(), "pending=1")
+	assert.NotContains(t, stderr.String(), canary, "stderr must not expose arbitrary callback text")
+}
+
 func TestTracingFinalizerWaitsDespiteCanceledSignalContext(t *testing.T) {
 	sourceCtx, cancel := context.WithCancel(context.Background())
 	cancel()

@@ -230,14 +230,40 @@ func finalizeTracingExporterWithReport(
 	}
 	report, err := reporter.ShutdownWithReport(waitCtx)
 	if err == nil && report.OwnerFinished {
+		if tracingExporterReportHasIssues(report.Stats) {
+			writeTracingExporterReport(stderr, "completed with delivery issues", report.Stats)
+			return report, true, 1
+		}
 		return report, true, 0
 	}
 	state := "failed"
 	if errors.Is(err, tracing.ErrShutdownPending) || !report.OwnerFinished {
 		state = "pending"
 	}
-	_, _ = fmt.Fprintf(stderr, "error: tracing exporter shutdown %s (accepted=%d delivered=%d pending=%d)\n", state, report.Stats.Accepted, report.Stats.Delivered, report.Stats.Pending) //nolint:errcheck // CLI error output is best-effort
+	writeTracingExporterReport(stderr, state, report.Stats)
 	return report, report.OwnerFinished, 1
+}
+
+func tracingExporterReportHasIssues(stats tracing.AsyncExporterStats) bool {
+	return stats.QueueFullDropped > 0 ||
+		stats.SinkFailed > 0 ||
+		stats.RejectedAfterClose > 0 ||
+		stats.AbandonedOnShutdown > 0 ||
+		stats.Pending > 0
+}
+
+func writeTracingExporterReport(stderr io.Writer, state string, stats tracing.AsyncExporterStats) {
+	_, _ = fmt.Fprintf(stderr,
+		"error: tracing exporter shutdown %s (accepted=%d delivered=%d queue_full_dropped=%d sink_failed=%d rejected_after_close=%d abandoned_on_shutdown=%d pending=%d)\n",
+		state,
+		stats.Accepted,
+		stats.Delivered,
+		stats.QueueFullDropped,
+		stats.SinkFailed,
+		stats.RejectedAfterClose,
+		stats.AbandonedOnShutdown,
+		stats.Pending,
+	) //nolint:errcheck // CLI error output is best-effort
 }
 
 type invocationFinalizer struct {
