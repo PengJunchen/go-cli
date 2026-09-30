@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -90,6 +91,10 @@ func installBashProcessStartGate(cmd *exec.Cmd) (*bashProcessStartGate, error) {
 	if cmd == nil || cmd.Path == "" || cmd.Env == nil || len(cmd.Args) != 3 || cmd.Args[1] != "-lc" || len(cmd.ExtraFiles) != 0 {
 		return nil, errors.New("managed Bash start gate requires the exact local bash -lc invocation")
 	}
+	trustedBashPath, err := validateTrustedManagedBashPath(cmd.Path)
+	if err != nil {
+		return nil, fmt.Errorf("managed Bash start gate requires trusted system Bash: %w", err)
+	}
 	restoreEnv, err := prepareBashRestoreEnvironment(cmd.Env)
 	if err != nil {
 		return nil, fmt.Errorf("managed Bash start gate cannot safely restore command environment: %w", err)
@@ -102,7 +107,7 @@ func installBashProcessStartGate(cmd *exec.Cmd) (*bashProcessStartGate, error) {
 	cmd.ExtraFiles = append(cmd.ExtraFiles, readEnd)
 	argv0 := cmd.Args[0]
 	command := cmd.Args[2]
-	bashPath := cmd.Path
+	bashPath := trustedBashPath
 	// Start the same Bash executable with an empty environment. In particular,
 	// this keeps BASH_ENV, exported functions, SHELLOPTS, PS4, and dynamic-loader
 	// variables from running code before the durable identity observer returns.
@@ -110,6 +115,7 @@ func installBashProcessStartGate(cmd *exec.Cmd) (*bashProcessStartGate, error) {
 	// observer releases the gate. The bootstrap receives no caller-controlled
 	// environment entries or shell code.
 	cmd.Env = []string{}
+	cmd.Path = trustedBashPath
 	cmd.Args = []string{
 		argv0,
 		"--noprofile",
@@ -121,6 +127,91 @@ func installBashProcessStartGate(cmd *exec.Cmd) (*bashProcessStartGate, error) {
 		bashPath,
 	}
 	return &bashProcessStartGate{readEnd: readEnd, writeEnd: writeEnd, restoreEnv: restoreEnv}, nil
+}
+
+func validateTrustedManagedBashPath(path string) (string, error) {
+	trustedPath, err := trustedSystemBashPath()
+	if err != nil {
+		return "", err
+	}
+
+	absPath, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve selected Bash path: %w", err)
+	}
+	selectedCanonical, err := filepath.EvalSymlinks(absPath)
+	if err != nil {
+		return "", fmt.Errorf("resolve selected Bash target: %w", err)
+	}
+	selectedCanonical = filepath.Clean(selectedCanonical)
+	if selectedCanonical != trustedPath {
+		return "", fmt.Errorf("selected executable %q resolves outside the trusted system Bash", path)
+	}
+
+	selectedInfo, err := os.Stat(absPath)
+	if err != nil {
+		return "", fmt.Errorf("inspect selected Bash: %w", err)
+	}
+	trustedInfo, err := os.Stat(trustedPath)
+	if err != nil {
+		return "", fmt.Errorf("inspect trusted system Bash: %w", err)
+	}
+	if !os.SameFile(selectedInfo, trustedInfo) {
+		return "", errors.New("selected executable does not match the trusted system Bash file")
+	}
+	if err := verifyTrustedSystemExecutable(trustedPath, trustedInfo); err != nil {
+		return "", err
+	}
+	return trustedPath, nil
+}
+
+func verifyTrustedSystemExecutable(path string, info os.FileInfo) error {
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o111 == 0 {
+		return errors.New("trusted system Bash is not a regular executable file")
+	}
+	if info.Mode()&(os.ModeSetuid|os.ModeSetgid) != 0 {
+		return errors.New("trusted system Bash has setuid or setgid mode bits")
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return errors.New("trusted system Bash is writable by group or other users")
+	}
+	if err := requireRootOwnedPath(info, path); err != nil {
+		return err
+	}
+	if err := verifyTrustedSystemPathSecurity(path, false); err != nil {
+		return err
+	}
+
+	for directory := filepath.Dir(path); ; directory = filepath.Dir(directory) {
+		directoryInfo, err := os.Lstat(directory)
+		if err != nil {
+			return fmt.Errorf("inspect trusted Bash path component %q: %w", directory, err)
+		}
+		if !directoryInfo.IsDir() || directoryInfo.Mode()&os.ModeSymlink != 0 {
+			return fmt.Errorf("trusted Bash path component %q is not a real directory", directory)
+		}
+		if directoryInfo.Mode().Perm()&0o022 != 0 {
+			return fmt.Errorf("trusted Bash path component %q is writable by group or other users", directory)
+		}
+		if err := requireRootOwnedPath(directoryInfo, directory); err != nil {
+			return err
+		}
+		if err := verifyTrustedSystemPathSecurity(directory, true); err != nil {
+			return err
+		}
+		if directory == string(filepath.Separator) {
+			break
+		}
+	}
+	return nil
+}
+
+func requireRootOwnedPath(info os.FileInfo, path string) error {
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != 0 {
+		return fmt.Errorf("trusted Bash path component %q is not owned by root", path)
+	}
+	return nil
 }
 
 func managedBashGateScript(fd int) string {

@@ -293,7 +293,9 @@ func TestManagedBashStartGatePreservesArgv0(t *testing.T) {
 	cmd.Stderr = &stderr
 	gate, err := installBashProcessStartGate(cmd)
 	require.NoError(t, err)
-	require.Equal(t, bashPath, cmd.Path)
+	trustedBashPath, err := validateTrustedManagedBashPath(bashPath)
+	require.NoError(t, err)
+	require.Equal(t, trustedBashPath, cmd.Path)
 	require.Equal(t, "bash", cmd.Args[0], "the original Bash argv0 must remain available to the post-gate exec")
 	require.Empty(t, cmd.Env, "the bootstrap process must receive no user-controlled environment")
 	require.NoError(t, cmd.Start())
@@ -322,6 +324,77 @@ func TestManagedBashStartGateClosesControlPipeBeforeUserCommand(t *testing.T) {
 	require.Equal(t, "closed", output.String(), "the control pipe must not leak into user Bash")
 }
 
+func TestPreparedBashRejectsUntrustedBashOnPATHBeforeStart(t *testing.T) {
+	originalPath := os.Getenv("PATH")
+	executors := []struct {
+		name string
+		run  func(context.Context, ToolCall) error
+	}{
+		{
+			name: "bash",
+			run: func(ctx context.Context, call ToolCall) error {
+				_, err := NewBashTool(WithTimeout(5*time.Second), WithNoSandbox()).Execute(ctx, call)
+				return err
+			},
+		},
+		{
+			name: "streaming_bash",
+			run: func(ctx context.Context, call ToolCall) error {
+				_, err := NewStreamingBashTool(WithTimeout(5*time.Second), WithNoSandbox()).ExecuteStreaming(ctx, call, nil)
+				return err
+			},
+		},
+	}
+	for _, executor := range executors {
+		t.Run(executor.name, func(t *testing.T) {
+			fakeDirectory := t.TempDir()
+			marker := filepath.Join(t.TempDir(), "fake-bash-ran")
+			fakeBash := filepath.Join(fakeDirectory, "bash")
+			fakeScript := "#!/bin/sh\n/usr/bin/touch " + shellQuoteTestArgument(marker) + "\nexec sleep 30\n"
+			require.NoError(t, os.WriteFile(fakeBash, []byte(fakeScript), 0o700))
+			t.Setenv("PATH", fakeDirectory+string(os.PathListSeparator)+originalPath)
+			resolved := exec.Command("bash", "-lc", ":")
+			require.Equal(t, fakeBash, resolved.Path, "the test must resolve the hostile PATH entry")
+
+			persistErr := errors.New("identity persistence intentionally held then rejected")
+			release := make(chan struct{})
+			observed := make(chan struct{})
+			ctx := WithProcessExecutionIdentityObserver(context.Background(), func(context.Context, ProcessExecutionIdentity) error {
+				close(observed)
+				<-release
+				return persistErr
+			})
+			call := ToolCall{ID: "call-untrusted-bash-path", Name: "bash", Args: map[string]any{"command": ":"}}
+			result := make(chan error, 1)
+			go func() { result <- executor.run(ctx, call) }()
+
+			select {
+			case err := <-result:
+				require.ErrorContains(t, err, "trusted system Bash")
+				select {
+				case <-observed:
+					t.Fatal("untrusted PATH-selected executable reached the identity observer")
+				default:
+				}
+				require.NoFileExists(t, marker, "a PATH-selected executable must be rejected before it can run")
+			case <-observed:
+				deadline := time.Now().Add(2 * time.Second)
+				for time.Now().Before(deadline) && !fileExists(marker) {
+					time.Sleep(10 * time.Millisecond)
+				}
+				close(release)
+				<-result
+				require.NoFileExists(t, marker, "untrusted Bash must not run before the observer releases its gate")
+				t.Fatal("untrusted PATH-selected executable reached the identity observer")
+			case <-time.After(3 * time.Second):
+				close(release)
+				<-result
+				t.Fatal("prepared Bash did not reject the untrusted PATH-selected executable")
+			}
+		})
+	}
+}
+
 func TestManagedBashStartGateRestoresEnvironmentWithoutShellParsing(t *testing.T) {
 	bashPath, err := exec.LookPath("bash")
 	if err != nil {
@@ -335,7 +408,9 @@ func TestManagedBashStartGateRestoresEnvironmentWithoutShellParsing(t *testing.T
 	cmd.Stdout = &output
 	gate, err := installBashProcessStartGate(cmd)
 	require.NoError(t, err)
-	require.Equal(t, bashPath, cmd.Path)
+	trustedBashPath, err := validateTrustedManagedBashPath(bashPath)
+	require.NoError(t, err)
+	require.Equal(t, trustedBashPath, cmd.Path)
 	require.NoError(t, cmd.Start())
 	gate.closeReadEnd()
 	require.NoError(t, gate.release())
