@@ -1498,9 +1498,11 @@ func (m *teaModel) renderStatusBarLocked() string {
 	usageSource := tokenUsageSourceLabel(m.tokenUsageSource)
 	usageDetails := "Tokens: unknown"
 	switch {
-	case m.tokenUnknownUsageAttempts > 0:
+	case usageSource == string(core.TokenUsageSourceEstimated):
+		usageDetails = fmt.Sprintf("Estimated tokens: %d/%d", total, maxT)
+	case usageSource == string(core.TokenUsageSourceReported) && m.tokenUnknownUsageAttempts > 0:
 		usageDetails = fmt.Sprintf("Known tokens: %d/%d", total, maxT)
-	case usageSource != string(core.TokenUsageSourceUnknown):
+	case usageSource == string(core.TokenUsageSourceReported):
 		usageDetails = fmt.Sprintf("Tokens: %d/%d (%d%%)", total, maxT, pct)
 	}
 
@@ -1510,13 +1512,15 @@ func (m *teaModel) renderStatusBarLocked() string {
 	switch {
 	case unknownCost && m.tokenCost <= 0:
 		costDetails = "Cost: unknown"
+	case slicesContain(costSources, string(core.TokenUsageCostEstimated)):
+		costDetails = fmt.Sprintf("Estimated cost: $%.4f", m.tokenCost)
 	case unknownCost:
 		costDetails = fmt.Sprintf("Known cost: $%.4f", m.tokenCost)
 	default:
 		costDetails = fmt.Sprintf("Cost: $%.4f", m.tokenCost)
 	}
 	line2 := truncateStatusBarText(fmt.Sprintf("%s | %s", usageDetails, costDetails), statusWidth)
-	usageComplete := m.tokenUnknownUsageAttempts == 0 && usageSource != string(core.TokenUsageSourceUnknown)
+	usageComplete := m.tokenUnknownUsageAttempts == 0 && usageSource == string(core.TokenUsageSourceReported)
 	if usageComplete && pct > 80 {
 		line2 = statusBarWarnStyle.Render(line2)
 	}
@@ -1530,7 +1534,23 @@ func (m *teaModel) renderStatusBarLocked() string {
 
 func tokenUsageProvenanceLine(m *teaModel, width int) string {
 	if width > 0 && width < splitWidthThreshold {
-		return truncateStatusBarText(fmt.Sprintf("Provenance: see /cost (unknown usage=%d, unknown cost=%d)", m.tokenUnknownUsageAttempts, m.tokenUnknownCostAttempts), width)
+		costSource := tokenUsageNarrowCostSourceLabel(m.tokenCostSources)
+		if width < 70 {
+			return truncateStatusBarText(fmt.Sprintf(
+				"usage=%s (unknown:%d) cost=%s (unknown:%d) /cost",
+				tokenUsageSourceLabel(m.tokenUsageSource),
+				m.tokenUnknownUsageAttempts,
+				costSource,
+				m.tokenUnknownCostAttempts,
+			), width)
+		}
+		return truncateStatusBarText(fmt.Sprintf(
+			"usage=%s (unknown usage=%d) cost=%s (unknown cost=%d) /cost",
+			tokenUsageSourceLabel(m.tokenUsageSource),
+			m.tokenUnknownUsageAttempts,
+			costSource,
+			m.tokenUnknownCostAttempts,
+		), width)
 	}
 	return truncateStatusBarText(fmt.Sprintf(
 		"Sources: usage=%s/u%d cost=%s/c%d price=%s actual=%s",
@@ -1541,6 +1561,21 @@ func tokenUsageProvenanceLine(m *teaModel, width int) string {
 		strings.Join(tokenUsagePriceSourceLabels(m.tokenPriceSources), ","),
 		tokenUsageProviderModels(m.tokenProviderModels),
 	), width)
+}
+
+func tokenUsageNarrowCostSourceLabel(sources []core.TokenUsageCostSource) string {
+	labels := tokenUsageCostSourceLabels(sources)
+	for _, preferred := range []string{
+		string(core.TokenUsageCostEstimated),
+		string(core.TokenUsageCostReported),
+	} {
+		for _, label := range labels {
+			if label == preferred {
+				return label
+			}
+		}
+	}
+	return string(core.TokenUsageCostUnknown)
 }
 
 func truncateStatusBarText(value string, width int) string {
