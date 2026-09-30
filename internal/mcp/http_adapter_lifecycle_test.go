@@ -206,6 +206,7 @@ func TestHTTPAdapterCanceledConnectRemainsOwnedUntilActualReturn(t *testing.T) {
 	t.Cleanup(allowInitReturn)
 	var initializeCalls atomic.Int32
 	var deleteCalls atomic.Int32
+	var cancellationNotifications atomic.Int32
 	transport := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		if req.Method == http.MethodDelete {
 			deleteCalls.Add(1)
@@ -227,6 +228,9 @@ func TestHTTPAdapterCanceledConnectRemainsOwnedUntilActualReturn(t *testing.T) {
 			}
 			return lifecycleResponse(req, http.StatusOK, map[string]any{"protocolVersion": streamableHTTPProtocolVersion}, fmt.Sprintf("session-connect-%d", call)), nil
 		case "notifications/initialized":
+			return lifecycleResponse(req, http.StatusAccepted, nil, ""), nil
+		case "notifications/cancelled":
+			cancellationNotifications.Add(1)
 			return lifecycleResponse(req, http.StatusAccepted, nil, ""), nil
 		default:
 			return lifecycleResponse(req, http.StatusBadRequest, nil, ""), nil
@@ -302,6 +306,7 @@ func TestHTTPAdapterCanceledConnectRemainsOwnedUntilActualReturn(t *testing.T) {
 		t.Fatal("connect operation completion remained open after initialize returned")
 	}
 	assert.EqualValues(t, 1, deleteCalls.Load(), "the late session is deleted exactly once")
+	assert.Zero(t, cancellationNotifications.Load(), "MCP clients must not cancel initialize requests")
 	assert.Empty(t, adapter.ProtocolVersion(), "the late handshake response must never publish after the close fence")
 
 	require.NoError(t, adapter.Connect(context.Background()), "a successful close permits an explicit new generation")
