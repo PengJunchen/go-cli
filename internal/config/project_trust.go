@@ -25,6 +25,7 @@ func LoadTrustedWithManager(ctx context.Context, manager approval.TrustManager) 
 		return nil, fmt.Errorf("config: load user/global configuration: %w", err)
 	}
 	globalConfig.ProjectSourceTrustStatus = ProjectSourceTrustUnknown
+	globalConfig.projectTrustManager = manager
 	globalConfig.mcpServersProvenance = mcpProvenanceFor(globalConfig, nil)
 
 	root, err := os.Getwd()
@@ -83,6 +84,7 @@ func LoadTrustedWithManager(ctx context.Context, manager approval.TrustManager) 
 	merged.ProjectSourceTrustStatus = ProjectSourceTrustVerified
 	merged.projectSourceSnapshot = captured.snapshot
 	merged.verifiedProjectSources = verified
+	merged.projectTrustManager = manager
 	merged.projectOverlay = cloneConfigValues(projectOverlay)
 	merged.userGlobalConfig = cloneConfigValues(globalConfig)
 	merged.mcpServersProvenance = mcpProvenanceFor(globalConfig, projectOverlay)
@@ -98,6 +100,15 @@ func (c *Config) VerifiedProjectSources() *approval.VerifiedProjectSources {
 	return c.verifiedProjectSources
 }
 
+// ProjectTrustManager returns the manager used to verify this configuration's
+// project sources. Assemblers use it to revalidate those sources on reload.
+func (c *Config) ProjectTrustManager() approval.TrustManager {
+	if c == nil {
+		return nil
+	}
+	return c.projectTrustManager
+}
+
 // ProjectOverlayForVerifiedSources returns a defensive project-only overlay
 // paired with this Config's verified capability. Raw captures and presentation
 // status never make this method available.
@@ -108,6 +119,7 @@ func (c *Config) ProjectOverlayForVerifiedSources() *Config {
 	overlay := cloneConfigValues(c.projectOverlay)
 	overlay.ProjectSourceTrustStatus = ProjectSourceTrustVerified
 	overlay.verifiedProjectSources = c.verifiedProjectSources
+	overlay.projectTrustManager = c.projectTrustManager
 	overlay.mcpServersProvenance = c.projectOverlay.mcpServersProvenance
 	return overlay
 }
@@ -204,6 +216,7 @@ func cloneConfigValues(source *Config) *Config {
 	clone.SmallModel.temperatureSet = source.SmallModel.temperatureSet
 	clone.SmallModel.maxTokensSet = source.SmallModel.maxTokensSet
 	clone.ProjectSourceTrustStatus = source.ProjectSourceTrustStatus
+	clone.projectTrustManager = source.projectTrustManager
 	clone.mcpServersProvenance = source.mcpServersProvenance
 	return &clone
 }

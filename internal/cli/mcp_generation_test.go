@@ -516,6 +516,31 @@ func TestDoctorMCPCheckerUsesFreshVerifiedProjectSource(t *testing.T) {
 	assert.EqualValues(t, 1, peer.lists.Load(), "doctor must probe the verified selected project source")
 }
 
+func TestDoctorCommandUsesInvocationTrustManagerForProjectMCP(t *testing.T) {
+	peer := newMCPGenerationPeer(t, []string{"doctor_tool"}, "doctor-result", false, false, false)
+	root, sourcePath, manager, _ := setupMCPGenerationProject(t, []byte(`{"servers":[]}`))
+	writeMCPGenerationProjectSource(t, root, sourcePath, peer.server.URL)
+	cfg, err := config.LoadTrustedWithManager(context.Background(), manager)
+	require.NoError(t, err)
+
+	// The production CLI owns a persistent manager per invocation; the process
+	// global is only a fallback and may belong to an unrelated caller.
+	approval.RegisterTrustManager(approval.NewDefaultTrustManager(approval.NewInMemoryTrustStore()))
+
+	runner := doctorRunnerForConfig(cfg)
+	var checker *MCPServersChecker
+	for _, candidate := range runner.checks {
+		if current, ok := candidate.(*MCPServersChecker); ok {
+			checker = current
+			break
+		}
+	}
+	require.NotNil(t, checker)
+	result := checker.Check(context.Background())
+	assert.Equal(t, doctorPass, result.Status)
+	assert.EqualValues(t, 1, peer.lists.Load(), "doctor must probe project MCP using the invocation's loaded manager")
+}
+
 func TestMCPGenerationEmptyProjectSourceRemovesToolsWithoutGlobalFallback(t *testing.T) {
 	projectPeer := newMCPGenerationPeer(t, []string{"project_tool"}, "project-result", false, false, false)
 	globalPeer := newMCPGenerationPeer(t, []string{"global_tool"}, "global-result", false, false, false)

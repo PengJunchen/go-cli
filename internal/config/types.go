@@ -48,6 +48,7 @@ type Config struct {
 	samplingPresenceKnown  bool
 	projectSourceSnapshot  *approval.ProjectSourceSnapshot
 	verifiedProjectSources *approval.VerifiedProjectSources
+	projectTrustManager    approval.TrustManager `json:"-" yaml:"-" mapstructure:"-"`
 	projectOverlay         *Config
 	userGlobalConfig       *Config
 	mcpServersProvenance   MCPServersProvenance

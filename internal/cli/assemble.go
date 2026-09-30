@@ -2556,8 +2556,16 @@ func registerCustomTools(ctx context.Context, rc *config.Config, tr tools.ToolRe
 	// Trust check: skip custom tools if project is not trusted. Custom tools
 	// from project config are already gated by LoadTrusted, but this provides
 	// defense-in-depth for code paths that bypass LoadTrusted.
-	cwd, _ := os.Getwd()
-	if !approval.GetTrustManager().IsTrusted(ctx, cwd) {
+	cwd, err := canonicalCurrentDirectory()
+	if err != nil {
+		logger.Warn("assemble_custom_tools_skip_unavailable", "reason", "project root unavailable")
+		return
+	}
+	manager := rc.ProjectTrustManager()
+	if manager == nil {
+		manager = approval.GetTrustManager()
+	}
+	if !manager.IsTrusted(ctx, cwd) {
 		logger.Warn("assemble_custom_tools_skip_untrusted", "reason", "project not trusted")
 		return
 	}
