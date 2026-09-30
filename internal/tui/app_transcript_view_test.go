@@ -185,7 +185,73 @@ func TestAppCanonicalTranscriptSearchUsesFullLoadedSource(t *testing.T) {
 	app.model.mu.Unlock()
 	require.True(t, found)
 	require.Equal(t, "large-row", key)
-	require.Contains(t, app.model.View(), "loaded projection only")
+	view := app.model.View()
+	require.Contains(t, view, "loaded projection only")
+	require.Contains(t, view, "[earlier content hidden]")
+	app.model.mu.Lock()
+	app.model.transcriptViewport.End()
+	app.model.mu.Unlock()
+	view = app.model.View()
+	require.Contains(t, view, "[view truncated]", "a bounded preview must label the hidden prefix")
+}
+
+func TestCanonicalTranscriptViewportSharesSourceBodyAcrossDisplayAndSearch(t *testing.T) {
+	content := strings.Repeat("R8 shared source line\n", 400) + "R8 source final marker"
+	snapshot := CanonicalTranscriptSnapshot{
+		PhysicalSessionID: "session-shared-source",
+		BranchID:          "branch-shared-source",
+		Revision:          "revision-shared-source",
+		Rows: []CanonicalTranscriptRow{{
+			Key:     DurableTranscriptKey{PhysicalSessionID: "session-shared-source", BranchID: "branch-shared-source", EntryID: "shared-source-row"},
+			Kind:    TranscriptRowAssistant,
+			Message: core.AgentMessage{Role: "assistant", Content: content},
+		}},
+	}
+
+	rows := canonicalTranscriptViewportRows(snapshot)
+	require.Len(t, rows, 1)
+	require.Equal(t, content, rows[0].searchText, "search keeps the entire canonical source body")
+	require.Equal(t, "[assistant]", rows[0].text, "display metadata must not concatenate a second body-sized string")
+	require.Equal(t, "[assistant]", rows[0].baseText)
+	require.Len(t, rows[0].lines, 402)
+	require.Equal(t, content, strings.Join(rows[0].lines[1:], "\n"), "display lines retain the exact uncropped source content")
+
+	app, err := NewBubbleteaAppWithTranscript(nil, snapshot, WithWidth(120))
+	require.NoError(t, err)
+	require.True(t, app.model.transcriptViewport.rowMetadata[0].renderOnDemand)
+	require.Empty(t, app.model.transcriptViewport.rowMetadata[0].renderedLines, "canonical offscreen fragments are rendered only on demand")
+	app.model.Update(tea.WindowSizeMsg{Width: 120, Height: 200})
+	view := app.View()
+	require.Contains(t, view, "R8 source final marker")
+	app.model.mu.Lock()
+	key, found := app.model.searchTranscriptLocked("R8 source final marker")
+	app.model.mu.Unlock()
+	require.True(t, found)
+	require.Equal(t, "shared-source-row", key)
+}
+
+func TestCanonicalTranscriptViewportPreservesANSIStateAcrossSourceLines(t *testing.T) {
+	content := "\x1b[31mred first line\nstill red on second\x1b[0m"
+	snapshot := CanonicalTranscriptSnapshot{
+		PhysicalSessionID: "session-ansi-source",
+		BranchID:          "branch-ansi-source",
+		Revision:          "revision-ansi-source",
+		Rows: []CanonicalTranscriptRow{{
+			Key:     DurableTranscriptKey{PhysicalSessionID: "session-ansi-source", BranchID: "branch-ansi-source", EntryID: "ansi-source-row"},
+			Kind:    TranscriptRowAssistant,
+			Message: core.AgentMessage{Role: "assistant", Content: content},
+		}},
+	}
+	rows := canonicalTranscriptViewportRows(snapshot)
+	viewport := newTranscriptViewport(80, 0)
+	require.NoError(t, viewport.SetRows(rows, "ansi-source"))
+	viewport.Resize(80, 8)
+	window := viewport.Window()
+	displayed := make([]string, 0, len(window.lines))
+	for _, line := range window.lines {
+		displayed = append(displayed, line.text)
+	}
+	require.Contains(t, strings.Join(displayed, "\n"), content, "SGR state must survive a source newline")
 }
 
 func TestAppLiveAssistantChunkUpdatesViewportRowThroughUpdate(t *testing.T) {
