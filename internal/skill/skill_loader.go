@@ -6,9 +6,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -91,9 +93,33 @@ const (
 // errParse is returned when a skill file cannot be parsed into a definition.
 var errParse = errors.New("skill: parse error")
 
+// ErrSkillResourceLimit reports that a skill source set exceeds one of the
+// loader's explicit file, byte, traversal-entry, or depth bounds.
+var ErrSkillResourceLimit = errors.New("skill: resource limit exceeded")
+
+// ErrSkillUnsafeSource reports a symlink, non-regular file, or invalid source
+// path that cannot be loaded safely.
+var ErrSkillUnsafeSource = errors.New("skill: unsafe source")
+
+const (
+	// Keep these bounds aligned with config.project_sources.go so trusted
+	// project captures and user-level directory loading have the same budget.
+	maxSkillFileBytes      int64 = 1 << 20
+	maxSkillDirectoryBytes int64 = 16 << 20
+	maxSkillCandidateFiles       = 128
+	maxSkillWalkEntries          = 4096
+	maxSkillDirectoryDepth       = 128
+	maxSkillLineBytes      int   = 4 << 20
+)
+
 // Load reads the skill file at path, parses its frontmatter and returns a
 // populated SkillDefinition. It emits a `skill.load` span.
 func (l *YAMLSkillLoader) Load(ctx context.Context, path string) (*SkillDefinition, error) {
+	def, _, err := l.loadFile(ctx, path)
+	return def, err
+}
+
+func (l *YAMLSkillLoader) loadFile(ctx context.Context, path string) (*SkillDefinition, int64, error) {
 	span, spanCtx := tracing.SpanFromContext(ctx, "skill.load", tracing.SpanKindInternal)
 	logger := tracing.NewTraceLogger(span, slog.Default())
 	defer span.End()
@@ -108,29 +134,24 @@ func (l *YAMLSkillLoader) Load(ctx context.Context, path string) (*SkillDefiniti
 	if err := spanCtx.Err(); err != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		span.SetStatus(tracing.SpanStatusError, err.Error())
-		return nil, err
+		return nil, 0, err
 	}
 
-	file, err := os.Open(absPath)
+	file, err := openRegularSkillFile(absPath)
 	if err != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		span.SetStatus(tracing.SpanStatusError, err.Error())
 		logger.Error("skill.load.open_failed", "path", absPath, "err", err)
-		return nil, fmt.Errorf("skill: open %s: %w", path, err)
+		return nil, 0, fmt.Errorf("skill: open %s: %w", path, err)
 	}
 	defer func() { _ = file.Close() }() //nolint:errcheck // best-effort close.
 
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024) // 4 MiB line buffer.
-	var lines []string
-	for scanner.Scan() {
-		lines = append(lines, scanner.Text())
-	}
-	if scanErr := scanner.Err(); scanErr != nil {
+	lines, bytesRead, scanErr := readSkillLines(spanCtx, file)
+	if scanErr != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		span.SetStatus(tracing.SpanStatusError, scanErr.Error())
 		logger.Error("skill.load.scan_failed", "path", absPath, "err", scanErr)
-		return nil, fmt.Errorf("skill: read %s: %w", path, scanErr)
+		return nil, bytesRead, fmt.Errorf("skill: read %s: %w", path, scanErr)
 	}
 
 	def, err := parseFrontmatter(lines)
@@ -138,7 +159,7 @@ func (l *YAMLSkillLoader) Load(ctx context.Context, path string) (*SkillDefiniti
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		span.SetStatus(tracing.SpanStatusError, err.Error())
 		logger.Error("skill.load.parse_failed", "path", absPath, "err", err)
-		return nil, fmt.Errorf("skill: load %s: %w", path, err)
+		return nil, bytesRead, fmt.Errorf("skill: load %s: %w", path, err)
 	}
 
 	span.SetAttributes(
@@ -148,35 +169,73 @@ func (l *YAMLSkillLoader) Load(ctx context.Context, path string) (*SkillDefiniti
 	span.SetStatus(tracing.SpanStatusOK, "")
 	logger.Info("skill.load", "path", absPath, "name", def.Name())
 
-	return &def, nil
+	return &def, bytesRead, nil
 }
 
 // LoadDir scans dirPath recursively for skill files and loads each one. Files
 // ending in ".md", ".skill.md" or ".yaml" (or ".yml") are considered candidate
-// skill files; any that fail to parse are skipped with a warning.
+// skill files; parse failures are skipped with a warning. Cancellation, unsafe
+// candidates, or exhausted resource limits fail the whole load without
+// returning definitions accumulated earlier in the walk.
 func (l *YAMLSkillLoader) LoadDir(ctx context.Context, dirPath string) ([]*SkillDefinition, error) {
 	span, spanCtx := tracing.SpanFromContext(ctx, "skill.load_dir", tracing.SpanKindInternal)
 	logger := tracing.NewTraceLogger(span, slog.Default())
 	defer span.End()
-
-	if err := spanCtx.Err(); err != nil {
+	fail := func(err error) ([]*SkillDefinition, error) {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		span.SetStatus(tracing.SpanStatusError, err.Error())
 		return nil, err
 	}
 
+	if err := spanCtx.Err(); err != nil {
+		return fail(err)
+	}
+
+	absDir, err := filepath.Abs(dirPath)
+	if err != nil {
+		return fail(fmt.Errorf("skill: scan dir %s: %w", dirPath, err))
+	}
+	root, err := filepath.EvalSymlinks(absDir)
+	if err != nil {
+		return fail(fmt.Errorf("skill: scan dir %s: %w", dirPath, err))
+	}
+	rootInfo, err := os.Stat(root)
+	if err != nil {
+		return fail(fmt.Errorf("skill: scan dir %s: %w", dirPath, err))
+	}
+	if !rootInfo.IsDir() {
+		return fail(fmt.Errorf("skill: scan dir %s: %w", dirPath, ErrSkillUnsafeSource))
+	}
+
 	var defs []*SkillDefinition
-	err := filepath.WalkDir(dirPath, func(path string, d os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
+	var candidateFiles int
+	var totalBytes int64
+	err = walkSkillDirectory(spanCtx, root, func(path, relative string, d os.DirEntry) error {
 		if d.IsDir() {
+			if isSkillFileName(d.Name()) {
+				return fmt.Errorf("%w: candidate %q is a directory", ErrSkillUnsafeSource, relative)
+			}
 			return nil
 		}
 		if !isSkillFileName(d.Name()) {
 			return nil
 		}
-		def, err := l.Load(spanCtx, path)
+		candidateFiles++
+		if candidateFiles > maxSkillCandidateFiles {
+			return fmt.Errorf("%w: directory contains more than %d skill candidates", ErrSkillResourceLimit, maxSkillCandidateFiles)
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("%w: candidate %q is a symlink", ErrSkillUnsafeSource, relative)
+		}
+		def, bytesRead, err := l.loadFile(spanCtx, path)
+		totalBytes += bytesRead
+		if totalBytes > maxSkillDirectoryBytes {
+			return fmt.Errorf("%w: directory source bytes exceed %d", ErrSkillResourceLimit, maxSkillDirectoryBytes)
+		}
 		if err != nil {
+			if isFatalSkillLoadError(err) {
+				return err
+			}
 			// Skip unparsable files rather than failing the whole directory.
 			logger.Warn("skill.load_dir.skipped", "path", path, "err", err)
 			return nil
@@ -185,15 +244,95 @@ func (l *YAMLSkillLoader) LoadDir(ctx context.Context, dirPath string) ([]*Skill
 		return nil
 	})
 	if err != nil {
-		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-		span.SetStatus(tracing.SpanStatusError, err.Error())
-		return nil, fmt.Errorf("skill: scan dir %s: %w", dirPath, err)
+		return fail(fmt.Errorf("skill: scan dir %s: %w", dirPath, err))
 	}
 
 	span.SetAttributes(tracing.Attribute{Key: "count", Value: len(defs)})
 	span.SetStatus(tracing.SpanStatusOK, "")
 	logger.Info("skill.load_dir", "dir", dirPath, "count", len(defs))
 	return defs, nil
+}
+
+func walkSkillDirectory(ctx context.Context, root string, visit func(path, relative string, entry os.DirEntry) error) error {
+	entriesRead := 0
+	var walk func(path, relative string) error
+	walk = func(path, relative string) error {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		dir, err := openSkillDirectory(path)
+		if err != nil {
+			return err
+		}
+
+		remaining := maxSkillWalkEntries - entriesRead
+		children, readErr := dir.ReadDir(remaining + 1)
+		closeErr := dir.Close()
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			if closeErr != nil {
+				return errors.Join(readErr, closeErr)
+			}
+			return readErr
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if len(children) > remaining {
+			return fmt.Errorf("%w: directory contains more than %d entries", ErrSkillResourceLimit, maxSkillWalkEntries)
+		}
+		entriesRead += len(children)
+		sort.Slice(children, func(i, j int) bool { return children[i].Name() < children[j].Name() })
+		for _, child := range children {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			childRelative := child.Name()
+			if relative != "." {
+				childRelative = filepath.Join(relative, child.Name())
+			}
+			childPath := filepath.Join(path, child.Name())
+			if child.IsDir() && skillPathDepth(childRelative) > maxSkillDirectoryDepth {
+				return fmt.Errorf("%w: directory depth exceeds %d", ErrSkillResourceLimit, maxSkillDirectoryDepth)
+			}
+			if err := visit(childPath, childRelative, child); err != nil {
+				return err
+			}
+			if child.IsDir() {
+				if err := walk(childPath, childRelative); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	return walk(root, ".")
+}
+
+func openSkillDirectory(path string) (*os.File, error) {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if before.Mode()&os.ModeSymlink != 0 || !before.IsDir() {
+		return nil, fmt.Errorf("%w: %q is not a regular directory", ErrSkillUnsafeSource, path)
+	}
+	dir, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	after, err := dir.Stat()
+	if err != nil {
+		_ = dir.Close()
+		return nil, err
+	}
+	if !after.IsDir() || !os.SameFile(before, after) {
+		_ = dir.Close()
+		return nil, fmt.Errorf("%w: %q changed while opening", ErrSkillUnsafeSource, path)
+	}
+	return dir, nil
 }
 
 // LoadSources parses a previously captured skill source set. Source files are
@@ -209,9 +348,59 @@ func (l *YAMLSkillLoader) LoadSources(ctx context.Context, sources []SkillSource
 		span.SetStatus(tracing.SpanStatusError, err.Error())
 		return nil, err
 	}
+	if len(sources) > maxSkillCandidateFiles {
+		err := fmt.Errorf("%w: source set contains more than %d skill files", ErrSkillResourceLimit, maxSkillCandidateFiles)
+		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+		span.SetStatus(tracing.SpanStatusError, err.Error())
+		return nil, err
+	}
 
-	defs := make([]*SkillDefinition, 0, len(sources))
-	for _, source := range sources {
+	normalizedSources := make([]SkillSourceFile, len(sources))
+	seenPaths := make(map[string]struct{}, len(sources))
+	var totalBytes int64
+	for i, source := range sources {
+		if err := spanCtx.Err(); err != nil {
+			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+			span.SetStatus(tracing.SpanStatusError, err.Error())
+			return nil, err
+		}
+		relativePath, err := validateSkillSourcePath(source.RelativePath)
+		if err != nil {
+			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+			span.SetStatus(tracing.SpanStatusError, err.Error())
+			return nil, err
+		}
+		if !isSkillFileName(filepath.Base(filepath.FromSlash(relativePath))) {
+			err := fmt.Errorf("%w: %q is not a skill file candidate", ErrSkillUnsafeSource, relativePath)
+			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+			span.SetStatus(tracing.SpanStatusError, err.Error())
+			return nil, err
+		}
+		if _, duplicate := seenPaths[relativePath]; duplicate {
+			err := fmt.Errorf("%w: duplicate skill source path %q", ErrSkillUnsafeSource, relativePath)
+			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+			span.SetStatus(tracing.SpanStatusError, err.Error())
+			return nil, err
+		}
+		seenPaths[relativePath] = struct{}{}
+		if int64(len(source.Content)) > maxSkillFileBytes {
+			err := fmt.Errorf("%w: source %q exceeds %d bytes", ErrSkillResourceLimit, relativePath, maxSkillFileBytes)
+			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+			span.SetStatus(tracing.SpanStatusError, err.Error())
+			return nil, err
+		}
+		totalBytes += int64(len(source.Content))
+		if totalBytes > maxSkillDirectoryBytes {
+			err := fmt.Errorf("%w: source set exceeds %d bytes", ErrSkillResourceLimit, maxSkillDirectoryBytes)
+			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+			span.SetStatus(tracing.SpanStatusError, err.Error())
+			return nil, err
+		}
+		normalizedSources[i] = SkillSourceFile{RelativePath: relativePath, Content: source.Content}
+	}
+
+	defs := make([]*SkillDefinition, 0, len(normalizedSources))
+	for _, source := range normalizedSources {
 		if err := spanCtx.Err(); err != nil {
 			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 			span.SetStatus(tracing.SpanStatusError, err.Error())
@@ -223,6 +412,11 @@ func (l *YAMLSkillLoader) LoadSources(ctx context.Context, sources []SkillSource
 				span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 				span.SetStatus(tracing.SpanStatusError, ctxErr.Error())
 				return nil, ctxErr
+			}
+			if isFatalSkillLoadError(err) {
+				span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
+				span.SetStatus(tracing.SpanStatusError, err.Error())
+				return nil, err
 			}
 			logger.Warn("skill.load_sources.skipped", "path", source.RelativePath, "err", err)
 			continue
@@ -244,11 +438,11 @@ func (l *YAMLSkillLoader) loadSource(ctx context.Context, source SkillSourceFile
 	logger := tracing.NewTraceLogger(span, slog.Default())
 	defer span.End()
 
-	relativePath := filepath.Clean(source.RelativePath)
-	if filepath.IsAbs(relativePath) || relativePath == "." || relativePath == ".." || strings.HasPrefix(relativePath, ".."+string(filepath.Separator)) {
+	relativePath, err := validateSkillSourcePath(source.RelativePath)
+	if err != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-		span.SetStatus(tracing.SpanStatusError, "skill source path is not relative")
-		return nil, fmt.Errorf("skill: source path %q is not relative to its directory", source.RelativePath)
+		span.SetStatus(tracing.SpanStatusError, err.Error())
+		return nil, err
 	}
 	span.SetAttributes(tracing.Attribute{Key: "source_path", Value: filepath.ToSlash(relativePath)})
 	if err := spanCtx.Err(); err != nil {
@@ -257,18 +451,8 @@ func (l *YAMLSkillLoader) loadSource(ctx context.Context, source SkillSourceFile
 		return nil, err
 	}
 
-	scanner := bufio.NewScanner(bytes.NewReader(source.Content))
-	scanner.Buffer(make([]byte, 64*1024), 4*1024*1024)
-	var lines []string
-	for scanner.Scan() {
-		if err := spanCtx.Err(); err != nil {
-			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
-			span.SetStatus(tracing.SpanStatusError, err.Error())
-			return nil, err
-		}
-		lines = append(lines, scanner.Text())
-	}
-	if scanErr := scanner.Err(); scanErr != nil {
+	lines, _, scanErr := readSkillLines(spanCtx, bytes.NewReader(source.Content))
+	if scanErr != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		span.SetStatus(tracing.SpanStatusError, scanErr.Error())
 		logger.Error("skill.load.scan_failed", "path", relativePath, "err", scanErr)
@@ -289,6 +473,94 @@ func (l *YAMLSkillLoader) loadSource(ctx context.Context, source SkillSourceFile
 	span.SetStatus(tracing.SpanStatusOK, "")
 	logger.Info("skill.load", "path", relativePath, "name", def.Name())
 	return &def, nil
+}
+
+func openRegularSkillFile(path string) (*os.File, error) {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: %q is not a regular non-symlink file", ErrSkillUnsafeSource, path)
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	after, err := file.Stat()
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	if !after.Mode().IsRegular() || !os.SameFile(before, after) {
+		_ = file.Close()
+		return nil, fmt.Errorf("%w: %q changed while opening", ErrSkillUnsafeSource, path)
+	}
+	return file, nil
+}
+
+func readSkillLines(ctx context.Context, reader io.Reader) ([]string, int64, error) {
+	limited := &io.LimitedReader{R: contextReader{ctx: ctx, reader: reader}, N: maxSkillFileBytes + 1}
+	scanner := bufio.NewScanner(limited)
+	scanner.Buffer(make([]byte, 64*1024), maxSkillLineBytes)
+	var lines []string
+	for scanner.Scan() {
+		if err := ctx.Err(); err != nil {
+			return nil, maxSkillFileBytes + 1 - limited.N, err
+		}
+		lines = append(lines, scanner.Text())
+	}
+	bytesRead := maxSkillFileBytes + 1 - limited.N
+	if err := ctx.Err(); err != nil {
+		return nil, bytesRead, err
+	}
+	if scanErr := scanner.Err(); scanErr != nil {
+		return nil, bytesRead, scanErr
+	}
+	if bytesRead > maxSkillFileBytes {
+		return nil, bytesRead, fmt.Errorf("%w: source exceeds %d bytes", ErrSkillResourceLimit, maxSkillFileBytes)
+	}
+	return lines, bytesRead, nil
+}
+
+type contextReader struct {
+	ctx    context.Context
+	reader io.Reader
+}
+
+func (r contextReader) Read(p []byte) (int, error) {
+	if err := r.ctx.Err(); err != nil {
+		return 0, err
+	}
+	n, err := r.reader.Read(p)
+	if ctxErr := r.ctx.Err(); ctxErr != nil {
+		return n, ctxErr
+	}
+	return n, err
+}
+
+func validateSkillSourcePath(path string) (string, error) {
+	cleaned := filepath.ToSlash(filepath.Clean(filepath.FromSlash(path)))
+	localPath := filepath.FromSlash(path)
+	if filepath.IsAbs(localPath) || filepath.VolumeName(localPath) != "" || cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, "../") || cleaned != filepath.ToSlash(path) {
+		return "", fmt.Errorf("%w: source path %q is not a clean relative path", ErrSkillUnsafeSource, path)
+	}
+	return cleaned, nil
+}
+
+func skillPathDepth(relative string) int {
+	if relative == "." || relative == "" {
+		return 0
+	}
+	return len(strings.Split(relative, string(filepath.Separator)))
+}
+
+func isFatalSkillLoadError(err error) bool {
+	return errors.Is(err, context.Canceled) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, ErrSkillResourceLimit) ||
+		errors.Is(err, ErrSkillUnsafeSource)
 }
 
 // isSkillFileName reports whether name looks like a skill file.
