@@ -129,11 +129,13 @@ func (s *FileTrustStore) Add(path string, entry TrustEntry) error {
 		if path == "" {
 			return false, errors.New("approval: trust entry path is empty")
 		}
-		if previous, ok := entries[path]; ok && previous.TrustGeneration > 0 {
-			if entry.TrustGeneration < previous.TrustGeneration {
+		if previous, ok := entries[path]; ok {
+			previousGeneration := effectiveTrustGeneration(previous)
+			entryGeneration := effectiveTrustGeneration(entry)
+			if previousGeneration > 0 && entryGeneration < previousGeneration {
 				return false, errTrustGenerationRegression
 			}
-			if entry.TrustGeneration == previous.TrustGeneration && !trustEntryEqual(previous, entry) {
+			if previousGeneration > 0 && entryGeneration == previousGeneration && !trustEntryEqual(previous, entry) {
 				return false, errTrustGenerationMutation
 			}
 		}
@@ -149,14 +151,15 @@ func (s *FileTrustStore) Remove(path string) error {
 		if !ok {
 			return false, nil
 		}
-		if entry.TrustGeneration == 0 {
+		generation := effectiveTrustGeneration(entry)
+		if generation == 0 {
 			delete(entries, path)
 			return true, nil
 		}
-		if entry.TrustGeneration == ^uint64(0) {
+		if generation == ^uint64(0) {
 			return false, errTrustGenerationOverflow
 		}
-		entries[path] = trustTombstone(path, entry.TrustGeneration+1)
+		entries[path] = trustTombstone(path, generation+1)
 		return true, nil
 	})
 }
@@ -371,11 +374,13 @@ func (s *InMemoryTrustStore) Add(path string, entry TrustEntry) error {
 		if path == "" {
 			return false, errors.New("approval: trust entry path is empty")
 		}
-		if previous, ok := entries[path]; ok && previous.TrustGeneration > 0 {
-			if entry.TrustGeneration < previous.TrustGeneration {
+		if previous, ok := entries[path]; ok {
+			previousGeneration := effectiveTrustGeneration(previous)
+			entryGeneration := effectiveTrustGeneration(entry)
+			if previousGeneration > 0 && entryGeneration < previousGeneration {
 				return false, errTrustGenerationRegression
 			}
-			if entry.TrustGeneration == previous.TrustGeneration && !trustEntryEqual(previous, entry) {
+			if previousGeneration > 0 && entryGeneration == previousGeneration && !trustEntryEqual(previous, entry) {
 				return false, errTrustGenerationMutation
 			}
 		}
@@ -485,22 +490,24 @@ func validateTrustEntryTransitions(previous, next map[string]TrustEntry) error {
 		return err
 	}
 	for key, old := range previous {
-		if old.TrustGeneration == 0 {
+		oldGeneration := effectiveTrustGeneration(old)
+		if oldGeneration == 0 {
 			continue
 		}
 		if current, ok := next[key]; ok {
-			if current.TrustGeneration < old.TrustGeneration {
-				return fmt.Errorf("%w: %q moved from %d to %d", errTrustGenerationRegression, key, old.TrustGeneration, current.TrustGeneration)
+			currentGeneration := effectiveTrustGeneration(current)
+			if currentGeneration < oldGeneration {
+				return fmt.Errorf("%w: %q moved from %d to %d", errTrustGenerationRegression, key, oldGeneration, currentGeneration)
 			}
-			if current.TrustGeneration == old.TrustGeneration && !trustEntryEqual(old, current) {
-				return fmt.Errorf("%w: %q at %d", errTrustGenerationMutation, key, old.TrustGeneration)
+			if currentGeneration == oldGeneration && !trustEntryEqual(old, current) {
+				return fmt.Errorf("%w: %q at %d", errTrustGenerationMutation, key, oldGeneration)
 			}
 			continue
 		}
 		root := trustEntryRoot(key, old)
 		replaced := false
 		for newKey, current := range next {
-			if current.Revoked && current.TrustGeneration > old.TrustGeneration &&
+			if current.Revoked && current.TrustGeneration > oldGeneration &&
 				(newKey == root || current.CanonicalRoot == root || current.Path == root) {
 				replaced = true
 				break
@@ -585,14 +592,15 @@ func (s *InMemoryTrustStore) Remove(path string) error {
 		if !ok {
 			return false, nil
 		}
-		if entry.TrustGeneration == 0 {
+		generation := effectiveTrustGeneration(entry)
+		if generation == 0 {
 			delete(entries, path)
 			return true, nil
 		}
-		if entry.TrustGeneration == ^uint64(0) {
+		if generation == ^uint64(0) {
 			return false, errTrustGenerationOverflow
 		}
-		entries[path] = trustTombstone(path, entry.TrustGeneration+1)
+		entries[path] = trustTombstone(path, generation+1)
 		return true, nil
 	})
 }

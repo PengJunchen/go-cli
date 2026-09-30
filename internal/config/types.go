@@ -44,14 +44,15 @@ type Config struct {
 	// that project configuration or other executable sources may be consumed.
 	ProjectSourceTrustStatus ProjectSourceTrustStatus `json:"project_source_trust_status,omitempty"`
 
-	verbose                bool
-	samplingPresenceKnown  bool
-	projectSourceSnapshot  *approval.ProjectSourceSnapshot
-	verifiedProjectSources *approval.VerifiedProjectSources
-	projectTrustManager    approval.TrustManager `json:"-" yaml:"-" mapstructure:"-"`
-	projectOverlay         *Config
-	userGlobalConfig       *Config
-	mcpServersProvenance   MCPServersProvenance
+	verbose                   bool
+	samplingPresenceKnown     bool
+	projectSourceSnapshot     *approval.ProjectSourceSnapshot
+	verifiedProjectSources    *approval.VerifiedProjectSources
+	projectTrustManager       approval.TrustManager `json:"-" yaml:"-" mapstructure:"-"`
+	projectExtensionSourceIDs map[string]string
+	projectOverlay            *Config
+	userGlobalConfig          *Config
+	mcpServersProvenance      MCPServersProvenance
 }
 
 // Verbose returns whether verbose output is enabled.

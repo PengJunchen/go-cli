@@ -88,6 +88,102 @@ func TestProjectTrustCheckTreatsLegacyManifestAsGenerationOneWithoutRewrite(t *t
 	assert.Equal(t, before, after, "lazy generation-1 migration must not rewrite on read")
 }
 
+func TestLegacyManifestRemoveAndRegrantNeverReuseGenerationOne(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	snapshot := testProjectSnapshot(t, root, []byte("legacy full manifest"), nil, nil)
+	store := NewInMemoryTrustStore()
+	legacy := TrustEntry{
+		Path:                     snapshot.CanonicalRoot(),
+		CanonicalRoot:            snapshot.CanonicalRoot(),
+		ManifestVersion:          snapshot.manifestVersion,
+		ProjectSources:           snapshot.SourceRecords(),
+		ProjectSourceDirectories: snapshot.DirectoryRecords(),
+		ManifestDigest:           snapshot.ManifestDigest(),
+	}
+	require.NoError(t, store.Add(legacy.Path, legacy))
+	manager := NewDefaultTrustManager(store).(*DefaultTrustManager)
+	old, err := manager.CheckProjectSourceSnapshot(ctx, snapshot)
+	require.NoError(t, err)
+	require.Equal(t, uint64(1), old.TrustGeneration())
+
+	require.NoError(t, store.Remove(legacy.Path))
+	entries, err := store.Load()
+	require.NoError(t, err)
+	require.True(t, entries[legacy.Path].Revoked, "removing a legacy full manifest must retain a tombstone")
+	require.Equal(t, uint64(2), entries[legacy.Path].TrustGeneration)
+	marked := false
+	err = old.CommitIfCurrent(ctx, func() error {
+		marked = true
+		return nil
+	})
+	require.Error(t, err)
+	require.False(t, marked, "the gen-1 binding must fail after legacy removal")
+
+	require.NoError(t, manager.TrustProjectSourceSnapshot(ctx, snapshot))
+	fresh, err := manager.CheckProjectSourceSnapshot(ctx, snapshot)
+	require.NoError(t, err)
+	require.Equal(t, uint64(3), fresh.TrustGeneration())
+	require.NoError(t, fresh.CommitIfCurrent(ctx, func() error {
+		marked = true
+		return nil
+	}))
+	marked = false
+	err = old.CommitIfCurrent(ctx, func() error {
+		marked = true
+		return nil
+	})
+	require.Error(t, err, "regranting the same legacy manifest must not revive its old binding")
+	require.False(t, marked)
+}
+
+func TestLegacyManifestStoreMutationsMustPreserveEffectiveGeneration(t *testing.T) {
+	root := t.TempDir()
+	snapshot := testProjectSnapshot(t, root, []byte("legacy full manifest"), nil, nil)
+	legacy := TrustEntry{
+		Path:                     snapshot.CanonicalRoot(),
+		CanonicalRoot:            snapshot.CanonicalRoot(),
+		ManifestVersion:          snapshot.manifestVersion,
+		ProjectSources:           snapshot.SourceRecords(),
+		ProjectSourceDirectories: snapshot.DirectoryRecords(),
+		ManifestDigest:           snapshot.ManifestDigest(),
+	}
+
+	for _, tc := range []struct {
+		name string
+		new  func() TrustStore
+	}{
+		{name: "in-memory", new: func() TrustStore { return NewInMemoryTrustStore() }},
+		{name: "file", new: func() TrustStore { return NewFileTrustStore(privateTrustStorePath(t)) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := tc.new()
+			require.NoError(t, store.Add(legacy.Path, legacy))
+			changed := legacy
+			changed.ManifestDigest = "different-but-nonempty"
+			assert.Error(t, store.Add(legacy.Path, changed), "same effective generation cannot mutate a legacy full manifest")
+			entries, err := store.Load()
+			require.NoError(t, err)
+			assert.Equal(t, legacy, entries[legacy.Path], "rejected Add must leave the prior epoch unchanged")
+
+			assert.Error(t, store.Save(map[string]TrustEntry{}), "whole-store replacement cannot erase a legacy generation-1 manifest")
+			entries, err = store.Load()
+			require.NoError(t, err)
+			assert.Equal(t, legacy, entries[legacy.Path], "rejected Save must leave the prior epoch unchanged")
+		})
+	}
+}
+
+func TestLegacyPathOnlyEntryRemainsUnbindableAndPhysicallyRemovable(t *testing.T) {
+	store := NewInMemoryTrustStore()
+	root := t.TempDir()
+	require.NoError(t, store.Add(root, TrustEntry{Path: root, Fingerprint: "legacy"}))
+	require.NoError(t, store.Remove(root))
+	entries, err := store.Load()
+	require.NoError(t, err)
+	assert.NotContains(t, entries, root, "path-only legacy entries never carried a source capability and remain removable")
+}
+
 func TestProjectTrustGenerationRevokeWritesTombstoneAndLegacyTrustCannotMintBinding(t *testing.T) {
 	ctx := context.Background()
 	root := t.TempDir()
