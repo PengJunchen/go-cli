@@ -109,8 +109,8 @@ func TestTokenUsageEventUsesAttemptSubtotalsAndUnknownCounts(t *testing.T) {
 	}
 }
 
-// TestCostHandler verifies that the /cost command displays context window
-// occupancy (total tokens / context window as a percentage).
+// TestCostHandler verifies that cumulative per-request token totals are not
+// presented as current context-window occupancy.
 func TestCostHandler(t *testing.T) {
 	statsReg := production.NewStatsRegistry()
 	statsReg.RecordTokens("sess-1", 5000, 3000)
@@ -130,8 +130,25 @@ func TestCostHandler(t *testing.T) {
 	output := buf.String()
 	assert.Contains(t, output, "Context:")
 	assert.Contains(t, output, "128000")
-	// 8000 total tokens / 128000 = 6%
-	assert.Contains(t, output, "(6%)")
+	assert.Contains(t, output, "Context:   unknown/128000 (current occupancy unavailable)")
+	assert.NotContains(t, output, "Context:   8000/128000", "cumulative request usage is not current context occupancy")
+}
+
+func TestCostHandlerReportsUnknownContextOccupancyWithoutSessionSnapshot(t *testing.T) {
+	var buf bytes.Buffer
+	sc := &slashContext{
+		statsRegistry: production.NewStatsRegistry(),
+		sessionID:     "missing-session",
+		out:           &buf,
+		contextWindow: 128000,
+	}
+
+	_, err := (&CostHandler{}).Handle(context.Background(), nil, sc)
+	require.NoError(t, err)
+
+	output := buf.String()
+	assert.Contains(t, output, "Context:   unknown/128000 (current occupancy unavailable)")
+	assert.NotContains(t, output, "Context:   0/128000", "a missing session snapshot must not imply empty context")
 }
 
 // TestContextWindowFallback verifies that when ModelInfo.ContextWindow is 0
