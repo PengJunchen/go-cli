@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
 )
@@ -133,6 +134,10 @@ func probeLinuxProcessGroup(processGroupID int) error {
 		return errors.New("process group ID cannot be probed safely")
 	}
 	return unix.Kill(-processGroupID, 0)
+}
+
+func processGroupInspection(status ProcessGroupExitStatus, reason string) ProcessGroupExitInspection {
+	return ProcessGroupExitInspection{Status: status, Reason: reason, ObservedAt: time.Now().UTC()}
 }
 
 func inspectLinuxProcessGroupExit(

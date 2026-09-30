@@ -48,7 +48,3 @@ func InspectProcessGroupExit(identity ExecutionIdentity) ProcessGroupExitInspect
 func unknownProcessGroupInspection(reason string) ProcessGroupExitInspection {
 	return ProcessGroupExitInspection{Status: ProcessGroupExitUnknown, Reason: reason}
 }
-
-func processGroupInspection(status ProcessGroupExitStatus, reason string) ProcessGroupExitInspection {
-	return ProcessGroupExitInspection{Status: status, Reason: reason, ObservedAt: time.Now().UTC()}
-}
