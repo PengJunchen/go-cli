@@ -613,7 +613,9 @@ type PreparedPolicyDecision struct {
 // request fence with its expected snapshot and return the resulting snapshot.
 type PreparedToolPolicy func(context.Context, PreparedPolicyRequest) (PreparedPolicyDecision, error)
 
-// ToolCallPreparer prepares a tool call without invoking its executor.
+// ToolCallPreparer prepares a tool call without invoking its executor. Callers
+// must keep call.Args stable until preparation returns; the resulting
+// invocation owns a defensive snapshot and is independent afterward.
 type ToolCallPreparer interface {
 	toolCallPreparerCapability()
 	PrepareToolCall(context.Context, ToolCall) (PreparedInvocation, error)

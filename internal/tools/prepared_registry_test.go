@@ -150,6 +150,37 @@ func TestPrepareToolCallNormalizesValidatesAndFreezesCapturedArguments(t *testin
 	assert.Equal(t, 1, tool.snapshotCalls())
 }
 
+func TestPreparedWorkspaceReadPreflightUsesFrozenCallSnapshot(t *testing.T) {
+	ctx := context.Background()
+	allowedRoot := t.TempDir()
+	outsideRoot := t.TempDir()
+	base := NewDefaultToolRegistry().(*DefaultToolRegistry)
+	require.NoError(t, RegisterDefaults(ctx, base, WithRegisteredPathWhitelist([]string{allowedRoot})))
+
+	for _, name := range []string{"read", "grep", "find", "ls"} {
+		t.Run(name, func(t *testing.T) {
+			allowedPath := filepath.Join(allowedRoot, "inside.txt")
+			outsidePath := filepath.Join(outsideRoot, "outside.txt")
+			args := map[string]any{"path": allowedPath}
+			frozen, err := freezeToolCall(ToolCall{Name: name, Args: args})
+			require.NoError(t, err)
+
+			// Synchronous caller mutation after the freeze must not change the
+			// path the preflight validates.
+			args["path"] = outsidePath
+			require.NoError(t, validatePreparedWorkspaceReadPath(base.tools[name], frozen))
+
+			outsideArgs := map[string]any{"path": outsidePath}
+			outsideCall, err := freezeToolCall(ToolCall{Name: name, Args: outsideArgs})
+			require.NoError(t, err)
+			outsideArgs["path"] = allowedPath
+			err = validatePreparedWorkspaceReadPath(base.tools[name], outsideCall)
+			require.Error(t, err)
+			require.Contains(t, err.Error(), "whitelist")
+		})
+	}
+}
+
 func TestPrepareToolCallRejectsInvalidSchemaBeforePolicy(t *testing.T) {
 	ctx := context.Background()
 	base := NewDefaultToolRegistry().(*DefaultToolRegistry) //nolint:errcheck
