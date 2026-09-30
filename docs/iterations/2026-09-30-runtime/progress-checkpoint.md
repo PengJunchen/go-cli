@@ -8,14 +8,14 @@ The historical ledger still lists 14 `done`, 16 `in_progress`, 14 `pending`, and
 
 | Check | Result | Limit and evidence |
 |---|---|---|
-| `GOMAXPROCS=2 NO_COLOR=1 make verify` | Exit 0: formatting, vet, lint (0 issues), build, all-package `go test -race -count=1 ./...`, scanner, test-log and goroutine-leak gates passed. Scanner: 414 files, 0 ERROR, 1,723 WARN. | `goimports` was unavailable and its optional step was skipped. The scanner WARN findings remain triage items. Logs: `/tmp/go-cli-verify-wave2b-20260930.log` and `/tmp/go-cli-verify-wave2b-full-output-20260930.log` (ends with `Verification complete`). |
+| `make verify` | Exit 0: formatting, vet, lint (0 issues), build, all-package `go test -race -count=1 ./...`, scanner, test-log and goroutine-leak gates passed. Scanner: 414 files, 0 ERROR, 1,723 WARN. | `goimports` was unavailable and its optional step was skipped. The scanner WARN findings remain triage items. Logs: `/tmp/go-cli-verify-wave2b-20260930.log` and `/tmp/go-cli-verify-wave2b-full-output-20260930.log` (ends with `Verification complete`). |
 | `GOMAXPROCS=2 go test -race -count=1 -tags=e2e ./tests/...` | Exit 0; `tests` completed in 28.175s and `tests/e2e_20260802` in 41.088s. | The earlier `./tests/e2e` attempt failed only during package setup because that directory does not exist; this corrected `./tests/...` run supersedes it. Log: `/tmp/go-cli-e2e-wave2b-20260930.log`. |
 | `GOMAXPROCS=2 go test -race -tags=mock ./internal/mock/...` | Exit 0 in 1.029s. | `-count=1` was not passed. Mock-only validation. Log: `/tmp/go-cli-mock-wave2-20260930.log`. |
 | `GOMAXPROCS=2 make test-cov-check` | Exit 0; 82.1% total statement coverage against the 65% threshold. | Aggregate coverage is not a per-critical-path guarantee. Log: `/tmp/go-cli-coverage-wave2-20260930.log`. |
 
 The source at `8cb287a` includes these bounded slices, carried into `4d014fa`; none closes its full phase:
 
-- **R3:** Active loop detection warns by default; termination is opt-in, and unknown priority does not itself force termination. Durable current input has a typed identity at index 0 and retains `RunID`/`PriorSourceCount` through preflight and overflow handling. Clone boundaries prevent the compactor from aliasing mutable caller-owned message data.
+- **R3:** Active loop detection warns by default; termination is opt-in. Unknown-effect terminal outcomes retain precedence over loop detection. Durable current input has a typed identity at index 0 and retains `RunID`/`PriorSourceCount` through preflight and overflow handling. Clone boundaries prevent the compactor from aliasing mutable caller-owned message data.
 - **R4:** Native `rg` wrapper and adversarial helper tests cover prepared-path behavior; real SubAgent tests cover prepared-policy behavior. The native `fd` path was unavailable/skipped and is not claimed as exercised.
 - **R7:** Operational shutdown reports all seven async-exporter counters; meaningful anomalies exit 1 and quiet zero-loss exits 0. Missing current context occupancy remains unknown and is kept separate from cumulative token usage.
 
@@ -29,7 +29,7 @@ The reviewed Hook-observer implementation is integrated at `4d014fa5c5599968ba19
 |---|---|---|
 | `GOMAXPROCS=2 GOCLI_REQUIRE_NATIVE_PLUGIN_TEST=1 go test -race -count=1 ./internal/cli ./internal/extension` | Exit 0; CLI 41.524s, extension 1.347s. | The required native Go plugin lifecycle gate ran and passed on Darwin. The Linux CI gate remains unwired; Linux execution was unavailable because no Docker daemon was available, and the protected gate wiring is pending approval. Log: `/tmp/go-cli-r7-hook-integrated-race-20261001.log`. |
 | `GOMAXPROCS=2 go test -race -count=1 -tags=no_plugin ./internal/cli ./internal/extension` | Exit 0; CLI 37.539s, extension 1.192s. | The native-plugin lifecycle fixture skipped as expected in the disabled-plugin build; the `no_plugin` package tests passed. Log: `/tmp/go-cli-r7-hook-integrated-noplugin-20261001.log`. |
-| `GOMAXPROCS=2 go vet ./internal/cli ./internal/extension` | Exit 0. | Scoped to the affected packages. |
+| `go vet ./internal/cli ./internal/extension` | Exit 0. | Scoped to the affected packages. |
 | `GOMAXPROCS=2 golangci-lint run --max-same-issues 0 --max-issues-per-linter 0 ./internal/cli ./internal/extension` | Exit 0; 0 issues. | Scoped to the affected packages. Log: `/tmp/go-cli-r7-hook-integrated-lint-20261001.log`. |
 
 The full-gate result at `8cb287a` remains useful source-wide evidence, but it does not establish a full verify at `4d014fa`. The next full repository gate is planned after the remaining R6, R7 Skill-schema, and R3 envelope integrations.
@@ -69,10 +69,11 @@ Linux Docker exposed two baseline test fixtures that failed even at `551e260`: a
 
 ## Current remaining boundaries and reviewed design handoffs
 
-These are design candidates or unresolved acceptance boundaries, not integrated implementations:
+These statuses distinguish integrated slices, implementation candidates, and unresolved acceptance boundaries:
 
 - **R3 provider envelope:** The reviewed [provider-envelope preflight handoff](r3-provider-envelope-preflight-handoff.md) describes a bounded estimate/admission contract. Its implementation remains unmerged; it does not close R3 or enable a native provider.
-- **R6 trust dispatch:** The [live-epoch revocation design](r6-trust-dispatch-revocation-design.md) and [trust snapshot API handoff](r6-trust-snapshot-api-handoff.md) remain implementation candidates, not shipped behavior.
+- **R6 trust snapshot:** The initial snapshot API and persistent project-trust CLI wiring were integrated at `f9acdfdc03da3040b4ff6fa95f915eef9cd56d0e` (with the sealed-config base integrated earlier). The [trust snapshot API handoff](r6-trust-snapshot-api-handoff.md) documents this integrated prerequisite.
+- **R6 live dispatch revocation:** The [live-epoch revocation design](r6-trust-dispatch-revocation-design.md) remains an implementation candidate; the final dispatch-time revocation fence is not yet shipped.
 - **R7 Hook observer:** The [Hook observer owner-boundary contract](r7-hook-observer-contract.md) is the reviewed design basis for the implementation integrated at `4d014fa`; the remaining phase acceptance is open.
 - **R7 Skill schema:** The [Skill schema handoff](r7-skill-schema-handoff.md) is reviewed design only; its implementation remains open.
 - **R8 active preview:** The [active-preview guard handoff](r8-active-preview-guard-handoff.md) is a reviewed, doc-only boundary proposal. A release owner must choose between preserving the complete-response guard with content-free progress only, or explicitly permitting a visibly provisional speculative preview that may already expose text later blocked or redacted. No preview builder is authorized until that disclosure choice is made; R8 active partial-text acceptance remains open.
