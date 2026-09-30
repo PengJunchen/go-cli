@@ -177,6 +177,26 @@ func TestNonDurableContextPreflightRejectsCompactorChangesToCurrentInput(t *test
 	}
 }
 
+func TestNonDurableContextPreflightRejectsInPlaceCurrentContentBlockMutation(t *testing.T) {
+	messages := []llm.Message{
+		{Role: llm.RoleSystem, Content: "s"},
+		{
+			Role: llm.RoleUser, Content: "current input",
+			ContentBlocks: []llm.ContentBlock{{Type: "text", Text: "original current block"}},
+		},
+	}
+	compactor := &budgetPreflightInPlaceBlockCompactor{}
+	_, _, _, err := preflightNonDurableRequest(
+		context.Background(), messages, 1,
+		compaction.NewMidTurnCompact(compaction.WithThresholdRatio(1)), compactor,
+		budgetPreflightCharacterEstimator{}, 1,
+	)
+	require.ErrorIs(t, err, errCurrentSubmissionNotPreserved)
+	require.Equal(t, 1, compactor.calls)
+	require.Equal(t, "original current block", messages[1].ContentBlocks[0].Text,
+		"a compactor must not mutate the caller's current-input graph while its rewrite is rejected")
+}
+
 func TestNonDurableContextPreflightRejectsBrokenCompactorToolGroup(t *testing.T) {
 	model := &budgetPreflightRecordingModel{}
 	loop := NewLoopAgent(WithLLM(model), WithSystemPrompt("s"))
@@ -252,6 +272,16 @@ func (model *budgetPreflightRecordingModel) requestsSnapshot() [][]llm.Message {
 
 type budgetPreflightRewriteCompactor struct {
 	rewrite func([]compaction.TurnItem) []compaction.TurnItem
+}
+
+type budgetPreflightInPlaceBlockCompactor struct {
+	calls int
+}
+
+func (compactor *budgetPreflightInPlaceBlockCompactor) Compact(_ context.Context, items []compaction.TurnItem, _ int, _ compaction.TokenEstimator) (compaction.CompactionResult, error) {
+	compactor.calls++
+	items[len(items)-1].ContentBlocks[0].Text = "rewritten current block"
+	return compaction.CompactionResult{Items: items, Strategy: compaction.StrategyTruncating}, nil
 }
 
 func (compactor budgetPreflightRewriteCompactor) Compact(_ context.Context, items []compaction.TurnItem, _ int, _ compaction.TokenEstimator) (compaction.CompactionResult, error) {

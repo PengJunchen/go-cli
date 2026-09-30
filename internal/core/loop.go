@@ -1055,7 +1055,7 @@ func preflightDurableRequest(
 	if err != nil {
 		return nil, err
 	}
-	result, err := compactor.Compact(ctx, items, maxTokens, estimator)
+	result, err := compactor.Compact(ctx, cloneCompactionTurnItems(items), maxTokens, estimator)
 	if err != nil {
 		return nil, err
 	}
@@ -1091,8 +1091,8 @@ func preflightNonDurableRequest(
 		return nil, currentSubmissionIndex, compaction.CompactResult{}, err
 	}
 	currentSubmissionID := items[currentSubmissionIndex].ID
-	currentSubmission := messages[currentSubmissionIndex]
-	compacted, result, err := midTurnCompactor.CompactIfNeeded(ctx, items, maxTokens, estimator, compactor)
+	currentSubmission := cloneLLMMessage(messages[currentSubmissionIndex])
+	compacted, result, err := midTurnCompactor.CompactIfNeeded(ctx, cloneCompactionTurnItems(items), maxTokens, estimator, compactor)
 	if err != nil {
 		return nil, currentSubmissionIndex, result, err
 	}
@@ -1293,6 +1293,18 @@ func messagesToTurnItems(msgs []llm.Message) []compaction.TurnItem {
 		finishReasons[i] = message.FinishReason
 	}
 	return agentMessagesToTurnItemsWithFinish(canonical, finishReasons)
+}
+
+func cloneLLMMessage(message llm.Message) llm.Message {
+	cloned := cloneAgentMessage(AgentMessage{
+		Role: string(message.Role), Content: message.Content, ContentBlocks: message.ContentBlocks,
+		Usage: message.Usage, ToolCalls: message.ToolCalls, ToolCallID: message.ToolCallID,
+		ToolName: message.Name, Runtime: message.Runtime,
+	})
+	message.ContentBlocks = cloned.ContentBlocks
+	message.Usage = cloned.Usage
+	message.ToolCalls = cloned.ToolCalls
+	return message
 }
 
 // agentMessagesToTurnItems retains source metadata while preparing the
@@ -1954,7 +1966,7 @@ func compactOverflowRequest(
 			return nil, err
 		}
 	}
-	result, err := compactor.Compact(ctx, items, maxTokens, estimator)
+	result, err := compactor.Compact(ctx, cloneCompactionTurnItems(items), maxTokens, estimator)
 	if err != nil {
 		return nil, fmt.Errorf("core: compact overflow request: %w", err)
 	}

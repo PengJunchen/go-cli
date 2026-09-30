@@ -32,6 +32,63 @@ func (summarizer *recordingDurableCompactionSummarizer) Summarize(context.Contex
 	return "raw durable summary", nil
 }
 
+type inPlaceCurrentBlockCompactor struct {
+	calls int
+}
+
+func (compactor *inPlaceCurrentBlockCompactor) Compact(_ context.Context, items []compaction.TurnItem, _ int, _ compaction.TokenEstimator) (compaction.CompactionResult, error) {
+	compactor.calls++
+	current := len(items) - 1
+	items[current].ContentBlocks[0].Text = "mutated by compactor"
+	priorCount := items[current].Runtime.Source.PriorSourceCount
+	through := llm.SourceThrough{PriorHistoryCount: priorCount}
+	summary := compaction.TurnItem{
+		ID: "mutating-compactor-summary", Role: compaction.RoleUser, Content: "summary of prior context", IsCompaction: true,
+		Runtime: llm.RuntimeMetadata{Source: llm.SourceRef{Kind: llm.SourceRunSummary, RunID: items[current].Runtime.Source.RunID, Through: through}},
+	}
+	return compaction.CompactionResult{
+		Items:         []compaction.TurnItem{items[0], summary, items[current]},
+		Strategy:      compaction.StrategySummary,
+		NewProjection: &compaction.NewProjection{Summary: summary.Content, Through: through},
+	}, nil
+}
+
+type durableCurrentBlocksAgent struct {
+	loop          *core.LoopAgent
+	contentBlocks []llm.ContentBlock
+}
+
+func (agent *durableCurrentBlocksAgent) Name() string { return "durable-current-blocks" }
+
+func (agent *durableCurrentBlocksAgent) Run(ctx context.Context, submission core.Submission, stream ...core.EventStream) (core.Result, error) {
+	sink, _, ok := core.RunCommitFromContext(ctx)
+	if !ok {
+		return core.Result{}, errors.New("test: durable run sink is unavailable")
+	}
+	sourceSink, ok := sink.(core.RunCommitCompactionSource)
+	if !ok {
+		return core.Result{}, errors.New("test: durable source snapshot is unavailable")
+	}
+	snapshot, err := sourceSink.CompactionSourceSnapshot()
+	if err != nil {
+		return core.Result{}, err
+	}
+	history := make([]core.AgentMessage, len(snapshot.Messages), len(snapshot.Messages)+1)
+	for index, message := range snapshot.Messages {
+		message.Runtime.Source = llm.SourceRef{
+			Kind: llm.SourcePriorPublished, HistoryRevision: snapshot.Revision, BranchID: snapshot.BranchID,
+			SourceEntryID: snapshot.SourceEntryIDs[index], PriorOrdinal: uint64(index),
+		}
+		history[index] = message
+	}
+	history = append(history, core.AgentMessage{
+		Role: string(llm.RoleUser), Content: submission.Content, ContentBlocks: agent.contentBlocks, InputKind: core.InputKindUser,
+	})
+	submission.History = history
+	_, err = agent.loop.RunCanonical(ctx, submission, stream...)
+	return core.Result{RunID: core.RunIDFromContext(ctx)}, err
+}
+
 type oneTokenForNonEmptyText struct{}
 
 func (oneTokenForNonEmptyText) Estimate(text string) (int, error) {
@@ -174,6 +231,70 @@ func TestDurableCompactionRejectsSummaryThatConsumesOversizedCurrentInput(t *tes
 		"the rejected projection must leave the raw user input unchanged after durable reopen")
 	require.Len(t, reopenedSnapshot.PublishedView.Messages, 1)
 	require.Equal(t, content, reopenedSnapshot.PublishedView.Messages[0].Content)
+}
+
+func TestDurableCompactionRejectsInPlaceMutationOfCurrentContentBlockBeforeProviderOrCommit(t *testing.T) {
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	workspaceID := "workspace-v1-durable-current-block-mutation"
+	index, prepared, initialSink := prepareRunCommitSession(t, root, workspaceID, "durable current block mutation")
+	preparedOpen := true
+	t.Cleanup(func() {
+		if preparedOpen {
+			_ = prepared.Close()
+		}
+	})
+
+	priorModel := runDurableCompactionTurn(t, initialSink, prepared, workspaceID, "prior durable turn", nil, 0, false)
+	require.Equal(t, 1, priorModel.CallCount())
+
+	currentSink, err := session.NewSessionRunCommitSink(prepared, index, workspaceID, nil)
+	require.NoError(t, err)
+	mutator := &inPlaceCurrentBlockCompactor{}
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate("durable-current-block-mutation", "durable current block mutation",
+		mock.ConversationTurn{AssistantContent: "must not be requested"},
+	))
+	loop := core.NewLoopAgent(core.WithLLM(model), core.WithSystemPrompt("s"))
+	loop.SetMidTurnCompaction(
+		compaction.NewMidTurnCompact(compaction.WithThresholdRatio(1)),
+		mutator,
+		durableCharacterEstimator{},
+		1,
+	)
+	agent := &durableCurrentBlocksAgent{
+		loop:          loop,
+		contentBlocks: []llm.ContentBlock{{Type: "text", Text: "original multimodal input"}},
+	}
+	content := "current block input"
+
+	runErr := runDurableCompactionRun(t, agent, currentSink, prepared, workspaceID, content)
+	require.ErrorIs(t, runErr, core.ErrDurableCompactionUnsupported,
+		"mutating the returned current item in place must not rewrite the raw current input snapshot")
+	require.Equal(t, 1, mutator.calls)
+	require.Zero(t, model.CallCount(), "a changed current content block must be rejected before provider dispatch")
+
+	live, err := prepared.Snapshot()
+	require.NoError(t, err)
+	for _, entry := range live.DurableEntries {
+		require.NotEqual(t, session.EntryTypeCompaction, entry.Type, "a rejected in-place mutation must not append a compaction row")
+	}
+	current := live.PublishedView.Messages[len(live.PublishedView.Messages)-1]
+	require.Equal(t, content, current.Content)
+	require.Equal(t, "original multimodal input", current.ContentBlocks[0].Text,
+		"the already-synced JSONL input must retain its original content block")
+
+	sessionID := live.SessionID
+	require.NoError(t, prepared.Close())
+	preparedOpen = false
+	reopened, err := session.NewDurableJSONLSessionPreparer(filepath.Join(root, "durable"), index).PrepareResume(context.Background(), sessionID)
+	require.NoError(t, err)
+	defer reopened.Close()
+	reopenedSnapshot, err := reopened.Snapshot()
+	require.NoError(t, err)
+	reopenedCurrent := reopenedSnapshot.PublishedView.Messages[len(reopenedSnapshot.PublishedView.Messages)-1]
+	require.Equal(t, "original multimodal input", reopenedCurrent.ContentBlocks[0].Text,
+		"reopening the JSONL session must not observe the compactor's in-place mutation")
 }
 
 func TestDurableCompactionWithoutCutSendsCurrentInputOnceAndReopens(t *testing.T) {
