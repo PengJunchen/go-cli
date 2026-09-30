@@ -749,6 +749,7 @@ func (s *REPLSession) executeTurn() error {
 		s.finishTurnSetupFailure(err)
 		return err
 	}
+	s.bindTodoUpdates()
 	s.runAgentGoroutine(runCtx)
 	waitErr := s.waitForTurnCompletion()
 
@@ -880,6 +881,7 @@ func (s *REPLSession) finishTurnSetupFailure(err error) {
 }
 
 func (s *REPLSession) stopTUI() {
+	s.unbindTodoUpdates()
 	if s.cancelTurn != nil {
 		s.cancelTurn()
 	}
@@ -1165,6 +1167,9 @@ func (s *REPLSession) renderTUI(initialTranscript *tui.CanonicalTranscriptSnapsh
 		tui.WithModelInfo(s.slashCtx.ModelName()),
 		tui.WithTurnCount(s.turnCounter),
 		tui.WithSessionInfo(s.assembly.SessionID),
+	}
+	if snapshot, ok := s.assembly.todoSnapshot(); ok {
+		appOpts = append(appOpts, tui.WithTodoSnapshot(todoUpdateMsg(snapshot)))
 	}
 	// Mode label: show "plan" when plan mode is active, otherwise "chat".
 	if s.assembly.PlanCtrl != nil && s.assembly.PlanCtrl.IsActive() {

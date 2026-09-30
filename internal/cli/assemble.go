@@ -258,6 +258,7 @@ type AgentAssembly struct {
 	closeOwner          *assemblyCloseOwner
 	mcpResources        *assemblyMCPResources
 	durableSession      *durableCLISession
+	todoState           *assemblyTodoState
 	approvalAuditHealth func() approval.AuditTrailHealth
 }
 
@@ -554,6 +555,7 @@ func AssembleAgent(
 		closeOwner:          s.closeOwner,
 		mcpResources:        s.mcpResources,
 		durableSession:      s.durableSession,
+		todoState:           s.todoState,
 		approvalAuditHealth: s.approvalAuditHealth,
 	}, nil
 }
@@ -677,6 +679,7 @@ type assembleState struct {
 	// Tools section
 	tr               tools.ToolRegistry
 	underlyingReg    tools.ToolRegistry
+	todoState        *assemblyTodoState
 	fileTracker      *tools.FileTracker
 	diffGen          tools.DiffGenerator
 	mutationQueue    tools.FileMutationQueue
@@ -1422,6 +1425,7 @@ func (s *assembleState) assembleSubAgent() {
 // assembleExtraTools registers remaining tools (todo, task, goal, web, plan_mode, etc.).
 func (s *assembleState) assembleExtraTools() error {
 	todoStore := tools.NewTodoStore()
+	s.todoState = newAssemblyTodoState(todoStore)
 	taskStore := tools.NewTaskStore()
 	goalStore, _ := tools.NewDefaultGoalStore("") //nolint:errcheck
 	s.hitlEmitter = &cliHITLEmitter{out: s.out}
@@ -1452,7 +1456,7 @@ func (s *assembleState) assembleExtraTools() error {
 	webFetchTool := tools.NewWebFetchTool(tools.WithHTMLConverter(s.htmlConverter))
 
 	extraTools := []tools.ToolDefinition{
-		tools.NewTodoWriteTool(todoStore),
+		tools.NewTodoWriteTool(todoStore, tools.WithTodoWriteChangeHandler(s.todoState.notify)),
 		tools.NewTaskCreateTool(taskStore),
 		tools.NewTaskUpdateTool(taskStore),
 		tools.NewGoalCreateTool(goalStore),
