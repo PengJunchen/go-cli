@@ -393,6 +393,57 @@ func TestRunCommitReceiptPersistenceFailureDoesNotPublishSuccess(t *testing.T) {
 	require.Equal(t, 1, model.idx, "receipt persistence failure must stop later provider work")
 }
 
+func TestRunCommitDetectorCauseDoesNotMaskReceiptPersistenceUnknown(t *testing.T) {
+	detectorParentCtx, cancelDetector := context.WithCancelCause(context.Background())
+	defer cancelDetector(nil)
+	receiptErr := errors.New("injected receipt sync failure after loop detection")
+	sink := &consumerTestSink{recordReceiptErr: receiptErr}
+	registry := newPreparedConsumerReadRegistry(t)
+	require.NoError(t, registry.SetPreparedToolStages(tools.PreparedToolStages{
+		PreparedAttemptObserver: func(context.Context, tools.FrozenPreparedAttempt) error {
+			cancelDetector(ErrLoopDetected)
+			return ErrLoopDetected
+		},
+	}))
+	model := &scriptedChatModel{seq: []*llm.Message{{
+		Role:      llm.RoleAssistant,
+		ToolCalls: []llm.ToolCall{{ID: "detector-receipt-failure", Name: "read", Args: map[string]any{"path": filepath.Join(t.TempDir(), "input.txt")}}},
+	}}}
+	agent := NewAgentImpl("durable-detector-receipt-failure", NewLoopAgent(WithLLM(model), WithTools(registry)))
+	owner := newRunOwner(WithRunCommit(detectorParentCtx, sink, RunCommitBinding{
+		SessionID: "session-detector-receipt-failure", WorkspaceID: "workspace-detector-receipt-failure",
+	}), nil, RunClaim{ID: "run-detector-receipt-failure"}, nil)
+
+	_, runErr := owner.run(time.Second, func(ctx context.Context) (Result, error) {
+		return agent.Run(ctx, Submission{Type: SubmissionUserMessage, Content: "prepare the repeated tool attempt"})
+	})
+	require.ErrorIs(t, runErr, ErrLoopDetected, "the first cause remains visible")
+	require.ErrorIs(t, runErr, receiptErr, "receipt failure must not be erased by detector normalization")
+	require.True(t, hasUnknownToolOutcome(runErr), "journal failure remains conservatively unknown")
+	status := owner.Snapshot()
+	require.Equal(t, RunOutcomeUnknown, status.Outcome, "unknown persistence evidence outranks detector error classification")
+
+	steps, _, receipts, terminal := sink.snapshot()
+	require.Equal(t, []string{"input", "begin", "receipt", "terminal"}, steps)
+	require.Empty(t, receipts, "the injected receipt sync failure leaves no durable receipt")
+	require.NotNil(t, terminal)
+	require.Equal(t, RunOutcomeUnknown, terminal.Outcome, "durable terminal classification preserves the failed receipt write")
+	require.Equal(t, 1, model.idx, "detector rejection and journal failure stop the next provider call")
+}
+
+func TestTerminalOutcomeKeepsRunCommitQuiescenceUnknownAheadOfLoopError(t *testing.T) {
+	detectorCtx, cancelDetector := context.WithCancelCause(context.Background())
+	cancelDetector(ErrLoopDetected)
+	defer cancelDetector(nil)
+	quiescenceErr := runCommitQuiescenceError{cause: ErrRunCommitQuiescenceUnproven}
+	runErr := normalizeLoopDetectedCause(detectorCtx, quiescenceErr)
+
+	require.ErrorIs(t, runErr, ErrLoopDetected, "first cancellation cause remains typed")
+	require.ErrorIs(t, runErr, ErrRunCommitQuiescenceUnproven, "R1 local-quiescence failure remains in the error chain")
+	require.True(t, hasUnknownToolOutcome(runErr), "an unproven dispatched action remains unknown")
+	require.Equal(t, RunOutcomeUnknown, terminalOutcome(runErr), "unknown R1 evidence outranks detector error")
+}
+
 func TestRunCommitConsumerBuffersParallelReceiptsInCanonicalOrder(t *testing.T) {
 	root := t.TempDir()
 	firstPath := filepath.Join(root, "first.txt")

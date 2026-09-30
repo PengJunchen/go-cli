@@ -483,7 +483,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 		}()
 		defer func() {
 			if errors.Is(context.Cause(spanCtx), ErrLoopDetected) {
-				runErr = ErrLoopDetected
+				runErr = normalizeLoopDetectedCause(spanCtx, runErr)
 			}
 		}()
 	}

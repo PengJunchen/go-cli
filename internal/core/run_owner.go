@@ -887,6 +887,8 @@ func (o *runOwner) run(timeout time.Duration, fn func(context.Context) (Result, 
 			case o.unknown || result.Outcome == RunOutcomeUnknown:
 				o.unknown = true
 				o.status.Outcome = RunOutcomeUnknown
+			case errors.Is(context.Cause(callbackCtx), ErrLoopDetected):
+				o.status.Outcome = RunOutcomeError
 			case result.Outcome != "":
 				o.status.Outcome = result.Outcome
 			case o.runErr != nil && o.ctx.Err() != nil && errors.Is(o.runErr, o.ctx.Err()):

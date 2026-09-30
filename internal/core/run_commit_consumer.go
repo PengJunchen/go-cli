@@ -1014,15 +1014,11 @@ func terminalOutcome(err error) RunOutcome {
 	if err == nil {
 		return RunOutcomeSuccess
 	}
-	if errors.Is(err, ErrLoopDetected) {
-		return RunOutcomeError
-	}
 	if hasUnknownToolOutcome(err) {
 		return RunOutcomeUnknown
 	}
-	var unknown runOutcomeUnknown
-	if errors.As(err, &unknown) && unknown.OutcomeUnknown() {
-		return RunOutcomeUnknown
+	if errors.Is(err, ErrLoopDetected) {
+		return RunOutcomeError
 	}
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return RunOutcomeCancelled
@@ -1034,7 +1030,7 @@ func normalizeLoopDetectedCause(ctx context.Context, err error) error {
 	if !errors.Is(context.Cause(ctx), ErrLoopDetected) {
 		return err
 	}
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if err == nil {
 		return ErrLoopDetected
 	}
 	if errors.Is(err, ErrLoopDetected) {

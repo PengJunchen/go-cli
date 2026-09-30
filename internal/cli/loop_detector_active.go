@@ -154,7 +154,7 @@ func normalizeLoopDetectorRunError(ctx context.Context, err error) error {
 	if !errors.Is(context.Cause(ctx), core.ErrLoopDetected) {
 		return err
 	}
-	if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+	if err == nil {
 		return core.ErrLoopDetected
 	}
 	if errors.Is(err, core.ErrLoopDetected) {

@@ -186,7 +186,7 @@ func TestAssembledLoopDetectorStopsParallelDurableBatchBeforeDispatch(t *testing
 
 	statusSource, ok := stream.(core.RunStatusSource)
 	require.True(t, ok)
-	require.Equal(t, core.RunOutcomeError, statusSource.RunStatusHandle().Snapshot().Outcome)
+	status := statusSource.RunStatusHandle().Snapshot()
 	snapshot, err := durableSession.snapshotSelected()
 	require.NoError(t, err)
 	receipts := make(map[string][]session.SessionEntry)
@@ -227,7 +227,13 @@ func TestAssembledLoopDetectorStopsParallelDurableBatchBeforeDispatch(t *testing
 			"unknown earlier attempt must retain its dispatched reservation state")
 	}
 	require.NotNil(t, terminal)
-	require.Equal(t, core.RunOutcomeError, terminal.RunOutcome)
+	if firstOutcome == string(core.ReceiptOutcomeUnknown) {
+		require.Equal(t, core.RunOutcomeUnknown, status.Outcome, "an unknown earlier reservation outranks the detector error")
+		require.Equal(t, core.RunOutcomeUnknown, terminal.RunOutcome)
+	} else {
+		require.Equal(t, core.RunOutcomeError, status.Outcome)
+		require.Equal(t, core.RunOutcomeError, terminal.RunOutcome)
+	}
 }
 
 func TestAssembledLoopDetectorCallerCancellationWinsOnCanonicalDurablePath(t *testing.T) {
