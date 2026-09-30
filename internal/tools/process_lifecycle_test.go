@@ -305,6 +305,23 @@ func TestManagedBashStartGatePreservesArgv0(t *testing.T) {
 	require.Equal(t, "bash", output.String(), "bash -lc must retain its original $0")
 }
 
+func TestManagedBashStartGateClosesControlPipeBeforeUserCommand(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is required for process lifecycle tests")
+	}
+	cmd := exec.Command("bash", "-lc", `test ! -e /dev/fd/3 && printf closed || printf leaked`)
+	cmd.Env = filteredEnv(nil)
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	gate, err := installBashProcessStartGate(cmd)
+	require.NoError(t, err)
+	require.NoError(t, cmd.Start())
+	gate.closeReadEnd()
+	require.NoError(t, gate.release())
+	require.NoError(t, cmd.Wait())
+	require.Equal(t, "closed", output.String(), "the control pipe must not leak into user Bash")
+}
+
 func TestManagedBashStartGateRestoresEnvironmentWithoutShellParsing(t *testing.T) {
 	bashPath, err := exec.LookPath("bash")
 	if err != nil {
