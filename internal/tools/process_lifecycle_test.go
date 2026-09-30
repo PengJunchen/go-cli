@@ -235,10 +235,17 @@ func TestPreparedBashDoesNotEvaluatePS4BeforeIdentityPersistence(t *testing.T) {
 	marker := filepath.Join(t.TempDir(), "ps4-command-substitution-ran")
 	ps4 := "$(touch " + shellQuoteTestArgument(marker) + ")"
 	env := filteredEnv(map[string]string{"SHELLOPTS": "xtrace", "PS4": ps4})
+	xtraceControl := exec.Command("bash", "--noprofile", "--norc", "-c", `case $- in *x*) exit 0 ;; *) exit 1 ;; esac`)
+	xtraceControl.Env = filteredEnv(map[string]string{"SHELLOPTS": "xtrace"})
+	if err := xtraceControl.Run(); err != nil {
+		t.Skip("this Bash does not import SHELLOPTS from the environment")
+	}
 	control := exec.Command("bash", "--noprofile", "--norc", "-c", ":")
 	control.Env = env
 	require.NoError(t, control.Run())
-	require.FileExists(t, marker, "the fixture must demonstrate that Bash expands PS4 when xtrace is enabled")
+	if !fileExists(marker) {
+		t.Skip("this Bash does not import PS4 from the environment; the PS4 command-substitution variant is unsupported")
+	}
 	require.NoError(t, os.Remove(marker))
 
 	release := make(chan struct{})
@@ -278,6 +285,34 @@ func TestPreparedBashDoesNotEvaluatePS4BeforeIdentityPersistence(t *testing.T) {
 	releaseGate()
 	require.NoError(t, <-result)
 	require.FileExists(t, marker, "the original Bash tracing environment must be restored after identity persistence")
+}
+
+func TestManagedBashStartGateRestoresShellOptions(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is required for process lifecycle tests")
+	}
+	command := `case $- in *x*) printf enabled ;; *) printf disabled ;; esac`
+	env := filteredEnv(map[string]string{"SHELLOPTS": "xtrace"})
+	control := exec.Command("bash", "-lc", command)
+	control.Env = env
+	var expected bytes.Buffer
+	control.Stdout = &expected
+	if err := control.Run(); err != nil {
+		t.Skip("this Bash does not import SHELLOPTS from the environment")
+	}
+	require.Equal(t, "enabled", expected.String(), "the control invocation must enable xtrace from SHELLOPTS")
+
+	cmd := exec.Command("bash", "-lc", command)
+	cmd.Env = env
+	var output bytes.Buffer
+	cmd.Stdout = &output
+	gate, err := installBashProcessStartGate(cmd)
+	require.NoError(t, err)
+	require.NoError(t, cmd.Start())
+	gate.closeReadEnd()
+	require.NoError(t, gate.release())
+	require.NoError(t, cmd.Wait())
+	require.Equal(t, expected.String(), output.String(), "SHELLOPTS behavior must match an ordinary Bash invocation after gate release")
 }
 
 func TestManagedBashStartGatePreservesArgv0(t *testing.T) {
