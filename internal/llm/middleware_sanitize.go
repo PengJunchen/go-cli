@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"log/slog"
-	"regexp"
 	"strings"
 )
 
@@ -60,31 +59,13 @@ type sanitizeModel struct {
 
 var _ BaseChatModel = (*sanitizeModel)(nil)
 
-// Precompiled patterns for the supported cross-model artifacts. The Claude and
-// Gemini patterns use DotAll mode ((?s)) so their content may span newlines.
-var (
-	// sanitizeClaudeRe matches Claude <antThinking>...</antThinking> blocks.
-	sanitizeClaudeRe = regexp.MustCompile(`(?s)<antThinking>.*?</antThinking>`)
-	// sanitizeGPTRe matches GPT watermark markers such as 【6bc68d3a】.
-	sanitizeGPTRe = regexp.MustCompile(`【.*?】`)
-	// sanitizeGeminiRe matches Gemini ```thinking\n...\n``` code blocks. Built
-	// from a double-quoted string because the pattern contains backticks.
-	sanitizeGeminiRe = regexp.MustCompile("(?s)```thinking\n.*?```")
-	// sanitizeMultiNewlineRe collapses three or more consecutive newlines into
-	// a single blank line.
-	sanitizeMultiNewlineRe = regexp.MustCompile(`\n{3,}`)
-)
-
-// sanitizeContent removes cross-model artifacts and collapses excessive blank
-// lines from content. It does not trim leading/trailing whitespace so that
-// per-chunk streaming content (where edge spaces may be significant) is
-// preserved; callers that have a complete response may trim afterwards.
+// sanitizeContent removes supported cross-model blocks. An exact opening
+// marker without a closing marker suppresses the remainder of the content;
+// an incomplete marker prefix at EOF is discarded while ordinary text is
+// preserved. It does not trim surrounding whitespace.
 func sanitizeContent(content string) string {
-	content = sanitizeClaudeRe.ReplaceAllString(content, "")
-	content = sanitizeGPTRe.ReplaceAllString(content, "")
-	content = sanitizeGeminiRe.ReplaceAllString(content, "")
-	content = sanitizeMultiNewlineRe.ReplaceAllString(content, "\n\n")
-	return content
+	var sanitizer streamContentSanitizer
+	return sanitizer.sanitize(content)
 }
 
 type streamSanitizeMarker struct {
@@ -110,7 +91,6 @@ type streamContentSanitizer struct {
 
 func (s *streamContentSanitizer) sanitize(content string) string {
 	var output strings.Builder
-	output.Grow(len(content))
 	for i := 0; i < len(content); i++ {
 		value := content[i]
 		if s.block != nil {

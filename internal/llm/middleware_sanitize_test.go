@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -86,6 +87,36 @@ func TestSanitizeModelMiddleware_CleanContentUnchanged(t *testing.T) {
 	resp, err := wrapped.Generate(context.Background(), nil)
 	require.NoError(t, err)
 	assert.Equal(t, "The quick brown fox jumps over the lazy dog.", resp.Content)
+}
+
+func TestSanitizeModelMiddleware_GenerateFailsClosedForUnclosedSensitiveBlocks(t *testing.T) {
+	cases := []struct {
+		name string
+		text string
+	}{
+		{name: "claude", text: "answer<antThinking>CLAUDE-GENERATE-SECRET"},
+		{name: "gpt", text: "answer【GPT-GENERATE-SECRET"},
+		{name: "gemini", text: "answer```thinking\nGEMINI-GENERATE-SECRET"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			base := &sanitizeMockModel{genContent: tc.text}
+			wrapped := NewSanitizeModelMiddleware().WrapModel(base)
+			resp, err := wrapped.Generate(context.Background(), nil)
+			require.NoError(t, err)
+			assert.Equal(t, "answer", resp.Content)
+			assert.NotContains(t, resp.Content, "SECRET")
+		})
+	}
+}
+
+func TestSanitizeModelMiddleware_GeneratePreservesOrdinaryTextNearMarkerPrefixes(t *testing.T) {
+	const text = "Documentation: <antThinkingX>, ```thinking example, and literal braces remain visible."
+	base := &sanitizeMockModel{genContent: text}
+	wrapped := NewSanitizeModelMiddleware().WrapModel(base)
+	resp, err := wrapped.Generate(context.Background(), nil)
+	require.NoError(t, err)
+	assert.Equal(t, text, resp.Content)
 }
 
 // TestSanitizeModelMiddleware_StreamSanitized verifies that artifacts are
@@ -215,8 +246,8 @@ func TestSanitizeModelMiddleware_StreamCollapsesNewlinesAcrossChunksAndKeepsWhit
 func TestSanitizeModelMiddleware_StreamPreservesChunkMetadataAndBackpressure(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	started := make(chan struct{})
-	thirdRead := make(chan struct{})
+	secondAccepted := make(chan struct{})
+	thirdAccepted := make(chan struct{})
 	upstream := make(chan MessageChunk)
 	base := &blockingSanitizeModel{stream: func() <-chan MessageChunk { return upstream }}
 	wrapped := NewSanitizeModelMiddleware().WrapModel(base)
@@ -224,20 +255,15 @@ func TestSanitizeModelMiddleware_StreamPreservesChunkMetadataAndBackpressure(t *
 	require.NoError(t, err)
 
 	go func() {
-		close(started)
 		upstream <- MessageChunk{Role: RoleAssistant, Content: "visible", Final: false}
 		upstream <- MessageChunk{Role: RoleAssistant, Content: "later", Final: false}
+		close(secondAccepted)
 		upstream <- MessageChunk{Role: RoleAssistant, Content: "last", Final: true, FinishReason: "stop", Usage: &Usage{TotalTokens: 2}}
-		close(thirdRead)
+		close(thirdAccepted)
 		close(upstream)
 	}()
-	<-started
-
-	select {
-	case <-thirdRead:
-		t.Fatal("sanitizer read a third upstream chunk while both output slots were occupied")
-	case <-time.After(20 * time.Millisecond):
-	}
+	<-secondAccepted
+	assert.Equal(t, 1, cap(out), "the sanitizer output queue must remain bounded to one chunk")
 
 	first := <-out
 	assert.Equal(t, "visible", first.Content)
@@ -251,6 +277,7 @@ func TestSanitizeModelMiddleware_StreamPreservesChunkMetadataAndBackpressure(t *
 	assert.Equal(t, "stop", third.FinishReason)
 	require.NotNil(t, third.Usage)
 	assert.Equal(t, 2, third.Usage.TotalTokens)
+	<-thirdAccepted
 	_, ok := <-out
 	assert.False(t, ok)
 }
@@ -308,6 +335,23 @@ func TestStreamContentSanitizerRetainsOnlyBoundedMarkerCarry(t *testing.T) {
 	got = sanitizer.sanitize("】after")
 	assert.Equal(t, "after", got)
 	assert.Nil(t, sanitizer.block)
+}
+
+func TestStreamContentSanitizerDoesNotAllocateForLargeRedactedBody(t *testing.T) {
+	const bodySize = 4 << 20
+	content := "<antThinking>" + strings.Repeat("x", bodySize) + "</antThinking>"
+	runtime.GC()
+	var before runtime.MemStats
+	runtime.ReadMemStats(&before)
+
+	var sanitizer streamContentSanitizer
+	got := sanitizer.sanitize(content)
+
+	var after runtime.MemStats
+	runtime.ReadMemStats(&after)
+	assert.Empty(t, got)
+	allocated := after.TotalAlloc - before.TotalAlloc
+	assert.Less(t, allocated, uint64(bodySize/8), "fully hidden content must not allocate an output buffer proportional to its input")
 }
 
 type blockingSanitizeModel struct {
