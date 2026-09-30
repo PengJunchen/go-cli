@@ -152,11 +152,15 @@ func inspectLinuxProcessGroupExit(
 		return unknownProcessGroupInspection("process identity probe is unavailable")
 	}
 	leaderStartToken, leaderProcessGroupID, err := leaderProbe(identity.LeaderPID)
+	leaderMatchesIdentity := false
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return unknownProcessGroupInspection("saved process leader is inaccessible")
 	}
-	if err == nil && leaderStartToken == identity.ProcessStartToken && leaderProcessGroupID != identity.ProcessGroupID {
-		return unknownProcessGroupInspection("saved process leader is still alive outside its recorded group")
+	if err == nil && leaderStartToken == identity.ProcessStartToken {
+		if leaderProcessGroupID != identity.ProcessGroupID {
+			return unknownProcessGroupInspection("saved process leader is still alive outside its recorded group")
+		}
+		leaderMatchesIdentity = true
 	}
 	pidMax, err := currentLinuxPIDMax()
 	if err != nil {
@@ -165,8 +169,10 @@ func inspectLinuxProcessGroupExit(
 	if identity.ProcessGroupID > pidMax {
 		return unknownProcessGroupInspection("recorded process group ID exceeds the Linux PID limit")
 	}
-	if err := groupProbe(identity.ProcessGroupID); err == nil {
+	if err := groupProbe(identity.ProcessGroupID); err == nil && leaderMatchesIdentity {
 		return processGroupInspection(ProcessGroupExitPresent, "kernel reports that the process group exists")
+	} else if err == nil {
+		return unknownProcessGroupInspection("process group ID exists but the saved leader identity is absent or reused")
 	} else if errors.Is(err, syscall.ESRCH) {
 		return processGroupInspection(ProcessGroupExitAbsent, "kernel reports that the process group does not exist")
 	}

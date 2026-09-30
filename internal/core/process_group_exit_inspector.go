@@ -19,11 +19,15 @@ const (
 )
 
 // ProcessGroupExitInspection records the status observed for one local process
-// group. Absent means the kernel reported that the group did not exist at
-// ObservedAt; it does not prove that a process which escaped the group stopped.
+// group. On Linux, Present is reported only while the saved leader identity is
+// still observed in the recorded group; an existing numeric group ID without
+// that anchor remains unknown. Absent means the kernel probe reported no group
+// during inspection, but it does not prove that an escaped process stopped.
 type ProcessGroupExitInspection struct {
-	Status     ProcessGroupExitStatus
-	Reason     string
+	Status ProcessGroupExitStatus
+	Reason string
+	// ObservedAt is captured immediately after the kernel probe and is an
+	// approximate timestamp for Status.
 	ObservedAt time.Time
 }
 

@@ -127,9 +127,31 @@ func TestInspectLinuxProcessGroupExitChecksRemainingGroupWhenLeaderIsGoneOrReuse
 	for _, test := range []struct {
 		name       string
 		leaderRead func(int) (string, int, error)
+		groupErr   error
+		want       ProcessGroupExitStatus
 	}{
-		{name: "leader exited", leaderRead: func(int) (string, int, error) { return "", 0, os.ErrNotExist }},
-		{name: "leader PID reused", leaderRead: func(int) (string, int, error) { return "linux:other-start", 99, nil }},
+		{
+			name:       "leader exited and group absent",
+			leaderRead: func(int) (string, int, error) { return "", 0, os.ErrNotExist },
+			groupErr:   syscall.ESRCH,
+			want:       ProcessGroupExitAbsent,
+		},
+		{
+			name:       "leader PID reused and group absent",
+			leaderRead: func(int) (string, int, error) { return "linux:other-start", 99, nil },
+			groupErr:   syscall.ESRCH,
+			want:       ProcessGroupExitAbsent,
+		},
+		{
+			name:       "leader exited and numeric group ID reused",
+			leaderRead: func(int) (string, int, error) { return "", 0, os.ErrNotExist },
+			want:       ProcessGroupExitUnknown,
+		},
+		{
+			name:       "leader PID reused and numeric group ID still exists",
+			leaderRead: func(int) (string, int, error) { return "linux:other-start", 99, nil },
+			want:       ProcessGroupExitUnknown,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			identity := testLinuxProcessGroupIdentity()
@@ -139,10 +161,10 @@ func TestInspectLinuxProcessGroupExitChecksRemainingGroupWhenLeaderIsGoneOrReuse
 				if groupID != identity.ProcessGroupID {
 					t.Fatalf("probed group %d, want %d", groupID, identity.ProcessGroupID)
 				}
-				return syscall.ESRCH
+				return test.groupErr
 			})
-			if inspection.Status != ProcessGroupExitAbsent || !groupProbeCalled {
-				t.Fatalf("inspection = %#v, group probe called = %t; remaining members must be checked after leader exit/reuse", inspection, groupProbeCalled)
+			if inspection.Status != test.want || !groupProbeCalled {
+				t.Fatalf("inspection = %#v, group probe called = %t; group state after leader exit/reuse = %q, want %q", inspection, groupProbeCalled, inspection.Status, test.want)
 			}
 		})
 	}
