@@ -12,6 +12,12 @@ import (
 	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
+type loopDetectorUnknownTestError struct{ cause error }
+
+func (err loopDetectorUnknownTestError) Error() string    { return "test: tool outcome remains unknown" }
+func (err loopDetectorUnknownTestError) Unwrap() error    { return err.cause }
+func (loopDetectorUnknownTestError) OutcomeUnknown() bool { return true }
+
 type loopDetectorCaptureTool struct{ name string }
 
 func (tool *loopDetectorCaptureTool) Name() string        { return tool.name }
@@ -112,6 +118,23 @@ func TestLoopDetectorFirstCauseWinsAndReturnsTypedTermination(t *testing.T) {
 		require.ErrorIs(t, context.Cause(runCtx), core.ErrLoopDetected)
 		publicErr := normalizeLoopDetectorRunError(runCtx, errors.Join(context.Canceled, err))
 		require.ErrorIs(t, publicErr, core.ErrLoopDetected)
-		require.NotErrorIs(t, publicErr, context.Canceled)
+		require.ErrorIs(t, publicErr, context.Canceled, "normalization preserves the original error chain")
+	})
+
+	t.Run("detector normalization keeps unknown evidence", func(t *testing.T) {
+		parent, cancelParent := context.WithCancelCause(context.Background())
+		defer cancelParent(nil)
+		runCtx, cancelRun, _ := newLoopDetectorRunContext(parent, config)
+		defer cancelRun(nil)
+		require.ErrorIs(t, observePreparedToolAttempt(runCtx, attempt), core.ErrLoopDetected)
+
+		unknownErr := loopDetectorUnknownTestError{cause: errors.New("local completion proof missing")}
+		publicErr := normalizeLoopDetectorRunError(runCtx, errors.Join(context.Canceled, unknownErr))
+		require.ErrorIs(t, publicErr, core.ErrLoopDetected)
+		require.ErrorIs(t, publicErr, unknownErr.cause)
+		require.ErrorIs(t, publicErr, context.Canceled, "the induced cancellation stays separate when unknown evidence is present")
+		var unknown interface{ OutcomeUnknown() bool }
+		require.ErrorAs(t, publicErr, &unknown)
+		require.True(t, unknown.OutcomeUnknown())
 	})
 }
