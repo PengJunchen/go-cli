@@ -73,8 +73,15 @@ func currentLinuxPIDNamespaceToken() (string, error) {
 	return fmt.Sprintf("linux:pidns:v1:%x:%x:init:%s", uint64(namespaceStat.Dev), namespaceStat.Ino, initStartToken), nil
 }
 
-func inspectLinuxLeader(pid int) (string, int, error) {
-	return readLinuxProcessStat(pid)
+func inspectLinuxLeader(pid int) (string, int, string, error) {
+	if pid <= 0 {
+		return "", 0, "", errors.New("process ID must be positive")
+	}
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
+	if err != nil {
+		return "", 0, "", err
+	}
+	return parseLinuxProcessStatDetails(data)
 }
 
 func readLinuxProcessStat(pid int) (string, int, error) {
@@ -89,25 +96,33 @@ func readLinuxProcessStat(pid int) (string, int, error) {
 }
 
 func parseLinuxProcessStat(data []byte) (string, int, error) {
+	startToken, processGroupID, _, err := parseLinuxProcessStatDetails(data)
+	return startToken, processGroupID, err
+}
+
+func parseLinuxProcessStatDetails(data []byte) (string, int, string, error) {
 	contents := string(data)
 	close := strings.LastIndex(contents, ")")
 	if close < 0 {
-		return "", 0, errors.New("process stat is malformed")
+		return "", 0, "", errors.New("process stat is malformed")
 	}
 	fields := strings.Fields(contents[close+1:])
 	// Fields start at proc stat field 3 (state); pgrp is field 5 and
 	// starttime is field 22.
 	if len(fields) <= 19 {
-		return "", 0, errors.New("process stat is incomplete")
+		return "", 0, "", errors.New("process stat is incomplete")
+	}
+	if len(fields[0]) != 1 {
+		return "", 0, "", errors.New("process stat has an invalid state")
 	}
 	processGroupID, err := strconv.Atoi(fields[2])
 	if err != nil || processGroupID <= 0 {
-		return "", 0, errors.New("process stat has an invalid process group")
+		return "", 0, "", errors.New("process stat has an invalid process group")
 	}
 	if fields[19] == "" {
-		return "", 0, errors.New("process stat has an empty start token")
+		return "", 0, "", errors.New("process stat has an empty start token")
 	}
-	return "linux:" + fields[19], processGroupID, nil
+	return "linux:" + fields[19], processGroupID, fields[0], nil
 }
 
 // probeLinuxProcessGroup performs the signal-zero existence check on the
@@ -124,7 +139,7 @@ func inspectLinuxProcessGroupExit(
 	identity ExecutionIdentity,
 	currentHostGeneration string,
 	currentPIDNamespaceToken string,
-	leaderProbe func(int) (string, int, error),
+	leaderProbe func(int) (string, int, string, error),
 	groupProbe func(int) error,
 ) ProcessGroupExitInspection {
 	if err := identity.Validate(); err != nil || identity.Kind != ExecutionIdentityProcessGroup || identity.Platform != "linux" {
@@ -151,8 +166,9 @@ func inspectLinuxProcessGroupExit(
 	if leaderProbe == nil || groupProbe == nil {
 		return unknownProcessGroupInspection("process identity probe is unavailable")
 	}
-	leaderStartToken, leaderProcessGroupID, err := leaderProbe(identity.LeaderPID)
-	leaderMatchesIdentity := false
+	leaderStartToken, leaderProcessGroupID, leaderState, err := leaderProbe(identity.LeaderPID)
+	leaderIdentityMatches := false
+	leaderIsActive := false
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return unknownProcessGroupInspection("saved process leader is inaccessible")
 	}
@@ -160,7 +176,8 @@ func inspectLinuxProcessGroupExit(
 		if leaderProcessGroupID != identity.ProcessGroupID {
 			return unknownProcessGroupInspection("saved process leader is still alive outside its recorded group")
 		}
-		leaderMatchesIdentity = true
+		leaderIdentityMatches = true
+		leaderIsActive = activeLinuxProcessState(leaderState)
 	}
 	pidMax, err := currentLinuxPIDMax()
 	if err != nil {
@@ -169,14 +186,49 @@ func inspectLinuxProcessGroupExit(
 	if identity.ProcessGroupID > pidMax {
 		return unknownProcessGroupInspection("recorded process group ID exceeds the Linux PID limit")
 	}
-	if err := groupProbe(identity.ProcessGroupID); err == nil && leaderMatchesIdentity {
+	groupProbeErr := groupProbe(identity.ProcessGroupID)
+	if groupProbeErr == nil {
+		if !leaderIdentityMatches {
+			return unknownProcessGroupInspection("process group ID exists but the saved leader identity is absent or reused")
+		}
+		if !leaderIsActive {
+			return unknownProcessGroupInspection("saved process leader is not active; zombie-only process groups cannot be resolved safely")
+		}
+		if !linuxLeaderStillMatches(identity, leaderProbe) {
+			return unknownProcessGroupInspection("saved process leader changed during process-group inspection")
+		}
 		return processGroupInspection(ProcessGroupExitPresent, "kernel reports that the process group exists")
-	} else if err == nil {
-		return unknownProcessGroupInspection("process group ID exists but the saved leader identity is absent or reused")
-	} else if errors.Is(err, syscall.ESRCH) {
+	}
+	if errors.Is(groupProbeErr, syscall.ESRCH) {
+		if leaderIdentityMatches {
+			leaderStartToken, _, _, err := leaderProbe(identity.LeaderPID)
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return unknownProcessGroupInspection("saved process leader is inaccessible after process-group inspection")
+			}
+			if err == nil && leaderStartToken == identity.ProcessStartToken {
+				return unknownProcessGroupInspection("kernel reports no group but the saved process leader identity remains")
+			}
+		}
 		return processGroupInspection(ProcessGroupExitAbsent, "kernel reports that the process group does not exist")
 	}
 	return unknownProcessGroupInspection("kernel could not confirm process-group absence")
+}
+
+func linuxLeaderStillMatches(identity ExecutionIdentity, leaderProbe func(int) (string, int, string, error)) bool {
+	leaderStartToken, leaderProcessGroupID, leaderState, err := leaderProbe(identity.LeaderPID)
+	if err != nil {
+		return false
+	}
+	return leaderStartToken == identity.ProcessStartToken && leaderProcessGroupID == identity.ProcessGroupID && activeLinuxProcessState(leaderState)
+}
+
+func activeLinuxProcessState(state string) bool {
+	switch state {
+	case "R", "S", "D", "T", "t", "W", "K", "P", "I":
+		return true
+	default:
+		return false
+	}
 }
 
 func currentLinuxPIDMax() (int, error) {

@@ -9,6 +9,7 @@ import (
 	"strings"
 	"syscall"
 	"testing"
+	"time"
 )
 
 func testLinuxProcessGroupIdentity() ExecutionIdentity {
@@ -28,9 +29,9 @@ func TestInspectLinuxProcessGroupExitRequiresPIDNamespaceToken(t *testing.T) {
 	identity.PIDNamespaceToken = ""
 	called := false
 
-	inspection := inspectLinuxProcessGroupExit(identity, identity.HostGeneration, identity.PIDNamespaceToken, func(int) (string, int, error) {
+	inspection := inspectLinuxProcessGroupExit(identity, identity.HostGeneration, identity.PIDNamespaceToken, func(int) (string, int, string, error) {
 		called = true
-		return "", 0, nil
+		return "", 0, "", nil
 	}, func(int) error {
 		called = true
 		return syscall.ESRCH
@@ -53,9 +54,9 @@ func TestInspectLinuxProcessGroupExitRequiresMatchingHostAndPIDNamespace(t *test
 		t.Run(test.name, func(t *testing.T) {
 			identity := testLinuxProcessGroupIdentity()
 			called := false
-			inspection := inspectLinuxProcessGroupExit(identity, test.host, test.namespace, func(int) (string, int, error) {
+			inspection := inspectLinuxProcessGroupExit(identity, test.host, test.namespace, func(int) (string, int, string, error) {
 				called = true
-				return "", 0, nil
+				return "", 0, "", nil
 			}, func(int) error {
 				called = true
 				return syscall.ESRCH
@@ -74,7 +75,7 @@ func TestInspectLinuxProcessGroupExitMapsGroupProbeResults(t *testing.T) {
 		want ProcessGroupExitStatus
 	}{
 		{name: "group exists", want: ProcessGroupExitPresent},
-		{name: "no such group", err: syscall.ESRCH, want: ProcessGroupExitAbsent},
+		{name: "no such group while leader remains", err: syscall.ESRCH, want: ProcessGroupExitUnknown},
 		{name: "permission denied", err: syscall.EPERM, want: ProcessGroupExitUnknown},
 		{name: "other probe error", err: errors.New("probe failed"), want: ProcessGroupExitUnknown},
 	} {
@@ -98,8 +99,8 @@ func TestInspectLinuxProcessGroupExitMapsGroupProbeResults(t *testing.T) {
 func TestInspectLinuxProcessGroupExitKeepsEscapedLeaderUnknown(t *testing.T) {
 	identity := testLinuxProcessGroupIdentity()
 	groupProbeCalled := false
-	inspection := inspectLinuxProcessGroupExit(identity, identity.HostGeneration, identity.PIDNamespaceToken, func(int) (string, int, error) {
-		return identity.ProcessStartToken, identity.ProcessGroupID + 1, nil
+	inspection := inspectLinuxProcessGroupExit(identity, identity.HostGeneration, identity.PIDNamespaceToken, func(int) (string, int, string, error) {
+		return identity.ProcessStartToken, identity.ProcessGroupID + 1, "S", nil
 	}, func(int) error {
 		groupProbeCalled = true
 		return syscall.ESRCH
@@ -112,8 +113,8 @@ func TestInspectLinuxProcessGroupExitKeepsEscapedLeaderUnknown(t *testing.T) {
 func TestInspectLinuxProcessGroupExitKeepsUnreadableLeaderUnknown(t *testing.T) {
 	identity := testLinuxProcessGroupIdentity()
 	groupProbeCalled := false
-	inspection := inspectLinuxProcessGroupExit(identity, identity.HostGeneration, identity.PIDNamespaceToken, func(int) (string, int, error) {
-		return "", 0, os.ErrPermission
+	inspection := inspectLinuxProcessGroupExit(identity, identity.HostGeneration, identity.PIDNamespaceToken, func(int) (string, int, string, error) {
+		return "", 0, "", os.ErrPermission
 	}, func(int) error {
 		groupProbeCalled = true
 		return syscall.ESRCH
@@ -126,30 +127,30 @@ func TestInspectLinuxProcessGroupExitKeepsUnreadableLeaderUnknown(t *testing.T) 
 func TestInspectLinuxProcessGroupExitChecksRemainingGroupWhenLeaderIsGoneOrReused(t *testing.T) {
 	for _, test := range []struct {
 		name       string
-		leaderRead func(int) (string, int, error)
+		leaderRead func(int) (string, int, string, error)
 		groupErr   error
 		want       ProcessGroupExitStatus
 	}{
 		{
 			name:       "leader exited and group absent",
-			leaderRead: func(int) (string, int, error) { return "", 0, os.ErrNotExist },
+			leaderRead: func(int) (string, int, string, error) { return "", 0, "", os.ErrNotExist },
 			groupErr:   syscall.ESRCH,
 			want:       ProcessGroupExitAbsent,
 		},
 		{
 			name:       "leader PID reused and group absent",
-			leaderRead: func(int) (string, int, error) { return "linux:other-start", 99, nil },
+			leaderRead: func(int) (string, int, string, error) { return "linux:other-start", 99, "S", nil },
 			groupErr:   syscall.ESRCH,
 			want:       ProcessGroupExitAbsent,
 		},
 		{
 			name:       "leader exited and numeric group ID reused",
-			leaderRead: func(int) (string, int, error) { return "", 0, os.ErrNotExist },
+			leaderRead: func(int) (string, int, string, error) { return "", 0, "", os.ErrNotExist },
 			want:       ProcessGroupExitUnknown,
 		},
 		{
 			name:       "leader PID reused and numeric group ID still exists",
-			leaderRead: func(int) (string, int, error) { return "linux:other-start", 99, nil },
+			leaderRead: func(int) (string, int, string, error) { return "linux:other-start", 99, "S", nil },
 			want:       ProcessGroupExitUnknown,
 		},
 	} {
@@ -165,6 +166,123 @@ func TestInspectLinuxProcessGroupExitChecksRemainingGroupWhenLeaderIsGoneOrReuse
 			})
 			if inspection.Status != test.want || !groupProbeCalled {
 				t.Fatalf("inspection = %#v, group probe called = %t; group state after leader exit/reuse = %q, want %q", inspection, groupProbeCalled, inspection.Status, test.want)
+			}
+		})
+	}
+}
+
+func TestInspectLinuxProcessGroupExitRechecksLeaderAcrossGroupProbe(t *testing.T) {
+	identity := testLinuxProcessGroupIdentity()
+	matchingLeader := linuxLeaderObservation{startToken: identity.ProcessStartToken, processGroupID: identity.ProcessGroupID, state: "S"}
+	for _, test := range []struct {
+		name         string
+		observations []linuxLeaderObservation
+		groupErr     error
+		want         ProcessGroupExitStatus
+	}{
+		{
+			name:         "leader remains in the group",
+			observations: []linuxLeaderObservation{matchingLeader, matchingLeader},
+			want:         ProcessGroupExitPresent,
+		},
+		{
+			name: "leader becomes zombie while group exists",
+			observations: []linuxLeaderObservation{
+				matchingLeader,
+				{startToken: identity.ProcessStartToken, processGroupID: identity.ProcessGroupID, state: "Z"},
+			},
+			want: ProcessGroupExitUnknown,
+		},
+		{
+			name:         "leader exits while group exists",
+			observations: []linuxLeaderObservation{matchingLeader, {err: os.ErrNotExist}},
+			want:         ProcessGroupExitUnknown,
+		},
+		{
+			name:         "leader exits and group is absent",
+			observations: []linuxLeaderObservation{matchingLeader, {err: os.ErrNotExist}},
+			groupErr:     syscall.ESRCH,
+			want:         ProcessGroupExitAbsent,
+		},
+		{
+			name:         "leader escapes before absent probe",
+			observations: []linuxLeaderObservation{matchingLeader, {startToken: identity.ProcessStartToken, processGroupID: identity.ProcessGroupID + 1}},
+			groupErr:     syscall.ESRCH,
+			want:         ProcessGroupExitUnknown,
+		},
+		{
+			name:         "leader escapes while group exists",
+			observations: []linuxLeaderObservation{matchingLeader, {startToken: identity.ProcessStartToken, processGroupID: identity.ProcessGroupID + 1}},
+			want:         ProcessGroupExitUnknown,
+		},
+		{
+			name:         "leader becomes inaccessible after absent probe",
+			observations: []linuxLeaderObservation{matchingLeader, {err: os.ErrPermission}},
+			groupErr:     syscall.ESRCH,
+			want:         ProcessGroupExitUnknown,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			calls := 0
+			leaderProbe := func(pid int) (string, int, string, error) {
+				if pid != identity.LeaderPID {
+					t.Fatalf("leader probe received PID %d, want %d", pid, identity.LeaderPID)
+				}
+				if calls >= len(test.observations) {
+					t.Fatalf("unexpected leader probe call %d", calls+1)
+				}
+				observation := test.observations[calls]
+				calls++
+				return observation.startToken, observation.processGroupID, observation.state, observation.err
+			}
+			inspection := inspectLinuxProcessGroupExit(identity, identity.HostGeneration, identity.PIDNamespaceToken, leaderProbe, func(groupID int) error {
+				if groupID != identity.ProcessGroupID {
+					t.Fatalf("group probe received PGID %d, want %d", groupID, identity.ProcessGroupID)
+				}
+				return test.groupErr
+			})
+			if inspection.Status != test.want {
+				t.Fatalf("status = %q, want %q (inspection: %#v)", inspection.Status, test.want, inspection)
+			}
+			if calls != len(test.observations) {
+				t.Fatalf("leader probe calls = %d, want %d", calls, len(test.observations))
+			}
+		})
+	}
+}
+
+func TestInspectLinuxProcessGroupExitKeepsZombieLeaderUnknown(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		groupErr error
+	}{
+		{name: "kernel reports group exists"},
+		{name: "kernel reports no group", groupErr: syscall.ESRCH},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			identity := testLinuxProcessGroupIdentity()
+			calls := 0
+			inspection := inspectLinuxProcessGroupExit(identity, identity.HostGeneration, identity.PIDNamespaceToken, func(pid int) (string, int, string, error) {
+				if pid != identity.LeaderPID {
+					t.Fatalf("leader probe received PID %d, want %d", pid, identity.LeaderPID)
+				}
+				calls++
+				return identity.ProcessStartToken, identity.ProcessGroupID, "Z", nil
+			}, func(groupID int) error {
+				if groupID != identity.ProcessGroupID {
+					t.Fatalf("group probe received PGID %d, want %d", groupID, identity.ProcessGroupID)
+				}
+				return test.groupErr
+			})
+			if inspection.Status != ProcessGroupExitUnknown {
+				t.Fatalf("inspection = %#v, want unknown for a zombie leader", inspection)
+			}
+			wantCalls := 1
+			if test.groupErr != nil {
+				wantCalls = 2
+			}
+			if calls != wantCalls {
+				t.Fatalf("leader probe calls = %d, want %d", calls, wantCalls)
 			}
 		})
 	}
@@ -188,8 +306,8 @@ func TestInspectLinuxProcessGroupExitRejectsNonProcessGroupIdentity(t *testing.T
 func TestInspectLinuxProcessGroupExitUsesReadOnlyGroupProbe(t *testing.T) {
 	identity := testLinuxProcessGroupIdentity()
 	observedGroupID := 0
-	inspection := inspectLinuxProcessGroupExit(identity, identity.HostGeneration, identity.PIDNamespaceToken, func(int) (string, int, error) {
-		return "linux:reused-start", identity.ProcessGroupID, nil
+	inspection := inspectLinuxProcessGroupExit(identity, identity.HostGeneration, identity.PIDNamespaceToken, func(int) (string, int, string, error) {
+		return "linux:reused-start", identity.ProcessGroupID, "S", nil
 	}, func(groupID int) error {
 		observedGroupID = groupID
 		return syscall.ESRCH
@@ -235,13 +353,20 @@ func TestParseLinuxProcessStatHandlesParenthesesInCommandName(t *testing.T) {
 	}
 }
 
-func matchingLinuxLeaderProbe(identity ExecutionIdentity) func(int) (string, int, error) {
-	return func(pid int) (string, int, error) {
+func matchingLinuxLeaderProbe(identity ExecutionIdentity) func(int) (string, int, string, error) {
+	return func(pid int) (string, int, string, error) {
 		if pid != identity.LeaderPID {
-			return "", 0, errors.New("inspector probed a PID other than the persisted leader")
+			return "", 0, "", errors.New("inspector probed a PID other than the persisted leader")
 		}
-		return identity.ProcessStartToken, identity.ProcessGroupID, nil
+		return identity.ProcessStartToken, identity.ProcessGroupID, "S", nil
 	}
+}
+
+type linuxLeaderObservation struct {
+	startToken     string
+	processGroupID int
+	state          string
+	err            error
 }
 
 func TestCurrentPIDNamespaceTokenIsStableAndNamespaced(t *testing.T) {
@@ -309,6 +434,39 @@ func TestInspectProcessGroupExitProvesStoppedGroup(t *testing.T) {
 	inspection := InspectProcessGroupExit(identity)
 	if inspection.Status != ProcessGroupExitAbsent || inspection.ObservedAt.IsZero() {
 		t.Fatalf("stopped process group inspection = %#v, want observed absent group", inspection)
+	}
+}
+
+func TestInspectProcessGroupExitKeepsZombieOnlyGroupUnknown(t *testing.T) {
+	command, identity := startProcessGroupInspectorChild(t)
+	if err := command.Process.Kill(); err != nil {
+		t.Fatalf("stop isolated process-group child: %v", err)
+	}
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		_, _, state, err := inspectLinuxLeader(command.Process.Pid)
+		if err == nil && state == "Z" {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("isolated child did not become a zombie before deadline (state %q, error %v)", state, err)
+		}
+		time.Sleep(time.Millisecond)
+	}
+
+	hostGeneration, err := currentLinuxHostGeneration()
+	if err != nil {
+		t.Fatalf("currentLinuxHostGeneration() error = %v", err)
+	}
+	identity.HostGeneration = hostGeneration
+	pidNamespaceToken, err := CurrentPIDNamespaceToken()
+	if err != nil {
+		t.Fatalf("CurrentPIDNamespaceToken() error = %v", err)
+	}
+	identity.PIDNamespaceToken = pidNamespaceToken
+	inspection := InspectProcessGroupExit(identity)
+	if inspection.Status != ProcessGroupExitUnknown {
+		t.Fatalf("zombie-only group inspection = %#v, want unknown until the zombie is reaped", inspection)
 	}
 }
 
