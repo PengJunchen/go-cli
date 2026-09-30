@@ -271,6 +271,9 @@ func TestMCPJSONBodyCancellationPreservesCause(t *testing.T) {
 			writeHTTPMCPJSONRPCResponse(w, id, map[string]any{"protocolVersion": streamableHTTPProtocolVersion})
 		case "notifications/initialized":
 			w.WriteHeader(http.StatusAccepted)
+		case "notifications/cancelled":
+			assert.Empty(t, id, "cancellation must be a JSON-RPC notification")
+			w.WriteHeader(http.StatusAccepted)
 		case "tools/list":
 			w.Header().Set("Content-Type", "application/json")
 			writeHTTPMCPJSONRPCResponse(w, id, map[string]any{"tools": []any{}})
