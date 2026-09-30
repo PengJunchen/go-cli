@@ -318,9 +318,11 @@ func createDispatchedBashRecoveryFixture(t *testing.T, executionOwner string, wi
 	if err != nil {
 		t.Fatal(err)
 	}
+	pidNamespaceToken := strings.Join([]string{"linux", "pidns", "v1", "test"}, ":")
+	processStartToken := strings.Join([]string{"linux", "41"}, ":")
 	identity := core.ExecutionIdentity{
 		Kind: core.ExecutionIdentityProcessGroup, Platform: "linux", HostGeneration: "linux:test-host",
-		PIDNamespaceToken: "linux:pidns:v1:test", LeaderPID: 41, ProcessStartToken: "linux:41", ProcessGroupID: 41,
+		PIDNamespaceToken: pidNamespaceToken, LeaderPID: 41, ProcessStartToken: processStartToken, ProcessGroupID: 41,
 	}
 	intent, err := writer.AppendAndSync(context.Background(), SessionEntry{
 		ID: "recovery-intent", ParentID: assistant[0].ID, Type: EntryTypeTool, RunID: "recovery-run", WorkspaceID: "workspace-recovery",
