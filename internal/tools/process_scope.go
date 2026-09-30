@@ -108,12 +108,12 @@ func startManagedLocalCommandWithStartHook(cancel context.CancelFunc, cmd *exec.
 	return &managedLocalCommand{cmd: cmd, scope: scope, stdout: stdoutRead, stderr: stderrRead, cancel: cancel}, nil
 }
 
-func startManagedLocalBashCommand(cancel context.CancelFunc, cmd *exec.Cmd, ctx context.Context) (*managedLocalCommand, error) {
+func startManagedLocalBashCommand(ctx context.Context, cancel context.CancelFunc, cmd *exec.Cmd) (*managedLocalCommand, error) {
 	observer := processExecutionIdentityObserverFromContext(ctx)
 	if observer == nil {
 		return startManagedLocalCommand(cancel, cmd)
 	}
-	return startManagedLocalBashCommandWithIdentityObserver(cancel, cmd, ctx, observer)
+	return startManagedLocalBashCommandWithIdentityObserver(ctx, cancel, cmd, observer)
 }
 
 // collect drains both pipes concurrently while the owner watches the leader,

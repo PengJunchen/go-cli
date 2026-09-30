@@ -54,7 +54,7 @@ func commandProcessGroupAlive(pgid int) (bool, error) {
 	return true, err
 }
 
-func startManagedLocalBashCommandWithIdentityObserver(cancel context.CancelFunc, cmd *exec.Cmd, ctx context.Context, observer ProcessExecutionIdentityObserver) (*managedLocalCommand, error) {
+func startManagedLocalBashCommandWithIdentityObserver(ctx context.Context, cancel context.CancelFunc, cmd *exec.Cmd, observer ProcessExecutionIdentityObserver) (*managedLocalCommand, error) {
 	gate, err := installBashProcessStartGate(cmd)
 	if err != nil {
 		return nil, fmt.Errorf("tools: prepare Bash process start gate: %w", err)
@@ -64,7 +64,7 @@ func startManagedLocalBashCommandWithIdentityObserver(cancel context.CancelFunc,
 
 	return startManagedLocalCommandWithStartHook(cancel, cmd, func(started *exec.Cmd) error {
 		if started.Process == nil || started.Process.Pid <= 0 {
-			return errors.New("Bash process start returned no child identity")
+			return errors.New("bash process start returned no child identity")
 		}
 		identity, err := captureManagedProcessIdentity(started.Process.Pid, started.Process.Pid)
 		if err != nil {
@@ -380,7 +380,7 @@ func bashReadonlyEnvironmentKey(key string) bool {
 
 func (g *bashProcessStartGate) release() error {
 	if g == nil || g.writeEnd == nil {
-		return errors.New("Bash process start gate is unavailable")
+		return errors.New("bash process start gate is unavailable")
 	}
 	payload := []byte("go-cli-identity-release\x00")
 	for _, entry := range g.restoreEnv {
