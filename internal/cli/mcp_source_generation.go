@@ -70,7 +70,12 @@ func selectMCPServerSource(ctx context.Context, rc *config.Config, manager appro
 		return nil, err
 	}
 	if manager == nil {
-		manager = approval.GetTrustManager()
+		if rc != nil {
+			manager = rc.ProjectTrustManager()
+		}
+		if manager == nil {
+			manager = approval.GetTrustManager()
+		}
 	}
 	cwd, err := os.Getwd()
 	if err != nil {

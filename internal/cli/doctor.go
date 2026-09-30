@@ -49,6 +49,10 @@ type DoctorRunner struct {
 
 // NewDoctorRunner returns a DoctorRunner with all default checkers registered.
 func NewDoctorRunner() *DoctorRunner {
+	return newDoctorRunner(approval.GetTrustManager())
+}
+
+func newDoctorRunner(manager approval.TrustManager) *DoctorRunner {
 	return &DoctorRunner{checks: []DoctorChecker{
 		NewGoVersionChecker(),
 		NewGoModChecker(""),
@@ -58,11 +62,21 @@ func NewDoctorRunner() *DoctorRunner {
 		NewPermissionsChecker(nil),
 		NewNetworkChecker("", 0),
 		NewAPIConnectivityChecker(),
-		NewMCPServersChecker(),
+		newMCPServersChecker(manager),
 		NewLSPChecker(),
 		NewDiskSpaceChecker("", 0),
 		NewOSInfoChecker(),
 	}}
+}
+
+func doctorRunnerForConfig(cfg Config) *DoctorRunner {
+	var manager approval.TrustManager
+	if source, ok := cfg.(interface {
+		ProjectTrustManager() approval.TrustManager
+	}); ok {
+		manager = source.ProjectTrustManager()
+	}
+	return newDoctorRunner(manager)
 }
 
 // WithCheckers replaces the checker list. Intended for testing.
@@ -567,7 +581,13 @@ type MCPServersChecker struct {
 
 // NewMCPServersChecker returns a checker that probes configured MCP servers.
 func NewMCPServersChecker() *MCPServersChecker {
-	manager := approval.GetTrustManager()
+	return newMCPServersChecker(approval.GetTrustManager())
+}
+
+func newMCPServersChecker(manager approval.TrustManager) *MCPServersChecker {
+	if manager == nil {
+		manager = approval.GetTrustManager()
+	}
 	return &MCPServersChecker{
 		trustedConfigLoader: func(ctx context.Context) (*config.Config, error) {
 			return config.LoadTrustedWithManager(ctx, manager)
@@ -909,7 +929,7 @@ func (c *doctorCmd) Synopsis() string { return "Run diagnostic checks" }
 // Run implements Command. It runs all doctor checks and prints the results.
 // A non-zero number of failed checks returns an ExecutionError.
 func (c *doctorCmd) Run(ctx context.Context, cfg Config, args []string) error {
-	runner := NewDoctorRunner()
+	runner := doctorRunnerForConfig(cfg)
 	checks := runner.Run(ctx)
 	fmt.Fprint(c.out, Format(checks)) //nolint:errcheck
 	for _, ch := range checks {
