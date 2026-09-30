@@ -20,9 +20,11 @@ type SkillDefinition interface {
 	// Prompt returns the instruction text to feed to the model when the
 	// skill executes.
 	Prompt() string
-	// Tools lists the names of the tools the skill may use.
+	// Tools lists tools suggested by the skill. SkillAdapter does not enforce
+	// this list as an executor permission boundary.
 	Tools() []string
-	// Parameters holds the structured parameters a skill accepts.
+	// Parameters holds legacy parameter metadata or defaults. It is not a JSON
+	// Schema for tool-call arguments.
 	Parameters() map[string]any
 	// TriggerHint returns a natural-language phrase that hints when the skill
 	// should be matched.
@@ -99,12 +101,14 @@ func WithPrompt(p string) SkillOption {
 	return func(o *skillOptions) { o.prompt = p }
 }
 
-// WithTools sets the list of tool names the skill may use.
+// WithTools sets tool names suggested by the skill prompt. The adapter does not
+// enforce these names as executor permissions.
 func WithTools(tools ...string) SkillOption {
 	return func(o *skillOptions) { o.tools = append([]string(nil), tools...) }
 }
 
-// WithParameters sets the structured parameters map.
+// WithParameters sets legacy parameter metadata or defaults. The adapter does
+// not interpret this map as an argument schema.
 func WithParameters(p map[string]any) SkillOption {
 	return func(o *skillOptions) {
 		m := make(map[string]any, len(p))
@@ -135,10 +139,12 @@ func (d *DefaultSkillDefinition) Category() string { return d.category }
 // Prompt returns the skill prompt.
 func (d *DefaultSkillDefinition) Prompt() string { return d.prompt }
 
-// Tools returns the list of tool names the skill may use.
+// Tools returns tool names suggested by the skill. The adapter does not
+// enforce these names as executor permissions.
 func (d *DefaultSkillDefinition) Tools() []string { return d.tools }
 
-// Parameters returns the structured parameters map.
+// Parameters returns legacy parameter metadata or defaults. This map is not a
+// JSON Schema for tool-call arguments.
 func (d *DefaultSkillDefinition) Parameters() map[string]any { return d.parameters }
 
 // TriggerHint returns the natural-language trigger hint.

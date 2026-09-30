@@ -14,14 +14,16 @@ import (
 
 // SkillAdapter wraps a SkillDefinition as a tools.ToolDefinition so the agent
 // loop can execute a skill as if it were a tool. Invoking the adapter runs the
-// skill's prompt and surfaces its declared tools and parameters through the
-// description.
+// skill's prompt and surfaces its suggested tools and legacy parameter
+// metadata through the description. These declarations do not grant tool
+// permissions or define accepted tool-call arguments.
 type SkillAdapter struct {
 	def SkillDefinition
 }
 
 // Compile-time assertion that SkillAdapter satisfies tools.ToolDefinition.
 var _ tools.ToolDefinition = (*SkillAdapter)(nil)
+var _ tools.Parameterized = (*SkillAdapter)(nil)
 
 // NewSkillAdapter wraps def as a tool. def must not be nil.
 func NewSkillAdapter(def SkillDefinition) *SkillAdapter {
@@ -31,13 +33,14 @@ func NewSkillAdapter(def SkillDefinition) *SkillAdapter {
 // Name returns the skill name, which serves as the tool name.
 func (a *SkillAdapter) Name() string { return a.def.Name() }
 
-// Description returns the skill description augmented with the tool list and
-// parameter names the skill declares.
+// Description returns the skill description augmented with the suggested tool
+// names and legacy parameter metadata. Tool suggestions are not enforced
+// permissions, and the legacy parameter map is not an argument schema.
 func (a *SkillAdapter) Description() string {
 	var sb strings.Builder
 	sb.WriteString(a.def.Description())
 	if toolsSlice := a.def.Tools(); len(toolsSlice) > 0 {
-		sb.WriteString("\ntools: ")
+		sb.WriteString("\nsuggested tools (not enforced): ")
 		sb.WriteString(strings.Join(toolsSlice, ", "))
 	}
 	if params := a.def.Parameters(); len(params) > 0 {
@@ -46,10 +49,21 @@ func (a *SkillAdapter) Description() string {
 			names = append(names, k)
 		}
 		sort.Strings(names)
-		sb.WriteString("\nparameters: ")
+		sb.WriteString("\nlegacy parameter metadata (not accepted as arguments): ")
 		sb.WriteString(strings.Join(names, ", "))
 	}
 	return sb.String()
+}
+
+// Parameters exposes the only argument shape currently supported by the
+// adapter: an empty object. Legacy SkillDefinition.Parameters values are
+// descriptive metadata and are deliberately not interpreted as JSON Schema.
+func (*SkillAdapter) Parameters() any {
+	return map[string]any{
+		"type":                 "object",
+		"properties":           map[string]any{},
+		"additionalProperties": false,
+	}
 }
 
 // Execute runs the skill by returning its prompt as the tool output. It emits
@@ -75,6 +89,16 @@ func (a *SkillAdapter) Execute(ctx context.Context, call tools.ToolCall) (*tools
 	}
 
 	name := a.def.Name()
+	if len(call.Args) > 0 {
+		err := errors.New("skill: arguments are unsupported without a declared argument schema")
+		span.SetAttributes(
+			tracing.Attribute{Key: "skill_name", Value: name},
+			tracing.Attribute{Key: "success", Value: false},
+		)
+		span.SetStatus(tracing.SpanStatusError, err.Error())
+		return nil, err
+	}
+
 	prompt := a.def.Prompt()
 	span.SetAttributes(
 		tracing.Attribute{Key: "skill_name", Value: name},
@@ -89,10 +113,24 @@ func (a *SkillAdapter) Execute(ctx context.Context, call tools.ToolCall) (*tools
 	return &tools.ToolResult{
 		Output: fmt.Sprintf("[skill %s]\n%s", name, prompt),
 		Metadata: map[string]any{
-			"skill":      name,
-			"tools":      a.def.Tools(),
-			"parameters": a.def.Parameters(),
+			"skill":                     name,
+			"tools":                     append([]string(nil), a.def.Tools()...), // Legacy metadata key.
+			"suggested_tools":           append([]string(nil), a.def.Tools()...),
+			"tool_permissions_enforced": false,
+			"parameters":                cloneLegacyParameters(a.def.Parameters()),
+			"tool_arguments_supported":  false,
 		},
 		ToolCallID: call.ID,
 	}, nil
+}
+
+func cloneLegacyParameters(parameters map[string]any) map[string]any {
+	if parameters == nil {
+		return nil
+	}
+	cloned := make(map[string]any, len(parameters))
+	for key, value := range parameters {
+		cloned[key] = value
+	}
+	return cloned
 }
