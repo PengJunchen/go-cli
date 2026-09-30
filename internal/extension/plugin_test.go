@@ -89,6 +89,27 @@ func TestPluginLoaderGRPCVariousCasing(t *testing.T) {
 	}
 }
 
+func TestPluginLoaderGRPCPathRedactsSecrets(t *testing.T) {
+	const canary = "grpc-url-secret-canary-42f8"
+	path := "grpc://user:" + canary + "@host:50051/extensions?token=" + canary
+	var logs bytes.Buffer
+	oldLogger := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, &slog.HandlerOptions{Level: slog.LevelDebug})))
+	t.Cleanup(func() { slog.SetDefault(oldLogger) })
+
+	loader := extension.NewDefaultPluginLoader()
+	_, err := loader.Load(context.Background(), path)
+	require.ErrorIs(t, err, extension.ErrUnsupportedRPC)
+	assert.NotContains(t, err.Error(), canary)
+	assert.NotContains(t, logs.String(), canary)
+	assert.Contains(t, logs.String(), "<remote-extension-path>")
+
+	managerErr := extension.NewPluginManager(loader).Load(context.Background(), []string{path})
+	require.ErrorIs(t, managerErr, extension.ErrUnsupportedRPC)
+	assert.NotContains(t, managerErr.Error(), canary)
+	assert.NotContains(t, logs.String(), canary)
+}
+
 func TestPluginLoaderNames(t *testing.T) {
 	assert.Equal(t, "default-plugin-loader", extension.NewDefaultPluginLoader().Name())
 }

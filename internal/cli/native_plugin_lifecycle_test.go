@@ -24,8 +24,8 @@ import (
 const nativePluginRequiredEnv = "GOCLI_REQUIRE_NATIVE_PLUGIN_TEST"
 
 func TestConfiguredGoPluginLifecycle(t *testing.T) {
-	if runtime.GOOS != "linux" && runtime.GOOS != "darwin" && runtime.GOOS != "freebsd" {
-		nativePluginUnavailable(t, "Go plugins are unavailable on "+runtime.GOOS)
+	if !nativePluginBuildSupported(runtime.GOOS, runtime.GOARCH) {
+		nativePluginUnavailable(t, "Go plugins are unavailable on "+runtime.GOOS+"/"+runtime.GOARCH)
 	}
 	goTool, err := exec.LookPath("go")
 	require.NoError(t, err)
@@ -50,7 +50,7 @@ func TestConfiguredGoPluginLifecycle(t *testing.T) {
 	build.Dir = moduleRoot
 	build.Env = os.Environ() // GOFLAGS, tags, compiler and cgo settings match this test invocation.
 	if output, buildErr := build.CombinedOutput(); buildErr != nil {
-		nativePluginUnavailable(t, "buildmode=plugin is unavailable: "+strings.TrimSpace(string(output)))
+		t.Fatalf("buildmode=plugin fixture failed on a supported OS with cgo enabled: %s", strings.TrimSpace(string(output)))
 	}
 
 	reportPath := filepath.Join(t.TempDir(), "plugin-report.txt")
@@ -118,4 +118,14 @@ func nativePluginUnavailable(t *testing.T, reason string) {
 		t.Fatal(reason)
 	}
 	t.Skip(reason)
+}
+
+func nativePluginBuildSupported(goos, goarch string) bool {
+	switch goos + "/" + goarch {
+	case "linux/386", "linux/amd64", "linux/arm", "linux/arm64", "linux/loong64", "linux/ppc64le", "linux/riscv64", "linux/s390x",
+		"android/386", "android/amd64", "darwin/amd64", "darwin/arm64", "freebsd/amd64":
+		return true
+	default:
+		return false
+	}
 }

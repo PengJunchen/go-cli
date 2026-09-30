@@ -17,7 +17,8 @@ func isRemoteExtensionPath(path string) bool {
 }
 
 func safeExtensionPath(path string) string {
-	if isRemoteExtensionPath(path) {
+	lower := strings.ToLower(path)
+	if isRemoteExtensionPath(path) || strings.HasPrefix(lower, "grpc://") {
 		return redactedRemoteExtensionPath
 	}
 	return path

@@ -121,17 +121,25 @@ func TestExtensionHookAdapterBeforeRunPass(t *testing.T) {
 	assert.True(t, ok, "the event data must be the documented concrete snapshot")
 }
 
-// A non-pass action hook adapter halts BeforeRun with an error carrying the
-// hook name and reason.
+// A block halts BeforeRun with a fixed-message error whose typed fields
+// retain registration identity without exposing request or reason content.
 func TestExtensionHookAdapterBeforeRunBlock(t *testing.T) {
 	const reasonCanary = "hook-reason-secret-71f6"
 	hook := &bridgeTestHook{name: "block-hook", action: extension.HookActionBlock, reason: reasonCanary}
 	adapter := bridgeHookAdapter(hook)
 
-	err := adapter.BeforeRun(context.Background(), core.Submission{Content: "hi"})
+	err := adapter.BeforeRun(context.Background(), core.Submission{Content: "private request canary"})
 	require.ErrorIs(t, err, extension.ErrHookBlocked)
+	assert.Equal(t, extension.ErrHookBlocked.Error(), err.Error())
+	assert.Equal(t, err.Error(), fmt.Sprintf("%+v", err), "formatting must not implicitly expose typed identity fields")
 	assert.NotContains(t, err.Error(), reasonCanary)
 	assert.NotContains(t, err.Error(), "block-hook")
+	assert.NotContains(t, err.Error(), "private request canary")
+	var observerErr *extensionHookObserverError
+	require.ErrorAs(t, err, &observerErr)
+	assert.Equal(t, "registered-owner", observerErr.owner)
+	assert.Equal(t, "block-hook", observerErr.hookName)
+	assert.Equal(t, "agent.before_run", observerErr.eventName)
 }
 
 // AfterRun forwards the agent.after_run event and does not error on pass.
@@ -346,6 +354,72 @@ func TestHookSnapshotEnforcesPayloadLimits(t *testing.T) {
 		err := overAdapter.BeforeRun(context.Background(), core.Submission{Content: strings.Repeat("x", contentLength+1)})
 		require.ErrorIs(t, err, extension.ErrHookPayloadLimitExceeded)
 		assert.Empty(t, overHook.Calls())
+	})
+}
+
+func TestHookSnapshotRejectsWideContainersBeforeObserver(t *testing.T) {
+	largeMap := make(map[string]any, hookPayloadMaxNodes/2+1)
+	for index := 0; index < hookPayloadMaxNodes/2+1; index++ {
+		largeMap[fmt.Sprintf("key-%05d", index)] = true
+	}
+
+	tests := []struct {
+		name       string
+		submission core.Submission
+	}{
+		{
+			name:       "history slice",
+			submission: core.Submission{History: make([]core.AgentMessage, hookPayloadMaxNodes+1)},
+		},
+		{
+			name: "content block slice",
+			submission: core.Submission{History: []core.AgentMessage{{
+				ContentBlocks: make([]llm.ContentBlock, hookPayloadMaxNodes+1),
+			}}},
+		},
+		{
+			name: "tool call slice",
+			submission: core.Submission{History: []core.AgentMessage{{
+				ToolCalls: make([]llm.ToolCall, hookPayloadMaxNodes+1),
+			}}},
+		},
+		{
+			name:       "metadata map keys and values",
+			submission: core.Submission{Metadata: largeMap},
+		},
+		{
+			name:       "nested metadata slice",
+			submission: core.Submission{Metadata: map[string]any{"wide": make([]any, hookPayloadMaxNodes+1)}},
+		},
+	}
+
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			hook := &bridgeTestHook{name: "wide-container", action: extension.HookActionPass}
+			err := bridgeHookAdapter(hook).BeforeRun(context.Background(), testCase.submission)
+			require.ErrorIs(t, err, extension.ErrHookPayloadLimitExceeded)
+			assert.Empty(t, hook.Calls(), "the observer must not be called for an over-wide container")
+		})
+	}
+}
+
+func TestHookPayloadBudgetRejectsContainerWidthsBeforeAllocation(t *testing.T) {
+	t.Run("slice entries", func(t *testing.T) {
+		budget := &hookPayloadBudget{}
+		require.ErrorIs(t, budget.requireEntries(hookPayloadMaxNodes+1, 1), extension.ErrHookPayloadLimitExceeded)
+		require.NoError(t, budget.requireEntries(hookPayloadMaxNodes, 1))
+	})
+
+	t.Run("map key and value entries", func(t *testing.T) {
+		budget := &hookPayloadBudget{}
+		require.ErrorIs(t, budget.requireEntries(hookPayloadMaxNodes/2+1, 2), extension.ErrHookPayloadLimitExceeded)
+		require.NoError(t, budget.requireEntries(hookPayloadMaxNodes/2, 2))
+	})
+
+	t.Run("container plus entries", func(t *testing.T) {
+		budget := &hookPayloadBudget{}
+		require.ErrorIs(t, budget.requireContainer(hookPayloadMaxNodes, 1), extension.ErrHookPayloadLimitExceeded)
+		require.NoError(t, budget.requireContainer(hookPayloadMaxNodes-1, 1))
 	})
 }
 
