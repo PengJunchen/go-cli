@@ -176,6 +176,7 @@ func TestDurableCurrentInputPreservationUsesTypedSourceIdentity(t *testing.T) {
 	}
 	current := compaction.TurnItem{
 		ID: "current-input", Role: compaction.RoleUser, Content: "same text",
+		ContentBlocks: []llm.ContentBlock{{Type: "text", Text: "original block"}},
 		Runtime: llm.RuntimeMetadata{Source: llm.SourceRef{
 			Kind: llm.SourceRunTranscript, RunID: "run-current-identity", PriorSourceCount: 1, TranscriptIndex: 0,
 		}},
@@ -190,6 +191,12 @@ func TestDurableCurrentInputPreservationUsesTypedSourceIdentity(t *testing.T) {
 	require.Equal(t, current.Runtime.Source, captured.Runtime.Source,
 		"same text in an older durable row must not substitute for the current transcript identity")
 	require.Equal(t, current, captured)
+
+	mutatedInPlace := current
+	mutatedInPlace.ContentBlocks[0].Text = "rewritten block"
+	require.ErrorIs(t, validateDurableCurrentInputPreserved(captured, []compaction.TurnItem{prior, mutatedInPlace}), ErrDurableCompactionUnsupported,
+		"the frozen current-input content graph must not share its backing storage with a mutating compactor")
+	current.ContentBlocks[0].Text = "original block"
 
 	changed := current
 	changed.Content = "edited current input"

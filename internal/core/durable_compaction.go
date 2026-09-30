@@ -188,13 +188,43 @@ func captureDurableCurrentInput(items []compaction.TurnItem, snapshot *Compactio
 		if source.PriorSourceCount != priorCount || item.Role != compaction.RoleUser {
 			return unsupported(fmt.Sprintf("has an invalid transcript source at item %d", index))
 		}
-		current = item
+		current = cloneCompactionTurnItem(item)
 		found = true
 	}
 	if !found {
 		return unsupported("is missing its original transcript source identity")
 	}
 	return current, nil
+}
+
+// cloneCompactionTurnItem freezes the message's mutable protocol-value graph.
+// TurnItem's scalar provenance is value-owned, while content blocks, usage,
+// and JSON tool arguments contain slices, pointers, or maps that a Compactor
+// could otherwise mutate through an aliased request item.
+func cloneCompactionTurnItem(item compaction.TurnItem) compaction.TurnItem {
+	message := cloneAgentMessage(AgentMessage{
+		Role: item.Role, Content: item.Content, ContentBlocks: item.ContentBlocks,
+		Usage: item.Usage, ToolCalls: item.ToolCalls, ToolCallID: item.ToolCallID,
+		ToolName: item.ToolName, ReceiptOutcome: item.ReceiptOutcome, Runtime: item.Runtime,
+	})
+	item.ContentBlocks = message.ContentBlocks
+	item.Usage = message.Usage
+	item.ToolCalls = message.ToolCalls
+	return item
+}
+
+// cloneCompactionTurnItems gives each Compactor an independent copy of all
+// mutable protocol-value graphs. Validation can then compare its result to
+// the original request even when a custom Compactor mutates its input in place.
+func cloneCompactionTurnItems(items []compaction.TurnItem) []compaction.TurnItem {
+	if items == nil {
+		return nil
+	}
+	cloned := make([]compaction.TurnItem, len(items))
+	for index, item := range items {
+		cloned[index] = cloneCompactionTurnItem(item)
+	}
+	return cloned
 }
 
 func validateDurableCurrentInputPreserved(current compaction.TurnItem, result []compaction.TurnItem) error {
