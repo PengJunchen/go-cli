@@ -120,6 +120,16 @@ func (m *MidTurnCompact) Reset() {
 	m.runningTotal = 0
 }
 
+// NewRun returns a fresh guard with the same threshold ratio and no cached
+// estimates. Callers can reuse the configured guard while keeping incremental
+// estimation state local to each conversation run.
+func (m *MidTurnCompact) NewRun() *MidTurnCompact {
+	if m == nil {
+		return nil
+	}
+	return &MidTurnCompact{thresholdRatio: m.thresholdRatio}
+}
+
 // estimateIncremental returns the total token estimate for items without
 // re-scanning items that were already estimated in a previous call. It appends
 // the estimate of each new item (items[lastIdx:]) to runningTotal, caching the
