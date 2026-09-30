@@ -96,6 +96,45 @@ func TestTodoStoreListEmpty(t *testing.T) {
 	assert.Empty(t, s.List())
 }
 
+func TestTodoStoreSnapshotsCarryRevisionsAndCopies(t *testing.T) {
+	s := NewTodoStore()
+	initial := s.Snapshot()
+	assert.Zero(t, initial.Revision)
+	assert.Empty(t, initial.Items)
+
+	added := s.Add(TodoItem{Content: "task A"})
+	assert.Equal(t, uint64(1), added.Revision)
+	require.Len(t, added.Items, 1)
+	assert.Equal(t, "todo-1", added.Items[0].ID)
+
+	added.Items[0].Content = "caller mutation"
+	stored := s.Snapshot()
+	assert.Equal(t, uint64(1), stored.Revision)
+	assert.Equal(t, "task A", stored.Items[0].Content)
+
+	updated, changed := s.Update("todo-1", "completed")
+	require.True(t, changed)
+	assert.Equal(t, uint64(2), updated.Revision)
+	assert.Equal(t, "completed", updated.Items[0].Status)
+
+	unchanged, changed := s.Update("todo-1", "completed")
+	assert.False(t, changed)
+	assert.Equal(t, uint64(2), unchanged.Revision)
+
+	unchanged, changed = s.Update("missing", "completed")
+	assert.False(t, changed)
+	assert.Equal(t, uint64(2), unchanged.Revision)
+
+	removed, changed := s.Remove("todo-1")
+	require.True(t, changed)
+	assert.Equal(t, uint64(3), removed.Revision)
+	assert.Empty(t, removed.Items)
+
+	unchanged, changed = s.Remove("missing")
+	assert.False(t, changed)
+	assert.Equal(t, uint64(3), unchanged.Revision)
+}
+
 func TestTodoStoreConcurrent(t *testing.T) {
 	s := NewTodoStore()
 	var wg sync.WaitGroup

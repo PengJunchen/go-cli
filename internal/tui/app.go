@@ -243,6 +243,16 @@ func WithThemeManager(mgr *ThemeManager) AppOption {
 	return func(a *BubbleteaApp) { a.themeMgr = mgr }
 }
 
+// WithTodoSnapshot seeds a new app with the Assembly's revisioned todo state.
+func WithTodoSnapshot(snapshot TodoUpdateMsg) AppOption {
+	return func(a *BubbleteaApp) {
+		a.initialTodoSnapshot = TodoUpdateMsg{
+			Revision: snapshot.Revision,
+			Items:    cloneTodoItems(snapshot.Items),
+		}
+	}
+}
+
 // WithWidth sets the target render width in terminal columns.
 func WithWidth(width int) AppOption {
 	return func(a *BubbleteaApp) { a.width = width }
@@ -455,6 +465,7 @@ type BubbleteaApp struct {
 
 	initialTranscript       *CanonicalTranscriptSnapshot
 	initialTranscriptErr    error
+	initialTodoSnapshot     TodoUpdateMsg
 	expectedRunID           string
 	expectedOwnerGeneration string
 }
@@ -532,6 +543,10 @@ func (a *BubbleteaApp) Run(ctx context.Context) error {
 		a.readyOnce = sync.Once{}
 		a.cleaned = false
 		a.model.quitCh = a.quitCh
+		a.model.mu.Lock()
+		a.model.todoSnapshot = cloneTodoItems(a.initialTodoSnapshot.Items)
+		a.model.todoRevision = a.initialTodoSnapshot.Revision
+		a.model.mu.Unlock()
 	}
 	a.uiContextDone = ctx.Done()
 	a.sendMu.Unlock()
@@ -716,6 +731,7 @@ func (a *BubbleteaApp) cleanup() {
 		a.model.mu.Lock()
 		a.model.streamBuf = make(map[string]*strings.Builder)
 		a.model.todoSnapshot = nil
+		a.model.todoRevision = 0
 		a.model.mu.Unlock()
 	}
 	a.sendMu.Lock()
@@ -870,6 +886,7 @@ type teaModel struct {
 	// progress panel. It is updated when a ContentTypeTodo event or a
 	// TodoUpdateMsg arrives, and rendered above the status bar.
 	todoSnapshot []TodoItem
+	todoRevision uint64
 
 	// concurrency: guards all mutable state above. Update runs single-threaded
 	// inside bubbletea, but external callers (tests, View) access the model
@@ -913,6 +930,8 @@ func newTeaModel(a *BubbleteaApp) *teaModel {
 		resumeCallback:                  a.resumeCallback,
 		approvalCh:                      a.approvalCh,
 		thinkingVisibility:              a.thinkingVisibility,
+		todoSnapshot:                    cloneTodoItems(a.initialTodoSnapshot.Items),
+		todoRevision:                    a.initialTodoSnapshot.Revision,
 		modelName:                       a.modelName,
 		turnCount:                       a.turnCount,
 		sessionID:                       a.sessionID,
@@ -1059,7 +1078,17 @@ func (m *teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var view string
 		notify := m.shouldNotify()
 		m.mu.Lock()
-		m.todoSnapshot = msg.Items
+		// Revision zero is the legacy unversioned form of TodoUpdateMsg. Keep
+		// accepting it for existing callers, but do not let it lower the
+		// revision guard used to reject stale revisioned snapshots.
+		if msg.Revision != 0 && msg.Revision < m.todoRevision {
+			m.mu.Unlock()
+			return m, nil
+		}
+		m.todoSnapshot = cloneTodoItems(msg.Items)
+		if msg.Revision != 0 {
+			m.todoRevision = msg.Revision
+		}
 		if notify {
 			view = m.renderViewLocked()
 		}
