@@ -15,6 +15,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -695,6 +696,7 @@ type assembleState struct {
 	// Extensions section
 	extHooks                    []core.Hook
 	extMiddleware               []core.Middleware
+	pluginLoader                extension.PluginLoader
 	hookChain                   *core.HookChain
 	hookMgr                     *core.HookManager
 	shellHooksLoaded            bool
@@ -1069,7 +1071,19 @@ func (s *assembleState) assembleTools() error {
 // hooks, and middleware. It also builds the hook chain.
 func (s *assembleState) assembleExtensions() error {
 	if s.rc != nil && s.rc.Extensions.Enabled != nil && *s.rc.Extensions.Enabled && len(s.rc.Extensions.PluginPaths) > 0 {
-		pm := extension.NewPluginManager(extension.NewDefaultPluginLoader())
+		var projectBinding tools.ProjectTrustBinding
+		if projectOverlay := s.rc.ProjectOverlayForVerifiedSources(); projectOverlay != nil && len(projectOverlay.Extensions.PluginPaths) > 0 {
+			verified := s.rc.VerifiedProjectSources()
+			if verified == nil || !reflect.DeepEqual(projectOverlay.Extensions.PluginPaths, s.rc.Extensions.PluginPaths) {
+				return errors.New("assemble: project extension paths no longer match their verified source overlay")
+			}
+			projectBinding = verified
+		}
+		loader := s.pluginLoader
+		if loader == nil {
+			loader = extension.NewDefaultPluginLoader()
+		}
+		pm := extension.NewPluginManager(loader)
 		s.pluginManagers = append(s.pluginManagers, pm)
 		if err := pm.Load(s.ctx, s.rc.Extensions.PluginPaths); err != nil {
 			return fmt.Errorf("assemble: load extensions: %w", err)
@@ -1078,7 +1092,18 @@ func (s *assembleState) assembleExtensions() error {
 			return fmt.Errorf("assemble: initialize extensions: %w", err)
 		}
 		for _, t := range pm.Tools() {
-			if regErr := s.tr.Register(s.ctx, t); regErr != nil {
+			var regErr error
+			if projectBinding != nil {
+				registrar, ok := s.tr.(tools.ProjectSourcedToolRegistrar)
+				if !ok {
+					regErr = tools.ErrProjectSourcedRegistrationUnavailable
+				} else {
+					regErr = registrar.RegisterProjectSourced(s.ctx, t, projectBinding)
+				}
+			} else {
+				regErr = s.tr.Register(s.ctx, t)
+			}
+			if regErr != nil {
 				s.logger.Warn("assemble_extension_tool_register_failed", "tool", t.Name(), "err", regErr)
 			}
 		}
@@ -2353,6 +2378,7 @@ func registerSkillTools(ctx context.Context, rc *config.Config, tr tools.Deferre
 	}
 	userSkillPath, userSkillRoot := canonicalUserSkillDirectory()
 	var defs []*skill.SkillDefinition
+	projectSkillSource := false
 	if userSkillPath != "" && requestedDir == userSkillPath {
 		if userSkillRoot == "" {
 			slog.Warn("assemble_skill_skip_unavailable", "reason", "user skill directory is unavailable")
@@ -2374,6 +2400,7 @@ func registerSkillTools(ctx context.Context, rc *config.Config, tr tools.Deferre
 			slog.Warn("assemble_skill_skip_untrusted", "reason", "project skill sources are not verified")
 			return nil
 		}
+		projectSkillSource = true
 		defs, err = loadVerifiedProjectSkills(ctx, verified, relativeDir)
 	}
 	if err != nil {
@@ -2388,9 +2415,21 @@ func registerSkillTools(ctx context.Context, rc *config.Config, tr tools.Deferre
 			continue
 		}
 		defCopy := def
-		if regErr := tr.RegisterDeferred(ctx, (*defCopy).Name(), func() (tools.ToolDefinition, error) {
+		loader := func() (tools.ToolDefinition, error) {
 			return skill.NewSkillAdapter(*defCopy), nil
-		}); regErr != nil {
+		}
+		var regErr error
+		if projectSkillSource {
+			registrar, ok := tr.(tools.ProjectSourcedDeferredToolRegistrar)
+			if !ok {
+				regErr = tools.ErrProjectSourcedRegistrationUnavailable
+			} else {
+				regErr = registrar.RegisterProjectSourcedDeferred(ctx, (*defCopy).Name(), loader, verified)
+			}
+		} else {
+			regErr = tr.RegisterDeferred(ctx, (*defCopy).Name(), loader)
+		}
+		if regErr != nil {
 			slog.Warn("assemble_skill_register_failed", "skill", (*def).Name(), "err", regErr)
 			continue
 		}
@@ -2577,6 +2616,15 @@ func registerCustomTools(ctx context.Context, rc *config.Config, tr tools.ToolRe
 		logger.Warn("assemble_custom_tools_skip_untrusted", "reason", "project not trusted")
 		return
 	}
+	var projectBinding tools.ProjectTrustBinding
+	if projectOverlay := rc.ProjectOverlayForVerifiedSources(); projectOverlay != nil && len(projectOverlay.Tools.CustomTools) > 0 {
+		verified := rc.VerifiedProjectSources()
+		if verified == nil || !reflect.DeepEqual(projectOverlay.Tools.CustomTools, rc.Tools.CustomTools) {
+			logger.Warn("assemble_custom_tools_skip_unknown_provenance", "reason", "merged definitions no longer match the verified project overlay")
+			return
+		}
+		projectBinding = verified
+	}
 
 	existing, err := tr.List(ctx)
 	if err != nil {
@@ -2605,7 +2653,19 @@ func registerCustomTools(ctx context.Context, rc *config.Config, tr tools.ToolRe
 		if cfg.Timeout > 0 {
 			timeout = time.Duration(cfg.Timeout) * time.Second
 		}
-		if regErr := tr.Register(ctx, tools.NewCustomCommandTool(cfg.Name, cfg.Description, cfg.Command, cfg.Args, cfg.Env, timeout, cfg.WorkingDir)); regErr != nil {
+		definition := tools.NewCustomCommandTool(cfg.Name, cfg.Description, cfg.Command, cfg.Args, cfg.Env, timeout, cfg.WorkingDir)
+		var regErr error
+		if projectBinding != nil {
+			registrar, ok := tr.(tools.ProjectSourcedToolRegistrar)
+			if !ok {
+				regErr = tools.ErrProjectSourcedRegistrationUnavailable
+			} else {
+				regErr = registrar.RegisterProjectSourced(ctx, definition, projectBinding)
+			}
+		} else {
+			regErr = tr.Register(ctx, definition)
+		}
+		if regErr != nil {
 			logger.Warn("assemble_custom_tool_register_failed", "name", cfg.Name, "err", regErr)
 			continue
 		}

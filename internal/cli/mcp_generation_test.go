@@ -31,11 +31,12 @@ type mcpGenerationPeer struct {
 	callStarted chan struct{}
 	callRelease chan struct{}
 
-	listOnce sync.Once
-	callOnce sync.Once
-	requests atomic.Int32
-	lists    atomic.Int32
-	calls    atomic.Int32
+	listOnce    sync.Once
+	callOnce    sync.Once
+	requests    atomic.Int32
+	lists       atomic.Int32
+	calls       atomic.Int32
+	disconnects atomic.Int32
 }
 
 func newMCPGenerationPeer(
@@ -111,6 +112,16 @@ func newMCPGenerationPeer(
 		}
 	})
 	peer.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodDelete {
+			if r.Header.Get("Mcp-Session-Id") != "generation-session" {
+				http.Error(w, "missing session id", http.StatusBadRequest)
+				return
+			}
+			peer.disconnects.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		w.Header().Set("Mcp-Session-Id", "generation-session")
 		peer.requests.Add(1)
 		handshake(w, r)
 	}))
@@ -234,49 +245,6 @@ func awaitMCPGenerationAttempt(t *testing.T, owner *assemblyMCPResources, after 
 	return attempt
 }
 
-func awaitMCPGenerationPublication(
-	t *testing.T,
-	owner *assemblyMCPResources,
-	registry tools.ToolRegistry,
-	after time.Time,
-	wantNames []string,
-) mcp.MCPConfigReloadAttempt {
-	t.Helper()
-	var reloader *mcp.DefaultHotReloader
-	owner.mu.Lock()
-	for _, candidate := range owner.reloaders {
-		if current, ok := candidate.(*mcp.DefaultHotReloader); ok {
-			reloader = current
-			break
-		}
-	}
-	owner.mu.Unlock()
-	require.NotNil(t, reloader, "assembly must own a config generation watcher")
-	var attempt mcp.MCPConfigReloadAttempt
-	var visible []string
-	completed := assert.Eventually(t, func() bool {
-		var hasAttempt bool
-		attempt, hasAttempt = reloader.LastAttempt()
-		if !hasAttempt || !attempt.CompletedAt.After(after) || attempt.ErrorClass != "" {
-			return false
-		}
-		visible = visibleMCPGenerationNames(t, registry)
-		if len(visible) != len(wantNames) {
-			return false
-		}
-		for index := range wantNames {
-			if visible[index] != wantNames[index] {
-				return false
-			}
-		}
-		return true
-	}, 5*time.Second, 5*time.Millisecond)
-	if !completed {
-		t.Fatalf("MCP generation was not published: latest attempt=%+v visible names=%v, want=%v", attempt, visible, wantNames)
-	}
-	return attempt
-}
-
 func triggerMCPGenerationReload(t *testing.T, owner *assemblyMCPResources) {
 	t.Helper()
 	count, err := owner.Reload(context.Background())
@@ -284,7 +252,7 @@ func triggerMCPGenerationReload(t *testing.T, owner *assemblyMCPResources) {
 	require.Equal(t, 1, count)
 }
 
-func TestMCPGenerationReplacementRetainsOnFailureAndJoinsPreparedCalls(t *testing.T) {
+func TestMCPGenerationCandidateFailureRetainsAndReplacementJoinsPreparedCalls(t *testing.T) {
 	oldPeer := newMCPGenerationPeer(t, []string{"old_search", "old_read"}, "old-generation-result", false, false, true)
 	badPeer := newMCPGenerationPeer(t, []string{"invalid_schema"}, "unused", true, false, false)
 	newPeer := newMCPGenerationPeer(t, []string{"new_search", "new_read"}, "new-generation-result", false, true, false)
@@ -316,11 +284,16 @@ func TestMCPGenerationReplacementRetainsOnFailureAndJoinsPreparedCalls(t *testin
 	staleRead, err := oldRegistry.PrepareToolCall(context.Background(), tools.ToolCall{ID: "old-read-call", Name: oldNames[0], Args: map[string]any{}})
 	require.NoError(t, err)
 
-	writeMCPGenerationProjectSource(t, root, sourcePath, badPeer.server.URL)
-	triggerMCPGenerationReload(t, owner)
-	failedAttempt := awaitMCPGenerationAttempt(t, owner, time.Time{})
-	assert.NotEmpty(t, failedAttempt.ErrorClass, "a trusted malformed candidate must be observable as a failed generation attempt")
+	source, err := selectMCPServerSource(context.Background(), cfg, manager)
+	require.NoError(t, err)
+	require.NotNil(t, source)
+	badCandidateErr := replaceMCPSourceGeneration(context.Background(), source, []config.MCPServerConfig{{Name: "generation-server", URL: badPeer.server.URL}}, deferred, owner)
+	require.Error(t, badCandidateErr, "a malformed candidate must be rejected without replacing the current source generation")
 	assert.Equal(t, oldNames, visibleMCPGenerationNames(t, deferred), "candidate schema failure must retain the published generation")
+	owner.mu.Lock()
+	assert.Empty(t, owner.staged, "a rejected candidate must be removed from owner staging")
+	owner.mu.Unlock()
+	assert.Eventually(t, func() bool { return badPeer.disconnects.Load() > 0 }, 2*time.Second, 5*time.Millisecond, "the rejected candidate client must be disconnected")
 
 	oldGeneration := owner.sources[mcpServerSourceIDProjectFile].current
 	require.NotNil(t, oldGeneration)
@@ -344,8 +317,10 @@ func TestMCPGenerationReplacementRetainsOnFailureAndJoinsPreparedCalls(t *testin
 		t.Fatal("prepared call did not reach the old MCP peer")
 	}
 
-	writeMCPGenerationProjectSource(t, root, sourcePath, newPeer.server.URL)
-	triggerMCPGenerationReload(t, owner)
+	replacementDone := make(chan error, 1)
+	go func() {
+		replacementDone <- replaceMCPSourceGeneration(context.Background(), source, []config.MCPServerConfig{{Name: "generation-server", URL: newPeer.server.URL}}, deferred, owner)
+	}()
 	select {
 	case <-newPeer.listStarted:
 	case <-time.After(2 * time.Second):
@@ -354,8 +329,8 @@ func TestMCPGenerationReplacementRetainsOnFailureAndJoinsPreparedCalls(t *testin
 	assert.Equal(t, oldNames, visibleMCPGenerationNames(t, deferred), "the old complete generation stays visible while the replacement is staged")
 	newPeer.release()
 	newNames := []string{"mcp__generation-server__new_read", "mcp__generation-server__new_search"}
-	successAttempt := awaitMCPGenerationPublication(t, owner, deferred, failedAttempt.CompletedAt, newNames)
-	assert.Empty(t, successAttempt.ErrorClass)
+	require.NoError(t, <-replacementDone)
+	assert.Equal(t, newNames, visibleMCPGenerationNames(t, deferred))
 	newGeneration := owner.sources[mcpServerSourceIDProjectFile].current
 	require.NotNil(t, newGeneration)
 	if oldGeneration.clients[0] == newGeneration.clients[0] {
@@ -444,13 +419,14 @@ func TestMCPGenerationTrustRevocationDisablesOnlyThatSource(t *testing.T) {
 	require.NotNil(t, oldGeneration)
 
 	require.NoError(t, manager.RevokeTrust(context.Background(), root))
+	_, staleErr := stale.Dispatch(context.Background())
+	require.Error(t, staleErr, "the old MCP registration must reject immediately after revoke, before the source poll")
+	assert.EqualValues(t, 1, peer.calls.Load(), "the stale call must not reach the MCP peer before watcher cleanup")
 	triggerMCPGenerationReload(t, owner)
 	attempt := awaitMCPGenerationAttempt(t, owner, time.Time{})
 	assert.NotEmpty(t, attempt.ErrorClass)
 	assert.Equal(t, []string{globalName}, visibleMCPGenerationNames(t, deferred), "revoked project MCP source must be disabled without affecting another source")
 
-	_, staleErr := stale.Dispatch(context.Background())
-	require.Error(t, staleErr, "prepared project call must be stale after source revocation")
 	assert.EqualValues(t, 1, peer.calls.Load(), "revoked stale call must not execute a second remote request")
 	retired := oldGeneration.leases[0].Retire()
 	select {
@@ -500,6 +476,127 @@ func TestMCPAssemblyRevalidatesStaleProjectCapabilityBeforeConnecting(t *testing
 	assert.Zero(t, peer.requests.Load(), "an invocation carrying a stale project capability must not connect to the revoked MCP source")
 }
 
+func TestExistingProjectMCPWatcherCannotAdoptRegrantedGeneration(t *testing.T) {
+	for _, pollDuringTombstone := range []bool{false, true} {
+		name := "regrant before first poll"
+		if pollDuringTombstone {
+			name = "poll during tombstone"
+		}
+		t.Run(name, func(t *testing.T) {
+			ctx := context.Background()
+			peer := newMCPGenerationPeer(t, []string{"project_tool"}, "project-result", false, false, false)
+			root, sourcePath, manager, _ := setupMCPGenerationProject(t, []byte(`{"servers":[]}`))
+			writeMCPGenerationProjectSource(t, root, sourcePath, peer.server.URL)
+			cfg, err := config.LoadTrustedWithManager(ctx, manager)
+			require.NoError(t, err)
+			deferred := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
+			owner := &assemblyMCPResources{}
+			require.NoError(t, registerMCPToolsOwned(ctx, cfg, deferred, owner))
+			t.Cleanup(func() {
+				owner.requestStopReloaders()
+				assert.NoError(t, owner.waitReloaders(context.Background()))
+				assert.NoError(t, owner.closeClients(context.Background()))
+			})
+
+			toolName := "mcp__generation-server__project_tool"
+			preparedRegistry := newMCPGenerationPreparedRegistry(t, deferred)
+			stale, err := preparedRegistry.PrepareToolCall(ctx, tools.ToolCall{ID: "stale-after-regrant", Name: toolName, Args: map[string]any{}})
+			require.NoError(t, err)
+
+			require.NoError(t, manager.RevokeTrust(ctx, root))
+			after := time.Time{}
+			if pollDuringTombstone {
+				triggerMCPGenerationReload(t, owner)
+				attempt := awaitMCPGenerationAttempt(t, owner, time.Time{})
+				require.NotEmpty(t, attempt.ErrorClass)
+				after = attempt.CompletedAt
+			}
+			trustMCPGenerationProjectSnapshot(t, root, manager)
+			triggerMCPGenerationReload(t, owner)
+			attempt := awaitMCPGenerationAttempt(t, owner, after)
+			require.NotEmpty(t, attempt.ErrorClass, "the initial generation mismatch must disable the source")
+			assert.Empty(t, visibleMCPGenerationNames(t, deferred), "the original assembly cannot publish under the regrant generation")
+			_, err = stale.Dispatch(ctx)
+			require.Error(t, err, "the old prepared permit remains fenced after same-manifest regrant")
+			assert.Zero(t, peer.calls.Load(), "neither old nor later registrations may call the peer after the watcher is disabled")
+			triggerMCPGenerationReload(t, owner)
+			attempt = awaitMCPGenerationAttempt(t, owner, attempt.CompletedAt)
+			require.NotEmpty(t, attempt.ErrorClass, "a later poll must leave the source permanently disabled")
+			assert.Empty(t, visibleMCPGenerationNames(t, deferred), "subsequent polls cannot adopt the new generation")
+			assert.Zero(t, peer.calls.Load())
+
+			freshConfig, err := config.LoadTrustedWithManager(ctx, manager)
+			require.NoError(t, err)
+			freshDeferred := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
+			freshOwner := &assemblyMCPResources{}
+			require.NoError(t, registerMCPToolsOwned(ctx, freshConfig, freshDeferred, freshOwner))
+			t.Cleanup(func() {
+				freshOwner.requestStopReloaders()
+				assert.NoError(t, freshOwner.waitReloaders(context.Background()))
+				assert.NoError(t, freshOwner.closeClients(context.Background()))
+			})
+			assert.Equal(t, []string{toolName}, visibleMCPGenerationNames(t, freshDeferred), "a fresh assembly may consume the regrant")
+			freshRegistry := newMCPGenerationPreparedRegistry(t, freshDeferred)
+			invocation, err := freshRegistry.PrepareToolCall(ctx, tools.ToolCall{ID: "fresh-generation", Name: toolName, Args: map[string]any{}})
+			require.NoError(t, err)
+			_, err = invocation.Dispatch(ctx)
+			require.NoError(t, err)
+			assert.EqualValues(t, 1, peer.calls.Load())
+		})
+	}
+}
+
+func TestProjectMCPWatcherCreatedUntrustedCannotAdoptLaterGrant(t *testing.T) {
+	ctx := context.Background()
+	peer := newMCPGenerationPeer(t, []string{"project_tool"}, "project-result", false, false, false)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	root := t.TempDir()
+	t.Chdir(root)
+	path := filepath.Join(root, ".go-cli", "mcp.json")
+	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0o700))
+	data, err := json.Marshal(map[string]any{"servers": []map[string]string{{"name": "generation-server", "url": peer.server.URL}}})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, data, 0o600))
+	manager := canonicalMCPTestTrustManager{DefaultTrustManager: approval.NewDefaultTrustManager(approval.NewInMemoryTrustStore()).(*approval.DefaultTrustManager)}
+	initialConfig, err := config.LoadTrustedWithManager(ctx, manager)
+	require.NoError(t, err)
+	require.Nil(t, initialConfig.VerifiedProjectSources())
+	deferred := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
+	owner := &assemblyMCPResources{}
+	require.NoError(t, registerMCPToolsOwned(ctx, initialConfig, deferred, owner))
+	t.Cleanup(func() {
+		owner.requestStopReloaders()
+		assert.NoError(t, owner.waitReloaders(context.Background()))
+		assert.NoError(t, owner.closeClients(context.Background()))
+	})
+	assert.Empty(t, visibleMCPGenerationNames(t, deferred))
+	assert.Zero(t, peer.requests.Load(), "an initially untrusted watcher must not connect")
+
+	trustMCPGenerationProjectSnapshot(t, root, manager)
+	triggerMCPGenerationReload(t, owner)
+	assert.Empty(t, visibleMCPGenerationNames(t, deferred), "a later grant cannot fill a binding that was unavailable at assembly")
+	assert.Zero(t, peer.requests.Load(), "the untrusted assembly must remain unable to connect after grant")
+
+	freshConfig, err := config.LoadTrustedWithManager(ctx, manager)
+	require.NoError(t, err)
+	freshDeferred := tools.NewDeferredToolRegistryAdapter(tools.NewDefaultToolRegistry())
+	freshOwner := &assemblyMCPResources{}
+	require.NoError(t, registerMCPToolsOwned(ctx, freshConfig, freshDeferred, freshOwner))
+	t.Cleanup(func() {
+		freshOwner.requestStopReloaders()
+		assert.NoError(t, freshOwner.waitReloaders(context.Background()))
+		assert.NoError(t, freshOwner.closeClients(context.Background()))
+	})
+	toolName := "mcp__generation-server__project_tool"
+	assert.Equal(t, []string{toolName}, visibleMCPGenerationNames(t, freshDeferred))
+	invocation, err := newMCPGenerationPreparedRegistry(t, freshDeferred).PrepareToolCall(ctx, tools.ToolCall{ID: "fresh", Name: toolName, Args: map[string]any{}})
+	require.NoError(t, err)
+	_, err = invocation.Dispatch(ctx)
+	require.NoError(t, err)
+	assert.EqualValues(t, 1, peer.calls.Load())
+}
+
 func TestDoctorMCPCheckerUsesFreshVerifiedProjectSource(t *testing.T) {
 	peer := newMCPGenerationPeer(t, []string{"doctor_tool"}, "doctor-result", false, false, false)
 	root, sourcePath, manager, cfg := setupMCPGenerationProject(t, []byte(`{"servers":[]}`))
@@ -541,11 +638,9 @@ func TestDoctorCommandUsesInvocationTrustManagerForProjectMCP(t *testing.T) {
 	assert.EqualValues(t, 1, peer.lists.Load(), "doctor must probe project MCP using the invocation's loaded manager")
 }
 
-func TestMCPGenerationEmptyProjectSourceRemovesToolsWithoutGlobalFallback(t *testing.T) {
-	projectPeer := newMCPGenerationPeer(t, []string{"project_tool"}, "project-result", false, false, false)
+func TestMCPGenerationInitialEmptyProjectSourceShadowsGlobalWithoutFallback(t *testing.T) {
 	globalPeer := newMCPGenerationPeer(t, []string{"global_tool"}, "global-result", false, false, false)
-	root, sourcePath, manager, _ := setupMCPGenerationProject(t, []byte(`{"servers":[]}`))
-	writeMCPGenerationProjectSource(t, root, sourcePath, projectPeer.server.URL)
+	_, sourcePath, manager, _ := setupMCPGenerationProject(t, []byte(`{"servers":[]}`))
 	writeGlobalMCPTestFile(t, `{"servers":[{"name":"global","url":"`+globalPeer.server.URL+`"}]}`)
 	cfg, err := config.LoadTrustedWithManager(context.Background(), manager)
 	require.NoError(t, err)
@@ -557,23 +652,14 @@ func TestMCPGenerationEmptyProjectSourceRemovesToolsWithoutGlobalFallback(t *tes
 		assert.NoError(t, owner.waitReloaders(context.Background()))
 		assert.NoError(t, owner.closeClients(context.Background()))
 	})
-	assert.Equal(t, []string{"mcp__generation-server__project_tool"}, visibleMCPGenerationNames(t, deferred))
-	assert.Zero(t, globalPeer.requests.Load(), "the lower-priority user-global file must not connect while a project source is selected")
-
-	// Replace it with an explicit, valid empty set and approve those exact bytes.
-	require.NoError(t, os.WriteFile(sourcePath, []byte(`{"servers":[]}`), 0o600))
-	trustMCPGenerationProjectSnapshot(t, root, manager)
-	triggerMCPGenerationReload(t, owner)
-	emptyAttempt := awaitMCPGenerationAttempt(t, owner, time.Time{})
-	assert.Empty(t, emptyAttempt.ErrorClass)
-	assert.Empty(t, visibleMCPGenerationNames(t, deferred), "an explicitly empty higher-priority source removes its old generation")
+	assert.Empty(t, visibleMCPGenerationNames(t, deferred), "an initially empty higher-priority project source stays selected")
 	assert.Zero(t, globalPeer.requests.Load(), "an empty selected project source does not fall through to a global file")
 
 	// A deletion that no longer matches the persisted source manifest is
 	// fail-closed and must continue to shadow the lower-priority file.
 	require.NoError(t, os.Remove(sourcePath))
 	triggerMCPGenerationReload(t, owner)
-	deletedAttempt := awaitMCPGenerationAttempt(t, owner, emptyAttempt.CompletedAt)
+	deletedAttempt := awaitMCPGenerationAttempt(t, owner, time.Time{})
 	assert.NotEmpty(t, deletedAttempt.ErrorClass)
 	assert.Empty(t, visibleMCPGenerationNames(t, deferred))
 	assert.Zero(t, globalPeer.requests.Load(), "deleting the selected project source must not reveal or execute a lower-priority source")
@@ -615,9 +701,12 @@ func TestMCPGenerationCloseFencePreventsStagedCandidatePublication(t *testing.T)
 	})
 	oldNames := []string{"mcp__generation-server__old_tool"}
 	assert.Equal(t, oldNames, visibleMCPGenerationNames(t, deferred))
-
-	writeMCPGenerationProjectSource(t, root, sourcePath, newPeer.server.URL)
-	triggerMCPGenerationReload(t, owner)
+	source, err := selectMCPServerSource(context.Background(), cfg, manager)
+	require.NoError(t, err)
+	replacementDone := make(chan error, 1)
+	go func() {
+		replacementDone <- replaceMCPSourceGeneration(context.Background(), source, []config.MCPServerConfig{{Name: "generation-server", URL: newPeer.server.URL}}, deferred, owner)
+	}()
 	select {
 	case <-newPeer.listStarted:
 	case <-time.After(2 * time.Second):
@@ -626,11 +715,12 @@ func TestMCPGenerationCloseFencePreventsStagedCandidatePublication(t *testing.T)
 
 	owner.requestStopReloaders()
 	newPeer.release()
-	_ = awaitMCPGenerationAttempt(t, owner, time.Time{})
+	require.Error(t, <-replacementDone, "a staged candidate must not publish after the owner closes")
 	require.NoError(t, owner.waitReloaders(context.Background()))
 	require.NoError(t, owner.closeClients(context.Background()))
 	assert.Equal(t, oldNames, visibleMCPGenerationNames(t, deferred), "the close admission fence prevents an in-flight candidate from publishing")
 	assert.NotContains(t, visibleMCPGenerationNames(t, deferred), "mcp__generation-server__new_tool")
+	assert.Eventually(t, func() bool { return newPeer.disconnects.Load() > 0 }, 2*time.Second, 5*time.Millisecond, "the rejected staged candidate client must be disconnected")
 }
 
 type mcpGenerationTestExecutor struct{}

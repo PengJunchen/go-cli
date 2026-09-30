@@ -19,6 +19,15 @@ type errTrustStore struct {
 	saveErr   error
 }
 
+type transactionalErrTrustStore struct {
+	*errTrustStore
+	updateErr error
+}
+
+func (s *transactionalErrTrustStore) Update(context.Context, func(map[string]TrustEntry) (bool, error)) error {
+	return s.updateErr
+}
+
 func (s *errTrustStore) Load() (map[string]TrustEntry, error) {
 	return nil, s.loadErr
 }
@@ -75,7 +84,10 @@ func TestIsTrusted_StoreLoadError(t *testing.T) {
 
 func TestTrustProject_StoreAddError(t *testing.T) {
 	addErr := errors.New("write failed")
-	tm := NewDefaultTrustManager(&errTrustStore{addErr: addErr})
+	tm := NewDefaultTrustManager(&transactionalErrTrustStore{
+		errTrustStore: &errTrustStore{addErr: addErr},
+		updateErr:     addErr,
+	})
 	err := tm.TrustProject(context.Background(), "/repo/a")
 	require.Error(t, err)
 	assert.Equal(t, addErr, err)
@@ -83,7 +95,10 @@ func TestTrustProject_StoreAddError(t *testing.T) {
 
 func TestRevokeTrust_StoreRemoveError(t *testing.T) {
 	removeErr := errors.New("remove failed")
-	tm := NewDefaultTrustManager(&errTrustStore{removeErr: removeErr})
+	tm := NewDefaultTrustManager(&transactionalErrTrustStore{
+		errTrustStore: &errTrustStore{removeErr: removeErr},
+		updateErr:     removeErr,
+	})
 	err := tm.RevokeTrust(context.Background(), "/repo/a")
 	require.Error(t, err)
 	assert.Equal(t, removeErr, err)
@@ -210,22 +225,23 @@ func TestFileTrustStoreLoadRequiresPrivateFileAndParent(t *testing.T) {
 	})
 }
 
-func TestFileTrustStoreSaveReplacesWideFilePrivately(t *testing.T) {
+func TestFileTrustStoreSaveRejectsWideFileAndPreservesContents(t *testing.T) {
 	dir := t.TempDir()
 	require.NoError(t, os.Chmod(dir, 0o700))
 	path := filepath.Join(dir, "trust.json")
-	require.NoError(t, os.WriteFile(path, []byte(`{"old":{}}`), 0o644))
+	original := []byte(`{"old":{}}`)
+	require.NoError(t, os.WriteFile(path, original, 0o644))
 	require.NoError(t, os.Chmod(path, 0o644))
 
 	entries := map[string]TrustEntry{"/workspace": {Path: "/workspace", TrustedAt: "2026-09-25T00:00:00Z"}}
-	require.NoError(t, NewFileTrustStore(path).Save(entries))
+	require.Error(t, NewFileTrustStore(path).Save(entries), "transactional replacement must not consume an insecure prior snapshot")
 
 	info, err := os.Stat(path)
 	require.NoError(t, err)
-	assert.Equal(t, os.FileMode(0o600), info.Mode().Perm())
-	got, err := NewFileTrustStore(path).Load()
+	assert.Equal(t, os.FileMode(0o644), info.Mode().Perm(), "failed replacement must not repair or reinterpret the existing file")
+	got, err := os.ReadFile(path)
 	require.NoError(t, err)
-	assert.Equal(t, entries, got)
+	assert.Equal(t, original, got)
 }
 
 func TestFileTrustStoreSaveRejectsAccessibleParentAndPreservesOldFile(t *testing.T) {

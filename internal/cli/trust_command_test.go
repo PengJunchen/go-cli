@@ -154,7 +154,10 @@ func TestTrustCommandRevokeRequiresCanonicalAbsoluteRootButNotTTY(t *testing.T) 
 		LoadTrustEntries() (map[string]approval.TrustEntry, error)
 	}).LoadTrustEntries()
 	require.NoError(t, err)
-	assert.NotContains(t, entries, canonicalRoot)
+	revoked, ok := entries[canonicalRoot]
+	require.True(t, ok, "revoke persists a tombstone so a later grant cannot reuse the previous epoch")
+	assert.True(t, revoked.Revoked)
+	assert.Greater(t, revoked.TrustGeneration, uint64(0))
 
 	err = command.Run(context.Background(), cfg, []string{"revoke", "relative/path"})
 	require.Error(t, err)

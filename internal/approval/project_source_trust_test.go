@@ -151,6 +151,7 @@ func TestProjectSourceTrustRejectsLegacyExpiredAndCanceledChecks(t *testing.T) {
 	require.NoError(t, err)
 	entry := entries[canonical]
 	entry.ExpiresAt = time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)
+	entry.TrustGeneration++
 	require.NoError(t, store.Add(canonical, entry))
 	_, err = frozen.CheckProjectSourceSnapshot(context.Background(), snapshot)
 	require.ErrorIs(t, err, ErrProjectSourceExpired)

@@ -680,6 +680,7 @@ type preparedInvocationConfig struct {
 	generations             DispatchFenceSnapshot
 	identity                TrustedToolIdentity
 	effects                 TrustedEffectSet
+	projectTrustBinding     ProjectTrustBinding
 	dispatchLease           PreparedDispatchLease
 	canonicalWorkspaceRoot  string
 	workspaceReadWhitelist  []string
@@ -698,6 +699,7 @@ type preparedInvocation struct {
 	generations             DispatchFenceSnapshot
 	identity                TrustedToolIdentity
 	effects                 TrustedEffectSet
+	projectTrustBinding     ProjectTrustBinding
 	dispatchLease           PreparedDispatchLease
 	canonicalWorkspaceRoot  string
 	workspaceReadWhitelist  []string
@@ -725,6 +727,7 @@ func newPreparedInvocation(config preparedInvocationConfig) *preparedInvocation 
 		generations:             config.generations,
 		identity:                config.identity,
 		effects:                 newTrustedEffectSet(config.effects.Values()...),
+		projectTrustBinding:     config.projectTrustBinding,
 		dispatchLease:           config.dispatchLease,
 		canonicalWorkspaceRoot:  config.canonicalWorkspaceRoot,
 		workspaceReadWhitelist:  append([]string(nil), config.workspaceReadWhitelist...),
@@ -1030,20 +1033,23 @@ func (p *preparedInvocation) commit(ctx context.Context) error {
 	if p == nil || p.fence == nil {
 		return ErrDispatchFenceUnavailable
 	}
-	var contextErr error
-	err := p.fence.commit(p.generations, func() {
-		contextErr = ctx.Err()
-		if contextErr == nil {
-			p.committed.Store(true)
+	mark := func() error {
+		var contextErr error
+		err := p.fence.commit(p.generations, func() {
+			contextErr = ctx.Err()
+			if contextErr == nil {
+				p.committed.Store(true)
+			}
+		})
+		if err != nil {
+			return err
 		}
-	})
-	if err != nil {
-		return err
-	}
-	if contextErr != nil {
 		return contextErr
 	}
-	return nil
+	if p.projectTrustBinding != nil {
+		return p.projectTrustBinding.CommitIfCurrent(ctx, mark)
+	}
+	return mark()
 }
 
 type preparedStreamingInvocation struct {

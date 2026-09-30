@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -14,6 +15,8 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/pengjunchen/go-cli/internal/approval"
+	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/mock"
 	"github.com/pengjunchen/go-cli/internal/session"
@@ -88,6 +91,45 @@ func (prepared *receiptGatedPreparedSession) DurableWriter() session.DurableSess
 type sessionCapturingToolPreparer struct {
 	*tools.MiddlewareToolRegistry
 	signals chan tools.PreparedCompletionSignal
+}
+
+type r6AskClassifier struct{}
+
+func (r6AskClassifier) Name() string { return "r6_run_commit_ask" }
+func (r6AskClassifier) Classify(context.Context, tools.ToolCall) approval.Classification {
+	return approval.Ask
+}
+
+type r6WaitingApprovalCallback struct {
+	entered chan<- struct{}
+	release <-chan struct{}
+}
+
+func (callback r6WaitingApprovalCallback) RequestApproval(ctx context.Context, _ string, _ map[string]any) (approval.ApprovalResult, error) {
+	select {
+	case callback.entered <- struct{}{}:
+	case <-ctx.Done():
+		return approval.ApprovalDeny, ctx.Err()
+	}
+	select {
+	case <-callback.release:
+		return approval.ApprovalAllow, nil
+	case <-ctx.Done():
+		return approval.ApprovalDeny, ctx.Err()
+	}
+}
+
+type r6RunCommitProjectTool struct {
+	calls atomic.Int32
+}
+
+func (*r6RunCommitProjectTool) Name() string { return "project_custom" }
+func (*r6RunCommitProjectTool) Description() string {
+	return "R6 project-bound durable receipt fixture"
+}
+func (tool *r6RunCommitProjectTool) Execute(context.Context, tools.ToolCall) (*tools.ToolResult, error) {
+	tool.calls.Add(1)
+	return &tools.ToolResult{Output: "must not run"}, nil
 }
 
 func newRunCommitStreamingRegistry(ctx context.Context, t *testing.T, policyCalls *atomic.Int32) *tools.MiddlewareToolRegistry {
@@ -166,6 +208,130 @@ func prepareRunCommitSession(t *testing.T, root, workspaceID, description string
 	}
 	require.NoError(t, err)
 	return index, prepared, sink
+}
+
+func TestRunCommitProjectRevocationDuringAskWritesOneNotDispatchedReceipt(t *testing.T) {
+	const (
+		storePathEnv = "GO_CLI_R6_RUN_COMMIT_TRUST_STORE"
+		rootPathEnv  = "GO_CLI_R6_RUN_COMMIT_TRUST_ROOT"
+	)
+	if storePath := os.Getenv(storePathEnv); storePath != "" {
+		manager := approval.NewDefaultTrustManager(approval.NewFileTrustStore(storePath))
+		if err := manager.RevokeTrust(context.Background(), os.Getenv(rootPathEnv)); err != nil {
+			_, _ = os.Stderr.WriteString(err.Error())
+			os.Exit(2)
+		}
+		os.Exit(0)
+	}
+
+	ctx := context.Background()
+	root := t.TempDir()
+	t.Setenv("HOME", root)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(root, "config"))
+	workspaceID := "workspace-v1-r6-revoke-during-ask"
+	workspace := filepath.Join(root, "workspace")
+	require.NoError(t, os.MkdirAll(workspace, 0o700))
+	projectConfig := filepath.Join(workspace, ".go-cli.yaml")
+	require.NoError(t, os.WriteFile(projectConfig, []byte("tools: {}\n"), 0o600))
+	trustPath := filepath.Join(root, "config", "go-cli", "trust.json")
+	manager := approval.NewDefaultTrustManager(approval.NewFileTrustStore(trustPath))
+	snapshot, err := config.CaptureProjectSources(ctx, workspace, nil)
+	require.NoError(t, err)
+	frozen, ok := manager.(approval.FrozenProjectSourceTrust)
+	require.True(t, ok)
+	require.NoError(t, frozen.TrustProjectSourceSnapshot(ctx, snapshot))
+	binding, err := frozen.CheckProjectSourceSnapshot(ctx, snapshot)
+	require.NoError(t, err)
+
+	base := tools.NewDefaultToolRegistry().(*tools.DefaultToolRegistry) //nolint:errcheck
+	target := &r6RunCommitProjectTool{}
+	require.NoError(t, base.RegisterProjectSourced(ctx, target, binding))
+	fence := base.DispatchFence()
+	entered := make(chan struct{}, 1)
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	releaseAsk := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(releaseAsk)
+	middleware := approval.NewApprovalMiddleware(r6AskClassifier{}, approval.NewInMemoryApprovalStore(),
+		approval.WithCallback(r6WaitingApprovalCallback{entered: entered, release: release}),
+		approval.WithDispatchFence(fence),
+		approval.WithPlanModeController(core.NewDefaultPlanModeController(fence)),
+	)
+	registry := tools.NewMiddlewareToolRegistry(base)
+	require.NoError(t, registry.SetPreparedToolPolicy(middleware.PreparedPolicy))
+	require.NoError(t, registry.SetPreparedToolStages(tools.PreparedToolStages{}))
+
+	_, prepared, sink := prepareRunCommitSession(t, root, workspaceID, "R6 revoke during Ask")
+	t.Cleanup(func() { _ = prepared.Close() })
+	model := mock.NewMockLLMServer(mock.NewConversationTemplate("r6-revoke-during-ask", "R6 revoke during Ask",
+		mock.ConversationTurn{AssistantToolCalls: []mock.ExpectedToolCall{{
+			ID: "project-call-1", Name: target.Name(), Args: map[string]any{"value": "x"},
+		}}},
+		mock.ConversationTurn{AssistantContent: "The project call was safely rejected."},
+	))
+	agent := core.NewAgentImpl("r6-revoke-during-ask", core.NewLoopAgent(core.WithLLM(model), core.WithTools(registry)))
+	harness := core.NewHarnessImpl(agent, core.WithHarnessEventBus(core.NewMemoryEventBus()))
+	stream, err := harness.Submit(core.WithRunCommit(ctx, sink, core.RunCommitBinding{
+		SessionID: prepared.View().SessionID, WorkspaceID: workspaceID,
+	}), "call the project tool")
+	require.NoError(t, err)
+	eventsDone := make(chan struct{})
+	go func() {
+		for range stream.Events() {
+		}
+		close(eventsDone)
+	}()
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		_, runErr := stream.Result()
+		t.Fatalf("project approval callback did not enter its blocked Ask phase: run error %v", runErr)
+	}
+
+	command := exec.Command(os.Args[0], "-test.run=^TestRunCommitProjectRevocationDuringAskWritesOneNotDispatchedReceipt$")
+	command.Env = append(os.Environ(), storePathEnv+"="+trustPath, rootPathEnv+"="+snapshot.CanonicalRoot())
+	if err := command.Start(); err != nil {
+		releaseAsk()
+		t.Fatal(err)
+	}
+	revokeDone := make(chan error, 1)
+	go func() { revokeDone <- command.Wait() }()
+	select {
+	case err := <-revokeDone:
+		require.NoError(t, err, "the subprocess revoke must finish before approval is released")
+	case <-time.After(5 * time.Second):
+		releaseAsk()
+		_ = <-revokeDone
+		t.Fatal("cross-process revoke blocked while the durable run awaited Ask")
+	}
+	releaseAsk()
+	<-eventsDone
+	_, runErr := stream.Result()
+	require.NoError(t, runErr)
+	require.Zero(t, target.calls.Load(), "the project executor must never start after revoke")
+	require.Equal(t, 2, model.CallCount(), "the run should persist a terminal result after the known pre-dispatch rejection")
+
+	state, err := prepared.Snapshot()
+	require.NoError(t, err)
+	var intents []session.SessionEntry
+	var receipts []session.SessionEntry
+	for _, row := range state.DurableEntries {
+		if row.Type != session.EntryTypeTool || row.ToolCallID != "project-call-1" {
+			continue
+		}
+		if row.ActionState == session.ActionStateIntent {
+			intents = append(intents, row)
+		}
+		if row.ReceiptOutcome != "" {
+			receipts = append(receipts, row)
+		}
+	}
+	require.Len(t, intents, 1, "the ActionID is reserved once before final dispatch")
+	require.Len(t, receipts, 1, "exactly one terminal receipt is persisted")
+	require.Equal(t, intents[0].ActionID, receipts[0].ActionID)
+	require.NotEmpty(t, receipts[0].ActionID)
+	require.Equal(t, core.DispatchStateNotDispatched, receipts[0].DispatchState)
+	require.Equal(t, core.ReceiptOutcomeError, receipts[0].ReceiptOutcome)
 }
 
 func TestRunCommitLoopStreamsPreparedBashAndReopensWithSessionSink(t *testing.T) {

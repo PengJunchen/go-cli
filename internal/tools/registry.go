@@ -41,6 +41,7 @@ var (
 	_ DispatchFenceProvider          = (*DefaultToolRegistry)(nil)
 	_ TrustedControlRegistrar        = (*DefaultToolRegistry)(nil)
 	_ TrustedNetworkReadRegistrar    = (*DefaultToolRegistry)(nil)
+	_ ProjectSourcedToolRegistrar    = (*DefaultToolRegistry)(nil)
 	_ trustedWorkspaceWriteRegistrar = (*DefaultToolRegistry)(nil)
 	_ registrationSnapshotProvider   = (*DefaultToolRegistry)(nil)
 	_ preparedToolPipelineProvider   = (*DefaultToolRegistry)(nil)

@@ -126,6 +126,80 @@ approved prompt
 	assert.Equal(t, config.ProjectSourceTrustChanged, current.ProjectSourceTrustStatus)
 }
 
+func TestProjectSkillToolStaysRevokedUntilFreshAssembly(t *testing.T) {
+	ctx := context.Background()
+	root := t.TempDir()
+	skillDir := filepath.Join(root, ".go-cli", "skills")
+	writeProjectSkill(t, filepath.Join(skillDir, "review", "SKILL.md"), projectSkillContent("project-review", "approved project instructions"))
+	writeProjectSkill(t, filepath.Join(root, ".go-cli.yaml"), "skill:\n  dir: .go-cli/skills\n")
+	t.Chdir(root)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	trustDir := filepath.Join(home, ".config", "go-cli")
+	require.NoError(t, os.MkdirAll(trustDir, 0o700))
+	trustPath := filepath.Join(trustDir, "trust.json")
+	manager := approval.NewDefaultTrustManager(approval.NewFileTrustStore(trustPath))
+	uncurated, err := config.LoadTrustedWithManager(ctx, manager)
+	require.NoError(t, err)
+	snapshot := uncurated.CapturedProjectSourcesForGrant()
+	require.NotNil(t, snapshot)
+	frozen, ok := manager.(approval.FrozenProjectSourceTrust)
+	require.True(t, ok)
+	require.NoError(t, frozen.TrustProjectSourceSnapshot(ctx, snapshot))
+	trusted, err := config.LoadTrustedWithManager(ctx, manager)
+	require.NoError(t, err)
+	require.NotNil(t, trusted.VerifiedProjectSources())
+
+	oldRegistry := newPreparedProjectSkillRegistry(ctx, t, trusted)
+	call := tools.ToolCall{ID: "skill-before-revoke", Name: "project-review"}
+	prepared, err := oldRegistry.PrepareToolCall(ctx, call)
+	require.NoError(t, err)
+	result, err := prepared.Dispatch(ctx)
+	require.NoError(t, err)
+	assert.Contains(t, result.Output, "approved project instructions")
+
+	stalePrepared, err := oldRegistry.PrepareToolCall(ctx, tools.ToolCall{ID: "skill-after-revoke", Name: "project-review"})
+	require.NoError(t, err)
+
+	revoker := approval.NewDefaultTrustManager(approval.NewFileTrustStore(trustPath))
+	require.NoError(t, revoker.RevokeTrust(ctx, snapshot.CanonicalRoot()))
+	_, err = stalePrepared.Dispatch(ctx)
+	require.Error(t, err, "the already assembled project skill must reject the revoked generation")
+	assert.False(t, stalePrepared.DispatchCommitted())
+
+	grantor := approval.NewDefaultTrustManager(approval.NewFileTrustStore(trustPath))
+	grant, ok := grantor.(approval.FrozenProjectSourceTrust)
+	require.True(t, ok)
+	require.NoError(t, grant.TrustProjectSourceSnapshot(ctx, snapshot))
+	freshConfig, err := config.LoadTrustedWithManager(ctx, grantor)
+	require.NoError(t, err)
+	require.NotNil(t, freshConfig.VerifiedProjectSources())
+	newRegistry := newPreparedProjectSkillRegistry(ctx, t, freshConfig)
+	newCall := tools.ToolCall{ID: "skill-after-new-grant", Name: "project-review"}
+	newInvocation, err := newRegistry.PrepareToolCall(ctx, newCall)
+	require.NoError(t, err)
+	newResult, err := newInvocation.Dispatch(ctx)
+	require.NoError(t, err, "a fresh assembly may bind the newly granted source generation")
+	assert.Contains(t, newResult.Output, "approved project instructions")
+
+	_, err = stalePrepared.Dispatch(ctx)
+	require.Error(t, err, "regranting must not repair the old skill adapter's generation")
+	assert.False(t, stalePrepared.DispatchCommitted())
+}
+
+func newPreparedProjectSkillRegistry(ctx context.Context, t *testing.T, cfg *config.Config) *tools.MiddlewareToolRegistry {
+	t.Helper()
+	base := tools.NewDefaultToolRegistry()
+	deferred := tools.NewDeferredToolRegistryAdapter(base)
+	registry := tools.NewMiddlewareToolRegistry(deferred)
+	require.NoError(t, registry.SetPreparedToolStages(tools.PreparedToolStages{}))
+	require.NoError(t, registry.SetPreparedToolPolicy(func(_ context.Context, request tools.PreparedPolicyRequest) (tools.PreparedPolicyDecision, error) {
+		return tools.PreparedPolicyDecision{Allowed: true, Generations: request.Generations}, nil
+	}))
+	require.Len(t, registerSkillTools(ctx, cfg, deferred), 1)
+	return registry
+}
+
 func TestRegisterSkillToolsRejectsProjectDirectorySwappedToUserRoot(t *testing.T) {
 	root := t.TempDir()
 	skillDir := filepath.Join(root, ".go-cli", "skills")

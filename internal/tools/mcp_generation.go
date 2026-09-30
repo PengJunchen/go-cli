@@ -104,12 +104,13 @@ func isNilPreparedDispatchLease(lease PreparedDispatchLease) bool {
 // generation. Its fields are private so callers cannot replace the frozen
 // metadata or omit its typed client-generation handle.
 type MCPToolCandidate struct {
-	name        string
-	remoteName  string
-	description string
-	schema      ToolSchemaSnapshot
-	client      MCPGenerationClientHandle
-	lease       PreparedDispatchLease
+	name                string
+	remoteName          string
+	description         string
+	schema              ToolSchemaSnapshot
+	client              MCPGenerationClientHandle
+	lease               PreparedDispatchLease
+	projectTrustBinding ProjectTrustBinding
 }
 
 // NewMCPToolCandidate snapshots one remote MCP tool's public descriptor and
@@ -143,6 +144,17 @@ func NewMCPToolCandidate(
 		client:      client,
 		lease:       lease,
 	}, nil
+}
+
+// WithProjectTrustBinding returns a copy bound to one verified project
+// generation. Candidates without this binding remain eligible only for
+// non-project MCP sources.
+func (candidate MCPToolCandidate) WithProjectTrustBinding(binding ProjectTrustBinding) (MCPToolCandidate, error) {
+	if !validProjectTrustBinding(binding) {
+		return MCPToolCandidate{}, ErrProjectTrustBindingInvalid
+	}
+	candidate.projectTrustBinding = binding
+	return candidate, nil
 }
 
 type mcpGenerationOwner struct {
@@ -352,6 +364,12 @@ func prepareMCPGenerationCandidate(candidate MCPToolCandidate) (mcpGenerationCan
 		hasParameters: true,
 		schema:        candidate.schema,
 	}
+	if candidate.projectTrustBinding != nil {
+		if !validProjectTrustBinding(candidate.projectTrustBinding) {
+			return mcpGenerationCandidate{}, ErrProjectTrustBindingInvalid
+		}
+		metadata.projectTrustBinding = candidate.projectTrustBinding
+	}
 	frozenDefinition := &frozenMCPGenerationDefinition{
 		name:        candidate.name,
 		description: candidate.description,
@@ -538,13 +556,22 @@ func removeRegistryName(order *[]string, name string) {
 }
 
 func (r *DefaultToolRegistry) registerDefaultToolGuarded(ctx context.Context, def ToolDefinition) error {
+	return r.registerDefaultToolGuardedWithBinding(ctx, def, nil)
+}
+
+func (r *DefaultToolRegistry) registerDefaultToolGuardedWithBinding(ctx context.Context, def ToolDefinition, binding ProjectTrustBinding) error {
 	metadata, fingerprint, err := prepareRegistrationMetadata(def, unknownTrustedEffects(), "")
 	if err != nil {
 		return err
 	}
+	metadata.projectTrustBinding = binding
 	name := def.Name()
 	if r == nil || r.fence == nil {
 		return ErrDispatchFenceUnavailable
+	}
+	source := RegistrationSourceToolRegistry
+	if binding != nil {
+		source = RegistrationSourceProjectSourced
 	}
 	_, err = r.fence.publishChecked(DispatchFenceRegistry, nil, func() error {
 		r.mu.Lock()
@@ -557,7 +584,7 @@ func (r *DefaultToolRegistry) registerDefaultToolGuarded(ctx context.Context, de
 		if previous, exists := r.metadata[name]; exists {
 			generation = previous.identity.RegistrationGeneration() + 1
 		}
-		metadata.identity = newTrustedToolIdentity(RegistrationSourceToolRegistry, name, generation, fingerprint, TrustedToolScope{})
+		metadata.identity = newTrustedToolIdentity(source, name, generation, fingerprint, TrustedToolScope{})
 		if _, exists := r.tools[name]; !exists {
 			r.order = append(r.order, name)
 		}

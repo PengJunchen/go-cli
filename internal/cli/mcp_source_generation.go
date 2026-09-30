@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	"gopkg.in/yaml.v3"
 
@@ -52,6 +53,54 @@ type mcpServerSource struct {
 	servers         []config.MCPServerConfig
 	initialErr      error
 	manager         approval.TrustManager
+	trustMu         sync.Mutex
+	trustLatched    bool
+	trustBinding    *approval.VerifiedProjectSources
+	trustDisabled   bool
+}
+
+func (s *mcpServerSource) projectTrustDisabledRevision() (string, bool) {
+	s.trustMu.Lock()
+	defer s.trustMu.Unlock()
+	if !s.trustLatched || s.trustBinding == nil || !s.trustBinding.Valid() {
+		s.trustLatched = true
+		s.trustDisabled = true
+	}
+	if !s.trustDisabled {
+		return "", false
+	}
+	return "trust-disabled:" + s.id + ":" + s.initialRevision, true
+}
+
+func (s *mcpServerSource) checkProjectTrustGeneration(current *approval.VerifiedProjectSources) (bool, string) {
+	s.trustMu.Lock()
+	defer s.trustMu.Unlock()
+	if !s.trustLatched {
+		s.trustLatched = true
+		s.trustBinding = nil
+	}
+	binding := s.trustBinding
+	if s.trustDisabled || binding == nil || !binding.Valid() || current == nil || !current.Valid() {
+		s.trustDisabled = true
+		return false, "trust-disabled:" + s.id + ":" + s.initialRevision
+	}
+	if binding.CanonicalRoot() != current.CanonicalRoot() || binding.TrustGeneration() != current.TrustGeneration() {
+		s.trustDisabled = true
+		return false, fmt.Sprintf("trust-disabled:%s:%s:%d", s.id, current.ManifestDigest(), current.TrustGeneration())
+	}
+	return true, ""
+}
+
+func (s *mcpServerSource) latchedProjectBinding() (*approval.VerifiedProjectSources, bool) {
+	if s == nil {
+		return nil, false
+	}
+	s.trustMu.Lock()
+	defer s.trustMu.Unlock()
+	if !s.trustLatched || s.trustDisabled || s.trustBinding == nil || !s.trustBinding.Valid() {
+		return nil, false
+	}
+	return s.trustBinding, true
 }
 
 func (s *mcpServerSource) reloadable() bool {
@@ -101,6 +150,8 @@ func selectMCPServerSource(ctx context.Context, rc *config.Config, manager appro
 				initialRevision: "verified:" + verified.ManifestDigest(),
 				servers:         cloneMCPServerConfigs(project.MCP.Servers),
 				manager:         manager,
+				trustLatched:    true,
+				trustBinding:    verified,
 			}, nil
 		}
 	}
@@ -132,6 +183,8 @@ func selectMCPServerSource(ctx context.Context, rc *config.Config, manager appro
 				initialRevision: "verified:" + verified.ManifestDigest(),
 				servers:         cloneMCPServerConfigs(project.MCP.Servers),
 				manager:         manager,
+				trustLatched:    true,
+				trustBinding:    verified,
 			}, nil
 		default:
 			return nil, errMCPSourceConfigUnknown
@@ -148,7 +201,7 @@ func selectMCPServerSource(ctx context.Context, rc *config.Config, manager appro
 
 	if verified := verifiedProjectSources(rc, projectRoot); verified != nil {
 		if data, present := verified.SourceBytes(config.ProjectMCPSourceID); present {
-			return newProjectMCPFileSource(projectRoot, "verified:"+verified.ManifestDigest(), data, manager), nil
+			return newProjectMCPFileSource(projectRoot, "verified:"+verified.ManifestDigest(), data, manager, verified), nil
 		}
 	}
 
@@ -171,6 +224,7 @@ func selectMCPServerSource(ctx context.Context, rc *config.Config, manager appro
 			initialRevision: revision,
 			initialErr:      errMCPSourceUnverified,
 			manager:         manager,
+			trustLatched:    true,
 		}
 		return source, nil
 	}
@@ -206,7 +260,7 @@ func selectMCPServerSource(ctx context.Context, rc *config.Config, manager appro
 	return source, nil
 }
 
-func newProjectMCPFileSource(root, revision string, data []byte, manager approval.TrustManager) *mcpServerSource {
+func newProjectMCPFileSource(root, revision string, data []byte, manager approval.TrustManager, binding *approval.VerifiedProjectSources) *mcpServerSource {
 	path := filepath.Join(root, ".go-cli", "mcp.json")
 	servers, err := parseMCPServerConfigBytes(data)
 	return &mcpServerSource{
@@ -218,6 +272,8 @@ func newProjectMCPFileSource(root, revision string, data []byte, manager approva
 		servers:         servers,
 		initialErr:      err,
 		manager:         manager,
+		trustLatched:    true,
+		trustBinding:    binding,
 	}
 }
 
@@ -232,6 +288,9 @@ func (s *mcpServerSource) loadCurrent(ctx context.Context) ([]config.MCPServerCo
 	case mcpServerSourceUserGlobalConfig:
 		return cloneMCPServerConfigs(s.servers), s.initialRevision, nil
 	case mcpServerSourceProjectConfig, mcpServerSourceProjectFile:
+		if revision, disabled := s.projectTrustDisabledRevision(); disabled {
+			return nil, revision, errMCPSourceUnverified
+		}
 		cfg, err := config.LoadTrustedWithManager(ctx, s.manager)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
@@ -241,9 +300,13 @@ func (s *mcpServerSource) loadCurrent(ctx context.Context) ([]config.MCPServerCo
 		}
 		verified := verifiedProjectSources(cfg, s.projectRoot)
 		if verified == nil {
-			return nil, currentUnverifiedProjectRevision(cfg, s.path), errMCPSourceUnverified
+			_, revision := s.checkProjectTrustGeneration(nil)
+			return nil, revision, errMCPSourceUnverified
 		}
 		revision := "verified:" + verified.ManifestDigest()
+		if accepted, disabledRevision := s.checkProjectTrustGeneration(verified); !accepted {
+			return nil, disabledRevision, errMCPSourceUnverified
+		}
 		if s.kind == mcpServerSourceProjectFile {
 			data, present := verified.SourceBytes(config.ProjectMCPSourceID)
 			if !present {
@@ -305,15 +368,6 @@ func (s *mcpServerSource) currentRevision(ctx context.Context) (string, error) {
 		return mcpProjectPathMetadataRevision(s.path), nil
 	}
 	return revision, nil
-}
-
-func currentUnverifiedProjectRevision(cfg *config.Config, path string) string {
-	if cfg != nil {
-		if snapshot := cfg.CapturedProjectSourcesForGrant(); snapshot != nil {
-			return "captured:" + snapshot.ManifestDigest()
-		}
-	}
-	return mcpProjectPathMetadataRevision(path)
 }
 
 func projectConfigPath(root string, records []approval.ProjectSourceRecord) string {
