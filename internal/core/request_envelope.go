@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math"
 	"reflect"
 
 	"github.com/pengjunchen/go-cli/internal/compaction"
@@ -517,11 +516,4 @@ func envelopeEstimateFits(estimate llm.RequestEnvelopeEstimate) bool {
 	}
 	total, ok = checkedTokenAdd(total, estimate.ProtocolFraming.Tokens)
 	return ok && total <= estimate.ProviderEnvelopeBudget
-}
-
-func validateEstimateCount(value int) error {
-	if value < 0 || math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
-		return errors.New("invalid estimate")
-	}
-	return nil
 }

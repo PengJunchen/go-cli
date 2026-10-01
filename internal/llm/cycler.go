@@ -180,13 +180,13 @@ func (c *ModelCycler) peekModel(sessionID string, taskType TaskType) (int, *mode
 		return 0, nil, err
 	}
 	resolved := c.resolvedModels
-	if index < 0 || index >= len(resolved) || resolved[index].CandidateHandle() == nil {
+	if index < 0 || index >= len(resolved) || resolved[index].candidate == nil {
 		return 0, nil, errors.New("llm: selected resolver candidate is unavailable")
 	}
 	return index, &modelCyclerSelectionLease{
 		cycler:         c,
 		revision:       c.selectionRevision,
-		candidateID:    resolved[index].CandidateHandle().CandidateID(),
+		candidateID:    resolved[index].candidate.id,
 		index:          index,
 		sessionID:      sessionID,
 		advanceCounter: advance,
@@ -283,7 +283,7 @@ func (l *modelCyclerSelectionLease) Commit() error {
 	c := l.cycler
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.selectionRevision != l.revision || l.index < 0 || l.index >= len(c.resolvedModels) || c.resolvedModels[l.index].CandidateHandle() == nil || c.resolvedModels[l.index].CandidateHandle().CandidateID() != l.candidateID {
+	if c.selectionRevision != l.revision || l.index < 0 || l.index >= len(c.resolvedModels) || c.resolvedModels[l.index].candidate == nil || c.resolvedModels[l.index].candidate.id != l.candidateID {
 		l.state.Store(2)
 		return ErrStaleSelectionLease
 	}

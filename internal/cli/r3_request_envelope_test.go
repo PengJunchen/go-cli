@@ -105,7 +105,7 @@ func newR3EnvelopeServer() *r3EnvelopeServer {
 	return result
 }
 
-func r3KnownCandidateModel(t *testing.T, ctx context.Context, endpoint string, inputLimit int) (llm.BaseChatModel, func()) {
+func r3KnownCandidateModel(ctx context.Context, t *testing.T, endpoint string, inputLimit int) (llm.BaseChatModel, func()) {
 	t.Helper()
 	const providerID = "r3-assembly-envelope"
 	const modelID = "assembly-envelope-model"
@@ -167,7 +167,7 @@ func runR3AssemblyEnvelopeCase(t *testing.T, inputLimit, toolSearchThreshold int
 	var model llm.BaseChatModel
 	var modelCleanup func()
 	if inputLimit > 0 {
-		model, modelCleanup = r3KnownCandidateModel(t, ctx, provider.server.URL, inputLimit)
+		model, modelCleanup = r3KnownCandidateModel(ctx, t, provider.server.URL, inputLimit)
 	} else {
 		model = assembly.Model
 	}
