@@ -4,6 +4,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -56,6 +58,61 @@ type SkillSourceLoader interface {
 	LoadSources(ctx context.Context, sources []SkillSourceFile) ([]*SkillDefinition, error)
 }
 
+// SkillLoadReporter is the optional per-call report capability for directory loads.
+type SkillLoadReporter interface {
+	LoadDirWithReport(ctx context.Context, dirPath string) (SkillLoadResult, error)
+}
+
+// SkillSourceLoadReporter is the optional per-call report capability for captured sources.
+type SkillSourceLoadReporter interface {
+	LoadSourcesWithReport(ctx context.Context, sources []SkillSourceFile) (SkillLoadResult, error)
+}
+
+// SkillLoadResult owns the definitions and report produced by one load call.
+type SkillLoadResult struct {
+	Definitions []*SkillDefinition
+	Report      SkillLoadReport
+}
+
+// SkillLoadReport summarizes successful definitions and skipped candidate files.
+type SkillLoadReport struct {
+	Summary     SkillLoadSummary
+	Diagnostics []SkillLoadDiagnostic
+}
+
+// SkillLoadSummary contains path-free counts for one load call.
+type SkillLoadSummary struct {
+	Loaded      int
+	Skipped     int
+	ErrorCounts []SkillLoadErrorCount
+}
+
+// SkillLoadErrorClass is a fixed, safe classification for a skipped skill file.
+type SkillLoadErrorClass string
+
+// SkillLoadErrorCount counts skipped files by fixed error class.
+type SkillLoadErrorCount struct {
+	Class SkillLoadErrorClass
+	Count int
+}
+
+// SkillLoadDiagnostic identifies one skipped file using a bounded relative label.
+type SkillLoadDiagnostic struct {
+	SourceID string
+	Class    SkillLoadErrorClass
+}
+
+const (
+	// SkillLoadErrorClassFrontmatter identifies frontmatter parse failures.
+	SkillLoadErrorClassFrontmatter SkillLoadErrorClass = "frontmatter"
+	// SkillLoadErrorClassParameterSchema identifies parameter_schema failures.
+	SkillLoadErrorClassParameterSchema SkillLoadErrorClass = "parameter_schema"
+	// SkillLoadErrorClassOther identifies other non-fatal file errors.
+	SkillLoadErrorClassOther SkillLoadErrorClass = "other"
+
+	maxSkillLoadDiagnosticBytes = 256
+)
+
 // SkillSourceFile holds captured skill bytes and their path relative to the
 // skill directory. It lets callers load a verified source set without
 // reopening mutable filesystem paths.
@@ -70,6 +127,8 @@ type YAMLSkillLoader struct{}
 // Compile-time assertion that YAMLSkillLoader satisfies SkillLoader.
 var _ SkillLoader = (*YAMLSkillLoader)(nil)
 var _ SkillSourceLoader = (*YAMLSkillLoader)(nil)
+var _ SkillLoadReporter = (*YAMLSkillLoader)(nil)
+var _ SkillSourceLoadReporter = (*YAMLSkillLoader)(nil)
 
 // NewYAMLSkillLoader returns a ready-to-use YAMLSkillLoader.
 func NewYAMLSkillLoader() SkillLoader { return &YAMLSkillLoader{} }
@@ -190,13 +249,23 @@ func (l *YAMLSkillLoader) loadFileWithOpener(ctx context.Context, path, absPath 
 // candidates, or exhausted resource limits fail the whole load without
 // returning definitions accumulated earlier in the walk.
 func (l *YAMLSkillLoader) LoadDir(ctx context.Context, dirPath string) ([]*SkillDefinition, error) {
+	result, err := l.LoadDirWithReport(ctx, dirPath)
+	if err != nil {
+		return nil, err
+	}
+	return result.Definitions, nil
+}
+
+// LoadDirWithReport scans a directory and returns a deterministic report for
+// skipped candidates.
+func (l *YAMLSkillLoader) LoadDirWithReport(ctx context.Context, dirPath string) (SkillLoadResult, error) {
 	span, spanCtx := tracing.SpanFromContext(ctx, "skill.load_dir", tracing.SpanKindInternal)
 	logger := tracing.NewTraceLogger(span, slog.Default())
 	defer span.End()
-	fail := func(err error) ([]*SkillDefinition, error) {
+	fail := func(err error) (SkillLoadResult, error) {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		span.SetStatus(tracing.SpanStatusError, err.Error())
-		return nil, err
+		return SkillLoadResult{}, err
 	}
 
 	if err := spanCtx.Err(); err != nil {
@@ -219,6 +288,8 @@ func (l *YAMLSkillLoader) LoadDir(ctx context.Context, dirPath string) ([]*Skill
 	var defs []*SkillDefinition
 	var candidateFiles int
 	var totalBytes int64
+	skipped := make(map[SkillLoadErrorClass]int)
+	diagnostics := make([]SkillLoadDiagnostic, 0)
 	err = walkSkillDirectory(spanCtx, rootHandle, root, func(path, relative string, d os.FileInfo, openCandidate func() (*os.File, error)) error {
 		if d.IsDir() {
 			if isSkillFileName(d.Name()) {
@@ -246,6 +317,8 @@ func (l *YAMLSkillLoader) LoadDir(ctx context.Context, dirPath string) ([]*Skill
 				return err
 			}
 			// Skip unparsable files rather than failing the whole directory.
+			class := classifySkillLoadError(err)
+			recordSkillLoadSkip(skipped, &diagnostics, relative, class)
 			logger.Warn("skill.load_dir.skipped", "path", path, "err", err)
 			return nil
 		}
@@ -262,7 +335,7 @@ func (l *YAMLSkillLoader) LoadDir(ctx context.Context, dirPath string) ([]*Skill
 	span.SetAttributes(tracing.Attribute{Key: "count", Value: len(defs)})
 	span.SetStatus(tracing.SpanStatusOK, "")
 	logger.Info("skill.load_dir", "dir", dirPath, "count", len(defs))
-	return defs, nil
+	return newSkillLoadResult(defs, skipped, diagnostics), nil
 }
 
 func walkSkillDirectory(ctx context.Context, root *os.Root, rootPath string, visit func(path, relative string, entry os.FileInfo, openCandidate func() (*os.File, error)) error) error {
@@ -446,6 +519,16 @@ func openRegularSkillFileAt(root *os.Root, relative string, expected os.FileInfo
 // consumed in the order supplied and are never reopened from disk. Malformed
 // skill files follow LoadDir's skip-with-warning behavior.
 func (l *YAMLSkillLoader) LoadSources(ctx context.Context, sources []SkillSourceFile) ([]*SkillDefinition, error) {
+	result, err := l.LoadSourcesWithReport(ctx, sources)
+	if err != nil {
+		return nil, err
+	}
+	return result.Definitions, nil
+}
+
+// LoadSourcesWithReport parses captured sources without reopening their paths
+// and reports skipped candidates.
+func (l *YAMLSkillLoader) LoadSourcesWithReport(ctx context.Context, sources []SkillSourceFile) (SkillLoadResult, error) {
 	span, spanCtx := tracing.SpanFromContext(ctx, "skill.load_sources", tracing.SpanKindInternal)
 	logger := tracing.NewTraceLogger(span, slog.Default())
 	defer span.End()
@@ -453,13 +536,13 @@ func (l *YAMLSkillLoader) LoadSources(ctx context.Context, sources []SkillSource
 	if err := spanCtx.Err(); err != nil {
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		span.SetStatus(tracing.SpanStatusError, err.Error())
-		return nil, err
+		return SkillLoadResult{}, err
 	}
 	if len(sources) > maxSkillCandidateFiles {
 		err := fmt.Errorf("%w: source set contains more than %d skill files", ErrSkillResourceLimit, maxSkillCandidateFiles)
 		span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 		span.SetStatus(tracing.SpanStatusError, err.Error())
-		return nil, err
+		return SkillLoadResult{}, err
 	}
 
 	normalizedSources := make([]SkillSourceFile, len(sources))
@@ -469,62 +552,66 @@ func (l *YAMLSkillLoader) LoadSources(ctx context.Context, sources []SkillSource
 		if err := spanCtx.Err(); err != nil {
 			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 			span.SetStatus(tracing.SpanStatusError, err.Error())
-			return nil, err
+			return SkillLoadResult{}, err
 		}
 		relativePath, err := validateSkillSourcePath(source.RelativePath)
 		if err != nil {
 			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 			span.SetStatus(tracing.SpanStatusError, err.Error())
-			return nil, err
+			return SkillLoadResult{}, err
 		}
 		if !isSkillFileName(filepath.Base(filepath.FromSlash(relativePath))) {
 			err := fmt.Errorf("%w: %q is not a skill file candidate", ErrSkillUnsafeSource, relativePath)
 			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 			span.SetStatus(tracing.SpanStatusError, err.Error())
-			return nil, err
+			return SkillLoadResult{}, err
 		}
 		if _, duplicate := seenPaths[relativePath]; duplicate {
 			err := fmt.Errorf("%w: duplicate skill source path %q", ErrSkillUnsafeSource, relativePath)
 			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 			span.SetStatus(tracing.SpanStatusError, err.Error())
-			return nil, err
+			return SkillLoadResult{}, err
 		}
 		seenPaths[relativePath] = struct{}{}
 		if int64(len(source.Content)) > maxSkillFileBytes {
 			err := fmt.Errorf("%w: source %q exceeds %d bytes", ErrSkillResourceLimit, relativePath, maxSkillFileBytes)
 			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 			span.SetStatus(tracing.SpanStatusError, err.Error())
-			return nil, err
+			return SkillLoadResult{}, err
 		}
 		totalBytes += int64(len(source.Content))
 		if totalBytes > maxSkillDirectoryBytes {
 			err := fmt.Errorf("%w: source set exceeds %d bytes", ErrSkillResourceLimit, maxSkillDirectoryBytes)
 			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 			span.SetStatus(tracing.SpanStatusError, err.Error())
-			return nil, err
+			return SkillLoadResult{}, err
 		}
 		normalizedSources[i] = SkillSourceFile{RelativePath: relativePath, Content: source.Content}
 	}
 
 	defs := make([]*SkillDefinition, 0, len(normalizedSources))
+	skipped := make(map[SkillLoadErrorClass]int)
+	diagnostics := make([]SkillLoadDiagnostic, 0)
 	for _, source := range normalizedSources {
 		if err := spanCtx.Err(); err != nil {
 			span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 			span.SetStatus(tracing.SpanStatusError, err.Error())
-			return nil, err
+			return SkillLoadResult{}, err
 		}
 		def, err := l.loadSource(spanCtx, source)
 		if err != nil {
 			if ctxErr := spanCtx.Err(); ctxErr != nil {
 				span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 				span.SetStatus(tracing.SpanStatusError, ctxErr.Error())
-				return nil, ctxErr
+				return SkillLoadResult{}, ctxErr
 			}
 			if isFatalSkillLoadError(err) {
 				span.SetAttributes(tracing.Attribute{Key: "success", Value: false})
 				span.SetStatus(tracing.SpanStatusError, err.Error())
-				return nil, err
+				return SkillLoadResult{}, err
 			}
+			class := classifySkillLoadError(err)
+			recordSkillLoadSkip(skipped, &diagnostics, source.RelativePath, class)
 			logger.Warn("skill.load_sources.skipped", "path", source.RelativePath, "err", err)
 			continue
 		}
@@ -537,7 +624,7 @@ func (l *YAMLSkillLoader) LoadSources(ctx context.Context, sources []SkillSource
 	)
 	span.SetStatus(tracing.SpanStatusOK, "")
 	logger.Info("skill.load_sources", "count", len(defs))
-	return defs, nil
+	return newSkillLoadResult(defs, skipped, diagnostics), nil
 }
 
 func (l *YAMLSkillLoader) loadSource(ctx context.Context, source SkillSourceFile) (*SkillDefinition, error) {
@@ -668,6 +755,90 @@ func isFatalSkillLoadError(err error) bool {
 		errors.Is(err, context.DeadlineExceeded) ||
 		errors.Is(err, ErrSkillResourceLimit) ||
 		errors.Is(err, ErrSkillUnsafeSource)
+}
+
+func classifySkillLoadError(err error) SkillLoadErrorClass {
+	if errors.Is(err, ErrSkillParameterSchemaInvalid) {
+		return SkillLoadErrorClassParameterSchema
+	}
+	if errors.Is(err, errParse) {
+		return SkillLoadErrorClassFrontmatter
+	}
+	return SkillLoadErrorClassOther
+}
+
+func recordSkillLoadSkip(counts map[SkillLoadErrorClass]int, diagnostics *[]SkillLoadDiagnostic, relative string, class SkillLoadErrorClass) {
+	counts[class]++
+	if len(*diagnostics) >= maxSkillCandidateFiles {
+		return
+	}
+	sourceID, ok := skillLoadDiagnosticSourceID(relative)
+	if !ok {
+		sourceID = `skill:"<invalid-relative-source>"`
+	}
+	*diagnostics = append(*diagnostics, SkillLoadDiagnostic{SourceID: sourceID, Class: class})
+}
+
+func newSkillLoadResult(definitions []*SkillDefinition, counts map[SkillLoadErrorClass]int, diagnostics []SkillLoadDiagnostic) SkillLoadResult {
+	errorCounts := make([]SkillLoadErrorCount, 0, len(counts))
+	skipped := 0
+	for class, count := range counts {
+		errorCounts = append(errorCounts, SkillLoadErrorCount{Class: class, Count: count})
+		skipped += count
+	}
+	sort.Slice(errorCounts, func(i, j int) bool {
+		return errorCounts[i].Class < errorCounts[j].Class
+	})
+	sort.Slice(diagnostics, func(i, j int) bool {
+		return diagnostics[i].SourceID < diagnostics[j].SourceID
+	})
+	return SkillLoadResult{
+		Definitions: definitions,
+		Report: SkillLoadReport{
+			Summary: SkillLoadSummary{
+				Loaded:      len(definitions),
+				Skipped:     skipped,
+				ErrorCounts: errorCounts,
+			},
+			Diagnostics: diagnostics,
+		},
+	}
+}
+
+func skillLoadDiagnosticSourceID(relative string) (string, bool) {
+	if relative == "" {
+		return "", false
+	}
+	localPath := filepath.FromSlash(relative)
+	if filepath.IsAbs(localPath) || filepath.VolumeName(localPath) != "" {
+		return "", false
+	}
+	cleaned := filepath.Clean(localPath)
+	if cleaned == "." || cleaned == ".." || strings.HasPrefix(cleaned, ".."+string(filepath.Separator)) || cleaned != localPath {
+		return "", false
+	}
+	normalized := filepath.ToSlash(cleaned)
+	for _, part := range strings.Split(normalized, "/") {
+		if part == "" || part == "." || part == ".." {
+			return "", false
+		}
+	}
+
+	const prefix = "skill:"
+	quoted := strconv.QuoteToASCII(normalized)
+	sourceID := prefix + quoted
+	if len(sourceID) <= maxSkillLoadDiagnosticBytes {
+		return sourceID, true
+	}
+
+	digest := sha256.Sum256([]byte(normalized))
+	digestText := hex.EncodeToString(digest[:])
+	quotedPath := strings.Trim(quoted, `"`)
+	marker := "~" + digestText + "~"
+	fragmentBudget := maxSkillLoadDiagnosticBytes - len(prefix) - len(marker)
+	headBytes := fragmentBudget / 2
+	tailBytes := fragmentBudget - headBytes
+	return prefix + quotedPath[:headBytes] + marker + quotedPath[len(quotedPath)-tailBytes:], true
 }
 
 // isSkillFileName reports whether name looks like a skill file.
