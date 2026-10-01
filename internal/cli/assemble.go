@@ -2020,7 +2020,7 @@ func resolveACPHTTPBearerToken(
 		if !ok || token == "" {
 			return "", errors.New("assemble: environment variable named by acp.bearer_token_env is missing or empty")
 		}
-		if !validACPBearerToken(token) {
+		if !acp.ValidHTTPBearerToken(token) {
 			return "", errors.New("assemble: environment variable named by acp.bearer_token_env contains an invalid bearer token")
 		}
 		return token, nil
@@ -2035,7 +2035,7 @@ func resolveACPHTTPBearerToken(
 	if !found {
 		return "", nil
 	}
-	if !validACPBearerToken(token) {
+	if !acp.ValidHTTPBearerToken(token) {
 		return "", errors.New("assemble: scoped ACP credential contains an invalid bearer token")
 	}
 	return token, nil
@@ -2058,19 +2058,6 @@ func validACPEnvironmentName(name string) bool {
 	}
 	for i, r := range name {
 		if r == '_' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || i > 0 && r >= '0' && r <= '9' {
-			continue
-		}
-		return false
-	}
-	return true
-}
-
-func validACPBearerToken(token string) bool {
-	if token == "" {
-		return false
-	}
-	for _, r := range token {
-		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("-._~+/=", r) {
 			continue
 		}
 		return false
