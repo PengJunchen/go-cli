@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"github.com/pengjunchen/go-cli/internal/extension"
+	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 const ownerName = "r7-fixture-owner"
@@ -21,7 +22,10 @@ func (*fixtureExtension) Name() string { return ownerName }
 
 func (*fixtureExtension) Init(ctx context.Context, registry extension.ExtensionRegistry) error {
 	report("Init")
-	return registry.RegisterHook(ctx, &fixtureHook{})
+	if err := registry.RegisterHook(ctx, &fixtureHook{}); err != nil {
+		return err
+	}
+	return registry.RegisterTool(ctx, &fixtureTool{})
 }
 
 func (*fixtureExtension) Shutdown(context.Context) error {
@@ -30,6 +34,23 @@ func (*fixtureExtension) Shutdown(context.Context) error {
 }
 
 type fixtureHook struct{}
+
+type fixtureTool struct{}
+
+func (*fixtureTool) Name() string        { return "r7_fixture_tool" }
+func (*fixtureTool) Description() string { return "R7 configured plugin dispatch fixture" }
+func (*fixtureTool) Parameters() any {
+	return map[string]any{
+		"type":       "object",
+		"properties": map[string]any{"value": map[string]any{"type": "string"}},
+		"required":   []any{"value"},
+	}
+}
+func (*fixtureTool) Execute(_ context.Context, call tools.ToolCall) (*tools.ToolResult, error) {
+	value, _ := call.Args["value"].(string)
+	report("ToolExecute|" + value)
+	return &tools.ToolResult{Output: "r7 plugin tool:" + value}, nil
+}
 
 func (*fixtureHook) Name() string { return "fixture-hook-owner-spoof" }
 

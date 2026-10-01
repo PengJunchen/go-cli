@@ -43,7 +43,9 @@ type ExtensionRegistry interface {
 type DefaultExtensionRegistry struct {
 	mu              sync.Mutex
 	tools           map[string]tools.ToolDefinition
+	toolOwners      map[string]string
 	toolOrder       []string
+	toolOwner       string
 	commands        map[string]func(args []string) error
 	commandOrder    []string
 	providers       map[string]llm.ModelProvider
@@ -63,6 +65,7 @@ var _ ExtensionRegistry = (*DefaultExtensionRegistry)(nil)
 func NewExtensionRegistry() ExtensionRegistry {
 	return &DefaultExtensionRegistry{
 		tools:       make(map[string]tools.ToolDefinition),
+		toolOwners:  make(map[string]string),
 		commands:    make(map[string]func(args []string) error),
 		providers:   make(map[string]llm.ModelProvider),
 		hooks:       make(map[string]Hook),
@@ -88,6 +91,7 @@ func (r *DefaultExtensionRegistry) RegisterTool(_ context.Context, t tools.ToolD
 		return fmt.Errorf("extension already registered: %s", name)
 	}
 	r.tools[name] = t
+	r.toolOwners[name] = r.toolOwner
 	r.toolOrder = append(r.toolOrder, name)
 	return nil
 }
@@ -222,6 +226,7 @@ func (r *DefaultExtensionRegistry) commitFromLocked(staging *DefaultExtensionReg
 	}
 	for _, name := range staging.toolOrder {
 		r.tools[name] = staging.tools[name]
+		r.toolOwners[name] = staging.toolOwners[name]
 	}
 	r.toolOrder = append(r.toolOrder, staging.toolOrder...)
 	for _, name := range staging.commandOrder {
@@ -286,6 +291,19 @@ func (r *DefaultExtensionRegistry) AllTools() []tools.ToolDefinition {
 	result := make([]tools.ToolDefinition, 0, len(r.toolOrder))
 	for _, name := range r.toolOrder {
 		result = append(result, r.tools[name])
+	}
+	return result
+}
+
+// AllToolRegistrations returns ordered, owner-bearing Tool registrations.
+// The returned slice is a snapshot; the Tool values themselves remain the
+// registered extension objects.
+func (r *DefaultExtensionRegistry) AllToolRegistrations() []ToolRegistration {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := make([]ToolRegistration, 0, len(r.toolOrder))
+	for _, name := range r.toolOrder {
+		result = append(result, ToolRegistration{Owner: r.toolOwners[name], Tool: r.tools[name]})
 	}
 	return result
 }

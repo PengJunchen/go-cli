@@ -19,6 +19,7 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/mock"
+	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 const nativePluginRequiredEnv = "GOCLI_REQUIRE_NATIVE_PLUGIN_TEST"
@@ -95,6 +96,15 @@ func TestConfiguredGoPluginLifecycle(t *testing.T) {
 	}
 	assert.True(t, modelSawOriginal, "the model sees the original prompt after the extension mutates its DTO")
 	assert.Equal(t, "deterministic fixture response", result.Message)
+	preparedRegistry, ok := assembly.ToolRegistry.(*tools.MiddlewareToolRegistry)
+	require.True(t, ok)
+	preparedTool, err := preparedRegistry.PrepareToolCall(context.Background(), tools.ToolCall{
+		ID: "r7-fixture-tool-call", Name: "r7_fixture_tool", Args: map[string]any{"value": "plugin-dispatch"},
+	})
+	require.NoError(t, err, "configured extension tool must be registered in the assembled registry")
+	toolResult, err := preparedTool.Dispatch(context.Background())
+	require.NoError(t, err)
+	assert.Equal(t, "r7 plugin tool:plugin-dispatch", toolResult.Output)
 
 	require.NoError(t, assembly.Close(context.Background()))
 	closed = true
@@ -105,6 +115,7 @@ func TestConfiguredGoPluginLifecycle(t *testing.T) {
 		"Init",
 		"agent.before_run|r7-fixture-owner|mutated-before",
 		"agent.after_run|r7-fixture-owner|error-present=false|class=",
+		"ToolExecute|plugin-dispatch",
 		"Shutdown",
 	}, strings.Split(strings.TrimSpace(string(report)), "\n"))
 	assert.NotContains(t, string(report), "fixture-hook-owner-spoof", "Source must use the registration owner")

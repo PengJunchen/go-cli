@@ -391,6 +391,15 @@ func (pm *PluginManager) Tools() []tools.ToolDefinition {
 	return nil
 }
 
+// ToolRegistrations returns ordered Tool registrations with the name of the
+// extension that successfully initialized each Tool.
+func (pm *PluginManager) ToolRegistrations() []ToolRegistration {
+	if der, ok := pm.coordinator.registry().(*DefaultExtensionRegistry); ok {
+		return der.AllToolRegistrations()
+	}
+	return nil
+}
+
 // Hooks returns all hooks registered by extensions during Init. It is empty
 // before Init is called.
 func (pm *PluginManager) Hooks() []Hook {
