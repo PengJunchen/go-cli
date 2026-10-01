@@ -379,7 +379,12 @@ while :; do sleep 30; done
 		_, readErr := io.Copy(io.Discard, owner.Reader())
 		readerDone <- readErr
 	}()
-	for _, path := range append(paths[:3], paths[8:]...) {
+	for _, path := range paths[:3] {
+		if err := stdioOwnerWaitForFile(path, 5*time.Second); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, path := range paths[8:] {
 		if err := stdioOwnerWaitForFile(path, 5*time.Second); err != nil {
 			t.Fatal(err)
 		}
