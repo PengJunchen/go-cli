@@ -535,9 +535,15 @@ func TestLoopReplansWhenConcurrentCyclerSelectionLeaseGoesStale(t *testing.T) {
 		case 2:
 			staleOperation = operationID
 			stalePlan := operationPlans[0].plan
+			staleProposal := stalePlan.Proposal()
 			require.Equal(t, "r3-stale-alpha", stalePlan.Model().Info.Name)
+			require.Equal(t, llm.CandidateCyclerSelected, staleProposal.Reason)
+			require.Equal(t, llm.AntecedentInitial, staleProposal.Antecedent.Kind)
 			require.Equal(t, "r3-stale-beta", operationPlans[1].plan.Model().Info.Name,
 				"the stale operation must re-peek and re-estimate the next cycler candidate")
+			replacementProposal := operationPlans[1].plan.Proposal()
+			require.Equal(t, llm.CandidateCyclerSelected, replacementProposal.Reason)
+			require.Equal(t, llm.AntecedentInitial, replacementProposal.Antecedent.Kind)
 			require.NotSame(t, operationPlans[0].plan, operationPlans[1].plan)
 
 			frozenOption, err := llm.OptionFromGenerationOptions(stalePlan.Options())
