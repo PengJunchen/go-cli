@@ -48,7 +48,10 @@ func stampAgentEvent(coordinates agentEventCoordinates, event AgentEvent) AgentE
 	case "message":
 		event.CanonicalTranscriptIndex = cloneOptionalUint64(coordinates.canonicalTranscriptIndex)
 		event.AssistantTranscriptOrdinal = cloneOptionalUint64(coordinates.assistantTranscriptOrdinal)
-	case EventKindPreToolCall, "tool_call", "tool_canceled", "tool_output", "tool_result":
+	case EventKindPreToolCall,
+		EventKindAssistantGenerationStarted,
+		EventKindAssistantGenerationFinished,
+		"tool_call", "tool_canceled", "tool_output", "tool_result":
 		event.CanonicalTranscriptIndex = cloneOptionalUint64(coordinates.canonicalTranscriptIndex)
 		event.AssistantTranscriptOrdinal = cloneOptionalUint64(coordinates.assistantTranscriptOrdinal)
 	}

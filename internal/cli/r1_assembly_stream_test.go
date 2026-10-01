@@ -226,6 +226,112 @@ func TestOutputGuardRunsBeforeVisibleDelta(t *testing.T) {
 	}
 }
 
+func TestDefaultAssemblyShowsGenerationStatusWithoutProviderContent(t *testing.T) {
+	// This AWS access-key-shaped canary passes the blocking PII guard but is
+	// replaced by the default assembly's redacting guard after the complete
+	// candidate has been checked.
+	candidate := "AKIA1234567890ABCDEF"
+	providerFlushed := make(chan struct{})
+	providerFinished := make(chan struct{})
+	releaseProvider := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseProvider) }) }
+	t.Cleanup(release)
+	fixture := newAssemblyStreamFixture(t, func(w http.ResponseWriter, r *http.Request, n int) {
+		if n != 1 {
+			http.Error(w, "unexpected additional model request", http.StatusBadRequest)
+			return
+		}
+		writeAssemblyStreamHeaders(w)
+		writeAssemblyChunk(w, map[string]any{"content": candidate}, nil)
+		close(providerFlushed)
+		select {
+		case <-releaseProvider:
+			writeAssemblyChunk(w, map[string]any{}, "stop")
+			_, _ = fmt.Fprint(w, "data: [DONE]\n\n")
+			if flusher, ok := w.(http.Flusher); ok {
+				flusher.Flush()
+			}
+			close(providerFinished)
+		case <-r.Context().Done():
+		}
+	})
+	ctx, stream := fixture.assembleAndSubmit(t, "Hold this response until its full output has been checked.")
+
+	var events []core.AgentEvent
+	var started *core.AgentEvent
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
+	for started == nil {
+		select {
+		case event, ok := <-stream.Events():
+			if !ok {
+				t.Fatal("event stream closed before generation status arrived")
+			}
+			events = append(events, event)
+			if event.Kind == core.EventKindAssistantGenerationStarted {
+				copy := event
+				started = &copy
+			}
+		case <-ctx.Done():
+			t.Fatalf("assembled run ended before generation status arrived: %v", ctx.Err())
+		case <-deadline.C:
+			t.Fatal("assembled run did not publish generation status")
+		}
+	}
+	select {
+	case <-providerFlushed:
+	case <-ctx.Done():
+		t.Fatalf("local provider did not flush the held candidate: %v", ctx.Err())
+	case <-deadline.C:
+		t.Fatal("local provider did not flush the held candidate")
+	}
+	assert.NotEmpty(t, started.RunID)
+	assert.NotNil(t, started.CanonicalTranscriptIndex)
+	assert.Empty(t, started.Content)
+	assert.Nil(t, started.ToolCalls)
+	assert.Nil(t, started.TokenUsage)
+	assert.Nil(t, started.Usage)
+	assert.NotContains(t, assemblyEventJSON(t, events), candidate)
+	assert.Empty(t, assemblyIncrementalText(events), "the held provider candidate must not reach visible deltas")
+	select {
+	case <-providerFinished:
+		t.Fatal("provider stream unexpectedly finished before it was released")
+	default:
+	}
+
+	release()
+	remaining, message, err := collectAssemblyEvents(stream)
+	events = append(events, remaining...)
+	require.NoError(t, err)
+	require.Equal(t, "[REDACTED]", message.Content)
+	require.Equal(t, 1, int(fixture.requests.Load()))
+	assert.NotContains(t, assemblyEventJSON(t, events), candidate)
+	assert.Equal(t, "[REDACTED]", assemblyIncrementalText(events), "only the checked and sanitized answer may be published as a delta")
+	var finished *core.AgentEvent
+	for _, event := range events {
+		switch event.Kind {
+		case core.EventKindAssistantGenerationStarted:
+			assert.Empty(t, event.Content)
+		case core.EventKindAssistantGenerationFinished:
+			copy := event
+			finished = &copy
+			assert.Empty(t, event.Content)
+		}
+	}
+	require.NotNil(t, finished)
+	assert.Equal(t, started.RunID, finished.RunID)
+	assert.NotNil(t, finished.CanonicalTranscriptIndex)
+	assert.Equal(t, *started.CanonicalTranscriptIndex, *finished.CanonicalTranscriptIndex)
+}
+
+func assemblyEventJSON(t *testing.T, events []core.AgentEvent) string {
+	t.Helper()
+	encoded, err := json.Marshal(events)
+	require.NoError(t, err)
+	return string(encoded)
+}
+
 func TestAssembledStreamJoinsProviderBodyCleanupBeforeEventClose(t *testing.T) {
 	requestStarted := make(chan struct{})
 	requestContextDone := make(chan struct{})

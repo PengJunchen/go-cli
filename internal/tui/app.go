@@ -835,6 +835,7 @@ type teaModel struct {
 	liveTranscriptRows     map[string]transcriptViewportRow
 	liveAssistantRows      map[AssistantOccurrenceKey]string
 	liveAssistantRenderers map[AssistantOccurrenceKey]*StreamingMarkdownRenderer
+	assistantProgress      *AssistantOccurrenceKey
 	liveToolRows           map[liveToolOccurrence]string
 	liveToolRenderers      map[liveToolOccurrence]*StreamingMarkdownRenderer
 	liveToolTruncation     map[liveToolOccurrence]*bool
@@ -971,6 +972,7 @@ func (m *teaModel) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 	case agentEventStreamClosedMsg:
 		m.mu.Lock()
+		m.assistantProgress = nil
 		if !m.eventSourceClosed {
 			m.eventSourceClosed = true
 			if m.eventSourceDone != nil {
@@ -1173,6 +1175,9 @@ func (m *teaModel) renderViewLocked() string {
 		}
 		// Reserve two status lines plus the bounded provenance line when usage is present.
 		statusRows := 2
+		if m.assistantProgress != nil {
+			statusRows++
+		}
 		if m.hasTokenUsageStatus() {
 			statusRows++
 		}
@@ -1206,6 +1211,10 @@ func (m *teaModel) renderViewLocked() string {
 		sb.WriteString("\n")
 		sb.WriteString(m.spinner.View())
 		sb.WriteString(" working...")
+	}
+	if m.assistantProgress != nil {
+		sb.WriteString("\n")
+		sb.WriteString(assistantGenerationProgressLabel)
 	}
 	// The active interaction is rendered as a modal above the status bar.
 	if current := m.activeInteraction; current != nil {
@@ -1256,6 +1265,10 @@ func (m *teaModel) renderFooterLocked() string {
 		sb.WriteString("\n")
 		sb.WriteString(m.spinner.View())
 		sb.WriteString(" working...")
+	}
+	if m.assistantProgress != nil {
+		sb.WriteString("\n")
+		sb.WriteString(assistantGenerationProgressLabel)
 	}
 	if current := m.activeInteraction; current != nil {
 		sb.WriteString("\n")
@@ -1840,6 +1853,10 @@ func startMessagePump(ctx context.Context, messages <-chan Msg, queueSpace chan<
 func (m *teaModel) handleEvent(ev AgentEvent) tea.Cmd {
 	ev = ev.clone()
 	ctx := context.Background()
+	if isAssistantGenerationLifecycleEvent(ev.Type) {
+		m.updateAssistantGenerationProgress(ev)
+		return nil
+	}
 
 	// A done event may precede one producer's optional complete-message
 	// duplicate. Keep the digest only for the immediately following complete
