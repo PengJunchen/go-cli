@@ -13,9 +13,12 @@ import (
 
 	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/llm"
 )
 
 func TestAssembledSubAgentModelOverrideUsesPrimaryResolverScope(t *testing.T) {
+	const childModel = "unregistered-child-model-name"
+
 	primaryCapture := &providerRequestCapture{}
 	primaryServer := httptest.NewServer(http.HandlerFunc(primaryCapture.handler))
 	t.Cleanup(primaryServer.Close)
@@ -50,7 +53,7 @@ func TestAssembledSubAgentModelOverrideUsesPrimaryResolverScope(t *testing.T) {
 		ID:           "r3-override-child",
 		Prompt:       "answer using the sub-agent model override",
 		SystemPrompt: "r3 assembled override fixture",
-		Model:        "unregistered-child-model-name",
+		Model:        childModel,
 		MaxTurns:     1,
 	})
 	require.NoError(t, err)
@@ -61,9 +64,16 @@ func TestAssembledSubAgentModelOverrideUsesPrimaryResolverScope(t *testing.T) {
 	assert.Equal(t, 1, count)
 	assert.Equal(t, "/primary/chat/completions", path)
 	assert.Equal(t, "Bearer "+primaryKey, authorization)
-	assert.Contains(t, body, `"model":"unregistered-child-model-name"`)
+	assert.Contains(t, body, `"model":"`+childModel+`"`)
 	assert.NotContains(t, body, primaryKey)
 	assert.NotContains(t, body, smallKey)
+
+	attempts, attemptSummary := assembly.CostTracker.AttemptCostSnapshot()
+	require.Len(t, attempts, 1, "the assembled child model request must be recorded as a physical provider attempt")
+	assert.Equal(t, 1, attemptSummary.Attempts)
+	assert.Equal(t, childModel, attempts[0].Result.Identity.ModelID)
+	assert.Equal(t, llm.UsageUnknown, attempts[0].Result.Usage.State, "the fixture response has no provider usage")
+	assert.Equal(t, 1, attemptSummary.UnknownUsageAttempts)
 
 	smallCount, _, smallAuthorization, smallBody := smallCapture.snapshot()
 	assert.Zero(t, smallCount, "a bare child model override stays on the Assembly primary provider")
