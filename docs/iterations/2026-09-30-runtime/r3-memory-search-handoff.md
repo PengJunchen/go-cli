@@ -47,11 +47,13 @@ First add focused failing tests in `internal/memory/file_store_test.go`; record 
 Required acceptance cases:
 
 1. **One record:** add one memory with a unique English term, search for that term, and assert exactly that ID with relevance `1.0`.
-2. **Two records:** add two memories with a term in only one, search for it, and assert only the matching ID with positive relevance.
-3. **CJK substring:** use at least three memories to isolate tokenization from the small-corpus adjustment; query a two-rune phrase such as `中文` in a longer run such as `本地中文检索`, and assert that only its owning record is returned.
-4. **No accidental bridge:** with a three-or-more-record corpus, query `中文` and assert no hit for content containing `中，文` or `中🙂文`; the bigram must not cross punctuation or emoji. Also retain punctuation-only and empty query behavior.
-5. **No match:** retain an unrelated query returning an empty slice.
-6. **Compatibility:** keep `TestSearch_CommonTermNotDiscriminating` unchanged (three records, term in two, no results) and `TestSearch_RelevanceRanking` unchanged (same order and relevance assertions). Run the existing keyword and partial-match tests too, so English tokenization and OR matching remain covered.
+2. **Two records, shared and unique terms:** make one term occur in both records and another occur only in one. The shared-term query returns no results; the unique-term query returns only its owner with relevance `1.0`.
+3. **Chinese substring:** in an independent corpus of at least three records, query a two-rune phrase such as `中文` inside a longer Han run such as `本地中文检索`. Assert only its owning record is returned, so this checks tokenization without relying on the small-corpus floor.
+4. **Single Han rune boundaries:** in an independent corpus of at least three records, a one-rune Han query succeeds when a document is that exact one-rune run. In a separate corpus of at least three records, querying the same rune does not match when it occurs only inside a longer Han run; multi-rune runs emit bigrams, not unigrams.
+5. **No script conversion:** in a corpus of at least three records, query `汉字` against a document containing `漢字` and assert no hit because the pair has no shared bigram. Do not add simplified/traditional conversion. Conversely, use exactly four records where only `后台管理` and `後臺管理` contain `管理`. Query `后台管理` and assert the traditional document is returned through the shared `管理` bigram and existing OR term matching. That result is shared-token matching, not conversion.
+6. **No accidental bridge:** with a three-or-more-record corpus, query `中文` and assert no hit for content containing `中，文` or `中🙂文`; the bigram must not cross punctuation or emoji. Keep these isolated boundary fixtures so corpus size does not confound the result.
+7. **Empty and no match:** retain empty-query, punctuation-only-query, and unrelated-query cases returning no results.
+8. **Compatibility and score range:** keep `TestSearch_CommonTermNotDiscriminating` unchanged (three records, term in two, no results) and `TestSearch_RelevanceRanking` unchanged (same order and relevance assertions). Every returned result must have strictly positive relevance in `(0,1]`, and the top result must be `1.0`; run the existing keyword and partial-match tests too, preserving English tokenization and OR matching.
 
 Tests should assert IDs and score relationships, not ordering between equal-score records because the current sort does not define a tie-breaker. The focused gate is `go test ./internal/memory -run 'Test(MemorySearch|Search_)' -count=1` (adjust the regexp to the final test names), followed by the repository's normal required checks in the builder/reviewer stages.
 
