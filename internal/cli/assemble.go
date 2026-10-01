@@ -1442,6 +1442,9 @@ func (s *assembleState) assembleSubAgent() {
 		core.WithModelWrapper(newModelWrapperWithChain(s.pw, s.modelChain, s.circuitBreaker, s.guardChain, s.telemetry)),
 		core.WithMidTurnCompaction(s.midTurn, s.compactor, s.estimator, s.ac.maxTokens),
 	}
+	if s.providerRetryPolicy != nil {
+		subAgentOpts = append(subAgentOpts, core.WithProviderRetryPolicy(s.providerRetryPolicy))
+	}
 	if s.costTracker != nil {
 		tracker := s.costTracker
 		subAgentOpts = append(subAgentOpts, core.WithProviderAttemptRecorder(func(result llm.ProviderAttemptResult) error {

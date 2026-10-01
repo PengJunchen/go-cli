@@ -19,8 +19,16 @@ import (
 const providerCredentialCanary = "provider-canary-do-not-forward"
 
 type providerRequestCapture struct {
-	mu            sync.Mutex
-	count         int
+	mu               sync.Mutex
+	count            int
+	path             string
+	authorization    string
+	body             string
+	responseStatuses []int
+	requests         []capturedProviderRequest
+}
+
+type capturedProviderRequest struct {
 	path          string
 	authorization string
 	body          string
@@ -35,12 +43,29 @@ func (c *providerRequestCapture) handler(w http.ResponseWriter, r *http.Request)
 
 	c.mu.Lock()
 	c.count++
+	requestNumber := c.count
 	c.path = r.URL.Path
 	c.authorization = r.Header.Get("Authorization")
 	c.body = string(body)
+	c.requests = append(c.requests, capturedProviderRequest{
+		path:          r.URL.Path,
+		authorization: r.Header.Get("Authorization"),
+		body:          string(body),
+	})
+	responseStatus := http.StatusOK
+	if requestNumber <= len(c.responseStatuses) {
+		responseStatus = c.responseStatuses[requestNumber-1]
+	}
 	c.mu.Unlock()
 
 	w.Header().Set("Content-Type", "application/json")
+	if responseStatus != http.StatusOK {
+		w.WriteHeader(responseStatus)
+		if _, err := io.WriteString(w, `{"error":{"message":"fixture transient error","type":"server_error"}}`); err != nil {
+			return
+		}
+		return
+	}
 	if _, err := io.WriteString(w, `{"choices":[{"message":{"role":"assistant","content":"ok"}}]}`); err != nil {
 		return
 	}
@@ -50,6 +75,12 @@ func (c *providerRequestCapture) snapshot() (count int, path, authorization, bod
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.count, c.path, c.authorization, c.body
+}
+
+func (c *providerRequestCapture) snapshotRequests() []capturedProviderRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]capturedProviderRequest(nil), c.requests...)
 }
 
 func TestProviderCredentialNeverSentToWrongOrigin(t *testing.T) {
