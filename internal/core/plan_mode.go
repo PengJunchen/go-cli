@@ -72,6 +72,36 @@ func (c *DefaultPlanModeController) DispatchFence() *tools.DispatchFence {
 	return c.fence
 }
 
+// StartIfInactive runs a short process-start callback while Plan transitions
+// are excluded by the shared dispatch fence. It returns false without running
+// start when Plan Mode is active. The boolean reports whether the callback was
+// authorized and invoked, so callers can distinguish a boundary failure from
+// an ordinary process-start error. The callback must only start the child and
+// must return before waiting for it or draining its output.
+func (c *DefaultPlanModeController) StartIfInactive(start func() error) (bool, error) {
+	if c == nil || c.fence == nil {
+		return false, tools.ErrDispatchFenceUnavailable
+	}
+	if start == nil {
+		return false, errors.New("core: Plan mode start callback is nil")
+	}
+
+	authorized := false
+	err := c.fence.WithSnapshot(func(_ tools.DispatchFenceSnapshot) error {
+		c.mu.RLock()
+		defer c.mu.RUnlock()
+		if c.active {
+			return nil
+		}
+		authorized = true
+		return start()
+	})
+	if err != nil {
+		return authorized, err
+	}
+	return authorized, nil
+}
+
 // Enter activates plan mode and logs the reason.
 func (c *DefaultPlanModeController) Enter(_ context.Context, reason string) error {
 	if _, err := c.fence.Publish(tools.DispatchFencePlan, nil, func() {

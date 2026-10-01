@@ -26,6 +26,55 @@ func (planModeLifecycleShellHookSkipped) Error() string {
 	return "Plan mode skipped a project lifecycle shell hook."
 }
 
+type planModeShellHookStartBoundaryUnavailable struct{}
+
+func (planModeShellHookStartBoundaryUnavailable) Error() string {
+	return "A project shell hook was blocked because atomic Plan mode start authorization is unavailable."
+}
+
+func (planModeShellHookStartBoundaryUnavailable) SafeToolInterceptionMessage() string {
+	return "A project shell hook was blocked because atomic Plan mode start authorization is unavailable."
+}
+
+type planModeShellHookStartBoundary interface {
+	StartIfInactive(start func() error) (bool, error)
+}
+
+// planModeShellHookStart authorizes the process start against the same fence
+// that publishes Plan transitions. Controllers without the atomic boundary
+// fail closed so an external implementation cannot silently reintroduce a
+// check-then-start race.
+func planModeShellHookStart(
+	event core.HookEvent,
+	planCtrl core.PlanModeController,
+	start func() error,
+) error {
+	if start == nil {
+		return planModeShellHookStartBoundaryUnavailable{}
+	}
+	if planCtrl == nil {
+		return start()
+	}
+	boundary, ok := planCtrl.(planModeShellHookStartBoundary)
+	if !ok {
+		return planModeShellHookStartBoundaryUnavailable{}
+	}
+	authorized, err := boundary.StartIfInactive(start)
+	if err != nil {
+		if !authorized {
+			return planModeShellHookStartBoundaryUnavailable{}
+		}
+		return err
+	}
+	if authorized {
+		return nil
+	}
+	if event == core.EventPreToolUse {
+		return planModePreToolShellHookDenial{}
+	}
+	return planModeLifecycleShellHookSkipped{}
+}
+
 func planModePreToolShellHookInterceptor(
 	planCtrl core.PlanModeController,
 	shellHooks []core.HookSystem,
