@@ -344,6 +344,16 @@ func validateVersion1EntryCoordinates(entry SessionEntry) error {
 		if entry.CheckpointKind == "" {
 			return errors.New("session: version 1 checkpoint requires a checkpoint kind")
 		}
+		if entry.CheckpointKind == CheckpointReconciliation {
+			if entry.OperatorReconciliation == nil || entry.ExecutionResolution != nil {
+				return errors.New("session: reconciliation checkpoint requires operator acceptance evidence only")
+			}
+			if err := entry.OperatorReconciliation.validate(); err != nil {
+				return err
+			}
+		} else if entry.OperatorReconciliation != nil {
+			return errors.New("session: operator reconciliation evidence requires a reconciliation checkpoint")
+		}
 		if entry.CheckpointKind == CheckpointExecutionResolution {
 			if entry.ExecutionResolution == nil || entry.RunID == "" || entry.ActionID == "" || entry.ExecutionResolution.RunID != entry.RunID || entry.ExecutionResolution.ActionID != entry.ActionID {
 				return errors.New("session: execution resolution checkpoint has mismatched typed proof")

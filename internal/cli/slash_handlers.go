@@ -2,12 +2,14 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
 	"unicode/utf8"
 
+	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/production"
 	"github.com/pengjunchen/go-cli/internal/session"
@@ -46,7 +48,7 @@ func (h *HelpHandler) Handle(_ context.Context, _ []string, deps Dependencies) (
 		"Memory: user-managed with /memory only; no automatic extraction or prompt injection.",
 		"Goal, Task, and Todo: stored only in memory for this process; not kept across restarts.",
 		"Session storage: without session.store_path, /session is unsupported.",
-		"Durable mode exposes /session tree and /session branches; resume uses --resume-session <physical-id> at startup.",
+		"Durable mode exposes /session tree, branches, pending, and explicit one-action reconciliation; resume uses --resume-session <physical-id> at startup.",
 		"Durable /session resume, fork, clone, and switch are unsupported.",
 		"Legacy mutable mode supports /session tree, branches, resume, fork, clone, and switch with a wired mutable tree; resume listing needs a session store.",
 		"Session snapshot and schema migration are unavailable.",
@@ -372,7 +374,9 @@ const (
 // SessionHandler delegates to the SessionSlashHandler for session operations.
 // Without sub-arguments it defaults to showing the tree.
 type SessionHandler struct {
-	mode sessionCommandMode
+	mode           sessionCommandMode
+	durableSession *durableCLISession
+	runSlotGuard   core.RunSlotGuard
 }
 
 var _ SlashCommandHandler = (*SessionHandler)(nil)
@@ -384,7 +388,7 @@ func (h *SessionHandler) Description() string {
 	}
 	switch h.mode {
 	case sessionCommandModeDurable:
-		return "Durable session commands: /session tree and /session branches; resume at startup with --resume-session <physical-id>."
+		return "Durable session commands: /session tree, /session branches, /session pending, and /session reconcile; resume at startup with --resume-session <physical-id>."
 	case sessionCommandModeLegacy:
 		return "Legacy session operations (subcommands: tree, fork, resume, branches, clone, switch; requires a mutable session tree)."
 	default:
@@ -401,6 +405,8 @@ func (h *SessionHandler) Subcommands() []Subcommand {
 		return []Subcommand{
 			{Name: "tree", Description: "Show the durable session tree"},
 			{Name: "branches", Description: "List durable session branches"},
+			{Name: "pending", Description: "List unresolved durable actions"},
+			{Name: "reconcile", Description: "Explicitly accept one unknown action outcome"},
 		}
 	}
 	return []Subcommand{
@@ -414,6 +420,29 @@ func (h *SessionHandler) Subcommands() []Subcommand {
 }
 
 func (h *SessionHandler) Handle(ctx context.Context, args []string, deps Dependencies) (string, error) {
+	if h != nil && h.mode == sessionCommandModeDurable && len(args) > 0 {
+		switch args[0] {
+		case "pending":
+			if len(args) != 1 {
+				fmt.Fprintln(deps.Out(), "Usage: /session pending") //nolint:errcheck
+				return "", nil
+			}
+			output, err := h.durablePendingOutput(ctx)
+			if err != nil {
+				fmt.Fprintf(deps.Out(), "Error: %v\n", err) //nolint:errcheck
+				return "", nil
+			}
+			fmt.Fprint(deps.Out(), output) //nolint:errcheck
+			return "", nil
+		case "reconcile":
+			if err := h.reconcilePendingAction(ctx, args[1:]); err != nil {
+				fmt.Fprintf(deps.Out(), "Error: %v\n", err) //nolint:errcheck
+			} else {
+				fmt.Fprintf(deps.Out(), "Recorded explicit reconciliation for the selected action; its original outcome remains unknown.\n") //nolint:errcheck
+			}
+			return "", nil
+		}
+	}
 	if deps.SessionHandler() == nil {
 		fmt.Fprintln(deps.Out(), "Unsupported: /session requires session.store_path.") //nolint:errcheck
 		return "", nil
@@ -432,6 +461,119 @@ func (h *SessionHandler) Handle(ctx context.Context, args []string, deps Depende
 	}
 	fmt.Fprint(deps.Out(), output) //nolint:errcheck
 	return "", nil
+}
+
+func (h *SessionHandler) durablePendingOutput(ctx context.Context) (string, error) {
+	if h == nil || h.mode != sessionCommandModeDurable || h.durableSession == nil {
+		return "", errors.New("durable session recovery is unavailable")
+	}
+	if err := h.durableSession.syncRecordedResolutions(ctx); err != nil {
+		return "", err
+	}
+	snapshot, err := h.durableSession.snapshotSelected()
+	if err != nil {
+		return "", err
+	}
+	pending, err := session.InspectPendingActions(snapshot)
+	if err != nil {
+		return "", err
+	}
+	var output strings.Builder
+	fmt.Fprintf(&output, "Session %s branch %s revision %s\n", snapshot.SessionID, snapshot.ActiveBranchID, snapshot.PublishedView.Revision)
+	if len(pending) == 0 {
+		output.WriteString("No unresolved durable actions.\n")
+		return output.String(), nil
+	}
+	output.WriteString("Unresolved durable actions (tool arguments are omitted):\n")
+	for _, action := range pending {
+		if action.Action.ActionID == "" {
+			fmt.Fprintf(&output, "- call=%s action=unreserved dispatch=unknown receipt=unknown\n", action.Action.ToolCallID)
+			continue
+		}
+		fmt.Fprintf(&output, "- action=%s tool=%s dispatch=%s receipt=%s", action.Action.ActionID, action.ToolName, action.DispatchState, action.ReceiptOutcome)
+		if action.ReconcileReady {
+			output.WriteString(" reconcile=available")
+		}
+		output.WriteByte('\n')
+	}
+	output.WriteString("For one unknown dispatched action, use /session reconcile <action-id> --revision=<revision> --accept-unknown-risk --reason=<short-token> [--reference=<id>].\n")
+	return output.String(), nil
+}
+
+func (h *SessionHandler) reconcilePendingAction(ctx context.Context, args []string) error {
+	if h == nil || h.mode != sessionCommandModeDurable || h.durableSession == nil {
+		return errors.New("durable session recovery is unavailable")
+	}
+	if len(args) == 0 || args[0] == "" {
+		return errors.New("usage: /session reconcile <action-id> --revision=<revision> --accept-unknown-risk --reason=<short-token> [--reference=<id>]")
+	}
+	actionID := args[0]
+	if len(actionID) > 256 {
+		return errors.New("action ID is too long")
+	}
+	var revision, reason, reference string
+	accepted := false
+	seen := make(map[string]bool, 4)
+	for _, arg := range args[1:] {
+		if arg == "--accept-unknown-risk" {
+			if seen["accept"] {
+				return errors.New("duplicate reconciliation option")
+			}
+			seen["accept"] = true
+			accepted = true
+			continue
+		}
+		name, value, ok := strings.Cut(arg, "=")
+		if !ok || value == "" || !strings.HasPrefix(name, "--") {
+			return errors.New("reconciliation options must use --name=value form")
+		}
+		key := strings.TrimPrefix(name, "--")
+		if key != "revision" && key != "reason" && key != "reference" || seen[key] {
+			return errors.New("unknown or duplicate reconciliation option")
+		}
+		seen[key] = true
+		switch key {
+		case "revision":
+			revision = value
+		case "reason":
+			reason = value
+		case "reference":
+			reference = value
+		}
+	}
+	if !accepted || revision == "" || reason == "" {
+		return errors.New("reconciliation requires --accept-unknown-risk, --revision, and --reason")
+	}
+	if len(revision) > 256 {
+		return errors.New("session revision is too long")
+	}
+	if registrar, ok := h.runSlotGuard.(core.RunSlotWrapperRegistrar); ok {
+		if _, active := registrar.ActiveRunStatus(); active {
+			return errors.New("reconciliation is unavailable while a run owner is active")
+		}
+	}
+	snapshot, err := h.durableSession.snapshotSelected()
+	if err != nil {
+		return err
+	}
+	if snapshot.PublishedView.Revision != revision {
+		return errors.New("session revision changed; run /session pending again")
+	}
+	selected, found, err := session.FindActionByID(snapshot, actionID)
+	if err != nil {
+		return err
+	}
+	if !found || (!selected.ReconcileReady && !(selected.Resolved && selected.Resolution == core.ResolutionOperatorReconciled)) {
+		return errors.New("action is not an unresolved dispatched unknown receipt")
+	}
+	request := session.OperatorReconciliationRequest{
+		Action: selected.Action, ExpectedRevision: revision, Reason: reason,
+		Reference: reference, AcceptUnknownRisk: accepted,
+	}
+	if err := h.durableSession.reconcileUnknownAction(ctx, request); err != nil {
+		return err
+	}
+	return nil
 }
 
 // ----------------------------------------------------------------------------

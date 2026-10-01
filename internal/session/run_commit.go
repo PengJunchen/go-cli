@@ -21,23 +21,24 @@ import (
 // session handle. It borrows that handle's writer and never closes the shared
 // session; release returns only this run's lease to its owner.
 type SessionRunCommitSink struct {
-	mu          sync.Mutex
-	prepared    PreparedSession
-	writer      DurableSessionWriter
-	index       *WorkspaceQuarantineIndex
-	sessionID   string
-	workspaceID string
-	branchID    string
-	leafID      string
-	baseView    SessionView
-	allRows     []SessionEntry
-	branchRows  []SessionEntry
-	runID       string
-	ownerGen    string
-	terminalID  string
-	release     func()
-	releaseOnce sync.Once
-	closed      bool
+	mu                       sync.Mutex
+	prepared                 PreparedSession
+	writer                   DurableSessionWriter
+	index                    *WorkspaceQuarantineIndex
+	sessionID                string
+	workspaceID              string
+	branchID                 string
+	leafID                   string
+	baseView                 SessionView
+	allRows                  []SessionEntry
+	branchRows               []SessionEntry
+	runID                    string
+	ownerGen                 string
+	terminalID               string
+	inspectExecutionIdentity func(core.ExecutionIdentity) core.ProcessGroupExitInspection
+	release                  func()
+	releaseOnce              sync.Once
+	closed                   bool
 }
 
 var _ core.RunCommitSink = (*SessionRunCommitSink)(nil)
@@ -92,6 +93,7 @@ func NewSessionRunCommitSink(
 		branchID: snapshot.ActiveBranchID, leafID: snapshot.ActiveLeafEntryID,
 		baseView: snapshot.PublishedView.Clone(),
 		allRows:  allRows, branchRows: branchRows, release: release,
+		inspectExecutionIdentity: core.InspectProcessGroupExit,
 	}, nil
 }
 
@@ -597,12 +599,6 @@ func (s *SessionRunCommitSink) ResolveExecution(ctx context.Context, resolution 
 	if err := s.validateCallContextLocked(ctx, resolution.RunID); err != nil {
 		return err
 	}
-	// Keep the terminal result immutable while allowing its exact local cleanup
-	// proof to finish the matching workspace marker.
-	lateAfterTerminal := s.terminalID != ""
-	if lateAfterTerminal && resolution.Evidence != core.ResolutionLocalResourcesStopped {
-		return s.rejectAfterTerminalLocked()
-	}
 	if resolution.ActionID == "" {
 		return errors.New("session: execution resolution requires an action ID")
 	}
@@ -614,6 +610,24 @@ func (s *SessionRunCommitSink) ResolveExecution(ctx context.Context, resolution 
 	receipt, err := s.findReceiptForIntentLocked(ref, intent)
 	if err != nil {
 		return err
+	}
+	return s.resolveExecutionLocked(ctx, resolution, ref, intent, receipt, false)
+}
+
+func (s *SessionRunCommitSink) resolveExecutionLocked(
+	ctx context.Context,
+	resolution core.ExecutionResolution,
+	ref PendingActionRef,
+	intent SessionEntry,
+	receipt SessionEntry,
+	allowOperatorReconciliation bool,
+) error {
+	// Keep the terminal result immutable while allowing its exact local cleanup
+	// or explicitly reconciled proof to finish the matching workspace marker.
+	lateAfterTerminal := s.terminalID != ""
+	if lateAfterTerminal && resolution.Evidence != core.ResolutionLocalResourcesStopped &&
+		!(allowOperatorReconciliation && resolution.Evidence == core.ResolutionOperatorReconciled) {
+		return s.rejectAfterTerminalLocked()
 	}
 	if receipt.RecordVersion != 1 || receipt.Seq == 0 {
 		return errors.New("session: execution resolution requires a synced receipt on the active branch")

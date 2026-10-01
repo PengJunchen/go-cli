@@ -260,6 +260,7 @@ type AgentAssembly struct {
 	closeOwner          *assemblyCloseOwner
 	mcpResources        *assemblyMCPResources
 	durableSession      *durableCLISession
+	runSlotGuard        core.RunSlotGuard
 	todoState           *assemblyTodoState
 	approvalAuditHealth func() approval.AuditTrailHealth
 }
@@ -556,6 +557,7 @@ func AssembleAgent(
 		closeOwner:          s.closeOwner,
 		mcpResources:        s.mcpResources,
 		durableSession:      s.durableSession,
+		runSlotGuard:        s.runSlotGuard,
 		todoState:           s.todoState,
 		approvalAuditHealth: s.approvalAuditHealth,
 	}, nil

@@ -30,6 +30,100 @@ type durableRecoveryPlan struct {
 	nextTranscriptIndex map[string]uint64
 }
 
+// PendingActionSnapshot is a redacted view of one unresolved action journal
+// occurrence. It intentionally omits tool arguments, executor identity, and
+// process identifiers.
+type PendingActionSnapshot struct {
+	Action         PendingActionRef
+	ToolName       string
+	DispatchState  core.DispatchState
+	ReceiptOutcome string
+	ReconcileReady bool
+	Resolved       bool
+	Resolution     core.ExecutionResolutionEvidence
+}
+
+// InspectPendingActions validates a prepared session snapshot and returns its
+// unresolved actions without exposing arguments or executor details.
+func InspectPendingActions(snapshot PreparedSessionSnapshot) ([]PendingActionSnapshot, error) {
+	plan, err := validatedSnapshotActionPlan(snapshot)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]PendingActionSnapshot, 0, len(plan.pending))
+	for _, ref := range plan.pending {
+		var occurrence *durableActionOccurrence
+		for _, candidate := range plan.occurrences {
+			if sameActionReference(candidate.ref, ref) {
+				occurrence = candidate
+				break
+			}
+		}
+		if occurrence == nil {
+			return nil, errors.New("session: pending action has no validated journal occurrence")
+		}
+		result = append(result, pendingActionSnapshot(occurrence))
+	}
+	return result, nil
+}
+
+// FindActionByID locates one validated reserved action by its stable ActionID,
+// including an action whose local resolution is waiting for index-sync retry.
+func FindActionByID(snapshot PreparedSessionSnapshot, actionID string) (PendingActionSnapshot, bool, error) {
+	if actionID == "" {
+		return PendingActionSnapshot{}, false, errors.New("session: action lookup requires a stable action ID")
+	}
+	plan, err := validatedSnapshotActionPlan(snapshot)
+	if err != nil {
+		return PendingActionSnapshot{}, false, err
+	}
+	var result *PendingActionSnapshot
+	for _, occurrence := range plan.occurrences {
+		if occurrence.intent == nil || occurrence.ref.ActionID != actionID {
+			continue
+		}
+		if result != nil {
+			return PendingActionSnapshot{}, false, errors.New("session: action ID is ambiguous in the selected snapshot")
+		}
+		pending := pendingActionSnapshot(occurrence)
+		result = &pending
+	}
+	if result == nil {
+		return PendingActionSnapshot{}, false, nil
+	}
+	return *result, true, nil
+}
+
+func validatedSnapshotActionPlan(snapshot PreparedSessionSnapshot) (*durableRecoveryPlan, error) {
+	if snapshot.SessionID == "" || snapshot.ActiveBranchID == "" {
+		return nil, errors.New("session: pending-action inspection requires a prepared physical session and branch")
+	}
+	if err := snapshot.PublishedView.Validate(); err != nil {
+		return nil, fmt.Errorf("session: pending-action inspection has an invalid published view: %w", err)
+	}
+	_, branchRows, err := validateRunCommitSnapshot(snapshot)
+	if err != nil {
+		return nil, fmt.Errorf("session: pending-action inspection has an invalid snapshot: %w", err)
+	}
+	return analyzeDurableActionJournal(branchRows, snapshot.SessionID)
+}
+
+func pendingActionSnapshot(occurrence *durableActionOccurrence) PendingActionSnapshot {
+	pending := PendingActionSnapshot{Action: occurrence.ref, ToolName: occurrence.toolName}
+	if occurrence.receipt != nil {
+		pending.DispatchState = occurrence.receipt.DispatchState
+		pending.ReceiptOutcome = occurrence.receipt.ReceiptOutcome
+	}
+	pending.ReconcileReady = occurrence.intent != nil && occurrence.receipt != nil &&
+		occurrence.receipt.DispatchState == DispatchStateDispatched &&
+		occurrence.receipt.ReceiptOutcome == core.ReceiptOutcomeUnknown && occurrence.resolution == nil
+	if occurrence.resolution != nil {
+		pending.Resolved = true
+		pending.Resolution = occurrence.resolution.Resolution.Evidence
+	}
+	return pending
+}
+
 type durableActionBatchKey struct {
 	runID     string
 	ordinal   uint64
@@ -635,7 +729,9 @@ func validateExecutionResolutionEvidence(
 		return errors.New("remote-terminal resolution requires typed protocol-terminal evidence; generic receipt outcomes are insufficient")
 	case core.ResolutionOperatorReconciled:
 		proof, exists := reconciliationRows[resolution.EvidenceRef]
-		if !exists || proof.Seq <= occurrence.receipt.Seq || proof.Seq >= resolutionSeq || !sameActionReference(occurrence.ref, refFromEntry(*proof, sessionID)) {
+		if !exists || proof.OperatorReconciliation == nil || proof.OperatorReconciliation.validate() != nil ||
+			proof.Seq <= occurrence.receipt.Seq || proof.Seq >= resolutionSeq ||
+			!sameActionReference(occurrence.ref, refFromEntry(*proof, sessionID)) {
 			return errors.New("operator reconciliation proof does not reference a matching reconciliation checkpoint")
 		}
 	default:

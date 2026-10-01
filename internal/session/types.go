@@ -6,7 +6,9 @@ package session
 
 import (
 	"context"
+	"errors"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/pengjunchen/go-cli/internal/core"
@@ -157,6 +159,9 @@ type SessionEntry struct {
 	// ExecutionResolution is the typed resource-quiescence proof carried by a
 	// checkpoint; a terminal receipt alone is never a resolution.
 	ExecutionResolution *core.ExecutionResolution `json:"execution_resolution,omitempty"`
+	// OperatorReconciliation records the explicit, user-approved acceptance of
+	// an unresolved action's unknown outcome. It is audit evidence only.
+	OperatorReconciliation *OperatorReconciliationRecord `json:"operator_reconciliation,omitempty"`
 }
 
 // clone returns a defensive copy of the entry so callers cannot mutate the
@@ -196,6 +201,10 @@ func (e *SessionEntry) clone() *SessionEntry {
 		resolution := *e.ExecutionResolution
 		cp.ExecutionResolution = &resolution
 	}
+	if e.OperatorReconciliation != nil {
+		reconciliation := *e.OperatorReconciliation
+		cp.OperatorReconciliation = &reconciliation
+	}
 	if e.AssistantTranscriptOrdinal != nil {
 		ordinal := *e.AssistantTranscriptOrdinal
 		cp.AssistantTranscriptOrdinal = &ordinal
@@ -227,6 +236,32 @@ const (
 
 // CheckpointKind identifies the durable checkpoint represented by an entry.
 type CheckpointKind string
+
+// OperatorReconciliationRecord records a user's explicit acceptance that an
+// action's dispatched outcome remains unknown. It does not claim termination.
+type OperatorReconciliationRecord struct {
+	Reason              string `json:"reason"`
+	Reference           string `json:"reference,omitempty"`
+	AcceptedUnknownRisk bool   `json:"accepted_unknown_risk"`
+}
+
+const (
+	maxOperatorReconciliationReasonBytes    = 512
+	maxOperatorReconciliationReferenceBytes = 1024
+)
+
+func (record OperatorReconciliationRecord) validate() error {
+	if !record.AcceptedUnknownRisk {
+		return errors.New("session: operator reconciliation requires explicit unknown-risk acceptance")
+	}
+	if strings.TrimSpace(record.Reason) == "" || len(record.Reason) > maxOperatorReconciliationReasonBytes || strings.ContainsAny(record.Reason, "\x00\r\n") {
+		return errors.New("session: operator reconciliation reason must be non-empty, single-line, and at most 512 bytes")
+	}
+	if len(record.Reference) > maxOperatorReconciliationReferenceBytes || strings.ContainsAny(record.Reference, "\x00\r\n") {
+		return errors.New("session: operator reconciliation reference must be single-line and at most 1024 bytes")
+	}
+	return nil
+}
 
 const (
 	// CheckpointRunTerminal marks a terminal run checkpoint.

@@ -111,6 +111,7 @@ type managedPreparedSession struct {
 	physical string
 	branch   string
 	leases   int
+	admin    bool
 	changed  chan struct{}
 	closeReq bool
 	closed   bool
@@ -128,6 +129,7 @@ type durableSessionRunLease struct {
 	branch    string
 	workspace string
 	root      string
+	exclusive bool
 	once      sync.Once
 }
 
@@ -276,6 +278,17 @@ func (manager *durableSessionManager) selectResume(ctx context.Context, physical
 
 // acquireRunLease pins the current prepared handle and its physical identity.
 func (manager *durableSessionManager) acquireRunLease() (*durableSessionRunLease, error) {
+	return manager.acquireLease(false)
+}
+
+// acquireReconciliationLease exclusively pins the selected session for a
+// user-requested durable recovery operation. It refuses to overlap any run or
+// other lease and blocks subsequent run leases until CloseRunCommit.
+func (manager *durableSessionManager) acquireReconciliationLease() (*durableSessionRunLease, error) {
+	return manager.acquireLease(true)
+}
+
+func (manager *durableSessionManager) acquireLease(exclusive bool) (*durableSessionRunLease, error) {
 	manager.mu.Lock()
 	if manager.closing {
 		manager.mu.Unlock()
@@ -298,6 +311,16 @@ func (manager *durableSessionManager) acquireRunLease() (*durableSessionRunLease
 		manager.mu.Unlock()
 		return nil, fmt.Errorf("%w: session %q requires exact reopen", ErrDurableSessionUnavailable, slot.physical)
 	}
+	if exclusive {
+		if slot.leases != 0 || slot.admin {
+			manager.mu.Unlock()
+			return nil, errors.New("cli: durable session is busy with another owner")
+		}
+		slot.admin = true
+	} else if slot.admin {
+		manager.mu.Unlock()
+		return nil, errors.New("cli: durable session is held by an exclusive recovery operation")
+	}
 	prepared := slot.prepared
 	physical, branch := slot.physical, slot.branch
 	slot.leases++ // A temporary borrow protects Snapshot from requester-path Close.
@@ -312,6 +335,9 @@ func (manager *durableSessionManager) acquireRunLease() (*durableSessionRunLease
 			slot.poisoned = true
 			manager.signalSlotLocked(slot)
 		}
+		if exclusive {
+			slot.admin = false
+		}
 		manager.releaseLeaseLocked(slot)
 		closing := manager.closing
 		manager.mu.Unlock()
@@ -322,11 +348,17 @@ func (manager *durableSessionManager) acquireRunLease() (*durableSessionRunLease
 		return nil, unavailableErr
 	}
 	if manager.closing {
+		if exclusive {
+			slot.admin = false
+		}
 		manager.releaseLeaseLocked(slot)
 		manager.mu.Unlock()
 		return nil, ErrDurableSessionManagerClosing
 	}
 	if manager.current != slot || slot.closeReq || slot.closed || slot.poisoned {
+		if exclusive {
+			slot.admin = false
+		}
 		manager.releaseLeaseLocked(slot)
 		manager.mu.Unlock()
 		return nil, fmt.Errorf("%w: session %q changed while checking the run lease", ErrDurableSessionUnavailable, physical)
@@ -334,6 +366,9 @@ func (manager *durableSessionManager) acquireRunLease() (*durableSessionRunLease
 	if snapshot.SessionID != physical || snapshot.ActiveBranchID != branch {
 		slot.poisoned = true
 		manager.signalSlotLocked(slot)
+		if exclusive {
+			slot.admin = false
+		}
 		manager.releaseLeaseLocked(slot)
 		manager.mu.Unlock()
 		return nil, fmt.Errorf("%w: session %q identity or active branch changed", ErrDurableSessionUnavailable, physical)
@@ -347,6 +382,7 @@ func (manager *durableSessionManager) acquireRunLease() (*durableSessionRunLease
 		branch:    branch,
 		workspace: manager.workspace,
 		root:      manager.root,
+		exclusive: exclusive,
 	}, nil
 }
 
@@ -474,6 +510,10 @@ func (manager *durableSessionManager) installPreparedSession(ctx context.Context
 		return manager.closeRejectedSlot(ctx, slot, ErrDurableSessionManagerClosing)
 	}
 	old := manager.current
+	if old != nil && old.admin {
+		manager.mu.Unlock()
+		return manager.closeRejectedSlot(ctx, slot, errors.New("cli: selected durable session is held by an exclusive recovery operation"))
+	}
 	if old != nil && old.physical == slot.physical {
 		manager.mu.Unlock()
 		return manager.closeRejectedSlot(ctx, slot, fmt.Errorf("%w: %q", ErrDurableSessionIdentityConflict, slot.physical))
@@ -552,8 +592,11 @@ func (manager *durableSessionManager) closeSlot(ctx context.Context, slot *manag
 	}
 }
 
-func (manager *durableSessionManager) releaseRunLease(slot *managedPreparedSession) {
+func (manager *durableSessionManager) releaseRunLease(slot *managedPreparedSession, exclusive bool) {
 	manager.mu.Lock()
+	if exclusive {
+		slot.admin = false
+	}
 	manager.releaseLeaseLocked(slot)
 	manager.mu.Unlock()
 }
@@ -739,7 +782,7 @@ func (lease *durableSessionRunLease) CloseRunCommit() {
 	}
 	lease.once.Do(func() {
 		if lease.manager != nil && lease.slot != nil {
-			lease.manager.releaseRunLease(lease.slot)
+			lease.manager.releaseRunLease(lease.slot, lease.exclusive)
 		}
 	})
 }
