@@ -66,6 +66,9 @@ jobs:
   test:
     name: Test (race + coverage)
     runs-on: ubuntu-latest
+    env:
+      CGO_ENABLED: "1"
+      GOCLI_REQUIRE_NATIVE_PLUGIN_TEST: "1"
     steps:
       - uses: actions/checkout@v4
 
@@ -75,13 +78,13 @@ jobs:
 
       - run: go mod download
 
-      - run: go test -race -count=1 -coverprofile=coverage.out ./...
+      - run: make test-cov
 
       - uses: actions/upload-artifact@v4
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:
           name: coverage
-          path: coverage.out
+          path: coverage/coverage.out
 
   test-e2e:
     name: E2E Tests
@@ -96,7 +99,37 @@ jobs:
       - run: go mod download
 
       - name: Run E2E tests
-        run: go test -race -count=1 -tags e2e ./tests/...
+        run: make test-e2e
+
+  test-mock:
+    name: Mock-tag Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - run: go mod download
+
+      - name: Run supported mock-tag scope
+        run: make test-mock
+
+  test-no-plugin:
+    name: no_plugin Stub Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - run: go mod download
+
+      - name: Run no_plugin stub scope without the native-required flag
+        run: make test-no-plugin
 
   docker:
     name: Docker Build

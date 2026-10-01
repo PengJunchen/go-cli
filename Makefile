@@ -1,4 +1,5 @@
-.PHONY: build test test-cov test-log test-leak lint fmt vet tidy clean check verify scan help
+.PHONY: build test test-cov test-cov-check test-e2e test-mock test-no-plugin \
+	test-log test-leak lint fmt vet tidy clean check verify scan help
 
 PROJECT_NAME ?= go-cli
 BUILD_DIR    ?= ./bin
@@ -8,6 +9,7 @@ COVERAGE_THRESHOLD ?= 65
 GO      ?= go
 GOFLAGS ?= -trimpath
 LDFLAGS ?= -s -w
+override VERIFY_TEST_GATE = go run ./internal/verify/cmd/test-gate
 
 # Build
 build:
@@ -15,18 +17,18 @@ build:
 
 # Run all tests
 test:
-	go test -race -count=1 ./...
+	$(VERIFY_TEST_GATE) -go-command $(GO) -go-arg=-race -go-arg=-count=1 -package=./...
 
 # Run tests with coverage
 test-cov:
 	@mkdir -p $(COVERAGE_DIR)
-	go test -race -coverprofile=$(COVERAGE_DIR)/coverage.out -covermode=atomic ./...
+	$(VERIFY_TEST_GATE) -go-command $(GO) -go-arg=-race -go-arg=-coverprofile=$(COVERAGE_DIR)/coverage.out -go-arg=-covermode=atomic -package=./...
 	go tool cover -func=$(COVERAGE_DIR)/coverage.out
 
 # Coverage threshold check
 test-cov-check:
 	@mkdir -p $(COVERAGE_DIR)
-	@go test -coverprofile=$(COVERAGE_DIR)/coverage.out ./... 2>/dev/null
+	@$(VERIFY_TEST_GATE) -go-command $(GO) -go-arg=-coverprofile=$(COVERAGE_DIR)/coverage.out -package=./...
 	@if report=$$(go tool cover -func=$(COVERAGE_DIR)/coverage.out 2>&1); then \
 	    :; \
 	else \
@@ -56,11 +58,27 @@ test-cov-check:
 
 # Run log-based verification tests
 test-log:
-	go test -race -count=1 -run "TestLogCapturer" ./internal/verify/...
+	$(VERIFY_TEST_GATE) -go-command $(GO) -go-arg=-race -go-arg=-count=1 -go-arg=-run=TestLogCapturer -package=./internal/verify/...
 
 # Run goroutine leak tests
 test-leak:
-	go test -race -count=1 -run "TestAssertNoGoroutineLeak|TestGoLeakChecker" ./internal/verify/...
+	$(VERIFY_TEST_GATE) -go-command $(GO) -go-arg=-race -go-arg=-count=1 '-go-arg=-run=TestAssertNoGoroutineLeak|TestGoLeakChecker' -package=./internal/verify/...
+
+# Run E2E-tagged tests in the packages that define them.
+test-e2e:
+	$(VERIFY_TEST_GATE) -go-command $(GO) -go-arg=-race -go-arg=-count=1 -go-arg=-tags=e2e \
+		-package=./internal/core -package=./internal/llm -package=./internal/memory \
+		-package=./internal/tools -package=./internal/tui -package=./tests/...
+
+# Run mock-tagged tests only in their supported package scope.
+test-mock:
+	$(VERIFY_TEST_GATE) -go-command $(GO) -go-arg=-race -go-arg=-count=1 -go-arg=-tags=mock -package=./internal/mock/...
+
+# Exercise the no_plugin stubs in the packages that provide them. Keep this
+# separate from Linux jobs that require the native plugin lifecycle test.
+test-no-plugin:
+	$(VERIFY_TEST_GATE) -go-command $(GO) -go-arg=-race -go-arg=-count=1 -go-arg=-tags=no_plugin \
+		-package=./internal/extension/... -package=./internal/cli/...
 
 # AST scan for mock/hardcoded bypass detection
 scan:

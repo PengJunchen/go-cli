@@ -57,6 +57,19 @@ func TestRunRejectsZeroMatchingTests(t *testing.T) {
 	}
 }
 
+func TestRunRejectsAllSkippedTests(t *testing.T) {
+	module := writeTestModule(t, "package fixture\n\nimport \"testing\"\n\nfunc TestSkipped(t *testing.T) { t.Skip(\"skip fixture\") }\n")
+	goCommand := mustGoCommand(t)
+	var stdout, stderr bytes.Buffer
+	code := run([]string{"-dir", module, "-go-command", goCommand, "-package=."}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatalf("run() accepted an all-skipped test selection; stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "no test or example passed") || !strings.Contains(stderr.String(), "skipped=1") {
+		t.Fatalf("all-skipped diagnostic missing: stdout=%q stderr=%q", stdout.String(), stderr.String())
+	}
+}
+
 func TestRunRejectsPackageWithoutTestFiles(t *testing.T) {
 	module := t.TempDir()
 	if err := os.WriteFile(filepath.Join(module, "go.mod"), []byte("module test-gate-empty\n\ngo 1.24.2\n"), 0o600); err != nil {
