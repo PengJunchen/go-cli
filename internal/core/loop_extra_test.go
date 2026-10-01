@@ -19,15 +19,19 @@ import (
 // scriptedChatModel returns a fixed sequence of responses (each possibly nil)
 // then a final content-only response, letting tests drive every loop branch.
 type scriptedChatModel struct {
-	mu   sync.Mutex
-	seq  []*llm.Message
-	errs []error
-	idx  int
+	mu       sync.Mutex
+	seq      []*llm.Message
+	errs     []error
+	idx      int
+	requests [][]llm.Message
 }
 
-func (m *scriptedChatModel) Generate(_ context.Context, _ []llm.Message, _ ...llm.Option) (*llm.Message, error) {
+func (m *scriptedChatModel) Generate(_ context.Context, messages []llm.Message, _ ...llm.Option) (*llm.Message, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	request := make([]llm.Message, len(messages))
+	copy(request, messages)
+	m.requests = append(m.requests, request)
 	if m.idx >= len(m.seq) {
 		return &llm.Message{Role: llm.RoleAssistant, Content: "fallback"}, nil
 	}

@@ -701,11 +701,12 @@ func TestRunCommitConsumerParallelCancellationDoesNotReadOrCopyLiveWorkerResult(
 	}
 	calls := make([]llm.ToolCall, 128)
 	calls[0] = llm.ToolCall{ID: "read-gated", Name: "read", Args: map[string]any{"path": path}}
-	canceled := make(map[string]bool, len(calls)-1)
+	canceled := make(map[string]string, len(calls)-1)
 	for index := 1; index < len(calls); index++ {
 		calls[index] = llm.ToolCall{ID: fmt.Sprintf("known-%03d", index), Name: "read"}
-		canceled[calls[index].ID] = true
+		canceled[calls[index].ID] = toolInterceptorCanceledOutput
 	}
+	canceled[lastKnownID] = "safe plan-mode denial"
 	owner := newRunOwner(parentCtx, nil, RunClaim{ID: "run-consumer-parallel-cancel"}, nil)
 	owner.ctx = WithRunCommit(owner.ctx, sink, RunCommitBinding{SessionID: "session-1", WorkspaceID: "workspace-1"})
 	assistant := AgentMessage{Role: string(llm.RoleAssistant), ToolCalls: calls}
@@ -733,6 +734,7 @@ func TestRunCommitConsumerParallelCancellationDoesNotReadOrCopyLiveWorkerResult(
 	require.Equal(t, "read-gated", receipts[0].ToolCallID)
 	require.Equal(t, ReceiptOutcomeUnknown, receipts[0].ReceiptOutcome)
 	require.Equal(t, lastKnownID, receipts[len(receipts)-1].ToolCallID)
+	require.Equal(t, "safe plan-mode denial", receipts[len(receipts)-1].Message.Content)
 	require.NotNil(t, terminal)
 	require.Equal(t, RunOutcomeUnknown, terminal.Outcome)
 }

@@ -23,6 +23,8 @@ import (
 // legitimately need many turns, so the default is generous.
 const defaultMaxIterations = 200
 
+const toolInterceptorCanceledOutput = "Tool call canceled by interceptor"
+
 // maxContinuationAttempts bounds the number of automatic continuation
 // requests the loop issues when the model output is truncated by max_tokens
 // (finish_reason == "length"). If that budget is exhausted, the incomplete
@@ -908,14 +910,14 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 			// ToolCallID (not positional index) so that out-of-order
 			// completion does not cause mismatched results.
 			var activeCalls []llm.ToolCall
-			canceledCalls := make(map[string]bool)
+			canceledCalls := make(map[string]string)
 			for _, tc := range resp.ToolCalls {
 				preEv := l.newPreToolCallEvent(iterationCtx, tc.Name, tc.ID, toToolsCall(tc).Args)
 				sendEvent(AgentEvent{Kind: EventKindPreToolCall, Timestamp: time.Now(), PreToolCall: preEv})
 				if preEv.IsCancelled() {
 					logger.Info("core.loop.tool_canceled", "tool", tc.Name, "id", tc.ID)
 					sendEvent(AgentEvent{Kind: "tool_canceled", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID})
-					canceledCalls[tc.ID] = true
+					canceledCalls[tc.ID] = toolInterceptionCancellationReceipt(preEv.CancellationError())
 					continue
 				}
 				activeCalls = append(activeCalls, tc)
@@ -955,8 +957,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 					}
 				}
 				for _, tc := range resp.ToolCalls {
-					if canceledCalls[tc.ID] {
-						const canceledOutput = "Tool call canceled by interceptor"
+					if canceledOutput, canceled := canceledCalls[tc.ID]; canceled {
 						sendToolResultEvent(canceledOutput, true, tc.ID, ReceiptOutcomeInterrupted, nil)
 						appendToolReceipt(&messages, &transcript, tc, canceledOutput, ReceiptOutcomeInterrupted, consumer)
 						continue
@@ -1020,15 +1021,15 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 				if preEv.IsCancelled() {
 					logger.Info("core.loop.tool_canceled", "tool", tc.Name, "id", tc.ID)
 					sendEvent(AgentEvent{Kind: "tool_canceled", Content: tc.Name, Timestamp: time.Now(), ToolCallID: tc.ID, ReceiptOutcome: ReceiptOutcomeInterrupted})
+					canceledOutput := toolInterceptionCancellationReceipt(preEv.CancellationError())
 					if consumer != nil {
-						const canceledOutput = "Tool call canceled by interceptor"
 						if commitErr := consumer.commitKnownCall(assistantOrdinal, assistantEntry.Message, "batch-"+newClaimID(), tc, uint64(len(transcript)), canceledOutput, ReceiptOutcomeInterrupted, &transcript, &messages); commitErr != nil {
 							span.SetStatus(tracing.SpanStatusError, commitErr.Error())
 							sendEvent(errEvent(commitErr))
 							return CanonicalRunResult{Events: events, Transcript: transcript}, commitErr
 						}
 					} else {
-						appendToolReceipt(&messages, &transcript, tc, "Tool call canceled by interceptor", ReceiptOutcomeInterrupted, consumer)
+						appendToolReceipt(&messages, &transcript, tc, canceledOutput, ReceiptOutcomeInterrupted, consumer)
 					}
 					continue
 				}
@@ -1102,6 +1103,13 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 	logger.Error("core.loop.max_iterations", "max", l.maxIterations)
 	sendEvent(errEvent(errMaxIterations))
 	return CanonicalRunResult{Events: events, Transcript: transcript}, errMaxIterations
+}
+
+func toolInterceptionCancellationReceipt(err error) string {
+	if message, ok := SafeToolInterceptionMessage(err); ok {
+		return message
+	}
+	return toolInterceptorCanceledOutput
 }
 
 func preflightDurableRequest(
