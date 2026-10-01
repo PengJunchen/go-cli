@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -349,10 +350,10 @@ func isLoopbackHost(host string) bool {
 }
 
 func canonicalLocalHost(host string) string {
-	if ip := net.ParseIP(host); ip != nil {
+	if ip, err := netip.ParseAddr(host); err == nil {
 		return ip.String()
 	}
-	return strings.ToLower(strings.TrimSuffix(host, "."))
+	return strings.ToLower(host)
 }
 
 func localOriginMatches(origin string, requestAuthority localHTTPAuthority, expectedScheme string, defaultPort int) bool {

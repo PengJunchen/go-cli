@@ -76,6 +76,16 @@ func TestHTTPServerNoAuthLoopbackPolicyAllowsLocalAuthoritiesAndNativePeers(t *t
 			origins: []string{"http://" + net.JoinHostPort("::1", port)},
 		},
 		{
+			name:    "IPv4-mapped IPv6 same origin",
+			host:    net.JoinHostPort("::ffff:127.0.0.1", port),
+			origins: []string{"http://" + net.JoinHostPort("::ffff:127.0.0.1", port)},
+		},
+		{
+			name:    "localhost trailing dot same origin",
+			host:    "localhost.:" + port,
+			origins: []string{"http://localhost.:" + port},
+		},
+		{
 			name: "native CLI without Origin",
 			host: net.JoinHostPort("127.0.0.1", port),
 		},
@@ -192,6 +202,30 @@ func TestHTTPServerNoAuthLoopbackPolicyRejectsRemoteAndMalformedAuthorities(t *t
 			name:        "Origin with a different local authority",
 			host:        localHost,
 			origins:     []string{"http://localhost:" + port},
+			withProfile: true,
+		},
+		{
+			name:        "Origin localhost with trailing dot differs from Host localhost",
+			host:        "localhost:" + port,
+			origins:     []string{"http://localhost.:" + port},
+			withProfile: true,
+		},
+		{
+			name:        "Origin localhost differs from Host localhost with trailing dot",
+			host:        "localhost.:" + port,
+			origins:     []string{"http://localhost:" + port},
+			withProfile: true,
+		},
+		{
+			name:        "IPv4 Origin differs from IPv4-mapped IPv6 Host",
+			host:        net.JoinHostPort("::ffff:127.0.0.1", port),
+			origins:     []string{"http://" + localHost},
+			withProfile: true,
+		},
+		{
+			name:        "IPv4-mapped IPv6 Origin differs from IPv4 Host",
+			host:        localHost,
+			origins:     []string{"http://" + net.JoinHostPort("::ffff:127.0.0.1", port)},
 			withProfile: true,
 		},
 		{
