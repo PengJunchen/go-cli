@@ -1,11 +1,13 @@
 package cli
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync"
 	"testing"
 
@@ -121,6 +123,27 @@ func TestAssembledModelCyclerUsesResolvedCandidatesAndAttemptAccounting(t *testi
 	assert.Equal(t, 1, summary.UnknownUsageAttempts, "the failed selected provider attempt has no authoritative usage")
 	assert.Equal(t, 4, summary.KnownInputTokens)
 	assert.Equal(t, 3, summary.KnownOutputTokens)
+
+	var costOutput bytes.Buffer
+	costDeps := &slashContext{out: &costOutput, costTracker: assembly.CostTracker}
+	_, err = (&CostHandler{}).Handle(context.Background(), nil, costDeps)
+	require.NoError(t, err)
+	assert.Same(t, assembly.CostTracker, costDeps.CostTracker(), "the report reads the Assembly's live tracker")
+
+	report := costOutput.String()
+	assert.Contains(t, report, "Known cost subtotal: $0.0000", "both rows are unpriced, so the known subtotal stays explicitly zero")
+	assert.Contains(t, report, "Attempt known cost subtotal: $0.0000")
+	assert.Contains(t, report, "Provider attempts: 2")
+	assert.Contains(t, report, "Known provider tokens: 4 in / 3 out", "known usage is counted once from the successful physical attempt")
+	assert.Contains(t, report, "Unknown usage attempts: 1")
+	assert.Contains(t, report, "Unknown cost attempts: 2", "the default cost tiers do not price these fixture model IDs")
+	assert.Equal(t, 2, strings.Count(report, "attempt_id="), "each physical attempt should render once")
+	assert.Contains(t, report, `model="cycle-selected-model" usage=unknown cost=unknown price_source=unknown`)
+	assert.Contains(t, report, `model="cycle-primary-model" usage=reported (4 in / 3 out) cost=unknown price_source=unknown`)
+	assert.NotContains(t, report, "Known provider tokens: 8 in / 6 out", "rendering must not add request tokens a second time")
+
+	_, summaryAfterReport := assembly.CostTracker.AttemptCostSnapshot()
+	assert.Equal(t, summary, summaryAfterReport, "rendering the report must not record attempts or add their usage again")
 }
 
 func TestReviewProviderFlagOverrideDoesNotRebindProviderConfigKey(t *testing.T) {
