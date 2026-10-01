@@ -128,6 +128,26 @@ func TestDurableSessionManagerSameIDSameBranchDoesNotPrepareResume(t *testing.T)
 	assert.Equal(t, 1, prepared.closeCount())
 }
 
+func TestDurableSessionManagerExclusiveReconciliationLeaseBlocksRunLeases(t *testing.T) {
+	prepared := newManagerTestPrepared("session-admin", "branch-main")
+	manager := newManagerTestManager(t, newManagerTestPreparer(prepared))
+	require.NoError(t, manager.prepareNew(context.Background(), "admin lease"))
+
+	admin, err := manager.acquireReconciliationLease()
+	require.NoError(t, err)
+	assert.Equal(t, "session-admin", admin.SessionID())
+	_, err = manager.acquireRunLease()
+	assert.Error(t, err, "run admission must stay closed while reconciliation owns the session")
+	admin.CloseRunCommit()
+
+	run, err := manager.acquireRunLease()
+	require.NoError(t, err)
+	_, err = manager.acquireReconciliationLease()
+	assert.Error(t, err, "reconciliation must refuse to overlap an active run lease")
+	run.CloseRunCommit()
+	require.NoError(t, manager.requestClose(context.Background()))
+}
+
 func TestDurableSessionManagerRejectsUnsupportedBranchWithoutReopeningSameFile(t *testing.T) {
 	prepared := newManagerTestPrepared("session-a", "branch-main")
 	preparer := newManagerTestPreparer(prepared)

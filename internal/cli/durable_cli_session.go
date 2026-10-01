@@ -179,6 +179,40 @@ func (cliSession *durableCLISession) bindRun(ctx context.Context) (context.Conte
 	return bindDurableSessionRun(ctx, lease, cliSession.index)
 }
 
+func (cliSession *durableCLISession) reconcileUnknownAction(ctx context.Context, request session.OperatorReconciliationRequest) error {
+	if cliSession == nil || cliSession.manager == nil || cliSession.index == nil {
+		return ErrNoDurableSessionSelected
+	}
+	lease, err := cliSession.manager.acquireReconciliationLease()
+	if err != nil {
+		return fmt.Errorf("cli: acquire exclusive durable-session reconciliation lease: %w", err)
+	}
+	sink, err := session.NewSessionRunCommitSink(lease.PreparedSession(), cliSession.index, lease.WorkspaceID(), lease.CloseRunCommit)
+	if err != nil {
+		lease.CloseRunCommit()
+		return fmt.Errorf("cli: prepare durable-session reconciliation: %w", err)
+	}
+	defer sink.CloseRunCommit()
+	return sink.ReconcileUnknownAction(ctx, request)
+}
+
+func (cliSession *durableCLISession) syncRecordedResolutions(ctx context.Context) error {
+	if cliSession == nil || cliSession.manager == nil || cliSession.index == nil {
+		return ErrNoDurableSessionSelected
+	}
+	lease, err := cliSession.manager.acquireReconciliationLease()
+	if err != nil {
+		return fmt.Errorf("cli: acquire exclusive durable-session recovery lease: %w", err)
+	}
+	sink, err := session.NewSessionRunCommitSink(lease.PreparedSession(), cliSession.index, lease.WorkspaceID(), lease.CloseRunCommit)
+	if err != nil {
+		lease.CloseRunCommit()
+		return fmt.Errorf("cli: prepare durable-session resolution sync: %w", err)
+	}
+	defer sink.CloseRunCommit()
+	return sink.SyncRecordedResolutions(ctx)
+}
+
 // bindDurableSessionRun gives the actual session adapter ownership of a
 // successful lease. A failed adapter construction returns the borrow directly
 // so the manager can close or replace its base handle.

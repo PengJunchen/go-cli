@@ -264,7 +264,7 @@ func TestInteractiveDurableSessionKeepsOnePhysicalSessionAcrossTurns(t *testing.
 	require.Contains(t, out.String(), "Session tree", "read-only slash view must use the selected canonical snapshot")
 	require.Contains(t, out.String(), "No branches in session tree.", "branch listing remains available in durable mode")
 	require.Contains(t, out.String(), "durable session command is unsupported", "branch and resume mutations must fail before changing state")
-	require.Contains(t, out.String(), "Durable session commands: /session tree and /session branches; resume at startup with --resume-session <physical-id>.")
+	require.Contains(t, out.String(), "Durable session commands: /session tree, /session branches, /session pending, and /session reconcile; resume at startup with --resume-session <physical-id>.")
 	sessionHandler, ok := repl.slashReg.Lookup("session")
 	require.True(t, ok)
 	sessionCompletions, ok := sessionHandler.(SubcommandProvider)
@@ -272,6 +272,8 @@ func TestInteractiveDurableSessionKeepsOnePhysicalSessionAcrossTurns(t *testing.
 	require.Equal(t, []Subcommand{
 		{Name: "tree", Description: "Show the durable session tree"},
 		{Name: "branches", Description: "List durable session branches"},
+		{Name: "pending", Description: "List unresolved durable actions"},
+		{Name: "reconcile", Description: "Explicitly accept one unknown action outcome"},
 	}, sessionCompletions.Subcommands(), "durable completion must not offer slash mutations")
 	require.Empty(t, repl.sessionTree.ListBranches(), "rejected slash mutations must not change the selected tree")
 	_, slashErr := repl.sessionHandler.Handle(context.Background(), session.SlashCommand{Name: "fork", Args: []string{"rejected"}})

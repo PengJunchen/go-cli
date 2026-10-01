@@ -428,6 +428,144 @@ func TestSessionRunCommitSinkRecordsReceiptBeforeResolvingExactProof(t *testing.
 	require.Equal(t, DispatchMarkerResolved, decisions[0].MarkerState)
 }
 
+func TestSessionRunCommitSinkExplicitlyReconcilesUnknownAction(t *testing.T) {
+	ctx := context.Background()
+	prepared, err := NewDurableJSONLSessionPreparer(t.TempDir(), nil).PrepareNew(ctx, "operator reconciliation")
+	require.NoError(t, err)
+	defer prepared.Close()
+	workspaceID := "workspace-v1-adapter"
+	var failResolutionSync atomic.Bool
+	index := newWorkspaceQuarantineIndex(t.TempDir(), workspaceIndexIO{sync: func(file *os.File) error {
+		if failResolutionSync.Load() {
+			return errors.New("injected workspace resolution sync failure")
+		}
+		return file.Sync()
+	}})
+	require.NoError(t, index.EnsureWorkspace(ctx, workspaceID))
+	sink, err := NewSessionRunCommitSink(prepared, index, workspaceID, nil)
+	require.NoError(t, err)
+	binding := core.RunCommitBinding{SessionID: prepared.View().SessionID, WorkspaceID: workspaceID, OwnerGeneration: "parent-generation"}
+	intent := preparedSessionRunCommitIntent(t)
+	var action PendingActionRef
+	identity := &core.ExecutionIdentity{
+		Kind: core.ExecutionIdentityProcessGroup, Platform: "linux", HostGeneration: "fixture-host",
+		LeaderPID: 999999, ProcessStartToken: "fixture-start", ProcessGroupID: 999999,
+	}
+	userMessage := core.AgentMessage{Role: "user", Content: "perform one write", InputKind: core.InputKindUser}
+	assistantMessage := core.AgentMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: intent.ToolCallID, Name: "read", Args: map[string]any{"path": "README.md"}}}}
+	unknownMessage := core.AgentMessage{Role: "tool", ToolCallID: intent.ToolCallID, ToolName: "read", Content: "outcome unknown", ReceiptOutcome: core.ReceiptOutcomeUnknown}
+	err = runSessionCommitAgent(t, sink, binding, func(ctx context.Context, actual core.RunCommitSink, runBinding core.RunCommitBinding, runID string) error {
+		intent.SessionID = runBinding.SessionID
+		intent.RunID = runID
+		intent.OwnerGeneration = runBinding.OwnerGeneration
+		action = PendingActionRef{
+			SessionID: runBinding.SessionID, WorkspaceID: runBinding.WorkspaceID, RunID: runID,
+			ActionBatchID: intent.ActionBatchID, AssistantTranscriptOrdinal: 0,
+			ToolCallID: intent.ToolCallID, ActionID: intent.ActionID,
+		}
+		if err := actual.CommitInput(ctx, core.RunCommitInput{RunID: runID, TranscriptIndex: 0, Message: userMessage, InputKind: core.InputKindUser}); err != nil {
+			return err
+		}
+		if err := actual.BeginIntentBatch(ctx, core.RunIntentBatch{
+			RunID: runID, ActionBatchID: intent.ActionBatchID, AssistantTranscriptOrdinal: 0,
+			AssistantMessage: assistantMessage, Intents: []core.ActionIntent{intent},
+		}); err != nil {
+			return err
+		}
+		if err := actual.RecordExecution(ctx, core.ActionExecution{
+			RunID: runID, AssistantTranscriptOrdinal: 0, ToolCallID: intent.ToolCallID,
+			ActionID: intent.ActionID, OwnerGeneration: intent.OwnerGeneration,
+			DispatchState: core.DispatchStateDispatched, ResourceState: core.RunExecutionCleanupPending,
+			ExecutionIdentity: identity,
+		}); err != nil {
+			return err
+		}
+		if err := actual.RecordReceipt(ctx, core.RunToolReceipt{
+			RunID: runID, AssistantTranscriptOrdinal: 0, ToolCallID: intent.ToolCallID, ActionID: intent.ActionID,
+			TranscriptIndex: 2, DispatchState: core.DispatchStateDispatched, ReceiptOutcome: core.ReceiptOutcomeUnknown,
+			Message: unknownMessage,
+		}); err != nil {
+			return err
+		}
+		return actual.CommitTerminal(ctx, core.RunTerminal{
+			RunID:      runID,
+			Transcript: []core.TranscriptEntry{{Message: userMessage}, {Message: assistantMessage}, {Message: unknownMessage}},
+			Outcome:    core.RunOutcomeUnknown, TerminalCheckpointID: "terminal-unknown-action",
+		})
+	})
+	require.NoError(t, err)
+
+	before, err := prepared.Snapshot()
+	require.NoError(t, err)
+	adminSink, err := NewSessionRunCommitSink(prepared, index, workspaceID, nil)
+	require.NoError(t, err)
+	req := OperatorReconciliationRequest{
+		Action: action, ExpectedRevision: before.PublishedView.Revision,
+		Reason: "confirmed-out-of-band", Reference: "incident-42", AcceptUnknownRisk: true,
+	}
+	notAccepted := req
+	notAccepted.AcceptUnknownRisk = false
+	require.Error(t, adminSink.ReconcileUnknownAction(ctx, notAccepted), "unknown outcome requires explicit acknowledgement")
+	staleRevision := req
+	staleRevision.ExpectedRevision = "stale-revision"
+	require.Error(t, adminSink.ReconcileUnknownAction(ctx, staleRevision), "stale session state must not be reconciled")
+	adminSink.inspectExecutionIdentity = func(core.ExecutionIdentity) core.ProcessGroupExitInspection {
+		return core.ProcessGroupExitInspection{Status: core.ProcessGroupExitPresent}
+	}
+	require.Error(t, adminSink.ReconcileUnknownAction(ctx, req), "a known-live owned process group must remain quarantined")
+	adminSink.inspectExecutionIdentity = func(core.ExecutionIdentity) core.ProcessGroupExitInspection {
+		return core.ProcessGroupExitInspection{Status: core.ProcessGroupExitUnknown}
+	}
+	failResolutionSync.Store(true)
+	require.Error(t, adminSink.ReconcileUnknownAction(ctx, req), "index sync failure must be reported after local proof is durable")
+	failResolutionSync.Store(false)
+	adminSink.CloseRunCommit()
+	adminSink, err = NewSessionRunCommitSink(prepared, index, workspaceID, nil)
+	require.NoError(t, err)
+	require.NoError(t, adminSink.SyncRecordedResolutions(ctx), "retry should idempotently sync the existing local resolution checkpoint")
+	require.NoError(t, adminSink.ReconcileUnknownAction(ctx, req), "retry must idempotently apply the already-synced local resolution")
+
+	after, err := prepared.Snapshot()
+	require.NoError(t, err)
+	var receipt *SessionEntry
+	var reconciliation *SessionEntry
+	var resolution *SessionEntry
+	for i := range after.DurableEntries {
+		row := &after.DurableEntries[i]
+		switch {
+		case row.Type == EntryTypeTool && row.ActionID == action.ActionID && row.ActionState == "":
+			receipt = row
+		case row.CheckpointKind == CheckpointReconciliation:
+			reconciliation = row
+		case row.CheckpointKind == CheckpointExecutionResolution:
+			resolution = row
+		}
+	}
+	require.NotNil(t, receipt)
+	require.Equal(t, core.ReceiptOutcomeUnknown, receipt.ReceiptOutcome, "operator reconciliation must preserve the original terminal receipt")
+	require.NotNil(t, reconciliation)
+	require.NotNil(t, resolution)
+	require.Greater(t, reconciliation.Seq, receipt.Seq)
+	require.Greater(t, resolution.Seq, reconciliation.Seq)
+	require.Equal(t, reconciliation.ID, resolution.ExecutionResolution.EvidenceRef)
+	require.Equal(t, "confirmed-out-of-band", reconciliation.OperatorReconciliation.Reason)
+	require.Equal(t, "incident-42", reconciliation.OperatorReconciliation.Reference)
+	require.True(t, reconciliation.OperatorReconciliation.AcceptedUnknownRisk)
+	require.Equal(t, DispatchMarkerResolved, indexMarkerStateForTest(t, index, action))
+	require.Equal(t, 1, countCheckpoint(after.DurableEntries, CheckpointReconciliation))
+	require.Equal(t, 1, countCheckpoint(after.DurableEntries, CheckpointExecutionResolution))
+}
+
+func countCheckpoint(rows []SessionEntry, kind CheckpointKind) int {
+	count := 0
+	for _, row := range rows {
+		if row.CheckpointKind == kind {
+			count++
+		}
+	}
+	return count
+}
+
 func TestSessionRunCommitSinkBuffersCanonicalReceiptOrderAcrossKnownDenial(t *testing.T) {
 	ctx := context.Background()
 	prepared, err := NewDurableJSONLSessionPreparer(t.TempDir(), nil).PrepareNew(ctx, "canonical receipt order")

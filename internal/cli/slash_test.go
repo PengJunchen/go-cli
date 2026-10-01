@@ -100,7 +100,7 @@ func TestSlashHelp(t *testing.T) {
 		"no automatic extraction or prompt injection",
 		"Goal, Task, and Todo: stored only in memory for this process",
 		"Session storage: without session.store_path, /session is unsupported.",
-		"Durable mode exposes /session tree and /session branches; resume uses --resume-session <physical-id> at startup.",
+		"Durable mode exposes /session tree, branches, pending, and explicit one-action reconciliation; resume uses --resume-session <physical-id> at startup.",
 		"Durable /session resume, fork, clone, and switch are unsupported.",
 		"Legacy mutable mode supports /session tree, branches, resume, fork, clone, and switch with a wired mutable tree; resume listing needs a session store.",
 		"Session snapshot and schema migration are unavailable.",

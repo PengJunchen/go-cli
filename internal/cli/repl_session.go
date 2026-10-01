@@ -418,6 +418,8 @@ func (s *REPLSession) setupSlashContext() error {
 				switch {
 				case s.assembly.durableSession != nil:
 					handler.mode = sessionCommandModeDurable
+					handler.durableSession = s.assembly.durableSession
+					handler.runSlotGuard = s.assembly.runSlotGuard
 				case s.assembly.SessionStore != nil:
 					handler.mode = sessionCommandModeLegacy
 				default:
