@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -26,6 +27,72 @@ import (
 type r4ShellHookSpec struct {
 	event   string
 	command string
+}
+
+type r4PlanControllerWithoutStartBoundary struct{}
+
+func (r4PlanControllerWithoutStartBoundary) Enter(context.Context, string) error { return nil }
+func (r4PlanControllerWithoutStartBoundary) Exit(context.Context, string) error  { return nil }
+func (r4PlanControllerWithoutStartBoundary) IsActive() bool                      { return false }
+func (r4PlanControllerWithoutStartBoundary) ShouldBlockWrite(string) bool        { return false }
+
+func TestPlanAwareShellHookStartReturnsTypedDenialAndResumesAfterExit(t *testing.T) {
+	controller := core.NewDefaultPlanModeController()
+	require.NoError(t, controller.Enter(context.Background(), "planning"))
+
+	started := false
+	err := planModeShellHookStart(core.EventPreToolUse, controller, func() error {
+		started = true
+		return nil
+	})
+	message, safe := core.SafeToolInterceptionMessage(err)
+	require.True(t, safe, "Plan denial must remain a typed safe cancellation")
+	assert.Equal(t, planModePreToolShellHookDenialMessage, message)
+	assert.False(t, started, "pre-tool shell command must not start during Plan mode")
+
+	err = planModeShellHookStart(core.EventSessionStart, controller, func() error {
+		started = true
+		return nil
+	})
+	require.IsType(t, planModeLifecycleShellHookSkipped{}, err)
+	assert.False(t, started, "lifecycle shell command must not start during Plan mode")
+
+	require.NoError(t, controller.Exit(context.Background(), "done"))
+	err = planModeShellHookStart(core.EventPreToolUse, controller, func() error {
+		started = true
+		return nil
+	})
+	require.NoError(t, err)
+	assert.True(t, started, "the captured hook should resume after Plan mode exits")
+}
+
+func TestPlanAwareShellHookStartFailsClosedWithoutAtomicControllerBoundary(t *testing.T) {
+	started := false
+	err := planModeShellHookStart(core.EventPreToolUse, r4PlanControllerWithoutStartBoundary{}, func() error {
+		started = true
+		return nil
+	})
+	_, safe := core.SafeToolInterceptionMessage(err)
+	assert.True(t, safe, "an external controller without a shared start boundary must not fall through AC-5")
+	assert.False(t, started, "a shell command must not start without the Plan transition fence")
+
+	err = planModeShellHookStart(core.EventPreToolUse, &core.DefaultPlanModeController{}, func() error {
+		started = true
+		return nil
+	})
+	_, safe = core.SafeToolInterceptionMessage(err)
+	assert.True(t, safe, "a controller without its fence must be a typed safe denial")
+	assert.False(t, started, "a shell command must not start without the Plan transition fence")
+}
+
+func TestPlanAwareShellHookStartPreservesOrdinaryStartError(t *testing.T) {
+	startErr := errors.New("private child start detail")
+	err := planModeShellHookStart(core.EventPreToolUse, core.NewDefaultPlanModeController(), func() error {
+		return startErr
+	})
+	assert.ErrorIs(t, err, startErr)
+	_, safe := core.SafeToolInterceptionMessage(err)
+	assert.False(t, safe, "an admitted cmd.Start error must keep ordinary AC-5 handling")
 }
 
 func TestAssembledPlanBlocksOpaquePreToolHooksBeforeDispatch(t *testing.T) {

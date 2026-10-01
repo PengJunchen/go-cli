@@ -127,6 +127,23 @@ func (f *DispatchFence) read(callback func(DispatchFenceSnapshot)) error {
 	return nil
 }
 
+// WithSnapshot runs a short callback while holding the fence's read boundary
+// and supplies the matching generation tuple. Callbacks must not invoke a
+// tool or wait for external work. A process-start caller must return as soon
+// as the child is started and wait for or drain it only after the boundary is
+// released.
+func (f *DispatchFence) WithSnapshot(callback func(DispatchFenceSnapshot) error) error {
+	if f == nil {
+		return ErrDispatchFenceUnavailable
+	}
+	if callback == nil {
+		return errors.New("tools: dispatch fence callback is nil")
+	}
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return callback(f.generations)
+}
+
 // Publish applies a short state update under the fence and advances its
 // generation domain. When expected is non-nil, the complete three-domain
 // snapshot must still match; this prevents an approval-cache update from

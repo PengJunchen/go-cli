@@ -1219,13 +1219,9 @@ func (s *assembleState) loadShellHooks(path string, data []byte, verified *appro
 		}
 		name := fmt.Sprintf("shell-hook-%d", i)
 		startGuard := core.ShellHookStartGuard(func(ctx context.Context, start func() error) error {
-			if s.planCtrl != nil && s.planCtrl.IsActive() {
-				if event == core.EventPreToolUse {
-					return planModePreToolShellHookDenial{}
-				}
-				return planModeLifecycleShellHookSkipped{}
-			}
-			return verified.CommitIfCurrent(ctx, start)
+			return verified.CommitIfCurrent(ctx, func() error {
+				return planModeShellHookStart(event, s.planCtrl, start)
+			})
 		})
 		s.shellHooks = append(s.shellHooks, core.NewShellHookWithStartGuard(name, event, hc.Command, timeout, startGuard))
 	}

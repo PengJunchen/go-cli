@@ -26,17 +26,30 @@ func TestHookSystem_ShellHookPreToolUse_Allow(t *testing.T) {
 func TestShellHookStartGuardReturnsBeforeWaitingForChild(t *testing.T) {
 	started := make(chan struct{})
 	guardReturned := make(chan struct{})
-	marker := filepath.Join(t.TempDir(), "hook-ran")
+	tempDir := t.TempDir()
+	marker := filepath.Join(tempDir, "hook-ran")
+	childStarted := filepath.Join(tempDir, "child-started")
+	releaseChild := filepath.Join(tempDir, "release-child")
+	t.Cleanup(func() {
+		if err := os.WriteFile(releaseChild, []byte("release"), 0o600); err != nil {
+			t.Errorf("release shell-hook child during cleanup: %v", err)
+		}
+	})
+	controller := NewDefaultPlanModeController()
 	guard := ShellHookStartGuard(func(_ context.Context, start func() error) error {
 		close(started)
-		if err := start(); err != nil {
+		run, err := controller.StartIfInactive(start)
+		if err != nil {
 			return err
+		}
+		if !run {
+			return errors.New("Plan mode unexpectedly blocked the lifecycle hook")
 		}
 		close(guardReturned)
 		return nil
 	})
 	hook := NewShellHookWithStartGuard("guarded", EventSessionStart,
-		"sleep 0.25; printf done >> '"+marker+"'", 3*time.Second, guard)
+		"printf started > '"+childStarted+"'; while [ ! -f '"+releaseChild+"' ]; do sleep 0.01; done; printf done > '"+marker+"'", 3*time.Second, guard)
 	done := make(chan struct{})
 	go func() {
 		hook.SessionStart(context.Background())
@@ -53,10 +66,38 @@ func TestShellHookStartGuardReturnsBeforeWaitingForChild(t *testing.T) {
 	case <-time.After(time.Second):
 		t.Fatal("start guard did not return after starting the child")
 	}
+	childStartDeadline := time.After(time.Second)
+	childStartPoll := time.NewTicker(10 * time.Millisecond)
+	defer childStartPoll.Stop()
+	for {
+		if _, err := os.Stat(childStarted); err == nil {
+			break
+		} else if !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("inspect child-start marker: %v", err)
+		}
+		select {
+		case <-childStartPoll.C:
+		case <-childStartDeadline:
+			t.Fatal("child did not reach its controlled wait")
+		}
+	}
 	select {
 	case <-done:
 		t.Fatal("shell hook waited for the child while still inside its start guard")
-	case <-time.After(50 * time.Millisecond):
+	default:
+	}
+	planEntryResult := make(chan error, 1)
+	go func() { planEntryResult <- controller.Enter(context.Background(), "planning") }()
+	select {
+	case err := <-planEntryResult:
+		if err != nil {
+			t.Fatalf("Plan entry failed while the child was running: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Plan entry remained blocked until the lifecycle child finished")
+	}
+	if err := os.WriteFile(releaseChild, []byte("release"), 0o600); err != nil {
+		t.Fatalf("release shell-hook child: %v", err)
 	}
 	select {
 	case <-done:
@@ -85,6 +126,28 @@ func TestShellHookStartGuardErrorStillJoinsStartedChild(t *testing.T) {
 	}
 	if data, readErr := os.ReadFile(marker); readErr != nil || string(data) != "done" {
 		t.Fatalf("started child was not joined: data=%q error=%v", data, readErr)
+	}
+}
+
+func TestHookManagerKeepsAC5ForAuthorizedStartFailure(t *testing.T) {
+	controller := NewDefaultPlanModeController()
+	startErr := errors.New("private child start detail")
+	hook := NewShellHookWithStartGuard("authorized-start-failure", EventPreToolUse, "unused", time.Second,
+		func(_ context.Context, _ func() error) error {
+			authorized, err := controller.StartIfInactive(func() error { return startErr })
+			if !authorized && err == nil {
+				return errors.New("Plan mode unexpectedly blocked the test hook")
+			}
+			if err == nil {
+				return startErr
+			}
+			return err
+		})
+	manager := NewHookManager(hook)
+
+	err := manager.PreToolUseContextInterceptor()(context.Background(), "read", "call-1", nil)
+	if err != nil {
+		t.Fatalf("ordinary child-start failures must retain AC-5 allow behavior: %v", err)
 	}
 }
 
