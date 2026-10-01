@@ -50,18 +50,32 @@ type hookPayload struct {
 // JSON payload on stdin describing the event, and (for tool events) the tool
 // name, arguments and result.
 type ShellHook struct {
-	name    string
-	event   HookEvent
-	command string
-	timeout time.Duration
+	name       string
+	event      HookEvent
+	command    string
+	timeout    time.Duration
+	startGuard ShellHookStartGuard
 }
 
+// ShellHookStartGuard authorizes the process launch itself. Implementations
+// may wrap start in a short transaction; they must not hold their guard while
+// the child process runs.
+type ShellHookStartGuard func(ctx context.Context, start func() error) error
+
 var _ HookSystem = (*ShellHook)(nil)
+
+var errShellHookGuardDidNotStart = errors.New("core: shell hook start guard did not start its child")
 
 // NewShellHook builds a ShellHook that runs command when event fires, bounded
 // by timeout.
 func NewShellHook(name string, event HookEvent, command string, timeout time.Duration) *ShellHook {
 	return &ShellHook{name: name, event: event, command: command, timeout: timeout}
+}
+
+// NewShellHookWithStartGuard builds a shell hook whose process launch is
+// authorized by startGuard. The child is awaited only after the guard returns.
+func NewShellHookWithStartGuard(name string, event HookEvent, command string, timeout time.Duration, startGuard ShellHookStartGuard) *ShellHook {
+	return &ShellHook{name: name, event: event, command: command, timeout: timeout, startGuard: startGuard}
 }
 
 // Name returns the hook identifier.
@@ -183,7 +197,28 @@ func (h *ShellHook) execCommand(ctx context.Context, payload hookPayload) (strin
 	var buf bytes.Buffer
 	cmd.Stdout = &buf
 	cmd.Stderr = &buf
-	if err := cmd.Run(); err != nil {
+	started := false
+	start := func() error {
+		err := cmd.Start()
+		started = err == nil
+		return err
+	}
+	var startErr error
+	if h.startGuard != nil {
+		startErr = h.startGuard(ctx, start)
+	} else {
+		startErr = start()
+	}
+	if startErr != nil {
+		if started {
+			startErr = errors.Join(startErr, cmd.Wait())
+		}
+		return buf.String(), startErr
+	}
+	if !started {
+		return buf.String(), errShellHookGuardDidNotStart
+	}
+	if err := cmd.Wait(); err != nil {
 		return buf.String(), err
 	}
 	return buf.String(), nil
@@ -222,19 +257,35 @@ func (m *HookManager) AfterRun(_ context.Context, _ Submission, _ Result, _ erro
 // under context.Background(); each shell hook applies its own timeout.
 func (m *HookManager) PreToolUseInterceptor() ToolInterceptor {
 	return func(toolName, _ string, args map[string]any) error {
-		ctx := context.Background()
-		for _, h := range m.hooks {
-			allow, err := h.PreToolUse(ctx, toolName, args)
-			if err != nil {
-				slog.Warn("core.hook_manager.pre_tool_use_error", "err", err)
-				continue // AC-5
-			}
-			if !allow {
-				return fmt.Errorf("tool %s blocked by hook", toolName) // AC-4
-			}
-		}
-		return nil
+		return m.preToolUse(context.Background(), toolName, args)
 	}
+}
+
+// PreToolUseContextInterceptor returns the run-context-aware variant of the
+// pre-tool interceptor. It preserves the active run context for cancellation
+// and trust-generation checks while retaining legacy AC-5 handling for hook
+// execution errors.
+func (m *HookManager) PreToolUseContextInterceptor() ContextToolInterceptor {
+	return func(ctx context.Context, toolName, _ string, args map[string]any) error {
+		if ctx == nil {
+			ctx = context.Background()
+		}
+		return m.preToolUse(ctx, toolName, args)
+	}
+}
+
+func (m *HookManager) preToolUse(ctx context.Context, toolName string, args map[string]any) error {
+	for _, h := range m.hooks {
+		allow, err := h.PreToolUse(ctx, toolName, args)
+		if err != nil {
+			slog.Warn("core.hook_manager.pre_tool_use_error", "err", err)
+			continue // AC-5
+		}
+		if !allow {
+			return fmt.Errorf("tool %s blocked by hook", toolName) // AC-4
+		}
+	}
+	return nil
 }
 
 // PostToolUseWrapper returns a tools.ToolExecutorWrapper that invokes
