@@ -1145,20 +1145,29 @@ func (s *assembleState) loadConfiguredShellHooks() {
 		return
 	}
 	s.shellHooksLoaded = true
-	hooksPath := filepath.Join(s.gitCwd, ".go-cli", "hooks.yaml")
-	if _, statErr := os.Stat(hooksPath); statErr == nil {
-		s.loadShellHooks(hooksPath)
-	}
-}
-
-// loadShellHooks reads a hooks.yaml file, parses shell hook definitions, and
-// stores shell hooks for later assembly into the HookManager.
-func (s *assembleState) loadShellHooks(path string) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		s.logger.Warn("assemble_hooks_read_failed", "path", path, "err", err)
+	if s.rc == nil {
 		return
 	}
+	verified := s.rc.VerifiedProjectSources()
+	if verified == nil {
+		return
+	}
+	projectRoot, err := canonicalExistingDirectory(s.gitCwd)
+	if err != nil || projectRoot != verified.CanonicalRoot() {
+		s.logger.Warn("assemble_hooks_unavailable", "reason", "verified project source root mismatch")
+		return
+	}
+	data, present := verified.SourceBytes(config.ProjectHooksSourceID)
+	if !present {
+		return
+	}
+	hooksPath := filepath.Join(verified.CanonicalRoot(), ".go-cli", "hooks.yaml")
+	s.loadShellHooks(hooksPath, data, verified)
+}
+
+// loadShellHooks parses verified hooks.yaml bytes and stores guarded shell
+// hooks for later assembly into the HookManager.
+func (s *assembleState) loadShellHooks(path string, data []byte, verified *approval.VerifiedProjectSources) {
 	var hooksCfg config.HooksConfig
 	if err := config.UnmarshalConfig(data, config.ConfigFormatYAML, &hooksCfg); err != nil {
 		s.logger.Warn("assemble_hooks_parse_failed", "path", path, "err", err)
@@ -1183,7 +1192,10 @@ func (s *assembleState) loadShellHooks(path string) {
 			timeout = 10 * time.Second
 		}
 		name := fmt.Sprintf("shell-hook-%d", i)
-		s.shellHooks = append(s.shellHooks, core.NewShellHook(name, event, hc.Command, timeout))
+		startGuard := core.ShellHookStartGuard(func(ctx context.Context, start func() error) error {
+			return verified.CommitIfCurrent(ctx, start)
+		})
+		s.shellHooks = append(s.shellHooks, core.NewShellHookWithStartGuard(name, event, hc.Command, timeout, startGuard))
 	}
 	s.logger.Info("assemble_hooks_ready", "path", path, "count", len(s.shellHooks))
 }
@@ -1662,20 +1674,12 @@ func (s *assembleState) assembleMiddleware() {
 
 	// Bind this Assembly's pre-tool interceptors to its loop. Plan Mode runs
 	// first so blocked calls retain the tool_canceled event semantics; shell
-	// hooks then run only for calls allowed by Plan Mode. The executor wrapper
+	// hooks run afterward with the caller's run context. The executor wrapper
 	// remains a final Plan Mode guard for calls outside the loop path.
-	interceptors := []core.ToolInterceptor{core.NewPlanModeToolInterceptor(s.planCtrl)}
+	s.loopAgent.SetToolInterceptor(core.NewPlanModeToolInterceptor(s.planCtrl))
 	if s.hookMgr != nil {
-		interceptors = append(interceptors, s.hookMgr.PreToolUseInterceptor())
+		s.loopAgent.SetContextToolInterceptor(s.hookMgr.PreToolUseContextInterceptor())
 	}
-	s.loopAgent.SetToolInterceptor(func(toolName, toolCallID string, args map[string]any) error {
-		for _, interceptor := range interceptors {
-			if err := interceptor(toolName, toolCallID, args); err != nil {
-				return err
-			}
-		}
-		return nil
-	})
 
 	chain := []core.Middleware{
 		core.NewLoggingMiddleware(s.ac.agentName),

@@ -23,6 +23,80 @@ func TestHookSystem_ShellHookPreToolUse_Allow(t *testing.T) {
 	}
 }
 
+func TestShellHookStartGuardReturnsBeforeWaitingForChild(t *testing.T) {
+	started := make(chan struct{})
+	guardReturned := make(chan struct{})
+	marker := filepath.Join(t.TempDir(), "hook-ran")
+	guard := ShellHookStartGuard(func(_ context.Context, start func() error) error {
+		close(started)
+		if err := start(); err != nil {
+			return err
+		}
+		close(guardReturned)
+		return nil
+	})
+	hook := NewShellHookWithStartGuard("guarded", EventSessionStart,
+		"sleep 0.25; printf done >> '"+marker+"'", 3*time.Second, guard)
+	done := make(chan struct{})
+	go func() {
+		hook.SessionStart(context.Background())
+		close(done)
+	}()
+
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("shell hook did not enter its start guard")
+	}
+	select {
+	case <-guardReturned:
+	case <-time.After(time.Second):
+		t.Fatal("start guard did not return after starting the child")
+	}
+	select {
+	case <-done:
+		t.Fatal("shell hook waited for the child while still inside its start guard")
+	case <-time.After(50 * time.Millisecond):
+	}
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("shell hook did not join its child")
+	}
+	if data, err := os.ReadFile(marker); err != nil || string(data) != "done" {
+		t.Fatalf("guarded child output = %q, error = %v", data, err)
+	}
+}
+
+func TestShellHookStartGuardErrorStillJoinsStartedChild(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "hook-ran")
+	guardErr := errors.New("trust state changed after launch")
+	guard := ShellHookStartGuard(func(_ context.Context, start func() error) error {
+		if err := start(); err != nil {
+			return err
+		}
+		return guardErr
+	})
+	hook := NewShellHookWithStartGuard("guarded", EventSessionStart,
+		"sleep 0.15; printf done > '"+marker+"'", time.Second, guard)
+	_, err := hook.execCommand(context.Background(), hookPayload{Event: string(EventSessionStart)})
+	if !errors.Is(err, guardErr) {
+		t.Fatalf("expected launch guard error, got %v", err)
+	}
+	if data, readErr := os.ReadFile(marker); readErr != nil || string(data) != "done" {
+		t.Fatalf("started child was not joined: data=%q error=%v", data, readErr)
+	}
+}
+
+func TestShellHookStartGuardCannotSilentlySkipLaunch(t *testing.T) {
+	hook := NewShellHookWithStartGuard("guarded", EventSessionStart, "exit 0", time.Second,
+		func(context.Context, func() error) error { return nil })
+	_, err := hook.execCommand(context.Background(), hookPayload{Event: string(EventSessionStart)})
+	if !errors.Is(err, errShellHookGuardDidNotStart) {
+		t.Fatalf("expected a fail-closed guard error, got %v", err)
+	}
+}
+
 func TestHookSystem_ShellHookPreToolUse_Deny(t *testing.T) {
 	hook := NewShellHook("test", EventPreToolUse, "exit 1", 5*time.Second)
 	allow, err := hook.PreToolUse(context.Background(), "bash", nil)

@@ -16,6 +16,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/pengjunchen/go-cli/internal/approval"
+	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/pengjunchen/go-cli/internal/tools"
 	"github.com/pengjunchen/go-cli/internal/tui"
 )
@@ -29,8 +30,7 @@ func TestAssembleRejectsConfiguredPostToolUseShellHook(t *testing.T) {
 	hooks := fmt.Sprintf("hooks:\n  - event: post_tool_use\n    command: touch %q\n    timeout: 1s\n", markerPath)
 	require.NoError(t, os.WriteFile(filepath.Join(hookDir, "hooks.yaml"), []byte(hooks), 0o600))
 
-	cfg := newAssembleTestConfig(t)
-	cfg.Git.WorkDir = workDir
+	cfg := newTrustedProjectHookAssembleTestConfig(t, workDir)
 	assembly, err := AssembleAgent(ctx, cfg, "openai", "test-model", io.Discard)
 	require.Nil(t, assembly)
 	require.ErrorIs(t, err, ErrPreparedPostToolUseHookUnsupported)
@@ -53,8 +53,7 @@ func TestAssembleAcceptsPreAndSessionShellHooksWithoutUnavailableWarning(t *test
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logBuffer, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	defer slog.SetDefault(previousLogger)
 
-	cfg := newAssembleTestConfig(t)
-	cfg.Git.WorkDir = workDir
+	cfg := newTrustedProjectHookAssembleTestConfig(t, workDir)
 	assembly, err := AssembleAgent(ctx, cfg, "openai", "test-model", io.Discard)
 	require.NoError(t, err)
 	require.NotNil(t, assembly)
@@ -147,6 +146,31 @@ func assembledWriteCall(path string) tools.ToolCall {
 		Name: "write",
 		Args: map[string]any{"path": path, "content": "approved"},
 	}
+}
+
+func newTrustedProjectHookAssembleTestConfig(t *testing.T, workDir string) *config.Config {
+	t.Helper()
+	ctx := context.Background()
+	t.Chdir(workDir)
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	globalConfigDir := filepath.Join(home, ".go-cli")
+	require.NoError(t, os.MkdirAll(globalConfigDir, 0o700))
+	globalConfig := "provider:\n  name: openai\n  api_key: test-key\n  base_url: http://127.0.0.1:1/v1\n  model: test-model\nmodel:\n  name: test-model\ntracing:\n  enabled: false\n"
+	require.NoError(t, os.WriteFile(filepath.Join(globalConfigDir, "config.yaml"), []byte(globalConfig), 0o600))
+
+	manager := approval.NewDefaultTrustManager(approval.NewInMemoryTrustStore())
+	snapshot, err := config.CaptureProjectSources(ctx, workDir, nil)
+	require.NoError(t, err)
+	frozen, ok := manager.(approval.FrozenProjectSourceTrust)
+	require.True(t, ok)
+	require.NoError(t, frozen.TrustProjectSourceSnapshot(ctx, snapshot))
+
+	cfg, err := config.LoadTrustedWithManager(ctx, manager)
+	require.NoError(t, err)
+	require.Equal(t, config.ProjectSourceTrustVerified, cfg.ProjectSourceTrustStatus)
+	cfg.Git.WorkDir = workDir
+	return cfg
 }
 
 func TestAssemblePreparedWriteApprovalModesKeepDecisionAtAssemblyBoundary(t *testing.T) {

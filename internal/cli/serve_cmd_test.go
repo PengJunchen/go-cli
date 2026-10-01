@@ -799,8 +799,7 @@ func TestServeAssemblyFailureDoesNotWriteTokenOrStartListener(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cfg := newAssembleTestConfig(t)
-	cfg.Git.WorkDir = workDir
+	cfg := newTrustedProjectHookAssembleTestConfig(t, workDir)
 	out := &safeBuffer{}
 	c := newServeCmd(out)
 	tokenPath := privateServeTokenPath(t)

@@ -257,6 +257,52 @@ func TestWithToolInterceptorBlocksToolExecution(t *testing.T) {
 	require.Len(t, findEvents(events, "tool_canceled"), 1)
 }
 
+func TestContextToolInterceptorReceivesRunContext(t *testing.T) {
+	type contextKey struct{}
+	tool := &trackingTool{name: "context-aware"}
+	model := &scriptedChatModel{seq: []*llm.Message{
+		{Role: llm.RoleAssistant, ToolCalls: []llm.ToolCall{{ID: "call", Name: "context-aware", Args: map[string]any{}}}},
+		{Role: llm.RoleAssistant, Content: "done"},
+	}}
+	loop := NewLoopAgent(WithLLM(model), WithTools(scriptedRegistry(tool)))
+	var observed any
+	loop.SetContextToolInterceptor(func(ctx context.Context, _, _ string, _ map[string]any) error {
+		observed = ctx.Value(contextKey{})
+		return nil
+	})
+
+	_, err := loop.Run(context.WithValue(context.Background(), contextKey{}, "run-context"), Submission{Content: "run"})
+	require.NoError(t, err)
+	require.Equal(t, "run-context", observed)
+	require.True(t, tool.executed.Load())
+}
+
+func TestPreToolCallEventRetainsContextDenialWithoutExposingArbitraryMessages(t *testing.T) {
+	secret := errors.New("private interceptor details")
+	event := &PreToolCallEvent{
+		ctx: context.Background(),
+		contextInterceptors: []ContextToolInterceptor{func(context.Context, string, string, map[string]any) error {
+			return secret
+		}},
+	}
+	require.True(t, event.IsCancelled())
+	require.ErrorIs(t, event.CancellationError(), secret)
+	_, safe := SafeToolInterceptionMessage(event.CancellationError())
+	require.False(t, safe, "arbitrary interceptor errors must not become user-facing tool receipts")
+
+	message, safe := SafeToolInterceptionMessage(testSafeToolInterceptionDenial{})
+	require.True(t, safe)
+	require.Equal(t, "safe policy denial", message)
+}
+
+type testSafeToolInterceptionDenial struct{}
+
+func (testSafeToolInterceptionDenial) Error() string { return "internal error details" }
+
+func (testSafeToolInterceptionDenial) SafeToolInterceptionMessage() string {
+	return "safe policy denial"
+}
+
 // Verify interceptors run exactly once per event (idempotency).
 func TestPreToolCallEvent_InterceptorsRunOnce(t *testing.T) {
 	t.Cleanup(ClearToolInterceptors)
