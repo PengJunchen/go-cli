@@ -128,25 +128,29 @@ func TestRequestEnvelopeUsesCandidateInputCapacityAndFrozenOutputReserve(t *test
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			candidate := requestEnvelopeCandidate(t, test.info)
-			model := candidate.ModelSpec()
 			requested, err := llm.MaterializeGenerationOptions()
 			require.NoError(t, err)
 			if test.requestMax != nil {
 				requested, err = llm.MaterializeGenerationOptions(llm.WithMaxTokens(*test.requestMax))
 				require.NoError(t, err)
 			}
-			options, err := effectiveCandidateOptions(candidate, model, requested)
+			messages := []llm.Message{{Role: llm.RoleUser, Content: "input"}}
+			plan, err := prepareRequestPlan(context.Background(), llm.CandidateProposal{
+				OperationID: llm.ProviderOperationID(test.name),
+				Candidate:   candidate,
+				Reason:      llm.CandidateInitial,
+				Antecedent:  llm.CandidateAntecedent{Kind: llm.AntecedentInitial},
+			}, messages, preparedRequestBase{requested: requested},
+				compaction.NewHeuristicTokenEstimator(), 8000)
 			require.NoError(t, err)
+			options := plan.Options()
 			if test.wantEffectiveO == nil {
 				require.Nil(t, options.MaxTokens)
 			} else {
 				require.NotNil(t, options.MaxTokens)
 				require.Equal(t, *test.wantEffectiveO, *options.MaxTokens)
 			}
-			estimate, err := estimateRequestEnvelope(context.Background(), candidate, model,
-				[]llm.Message{{Role: llm.RoleUser, Content: "input"}}, options,
-				compaction.NewHeuristicTokenEstimator(), 8000, 0)
-			require.NoError(t, err)
+			estimate := plan.Estimate()
 			if !test.wantLimitKnown {
 				require.Equal(t, llm.EstimateUnknown, estimate.ProviderLimit.State)
 				require.Equal(t, llm.EstimateUnknown, estimate.ProviderFitState)

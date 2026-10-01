@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -206,7 +207,8 @@ func TestEncodeGeminiRequest_SystemToolToUser(t *testing.T) {
 	assert.Equal(t, "assistant", req.Contents[2].Role) // assistant role is left verbatim
 	require.NotNil(t, req.GenerationConfig)
 	assert.Equal(t, 0.4, req.GenerationConfig.Temperature)
-	assert.Equal(t, 123, req.GenerationConfig.MaxOutputTokens)
+	require.NotNil(t, req.GenerationConfig.MaxOutputTokens)
+	assert.Equal(t, 123, *req.GenerationConfig.MaxOutputTokens)
 
 	// No generation-config-driving fields => nil config.
 	body, err = encodeGeminiRequest(ModelConfig{}, []Message{{Role: RoleUser, Content: "x"}}, nil)
@@ -214,6 +216,152 @@ func TestEncodeGeminiRequest_SystemToolToUser(t *testing.T) {
 	var req2 geminiRequest
 	require.NoError(t, json.Unmarshal(body, &req2))
 	assert.Nil(t, req2.GenerationConfig)
+}
+
+func TestEncodeGeminiRequestPreservesMaxOutputTokenPresence(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	tests := []struct {
+		name                 string
+		config               ModelConfig
+		options              []Option
+		wantGeneration       bool
+		wantMaxTokensPresent bool
+		wantMaxTokens        int
+	}{
+		{name: "unset remains omitted"},
+		{
+			name:           "temperature does not invent an output cap",
+			config:         ModelConfig{Temperature: 0.4},
+			wantGeneration: true,
+		},
+		{
+			name:                 "explicit zero option is serialized",
+			options:              []Option{WithMaxTokens(0)},
+			wantGeneration:       true,
+			wantMaxTokensPresent: true,
+		},
+		{
+			name:                 "explicit zero model config is serialized",
+			config:               ModelConfig{MaxTokensSet: true},
+			wantGeneration:       true,
+			wantMaxTokensPresent: true,
+		},
+		{
+			name:                 "positive option cap is serialized",
+			options:              []Option{WithMaxTokens(123)},
+			wantGeneration:       true,
+			wantMaxTokensPresent: true,
+			wantMaxTokens:        123,
+		},
+		{
+			name:                 "positive model cap is serialized",
+			config:               ModelConfig{MaxTokens: 123},
+			wantGeneration:       true,
+			wantMaxTokensPresent: true,
+			wantMaxTokens:        123,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			body, err := encodeGeminiRequest(test.config, []Message{{Role: RoleUser, Content: "hello"}}, test.options)
+			require.NoError(t, err)
+
+			var request map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(body, &request))
+			generationConfigBody, hasGenerationConfig := request["generationConfig"]
+			if !test.wantGeneration {
+				assert.False(t, hasGenerationConfig)
+				return
+			}
+			require.True(t, hasGenerationConfig)
+			var generationConfig map[string]json.RawMessage
+			require.NoError(t, json.Unmarshal(generationConfigBody, &generationConfig))
+			maxOutputTokensBody, hasMaxOutputTokens := generationConfig["maxOutputTokens"]
+			if !test.wantMaxTokensPresent {
+				assert.False(t, hasMaxOutputTokens)
+				return
+			}
+			require.True(t, hasMaxOutputTokens, "explicit MaxTokens must remain distinguishable from unset after JSON encoding")
+			var maxOutputTokens int
+			require.NoError(t, json.Unmarshal(maxOutputTokensBody, &maxOutputTokens))
+			assert.Equal(t, test.wantMaxTokens, maxOutputTokens)
+		})
+	}
+}
+
+func TestGeminiPreparedZeroOutputCapMatchesHTTPBody(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	type capturedRequest struct {
+		body []byte
+		err  error
+	}
+	requests := make(chan capturedRequest, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		requests <- capturedRequest{body: body, err: err}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"candidates":[{"content":{"parts":[{"text":"ok"}]}}]}`)
+	}))
+	defer server.Close()
+
+	const modelName = "gemini-plan-zero-cap"
+	provider := NewGeminiProvider(WithNativeBaseURL(server.URL), WithNativeHTTPClient(server.Client()))
+	model, _, err := provider.Build(context.Background(), ModelConfig{Model: modelName})
+	require.NoError(t, err)
+
+	candidateID := CandidateID("gemini-plan-zero-cap-candidate")
+	modelSpec := ModelSpec{
+		ProviderID: geminiProviderName,
+		ModelID:    modelName,
+		Known:      true,
+		Info:       ModelInfo{Name: modelName, ContextWindow: 1000, MaxOutputTokens: 200},
+	}
+	candidate := &resolvedCandidateHandle{
+		id: candidateID,
+		identity: AttemptIdentity{
+			ProviderID: geminiProviderName,
+			ModelID:    modelName,
+			ProtocolID: protocolGeminiGenerate,
+			Candidate:  candidateID,
+		},
+		model:    modelSpec,
+		provider: provider,
+		cfg:      ModelConfig{Model: modelName},
+	}
+	options, err := MaterializeGenerationOptions(WithMaxTokens(0))
+	require.NoError(t, err)
+	plan, err := NewPreparedRequestPlan(CandidateProposal{
+		OperationID: "gemini-plan-zero-cap-operation",
+		Candidate:   candidate,
+		Reason:      CandidateInitial,
+		Antecedent:  CandidateAntecedent{Kind: AntecedentInitial},
+	}, modelSpec, []Message{{Role: RoleUser, Content: "zero means no generation allowance"}}, options,
+		RequestEnvelopeEstimate{})
+	require.NoError(t, err)
+	preparedOptions := plan.Options()
+	require.NotNil(t, preparedOptions.MaxTokens)
+	require.Zero(t, *preparedOptions.MaxTokens)
+
+	dispatchOption, err := OptionFromGenerationOptions(preparedOptions)
+	require.NoError(t, err)
+	require.NoError(t, plan.Consume(candidate, plan.Messages(), dispatchOption))
+	response, err := model.Generate(WithPreparedRequestPlan(context.Background(), plan), plan.Messages(), dispatchOption)
+	require.NoError(t, err)
+	require.Equal(t, "ok", response.Content)
+
+	captured := <-requests
+	require.NoError(t, captured.err)
+	var wire map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(captured.body, &wire))
+	var generationConfig map[string]json.RawMessage
+	require.NoError(t, json.Unmarshal(wire["generationConfig"], &generationConfig))
+	maxOutputTokensBody, present := generationConfig["maxOutputTokens"]
+	require.True(t, present)
+	var maxOutputTokens int
+	require.NoError(t, json.Unmarshal(maxOutputTokensBody, &maxOutputTokens))
+	assert.Zero(t, maxOutputTokens)
 }
 
 // TestDecodeGeminiResponse_EmptyCandidates verifies missing candidates yields
