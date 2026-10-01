@@ -1870,7 +1870,7 @@ type geminiInlineData struct {
 // field name used by the Google GenAI generateContent API.
 type geminiGenConfig struct {
 	Temperature     float64 `json:"temperature,omitempty"`
-	MaxOutputTokens int     `json:"maxOutputTokens,omitempty"`
+	MaxOutputTokens *int    `json:"maxOutputTokens,omitempty"`
 }
 
 // geminiResponse is the Google GenAI generateContent response body.
@@ -2012,6 +2012,7 @@ func encodeGeminiRequest(cfg ModelConfig, msgs []Message, opts []Option) ([]byte
 	for _, opt := range opts {
 		opt(genOpts)
 	}
+	maxOutputTokens := samplingMaxTokens(cfg, genOpts.MaxTokens)
 
 	contents := make([]geminiContent, 0, len(msgs))
 	for _, msg := range msgs {
@@ -2031,17 +2032,16 @@ func encodeGeminiRequest(cfg ModelConfig, msgs []Message, opts []Option) ([]byte
 	}
 
 	var gc *geminiGenConfig
-	if genOpts.Temperature != nil || cfg.Temperature > 0 || (genOpts.MaxTokens != nil || cfg.MaxTokens > 0) {
+	if genOpts.Temperature != nil || cfg.Temperature > 0 || maxOutputTokens != nil {
 		gc = &geminiGenConfig{}
 		if genOpts.Temperature != nil {
 			gc.Temperature = *genOpts.Temperature
 		} else {
 			gc.Temperature = cfg.Temperature
 		}
-		if genOpts.MaxTokens != nil {
-			gc.MaxOutputTokens = *genOpts.MaxTokens
-		} else {
-			gc.MaxOutputTokens = cfg.MaxTokens
+		if maxOutputTokens != nil {
+			value := *maxOutputTokens
+			gc.MaxOutputTokens = &value
 		}
 	}
 
