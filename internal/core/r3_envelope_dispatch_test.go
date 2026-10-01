@@ -534,10 +534,17 @@ func TestLoopReplansWhenConcurrentCyclerSelectionLeaseGoesStale(t *testing.T) {
 			require.Equal(t, "r3-stale-alpha", operationPlans[0].plan.Model().Info.Name)
 		case 2:
 			staleOperation = operationID
-			require.Equal(t, "r3-stale-alpha", operationPlans[0].plan.Model().Info.Name)
+			stalePlan := operationPlans[0].plan
+			require.Equal(t, "r3-stale-alpha", stalePlan.Model().Info.Name)
 			require.Equal(t, "r3-stale-beta", operationPlans[1].plan.Model().Info.Name,
 				"the stale operation must re-peek and re-estimate the next cycler candidate")
 			require.NotSame(t, operationPlans[0].plan, operationPlans[1].plan)
+
+			frozenOption, err := llm.OptionFromGenerationOptions(stalePlan.Options())
+			require.NoError(t, err)
+			require.ErrorIs(t, stalePlan.Consume(stalePlan.Proposal().Candidate, stalePlan.Messages(), frozenOption),
+				llm.ErrPreparedRequestConsumed,
+				"a lease rejected before dispatch must not leave its prepared plan reusable")
 		default:
 			t.Fatalf("operation %q produced %d prepared plans", operationID, len(operationPlans))
 		}
