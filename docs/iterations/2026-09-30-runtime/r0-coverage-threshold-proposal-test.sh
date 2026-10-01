@@ -18,9 +18,10 @@ pass() {
 	echo "PASS: $*"
 }
 
-for command in awk cp git grep make mktemp; do
+for command in awk bc cp git grep make mktemp; do
 	command -v "$command" >/dev/null 2>&1 || fail "required command not found: $command"
 done
+REAL_BC=$(command -v bc) || fail "required command not found: bc"
 
 (
 	cd "$REPO_ROOT" || exit 1
@@ -56,10 +57,10 @@ chmod +x "$TMP_ROOT/bin/go" || fail "cannot install fake go command"
 
 cat >"$TMP_ROOT/bin/bc" <<'EOF'
 #!/bin/sh
-cat >/dev/null
-printf '100.0\n0\n'
+cat >"$FAKE_BC_INPUT" || exit 1
+exec "$REAL_BC" <"$FAKE_BC_INPUT"
 EOF
-chmod +x "$TMP_ROOT/bin/bc" || fail "cannot install fake bc command"
+chmod +x "$TMP_ROOT/bin/bc" || fail "cannot install bc input-capture wrapper"
 
 run_case() {
 	make_dir=$1
@@ -74,7 +75,7 @@ run_case() {
 	if [ -n "$threshold" ]; then
 		if (
 			cd "$make_dir" || exit 1
-			FAKE_COVER_REPORT=$report_file FAKE_COVER_STATUS=$cover_status PATH=$TMP_ROOT/bin:$PATH \
+			FAKE_COVER_REPORT=$report_file FAKE_COVER_STATUS=$cover_status REAL_BC=$REAL_BC FAKE_BC_INPUT=$TMP_ROOT/$name.bc-input PATH=$TMP_ROOT/bin:$PATH \
 				make -s test-cov-check COVERAGE_DIR="$TMP_ROOT/coverage/$name" COVERAGE_THRESHOLD="$threshold"
 		) >"$log_file" 2>&1; then
 			rc=0
@@ -84,7 +85,8 @@ run_case() {
 	else
 		if (
 			cd "$make_dir" || exit 1
-			FAKE_COVER_REPORT=$report_file FAKE_COVER_STATUS=$cover_status PATH=$TMP_ROOT/bin:$PATH \
+			unset COVERAGE_THRESHOLD
+			FAKE_COVER_REPORT=$report_file FAKE_COVER_STATUS=$cover_status REAL_BC=$REAL_BC FAKE_BC_INPUT=$TMP_ROOT/$name.bc-input PATH=$TMP_ROOT/bin:$PATH \
 				make -s test-cov-check COVERAGE_DIR="$TMP_ROOT/coverage/$name"
 		) >"$log_file" 2>&1; then
 			rc=0
@@ -97,6 +99,13 @@ run_case() {
 			[ "$rc" -eq 0 ] || fail "$name: expected the baseline recipe to return success, got $rc"
 			grep -E 'too many arguments|unexpected operator|integer expression expected' "$log_file" >/dev/null || fail "$name: expected the baseline shell test error"
 			grep -F 'Coverage check passed:' "$log_file" >/dev/null || fail "$name: expected the baseline false pass"
+			expected_bc_input=$(printf '100.0\n81.5 < 65')
+			actual_bc_input=$(cat "$TMP_ROOT/$name.bc-input")
+			[ "$actual_bc_input" = "$expected_bc_input" ] || fail "$name: real bc did not receive the false-match and final-total expressions"
+			printf '%s\n' 'Captured real bc stdin:'
+			cat "$TMP_ROOT/$name.bc-input"
+			printf '%s\n' 'Captured baseline make output:'
+			cat "$log_file"
 			pass "$name reproduces the grep false match and false pass"
 			;;
 		pass)
@@ -125,9 +134,13 @@ run_case() {
 					;;
 				cover-command-nonzero)
 					grep -F 'go tool cover failed with exit code 7' "$log_file" >/dev/null || fail "$name: did not preserve the tool failure status"
+					grep -E 'Error( code)? 7([[:space:]]|$)' "$log_file" >/dev/null || fail "$name: make did not report the recipe exit status 7"
 					;;
 				malformed-threshold)
 					grep -F 'Coverage threshold must be a number between 0 and 100' "$log_file" >/dev/null || fail "$name: did not reject the invalid threshold"
+					;;
+				out-of-range-total)
+					grep -F 'go tool cover output must contain exactly one valid total coverage line' "$log_file" >/dev/null || fail "$name: did not reject coverage above 100 percent"
 					;;
 			esac
 			pass "$name"
@@ -146,6 +159,7 @@ run_case "$TMP_ROOT/proposed" below-threshold fail '' 0 'total: (statements) 64.
 run_case "$TMP_ROOT/proposed" missing-total fail 65 0 '/module/total_counter.go:17: fakeFunction 100.0%'
 run_case "$TMP_ROOT/proposed" duplicate-total fail 65 0 "$(printf '%s\n' 'total: (statements) 81.5%' 'total: (statements) 100.0%')"
 run_case "$TMP_ROOT/proposed" malformed-total fail 65 0 'total: (statements) eighty-one%'
+run_case "$TMP_ROOT/proposed" out-of-range-total fail 65 0 'total: (statements) 100.1%'
 run_case "$TMP_ROOT/proposed" cover-command-nonzero fail 65 7 'total: (statements) 81.5%'
 run_case "$TMP_ROOT/proposed" malformed-threshold fail invalid 0 'total: (statements) 81.5%'
 
