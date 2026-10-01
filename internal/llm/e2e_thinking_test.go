@@ -70,9 +70,10 @@ func TestET_thinking_level_params_correct(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		var capturedBody []byte
+		bodyCh := make(chan []byte, 2)
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			capturedBody, _ = io.ReadAll(r.Body)
+			body, _ := io.ReadAll(r.Body)
+			bodyCh <- append([]byte(nil), body...)
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"role":"assistant","content":[{"type":"text","text":"ok"}],"stop_reason":"end_turn"}`))
 		}))
@@ -86,6 +87,7 @@ func TestET_thinking_level_params_correct(t *testing.T) {
 		// ThinkingNone → no thinking key.
 		_, err = model.Generate(ctx, msgs, WithThinking(ThinkingConfigForLevel(ThinkingNone)))
 		require.NoError(t, err)
+		capturedBody := <-bodyCh
 
 		var bodyMap map[string]any
 		require.NoError(t, json.Unmarshal(capturedBody, &bodyMap))
@@ -95,6 +97,7 @@ func TestET_thinking_level_params_correct(t *testing.T) {
 		// ThinkingHigh → thinking = {type: enabled, budget_tokens: 16384}.
 		_, err = model.Generate(ctx, msgs, WithThinking(ThinkingConfigForLevel(ThinkingHigh)))
 		require.NoError(t, err)
+		capturedBody = <-bodyCh
 
 		require.NoError(t, json.Unmarshal(capturedBody, &bodyMap))
 		thinking, ok := bodyMap["thinking"].(map[string]any)

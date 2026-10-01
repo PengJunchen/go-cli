@@ -178,6 +178,23 @@ func TestEncodeClaudeRequest_MaxTokensSources(t *testing.T) {
 	assert.Equal(t, "user", req.Messages[0].Role)
 }
 
+func TestEncodeClaudeRequest_ThinkingShape(t *testing.T) {
+	defer verify.AssertNoGoroutineLeak(t)()
+
+	body, err := encodeClaudeRequest(ModelConfig{}, "claude-3", nil, []Option{
+		WithThinking(ThinkingConfigForLevel(ThinkingHigh)),
+	})
+	require.NoError(t, err)
+
+	var request map[string]any
+	require.NoError(t, json.Unmarshal(body, &request))
+	thinking, ok := request["thinking"].(map[string]any)
+	require.True(t, ok, "Claude thinking must be a top-level object")
+	assert.Equal(t, "enabled", thinking["type"])
+	assert.Equal(t, float64(16384), thinking["budget_tokens"])
+	assert.NotContains(t, thinking, "thinking", "Claude thinking config must not be nested twice")
+}
+
 // TestDecodeClaudeResponse_NoUsage verifies a response without usage is fine.
 func TestDecodeClaudeResponse_NoUsage(t *testing.T) {
 	defer verify.AssertNoGoroutineLeak(t)()

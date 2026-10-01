@@ -1,138 +1,185 @@
 //go:build e2e
 
-package llm
+package llm_test
 
 import (
 	"context"
-	"errors"
+	"encoding/json"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/compaction"
+	"github.com/pengjunchen/go-cli/internal/core"
+	"github.com/pengjunchen/go-cli/internal/llm"
 )
 
-// TestET_model_cycler_rotation verifies the three core behaviors of
-// ModelCycler end-to-end:
-//
-//  1. Round-robin rotation: consecutive calls cycle through all models in
-//     order, wrapping around after the last model.
-//  2. Session affinity: the same session ID always routes to the same model,
-//     while different session IDs can be assigned different models.
-//  3. Fallback: when the selected model returns an error, the call falls back
-//     to the primary (wrapped) model.
+// TestET_model_cycler_rotation exercises resolver-guarded cycler candidates
+// through Core so provider requests receive the current operation authority.
 func TestET_model_cycler_rotation(t *testing.T) {
-	// --- Round-robin rotation ---
 	t.Run("round_robin_rotation", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		reg := newCyclerTestRegistry(t, nil)
-		c := NewModelCycler(ModelCyclerConfig{
-			Models:   threeModels,
-			Strategy: StrategyRoundRobin,
-		}).WithRegistry(reg)
-
-		primary := &fbMockModel{genContent: "primary-ok"}
-		wrapped := c.WrapModel(primary)
-
-		// Each provider's Build returns a model whose Generate content is the
-		// model name from the config, so we can verify which model was selected
-		// by checking resp.Content.
-		expected := []string{"gpt-4o", "claude-3", "gemini-pro"}
-		for i, want := range expected {
-			resp, err := wrapped.Generate(ctx, nil)
-			require.NoError(t, err)
-			assert.Equal(t, want, resp.Content, "call %d should select model %q", i, want)
+		server, requests := newCyclerE2EServer(t, nil)
+		resolver := newCyclerE2EResolver(t, server, "cycler-gpt", "cycler-claude", "cycler-gemini", "cycler-primary")
+		entries := []llm.ModelEntry{
+			{Provider: "cycler-gpt", Model: "gpt-4o"},
+			{Provider: "cycler-claude", Model: "claude-3"},
+			{Provider: "cycler-gemini", Model: "gemini-pro"},
 		}
+		resolved := resolveCyclerE2EEntries(t, resolver, server.URL, entries)
+		primary := resolveCyclerE2EModel(t, resolver, server.URL, "cycler-primary", "primary")
+		loop := newCyclerE2ELoop(t, entries, resolved, primary, false)
 
-		// Fourth call wraps around to the first model.
-		resp, err := wrapped.Generate(ctx, nil)
-		require.NoError(t, err)
-		assert.Equal(t, "gpt-4o", resp.Content, "call 3 should wrap around to first model")
-
-		assert.Equal(t, 0, primary.genCalls,
-			"primary should never be called when all selected models succeed")
+		expected := []string{"gpt-4o", "claude-3", "gemini-pro", "gpt-4o"}
+		for i, want := range expected {
+			_, err := loop.Run(ctx, core.Submission{Content: "cycle"})
+			require.NoError(t, err)
+			assert.Equal(t, expected[:i+1], requests(), "request sequence after call %d", i)
+			assert.Equal(t, want, requests()[i], "call %d should select model %q", i, want)
+		}
 	})
 
-	// --- Session affinity ---
 	t.Run("session_affinity", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		reg := newCyclerTestRegistry(t, nil)
-		c := NewModelCycler(ModelCyclerConfig{
-			Models:          threeModels,
-			Strategy:        StrategyRoundRobin,
-			SessionAffinity: true,
-		}).WithRegistry(reg)
-
-		primary := &fbMockModel{genContent: "primary-ok"}
-		wrapped := c.WrapModel(primary)
-
-		ctxA := WithSessionID(ctx, "session-A")
-		ctxB := WithSessionID(ctx, "session-B")
-
-		// First call for session-A selects a model via round-robin (index 0).
-		respA1, err := wrapped.Generate(ctxA, nil)
-		require.NoError(t, err)
-		firstA := respA1.Content
-		assert.Contains(t, []string{"gpt-4o", "claude-3", "gemini-pro"}, firstA,
-			"first call should select a valid model")
-
-		// Subsequent calls for session-A must always return the same model.
-		for i := 0; i < 4; i++ {
-			resp, err := wrapped.Generate(ctxA, nil)
-			require.NoError(t, err)
-			assert.Equal(t, firstA, resp.Content,
-				"session-A should always route to the same model (call %d)", i+1)
+		server, requests := newCyclerE2EServer(t, nil)
+		resolver := newCyclerE2EResolver(t, server, "cycler-gpt", "cycler-claude", "cycler-gemini", "cycler-primary")
+		entries := []llm.ModelEntry{
+			{Provider: "cycler-gpt", Model: "gpt-4o"},
+			{Provider: "cycler-claude", Model: "claude-3"},
+			{Provider: "cycler-gemini", Model: "gemini-pro"},
 		}
+		resolved := resolveCyclerE2EEntries(t, resolver, server.URL, entries)
+		primary := resolveCyclerE2EModel(t, resolver, server.URL, "cycler-primary", "primary")
+		loop := newCyclerE2ELoop(t, entries, resolved, primary, true)
 
-		// Session-B gets a different model (round-robin index 1).
-		respB, err := wrapped.Generate(ctxB, nil)
-		require.NoError(t, err)
-		assert.NotEqual(t, firstA, respB.Content,
-			"session-B should get a different model than session-A")
-
-		// Repeated calls for session-B keep the same assignment.
-		respB2, err := wrapped.Generate(ctxB, nil)
-		require.NoError(t, err)
-		assert.Equal(t, respB.Content, respB2.Content,
-			"session-B should keep its model assignment on repeated calls")
-
-		assert.Equal(t, 0, primary.genCalls,
-			"primary should never be called when selected models succeed")
+		calls := []struct {
+			ctx  context.Context
+			want string
+		}{
+			{llm.WithSessionID(ctx, "session-A"), "gpt-4o"},
+			{llm.WithSessionID(ctx, "session-A"), "gpt-4o"},
+			{llm.WithSessionID(ctx, "session-B"), "claude-3"},
+			{llm.WithSessionID(ctx, "session-B"), "claude-3"},
+		}
+		for i, call := range calls {
+			_, err := loop.Run(call.ctx, core.Submission{Content: "cycle"})
+			require.NoError(t, err)
+			assert.Equal(t, call.want, requests()[i], "call %d should preserve session routing", i)
+		}
 	})
 
-	// --- Fallback on error ---
 	t.Run("fallback_on_error", func(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
-		// Every built model will fail Generate with an error.
-		reg := newCyclerTestRegistry(t, errors.New("selected model down"))
-		c := NewModelCycler(ModelCyclerConfig{
-			Models:   threeModels,
-			Strategy: StrategyRoundRobin,
-		}).WithRegistry(reg)
+		server, requests := newCyclerE2EServer(t, map[string]bool{"selected-model": true})
+		resolver := newCyclerE2EResolver(t, server, "cycler-selected", "cycler-primary")
+		entries := []llm.ModelEntry{{Provider: "cycler-selected", Model: "selected-model"}}
+		resolved := resolveCyclerE2EEntries(t, resolver, server.URL, entries)
+		primary := resolveCyclerE2EModel(t, resolver, server.URL, "cycler-primary", "primary-model")
+		loop := newCyclerE2ELoop(t, entries, resolved, primary, false)
 
-		primary := &fbMockModel{genContent: "primary-ok"}
-		wrapped := c.WrapModel(primary)
-
-		resp, err := wrapped.Generate(ctx, nil)
+		_, err := loop.Run(ctx, core.Submission{Content: "cycle"})
 		require.NoError(t, err)
-		assert.Equal(t, "primary-ok", resp.Content,
-			"should fall back to primary when the selected model fails")
-		assert.Equal(t, 1, primary.genCalls,
-			"primary should be called exactly once as fallback")
-
-		// A second call also falls back (round-robin advances to the next
-		// model, which also fails).
-		resp2, err := wrapped.Generate(ctx, nil)
-		require.NoError(t, err)
-		assert.Equal(t, "primary-ok", resp2.Content,
-			"second call should also fall back to primary")
-		assert.Equal(t, 2, primary.genCalls,
-			"primary should be called twice as fallback")
+		assert.Equal(t, []string{"selected-model", "primary-model"}, requests(),
+			"Core should own and authorize the primary fallback after selected model failure")
 	})
+}
+
+func newCyclerE2EServer(t *testing.T, failures map[string]bool) (*httptest.Server, func() []string) {
+	t.Helper()
+	var mu sync.Mutex
+	var models []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var request struct {
+			Model string `json:"model"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, "invalid request", http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		models = append(models, request.Model)
+		mu.Unlock()
+		if failures[request.Model] {
+			http.Error(w, "temporary provider failure", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = fmt.Fprintf(w, "data: {\"choices\":[{\"delta\":{\"content\":%q}}]}\n\n", request.Model)
+		_, _ = io.WriteString(w, "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(server.Close)
+	return server, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return append([]string(nil), models...)
+	}
+}
+
+func newCyclerE2EResolver(t *testing.T, server *httptest.Server, providers ...string) *llm.ModelResolver {
+	t.Helper()
+	registry := llm.NewProviderRegistry()
+	for _, providerID := range providers {
+		require.NoError(t, registry.Register(llm.NewEinoProvider(
+			llm.WithProviderName(providerID),
+			llm.WithHTTPClient(server.Client()),
+		)))
+	}
+	return registry.SnapshotResolver()
+}
+
+func resolveCyclerE2EEntries(t *testing.T, resolver *llm.ModelResolver, endpoint string, entries []llm.ModelEntry) []llm.ResolvedModel {
+	t.Helper()
+	resolved := make([]llm.ResolvedModel, 0, len(entries))
+	for _, entry := range entries {
+		resolved = append(resolved, resolveCyclerE2EModel(t, resolver, endpoint, entry.Provider, entry.Model))
+	}
+	return resolved
+}
+
+func resolveCyclerE2EModel(t *testing.T, resolver *llm.ModelResolver, endpoint, providerID, modelID string) llm.ResolvedModel {
+	t.Helper()
+	resolved, err := resolver.ResolveModel(context.Background(), llm.ModelRequest{
+		ProviderID: providerID,
+		ModelID:    modelID,
+		Endpoint:   endpoint,
+	})
+	require.NoError(t, err)
+	return resolved
+}
+
+func newCyclerE2ELoop(t *testing.T, entries []llm.ModelEntry, resolved []llm.ResolvedModel, primary llm.ResolvedModel, sessionAffinity bool) *core.LoopAgent {
+	t.Helper()
+	cycler := llm.NewModelCycler(llm.ModelCyclerConfig{
+		Models:          entries,
+		Strategy:        llm.StrategyRoundRobin,
+		SessionAffinity: sessionAffinity,
+	}).WithResolvedModels(resolved)
+	loop := core.NewLoopAgent(
+		core.WithLLM(cycler.WrapModel(buildCyclerE2EModel(t, primary))),
+		core.WithMaxIterations(1),
+	)
+	loop.SetMidTurnCompaction(compaction.NewMidTurnCompact(), nil, compaction.NewHeuristicTokenEstimator(), 8000)
+	return loop
+}
+
+func buildCyclerE2EModel(t *testing.T, resolved llm.ResolvedModel) llm.BaseChatModel {
+	t.Helper()
+	model, cleanup, err := resolved.Build(context.Background())
+	require.NoError(t, err)
+	t.Cleanup(cleanup)
+	return model
 }

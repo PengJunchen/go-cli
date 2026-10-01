@@ -335,7 +335,7 @@ func injectClaudeThinking(data []byte, genOpts *GenerationOptions) ([]byte, erro
 	}
 	thinking := make(map[string]any)
 	ClaudeThinkingAdapter{}.Apply(thinking, config)
-	rawThinking, err := json.Marshal(thinking)
+	rawThinking, err := json.Marshal(thinking["thinking"])
 	if err != nil {
 		return nil, errors.New("llm: marshal Claude thinking configuration")
 	}
