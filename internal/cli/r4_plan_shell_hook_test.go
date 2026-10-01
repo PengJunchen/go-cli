@@ -126,12 +126,12 @@ func TestAssembledPlanBlocksOpaquePreToolHooksBeforeDispatch(t *testing.T) {
 			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			defer cancel()
 			capturedHooks := []r4ShellHookSpec{{event: "pre_tool_use", command: r4MarkerCommand(capturedMarker)}}
-			config := newR4TrustedProjectHookConfig(t, ctx, root, fixture.server.URL, capturedHooks)
+			config := newR4TrustedProjectHookConfig(ctx, t, root, fixture.server.URL, capturedHooks)
 			assembly, err := AssembleAgent(ctx, config, config.Provider.Name, config.Provider.Model, io.Discard, WithApproveMode(ApproveAuto))
 			require.NoError(t, err)
 			t.Cleanup(assembly.Cleanup)
 
-			r4SetPlanModeViaSlash(t, ctx, assembly, "enter")
+			r4SetPlanModeViaSlash(ctx, t, assembly, "enter")
 			stream, err := assembly.Harness.Submit(ctx, "Use the requested tool.")
 			require.NoError(t, err)
 			events, _, runErr := collectAssemblyEvents(stream)
@@ -148,7 +148,7 @@ func TestAssembledPlanBlocksOpaquePreToolHooksBeforeDispatch(t *testing.T) {
 			_, err = os.Stat(capturedMarker)
 			assert.ErrorIs(t, err, os.ErrNotExist, "the captured pre-tool hook must not run while Plan is active")
 
-			r4SetPlanModeViaSlash(t, ctx, assembly, "exit")
+			r4SetPlanModeViaSlash(ctx, t, assembly, "exit")
 			stream, err = assembly.Harness.Submit(ctx, "Use the requested tool again.")
 			require.NoError(t, err)
 			events, _, runErr = collectAssemblyEvents(stream)
@@ -189,7 +189,7 @@ func TestAssembledPlanReadWithoutPreToolHookStillDispatches(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(assembly.Cleanup)
 
-	r4SetPlanModeViaSlash(t, ctx, assembly, "enter")
+	r4SetPlanModeViaSlash(ctx, t, assembly, "enter")
 	stream, err := assembly.Harness.Submit(ctx, "Read the allowed file.")
 	require.NoError(t, err)
 	events, _, runErr := collectAssemblyEvents(stream)
@@ -212,7 +212,7 @@ func TestAssembledPlanSuppressesOpaqueLifecycleShellHooksAndResumesAfterExit(t *
 	})
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	config := newR4TrustedProjectHookConfig(t, ctx, root, fixture.server.URL, captured)
+	config := newR4TrustedProjectHookConfig(ctx, t, root, fixture.server.URL, captured)
 	assembly, err := AssembleAgent(ctx, config, config.Provider.Name, config.Provider.Model, io.Discard, WithApproveMode(ApproveAuto))
 	require.NoError(t, err)
 	t.Cleanup(assembly.Cleanup)
@@ -223,7 +223,7 @@ func TestAssembledPlanSuppressesOpaqueLifecycleShellHooksAndResumesAfterExit(t *
 	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
 	t.Cleanup(func() { slog.SetDefault(previousLogger) })
 
-	r4SetPlanModeViaSlash(t, ctx, assembly, "enter")
+	r4SetPlanModeViaSlash(ctx, t, assembly, "enter")
 	logs.Reset()
 	require.NoError(t, assembly.HookChain.OnTurnStart(ctx, "plan-start"))
 	require.NoError(t, assembly.HookChain.OnTurnEnd(ctx, "plan-start", core.Result{}, nil))
@@ -232,14 +232,14 @@ func TestAssembledPlanSuppressesOpaqueLifecycleShellHooksAndResumesAfterExit(t *
 	assert.Contains(t, strings.ToLower(logs.String()), "plan mode", "suppression should leave a safe diagnostic")
 	assert.NotContains(t, logs.String(), r4MarkerCommand(capturedStart), "diagnostics must not expose shell commands")
 
-	r4SetPlanModeViaSlash(t, ctx, assembly, "exit")
+	r4SetPlanModeViaSlash(ctx, t, assembly, "exit")
 	require.NoError(t, assembly.HookChain.OnTurnStart(ctx, "normal-start"))
 	require.NoError(t, assembly.HookChain.OnTurnEnd(ctx, "normal-start", core.Result{}, nil))
 	assert.FileExists(t, capturedStart, "the captured session_start hook resumes after Plan exit")
 	assert.FileExists(t, capturedEnd, "the captured session_end hook resumes after Plan exit")
 }
 
-func newR4TrustedProjectHookConfig(t *testing.T, ctx context.Context, root, baseURL string, hooks []r4ShellHookSpec) *config.Config {
+func newR4TrustedProjectHookConfig(ctx context.Context, t *testing.T, root, baseURL string, hooks []r4ShellHookSpec) *config.Config {
 	t.Helper()
 	canonicalRoot, err := filepath.EvalSymlinks(root)
 	require.NoError(t, err)
@@ -286,7 +286,7 @@ func r4ShellQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
-func r4SetPlanModeViaSlash(t *testing.T, ctx context.Context, assembly *AgentAssembly, action string) {
+func r4SetPlanModeViaSlash(ctx context.Context, t *testing.T, assembly *AgentAssembly, action string) {
 	t.Helper()
 	var output bytes.Buffer
 	interactive := &interactiveCmd{out: &output, slashReg: defaultSlashReg}
