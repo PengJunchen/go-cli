@@ -678,7 +678,7 @@ func (a *gRPCAdapter) newRequest(ctx context.Context, method, route string, body
 	}
 	request.Header.Set(ACPHTTPProfileHeader, ACPHTTPProfileV1)
 	if a.bearerToken != "" {
-		if !validBearerToken(a.bearerToken) {
+		if !ValidHTTPBearerToken(a.bearerToken) {
 			return nil, errInvalidHTTPACPConfig
 		}
 		request.Header.Set("Authorization", "Bearer "+a.bearerToken)
@@ -686,17 +686,28 @@ func (a *gRPCAdapter) newRequest(ctx context.Context, method, route string, body
 	return request, nil
 }
 
-func validBearerToken(token string) bool {
+// ValidHTTPBearerToken reports whether token matches the RFC 6750 b64token
+// syntax used by the private HTTP profile. Padding may appear only at the end.
+func ValidHTTPBearerToken(token string) bool {
 	if token == "" {
-		return true
-	}
-	for _, r := range token {
-		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("-._~+/=", r) {
-			continue
-		}
 		return false
 	}
-	return true
+	paddingStarted := false
+	contentChars := 0
+	for _, r := range token {
+		if r == '=' {
+			if contentChars == 0 {
+				return false
+			}
+			paddingStarted = true
+			continue
+		}
+		if paddingStarted || !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("-._~+/", r)) {
+			return false
+		}
+		contentChars++
+	}
+	return contentChars > 0
 }
 
 func validOpaqueSessionID(sessionID, displayAlias string) bool {

@@ -129,6 +129,40 @@ func TestGRPCAdapterRejectsWrongHTTPBearerTokenWithoutLeaking(t *testing.T) {
 	require.Zero(t, remaining)
 }
 
+func TestGRPCAdapterRejectsMalformedHTTPBearerTokenBeforeRequest(t *testing.T) {
+	for _, token := range []string{"abc=def", "=abc", "="} {
+		t.Run(token, func(t *testing.T) {
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				http.Error(w, "unexpected request", http.StatusUnauthorized)
+			}))
+			t.Cleanup(server.Close)
+
+			client := NewGRPCAdapter(server.URL, WithHTTPBearerToken(token))
+			err := client.Connect(context.Background())
+			require.ErrorIs(t, err, errInvalidHTTPACPConfig)
+			require.NotContains(t, err.Error(), token)
+			require.Zero(t, requests.Load(), "invalid token syntax must be rejected before network I/O")
+		})
+	}
+}
+
+func TestGRPCAdapterAcceptsHTTPBearerTokenTrailingPadding(t *testing.T) {
+	for _, token := range []string{"abc=", "abc=="} {
+		t.Run(token, func(t *testing.T) {
+			server := NewHTTPServer("padded-token-peer", "127.0.0.1:0", nil)
+			server.SetAuth(token, "principal-a")
+			require.NoError(t, server.Start(context.Background()))
+			t.Cleanup(func() { _ = server.Stop(context.Background()) }) //nolint:errcheck // test cleanup
+
+			client := NewGRPCAdapter("http://"+server.Addr(), WithHTTPBearerToken(token))
+			require.NoError(t, client.Connect(context.Background()))
+			require.NoError(t, client.Disconnect(context.Background()))
+		})
+	}
+}
+
 func TestGRPCAdapterUnknownHTTPConnectOutcomeFencesWithoutReplay(t *testing.T) {
 	var connectRequests atomic.Int32
 	var disconnectRequests atomic.Int32

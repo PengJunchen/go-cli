@@ -97,6 +97,9 @@ func TestAssembleAgentFailsClosedForInvalidACPBearerTokenEnvBeforeHTTP(t *testin
 	}{
 		{name: "missing value", envName: "GO_CLI_TEST_MISSING_ACP_BEARER_TOKEN", value: ""},
 		{name: "malformed reference", envName: "GO-CLI-TEST-ACP-TOKEN", value: "must-not-leak"},
+		{name: "token with embedded padding", envName: "GO_CLI_TEST_ACP_TOKEN_EMBEDDED_PADDING", value: "abc=def"},
+		{name: "token with leading padding", envName: "GO_CLI_TEST_ACP_TOKEN_LEADING_PADDING", value: "=abc"},
+		{name: "padding without token", envName: "GO_CLI_TEST_ACP_TOKEN_PADDING_ONLY", value: "="},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -123,6 +126,18 @@ func TestAssembleAgentFailsClosedForInvalidACPBearerTokenEnvBeforeHTTP(t *testin
 				t.Fatal("invalid explicit bearer-token configuration must fail before sending an HTTP request")
 			case <-time.After(25 * time.Millisecond):
 			}
+		})
+	}
+}
+
+func TestResolveACPBearerTokenAcceptsRFC6750TrailingPadding(t *testing.T) {
+	for _, token := range []string{"abc", "abc=", "abc=="} {
+		t.Run(token, func(t *testing.T) {
+			const envName = "GO_CLI_TEST_ACP_PADDED_TOKEN"
+			t.Setenv(envName, token)
+			got, err := resolveACPHTTPBearerToken(context.Background(), nil, envName, "http://127.0.0.1:43210/acp")
+			require.NoError(t, err)
+			require.Equal(t, token, got)
 		})
 	}
 }
