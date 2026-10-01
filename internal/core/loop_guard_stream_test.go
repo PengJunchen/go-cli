@@ -127,7 +127,7 @@ func TestCompleteResponseGuardSeesWholeContinuationAndPreservesToolCalls(t *test
 	require.Equal(t, []string{"john@example.com"}, model.checks, "guard must receive one complete candidate across chunks and continuations")
 	require.Equal(t, 2, model.calls)
 	require.Equal(t, []llm.ToolCall{{ID: "call-safe", Name: "inspect", Args: map[string]any{"path": "a.go"}}}, response.ToolCalls)
-	events := stream.collected()
+	events := messageEvents(stream.collected())
 	require.Len(t, events, 1)
 	require.True(t, events[0].Incremental)
 	require.Equal(t, "[redacted]", events[0].Content, "only checked sanitized text may be published")
@@ -150,7 +150,7 @@ func TestCompleteResponseGuardContinuationFailurePublishesNoCandidate(t *testing
 	_, err := loop.generateWithContinuation(context.Background(), model, nil, nil, stream, slog.Default())
 	require.ErrorIs(t, err, continuationErr)
 	require.Empty(t, model.checks, "the guard must not inspect an incomplete continuation chain")
-	require.Empty(t, stream.collected(), "incomplete guarded output must not reach event consumers")
+	require.Empty(t, messageEvents(stream.collected()), "incomplete guarded output must not reach event consumers")
 }
 
 func TestCompleteResponseGuardDenialPublishesNoCandidate(t *testing.T) {
@@ -166,7 +166,7 @@ func TestCompleteResponseGuardDenialPublishesNoCandidate(t *testing.T) {
 	_, err := loop.generateWithContinuation(context.Background(), model, nil, nil, stream, slog.Default())
 	require.ErrorContains(t, err, "guard denied candidate")
 	require.Equal(t, []string{"denied text"}, model.checks)
-	require.Empty(t, stream.collected())
+	require.Empty(t, messageEvents(stream.collected()))
 }
 
 func TestGuardedStreamBudgetIncludesToolCallPayload(t *testing.T) {
@@ -197,7 +197,7 @@ func TestGuardedStreamBudgetIncludesLengthSegmentToolPayload(t *testing.T) {
 	require.ErrorContains(t, err, "response segment exceeds")
 	require.Equal(t, 1, model.calls, "an oversized partial segment must fail before continuation")
 	require.Empty(t, model.checks, "an incomplete segment must not reach OutputGuard")
-	require.Empty(t, stream.collected(), "guarded partial content must remain unpublished")
+	require.Empty(t, messageEvents(stream.collected()), "guarded partial content must remain unpublished")
 }
 
 func TestCompleteResponseGuardRejectsInvalidToolGroupBeforePublishingText(t *testing.T) {
@@ -217,7 +217,7 @@ func TestCompleteResponseGuardRejectsInvalidToolGroupBeforePublishingText(t *tes
 	_, err := loop.generateWithContinuation(context.Background(), model, nil, nil, stream, slog.Default())
 	require.ErrorContains(t, err, "more than")
 	require.Empty(t, model.checks, "structurally invalid tool groups must not reach output guard")
-	require.Empty(t, stream.collected(), "candidate text must not publish before tool group validation")
+	require.Empty(t, messageEvents(stream.collected()), "candidate text must not publish before tool group validation")
 }
 
 func TestGuardedStreamBudgetIgnoresChunkFramingAndEmptyContent(t *testing.T) {

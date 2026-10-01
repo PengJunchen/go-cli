@@ -16,6 +16,12 @@ const (
 	// EventKindPreToolCall marks an event emitted before each tool execution,
 	// allowing external interceptors to cancel the call via PreToolCall.Cancel.
 	EventKindPreToolCall = "pre_tool_call"
+	// EventKindAssistantGenerationStarted marks the start of a guarded assistant
+	// response operation. It carries occurrence coordinates but no candidate content.
+	EventKindAssistantGenerationStarted = "assistant_generation_started"
+	// EventKindAssistantGenerationFinished closes the matching guarded assistant
+	// response operation, regardless of whether it succeeded, failed, or canceled.
+	EventKindAssistantGenerationFinished = "assistant_generation_finished"
 )
 
 // AgentMessage is a single message exchanged within a conversation.

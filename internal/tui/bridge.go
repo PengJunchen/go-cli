@@ -54,6 +54,18 @@ func KindToContentType(kind string) string {
 // fields consumed by the TUI, derives ContentType from Kind, and forwards
 // token usage plus safe tool-call details when present.
 func CoreEventToAgentEvent(ev core.AgentEvent) AgentEvent {
+	if isAssistantGenerationLifecycleEvent(ev.Kind) {
+		ae := AgentEvent{
+			Type:        ev.Kind,
+			ContentType: ContentTypeStatus,
+			RunID:       ev.RunID,
+		}
+		if ev.CanonicalTranscriptIndex != nil {
+			index := *ev.CanonicalTranscriptIndex
+			ae.CanonicalTranscriptIndex = &index
+		}
+		return ae
+	}
 	ae := AgentEvent{
 		Type:           ev.Kind,
 		Content:        ev.Content,
@@ -93,6 +105,10 @@ func CoreEventToAgentEvent(ev core.AgentEvent) AgentEvent {
 		}
 	}
 	return ae
+}
+
+func isAssistantGenerationLifecycleEvent(kind string) bool {
+	return kind == core.EventKindAssistantGenerationStarted || kind == core.EventKindAssistantGenerationFinished
 }
 
 // copyToolCalls copies only JSON-compatible argument values into presentation-
