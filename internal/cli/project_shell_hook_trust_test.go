@@ -23,7 +23,7 @@ func TestAssembleSkipsProjectShellHooksWithoutVerifiedSources(t *testing.T) {
 	require.NoError(t, err)
 	require.Nil(t, rc.VerifiedProjectSources())
 
-	assembly := assembleProjectShellHookTestRuntime(t, ctx, root, rc)
+	assembly := assembleProjectShellHookTestRuntime(ctx, t, root, rc)
 	require.NoError(t, assembly.HookChain.OnTurnStart(ctx, "untrusted-turn"))
 	_, err = os.Stat(marker)
 	require.ErrorIs(t, err, os.ErrNotExist, "untrusted project hook must not execute")
@@ -48,7 +48,7 @@ func TestAssembleProjectShellHooksUseCapturedBytesAndTrustGeneration(t *testing.
 	// The verified capability must keep the captured command authoritative even
 	// when the project file changes after LoadTrustedWithManager returns.
 	require.NoError(t, os.WriteFile(hooksPath, projectShellHookYAML(t, shellAppendCommand(liveMarker)), 0o600))
-	assembly := assembleProjectShellHookTestRuntime(t, ctx, root, rc)
+	assembly := assembleProjectShellHookTestRuntime(ctx, t, root, rc)
 	require.NotNil(t, assembly.HookChain)
 	require.NotEmpty(t, assembly.HookChain.Hooks())
 	require.NoError(t, assembly.HookChain.OnTurnStart(ctx, "captured-turn"))
@@ -73,7 +73,7 @@ func TestAssembleProjectShellHooksUseCapturedBytesAndTrustGeneration(t *testing.
 	require.NoError(t, freshRevokedManager.RevokeTrust(ctx, snapshot.CanonicalRoot()))
 	freshRevoked, err := config.LoadTrustedWithManager(ctx, freshRevokedManager)
 	require.NoError(t, err)
-	freshAssembly := assembleProjectShellHookTestRuntime(t, ctx, root, freshRevoked)
+	freshAssembly := assembleProjectShellHookTestRuntime(ctx, t, root, freshRevoked)
 	require.NoError(t, freshAssembly.HookChain.OnTurnStart(ctx, "fresh-revoked-turn"))
 	assertFileContents(t, capturedMarker, "ran")
 	_, err = os.Stat(liveMarker)
@@ -84,10 +84,10 @@ func TestAssembleProjectShellHookStartRespectsCanceledRunContext(t *testing.T) {
 	root, _, marker := newProjectShellHookFixture(t, "cancelled")
 	ctx := context.Background()
 	manager := approval.NewDefaultTrustManager(approval.NewInMemoryTrustStore())
-	grantProjectShellHooks(t, ctx, root, manager)
+	grantProjectShellHooks(ctx, t, root, manager)
 	rc, err := config.LoadTrustedWithManager(ctx, manager)
 	require.NoError(t, err)
-	assembly := assembleProjectShellHookTestRuntime(t, ctx, root, rc)
+	assembly := assembleProjectShellHookTestRuntime(ctx, t, root, rc)
 
 	canceled, cancel := context.WithCancel(ctx)
 	cancel()
@@ -100,7 +100,7 @@ func TestAssembleProjectShellHooksRequireVerifiedRootMatch(t *testing.T) {
 	ctx := context.Background()
 	root, _, marker := newProjectShellHookFixture(t, "root-mismatch")
 	manager := approval.NewDefaultTrustManager(approval.NewInMemoryTrustStore())
-	grantProjectShellHooks(t, ctx, root, manager)
+	grantProjectShellHooks(ctx, t, root, manager)
 	rc, err := config.LoadTrustedWithManager(ctx, manager)
 	require.NoError(t, err)
 	require.NotNil(t, rc.VerifiedProjectSources())
@@ -146,7 +146,7 @@ func shellSingleQuote(value string) string {
 	return "'" + strings.ReplaceAll(value, "'", "'\\''") + "'"
 }
 
-func grantProjectShellHooks(t *testing.T, ctx context.Context, root string, manager approval.TrustManager) {
+func grantProjectShellHooks(ctx context.Context, t *testing.T, root string, manager approval.TrustManager) {
 	t.Helper()
 	snapshot, err := config.CaptureProjectSources(ctx, root, nil)
 	require.NoError(t, err)
@@ -155,7 +155,7 @@ func grantProjectShellHooks(t *testing.T, ctx context.Context, root string, mana
 	require.NoError(t, frozen.TrustProjectSourceSnapshot(ctx, snapshot))
 }
 
-func assembleProjectShellHookTestRuntime(t *testing.T, ctx context.Context, root string, rc *config.Config) *AgentAssembly {
+func assembleProjectShellHookTestRuntime(ctx context.Context, t *testing.T, root string, rc *config.Config) *AgentAssembly {
 	t.Helper()
 	require.NotNil(t, rc)
 	rc.Git.WorkDir = root
