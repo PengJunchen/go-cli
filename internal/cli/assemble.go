@@ -99,8 +99,9 @@ type ModelConfig struct {
 	// modality. It is nil when the model registry is not enabled.
 	ModelRegistry llm.ModelRegistry
 	// ContextWindow is the model's total context window size (in tokens),
-	// used for TUI status bar and /cost occupancy display. Falls back to
-	// MaxTokens when the model doesn't report a context window.
+	// used for status and cost displays. Zero means provider metadata did not
+	// establish the model's capacity. MaxTokens remains the local compaction
+	// ceiling and is reported separately.
 	ContextWindow int
 	// ThinkingLevel is the resolved LLM reasoning depth applied to every
 	// Generate/Stream call. Defaults to ThinkingMedium when no explicit
@@ -480,11 +481,9 @@ func AssembleAgent(
 	asmSpan.SetStatus(tracing.SpanStatusOK, "")
 	asmSpan.End()
 
-	// Resolve the context window for TUI status bar and /cost occupancy.
+	// Preserve unknown model context capacity as unknown. MaxTokens is a local
+	// compaction budget and must not be presented as provider context capacity.
 	contextWindow := s.modelInfo.ContextWindow
-	if contextWindow <= 0 {
-		contextWindow = s.ac.maxTokens
-	}
 
 	return &AgentAssembly{
 		CoreRuntime: CoreRuntime{
@@ -816,7 +815,7 @@ func (s *assembleState) assembleModel() error {
 		}
 		resolvedModels := make([]llm.ResolvedModel, 0, len(entries))
 		for _, entry := range entries {
-			resolved, resolveErr := modelResolver.resolveCyclerCandidate(s.ctx, entry.Provider, entry.Model)
+			resolved, resolveErr := modelResolver.resolveCyclerCandidate(s.ctx, s.rc, entry.Provider, entry.Model)
 			if resolveErr != nil {
 				return fmt.Errorf("assemble: resolve model cycler candidate %q/%q: %w", entry.Provider, entry.Model, resolveErr)
 			}
@@ -884,6 +883,7 @@ func (s *assembleState) assembleModel() error {
 		WithModelRegistry(s.modelRegistry).
 		WithPrimaryCleanup(s.primaryModelCleanup).
 		WithModelNames(s.providerName, s.modelName, smallProvider, smallModelName).
+		WithPrimaryModelContextWindow(s.modelInfo.ContextWindow).
 		WithModelBuilder(func(ctx context.Context, name string) (llm.BaseChatModel, func(), error) {
 			m, _, cleanup, err := modelResolver.buildPrimary(ctx, s.rc, s.providerName, name)
 			return m, cleanup, err
@@ -892,10 +892,34 @@ func (s *assembleState) assembleModel() error {
 			m, _, cleanup, err := modelResolver.buildInteractive(ctx, s.rc, candidate)
 			return m, cleanup, err
 		}).
+		WithModelSpecResultBuilder(func(ctx context.Context, candidate llm.ModelSpec) (llm.ModelSpecBuildResult, error) {
+			m, info, cleanup, err := modelResolver.buildInteractive(ctx, s.rc, candidate)
+			return llm.ModelSpecBuildResult{Model: m, Cleanup: cleanup, ContextWindow: info.ContextWindow}, err
+		}).
 		WithModelLister(func() []llm.ModelInfo {
 			return modelResolver.listAvailableModels(context.Background(), s.rc, s.providerName)
 		}).
 		WithModelSpecLister(modelResolver.listModelSpecs).
+		WithModelSwitchAdmission(func(ctx context.Context) (func(), error) {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+			guard := s.runSlotGuard
+			claimer, ok := guard.(core.RunSlotTryClaimer)
+			if !ok {
+				return nil, errors.New("cli: shared run guard does not support nonblocking model-switch admission")
+			}
+			claim, err := claimer.TryClaimRun()
+			if err != nil {
+				return nil, err
+			}
+			return func() { guard.Release(claim) }, nil
+		}).
+		WithModelSelectorFailureHandler(func() {
+			if closer, ok := s.runSlotGuard.(core.RunAdmissionCloser); ok {
+				closer.CloseAdmission()
+			}
+		}).
 		WithModelSwitchCallback(func(m llm.BaseChatModel) {
 			if s.loopAgent != nil {
 				s.loopAgent.SetModel(m)
@@ -1767,8 +1791,10 @@ type cliModelResolver struct {
 	resolver          *llm.ModelResolver
 	authChain         *config.AuthChain
 	primaryProviderID string
+	primaryModelID    string
 	primaryEndpoint   string
 	smallProviderID   string
+	smallModelID      string
 	smallEndpoint     string
 	smallErr          error
 }
@@ -1811,9 +1837,11 @@ func newCLIModelResolver(rc *config.Config, primaryProviderName string, includeS
 	}
 	appendConfiguredModel(modelNamesByProvider, primaryProviderName, configuredPrimaryModel)
 	smallProviderName := ""
+	configuredSmallModel := ""
 	smallEndpoint := ""
 	var smallErr error
 	if includeSmall && rc != nil {
+		configuredSmallModel = strings.TrimSpace(rc.SmallModel.Model)
 		smallProviderName = normalizeProviderName(rc.SmallModel.Provider)
 		if smallProviderName == "" {
 			smallProviderName = primaryProviderName
@@ -1931,8 +1959,10 @@ func newCLIModelResolver(rc *config.Config, primaryProviderName string, includeS
 		resolver:          registry.SnapshotResolver(),
 		authChain:         authChain,
 		primaryProviderID: primaryProviderName,
+		primaryModelID:    configuredPrimaryModel,
 		primaryEndpoint:   primary.endpoint,
 		smallProviderID:   smallProviderName,
+		smallModelID:      configuredSmallModel,
 		smallEndpoint:     smallEndpoint,
 		smallErr:          smallErr,
 	}, nil
@@ -2118,14 +2148,30 @@ func (r *cliModelResolver) build(ctx context.Context, request llm.ModelRequest) 
 	return model, llm.ModelInfo{}, cleanup, nil
 }
 
-func (r *cliModelResolver) resolveCyclerCandidate(ctx context.Context, providerName, modelName string) (llm.ResolvedModel, error) {
+func (r *cliModelResolver) resolveCyclerCandidate(ctx context.Context, rc *config.Config, providerName, modelName string) (llm.ResolvedModel, error) {
 	providerName = normalizeProviderName(providerName)
-	request := llm.ModelRequest{ProviderID: providerName, ModelID: strings.TrimSpace(modelName)}
+	modelName = strings.TrimSpace(modelName)
+	request := llm.ModelRequest{ProviderID: providerName, ModelID: modelName}
 	if providerIdentityMatches(r.primaryProviderID, providerName) {
 		request.Endpoint = r.primaryEndpoint
 	} else if providerIdentityMatches(r.smallProviderID, providerName) {
 		request.Endpoint = r.smallEndpoint
 	}
+
+	modelSampling := config.SamplingSettings{}
+	providerSampling := config.SamplingSettings{}
+	if rc != nil {
+		if providerIdentityMatches(resolveProviderName("", rc), providerName) {
+			providerSampling = rc.ProviderSampling()
+		}
+		switch {
+		case providerIdentityMatches(r.primaryProviderID, providerName) && modelName == r.primaryModelID:
+			modelSampling = rc.ModelSampling()
+		case providerIdentityMatches(r.smallProviderID, providerName) && modelName == r.smallModelID:
+			modelSampling = rc.SmallModelSampling()
+		}
+	}
+	applySamplingSettings(&request, modelSampling, providerSampling)
 	return r.resolver.ResolveModel(ctx, request)
 }
 

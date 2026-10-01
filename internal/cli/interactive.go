@@ -272,6 +272,10 @@ func emitTokenUsageEvent(stream *core.EventStreamImpl, assembly *AgentAssembly) 
 	if len(costSources) == 0 {
 		costSources[core.TokenUsageCostUnknown] = struct{}{}
 	}
+	contextWindow := assembly.ContextWindow
+	if assembly.ModelSelector != nil {
+		contextWindow = assembly.ModelSelector.ActiveModelSnapshot().ContextWindow
+	}
 	providerModelList := make([]core.TokenUsageProviderModel, 0, len(providerModels))
 	for providerModel := range providerModels {
 		providerModelList = append(providerModelList, providerModel)
@@ -288,7 +292,7 @@ func emitTokenUsageEvent(stream *core.EventStreamImpl, assembly *AgentAssembly) 
 		TokenUsage: &core.TokenUsage{
 			InputTokens:          inputTokens,
 			OutputTokens:         outputTokens,
-			MaxTokens:            assembly.ContextWindow,
+			MaxTokens:            contextWindow,
 			Cost:                 cost,
 			UnknownUsageAttempts: unknownUsageAttempts,
 			UnknownCostAttempts:  unknownCostAttempts,

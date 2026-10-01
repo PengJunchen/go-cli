@@ -143,10 +143,15 @@ func (h *CostHandler) Handle(_ context.Context, _ []string, deps Dependencies) (
 			fmt.Fprintf(deps.Out(), "  Tokens out: %d\n", stats.TokensOut) //nolint:errcheck
 		}
 	}
-	if deps.ContextWindow() > 0 {
+	if contextWindow := deps.ContextWindow(); contextWindow > 0 {
 		// SessionStats tokens accumulate across provider calls; they do not
 		// describe the current prompt's context-window occupancy.
-		fmt.Fprintf(deps.Out(), "  Context:   unknown/%d (current occupancy unavailable)\n", deps.ContextWindow()) //nolint:errcheck
+		fmt.Fprintf(deps.Out(), "  Context:   unknown/%d (current occupancy unavailable)\n", contextWindow) //nolint:errcheck
+	} else {
+		fmt.Fprintln(deps.Out(), "  Context:   unknown (model context window unavailable)") //nolint:errcheck
+	}
+	if ceiling := deps.LocalCompactionCeiling(); ceiling > 0 {
+		fmt.Fprintf(deps.Out(), "  Local compaction ceiling: %d tokens\n", ceiling) //nolint:errcheck
 	}
 	return "", nil
 }
