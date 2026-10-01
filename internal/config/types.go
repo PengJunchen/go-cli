@@ -50,6 +50,8 @@ type Config struct {
 	verifiedProjectSources    *approval.VerifiedProjectSources
 	projectTrustManager       approval.TrustManager `json:"-" yaml:"-" mapstructure:"-"`
 	projectExtensionSourceIDs map[string]string
+	projectACPCommandSourceID string
+	projectACPCommandPath     string
 	projectOverlay            *Config
 	userGlobalConfig          *Config
 	mcpServersProvenance      MCPServersProvenance
@@ -457,18 +459,23 @@ type HookConfig struct {
 }
 
 // ACPConfig controls Agent Communication Protocol (ACP) multi-agent
-// communication. When Transport and Endpoints are both non-empty, the CLI
-// creates an ACPClient, connects to the first endpoint, and wires an
-// ACPMiddlewareAdapter into the loop middleware chain so inbound ACP messages
-// are dispatched to sub-agents.
+// communication. Stdio transport starts Command directly with Args and uses
+// owned child stdin/stdout pipes and same-process-group cleanup; it does not
+// wrap Command in a shell. Descendants that leave the process group with
+// setsid or setpgid are outside this cleanup boundary. Grpc transport connects
+// to the first endpoint.
 type ACPConfig struct {
 	// Transport selects the wire format: "stdio" (newline-delimited JSON over
-	// stdin/stdout) or "grpc" (JSON-over-HTTP). When empty, ACP is disabled.
+	// an owned child process) or "grpc" (JSON-over-HTTP). When empty, ACP is disabled.
 	Transport string `json:"transport"`
-	// Endpoints lists the peer endpoints. For "grpc" transport each entry is an
-	// HTTP URL; for "stdio" the first entry is informational (stdin/stdout are
-	// used automatically).
+	// Endpoints lists peer endpoints. For "grpc" transport each entry is an
+	// HTTP URL. Stdio does not use Endpoints.
 	Endpoints []string `json:"endpoints"`
+	// Command is the executable to start for stdio transport. It is invoked
+	// directly, without shell expansion.
+	Command string `json:"command"`
+	// Args are passed as discrete arguments to Command for stdio transport.
+	Args []string `json:"args"`
 	// BearerTokenEnv names the environment variable holding the bearer token for
 	// the private HTTP ACP profile. If set, the exact variable is required; the
 	// token is never stored in config. This field does not apply to stdio.

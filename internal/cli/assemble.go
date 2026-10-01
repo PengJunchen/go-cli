@@ -1501,46 +1501,133 @@ func (s *assembleState) assembleSubAgent() error {
 		s.logger.Warn("assemble_subagent_tool_failed", "err", subErr)
 	}
 
+	return s.assembleACP()
+}
+
+func (s *assembleState) assembleACP() error {
+	if s.rc == nil {
+		return nil
+	}
 	// The dedicated HTTP token reference is meaningful only for the private
 	// HTTP profile. Reject a misplaced setting instead of silently ignoring it.
-	if s.rc != nil && s.rc.ACP.BearerTokenEnv != "" && (s.rc.ACP.Transport != "grpc" || len(s.rc.ACP.Endpoints) == 0) {
+	if s.rc.ACP.BearerTokenEnv != "" && (s.rc.ACP.Transport != "grpc" || len(s.rc.ACP.Endpoints) == 0) {
 		return errors.New("assemble: acp.bearer_token_env requires acp.transport grpc and an HTTP endpoint")
 	}
-
-	// Wire ACP multi-agent communication (if configured).
-	if s.rc != nil && s.rc.ACP.Transport != "" && len(s.rc.ACP.Endpoints) > 0 {
-		switch s.rc.ACP.Transport {
-		case "stdio":
-			s.acpClient = acp.NewStdioAdapter(os.Stdin, os.Stdout)
-		case "grpc":
-			var authChain *config.AuthChain
-			if s.modelResolver != nil {
-				authChain = s.modelResolver.authChain
-			}
-			token, tokenErr := resolveACPHTTPBearerToken(s.ctx, authChain, s.rc.ACP.BearerTokenEnv, s.rc.ACP.Endpoints[0])
-			if tokenErr != nil {
-				return tokenErr
-			}
-			var adapterOptions []acp.Option
-			if token != "" {
-				adapterOptions = append(adapterOptions, acp.WithHTTPBearerToken(token))
-			}
-			s.acpClient = acp.NewGRPCAdapter(s.rc.ACP.Endpoints[0], adapterOptions...)
-		default:
-			s.logger.Warn("assemble_acp_unknown_transport", "transport", s.rc.ACP.Transport)
-		}
-		if s.acpClient != nil {
-			if connErr := s.acpClient.Connect(s.ctx); connErr != nil {
-				s.logger.Warn("assemble_acp_connect_failed", "err", connErr)
-				s.acpConnectErr = connErr
-			} else {
-				acpMW := acp.NewACPMiddleware("acp-bridge", s.acpClient)
-				s.acpAdapter = acp.NewACPMiddlewareAdapter(acpMW, dispatcher, s.acpClient)
-				s.logger.Info("assemble_acp_connected", "transport", s.rc.ACP.Transport)
-			}
-		}
+	if s.rc.ACP.Transport == "" {
+		return nil
 	}
+	var client acp.ACPClient
+	switch s.rc.ACP.Transport {
+	case "stdio":
+		if strings.TrimSpace(s.rc.ACP.Command) == "" {
+			return errors.New("assemble: ACP stdio transport requires acp.command")
+		}
+		owner, verified, err := s.newACPStdioProcessOwner()
+		if err != nil {
+			return fmt.Errorf("assemble: prepare ACP stdio process: %w", err)
+		}
+		start := owner.Start
+		if verified != nil {
+			err = verified.CommitIfCurrent(s.ctx, start)
+		} else {
+			err = start()
+		}
+		if err != nil {
+			return errors.Join(fmt.Errorf("assemble: start ACP stdio process: %w", err), owner.Join())
+		}
+		client = acp.NewStdioAdapter(owner.Reader(), owner.Writer(), acp.WithStdioOwnedTransportCloser(owner))
+	case "grpc":
+		if len(s.rc.ACP.Endpoints) == 0 {
+			return nil
+		}
+		var authChain *config.AuthChain
+		if s.modelResolver != nil {
+			authChain = s.modelResolver.authChain
+		}
+		token, tokenErr := resolveACPHTTPBearerToken(s.ctx, authChain, s.rc.ACP.BearerTokenEnv, s.rc.ACP.Endpoints[0])
+		if tokenErr != nil {
+			return tokenErr
+		}
+		var adapterOptions []acp.Option
+		if token != "" {
+			adapterOptions = append(adapterOptions, acp.WithHTTPBearerToken(token))
+		}
+		client = acp.NewGRPCAdapter(s.rc.ACP.Endpoints[0], adapterOptions...)
+	default:
+		s.logger.Warn("assemble_acp_unknown_transport", "transport", s.rc.ACP.Transport)
+		return nil
+	}
+
+	if client == nil {
+		return nil
+	}
+	s.acpClient = client
+	if connErr := client.Connect(s.ctx); connErr != nil {
+		s.logger.Warn("assemble_acp_connect_failed", "err", connErr)
+		s.acpConnectErr = connErr
+		return nil
+	}
+	acpMW := acp.NewACPMiddleware("acp-bridge", client)
+	s.acpAdapter = acp.NewACPMiddlewareAdapter(acpMW, s.dispatcher, client)
+	s.logger.Info("assemble_acp_connected", "transport", s.rc.ACP.Transport)
 	return nil
+}
+
+func (s *assembleState) newACPStdioProcessOwner() (*acp.StdioProcessOwner, *approval.VerifiedProjectSources, error) {
+	command := s.rc.ACP.Command
+	executablePath := ""
+	cleanup := func() error { return nil }
+	var verified *approval.VerifiedProjectSources
+	if s.rc.HasProjectACPCommandOverlay() {
+		original := s.rc.VerifiedProjectSources()
+		manager := s.rc.ProjectTrustManager()
+		if original == nil || manager == nil {
+			return nil, nil, errors.New("verified project ACP command has no current trust authority")
+		}
+		fresh, err := config.LoadTrustedWithManager(s.ctx, manager)
+		if err != nil {
+			return nil, nil, fmt.Errorf("revalidate project ACP command: %w", err)
+		}
+		verified = fresh.VerifiedProjectSources()
+		if verified == nil || fresh.ProjectSourceTrustStatus != config.ProjectSourceTrustVerified ||
+			verified.CanonicalRoot() != original.CanonicalRoot() ||
+			verified.ManifestDigest() != original.ManifestDigest() ||
+			verified.TrustGeneration() != original.TrustGeneration() ||
+			fresh.ACP.Transport != s.rc.ACP.Transport || fresh.ACP.Command != s.rc.ACP.Command ||
+			!reflect.DeepEqual(fresh.ACP.Args, s.rc.ACP.Args) {
+			return nil, nil, errors.New("project ACP command trust changed since configuration load")
+		}
+		_, captured, ok := fresh.ProjectACPCommandBytesForVerifiedConfig()
+		if !ok {
+			return nil, nil, errors.New("verified project ACP command bytes are unavailable")
+		}
+		directory, err := os.MkdirTemp("", "go-cli-acp-stdio-")
+		if err != nil {
+			return nil, nil, fmt.Errorf("create private ACP executable directory: %w", err)
+		}
+		executablePath = filepath.Join(directory, "agent")
+		if err := os.WriteFile(executablePath, captured, 0o700); err != nil {
+			_ = os.RemoveAll(directory)
+			return nil, nil, fmt.Errorf("materialize verified ACP executable: %w", err)
+		}
+		if err := os.Chmod(executablePath, 0o700); err != nil {
+			_ = os.RemoveAll(directory)
+			return nil, nil, fmt.Errorf("make verified ACP executable runnable: %w", err)
+		}
+		cleanup = func() error { return os.RemoveAll(directory) }
+	}
+
+	owner, err := acp.NewStdioProcessOwner(acp.StdioProcessConfig{
+		Context:        s.ctx,
+		Command:        command,
+		ExecutablePath: executablePath,
+		Args:           append([]string(nil), s.rc.ACP.Args...),
+		Cleanup:        cleanup,
+	})
+	if err != nil {
+		return nil, nil, errors.Join(err, cleanup())
+	}
+	return owner, verified, nil
 }
 
 // assembleExtraTools registers remaining tools (todo, task, goal, web, plan_mode, etc.).

@@ -298,6 +298,41 @@ func TestStdioOwnedPipeDisconnectClosesAndJoinsWorkers(t *testing.T) {
 	}
 }
 
+func TestStdioOwnedTransportJoinRunsAfterWorkersAndReportsErrors(t *testing.T) {
+	clientInput, peerInput := io.Pipe()
+	readerReturned := make(chan struct{})
+	joinCalled := make(chan bool, 1)
+	joinErr := errors.New("process join failed")
+	owned := &joinTrackingStdioCloser{
+		close: func() error { return clientInput.Close() },
+		join: func() error {
+			select {
+			case <-readerReturned:
+				joinCalled <- true
+			default:
+				joinCalled <- false
+			}
+			return joinErr
+		},
+	}
+	reader := &returnTrackingReader{reader: clientInput, returned: readerReturned}
+	client := NewStdioAdapter(reader, &bytes.Buffer{}, WithStdioOwnedTransportCloser(owned))
+	t.Cleanup(func() {
+		_ = peerInput.Close()
+		_ = clientInput.Close()
+	})
+	require.NoError(t, client.Connect(context.Background()))
+
+	err := client.Disconnect(context.Background())
+	assert.ErrorIs(t, err, joinErr, "the owned process Join error is part of Disconnect completion")
+	select {
+	case workersHadReturned := <-joinCalled:
+		assert.True(t, workersHadReturned, "Join must run after the adapter reader callback has returned")
+	case <-time.After(time.Second):
+		t.Fatal("owned process Join was not called")
+	}
+}
+
 func TestStdioBlockingOwnedCloserRemainsTrackedAcrossDisconnectWaiters(t *testing.T) {
 	clientInput, peerInput := io.Pipe()
 	readerStarted := make(chan struct{})
@@ -590,6 +625,28 @@ func (closers closeAll) Close() error {
 		}
 	}
 	return errors.Join(errs...)
+}
+
+type joinTrackingStdioCloser struct {
+	close func() error
+	join  func() error
+}
+
+func (c *joinTrackingStdioCloser) Close() error { return c.close() }
+func (c *joinTrackingStdioCloser) Join() error  { return c.join() }
+
+type returnTrackingReader struct {
+	reader   io.Reader
+	returned chan struct{}
+	once     sync.Once
+}
+
+func (r *returnTrackingReader) Read(data []byte) (int, error) {
+	n, err := r.reader.Read(data)
+	if err != nil {
+		r.once.Do(func() { close(r.returned) })
+	}
+	return n, err
 }
 
 type blockingStdioCloser struct {

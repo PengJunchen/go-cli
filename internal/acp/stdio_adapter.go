@@ -661,9 +661,14 @@ func (s *StdioAdapter) startCleanup(session *stdioSession, sendDisconnect bool) 
 			close(closerDone)
 		} else {
 			go func() {
-				err := closeOwnedTransport(owned)
+				closeErr := closeOwnedTransport(owned)
+				<-session.joined
+				var joinErr error
+				if joiner, ok := owned.(interface{ Join() error }); ok {
+					joinErr = joiner.Join()
+				}
 				s.mu.Lock()
-				s.ownedCloseErr = err
+				s.ownedCloseErr = errors.Join(closeErr, joinErr)
 				s.mu.Unlock()
 				close(closerDone)
 			}()
