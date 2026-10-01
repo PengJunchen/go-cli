@@ -198,6 +198,70 @@ func TestModelSwitchPublishesContextWindowAndCostUsesActiveSnapshot(t *testing.T
 	assert.Contains(t, unknownCost.String(), "Local compaction ceiling: 8192 tokens")
 }
 
+func TestAssembledSameProviderAlternateModelSwitchUsesProviderSampling(t *testing.T) {
+	server := newR3SamplingServer(t)
+
+	const (
+		providerName = "r3-switch-sampling-provider"
+		primaryModel = "configured-primary-model"
+		alternate    = "same-provider-alternate-model"
+	)
+	apiKey := newTestCredentialCanary(t)
+	const envPrefix = "GO_CLI_R3_SWITCH_SAMPLING"
+	for _, suffix := range []string{
+		"PROVIDER_NAME", "PROVIDER_BASE_URL", "PROVIDER_API_KEY", "PROVIDER_TEMPERATURE", "PROVIDER_MAX_TOKENS",
+		"MODEL_NAME", "MODEL_TEMPERATURE", "MODEL_MAX_TOKENS",
+	} {
+		t.Setenv(envPrefix+"_"+suffix, "")
+	}
+	configData, err := json.Marshal(map[string]any{
+		"provider": map[string]any{
+			"name": providerName, "base_url": server.server.URL, "api_key": apiKey,
+			"temperature": 0.6, "max_tokens": 512,
+		},
+		"model": map[string]any{"name": primaryModel, "temperature": 0, "max_tokens": 128},
+	})
+	require.NoError(t, err)
+	rc, err := config.NewLoader().WithFileBytes("r3-model-switch-sampling.json", configData).
+		WithEnvPrefix(envPrefix).Load(context.Background())
+	require.NoError(t, err)
+	assert.True(t, rc.ModelSampling().TemperatureSet, "the primary model's explicit zero must be present")
+	assert.True(t, rc.ModelSampling().MaxTokensSet, "the primary model's token limit must be present")
+
+	assembly, err := AssembleAgent(context.Background(), rc, providerName, primaryModel, io.Discard, WithApproveMode(ApproveAuto))
+	require.NoError(t, err)
+	t.Cleanup(assembly.Cleanup)
+	deps := &slashContext{modelSelector: assembly.ModelSelector, modelName: primaryModel, out: io.Discard}
+	_, err = (&ModelHandler{}).Handle(context.Background(), []string{"--provider", providerName, "--", alternate}, deps)
+	require.NoError(t, err)
+	assert.Equal(t, alternate, assembly.ModelSelector.PrimaryModelName())
+
+	recorder := &r3PreparedPlanRecordingModel{BaseChatModel: assembly.ModelSelector.PrimaryModel()}
+	assembly.LoopAgent.SetModel(recorder)
+	_, err = assembly.TurnRunner.RunTurn(context.Background(), core.Submission{Content: "exercise alternate-model sampling"})
+	require.NoError(t, err)
+
+	request := server.singleRequest(t)
+	assert.Equal(t, "Bearer "+apiKey, request.authorization)
+	var body struct {
+		Model       string   `json:"model"`
+		Temperature *float64 `json:"temperature"`
+		MaxTokens   *int     `json:"max_tokens"`
+	}
+	require.NoError(t, json.Unmarshal(request.body, &body))
+	assert.Equal(t, alternate, body.Model)
+	assert.Equal(t, r3Float64Pointer(0.6), body.Temperature, "an alternate identity inherits matching provider sampling, not primary-model sampling")
+	require.NotNil(t, body.MaxTokens)
+	assert.Equal(t, 512, *body.MaxTokens)
+
+	plans := recorder.planSnapshot()
+	require.Len(t, plans, 1)
+	planOptions := plans[0].Options()
+	assert.Equal(t, r3Float64Pointer(0.6), planOptions.Temperature, "prepared-plan sampling must match the provider request")
+	require.NotNil(t, planOptions.MaxTokens)
+	assert.Equal(t, 512, *planOptions.MaxTokens)
+}
+
 func TestAssembledCyclerSamplingMatchesModelIdentityAndPreparedRequest(t *testing.T) {
 	primaryServer := newR3SamplingServer(t)
 	smallServer := newR3SamplingServer(t)

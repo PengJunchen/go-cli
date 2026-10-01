@@ -48,6 +48,10 @@ func TestAssembledSubAgentModelOverrideUsesPrimaryResolverScope(t *testing.T) {
 				BaseURL: primaryServer.URL + "/primary",
 				APIKey:  primaryKey,
 			}
+			cfg.Provider.SetTemperature(0.6)
+			cfg.Provider.SetMaxTokens(512)
+			cfg.Model.SetTemperature(0)
+			cfg.Model.SetMaxTokens(128)
 			cfg.SmallModel = config.SmallModelConfig{
 				Provider: smallProvider,
 				BaseURL:  smallServer.URL + "/small",
@@ -85,6 +89,10 @@ func TestAssembledSubAgentModelOverrideUsesPrimaryResolverScope(t *testing.T) {
 				assert.Contains(t, request.body, `"model":"`+childModel+`"`)
 				assert.NotContains(t, request.body, primaryKey)
 				assert.NotContains(t, request.body, smallKey)
+				assert.Contains(t, request.body, `"temperature":0.6`, "alternate child models inherit matching provider sampling")
+				assert.Contains(t, request.body, `"max_tokens":512`, "alternate child models must not inherit primary-model sampling")
+				assert.NotContains(t, request.body, `"temperature":0,`)
+				assert.NotContains(t, request.body, `"max_tokens":128`)
 			}
 
 			attempts, attemptSummary := assembly.CostTracker.AttemptCostSnapshot()
