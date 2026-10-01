@@ -311,6 +311,7 @@ type assembleConfig struct {
 	durableSession *durableCLISession
 	agentName      string
 	thinkingLevel  *llm.ThinkingLevel
+	pluginLoader   extension.PluginLoader
 	// noSandbox disables bash sandbox enforcement, replacing the default
 	// sandbox with an AllowAllSandbox that permits every command.
 	noSandbox bool
@@ -628,6 +629,7 @@ func newAssembleState(
 		lifetimeCancel: lifetimeCancel,
 		mcpResources:   &assemblyMCPResources{},
 		durableSession: ac.durableSession,
+		pluginLoader:   ac.pluginLoader,
 	}
 	s.closeOwner = newAssemblyCloseOwner(
 		func() core.RunSlotGuard { return s.runSlotGuard },
@@ -1100,7 +1102,8 @@ func (s *assembleState) assembleExtensions() error {
 		if err := pm.Init(s.ctx); err != nil {
 			return fmt.Errorf("assemble: initialize extensions: %w", err)
 		}
-		for _, t := range pm.Tools() {
+		for _, registration := range pm.ToolRegistrations() {
+			t := registration.Tool
 			var regErr error
 			if projectBinding != nil {
 				registrar, ok := s.tr.(tools.ProjectSourcedToolRegistrar)
@@ -1113,7 +1116,9 @@ func (s *assembleState) assembleExtensions() error {
 				regErr = s.tr.Register(s.ctx, t)
 			}
 			if regErr != nil {
-				s.logger.Warn("assemble_extension_tool_register_failed", "tool", t.Name(), "err", regErr)
+				safeErr := newExtensionToolRegistrationError(registration.Owner, t.Name(), regErr)
+				s.logger.Warn("assemble_extension_tool_register_failed", "owner", safeErr.Owner, "tool", safeErr.Tool, "class", safeErr.Class)
+				return safeErr
 			}
 		}
 		for _, registration := range pm.HookRegistrations() {

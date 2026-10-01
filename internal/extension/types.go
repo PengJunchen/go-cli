@@ -5,6 +5,8 @@ import (
 	"errors"
 	"log/slog"
 	"time"
+
+	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 // This file defines the Phase 4 richer Extension system model: the Extension
@@ -114,6 +116,14 @@ const (
 type HookRegistration struct {
 	Owner string
 	Hook  Hook
+}
+
+// ToolRegistration binds a tool to the extension that successfully initialized
+// it. Owner is assigned by the coordinator and cannot be overridden by the
+// tool's own name.
+type ToolRegistration struct {
+	Owner string
+	Tool  tools.ToolDefinition
 }
 
 // HookSubmissionSnapshot is a bounded, extension-owned copy of a submission.

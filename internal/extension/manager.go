@@ -207,6 +207,7 @@ func (c *extensionCoordinator) initExtension(ctx context.Context, ext Extension)
 		return ErrExtensionAtomicCommitUnsupported
 	}
 	staging.hookOwner = name
+	staging.toolOwner = name
 	managed := &managedExtension{
 		ext:        ext,
 		name:       name,

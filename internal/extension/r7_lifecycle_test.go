@@ -11,6 +11,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/tools"
 )
 
 type r7LifecycleExt struct {
@@ -753,5 +755,45 @@ func TestHookRegistrationOwnerSurvivesStageCommit(t *testing.T) {
 	assert.Equal(t, []Hook{registrations[0].Hook, registrations[1].Hook}, manager.Hooks())
 	assert.Equal(t, int32(1), conflict.stopCalls.Load(), "a conflicting stage is cleaned up once")
 	assert.Equal(t, int32(0), failed.stopCalls.Load(), "a failed Init does not publish or gain a shutdown callback")
+	require.NoError(t, manager.Shutdown(context.Background()))
+}
+
+func TestToolRegistrationOwnerSurvivesStageCommit(t *testing.T) {
+	loader := newMgrTestPluginLoader("test")
+	register := func(toolName string) func(context.Context, ExtensionRegistry) error {
+		return func(ctx context.Context, registry ExtensionRegistry) error {
+			return registry.RegisterTool(ctx, testTool{name: toolName})
+		}
+	}
+
+	first := &r7LifecycleExt{name: "tool-owner-one", init: register("tool-name-does-not-own-extension")}
+	second := &r7LifecycleExt{name: "tool-owner-two", init: register("second-tool")}
+	conflict := &r7LifecycleExt{name: "tool-owner-conflict", init: register("tool-name-does-not-own-extension")}
+	failed := &r7LifecycleExt{name: "tool-owner-failed", init: func(ctx context.Context, registry ExtensionRegistry) error {
+		if err := registry.RegisterTool(ctx, testTool{name: "not-committed"}); err != nil {
+			return err
+		}
+		return errors.New("fixture init failure")
+	}}
+	loader.SetResult("plugins", []Extension{first, failed, second, conflict})
+	manager := NewPluginManager(loader)
+	require.NoError(t, manager.Load(context.Background(), []string{"plugins"}))
+	require.Error(t, manager.Init(context.Background()))
+
+	registrations := manager.ToolRegistrations()
+	require.Len(t, registrations, 2)
+	assert.Equal(t, "tool-owner-one", registrations[0].Owner)
+	assert.Equal(t, "tool-name-does-not-own-extension", registrations[0].Tool.Name())
+	assert.Equal(t, "tool-owner-two", registrations[1].Owner)
+	assert.Equal(t, "second-tool", registrations[1].Tool.Name())
+	assert.Equal(t, []tools.ToolDefinition{registrations[0].Tool, registrations[1].Tool}, manager.Tools())
+
+	registrations[0] = ToolRegistration{Owner: "mutated", Tool: testTool{name: "mutated"}}
+	again := manager.ToolRegistrations()
+	require.Len(t, again, 2)
+	assert.Equal(t, "tool-owner-one", again[0].Owner, "caller mutation must not affect the registry snapshot")
+	assert.Equal(t, "tool-name-does-not-own-extension", again[0].Tool.Name())
+	assert.Zero(t, failed.stopCalls.Load(), "failed Init does not commit tool registrations or gain a shutdown callback")
+	assert.Equal(t, int32(1), conflict.stopCalls.Load(), "a conflicting stage is cleaned up once and cannot replace the published owner")
 	require.NoError(t, manager.Shutdown(context.Background()))
 }
