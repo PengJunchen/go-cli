@@ -449,7 +449,7 @@ func TestSessionRunCommitSinkExplicitlyReconcilesUnknownAction(t *testing.T) {
 	var action PendingActionRef
 	identity := &core.ExecutionIdentity{
 		Kind: core.ExecutionIdentityProcessGroup, Platform: "linux", HostGeneration: "fixture-host",
-		LeaderPID: 999999, ProcessStartToken: "fixture-start", ProcessGroupID: 999999,
+		LeaderPID: 999999, ProcessStartToken: "proc7", ProcessGroupID: 999999,
 	}
 	userMessage := core.AgentMessage{Role: "user", Content: "perform one write", InputKind: core.InputKindUser}
 	assistantMessage := core.AgentMessage{Role: "assistant", ToolCalls: []llm.ToolCall{{ID: intent.ToolCallID, Name: "read", Args: map[string]any{"path": "README.md"}}}}

@@ -17,7 +17,7 @@ import (
 
 func TestAssembleAgentUsesDedicatedACPBearerTokenEnv(t *testing.T) {
 	const envName = "GO_CLI_TEST_ACP_BEARER_TOKEN"
-	const token = "acp-test-bearer-secret"
+	const token = "acpTok7"
 	t.Setenv(envName, token)
 
 	type requestObservation struct {
@@ -144,7 +144,7 @@ func TestResolveACPBearerTokenAcceptsRFC6750TrailingPadding(t *testing.T) {
 }
 
 func TestResolveACPBearerTokenFailsClosedForMissingOrMalformedExplicitRef(t *testing.T) {
-	const secret = "must-not-leak"
+	const secret = "noLeak7"
 	chain := config.NewAuthChain().WithSources([]config.AuthSource{{
 		Name: "exact-scope-test",
 		LookupScoped: func(config.AuthScope) (string, error) {
@@ -175,8 +175,8 @@ func TestResolveACPBearerTokenFailsClosedForMissingOrMalformedExplicitRef(t *tes
 }
 
 func TestResolveACPBearerTokenUsesExactPrivateProfileScopeOnly(t *testing.T) {
-	const llmSecret = "openai-llm-secret"
-	const wrongScopeSecret = "wrong-acp-scope-secret"
+	const llmSecret = "llmFake"
+	const wrongScopeSecret = "wrong7"
 	var requested config.AuthScope
 	chain := config.NewAuthChain().WithSources([]config.AuthSource{
 		{
@@ -210,7 +210,7 @@ func TestResolveACPBearerTokenUsesExactPrivateProfileScopeOnly(t *testing.T) {
 }
 
 func TestResolveACPBearerTokenRedactsScopedSourceErrors(t *testing.T) {
-	const secret = "source-error-secret"
+	const secret = "errMsg7"
 	chain := config.NewAuthChain().WithSources([]config.AuthSource{{
 		Name: "broken-source",
 		LookupScoped: func(config.AuthScope) (string, error) {
