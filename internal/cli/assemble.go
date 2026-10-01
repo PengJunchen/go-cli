@@ -2065,7 +2065,11 @@ func (r *cliModelResolver) buildPrimary(ctx context.Context, rc *config.Config, 
 		if providerIdentityMatches(resolveProviderName("", rc), providerName) {
 			providerSampling = rc.ProviderSampling()
 		}
-		applySamplingSettings(&request, rc.ModelSampling(), providerSampling)
+		modelSampling := config.SamplingSettings{}
+		if providerIdentityMatches(r.primaryProviderID, providerName) && strings.TrimSpace(modelName) == r.primaryModelID {
+			modelSampling = rc.ModelSampling()
+		}
+		applySamplingSettings(&request, modelSampling, providerSampling)
 	} else {
 		request.MaxTokens = config.DefaultLLMMaxTokens
 		request.MaxTokensSet = true
