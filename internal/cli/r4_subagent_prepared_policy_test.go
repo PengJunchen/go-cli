@@ -25,7 +25,8 @@ import (
 const r4SubagentPolicyPrompt = "r4-child-prepared-policy-fixture"
 
 type assembledSubagentPolicyProvider struct {
-	writePath string
+	writePath  string
+	childModel string
 
 	childStarted         chan struct{}
 	releaseFirstChild    chan struct{}
@@ -52,10 +53,6 @@ func (p *assembledSubagentPolicyProvider) ServeHTTP(w http.ResponseWriter, r *ht
 		return
 	}
 	_ = r.Body.Close()
-	if request.Model != "r4-assembly-provider" {
-		p.wrongModelRequests.Add(1)
-	}
-
 	child := false
 	for _, message := range request.Messages {
 		if message.Role != "system" {
@@ -66,6 +63,13 @@ func (p *assembledSubagentPolicyProvider) ServeHTTP(w http.ResponseWriter, r *ht
 			child = true
 			break
 		}
+	}
+	expectedModel := "r4-assembly-provider"
+	if child && p.childModel != "" {
+		expectedModel = p.childModel
+	}
+	if request.Model != expectedModel {
+		p.wrongModelRequests.Add(1)
 	}
 
 	if child {
@@ -103,13 +107,17 @@ func (p *assembledSubagentPolicyProvider) ServeHTTP(w http.ResponseWriter, r *ht
 	}
 
 	if p.parentRequests.Add(1) == 1 {
-		writeSubagentPolicyToolCall(w, "dispatch_subagent", "parent-subagent-policy-fixture", map[string]any{
+		arguments := map[string]any{
 			"id":            "r4-policy-child",
 			"prompt":        "write the configured fixture file",
 			"system_prompt": r4SubagentPolicyPrompt,
 			"tools":         []string{"write"},
 			"max_turns":     2,
-		})
+		}
+		if p.childModel != "" {
+			arguments["model"] = p.childModel
+		}
+		writeSubagentPolicyToolCall(w, "dispatch_subagent", "parent-subagent-policy-fixture", arguments)
 		return
 	}
 	writeSubagentPolicyText(w, "parent finished")
@@ -180,10 +188,15 @@ func (t *assembledSubagentReplacementTool) Execute(context.Context, tools.ToolCa
 
 func newAssembledSubagentPolicyFixture(t *testing.T, blockChild bool) (*AgentAssembly, *assembledSubagentPolicyProvider, context.Context, chan tui.ApprovalRequest) {
 	t.Helper()
+	return newAssembledSubagentPolicyFixtureWithModel(t, blockChild, "")
+}
+
+func newAssembledSubagentPolicyFixtureWithModel(t *testing.T, blockChild bool, childModel string) (*AgentAssembly, *assembledSubagentPolicyProvider, context.Context, chan tui.ApprovalRequest) {
+	t.Helper()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	t.Cleanup(cancel)
-	provider := &assembledSubagentPolicyProvider{}
+	provider := &assembledSubagentPolicyProvider{childModel: childModel}
 	var releaseFirstChild chan struct{}
 	if blockChild {
 		provider.childStarted = make(chan struct{}, 1)
@@ -198,8 +211,9 @@ func newAssembledSubagentPolicyFixture(t *testing.T, blockChild bool) (*AgentAss
 	provider.writePath = filepath.Join(cfg.Git.WorkDir, "child-write.txt")
 	cfg.Provider.BaseURL = server.URL
 	approvalCh := make(chan tui.ApprovalRequest)
-	// Leave durable sessions and model overrides disabled: this fixture covers
-	// the non-durable child inheriting the real Assembly model and tool registry.
+	// Keep durable sessions disabled so the fixture exercises Assembly's
+	// non-durable child and shared prepared-tool registry. The child model may
+	// inherit the parent or use an Assembly-resolved override.
 	assembly, err := AssembleAgent(ctx, cfg, "openai", "r4-assembly-provider", io.Discard, WithApprovalChannel(approvalCh))
 	require.NoError(t, err)
 	t.Cleanup(assembly.Cleanup)
@@ -369,6 +383,32 @@ func TestAssembleRealSubAgentChildWriteReplacementStalesPendingApproval(t *testi
 	assert.EqualValues(t, 1, provider.childWriteCalls.Load())
 	assert.Zero(t, provider.wrongModelRequests.Load(), "the child must inherit the configured Assembly model")
 	assert.NoFileExists(t, provider.writePath)
+}
+
+func TestAssembleRealSubAgentOverrideChildWriteReplacementStalesPendingApproval(t *testing.T) {
+	const childModel = "r4-child-override-model"
+	assembly, provider, ctx, approvalCh := newAssembledSubagentPolicyFixtureWithModel(t, false, childModel)
+	done := startAssembledSubagentPolicyTurn(ctx, assembly)
+
+	parentApproval := awaitAssembledApproval(ctx, t, approvalCh, "dispatch_subagent")
+	parentApproval.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalAllow}
+	childApproval := awaitAssembledApproval(ctx, t, approvalCh, "write")
+	assert.Equal(t, provider.writePath, childApproval.Args["path"])
+	assert.NoFileExists(t, provider.writePath, "parent dispatch approval must not grant the child's write")
+	assert.EqualValues(t, 1, provider.childRequests.Load())
+	assert.Zero(t, provider.wrongModelRequests.Load(), "the child must use its resolved Assembly-primary model override")
+
+	replacement := &assembledSubagentReplacementTool{}
+	require.NoError(t, assembly.ToolRegistry.Register(ctx, replacement))
+	childApproval.ResponseCh <- tui.ApprovalResponse{Decision: tui.ApprovalAllow}
+	outcome := awaitAssembledSubagentTurn(ctx, t, done)
+	require.NoError(t, outcome.err)
+
+	assert.Zero(t, replacement.calls.Load(), "a replacement must not execute under the child's prior approval")
+	assert.EqualValues(t, 1, provider.childWriteCalls.Load())
+	assert.EqualValues(t, 2, provider.childRequests.Load(), "the child should receive the stale-plan result and finish")
+	assert.Zero(t, provider.wrongModelRequests.Load(), "both child turns must use the resolved override")
+	assert.NoFileExists(t, provider.writePath, "the frozen approval must not authorize the original or replacement tool")
 }
 
 func TestAssembleRealSubAgentUnknownDispatchRemainsBlockedInPlan(t *testing.T) {
