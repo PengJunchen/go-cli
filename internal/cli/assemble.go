@@ -1431,7 +1431,14 @@ func (s *assembleState) assembleOutputGuards() {
 // assembleSubAgent wires the real SubAgent factory, dispatcher, and ACP
 // multi-agent communication.
 func (s *assembleState) assembleSubAgent() {
-	subAgentFactory := core.NewRealSubAgentFactory(s.model, llm.NewProviderRegistry(), s.tr,
+	var modelBuilder core.SubAgentModelBuilder
+	if s.modelResolver != nil {
+		modelBuilder = func(ctx context.Context, modelName string) (llm.BaseChatModel, func(), error) {
+			model, _, cleanup, err := s.modelResolver.buildPrimary(ctx, s.rc, s.providerName, modelName)
+			return model, cleanup, err
+		}
+	}
+	subAgentFactory := core.NewRealSubAgentFactoryWithModelBuilder(s.model, modelBuilder, s.tr,
 		core.WithModelWrapper(newModelWrapperWithChain(s.pw, s.modelChain, s.circuitBreaker, s.guardChain, s.telemetry)),
 		core.WithMidTurnCompaction(s.midTurn, s.compactor, s.estimator, s.ac.maxTokens),
 	)
