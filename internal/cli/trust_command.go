@@ -221,6 +221,12 @@ func (c *trustCommand) list() error {
 }
 
 func trustEntryListStatus(root string, entry approval.TrustEntry, now time.Time) string {
+	if entry.Revoked {
+		if entry.TrustGeneration > 0 {
+			return fmt.Sprintf("revoked trust generation %d; not authorized", entry.TrustGeneration)
+		}
+		return "revoked trust entry; not authorized"
+	}
 	if entry.ManifestVersion == 0 {
 		return "legacy path-only entry; does not authorize executable sources"
 	}
