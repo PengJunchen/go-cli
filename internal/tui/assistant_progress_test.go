@@ -3,8 +3,9 @@ package tui
 import (
 	"testing"
 
-	"github.com/pengjunchen/go-cli/internal/core"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/core"
 )
 
 const (
