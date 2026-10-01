@@ -118,6 +118,20 @@ func TestAdaptHITLEmitterAnswerError(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestAdaptHITLEmitterPreservesExplicitQuestionCancellation(t *testing.T) {
+	emitter := &recordingEmitter{
+		autoAnswer: true,
+		answer:     HITLAnswer{Error: ErrHITLQuestionCanceled},
+	}
+	tool := NewAskUserQuestionTool(emitter, time.Second)
+
+	_, err := tool.Execute(context.Background(), tools.ToolCall{
+		Args: map[string]any{"question": "continue?"},
+	})
+	require.ErrorIs(t, err, ErrHITLQuestionCanceled)
+	require.NotErrorIs(t, err, context.Canceled)
+}
+
 func TestAdaptHITLEmitterEmitError(t *testing.T) {
 	emitter := &errorEmitter{}
 	tool := NewAskUserQuestionTool(emitter, time.Second)

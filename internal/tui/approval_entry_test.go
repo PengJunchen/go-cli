@@ -10,6 +10,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/core"
 )
 
 // TestRenderApprovalRequest_NoDiff verifies the basic approval entry rendering
@@ -541,6 +543,19 @@ func TestTUIAskUserFreeTextReachesHandler(t *testing.T) {
 	m.Update(tea.KeyMsg{Type: tea.KeyBackspace})
 	m.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	assert.Equal(t, "draf", receiveHITLResponse(t, responseCh).Answer)
+	assert.Nil(t, m.activeInteraction)
+}
+
+func TestTUIAskUserEscIsKnownQuestionCancellation(t *testing.T) {
+	responseCh := make(chan HITLResponse, 1)
+	m := &teaModel{accordion: NewAccordionModel(), msgCh: make(chan Msg, 1)}
+	m.Update(HITLMessage{QuestionID: "q-escape", Question: "Decline this question?", ResponseCh: responseCh})
+	require.Contains(t, m.View(), "Decline this question?")
+	m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+
+	response := receiveHITLResponse(t, responseCh)
+	require.ErrorIs(t, response.Err, core.ErrHITLQuestionCanceled)
+	assert.NotErrorIs(t, response.Err, context.Canceled, "an explicit question decline is not parent/turn cancellation")
 	assert.Nil(t, m.activeInteraction)
 }
 

@@ -393,6 +393,26 @@ func TestRunCommitReceiptPersistenceFailureDoesNotPublishSuccess(t *testing.T) {
 	require.Equal(t, 1, model.idx, "receipt persistence failure must stop later provider work")
 }
 
+func TestRunCommitReceiptOutcomeKeepsUserQuestionDeclineDistinctFromTurnCancellation(t *testing.T) {
+	declined := runCommitReceiptOutcome(context.Background(), runCommitDispatchResult{
+		err:       fmt.Errorf("ask_user: %w", ErrHITLQuestionCanceled),
+		committed: true,
+	})
+	require.Equal(t, ReceiptOutcomeError, declined)
+
+	committedCancellation := runCommitReceiptOutcome(context.Background(), runCommitDispatchResult{
+		err:       context.Canceled,
+		committed: true,
+	})
+	require.Equal(t, ReceiptOutcomeUnknown, committedCancellation, "generic canceled mutating work must remain unknown")
+
+	preDispatchCancellation := runCommitReceiptOutcome(context.Background(), runCommitDispatchResult{
+		err:       context.Canceled,
+		committed: false,
+	})
+	require.Equal(t, ReceiptOutcomeInterrupted, preDispatchCancellation)
+}
+
 func TestRunCommitDetectorCauseDoesNotMaskReceiptPersistenceUnknown(t *testing.T) {
 	detectorParentCtx, cancelDetector := context.WithCancelCause(context.Background())
 	defer cancelDetector(nil)

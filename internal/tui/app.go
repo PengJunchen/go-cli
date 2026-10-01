@@ -2980,7 +2980,7 @@ func (m *teaModel) handleHITLKeyLocked(msg tea.KeyMsg) tea.Cmd {
 		return nil
 	}
 	if msg.Type == tea.KeyEsc {
-		m.respondHITLLocked(HITLResponse{Err: context.Canceled})
+		m.respondHITLLocked(HITLResponse{Err: core.ErrHITLQuestionCanceled})
 		m.finishActiveInteractionLocked()
 		return nil
 	}
