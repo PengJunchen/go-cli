@@ -436,7 +436,9 @@ func AssembleAgent(
 	if err := s.assembleCompactor(); err != nil {
 		return nil, errors.Join(err, s.runCleanup())
 	}
-	s.assembleSubAgent()
+	if err := s.assembleSubAgent(); err != nil {
+		return nil, errors.Join(err, s.runCleanup())
+	}
 	s.assembleMiddleware()
 	s.assembleSession()
 
@@ -1470,7 +1472,7 @@ func (s *assembleState) assembleOutputGuards() {
 
 // assembleSubAgent wires the real SubAgent factory, dispatcher, and ACP
 // multi-agent communication.
-func (s *assembleState) assembleSubAgent() {
+func (s *assembleState) assembleSubAgent() error {
 	var modelBuilder core.SubAgentModelBuilder
 	if s.modelResolver != nil {
 		modelBuilder = func(ctx context.Context, modelName string) (llm.BaseChatModel, func(), error) {
@@ -1499,13 +1501,31 @@ func (s *assembleState) assembleSubAgent() {
 		s.logger.Warn("assemble_subagent_tool_failed", "err", subErr)
 	}
 
+	// The dedicated HTTP token reference is meaningful only for the private
+	// HTTP profile. Reject a misplaced setting instead of silently ignoring it.
+	if s.rc != nil && s.rc.ACP.BearerTokenEnv != "" && (s.rc.ACP.Transport != "grpc" || len(s.rc.ACP.Endpoints) == 0) {
+		return errors.New("assemble: acp.bearer_token_env requires acp.transport grpc and an HTTP endpoint")
+	}
+
 	// Wire ACP multi-agent communication (if configured).
 	if s.rc != nil && s.rc.ACP.Transport != "" && len(s.rc.ACP.Endpoints) > 0 {
 		switch s.rc.ACP.Transport {
 		case "stdio":
 			s.acpClient = acp.NewStdioAdapter(os.Stdin, os.Stdout)
 		case "grpc":
-			s.acpClient = acp.NewGRPCAdapter(s.rc.ACP.Endpoints[0])
+			var authChain *config.AuthChain
+			if s.modelResolver != nil {
+				authChain = s.modelResolver.authChain
+			}
+			token, tokenErr := resolveACPHTTPBearerToken(s.ctx, authChain, s.rc.ACP.BearerTokenEnv, s.rc.ACP.Endpoints[0])
+			if tokenErr != nil {
+				return tokenErr
+			}
+			var adapterOptions []acp.Option
+			if token != "" {
+				adapterOptions = append(adapterOptions, acp.WithHTTPBearerToken(token))
+			}
+			s.acpClient = acp.NewGRPCAdapter(s.rc.ACP.Endpoints[0], adapterOptions...)
 		default:
 			s.logger.Warn("assemble_acp_unknown_transport", "transport", s.rc.ACP.Transport)
 		}
@@ -1520,6 +1540,7 @@ func (s *assembleState) assembleSubAgent() {
 			}
 		}
 	}
+	return nil
 }
 
 // assembleExtraTools registers remaining tools (todo, task, goal, web, plan_mode, etc.).
@@ -1973,6 +1994,88 @@ func newCLIModelResolver(rc *config.Config, primaryProviderName string, includeS
 		smallEndpoint:     smallEndpoint,
 		smallErr:          smallErr,
 	}, nil
+}
+
+func resolveACPHTTPBearerToken(
+	ctx context.Context,
+	authChain *config.AuthChain,
+	envName string,
+	endpoint string,
+) (string, error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if strings.TrimSpace(envName) != envName {
+		return "", errors.New("assemble: acp.bearer_token_env must be an environment variable name")
+	}
+	origin, err := acpHTTPOrigin(endpoint)
+	if err != nil {
+		return "", err
+	}
+	if envName != "" {
+		if !validACPEnvironmentName(envName) {
+			return "", errors.New("assemble: acp.bearer_token_env must be an environment variable name")
+		}
+		token, ok := os.LookupEnv(envName)
+		if !ok || token == "" {
+			return "", errors.New("assemble: environment variable named by acp.bearer_token_env is missing or empty")
+		}
+		if !validACPBearerToken(token) {
+			return "", errors.New("assemble: environment variable named by acp.bearer_token_env contains an invalid bearer token")
+		}
+		return token, nil
+	}
+	if authChain == nil {
+		return "", nil
+	}
+	token, found, err := authChain.ResolveCredential(ctx, "acp", acp.ACPHTTPProfileV1, origin)
+	if err != nil {
+		return "", errors.New("assemble: scoped ACP credential lookup failed")
+	}
+	if !found {
+		return "", nil
+	}
+	if !validACPBearerToken(token) {
+		return "", errors.New("assemble: scoped ACP credential contains an invalid bearer token")
+	}
+	return token, nil
+}
+
+func acpHTTPOrigin(endpoint string) (string, error) {
+	parsed, err := url.Parse(endpoint)
+	if err != nil || parsed == nil || parsed.Opaque != "" ||
+		(parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" ||
+		parsed.Hostname() == "" || parsed.User != nil || parsed.RawQuery != "" ||
+		parsed.Fragment != "" || parsed.ForceQuery || strings.Contains(endpoint, "#") || strings.HasSuffix(parsed.Host, ":") {
+		return "", errors.New("assemble: invalid private ACP HTTP endpoint")
+	}
+	return parsed.Scheme + "://" + parsed.Host, nil
+}
+
+func validACPEnvironmentName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for i, r := range name {
+		if r == '_' || r >= 'A' && r <= 'Z' || r >= 'a' && r <= 'z' || i > 0 && r >= '0' && r <= '9' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validACPBearerToken(token string) bool {
+	if token == "" {
+		return false
+	}
+	for _, r := range token {
+		if r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("-._~+/=", r) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func appendConfiguredModel(modelsByProvider map[string][]llm.ModelInfo, providerID, modelID string) {

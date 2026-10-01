@@ -469,6 +469,10 @@ type ACPConfig struct {
 	// HTTP URL; for "stdio" the first entry is informational (stdin/stdout are
 	// used automatically).
 	Endpoints []string `json:"endpoints"`
+	// BearerTokenEnv names the environment variable holding the bearer token for
+	// the private HTTP ACP profile. If set, the exact variable is required; the
+	// token is never stored in config. This field does not apply to stdio.
+	BearerTokenEnv string `json:"bearer_token_env" yaml:"bearer_token_env"`
 	// Timeout bounds ACP operations in seconds. Zero means no explicit timeout.
 	Timeout int `json:"timeout"`
 }

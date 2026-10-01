@@ -216,6 +216,22 @@ Inter-process Agent communication protocol, two adapters:
 
 Message types: `connect` / `disconnect` / `message` / `response` / `ack` / `error`
 
+The `grpc` transport uses the private JSON-over-HTTP profile. Set
+`acp.bearer_token_env` to the name of a dedicated environment variable to send
+a bearer token to that configured HTTP endpoint. The value is read at startup,
+is never stored in config, and a missing or malformed explicit reference fails
+assembly before any ACP request. When the field is unset, only a credential
+scoped to provider `acp`, protocol `go-cli-acp-json/1`, and the endpoint origin
+is eligible. This setting does not apply to `stdio`.
+
+```yaml
+acp:
+  transport: grpc
+  endpoints:
+    - http://127.0.0.1:8081/acp
+  bearer_token_env: GO_CLI_ACP_BEARER_TOKEN
+```
+
 ### MCP Tool Integration
 
 Adapts MCP server tools to `ToolDefinition`, registers them into the tool registry for Agent Loop invocation.
