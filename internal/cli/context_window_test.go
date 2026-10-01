@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"io"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -151,9 +152,8 @@ func TestCostHandlerReportsUnknownContextOccupancyWithoutSessionSnapshot(t *test
 	assert.NotContains(t, output, "Context:   0/128000", "a missing session snapshot must not imply empty context")
 }
 
-// TestContextWindowFallback verifies that when ModelInfo.ContextWindow is 0
-// (the provider does not report a context window), the AgentAssembly falls
-// back to MaxTokens for the ContextWindow value.
+// TestContextWindowFallback verifies that an unknown model window stays
+// unknown while the separate local compaction ceiling remains available.
 func TestContextWindowFallback(t *testing.T) {
 	// Use the EinoProvider path (BaseURL set) without configuring any models.
 	// findModelInfo will return a zero ModelInfo with ContextWindow=0.
@@ -174,14 +174,13 @@ func TestContextWindowFallback(t *testing.T) {
 	assert.Equal(t, 0, modelInfo.ContextWindow,
 		"buildModel should return zero ContextWindow when provider has no model list")
 
-	// Simulate the fallback logic from AssembleAgent.
-	maxTokens := 8000
-	contextWindow := modelInfo.ContextWindow
-	if contextWindow <= 0 {
-		contextWindow = maxTokens
-	}
-	assert.Equal(t, maxTokens, contextWindow,
-		"ContextWindow should fall back to MaxTokens when ModelInfo.ContextWindow is 0")
+	assembly, err := AssembleAgent(ctx, rc, "eino", "test-model", io.Discard, WithMaxTokens(8000))
+	require.NoError(t, err)
+	t.Cleanup(assembly.Cleanup)
+	assert.Zero(t, assembly.ContextWindow,
+		"unknown model context capacity must not be replaced by a local compaction threshold")
+	assert.Equal(t, 8000, assembly.MaxTokens,
+		"the local compaction ceiling remains available as separate metadata")
 }
 
 // TestFindModelInfo verifies the helper that locates a model by name in a

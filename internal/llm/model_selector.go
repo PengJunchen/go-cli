@@ -22,6 +22,17 @@ type ModelLister func() []ModelInfo
 // ModelSpecBuilder builds a model from its provider-scoped identity.
 type ModelSpecBuilder func(ctx context.Context, model ModelSpec) (BaseChatModel, func(), error)
 
+// ModelSpecBuildResult carries a built model and the non-sensitive UI metadata
+// resolved for that exact provider/model identity.
+type ModelSpecBuildResult struct {
+	Model         BaseChatModel
+	Cleanup       func()
+	ContextWindow int
+}
+
+// ModelSpecResultBuilder builds a model and returns its UI metadata.
+type ModelSpecResultBuilder func(ctx context.Context, model ModelSpec) (ModelSpecBuildResult, error)
+
 // ModelSpecLister returns provider-scoped model entries from the active catalog.
 type ModelSpecLister func() []ModelSpec
 
@@ -33,6 +44,7 @@ type modelGeneration struct {
 	model            BaseChatModel
 	providerID       string
 	modelName        string
+	contextWindow    int
 	cleanup          func()
 	cleanupAttempted bool
 	cleanupErr       error
@@ -156,10 +168,11 @@ type DefaultModelSelector struct {
 	modelLister ModelLister
 	// modelSpecBuilder and modelSpecLister preserve provider identity for
 	// catalog-based switching while the name-only API remains available.
-	modelSpecBuilder ModelSpecBuilder
-	modelSpecLister  ModelSpecLister
-	switchAdmission  ModelSwitchAdmission
-	failureHandler   func()
+	modelSpecBuilder       ModelSpecBuilder
+	modelSpecLister        ModelSpecLister
+	modelSpecResultBuilder ModelSpecResultBuilder
+	switchAdmission        ModelSwitchAdmission
+	failureHandler         func()
 	// onModelSwitched is called after a successful model switch so callers
 	// (e.g. the LoopAgent) can update their reference to the primary model.
 	onModelSwitched func(BaseChatModel)
@@ -240,6 +253,28 @@ func (s *DefaultModelSelector) WithModelLister(lister ModelLister) *DefaultModel
 // SwitchModel and SwitchModelSpec when available.
 func (s *DefaultModelSelector) WithModelSpecBuilder(builder ModelSpecBuilder) *DefaultModelSelector {
 	s.modelSpecBuilder = builder
+	return s
+}
+
+// WithModelSpecResultBuilder sets an additive provider-scoped builder that
+// returns the active model's non-sensitive UI metadata. It takes precedence
+// over the legacy model-spec builder when both are configured.
+func (s *DefaultModelSelector) WithModelSpecResultBuilder(builder ModelSpecResultBuilder) *DefaultModelSelector {
+	s.modelSpecResultBuilder = builder
+	return s
+}
+
+// WithPrimaryModelContextWindow records the initial model's known context
+// window. Non-positive values remain unknown.
+func (s *DefaultModelSelector) WithPrimaryModelContextWindow(contextWindow int) *DefaultModelSelector {
+	if contextWindow < 0 {
+		contextWindow = 0
+	}
+	s.switchMu.Lock()
+	if s.active != nil {
+		s.active.contextWindow = contextWindow
+	}
+	s.switchMu.Unlock()
 	return s
 }
 
@@ -352,7 +387,16 @@ type modelBuildPlan struct {
 	providerID     string
 	modelName      string
 	providerScoped bool
-	build          func(context.Context) (BaseChatModel, func(), error)
+	build          func(context.Context) (ModelSpecBuildResult, error)
+}
+
+// ActiveModelSnapshot exposes the active provider/model identity and context
+// window needed by user-facing status and cost displays. A zero window means
+// the provider metadata did not establish the model's capacity.
+type ActiveModelSnapshot struct {
+	ProviderID    string
+	ModelID       string
+	ContextWindow int
 }
 
 // SwitchModel replaces the primary model at runtime. Model construction and
@@ -360,7 +404,7 @@ type modelBuildPlan struct {
 // before it can construct a candidate.
 func (s *DefaultModelSelector) SwitchModel(ctx context.Context, modelName string) error {
 	return s.switchPrimary(ctx, func() (modelBuildPlan, error) {
-		if s.modelSpecBuilder != nil {
+		if s.modelSpecResultBuilder != nil || s.modelSpecBuilder != nil {
 			current := s.currentModelSpec()
 			model := ModelSpec{
 				ProviderID: current.ProviderID,
@@ -371,13 +415,18 @@ func (s *DefaultModelSelector) SwitchModel(ctx context.Context, modelName string
 			if model.ProviderID == "" || model.ModelID == "" {
 				return modelBuildPlan{}, fmt.Errorf("llm: provider and model identities are required")
 			}
-			builder := s.modelSpecBuilder
+			resultBuilder := s.modelSpecResultBuilder
+			legacyBuilder := s.modelSpecBuilder
 			return modelBuildPlan{
 				providerID:     model.ProviderID,
 				modelName:      model.ModelID,
 				providerScoped: true,
-				build: func(ctx context.Context) (BaseChatModel, func(), error) {
-					return builder(ctx, model)
+				build: func(ctx context.Context) (ModelSpecBuildResult, error) {
+					if resultBuilder != nil {
+						return resultBuilder(ctx, model)
+					}
+					built, cleanup, err := legacyBuilder(ctx, model)
+					return ModelSpecBuildResult{Model: built, Cleanup: cleanup}, err
 				},
 			}, nil
 		}
@@ -389,8 +438,9 @@ func (s *DefaultModelSelector) SwitchModel(ctx context.Context, modelName string
 		return modelBuildPlan{
 			providerID: current.ProviderID,
 			modelName:  modelName,
-			build: func(ctx context.Context) (BaseChatModel, func(), error) {
-				return builder(ctx, modelName)
+			build: func(ctx context.Context) (ModelSpecBuildResult, error) {
+				built, cleanup, err := builder(ctx, modelName)
+				return ModelSpecBuildResult{Model: built, Cleanup: cleanup}, err
 			},
 		}, nil
 	})
@@ -401,7 +451,7 @@ func (s *DefaultModelSelector) SwitchModel(ctx context.Context, modelName string
 // resolves the identity against its provider and credential snapshot.
 func (s *DefaultModelSelector) SwitchModelSpec(ctx context.Context, model ModelSpec) error {
 	return s.switchPrimary(ctx, func() (modelBuildPlan, error) {
-		if s.modelSpecBuilder == nil {
+		if s.modelSpecResultBuilder == nil && s.modelSpecBuilder == nil {
 			return modelBuildPlan{}, fmt.Errorf("llm: provider-scoped model switching not configured")
 		}
 		model.ProviderID = canonicalProviderID(model.ProviderID)
@@ -411,13 +461,18 @@ func (s *DefaultModelSelector) SwitchModelSpec(ctx context.Context, model ModelS
 		if model.ProviderID == "" || model.ModelID == "" {
 			return modelBuildPlan{}, fmt.Errorf("llm: provider and model identities are required")
 		}
-		builder := s.modelSpecBuilder
+		resultBuilder := s.modelSpecResultBuilder
+		legacyBuilder := s.modelSpecBuilder
 		return modelBuildPlan{
 			providerID:     model.ProviderID,
 			modelName:      model.ModelID,
 			providerScoped: true,
-			build: func(ctx context.Context) (BaseChatModel, func(), error) {
-				return builder(ctx, model)
+			build: func(ctx context.Context) (ModelSpecBuildResult, error) {
+				if resultBuilder != nil {
+					return resultBuilder(ctx, model)
+				}
+				built, cleanup, err := legacyBuilder(ctx, model)
+				return ModelSpecBuildResult{Model: built, Cleanup: cleanup}, err
 			},
 		}, nil
 	})
@@ -449,12 +504,13 @@ func (s *DefaultModelSelector) switchPrimary(ctx context.Context, prepare func()
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	model, cleanup, builderPanicked, buildErr := invokeModelBuilder(ctx, plan.build)
+	built, builderPanicked, buildErr := invokeModelBuilder(ctx, plan.build)
 	candidate := &modelGeneration{
-		model:      model,
-		providerID: plan.providerID,
-		modelName:  plan.modelName,
-		cleanup:    cleanup,
+		model:         built.Model,
+		providerID:    plan.providerID,
+		modelName:     plan.modelName,
+		contextWindow: max(0, built.ContextWindow),
+		cleanup:       built.Cleanup,
 	}
 	if builderPanicked {
 		s.switchMu.Lock()
@@ -469,7 +525,7 @@ func (s *DefaultModelSelector) switchPrimary(ctx context.Context, prepare func()
 		}
 		return errors.Join(wrapped, s.disposeUnpublished(candidate))
 	}
-	if isNilChatModel(model) {
+	if isNilChatModel(built.Model) {
 		return errors.Join(ErrModelBuilderReturnedNil, s.disposeUnpublished(candidate))
 	}
 	if err := ctx.Err(); err != nil {
@@ -655,16 +711,14 @@ func (s *DefaultModelSelector) removeRetired(target *modelGeneration) {
 	}
 }
 
-func invokeModelBuilder(ctx context.Context, build func(context.Context) (BaseChatModel, func(), error)) (model BaseChatModel, cleanup func(), panicked bool, err error) {
+func invokeModelBuilder(ctx context.Context, build func(context.Context) (ModelSpecBuildResult, error)) (result ModelSpecBuildResult, panicked bool, err error) {
 	defer func() {
 		if recover() != nil {
-			model = nil
-			cleanup = nil
-			err = nil
+			result = ModelSpecBuildResult{}
 			panicked = true
 		}
 	}()
-	model, cleanup, err = build(ctx)
+	result, err = build(ctx)
 	return
 }
 
@@ -756,6 +810,21 @@ func (s *DefaultModelSelector) CurrentModelSpec() ModelSpec {
 		ProviderID: canonicalProviderID(s.primaryProvider),
 		ModelID:    strings.TrimSpace(s.primaryName),
 	}
+}
+
+// ActiveModelSnapshot returns safe active metadata for UI status displays. It
+// does not expose provider endpoints, credentials, or auth configuration.
+func (s *DefaultModelSelector) ActiveModelSnapshot() ActiveModelSnapshot {
+	s.switchMu.Lock()
+	defer s.switchMu.Unlock()
+	snapshot := ActiveModelSnapshot{
+		ProviderID: canonicalProviderID(s.primaryProvider),
+		ModelID:    strings.TrimSpace(s.primaryName),
+	}
+	if s.active != nil {
+		snapshot.ContextWindow = s.active.contextWindow
+	}
+	return snapshot
 }
 
 // PrimaryModelName returns the name of the current primary model.

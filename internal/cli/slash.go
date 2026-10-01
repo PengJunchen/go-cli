@@ -30,6 +30,7 @@ type AgentAccessor interface {
 	CostTracker() *production.CostTracker
 	StatsRegistry() *production.StatsRegistry
 	ContextWindow() int
+	LocalCompactionCeiling() int
 	ModelName() string
 }
 
@@ -119,13 +120,14 @@ type slashContext struct {
 	// Dependencies for the extended slash commands. Any of these may be nil
 	// when the corresponding subsystem is not wired; handlers print a helpful
 	// diagnostic in that case.
-	fileTracker   *tools.FileTracker
-	diffGenerator tools.DiffGenerator
-	planCtrl      core.PlanModeController
-	config        *config.Config
-	sessionStore  *session.JSONLSessionStore
-	memoryStore   memory.MemoryStore
-	contextWindow int
+	fileTracker            *tools.FileTracker
+	diffGenerator          tools.DiffGenerator
+	planCtrl               core.PlanModeController
+	config                 *config.Config
+	sessionStore           *session.JSONLSessionStore
+	memoryStore            memory.MemoryStore
+	contextWindow          int
+	localCompactionCeiling int
 	// thinkingVisibility controls how thinking entries are displayed in the TUI.
 	// "show" (default) expands them, "collapse" folds them to a summary, "hide"
 	// suppresses them entirely. Set by the /thinking slash command.
@@ -163,7 +165,13 @@ var _ Dependencies = (*slashContext)(nil)
 func (sc *slashContext) Agent() *core.AgentImpl                   { return sc.agent }
 func (sc *slashContext) CostTracker() *production.CostTracker     { return sc.costTracker }
 func (sc *slashContext) StatsRegistry() *production.StatsRegistry { return sc.statsRegistry }
-func (sc *slashContext) ContextWindow() int                       { return sc.contextWindow }
+func (sc *slashContext) ContextWindow() int {
+	if sc.modelSelector != nil {
+		return sc.modelSelector.ActiveModelSnapshot().ContextWindow
+	}
+	return sc.contextWindow
+}
+func (sc *slashContext) LocalCompactionCeiling() int { return sc.localCompactionCeiling }
 func (sc *slashContext) ModelName() string {
 	if sc.modelSelector != nil {
 		return sc.modelSelector.PrimaryModelName()
