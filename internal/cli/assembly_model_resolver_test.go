@@ -364,16 +364,14 @@ func TestAssembledConflictingSameScopeSmallCredentialFailsWithoutLeak(t *testing
 }
 
 func TestAssembledModelSwitchUsesConfiguredResolverRequest(t *testing.T) {
-	capture := &providerRequestCapture{}
-	srv := httptest.NewServer(http.HandlerFunc(capture.handler))
-	t.Cleanup(srv.Close)
+	server := newR3SamplingServer(t)
 
 	const providerName = "switch-assembly-gateway"
 	apiKey := newTestCredentialCanary(t)
 	rc := &config.Config{
 		Provider: config.ProviderConfig{
 			Name:        providerName,
-			BaseURL:     srv.URL,
+			BaseURL:     server.server.URL,
 			APIKey:      apiKey,
 			Temperature: 0.7,
 			MaxTokens:   256,
@@ -392,26 +390,59 @@ func TestAssembledModelSwitchUsesConfiguredResolverRequest(t *testing.T) {
 	assert.Same(t, initialModel, assembly.ModelConfig.ModelSelector.PrimaryModel(), "failed model construction must leave the selected model unchanged")
 	assert.Equal(t, "initial-model", assembly.ModelConfig.ModelSelector.PrimaryModelName())
 
-	require.NoError(t, assembly.ModelConfig.ModelSelector.SwitchModel(context.Background(), "switched-model"))
-	count, _, _, _ := capture.snapshot()
-	assert.Zero(t, count, "switching constructs a scoped model without dispatching a provider request")
-
-	response, err := assembly.ModelConfig.ModelSelector.PrimaryModel().Generate(withCLITestOperation(context.Background()), []llm.Message{{Role: llm.RoleUser, Content: "after switch"}})
+	initialRecorder := &r3PreparedPlanRecordingModel{BaseChatModel: initialModel}
+	assembly.LoopAgent.SetModel(initialRecorder)
+	_, err = assembly.TurnRunner.RunTurn(context.Background(), core.Submission{Content: "exercise the configured primary model"})
 	require.NoError(t, err)
-	require.NotNil(t, response)
-
-	count, _, authorization, body := capture.snapshot()
-	assert.Equal(t, 1, count)
-	assert.Equal(t, "Bearer "+apiKey, authorization)
-	var request struct {
-		Model       string  `json:"model"`
-		Temperature float64 `json:"temperature"`
-		MaxTokens   int     `json:"max_tokens"`
+	initialRequest := server.singleRequest(t)
+	assert.Equal(t, "Bearer "+apiKey, initialRequest.authorization)
+	var initialBody struct {
+		Model       string   `json:"model"`
+		Temperature *float64 `json:"temperature"`
+		MaxTokens   *int     `json:"max_tokens"`
 	}
-	require.NoError(t, json.Unmarshal([]byte(body), &request))
-	assert.Equal(t, "switched-model", request.Model)
-	assert.Equal(t, 0.3, request.Temperature)
-	assert.Equal(t, 96, request.MaxTokens)
+	require.NoError(t, json.Unmarshal(initialRequest.body, &initialBody))
+	assert.Equal(t, "initial-model", initialBody.Model)
+	assert.Equal(t, r3Float64Pointer(0.3), initialBody.Temperature, "the configured primary identity retains its model-level temperature")
+	require.NotNil(t, initialBody.MaxTokens)
+	assert.Equal(t, 96, *initialBody.MaxTokens, "the configured primary identity retains its model-level token limit")
+	initialPlans := initialRecorder.planSnapshot()
+	require.Len(t, initialPlans, 1)
+	initialPlanOptions := initialPlans[0].Options()
+	assert.Equal(t, r3Float64Pointer(0.3), initialPlanOptions.Temperature, "prepared-plan sampling must match the primary wire request")
+	require.NotNil(t, initialPlanOptions.MaxTokens)
+	assert.Equal(t, 96, *initialPlanOptions.MaxTokens)
+
+	require.NoError(t, assembly.ModelConfig.ModelSelector.SwitchModel(context.Background(), "switched-model"))
+	select {
+	case unexpected := <-server.requests:
+		t.Fatalf("switching must construct a scoped model without dispatching a provider request: %#v", unexpected)
+	default:
+	}
+
+	switchedRecorder := &r3PreparedPlanRecordingModel{BaseChatModel: assembly.ModelConfig.ModelSelector.PrimaryModel()}
+	assembly.LoopAgent.SetModel(switchedRecorder)
+	_, err = assembly.TurnRunner.RunTurn(context.Background(), core.Submission{Content: "exercise the alternate model"})
+	require.NoError(t, err)
+
+	switchedRequest := server.singleRequest(t)
+	assert.Equal(t, "Bearer "+apiKey, switchedRequest.authorization)
+	var switchedBody struct {
+		Model       string   `json:"model"`
+		Temperature *float64 `json:"temperature"`
+		MaxTokens   *int     `json:"max_tokens"`
+	}
+	require.NoError(t, json.Unmarshal(switchedRequest.body, &switchedBody))
+	assert.Equal(t, "switched-model", switchedBody.Model)
+	assert.Equal(t, r3Float64Pointer(0.7), switchedBody.Temperature, "an alternate identity inherits provider sampling rather than the primary model's settings")
+	require.NotNil(t, switchedBody.MaxTokens)
+	assert.Equal(t, 256, *switchedBody.MaxTokens, "the alternate identity must not retain the primary model's token limit")
+	switchedPlans := switchedRecorder.planSnapshot()
+	require.Len(t, switchedPlans, 1)
+	switchedPlanOptions := switchedPlans[0].Options()
+	assert.Equal(t, r3Float64Pointer(0.7), switchedPlanOptions.Temperature, "prepared-plan temperature must match the alternate wire request")
+	require.NotNil(t, switchedPlanOptions.MaxTokens)
+	assert.Equal(t, 256, *switchedPlanOptions.MaxTokens, "prepared-plan token limit must match the alternate wire request")
 }
 
 func TestAssembledNativeProviderRejectsBeforeConfiguredEndpoint(t *testing.T) {
