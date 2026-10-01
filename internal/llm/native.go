@@ -1199,6 +1199,12 @@ func NewOpenAIProvider(opts ...NativeProviderOption) *OpenAIProvider {
 // Name returns the provider identifier.
 func (p *OpenAIProvider) Name() string { return p.name }
 
+// EstimateProtocolFraming uses the same OpenAI-compatible chat envelope
+// accounting as the default provider adapter.
+func (p *OpenAIProvider) EstimateProtocolFraming(messages []Message, options GenerationOptions) (int, error) {
+	return estimateOpenAICompatibleFraming(messages, options)
+}
+
 // Models returns the static model list.
 func (p *OpenAIProvider) Models() []ModelInfo { return p.modelsCopy() }
 

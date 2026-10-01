@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/pengjunchen/go-cli/internal/compaction"
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/mock"
 	"github.com/pengjunchen/go-cli/internal/tools"
@@ -319,7 +320,9 @@ func TestRealSubAgentRunner_ModelOverride(t *testing.T) {
 	)
 	require.NoError(t, reg.Register(registryProvider))
 
-	factory := NewRealSubAgentRunnerFactory(parentModel, reg, tools.NewDefaultToolRegistry())
+	factory := NewRealSubAgentRunnerFactory(parentModel, reg, tools.NewDefaultToolRegistry(),
+		WithMidTurnCompaction(nil, nil, compaction.NewHeuristicTokenEstimator(), 50000),
+	)
 	runner := factory(SubAgentConfig{Name: "test", MaxTurns: 3, Model: "mock"})
 
 	final, err := runner.Run(context.Background(), "test", nil, func(AgentEvent) {})

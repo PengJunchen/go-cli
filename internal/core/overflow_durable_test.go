@@ -41,6 +41,7 @@ func (sink *overflowProjectionSink) CommitCompaction(ctx context.Context, projec
 type overflowSummaryCompactor struct {
 	onCompact         func(context.Context, []compaction.TurnItem)
 	cutThroughCurrent bool
+	summary           string
 }
 
 func (compactor overflowSummaryCompactor) Compact(ctx context.Context, items []compaction.TurnItem, _ int, _ compaction.TokenEstimator) (compaction.CompactionResult, error) {
@@ -50,7 +51,7 @@ func (compactor overflowSummaryCompactor) Compact(ctx context.Context, items []c
 	var runID string
 	through := llm.SourceThrough{}
 	var retained []compaction.TurnItem
-	for _, item := range items {
+	for index, item := range items {
 		source := item.Runtime.Source
 		switch source.Kind {
 		case llm.SourcePriorPublished:
@@ -66,14 +67,22 @@ func (compactor overflowSummaryCompactor) Compact(ctx context.Context, items []c
 			} else {
 				retained = append(retained, item)
 			}
+		case llm.SourceNone:
+			if index == len(items)-1 {
+				retained = append(retained, item)
+			}
 		}
+	}
+	summary := compactor.summary
+	if summary == "" {
+		summary = "compacted context"
 	}
 	resultItems := []compaction.TurnItem{
 		items[0],
 		{
 			ID:           "overflow-summary",
 			Role:         compaction.RoleUser,
-			Content:      "compacted context",
+			Content:      summary,
 			IsCompaction: true,
 			Runtime: llm.RuntimeMetadata{Source: llm.SourceRef{
 				Kind: llm.SourceRunSummary, RunID: runID, Through: through,
@@ -84,7 +93,7 @@ func (compactor overflowSummaryCompactor) Compact(ctx context.Context, items []c
 	result := compaction.CompactionResult{
 		Items:         resultItems,
 		Strategy:      compaction.StrategySummary,
-		NewProjection: &compaction.NewProjection{Summary: "compacted context", Through: through},
+		NewProjection: &compaction.NewProjection{Summary: summary, Through: through},
 	}
 	return result, nil
 }

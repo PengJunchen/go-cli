@@ -127,6 +127,12 @@ func WithDefaultModel(name string) ProviderOption {
 // Name returns the provider identifier.
 func (p *EinoProvider) Name() string { return p.name }
 
+// EstimateProtocolFraming returns the OpenAI-compatible chat envelope's local
+// framing estimate. Tool schema JSON is deliberately estimated separately.
+func (p *EinoProvider) EstimateProtocolFraming(messages []Message, options GenerationOptions) (int, error) {
+	return estimateOpenAICompatibleFraming(messages, options)
+}
+
 // Models returns the static model list configured for this provider.
 func (p *EinoProvider) Models() []ModelInfo {
 	out := make([]ModelInfo, len(p.models))
@@ -569,6 +575,25 @@ func samplingMaxTokens(cfg ModelConfig, override *int) *int {
 		return &value
 	}
 	return nil
+}
+
+func estimateOpenAICompatibleFraming(messages []Message, options GenerationOptions) (int, error) {
+	if len(messages) > (int(^uint(0)>>1)-7)/4 {
+		return 0, errors.New("llm: request framing estimate overflow")
+	}
+	// The adapter's request has one outer message-list envelope, three framing
+	// tokens per message, and an extra tool-choice envelope when tools exist.
+	framing := 3 + len(messages)*4
+	if len(options.Tools) > 0 {
+		framing += 4
+	}
+	for _, message := range messages {
+		if len(message.ToolCalls) > (int(^uint(0)>>1)-framing)/5 {
+			return 0, errors.New("llm: request framing estimate overflow")
+		}
+		framing += len(message.ToolCalls) * 5
+	}
+	return framing, nil
 }
 
 // openAIToolDef is the OpenAI tool definition format.

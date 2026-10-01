@@ -44,25 +44,26 @@ var errCurrentSubmissionNotPreserved = errors.New("core: compaction did not pres
 // loopConfig holds the configurable dependencies of a LoopAgent. All
 // dependencies are interface types.
 type loopConfig struct {
-	model                   llm.BaseChatModel
-	providerAttemptRecorder func(llm.ProviderAttemptResult) error
-	providerRetryPolicy     llm.RetryPolicy
-	tools                   tools.ToolRegistry
-	maxIterations           int
-	modelWrapper            ModelWrapper
-	executionMode           ExecutionMode
-	toolInterceptors        []ToolInterceptor
-	systemPromptOverride    string
-	promptBuilder           SystemPromptBuilder
-	promptOpts              SystemPromptOptions
-	tracer                  *tracing.Tracer
-	steerCh                 chan string
-	followUpCh              chan string
-	thinkingConfig          *llm.ThinkingConfig
-	midTurnCompactor        *compaction.MidTurnCompact
-	compactor               compaction.Compactor
-	estimator               compaction.TokenEstimator
-	maxTokens               int
+	model                          llm.BaseChatModel
+	providerAttemptRecorder        func(llm.ProviderAttemptResult) error
+	providerRetryPolicy            llm.RetryPolicy
+	tools                          tools.ToolRegistry
+	maxIterations                  int
+	modelWrapper                   ModelWrapper
+	executionMode                  ExecutionMode
+	toolInterceptors               []ToolInterceptor
+	systemPromptOverride           string
+	promptBuilder                  SystemPromptBuilder
+	promptOpts                     SystemPromptOptions
+	tracer                         *tracing.Tracer
+	steerCh                        chan string
+	followUpCh                     chan string
+	thinkingConfig                 *llm.ThinkingConfig
+	midTurnCompactor               *compaction.MidTurnCompact
+	compactor                      compaction.Compactor
+	estimator                      compaction.TokenEstimator
+	maxTokens                      int
+	multimodalTokensPerItemReserve int
 }
 
 // LoopOption configures a LoopAgent at construction time.
@@ -133,6 +134,26 @@ func WithMaxIterations(n int) LoopOption {
 	}
 }
 
+// WithMidTurnCompaction wires the request estimator and compaction dependencies
+// into a LoopAgent at construction time. It is especially useful for nested
+// LoopAgents, such as real sub-agents, that need the same fail-closed request
+// envelope preflight as the top-level loop.
+func WithMidTurnCompaction(mtc *compaction.MidTurnCompact, compactor compaction.Compactor, estimator compaction.TokenEstimator, maxTokens int) LoopOption {
+	return func(c *loopConfig) {
+		c.midTurnCompactor = mtc
+		c.compactor = compactor
+		c.estimator = estimator
+		c.maxTokens = maxTokens
+	}
+}
+
+// WithMultimodalTokenReserve configures a finite conservative token reserve
+// for each non-text content block in resolver-backed request preflight. A
+// non-positive value leaves multimodal requests unbounded and fail-closed.
+func WithMultimodalTokenReserve(tokensPerItem int) LoopOption {
+	return func(c *loopConfig) { c.multimodalTokensPerItemReserve = tokensPerItem }
+}
+
 // WithSteeringChannel sets the channel the loop drains for steering
 // instructions between LLM iterations. When a steering message is pending,
 // it is injected into the conversation as a user message before the next LLM
@@ -165,32 +186,33 @@ func WithThinkingConfig(cfg llm.ThinkingConfig) LoopOption {
 // the injected chat model, servicing any tool calls the model requests, and
 // returns the events it fired.
 type LoopAgent struct {
-	model                   llm.BaseChatModel
-	providerAttemptRecorder func(llm.ProviderAttemptResult) error
-	providerRetryPolicy     llm.RetryPolicy
-	tools                   tools.ToolRegistry
-	maxIterations           int
-	modelWrapper            ModelWrapper
-	executionMode           ExecutionMode
-	toolInterceptors        []ToolInterceptor
-	systemPromptOverride    string
-	promptBuilder           SystemPromptBuilder
-	promptOpts              SystemPromptOptions
-	tracer                  *tracing.Tracer
-	steerCh                 chan string
-	followUpCh              chan string
-	thinkingConfig          *llm.ThinkingConfig
-	midTurnCompactor        *compaction.MidTurnCompact
-	compactor               compaction.Compactor
-	estimator               compaction.TokenEstimator
-	maxTokens               int
+	model                          llm.BaseChatModel
+	providerAttemptRecorder        func(llm.ProviderAttemptResult) error
+	providerRetryPolicy            llm.RetryPolicy
+	tools                          tools.ToolRegistry
+	maxIterations                  int
+	modelWrapper                   ModelWrapper
+	executionMode                  ExecutionMode
+	toolInterceptors               []ToolInterceptor
+	systemPromptOverride           string
+	promptBuilder                  SystemPromptBuilder
+	promptOpts                     SystemPromptOptions
+	tracer                         *tracing.Tracer
+	steerCh                        chan string
+	followUpCh                     chan string
+	thinkingConfig                 *llm.ThinkingConfig
+	midTurnCompactor               *compaction.MidTurnCompact
+	compactor                      compaction.Compactor
+	estimator                      compaction.TokenEstimator
+	maxTokens                      int
+	multimodalTokensPerItemReserve int
 	// toolSearchThreshold is the maximum number of tools to expose to the LLM
 	// without filtering. When the tool count exceeds this, tools are
 	// dynamically scored and filtered by relevance to the current query.
 	// Zero means no filtering (all tools exposed).
 	toolSearchThreshold int
 	// mu protects runtime mutable fields (model, midTurnCompactor, compactor,
-	// estimator, maxTokens, toolSearchThreshold) from data races between
+	// estimator, maxTokens, multimodalTokensPerItemReserve, toolSearchThreshold) from data races between
 	// concurrent setter calls and Run.
 	mu      sync.RWMutex
 	pauseMu sync.Mutex
@@ -264,25 +286,26 @@ func NewLoopAgent(opts ...LoopOption) *LoopAgent {
 		cfg.maxIterations = defaultMaxIterations
 	}
 	la := &LoopAgent{
-		model:                   cfg.model,
-		providerAttemptRecorder: cfg.providerAttemptRecorder,
-		providerRetryPolicy:     cfg.providerRetryPolicy,
-		tools:                   cfg.tools,
-		maxIterations:           cfg.maxIterations,
-		modelWrapper:            cfg.modelWrapper,
-		executionMode:           cfg.executionMode,
-		toolInterceptors:        append([]ToolInterceptor(nil), cfg.toolInterceptors...),
-		systemPromptOverride:    cfg.systemPromptOverride,
-		promptBuilder:           cfg.promptBuilder,
-		promptOpts:              cfg.promptOpts,
-		tracer:                  cfg.tracer,
-		steerCh:                 cfg.steerCh,
-		followUpCh:              cfg.followUpCh,
-		thinkingConfig:          cfg.thinkingConfig,
-		midTurnCompactor:        cfg.midTurnCompactor,
-		compactor:               cfg.compactor,
-		estimator:               cfg.estimator,
-		maxTokens:               cfg.maxTokens,
+		model:                          cfg.model,
+		providerAttemptRecorder:        cfg.providerAttemptRecorder,
+		providerRetryPolicy:            cfg.providerRetryPolicy,
+		tools:                          cfg.tools,
+		maxIterations:                  cfg.maxIterations,
+		modelWrapper:                   cfg.modelWrapper,
+		executionMode:                  cfg.executionMode,
+		toolInterceptors:               append([]ToolInterceptor(nil), cfg.toolInterceptors...),
+		systemPromptOverride:           cfg.systemPromptOverride,
+		promptBuilder:                  cfg.promptBuilder,
+		promptOpts:                     cfg.promptOpts,
+		tracer:                         cfg.tracer,
+		steerCh:                        cfg.steerCh,
+		followUpCh:                     cfg.followUpCh,
+		thinkingConfig:                 cfg.thinkingConfig,
+		midTurnCompactor:               cfg.midTurnCompactor,
+		compactor:                      cfg.compactor,
+		estimator:                      cfg.estimator,
+		maxTokens:                      cfg.maxTokens,
+		multimodalTokensPerItemReserve: cfg.multimodalTokensPerItemReserve,
 	}
 	slog.Info("core.loop.new",
 		"max_iterations", la.maxIterations,
@@ -374,6 +397,15 @@ func (l *LoopAgent) SetMidTurnCompaction(mtc *compaction.MidTurnCompact, compact
 	l.mu.Unlock()
 }
 
+// SetMultimodalTokenReserve changes the finite per-content-block reserve used
+// by subsequent resolver-backed request preflight runs. Non-positive values
+// disable the reserve and preserve fail-closed behavior for multimodal input.
+func (l *LoopAgent) SetMultimodalTokenReserve(tokensPerItem int) {
+	l.mu.Lock()
+	l.multimodalTokensPerItemReserve = tokensPerItem
+	l.mu.Unlock()
+}
+
 // SetModel replaces the LLM model at runtime. The next Run call will use the
 // new model. This is used by the /model slash command to switch models
 // without restarting the process.
@@ -413,6 +445,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 	compactor := l.compactor
 	estimator := l.estimator
 	maxTokens := l.maxTokens
+	multimodalTokensPerItemReserve := l.multimodalTokensPerItemReserve
 	l.mu.RUnlock()
 
 	// Inject the Tracer into the context so that all downstream
@@ -492,6 +525,7 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 		span.SetStatus(tracing.SpanStatusError, errNilModel.Error())
 		return CanonicalRunResult{Transcript: transcript}, errNilModel
 	}
+	selectionSource, _ := llm.CandidateSelectionSourceFromModel(model)
 
 	// Apply the model wrapper (if any) before the first LLM call. The
 	// wrapper may add middleware such as retry, cost tracking, etc.
@@ -503,6 +537,10 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 			}
 		}
 	}
+	if selectionSource == nil {
+		selectionSource, _ = llm.CandidateSelectionSourceFromModel(model)
+	}
+	resolverBacked := len(llm.ProviderCandidatesFromModel(model)) > 0
 
 	// Build tool definitions for the model from the tool registry so the LLM
 	// knows what tools it can invoke. The raw tool definitions are cached in
@@ -623,7 +661,10 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 	}
 	if len(messages) == 0 || messages[len(messages)-1].Role != llm.RoleUser || messages[len(messages)-1].Content != submission.Content {
 		message := llm.Message{Role: llm.RoleUser, Content: submission.Content}
-		if consumer != nil {
+		if resolverBacked {
+			// Resolver-backed requests are compacted only after the final filtered
+			// tools and the active candidate's protocol envelope are known.
+		} else if consumer != nil {
 			message.Runtime = consumer.transcriptMetadata(0, "")
 		}
 		messages = append(messages, message)
@@ -763,7 +804,24 @@ func (l *LoopAgent) RunCanonical(ctx context.Context, submission Submission, str
 		}
 		eventCoordinates = iterationCoordinates
 		iterationCtx := withAgentEventCoordinates(spanCtx, iterationCoordinates)
-		resp, err := l.generateWithContinuationAndCompaction(iterationCtx, model, messages, iterOpts, es, logger, consumer, compactor, estimator, maxTokens)
+		if selectionSource != nil {
+			iterationCtx = llm.WithCandidateSelectionSource(iterationCtx, selectionSource)
+		}
+		var resp *llm.Message
+		var err error
+		if resolverBacked {
+			var compactedMessages []llm.Message
+			resp, compactedMessages, currentSubmissionIndex, err = l.generateWithPreparedContinuation(
+				iterationCtx, model, messages, currentSubmissionIndex, iterOpts, es, logger,
+				consumer, midTurnCompactor, compactor, estimator, maxTokens,
+				multimodalTokensPerItemReserve,
+			)
+			if compactedMessages != nil {
+				messages = compactedMessages
+			}
+		} else {
+			resp, err = l.generateWithContinuationAndCompaction(iterationCtx, model, messages, iterOpts, es, logger, consumer, compactor, estimator, maxTokens)
+		}
 		if err != nil {
 			var providerErr *llm.ProviderError
 			if errors.As(err, &providerErr) && providerErr != nil {
@@ -1071,6 +1129,67 @@ func preflightDurableRequest(
 		return nil, err
 	}
 	return turnItemsToMessages(result.Items), nil
+}
+
+func preflightDurableRequestAt(
+	ctx context.Context,
+	messages []llm.Message,
+	consumer *runCommitConsumer,
+	compactor compaction.Compactor,
+	estimator compaction.TokenEstimator,
+	maxTokens int,
+	currentSubmissionIndex int,
+) ([]llm.Message, int, error) {
+	items := messagesToTurnItems(messages)
+	if err := validateDurableRequestSource(items, consumer.source, consumer.runID); err != nil {
+		return nil, currentSubmissionIndex, err
+	}
+	if currentSubmissionIndex < 0 || currentSubmissionIndex >= len(items) {
+		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "current submission cannot be preserved during compaction"}
+	}
+	currentID := items[currentSubmissionIndex].ID
+	if maxTokens <= 0 || estimator == nil {
+		return messages, currentSubmissionIndex, nil
+	}
+	if err := compaction.ValidateCompactionEligible(items); err != nil {
+		return nil, currentSubmissionIndex, fmt.Errorf("%w: %v", ErrDurableCompactionUnsupported, err)
+	}
+	if consumer.source == nil || compactor == nil {
+		return nil, currentSubmissionIndex, ErrRunCommitCompactionProjectionUnavailable
+	}
+	currentInput, err := captureDurableCurrentInput(items, consumer.source, consumer.runID)
+	if err != nil {
+		return nil, currentSubmissionIndex, err
+	}
+	result, err := compactor.Compact(ctx, cloneCompactionTurnItems(items), maxTokens, estimator)
+	if err != nil {
+		return nil, currentSubmissionIndex, err
+	}
+	projection, err := validateDurableCompactionResult(items, result, consumer.source, consumer.runID)
+	if err != nil {
+		return nil, currentSubmissionIndex, err
+	}
+	if err := validateDurableCurrentInputPreserved(currentInput, result.Items); err != nil {
+		return nil, currentSubmissionIndex, err
+	}
+	compactedSubmissionIndex := -1
+	for index, item := range result.Items {
+		if item.ID != currentID {
+			continue
+		}
+		if compactedSubmissionIndex >= 0 {
+			return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "compactor duplicated the current submission"}
+		}
+		compactedSubmissionIndex = index
+	}
+	if compactedSubmissionIndex < 0 {
+		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "compactor removed the current submission"}
+	}
+	if err := consumer.commitCompaction(projection); err != nil {
+		markRunOutcomeUnknown(ctx)
+		return nil, currentSubmissionIndex, err
+	}
+	return turnItemsToMessages(result.Items), compactedSubmissionIndex, nil
 }
 
 func preflightNonDurableRequest(
@@ -1410,6 +1529,25 @@ func (l *LoopAgent) streamGenerate(ctx context.Context, model llm.BaseChatModel,
 	return l.streamGenerateWithBudget(ctx, model, messages, toolOpts, es, &guardedStreamBudget{}, true)
 }
 
+func (l *LoopAgent) streamGenerateWithPreparedBudget(
+	ctx context.Context,
+	model llm.BaseChatModel,
+	plan *llm.PreparedRequestPlan,
+	es EventStream,
+	budget *guardedStreamBudget,
+	publishIncremental bool,
+) (*llm.Message, error) {
+	if plan == nil {
+		return nil, &RequestEnvelopeError{Reason: "prepared request plan is missing"}
+	}
+	option, err := llm.OptionFromGenerationOptions(plan.Options())
+	if err != nil {
+		return nil, &RequestEnvelopeError{Reason: "prepared generation options cannot be copied for dispatch", Cause: err}
+	}
+	ctx = llm.WithPreparedRequestPlan(ctx, plan)
+	return l.streamGenerateWithBudget(ctx, model, plan.Messages(), []llm.Option{option}, es, budget, publishIncremental)
+}
+
 func (l *LoopAgent) streamGenerateWithBudget(ctx context.Context, model llm.BaseChatModel, messages []llm.Message, toolOpts []llm.Option, es EventStream, budget *guardedStreamBudget, publishIncremental bool) (*llm.Message, error) {
 	streamCtx, cancel := context.WithCancelCause(ctx)
 	ch, err := model.Stream(streamCtx, messages, toolOpts...)
@@ -1595,6 +1733,50 @@ func (l *LoopAgent) generateWithContinuationAndCompaction(
 	estimator compaction.TokenEstimator,
 	maxTokens int,
 ) (*llm.Message, error) {
+	return l.generateWithContinuationAndCompactionState(ctx, model, messages, len(messages)-1, toolOpts, es, logger, consumer, nil, compactor, estimator, maxTokens, 0, nil)
+}
+
+type preparedLoopRequestState struct {
+	messages               []llm.Message
+	currentSubmissionIndex int
+}
+
+func (l *LoopAgent) generateWithPreparedContinuation(
+	ctx context.Context,
+	model llm.BaseChatModel,
+	messages []llm.Message,
+	currentSubmissionIndex int,
+	toolOpts []llm.Option,
+	es EventStream,
+	logger *slog.Logger,
+	consumer *runCommitConsumer,
+	midTurnCompactor *compaction.MidTurnCompact,
+	compactor compaction.Compactor,
+	estimator compaction.TokenEstimator,
+	maxTokens int,
+	multimodalTokensPerItemReserve int,
+) (*llm.Message, []llm.Message, int, error) {
+	state := &preparedLoopRequestState{messages: messages, currentSubmissionIndex: currentSubmissionIndex}
+	response, err := l.generateWithContinuationAndCompactionState(ctx, model, messages, currentSubmissionIndex, toolOpts, es, logger, consumer, midTurnCompactor, compactor, estimator, maxTokens, multimodalTokensPerItemReserve, state)
+	return response, state.messages, state.currentSubmissionIndex, err
+}
+
+func (l *LoopAgent) generateWithContinuationAndCompactionState(
+	ctx context.Context,
+	model llm.BaseChatModel,
+	messages []llm.Message,
+	currentSubmissionIndex int,
+	toolOpts []llm.Option,
+	es EventStream,
+	logger *slog.Logger,
+	consumer *runCommitConsumer,
+	midTurnCompactor *compaction.MidTurnCompact,
+	compactor compaction.Compactor,
+	estimator compaction.TokenEstimator,
+	maxTokens int,
+	multimodalTokensPerItemReserve int,
+	state *preparedLoopRequestState,
+) (*llm.Message, error) {
 	guard, guarded := model.(CompleteResponseGuard)
 	if guarded {
 		if guard.MaxCandidateBytes() != guardedStreamMaxBytes {
@@ -1606,10 +1788,15 @@ func (l *LoopAgent) generateWithContinuationAndCompaction(
 	if operationErr != nil {
 		return nil, operationErr
 	}
-	resp, messages, budget, err := l.runMainProviderOperation(
+	resp, messages, currentSubmissionIndex, budget, err := l.runMainProviderOperation(
 		mainCtx, model, messages, toolOpts, es, guarded, operationActive,
-		consumer, compactor, estimator, maxTokens,
+		consumer, midTurnCompactor, compactor, estimator, maxTokens,
+		multimodalTokensPerItemReserve, currentSubmissionIndex,
 	)
+	if state != nil {
+		state.messages = messages
+		state.currentSubmissionIndex = currentSubmissionIndex
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -1767,17 +1954,51 @@ func (l *LoopAgent) runMainProviderOperation(
 	guarded bool,
 	operationActive bool,
 	consumer *runCommitConsumer,
+	midTurnCompactor *compaction.MidTurnCompact,
 	compactor compaction.Compactor,
 	estimator compaction.TokenEstimator,
 	maxTokens int,
-) (*llm.Message, []llm.Message, *guardedStreamBudget, error) {
+	multimodalTokensPerItemReserve int,
+	currentSubmissionIndex int,
+) (*llm.Message, []llm.Message, int, *guardedStreamBudget, error) {
 	currentMessages := messages
 	var response *llm.Message
 	var successfulBudget *guardedStreamBudget
+	var requestBase preparedRequestBase
+	var requestPlan *llm.PreparedRequestPlan
+	var selectionSource llm.CandidateSelectionSource
+	var staleSelectionRetries int
+	if operationActive {
+		var err error
+		requestBase, err = newPreparedRequestBase(toolOpts)
+		if err != nil {
+			return nil, currentMessages, currentSubmissionIndex, nil, err
+		}
+		requestBase.multimodalTokensPerItemReserve = multimodalTokensPerItemReserve
+		proposal, proposalErr := initialMainCandidateProposal(ctx, model)
+		if proposalErr != nil {
+			return nil, currentMessages, currentSubmissionIndex, nil, proposalErr
+		}
+		selectionSource, _ = llm.CandidateSelectionSourceFromContext(ctx)
+		requestPlan, currentMessages, currentSubmissionIndex, err = prepareAdmittedRequestPlan(
+			ctx, proposal, currentMessages, currentSubmissionIndex, requestBase, consumer,
+			midTurnCompactor, compactor, estimator, maxTokens,
+		)
+		if err != nil {
+			return nil, currentMessages, currentSubmissionIndex, nil, err
+		}
+		ctx = llm.WithPreparedRequestPlan(ctx, requestPlan)
+	}
 	runSchedule := func(operationCtx context.Context, dispatchModel llm.BaseChatModel) error {
 		for {
 			attemptBudget := &guardedStreamBudget{}
-			candidate, callErr := l.streamGenerateWithBudget(operationCtx, dispatchModel, currentMessages, toolOpts, es, attemptBudget, !guarded)
+			var candidate *llm.Message
+			var callErr error
+			if requestPlan != nil {
+				candidate, callErr = l.streamGenerateWithPreparedBudget(operationCtx, dispatchModel, requestPlan, es, attemptBudget, !guarded)
+			} else {
+				candidate, callErr = l.streamGenerateWithBudget(operationCtx, dispatchModel, currentMessages, toolOpts, es, attemptBudget, !guarded)
+			}
 			if callErr == nil {
 				if candidate == nil {
 					return errors.New("core: provider returned a nil response")
@@ -1787,10 +2008,44 @@ func (l *LoopAgent) runMainProviderOperation(
 				return nil
 			}
 
-			recovered, compactedMessages, recoveryBudget, recoveredOK, recoveryErr := l.recoverOverflowAttempt(
-				operationCtx, dispatchModel, currentMessages, toolOpts, es, attemptBudget, guarded, operationActive,
-				consumer, compactor, estimator, maxTokens, callErr,
-			)
+			var denied *llm.DispatchDeniedError
+			if requestPlan != nil && errors.As(callErr, &denied) && denied.Code == llm.DeniedStaleSelectionLease {
+				if selectionSource == nil || staleSelectionRetries >= 8 {
+					return callErr
+				}
+				proposal, peekErr := selectionSource.PeekCandidate(operationCtx)
+				if peekErr != nil {
+					return errors.Join(callErr, peekErr)
+				}
+				staleSelectionRetries++
+				requestPlan, currentMessages, currentSubmissionIndex, callErr = prepareAdmittedRequestPlan(
+					operationCtx, proposal, currentMessages, currentSubmissionIndex, requestBase, consumer,
+					midTurnCompactor, compactor, estimator, maxTokens,
+				)
+				if callErr != nil {
+					return errors.Join(denied, callErr)
+				}
+				operationCtx = llm.WithPreparedRequestPlan(operationCtx, requestPlan)
+				continue
+			}
+
+			var recovered *llm.Message
+			var compactedMessages []llm.Message
+			var compactedSubmissionIndex = currentSubmissionIndex
+			var recoveryBudget *guardedStreamBudget
+			var recoveredOK bool
+			var recoveryErr error
+			if requestPlan != nil {
+				recovered, compactedMessages, compactedSubmissionIndex, recoveryBudget, recoveredOK, recoveryErr = l.recoverPreparedOverflowAttempt(
+					operationCtx, dispatchModel, currentMessages, requestPlan, requestBase, currentSubmissionIndex,
+					es, attemptBudget, guarded, consumer, compactor, estimator, maxTokens, callErr,
+				)
+			} else {
+				recovered, compactedMessages, recoveryBudget, recoveredOK, recoveryErr = l.recoverOverflowAttempt(
+					operationCtx, dispatchModel, currentMessages, toolOpts, es, attemptBudget, guarded, operationActive,
+					consumer, compactor, estimator, maxTokens, callErr,
+				)
+			}
 			if recoveryErr != nil {
 				return errors.Join(callErr, recoveryErr)
 			}
@@ -1800,6 +2055,7 @@ func (l *LoopAgent) runMainProviderOperation(
 				}
 				response = recovered
 				currentMessages = compactedMessages
+				currentSubmissionIndex = compactedSubmissionIndex
 				successfulBudget = recoveryBudget
 				return nil
 			}
@@ -1822,7 +2078,19 @@ func (l *LoopAgent) runMainProviderOperation(
 			if waitErr := waitProviderRetry(operationCtx, backoff); waitErr != nil {
 				return errors.Join(callErr, waitErr)
 			}
-			operationCtx = llm.WithCandidateProposal(operationCtx, proposal)
+			if requestPlan != nil {
+				var prepareErr error
+				requestPlan, currentMessages, currentSubmissionIndex, prepareErr = prepareAdmittedRequestPlan(
+					operationCtx, proposal, currentMessages, currentSubmissionIndex, requestBase, consumer,
+					midTurnCompactor, compactor, estimator, maxTokens,
+				)
+				if prepareErr != nil {
+					return errors.Join(callErr, prepareErr)
+				}
+				operationCtx = llm.WithPreparedRequestPlan(operationCtx, requestPlan)
+			} else {
+				operationCtx = llm.WithCandidateProposal(operationCtx, proposal)
+			}
 		}
 	}
 
@@ -1837,9 +2105,9 @@ func (l *LoopAgent) runMainProviderOperation(
 		runErr = runSchedule(ctx, model)
 	}
 	if runErr != nil {
-		return nil, currentMessages, nil, runErr
+		return nil, currentMessages, currentSubmissionIndex, nil, runErr
 	}
-	return response, currentMessages, successfulBudget, nil
+	return response, currentMessages, currentSubmissionIndex, successfulBudget, nil
 }
 
 func waitProviderRetry(ctx context.Context, delay time.Duration) error {
@@ -1935,6 +2203,92 @@ func (l *LoopAgent) recoverOverflowAttempt(
 	return response, compacted, recoveryBudget, true, nil
 }
 
+func (l *LoopAgent) recoverPreparedOverflowAttempt(
+	ctx context.Context,
+	model llm.BaseChatModel,
+	messages []llm.Message,
+	failedPlan *llm.PreparedRequestPlan,
+	requestBase preparedRequestBase,
+	currentSubmissionIndex int,
+	es EventStream,
+	failedBudget *guardedStreamBudget,
+	guarded bool,
+	consumer *runCommitConsumer,
+	compactor compaction.Compactor,
+	estimator compaction.TokenEstimator,
+	maxTokens int,
+	callErr error,
+) (*llm.Message, []llm.Message, int, *guardedStreamBudget, bool, error) {
+	if !guarded || failedBudget == nil || failedBudget.visible || failedBudget.bytes != 0 || failedBudget.chunks != 0 {
+		return nil, nil, currentSubmissionIndex, nil, false, nil
+	}
+	attempt, finished := llm.FinishedProviderAttemptFromError(callErr)
+	if !finished || attempt.Failure != llm.FailureOverflow || attempt.AttemptID == "" {
+		return nil, nil, currentSubmissionIndex, nil, false, nil
+	}
+	authority, ok := llm.OperationDispatchAuthorityFromContext(ctx)
+	if !ok {
+		return nil, nil, currentSubmissionIndex, nil, false, nil
+	}
+	recoveryOwner, ok := authority.(llm.OverflowRecoveryAuthority)
+	if !ok {
+		return nil, nil, currentSubmissionIndex, nil, false, nil
+	}
+	var candidate llm.ResolvedCandidateHandle
+	for _, resolved := range llm.ProviderCandidatesFromModel(model) {
+		if resolved != nil && resolved.CandidateID() == attempt.Identity.Candidate && resolved.Identity() == attempt.Identity {
+			candidate = resolved
+			break
+		}
+	}
+	if candidate == nil || failedPlan == nil || failedPlan.Proposal().Candidate != candidate {
+		return nil, nil, currentSubmissionIndex, nil, false, nil
+	}
+	if err := recoveryOwner.BeginOverflowRecovery(ctx, attempt.AttemptID); err != nil {
+		return nil, nil, currentSubmissionIndex, nil, false, nil
+	}
+	proposal := llm.CandidateProposal{
+		OperationID: authority.ID(),
+		Candidate:   candidate,
+		Reason:      llm.CandidateOverflow,
+		Antecedent: llm.CandidateAntecedent{
+			Kind:      llm.AntecedentFinishedOverflow,
+			AttemptID: attempt.AttemptID,
+		},
+	}
+	owner, ok := authority.(*providerOperationAuthority)
+	if !ok {
+		return nil, nil, currentSubmissionIndex, nil, false, errors.New("core: overflow recovery requires the Loop-owned dispatch authority")
+	}
+	if err := owner.planCandidateProposal(proposal); err != nil {
+		return nil, nil, currentSubmissionIndex, nil, false, err
+	}
+	compacted, compactedIndex, err := compactPreparedOverflowRequest(
+		ctx, messages, currentSubmissionIndex, consumer, compactor, estimator, failedPlan.Estimate().MessageBudget,
+	)
+	if err != nil {
+		return nil, nil, currentSubmissionIndex, nil, false, err
+	}
+	recoveryCtx := llm.WithCandidateProposal(ctx, proposal)
+	requestPlan, compacted, compactedIndex, err := prepareAdmittedRequestPlan(
+		recoveryCtx, proposal, compacted, compactedIndex, requestBase, consumer,
+		compaction.NewMidTurnCompact(), compactor, estimator, maxTokens,
+	)
+	if err != nil {
+		return nil, compacted, compactedIndex, nil, false, err
+	}
+	recoveryCtx = llm.WithPreparedRequestPlan(recoveryCtx, requestPlan)
+	recoveryBudget := &guardedStreamBudget{}
+	response, err := l.streamGenerateWithPreparedBudget(recoveryCtx, model, requestPlan, es, recoveryBudget, false)
+	if err != nil {
+		return nil, nil, currentSubmissionIndex, nil, false, err
+	}
+	if response == nil {
+		return nil, nil, currentSubmissionIndex, nil, false, errors.New("core: overflow recovery returned a nil response")
+	}
+	return response, compacted, compactedIndex, recoveryBudget, true, nil
+}
+
 func compactOverflowRequest(
 	ctx context.Context,
 	messages []llm.Message,
@@ -1987,6 +2341,135 @@ func compactOverflowRequest(
 		}
 	}
 	return turnItemsToMessages(result.Items), nil
+}
+
+func initialMainCandidateProposal(ctx context.Context, model llm.BaseChatModel) (llm.CandidateProposal, error) {
+	authority, ok := llm.OperationDispatchAuthorityFromContext(ctx)
+	if !ok {
+		return llm.CandidateProposal{}, &RequestEnvelopeError{Reason: "provider operation authority is unavailable"}
+	}
+	candidates := llm.ProviderCandidatesFromModel(model)
+	if source, exists := llm.CandidateSelectionSourceFromContext(ctx); exists {
+		proposal, err := source.PeekCandidate(ctx)
+		if err != nil {
+			return llm.CandidateProposal{}, &RequestEnvelopeError{Reason: "active candidate cannot be pinned before estimation", Cause: err}
+		}
+		if proposal.OperationID != authority.ID() || proposal.Antecedent.Kind != llm.AntecedentInitial {
+			return llm.CandidateProposal{}, &RequestEnvelopeError{Reason: "candidate selector returned an invalid initial proposal"}
+		}
+		switch proposal.Reason {
+		case llm.CandidateCyclerSelected:
+			if proposal.SelectionLease == nil {
+				return llm.CandidateProposal{}, &RequestEnvelopeError{Reason: "cycler selector omitted its selection lease"}
+			}
+		case llm.CandidateInitial:
+			if proposal.SelectionLease != nil {
+				return llm.CandidateProposal{}, &RequestEnvelopeError{Reason: "fixed initial candidate unexpectedly carries a selection lease"}
+			}
+		default:
+			return llm.CandidateProposal{}, &RequestEnvelopeError{Reason: "candidate selector returned an unsupported initial reason"}
+		}
+		for _, candidate := range candidates {
+			if candidate == proposal.Candidate {
+				return proposal, nil
+			}
+		}
+		return llm.CandidateProposal{}, &RequestEnvelopeError{Reason: "selected candidate is outside the provider operation set"}
+	}
+	if len(candidates) != 1 {
+		return llm.CandidateProposal{}, &RequestEnvelopeError{Reason: "active provider candidate cannot be pinned unambiguously"}
+	}
+	return llm.CandidateProposal{
+		OperationID: authority.ID(),
+		Candidate:   candidates[0],
+		Reason:      llm.CandidateInitial,
+		Antecedent:  llm.CandidateAntecedent{Kind: llm.AntecedentInitial},
+	}, nil
+}
+
+func compactPreparedOverflowRequest(
+	ctx context.Context,
+	messages []llm.Message,
+	currentSubmissionIndex int,
+	consumer *runCommitConsumer,
+	compactor compaction.Compactor,
+	estimator compaction.TokenEstimator,
+	messageBudget int,
+) ([]llm.Message, int, error) {
+	if compactor == nil || estimator == nil || messageBudget <= 0 {
+		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "overflow recovery requires a positive prepared message budget and compactor"}
+	}
+	items := messagesToTurnItems(messages)
+	if currentSubmissionIndex < 0 || currentSubmissionIndex >= len(items) {
+		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "current submission cannot be preserved during overflow recovery"}
+	}
+	currentID := items[currentSubmissionIndex].ID
+	currentMessage := cloneLLMMessage(messages[currentSubmissionIndex])
+	if consumer != nil {
+		if consumer.source == nil {
+			return nil, currentSubmissionIndex, ErrRunCommitCompactionProjectionUnavailable
+		}
+		if err := validateDurableRequestSource(items, consumer.source, consumer.runID); err != nil {
+			return nil, currentSubmissionIndex, err
+		}
+	}
+	if err := compaction.ValidateCompactionEligible(items); err != nil {
+		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "overflow request contains non-compaction-safe content", Cause: err}
+	}
+	var durableCurrentInput compaction.TurnItem
+	if consumer != nil {
+		var err error
+		durableCurrentInput, err = captureDurableCurrentInput(items, consumer.source, consumer.runID)
+		if err != nil {
+			return nil, currentSubmissionIndex, err
+		}
+	}
+	result, err := compactor.Compact(ctx, cloneCompactionTurnItems(items), messageBudget, estimator)
+	if err != nil {
+		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "overflow request compaction failed", Cause: err}
+	}
+	if reflect.DeepEqual(items, result.Items) {
+		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "overflow request compaction made no progress"}
+	}
+	compactedItems, err := compaction.NormalizeToolCallGroups(result.Items)
+	if err != nil {
+		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "overflow compactor returned invalid tool-call groups", Cause: err}
+	}
+	var durableProjection CompactionProjection
+	if consumer != nil {
+		result.Items = compactedItems
+		durableProjection, err = validateDurableCompactionResult(items, result, consumer.source, consumer.runID)
+		if err != nil {
+			return nil, currentSubmissionIndex, err
+		}
+		if err := validateDurableCurrentInputPreserved(durableCurrentInput, compactedItems); err != nil {
+			return nil, currentSubmissionIndex, err
+		}
+	}
+	compactedSubmissionIndex := -1
+	for index, item := range compactedItems {
+		if item.ID != currentID {
+			continue
+		}
+		if compactedSubmissionIndex >= 0 {
+			return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "overflow compactor duplicated the current submission"}
+		}
+		compactedSubmissionIndex = index
+	}
+	if compactedSubmissionIndex < 0 {
+		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "overflow compactor removed the current submission"}
+	}
+	compactedMessages := turnItemsToMessages(compactedItems)
+	if !reflect.DeepEqual(currentMessage, compactedMessages[compactedSubmissionIndex]) {
+		return nil, currentSubmissionIndex, &RequestEnvelopeError{Reason: "overflow compactor changed the current submission"}
+	}
+	if consumer != nil {
+		if err := consumer.commitCompaction(durableProjection); err != nil {
+			markRunOutcomeUnknown(ctx)
+			return nil, currentSubmissionIndex, err
+		}
+	}
+	return compactedMessages, compactedSubmissionIndex, nil
 }
 
 func providerOperationContext(ctx context.Context, model llm.BaseChatModel, kind llm.ProviderOperationKind) (context.Context, bool, error) {

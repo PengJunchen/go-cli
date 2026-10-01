@@ -299,6 +299,7 @@ func (r *ModelResolver) resolveModel(ctx context.Context, request ModelRequest, 
 			OriginKind: originKind,
 			Candidate:  candidateID,
 		},
+		model:    modelSpec,
 		provider: definition.provider,
 		cfg:      cfg,
 	}

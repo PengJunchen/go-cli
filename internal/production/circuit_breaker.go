@@ -30,6 +30,9 @@ const (
 	StreamFailed
 	// StreamCanceledNeutral releases admission without changing outcome counts.
 	StreamCanceledNeutral
+	// StreamNoDispatchNeutral releases an admission when a typed Loop denial
+	// occurred before every provider dispatch in the operation.
+	StreamNoDispatchNeutral
 )
 
 // CircuitBreakerStreamTicket settles one streaming admission at most once.
@@ -95,7 +98,7 @@ func (t *defaultCircuitBreakerStreamTicket) Complete(outcome StreamOutcome) bool
 		return false
 	}
 	switch outcome {
-	case StreamSucceeded, StreamFailed, StreamCanceledNeutral:
+	case StreamSucceeded, StreamFailed, StreamCanceledNeutral, StreamNoDispatchNeutral:
 	default:
 		return false
 	}
@@ -140,7 +143,7 @@ func (t *defaultCircuitBreakerStreamTicket) Complete(outcome StreamOutcome) bool
 				b.halfOpenCalls = 0
 				b.halfOpenSuccesses = 0
 			}
-		case StreamCanceledNeutral:
+		case StreamCanceledNeutral, StreamNoDispatchNeutral:
 			if b.halfOpenCalls > 0 {
 				b.halfOpenCalls--
 			}

@@ -137,6 +137,11 @@ func (m *costTrackingModel) ProviderCandidates() []llm.ResolvedCandidateHandle {
 	return llm.ProviderCandidatesFromModel(m.next)
 }
 
+func (m *costTrackingModel) CandidateSelectionSource() llm.CandidateSelectionSource {
+	source, _ := llm.CandidateSelectionSourceFromModel(m.next)
+	return source
+}
+
 // recordUsage records token counts to the cost tracker and stats registry.
 func (m *costTrackingModel) recordUsage(ctx context.Context, resp *llm.Message) {
 	if resp.Usage == nil {

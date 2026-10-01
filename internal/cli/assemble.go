@@ -427,15 +427,15 @@ func AssembleAgent(
 		return nil, errors.Join(err, s.runCleanup())
 	}
 	s.assembleOutputGuards()
-	s.assembleSubAgent()
 	if err := s.assembleExtraTools(); err != nil {
 		return nil, errors.Join(err, s.runCleanup())
 	}
 	s.assembleLoopAgent()
-	s.assembleMiddleware()
 	if err := s.assembleCompactor(); err != nil {
 		return nil, errors.Join(err, s.runCleanup())
 	}
+	s.assembleSubAgent()
+	s.assembleMiddleware()
 	s.assembleSession()
 
 	// Resume history from session store if requested.
@@ -1433,6 +1433,7 @@ func (s *assembleState) assembleOutputGuards() {
 func (s *assembleState) assembleSubAgent() {
 	subAgentFactory := core.NewRealSubAgentFactory(s.model, llm.NewProviderRegistry(), s.tr,
 		core.WithModelWrapper(newModelWrapperWithChain(s.pw, s.modelChain, s.circuitBreaker, s.guardChain, s.telemetry)),
+		core.WithMidTurnCompaction(s.midTurn, s.compactor, s.estimator, s.ac.maxTokens),
 	)
 	dispatcher := core.NewDefaultSubagentDispatcher(subAgentFactory)
 	s.dispatcher = dispatcher

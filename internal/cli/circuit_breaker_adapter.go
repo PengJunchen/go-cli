@@ -22,6 +22,11 @@ func (m *circuitBreakerModel) ProviderCandidates() []llm.ResolvedCandidateHandle
 	return llm.ProviderCandidatesFromModel(m.inner)
 }
 
+func (m *circuitBreakerModel) CandidateSelectionSource() llm.CandidateSelectionSource {
+	source, _ := llm.CandidateSelectionSourceFromModel(m.inner)
+	return source
+}
+
 // RunProviderOperation admits the complete Core-owned schedule as one breaker
 // operation. Each nested provider dispatch still passes through its guarded
 // adapter, while retry and candidate decisions remain in Core.
@@ -46,6 +51,8 @@ func (m *circuitBreakerModel) RunProviderOperation(ctx context.Context, run func
 			outcome = production.StreamSucceeded
 		} else if ctx.Err() != nil {
 			outcome = callerCancellationOutcome(ctx)
+		} else if loopNoDispatchFailure(ctx, err) {
+			outcome = production.StreamNoDispatchNeutral
 		}
 		ticket.Complete(outcome)
 		return err
@@ -86,6 +93,25 @@ func (m *circuitBreakerModel) RunProviderOperation(ctx context.Context, run func
 		}
 	}
 	return nil
+}
+
+func loopNoDispatchFailure(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	authority, ok := llm.OperationDispatchAuthorityFromContext(ctx)
+	if !ok {
+		return false
+	}
+	counter, ok := authority.(llm.ActualDispatchCounter)
+	if !ok || counter.ActualDispatchCount() != 0 {
+		return false
+	}
+	var noDispatch interface {
+		error
+		NoProviderDispatch() bool
+	}
+	return errors.As(err, &noDispatch) && noDispatch.NoProviderDispatch()
 }
 
 var _ llm.BaseChatModel = (*circuitBreakerModel)(nil)

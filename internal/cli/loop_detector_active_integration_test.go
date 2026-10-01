@@ -352,6 +352,10 @@ func TestAssembledLoopDetectorWarnsContinuesAndInjectsNextTurnReminder(t *testin
 	defer provider.Close()
 
 	assembly, durableSession, _ := newActiveLoopDurableAssembly(ctx, t, provider.URL, "", 2)
+	// This test exercises loop-detector continuity across durable turns. Keep
+	// its long-lived fixture inside the request envelope so it does not invoke
+	// an unrelated configured Unified/Micro compaction path.
+	assembly.LoopAgent.SetMidTurnCompaction(assembly.MidTurn, assembly.Compactor, assembly.Estimator, 50000)
 	runCtx := bindActiveLoopDurableRun(ctx, t, assembly, durableSession)
 	firstRun, err := assembly.Harness.Submit(runCtx, "read the same marker repeatedly")
 	require.NoError(t, err)
