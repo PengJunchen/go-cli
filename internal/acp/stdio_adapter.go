@@ -219,7 +219,7 @@ func (s *StdioAdapter) Connect(ctx context.Context) error {
 	write, err := s.writeFrame(ctx, session, connectMsg, true)
 	if err != nil {
 		s.mu.Lock()
-		if !write.started && !s.closing {
+		if !write.started && !s.closing && s.owned == nil {
 			s.connecting = false
 			s.session = nil
 			s.mu.Unlock()

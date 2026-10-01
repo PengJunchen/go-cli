@@ -297,8 +297,14 @@ func (o *StdioProcessOwner) shutdown() {
 		groupGone, groupErr = waitACPStdioProcessGroupGone(groupID, stdioProcessKillWait)
 		shutdownErr = errors.Join(shutdownErr, groupErr)
 	}
+	// Once the bounded group check has settled, close this local read end so an
+	// escaped descendant that retained a duplicate writer cannot keep the
+	// adapter reader (and therefore Join) blocked. This releases only our local
+	// reader; process-group absence remains the separate containment result.
+	if err := o.stdout.Close(); err != nil && !errors.Is(err, os.ErrClosed) {
+		shutdownErr = errors.Join(shutdownErr, err)
+	}
 	if !groupGone {
-		_ = o.stdout.Close()
 		shutdownErr = errors.Join(shutdownErr, ErrStdioProcessCleanupPending)
 	}
 	o.mu.Lock()
