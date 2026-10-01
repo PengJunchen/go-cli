@@ -810,7 +810,7 @@ func skillLoadDiagnosticSourceID(relative string) (string, bool) {
 		return "", false
 	}
 	localPath := filepath.FromSlash(relative)
-	if filepath.IsAbs(localPath) || filepath.VolumeName(localPath) != "" {
+	if filepath.IsAbs(localPath) || hasSkillPathVolumeName(localPath) || strings.HasPrefix(relative, `\\`) {
 		return "", false
 	}
 	cleaned := filepath.Clean(localPath)
@@ -839,6 +839,16 @@ func skillLoadDiagnosticSourceID(relative string) (string, bool) {
 	headBytes := fragmentBudget / 2
 	tailBytes := fragmentBudget - headBytes
 	return prefix + quotedPath[:headBytes] + marker + quotedPath[len(quotedPath)-tailBytes:], true
+}
+
+func hasSkillPathVolumeName(path string) bool {
+	if filepath.VolumeName(path) != "" {
+		return true
+	}
+	if len(path) < 2 || path[1] != ':' {
+		return false
+	}
+	return (path[0] >= 'A' && path[0] <= 'Z') || (path[0] >= 'a' && path[0] <= 'z')
 }
 
 // isSkillFileName reports whether name looks like a skill file.
