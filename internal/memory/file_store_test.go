@@ -23,6 +23,16 @@ func newTestStore(t *testing.T) (*FileMemoryStore, string) {
 	return s, path
 }
 
+func assertSearchRelevanceRange(t *testing.T, results []Memory) {
+	t.Helper()
+	require.NotEmpty(t, results)
+	assert.InDelta(t, 1.0, results[0].Relevance, 1e-9)
+	for _, result := range results {
+		assert.Greater(t, result.Relevance, 0.0)
+		assert.LessOrEqual(t, result.Relevance, 1.0)
+	}
+}
+
 func TestNewFileMemoryStore_NonExistentFile(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "memories.jsonl")
 	s, err := NewFileMemoryStore(path)
@@ -326,6 +336,135 @@ func TestSearch_CommonTermNotDiscriminating(t *testing.T) {
 	res, err := s.Search(ctx, "shared", 10)
 	require.NoError(t, err)
 	assert.Empty(t, res)
+}
+
+func TestMemorySearchOneDocument(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+	require.NoError(t, store.Add(ctx, Memory{ID: "only", Content: "launch checklist"}))
+
+	results, err := store.Search(ctx, "checklist", 10)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "only", results[0].ID)
+	assertSearchRelevanceRange(t, results)
+}
+
+func TestMemorySearchTwoDocumentsUniqueAndSharedTerms(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+	require.NoError(t, store.Add(ctx, Memory{ID: "owner", Content: "shared uniqueamber"}))
+	require.NoError(t, store.Add(ctx, Memory{ID: "other", Content: "shared evergreen"}))
+
+	results, err := store.Search(ctx, "uniqueamber", 10)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "owner", results[0].ID)
+	assertSearchRelevanceRange(t, results)
+
+	results, err = store.Search(ctx, "shared", 10)
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
+func TestMemorySearchCJKSubstring(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+	require.NoError(t, store.Add(ctx, Memory{ID: "owner", Content: "本地中文检索"}))
+	require.NoError(t, store.Add(ctx, Memory{ID: "other-one", Content: "English gardening notes"}))
+	require.NoError(t, store.Add(ctx, Memory{ID: "other-two", Content: "rust distributed storage"}))
+
+	results, err := store.Search(ctx, "中文", 10)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "owner", results[0].ID)
+	assertSearchRelevanceRange(t, results)
+}
+
+func TestMemorySearchSingleHanRuneOnlyMatchesSingleRuneRun(t *testing.T) {
+	t.Run("exact single rune", func(t *testing.T) {
+		store, _ := newTestStore(t)
+		ctx := context.Background()
+		require.NoError(t, store.Add(ctx, Memory{ID: "exact", Content: "中"}))
+		require.NoError(t, store.Add(ctx, Memory{ID: "other-one", Content: "English gardening notes"}))
+		require.NoError(t, store.Add(ctx, Memory{ID: "other-two", Content: "rust distributed storage"}))
+
+		results, err := store.Search(ctx, "中", 10)
+		require.NoError(t, err)
+		require.Len(t, results, 1)
+		assert.Equal(t, "exact", results[0].ID)
+		assertSearchRelevanceRange(t, results)
+	})
+
+	t.Run("rune inside longer Han run", func(t *testing.T) {
+		store, _ := newTestStore(t)
+		ctx := context.Background()
+		require.NoError(t, store.Add(ctx, Memory{ID: "long", Content: "中文检索"}))
+		require.NoError(t, store.Add(ctx, Memory{ID: "other-one", Content: "English gardening notes"}))
+		require.NoError(t, store.Add(ctx, Memory{ID: "other-two", Content: "rust distributed storage"}))
+
+		results, err := store.Search(ctx, "中", 10)
+		require.NoError(t, err)
+		assert.Empty(t, results)
+	})
+}
+
+func TestMemorySearchHanScriptsDoNotConvert(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+	require.NoError(t, store.Add(ctx, Memory{ID: "traditional", Content: "漢字"}))
+	require.NoError(t, store.Add(ctx, Memory{ID: "other-one", Content: "English gardening notes"}))
+	require.NoError(t, store.Add(ctx, Memory{ID: "other-two", Content: "rust distributed storage"}))
+
+	results, err := store.Search(ctx, "汉字", 10)
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
+func TestMemorySearchHanQueryKeepsORMatchingForSharedBigram(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+	require.NoError(t, store.Add(ctx, Memory{ID: "traditional", Content: "後臺管理"}))
+	require.NoError(t, store.Add(ctx, Memory{ID: "other-one", Content: "English gardening notes"}))
+	require.NoError(t, store.Add(ctx, Memory{ID: "other-two", Content: "rust distributed storage"}))
+	require.NoError(t, store.Add(ctx, Memory{ID: "other-three", Content: "database deployment guide"}))
+
+	results, err := store.Search(ctx, "后台管理", 10)
+	require.NoError(t, err)
+	require.Len(t, results, 1)
+	assert.Equal(t, "traditional", results[0].ID, "the literal shared bigram 管理 matches through OR term semantics")
+	assertSearchRelevanceRange(t, results)
+}
+
+func TestMemorySearchHanBigramsDoNotBridgeSeparators(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := context.Background()
+	require.NoError(t, store.Add(ctx, Memory{ID: "punctuation", Content: "中，文"}))
+	require.NoError(t, store.Add(ctx, Memory{ID: "emoji", Content: "中🙂文"}))
+	require.NoError(t, store.Add(ctx, Memory{ID: "other", Content: "English gardening notes"}))
+
+	results, err := store.Search(ctx, "中文", 10)
+	require.NoError(t, err)
+	assert.Empty(t, results)
+}
+
+func TestTokenizeHanRunsAndScriptTransitions(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  []string
+	}{
+		{name: "overlapping Han bigrams", input: "中文检索", want: []string{"中文", "文检", "检索"}},
+		{name: "single Han rune", input: "中", want: []string{"中"}},
+		{name: "Han and non-Han transitions", input: "ABC中文DEF123", want: []string{"abc", "中文", "def123"}},
+		{name: "punctuation boundary", input: "中，文", want: []string{"中", "文"}},
+		{name: "emoji boundary", input: "中🙂文", want: []string{"中", "文"}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			assert.Equal(t, test.want, tokenize(test.input))
+		})
+	}
 }
 
 func TestPersistence_Reload(t *testing.T) {

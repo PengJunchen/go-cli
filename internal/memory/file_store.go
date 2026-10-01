@@ -294,6 +294,10 @@ func (s *FileMemoryStore) Search(_ context.Context, query string, limit int) ([]
 	if n == 0 {
 		return nil, nil
 	}
+	effectiveN := n
+	if effectiveN < 3 {
+		effectiveN = 3
+	}
 
 	// Collect candidate document IDs that contain at least one query term.
 	uniqueQ := dedup(qTerms)
@@ -328,7 +332,7 @@ func (s *FileMemoryStore) Search(_ context.Context, query string, limit int) ([]
 		if df == 0 {
 			continue
 		}
-		idf := math.Log(float64(n) / float64(1+df))
+		idf := math.Log(float64(effectiveN) / float64(1+df))
 		for i := range cands {
 			id := cands[i].id
 			dl := s.docLen[id]
@@ -569,22 +573,44 @@ func newMemoryID() (string, error) {
 	return "mem_" + hex.EncodeToString(b[:]), nil
 }
 
-// tokenize splits text into lowercase alphanumeric tokens.
+// tokenize lowercases alphanumeric runs, emitting a singleton for a one-rune
+// Han run and overlapping bigrams for longer Han runs.
 func tokenize(text string) []string {
 	text = strings.ToLower(text)
 	var tokens []string
-	var b strings.Builder
+	var run []rune
+	runIsHan := false
+	hanScript := unicode.Scripts["Han"]
+	flush := func() {
+		if len(run) == 0 {
+			return
+		}
+		if runIsHan {
+			if len(run) == 1 {
+				tokens = append(tokens, string(run[0]))
+			} else {
+				for i := 0; i < len(run)-1; i++ {
+					tokens = append(tokens, string(run[i:i+2]))
+				}
+			}
+		} else {
+			tokens = append(tokens, string(run))
+		}
+		run = nil
+	}
 	for _, r := range text {
 		if unicode.IsLetter(r) || unicode.IsDigit(r) {
-			b.WriteRune(r)
-		} else if b.Len() > 0 {
-			tokens = append(tokens, b.String())
-			b.Reset()
+			isHan := unicode.Is(hanScript, r)
+			if len(run) > 0 && isHan != runIsHan {
+				flush()
+			}
+			run = append(run, r)
+			runIsHan = isHan
+		} else {
+			flush()
 		}
 	}
-	if b.Len() > 0 {
-		tokens = append(tokens, b.String())
-	}
+	flush()
 	return tokens
 }
 
