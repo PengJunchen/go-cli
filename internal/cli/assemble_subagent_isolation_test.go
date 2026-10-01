@@ -69,8 +69,8 @@ func TestAssembleSubAgentDispatchersStayBoundToTheirRegistry(t *testing.T) {
 	stateA.assembleOutputGuards()
 	stateB.assembleOutputGuards()
 
-	stateA.assembleSubAgent()
-	stateB.assembleSubAgent()
+	require.NoError(t, stateA.assembleSubAgent())
+	require.NoError(t, stateB.assembleSubAgent())
 	assert.Same(t, sentinelFactory, core.GetSubAgentFactory(), "an Assembly must not mutate the process-wide subagent factory")
 
 	ctx := context.Background()

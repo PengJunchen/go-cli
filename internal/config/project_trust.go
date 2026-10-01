@@ -78,6 +78,8 @@ func LoadTrustedWithManager(ctx context.Context, manager approval.TrustManager) 
 		projectOverlay.mcpServersProvenance = MCPServersFromProject
 	}
 	projectOverlay.projectExtensionSourceIDs = cloneStringMap(captured.projectExtensionSourceIDs)
+	projectOverlay.projectACPCommandSourceID = captured.projectACPCommandSourceID
+	projectOverlay.projectACPCommandPath = captured.projectACPCommandPath
 	merged := mergeConfigs(globalConfig, projectOverlay)
 	if err := NewDefaultValidator().Validate(*merged); err != nil {
 		return nil, fmt.Errorf("config: validate merged trusted configuration: %w", err)
@@ -87,6 +89,8 @@ func LoadTrustedWithManager(ctx context.Context, manager approval.TrustManager) 
 	merged.verifiedProjectSources = verified
 	merged.projectTrustManager = manager
 	merged.projectExtensionSourceIDs = cloneStringMap(captured.projectExtensionSourceIDs)
+	merged.projectACPCommandSourceID = captured.projectACPCommandSourceID
+	merged.projectACPCommandPath = captured.projectACPCommandPath
 	merged.projectOverlay = cloneConfigValues(projectOverlay)
 	merged.userGlobalConfig = cloneConfigValues(globalConfig)
 	merged.mcpServersProvenance = mcpProvenanceFor(globalConfig, projectOverlay)
@@ -119,6 +123,33 @@ func (c *Config) ProjectExtensionBytesForVerifiedPath(path string) ([]byte, bool
 		return nil, false
 	}
 	return verified.SourceBytes(sourceID)
+}
+
+// ProjectACPCommandBytesForVerifiedConfig returns the exact executable bytes
+// and canonical source path captured for this verified project's ACP command.
+func (c *Config) ProjectACPCommandBytesForVerifiedConfig() (string, []byte, bool) {
+	if c == nil {
+		return "", nil, false
+	}
+	verified := c.VerifiedProjectSources()
+	project := c.ProjectOverlayForVerifiedSources()
+	if verified == nil || project == nil || project.ACP.Command == "" || project.ACP.Command != c.ACP.Command ||
+		c.projectACPCommandSourceID == "" || c.projectACPCommandPath == "" {
+		return "", nil, false
+	}
+	data, present := verified.SourceBytes(c.projectACPCommandSourceID)
+	if !present {
+		return "", nil, false
+	}
+	return c.projectACPCommandPath, data, true
+}
+
+// HasProjectACPCommandOverlay reports whether the loaded configuration
+// originated its ACP command from a project overlay. It grants no access to
+// the captured executable bytes; assembly uses it to avoid falling back to a
+// live path when a project command's verified bytes are unavailable.
+func (c *Config) HasProjectACPCommandOverlay() bool {
+	return c != nil && c.projectOverlay != nil && c.projectOverlay.ACP.Command != ""
 }
 
 // ProjectTrustManager returns the manager used to verify this configuration's
@@ -239,6 +270,8 @@ func cloneConfigValues(source *Config) *Config {
 	clone.ProjectSourceTrustStatus = source.ProjectSourceTrustStatus
 	clone.projectTrustManager = source.projectTrustManager
 	clone.projectExtensionSourceIDs = cloneStringMap(source.projectExtensionSourceIDs)
+	clone.projectACPCommandSourceID = source.projectACPCommandSourceID
+	clone.projectACPCommandPath = source.projectACPCommandPath
 	clone.mcpServersProvenance = source.mcpServersProvenance
 	return &clone
 }

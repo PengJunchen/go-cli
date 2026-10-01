@@ -96,6 +96,8 @@ type capturedProjectSources struct {
 	selectedConfigID          string
 	selectedPath              string
 	projectExtensionSourceIDs map[string]string
+	projectACPCommandSourceID string
+	projectACPCommandPath     string
 }
 
 type sourceCapture struct {
@@ -107,6 +109,8 @@ type sourceCapture struct {
 	fileIDs                   map[string]struct{}
 	directoryIDs              map[string]struct{}
 	projectExtensionSourceIDs map[string]string
+	projectACPCommandSourceID string
+	projectACPCommandPath     string
 	readBytes                 map[string][]byte
 	totalBytes                int64
 }
@@ -170,6 +174,8 @@ func captureProjectSources(ctx context.Context, root string, globalConfig *Confi
 		selectedConfigID:          selectedID,
 		selectedPath:              selectedPath,
 		projectExtensionSourceIDs: cloneStringMap(capture.projectExtensionSourceIDs),
+		projectACPCommandSourceID: capture.projectACPCommandSourceID,
+		projectACPCommandPath:     capture.projectACPCommandPath,
 	}, nil
 }
 
@@ -339,6 +345,16 @@ func captureConfigReferences(capture *sourceCapture, cfg *Config, projectLayer b
 			}
 		}
 	}
+	if cfg.ACP.Command != "" {
+		sourceID, commandPath, err := captureCommandReferenceSource(capture, "acp-command", cfg.ACP.Command, "", projectLayer)
+		if err != nil {
+			return err
+		}
+		if projectLayer {
+			capture.projectACPCommandSourceID = sourceID
+			capture.projectACPCommandPath = commandPath
+		}
+	}
 	if len(cfg.LSP.ServerCommand) > 0 {
 		if err := captureCommandReference(capture, "lsp-command", cfg.LSP.ServerCommand[0], cfg.LSP.WorkspaceRoot, projectLayer); err != nil {
 			return err
@@ -356,19 +372,24 @@ func captureConfigReferences(capture *sourceCapture, cfg *Config, projectLayer b
 }
 
 func captureCommandReference(capture *sourceCapture, category, command, workingDir string, projectLayer bool) error {
+	_, _, err := captureCommandReferenceSource(capture, category, command, workingDir, projectLayer)
+	return err
+}
+
+func captureCommandReferenceSource(capture *sourceCapture, category, command, workingDir string, projectLayer bool) (string, string, error) {
 	if command == "" {
-		return nil
+		return "", "", nil
 	}
 	if !filepath.IsAbs(command) && !strings.ContainsAny(command, `/\\`) {
 		resolved, err := lookPathExecutable(capture.ctx, command)
 		if err != nil {
 			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrProjectSourceLimit) {
-				return err
+				return "", "", err
 			}
 			if projectLayer {
-				return fmt.Errorf("%w: project executable %q cannot be resolved to a workspace source", ErrProjectSourceOutsideRoot, command)
+				return "", "", fmt.Errorf("%w: project executable %q cannot be resolved to a workspace source", ErrProjectSourceOutsideRoot, command)
 			}
-			return nil
+			return "", "", nil
 		}
 		if projectLayer {
 			command = resolved
@@ -378,21 +399,21 @@ func captureCommandReference(capture *sourceCapture, category, command, workingD
 			// manifest as an in-root source.
 			inside, err := resolvedWithinRoot(capture, resolved)
 			if err != nil {
-				return err
+				return "", "", err
 			}
 			if !inside {
-				return nil
+				return "", "", nil
 			}
 			command = resolved
 		}
 	} else if !filepath.IsAbs(command) {
 		workingDirectory, err := commandExecutionDirectory(workingDir)
 		if err != nil {
-			return fmt.Errorf("config: resolve command working directory: %w", err)
+			return "", "", fmt.Errorf("config: resolve command working directory: %w", err)
 		}
 		command = filepath.Join(workingDirectory, command)
 	}
-	return captureReferencedPath(capture, category, command, sourceExtensionDirectory, projectLayer)
+	return captureReferencedPathSource(capture, category, command, sourceExtensionDirectory, projectLayer)
 }
 
 func lookPathExecutable(ctx context.Context, command string) (string, error) {
@@ -473,28 +494,33 @@ func captureReferencedDirectory(capture *sourceCapture, category, raw string, ki
 }
 
 func captureReferencedPath(capture *sourceCapture, category, raw string, directoryKind sourceDirectoryKind, projectLayer bool) error {
+	_, _, err := captureReferencedPathSource(capture, category, raw, directoryKind, projectLayer)
+	return err
+}
+
+func captureReferencedPathSource(capture *sourceCapture, category, raw string, directoryKind sourceDirectoryKind, projectLayer bool) (string, string, error) {
 	if raw == "" {
-		return nil
+		return "", "", nil
 	}
 	if looksLikeEndpoint(raw) {
 		if projectLayer {
-			return fmt.Errorf("%w: remote source %q cannot be bound to a workspace manifest", ErrProjectSourceOutsideRoot, raw)
+			return "", "", fmt.Errorf("%w: remote source %q cannot be bound to a workspace manifest", ErrProjectSourceOutsideRoot, raw)
 		}
-		return nil
+		return "", "", nil
 	}
 	relative, absolute, inside, err := resolveProjectReference(capture, raw)
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	if !inside {
 		if projectLayer {
-			return fmt.Errorf("%w: %s", ErrProjectSourceOutsideRoot, raw)
+			return "", "", fmt.Errorf("%w: %s", ErrProjectSourceOutsideRoot, raw)
 		}
-		return nil
+		return "", absolute, nil
 	}
 	info, err := inspectProjectPath(capture.root, relative)
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	id := projectSourceID(category, relative)
 	if projectLayer && category == "extensions" {
@@ -503,13 +529,16 @@ func captureReferencedPath(capture *sourceCapture, category, raw string, directo
 	if info == nil {
 		input := approval.ProjectSourceFileInput{ID: id, RelativePath: relative, Present: false}
 		capture.addFile(input)
-		return nil
+		return id, absolute, nil
 	}
 	if info.IsDir() {
-		return captureDirectory(capture, id, relative, directoryKind)
+		if err := captureDirectory(capture, id, relative, directoryKind); err != nil {
+			return "", "", err
+		}
+		return id, absolute, nil
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("%w: %s", ErrProjectSourceNonRegular, absolute)
+		return "", "", fmt.Errorf("%w: %s", ErrProjectSourceNonRegular, absolute)
 	}
 	maxFileBytes := int64(projectSourceMaxFileBytes)
 	if projectLayer && category == "extensions" && filepath.Ext(relative) == ".so" {
@@ -517,10 +546,10 @@ func captureReferencedPath(capture *sourceCapture, category, raw string, directo
 	}
 	input, _, _, err := captureFileWithLimit(capture, id, relative, maxFileBytes)
 	if err != nil {
-		return err
+		return "", "", err
 	}
 	capture.addFile(input)
-	return nil
+	return id, absolute, nil
 }
 
 func resolveProjectReference(capture *sourceCapture, raw string) (relative, absolute string, inside bool, err error) {

@@ -212,8 +212,10 @@ func WithName(name string) Option {
 }
 
 // WithStdioOwnedTransportCloser opts the StdioAdapter into closing the
-// supplied transport during Disconnect. Without this option, reader and writer
-// resources remain caller-owned and are never closed by the adapter.
+// supplied transport during Disconnect. If the supplied closer also exposes a
+// Join() error method, Disconnect calls it after its stdio workers have joined.
+// Without this option, reader and writer resources remain caller-owned and are
+// never closed by the adapter.
 func WithStdioOwnedTransportCloser(closer io.Closer) Option {
 	return func(o *adapterOptions) { o.stdioOwnedTransportCloser = closer }
 }
