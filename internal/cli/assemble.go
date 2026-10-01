@@ -2369,7 +2369,11 @@ func registerSkillTools(ctx context.Context, rc *config.Config, tr tools.Deferre
 		return nil
 	}
 
-	loader := skill.NewYAMLSkillLoader()
+	loader, ok := skill.NewYAMLSkillLoader().(skill.SkillLoadReporter)
+	if !ok {
+		slog.Warn("assemble_skill_load_failed", "err", "built-in skill loader cannot report skipped sources")
+		return nil
+	}
 	verified := (*approval.VerifiedProjectSources)(nil)
 	if rc != nil {
 		verified = rc.VerifiedProjectSources()
@@ -2392,14 +2396,14 @@ func registerSkillTools(ctx context.Context, rc *config.Config, tr tools.Deferre
 		return nil
 	}
 	userSkillPath, userSkillRoot := canonicalUserSkillDirectory()
-	var defs []*skill.SkillDefinition
+	var loadResult skill.SkillLoadResult
 	projectSkillSource := false
 	if userSkillPath != "" && requestedDir == userSkillPath {
 		if userSkillRoot == "" {
 			slog.Warn("assemble_skill_skip_unavailable", "reason", "user skill directory is unavailable")
 			return nil
 		}
-		defs, err = loader.LoadDir(ctx, userSkillRoot)
+		loadResult, err = loader.LoadDirWithReport(ctx, userSkillRoot)
 	} else {
 		relativeDir, insideProject := relativeSkillDirectory(projectRoot, requestedDir)
 		if !insideProject {
@@ -2416,16 +2420,32 @@ func registerSkillTools(ctx context.Context, rc *config.Config, tr tools.Deferre
 			return nil
 		}
 		projectSkillSource = true
-		defs, err = loadVerifiedProjectSkills(ctx, verified, relativeDir)
+		loadResult, err = loadVerifiedProjectSkills(ctx, verified, relativeDir)
 	}
 	if err != nil {
 		slog.Warn("assemble_skill_load_failed", "err", err)
 		return nil
 	}
+	if loadResult.Report.Summary.Skipped > 0 {
+		summary := loadResult.Report.Summary
+		slog.Warn(
+			"assemble_skills_load_report",
+			"loaded", summary.Loaded,
+			"skipped", summary.Skipped,
+			"error_classes", formatSkillLoadErrorCounts(summary.ErrorCounts),
+		)
+		for _, diagnostic := range loadResult.Report.Diagnostics {
+			slog.Warn(
+				"assemble_skill_load_skipped",
+				"source_id", diagnostic.SourceID,
+				"error_class", string(diagnostic.Class),
+			)
+		}
+	}
 
 	var infos []core.SkillInfo
 	count := 0
-	for _, def := range defs {
+	for _, def := range loadResult.Definitions {
 		if def == nil {
 			continue
 		}
@@ -2523,9 +2543,9 @@ func relativeSkillDirectory(root, dir string) (string, bool) {
 	return filepath.ToSlash(relative), true
 }
 
-func loadVerifiedProjectSkills(ctx context.Context, verified *approval.VerifiedProjectSources, relativeDir string) ([]*skill.SkillDefinition, error) {
+func loadVerifiedProjectSkills(ctx context.Context, verified *approval.VerifiedProjectSources, relativeDir string) (skill.SkillLoadResult, error) {
 	if verified == nil || !verified.Valid() {
-		return nil, errors.New("cli: verified project skill sources are unavailable")
+		return skill.SkillLoadResult{}, errors.New("cli: verified project skill sources are unavailable")
 	}
 	cleanRelativeDir := filepath.ToSlash(filepath.Clean(filepath.FromSlash(relativeDir)))
 	directoryID := ""
@@ -2536,11 +2556,11 @@ func loadVerifiedProjectSkills(ctx context.Context, verified *approval.VerifiedP
 		}
 	}
 	if directoryID == "" {
-		return nil, errors.New("cli: verified project skill directory is missing from the source manifest")
+		return skill.SkillLoadResult{}, errors.New("cli: verified project skill directory is missing from the source manifest")
 	}
 	members, ok := verified.DirectoryMembers(directoryID)
 	if !ok {
-		return nil, errors.New("cli: verified project skill membership is unavailable")
+		return skill.SkillLoadResult{}, errors.New("cli: verified project skill membership is unavailable")
 	}
 	memberSet := make(map[string]struct{}, len(members))
 	for _, member := range members {
@@ -2559,11 +2579,11 @@ func loadVerifiedProjectSkills(ctx context.Context, verified *approval.VerifiedP
 			continue
 		}
 		if _, isMember := memberSet[record.RelativePath]; !isMember {
-			return nil, fmt.Errorf("cli: project skill source %q is not in its verified directory membership", record.RelativePath)
+			return skill.SkillLoadResult{}, fmt.Errorf("cli: project skill source %q is not in its verified directory membership", record.RelativePath)
 		}
 		content, present := verified.SourceBytes(record.ID)
 		if !present {
-			return nil, fmt.Errorf("cli: verified project skill bytes are unavailable for %q", record.RelativePath)
+			return skill.SkillLoadResult{}, fmt.Errorf("cli: verified project skill bytes are unavailable for %q", record.RelativePath)
 		}
 		sources = append(sources, skill.SkillSourceFile{RelativePath: memberRelativePath, Content: content})
 		capturedPaths[record.RelativePath] = struct{}{}
@@ -2573,14 +2593,22 @@ func loadVerifiedProjectSkills(ctx context.Context, verified *approval.VerifiedP
 			continue
 		}
 		if _, captured := capturedPaths[member]; !captured {
-			return nil, fmt.Errorf("cli: project skill source %q is missing from its verified manifest", member)
+			return skill.SkillLoadResult{}, fmt.Errorf("cli: project skill source %q is missing from its verified manifest", member)
 		}
 	}
-	sourceLoader, ok := skill.NewYAMLSkillLoader().(skill.SkillSourceLoader)
+	sourceLoader, ok := skill.NewYAMLSkillLoader().(skill.SkillSourceLoadReporter)
 	if !ok {
-		return nil, errors.New("cli: skill loader cannot consume verified project sources")
+		return skill.SkillLoadResult{}, errors.New("cli: built-in skill loader cannot report captured sources")
 	}
-	return sourceLoader.LoadSources(ctx, sources)
+	return sourceLoader.LoadSourcesWithReport(ctx, sources)
+}
+
+func formatSkillLoadErrorCounts(counts []skill.SkillLoadErrorCount) string {
+	parts := make([]string, 0, len(counts))
+	for _, count := range counts {
+		parts = append(parts, fmt.Sprintf("%s=%d", count.Class, count.Count))
+	}
+	return strings.Join(parts, ",")
 }
 
 func isSkillSourceCandidate(path string) bool {
