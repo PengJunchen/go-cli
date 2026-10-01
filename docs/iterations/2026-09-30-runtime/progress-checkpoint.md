@@ -1,10 +1,27 @@
 # Runtime repair checkpoint — 2026-09-30
 
-This checkpoint preserves successive historical snapshots from `codex/runtime-repair-20260929`; that branch is historical, and the active local merge target is `develop`. The current integrated source snapshot recorded here is `4d014fa5c5599968ba19bd2bd3839bb54ae4f02e`. The full-repository gate evidence below is from its pre-R7-Hook predecessor, `8cb287a5201ce52816d7fc67873b4d60b2b495cd`; focused affected-package gates also passed at `4d014fa`. Documentation-only commits through `29f60564daa2863ebe5d65e7ec5dd071d3b1233e` add reviewed handoffs. This is not a completion claim for the 47-task [execution plan](../2026-09-25-runtime/execution-tasks.json). The older [shared execution ledger](../2026-09-25-runtime/execution-status.md) remains the historical task ledger; this note records newer evidence without changing protected task metadata or that ledger's sole-writer rule.
+This checkpoint preserves successive historical snapshots from `codex/runtime-repair-20260929`; that branch is historical, and the active local merge target is `develop`. The current integrated source snapshot recorded here is `99409f7af40f5a4bbfe46feae576acdff38c33f8` (`develop`, 2026-10-01). The previously recorded `0fef2f5e56b9ec6d0088fbcfc90c029c88255a83` source is now a predecessor snapshot; it remains important because a full `make verify` is running against that pinned tree. This checkpoint does not claim completion of the 47-task [execution plan](../2026-09-25-runtime/execution-tasks.json). The [shared execution ledger](../2026-09-25-runtime/execution-status.md) remains the sole task-status source; this note records evidence without changing protected metadata.
 
-The historical ledger still lists 14 `done`, 16 `in_progress`, 14 `pending`, and 3 intentionally `deferred` tasks. A read-only comparison of the unfinished builder tasks' planned test names against top-level Go test functions found 17 matches among 128 distinct names. The other 111 names require either an explicit mapping to equivalent tests or new executable acceptance cases; this count alone does not prove the behavior is untested.
+The counts `14 done / 16 in_progress / 14 pending / 3 deferred`, and the earlier `17 of 128` planned-test-name comparison, are historical audit snapshots only. They are not current task counts and do not mean 47 tasks are complete. The historical `/tmp/go-cli-*.log` files cited below were absent when checked on 2026-10-01. Their results remain historical records; the persistent evidence for newer slice checks is under `/Users/pengjunchen/.codex/go-cli-validation/`.
 
-## Most recent full-gate baseline: `8cb287a` (before R7 Hook integration)
+## Current integrated source and slice evidence: `99409f7`
+
+The table describes bounded slices in the current local `develop` source. Passing package gates are not phase closure or a full-repository gate.
+
+| Slice | Source now in `develop` | Evidence and limit |
+|---|---|---|
+| **R3 provider envelope** | `a92fbb5` implementation plus `3ee7b97` lint follow-up. | Independently reviewed candidate at `49e13e9` (`/Users/pengjunchen/.codex/go-cli-validation/r3-review/review-49e13e9d.md`). Integrated `3ee7b97` passed race tests for `llm`, `core`, `cli`, and `production`; scoped `go vet` passed and lint reported 0 issues. Logs: `/Users/pengjunchen/.codex/go-cli-validation/integrated-3ee7b97/`. This does not close all R3 acceptance. |
+| **R3 memory search** | `99409f7` adds small-corpus retrieval and Han substring matching, including focused regression tests. | Independent review approved the candidate. Builder checks: 24 focused race tests; normal memory, CLI, and CLI-binary packages; race on memory/CLI/CLI-binary; vet passed; memory lint passed; scanner reported 0 ERROR. Logs: `/Users/pengjunchen/.codex/go-cli-validation/r3-memory-search-build/`; independent focused race log: `/Users/pengjunchen/.codex/go-cli-validation/r3-memory-search-review/race-focus.log`. This is a narrow slice, not R3 phase closure. |
+| **R6 project trust** | `15f3a54` dispatch generation fence, `84e9281` epoch persistence, and `734162b` revoked-generation CLI/E2E repair are integrated. | The five trust-related failures from the earlier broad run have follow-up fixes. The isolated recovery candidate `f303d0a` passed 593 tests across `cmd/cli` and `tests/e2e_20260802`; four independently reviewed targeted race cases also passed. Persistent records: `/Users/pengjunchen/.codex/go-cli-validation/r6-gate-recovery/` and `/Users/pengjunchen/.codex/go-cli-validation/r6-gate-review/f303d0a32f68199458632070486cd0ead1524842/`. The candidate run is scoped evidence, not a current full-repository gate. |
+| **R7 extension and Hook** | Hook observer integration is at `4d014fa`; fail-closed tool projection is at `5f4fa03`. | Candidate validation at `ac5c5d7` passed the required native-plugin race run (1,051 tests across CLI/extension as reported), the `no_plugin` run, vet, lint (0 issues), and scanner (0 ERROR). Logs: `/Users/pengjunchen/.codex/go-cli-validation/r7-tools-recovery/`. Native execution was on Darwin; the Linux CI release gate is still only a proposal. The candidate's earlier normal suite included the five trust failures later repaired by R6. The dedicated Hook logs cited below were under `/tmp` and are no longer present. |
+| **R7 Skill** | The parameter-schema implementation is at `c02a160`; skipped-load reporting is at `b381f18`; portable volume-label rejection is at `0fef2f5`. | The 0fef slice report records 1,085 normal and race tests, vet/lint success, scanner 0 ERROR, 16 tagged E2E tests, a 23-test follow-up, and 28 independently reviewed cases. Persistent validation directories: `/Users/pengjunchen/.codex/go-cli-validation/r7-skill-recovery/` and `/Users/pengjunchen/.codex/go-cli-validation/r7-skill-review/`. These checks are scoped to the Skill-related slices. |
+| **R7 runtime capability disposition** | `165deeb` is documentation only and pins its audit to baseline `2beba95`. | Do not treat the disposition table as the current source inventory: later Skill/report and extension/Hook features above are integrated. The document neither ships capabilities nor closes R7. |
+
+### Full-repository gate status
+
+The last completed broad `make verify` cited in the old `/tmp` evidence is pinned to `2beba95` and failed five checks. Subsequent R6 trust and R7 Skill fixes are now in `99409f7`; that historical failure is not a result for the current source. A separate full `make verify` is in progress on the pinned `0fef2f5` tree, with artifacts under `/Users/pengjunchen/.codex/go-cli-validation/full-0fef2f5/`. That run predates the `99409f7` memory-search change. Keep these states separate: neither the old failure nor scoped slice passes are a full-gate result for `99409f7`. The final broad gate must use the final integrated source after the remaining R3/R8 source slices land.
+
+## Historical full-gate baseline: `8cb287a` (before R7 Hook integration)
 
 | Check | Result | Limit and evidence |
 |---|---|---|
@@ -21,7 +38,7 @@ The source at `8cb287a` includes these bounded slices, carried into `4d014fa`; n
 
 The linked [R3](r3-acceptance-audit.md), [R4](r4-acceptance-audit.md), and [R7](r7-acceptance-audit.md) acceptance audits are frozen maps from older source snapshots. The gate evidence above is newer for source `8cb287a`; it does not replace the audits' phase-level findings or close those phases.
 
-## R7 Hook integration at `4d014fa`
+## Historical R7 Hook integration at `4d014fa`
 
 The reviewed Hook-observer implementation is integrated at `4d014fa5c5599968ba19bd2bd3839bb54ae4f02e`. It carries the validated extension owner into Hook events, supplies extension-owned snapshots of run data, and treats remote plugin descriptors as unavailable. The full `make verify` gate has not been rerun at this source; these affected-package gates passed:
 
@@ -32,7 +49,7 @@ The reviewed Hook-observer implementation is integrated at `4d014fa5c5599968ba19
 | `go vet ./internal/cli ./internal/extension` | Exit 0. | Scoped to the affected packages. |
 | `GOMAXPROCS=2 golangci-lint run --max-same-issues 0 --max-issues-per-linter 0 ./internal/cli ./internal/extension` | Exit 0; 0 issues. | Scoped to the affected packages. Log: `/tmp/go-cli-r7-hook-integrated-lint-20261001.log`. |
 
-The full-gate result at `8cb287a` remains useful source-wide evidence, but it does not establish a full verify at `4d014fa`. The next full repository gate is planned after the remaining R6, R7 Skill-schema, and R3 envelope integrations.
+The full-gate result at `8cb287a` remains useful source-wide evidence, but it does not establish a full verify at `4d014fa`. Subsequent source integrations and their bounded checks are summarized above; the broad-gate status is recorded separately.
 
 ## Earlier historical evidence
 
@@ -71,12 +88,11 @@ Linux Docker exposed two baseline test fixtures that failed even at `551e260`: a
 
 These statuses distinguish integrated slices, implementation candidates, and unresolved acceptance boundaries:
 
-- **R3 provider envelope:** The reviewed [provider-envelope preflight handoff](r3-provider-envelope-preflight-handoff.md) describes a bounded estimate/admission contract. Its implementation remains unmerged; it does not close R3 or enable a native provider.
-- **R6 trust snapshot:** The initial snapshot API and persistent project-trust CLI wiring were integrated at `f9acdfdc03da3040b4ff6fa95f915eef9cd56d0e` (with the sealed-config base integrated earlier). The [trust snapshot API handoff](r6-trust-snapshot-api-handoff.md) documents this integrated prerequisite.
-- **R6 live dispatch revocation:** The [live-epoch revocation design](r6-trust-dispatch-revocation-design.md) remains an implementation candidate; the final dispatch-time revocation fence is not yet shipped.
-- **R7 Hook observer:** The [Hook observer owner-boundary contract](r7-hook-observer-contract.md) is the reviewed design basis for the implementation integrated at `4d014fa`; the remaining phase acceptance is open.
-- **R7 Skill schema:** The [Skill schema handoff](r7-skill-schema-handoff.md) is reviewed design only; its implementation remains open.
-- **R8 active preview:** The [active-preview guard handoff](r8-active-preview-guard-handoff.md) is a reviewed, doc-only boundary proposal. A release owner must choose between preserving the complete-response guard with content-free progress only, or explicitly permitting a visibly provisional speculative preview that may already expose text later blocked or redacted. No preview builder is authorized until that disclosure choice is made; R8 active partial-text acceptance remains open.
-- **Other pending decisions:** R2 restart recovery and reconciliation remain pending. Native Claude/Gemini enablement, the R4 Plan/model-transition decision, and the R3 PRD-04 hard-cost-budget policy remain unresolved. R9 remains intentionally deferred.
+- **R3:** The provider-envelope implementation and lint follow-up are integrated at `a92fbb5`/`3ee7b97`; the memory-search slice is integrated at `99409f7`. Remaining R3 acceptance tests/source are still pending, so these bounded slices do not close R3 or enable a native provider. The [provider-envelope preflight handoff](r3-provider-envelope-preflight-handoff.md) records its reviewed contract.
+- **R6 trust:** Snapshot persistence and dispatch-time generation revocation are integrated (`15f3a54`, `84e9281`, `734162b`). The [trust snapshot API handoff](r6-trust-snapshot-api-handoff.md) and [live-epoch revocation design](r6-trust-dispatch-revocation-design.md) are historical design records for those implementation slices; the scoped gate evidence above is not full phase closure.
+- **R7 extensions and Skill:** Hook ownership and fail-closed tool projection are integrated, as are Skill parameter schemas, skipped-load reporting, and portable volume-label rejection (see the table). The [Hook observer owner-boundary contract](r7-hook-observer-contract.md) and [Skill schema handoff](r7-skill-schema-handoff.md) are design records, not statements that those features remain unimplemented. Broader R7 acceptance remains open; the Linux native-plugin CI gate has not been wired.
+- **R7 capability disposition:** The [disposition document](r7-runtime-capability-disposition.md) at `165deeb` is doc-only and audits baseline `2beba95`; it is not a current inventory after the integrations listed above.
+- **R8 content-free status:** The reviewed [active-preview guard handoff](r8-active-preview-guard-handoff.md) says at line 66 that content-free status/progress is ready for Builder. That source slice is not yet integrated. A separate release-owner disclosure decision remains for speculative assistant-text preview, which could show text later blocked or redacted; that decision does not block the content-free status slice. R8 active-preview acceptance remains open.
+- **Other pending decisions and protected work:** The separate [protected test-gate addendum](../2026-09-25-runtime/protected-changes-test-gate.md) remains unapplied pending its own authorization and release review. R2 restart recovery/reconciliation, native Claude/Gemini enablement, the R4 Plan/model-transition decision, and the R3 PRD-04 hard-cost-budget policy remain unresolved. R9 remains intentionally deferred.
 
 No remote push or PR is part of this checkpoint. Recheck the active local `develop` merge target immediately before merging accepted work.
