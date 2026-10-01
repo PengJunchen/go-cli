@@ -2,8 +2,10 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"github.com/pengjunchen/go-cli/internal/llm"
 	"github.com/pengjunchen/go-cli/internal/tools"
@@ -29,6 +31,8 @@ var errSubAgentDepthExceeded = fmt.Errorf("sub-agent recursion depth limit (%d) 
 type realSubAgentRunner struct {
 	model          llm.BaseChatModel
 	registry       *llm.ProviderRegistry
+	modelBuilder   SubAgentModelBuilder
+	requireBuilder bool
 	modelName      string
 	tools          tools.ToolRegistry
 	allowedTools   []string
@@ -38,6 +42,25 @@ type realSubAgentRunner struct {
 	depth          int
 	maxDepth       int
 	compactionHook CompactionHook
+}
+
+// SubAgentModelBuilder resolves an override model for a real sub-agent. It is
+// called from the sub-agent's Run context, after durable-run and recursion
+// guards have passed.
+type SubAgentModelBuilder func(context.Context, string) (llm.BaseChatModel, func(), error)
+
+var errSubAgentModelBuilderReturnedNil = errors.New("core: sub-agent model builder returned no model")
+
+type safeSubAgentModelError struct {
+	cause error
+}
+
+func (e safeSubAgentModelError) Error() string {
+	return "core: sub-agent model resolution failed"
+}
+
+func (e safeSubAgentModelError) Unwrap() error {
+	return e.cause
 }
 
 var _ subAgentRunner = (*realSubAgentRunner)(nil)
@@ -84,19 +107,35 @@ func (r *realSubAgentRunner) Run(ctx context.Context, prompt string, inbox <-cha
 		return AgentMessage{}, err
 	}
 
-	// Resolve the model: when a model-name override is set and a registry is
-	// available, build a model from the registry; otherwise fall back to the
-	// parent model.
+	// Resolve an optional model override only after run guards have passed. The
+	// builder-enabled factory owns the same resolver scope as its parent and
+	// must fail closed instead of falling back to another provider or model.
 	model := r.model
-	if r.modelName != "" && r.registry != nil {
-		m, cleanup, err := r.registry.GetModel(ctx, r.modelName, llm.ModelConfig{Model: r.modelName})
-		if err != nil {
-			return AgentMessage{}, err
+	modelName := strings.TrimSpace(r.modelName)
+	if modelName != "" && r.requireBuilder {
+		if r.modelBuilder == nil {
+			return AgentMessage{}, ErrSubAgentModelBuilderUnavailable
 		}
+		resolvedModel, cleanup, err := r.modelBuilder(ctx, modelName)
 		if cleanup != nil {
 			defer cleanup()
 		}
-		model = m
+		if err != nil {
+			return AgentMessage{}, safeSubAgentModelError{cause: err}
+		}
+		if resolvedModel == nil {
+			return AgentMessage{}, safeSubAgentModelError{cause: errSubAgentModelBuilderReturnedNil}
+		}
+		model = resolvedModel
+	} else if modelName != "" && r.registry != nil {
+		resolvedModel, cleanup, err := r.registry.GetModel(ctx, modelName, llm.ModelConfig{Model: modelName})
+		if cleanup != nil {
+			defer cleanup()
+		}
+		if err != nil {
+			return AgentMessage{}, err
+		}
+		model = resolvedModel
 	}
 
 	loopOpts := []LoopOption{
@@ -175,21 +214,27 @@ func defaultSubAgentCompactionHook(_ context.Context, messages []AgentMessage) (
 // realSubAgentRunner instances. The model and tool registry are captured in
 // the closure so every sub-agent gets the same LLM and tool set as the parent.
 func NewRealSubAgentRunnerFactory(model llm.BaseChatModel, registry *llm.ProviderRegistry, tr tools.ToolRegistry, opts ...LoopOption) SubAgentRunnerFactory {
+	return newRealSubAgentRunnerFactory(model, registry, nil, false, tr, opts...)
+}
+
+func newRealSubAgentRunnerFactory(model llm.BaseChatModel, registry *llm.ProviderRegistry, builder SubAgentModelBuilder, requireBuilder bool, tr tools.ToolRegistry, opts ...LoopOption) SubAgentRunnerFactory {
 	return func(cfg SubAgentConfig) subAgentRunner {
 		maxIter := cfg.MaxTurns
 		if maxIter <= 0 {
 			maxIter = defaultMaxIterations
 		}
 		return &realSubAgentRunner{
-			model:        model,
-			registry:     registry,
-			modelName:    cfg.Model,
-			tools:        tr,
-			allowedTools: cfg.Tools,
-			maxIter:      maxIter,
-			systemPrompt: cfg.SystemPrompt,
-			opts:         opts,
-			maxDepth:     defaultMaxSubAgentDepth,
+			model:          model,
+			registry:       registry,
+			modelBuilder:   builder,
+			requireBuilder: requireBuilder,
+			modelName:      cfg.Model,
+			tools:          tr,
+			allowedTools:   cfg.Tools,
+			maxIter:        maxIter,
+			systemPrompt:   cfg.SystemPrompt,
+			opts:           opts,
+			maxDepth:       defaultMaxSubAgentDepth,
 		}
 	}
 }
@@ -201,6 +246,16 @@ func NewRealSubAgentRunnerFactory(model llm.BaseChatModel, registry *llm.Provide
 func NewRealSubAgentFactory(model llm.BaseChatModel, registry *llm.ProviderRegistry, tr tools.ToolRegistry, opts ...LoopOption) SubAgentFactory {
 	return NewSubAgentFactory(WithSubAgentRunnerFactory(
 		NewRealSubAgentRunnerFactory(model, registry, tr, opts...),
+	))
+}
+
+// NewRealSubAgentFactoryWithModelBuilder creates a real SubAgent factory whose
+// non-empty model overrides are resolved by builder from the Run context. An
+// empty override continues to inherit parentModel. A missing builder fails
+// closed when an override is requested.
+func NewRealSubAgentFactoryWithModelBuilder(parentModel llm.BaseChatModel, builder SubAgentModelBuilder, tr tools.ToolRegistry, opts ...LoopOption) SubAgentFactory {
+	return NewSubAgentFactory(WithSubAgentRunnerFactory(
+		newRealSubAgentRunnerFactory(parentModel, nil, builder, true, tr, opts...),
 	))
 }
 
