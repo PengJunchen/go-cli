@@ -181,6 +181,25 @@ func TestSkillLoadReportClassifiesOnlyKnownSkipErrors(t *testing.T) {
 	assert.Equal(t, SkillLoadErrorClassFrontmatter, classifySkillLoadError(fmt.Errorf("schema chain: %w", errParse)))
 }
 
+func TestSkillLoadReportDiagnosticRejectsUnsafeRelativeIdentities(t *testing.T) {
+	for _, path := range []string{
+		"",
+		".",
+		"..",
+		"../escape.md",
+		"nested/../escape.md",
+		"/absolute.md",
+		"C:/volume.md",
+		`C:\\volume.md`,
+		`\\\\server\\share.md`,
+	} {
+		t.Run(fmt.Sprintf("%q", path), func(t *testing.T) {
+			_, ok := skillLoadDiagnosticSourceID(path)
+			assert.False(t, ok, "unsafe identities must not appear as diagnostic source ids")
+		})
+	}
+}
+
 func sortDiagnostics(diagnostics []SkillLoadDiagnostic) bool {
 	for i := 1; i < len(diagnostics); i++ {
 		if diagnostics[i-1].SourceID > diagnostics[i].SourceID {
