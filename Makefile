@@ -27,14 +27,32 @@ test-cov:
 test-cov-check:
 	@mkdir -p $(COVERAGE_DIR)
 	@go test -coverprofile=$(COVERAGE_DIR)/coverage.out ./... 2>/dev/null
-	@COVERAGE=$$(go tool cover -func=$(COVERAGE_DIR)/coverage.out | grep total | awk '{print $$3}' | sed 's/%//') && \
-		echo "Total coverage: $${COVERAGE}%" && \
-		if [ $$(echo "$$COVERAGE < $(COVERAGE_THRESHOLD)" | bc) -eq 1 ]; then \
-			echo "ERROR: Coverage $${COVERAGE}% is below threshold $(COVERAGE_THRESHOLD)%"; \
-			exit 1; \
-		else \
-			echo "Coverage check passed: $${COVERAGE}% >= $(COVERAGE_THRESHOLD)%"; \
-		fi
+	@if report=$$(go tool cover -func=$(COVERAGE_DIR)/coverage.out 2>&1); then \
+	    :; \
+	else \
+	    cover_status=$$?; \
+	    printf '%s\n' "$$report"; \
+	    echo "ERROR: go tool cover failed with exit code $$cover_status"; \
+	    exit "$$cover_status"; \
+	fi; \
+	printf '%s\n' "$$report"; \
+	threshold='$(COVERAGE_THRESHOLD)'; \
+	if ! awk -v threshold="$$threshold" 'BEGIN { if (threshold !~ /^[0-9]+([.][0-9]+)?$$/ || threshold + 0 > 100) exit 1; exit 0 }'; then \
+	    echo "ERROR: Coverage threshold must be a number between 0 and 100"; \
+	    exit 2; \
+	fi; \
+	coverage=$$(printf '%s\n' "$$report" | awk '$$1 == "total:" { count++; if (NF != 3 || $$2 != "(statements)" || $$3 !~ /^[0-9]+([.][0-9]+)?%$$/) invalid = 1; value = $$3; sub(/%$$/, "", value); if (value + 0 > 100) invalid = 1 } END { if (count != 1 || invalid) exit 1; print value }'); \
+	if [ $$? -ne 0 ]; then \
+	    echo "ERROR: go tool cover output must contain exactly one valid total coverage line"; \
+	    exit 1; \
+	fi; \
+	echo "Total coverage: $${coverage}%"; \
+	if awk -v coverage="$$coverage" -v threshold="$$threshold" 'BEGIN { exit !(coverage + 0 >= threshold + 0) }'; then \
+	echo "Coverage check passed: $${coverage}% >= $${threshold}%"; \
+	else \
+	    echo "ERROR: Coverage $${coverage}% is below threshold $${threshold}%"; \
+	    exit 1; \
+	fi
 
 # Run log-based verification tests
 test-log:
