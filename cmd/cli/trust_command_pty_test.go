@@ -4,6 +4,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -114,10 +115,34 @@ func TestCLIBinaryTrustGrantPTYPersistsManifestForLaterInvocation(t *testing.T) 
 	require.Zero(t, code, "output=%q", output)
 	assert.Contains(t, output, root)
 	assert.Contains(t, output, "manifest v1")
+	grantedEntry := readStoredTrustEntries(t, storePath)[root]
+	require.Positive(t, grantedEntry.TrustGeneration)
+	require.False(t, grantedEntry.Revoked)
 
 	code, output = runCLIBinary(t, binaryPath, workDir, home, "trust", "revoke", root)
 	require.Zero(t, code, "output=%q", output)
 	code, output = runCLIBinary(t, binaryPath, workDir, home, "trust", "list")
 	require.Zero(t, code, "output=%q", output)
-	assert.Contains(t, output, "No trust entries.")
+	assert.Contains(t, output, root)
+	assert.Contains(t, output, "revoked trust generation")
+	assert.Contains(t, output, "not authorized")
+	tombstone := readStoredTrustEntries(t, storePath)[root]
+	assert.True(t, tombstone.Revoked)
+	assert.Equal(t, grantedEntry.TrustGeneration+1, tombstone.TrustGeneration)
+	assert.Zero(t, tombstone.ManifestVersion)
+}
+
+type storedTrustEntry struct {
+	ManifestVersion int    `json:"manifest_version"`
+	TrustGeneration uint64 `json:"trust_generation"`
+	Revoked         bool   `json:"revoked"`
+}
+
+func readStoredTrustEntries(t *testing.T, path string) map[string]storedTrustEntry {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var entries map[string]storedTrustEntry
+	require.NoError(t, json.Unmarshal(data, &entries))
+	return entries
 }
