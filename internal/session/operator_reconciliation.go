@@ -51,7 +51,12 @@ func (s *SessionRunCommitSink) SyncRecordedResolutions(ctx context.Context) erro
 // ReconcileUnknownAction durably records explicit acceptance of one unknown
 // dispatched action, writes its typed execution-resolution checkpoint, and
 // applies that exact resolution to the workspace quarantine index. It never
-// changes or replays the original tool receipt.
+// changes or replays the original tool receipt. Callers must hold exclusive
+// ownership of the prepared session for the entire operation, with no
+// concurrent runs or other run-commit sinks writing it. ExpectedRevision is
+// checked against the snapshot captured when this sink was constructed. The
+// CLI provides this ownership through its reconciliation lease; other callers
+// must serialize access to the session themselves.
 func (s *SessionRunCommitSink) ReconcileUnknownAction(ctx context.Context, request OperatorReconciliationRequest) error {
 	if s == nil {
 		return errors.New("session: operator reconciliation requires a run-commit sink")
