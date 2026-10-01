@@ -215,6 +215,9 @@ func (c *serveCmd) Run(ctx context.Context, cfg Config, args []string) error {
 	}
 
 	server := acp.NewHTTPServer("acp-server", addr, handler)
+	if noAuth {
+		server.SetNoAuthLoopbackPolicy()
+	}
 	if authToken != "" {
 		server.SetAuth(authToken, authSubject)
 	}
