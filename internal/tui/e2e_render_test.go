@@ -209,20 +209,21 @@ func TestE2EBoxSpinnerComponents(t *testing.T) {
 // applies syntax coloring to language-specific keywords.
 func TestE2EMultiLanguageHighlight(t *testing.T) {
 	cases := []struct {
-		lang    string
-		code    string
-		keyword string
+		lang       string
+		code       string
+		keyword    string
+		plainToken string
 	}{
-		{"go", "func main() {}", "func"},
-		{"python", "def main():\n    pass", "def"},
-		{"javascript", "function main() {}", "function"},
-		{"typescript", "interface Foo {}", "interface"},
-		{"rust", "fn main() {}", "fn"},
-		{"java", "public class Main {}", "public"},
-		{"bash", "if true; then echo hi; fi", "if"},
-		{"json", `{"active": true}`, "true"},
-		{"yaml", "enabled: true", "true"},
-		{"sql", "SELECT * FROM users", "SELECT"},
+		{"go", "func main() {}", "func", "main"},
+		{"python", "def main():\n    pass", "def", "main"},
+		{"javascript", "function main() {}", "function", "main"},
+		{"typescript", "interface Foo {}", "interface", "Foo"},
+		{"rust", "fn main() {}", "fn", "main"},
+		{"java", "public class Main {}", "public", "Main"},
+		{"bash", "if true; then echo hi; fi", "if", "echo"},
+		{"json", `{"active": true}`, "true", "active"},
+		{"yaml", "enabled: true", "true", "enabled"},
+		{"sql", "SELECT * FROM users", "SELECT", "users"},
 	}
 
 	r := NewMarkdownRenderer()
@@ -241,12 +242,31 @@ func TestE2EMultiLanguageHighlight(t *testing.T) {
 			assert.Contains(t, plain, tc.keyword,
 				"keyword %q should appear in rendered %s code block", tc.keyword, tc.lang)
 
-			// Glamour/Chroma styles each rendered code block. Assert through the
-			// renderer's public output instead of the removed private highlighter.
-			assert.NotEqual(t, plain, out,
-				"%s code block should contain ANSI syntax styling", tc.lang)
+			keywordStyle := ansiStyleImmediatelyBefore(out, tc.keyword)
+			plainStyle := ansiStyleImmediatelyBefore(out, tc.plainToken)
+			assert.NotEmpty(t, keywordStyle,
+				"%s keyword %q should have ANSI styling in the rendered code block", tc.lang, tc.keyword)
+			assert.NotEqual(t, plainStyle, keywordStyle,
+				"%s keyword %q should have a different style from ordinary token %q in the same code block",
+				tc.lang, tc.keyword, tc.plainToken)
 		})
 	}
+}
+
+func ansiStyleImmediatelyBefore(rendered, text string) string {
+	textIndex := strings.Index(rendered, text)
+	if textIndex < 0 {
+		return ""
+	}
+	styleStart := strings.LastIndex(rendered[:textIndex], "\x1b[")
+	if styleStart < 0 {
+		return ""
+	}
+	styleEnd := strings.IndexByte(rendered[styleStart:textIndex], 'm')
+	if styleEnd < 0 || styleStart+styleEnd+1 != textIndex {
+		return ""
+	}
+	return rendered[styleStart:textIndex]
 }
 
 // TestE2EOldVsNewRendering compares the old simple rendering (uniform Primary
