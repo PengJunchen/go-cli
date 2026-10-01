@@ -766,7 +766,7 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 	ordinal uint64,
 	assistant AgentMessage,
 	calls []llm.ToolCall,
-	canceled map[string]bool,
+	canceled map[string]string,
 	stream EventStream,
 	transcript *[]TranscriptEntry,
 	messages *[]llm.Message,
@@ -780,8 +780,11 @@ func (consumer *runCommitConsumer) executeParallelGroup(
 	}
 	for index, call := range calls {
 		action := runCommitParallelAction{call: call}
-		if canceled[call.ID] {
-			known := runCommitToolResult{output: "Tool call canceled by interceptor", isError: true, outcome: ReceiptOutcomeInterrupted}
+		if canceledOutput, isCanceled := canceled[call.ID]; isCanceled {
+			if canceledOutput == "" {
+				canceledOutput = toolInterceptorCanceledOutput
+			}
+			known := runCommitToolResult{output: canceledOutput, isError: true, outcome: ReceiptOutcomeInterrupted}
 			action.known = &known
 			batch.KnownReceipts = append(batch.KnownReceipts, consumer.knownReceipt(ordinal, call, uint64(len(*transcript)+index), known.output, known.outcome))
 			actions[index] = action

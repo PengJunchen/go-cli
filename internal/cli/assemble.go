@@ -1219,6 +1219,12 @@ func (s *assembleState) loadShellHooks(path string, data []byte, verified *appro
 		}
 		name := fmt.Sprintf("shell-hook-%d", i)
 		startGuard := core.ShellHookStartGuard(func(ctx context.Context, start func() error) error {
+			if s.planCtrl != nil && s.planCtrl.IsActive() {
+				if event == core.EventPreToolUse {
+					return planModePreToolShellHookDenial{}
+				}
+				return planModeLifecycleShellHookSkipped{}
+			}
 			return verified.CommitIfCurrent(ctx, start)
 		})
 		s.shellHooks = append(s.shellHooks, core.NewShellHookWithStartGuard(name, event, hc.Command, timeout, startGuard))
@@ -1698,13 +1704,16 @@ func (s *assembleState) assembleMiddleware() {
 	s.reminderMgr = core.NewDefaultSystemReminderManager()
 	s.failureSynthesizer = core.NewDefaultFailureTurnSynthesizer()
 
-	// Bind this Assembly's pre-tool interceptors to its loop. Plan Mode runs
-	// first so blocked calls retain the tool_canceled event semantics; shell
-	// hooks run afterward with the caller's run context. The executor wrapper
-	// remains a final Plan Mode guard for calls outside the loop path.
+	// Bind this Assembly's pre-tool interceptors to its loop. The effect-aware
+	// prepared policy remains the final Plan Mode authority; before it runs,
+	// refuse opaque project pre-tool shell hooks while Plan Mode is active.
 	s.loopAgent.SetToolInterceptor(core.NewPlanModeToolInterceptor(s.planCtrl))
 	if s.hookMgr != nil {
-		s.loopAgent.SetContextToolInterceptor(s.hookMgr.PreToolUseContextInterceptor())
+		s.loopAgent.SetContextToolInterceptor(planModePreToolShellHookInterceptor(
+			s.planCtrl,
+			s.shellHooks,
+			s.hookMgr.PreToolUseContextInterceptor(),
+		))
 	}
 
 	chain := []core.Middleware{

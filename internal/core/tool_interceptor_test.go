@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync/atomic"
 	"testing"
 
@@ -275,6 +276,60 @@ func TestContextToolInterceptorReceivesRunContext(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "run-context", observed)
 	require.True(t, tool.executed.Load())
+}
+
+func TestToolInterceptionReceiptsExposeOnlyTypedSafeMessages(t *testing.T) {
+	for _, execution := range []struct {
+		name  string
+		mode  ExecutionMode
+		calls int
+	}{
+		{name: "sequential", mode: ExecutionModeSequential, calls: 1},
+		{name: "parallel", mode: ExecutionModeParallel, calls: 2},
+	} {
+		for _, denial := range []struct {
+			name     string
+			err      error
+			wantText string
+		}{
+			{name: "typed-safe", err: testSafeToolInterceptionDenial{}, wantText: "safe policy denial"},
+			{name: "arbitrary", err: errors.New("private interceptor details"), wantText: toolInterceptorCanceledOutput},
+		} {
+			t.Run(execution.name+"/"+denial.name, func(t *testing.T) {
+				calls := make([]llm.ToolCall, execution.calls)
+				for index := range calls {
+					calls[index] = llm.ToolCall{ID: fmt.Sprintf("call-%d", index), Name: "blocked", Args: map[string]any{}}
+				}
+				model := &scriptedChatModel{seq: []*llm.Message{
+					{Role: llm.RoleAssistant, ToolCalls: calls},
+					{Role: llm.RoleAssistant, Content: "done"},
+				}}
+				loop := NewLoopAgent(WithLLM(model), WithTools(scriptedRegistry(&trackingTool{name: "blocked"})), WithExecutionMode(execution.mode))
+				loop.SetContextToolInterceptor(func(context.Context, string, string, map[string]any) error {
+					return denial.err
+				})
+
+				_, err := loop.Run(context.Background(), Submission{Content: "run"})
+				require.NoError(t, err)
+
+				model.mu.Lock()
+				requests := append([][]llm.Message(nil), model.requests...)
+				model.mu.Unlock()
+				require.GreaterOrEqual(t, len(requests), 2)
+				var receipts []string
+				for _, message := range requests[1] {
+					if message.Role == llm.RoleTool {
+						receipts = append(receipts, message.Content)
+					}
+				}
+				require.Len(t, receipts, execution.calls)
+				for _, receipt := range receipts {
+					assert.Equal(t, denial.wantText, receipt)
+					assert.NotContains(t, receipt, "private interceptor details")
+				}
+			})
+		}
+	}
 }
 
 func TestPreToolCallEventRetainsContextDenialWithoutExposingArbitraryMessages(t *testing.T) {

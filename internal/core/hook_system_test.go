@@ -205,6 +205,33 @@ func TestHookSystem_HookManagerExecutionFailureContinues(t *testing.T) {
 	}
 }
 
+func TestHookManagerPropagatesTypedSafeShellHookDenial(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "hook-ran")
+	denial := testSafeHookDenial{}
+	hook := NewShellHookWithStartGuard("guarded", EventPreToolUse, "printf ran > '"+marker+"'", time.Second,
+		func(context.Context, func() error) error { return denial })
+	manager := NewHookManager(hook)
+
+	err := manager.PreToolUseContextInterceptor()(context.Background(), "read", "call-1", nil)
+	if err == nil {
+		t.Fatal("expected typed safe shell-hook denial to cancel the tool call")
+	}
+	if message, ok := SafeToolInterceptionMessage(err); !ok || message != denial.SafeToolInterceptionMessage() {
+		t.Fatalf("safe denial message = %q, ok=%v; want %q", message, ok, denial.SafeToolInterceptionMessage())
+	}
+	if _, statErr := os.Stat(marker); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("denied shell hook started its child: stat error = %v", statErr)
+	}
+}
+
+type testSafeHookDenial struct{}
+
+func (testSafeHookDenial) Error() string { return "opaque internal denial" }
+
+func (testSafeHookDenial) SafeToolInterceptionMessage() string {
+	return "fixed safe denial"
+}
+
 func TestHookSystem_HookManagerPostToolUse(t *testing.T) {
 	mock := &mockHookSystem{event: EventPostToolUse}
 	manager := NewHookManager(mock)
