@@ -10,8 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/pengjunchen/go-cli/internal/config"
 	"github.com/stretchr/testify/require"
+
+	"github.com/pengjunchen/go-cli/internal/config"
 )
 
 func TestAssembleAgentUsesDedicatedACPBearerTokenEnv(t *testing.T) {
