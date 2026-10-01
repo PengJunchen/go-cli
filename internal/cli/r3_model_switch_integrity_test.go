@@ -253,31 +253,33 @@ func TestAssembledCyclerSamplingMatchesModelIdentityAndPreparedRequest(t *testin
 			primaryServer.reset()
 			smallServer.reset()
 
-			enabled := true
-			rc := &config.Config{
-				Provider: config.ProviderConfig{
-					Name:    primaryProvider,
-					BaseURL: primaryServer.server.URL,
-					APIKey:  primaryKey,
-				},
-				SmallModel: config.SmallModelConfig{
-					Provider: smallProvider,
-					BaseURL:  smallServer.server.URL,
-					APIKey:   smallKey,
-					Model:    smallModel,
-				},
-				ModelCycler: config.ModelCyclerConfig{
-					Enabled:  &enabled,
-					Strategy: llm.StrategyRoundRobin,
-					Models:   []config.ModelEntry{{Provider: test.provider, Model: test.model}},
-				},
+			const envPrefix = "GO_CLI_R3_CYCLER_SAMPLING"
+			for _, suffix := range []string{
+				"PROVIDER_NAME", "PROVIDER_BASE_URL", "PROVIDER_API_KEY", "PROVIDER_TEMPERATURE", "PROVIDER_MAX_TOKENS",
+				"MODEL_NAME", "MODEL_TEMPERATURE", "MODEL_MAX_TOKENS",
+				"SMALL_MODEL_PROVIDER", "SMALL_MODEL_BASE_URL", "SMALL_MODEL_API_KEY", "SMALL_MODEL_MODEL", "SMALL_MODEL_TEMPERATURE", "SMALL_MODEL_MAX_TOKENS",
+				"MODELCYCLER_ENABLED",
+			} {
+				t.Setenv(envPrefix+"_"+suffix, "")
 			}
-			rc.Provider.SetTemperature(0.6)
-			rc.Provider.SetMaxTokens(512)
-			rc.Model.SetTemperature(0)
-			rc.Model.SetMaxTokens(128)
-			rc.SmallModel.SetTemperature(0)
-			rc.SmallModel.SetMaxTokens(192)
+			configData, err := json.Marshal(map[string]any{
+				"provider": map[string]any{
+					"name": primaryProvider, "base_url": primaryServer.server.URL, "api_key": primaryKey,
+					"temperature": 0.6, "max_tokens": 512,
+				},
+				"model": map[string]any{"temperature": 0, "max_tokens": 128},
+				"small_model": map[string]any{
+					"provider": smallProvider, "base_url": smallServer.server.URL, "api_key": smallKey, "model": smallModel,
+					"temperature": 0, "max_tokens": 192,
+				},
+				"model_cycler": map[string]any{
+					"enabled": true, "strategy": llm.StrategyRoundRobin,
+					"models": []config.ModelEntry{{Provider: test.provider, Model: test.model}},
+				},
+			})
+			require.NoError(t, err)
+			rc, err := config.NewLoader().WithFileBytes("r3-cycler-sampling.json", configData).WithEnvPrefix(envPrefix).Load(context.Background())
+			require.NoError(t, err)
 
 			assembly, err := AssembleAgent(context.Background(), rc, primaryProvider, primaryModel, io.Discard, WithApproveMode(ApproveAuto))
 			require.NoError(t, err)
