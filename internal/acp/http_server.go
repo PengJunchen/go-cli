@@ -12,6 +12,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -157,13 +158,14 @@ func (e *httpServerCleanupPendingError) Done() <-chan struct{} { return e.done }
 // This HTTP server implements the private go-cli-acp-json/1 profile; it does
 // not claim a durable R2 session or official ACP interoperability.
 type HTTPServer struct {
-	name        string
-	addr        string
-	handler     *CoreHandler
-	authToken   string
-	authSubject string
-	tlsCertFile string
-	tlsKeyFile  string
+	name                 string
+	addr                 string
+	handler              *CoreHandler
+	authToken            string
+	authSubject          string
+	noAuthLoopbackPolicy bool
+	tlsCertFile          string
+	tlsKeyFile           string
 
 	mu         sync.Mutex
 	sessions   map[string]httpSessionBinding
@@ -228,6 +230,13 @@ func (s *HTTPServer) SetAuth(token, subject string) {
 	s.authSubject = subject
 }
 
+// SetNoAuthLoopbackPolicy enables Host and Origin validation for an
+// unauthenticated loopback server. It must be called before Start. Native
+// clients without an Origin header remain supported.
+func (s *HTTPServer) SetNoAuthLoopbackPolicy() {
+	s.noAuthLoopbackPolicy = true
+}
+
 // SetTLS configures the server to serve HTTPS using the provided certificate
 // and key file paths. Both must be non-empty for TLS to be enabled. This must
 // be called before Start.
@@ -270,6 +279,95 @@ func (s *HTTPServer) profileMiddleware(next http.Handler) http.Handler {
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+type localHTTPAuthority struct {
+	host string
+	port int
+}
+
+func noAuthLoopbackPolicyMiddleware(listener net.Addr, useTLS bool, next http.Handler) http.Handler {
+	_, listenerPortText, err := net.SplitHostPort(listener.String())
+	listenerPort, portErr := strconv.Atoi(listenerPortText)
+	if err != nil || portErr != nil || listenerPort < 1 || listenerPort > 65535 {
+		return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			http.Error(w, "invalid local listener authority", http.StatusForbidden)
+		})
+	}
+	defaultPort := 80
+	originScheme := "http"
+	if useTLS {
+		defaultPort = 443
+		originScheme = "https"
+	}
+
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requestAuthority, ok := parseLocalHTTPAuthority(r.Host, defaultPort)
+		if !ok || requestAuthority.port != listenerPort {
+			http.Error(w, "invalid local request authority", http.StatusForbidden)
+			return
+		}
+
+		origins := r.Header.Values("Origin")
+		if len(origins) > 1 || (len(origins) == 1 && !localOriginMatches(origins[0], requestAuthority, originScheme, defaultPort)) {
+			http.Error(w, "cross-origin request is not allowed", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func parseLocalHTTPAuthority(authority string, defaultPort int) (localHTTPAuthority, bool) {
+	if authority == "" || strings.TrimSpace(authority) != authority || strings.ContainsAny(authority, "/?#@,") || strings.HasSuffix(authority, ":") {
+		return localHTTPAuthority{}, false
+	}
+	parsed, err := url.Parse("//" + authority)
+	if err != nil || parsed.Host == "" || parsed.User != nil || parsed.Path != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Opaque != "" {
+		return localHTTPAuthority{}, false
+	}
+	host := parsed.Hostname()
+	if !isLoopbackHost(host) {
+		return localHTTPAuthority{}, false
+	}
+	port := defaultPort
+	if portText := parsed.Port(); portText != "" {
+		parsedPort, err := strconv.Atoi(portText)
+		if err != nil || parsedPort < 1 || parsedPort > 65535 {
+			return localHTTPAuthority{}, false
+		}
+		port = parsedPort
+	}
+	return localHTTPAuthority{host: canonicalLocalHost(host), port: port}, true
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+func canonicalLocalHost(host string) string {
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.String()
+	}
+	return strings.ToLower(strings.TrimSuffix(host, "."))
+}
+
+func localOriginMatches(origin string, requestAuthority localHTTPAuthority, expectedScheme string, defaultPort int) bool {
+	if origin == "" || strings.TrimSpace(origin) != origin || strings.ContainsAny(origin, "?#,") {
+		return false
+	}
+	parsed, err := url.Parse(origin)
+	if err != nil || parsed.Scheme == "" || parsed.Opaque != "" || parsed.Host == "" || parsed.User != nil || parsed.Path != "" || parsed.RawPath != "" || parsed.RawQuery != "" || parsed.Fragment != "" || parsed.ForceQuery {
+		return false
+	}
+	if !strings.EqualFold(parsed.Scheme, expectedScheme) {
+		return false
+	}
+	originAuthority, ok := parseLocalHTTPAuthority(parsed.Host, defaultPort)
+	return ok && originAuthority == requestAuthority
 }
 
 // authSubjectFromContext returns the authenticated subject from the request
@@ -330,6 +428,14 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 		s.mu.Unlock()
 		return fmt.Errorf("acp: listen %s: %w", s.addr, err)
 	}
+	noAuthLoopbackPolicy := s.noAuthLoopbackPolicy && s.authToken == ""
+	if noAuthLoopbackPolicy && !IsLoopbackAddr(ln.Addr().String()) {
+		boundAddr := ln.Addr().String()
+		_ = ln.Close()
+		s.mu.Unlock()
+		return fmt.Errorf("acp: unauthenticated server policy requires a loopback listener, got %q", boundAddr)
+	}
+	serveTLS := s.tlsCertFile != "" && s.tlsKeyFile != ""
 
 	if s.maxConcurrency <= 0 {
 		s.maxConcurrency = 64
@@ -348,6 +454,9 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 	handler = s.profileMiddleware(handler)
 	if s.authToken != "" {
 		handler = s.authMiddleware(handler)
+	}
+	if noAuthLoopbackPolicy {
+		handler = noAuthLoopbackPolicyMiddleware(ln.Addr(), serveTLS, handler)
 	}
 	handler = s.rateLimitMiddleware(handler)
 
@@ -382,7 +491,6 @@ func (s *HTTPServer) Start(ctx context.Context) error {
 	s.ln = ln
 	s.ctx = genCtx
 	s.cancel = cancel
-	serveTLS := s.tlsCertFile != "" && s.tlsKeyFile != ""
 	tlsCertFile := s.tlsCertFile
 	tlsKeyFile := s.tlsKeyFile
 	listenAddr := ln.Addr().String()

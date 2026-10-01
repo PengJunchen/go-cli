@@ -7,6 +7,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/pengjunchen/go-cli/internal/acp"
 	"github.com/pengjunchen/go-cli/internal/config"
 )
 
@@ -178,11 +180,12 @@ func waitForServeStart(t *testing.T, out *safeBuffer, done <-chan error) {
 func TestServeStartsAssembledRuntimeWithExplicitDenyOnLoopback(t *testing.T) {
 	out := &safeBuffer{}
 	c := newServeCmd(out)
+	cfg := newAssembleTestConfig(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	done := make(chan error, 1)
 	go func() {
-		done <- c.Run(ctx, newAssembleTestConfig(t), []string{
+		done <- c.Run(ctx, cfg, []string{
 			"--no-auth",
 			"--approve", "deny",
 			"--addr", "127.0.0.1:0",
@@ -192,6 +195,68 @@ func TestServeStartsAssembledRuntimeWithExplicitDenyOnLoopback(t *testing.T) {
 	waitForServeStart(t, out, done)
 	if strings.Contains(out.String(), "echo mode") || strings.Contains(out.String(), "fallback") {
 		t.Fatalf("serve started without the configured agent runtime: %s", out.String())
+	}
+
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("serve shutdown failed: %v", err)
+	}
+}
+
+func TestServeNoAuthRejectsRebindingAndAllowsNativeLoopbackPeer(t *testing.T) {
+	reserved, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("reserve loopback address: %v", err)
+	}
+	addr := reserved.Addr().String()
+	if err := reserved.Close(); err != nil {
+		t.Fatalf("release loopback address: %v", err)
+	}
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("split loopback address: %v", err)
+	}
+
+	out := &safeBuffer{}
+	c := newServeCmd(out)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		done <- c.Run(ctx, newAssembleTestConfig(t), []string{
+			"--no-auth",
+			"--approve", "deny",
+			"--addr", addr,
+		})
+	}()
+	waitForServeStart(t, out, done)
+
+	connect := func(host, origin string) int {
+		t.Helper()
+		request, requestErr := http.NewRequest(http.MethodPost, "http://"+addr+"/connect", strings.NewReader(`{"version":"go-cli-acp-json/1","type":"connect","sender_id":"serve-origin-test"}`))
+		if requestErr != nil {
+			t.Fatalf("create connect request: %v", requestErr)
+		}
+		request.Host = host
+		request.Header.Set(acp.ACPHTTPProfileHeader, acp.ACPHTTPProfileV1)
+		request.Header.Set("Content-Type", "application/json")
+		if origin != "" {
+			request.Header.Set("Origin", origin)
+		}
+		response, doErr := http.DefaultClient.Do(request)
+		if doErr != nil {
+			t.Fatalf("send connect request: %v", doErr)
+		}
+		defer response.Body.Close()
+		return response.StatusCode
+	}
+
+	attackerAuthority := net.JoinHostPort("attacker.example", port)
+	if got := connect(attackerAuthority, "http://"+attackerAuthority); got != http.StatusForbidden {
+		t.Fatalf("DNS-rebinding request got HTTP %d; want %d", got, http.StatusForbidden)
+	}
+	if got := connect(addr, ""); got != http.StatusOK {
+		t.Fatalf("native no-Origin loopback request got HTTP %d; want %d", got, http.StatusOK)
 	}
 
 	cancel()
