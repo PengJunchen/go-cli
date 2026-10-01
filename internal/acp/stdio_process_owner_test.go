@@ -189,6 +189,96 @@ func TestStdioProcessOwnerContextCancellationStopsAndJoinsChild(t *testing.T) {
 	stdioOwnerRequireJoinedState(t, owner)
 }
 
+func TestStdioAdapterConnectCancellationStillJoinsOwnedProcess(t *testing.T) {
+	requireStdioProcessGroups(t)
+
+	dir := t.TempDir()
+	readyPath := filepath.Join(dir, "helper-ready")
+	executablePath := stdioOwnerWriteScript(t, dir, "materialized-acp-helper", `
+: > "$1"
+while :; do sleep 30; done
+`)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var owner *StdioProcessOwner
+	var cleanupCalls atomic.Int32
+	owner, err := NewStdioProcessOwner(StdioProcessConfig{
+		Context:        ctx,
+		Command:        "verified-acp-helper",
+		ExecutablePath: executablePath,
+		Args:           []string{readyPath},
+		Cleanup: func() error {
+			if !stdioOwnerChannelClosed(owner.waitDone) {
+				return errors.New("materialized executable cleanup ran before the direct child was waited")
+			}
+			owner.mu.Lock()
+			groupGone := owner.groupGone
+			owner.mu.Unlock()
+			if !groupGone || owner.cmd.ProcessState == nil {
+				return errors.New("materialized executable cleanup ran before process cleanup joined")
+			}
+			cleanupCalls.Add(1)
+			removeErr := os.Remove(executablePath)
+			if errors.Is(removeErr, os.ErrNotExist) {
+				return nil
+			}
+			return removeErr
+		},
+	})
+	if err != nil {
+		t.Fatalf("create owner: %v", err)
+	}
+	defer stdioOwnerCleanup(t, owner)
+	if err := owner.Start(); err != nil {
+		t.Fatalf("start materialized helper: %v", err)
+	}
+	if err := stdioOwnerWaitForFile(readyPath, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+
+	client := NewStdioAdapter(owner.Reader(), owner.Writer(), WithStdioOwnedTransportCloser(owner)).(*StdioAdapter)
+	if _, err := os.Stat(executablePath); err != nil {
+		t.Fatalf("materialized executable disappeared before Connect: %v", err)
+	}
+	cancel()
+	if err := client.Connect(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Connect error = %v, want context cancellation before dispatch", err)
+	}
+	if !stdioOwnerWaitChannel(owner.shutdownDone, 5*time.Second) {
+		t.Fatal("owner context cancellation did not complete bounded process-group shutdown")
+	}
+
+	if err := stdioOwnerCallWithin("Disconnect after canceled owned Connect", func() error {
+		return client.Disconnect(context.Background())
+	}); err != nil {
+		t.Fatalf("Disconnect after canceled owned Connect: %v", err)
+	}
+	if got := cleanupCalls.Load(); got != 1 {
+		t.Fatalf("materialized executable cleanup count = %d, want 1 after adapter cleanup", got)
+	}
+	if _, err := os.Stat(executablePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("materialized executable still exists after adapter cleanup: %v", err)
+	}
+	client.mu.Lock()
+	session := client.session
+	cleanupDone := client.cleanupDone
+	closed := client.closed
+	client.mu.Unlock()
+	if session == nil || !closed || !stdioOwnerChannelClosed(cleanupDone) {
+		t.Fatal("adapter detached its owned session or returned before the retained cleanup completed")
+	}
+	if !stdioOwnerChannelClosed(session.joined) || session.workers != 0 {
+		t.Fatalf("stdio workers did not join: workers=%d joined=%v", session.workers, stdioOwnerChannelClosed(session.joined))
+	}
+	if err := stdioOwnerCallWithin("Join after canceled owned Connect", owner.Join); err != nil {
+		t.Fatalf("owner Join after canceled owned Connect: %v", err)
+	}
+	stdioOwnerRequireJoinedState(t, owner)
+	if _, err := owner.stdout.Stat(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("owned stdout fd remains usable after adapter join: %v", err)
+	}
+}
+
 func TestStdioProcessOwnerJoinsSameGroupDescendantsBeforeSuccess(t *testing.T) {
 	requireStdioProcessGroups(t)
 	dir := t.TempDir()
@@ -201,12 +291,16 @@ func TestStdioProcessOwnerJoinsSameGroupDescendantsBeforeSuccess(t *testing.T) {
 		filepath.Join(dir, "child-reaped"),
 		filepath.Join(dir, "grandchild-term"),
 		filepath.Join(dir, "leader-reaped"),
+		filepath.Join(dir, "leader-trap-ready"),
+		filepath.Join(dir, "child-trap-ready"),
+		filepath.Join(dir, "grandchild-trap-ready"),
 	}
 	grandchildScript := stdioOwnerWriteScript(t, dir, "grandchild.sh", `
 trap ': > "$2"; exit 0' TERM
+: > "$3"
 : > "$1"
 printf '%s\n' grandchild-ready
-while :; do sleep 30; done
+while :; do :; done
 `)
 	childScript := stdioOwnerWriteScript(t, dir, "child.sh", `
 child_ready=$1
@@ -215,13 +309,16 @@ child_term=$3
 child_reaped=$4
 grandchild_term=$5
 grandchild_script=$6
-trap ': > "$child_term"' TERM
-/bin/sh "$grandchild_script" "$grandchild_ready" "$grandchild_term" &
+grandchild_trap_ready=$7
+child_trap_ready=$8
+trap ': > "$child_term"; wait "$grandchild" || :; : > "$child_reaped"' TERM
+: > "$child_trap_ready"
+/bin/sh "$grandchild_script" "$grandchild_ready" "$grandchild_term" "$grandchild_trap_ready" &
 grandchild=$!
 : > "$child_ready"
 printf '%s\n' child-ready
 wait "$grandchild" || :
-while [ ! -e "$grandchild_term" ]; do sleep 0.01; done
+while [ ! -e "$grandchild_term" ]; do :; done
 wait "$grandchild" || :
 : > "$child_reaped"
 `)
@@ -236,8 +333,12 @@ grandchild_term=$7
 leader_reaped=$8
 child_script=$9
 grandchild_script=${10}
+leader_trap_ready=${11}
+child_trap_ready=${12}
+grandchild_trap_ready=${13}
 trap ': > "$leader_term"' TERM
-/bin/sh "$child_script" "$child_ready" "$grandchild_ready" "$child_term" "$child_reaped" "$grandchild_term" "$grandchild_script" &
+: > "$leader_trap_ready"
+/bin/sh "$child_script" "$child_ready" "$grandchild_ready" "$child_term" "$child_reaped" "$grandchild_term" "$grandchild_script" "$child_trap_ready" "$grandchild_trap_ready" &
 child=$!
 : > "$leader_ready"
 printf '%s\n' leader-ready
@@ -251,7 +352,7 @@ while :; do sleep 30; done
 	var err error
 	owner, err = NewStdioProcessOwner(StdioProcessConfig{
 		Command: leaderScript,
-		Args:    []string{paths[0], paths[1], paths[2], paths[3], paths[4], paths[5], paths[6], paths[7], childScript, grandchildScript},
+		Args:    []string{paths[0], paths[1], paths[2], paths[3], paths[4], paths[5], paths[6], paths[7], childScript, grandchildScript, paths[8], paths[9], paths[10]},
 		Cleanup: func() error {
 			cleanupCalls.Add(1)
 			if !stdioOwnerChannelClosed(owner.waitDone) {
@@ -278,7 +379,7 @@ while :; do sleep 30; done
 		_, readErr := io.Copy(io.Discard, owner.Reader())
 		readerDone <- readErr
 	}()
-	for _, path := range paths[:3] {
+	for _, path := range append(paths[:3], paths[8:]...) {
 		if err := stdioOwnerWaitForFile(path, 5*time.Second); err != nil {
 			t.Fatal(err)
 		}

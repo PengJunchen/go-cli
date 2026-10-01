@@ -47,6 +47,33 @@ func TestStdioConnectRejectsMissingTransportSide(t *testing.T) {
 	require.ErrorIs(t, missingWriter.Connect(context.Background()), errStdioMissingOutput)
 }
 
+func TestStdioCallerOwnedCanceledConnectCanRetry(t *testing.T) {
+	clientInput, peerInput := io.Pipe()
+	var output bytes.Buffer
+	client := NewStdioAdapter(clientInput, &output)
+	t.Cleanup(func() {
+		_ = peerInput.Close()
+		_ = clientInput.Close()
+	})
+
+	preCanceledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	require.ErrorIs(t, client.Connect(preCanceledCtx), context.Canceled)
+	assert.Nil(t, client.ReceiveMessages(), "a known-not-dispatched caller-owned Connect can be retried")
+
+	require.NoError(t, client.Connect(context.Background()))
+	require.NotNil(t, client.ReceiveMessages())
+	assert.Equal(t, 1, strings.Count(output.String(), "\n"), "retry writes exactly one connect frame")
+
+	disconnectCtx, disconnectCancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	err := client.Disconnect(disconnectCtx)
+	disconnectCancel()
+	done := requireStdioPending(t, err, false)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	require.NoError(t, peerInput.Close(), "caller-owned input remains open until its peer closes")
+	assertChannelCloses(t, done)
+}
+
 func TestStdioFrameLimitUsesPayloadBytesAndCRLFTerminator(t *testing.T) {
 	msg := ACPMessage{Type: TypeMessage, SenderID: "peer"}
 	empty, err := json.Marshal(msg)
