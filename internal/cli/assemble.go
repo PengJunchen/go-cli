@@ -1438,10 +1438,18 @@ func (s *assembleState) assembleSubAgent() {
 			return model, cleanup, err
 		}
 	}
-	subAgentFactory := core.NewRealSubAgentFactoryWithModelBuilder(s.model, modelBuilder, s.tr,
+	subAgentOpts := []core.LoopOption{
 		core.WithModelWrapper(newModelWrapperWithChain(s.pw, s.modelChain, s.circuitBreaker, s.guardChain, s.telemetry)),
 		core.WithMidTurnCompaction(s.midTurn, s.compactor, s.estimator, s.ac.maxTokens),
-	)
+	}
+	if s.costTracker != nil {
+		tracker := s.costTracker
+		subAgentOpts = append(subAgentOpts, core.WithProviderAttemptRecorder(func(result llm.ProviderAttemptResult) error {
+			_, err := tracker.RecordAttempt(result)
+			return err
+		}))
+	}
+	subAgentFactory := core.NewRealSubAgentFactoryWithModelBuilder(s.model, modelBuilder, s.tr, subAgentOpts...)
 	dispatcher := core.NewDefaultSubagentDispatcher(subAgentFactory)
 	s.dispatcher = dispatcher
 	if subErr := s.tr.Register(s.ctx, core.NewSubagentTool(dispatcher)); subErr != nil {
